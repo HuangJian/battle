@@ -33,13 +33,22 @@ import shutil
 import subprocess
 import time
 from collections.abc import Sequence
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 
 from log_bundle import LogBundle
+from platform_utils import (
+    KILL_REAP_SEC,
+    cpu_worker_slots,
+    effective_cores,
+    keep_unreaped,
+    kill_process_tree,
+    popen_own_group,
+    reap_bounded,
+    sweep_unreaped,
+)
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from platform_utils import cpu_worker_slots, effective_cores
 
 # 单局看门狗的口径常量与 eval **共用一份**（`remote/game_watch.py`）：点名线 5s、首次尝试硬顶
 # 也是 5s（用户口径「单局 >5s 肯定不正常」⇒ 超时原地重跑）、重试上限 ×4、最多 3 次、轮询 0.5s。
@@ -49,6 +58,11 @@ from remote import game_watch, serve_pool
 from remote.protocol import (
     ProtocolError,
     RetryableError,
+    # ★ 「机器级停滞」（子进程 SIGKILL 之后收不了尸）的异常**定义在 `remote/protocol.py`**
+    # ——与 `RetryableError` 同册：它是**两腿共用**的分类语义（eval 腿也抛这一类，见
+    # `remote/offline_eval`），各腿的重投粒度各自定。这里 import 进来当模块属性，好让
+    # `remote/worker.py` 与用例继续按本模块取它（改归属不动调用点）。
+    UnreapableChildError,
     data_fp,
     iter_expected_data_fp,
     parse_shard_name,
@@ -62,9 +76,35 @@ REPORT_NAME = "_rl_report.json"
 #: 并行度上限（防 hub 侧误配 workers=1000 把节点打爆；16 vCPU 节点的合理值远低于此）。
 MAX_WORKERS = 256
 
+# ★ 被杀子进程的**回收**上限 = `platform_utils.KILL_REAP_SEC`（全仓唯一那个数，本模块直接用它）。
+# 为什么它必须存在（2026-09-25 云机二次取证「rollout 卡死机器半天」）：旧路径是
+# `p.kill(); p.wait()` —— **没有上限**。子进程卡在不可中断的 IO 里（云机上被挂住的挂载点/
+# 慢盘就是这样，D 状态）时 SIGKILL 要等那个系统调用返回才生效，`wait()` 就跟着无限等；而超时
+# 行里的 elapsed 是 kill **之前**算的，日志照旧写着「5.0s」⇒ 现场看起来是「一局超时之后整轮
+# 静默挂住 890s」（92 条线程里有一条卡住，`as_completed` 就永远收不齐，排在后面的局连开始都
+# 开始不了）。有上限之后：最坏只损失这一局的尝试，绝不让一条线程把整轮当人质。
+
+
+# ★ `UnreapableChildError` 的**定义**在 `remote/protocol.py`（见那里的 docstring：分类语义是
+# 两腿共用的）；本模块只 import 它（上面那一段）。rollout 腿的**重投纪律**在
+# `run_iter_rollout` 的轮循环里：不就地重跑那一局（重跑会在同一个 `w{i}/` 上再起一个写者，
+# 而旧的那个可能还活着 ⇒ 两个进程写同一份 shard = 静默错数据，`_clean_attempt` 存在的全部
+# 理由），而是清掉半截产出后与本轮其它没产出的局一起重投；不睡、不报失败、不消耗调用方的
+# 重试预算（云机自主段 `run_loop._run_with_retries` 只有 3 次），缺省不限（`ENV_ROUND_RETRY_MAX`
+# 是操作员的退出阀）。
+
 #: 本机并行度夹取的覆盖开关（实验/排障用）：正整数 = 直接当上限，`0` = **不夹**
 #: （完全按 hub 给的 workers 走）。缺省 = 按本机核数夹取（`cpu_worker_slots()`）。
 ENV_WORKERS_CAP = "NN_ROLLOUT_WORKERS_MAX"
+
+#: 「机器级停滞」的轮内重投上限（实验/排障用）：`0`/未设 = **不限**；正整数 = 重投这么久就放弃
+#: （上抛 `RetryableError`，交回调用方自己的重试语义）。
+#:
+#: 为什么缺省是不限：这一类失败是**机器**的病（D 状态 / 挂住的挂载点），现场 890s 之后自己好了；
+#: 而外层每条腿的预算都很小（云机自主段 `ITER_RETRIES=2` ⇒ 3 次就把整段判死）——重投放外层
+#: 等于用「一台机器短暂卡住」把整段训练判死。放在轮内则：机器一好就接上，且**不空转**
+#: （只补没产出的那几局，已结算的局不重跑）。会一直试是指：每一轮都真的在跑活，不是等。
+ENV_ROUND_RETRY_MAX = "NN_ROLLOUT_ROUND_RETRY_MAX"
 
 
 def workers_cap() -> int:
@@ -92,6 +132,20 @@ def workers_cap() -> int:
         except ValueError:
             pass  # 非法值 ⇒ 回落到核数口径（响亮的事交给日志，不在这里抛）
     return cpu_worker_slots()
+
+
+def round_retry_max() -> int:
+    """轮内重投上限（`0` = 不限）；见 `ENV_ROUND_RETRY_MAX`。非法值 → 回落不限（响亮的事交给日志）。
+
+    ⚠ 与 `workers_cap()` 同一个形状：**执行 rollout 那台机器**读自己的 env（不是 hub/导出机）。
+    """
+    raw = (os.environ.get(ENV_ROUND_RETRY_MAX) or "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return 0
 
 
 def resolve_bun(name: str = "") -> str:
@@ -181,6 +235,30 @@ def _game_out_dir(argv: list[str]) -> str:
         return ""
 
 
+def _kill_and_reap(p: Any, *, label: str, log, where: str) -> bool:
+    """SIGKILL 整个进程组 + **有界**回收；返回 False = 收不了尸（调用方按 `UnreapableChildError` 走）。
+
+    `p` 取 `Any`（不写死 `subprocess.Popen`）：契约只有「pid / kill / wait(timeout) / poll」，
+    而平台层那几个原语（`platform_utils`）本来就是按 Any 写的 —— 写死具体类会让「收不了尸」
+    这一态在用例里没法用替身造出来（真态要不可中断的 IO）。
+
+    顺手 `sweep_unreaped()`（零等待）把之前收不了尸的进程再碰一次：它们可能早就退出了，
+    而机器上本来就已经被一堆进程压着，僵尸再占着 pid/句柄只有坏处。
+    """
+    sweep_unreaped()
+    kill_process_tree(p)  # 进程组：bun 自己带的子进程（编译缓存 worker/子工具）一起带走
+    if reap_bounded(p, KILL_REAP_SEC):
+        return True
+    keep_unreaped(p)  # 之后非阻塞地再试（见 platform_utils.sweep_unreaped）
+    log(
+        f"WARN rollout 单局子进程杀不掉：{label} —— SIGKILL 之后 {KILL_REAP_SEC:g}s 内回收不了"
+        f"（pid={p.pid}，很可能卡在不可中断的 IO 里）——本局不就地重跑（同一目录上可能还有活写者），"
+        f"交回整轮：清掉它的半截产出后与本轮其它没产出的局一起重投（不是失败，云机不停）；"
+        f"现场 {where}"
+    )
+    return False
+
+
 def _clean_attempt(job_dir: Path, argv: list[str]) -> None:
     """删掉一次失败尝试可能留下的半截产出（**就地重跑前必须做**）。
 
@@ -204,6 +282,8 @@ def _clean_attempt(job_dir: Path, argv: list[str]) -> None:
         pass
     if stage is not None and seed is not None:
         name = shard_name(stage, seed)
+        # 递归扫：`scan_shard_dirs` 认的是「job 目录下任何位置的合法 shard 目录」，这里必须**同口径**
+        # （宽一边就是半截 shard 留在盘上被当成产出）。
         targets += list(job_dir.rglob(name))
     for t in targets:
         try:
@@ -234,9 +314,15 @@ def _run_one_game(
     返回墙钟秒。失败语义：
       * 超过 `timeout_sec`（**本次尝试的硬顶**，由 `_run_one_game_with_retries` 按尝试次数算：
         首次 = plan 给的上限或 `DEFAULT_GAME_TIMEOUT_SEC`，重试放宽 `RETRY_TIMEOUT_FACTOR` 倍）
-        → kill 子进程 + RetryableError（调用方 `_run_one_game_with_retries` 就地重跑）；
+        → SIGKILL 整个进程组 + **有界**回收 + RetryableError（调用方就地重跑）；
+        **回收不了**（D 状态 / 挂住的挂载点）⇒ `UnreapableChildError`（本局不重跑、整轮交回重发，
+        见那个类的 docstring 与 `KILL_REAP_SEC`）；
       * rc != 0 → RetryableError（同上；本机路径是把 stderr 尾巴抛出去让 loop 重试）；
       * 日志写不进去（磁盘）→ OSError 原样上抛（worker 侧统一按失败处理）。
+
+    ★ 这条路径上**任何一次等待都必须有上限**（看门狗、kill 后的回收）：训练轮里 92 条线程
+    同时在跑，其中一条卡在无上限的 syscall 上，整轮就再也收不齐 —— 排在它后面的局连开始都
+    开始不了，而日志里只有一行「已结算 N 局」不再动（2026-09-25「卡死机器半天」的真身）。
 
     等待用**轮询**而不是一次 `p.wait(timeout=...)`：轮询让「单局异常慢」在卡住期间就能被
     点名（软告警），而不是等硬顶到了才知道某一局有问题（2026-09-22 it34 的 651s 就是这么
@@ -249,12 +335,15 @@ def _run_one_game(
     t0 = time.time()
     warned = False
     with open(log_path, "w", encoding="utf-8") as lf:
+        # `popen_own_group`：自带进程组（POSIX）⇒ 超时可以连 bun 自己带的子进程一起 SIGKILL（
+        # 只杀父进程会留下孤儿继续吃 CPU/内存，机器越跑越卡）；代价是 Ctrl+C 不再自动传到它，
+        # 而这条路径本来就总是自己 kill（超时/rc≠0/收池都各有出口）。
         p = subprocess.Popen(
             [bun, *_exec_argv(argv, job_dir)],
             cwd=str(ts_dir),
             stdout=lf,
             stderr=subprocess.STDOUT,
-            **_POPEN_NO_WINDOW,
+            **popen_own_group(),
         )
         while True:
             try:
@@ -276,14 +365,22 @@ def _run_one_game(
                         )
                     )
                 if elapsed >= timeout_sec:
-                    p.kill()
-                    p.wait()
-                    raise RetryableError(
+                    # ★ 这里曾经是 `p.kill(); p.wait()`（无上限）：机器一卡，这一局的线程就永远
+                    # 停在 waitpid 上，而日志里看不出来（elapsed 上面已经算过，照样是 5.0s）。
+                    msg = (
                         game_watch.hard_cap_line(
                             "rollout", label, elapsed, timeout_sec, str(log_path)
                         )
                         + f"（{' '.join(argv[:4])}…）"
-                    ) from None
+                    )
+                    if not _kill_and_reap(p, label=label, log=log, where=str(log_path)):
+                        raise UnreapableChildError(
+                            msg
+                            + f"；且 SIGKILL 之后 {KILL_REAP_SEC:g}s 内回收不了（pid={p.pid}）"
+                            "——本局不再重跑（同一目录上可能还有活写者）；整轮交回 worker，"
+                            "**立即**重领重投同一份活（不睡/不报失败/云机不停）"
+                        ) from None
+                    raise RetryableError(msg) from None
     if rc != 0:
         tail = ""
         try:
@@ -318,7 +415,9 @@ def _run_one_game_with_retries(
     每次尝试的上限按 `attempt_timeout_sec` 算：首次 = `timeout_sec`（用户口径 5s），重试放宽
     ×`RETRY_TIMEOUT_FACTOR`（除非 plan 显式给了上限——那是配置说了算，不做解释）。
 
-    全部尝试都失败 → RetryableError（整轮交给 worker 的既有重试语义）。
+    全部尝试都失败 → RetryableError（整轮交给 worker 的既有重试语义）。**例外**：
+    `UnreapableChildError`（子进程 SIGKILL 后收不了尸）**直接上抛**，不重跑这一局——重跑会在
+    同一个 `w{i}/` 上再起一个写者（那个可能还活着），两个进程写同一份 shard = 静默错数据。
     """
     label = _game_label(argv)
     last: Exception | None = None
@@ -347,6 +446,10 @@ def _run_one_game_with_retries(
                 ),
                 attempt,
             )
+        except UnreapableChildError:
+            # 机器层面的卡住（D 状态）：原地重跑会在同一个 `w{i}/` 上再起一个写者 ⇒ 直接上抛，
+            # 让整轮走「交回重发」（重发会把 job 目录整个 rmtree 掉，干净）。
+            raise
         except RetryableError as e:
             last = e
     raise RetryableError(
@@ -562,35 +665,97 @@ def run_iter_rollout(
     game_secs: list[float] = [0.0] * len(argvs)
     game_attempts: list[int] = [1] * len(argvs)
     ok = False
+    round_retries = 0  # 「整轮重投」次数（类：机器级停滞）
+    retry_cap = round_retry_max()
     try:
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            futs = {
-                ex.submit(
-                    _run_one_game_with_retries,
-                    bun,
-                    argv,
-                    jd,
-                    tsd,
-                    argv[argv.index("--out") + 1],
-                    timeout_sec,
-                    log,
-                    explicit,
-                    pool,
-                ): i
-                for i, argv in enumerate(argvs)
-            }
             last_log_at = t0
-            for done_n, fut in enumerate(as_completed(futs), 1):
-                i = futs[fut]
-                game_secs[i], game_attempts[i] = fut.result()  # 异常在 worker 侧统一处理
-                # 进度行**按时间**节流（`game_watch.progress_due`，缺省每分钟一句）：原来的
-                # 「每 10 局一句」在高并发轮上是每秒数行 —— 云端离线课的日志就是被它刷屏的
-                # （用户口径 2026-09-23）。最后一句恒打（轮结束的唯一落点）。
-                now = time.time()
-                rb.add("进度", f"{done_n}/{len(argvs)} games settled ({now - t0:.0f}s)")
-                if game_watch.progress_due(done_n, len(argvs), now, last_log_at):
-                    last_log_at = now
-                    rb.beat("kind=iter rollout", now=now)
+            settled_n = 0
+            # `pending` = 还没拿到结果的局（**跨重投存活**）：机器级停滞重投时只补这几个，
+            # 已结算的局一个字都不重跑（用户口径：不许空转烧配额）。
+            pending: list[int] = [i for i in range(len(argvs))]
+            while pending:
+                futs = {
+                    ex.submit(
+                        _run_one_game_with_retries,
+                        bun,
+                        argvs[i],
+                        jd,
+                        tsd,
+                        argvs[i][argvs[i].index("--out") + 1],
+                        timeout_sec,
+                        log,
+                        explicit,
+                        pool,
+                    ): i
+                    for i in pending
+                }
+                # 循环用**带超时的 wait** 而不是 `as_completed`：`as_completed` 只在「有局结算」时
+                # 才醒，而进度行与心跳都挂在结算上 ⇒ 所有线程一起卡住时它们一起哑，日志进入完全
+                # 静默（2026-09-25 现场：5s 的 270/336 之后 890s 一行都没有）。带超时的 wait 每
+                # `GAME_POLL_SEC` 给我们一次说话的机会 —— 停滞就按 `STALL_WARN_SEC` 点名（带还在
+                # 飞的局身份，见 game_watch.stall_line）。
+                inflight = set(futs)
+                last_settle = time.time()
+                stalled_at = 0.0
+                stuck: list[int] = []  # 本次尝试里「机器级停滞」没产出结果的局
+                while inflight:
+                    finished, inflight2 = wait(
+                        inflight, timeout=game_watch.GAME_POLL_SEC, return_when=FIRST_COMPLETED
+                    )
+                    inflight = inflight2
+                    now = time.time()
+                    if not finished:
+                        if (now - last_settle) >= game_watch.STALL_WARN_SEC and (
+                            now - stalled_at
+                        ) >= game_watch.STALL_WARN_SEC:
+                            stalled_at = now
+                            log(
+                                game_watch.stall_line(
+                                    "rollout",
+                                    len(inflight),
+                                    now - last_settle,
+                                    [_game_label(argvs[futs[f]]) for f in inflight],
+                                )
+                            )
+                        continue
+                    for fut in finished:
+                        i = futs[fut]
+                        try:
+                            game_secs[i], game_attempts[i] = fut.result()
+                        except UnreapableChildError:
+                            # **机器级**：这一局没产出，但整轮**不失败**——记下来，等本次尝试
+                            # 其它在飞的局收完（它们可能只是慢），再由外层重投补它（见循环头）。
+                            stuck.append(i)
+                        else:
+                            settled_n += 1
+                        # 进度行**按时间**节流（`game_watch.progress_due`，缺省每分钟一句）：原来的
+                        # 「每 10 局一句」在高并发轮上是每秒数行 —— 云端离线课的日志就是被它刷屏的
+                        # （用户口径 2026-09-23）。最后一句恒打（轮结束的唯一落点）。
+                        rb.add("进度", f"{settled_n}/{len(argvs)} games settled ({now - t0:.0f}s)")
+                        if game_watch.progress_due(settled_n, len(argvs), now, last_log_at):
+                            last_log_at = now
+                            rb.beat("kind=iter rollout", now=now)
+                    last_settle = now
+                if not stuck:
+                    break
+                round_retries += 1
+                if retry_cap and round_retries > retry_cap:
+                    # 只有操作员显式设了上限才走这里（缺省不限）：上抛交回调用方自己的重试语义。
+                    raise RetryableError(
+                        f"rollout 机器级停滞：轮内已重投 {round_retries - 1} 次仍有 "
+                        f"{len(stuck)} 局收不了尸（{ENV_ROUND_RETRY_MAX}={retry_cap} 是操作员设的上限）"
+                        f"——剩余 {len(stuck)} 局交回上层重试；现场见各局 w*/rollout.log"
+                    ) from None
+                log(
+                    f"WARN rollout 整轮重投第 {round_retries} 次：本次尝试有 {len(stuck)} 局收不了尸"
+                    f"（机器级停滞，已结算 {settled_n}/{len(argvs)} 局）——只补这 {len(stuck)} 局，"
+                    f"先清掉它们的半截产出（旧写者可能还在）；不报失败、不退租约、云机不停"
+                    + ("" if not retry_cap else f"（上限 {retry_cap} 次）")
+                )
+                for i in stuck:
+                    _clean_attempt(jd, argvs[i])
+                pending = sorted(stuck)
         ok = True
     finally:
         if pool is not None:
@@ -601,6 +766,9 @@ def run_iter_rollout(
             # 中断也要交代现场（看门狗口径/池计数/已结算到哪一局）——否则「为什么被杀了」
             # 无从归因。重试/慢局那几行已经在抛出前各自打过了。
             rb.emit("kind=iter rollout 中断")
+    if round_retries:
+        # 重投过就要可见（它是“机器卡过”的唯一记分）——正常轮恒空。
+        rb.add("整轮重投", f"{round_retries} 次（机器级停滞：收不了尸）")
     shard_dirs = verify_shards(jd, iter_expected_data_fp(spec))
     reports = collect_reports(jd, spec)
     report = combine_reports(reports)

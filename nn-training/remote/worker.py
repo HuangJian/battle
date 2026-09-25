@@ -32,6 +32,7 @@ from pathlib import Path
 from typing import Any
 
 from log_bundle import LogBundle
+from remote import iter_rollout as _iter_rollout
 from remote import net_http
 from remote.bulk_sched import (
     BULK_P1_CRITICAL,
@@ -3525,6 +3526,19 @@ def worker_loop(
                     f"cancel_latency_s={time.time() - _t_ppo0:.1f}"
                 )
                 abandon_job(base_url, token, jid, worker_id=worker_id, reason="landed")
+            except _iter_rollout.UnreapableChildError as e:
+                # **机器级**停滞（子进程 SIGKILL 之后收不了尸：D 状态 / 挂住的挂载点）——
+                # 处置 = **立即还租约、立即重领重投**：不睡（云机按分钟计费，空转就是烧配额）、
+                # 不报 `report_job_failure`（那会把机器的问题记在内容头上 ⇒ hub 落终局 failed
+                # ⇒ 训练停腿 ⇒ 反过来把云机停掉）、不计毒包（hub 只对**租约过期**计 reclaims，
+                # 主动 release 不算 ⇒ 反复重投永远不会把自己冻死）。
+                # 判据走**模块属性**读（不用 from-import 的副本）：与 `UnreapableChildError`
+                # 的归属一致，改动那一处就够。
+                log(
+                    f"job {jid} 机器级停滞（子进程收不了尸）: {e} — release 租约立即重领"
+                    "重投同一份活（不睡/不报失败/不计毒包，云机不停）"
+                )
+                release_job(base_url, token, jid, lease_token, log=log)
             except RetryableError as e:
                 # 瞬时失败（网络/5xx/传输损坏）：主动还租约立即回池——不再付 30min 过期等待
                 log(f"job {jid} 瞬时失败: {e} — release 租约回池，立即可重领")

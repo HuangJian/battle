@@ -19,10 +19,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 import pytest
@@ -1296,6 +1298,265 @@ d.mkdir(parents=True, exist_ok=True)
     "totalSamples": 2, "totalTicks": 20, "scoreList": [1.0], "dimLists": {"kills": [1.0]},
 }))
 """
+
+
+# ------------------------------------------------------------------ 子进程回收 / 整轮停滞
+# （2026-09-25 二次取证「rollout 卡死机器半天」：一条线程卡在无上限的 syscall 上 ⇒ 整轮收不齐）
+
+
+class _UnreapablePopen:
+    """「SIGKILL 之后仍收不了尸」的子进程替身（D 状态 / 挂住的挂载点 —— 真态在单测里造不出来）。
+
+    契约就是被测的那一条：`wait(timeout)` 永远超时（真实现里要等不可中断的 IO 返回）。
+    `wait()` **没有上限**时真实现永远不返回 —— 所以这里记一笔并立刻返回，好让断言说清
+    「不许没有上限」，而不是让用例自己挂在那儿（那正是生产事故的形态）。
+    """
+
+    instances: list[_UnreapablePopen] = []
+
+    def __init__(self, argv: object, **_kw: object) -> None:
+        self.argv = argv
+        # 一个不可能存在的 pid：killpg 会 ESRCH（助手自己吞掉、退回单进程 kill），
+        # 所以真信号永远打不到任何东西上；同时它也不是 0（killpg(0) = 打自己那一组）。
+        self.pid = 2**31 - 1
+        self.killed = 0
+        self.unbounded_waits = 0
+        self.bounded_waits: list[float] = []
+        self.returncode: int | None = None
+        _UnreapablePopen.instances.append(self)
+
+    def kill(self) -> None:
+        self.killed += 1
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        if timeout is None:
+            self.unbounded_waits += 1
+            return 1
+        self.bounded_waits.append(float(timeout))
+        raise subprocess.TimeoutExpired("unreapable", timeout)
+
+
+class _FlakyPopen:
+    """前 `fail_first` 个**本局的**子进程「SIGKILL 之后收不了尸」，之后委派真 `Popen`。
+
+    为什么要能「后来好了」：轮内重投的语义是**只补没产出的那几局**（机器一好就接上）——
+    用例要真走完这条路（真的产出 shard、真的走轮末校验），而不是靠断言「循环不会结束」。
+    只数 `match` 命中的那些 argv：轮里还会有别的子进程（长驻池的 `serve-loop`），
+    它们的死活不该被这个替身改掉（否则用例测的不再是「某一局收不了尸」）。
+    """
+
+    real: Any = None
+    match = ""
+    fail_first = 1
+    made = 0
+    instances: list[_FlakyPopen] = []
+
+    def __new__(cls, argv: object, **kw: object) -> Any:
+        joined = " ".join(str(a) for a in (argv if isinstance(argv, (list, tuple)) else [argv]))
+        if not cls.match or cls.match not in joined:
+            return cls.real(argv, **kw)  # type: ignore[misc]
+        cls.made += 1
+        if cls.made > cls.fail_first:
+            return cls.real(argv, **kw)  # type: ignore[misc]
+        return object.__new__(cls)
+
+    def __init__(self, argv: object, **_kw: object) -> None:
+        self.argv = argv
+        self.pid = 2**31 - 1  # 不可能存在的 pid：killpg ESRCH（真信号打不到任何东西）
+        self.killed = 0
+        self.unbounded_waits = 0
+        self.bounded_waits: list[float] = []
+        self.returncode: int | None = None
+        type(self).instances.append(self)
+
+    def kill(self) -> None:
+        self.killed += 1
+
+    def poll(self) -> int | None:
+        return self.returncode
+
+    def wait(self, timeout: float | None = None) -> int:
+        if timeout is None:
+            self.unbounded_waits += 1
+            return 1
+        self.bounded_waits.append(float(timeout))
+        raise subprocess.TimeoutExpired("unreapable", timeout)
+
+
+def test_kill_and_reap_bounds_the_wait_and_books_the_leftover(monkeypatch) -> None:
+    """★ 回收**有上限**：杀不掉的子进程不许把这一局的线程按在 `waitpid` 上（事故形态）。
+
+    旧代码是 `p.kill(); p.wait()`：日志里那一局照旧写着「硬顶 5s」（elapsed 在 kill **之前**
+    算），现场却是整轮 890s 一行不动。
+    """
+    monkeypatch.setattr(iter_rollout, "KILL_REAP_SEC", 0.05)
+    killed: list[object] = []
+    monkeypatch.setattr(iter_rollout, "kill_process_tree", lambda p: killed.append(p))
+    msgs: list[str] = []
+    p = _UnreapablePopen(["stub"])
+    _UnreapablePopen.instances.clear()
+    try:
+        assert (
+            iter_rollout._kill_and_reap(
+                p, label="s0/d0", log=msgs.append, where="w0/rollout.log"
+            )
+            is False
+        )
+        assert killed == [p], "kill 必须走进程组那一条（连 bun 自己带的子进程一起带走）"
+        assert p.unbounded_waits == 0, "不许出现无上限的 wait（那正是整轮挂住的成因）"
+        assert p.bounded_waits == [0.05], p.bounded_waits
+        # 现场必须响亮（带局身份 + 已收不了的读数）：否则轮末只剩一个没信息量的计数
+        assert any("子进程杀不掉" in m and "s0/d0" in m and "回收不了" in m for m in msgs), msgs
+        assert pu.unreaped_count() == 1, "收不了的要记账（之后非阻塞地再碰一次）"
+        p.returncode = 0  # 它后来退出了
+        assert pu.sweep_unreaped() >= 1 and pu.unreaped_count() == 0
+    finally:
+        _UnreapablePopen.instances.clear()
+        pu.sweep_unreaped()
+
+
+def _flaky_popen(monkeypatch: pytest.MonkeyPatch, script: Path, *, fail_first: int) -> type[_FlakyPopen]:
+    """把 `subprocess.Popen` 换成「前 `fail_first` 个**本局**子进程收不了尸」的替身。"""
+    _FlakyPopen.real = subprocess.Popen
+    _FlakyPopen.match = str(script)
+    _FlakyPopen.fail_first = fail_first
+    _FlakyPopen.made = 0
+    _FlakyPopen.instances = []
+    monkeypatch.setattr(iter_rollout.subprocess, "Popen", _FlakyPopen)
+    return _FlakyPopen
+
+
+def _sweep_leftovers() -> None:
+    """收尸尽到就行（记账是模块级共享的，用例自己收干净，别给别的用例留僵尸候选）。"""
+    for inst in _FlakyPopen.instances:
+        inst.returncode = 1
+    sweep = getattr(pu, "sweep_unreaped", None)
+    if sweep is not None:
+        sweep()
+
+
+def test_a_child_that_cannot_be_reaped_is_retried_in_round_never_failing(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """★ 机器级停滞（SIGKILL 之后收不了尸）**在轮内重投**，整轮不许失败、不许挂住。
+
+    用户 2026-09-25 口径：失败就重试，不许关云机让任务失败，也不许空转烧配额。三条一起钉：
+
+      ① 整轮不许出现**无上限的 wait** —— 旧代码就是 `p.kill(); p.wait()`，真实现里那一刻
+         永远不返回，而日志照旧写着「硬顶 5s」（elapsed 是 kill 之前算的）：890s 零行就是这么来的；
+      ② 这一局**不就地重跑** —— 同一个 `w{i}/` 上会再起一个写者，而旧的那个可能还活着 ⇒ 两个
+         进程写同一份 shard（半截/交错）⇒ 静默错数据（`_clean_attempt` 存在的全部理由）⇒
+         它必须走「清半截产出 + 与本轮其它没产出的局一起重投」那条路；
+      ③ 重投后整轮**成功**（不抛、不报失败、不去动调用方的重试预算），且只补没产出的局。
+    """
+    _fast_watchdog(monkeypatch)
+    # 留 2 次好让「万一走了单局重跑」在日志里看得出来（默认 3 次会把重跑藏进正常重试里）
+    monkeypatch.setattr(game_watch, "GAME_MAX_ATTEMPTS", 2)
+    # ⚠ 硬顶必须比**真 python 启动开销**大（替身只占第一次；重投那次是真跑桩脚本，
+    # xdist 满载时启动能到几百毫秒——给 0.05s 会把「本该成功的重投」误杀成超时）
+    script = tmp_path / "ok.py"
+    script.write_text(_STUB_SLOW.replace("@SECS@", "0"), encoding="utf-8")
+    _flaky_popen(monkeypatch, script, fail_first=1)
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    t0 = time.time()
+    try:
+        out = run_iter_rollout(
+            job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=2.0), log=msgs.append
+        )
+        wall = time.time() - t0
+    finally:
+        spawned = list(_FlakyPopen.instances)
+        _sweep_leftovers()
+    assert wall < 30.0, f"重投必须有界（不能把线程按在 waitpid 上）：{wall:.1f}s"
+    assert spawned, "替身必须真的被起过"
+    # ① 回收不许没有上限（旧形态）
+    assert sum(i.unbounded_waits for i in spawned) == 0, "回收不许没有上限（那会永远不返回）"
+    assert any("杀不掉" in m for m in msgs), f"「收不了尸」必须响亮留痕：{msgs}"
+    # ② 收不了尸的局不走单局重跑（同一目录上可能还有活写者）
+    assert not any("单局重试" in m for m in msgs), f"收不了尸的局不许就地重跑：{msgs}"
+    # ③ 整轮重投 —— 可见、只补没产出的局 —— 而且整轮跑成了
+    assert any("整轮重投第 1 次" in m for m in msgs), f"必须有整轮重投那一行：{msgs}"
+    assert any("整轮重投=1 次" in m for m in msgs), f"重投这事要在轮账里留痕：{msgs}"
+    assert out["report"]["games"] == 1, f"重投之后整轮必须成功：{out['report']}"
+    assert out["report"]["shards"] == 1
+
+
+def test_reap_stall_round_retry_is_unbounded_unless_operator_caps_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """重投次数**缺省不限**（机器一好就接上）；`NN_ROLLOUT_ROUND_RETRY_MAX` 是操作员的退出阀。
+
+    为什么不能把「机器级停滞」当成一轮失败扔出去：外层每条腿的预算都很小
+    （云机自主段 `remote/run_loop._run_with_retries` 只有 3 次）⇒「一台机器短管卡住」
+    三次就把整段训练判死（用户口径：不许关云机让任务失败）。
+    """
+    _fast_watchdog(monkeypatch)
+    monkeypatch.setenv(iter_rollout.ENV_ROUND_RETRY_MAX, "2")
+    script = tmp_path / "ok.py"
+    script.write_text(_STUB_SLOW.replace("@SECS@", "0"), encoding="utf-8")
+    _flaky_popen(monkeypatch, script, fail_first=99)  # 一直是收不了尸（每次都走替身，不会真起进程）
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    t0 = time.time()
+    try:
+        with pytest.raises(RetryableError) as ei:
+            run_iter_rollout(
+                job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=0.2), log=msgs.append
+            )
+        wall = time.time() - t0
+    finally:
+        _sweep_leftovers()
+    assert wall < 30.0, f"连重投也必须每轮有界：{wall:.1f}s"
+    assert len([m for m in msgs if "整轮重投第" in m]) == 2, msgs  # 上限 2：重投两次
+    assert "机器级停滞" in str(ei.value), ei.value
+    assert iter_rollout.ENV_ROUND_RETRY_MAX in str(ei.value), str(ei.value)
+    # 缺省（不设 env）不许退化成有上限
+    monkeypatch.delenv(iter_rollout.ENV_ROUND_RETRY_MAX)
+    assert iter_rollout.round_retry_max() == 0
+
+
+def test_a_round_that_stalls_names_the_games_still_in_flight(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """★ 整轮停滞必须当场点名（带还在飞的局身份）。
+
+    为什么（2026-09-25 现场）：进度行与心跳都挂在「有局结算」上 ⇒ 所有线程一起卡住时它们
+    **一起哑**，日志里从 5s 的 270/336 直接跳到 890s 之后的下一行。停机时唯一能回答
+    「谁卡住了」的就是这条。
+    """
+    _fast_watchdog(monkeypatch)
+    monkeypatch.setattr(game_watch, "STALL_WARN_SEC", 0.2)
+    script = tmp_path / "slow-ok.py"
+    script.write_text(_STUB_SLOW.replace("@SECS@", "0.6"), encoding="utf-8")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    out = run_iter_rollout(
+        job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=20.0), log=msgs.append
+    )
+    stalls = [m for m in msgs if "整轮停滞" in m]
+    assert stalls, f"停滞这么久必须有读数（否则停机时什么都看不见）：{msgs}"
+    assert "s0/d0" in stalls[0] and "在飞" in stalls[0], stalls[0]
+    assert out["report"]["games"] == 1  # 慢 ≠ 失败：它照常跑完
+    # 跑得动的轮子不该有这条。注意别拿「亚秒级」当判据：xdist -n 12 满载时一个 python 桩的
+    # 启动就是 ~0.5s（实测 ≤5s 警告线都被别人的用例踩到过）——这里把线放到 30s，钉的是
+    # 「正常轮不报警」，不是「机器必须够快」（那正是本仓禁止的拿时长当同步）。
+    monkeypatch.setattr(game_watch, "STALL_WARN_SEC", 30.0)
+    fast = tmp_path / "fast-ok.py"
+    fast.write_text(_STUB_SLOW.replace("@SECS@", "0"), encoding="utf-8")
+    msgs2: list[str] = []
+    job_dir2 = tmp_path / "job2"
+    job_dir2.mkdir()
+    run_iter_rollout(
+        job_dir2, _one_game_spec(tmp_path, fast, game_timeout_sec=20.0), log=msgs2.append
+    )
+    assert not any("整轮停滞" in m for m in msgs2), msgs2
 
 
 def test_resolve_bun_missing_is_loud() -> None:

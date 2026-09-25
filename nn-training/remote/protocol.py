@@ -489,6 +489,32 @@ class RetryableError(Exception):
     RetryableError 后主动 release 租约回池，立即可重领（不再干等 30min 过期）。"""
 
 
+class UnreapableChildError(RetryableError):
+    """子进程 SIGKILL 之后仍然回收不了（D 状态 / 挂住的挂载点）——**机器**的病，不是内容的错。
+
+    事实基础：`kill()` 只是把信号递进去；子进程若卡在**不可中断**的 IO 里，要等那个系统调用
+    返回才真的死。`platform_utils` 的处置是**有界**回收（`reap_bounded`，预算 = `KILL_REAP_SEC`），
+    收不回来就把这个子进程记进账（`keep_unreaped`）并抛本异常 —— 绝不能在那里等下去
+    （2026-09-25 云机「卡死机器半天」的现场就是一条线程永远停在 `waitpid` 上：92 条线程里一条
+    不返回，整轮就再也收不齐，而日志里什么都看不出来）。
+
+    为什么它**必须**与普通超时分开（两腿都按这个分类分岔，2026-09-25 用户口径）：
+
+      * 普通超时（`TimeoutExpired`）= 这一局慢（内容/负载）：它有自己的出路 —— 原地重跑同一
+        argv，几次之后仍失败就是**这一轮的确定性失败**（响亮记一笔，读数少一局）；
+      * 收不了尸 = 机器卡住：旧写者**可能还活着** ⇒ 在同一个输出目录上重跑就是两个写者写同一
+        份产出（半截/交错）⇒ 静默错数据。所以腿侧的处置只能是**轮内重投**：先把它半截的产出
+        删干净，再与其它没产出的局一起投。判成本轮失败则是把机器的问题记在内容头上
+        （worker 侧 `report_job_failure` ⇒ hub 落终局 ⇒ 停腿 ⇒ 反过来把云机停掉）。
+
+    继承 `RetryableError` 是因为它在语义上就是「可重试、非确定性拒绝」；**重试的粒度由各腿自己
+    定**（rollout 腿 `remote/iter_rollout.run_iter_rollout`、eval 腿
+    `remote/offline_eval.run_cloud_eval` 都是在轮内重投，只补没产出的局；缺省不限，各自留一个
+    操作员上限 env）。worker_loop 里还有一条同名的兜底分支（还租约 + 立即重领，不报失败、
+    不冷却）。
+    """
+
+
 class JobCancelledError(RuntimeError):
     """本 job 已被**别人赢下**（结果已落盘）⇒ 停算丢弃，**不**回传、**不**报失败。
 

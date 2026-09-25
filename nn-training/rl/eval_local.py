@@ -16,11 +16,12 @@ from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from platform_utils import KILL_REAP_SEC, keep_unreaped, kill_process_tree, popen_own_group
 
 # 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
 from remote import game_watch
+from remote.protocol import UnreapableChildError
 from remote.serve_pool import EVAL_SCRIPT as _EVAL_SCRIPT
 from rl.log import log
 
@@ -629,6 +630,12 @@ def run_eval_runner_capture(
     到 `timeout_sec` 才 kill 并按 `TimeoutExpired` 上抛（语义与 `subprocess.run` 逐字一致，
     包括异常体里的 captured output——诊断不能被超时吃掉）。
 
+    **收不了尸是另一档**（2026-09-25）：SIGKILL 之后 `KILL_REAP_SEC` 内连输出都收不回来 ⇒ 抛
+    `UnreapableChildError`（机器级停滞），不是普通超时——调用方对它**不原地重跑**（旧写者可能
+    还活着 ⇒ 同一目录上两个写者写同一份产出），而是清掉半截产出后整轮重投（见
+    `remote/offline_eval.run_cloud_eval` 的轮循环）。分类就住在这个抛出点上：调用方拿到的
+    异常类型就是它唯一能用的判据。
+
     软告警与硬顶同值（默认 5s = 5s）时不重复打 WARN：超时行的抛出体自己带着局身份与现场。
     """
     proc = subprocess.Popen(
@@ -639,7 +646,8 @@ def run_eval_runner_capture(
         text=True,
         encoding="utf-8",
         errors="replace",
-        **_POPEN_NO_WINDOW,
+        # 自带进程组（POSIX）：超时时能把导出器自己带的子进程一起 SIGKILL（只杀父进程会留下孤儿）。
+        **popen_own_group(),
     )
     t0 = time.time()
     warned = False
@@ -661,8 +669,27 @@ def run_eval_runner_capture(
                     )
                 )
             if elapsed >= timeout_sec:
-                proc.kill()
-                out, err = proc.communicate()  # kill 后把尾巴收干净（诊断就在这里面）
+                kill_process_tree(proc)
+                # ★ 这一步曾经是裸 `proc.communicate()`（**无上限**）：子进程卡在不可中断的 IO
+                # 里（D 状态）时它永远读不到 EOF ⇒ 一个 slot 永远出不来、而且什么都看不见
+                # （2026-09-25 云机「rollout 卡死机器半天」的同源形态，见
+                # `platform_utils.reap_bounded`）。有上限之后：尾巴收不到就收不到（诊断少一点
+                # 也比挂住强），本局按**机器级停滞**上抛（`UnreapableChildError`）——它和普通
+                # 超时是两档，调用方按那个分类决定「原地重跑」还是「整轮重投、只补没评的局」
+                # （见 `remote/offline_eval.run_cloud_eval` 的轮循环）。
+                try:
+                    out, err = proc.communicate(timeout=KILL_REAP_SEC)
+                except subprocess.TimeoutExpired:
+                    keep_unreaped(proc)  # 非阻塞地等它哪天退出再收尸（sweep_unreaped）
+                    (log_fn or log)(
+                        f"WARN {kind} 单局子进程杀不掉：{label or '?'} —— SIGKILL 之后"
+                        f" {KILL_REAP_SEC:g}s 内连输出都收不回来（pid={proc.pid}，很可能卡在不可"
+                        f"中断的 IO 里）——本局按机器级停滞上抛，不再等它"
+                    )
+                    raise UnreapableChildError(
+                        f"{kind} 单局子进程杀不掉：{label or '?'} —— SIGKILL 之后"
+                        f" {KILL_REAP_SEC:g}s 内回收不了（pid={proc.pid}）"
+                    ) from None
                 raise subprocess.TimeoutExpired(
                     cmd, timeout_sec, output=out, stderr=err
                 ) from None

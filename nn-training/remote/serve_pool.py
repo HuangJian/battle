@@ -29,7 +29,12 @@ World」，只有这样 serve 与一次性调用的产物才逐字节一致 —�
 **但回退本身要有限度**（2026-09-25 云机卡死取证）：一次超时 = kill worker + 该局一次性 spawn
 + 池补位再冷启动一个 ⇒ 一次超时放大成**三份进程**；过载时「回退越多、进程越多、越慢」是
 正反馈，能把整轮锁死。所以本轮累计回退到阈值（`FALLBACK_BREAKER_MIN`，随池宽度走）就地
-**熔断**：不再接任务、不再补位，余下局直接一次性，并且只留一行现场（`_fallback`）。
+**熔断**：**停掉补位**（一个 worker 都不再新建），只留一行现场（`_fallback`）。
+
+  ★ 熔断的语义**只有「不再补位」这一条**（2026-09-25 二次取证修正）：手上还活着的 worker 是
+    **暖进程**，接着服务到自然耗尽；旧实现把熔断做成了「余下局全走一次性」——那等于在最挤的
+    时刻把每一局都换成「冷启动一个 bun + wasm 编译 + attestation」，正是它要掐掉的放大器
+    （现场：熔断行之后整轮 900s+，机器被堆死的进程压住）。
 """
 
 from __future__ import annotations
@@ -42,7 +47,7 @@ import time
 from pathlib import Path
 from typing import NamedTuple
 
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from platform_utils import kill_process_tree, popen_own_group
 
 #: 与 `tools/sim/serve-loop.ts` 逐字对齐的三个标记（改一侧必须同步另一侧）。
 SERVE_READY = "__SERVE_READY__"
@@ -72,8 +77,9 @@ ENV_SWITCH = "NN_SERVE_POOL"
 #: 一次性 `spawn`（再冷启动一次 bun）③ 池补位又冷启动一个 ⇒ **一次超时放大成三份进程**。
 #: 过载时回退越多、进程越多、游戏越慢 ⇒ 回退更多：正反馈把机器锁死在 5s 硬顶之外，整轮
 #: 从此不再推进（现场：220 worker 的健康轮 p90=2.62s，下一轮被 2× 超订后成批踩 5s 线，
-#: 5s 后一次刷出 60+ 行回退，随后 4 分钟零行）。熔断是这条回路的唯一刹车：拿不准就退到
-#: 一次性路径（**只慢不错、绝不丢局**），但**不再重建 worker**。
+#: 5s 后一次刷出 60+ 行回退，随后 4 分钟零行）。熔断是这条回路的唯一刹车：**不再补位**
+#: （第三份进程就是补位那个冷启动），但**已经暖着的 worker 继续用**——它们是这条回路里
+#: 唯一「不花新启动成本」的部分，把它们一起扔掉只会让余下每一局都付一次冷启动。
 #: 阈值随池宽度走（大池按 1/4 收线，小池 4 条起步）——见 `_breaker_after`。
 FALLBACK_BREAKER_MIN = 4
 
@@ -191,10 +197,14 @@ class _Worker:
         return out
 
     def kill(self) -> None:
-        try:
-            self.proc.kill()
-        except OSError:
-            pass
+        """收掉这个 worker（POSIX 下连它的**整个进程组**一起）。**不等回收**。
+
+        为什么是进程组：worker 是长驻的 `bun`，它自己可能带子进程（编译缓存 worker/子工具）；
+        只杀进程本身会留下孤儿继续吃 CPU/内存（机器越跑越卡）。为什么不等回收：kill 是异步的
+        —— 等就把这一层变成阻塞点（一次超时 = 一个 worker 要收，而它可能正卡在不可中断的 IO
+        里；有界的等属于 `popen` 侧的纪律，池这里只负责把信号递出去）。
+        """
+        kill_process_tree(self.proc)
         try:
             if self.proc.stdin is not None:
                 self.proc.stdin.close()
@@ -236,9 +246,9 @@ class ServePool:
         self.closed = False
         #: 熔断阈值（本轮累计回退到它就停用池）；见 `FALLBACK_BREAKER_MIN`。
         self.breaker_after = max(FALLBACK_BREAKER_MIN, self.max_workers // 4)
-        #: 已熔断：不再接任务、不再补位（`workers` 收掉交给 `close()`/轮末）。
+        #: 已熔断 = **不再补位**（一个 worker 都不再新建）；手上的暖 worker 继续服务。
         self.disabled = False
-        #: 熔断后被**绕过**的局数（它们走一次性路径，不计进 `fallback`——否则计数被灌满）。
+        #: 熔断后因**没有暖 worker 可用**而走一次性路径的局数（不计进 `fallback`——否则计数被灌满）。
         self.bypassed = 0
         self._fallback_logged = 0
 
@@ -256,7 +266,8 @@ class ServePool:
                 bufsize=1,  # 行缓冲：任务行必须立刻送达 worker（否则池会安静地卡住）
                 encoding="utf-8",
                 errors="replace",
-                **_POPEN_NO_WINDOW,
+                # 自带进程组 ⇒ 收池/kill 时能连带它自己起的子进程（`_Worker.kill`）。
+                **popen_own_group(),
             )
         except OSError:
             return None
@@ -317,22 +328,30 @@ class ServePool:
 
         return base(argv0) == base(self.script)
 
-    def _acquire(self, timeout_sec: float | None = None) -> _Worker | None:
-        """取一个空闲 worker；池没满则补位（新 worker 也要等就绪）。
+    def _acquire(
+        self, timeout_sec: float | None = None, *, replenish: bool = True
+    ) -> _Worker | None:
+        """取一个空闲 worker；`replenish=True` 时池没满则补位（新 worker 也要等就绪）。
 
         `timeout_sec` = 这一局**本次尝试的硬顶**（`_submit` 传进来）：补位冷启动的等待
         不得超过它 —— 否则「机器一慢」会把一个游戏线程按在就绪等待里（旧行为是固定 60s，
         远超单局 5s 的硬顶，而看门狗在这段里什么都打不出来）。等不到就绪 ⇒ 当场放弃这个
         新 worker，**交给调用方的一次性路径**（与「起不来」同一个出口，只慢不错）。
+
+        `replenish=False`（熔断后）：**只用还活着的（暖的）worker，一个都不新建** —— 冷启动就是
+        「一次超时 → 三份进程」里的第三份，熔断的全部意义就是停掉它（见 `_fallback`）。
         """
         with self._lock:
-            if self.disabled:
-                return None
             for w in self._workers:
                 if not w.busy and not w.dead:
                     w.busy = True
                     return w
-            if len(self._workers) >= self.max_workers:
+            if (
+                not replenish
+                or self.closed
+                or self.disabled
+                or len(self._workers) >= self.max_workers
+            ):
                 return None
         fresh = self._spawn()
         if fresh is None:
@@ -365,7 +384,11 @@ class ServePool:
         w.kill()
 
     def _fallback(self, reason: str) -> None:
-        """记一次回退；到熔断线就地停用池并**响亮记一行**（这一行是全轮唯一的刹车现场）。
+        """记一次回退；到熔断线就**停掉补位**并响亮记一行（这一行是全轮唯一的刹车现场）。
+
+        熔断的语义**只有一条：不再补位**（不再新建 worker）。**不是**停用整个池 —— 见模块
+        docstring 里那条 ★：温暖 worker 继续服务，直到自然耗尽。旧实现把「熔断」做成了「余下局
+        全走一次性」，那等于在最挤的时刻把每一局都换成一次冷启动，正是它要掐掉的放大器。
 
         计数在锁外自增不致命（GIL 下 dict 操作原子、计数只是诊断口径），但熔断只能置一次。
         """
@@ -375,10 +398,11 @@ class ServePool:
             self.disabled = True
             reasons = ",".join(f"{k}={v}" for k, v in sorted(self.fallback_reasons.items()))
             self.log(
-                f"[serve-pool] 熔断：本轮停用池（fallback={self.fallback} ≥ 阈值"
+                f"[serve-pool] 熔断：本轮停掉**补位**（fallback={self.fallback} ≥ 阈值"
                 f"{self.breaker_after}；served={self.served} spawned={self.spawned} "
-                f"killed={self.killed}｜{reasons}）——余下局直接一次性 spawn，"
-                "不再补位/不再重建 worker（避免「一次超时 → 三份进程」的放大回路）"
+                f"killed={self.killed}｜{reasons}）——手上还暖的 worker 接着用（省一次冷启动），"
+                "没有暖 worker 的局走一次性 spawn；不再新建 worker"
+                "（避免「一次超时 → 三份进程」的放大回路）"
             )
 
     def _log_fallback(self, reason: str, why: str, *, kind: str, label: str, where: str) -> None:
@@ -442,13 +466,17 @@ class ServePool:
         if self.closed or len(argv) < 2 or not self.owns(argv[0]):
             return TaskOutcome(False, 0.0, [], "not-ours")
         if self.disabled:
-            # 熔断后**不计回退**（否则计数与日志都被余下 300 局灌满）：直接交回一次性路径。
-            self.bypassed += 1
-            return TaskOutcome(False, 0.0, [], "pool-disabled")
-        w = self._acquire(timeout_sec)
-        if w is None:
-            self._fallback("no-slot")
-            return TaskOutcome(False, 0.0, [], "no-slot")
+            # 熔断后**不计回退**（否则计数与日志都被余下几百局灌满），也**不再补位**；但手上还
+            # 暖着的 worker 接着用 —— 它们是这条回路里唯一不花新启动成本的部分（见 `_fallback`）。
+            w = self._acquire(timeout_sec, replenish=False)
+            if w is None:
+                self.bypassed += 1
+                return TaskOutcome(False, 0.0, [], "pool-disabled")
+        else:
+            w = self._acquire(timeout_sec)
+            if w is None:
+                self._fallback("no-slot")
+                return TaskOutcome(False, 0.0, [], "no-slot")
         w.result = None
         w.settled.clear()
         w.drain()
@@ -573,5 +601,9 @@ class ServePool:
         return (
             f"serve_pool: served={self.served} spawned={self.spawned} killed={self.killed} "
             f"fallback={self.fallback}（{reasons}）"
-            + (f"｜已熔断：余下 {self.bypassed} 局走一次性" if self.disabled else "")
+            + (
+                f"｜已熔断（停补位）：余下 {self.bypassed} 局没有暖 worker 可用，走一次性"
+                if self.disabled
+                else ""
+            )
         )

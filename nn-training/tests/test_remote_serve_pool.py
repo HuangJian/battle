@@ -122,6 +122,53 @@ for line in sys.stdin:
         time.sleep(3600)
 """
 
+#: 支持 `--serve`，但**只对指定 seed** 睡死（`@SLOW@`）。
+#:
+#: 用途：造「一个 worker 被硬顶带走、另一个 worker 还暖着」的现场 —— 熔断之后池该继续用那个
+#: 暖的（省一次 bun 冷启动），而不是把余下局全推去一次性。
+_STUB_SERVE_SLOW_ONE = """\
+import json, os, sys, time
+from pathlib import Path
+
+sys.stdout.reconfigure(line_buffering=True)
+SLOW = "@SLOW@"
+
+
+def one(a):
+    def val(flag):
+        return a[a.index(flag) + 1] if flag in a else ""
+
+    out = Path(val("--out"))
+    out.mkdir(parents=True, exist_ok=True)
+    stage, seed, wver = int(val("--stages")), int(val("--seeds")), val("--wver")
+    if SLOW and str(seed) == SLOW:
+        print(f"[stub-slow-one] hanging s{stage}/d{seed}", flush=True)
+        time.sleep(3600)
+    d = out.parent / f"rl_s{stage}_seed{seed}"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "manifest.json").write_text(json.dumps({"stage": stage, "seed": seed, "wver": wver}))
+    (out / "_rl_report.json").write_text(json.dumps({
+        "games": 1, "winRate": 1.0, "outcomes": {"stage_clear": 1},
+        "totalSamples": 2, "totalTicks": 20, "scoreList": [1.0], "dimLists": {"kills": [1.0]},
+    }))
+    print(f"[stub-slow-one] done s{stage}/d{seed} pid={os.getpid()}")
+
+
+if "--serve" in sys.argv:
+    print("__SERVE_READY__")
+    for line in sys.stdin:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            one(json.loads(line))
+            print("__SERVE_OK__")
+        except Exception as e:                # noqa: BLE001 — 协议要求把消息原样送回去
+            print(f"__SERVE_ERR__ {e}")
+else:
+    one(sys.argv[1:])
+"""
+
 #: 完全不认 `--serve`（只会跑一次性路径的桩）：池必须**快速**判定起不来，不等满就绪上限。
 _STUB_NO_SERVE = """\
 import sys
@@ -191,7 +238,9 @@ def allow_stub(monkeypatch: pytest.MonkeyPatch) -> None:
     """把测试桩加进白名单（真实节点上这里是 `tools/sim/export-rl-rollout.ts`）。"""
     monkeypatch.setattr(
         serve_pool, "SERVE_CAPABLE_SCRIPTS",
-        frozenset({"stub_serve.py", "stub_serve_a.py", "stub_serve_b.py"}),
+        frozenset(
+            {"stub_serve.py", "stub_serve_a.py", "stub_serve_b.py", "stub_slow_one.py"}
+        ),
     )
 
 
@@ -441,6 +490,9 @@ def test_fallback_breaker_stops_rebuilding_workers(
     为什么这条是本轮（2026-09-25 云机卡死）的核心护栏：一次超时 = kill worker + 该局一次性
     spawn + 池补位再冷启动 ⇒ 一次超时放大成三份进程。过载时那是正反馈（越多回退越慢），
     没有刹车就会锁死整轮（现场：5s 后一次 60+ 行回退，随后 4 分钟零行）。
+
+    本用例的池里**一个暖 worker 都不剩**（每局都睡死、每个都被带走）——那是熔断后走一次性
+    的**唯一**条件；「手上还有暖 worker 就接着用」由下一个用例钉。
     """
     _fast_poll(monkeypatch)
     script = _write_stub(tmp_path, _STUB_HANGS_ON_TASK, name="stub_hang_task.py")
@@ -463,6 +515,51 @@ def test_fallback_breaker_stops_rebuilding_workers(
     assert sum(1 for m in lines if "熔断" in m) == 1, lines
     assert lines[-1].startswith("[serve-pool] 熔断"), lines
     assert "已熔断" in pool.summary() and f"余下 {total - 4} 局" in pool.summary()
+    pool.close()
+
+
+def test_breaker_stops_replenishing_but_keeps_serving_warm_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 熔断 = **不再补位**，不是「把池关掉」：手上还暖的 worker 接着服务。
+
+    为什么（2026-09-25 云机二次取证）：旧实现把熔断做成了「余下局全走一次性」——那等于在最挤
+    的时刻把每一局都换成「冷启动一个 bun + wasm 编译 + attestation」：**正是它要掐掉的放大器**
+    （现场：熔断行之后整轮 900s+、机器被堆死的进程压住）。暖 worker 是这条回路里唯一「不花新
+    启动成本」的部分，把它们一起扔掉只会让余下每一局都付一次冷启动。
+    另一方面，补位的冷启动就是「一次超时 → 三份进程」里的第三份 ⇒ **一个都不许新建**。
+    """
+    _fast_poll(monkeypatch)
+    # 一处超时就熔断（池小 ⇒ 阈值起步 4；这里把阈值打到 1，隔离「熔断之后」的行为）
+    monkeypatch.setattr(serve_pool, "FALLBACK_BREAKER_MIN", 1)
+    script = _write_stub(tmp_path, _STUB_SERVE_SLOW_ONE, name="stub_slow_one.py", slow="7")
+    msgs: list[str] = []
+    pool = ServePool(sys.executable, script.name, tmp_path, 2, msgs.append)
+    assert pool.start() == 2
+    assert pool.breaker_after == 1
+
+    # ① 睡死的局：硬顶到点 ⇒ kill 一个 worker + 回退，同时把熔断闸拉下
+    hang_argv, hang_log = _task(script, 0, 7, "w0", tmp_path)
+    assert pool.try_pool(hang_argv, hang_log, 0.3) is None
+    assert pool.disabled is True and pool.fallback == 1 and pool.spawned == 2
+
+    # ② 健康局 + 还有一个暖 worker ⇒ 必须由它服务（不是绕过池）
+    ok_argv, ok_log = _task(script, 0, 8, "w1", tmp_path)
+    assert pool.try_pool(ok_argv, ok_log, 30.0) is not None
+    assert pool.served == 1 and pool.bypassed == 0, (pool.served, pool.bypassed)
+    assert pool.spawned == 2, f"熔断后不得新建 worker（冷启动就是第三份进程）：{pool.spawned}"
+
+    # ③ 最后一个暖 worker 也被带走 ⇒ 池真的没法服务了，余下局才走一次性
+    assert pool.try_pool(hang_argv, hang_log, 0.3) is None
+    assert pool.spawned == 2, "熔断后哪怕在连续回退，也一个都不许重建"
+    argv3, log3 = _task(script, 0, 9, "w3", tmp_path)
+    assert pool.try_pool(argv3, log3, 30.0) is None
+    assert pool.bypassed == 1, "没有暖 worker 才计绕过（否则计数被余下几百局灌满）"
+
+    # 刹车现场与轮末汇总都要说清它到底做了什么
+    brake = [m for m in msgs if "熔断" in m]
+    assert len(brake) == 1 and "补位" in brake[0], brake
+    assert "已熔断（停补位）" in pool.summary() and "余下 1 局" in pool.summary()
     pool.close()
 
 

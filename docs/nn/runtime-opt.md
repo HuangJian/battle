@@ -7,6 +7,180 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §25 eval 腿的机器级停滞：收到尸与收不了尸必须分两档，收不了尸在**轮内**重投（2026-09-25）
+
+> 接 §24：rollout 腿当天就改成了「机器级停滞 ⇒ 轮内重投、只补没产出的局」（DECISIONS
+> `§2026-09-25-goalnn-rollout-reap-wedge`）。**eval 腿当时只改了一半**：有界回收接上了，但
+> 「收不了尸」被当成普通超时上抛 —— 这一节把它对齐（用户口径：eval 腿的机器级停滞也要轮内重投、
+> 只补没评的局，而且不许把内容面失败的那条出路堵死）。
+
+### 25.1 eval 腿原来的半拉状态（为什么它不是「已经安全了」）
+
+§24 给两条 CPU 腿都装了有界回收，但分类只做在 rollout 腿上：
+
+| 腿 | 收不了尸时的行为（改前） | 后果 |
+|---|---|---|
+| rollout（`iter_rollout`） | 抛 `UnreapableChildError` ⇒ 轮内接住 ⇒ 只补没产出的局 | ✅ |
+| eval（`run_cloud_eval.run_one`） | `keep_unreaped` 后抛 `TimeoutExpired` ⇒ 通用分支：原地重跑 3 次 ⇒ 记一轮 `failed` | ❌ 这一轮永远缺那个读数 |
+
+`failed` 不是「可见的失败」，而是**这一轮少一局**：`settle_eval_summary` 按 `pairs` 结算，缺的那局
+只会体现在 `dropped` 里。而评估腿**没有任何重订机会** —— 调用方 `CloudEvalRunner` 只把 `run_cloud_eval`
+的返回记一行日志（它「永不抛」），云机自主段那 3 次重试只盖 rollout 腿。
+
+### 25.2 分类就住在抛出点上：`UnreapableChildError` 是两腿共用的
+
+* **定义上移**到 `remote/protocol.py`（紧挨 `RetryableError`：它是「可重试、非确定性拒绝」里最特殊的
+  一档 —— 重试的**粒度**由各腿自己定）。`remote/iter_rollout.py` 只 `import` 它当模块属性，
+  `remote/worker.py` 与既有用例零改动（`_iter_rollout.UnreapableChildError` 仍是同一个类）。
+  为什么不放在 `platform_utils`：那是**没有** `RetryableError` 概念的最底层（wire/分类异常都在 protocol）。
+* `rl/eval_local.run_eval_runner_capture`：`communicate(timeout=KILL_REAP_SEC)` 再超时就
+  `keep_unreaped(proc)` + 抛 `UnreapableChildError`（日志照旧点名「单局子进程杀不掉」）。
+  **普通超时（收得了尸）仍是 `TimeoutExpired`** —— 两档绝不能混：
+  * 普通超时 = 这一局慢（内容/负载）⇒ 原地重跑同一 argv，几次之后仍是这一轮的确定性失败（写 `failed`）；
+  * 收不了尸 = 机器卡住 + 旧写者**可能还活着** ⇒ 在同一目录上重跑 = 两个写者写同一份
+    `_eval_report.json`（半截/交错 = 静默错读数）。
+
+### 25.3 `run_cloud_eval` 的轮循环（只补没评的局）
+
+```
+while True:
+    跑一趟 pending（ThreadPoolExecutor，局内各自重试不变）
+    没有 machine_stuck ⇒ break
+    到操作员上限 ⇒ 把还没评的局记成本轮 failed，照常收尾（不上抛）
+    pending = 账本缺口（eval_done_keys 里没有、且不在 failed 里的局）
+    清 pending 的半截产出（旧写者可能还在）→ 再跑
+```
+
+* 缺口算在**盘上账本**上（`eval_done_keys`）而不是内存 `seen`：断点续跑/上次漏账也能对得上，
+  而且天然满足「已落账的局一个字不重跑」（不空转）。
+* 内容面失败（rc≠0 / 落账失败）**不**进重投集合 —— 那是这一轮该接受的结局（它的出路是 `failed`
+  那一笔 + 下一轮/下次导入重评）。
+* 次数缺省**不限**；`NN_EVAL_ROUND_RETRY_MAX`（=0 不限，非法值回落不限）是操作员的退出阀。到上限
+  **不能上抛**：评估腿「永不抛」，抛出去这一轮连 summary 都没有（是整轮作废，比少一局更坏）。
+* 日志（正常轮零噪音）：
+
+```
+WARN [eval-cloud] it12 整轮重投第 1 次：本次尝试有 1 局收不了尸（机器级停滞，已结算 335/336 局）
+     ——只补这 1 局，先清掉它们的半截产出（旧写者可能还在）；不报失败、不睡、不占用外层重试预算、云机不停
+[eval-cloud] it12 DONE：336/336 局落账（失败 0，41.2s，wver=1462bb4a1d3f…，整轮重投 1 次）
+```
+
+* `out["roundRetries"]` 只进日志/诊断（与 `servePool` 同理：**不进 wire**，hub 不认识这个键）。
+
+### 25.4 下次该看的读数
+
+1. `[eval-cloud] itN DONE` 里有没有「整轮重投 N 次」——正常轮**恒空**，出现即「机器卡过」。
+2. `WARN [eval-cloud] itN 整轮重投第 M 次：…只补这 K 局`：`K` 应当远小于本轮局数（它是**没做完的**
+   那几局，不是整轮重跑）；`K` 每趟不降反而是机器越来越糟的指纹。
+3. `WARN eval 单局子进程杀不掉：sX/dY —— SIGKILL 之后 5s 内连输出都收不回来`：收不了尸的现场
+   （带局身份），与 `platform_utils.unreaped_count()` 那本账对应。
+4. 轮末「失败 N」里有没有成批的机器级停滞：只有操作员设了 `NN_EVAL_ROUND_RETRY_MAX` 才该出现
+   （缺省不限 ⇒ 机器一好就自己接上）。
+
+### 25.5 用例（钉住的契约）
+
+* `tests/test_eval_local_capture.py::test_capture_distinguishes_an_unreapable_child_from_a_plain_timeout`
+  —— 替身子进程（`communicate` 永远超时）⇒ 抛的是 `UnreapableChildError`、回收等待有上限（无上限的
+  `communicate` 会让用例直接炸）、账本记了 1 个；对照组：收得了尸的超时仍是 `TimeoutExpired`。
+* `tests/test_offline_eval_cloud.py::test_unreapable_eval_game_is_resubmitted_in_round_never_failing`
+  —— 一局第一次收不了尸、第二次真跑 ⇒ 整轮 4/4 落账 + `failed=0` + `roundRetries=1`；其余三局**各只
+  跑一次**（只补缺口）。
+* `…::test_eval_round_retry_cap_is_the_operators_exit_valve` —— `NN_EVAL_ROUND_RETRY_MAX=2` ⇒ 重投 2 次
+  后把该局记成失败、其余照落账（整轮不抛、不白评）。
+* `…::test_run_cloud_eval_survives_single_game_failures` 追加断言：**内容面**失败不触发任何轮内重投。
+
+---
+## §24 云机 rollout **二次**卡死：`kill` 之后无上限的 `wait()` + 熔断把整轮推去冷启动（2026-09-25）
+
+> 起因（用户真机日志，`battle.offline.ipynb` × `x20-dodge-l3`，96 核配额的 Kaggle TPU 会话）：
+> §23 的三件套**都已生效**（`workers=92` 夹取、健康轮 336 局 **3.29s**、单局 p50=0.47s p90=1.12s，
+> 熔断会响）—— 而卡死照旧复现。这一轮拿到了它的指纹，而且它**不是** §23 那三条。
+
+### 24.1 现场读数（两次，各损失 15–24 分钟）
+
+| 读数 | 值 |
+|---|---|
+| 熔断行（07:30:40 / 07:54:34） | `fallback=23 ≥ 阈值23；served=219/270 spawned=92 killed=22｜timeout=23`——开跑 **5s 内**就 ≥23 局踩了 5s 硬顶 |
+| 回退详情 | `timeout: rc=<仍在运行>；现场 …/w97/rollout.log`（**尾行是空的**：worker 活着，但这一局 5s 内一个字都没吐） |
+| 停滞中的那轮（08:09:37） | `进度=271/336 games settled (910s)` —— 5s 时的 270 就是它的**终点**，之后 890s 一局都没结算 |
+| 同一秒出现的两条 | `rollout 单局重试 2/3（上次：rollout 单局超时（5.0s > 硬顶 5s）…）`，正是 07:54:33 那批回退局 |
+
+### 24.2 根因：`p.kill(); p.wait()` 没有上限（而日志仍写着「5.0s」）
+
+从「attempt 1 以 5s 超时结束」到「attempt 2 的重试行」之间只有 `_clean_attempt` 与
+`p.kill(); p.wait()` 两件事；**而超时行里的 `elapsed` 是 kill 之前算的** ⇒ 890s 就花在 kill 之后的
+**回收**上：SIGKILL 递进去了，子进程却卡在**不可中断的 IO** 里（云机上被挂住的挂载点/慢盘就是
+D 状态），`waitpid` 要等那个系统调用返回才收得到尸。后果不是「这一局慢」，而是：
+
+* 那一条游戏线程永远不返回 ⇒ `as_completed` 永远收不齐 ⇒ **整轮**结束不了；
+* 92 条线程里剩下的都在等它 ⇒ 排在后面的 65 局**连开始都开始不了**（`271/336` 里少的就是它们）；
+* 两条线程在**同一秒**解封 ⇒ 是 OS 层面的事件（挂载点/IO 恢复），不是某一局自己的毛病。
+
+**触发**与**放大**要分开看：5s 内成批踩硬顶那一下，前 270 局跑得和健康轮一样快（5s 内结算完）⇒
+机器当时并没有全面过载，慢的是那 23+ 个被判超时的局（`rc=<仍在运行>`、尾行空）。所以 5s 线不动
+（用户口径），要修的是它后面那三件事：**无上限的等待**、**熔断的放大器语义**（下一段）、
+以及**重投放在哪一层**（§24.3 末：放外层 = 三次就把整段训练判死）：
+熔断把余下每一局推去**一次性冷启动**（bun + wasm 编译 + attestation），而手上 70 个**暖** worker
+空转 —— 机器已经卡住了，这正好是熔断要掐掉的那条正反馈（§23 的原意是「不再补位」，
+实现却写成了「余下局全走一次性」）。
+
+### 24.3 落地（两处语义 + 一处可观测）
+
+| 位置 | 改动 | 用例 |
+|---|---|---|
+| **新增 `platform_utils` 四个原语** | `popen_own_group()`（POSIX 下自带进程组）· `kill_process_tree()`（SIGKILL 整个进程组、**不等回收**）· `reap_bounded()`（有界回收，超时 False）· `keep_unreaped()`/`sweep_unreaped()`（收不了尸的记账 + 之后非阻塞再收）· `KILL_REAP_SEC=5.0` = 全仓唯一那个数 | `test_platform_utils_proc`（真进程：孙进程跟着进程组一起走（**管道 EOF** 作判据）、有界回收活着的子进程返回 False、记账只收死的不收活的） |
+| `remote/iter_rollout` | 超时路径改 `_kill_and_reap`（进程组 + 有界回收）；**回收不了 ⇒ `UnreapableChildError`**（本局**不就地重跑** —— 直接重跑会在同一 `w{i}/` 上再起一个写者）；主循环从 `as_completed` 改**带超时的 `wait`** + 停滞按 `STALL_WARN_SEC` 点名；**机器级停滞在轮内重投**（只补没产出的那几局，先 `_clean_attempt`；不睡、不报失败、不消耗调用方重试预算；次数缺省不限，`ENV_ROUND_RETRY_MAX` = 操作员退出阀） | `test_remote_iter::test_a_child_that_cannot_be_reaped_is_retried_in_round_never_failing`（替身：第一次收不了尸、第二次真跑桩脚本 ⇒ 整轮**跑成**；无上限 wait = 0；不走单局重跑；轮账带 `整轮重投=1 次`）· `::test_reap_stall_round_retry_is_unbounded_unless_operator_caps_it`（`ENV_ROUND_RETRY_MAX=2` ⇒ 重投两次后响亮上抛，每轮仍有界）· `::test_kill_and_reap_bounds_the_wait_and_books_the_leftover` · `::test_a_round_that_stalls_names_the_games_still_in_flight` |
+| `remote/serve_pool` | 熔断语义收窄为「**只停补位**」：暖 worker 继续服务、**一个都不许新建**；worker 也走 `popen_own_group` + `kill_process_tree`（孤儿吃 CPU ⇒ 机器越跑越卡） | `test_remote_serve_pool::test_breaker_stops_replenishing_but_keeps_serving_warm_workers` |
+| `remote/game_watch` | `STALL_WARN_SEC=120` + `stall_line()`：整轮停滞时点名（带**还在飞的局身份**）——进度行/心跳只在「有局结算」时才打，全卡住时它们**一起哑**（这就是 890s 里一行都没有的成因） | `test_game_watch::test_stall_line_names_the_games_still_in_flight` |
+| `remote/worker`（`worker_loop`） | 回落档（轮内已接住的不会到这里：只有操作员设了 `ENV_ROUND_RETRY_MAX` 或非 rollout 腿抛的同一个类才上抛）：`UnreapableChildError` ⇒ 还租约 + **立即**重领，**不睡、不**报 `report_job_failure`（那是把机器的病记在内容头上 ⇒ hub 落终局 failed ⇒ 停腿 ⇒ 反手把云机停掉） | `test_worker_reap_stall`（立即重领而不是等；反复连卡仍继续重领；**对照腿**：普通 `RetryableError` 同路） |
+| `rl/eval_local` | 同源的裸 `communicate()`（kill 之后无上限，读不到 EOF 就永远不返回）改成有界；收不回尾巴就响亮一行、按超时上抛 | 既有 `test_eval_local_capture` 覆盖硬顶语义 |
+
+口径：`KILL_REAP_SEC` / `popen_own_group` / `kill_process_tree` / `reap_bounded` 是**跨腿共用**的
+（rollout 与 eval 两条腿都在云机 CPU 上跑子进程）；`UnreapableChildError` 归到 `RetryableError`
+的子类是有意的 —— 卡住的是**机器**不是这一局的内容，它必须落在「重试」而不是「失败」那一侧
+（`ProtocolError` 会走 `report_job_failure` ⇒ hub 终局 failed ⇒ 停腿 ⇒ 反手下发停机指示把云机停掉）。
+重投由 `run_iter_rollout` 在轮内做（只补没产出的局），上抛到 `worker_loop` 的那一段只做
+「还租约 + 立即重领」（它的出口语义与其它 `RetryableError` 一样，只是多一行点名）。
+
+★ **重投放哪里：轮内，不是外层**（用户 2026-09-25：失败就重试，不许关云机让任务失败，也不许空转
+烧配额）。三条一起看才能定这个位置：
+
+* **放外层 = 把整段训练判死**：云机自主段 `remote/run_loop._run_with_retries` 只有 `ITER_RETRIES=2`
+  （共 3 次）⇒`_run_iteration`（它就在同一进程里调 `run_job` → `run_iter_rollout`）一抛，三次就把
+  「自主段」结账成 `failed`；hub 腿那侧更窄（5 连击）。而机器的病现场持续 **890s**、健康轮只要
+  3.3s ⇒ 「一台机器短暂卡住」绝不能等于「这一轮失败」。
+* **只补没产出的局**（而不是重跑整轮）：卡死那一次已经结算的 270 局直接复用（它们的 shard 已经
+  在盘上、同 (stage,seed,wver) 确定性），只重投没产出的那几局——这是「不空转烧配额」的正解，
+  也是把“不可重投”降到“可以重投”的关键（旧写法怕的是「同一目录上再起一个写者」；现在先
+  `_clean_attempt` 把半截产出删掉，写者只会在已删除的 inode 上写）。
+* **不睡**：那 15 分钟里睡掉的每分钟都是白烧的云机会额（试过 30s 冷却，当天被用户否决）。
+  不睡的成本（重投打在被卡住的机器上）由「只补那几局 + 池不再补位」共同封顶（后者见 §24.2 末）。
+
+**对照组**：普通 `RetryableError`（单局三次尝试都失败）**照旧上抛**，不由这条循环接住 —— 那是
+“内容面”的失败（可能真的有个局跑不完），必须有一条出去的路（否则就是另一个形态的卡死）。
+
+### 24.4 否决项
+
+* **收不了尸就原地重跑这一局**：同一个 `w{i}/` 上会再起一个写者，而旧的那个可能还活着 ⇒ 两个进程
+  写同一份 shard（半截/交错）⇒ **静默错数据**（`_clean_attempt` 存在的全部理由）。
+* **熔断 = 停用整池**（§23 的实现）：等于在最挤的时刻把每一局都换成一次冷启动 —— 见 §24.2 末。
+* **抬高 5s 硬顶**：同上（§23.3 已否一次）；本条的慢局是被系统事件挤慢的，抬高只会让机器更久地
+  停在卡死态。
+* **给「回收不了」加固定重试/固定等待**：把机器的问题记在内容头上，且等待本身又是无上限的风险。
+* **继续用 `p.wait()`（无参）**：那就是本条本身。
+
+### 24.5 下次真机该看的四个读数
+
+① `WARN rollout 单局子进程杀不掉：sX/dY —— SIGKILL 之后 5s 内回收不了`（有它 ⇒ 机器/挂载点层面
+卡住，且已按纪律收场：本局不重跑、整轮重发）；② `WARN rollout 整轮停滞：Ns 里一局都没结算
+（还有 M 局在飞：…）`（有它 ⇒ **卡住的是哪几局**一眼可见）；③ 熔断行现在读作「停掉**补位**」+
+轮末 `已熔断（停补位）：余下 N 局没有暖 worker 可用，走一次性`；④ `WARN rollout 整轮重投第 N 次：本次尝试有 M 局收不了尸（机器级停滞，已结算 X/Y 局）
+——只补这 M 局`（有它 ⇒ 机器级停滞已被轮内接住，且**没白烧配额**：X 局没重跑；M 一直不降
+而 N 一直涨 ⇒ 机器真的还没好，但训练没死、也没停云机）；⑤ **若出现「整轮停滞」却没有
+「子进程杀不掉」** ⇒ 卡点在 `_clean_attempt` / 写盘（挂载点 IO）那一侧：那条路径**不能**靠超时
+收场（半截 shard 会被当成产出，静默错数据），下一步是把它挪到「独立目录 + 持久重试账本」。
+
+---
 ## §23 云机「rollout 卡死」三件套：两条 CPU 腿真交替 + 池熔断/背压 + 并发按核数夹取（2026-09-25）
 
 > 起因（用户真机日志，`battle.offline.ipynb` × `x20-dodge-l1`，**96 核配额**的 Kaggle TPU 会话——

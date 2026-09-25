@@ -2574,3 +2574,106 @@ cloudflared 隧道进 hub，它自己跑 rollout）与采样节点 `rollout.clou
 **回归**：`nn-training/tests/test_eval_a_once.py`（bc 缺省 ×2：取 bc 断言 + 重启后早退不写别轮
 wver；旧钉死 live-out 的用例已按新语义改写）+ `test_baseline_eval.py` 全绿。
 —— 全文即本条 · 档案 `docs/nn/engineering.md` §25
+
+## §2026-09-25-goalnn-rollout-reap-wedge（2026-09-25，云机 rollout 二次卡死取证）
+
+**现场**：battle.offline.ipynb × x20-dodge-l3（96 核配额）。§23 的三件套都已生效（`workers=92`、
+健康轮 336 局 3.29s、熔断会响），但两次各损失 15–24 分钟：开跑 5s 内 ≥23 局踩硬顶 ⇒ 熔断 ⇒
+随后 `进度=271/336 games settled (910s)` 一行不动（890s 里零结算），两条同批回退局的重试行
+在 910s 那一刻才出现，且写着「上次：rollout 单局超时（5.0s > 硬顶 5s）」。
+
+**根因**：`p.kill(); p.wait()` **没有上限**。超时行里的 elapsed 是 kill **之前**算的（所以照旧
+写 5.0s），而 890s 花在 kill 之后的**回收**上——子进程卡在不可中断的 IO（D 状态）时 SIGKILL 要
+等系统调用返回才生效。一条线程不返回 ⇒ 整轮收不齐（后面的 65 局连开始都开始不了）。
+**放大器**：熔断（§23）把余下每一局推去**一次性冷启动**，而手上 70 个**暖** worker 空转——
+那正是它要掐掉的正反馈；「不再补位」被实现成了「余下局全走一次性」。
+
+**变更**：① `platform_utils` 新增 `popen_own_group`（POSIX 进程组）/ `kill_process_tree`（SIGKILL
+整组、不等回收）/ `reap_bounded`（有界回收）/ `keep_unreaped`+`sweep_unreaped`（收不了尸的记账）
+与 `KILL_REAP_SEC=5.0`（全仓唯一那个数）；② 两条 CPU 腿（`iter_rollout` 的逐局、`eval_local` 的
+抓取）都改成进程组 + **有界**回收；③ 回收不了 ⇒ **`UnreapableChildError`**（`RetryableError`
+子类）：本局**不就地重跑**（同一 `w{i}/` 上再起一个写者 = 半截/交错 shard = 静默错数据）；
+④ 熔断语义收窄为 **只停补位**（暖 worker 继续服务、一个都不新建）；⑤ `game_watch.STALL_WARN_SEC=120`
++ `stall_line`：整轮停滞时点名（进度行只在「有局结算」时才打 ⇒ 全卡住时它们一起哑，这就是
+890s 零行的成因）；⑥ **重投放在轮内**（用户口径「失败就重试，不许关云机让任务失败，也不许空转
+烧配额」）：`run_iter_rollout` 自己接住 `UnreapableChildError`，**只补没产出的那几局**（已结算的
+局不重跑，先 `_clean_attempt` 清掉半截产出），不睡、不报失败、不消耗调用方重试预算 ⇒ 训练腿与
+云机都不受影响；重投次数缺省**不限**（`ENV_ROUND_RETRY_MAX` 是操作员退出阀，缺省 0=不限）；
+**为什么不能扔给外层**：外层每条腿预算极小（云机自主段 `run_loop._run_with_retries` 只有 3 次）
+⇒「一台机器短管卡住」会直接把整段训练判死；⑦ `worker_loop` 保留同名分支作为回落：
+能上抛到那里的（操作员设了上限 / 非 rollout 腿）只做「还租约 + 立即重领」，不睡、不报失败（hub
+只对**租约过期**计毒包，主动 release 不算 ⇒ 反复重投不会把自己冻死）。
+
+**被否决**：收不了尸就**原地重跑这一局**（静默错数据的入口）· 熔断=停用整池（旧实现，等于在最挤的
+时刻把每一局都换成冷启动）· 抬高 5s 硬顶（§23.3 已否，且本条的慢局是被系统事件挤慢的）·
+给「回收不了」加固定等待/固定重试（把机器问题记在内容头上，且那个等待又是无上限的风险）·
+**退避/冷却（试过 30s，用户当天否决）**：云机按分钟计费，机器卡死的那 15 分钟里睡掉的分钟
+就是白烧的配额；而要的东西（别把整轮反复重投打在被卡住的机器上）由「**只补没产出的那几局**」
+回答 —— 重投不再是「336 局重跑一遍」，而是接着把它没做完的那几局做完（既不空转也不浪费）·
+把重投扔给调用方重试预算（3 次即判死整段训练）· 拿 `FREEZE_AFTER_RECLAIMS` 当刹车（主动 release
+刻意不计数，否则诚实重试会被冻成毒包）· 拆掉 `_clean_attempt` 的全树 rglob（与 `scan_shard_dirs`
+同口径，收窄 = 半截 shard 会被当成产出）。
+
+**违反后果**：任何一处裸 `wait()`/`communicate()`（无上限）⇒ 一条线程就能把整轮按住且**日志看不出
+来**（elapsed 是 kill 之前算的）· 熔断写成「余下局全走一次性」⇒ 卡死时反而最大化进程 churn ·
+进度/心跳只挂在「有局结算」上 ⇒ 全卡住时零日志，operator 只能看着机器卡死 ·
+把「机器级停滞」当成一轮失败扔出去 ⇒ 3 次就把整段训练判死（云机白烧）· 重投时**重跑整轮** ⇒
+机器卡 15 分钟就白烧 15 分钟的重复活（要的是「只补没产出的那几局」）。
+—— 全文（现场读数 / 根因 / 落地表 / 否决项 / 下次该看的四个读数）→ `docs/nn/runtime-opt.md` §24 · 锚 `## §24`
+
+## §2026-09-25-goalnn-eval-round-retry（2026-09-25，eval 腿对齐机器级停滞口径）
+
+**现场/来历**：`§2026-09-25-goalnn-rollout-reap-wedge` 把 rollout 腿的「机器级停滞」改成轮内重投，
+但**eval 腿只改了一半**：`rl/eval_local.run_eval_runner_capture` 已经用进程组 + 有界回收（收不了尸
+就 `keep_unreaped`），可它把那一态**当成普通超时上抛** ⇒ `run_cloud_eval.run_one` 的通用分支把它当
+内容失败：原地重跑 3 次、失败就记一轮 `failed` ⇒ 这一轮**永远缺一个读数**（且没有任何重订机会：
+评估腿的调用方 `CloudEvalRunner` / 云机自主段不重试，rollout 腿的 3 次预算也不盖它）。
+
+**变更**：① `UnreapableChildError` 的**定义**上移到 `remote/protocol.py`（与 `RetryableError` 同册：
+它是**两腿共用**的分类语义），`remote/iter_rollout.py` 只 import 它当模块属性（worker.py / 用例
+零改动）；② `run_eval_runner_capture` 在「SIGKILL 之后 `KILL_REAP_SEC` 内连输出都收不回来」时抛它
+（普通超时照旧 `TimeoutExpired` —— 分类就住在抛出点上）；③ `run_cloud_eval` 加**轮循环**：
+`except UnreapableChildError` ⇒ 本局**不原地重跑**（同一 `eval-<it>-s<stage>-d<seed>/` 上可能还有
+活写者 ⇒ 半截/交错的 `_eval_report.json`）、**不记 `failed`**，只把它记进 `machine_stuck`；一趟跑完
+若有它的局，就用 `eval_done_keys` 算缺口**只补没评的局**（已落账的不重跑 = 不空转），投前
+`rmtree_best_effort` 清半截产出，然后重投；④ 重投次数缺省**不限**（`NN_EVAL_ROUND_RETRY_MAX`
+是操作员退出阀，缺省 0=不限；到上限**不上抛**——评估腿「永不抛」，抛出去连 summary 都没了——
+而是把还没评的局记成本轮 `failed` 并照常收尾）；⑤ 内容面失败（rc≠0 / 落账失败）仍归 `failed`；
+⑥ `out` 新增 `roundRetries`（只进日志/诊断，不进 wire），DONE 行在卡过时追加「整轮重投 N 次」。
+
+**被否决**：收不了尸 = 普通超时（把机器的问题记在内容头上 ⇒ 每轮都缺同一批读数）· 原地重跑同一
+`game_dir`（两个写者写同一份报告 = 静默错读数）· 把机器级停滞上抛给调用方（`CloudEvalRunner` 只
+记一笔 WARN 就走 ⇒ 这一轮白评）· 重投时重跑整轮（机器卡 15 分钟就白烧 15 分钟重复活）· 睡/退避
+（云机按分钟计费；且「只补没评的局」已经把「反复重投」的范围缩到真正没做完的那几局）。
+
+**违反后果**：把收不了尸并进 `TimeoutExpired` ⇒ 调用方只能二选一（机器问题记成内容失败 / 内容
+失败无限重投）· 用 `seen` 内存计数而非账本算缺口 ⇒ 断点续跑/落账失败时漏补或重复评 ·
+在轮内重投时**不**清半截产出 ⇒ 旧写者与被杀进程的产物被当成有效读数。
+—— 全文（现场/两腿口径对照/日志样例/下次该看的读数）→ `docs/nn/runtime-opt.md` §25 · 锚 `## §25` ·
+同源条目 `§2026-09-25-goalnn-rollout-reap-wedge`（rollout 腿）
+
+## §2026-09-25-state-init-course-key（2026-09-25，课程键 `state_init` 进 CourseConfig）
+
+**来历**：`curricula/x20-state-init.jsonc`（rollout 起始分布 = 人类 demo 中段交棒，plan 六腿六负
+后的第七条攻击面）起草时就带着 `state_init` 块，而 `CourseConfig` 是 `extra="forbid"` ⇒ 那个文件
+**长期加载失败**，连带 `tests/test_reward_golden.py::test_jsonc_courses_load`（遍历 `curricula/*.jsonc`）
+成为门禁唯一那条红。plan `plan/x20-state-init.plan.md` P2 = 把这个键映射进配置层。
+
+**变更**：① `StateInitBlock`（`rl/config.py`）：`bank/cut_from/cut_to/cut_step/rotate_cuts/
+rebase_counters` 全可选 + v1 缺省，`extra=forbid`，切点自相矛盾（`cut_from<0` / `cut_to>0` /
+`cut_step<1`）在校验期拒；② `CourseConfig.state_init: StateInitBlock | None = None`（缺席 = 标准
+开局，老课程逐字节不变）；③ `flat_overrides` 把整块转成 **dict** 交出去（不进 mapping 那张标量表）；
+④ 「声明了就必须能跑」的自洽检查住 **`apply_course`（启动期）**：`bank` 空、或不在盘上（cwd /
+仓库根 / nn-training 三种基准都认，`_resolve_state_init_bank`）⇒ `SystemExit`（响亮，不静默退回
+标准开局——那等于换了一个实验，而账本还以为跑的是中段起跑）。
+
+**被否决**：把 bank 存在性检查放进 `load_course`（`load_course` 只读课程文件本身；在那儿读盘会让
+**任何**遍历课程的调用方被一个未落地的产物打红——就是这次那条门禁红）· 把 pydantic 模型对象原样
+传进 `args`（`echo_config` 对非标量做 `json.dumps` ⇒ 当场炸；P3 的 `build_rollout_cmd` 也只要
+JSON 数据）· 允许 `cut_to > 0`（绝对上界：得先读银行 manifest 知道局长，v1 只支持相对局尾）·
+`bank` 缺失时静默关掉 state_init（映射漏了/数据缺了都表现为「静默失效」，`ent_break` 前科）。
+
+**违反后果**：新增课程键不映射 `flat_overrides` ⇒ 训练静默按缺省跑（`ent_break` 前科：`0.25` 从未
+落地）· 在 `load_course` 里做产物存在性检查 ⇒ 起草中的课程文件把全体遍历课程的用例打红 ·
+块内乱写键被静默忽略（`extra=forbid` 是这一层的唯一防线）。
+—— 全文（P2 落地记录 / 银行内容校验为何留 P0-P3）→ `plan/x20-state-init.plan.md` P2

@@ -18,12 +18,18 @@ rl/queue.py 各自维护了一份逐字节相同的 `_POPEN_NO_WINDOW`（Windows
   effective_cores() —— 本进程**真正能用**的核数（容器配额/亲和掩码 > os.cpu_count()）。
   cpu_worker_slots(cores=None) —— 本机 CPU 并行槽的**唯一口径**（见 docstring）：
     rollout 与 eval 都用它，谁都不为对方预留核数。
+  popen_own_group(**extra) —— **自带进程组**的子进程 kwargs（POSIX 的 start_new_session）。
+  kill_process_tree(proc) —— SIGKILL 掉整个进程组（连孤儿一起）；**不等回收**。
+  reap_bounded(proc, timeout) —— 有界回收（waitpid）；超时返回 False，**绝不无限等**。
+  KILL_REAP_SEC —— 回收预算的唯一数字（kill 之后最多等这么久）。
+  keep_unreaped(proc) / sweep_unreaped() / unreaped_count() —— 收不了尸的进程记账。
 """
 
 from __future__ import annotations
 
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from typing import Any
@@ -232,3 +238,98 @@ def popen_kwargs(**extra: Any) -> dict[str, Any]:
     ``subprocess.run(cmd, ..., **_POPEN_NO_WINDOW, capture_output=True)``。
     """
     return {**POPEN_NO_WINDOW, **extra}
+
+
+# --------------------------------------------------------------- 子进程回收（kill / reap）
+
+#: kill 之后回收（waitpid）的**统一预算**（秒）：所有「杀了就得等它死」的路径都用这一个数。
+#:
+#: 为什么必须是个**有上限**的数（它取代的是裸 `p.wait()`）：见 `reap_bounded` —— 云机上那条
+#: 「rollout 卡死机器半天」的现场就是一条线程永远停在 `waitpid` 上（一条线程卡住 = 整轮收不齐）。
+KILL_REAP_SEC = 5.0
+
+#: 杀不掉也收不了尸的子进程（SIGKILL 之后仍卡在不可中断的 IO 里）——留着，之后非阻塞地
+#: 再碰一次（它们可能已经退出了）。见 `reap_bounded` 的 docstring 与 `keep_unreaped`。
+_UNREAPED: list[Any] = []
+
+
+def popen_own_group(**extra: Any) -> dict[str, Any]:
+    """起一个**自带进程组**的子进程的 kwargs（= `popen_kwargs` + POSIX 的 start_new_session）。
+
+    为什么要有它（2026-09-25 云机二次取证）：
+      ① 只有自带进程组才敢 `killpg` —— 否则 `killpg(pid)` 打的是**我们自己**的进程组；
+      ② 被池化/逐局起的 `bun` 自己还会带子进程（编译缓存 worker、子工具）——只杀进程本身
+         会留下**孤儿**继续吃 CPU/内存，机器越跑越卡，而日志里只看得见「我们 kill 过它」。
+    Windows 没有这套语义（连 `start_new_session` 都不存在）⇒ 退回 `popen_kwargs`（单进程 kill）。
+    """
+    if os.name == "posix":
+        return popen_kwargs(start_new_session=True, **extra)
+    return popen_kwargs(**extra)
+
+
+def kill_process_tree(proc: Any) -> None:
+    """SIGKILL 掉 `proc` 与其**整个进程组**（POSIX）/ 单进程（Windows）。**不等回收**。
+
+    前置：`proc` 是用 `popen_own_group()` 起的。不是的话退回单进程 `kill()` —— `killpg(pid)`
+    在「pid 不是组长」时是 ESRCH，绝不能拿它去赌（赌错就是打死自己的进程组）。
+    刻意不等回收：kill 本身是异步的，在这里等就把它变成了阻塞点 —— 要等就 `reap_bounded`，
+    而那里必须有上限（见它）。
+    """
+    # `os.killpg`/`signal.SIGKILL` 在 win32 的 typeshed stubs 里不存在 ⇒ 取属性（运行时判定），
+    # 不用 `# type: ignore` 消音：那样在真 POSIX 上写错名字也不会有人发现。
+    killpg = getattr(os, "killpg", None)
+    sigkill = getattr(signal, "SIGKILL", None)
+    if os.name == "posix" and killpg is not None and sigkill is not None:
+        try:
+            killpg(proc.pid, sigkill)
+            return
+        except (OSError, ProcessLookupError):
+            pass
+    try:
+        proc.kill()
+    except OSError:
+        pass
+
+
+def reap_bounded(proc: Any, timeout: float) -> bool:
+    """**有界**回收一个已经被 kill 的子进程：True = 确认收尸，False = 超时（它可能还活着）。
+
+    为什么必须有上限（2026-09-25 云机二次取证「rollout 卡死机器半天」）：`kill()` 只是把信号
+    递进去；子进程若正卡在**不可中断**的 IO（D 状态 —— 云机上被挂住的挂载点/慢盘就是这样）
+    里，要等那个系统调用返回才真的死。旧代码是 `p.kill(); p.wait()`，**没有上限** ⇒ 那一局的
+    线程停在 `waitpid` 上，而日志里什么都看不出来（超时行里的 elapsed 是 kill **之前**算的，
+    照样写着「5.0s」）。现场读数：两条线程各卡 ~890s、轮内进度从 5s 的 270/336 一动不动，
+    整轮（以及整台机器）就这么静默挂住。
+    """
+    try:
+        proc.wait(timeout=float(timeout))
+        return True
+    except subprocess.TimeoutExpired:
+        return False
+
+
+def keep_unreaped(proc: Any) -> None:
+    """记下一个「杀不掉也收不了尸」的子进程（之后由 `sweep_unreaped` 再试一次）。"""
+    _UNREAPED.append(proc)
+
+
+def sweep_unreaped() -> int:
+    """非阻塞地再碰一次之前收不了尸的子进程：返回这一趟**真的收掉**的个数。
+
+    只问 `poll()`（零等待）：它们可能早就退出了，只是当时没等到；这里顺手收尸，避免僵尸进程
+    长期占着 pid/句柄（机器本来就已经被一堆进程压着）。
+    """
+    done = 0
+    for p in list(_UNREAPED):
+        try:
+            if p.poll() is not None:
+                _UNREAPED.remove(p)
+                done += 1
+        except Exception:  # 收尸是尽力而为：绝不能因此让调用方失败
+            _UNREAPED.remove(p)
+    return done
+
+
+def unreaped_count() -> int:
+    """还没收掉的「僵尸候选」个数（诊断与用例用）。"""
+    return len(_UNREAPED)
