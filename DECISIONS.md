@@ -3134,3 +3134,45 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 - **门禁**：nn **2524 → 2539 passed / 3 skipped**（+15 = 新守卫）；ruff `All checks passed`；mypy 绿（433 文件）；
   根 `bun run check` 2120 pass / 0 fail；dashboard typecheck + 1105 pass / 0 fail；`check-decisions` ok。
 —— 全文（成员表 / 四簇判据 / 链式宿主 / 三张表 / 静默失去覆盖那条教训）→ `docs/nn/engineering.md` §23「第二十二刀」。
+
+## §2026-09-25-goalnn-loop-guards-cluster-split（2026-09-25，用户指令「拆 `rl/loop_guards.py` 或 `loop_steps.py` 剩下的叶子，先给侦察结论与刀口判据」）
+
+`rl/loop_guards.py` **785 → 194 行**（−75%）。13 个方法按**判据同源**切成四簇，各成模块
+（177 / 200 / 287 / 78 行），组合根留在原文件并留下**四个共享 sink + 三个判决词表常量**。
+同一对象、同一把锁、零行为变化。
+
+| 混入 | 判据（同一件事的一条轴） | 模块 | 方法 |
+|---|---|---|---|
+| `TrainingGuardsTrip` | **过程面**硬边界（更新健康度 / 评估显著度，**连击式**） | `rl/loop_guards_trip.py` | `_breaker` · `_stop_loss` |
+| `TrainingGuardsLeg` | **结果面**停腿（退回了吗 / 比对照臂差吗；读趋势 + 停云机） | `rl/loop_guards_leg.py` | `_kickstart_burn` · `_paired_kill` |
+| `TrainingGuardsGate` | **课程结束门一整族**（求值 → 判决落地 → 预算硬断） | `rl/loop_guards_gate.py` | `_gate` · `_apply_verdict` · `_warn_min_train_unreachable` · `_budget_hard_cut` |
+| `TrainingGuardsSweep` | **轮级磁盘回收**（keepIters / job 目录 / 孤儿波次） | `rl/loop_guards_sweep.py` | `_rotate_cleanup` |
+
+- **刀口：先选文件，再选切法**。`loop_steps.py` 余下 8 叶**被否决**——它们类内零互调、且判据彼此
+  无关（课程读盘 / 配额 / 落账 / 取证 / journal），拆它只能按大小。`loop_guards.py` 的调用图是
+  **多 sink 的 DAG**（不是 S22 的连通分量、也不是 S19/S20 的单链）：`_ledger_apply` 被 **3 簇**调、
+  `_sync_cloud_halt` 被 **2 簇 + 外部** `loop_lifecycle.finish_course` 调。
+- **宿主 = 留宿主**（提供者留根、调用者出包），依据是 S19 已记录的规则「**入边来自多个 sibling ⇒
+  锁进组合根**」。四簇彼此零互调 ⇒ 基类元组顺序恒惰性（零重名、零 `super()`）。
+  `TrainingLoop.__bases__` / `TrainingSteps.__bases__` / 全部既有 import 与测试宿主**一行不改**。
+- **★ 本刀与前三刀最大的差别：patch 面零迁移**。留根的两人正是 **patch 锚点**——`set_cloud_halt` /
+  `dist_common` 被**四个测试文件 5 处**以 `monkeypatch.setattr("rl.loop_guards.…", raising=True)`
+  打桩（`test_paired_kill` / `test_loop_gate_nopark` / `test_loop_gate_soft_remediate` /
+  `test_kickstart_plan` / `test_loop_park`）。搬走`_sync_cloud_halt` 会让这些桩**静静失效** ⇒
+  「谁是 patch 锚点」升级为**宿主定档的硬判据**（新守卫正面钉锚点必须在根、四簇不得持有）。
+- **守卫演进 4 处**：`test_loop_core_tail_split`（全量 `MRO_NAMES` 插四名 + `INBOUND_CALLS["_eval_on_round"]`
+  的呼叫点随 `_gate` 迁到 `loop_guards_gate.py`）· `test_loop_volume_split`（覆盖面主动扩成
+  「四新家 + 组合根」——S22 那条「静默读到空」的教训的**预防性**应用）· `test_layering`（**未红**：
+  四簇经 `rl` 传递**不达** remote，故无需登记——「先红再登记」的反面，「不红」同样是信息）·
+  dashboard **无需改**（`specs.ts:416` 指的 `_gate_halt_mode` 正留根）。
+- **mypy 强制出的设计事实**：四簇的类体必须声明**借用**的槽位（首轮 13 个 `attr-defined` 错误），
+  且 `loop_guards_leg` / `loop_guards_sweep` 原成员从不需要 `Any` ⇒ 声明面 = 「派生的事实 ∪ 借用的方法」
+  （新守卫逐项对账，多一个没用声明也红）。
+- **违反后果**：成员在错家重复定义 / 组合根长出方法或回调客户端 / 基类元组漂 / 借用声明多或少 /
+  入边出边漂 / 停机态多写手 / 判决词表常量不再是类属性 / patch 锚点搬家 / 旧家又吸收 seam /
+  反向往上游 import / 四簇任一真判失效 —— 均在**提交时**红（反探针 27/27）。
+- **门禁**：nn **2539 → 2566 passed / 3 skipped**（+27 = 新守卫）；ruff `All checks passed`；mypy 绿（438 文件）；
+  根 `bun run check` 2120 pass / 0 fail；`check-decisions` ok。
+- **★ 反探针的元教训**：首版两条变异「存活」——查下去是**探针锚点打偏**（变异落在被测 fixture
+  走不到的分支上），不是守卫漏。**「存活」先怀疑探针本身，再怀疑守卫。**
+—— 全文（刀口对照表 / 宿主定档 / 三张表 / mypy 逼出的声明面）→ `docs/nn/engineering.md` §23「第二十三刀」。

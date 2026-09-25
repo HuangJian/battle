@@ -49,9 +49,9 @@ _TS_FMT = "%Y-%m-%d %H:%M:%S"
 
 @dataclass(frozen=True)
 class LedgerSpec:
-    """重算连击所需的阈值（必须与 `loop_guards._breaker` 用的那次判定同源）。
+    """重算连击所需的阈值（必须与 `loop_guards_trip._breaker` 用的那次判定同源）。
 
-    `from_args` 逐条复制 `loop_guards` 的选择语义：KL 阈值只在 intent/goal 模式取
+    `from_args` 逐条复制 `loop_guards_trip` 的选择语义：KL 阈值只在 intent/goal 模式取
     args 覆盖（per-tick 恒用常量），ENT 三个阈值恒取 args 覆盖（缺省回落常量）。
     阈值变了 ⇒ 新阈值下重算的连击是「新纪元」的口径，这是刻意的：换阈值就是换判据。
     """

@@ -88,6 +88,11 @@ nn-training/
 │   ├── loop_baseline.py     #    it0 基线评估 mixin：bc 权重指纹 + 落地摘 → 派/不派（RoundSteps 的基类，S4 第二十刀）
 │   ├── loop_iter_dir.py     #    本轮目录与产出健康 mixin：续跑保留/重建 + 零 shard 告警（RoundSteps 的基类，S4 第二十刀）
 │   ├── loop_dispatch.py     #    本轮派发与让位 mixin：采集三路 / A-eval 稀疏化 / EvalBoard 关窗（RoundSteps 的基类，S4 第二十刀）
+│   ├── loop_guards.py       #    训练护栏**组合根**：共享 sink（账本视图增量 + 判决→云机达令，S4 第二十三刀）
+│   ├── loop_guards_trip.py  #    过程面硬边界 mixin：F4 熔断 / 止损（连击式，S4 第二十三刀）
+│   ├── loop_guards_leg.py   #    结果面停腿 mixin：干烧回锚 / 配对杀臂（读趋势 + 停云机，S4 第二十三刀）
+│   ├── loop_guards_gate.py  #    课程结束门 mixin：门求值 / 判决落地 / 预算硬断（S4 第二十三刀）
+│   ├── loop_guards_sweep.py #    轮级磁盘回收 mixin：keepIters 轮转 / job 目录 / 孤儿波次清扫（S4 第二十三刀）
 │   └── __init__.py          #    包入口文档
 │
 ├── scripts/                 # 【辅助脚本】一次性/诊断工具

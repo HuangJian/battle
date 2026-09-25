@@ -299,11 +299,20 @@ def test_cross_module_hands_are_the_declared_ones() -> None:
         (NN_ROOT / "rl" / "loop_remote_fail.py", "TrainingRemoteFail"),
         (NN_ROOT / "rl" / "loop_remote_push.py", "TrainingRemotePush"),
     )
+    # S4 第二十三刀同款：`loop_guards` 的 12 个成员切进四个新混入 ⇒ 覆盖也改成「四新家 + 组合根」。
+    # **只读旧文件会让本用例静默失去那 12 个成员的覆盖**（组合根现在只剩 4 个 sink）。
+    guards_family = (
+        (NN_ROOT / "rl" / "loop_guards.py", "TrainingGuards"),
+        (NN_ROOT / "rl" / "loop_guards_trip.py", "TrainingGuardsTrip"),
+        (NN_ROOT / "rl" / "loop_guards_leg.py", "TrainingGuardsLeg"),
+        (NN_ROOT / "rl" / "loop_guards_gate.py", "TrainingGuardsGate"),
+        (NN_ROOT / "rl" / "loop_guards_sweep.py", "TrainingGuardsSweep"),
+    )
     for path, cls in (
         (CORE_PY, "TrainingLoop"),
         (STEPS_PY, "TrainingSteps"),
         *remote_family,
-        (NN_ROOT / "rl" / "loop_guards.py", "TrainingGuards"),
+        *guards_family,
         (ROUND_STEPS_PY, "RoundSteps"),
     ):
         for fn in _methods(path, cls).values():

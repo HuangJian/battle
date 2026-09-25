@@ -30,7 +30,11 @@
   loop_steps.py    TrainingSteps mixin（课程 / 落账 / 取证；基类 TrainingRemote + TrainingEval + TrainingExport）
   loop_eval.py     TrainingEval mixin（in-loop 评估链：派发 / 尾巴收拢 / join / 收官 drain；S4 第十七刀）
   loop_volume.py   TrainingVolume mixin（动态采集编排：初波/补波/连续配额 → 派发 → 报告合并；S4 第十八刀）
-  loop_guards.py   TrainingGuards mixin（F4 熔断 / 止损 / keepIters 轮转）
+  loop_guards.py   TrainingGuards **组合根**（共享 sink：账本视图增量 / 判决→云机达令；S4 第二十三刀）
+  loop_guards_trip.py  TrainingGuardsTrip mixin（过程面硬边界：F4 熔断 / 止损；S4 第二十三刀）
+  loop_guards_leg.py   TrainingGuardsLeg mixin（结果面停腿：干烧回锚 / 配对杀臂；S4 第二十三刀）
+  loop_guards_gate.py  TrainingGuardsGate mixin（课程结束门：求值 / 判决落地 / 预算硬断；S4 第二十三刀）
+  loop_guards_sweep.py TrainingGuardsSweep mixin（轮级磁盘回收：keepIters 轮转 / job 目录；S4 第二十三刀）
   rollout_phase.py 单轮采集派发三路 + 双缓冲预采句柄
   events.py        training_log.jsonl 事件写入（run_start/iteration/circuit_break/iter_error）
 

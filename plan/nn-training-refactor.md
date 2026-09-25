@@ -1116,6 +1116,42 @@ dashboard typecheck + **1105 pass / 0 fail**；`check-decisions` ok。
 **门禁**：nn **2524 → 2539 passed / 3 skipped**；ruff / mypy 绿（433 文件）；根 `bun run check` 2120 / 0；
 dashboard typecheck + **1105 / 0**；`check-decisions` ok。
 
+#### 5.3.22 第二十三刀（2026-09-25，**已完成**）—— `loop_guards` 的 13 成员按判据同源切四簇
+
+用户指令：「拆 `rl/loop_guards.py` 或 `loop_steps.py` 剩下的叶子，先给侦察结论与刀口判据」。
+`rl/loop_guards.py` **785 → 194 行**（−75%），13 方法 → 四簇（177 / 200 / 287 / 78 行）。
+
+**刀口：先选文件，再选切法**——`loop_steps.py` 余下 8 叶被否决（类内零互调 + 判据彼此无关 ⇒
+拆它只能按大小）；`loop_guards.py` 的调用图是**多 sink 的 DAG**，判据同源有四条轴。
+
+| 新家 | 方法 | 判据 |
+|---|---|---|
+| `rl/loop_guards_trip.py::TrainingGuardsTrip` | `_breaker` · `_stop_loss` | **过程面**硬边界（连击式） |
+| `rl/loop_guards_leg.py::TrainingGuardsLeg` | `_kickstart_burn` · `_paired_kill` | **结果面**停腿 |
+| `rl/loop_guards_gate.py::TrainingGuardsGate` | `_gate` · `_apply_verdict` · `_warn_min_train_unreachable` · `_budget_hard_cut` | **课程结束门一整族** |
+| `rl/loop_guards_sweep.py::TrainingGuardsSweep` | `_rotate_cleanup` | **轮级磁盘回收** |
+| `rl/loop_guards.py::TrainingGuards`（**留根**） | `_ledger_apply` · `_sync_cloud_halt` · `_is_soft_verdict` · `_gate_halt_mode` + 3 常量 | **共享 sink**（提供者留根、调用者出包） |
+
+**宿主 = 留宿主**，依据 S19 已记录的规则「入边来自多个 sibling ⇒ 锁进组合根」：`_ledger_apply` 被 3 簇调、
+`_sync_cloud_halt` 被 2 簇 + 外部 `loop_lifecycle.finish_course` 调。四簇零互调 ⇒ 元组顺序惰性；
+`TrainingLoop.__bases__` / `TrainingSteps.__bases__` / 既有 import 与测试宿主**一行不改**。
+
+**★ patch 面零迁移**（与前四刀最大的差别）：`set_cloud_halt` / `dist_common` 被四个测试文件 5 处打桩，
+而唯一真调用点 `_sync_cloud_halt` 留根 ⇒ 那些文件**一行不改**。「谁是 patch 锚点」升级为本刀宿主判据。
+
+**mypy 逼出的设计事实**：首轮 13 个 `attr-defined` ⇒ 每簇加声明块，并把声明面写成契约
+`declared == 派生集 ∪ 借用的方法`。
+
+**守卫演进 4 处**：core_tail（`MRO_NAMES` 插四名 + `_eval_on_round` 入边改址）/ volume（覆盖面主动
+扩成「四新家 + 组合根」）/ layering（**未红**——四簇不达 remote，无需登记）/ dashboard（**无需改**）。
+新守卫 `tests/test_loop_guards_split.py`（**27 例**）+ 反探针 **27/27 全红**；纯搬对账 **12/12 逐字节**。
+
+**★ 反探针的元教训**：首版两条变异「存活」= 探针锚点打偏（落在 fixture 走不到的分支上），不是守卫漏——
+**「存活」先怀疑探针本身**。
+
+**门禁**：nn **2539 → 2566 passed / 3 skipped**；ruff / mypy 绿（438 文件）；根 `bun run check` 2120 / 0；
+`check-decisions` ok。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /

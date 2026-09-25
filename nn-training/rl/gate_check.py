@@ -1,7 +1,7 @@
 """gate_check —— 课程结束门求值器（plan/course-exit-and-shutdown.md §3/§4，M1）。
 
 职责边界：**只判不停、只算不写**。`evaluate()` 是纯函数（禁 torch/numpy，单测
-断言），写盘与停机分别是 `loop_guards`（gate_verdict 事件）与执行面的事。
+断言），写盘与停机分别是 `loop_guards_gate`（gate_verdict 事件）与执行面的事。
 
 四条红线
 --------

@@ -275,7 +275,7 @@ def write_gate_verdict(
     """gate_verdict 事件：课程结束门判决落地（plan §4.3）。
 
     两条来源（lattice 的 ABORT 项不能只有人工 override 一条路）：
-      1. `loop_guards._gate` 第四守卫——ADVANCE/REMEDIATE/STOP/PAUSE；
+      1. `loop_guards_gate._gate` 第四守卫——ADVANCE/REMEDIATE/STOP/PAUSE；
       2. `_breaker` 熔断——ABORT（ds-P1-1：否则执行面在真正的 ABORT 场景读不到判决）。
     读盘面（notebook/hub 运维）只读末个 gate_verdict，不自己算门。
     """

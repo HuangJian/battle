@@ -1718,6 +1718,119 @@ dashboard 门禁照跑（1105 / 0）。
   （`--amend`）带两处文档一次改齐。**可测量值落盘后量一次，别在编辑过程中随手报。**
 - **刻意不动**：`docs/nn/engineering.md` §23 前面的历史刀记（那时指针正确）。
 
+### 第二十三刀（2026-09-25）：`loop_guards` 的 13 成员按判据同源切四簇（多 sink 的 DAG）
+
+用户指令：「拆 `rl/loop_guards.py` 或 `loop_steps.py` 剩下的叶子，先给侦察结论与刀口判据」——
+`rl/loop_guards.py` **785 → 194 行**（−75%），13 个方法 → 四簇（177 / 200 / 287 / 78 行）。
+
+#### 刀口：两个候选的实测对照（为什么选它）
+
+| | `loop_guards.py` | `loop_steps.py` 余 8 叶 |
+|---|---|---|
+| 调用图 | **多 sink 的 DAG**（`_ledger_apply` ← 3 簇、`_sync_cloud_halt` ← 2 簇 + 外部） | 8 个成员**全是叶子**（类内零互调） |
+| 判据同源 | **有**（四条轴，且源码注释自己写着分工） | **无**（读盘/配额/落账/取证/journal 混居） |
+| patch 锚点 | `set_cloud_halt` / `dist_common`（四个测试文件 5 处） | 只有 `log`，且属留守成员 |
+
+拆 8 个无关叶子只能**按大小**——正是判据要避免的。故取 `loop_guards.py`。
+
+| 混入 | 判据 | 模块 | 方法（行） |
+|---|---|---|---|
+| `TrainingGuardsTrip` | **过程面**硬边界（更新健康度 / 评估显著度，连击式） | `rl/loop_guards_trip.py` | 2（方法体 111） |
+| `TrainingGuardsLeg` | **结果面**停腿（退回了吗 / 比对照臂差吗） | `rl/loop_guards_leg.py` | 2（方法体 160） |
+| `TrainingGuardsGate` | **课程结束门一整族**（求值 → 判决落地 → 预算硬断） | `rl/loop_guards_gate.py` | 4（方法体 214） |
+| `TrainingGuardsSweep` | **轮级磁盘回收** | `rl/loop_guards_sweep.py` | 1（方法体 52） |
+
+判据的「同源」不是散文，而是源码自己写的分工：`_kickstart_burn` 的 docstring 明写「与 F4 过程熔断的
+分工：那个看更新健康度（kl/ent），这个看**结果有没有退回去**」；`_paired_kill` 明写「与 `_kickstart_burn`
+的分工：一个问『我退了吗』，一个问『我比对照臂差吗』；两者正交，都要」。四条轴就是从这些句子里读出来的。
+**不是按大小、不是按物理位置**：52 行的 `_rotate_cleanup` 独立成簇，294 行的门族一簇也不拆。
+
+#### 宿主：留宿主（提供者留根、调用者出包）
+
+S22 是「一条连通分量 ⇒ 组合根零方法」。这里做不到，因为调用图有**四个 sink**（出边为 ∅ 的节点）：
+
+```
+_ledger_apply        ← trip(3) · leg(4) · gate(2) · round_steps(1) · steps(1)
+_sync_cloud_halt     ← leg(2) · gate(3) · lifecycle.finish_course(1)      ← 外部调用者
+_is_soft_verdict     ← _sync_cloud_halt(1) · gate(1)
+_gate_halt_mode      ← _sync_cloud_halt(1)
+```
+
+依据 S19 已记录的规则「**入边来自多个 sibling ⇒ 锁进组合根**」，这四人就是**提供者**——
+提供者留根、调用者出包。三个判决词表常量（`CLOUD_HALT_VERDICTS` / `NO_CLOUD_HALT_KINDS` /
+`GATE_HALT_MODES`）也留根：外部按**类属性**取（`rl/loop_lifecycle` 与 `test_train_ledger` 都用
+`TrainingGuards.NO_CLOUD_HALT_KINDS`，从模块直接 import 会 ImportError）。
+
+```
+class TrainingGuards(TrainingGuardsTrip, TrainingGuardsLeg, TrainingGuardsGate, TrainingGuardsSweep)
+```
+
+四簇**彼此零互调**（出边只有指向两个 sink 的边）⇒ 基类元组顺序恒惰性；MRO = `TrainingLoop …
+TrainingGuards, TrainingGuardsTrip, TrainingGuardsLeg, TrainingGuardsGate, TrainingGuardsSweep,
+TrainingLifecycle, object`。`TrainingLoop.__bases__` / `TrainingSteps.__bases__` / 既有 import 与
+测试宿主**一行不改**。
+
+#### ★ patch 锚点升级为宿主判据（本刀与前三刀最大的差别）
+
+`set_cloud_halt` 与 `dist_common` 被**四个测试文件 5 处**打桩（`raising=True` 只保证「打桩那一刻
+响亮」）：
+
+| 文件 | 行 |
+|---|---|
+| `test_paired_kill.py` | 197（`set_cloud_halt`）· 198（`dist_common.course_name_of`） |
+| `test_loop_gate_nopark.py` | 57 · 116 |
+| `test_loop_gate_soft_remediate.py` | 73 |
+| `test_kickstart_plan.py` | 262 · 263 |
+| `test_loop_park.py` | 121（`import rl.loop_guards as guards` 后对象式 `setattr`） |
+
+`_sync_cloud_halt`（唯一真调用点）留根 ⇒ **这四处测试一行不改**。守卫正面钉死：两个锚点必须是
+`rl/loop_guards` 的模块全局，且**不得**出现在四个新家的命名空间里；另加一条功能性用例证明
+「按 `rl.loop_guards.set_cloud_halt` 打桩真能拦住真调用」（并用一条局部 `import … as _local` 的
+反探针证明这条守卫会红）。
+
+#### mypy 逼出来的设计事实：声明面 = 派生的事实 ∪ 借用的方法
+
+切完第一轮 mypy 报 **13 个 `attr-defined`**（`args` / `_jsonl_path` / `_ledger_apply` / `_agg` …）——
+因为四簇只借 `self.` 而不拥有这些槽位。处理：每个新类加一段声明块（注明真实现住哪），再把
+**声明面本身写成契约**：`declared == (self.X 派生集) ∪ (借用的方法)`，多一个没用声明也红。
+两个新家（leg / sweep）原本从不需要 `Any` ⇒ 顺手补 `from typing import Any`（否则 ruff F821）。
+
+#### 守卫演进 4 处
+
+| 文件 | 演进 |
+|---|---|
+| `test_loop_core_tail_split` | 全量 `MRO_NAMES` 在 `TrainingGuards` 后插四名；`INBOUND_CALLS["_eval_on_round"]` 的呼叫点随 `_gate` → `loop_guards_gate.py` |
+| `test_loop_volume_split` | guards 覆盖面**主动**扩成「四新家 + 组合根」（S22 「静默读到空」的预防性应用） |
+| `test_layering` | **未红**——四簇经 `rl` 传递不达 remote，无需登记（「先红再登记」的反面：不红也是信息） |
+| dashboard `specs.ts:416` | **无需改**——它指的 `_gate_halt_mode` 正留根（与 S21/S22 的盲区坑相反） |
+
+新守卫 `tests/test_loop_guards_split.py`（**27 例**，含 9 条功能性/机制性）+ 反探针 **27/27 全红**；
+纯搬对账 **12/12 逐字节等**（留守 4/4 同）。
+
+#### ★ 反探针的元教训：「存活」先怀疑探针
+
+首版两条变异存活：⑳「干烧熔断不再读起点基线」与㉒「预算硬断不再停腿」。查下去全是**探针锚点打偏**
+——变异落在我那两条 fixture **走不到**的分支上（⑳ 改的是 `baseline is None` 分支，而 fixture 带 it0 基线；
+㉒ 改的是「未到顶」分支，而 fixture 已过顶）。改成真正作用于命中路径的变异后 27/27。
+**反探针出现「存活」时，先怀疑探针本身，再怀疑守卫。**
+
+#### 记账
+
+| 文件 | 行数 |
+|---|---|
+| `rl/loop_guards.py`（组合根） | **194**（785 → 194） |
+| `rl/loop_guards_trip.py` / `_leg.py` / `_gate.py` / `_sweep.py` | 177 / 200 / 287 / 78 |
+| `tests/test_loop_guards_split.py` | 789（27 例） |
+
+- **门禁**：nn **2539 → 2566 passed / 3 skipped**；ruff `All checks passed`；mypy 绿（438 文件）；
+  根 `bun run check` 2120 / 0；`check-decisions` ok。
+- **顺手同步的 provenance**：`rl/__init__.py` 模块表（1 → 5 行）· `README.md` 模块表（补 5 行）·
+  `rl/paired_kill.py`（IO 指针）· `rl/workdir_sweep.py`（`_rotate_cleanup` 指针）· `rl/train_ledger.py`
+  （`_breaker` 同源指针 ×2）· `rl/events.py`（`gate_verdict` 两条来源）· `rl/gate_check.py`（写盘方）·
+  `rl/config.py`（in-loop 接线）。
+- **刻意不动**：`docs/nn/training-stack.md` / `docs/nn/experiments.md` / `docs/rl.progress.md` /
+  `plan/feasibility-map.md` 里带日期的历史记录（那时指针正确）。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数

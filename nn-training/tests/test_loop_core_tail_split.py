@@ -98,6 +98,12 @@ MRO_NAMES = [
     "TrainingEval",
     "TrainingExport",
     "TrainingGuards",
+    # S4 第二十三刀把 `TrainingGuards` 的 13 个成员按判据同源切成四簇；组合根仍在原位，
+    # 四簇作为它的基类紧随其后（互不调用、零重名 ⇒ 元组顺序惰性，但 MRO 名单是**全量**）。
+    "TrainingGuardsTrip",
+    "TrainingGuardsLeg",
+    "TrainingGuardsGate",
+    "TrainingGuardsSweep",
     "TrainingLifecycle",
     "object",
 ]
@@ -108,7 +114,8 @@ INBOUND_CALLS = {
     "_check_quota_incident": {"loop_round_steps.py": 1},
     "_prepare_iter_dir": {"loop_round_steps.py": 1},
     "_rollout_phase": {"loop_round_steps.py": 1},
-    "_eval_on_round": {"loop_eval.py": 1, "loop_guards.py": 1, "loop_round_steps.py": 1},
+    # S4 第二十三刀：唯一的呼叫点 `self._eval_on_round(it)` 随 `_gate` 迁到 `loop_guards_gate.py`。
+    "_eval_on_round": {"loop_eval.py": 1, "loop_guards_gate.py": 1, "loop_round_steps.py": 1},
     "_evalboard_yield": {"loop_round_steps.py": 1},
     "_maybe_dispatch_baseline_eval": {"loop_round_steps.py": 1},
 }

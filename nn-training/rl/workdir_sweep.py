@@ -13,7 +13,7 @@ worker 的 `_idx = next_idx[0]` 路径）。
 
 本模块 plan_（纯函数）与 sweep_（IO 执行）分离，单测共享（同 repo 纯函数先例：
 queue_local.pick_tail_race / race_tier_ok）。sweep_failed_wave_dirs 在每轮迭代
-收尾（loop_guards._rotate_cleanup，当前 it 目录全部局已结算、无在飞子进程）删除
+收尾（loop_guards_sweep._rotate_cleanup，当前 it 目录全部局已结算、无在飞子进程）删除
 无 _rl_report.json 的 w* 目录——删除失败（沙箱保护/占用）跳过，训练照常。
 """
 

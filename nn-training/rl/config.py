@@ -402,7 +402,7 @@ class PpoScheduleEntry(BaseModel):
 # 阈值随课程文件进 course_fp（§331-D14）——改阈值 = 新实验版本。
 #
 # 本模块只管**声明与解析期校验**（M0）；求值器在 `rl/gate_check.py`（M1），
-# in-loop 接线在 `rl/loop_guards.py` 第四守卫（M1）。
+# in-loop 接线在 `rl/loop_guards_gate.py` 第四守卫（M1；S4 第二十三刀前住 rl/loop_guards.py）。
 
 #: 固定 catalog（§3.3）：每种 kind = 求值器一个函数；未知 kind 响亮报错。
 GATE_KINDS: frozenset[str] = frozenset(

@@ -18,7 +18,8 @@
 判据实测是在 it25+it30 触发（相隔一个评估节拍）——两点连着低才是趋势，单点不是。
 
 本模块**纯函数**（数字进、判定出）：可回放、可单测、控制台可用同一函数复算
-（不许在别处写第二份 Δ 判据）。IO 与停腿动作在 `rl/loop_guards.py::_paired_kill`。
+（不许在别处写第二份 Δ 判据）。IO 与停腿动作在 `rl/loop_guards_leg.py::_paired_kill`
+（S4 第二十三刀从 `rl/loop_guards.py` 按判据同源切出）。
 """
 
 from __future__ import annotations
