@@ -1,0 +1,179 @@
+// 课程 x20-state-init —— **覆盖腿：人类 demo 中段世界快照起跑 rollout**（dodge-avoidance §6 B1/B4）
+//
+// 状态：**代码前置已落地（P0–P4），待用户手工开训**（agent 不得启动训练）。
+//   P0 银行已生成并在盘（tickHash 对账 2916/2916）；P1 导出器 `--init-snapshot`；P2 课程字段；
+//   P3 派生/透传/护栏；P3.5 shard 侧 initTick 护栏 + 起始分布进语料身份。
+//   ⚠ v1 **只在本机采集**下可跑：云侧快照搬运（P2.5）未落地，课程开着 state_init 时
+//   逐轮上云/半离线整段的 argv 会在**发布前**响亮拒（宁可拒发，不可静默跑标准开局）。
+//
+// 立项（六腿六负之后）：L1/L3/firstkill/terminal/lambda/noexplore 六次单变量一致阴性，
+//   共同病根 = 价格只对见过的货有效（experiments §29 策略库缺货 / demo-mix §117 共访
+//   1–9 格 / lambda V 无法自举没去过的状态）。本腿换攻击面：不动任何价格项，
+//   只换 rollout 的起始状态分布（训练侧采样；任务侧命数/敌数/关卡形态/终局标准一个字不动）。
+//
+// 单变量纯度：reward 与 x20-noexplore **逐字相同**（base 公式，wExplore=0，无窗口项——
+//   窗口项是游戏时钟语义，中段起跑无定义，v1 不用）；**唯一变量 = 起始状态分布**
+//   （标准开局 vs 人类 demo 中段交棒）。位移包/采样/配对种子流全同 L1/L3。
+//
+// 起点银行（P0 实测，2026-09-25）：`tmp/human-x20-replays/{w1,wwave2,wwave3}` 62 录像
+//   → 62 局（四关 11/11/23/17）· 972 个切点快照 · **tickHash 逐点对账 2916 条全对**
+//   （外部证据 = 录像记录链，见 `docs/x20-dissection-414000.md`）· 全 20 杀通关、
+//   deathTick 全空（⇒ 每个切点上的玩家**必然活着**，顺风局，无 distress 局）。
+//   ⚠ 全部 demo 在 414xxx 种子上 = 门控段种子 ⇒ 415000 段干净（415000+），414000 段
+//   只做连续性记录、不判门（见判据）。切点：[300, T−120] 步 300（排除开局 300t——
+//   标准起点已覆盖；排除终局前 120t——剩 1 敌的 trivial 态）；每轮切点轮换
+//   （key 带 rotate_seed,it，resume-safe，§15.1）。
+//
+// 起点权重：noexplore 最优 it105（`x20-noexplore.it105`），纯 warm start，
+//   `kickstart_ref=false`（kk≈0）。不用 L1-it60（四候选挑出的单点 + 失败塑形残留，
+//   会污染单变量）不用 BC-ref（held-out mean 0.00，已判死；本腿要的是人类状态不是人类权重）。
+//   comparator = noexplore 同绝对 it 点历史（run 内 itN = 绝对 it105+N；abs>180 后无对照裸奔，
+//   与 L1 同口径）。配对：`paired_rotate_seed` 同值（游戏种子流仍配对；切点派生另行 keyed）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 判据
+// ══════════════════════════════════════════════════════════════════════════
+// **开工前置（不是读数）**：银行 tickHash 对账 62/62 局 × 每切点全对（P0 已过）。
+//   它验的是「银行里的状态就是人类到达过的状态」，口径在采集侧另有一条**运行期**自检
+//   （每局 restore 后立刻比对 tickHash，不符该局响亮失败）——两条都不许省。
+// **主读数顺序写死：覆盖先行**：① 交棒世界自检 + 交棒后存活/击杀分布是否向人类靠拢
+//   （traj 事后：metrics 首行 + `initCounters` rebase；value.npy 首行 V 均值趋势）
+//   ② 日常 low%（标准起点，860001 段）③ 双段 verdict（见下）。it50 哨兵：①② 任一不动
+//   ⇒ 停腿（只花 1/6 预算）。
+// **主门（415000 段，干净）**：`low% ≤ 33.9`（vs noexplore it105 同段 36.9/7.44/p1，−3pp）
+//   且 `p10 ≥ 2`。**414000 段只记录不判门**（demo 种子重叠，披露即免责；跑分用于连续性）。
+// **约束（只记录 + 人工盯盘决策，不自动停）**：日常 mean < 6.19；超时 >5%；
+//   kl 连续 3 轮 ≥0.075；保守陷阱（cells/move/pass 任一显著下降）。
+// **判据一律不得由教师表现反推**（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 止损（人工盯盘执行）
+// ══════════════════════════════════════════════════════════════════════════
+//   · **专属死刑**：交棒后行为分布（存活/击杀）连续 3 个 eval 点不动 ⇒ 停腿
+//     （覆盖给了还不动，问题在别处）。
+//   · **it50 哨兵**：机制①②任一不动 ⇒ 停腿（不续杯）。
+//   · **上/下限**：mean < 6.19 或 timeout >5% ⇒ 人工决策停。
+//   · **机械横盘**：low% 连续 4 个 eval 点无改善 ⇒ 停腿；宽限一次 +10 轮。
+//   · 后路预注册：V 建立＋low 不动 ⇒ 转 DAgger/搜索蒸馏（plan §6 证伪条款），
+//     不开第三条价格腿；V 建不起来 ⇒ 先查银行/交棒自检再怀疑假设。
+
+{
+  "version": 5,
+  "name": "x20-state-init",
+  "mode": "per-tick",
+  // 环境不变：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。
+  // 任务侧一个字不动（AGENTS §0.2）；起始分布是训练侧采样。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：noexplore 原公式逐字 ──────────────────────────────────────────
+  // 计数器列一律是**游戏真值**（继承的击杀也在里面）；奖励 = Φ 的差分（rl/reward_library），
+  // 对「继承的进度」天然不付钱 —— 不需要、也不许在 TS 侧做 rebase（那会让 metrics.kills
+  // 与 manifest 的游戏真值分叉）。分析侧要 rebase 就用 shard manifest 的 `initCounters`。
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.0,
+      "wPickup": 3.0,
+      "wApproach": 0.008
+    },
+    // dense-only（与父腿一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起始分布：人类中段**世界快照**注入 ─────────────────────────────────────
+  // 语义（TS 侧执行，`tools/sim/export-rl-rollout.ts`）：一局 = 标准 (stage, seed) 游戏，
+  // 起始世界换成人类 demo 在 tick T 的 `cloneWorld` 快照（restore 后核 tickHash →
+  // **以该局抽到的 seed 重开 RNG** → 重新施加关卡权威值 → 交棒），T 之后归策略。
+  // 游戏时钟继续走（max_ticks 对游戏时钟，cut 吃掉 T）；结局/win 用真实结局；
+  // PPO/GAE 不动（truncated bootstrap 现成）。
+  "state_init": {
+    // 快照银行 manifest（P0 产物）：`{recipe, games:[{id, stage, demoSeed, ticks, cuts[]}]}`
+    // + 同目录 `snapshots/<stage>-<demoSeed>-t<tick>.json`。两种基准都认（仓库相对 /
+    // nn-training 相对），见 `rl.config.resolve_state_init_bank`。
+    "bank": "nn-training/data/state-init-bank/manifest.json",
+    // 切点 recipe：[cut_from, cut_to] 步 cut_step（cut_to 负值 = 从局尾回退）。
+    // ⚠ 它只是 P0 的**物化规则**：真正的每局 cuts[] 已在 manifest 里，采集侧（P3）只从
+    // manifest 抽（选哪个状态进语料身份）——改这里必须重跑 P0 银行，否则对不上。
+    "cut_from": 300,
+    "cut_to": -120,
+    "cut_step": 300,
+    // 每轮抽样：同 stage 银行局内均匀 + 切点均匀，派生 key=(rotate_seed, it, stage, seed)
+    // （resume-safe：同 key 必同值 ⇒ 断点续跑不换起始状态；换 it 必换 ⇒ §15.1 语料轮换）。
+    "rotate_cuts": true
+  },
+
+  // ── 起点：noexplore 最优 it105，纯 warm start ──────────────────────────────
+  "bc": "nn-training/weights/x20-noexplore/x20-noexplore.it105.20260922-053620.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  // ── 配对：续 noexplore 的种子流（1789876303，游戏种子仍配对；切点另行 keyed）──
+  // ⚠ 改它 = 非配对。
+  "paired_rotate_seed": 1789876303,
+
+  // ── 预算 ───────────────────────────────────────────────────────────────
+  "iters": 300,
+  "max_hours": 12,
+  "workers": 8,
+
+  // ── 位移包：回基线（与 noexplore 一致）────────────────────────────────────
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：mb 对齐 ────────────────────────────────────────────────────────
+  // 49152 = 48 × mb(1024)；est_samples_per_game = P0 实测**首轮兜底**：全银行 972 个切点
+  // 的剩余决策步均值 = 250（中段局的剩余时长分布与标准开局不同，不能沿用父腿的 147）。
+  // 首轮之后由 trailing 5 轮的实测局均覆盖（rl/resume.trailing_samples_per_game）。
+  "target_transitions": 49152,
+  "est_samples_per_game": 250,
+  "seed_rotate": 150,
+
+  // ── 路径：新目录、禁续跑（§15.5）────────────────────────────────────────
+  "out": "tmp/x20-state-init/weights.json",
+  "traj": "tmp/x20-state-init",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-state-init",
+  "backup_prefix": "x20-state-init",
+
+  // ── 评估：标准起点（plan §2 M5 原话），与日常同口径 ───────────────────────
+  // 训练只有 t≥300 的中段局，判决仍是标准开局全局长局 ⇒ 预注册读数：开局事故占比 /
+  // 死亡 tick 中位不劣化（§113 口径），不混合标准开局局（会毁单变量纯度）。
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 开工前置 ─────────────────────────────────────────────────────────────
+// ① 代码前置 P0–P4 已落地（本文件即验收面）：银行 manifest 在盘 + tickHash 对账 62/62
+//    局全对 + `--init-snapshot` 单局 smoke 绿 + `bun run check` 绿。② bc 文件存在。
+// ③ **本机 worker**（v1 只在 node_side=False 的采集路径下可跑；上云轮发布前响亮拒，
+//    故**不需要**为这门课重推云节点——重推是 P2.5 落地时的事）。④ 新 out/traj 目录。
+// ⑤ 判决段预注册（见判据）：415000 主门 + 414000 只记录不判门。
+//
+// 启动（**用户手工；agent 不得启动训练**，经控制台）。
+//
+// ── 诊断工具 ─────────────────────────────────────────────────────────────
+// · 日常趋势：it0/it5…（860001 段 400 局）low%/mean/p10 + 交棒后行为分布（`initCounters`
+//   rebase 后看存活/击杀）+ value.npy 首行 V 均值趋势 + 与 noexplore 同绝对 it 点配对对照
+//   （abs≤180）。
+// · 交棒自检：每局 restore 后 tickHash 与 manifest 对不上 ⇒ 该局响亮失败（日志里直接可见）；
+//   银行侧的历史对账读数在 `data/state-init-bank/manifest.json`（逐局 hashChecks）。
+// · 起始状态重复度：shard manifest 的 `initSnapshot` 频次分布（池小 ⇒ V 头记忆化风险读数）。
+//
+// ── 结算节（跑完回填）─────────────────────────────────────────────────────
+// 必填：① 交棒自检/保真结果 ② 交棒 V/行为 it0 → 终点 ③ 日常 low% 跟随 ④ 415000 主门 +
+//   414000 连续性（披露 seed overlap）⑤ 分关表 ⑥ 超时/换血/PPO 健康 ⑦ 实际轮数与耗时
+//   ⑧ 起始状态重复度读数

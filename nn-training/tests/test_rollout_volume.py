@@ -629,6 +629,8 @@ class _StubLoop:
         self._course_fp: str | None = None
         # D14 语义身份（§2/A）：与 `_course_fp` 成对（生产端在 `_setup` 里一起设）
         self._corpus_fp: str = ""
+        # 起始分布护栏（P3.5）：同样在 `_setup` 里与上面两个一起设（本桩无课程 ⇒ 恒 False）
+        self._state_init = False
         self._extra_wver = None
         self._volume_target: int | None = None
         self._volume_collected: int | None = None

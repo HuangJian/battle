@@ -18,6 +18,7 @@ def build_rollout_cmd(
     seed: int,
     wver: str = "",
     node_label: str = "",
+    node_side: bool = False,
 ) -> list[str]:
     """按 args.goal_rollout / intent_rollout 选 exporter 并拼装 bun 命令。
 
@@ -25,6 +26,10 @@ def build_rollout_cmd(
       goal   → export-goal-rollout.ts（心跳承诺期，--heartbeat [--coarse]）
       intent → export-intent-rollout.ts（意图步半 MDP，--replan）
       per-tick → export-rl-rollout.ts（--wver/--node-label [--reward/--dodge]）
+
+    `node_side=True` = 这份命令将由**别的机器**执行（逐轮上云 / 半离线整段）：路径必须是 job
+    目录内的相对路径、且节点上必须有那份数据。起始分布（state_init）的快照**还没**走这条通道
+    （plan §P2.5）⇒ 在 `argv_init_for` 里**响亮拒**（宁可拒发，不可静默跑成标准开局）。
     """
     if getattr(args, "goal_rollout", False):
         cmd = [
@@ -110,6 +115,14 @@ def build_rollout_cmd(
         cfp2 = corpus_fp_for_args(args)
         if cfp2:
             cmd += ["--corpus-fp", cfp2]
+        # 起始分布（plan/x20-state-init.plan.md P1/P3）：人类中段快照注入，一局一个快照。
+        # 派生（哪一局哪个切点）住 `rl/state_init`：纯函数、key 含 (rotate_seed, it, stage, seed)
+        # ⇒ 断点续跑不会换起始状态，每轮换（§15.1）。课程没开 state_init ⇒ None（零回归）。
+        from rl.state_init import argv_init_for
+
+        init = argv_init_for(args, stage=int(stage), seed=int(seed), node_side=node_side)
+        if init is not None:
+            cmd += ["--init-snapshot", init.path]
         for k, v in args_rollout_overrides(args).items():
             # 键是下划线（lives_override），导出器只认连字符（--lives-override，
             # 未知 flag 静默忽略）——c6-gae 本地 3命1星事故根因，见 tests/test_rl_cmd.py。

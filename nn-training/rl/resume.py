@@ -11,10 +11,38 @@ from pathlib import Path
 # 判据同源（plan/accident.plan.md §2/A，2026-09-21）：本地对账用**和云端装载/发布同一把尺子**
 # ——`remote.protocol.d14_corpus_match`。方向安全：protocol 是底层模块，不 import 任何 rl/*。
 from remote.protocol import d14_corpus_match
+from rl.log import log
 
 MANIFEST_NAME = "manifest.json"
 #: shard 目录名（一局一目录，`dist_common.write_shard` / TS 导出器同形）。
 SHARD_DIR_GLOB = "rl_s*_seed*"
+
+
+def state_init_enabled(args) -> bool:
+    """课程是否开了起始分布（`state_init`）——shard 侧护栏的**唯一**判据来源。
+
+    为什么由 `args` 派生，而不是在扫描器里从产物猜：扫描器手里只有**产物**（manifest 里有没有
+    `initTick`），而「这一轮该不该有」是课程声明的事实（P2 把课程块映射成 `args.state_init`）。
+    两者不一致就是静默失效——老节点忽略 `--init-snapshot`、派发漏接、手工拼 argv 绕过
+    `build_rollout_cmd`——于是同一份 traj 目录里躺着两种起始分布的局，账本却按一种记。
+
+    与 AGENTS §2.2（No Hidden State）：只读 `args`，不缓存、不置位。
+    """
+    return getattr(args, "state_init", None) is not None
+
+
+def shard_state_init_ok(mm: dict, state_init: bool) -> bool:
+    """shard manifest 的起始分布血缘是否与本次运行一致（False ⇒ 该 shard 不计入）。
+
+    `state_init=True` 要求 manifest 带 **`initTick`**（正整数；P1 只在真注入了快照时才写，
+    additive-only ⇒ 老 shard 天然缺该键）。反向（课程关了 state_init 却收到带 `initTick` 的
+    shard）**不拒**：那一份是本课程的更严版本（中段起跑），且 D14 已按「起始分布进语料身份」
+    （`config.corpus_identity_fp`）把它挡在混训之外——这里只补「同一身份下被静默降级」那个洞。
+    """
+    if not state_init:
+        return True  # 默认 False = 逐字节旧行为（无该键、无该检查）
+    tick = mm.get("initTick")
+    return isinstance(tick, int) and tick > 0
 
 
 def walk_shard_dirs(root: Path, *, with_manifest: bool = False) -> list[Path]:
@@ -78,6 +106,7 @@ def completed_pairs(
     extra_wver: str | None = None,
     course_fp: str | None = None,
     corpus_fp: str | None = None,
+    state_init: bool = False,
 ) -> set[tuple[int, int]]:
     """扫描 traj_dir 已完整落盘且 manifest.wver∈{wver, extra_wver} 的 (stage,seed)——rollout 断点。
 
@@ -90,8 +119,16 @@ def completed_pairs(
 
     完整 shard 判定：write_shard 先写 12 npy 后写 manifest；存在 manifest.json ⇒ 目录完整。
     仅在 manifest 显式回显 stage/seed（agent 打包时回填）后才算数，否则不计入 done。
+
+    state_init（`plan/x20-state-init.plan.md` P3.5）：课程开了起始分布时，缺 `initTick` 的
+    shard **不算 done**（否则会把标准开局的局当成已完成，静默少采一整批中段局）。
     """
-    return {p for p, _m in _scan_shards(traj_dir, wver, extra_wver, course_fp, corpus_fp)}
+    return {
+        p
+        for p, _m in _scan_shards(
+            traj_dir, wver, extra_wver, course_fp, corpus_fp, state_init=state_init
+        )
+    }
 
 
 def _scan_shards(
@@ -100,6 +137,7 @@ def _scan_shards(
     extra_wver: str | None = None,
     course_fp: str | None = None,
     corpus_fp: str | None = None,
+    state_init: bool = False,
 ) -> list[tuple[tuple[int, int], Path]]:
     """扫描 traj_dir 内 manifest.wver∈{wver, extra_wver} 的完整 shard，产出 (pair, dir)。
     dir = shard 目录（含 manifest.json），stream 用它把在盘的预采首波 shard 注入训练。
@@ -115,16 +153,21 @@ def _scan_shards(
     语义不变）就把自己历史的 shard 全判成异血缘 ⇒ 全量重采（白烧一轮采集，云端其实照收）。
     这就是「同一个 D14 有两份实现」的代价；现在本地也走 d14_corpus_match，判据只剩一处。
 
+    起始分布护栏（P3.5）：`state_init=True` 时缺 `initTick` 的 shard 不进结果 + **响亮记一行**
+    （这类失效的症状是「任务全军覆没、语料却没少」——不记一行就只能等到判决段对不上账）。
+
     目录签名缓存（P2-2）：签名未变（无新 shard / 无 shard 内容更新）时零 IO 复用。
+    `state_init` 进缓存 key：同一目录在两种口径下结果不同，不能互相命中。
     """
     if not traj_dir.exists():
         return []
     sig = _dir_signature(traj_dir)
-    key = (str(traj_dir), wver, extra_wver, course_fp, corpus_fp, sig)
+    key = (str(traj_dir), wver, extra_wver, course_fp, corpus_fp, state_init, sig)
     cached = _SCAN_CACHE.get(key)
     if cached is not None:
         return cached
     res: list[tuple[tuple[int, int], Path]] = []
+    dropped: list[Path] = []
     for d in walk_shard_dirs(traj_dir, with_manifest=True):
         m = d / MANIFEST_NAME
         try:
@@ -139,7 +182,15 @@ def _scan_shards(
             str(course_fp or ""), str(corpus_fp or ""), mm
         ):
             continue  # D14：跨语料不参与对账（判据同源，见 docstring）
+        if not shard_state_init_ok(mm, state_init):
+            dropped.append(d)
+            continue
         res.append(((int(st), int(sd)), d))
+    if dropped:
+        log(
+            f"[resume] state_init: 剔除 {len(dropped)} 个缺 initTick 的 shard（标准开局产物，"
+            f"不是本轮的起始分布；首例 {dropped[0]}）——不回退成标准开局，去补采"
+        )
     if len(_SCAN_CACHE) >= _SCAN_CACHE_MAX:
         _SCAN_CACHE.clear()
     _SCAN_CACHE[key] = res
@@ -152,6 +203,7 @@ def settled_stage_totals(
     extra_wver: str | None = None,
     course_fp: str | None = None,
     corpus_fp: str | None = None,
+    state_init: bool = False,
 ) -> dict[int, tuple[int, int]]:
     """stage → (games, transitions)：已结算 shard 的局数与 `nSamples` 之和。
 
@@ -169,7 +221,9 @@ def settled_stage_totals(
     的关永远“零样本” ⇒ 补波永不达标（白烧到波次上限）。
     """
     out: dict[int, tuple[int, int]] = {}
-    for (stage, _seed), d in _scan_shards(traj_dir, wver, extra_wver, course_fp, corpus_fp):
+    for (stage, _seed), d in _scan_shards(
+        traj_dir, wver, extra_wver, course_fp, corpus_fp, state_init=state_init
+    ):
         try:
             mm = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -295,6 +349,7 @@ def resumed_manifests(
     extra_wver: str | None = None,
     course_fp: str | None = None,
     corpus_fp: str | None = None,
+    state_init: bool = False,
 ) -> list[dict]:
     """收集本轮未采样（不在 exclude）且已 done（wver 匹配）shard 的单局摘要，
     重启续跑时并入聚合，使报告 games/outcomes 仍覆盖完整一轮。
@@ -327,6 +382,8 @@ def resumed_manifests(
             str(course_fp or ""), str(corpus_fp or ""), mm
         ):
             continue  # D14：跨语料绝不并入本轮报告（判据同源，见 _scan_shards）
+        if not shard_state_init_ok(mm, state_init):
+            continue  # 起始分布血缘（P3.5）：别把标准开局的局并进本轮报告
         if (int(st), int(sd)) in skip:
             continue
         if only is not None and (int(st), int(sd)) not in only:

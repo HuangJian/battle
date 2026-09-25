@@ -23,7 +23,7 @@ from rl.eval_dispatch import dispatch_eval_bg
 from rl.eval_m1 import dispatch_eval_bg_m1
 from rl.log import log
 from rl.queue import RUN_ID, local_slots_max_of, run_rollout, run_rollout_queue
-from rl.resume import completed_pairs
+from rl.resume import completed_pairs, state_init_enabled
 from rl.stream import run_rollout_stream
 
 
@@ -62,6 +62,7 @@ def precollect_progress(
         extra_wver=extra_wver,
         course_fp=course_fp,
         corpus_fp=corpus_fp,
+        state_init=state_init_enabled(args),
     )
     return len(done)
 

@@ -48,7 +48,9 @@ from rl.queue import REPO_ROOT, RUN_ID
 from rl.reports import combine_reports
 from rl.resume import (
     completed_pairs,
+    resumed_manifests,
     settled_stage_totals,
+    state_init_enabled,
     trailing_samples_per_game,
 )
 from rl.rollout_phase import dispatch_rollout_phase, join_precollect_child
@@ -592,6 +594,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         from rl.cmd import corpus_fp_for_args
 
         self._corpus_fp = corpus_fp_for_args(args)
+        # 起始分布（plan/x20-state-init.plan.md P3.5）：本地对账/shard 侧的护栏开关。
+        # 与 _course_fp/_corpus_fp 同一处建立（一次读 args，不猜、不缓存过期值）。
+        self._state_init = state_init_enabled(args)
 
         # R2a（plan/r2-loop-task-queue §5）：**一次扫描**得到账本视图——续跑指针、累计量、
         # 熔断连击、提示类判决次数全由它重建（旧实现是 5 个扫描器各读一遍全文件）。
@@ -824,6 +829,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
                 extra_wver=extra_wver,
                 course_fp=self._course_fp,
                 corpus_fp=self._corpus_fp,
+                state_init=self._state_init,
             )
         )
         if have_resume:
@@ -1148,6 +1154,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
                 extra_wver=self._extra_wver,
                 course_fp=self._course_fp,
                 corpus_fp=self._corpus_fp,
+                state_init=self._state_init,
             )
             collected = {s: totals.get(s, (0, 0))[1] for s in stages}
             games_done = {s: totals.get(s, (0, 0))[0] for s in stages}
@@ -1287,6 +1294,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
                 extra_wver=extra_wver,
                 course_fp=course_fp,
                 corpus_fp=corpus_fp,
+                state_init=self._state_init,
             )
             collected = {s: int(totals.get(s, (0, 0))[1]) for s in stages}
             games_done = {s: int(totals.get(s, (0, 0))[0]) for s in stages}
@@ -1330,6 +1338,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
             extra_wver=extra_wver,
             course_fp=course_fp,
             corpus_fp=corpus_fp,
+            state_init=self._state_init,
         )
         collected_total = sum(int(totals.get(s, (0, 0))[1]) for s in stages)
         unmet = {
@@ -1363,13 +1372,13 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         # 配额已满重启 ⇒ batches=0，若只 adopt(combined=None) 会把除零保护的 winRate=0
         # 写进账本（x20-steady it76 / §107）——必须从 shard 回填 outcomes。
         from rl.reports import merge_volume_report
-        from rl.resume import resumed_manifests
 
         disk_reports = resumed_manifests(
             self._traj_dir,
             wver,
             extra_wver=extra_wver,
             course_fp=course_fp,
+            state_init=self._state_init,
         )
         if stages:
             stage_set = {int(s) for s in stages}

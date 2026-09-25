@@ -760,6 +760,7 @@ class TrainingSteps:
     def _course_iter(self, it: int) -> None:
         """M1c：每 iter 注入课程配置的加载期上下文（holder）与超参 schedule。
 
+        - `args._it` / `args._rotate_seed`：起始分布（state_init）派生的 key 两半；
         - holder（reward_context）：reward_fn + gamma/lam + it + 血缘——loaders
           （ppo.engine.load_shard）读取，奖励唯一定义源=课程配置公式；
         - ppo_schedule（按绝对 iter 查表）：lr 改 opt.param_groups（保 Adam
@@ -767,6 +768,14 @@ class TrainingSteps:
           供 update 期注入。
         """
         args = self.args
+        # 起始分布派生 key（plan/x20-state-init.plan.md §P3.3）：本轮的轮次 + 种子轮换基数。
+        # **每轮覆盖写**（不是累加、不是游标）——`rl/state_init.pick` 靠这两个值保证
+        # 「同 key 同起始状态」（断点续跑不换状态）、「换 it 换一整批」（§15.1 语料轮换）。
+        # 于所有 argv 构造点之前注入（argv 由 build_rollout_cmd 现读）。
+        args._it = int(it)
+        # getattr 兜底与 `loop_core.__init__` 的初值同源（0）——部分单测只构造 TrainingSteps
+        # 的一部分字段；真实路径上它在开跑前已被 resolve_rotate_seed 写好。
+        args._rotate_seed = int(getattr(self, "_rotate_seed", 0))
         course = getattr(args, "course_obj", None)
         if course is None:
             from rl.reward_context import reset as _ctx_reset
@@ -1203,12 +1212,17 @@ class TrainingSteps:
         # hub 侧永远等不到结果（训练轮空转 + worker 反复领同一份死活）。过滤判据
         # 与云端同源（`remote.protocol.d14_corpus_match`），故「打进 payload 的集合」
         # 恒等于「云端会接受的集合」；`verify_and_land` 用同样的两个 fp 重算 data_fp。
+        # 起始分布（P3.5）：开了 state_init 时，缺 initTick 的 shard 不进 payload——
+        # 一并进 job 里就等于云端训的是另一个起始分布，而 data_fp 账面对得上（静默换实验）。
+        from rl.resume import state_init_enabled
+
         local_shards = iter_shard_dirs(
             args.traj,
             it,
             log=(lambda _m: None) if (rollout_spec or export_path is not None) else log,
             course_fp=course_fp,
             corpus_fp=corpus_fp,
+            state_init=state_init_enabled(args),
         )
         shard_dirs = _gate_round_shards(
             local_shards=local_shards,
@@ -1447,6 +1461,8 @@ class TrainingSteps:
         from remote.hub_client import mark_job_completed, verify_and_land
 
         # 三重校验 + 落位（D12）：任一不等响亮拒绝，不落盘
+        from rl.resume import state_init_enabled
+
         verify_and_land(
             result,
             sess.manifest,
@@ -1454,6 +1470,9 @@ class TrainingSteps:
             traj_dir=args.traj,
             it=sess.it,
             out_weights=args.out,
+            # data_fp 重算必须用与发布**同一条**过滤（P3.5）：否则本地算出的集合
+            # 与云端收到的集合分叉，三重校验会响亮拒收一份本来正常的 job。
+            state_init=state_init_enabled(args),
             log=log,
         )
         mark_job_completed(self._jsonl_path, sess.jid)

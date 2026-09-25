@@ -13,7 +13,7 @@ import numpy as np
 import dist_common
 from rl.log import log
 from rl.queue import local_slots_max_of, run_rollout_queue
-from rl.resume import _scan_shards, completed_pairs
+from rl.resume import _scan_shards, completed_pairs, state_init_enabled
 
 
 def _default_ppo_backend():
@@ -204,6 +204,7 @@ def run_rollout_stream(
             extra_wver=extra_wver,
             course_fp=course_fp,
             corpus_fp=corpus_fp,
+            state_init=state_init_enabled(args),
         )
         remaining_games = max(0, len(pairs) - len(_done_start))
     except OSError:
@@ -371,6 +372,7 @@ def run_rollout_stream(
             extra_wver=extra_wver,
             course_fp=course_fp,
             corpus_fp=corpus_fp,
+            state_init=state_init_enabled(args),
         ):
             if _pair not in plan_set_:
                 continue

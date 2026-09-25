@@ -27,7 +27,7 @@ from rl.queue_local import (
     run_rollout,
 )
 from rl.reports import combine_reports, win_of
-from rl.resume import completed_pairs, resumed_manifests
+from rl.resume import completed_pairs, resumed_manifests, state_init_enabled
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -379,6 +379,7 @@ class RolloutDispatcher:
             extra_wver=extra_wver,
             course_fp=course_fp,
             corpus_fp=corpus_fp,
+            state_init=state_init_enabled(args),
         )
         done = done_all & plan_set
         tasks = [p for p in norm_pairs if p not in done]
@@ -408,6 +409,7 @@ class RolloutDispatcher:
                     extra_wver=extra_wver,
                     course_fp=course_fp,
                     corpus_fp=corpus_fp,
+                    state_init=state_init_enabled(args),
                 )
             )
             combined["missing"] = []
@@ -1150,6 +1152,7 @@ class RolloutDispatcher:
                 extra_wver=extra_wver,
                 course_fp=course_fp,
                 corpus_fp=corpus_fp,
+                state_init=state_init_enabled(args),
             )
         )
         combined["missing"] = [list(k) for k in missing]

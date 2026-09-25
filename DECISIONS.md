@@ -2654,17 +2654,20 @@ wver；旧钉死 live-out 的用例已按新语义改写）+ `test_baseline_eval
 
 ## §2026-09-25-state-init-course-key（2026-09-25，课程键 `state_init` 进 CourseConfig）
 
-**来历**：`curricula/x20-state-init.jsonc`（rollout 起始分布 = 人类 demo 中段交棒，plan 六腿六负
+> _(本条的 `rebase_counters` 字段与「中段交棒」措辞已在同日被 §2026-09-25-state-init-snapshot 修订：
+> 起始分布改为**快照注入**，`rebase_counters` 删除。本条只保留「课程键怎么进配置层」那部分。)_
+
+**来历**：`curricula/x20-state-init.jsonc`（rollout 起始分布 = 人类 demo 中段起跑，plan 六腿六负
 后的第七条攻击面）起草时就带着 `state_init` 块，而 `CourseConfig` 是 `extra="forbid"` ⇒ 那个文件
 **长期加载失败**，连带 `tests/test_reward_golden.py::test_jsonc_courses_load`（遍历 `curricula/*.jsonc`）
 成为门禁唯一那条红。plan `plan/x20-state-init.plan.md` P2 = 把这个键映射进配置层。
 
-**变更**：① `StateInitBlock`（`rl/config.py`）：`bank/cut_from/cut_to/cut_step/rotate_cuts/
-rebase_counters` 全可选 + v1 缺省，`extra=forbid`，切点自相矛盾（`cut_from<0` / `cut_to>0` /
+**变更**：① `StateInitBlock`（`rl/config.py`）：`bank/cut_from/cut_to/cut_step/rotate_cuts`
+全可选 + v1 缺省，`extra=forbid`，切点自相矛盾（`cut_from<0` / `cut_to>0` /
 `cut_step<1`）在校验期拒；② `CourseConfig.state_init: StateInitBlock | None = None`（缺席 = 标准
 开局，老课程逐字节不变）；③ `flat_overrides` 把整块转成 **dict** 交出去（不进 mapping 那张标量表）；
 ④ 「声明了就必须能跑」的自洽检查住 **`apply_course`（启动期）**：`bank` 空、或不在盘上（cwd /
-仓库根 / nn-training 三种基准都认，`_resolve_state_init_bank`）⇒ `SystemExit`（响亮，不静默退回
+仓库根 / nn-training 三种基准都认，`resolve_state_init_bank`）⇒ `SystemExit`（响亮，不静默退回
 标准开局——那等于换了一个实验，而账本还以为跑的是中段起跑）。
 
 **被否决**：把 bank 存在性检查放进 `load_course`（`load_course` 只读课程文件本身；在那儿读盘会让
@@ -2677,6 +2680,49 @@ JSON 数据）· 允许 `cut_to > 0`（绝对上界：得先读银行 manifest �
 落地）· 在 `load_course` 里做产物存在性检查 ⇒ 起草中的课程文件把全体遍历课程的用例打红 ·
 块内乱写键被静默忽略（`extra=forbid` 是这一层的唯一防线）。
 —— 全文（P2 落地记录 / 银行内容校验为何留 P0-P3）→ `plan/x20-state-init.plan.md` P2
+
+## §2026-09-25-state-init-snapshot（2026-09-25，rollout 起始分布 = 人类中段**世界快照**注入）
+
+**来历**：六条价格腿全阴性后的第七条攻击面 = 只换 rollout 的起始**状态分布**、不动任何价格项
+（plan/x20-state-init.plan.md）。首版设计是「人类**磁带**（逐 tick 输入）headless 快进 T tick
+后交棒」；评审发现六个阻断级问题，其中四条全部源自「用**输入**去重建**状态**」：B2 人类 idle
+（20–30% 帧）在动作空间里表达不了（`ScriptedInput` 的 move=0 = 继续走）、B5 快进段内可能先死、
+B6 交棒点不在决策边界上、B1 重建出的不是人类那个状态且**无外部证据**可对。改为**直接注入状态**。
+
+**决定（后来者极容易做错，故入册）**
+① 起始分布 = `cloneWorld` 快照（`tools/sim/build-state-init-bank.ts` 产物，人类**真正到达过**的世界），
+不是人类输入的产物。资产全是现成机制（`ReplayInput` + `cloneWorld`/`restoreWorld` +
+`worldTickHash`），不新造格式、不新造解码器。
+② **状态来自人类，未来来自本局抽到的 seed**：restore → 核 tickHash → `world.rng.reseed(seed)` →
+重施 CLI/关卡权威值。故 `(stage,seed)` 种子流逐轮照旧轮换（§15.1 真满足、判决段配对干净），
+而起始状态集合 = 银行 972 个切点（池小 ⇒ V 头记忆化风险，已在 plan §5 预注册读数）。
+③ **不做 rebase**：奖励 = Φ 的差分，对「继承的进度」天然不付钱；计数器列保持**游戏真值**，
+`initCounters`/`initSnapshot`/`initTick` additive-only 进 shard manifest 供分析侧自行 rebase。
+④ **v1 只在本机采集**：课程开了 `state_init` ⇒ `node_side=True` 的三条 argv 路径
+（`build_rollout_cmd` / `iter_job.build_iter_spec` / `plan.template_argv`）在**发布前** `SystemExit`
+——老导出器**静默忽略未知 flag**，云节点 cwd = job 目录 ⇒ 「云上跑标准开局、账本写中段起跑」是
+最贵的错，宁可不发。
+⑤ **shard 侧护栏**：缺正整数 `initTick` 的 shard 在**六个 funnel** 一律不计入（`_scan_shards` /
+`completed_pairs` / `settled_stage_totals` / `resumed_manifests` / `iter_shard_dirs` /
+`verify_and_land`），判据函数单点 = `rl.resume.shard_state_init_ok`；开关只从 `args.state_init` 派生。
+⑥ **起始分布进语料身份**（`corpus_identity_fp`，仅激活时，bank 只算文件名）：决定「一个样本从哪个
+世界开始」与 `seed_rotate`/`mode` 同类 ⇒ 课程中途加/删/改 `state_init` 时旧 shard 在四个 funnel
+全被 D14 自动排除，零额外参数。
+⑦ 保真门是**外部**证据（plan §2 M4）：切点取 `hashInterval` 整数倍 ⇒ 每个快照都能与录像记录链
+逐点对账（P0 已 2916/2916 全对）；采集侧每局 restore 后再自检一次，不符 = 该局响亮失败。
+
+**被否决**：① 磁带 FF（B2 idle 不可表达 / B5 快进段内会死 / B6 边界 / 无外部证据）·
+② 「用 demo 那一局的 seed 复现」（踩 §15.1「第 it 轮 (stage,seed) 不得与更早轮重复」= 重磨固定集，
+且训练 seed 集与 414000 判决段本体重合）· ③ 在 TS 侧 rebase 计数器（对奖励是恒等变换，却让
+`metrics.kills` 与 manifest 真值分叉）· ④ 云侧顺手做 blob 搬运（用 `node_side` 响亮拒换时间；
+规格留 P2.5，届时必须同时动 `_RETARGET_FLAGS` 与 plan 自检）· ⑤ bank **内容**进语料身份（要读盘 + 
+节点上不一定有该文件 ⇒ hub/节点指纹分叉，整份 job 误拒）。
+
+**违反后果**：把 `--init-snapshot` 放上云而不做 blob 通道 ⇒ 云上跑标准开局、账本写中段起跑 ·
+在 `reseed` **之后**核 tickHash ⇒ 外部证据变成恒假/恒真 · 交棒点不在 `K` 边界 ⇒ 首个决策前 K−1
+tick 由「上一帧残留动作」驱动 · 课程中途删 `state_init` 还复用旧 shard ⇒ 两种起始分布混训。
+—— 全文（六条评审处置表 / P0 实测读数 / 单局 smoke 读数 / P2.5 规格）→ `plan/x20-state-init.plan.md`
+§2 / §3 / §6 · 前身条目 `§2026-09-25-state-init-course-key`
 
 ## §2026-09-25-goalnn-prefetch-p0-not-preempt — 抢占权专属 P1：控制面只让路 + P2 补齐开工门禁 + 挤走不占重试预算（plan/bulk-p2-preempt-fix）
 
