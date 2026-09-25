@@ -205,6 +205,14 @@ TASK_STATE_STALE = "stale"
 TASK_STATE_NO_PACK = "no_pack"
 TASK_STATE_CLAIMED = "claimed"
 TASK_STATE_NOT_OFFLINE = "not_offline"
+#: 「离线盘在线」的窗口（秒）：与离线租约 TTL 同档 —— 取包腿的报到节奏就是这个量级。
+OFFLINE_DISK_WINDOW_SEC = 900.0
+#: 离线腿的指路（2026-09-25 退役「发一份 kind=run 队列项」之后，离线课的唯一载体是任务包）。
+OFFLINE_LEG_HINT = (
+    "离线课不再经 hub 队列执行：云机用 battle.offline.ipynb 取任务包接手"
+    "（/offline/tasks → /offline/task-pack → 跑完回传）"
+)
+
 #: 清单排序名次：`ready` 最前、`not_offline` 最后；同级按包的 mtime **升序**（最老的先跑）。
 #: 为什么 `claimed` 排在 `no_pack` 之前：前者是「有人在跑」、后者是「没人能跑」——
 #: 一眼看出「活儿在动」比看出「缺东西」更接近清单的用途（下一批还有人问）。
@@ -1938,6 +1946,15 @@ class _HubQueue(_AuthGuard):
         #: 最坏情形由回传侧 `(run_id, it)` 首写幂等兜底（plan §3.2）。
         self._leases: dict[str, dict] = {}
         self._lease_lock = Lock()
+        #: 离线**盘**报名表：disk_id -> last_seen（秒）。★ 为什么单独一张表：跑
+        #: `battle.offline.ipynb` 的机器**不碰队列**（取包链全在 `/offline/*` 上），它的身份
+        #: 只能在那一面被看到；而「本环境有没有离线盘」这个读数此前恒为空（审计 §4-L3：
+        #: `CFG["offline_worker"]` 全仓只有测试设过）。与 `_leases` 同口径：进程内、只做观测
+        #: （重启即清，最坏情形由回传侧首写幂等兜底）。
+        self._offline_disks: dict[str, float] = {}
+        #: 独立锁：`offline_disk_readout` 会被 `/admin/queue` 调到，而那条路不持 `_lease_lock`
+        #: 也不该持 `_lock`（观测面不许和调度临界区互等）。
+        self._disk_lock = Lock()
         _AuthGuard.__init__(self, now_fn)
         # 时钟与单课程 store 同源（测试注入的假时钟必须一致，否则 claimed 标记的时间戳
         # 会混入真实墙钟）。
@@ -2185,6 +2202,50 @@ class _HubQueue(_AuthGuard):
             return len(
                 {wid for wid, seen in self._registry().items() if now - seen <= WORKER_SEEN_WINDOW_SEC}
             )
+
+    def note_offline_disk(self, disk_id: str) -> None:
+        """登记一次**离线盘**露面（`X-Battle-Offline` 的持有者）；空 id 记成 `<offline>`。
+
+        判据（头）由 handler 侧解析，这里只记账——与 job 腿的归属闸共用同一份 `ROLE_HEADER`
+        语义：带标 = 离线盘，缺席 = 在线盘（旧 hub/旧 worker 混合部署逐字节兼容）。
+        """
+        did = (disk_id or "").strip() or "<offline>"
+        with self._disk_lock:
+            self._offline_disks[did] = self._now()
+
+    def offline_disk_readout(self) -> dict:
+        """「本环境有没有离线盘」+「有没有没人能领的离线队列项」——plan §7.2.3 的读数。
+
+        两个数字各治一个坑：
+        · `recent_n`：有离线盘在线 ⇒ 离线课的任务包有人取（这是取包链**唯一**的报到面）；
+        · `stale_jobs`：队列里还挂着 `role=offline` 的**待领**项 ⇒ **没有消费者**。
+          `kind=run` 队列腿 2026-09-25 退役后，这类项只可能来自「盘上遗留 / 手写参数 /
+          混部期旧 hub」，`hint` 直接给该走哪条路（本机也不再有任何人在等它，不再白等 8h）。
+        """
+        now = self._now()
+        with self._disk_lock:
+            recent = sorted(
+                d
+                for d, seen in self._offline_disks.items()
+                if now - seen <= OFFLINE_DISK_WINDOW_SEC
+            )
+            last = max(self._offline_disks.values(), default=0.0)
+        stale: list[dict] = []
+        for course in self._order:
+            st = self._stores[course]
+            for jid in st.claimable_job_ids():
+                if st.job_role(jid) == ROLE_OFFLINE:
+                    stale.append({"course": course, "job_id": jid})
+        out: dict = {
+            "recent_n": len(recent),
+            "recent": recent,
+            "last_seen_ago": round(now - last, 1) if last else None,
+            "stale_jobs": stale,
+        }
+        if stale:
+            # 只有真存在「没人能领的离线项」才喊：这句话是给操作员的下一步，不是背景噪音。
+            out["hint"] = OFFLINE_LEG_HINT
+        return out
 
     # ---- 课程表与归属 ----
     def courses(self) -> list[str]:
@@ -2799,6 +2860,8 @@ class _HubQueue(_AuthGuard):
             # job 身份歧义面（2026-09-24 事故）：非空 = 有 jid 挂在 ≥2 门课上，而
             # `course_of` 对它们一律拒答（那些 job 谁都跑不了）⇒ 必须让操作员一眼看见。
             "ambiguous_jids": self.ambiguous_jids(),
+            # 离线盘的报到面 + 「没人能领的离线队列项」（plan §7.2.3 的读数；见方法 docstring）
+            "offline_disk": self.offline_disk_readout(),
         }
 
     # ---- job 作用域委派（与 `_JobStore` 同名同签名） ----
@@ -3424,6 +3487,19 @@ class HubHandler(BaseHTTPRequestHandler):
             return urllib.parse.unquote(parts[1])
         return None
 
+    def _note_offline_disk(self) -> None:
+        """离线**盘**报名（`/offline/*` 面）：带 `X-Battle-Offline` 的请求 = 这块盘自报身份。
+
+        ★ 为什么必须在这里（2026-09-25，plan §7.0.1 #2 / §7.2.3）：跑 `battle.offline.ipynb`
+        的云机**不碰 `/jobs/*`**（它走清单 + 取包 + 租约 + 补传），而角色头此前只在 worker 的
+        peek/claim 面上被读 ⇒ 离线盘在 hub 眼里是匿名的，「有没有离线盘」这个读数恒为空。
+        身份取 `?worker=`（租约面自带）；清单/取包不带 worker ⇒ 记成 `<offline>` 一个人次。
+        """
+        if role_from_header(self.headers.get(ROLE_HEADER, "")) != ROLE_OFFLINE:
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        self.hub.note_offline_disk((qs.get("worker") or [""])[0])
+
     def _query_course(self) -> str:
         """`?course=` 查询参数（空 = 未给定）。与路径解析同源（urllib.parse）。"""
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
@@ -3432,6 +3508,9 @@ class HubHandler(BaseHTTPRequestHandler):
     # ---- 路由 ----
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
+        if path.startswith("/offline/"):
+            # 离线盘报名（取包链的全部端点都在这条前缀下；见 `_note_offline_disk`）。
+            self._note_offline_disk()
         try:
             if path == "/ping" or path == "/":
                 if not self._auth_ok():
@@ -3491,6 +3570,9 @@ class HubHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         path = self.path.split("?", 1)[0]
+        if path.startswith("/offline/"):
+            # 同上：租约/补传也在这条前缀下（POST 面）。
+            self._note_offline_disk()
         try:
             if path.startswith("/jobs/") and path.endswith("/heartbeat"):
                 self._post_heartbeat()

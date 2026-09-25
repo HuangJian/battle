@@ -6,7 +6,7 @@
    真有那些方法（加一步而不加实现 ⇒ 这里红）。顺带钉住 `precollect_join` **必须排在
    `prepare_iter` 之前**——这是 R2c-3 对齐真实依赖时纠正的一处真顺序错（预采产出的是本轮
    shard，而 `prepare_iter` 靠 `completed_pairs` 看盘决定「保留续跑 / 清场重建」）。
-2. **组合循环只是「按表施加步骤」**：某步给终态即停、`ctx.it` 被整段推进后必须原样带回、
+2. **组合循环只是「按表施加步骤」**：某步给终态即停、`ctx.it` 被步骤改写后必须原样带回、
    异常分类与细粒度驱动器共用一份判决（`round_failure`）。
 
 组合循环的测试用**假步骤**（`TrainingLoop.__new__` + 替换 `round_steps`）：这一步验证的是
@@ -25,7 +25,7 @@ from rl.loop_core import TrainingLoop
 from rl.loop_round import (
     COLLECT_LOCAL,
     COLLECT_NODE,
-    COLLECT_SEGMENT,
+    COLLECT_OFFLINE,
     ROUND_NEXT,
     ROUND_RETRY,
     ROUND_SMOKE_STOP,
@@ -90,29 +90,23 @@ def test_precollect_join_runs_before_prepare_iter() -> None:
 # --------------------------------------------------------------- RoundContext
 
 
-def test_round_context_seg_ran_is_derived_from_collect_mode() -> None:
-    ctx = RoundContext(it=3)
-    assert ctx.collect_mode == COLLECT_LOCAL and not ctx.seg_ran
-    ctx.collect_mode = COLLECT_NODE
-    assert not ctx.seg_ran
-    ctx.collect_mode = COLLECT_SEGMENT
-    assert ctx.seg_ran  # 派生属性：不可能与 collect_mode 分叉
-
-
 def test_resolve_collect_mode_precedence() -> None:
-    """采集模式裁决点：**段长 > 整轮上云 > 本机采样**。
+    """采集模式裁决点：**离线课 > 整轮上云 > 本机采样**；离线课**绝不**回落本机采样。
 
     这不是纯风格：2026-09-17 的半离线整段只算了 `ctx.seg` 而没人翻 `collect_mode`，
     kind=run 分支因此**永远不可达**（表面一切正常：本机照常采样、账本照常记账）。
-    把优先序扭在一个纯函数上，就不必靠「两个文件里的两行看起来还一致」。
+    ★ 2026-09-25 那条腿退役（plan/online-offline-role-routing §7）后，`run` / 段长一律 =
+    **这门课不归本机**：若回落到 `COLLECT_LOCAL`，本机就会偷偷自己采样、与云机取包链双跑
+    （这正是「在配置里删字段」那个写法的坑，§7.2-1）。
     """
     assert resolve_collect_mode("local", 0) == COLLECT_LOCAL
     assert resolve_collect_mode("node", 0) == COLLECT_NODE
-    assert resolve_collect_mode("run", 3) == COLLECT_SEGMENT
-    assert resolve_collect_mode("run", -1) == COLLECT_SEGMENT  # <0 = 到课程末尾，也是整段
-    # 段长优先：声明 node 但又给了段长 ⇒ 走整段（否则云机永远领不到 kind=run job）
-    assert resolve_collect_mode("node", 2) == COLLECT_SEGMENT
-    assert resolve_collect_mode("local", 1) == COLLECT_SEGMENT
+    assert resolve_collect_mode("run", 3) == COLLECT_OFFLINE
+    assert resolve_collect_mode("run", -1) == COLLECT_OFFLINE  # <0 = 到课程末尾
+    assert resolve_collect_mode("run", 0) == COLLECT_OFFLINE  # 没写段长也仍是离线课
+    # 段长优先：声明 node 但又给了段长 ⇒ 按离线课处理（历史上这正是 kind=run 的形状）
+    assert resolve_collect_mode("node", 2) == COLLECT_OFFLINE
+    assert resolve_collect_mode("local", 1) == COLLECT_OFFLINE
 
 
 def test_round_context_marks_are_ordered_and_unique() -> None:
@@ -181,7 +175,7 @@ def _install_fake_steps(
             if kind == yield_at:
                 return wait_for("fake 让位")
             if kind == advance_it_at:
-                ctx.it += 5  # 半离线整段会一次推进多轮——返回值必须带回去
+                ctx.it += 5  # 引擎可以改写指针——返回值必须带回去（重试/让位不跳轮）
             if kind == stop_at:
                 return finish(ROUND_STOP)
             return None
@@ -211,7 +205,7 @@ def test_composition_stops_at_the_first_step_with_a_final_outcome(tmp_path: Path
 
 
 def test_composition_returns_the_it_advanced_by_a_step(tmp_path: Path) -> None:
-    """★ 半离线整段会推进 it：丢掉返回值就会重跑整段（比跳轮更贵）。"""
+    """★ 指针必须原样带回：丢了返回值 = 跳轮 / 重跑（重试与让位都靠它不跳）。"""
     loop = _bare_loop(tmp_path)
     calls: list[str] = []
     _install_fake_steps(loop, calls, advance_it_at="rollout")

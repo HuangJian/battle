@@ -50,7 +50,7 @@ import type { RowBadge } from '../components/StatusRow'
 import type { StatusTone } from '../components/StatusDot'
 
 /** 段内产物「多久没动了」的红线：超过它就当可疑（离线课挂掉与还在跑的唯一区分）。
- *  离线段是整段上云（一轮可能十几分钟），30 分钟仍属正常长轮，故定 1h。 */
+ *  离线课那份在云机上跑（一轮可能十几分钟），30 分钟仍属正常长轮，故定 1h。 */
 export const OFFLINE_STALE_SEC = 3600
 
 // ────────────────────────── 状态判定 ──────────────────────────
@@ -346,8 +346,8 @@ export interface CourseMatrixInput {
    *
    *  为什么要它（2026-09-24）：`modeDrift` 只比「意图 vs hub」两个源，而用户报障的现场是
    *  **第三个**源没跟上——hub 已回到在线、意图也已是在线，但 `courses.<课>.rollout_src` 还是
-   *  `run`（整段上云）⇒ 下一段照样派 `kind=run`（节点缺 bun 就拒单）。配置侧那一格只有逐课下发
-   *  才算得出来（`modes.rolloutSrc` 只有查看课程一个）。 */
+   *  `run`（本课仍归云机）⇒ 本机在下一轮仍然收工、不采样（训练就此停住，而面板看着「在训」）。
+   *  配置侧那一格只有逐课下发才算得出来（`modes.rolloutSrc` 只有查看课程一个）。 */
   courseRolloutSrc?: Record<string, string> | null
   viewing: string
   /** 判定「段内多久没动」的当下时刻（epoch 秒）——调用方给，便于单测。 */
@@ -370,7 +370,7 @@ export function modeDriftOf(
   const intent = intents?.[course]
   if (!intent) return null
   if (!ov || !hubOnline || !ov.hubSeen) return null
-  // 配置侧那一格（**第三个源**）：意图/ hub 都回到在线而配置还写着 `run` ⇒ 下一段仍是整段上云。
+  // 配置侧那一格（**第三个源**）：意图/ hub 都回到在线而配置还写着 `run` ⇒ 本机仍不跑这门课。
   // 独立于「意图 vs hub」是否一致来算：两者一致也照样可能带着 `run`（用户报障的现场就是这个形状）。
   const configRun = rolloutSrc?.[course] === 'run' && intent === 'online'
   if (ov.offline === (intent === 'offline') && !configRun) return null

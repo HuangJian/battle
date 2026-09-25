@@ -8,6 +8,55 @@
 
 ---
 
+## §48 「离线 = 发一份 kind=run 队列项」那条腿退役：离线课由云机取包接手（2026-09-25）
+
+> 现场来源：`reports/online-offline-hot-switch-audit-2026-09-25.md`（§4-L3 / R3）+ 用户裁决；
+> 裁决与残留清单 → `plan/online-offline-role-routing.plan.md` §7（口径 §7.0、不许碰的两条 §7.0.1）。
+
+**裁决（用户口径）**：离线场景里**没有「一整段」这个中间概念**——云机接手一门课就一直跑，直到
+① 跑完整个课程；② 云机配额/预算用尽；③ 人工停机/停课；**能传回来多少是多少**（已跑完的轮尽力
+补传，不为凑完整卡住在飞的那一轮）。所以队列里的「整段 job」不是离线场景的载体，它只是
+`kind=run` 这条**残留路径**的形状。
+
+**为什么退役**：那条腿（本机发一份带段长的 `kind=run` 队列项、随后等 8h）与取包链
+（`--export-bundle` 任务包 → 云机 `/offline/tasks` → 取包 → 跑完回传）**干的是同一件事**，
+是两个执行者——2026-09-25 云机接错盘事故的结构。裁决：**取向 1（源头砍掉，砍在发布点）+
+取向 3 的机制作尾巴；取向 2（只给离线盘）否决**（`role=offline` 的消费者当时并不存在，
+要成立就得新造并部署一个）。
+
+**实施形状**（P5）：
+
+| 位置 | 现在 |
+|---|---|
+| `rl/loop_steps.py` | 发布端（`_remote_run_segment`）删除；`RUN_WAIT_DEFAULT_SEC` / `_run_wait_sec` / `--run-wait-sec` / `rl.run_wait_sec` 一并退役（**没有 8h 白等这回事了**） |
+| `rl/loop_round_steps.py::step_course_iter` | 离线课（来源 `run` 或写了终点值）⇒ 一行指路 + `ROUND_OFFLINE_EXIT`：**不采样、不发队列项、不等、不进账本** |
+| `rl/loop_round.py::resolve_collect_mode` | `COLLECT_SEGMENT` → `COLLECT_OFFLINE`：**绝不**回落 `COLLECT_LOCAL`（回落 = 本机偷偷自己采样、与云机双跑） |
+| `rl/loop_steps.py::_remote_ppo_publish` | **咽喉点守卫**：带 `plan_bytes` 而不带 `export_path` ⇒ `SystemExit`，消息指路 `battle.offline.ipynb` + `--export-bundle` |
+| `remote/worker.py::run_job` | `kind=run` **响亮拒收**（最前，零指令零下载；不是「当成 iter 跑一轮」——半跑会产出权重、让控制面看着像在推进） |
+| `remote/run_loop.py::run_plan_job` | 保留但**无生产调用者**：它是「从首轮结果续下去」的唯一入口，`tests/test_run_loop.py` 的 4 组段语义回归挂在它上面 |
+| `kind=run` 的 **manifest 形状** | **保留**（`--export-bundle` 仍造它，只是 `register=False` ⇒ 只建 job 目录当打包源、不进待领池） |
+| 配置（`rollout_src=run` + `run_iters`） | **不动**：它是「这门课由云机接手」的既有声明，也是导出腿的终点口径（删字段会让本机悄悄退回自己采样） |
+
+**离线盘报名（新）**：跑 `battle.offline.ipynb` 的云机**不碰队列**（它走清单/取包/租约/补传），
+所以角色头此前只在 worker 的 peek/claim 面上被读 ⇒ 离线盘在 hub 眼里是匿名的、「本环境有没有
+离线盘」这个读数恒为空。现在：`remote/offline_boot.py` 的**每一个** hub 调用都带
+`X-Battle-Offline: 1`（`_headers()`，本模块不 import `remote.*`，故头名/值两份拷贝由测试守逐字
+相同），hub 在 `/offline/*` 前缀上记一次（`?worker=` 取身份，清单/取包记成 `<offline>`），
+`/admin/queue.offline_disk` 报出：`recent`/`recent_n`/`last_seen_ago` + **`stale_jobs`**
+（还挂着的 `role=offline` 待领项 = 盘上遗留 / 手写参数 / 混部期旧 hub）+ `hint`。
+
+**没动的两条（用户点名保留）**：① 离线云机**串行跑多门课**（`/offline/tasks` 清单 + `drain`
+驻守 + claim/heartbeat/release 租约 + 预算/空闲上限，空队列正常收工）；② **notebook 里不写课程名**
+（`requested_courses` 空 ⇒ 清单发现）。`/offline/*` 与任务包格式**一个字节都没改**（既有取包链
+e2e 全绿）。
+
+**门禁**：`nn-python-gate` 2484 passed（ruff + mypy + tests/+e2e）· 新增
+`tests/test_offline_leg_retired.py`（13 条：发布点枚举 / 咽喉点响亮拒 / worker 拒收 / 本机循环
+收官 / 读数 / 报名）· dashboard `bun run typecheck` + 1158 测试绿（文案改词同步）· 一条
+`DECISIONS`。
+
+---
+
 ## §47 归属（role）：job 自己说「该由哪块盘执行」；认领咽喉点两道闸（2026-09-25）
 
 > 现场来源：`reports/online-offline-hot-switch-audit-2026-09-25.md`（L1–L6 / I1–I6）+ 用户四项裁决；

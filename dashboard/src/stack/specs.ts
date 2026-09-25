@@ -163,12 +163,13 @@ export function slimToCfg(mode: SlimMode): 0 | 1 {
 /** 训练模式 → 课程级 rl-config 键（**唯一推导点**；2026-09-19 离线训练模式）。
  *
  *  `offline` ⇒ `{rollout_src:'run', run_iters:-1}`：两个键缺一不可——
- *    · `run` 是**声明**（本机不跑 rollout，整段交给云机）；
- *    · `run_iters:-1` 是**段长**（-1 = 直到课程末尾，与 `--export-bundle` 同口径）。
- *    只写 `run` 而不给段长在训练侧是配置错误（`_run_segment_iters` 返回 0 = 关，
- *    于是本轮静默退化成在**本机**采样 —— 那正是最难查的那类分叉）。
+ *    · `run` 是**声明**（本机不跑这门课，交给云机接手）；
+ *    · `run_iters:-1` 是**终点**（-1 = 直到课程末尾；与 `--export-bundle` 的任务包同口径）。
+ *    两个键都在才判成离线课（`resolve_collect_mode`：来源 `run` **或**有终点值 ⇒ 离线）。
+ *    缺终点值的代价是**静默分叉**：`--export-bundle` 会拒绝导出（`_export_offline_bundle`
+ *    的 SystemExit），而离线课本身仍然不让本机采样 —— 那正是最难查的那类半状态。
  *  `online` ⇒ `{rolloutSrc: 选中的源, runIters: null}`，其中 `null` = **要求删除**该课
- *    的 `run_iters`/`rollout_src` 覆盖（不删就会「切回在线了但还在整段上云」）。
+ *    的 `run_iters`/`rollout_src` 覆盖（不删就会「切回在线了但本课还归云机」）。
  *
  *  为什么放这里：模式与 rollout 源是**两个域**（一个用户口径、一个 python 字面量），
  *  换算只此一处，弹窗/preset/测试共用。

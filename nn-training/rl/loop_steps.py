@@ -31,7 +31,7 @@ from remote.push_client import submit_job as _push_submit
 from remote.push_client import wait_result as _push_wait_result
 from rl.archive import backup_weights
 from rl.eval_m1 import read_eval_summary
-from rl.events import write_event, write_gate_verdict, write_iteration
+from rl.events import write_gate_verdict, write_iteration
 from rl.log import log
 from rl.loop_round import RemotePpoJob, RoundContext, StepResult, wait_for
 from rl.modes import _MODE_BACKUP_PREFIX
@@ -138,22 +138,17 @@ def _rollout_source(args: Any) -> str:
     return val
 
 
-#: 半离线段等待预算缺省（秒）：一次 kind=run job 覆盖多轮，节点要跑完才回传。
-#: 这里只是 hub 侧的**等待上限**，不是训练预算（训练预算在计划里：budget_sec / iters）。
-#: 8h ≈ Kaggle 单会话上限：超过它还没回，几乎只能是节点挂了——响亮超时好过默默挂着。
-RUN_WAIT_DEFAULT_SEC = 8 * 3600.0
-
-
 def _run_segment_iters(args: Any) -> int:
-    """半离线段长：一次 `kind=run` job 覆盖几轮（0 = 关；<0 = 直到课程末尾）。
+    """离线课的段长声明（0 = 关；<0 = 直到课程末尾）。
 
     优先级与 `_rollout_source` 同口径：CLI `--run-iters` > `courses.<stem>.run_iters` >
-    `rl.run_iters` > 0。**缺省 0 = 关**（历史行为逐字节不变；要半离线才显式开）。
+    `rl.run_iters` > 0。**缺省 0 = 关**（历史行为逐字节不变；要离线才显式开）。
     选项住 rl-config，永不进 curricula（D14 血缘）。
 
-    语义（用户 2026-09-17 定）：一次领走 = 整段——节点收到（课程 + 初始权重 + 代码 +
-    计划）后即使 hub 彻底失联也能自己跑完，逐轮权重/指标落在产物目录（Kaggle
-    /kaggle/working、Colab Drive）+ 可打包下载。
+    ★ 2026-09-25：它曾经是「半离线整段 job 的段长」（一次领走 it..end_it、本机等 8h）
+    —— 那条腿已退役（`plan/online-offline-role-routing.plan.md` §7）。这个值现在只剩
+    两个用途：① 与 `--rollout-src run` 一起声明「这门课由云机（取包）接手」；
+    ② `--export-bundle` 的终点（控制台导出用 `-1`）。
     """
     n = int(getattr(args, "run_iters", 0) or 0)
     if n:
@@ -173,19 +168,6 @@ def _run_segment_iters(args: Any) -> int:
         return int(course.get("run_iters") or rl.get("run_iters") or 0)
     except Exception:
         return 0
-
-
-def _run_wait_sec(args: Any) -> float:
-    """半离线段的等待上限（秒）：CLI `--run-wait-sec` > `rl.run_wait_sec` > 8h。"""
-    v = float(getattr(args, "run_wait_sec", 0.0) or 0.0)
-    if v > 0:
-        return v
-    try:
-        cfg = dist_common.load_dist_config() or {}
-        v = float((cfg.get("rl") or {}).get("run_wait_sec") or 0.0)
-    except Exception:
-        v = 0.0
-    return v if v > 0 else RUN_WAIT_DEFAULT_SEC
 
 
 def _gpu_push_nodes(remote_token: str) -> list[dict]:
@@ -1129,6 +1111,24 @@ class TrainingSteps:
         args = self.args
         it_dir = self._traj_dir
         t_ppo = time.time()
+        # ★ 2026-09-25（plan/online-offline-role-routing §7）：kind=run 的**队列项**退役。
+        # 生产端唯一的发布者（发一份带段长的队列项、随后等 8h 的那个方法）已删，
+        # 取包链（`--export-bundle` ⇒ 任务包）是它的完整替代（原方法名见 plan §7.6）。
+        #
+        # 谁还带 plan_bytes 而不带 export_path，就是复活那条腿——而队列里**没有消费者**
+        # （`remote/worker.py` 对 kind=run 响亮拒收）⇒ 本机会白等一整段（老代码是 8h），
+        # 症状是「队列不降、没人报错」。所以在这里**当场**拒，并把该走哪条路写进消息里
+        # （这是 kind=run 的唯一咽喉：`--export-bundle` 是唯一合法调用者，它带 export_path）。
+        if plan_bytes is not None and export_path is None:
+            raise SystemExit(
+                "[run_rl] kind=run（离线队列项）这条腿已于 2026-09-25 退役——离线课不再经"
+                " hub 队列执行：云机用 battle.offline.ipynb 取任务包接手"
+                "（/offline/tasks 清单 → /offline/task-pack 取包 → 跑完回传，"
+                "控制台「导入产物」推进本机账本）。本机此刻要发的是**任务包**："
+                "控制台「切离线」会自动跑 --export-bundle，或手工 `--export-bundle <zip>`。"
+                "（本拒绝点住 `_remote_ppo_publish`：任何新调用者只要不带 export_path 就撞上"
+                "这里，不必等谁去读代码。）"
+            )
         # 半离线（kind="run"）：plan_bytes 非空 = 本 job 之后还要节点自主把计划跑完。
         if plan_bytes is not None and rollout_spec is None:
             raise SystemExit(
@@ -1316,6 +1316,11 @@ class TrainingSteps:
             keep_init_weights=bool(getattr(args, "smoke", False)),
             # M3：kind=iter 的三件套（rollout 规格 + TS 运行时 sha/文件）；
             # 非 iter 轮恒为默认（kind="ppo"，manifest 不含这两个键 —— 逐字节不变）。
+            #
+            # kind=run 的**形状**保留：今天唯一带 `plan_bytes` 的调用者是 `--export-bundle`
+            # （它同时带 `export_path` ⇒ `register=False`：只建 job 目录当打包源、不进待领池）。
+            # 「发一份 kind=run 队列项、本机等 8h」那条腿 2026-09-25 退役（plan §7）——
+            # 所以谁若**不带** export_path 传 plan_bytes，就是复活了退役腿。
             kind="run" if plan_bytes is not None else ("iter" if rollout_spec else "ppo"),
             rollout_spec=rollout_spec,
             plan_bytes=plan_bytes,
@@ -1389,7 +1394,6 @@ class TrainingSteps:
             kick_on=kick_on,
             kick_kl=kick_kl,
             rollout_spec=rollout_spec,
-            segment=plan_bytes is not None,
             hub_push=hub_push,
         )
         # remote PPO 等待期集群空闲 —— 立即开 evalboard 窗领批（含等待期间新入队的）。
@@ -1508,14 +1512,11 @@ class TrainingSteps:
                 "protocol": _cf_tunnel[0],
                 "edge_ip": _cf_tunnel[1],
                 "slim": bool(int(getattr(args, "remote_slim", 1) or 0)),
-                # M3：记**实测**在哪采集（node = 本轮整轮上云；run = 整段自主），不是
+                # M3：记**实测**在哪采集（node = 本轮整轮上云；local = 本机），不是
                 # args 字面量（auto 会被 _rollout_source 解析成 local/node——原样记
-                # auto 等于没记）。
-                "rollout_src": (
-                    "run"
-                    if sess.segment
-                    else ("node" if sess.rollout_spec else "local")
-                ),
+                # auto 等于没记）。离线课（`run`）不再产生 iteration 事件（本机不发活），
+                # 所以这里只可能是这两档。
+                "rollout_src": ("node" if sess.rollout_spec else "local"),
             },
         )
         # 启动协议补丁（2026-09-08 vk1 事故）：kickstart_ref 已要求时，it1 校准把
@@ -1803,139 +1804,12 @@ class TrainingSteps:
             f"（{self._node_rollout_sec}s），往返 {round(time.time() - t_roll, 1)}s"
         )
 
-    def _remote_run_segment(self, it: int, pairs: list[tuple[int, int]], n: int) -> int:
-        """半离线：把 it..end_it **整段**交给云机自主跑（kind=run），返回段尾 it。
-
-        用户需求（2026-09-17）：「云机领到任务（课程 + 初始权重 + 代码）后，即使本机 hub
-        一直失联，也能全程自主完成训练，并以 kaggle/colab 官方方式提供产物打包下载」。
-
-        与本机、kind=iter（逐轮上云）的差别只有一条：**hub 不再逐轮决策**。计划
-        （`rl/plan.build_plan`）把「后面每轮跑哪些局 + argv 长什么样 + 到哪停」一次性写成
-        文件随 payload 下发；节点用同 commit 的代码重放（`pairs_fp` 两侧对账，不符就
-        一局不跑），逐轮权重/指标写进产物目录（`remote/artifacts.py`），末尾才回传合并结果。
-
-        本函数只做三件 hub 侧的事：① 组装计划并发布；② 用**放大的**等待预算阻塞（整段
-        墙钟量级）；③ 把节点回的逐轮明细落成 `run_segment` 事件（给控制台画曲线），并把
-        段尾的报告/指标交给本轮结算（iteration 事件复用 `_record_iteration`）。
-
-        中间轮没有本机 eval：它们不在本机跑，归档里也没有它们的权重（拿活指针去充数就是
-        P0 修过的「标签超前一轮」）。所以调用方在本轮**跳过** `_dispatch_delayed_eval`。
-        """
-        args = self.args
-        # ★ 2026-09-21（§3）：原先这里有「要求 --ppo remote」的闸——旗标删除后它恒真、
-        # 会把整段误拒。单一 PPO 路径下「整段 rollout + PPO 都在节点上」本就是唯一形态。
-        from rl.iter_job import build_iter_spec
-        from rl.plan import RUN_NODE_LABEL, build_plan, dump_plan
-
-        wver = dist_common.weights_fingerprint(args.out)
-        if not wver:
-            raise SystemExit(f"[run_rl] 半离线 it{it}: 本机无权重（{args.out}）——无起点不发段")
-        workers = int(getattr(args, "remote_iter_workers", 0) or 0) or int(
-            getattr(args, "workers", 1) or 1
-        )
-        game_timeout = float(getattr(args, "remote_iter_game_timeout", 0.0) or 0.0)
-        spec = build_iter_spec(
-            args,
-            pairs,
-            wver=wver,
-            workers=workers,
-            game_timeout_sec=game_timeout,
-            hub_bun=str(getattr(self, "bun", "bun") or "bun"),
-            node_label=RUN_NODE_LABEL,
-        )
-        iters_total = int(getattr(args, "iters", 0) or 0)
-        if iters_total <= 0:
-            if n < 0:
-                raise SystemExit(
-                    "[run_rl] --run-iters<0（跑到课程末尾）需要课程声明 iters——"
-                    "没有终点就不叫整段，节点会一直跑下去"
-                )
-            iters_total = it + n
-        plan = build_plan(
-            args,
-            it=it,
-            iters_total=iters_total,
-            rotate_seed=int(self._rotate_seed),
-            # n-1：计划里的 argv 模板是给**下一轮**用的，段尾 = it + (n-1)。
-            max_iters=0 if n < 0 else n - 1,
-            workers=workers,
-            game_timeout_sec=game_timeout,
-            budget_sec=float(getattr(args, "run_budget_sec", 0.0) or 0.0),
-            volume=self._volume_plan_block(),
-            log=log,
-        )
-        end_it = int(plan["end_it"])
-        log(
-            f"[run_rl] rollout_src=run it{it}: 半离线段 it{it} → it{end_it}"
-            f"（节点自主跑 {end_it - it} 轮；hub 失联不影响，产物在节点工作目录）"
-        )
-        t0 = time.time()
-        try:
-            result = self._remote_ppo(
-                it,
-                spec,
-                plan_bytes=dump_plan(plan),
-                wait_timeout_sec=_run_wait_sec(args),
-            )
-        except remote_retryable_exceptions() as e:
-            # 与 `_remote_iter` 同规：节点已回报的确定性失败（bun 装不上 / TS 拿不到）
-            # 与鉴权/闭锁类 HTTP 都**不重试**——重发同一段只是再白烧一个巨大等待预算。
-            if isinstance(e, JobFailedError):
-                self._abort_node_failure(it, e, where="半离线段 rollout+PPO")
-                raise
-            fatal = fatal_remote_http(e)
-            if fatal:
-                write_gate_verdict(
-                    self._jsonl_path,
-                    it,
-                    "ABORT",
-                    f"半离线段不可重试失败 HTTP {fatal}——检查 --remote-token 与节点隧道："
-                    f"{str(e)[:200]}",
-                    decider="loop",
-                )
-                log(f"[run_rl] GATE ABORT it{it}: 半离线段远端 HTTP {fatal}——不再重试")
-                self._leg_abort = True
-            raise
-        rows = [r for r in (result.get("iters") or []) if isinstance(r, dict)]
-        last = rows[-1] if rows else {}
-        rep = dict(last.get("report") or result.get("report") or {})
-        rep.pop("perGameSecs", None)  # 逐局秒数只用于诊断，不进 iteration 账本
-        self._report = rep
-        # 结算口径用**段尾那一轮**（本轮的 PPO 已在节点跑完）：采集墙钟同理。
-        self._node_rollout_sec = float(rep.get("elapsedSec") or 0.0)
-        write_event(
-            self._jsonl_path,
-            {
-                "event": "run_segment",
-                "iter_start": int(it),
-                "iter_end": end_it,
-                "iters": rows,
-                "run_state": result.get("run_state"),
-                "plan_sha256": str(result.get("plan_sha256", "") or ""),
-                "artifacts": result.get("artifacts") or {},
-                "wall_sec": round(time.time() - t0, 1),
-                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            },
-        )
-        got_end = int(result.get("it_end") or end_it)
-        if got_end != end_it:
-            # 节点自报的段尾与计划不符：结果仍然可信（协议已校验严格递增 + it_end == 末轮），
-            # 但“我们以为跑到哪”必须按**实际**改，否则下一轮会重跑已训过的轮。
-            log(
-                f"[run_rl] WARN 半离线段实际跑到 it{got_end}（计划 it{end_it}）——"
-                f"按实际推进（run_state={result.get('run_state')}）"
-            )
-        log(
-            f"[run_rl] 半离线段收回：it{it} → it{got_end}（{len(rows)} 轮明细，"
-            f"往返 {round(time.time() - t0, 1)}s，state={result.get('run_state')}）"
-        )
-        return got_end
-
     def _export_offline_bundle(self, it: int, pairs: list[tuple[int, int]], n: int) -> None:
         """`--export-bundle`：把 it..it+n-1 打成**可上传云机**的全离线任务包（本轮不训练）。
 
         用户需求（2026-09-17）：「hub 支持打包导出训练任务（课程、初始权重、代码），以
-        kaggle/colab 官方方式上传云机后，云机全程自主完成训练」。与半离线的差别：包一旦
+        kaggle/colab 官方方式上传云机后，云机全程自主完成训练」。★ 2026-09-25 起它是
+        **离线腿的唯一载体**（「发一份 kind=run 队列项」那条腿已退役，plan §7）：包一旦
         写出，hub 就可以关机——任务信息（课程/超参/血缘/计划/代码）全在包里。
 
         轮次对齐（整条第 N 个容易错的地方）：本轮的 `it` **就是**包里要跑的第一轮（loop 的

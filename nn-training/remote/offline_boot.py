@@ -114,6 +114,26 @@ OFFLINE_LEASE_TTL_SEC = 900
 WORKER_ID_NAME = ".worker-id"
 #: 心跳周期（秒）：租约 900s ⇒ 60s 一跳留了 15 次补跳的余量（网络抖动 / 长轮之间）。
 HEARTBEAT_SEC = 60.0
+
+#: 角色头（与 `remote/protocol.py::ROLE_HEADER` / `ROLE_HEADER_VALUE` 逐字相同；测试守——
+#: 本模块**不得 import `remote.*`**，理由见文件头）。
+#:
+#: ★ 2026-09-25（plan/online-offline-role-routing §7.0.1 #2）：跑本 notebook 的云机**天生
+#: 就是离线盘** —— 它自报这一条，hub 才认得出「离线盘在线」（`/admin/queue` 的
+#: `offline_disk` 读数），也才拦得住别人拿走离线课的任务包（与 job 腿共用同一份归属判据）。
+#: 这是**这块盘的身份**，不是「每门课一个开关」：不因此要求 ipynb 填课程名
+#: （`requested_courses` 空 ⇒ 照旧走 `/offline/tasks` 清单发现）。
+ROLE_HEADER = "X-Battle-Offline"
+ROLE_HEADER_VALUE = "1"
+
+
+def _headers(token: str) -> dict[str, str]:
+    """hub 请求头：口令 + **身份**（`X-Battle-Offline`，见 `ROLE_HEADER` 的理由）。
+
+    所有 hub 调用（探活 / 取包 / 续跑锚点 / 代码 / 清单 / 租约 / 补传）都走它：少一处
+    就等于那一次「这块盘没报名」，而漏掉的后果是**静默**的（读数少一个、包可能被别处拿走）。
+    """
+    return {"Authorization": "Bearer " + token, ROLE_HEADER: ROLE_HEADER_VALUE}
 #: 清单轮询的缺省间隔（秒）——`CFG.queue_poll_sec`（与等包轮询同档）。
 DEFAULT_QUEUE_POLL_SEC = 15.0
 
@@ -374,7 +394,7 @@ def probe_hub(hub: str, token: str, log: Callable[[str], None], timeout: float =
     """`GET /ping` 探活：True/False（**只判连通性**，鉴权错也算「通」——那是配置问题不是网络问题）。"""
     try:
         req = urllib.request.Request(
-            hub.rstrip("/") + "/ping", headers={"Authorization": "Bearer " + token}
+            hub.rstrip("/") + "/ping", headers=_headers(token)
         )
         with _build_opener().open(req, timeout=timeout) as resp:
             resp.read(1)
@@ -470,7 +490,7 @@ def fetch_task_pack(
     url = f"{hub.rstrip('/')}/offline/task-pack?course={urllib.parse.quote(course)}"
     try:
         raw = _fetch_guarded(
-            url, {"Authorization": "Bearer " + token}, log, "task-pack", timeout
+            url, _headers(token), log, "task-pack", timeout
         )
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
@@ -543,7 +563,7 @@ def fetch_resume(
     """
     url = f"{hub.rstrip('/')}/offline/resume?course={urllib.parse.quote(course)}"
     try:
-        req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+        req = urllib.request.Request(url, headers=_headers(token))
         with _build_opener().open(req, timeout=timeout) as resp:
             meta = json.loads(resp.read().decode("utf-8"))
     except Exception as e:
@@ -563,7 +583,7 @@ def fetch_resume(
     for name in ("weights.json", "opt.tar", "row.json"):
         q = f"{url}&it={it}&name={urllib.parse.quote(name)}"
         try:
-            req = urllib.request.Request(q, headers={"Authorization": "Bearer " + token})
+            req = urllib.request.Request(q, headers=_headers(token))
             with _build_opener().open(req, timeout=timeout) as resp:
                 (ac_dir / name).write_bytes(resp.read())
         except Exception as e:
@@ -791,7 +811,7 @@ def _code_candidates(
         try:
             got = _fetch_guarded(
                 hub.rstrip("/") + "/code",
-                {"Authorization": "Bearer " + token},
+                _headers(token),
                 log,
                 "code.zip",
                 PACK_TIMEOUT,
@@ -1345,7 +1365,7 @@ def _post_json(url: str, token: str, log: Callable[[str], None], *, timeout: flo
     这里是几百字节的控制消息，且要的是「失败也要拿到状态码与正文」（护栏会抛）。
     """
     req = urllib.request.Request(
-        url, data=b"", method="POST", headers={"Authorization": "Bearer " + token}
+        url, data=b"", method="POST", headers=_headers(token)
     )
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -1396,7 +1416,7 @@ def fetch_task_list(
 ) -> list[dict] | None:
     """`GET /offline/tasks` → 任务清单；`None` = **hub 不支持 / 不可达**（调用方据此降级）。"""
     url = f"{hub.rstrip('/')}{OFFLINE_TASKS_PATH}"
-    req = urllib.request.Request(url, headers={"Authorization": "Bearer " + token})
+    req = urllib.request.Request(url, headers=_headers(token))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             doc = _json_dict(resp.read())

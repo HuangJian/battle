@@ -1,16 +1,19 @@
-"""test_run_segment.py —— 半离线整段（kind=run）的 **hub 侧**：段长解析 + 发布 + 计划随 payload。
+"""test_run_segment.py —— `kind=run` 的**形状**（hub 侧）：段长解析 + 发布 + 计划随 payload。
 
-用户需求（2026-09-17）：「云机从 hub 领到训练任务（课程、初始权重、代码）后，即使本机 hub
-一直失联，也能全程自主完成训练，并以 kaggle/colab 官方方式提供产物（每轮权重和指标）打包
-下载。」节点侧的执行器/产物/续跑在 `tests/test_run_loop.py`（+ `tests/test_plan.py`）；本文件
-钉的是**交接的那一半**——hub 必须真的能把「整段」发出去，否则节点再能干也无从领起：
+★ 2026-09-25：它曾经钉的是「半离线整段」这条**队列腿**（一次领走 it..end_it、本机等 8h）
+—— 那条腿已退役（`plan/online-offline-role-routing.plan.md` §7）。剩下的两半仍然有用，
+而且都在**导出腿**（任务包）上：
 
-  * 开关解析：`--run-iters` > `courses.<课>.run_iters` > `rl.run_iters` > 0（缺省**关**，
-    历史行为逐字节不变）；等待预算同规（缺省 8h）；
-  * 发布：`publish_job(kind="run", plan_bytes=…)` 把 `plan.json` 放进 **payload**（节点解包
-    即得），manifest 记 `plan_sha256`；缺计划/带本地 shard 一律**拒发**（不是静默降级）；
-  * 段长语义：`max_iters=n-1` ⇒ 计划覆盖 it+1..it+n-1（模板 argv 是给**下一轮**的）；
-  * 幂等：同一份计划重发 ⇒ 同一 job_id（逐轮重试/进程重启后重发走的正是这条路）。
+  * 开关解析：`--run-iters` > `courses.<课>.run_iters` > `rl.run_iters` > 0（缺省**关**）。
+    今天它声明「这门课由云机接手」，同时是 `--export-bundle` 的终点；`run` 仍在来源枚举里
+    （离线课 ⇒ 本机不跑，见 `tests/test_loop_round.py` 的 `resolve_collect_mode`）；
+  * 发布形状：`publish_job(kind="run", plan_bytes=…)` 把 `plan.json` 放进 **payload**、
+    manifest 记 `plan_sha256`；缺计划/带本地 shard 一律**拒发**（不是静默降级）——任务包
+    （`--export-bundle`，带 `export_path` ⇒ `register=False`）靠的正是这套形状；
+  * 计划区间：`max_iters=n-1` ⇒ 覆盖 it+1..it+n-1（模板 argv 是给**下一轮**的）；
+  * 幂等：同一份计划重发 ⇒ 同一 job_id。
+
+「生产端只有一个发布调用点、且必带 export_path」由 `tests/test_offline_leg_retired.py` 枚举钉住。
 """
 
 from __future__ import annotations
@@ -33,10 +36,8 @@ from rl.cli import build_argparser
 from rl.iter_job import build_iter_spec
 from rl.loop_steps import (
     ROLLOUT_SRCS,
-    RUN_WAIT_DEFAULT_SEC,
     _rollout_source,
     _run_segment_iters,
-    _run_wait_sec,
 )
 from rl.plan import build_plan, dump_plan, planned_iters
 
@@ -63,7 +64,6 @@ def _args(**over: object) -> SimpleNamespace:
         "course_frozen_bytes": None,
         "course_path": "",
         "run_iters": 0,
-        "run_wait_sec": 0.0,
     }
     base.update(over)
     return SimpleNamespace(**base)
@@ -106,7 +106,7 @@ def test_console_written_course_keys_drive_the_per_round_read() -> None:
     （`_rollout_source` / `_run_segment_iters`，读的是 `dist_common.load_dist_config()`）
     ⇒ 机制上不需要重开课。本用例把「写面 ↔ 读面」钉在一起，防两腿各自漂：
 
-      * 离线（整段上云）= `rollout_src="run"` **与** `run_iters=-1` 两键都在 ⇒ `run` + `-1`；
+      * 离线（云机接手）= `rollout_src="run"` **与** `run_iters=-1` 两键都在 ⇒ `run` + `-1`；
       * 切回在线 = 两键**都删**（只删一个 = 半状态：要么本机采样却又被当段长，
         要么反过来）⇒ `local` + `0`。
 
@@ -180,19 +180,8 @@ def test_cli_default_rollout_src_never_shadows_the_course_level_key() -> None:
     assert _rollout_source(_args(rollout_src="node", course_path="curricula/x1.jsonc")) == "node"
 
 
-def test_segment_wait_sec_default_and_override() -> None:
-    """等待上限：CLI > rl.run_wait_sec > 缺省 8h（整段墙钟量级，不是 30min）。"""
-    assert _run_wait_sec(_args()) == RUN_WAIT_DEFAULT_SEC
-    assert _run_wait_sec(_args(run_wait_sec=60.0)) == 60.0
-    with patch("rl.loop_steps.dist_common") as dc:
-        dc.load_dist_config.return_value = {"rl": {"run_wait_sec": 7200}}
-        assert _run_wait_sec(_args()) == 7200.0
-        # CLI 仍压过配置
-        assert _run_wait_sec(_args(run_wait_sec=11.0)) == 11.0
-
-
 def test_segment_plan_range_matches_declared_length() -> None:
-    """`max_iters=n-1` ⇒ 覆盖 it+1..it+n-1：段长 n 的语义必须与 `planned_iters` 对得上。"""
+    """`max_iters` 与 `planned_iters`/`end_it` 的对应（导出包的计划区间靠它）。"""
     plan = build_plan(_args(), it=3, iters_total=20, rotate_seed=7, max_iters=4, log=lambda _m: None)
     assert plan["end_it"] == 7
     assert planned_iters(plan) == [4, 5, 6, 7]
@@ -216,7 +205,12 @@ def test_build_iter_spec_node_label_marks_autonomous_shards() -> None:
 
 
 def _publish(tmp_path: Path, *, n: int = 3, it: int = 1, **over: object) -> tuple[dict, bytes]:
-    """发布一个 kind=run job，返回 (manifest, plan 字节)。"""
+    """发布一个 `kind=run` 的 manifest（**形状**：任务包/导出腿用的那种），返回 (manifest, plan 字节)。
+
+    注：生产代码里这条路只在 `--export-bundle` 上走（带 `export_path` ⇒ 不进待领池）；
+    这里直接调 `publish_job` 是为了单测形状与 payload 内容——「生产端只有一个调用点、
+    且必带 export_path」由 `tests/test_offline_leg_retired.py` 枚举钉住。
+    """
     tmp_path.mkdir(parents=True, exist_ok=True)  # 子目录（拒发用例用 tmp_path/"a" 之类）
     args = _args()
     plan = build_plan(args, it=it, iters_total=it + n, rotate_seed=99, max_iters=n - 1, log=lambda _m: None)

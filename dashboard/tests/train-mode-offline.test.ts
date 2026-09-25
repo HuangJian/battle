@@ -91,7 +91,7 @@ describe('course-lifecycle / train-mode（开课）：离线落课程级键 + hu
     expect(tm).toContain("src === 'node' || src === 'auto'")
   })
 
-  it('开课时把该课 hub 模式一起放对：离线 ⇒ 只让带标 worker 领；在线 ⇒ 恢复派发', () => {
+  it('开课时把该课 hub 模式一起放对：离线 ⇒ 该课停车；在线 ⇒ 恢复派发', () => {
     expect(src).toContain("opts.trainMode === 'offline' ? 'offline' : 'online'")
     expect(src).toContain('pushHubMode(c, trainMode')
     // 结果要回话（静默切模式 = 「我明明选了在线却不动」）
@@ -172,7 +172,7 @@ describe('热切开关的接线：route → setCourseMode → 面板（三源一
     expect(app).toContain('courseRolloutSrc={stateView?.courseRolloutSrc ?? null}')
     const panel = readSrc('src/web/app/panels/CourseMatrix.tsx')
     expect(panel).toContain('courseRolloutSrc,')
-    expect(panel).toContain('配置仍是整段上云')
+    expect(panel).toContain('配置仍是离线（云机接手）')
   })
 })
 

@@ -1,4 +1,4 @@
-"""tests/test_run_loop.py —— 半离线自主段（`remote/run_loop.py` + `remote/artifacts.py`）。
+"""tests/test_run_loop.py —— 离线自主段（`remote/run_loop.py` + `remote/artifacts.py`）。
 
 用户需求（2026-09-17）：云机从 hub 领到任务（课程 + 初始权重 + 代码）后，**即使 hub 一直
 失联**也要能全程自主跑完，并以 Kaggle/Colab 官方方式（工作目录里的产物 zip）交付逐轮权重
@@ -288,7 +288,9 @@ def test_run_standalone_loads_course_snapshot_into_iter_spec(
     此前它从不传 course ⇒ `iter_spec` 里 `stage_json_of(course, stage)` 拿不到自定义关
     （ladder 2000+）⇒ `retarget_argv` 把计划里的 `--stage-json` 整对删掉 ⇒ 导出器解析
     stage 失败 → **空局**（0 samples、rc=0、零 shard）→ 整段 rollout 被误报成环境/写盘
-    问题（半离线 worker 侧已传 course：worker.py run_plan_job(course=course)，只有这条漏）。
+    问题（`run_plan_job` 侧已传 course，只有这条漏）。注：队列那条腿 2026-09-25 退役
+    （plan/online-offline-role-routing §7）——`run_plan_job` 今天没有生产调用者，这条回归
+    守的是「从首轮结果续下去」这个入口本身（任务包/产物目录续跑共用同一段驱动）。
     """
     plan, m, job_dir, first = _prepare(tmp_path, iters=3, start_it=1)
     art = tmp_path / "art"

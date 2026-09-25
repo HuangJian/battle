@@ -2467,3 +2467,49 @@ Node/Bun 无 `sched_getaffinity`）+ `hostLogicalCores` 兜底，逐条镜像 `e
 第一道坎）· 只改一处核数读数 ⇒ python 按 96 算、TS 工具/脚本按 224 算，同一次跑里两个口径
 （`eval-course-ckpt` 的默认 worker、agent 上报的 `cpus`、gate 的 `-n` 都还在按宿主机数排）。
 —— 全文（现场读数 / 三条根因 / 落地表 / 下次真机该看的四个读数）→ `docs/nn/runtime-opt.md` §23 · 锚 `## §23`
+
+## §2026-09-25-goalnn-offline-leg-retired（2026-09-25，plan/online-offline-role-routing.plan.md §7）
+
+**「离线 = 本机发一份 `kind=run` 队列项、随后等 8h」这条腿退役** —— 离线场景**没有「一整段」这个
+中间概念**（用户 2026-09-25 口径）：云机接手一门课就一直跑，直到 ① 跑完课程 ② 云机配额用尽
+③ 人工停机/停课，**能传回来多少是多少**。离线课的唯一载体是**任务包**（`--export-bundle` →
+云机 `battle.offline.ipynb`：`/offline/tasks` 清单 → 取包 → 跑完逐轮回传 → 控制台导入产物）。
+落地（P5，逐条都在代码里）：
+
+1. **砍在发布点，不砍配置**：发布端（发一份带段长的队列项那个方法）删除，
+   `RUN_WAIT_DEFAULT_SEC` / `_run_wait_sec` / `--run-wait-sec` / `rl.run_wait_sec` 一并退役（**没有
+   8h 白等这回事了**）。配置里的 `rollout_src=run` + `run_iters` **保留**——它是「这门课由云机
+   接手」的既有声明，也是导出腿的终点口径（删字段会让 `resolve_collect_mode` 落回 `COLLECT_LOCAL`
+   ⇒ **本机偷偷自己采样、与云机双跑**）。
+2. **本机循环遇离线课干净收官**：`resolve_collect_mode` 的 `COLLECT_SEGMENT` → `COLLECT_OFFLINE`
+   （来源 `run` **或**写了终点值 ⇒ 离线，**绝不**回落本机采样）；`step_course_iter` 打一行指路
+   （`battle.offline.ipynb`）后返回 `ROUND_OFFLINE_EXIT`：不采样、不发队列项、不等待、不进账本
+   （不是失败：不落 `iter_error`、不计连击）。该课的权重/读数由**产物导入**推进本机账本。
+3. **无消费者改成当场报错**：`_remote_ppo_publish` 是 `kind=run` 的唯一咽喉 —— 带 `plan_bytes`
+   而不带 `export_path` ⇒ `SystemExit`，消息指路取包链与本机该走的那一步（任务包）。
+   worker 侧对 `kind=run` **响亮拒收**（最前，零指令零下载）：不是「当成 iter 跑一轮」——半跑会
+   产出权重、让控制面看着像在推进，而 hub 侧早就不等了（那是最难查的静默分叉）。
+4. **离线盘报名**（R3：离线盘在 hub 眼里是匿名的）：`offline_boot` 的每个 hub 调用都带
+   `X-Battle-Offline: 1`（与 job 腿共用同一份归属判据；本模块不 import `remote.*`，两份字面量由
+   测试守逐字相同），hub 在 `/offline/*` 前缀记一次 ⇒ `/admin/queue.offline_disk` 报
+   `recent`/`last_seen_ago` + **`stale_jobs`**（还挂着的离线待领项 = 盘上遗留 / 手写参数 /
+   混部期旧 hub）+ `hint`。这是「本环境有没有离线盘」**唯一**的报到面（此前恒为空）。
+5. **保留的两条能力（用户点名，一个字节都不改）**：① 离线云机**串行跑多门课**（清单 + `drain`
+   驻守 + 租约 + 预算/空闲上限）；② **notebook 不写课程名**（`requested_courses` 空 ⇒ 清单发现）。
+   所以「报名」只能是**这块盘的身份**，不许做成「每门课一个开关」。
+
+**被否决**：① 取向 2「保留这条腿、只给离线盘」——`role=offline` 的消费者**当时并不存在**（全仓只有
+测试设过 `CFG["offline_worker"]`），要成立就得新造并部署一个，而它的活已被取包链完整覆盖
+⇒ 一个任务两个执行者，正是 2026-09-25 云机接错盘事故的结构；② 在 `setCourseMode` 里**删配置字段**
+来关掉这条腿（见落地 1：会静默退回本机采样、与云机双跑）；③ 只做「熔断」（单独用 = 每次切离线先
+白等一轮，且不解决「两个执行者」的结构）；④ 把 `remote/run_loop.py::run_plan_job` 一并删掉
+（它无生产调用者了，但它是「从首轮结果续下去」的唯一入口，`tests/test_run_loop.py` 的 4 组段语义
+回归挂在它上面——删它等于把这些回归一起删）；⑤ 加回退开关（`NN_ROLE_ROUTING=0` 那类）——
+会把「一个盘一种任务」变成可选，而它正是这次事故的判据。
+
+**违反后果**：留着旧腿 ⇒ 队列项无人能领、本机白等 8h，而日志一切正常（队列不降、没人报错）·
+在配置里删字段 ⇒ 本机与云机**双跑**同一门课（两份权重、账本互相污染）· 只在测试里改断言而不动
+生产枚举 ⇒ 第 5 条认领/发布路径静默绕过归属闸 · 把「报名」做成每门课的开关 ⇒ 用户点名的两条能力
+（多课程串行 / 不写课程名）当场作废。
+—— 全文（口径、R1–R4、残留清单、DoD）→ `plan/online-offline-role-routing.plan.md` §7 ·
+档案 `docs/nn/remote-transport.md` §48 · 回归 `nn-training/tests/test_offline_leg_retired.py`

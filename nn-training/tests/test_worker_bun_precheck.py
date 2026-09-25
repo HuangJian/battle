@@ -2,7 +2,8 @@
 
 守的是**设计决定**，不是实现细节：
 
-  ① `kind in (iter, run)` ∧ 节点没 bun ⇒ 抛 `ProtocolError` **且一个字节都不下**
+  ① `kind=iter` ∧ 节点没 bun ⇒ 抛 `ProtocolError` **且一个字节都不下**（`kind=run`
+     在更前面就被拒了：那条腿已退役，见 `tests/test_offline_leg_retired.py`）
      （payload / code.zip / ts_code.zip 三件都在自检之后才取；户报障现场是真机
      3.42MB / 12.1s 全白传之后才发现没 bun）；
   ② `echo=True` 豁免：echo 走「只验传输链」，整个跳过 rollout（`worker.py` 的 kind 分叉），
@@ -57,7 +58,7 @@ def _manifest(kind: str) -> dict:
         "data_fp": "d" * 64,
         "payload_sha256": "p" * 64,
     }
-    if kind in ("iter", "run"):
+    if kind in ("iter", "run"):  # kind=run 的 manifest 由 test_offline_leg_retired 复用
         raw["ts_code_sha256"] = "t" * 64
         raw["rollout"] = {
             # 一局的完整命令（argv 校验：白名单脚本 + --stages/--seeds 各一次 + --out/--weights 相对路径）
@@ -107,7 +108,7 @@ def downloads(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     return seen
 
 
-@pytest.mark.parametrize("kind", ["iter", "run"])
+@pytest.mark.parametrize("kind", ["iter"])
 def test_missing_bun_rejects_before_any_download(
     tmp_path: Path, no_bun: None, downloads: list[str], kind: str
 ) -> None:
@@ -148,15 +149,15 @@ def test_bun_present_does_not_block_the_flow(
 def test_cached_result_is_reused_even_without_bun(
     tmp_path: Path, no_bun: None, downloads: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """④ 复用块在自检之前：上次算完、只差重传的 job 不该被「缺 bun」拒掉。
+    """④ 复用块在自检之前：上次算完、只差重传的 job 不该被「缺 bun」拒掉（用 `iter` 验序）。
 
     `validate_result` 在这里被打桩成通过 —— 本用例钉的是**顺序**（复用优先于能力自检），
     不是结果体的字段校验（那由 `test_remote_ppo` 一族覆盖）。
     """
     monkeypatch.setattr(worker, "validate_result", lambda *_a, **_k: None)
-    cached = {"job_id": JID, "kind": "run", "echo": False}
+    cached = {"job_id": JID, "kind": "iter", "echo": False}
     job_dir = tmp_path / JID
     job_dir.mkdir(parents=True)
     (job_dir / "_result.json").write_text(json.dumps(cached), encoding="utf-8")
-    assert worker.run_job("http://hub", "tok", _job("run"), work_dir=tmp_path) == cached
+    assert worker.run_job("http://hub", "tok", _job("iter"), work_dir=tmp_path) == cached
     assert downloads == []

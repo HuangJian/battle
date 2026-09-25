@@ -116,9 +116,12 @@ describe('setCourseMode（热切 + 落意图）', () => {
     expect(calls[0].auth).toBe('Bearer tok')
     expect(readCourseModes()).toEqual({ c5: 'offline' })
     // ★ 2026-09-24（L1）：文案换成**合并后**的语义——「只接收 it 权重/指标回传」是旧的半语义
-    //（那颗开关现在同时把本机置成整段上云），继续拿它当断言基准会把矛盾的双关锁在测试里。
+    //（那颗开关现在同时把本机置成「这门课不归本机」），继续拿它当断言基准会把矛盾的双关锁在测试里。
+    // ★ 2026-09-25（plan/online-offline-role-routing §7）：文案改指**取包链**——离线课不再经
+    // hub 队列跑（那条腿退役），云机取任务包接手。
     expect(r.message).toContain('已切离线')
-    expect(r.message).toContain('整段上云')
+    expect(r.message).toContain('battle.offline.ipynb')
+    expect(r.message).toContain('本机不跑这门课')
     expect(r.message).not.toContain('只接收')
   })
 
@@ -244,7 +247,7 @@ describe('restoreCourseModes（起 hub 后回灌）', () => {
 
 /** 用户报障：离线课切回在线后 Kaggle 仍因缺 bun 拒单（派出的 job 仍是 `kind:"run"`）。
  *
- *  根因：开关只翻了 hub 那半边，`courses.<课>.rollout_src=run` 一直没撒 ⇒ 下一段照样整段上云。
+ *  根因：开关只翻了 hub 那半边，`courses.<课>.rollout_src=run` 一直没撒 ⇒ 本机下一轮仍不采样。
  *  本组钉的就是「一颗开关 = 完整语义」（plan/train-mode-hot-switch.plan.md L1）。
  */
 describe('★2026-09-24 L1：切模式同时写本机训练配置（不再需要重开课）', () => {
@@ -285,18 +288,19 @@ describe('★2026-09-24 L1：切模式同时写本机训练配置（不再需要
     expect(courseRow('x20-firstkill')).toMatchObject({ rollout_src: 'run', run_iters: -1 })
   })
 
-  it('文案带语义与时机：离线 ⇒ 「整段上云」（节点要 bun）；在线 ⇒ 「不需要 bun」+「段边界生效」', async () => {
+  it('文案带语义与时机：离线 ⇒ 「本机不跑这门课」（取包链接手）；在线 ⇒ 「不需要 bun」+「轮边界生效」', async () => {
     const off = await setCourseMode('x20-firstkill', 'offline')
-    expect(off.message).toContain('整段上云')
-    expect(off.message).toContain('段边界生效')
+    expect(off.message).toContain('本机不跑这门课')
+    expect(off.message).toContain('battle.offline.ipynb')
+    expect(off.message).toContain('轮边界生效')
     const on = await setCourseMode('x20-firstkill', 'online')
     expect(on.message).toContain('不需要 bun')
-    expect(on.message).toContain('段边界生效')
+    expect(on.message).toContain('轮边界生效')
   })
 })
 
 /** 逆测试（plan §2.2 F9）：`pushHubMode`（开课/停课的 hub 推送）曾直接调 `setCourseMode`，
- *  于是「加一步写配置」会让**开课重复写盘 1–3 次**、还会把**停课**误翻译成「整段上云」。
+ *  于是「加一步写配置」会让**开课重复写盘 1–3 次**、还会把**停课**误翻译成「云机接手」。
  *  所以推 hub 必须走**只推 hub + 落意图**的原语。 */
 describe('★2026-09-24 L1：`pushCourseMode`（hub+意图的原语）绝不动 rl-config', () => {
   it('推 offline：hub 收到了、意图落了、**配置一个字没写**', async () => {

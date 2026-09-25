@@ -1,11 +1,12 @@
 # Plan: online-offline-role-routing — 让「该由哪个盘执行」成为 job 的不变式
 
 > **交付物**：本 plan + 代码（2026-09-25 已实施，见 §8 实施修订表）。
-> **状态**：**已实施**（P1/P2/P3 落地；P4 未做，见 §3）。评审吸收记录见 §8。
+> **状态**：**已实施**（P1/P2/P3 落地；**P5 = §7 的收尾：已实施**（2026-09-25）；P4 未做，见 §3）。
+> 评审吸收记录见 §8；P5 的记录 = `DECISIONS §2026-09-25-goalnn-offline-leg-retired` + `docs/nn/remote-transport.md` §48。
 > **背景**：`reports/online-offline-hot-switch-audit-2026-09-25.md`（六条不足 L1–L6 / 六条不变式 I1–I6）。
 > **姊妹 plan**：`plan/switch-mode-drops-jobs.plan.md`（管"切换即撤单"）。本 plan 管"归属"。
 > **两者关系**：必须同批或紧接落地 —— 只做归属会出现"旧 job 一直不可领"，只做撤单会出现"撤了单但仍派给错盘"。
-> **阅读顺序**：§1 事实链 → §2 设计 → §3 分阶段 → §4 e2e → §5 DoD → §6 边界 → §7 待裁决 → §8 实施修订。
+> **阅读顺序**：§1 事实链 → §2 设计 → §3 分阶段 → §4 e2e → §5 DoD → §6 边界 → §7 裁决（`kind=run` 归谁）→ §8 实施修订。
 > **行号只作定位加速，判据看函数名。**
 
 ---
@@ -148,6 +149,7 @@ CFG["offline_worker"] → supervisor argv `--offline` → worker_loop(role=…) 
 | **P2** | §2.4 取包端点补 mode 闸 | `hub_server.py` | ✅ 已实施 |
 | **P3** | §2.5 配置短路 | `rl/cli.py` | ✅ 已实施 |
 | **P4** | I6 第三块盘：`battle.cloudflared.ipynb` 装 bun + 接"每次会话刷新"（或明确退役它） | 该 ipynb | ⬜ 未做（与本 plan 正交） |
+| **P5** | **§7 的收尾**：`kind=run` 的队列项退役（砍在发布点）+ 无消费者时的响亮拒 + 离线盘报名与读数 | `rl/loop_steps.py` / `rl/loop_round_steps.py` / `rl/loop_round.py` / `rl/loop_core.py` / `rl/loop_runner.py` / `rl/cli.py` / `remote/worker.py` / `remote/run_loop.py` / `remote/offline_boot.py` / `remote/hub_server.py` | ✅ 已实施 |
 
 **实施顺序（已按此落）**：`protocol.py` 常量+映射 → `hub_client.py` 写字段 → `hub_server.py`
 闸下沉 + 三个面透传 role → `worker.py` 两跳带头 → push 腿同源 → notebook 文案同步。
@@ -221,22 +223,143 @@ CFG["offline_worker"] → supervisor argv `--offline` → worker_loop(role=…) 
 
 ---
 
-## 7. 待裁决（仍未裁决，**阻塞的不是 P1 而是它的收尾**）
+## 7. 裁决：`kind=run` 的 job 归谁 —— **已裁决（2026-09-25，用户委托 agent 裁决）**
 
-**`kind=run` 的 job 在 P1 之后归谁？**
+**结论：取向 1（源头砍掉）为主 + 取向 3 的机制作尾巴（熔断收尾）；取向 2 否决。**
+**口径（用户 2026-09-25）：离线场景里没有「一整段」这个中间概念。**
 
-P1 之后 `role=offline` 的 job 只给 `role=offline` 的 worker。若没有任何 worker 声明离线角色，
-这类 job 无人接，本机训练侧会白等（`rl/loop_steps.py RUN_WAIT_DEFAULT_SEC=8h`）。
+### 7.0 离线场景的口径（先定死，别拿代码里的残留当需求）
 
-三个取向（**用户未裁决，agent 落地到这里必须停下来问**）：
+**云机接手一门课 ⇒ 就一直跑**，直到三种收尾之一：① 跑完整个课程；② 云机配额/预算用尽；
+③ 人工停机/停课（云机收到指示，轮边界收尾）。**能传回来多少是多少** —— 已跑完的轮尽力补传，
+不追求完整、不阻塞在飞的那一轮。
 
-1. **源头砍掉（推荐）**：`setCourseMode('offline')` 不再写 `rollout_src=run` / `run_iters`
-   ⇒ 离线课整体交给取包链；`kind=run` 逐步自然消亡。**代价**：切离线后本机不再发活。
-2. **保留但只给离线 worker**：需要一个真实 `role=offline` worker（等于让某个盘接 hub job）。
-3. **拒单 + 熔断收尾**：job 烂在队列、3 次熔断冻结，本机等超时收兵（训练停摆至人工处理）。
+⇒ 所以「一整段 job」不是离线场景的载体，它只是 `kind=run` 这条**残留路径**的形状（本机发一份带段长的
+队列项、随后等 8h）。离线场景的载体是**任务包**（`battle.offline.ipynb` 取包接手一直跑）。
+（用户 2026-09-25 原话：「offline notebook 接过去就一直跑，直到跑完整个课程，或者云机配额用尽，
+或者人工停机/停课，能传回来多少是多少」——所以「段长」这个词在离线场景里没有位置。）
 
-**P1 已落"归属"这一半**（对 `kind=ppo`/`iter` 立即生效、无副作用），但**本条仍阻塞 P1 的收尾**——
-不许当成做完了。撤单腿（姊妹 plan）与它是同一件事的两半。
+### 7.0.1 本裁决**不许碰**的两条既有能力（用户 2026-09-25 点名保留）
+
+1. **离线云机串行跑多门课**：`offline_boot.run` 的 `/offline/tasks` 清单 + `queue_mode=drain`（缺省：跑完一批
+   继续驻守）+ claim/heartbeat/release 租约 + `session_budget_sec`/`idle_wait_sec`；**空队列 = 正常收工 rc=0**。
+   ⇒ P5 一个字节都不动 `/offline/*`。
+2. **notebook 里不写课程名**：`requested_courses` 空 ⇒ 走清单发现（只对没有清单端点的老 hub 降级回「必须填 course」）。
+   ⇒ P5 的「离线盘报名」只能是**这块盘的身份**（离线 notebook 天生就是离线盘，自报即可），
+   **不许**做成「每门课一个开关」，也不许因此要求 ipynb 填课程名。
+
+起因：P1 之后 `role=offline` 的 job 只给 `role=offline` 的 worker，若没有任何 worker 声明离线角色，
+这类 job 无人接，本机训练侧白等（`rl/loop_steps.py RUN_WAIT_DEFAULT_SEC=8h`）。
+
+### 7.1 依据（R1–R4 均已在代码里核实）
+
+| # | 事实 | 出处 |
+|---|---|---|
+| R1 | 队列里的 `kind=run`（残留路径）**只有一个生产发布者**：离线档本机循环的那次派发（`register=True`，本机随后等 8h） | `rl/loop_steps.py _remote_run_segment` → `_remote_ppo(plan_bytes=…, register=export_path is None)` |
+| R2 | `--export-bundle`（取包链的入口；控制台「切离线」自动跑的就是它）**也**造 `kind=run` 的 manifest，但 `register=False`（只建 job 目录当打包源，**不进待领池**、不记账本） | `rl/loop_steps.py`（`register=export_path is None` + 导出分支）· `dashboard/src/server/bundles/export.ts taskBundleArgs` |
+| R3 | **没有任何盘是离线角色**：`CFG["offline_worker"]` 全仓只有测试设过；`offline_boot`（取包链）全文碰不到 `/jobs`，它自报身份只有 `Authorization` | 审计 §4-L3 · `remote/offline_boot.py` |
+| R4 | 因此 P1 之后 `role=offline` 的**队列项无人能领**（旧 job 按 `kind` 兜底也是 offline），本机在每个段上白等 8h | `protocol.KIND_ROLES`（`run ⇒ offline`）· `hub_server._JobStore.role_blocked` |
+
+⇒ **取向 2（保留但只给离线 worker）** 要成立，必须**新造并部署**一个消费者；而它的功能已被
+**取包链**完整覆盖且更完整（`battle.offline.ipynb`：`/offline/tasks` 清单 + 租约 + 取包 + 产物回传 +
+it0 基线 + 本机产物优先；四份 plan 在建/已实施）⇒ 保留它 = **一个任务两个执行者**，
+正是本次事故的结构（审计 §2：两条链结构上分离，问题在闸门语义）。
+⇒ **取向 3 单独用**（只熔断）＝ 每次切离线都先白等一轮，且不解决「两个执行者」的结构问题。
+
+### 7.2 实施形状（P5：砍在**发布点**，不是配置字段）
+
+1. **配置不动**：`setCourseMode('offline')` 继续写 `rollout_src=run` + `run_iters` —— 它们是「这门课由云机
+   接手」的既有声明（`run_iters=-1` = 跑到课程末，与 §7.0 的离线场景同义），且 `--export-bundle` 的终点口径
+   与它同源。**不**按本节的原始稿（取向 1 的字面写法）
+   在这里删字段：`resolve_collect_mode(seg=0, source≠node)` 落到 `COLLECT_LOCAL` ⇒ **本机偷偷退回自己
+   采样训练**，与云机取包链**双跑**（这正是原稿那句「代价：本机不再发活」没写出来的坑）。
+2. **本机循环遇 `run` 不再派发**：不发布队列项、不采样、不进账本、不等 `run_wait_sec`；
+   收工形状复用既有 `ROUND_BUNDLE_EXIT` 的「干净收官」（`loop_runner` 置 `finished=True` +
+   一行 `finish_reason`），日志**指路取包链**（该用哪个 ipynb）。§6 的「不碰 `stopCourse`」不变。
+   该课的权重/读数由**产物导入**（取包链的 `POST /offline/artifact` → 控制台导入）推进本机账本。
+3. **尾巴 = 熔断收尾（取向 3 的机制，不是它的取向）**：任何仍存在的 offline-role 队列项
+   （盘上遗留 / 手写 `--run-iters` / 混部期旧 hub）**不许白等 8h**：hub 侧补一条
+   **「本环境有没有离线 worker」**的读数（`/admin/queue` 已报 `roles`，worker 侧一并报 role），
+   训练侧发布前探一次 —— 无消费者 ⇒ **立即响亮拒跑 + 一行指路**（探不到读数才落到既有的有界等待）。
+4. **取包链零改动**：R2 那条路径（`register=False`）逐字节不动；`/offline/*` 与任务包格式不变，
+   `--export-bundle` 仍是「只读快照、不推进账本」。
+
+### 7.3 与姊妹 plan 的接口
+
+- 撤单腿（`plan/switch-mode-drops-jobs.plan.md`）在 **run 腿上结构性变成不可达**（没有 job 可撤）——
+  但**仍然要落**：切在线→离线时在飞的 **`iter`/`ppo`** job 仍靠它撤。
+- 两者因此**不再硬耦合**（本 plan 开头的「必须同批或紧接」对本条收窄为「`iter`/`ppo` 腿上同批」）：
+  先做哪条都不会留下「旧 job 不可领」或「撤了单但派给错盘」的半状态。
+
+### 7.4 DoD（P5 落地时逐条判）
+
+- [x] `/admin/queue` 上不再出现 offline-role 的**待领**项 —— 生产端不再发它
+      （枚举式：`tests/test_offline_leg_retired.py::test_run_manifest_is_published_from_exactly_one_place_with_export_path`；
+      残留项另有 `offline_disk.stale_jobs` 点名）。
+- [x] 离线课本机循环：一行指路 + 不采样 + 不派发 + 不进账本 + 不等待
+      （`test_offline_course_stops_the_round_cleanly_with_a_pointing_line` × 3 档 `run_iters`
+      + `test_offline_course_never_reaches_the_collect_step` + `resolve_collect_mode` 的
+      「绝不回落 `COLLECT_LOCAL`」断言）。
+- [x] 无消费者时**响亮拒**且**有界**（不是 8h）：发布咽喉点 `SystemExit`（
+      `test_publish_choke_point_refuses_a_run_queue_job_loudly`，消息含 `battle.offline.ipynb`
+      与 `--export-bundle`）+ worker 侧零下载拒收（`test_worker_refuses_a_run_kind_job_before_any_download`）
+      + `RUN_WAIT_DEFAULT_SEC`/`_run_wait_sec`/`--run-wait-sec`/`rl.run_wait_sec` 全部退役
+      （`test_production_code_has_no_trace_of_the_retired_leg`）。
+- [x] `--export-bundle` / `/offline/*` 逐字节不变（取包链 e2e 全绿；`e2e/test_offline_training_e2e.py`
+      的两条段用例改成钉「**遗留**离线项仍按归属派发 + 补传读面」）；§7.0 的三种收尾与「能传回来多少
+      是多少」不被本裁决改动。
+- [x] `nn-python-gate` 绿（2484 passed，含 ruff + mypy + tests/+e2e）+ dashboard typecheck/1158 测试绿
+      + 一条 `DECISIONS`（含被否决项：取向 2 / 在配置里删字段 / 只熔断 / 删 `run_plan_job` / 加回退开关）。
+
+### 7.5 取向 1 / 2 / 3 的对照（留档，免得再问一次）
+
+| 取向 | 本裁决 | 理由 |
+|---|---|---|
+| 1 源头砍掉 | ✅ **采用（砍在发布点）** | R1/R2：队列项只有一个发布者，且取包链是它的完整替代 |
+| 2 只给离线盘 | ❌ 否决 | R3：消费者**不存在**，要成立就得新造并部署一个（= 两套执行者） |
+| 3 熔断收尾 | ⚠️ **只作尾巴** | 单独用＝每次切离线先白等一轮，且留着「两个执行者」的结构 |
+
+### 7.6 残留清单：仓里还有哪些地方当成「离线 = 发一份队列 job」（2026-09-25 排查）
+
+> 判据：凡把 `rollout_src=run` / `run_iters` / `kind=run` 理解成「本机发一份 job 到队列、等人领」的地方。
+> 「保留」= P5 不动它（或只改措辞）；「退役」= P5 要拆掉的；「改词」= 行为不动、文案要跟上。
+
+**一、真会发出队列项的（退对象）**
+
+| 位置 | 现在的假设 | 归属 |
+|---|---|---|
+| `rl/loop_steps.py _remote_run_segment` | 本机发布一份 `kind=run` 队列项，随后等 `run_wait_sec` | **退役**（改为不派发 / 不采样 / 不进账本 / 不等） |
+| `rl/loop_round_steps.py` 的 `COLLECT_SEGMENT` 分支 | 采集模式分流里有一条「整段」腿 | **退役**；同文件的 `--export-bundle` 早退**保留**（取包链入口） |
+| `rl/loop_round.py resolve_collect_mode` / `COLLECT_SEGMENT` / `ctx.seg` | 段长决定「本机不采样」 | **半退役**：字段留（`--export-bundle` 的到哪停），`COLLECT_SEGMENT` 分支退役 |
+| `rl/loop_steps.py RUN_WAIT_DEFAULT_SEC` / `_run_wait_sec` / `--run-wait-sec` / `rl.run_wait_sec` | 等一个没人领的 job，硬顶 8h | **退役**（尾巴改成有界 + 响亮拒跑） |
+| `remote/worker.py`「半离线尾巴」（`kind == "run"` → `run_plan_job`） | worker 领到 run job 后把剩余轮次自己跑完 | **退役**（队列腿的消费端；取包链走 `run_loop.main --bundle`，与它无关） |
+| `remote/run_loop.py run_plan_job` | 同上 | **退役**（随发布端一起） |
+| `remote/hub_client.py publish_job` 的 `kind='run'` 必填校验 | `kind=run` 必须带 `plan_bytes` + `rollout_spec` | **保留**（`--export-bundle` 仍造这种 manifest），但注释要写明「它的消费者是取包链，不是队列」 |
+
+**二、配置/语义层（保留，改措辞）**
+
+| 位置 | 现在的说法 | 归属 |
+|---|---|---|
+| `dashboard/src/stack/specs.ts trainModeKnobs` | `offline ⇒ rollout_src=run + run_iters=-1`「整段上云」 | **保留**（= 「这门课由云机接手」的声明）；措辞改「整段/段长」→「由云机接手 / 到课程末」 |
+| `dashboard/src/server/actions/train-mode.ts` | 写配置 + 回执「整段上云」 | **保留写入**；回执改词（「本机不再采样」仍然对） |
+| `dashboard/src/server/actions/course-mode.ts` | 切离线回执「整段上云（云机自己跑 rollout）」 + 「一段 job 覆盖到课程末，trainer 阻塞在段等待里」 | **保留**（这颗开关就是把手交给取包链）；**两句文案 P5 后都不再成立**，要改 |
+| `dashboard/src/server/actions/course-lifecycle.ts` 停课回执 | 「带标 worker 仍可领已入队的整段 job」 | **改词**（P5 后这句话是假的） |
+| `dashboard/src/server/actions/course-lifecycle.ts` 开课预校验 | 「整段上云要求课程声明 iters>0」 | **判据保留**（包同样要有终点）、措辞改 |
+| `dashboard/src/server/api/state-view.ts` | 「离线课的 PPO job 不经 hub 队列认领」→ 关掉排队暂停红条 | **判据保留**；这条注释在 P5 之前**与代码不符**（本机循环确实会发一份队列项），P5 之后才为真 → **P5 的验收点之一** |
+| `dashboard/src/server/exit-watchdog.ts` | 认得 `--run-iters<0 …` 那条 SystemExit | **随 P5**：`--run-iters` 只剩导出用途就删掉这条匹配 |
+| `dashboard/src/server/bundles/export.ts` | `--run-iters -1` + `--export-bundle` | **保留**（取包链的入口，就是「云机接手」的交付物） |
+| `dashboard/src/core/types.ts` / `api/route.ts` 的域校验 / `OpenCourseModal.tsx` | `run` 是合法 rollout 源；离线档忽略 rollout 选择 | **保留**，注释改词 |
+| `dashboard/src/server/iters.ts`（事件记 `rollout_src`） | 观测字段 | **保留** |
+
+**三、文档与测试（随 P5 改）**
+
+| 位置 | 归属 |
+|---|---|
+| `docs/nn/remote-transport.md` / `console.md` / `training-stack.md` / `runtime-opt.md` 的「半离线/整段」段 | 改词：离线 = 取包接手；队列 run 项退役（P5 落一条进度记录） |
+| `tests/test_run_segment.py`（8 处）/ `tests/test_loop_round.py` / `tests/test_serve_wiring.py` | 跟 P5 一起改：整段腿的主用例退役或改成「不派发」的断言 |
+| `tests/test_role_routing.py`（`run ⇒ offline` 映射） | **保留**（形状仍在；旧 job 兜底仍需要） |
+| `e2e/test_offline_training_e2e.py`（取包链）/ `e2e/test_loop_supervisor_integration.py` | 前者**保留**（要加一条：本机对离线课不发队列项）；后者按 P5 调整 |
+| `dashboard/tests/{train-mode-offline,course-mode,course-lifecycle,exit-watchdog,server-api-state-view}.test.ts` | 按上表逐条改断言/文案 |
 
 ---
 

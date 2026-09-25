@@ -33,6 +33,7 @@ from rl.loop_guards import TrainingGuards
 from rl.loop_round import (
     ROUND_BUNDLE_EXIT,
     ROUND_NEXT,
+    ROUND_OFFLINE_EXIT,
     ROUND_RETRY,
     ROUND_SMOKE_STOP,
     ROUND_STOP,
@@ -395,6 +396,9 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
             it = outcome.it  # 段跑会推进 it；必须以返回值为准
             if outcome.status == ROUND_BUNDLE_EXIT:
                 return
+            if outcome.status == ROUND_OFFLINE_EXIT:
+                # 离线课：本机不跑这门课（云机取任务包接手）——干净收工，不是失败。
+                return
             if outcome.status == ROUND_SMOKE_STOP:
                 smoke_void = True
                 break
@@ -431,7 +435,7 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards):
         """跑一轮（R2c-2 从 `run()` 抽出；R2c-3 起由**步骤表**驱动，仍是同一套控制流）。
 
         组合路径 = 依次施加 `rl.loop_round.STEP_ORDER` 里的每一步：某一步给出终态
-        （门 / 熔断 / 止损 / 预算 / 停腿 / 冒烟 / 全离线导出）即返回，否则一路到 `cleanup`
+        （门 / 熔断 / 止损 / 预算 / 停腿 / 冒烟 / 全离线导出 / 离线课）即返回，否则一路到 `cleanup`
         （它返回 `ROUND_NEXT`）。细粒度路径（`LoopRunner.run_step`）走**同一张表**，只是每步
         之间可以把执行权交给别的课程——两条驱动因此不可能漂移（加一步必须同时进表）。
 

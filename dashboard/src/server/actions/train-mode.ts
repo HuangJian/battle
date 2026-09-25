@@ -11,7 +11,7 @@
  *  ★ 评审结论（plan/train-mode-hot-switch.plan.md §2.2 F9）：**只有这两条用户动作路径写配置**。
  *  hub 推送的内部复用路径（`pushCourseMode`：开课的 hub 推送、停课置离线、起 hub 回灌）**一个字
  *  都不写** —— 否则开课会重复写盘 1–3 次（`pushHubMode` 带 3×2s 重试），而「停课」还会被误翻译成
- *  「整段上云」。
+ *  「云机接手」。
  *
  *  ★ node 往返（plan §2.6）：`offline` 会把 `courses.<课>.rollout_src` **覆写**成 `run`。若就此
  *  不管，显式选过 `node`（整轮上云）的课一下离线再切回在线时，`node` 那格已经没了 ⇒ 静默降级成
@@ -77,10 +77,10 @@ export function applyTrainModeToConfig(
     // 记「即将被覆写的那个源」——必须在写 `run` **之前**读（顺序即契约）。
     if (opts.remember) rememberRolloutSrc(course, resolveRolloutSrc(cfg, course))
     const knobs = trainModeKnobs('offline', opts.rolloutSrc ?? 'local')
-    // 两个键缺一不可：`run` 是声明，`run_iters` 是段长（`-1` = 到课程末）。
+    // 两个键缺一不可：`run` 是声明（本机不跑这门课），`run_iters` 是终点（`-1` = 到课程末）。
     row.rollout_src = knobs.rolloutSrc
     row.run_iters = knobs.runIters ?? -1
-    notes.push('训练模式 离线：本课 rollout_src=run + run_iters=-1（整段上云）')
+    notes.push('训练模式 离线：本课 rollout_src=run + run_iters=-1（本机不跑，云机取包接手）')
   } else {
     // 切回在线 = **撤掉离线标记**：段长必删（留着它 = 下一轮又被当成段长 + 本机采样 = 半状态）。
     delete row.run_iters

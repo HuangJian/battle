@@ -167,14 +167,18 @@ def _plan_args() -> SimpleNamespace:
         course_frozen_bytes=None,
         course_path="",
         run_iters=0,
-        run_wait_sec=0.0,
     )
 
 
 def _publish_run_job(
     course: str, job_root: Path, jsonl: Path, tmp_path: Path, *, it: int = 1, n: int = 3
 ) -> dict:
-    """训练侧真发布一份 **kind="run"**（整段）job：计划随 payload、shard 由节点现产。"""
+    """真发布一份 **kind="run"** 的 manifest（计划随 payload、shard 由节点现产）。
+
+    ★ 2026-09-25：生产端**不再**发这种队列项（离线课走任务包，plan §7）——本助手造的是
+    「盘上遗留的离线项」，专门用来钉 hub 侧的归属闸与补传读面在**遗留项**上仍然正确
+    （混部期旧 hub / 旧盘上确实会有这种 job；派错盘正是 2026-09-25 事故的形态）。
+    """
     args = _plan_args()
     plan = build_plan(
         args, it=it, iters_total=it + n, rotate_seed=99, max_iters=n - 1, log=_quiet
@@ -324,11 +328,11 @@ class _Hub:
             self.proc.wait(timeout=5)
 
 
-# ────────────────────────── ① 整段 job：谁能领、谁不能 ──────────────────────────
+# ───────────── ① 队列里**遗留**的离线项：谁能领、谁不能（队列腿已退役，闸仍要对） ─────────────
 
 
 def test_offline_segment_is_claimable_only_by_a_marked_worker(tmp_path: Path) -> None:
-    """离线课的整段 job：普通 poller 领不到；带 `X-Battle-Offline` 的领得到。
+    """**遗留**的离线项：普通 poller 领不到；带 `X-Battle-Offline` 的领得到。
 
     2026-09-25：头的语义从「能力」升为**归属**（一个盘一种任务）——旧口径「带标仍可领
     在线课」已作废，对应的断言不再存在（归属闸会当场拒，见
@@ -376,7 +380,10 @@ def test_offline_segment_is_claimable_only_by_a_marked_worker(tmp_path: Path) ->
 def test_segment_rounds_backfeed_into_the_right_course_and_show_up_on_the_read_face(
     tmp_path: Path,
 ) -> None:
-    """云机逐轮补传 → 落**本课**目录 → `/admin/offline` 报出段内进度（控制台读面）。"""
+    """云机逐轮补传 → 落**本课**目录 → `/admin/offline` 报出段内进度（控制台读面）。
+
+    取包腿（在跑的云机）就这么补传：每跑完一轮推一次，`course` 是 hub 下发的归位键。
+    """
     traj = tmp_path / "traj"
     off_job_root, off_jsonl = _course_dirs(traj, C_OFF)
     on_job_root, on_jsonl = _course_dirs(traj, C_ON)

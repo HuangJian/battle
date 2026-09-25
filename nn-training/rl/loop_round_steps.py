@@ -31,9 +31,10 @@ from rl.log import log
 from rl.loop_round import (
     COLLECT_LOCAL,
     COLLECT_NODE,
-    COLLECT_SEGMENT,
+    COLLECT_OFFLINE,
     ROUND_BUNDLE_EXIT,
     ROUND_NEXT,
+    ROUND_OFFLINE_EXIT,
     ROUND_RETRY,
     ROUND_SMOKE_STOP,
     ROUND_STOP,
@@ -53,6 +54,10 @@ from rl.loop_steps import (
 )
 from rl.loop_tasks import ROUND_TASKS
 from rl.rollout_phase import join_precollect_child, precollect_ready, spawn_next_collect
+
+#: 离线课的**唯一**执行者指路（日志/报错共用一句，免得几处各写一份说法）。
+#: 背景：半离线整段腿（发一份 `kind=run` 队列项、本机等 8h）2026-09-25 退役。
+OFFLINE_LEG_HINT = "battle.offline.ipynb（/offline/tasks 清单 → /offline/task-pack 取包 → 跑完回传）"
 
 
 class RoundSteps:
@@ -80,7 +85,6 @@ class RoundSteps:
     _evalboard_yield: Any
     _evalboard_idle: Any
     _export_offline_bundle: Any
-    _remote_run_segment: Any
     _remote_iter: Any
     _rollout_phase: Any
     _volume_topup: Any
@@ -233,24 +237,18 @@ class RoundSteps:
         # 本轮是否派发干净评估：**求值一次**并共享（原轮体在 rollout 调用点内联求值，
         # 同一 it 上是纯函数，故拆出来不改变行为）。
         ctx.eval_on_round = self._eval_on_round(it)
-        # 半离线整段（kind=run；2026-09-17）：一次领走 it..end_it，节点自主跑完，
-        # hub 期间失联也不影响（产物目录是交付面）。
+        # ★ 采集模式由 `resolve_collect_mode` **一处**裁决（离线课 > 整轮上云 > 本机采样）：
+        #   R2c-3 拆 13 步时这里只算了 `ctx.seg` 而没翻 `collect_mode`，于是 kind=run 分支
+        #   不可达（表面正常：本机照常采样、账本照常记账，只是云机永远领不到整段）。
+        #   段长与来源的先后也必须在同一处对齐。
         #
-        # ★ 采集模式由 `resolve_collect_mode` **一处**裁决（段长 > 整轮上云 > 本机采样，
-        #   2026-09-19 离线训练模式）：R2c-3 拆 13 步时这里只算了 `ctx.seg` 而没翻
-        #   `collect_mode`，于是 kind=run 分支不可达（表面正常：本机照常采样、账本照常
-        #   记账，只是云机永远领不到整段）。段长与来源的先后也必须在同一处对齐。
+        # ★ 2026-09-25（退役「半离线整段」腿，`plan/online-offline-role-routing.plan.md` §7）：
+        #   离线课不再由本机派发——不采样、不发队列项、不等待。执行者是云机（取任务包
+        #   接手），产物回传后在控制台「导入产物」即推进本机账本。本机侧到此干净收官。
         src = _rollout_source(args)
         ctx.seg = _run_segment_iters(args)
-        if src == "run" and not ctx.seg:
-            raise SystemExit(
-                "[run_rl] --rollout-src run（整段上云）需要说明段长：--run-iters >0（N 轮）"
-                "或 <0（到课程末尾）——也可以写进 rl-config：courses.<课>.run_iters。"
-                "缺段长时**不**替你退回本机采样（那会让「云机在跑」与「本机在跑」看起来一样）"
-            )
-        # M3/离线：node 或整段时本机**完全不采样**（也不预采/不补波），分别由
-        # _remote_iter（kind=iter）与 _remote_run_segment（kind=run）派发。
-        # eval 不动（仍在本地 hub 跑，§5.4）。
+        # M3/离线：node 时本机**完全不采样**（也不预采/不补波），由 `_remote_iter`
+        # （kind=iter）派发；离线课（run）本机什么都不做。eval 不动（仍在本地 hub 跑，§5.4）。
         ctx.collect_mode = resolve_collect_mode(src, ctx.seg)
         self._node_rollout = ctx.collect_mode != COLLECT_LOCAL
         ctx.node_rollout = self._node_rollout
@@ -262,6 +260,19 @@ class RoundSteps:
                     "（>0 = N 轮；<0 = 到课程末尾）"
                 )
             self._export_offline_bundle(it, ctx.pairs, ctx.seg)
+        if ctx.collect_mode == COLLECT_OFFLINE:
+            # 不是失败：不落 iter_error、不计连击（在 `round_failure` 里另行开路）。
+            log(
+                f"[run_rl] it{it}: 本课 rollout_src=run —— **离线课不由本机跑**"
+                "（不采样、不发队列项、不等待）。执行者=云机取包链："
+                f"{OFFLINE_LEG_HINT}；产物回传后在控制台「导入产物」即推进本机账本"
+                + (
+                    ""
+                    if ctx.seg
+                    else "（本课没写 run_iters——导出包请用控制台的「导出任务包」，它自带 -1）"
+                )
+            )
+            return finish(ROUND_OFFLINE_EXIT, "离线课由云机取任务包接手（本机不跑）")
         return None
 
     # ------------------------------------------------------------- ⑤ 采集
@@ -269,17 +280,20 @@ class RoundSteps:
     def step_rollout(self, ctx: RoundContext) -> StepResult | None:
         """采集（按 `ctx.collect_mode` 分流）：
 
-        · `segment`（半离线整段）：一次领走 it..end_it，**推进指针**（`ctx.it` 变成本段末尾）；
         · `node`（整轮上云）：发 kind=iter job，本机不采样；
         · `local`（默认）：配额课程走**连续配额采集**（2026-09-19 VOLUME_RULE_V2，它自己
-          实时读账本派批 + 软停 + 采纳报告，离散补波因此退役）；否则本机 `_rollout_phase`。
+          实时读账本派批 + 软停 + 采纳报告，离散补波因此退役）；否则本机 `_rollout_phase`；
+        · `offline`（离线课，`rollout_src=run`）：**不该走到这里**——上一步（`step_course_iter`）
+          已让本轮以 `ROUND_OFFLINE_EXIT` 收官。真走到这里 = 步骤被改动过，**响亮报错**
+          而不是静默退化成「本机自己采样」（那会与云机取包链双跑）。
         """
         it = ctx.it
-        if ctx.collect_mode == COLLECT_SEGMENT:
-            self._node_rollout = True  # 本机不采样、不预采、不本地 PPO
-            ctx.node_rollout = True
-            ctx.it = self._remote_run_segment(it, ctx.pairs, ctx.seg)
-        elif ctx.collect_mode == COLLECT_NODE:
+        if ctx.collect_mode == COLLECT_OFFLINE:
+            raise RuntimeError(
+                "[run_rl] 离线课（rollout_src=run）走到了采集步——步骤顺序被改动过？"
+                f"本机不跑这门课：{OFFLINE_LEG_HINT}"
+            )
+        if ctx.collect_mode == COLLECT_NODE:
             self._remote_iter(it, ctx.pairs)
         elif self._volume_active():
             # 连续配额采集（2026-09-19）：替代「初波 + 补波」；实时按分关差额 + 软停
@@ -309,8 +323,9 @@ class RoundSteps:
 
         ① 为上一轮已完成权重 W(it-1) 派发干净评估 —— 游戏藏进随后 PPO(it) 空窗。
            串行路径此前在此处派发读活指针 = W(it-1) 却标 itN（标签超前一轮）；stream/intent/m1/
-           基线路径维持原语义。**半离线段例外**：段中间那些轮不在本机跑，归档里没有它们的
-           权重——拿活指针（= 段尾权重）去充 W(it-1) 就是 P0 刚修掉的 eval 污染。
+           基线路径维持原语义。（半离线段曾例外：段中间那些轮不在本机跑，归档里没有它们的
+           权重——拿活指针（= 段尾权重）去充 W(it-1) 就是 P0 刚修掉的 eval 污染；
+           该腿 2026-09-25 退役后，本步不再需要那条豁免。）
         ② it0 基线（bc 权重）：rollout 收官后派发，落账前每轮重试。
         ③ 本轮采集报告行 + **开 idle 窗**（集群空闲立即领批）——不能等到 join_eval 之后：
            remote PPO 可阻塞数十分钟，那时才开窗等于永假。
@@ -319,8 +334,7 @@ class RoundSteps:
         独立的重放价值（它们都无幂等判据，重跑一遍无害且必须）。
         """
         it = ctx.it
-        if not ctx.seg_ran:
-            self._dispatch_delayed_eval(it, ctx.dist_cfg)
+        self._dispatch_delayed_eval(it, ctx.dist_cfg)
         self._maybe_dispatch_baseline_eval(ctx.dist_cfg)
         self._log_report(it, ctx.t_rollout)
         self._evalboard_idle(it, ctx.dist_cfg)

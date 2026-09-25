@@ -1,8 +1,13 @@
-"""remote/run_loop.py —— 半离线自主段执行器（kind=run）。
+"""remote/run_loop.py —— 离线自主段执行器（任务包 / 产物目录入口）。
 
-**语义**：hub 在交接时给一次（课程 + 初始权重 + 代码 + `plan.json`），此后**云机自主**
-把计划里的轮次跑完（rollout + PPO 全在节点），逐轮把权重/opt/指标写进本地产物目录
+**语义**：接手一次（课程 + 初始权重 + 代码 + `plan.json`），此后**云机自主**把计划里的
+轮次跑完（rollout + PPO 全在节点），逐轮把权重/opt/指标写进本地产物目录
 （`remote/artifacts.py`），最后把「末轮形状」的结果回传（能通则通，不通也不影响产物）。
+
+★ 2026-09-25：入口只有两个——**任务包**（`remote.bundle` 铺成产物目录）与**产物目录续跑**
+（`--artifacts`）。曾经的第三个入口「hub 发一份 `kind=run` 队列 job、worker 接着把计划跑完」
+（`run_plan_job`）已退役：hub 侧不再发这种活，worker 侧对它**响亮拒收** —— 见
+`plan/online-offline-role-routing.plan.md` §7。
 
 **为什么整段自主要做成「同一个 run_job 递归 N 次」而不是另写一条训练链**：一次迭代的
 全部知识（D14 血缘、课程/奖励重建、opt 解析、PPO load→chunk→update、产物打包、
@@ -413,7 +418,7 @@ def _seed_demo_blob_cache(
     （hub-run 路径 post() 落盘）。任一命中但 sha 不符 = 跳过找下一个；全无 ⇒ 启动期
     **响亮拒绝**（不等跑到 it1 的 PPO 才炸；修法写进错误里）。
     run 模式没有可用的 hub blob 通道（逐轮 manifest 是节点本地合成的，hub 上无此 job），
-    所以这里**不**尝试联网下载——离线腿走 bundle（自动带包），半离线请预置文件或缓存。
+    所以这里**不**尝试联网下载——离线腿走 bundle（自动带包），手工递送请预置文件或缓存。
     """
     sha = str(manifest.get("demo_sha", "") or "")
     if not sha:
@@ -678,9 +683,9 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
     m["payload_sha256"] = pack_payload([], m, zip_path, extra_files=[payload_init])
     m = normalize_manifest(m)
     run_job = ctx.run_job_fn or _real_run_job
-    # 代码快照与 TS 运行时：**有随包字节就用字节**（全离线：节点无仓、不联网），没有就
-    # 交给 `run_job` 走它本来的路（命中 code_cache / 向 hub 下载——半离线轮就是这条路：
-    # worker 自己那一轮已把 code.zip 落进内容寻址缓存）。两个来源都存在时优先字节。
+    # 代码快照与 TS 运行时：**有随包字节就用字节**（离线：节点无仓、不联网），没有就
+    # 交给 `run_job` 走它本来的路（命中 code_cache / 向 hub 下载——hub 逐轮发 job 那条路
+    # 已经这么跑：worker 自己那一轮把 code.zip 落进内容寻址缓存）。两个来源都存在时优先字节。
     preloaded: dict = {"payload_zip": zip_path.read_bytes()}
     if ctx.code_zip_bytes:
         preloaded["code_zip"] = ctx.code_zip_bytes
@@ -926,8 +931,8 @@ def run_plan_job(
     eval_game_timeout_sec: float = 0.0,
     #: rollout 并行局数（0 = 按本机核数自动；与 eval 同一口径，见 `RunContext.rollout_workers`）。
     rollout_workers: int = 0,
-    #: 产物补传：本 job 就是从这条连接上领来的，地址与 token 手边就有——半离线段因此
-    #: **默认就开着补传**（hub 中途失联时不至于「跑完一整段、控制面一无所知」）。
+    #: 产物补传（可选）：给了 hub 地址 + token 就在每轮落盘后尽力推一份上去
+    #: （hub 中途失联也不至于「跑完一整段、控制面一无所知」）。
     hub_url: str = "",
     hub_token: str = "",
     #: 本份产物在 hub 里的**归位键**（多课程 hub 的课程键；见 `OfflineDeliverer.course`）。
@@ -938,11 +943,16 @@ def run_plan_job(
     run_job_fn: Callable[..., dict] | None = None,
     log: Callable[[str], None] = _log_default,
 ) -> dict:
-    """kind=run 的尾巴：本 job 自己那一轮已经跑完（`first_result`），接着把计划跑完。
+    """从「首轮结果」续跑：`first_result` 已经跑完，接着把计划剩下的轮次跑完。
 
-    返回**合并结果**（末轮形状 + `iters` 明细 + `it_end` + `artifacts`），它可以照原样
-    走 hub 的既有落位链（`verify_and_land`：data_fp / init_weights_fp / commit_echo 都是
-    本 job 自己的，逐字段对得上）——半离线段在 hub 侧**不需要**新代码。
+    ★ 2026-09-25：**今天没有生产调用者**。它曾经是「hub 发一份 `kind=run` 整段 job、
+    worker 接着跑完」那条腿的尾巴——那条腿已退役（`plan/online-offline-role-routing.plan.md`
+    §7：hub 侧不再发这种活，`remote/worker.py` 对它响亮拒收；离线课走任务包 + `run_standalone`）。
+    保留它的理由只有一个，但很实在：它是把 `_drive` **从首轮结果续下去**的唯一入口，而
+    `tests/test_run_loop.py` 的 4 组段语义回归（整段逐轮同构 / 锚点续跑不重复记账 /
+    `max_iters` 上限 / 轮失败后产物仍可续）全挂在它上面——删它等于把这些回归一起删。
+
+    返回**合并结果**（末轮形状 + `iters` 明细 + `it_end` + `artifacts`）。
 
     收尾策略：正常跑完、预算到点、还是中途抛错，都 `finalize` 产物（state + 全量 zip）
     之后再返回/抛出——**任何时刻停下，卷上的目录都是自洽可续的**。
@@ -1172,8 +1182,8 @@ def apply_resume_overlay(ctx: RunContext, resume_dir: str | Path | None) -> int:
 def _require_offline_runtime(ctx: RunContext, *, work_dir: Path) -> None:
     """standalone（无 hub）入口的硬门：没有代码快照就**现在**响亮拒收。
 
-    为什么不在 `_run_iteration` 里卡：半离线轮（hub 发的 kind=run）走的是同一条迭代函数，
-    它的代码是 worker 自己那一轮从 hub 下好、已落进内容寻址缓存（`code_cache/<sha>/`）的
+    为什么不在 `_run_iteration` 里卡：`run_job` 那条路（hub 逐轮发 job）走的是同一条迭代
+    函数，它的代码是 worker 自己从 hub 下好、已落进内容寻址缓存（`code_cache/<sha>/`）的
     ——那里没有 `code.zip` 字节也**没问题**。而 standalone 是「无 hub」入口：既没有缓存、
     又没随包字节时，`run_job` 会拿着空 base_url 去下载，报一个跟真因无关的错（重试/联网
     都治不了）。所以卡在入口，并把修法写进错误里。

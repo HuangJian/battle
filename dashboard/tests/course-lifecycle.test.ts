@@ -202,7 +202,7 @@ describe('openCourse：把「这门课存在且可被调度」写到盘上', () 
 
 // ────────────────────────── ①b 开课：离线模式预校验（2026-09-22 事故回归） ──────────────────────────
 
-describe('openCourse：离线（整段上云）要求课程声明有限 iters', () => {
+describe('openCourse：离线（云机接手）要求课程声明有限 iters', () => {
   const FIX = path.join(DIR, 'curricula-fix') // 夹具课程目录（临时 BCITY_CURRICULA_DIR）
   const trajOf = (c: string) => path.join(DIR, 'traj', c)
 
@@ -372,7 +372,7 @@ describe('openCourse：置 hub 模式在发现事实**之后**（事故回归）
     expect(modes[COURSE]).toBe('online')
   })
 
-  it('离线开课 ⇒ 推的是 offline（整段只交给带标 worker）', async () => {
+  it('离线开课 ⇒ 推的是 offline（该课停车：不再实时派发）', async () => {
     await openCourse(COURSE, { trainMode: 'offline', hubMode: { attempts: 1, delayMs: 0 } })
     expect(calls[0]!.url).toContain('mode=offline')
   })
@@ -393,7 +393,7 @@ describe('stopCourse：非破坏停课（暂停意图 + hub 置离线）', () =>
     // 账本/队列保留（用户口径：暂停 = 保留队列，不删）
     expect(readFileSync(path.join(TRAJ, COURSE, 'training_log.jsonl'), 'utf-8')).toBe(before)
     expect(r.detail!.join('\n')).toContain('队列与账本一个字不动')
-    // ★ 2026-09-24（plan §2.2 F9）：停课**不是**「整段上云」——它的 hub 推送走 `pushCourseMode`
+    // ★ 2026-09-24（plan §2.2 F9）：停课**不是**「云机接手」——它的 hub 推送走 `pushCourseMode`
     //（只推 hub + 落意图），绝不动 `courses.<课>`。误译成写 run/run_iters 会让「停课」把本机
     // 采样也关掉（而停课的定义是非破坏：随时开课接着跑）。
     expect(courseKeys(COURSE)).toEqual({})

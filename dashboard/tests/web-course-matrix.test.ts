@@ -479,7 +479,7 @@ describe('modeDrift：控制台意图 ≠ hub 此刻的表', () => {
   })
 
   // ★ 2026-09-24（plan/train-mode-hot-switch §2.5）：第三个源 —— hub 与意图都已经是在线，
-  // 而 rl-config 里还写着 `rollout_src=run`（整段上云，要求节点装 bun）⇒ 下一段照样派 kind=run。
+  // 而 rl-config 里还写着 `rollout_src=run`（本课仍归云机）⇒ 本机在下一轮仍然收工、不采样。
   // 用户报障的现场就是这个形状（切回在线后 Kaggle 仍因缺 bun 拒单）。
   it('意图/ hub 都回到在线 ∧ 配置仍是 run ⇒ 漂移（configRun）', () => {
     const drift = (rolloutSrc: Record<string, string> | null): unknown =>

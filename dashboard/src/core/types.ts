@@ -90,11 +90,12 @@ export type RolloutSrcMode = 'local' | 'node' | 'run' | 'auto'
 /** 启动训练时的**训练模式**（2026-09-19 用户口径：启动时需指定，缺省在线）。
  *
  *  · `online`  = 现状：本机跑 rollout，每个 it 向云端 worker 传语料；hub 实时派发。
- *  · `offline` = 本机不跑训练：整段上云（`courses.<课>.{rollout_src:'run', run_iters:-1}`）
- *    + hub 该课置 offline（只有带标 worker 能领），或在控制台导出任务包人工搬上云。
+ *  · `offline` = 本机不跑训练：云机接手（`courses.<课>.{rollout_src:'run', run_iters:-1}`）
+ *    + hub 该课置 offline（该课停车、不再实时派发），并由控制台导出任务包给云机取（或人工搬上云）。
+ *    ★ 2026-09-25：离线课**不再经 hub 队列**执行（那条腿已退役，plan/online-offline-role-routing §7）。
  *
  *  它不是「一个旋钮的显示名」：域换算（模式 → 课程级键）住在 `stack/specs.ts::trainModeKnobs`，
- *  是**唯一**推导点（在线要显式清掉 run 的两把键，否则切回在线仍是整段上云）。 */
+ *  是**唯一**推导点（在线要显式清掉 run 的两把键，否则切回在线还是这门课不归本机）。 */
 export type TrainMode = 'online' | 'offline'
 
 /** rl-config.json（本工具链只消费 nodes + rl + courses 块，其余键原样保留）。 */

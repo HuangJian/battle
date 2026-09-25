@@ -32,7 +32,7 @@ rl-config）② 再推 hub 镜像。机制上不需要重开课：`_rollout_sour
 
 | 档位 | 配置 | job kind | 节点要 bun 吗 |
 |---|---|---|---|
-| 离线 | `rollout_src=run` + `run_iters=-1` | `run`（整段上云） | **要**（这是 `run` 的定义，不是 bug） |
+| 离线 | `rollout_src=run` + `run_iters=-1` | `run`（本机不跑这门课：云机取包接手） | **要**（这是 `run` 的定义，不是 bug） |
 | 在线（缺省） | 两键**都不在**（缺席 = local） | `ppo`（本机采样，云机只算 PPO） | 不要 |
 | 在线 + 显式 `node` | `rollout_src=node` | `iter`（整轮上云） | 要（显式选择的代价） |
 
@@ -46,7 +46,7 @@ rl-config）② 再推 hub 镜像。机制上不需要重开课：`_rollout_sour
 | `restoreCourseModes`（起 hub 回灌） | 只推 hub —— 回灌不是用户动作 | **绝不** |
 
 为什么必须拆：`pushHubMode`（开课/停课的 hub 推送，带 3×2s 重试）**就是循环调 `setCourseMode` 的**
-⇒ 往那颗开关里塞写配置，会让**开课重复写盘 1–3 次**、还会把**停课**误翻译成「整段上云」。
+⇒ 往那颗开关里塞写配置，会让**开课重复写盘 1–3 次**、还会把**停课**误翻译成「云机接手」。
 
 ### ★ 生效时机是**段边界**，不是「下一轮」
 
@@ -55,7 +55,8 @@ rl-config）② 再推 hub 镜像。机制上不需要重开课：`_rollout_sour
 课程剩下的全部。**不做抢占**是有意的（已经在飞的段不取消），所以回执与文档都写明了这条，
 并指向立刻断开的把手：**停课 / 暂停**。
 
-推论（运维口径）：想「只停 hub 派发、本机继续训」请用**暂停键**，切离线现在的含义是**整段上云**。
+推论（运维口径）：想「只停 hub 派发、本机继续训」请用**暂停键**，切离线现在的含义是
+**这门课交给云机接手**（本机在下一个轮边界干净收官，不再有「段等待」；云机取任务包跑）。
 
 ### node 往返：`offline` 会把显式选的 `node` 覆写掉
 
@@ -72,12 +73,12 @@ hub 与意图都回到在线，而配置里还是 `run` ⇒ 下一段照样派 `
 * 取数：`stateView.courseRolloutSrc`（逐课 `resolveRolloutSrc(cfg, c)`，纯函数 over 内存 cfg、零 IO）
   —— `modes.rolloutSrc` 只有**查看课程**一个，而矩阵是逐行全课表，非当前课程的行需要自己那一格。
 * 渲染：`modeDrift.configRun`（仅当 `intent === 'online'` 且配置是 `run`）⇒ 行上多一个
-  「配置仍是整段上云」徽标，与「意图未生效」各说各的（不混成一个）。无意图 / 旧视图 ⇒ `null`，**不编**。
+  「配置仍是离线（云机接手）」徽标，与「意图未生效」各说各的（不混成一个）。无意图 / 旧视图 ⇒ `null`，**不编**。
 
 ### 验证
 
 * `tests/course-mode.test.ts`：切离线落两键 / 切在线两键都不在 / **node 往返回到 node** / `local` 不留痕 /
-hub 不可达时配置照样落 / 文案含「整段上云」「不需要 bun」「段边界生效」；
+hub 不可达时配置照样落 / 文案含「本机不跑这门课」「不需要 bun」「轮边界生效」；
 * 逆测试：`pushCourseMode` 与 `restoreCourseModes` **一个字都不写** rl-config（防 F9 复发）；
 * 跨语言钉子：`nn-training/tests/test_run_segment.py` 钉「控制台写的两键 ↔ `_rollout_source`/`_run_segment_iters`」；
 * 既有源码断言跟着写面搬家（`tests/train-mode-offline.test.ts`、`tests/rollout-src-launch-option.test.ts`）。

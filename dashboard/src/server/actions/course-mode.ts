@@ -20,7 +20,7 @@
  *    · `restoreCourseModes`：起 hub 回灌（只推 hub：回灌不是用户动作，不该改训练配置）。
  *
  *  ★ 2026-09-25（plan/offline-switch-auto-bundle）：这颗开关还要**顺手把任务包导出来**——
- *  「切离线」= 「让云机去跑整段」，而云机取的是 `tmp/<课>/task-<课>.zip`；此前只有**开课**
+ *  「切离线」= 「这门课交给云机接手」，而云机取的是 `tmp/<课>/task-<课>.zip`；此前只有**开课**
  *  才导包（`course-lifecycle.openCourse`），热切离线不导 ⇒ 在线课切成离线后云机 404 干等
  *  `wait_pack_sec`（30 分钟）才由一句 `SystemExit` 告诉人（用户 2026-09-25 报障）。
  *  规则 = `autoBundleDecision`（缺包才导、有包不动、导不出只说清不改 `ok`）。
@@ -89,7 +89,7 @@ const UNKNOWN_COURSE_RE = /需要合法 course|未知课程|unknown course/i
  *
  *  ★ 2026-09-24（plan §2.2 F9）：它曾是 `setCourseMode` 的全部内容，而 `pushHubMode`
  *  （`course-lifecycle.ts`，带 3×2s 重试）就是循环调 `setCourseMode` 的 ⇒ 「往 setCourseMode
- *  里加写配置」会让**开课重复写盘 1–3 次**，并把「停课」误翻译成「整段上云」。故拆开：
+ *  里加写配置」会让**开课重复写盘 1–3 次**，并把「停课」误翻译成「云机接手」。故拆开：
  *  写配置是**用户动作**的事（只有那颗开关与开课弹窗有），推 hub 是**基建**的事。
  *
  *  校验与旧行为逐字一致（非法模式/空课程：一次都不打 hub，也不落意图）。 */
@@ -132,8 +132,10 @@ export async function pushCourseMode(
  *    ② 再推 hub 镜像（网络，可能失败——失败照样如实报告，意图已落盘、回灌兜底）。
  *  顺序即契约：配置写不进去就**不推 hub**（否则留下「hub 离线但本机仍本机采样」的半状态）。
  *
- *  ⚠ 生效时机是**段边界**不是秒级：`run_iters<0` 时一段 job 覆盖到课程末，trainer 阻塞在段等待里
- *  （plan §2.4 F8）——文案里写明，免得被当成「点了没反应」。
+ *  ⚠ 生效时机是**轮边界**不是秒级：切离线后本机在下一个轮边界干净收官（`ROUND_OFFLINE_EXIT`），
+ *  **不再有「段等待」**——「发一份 kind=run 队列项、本机等 8h」那条腿 2026-09-25 退役
+ *  （plan/online-offline-role-routing §7）；切回在线同样在轮边界恢复本机采样。文案里写明，
+ *  免得被当成「点了没反应」。
  */
 /** 自动导出的**输入事实**（全部由调用方查好：纯函数不碰 IO，规则表见 plan §3.1）。 */
 export interface AutoBundleFacts {
@@ -220,14 +222,14 @@ export async function setCourseMode(
   // ② hub 镜像
   const res = await pushCourseMode(c, m)
   // 文案按**合并后**的语义写（不再复用 `pushCourseMode` 那句「只接收 it 权重/指标回传」——
-  // 那是旧的半语义：那颗开关现在同时把本机置成整段上云，两句话并排会自相矛盾）。
+  // 那是旧的半语义：那颗开关现在同时把本机置成「这门课不归本机」，两句话并排会自相矛盾）。
   const head = res.message.includes('已经是')
     ? `${c} 已经是 ${m}（幂等：hub 已重新下发 + 本机配置已重写）`
     : m === 'offline'
-      ? `${c} 已切离线：整段上云（本机不再采样，云机自己跑 rollout——节点必须有 bun）`
+      ? `${c} 已切离线：本机不跑这门课（云机取任务包接手——battle.offline.ipynb 跑 rollout+PPO）`
       : `${c} 已切在线：本机采样 + 云机只算 PPO（不需要 bun）`
   const timing =
-    '★ 段边界生效：已在飞的一段不会被抢占，而一段可能跑到课程末（要立刻断开请用停课/暂停）'
+    '★ 轮边界生效：本机在下一个轮边界干净收官（不再有「段等待」）；云机那份在它自己的会话里跑（要立刻断开请用停课/暂停）'
   // 配置侧的实情也回执（write 的 notes）：尤其「rollout 位置恢复为 node」这种——
   // 不说出来，操作员没法知道往返没把原来的选择弄丢。
   const cfgNote = notes.length > 0 ? notes.join('；') : ''

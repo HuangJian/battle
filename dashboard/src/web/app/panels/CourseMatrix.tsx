@@ -76,8 +76,8 @@ export interface CourseMatrixProps {
   /** **逐课**生效 rollout 源（`stateView.courseRolloutSrc`；缺省 = 旧视图/不报）。
    *
    *  漂移徽标只比「意图 vs hub」两个源是不够的：用户报障的现场是**第三个**源没跟上——
-   *  hub 与意图都回到在线，而 `courses.<课>.rollout_src` 仍是 `run`（整段上云）⇒ 下一段
-   *  照样派 `kind=run`，节点缺 bun 就拒单（2026-09-24 / plan §2.5）。 */
+   *  hub 与意图都回到在线，而 `courses.<课>.rollout_src` 仍是 `run`（本课仍归云机）⇒ 本机在
+   *  下一轮仍然收工、不采样（训练停住而面板看着「在训」，2026-09-24 / plan §2.5）。 */
   courseRolloutSrc?: Record<string, string> | null
   /** 当前查看课程（高亮）。 */
   course: string
@@ -383,18 +383,18 @@ function MatrixTr({
                 </span>
               ) : null}
               {/* 第三个源（rl-config 配置）没跟上：hub 与意图都已回到在线，而
-                  `courses.<课>.rollout_src` 还是 `run`（整段上云）⇒ 下一段照样派 `kind=run`，
-                  节点缺 bun 就拒单（2026-09-24 用户报障的那条链）。它只在逐课配置下发后才算得出来。 */}
+                  `courses.<课>.rollout_src` 还是 `run`（本课仍归云机）⇒ 本机在下一轮仍然收工、
+                  不采样（2026-09-24 用户报障的那条链）。它只在逐课配置下发后才算得出来。 */}
               {r.modeDrift?.configRun ? (
                 <span
                   className="tc-mx__pausebadge tc-badge tc-badge--warn"
                   title={
-                    `配置未跟上：${r.course} 的 rl-config 里仍是 rollout_src=run（整段上云，` +
-                    '要求节点装 bun）。点这个按钮一次即修正（本机配置与 hub 一起改）——' +
-                    '★ 段边界生效：已在飞的那一段不会被抢占，可能要等到段尾才换挡。'
+                    `配置未跟上：${r.course} 的 rl-config 里仍是 rollout_src=run（本课仍归云机：` +
+                    '本机在下一轮收工、不采样）。点这个按钮一次即修正（本机配置与 hub 一起改）——' +
+                    '★ 轮边界生效：下一轮换挡（不再有「段等待」）。'
                   }
                 >
-                  配置仍是整段上云
+                  配置仍是离线（云机接手）
                 </span>
               ) : null}
             </span>

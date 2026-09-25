@@ -10,7 +10,7 @@
  *  1. **域无换算**：python `--rollout-src` 的 choices 就是
  *     `'auto'|'local'|'node'|'run'` 字符串，rl-config 里原样落。若有人在这里发明
  *     `on/off` 之类的中间域，训练侧 choices 会直接报错退出——所以有专项断言
- *     「preset 不得过换算函数」。（`run` = 离线训练模式的整段上云，2026-09-19 加。）
+ *     「preset 不得过换算函数」。（`run` = 离线训练模式「本机不跑这门课」，2026-09-19 加。）
  *  2. **缺省不是 auto**：python 缺省 `auto`，但 `_rollout_source()` 在 rl-config
  *     没有该键时一律返回 `local`（历史行为）。控制台若缺省成 `node`，就会在没改过
  *     配置的课上谎报「本轮上云」。

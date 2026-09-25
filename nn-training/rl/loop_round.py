@@ -5,7 +5,9 @@ R2c-2 让「**一轮**」成为可调度的单元（`TrainingLoop.run_one_round`
 执行权交给别的课，而它自己那一步**不丢**（账本 + 幂等判据在 `rl.loop_tasks` 里）。
 
 **为什么先提 `RoundContext`**：轮体里锁着几个轮内局部量（`pairs` / `dist_cfg` / `t_rollout`
-/ `seg`）与一个**会被改写的指针**（半离线整段 `_remote_run_segment` 会一次推进 `it`）。
+/ `seg`）与一个**会被改写的指针**（`it`：半离线整段曾一次吃掉 it..end_it —— **那条腿
+2026-09-25 已退役**，见 `plan/online-offline-role-routing.plan.md` §7；指针仍是
+`RoundOutcome.it` 契约的一部分：重试/让位靠它原地不跳轮）。
 步骤化之后它们必须跨步可见 ⇒ 提成一个显式对象；**不放进引擎的实例属性**（§2.2 无隐藏状态）：
 轮内状态是「这一轮的」，长在引擎上会被同进程的其它课程互相覆盖。
 
@@ -49,14 +51,18 @@ ROUND_WAIT = "wait"
 ROUND_SMOKE_STOP = "smoke_stop"
 #: 全离线任务包已写出，整条腿结束。
 ROUND_BUNDLE_EXIT = "bundle_exit"
+#: **离线课不由本机跑**（`rollout_src=run`）：本机侧干净收官，执行者是云机（取任务包接手）。
+#: 2026-09-25 起“半离线整段”（发一份 `kind=run` 队列项、本机等 8h）那条腿已退役
+#: —— 见 `plan/online-offline-role-routing.plan.md` §7。它不是失败：不落 `iter_error`、不计连击。
+ROUND_OFFLINE_EXIT = "offline_exit"
 
 
 @dataclass(frozen=True)
 class RoundOutcome:
     """`run_one_round` 的返回：终态 + 本轮结束时的迭代号。
 
-    `it` 必须带回驱动循环：半离线整段（`_remote_run_segment`）会一次吃掉 it..end_it，
-    丢掉返回值就会重跑已经跑完的那一段（比跳轮更贵）。
+    `it` 必须带回驱动循环：`ROUND_RETRY` / `ROUND_WAIT` 靠它原地重试（丢了返回值 = 跳轮）。
+    半离线整段曾一次吃掉 it..end_it（该腿已退役，`ROUND_OFFLINE_EXIT` 不推进指针）。
 
     `detail`：`ROUND_WAIT` 的**人读原因**（在等什么、等谁）——它会直接上屏到控制台调度器
     卡片的「在等什么」列，所以必须是事实句（带 jid/轮号），而不是「等待中」。其它终态
@@ -75,12 +81,13 @@ class RoundOutcome:
 COLLECT_LOCAL = "local"
 #: 整轮上云（kind=iter）：节点自己跑 rollout + PPO，本机**完全不采样、不补波**。
 COLLECT_NODE = "node"
-#: 半离线整段（kind=run）：一次领走 it..end_it，本机不采样、不补波、不本地 PPO。
-COLLECT_SEGMENT = "segment"
+#: **离线课**（kind=run / `rollout_src=run`）：本机**不跑这门课**——不采样、不派发、不等待；
+#: 执行者是云机（取任务包接手）。2026-09-25 替换掉 `COLLECT_SEGMENT`（半离线整段）。
+COLLECT_OFFLINE = "offline"
 
 
 def resolve_collect_mode(source: str, seg: int) -> str:
-    """采集模式的**唯一**裁决点：段长 > 整轮上云 > 本机采样。
+    """采集模式的**唯一**裁决点：离线课 > 整轮上云 > 本机采样。
 
     为什么单拎出来：这三条支路决定「本机到底采不采样」，而派发点（`step_rollout`）与
     裁决点（`step_course_iter`）在两个文件里。2026-09-17 的半离线整段写着 `ctx.seg` 却
@@ -88,11 +95,17 @@ def resolve_collect_mode(source: str, seg: int) -> str:
     采样、账本照常记账，只是云机永远领不到整段）。把裁决收在一个纯函数里，它就能被单测
     钉住，而不是靠人把两处对齐。
 
+    ★ 2026-09-25（退役「半离线整段」腿）：`run` / 段长**不再**对应「本机替它派发并等」的任何
+    模式，而是 `COLLECT_OFFLINE` = 这门课不归本机（云机取任务包接手）。**绝不**回落到
+    `COLLECT_LOCAL` —— 那正是「本机偷偷自己采样、与云机双跑」的那个坑（§7.2）。
+
     `source` 取 `rl/loop_steps.py::_rollout_source` 的返回值（auto 已解析过）；`seg` 取
-    `_run_segment_iters`（`>0` = N 轮，`<0` = 到课程末尾）。
+    `_run_segment_iters`（`>0` = N 轮，`<0` = 到课程末尾）——退役后它只剩两个用途：
+    ① 与 `run` 一起声明「这门课由云机接手」（历史配置里可能只写了 `run_iters`）；
+    ② `--export-bundle` 的「跑到哪停」。
     """
-    if seg:
-        return COLLECT_SEGMENT
+    if source == "run" or seg:
+        return COLLECT_OFFLINE
     if source == "node":
         return COLLECT_NODE
     return COLLECT_LOCAL
@@ -130,9 +143,9 @@ class RemotePpoJob:
     pack_sec: float = 0.0
     kick_on: bool = False
     kick_kl: float = 0.0
-    #: 整轮上云规格（非空 = 节点侧采集）；`segment` = 半离线整段（kind=run）。
+    #: 整轮上云规格（非空 = 节点侧采集）。
+    #: （半离线整段那条腿 2026-09-25 退役 ⇒ 本对象不再有 `segment` 字段。）
     rollout_spec: dict[str, Any] | None = None
-    segment: bool = False
     #: hub 中介推送（读数口径用：它也算「推」）。
     hub_push: bool = False
     #: 直推时最后一次 submit 的传输读数（随结果上浮给 `_wire_from_result`）。
@@ -179,7 +192,8 @@ class RoundContext:
     dist_cfg: dict[str, Any] | None = None
     #: rollout 起点墙钟（`_log_report` 的耗时分母）。
     t_rollout: float = 0.0
-    #: 整段长度（`--run-iters`；0 = 不整段）。
+    #: 段长（`--run-iters`；0 = 未声明）。退役后本机只用它做两件事：
+    #: 判「这门课归云机」（与 `run` 同义）与 `--export-bundle` 的终点。
     seg: int = 0
     #: 采集模式（见 `COLLECT_*`）。
     collect_mode: str = COLLECT_LOCAL
@@ -200,11 +214,6 @@ class RoundContext:
     done: list[str] = field(default_factory=list)
 
     # ------------------------------------------------------------- 小工具
-
-    @property
-    def seg_ran(self) -> bool:
-        """本轮是否走了半离线整段（**派生**，不单独存字段 ⇒ 不可能与 collect_mode 分叉）。"""
-        return self.collect_mode == COLLECT_SEGMENT
 
     def mark(self, kind: str) -> None:
         """记下「这一步走完了」（重复标记只保留一次，顺序即执行顺序）。"""

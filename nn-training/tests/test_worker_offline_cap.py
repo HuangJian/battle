@@ -198,15 +198,20 @@ def _boot(tmp_path: Path) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
 
 
 def test_run_job_forwards_the_hub_course_into_the_backfeed() -> None:
-    """worker 把取活面里的课程键透进 `run_plan_job`（补传的归位键）。
+    """补传的**归位键**（课程键）链路仍然完整 —— 但入口只剩取包腿（队列腿 2026-09-25 退役）。
 
     为什么用源码断言：链路中段是「跑完一整段的真 PPO」——单测里跑不起来，而这一跳断掉的
-    表现极其隐。：多课程 hub 下每条补传都被 400「无法归属课程」拒掉，节点侧补传整体停用，
+    表现极其隐：多课程 hub 下每条补传都被 400「无法归属课程」拒掉，节点侧补传整体停用，
     而训练本身完全正常（只有控制台看不到段内进度）。端到端那条在 `e2e/test_offline_training_e2e.py`。
+
+    ★ 2026-09-25（plan/online-offline-role-routing §7）：「worker 领到 kind=run job 后自己把
+    剩下轮次跑完」那条腿退役 ⇒ worker 侧**不再有**这一跳透传（它连 kind=run 都拒收）；
+    归位键今天由取包腿给（`run_standalone --hub-course`）。所以这里同时钉住「worker 侧
+    不再透传」——防止有人把队列腿连人带键一起复活。
     """
     root = Path(__file__).resolve().parent.parent
     src = (root / "remote" / "worker.py").read_text(encoding="utf-8")
-    assert 'hub_course=str(job.get("course") or "")' in src
+    assert 'hub_course=str(job.get("course") or "")' not in src  # 队列腿已退役（连带这一跳）
     # 下游每一跳都真的接这个形参（漏一跳 = 云机上 TypeError，或值静默丢掉）
     run_loop_src = (root / "remote" / "run_loop.py").read_text(encoding="utf-8")
     assert run_loop_src.count('hub_course: str = ""') == 3  # run_plan_job/open_run_context/run_standalone
