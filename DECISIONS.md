@@ -2513,3 +2513,44 @@ Node/Bun 无 `sched_getaffinity`）+ `hostLogicalCores` 兜底，逐条镜像 `e
 （多课程串行 / 不写课程名）当场作废。
 —— 全文（口径、R1–R4、残留清单、DoD）→ `plan/online-offline-role-routing.plan.md` §7 ·
 档案 `docs/nn/remote-transport.md` §48 · 回归 `nn-training/tests/test_offline_leg_retired.py`
+
+---
+
+## §2026-09-25-goalnn-cloudflared-notebook-retired（2026-09-25，plan/online-offline-role-routing.plan.md §9）
+
+**裁决**：`nn-training/ipynb/battle.cloudflared.ipynb` **明确退役** —— 变成**零逻辑指路牌**
+（Run 即 `SystemExit` + 指到该用的 notebook），**不装 bun**、不接「每次会话刷新引导模块」。
+取向对照 → plan §9.4。
+
+**为什么**（R1–R5，均在代码/配置/审计里核过）：
+① 它服务的能力已有**两个**正统执行者 —— 节点侧 rollout/eval over cloudflared 归
+`rollout.cloudflared.ipynb`（bun + `sampler-agent`；`rl-config.nodes[]` 里已有 CF URL 节点），
+GPU PPO 算力归 `battle.tailscale.ipynb`（pull/push 都支持），且**训练侧本来就在 tailnet 上**
+（push 的目的地址就是节点的 TS IP）⇒「训练机没有 tailnet」这个场景在系统里不存在；
+② 它**现在什么都跑不了**：cell 与它的两条模块链都不装 bun，也都不经过 §46 那条 bun 修复
+⇒ 任何 `kind=iter`（节点侧 rollout）被 worker 的能力自检**零下载拒单** —— 而这是**静默**的
+（控制台看着像「这台盘在线但没在干活」），它顶多能跑 `kind=ppo`，那条路 tailscale 盘已覆盖；
+③ 它的 230 行 cell 是 `remote/notebook_boot.py::_push` 的**第二份内联实现**且**不拉远端引导模块**
+—— 仓库里的修复到不了它（审计 §I6 的后半句），两份必然漂。
+
+**落地（P4）**：该 ipynb 只剩一份 markdown（退役原因 + 能力清单）+ 一个 `SystemExit` cell
+（消息含三份替代 notebook 与 §9 指路）；`remote/notebook_runtime.py` / `remote/push_bootstrap.py`
+的抬头不再把它算作使用者（保留一行「2026-09-25 已退役」的历史注记）。
+**能力清单（plan §9.2 那张表）= 唯一口径**：在线 PPO → `battle.tailscale.ipynb`（pull）·
+节点侧 rollout/eval → `battle.tailscale.ipynb` 或 `rollout.cloudflared.ipynb` ·
+离线自主跑整课 → `battle.offline.ipynb` · BC → `battle-bc.ipynb`。
+
+**被否决**：① **装 bun + 接刷新** —— 它服务的能力已被 `rollout.cloudflared.ipynb` 承担，留着就得
+**同时**补 bun（改 cell ⇒ 要求用户重贴 notebook，或在模块侧为新入口再挂一个 boot 钩子）**和**
+把它改挂远端引导模块（第二份实现要么删、要么两边维护），而 R4 说明这条接入方式训练侧用不上
+⇒ 为没有消费者的路径加钩子；② **直接删文件** —— 用户 Kaggle/Colab 里可能还有旧副本，
+**删库不产生指路**（零逻辑牌子把「下一次打开」变成一次明确指引，且随时可从 git 历史取回）；
+③ **保留可用、只在文档标注退役** —— 文档不在打开 notebook 的那一刻，§I6 的坑照旧。
+
+**违反后果**：把引导代码贴回去 ⇒ 这块盘又能起 worker、又能被控制台派活，而它跑不了
+`kind=iter`、仓库修复也到不了它，失效方式**静默**（要等真机报障才看得见；同一形状已经咬过
+两次：`f274ac1b` 之前的白传 + §46 的「从来没装 bun」）。
+
+**回归**：`nn-training/tests/test_notebook_retired.py`（禁 worker 引导标识 + 必须 `SystemExit` +
+三份指路）。
+—— 全文 → `plan/online-offline-role-routing.plan.md` §9 · 档案 `docs/nn/remote-transport.md` §49

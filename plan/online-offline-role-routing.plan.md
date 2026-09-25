@@ -6,7 +6,7 @@
 > **背景**：`reports/online-offline-hot-switch-audit-2026-09-25.md`（六条不足 L1–L6 / 六条不变式 I1–I6）。
 > **姊妹 plan**：`plan/switch-mode-drops-jobs.plan.md`（管"切换即撤单"）。本 plan 管"归属"。
 > **两者关系**：必须同批或紧接落地 —— 只做归属会出现"旧 job 一直不可领"，只做撤单会出现"撤了单但仍派给错盘"。
-> **阅读顺序**：§1 事实链 → §2 设计 → §3 分阶段 → §4 e2e → §5 DoD → §6 边界 → §7 裁决（`kind=run` 归谁）→ §8 实施修订。
+> **阅读顺序**：§1 事实链 → §2 设计 → §3 分阶段 → §4 e2e → §5 DoD → §6 边界 → §7 裁决（`kind=run` 归谁）→ §8 实施修订 → §9 裁决（P4：第三块盘退役）。
 > **行号只作定位加速，判据看函数名。**
 
 ---
@@ -148,7 +148,7 @@ CFG["offline_worker"] → supervisor argv `--offline` → worker_loop(role=…) 
 | **P1（核心）** | §2.1 role 进 manifest + §2.2 咽喉点两道闸 + §2.3 角色上报（复用载体） | `protocol.py` / `hub_client.py` / `hub_server.py` / `worker.py` / `push_dispatch.py` / `notebook_runtime.py` | ✅ 已实施 |
 | **P2** | §2.4 取包端点补 mode 闸 | `hub_server.py` | ✅ 已实施 |
 | **P3** | §2.5 配置短路 | `rl/cli.py` | ✅ 已实施 |
-| **P4** | I6 第三块盘：`battle.cloudflared.ipynb` 装 bun + 接"每次会话刷新"（或明确退役它） | 该 ipynb | ⬜ 未做（与本 plan 正交） |
+| **P4** | I6 第三块盘：`battle.cloudflared.ipynb` —— **明确退役**（不装 bun，见 §9） | 该 ipynb + 两处 docstring | ✅ 已实施（2026-09-25） |
 | **P5** | **§7 的收尾**：`kind=run` 的队列项退役（砍在发布点）+ 无消费者时的响亮拒 + 离线盘报名与读数 | `rl/loop_steps.py` / `rl/loop_round_steps.py` / `rl/loop_round.py` / `rl/loop_core.py` / `rl/loop_runner.py` / `rl/cli.py` / `remote/worker.py` / `remote/run_loop.py` / `remote/offline_boot.py` / `remote/hub_server.py` | ✅ 已实施 |
 
 **实施顺序（已按此落）**：`protocol.py` 常量+映射 → `hub_client.py` 写字段 → `hub_server.py`
@@ -383,3 +383,60 @@ it0 基线 + 本机产物优先；四份 plan 在建/已实施）⇒ 保留它 =
 - `docs/tpu-perf` 无关；`rl/cli.py` 的 `--rollout-src` 短路（§2.5）属于 I3；
 - `hub_server.py` 的"离线课整段交领"日志判据原读 `mode_of(course)` ⇒ 热切后会撒谎，改为读 `job_role(jid)`；
 - `active_courses()` 的 `mode_of` 读法保留，但补写"它只是活跃度近似、不参与派发判断"的口径注释。
+
+---
+
+## 9. 裁决：P4 —— `battle.cloudflared.ipynb` **明确退役**（不装 bun）（2026-09-25）
+
+**结论：退役**（文件保留为**零逻辑指路牌**；不装 bun、不接刷新、不再能起 worker）。
+取向对照见 §9.4。
+
+### 9.1 依据（R1–R5，均在代码/配置/真机里核过）
+
+| # | 事实 | 出处 |
+|---|---|---|
+| R1 | 它=「GPU worker 经 cloudflared 公网隧道接入」（push-first 无 hub / pull）。而 ① 节点侧 rollout/eval 的 cloudflared 通道现在由 `rollout.cloudflared.ipynb` 承担（bun + `sampler-agent`，且 `rl-config.nodes[]` 里已有 CF URL 节点，如 `gcs`）；② GPU PPO 算力由 `battle.tailscale.ipynb` 承担（push/pull 都支持） | `nn-training/rl-config.json` 的 `nodes[]`（含 `https://….trycloudflare.com`）· `ipynb/rollout.cloudflared.ipynb`（装 bun 那段） |
+| R2 | **它现在什么都跑不了**：cell 与它的两条模块链（`notebook_runtime.run_notebook` pull / 内联 push bootstrap）都不装 bun，也都不经过 `tailscale_boot.ensure()`（§46 的 bun 修复只覆盖在线 tailscale 腿与 Colab 离线腿）⇒ 任何 `kind=iter` job 被 worker 的能力自检**零下载拒单**；它顶多能跑 `kind=ppo`（hub 采样本机 + 云机只算 PPO），而那条路 tailscale 盘已覆盖 | `remote/notebook_runtime.py` · `remote/push_bootstrap.py` · `remote/tailscale_boot.py::ensure_bun`（§46） |
+| R3 | 它的 230 行 cell 是 `notebook_boot._push` 的**第二份实现**（HTTP 升级服务 + 起 cloudflared + 释放端口 + spawn 完整 worker）——两份必然漂；审计 §I6 的后半句「没被'每次会话刷新引导模块'覆盖」说的就是它：它**不拉远端引导模块**，仓库里的修复到不了它 | `ipynb/battle.cloudflared.ipynb` cell vs `remote/notebook_boot.py::_push` |
+| R4 | **训练侧本来就在 tailnet 上**：push 的目的地址就是节点的 TS IP（`battle.tailscale.ipynb` 的 `rl_mode: push` 那行），用户真机日志（§46）也是这条 ⇒「训练机没有 tailnet」这个场景在系统里不存在 | `ipynb/battle.tailscale.ipynb` markdown 表 · `docs/nn/remote-transport.md` §46 |
+| R5 | 它正是审计点名的**下一个同款坑**：也能起 worker、也会被 UI 派活、却静默拒单（与 `9d…`/`ed9d3514` 同类：能力与 UI 的承诺不一致） | `reports/online-offline-hot-switch-audit-2026-09-25.md` §I6 |
+
+### 9.2 实施形状（P4）
+
+1. **`nn-training/ipynb/battle.cloudflared.ipynb` 变成零逻辑指路牌**：markdown 说清「已退役 + 为什么 +
+   该用哪个」，code cell 打印同一份指路后 `SystemExit` ⇒ 审计 §I6 的两个洞（**不装 bun / 不被刷新覆盖**）
+   **由构造消失**（没有逻辑可漂、没有被派活的可能）。
+2. **两处点它名字的 docstring 改掉**：`remote/notebook_runtime.py` 的抬头（原来写「（`battle.cloudflared.ipynb` /
+   `battle.tailscale.ipynb`）的运行时逻辑」）与 `remote/push_bootstrap.py` 的「Kaggle push-first：notebook
+   内联一份压缩 bootstrap」（现在只有 tailscale 盘的内联回退用它）。
+3. **能力清单成为唯一口径**（本表即「该用哪个 notebook」的答案）：
+
+| 你要的 | 用哪个 |
+|---|---|
+| 在线 PPO 算力（hub 采样本机 + 云机算 PPO，`kind=ppo`） | `battle.tailscale.ipynb`（pull） |
+| 节点侧 rollout/eval（`kind=iter`，需要 bun） | `battle.tailscale.ipynb`（pull/push；§46 起自装 bun）**或** `rollout.cloudflared.ipynb`（不需要 tailnet） |
+| 云机自主跑整课（离线） | `battle.offline.ipynb`（取任务包；**不经 hub 队列**，P5 之后） |
+| BC 蒸馏 | `battle-bc.ipynb` |
+
+4. **守卫用例**（`nn-training/tests/test_notebook_retired.py`）：该 ipynb 里不得再出现任何 worker 引导标识
+   （`notebook_runtime` / `push_bootstrap` / `worker_loop` / `run_pull_worker` / `run_push_worker` /
+   cloudflared 二进制安装），且必须含 `SystemExit` 与三份指路 —— 防止有人「顺手把它改回可用」而没读这段裁决。
+
+### 9.3 DoD（已逐条判）
+
+- [x] 该 ipynb **零逻辑**（无 worker 引导标识），打开即指路（`SystemExit` + 该用哪个）。
+- [x] `notebook_runtime.py` / `push_bootstrap.py` 不再点它的名字（§46 的历史注记不算）。
+- [x] 能力清单与 `rl-config.nodes[]`（CF URL 节点）+ §46 的 bun 口径一致。
+- [x] `nn-python-gate` 绿（含新守卫用例）+ 一条 `DECISIONS`（含被否决项）。
+
+### 9.4 取向对照（留档）
+
+| 取向 | 本裁决 | 理由 |
+|---|---|---|
+| **退役（指路牌）** | ✅ **采用** | R1/R2/R3：它服务的能力已被两处取代，且留着它就是第二份 bootstrap 实现 + 一个静默拒单入口 |
+| 装 bun + 接刷新 | ❌ 否决 | 要服务的能力（节点侧 rollout over CF）已由 `rollout.cloudflared.ipynb` 承担；留着就得**同时**补 bun（改 cell ⇒ 用户重贴 notebook，或在模块侧为新入口再挂一个 boot 钩子）**和**把它改挂远端引导模块（R3 的第二份实现要么删、要么两边维护）；R4 说明这条接入方式训练侧用不上 ⇒ 为没有消费者的路径加钩子 |
+| 直接删文件 | ❌ 否决 | 用户 Kaggle/Colab 里可能还有旧副本，**删库不产生指路**；零逻辑牌子能把「下一次打开」变成一次明确指引（与 §7 的「响亮拒 + 一行指路」同款，且随时可从 git 历史取回） |
+| 保留可用、只在文档标注退役 | ❌ 否决 | 文档不在打开 notebook 的那一刻；§I6 的坑照旧（能起 worker、能被 UI 派活、静默拒单） |
+
+**与 §7 的关系**：两条裁决治的是同一个病 —— **一个任务不许有两个执行者**。§7 砍掉的是「队列里的整段」
+（本机 vs 云机取包），§9 砍掉的是「第三个 worker 盘」（它服务的两条活都已有正统执行者）。

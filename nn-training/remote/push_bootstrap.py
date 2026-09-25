@@ -4,8 +4,10 @@
 一律进 code.zip。但 **首个 job 之前还没有 code.zip**，故本模块两种形态：
 
   1. 仓库/测试：直接 import（完整实现）。
-  2. Kaggle push-first：notebook 内联一份**压缩** bootstrap（仅升级 HTTP + cloudflared），
-     解包首个 job 的 code_b64 后 sys.path 注入并调用 `run_push_after_upgrade`。
+  2. Kaggle push-first：`battle.tailscale.ipynb` 的 cell 内联一份**压缩** bootstrap
+     （仅升级 HTTP + cloudflared），解包首个 job 的 code_b64 后 sys.path 注入并调用
+     `run_push_after_upgrade`。（`battle.cloudflared.ipynb` 曾是同一形态的第二份实现，
+     2026-09-25 退役 —— 见 `plan/online-offline-role-routing.plan.md` §9。）
 
 完整 worker_server / 守候日志 / 设备探测仍在 `remote/notebook_runtime.py`。
 """
