@@ -58,9 +58,11 @@ def test_falls_back_to_the_installer_home_dir(
 
 
 def test_installs_then_prepends_path(no_bun: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: dict[str, object] = {}
+    # 值类型是 `list[str]`（argv），不是 `object`：下面 `" ".join(seen["argv"])` 要它可迭代
+    # —— 原来写 `object` 时 mypy 报 arg-type（门禁只在文件被暂存时拦，所以一直没人碰它）。
+    seen: dict[str, list[str]] = {}
 
-    def fake_run(argv, **kw):
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
         seen["argv"] = argv
         target = no_bun / ".bun" / "bin"
         target.mkdir(parents=True, exist_ok=True)
