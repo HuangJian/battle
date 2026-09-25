@@ -81,10 +81,12 @@ PRIVATE_MOVED = ("_forces_of", "_KIND_CHAR")
 #: 门面 + 执行器两个宿主里对批规划成员的真实调用点
 #: （AST 计真实 `Call`；归属者 = 顶层 def / 类.方法，含闭包名）。
 INBOUND_CALLS: dict[str, dict[str, int]] = {
-    "batch_iter_id": {"BatchEvalRunner._run": 1},
-    "is_transient_error": {"BatchEvalRunner._run.worker": 1},
+    # 2026-09-25（S30/B5a）：`_run` 拆成相位方法 ⇒ 归属者的方法名随成员走
+    # （`batch_iter_id` 留 `_open_unit`，两个闭包调用点随 `_run_channels`）。
+    "batch_iter_id": {"BatchEvalRunner._open_unit": 1},
+    "is_transient_error": {"BatchEvalRunner._run_channels.worker": 1},
     "kind_for_policy": {"BatchEvalRunner.__init__": 1},
-    "node_gate_reason": {"BatchEvalRunner._run.bringup": 1},
+    "node_gate_reason": {"BatchEvalRunner._run_channels.bringup": 1},
     "select_next_unit": {"maybe_dispatch_batch": 1},
     "units_for_batch": {"maybe_dispatch_batch": 1},
 }

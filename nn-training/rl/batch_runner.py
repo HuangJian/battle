@@ -36,6 +36,7 @@ import threading
 import time
 from collections import deque
 from pathlib import Path
+from typing import NamedTuple
 
 import dist_common
 from rl.batch_plan import (
@@ -94,6 +95,49 @@ def _heartbeat(**patch: object) -> None:
         pass
 
 
+class _UnitPlan(NamedTuple):
+    """一个单元的**派发前置条件** = `_open_unit` 的产出 = 通道机器与收尾要用的一切。
+
+    单元开头内部的中间量（`policy_cfg` / `window` / `god` / `iter_base` / `pairs` /
+    `done_before` / `snapshot_path`）**不外漏** —— 它们是那句话的局部推导，写进契约只会让
+    「机器到底依赖什么」变模糊。字段与 `_open_unit` 的返回**逐名对应**（守卫钉住）。
+    """
+
+    # ── 任务语义（来自 unit）──
+    unit: dict
+    kind: str
+    unit_lives: int | None
+    unit_level: int | None
+    stage_params: dict
+    total: int
+    todo: list[tuple[int, int]]
+    t_start: float
+    # ── 三个超时 + 背压/重探配额（policy 配置）──
+    status_timeout: float
+    task_timeout: float
+    fail_streak_max: int
+    busy_retry_limit: int
+    busy_backoff_sec: float
+    recover_ping_sec: float
+    no_consumer_grace: float
+    max_recovery_tries: int
+    # ── 身份与门：iterId / 权重指纹 / 本机 bun / codeHash ──
+    iter_id: str
+    weights_bytes: bytes
+    wver: str
+    key16: str
+    local_bun: str
+    code_hash_local: str
+    # ── 派发面 ──
+    enabled_nodes: list[dict]
+    local_slots: int
+    local_weights: str | None
+    local_on: bool
+    deadline: float
+    trace: bool
+    req_scope: str
+
+
 class BatchEvalRunner:
     """一批次中一个 100 局单元的派发器（阻塞版，调用方放后台线程跑）。
 
@@ -150,6 +194,24 @@ class BatchEvalRunner:
             return {"settled": 0, "total": 0, "dropped": 0}
 
     def _run(self) -> dict:
+        """一个单元 = **开头 → 通道机器 → 收尾**（三段各自成方法，见下面三个被调者）。
+
+        这一段只讲相位；判断与状态都在被调者里。`_open_unit` 用返回 dict 表示「无事可做」
+        （nn 缺权重 / 本单元已全结算），直接透传。
+        """
+        plan = self._open_unit()
+        if isinstance(plan, dict):
+            return plan
+        return self._run_channels(plan)
+
+    def _open_unit(self) -> _UnitPlan | dict:
+        """单元开头：把配置 / 权重 / 语料 / 通道表**算清楚**，返回一个单元的全部前置条件。
+
+        两种「没事干」直接返回结果 dict（调用方透传）：
+          - nn 单元没有权重（`rl_path` 空）⇒ 0 局；
+          - 本单元的 pair 全都已结算（`_done_keys`）⇒ settled=total，不重复跑。
+        """
+
         args = self.args
         unit = self.unit
         policy_cfg = self.cfg.get("policy", {})
@@ -269,6 +331,82 @@ class BatchEvalRunner:
         # god 的占位 `{}` 权重也在各自通道内 POST（不 POST 则 /v1/task 必然 409 ——
         # 这正是 C 层 god 批此前「无节点可用」表象的真因）。
         assert weights_bytes is not None
+        return _UnitPlan(
+            unit=unit,
+            kind=kind,
+            unit_lives=unit_lives,
+            unit_level=unit_level,
+            stage_params=stage_params,
+            total=total,
+            todo=todo,
+            t_start=t_start,
+            status_timeout=status_timeout,
+            task_timeout=task_timeout,
+            fail_streak_max=fail_streak_max,
+            busy_retry_limit=busy_retry_limit,
+            busy_backoff_sec=busy_backoff_sec,
+            recover_ping_sec=recover_ping_sec,
+            no_consumer_grace=no_consumer_grace,
+            max_recovery_tries=max_recovery_tries,
+            iter_id=iter_id,
+            weights_bytes=weights_bytes,
+            wver=wver,
+            key16=key16,
+            local_bun=local_bun,
+            code_hash_local=code_hash_local,
+            enabled_nodes=enabled_nodes,
+            local_slots=local_slots,
+            local_weights=local_weights,
+            local_on=local_on,
+            deadline=deadline,
+            trace=trace,
+            req_scope=req_scope,
+        )
+
+    def _run_channels(self, plan: _UnitPlan) -> dict:
+        """通道机器：**每节点一条通道**（就绪即派单 / 失联重探）+ 本机槽位 + 尾段竞速。
+
+        状态（队列 / 在飞 / 逐节点账 / 三个闸的计数器）与 11 个闭包都住在本方法里 ——
+        它们互相咬得很紧（闭包共享 58 个名字、139 处引用），切成对象是**另一步**
+        （见 plan/nn-training-refactor.md §5.6 的 B5b），本步只把相位边界显式化：
+        取值 → 机器 → `_settle_unit`。下面 600 余行与拆分前**逐字节相同**。
+        """
+        # 机器阶段用的名字（来源见 `_UnitPlan`；显式取值 ⇒ 下面逐字保留、不改成 plan.x）
+        unit, kind, unit_lives, unit_level, stage_params, total, todo, t_start = (
+            plan.unit,
+            plan.kind,
+            plan.unit_lives,
+            plan.unit_level,
+            plan.stage_params,
+            plan.total,
+            plan.todo,
+            plan.t_start,
+        )
+        status_timeout, task_timeout, fail_streak_max = (
+            plan.status_timeout,
+            plan.task_timeout,
+            plan.fail_streak_max,
+        )
+        busy_retry_limit, busy_backoff_sec = plan.busy_retry_limit, plan.busy_backoff_sec
+        recover_ping_sec, no_consumer_grace, max_recovery_tries = (
+            plan.recover_ping_sec,
+            plan.no_consumer_grace,
+            plan.max_recovery_tries,
+        )
+        iter_id, weights_bytes, wver, key16 = (
+            plan.iter_id,
+            plan.weights_bytes,
+            plan.wver,
+            plan.key16,
+        )
+        local_bun, code_hash_local = plan.local_bun, plan.code_hash_local
+        enabled_nodes, local_slots, local_weights, local_on = (
+            plan.enabled_nodes,
+            plan.local_slots,
+            plan.local_weights,
+            plan.local_on,
+        )
+        deadline, trace, req_scope = plan.deadline, plan.trace, plan.req_scope
 
         pending: deque[tuple[int, int]] = deque(todo)
         lock = threading.Lock()
@@ -885,6 +1023,50 @@ class BatchEvalRunner:
                 )
                 break
             all_done.wait(0.2)
+        return self._settle_unit(
+            lock=lock,
+            seen=seen,
+            nodes_ready_ever=nodes_ready_ever,
+            writers=writers,
+            dup_settles=dup_settles,
+            stop_watch=stop_watch,
+            all_done=all_done,
+            node_games=node_games,
+            node_soft_fails=node_soft_fails,
+            node_hard_fails=node_hard_fails,
+            threads=threads,
+            unit=unit,
+            req_scope=req_scope,
+            todo=todo,
+            t_start=t_start,
+        )
+
+    def _settle_unit(
+        self,
+        *,
+        lock: threading.Lock,
+        seen: set[tuple[int, int]],
+        nodes_ready_ever: set[str],
+        writers: list[int],
+        dup_settles: list[int],
+        stop_watch: threading.Event,
+        all_done: threading.Event,
+        node_games: dict[str, int],
+        node_soft_fails: dict[str, int],
+        node_hard_fails: dict[str, int],
+        threads: list[threading.Thread],
+        unit: dict,
+        req_scope: str,
+        todo: list[tuple[int, int]],
+        t_start: float,
+    ) -> dict:
+        """收尾三闸：停机 → 断连 → 只等**正在写行的赢家**落盘 → 线程 best-effort → 落账。
+
+        这里是「一次批单元」对台账的唯一交代：`dropped == 0` ⇒ `mark_unit_done`（含
+        `node_dist` 参与度）；否则 `reopen_for_resume`（部分完成，下窗续跑）。两者都在
+        `try` 里 —— B 层的规矩是**任何失败只记日志、绝不抛出**（训练主链零风险）。
+        """
+
         stop_watch.set()
         # req 4：收工即断连（settled 满或墙钟到点都一样——在途局结果无用，不许再拖着等）。
         closing = dist_common.abort_active_requests(req_scope)
@@ -919,6 +1101,50 @@ class BatchEvalRunner:
             f"[batcheval] {unit['rung']} u{self.unit_idx} DONE settled={len(seen)}/{len(todo)} "
             f"dropped={dropped} dup={dup_settles[0]} sec={round(time.time() - t_start, 1)}"
         )
+        self._log_provenance(
+            unit=unit,
+            node_games=node_games,
+            node_soft_fails=node_soft_fails,
+            node_hard_fails=node_hard_fails,
+            nodes_ready_ever=nodes_ready_ever,
+        )
+        try:
+            if dropped == 0:
+                BatchStore(data_root()).mark_unit_done(
+                    str(self.batch.get("batch_id")), self.unit_idx, dict(node_games)
+                )
+            else:
+                # 部分完成（yield/超时）：不标 unit done，批回 pending 供 idle 续跑；
+                # 已结算 seed 由 _done_keys 跳过，不重复计。
+                log(
+                    f"[batcheval] {unit['rung']} u{self.unit_idx}: partial "
+                    f"({dropped} left) — reopen batch for resume"
+                )
+                BatchStore(data_root()).reopen_for_resume(str(self.batch.get("batch_id")))
+        except Exception as e:
+            log(f"[batcheval] WARN mark_unit_done failed: {e}")
+        # R4-G1 心跳：单元结束（清 rung；window_open 留给 loop_core 的开关窗写点）。
+        _heartbeat(
+            batch_id=str(self.batch.get("batch_id")), rung=None, remaining_units=0
+        )
+        return {"settled": len(seen), "total": len(todo), "dropped": dropped}
+
+    def _log_provenance(
+        self,
+        *,
+        unit: dict,
+        node_games: dict[str, int],
+        node_soft_fails: dict[str, int],
+        node_hard_fails: dict[str, int],
+        nodes_ready_ever: set[str],
+    ) -> None:
+        """参与度账（provenance）：**谁跑的必须自证**。
+
+        逐局行带的 `node` 列是同一份账的落盘形态；这里在日志里再算一遍，让「熔断静默降
+        本地」不再可能被误读为分布式。两条响亮告警分别对应「远端 0 参与但仍跑成」与
+        「本单元 0 局跑成」（后者见 2026-09-19 那次权重桶被收敛扫掉的实测）。
+        """
+
         # 参与度账（provenance）：谁跑的必须自证。逐局行带的 node 列是同一份账的
         # 落盘形态；这里在日志里再算一遍，让“熔断静默降本地”不再可能被误读为分布式。
         tally = ", ".join(f"{k}={v}" for k, v in sorted(node_games.items())) or "none"
@@ -950,26 +1176,7 @@ class BatchEvalRunner:
                     f"同 kind 保留份数收敛扫掉（workdir-cleanup.WEIGHT_FILES_KEEP）；查节点日志的"
                     f"ENOENT 与 tmp/dist-agent/weights-*.json，一次性评估用专用 kind 规避"
                 )
-        try:
-            if dropped == 0:
-                BatchStore(data_root()).mark_unit_done(
-                    str(self.batch.get("batch_id")), self.unit_idx, dict(node_games)
-                )
-            else:
-                # 部分完成（yield/超时）：不标 unit done，批回 pending 供 idle 续跑；
-                # 已结算 seed 由 _done_keys 跳过，不重复计。
-                log(
-                    f"[batcheval] {unit['rung']} u{self.unit_idx}: partial "
-                    f"({dropped} left) — reopen batch for resume"
-                )
-                BatchStore(data_root()).reopen_for_resume(str(self.batch.get("batch_id")))
-        except Exception as e:
-            log(f"[batcheval] WARN mark_unit_done failed: {e}")
-        # R4-G1 心跳：单元结束（清 rung；window_open 留给 loop_core 的开关窗写点）。
-        _heartbeat(
-            batch_id=str(self.batch.get("batch_id")), rung=None, remaining_units=0
-        )
-        return {"settled": len(seen), "total": len(todo), "dropped": dropped}
+
 
     def _done_keys(self, key16: str) -> set[tuple[int, int]]:
         out: set[tuple[int, int]] = set()

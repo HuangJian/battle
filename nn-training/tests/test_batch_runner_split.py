@@ -67,6 +67,7 @@ RUNNER_IMPORTS = {
     "shutil",
     "threading",
     "time",
+    "typing",
     "dist_common",
     "rl.batch_plan",
     "rl.batch_store",

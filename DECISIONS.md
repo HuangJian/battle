@@ -3313,6 +3313,31 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
   nn **2567 → 2586 passed / 3 skipped**（ruff + mypy 绿）；根 2120 / 0；dashboard typecheck + 1105 / 0；
   `check-decisions` ok。**下一步 = B2**（`rl/batch_store.py`：8 个写点 → 具名转移 + `dirty` 才落盘）。
 
+## §2026-09-25-goalnn-batch-runner-phase-split（2026-09-25，B5a：`_run` 按**相位**切三段，机器体逐字节不动）
+
+**决定：`BatchEvalRunner._run`（821 行）按相位拆成 `_open_unit` / `_run_channels` / `_settle_unit` /
+`_log_provenance`，`_run` 退成 6 行相位叙述；机器体（615 行）**逐字节不动**，只多一个显式取值段；
+新增 `_UnitPlan`（29 字段）作为开头的**对外契约**。** 全文 → `docs/nn/engineering.md` §30；设计 → `plan/nn-training-refactor.md` §5.6。
+
+- **侦察定量（决定刀口）**：`_run` 外层赋值 65 个名字、58 个被机器段读 ⇒ **212 处引用**，其中
+  **139 在 11 个闭包内**；**零 `nonlocal`**（状态靠可变容器绕过闭包只读）⇒ 「按调用图切」只能得到
+  615 行的连通分量。**病根与 B2 同型：不是没有链，是状态没有所有者。**
+- **切法 = 相位**（谁的失败模式是什么、谁对台账负责）：开头（短路）/ 机器（并发与背压）/ 收尾
+  （**对台账的唯一交代**）+ 参与度账。`_UnitPlan` **只收真要用到的 29 个名字** —— 开头内部的中间量
+  （`policy_cfg` / `window` / `god` / `iter_base` / `pairs` / `done_before` / `snapshot_path`）**不出界**。
+- **验证**：逐段字节对账（`tmp/verify_b5.py` 对 `git show HEAD:`：A 119 · S 615 · D_head 34 ·
+  D_tail 20 · PROV 31 行原样且各一次）+ **8 条恒等映射取值**（`x = plan.x`，写错名字不会静默换值）+
+  契约闭合（字段 == 返回实参 == 取值名）+ 反探针 **14/14**，sha256 无漂移。
+- **★ 收益 = 可测性**：`_settle_unit` / `_log_provenance` 现在**直接可调** ⇒ 台账交代（全结算 ⇒
+  `mark_unit_done` + `node_dist`；部分 ⇒ `reopen_for_resume`）、「任何失败只记日志绝不抛出」、
+  两条响亮告警、两处短路全部成为单测（`tests/test_batch_runner_phases.py` 10 例）。
+- **守卫演进 2 处**：import 闭集 +`typing`；`test_batch_plan_split` 入边归属者改名
+  （`_run.bringup` → `_run_channels.bringup` 等）—— 又一次「搬成员 = 改归属者名字」。
+- **遗留 B5b（本刀不做）**：`_run_channels` 仍 677 行；状态对象化是**改写**（212 处引用 + 40 处
+  `self.` 改回指）⇒ 字节对账不成立，主证据须换成「AST 变换证明 + 差分探针」，已写进 plan §5.6.3。
+- **记账/门禁**：`batch_runner.py` **1031 → 1238 行** · nn **2633 → 2643 passed / 3 skipped** ·
+  根 `bun run check` 2120 / 0。
+
 ## §2026-09-25-goalnn-batch-unrunnable-filter-loud-requeue（2026-09-25，B4 发现的既存缺陷：无可跑 unit 的批不再静默卡死）
 
 **决定：`maybe_dispatch_batch` 在「规划成功但 `select_next_unit` 无待跑 unit」时，从**静默 `return None`**
