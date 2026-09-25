@@ -98,6 +98,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 11 | ~~云机离线 eval 腿仍未入池~~ **已收尾**：池已接入 `run_cloud_eval` + `run_local_eval_game`（每轮一个池、轮末关；上限 `min(slots, 局数)`），实测 **1.19–1.39×**（24/48 局），逐局 `_eval_report.json` **逐字段相同**（`elapsedSec` 除外） | `docs/nn/runtime-opt.md` §22.5 | ✅ 已验：`tests/test_offline_eval_pool.py`（接线 + 执行面，8 用例）+ `tools/perf/bench-eval-pool.py` 真机 A/B |
 | 12 | **离线开课补 it0 基线的真机判据未取**（代码/单测已齐，见 `docs/nn/remote-transport.md` §42） | `docs/nn/remote-transport.md` §42 | 点一次离线开课 ⇒ `tmp/<课>/evalA.log` 出现 `[evalA] DONE it0 … games=<关数×每关局数>`；**等第一轮回传落账后**控制台指标表出现 it0 行、配对基线回到 0（不再是「首条 eval 轮」） |
 | 13 | **切离线自动出包的真机判据未取**（代码/单测已齐，见 `docs/nn/remote-transport.md` §43） | `docs/nn/remote-transport.md` §43 | 在线课点「切离线」⇒ 回执带「任务包导出已启动」且 `tmp/<课>/task-<课>.zip` 出现；云机日志出现 `hub 找的落点：…`（不再是固定文案）；**包在导出窗口里云机会等到它**（不再等满 1800s） |
+| 14 | **云机清单 + 租约的真机判据未取**（代码/单测已齐，见 `docs/nn/remote-transport.md` §44） | `docs/nn/remote-transport.md` §44 | 清空 `battle.offline/<课>/` 后把 `CFG.course` 留空跑一次 cell：日志出现 `hub 清单：N 条` + `领到租约`，两门课按 `ready`+mtime 升序跑完；**第二台**同时跑 ⇒ `已被 … 持有（Ns 后过期）` 且照旧跑完；控制台 `GET /admin/offline` 的 `leases` 能看到 holder |
 
 ### 3.4 控制台
 

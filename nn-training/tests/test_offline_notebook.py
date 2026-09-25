@@ -37,6 +37,11 @@ CFG_KEYS = (
     "wait_pack_sec",
     "prompt_upload",
     "hub_tries",
+    "auto_discover",
+    "queue_mode",
+    "queue_poll_sec",
+    "idle_wait_sec",
+    "session_budget_sec",
     "live_backfeed",
     "device",
     "threads",
@@ -111,13 +116,23 @@ def test_credentials_are_read_before_any_network_change() -> None:
 
     2026-09-22（多课程）：取包与网络动作都搬进了逐课的 `run_one_course`，所以判据是
     「`run()` 读完凭据之后才调 `run_one_course`，而 `obtain_pack` 只在 `run_one_course` 里」。
+    2026-09-25（清单/队列）：`run()` 把两个循环拆成 `_run_batch` / `_run_auto`（都在同一
+    文件、都**只**通过参数拿凭据）⇒ 判据跟着搬：`run()` 里 `creds = {` 必须早于调它们俩，
+    而 `run_one_course(` 只出现在 `_run_batch` 里。
     """
     src = Path(offline_boot.__file__).read_text(encoding="utf-8")
     body = src[src.index("def run(") :]
     body = body[: body.index("\ndef ")]  # run() 的函数体（下一个顶层 def 之前）
-    assert body.index("creds = {") < body.index("run_one_course("), (
-        "取包/网络动作必须晚于凭据读取（2026-09-17 Kaggle 事故的时序约束）"
-    )
+    for call in ("_run_batch(", "_run_auto("):
+        assert body.index("creds = {") < body.index(call), (
+            f"{call} 是碰网络的下一步，必须晚于凭据读取（2026-09-17 Kaggle 事故的时序约束）"
+        )
+    assert "run_one_course(" not in body, "取包那一步住在 _run_batch 里（别在 run() 里绕过凭据顺序）"
+    batch = src[src.index("def _run_batch(") :]
+    batch = batch[: batch.index("\ndef ")]
+    assert "creds: dict" in batch[:400], "_run_batch 必须收下已读好的凭据"
+    assert batch.index("run_one_course(") > 0
+    assert "creds: dict" in src[src.index("def _run_auto(") :][:400], "_run_auto 同上"
     per_course = src[src.index("def run_one_course(") :]
     assert "creds: dict" in per_course[:400], "run_one_course 必须收下已读好的凭据"
     assert per_course.index("pack = obtain_pack(") > 0

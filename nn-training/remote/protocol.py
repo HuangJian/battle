@@ -887,6 +887,21 @@ OFFLINE_RESUME_BLOB_PATH = "/offline/resume/blob"
 #: 锚点字节端点允许的文件名（白名单：拒路径穿越与「借名读别的文件」）。
 OFFLINE_RESUME_BLOB_NAMES = ("weights.json", "opt.tar", "row.json")
 
+#: 离线**任务清单 + 领取租约**（hub → 云机，2026-09-25，`plan/offline-task-discovery.plan.md`）：
+#: 云机不再要在 notebook 里写死课程名——`GET /offline/tasks` 列出可领的离线任务
+#: （课程 + 包 + 新鲜度 + 谁在跑），云机 `claim` → 取包 → 跑完 → `release`，跑完一批再问一次。
+OFFLINE_TASKS_PATH = "/offline/tasks"
+OFFLINE_CLAIM_PATH = "/offline/claim"
+OFFLINE_HEARTBEAT_PATH = "/offline/heartbeat"
+OFFLINE_RELEASE_PATH = "/offline/release"
+#: 清单协议版本：云机据此判断能力（老 hub 没有这个端点 ⇒ 404 ⇒ 降级到 `CFG.course`）。
+OFFLINE_QUEUE_VERSION = 1
+#: 离线租约时长（秒）。为什么与逐轮 job 的 `CLAIM_TTL_SEC = 300` 不同档：离线段是**小时级**
+#: （取包 + 跑完整段 + 打包交付），300s 只会让心跳压力白增。心跳周期沿用 `HEARTBEAT_SEC = 60`。
+#: 租约只管**领取资格**，不参与回传（`/offline/artifact` 一行不改）：回传靠 `(run_id, it)`
+#: 首写幂等兜底 ⇒ 租约过期/被接管**不会**让已跑完的产物作废。
+OFFLINE_LEASE_TTL_SEC = 900
+
 # ---- worker 能力自报（离线训练模式，2026-09-19）----
 # 离线课（`kind="run"` 整段）与在线课（逐轮）对 worker 的要求不同：前者要求节点
 # **自己跑完整段**（rollout + PPO 全在节点、计划随 job 走）。所以「谁能领离线课」不能靠

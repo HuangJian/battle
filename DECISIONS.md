@@ -2385,3 +2385,21 @@ hub 自己重打包（造第二份打包逻辑）· 进度停滞时自动清空 
 缺包路径没有自愈 ⇒ 排障人要自己猜是该重导还是课程名写错；把「全被跳过」与「队列本来就空」合并 ⇒
 没活干时响亮失败（两条判据来源不同，见 plan/offline-task-discovery §3.3）。
 —— 全文（S1–S6 落码清单 / 评审 F1–F9 + S-1 + X1–X3 处置 / 实测）→ `docs/nn/remote-transport.md` §43 · 锚 `## §43`
+
+## §2026-09-25-goalnn-offline-task-discovery（2026-09-25，plan/offline-task-discovery.plan.md）
+
+**离线云机不再在 notebook 里写死课程名**：新增只读清单 `GET /offline/tasks`（课程 + 包 + 新鲜度 +
+持有者 + 段内进度；`?include=all` 才带 `not_offline`）+ 硬租约三端点
+`POST /offline/{claim,heartbeat,release}`（TTL 900s + 60s 心跳、**惰性过期**、**409 而非 403**、
+`release` 不覆盖别人的）。**候选面 = 课程表 ∪ 盘上的开课标记**（离线课本机不训练 ⇒ 冷掉后从
+1 小时新鲜窗里消失而包还在盘上）。`worker_id` 持久化在 `<work>/.worker-id` ⇒ 同一台机器重跑
+判 `mine` 直接续领（否则被自己留下的租约挡到过期，Kaggle 上等于废掉整个会话）。
+云机侧 `CFG.course` 退化为**可选覆盖**：填了 = 老行为且**一次都不问清单**；留空 = 问清单 → 领租约 →
+取包 → 跑完 → 交还，`served[包 sha]` 防自激（同段重跑 = 回传全判 `duplicate`）；`queue_mode`
+缺省 `drain`，受 `session_budget_sec`（**新键**，与逐段 `budget_sec` 是两把旋钮）/`idle_wait_sec`/
+停机信号限制；老 hub 只探测一次就降级。**边界**：点名要跑的课取不到包 = 异常（跳过继续、全跳过
+响亮失败）；**队列空 = 正常收工（rc=0）**。**被否决**：软占位（两台同跑白烧一张卡，第二份回传被
+静默丢弃）· 只靠 `(run_id,it)` 幂等不要租约 · 403 表达租约不匹配（会重演「worker 把它读成
+ProtocolError ⇒ 停腿」）· 租约参与回传。**违反后果**：清单只认课程表 ⇒ 冷课永远等不到云机；
+租约不绑定持久 worker id ⇒ 中断重跑白白等满 TTL；把「清单空」与「全被跳过」合并 ⇒ 没活干时响亮失败。
+—— 全文（规则表 / 兼容矩阵 / 评审 G1–G7 + S-1 + X1–X3 处置）→ `docs/nn/remote-transport.md` §44 · 锚 `## §44`

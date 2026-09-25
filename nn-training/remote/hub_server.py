@@ -69,6 +69,7 @@ import ipaddress
 import json
 import os
 import random
+import secrets
 import sys
 import tempfile
 import time
@@ -108,13 +109,20 @@ from remote.protocol import (
     OFFLINE_ARTIFACT_BODY_MAX,
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_CAP_HEADER,
+    OFFLINE_CLAIM_PATH,
+    OFFLINE_HEARTBEAT_PATH,
+    OFFLINE_LEASE_TTL_SEC,
+    OFFLINE_QUEUE_VERSION,
+    OFFLINE_RELEASE_PATH,
     OFFLINE_RESULT_BODY_MAX,
     OFFLINE_RESULT_PATH,
     OFFLINE_RESUME_BLOB_NAMES,
     OFFLINE_RESUME_BLOB_PATH,
     OFFLINE_RESUME_PATH,
     OFFLINE_TASK_PACK_PATH,
+    OFFLINE_TASKS_PATH,
     PAYLOAD_NAME,
+    PLAN_NAME,
     PRIORITY_HIGH,
     PRIORITY_HIGHEST,
     PRIORITY_LOW,
@@ -186,6 +194,24 @@ TASK_PACK_STALE_TRIGGER_LIMIT = 2
 #: 「**缺包**」的上界（比过期那条宽一档）：缺包是**确定要造一份**，多试两次值；
 #: 到顶仍没包 ⇒ 不再触发，只在 404 正文里指路手动（plan/offline-switch-auto-bundle §3.4）。
 TASK_PACK_MISS_TRIGGER_LIMIT = 3
+#: 离线任务的四种状态（清单面，`plan/offline-task-discovery.plan.md` §3.1）：
+#: `ready`（有新鲜包可领）/ `stale`（包在但起点已旧，领了要从旧起点跑）/ `no_pack`（还没导）/ `claimed`（有人持租）。
+#: 第五种 `not_offline` 只在 `?include=all`（控制台排障）时出现——云机永远用默认清单。
+TASK_STATE_READY = "ready"
+TASK_STATE_STALE = "stale"
+TASK_STATE_NO_PACK = "no_pack"
+TASK_STATE_CLAIMED = "claimed"
+TASK_STATE_NOT_OFFLINE = "not_offline"
+#: 清单排序名次：`ready` 最前、`not_offline` 最后；同级按包的 mtime **升序**（最老的先跑）。
+#: 为什么 `claimed` 排在 `no_pack` 之前：前者是「有人在跑」、后者是「没人能跑」——
+#: 一眼看出「活儿在动」比看出「缺东西」更接近清单的用途（下一批还有人问）。
+TASK_STATE_RANK = {
+    TASK_STATE_READY: 0,
+    TASK_STATE_STALE: 1,
+    TASK_STATE_CLAIMED: 2,
+    TASK_STATE_NO_PACK: 3,
+    TASK_STATE_NOT_OFFLINE: 4,
+}
 #: 同课程的触发账本（进程内；hub 重启即清——与租约同风格，重启后重触发一次无害）。
 _TASK_PACK_TRIGGERS: dict[str, dict[str, float]] = {}
 #: **缺包**用另一本账（与过期那条腿分开）：两本账在同一个重导窗口里各自记账，
@@ -255,6 +281,72 @@ def pack_index_part_sha(pack_path: Path, part: str) -> str:
     parts = idx.get("parts") if isinstance(idx, dict) else None
     rec = parts.get(part) if isinstance(parts, dict) else None
     return str(rec.get("sha256", "") or "") if isinstance(rec, dict) else ""
+
+
+def pack_index_meta(pack_path: Path) -> dict:
+    """包的段元信息：`{run_id, it, end_it, commit, created_at}`（读不到 → 各字段空值）。
+
+    为什么从包里读而不查账本：包是**导出那一刻的只读快照**（控制台写的那个 zip），
+    而清单要回答的是「我领了这份包会跑哪一段」——只有包里那几行是权威的。容错口径与
+    `pack_index_part_sha` 同款：解不开 zip / 缺索引 / 缺 plan ⇒ 空值（**不报错**：
+    清单是观测面，不该因为一个坏包变成 500）。
+    """
+    empty = {"run_id": "", "it": 0, "end_it": 0, "commit": "", "created_at": 0.0}
+    try:
+        with zipfile.ZipFile(pack_path) as zf:
+            idx = json.loads(zf.read(TASK_PACK_INDEX_NAME).decode("utf-8"))
+            try:
+                plan = json.loads(zf.read(PLAN_NAME).decode("utf-8"))
+            except (KeyError, ValueError):
+                plan = {}
+    except Exception:
+        return empty
+    if not isinstance(idx, dict):
+        return empty
+    plan = plan if isinstance(plan, dict) else {}
+
+    def _int(v: object) -> int:
+        if not isinstance(v, (int, float, str)):
+            return 0
+        try:
+            return int(v)
+        except (TypeError, ValueError):
+            return 0
+
+    return {
+        "run_id": str(idx.get("runId") or ""),
+        "it": _int(idx.get("it") or plan.get("start_it")),
+        "end_it": _int(plan.get("end_it")),
+        "commit": str(idx.get("commit") or ""),
+        "created_at": float(idx.get("createdAt") or 0.0),
+    }
+
+
+def task_state(*, pack_exists: bool, stale: bool, held: bool) -> str:
+    """一门课在清单里的状态（纯函数，总表可单测）：前者优先。
+
+    顺序：`claimed` > `no_pack` > `stale` > `ready`。为什么「有主」压过「没包」：状态要
+    回答的是「我能不能现在领」（`claimable` 单独给），而「谁在跑」比「缺东西」更应该先被看见。
+    """
+    if held:
+        return TASK_STATE_CLAIMED
+    if not pack_exists:
+        return TASK_STATE_NO_PACK
+    return TASK_STATE_STALE if stale else TASK_STATE_READY
+
+
+def lease_verdict(now: float, rec: dict | None, worker_id: str) -> str:
+    """租约判据（纯函数）：`free` / `mine` / `foreign` / `expired`。
+
+    **惰性过期**（读时判，不养清理线程）。`mine` 是特意分出来的一档：同一个 `worker_id`
+    再来领（cell 中断后重跑、心跳超时后补领）应当直接续上，而不是被自己挡在门外
+    （评审 G1：Kaggle 上十几分钟的会话预算，白等 900s 等于整个会话废掉）。
+    """
+    if not rec:
+        return "free"
+    if float(rec.get("expires_at", 0.0)) <= float(now):
+        return "expired"
+    return "mine" if str(rec.get("worker_id", "")) == worker_id else "foreign"
 
 
 def reset_task_pack_triggers(course: str = "") -> None:
@@ -1763,6 +1855,12 @@ class _HubQueue(_AuthGuard):
         #: 自动发现的扫描闸（`_discover_last` 初值 0 ⇒ 首次调用必扫）
         if self._discover_root is not None:
             self._discover_last = float("-inf")
+        #: **离线租约**（课程 → `{token, worker_id, at, expires_at}`）：进程内、惰性过期。
+        #: 为什么住实例而不是模块（与 `_TASK_PACK_TRIGGERS` 不同）：生产一个进程一个 hub 两者等价，
+        #: 而单测里每个 hub 各自干净（共享就得分用例清账）。重启即清——与触发账本同口径：
+        #: 最坏情形由回传侧 `(run_id, it)` 首写幂等兜底（plan §3.2）。
+        self._leases: dict[str, dict] = {}
+        self._lease_lock = Lock()
         _AuthGuard.__init__(self, now_fn)
         # 时钟与单课程 store 同源（测试注入的假时钟必须一致，否则 claimed 标记的时间戳
         # 会混入真实墙钟）。
@@ -2349,6 +2447,210 @@ class _HubQueue(_AuthGuard):
                 }
             if runs:
                 out[course] = runs
+        return out
+
+    # ---- 离线任务清单 + 领取租约（2026-09-25，`plan/offline-task-discovery.plan.md`）----
+    def offline_task_courses(self) -> list[str]:
+        """清单的**候选面**（评审 S-1）：课程表里 `mode=offline` 的 ∪ 盘上有开课标记的。
+
+        为什么不只认课程表：课程表是「1 小时新鲜度扫描」的产物，而**离线课本机不训练**
+        ⇒ 课冷掉 / hub 重启之后它从表里消失，而包还在盘上——只认表会让云机问清单时得到
+        「没有任务」（明明有一份包在等它领）。判据与 404 自愈门同源（`_task_pack_miss_candidate`）。
+        """
+        out = [c for c in self._order if self.mode_of(c) == COURSE_MODE_OFFLINE]
+        root = self._discover_root
+        if root is None:
+            return out
+        try:
+            names = sorted(p.name for p in root.iterdir() if p.is_dir())
+        except OSError:
+            return out
+        for name in names:
+            if name in out or name in self._stores:
+                continue  # 表里已有的走上面那条（表里是 online ⇒ 清单给 `not_offline`，不在这儿加）
+            try:
+                if (root / name / COURSE_ENABLE_MARKER).exists():
+                    out.append(name)
+            except OSError:
+                continue
+        return out
+
+    def offline_tasks(self, *, include_all: bool = False) -> list[dict]:
+        """`GET /offline/tasks` 的内容——**零副作用**（不触发重导、不写账本、不动游标）。
+
+        每行字段定死在 §3.1：`course/state/claimable/pack/run_id/it/end_it/stale_reason/
+        holder/progress`。读不到就如实给空值（一个坏包不该把整张清单变成 500）。
+        """
+        progress = self.offline_progress()
+        courses = self.offline_task_courses()
+        if include_all:
+            for c in self._order:
+                if c not in courses:
+                    courses.append(c)
+        rows: list[dict] = []
+        for course in courses:
+            try:
+                pack_path = self.task_pack_path(course)
+            except ProtocolError:
+                continue  # 目录名不合规（历史残留）⇒ 清单里跳过，不当 500 报
+            real = course in self._stores
+            # 不在表里、只在盘上有开课标记 ⇒ 按离线意图算（评审 S-1）。
+            offline = self.mode_of(course) == COURSE_MODE_OFFLINE if real else True
+            pack: dict | None = None
+            meta = {"run_id": "", "it": 0, "end_it": 0, "commit": "", "created_at": 0.0}
+            stale_reason = ""
+            if pack_path.is_file():
+                try:
+                    st = pack_path.stat()
+                    pack = {
+                        "name": pack_path.name,
+                        "bytes": int(st.st_size),
+                        "sha256": _file_sha256(pack_path),
+                        "mtime": float(st.st_mtime),
+                    }
+                except OSError:
+                    pack = None
+                if pack is not None:
+                    meta = pack_index_meta(pack_path)
+                    stale_reason = task_pack_stale_reason(
+                        pack_init_sha=pack_index_part_sha(pack_path, INIT_WEIGHTS_NAME),
+                        active_sha=_file_sha256(
+                            pack_path.parent / _JobStore.ACTIVE_WEIGHTS_NAME
+                        ),
+                    )
+            holder = self.holder_info(course)
+            state = (
+                task_state(
+                    pack_exists=pack is not None, stale=bool(stale_reason), held=holder is not None
+                )
+                if offline
+                else TASK_STATE_NOT_OFFLINE
+            )
+            runs = progress.get(course) or {}
+            latest = max(runs.values(), key=lambda r: float(r.get("last_mtime") or 0.0)) if runs else None
+            rows.append(
+                {
+                    "course": course,
+                    "state": state,
+                    # 可领 = 离线 ∧ 有包 ∧ 无主。**过期包也可领**：包旧只意味着起点旧，
+                    # 而「领不领」是云机的判断（它还要比 `served` 的 sha）。
+                    "claimable": bool(offline and pack is not None and holder is None),
+                    "pack": pack,
+                    "run_id": meta["run_id"],
+                    "it": meta["it"],
+                    "end_it": meta["end_it"],
+                    "stale_reason": stale_reason,
+                    "holder": holder,
+                    "progress": {
+                        "count": int(latest["count"]) if latest else 0,
+                        "last_mtime": float(latest["last_mtime"]) if latest else 0.0,
+                    },
+                }
+            )
+        rows.sort(
+            key=lambda r: (
+                TASK_STATE_RANK.get(str(r["state"]), 9),
+                float((r["pack"] or {}).get("mtime") or 0.0),
+                str(r["course"]),
+            )
+        )
+        return rows
+
+    def _lease_rec(self, course: str) -> dict | None:
+        """有效租约（**惰性过期**：读时就地清掉 ⇒ 读面与领取面同一条判据）。"""
+        now = float(self._now())
+        with self._lease_lock:
+            rec = self._leases.get(course)
+            if rec is not None and float(rec.get("expires_at", 0.0)) <= now:
+                del self._leases[course]
+                return None
+            return dict(rec) if rec else None
+
+    def offline_lease(self, course: str) -> dict | None:
+        """某门课的**有效**租约（对外只读面：清单 / 拒因 / 控制台都用它）。"""
+        return self._lease_rec(course)
+
+    def holder_info(self, course: str) -> dict | None:
+        """持有人那三行（`worker_id` / `age_sec` / `expires_in`）——清单与拒因共用一份。"""
+        rec = self._lease_rec(course)
+        if not rec:
+            return None
+        now = float(self._now())
+        return {
+            "worker_id": str(rec.get("worker_id") or ""),
+            "age_sec": round(max(0.0, now - float(rec.get("at") or now)), 1),
+            "expires_in": round(max(0.0, float(rec.get("expires_at") or now) - now), 1),
+        }
+
+    def claim_offline(
+        self, course: str, worker_id: str, *, takeover: bool = False
+    ) -> tuple[dict, str]:
+        """领一门课的离线租约 → `(租约, "")`；领不到 → `({}, "foreign"|"bad")`。
+
+        `mine`（同一个 `worker_id` 回来）与 `expired` 直接续上：cell 中断后重跑不该被
+        **自己留下**的租约挡住（评审 G1）。`takeover=True` 是显式接管（控制台/人工搬机）。
+        """
+        wid = str(worker_id or "").strip()
+        if not wid:
+            return {}, "bad"
+        now = float(self._now())
+        with self._lease_lock:
+            verdict = lease_verdict(now, self._leases.get(course), wid)
+            if verdict == "foreign" and not takeover:
+                return {}, "foreign"
+            lease = {
+                "token": secrets.token_hex(8),
+                "worker_id": wid,
+                "at": now,
+                "expires_at": now + OFFLINE_LEASE_TTL_SEC,
+            }
+            self._leases[course] = lease
+            return self._lease_pub(course, lease), ""
+
+    @staticmethod
+    def _lease_pub(course: str, lease: dict) -> dict:
+        """租约 → 响应体（`ttl_sec` 用常量；内部字段 `at` 不外漏）。"""
+        return {
+            "token": str(lease.get("token") or ""),
+            "course": course,
+            "worker_id": str(lease.get("worker_id") or ""),
+            "ttl_sec": OFFLINE_LEASE_TTL_SEC,
+            "expires_at": float(lease.get("expires_at") or 0.0),
+        }
+
+    def heartbeat_offline(self, course: str, lease_token: str) -> tuple[dict, str]:
+        """续租 → `({"ttl_sec","expires_at"}, "")`；已过期 → `"expired"`；被接管 → `"taken"`。"""
+        now = float(self._now())
+        with self._lease_lock:
+            rec = self._leases.get(course)
+            if rec is None or float(rec.get("expires_at", 0.0)) <= now:
+                self._leases.pop(course, None)
+                return {}, "expired"
+            if str(rec.get("token") or "") != str(lease_token or ""):
+                return {}, "taken"
+            rec["expires_at"] = now + OFFLINE_LEASE_TTL_SEC
+            return {"ttl_sec": OFFLINE_LEASE_TTL_SEC, "expires_at": rec["expires_at"]}, ""
+
+    def release_offline(self, course: str, lease_token: str) -> tuple[bool, str]:
+        """交还租约（**不覆盖别人的**）：过期/没领过 ⇒ 本来就无主，空操作也算成功。"""
+        now = float(self._now())
+        with self._lease_lock:
+            rec = self._leases.get(course)
+            if rec is None or float(rec.get("expires_at", 0.0)) <= now:
+                self._leases.pop(course, None)
+                return True, ""
+            if str(rec.get("token") or "") != str(lease_token or ""):
+                return False, "foreign"
+            del self._leases[course]
+            return True, ""
+
+    def offline_leases(self) -> dict[str, dict]:
+        """有效租约一览（`/admin/offline` 的 `leases` 字段：控制台回答「谁在跑哪门课」）。"""
+        out: dict[str, dict] = {}
+        for course in list(self._leases):
+            info = self.holder_info(course)
+            if info is not None:
+                out[course] = info
         return out
 
     # ---- 观测面 ----
@@ -3037,6 +3339,8 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._admin_offline()
             elif path == OFFLINE_TASK_PACK_PATH:
                 self._get_task_pack()
+            elif path == OFFLINE_TASKS_PATH:
+                self._get_offline_tasks()
             elif path == OFFLINE_RESUME_PATH:
                 self._get_offline_resume()
             elif path == OFFLINE_RESUME_BLOB_PATH:
@@ -3100,6 +3404,12 @@ class HubHandler(BaseHTTPRequestHandler):
                 self._post_offline_artifact()
             elif path == OFFLINE_RESULT_PATH:
                 self._post_offline_result()
+            elif path == OFFLINE_CLAIM_PATH:
+                self._post_offline_lease("claim")
+            elif path == OFFLINE_HEARTBEAT_PATH:
+                self._post_offline_lease("heartbeat")
+            elif path == OFFLINE_RELEASE_PATH:
+                self._post_offline_lease("release")
             else:
                 self._json({"error": "not found"}, 404)
         except (ProtocolError, ValueError) as e:
@@ -3374,7 +3684,140 @@ class HubHandler(BaseHTTPRequestHandler):
         """
         if not self._auth_ok():
             return
-        self._json({"progress": self.hub.offline_progress()}, 200)
+        self._json(
+            {"progress": self.hub.offline_progress(), "leases": self.hub.offline_leases()}, 200
+        )
+
+    def _get_offline_tasks(self) -> None:
+        """`GET /offline/tasks`（2026-09-25，`plan/offline-task-discovery.plan.md` §3.1）：可领任务清单。
+
+        为什么不是「`/admin/courses` 加几列」：这张表的消费者是**云机**（它据此排好本次会话的
+        队列），而 `/admin/*` 是控制台口径（含在线课、不含包）。默认只报 `mode=offline` 的课
+        + 包在哪 + 新鲜度 + 谁在跑；`?include=all` 才附带 `not_offline`（控制台排障用）。
+
+        **只读**（plan §1.4-2）：不触发重导、不写账本、不动游标——触发重导仍是
+        `/offline/task-pack` 的专属特权。
+        """
+        if not self._auth_ok():
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        include_all = (qs.get("include") or [""])[0].strip().lower() == "all"
+        self._json(
+            {
+                "tasks": self.hub.offline_tasks(include_all=include_all),
+                "hub_version": OFFLINE_QUEUE_VERSION,
+                "generated_at": time.time(),
+            },
+            200,
+        )
+
+    def _post_offline_lease(self, action: str) -> None:
+        """租约三合一的入口（`claim` / `heartbeat` / `release`，plan §3.2）。
+
+        参数一律走查询串（与其余端点同一条形状）。**409 表达业务拒绝**（被别人持有 /
+        已过期 / 不是持有人）——**不用 403**：job 腿上「403 lease mismatch 被 worker 读成
+        ProtocolError ⇒ 报 job 失败 ⇒ 训练停腿」已经踩过一次（plan §3.2 返回码纪律）。
+        """
+        if not self._auth_ok():
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+
+        def _q(key: str) -> str:
+            return str((qs.get(key) or [""])[0]).strip()
+
+        course = _q("course")
+        if not course:
+            self._json({"error": "需要 ?course=<课>"}, 400)
+            return
+        try:
+            pack = self.hub.task_pack_path(course)
+        except ProtocolError as e:
+            self._json({"error": str(e), "course": course}, 400)
+            return
+        if action == "claim":
+            worker = _q("worker")
+            if not worker:
+                self._json(
+                    {
+                        "error": (
+                            "需要 ?worker=<本机 id>（写进 <work>/.worker-id）；空 id 会让两台互相顶租约"
+                        ),
+                        "course": course,
+                    },
+                    400,
+                )
+                return
+            if not pack.is_file():
+                # 404 与 `/offline/task-pack` 同口径（带已知课程表）：包都没导出来，谈领租约就早了一步。
+                self._json(
+                    {
+                        "error": f"没有任务包 {pack.name}——先在控制台「导出任务包」",
+                        "course": course,
+                        "known_courses": self.hub.courses(),
+                    },
+                    404,
+                )
+                return
+            takeover = _q("takeover").lower() in ("1", "true", "yes")
+            lease, _why = self.hub.claim_offline(course, worker, takeover=takeover)
+            if not lease:
+                holder = self.hub.holder_info(course)
+                who = holder["worker_id"] if holder else "?"
+                left = float(holder["expires_in"]) if holder else 0.0
+                self._json(
+                    {
+                        "error": (
+                            f"这门课的离线任务已被 {who} 持有（{left:.0f}s 后过期；"
+                            "确实要顶掉它加 ?takeover=1）"
+                        ),
+                        "course": course,
+                        "held": True,
+                        "holder": holder,
+                    },
+                    409,
+                )
+                return
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] offline-claim {course} "
+                f"worker={lease['worker_id']} takeover={int(takeover)}",
+                flush=True,
+            )
+            self._json({"lease": lease}, 200)
+            return
+        token = _q("lease")
+        if action == "heartbeat":
+            res, why = self.hub.heartbeat_offline(course, token)
+            if not res:
+                holder = self.hub.holder_info(course)
+                who = holder["worker_id"] if holder else "?"
+                self._json(
+                    {
+                        "error": (
+                            "租约已过期（本会话产物照旧落盘 + 打包；回传可能被判 duplicate 丢弃）"
+                            if why == "expired"
+                            else f"租约已被 {who} 接管——本会话继续跑完并打包"
+                        ),
+                        "course": course,
+                        "expired": why == "expired",
+                        "holder": holder,
+                    },
+                    409,
+                )
+                return
+            self._json(res, 200)
+            return
+        ok, _why = self.hub.release_offline(course, token)
+        if not ok:
+            self._json(
+                {
+                    "error": "不是当前持有人（不覆盖别人的租约）",
+                    "course": course,
+                    "holder": self.hub.holder_info(course),
+                },
+                409,
+            )
+            return
+        self._json({"released": True, "course": course}, 200)
 
     def _get_task_pack(self) -> None:
         """`GET /offline/task-pack?course=<课>`：把整段任务包（`task-<课>.zip`）递给云机。

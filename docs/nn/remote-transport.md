@@ -6,6 +6,45 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+---
+
+## §44 云机不再写死课程名：hub 清单 + 领取租约（plan/offline-task-discovery.plan.md，2026-09-25）
+
+**用户口径**：「云机不应该要在 `battle.offline.ipynb` 里配置离线课程名，它应该直接向 hub 问询，
+逐个下载离线任务包并完成训练任务。」
+
+**新读面 `GET /offline/tasks`**（只读）：默认列 `mode=offline` 的课 + 包在哪（名字/字节/sha/mtime）+
+段元信息（`run_id`/`it`/`end_it`，从包的 `task.json`+`plan.json` 读）+ 新鲜度（`stale_reason` 复用
+过期判据）+ 持有者 + 段内进度；排序 = `ready` 优先、同级按包 mtime 升序（最老的先跑）、`claimed`/`no_pack`
+殿后。`?include=all` 才附带 `not_offline`（控制台排障；云机永远用默认）。**零副作用**：不触发重导、
+不写账本、不动游标（触发重导仍是 `GET /offline/task-pack` 的专属特权）。
+**候选面 = 课程表 ∪ 盘上的开课标记**（评审 S-1）：离线课本机不训练 ⇒ 冷掉/hub 重启后它从
+1 小时新鲜窗里消失而包还在盘上；只认表会让云机得到「没有任务」而干等。
+
+**租约 `POST /offline/{claim,heartbeat,release}`**（用户拍板 = 硬租约）：TTL **900s**（离线段是小时级，
+与逐轮 job 的 300s 不同档）+ 60s 心跳；**惰性过期**（读时判，不养清理线程）；hub 重启即清
+（与触发账本同口径，最坏情形由回传侧 `(run_id, it)` 首写幂等兜底）。**409 表达业务拒绝**
+（被别人持有 / 已过期 / 不是持有人），**不用 403**——job 腿上「403 lease mismatch 被 worker 读成
+ProtocolError ⇒ 报 job 失败 ⇒ 训练停腿」已经踩过一次。**租约不参与回传**：`/offline/artifact` 一行不改。
+`worker_id` 由云机**持久化**在 `<work>/.worker-id`（评审 G1）：cell 中断后重跑是同一台机器，
+hub 判 `mine` 直接续领（换新 token）；否则会白等 900s（Kaggle 上等于废掉整个会话）。要顶掉别人用
+显式 `?takeover=1`。
+
+**云机侧**：`CFG.course` 退化成**可选覆盖**——填了 = 老行为（顺序/校验一字不改，且**一次都不问清单**）；
+留空 = 问清单 → 领租约 → 取包 → 跑完 → 交还 → 记 `served[course]=包 sha`（同 sha 跳课 = 防自激：
+包没换就重跑同一段 ⇒ `run_id` 相同 ⇒ 回传全判 `duplicate`）。`queue_mode` 缺省 `"drain"`（跑完一批
+继续驻守轮询），受 `session_budget_sec`（**新键**，与逐段的 `budget_sec` 泾渭分明）/
+`idle_wait_sec` / 停机信号限制；`"once"` = 跑一批就收工。**老 hub（404）只探测一次**就降级回
+「必须填 course」。租约的任何失败都只是日志（训练永不因网络停摆）。
+
+**边界（与 plan/offline-switch-auto-bundle 同一句话的两半，评审 X1）**：**点名**（CFG 或清单）要跑的课
+取不到包 = **异常**（跳过继续、全跳过响亮 `SystemExit`）；**队列本来就空** = **正常收工**（rc=0）。
+**被否决**：软占位（两台同跑一门课会白烧一张卡，第二份回传被静默丢弃）· 只靠幂等不要租约 ·
+hub 自己打包 · 用 403 表达租约不匹配。**真机残留**：两门课自动跑完 + 第二台 409 + 控制台看 holder
+（`docs/nn.progress.md` 3.3 row 14，由用户跑）。
+
+—— 全文（规则表 / 兼容矩阵 / 评审处置 G1–G7+S-1+X1–X3）→ `plan/offline-task-discovery.plan.md` §11
+
 ## §43 切离线自动出包 + 缺包自愈：不再让云机干等 30 分钟（plan/offline-switch-auto-bundle.plan.md，2026-09-25）
 
 **现象**（用户报障，2026-09-25 18:46–19:14）：在线课切成离线之后，云机 `GET /offline/task-pack` 一贯 404——
