@@ -23,13 +23,19 @@
    不许哪天有人「就地补一个」）；
 2. 门面 re-export 的是**同一个对象**（`is`，不是同名副本）；
 3. **DI seam 随实现走**：`_push_job_round` 读 `rl.loop_transport._push_submit`，
-   `TrainingRemote._push_submit_first/_push_fetch` 读 `rl.loop_remote._push_submit`——
+   `TrainingRemote._push_submit_first/_push_fetch` 读 `rl.loop_remote_push._push_submit`——
    同名 seam 在多个模块并存是**几个各自真实的注入点**，不是重复定义。
    这一条是功能性的（真调一次），因为「patch 目标写错」正是这类拆分最容易犯、
    且**最静默**的错：测试会绿，而注入根本没生效。
-4. 两个新模块都不得反向 import `rl.loop_steps`（否则门面会变成环）。
+4. 远端一族（组合根 + 四个混入）都不得反向 import `rl.loop_steps`（否则门面会变成环）。
 5. 继承方向不得反过来（`TrainingRemote` 不能是 `TrainingSteps` 的子类）。
-6. `loop_remote` 直接从 `rl.loop_transport` 拿传输原语（首簇搬迁的预期收益）。
+6. 远端一族直接从 `rl.loop_transport` 拿传输原语（首簇搬迁的预期收益）。
+
+> **S4 第二十二刀（2026-09-25）**：远端 PPO 腿的 862 行连通分量按判据同源切成四簇
+> （`loop_remote_push` / `loop_remote_job` / `loop_remote_fail` / `loop_remote_drive`），
+> `rl/loop_remote.py` 退成**零方法的组合根**（`class TrainingRemote(TrainingRemoteDrive)`）。
+> 本文件里与「13 个方法住在同一个类」相关的几条断言因此演进：定义面改成读组合根的 **MRO**，
+> 入边/import 面改成读**一族**；完整契约在新家 `tests/test_loop_remote_split.py`。
 """
 
 from __future__ import annotations
@@ -214,9 +220,22 @@ def _class_methods(path: Path, cls_name: str) -> set[str]:
     return {m.name for m in cls.body if isinstance(m, ast.FunctionDef)}
 
 
-def test_remote_leg_is_defined_in_loop_remote_only() -> None:
-    """远端 PPO 腿定义在 `TrainingRemote`；`TrainingSteps` 里**不得**再有同名方法。"""
-    defined = _class_methods(NN_ROOT / "rl" / "loop_remote.py", "TrainingRemote")
+#: S4 第二十二刀后远端腿一族 = 组合根 + 四个混入（判据同源切簇）。
+REMOTE_FAMILY = (
+    "loop_remote.py",
+    "loop_remote_push.py",
+    "loop_remote_job.py",
+    "loop_remote_fail.py",
+    "loop_remote_drive.py",
+)
+
+
+def test_remote_leg_is_defined_in_the_remote_family_only() -> None:
+    """远端 PPO 腿定义在 `TrainingRemote` 的 **MRO** 里（S4 第二十二刀后 = 四个混入）；
+    `TrainingSteps` 里**不得**再有同名方法。"""
+    from rl.loop_remote import TrainingRemote
+
+    defined = {n for k in TrainingRemote.__mro__ for n in vars(k)}
     assert set(REMOTE_LEG) <= defined, sorted(set(REMOTE_LEG) - defined)
     left = _class_methods(NN_ROOT / "rl" / "loop_steps.py", "TrainingSteps")
     crept_back = sorted(set(REMOTE_LEG) & left)
@@ -241,34 +260,54 @@ def test_training_steps_inherits_training_remote() -> None:
     from rl.loop_export import TrainingExport
 
     assert steps.TrainingSteps.__bases__ == (TrainingRemote, TrainingEval, TrainingExport)
-    # 组合类与四个「继承真混入」的测试宿主因此都不必改。
-    assert TrainingRemote._remote_ppo.__module__ == "rl.loop_remote"
+    # 组合类与四个「继承真混入」的测试宿主因此都不必改；组合根仍在 rl/loop_remote.py，
+    # 但 13 个方法已按判据同源搬到四个新家（`_remote_ppo` ∈ Job）。
+    assert TrainingRemote.__module__ == "rl.loop_remote"
+    assert TrainingRemote._remote_ppo.__module__ == "rl.loop_remote_job"
 
 
-def test_loop_remote_does_not_import_loop_steps() -> None:
-    """不得成环：`loop_remote` 不许 import `loop_steps`（它只靠 `self.*` 回调）。"""
-    assert "rl.loop_steps" not in _imports(NN_ROOT / "rl" / "loop_remote.py")
+def test_loop_remote_family_does_not_import_loop_steps() -> None:
+    """不得成环：远端一族谁都不许 import `loop_steps`（它只靠 `self.*` 回调）。"""
+    for fname in REMOTE_FAMILY:
+        assert "rl.loop_steps" not in _imports(NN_ROOT / "rl" / fname), fname
 
 
-def test_loop_remote_uses_the_transport_layer_directly() -> None:
-    """首簇搬迁的预期收益：新模块直接从 `rl.loop_transport` 取传输原语（不经门面往返）。"""
-    assert "rl.loop_transport" in _imports(NN_ROOT / "rl" / "loop_remote.py")
+def test_loop_remote_family_uses_the_transport_layer_directly() -> None:
+    """首簇搬迁的预期收益：新家直接从 `rl.loop_transport` 取传输原语（不经门面往返）。"""
+    hits = [f for f in REMOTE_FAMILY if "rl.loop_transport" in _imports(NN_ROOT / "rl" / f)]
+    assert hits, "远端一族应至少有一处直接依赖 rl.loop_transport"
 
 
-def test_remote_leg_methods_read_the_loop_remote_seams() -> None:
-    """seam 住在实现所在模块：那 13 个方法的**方法体**里必须真的读 `rl.loop_remote` 的全局。
-
-    结构断言（读 AST 的 Name 载入），功能侧的证明在 e2e 的
-    `test_push_publish_phase_submits_and_wait_phase_switches_node`（patch `rl.loop_remote.*`
-    并驱动真宿主 `st._push_submit_first` / `st._push_fetch`）。
-    """
-    tree = ast.parse((NN_ROOT / "rl" / "loop_remote.py").read_text(encoding="utf-8"))
-    cls = next(
-        n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "TrainingRemote"
-    )
+def _module_class_reads(path: Path) -> set[str]:
+    """该文件所有类的方法体里 `Name` 载入（含成员表达式里的 `self`）。"""
+    tree = ast.parse(path.read_text(encoding="utf-8"))
     reads: set[str] = set()
-    for node in ast.walk(cls):
-        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
-            reads.add(node.id)
+    for cls in (n for n in ast.walk(tree) if isinstance(n, ast.ClassDef)):
+        for node in ast.walk(cls):
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+                reads.add(node.id)
+    return reads
+
+
+def test_remote_leg_methods_read_their_own_module_seams() -> None:
+    """seam 住在**实现所在模块**：每条腿的方法体读的是它**新家**的全局。
+
+    S4 第二十二刀把 13 个方法切成四簇，DI seam 随之分散（`_push_submit` /
+    `_push_wait_result` 在直推腿，`dist_common` 在驱动入口）。功能侧的证明在 e2e 的
+    `test_push_publish_phase_submits_and_wait_phase_switches_node`（patch
+    `rl.loop_remote_push.*` 并驱动真宿主 `st._push_submit_first` / `st._push_fetch`）。
+    """
+    expect = {
+        "loop_remote_push.py": ("_push_submit", "_push_wait_result", "log"),
+        "loop_remote_job.py": ("log",),
+        "loop_remote_fail.py": ("log",),
+        "loop_remote_drive.py": ("dist_common", "log"),
+    }
+    for fname, names in expect.items():
+        reads = _module_class_reads(NN_ROOT / "rl" / fname)
+        for name in names:
+            assert name in reads, f"{fname} 的方法体里应读到 {name}"
+    # 组合根已退成薄门面：它**不再**读任何 DI seam（否则「seam 只剩一份」就不成立）。
+    root_reads = _module_class_reads(NN_ROOT / "rl" / "loop_remote.py")
     for name in ("_push_submit", "_push_wait_result", "dist_common", "log"):
-        assert name in reads, f"TrainingRemote 的方法体里应读到 {name}"
+        assert name not in root_reads, f"组合根不该再读 {name}"

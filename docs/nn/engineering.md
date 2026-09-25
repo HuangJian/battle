@@ -1627,6 +1627,97 @@ MRO 里更靠前，否则占位反过来胜出 ⇒ 静默返回 falsy 把 eval �
 - **顺手同步的 provenance**：`rl/__init__.py` / `README.md` 模块表 · `rl/volume_waves.py`（`loop_steps._volume_plan_block`
   → `loop_export._volume_plan_block`）· `rl/loop_remote.py` 头注（元组只追加 + 三个 seam 命名空间）· `rl/loop_eval.py` 头注。
 
+### 第二十二刀（2026-09-25）：`loop_remote` 的 862 行连通分量按判据同源切四簇
+
+用户指令：「把 `loop_remote.py` 那 862 行连通分量按「判据同源」拆成多个混入」——`rl/loop_remote.py`
+**997 → 35 行**（−96%），13 个方法（862 行）切成四簇（四个新模块 111 / 551 / 112 / 291 行；
+方法体本身 = 69 + 470 + 76 + 247），
+组合根留在原文件且**零方法**。同一对象、同一把锁、零行为变化。
+
+#### 刀口：一条连通分量没有「链」可牵 ⇒ 判据同源
+
+S19/S20 的取法是「找方法间调用链」。这里被否决：13 个节点的类内调用图**本就连成一个 862 行连通分量**
+（S4 第二步已按链切过一次），没有第二条链可牵。于是改按「**同一件事 / 同一套失败语义**」切：
+
+| 混入 | 判据 | 模块 | 方法（行） |
+|---|---|---|---|
+| `TrainingRemotePush` | 把一份 job **送到节点**（提交 / 首发 / 取回） | `rl/loop_remote_push.py` | 3（69） |
+| `TrainingRemoteJob` | **一份远端 PPO job 的四步** + 组合入口 | `rl/loop_remote_job.py` | 5（470） |
+| `TrainingRemoteFail` | **远端失败的唯一处置策略** | `rl/loop_remote_fail.py` | 2（76） |
+| `TrainingRemoteDrive` | **谁驱动这条腿**（轮内 / 整轮 / 整段） | `rl/loop_remote_drive.py` | 3（247） |
+
+不是按大小、不是按物理位置：`_remote_ppo_publish`（302 行）留在 Job 里不动（它就是「发布」这件事）。
+
+#### 宿主：把 DAG 写进类声明（调用者依赖被调用者）
+
+侦察量出的依赖是**严格分层**的：`Drive → {Fail, Job}`、`Job → Push`、`Fail`/`Push` 是叶子。于是
+
+```
+class TrainingRemotePush                                     # 叶子
+class TrainingRemoteFail                                     # 叶子
+class TrainingRemoteJob(TrainingRemotePush)                   # Job 借 Push
+class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob)   # Drive 借两者
+class TrainingRemote(TrainingRemoteDrive)                     # 组合根（零方法）
+```
+
+MRO = `TrainingRemote, TrainingRemoteDrive, TrainingRemoteFail, TrainingRemoteJob, TrainingRemotePush, object`
+——13 名**各一所有者**，无遮罩。**组合根仍住 `rl/loop_remote.py`**，所以 `TrainingSteps.__bases__` /
+`TrainingLoop.__bases__` / 四个「继承真混入」的测试宿主 / 既有 `from rl.loop_remote import TrainingRemote`
+调用点**一行不改**（`__mro__[1]` 仍是它）——这正是把组合根留在原文件的理由。
+
+#### patch 面：seam 随实现分散（每模块一个真注入点）
+
+| seam | 旧址 | 新址 |
+|---|---|---|
+| `_push_submit` / `_push_wait_result` | `rl.loop_remote` | `rl.loop_remote_push` |
+| `dist_common` | `rl.loop_remote` | `rl.loop_remote_drive` |
+| `log` | `rl.loop_remote` | 每簇自己的模块 |
+
+e2e 的 2 处 `monkeypatch.setattr` 已改址；新守卫正面钉「**组合根零 seam**」（`GONE_FROM_ROOT` 全 `not hasattr`）。
+
+#### 守卫演进 6 处（旧家的所有断言都换了「读」的姿势）
+
+| 文件 | 演进 |
+|---|---|
+| `test_loop_transport_split` | 定义面改读**组合根 MRO**；入边/import 面改读**一族**5 文件；`_remote_ppo.__module__` → `rl.loop_remote_job` |
+| `test_loop_export_split` | `_ensure_ts_code` 入边 → Job；`_volume_plan_block` 入边 → Drive；槽位读者改**元组**（`_ts_code_zip_path` 有两个读者）；删死常量 `REMOTE_PY` |
+| `test_loop_lifecycle_split` | `_evalboard_idle` 入边 `rl/loop_remote.py` → `rl/loop_remote_job.py` |
+| `test_loop_core_tail_split` | 全量 `MRO_NAMES` 在 `TrainingRemote` 后插四名（本文件是这份名单的唯一所有者） |
+| `test_loop_volume_split` | 按旧文件枚举远端方法的覆盖面 → 「四新家 + 组合根」 |
+| `test_layering` | 四模块登记进 `RL_ORCHESTRATION`（先红再登记**第七次**） |
+
+#### ★ 本刀的新形态坑：守卫会**静静地读到空**
+
+`test_loop_volume_split::test_cross_module_hands_are_the_declared_ones` 按 `(rl/loop_remote.py, "TrainingRemote")`
+枚举方法来找「谁碰了 volume 槽位」。类体被切空之后，它**读到空集也算通过**——`test_loop_volume_split`
+**没红**（与第十六/十九/二十/二十一刀「按路径读源码的守卫响亮失败」是不同形态）。
+**搬家时要问的不只是「谁会响亮地读它」，还有「谁会静静地读到空」**；本刀主动改成读「四新家 + 组合根」。
+
+#### dashboard 跨项目盲区（同族）又一次
+
+`course-lifecycle.ts` 两处注释把 `--run-iters<0` 守卫指到 `rl/loop_remote.py`——S21 才刚把它修成那个名字，
+S22 又把它搬进 `rl/loop_remote_drive.py`（`_remote_run_segment` 本体，L209）⇒ 同步改址。**注释-only**，
+dashboard 门禁照跑（1105 / 0）。
+
+#### 验证
+
+- **纯搬对账**：搬走的 **13/13 逐字节等价**（`tmp/verify_s22.py` 对 `git show HEAD:` 比）；组合根**零方法**；
+  五件链元组 + `TrainingSteps.__bases__` / `__mro__[1]` 逐字；13 名唯一所有者。
+- **守卫** `tests/test_loop_remote_split.py`（**15 例**）：定义面唯一 · 对象恒等 · 组装逐字 · 组合根零方法
+  （**正面断言**，比「搬走的不在」硬）· 借用声明闭集 == 派生集（**跨 MRO 并集**）· helper hand 声明处 ·
+  入边/出边/槽位写手闭集 · 顶层与延迟 import 逐文件闭集 · 禁反向边 · **★ 三条功能性**（fail 的 ABORT seam
+  在本模块且旧家收不到 · 失败策略两种路径都停腿 · 跨簇交棒解析到同一对象）。
+- **反探针 24/24 全红**（每条先断言锚点唯一；含功能性两条）；还原后 sha256 无漂移。
+- **门禁**：nn **2524 → 2539 passed / 3 skipped**；ruff / mypy 绿（433 文件）；根 `bun run check`
+  2120 / 0；dashboard typecheck + 1105 / 0；`check-decisions` ok。
+- **顺手同步的 provenance**：`rl/__init__.py` 模块表（补 5 行）· `README.md` 模块表（1 → 5 行）·
+  `rl/loop_steps.py`（类 docstring + 出包簇头注的调用者改名）· `rl/loop_lifecycle.py`（`_evalboard_idle`
+  入边方 + 装配图）· `rl/loop_volume.py`（`Any` 声明理由的引用改指 `loop_remote_push.py`）。
+- **记账校正（S19/S20 同款教训）**：模块行数先报了分刀时点的读数（`loop_remote_job.py` = 548），
+  随后为 `_evalboard_idle` 补了一条声明（+3）⇒ 真值 **551**（四新家 = 111 / 551 / 112 / 291）。已连提交
+  （`--amend`）带两处文档一次改齐。**可测量值落盘后量一次，别在编辑过程中随手报。**
+- **刻意不动**：`docs/nn/engineering.md` §23 前面的历史刀记（那时指针正确）。
+
 ### 未做完（S4 余下）
 
 `remote/` 内部**已零环**（见「拆环」节），`worker.py` 的拆分面**已收口**：只剩三个宿主函数
@@ -1646,9 +1737,11 @@ HTTP 面（`hub/http_face.py` L5）与引导链（`hub/boot.py` L6）分开，�
 （余下 7 个叶子按判据同源分成 `rl/loop_baseline.py` / `loop_iter_dir.py` / `loop_dispatch.py` 三簇）
 切完后，`rl/loop_core.py` **1386 → 240 行**，`TrainingLoop` 成了**纯组合类**（只剩 `__init__` 与
 结构性例外的 `_run_inspect`）。`rl/` 侧的继续：**第二十一刀**切了 `loop_steps.py` 里唯一能成簇的出包家族（4 成员 / 126 行 →
-`rl/loop_export.py`，`loop_steps.py` 667 → 541 行）——余下 8 个是**互不调用的叶子**（零新链），连同
-`loop_remote.py`（993 行，13 成员是**一个 862 行连通分量**，按链切不动）与 `loop_guards.py`（784 行）
-成为下一刀候选。
+`rl/loop_export.py`，`loop_steps.py` 667 → 541 行）；**第二十二刀**把 `loop_remote.py` 的 862 行
+连通分量按**判据同源**切成四簇（`loop_remote_push` / `job` / `fail` / `drive`，组合根零方法）——
+「没有链可牵」这条已经用过，剩下的**按「有没有下一条链 / 还能不能再按判据分」回答**。
+`rl/` 侧余下的候选：`loop_steps.py` 余 8 个叶子（零新链）· `loop_guards.py`（784 行）；
+再往下 `batch_eval.py`（1785 行）要拆得先设计「批存储」接口（真设计改动）。
 
 **✅ 清理已做（2026-09-24，第十二刀）：`remote/job_fs._ensure_commit` 已删**——第六步之一登记的
 既存死代码（全仓零调用，只搬未删）。同时删 `job_fs.__all__` 条目、`worker.py` 的门面转发、

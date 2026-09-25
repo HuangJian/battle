@@ -108,7 +108,8 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
     """单轮结算与账 mixin。
 
     三个基类按「调用者依赖被调用者」挂在本类**末位之后**（追加不插队，`__mro__[1]` 仍是
-    `TrainingRemote`）：远端 PPO 腿（`TrainingRemote`，13 方法）· in-loop 评估链
+    `TrainingRemote`）：远端 PPO 腿（`TrainingRemote`，13 方法；S4 第二十二刀切成
+    Push / Job / Fail / Drive 四个混入，组合根仍住 `rl/loop_remote.py`）· in-loop 评估链
     （`TrainingEval`，8 成员）· 产物出包（`TrainingExport`，4 方法）。本类只被它们驱动，
     全体由 `TrainingLoop` 组合。
     """
@@ -492,8 +493,9 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
     # `_volume_plan_block`）就在这一簇里——搬走后本类**零方法间调用**（8 个成员全是叶子）。
     #
     # 方向：调用者依赖被调用者。调用者是 `RoundSteps`（`step_export_offline_bundle` /
-    # `step_export_weights`）与 `TrainingRemote`（`_remote_ppo_publish` → `_ensure_ts_code`、
-    # `_remote_run_segment` → `_volume_plan_block`），两者都在本类的基类之前 ⇒ 本簇挂
+    # `step_export_weights`）与远端腿（S4 第二十二刀后：`TrainingRemoteJob._remote_ppo_publish`
+    # → `_ensure_ts_code`、`TrainingRemoteDrive._remote_run_segment` → `_volume_plan_block`），
+    # 两者都在本类的基类之前 ⇒ 本簇挂
     # `TrainingSteps` 的**末位**基类（`class TrainingSteps(TrainingRemote, TrainingEval,
     # TrainingExport)`）。依据（实测）：4 个成员名在既有混入里零同名定义，末位追加不会被遮罩。
 

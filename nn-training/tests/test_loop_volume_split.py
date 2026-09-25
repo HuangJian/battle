@@ -290,10 +290,19 @@ def test_host_still_initializes_the_slots() -> None:
 def test_cross_module_hands_are_the_declared_ones() -> None:
     """除申报的两处外，无人碰 volume 槽位——否则状态归属会悄悄裂成「谁都能写」。"""
     found: set[str] = set()
+    # S4 第二十二刀把 `loop_remote` 的类体切成四个混入 ⇒ 远端一族的覆盖改成“四个新家 + 组合根”
+    # （组合根现在零方法，保留它是为了钉住「没被顺手塞回」；只读旧文件会让本用例**静默失去覆盖**）。
+    remote_family = (
+        (NN_ROOT / "rl" / "loop_remote.py", "TrainingRemote"),
+        (NN_ROOT / "rl" / "loop_remote_drive.py", "TrainingRemoteDrive"),
+        (NN_ROOT / "rl" / "loop_remote_job.py", "TrainingRemoteJob"),
+        (NN_ROOT / "rl" / "loop_remote_fail.py", "TrainingRemoteFail"),
+        (NN_ROOT / "rl" / "loop_remote_push.py", "TrainingRemotePush"),
+    )
     for path, cls in (
         (CORE_PY, "TrainingLoop"),
         (STEPS_PY, "TrainingSteps"),
-        (NN_ROOT / "rl" / "loop_remote.py", "TrainingRemote"),
+        *remote_family,
         (NN_ROOT / "rl" / "loop_guards.py", "TrainingGuards"),
         (ROUND_STEPS_PY, "RoundSteps"),
     ):

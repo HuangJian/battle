@@ -76,7 +76,11 @@ nn-training/
 │   ├── archive.py           #    RL 权重归档轮转 + 分支 push
 │   ├── log.py               #    log() 落盘（带时间戳统一格式）
 │   ├── loop_transport.py    #    传输/发布层：rollout 源解析 + transport 选择 + hub 推送 + 节点 failover（2026-09-23 从 loop_steps.py 拆出，S4）
-│   ├── loop_remote.py       #    远端 PPO 腿 mixin：发布 → 领取 → 三重校验落位 → failover → 事件落账（TrainingSteps 的基类，S4 第二步）
+│   ├── loop_remote.py       #    远端 PPO 腿**组合根**（零方法；TrainingSteps 的基类，S4 第二十二刀收口）
+│   ├── loop_remote_push.py  #    直推腿 mixin：把 job 送到节点（提交/首发/取回；S4 第二十二刀）
+│   ├── loop_remote_job.py   #    远端 PPO job 四步 mixin：发布 → 探活 → 取回 → 三重校验落位（S4 第二十二刀）
+│   ├── loop_remote_fail.py  #    远端失败策略 mixin：确定性失败立即停腿 / 可重试失败计连败配额（S4 第二十二刀）
+│   ├── loop_remote_drive.py #    驱动入口 mixin：轮内三相 / 整轮上云 / 半离线整段（S4 第二十二刀）
 │   ├── loop_eval.py         #    in-loop 评估链 mixin：派发 → 尾巴收拢 → PPO 收官 join/交棒 → 收官 drain（TrainingSteps 的基类，S4 第十七刀）
 │   ├── loop_volume.py       #    动态采集编排 mixin：初波/补波/连续配额 → 派发 → 报告合并 → WAL（RoundSteps 的基类，S4 第十八刀）
 │   ├── loop_lifecycle.py    #    主循环骨架 mixin：setup / run 编排 / 轮派发 / 收官 / 停车（TrainingLoop 的基类，S4 第十九刀）

@@ -73,7 +73,7 @@ function assertCourseExists(course: string): void {
 
 /** 课程文件声明的 `iters`（终点轮数）；读不到 / 没声明 → null。
  *
- *  与 python 侧 `run_rl` 的整段守卫同口径（`rl/loop_remote.py`：`--run-iters<0` 需要课程声明
+ *  与 python 侧 `run_rl` 的整段守卫同口径（`rl/loop_remote_drive.py`：`--run-iters<0` 需要课程声明
  *  iters——没有终点就不叫整段）：离线（整段上云）模式 = 跑到课程末尾，没有有限终点节点会
  *  一直跑下去。开课预校验在这里读课程文件，**在 trainer 接触坏配置之前**就把配备错拦下。
  *  JSONC 解析借 `core/jsonc.ts::readJsoncFile`（唯一 JSONC 解析器，别再手搓，见该文件头）。 */
@@ -310,7 +310,7 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
       )
     }
     // ★ 2026-09-22 事故预校验：离线（整段上云）= 跑到课程末尾，课程必须声明有限 iters——
-    //   没有终点节点会一直跑下去（python 侧 `loop_remote` 的同款 SystemExit 曾把共享 trainer
+    //   没有终点节点会一直跑下去（python 侧 `loop_remote_drive` 的同款 SystemExit 曾把共享 trainer
     //   整个弄崩）。在这里读课程文件、**在 trainer 接触坏配置之前**响亮拒绝（零副作用，
     //   与上方其它预检同区）。
     if (opts.trainMode === 'offline') {

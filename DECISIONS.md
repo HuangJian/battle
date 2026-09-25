@@ -3091,3 +3091,46 @@ body **没有安全 Range**，并发只会互相拖慢。**唯一的槽位入口
 - **门禁**：nn **2510 → 2524 passed / 3 skipped**（+14 = 新守卫）；ruff `All checks passed`；mypy 绿；
   根 `bun run check` 2120 pass / 0 fail；dashboard typecheck + **1105 pass / 0 fail**；`check-decisions` ok。
 —— 全文（成员表 / 宿主与末位追加依据 / 三张表 / 死 import / 反探针教训）→ `docs/nn/engineering.md` §23「第二十一刀」。
+
+## §2026-09-25-goalnn-loop-remote-cluster-split（2026-09-25，用户指令「把 `loop_remote.py` 那 862 行连通分量按「判据同源」拆成多个混入」）
+
+`rl/loop_remote.py` **997 → 35 行**（−96%）。13 个方法（862 行，一条连通分量）按**判据同源**切成四簇，
+各成模块（111 / 551 / 112 / 291 行，方法体本身 69 / 470 / 76 / 247），组合根留在原文件且**零方法**。同一对象、同一把锁、零行为变化。
+
+| 混入 | 判据 | 模块 | 方法 |
+|---|---|---|---|
+| `TrainingRemotePush` | 把一份 job **送到节点**（提交 / 首发 / 取回） | `rl/loop_remote_push.py` | `_push_submit_node` · `_push_submit_first` · `_push_fetch` |
+| `TrainingRemoteJob` | **一份远端 PPO job 的四步** + 组合入口 | `rl/loop_remote_job.py` | `_remote_ppo` · `_remote_ppo_publish` · `_remote_ppo_probe` · `_remote_ppo_fetch` · `_remote_ppo_land` |
+| `TrainingRemoteFail` | **远端失败的唯一处置策略** | `rl/loop_remote_fail.py` | `_abort_node_failure` · `_handle_remote_failure` |
+| `TrainingRemoteDrive` | **谁驱动这条腿**（轮内 / 整轮 / 整段） | `rl/loop_remote_drive.py` | `_remote_ppo_step` · `_remote_iter` · `_remote_run_segment` |
+
+- **刀口：一条连通分量没有「链」可牵 ⇒ 判据同源**。S19/S20 的取法是「找方法间调用链」，而这里 13 个节点
+  本就连成**一个 862 行连通分量**（S4 第二步已按链切过一次）。于是按「同一件事 / 同一套失败语义」切：
+  推送腿 · 一个 job 的四步 · 失败策略 · 驱动入口。**不是按大小、不是按物理位置。**
+- **宿主 = 把 DAG 写进类声明**（调用者依赖被调用者）：`Push ← Job ← {Fail, Job} ← Drive ← TrainingRemote`。
+  `Fail` 与 `Job` 并列成为 `Drive` 的第二个基类（驱动要用失败策略）。MRO 线性化 = `TrainingRemote,
+  TrainingRemoteDrive, TrainingRemoteFail, TrainingRemoteJob, TrainingRemotePush, object`——13 名**各一所有者**。
+- **组合根仍住 `rl/loop_remote.py` 且零方法**（`class TrainingRemote(TrainingRemoteDrive)`）——因此
+  `TrainingSteps.__bases__` / `TrainingLoop.__bases__` / 四个「继承真混入」的测试宿主 / 既有
+  `from rl.loop_remote import TrainingRemote` 调用点**一行不改**（`__mro__[1]` 仍是它）。
+- **patch 面**：`_push_submit` / `_push_wait_result` 随推送腿迁到 `rl.loop_remote_push`（e2e 的 2 处
+  `monkeypatch.setattr` 改址）；`dist_common` 随驱动迁到 `rl.loop_remote_drive`。**patch 旧的
+  `rl.loop_remote.*` 现在是静默空操作**——新守卫正面钉「组合根零 seam」+ 每模块读自己新家的全局。
+- **守卫演进 6 处**：`test_loop_transport_split`（定义面改读**组合根 MRO**、入边/import 面改读一族、
+  `_remote_ppo.__module__` → `rl.loop_remote_job`）· `test_loop_export_split`（两条入边换落点、槽位读者
+  改元组）· `test_loop_lifecycle_split`（`_evalboard_idle` 入边 → `loop_remote_job.py`）·
+  `test_loop_core_tail_split`（全量 `MRO_NAMES` 插四名）· `test_loop_volume_split`（远端一族改为
+  「四新家 + 组合根」）· `test_layering`（四名登记，先红再登记**第七次**）。新守卫
+  `tests/test_loop_remote_split.py`（**15 例**）+ 反探针 **24/24 全红**（含功能性两条）。
+- **★ 本刀的新形态坑（与「搬家后按路径读源码的守卫**响亮**失效」不同）**：`test_loop_volume_split` 里
+  按 `rl/loop_remote.py` **类名**枚举方法的覆盖面，在类体被切空之后**静默失去覆盖却不红**（读到空集
+  也算通过）⇒ 主动改成读「四新家 + 组合根」。**搬家时要问的不只是「谁会响亮地读它」，还有「谁会静静地读到空」。**
+- **dashboard 跨项目盲区（第十六/十九/二十/二十一刀同族）又一次**：`course-lifecycle.ts` 两处注释把
+  `--run-iters<0` 守卫指到 `rl/loop_remote.py`——S21 才刚修成那个名字，S22 又把它搬进
+  `rl/loop_remote_drive.py`（`_remote_run_segment` 本体）⇒ 同步改址（注释-only，dashboard 门禁照跑）。
+- **违反后果**：五件链断任一环或插队 · 组合根长出方法/seam · 成员在错家重复定义 · 借用声明多/少 ·
+  helper hand 没在用到它的文件里声明 · 入边/出边/槽位写手漂 · 顶层或延迟 import 面长出 · 反向边 ·
+  失败策略不再停腿 —— 均在**提交时**红（反探针 24/24）。
+- **门禁**：nn **2524 → 2539 passed / 3 skipped**（+15 = 新守卫）；ruff `All checks passed`；mypy 绿（433 文件）；
+  根 `bun run check` 2120 pass / 0 fail；dashboard typecheck + 1105 pass / 0 fail；`check-decisions` ok。
+—— 全文（成员表 / 四簇判据 / 链式宿主 / 三张表 / 静默失去覆盖那条教训）→ `docs/nn/engineering.md` §23「第二十二刀」。

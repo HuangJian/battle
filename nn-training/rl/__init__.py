@@ -22,6 +22,11 @@
   loop_iter_dir.py TrainingIterDir mixin（本轮目录续跑保留/重建 + 零 shard 配额告警；S4 第二十刀）
   loop_dispatch.py TrainingDispatch mixin（本轮派发与让位：采集三路 / A-eval 稀疏化 / EvalBoard 关窗；S4 第二十刀）
   loop_export.py   TrainingExport mixin（产物出包：TS 码 zip / 计划采集块 / 全离线包 / 权重归档；S4 第二十一刀）
+  loop_remote.py   TrainingRemote **组合根**（远端 PPO 腿；零方法，S4 第二十二刀收口）
+  loop_remote_push.py  TrainingRemotePush mixin（直推腿：把 job 送到节点；S4 第二十二刀）
+  loop_remote_job.py   TrainingRemoteJob mixin（一个远端 PPO job 的四步 + 组合入口；S4 第二十二刀）
+  loop_remote_fail.py  TrainingRemoteFail mixin（远端失败策略：确定性停腿 / 连败配额；S4 第二十二刀）
+  loop_remote_drive.py TrainingRemoteDrive mixin（驱动入口：轮内三相 / 整轮 / 半离线整段；S4 第二十二刀）
   loop_steps.py    TrainingSteps mixin（课程 / 落账 / 取证；基类 TrainingRemote + TrainingEval + TrainingExport）
   loop_eval.py     TrainingEval mixin（in-loop 评估链：派发 / 尾巴收拢 / join / 收官 drain；S4 第十七刀）
   loop_volume.py   TrainingVolume mixin（动态采集编排：初波/补波/连续配额 → 派发 → 报告合并；S4 第十八刀）

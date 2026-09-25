@@ -53,7 +53,6 @@ from typing import Any, cast
 NN_ROOT = Path(__file__).resolve().parent.parent
 EXPORT_PY = NN_ROOT / "rl/loop_export.py"
 STEPS_PY = NN_ROOT / "rl/loop_steps.py"
-REMOTE_PY = NN_ROOT / "rl/loop_remote.py"
 ROUND_STEPS_PY = NN_ROOT / "rl/loop_round_steps.py"
 
 CLASS = "TrainingExport"
@@ -75,10 +74,13 @@ STAYS = (
 STEPS_BASES = ("TrainingRemote", "TrainingEval", "TrainingExport")
 
 #: 入边闭集：成员 → {rl 模块: 呼叫点数}（`self.<成员>(` 的真实形态；新入边必须改这张表）。
+#: S4 第二十二刀把 `loop_remote` 切成四簇后，两条入边各自换了落点（实现所在模块）：
+#: `_ensure_ts_code` 的呼叫者在 `_remote_ppo_publish`（→ `loop_remote_job.py`），
+#: `_volume_plan_block` 的呼叫者在 `_remote_run_segment`（→ `loop_remote_drive.py`）。
 INBOUND_CALLS: dict[str, dict[str, int]] = {
-    "_ensure_ts_code": {"loop_remote.py": 1},
+    "_ensure_ts_code": {"loop_remote_job.py": 1},
     # 一处是 loop_export 自己那条链（`_export_offline_bundle` → 它），一处是远端分段的计划。
-    "_volume_plan_block": {"loop_export.py": 1, "loop_remote.py": 1},
+    "_volume_plan_block": {"loop_export.py": 1, "loop_remote_drive.py": 1},
     "_export_offline_bundle": {"loop_round_steps.py": 1},
     "_export_weights": {"loop_round_steps.py": 1},
 }
@@ -87,9 +89,10 @@ INBOUND_CALLS: dict[str, dict[str, int]] = {
 OUTBOUND_HANDS = frozenset({"_remote_ppo"})
 
 #: 槽位写-读手：本模块**写**、别处**读**的槽（写-读手契约；读者少一个也红）。
-SLOT_HANDS = {
-    "_ts_code_sha256": "rl/loop_remote.py",
-    "_ts_code_zip_path": "rl/loop_remote.py",
+#: S4 第二十二刀后读者在两个新家里：`_remote_ppo_publish`（Job）与 `_push_submit_node`（Push）。
+SLOT_HANDS: dict[str, tuple[str, ...]] = {
+    "_ts_code_sha256": ("rl/loop_remote_job.py",),
+    "_ts_code_zip_path": ("rl/loop_remote_job.py", "rl/loop_remote_push.py"),
 }
 
 #: 顶层 import 闭集（非 stdlib；本模块不许长出重依赖）。
@@ -102,6 +105,10 @@ FORBIDDEN_IMPORTS = frozenset(
         "rl.loop_core",
         "rl.loop_eval",
         "rl.loop_remote",
+        "rl.loop_remote_drive",
+        "rl.loop_remote_fail",
+        "rl.loop_remote_job",
+        "rl.loop_remote_push",
         "rl.loop_round_steps",
         "rl.loop_steps",
     }
@@ -332,12 +339,15 @@ def test_outbound_hands_closed_set() -> None:
 
 
 def test_slot_write_read_hands() -> None:
-    """槽位写-读手：本模块写、`loop_remote` 读（写手在这里，读者不能在别处丢）。"""
+    """槽位写-读手：本模块写、远端两簇读（写手在这里，读者不能在别处丢）。"""
     assigns = _self_assigns(EXPORT_PY, CLASS)
-    for slot, reader in SLOT_HANDS.items():
+    for slot, readers in SLOT_HANDS.items():
         writers = {m for m, names in assigns.items() if slot in names}
         assert writers == {"_ensure_ts_code"}, f"{slot} 的写手变了：{sorted(writers)}"
-        assert slot in (NN_ROOT / reader).read_text(encoding="utf-8"), f"{slot} 的读者丢了"
+        for reader in readers:
+            assert slot in (NN_ROOT / reader).read_text(encoding="utf-8"), (
+                f"{slot} 的读者 {reader} 丢了"
+            )
 
 
 def test_old_home_no_longer_absorbs_patches() -> None:

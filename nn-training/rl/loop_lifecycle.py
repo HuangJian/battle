@@ -13,7 +13,7 @@
 调用者那一侧的基类。本簇**破例**，因为入边把这条路堵死了——`_evalboard_idle` 被两个 mixin
 以 `self.` 调用：
 
-    rl/loop_remote.py      （TrainingRemote）
+    rl/loop_remote_job.py  （TrainingRemoteJob；S4 第二十二刀前在 loop_remote.py）
     rl/loop_round_steps.py （RoundSteps）
 
 新混入要同时是两者的祖先才接得住这条既有入边；而
@@ -31,7 +31,7 @@
 
 ## 跨模块手（本模块是**被调用**的一方，且只此一条入边）
 
-`loop_remote.py` / `loop_round_steps.py` → `self._evalboard_idle(...)`：搬家前它们解析到
+`loop_remote_job.py` / `loop_round_steps.py` → `self._evalboard_idle(...)`：搬家前它们解析到
 `loop_core` 里的定义，搬家后解析到本模块——**手数不变，只是换了落点**（两处源码一字不改）。
 反方向（本模块 → 其余混入）是混入常态的动态解析：`self.round_steps()` / `self.round_failure()`
 （RoundSteps）、`self._drain_pending_eval()`（TrainingEval）、`self._sync_cloud_halt()`

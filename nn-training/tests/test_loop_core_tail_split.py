@@ -79,6 +79,9 @@ STAYS = ("__init__", "_run_inspect")
 #: 在 `TrainingEval` 之后插入一项（`TrainingSteps.__bases__` 那三处断言由各刀的守卫自己演进——
 #: 见 `tests/test_loop_transport_split.py` / `test_loop_eval_split.py` / `test_loop_lifecycle_split.py`）。
 ROUND_STEPS_BASES = ("TrainingVolume", "TrainingBaseline", "TrainingIterDir", "TrainingDispatch")
+#: `TrainingLoop` 的**全量 MRO 名单**（本文件是这份名单的**唯一所有者**；S18/S19/S20 那几处
+#: 只钉相对位置，避开同一份名单三处各自漂）。S4 第二十二刀把 `TrainingRemote` 变成组合根
+#: （`Push ← Job ← {Fail, Job} ← Drive`）⇒ 四个新混入插在 `TrainingRemote` 之后、`TrainingEval` 之前。
 MRO_NAMES = [
     "TrainingLoop",
     "RoundSteps",
@@ -88,6 +91,10 @@ MRO_NAMES = [
     "TrainingDispatch",
     "TrainingSteps",
     "TrainingRemote",
+    "TrainingRemoteDrive",
+    "TrainingRemoteFail",
+    "TrainingRemoteJob",
+    "TrainingRemotePush",
     "TrainingEval",
     "TrainingExport",
     "TrainingGuards",

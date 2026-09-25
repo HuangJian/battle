@@ -81,6 +81,10 @@ L2_PACKAGES = ("remote",)
 #: 同日（S4 第二十一刀）：`loop_steps` 拆出 `loop_export`（产物出包 4 方法的混入），它拿
 #: `remote.hub_client.pack_ts_code_zip`（`_ensure_ts_code` 里**延迟** import——本快照的 AST 也看
 #: 函数内 import）⇒ 同样先红、再登记（第六次）。
+#: 同日（S4 第二十二刀）：`loop_remote` 的 862 行连通分量按判据同源切成四簇——`loop_remote_push`
+#: / `loop_remote_job` / `loop_remote_fail` / `loop_remote_drive`。四者**都**经 `rl.loop_transport`
+#: （或直接 `remote.push_client`）传递可达 remote，故全部登记；`loop_remote` 退成组合根后仍经
+#: `rl.loop_remote_drive` 可达 ⇒ 名字不动（第七次）。
 RL_ORCHESTRATION = frozenset(
     {
         "bc_loop",
@@ -93,9 +97,13 @@ RL_ORCHESTRATION = frozenset(
         "loop_iter_dir",
         "loop_lifecycle",
         "loop_plan",
+        "loop_remote",
+        "loop_remote_drive",
+        "loop_remote_fail",
+        "loop_remote_job",
+        "loop_remote_push",
         "loop_round_steps",
         "loop_runner",
-        "loop_remote",
         "loop_serve",
         "loop_steps",
         "loop_transport",

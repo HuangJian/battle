@@ -17,7 +17,8 @@ run ──→ _setup ──→ _setup_common
 ## 宿主判据（本刀的题眼）：为什么**不是**某个 sibling mixin
 
 本仓通例是「调用者依赖被调用者」（把被调用的一簇挂到调用者那一侧）。本簇**破例**，因为
-`_evalboard_idle` 有入边——两个 mixin 以 `self.` 调它：`rl/loop_remote.py`（1 处）与
+`_evalboard_idle` 有入边——两个 mixin 以 `self.` 调它：`rl/loop_remote_job.py`（1 处；
+S4 第二十二刀前在 `rl/loop_remote.py`，调用者是 `_remote_ppo_publish`）与
 `rl/loop_round_steps.py`（2 处）。新混入要同时是这两个 caller 的祖先才接得住；而
 `set(RoundSteps.__mro__) ∩ set(TrainingRemote.__mro__) == {object}` —— **交集为空**，任何
 sibling 宿主都不存在。唯一出路 = 组合根 `TrainingLoop`（`__bases__` 三件套 → 末位追加第四件）。
@@ -78,7 +79,7 @@ CLUSTER_MODULE_NAMES = (
 
 #: 入边闭集：谁以 `self.<名字>(` 调本模块（搬家前后**手数不变**，只是换了落点）。
 INBOUND_CALLS = {
-    "rl/loop_remote.py": 1,
+    "rl/loop_remote_job.py": 1,
     "rl/loop_round_steps.py": 2,
 }
 
@@ -331,7 +332,7 @@ def test_borrowed_declarations_are_exactly_the_touched_set() -> None:
 
 def test_cross_module_inbound_hands_closed_set() -> None:
     """入边闭集：只有那两个文件、只有 `_evalboard_idle`（新入边必须改这张表）。"""
-    assert set(INBOUND_CALLS) == {"rl/loop_remote.py", "rl/loop_round_steps.py"}
+    assert set(INBOUND_CALLS) == {"rl/loop_remote_job.py", "rl/loop_round_steps.py"}
     for rel in INBOUND_CALLS:
         src = (NN_ROOT / rel).read_text(encoding="utf-8")
         # 入边只有 `self._evalboard_idle(` 这一种形状；没有别的 `self.<本簇成员>(`。

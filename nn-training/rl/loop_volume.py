@@ -93,7 +93,7 @@ class TrainingVolume:
     _report: Any
     _stream_meta: Any
     #: 由 `TrainingSteps` 提供、在本模块里被**调用**的 WAL 句柄（组合实例上动态解析）。
-    #: 声明为 `Any` 的理由同 `rl/loop_remote.py`：混入间互调的方法必须在每个文件里类型可见。
+    #: 声明为 `Any` 的理由同 `rl/loop_remote_push.py`：混入间互调的方法必须在每个文件里类型可见。
     _commit_journal: Any
 
     # ---- 本簇自己的状态（S4 第十八刀随簇搬来；只被这一簇读写）----------------------

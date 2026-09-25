@@ -1081,6 +1081,41 @@ dashboard typecheck + **1105 pass / 0 fail**；`check-decisions` ok。
 分层快照先红再登记**第六次**（`loop_export` 由**函数内延迟 import** `remote.hub_client` 入选）。
 **门禁**：nn **2510 → 2524 passed / 3 skipped**；ruff / mypy 绿；根 `bun run check` 2120 / 0；dashboard **1105 / 0**。
 
+#### 5.3.21 第二十二刀（2026-09-25，**已完成**）—— `loop_remote` 的 862 行连通分量 → 四簇混入
+
+用户指令：「把 `loop_remote.py` 那 862 行连通分量按「判据同源」拆成多个混入」。`rl/loop_remote.py`
+**997 → 35 行**（−96%），13 方法 → 四簇（方法体 69 / 470 / 76 / 247 行），组合根零方法。
+
+**刀口：一条连通分量没有「链」可牵 ⇒ 判据同源**（S19/S20 的链取法在此无解——13 个节点本就连成一个
+连通分量）。四判据：推送腿 / 一个 job 的四步 / 失败策略 / 驱动入口。
+
+| 新家 | 方法 | 判据 |
+|---|---|---|
+| `rl/loop_remote_push.py::TrainingRemotePush` | `_push_submit_node` · `_push_submit_first` · `_push_fetch` | 把一份 job 送到节点 |
+| `rl/loop_remote_job.py::TrainingRemoteJob` | `_remote_ppo` · `_remote_ppo_publish` · `_remote_ppo_probe` · `_remote_ppo_fetch` · `_remote_ppo_land` | 一份 job 的四步 + 组合入口 |
+| `rl/loop_remote_fail.py::TrainingRemoteFail` | `_abort_node_failure` · `_handle_remote_failure` | 远端失败策略 |
+| `rl/loop_remote_drive.py::TrainingRemoteDrive` | `_remote_ppo_step` · `_remote_iter` · `_remote_run_segment` | 谁驱动这条腿 |
+
+**宿主 = 把 DAG 写进类声明**：`Push ← Job ← {Fail, Job} ← Drive ← TrainingRemote`（Fail 与 Job 并列
+成为 Drive 的第二个基类）。组合根仍住 `rl/loop_remote.py` 且**零方法** ⇒ `TrainingSteps.__bases__` /
+`TrainingLoop.__bases__` / 测试宿主 / `from rl.loop_remote import TrainingRemote` 调用点**一行不改**。
+
+**patch 面**：`_push_submit` / `_push_wait_result` → `rl.loop_remote_push`（e2e 两处 `setattr` 改址）；
+`dist_common` → `rl.loop_remote_drive`；`log` → 每簇自己的模块。patch 旧的 `rl.loop_remote.*` 现在是**静默空操作**。
+
+**守卫演进 6 处**（transport 定义面改读组合根 MRO / export 两条入边换落点 + 读者改元组 / lifecycle 入边
+改址 / core_tail 的 `MRO_NAMES` 插四名 / volume 改读「四新家 + 组合根」/ layering 登记四模块）。
+新守卫 `tests/test_loop_remote_split.py`（**15 例**，含三条功能性）+ 反探针 **24/24 全红**；
+纯搬对账 **13/13 逐字节**。分层快照先红再登记**第七次**。
+
+**★ 新形态坑**：`test_loop_volume_split` 按旧文件**类名**枚举方法——类体被切空后它**静默读到空集也算过**
+（与「按路径读写源码的守卫响亮失败」不同）⇒ 搬家还要问「谁会静静地读到空」。
+**dashboard 跨项目盲区（同族）又一次**：`--run-iters<0` 守卫随 `_remote_run_segment` 迁到
+`loop_remote_drive.py`（S21 才刚指到 `loop_remote.py`）⇒ 同步改址。
+
+**门禁**：nn **2524 → 2539 passed / 3 skipped**；ruff / mypy 绿（433 文件）；根 `bun run check` 2120 / 0；
+dashboard typecheck + **1105 / 0**；`check-decisions` ok。
+
 ### 5.4 本轮**不做**（已核，刻意保留）
 
 - `remote/notebook_boot.py` ↔ `remote/offline_boot.py` 的孪生助手（`_build_opener` /
