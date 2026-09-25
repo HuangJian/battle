@@ -8,6 +8,70 @@
 
 ---
 
+## §47 归属（role）：job 自己说「该由哪块盘执行」；认领咽喉点两道闸（2026-09-25）
+
+> 现场来源：`reports/online-offline-hot-switch-audit-2026-09-25.md`（L1–L6 / I1–I6）+ 用户四项裁决；
+> 设计与实施 → `plan/online-offline-role-routing.plan.md`（§8 是评审 A–K 的处置表）。
+
+**症状**：课程热切模式时，**历史 job 的归属跟着跳**。最锋利的一条：盘 A 两小时前因为节点上
+没有 `bun` 被拒的那个 `kind=run` job（整段自主），在课程切成**在线**之后被**另一块盘**领走——
+它有能力跑，但它不该跑；日志上一切正常（队列在降、心跳在跳），只有一行「离线课整段交领」
+事后能对上账，而那一行的判据本身就是错的（见下）。
+
+**根因（三条，互相放大）**：
+
+1. **归属不是 job 的属性**：`claim_next` / `peek_jobs` 用 `mode_of(course)` 判「谁能领」——
+   mode 住在 hub 内存表、控制台可热切、重启即回启动参数，用它当判据等于把归属交给一个易变的开关。
+2. **认领面有四条腿，闸只在其中三条上**：`claim_next`、`peek`+`claim`、按 id 直领（`claim_job`，
+   原本**零校验**）、以及 **push 派发**（`push_dispatch._dispatch` → `Hub.claim`，**不经过** `claim_job`）。
+   各写各的判据必然漂（第 4 条腿就这么漏了）。
+3. **能力 ≠ 归属**：`--offline` / `X-Battle-Offline: 1` 原本是**能力声明**（「我能自主跑完整段」），
+   而 `kind=run` 整段**确实**由在线盘跑得动（审计 §3）⇒ 能力闸拦不住「有能力的盘接走不属于它的活」。
+   这是把 *capability* 换成 *policy* 的正当理由（supersede `DECISIONS.md:1634` ③）。
+
+**修法（落成不变式）**：
+
+- **`manifest.role ∈ {offline, online}`，发布时定死**（`publish_job`，`kind` 的同一快照：
+  `run ⇒ offline`，`iter/ppo/bc ⇒ online`；`MANIFEST_KINDS`/`KIND_ROLES` 共用一份全集，穷举用例钉住）。
+  字段**可选**（旧 job 无它 ⇒ `role_of` 按 kind 兜底，不拒单），但一旦存在必须合法。
+  显式 `role=` 可覆盖（逃生口）；不落 `MANIFEST_OPTIONAL_DEFAULTS`（那会造第二个事实源）。
+- **闸下沉到 `_JobStore._claim_locked`**（租约写入的唯一临界区）⇒ 四条腿天然同源；
+  判据函数只有一份 `role_blocked(job_id, role) -> "" | "parked" | "role"`：
+  派发面用它**过滤候选**、临界区用它**拒绝**（同一份尺子两个方向）。
+- **两道正交的闸**：归属闸（job 级，`manifest.role`）+ **停摆闸**（课程级，`mode=offline` 且请求方
+  不是离线盘）——后者是 2026-09-20 的既有语义，**保留**（离线课的活留给切回在线，`pending_n` 不降）。
+- **worker 侧复用既有载体、不新增第 4 个模式载体**：`CFG["offline_worker"] → --offline →
+  X-Battle-Offline: 1`，头名与取值**逐字节不变**（改名只会让混合部署里的带标 worker 静默掉线），
+  只有语义从「能力」升为「归属」。**claim 也必须带头**（旧代码里这条头从未出现在 claim 上；
+  闸下沉之后，只在 peek 上带头 = 带标 worker **自锁**：peek 绿、claim 红）。
+- **取包端点补 mode 闸**（`_get_task_pack`）：包在盘上 ≠ 该发给你（切离线时自动导出且「已有包不动」
+  ⇒ 切回在线后包还在）。只在「表里有它且明确 online」时 409；冷课/未扫到的课照旧放行
+  （与 `_task_pack_miss_candidate` ① 同规）。
+- **归属可见**：`/admin/queue` 每行加 `roles: {jid: role}`。**不**报 `claimable` 布尔——
+  「可不可领」是**相对请求方角色**的属性，观察者不带角色，任何布尔都会误导。
+
+**行为变更（必须点名）**：带 `X-Battle-Offline` 的盘**不再兼领在线盘的活**（旧注释里明写过
+「带标 worker 仍可领在线课」）——一个盘一种任务，用户 2026-09-25 裁决。
+`DECISIONS.md §2026-09-25-goalnn-role-routing`。
+
+**被否决**：新增独立 `X-Battle-Role` 头 / `--role` 参数（= 第 4 个模式载体，与「模式只有一个来源」
+自相矛盾，且旧 worker 不带新头 ⇒ 静默掉线）· `role` 进 `MANIFEST_OPTIONAL_DEFAULTS`（静态默认值 = 第二个事实源）·
+`NN_ROLE_ROUTING=0` 回退开关（它把「一个盘一种任务」变成**可选**，正好在最需要它的混部期复现事故；
+回滚面已在笔记本/CLI + 本提交同批）· 只在各调用点加闸（push 腿必然漏）· 归属缓存永不失效
+（重发覆盖 manifest 就谎报；改为 `publish` 里 pop）。
+
+**违反后果**：归属写在调用点 ⇒ 新加一条腿就绕过闸，而绕过的表现是静默的（活被错的盘领走、
+日志正常）· 归属读 mode ⇒ 每切一次模式历史 job 跳一次（本轮事故）· claim 不带头 ⇒ 带标 worker
+自锁（peek 说能领、claim 当场拒）· 取包端点不查 mode ⇒ 离线盘能取走在线课的包跑整段（L6）·
+`/admin/queue` 报 `claimable` 布尔 ⇒ 排障的人拿着一个与请求方角色无关的答案去定位「为什么没人领」。
+
+**真机验证点**：`整段交领：` 那一行的判据是 `job_role(jid)==offline`（不再读 mode）·
+`/admin/queue` 的 `roles` 与 `pending_n` 一起看（「队列不降」是在等另一块盘）·
+worker 侧两条 HTTP 面（`/jobs/peek`、`/jobs/{id}/claim`）都应带 `X-Battle-Offline: 1`（离线盘观察），
+在线盘**一条都不带**。
+
+---
+
 ## §46 在线腿（tailscale 盘）从来不装 bun：切到在线课程后 worker 每单零下载拒单（2026-09-25）
 
 **症状**（用户真机日志，`battle.tailscale.ipynb`，`mode=rl/pull`，Tesla T4）：

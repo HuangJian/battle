@@ -57,11 +57,13 @@ from remote.protocol import (
     CLAIM_MODE_EXCLUSIVE,
     HEARTBEAT_SEC,
     JOB_CANCEL_POLL_SEC,
-    OFFLINE_CAP_HEADER,
-    OFFLINE_CAP_VALUE,
     PAYLOAD_NAME,
     PRIORITY_NONE,
     PRIORITY_ORDER,
+    ROLE_HEADER,
+    ROLE_HEADER_VALUE,
+    ROLE_OFFLINE,
+    ROLE_ONLINE,
     WIRE_V2_CONTENT_TYPE,
     WORKER_ID_HEADER,
     CodeChangedError,
@@ -501,17 +503,23 @@ def _request(
 
 # ---- 新调度面（2026-09-22，plan/transfer-scheduling）：peek / priority / claim ----
 
-def _sched_headers(worker_id: str, *, offline_ok: bool = False) -> dict[str, str]:
-    """新面的公共头：worker 身份（必须） + 可选能力声明（离线课）。
+def _sched_headers(worker_id: str, *, role: str = ROLE_ONLINE) -> dict[str, str]:
+    """新面的公共头：worker 身份（必须） + 归属角色（离线盘才带）。
 
     身份必须自报：隧道回源把全流量归成 127.0.0.1，源 IP 分不出 worker；而 hub 的
     `active_worker_count()`（避让链的唯一输入）就靠它计数——缺它避让链静默失效。
+
+    `role`（2026-09-25）：原来这里叫「能力声明」，现在语义是**归属**（本会话属于哪块盘）；
+    头名与取值不变（`X-Battle-Offline: 1`，见 `protocol.ROLE_HEADER` 的理由）。
+    ⚠ 调用点必须**都**带它（peek 与 claim 两条 HTTP 面，`acquire_job` 内部两跳都在）：
+    只在 peek 上带的话，带标 worker 会在 `claim` 那一步被归属闸
+    （`_JobStore._claim_locked`）当成 online 当场拒掉——**自锁**（peek 绿、claim 红）。
     """
     h: dict[str, str] = {}
     if worker_id:
         h[WORKER_ID_HEADER] = worker_id
-    if offline_ok:
-        h[OFFLINE_CAP_HEADER] = OFFLINE_CAP_VALUE
+    if role == ROLE_OFFLINE:
+        h[ROLE_HEADER] = ROLE_HEADER_VALUE
     return h
 
 
@@ -520,7 +528,7 @@ def peek_jobs(
     token: str,
     *,
     worker_id: str = "",
-    offline_ok: bool = False,
+    role: str = ROLE_ONLINE,
     n: int = 3,
     timeout: float = 30.0,
     log: Any = None,
@@ -537,7 +545,7 @@ def peek_jobs(
         token,
         f"/jobs/peek?n={max(1, int(n))}",
         timeout=timeout,
-        headers=_sched_headers(worker_id, offline_ok=offline_ok) or None,
+        headers=_sched_headers(worker_id, role=role) or None,
     )
     if status != 200:
         _warn_non_200(base_url, status, log, body=body)
@@ -621,6 +629,7 @@ def claim_job(
     *,
     mode: str = CLAIM_MODE_EXCLUSIVE,
     worker_id: str = "",
+    role: str = ROLE_ONLINE,
     expected_epoch: int | None = None,
     timeout: float = 30.0,
     log: Any = None,
@@ -644,7 +653,9 @@ def claim_job(
         timeout=timeout,
         data=payload,
         method="POST",
-        headers={"Content-Type": "application/json", **_sched_headers(worker_id)},
+        # ★ 归属头必须随 claim 一起发（F6 的老毛病是「头只到 peek，claim 不带」；
+        # 而在归属闸下沉到 `_claim_locked` 之后，claim 不带头 = 带标 worker 自锁）。
+        headers={"Content-Type": "application/json", **_sched_headers(worker_id, role=role)},
     )
     if status != 200:
         _warn_non_200(base_url, status, log, body=body, jid=jid)
@@ -849,7 +860,7 @@ def acquire_job(
     token: str,
     *,
     worker_id: str = "",
-    offline_ok: bool = False,
+    role: str = ROLE_ONLINE,
     depth: int = 3,
     on_drop: Any = None,
     log: Any = None,
@@ -871,7 +882,7 @@ def acquire_job(
         base_url,
         token,
         worker_id=worker_id,
-        offline_ok=offline_ok,
+        role=role,
         n=depth,
         log=log,
     )
@@ -916,6 +927,7 @@ def acquire_job(
             jid,
             mode=CLAIM_MODE_EXCLUSIVE,
             worker_id=worker_id,
+            role=role,  # ★ 与 peek 同一份归属（漏了它 = 带标 worker 自锁）
             expected_epoch=epoch,
             log=log,
         )
@@ -3212,7 +3224,7 @@ def _prefetch_fill(
     stop: threading.Event,
     *,
     worker_id: str = "",
-    offline_ok: bool = False,
+    role: str = ROLE_ONLINE,
     depth: int = PREFETCH_DEPTH_DEFAULT,
     skip: set[str] | None = None,
     log: Any = None,
@@ -3237,7 +3249,7 @@ def _prefetch_fill(
                 base_url,
                 token,
                 worker_id=worker_id,
-                offline_ok=offline_ok,
+                role=role,
                 n=max(1, int(depth)),
                 log=None,  # 预取的 peek 不进 poll 告警节流表（同一 url 会互相压报）
             )
@@ -3293,8 +3305,10 @@ def worker_loop(
     artifacts_dir: str | Path | None = None,
     run_max_iters: int = 0,
     run_budget_sec: float = 0.0,
-    # 离线训练模式（2026-09-19）：本会话能自己跑完整段 ⇒ 带能力头领离线课
-    offline_ok: bool = False,
+    # 离线训练模式（2026-09-19，2026-09-25 语义升为**归属**）：本会话属于离线盘 ⇒
+    # 只在 peek/claim 面带角色头，且只能领 `manifest.role="offline"` 的 job。
+    # 缺省 `online` = 旧 worker 行为（`--offline` 的 CLI 名与头的字面量都不变）。
+    role: str = ROLE_ONLINE,
     # 软持有预取深度（P2，2026-09-22）：0 = 关预取（只调度不预取，§7 的回退档）
     prefetch_depth: int = PREFETCH_DEPTH_DEFAULT,
     # 结果回传模式（P2.5，2026-09-22）：async = 回传**不占关键路径**（缺省）；sync = 旧行为
@@ -3382,7 +3396,7 @@ def worker_loop(
                     base_url,
                     token,
                     worker_id=worker_id,
-                    offline_ok=offline_ok,  # 能力自报：能自己跑完整段
+                    role=role,  # 归属自报：本会话只领本盘的活
                     # P2：已被别人落盘的 job（none 级）就地丢掉本地预取副本——再预取就白花带宽。
                     on_drop=(pf_store.drop if pf_store is not None else None),
                     log=log,
@@ -3465,7 +3479,7 @@ def worker_loop(
                     args=(base_url, token, pf_store, _pf_stop),
                     kwargs={
                         "worker_id": worker_id,
-                        "offline_ok": offline_ok,
+                        "role": role,
                         "depth": prefetch_depth,
                         "skip": {jid},
                         "log": log,
@@ -3699,14 +3713,15 @@ def main() -> None:
         default=0.0,
         help="本次自主段最多跑多少秒（0=不限；Kaggle 会话到点前干净停机的把手）",
     )
-    # ---- 离线训练模式（2026-09-19）----
-    # 能力自报：本会话能自己跑完整段（kind=run）。hub 只把**离线课**的 job 放给带标的
-    # worker；不带标就领不到（离线课不实时派发，但不是谁都领得到的公共池）。
-    # 这是能力声明，不是课程绑定：带标 worker 照样领在线课（课程与 worker 正交）。
+    # ---- 离线训练模式 / 归属（2026-09-19 落地，2026-09-25 语义升级）----
+    # **语义**：本会话属于**离线盘**（`role=offline`）——只能领归属为 offline 的 job
+    # （整段自主，`manifest.role` 由发布时定死），且**不再**兼领在线盘的活（一个盘一种任务，
+    # 用户 2026-09-25 裁决；旧口径「能力声明、带标仍可领在线课」已作废，见 DECISIONS
+    # §2026-09-25-goalnn-role-routing）。FLAG 名与头上的字面量都保持不变（混合部署兼容）。
     ap.add_argument(
         "--offline",
         action="store_true",
-        help="自报「能自主跑完整段」：领离线课的整段 job（kind=run）；带标仍可领在线课",
+        help="自报本会话属于**离线盘**（role=offline）：只领归属为 offline 的整段 job",
     )
     args = ap.parse_args()
     token = args.token
@@ -3753,7 +3768,7 @@ def main() -> None:
             artifacts_dir=args.artifacts or None,
             run_max_iters=args.run_max_iters,
             run_budget_sec=args.run_budget_sec,
-            offline_ok=args.offline,
+            role=ROLE_OFFLINE if args.offline else ROLE_ONLINE,
             prefetch_depth=args.prefetch_depth,
             result_upload=args.result_upload,
         )

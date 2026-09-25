@@ -108,7 +108,6 @@ from remote.protocol import (
     INIT_WEIGHTS_NAME,
     OFFLINE_ARTIFACT_BODY_MAX,
     OFFLINE_ARTIFACT_PATH,
-    OFFLINE_CAP_HEADER,
     OFFLINE_CLAIM_PATH,
     OFFLINE_HEARTBEAT_PATH,
     OFFLINE_LEASE_TTL_SEC,
@@ -130,6 +129,9 @@ from remote.protocol import (
     PRIORITY_NONE,
     PUSH_POLL_SEC,
     PUSH_TIMEOUT_SEC,
+    ROLE_HEADER,
+    ROLE_OFFLINE,
+    ROLE_ONLINE,
     TS_CODE_NAME,
     WIRE_V2_MAGIC,
     WORKER_ID_HEADER,
@@ -139,10 +141,11 @@ from remote.protocol import (
     decode_opt_tar,
     decode_weights_json,
     find_payload,
-    has_offline_capability,
     job_priority,
     may_avoid_stale_holder,
     parse_course_arg,
+    role_from_header,
+    role_of,
     rotation_order,
     sanitize_run_id,
     unpack_result_v2,
@@ -614,6 +617,18 @@ class _JobStore(_AuthGuard):
         #: （优先级表中档的输入）。为啥不只看租约：备份副本**不设租约**，只看租约就判不出
         #: 「别处在做」⇒ 所有 job 都会被判成 highest ⇒ 多张卡同抢一份（= race 换个名字）。
         self._claimed: dict[str, dict] = {}
+        #: 课程停摆（离线课 = 活留着等切回在线，2026-09-20 的既有语义）。与 job 级归属闸
+        #: **正交**：这一位说的是「这门课现在还派不派活」（课程级），`role` 说的是「这份活
+        #: 归哪块盘」（job 级）。两者共用同一个咽喉点（`role_blocked` → `_claim_locked`），
+        #: 不各自为政——由 `_HubQueue` 在 `set_mode` / 构造时同步（它是唯一知道 mode 的层）。
+        self.parked = False
+        #: job_id -> 归属角色缓存（`manifest.role`，2026-09-25）。为什么缓存：`claim_next` /
+        #: `peek` 每拍都要按角色过滤候选，而 manifest 在盘上——每拍每候选重读一次盘是白烧 IO。
+        #: 失效点 = `publish`（重发覆盖 manifest ⇒ 旧归属作废；见那里的 pop）——不靠
+        #: 「同一 job_id 的 role 永不变」这种假设。只缓存**读成功**的值（manifest 还没落定时不缓存）。
+        #: 用独立锁：`job_role` 会被持 `_lock` 的调度临界区调到，共锁会自锁。
+        self._roles: dict[str, str] = {}
+        self._role_lock = Lock()
         #: job_id -> {"worker", "at"}：**PPO 真正启动**（`POST /jobs/{id}/start` 打点）。
         #: 掉队阈值的**唯一**时基（R2-C1）：claim 之后还有下载 + 解包，拿 claim 起算会把
         #: 「下载慢」误判成「算得慢」，反而多开备份把本来就慢的链路压得更死。
@@ -730,6 +745,46 @@ class _JobStore(_AuthGuard):
     def _job_dir(self, job_id: str) -> Path:
         return self.job_root / job_id
 
+    def role_blocked(self, job_id: str, role: str) -> str:
+        """这份活能不能交给 `role`；`""` = 可以，否则是拒因（`"parked"` / `"role"`）。
+
+        **两道闸的唯一判据源**（2026-09-25）：派发面（`claim_next` / `peek_jobs` / push）
+        用它**过滤候选**，临界区（`_claim_locked`）用它**拒绝**——同一份判据两个方向，
+        不会出现「peek 说能领、claim 说不能」这类两套尺子。
+
+        为什么停摆闸也住这里（而不住各自的调用点）：push 腿（`Hub.claim`）**不经过**
+        `claim_job`，按 id 直领（`POST /jobs/{id}/claim`）也不经过 `claim_next`——闸写在
+        调用点必然漏一条（F5 就是这么来的）。
+        """
+        if self.parked and role != ROLE_OFFLINE:
+            # 离线课：只对离线盘放行（旧口径就是「带标 worker 才领得走」，现在改成按归属判）。
+            return "parked"
+        if self.job_role(job_id) != role:
+            return "role"
+        return ""
+
+    def job_role(self, job_id: str) -> str:
+        """job 的**归属角色**（`manifest.role`；旧 job 按 `kind` 兜底；读不到 ⇒ online）。
+
+        为什么读不到就归 online：这个函数的返回值会参与「你能不能领这份活」的判断。
+        归 online 的后果是「少一个人能领离线活」（看得见：队列不降），归 offline 的后果是
+        「一个能跑的活没人领、且看起来一切正常」（看不见）——两者不对称，所以倒向后者。
+        """
+        with self._role_lock:
+            cached = self._roles.get(job_id)
+        if cached is not None:
+            return cached
+        try:
+            man = json.loads((self._job_dir(job_id) / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ROLE_ONLINE
+        if not isinstance(man, dict):
+            return ROLE_ONLINE
+        role = role_of(man)
+        with self._role_lock:
+            self._roles[job_id] = role
+        return role
+
     # ---- 统一计量（M0）：传输层实测字节 ----
     def record_payload_sent(self, job_id: str, n: int) -> None:
         """记一次 /jobs/{id}/payload 服务出去的字节数（累积——重下会累加）。"""
@@ -769,6 +824,11 @@ class _JobStore(_AuthGuard):
         幂等：同 job_id 已发布 → 覆盖 payload 但**不重复**追加 job_pending
         （账本按 job_id 去重——重启后重发布不产生双 pending）。
         """
+        # 归属缓存随 manifest 一起失效（2026-09-25）：重发覆盖了 manifest ⇒ 缓存里的旧
+        # 归属就是**谎报**（`job_role` 用它判「这份活归谁」）。发布路径只此一处，放在这里
+        # 就不需要「同 job_id 的 role 永不变」这条假设。
+        with self._role_lock:
+            self._roles.pop(job_id, None)
         with self._lock:
             jd = self._job_dir(job_id)
             jd.mkdir(parents=True, exist_ok=True)
@@ -802,6 +862,7 @@ class _JobStore(_AuthGuard):
         avoid_stale_holder: bool = False,
         mode: str | None = None,
         expected_epoch: int | None = None,
+        role: str = ROLE_ONLINE,
     ) -> str | None:
         """领取（独占 = 设租约 + owner + last_heartbeat 三件套**同时置**）。
 
@@ -827,6 +888,7 @@ class _JobStore(_AuthGuard):
             worker_id=worker_id,
             avoid_stale_holder=avoid_stale_holder,
             expected_epoch=expected_epoch,
+            role=role,
         )
         return token if ok else None
 
@@ -838,6 +900,7 @@ class _JobStore(_AuthGuard):
         worker_id: str = "",
         avoid_stale_holder: bool = False,
         expected_epoch: int | None = None,
+        role: str = ROLE_ONLINE,
     ) -> ClaimOutcome:
         """带原因的领取（新 HTTP 面的唯一入口）：区分「降级」与「领不到」。
 
@@ -852,6 +915,7 @@ class _JobStore(_AuthGuard):
             worker_id=worker_id,
             avoid_stale_holder=avoid_stale_holder,
             expected_epoch=expected_epoch,
+            role=role,
         )
         if ok:
             status = "backup" if mode == CLAIM_MODE_BACKUP else "ok"
@@ -867,6 +931,7 @@ class _JobStore(_AuthGuard):
         worker_id: str,
         avoid_stale_holder: bool,
         expected_epoch: int | None,
+        role: str = ROLE_ONLINE,
     ) -> tuple[bool, str, str]:
         """claim 的**唯一**临界区（返回 `(ok, token, 原因)`）。
 
@@ -884,6 +949,14 @@ class _JobStore(_AuthGuard):
             if job_id in self._frozen:
                 # ★ 熔断（§4.1）：任何入口都不再下发（含备份副本）。
                 return False, "", "frozen"
+            blocked = self.role_blocked(job_id, role)
+            if blocked:
+                # ★ 归属/停摆闸（2026-09-25，plan/online-offline-role-routing §2.2）：租约
+                # 写入的**唯一**入口就在本函数（B3 的入口唯一性契约），所以全部认领面
+                # （claim_next / peek+claim / 按 id 直领 / push 派发）天然同源——**别**在
+                # 各自的调用点再各判一次，那又是两套会漂的判据（push 腿根本不经过
+                # `claim_job`，就是这条的必要性所在）。
+                return False, "", blocked
             now = self._now()
             if mode == CLAIM_MODE_BACKUP:
                 # 备份副本：不设租约、不动原租约（R2-3），只授权「你的回传不吃 403」。
@@ -1840,6 +1913,10 @@ class _HubQueue(_AuthGuard):
         self._modes: dict[str, str] = {
             c: str(md.get(c) or COURSE_MODE_ONLINE) for c in self._order
         }
+        # 停摆位同步到 store（唯一知道 mode 的层是它）：`set_mode` 热切与启动参数两条路
+        # 都得过这里，否则「重启后离线课变成可领」这类偏差没有任何一处会报错。
+        for _c in self._order:
+            self._sync_parked(_c)
         #: 上次派发过的课程（轮转起点）；None = 从序首开始
         self._cursor: str | None = None
         #: job_id -> course（归属解析缓存；job_id 不可复用，故不会失效）
@@ -2213,7 +2290,14 @@ class _HubQueue(_AuthGuard):
         if m not in COURSE_MODES:
             return False
         self._modes[course] = m
+        self._sync_parked(course)
         return True
+
+    def _sync_parked(self, course: str) -> None:
+        """把课程模式推给 store（停摆闸的唯一输入；`_JobStore.role_blocked` 读它）。"""
+        st = self._stores.get(course)
+        if st is not None:
+            st.parked = self.mode_of(course) == COURSE_MODE_OFFLINE
 
     def active_courses(self) -> int:
         """**在实时派发**的课程数（竞速判据的分母）：非离线，且有待领或未过期在飞 job。
@@ -2224,6 +2308,9 @@ class _HubQueue(_AuthGuard):
         n = 0
         for course in self._order:
             if self.mode_of(course) == COURSE_MODE_OFFLINE:
+                # 观测口径（2026-09-25 复核）：这里的 mode 是**课程活跃度**的近似——离线课的
+                # 活动由取包腿（`/offline/tasks`）承担，不进「活跃课」计数。它不参与任何派发
+                # 判断（归属/停摆闸都在 `_JobStore` 里），故保留 mode 读法。
                 continue
             st = self._stores[course]
             if st.claimable_job_ids() or st.inflight():
@@ -2232,7 +2319,7 @@ class _HubQueue(_AuthGuard):
 
     # ---- 派发（跨课程轮转 + 超时换 worker） ----
     def claim_next(
-        self, worker_id: str = "", offline_ok: bool = False
+        self, worker_id: str = "", role: str = ROLE_ONLINE
     ) -> tuple[str, str, str] | None:
         """取下一份该派发的 job → (course, job_id, lease_token)；无 → None。
 
@@ -2243,9 +2330,12 @@ class _HubQueue(_AuthGuard):
         **过期死掉的**且持有人就是本次请求者时，本次跳过它（`avoid_expired_holder`）——
         但机群只剩一个活跃 worker 时不避让（否则它自己超时过的 job 谁都领不到 = 停摆）。
 
-        离线课（2026-09-19 用户口径「也支持带特别标识的云端 worker 在线领取」）：
-        只有 `offline_ok=True`（worker 自报能跑完整段）的请求才能领——它不实时派发，
-        但也**不是**谁都领不到的坟墓。带标 worker 仍可领在线课（课程与 worker 正交）。
+        **两道闸（2026-09-25，本节头的 plan）**，判据都在 `_JobStore.role_blocked`：
+          * 归属闸（job 级）：派发只看 **job 自己的 `role`**，不再看课程当前 mode
+            （mode 易变：切一次模式，历史 job 的归属就跳一次 —— 事故本体）；
+          * 停摆闸（课程级）：离线课不向在线盘派发（活留着等切回在线）。
+        旧口径「带标 worker 仍可领在线课」**已取消**：一个盘一种任务（用户 2026-09-25
+        裁决）——这条是**行为变更**，见 `DECISIONS.md §2026-09-25-goalnn-role-routing`。
         """
         # 派发前扫一次（有最小间隔闸）：新课程/新 job 目录出现后，**下一次轮询**就能被领到，
         # 不必等后台节拍——否则新开的课在最坏情况下要等一个扫描周期才有人来领活。
@@ -2254,15 +2344,20 @@ class _HubQueue(_AuthGuard):
         for course in rotation_order(self._order, self._cursor):
             if not self._serves_course(course):
                 continue
-            offline = self.mode_of(course) == COURSE_MODE_OFFLINE
-            if offline and not offline_ok:
-                continue
             st = self._stores[course]
             for jid in st.claimable_job_ids():
+                if st.role_blocked(jid, role):
+                    # 归属/停摆不符：**跳过这一份**，不是跳过整门课——同门课同时躺着两类
+                    # 归属的活是「模式刚热切过」的常态（正是事故现场的形状）。
+                    # 「跳过后一直无人领」的收尾是撤单腿的事
+                    # （`plan/switch-mode-drops-jobs.plan.md`），不是这一层的职责。
+                    continue
                 # 只给「允不允许避让」的闸；身份比对在 store 里（它才知道租约回收后的
                 # stale 记录，在这里判会踩时序——见 `may_avoid_stale_holder` docstring）。
                 avoid = may_avoid_stale_holder(worker_id, active_workers)
-                tok = st.claim(jid, worker_id=worker_id, avoid_stale_holder=avoid)
+                tok = st.claim(
+                    jid, worker_id=worker_id, avoid_stale_holder=avoid, role=role
+                )
                 if tok is None:
                     self._announce_freeze(course, jid)
                     continue  # 活租约在持 / 本次该避让 / 并发领取竞负 / 已熔断冻结
@@ -2682,6 +2777,11 @@ class _HubQueue(_AuthGuard):
                 "pending_n": len(pending),
                 "inflight": inflight,
                 "next_job": pending[0] if pending else None,
+                # 归属可见（2026-09-25）：不说清楚「谁在等谁」，事后只能看到
+                # 「队列不降」而不知道它是在等另一块盘（事故现场就是这样）。
+                # 注意：这里**不**报 claimable 布尔——「可不可领」现在是**相对请求方角色**的
+                # 属性，一个观察者不带角色，任何布尔都会误导（plan §2.2 评审修订）。
+                "roles": {jid: self._stores[course].job_role(jid) for jid in pending},
                 # §4.1 可观测（毒包熔断）：冻了谁、冻在几次；已冻的 job 已不在 pending 里，
                 # 不给这一行就只剩「队列莫名其妙短了」
                 "frozen": {
@@ -2747,6 +2847,16 @@ class _HubQueue(_AuthGuard):
         st = self._stores.get(course)
         return st.claimable_job_ids() if st else []
 
+    def job_role(self, job_id: str) -> str:
+        """job 归属角色（经 store 的缓存读）；不归本 hub 管 ⇒ online（保守：不锁死别人）。"""
+        st = self._store_of(job_id)
+        return st.job_role(job_id) if st is not None else ROLE_ONLINE
+
+    def role_blocked(self, job_id: str, role: str) -> str:
+        """归属/停摆闸的**只读**探针（派发面用）；不归本 hub 管 ⇒ `""`（不锁死别人）。"""
+        st = self._store_of(job_id)
+        return st.role_blocked(job_id, role) if st is not None else ""
+
     def claim(
         self,
         job_id: str,
@@ -2755,8 +2865,13 @@ class _HubQueue(_AuthGuard):
         avoid_stale_holder: bool = False,
         mode: str | None = None,
         expected_epoch: int | None = None,
+        role: str = ROLE_ONLINE,
     ) -> str | None:
-        """（单份领取；多课程的挑选入口是 `claim_next`——离线课的能力闸在那边。）"""
+        """（单份领取；多课程的挑选入口是 `claim_next`——归属/停摆闸在 store 里，两处共用。）
+
+        这条路的调用者包括 **push 派发**（`push_dispatch._dispatch`）——它**不是**由
+        `claim_job` 转过来的，所以闸必须住在 `_claim_locked` 里而不是各调用点。
+        """
         st = self._store_of(job_id)
         if st is None:
             return None
@@ -2767,6 +2882,7 @@ class _HubQueue(_AuthGuard):
             avoid_stale_holder=avoid_stale_holder,
             mode=mode,
             expected_epoch=expected_epoch,
+            role=role,
         )
 
     # ---- 新调度面（2026-09-22，plan/transfer-scheduling）：peek / claim / priority ----
@@ -2774,13 +2890,14 @@ class _HubQueue(_AuthGuard):
         self,
         *,
         worker_id: str = "",
-        offline_ok: bool = False,
+        role: str = ROLE_ONLINE,
         n: int = PEEK_MAX,
     ) -> list[dict]:
         """候选 job（**不认领**：无租约、无副作用、不动游标）——§2.6 的软持有候选来源。
 
-        与旧 `claim_next` 同三道闸：`_serves_course`（开课标记）、离线课的能力闸
-        （`offline_ok` = worker 自报能跑完整段）、冻结/已落盘的排除（在 `claimable_job_ids` 里）。
+        与 `claim_next` 同三道闸：`_serves_course`（开课标记）、**归属/停摆**
+        （`role` = 请求方自报的归属，判据与闸同源：`_JobStore.role_blocked`）、
+        冻结/已落盘的排除（在 `claimable_job_ids` 里）。
 
         跨课程公平性：顺序取 `rotation_order(self._order, self._cursor)`，**只读不写**
         （R2-C2）——游标由真正 claim 成功的那一方推进（`claim_job`）。若在这里推进，
@@ -2800,10 +2917,8 @@ class _HubQueue(_AuthGuard):
                 break
             if not self._serves_course(course):
                 continue
-            if self.mode_of(course) == COURSE_MODE_OFFLINE and not offline_ok:
-                continue
             st = self._stores[course]
-            ids = st.claimable_job_ids()
+            ids = [j for j in st.claimable_job_ids() if not st.role_blocked(j, role)]
             if not ids:
                 continue
             jid = ids[0]
@@ -2851,12 +2966,16 @@ class _HubQueue(_AuthGuard):
         mode: str = CLAIM_MODE_EXCLUSIVE,
         worker_id: str = "",
         expected_epoch: int | None = None,
+        role: str = ROLE_ONLINE,
     ) -> ClaimOutcome:
         """新 claim 面（`POST /jobs/{id}/claim`）的唯一实现入口。
 
         与旧 `claim_next` 的差别：挑活已在客户端（peek + priority）；这里只负责「这一份
         归不归你」+ 游标推进 + 熔断告警——**不再**在这里扫整张表。
         避让的「允不允许」仍在调用方算（`may_avoid_stale_holder`，R2-2 的避让链）。
+
+        `role`（2026-09-25）：归属/停摆不符 ⇒ `ClaimOutcome(False, "", "role"|"parked", …)`
+        ——**确定性拒**（不是 409 busy：重试一百次也不会变），面向「这个盘本来就不该跑它」。
         """
         st = self._store_of(job_id)  # 内部走 course_of：歧义会记进 self._ambiguous
         if st is None:
@@ -2879,6 +2998,7 @@ class _HubQueue(_AuthGuard):
             worker_id=worker_id,
             avoid_stale_holder=avoid,
             expected_epoch=expected_epoch,
+            role=role,
         )
         if out.ok:
             course = self.course_of(job_id) or ""
@@ -3458,10 +3578,11 @@ class HubHandler(BaseHTTPRequestHandler):
         if not self._auth_ok():
             return
         n = max(1, min(int(self._query_int("n", 3)), PEEK_MAX))
-        offline_ok = has_offline_capability(self.headers.get(OFFLINE_CAP_HEADER, ""))
+        # 请求方归属（缺头/旧 worker ⇒ online；见 `role_from_header`）。
+        role = role_from_header(self.headers.get(ROLE_HEADER, ""))
         jobs = self.hub.peek_jobs(
             worker_id=self._worker_id(),
-            offline_ok=offline_ok,
+            role=role,
             n=n,
         )
         self._json({"jobs": jobs, "halt": self.hub.all_halted()})
@@ -3512,19 +3633,22 @@ class HubHandler(BaseHTTPRequestHandler):
             self._json({"error": "expected_epoch 非法"}, 400)
             return
         worker_id = str(body.get("worker_id") or self._worker_id())
+        role = role_from_header(self.headers.get(ROLE_HEADER, ""))
         out = self.hub.claim_job(
-            jid, mode=mode, worker_id=worker_id, expected_epoch=want_epoch
+            jid, mode=mode, worker_id=worker_id, expected_epoch=want_epoch, role=role
         )
         course = self.hub.course_of(jid) or ""
         if out.ok:
             self._log_claim(jid, course, worker_id, mode, out.token)
-            if self.hub.mode_of(course) == COURSE_MODE_OFFLINE and mode != CLAIM_MODE_BACKUP:
-                # 发光的一行：离线课（整段）落到带标 worker 手上——这是「离线课真的在跑」
-                # 在 hub 侧的**唯一**痕迹（它不实时派发，也不会被 push 推）。
+            # 发光的一行：整段（离线盘的活）落到**离线盘**请求者手上——这是「离线活真的在跑」
+            # 在 hub 侧的**唯一**痕迹（它不实时派发，也不会被 push 推）。
+            # ★ 判据用 **job 自己的 role**，不是课程当前 mode（后者会在热切后撒谎，
+            #   而这一行存在的意义就是事后能对上账）。
+            if self.hub.job_role(jid) == ROLE_OFFLINE and mode != CLAIM_MODE_BACKUP:
                 print(
-                    f"[{time.strftime('%H:%M:%S')}] [hub-server] 离线课整段交领："
+                    f"[{time.strftime('%H:%M:%S')}] [hub-server] 整段交领："
                     f"course={course or '-'} job={jid} worker={worker_id or '?'}"
-                    f"（带 `{OFFLINE_CAP_HEADER}` 能力头）",
+                    f"（请求方自称 `{ROLE_HEADER}={role}`）",
                     flush=True,
                 )
             # 领取标记（原轮询面也做这件事）：console 据此区分「排队等取」与「已在跑」。
@@ -3853,6 +3977,27 @@ class HubHandler(BaseHTTPRequestHandler):
                     **self._task_pack_miss_gate(course, p),
                 },
                 404,
+            )
+            return
+        # ★ 模式门（2026-09-25，plan/online-offline-role-routing §2.4）：包**确实在盘上**
+        # 不等于「该发给你」。切离线时控制台会自动导出 `task-<课>.zip`、而且「已有包不动」
+        # （course-mode.ts）⇒ **切回在线后那个包还在**，而本端点原来不查 mode ⇒ 离线盘
+        # 能把在线课取走并跑整段（L6）。判据用状态码而不是 404：包在、没丢，正确动作是
+        # 「去控制台切回离线」，404 会把人引向「再导一次」（越导越乱）。
+        # ⚠ 只在「**表里有它且明确 online**」时拦：冷课/未扫到的课必须照旧放行
+        # （与 `_task_pack_miss_candidate` ① 同一条规则——离线课本来就不常训练，从表里
+        # 掉出去是常态，拿“不在表里”当 online 会把正常取包锁死）。
+        if course in self.hub.courses() and self.hub.mode_of(course) != COURSE_MODE_OFFLINE:
+            self._json(
+                {
+                    "error": (
+                        "该课现在是 online —— 离线课请先在控制台切离线（切换会自动导出"
+                        "任务包）；在线课请用 battle.tailscale.ipynb"
+                    ),
+                    "course": course,
+                    "mode": self.hub.mode_of(course),
+                },
+                409,
             )
             return
         # 新鲜度门（§8）：旧包比没包更危险（云机会从旧起点重跑几十轮）⇒ 过期就触发重导 + 409；

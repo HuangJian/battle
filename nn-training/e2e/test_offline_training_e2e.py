@@ -328,7 +328,12 @@ class _Hub:
 
 
 def test_offline_segment_is_claimable_only_by_a_marked_worker(tmp_path: Path) -> None:
-    """离线课的整段 job：普通 poller 领不到；带 `X-Battle-Offline` 的领得到；带标仍能领在线课。"""
+    """离线课的整段 job：普通 poller 领不到；带 `X-Battle-Offline` 的领得到。
+
+    2026-09-25：头的语义从「能力」升为**归属**（一个盘一种任务）——旧口径「带标仍可领
+    在线课」已作废，对应的断言不再存在（归属闸会当场拒，见
+    `tests/test_role_routing.py`）。本文件保留的是跨进程那条真链路。
+    """
     traj = tmp_path / "traj"
     off_job_root, off_jsonl = _course_dirs(traj, C_OFF)
     on_job_root, on_jsonl = _course_dirs(traj, C_ON)
@@ -351,14 +356,16 @@ def test_offline_segment_is_claimable_only_by_a_marked_worker(tmp_path: Path) ->
         assert q["courses"][C_OFF]["inflight"] == [], "离线课不该派给普通 worker"
 
         # 带标 poller：整段 job 立刻到手，且响应自报归属课程（补传的归位键）
-        marked = hub_poll(hub.base, TOKEN, worker_id="marked-1", offline_ok=True)
+        marked = hub_poll(hub.base, TOKEN, worker_id="marked-1", role="offline")
         assert marked is not None, f"带标 worker 领不到离线课；输出：{hub.output()}"
         assert marked["job_id"] == man_off["job_id"]
         assert marked["course"] == C_OFF
         assert marked["manifest"]["kind"] == "run"
         assert marked["manifest"]["plan_sha256"], "整段 job 必须随计划（节点靠它自主跑完）"
-        # 观测：hub 日志里有一行「离线课整段交领」（现场排障的第一只手电）
-        assert any("离线课整段交领" in ln for ln in hub.lines), hub.output()
+        # 观测：hub 日志里有一行「整段交领」（现场排障的第一只手电）。
+        # 文案 2026-09-25 改过：判据从「课程当前 mode」换成 **job 自己的 role**，
+        # 所以行里报的是「请求方自称的角色」而不是「这是离线课」。
+        assert any("整段交领" in ln and "marked-1" in ln for ln in hub.lines), hub.output()
     finally:
         hub.close()
 
@@ -379,7 +386,7 @@ def test_segment_rounds_backfeed_into_the_right_course_and_show_up_on_the_read_f
     try:
         hub.ready(expect=[C_OFF, C_ON])
         hub.set_mode(C_OFF, "offline")
-        got = hub_poll(hub.base, TOKEN, worker_id="marked-1", offline_ok=True)
+        got = hub_poll(hub.base, TOKEN, worker_id="marked-1", role="offline")
         assert got is not None and got["job_id"] == man_off["job_id"], got
         course = got["course"]
 
@@ -532,7 +539,12 @@ def test_a_fresh_run_lays_down_code_and_ts_tree_before_the_loop(
 
 
 def test_task_pack_endpoint_hands_over_the_console_export(tmp_path: Path) -> None:
-    """`GET /offline/task-pack?course=` 递的就是控制台导出的那份 zip（404/401/越界各有话说）。"""
+    """`GET /offline/task-pack?course=` 递的就是控制台导出的那份 zip（404/401/越界各有话说）。
+
+    ⚠ 取包要**先切离线**（2026-09-25 的 mode 闸，plan/online-offline-role-routing §2.4）：
+    包在盘上 ≠ 该发给你——切离线时控制台会自动导出且「已有包不动」⇒ 切回在线后包还在，
+    不查 mode 就等于在线课也能被离线盘取走跑整段（L6）。所以本用例先钉 409、切离线后 200。
+    """
     traj = tmp_path / "traj"
     _course_dirs(traj, C_OFF)
     _course_dirs(traj, C_ON)
@@ -542,6 +554,12 @@ def test_task_pack_endpoint_hands_over_the_console_export(tmp_path: Path) -> Non
     try:
         hub.ready(expect=[C_OFF, C_ON])
 
+        # 课还是在线 ⇒ 409（包在、没丢：正文要说清下一步，不是 404 把人引向「再导一次」）
+        st, raw = _http_bytes(hub.base, f"/offline/task-pack?course={C_OFF}")
+        assert st == 409 and raw != pack_bytes, (st, raw[:200])
+        assert "online" in raw.decode("utf-8"), raw[:200]
+
+        hub.set_mode(C_OFF, "offline")
         st, raw = _http_bytes(hub.base, f"/offline/task-pack?course={C_OFF}")
         assert st == 200 and raw == pack_bytes, (st, raw[:40])
         assert hashlib.sha256(raw).hexdigest() == hashlib.sha256(pack_bytes).hexdigest()

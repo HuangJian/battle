@@ -30,8 +30,9 @@ from remote.hub_server import _HubQueue, _JobStore, as_hub, make_server
 from remote.protocol import (
     AUTH_HEADER,
     COURSE_ENABLE_MARKER,
-    OFFLINE_CAP_VALUE,
     OFFLINE_TASK_PACK_PATH,
+    ROLE_HEADER,
+    ROLE_HEADER_VALUE,
     ProtocolError,
 )
 
@@ -112,6 +113,47 @@ def test_task_pack_missing_is_actionable_404(tmp_path: Path) -> None:
     assert "导出" in body["error"], body
     assert body["course"] == "c5-gae"
     assert body["known_courses"] == ["c5-gae"]
+
+
+def test_task_pack_online_course_is_409_even_when_the_pack_lives_on_disk(tmp_path: Path) -> None:
+    """★ mode 门（2026-09-25，plan/online-offline-role-routing §2.4）：包在盘上 ≠ 该发给你。
+
+    现场：切离线时控制台会自动导出 `task-<课>.zip`，而且「已有包不动」⇒ **切回在线后那个包
+    还在**。本端点原来不查 mode ⇒ 离线盘能把一门**在线**课取走并自己跑整段（L6）。
+    判据用 409 而不是 404：包在、没丢，正确动作是「去控制台切回离线」，404 会把人引向
+    「再导一次」（越导越乱）。
+    """
+    payload = b"PK\x03\x04" + b"stale-but-present" * 8
+    _write_pack(tmp_path, "c5-gae", payload)
+    (tmp_path / "c5-gae" / "remote-jobs").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "c5-gae" / "training_log.jsonl").touch()
+    (tmp_path / "c5-gae" / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
+    base, hub, _srv = _boot(tmp_path)
+    hub.discover()
+    assert hub.courses() == ["c5-gae"] and hub.mode_of("c5-gae") != "offline"
+
+    st, raw, _h = _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
+    body = _as_json(raw)
+    assert st == 409, body
+    assert raw != payload, "拦住就不能把包发出去"
+    assert body["mode"] != "offline" and "online" in body["error"]
+    # 反面：同一份包、同一门课，切成离线后照发（证明上面拦的是归属而不是「文件没了」）
+    assert hub.set_mode("c5-gae", "offline") is True
+    st2, raw2, _h2 = _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
+    assert st2 == 200 and raw2 == payload
+
+
+def test_task_pack_cold_course_still_served(tmp_path: Path) -> None:
+    """「不在课程表里」**不**等于在线（离线课本来就不常训练，从表里掉出去是常态）。
+
+    拿“不在表里”当 online 会把正常取包锁死（与 `_task_pack_miss_candidate` ① 同一条规则）。
+    """
+    payload = b"PK\x03\x04" + b"cold-course" * 8
+    _write_pack(tmp_path, "c5-gae", payload)
+    base, hub, _srv = _boot(tmp_path)
+    assert hub.courses() == []  # 真没扫到这门课
+    st, raw, _h = _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
+    assert st == 200 and raw == payload
 
 
 def test_task_pack_rejects_unsafe_course_names(tmp_path: Path) -> None:
@@ -394,15 +436,15 @@ def test_trigger_reports_unreachable_console(tmp_path, monkeypatch) -> None:
     assert ok is False and why == "OSError"
 
 
-def test_offline_capability_header_name_is_shared_with_workers() -> None:
-    """头名/值是与 worker 的跨层契约：改一边忘另一边会变成「离线课永远没人领」。
+def test_role_header_name_is_shared_with_workers() -> None:
+    """头名/值是与 worker 的跨层契约：改一边忘另一边会变成「整段 job 永远没人领」。
 
     这里钉的是**字面量**（worker 侧那条断言在 `tests/test_worker_offline_cap.py`）。
+    字面量**故意**保留 `X-Battle-Offline`（语义已从「能力」升为「归属」，改名只会让混合
+    部署里的带标 worker 静默掉线）——所以这条断言守的是「不许顺手改名」。
     """
-    from remote.protocol import OFFLINE_CAP_HEADER
-
-    assert OFFLINE_CAP_HEADER == "X-Battle-Offline"
-    assert OFFLINE_CAP_VALUE == "1"
+    assert ROLE_HEADER == "X-Battle-Offline"
+    assert ROLE_HEADER_VALUE == "1"
 
 # --------------------------------------------- 缺包自愈门（§3.4，2026-09-25）
 #

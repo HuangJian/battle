@@ -731,12 +731,13 @@ def _http(
             return e.code, {}
 
 
-def _next(base: str, *, worker_id: str = "", offline_ok: bool = False) -> dict:
+def _next(base: str, *, worker_id: str = "", role: str = "online") -> dict:
     """旧轮询面的同形替代（peek + claim；实现见 `tests/helpers/hub_poll`）。
 
     返回 `{job_id, manifest, halt, lease_token, course}`；无活 ⇒ `{"job_id": None, ...}`。
+    `role`：归属声明（2026-09-25），peek 与 claim 两跳都带。
     """
-    got = hub_poll(base, "sekret", worker_id=worker_id, offline_ok=offline_ok)
+    got = hub_poll(base, "sekret", worker_id=worker_id, role=role)
     if got is None or not got.get("job_id"):
         return {"job_id": None, "halt": bool(got and got.get("halt"))}
     return got

@@ -39,6 +39,8 @@ from remote.protocol import (
     FAIL_NAME,
     PAYLOAD_NAME,
     PLAN_NAME,
+    ROLE_FIELD,
+    ROLES,
     TS_CODE_NAME,
     JobFailedError,
     ProtocolError,
@@ -52,6 +54,7 @@ from remote.protocol import (
     job_seed,
     normalize_manifest,
     pack_payload,
+    role_of,
     unpack_payload,
     validate_rollout_spec,
 )
@@ -671,6 +674,9 @@ def publish_job(
     # **在 job_id 算完之后注入**（同 course_name）：切传输方式不改变 job 身份——同一轮的活
     # 换个传输腿走，幂等键没必要跟着变（变了会让重发变成两个 job，账本上出现两条）。
     dispatch: str = "",
+    # 归属角色（2026-09-25）：空 = 由 `kind` 推（run ⇒ offline，其余 ⇒ online——同一个
+    # 快照）；显式传 `offline`/`online` 可覆盖（离线盘手工排活、将来加 kind 时的逃生口）。
+    role: str = "",
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
 ) -> dict:
     """打包 + 发布 job（磁盘 IPC）：job_root/<job_id>/ + jsonl job_pending 事件。
@@ -878,6 +884,12 @@ def publish_job(
         # 同上：job 身份已定，传输腿的意图是**附加语义**不是身份成分。旧 hub/旧 worker
         # 忽略未知键 ⇒ 缺席即 pull，行为逐字节不变。
         m["dispatch"] = str(dispatch)
+    # 归属角色（2026-09-25，plan/online-offline-role-routing §2.1）：**发布时定死**的 job
+    # 属性——hub 的派发/认领闸读它，不再读易变的「课程当前 mode」。
+    # 与 `dispatch` 同位置（job_id 之后）：归属不是身份成分，重发同一轮不会因为归属变化而
+    # 变成两个 job。缺省由 kind 推（同一份快照，不引入第二个读盘点）；显式 `role=` 可覆盖。
+    # 旧 hub/旧 worker 忽略未知键 ⇒ 没这个字段的旧 job 由 `role_of` 按 kind 兜底。
+    m[ROLE_FIELD] = role if role in ROLES else role_of({"kind": kind})
     # 5) 落盘 job 目录：payload.zip（zip 内 manifest 为占位副本——payload_sha256 尚
     #    未算出）→ 回填真实 sha → 权威 manifest.json（worker 以 job 记录校验，D1）。
     #    normalize_manifest 在回填后调用：payload_sha256 必填非空，占位空串会误拒。

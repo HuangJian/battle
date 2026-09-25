@@ -60,6 +60,37 @@ WORKER_ID_HEADER = "X-Worker-Id"
 #: （2026-09-22 P3 竞速退役：本窗口现在**只**服务 `active_worker_count()` 的避让链。）
 WORKER_SEEN_WINDOW_SEC = 180.0
 
+# ---- 归属角色（role）：本会话属于哪块盘（2026-09-25，语义从「能力」升级）----
+# 原来是「能力声明」（`--offline` = 我能自主跑完整段），现在是**归属声明**。
+# 为什么必须换（2026-09-25 云机接错盘的事故，plan/online-offline-role-routing.plan.md §1）：
+# `kind=run`（整段）**确实**由 tailscale 盘跑得动——它有能力；事故正是「有能力的盘接了不
+# 属于它的整段 job」。能力闸拦不住接错盘 ⇒ 判据必须是**角色**（该由哪块盘执行）。
+# 头名与取值**保持逐字节不变**（`X-Battle-Offline: 1`）：混合部署里旧 hub/旧 worker 用同一
+# 份字面量，改名只会让带标 worker 在旧 hub 上静默掉线，而“归属判断是否正确”与名字无关。
+#: 角色头（peek / claim / 轮询面通用）：带它 = 本会话属于**离线盘**；缺席 = 在线盘。
+ROLE_HEADER = "X-Battle-Offline"
+#: 头的规范值（历史值 `1`；解析同时接受角色字面量 `offline`）。
+ROLE_HEADER_VALUE = "1"
+ROLE_OFFLINE = "offline"
+ROLE_ONLINE = "online"
+#: 两个角色（`manifest.role` 与请求方角色的合法值域，两处共用）。
+ROLES: tuple[str, ...] = (ROLE_ONLINE, ROLE_OFFLINE)
+#: job manifest 里的归属键名。
+ROLE_FIELD = "role"
+
+
+def role_from_header(raw: object) -> str:
+    """角色头 → 角色（缺头 / 空 / `0` / `false` 一律 = **online**）。
+
+    只认白名单真值（不做「非空即有」这类宽松推断）：判错的方向是明确的——低估只是少一个
+    能领离线活的人（看得见：队列不降），高估会让在线盘的 worker 领走离线盘的活（看不见）。
+    旧 worker 从不带这条头 ⇒ 它们一律按 online 处理（行为与今天一致）。
+    """
+    val = str(raw or "").strip().lower()
+    if val == ROLE_OFFLINE or val in ("1", "true", "yes", "on"):
+        return ROLE_OFFLINE
+    return ROLE_ONLINE
+
 
 def rotation_order(order: Sequence[str], start: str | None) -> list[str]:
     """跨课程轮转顺序：从 `start`（上次派发过的课程）的**下一门**开始绕一圈。
@@ -364,6 +395,35 @@ MANIFEST_OPTIONAL_DEFAULTS: dict[str, object] = {
     "slim": False,
 }
 
+# ------------------------------------------------------------------ 归属（role）
+# job 的「该由哪块盘执行」是 **job 自己的属性**（2026-09-25，本节头的 plan）：发布时定死、
+# 此后不随课程 mode 漂移。为什么必须落成字段而不是每次现算：mode 是易变的（hub 内存表、
+# 控制台可热切），用它当判据 ⇒ 切一次模式，历史 job 的归属就跳一次（事故现场：两小时前
+# 缺 bun 被拒的那个 `kind=run` job 在切成在线后被 tailscale 盘领走）。
+#: 合法 kind 全集（`validate_manifest` 与 `KIND_ROLES` 共用一份；穷举由用例钉住）。
+MANIFEST_KINDS: tuple[str, ...] = ("ppo", "bc", "iter", "run")
+#: kind → 归属角色（**唯一**映射）：`run`（整段自主）= 离线盘的活；其余（逐轮/整轮/BC）
+#: 都是在线盘的活。加新 kind 必须同时给出角色，否则 `test_role_routing` 当场红。
+KIND_ROLES: dict[str, str] = {
+    "run": ROLE_OFFLINE,
+    "iter": ROLE_ONLINE,
+    "ppo": ROLE_ONLINE,
+    "bc": ROLE_ONLINE,
+}
+
+
+def role_of(manifest: Mapping[str, object]) -> str:
+    """job 归属角色：`manifest.role` 优先；缺失/非法 ⇒ 按 `kind` 兜底。
+
+    **不拒单**：旧 job（发布早于本字段）不能因为缺字段变孤儿（它们的 kind 就已经说明了
+    归属）；未知 kind 也回落 online（`validate_manifest` 已在入口挡掉未知 kind）。
+    """
+    raw = str(manifest.get(ROLE_FIELD) or "").strip().lower()
+    if raw in ROLES:
+        return raw
+    return KIND_ROLES.get(str(manifest.get("kind") or "ppo"), ROLE_ONLINE)
+
+
 # ------------------------------------------------------------------ M3: kind=iter
 # plan/remote-wire-remediation.plan.md §5.2：新 job kind =「一整轮」——节点自己跑
 # rollout（bun 调 exporter 产 shard）→ 接着跑既有 PPO 链路 → 只回传权重/report。
@@ -495,8 +555,11 @@ def normalize_manifest(m: dict) -> dict:
     if not isinstance(m, dict):
         raise ProtocolError(f"manifest 必须是对象，收到 {type(m).__name__}")
     kind = str(m.get("kind", "ppo") or "ppo")
-    if kind not in ("ppo", "bc", "iter", "run"):
-        raise ProtocolError(f"kind={kind!r} 未知（只认 'ppo'|'bc'|'iter'|'run'）——拒收")
+    if kind not in MANIFEST_KINDS:
+        # 允许列表与 `KIND_ROLES` 同一份（`MANIFEST_KINDS`）——加 kind 而忘了给角色会当场红。
+        raise ProtocolError(
+            f"kind={kind!r} 未知（只认 {'|'.join(repr(k) for k in MANIFEST_KINDS)}）——拒收"
+        )
     required = [
         k for k in MANIFEST_REQUIRED if not (kind == "bc" and k in MANIFEST_BC_EXEMPT)
     ]
@@ -565,6 +628,11 @@ def normalize_manifest(m: dict) -> dict:
                 f"kind=iter 要求 mode='per-tick'，收到 {out['mode']!r}（M3 只上云 per-tick rollout）"
             )
         out["rollout"] = validate_rollout_spec(out["rollout"])
+    # 归属字段（2026-09-25）：**可选**（旧 job 没有它 ⇒ `role_of` 按 kind 兜底），
+    # 但一旦存在就必须合法——一个拼错的 role 静默变成 online 正是那种「看不见」的失败。
+    role_raw = out.get(ROLE_FIELD)
+    if role_raw not in (None, "") and str(role_raw) not in ROLES:
+        raise ProtocolError(f"{ROLE_FIELD}={role_raw!r} 未知（只认 {list(ROLES)}）——拒收")
     if not isinstance(out.get("normalize_ret", False), bool):
         raise ProtocolError(f"normalize_ret 必须是 bool，收到 {out.get('normalize_ret')!r}")
     if not isinstance(out.get("kickstart_kl", 0.0), (int, float)) or isinstance(
@@ -901,26 +969,6 @@ OFFLINE_QUEUE_VERSION = 1
 #: 租约只管**领取资格**，不参与回传（`/offline/artifact` 一行不改）：回传靠 `(run_id, it)`
 #: 首写幂等兜底 ⇒ 租约过期/被接管**不会**让已跑完的产物作废。
 OFFLINE_LEASE_TTL_SEC = 900
-
-# ---- worker 能力自报（离线训练模式，2026-09-19）----
-# 离线课（`kind="run"` 整段）与在线课（逐轮）对 worker 的要求不同：前者要求节点
-# **自己跑完整段**（rollout + PPO 全在节点、计划随 job 走）。所以「谁能领离线课」不能靠
-# 猜，要由 worker 自己声明能力。用户口径：离线模式「也支持带特别标识的云端 worker 在线
-# 领取」——标识语义 = 能力，不是课程绑定（课程与 worker 正交：带标 worker 仍可领在线课）。
-#: 能力头（轮询/peek 面）：`X-Battle-Offline: 1` = 本会话能自主跑完整段。
-OFFLINE_CAP_HEADER = "X-Battle-Offline"
-#: 头的规范值（写 1；解析放宽到常见真值）。
-OFFLINE_CAP_VALUE = "1"
-
-
-def has_offline_capability(raw: object) -> bool:
-    """能力头 → 布尔。缺头 / 空 / `0` / `false` 一律 = **无能力**。
-
-    只认白名单真值（不做「非空即有」这类宽松推断）：能力判错的方向是明确的——
-    低估只是少一个 worker 领离线课（看得见：队列不降），高估会让一个只会逐轮的
-    worker 领走整段 job 并卡在那里（看不见）。
-    """
-    return str(raw or "").strip().lower() in ("1", "true", "yes", "on")
 
 _RUN_ID_OK = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #: run_id 长度上限（它同时是 hub 侧目录名，必须短且有界）。

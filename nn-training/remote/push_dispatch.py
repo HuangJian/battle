@@ -47,7 +47,6 @@ from remote.protocol import (
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_TTL_SEC,
-    COURSE_MODE_OFFLINE,
     PRIORITY_HIGH,
     PRIORITY_HIGHEST,
     PRIORITY_LOW,
@@ -56,6 +55,7 @@ from remote.protocol import (
     PUSH_PING_SEC,
     PUSH_POLL_SEC,
     PUSH_TIMEOUT_SEC,
+    ROLE_ONLINE,
     TS_CODE_NAME,
     ProtocolError,
     RetryableError,
@@ -520,8 +520,13 @@ class PushDispatcher:
         started: list[str] = []
         hub = self.hub
         for course in rotation_order(list(hub.courses()), getattr(hub, "_cursor", None)):
-            if hub.mode_of(course) == COURSE_MODE_OFFLINE:
-                continue  # 离线课不实时派发（只收回传）
+            # ★ 归属闸（2026-09-25，plan/online-offline-role-routing §2.2）：原来这里读
+            # 「课程当前 mode」——模式一热切，历史 job 的归属就跳一次（事故本体）。
+            # push 登记表里**没有**角色字段（`push_worker_from_node` 只有 id/url/key/
+            # concurrency）⇒ 一律把 push worker 当**在线盘**：role=offline 的活、以及
+            # 停摆（离线）课的活，一律不推。
+            # 真正的闸在 `hub.claim` → `_JobStore.role_blocked`（本文件的判断只是
+            # 「不值当推」的过滤，不是判据源）。
             prim, backup = self._course_counts(course)
             if prim == 0:
                 jid, mode = self._pick_primary(course)
@@ -534,6 +539,8 @@ class PushDispatcher:
                 jid, mode = tgt, CLAIM_MODE_BACKUP
             if not jid:
                 continue
+            if hub.role_blocked(jid, ROLE_ONLINE):
+                continue  # 不属于在线盘 / 课程停摆：不推、也不越序（FIFO 纪律）
             jd = hub._job_dir(jid)
             try:
                 manifest = json.loads((jd / "manifest.json").read_text(encoding="utf-8"))
@@ -546,7 +553,11 @@ class PushDispatcher:
                 continue  # 没有空闲 worker —— 等下一拍
             wid = str(worker["id"])
             lease = hub.claim(
-                jid, ttl=CLAIM_TTL_SEC, worker_id=push_worker_id_of(wid), mode=mode
+                jid,
+                ttl=CLAIM_TTL_SEC,
+                worker_id=push_worker_id_of(wid),
+                mode=mode,
+                role=ROLE_ONLINE,  # push 腿只有在线盘（登记表无角色字段）
             )
             if lease is None:
                 continue  # 活租约在持 / 并发领取竞负 / 熔断冻结

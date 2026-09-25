@@ -150,6 +150,36 @@ def test_cli_accepts_rollout_src_run() -> None:
         build_argparser("rl", {}).parse_args(["--rollout-src", "cloud"])
 
 
+def test_cli_default_rollout_src_never_shadows_the_course_level_key() -> None:
+    """★ 顶层 `rl.rollout_src` **不得**顶掉课程级 `courses.<课>.rollout_src`（2026-09-25）。
+
+    现场（plan/online-offline-role-routing §2.5）：argparse 的默认值曾是
+    `_d("rollout_src", "auto")`——它把 rl-config 顶层的 `rl.rollout_src` 读成**默认值**，
+    于是 `_rollout_source` 第一行「非 auto 就早返回」直接命中 ⇒ 课程级配置被整个忽略
+    （控制台写着 run、实际跑 local，而两者的日志形状一样）。
+
+    裁决后：默认恒为 `auto`（裁决回到课程级）；顶层 `rl.rollout_src` **仍在** `_rollout_source`
+    的兜底链里（课程级为空 ⇒ 照旧生效）⇒ 顶层配置的语义一字未变。
+    """
+    ns = build_argparser("rl", {"rollout_src": "node"}).parse_args([])
+    assert ns.rollout_src == "auto"
+    # 课程级优先
+    with patch("rl.loop_steps.dist_common") as dc:
+        dc.load_dist_config.return_value = {"courses": {"x1": {"rollout_src": "run"}}}
+        assert (
+            _rollout_source(_args(rollout_src=ns.rollout_src, course_path="curricula/x1.jsonc")) == "run"
+        )
+    # 课程级为空 ⇒ 顶层照旧生效（这条保证上面那次改动不是「把顶层配置关掉了」）
+    with patch("rl.loop_steps.dist_common") as dc:
+        dc.load_dist_config.return_value = {"rl": {"rollout_src": "node"}}
+        assert (
+            _rollout_source(_args(rollout_src=ns.rollout_src, course_path="curricula/x1.jsonc"))
+            == "node"
+        )
+    # 显式 CLI 仍然最高优先
+    assert _rollout_source(_args(rollout_src="node", course_path="curricula/x1.jsonc")) == "node"
+
+
 def test_segment_wait_sec_default_and_override() -> None:
     """等待上限：CLI > rl.run_wait_sec > 缺省 8h（整段墙钟量级，不是 30min）。"""
     assert _run_wait_sec(_args()) == RUN_WAIT_DEFAULT_SEC

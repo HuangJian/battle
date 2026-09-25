@@ -2404,6 +2404,33 @@ ProtocolError ⇒ 停腿」）· 租约参与回传。**违反后果**：清单�
 租约不绑定持久 worker id ⇒ 中断重跑白白等满 TTL；把「清单空」与「全被跳过」合并 ⇒ 没活干时响亮失败。
 —— 全文（规则表 / 兼容矩阵 / 评审 G1–G7 + S-1 + X1–X3 处置）→ `docs/nn/remote-transport.md` §44 · 锚 `## §44`
 
+## §2026-09-25-goalnn-role-routing（2026-09-25，plan/online-offline-role-routing.plan.md）
+
+**「该由哪个盘执行」成为 job 的不变式**：`manifest.role ∈ {offline, online}` 在**发布时**定死
+（`publish_job`，`kind` 的同一快照：`run ⇒ offline`；`iter/ppo/bc ⇒ online`；`MANIFEST_KINDS`/`KIND_ROLES`
+共用一份全集 + 穷举用例）。**闸下沉到 `_JobStore._claim_locked`**（租约写入的唯一临界区）⇒ 四条认领腿
+（`claim_next` / `peek`+`claim` / 按 id 直领 / **push 派发**）天然同源；判据函数只有一份
+`role_blocked(job_id, role) -> "" | "parked" | "role"`（派发面用它过滤候选、临界区用它拒绝）。
+**两道正交的闸**：归属闸（job 级，`manifest.role`）+ **停摆闸**（课程级，`mode=offline` 且请求方不是
+离线盘——2026-09-20 的既有语义，**保留**：离线课的活留给切回在线，`pending_n` 不降）。
+worker 侧**复用既有载体**（`CFG["offline_worker"] → --offline → X-Battle-Offline: 1`，头名与取值逐字节不变，
+只把语义从「能力」升为「归属」），且 **peek 与 claim 两跳都带**（旧代码里 claim 从不带这条头）；
+取包端点 `_get_task_pack` 补 mode 闸（只在「表里有它且明确 online」时 409；冷课/未扫到的课放行）；
+`/admin/queue` 每行加 `roles: {jid: role}`（**不**报 `claimable` 布尔——它是相对请求方角色的属性）。
+**行为变更**：带 `X-Battle-Offline` 的盘**不再兼领在线盘的活**（一个盘一种任务，用户 2026-09-25 裁决）
+——这**supersede `§2026-09-19` 的能力语义**（原 `protocol.py`「带标 worker 仍可领在线课」）：`kind=run`
+整段**确实**由在线盘跑得动（审计 §3）⇒ 能力闸拦不住「有能力的盘接走不属于它的活」，判据必须是角色。
+顺带修：`rl/cli.py --rollout-src` 的默认从 `_d("rollout_src", …)` 改为字面量 `"auto"`（旧写法把顶层
+`rl.rollout_src` 读成 argparse 默认值 ⇒ `_rollout_source` 早返回 ⇒ **课程级配置被整个忽略**；顶层仍在兜底链里）。
+**被否决**：新增独立 `X-Battle-Role` 头 / `--role` 参数（= 第 4 个模式载体，且旧 worker 不带新头会静默掉线）·
+`role` 进 `MANIFEST_OPTIONAL_DEFAULTS`（静态默认值 = 第二个事实源）· `NN_ROLE_ROUTING=0` 回退开关
+（把「一个盘一种任务」变成**可选**，正好在最需要它的混部期复现事故；回滚面 = 笔记本开关 + 本提交同批）·
+只在各调用点分别加闸（push 腿必然漏——它就是本轮的第一个洞）· 归属缓存永不失效（重发覆盖 manifest 即谎报；
+改为 `publish` 里 pop）。**违反后果**：归属写在调用点 ⇒ 新加一条腿就静默绕过闸；归属读 mode ⇒ 每切一次模式
+历史 job 跳一次（本轮事故：两小时前缺 bun 被拒的 `kind=run` job 被另一块盘领走）；claim 不带头 ⇒
+带标 worker 自锁（peek 说能领、claim 当场拒）；取包端点不查 mode ⇒ 离线盘能取走在线课的包跑整段（L6）。
+—— 全文（症状 / 三条根因 / 落地表 / 被否决策 / 真机验证点）→ `docs/nn/remote-transport.md` §47 · 锚 `## §47`
+
 ## §2026-09-25-goalnn-cloud-cpu-ledger（2026-09-25，云机 rollout 卡死取证）
 
 **云机上的「rollout 卡死」= 两条 CPU 腿同时开满 + 池的回退放大**（不是导出器坏了、也不是局真的

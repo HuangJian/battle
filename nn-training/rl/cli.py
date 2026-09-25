@@ -520,7 +520,13 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     # 取值优先级：本参数 > rl-config `courses.<stem>.rollout_src` > rl.* > local。
     ap.add_argument(
         "--rollout-src",
-        default=_d("rollout_src", "auto"),
+        # ★ 默认**不**取 `rl.*`（2026-09-25，plan/online-offline-role-routing §2.5）：
+        # `_d("rollout_src", "auto")` 会把 `rl-config` 顶层的 `rl.rollout_src` 读成 argparse
+        # 默认值 ⇒ `_rollout_source` 看到非 auto 就直接早返回，**课程级
+        # `courses.<课>.rollout_src` 被整个忽略**（控制台 UI 显示 run、实际跑 local）。
+        # 写死 "auto" 只是让裁决回到课程级；`rl.rollout_src` 仍在 `_rollout_source` 的
+        # 兜底链里（课程级为空 ⇒ 照旧生效）⇒ 顶层配置的语义一字未变。
+        default="auto",
         choices=("auto", "local", "node", "run"),
         help="M3 rollout 上云：'local'=本机采样（默认行为）；'node'=本轮整轮上云"
         "（节点 bun 跑 exporter 产 shard + 跑 PPO，kind=iter job）；'run'=**整段**上云"
