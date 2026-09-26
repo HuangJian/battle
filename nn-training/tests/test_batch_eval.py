@@ -500,6 +500,7 @@ def test_tail_race_steals_slow_node_tail(tmp_path: Path, monkeypatch) -> None:
     assert len(rows) == out["total"], f"逐局行数应 == 局数：{len(rows)} vs {out['total']}"
     assert len({(r["stage"], r["seed"]) for r in rows}) == out["total"]
     # 墙钟不得被慢节点拖满：慢副本各 1.5s，竞速后应明显更短（宽松上界，防抖动）。
+    # timing-ok: 相对判据（阈值随本轮局数 total × 1.4 走，非绝对常数）
     assert dt < out["total"] * 1.4, f"尾段未被竞速抢走：{dt:.2f}s for {out['total']} games"
 
 
@@ -834,6 +835,7 @@ def test_settle_complete_closes_inflight_connections(tmp_path: Path, monkeypatch
     dt = time.monotonic() - t0
     assert out["settled"] == out["total"] == 100 and out["dropped"] == 0, out
     assert aborted["n"] >= 1, "settled 满必须触发断连"
+    # timing-ok: 上界兜底（settled 满应立刻收工，5s 只挡挂起）
     assert dt < 5.0, f"settled 满后未立即收工（慢节点在飞局拖着）：{dt:.1f}s"
     assert any("在飞连接" in m and "立即收工" in m for m in logs), logs
     # 被主动断开的回包不得被当成节点故障（否则会误熔断慢节点）：无失败计数行，

@@ -101,6 +101,7 @@ def test_predicate_is_non_blocking(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(rp, "completed_pairs", lambda *a, **kw: set())
     t0 = time.monotonic()
     assert rp.precollect_ready(_as_popen(_Child(None)), tmp_path, 3, _args(tmp_path)) is False
+    # timing-ok: 契约上界（让位判据必须立刻回答，上界即契约）
     assert time.monotonic() - t0 < 0.5
 
 
@@ -112,6 +113,7 @@ def test_join_uses_the_same_predicate_and_returns_at_once_when_ready(
     child = _Child(None)
     t0 = time.monotonic()
     assert rp.join_precollect_child(_as_popen(child), tmp_path, 3, _args(tmp_path)) is None
+    # timing-ok: 契约上界（就绪必须当场返回，上界即契约）
     assert time.monotonic() - t0 < 0.5
     assert child.poll() is None  # 就绪开训 ≠ terminate 子进程：它继续产剩下的 shard
 

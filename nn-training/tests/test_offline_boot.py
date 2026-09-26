@@ -458,31 +458,36 @@ def test_hub_fetch_gives_up_after_the_cap_and_switches_to_upload(
 
 
 def test_hub_tries_zero_means_no_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`hub_tries=0` = 不限轮数（旧行为留一个把手：hub 稍后才会导出时用它）。"""
+    """`hub_tries=0` = 不限轮数（旧行为留一个把手：hub 稍后才会导出时用它）。
+
+    **事件驱动，不看墙钟**（2026-09-26）：旧版拿 `wait_pack_sec=1.0 ∧ poll_sec=0.05` 赌
+    「1s 里能轮 ≈20 次 ⇒ 越过上限 10」，CPU 被训练 rollout / 并行开发占满时轮不到那么多次，
+    断言就假红。现在与上面的 `test_hub_fetch_gives_up_after_the_cap_and_switches_to_upload`
+    同形：**包在第 `beyond` 轮才出现**（hub 稍后导出），循环由这个**状态**退出；参数里
+    `wait_pack_sec=30` 只是挂起兜底，不参与判定 —— 负载再高，只要包出现就返回。
+    """
     monkeypatch.setattr(offline_boot, "UPLOAD_GLOBS", (str(tmp_path / "none"),))
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub.invalid"])
     monkeypatch.setattr(offline_boot, "probe_hub", lambda *a, **k: True)
     calls = {"n": 0}
+    beyond = offline_boot.DEFAULT_HUB_TRIES + 2  # 越缺省上限：够拿到它就证「0 = 不限」
 
     def fetch(hub, token, course, dest_dir, log, timeout=0.0):
         calls["n"] += 1
+        if calls["n"] == beyond:
+            return fake_pack(dest_dir, course=course)  # 第 beyond 轮 hub 才导出
         return None
 
     monkeypatch.setattr(offline_boot, "fetch_task_pack", fetch)
-    with pytest.raises(SystemExit):
-        offline_boot.obtain_pack(
-            {
-                "course": "c5-gae",
-                # 轮询下限 0.05s/轮 ⇒ 1s 窗口里约 20 轮，足够越过缺省上限（10）
-                "wait_pack_sec": 1.0,
-                "poll_sec": 0.05,
-                "prompt_upload": False,
-                "hub_tries": 0,
-            },
-            {"HUB_TOKEN": "t"},
-            quiet,
-            tmp_path / "w",
-        )
+    got = offline_boot.obtain_pack(
+        {"course": "c5-gae", "wait_pack_sec": 30, "poll_sec": 0.05, "prompt_upload": False,
+         "hub_tries": 0},
+        {"HUB_TOKEN": "t"},
+        quiet,
+        tmp_path / "w",
+    )
+    assert got is not None and got.name == "task-c5-gae.zip"
+    assert calls["n"] == beyond, f"hub_tries=0 应一直轮询直到包出现：{calls['n']}"
     assert calls["n"] > offline_boot.DEFAULT_HUB_TRIES, "0 = 不限轮数"
 
 

@@ -307,6 +307,12 @@ def test_rescan_discovers_node_online_mid_round(tmp_path, monkeypatch) -> None:
     让出窗口」——满载时 self 的慢与 a97 的上线谁先发生就成了掷硬币（a97 可能一局都拿不到）。
     现在 self 的第一局**等 a97 真的供满 2 局**才返回：「a97 中途进场并供样」是构造性的，
     旧形态（rescan 等到 120s）下等不到 ⇒ 兜底 20s 后 `by_node[a97] == 0` ⇒ 响亮地红。
+
+    2026-09-26（burner 满载扫尾）：gate 只在 **self 真被派到**时才存在 —— a97 带 4 并发
+    把 6 局全接了（实测 `by_node={'a97': 6}`）时 self 一局没拿到，`self_gate` 为空。
+    那不是回归（a97 确实中途上线并供满 6 局）；旧断言 `self_gate and self_gate[0]` 把
+    「self 会被派到」当成了前提，于是假红。现在只要求「若 self 被 gated，gate 必须成功」
+    （`all(self_gate)`），真正的钉子交给下面的 `by_node[a97] >= 2`（与 self 是否被派无关）。
     """
     a97 = {"n": 0}
 
@@ -341,7 +347,8 @@ def test_rescan_discovers_node_online_mid_round(tmp_path, monkeypatch) -> None:
     report = h.run(fetch)
     assert report["missing"] == [], report["missing"]
     by_node = report["dist"]["nodes"]
-    assert self_gate and self_gate[0], "a97 没能在 self 让位窗口内供满 2 局"
+    # self 未被派到（a97 全接了）时 self_gate 为空——空即无需让位，不算失败。
+    assert all(self_gate), f"self 让位期间 a97 一直没供满 2 局: self_gate={self_gate}"
     assert by_node.get("a97", 0) >= 2, f"中途上线节点必须真的供样: {by_node}"
     assert "online mid-run" in "\n".join(h.logs)
 
@@ -401,4 +408,5 @@ def test_halt_stops_round_without_waiting_window(tmp_path, monkeypatch) -> None:
     report = h.run(fetch, halt_event=halt)
     elapsed = time.monotonic() - t0
     assert report.get("halt_aborted") is True, report
+    # timing-ok: 上界兜底（halt 后不得白等窗口，3s 只挡挂起）
     assert elapsed < 3.0, f"halt 后不得白等窗口（实测 {elapsed:.1f}s）"

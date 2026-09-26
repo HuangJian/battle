@@ -37,6 +37,7 @@ def test_poll_result_abandon_fires_immediately(monkeypatch) -> None:
         )
     dt = time.monotonic() - t0
     assert "abandoned" in str(ei.value)
+    # timing-ok: 上界兜底（放弃应在 ~1s，5s 只挡挂起）
     assert dt < 5.0, f"放弃应在 ~1s 内发生，实际 {dt:.1f}s（budget=600 远未耗尽）"
 
 
@@ -339,6 +340,7 @@ def test_abort_active_requests_never_blocks_and_gates_new_requests() -> None:
         n = dist_common.abort_active_requests("t-abort")
         dt = time.monotonic() - t0
         assert n == 1, n
+        # timing-ok: 契约上界（收工路径不许等 close，上界即契约）
         assert dt < 0.5, f"abort 阻塞了 {dt:.2f}s（收工路径不许等 close）"
         assert dist_common.abort_scope("t-abort") is True
         with pytest.raises(dist_common.DistError) as ei:

@@ -123,6 +123,10 @@ def test_note_rate_rebinding_happens_on_the_wire_module() -> None:
     """注入点口径：只有重绑 `wire._BEST_RATE` 才改变 `_min_rate`——`worker` 的名字是转发。"""
     saved = wire_mod._BEST_RATE
     try:
+        # 先清到基线：`_BEST_RATE` 是**进程级**全局，同一 xdist worker 里先跑过的真实传输
+        # 会把它抬高（实测把「极小 body + 极小耗时」量成 62 万 KB/s ⇒ `_min_rate()` = 4×
+        # 那个值）=> 下面「== WIRE_MIN_RATE」的前提失效（2026-09-26 burner 扫尾抓到的假红）。
+        wire_mod._BEST_RATE = 0.0
         worker_mod._BEST_RATE = 999_999.0  # 只改转发名：不该影响判据
         assert wire_mod._min_rate() == wire_mod.WIRE_MIN_RATE
         wire_mod._BEST_RATE = 999_999.0

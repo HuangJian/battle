@@ -47,6 +47,7 @@ def test_join_timeout_zero_returns_immediately() -> None:
     t0 = time.monotonic()
     t.join(timeout=0.0)
     dt = time.monotonic() - t0
+    # timing-ok: 契约上界（join(0) 应立即返回，上界即契约）
     assert dt < 0.5, f"join(0) 应立即返回，实际 {dt:.3f}s"
     assert t.is_alive()
     done.set()

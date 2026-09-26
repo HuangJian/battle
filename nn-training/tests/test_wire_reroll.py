@@ -385,7 +385,10 @@ def test_reroll_probe_uses_the_net_elapsed(monkeypatch) -> None:
     assert len(out) == 256 * 1024
     assert wall >= 1.0, "夹具没真让路（探针没被测到）"
     assert len(seen) == 1, f"首块只该判一次：{seen}"
-    assert seen[0] < 0.5, f"让路时间没被扣掉：elapsed={seen[0]:.3f}（应 ≈0，墙钟 ≈{wall:.2f}）"
+    # **相对判据**（2026-09-26）：净值必须比墙钟小掉那次让路（1.0s）——满载时线程被剥夺
+    # 2.6s 会让净值一起涨（实测 elapsed=2.611 / wall=3.61），绝对上界（原 `seen[0] < 0.5`）
+    # 在负载下是假红；「让路被扣掉了」只看 seen[0] 是否明显小于 wall（没扣 ⇒ 两者≈相等）。
+    assert wall - seen[0] >= 0.5, f"让路时间没被扣掉：elapsed={seen[0]:.3f}（墙钟 ≈{wall:.2f}）"
 
 
 def test_net_elapsed_does_not_extend_the_wall_clock_timeout() -> None:
@@ -576,10 +579,15 @@ def test_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
     )
     wall = time.time() - t0
     th.join(5)
-    assert out and wall >= 0.3, f"夹具没让这次调用真的排上队：{wall:.2f}s"
+    # 下界留 100ms 余量：占位时长从 `_free_soon` 起算，而 `t0` 在 `_hold_slot_for` 返回后
+    # （中间隔着起线程 + 返回）——满载时这点间隙会把实测墙钟压到 0.3s **以下**（实测 0.2996
+    # ⇒ `>= 0.3` 假红，2026-09-26 burner 扫尾）。“真的排上队”的结构性证据是下面的
+    # `queue_waits >= 1`（调度器自己的账），不靠这个下界；0.2 仍能区分 0.0（没排队）。
+    assert out and wall >= 0.2, f"夹具没让这次调用真的排上队：{wall:.2f}s"
 
     lines: list[str] = []
     worker_mod._wire_flush("jq", lines.append)
+    # timing-ok: 夹具模拟（段秒数是极小块的真传输，≈0；上界只挡「把排队算进去」）
     assert _segment_seconds(lines[-1], "payload") < 0.2, f"段秒数把排队算进去了：{lines[-1]}"
     assert worker_mod._BULK.stats()["queue_waits"] >= 1, "调度器没记到这次排队"
 
@@ -594,4 +602,5 @@ def test_result_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
 
     lines: list[str] = []
     worker_mod._wire_flush("jr", lines.append)
+    # timing-ok: 夹具模拟（同上下载段：真实传输 ≈0，上界只挡「把排队算进去」）
     assert _segment_seconds(lines[-1], "result") < 0.2, f"回传段秒数把排队算进去了：{lines[-1]}"

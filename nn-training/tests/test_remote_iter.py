@@ -1472,6 +1472,7 @@ def test_a_child_that_cannot_be_reaped_is_retried_in_round_never_failing(
     finally:
         spawned = list(_FlakyPopen.instances)
         _sweep_leftovers()
+    # timing-ok: 上界兜底（重投只需有界，30s 只挡挂起）
     assert wall < 30.0, f"重投必须有界（不能把线程按在 waitpid 上）：{wall:.1f}s"
     assert spawned, "替身必须真的被起过"
     # ① 回收不许没有上限（旧形态）
@@ -1512,6 +1513,7 @@ def test_reap_stall_round_retry_is_unbounded_unless_operator_caps_it(
         wall = time.time() - t0
     finally:
         _sweep_leftovers()
+    # timing-ok: 上界兜底（同上有界：每轮都不得按在 waitpid 上）
     assert wall < 30.0, f"连重投也必须每轮有界：{wall:.1f}s"
     assert len([m for m in msgs if "整轮重投第" in m]) == 2, msgs  # 上限 2：重投两次
     assert "机器级停滞" in str(ei.value), ei.value

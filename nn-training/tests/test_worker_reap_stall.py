@@ -129,6 +129,7 @@ def test_reap_stall_is_retried_immediately_and_never_reported_as_failure(
     assert not reported, f"机器的问题不许报成确定性失败（那会停腿 + 停云机）：{reported}"
     gap = records[1][1] - records[0][1]
     assert gap < 1.0, f"必须立即重领（不许睡/空转烧配额）：下一份活在 {gap:.3f}s 后开算"
+    # timing-ok: 上界兜底（处置必须有界，10s 只挡挂起）
     assert wall < 10.0, f"处置必须有界：{wall:.1f}s"
     stall = [m for m in logs if "机器级停滞" in m]
     assert stall and "立即重领" in stall[0], f"停滞必须响亮留痕（带处置）：{logs}"
@@ -179,6 +180,7 @@ def test_repeated_stalls_keep_being_reclaimed(tmp_path: Path, monkeypatch: pytes
         f"连卡 3 次之后必须还能重领（第 4 次才跑成）：{records}"
     )
     assert not reported, f"反复停滞不许变成失败（那会停腿 + 停云机）：{reported}"
+    # timing-ok: 上界兜底（重投不许带等待，5s 只挡挂起）
     assert wall < 5.0, f"重投不许带等待（睡前摇/冷却 = 空转烧配额）：整段 {wall:.1f}s"
 
 
@@ -199,4 +201,5 @@ def test_plain_transient_failure_still_reclaims_immediately(
     assert [j for j, _ in records] == ["j1", "j2"], records
     gap = records[1][1] - records[0][1]
     assert gap < 1.0, f"普通瞬时失败也是立即重领（{gap:.3f}s）"
+    # timing-ok: 上界兜底（同上整段有界，10s 只挡挂起）
     assert wall < 10.0, wall

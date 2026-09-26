@@ -833,6 +833,7 @@ def test_evaluate_10k_rows_is_fast() -> None:
     res = evaluate(spec, rows, now=FROZEN_NOW)
     dt = time.perf_counter() - t0
     assert res.verdict in EXIT_CODES
+    # timing-ok: 上界兜底（10k 行求值应瞬时，3s 只挡退化）
     assert dt < 3.0, f"10k 行求值耗时 {dt:.2f}s（窗口截断失效？）"
 
 

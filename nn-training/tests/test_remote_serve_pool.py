@@ -443,6 +443,7 @@ def test_dead_worker_falls_back_instead_of_waiting_the_cap(tmp_path: Path) -> No
     argv, logp = _task(script, 0, 0, "w0", tmp_path)
     t0 = time.time()
     assert pool.try_pool(argv, logp, 30.0) is None
+    # timing-ok: 上界兜底（死进程应立刻唤醒，10s 只挡挂起）
     assert time.time() - t0 < 10.0, "死进程必须立刻唤醒等待方，不能等满 30s 硬顶"
     assert pool.fallback_reasons == {"dead": 1}
     # 回退必须留一行**带现场**的日志（退出码）：否则那一局的 rollout.log 会被一次性路径
@@ -596,6 +597,7 @@ def test_acquire_gives_up_within_the_game_cap_instead_of_the_ready_timeout(tmp_p
     argv, logp = _task(script, 0, 0, "w0", tmp_path)
     t0 = time.time()
     assert pool.try_pool(argv, logp, 1.0) is None  # 不 start()：首次取槽就是冷启动
+    # timing-ok: 上界兜底（就绪等待应受本次硬顶约束，10s 只挡挂起）
     assert time.time() - t0 < 10.0, "就绪等待必须受本次尝试的硬顶约束，不是固定 60s"
     assert pool.fallback_reasons == {"no-slot": 1} and pool.killed == 1
     pool.close()
@@ -607,6 +609,7 @@ def test_pool_start_fails_fast_when_script_has_no_serve(tmp_path: Path) -> None:
     pool = _pool(tmp_path, script, workers=2, ready=60.0)
     t0 = time.time()
     assert pool.start() == 0
+    # timing-ok: 上界兜底（进程当场退出就该放弃，15s 只挡挂起）
     assert time.time() - t0 < 15.0, "进程当场退出就该立刻放弃，而不是等 60s"
     pool.close()
 
@@ -656,7 +659,7 @@ def test_run_iter_rollout_goes_through_the_pool(
 
     环境**杀子进程**（编码 agent 的删除/写守卫、负载、控制台广播）不在本用例的检验范围内，
     但它恰恰会打在这条用例上——因为全仓只有它把**一批 python 子进程**长期挂在项目内
-    `tmp/pytest-tmp/` 下又持续写盘（2026-09-23；取证与判据：docs/nn/engineering.md §26）。
+    `tmp/pytest-tmp/` 下又持续写盘（2026-09-23；取证与判据：docs/nn/engineering.md §21）。
     池对此的契约是「只慢不错、绝不丢局」：那一局回退一次性 spawn、产物齐全，只是计数变成
     `served=2/killed=1/fallback=1`。所以这里先断言**被环境杀的那一轮产物齐全**（契约现场），
     再用一轮干净的重跑钉「接线走池」。系统性回归不会因此漏网：真坏了每一轮计数都一样。
@@ -714,7 +717,7 @@ def test_concurrent_pool_games_never_hit_the_counter_race(
     """并发跑局：桩的计数器**不许**被并发读者读到空文件。
 
     这是 2026-09-23/24 那个 pre-commit flake 的直接回归钉子（根因与取证见
-    `docs/nn/engineering.md §26`）：旧的自增写法（截断 + 写）会让另一个 worker 读到
+    `docs/nn/engineering.md §21`）：旧的自增写法（截断 + 写）会让另一个 worker 读到
     截断中的空计数文件 ⇒ `int("")` ⇒ 它回 `__SERVE_ERR__` ⇒ 池按纪律换掉它并回退
     一次性 ⇒ 端到端计数变成 `killed=1/fallback=1`（三局产物其实齐全，所以只是**假红**）。
     4 worker × 12 局的碰撞概率远高于端到端用例的 2×3 ⇒ 旧写法下能稳定抓住这个回归。

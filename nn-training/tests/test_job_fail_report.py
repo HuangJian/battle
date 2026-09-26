@@ -199,6 +199,7 @@ def test_wait_job_fails_fast_with_reason_instead_of_timeout(tmp_path: Path) -> N
             # 与生产同参：预算 25 分钟、轮询 5s —— 修复前这里要等到超时才返回
             wait_job(base, "sekret", jid, timeout_sec=25 * 60, poll_sec=5.0, log=_QUIET)
         elapsed = time.time() - t0
+        # timing-ok: 上界兜底（修复前 1500s，10s 只挡挂起）
         assert elapsed < 10.0, f"应立刻收兵，实测 {elapsed:.1f}s（修复前是 1500s）"
         assert "bun" in str(ei.value)
         assert ei.value.kind == "ProtocolError"
@@ -345,6 +346,7 @@ def test_push_node_failure_is_410_and_fails_fast(tmp_path: Path) -> None:
         t0 = time.time()
         with pytest.raises(JobFailedError) as ei:
             wait_result(base, "tok", "j1", timeout_sec=1800.0, poll_sec=0.01, log=_QUIET)
+        # timing-ok: 上界兜底（预算 1800s，10s 只挡挂起）
         assert time.time() - t0 < 10.0  # 修复前：500 → 重试到 1800s 预算耗尽
         assert "bun" in str(ei.value) and ei.value.kind == "ProtocolError"
     finally:

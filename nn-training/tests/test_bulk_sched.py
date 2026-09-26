@@ -404,6 +404,7 @@ def test_yield_stops_at_budget_even_if_control_stays():
         stop.set()
         t.join(5)
     assert spent <= budget + step + 1e-6, f"让路超预算：{spent}"
+    # timing-ok: 相对判据（阈值随让路预算 budget/step 走）
     assert elapsed <= budget + step + 0.25, f"让路墙钟超预算：{elapsed}"
     assert s.stats()["yield_count"] >= 1
 
@@ -415,6 +416,7 @@ def test_no_yield_when_no_control():
         t0 = time.time()
         spent = s.pause_if_needed(tok)
     assert spent == 0.0
+    # timing-ok: 契约上界（无控制面 ⇒ 让路点零成本，上界即契约）
     assert time.time() - t0 < 0.05
 
 

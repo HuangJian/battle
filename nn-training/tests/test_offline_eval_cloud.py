@@ -366,6 +366,7 @@ def test_unreapable_eval_game_is_resubmitted_in_round_never_failing(
         slots=3,
         log=log,
     )
+    # timing-ok: 上界兜底（重投只需有界，30s 只挡挂起）
     assert time.time() - t0 < 30.0, "重投必须先有界、再谈次数（不许把线程按在等上面）"
     # ④ 整轮跑成：4 局全落账 + 一份 summary（读数不能因为机器抖一下就缺口）
     assert out["ran"] and out["settled"] == 4 and out["games"] == 4, out
@@ -482,6 +483,7 @@ def test_submit_does_not_block_ppo(monkeypatch: pytest.MonkeyPatch) -> None:
     t0 = time.time()
     assert runner.submit(3)
     submit_sec = time.time() - t0
+    # timing-ok: 契约上界（submit 不许阻塞，上界即契约）
     assert submit_sec < 0.5, f"submit 阻塞了 {submit_sec:.2f}s —— 它就变成了串行 eval"
     assert started.wait(5), "后台线程没有开始跑这一轮"
     assert runner.inflight_it() == 3
@@ -489,6 +491,7 @@ def test_submit_does_not_block_ppo(monkeypatch: pytest.MonkeyPatch) -> None:
     runner.handoff_wait_sec = 0.05
     t1 = time.time()
     assert runner.submit(4) is False
+    # timing-ok: 上界兜底（handoff 已设 0.05s，1s 只挡挂起）
     assert time.time() - t1 < 1.0
     assert any("跳过本轮" in m for m in logs)
     release.set()
@@ -510,6 +513,7 @@ def test_drain_is_bounded_and_reports_overrun(monkeypatch: pytest.MonkeyPatch) -
     assert runner.submit(7)
     t0 = time.time()
     assert runner.drain(timeout=0.2) is False
+    # timing-ok: 上界兜底（drain timeout=0.2s，2s 只挡挂起）
     assert time.time() - t0 < 2.0
     assert any("WARN" in m and "收线超时" in m for m in logs)
     release.set()

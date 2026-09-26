@@ -281,6 +281,7 @@ def test_post_weights_parallel_on_alive_fires_per_success(monkeypatch) -> None:
     assert "fail" not in spawned
     assert [n["id"] for n in alive] == ["fast", "slow"]
     # 并行：总墙钟应接近最慢成功节点（0.15s），远小于串行 0.15+ 其它
+    # timing-ok: 相对判据（阈值随节点超时 0.15s 走，判并行而非绝对速度）
     assert dt < 0.4
     dist_common.weights_push_cache_reset()
 

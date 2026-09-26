@@ -553,6 +553,7 @@ def test_settled_full_teardown_does_not_wait_for_slow_node(tmp_path, monkeypatch
     assert not slow_done or min(slow_done) > returned_at, (
         "收工等了慢节点：它的局在 play 返回前就结束了（旧实现 join(window + taskTimeoutSec)）"
     )
+    # timing-ok: 相对判据（阈值 = 场景的 SLOW_NODE_SEC）
     assert elapsed < SLOW_NODE_SEC, f"settled 满后不该等慢节点（实测 {elapsed:.2f}s）"
     assert "settled 满（4/4）" in "\n".join(h.logs)
 
@@ -582,6 +583,7 @@ def test_window_expiry_still_lands_inflight_games(tmp_path, monkeypatch) -> None
     played = [r for r in rows if r.get("event") == "eval"]
     assert past_window and past_window[0], "回包没能等到窗口过期（用例前提失效）"
     assert len(played) == 1, f"窗口到点的在飞局必须落账: {rows}"
+    # timing-ok: 相对判据（阈值 = 场景窗口 h.window_sec + 5s 宽限）
     assert elapsed < h.window_sec + 5.0, f"宽限不该失控（实测 {elapsed:.2f}s）"
 
 
