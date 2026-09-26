@@ -30,6 +30,7 @@ import type { Direction } from '../../src/constants'
 import { dodgeL0 } from '../../src/nn/dodge-l0'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
+import { decodeMove, encodeMove } from '../../src/nn/action-space'
 import type { InputLike } from '../../src/game/Input'
 import { Camera } from '../../src/presentation/Camera'
 import { AnimationSystem } from '../../src/presentation/AnimationSystem'
@@ -46,18 +47,12 @@ import {
 import { updateVisualState, DT } from '../perf/fixtures/render-scenarios'
 
 const K = 10
-const MOVE_DECODE: Direction[] = ['up', 'down', 'left', 'right']
 
 class ScriptedInput {
   moveDir: Direction | null = null
-  lastDir: Direction = 'up'
   firing = false
   setAction(move: number, fire: number): void {
-    if (move === 0) this.moveDir = this.lastDir
-    else {
-      this.lastDir = MOVE_DECODE[move - 1]
-      this.moveDir = this.lastDir
-    }
+    this.moveDir = decodeMove(move)
     this.firing = fire === 1
   }
   getMoveDirection(): Direction | null {
@@ -72,7 +67,6 @@ class ScriptedInput {
   endFrame(): void {}
   reset(): void {
     this.moveDir = null
-    this.lastDir = 'up'
     this.firing = false
   }
 }
@@ -213,9 +207,9 @@ function recordOne(
         // 的 resolveDodge——arena 缺省 l0，但 --dodge off 的 rollout 不覆盖采样动作，
         // 若此处无条件改写会偏离真实训练轨迹）。rollout 阵亡局复现必须 --dodge off。
         if (dodgeMode === 'l0') {
-          const sampledDir = aMove === 0 ? scripted.lastDir : MOVE_DECODE[aMove - 1]
+          const sampledDir = decodeMove(aMove)
           const d = dodgeL0(world, sampledDir)
-          if (d.triggered && d.dir) aMove = MOVE_DECODE.indexOf(d.dir) + 1
+          if (d.triggered && d.dir) aMove = encodeMove(d.dir)
         }
       } else {
         aMove = argmaxCat(model.moveLogits, masks.move)

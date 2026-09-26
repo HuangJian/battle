@@ -17,12 +17,11 @@ import type { Direction } from '../constants'
 import type { World } from '../game/World'
 import type { InputLike } from '../game/Input'
 import { ObsEncoder, computeMasks } from './obs-encoder'
+import { decodeMove } from './action-space'
 import { buildModelFromText, type ModelLike } from './infer'
 import { resolveLatestWeights } from './weights'
 import { join } from 'path'
 import { readFileSync, existsSync } from 'fs'
-
-const DIR_DECODE: Direction[] = ['up', 'down', 'left', 'right']
 
 export interface NNInputOptions {
   /** Explicit weights file. If omitted, the latest versioned/active weights
@@ -89,13 +88,10 @@ export class NNInput implements InputLike {
 
   // committed (held) action for the current inter-decision window
   private moveDir: Direction | null = null
-  // Last *commanded* direction. Held-action BC semantic: a `none` prediction
-  // (move index 0) means "keep the current heading", NOT "stop". God-AI's
-  // none-label comes from its held direction, so returning null here would
-  // freeze the tank (SimulationPlayer sets moving=false on null) and lock the
-  // world in a static state the model never recovers from -> 0% win. We hold
-  // the last commanded direction instead, which keeps the state active.
-  private lastDir: Direction = 'up'
+  // B案 (plan/new-era-stop): move index 0 = **STOP** — `moveDir = null` lets
+  // `SimulationPlayer` set `moving = false`. "Continue straight" is a 1..4
+  // direction (the heading is observable in ch6 `self`), so there is no keep
+  // class and no held-direction (keep) semantic. dims/heads/masks are unchanged.
   private firing = false
 
   // A decision is committed (and holds until the next due tick). Only the lazy
@@ -137,7 +133,6 @@ export class NNInput implements InputLike {
 
   reset(): void {
     this.moveDir = null
-    this.lastDir = 'up'
     this.firing = false
     // Tick 0's decision, on the freshly loaded stage (callers reset() after
     // `world.loadStageData(...)` — the builders' `t = 0` observation).
@@ -193,15 +188,9 @@ export class NNInput implements InputLike {
       }
     // v1 move mask is all-valid; fall back to none if the chosen slot is masked.
     if (masks.move[bestMove] !== 1) bestMove = 0
-    // Held-action semantic: index 0 (none) = keep current heading (see lastDir
-    // field). Only a *real* direction updates lastDir; none holds it. This keeps
-    // the tank moving and the world state active, avoiding the freeze deadlock.
-    if (bestMove === 0) {
-      this.moveDir = this.lastDir
-    } else {
-      this.lastDir = DIR_DECODE[bestMove - 1]
-      this.moveDir = this.lastDir
-    }
+    // B案: index 0 = STOP (decodeMove(0) === null ⇒ moving=false). 1..4 = the
+    // four directions. Held for the rest of the inter-decision window.
+    this.moveDir = decodeMove(bestMove)
 
     // --- fire head (argmax over 2: 0 release, 1 hold) ---
     const fr = this.model.fireLogits

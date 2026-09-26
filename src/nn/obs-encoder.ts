@@ -657,7 +657,9 @@ function fnv1a(str: string): string {
 
 export const SCHEMA_FINGERPRINT = fnv1a(
   [
-    'v3',
+    // Single point: the schema tag tracks OBS_SCHEMA_MAJOR (was a separate
+    // hard-coded 'v3' literal). Same value today ⇒ fingerprint unchanged.
+    `v${OBS_SCHEMA_MAJOR}`,
     OBS_SCHEMA_MAJOR,
     OBS_CHANNELS,
     SCALAR_DIM,

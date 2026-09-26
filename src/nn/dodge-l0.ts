@@ -72,8 +72,8 @@ function laneScore(bullets: World['bullets'], cx: number, cy: number): number {
 }
 
 /**
- * L0 dodge 判定。`sampledDir` = 采样动作的有效方向（move=0 ⇒ 保持 lastDir——
- * ScriptedInput 语义：none = 沿当前朝向继续走）。
+ * L0 dodge 判定。`sampledDir` = 采样动作的有效方向；B案下 move=0 是 **STOP** ⇒
+ * `decodeMove(0) === null`（坦克不动，采样安全分 -1 ⇒ 允许保底层覆盖）。
  * 评分制：对 4 个方向算"移一步后的安全分"（出弹道 = ∞ > 弹道内距离），
  * 只当最优方向严格优于采样动作时才覆盖——保底层只兜底，不做转向教学
  * （覆盖率纪律 §3.5①：覆盖率应低且可辩护）。

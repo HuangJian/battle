@@ -17,6 +17,7 @@ import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
 import { NNInput } from '../../src/nn/policy-input'
 import { ObsEncoder } from '../../src/nn/obs-encoder'
+import { decodeMove } from '../../src/nn/action-space'
 import { buildModelFromText, type ModelLike } from '../../src/nn/infer'
 import { resolveLatestWeights } from '../../src/nn/weights'
 import { START_LIVES } from '../../src/constants'
@@ -53,7 +54,6 @@ function runTrace(
   const wpath = resolveLatestWeights(weightsDir) ?? join(weightsDir, 'weights.json')
   const model: ModelLike = buildModelFromText(readFileSync(wpath, 'utf8'))
   const enc2 = new ObsEncoder()
-  const DIR_DECODE: string[] = ['up', 'down', 'left', 'right']
 
   let t = 0
   let decisions = 0
@@ -95,7 +95,7 @@ function runTrace(
           bv = mv[i]
           bestMv = i
         }
-      const manualDir = bestMv === 0 ? 'none' : DIR_DECODE[bestMv - 1]
+      const manualDir = decodeMove(bestMv) ?? 'none'
       const manualFire = model.fireLogits[1] > model.fireLogits[0] ? 1 : 0
       if (decisions <= verboseDecisions) {
         const kc = world.killCount

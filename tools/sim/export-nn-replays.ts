@@ -35,6 +35,7 @@ import { isArenaId, resolveArenaStage, arenaLevelOfId } from '../../src/nn/arena
 import { START_LIVES, ENEMIES_PER_STAGE } from '../../src/constants'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
 import { buildModelFromText, type ModelLike } from '../../src/nn/infer'
+import { decodeMove } from '../../src/nn/action-space'
 import type { InputLike } from '../../src/game/Input'
 import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { InputRecorder } from '../../src/replay/InputRecorder'
@@ -269,22 +270,15 @@ function main(): void {
   }
 }
 
-// ---- Held-action ScriptedInput (index 0 = keep current heading) ----
+// ---- ScriptedInput (B案: index 0 = STOP, 1..4 = directions) ----
 import type { Direction } from '../../src/constants'
-
-const MOVE_DECODE: Direction[] = ['up', 'down', 'left', 'right']
 
 class ScriptedInput implements InputLike {
   private moveDir: Direction | null = null
-  private lastDir: Direction = 'up'
   private firing = false
 
   setAction(move: number, fire: number): void {
-    if (move === 0) this.moveDir = this.lastDir
-    else {
-      this.lastDir = MOVE_DECODE[move - 1]
-      this.moveDir = this.lastDir
-    }
+    this.moveDir = decodeMove(move)
     this.firing = fire === 1
   }
 
@@ -304,7 +298,6 @@ class ScriptedInput implements InputLike {
 
   reset(): void {
     this.moveDir = null
-    this.lastDir = 'up'
     this.firing = false
   }
 }

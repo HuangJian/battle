@@ -49,6 +49,7 @@ import { buildReplayFilename, serializeReplayFile } from '../../src/replay/file'
 import type { ReplayType } from '../../src/replay/types'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
+import { decodeMove } from '../../src/nn/action-space'
 import { featuresEngine } from '../../src/nn/conv/conv'
 import { GoalExecutor } from '../../src/nn/goal-executor'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
@@ -99,20 +100,13 @@ const K = 10
 const TELEMETRY_SAMPLE_TICKS = 6
 const BASE_PRESSURE_RADIUS = 12
 
-const MOVE_DECODE: Direction[] = ['up', 'down', 'left', 'right']
-
-/** 受控输入：与 export-rl-rollout.ScriptedInput 同实现（动作施加门控一致）。 */
+/** 受控输入：与 export-rl-rollout.ScriptedInput 同实现（B案：0 = STOP，1..4 = 方向）。 */
 class ScriptedInput {
   moveDir: Direction | null = null
-  lastDir: Direction = 'up'
   firing = false
 
   setAction(move: number, fire: number): void {
-    if (move === 0) this.moveDir = this.lastDir
-    else {
-      this.lastDir = MOVE_DECODE[move - 1]
-      this.moveDir = this.lastDir
-    }
+    this.moveDir = decodeMove(move)
     this.firing = fire === 1
   }
 
@@ -134,7 +128,6 @@ class ScriptedInput {
 
   reset(): void {
     this.moveDir = null
-    this.lastDir = 'up'
     this.firing = false
   }
 }

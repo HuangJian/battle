@@ -72,6 +72,7 @@ import {
 } from '../../src/nn/arena-ladder'
 import { decodeStageGrid } from '../../src/nn/config-stage'
 import { buildModelFromText } from '../../src/nn/infer'
+import { MOVE_DIM, decodeMove, encodeMove } from '../../src/nn/action-space'
 import { featuresEngine } from '../../src/nn/conv/conv'
 import { dodgeL0 } from '../../src/nn/dodge-l0'
 import {
@@ -101,7 +102,6 @@ import type { RunTelemetry } from './simulation-runner'
 
 const MAX_TICKS = 36000
 const K = 10
-const MOVE_DIM = 5
 const FIRE_DIM = 2
 export const MASK_DIM = MOVE_DIM + FIRE_DIM // 7 (v2: item head removed)
 
@@ -212,20 +212,13 @@ const RL_SCORE_CONFIG: ScoreConfig = { ...V7_SCORE_CONFIG, lossWeights: RL_LOSS_
 const TELEMETRY_SAMPLE_TICKS = 6
 const BASE_PRESSURE_RADIUS = 12
 
-const MOVE_DECODE: Direction[] = ['up', 'down', 'left', 'right']
-
-/** 受控输入：实现 InputLike，把采样动作施加到 World（持有门控，None=hold lastDir）。 */
+/** 受控输入：实现 InputLike，把采样动作施加到 World（B案：0 = STOP，1..4 = 方向）。 */
 class ScriptedInput {
   moveDir: Direction | null = null
-  lastDir: Direction = 'up'
   firing = false
 
   setAction(move: number, fire: number): void {
-    if (move === 0) this.moveDir = this.lastDir
-    else {
-      this.lastDir = MOVE_DECODE[move - 1]
-      this.moveDir = this.lastDir
-    }
+    this.moveDir = decodeMove(move)
     this.firing = fire === 1
   }
 
@@ -243,7 +236,6 @@ class ScriptedInput {
   }
   reset(): void {
     this.moveDir = null
-    this.lastDir = 'up'
     this.firing = false
   }
 }
@@ -847,10 +839,10 @@ function runOne(
       let aMove = mv.idx
       let lpMove = mv.logp
       if (dodgeMode === 'l0') {
-        const sampledDir = mv.idx === 0 ? scripted.lastDir : MOVE_DECODE[mv.idx - 1]
+        const sampledDir = decodeMove(mv.idx)
         const d = dodgeL0(world, sampledDir)
         if (d.triggered && d.dir) {
-          aMove = MOVE_DECODE.indexOf(d.dir) + 1
+          aMove = encodeMove(d.dir)
           lpMove = logProbAt(model.moveLogits, masks.move, aMove)
           dodgeTicks++
         }
@@ -858,7 +850,7 @@ function runOne(
         godProbe.getMoveDirection()
         godProbe.isFiring()
         if (godProbe._lastBranch === 'dodge' && godProbe._moveDir) {
-          aMove = MOVE_DECODE.indexOf(godProbe._moveDir) + 1
+          aMove = encodeMove(godProbe._moveDir)
           lpMove = logProbAt(model.moveLogits, masks.move, aMove)
           dodgeTicks++
         }

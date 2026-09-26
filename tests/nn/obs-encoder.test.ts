@@ -243,6 +243,36 @@ describe('ObsEncoder.encode — spatial channels', () => {
     expect(chMax(enc.obs, CH.self)).toBe(17)
   })
 
+  // ---- B案 premise: ch6 `self` must carry dirIdx (plan/new-era-stop #1) ----
+  // With index 0 = STOP, "continue straight" is expressible ONLY by 1..4, which
+  // requires the tank's current heading to be observable. It is: the low 3 bits
+  // of ch6 `self` = dirIdx + 1. If this ever regresses, B案 silently loses the
+  // heading and every straight-line plan becomes unlearnable.
+  it('ch6 self carries dirIdx+1 in the low 3 bits (up=1/down=2/left=3/right=4)', () => {
+    const expected: Array<[Direction, number]> = [
+      ['up', 1],
+      ['down', 2],
+      ['left', 3],
+      ['right', 4],
+    ]
+    const seen = new Set<number>()
+    for (const [dir, code] of expected) {
+      const enc = new ObsEncoder()
+      enc.encode(mkWorld({ player: mkTank({ level: 0, dir, x: 96, y: 96 }) }))
+      const val = chMax(enc.obs, CH.self)
+      expect(val & 0x7).toBe(code)
+      expect(val >> 3).toBe(0) // level 0: star must not collide with the dir code
+      seen.add(val)
+    }
+    expect(seen.size).toBe(4)
+  })
+
+  it('ch6 self keeps the dir code under a star level (level 2, left -> 19)', () => {
+    const enc = new ObsEncoder()
+    enc.encode(mkWorld({ player: mkTank({ level: 2, dir: 'left', x: 96, y: 96 }) }))
+    expect(chMax(enc.obs, CH.self)).toBe((2 << 3) | 3)
+  })
+
   it('encodes a power-up on ch12 with value = enumIndex+1 (mine=15)', () => {
     const enc = new ObsEncoder()
     enc.encode(

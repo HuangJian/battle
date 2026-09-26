@@ -19,7 +19,10 @@ import { OBS_CHANNELS, BOARD, SCALAR_DIM } from './obs-encoder'
 import { noteFeaturesTs, runStudentFeatures } from './conv/conv'
 import { runStudentConvTs, type ConvTsView } from './conv/conv_ts'
 
-export const MOVE_DIM = 5
+// MOVE_DIM now lives in action-space.ts (single source: index 0 = STOP, 1..4 =
+// directions). Re-exported here so `infer`'s public surface is unchanged.
+import { MOVE_DIM } from './action-space'
+export { MOVE_DIM }
 export const FIRE_DIM = 2
 
 /** Default conv channel plan (14 -> 32 -> 48 -> 64). Mirrors model.py. */
