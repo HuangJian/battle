@@ -2,8 +2,8 @@
 
 用途：把「与 x20-noexplore 同 it 点对照」这类评审里手工拼的表变成随时可出的东西。
 
-输入**既可以是活体目录也可以是封存目录**——只读 `eval_log.jsonl` / `training_log.jsonl`
-（或它们的 `.gz` / `.xz`，按 magic 判别，照 `remote/protocol.py` 先例），不扫盘、不递归。
+输入**既可以是活体目录也可以是封存目录**——只读 `eval_log.jsonl`（或它的 `.gz` / `.xz`，
+按 magic 判别，照 `remote/protocol.py` 先例），不扫盘、不递归。
 
 **缺键 ≠ 0**（`reports/x20-dodge.review.md` P0 的教训）：某列在任一侧**一行都没有**时显示
 `未知`，而不是把它算成 0 拉低分母。合法的 0 值（零击杀的局）照常计入。
@@ -32,7 +32,8 @@ UNKNOWN = "未知"
 
 #: 逐局评估账本的候选文件名（活体是 `.jsonl`；封存是压缩件）
 _EVAL_NAMES = ("eval_log.jsonl", "eval_log.jsonl.gz", "eval_log.jsonl.xz")
-_TRAIN_NAMES = ("training_log.jsonl", "training_log.jsonl.gz", "training_log.jsonl.xz")
+#: **字符串域**的键（其余键一律按数值判「有值」——与 `_num` 同一套判据，见 `_present`）
+_STR_KEYS = frozenset({"outcome"})
 
 #: 报表指标：(键, 标题, 取值函数)。取不到 ⇒ `未知`。
 #: 「机制读数」四列来自 metrics v8 / Phase 0（旧报告缺键是常态，所以必须能显示未知）。
@@ -40,11 +41,7 @@ METRICS: list[tuple[str, str, Callable[[list[dict]], float | None]]] = [
     ("n", "局数", lambda rs: float(len(rs)) or None),
     ("mean", "kills 均值", lambda rs: _mean(rs, "kills")),
     ("p10", "kills p10", lambda rs: _pct(rs, "kills", 10)),
-    (
-        "low_pct",
-        "低杀率 %(kills≤3)",
-        lambda rs: _share(rs, "kills", lambda r: (_num(r, "kills") or 0) <= 3),
-    ),
+    ("low_pct", "低杀率 %(kills≤3)", lambda rs: _share(rs, "kills", _kills_le3)),
     ("zero_kill_pct", "零击杀 %", lambda rs: _share(rs, "kills", lambda r: _num(r, "kills") == 0)),
     ("win_pct", "胜率 %", lambda rs: _share(rs, "win", lambda r: _num(r, "win") == 1)),
     (
@@ -73,6 +70,12 @@ def _num(row: dict, key: str) -> float | None:
     return float(v)
 
 
+def _kills_le3(r: dict) -> bool:
+    """低杀判据。**必须走 `_num`**：字符串 `kills` 是缺键（不进分母），不是零杀。"""
+    d = _num(r, "kills")
+    return d is not None and d <= 3
+
+
 def _mean(rows: list[dict], key: str) -> float | None:
     vals = [v for v in (_num(r, key) for r in rows) if v is not None]
     return sum(vals) / len(vals) if vals else None
@@ -88,9 +91,18 @@ def _pct(rows: list[dict], key: str, p: float) -> float | None:
 
 
 def _present(row: dict, key: str) -> bool:
-    """该行有没有这一列的值（`None`/缺键都不算——故 `kills` 与 `outcome` 同一套判据）。"""
+    """该行有没有这一列的**可用**值。
+
+    数值键必须真的是 `int/float`（`bool` 不算）；字符串域键（`outcome`）必须是 `str`。
+    这条与 `_num` **同一套判据**：旧实现收 `str` ⇒ 字符串 `kills` 进了分母（`_present` 认它）
+    却被 `pred` 当 0（`_num` 拒 str），静默算成零杀——正是「缺键 ≠ 0」要防的那类错。
+    """
     v = row.get(key)
-    return v is not None and isinstance(v, (int, float, str)) and not isinstance(v, bool)
+    if v is None or isinstance(v, bool):
+        return False
+    if key in _STR_KEYS:
+        return isinstance(v, str)
+    return isinstance(v, (int, float))
 
 
 def _share(rows: list[dict], key: str, pred: Callable[[dict], bool]) -> float | None:
@@ -148,11 +160,6 @@ def load_eval_rows(dirpath: Path) -> list[dict]:
     if p is None:
         raise FileNotFoundError(f"{dirpath} 下找不到逐局评估账本（试过 {', '.join(_EVAL_NAMES)}）")
     return [r for r in read_jsonl(p) if r.get("event") == "eval"]
-
-
-def load_train_rows(dirpath: Path) -> list[dict]:
-    p = resolve_log(dirpath, _TRAIN_NAMES)
-    return read_jsonl(p) if p else []
 
 
 # ────────────────────────── 对齐与汇总 ──────────────────────────

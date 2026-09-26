@@ -26,7 +26,8 @@ manifest 的 sha256 一律算**解压后的原字节**（否则换机重压 ⇒ 
 **删除纪律**：一律 `platform_utils.rmtree_best_effort`（裸 `shutil.rmtree` 会被沙箱
 删除保护 shim 打死线程——2026-09-10 门禁事故）；本模块不得 import 训练热路径。
 
-**幂等**：目标已存在且 sha 相符 ⇒ 不重搬；缺件补、多余报。
+**幂等**：二次封存（活体已移走）⇒ 拒绝、档案逐字节不动；中断重跑（活体仍在、目标已存在）
+⇒ 逐件重搬并覆盖同路径——压缩件**确定性**（gzip `mtime` 钉 0）⇒ 结果一致。
 """
 
 from __future__ import annotations
@@ -59,6 +60,14 @@ COURSE_ENABLE_MARKER = "training-enabled.txt"
 FRESH_WINDOW_SEC = 3600.0
 #: opt/ckpt 的「关键轮」默认间隔（§3.2）。
 DEFAULT_OPT_KEY_EVERY = 25
+#: 「关键轮」保留理由的两族（C 形态 offline opt.tar / A/B 形态 ppo_ckpt_remote.tar）。
+#: manifest 的 `keys.opt_key_iters` 与 `weights[]` 必须取**并集**——只认 C 族会让 A/B 课
+#: `weights[]` 恒空（2026-09-26 评审：G4-① 的起点入口对多数课拿不到东西）。
+_KEY_REASONS = ("L0'-opt-key", "L0-ckpt-key")
+#: 逐轮权重归档根（与 `rl/archive.py::WEIGHTS_BACKUP_DIR` 同路径；本模块**只读**它）。
+WEIGHTS_ARCHIVE_DIR = REPO_ROOT / "nn-training" / "weights"
+#: 归档件名：`<prefix>.it<N>.<YYYYMMDD-HHMMSS>.json`（`rl/archive.py::backup_weights`）
+_WEIGHT_ARCH_RE = re.compile(r"^.+\.it(\d+)\.\d{8}-\d{6}\.json$")
 
 # ────────────────────────── 路径判据（纯正则，无 IO） ──────────────────────────
 
@@ -354,8 +363,12 @@ def course_guard(
     """
     if not traj.is_dir():
         return f"课程目录不存在：{traj}"
-    if not (traj / COURSE_ENABLE_MARKER).exists():
-        return ""
+    # ★ 新鲜度是**与 marker 无关的第二道闸**（2026-09-26 评审实测洞）：停课的动作就是删
+    #   marker，但它**不杀循环**、不等在飞的那一轮——刚停完课的那几秒/几分钟里目录仍在被
+    #   写。旧实现「无 marker 直接放行」正落到这个窗口：搬到撕裂的树、再 best-effort 删活体。
+    #   故：新鲜 ⇒ 一律拒（不论 marker 在不在）；`--force` 仍是逃生阀，但**越不过
+    #   「新鲜 + marker 在」**那一种（那是最像在训的形状）。
+    has_marker = (traj / COURSE_ENABLE_MARKER).exists()
     t_now = time.time() if now is None else now
     newest = _newest_mtime(
         [
@@ -368,13 +381,19 @@ def course_guard(
         ]
     )
     fresh = newest > 0 and (t_now - newest) <= window
-    if fresh:
+    if has_marker and fresh:
         return (
             f"课程 {course} 在训（{COURSE_ENABLE_MARKER} 存在且目录新鲜）——拒绝封存；"
             "先停课（控制台「停课」删 marker）再跑。"
         )
-    if not force:
+    if has_marker and not force:
         return f"课程 {course} 残留开课标记（已陈旧）——确认它确实不在训练时用 --force 重跑。"
+    if fresh and not force:
+        age = max(0, int(t_now - newest))
+        return (
+            f"课程 {course} 目录 {age} 秒前刚被写过（**无开课标记**）——可能仍有循环在收尾"
+            "或云机在回传；等它停稳（或确认已停）后用 --force 重跑。"
+        )
     return ""
 
 
@@ -580,13 +599,13 @@ def archive_course(
                 dst.parent.mkdir(parents=True, exist_ok=True)
                 if op.reason == "L3-shards":
                     src_sha = sha256_file(src)
-                    shutil.copyfile(src, dst)
+                    shutil.copy2(src, dst)
                     if sha256_file(dst) != src_sha:
                         rep.verify_failed.append(op.rel)
                     shard_files += 1
                     shard_bytes += op.size
                     continue
-                shutil.copyfile(src, dst)
+                shutil.copy2(src, dst)
                 artifacts.append(
                     {
                         "rel": op.rel,
@@ -659,12 +678,11 @@ def _build_manifest(
     its = [
         it for it in (_any_iter_of(o.rel) for o in rep.ops if o.action == "keep") if it is not None
     ]
+    # ★ 关键轮 = **两族理由的并集**（`_KEY_REASONS`）：C 形态的 offline `opt.tar` 与 A/B
+    #   形态的 `it<N>/ppo_ckpt_remote.tar`。只认 C 族会让 13 门里多数的 A/B 课 `weights[]`
+    #   恒空 ⇒ G4-① 的起点入口拿不到东西（2026-09-26 评审实测）。
     keys = sorted(
-        {
-            it
-            for it in (_any_iter_of(o.rel) for o in rep.ops if o.reason == "L0'-opt-key")
-            if it is not None
-        }
+        {it for it in (_any_iter_of(o.rel) for o in rep.ops if o.reason in _KEY_REASONS) if it is not None}
     )
 
     def _its_of(rx: re.Pattern[str]) -> list[int]:
@@ -698,9 +716,7 @@ def _build_manifest(
             "backtest_iters": backtest_its,
         },
         # ★ 起点指向**归档**（nn-training/weights/<课>/），不指 tmp —— 封存后 tmp 路径不存在
-        "weights": [
-            {"it": it, "src": "archive", "path": _archive_weight_hint(course, it)} for it in keys
-        ],
+        "weights": [_weight_entry(course, it) for it in keys],
         "active_weights": (
             {
                 "path": active["stored"],
@@ -723,11 +739,46 @@ def _build_manifest(
     }
 
 
-def _archive_weight_hint(course: str, it: int) -> str:
-    """关键轮权重在**权重归档**里的路径（`.xz 惯例` 的 `nn-training/weights/<课>/`）。
+def resolve_archived_weight(course: str, it: int) -> tuple[str, str, int] | None:
+    """在权重归档里解析第 `it` 轮的**具体**归档件 → `(仓根相对路径, sha256, 字节)`。
 
-    只给目录级提示（真实文件名带时间戳，且同一 it 可重跑多份）；`course_compare` / 开课弹窗
-    按目录 glob 即可。
+    同一 it 可重跑多份（文件名带时间戳）⇒ 取**字典序最大**那份（时间戳定宽 ⇒ 序 = 时间序）。
+    归档是可选资产（旧课可能没备份、`weights-prune` 可能删过）⇒ 解析不到返回 None，由调用方
+    退回目录级 glob 提示；**绝不**编一个 sha256 出来——G4-① 的「sha 可验」要求它指向真实字节。
+    """
+    d = WEIGHTS_ARCHIVE_DIR / course
+    if not d.is_dir():
+        return None
+    best: Path | None = None
+    try:
+        for p in d.iterdir():
+            m = _WEIGHT_ARCH_RE.match(p.name)
+            if m is not None and int(m.group(1)) == it and (best is None or p.name > best.name):
+                best = p
+    except OSError:
+        return None
+    if best is None:
+        return None
+    try:
+        return (best.relative_to(REPO_ROOT).as_posix(), sha256_file(best), best.stat().st_size)
+    except OSError:
+        return None
+
+
+def _weight_entry(course: str, it: int) -> dict[str, Any]:
+    """起点条目（§3.4）：能解析到**具体**归档件就带 sha256/bytes（G4-①「sha 可验」）；
+    解析不到 ⇒ 退回目录级 glob 提示且**不带** sha（不编造）。"""
+    got = resolve_archived_weight(course, it)
+    if got is None:
+        return {"it": it, "src": "archive", "path": _archive_weight_hint(course, it)}
+    rel, sha, size = got
+    return {"it": it, "src": "archive", "path": rel, "sha256": sha, "bytes": size}
+
+
+def _archive_weight_hint(course: str, it: int) -> str:
+    """关键轮权重在**权重归档**里的目录级 glob（`.xz 惯例` 的 `nn-training/weights/<课>/`）。
+
+    只在解析不到具体件时用：真实文件名带时间戳，且同一 it 可重跑多份。
     """
     return f"nn-training/weights/{course}/*.it{it}.*.json"
 
@@ -735,6 +786,15 @@ def _archive_weight_hint(course: str, it: int) -> str:
 def _build_archive_md(course: str, rep: ArchiveReport, manifest: dict[str, Any]) -> str:
     """人读索引（**永不压缩**）。"""
     reads = manifest["reads"]
+    wlines = [
+        f"- it{w.get('it')}：`{w.get('path')}`"
+        + (
+            f"（sha256 `{str(w.get('sha256'))[:12]}…`，{w.get('bytes')} B）"
+            if w.get("sha256")
+            else "（归档里未找到具体件——按 glob 取）"
+        )
+        for w in (manifest.get("weights") or [])
+    ] or ["- （无：本课无关键轮权重）"]
     lines = [
         f"# 课程档案：{course}",
         "",
@@ -759,6 +819,10 @@ def _build_archive_md(course: str, rep: ArchiveReport, manifest: dict[str, Any])
         f"- 判决行：{reads['judge'] or '（无）'}",
         f"- 回测行：{reads['backtest'] or '（无）'}",
         f"- settle 行：{reads['settle'] or '（无）'}",
+        "",
+        "## 起点权重（可作新腿 bc 起点）",
+        "",
+        *wlines,
         "",
         "## 何时不能用",
         "",

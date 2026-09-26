@@ -20,16 +20,20 @@ import os from 'os'
 import path from 'path'
 
 import { api } from './helpers/console-fixture'
+import { resolveArchivedSeedPath } from '../src/stack/courses'
 
 const scratch = mkdtempSync(path.join(os.tmpdir(), 'bcity-archive-'))
 const ARCHIVE_DIR = path.join(scratch, 'archive', 'courses')
 const TMP_DIR = path.join(scratch, 'tmp')
 const CURRICULA_DIR = path.join(scratch, 'curricula')
-for (const d of [ARCHIVE_DIR, TMP_DIR, CURRICULA_DIR]) mkdirSync(d, { recursive: true })
-// 惰性取值 ⇒ import 之后设也生效（三个 getter 每次调用都读 env）
+const WEIGHTS_DIR = path.join(scratch, 'weights')
+for (const d of [ARCHIVE_DIR, TMP_DIR, CURRICULA_DIR, WEIGHTS_DIR])
+  mkdirSync(d, { recursive: true })
+// 惰性取值 ⇒ import 之后设也生效（四个 getter 每次调用都读 env）
 process.env.BCITY_ARCHIVE_DIR = ARCHIVE_DIR
 process.env.BCITY_TMP_LOGS_DIR = TMP_DIR
 process.env.BCITY_CURRICULA_DIR = CURRICULA_DIR
+process.env.BCITY_WEIGHTS_ARCHIVE_DIR = WEIGHTS_DIR
 
 afterAll(() => rmSync(scratch, { recursive: true, force: true }))
 
@@ -103,6 +107,46 @@ describe('课程封存读面', () => {
     writeFileSync(path.join(d, 'archive-manifest.json'), '{ not json')
     expect(() => api.readArchived()).not.toThrow()
     expect(api.readArchived().some((a) => a.course === 'x-broken')).toBe(false)
+  })
+})
+
+describe('封存起点解析（G4-①）', () => {
+  it('manifest 里有具体 path ⇒ 解析到该归档件', () => {
+    const course = 'x-seed-1'
+    const dir = path.join(WEIGHTS_DIR, course)
+    mkdirSync(dir, { recursive: true })
+    const file = 'rl-weights.it150.20260101-000000.json'
+    writeFileSync(path.join(dir, file), '{}')
+    archive(course, {
+      weights: [
+        {
+          it: 150,
+          src: 'archive',
+          path: `nn-training/weights/${course}/${file}`,
+          sha256: 'ab'.repeat(32),
+          bytes: 2,
+        },
+      ],
+    })
+    expect(resolveArchivedSeedPath(course, 150)).toBe(path.join(dir, file))
+  })
+
+  it('manifest 只有 glob 提示 ⇒ 在归档目录 glob，同 it 多份取时间戳最大', () => {
+    const course = 'x-seed-2'
+    const dir = path.join(WEIGHTS_DIR, course)
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(path.join(dir, 'w.it7.20260101-000000.json'), '{}')
+    writeFileSync(path.join(dir, 'w.it7.20260102-000000.json'), '{}')
+    archive(course, {
+      weights: [{ it: 7, src: 'archive', path: `nn-training/weights/${course}/*.it7.*.json` }],
+    })
+    expect(resolveArchivedSeedPath(course, 7)).toBe(path.join(dir, 'w.it7.20260102-000000.json'))
+  })
+
+  it('解析不到 / 非法课名 ⇒ null（调用方响亮拒绝，不退回 BC）', () => {
+    expect(resolveArchivedSeedPath('x-nope', 5)).toBeNull()
+    expect(resolveArchivedSeedPath('../evil', 5)).toBeNull()
+    expect(resolveArchivedSeedPath('x-seed-1', 999)).toBeNull()
   })
 })
 

@@ -237,10 +237,24 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         if (rolloutSrc && !['auto', 'local', 'node', 'run'].includes(rolloutSrc)) {
           return errResp(`未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node|run）`, 400)
         }
+        // 起点权重来源（G4-①）：`{sourceCourse, it}`，服务端按 manifest 自解析路径
+        //（客户端**不给路径**——给路径就是一条可被篡改的写面）。
+        const seedRaw = body.seedFrom
+        let seedFrom: { sourceCourse: string; it: number } | undefined
+        if (seedRaw !== undefined && seedRaw !== null) {
+          const o = seedRaw as Record<string, unknown>
+          const src = typeof o?.sourceCourse === 'string' ? o.sourceCourse : ''
+          const it = typeof o?.it === 'number' && Number.isInteger(o.it) ? o.it : NaN
+          if (!src || !Number.isInteger(it)) {
+            return errResp('seedFrom 需要 { sourceCourse: string, it: int }', 400)
+          }
+          seedFrom = { sourceCourse: src, it }
+        }
         return okResp(
           await openCourse(ctx.course, {
             trainMode: (trainMode || undefined) as TrainMode | undefined,
             rolloutSrc: (rolloutSrc || undefined) as RolloutSrcMode | undefined,
+            ...(seedFrom ? { seedFrom } : {}),
           }),
         )
       }
@@ -438,8 +452,9 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         // （`rl/course_archive.py`）。顺序契约在 python 侧（建→校验→删），这里只是入口。
         //
         // ★ **默认只跑 `--dry-run`**：`apply` 必须显式给——最贵的错误是「删了才发现没搬成」，
-        //   所以先看清单与字节账。★ 在训硬闸也在 python 侧（marker + 新鲜 ⇒ 拒绝，
-        //   `--force` 只能越**陈旧** marker）：控制台不自己算一份判据，两处必然漂开。
+        //   所以先看清单与字节账。★ 硬闸全在 python 侧（`marker + 新鲜` ⇒ 拒；**无 marker 但
+        //   新鲜** ⇐ 停课只删 marker、不杀循环 ⇒ 默认也拒；`--force` 只越「陈旧 marker」与
+        //   「无 marker 的新鲜目录」，不越「新鲜 marker」）：控制台不自己算一份判据，两处必然漂开。
         if (!ctx.course) return errResp('缺少 course', 400)
         const apply = body.apply === true
         const force = body.force === true

@@ -58,6 +58,7 @@ import {
   COURSE_ENABLE_MARKER,
   courseRunnerFacts,
   openCourse,
+  prepareCourseForOpen,
   stopCourse,
 } from '../src/server/actions/course-lifecycle'
 import { readLoopControl, setCoursePaused } from '../src/server/actions/loop-control'
@@ -201,6 +202,25 @@ describe('openCourse：把「这门课存在且可被调度」写到盘上', () 
 })
 
 // ────────────────────────── ①b 开课：离线模式预校验（2026-09-22 事故回归） ──────────────────────────
+
+describe('封存起点（G4-①）', () => {
+  it('prepareCourseForOpen(seedPath) ⇒ 从该文件播种（不落 BC）', () => {
+    const src = path.join(DIR, 'seed-weights.json')
+    writeFileSync(src, '{"seed":1}')
+    const r = prepareCourseForOpen('x-seedtest', src)
+    const dst = path.join(TRAJ, 'x-seedtest', 'weights.json')
+    expect(readFileSync(dst, 'utf8')).toBe('{"seed":1}')
+    expect(r.notes.join('\n')).toContain('封存起点')
+    rmSync(path.join(TRAJ, 'x-seedtest'), { recursive: true, force: true })
+  })
+
+  it('seedFrom 解析不到 ⇒ 开课前响亮拒绝、零副作用', async () => {
+    await expect(
+      openCourse(COURSE, { seedFrom: { sourceCourse: 'no-such-arch', it: 3 } }),
+    ).rejects.toThrow(/起点不可用/)
+    expect(existsSync(path.join(TRAJ, COURSE, COURSE_ENABLE_MARKER))).toBe(false)
+  })
+})
 
 describe('openCourse：离线（云机接手）要求课程声明有限 iters', () => {
   const FIX = path.join(DIR, 'curricula-fix') // 夹具课程目录（临时 BCITY_CURRICULA_DIR）

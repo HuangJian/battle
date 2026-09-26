@@ -57,6 +57,9 @@ export function manifestToView(course: string, doc: Record<string, unknown>): Ar
         it: _num(w.it),
         src: _str(w.src, 'archive'),
         path: _str(w.path),
+        // G4-①「sha 可验」：只有解析到具体件时才有；缺字段 = 该轮归档件没找到（path 是 glob）
+        ...(typeof w.sha256 === 'string' ? { sha256: w.sha256 } : {}),
+        ...(typeof w.bytes === 'number' ? { bytes: w.bytes } : {}),
       })),
     reads: {
       evalLog: _str(reads.eval_log),

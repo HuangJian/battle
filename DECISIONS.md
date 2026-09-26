@@ -4200,3 +4200,38 @@ G5 断言由「逐行逐字段一致」升为「**解压后逐字节一致**」�
 **边界**：这是一条**便利 vs 体积**的裁决，**不是 G1 的杠杆** —— 封存后 `tmp/` 地板 10.0 GB 里
 L0 只占 0.3 GB（3%），压到 0.05 GB 只把地板降到 9.75 GB。`tmp/ ≤ 1 GB` 的瓶颈是
 在训课 9.0 GB 与非课程 0.70 GB（E0 基线），别拿压缩当空间问题的答案。
+
+---
+
+## §2026-09-26-course-archive-guard-and-startpoint（2026-09-26：封存硬闸补第二道新鲜度 + 起点 sha 可验）
+
+**来历**：2026-09-26 外部评审用真模块探针实测两处实现稿缺陷
+（`plan/course-archive.plan.md`）：① `course_guard` 首句 `if not marker.exists(): return ""`
+⇒ **无 marker 时新鲜度整条失效**；② manifest `keys` 只认 `L0'-opt-key`（offline 族），
+A/B 形态的 `it<N>/ppo_ckpt_remote.tar` 走 `L0-ckpt-key` ⇒ 多数课 `weights[]` 恒空、
+`ARCHIVE.md` 标签（「opt/ckpt」）与实际不符。另有一处规格偏差未记：`weights[]` 只有目录级
+glob 提示，没有 sha256/bytes（G4-① 明写「sha 可验」）。
+
+**决定**：
+① **新鲜度升为与 marker 无关的第二道闸**：目录新鲜（不论有无 marker）默认拒绝封存；
+`--force` 只越「陈旧 marker」与「无 marker 的新鲜目录」，**不越「新鲜 marker」**。
+来历：停课动作 = 删 marker 但**不杀循环**（`stopCourse` 注释自己承认云机上那份只能由操作员
+在云机侧停）⇒ 正规流程「先停课 → 再封存」正好落在「无 marker 但仍在写」的窗口，旧实现会把
+**撕裂的树**搬进档案再 `rmtree` 活体（⑤ 的 sha 链只证「拷贝保真」，证不了「源已静止」）。
+② **关键轮 = opt ∪ ckpt 两族并集**（`_KEY_REASONS`）；`ARCHIVE.md` 标签与实际一致。
+③ **`weights[]` 起点「sha 可验」落地**：解析到具体归档件 ⇒ 记实际 `path` + `sha256`/`bytes`；
+解析不到 ⇒ 退化为目录级 glob 提示且**不带** sha（绝不编造哈希）。
+④ **控制台起点选择器落地**：`openCourse` 收 `seedFrom:{sourceCourse,it}`（**不收路径**，服务端按
+manifest 自解析并校验落在权重归档内）；解析不到响亮拒绝（绝不退回 BC 播种）。
+
+**被否决**：修正 ①时把「无 marker」一律放行到 `--force` 才做（会让正规流程必须先 `--force`，
+把逃生阀变成必经步）；起点「让客户端传路径」（可被篡改的写面）；找不到归档件时退回 BC
+（静默拿错起点，与 §384 同类错）；把 sha 记在 glob 提示上（假哈希）。
+
+**违反后果**：放行新鲜无 marker 目录 ⇒ 搬到撕裂的树 + 删活体（不可逆）；只认 opt 族 ⇒
+A/B 课起点入口失效；编造 sha ⇒ 校验仪式变假。
+
+**落点**：`nn-training/rl/course_archive.py`（guard / `_KEY_REASONS` / `resolve_archived_weight`）、
+`dashboard/src/stack/courses.ts::resolveArchivedSeedPath`、
+`dashboard/src/server/actions/course-lifecycle.ts`、`dashboard/src/web/app/panels/OpenCourseModal.tsx`；
+正文同步进 `plan/course-archive.plan.md §1.3-1 / §3.5 / §3.6`。

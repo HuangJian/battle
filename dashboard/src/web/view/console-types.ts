@@ -194,8 +194,11 @@ export interface ArchivedCourseView {
   bytesTotal: number
   bytesRawTotal: number
   filesTotal: number
-  /** 起点（`path` 指向 `nn-training/weights/<课>/`，**不是**已移走的 tmp 路径）。 */
-  weights: { it: number; src: string; path: string }[]
+  /** 起点（`path` 指向 `nn-training/weights/<课>/`，**不是**已移走的 tmp 路径）。
+   *
+   *  `sha256`/`bytes` 只在归档里**解析到了具体件**时才有（G4-①「sha 可验」）；缺失 =
+   *  该轮的归档件没找到（`path` 退化为目录级 glob）。 */
+  weights: { it: number; src: string; path: string; sha256?: string; bytes?: number }[]
   /** 封存目录内相对路径（gz 件带 `.gz`/`.xz` 后缀）。 */
   reads: { evalLog: string; trainLog: string }
 }

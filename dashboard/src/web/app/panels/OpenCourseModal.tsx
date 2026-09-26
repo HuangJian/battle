@@ -9,7 +9,7 @@
 
 import { useState } from 'preact/hooks'
 import type { RolloutSrcMode, TrainMode } from '../../../core/types'
-import type { ModeView } from '../../view'
+import type { ArchivedCourseView, ModeView } from '../../view'
 import { SegmentedControl } from '../../components/SegmentedControl'
 
 export interface OpenCourseModalProps {
@@ -18,8 +18,16 @@ export interface OpenCourseModalProps {
   course: string
   /** 该课当前生效值（`modes.rolloutSrc === 'run'` ⇒ 这把键已经是离线档）。 */
   modes: ModeView
+  /** 已封存课程（`stateView.archived`）：起点权重选择器的来源（**只读 manifest 的
+   *  `weights[]`**，G4-①）。缺省 = 旧视图/尚未封存过 ⇒ 只有 BC 默认一档。 */
+  archived?: ArchivedCourseView[] | null
   onClose: () => void
-  onConfirm: (opts: { trainMode: TrainMode; rolloutSrc?: RolloutSrcMode }) => void
+  onConfirm: (opts: {
+    trainMode: TrainMode
+    rolloutSrc?: RolloutSrcMode
+    /** 起点 = 封存课的某个关键轮（缺省 = BC 播种）。服务端按 manifest 自解析路径。 */
+    seedFrom?: { sourceCourse: string; it: number }
+  }) => void
   /** 局域网只读视图：按钮禁用（服务端 403 兜底）。 */
   readOnly?: boolean
 }
@@ -47,6 +55,7 @@ export function OpenCourseModal({
   open,
   course,
   modes,
+  archived,
   onClose,
   onConfirm,
   readOnly,
@@ -64,15 +73,32 @@ export function OpenCourseModal({
     if (local === 'local' || local === 'node' || local === 'auto') return local
     return modes.rolloutSrc === 'node' || modes.rolloutSrc === 'auto' ? modes.rolloutSrc : 'local'
   })
+  // 起点权重来源：`'bc'` = 课程文件 bc 播种（缺省）；否则 `<封存课>:<it>`。
+  const [seed, setSeed] = useState('bc')
+  // 只列**解析得到路径**的关键轮（glob 提示给不出可直接播种的文件 ⇒ 不列，避免假选项）。
+  const sources = (archived ?? []).flatMap((a) =>
+    a.weights
+      .filter((w) => w.path && !w.path.includes('*'))
+      .map((w) => ({
+        value: `${a.course}:${w.it}`,
+        label: `${a.course} · it${w.it}`,
+      })),
+  )
 
   if (!open || !course) return null
   const confirm = (): void => {
     writeLocal(TC_OPEN_TRAIN_MODE, trainMode)
     writeLocal(TC_OPEN_ROLLOUT, rolloutSrc)
+    const sep = seed.lastIndexOf(':')
+    const seedFrom =
+      seed === 'bc' || sep <= 0
+        ? undefined
+        : { sourceCourse: seed.slice(0, sep), it: Number(seed.slice(sep + 1)) }
     onConfirm({
       trainMode,
       // 离线档忽略 rollout 选择（服务端也会忽略：离线只认 run/run_iters 那对键）。
       rolloutSrc: trainMode === 'online' ? rolloutSrc : undefined,
+      ...(seedFrom ? { seedFrom } : {}),
     })
   }
   return (
@@ -109,6 +135,31 @@ export function OpenCourseModal({
             onChange={setTrainMode}
           />
         </div>
+        {/* ★ 起点权重（G4-①）：从**封存档案**取关键轮归档权重作新腿起点；只在通知
+            「开始」时服务端解析路径并把该文件播成 tmp/<本课>/weights.json（仅在本课
+            尚无 weights.json 时生效）。无封存课 ⇒ 只有 BC 默认一档。 */}
+        <div className="tc-line">
+          <span className="tc-muted tc-small tc-launch__lbl">起点权重</span>
+          <select
+            className="tc-sel"
+            aria-label="起点权重"
+            value={seed}
+            onChange={(e) => setSeed((e.currentTarget as HTMLSelectElement).value)}
+          >
+            <option value="bc">BC 默认（课程文件 bc）</option>
+            {sources.map((s) => (
+              <option key={s.value} value={s.value}>
+                {s.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        {seed !== 'bc' ? (
+          <p className="tc-muted tc-small tc-hint">
+            从封存档案取起点：开始会把该归档权重播种成 <code>tmp/{course}/weights.json</code>
+            （仅在本课尚无该文件时生效；路径由服务端按 <code>archive-manifest.json</code> 解析）。
+          </p>
+        ) : null}
         {trainMode === 'offline' ? (
           <p className="tc-muted tc-small tc-hint">
             离线（缺省在线）：本机**不跑** rollout/PPO。开课后本课 <code>rollout_src=run</code> +{' '}

@@ -131,6 +131,9 @@ class Course:
         self.name = name
         if "A" in form:
             self.write("it100/dist/mac/rl_s2000_seed1/obs.npy", b"x" * 4096)
+            # 远程 PPO 的 model+opt（`L0-ckpt-key`）——真实 A/B 课都有，且它是不带 marker 时
+            # 唯一能把内容轮号带进「关键轮」的源（judge 行只是 L0）。
+            self.write("it100/ppo_ckpt_remote.tar", b"c" * 2048)
         if "B" in form:
             self.write("it100/w7/rl_s2000_seed2/obs.npy", b"y" * 4096)
         if "C" in form:
@@ -163,6 +166,9 @@ class Course:
                 os.utime(p, (old, old))
 
     def run(self, **kw):
+        # 夹具目录刚建 ⇒ 默认把 `now` 放到很远，表示「已停稳」（新鲜度闸见 `course_guard`）；
+        # 需要验新鲜的那种用例自己显式传 `now`。
+        kw.setdefault("now", time.time() + 10**6)
         return CA.archive_course(
             self.name,
             traj_root=self.traj.parent,
@@ -192,6 +198,21 @@ def test_in_training_course_refused_and_zero_change(tmp_path):
     assert before == after
 
 
+def test_fresh_dir_without_marker_refused_unless_forced(tmp_path):
+    """★ 无 marker 但目录**新鲜** ⇒ 默认拒绝（第二道闸）—— 停课只删 marker、不杀循环，
+    刚停完课的那一窗目录仍在被写；`--force` 是逃生阀但越不过「新鲜 + marker」那种形状。"""
+    c = Course(tmp_path, "x-fresh-nomark", "A")
+    assert not (c.traj / "training-enabled.txt").exists()
+
+    rep = c.run(dry_run=False, now=time.time())
+    assert rep.refused and "刚被写过" in rep.refused
+    assert not rep.ops
+    assert not c.archive.exists()
+
+    forced = c.run(dry_run=False, force=True, now=time.time())
+    assert forced.ok and not forced.refused
+
+
 def test_stale_marker_needs_force(tmp_path):
     """陈旧 marker：无 `--force` 拒绝（宁可不做），有 `--force` 才继续。"""
     c = Course(tmp_path, "x-stale", "A")
@@ -211,7 +232,12 @@ def test_dry_run_zero_write_zero_delete(tmp_path):
     before = sorted(p.relative_to(c.traj).as_posix() for p in c.traj.rglob("*"))
 
     rep = CA.archive_course(
-        c.name, traj_root=c.traj.parent, archive_root=c.archive, dry_run=True, keys={}
+        c.name,
+        traj_root=c.traj.parent,
+        archive_root=c.archive,
+        dry_run=True,
+        keys={},
+        now=time.time() + 10**6,
     )
     assert rep.ok and rep.dry_run
     assert rep.bytes_freed > 0
@@ -335,6 +361,56 @@ def test_keep_shards_manifest_holds_aggregate_not_per_file(tmp_path):
     # 区间仍由保留项（含 shard 目录）算出——不是 (0,0)
     assert m["it_range"][1] == 100
     assert (c.archive / c.name / "it100/dist/mac/rl_s2000_seed1/obs.npy").is_file()
+
+
+def test_manifest_keys_include_ckpt_key_iters_for_ab_forms(tmp_path):
+    """★ A/B 形态的关键轮来自 `L0-ckpt-key`（`it<N>/ppo_ckpt_remote.tar`）——必须与 C 形态的
+    `L0'-opt-key` **取并集**，否则多数课的 `weights[]` 恒空（G4-① 起点入口失效）。"""
+    c = Course(tmp_path, "x-ckptkeys", "A")
+    rep = c.run(dry_run=False)
+    assert rep.ok, rep.summary()
+    m = json.loads((c.archive / c.name / "archive-manifest.json").read_text(encoding="utf-8"))
+    assert 100 in m["keys"]["opt_key_iters"]
+    assert any(w["it"] == 100 for w in m["weights"])
+    # `ARCHIVE.md` 的标签与实际一致（不再是「标签写 opt/ckpt、实现只算 opt」）
+    md = (c.archive / c.name / "ARCHIVE.md").read_text(encoding="utf-8")
+    assert "起点权重" in md and "ppo_ckpt_remote" not in md
+
+
+def test_manifest_weights_resolve_concrete_file_with_sha(tmp_path, monkeypatch):
+    """能解析到归档里的具体件 ⇒ `path` 是**那个文件**且带 sha256/bytes（G4-①「sha 可验」）。
+    同一 it 多份时取时间戳最大那份；解析不到 ⇒ 退回 glob 提示且**不带** sha。"""
+    c = Course(tmp_path, "x-wres", "A")
+    wdir = tmp_path / "weights" / "x-wres"
+    wdir.mkdir(parents=True)
+    (wdir / "rl-weights.it100.20260101-000000.json").write_bytes(b"old")
+    (wdir / "rl-weights.it100.20260102-000000.json").write_bytes(b"newer")
+    monkeypatch.setattr(CA, "REPO_ROOT", tmp_path)
+    monkeypatch.setattr(CA, "WEIGHTS_ARCHIVE_DIR", tmp_path / "weights")
+
+    rep = c.run(dry_run=False)
+    assert rep.ok, rep.summary()
+    m = json.loads((c.archive / c.name / "archive-manifest.json").read_text(encoding="utf-8"))
+    w = next(x for x in m["weights"] if x["it"] == 100)
+    assert w["path"].endswith("rl-weights.it100.20260102-000000.json")
+    assert w["bytes"] == len(b"newer")
+    assert isinstance(w["sha256"], str) and len(w["sha256"]) == 64
+    # ARCHIVE.md 把它写成可读的起点
+    assert "rl-weights.it100.20260102-000000.json" in (c.archive / c.name / "ARCHIVE.md").read_text(
+        encoding="utf-8"
+    )
+
+
+def test_manifest_weights_fall_back_to_glob_without_archive(tmp_path, monkeypatch):
+    """归档里没有该轮（旧课 / 被 prune）⇒ glob 提示、**不带** sha（不编造）。"""
+    c = Course(tmp_path, "x-wglob", "A")
+    monkeypatch.setattr(CA, "WEIGHTS_ARCHIVE_DIR", tmp_path / "no-such-weights")
+    rep = c.run(dry_run=False)
+    assert rep.ok, rep.summary()
+    m = json.loads((c.archive / c.name / "archive-manifest.json").read_text(encoding="utf-8"))
+    w = next(x for x in m["weights"] if x["it"] == 100)
+    assert w["path"] == "nn-training/weights/x-wglob/*.it100.*.json"
+    assert "sha256" not in w
 
 
 def test_second_run_is_safe_noop(tmp_path):

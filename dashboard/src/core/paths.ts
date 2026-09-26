@@ -96,6 +96,13 @@ export function archiveCoursesDir(): string {
   return process.env.BCITY_ARCHIVE_DIR || path.join(REPO_ROOT, 'archive', 'courses')
 }
 
+/** 逐轮权重归档根（`nn-training/weights/`——与 python `rl/archive.py::WEIGHTS_BACKUP_DIR`
+ *  同路径）。封存起点（G4-①）从这里解析归档件；单测以 `BCITY_WEIGHTS_ARCHIVE_DIR` 重定向，
+ *  故**惰性**取值。 */
+export function weightsArchiveDir(): string {
+  return process.env.BCITY_WEIGHTS_ARCHIVE_DIR || path.join(NN_TRAINING, 'weights')
+}
+
 /** 控制台客户端 bundle 产物目录（server/build.ts 构建，.gitignore 排除）。 */
 export const BUNDLE_DIR = path.join(DASHBOARD_ROOT, '.build')
 /** EvalBoard 账本数据根（EVALBOARD_DATA 环境变量可覆盖；见 store.ts）。 */

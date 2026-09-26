@@ -7,10 +7,10 @@
  *  这里 import，不断环。`actions.ts` 重导出同名函数，老调用方零改动。
  */
 
-import { copyFileSync, existsSync, mkdirSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'fs'
 import path from 'path'
 import { readJsoncFile } from '../core/jsonc'
-import { curriculaDir, REPO_ROOT } from '../core/paths'
+import { archiveCoursesDir, curriculaDir, REPO_ROOT, weightsArchiveDir } from '../core/paths'
 
 /** 课程 BC 种子路径（§384）：读课程 jsonc 的 `bc` 字段（相对仓库根解析）。
  *
@@ -70,4 +70,60 @@ export function seedWeightsFromBc(course: string, weightsPath: string): string {
   mkdirSync(path.dirname(weightsPath), { recursive: true })
   copyFileSync(bcPath, weightsPath)
   return bcPath
+}
+
+// ────────────────────────── 封存起点（G4-①） ──────────────────────────
+
+/** 归档件名：`<prefix>.it<N>.<YYYYMMDD-HHMMSS>.json`（python `backup_weights`）。 */
+const ARCHIVED_WEIGHT_RE = /\.it(\d+)\.\d{8}-\d{6}\.json$/
+
+/** 归档权限校验：路径必须**真的**在权重归档根之内（防 manifest 被手改成越界路径）。 */
+function insideWeightsArchive(p: string): boolean {
+  const rel = path.relative(weightsArchiveDir(), p)
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
+}
+
+/** 封存课的某个关键轮 → **实际**权重文件绝对路径（plan/course-archive.plan.md §3.5 / G4-①）。
+ *
+ *  客户端只给 `{sourceCourse, it}`（**不给路径**）：路径由服务端从
+ *  `archive/courses/<课>/archive-manifest.json` 自己解析——绝不信任客户端传的路径，
+ *  manifest 也可能被手改，故解析结果还要过 `insideWeightsArchive`。
+ *
+ *  优先级：① manifest 里该 it 的**具体** `path`（无 glob 字符且文件在）；② 否则在该课归档
+ *  目录里按 `*.it<it>.*.json` glob（与 python `resolve_archived_weight` 同口径：同名多份取
+ *  时间戳最大那份）。都找不到 ⇒ null（调用方响亮拒绝，不退回 BC——那会静默拿错起点）。 */
+export function resolveArchivedSeedPath(sourceCourse: string, it: number): string | null {
+  if (!/^[A-Za-z0-9._-]+$/.test(sourceCourse) || !Number.isInteger(it)) return null
+  const manifest = path.join(archiveCoursesDir(), sourceCourse, 'archive-manifest.json')
+  try {
+    const doc = JSON.parse(readFileSync(manifest, 'utf8')) as { weights?: unknown }
+    const weights = Array.isArray(doc.weights) ? doc.weights : []
+    const entry = weights.find(
+      (w): w is { it?: unknown; path?: unknown } =>
+        typeof w === 'object' && w !== null && (w as { it?: unknown }).it === it,
+    )
+    // manifest 里存的是仓根相对的 `nn-training/weights/<课>/<file>.json`。归档布局是**该课
+    // 目录下平铺** ⇒ 只取 basename 再拼回 `<权重根>/<课>/`：既能在单测重定向下工作，
+    // 也天然让「手改 manifest 指向越界路径」失效（拼不出 weights 根之外）。
+    const base = typeof entry?.path === 'string' ? path.basename(entry.path) : ''
+    if (base && !base.includes('*') && !base.includes('?')) {
+      const abs = path.join(weightsArchiveDir(), sourceCourse, base)
+      if (insideWeightsArchive(abs) && existsSync(abs)) return abs
+    }
+  } catch {
+    // 没档案 / 坏 manifest ⇒ **它不是封存课**，不该作起点来源（不做 glob 兜底——否则
+    // 任意一门有归档权重的活体课都能被当「封存起点」，与「从封存课取」的语义不符）。
+    return null
+  }
+  const dir = path.join(weightsArchiveDir(), sourceCourse)
+  let best: string | null = null
+  try {
+    for (const name of readdirSync(dir)) {
+      const m = ARCHIVED_WEIGHT_RE.exec(name)
+      if (m && Number(m[1]) === it && (best === null || name > best)) best = name
+    }
+  } catch {
+    return null
+  }
+  return best ? path.join(dir, best) : null
 }

@@ -20,14 +20,14 @@
  *      ——那会让 iter/队列/账本等阅读面一起消失）。
  */
 
-import { appendFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'fs'
+import { appendFileSync, copyFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'fs'
 import path from 'path'
 import { loadConfig } from '../../core/config'
 import { readJsoncFile } from '../../core/jsonc'
-import { curriculaDir, tmpLogsDir } from '../../core/paths'
+import { curriculaDir, REPO_ROOT, tmpLogsDir } from '../../core/paths'
 import { validateCourseName } from '../../core/slots'
 import type { RolloutSrcMode, TrainMode } from '../../core/types'
-import { isBcCourse, seedWeightsFromBc } from '../../stack/courses'
+import { isBcCourse, resolveArchivedSeedPath, seedWeightsFromBc } from '../../stack/courses'
 import { pruneLegacyCourseKnobs } from '../../stack/course-knobs'
 import { kickstartReceipt } from '../../stack/kickstart-receipt'
 import { pairedSeedReceipt } from '../../stack/paired-seed-receipt'
@@ -54,6 +54,14 @@ export interface OpenCourseOpts {
   /** hub 模式推送的有界重试（缺省 3 次 × 2s）。hub 的课程表是**扫盘发现**，新建的
    *  `remote-jobs/` 要等它扫到才认这门课；测试注入 1 次避免空等。 */
   hubMode?: { attempts?: number; delayMs?: number }
+  /** **起点权重来源**（plan/course-archive.plan.md §3.5 / G4-①）：指向一门**已封存**课的
+   *  某个关键轮——开课时把该归档权重播种成 `tmp/<本课>/weights.json`（缺省 = BC 播种，
+   *  行为不变）。
+   *
+   *  这里只收 `{sourceCourse, it}`（**绝不收路径**）：路径由服务端从
+   *  `archive/courses/<课>/archive-manifest.json` 自解析并校验（见 `resolveArchivedSeedPath`）。
+   *  解析不到 ⇒ 响亮拒绝（绝不退回 BC——那会静默拿错起点）。 */
+  seedFrom?: { sourceCourse: string; it: number }
 }
 
 /** 课程参数快速失败。
@@ -141,7 +149,7 @@ export function courseEnabled(course: string): boolean {
  *  ★ 只做「事实」，不写旋钮（旋钮见 `writeCourseConfigForOpen`）——两件事各自的失败语义不同：
  *  旋钮写坏了是配置问题，事实没建出来是「这门课根本不存在」。
  */
-export function prepareCourseForOpen(course: string): { notes: string[] } {
+export function prepareCourseForOpen(course: string, seedPath?: string): { notes: string[] } {
   const notes: string[] = []
   const bc = isBcCourse(course)
   // 课程 traj 根：生产下就是仓根 `tmp/`（与训练侧同布局），单测用 BCITY_TMP_LOGS_DIR 重定向
@@ -149,8 +157,17 @@ export function prepareCourseForOpen(course: string): { notes: string[] } {
   if (!bc) {
     const weightsPath = path.join(trajRoot, course, 'weights.json')
     if (!existsSync(weightsPath)) {
-      seedWeightsFromBc(course, weightsPath) // 缺文件即抛 → 调用方响亮失败（不静默跑新权）
-      notes.push(`已播种初始权重 tmp/${course}/weights.json`)
+      if (seedPath) {
+        // 起点 = **封存档案**里的归档权重（G4-①）：seedPath 已由调用方从 manifest 解析并校验过。
+        mkdirSync(path.dirname(weightsPath), { recursive: true })
+        copyFileSync(seedPath, weightsPath)
+        notes.push(
+          `已从封存起点播种权重 tmp/${course}/weights.json ← ${path.relative(REPO_ROOT, seedPath)}`,
+        )
+      } else {
+        seedWeightsFromBc(course, weightsPath) // 缺文件即抛 → 调用方响亮失败（不静默跑新权）
+        notes.push(`已播种初始权重 tmp/${course}/weights.json`)
+      }
     }
   }
   const traj = path.join(trajRoot, course)
@@ -276,6 +293,20 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
     validateCourseName(c)
     assertCourseExists(c)
     const bc = isBcCourse(c)
+    // ★ 起点解析（G4-①）也是**读**，和下面的检查同区（拒绝 = 零副作用）：封存起点解析不到
+    //   就响亮拒，绝不退回 BC 播种（那会静默拿错起点）。
+    let seedPath: string | undefined
+    if (opts.seedFrom) {
+      const found = resolveArchivedSeedPath(opts.seedFrom.sourceCourse, opts.seedFrom.it)
+      if (!found) {
+        throw new ActionError(
+          `起点不可用：封存课 ${opts.seedFrom.sourceCourse} 的 it${opts.seedFrom.it} 在 ` +
+            'nn-training/weights/ 下找不到归档权重（先确认它确实被封存过、该轮在关键轮里）。' +
+            '本次开课未写任何东西。',
+        )
+      }
+      seedPath = found
+    }
     // ① **先做全部会拒绝的检查**（零副作用），再进写面。
     //    2026-09-20 实测的顺序坑：检查原本排在写面**之后** ⇒ 被拒的那一次照样写了课程旋钮 +
     //    **开课标记**（而标记就是训练侧/hub 的「在训」闸！）⇒ 回执照说「未开课」，盘上却已
@@ -340,7 +371,7 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
         ? [`已清理 legacy 传输配置 ${pruned.removed.length} 项（课程与 worker 节点正交）`]
         : []),
       `暂停意图：${resume.ok ? resume.message : `未改动（${resume.message}）`}`,
-      ...prepareCourseForOpen(c).notes,
+      ...prepareCourseForOpen(c, seedPath).notes,
       // §5.3 起点-基线对照行（plan/accident.plan.md）：C 事故里「本腿恢复的权重已经在 bc
       // 权重那一档、却拿满额锚去拉」这个事实，开课前盘上就有——放在回执里，操作员点开课时
       // 直接看见。与训练侧 `loop_lifecycle._kickstart_baseline_row` 同源同数（同一份账本、

@@ -39,7 +39,7 @@ export function sanitizeViewCourse(raw: string | null): string {
  *  里尚未落盘的课也收」的回填会把它重新捞回来，课程 select 与开课弹窗里于是仍然看得见
  *  一门已经封存的课（G2「不进活体视图」直接落空）。所以排除判据只能建在
  *  `archive-manifest.json` 的存在上，不能指望「tmp 没了它自然消失」。 */
-export function discoverCourses(max = 500): string[] {
+export function discoverCourses(max = 500, archivedNames?: Set<string>): string[] {
   const out: Array<{ name: string; mtime: number }> = []
   const seen = new Set<string>()
   try {
@@ -73,7 +73,9 @@ export function discoverCourses(max = 500): string[] {
   } catch {
     /* no curricula dir — fall through */
   }
-  const archived = archivedCourseSet()
+  // 已封存集合可由调用方传入（`/api/state` 已经为 `archived` 读面解析过一遍 manifest——
+  // 不传就再解析一遍：13 门 ×~20 KB 可忽略，门数上百才是每 3 秒两次 `JSON.parse`）。
+  const archived = archivedNames ?? archivedCourseSet()
   return out
     .filter((c) => !archived.has(c.name))
     .sort((a, b) => b.mtime - a.mtime)

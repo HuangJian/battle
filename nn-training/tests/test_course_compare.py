@@ -166,6 +166,17 @@ def test_iters_default_is_intersection_and_explicit_allows_gaps(tmp_path):
     assert n9["b"] == "1.00"
 
 
+def test_string_numeric_value_is_missing_not_zero(tmp_path):
+    """★ 字符串 `kills` 是**缺键**（既不进 low_pct 分子也不进分母），不是零杀。旧实现
+    `_present` 收 str 而 `_num` 拒 str，会把字符串当 0 静默拉低低杀率。"""
+    a = tmp_path / "a"
+    _write(a, [_row(1, 1, kills="3"), _row(1, 2, kills=9)])
+    res = CC.compare_iters(a, a)
+    by = {r["key"]: r["a"] for r in res["rows"]}
+    assert by["low_pct"] == "0.00"  # 分母 1（只第 2 行有效），9<=3 为假
+    assert by["mean"] == "9.00"  # 字符串不计入均值
+
+
 def test_p10_is_nearest_rank_and_low_rate():
     rows = [_row(1, s, kills=k) for s, k in enumerate([0, 1, 2, 3, 10, 20, 30, 40, 50, 60])]
     summ = CC.summarize(rows)

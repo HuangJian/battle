@@ -358,11 +358,14 @@ export function App({ initial }: AppProps) {
   const handleOpenCourse = async (opts: {
     trainMode: TrainMode
     rolloutSrc?: RolloutSrcMode
+    seedFrom?: { sourceCourse: string; it: number }
   }): Promise<void> => {
     setOpenCourseModal(false)
     await doAction('openCourse', {
       trainMode: opts.trainMode,
       ...(opts.rolloutSrc ? { rolloutSrc: opts.rolloutSrc } : {}),
+      // 起点权重（G4-①）：只传 `{sourceCourse, it}`，路径由服务端按 manifest 自解析。
+      ...(opts.seedFrom ? { seedFrom: opts.seedFrom } : {}),
     })
   }
 
@@ -634,6 +637,7 @@ export function App({ initial }: AppProps) {
           open={openCourseModal}
           course={viewCourse}
           modes={stateView.modes}
+          archived={stateView.archived}
           onClose={() => setOpenCourseModal(false)}
           onConfirm={(opts) => void handleOpenCourse(opts)}
           readOnly={readOnly}
