@@ -538,3 +538,23 @@ def test_bc_c4_v3_corpus_scaled_up() -> None:
     assert str(c.train.fire_pos_weight) == "auto"
     assert c.eval.games_per_stage >= 30
     assert c.train.seed == 1234  # R1 两臂统一口径的锚
+
+
+# --------------------------------------------------
+# 课程 `eval` 块（2026-09-13 BC 每-epoch 评估；2026-09-26 自 test_bc_epoch_resume 分家）
+# --------------------------------------------------
+
+
+def test_bc_course_eval_block_multi_level() -> None:
+    from rl.bc_config import load_bc_course
+
+    c = load_bc_course("bc-c4")
+    assert c.eval.enabled is True
+    assert c.eval.every_epochs == 10
+    assert c.eval.games_per_stage == 10
+    assert c.eval.levels == ["arena4", "arena6"]  # 多地图
+
+def test_bc_course_eval_block_default_off() -> None:
+    from rl.bc_config import load_bc_course
+
+    assert load_bc_course("bc-e2e").eval.enabled is False  # 夹具不配 eval

@@ -1,9 +1,10 @@
 """PPO on-policy policy gradient backend.
 
 Sub-modules:
-  engine  - build_ppo / ppo_update / load_episodes / discover_rl_shards / ...
-  common  - masked_logsoftmax / compute_gae / discover_shards / load_shard_fields / ...
-  np_core - ppo/common 的**纯 numpy/stdlib 核心**（torch-free）
+  engine  - build_ppo / ppo_update / PPO 更新循环（torch）
+  common  - masked_logsoftmax / cat_logprob / sync_scalars / ckpt（torch）
+  np_core - **纯 numpy/stdlib 核心**（torch-free）：GAE / shard 发现装载 / episode
+            捆绑（load_episodes、discover_rl_shards、load_shard）/ XLA 助手
   goal    - GoalNet RL adapter (goal-step PPO)
   intent  - IntentNet RL adapter (intent-step semi-MDP)
   bench   - PPO benchmark script
@@ -16,6 +17,10 @@ Sub-modules:
 台阶还得踩到底（同日修正）：**惰性还不够，指向还得对**。首版把 `compute_gae` /
 `chunk_episodes` / `discover_shards` / `load_shard_fields` 都指向 `ppo.common`——那是再
 导出的旧家 ⇒ `ppo.compute_gae` 依旧拖 torch。见 `_EXPORTS` 的注释。
+
+第三次踩（同日）：`discover_rl_shards` / `load_episodes` / `load_shard` 随 per-tick
+shard 装载从 `ppo/engine` 搬进 `ppo/np_core` ⇒ 便捷名同步改指 `ppo.np_core`。
+（`ppo.load_episodes` 此前必拖 torch，`e2e/test_run_rl` 的无 torch 路径因此收集失败。）
 """
 
 from __future__ import annotations
@@ -34,12 +39,12 @@ _EXPORTS: dict[str, str] = {
     "chunk_episodes": "ppo.np_core",
     "compute_gae": "ppo.np_core",
     "discover_shards": "ppo.np_core",
+    "discover_rl_shards": "ppo.np_core",
+    "load_episodes": "ppo.np_core",
+    "load_shard": "ppo.np_core",
     "load_shard_fields": "ppo.np_core",
     "masked_logsoftmax": "ppo.common",
     "build_ppo": "ppo.engine",
-    "discover_rl_shards": "ppo.engine",
-    "load_episodes": "ppo.engine",
-    "load_shard": "ppo.engine",
     "ppo_update": "ppo.engine",
 }
 

@@ -6,7 +6,12 @@
   —— Kaggle 面板 TPU 利用率近 0、CPU 满；PPO 单步 **8~9s**（本地 CPU 基准 ~4.7s/step、
      TPU 工作参考 ~44ms）。
 
-本文件钉住两件事（都在 `ppo/common.py` + `remote/worker.py`，纯函数 + 源码守线）：
+本文件钉住两件事（都在 `ppo/np_core.py` + `remote/train_core.py`，纯函数 + 源码守线）：
+
+2026-09-26：`--device tpu` 的判据与诊断（`tpu_backend_missing_reason` / `xla_fingerprint` /
+`xla_device_speed_probe` / `xla_mark_step` …）随「免 torch 半边」搬进 `ppo/np_core`（顶层零
+torch，torch/torch_xla 全部延迟 import）⇒ 本文件不再 import torch（此前只因为这些名字从
+`ppo.common` 取，整个文件在无 torch 机上收集失败——判据本身一行都没碰 torch）。
 
   ① **判据**：`tpu_backend_missing_reason()` 从**后端指纹**判「这不是 TPU」——
      `device_type != TPU` 或设备属性里没有 `coords`/`core_on_chip`（XLA 的 CPU 插件没有
@@ -27,7 +32,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ppo.common import (
+from ppo.np_core import (
     _SPEED_PROBE,
     TPU_ATTR_KEYS,
     tpu_backend_missing_reason,

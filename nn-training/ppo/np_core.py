@@ -2,8 +2,9 @@
 
 ppo/common.py 混装两类东西：
   * numpy/stdlib：GAE、shard 发现/装载、episode 装载骨架（load_episodes_common）、
-    minibatch 切分、per-stage 配额截断、XLA 文本指标解析、TPU 指纹判据、
-    numpy RNG 状态打包；
+    **per-tick RL shard 装载（_RL_SHARD_SPEC / load_shard / load_episodes，2026-09-26
+    自 ppo/engine.py 搬来）**、minibatch 切分、per-stage 配额截断、XLA 文本指标解析、
+    TPU 指纹判据、numpy RNG 状态打包；
   * torch 张量：masked_logsoftmax / approx_kl_est / sync_scalars / 设备助手 / ckpt。
 前者被大量「业务逻辑」用例使用，却因同住一个模块而被 torch 拖进测试路径。
 2026-09-26 拆出本模块（torch-free）；`ppo/common.py` 从这里再导出，调用点一行不改。
@@ -11,6 +12,7 @@ ppo/common.py 混装两类东西：
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
@@ -108,6 +110,161 @@ def tpu_backend_missing_reason(fp: dict) -> str:
     if attrs and not any(k in str(attrs) for k in TPU_ATTR_KEYS):
         return f"设备属性里没有 TPU 指纹（attrs={attrs}）"
     return ""
+
+# ---------------- XLA 设备 / 诊断助手（2026-09-26 从 ppo/common.py 搬来） ----------------
+# 顶层零 torch：torch / torch_xla 全部延迟到调用点（未装 torch_xla 的机器行为逐字节不变）。
+# 为什么搬：这一簇本就是「判据 + 诊断」（读设备属性 / 打一行自检日志），却与 torch 张量
+# 助手同住 ppo/common.py ⇒ 想测它们的用例只能连坐 torch（tests/test_tpu_backend_guard.py）。
+
+def xla_device():
+    """取 XLA 设备句柄。优先 `torch_xla.device()`（2.5+ 推荐），旧版回退 `xm.xla_device()`。
+
+    2026-09-10 实测：Kaggle TPU 镜像的 torch_xla 会给 `xm.xla_device()` 发
+    DeprecationWarning（"Use torch_xla.device instead"）。两条都保留是为了跨版本可用。
+    """
+    import torch_xla
+    import torch_xla.core.xla_model as xm
+
+    dev_fn = getattr(torch_xla, "device", None)
+    if callable(dev_fn):
+        return dev_fn()
+    return xm.xla_device()
+
+
+def optimizer_step(opt, device) -> None:
+    """设备感知的优化器步进：XLA 走 xm.optimizer_step，其余 == 裸 opt.step()。"""
+    if is_xla(device):
+        import torch_xla.core.xla_model as xm
+
+        xm.optimizer_step(opt)
+    else:
+        opt.step()
+
+
+def xla_mark_step(device) -> None:
+    """XLA 图执行边界（非 XLA 设备为 no-op）——保证 host 侧读到的权重是最新值。"""
+    if is_xla(device):
+        import torch_xla
+        import torch_xla.core.xla_model as xm
+
+        # 2.5+ 把 mark_step 改名为 sync()；两个都探，兼容旧版。
+        for _name in ("sync", "mark_step"):
+            _fn = getattr(torch_xla, _name, None)
+            if callable(_fn):
+                _fn()
+                return
+        xm.mark_step()
+
+
+#: 设备自检的缓存（同一进程只测一次——它含一次 XLA 编译，按 job 跑会白付 300 次）。
+_SPEED_PROBE: dict[str, float] = {}
+
+
+def xla_fingerprint(device: object = None) -> dict:
+    """XLA 运行时的**后端指纹**（诊断与护栏用，2026-09-22）。
+
+    为什么需要：`xla_device()` 在 **CPU 后端**上照样返回 `xla:0`（XLA 的 CPU 插件是合法后端），
+    于是「`--device tpu`」可能整段跑在 CPU 上，而日志里看不出任何异常——2026-09-22 Kaggle
+    TPU 实例上离线课程 PPO 单步 8~9s（本地 CPU 基准 ~4.7s/step、TPU 参考 ~44ms）就是这个嫌疑。
+
+    **别拿 `world_size()` 当判据**：torch_xla 源码里无复制时它恒为 1（同一次实测：
+    `world_size=1` 而 `global_device_count=8`、`device_type=TPU`、matmul 快 12×）。
+
+    返回（读不到的项记 None，**绝不抛**——诊断不能反过来把训练搞挂）：
+      device_type              —— `torch_xla.runtime.device_type()`（= PJRT_DEVICE 的设备名部分）
+      global_device_count      —— XLA 运行时看到的设备总数（TPU v5e-8 = 8；CPU 后端 = 1）
+      addressable_device_count —— 本进程可见设备数
+      replication_devices      —— `_xla_get_replication_devices_count()`（0 = 无复制）
+      world_size               —— 仅记录（见上，**不是** TPU 判据）
+      attrs                    —— 设备属性原文（TPU 有 `coords`/`core_on_chip`）
+    """
+    out: dict = {
+        "device_type": None,
+        "global_device_count": None,
+        "addressable_device_count": None,
+        "replication_devices": None,
+        "world_size": None,
+        "attrs": None,
+    }
+    try:
+        import torch_xla
+        import torch_xla.runtime as xr
+    except Exception:
+        return out
+    for key, fn in (
+        ("device_type", lambda: xr.device_type()),
+        ("global_device_count", lambda: xr.global_device_count()),
+        ("addressable_device_count", lambda: xr.addressable_device_count()),
+        ("world_size", lambda: xr.world_size()),
+    ):
+        try:
+            out[key] = fn()
+        except Exception:
+            pass
+    try:
+        out["replication_devices"] = int(
+            torch_xla._XLAC._xla_get_replication_devices_count()
+        )
+    except Exception:
+        pass
+    try:
+        dev = str(device) if device is not None else str(xla_device())
+        out["attrs"] = str(xr.runtime_device_attributes(dev))
+    except Exception:
+        pass
+    return out
+
+
+
+def xla_device_speed_probe(device: object, *, n: int = 2048) -> float | None:
+    """一次 `n×n` matmul 的墙钟（秒）——**同一进程只测一次**，失败返回 None。
+
+    为什么它值得：TPU 与 CPU 的 XLA 后端在这一项上差一个数量级（Kaggle v5e-8 实测
+    **1.5ms vs 17.9ms**，快 12×）⇒ 它能把「日志说 TPU、实际跑 CPU」的静默降级照出来
+    （`xla_device()` 两种后端都返回 `xla:0`，指纹之外只剩速度能区分）。
+    """
+    key = str(device)
+    if key in _SPEED_PROBE:
+        return _SPEED_PROBE[key]
+    try:
+        import torch
+
+        # device 是 XLA 设备对象（torch 的 device 形参类型桩不认它）——显式 cast 说明意图。
+        dev = cast(Any, device if device is not None else xla_device())
+        a = torch.randn(n, n, device=dev)
+        b = torch.randn(n, n, device=dev)
+        t0 = time.perf_counter()
+        (a @ b).cpu()
+        xla_mark_step(dev)
+        sec = time.perf_counter() - t0
+    except Exception:
+        return None
+    _SPEED_PROBE[key] = sec
+    return sec
+
+
+def xla_world_size() -> int | None:
+    """TPU 核数（诊断/日志用，2026-09-11）。新版 torch_xla 挪到
+    torch_xla.runtime.world_size()；旧版 xm.xrt_world_size()。非 TPU 或读不到
+    返回 None（延迟 import，未装 torch_xla 的机器行为不变）。
+
+    ⚠ 2026-09-22 更正：torch_xla 的 `runtime.world_size()` 在**无复制时恒为 1**
+    （源码：`_xla_get_replication_devices_count() == 0` ⇒ 1），所以这个数**不能**当
+    TPU 判据（同一次实测 world_size=1 而 global_device_count=8、device_type=TPU）。
+    要判后端用 `xla_fingerprint()`。
+    """
+    try:
+        import torch_xla.runtime as xr
+
+        return int(xr.world_size())
+    except Exception:
+        try:
+            import torch_xla.core.xla_model as xm
+
+            return int(xm.xrt_world_size())
+        except Exception:
+            return None
+
 
 _DUR_RE = re.compile(r"(\d+(?:\.\d+)?)(ms|us|ns|h|m|s)")
 
@@ -406,3 +563,156 @@ def load_episodes_common(
         for e in episodes:
             e["ret"] = (e["ret"] - rmean) / rstd
     return episodes
+
+
+# ---------------- GAE / 装载默认折扣（CLI 可覆盖：ppo/engine.py --gamma/--lam） ----------------
+# R6（2026-08-25 训练质量审计）：GAMMA 0.99 → 0.995——决策间隔 K=10 下有效时域从
+# ~100 决策(16.7s) 拉长到 ~200 决策(33s)，守家/拦截是长时域行为，需要更远的信用回溯。
+# （同批把 VF_COEF 0.5 → 1.0，仍留在 ppo/engine.py。）
+GAMMA = 0.995
+LAM = 0.95
+
+
+# ---------------- RL shard 装载（per-tick / 2026-09-26 从 ppo/engine.py 搬来） ----------------
+# ---------------- trajectory loading ----------------
+# RL shard 字段表：{key: (filename, dtype)} —— 与旧 load_shard 逐字段一致（copy=False 零拷贝）。
+# plan/rl-training-config.md §4.2：per-tick shard 的 reward 由 TS 落盘改为 Python
+# 公式引擎计算——TS 只落 `metrics.npy`（[N+1,21] f8：N 个决策快照 + 1 个终局快照），
+# 加载器读 holder（rl.reward_context）的 RewardFn 按配置公式算 reward。
+_RL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
+    "obs": ("obs.npy", np.uint8),
+    "scalars": ("scalars.npy", np.float32),
+    "a_move": ("a_move.npy", np.int64),
+    "a_fire": ("a_fire.npy", np.int64),
+    "lp_move": ("lp_move.npy", np.float32),
+    "lp_fire": ("lp_fire.npy", np.float32),
+    "value": ("value.npy", np.float32),
+    "metrics": ("metrics.npy", np.float64),
+    "done": ("done.npy", np.int64),
+    "mask": ("mask.npy", np.int64),
+}
+
+
+def discover_rl_shards(root: str) -> list[str]:
+    return discover_shards(root, ("metrics.npy", "obs.npy"))
+
+
+def load_shard(dirpath: str) -> dict[str, np.ndarray]:
+    """读 shard 字段 + manifest → `reward` 由公式引擎按 metrics 算（N 样本）。
+
+    无 holder（reward_fn None）时**响亮报错**——旧 reward.npy 直读路径已随
+    TS 落盘改版删除（历史 run 需在公式引擎下重采，plan §4.2 / §12-2）。
+    """
+    d = load_shard_fields(dirpath, _RL_SHARD_SPEC)
+    metrics = d.pop("metrics")  # [N+1,21]
+    n_obs = int(d["obs"].shape[0])
+    if metrics.shape[0] != n_obs + 1:
+        raise ValueError(
+            f"metrics 行数 {metrics.shape[0]} != nSamples+1={n_obs + 1}（{dirpath}）——"
+            "指标行失配（决策行 + 终局行），shard 损坏或格式不符"
+        )
+    manifest: dict = {}
+    mp = os.path.join(dirpath, "manifest.json")
+    if os.path.exists(mp):
+        with open(mp, encoding="utf-8") as f:
+            manifest = json.load(f)
+    d["reward"] = _reward_from_metrics(metrics, manifest, dirpath)
+    # stage：供 load_episodes_common 的**逐关**配额（target_transitions 路线）分组。
+    # 它不进 episode 字段集（load_episodes_common 显式排除 "stage"），也不是 GAE 输入；
+    # 0 维数组 ⇒ trim_shard_arrays 不会截它。manifest 缺该键时取 -1（所有 shard 归一组，
+    # 配额退化为全局，加载日志里会显示只有 1 个 stage）。
+    d["stage"] = np.asarray(int(manifest.get("stage", -1)))
+    return d
+
+
+def _reward_from_metrics(metrics: np.ndarray, manifest: dict, dirpath: str) -> np.ndarray:
+    """metrics [N+1,29] + manifest {outcome, score} → reward [N]（float32）。
+
+    wrapper（§4.3.3）：Φ = formula(metrics)；r[i] = Φ[i+1]−Φ[i]；末样本 +=
+    reconcile（score_reconcile → scale·score(gated)−(Φ[N]−Φ[0])；toy → terminal）。
+    """
+    from rl.reward_context import current as _ctx_current
+    from rl.reward_library import METRICS_DIM
+
+    ctx = _ctx_current()
+    m = np.asarray(metrics, dtype=np.float64)
+    if m.ndim != 2 or m.shape[1] != METRICS_DIM:
+        raise ValueError(
+            f"metrics 形状应为 [N+1,{METRICS_DIM}]，收到 {m.shape}（{dirpath}）——metrics_version 不匹配？"
+        )
+    mver = manifest.get("metrics_version")
+    if mver is not None and int(mver) != ctx.metrics_version:
+        raise ValueError(
+            f"shard metrics_version={mver} != 期望 {ctx.metrics_version}（{dirpath}）——"
+            "shard 格式版本不匹配，禁止静默错读（评审 LC §1.1）"
+        )
+    if ctx.reward_fn is None:
+        raise RuntimeError(
+            f"metrics shard 需要 RewardFn，但 reward_context holder 未设置（{dirpath}）——"
+            "per-tick 训练请经 `python run_rl.py --course <name>` 启动（奖励唯一定义源=课程配置公式）"
+        )
+    outcome = str(manifest.get("outcome", "timeout"))
+    score = float(manifest.get("score", 0.0))
+    r = ctx.reward_fn(m, outcome, score, ctx.it)
+    return np.asarray(r, dtype=np.float32)
+
+
+def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM) -> dict | None:
+    """流式 backend 接口（rl/stream.py）：单个 shard → 可训练 episode（adv/ret 未归一）。
+
+    ppo_intent.load_episode_from_shard 同签名——run_rollout_stream 以 backend 参数
+    复用同一套流式基础设施（工程化共享，勿在 stream 内复制第二份加载逻辑）。
+    """
+    d = load_shard(dirpath)
+    N = d["obs"].shape[0]
+    if N == 0:
+        return None
+    adv, ret = compute_gae(d["reward"], d["value"], d["done"], gamma, lam)
+    return {
+        "obs": d["obs"],
+        "scalars": d["scalars"],
+        "a_move": d["a_move"],
+        "a_fire": d["a_fire"],
+        "lp_move": d["lp_move"],
+        "lp_fire": d["lp_fire"],
+        "value": d["value"],
+        "adv": adv.astype(np.float32),
+        "ret": ret.astype(np.float32),
+        "mask": d["mask"],
+    }
+
+
+def load_episodes(
+    data_root: str,
+    gamma: float = GAMMA,
+    lam: float = LAM,
+    normalize_adv: bool = True,
+    normalize_ret: bool = False,
+    per_stage_quota: int = 0,
+    bundle: Any = None,
+) -> list[dict]:
+    """Discover trajectory shards under `data_root`, compute per-episode GAE,
+    and normalize advantages across the whole batch. Shared by this CLI's
+    update mode and the run_rl.py loop.
+
+    normalize_ret（R5，默认 False = 历史行为逐字节不变）：True 时 ret 跨 batch
+    归一（mean 0 / std 1，intent 头同款），让 value 头拟合 O(1) 量级目标。
+    备注：GAE 自举仍用 rollout 时 head 输出的原始尺度 V——baseline 不改变策略
+    梯度的无偏性，只改变方差；当前 V 近乎常数（MSE≫return 方差）时归一化只会
+    把 baseline 从"无"变"有"，不会变坏。stream 路径不走本函数（见
+    rl/stream.py），该 flag 只覆盖串行（local/remote）路径。
+    """
+    return load_episodes_common(
+        data_root,
+        label="ppo",
+        shard_kind="RL",
+        need_files=("metrics.npy", "obs.npy"),
+        shard_loader=load_shard,
+        gae=lambda d: compute_gae(d["reward"], d["value"], d["done"], gamma, lam),
+        gae_name="GAE",
+        normalize_adv=normalize_adv,
+        normalize_ret=normalize_ret,
+        per_stage_quota=per_stage_quota,
+        # ★ 2026-09-24（日志节食）：装载读数攒进调用方的那一行（None = 逐字节原行为）。
+        bundle=bundle,
+    )

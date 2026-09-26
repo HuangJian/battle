@@ -4134,4 +4134,21 @@ skip torch 用例（掩盖覆盖；torch 真缺失时应当**红**）；③ 为�
 
 **违反后果**：从再导出点 import ⇒ torch 被拖回测试路径（拆分白做）；monkeypatch 打在旧家 ⇒
 静默失效，用例看着绿而根本没测到东西。
+
+### 补记（同日第三轮）：`engine` 的装载半边 + 三份测试分家（2875 → **2907 passed**）
+
+- **生产两刀**：XLA 设备/诊断助手从 `ppo/common.py`、trajectory 装载半边（含 `GAMMA`/`LAM`
+  权威定义）从 `ppo/engine.py`，两簇都**一行不碰 torch** ⇒ 都搬 `ppo/np_core`，两处再导出；
+  `ppo/__init__._EXPORTS` 三个便捷名同步改指 np_core（**第三次**踩「指向没随函数搬家」）。
+- **测试三处纯搬迁**（新文件顶层零 torch）：`test_np_core.py`（9，自 `test_ppo_common`）、
+  `test_bc_resume_store.py`（4，自 `test_bc_epoch_resume`）、评估块 2 条入 `test_bc_course`；
+  `test_metrics_shard` 就地改取 `ppo.np_core.load_episodes`。搬迁完备性用 **nodeid 多重集逐条相同**
+  （真 torch 两侧各 3008）证明，不靠行数。
+- **新铁律（与上一条同族）**：**「没人 `import` 这个名字」≠「没人在属性上取它」**——删掉 ruff 判
+  F401 的再导出（`engine.compute_gae` 等四个）⇒ `test_ppo_goal` 当场 AttributeError；已加身份守卫。
+- **测量口径**：`-o addopts=""` 重置 addopts（否则 addopts 里的 `-x` 会在首个红处把各 worker
+  截断，passed 偏小）；worktree 对比须 `NN_PY=<主树 venv python>`；worktree 建在仓库内会让
+top 层源码扫描类闸（`bun test`）成批**假红**，比完立即 `git worktree remove`。
+- **不动**：`test_backend_contract` 改源码扫描会换掉 `isinstance(RolloutBackend)` 这条真结构断言
+  （需单独决策）；`ppo/goal|intent` 的 `compute_gae_variable` 是各线 `GAMMA_TICK` **别名**不是重复实现。
 —— 全文（逐项拆分理由 / 测量数据 / 守卫清单）→ `docs/nn/engineering.md` §29

@@ -100,6 +100,71 @@ nn-training 的 python 门禁里有 31 个测试文件因 `import torch`（或�
 bundle）、`test_remote_ppo` 2 条要真 `state_dict` 序列化 / 真张量注入 NaN、`e2e/test_bc_epoch_e2e`
 1 条是真 BC 训练 e2e。⇒ 免 torch 面收敛到 **2875 passed / 4 skipped**，剩 **6 个失败用例 + 18 个
 收集失败文件**（后者是 `import torch` 在模块层，要免只能继续拆生产模块，不在本次范围内）。
+### 补记（同日，第三轮）：engine 的装载半边 + 三份测试分家（免 torch 面 2875 → **2907 passed**）
+
+第二轮收尾时剩 **18 个「模块层 `import torch`」的测试文件**（收集期就红）。这一轮按
+「**先看依赖长在谁身上**」逐个判，能整文件救回的只有两条，其余要拆生产模块或改测试归属：
+
+**① 生产侧一刀：`ppo/engine.py` 的 trajectory 装载半边 → `ppo/np_core.py`**
+
+`engine.py` 里 `_RL_SHARD_SPEC` / `discover_rl_shards` / `load_shard` / `_reward_from_metrics` /
+`load_episode_from_shard` / `load_episodes` 六者**一行都不碰 torch**（numpy + `rl.reward_*`），
+却与 PPO 更新循环同住一个顶层 `import torch` 的模块。整块搬进 `ppo/np_core`（与
+`load_episodes_common` 合家），`GAMMA` / `LAM` 的**权威定义**也一并搬去（装载默认值，
+R6 收紧理由随迁；engine 仍 `--gamma/--lam` 覆盖）⇒ `ppo.engine.load_episodes` 等访问点由
+engine 再导出，`rl/stream.py` / `remote/train_core.py` / `ppo/bench.py` 一行不改。
+`ppo/__init__._EXPORTS` 里 `discover_rl_shards` / `load_episodes` / `load_shard` 三个便捷名
+同步改指 `np_core`——**这是本会话第三次踩「指向没随函数搬家」**（第一次 `compute_gae` 等四个、
+第二次 `_XLA_CACHE_STATE`）；判据固定：**名字指向哪家，就看谁定义它**。
+
+**①b 同一刀的另一半：XLA 设备/诊断助手也从 `common.py` 搬进 `np_core`**（上一轮实现、本轮一并交付）：
+`xla_device` / `optimizer_step` / `xla_mark_step` / `_SPEED_PROBE` / `xla_fingerprint` /
+`xla_device_speed_probe` / `xla_world_size` 本就顶层零 torch（torch / torch_xla 全部延迟 import），
+却与 torch 张量助手同住 `ppo/common.py` ⇒ 逼得「只测 TPU 判据」的 `test_tpu_backend_guard.py`
+连坐 torch（收集期就红）。搬走后该文件改从 `ppo.np_core` 取判据函数，**整文件免 torch**
+（它守的那条源码线本来就读 `remote/train_core.py`，与判据函数的家无关）。
+命名面用脚本对账（`names(HEAD 版) − names(工作树)`）核过：`common` 只少 `cast` / `time` 两个
+不再用的 import，其余名称一条不丢（全部经再导出保留）；`engine` 只少 `_reward_from_metrics`
+（私有，仅 engine 自用）与 `json` / `npt`。
+
+**② 测试侧三处分家（纯搬迁，测试名多重集逐条相同）**
+
+| 新家（免 torch） | 从哪搬 | 条数 | 为什么这些条能免 |
+|---|---|---|---|
+| `tests/test_np_core.py` | `test_ppo_common.py` | 9 | 只吃 np_core：GAE 手算/退化、`chunk_episodes` 对齐、RNG 打包往返、shard 发现/字段表、`load_episodes_common` 的 ret 归一 |
+| `tests/test_bc_resume_store.py` | `test_bc_epoch_resume.py` | 4 | 只碰 `_JobStore`（resume 单文件 + 指标 jsonl + 租约门，假时钟注入）——原文件为 2 条真训练用例付了整文件的 torch 代价 |
+| `test_bc_course.py`（既有） | `test_bc_epoch_resume.py` | 2 | 课程 `eval` 块解析，属 bc_config 课程 schema |
+| `test_metrics_shard.py`（就地改 import） | — | 5 | 只 `from ppo import engine` 取 `engine.load_episodes` ⇒ 改直取 `ppo.np_core.load_episodes` |
+
+**测量**（`tmp/wt-before` worktree at `d23ad38` vs 工作树，**同一条命令**）：
+
+| | passed | failed | skipped | 收集错误文件 |
+|---|---|---|---|---|
+| before（`d23ad38`） | 2872 | 9* | 4 | 18 |
+| after | **2907** | 6 | 4 | **16** |
+
+\* before 的 9 条里有 3 条是 `test_common_layer` 在 worktree 里的**环境假红**（同文件在主树 17/17 绿），
+净判据是 passed **+35**。收集面也做了**纯搬迁证明**：真 torch 下 `--collect-only` 两侧 nodeid 各
+**3008** 条，把文件名抹掉后测试名多重集**逐条相同**，只有两个新文件路径出现 ⇒ 没有丢也没有重复。
+
+**新坑（已加守卫）：删「没人 `import` 的再导出」不等于安全**
+
+搬走装载块后，engine 里 `compute_gae` / `discover_shards` / `load_episodes_common` /
+`load_shard_fields` 四个名字被 ruff 判 F401 死代码（search 不到 `import 它们` 的地方），删掉后
+门禁当场红：`tests/test_ppo_goal.py::test_dt1_degradation` 用 `import ppo.engine as ppo` 后
+`ppo.compute_gae(...)` 当定长参照。**「没人 `import` 这个名字」≠「没人在属性上取它」**。
+守卫落 `test_ppo_common.py::test_engine_and_common_still_re_export_the_np_core_names`
+（逐名 `is` 断言两条再导出链 + 根级便捷名）。
+
+**剩下 16 个文件**：多数是真 torch（`test_rl_model` / `test_student_model` / `test_bc_masked` /
+`test_shard_split` 要走 `DataLoader`、`test_backend_contract` 要真 import 三个后端、
+`test_bc_epoch_resume` 剩的 2 条真跑 `bc_train`）。⚠ **AST 说「这函数不引 `torch`」不等于
+「这条用例不要 torch」**：`test_ppo_demo_mix` / `test_ppo_kickstart_cache` / `test_ppo_scalar_sync`
+的「免 torch」用例是把 numpy 交给 `ppo_update`（engine 内部转张量）；`test_ppo_numerics` 的
+KL 三条经 `_sample_logprobs` 造的是 torch 张量。可动的只剩两类，都不便宜：
+(a) `test_backend_contract` 改用**源码扫描**替签名/结构契约（会换掉 `isinstance(RolloutBackend)`
+这条真结构断言，需单独决策）；(b) `ppo/goal.py` / `ppo/intent.py` 的装载簇搬 np_core——但那些
+`compute_gae_variable` 是**各线自己的 `GAMMA_TICK` 别名**（不是重复实现），搬走反而丢语义。
 
 ---
 

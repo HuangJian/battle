@@ -16,14 +16,19 @@ checkpoint(RNG) / shard 发现与加载 / episode 骨架 样板。本模块把�
     日志前缀/措辞按原样参数化。
   * _ppo_save / _ppo_load / _pack_np_state / _unpack_np_state 原样搬移——
     ppo_intent 原内联的 checkpoint 段改为调用本实现（逐字节相同）。
+
+2026-09-26（续扫「免 torch 半边」）：**XLA 设备 / 诊断助手**（xla_device / optimizer_step /
+  xla_mark_step / _SPEED_PROBE / xla_fingerprint / xla_device_speed_probe / xla_world_size）
+  也搬到 ppo/np_core——它们本就顶层零 torch（全部延迟 import），却与 torch 张量助手同住这里，
+  逼得「测判据」的用例连坐 torch。这里再导出，既有调用点（engine / intent / goal / train_core）
+  一行不改。
 """
 
 from __future__ import annotations
 
 import json
 import os
-import time
-from typing import Any, cast
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -34,6 +39,7 @@ import torch.nn.functional as F
 # 这里再导出，既有 `from ppo.common import compute_gae / chunk_episodes / ...` 一行不改。
 from ppo.np_core import (  # noqa: F401  (re-export：既有调用点不变)
     _DUR_RE,
+    _SPEED_PROBE,
     _UNIT_SEC,
     _XLA_CACHE_STATE,
     TPU_ATTR_KEYS,
@@ -49,18 +55,48 @@ from ppo.np_core import (  # noqa: F401  (re-export：既有调用点不变)
     is_xla,
     load_episodes_common,
     load_shard_fields,
+    optimizer_step,
     tpu_backend_missing_reason,
     trim_shard_arrays,
     xla_delta_str,
+    xla_device,
+    xla_device_speed_probe,
     xla_enable_compile_cache,
+    xla_fingerprint,
+    xla_mark_step,
     xla_metrics_delta,
     xla_metrics_snapshot,
+    xla_world_size,
 )
 
 # 统一时间戳日志（与 ppo 旧 log 逐字节一致）。**再导出**：ppo.intent / ppo.engine /
 # ppo.goal / train.goal_bc 都从本模块取 `log`（load_episodes_common 搬去 np_core 后，
 # 本模块自身不再直接调用它 ⇒ 显式 `log as log` + noqa 标成公开再导出，勿当死代码删）。
 from rl.log import log as log
+
+
+# ---------------- 标量同步（N 次 device→host 同步收成 1 次） ----------------
+def sync_scalars(values: dict[str, torch.Tensor]) -> dict[str, float]:
+    """把一组 device 标量张量用**一次**同步搬回主机（N 次 ``.item()`` → 1 次）。
+
+    为什么（2026-09-10）：三后端每个梯度步各有 6-8 处 ``.item()``/``float()``。CPU 上
+    近乎免费（数据已在主机内存，实测同步税仅 +4 ms/step），但 **CUDA 上每一次都是全设备
+    同步** —— 强制 drain 尚未执行的 kernel 队列，把 CPU 与 GPU 的流水线彻底串行化。
+    per-tick 每轮 148 个梯度步 × 8 次 = **1184 次强制同步/轮**；GPU 侧实测利用率仅
+    ~3%（236 GFLOP/s vs T4 fp32 峰值 8.1 TFLOPS），同步串行化是首要嫌疑，而 CPU 基准
+    对这个开销**完全失明**（这正是它必须按设备分别实测的原因）。
+
+    数值逐位不变：``torch.stack(...).tolist()`` 只 materialize 一次，每个元素与逐项
+    ``float(t.item())`` 返回**同一个 Python float**（float32 → double 无损；混合 dtype
+    由 torch 提升到公共 dtype，不会截断）。
+
+    入参张量会被 ``reshape(())`` 规整为标量；请只传 0 维或单元素张量。
+    """
+    if not values:
+        return {}
+    keys = list(values)
+    stacked = torch.stack([values[k].detach().reshape(()) for k in keys]).tolist()
+    return dict(zip(keys, stacked, strict=True))
 
 
 # ---------------- policy helpers ----------------
@@ -115,183 +151,6 @@ def approx_kl_est(lp_old: torch.Tensor, lp_new: torch.Tensor) -> torch.Tensor:
 #   2. state_dict() 里的参数/动量是 XLATensor，torch.save 会 pickle 出设备张量，
 #      跨机 torch.load 还原即炸 —— 必须先物化到 CPU 再落盘。
 # 下面两个助手在 CPU/CUDA 上是**恒等操作**：数值、行为、落盘张量全部不变
-# （AGENTS §2.3 确定性承诺不受影响）。XLA 相关 import 全部延迟到调用点，
-# 保证「未装 torch_xla 的机器」行为与今日逐字节相同。
-
-
-
-def sync_scalars(values: dict[str, torch.Tensor]) -> dict[str, float]:
-    """把一组 device 标量张量用**一次**同步搬回主机（N 次 ``.item()`` → 1 次）。
-
-    为什么（2026-09-10）：三后端每个梯度步各有 6-8 处 ``.item()``/``float()``。CPU 上
-    近乎免费（数据已在主机内存，实测同步税仅 +4 ms/step），但 **CUDA 上每一次都是全设备
-    同步** —— 强制 drain 尚未执行的 kernel 队列，把 CPU 与 GPU 的流水线彻底串行化。
-    per-tick 每轮 148 个梯度步 × 8 次 = **1184 次强制同步/轮**；GPU 侧实测利用率仅
-    ~3%（236 GFLOP/s vs T4 fp32 峰值 8.1 TFLOPS），同步串行化是首要嫌疑，而 CPU 基准
-    对这个开销**完全失明**（这正是它必须按设备分别实测的原因）。
-
-    数值逐位不变：``torch.stack(...).tolist()`` 只 materialize 一次，每个元素与逐项
-    ``float(t.item())`` 返回**同一个 Python float**（float32 → double 无损；混合 dtype
-    由 torch 提升到公共 dtype，不会截断）。
-
-    入参张量会被 ``reshape(())`` 规整为标量；请只传 0 维或单元素张量。
-    """
-    if not values:
-        return {}
-    keys = list(values)
-    stacked = torch.stack([values[k].detach().reshape(()) for k in keys]).tolist()
-    return dict(zip(keys, stacked, strict=True))
-
-
-def xla_device():
-    """取 XLA 设备句柄。优先 `torch_xla.device()`（2.5+ 推荐），旧版回退 `xm.xla_device()`。
-
-    2026-09-10 实测：Kaggle TPU 镜像的 torch_xla 会给 `xm.xla_device()` 发
-    DeprecationWarning（"Use torch_xla.device instead"）。两条都保留是为了跨版本可用。
-    """
-    import torch_xla
-    import torch_xla.core.xla_model as xm
-
-    dev_fn = getattr(torch_xla, "device", None)
-    if callable(dev_fn):
-        return dev_fn()
-    return xm.xla_device()
-
-
-def optimizer_step(opt, device) -> None:
-    """设备感知的优化器步进：XLA 走 xm.optimizer_step，其余 == 裸 opt.step()。"""
-    if is_xla(device):
-        import torch_xla.core.xla_model as xm
-
-        xm.optimizer_step(opt)
-    else:
-        opt.step()
-
-
-def xla_mark_step(device) -> None:
-    """XLA 图执行边界（非 XLA 设备为 no-op）——保证 host 侧读到的权重是最新值。"""
-    if is_xla(device):
-        import torch_xla
-        import torch_xla.core.xla_model as xm
-
-        # 2.5+ 把 mark_step 改名为 sync()；两个都探，兼容旧版。
-        for _name in ("sync", "mark_step"):
-            _fn = getattr(torch_xla, _name, None)
-            if callable(_fn):
-                _fn()
-                return
-        xm.mark_step()
-
-
-#: 设备自检的缓存（同一进程只测一次——它含一次 XLA 编译，按 job 跑会白付 300 次）。
-_SPEED_PROBE: dict[str, float] = {}
-
-
-def xla_fingerprint(device: object = None) -> dict:
-    """XLA 运行时的**后端指纹**（诊断与护栏用，2026-09-22）。
-
-    为什么需要：`xla_device()` 在 **CPU 后端**上照样返回 `xla:0`（XLA 的 CPU 插件是合法后端），
-    于是「`--device tpu`」可能整段跑在 CPU 上，而日志里看不出任何异常——2026-09-22 Kaggle
-    TPU 实例上离线课程 PPO 单步 8~9s（本地 CPU 基准 ~4.7s/step、TPU 参考 ~44ms）就是这个嫌疑。
-
-    **别拿 `world_size()` 当判据**：torch_xla 源码里无复制时它恒为 1（同一次实测：
-    `world_size=1` 而 `global_device_count=8`、`device_type=TPU`、matmul 快 12×）。
-
-    返回（读不到的项记 None，**绝不抛**——诊断不能反过来把训练搞挂）：
-      device_type              —— `torch_xla.runtime.device_type()`（= PJRT_DEVICE 的设备名部分）
-      global_device_count      —— XLA 运行时看到的设备总数（TPU v5e-8 = 8；CPU 后端 = 1）
-      addressable_device_count —— 本进程可见设备数
-      replication_devices      —— `_xla_get_replication_devices_count()`（0 = 无复制）
-      world_size               —— 仅记录（见上，**不是** TPU 判据）
-      attrs                    —— 设备属性原文（TPU 有 `coords`/`core_on_chip`）
-    """
-    out: dict = {
-        "device_type": None,
-        "global_device_count": None,
-        "addressable_device_count": None,
-        "replication_devices": None,
-        "world_size": None,
-        "attrs": None,
-    }
-    try:
-        import torch_xla
-        import torch_xla.runtime as xr
-    except Exception:
-        return out
-    for key, fn in (
-        ("device_type", lambda: xr.device_type()),
-        ("global_device_count", lambda: xr.global_device_count()),
-        ("addressable_device_count", lambda: xr.addressable_device_count()),
-        ("world_size", lambda: xr.world_size()),
-    ):
-        try:
-            out[key] = fn()
-        except Exception:
-            pass
-    try:
-        out["replication_devices"] = int(
-            torch_xla._XLAC._xla_get_replication_devices_count()
-        )
-    except Exception:
-        pass
-    try:
-        dev = str(device) if device is not None else str(xla_device())
-        out["attrs"] = str(xr.runtime_device_attributes(dev))
-    except Exception:
-        pass
-    return out
-
-
-
-def xla_device_speed_probe(device: object, *, n: int = 2048) -> float | None:
-    """一次 `n×n` matmul 的墙钟（秒）——**同一进程只测一次**，失败返回 None。
-
-    为什么它值得：TPU 与 CPU 的 XLA 后端在这一项上差一个数量级（Kaggle v5e-8 实测
-    **1.5ms vs 17.9ms**，快 12×）⇒ 它能把「日志说 TPU、实际跑 CPU」的静默降级照出来
-    （`xla_device()` 两种后端都返回 `xla:0`，指纹之外只剩速度能区分）。
-    """
-    key = str(device)
-    if key in _SPEED_PROBE:
-        return _SPEED_PROBE[key]
-    try:
-        import torch
-
-        # device 是 XLA 设备对象（torch 的 device 形参类型桩不认它）——显式 cast 说明意图。
-        dev = cast(Any, device if device is not None else xla_device())
-        a = torch.randn(n, n, device=dev)
-        b = torch.randn(n, n, device=dev)
-        t0 = time.perf_counter()
-        (a @ b).cpu()
-        xla_mark_step(dev)
-        sec = time.perf_counter() - t0
-    except Exception:
-        return None
-    _SPEED_PROBE[key] = sec
-    return sec
-
-
-def xla_world_size() -> int | None:
-    """TPU 核数（诊断/日志用，2026-09-11）。新版 torch_xla 挪到
-    torch_xla.runtime.world_size()；旧版 xm.xrt_world_size()。非 TPU 或读不到
-    返回 None（延迟 import，未装 torch_xla 的机器行为不变）。
-
-    ⚠ 2026-09-22 更正：torch_xla 的 `runtime.world_size()` 在**无复制时恒为 1**
-    （源码：`_xla_get_replication_devices_count() == 0` ⇒ 1），所以这个数**不能**当
-    TPU 判据（同一次实测 world_size=1 而 global_device_count=8、device_type=TPU）。
-    要判后端用 `xla_fingerprint()`。
-    """
-    try:
-        import torch_xla.runtime as xr
-
-        return int(xr.world_size())
-    except Exception:
-        try:
-            import torch_xla.core.xla_model as xm
-
-            return int(xm.xrt_world_size())
-        except Exception:
-            return None
-
 
 # ---------------- XLA 步耗诊断（2026-09-22） ----------------
 # 背景：Kaggle v5e-8 上离线课程 PPO 单步 8~10s（同引擎在线课程 ~44ms/step，见 engine.py

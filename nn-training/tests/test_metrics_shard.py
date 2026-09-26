@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ppo import engine
+from ppo.np_core import load_episodes
 from rl.config import load_course
 from rl.reward_context import Scoped, current, reset
 from rl.reward_library import METRIC_INDEX, METRICS_DIM, METRICS_VERSION, build_reward_fn
@@ -98,7 +98,7 @@ def test_load_episodes_reconcile_telescoping(tmp_path: Path) -> None:
             },
         )
     with Scoped(reward_fn=_s4b_fn(), gamma=0.995, lam=0.95, it=1):
-        eps = engine.load_episodes(str(tmp_path), normalize_adv=False)
+        eps = load_episodes(str(tmp_path), normalize_adv=False)
     assert len(eps) == 2
     for e, (name, n, _score, _outcome) in zip(eps, specs, strict=True):
         assert e["obs"].shape[0] == n
@@ -126,7 +126,7 @@ def test_metrics_version_mismatch_loud(tmp_path: Path) -> None:
         Scoped(reward_fn=_s4b_fn(), gamma=0.995, lam=0.95, it=1),
         pytest.raises(ValueError, match="metrics_version=1"),
     ):
-        engine.load_episodes(str(tmp_path))
+        load_episodes(str(tmp_path))
 
 
 def test_no_holder_loud_error(tmp_path: Path) -> None:
@@ -140,7 +140,7 @@ def test_no_holder_loud_error(tmp_path: Path) -> None:
         {"metrics_version": METRICS_VERSION, "nSamples": n, "outcome": "timeout", "score": 0.0},
     )
     with pytest.raises(RuntimeError, match="reward_context holder 未设置"):
-        engine.load_episodes(str(tmp_path))
+        load_episodes(str(tmp_path))
 
 
 def test_row_shape_mismatch_loud(tmp_path: Path) -> None:
@@ -157,7 +157,7 @@ def test_row_shape_mismatch_loud(tmp_path: Path) -> None:
         Scoped(reward_fn=_s4b_fn(), gamma=0.995, lam=0.95, it=1),
         pytest.raises(ValueError, match="指标行失配"),
     ):
-        engine.load_episodes(str(tmp_path))
+        load_episodes(str(tmp_path))
 
 
 def test_same_seed_shards_byte_identical(tmp_path: Path) -> None:

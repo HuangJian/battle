@@ -39,13 +39,11 @@ if _ilu.find_spec("schema") is None:
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
 import argparse
-import json
 import os
 import time
 from typing import Any
 
 import numpy as np
-import numpy.typing as npt
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -62,12 +60,8 @@ from ppo.common import (
     cat_entropy,
     cat_logprob,
     chunk_episodes,
-    compute_gae,
     demo_index,
-    discover_shards,
     is_xla,
-    load_episodes_common,
-    load_shard_fields,
     log,
     masked_logsoftmax,
     optimizer_step,
@@ -79,6 +73,28 @@ from ppo.common import (
     xla_metrics_delta,
     xla_metrics_snapshot,
 )
+
+# 2026-09-26：trajectory 装载的**家**在 `ppo/np_core.py`（顶栏注释）；此处仅再导出，
+# 访问点不变（`ppo.engine.load_episodes` / `load_shard` / `_rl_shard_spec`）。
+#
+# ★ `compute_gae` / `discover_shards` / `load_episodes_common` / `load_shard_fields`
+#   这四个也**必须留着**：engine 是对外的访问点——`tests/test_ppo_goal.py` /
+#   `test_ppo_intent.py` 用 `import ppo.engine as ppo` 后把 `ppo.compute_gae(...)`
+#   当定长参照。搬走装载块后它们一度被 ruff F401 判成死代码而删掉，门禁当场红：
+#   **「没人 `import` 这个名字」≠「没人在属性上取」**。
+from ppo.np_core import (  # noqa: F401  (re-export：既有调用点不变)
+    _RL_SHARD_SPEC,
+    GAMMA,
+    LAM,
+    compute_gae,
+    discover_rl_shards,
+    discover_shards,
+    load_episode_from_shard,
+    load_episodes,
+    load_episodes_common,
+    load_shard,
+    load_shard_fields,
+)
 from ppo.trainer import aggregate_stats, tensored_chunks
 from schema import FIRE_DIM, MOVE_DIM
 
@@ -89,8 +105,6 @@ from schema import FIRE_DIM, MOVE_DIM
 #     决策(33s)——守家/拦截是长时域行为，需要更远的信用回溯；
 #   VF_COEF 0.5 → 1.0：价值头训练强度翻倍，缩小 value loss 与 policy loss 的量级差，
 #     让 baseline 脱离噪声、给策略梯度注入真实优势信号。
-GAMMA = 0.995
-LAM = 0.95
 CLIP_EPS = 0.2
 VF_COEF = 1.0
 # ★ ENT_COEF 只是**缺省值**（`ppo_update(ent_coef=None)` 时生效，缺省路径数学逐字节不变）。
@@ -120,148 +134,10 @@ def build_ppo(weights_path: str | None) -> PPOStudent:
     return PPOStudent(h=h or 64, d=d or 8, head_hidden=head_hidden or 128)
 
 
-# ---------------- trajectory loading ----------------
-# RL shard 字段表：{key: (filename, dtype)} —— 与旧 load_shard 逐字段一致（copy=False 零拷贝）。
-# plan/rl-training-config.md §4.2：per-tick shard 的 reward 由 TS 落盘改为 Python
-# 公式引擎计算——TS 只落 `metrics.npy`（[N+1,21] f8：N 个决策快照 + 1 个终局快照），
-# 加载器读 holder（rl.reward_context）的 RewardFn 按配置公式算 reward。
-_RL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
-    "obs": ("obs.npy", np.uint8),
-    "scalars": ("scalars.npy", np.float32),
-    "a_move": ("a_move.npy", np.int64),
-    "a_fire": ("a_fire.npy", np.int64),
-    "lp_move": ("lp_move.npy", np.float32),
-    "lp_fire": ("lp_fire.npy", np.float32),
-    "value": ("value.npy", np.float32),
-    "metrics": ("metrics.npy", np.float64),
-    "done": ("done.npy", np.int64),
-    "mask": ("mask.npy", np.int64),
-}
+# 2026-09-26：trajectory 装载（shard 发现 / metrics→reward / GAE / 配额；**免 torch**）
+# 已搬进 `ppo/np_core.py`（与 load_episodes_common 同家）——本模块只从那里再导出，
+# 调用点（rl/stream.py / remote/train_core.py / ppo/bench.py / ppo/__init__ 的便捷名）一行不改。
 
-
-def discover_rl_shards(root: str) -> list[str]:
-    return discover_shards(root, ("metrics.npy", "obs.npy"))
-
-
-def load_shard(dirpath: str) -> dict[str, np.ndarray]:
-    """读 shard 字段 + manifest → `reward` 由公式引擎按 metrics 算（N 样本）。
-
-    无 holder（reward_fn None）时**响亮报错**——旧 reward.npy 直读路径已随
-    TS 落盘改版删除（历史 run 需在公式引擎下重采，plan §4.2 / §12-2）。
-    """
-    d = load_shard_fields(dirpath, _RL_SHARD_SPEC)
-    metrics = d.pop("metrics")  # [N+1,21]
-    n_obs = int(d["obs"].shape[0])
-    if metrics.shape[0] != n_obs + 1:
-        raise ValueError(
-            f"metrics 行数 {metrics.shape[0]} != nSamples+1={n_obs + 1}（{dirpath}）——"
-            "指标行失配（决策行 + 终局行），shard 损坏或格式不符"
-        )
-    manifest: dict = {}
-    mp = os.path.join(dirpath, "manifest.json")
-    if os.path.exists(mp):
-        with open(mp, encoding="utf-8") as f:
-            manifest = json.load(f)
-    d["reward"] = _reward_from_metrics(metrics, manifest, dirpath)
-    # stage：供 load_episodes_common 的**逐关**配额（target_transitions 路线）分组。
-    # 它不进 episode 字段集（load_episodes_common 显式排除 "stage"），也不是 GAE 输入；
-    # 0 维数组 ⇒ trim_shard_arrays 不会截它。manifest 缺该键时取 -1（所有 shard 归一组，
-    # 配额退化为全局，加载日志里会显示只有 1 个 stage）。
-    d["stage"] = np.asarray(int(manifest.get("stage", -1)))
-    return d
-
-
-def _reward_from_metrics(metrics: np.ndarray, manifest: dict, dirpath: str) -> np.ndarray:
-    """metrics [N+1,29] + manifest {outcome, score} → reward [N]（float32）。
-
-    wrapper（§4.3.3）：Φ = formula(metrics)；r[i] = Φ[i+1]−Φ[i]；末样本 +=
-    reconcile（score_reconcile → scale·score(gated)−(Φ[N]−Φ[0])；toy → terminal）。
-    """
-    from rl.reward_context import current as _ctx_current
-    from rl.reward_library import METRICS_DIM
-
-    ctx = _ctx_current()
-    m = np.asarray(metrics, dtype=np.float64)
-    if m.ndim != 2 or m.shape[1] != METRICS_DIM:
-        raise ValueError(
-            f"metrics 形状应为 [N+1,{METRICS_DIM}]，收到 {m.shape}（{dirpath}）——metrics_version 不匹配？"
-        )
-    mver = manifest.get("metrics_version")
-    if mver is not None and int(mver) != ctx.metrics_version:
-        raise ValueError(
-            f"shard metrics_version={mver} != 期望 {ctx.metrics_version}（{dirpath}）——"
-            "shard 格式版本不匹配，禁止静默错读（评审 LC §1.1）"
-        )
-    if ctx.reward_fn is None:
-        raise RuntimeError(
-            f"metrics shard 需要 RewardFn，但 reward_context holder 未设置（{dirpath}）——"
-            "per-tick 训练请经 `python run_rl.py --course <name>` 启动（奖励唯一定义源=课程配置公式）"
-        )
-    outcome = str(manifest.get("outcome", "timeout"))
-    score = float(manifest.get("score", 0.0))
-    r = ctx.reward_fn(m, outcome, score, ctx.it)
-    return np.asarray(r, dtype=np.float32)
-
-
-def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM) -> dict | None:
-    """流式 backend 接口（rl/stream.py）：单个 shard → 可训练 episode（adv/ret 未归一）。
-
-    ppo_intent.load_episode_from_shard 同签名——run_rollout_stream 以 backend 参数
-    复用同一套流式基础设施（工程化共享，勿在 stream 内复制第二份加载逻辑）。
-    """
-    d = load_shard(dirpath)
-    N = d["obs"].shape[0]
-    if N == 0:
-        return None
-    adv, ret = compute_gae(d["reward"], d["value"], d["done"], gamma, lam)
-    return {
-        "obs": d["obs"],
-        "scalars": d["scalars"],
-        "a_move": d["a_move"],
-        "a_fire": d["a_fire"],
-        "lp_move": d["lp_move"],
-        "lp_fire": d["lp_fire"],
-        "value": d["value"],
-        "adv": adv.astype(np.float32),
-        "ret": ret.astype(np.float32),
-        "mask": d["mask"],
-    }
-
-
-def load_episodes(
-    data_root: str,
-    gamma: float = GAMMA,
-    lam: float = LAM,
-    normalize_adv: bool = True,
-    normalize_ret: bool = False,
-    per_stage_quota: int = 0,
-    bundle: Any = None,
-) -> list[dict]:
-    """Discover trajectory shards under `data_root`, compute per-episode GAE,
-    and normalize advantages across the whole batch. Shared by this CLI's
-    update mode and the run_rl.py loop.
-
-    normalize_ret（R5，默认 False = 历史行为逐字节不变）：True 时 ret 跨 batch
-    归一（mean 0 / std 1，intent 头同款），让 value 头拟合 O(1) 量级目标。
-    备注：GAE 自举仍用 rollout 时 head 输出的原始尺度 V——baseline 不改变策略
-    梯度的无偏性，只改变方差；当前 V 近乎常数（MSE≫return 方差）时归一化只会
-    把 baseline 从"无"变"有"，不会变坏。stream 路径不走本函数（见
-    rl/stream.py），该 flag 只覆盖串行（local/remote）路径。
-    """
-    return load_episodes_common(
-        data_root,
-        label="ppo",
-        shard_kind="RL",
-        need_files=("metrics.npy", "obs.npy"),
-        shard_loader=load_shard,
-        gae=lambda d: compute_gae(d["reward"], d["value"], d["done"], gamma, lam),
-        gae_name="GAE",
-        normalize_adv=normalize_adv,
-        normalize_ret=normalize_ret,
-        per_stage_quota=per_stage_quota,
-        # ★ 2026-09-24（日志节食）：装载读数攒进调用方的那一行（None = 逐字节原行为）。
-        bundle=bundle,
-    )
 
 
 # ---------------- PPO update ----------------
