@@ -19,7 +19,9 @@ export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`
 export const TC_TREND_SOURCE = `${TC_KEY_PREFIX}trend.source`
 // ★ `tc.train.mode`（last-used pull/push/local）已随「启动训练不选模式」于 2026-09-19 退役；
 //   旧值留在 localStorage 里无害（tc.* 前缀不会被 cleanupNonTcKeys 误删），不再有任何读者。
-export const TC_TRAIN_TOGGLES = `${TC_KEY_PREFIX}train.toggles`
+// ★ `tc.train.toggles`（行为开关的本地偏好）已于 2026-09-26 退役：三个键（stream /
+//   double_buffer / precollect_early）在单一 PPO 路径下恒不生效，开关现在只**呈现** rl-config 的
+//   当前值（不读写本地偏好）—— 见 `panels/TrainLaunchModal.tsx::INERT_TOGGLES`。旧值同样留着无害。
 export const TC_NODE_VIEW = (view: 'ctl' | 'pool', key: string): string =>
   `${TC_KEY_PREFIX}node.${view}.${key}`
 
