@@ -48,6 +48,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+from tests.helpers import source_scan
+
 NN_ROOT = Path(__file__).resolve().parent.parent
 
 #: L0 的**顶层单文件模块**（stdlib-only；`common/` 是包，单独处理）。
@@ -153,7 +155,7 @@ def _imports(path: Path) -> set[str]:
     ⚠ 展开必须**对所有子包**生效：只给某个包开小灶，`from rl import loop_steps` 就会被
     记成裸 `rl`，环与切线的断言会**静默失效**（2026-09-23 反向探针实测到，见本文件头部）。
     """
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = source_scan.parse(str(path))
     subs = _subpackages()
     out: set[str] = set()
     for node in ast.walk(tree):

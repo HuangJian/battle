@@ -39,6 +39,8 @@ from typing import Any
 
 import pytest
 
+from tests.helpers import source_scan
+
 NN_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(NN_ROOT))
 
@@ -249,7 +251,7 @@ def _os_kill_zero_lines(path: Path) -> list[int]:
     """
     import ast
 
-    tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = source_scan.parse(str(path))
     out: list[int] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or len(node.args) < 2:

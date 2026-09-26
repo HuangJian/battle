@@ -62,6 +62,7 @@ from remote import hub_server as hs
 from remote.hub.queue import _HubQueue
 from remote.hub.store import _JobStore
 from tests.helpers import remote_dag as dag
+from tests.helpers import source_scan
 
 NN_ROOT = ROOT
 ENTRY = NN_ROOT / "remote" / "hub_server.py"
@@ -149,7 +150,7 @@ SEND_TIMEOUT_READER = ("remote/hub/http_face.py", "HubHandler", "_bytes")
 
 
 def _tree(rel: str) -> ast.Module:
-    return ast.parse((NN_ROOT / rel).read_text(encoding="utf-8"))
+    return source_scan.parse(str(NN_ROOT / rel))
 
 
 def _own_defs(rel: str) -> set[str]:
@@ -275,7 +276,7 @@ def test_every_send_timeout_patch_targets_the_owner_module() -> None:
     owner = SEND_TIMEOUT_READER[0].removesuffix(".py").replace("/", ".")
     targets: list[str] = []
     for p in sorted((NN_ROOT / "tests").glob("*.py")) + sorted((NN_ROOT / "e2e").glob("*.py")):
-        for node in ast.walk(ast.parse(p.read_text(encoding="utf-8"))):
+        for node in ast.walk(source_scan.parse(str(p))):
             if not isinstance(node, ast.Call):
                 continue
             fn = node.func

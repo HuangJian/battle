@@ -85,7 +85,7 @@ def test_mirror_scalar_lockstep() -> None:
     """M2 镜像索引锁步：SCALAR_X_INDICES = [15,18,29]（v2 重编号 [20,23]→[15,18]，
     之后追加 29=iceVx，见 schema.py:94/127）——mirrorX 前后 (obs, scalars, move) 自洽；
     旧索引 [20,23] 必须不再翻转（防回归）。"""
-    from data.dataset import mirror_x
+    from data.mirror import mirror_x
     from schema import SCALAR_DIM, SCALAR_X_INDICES
 
     # 2026-09-20：本行原写死 [15,18]，schema 追加 29=iceVx 后已过期 —— 因 check() 只聚合
@@ -909,7 +909,7 @@ def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     try:
         traj = tmp_path / "i7"
         traj.mkdir()
-        srv.eval_delay = 2.0
+        srv.eval_delay = 1.0
         args_eval = types.SimpleNamespace(
             **{**vars(args), "eval_games_per_stage": 2, "eval_stages": "0-2"}
         )

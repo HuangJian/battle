@@ -538,7 +538,11 @@ def test_heartbeat_loop_beats_then_stops(monkeypatch: pytest.MonkeyPatch) -> Non
     n = len(hits)
     # sleep-ok: 夹具模拟的工作量：给「stop 之后不再打点」留一段窗口（期间本会再跳 5 次）
     time.sleep(0.05)
-    assert len(hits) == n, "stop 之后不该继续打点"
+    # 允许**在途的那一拍**：`done.set()` 与心跳线程的 `done.wait` 有竞态——interval=0.01s
+    # 比主线程 break→set 的间隔还短，满载时线程可能刚好越过检查、正在打这一拍（实测
+    # n=1 而窗口末 len=2 ⇒ 假红，2026-09-26）。循环一次只打一拍 ⇒ 至多多一拍；窗口内
+    # 本会跳 5 次，所以 ≥2 才是真的没看 `done`。
+    assert len(hits) <= n + 1, "stop 之后不该继续打点（最多放行在途的一拍）"
 
 
 def test_claim_and_release_never_raise_on_a_dead_hub(monkeypatch: pytest.MonkeyPatch) -> None:

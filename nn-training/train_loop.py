@@ -63,7 +63,9 @@ sys.path.insert(0, HERE)
 # Import train() IN-PROCESS. Because train_loop already holds a single-instance
 # lock, running training here (instead of via a subprocess) removes the
 # launcher's double-spawn race and keeps epoch stdout directly visible.
-from train.bc import train as _train_bc
+#
+# 2026-09-26：`train.bc` 顶层 import torch，改为**调用点延迟 import**——于是本模块的
+# CLI / 参数解析 / 轮次规划（纯函数）不再把 torch 拖进测试路径（「顶层零 torch」规矩）。
 from train.loop_util import (
     SPIN_WARN_S,
     _emit,
@@ -247,6 +249,8 @@ def main() -> None:
             val = None
             crashed = False
             try:
+                from train.bc import train as _train_bc  # 延迟：见文件头（顶层零 torch）
+
                 result = _train_bc(bc_args)
                 val = result.get("best_val_loss")
             except Exception as e:  # never let one bad round kill the loop

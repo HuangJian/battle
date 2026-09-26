@@ -39,6 +39,7 @@ import rl.agent_meta
 import rl.bc_ledger
 import rl.queue
 import rl.stream
+from tests.helpers import source_scan
 
 NN_ROOT = Path(__file__).resolve().parent.parent
 
@@ -52,7 +53,8 @@ STANDALONE_BOOT_MODULES = (
 
 
 def _read(p: Path) -> str:
-    return p.read_text(encoding="utf-8")
+    # 缓存版：同一文件被多个用例/多条判据读到也只读盘一次（见 tests/helpers/source_scan.py）。
+    return source_scan.read_text(str(p))
 
 
 def _module_level_imports(src: str) -> list[str]:
@@ -212,7 +214,7 @@ def test_every_production_capture_site_pins_encoding() -> None:
     for p in NN_ROOT.rglob("*.py"):
         if skip_parts & set(p.parts):
             continue
-        for node in ast.walk(ast.parse(_read(p))):
+        for node in ast.walk(source_scan.parse(str(p))):
             if not isinstance(node, ast.Call):
                 continue
             text_on = any(

@@ -26,7 +26,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.dataset import mirror_x
+from data.mirror import mirror_x  # 纯 numpy 模块：本文件不需要 torch
 from schema import CH, DIRECTION_CHANNELS, SCALAR_DIM, SCALAR_X_INDICES
 
 TANK_CHANNELS = sorted(DIRECTION_CHANNELS - {CH["bullet"]})

@@ -62,6 +62,8 @@ import ast
 import re
 from pathlib import Path
 
+from tests.helpers import source_scan
+
 ROOT = Path(__file__).resolve().parent.parent
 TESTS = Path(__file__).resolve().parent
 E2E = ROOT / "e2e"
@@ -118,7 +120,7 @@ def _rel(py: Path) -> str:
 
 def _problems(py: Path) -> list[str]:
     """该文件里每一处不合格 sleep 的 `路径:行: 源码 → 问题`。"""
-    src = py.read_text(encoding="utf-8")
+    src = source_scan.read_text(str(py))
     lines = src.splitlines()
     rel = _rel(py)
     out: list[str] = []
@@ -252,7 +254,7 @@ def _timing_reason(lines: list[str], lineno: int) -> str | None:
 
 def _timing_problems(py: Path) -> list[str]:
     """该文件里每一处不合格上界墙钟断言的 `路径:行: 源码 → 问题`。"""
-    src = py.read_text(encoding="utf-8")
+    src = source_scan.read_text(str(py))
     lines = src.splitlines()
     rel = _rel(py)
     out: list[str] = []

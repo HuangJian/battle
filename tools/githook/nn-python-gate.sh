@@ -40,6 +40,12 @@
 #                 （0 = 不设，退回 torch 自己的默认 = 各 worker 开满物理核）。
 #   注：该 env 随进程树继承到测试 spawn 的子进程（如 train_loop.py 的 os.environ.setdefault）；
 #   训练入口里的 torch.set_num_threads(--threads) 是进程内显式覆盖，不受此影响。
+#   不做「torch 池 ‖ 免 torch 池」拆分（2026-09-26 实测）：两池并行一律 ≥ 单次 -n12
+#   （33s → 40/41s，torch 段单核串行更是 37s，直接变成关键路径）。套件墙钟本就由免
+#   torch 的重用例决定（移走那 360 个 torch 用例后 -n12 仍 ~31s），torch 用例在单次
+#   跑里已被 worker 空档吸收；单开池只多付一次 startup + 每 worker 一次 torch 冷
+#   import，并把关键路径变成较慢的那一池。免 torch 子集只作**可移植**用途（无 torch
+#   的机器/镜像可跑 2620/2980 用例），不作加速。
 #
 # 单测墙钟护栏（2026-09-15）：pytest 加 `--timeout=${NN_PYTEST_TIMEOUT_S:-60}`
 #  ——与 task.py check 同款 60s/用例（本仓最慢单测实测 22s，有 ~2.7× 余量）。

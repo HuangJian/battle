@@ -222,6 +222,8 @@ def test_exhausted_rerolls_still_fail_loudly(monkeypatch) -> None:
         return 500, b"boom"
 
     monkeypatch.setattr(http_mod, "_request", fake)
+    # 不替生产退避白等（`_get_with_retry` 第 1 次重试睡 2s；本用例只看抛不抛）：
+    monkeypatch.setattr(http_mod.time, "sleep", lambda _s: None)
     with pytest.raises(RetryableError):
         worker_mod._get_with_retry(
             "http://hub",
@@ -513,6 +515,8 @@ def test_real_failures_still_consume_attempts_after_preempts(monkeypatch) -> Non
         return 500, b"boom"
 
     monkeypatch.setattr(http_mod, "_request", fake)
+    # 同上：2 次挤走 + 2 次真失败中间的退避（2s/4s）不用真等。
+    monkeypatch.setattr(http_mod.time, "sleep", lambda _s: None)
     with pytest.raises(RetryableError):
         worker_mod._get_with_retry(
             "http://hub",

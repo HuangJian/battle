@@ -10,6 +10,7 @@ import time
 import pytest
 
 import dist_common
+from tests.helpers import source_scan
 
 
 def test_poll_result_abandon_fires_immediately(monkeypatch) -> None:
@@ -254,7 +255,7 @@ def test_transient_judgement_defined_once_and_wired() -> None:
     def definers_of(name: str) -> list[str]:
         found = []
         for path in [root / "dist_common.py", *sorted((root / "rl").glob("*.py"))]:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
+            tree = source_scan.parse(str(path))
             for node in ast.walk(tree):
                 if isinstance(node, ast.FunctionDef) and node.name == name:
                     found.append(path.name)
@@ -265,7 +266,7 @@ def test_transient_judgement_defined_once_and_wired() -> None:
     assert "dist_common.py" in definers, definers
     forwarders = [d for d in definers if d != "dist_common.py"]
     assert len(forwarders) == 1, definers
-    fwd_src = (root / "rl" / forwarders[0]).read_text(encoding="utf-8")
+    fwd_src = source_scan.read_text(str(root / "rl" / forwarders[0]))
     assert "return dist_common.is_transient_error(e)" in fwd_src
     assert "TRANSIENT_HTTP_STATUS" not in fwd_src  # 判据逻辑不得复制回 B 层
     assert "_BUSY_HINT" not in fwd_src
@@ -276,8 +277,8 @@ def test_transient_judgement_defined_once_and_wired() -> None:
     home = importlib.import_module(f"rl.{forwarders[0][:-3]}")
     assert be.is_transient_error is home.is_transient_error, forwarders
 
-    a_layer = (root / "rl" / "dispatch.py").read_text(encoding="utf-8")
-    c_layer = (root / "rl" / "eval_dispatch.py").read_text(encoding="utf-8")
+    a_layer = source_scan.read_text(str(root / "rl" / "dispatch.py"))
+    c_layer = source_scan.read_text(str(root / "rl" / "eval_dispatch.py"))
     for src in (a_layer, c_layer):
         assert "dist_common.is_transient_error(" in src
         assert "dist_common.refresh_weights(" in src

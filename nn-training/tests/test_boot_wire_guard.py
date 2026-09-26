@@ -235,8 +235,10 @@ def test_reroll_is_capped_and_the_last_attempt_always_transfers(monkeypatch) -> 
     assert "attempts=4" in done and f"rerolls={ts.BOOT_REROLL_MAX}" in done
 
 
-def test_stall_is_retried_within_the_same_fetch() -> None:
+def test_stall_is_retried_within_the_same_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     """停滞也在同一次 fetch 内重试（引导期的外层循环是 30 s 退避，太慢）。"""
+    # 内层重试的指数退避（第 1 次 2s）不用真等——本用例只看「有没有在同一 fetch 内重试」。
+    monkeypatch.setattr(ts.time, "sleep", lambda _s: None)
 
     class _Stalling(_FakeResp):
         def read(self, _n: int) -> bytes:
@@ -252,8 +254,10 @@ def test_stall_is_retried_within_the_same_fetch() -> None:
     assert any("传输失败（" in ln and "停滞" in ln for ln in lines)
 
 
-def test_exhausted_attempts_raise_the_informative_error() -> None:
+def test_exhausted_attempts_raise_the_informative_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """几次都没成 ⇒ 抛**带正文**的错误（调用方要能把它写进日志，而不是只写类型名）。"""
+    # 同上：最后一次尝试后的退避也不用真等（只断言错误正文）。
+    monkeypatch.setattr(ts.time, "sleep", lambda _s: None)
 
     class _Stalling(_FakeResp):
         def read(self, _n: int) -> bytes:

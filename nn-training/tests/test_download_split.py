@@ -45,6 +45,7 @@ import remote.download as download_mod
 import remote.worker as worker_mod
 from common.protocol import BLOB_OPT, RetryableError
 from tests.helpers import remote_dag as dag
+from tests.helpers import source_scan
 
 DL_FILE = ROOT / "remote" / "download.py"
 WORKER_FILE = ROOT / "remote" / "worker.py"
@@ -75,7 +76,7 @@ ALLOWED_IMPORTS = {
 
 
 def _tree(path: Path) -> ast.Module:
-    return ast.parse(path.read_text(encoding="utf-8"))
+    return source_scan.parse(str(path))
 
 
 def _defined(path: Path) -> set[str]:
@@ -195,7 +196,7 @@ def test_host_callers_still_resolve_their_own_host_namespace() -> None:
 
     # 且两处都**没有**属性式访问（否则就是换了命名空间）
     for path in (WORKER_FILE, ROUND_FILE):
-        text = path.read_text(encoding="utf-8")
+        text = source_scan.read_text(str(path))
         assert "download.download_" not in text and "download_mod.download_" not in text, path.name
 
 

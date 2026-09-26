@@ -21,6 +21,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers import source_scan
+
 NN_DIR = Path(__file__).resolve().parents[1]
 
 #: 非测试代码根（tests/ 与 e2e/ 除外：它们要**提到**这些名字来钉「已删除」）。
@@ -78,7 +80,7 @@ def test_source_has_no_ppo_placement_reads() -> None:
     """
     offenders: list[str] = []
     for p in _source_paths():
-        tree = ast.parse(p.read_text(encoding="utf-8", errors="replace"), filename=str(p))
+        tree = source_scan.parse(str(p), errors="replace")
         for node in ast.walk(tree):
             # args.ppo
             if (

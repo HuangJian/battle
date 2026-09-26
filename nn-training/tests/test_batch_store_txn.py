@@ -31,12 +31,13 @@ if str(ROOT) not in sys.path:
 
 import rl.batch_eval as be
 import rl.batch_store as bs
+from tests.helpers import source_scan
 
 RL = ROOT / "rl"
 STORE_PATH = RL / "batch_store.py"
 EVAL_PATH = RL / "batch_eval.py"
-STORE_SRC = STORE_PATH.read_text(encoding="utf-8")
-EVAL_SRC = EVAL_PATH.read_text(encoding="utf-8")
+STORE_SRC = source_scan.read_text(str(STORE_PATH))
+EVAL_SRC = source_scan.read_text(str(EVAL_PATH))
 
 #: 搬进 store 的公开名（**必须**经 `rl.batch_eval` 再导出 ⇒ 调用点与测试一行不改）。
 REEXPORTED = (
@@ -215,7 +216,7 @@ def test_status_assignments_live_only_in_the_named_transitions() -> None:
     """
     hits: dict[str, list[str]] = {}
     for p in _non_test_py():
-        owners = _subscript_store_owners(p.read_text(encoding="utf-8"), "status")
+        owners = _subscript_store_owners(source_scan.read_text(str(p)), "status")
         if owners:
             hits[str(p.relative_to(ROOT))] = owners
     assert hits == {"rl/batch_store.py": sorted(STATUS_WRITERS)}, hits
@@ -225,7 +226,7 @@ def test_ledger_publish_is_the_single_writer() -> None:
     """`_publish` 是 `batches.jsonl` 的唯一写点；它的调用者闭集 = 转移 + 播种缝。"""
     callers: dict[str, list[str]] = {}
     for p in _non_test_py():
-        src = p.read_text(encoding="utf-8")
+        src = source_scan.read_text(str(p))
         if "_publish(" not in src:
             continue
         owners: list[str] = []

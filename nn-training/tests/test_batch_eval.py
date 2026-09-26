@@ -210,7 +210,9 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
         )
 
     monkeypatch.setattr(dist_common, "fetch_task", fake_fetch)
-    args = types.SimpleNamespace(eval_window_sec=2)
+    # 窗只当「跑一会儿就关」的配速（断言只看「关窗后不派新局」，不看窗长）：
+    # 2s → 0.4s（2026-09-26 墙钟收敛；fake 节点一局是瞬时的）。
+    args = types.SimpleNamespace(eval_window_sec=0.4)
     cfg = {
         "policy": {
             "statusTimeoutSec": 1,

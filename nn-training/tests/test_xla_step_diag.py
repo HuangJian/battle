@@ -26,7 +26,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ppo.common import (
+# 这五个都是纯文本/字典解析，住在免 torch 的 ppo.np_core（2026-09-26 拆分）。
+# 本文件的 TestEngineWiring 里对 ppo.common 的 demo_index / _XLA_CACHE_STATE 仍是延迟 import，
+# 不影响收集期免 torch。
+from ppo.np_core import (
     _parse_xla_duration,
     xla_delta_str,
     xla_enable_compile_cache,

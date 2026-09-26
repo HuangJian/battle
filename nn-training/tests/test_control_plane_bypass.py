@@ -33,8 +33,11 @@ from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH
 
 TOKEN = "sekret"
 JID = "j" * 16
-#: 慢 bulk 的体量与节奏（4 片 × 256KB，每片 40ms ⇒ 约 0.2s 的可观测窗口）。
-_BULK_BODY = b"x" * (W.BODY_CHUNK * 4)
+#: 慢 bulk 的体量与节奏（2 片 × 256KB，每片 40ms ⇒ 约 0.1s 的可观测窗口）。
+#: 2026-09-26：4 片 → 2 片——控制面窗口在整个传输期间开着，bulk 会在**每个分片间隙**
+#: 让路 `BULK_YIELD_STEP_SEC=0.5s` 一格 ⇒ 4 片要白等 ~1.5s；2 片仍能造出「在途 ∧ 让路」，
+#: 采样数（≥ 3）绰绰有余。
+_BULK_BODY = b"x" * (W.BODY_CHUNK * 2)
 _CHUNK_GAP_SEC = 0.04
 
 
