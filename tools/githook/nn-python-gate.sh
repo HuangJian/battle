@@ -40,6 +40,11 @@
 #                 （0 = 不设，退回 torch 自己的默认 = 各 worker 开满物理核）。
 #   注：该 env 随进程树继承到测试 spawn 的子进程（如 train_loop.py 的 os.environ.setdefault）；
 #   训练入口里的 torch.set_num_threads(--threads) 是进程内显式覆盖，不受此影响。
+#   为何 12 而非 8（2026-09-26 CPU 记账，/usr/bin/time 记 user+sys）：-n8 时 8 物理核
+#   平均只 busy 4.6~5.1 核（每 worker 约 57% 在 CPU 上）—— 本套件大量时间在等子进程/
+#   socket/sleep/torch 首次 import，**不是 CPU-bound** ⇒ 超订把空闲核填满（-n12 busy
+#   6.8~7.4）；再往上（-n16）只增加每个 worker 的冗余启动 CPU（实测 user+sys 262s→507s）
+#   而墙钟不再降。即「-n12 比 -n8 快」不是噪声、也不是靠 SMT 变戏法，是负载本就没吃满 8 核。
 #   不做「torch 池 ‖ 免 torch 池」拆分（2026-09-26 实测）：两池并行一律 ≥ 单次 -n12
 #   （33s → 40/41s，torch 段单核串行更是 37s，直接变成关键路径）。套件墙钟本就由免
 #   torch 的重用例决定（移走那 360 个 torch 用例后 -n12 仍 ~31s），torch 用例在单次

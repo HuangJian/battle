@@ -45,7 +45,11 @@ serve_pool 端到端 / `bulk_sched` 单通道 / `eval_local` 硬顶 / `push_prio
   * 只认**上界**：`t < N` / `t <= N` / `N > t` / `N >= t`（`t` = 墙钟时长）。
     下界（`t >= 1.0`，用来证「夹具真等过」）**不管** —— 负载越高它越成立，不会假红。
   * `t` 的判据（AST）：`time.time()/monotonic()/perf_counter()` 的差，或名字属于时长族
-    （`elapsed` / `wall` / `dt` / `took` / `duration` / `sec(s)` / `*_sec`）。
+    （**词**级匹配、允许 `_` 分隔：`elapsed` / `wall` / `dt` / `took` / `duration` / `sec(s)` /
+    `*_sec`，以及 `elapsed_ms`、`_segment_seconds` 这类）。名字可以长在**变量/属性**上，也可以
+    在**调用的函数名**（`_segment_seconds(...)`）或**下标的基底**（`seen[0]`）上
+    （2026-09-26 扩：此前只认 Name/Attribute，`test_wire_reroll` 两处
+    `_segment_seconds(...) < 0.2` 是守卫盲区，靠人肉 `timing-ok` 标注兜着）。
   * 每处上界必须带 `# timing-ok: <理由>`，理由落进四族之一：`上界兜底`（只兜挂起/卡死，
     余量大，真挂起才红）· `契约上界`（上界即契约：零成本 / 立即返回 / 不许阻塞，紧是设计）·
     `夹具模拟`（量的是夹具模拟的工作量）· `相对判据`（阈值由场景推导：budget / 窗口 /
@@ -80,8 +84,26 @@ _TIMING_MARK = re.compile(r"timing-ok:\s*(?P<why>[^\r\n]*)")
 TIMING_FAMILIES = ("上界兜底", "契约上界", "夹具模拟", "相对判据")
 #: 墙钟调用的方法名（`time.time() - t0` 里的 `time()`）——`time` / `monotonic` / `perf_counter`。
 _TIME_FUNCS = frozenset({"time", "monotonic", "perf_counter", "monotonic_ns", "perf_counter_ns"})
-#: 时长命名的变量（`elapsed` / `wall` / `dt` … 或 `*_sec` 后缀）——这些名字就是「秒」。
-_DURATION_NAME = re.compile(r"^(?:elapsed|wall|dt|took|duration|sec|secs|seconds)$|_secs?$")
+#: 时长命名的**词**——这些名字就是「秒」。词级匹配（`_` 分隔即算），故
+#: `elapsed` / `wall` / `wait_sec` / `elapsed_ms` / `_segment_seconds` 都命中；
+#: 边界要求 `_` 或首尾，避免 `wallpaper` / `seconds_ago≠` 这类无关词误报。
+_DURATION_NAME = re.compile(r"(?:^|_)(?:elapsed|wall|dt|took|duration|sec|secs|seconds)(?:_|$)")
+
+
+def _named_duration(node: ast.AST) -> bool:
+    """这个名字是不是墙钟时长：变量/属性 · 调用的函数名 · 下标的基底。
+
+    覆盖 `elapsed` / `wall` / `elapsed_ms` / `_segment_seconds(...)` / `seen_secs[0]`；
+    不认纯常量与无关名字（`cfgs[0]`、`status < 400`）。
+    """
+    if isinstance(node, (ast.Name, ast.Attribute)):
+        name = node.id if isinstance(node, ast.Name) else node.attr
+        return bool(_DURATION_NAME.search(name))
+    if isinstance(node, ast.Call):
+        return _named_duration(node.func)
+    if isinstance(node, ast.Subscript):
+        return _named_duration(node.value)
+    return False
 
 
 def _sleep_calls(src: str) -> list[tuple[int, str]]:
@@ -195,7 +217,11 @@ def test_stub_source_strings_are_not_synchronization() -> None:
 
 
 def _is_wallclock(node: ast.AST) -> bool:
-    """该表达式是不是**墙钟时长**：`time.time() - t0` 形，或时长命名的变量/属性。"""
+    """该表达式是不是**墙钟时长**：`time.time() - t0` 形，或时长命名的表达式。
+
+    命名面覆盖变量/属性 · 调用的函数名 · 下标的基底（见 `_named_duration`）；
+    `time.time()` 差的任一侧也认（`time.time() - t0` 里两侧都未必叫时长名）。
+    """
     if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Sub):
         for side in (node.left, node.right):
             if (
@@ -204,9 +230,9 @@ def _is_wallclock(node: ast.AST) -> bool:
                 and side.func.attr in _TIME_FUNCS
             ):
                 return True
-    if isinstance(node, ast.Name) and _DURATION_NAME.search(node.id):
-        return True
-    return isinstance(node, ast.Attribute) and bool(_DURATION_NAME.search(node.attr))
+            if _named_duration(side):
+                return True
+    return _named_duration(node)
 
 
 def _upper_bounded(node: ast.Compare) -> ast.AST | None:
@@ -317,6 +343,35 @@ def test_the_guard_actually_catches_wallclock_asserts(tmp_path: Path) -> None:
         "    assert elapsed >= 0.3  # 下界：证夹具真等过（负载越高越成立，不标）\n"
         "    assert elapsed <= budget + 0.25  # timing-ok: 相对判据（阈值随预算走）\n"
         "    assert status < 400\n",  # 非时长，不管
+        encoding="utf-8",
+    )
+    assert _timing_problems(good) == [], _timing_problems(good)
+
+
+def test_the_guard_recognizes_calls_and_subscripts(tmp_path: Path) -> None:
+    """扩面自证（2026-09-26）：函数调用与下标也是墙钟面。
+
+    `test_wire_reroll` 两处 `_segment_seconds(lines[-1], …) < 0.2` 曾是守卫盲区
+    （只认 Name/Attribute），靠人肉 `timing-ok` 标注兜着；这里把它们钉成守卫的职责。
+    """
+    bad = tmp_path / "bad_calls.py"
+    bad.write_text(
+        "def f(lines, seen_secs):\n"
+        "    assert _segment_seconds(lines[-1], \"payload\") < 0.2\n"  # 未标注（Call + 词级名）
+        "    assert seen_secs[0] < 0.5\n",  # 未标注（下标基底）
+        encoding="utf-8",
+    )
+    got = _timing_problems(bad)
+    assert len(got) == 2, got
+    assert got[0].startswith("bad_calls.py:2: assert _segment_seconds("), got[0]
+    assert got[1].startswith("bad_calls.py:3: assert seen_secs[0] < 0.5"), got[1]
+
+    good = tmp_path / "good_calls.py"
+    good.write_text(
+        "def f(cfgs, status):\n"
+        "    assert cfgs[0] < 5\n"  # 下标基底非时长名
+        "    assert status < 400\n"  # 非时长
+        "    assert len(cfgs) < 10\n",  # 调用名非时长
         encoding="utf-8",
     )
     assert _timing_problems(good) == [], _timing_problems(good)
