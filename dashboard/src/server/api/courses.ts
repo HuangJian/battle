@@ -7,7 +7,8 @@ import { PostBody, bodyStr } from './route'
 
 // ────────────────── 视图课程参数校验（局域网只读防线 2：GET ?course= 只读覆盖） ──────────────────
 
-/** 校验 GET 端点（/api/state /api/pool /api/log/<key> /log/<key>）的 ?course= 参数：
+/** 校验 GET 端点（/api/state /api/log/<key> /log/<key>）的 ?course= 参数：
+ *  （★ 2026-09-26：`/api/pool` 已**移除** `?course=` —— 池视图是机器级事实，改看 `?days=` 窗口。）
  *  只放行真实存在的课程（tmp/<course> 目录或 curricula/<course>.jsonc）且形态限
  *  [A-Za-z0-9._-]——杜绝路径穿越（?course=../xxx）与任意路径读取。非法/空 → 返回 ''，
  *  视图静默回退操作员课程（服务端不报错；LAN 只是多看了一眼）。 */

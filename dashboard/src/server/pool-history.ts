@@ -20,33 +20,66 @@
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
 import { dirname, join } from 'path'
-import { REPO_ROOT, tmpPoolDir } from '../core/paths'
+import { tmpPoolDir } from '../core/paths'
 import { fmtFullTs, latestIterationFromLedgerTail, stripIsoPrefix } from '../web/view'
 // 直连 api/logs 的文件而非 `../api` 桶：桶经 snapshot-cache 反向 import 本模块（成环）。
 import { readLedgerTail } from './api/logs'
 
-/** 锚点文件：tmp/dist-agent/pool-epoch.txt（毫秒时间戳）。语义（用户 2026-08-31）：
+/** 锚点文件路径：<池扫描根>/dist-agent/pool-epoch.txt（默认 tmp/dist-agent/pool-epoch.txt，
+ *  与旧硬编码路径逐字节相同）。语义（用户 2026-08-31）：
  *  · 部署写入一次 → 历史自此刻起重新累计；
  *  · 此后任何部署/重启只读同一锚点 → 历史持续累计；
- *  · 用户明确要求清空时，重写/删除该文件 = 新锚点。 */
-const EPOCH_FILE = join(REPO_ROOT, 'tmp', 'dist-agent', 'pool-epoch.txt')
+ *  · 用户明确要求清空时，重写/删除该文件 = 新锚点。
+ *
+ *  ★ 2026-09-26（二轮评审）：随 `tmpPoolDir()` 取根而不是硬钉 `REPO_ROOT` ——
+ *  单测以 `BCITY_POOL_DIR` 重定向池根时，锚点跟着走，预筛才能端到端验（此前的 DoD
+ *  只能测 `pruneByEpoch` 纯函数）。默认路径不变。 */
+function epochFilePath(): string {
+  return join(tmpPoolDir(), 'dist-agent', 'pool-epoch.txt')
+}
 
+/** 0 = 锚点未建立（累计全部历史）；>0 = 只统计该时刻之后的行。
+ *
+ *  ★ **惰性**取值（每次聚合读一次，不再是模块加载时常量）：单测写完锚点再聚合即可生效；
+ *  代价是每次聚合一次 `existsSync` + 一次小文件读（毫秒级，且被进程内 memo 摊薄）。 */
 function poolEpochMs(): number {
   try {
-    if (!existsSync(EPOCH_FILE)) return 0
-    const v = parseInt(readFileSync(EPOCH_FILE, 'utf8').trim(), 10)
+    const p = epochFilePath()
+    if (!existsSync(p)) return 0
+    const v = parseInt(readFileSync(p, 'utf8').trim(), 10)
     return Number.isFinite(v) && v > 0 ? v : 0
   } catch {
     return 0
   }
 }
 
-/** 0 = 锚点未建立（累计全部历史）；>0 = 只统计该时刻之后的行。 */
-const POOL_EPOCH_MS = poolEpochMs()
-
 /** 大文件阈值：超过它只读尾部（`readLedgerTail`，诚实截断由 `ActiveFlow.truncated` 上屏）。 */
 const LARGE_META_BYTES = 2 * 1024 * 1024
 const LARGE_META_TAIL_LINES = 20_000
+
+/** 进程内聚合 memo 的最短复用窗口（毫秒）。
+ *
+ *  **为什么必须同时有「时间下限」和「指纹」**（2026-09-26 二轮评审）：
+ *   · 指纹（路径 + mtime + 体积）保证**空闲时零重扫**；
+ *   · 但训练在跑时 meta 逐秒追加 ⇒ 指纹每秒都在变，只靠指纹等于每 5s 重扫一次全池
+ *     （快照刷新器每拍都调 `getFleetProbes` → 本函数，而 5 个大文件 40+MB）。
+ *     时间下限把重扫节奏封顶在 ≤ 1 次/窗口。*/
+export const AGG_MEMO_MIN_MS = 30_000
+
+interface AggMemo {
+  root: string
+  epochMs: number
+  fp: string
+  at: number
+  val: HistoryAggregate
+}
+let aggMemo: AggMemo | null = null
+
+/** 硬清聚合 memo。生产路径只有 `?fresh=1`（手动刷新：操作员明确要「现在就给我新的」）调；
+ *  其余时候无需调用——指纹/时间下限自会失效。单测夹具也用它隔离。 */
+export function invalidateNodeHistoryMemo(): void {
+  aggMemo = null
+}
 
 /** dist-agent-meta 的 ts 分布带 T（ISO）与空格两种写法；统一为空格格式后再比。 */
 function normTs(s: string | undefined): string {
@@ -131,7 +164,15 @@ export interface ActiveFlow {
 /** 本地日桶：保留窗口投影所需的全部原始事实。
  *
  *  ⚠ 字段必须够重建 `NodeHistory` 的**每一个窗口字段**：只存 `ok/fail` 计数的话，
- *  「窗口内完成率（最近 ≤10 条结算）」与「最近错误」就无源可算（评审缺口，2026-09-26）。 */
+ *  「窗口内完成率（最近 ≤10 条结算）」与「最近错误」就无源可算（评审缺口，2026-09-26）。
+ *
+ *  ★ **两组字段的口径不同（二轮评审补正）**：
+ *   · **计数 / 样本 / 完成率**（`ok`/`fail`/`rollout`/`eval`/`results`/`elapsed`/`wall`）
+ *     只收**已完成轮**（`it <= baseIt_flow`）——「这一轮的账结清了吗」是数据卫生；
+ *   · **时间戳 / 错误**（`lastOkTs*`/`lastFailTs*`/`lastError*`/`lastTs`）收**全部**行
+ *     ——「这台机器最后一次有动静是什么时候」是**可达性**（isSlowNode / 最近成功列）。
+ *     两组混用会把「轮前段就交完活、轮又长」的节点推回上一轮时刻，在 30 分钟可达性
+ *     窗口上从「慢」翻成「离线」（2026-09-11 报障的反面）。 */
 export interface DayBucket {
   ok: number
   fail: number
@@ -148,6 +189,8 @@ export interface DayBucket {
   /** 最近失败原因 + 其毫秒（是否上屏由投影按「近一小时」判定）。 */
   lastError: string
   lastErrorTsMs: number | null
+  /** 最近失败时刻的毫秒（与 `lastFailTs` 同源；投影按「近一小时」判定是否上屏）。 */
+  lastFailTsMs: number | null
   /** 最近一次成功结算的毫秒 + 单局耗时（isSlowNode 输入）。 */
   lastOkTsMs: number | null
   lastOkElapsedSec: number | null
@@ -167,6 +210,7 @@ function emptyDayBucket(): DayBucket {
     lastFailTs: '',
     lastError: '',
     lastErrorTsMs: null,
+    lastFailTsMs: null,
     lastOkTsMs: null,
     lastOkElapsedSec: null,
     lastTs: '',
@@ -287,6 +331,8 @@ export function projectWindow(agg: HistoryAggregate, w: NodeWindow): WindowAggre
     h.lastContrib = agg.lastContrib.get(node) ?? -1
     let lastError = ''
     let lastErrorMs = -Infinity
+    let lastFailCell = ''
+    let lastFailMs = -Infinity
     for (const [, byNode] of days) {
       const b = byNode.get(node)
       if (!b) continue
@@ -302,21 +348,26 @@ export function projectWindow(agg: HistoryAggregate, w: NodeWindow): WindowAggre
       for (const v of b.wall) pushWindowSample(h.wallRecent, v)
       // days 已按日升序：直接取最大（'-' < 任何 'YYYY-…' 字符串）。
       if (b.lastOkTs > h.lastOkTs) h.lastOkTs = b.lastOkTs
-      if (b.lastFailTs > h.lastFailTs) h.lastFailTs = b.lastFailTs
       if (b.lastTs > h.lastTs) h.lastTs = b.lastTs
       if (b.lastOkTsMs != null && (h.lastOkTsMs == null || b.lastOkTsMs >= h.lastOkTsMs)) {
         h.lastOkTsMs = b.lastOkTsMs
         h.lastOkElapsedSec = b.lastOkElapsedSec
+      }
+      if (b.lastFailTsMs != null && b.lastFailTsMs > lastFailMs) {
+        lastFailMs = b.lastFailTsMs
+        lastFailCell = b.lastFailTs
       }
       if (b.lastErrorTsMs != null && b.lastErrorTsMs > lastErrorMs) {
         lastErrorMs = b.lastErrorTsMs
         lastError = b.lastError
       }
     }
-    // 最近错误只在**近一小时**上屏（用户指令；与成功率/统计列无关）。
+    // 「最近错误」与「最近失败」**同一个近一小时口径**（用户指令；与成功率/统计列无关）。
+    // 两者一起上屏（UI 只在 lastError 非空时渲染 lastFailTs）：分开判会出现
+    // 「有错误文字、时间戳却是几天前」，所以这里一并按窗口末刻判定。
     h.lastError = lastError && w.endMs - lastErrorMs <= 3_600_000 ? lastError : ''
+    h.lastFailTs = lastFailCell && w.endMs - lastFailMs <= 3_600_000 ? lastFailCell : '-'
     h.lastOkTs = h.lastOkTs || '-'
-    h.lastFailTs = h.lastFailTs || '-'
     h.lastTs = h.lastTs || '-'
     h.avgElapsedSec = windowMeanSec(h.elapsedRecent)
     h.avgWallSec = windowMeanSec(h.wallRecent)
@@ -400,10 +451,18 @@ interface ParsedRow {
   it: number
   mode: 'rollout' | 'eval'
   ts: string
-  tsMs: number | null
+  /** 已解析的毫秒时刻（非空：解析不出的行在 `parseMetaRow` 就被丢掉，不会落进 1970 桶）。 */
+  tsMs: number
   elapsedSec: unknown
   wallSec: unknown
   reason: string
+}
+
+/** 进落桶队列的一行 + 「它的计数算不算」标记：
+ *  `counted=false` = 属于该流的**进行中那一轮**（时间戳照记、计数不算，见 DayBucket）。 */
+interface RowEntry {
+  r: ParsedRow
+  counted: boolean
 }
 
 function parseMetaRow(line: string, epochStr: string): ParsedRow | null {
@@ -422,13 +481,17 @@ function parseMetaRow(line: string, epochStr: string): ParsedRow | null {
     const nts = normTs(r.ts)
     // 只统计「清空锚点之后」的行；ts 缺失无法判定新旧 → 忽略，保守。
     if (!r.ts || nts < epochStr) return null
+    const tsMs = parseTsMs(r.ts)
+    // ts 在但解析不出（坏格式）→ 既不能分天、也不能定时刻：丢掉比静默塞进
+    // `localDayKey(0)` = 1970-01-01 桶诚实（二轮评审）。
+    if (tsMs == null) return null
     return {
       node: r.node,
       ok: !!r.ok,
       it: typeof r.it === 'number' && Number.isInteger(r.it) ? r.it : -1,
       mode: r.mode === 'eval' ? 'eval' : 'rollout',
       ts: nts,
-      tsMs: parseTsMs(r.ts),
+      tsMs,
       elapsedSec: r.elapsedSec,
       wallSec: r.wallSec,
       reason: typeof r.reason === 'string' ? r.reason : '',
@@ -438,8 +501,12 @@ function parseMetaRow(line: string, epochStr: string): ParsedRow | null {
   }
 }
 
-function bucketRow(byDay: Map<string, Map<string, DayBucket>>, r: ParsedRow): void {
-  const key = localDayKey(r.tsMs ?? 0)
+function bucketRow(
+  byDay: Map<string, Map<string, DayBucket>>,
+  r: ParsedRow,
+  counted: boolean,
+): void {
+  const key = localDayKey(r.tsMs)
   let byNode = byDay.get(key)
   if (!byNode) {
     byNode = new Map()
@@ -450,29 +517,36 @@ function bucketRow(byDay: Map<string, Map<string, DayBucket>>, r: ParsedRow): vo
     b = emptyDayBucket()
     byNode.set(r.node, b)
   }
+  // ① 时间戳 / 错误列：**可达性口径**——进行中那一轮的行也照记（见 aggregateNodeHistory）。
+  if (r.ok) {
+    if (r.ts > b.lastOkTs) b.lastOkTs = r.ts
+    if (b.lastOkTsMs == null || r.tsMs >= b.lastOkTsMs) {
+      b.lastOkTsMs = r.tsMs
+      b.lastOkElapsedSec =
+        typeof r.elapsedSec === 'number' && r.elapsedSec > 0 ? r.elapsedSec : null
+    }
+  } else {
+    if (r.ts > b.lastFailTs) b.lastFailTs = r.ts
+    if (b.lastFailTsMs == null || r.tsMs > b.lastFailTsMs) b.lastFailTsMs = r.tsMs
+    if (r.reason && (b.lastErrorTsMs == null || r.tsMs >= b.lastErrorTsMs)) {
+      b.lastError = stripIsoPrefix(r.reason).slice(0, 120)
+      b.lastErrorTsMs = r.tsMs
+    }
+  }
+  if (r.ts > b.lastTs) b.lastTs = r.ts
+  // ② 计数 / 样本 / 完成率：**只认已完成轮**（数据卫生：进行中那一轮的半截计数不作数）。
+  if (!counted) return
   b.results.push(r.ok)
   if (b.results.length > 10) b.results.shift()
   if (r.ok) {
     b.ok++
     if (r.mode === 'eval') b.eval++
     else b.rollout++
-    if (r.ts > b.lastOkTs) b.lastOkTs = r.ts
-    if (r.tsMs != null && (b.lastOkTsMs == null || r.tsMs >= b.lastOkTsMs)) {
-      b.lastOkTsMs = r.tsMs
-      b.lastOkElapsedSec =
-        typeof r.elapsedSec === 'number' && r.elapsedSec > 0 ? r.elapsedSec : null
-    }
     pushWindowSample(b.elapsed, r.elapsedSec)
     pushWindowSample(b.wall, r.wallSec)
   } else {
     b.fail++
-    if (r.ts > b.lastFailTs) b.lastFailTs = r.ts
-    if (r.reason && (b.lastErrorTsMs == null || (r.tsMs ?? -1) >= b.lastErrorTsMs)) {
-      b.lastError = stripIsoPrefix(r.reason).slice(0, 120)
-      b.lastErrorTsMs = r.tsMs
-    }
   }
-  if (r.ts > b.lastTs) b.lastTs = r.ts
 }
 
 /** 逐流状态（**每个源各自一份 it 分布**，绝不合并成一张全局图——同一 it 在两门课里是两回事）。 */
@@ -499,12 +573,13 @@ export function pruneByEpoch<T extends { mtimeMs: number }>(cands: T[], epochMs:
 
 export function aggregateNodeHistory(): HistoryAggregate {
   const byDay = new Map<string, Map<string, DayBucket>>()
-  const epochStr = fmtFullTs(POOL_EPOCH_MS)
+  const tmpDir = tmpPoolDir()
+  const epochMs = poolEpochMs()
+  const epochStr = fmtFullTs(epochMs)
 
   // 收集所有候选 meta 文件（递归扫描 tmp/ 下所有 dist-agent-meta.jsonl）。
   // 训练流的 traj_root 可以是 tmp/X（一层）或 tmp/X/traj（两层），必须递归搜索。
   const candidates: MetaCandidate[] = []
-  const tmpDir = tmpPoolDir()
   const walk = (base: string, rel: string): void => {
     try {
       for (const d of readdirSync(join(base, rel), { withFileTypes: true })) {
@@ -539,15 +614,32 @@ export function aggregateNodeHistory(): HistoryAggregate {
   } catch {
     /* tmp missing */
   }
+  // 指纹要稳定：readdir 顺序不作保证，先按目录名排（对结果无影响——下面还会按 mtime 排）。
+  candidates.sort((a, b) => (a.dir < b.dir ? -1 : 1))
+
+  // ── 进程内 memo（二轮评审）──
+  // 两个消费者（`api/pool` 探测层 + `snapshot-cache` 机群探测）用同一份聚合；
+  // 空闲时靠指纹零重扫，训练中靠 AGG_MEMO_MIN_MS 把重扫节奏封顶。
+  const nowMs = Date.now()
+  const fp = candidates.map((c) => `${c.dir}|${c.mtimeMs}|${c.size}`).join('\n')
+  if (
+    aggMemo &&
+    aggMemo.root === tmpDir &&
+    aggMemo.epochMs === epochMs &&
+    (nowMs - aggMemo.at < AGG_MEMO_MIN_MS || aggMemo.fp === fp)
+  ) {
+    aggMemo.at = nowMs
+    return aggMemo.val
+  }
 
   // 预筛：整份文件 mtime 早于 epoch ⇒ 全部行都在 epoch 前，跳过。
   // **钉在 epoch（与「看哪天」无关）**：预筛若随窗口变，"切天零重算"就不成立（§4.3）。
-  const srcs = pruneByEpoch(candidates, POOL_EPOCH_MS)
+  const srcs = pruneByEpoch(candidates, epochMs)
   srcs.sort((a, b) => b.mtimeMs - a.mtimeMs)
   const sources: ActiveFlow[] = srcs.map((c) => ({ dir: c.dir, mtimeMs: c.mtimeMs, lines: 0 }))
 
   const flows: FlowState[] = []
-  const allRows: ParsedRow[] = []
+  const allRows: RowEntry[] = []
   for (let i = 0; i < srcs.length; i++) {
     const src = srcs[i]!
     const flow = sources[i]!
@@ -605,18 +697,19 @@ export function aggregateNodeHistory(): HistoryAggregate {
       }
     }
 
-    // ③ 只把「已完成轮」的行送进全量行集（it <= baseIt；无 it 的行照进）。
+    // ③ **全部行都进全量行集**（时间戳/错误列是可达性口径，见 DayBucket）；`counted` 标记
+    //    「这行的计数算不算」——已完成轮 = it <= baseIt_flow（无 it 的行照算已完成）。
     for (const r of rows) {
-      if (baseIt >= 0 && r.it >= 0 && r.it > baseIt) continue
-      allRows.push(r)
+      const counted = !(baseIt >= 0 && r.it >= 0 && r.it > baseIt)
+      allRows.push({ r, counted })
     }
 
     flows.push({ src: flow, itByNode, baseIt, completedAtMs, contribAtBase })
   }
 
   // ④ 时间升序后落桶（跨流合并后仍按时间有序 ⇒ results 时间升序、lastXxx 取最大才对）。
-  allRows.sort((a, b) => (a.tsMs ?? 0) - (b.tsMs ?? 0))
-  for (const r of allRows) bucketRow(byDay, r)
+  allRows.sort((a, b) => a.r.tsMs - b.r.tsMs)
+  for (const e of allRows) bucketRow(byDay, e.r, e.counted)
 
   // ⑤ 最新完成轮：**跨课按完成时刻取最新**（不是比 it 大小——it 是课程内序号，§1.1）。
   //    停摆课因完成时刻旧而自然落选，不必额外过滤。
@@ -634,7 +727,9 @@ export function aggregateNodeHistory(): HistoryAggregate {
     ? { dir: winner.src.dir, it: winner.baseIt, completedAtMs: winner.completedAtMs }
     : null
 
-  return { byDay, sources, epochMs: POOL_EPOCH_MS, lastContrib, latestRound }
+  const out: HistoryAggregate = { byDay, sources, epochMs, lastContrib, latestRound }
+  aggMemo = { root: tmpDir, epochMs, fp, at: Date.now(), val: out }
+  return out
 }
 
 /** 状态徽章判定：最近 10 次结算完成率（成功率 ≥90% · 波动 ≥70% · 异常 <70%）。

@@ -34,6 +34,26 @@ nodes-decouple-from-course.plan.md）：
 无时区后缀**（UTC `toISOString()` 只出现在 `lastError` 的字符串前缀）；分桶前**禁止** `Date.UTC`。
 ② `poolStatus`（成功率）**函数不变但输入随窗口变** —— 用户可在表头看到「成功率随所选窗口变」。
 
+**二轮评审补正（2026-09-26，同日）**：三处口径/代价现场核对后修正 ——
+
+* **聚合进程内 memo**：`aggregateNodeHistory()` 加一层进程内 memo（池根 + epoch + 候选指纹
+  〔路径/mtime/体积〕+ `AGG_MEMO_MIN_MS = 30s` **时间下限**）。两个消费者（`api/pool` 探测层、
+  `snapshot-cache` 机群探测）**共用一份**；空闲时靠指纹零重扫，训练中靠时间下限把重扫节奏封顶
+  （否则快照刷新器每 5s 重扫全池）。本机实测：15 个活跃流、其中 5 个 >2MB，冷算 ~0.23s。
+  ⚠ 「131 个 `dist-agent-meta.jsonl` 文件」≠ 聚合的流数——扫描带**深度护栏**（`tmp/X` 与
+  `tmp/X/traj`），`itN/` 子树不进去，实际命中 15 个。
+* **水位只作用于计数/样本，时间戳取全部行**：`DayBucket` 两组字段口径不同（详见 `pool-history.ts`
+  注释）—— `ok/fail/rollout/eval/results/elapsed/wall` 只收**已完成轮**；
+  `lastOkTs*`/`lastFailTs*`/`lastError*`/`lastTs` 收**全部**行（可达性口径）。混用会把
+  「轮前段就交完活、轮又长」的节点推回上一轮时刻，在 30 分钟可达性窗上从「慢」翻成「离线」
+  ——正是 2026-09-11 报障的反面。
+* **「最近失败」与「最近错误」同窗**：两者都按**近一小时**判定（此前 `lastFailTs` 无窗，靠
+  「UI 只在 `lastError` 非空时渲染它」才看不出来）；ts 解析不出的行直接丢掉，不再静默落进
+  1970-01-01 桶。
+* 预筛锚点文件随**池扫描根**取（`<池根>/dist-agent/pool-epoch.txt`，默认路径逐字节不变）
+  ⇒ 单测可端到端验预筛（此前只能测 `pruneByEpoch` 纯函数）；`/api/pool` 的流徽标改口径为
+  「**扫描** N 个训练流」（N 与窗口无关，不再写成「数据来自 N 个流」）。
+
 决策条目：`DECISIONS.md §2026-09-26-nodes-decouple-from-course`。
 
 ## §15 「在线/离线」收敛成**一颗开关**（本机配置 + hub 模式一起动）+ 第三源漂移徽标（2026-09-24）

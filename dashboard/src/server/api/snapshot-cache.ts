@@ -114,7 +114,9 @@ export async function computeFleetProbes(cfg: RlConfig): Promise<FleetProbes> {
   }
   // ★ 2026-09-26（plan/nodes-decouple-from-course.plan.md）：agg 现在是**按天分桶**的全量
   // 聚合，展示行由 `projectWindow` 投影得到。
-  //  · 慢节点判定（可达性，看「最近」）取**全部**窗口 —— 与「看哪天」无关；
+  //  · 慢节点判定（可达性，看「最近」）取**全部**窗口 —— 与「看哪天」无关；且它吃的
+  //    `lastOkTsMs`/`lastOkElapsedSec` 是**可达性口径**（含进行中那一轮的行），不是
+  //    「已完成轮」的统计口径 —— 详见 pool-history.ts 的 DayBucket 注释（二轮评审补正）。
   //  · 贡献数（pill 的 `lastContrib`）取 `agg.lastContrib`（跨课按完成时刻选的最新完成轮）；
   //    空 map = 无完成信号 = 无池数据（-1）。
   // local 节点是否出、以及它的 slots，是**结构**（cfg 现算，见 computeSlowSnapshot）；
@@ -124,6 +126,8 @@ export async function computeFleetProbes(cfg: RlConfig): Promise<FleetProbes> {
   let localContrib = -1
   if (agg) {
     const all = projectWindow(agg, resolveWindow('all', Date.now(), agg.epochMs))
+    // 输入是窗口投影，但其中的时刻/耗时字段取**全部行**（含进行中那一轮）——「还在结算吗」
+    // 与「这一轮的账结清了吗」是两个问题，混用会把轮前段就交完活的节点误推成离线。
     for (const [id, h] of all.hist) slowById.set(id, isSlowNode(h))
     if (agg.lastContrib.size > 0) {
       for (const [id, v] of agg.lastContrib) contribById.set(id, v)

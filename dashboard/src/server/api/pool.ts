@@ -5,7 +5,9 @@
  *    · **结构**：节点行/顺序、`enabled`（只读的那一行显示 disabled/无 ping）、local 槽数——来自
  *      当下 cfg，**毫秒级**，而且就是操作员刚刚拨下的那个开关；
  *    · **探测**：逐节点 ping（2.5s 超时 ∥）、池历史聚合（递归扫 tmp、读 MB 级 meta）、codeHash
- *      （sampler-agent 算全部源码）、selfNode `/v1/status`——实测冷算 **2448–2552ms**。
+ *      （sampler-agent 算全部源码）、selfNode `/v1/status`——实测冷算 **2448–2552ms**
+ *      （大头是 ping 的超时预算；池历史聚合本机实测 ~0.2–0.3s，且已被进程内 memo 与
+ *      `snapshot-cache` 的机群探测**共用一份**，不再各算一遍）。
  *  于是「停用节点」这个动作无论怎么处置缓存都不对：不碰 ⇒ 池表还显示旧状态 30s（TTL）/5min
  *  （面板轮询）而同一页的注册表行已经写「已停用」；硬清 ⇒ 面板被按住 2.5s；整条软作废 ⇒ 首帧
  *  给的还是旧状态（要等后台重算落地，实测 ~2.5s）。
@@ -35,6 +37,7 @@ import {
   type WindowAggregate,
   aggregateNodeHistory,
   emptyHistory,
+  invalidateNodeHistoryMemo,
   poolStatus,
   projectWindow,
   resolveWindow,
@@ -203,7 +206,12 @@ export async function buildPoolView(fresh = false, days = 'today'): Promise<Pool
   const cfg = loadConfig()
   const state = loadConsoleState()
   const course = effectiveCourse(state, discoverCourses())
-  if (fresh) poolProbeCache.clear()
+  if (fresh) {
+    poolProbeCache.clear()
+    // ★ 手动刷新也不能吃聚合的进程内 memo（那是给「稳态重扫节奏」用的，不是给
+    //   「现在就给我新的」用的）——否则 `?fresh=1` 会静默给出最多 30s 前的一份历史。
+    invalidateNodeHistoryMemo()
+  }
   const p = await getPoolProbes(cfg)
   return assemblePoolView(cfg, course, p, days)
 }

@@ -9,12 +9,13 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
   aggregateNodeHistory,
   emptyHistory,
+  invalidateNodeHistoryMemo,
   isSlowNode,
   isSlowNodeRows,
   lastCompletedIter,
@@ -124,6 +125,14 @@ describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计
   ) => JSON.stringify({ node, mode, it, stage: 0, seed: 1, ok, elapsedSec: 1, ts })
   const metaRow = (node: string, it: number, mode: 'rollout' | 'eval' = 'rollout') =>
     metaRowAt(node, it, tsAt(0), mode)
+  /** 毫秒 → 'YYYY-MM-DD HH:MM:SS'（与 Python strftime 写入同形）。 */
+  const tsFromMs = (ms: number): string => {
+    const d = new Date(ms)
+    const p = (n: number): string => String(n).padStart(2, '0')
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(
+      d.getMinutes(),
+    )}:${p(d.getSeconds())}`
+  }
   /** 账本 `iteration` 事件（`time` = 完成时刻，§3.4）。 */
   const iterEvent = (it: number, time = tsAt(0)) =>
     JSON.stringify({ event: 'iteration', iter: it, time })
@@ -138,6 +147,8 @@ describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计
     const root = mkdtempSync(join(tmpdir(), 'bcity-pool-'))
     const prev = process.env.BCITY_POOL_DIR
     process.env.BCITY_POOL_DIR = root
+    // 进程内 memo 会把上一用例的 root/结果带过来；夹具起手先清（见 invalidateNodeHistoryMemo）。
+    invalidateNodeHistoryMemo()
     try {
       const flows = Array.isArray(flow) ? flow : [{ name: 'flow', ...flow }]
       for (const f of flows) {
@@ -184,6 +195,49 @@ describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计
       expect(win.hist.get('a1')!.winRollout).toBe(2)
       expect(win.hist.get('a1')!.winEval).toBe(1)
     })
+  })
+
+  it('水位只作用于**计数/样本**；时间戳类字段取**全部**行（可达性口径，二轮评审补正）', () => {
+    // 症状：`allRows` 只收 `it <= baseIt` 后，「最近成功/失败/耗时」与 isSlowNode 的输入
+    // 一起被推到上一轮完成时刻 —— 一个「轮前段就交完活、轮又长」的节点会在 30 分钟
+    // 可达性窗口上从「慢」翻成「离线」（2026-09-11 报障的反面）。
+    // 判据：**统计只认已完成轮；「还活着吗」认全部行。**
+    const t = Date.parse('2026-09-26T15:00:00')
+    const inProgressFail = JSON.stringify({
+      node: 'a1',
+      mode: 'rollout',
+      it: 8,
+      ok: false,
+      reason: 'link timeout',
+      ts: tsAt(0, '14:55:00'),
+    })
+    const inProgressOk = JSON.stringify({
+      node: 'a1',
+      mode: 'rollout',
+      it: 8,
+      ok: true,
+      elapsedSec: 41.9,
+      ts: tsAt(0, '14:50:00'),
+    })
+    withPoolRoot(
+      {
+        meta: [metaRowAt('a1', 7, tsAt(0, '08:00:00')), inProgressOk, inProgressFail],
+        ledger: [iterEvent(7, tsAt(0, '08:30:00'))],
+      },
+      () => {
+        const agg = aggregateNodeHistory()
+        const h = projectWindow(agg, resolveWindow('all', t, agg.epochMs)).hist.get('a1')!
+        // 计数：只含已完成轮（it7 一条）
+        expect(h.ok).toBe(1)
+        expect(h.fail).toBe(0)
+        // 时间戳：可达性口径，含进行中那一轮
+        expect(h.lastOkTs).toBe(tsAt(0, '14:50:00'))
+        expect(h.lastOkTsMs).toBe(parseTsMs(tsAt(0, '14:50:00'))!)
+        expect(h.lastFailTs).toBe(tsAt(0, '14:55:00'))
+        // isSlowNode 的输入随之看到「14:50 还在交活」⇒ 宁可判「慢」也不误判「离线」
+        expect(h.lastOkElapsedSec).toBe(41.9)
+      },
+    )
   })
 
   it('无训练账本（一次性 run 目录）→ 退化为 meta 最大 it（旧口径，行为不变）', () => {
@@ -359,13 +413,99 @@ describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计
   })
 
   // ── 大文件只读尾部（阈值线之上，诚实截断标记） ──
-  it('大文件只读尾部（>2MB 的流标记 truncated）', () => {
+  it('大文件只读尾部：**尾窗之外的行一行都没进聚合**（不只是打个 truncated 标记）', () => {
+    // 50 000 行 ≈ 6 MB > 2 MB 阈值；尾窗 = 最后 20 000 行 ≡ 全是 NEW。
+    // 行为式证明（比 spy 强：断言「早段的行不存在」，而不是「调用了哪个函数」）。
     const big: string[] = []
-    for (let i = 0; i < 30_000; i++) big.push(metaRowAt('a1', 1, tsAt(0, '08:00:00')))
+    for (let i = 0; i < 25_000; i++) big.push(metaRowAt('OLD', 1, tsAt(0, '08:00:00')))
+    for (let i = 0; i < 25_000; i++) big.push(metaRowAt('NEW', 1, tsAt(0, '09:00:00')))
     withPoolRoot({ meta: big, ledger: [iterEvent(1)] }, () => {
       const agg = aggregateNodeHistory()
       expect(agg.sources.length).toBe(1)
       expect(agg.sources[0]!.truncated).toBe(true)
+      const win = projectWindow(agg, resolveWindow('all', now, agg.epochMs))
+      expect(win.hist.has('NEW')).toBe(true)
+      expect(win.hist.has('OLD')).toBe(false)
+    })
+  })
+
+  // ── 预筛端到端（钉在 epoch；二轮评审：此前只能测 pruneByEpoch 纯函数） ──
+  it('预筛端到端：mtime 早于锚点的整份文件连 sources 都不进（锚点随池根走）', () => {
+    const root = mkdtempSync(join(tmpdir(), 'bcity-pool-'))
+    const prev = process.env.BCITY_POOL_DIR
+    process.env.BCITY_POOL_DIR = root
+    invalidateNodeHistoryMemo()
+    try {
+      const nowMs = Date.now()
+      const epoch = nowMs - 3_600_000
+      mkdirSync(join(root, 'dist-agent'), { recursive: true })
+      writeFileSync(join(root, 'dist-agent', 'pool-epoch.txt'), String(epoch), 'utf8')
+      const tsFresh = tsFromMs(nowMs - 60_000)
+      for (const [name, node] of [
+        ['fresh', 'aLive'],
+        ['stale', 'aOld'],
+      ] as const) {
+        mkdirSync(join(root, name), { recursive: true })
+        writeFileSync(
+          join(root, name, 'dist-agent-meta.jsonl'),
+          `${JSON.stringify({ node, mode: 'rollout', it: 1, ok: true, elapsedSec: 1, ts: tsFresh })}\n`,
+          'utf8',
+        )
+      }
+      // stale 流整份都在锚点之前（文件 mtime < epoch）→ 必须被预筛掉
+      const ancient = new Date(epoch - 3_600_000)
+      utimesSync(join(root, 'stale', 'dist-agent-meta.jsonl'), ancient, ancient)
+      const agg = aggregateNodeHistory()
+      expect(agg.epochMs).toBe(epoch)
+      expect(agg.sources.map((s) => s.dir)).toEqual(['fresh'])
+      const win = projectWindow(agg, resolveWindow('all', nowMs, agg.epochMs))
+      expect(win.hist.has('aLive')).toBe(true)
+      expect(win.hist.has('aOld')).toBe(false)
+    } finally {
+      if (prev === undefined) delete process.env.BCITY_POOL_DIR
+      else process.env.BCITY_POOL_DIR = prev
+      invalidateNodeHistoryMemo()
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  // ── 进程内 memo（两个消费者共用一份；训练中重扫节奏封顶） ──
+  it('聚合 memo：同根同指纹复用**同一对象**；窗口内不重扫；invalidate 后重算', () => {
+    withPoolRoot(FLOW, (root) => {
+      const a = aggregateNodeHistory()
+      expect(aggregateNodeHistory()).toBe(a) // 两个消费者拿到同一份（不是各算一遍）
+      // 训练在跑、meta 在追加：AGG_MEMO_MIN_MS 窗口内不重扫（否则快照刷新器每 5s 重扫全池）
+      appendFileSync(join(root, 'flow', 'dist-agent-meta.jsonl'), `${metaRow('a1', 7)}\n`, 'utf8')
+      expect(aggregateNodeHistory()).toBe(a)
+      invalidateNodeHistoryMemo()
+      const c = aggregateNodeHistory()
+      expect(c).not.toBe(a)
+      // FLOW 的 a1 在 it7 有 3 条 + 追加 1 条 = 4（重算确实读到了新行）
+      const win = projectWindow(c, resolveWindow('all', now, c.epochMs)).hist.get('a1')!
+      expect(win.ok).toBe(4)
+    })
+  })
+
+  // ── 「最近失败/最近错误」共用一个近一小时口径 ──
+  it('最近失败与最近错误同口径（近一小时）：超窗不上屏、计数照算；窗口内上屏', () => {
+    const failRow = (ts: string) =>
+      JSON.stringify({ node: 'a1', mode: 'rollout', it: 1, ok: false, reason: 'boom', ts })
+    // 钉在当天正午，避开「now - 2h 坐到昨天」的跨天边界（窗口是本地日）。
+    const noon = new Date(now)
+    noon.setHours(12, 0, 0, 0)
+    const t = noon.getTime()
+    withPoolRoot({ meta: [failRow(tsFromMs(t - 2 * 3_600_000))], ledger: [iterEvent(1)] }, () => {
+      const agg = aggregateNodeHistory()
+      const h = projectWindow(agg, resolveWindow('today', t, agg.epochMs)).hist.get('a1')!
+      expect(h.fail).toBe(1) // 计数是窗口口径：2 小时前的失败照算
+      expect(h.lastError).toBe('') // 但不上屏
+      expect(h.lastFailTs).toBe('-') // 时间戳与错误同一个窗，不会出现「有字却是几天前」
+    })
+    withPoolRoot({ meta: [failRow(tsFromMs(t - 10 * 60_000))], ledger: [iterEvent(1)] }, () => {
+      const agg = aggregateNodeHistory()
+      const h = projectWindow(agg, resolveWindow('today', t, agg.epochMs)).hist.get('a1')!
+      expect(h.lastError).toBe('boom')
+      expect(h.lastFailTs).toBe(tsFromMs(t - 10 * 60_000))
     })
   })
 

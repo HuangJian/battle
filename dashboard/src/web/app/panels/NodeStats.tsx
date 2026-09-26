@@ -307,11 +307,15 @@ export function NodeStats({ enabled, poolFreshNonce }: NodeStatsProps) {
         {pool.sources.length > 0 ? (
           <span
             className="tc-badge tc-badge--a"
-            title={pool.sources
-              .map((s) => `${s.dir}（${s.lines} 条${s.truncated ? ' · 仅尾部' : ''}）`)
-              .join('\n')}
+            title={
+              `扫描到 ${pool.sources.length} 个训练流的 meta 账本（与所选窗口无关；\n` +
+              `窗口内统计只含其中在「${pool.window.label}」内有行的流）：\n` +
+              pool.sources
+                .map((s) => `${s.dir}（${s.lines} 条${s.truncated ? ' · 仅尾部' : ''}）`)
+                .join('\n')
+            }
           >
-            数据来自 {pool.sources.length} 个训练流 · 最新 {fmtTs(pool.sources[0]!.mtimeMs)}
+            扫描 {pool.sources.length} 个训练流 · 最新 {fmtTs(pool.sources[0]!.mtimeMs)}
           </span>
         ) : null}
         <span className="tc-muted tc-small">本机 v{pool.localHash.slice(0, 7) || '-'}</span>

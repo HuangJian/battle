@@ -80,20 +80,26 @@ interface FlowState {
   completedAtMs: number | null      // ★§3.4：账本最后一个 iteration 事件的 time（本地 ms）
   contribAtBase: Map<string, number> // 该流在 baseIt 的 rollout+eval 成功局数
 }
-// 解析该流的行：ts >= epochStr 且 it <= baseIt（= 已完成轮）才落桶
-//   —— `it <= baseIt` 是**数据卫生**，不是展示口径（R5）
+// 解析该流的行：ts >= epochStr 才进；`it <= baseIt`（= 已完成轮）**只决定计数算不算**
+//   —— `it <= baseIt` 是**数据卫生**，不是展示口径（R5）；时间戳/错误列取**全部**行
+//   （可达性口径，见下 DayBucket 的两组字段，2026-09-26 二轮评审补正）
 
 // ③ 落桶：`byDay: Map<'YYYY-MM-DD'(本地), Map<node, DayBucket>>`
 export interface DayBucket {
+  // ── 计数/样本/完成率：只收**已完成轮**（it <= baseIt_flow）──
   ok: number; fail: number
   rollout: number; eval: number          // 窗口内成功局数（分 mode）
   results: boolean[]                     // 最近 ≤10 条结算结果（时间升序）→ 窗口内完成率
   elapsed: number[]; wall: number[]      // 最近 ≤50 成功局样本（pushWindowSample 上限）
+  // ── 时间戳/错误：收**全部**行（可达性口径；含进行中那一轮）──
   lastOkTs: string; lastFailTs: string   // 最近成功/失败（窗口内取最大）
-  lastError: string; lastErrorTsMs: number | null  // 最近失败原因 + 其毫秒（近一小时由投影判）
-  lastOkTsMs: number | null; lastOkElapsedSec: number | null  // isSlowNode 输入
+  lastFailTsMs: number | null                     // 与 lastFailTs 同源（投影按近一小时判上屏）
+  lastError: string; lastErrorTsMs: number | null // 最近失败原因 + 其毫秒（近一小时由投影判）
+  lastOkTsMs: number | null; lastOkElapsedSec: number | null  // isSlowNode 输入（可达性）
   lastTs: string
 }
+// ★ 两组字段为什么不同口径：混用会把「轮前段就交完活、轮又长」的节点推回上一轮时刻，
+//   在 30 分钟可达性窗上从「慢」翻成「离线」（2026-09-11 报障的反面）。
 
 // ④ 投影（纯函数、零 IO、可单测）
 export interface NodeWindow { key: string; label: string; fromDay: string; toDay: string;
@@ -107,8 +113,12 @@ export function projectWindow(agg: HistoryAggregate, w: NodeWindow): WindowAggre
 * `WindowAggregate`（投影结果）：`hist: Map<node, NodeHistory>` / `sources` / `epochMs` / `window` / `latestRound`。
   **所有展示字段（含 `avgElapsedSec` / `avgWallSec` / 完成率 / 最近成功失败 / 最近错误）都是窗口口径** ——
   切天就是换个窗口看同一份数据（唯一例外：`lastContrib` 是"最新完成轮"、与窗口无关）。
+* **聚合加一层进程内 memo**（2026-09-26 二轮评审）：键 = 池根 + epoch + 候选指纹（路径/mtime/体积），
+  另加 `AGG_MEMO_MIN_MS = 30s` **时间下限**。两个消费者（`api/pool` 探测层、`snapshot-cache` 机群探测）
+  **共用一份**；空闲时靠指纹零重扫，训练中（meta 逐秒追加 ⇒ 指纹一直变）靠时间下限把重扫节奏封顶
+  ——否则快照刷新器每 5s 就重扫一遍全池。`invalidateNodeHistoryMemo()` 只给单测夹具用。
 * `ActiveFlow` 从"过滤依据"升级为**诊断**：`sources: ActiveFlow[]`（本次合并了哪些流、各多少行），
-  节点页脚注显示"数据来自 N 个训练流"。
+  节点页徽标显示"**扫描** N 个训练流"（N 与窗口无关，故不用"数据来自"的措辞）。
 * **删除**展示侧的 `globalMaxIt` / `lastIter` / `lastIterOk` / `contribRollout` / `contribEval`
   （裁决：「`lastIter*` 从类型里删」，不是只从 UI 撤）；`baseIt` 只存在于聚合内部与 `latestRound`。
   判据：删完 `NodeHistory` / `NodeHistoryRow` / `PoolView` 上**不再有任何"以 it 为口径"的展示字段**
@@ -177,7 +187,9 @@ agg.lastContrib = latest && latest.baseIt >= 0
   分列展示仍按 §3.3（`winRollout`/`winEval` 是**窗口**口径；`lastContrib` 是**最新完成轮**口径）。
 * **不做**：不引入任何"新鲜度阈值"（`HEALTHY_FRESH_MS` 一类常量**删掉**）。轮有多旧只作脚注信息。
 * **与 `isSlowNode` 的分工**：`isSlowNode` 仍是"ping 失败但仍在结算"的**可达性**口径（`:383-391`），
-  保持现状（输入取 `projectWindow(agg, 'all')`）。
+  **函数体不改**；输入取 `projectWindow(agg, 'all')`，其中 `lastOkTsMs`/`lastOkElapsedSec` 已是
+  **可达性口径**（含进行中那一轮的行，见 §3.1 的 DayBucket 两组字段）——否则水位过滤会把它推回
+  上一轮完成时刻，在 30 分钟窗边界上把「慢」误判成「离线」（二轮评审）。
 * ⚠ **并存提示**：服务端 `poolStatus`（成功率）与 `nodeHealth`（产能）**不是同一个指标**，
   本 plan 只修 `lastContrib` 的来源，**不改 `poolStatus` 公式**（§3.2 已说明其输入随窗口）。
 
@@ -209,7 +221,9 @@ agg.lastContrib = latest && latest.baseIt >= 0
   这样缓存的全量 `agg` 与"看哪天"无关，"切天零重算"成立（§5 有断言）。
 * 单文件上限：超过阈值只读**尾部 N 行**（`readLedgerTail` 先例）——⭐ **与天窗口有取舍**：
   截断后更早的天数会缺数据，UI 必须标注"该流只统计最近 N 行"（诚实截断，不静默）。
-* 全量聚合结果进 SWR 缓存；窗口投影微秒级。
+* 全量聚合结果进 **SWR 缓存 + 进程内 memo**（§3.1）；窗口投影微秒级。实测（本机，2026-09-26）：
+  15 个活跃流 / 其中 5 个 >2MB，冷算 ~0.23s（`tmp/**` 下共 131 个 `dist-agent-meta.jsonl`，但扫描
+  带深度护栏只命中 15 个）。
 
 ### 4.4 epoch 与窗口 / `?course=` 牵连面
 
@@ -238,9 +252,12 @@ agg.lastContrib = latest && latest.baseIt >= 0
       **相反**的数据）② `lastContrib` = 该节点在该轮 rollout+eval 成功局数 ③ `nodeHealth` 三档
       ④ 所有流都取不到 `iteration` 时间戳时的退化路径明确（按 mtime 兜底 + 记一行）；
 - [ ] 单测：① 两门课的行合并到同一节点 ② 窗口边界（固定 `TZ`，含跨天）③ epoch 与窗口取交集
-      ④ 投影纯函数（同一 `agg` 切不同 days）⑤ **逐流水位只滤掉"进行中那一轮"**（造一条 it > baseIt
-      的行，断言不进桶，且**另一门课同一 it** 的行照常进）⑥ 预筛（mtime < epoch 的整份文件**不被 read**，
-      用 spy）⑦ 大文件只读尾部（阈值线）；
+      ④ 投影纯函数（同一 `agg` 切不同 days）⑤ **逐流水位只滤掉"进行中那一轮"的计数**（造一条 it > baseIt
+      的行，断言计数不进、**另一门课同一 it** 的行照常进）⑥ 预筛：端到端（写锚点文件 + `utimesSync`
+      把另一份流置成 mtime < epoch，断言它连 `sources` 都不进）+ `pruneByEpoch` 纯函数；
+      ⑦ 大文件只读尾部：**行为式**断言早于尾窗的行一行都没进聚合（比 spy 强：断言结果，不是断言调用）；
+      ⑧ **水位 vs 时间戳分组**（时间戳含进行中那一轮；计数不含）；⑨ 聚合 memo（同根复用同一对象、
+      窗口内不重扫、`invalidate` 后重算）；
 - [ ] 门禁：`cd dashboard && bun run typecheck && bun run test` 绿 + 根 `bun run check` 绿
       （动过 `dashboard/src/web/**` ⇒ 走 `bun dashboard/src/server/build.ts` 三份 bundle）；
 - [ ] 文档：`docs/nn/console.md` 新条目（解耦 + 天窗口 + "it 只作内部过滤器"）；
@@ -272,3 +289,9 @@ agg.lastContrib = latest && latest.baseIt >= 0
 * **2026-09-26（评审）**：修 S8 时区前提（UTC → 训练机本地）、逐流 `itByNode` 结构、`DayBucket`
   补齐窗口投影所需字段、预筛钉 epoch 以保住"切天零重算"、`poolStatus` 口径、点名
   `snapshot-cache.ts` 第二消费者、`?course=` 牵连面、S9–S12 新增现状。
+* **2026-09-26（二轮评审）**：① 聚合加**进程内 memo**（§3.1/§4.3）——两个消费者共用、训练中重扫
+  节奏封顶；② `DayBucket` 两组字段**分口径**（计数只认已完成轮，时间戳/错误取全部行）+ `lastFailTsMs`，
+  修 `isSlowNode` 输入被水位过滤推后的可达性漂移（§3.1/§3.4）；③ 预筛锚点随池根走（单测可端到端验）；
+  ④ ts 解析不出的行直接丢掉（不再落进 1970-01-01 桶）；⑤ 节点页徽标改「扫描 N 个训练流」；
+  ⑥ DoD 的 spy 断言换成更强的**行为式**断言；⑦ 附上本机实测扫描规模（131 个文件 ≠ 15 个命中流，
+  深度护栏），以免继续引用单文件时代的数。
