@@ -4152,3 +4152,32 @@ top 层源码扫描类闸（`bun test`）成批**假红**，比完立即 `git wo
 - **不动**：`test_backend_contract` 改源码扫描会换掉 `isinstance(RolloutBackend)` 这条真结构断言
   （需单独决策）；`ppo/goal|intent` 的 `compute_gae_variable` 是各线 `GAMMA_TICK` **别名**不是重复实现。
 —— 全文（逐项拆分理由 / 测量数据 / 守卫清单）→ `docs/nn/engineering.md` §29
+
+## §2026-09-26-goalnn-contract-scan-layer（2026-09-26，运行期契约判据拆成「源码扫描层 + ground truth + 交叉校验」）
+
+**背景**：`tests/test_backend_contract.py`（P0-1 的捕获器：三套 PPO 后端必须满足
+`RolloutBackend` 的 5 个成员 + `update` 必须接受 stream.py 无条件注入的 `ckpt_path` /
+`on_epoch_done`）原本只走**运行期** `importlib.import_module` 三个后端 ⇒ 三个后端顶层都
+`import torch`，**无 torch 的机器/镜像上整文件收集失败**，这类缺陷在那边一条都守不住。
+
+**做法（三层，判据一条不删）**：
+1. **源码扫描层**（免 torch，`tests/helpers/backend_contract_scan.py`）：AST 解析 5 个成员
+   （含 `from X import y` 递归确认名字来路）、把 `def update(...)` 的形参表翻成
+   `inspect.Signature` 后跑**同一段** `sig.bind(...)`；`if`/`try` 体内的定义标 conditional
+   且必需成员不得 conditional；解析不出的形状（lambda 赋值 / partial / `__getattr__`）报
+   `UNRESOLVED` 而**不是**当作通过。
+2. **运行期 ground truth**（`test_backend_contract_runtime.py`）：原 3 条断言原样保留。
+3. **双向交叉校验**：静态结论 ⇔ 运行期事实（成员表、可绑定性），任一方向分歧即红。
+
+**「不弱化」的证据（突变探针，实测）**：把 `ppo_update_goal` 的 `on_epoch_done` 摘掉
+（P0-1 原形）⇒ 两层**同时**红，且静态层在 **`PYTHONPATH=tmp/no_torch`（无 torch）下也红**；
+两条交叉校验在突变下仍绿（两层同结论）。+ 文件内自证用例把四条边界各砸一遍。
+
+**被否决**：① `pytest.importorskip("torch")` 静默 skip（掩盖覆盖，且与
+`§2026-09-26-goalnn-notorch-half` 的「torch 真缺失时应当**红**」口径冲突）；② 留运行期一份
+了事（无 torch 机零覆盖）；③ 为省 torch 把 `isinstance(RolloutBackend)` 这条真结构断言删掉
+（可移植性不该拿掉真判据）。
+
+**代价（明说）**：无 torch 机上**测试文件数不变**——老文件退出收集失败名单，新的运行期文件
+按「不静默 skip」口径顶进来；匀出来的是用例（2907 → **2918 passed**，收集失败文件仍 16 个）。
+—— 全文（逐项边界 / 突变探针输出 / 自证清单）→ `docs/nn/engineering.md` §29 补记

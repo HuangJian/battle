@@ -165,6 +165,39 @@ KL 三条经 `_sample_logprobs` 造的是 torch 张量。可动的只剩两类�
 (a) `test_backend_contract` 改用**源码扫描**替签名/结构契约（会换掉 `isinstance(RolloutBackend)`
 这条真结构断言，需单独决策）；(b) `ppo/goal.py` / `ppo/intent.py` 的装载簇搬 np_core——但那些
 `compute_gae_variable` 是**各线自己的 `GAMMA_TICK` 别名**（不是重复实现），搬走反而丢语义。
+### 补记（同日第四轮）：运行期契约判据拆成「源码扫描层 + ground truth + 交叉校验」
+
+收尾时 16 个收集失败文件里，`test_backend_contract.py` 是唯一**一整文件都只因为「真 import
+三个后端」**而红——那 4 条判据（10 个用例）本身一行不碰 torch。改成三层：
+
+| 层 | 文件 | 要求 torch | 管什么 |
+|---|---|---|---|
+| 源码扫描（可移植） | `test_backend_contract.py` | 否 | 5 个成员可解析（含名字来路）+ `update` 能绑定 stream.py 的调用形状 |
+| 运行期 ground truth | `test_backend_contract_runtime.py` | **是（故意不 skip）** | 真 import + `isinstance(RolloutBackend)` + 真 `inspect.signature` |
+| 双向交叉校验 | 同上 | 是 | 静态结论 ⇔ 运行期结论（成员表 / 绑定性两个方向） |
+
+判据与实现放 `tests/helpers/backend_contract_scan.py`（与 `source_scan` 同族的只读扫描助手）：
+只在同模块解析名字、跨 `from X import y` 递归确认（`_MAX_DEPTH=4`）；`if`/`try` 体内的定义标
+`conditional` 且**必需成员不得 conditional**；解析不出来的形状（lambda 赋值 / partial /
+`__getattr__` 钩子）返回 `UNRESOLVED` 而**不是**「视为通过」。签名侧把 AST 形参表翻成
+`inspect.Signature` 后跑**同一段** `sig.bind(...)`——两侧的分歧只可能来自签名本身。
+
+**「不弱化」的机器证据（突变探针，实测）**：把 `ppo_update_goal` 的 `on_epoch_done`
+形参摘掉（P0-1 原形），两层**同时**红：
+
+```
+tests/test_backend_contract.py::test_update_accepts_stream_injected_kwargs[goal]        FAILED
+tests/test_backend_contract_runtime.py::test_update_accepts_stream_injected_kwargs[goal-ppo.goal]  FAILED
+```
+
+且静态层那一条在 **`PYTHONPATH=tmp/no_torch`（无 torch）下也红**——这正是旧版做不到的；两条
+交叉校验在突变下**仍绿**（两层给出同一结论）。文件里还留了自证用例
+`test_the_scanner_actually_catches_the_p0_1_shape`，把四条边界（缺关键字 / `**kwargs` 不假红 /
+条件定义 / 幽灵 import / lambda 未解析）各自砸一遍。
+
+**代价（明说）**：无 torch 机上**测试文件数不变**——`test_backend_contract.py` 退出收集失败名单，
+`test_backend_contract_runtime.py` 按「**不静默 skip**」口径顶进来（torch 真缺失时应当红）。
+匀出来的是**用例**：本轮收尾 **2907 → 2918 passed**（+11），收集失败文件仍 16 个。
 
 ---
 
