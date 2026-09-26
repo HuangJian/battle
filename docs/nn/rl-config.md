@@ -16,8 +16,8 @@
 
 | 类 | 判据 | 处置 | 例 |
 |---|---|---|---|
-| **A 机器/环境级** | 值描述**这台机器/这条链路**，课程文件天然表达不了 | 留 | `rl.hub_port` `agent_port` `remote_token` `remote_hub_url` `remote_hubs` `cf_protocol` `cf_edge_ip` `slim` `torch_threads` `nodes[]` |
-| **B 全局缺省** | 课程文件 schema **有同名键**，这里只是「课程没写时的兜底」 | 只留必要兜底 + 注释；「所有在训课程都显式声明」的可删 | `rl.mb` `workers` `seed_rotate` `difficulty` `max_ticks` `keep_iters` `eval_window_sec` |
+| **A 机器/环境级** | 值描述**这台机器/这条链路**，课程文件天然表达不了 | 留 | `rl.hub_port` `agent_port` `remote_token` `remote_hub_url` `remote_hubs` `cf_protocol` `cf_edge_ip` `slim` `torch_threads` `nodes[]` · **`rl.local_slots` / `rl.workers`**（本机并发配额，见 §1.4b） |
+| **B 全局缺省** | 课程文件 schema **有同名键**，这里只是「课程没写时的兜底」 | 只留必要兜底；**范围内全绿的删掉**（判据与执行见 §1.4b） | `rl.mb` `seed_rotate` `keep_iters` `eval_window_sec` |
 | **C 调度策略** | 「怎么派活」而非「怎么训」的阈值 | 留 | `policy.taskTimeoutSec` `taskFetchTimeoutSec` `queueWindowSec` `statusTimeoutSec` `nodeFailStreak` `streamKlCap` |
 | **D 每课机器侧** | 控制台开课/热切的写面；per-course 最具体 | 留活课、删停课 | `courses.<课>.{rollout_src,run_iters,paired_kill,gate_halt_mode}` |
 | **E 废弃/死** | 代码注释明写废弃，或全域零消费者 | 删 | `intent_rl.*` · `policy.upgradeBranch` · `policy.minDiskFreeMB` · `policy.streamKlCapIntent` · `policy.streamWaveGamesIntent` |
@@ -46,9 +46,13 @@
 | `rl.stream` | E | 单一 PPO 路径下 `validate_args` **强制置 0**，填了也不生效 |
 | `rl.double_buffer` | E | 同上 |
 | `rl.precollect_early` | E | 只在 `double_buffer` 开时被读；恒 0 ⇒ 不生效 |
+| `rl.difficulty` | B | 矩阵全绿（108/108 课程显式声明：44 个课程文件 + 64 个关卡注入）⇒ 纯兜底；删后读者 `eval_a_once.py:274` 的 `or "hard"` 与删前**同值** |
+| `rl.max_ticks` | B | 同上（`eval_a_once.py:273` 的 `or 12000` 与删前的 `12000` 同值） |
 
-**清洗记录**：2026-09-26，本机 `nn-training/rl-config.json`；
-备份 → `nn-training/rl-config.json.bak.20260926-171807`（sha256 已回读校验，gitignore 覆盖）。
+**清洗记录**：2026-09-26，本机 `nn-training/rl-config.json`，两批（键见上表）：
+P0 死键/废弃块 → 备份 `nn-training/rl-config.json.bak.20260926-171807`；
+B 类全绿键 → 备份 `nn-training/rl-config.json.bak.20260926-181554`
+（两份 sha256 均已回读校验，gitignore 覆盖）。
 清洗后顶层键 = `version / policy / nodes / rl / courses`。
 
 ### 1.4 「删配置、不删代码」
@@ -61,6 +65,39 @@
   `mode != per-tick` 响亮拒启）⇒ 重启前须先解冻，且新配置按 x 系列写进 `curricula/*.jsonc`。
 - `rl/cli.py` / `rl/rollout_phase.py` 仍认得 `stream`/`double_buffer`/`precollect_early`
   （`rollout_phase` 的提前预采只在 `double_buffer` 开时生效）。
+
+### 1.4b B 类「全绿」判据与本次执行（2026-09-26）
+
+**全绿**（`tools/rl_config_clean.py::is_green`）= 范围内的**每一门**课程都**不靠 rl-config 兜底**
+（值来自课程文件或关卡注入）；空集恒「非全绿」——**样本不足就不删**（plan §3.2）。
+
+**范围**（`--scope`）：
+
+| 范围 | 课程表 | 何时用 |
+|---|---|---|
+| `live`（缺省） | 在训课程 = 有 `tmp/<课>/training-enabled.txt` | 有人正开着课时的常规口径（与训练侧 `enabled_courses` / hub `_course_dir_live` 同闸） |
+| `all` | `curricula/*.jsonc` 的全部课程 | **在训集为空时唯一能出结论的范围**；且「全绿于 all ⇒ 全绿于 live」（更强，不反之） |
+
+**本次执行**：操作员在 17:49 把两门在训课停课（控制台日志 `已停课 …（已删开课标记）`）
+⇒ `live` 集为空、`--matrix` 出不了结论；改用 `--scope all`（108 门）⇒ 全绿 = `difficulty`、`max_ticks`。
+
+**机器级键永不删**（`tools/rl_config_clean.py::MACHINE_KEYS`）：`local_slots`、`workers`。
+它们在 `--scope all` 下会判「全绿」（108/108 课程都写了 `workers`），但 rl-config 里这条是
+**裸机读数**而不是课程兜底——`dashboard/src/core/slots.ts::bareCapacity` = `max(rl.workers, rl.local_slots)`，
+`rl/config.py::apply_course_machine_overrides` 也把 `rl.{workers,local_slots}` 当本机配额缺省。
+删掉 ⇒ `Number(undefined ?? 0)` = 0 ⇒ 容量塌成 0、`checkCapacity` 把每门课都报成超量（假红）。
+
+**保留兜底的（没删）**：`mb` `seed_rotate` `keep_iters` `eval_window_sec` `total_stages`
+`rotate_stages` `seed` `lr` `epochs` `gamma` `lam` `target_transitions` —— 在 `all` 范围内都有课程靠
+rl-config 兜底（例：`mb` 有 9 门 BC/demo 课没写；`keep_iters`/`eval_window_sec` 几乎全体依赖）。
+按 plan §8-O1：**保留**比「零缺省」安全（历史课可复现；新课漏声明不至静默漂到 argparse 默认）。
+
+```bash
+cd nn-training
+bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py --matrix --scope all                    # 出矩阵 + 全绿清单
+bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py --drop-b-class --scope all              # dry-run（零写盘）
+bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py --drop-b-class --scope all --apply      # 先备份再删
+```
 
 ### 1.5 键白名单（防再长草）
 
@@ -83,18 +120,21 @@ cd nn-training && bash ../tools/githook/nn-py-safe.sh -m pytest tests/test_rl_co
 cd nn-training
 bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py            # dry-run（零写盘，逐键 diff，脱敏）
 bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py --apply    # 先写 .bak.<ts>（sha 回读校验）再删
-bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py --matrix   # 「在训课程 × B 类键」覆盖矩阵
+bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py --matrix --scope all   # 「课程 × B 类键」覆盖矩阵
+bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py --drop-b-class --scope all --apply  # 删全绿 B 类兜底键
 ```
 
 - 只删 `DELETE_PATHS`（8 个点号路径）+ `--drop-course` 点名的条目；**未知键一个字不碰**。
+- `--drop-b-class`（配 `--scope`）才把**矩阵全绿的 B 类兜底键**算进删除清单（缺省关；机器级键永不在内）。
 - 结构残缺（缺 `version`/`policy`/`rl`/`nodes`）⇒ 拒删（不写坏唯一的开训入口）。
 - 脱敏：`rl.remote_token` / `nodes[].authKey` 只以 `…（len=N）` 出现（红线：含密钥文件永不泄露）。
 - 回退：备份文件在 `nn-training/rl-config.json.bak.<ts>`（已 gitignore），直接 `cp` 回去。
 
 ### 1.7 待办（未做完的部分）
 
-- **B 类兜底键的删除待训练机出矩阵**：只删「所有在训课程都显式声明」的键（判据 `--matrix` 的「全绿」）。
-  本机实测在训仅 `x20-dodge-l3d2` / `x20-steady-cont` 两门，样本不足以代表全部在训课。
+- ~~**B 类兜底键的删除待训练机出矩阵**~~ **已完成（2026-09-26，§1.4b）**：`live` 集为空（操作员已于
+  17:49 停掉全部课程）⇒ 改用 `--scope all`（108 门）出结论，删 `rl.difficulty` / `rl.max_ticks`。
+  若之后重新开课、想按「在训集」口径再核一遍：`--matrix --scope live`。
 - **停课 `courses.<课>` 条目的清理**：与 `plan/course-archive.plan.md` 的「退出活体」流程
   （删 marker = 三处同时退出）对齐后再执行，避免与封存动作打架。
 - **控制台冒烟接线**：`dashboard/src/stack/smoke.ts::rlConfigSmoke` 读同一份

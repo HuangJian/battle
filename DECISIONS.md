@@ -4329,3 +4329,48 @@ POST、仍刷一串假「失败」，根因（推了必被拒的课）没治；�
 **违反后果**：把「怎么训」的超参写回 rl-config = 造第二事实源（用户原则针对的正是这一类）；
 不删 `policy.upgradeBranch` 的读点 = 下次有人手填非空值就再 reset 一遍全部节点。全文 →
 `docs/nn/rl-config.md` §1 · 计划 → `plan/rl-config-cleanup.plan.md`。
+
+---
+
+## §2026-09-26-rl-config-b-class（2026-09-26，B 类兜底键删除：范围取「全部课程」超集 + `workers` 归机器级）
+
+**触发（用户 2026-09-26）**：「在训练机跑 `rl_config_clean.py --matrix`，按全绿结果删掉多余 B 类兜底键」。
+
+**前置事实**：训练机（= 本机，hub / sampler / trainer 都活在这个工作区）上操作员已于 17:49 把最后
+两门在训课停掉（`x20-steady-cont` / `x20-dodge-l3d2`；控制台日志 `已停课 …（已删开课标记）`）
+⇒ `live`（`training-enabled.txt`）集为**空**，plan §3.2 / §8-O1 的常规判据出不了结论
+（`is_green` 对空集恒 False）。
+
+**决定 1 — 判据范围改用「全部课程」超集**：`--matrix` / `--drop-b-class` 增 `--scope {live,all}`；
+`all` = `curricula/*.jsonc` 全部课程（本机 108 门）。理由：B 类兜底的**风险面**是「任何课程没声明该键
+时落到 rl-config 的值」，所以「全部课程都不靠它」是**更强**的证据（全绿于 `all` ⇒ 全绿于 `live`，
+反之不然）；在训集为空时它是唯一能出结论的范围。**本次按 `all` 删 `rl.difficulty` / `rl.max_ticks`**
+——两者 108/108 显式声明（44 课程文件 + 64 关卡注入），且唯一消费者 `rl/eval_a_once.py:273-274`
+的兜底 `or 12000` / `or "hard"` 与被删值**逐字同值** ⇒ 零行为变化。
+
+**决定 2 — `workers` 与 `local_slots` 同归机器级**（`tools/rl_config_clean.py::MACHINE_KEYS`）：
+二者在 `--scope all` 下判「全绿」（108/108 课程都写了 `workers`），但 rl-config 里这条是**裸机读数**：
+`dashboard/src/core/slots.ts::bareCapacity` = `max(rl.workers, rl.local_slots)`，
+`rl/config.py::apply_course_machine_overrides` 也把 `rl.{workers,local_slots}` 当本机配额缺省。
+删 `workers` ⇒ `Number(undefined ?? 0)` = 0 ⇒ 容量塌成 0、`checkCapacity` 把每门课报成超量（假红）。
+这是 plan §3.2-4 对 `local_slots` 豁免的推广。
+
+**保留兜底（非全绿）**：`mb`（9 门 BC/demo 课没写）、`seed_rotate`（4 门）、`keep_iters`（106 门）、
+`eval_window_sec` / `total_stages` / `rotate_stages` / `seed`（各 108 门）等一律**不删**——
+plan §8-O1 已否决「零缺省」。
+
+**顺手修的 bug（同一路径）**：`tools/rl_config_clean.py::load_jsonc` 此前是 `strip_comments` +
+`json.loads`，**漏了去尾逗号** ⇒ 实测 108 个课程文件里 88 个、25 个关卡文件**全部**读不进，
+`--matrix` 一遇在训课程就 `JSONDecodeError`；更危险的是若哪天调用点吞掉异常，「读不进来」会被
+读成「课程没声明该键」= 静默删兜底。改为产品同源 `rl.jsonc.loads`（= `strip_comments` →
+`_drop_trailing_commas` → `json.loads`）。
+
+**备选与否决**：① 只用 `live` 范围、本次什么都不删——否（在训集空是操作员的即时状态，不是「无课程」；
+空集下不删等于把「召回训练机跑矩阵」的目的作废）；② 按「4 门 dodge 课」（course-archive §1.1 的
+基线在训集）范围删——否（会把 `mb` / `seed_rotate` / `lr` / `epochs` / `gamma` / `lam` 一起删掉，
+而 9 门 BC/demo 课正靠 `rl.mb` 兜底 ⇒ 历史课程行为漂移，正是 §8-O1 否决的形态）；
+③ 连 `workers` 一起删——否（机器容量读数，见决定 2）；④ 现场补写 `training-enabled.txt` 造一个 live 集
+——否（伪造开课标记 = 越权改控制台拥有的状态文件，AGENTS 明禁）。
+
+**违反后果**：把 `live` 当唯一范围 ⇒ 全停课时工具永久无法收敛；删 `rl.workers` ⇒ 控制台并发校验假红。
+全文 → `docs/nn/rl-config.md` §1.4b。

@@ -187,3 +187,69 @@ def test_whitelist_paths_are_the_documented_set() -> None:
         "rl.double_buffer",
         "rl.precollect_early",
     }
+
+
+# ------------------------------------------------------------------ JSONC 加载
+
+def test_load_jsonc_uses_the_product_loader(tmp_path: Path) -> None:
+    """课程/level 文件带**尾逗号 + 行注释**时也必须读得进来。
+
+    回归（2026-09-26 实测）：此前是 `strip_comments` + `json.loads`，漏了去尾逗号
+    ⇒ `curricula/*.jsonc` 108 个里 88 个、`levels/*.jsonc` 25 个里 25 个都读不了，
+    `--matrix` 只要遇到一门在训课程就 `JSONDecodeError` 崩掉（而「文件没读进来」
+    会被误读成「课程没声明该键」= 静默删兜底）。产品侧 `load_course` 走
+    `rl.jsonc.loads`（`strip_comments` → `_drop_trailing_commas` → `json.loads`）
+    ——本工具必须同源。
+    """
+    p = tmp_path / "c.jsonc"
+    p.write_text(
+        '{\n  // 行注释\n  "level": "l1",\n  "mb": 1024,\n}\n',
+        encoding="utf-8",
+    )
+    assert clean.load_jsonc(p) == {"level": "l1", "mb": 1024}
+
+
+# ------------------------------------------------------------------ 矩阵范围 / 机器键
+
+def test_machine_keys_are_never_green_for_deletion() -> None:
+    """`local_slots` / `workers` 是**机器级**读数（不是课程兜底）⇒ 全绿也不删。
+
+    `workers`：`dashboard/src/core/slots.ts::bareCapacity` = `max(rl.workers, rl.local_slots)`
+    是本机并发容量；删了 ⇒ `Number(undefined ?? 0)` = 0 ⇒ 容量塌成 0，`checkCapacity`
+    把每门课都报成超量（假红）。与 plan §3.2-4 对 `local_slots` 的豁免同一条理。
+    """
+    assert "workers" in clean.MACHINE_KEYS and "local_slots" in clean.MACHINE_KEYS
+    assert "workers" not in clean.b_class_green(_cfg(), [])
+    # 显式构造：唯一一门课把 workers 声明在课程文件里（全绿的形状）
+    green = clean.green_keys_for_rows({"workers": ["course"], "mb": ["course"]})
+    assert green == ["mb"], "workers 属机器级，不得进可删清单"
+
+
+def test_b_class_green_only_when_every_course_declares() -> None:
+    assert clean.green_keys_for_rows({"mb": ["course", "level"]}) == ["mb"]
+    assert clean.green_keys_for_rows({"mb": ["course", "rl-config"]}) == []
+    assert clean.green_keys_for_rows({"mb": []}) == []
+
+
+# ------------------------------------------------------------------ 绿键删除
+
+def test_apply_drops_green_b_class_keys_from_rl_block() -> None:
+    out = clean.apply_deletions(_cfg(), b_class_keys=["mb"])
+    assert "mb" not in out["rl"]
+    # 别的 rl 键一个字不碰
+    assert out["rl"]["hub_port"] == 8787
+    assert out["future_handwritten_key"] == {"keep": True}
+
+
+def test_plan_deletions_reports_green_b_class_keys() -> None:
+    lines = "\n".join(clean.plan_deletions(_cfg(), b_class_keys=["mb", "not_present"]))
+    assert "rl.mb: 512 → 删除" in lines
+    assert "rl.not_present: 不存在，跳过" in lines
+
+
+def test_dry_run_with_drop_b_class_still_writes_nothing(tmp_path: Path) -> None:
+    p = _write(tmp_path, _cfg())
+    before, mtime = _sha(p), p.stat().st_mtime_ns
+    assert clean.main(["--config", str(p), "--drop-b-class", "--scope", "all"]) == 0
+    assert _sha(p) == before and p.stat().st_mtime_ns == mtime
+    assert not list(tmp_path.glob("*.bak.*"))
