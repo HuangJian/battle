@@ -2177,6 +2177,39 @@ a.tc-btn {
   color: var(--yellow);
   font-weight: 700;
 }
+/* 封存分组（plan/course-archive.plan.md §4 S3）：默认折叠、只读呈现。
+   它不是「在训的课」——放在表头 chip 之下、不占主表任何行（呈现负担不增）。 */
+.tc-mx__arch {
+  margin: 0 0 var(--sp-2);
+}
+.tc-mx__arch-toggle {
+  cursor: pointer;
+  border: 1px dashed var(--line);
+  border-radius: 999px;
+  padding: 0 8px;
+  background: none;
+}
+.tc-mx__arch-list {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0 0 0 var(--sp-2);
+  border-left: 2px solid var(--line);
+}
+.tc-mx__arch-row {
+  display: flex;
+  gap: var(--sp-2);
+  align-items: baseline;
+  font-size: var(--fs-sm);
+}
+.tc-mx__arch-name {
+  color: var(--fg);
+}
+.tc-mx__arch-meta {
+  color: var(--muted);
+}
+.tc-mx__arch-ok {
+  color: var(--green);
+}
 .tc-mx__chip--info {
   color: var(--accent);
 }

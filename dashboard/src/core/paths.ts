@@ -87,6 +87,22 @@ export function loopAppliedPath(): string {
   return process.env.BCITY_LOOP_APPLIED ?? path.join(LOG_DIR, 'loop-control.applied.json')
 }
 
+/** 课程**封存区**（仓根 `archive/courses/`——plan/course-archive.plan.md §3.1）。
+ *
+ *  每门封存课一个目录，内含 `archive-manifest.json`（控制台**只读它**：不扫盘、不递归、
+ *  不解压）与 `ARCHIVE.md`。与既有忽略条目 `nn-training/archive` **不是**同一路径（那是历史条目）。
+ *  单测以 `BCITY_ARCHIVE_DIR` 重定向；默认行为零变化，故**惰性**取值。 */
+export function archiveCoursesDir(): string {
+  return process.env.BCITY_ARCHIVE_DIR || path.join(REPO_ROOT, 'archive', 'courses')
+}
+
+/** 逐轮权重归档根（`nn-training/weights/`——与 python `rl/archive.py::WEIGHTS_BACKUP_DIR`
+ *  同路径）。封存起点（G4-①）从这里解析归档件；单测以 `BCITY_WEIGHTS_ARCHIVE_DIR` 重定向，
+ *  故**惰性**取值。 */
+export function weightsArchiveDir(): string {
+  return process.env.BCITY_WEIGHTS_ARCHIVE_DIR || path.join(NN_TRAINING, 'weights')
+}
+
 /** 控制台客户端 bundle 产物目录（server/build.ts 构建，.gitignore 排除）。 */
 export const BUNDLE_DIR = path.join(DASHBOARD_ROOT, '.build')
 /** EvalBoard 账本数据根（EVALBOARD_DATA 环境变量可覆盖；见 store.ts）。 */

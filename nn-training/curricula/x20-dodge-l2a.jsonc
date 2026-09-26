@@ -1,0 +1,161 @@
+// 课程 x20-dodge-l2a —— **残血深度势：wDanger 首剂量**（dodge-avoidance §4 L2a）
+//
+// 状态：**草稿，待用户手工开训**（agent 不得启动训练）。
+//
+// 立项（plan §4.2 L2a；Phase 2 §36 修正案形态）：累计型 danger 罚的是"在危险里活下来"
+//   （方向反了），改深度型势 `- wDanger*max(0, 0.4-playerHpRatio)`——有界、可回血、
+//   无"死得快更划算"（plan §4.3 优先形态；`dangerTicks` 保留为诊断读数，公式不用）。
+//   量纲：每局总量 ≤0.4·wD；wDanger=2.0 起 ≈ ≤0.8单位 ≈ 0.3杀。
+//
+// 顺序锁状态（必须先读）：L2a 须等 L1 结论——L1 已判负（2026-09-25，机制零进展）。
+//   锁按字面已解除（有结论），但锁的**前提**（开局干净）未达成 ⇒ 本腿读数带混杂：
+//   开局 600t 内的残血行为混进塑形窗。对冲：机制先行 + 专属死刑便宜（分布不动即停，
+//   约 it40 见分晓，不烧满 300 轮）；结算必须写明混杂，不得把开局效应归因给深度势。
+//
+// 单变量纯度：与 x20-noexplore **逐字相同**，只加公式尾项 + `wDanger` 参数
+//   （reward 进血缘正确）。采样 49152 / mb 1024 / lr / epochs / gamma / lam /
+//   schedule / seed_rotate 全同。剂量梯：2.0 起 / 3.0 / 5.0（单次只升一档重试，
+//   2.0/3.0 validate 零警告已验——开训前本文件重验）。
+//
+// 起点：noexplore 最优 it105（`x20-noexplore.it105`），纯 warm start，`kickstart_ref=false`。
+//   comparator = noexplore 同绝对 it 点历史（run 内 itN = 绝对 it105+N；abs>180 后无对照裸奔，
+//   与 L1 同口径）。配对：`paired_rotate_seed` 与 noexplore 同值 1789876303
+//   （L1/L3 同 V；改它 = 非配对）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 判据
+// ══════════════════════════════════════════════════════════════════════════
+// **主读数顺序写死：机制先行**（plan §8 链条）：① T1（承伤速率 dmg/千tick，观测无阈值，
+//   R2 修订）+ dangerRate 分布是否移动（日常 eval 自带 dangerTicks，无需 resim）
+//   ② low% 是否跟随下移 ③ 顶部死亡占比。it40 只记录、不停腿（it40 误杀门已废）。
+// **门**：414000 段 `low% 相对 noexplore 同 it 点改善 ≥3pp` 且 `p10 ≥ 2`
+//   （noexplore it105 段值 33.0/8.33/p2）。
+// **约束（只记录 + 人工盯盘决策，不自动停）**：日常 mean < 6.19；超时 >5%；
+//   kl 连续 3 轮 ≥0.075；保守陷阱（cells/move/pass 任一显著下降——深度势回血设计里
+//   "装死回血"也是保守，盯 cells）。
+// **回测门**：终点候选 415000 不劣于 noexplore 同 it 点（同段同种子配对）。
+// **判据一律不得由教师表现反推**（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 止损（人工盯盘执行）
+// ══════════════════════════════════════════════════════════════════════════
+//   · **专属死刑**：T1 + dangerRate 分布连续 3 个 eval 点不动 ⇒ 停腿
+//     （plan 原话"分布不动 ⇒ 停"；开局混杂下信号更难进，不动即停，不加轮）。
+//   · **上/下限**：mean < 6.19 或 timeout >5% ⇒ 人工决策停。
+//   · **机械横盘**：low% 连续 4 个 eval 点无改善 ⇒ 停腿；宽限一次 +10 轮。
+//   · B2 分支不适用本腿（那是 L2b 的）；本轮若"分布动 + low 不动"，按 plan §6 诚实记录，
+//     不自动转腿（转腿是开新课的决定，不是本腿的自动动作）。
+
+{
+  "version": 5,
+  "name": "x20-dodge-l2a",
+  "mode": "per-tick",
+  // 环境不变：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。
+  // 任务侧一个字不动（AGENTS §0.2）。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：noexplore 原公式 + ★残血深度势 ─────────────────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist) - wDanger * max(0, 0.4-playerHpRatio)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.0,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wDanger": 2.0
+    },
+    // dense-only（与父腿一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：noexplore 最优 it105，纯 warm start ──────────────────────────────
+  "bc": "nn-training/weights/x20-noexplore/x20-noexplore.it105.20260922-053620.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  // ── 配对：续 noexplore 的种子流（1789876303）────────────────────────────────
+  // ⚠ 改它 = 非配对。
+  // 本腿不开 paired-kill（默认关；单腿绝对门，无配对杀臂——2026-09-26 opt-in 教训）。
+  "paired_rotate_seed": 1789876303,
+
+  // ── 预算 ───────────────────────────────────────────────────────────────
+  "iters": 300,
+  "max_hours": 12,
+  "workers": 8,
+
+  // ── 位移包：回基线（与 noexplore 一致）────────────────────────────────────
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：mb 对齐 ────────────────────────────────────────────────────────
+  // 49152 = 48 × mb(1024)；per-stage quota = 12288 = 12 × mb ⇒ 无 ragged tail。
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+
+  // ── 路径：新目录、禁续跑（§15.5）────────────────────────────────────────
+  "out": "tmp/x20-dodge-l2a/weights.json",
+  "traj": "tmp/x20-dodge-l2a",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-dodge-l2a",
+  "backup_prefix": "x20-dodge-l2a",
+
+  // ── 评估 ───────────────────────────────────────────────────────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 开工前置 ─────────────────────────────────────────────────────────────
+// ① bc 文件存在（noexplore it105）。② 公式编译验证（validate_reward 零错误零警告；
+//    wDanger 进血缘是指纹变化的正确原因；`max(0, 0.4-playerHpRatio)` 形态见 plan §4.3）。
+// ③ metrics v8 全链路（playerHpRatio idx41 / dangerTicks idx42 已部署，复用 L1 同款确认）。
+// ④ 新 out/traj 目录（禁续跑，§15.5）。⑤ remote_hubs 登记 + slot 容量 + worker 心跳。
+// ⑥ it0 基线现跑：开训后先用 bc 跑 400 局日常段（860001，同种子），单 wver 校验通过
+//    才算数——C-0 教训（200 局 it0 分母太小，+2.65pp 都判不了）+ L1 事故（it0 混入 it43
+//    权重误标）：400 行同 wver 否则重跑，判读以 400 局为准。
+//    已跑（2026-09-26，开训前）：n=400 win 15.50%（62/400）kills 7.71 low% 37.50 p10 1
+//    p50 5，单权重源（spec 锁定 noex-it105；与 C-0 那次 bc 现跑逐局一致，确定性旁证）。
+//    数据：`tmp/dodge-it0-baseline-860001.jsonl`（四腿共用，同 bc 同段）。
+//
+// 启动（**用户手工；agent 不得启动训练**，经控制台）。
+//
+// ── 诊断工具 ─────────────────────────────────────────────────────────────
+// · 日常趋势：it0/it5…（860001 段 400 局）T1/dangerRate 分布/low%/mean/p10 +
+//   noexplore 同绝对 it 点对照（机制读数永远先于 low% 看）。
+// · dangerRate 口径：dangerTicks/(ticks+1)（与 threatRate 同形；诊断用，公式不用）。
+// · value 首行均值每 eval 点记录（state-init 教训：V 的 it0 基线被 workdir sweep 吃掉；
+//   本腿从 it0 起每点 pin 一份，workdir 清理不得删该记录）。
+//
+// ── 结算节（跑完回填）──────────────────────────────────────────────────────
+// 必填：① T1/dangerRate it0 → 终点 + 配对对照 ② low% 是否跟随 ③ 414000 主段 +
+//   415000 回测（800 局）④ 分关表 ⑤ 顶部死亡占比 ⑥ 超时/换血读数 ⑦ 实际轮数与耗时
+//   ⑧ 开局混杂声明：开局窗内残血行为占比变化（L1 未洗干净的前提下，归因边界写死）。
+//
+// ── 结算（2026-09-26 回填：it1–65，用户手工停腿，~08:00→12:57 ≈5h；门控未跑）──
+// ① 机制（日常，腿内趋势；历史臂 pre-v8 无 danger/threat 字段，无配对基线）：it0 191 局
+//    dangerRate 221/kt / threat 19.9/kt → it60 danger 216/kt / threat 20.7/kt（双双平/反向）；
+//    clean600 51.8→45.2%（−6.6pp 反向），dmg600 72.4→82.x（反向）。唯一亮带 it15
+//    （threat 16.4/kt −18%）未维持，it20 起 revert。专属死刑（T1+dangerRate 连续 3 点不动）
+//    按字面成立（it50/55/60：224/229/216 全平）。
+// ② 日常 low：it0 39.3/7.76 → it60 36.0/7.41（Δ−3.3pp 噪声）；最优 it40 31.0（−8.3pp spike，
+//    未维持，it55 反弹 39.0）；p10 12 个点 4 个 ≥2。low 动而分布不动 = 撞大运，不认。
+// ③④ 门控/回测：未跑。it40 spike 未维持 + 机制零位移 ⇒ 门过先验低（L3 首轮先例，不补测）。
+// ⑤ 超时/换血：超时全 0；约束全绿（kl≤0.0151、ent 0.54~0.69 无塌、cells 73~85 无塌）。
+// ⑥ 实际：it1–65（预算 300/12h 的 ~22%）；用户控制台手工停（loop-control paused）。
+// ⑧ 开局混杂声明：L1 未洗干净（L1d2 判死）的前提下，本腿开局窗内残血行为占比无改善
+//    （clean600 反向），归因边界：深度势信号从未进入，混杂不背锅——零就是零。
+// 判语：**判负**。wDanger=2.0 无效；B2 分支不适用本腿（那是 L2b 的）；"分布动+low不动"亦未出现，
+//    不转 state-init。数据：`tmp/x20-dodge-l2a/eval_log.jsonl`（it0/5/…/60，400局/点）。

@@ -7,6 +7,96 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §17 起 hub 很慢：回灌把**停掉的历史课**也逐课重试（2026-09-26）
+
+用户报障：「dashboard 上启动 trainer/hub 需要等很久，似乎是以前停掉的训练课程都还要扫一遍？」
+现场回执停在 `hubServer` 那一步，并刷出一串 `失败 x20-clutch: 需要合法 course（[]）与 mode(...)`
+（连同 `x20-demo-mix` / `x20-dodge-l1` / `x20-firstkill` … 共 11 门）。
+
+### 根因：不是「扫盘慢」，是**回灌按只增的意图表全量推**
+
+`courseModes`（console-state）是**只增**表：开课写、停课写（`stopCourse` 推 offline 时也会落一份）、
+热切写 ⇒ 停在 `tmp/` 下的历史课**永久**留着一份意图。而 `restoreCourseModes`（R3-2 的起 hub 回灌，
+挂在 `startComponent('hubServer')` 的两个分支上、**同步 await**）逐条把全部意图推给 hub。
+
+hub 的认课判据是**开课标记**（`remote/hub/queue_discover.py::_course_dir_live` 与 `_serves_course`
+都要求 `training-enabled.txt`）：没标记 ⇒ 按设计**必回** 400。于是每一门停掉的课都白烧整段有界重试
+（`pushModeWithRetry`：首试 + 2 次重试 × 2s ≈ **4s/门**，**串行**）——11 门 ≈ **44s** 纯 sleep，
+外加 33 次必然被拒的 POST 和一串看起来像坏了的「失败 x20-…」。
+
+实盘对账（`tmp/*/training-enabled.txt`）：**标记存在**的两门（`x20-dodge-l3d2`、`x20-steady-cont`）
+回灌成功，其余 11 门全失败——与报障日志一一对应。
+
+### 修法：回灌的输入集与 hub 的认课判据**同源**
+
+`restoreCourseModes` **只回灌已开课的课程**（`stack/courses.ts::courseEnabled`）；未开课的进
+`RestoreResult.skipped`（**不是失败**），摘要如实写「跳过 N 门未开课（意图保留，开课即下发）」。
+意图一个字不丢（仍在 `courseModes` 里，`stateView.courseModeIntents` 照旧供漂移徽标用），真正
+开课时 `openCourse` 按弹窗选中的模式重新下发——与「开课标记才是 hub 的认课闸」这条既有口径一致。
+
+判据本体从 `server/actions/course-lifecycle.ts` 搬到 `stack/courses.ts`（该文件头写着它是
+「课程域共享判据、不断环」的家）：`course-lifecycle` 已 import `course-mode`，回灌要读标记只能
+反向 import ⇒ 成环，故判据下沉。
+
+### 不改什么
+
+* **有界重试原样保留**：它是 2026-09-23 真机事故（新开课 hub 还没扫到就回灌）的解药，见 §14/§36
+  ——只为省时间砍掉它 = 那条事故复发。
+* 停课**不下架**意图（`stopCourse` 仍写 offline 供 hub 立即收闸）；不在回灌里用
+  `GET /admin/courses` 反查 hub 课程表（会把「发现时序」竞态引回回灌路径）。
+
+决策条目：`DECISIONS.md §2026-09-26-hub-mode-restore-enabled-only`；门禁：dashboard
+`tests/course-mode.test.ts`（未开课 ⇒ 零 POST 零重试；跳过如实上摘要且不算失败）。
+
+## §16 节点统计与课程解耦：合所有流 + 按天窗口 + `it` 只作内部过滤器（2026-09-26）
+
+「节点是机群级资产」这句话控制台早就写在注释里（`/api/pool` “没有任何按课程的东西”），但数据层
+一直只聚合 `tmp/**` 里 **mtime 最新的那一个** `dist-agent-meta.jsonl`（旧动机：避免旧训练流的
+数千条历史淹没新数据）——节点页实际是「最近活跃那一门课」的页。本轮解耦（plan/
+nodes-decouple-from-course.plan.md）：
+
+* **数据源合并所有流**：递归扫 `tmp/` 下所有 `dist-agent-meta.jsonl`（课程目录 + 独立 eval run
+  目录 `tmp/<name>.jsonl.run/`），逐流取**完成水位**（账本 `training_log.jsonl` 最后一个
+  `iteration` 事件）只用于过滤「进行中那一轮」的行。
+* **单一时间口径**：落桶按**本地日**（`byDay: 'YYYY-MM-DD' → node → DayBucket`），视图按
+  `?days=today|yesterday|7|all|N` 切窗口。**课程内序号 `it` 不出现在任何展示字段**（跨课不可比，
+  它只是服务端解析循环里的过滤器）。
+* **一次算全量、切天纯投影**：`aggregateNodeHistory()`（与窗口无关，进 SWR 缓存）⊕
+  `projectWindow(agg, w)`（纯函数）⇒ 切天零重算。预筛（整份文件 mtime 早于 `POOL_EPOCH_MS`
+  才跳过）**钉在 epoch**，否则「切天零重算」不成立。
+* **健康度 = 最新完成轮的贡献 vs 并发**（判据 `nodeHealth` 现成）：跨课「最新完成轮」按**完成
+  时刻**选（`iteration.time`；读不出用 meta mtime 兜底）——**不是**比 `it` 大小。停摆课因完成
+  时刻旧而自然落选。
+* **两个容器各负责一层**：节点表（`/api/pool`）的「窗口内局数 `winRollout/winEval`」与 pill 行
+  （`/api/state` 的 `lastContrib`）**共用同一份 `aggregateNodeHistory()`**；表格状态列改名
+  **「成功率」**（窗口内最近 ≤10 次结算完成率），与 pill 的**「产能」**分列分名。
+
+⚠ **两条容易踩的**：① meta 行的 `ts` 与账本 `time` 都是 Python `strftime` 写的**训练机本地时间、
+无时区后缀**（UTC `toISOString()` 只出现在 `lastError` 的字符串前缀）；分桶前**禁止** `Date.UTC`。
+② `poolStatus`（成功率）**函数不变但输入随窗口变** —— 用户可在表头看到「成功率随所选窗口变」。
+
+**二轮评审补正（2026-09-26，同日）**：三处口径/代价现场核对后修正 ——
+
+* **聚合进程内 memo**：`aggregateNodeHistory()` 加一层进程内 memo（池根 + epoch + 候选指纹
+  〔路径/mtime/体积〕+ `AGG_MEMO_MIN_MS = 30s` **时间下限**）。两个消费者（`api/pool` 探测层、
+  `snapshot-cache` 机群探测）**共用一份**；空闲时靠指纹零重扫，训练中靠时间下限把重扫节奏封顶
+  （否则快照刷新器每 5s 重扫全池）。本机实测：15 个活跃流、其中 5 个 >2MB，冷算 ~0.23s。
+  ⚠ 「131 个 `dist-agent-meta.jsonl` 文件」≠ 聚合的流数——扫描带**深度护栏**（`tmp/X` 与
+  `tmp/X/traj`），`itN/` 子树不进去，实际命中 15 个。
+* **水位只作用于计数/样本，时间戳取全部行**：`DayBucket` 两组字段口径不同（详见 `pool-history.ts`
+  注释）—— `ok/fail/rollout/eval/results/elapsed/wall` 只收**已完成轮**；
+  `lastOkTs*`/`lastFailTs*`/`lastError*`/`lastTs` 收**全部**行（可达性口径）。混用会把
+  「轮前段就交完活、轮又长」的节点推回上一轮时刻，在 30 分钟可达性窗上从「慢」翻成「离线」
+  ——正是 2026-09-11 报障的反面。
+* **「最近失败」与「最近错误」同窗**：两者都按**近一小时**判定（此前 `lastFailTs` 无窗，靠
+  「UI 只在 `lastError` 非空时渲染它」才看不出来）；ts 解析不出的行直接丢掉，不再静默落进
+  1970-01-01 桶。
+* 预筛锚点文件随**池扫描根**取（`<池根>/dist-agent/pool-epoch.txt`，默认路径逐字节不变）
+  ⇒ 单测可端到端验预筛（此前只能测 `pruneByEpoch` 纯函数）；`/api/pool` 的流徽标改口径为
+  「**扫描** N 个训练流」（N 与窗口无关，不再写成「数据来自 N 个流」）。
+
+决策条目：`DECISIONS.md §2026-09-26-nodes-decouple-from-course`。
+
 ## §15 「在线/离线」收敛成**一颗开关**（本机配置 + hub 模式一起动）+ 第三源漂移徽标（2026-09-24）
 
 用户 2026-09-24 报障：「离线课切回在线后，Kaggle 仍因缺 bun 拒单」。实锤：切在线后派出的 job

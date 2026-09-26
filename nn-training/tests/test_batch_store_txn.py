@@ -218,7 +218,7 @@ def test_status_assignments_live_only_in_the_named_transitions() -> None:
     for p in _non_test_py():
         owners = _subscript_store_owners(source_scan.read_text(str(p)), "status")
         if owners:
-            hits[str(p.relative_to(ROOT))] = owners
+            hits[p.relative_to(ROOT).as_posix()] = owners
     assert hits == {"rl/batch_store.py": sorted(STATUS_WRITERS)}, hits
 
 
@@ -246,7 +246,7 @@ def test_ledger_publish_is_the_single_writer() -> None:
 
         walk(ast.parse(src), "")
         if owners:
-            callers[str(p.relative_to(ROOT))] = sorted(set(owners))
+            callers[p.relative_to(ROOT).as_posix()] = sorted(set(owners))
     allowed = [*sorted(TRANSITIONS), "write_batches"]
     assert set(callers) == {"rl/batch_store.py"}, callers
     assert set(callers["rl/batch_store.py"]) <= {"BatchStore." + t for t in allowed} | {"write_batches"}, (

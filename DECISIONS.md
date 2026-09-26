@@ -4205,3 +4205,320 @@ shard_ids 对账 1 条 → `test_shard_plan`（顺带把「合成形状 = load_d
 `test_shard_split` 那条有真主题归属外，其余留在原处并在表里写明理由；③ 跨文件借 helper
 （孪生文件里重写一小段自造语料）。
 —— 全文（16 文件逐条真因表 / 搬迁对账 / 两条新标准）→ `docs/nn/engineering.md` §29 补记
+## §2026-09-26-paired-kill-opt-in（2026-09-26，配对杀臂默认关火）
+
+**来历**：`§2026-09-25-clutch-null-kill` 的对称自杀修了对照臂，但"谁该被比"没修——
+state-init 出生 11 轮即被杀：拿它的 it5/it10 日常（12.0%/11.5%）去比**已归档** L1 的
+it5/it10（16.0%/15.5%），连跪两点 −4pp。两腿同 V（1789876303）只是门派同源（全屋种子流），
+不是配对实验；L1 当天已判负归档，拿它当"对端"比出"落后"是必然。
+
+**决定**：`courses.<课>.paired_kill.enabled` 显式 `true` 才判（缺席/写坏=False；关了的守卫
+连 streak 落账都不写）。C-w 设 `enabled: true`（课程要的中点杀臂仍在）+ C-0 保持
+`self_kill: false`（只记录不停车）；其余一切腿（state-init/L1d2/L2a/L2b…）缺席=不判——
+未来同 V 的活腿之间也不会交叉开火。
+
+**被否决**：只给"归档腿"加存活判断（治标：未来两条活腿同 V 照样互杀；且"归档"无机器定义）·
+守卫内写死白名单（课程对名单进代码，换一批腿改一次；执行面策略住 rl-config 已有先例）。
+
+**违反后果**：默认开火 ⇒ 任何新腿出生即被拉去跟历史最强点比，连跪即死（state-init it11）。
+
+## §2026-09-26-nodes-decouple-from-course（2026-09-26，节点统计与课程解耦 + 按天窗口）
+
+**来历**：控制台节点页自称“机群级”，但 `aggregateNodeHistory()` 一直只聚合 `tmp/**` 里 mtime
+最新的**那一个** `dist-agent-meta.jsonl`（旧动机：避免旧训练流数千条历史淹没新数据）——实际是
+「最近活跃那一门课」的页。plan/nodes-decouple-from-course.plan.md（2026-09-24 用户指令 + 2026-09-26
+评审修订）。
+
+**决定**：① 数据源合并**所有**训练流（课程目录 + 独立 eval run 目录），逐流取完成水位
+（账本 `iteration`）**只用于过滤进行中那一轮**；② 视图按**本地日**分桶、`?days=` 切窗口
+（today/yesterday/7/all/N）；③ 课程内序号 `it` 是**课程内**序号、跨课不可比，**不进任何展示
+字段**；④ `aggregateNodeHistory()`（全量、与窗口无关、进 SWR 缓存）⊕ `projectWindow()`（纯投影）
+⇒ 切天零重算，预筛钉在 epoch；⑤ 健康度取「最新完成轮」（跨课按**完成时刻**选，`nodeHealth` 判据
+不变）；pill 的 `lastContrib` 与节点表**共用同一份 agg**；表格状态列改名「成功率」（窗口内完成率）
+与 pill「产能」分列分名。
+
+**被否决**：把「全局 it 基准」当跨课对齐口径（`it` 是课程内序号，课 A 的 it300 会把课 B 的 it50
+全算成 0 贡献，看着像掉线）；预筛随窗口变（会让 `days=1` 与 `days=all` 读不同文件集 ⇒
+「切天零重算」不成立）；把「最新完成轮」按 it 大小排序（停摆课的高序号会误胜）。
+
+**违反后果**：展示面出现 `it` ⇒ 跨课比较无意义（同一数字两门课含义不同）；按 it 选最新完成轮 ⇒
+停摆课永久占据基准，活跃节点被算成 0 贡献（假离线）；UTC 换算 ts（训练机本地时间）⇒ 傍晚的局
+跨天错桶。
+
+**落点**：`dashboard/src/server/pool-history.ts`（byDay / projectWindow / resolveWindow /
+lastContrib）、`server/api/pool.ts` + `snapshot-cache.ts`（两个消费者）、`web/view/pool-types.ts` +
+`NodeStats.tsx`（Segmented + 列改名）；正文 `docs/nn/console.md §16`。
+
+**二轮评审补正（2026-09-26，同日）**：① `aggregateNodeHistory()` 加**进程内 memo**（池根 + epoch +
+候选指纹〔路径/mtime/体积〕+ `AGG_MEMO_MIN_MS = 30s` 时间下限）—— 两个消费者共一份，训练中
+（meta 逐秒追加）重扫节奏也封顶（否则快照刷新器每 5s 重扫全池）；② **水位只作用于计数/样本，
+时间戳/错误列取全部行**：`isSlowNode` 与「最近成功/失败」是**可达性**口径（含进行中那一轮），
+统计是数据卫生口径 —— 两者混用会把「轮前段就交完活」的节点推回上一轮时刻、在 30 分钟窗边界
+把「慢」误判成「离线」（2026-09-11 报障的反面）；③ 「最近失败」与「最近错误」同按**近一小时**
+判定；④ 预筛锚点随**池扫描根**取（默认路径逐字节不变）⇒ 单测可端到端验预筛；⑤ 预筛命中数
+按**扫描深度护栏**算（`tmp/**` 下 131 个 meta 文件 ≠ 实际命中的 15 个流），ts 解析不出的行丢弃、
+不再落进 1970-01-01 桶。
+
+**被否决（二轮）**：只给候选流数加硬上限（静默丢流，面上看不出、行却少算）；memo 只留指纹不留
+时间下限（训练中 meta 逐秒追加 ⇒ 指纹每秒都变，等于没缓存）；把 `lastFailTs` 从窗口改成窗口无关
+的全量最大（脚注说的近一小时就变成假话）。
+
+---
+
+## §2026-09-26-course-archive-compress（2026-09-26，课程封存默认 gzip：重开 O3「不压缩」）
+
+**来历**：`plan/course-archive.plan.md §8-O3` 原裁决「不压缩」，理由是「单课 ≤80 MB 收益小、
+且会破坏 `eval_log.jsonl` 可直接读」。同日 E0 基线实测 13 门已停课的保留集（L0）合计
+**334 MB**（其中 `eval_log.jsonl` 单门 16–30 MB），用户 2026-09-26 指令重开该裁决。
+
+**决定**：
+① **默认 gzip（level 6）逐件压缩 L0 文本件**（`*.jsonl` / `*.json` / `.console.log` / settle 行）；
+实测 `eval_log.jsonl` 10.5–11.7×、`judge/backtest` 10.0×、`dist-agent-meta` 11.6×、
+`training_log` 8.9× ⇒ 334 MB → **≈50 MB**。
+② **不压**四类：`archive-manifest.json` 与 `ARCHIVE.md`（控制台 S3「只读 manifest、不扫盘」
+必须零解压成本）、L3 保留的 `.npy` shards（dense 数组 + BC 复算要直接 mmap）、
+`ppo_ckpt_remote.tar`（实测仅 1.4×，白搭一层）。
+③ `--codec xz` **可选**，固定 **preset 3**（依 `remote-transport.md §B6`：preset 3→6 已量、
+不采用）；`--no-compress` 为逃生舱（一次性排障要直接 grep）。
+④ manifest 的 `sha256` 一律算**解压后的原字节**，另记 `codec` / `bytes_raw` / `bytes_stored`
+——否则换机/换级别重压 ⇒ sha 变，⑤校验仪式失效。
+⑤ `tools/course_compare.py` **透明读 `.gz`**（照 `remote/protocol.py` 的 gzip 魔数判别先例）；
+G5 断言由「逐行逐字段一致」升为「**解压后逐字节一致**」（更强且更好测）。
+⑥ 封存目录形态 = `<课>/eval_log.jsonl.gz` 等（原名 + `.gz`，逐件、不打包）。
+
+**被否决**：**zstd**（新依赖，§5 要求先论证；仓库既有惯例就是 stdlib gzip）；
+**xz preset 6**（`remote-transport §B6` 已量，体积仅 −2.6…−3.0%）；
+**压整包含 manifest**（控制台列封存课要逐课解压 gz，违背 S3「不扫盘」初衷）；
+**整目录打一个 tar.gz**（丢「一件一文件」的 manifest 模型，也丢单件 sha 可验）。
+
+**违反后果**：sha 算在压缩字节上 ⇒ 换机重压即校验失败，「建→校验→删」的顺序保证被架空；
+压 manifest ⇒ 控制台每次列封存课都要解压。
+
+**落点**：`nn-training/rl/course_archive.py`（未建，E1+ 实现）、`nn-training/tools/course_compare.py`
+（未建，E5）；裁决正文同步进 `plan/course-archive.plan.md §8-O3`，基线数 `docs/nn/course-archive.md §1`。
+
+**边界**：这是一条**便利 vs 体积**的裁决，**不是 G1 的杠杆** —— 封存后 `tmp/` 地板 10.0 GB 里
+L0 只占 0.3 GB（3%），压到 0.05 GB 只把地板降到 9.75 GB。`tmp/ ≤ 1 GB` 的瓶颈是
+在训课 9.0 GB 与非课程 0.70 GB（E0 基线），别拿压缩当空间问题的答案。
+
+---
+
+## §2026-09-26-course-archive-guard-and-startpoint（2026-09-26：封存硬闸补第二道新鲜度 + 起点 sha 可验）
+
+**来历**：2026-09-26 外部评审用真模块探针实测两处实现稿缺陷
+（`plan/course-archive.plan.md`）：① `course_guard` 首句 `if not marker.exists(): return ""`
+⇒ **无 marker 时新鲜度整条失效**；② manifest `keys` 只认 `L0'-opt-key`（offline 族），
+A/B 形态的 `it<N>/ppo_ckpt_remote.tar` 走 `L0-ckpt-key` ⇒ 多数课 `weights[]` 恒空、
+`ARCHIVE.md` 标签（「opt/ckpt」）与实际不符。另有一处规格偏差未记：`weights[]` 只有目录级
+glob 提示，没有 sha256/bytes（G4-① 明写「sha 可验」）。
+
+**决定**：
+① **新鲜度升为与 marker 无关的第二道闸**：目录新鲜（不论有无 marker）默认拒绝封存；
+`--force` 只越「陈旧 marker」与「无 marker 的新鲜目录」，**不越「新鲜 marker」**。
+来历：停课动作 = 删 marker 但**不杀循环**（`stopCourse` 注释自己承认云机上那份只能由操作员
+在云机侧停）⇒ 正规流程「先停课 → 再封存」正好落在「无 marker 但仍在写」的窗口，旧实现会把
+**撕裂的树**搬进档案再 `rmtree` 活体（⑤ 的 sha 链只证「拷贝保真」，证不了「源已静止」）。
+② **关键轮 = opt ∪ ckpt 两族并集**（`_KEY_REASONS`）；`ARCHIVE.md` 标签与实际一致。
+③ **`weights[]` 起点「sha 可验」落地**：解析到具体归档件 ⇒ 记实际 `path` + `sha256`/`bytes`；
+解析不到 ⇒ 退化为目录级 glob 提示且**不带** sha（绝不编造哈希）。
+④ **控制台起点选择器落地**：`openCourse` 收 `seedFrom:{sourceCourse,it}`（**不收路径**，服务端按
+manifest 自解析并校验落在权重归档内）；解析不到响亮拒绝（绝不退回 BC 播种）。
+
+**被否决**：修正 ①时把「无 marker」一律放行到 `--force` 才做（会让正规流程必须先 `--force`，
+把逃生阀变成必经步）；起点「让客户端传路径」（可被篡改的写面）；找不到归档件时退回 BC
+（静默拿错起点，与 §384 同类错）；把 sha 记在 glob 提示上（假哈希）。
+
+**违反后果**：放行新鲜无 marker 目录 ⇒ 搬到撕裂的树 + 删活体（不可逆）；只认 opt 族 ⇒
+A/B 课起点入口失效；编造 sha ⇒ 校验仪式变假。
+
+**落点**：`nn-training/rl/course_archive.py`（guard / `_KEY_REASONS` / `resolve_archived_weight`）、
+`dashboard/src/stack/courses.ts::resolveArchivedSeedPath`、
+`dashboard/src/server/actions/course-lifecycle.ts`、`dashboard/src/web/app/panels/OpenCourseModal.tsx`；
+正文同步进 `plan/course-archive.plan.md §1.3-1 / §3.5 / §3.6`。
+
+## §2026-09-26-x20-steady-cont（2026-09-26，B续跑立项：八连阴后唯一阳性斜率 + H1/H2判决实验）
+
+**来历**：noexplore it105 之后八条腿七死一停（floor/firstkill/terminal/demo-mix 判负；
+dodge L1 两档判死、L3 两档判负、L2a 无信号、L2b B2 未开；state-init 154 轮日常反 хуже）。
+唯一阳性是 B：判决 35.5 vs 门 35（差 4 局），终点区日常已摸门。B 结算④遗留总量混杂
+（"每轮更稳还是总量更多"）从未被回答。
+
+**决定**：开 `x20-steady-cont`（`nn-training/curricula/x20-steady-cont.jsonc`）——与 B
+逐字同（奖励/位移/采集全同，validate 零错零警），起点 B-it175 纯 warm start
+（`kickstart_ref=false`，C 教训 kk≈0），200 轮/14h，门沿用 B 原门（414000 ≤35% 且
+p10≥2，不移球门）。过门 = H1（量不够，继续加）；200 轮横盘 = H2（到顶，停烧转蒸馏评审）。
+横盘后不转 state-init（154 轮已阴性）。L3d2 并跑（算力足）。
+
+**被否决**：新价格腿（六条全死，重开是挖坟）；现在接受平台（B 斜率未死，先烧便宜的这枪）；
+continuation 带 kickstart（C 事故：kk=1 前 30 轮全回锚）；续 B 的种子流（B 先于 pinning
+机制，无值可续；新流 + 绝对门，代价是训练曲线只可比趋势）。
+
+**违反后果**：带 kickstart 开 ⇒ 前 30 轮白烧；中途改门 ⇒ 0.5pp 级 verdict 变 p-hacking；
+预算烧完横盘还续 ⇒ L1d2 证明过这是"再等等"无底洞。
+
+**落点**：`nn-training/curricula/x20-steady-cont.jsonc`（结算节待回填）。
+
+## §2026-09-26-hub-mode-restore-enabled-only（2026-09-26，用户报障：起 hub/trainer 等很久——回灌把停掉的历史课逐课重试）
+
+**症状**：控制台首页点「启动服务进程」，停在 `hubServer` 那一步几十秒；回执刷出一串
+`失败 x20-clutch: 需要合法 course（[]）与 mode(...)`、`x20-demo-mix`、`x20-dodge-l1` …（真机 11 门）。
+
+**根因（代码实锤，非「扫盘慢」）**：`courseModes` 是**只增**意图表（开课 / 停课 / 热切都往里写），
+停在 `tmp/` 下的历史课永久留着一份意图；而 `restoreCourseModes`（起 hub 回灌，挂在
+`startComponent('hubServer')` 的**两个分支**上、同步 await）**逐条** 推全部意图。hub 的认课判据是
+**开课标记**（`remote/hub/queue_discover.py::_course_dir_live` / `_serves_course` 都要求
+`training-enabled.txt`）⇒ 停掉的课按设计**必回 400**，于是每门课都白烧整段有界重试
+（`pushModeWithRetry`：3 次首试 + 2×2s ≈ **4s/门**，串行）。11 门 ≈ **44s** 纯 sleep。
+实盘核对：`tmp/*/training-enabled.txt` 存在的两门（`x20-dodge-l3d2`/`x20-steady-cont`）回灌成功，
+其余 11 门全失败——与报障日志一一对应。
+
+**决定**：`restoreCourseModes` **只回灌已开课的课程**（判据 = 开课标记
+`stack/courses.ts::courseEnabled`，与 hub 同源）。未开课的课进 `skipped`（**不是失败**）：
+意图一个字不丢（仍在 `courseModes` 里），摘要如实写「跳过 N 门未开课（意图保留，开课即下发）」，
+真正开课时 `openCourse` 按弹窗模式重新下发。
+
+**落地**：判据从 `server/actions/course-lifecycle.ts` 搬到 `stack/courses.ts`（该文件本就是
+仓库里「课程域共享判据、不断环」的家：`course-lifecycle` 已 import `course-mode`，回灌反向
+import 会成环）；`course-mode.ts`（gate + `RestoreResult.skipped`）· `state-view.ts` 改 import 口 ·
+`course-lifecycle.ts` 改 import；回归 `tests/course-mode.test.ts`（+2：未开课 ⇒ 零 POST 零重试、
+跳过如实上摘要不算失败；既有 5 例补开课标记）。
+
+**备选与否决**：① 只把回灌改成并行（`Promise.all`）——否，省掉串行 sleep 但**仍**白打 33 次
+POST、仍刷一串假「失败」，根因（推了必被拒的课）没治；② 缩短重试窗口 / 去掉重试——否，
+那次有界重试是 2026-09-23 真机事故（新开课 hub 还没扫到）的解药，不能为省时间砍掉；
+③ 停课时删掉意图项——否，丢记录且 `stopCourse` 的 hub 置离线要写它；
+④ 起 hub 时先 `GET /admin/courses` 取 hub 课程表再筛——否，又把「发现时序」引回回灌路径
+（`docs/nn/remote-transport.md §36` 的坑）。
+
+**违反后果**：任何「回灌按意图表全量推」的写法都会随历史课积累线性变慢（且刷假失败）；
+任何把回灌判据换成「hub 课程表」的写法会把发现时序竞态引回来。全文 →
+`docs/nn/console.md §15`。
+
+---
+
+## §2026-09-26-rl-config-scope（2026-09-26，`rl-config.json` 职责边界：只留「别处无处安放」，删配置不删代码）
+
+**触发（用户 2026-09-25/26）**：「已经在其它地方配置过的数据就不该再往里填；`intent_rl` 已废弃，
+后期重启也要配成现在 x 系列一样」→「intent/goal、`stream`/`double_buffer`/`precollect_early`
+**只删配置、不删代码**」。
+
+**决定**：`nn-training/rl-config.json` 只保留五类里的 A（机器/环境级）、C（调度策略）、D（每课
+机器侧旋钮活课）；B（课程文件已有同名键的全局缺省）只留必要兜底；E（废弃/死键）删。
+**新键该写哪**：机器事实 → rl-config；「怎么训」的超参/奖励/关卡/门 → `curricula/<课>.jsonc`。
+
+**本次删除（8 个点号路径，含代码读点）**：`intent_rl`（整块 29 键）、`policy.upgradeBranch`
+（**连 `rl/dispatch.py` 的读点一并去掉**——只删键不删读点，2026-08-30「残留旧分支名 reset 全部
+节点」的坑就还在）、`policy.minDiskFreeMB`（零消费者）、`policy.streamKlCapIntent` /
+`policy.streamWaveGamesIntent`（intent 专属）、`rl.stream` / `rl.double_buffer` / `rl.precollect_early`
+（单一 PPO 路径下 `validate_args` 恒置 0 / 只在 `double_buffer` 开时被读 ⇒ 填了也不生效）。
+
+**代码保留**（用户裁决）：`ppo/intent.py`、`ppo/goal.py`、`rl/modes.py` 的 `intent_rl(legacy)` 回退、
+`rl/eval_m1.py` 与 m1-eval 派发链、`stream`/`double_buffer`/`precollect_early` 的读取点**都不动**
+——重启时复用，不从 git 历史重补。intent/goal 入口仍冻结（`validate_args` 拒启），重启前须先解冻。
+
+**防再长草**：新增 `nn-training/rl_config.schema.json`（键白名单数据）+ `rl_config_schema.py`
+（**只告警不拒**，`run_rl.py` 启动时把未知/已退役键点出来）；清洗工具
+`nn-training/tools/rl_config_clean.py`（dry-run/`--apply` 先备份 sha 校验/`--matrix`/脱敏）；
+顺手修 `tools/agent/agent-setup.md` 里把磁盘阈值当成 rl-config 键的指路。
+
+**备选与否决**：① 连 `ppo/intent.py`、`ppo/goal.py` 一起删——否（用户裁决：删配置不删代码）；
+② 顺手去掉 `rl/modes.py` 的 legacy 回退与改 `e2e/test_run_rl_m1.py` 断言——否（同上）；
+③ 一次性真删（B 类全删、零缺省）——否（会让历史课程无法复现，漏声明时静默落 argparse 默认）；
+④ 未知键硬拒开训——否（用户裁决 O3：只告警不拒）。
+
+**违反后果**：把「怎么训」的超参写回 rl-config = 造第二事实源（用户原则针对的正是这一类）；
+不删 `policy.upgradeBranch` 的读点 = 下次有人手填非空值就再 reset 一遍全部节点。全文 →
+`docs/nn/rl-config.md` §1 · 计划 → `plan/rl-config-cleanup.plan.md`。
+
+---
+
+## §2026-09-26-rl-config-b-class（2026-09-26，B 类兜底键删除：范围取「全部课程」超集 + `workers` 归机器级）
+
+**触发（用户 2026-09-26）**：「在训练机跑 `rl_config_clean.py --matrix`，按全绿结果删掉多余 B 类兜底键」。
+
+**前置事实**：训练机（= 本机，hub / sampler / trainer 都活在这个工作区）上操作员已于 17:49 把最后
+两门在训课停掉（`x20-steady-cont` / `x20-dodge-l3d2`；控制台日志 `已停课 …（已删开课标记）`）
+⇒ `live`（`training-enabled.txt`）集为**空**，plan §3.2 / §8-O1 的常规判据出不了结论
+（`is_green` 对空集恒 False）。
+
+**决定 1 — 判据范围改用「全部课程」超集**：`--matrix` / `--drop-b-class` 增 `--scope {live,all}`；
+`all` = `curricula/*.jsonc` 全部课程（本机 108 门）。理由：B 类兜底的**风险面**是「任何课程没声明该键
+时落到 rl-config 的值」，所以「全部课程都不靠它」是**更强**的证据（全绿于 `all` ⇒ 全绿于 `live`，
+反之不然）；在训集为空时它是唯一能出结论的范围。**本次按 `all` 删 `rl.difficulty` / `rl.max_ticks`**
+——两者 108/108 显式声明（44 课程文件 + 64 关卡注入），且唯一消费者 `rl/eval_a_once.py:273-274`
+的兜底 `or 12000` / `or "hard"` 与被删值**逐字同值** ⇒ 零行为变化。
+
+**决定 2 — `workers` 与 `local_slots` 同归机器级**（`tools/rl_config_clean.py::MACHINE_KEYS`）：
+二者在 `--scope all` 下判「全绿」（108/108 课程都写了 `workers`），但 rl-config 里这条是**裸机读数**：
+`dashboard/src/core/slots.ts::bareCapacity` = `max(rl.workers, rl.local_slots)`，
+`rl/config.py::apply_course_machine_overrides` 也把 `rl.{workers,local_slots}` 当本机配额缺省。
+删 `workers` ⇒ `Number(undefined ?? 0)` = 0 ⇒ 容量塌成 0、`checkCapacity` 把每门课报成超量（假红）。
+这是 plan §3.2-4 对 `local_slots` 豁免的推广。
+
+**保留兜底（非全绿）**：`mb`（9 门 BC/demo 课没写）、`seed_rotate`（4 门）、`keep_iters`（106 门）、
+`eval_window_sec` / `total_stages` / `rotate_stages` / `seed`（各 108 门）等一律**不删**——
+plan §8-O1 已否决「零缺省」。
+
+**顺手修的 bug（同一路径）**：`tools/rl_config_clean.py::load_jsonc` 此前是 `strip_comments` +
+`json.loads`，**漏了去尾逗号** ⇒ 实测 108 个课程文件里 88 个、25 个关卡文件**全部**读不进，
+`--matrix` 一遇在训课程就 `JSONDecodeError`；更危险的是若哪天调用点吞掉异常，「读不进来」会被
+读成「课程没声明该键」= 静默删兜底。改为产品同源 `rl.jsonc.loads`（= `strip_comments` →
+`_drop_trailing_commas` → `json.loads`）。
+
+**备选与否决**：① 只用 `live` 范围、本次什么都不删——否（在训集空是操作员的即时状态，不是「无课程」；
+空集下不删等于把「召回训练机跑矩阵」的目的作废）；② 按「4 门 dodge 课」（course-archive §1.1 的
+基线在训集）范围删——否（会把 `mb` / `seed_rotate` / `lr` / `epochs` / `gamma` / `lam` 一起删掉，
+而 9 门 BC/demo 课正靠 `rl.mb` 兜底 ⇒ 历史课程行为漂移，正是 §8-O1 否决的形态）；
+③ 连 `workers` 一起删——否（机器容量读数，见决定 2）；④ 现场补写 `training-enabled.txt` 造一个 live 集
+——否（伪造开课标记 = 越权改控制台拥有的状态文件，AGENTS 明禁）。
+
+**违反后果**：把 `live` 当唯一范围 ⇒ 全停课时工具永久无法收敛；删 `rl.workers` ⇒ 控制台并发校验假红。
+全文 → `docs/nn/rl-config.md` §1.4b。
+
+**评审补正（2026-09-26 晚，对 `12187fa4` + `9fd0834c` 两个提交）**：另一 agent 逐条核过后，以下四处**改了实现**：
+
+1. **「与控制台冒烟共用一份」的说法作废**（`rl_config_schema.py` docstring / `rl_config.schema.json`
+   `_doc` / `run_rl.py` 注释三处）：`dashboard/src/**` 对该 JSON **零引用**，`rlConfigSmoke` 仍只查
+   port/token/nodes ⇒ plan §3.4/E8 的「冒烟面板也点出假键」**未达成**（只达成启动日志那一半）。
+   改 dashboard 时再接线，那时才恢复「共用一份」的措辞。
+2. **脱敏收敛成一条清单，且不给「打印原文」的口子**：`rl_config_clean.py` 的
+   `_SECRET_PATHS=("rl.remote_token","rl.remote_hub_url")` 与 `desensitize()` 实际只脱
+   token/authKey **不一致** ⇒ 改为 `SECRET_KEYS=("remote_token","authKey")`（打印面与 diff 面
+   共用一份）；同时把误导性的 `--no-redact` 改成诚实的 `--no-preview`。**否决**「按名字实现成
+   打印原文」：plan §1.5 红线 1 说任何输出（含本地排障）都不得带出凭据 ⇒ 那就**不存在**这条路径。
+3. **升级分支的坑在签名层面关死**：`dist_common.upgrade_branch_or(explicit)` ⇒
+   `current_upgrade_branch()`（无参）。读点已验证删除，但「显式值优先于锁存」这个**语义**还留在
+   签名里 ⇒ 顺手写一行 `or` 就能把 2026-08-30 的坑复发。拿掉参数后，复发必须改签名（并改
+   `tests/test_dist_upgrade_cli.py::test_upgrade_branch_has_no_explicit_override_path` 的断言）=
+   一次有意识的决定。备选：保留函数不动——否（评审正确指出那是不可达死分支）。
+4. **接线补钉子**：`check_rl_config` 有单测，但 `run_rl.py` 那三行「读配置 → 打告警」此前无人盯
+   ⇒ 新增 `tests/test_rl_config_schema.py::test_run_rl_logs_the_advisory_and_still_starts`
+   （子进程 oracle，同 `test_serve_wiring` 手法）：假键 ⇒ 启动日志出现告警行且**照常起训**。
+
+**未决（需用户拍板）**：控制台 `stream` / `double_buffer` / `precollect_early` 三个开关**仍在写**
+这三键（死开关 + 会打「已退役」告警）——摘不摘属控制台手感变化，不自行决定。
+
+## §2026-09-26-x20-series-close（2026-09-26，x20 全系列关账：八腿结论 + L1/收入侧判死 + 转向新纪元）
+
+**来历**：noexplore it105 之后全部 x20 腿关账（`docs/nn/experiments.md` §37–§44）：
+L1 两档（0.01 跑满 300 轮 / 0.02 31 轮 + 三候选门控）机制双零进展、门控七候选全灭 ⇒ **L1 方向判死**；
+L2a（65 轮）danger/threat 双平 ⇒ 判负；L2b（66 轮）threat 60 轮零位移 ⇒ 判负；
+L3 两档（(3.5,2.0) 94 轮 / (4.0,4.0) 173 轮 + 三候选门控）拾取 +5/+9.5pp 但 low 不跟、
+it100 池外显著更差 ⇒ **收入侧判死**；state-init（154 轮）日常比起点差 ⇒ 判负；
+B-cont（25 轮）因表示层缺"停"被叫停，H1/H2 未决移交新纪元。
+
+**决定**：
+① L1/收入侧两方向判死：不开 wOpen=0.03，不升 (5.0,6.0)；② L2b 的 B2 升档（wThreat=60）
+不再执行——60 轮零位移下加倍期望≈0，且新纪元已取代塑形路线，按 plan §6 后半句转 DAgger 排队；
+③ state-init 的 B1/B4 指望落空（154 轮阴性）；④ 全系列 verdict 移交新纪元
+（`plan/new-era-stop.plan.md`：STOP + 控制执行 bundle，从零爬梯子）。
+
+**被否决**：L2b-60 照开（烧 3 小时买一个已知答案）；L3d2 再燒到 300 輪（拾取横盘 100 轮，
+摸 90% 也无 low 跟随先验）；state-init 续跑（日常更差，无正斜率可续）；
+逐腿 415000 回测全补（最好 −1.4pp/−3.4pp 噪声，L3 首轮"先验低不补测"先例）。
+
+**违反后果**：重开任一判死方向 ⇒ 复刻七连阴烧机时；DAgger 提前立项（BC-ref 栽的 held-out 门未过，
+先答"第一代学生凭什么活"）。
+
+**落点**：各课程文件结算节（`nn-training/curricula/x20-dodge-*.jsonc`、`x20-state-init.jsonc`、
+`x20-steady-cont.jsonc`）+ `docs/nn/experiments.md` §37–§44；门控数据 `tmp/x20-dodge-l*/settle/`。

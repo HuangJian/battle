@@ -8,7 +8,7 @@
  *    - GET  /app.js      → 客户端 bundle（build.ts ensureBundle：mtime 失效自动重建；禁词/体积断言）
  *    - GET  /log/<key>   → 日志页 SSR（renderLogPage）+ /app-log.js
  *    - GET  /api/state   → 状态快照（api.buildStateView：组件/节点/模式/指标，3s 全局节奏）
- *    - GET  /api/pool    → 池数据端点（api.buildPoolView：节点历史/selfStatus/localHash，
+ *    - GET  /api/pool    → 池数据端点（api.buildPoolView：节点历史/selfStatus/localHash；?days= 本地日窗口，
  *                          独立慢节奏 + 课程键控 30s TTL 缓存，?fresh=1 强制）
  *    - GET  /api/log/<key> → 日志载荷（日志页 2s/4s 轮询）
  *    - GET  /api/evalGames            → 最新 in-loop eval 逐局视图（导出 replay 弹窗）
@@ -16,7 +16,8 @@
  *    - GET  /api/evalReplayFile       → 单局 .replay 下载（manifest 白名单）
  *    - POST /api/<act>   → 动作（api.routeAction → actions：启/停/冒烟/预设/开关/节点编辑）
  *
- *  课程只读覆盖：/api/state /api/pool /api/log/<key> /log/<key> 均接受 ?course=<name>
+ *  课程只读覆盖：/api/state /api/log/<key> /log/<key> 均接受 ?course=<name>
+ *  （★ 2026-09-26：/api/pool 已移除 ?course= —— 池视图与课程无关，改为 ?days= 窗口）
  *  （api.sanitizeViewCourse 校验：真实课程 + 防路径穿越）——只影响本次读取的课程数据，
  *  绝不写 console-state，LAN 切换查看课程不影响正在训练的操作员课程。
  *
@@ -325,7 +326,10 @@ async function main(): Promise<void> {
         }
         if (req.method === 'GET' && url.pathname === '/api/pool') {
           const fresh = url.searchParams.get('fresh') === '1'
-          return json(await buildPoolView(fresh, viewCourse || undefined))
+          // ★ 2026-09-26：`?days=` = 本地日窗口（today/yesterday/7/all/N，缺省 today）；
+          // 池视图与课程无关，`?course=` 已移除（plan/nodes-decouple-from-course.plan.md）。
+          const days = url.searchParams.get('days') ?? 'today'
+          return json(await buildPoolView(fresh, days))
         }
         if (req.method === 'GET' && url.pathname === '/api/evalboard') {
           const fresh = url.searchParams.get('fresh') === '1'

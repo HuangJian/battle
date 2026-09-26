@@ -119,9 +119,11 @@ describe('pool data layers (dashboard/src/server/pool-history + iters)', () => {
   })
   it('aggregateNodeHistory returns empty aggregate without tmp data', () => {
     // 仓库 tmp/ 总存在；聚合不抛错即可（数据多少无关正确性）。
+    // ★ 2026-09-26：agg 现在是逐日分桶（byDay）+ 最新完成轮 lastContrib（无 it 展示口径）。
     const agg = aggregateNodeHistory()
-    expect(agg.hist).toBeInstanceOf(Map)
-    expect(typeof agg.globalMaxIt).toBe('number')
+    expect(agg.byDay).toBeInstanceOf(Map)
+    expect(agg.lastContrib).toBeInstanceOf(Map)
+    expect(Array.isArray(agg.sources)).toBe(true)
     expect(agg.epochMs).toBeGreaterThanOrEqual(0)
   })
   it('readIterMetrics tolerates missing traj dir', () => {

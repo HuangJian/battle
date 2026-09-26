@@ -1,0 +1,165 @@
+// 课程 x20-dodge-l2b —— **弹道速率势：wThreat 首剂量**（dodge-avoidance §4 L2b）
+//
+// 状态：**草稿，待用户手工开训**（agent 不得启动训练）。
+//
+// 立项（plan §4.2 L2b；Phase 2 §36 修正案形态）：threat 原始值人类≥NN，罚原始=罚接战
+//   （方向反了），改有界速率 `- wThreat*threatTicks/(ticks+1)`（threatTicks≤ticks
+//   不变量 ⇒ 可达上界恒 <wThreat；**诊断优先**——本腿先看分布动不动，再看 low%）。
+//   量纲：典型局 ±0.6单位 ≈ 0.2杀。
+//   包络仪注：validate 会报 1 个 warning（(threatTicks,ticks)=(36000,0) 角峰值超限），
+//   该角被 `threatTicks≤ticks` 不变量证伪、不可达——plan 备案过的误报，除此外零警告。
+//
+// 顺序锁状态（必须先读）：与 L2a 同——L1 已判负（2026-09-25），锁解除但前提（开局干净）
+//   未达成，开局混杂同 L2a。对冲同 L2a：机制先行 + 专属死刑便宜，结算写明混杂。
+//
+// 单变量纯度：与 x20-noexplore **逐字相同**，只加公式尾项 + `wThreat` 参数
+//   （reward 进血缘正确）。采样 49152 / mb 1024 / lr / epochs / gamma / lam /
+//   schedule / seed_rotate 全同。剂量梯：30 起 / 60 / 120（单次只升一档重试；
+//   wT=30 除误报角外零警告，开训前本文件重验）。
+//
+// 起点：noexplore 最优 it105（`x20-noexplore.it105`），纯 warm start，`kickstart_ref=false`。
+//   comparator = noexplore 同绝对 it 点历史（run 内 itN = 绝对 it105+N；abs>180 后无对照裸奔，
+//   与 L1 同口径）。配对：`paired_rotate_seed` 与 noexplore 同值 1789876303
+//   （L1/L3 同 V；改它 = 非配对）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 判据
+// ══════════════════════════════════════════════════════════════════════════
+// **主读数顺序写死：机制先行**（plan §8 链条）：① threatRate 分布是否移动 + 顶部死亡占比
+//   （基线：plan 26.5%，L1 实测 27.0%——以后者为当前锚，差异记入结算；日常 eval 自带
+//   threatTicks，无需 resim）② low% 是否跟随。it40 只记录、不停腿（it40 误杀门已废）。
+// **门**：414000 段 `low% 相对 noexplore 同 it 点改善 ≥3pp` 且 `p10 ≥ 2`
+//   （noexplore it105 段值 33.0/8.33/p2）。
+// **约束（只记录 + 人工盯盘决策，不自动停）**：日常 mean < 6.19；超时 >5%；
+//   kl 连续 3 轮 ≥0.075；保守陷阱（cells/move/pass 任一显著下降——"不接战"式保守
+//   会同时压 threatRate 与 kills，盯 kills 是否同向掉）。
+// **回测门**：终点候选 415000 不劣于 noexplore 同 it 点（同段同种子配对）。
+// **判据一律不得由教师表现反推**（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 止损（人工盯盘执行；B2 分支预注册）
+// ══════════════════════════════════════════════════════════════════════════
+//   · **专属死刑**：threatRate 分布连续 3 个 eval 点不动 ⇒ 按 B2 升一档（wThreat=60）
+//     重试一次；仍不动 ⇒ 本路线证伪，转 DAgger/搜索蒸馏（plan §6 B2，不开第三档）。
+//   · **撞大运条款**：分布不动但 low% 动了 ⇒ 不认，重查（plan 原话）。
+//   · **转 state-init 条款**：分布动了但 low% 不动 ⇒ 缺口在覆盖不在价格，按 plan §6 停本腿、
+//     开 state-init（转腿是开新课的决定，自动动作只有"停"）。
+//   · **上/下限**：mean < 6.19 或 timeout >5% ⇒ 人工决策停。
+//   · **机械横盘**：low% 连续 4 个 eval 点无改善 ⇒ 停腿；宽限一次 +10 轮。
+
+{
+  "version": 5,
+  "name": "x20-dodge-l2b",
+  "mode": "per-tick",
+  // 环境不变：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。
+  // 任务侧一个字不动（AGENTS §0.2）。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：noexplore 原公式 + ★弹道速率势 ─────────────────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach * where(pickupDist < 0, 0, pickupDist) - wThreat * threatTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.0,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wThreat": 30.0
+    },
+    // dense-only（与父腿一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：noexplore 最优 it105，纯 warm start ──────────────────────────────
+  "bc": "nn-training/weights/x20-noexplore/x20-noexplore.it105.20260922-053620.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+  // ── 配对：续 noexplore 的种子流（1789876303）────────────────────────────────
+  // ⚠ 改它 = 非配对。
+  // 本腿不开 paired-kill（默认关；单腿绝对门，无配对杀臂——2026-09-26 opt-in 教训）。
+  "paired_rotate_seed": 1789876303,
+
+  // ── 预算 ───────────────────────────────────────────────────────────────
+  "iters": 300,
+  "max_hours": 12,
+  "workers": 8,
+
+  // ── 位移包：回基线（与 noexplore 一致）────────────────────────────────────
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：mb 对齐 ────────────────────────────────────────────────────────
+  // 49152 = 48 × mb(1024)；per-stage quota = 12288 = 12 × mb ⇒ 无 ragged tail。
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+
+  // ── 路径：新目录、禁续跑（§15.5）────────────────────────────────────────
+  "out": "tmp/x20-dodge-l2b/weights.json",
+  "traj": "tmp/x20-dodge-l2b",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-dodge-l2b",
+  "backup_prefix": "x20-dodge-l2b",
+
+  // ── 评估 ───────────────────────────────────────────────────────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 开工前置 ─────────────────────────────────────────────────────────────
+// ① bc 文件存在（noexplore it105）。② 公式编译验证（validate_reward 零错误、
+//    仅 (36000,0) 误报角 1 警告；本轮 venv 实测确认）；
+//    wThreat 进血缘是指纹变化的正确原因；除法形态 `threatTicks/(ticks+1)` 分母恒>0）。
+// ③ metrics v8 全链路（threatTicks idx43 已部署，复用 L1 同款确认）。
+// ④ 新 out/traj 目录（禁续跑，§15.5）。⑤ remote_hubs 登记 + slot 容量 + worker 心跳。
+// ⑥ it0 基线现跑：开训后先用 bc 跑 400 局日常段（860001，同种子），单 wver 校验通过
+//    才算数——C-0 教训（200 局 it0 分母太小，+2.65pp 都判不了）+ L1 事故（it0 混入 it43
+//    权重误标）：400 行同 wver 否则重跑，判读以 400 局为准。
+//    已跑（2026-09-26，开训前）：n=400 win 15.50%（62/400）kills 7.71 low% 37.50 p10 1
+//    p50 5，单权重源（spec 锁定 noex-it105；与 C-0 那次 bc 现跑逐局一致，确定性旁证）。
+//    数据：`tmp/dodge-it0-baseline-860001.jsonl`（四腿共用，同 bc 同段）。
+//
+// 启动（**用户手工；agent 不得启动训练**，经控制台）。
+//
+// ── 诊断工具 ─────────────────────────────────────────────────────────────
+// · 日常趋势：it0/it5…（860001 段 400 局）threatRate 分布/low%/mean/p10 +
+//   noexplore 同绝对 it 点对照（机制读数永远先于 low% 看）。
+// · `tmp/topdeath/deathpos.ts`（顶部死亡占比；归档读数 L1 实测 27.0%）。
+// · value 首行均值每 eval 点记录（state-init 教训：V 的 it0 基线被 workdir sweep 吃掉；
+//   本腿从 it0 起每点 pin 一份，workdir 清理不得删该记录）。
+//
+// ── 结算节（跑完回填）──────────────────────────────────────────────────────
+// 必填：① threatRate/顶部死亡占比 it0 → 终点 + 配对对照 ② low% 是否跟随
+//   ③ 414000 主段 + 415000 回测（800 局）④ 分关表 ⑤ 超时/换血读数 ⑥ 实际轮数与耗时
+//   ⑦ B2 分支去向记录（升档重试 / 转 DAgger / 转 state-init 三选一写死）。
+//
+// ── 结算（2026-09-26 回填：it1–66，用户手工停腿，~08:00→13:04 ≈5h；门控未跑）──
+// ① 机制（日常，腿内趋势；历史臂 pre-v8 无 threat 字段，无配对基线）：it0 threat 19.5/kt →
+//    it60 21.3/kt（平/反向）；clean 52.5→51.2%（平），dmg600 71→75（平）；threat 自 it5 起
+//    20.9/22.0/20.9/21.1/19.5/21.6 全平——B2"升档重试"前置条件 it15–20 即已成立，但未执行
+//    （当时在等 it30+ 确认分布真不动；事后看早该升）。
+// ② 日常 low：it0 40.0/7.64 → it60 35.2/7.69（Δ−4.8pp）；最优 it25 33.8，最差 it30 44.2
+//    （±5pp 震荡）；p10 12 个点 3 个 ≥2。low 动而 threat 不动 = 撞大运条款，不认。
+// ③④ 门控/回测：未跑（分布不动 + low 震荡，门过先验低；不补测）。
+// ⑤ 超时/换血：超时全 0；约束全绿（kl≤0.0149、ent 0.47~0.65 无塌、cells 73~81 无塌）；
+//    附带 it62 rollout wr 0.0888 全程最低（单点，未传导到日常，记录）。
+// ⑥ 实际：it1–66（预算 ~22%）；用户控制台手工停。
+// ⑦ B2 去向三选一：**原判应升 wThreat=60 重试一次**，但 x20 全系列关账 + 新纪元（STOP 表示层）
+//    已取代塑形路线——60 档(FW: threat 30 档 60 轮零位移，加倍期望≈0）不再开；
+//    按 plan §6 B2 后半句：本路线证伪，转 DAgger/搜索蒸馏排队（新纪元结论后评审）。
+//    不转 state-init（state-init 154 轮已阴性）。
+// 判语：**判负**。wThreat=30 无效；威胁塑形方向连同 L2a 一并归档，不开第三档。
+// 数据：`tmp/x20-dodge-l2b/eval_log.jsonl`（it0/5/…/60）。

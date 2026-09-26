@@ -1,40 +1,85 @@
-/** pool-history.ts — 节点历史聚合（由 monitor/history.ts 迁入，§3.4 #4）。
+/** pool-history.ts — 节点历史聚合（机群级：合并 tmp/ 下所有训练流）。
  *
- *  纯 fs 逻辑的服务端数据层：按 mtime 自动选取 tmp/ 下最新训练流的
- *  dist-agent-meta.jsonl（递归扫描，只聚合最近活跃目录），聚合出每节点的
- *  ok/fail/最近完成率/上轮贡献度/滑动平均耗时等。历史锚点 tmp/dist-agent/pool-epoch.txt
- *  （受控清空）保留原语义。
+ *  纯 fs 逻辑的服务端数据层。**2026-09-26 起节点统计与课程解耦**（plan/nodes-decouple-from-course.plan.md）：
  *
- *  GLM-U3 修正（本轮迁入顺手做）：lastError 在聚合层剥离 sampler-agent 的
- *  `new Date().toISOString()`（UTC）前缀——节点卡「最近错误」列不再与同行的
- *  本机时间「最近成功」混排；时间单独经 lastFailTs 展示。
+ *   · **数据源 = 所有流**：递归扫描 tmp/ 下所有 `dist-agent-meta.jsonl`（课程目录 + 独立 eval run
+ *     目录），逐流取**完成水位**（排除进行中那一轮），再合并落桶。此前只聚合 mtime 最新那一个源。
+ *   · **单一时间口径**：视图按「本地日」分桶（`byDay`），统计只用时间 —— 课程内序号 `it` 只作
+ *     内部过滤器（`it <= baseIt_flow`），**不出现在任何展示字段**。
+ *   · **一次算全量、切天纯投影**：`aggregateNodeHistory()`（与窗口无关）⊕ `projectWindow(agg, w)`
+ *     （纯函数）。探测层缓存全量 agg；切天零重算。
+ *   · **贡献数取「最新完成的整轮」**：跨课按**完成时刻**选（不是比 `it` 大小——`it` 是课程内序号，
+ *     不可比）；停摆课因完成时刻旧而自然落选。
+ *
+ *  GLM-U3 修正：lastError 在聚合层剥离 sampler-agent 的 `new Date().toISOString()`（UTC）前缀
+ *  ——注意那是 `lastError` **字符串**的前缀；meta 行的 `ts` 字段是 Python `strftime` 写的
+ *  **训练机本地时间、无时区后缀**（§4.2，别混）。
+ *
+ *  历史锚点 tmp/dist-agent/pool-epoch.txt（受控清空）保留原语义。
  */
 
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
 import { dirname, join } from 'path'
-import { REPO_ROOT, tmpPoolDir } from '../core/paths'
-import { fmtFullTs, latestIterFromLedgerTail, stripIsoPrefix } from '../web/view'
+import { tmpPoolDir } from '../core/paths'
+import { fmtFullTs, latestIterationFromLedgerTail, stripIsoPrefix } from '../web/view'
 // 直连 api/logs 的文件而非 `../api` 桶：桶经 snapshot-cache 反向 import 本模块（成环）。
 import { readLedgerTail } from './api/logs'
 
-/** 锚点文件：tmp/dist-agent/pool-epoch.txt（毫秒时间戳）。语义（用户 2026-08-31）：
+/** 锚点文件路径：<池扫描根>/dist-agent/pool-epoch.txt（默认 tmp/dist-agent/pool-epoch.txt，
+ *  与旧硬编码路径逐字节相同）。语义（用户 2026-08-31）：
  *  · 部署写入一次 → 历史自此刻起重新累计；
  *  · 此后任何部署/重启只读同一锚点 → 历史持续累计；
- *  · 用户明确要求清空时，重写/删除该文件 = 新锚点。 */
-const EPOCH_FILE = join(REPO_ROOT, 'tmp', 'dist-agent', 'pool-epoch.txt')
+ *  · 用户明确要求清空时，重写/删除该文件 = 新锚点。
+ *
+ *  ★ 2026-09-26（二轮评审）：随 `tmpPoolDir()` 取根而不是硬钉 `REPO_ROOT` ——
+ *  单测以 `BCITY_POOL_DIR` 重定向池根时，锚点跟着走，预筛才能端到端验（此前的 DoD
+ *  只能测 `pruneByEpoch` 纯函数）。默认路径不变。 */
+function epochFilePath(): string {
+  return join(tmpPoolDir(), 'dist-agent', 'pool-epoch.txt')
+}
 
+/** 0 = 锚点未建立（累计全部历史）；>0 = 只统计该时刻之后的行。
+ *
+ *  ★ **惰性**取值（每次聚合读一次，不再是模块加载时常量）：单测写完锚点再聚合即可生效；
+ *  代价是每次聚合一次 `existsSync` + 一次小文件读（毫秒级，且被进程内 memo 摊薄）。 */
 function poolEpochMs(): number {
   try {
-    if (!existsSync(EPOCH_FILE)) return 0
-    const v = parseInt(readFileSync(EPOCH_FILE, 'utf8').trim(), 10)
+    const p = epochFilePath()
+    if (!existsSync(p)) return 0
+    const v = parseInt(readFileSync(p, 'utf8').trim(), 10)
     return Number.isFinite(v) && v > 0 ? v : 0
   } catch {
     return 0
   }
 }
 
-/** 0 = 锚点未建立（累计全部历史）；>0 = 只统计该时刻之后的行。 */
-const POOL_EPOCH_MS = poolEpochMs()
+/** 大文件阈值：超过它只读尾部（`readLedgerTail`，诚实截断由 `ActiveFlow.truncated` 上屏）。 */
+const LARGE_META_BYTES = 2 * 1024 * 1024
+const LARGE_META_TAIL_LINES = 20_000
+
+/** 进程内聚合 memo 的最短复用窗口（毫秒）。
+ *
+ *  **为什么必须同时有「时间下限」和「指纹」**（2026-09-26 二轮评审）：
+ *   · 指纹（路径 + mtime + 体积）保证**空闲时零重扫**；
+ *   · 但训练在跑时 meta 逐秒追加 ⇒ 指纹每秒都在变，只靠指纹等于每 5s 重扫一次全池
+ *     （快照刷新器每拍都调 `getFleetProbes` → 本函数，而 5 个大文件 40+MB）。
+ *     时间下限把重扫节奏封顶在 ≤ 1 次/窗口。*/
+export const AGG_MEMO_MIN_MS = 30_000
+
+interface AggMemo {
+  root: string
+  epochMs: number
+  fp: string
+  at: number
+  val: HistoryAggregate
+}
+let aggMemo: AggMemo | null = null
+
+/** 硬清聚合 memo。生产路径只有 `?fresh=1`（手动刷新：操作员明确要「现在就给我新的」）调；
+ *  其余时候无需调用——指纹/时间下限自会失效。单测夹具也用它隔离。 */
+export function invalidateNodeHistoryMemo(): void {
+  aggMemo = null
+}
 
 /** dist-agent-meta 的 ts 分布带 T（ISO）与空格两种写法；统一为空格格式后再比。 */
 function normTs(s: string | undefined): string {
@@ -56,6 +101,7 @@ export function windowMeanSec(arr: readonly number[]): number | null {
   return arr.length ? +(arr.reduce((a, b) => a + b, 0) / arr.length).toFixed(1) : null
 }
 
+/** 每节点的**窗口投影**行（2026-09-26 起：所有统计字段都是窗口口径）。 */
 export interface NodeHistory {
   ok: number
   fail: number
@@ -72,21 +118,17 @@ export interface NodeHistory {
   wallRecent: number[]
   /** wallRecent 的均值；null = 无样本（历史 meta 无 wallSec 时）。 */
   avgWallSec: number | null
-  /** 最近至多 10 条结算结果（ok=true），完成率 = 在线状态的判定依据。 */
+  /** 最近至多 10 条结算结果（ok=true），完成率（成功率）的判定依据。 */
   recent: boolean[]
-  /** 该节点自己最近一次成功结算的轮次（-1 = 无成功记录）。 */
-  lastIter: number
-  /** 对齐基准轮（globalMaxIt，= 最近**完成**轮）该节点的成功结算局数（rollout + eval 合计）。 */
-  lastIterOk: number
+  /** ★窗口内成功局数（rollout / eval 分列，取代旧的「对齐轮 contrib*」）。 */
+  winRollout: number
+  winEval: number
+  /** ★最近**完成**轮（跨课按完成时刻选）该节点成功局数（rollout + eval）；-1 = 无池数据。 */
+  lastContrib: number
   /** 最近一次成功结算的毫秒时刻（null = 从未结算）；isSlowNode 判定用。 */
   lastOkTsMs: number | null
   /** 最近一次成功结算的单局耗时（秒，null = 无样本）；isSlowNode 判定用。 */
   lastOkElapsedSec: number | null
-  /** 对齐基准轮（最近完成轮）rollout 成功局数（F5，plan/dist-codehash-stale-fix.md：贡献列按
-   *  mode 分桶——"只跑 eval 的节点"不再看起来在贡献 rollout）。 */
-  contribRollout: number
-  /** 对齐基准轮（最近完成轮）eval 成功局数。 */
-  contribEval: number
 }
 
 export function emptyHistory(): NodeHistory {
@@ -102,54 +144,272 @@ export function emptyHistory(): NodeHistory {
     wallRecent: [],
     avgWallSec: null,
     recent: [],
-    lastIter: -1,
-    lastIterOk: 0,
+    winRollout: 0,
+    winEval: 0,
+    lastContrib: -1,
     lastOkTsMs: null,
     lastOkElapsedSec: null,
-    contribRollout: 0,
-    contribEval: 0,
   }
 }
 
-/** 活跃训练流信息：mtime 最新的 dist-agent-meta.jsonl 所在目录。 */
+/** 活跃训练流信息：一个 `dist-agent-meta.jsonl`（**诊断**用途，不再当过滤依据）。 */
 export interface ActiveFlow {
   dir: string
   mtimeMs: number
   lines: number
+  /** 该流因体积过大只读了尾部（诚实截断，UI 标注）。 */
+  truncated?: boolean
 }
 
+/** 本地日桶：保留窗口投影所需的全部原始事实。
+ *
+ *  ⚠ 字段必须够重建 `NodeHistory` 的**每一个窗口字段**：只存 `ok/fail` 计数的话，
+ *  「窗口内完成率（最近 ≤10 条结算）」与「最近错误」就无源可算（评审缺口，2026-09-26）。
+ *
+ *  ★ **两组字段的口径不同（二轮评审补正）**：
+ *   · **计数 / 样本 / 完成率**（`ok`/`fail`/`rollout`/`eval`/`results`/`elapsed`/`wall`）
+ *     只收**已完成轮**（`it <= baseIt_flow`）——「这一轮的账结清了吗」是数据卫生；
+ *   · **时间戳 / 错误**（`lastOkTs*`/`lastFailTs*`/`lastError*`/`lastTs`）收**全部**行
+ *     ——「这台机器最后一次有动静是什么时候」是**可达性**（isSlowNode / 最近成功列）。
+ *     两组混用会把「轮前段就交完活、轮又长」的节点推回上一轮时刻，在 30 分钟可达性
+ *     窗口上从「慢」翻成「离线」（2026-09-11 报障的反面）。 */
+export interface DayBucket {
+  ok: number
+  fail: number
+  /** 窗口内成功局数（分 mode）。 */
+  rollout: number
+  eval: number
+  /** 最近 ≤10 条结算结果（时间升序；跨天合并后再截尾 10）。 */
+  results: boolean[]
+  /** 最近 ≤50 成功局样本。 */
+  elapsed: number[]
+  wall: number[]
+  lastOkTs: string
+  lastFailTs: string
+  /** 最近失败原因 + 其毫秒（是否上屏由投影按「近一小时」判定）。 */
+  lastError: string
+  lastErrorTsMs: number | null
+  /** 最近失败时刻的毫秒（与 `lastFailTs` 同源；投影按「近一小时」判定是否上屏）。 */
+  lastFailTsMs: number | null
+  /** 最近一次成功结算的毫秒 + 单局耗时（isSlowNode 输入）。 */
+  lastOkTsMs: number | null
+  lastOkElapsedSec: number | null
+  lastTs: string
+}
+
+function emptyDayBucket(): DayBucket {
+  return {
+    ok: 0,
+    fail: 0,
+    rollout: 0,
+    eval: 0,
+    results: [],
+    elapsed: [],
+    wall: [],
+    lastOkTs: '',
+    lastFailTs: '',
+    lastError: '',
+    lastErrorTsMs: null,
+    lastFailTsMs: null,
+    lastOkTsMs: null,
+    lastOkElapsedSec: null,
+    lastTs: '',
+  }
+}
+
+/** 跨课选出的「最新完成轮」（诊断/展示脚注）。 */
+export interface LatestRound {
+  dir: string
+  it: number
+  completedAtMs: number | null
+}
+
+/** 全量聚合（**与窗口无关**，进 SWR 缓存；切天只投影）。 */
 export interface HistoryAggregate {
-  hist: Map<string, NodeHistory>
-  activeFlow: ActiveFlow | null
-  /** 上轮贡献度的对齐基准轮 = **最近已完成轮**（训练账本 `iteration` 事件的最后一个，
-   *  见 `lastCompletedIter`）；无完成信号（一次性 run 目录）或该轮在 meta 里没有任何行时
-   *  退化为「meta 里所有节点成功结算的最大 it」（旧口径）。
-   *  名字保留 `globalMaxIt`（调用面用它与节点自己的 `lastIter` 比时效），语义以上行为准。 */
-  globalMaxIt: number
+  /** 本地日（'YYYY-MM-DD'）→ 节点 → 日桶。 */
+  byDay: Map<string, Map<string, DayBucket>>
+  /** 本次合并的训练流（诊断：节点页脚注「数据来自 N 个流」）。 */
+  sources: ActiveFlow[]
   /** 历史锚点毫秒（渲染层展示用）。 */
   epochMs: number
+  /** 最新完成轮贡献（跨课按完成时刻选）；空 = 无完成信号（消费方 → -1）。 */
+  lastContrib: Map<string, number>
+  /** 最新完成轮的来源（诊断；null = 无池数据）。 */
+  latestRound: LatestRound | null
+}
+
+/** 窗口计算结果（切天纯投影的输出）。 */
+export interface WindowAggregate {
+  hist: Map<string, NodeHistory>
+  sources: ActiveFlow[]
+  epochMs: number
+  window: NodeWindow
+  latestRound: LatestRound | null
+}
+
+/** 本地日 key（'YYYY-MM-DD'）。分桶必须用**本地时区**（tmp 所在机器 TZ）。 */
+export function localDayKey(ms: number): string {
+  const d = new Date(ms)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+/** 本地零点毫秒（按日历加减天，避免夏令时下的 24h 误差）。 */
+function dayStart(ms: number, deltaDays = 0): number {
+  const d = new Date(ms)
+  d.setDate(d.getDate() + deltaDays)
+  d.setHours(0, 0, 0, 0)
+  return d.getTime()
+}
+
+/** 窗口描述：按**本地日 key** 过滤（含首含尾）+ 展示用起止毫秒。 */
+export interface NodeWindow {
+  key: string
+  label: string
+  /** 含首的本地日 key。 */
+  fromDay: string
+  /** 含尾的本地日 key。 */
+  toDay: string
+  /** 展示用窗口起点毫秒（与 epoch 取较大者）。 */
+  startMs: number
+  endMs: number
+}
+
+/** `?days=` 规格 → 窗口。接受 `today` / `yesterday` / `all` / `7` / `d7` / 任意 `N`（N≥1 = 最近 N 天含今天）；
+ *  缺省/非法 = 今天。 */
+export function resolveWindow(spec: string, nowMs: number, epochMs: number): NodeWindow {
+  const s = (spec ?? '').trim().toLowerCase()
+  const todayStart = dayStart(nowMs)
+  let fromDayMs: number
+  let toDayMs = todayStart
+  let key: string
+  let label: string
+  if (s === 'all') {
+    key = 'all'
+    label = '全部'
+    fromDayMs = epochMs > 0 ? dayStart(epochMs) : 0
+  } else if (s === 'yesterday') {
+    key = 'yesterday'
+    label = '昨天'
+    fromDayMs = dayStart(todayStart, -1)
+    toDayMs = fromDayMs
+  } else {
+    // 数字或别名：`d7`/`7` → 最近 7 天；缺省/非法 = 今天。key 与 UI 的 WINDOW_OPTIONS 同形。
+    const n = s === '' || s === 'today' ? 1 : s === 'd7' ? 7 : Number(s)
+    const days = Number.isInteger(n) && n >= 1 ? n : 1
+    key = days === 1 ? 'today' : String(days)
+    label = days === 1 ? '今天' : days === 7 ? '最近 7 天' : `最近 ${days} 天`
+    fromDayMs = dayStart(todayStart, -(days - 1))
+  }
+  return {
+    key,
+    label,
+    fromDay: localDayKey(fromDayMs),
+    toDay: localDayKey(toDayMs),
+    startMs: Math.max(fromDayMs, epochMs),
+    endMs: nowMs,
+  }
+}
+
+/** 窗口投影（**纯函数、零 IO**）：同一份 agg 切不同 days = 换一个窗口看同一份数据。
+ *
+ *  所有展示字段都是窗口口径（唯一例外：`lastContrib` 是「最新完成轮」、与窗口无关）。 */
+export function projectWindow(agg: HistoryAggregate, w: NodeWindow): WindowAggregate {
+  const hist = new Map<string, NodeHistory>()
+  const nodes = new Set<string>()
+  const days: Array<[string, Map<string, DayBucket>]> = []
+  for (const [day, byNode] of agg.byDay) {
+    if (day < w.fromDay || day > w.toDay) continue
+    days.push([day, byNode])
+    for (const node of byNode.keys()) nodes.add(node)
+  }
+  days.sort((a, b) => (a[0] < b[0] ? -1 : 1))
+  for (const node of nodes) {
+    const h = emptyHistory()
+    h.lastContrib = agg.lastContrib.get(node) ?? -1
+    let lastError = ''
+    let lastErrorMs = -Infinity
+    let lastFailCell = ''
+    let lastFailMs = -Infinity
+    for (const [, byNode] of days) {
+      const b = byNode.get(node)
+      if (!b) continue
+      h.ok += b.ok
+      h.fail += b.fail
+      h.winRollout += b.rollout
+      h.winEval += b.eval
+      for (const ok of b.results) {
+        h.recent.push(ok)
+        if (h.recent.length > 10) h.recent.shift()
+      }
+      for (const v of b.elapsed) pushWindowSample(h.elapsedRecent, v)
+      for (const v of b.wall) pushWindowSample(h.wallRecent, v)
+      // days 已按日升序：直接取最大（'-' < 任何 'YYYY-…' 字符串）。
+      if (b.lastOkTs > h.lastOkTs) h.lastOkTs = b.lastOkTs
+      if (b.lastTs > h.lastTs) h.lastTs = b.lastTs
+      if (b.lastOkTsMs != null && (h.lastOkTsMs == null || b.lastOkTsMs >= h.lastOkTsMs)) {
+        h.lastOkTsMs = b.lastOkTsMs
+        h.lastOkElapsedSec = b.lastOkElapsedSec
+      }
+      if (b.lastFailTsMs != null && b.lastFailTsMs > lastFailMs) {
+        lastFailMs = b.lastFailTsMs
+        lastFailCell = b.lastFailTs
+      }
+      if (b.lastErrorTsMs != null && b.lastErrorTsMs > lastErrorMs) {
+        lastErrorMs = b.lastErrorTsMs
+        lastError = b.lastError
+      }
+    }
+    // 「最近错误」与「最近失败」**同一个近一小时口径**（用户指令；与成功率/统计列无关）。
+    // 两者一起上屏（UI 只在 lastError 非空时渲染 lastFailTs）：分开判会出现
+    // 「有错误文字、时间戳却是几天前」，所以这里一并按窗口末刻判定。
+    h.lastError = lastError && w.endMs - lastErrorMs <= 3_600_000 ? lastError : ''
+    h.lastFailTs = lastFailCell && w.endMs - lastFailMs <= 3_600_000 ? lastFailCell : '-'
+    h.lastOkTs = h.lastOkTs || '-'
+    h.lastTs = h.lastTs || '-'
+    h.avgElapsedSec = windowMeanSec(h.elapsedRecent)
+    h.avgWallSec = windowMeanSec(h.wallRecent)
+    hist.set(node, h)
+  }
+  return {
+    hist,
+    sources: agg.sources,
+    epochMs: agg.epochMs,
+    window: w,
+    latestRound: agg.latestRound,
+  }
 }
 
 /**
  * 最近**已完成**轮的水位：同一训练流目录里 `training_log.jsonl` 的最后一个 `iteration`
- * 事件（只认 iteration —— hub 追加的 `job_completed` 带 it，照它取会读出「还没跑完的那一轮」，
- * 见 `web/view/course-overview.latestIterFromLedgerTail`）。
+ * 事件（只认 iteration —— hub 追加的 `job_completed` 带 it，照它取会读出「还没跑完的那一轮」）。
  *
  * 为什么需要水位：meta 账本是**逐局**追加的，进行中那一轮的行会一直变多——按「最大 it」取
  * 对齐基准，先交活的节点贡献显示得高、还没跑到的显示 0（看着像掉线），而这台机器其实健康。
  * 完成水位由训练循环写在轮末（rollout + PPO 之后），正好是「这一轮的账已经结清」的判据。
  *
- * 目录取 meta 所在目录（rollout/eval 的 meta 路径 = `<traj root>/dist-agent-meta.jsonl`，
- * 账本同在 traj root）；再退一层父母录，兼容 meta 落在 `<traj root>/traj/` 的布局。
+ * 目录取 meta 所在目录；再退一层父母录，兼容 meta 落在 `<traj root>/traj/` 的布局。
  * 读不出（无账本 / 一次性 run 目录 / 坏文件）→ null，调用方按旧口径退化。
  */
 export function lastCompletedIter(metaAbsPath: string): number | null {
+  return lastCompletedIterInfo(metaAbsPath)?.it ?? null
+}
+
+/** 同 `lastCompletedIter`，另带该轮的**完成时刻**（本地 ms；`iteration.time` 解析不出 → null）。
+ *
+ *  §3.4：跨课按**完成时刻**选「最新完成轮」——比「该轮 meta 最后一行的 ts」准（后者是
+ *  「最后结算」，与「轮完成」差一个 PPO 的时间）。 */
+export function lastCompletedIterInfo(
+  metaAbsPath: string,
+): { it: number; atMs: number | null } | null {
   const dir = dirname(metaAbsPath)
   for (const p of [join(dir, 'training_log.jsonl'), join(dirname(dir), 'training_log.jsonl')]) {
     try {
       if (!existsSync(p)) continue
-      const it = latestIterFromLedgerTail(readLedgerTail(p, 600))
-      if (it !== null) return it
+      const ev = latestIterationFromLedgerTail(readLedgerTail(p, 600))
+      if (ev) return { it: ev.iter, atMs: parseTsMs(ev.time) }
     } catch {
       /* 账本不可读 → 试下一个候选 */
     }
@@ -159,7 +419,7 @@ export function lastCompletedIter(metaAbsPath: string): number | null {
 
 /**
  * 对齐基准轮的选取（纯函数，可单测）：
- *  · 有完成水位、且该轮在 meta 里**确实有行** → 用水位（进行中那一轮不进贡献统计）；
+ *  · 有完成水位、且该轮在 meta 里**确实有行** → 用水位（进行中那一轮不进统计）；
  *  · 水位缺失/在 meta 里无行/水位为负 → 退化为 meta 最大 it（一次性 run 目录、空池）。
  *
  * 「水位在 meta 里无行」这一条是安全阀：账本与 meta 不同步（换了训练流、账本被清）时，
@@ -174,38 +434,152 @@ export function pickBaseIter(
   return hasRowsAt(completedIt) ? completedIt : maxIt
 }
 
-export function aggregateNodeHistory(): HistoryAggregate {
-  const hist = new Map<string, NodeHistory>()
-  // 各节点在「轮次 → 成功局数」的分布：上轮贡献度按全局最大轮对齐。
-  const okByNodeIt = new Map<string, Map<number, number>>()
-  // F5：按 mode 分桶的 ok 计数（node -> it -> count），键与 okByNodeIt 同构。
-  // 声明必须在此处（解析循环之前）——const 在 TDZ 内引用会抛 ReferenceError。
-  const okByNodeItRollout = new Map<string, Map<number, number>>()
-  const okByNodeItEval = new Map<string, Map<number, number>>()
-  const bump = (node: string): NodeHistory => {
-    let h = hist.get(node)
-    if (!h) {
-      h = emptyHistory()
-      h.lastTs = ''
-      h.lastOkTs = ''
-      h.lastFailTs = ''
-      hist.set(node, h)
+/** meta 行 ts（'YYYY-MM-DD HH:MM:SS' 或 ISO）→ 毫秒；无效返回 null（测试共用）。
+ *
+ *  ★ 这些 ts 是**训练机本地时间、无时区后缀**（Python `strftime`）——`Date.parse` 对无时区
+ *  串按本地解析，正是我们要的。**禁止**改成 `Date.UTC`（会把傍晚的局跨天错桶）。 */
+export function parseTsMs(s: string | undefined): number | null {
+  if (!s) return null
+  const t = Date.parse(s.includes('T') ? s : s.replace(' ', 'T'))
+  return Number.isFinite(t) ? t : null
+}
+
+/** 解析后的一行（紧凑形态，避免持有整份原始文本）。 */
+interface ParsedRow {
+  node: string
+  ok: boolean
+  it: number
+  mode: 'rollout' | 'eval'
+  ts: string
+  /** 已解析的毫秒时刻（非空：解析不出的行在 `parseMetaRow` 就被丢掉，不会落进 1970 桶）。 */
+  tsMs: number
+  elapsedSec: unknown
+  wallSec: unknown
+  reason: string
+}
+
+/** 进落桶队列的一行 + 「它的计数算不算」标记：
+ *  `counted=false` = 属于该流的**进行中那一轮**（时间戳照记、计数不算，见 DayBucket）。 */
+interface RowEntry {
+  r: ParsedRow
+  counted: boolean
+}
+
+function parseMetaRow(line: string, epochStr: string): ParsedRow | null {
+  try {
+    const r = JSON.parse(line) as {
+      node?: string
+      ok?: boolean
+      elapsedSec?: number
+      wallSec?: number
+      ts?: string
+      reason?: string
+      it?: number
+      mode?: string
     }
-    return h
+    if (!r.node) return null
+    const nts = normTs(r.ts)
+    // 只统计「清空锚点之后」的行；ts 缺失无法判定新旧 → 忽略，保守。
+    if (!r.ts || nts < epochStr) return null
+    const tsMs = parseTsMs(r.ts)
+    // ts 在但解析不出（坏格式）→ 既不能分天、也不能定时刻：丢掉比静默塞进
+    // `localDayKey(0)` = 1970-01-01 桶诚实（二轮评审）。
+    if (tsMs == null) return null
+    return {
+      node: r.node,
+      ok: !!r.ok,
+      it: typeof r.it === 'number' && Number.isInteger(r.it) ? r.it : -1,
+      mode: r.mode === 'eval' ? 'eval' : 'rollout',
+      ts: nts,
+      tsMs,
+      elapsedSec: r.elapsedSec,
+      wallSec: r.wallSec,
+      reason: typeof r.reason === 'string' ? r.reason : '',
+    }
+  } catch {
+    return null
   }
-  const epochStr = fmtFullTs(POOL_EPOCH_MS)
-  // 最近一小时永远相对"当下"（不可复用 epoch——epoch 是部署锚点）。
-  const hourAgoStr = fmtFullTs(Date.now() - 3_600_000)
+}
+
+function bucketRow(
+  byDay: Map<string, Map<string, DayBucket>>,
+  r: ParsedRow,
+  counted: boolean,
+): void {
+  const key = localDayKey(r.tsMs)
+  let byNode = byDay.get(key)
+  if (!byNode) {
+    byNode = new Map()
+    byDay.set(key, byNode)
+  }
+  let b = byNode.get(r.node)
+  if (!b) {
+    b = emptyDayBucket()
+    byNode.set(r.node, b)
+  }
+  // ① 时间戳 / 错误列：**可达性口径**——进行中那一轮的行也照记（见 aggregateNodeHistory）。
+  if (r.ok) {
+    if (r.ts > b.lastOkTs) b.lastOkTs = r.ts
+    if (b.lastOkTsMs == null || r.tsMs >= b.lastOkTsMs) {
+      b.lastOkTsMs = r.tsMs
+      b.lastOkElapsedSec =
+        typeof r.elapsedSec === 'number' && r.elapsedSec > 0 ? r.elapsedSec : null
+    }
+  } else {
+    if (r.ts > b.lastFailTs) b.lastFailTs = r.ts
+    if (b.lastFailTsMs == null || r.tsMs > b.lastFailTsMs) b.lastFailTsMs = r.tsMs
+    if (r.reason && (b.lastErrorTsMs == null || r.tsMs >= b.lastErrorTsMs)) {
+      b.lastError = stripIsoPrefix(r.reason).slice(0, 120)
+      b.lastErrorTsMs = r.tsMs
+    }
+  }
+  if (r.ts > b.lastTs) b.lastTs = r.ts
+  // ② 计数 / 样本 / 完成率：**只认已完成轮**（数据卫生：进行中那一轮的半截计数不作数）。
+  if (!counted) return
+  b.results.push(r.ok)
+  if (b.results.length > 10) b.results.shift()
+  if (r.ok) {
+    b.ok++
+    if (r.mode === 'eval') b.eval++
+    else b.rollout++
+    pushWindowSample(b.elapsed, r.elapsedSec)
+    pushWindowSample(b.wall, r.wallSec)
+  } else {
+    b.fail++
+  }
+}
+
+/** 逐流状态（**每个源各自一份 it 分布**，绝不合并成一张全局图——同一 it 在两门课里是两回事）。 */
+interface FlowState {
+  src: ActiveFlow
+  itByNode: Map<string, Map<number, { rollout: number; eval: number }>>
+  baseIt: number
+  completedAtMs: number
+  contribAtBase: Map<string, number>
+}
+
+interface MetaCandidate {
+  path: string
+  dir: string
+  mtimeMs: number
+  size: number
+}
+
+/** 预筛（纯函数，可单测）：整份文件 mtime 早于 epoch ⇒ 全部行都在 epoch 前，跳过。
+ *  **钉在 epoch（与「看哪天」无关）** —— 预筛若随窗口变，「切天零重算」就不成立（plan §4.3）。 */
+export function pruneByEpoch<T extends { mtimeMs: number }>(cands: T[], epochMs: number): T[] {
+  return cands.filter((c) => c.mtimeMs >= epochMs)
+}
+
+export function aggregateNodeHistory(): HistoryAggregate {
+  const byDay = new Map<string, Map<string, DayBucket>>()
+  const tmpDir = tmpPoolDir()
+  const epochMs = poolEpochMs()
+  const epochStr = fmtFullTs(epochMs)
 
   // 收集所有候选 meta 文件（递归扫描 tmp/ 下所有 dist-agent-meta.jsonl）。
   // 训练流的 traj_root 可以是 tmp/X（一层）或 tmp/X/traj（两层），必须递归搜索。
-  interface MetaCandidate {
-    path: string
-    dir: string
-    mtimeMs: number
-  }
   const candidates: MetaCandidate[] = []
-  const tmpDir = tmpPoolDir()
   const walk = (base: string, rel: string): void => {
     try {
       for (const d of readdirSync(join(base, rel), { withFileTypes: true })) {
@@ -219,10 +593,12 @@ export function aggregateNodeHistory(): HistoryAggregate {
         } else if (d.name === 'dist-agent-meta.jsonl') {
           const p = join(base, childRel)
           try {
+            const st = statSync(p)
             candidates.push({
               path: p,
               dir: childRel.replace(/\/dist-agent-meta\.jsonl$/, ''),
-              mtimeMs: statSync(p).mtimeMs,
+              mtimeMs: st.mtimeMs,
+              size: st.size,
             })
           } catch {
             /* stat failed */
@@ -238,120 +614,127 @@ export function aggregateNodeHistory(): HistoryAggregate {
   } catch {
     /* tmp missing */
   }
+  // 指纹要稳定：readdir 顺序不作保证，先按目录名排（对结果无影响——下面还会按 mtime 排）。
+  candidates.sort((a, b) => (a.dir < b.dir ? -1 : 1))
 
-  // 按 mtime 降序：最新修改的 = 当前活跃训练流。仅聚合最新那个——避免旧训练流
-  // 的数千条历史淹没新训练数据。
-  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs)
-  const activeFlow: ActiveFlow | null =
-    candidates.length > 0
-      ? { dir: candidates[0].dir, mtimeMs: candidates[0].mtimeMs, lines: 0 }
-      : null
-  const sources = candidates.length > 0 ? [candidates[0]] : []
-  for (const src of sources) {
+  // ── 进程内 memo（二轮评审）──
+  // 两个消费者（`api/pool` 探测层 + `snapshot-cache` 机群探测）用同一份聚合；
+  // 空闲时靠指纹零重扫，训练中靠 AGG_MEMO_MIN_MS 把重扫节奏封顶。
+  const nowMs = Date.now()
+  const fp = candidates.map((c) => `${c.dir}|${c.mtimeMs}|${c.size}`).join('\n')
+  if (
+    aggMemo &&
+    aggMemo.root === tmpDir &&
+    aggMemo.epochMs === epochMs &&
+    (nowMs - aggMemo.at < AGG_MEMO_MIN_MS || aggMemo.fp === fp)
+  ) {
+    aggMemo.at = nowMs
+    return aggMemo.val
+  }
+
+  // 预筛：整份文件 mtime 早于 epoch ⇒ 全部行都在 epoch 前，跳过。
+  // **钉在 epoch（与「看哪天」无关）**：预筛若随窗口变，"切天零重算"就不成立（§4.3）。
+  const srcs = pruneByEpoch(candidates, epochMs)
+  srcs.sort((a, b) => b.mtimeMs - a.mtimeMs)
+  const sources: ActiveFlow[] = srcs.map((c) => ({ dir: c.dir, mtimeMs: c.mtimeMs, lines: 0 }))
+
+  const flows: FlowState[] = []
+  const allRows: RowEntry[] = []
+  for (let i = 0; i < srcs.length; i++) {
+    const src = srcs[i]!
+    const flow = sources[i]!
+    let lines: string[]
     try {
       if (!existsSync(src.path)) continue
-      const lines = readFileSync(src.path, 'utf8').split(String.fromCharCode(10))
-      if (activeFlow) activeFlow.lines = lines.filter((l) => l.trim()).length
-      for (const line of lines) {
-        if (!line.trim()) continue
-        try {
-          const r = JSON.parse(line) as {
-            node?: string
-            ok?: boolean
-            elapsedSec?: number
-            /** 训练机派发→结算墙钟（新 meta 行；旧行无此键）。 */
-            wallSec?: number
-            ts?: string
-            reason?: string
-            it?: number
-            mode?: string
-          }
-          if (!r.node) continue
-          const nts = normTs(r.ts)
-          // 只统计"清空锚点之后"的行；ts 缺失无法判定新旧 → 忽略，保守。
-          if (!r.ts || nts < epochStr) continue
-          const h = bump(r.node)
-          h.recent.push(!!r.ok)
-          if (h.recent.length > 10) h.recent.shift()
-          if (r.ok) {
-            h.ok++
-            if (nts >= h.lastOkTs) h.lastOkTs = nts
-            const okMs = parseTsMs(r.ts)
-            if (okMs != null && okMs >= (h.lastOkTsMs ?? 0)) {
-              h.lastOkTsMs = okMs
-              h.lastOkElapsedSec =
-                typeof r.elapsedSec === 'number' && r.elapsedSec > 0 ? r.elapsedSec : null
-            }
-            const it = typeof r.it === 'number' && Number.isInteger(r.it) ? r.it : -1
-            if (it >= 0) {
-              let m = okByNodeIt.get(r.node)
-              if (!m) {
-                m = new Map()
-                okByNodeIt.set(r.node, m)
-              }
-              m.set(it, (m.get(it) ?? 0) + 1)
-              // F5：按 mode 分桶——旧记录无 mode 字段按 rollout 处理（向后兼容）。
-              const mode = r.mode === 'eval' ? 'eval' : 'rollout'
-              const modeMap = mode === 'eval' ? okByNodeItEval : okByNodeItRollout
-              let mm = modeMap.get(r.node)
-              if (!mm) {
-                mm = new Map()
-                modeMap.set(r.node, mm)
-              }
-              mm.set(it, (mm.get(it) ?? 0) + 1)
-            }
-            pushWindowSample(h.elapsedRecent, r.elapsedSec)
-            pushWindowSample(h.wallRecent, r.wallSec)
-          } else {
-            h.fail++
-            // 最新错误只近一小时（用户指令）：窗口外错误不进 lastError；
-            // 剥离 agent 的 UTC ISO 前缀（GLM-U3），时间列另有 lastFailTs。
-            h.lastError =
-              nts >= hourAgoStr ? stripIsoPrefix(r.reason ?? '').slice(0, 120) : h.lastError
-            if (nts >= hourAgoStr && nts > h.lastFailTs) h.lastFailTs = nts
-          }
-          if (nts > h.lastTs) h.lastTs = nts
-        } catch {
-          /* skip bad line */
-        }
+      // 大文件只读尾部（诚实截断：UI 标注「该流只统计最近 N 行」）。
+      if (src.size > LARGE_META_BYTES) {
+        lines = readLedgerTail(src.path, LARGE_META_TAIL_LINES)
+        flow.truncated = true
+      } else {
+        lines = readFileSync(src.path, 'utf8').split(String.fromCharCode(10))
       }
     } catch {
-      /* unreadable */
+      continue
     }
-  }
-  // 上轮贡献度修正（2026-09-06，a98 案例）：口径 = 对齐基准轮下各节点成功局数，
-  // 落后节点计 0（渲染层灰显 + tooltip 给出其最近贡献轮次）。
-  let metaMaxIt = -1
-  for (const m of okByNodeIt.values()) {
-    for (const it of m.keys()) if (it > metaMaxIt) metaMaxIt = it
-  }
-  // 对齐基准轮 = 最近**完成**轮（2026-09-20 用户指令：进行中那一轮的半截计数不算数——
-  // 否则先交活的节点看着健康、还没轮到的看着掉线）。无完成信号时退化，见 pickBaseIter。
-  const completedIt = sources.length > 0 ? lastCompletedIter(sources[0]!.path) : null
-  const globalMaxIt = pickBaseIter(completedIt, metaMaxIt, (it) => {
-    for (const m of okByNodeIt.values()) if (m.has(it)) return true
-    return false
-  })
-  for (const [node, h] of hist) {
-    const m = okByNodeIt.get(node)
+    flow.lines = lines.filter((l) => l.trim()).length
+
+    // ① 解析 + 逐流 it 分布（用于水位）。
+    const rows: ParsedRow[] = []
+    const itByNode = new Map<string, Map<number, { rollout: number; eval: number }>>()
     let maxIt = -1
-    if (m) for (const it of m.keys()) if (it > maxIt) maxIt = it
-    h.lastIter = maxIt
-    // 合计保留（渲染层仍可用）；分桶口径供贡献列拆分展示 rollout/eval。
-    h.lastIterOk = (globalMaxIt >= 0 && m?.get(globalMaxIt)) || 0
-    const mr = okByNodeItRollout.get(node)
-    const me = okByNodeItEval.get(node)
-    h.contribRollout = (globalMaxIt >= 0 && mr?.get(globalMaxIt)) || 0
-    h.contribEval = (globalMaxIt >= 0 && me?.get(globalMaxIt)) || 0
-    // 滑动窗口均值（最近 ≤50 局）：口径升级/负载变化后即时不被终身历史拖累。
-    // avgWallSec 与 avgElapsedSec 并列：前者含网络/轮询，后者是节点侧服务时长。
-    h.avgElapsedSec = windowMeanSec(h.elapsedRecent)
-    h.avgWallSec = windowMeanSec(h.wallRecent)
+    for (const line of lines) {
+      if (!line.trim()) continue
+      const r = parseMetaRow(line, epochStr)
+      if (!r) continue
+      rows.push(r)
+      if (r.ok && r.it >= 0) {
+        let m = itByNode.get(r.node)
+        if (!m) {
+          m = new Map()
+          itByNode.set(r.node, m)
+        }
+        const c = m.get(r.it) ?? { rollout: 0, eval: 0 }
+        if (r.mode === 'eval') c.eval++
+        else c.rollout++
+        m.set(r.it, c)
+        if (r.it > maxIt) maxIt = r.it
+      }
+    }
+
+    // ② 逐流水位：只用于过滤「进行中那一轮」的行（数据卫生，不是展示口径）。
+    const completed = lastCompletedIterInfo(src.path)
+    const baseIt = pickBaseIter(completed?.it ?? null, maxIt, (it) => {
+      for (const m of itByNode.values()) if (m.has(it)) return true
+      return false
+    })
+    // 完成时刻：优先账本 iteration.time；读不出 → 该 meta 的 mtime（兜底 + 仍参与「最新完成轮」比较）。
+    const completedAtMs = completed?.atMs ?? src.mtimeMs
+    const contribAtBase = new Map<string, number>()
+    if (baseIt >= 0) {
+      for (const [node, m] of itByNode) {
+        const c = m.get(baseIt)
+        contribAtBase.set(node, c ? c.rollout + c.eval : 0)
+      }
+    }
+
+    // ③ **全部行都进全量行集**（时间戳/错误列是可达性口径，见 DayBucket）；`counted` 标记
+    //    「这行的计数算不算」——已完成轮 = it <= baseIt_flow（无 it 的行照算已完成）。
+    for (const r of rows) {
+      const counted = !(baseIt >= 0 && r.it >= 0 && r.it > baseIt)
+      allRows.push({ r, counted })
+    }
+
+    flows.push({ src: flow, itByNode, baseIt, completedAtMs, contribAtBase })
   }
-  return { hist, activeFlow, globalMaxIt, epochMs: POOL_EPOCH_MS }
+
+  // ④ 时间升序后落桶（跨流合并后仍按时间有序 ⇒ results 时间升序、lastXxx 取最大才对）。
+  allRows.sort((a, b) => a.r.tsMs - b.r.tsMs)
+  for (const e of allRows) bucketRow(byDay, e.r, e.counted)
+
+  // ⑤ 最新完成轮：**跨课按完成时刻取最新**（不是比 it 大小——it 是课程内序号，§1.1）。
+  //    停摆课因完成时刻旧而自然落选，不必额外过滤。
+  let winner: FlowState | null = null
+  for (const f of flows) {
+    if (winner === null || f.completedAtMs > winner.completedAtMs) winner = f
+  }
+  const allNodes = new Set<string>()
+  for (const byNode of byDay.values()) for (const n of byNode.keys()) allNodes.add(n)
+  const lastContrib =
+    winner && winner.baseIt >= 0
+      ? new Map([...allNodes].map((n) => [n, winner.contribAtBase.get(n) ?? 0]))
+      : new Map<string, number>()
+  const latestRound: LatestRound | null = winner
+    ? { dir: winner.src.dir, it: winner.baseIt, completedAtMs: winner.completedAtMs }
+    : null
+
+  const out: HistoryAggregate = { byDay, sources, epochMs, lastContrib, latestRound }
+  aggMemo = { root: tmpDir, epochMs, fp, at: Date.now(), val: out }
+  return out
 }
 
-/** 状态徽章判定：最近 10 次结算完成率（健康≥90% · 波动≥70% · 异常<70%）。 */
+/** 状态徽章判定：最近 10 次结算完成率（成功率 ≥90% · 波动 ≥70% · 异常 <70%）。
+ *
+ *  ⚠ 输入 `recent` 是**窗口内**的最近 ≤10 条 ⇒ 成功率随所选窗口变（plan §3.2 裁决）。 */
 export function poolStatus(h: NodeHistory): 'healthy' | 'warn' | 'bad' | 'nodata' {
   const n = h.recent.length
   if (n === 0) return 'nodata'
@@ -388,13 +771,6 @@ export function isSlowNode(h: {
   if (h.lastOkTsMs == null) return false
   if (Date.now() - h.lastOkTsMs > SLOW_NODE_STALE_MS) return false
   return (h.lastOkElapsedSec ?? h.avgElapsedSec ?? 0) > SLOW_NODE_ELAPSED_SEC
-}
-
-/** meta 行 ts（'YYYY-MM-DD HH:MM:SS' 或 ISO）→ 毫秒；无效返回 null（测试共用）。 */
-export function parseTsMs(s: string | undefined): number | null {
-  if (!s) return null
-  const t = Date.parse(s.includes('T') ? s : s.replace(' ', 'T'))
-  return Number.isFinite(t) ? t : null
 }
 
 /**

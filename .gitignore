@@ -38,6 +38,16 @@ nn-training/weights/**/*.ckpt.*
 nn-training/weights/**/*.md
 nn-training/archive
 
+# 课程封存区（plan/course-archive.plan.md §3.1）：只入库索引两件（可查/可比的载体：
+# ARCHIVE.md + archive-manifest.json），权重/账本/判决行/gz 件留本地——与上面
+# nn-training/weights/**/*.json 同一条理（大件不进库，且这些 json 本来就已被忽略）。
+# 归档根在**仓根** archive/，与上面的历史条目 nn-training/archive **不是**同一路径。
+# 写法照 dashboard/data/evalboard/*：不先整树排除父目录，只排课目录下的一层，
+# 再用否定把两件索引捞回来。
+archive/courses/*/*
+!archive/courses/*/ARCHIVE.md
+!archive/courses/*/archive-manifest.json
+
 .venv/
 
 # 分布式采样密钥（plan/distributed-rollout.md v3.3，严禁入库）

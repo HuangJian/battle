@@ -19,7 +19,12 @@ import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
 import path from 'path'
 import { DASHBOARD_ROOT } from '../src/core/paths'
-import type { CourseOverviewRow, LoopQueueView, ParallelOverviewView } from '../src/web/view'
+import type {
+  ArchivedCourseView,
+  CourseOverviewRow,
+  LoopQueueView,
+  ParallelOverviewView,
+} from '../src/web/view'
 import { parseLoopQueue, withPausedFacts, withTraining } from '../src/web/view'
 
 // ────────────────────────── 夹具 ──────────────────────────
@@ -121,6 +126,8 @@ async function render(
     modeIntents?: Record<string, 'online' | 'offline'> | null
     /** 逐课生效 rollout 源（`stateView.courseRolloutSrc`）——缺省 = 旧视图/不报配置侧。 */
     courseRolloutSrc?: Record<string, string> | null
+    /** 已封存课程（`stateView.archived`）——缺省 = 旧视图/未封存过。 */
+    archived?: ArchivedCourseView[] | null
     course?: string
     onAction?: (act: string, body: Record<string, unknown>) => void
   } = {},
@@ -135,6 +142,7 @@ async function render(
       course: props.course ?? 'c4',
       onSelectCourse: () => {},
       onAction: props.onAction,
+      archived: props.archived,
     }),
   )
 }
@@ -728,5 +736,77 @@ describe('接线：面板挂载、跨区分流与动作路由同源', () => {
     )
     expect(refresher).toContain('refreshLoopQueue()')
     expect(refresher).toContain('refreshHubAdmin()')
+  })
+})
+
+// ────────────────────────── 封存分组（plan/course-archive.plan.md §4 S3） ──────────────────────────
+
+/** 一条封存档案（字段与 python `rl/course_archive.py::_build_manifest` 同形）。 */
+function archRow(patch: Partial<ArchivedCourseView> & { course: string }): ArchivedCourseView {
+  return {
+    archivedAt: '2026-09-26 10:00:00',
+    form: 'A',
+    parent: '',
+    itRange: [0, 182],
+    finalIt: 182,
+    keyIters: [150, 182],
+    shardsKept: false,
+    codec: 'gzip',
+    verdict: '',
+    bytesTotal: 12_000_000,
+    bytesRawTotal: 320_000_000,
+    filesTotal: 42,
+    weights: [],
+    reads: { evalLog: 'eval_log.jsonl.gz', trainLog: 'training_log.jsonl.gz' },
+    ...patch,
+  }
+}
+
+describe('课程矩阵：封存分组（默认折叠、不占主表）', () => {
+  it('无档案 ⇒ 不画封存分组（旧视图/未封存过零变化）', async () => {
+    expect(await render()).not.toContain('tc-mx__arch')
+  })
+
+  it('有档案 ⇒ 计数 chip + 默认折叠（aria-expanded=false，行不上屏）', async () => {
+    const html = await render({ archived: [archRow({ course: 'x20-noexplore' })] })
+    expect(html).toContain('封存 1 门')
+    // 默认折叠：Collapsible 带 --on，aria-expanded=false
+    expect(html).toContain('tc-collapse--on')
+    expect(html).toContain('aria-expanded="false"')
+  })
+
+  it('展开内容给出「形态 / it 区间 / 还能不能复算」——shards 边界必须显式说', async () => {
+    const html = await render({
+      archived: [
+        archRow({ course: 'x20-noexplore', form: 'A+B', shardsKept: false }),
+        archRow({ course: 'human-shards', form: 'A', shardsKept: true, itRange: [1, 40] }),
+      ],
+    })
+    expect(html).toContain('封存 2 门')
+    expect(html).toContain('x20-noexplore')
+    expect(html).toContain('形态 A+B · it 0–182')
+    // ★ 「不可复算」是边界声明，不是细节：不说清楚就会有人拿它去重跑 rollout
+    expect(html).toContain('无可复算 shards（只可比）')
+    expect(html).toContain('含 shards（可复算）')
+    // 只读：档案清单里没有任何动作按钮（不假装能控）——唯一的按钮是那个折叠开关
+    const from = html.indexOf('tc-mx__arch-list')
+    const listPart = html.slice(from, html.indexOf('</ul>', from))
+    expect(listPart).toContain('tc-mx__arch-row')
+    expect(listPart).not.toContain('<button')
+  })
+
+  it('全部课程都封存（无在训行）⇒ 仍然画封存分组，不整块消失', async () => {
+    const html = await render({
+      overview: null,
+      loopQueue: null,
+      archived: [archRow({ course: 'x-all' })],
+    })
+    expect(html).toContain('封存 1 门')
+    expect(html).toContain('x-all')
+  })
+
+  it('接线：app.tsx 把 stateView.archived 传进面板（源码断言）', () => {
+    const app = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'web', 'app', 'app.tsx'), 'utf-8')
+    expect(app).toContain('archived={stateView?.archived ?? null}')
   })
 })

@@ -311,14 +311,31 @@ export interface ParallelOverviewView {
  *  与训练侧写的 `run_start` / `run_complete`（多写者文件）——把 `job_completed` 的 it
  *  当轮次会读出「还没跑完的那一轮」，那是错的。 */
 export function latestIterFromLedgerTail(lines: string[]): number | null {
+  return latestIterationFromLedgerTail(lines)?.iter ?? null
+}
+
+/** 账本尾行里最后一个 `iteration` 事件的**轮次 + `time`**（纯函数，可单测）。
+ *
+ *  `latestIterFromLedgerTail` 只要轮次；池历史还要「这一轮是**什么时候**完成的」
+ *  （跨课按完成时刻选最新完成轮，见 `server/pool-history` §3.4）——`time` 由
+ *  `rl/events.write_iteration` 写成 `strftime("%Y-%m-%d %H:%M:%S")`（训练机本地、无时区）。
+ *  两者共用这里的一条读法，避免「只认 iteration」的判据出现第二份实现。 */
+export function latestIterationFromLedgerTail(
+  lines: string[],
+): { iter: number; time: string } | null {
   for (let i = lines.length - 1; i >= 0; i--) {
     const line = lines[i]!.trim()
     if (!line || !line.includes('"iteration"')) continue
     try {
-      const e = JSON.parse(line) as { event?: unknown; iter?: unknown; it?: unknown }
+      const e = JSON.parse(line) as {
+        event?: unknown
+        iter?: unknown
+        it?: unknown
+        time?: unknown
+      }
       if (e.event !== 'iteration') continue
       const it = typeof e.iter === 'number' ? e.iter : typeof e.it === 'number' ? e.it : null
-      if (it !== null) return it
+      if (it !== null) return { iter: it, time: typeof e.time === 'string' ? e.time : '' }
     } catch {
       /* 写半行竞态：跳过该行看更早的 */
     }

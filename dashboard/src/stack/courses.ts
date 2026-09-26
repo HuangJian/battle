@@ -7,10 +7,16 @@
  *  这里 import，不断环。`actions.ts` 重导出同名函数，老调用方零改动。
  */
 
-import { copyFileSync, existsSync, mkdirSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'fs'
 import path from 'path'
 import { readJsoncFile } from '../core/jsonc'
-import { curriculaDir, REPO_ROOT } from '../core/paths'
+import {
+  archiveCoursesDir,
+  curriculaDir,
+  REPO_ROOT,
+  tmpLogsDir,
+  weightsArchiveDir,
+} from '../core/paths'
 
 /** 课程 BC 种子路径（§384）：读课程 jsonc 的 `bc` 字段（相对仓库根解析）。
  *
@@ -56,6 +62,32 @@ export function isBcCourse(course: string): boolean {
   }
 }
 
+// ────────────────────────── 开课标记（发现判据的显式闸） ──────────────────────────
+
+/** 「已开课」标记文件名（**必须与 python 侧 `remote/protocol.py::COURSE_ENABLE_MARKER` 同名**）。
+ *
+ *  ★ 2026-09-26 从 `server/actions/course-lifecycle.ts` 搬到这里：回灌（`course-mode.ts`）也要
+ *  读它，而 `course-lifecycle` 已 import `course-mode`（反向 import 成环）——本模块是仓库里
+ *  约定的「课程域共享判据、不断环」的家（文件头注释同口径）。
+ *
+ *  为什么需要它（2026-09-20 用户报障）：「共享 trainer 是发现式的」+「tmp/ 下堆着几十门历史课
+ *  的账本」⇒ 进程一启动就把**所有历史课**一起拉进训练（实测：起 trainer 后控制台列出 21 门
+ *  「正在训练」）。用户口径：「课程开训需要用户手动开启」⇒ 课程表 = 账本 ∧ **开课标记**；
+ *  训练侧与 hub 的发现判据都加这一道闸（`rl/loop_plan.enabled_courses`、`_course_dir_live`）。
+ *  标记与账本同住课程目录：一个判据、一处位置，开/停课各是一次文件操作（不涉及共享 JSON 的
+ *  读-改-写竞态），且控制台重启不丢「哪几门开着」。 */
+export const COURSE_ENABLE_MARKER = 'training-enabled.txt'
+
+/** 本课的开课标记路径（`<traj-root>/<课>/training-enabled.txt`）。 */
+export function courseEnableMarkerPath(course: string): string {
+  return path.join(tmpLogsDir(), course, COURSE_ENABLE_MARKER)
+}
+
+/** 这门课是否已开课（标记存在）——与控制台总览/按钮同判据。 */
+export function courseEnabled(course: string): boolean {
+  return !!course && existsSync(courseEnableMarkerPath(course))
+}
+
 /** 按课程播种初始权重（console 与 hub 双路的实际 seeding 路径，DoD F-B6）。
  *
  *  `sha256(weightsPath) == sha256(课程 bc 声明的文件)` 由调用链保证——这里是唯一的
@@ -70,4 +102,60 @@ export function seedWeightsFromBc(course: string, weightsPath: string): string {
   mkdirSync(path.dirname(weightsPath), { recursive: true })
   copyFileSync(bcPath, weightsPath)
   return bcPath
+}
+
+// ────────────────────────── 封存起点（G4-①） ──────────────────────────
+
+/** 归档件名：`<prefix>.it<N>.<YYYYMMDD-HHMMSS>.json`（python `backup_weights`）。 */
+const ARCHIVED_WEIGHT_RE = /\.it(\d+)\.\d{8}-\d{6}\.json$/
+
+/** 归档权限校验：路径必须**真的**在权重归档根之内（防 manifest 被手改成越界路径）。 */
+function insideWeightsArchive(p: string): boolean {
+  const rel = path.relative(weightsArchiveDir(), p)
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel)
+}
+
+/** 封存课的某个关键轮 → **实际**权重文件绝对路径（plan/course-archive.plan.md §3.5 / G4-①）。
+ *
+ *  客户端只给 `{sourceCourse, it}`（**不给路径**）：路径由服务端从
+ *  `archive/courses/<课>/archive-manifest.json` 自己解析——绝不信任客户端传的路径，
+ *  manifest 也可能被手改，故解析结果还要过 `insideWeightsArchive`。
+ *
+ *  优先级：① manifest 里该 it 的**具体** `path`（无 glob 字符且文件在）；② 否则在该课归档
+ *  目录里按 `*.it<it>.*.json` glob（与 python `resolve_archived_weight` 同口径：同名多份取
+ *  时间戳最大那份）。都找不到 ⇒ null（调用方响亮拒绝，不退回 BC——那会静默拿错起点）。 */
+export function resolveArchivedSeedPath(sourceCourse: string, it: number): string | null {
+  if (!/^[A-Za-z0-9._-]+$/.test(sourceCourse) || !Number.isInteger(it)) return null
+  const manifest = path.join(archiveCoursesDir(), sourceCourse, 'archive-manifest.json')
+  try {
+    const doc = JSON.parse(readFileSync(manifest, 'utf8')) as { weights?: unknown }
+    const weights = Array.isArray(doc.weights) ? doc.weights : []
+    const entry = weights.find(
+      (w): w is { it?: unknown; path?: unknown } =>
+        typeof w === 'object' && w !== null && (w as { it?: unknown }).it === it,
+    )
+    // manifest 里存的是仓根相对的 `nn-training/weights/<课>/<file>.json`。归档布局是**该课
+    // 目录下平铺** ⇒ 只取 basename 再拼回 `<权重根>/<课>/`：既能在单测重定向下工作，
+    // 也天然让「手改 manifest 指向越界路径」失效（拼不出 weights 根之外）。
+    const base = typeof entry?.path === 'string' ? path.basename(entry.path) : ''
+    if (base && !base.includes('*') && !base.includes('?')) {
+      const abs = path.join(weightsArchiveDir(), sourceCourse, base)
+      if (insideWeightsArchive(abs) && existsSync(abs)) return abs
+    }
+  } catch {
+    // 没档案 / 坏 manifest ⇒ **它不是封存课**，不该作起点来源（不做 glob 兜底——否则
+    // 任意一门有归档权重的活体课都能被当「封存起点」，与「从封存课取」的语义不符）。
+    return null
+  }
+  const dir = path.join(weightsArchiveDir(), sourceCourse)
+  let best: string | null = null
+  try {
+    for (const name of readdirSync(dir)) {
+      const m = ARCHIVED_WEIGHT_RE.exec(name)
+      if (m && Number(m[1]) === it && (best === null || name > best)) best = name
+    }
+  } catch {
+    return null
+  }
+  return best ? path.join(dir, best) : null
 }

@@ -3,9 +3,11 @@ import { existsSync } from 'fs'
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
 import type { ConsoleStateView, MetricsView } from '../../web/view'
-import { courseEnableMarkerPath, loadConsoleState, readCourseModes } from '../actions'
+import { courseEnableMarkerPath, isBcCourse } from '../../stack/courses'
+import { loadConsoleState, readCourseModes } from '../actions'
 import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/specs'
 import { readIterMetrics, readPairedReferee } from '../iters'
+import { readArchived } from './archive'
 import { loadConfigSafe } from './config'
 import { discoverCourses, effectiveCourse } from './courses'
 import { buildLoopQueueView } from './loop-queue'
@@ -13,12 +15,14 @@ import { buildOverview, buildWorkerRegistry, getHubAdmin, sharedTrainerAlive } f
 import { detectPpoQueueStall } from './ppo-queue'
 import { readTunnelAbRuns } from './tunnel-ab'
 import { getSlowSnapshot } from './snapshot-refresher'
-import { isBcCourse } from '../../stack/courses'
 
 export async function buildStateView(courseOverride?: string): Promise<ConsoleStateView> {
   const cfg = loadConfigSafe()
   const state = loadConsoleState()
-  const courses = discoverCourses()
+  // 封存读面只解析一次：`discoverCourses` 要按它排除已封存课，返回体也要它 ⇒ 同一份结果
+  // 复用，别让 `/api/state` 每拍对同一批 manifest `JSON.parse` 两遍。
+  const archivedList = readArchived()
+  const courses = discoverCourses(500, new Set(archivedList.map((a) => a.course)))
   const course = courseOverride || effectiveCourse(state, courses)
   // 机群级两笔冷探测互不依赖，**并行起跑**：慢快照里的节点 ping（~1.5s）与 hub 观测面
   // （`buildOverview`/`buildWorkerRegistry` 里的 ~1.2s）。串行时它们是相加的——冷启动/
@@ -98,6 +102,9 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     isBc: isBcCourse(course),
     activeCourse: state.activeCourse || state.course || course,
     courses,
+    // 已封存课程：只读 `archive/courses/*/archive-manifest.json`（不扫盘、不解压）——
+    // 与 `courses` 互斥（封存课已在 discoverCourses 里按 manifest 排除）。
+    archived: archivedList,
     // 在训（= **已开课**）课程：课程 select 的多课高亮、顶部 pill 行、总览的「在训」列
     // 与门禁动作开关**同源**——一处判据修三次才会三处各说各话，故只在这里算一次。
     trainingCourses: training,

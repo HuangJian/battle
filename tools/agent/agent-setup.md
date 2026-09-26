@@ -53,7 +53,8 @@ bun tools/agent/sampler-agent.ts --port 8443 --workers <N>
 # ⑤ 记下访问地址与 authKey，进入 §5 协调器侧接入
 ```
 
-磁盘余量 ≥2GB（agent 自检 `minDiskFreeMB=2048`，不足拒单）。
+磁盘余量 ≥2GB（agent 自检：可用 <2048MB 拒单——阈值是 TS 侧常量，硬编码在
+`tools/agent/sampler-agent.ts:1520`，**不是** rl-config 键，别去配置里找）。
 
 ### 2.1 rollout 引擎：微基准自动选（engine × features 后端，DECISIONS §367）
 

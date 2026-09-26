@@ -357,3 +357,25 @@ def test_scan_seen_atsec_expires_dedup_cooldown(
     assert fresh["results"][0]["reason"] == "dedup", fresh["results"]
     assert posted == ["http://10.0.0.1:8443"], "窗内不得再发 POST"
     dist_common.reset_restart_state()
+
+
+def test_upgrade_branch_has_no_explicit_override_path() -> None:
+    """评审更正（2026-09-26）：升级分支**只有一个来源**（训练机锁存）。
+
+    此前是 `upgrade_branch_or(explicit)`，语义「显式值优先于锁存」——那是 2026-08-30 事故的
+    载体（rl-config 里残留的 `'intent-ai'` 只要非空就盖掉锁存，把全部节点 reset 回旧代码）。
+    读点已随 `policy.upgradeBranch` 删除；本次又把那个参数一并拿掉 ⇒ 坑在**签名层面**不再
+    可能复现。这条用例盯的就是签名本身：谁想再引入「从配置/调用方传分支进来」这条路径，
+    必须先改这条断言（= 一次有意识的决定，而不是顺手写一行 `or` 兜底）。
+    """
+    import inspect
+
+    assert not hasattr(dist_common, "upgrade_branch_or"), "旧的「显式优先」入口不得复活"
+    assert list(inspect.signature(dist_common.current_upgrade_branch).parameters) == []
+    dist_common.set_upgrade_branch("goal-nn")
+    try:
+        assert dist_common.current_upgrade_branch() == "goal-nn"
+        dist_common.set_upgrade_branch("")
+        assert dist_common.current_upgrade_branch() == "", "锁存为空 = 不升级（调用方只告警）"
+    finally:
+        dist_common.set_upgrade_branch("")

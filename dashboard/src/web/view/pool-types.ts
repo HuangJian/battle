@@ -1,4 +1,10 @@
-/** pool-types.ts — /api/pool 视图类型（节点历史 / 活跃流 / selfStatus）。 */
+/** pool-types.ts — /api/pool 视图类型（节点历史 / 训练流 / 窗口 / selfStatus）。
+ *
+ *  ★ 2026-09-26（plan/nodes-decouple-from-course.plan.md）：节点统计与课程解耦 ——
+ *   · 视图合并 tmp/ 下**所有**训练流，按**本地日**窗口投影；
+ *   · 课程内序号 `it` **不再出现在任何展示字段**（只作服务端内部过滤器）；
+ *   · 「上轮贡献」→ **窗口内局数**（`winRollout` / `winEval` 两列），「状态」列改名「成功率」。
+ */
 // ────────────────────────── /api/pool 视图类型 ──────────────────────────
 
 export type NodePoolStatus = 'healthy' | 'warn' | 'bad' | 'noping' | 'nodata' | 'disabled'
@@ -16,22 +22,19 @@ export interface NodeHistoryRow {
   versionOk: boolean | null
   /** 短版本号（前 7 位）。 */
   version: string
-  /** 训练机侧短 hash（前 7 位）——F5（plan/dist-codehash-stale-fix.md）：stale 诊断
-   *  Pill 展示两侧 hash，一眼看出差异在哪一侧。 */
+  /** 训练机侧短 hash（前 7 位）——F5（plan/dist-codehash-stale-fix.md）：stale 诊断。 */
   versionLocal: string
   pingMs: number | null
   ok: number
   fail: number
-  /** 上轮贡献合计（rollout + eval）。 */
-  contrib: number
-  /** F5（plan/dist-codehash-stale-fix.md）：上轮贡献按 mode 分桶——"只跑 eval 的
-   * 节点"不再看起来在贡献 rollout。 */
-  contribRollout: number
-  contribEval: number
-  lastIter: number
-  globalMaxIt: number
+  /** ★窗口内成功局数（rollout）——取代旧的「对齐轮 contribRollout」。 */
+  winRollout: number
+  /** ★窗口内成功局数（eval）。 */
+  winEval: number
+  /** 最近**完成**轮（跨课按完成时刻选）该节点成功局数（rollout + eval）；-1 = 无池数据。 */
+  lastContrib: number
   avgElapsedSec: number | null
-  /** 训练机派发→结算墙钟滑动均值（含网络/轮询）；null = meta 尚无 wallSec。 */
+  /** 训练机派发→结算墙钟滑动均值（含网络/轮询）；null = 窗口内无 wallSec。 */
   avgWallSec: number | null
   lastOkTs: string
   lastFailTs: string
@@ -40,11 +43,32 @@ export interface NodeHistoryRow {
   recent: boolean[]
 }
 
+/** 本次合并的训练流（诊断：脚注「数据来自 N 个训练流」）。 */
 export interface ActiveFlowInfo {
   dir: string
   mtimeMs: number
   lines: number
+  /** 该流因体积过大只读了尾部（诚实截断）。 */
+  truncated?: boolean
 }
+
+/** 会话视图的窗口（本地日）。 */
+export interface PoolWindowInfo {
+  key: string
+  label: string
+  startMs: number
+  endMs: number
+}
+
+/** 节点页窗口选项（UI Segmented；服务端 `?days=` 同键）。 */
+export const WINDOW_OPTIONS = [
+  { key: 'today', label: '今天' },
+  { key: 'yesterday', label: '昨天' },
+  { key: '7', label: '7 天' },
+  { key: 'all', label: '全部' },
+] as const
+
+export type PoolWindowKey = (typeof WINDOW_OPTIONS)[number]['key']
 
 export interface SelfStatus {
   workers: number
@@ -63,9 +87,13 @@ export interface PoolView {
    *  视图是两层拼的：结构（节点行/order/enabled/local 槽数）每请求现算、无缓存；
    *  这个字段只标探测列的新鲜度 —— 也是客户端判定「后台重算落地了」的判据。 */
   cachedAt: number
+  /** 操作员课程回显（`?course=` 已移除；池视图本身与课程无关）。 */
   course: string
   epochMs: number
-  activeFlow: ActiveFlowInfo | null
+  /** 合并的训练流（诊断）。 */
+  sources: ActiveFlowInfo[]
+  /** 本次投影的窗口（本地日；切天只改它，不重算聚合）。 */
+  window: PoolWindowInfo
   nodes: NodeHistoryRow[]
   local: NodeHistoryRow | null
   selfStatus: SelfStatus | null

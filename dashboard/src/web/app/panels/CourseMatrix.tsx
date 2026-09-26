@@ -35,8 +35,10 @@
  *  一个都不渲染——与合并前两张卡同一判据。
  */
 
+import { useState } from 'preact/hooks'
 import {
   FROZEN_RECLAIMS,
+  type ArchivedCourseView,
   frozenJobs,
   isTrainingRow,
   kindBadge,
@@ -53,10 +55,69 @@ import {
   stepTitle,
   waitingClass,
 } from '../../view'
+import { Collapsible } from '../../components/Collapsible'
 import { Empty } from '../../components/Empty'
 import { SectionHeader } from '../../components/SectionHeader'
 import { StatusDot } from '../../components/StatusDot'
 import { BundleRowActions } from './BundleRowActions'
+
+/** 封存分组：一个计数 chip + **默认折叠**的档案清单（plan/course-archive.plan.md §4 S3）。
+ *
+ *  数据源是 `stateView.archived`（**只读 manifest，不扫盘、不解压**）——这里只负责呈现：
+ *  每行给「哪门 / 什么形态 / it 区间 / 还有没有可复算的 shards」。最后一栏是**边界声明**，
+ *  不是细节：`shards 未留存 ⇒ 不可复算，只可比`，不说清楚就会有人拿它去重跑 rollout。
+ */
+export function ArchiveGroup({
+  arch,
+  open,
+  onToggle,
+}: {
+  arch: ArchivedCourseView[]
+  open: boolean
+  onToggle: (next: boolean) => void
+}) {
+  if (arch.length === 0) return null
+  return (
+    <div className="tc-mx__arch">
+      <button
+        type="button"
+        className="tc-mx__chip tc-mx__arch-toggle"
+        aria-expanded={open}
+        title={
+          `已封存的 ${arch.length} 门课程（只读档案在 archive/courses/<课>/）。` +
+          '封存课不进训练、不参与派发，也已从课程选择器/开课弹窗里排除；' +
+          '需要起点时用档案里的 weights[]（指向 nn-training/weights/）。'
+        }
+        onClick={() => onToggle(!open)}
+      >
+        {`封存 ${arch.length} 门 ${open ? '▾' : '▸'}`}
+      </button>
+      <Collapsible collapsed={!open}>
+        <ul className="tc-mx__arch-list">
+          {arch.map((a) => (
+            <li key={a.course} className="tc-mx__arch-row">
+              <span className="tc-mx__arch-name">{a.course}</span>
+              <span
+                className="tc-mx__arch-meta"
+                title={
+                  `形态 ${a.form}（A=旧 it<N>/dist/；B=新 it<N>/w<id>/；C=offline 回传）· ` +
+                  `it ${a.itRange[0]}–${a.itRange[1]}（终点 ${a.finalIt}）· ` +
+                  `codec ${a.codec} · 档案 ${(a.bytesTotal / 1_000_000).toFixed(1)} MB` +
+                  (a.parent ? ` · 父臂 ${a.parent}` : '')
+                }
+              >
+                {`形态 ${a.form} · it ${a.itRange[0]}–${a.itRange[1]} · `}
+                <span className={a.shardsKept ? 'tc-mx__arch-ok' : ''}>
+                  {a.shardsKept ? '含 shards（可复算）' : '无可复算 shards（只可比）'}
+                </span>
+              </span>
+            </li>
+          ))}
+        </ul>
+      </Collapsible>
+    </div>
+  )
+}
 
 /** 切课按钮的悬停（导出给用例断言，避免文案与断言两处漂移）。 */
 export function pickTitle(course: string, viewing: boolean): string {
@@ -84,6 +145,13 @@ export interface CourseMatrixProps {
   onSelectCourse: (course: string) => void
   /** 动作通道。缺省 = 不渲染动作列（见文件头注）。 */
   onAction?: (act: string, body: Record<string, unknown>) => unknown
+  /** 已封存课程（`stateView.archived`；缺省 = 旧视图/尚未封存过 ⇒ 不画封存分组）。
+   *
+   *  为什么进这张表：封存课**已从 `discoverCourses()` 排除**（否则 curricula 回填会把它
+   *  捞回课程 select），于是它在这里**根本没有行**——但「它还在、只是封存了」这件事得有个
+   *  去处，否则操作员会以为档案丢了。默认折叠：它不属于「盯着在跑的那几门」（见文件头注
+   *  「只列在训课程」），一行的信息量只有「哪门、什么形态、还能不能复算」。 */
+  archived?: ArchivedCourseView[] | null
 }
 
 export function CourseMatrix({
@@ -94,9 +162,13 @@ export function CourseMatrix({
   course,
   onSelectCourse,
   onAction,
+  archived,
 }: CourseMatrixProps) {
   // 「段内多久没动」要当下时刻：读表在这里发生，纯函数只收数字（可单测、可回放）。
   const nowSec = Math.floor(Date.now() / 1000)
+  // 封存分组**默认折叠**（不属于「盯着在跑的那几门」）。
+  const [archOpen, setArchOpen] = useState(false)
+  const arch = archived ?? []
   const all = mergeCourseRows({
     overview,
     queue: loopQueue,
@@ -112,11 +184,22 @@ export function CourseMatrix({
   // 两侧都没东西可说时不留空壳；但**读失败必须显因**（不静默）——那是运维唯一能修的线索。
   if (all.length === 0) {
     const err = loopQueue?.error
-    if (!err) return null
+    if (!err) {
+      // ★ 全部课程都封存了（`all` 空、封存非空）也是合法稳态：不画封存分组就等于
+      //   把「档案还在」这件事一起藏了。
+      if (arch.length === 0) return null
+      return (
+        <section className="tc-mx" aria-label="课程矩阵">
+          <SectionHeader title="课程" />
+          <ArchiveGroup arch={arch} open={archOpen} onToggle={setArchOpen} />
+        </section>
+      )
+    }
     return (
       <section className="tc-mx" aria-label="课程矩阵">
         <SectionHeader title="课程" />
         <Empty kind="error" reason={`只读视图不可用：${err}`} />
+        <ArchiveGroup arch={arch} open={archOpen} onToggle={setArchOpen} />
       </section>
     )
   }
@@ -199,6 +282,7 @@ export function CourseMatrix({
           </span>
         ) : null}
       </div>
+      <ArchiveGroup arch={arch} open={archOpen} onToggle={setArchOpen} />
       {rows.length === 0 ? (
         // ★ 0 门在训是**合法稳态**（都收官了 / 进程没跑）：显因，不整块消失。
         <Empty

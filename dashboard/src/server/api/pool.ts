@@ -5,20 +5,24 @@
  *    · **结构**：节点行/顺序、`enabled`（只读的那一行显示 disabled/无 ping）、local 槽数——来自
  *      当下 cfg，**毫秒级**，而且就是操作员刚刚拨下的那个开关；
  *    · **探测**：逐节点 ping（2.5s 超时 ∥）、池历史聚合（递归扫 tmp、读 MB 级 meta）、codeHash
- *      （sampler-agent 算全部源码）、selfNode `/v1/status`——实测冷算 **2448–2552ms**。
+ *      （sampler-agent 算全部源码）、selfNode `/v1/status`——实测冷算 **2448–2552ms**
+ *      （大头是 ping 的超时预算；池历史聚合本机实测 ~0.2–0.3s，且已被进程内 memo 与
+ *      `snapshot-cache` 的机群探测**共用一份**，不再各算一遍）。
  *  于是「停用节点」这个动作无论怎么处置缓存都不对：不碰 ⇒ 池表还显示旧状态 30s（TTL）/5min
  *  （面板轮询）而同一页的注册表行已经写「已停用」；硬清 ⇒ 面板被按住 2.5s；整条软作废 ⇒ 首帧
  *  给的还是旧状态（要等后台重算落地，实测 ~2.5s）。
  *
- *  根上的观察：**这份视图里没有任何“按课程”的东西**——cfg.nodes / rl.local_slots / tmp 下最新
- *  活跃流 / 本机 codeHash / selfNode 存活性全是**机器事实**（`aggregateNodeHistory` 不收课程参数，
- *  只扫 `tmp/**` 取 mtime 最新的 meta）。所以拆成两层：
+ *  根上的观察：**这份视图里没有任何“按课程”的东西**——cfg.nodes / rl.local_slots / tmp 下所有
+ *  训练流 / 本机 codeHash / selfNode 存活性全是**机器事实**（`aggregateNodeHistory` 不收课程参数，
+ *  扫 `tmp/**` 合并**所有** meta）。所以拆成两层：
  *    · **探测层** `PoolProbes`：单条目全局 SWR 缓存（与 `snapshot-cache.FleetProbes` 同规）
  *      ——机器级、跨课程共用、陈旧先给旧值 + 重算丢后台；
  *    · **结构层**：每请求现算（`assemblePoolView`）——节点行/顺序/停用/local 槽数、`disabled` 行的
  *      `status`/`pingMs` 都是 cfg 事实，**第一帧就是新的**。
- *  `course` 只作为回显字段（也只作为 `?course=` 覆盖的入参），不再当缓存键——切课不再重算探测。
- *  探测列（enabled 节点的 status/完成率/版本、selfStatus…）允许粗一个重算周期；客户端以
+ *  `course` 只作为回显字段，不再当缓存键。**2026-09-26（plan/nodes-decouple-from-course.plan.md）：
+ *  `?course=` 已移除，视图加 `?days=` 窗口**——聚合缓存的是**全量** `agg`（与窗口无关），
+ *  `days` 只在 `assemblePoolView` 之后做**纯投影** ⇒ 切天零重算。
+ *  探测列（enabled 节点的 status/成功率/版本、selfStatus…）允许粗一个重算周期；客户端以
  *  `cachedAt`（= 探测层算完时刻）推进为「新的一份到了」的判据，做一次有界再校验（见 NodeStats）。
  *  显式 `?fresh=1`（手动刷新 / 重试）仍是**硬清 + 等重算**——那时操作员的诉求就是“现在就给我新的”。 */
 import { loadConfig } from '../../core/config'
@@ -30,9 +34,13 @@ import { loadConsoleState } from '../actions'
 import {
   type HistoryAggregate,
   type NodeHistory,
+  type WindowAggregate,
   aggregateNodeHistory,
   emptyHistory,
+  invalidateNodeHistoryMemo,
   poolStatus,
+  projectWindow,
+  resolveWindow,
 } from '../pool-history'
 import { createSwrCache } from '../../core/swr-cache'
 import { discoverCourses, effectiveCourse } from './courses'
@@ -49,7 +57,6 @@ interface PoolProbes {
   agg: HistoryAggregate
   /** 节点 ping（id → 应答与耗时）；**探测时**停用的节点缺席（现启用后要等下一次重算才有）。 */
   pingById: Map<string, { ping: Record<string, unknown> | null; ms: number | null }>
-  localHist: NodeHistory
   hash: string
   selfStatus: SelfStatus | null
 }
@@ -142,8 +149,7 @@ function nodeHistoryRow(
     concurrency: number
     gpu_push?: boolean
   },
-  h: ReturnType<typeof emptyHistory>,
-  agg: { globalMaxIt: number },
+  h: NodeHistory,
   ping: Record<string, unknown> | null,
   pingMs: number | null,
   localHash: string,
@@ -160,7 +166,7 @@ function nodeHistoryRow(
     version = codeHash ? codeHash.slice(0, 7) : ''
     versionOk = codeHash.length > 0 ? codeHash === localHash : null
     spec = ping.cpus ? `${ping.cpus} 核` : '?核'
-    status = poolStatus(h) // 在线但无结算历史 → 'nodata' 灰显
+    status = poolStatus(h) // 在线但无结算历史（窗口内无 recent）→ 'nodata' 灰显
   } else {
     status = h.recent.length === 0 ? 'noping' : poolStatus(h)
   }
@@ -177,11 +183,9 @@ function nodeHistoryRow(
     pingMs: disabled ? null : pingMs,
     ok: h.ok,
     fail: h.fail,
-    contrib: h.lastIterOk,
-    contribRollout: h.contribRollout,
-    contribEval: h.contribEval,
-    lastIter: h.lastIter,
-    globalMaxIt: agg.globalMaxIt,
+    winRollout: h.winRollout,
+    winEval: h.winEval,
+    lastContrib: h.lastContrib,
     avgElapsedSec: h.avgElapsedSec,
     avgWallSec: h.avgWallSec,
     lastOkTs: h.lastOkTs,
@@ -191,18 +195,25 @@ function nodeHistoryRow(
   }
 }
 
-/** 池汇总（首屏不入流：扫描 tmp 太重，客户端异步拉；R7）。courseOverride 为只读视图课程
- *  （?course=，已 sanitize）；空则回退操作员课程。
+/** 池汇总（首屏不入流：扫描 tmp 太重，客户端异步拉；R7）。
+ *
+ *  `days` = 本地日窗口（`today`/`yesterday`/`all`/`7`/`N`；缺省 today）。
+ *  **2026-09-26：`?course=` 已移除** —— 池视图与课程无关，`course` 只是回显。
  *
  *  `fresh=true`（`?fresh=1`：手动刷新 / 重试）＝**硬清 + 等重算**——这是操作员的明确要求
  *  （“现在就给我新的”），不是动作路径（那走 `refreshPoolViews` 的软作废）。 */
-export async function buildPoolView(fresh = false, courseOverride?: string): Promise<PoolView> {
+export async function buildPoolView(fresh = false, days = 'today'): Promise<PoolView> {
   const cfg = loadConfig()
   const state = loadConsoleState()
-  const course = courseOverride || effectiveCourse(state, discoverCourses())
-  if (fresh) poolProbeCache.clear()
+  const course = effectiveCourse(state, discoverCourses())
+  if (fresh) {
+    poolProbeCache.clear()
+    // ★ 手动刷新也不能吃聚合的进程内 memo（那是给「稳态重扫节奏」用的，不是给
+    //   「现在就给我新的」用的）——否则 `?fresh=1` 会静默给出最多 30s 前的一份历史。
+    invalidateNodeHistoryMemo()
+  }
   const p = await getPoolProbes(cfg)
-  return assemblePoolView(cfg, course, p)
+  return assemblePoolView(cfg, course, p, days)
 }
 
 /** **结构现算 ⊕ 探测取自缓存**：节点行/顺序、`enabled`（disabled 行的 status/无 ping）、local 槽数
@@ -210,14 +221,17 @@ export async function buildPoolView(fresh = false, courseOverride?: string): Pro
  *
  *  探测列（enabled 节点的 status/完成率/版本、selfStatus…）允许粗一个重算周期：它们本来就是
  *  “上一次探测的结论”。`cachedAt` 仍是**探测层**的时刻（客户端拿它判断重算何时落地）。 */
-function assemblePoolView(cfg: RlConfig, course: string, p: PoolProbes): PoolView {
+function assemblePoolView(cfg: RlConfig, course: string, p: PoolProbes, days: string): PoolView {
+  // ★ 切天零重算：`p.agg` 是**全量**（与窗口无关，探测层缓存），这里只做纯投影。
+  const w = resolveWindow(days, Date.now(), p.agg.epochMs)
+  const proj: WindowAggregate = projectWindow(p.agg, w)
   const nodes: NodeHistoryRow[] = cfg.nodes.map((n) => {
-    const h = p.agg.hist.get(n.id) ?? emptyHistory()
+    const h = proj.hist.get(n.id) ?? emptyHistory()
     const probe = p.pingById.get(n.id)
-    return nodeHistoryRow(n, h, p.agg, probe?.ping ?? null, probe?.ms ?? null, p.hash)
+    return nodeHistoryRow(n, h, probe?.ping ?? null, probe?.ms ?? null, p.hash)
   })
 
-  const localH = p.localHist
+  const localH = proj.hist.get('local') ?? emptyHistory()
   const slots = Number(cfg.rl.local_slots)
   const local: NodeHistoryRow = {
     id: 'local',
@@ -233,11 +247,9 @@ function assemblePoolView(cfg: RlConfig, course: string, p: PoolProbes): PoolVie
     pingMs: null,
     ok: localH.ok,
     fail: localH.fail,
-    contrib: localH.lastIterOk,
-    contribRollout: localH.contribRollout,
-    contribEval: localH.contribEval,
-    lastIter: localH.lastIter,
-    globalMaxIt: p.agg.globalMaxIt,
+    winRollout: localH.winRollout,
+    winEval: localH.winEval,
+    lastContrib: localH.lastContrib,
     avgElapsedSec: localH.avgElapsedSec,
     avgWallSec: localH.avgWallSec,
     lastOkTs: localH.lastOkTs,
@@ -249,8 +261,9 @@ function assemblePoolView(cfg: RlConfig, course: string, p: PoolProbes): PoolVie
   return {
     cachedAt: p.at,
     course,
-    epochMs: p.agg.epochMs,
-    activeFlow: p.agg.activeFlow,
+    epochMs: proj.epochMs,
+    sources: proj.sources,
+    window: { key: w.key, label: w.label, startMs: w.startMs, endMs: w.endMs },
     nodes,
     local,
     selfStatus: p.selfStatus,
@@ -284,7 +297,6 @@ async function computePoolProbes(cfg: RlConfig): Promise<PoolProbes> {
     at: Date.now(),
     agg,
     pingById: new Map(probes.map(({ n, ping, ms }) => [n.id, { ping, ms }])),
-    localHist: agg.hist.get('local') ?? emptyHistory(),
     hash,
     selfStatus: await fetchSelfStatus(cfg),
   }
