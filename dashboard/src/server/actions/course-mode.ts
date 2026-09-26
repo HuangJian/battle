@@ -28,6 +28,7 @@
 
 import { loadConfig } from '../../core/config'
 import type { RlConfig } from '../../core/types'
+import { courseEnabled } from '../../stack/courses'
 import { hubCandidates, hubSetCourseMode } from '../../stack/hub-admin'
 import {
   TASK_BUNDLE_BUSY_KEY,
@@ -291,6 +292,13 @@ async function pushModeWithRetry(
   return last
 }
 
+/** 回灌的产出：`skipped` = 意图仍在、但**没推**的课（见 `restoreCourseModes`）。 */
+export interface RestoreResult {
+  restored: number
+  failed: string[]
+  skipped: string[]
+}
+
 /** 起 hub 后回灌全部意图（幂等；hub 不可达只如实报告，不抛）。
  *
  *  回灌**两种模式都发**（不是只发 offline）：控制台的意图是权威的——hub 可能被以别的
@@ -300,31 +308,47 @@ async function pushModeWithRetry(
  *  而 hub 的课程表是扫盘发现的，磁盘事实/扫描都可能晚一两拍。此前是单发：偏巧落在发现之前
  *  的那一门课意图就静默失配（真机实测三门里的一门）。重试耗尽仍**不是失败**（意图已落盘，
  *  且 hub 侧现在也会在 mode POST 时按需真扫），只是如实报进 `failed`。
- */
+ *
+ *  ★ 2026-09-26（用户报障「起 hub 等很久，像是把停掉的历史课都扫了一遍」）：**只回灌已开课的
+ *  课程**（判据 = 开课标记，`stack/courses.ts::courseEnabled`）——与 hub 自己的认课判据同源
+ *  （`remote/hub/queue_discover.py::_course_dir_live` 与 `_serves_course` 都要求这个标记）。
+ *  意图表是只增的（开课、停课、热切都往里写），停在 `tmp/` 下的历史课会永久留着一份意图，
+ *  而 hub 对**没有标记**的课按设计必回 400 ⇒ 每一次回灌都为它们烧掉整段有界重试
+ *  （3× 首试 + 2×2s ≈ 4s/门，串行）——真机实测 11 门停掉的课 = 起 hub 白等 ~44s，且摘要里
+ *  刷出一串「失败 x20-…」，看起来像坏了。这些意图**没有丢**（仍在 `courseModes` 里，
+ *  `skipped` 只是「这一拍没推」），开课时 `openCourse` 会按弹窗选中的模式重新下发。 */
 export async function restoreCourseModes(
   cfg: RlConfig,
   only?: string,
   retry: ModeRetry = {},
-): Promise<{ restored: number; failed: string[] }> {
+): Promise<RestoreResult> {
   const modes = readCourseModes()
   const failed: string[] = []
+  const skipped: string[] = []
   let restored = 0
   for (const course of Object.keys(modes).sort()) {
+    if (!courseEnabled(course)) {
+      skipped.push(course)
+      continue
+    }
     const err = await pushModeWithRetry(cfg, course, modes[course], only, retry)
     if (err) failed.push(`${course}: ${err}`)
     else restored += 1
   }
-  return { restored, failed }
+  return { restored, failed, skipped }
 }
 
-/** 回灌结果 → 一行摘要（无意图 → 空串：调用方不要为「什么都没做」编文案）。 */
+/** 回灌结果 → 一行摘要（无意图 / 无疑可推 → 空串：调用方不要为「什么都没做」编文案）。 */
 export async function restoreCourseModesNote(
   cfg: RlConfig,
   only?: string,
   retry: ModeRetry = {},
 ): Promise<string> {
-  const { restored, failed } = await restoreCourseModes(cfg, only, retry)
+  const { restored, failed, skipped } = await restoreCourseModes(cfg, only, retry)
   if (restored === 0 && failed.length === 0) return ''
   const head = `已回灌 ${restored} 门课的离线/在线意图`
-  return failed.length ? `${head}；失败 ${failed.join('、')}` : head
+  // 跳过的课**要说出来**（不静默）：它们是「有意图、但本拍不该推」的那批（多为停掉的历史课），
+  // 不说清会让操作员以为回灌漏了课。
+  const skip = skipped.length ? `跳过 ${skipped.length} 门未开课（意图保留，开课即下发）` : ''
+  return [head, skip, failed.length ? `失败 ${failed.join('、')}` : ''].filter(Boolean).join('；')
 }

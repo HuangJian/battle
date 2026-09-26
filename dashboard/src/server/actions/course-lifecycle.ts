@@ -27,7 +27,13 @@ import { readJsoncFile } from '../../core/jsonc'
 import { curriculaDir, REPO_ROOT, tmpLogsDir } from '../../core/paths'
 import { validateCourseName } from '../../core/slots'
 import type { RolloutSrcMode, TrainMode } from '../../core/types'
-import { isBcCourse, resolveArchivedSeedPath, seedWeightsFromBc } from '../../stack/courses'
+import {
+  COURSE_ENABLE_MARKER,
+  courseEnableMarkerPath,
+  isBcCourse,
+  resolveArchivedSeedPath,
+  seedWeightsFromBc,
+} from '../../stack/courses'
 import { pruneLegacyCourseKnobs } from '../../stack/course-knobs'
 import { kickstartReceipt } from '../../stack/kickstart-receipt'
 import { pairedSeedReceipt } from '../../stack/paired-seed-receipt'
@@ -108,26 +114,10 @@ export function declaredCourseIters(course: string): number | null {
 }
 
 // ────────────────────────── 开课标记（发现判据的显式闸） ──────────────────────────
-
-/** 「已开课」标记文件名（**必须与 python 侧 `remote/protocol.py::COURSE_ENABLE_MARKER` 同名**）。
- *
- *  为什么需要它（2026-09-20 用户报障）：「共享 trainer 是发现式的」+「tmp/ 下堆着几十门历史课
- *  的账本」⇒ 进程一启动就把**所有历史课**一起拉进训练（实测：起 trainer 后控制台列出 21 门
- *  「正在训练」）。用户口径：「课程开训需要用户手动开启」⇒ 课程表 = 账本 ∧ **开课标记**；
- *  训练侧与 hub 的发现判据都加这一道闸（`rl/loop_plan.enabled_courses`、`_course_dir_live`）。
- *  标记与账本同住课程目录：一个判据、一处位置，开/停课各是一次文件操作（不涉及共享 JSON 的
- *  读-改-写竞态），且控制台重启不丢「哪几门开着」。 */
-export const COURSE_ENABLE_MARKER = 'training-enabled.txt'
-
-/** 本课的开课标记路径（`<traj-root>/<课>/training-enabled.txt`）。 */
-export function courseEnableMarkerPath(course: string): string {
-  return path.join(tmpLogsDir(), course, COURSE_ENABLE_MARKER)
-}
-
-/** 这门课是否已开课（标记存在）——与控制台总览/按钮同判据。 */
-export function courseEnabled(course: string): boolean {
-  return !!course && existsSync(courseEnableMarkerPath(course))
-}
+//
+// 判据本体（`COURSE_ENABLE_MARKER` / `courseEnableMarkerPath` / `courseEnabled`）住
+// `stack/courses.ts`——回灌（`course-mode.ts`）也要读它，而本文件已 import `course-mode`
+// （见文件头），判据留在这里会让回灌反向 import 成环。语义与「为什么需要它」的全文见该处。
 
 // ────────────────────────── 课程准备（发现事实） ──────────────────────────
 

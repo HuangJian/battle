@@ -55,12 +55,12 @@ writeFileSync(
 )
 
 import {
-  COURSE_ENABLE_MARKER,
   courseRunnerFacts,
   openCourse,
   prepareCourseForOpen,
   stopCourse,
 } from '../src/server/actions/course-lifecycle'
+import { COURSE_ENABLE_MARKER } from '../src/stack/courses'
 import { readLoopControl, setCoursePaused } from '../src/server/actions/loop-control'
 import * as actions from '../src/server/actions'
 

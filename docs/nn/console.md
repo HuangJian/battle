@@ -7,6 +7,47 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §17 起 hub 很慢：回灌把**停掉的历史课**也逐课重试（2026-09-26）
+
+用户报障：「dashboard 上启动 trainer/hub 需要等很久，似乎是以前停掉的训练课程都还要扫一遍？」
+现场回执停在 `hubServer` 那一步，并刷出一串 `失败 x20-clutch: 需要合法 course（[]）与 mode(...)`
+（连同 `x20-demo-mix` / `x20-dodge-l1` / `x20-firstkill` … 共 11 门）。
+
+### 根因：不是「扫盘慢」，是**回灌按只增的意图表全量推**
+
+`courseModes`（console-state）是**只增**表：开课写、停课写（`stopCourse` 推 offline 时也会落一份）、
+热切写 ⇒ 停在 `tmp/` 下的历史课**永久**留着一份意图。而 `restoreCourseModes`（R3-2 的起 hub 回灌，
+挂在 `startComponent('hubServer')` 的两个分支上、**同步 await**）逐条把全部意图推给 hub。
+
+hub 的认课判据是**开课标记**（`remote/hub/queue_discover.py::_course_dir_live` 与 `_serves_course`
+都要求 `training-enabled.txt`）：没标记 ⇒ 按设计**必回** 400。于是每一门停掉的课都白烧整段有界重试
+（`pushModeWithRetry`：首试 + 2 次重试 × 2s ≈ **4s/门**，**串行**）——11 门 ≈ **44s** 纯 sleep，
+外加 33 次必然被拒的 POST 和一串看起来像坏了的「失败 x20-…」。
+
+实盘对账（`tmp/*/training-enabled.txt`）：**标记存在**的两门（`x20-dodge-l3d2`、`x20-steady-cont`）
+回灌成功，其余 11 门全失败——与报障日志一一对应。
+
+### 修法：回灌的输入集与 hub 的认课判据**同源**
+
+`restoreCourseModes` **只回灌已开课的课程**（`stack/courses.ts::courseEnabled`）；未开课的进
+`RestoreResult.skipped`（**不是失败**），摘要如实写「跳过 N 门未开课（意图保留，开课即下发）」。
+意图一个字不丢（仍在 `courseModes` 里，`stateView.courseModeIntents` 照旧供漂移徽标用），真正
+开课时 `openCourse` 按弹窗选中的模式重新下发——与「开课标记才是 hub 的认课闸」这条既有口径一致。
+
+判据本体从 `server/actions/course-lifecycle.ts` 搬到 `stack/courses.ts`（该文件头写着它是
+「课程域共享判据、不断环」的家）：`course-lifecycle` 已 import `course-mode`，回灌要读标记只能
+反向 import ⇒ 成环，故判据下沉。
+
+### 不改什么
+
+* **有界重试原样保留**：它是 2026-09-23 真机事故（新开课 hub 还没扫到就回灌）的解药，见 §14/§36
+  ——只为省时间砍掉它 = 那条事故复发。
+* 停课**不下架**意图（`stopCourse` 仍写 offline 供 hub 立即收闸）；不在回灌里用
+  `GET /admin/courses` 反查 hub 课程表（会把「发现时序」竞态引回回灌路径）。
+
+决策条目：`DECISIONS.md §2026-09-26-hub-mode-restore-enabled-only`；门禁：dashboard
+`tests/course-mode.test.ts`（未开课 ⇒ 零 POST 零重试；跳过如实上摘要且不算失败）。
+
 ## §16 节点统计与课程解耦：合所有流 + 按天窗口 + `it` 只作内部过滤器（2026-09-26）
 
 「节点是机群级资产」这句话控制台早就写在注释里（`/api/pool` “没有任何按课程的东西”），但数据层

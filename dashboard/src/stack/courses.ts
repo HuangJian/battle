@@ -10,7 +10,13 @@
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'fs'
 import path from 'path'
 import { readJsoncFile } from '../core/jsonc'
-import { archiveCoursesDir, curriculaDir, REPO_ROOT, weightsArchiveDir } from '../core/paths'
+import {
+  archiveCoursesDir,
+  curriculaDir,
+  REPO_ROOT,
+  tmpLogsDir,
+  weightsArchiveDir,
+} from '../core/paths'
 
 /** 课程 BC 种子路径（§384）：读课程 jsonc 的 `bc` 字段（相对仓库根解析）。
  *
@@ -54,6 +60,32 @@ export function isBcCourse(course: string): boolean {
   } catch {
     return false
   }
+}
+
+// ────────────────────────── 开课标记（发现判据的显式闸） ──────────────────────────
+
+/** 「已开课」标记文件名（**必须与 python 侧 `remote/protocol.py::COURSE_ENABLE_MARKER` 同名**）。
+ *
+ *  ★ 2026-09-26 从 `server/actions/course-lifecycle.ts` 搬到这里：回灌（`course-mode.ts`）也要
+ *  读它，而 `course-lifecycle` 已 import `course-mode`（反向 import 成环）——本模块是仓库里
+ *  约定的「课程域共享判据、不断环」的家（文件头注释同口径）。
+ *
+ *  为什么需要它（2026-09-20 用户报障）：「共享 trainer 是发现式的」+「tmp/ 下堆着几十门历史课
+ *  的账本」⇒ 进程一启动就把**所有历史课**一起拉进训练（实测：起 trainer 后控制台列出 21 门
+ *  「正在训练」）。用户口径：「课程开训需要用户手动开启」⇒ 课程表 = 账本 ∧ **开课标记**；
+ *  训练侧与 hub 的发现判据都加这一道闸（`rl/loop_plan.enabled_courses`、`_course_dir_live`）。
+ *  标记与账本同住课程目录：一个判据、一处位置，开/停课各是一次文件操作（不涉及共享 JSON 的
+ *  读-改-写竞态），且控制台重启不丢「哪几门开着」。 */
+export const COURSE_ENABLE_MARKER = 'training-enabled.txt'
+
+/** 本课的开课标记路径（`<traj-root>/<课>/training-enabled.txt`）。 */
+export function courseEnableMarkerPath(course: string): string {
+  return path.join(tmpLogsDir(), course, COURSE_ENABLE_MARKER)
+}
+
+/** 这门课是否已开课（标记存在）——与控制台总览/按钮同判据。 */
+export function courseEnabled(course: string): boolean {
+  return !!course && existsSync(courseEnableMarkerPath(course))
 }
 
 /** 按课程播种初始权重（console 与 hub 双路的实际 seeding 路径，DoD F-B6）。

@@ -11,7 +11,7 @@
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'bun:test'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 
@@ -19,6 +19,10 @@ const DIR = mkdtempSync(path.join(os.tmpdir(), 'bcity-cmode-'))
 process.env.BCITY_CONSOLE_STATE = path.join(DIR, 'console-state.json')
 process.env.BCITY_REGISTRY_FILE = path.join(DIR, 'registry.json')
 process.env.BCITY_RL_CONFIG = path.join(DIR, 'rl-config.json')
+// ★ 2026-09-26：回灌**只对已开课（开课标记存在）的课程**推模式（判据 = 开课标记，
+// 与 hub 自己的认课判据同源）⇒ 本套件必须把 traj 根重定向，否则回灌会去读**仓根 tmp/**
+// 的真实标记（那正是被钉住的那条事故的另一半）。
+process.env.BCITY_TMP_LOGS_DIR = path.join(DIR, 'traj')
 // ★ 2026-09-25：切离线会顺手导任务包（真起 run_rl 子进程）。本套件钉的是「意图落盘 +
 // 回灌」，不该被导出副作用牵着走——置逃生阀（导出自身的规则由 course-mode-bundle 套件钉）。
 process.env.BCITY_NO_AUTO_TASK_BUNDLE = '1'
@@ -66,6 +70,15 @@ const courseRow = (course: string): Record<string, unknown> => {
   return cfg.courses?.[course] ?? {}
 }
 
+/** traj 根（`BCITY_TMP_LOGS_DIR` 重定向后的那份）。 */
+const TRAJ = process.env.BCITY_TMP_LOGS_DIR as string
+
+/** 把一门课置成**已开课**（写开课标记）——回灌只对这类课推模式（2026-09-26）。 */
+const enable = (course: string): void => {
+  mkdirSync(path.join(TRAJ, course), { recursive: true })
+  writeFileSync(path.join(TRAJ, course, 'training-enabled.txt'), '', 'utf-8')
+}
+
 interface Call {
   url: string
   method: string
@@ -104,6 +117,9 @@ beforeEach(() => {
   saveConsoleState({ courseModes: {}, courseRolloutSrc: {} })
   // 每例从「干净课程表」起步：L1 之后开关会写 rl-config，上例的残留不许漏进下一例。
   writeRlConfig({})
+  // 开课标记同理（回灌按它筛课）：每例从「一门都没开课」起步。
+  rmSync(TRAJ, { recursive: true, force: true })
+  mkdirSync(TRAJ, { recursive: true })
 })
 
 describe('setCourseMode（热切 + 落意图）', () => {
@@ -176,13 +192,14 @@ describe('setCourseMode（热切 + 落意图）', () => {
 describe('restoreCourseModes（起 hub 后回灌）', () => {
   it('两种模式都发（只补 offline 会让「我点过在线」失效）', async () => {
     saveConsoleState({ courseModes: { c5: 'offline', c6: 'online' } })
+    enable('c5')
+    enable('c6')
     const r = await restoreCourseModes({
       version: 1,
       nodes: [],
       rl: { hub_port: 18787, remote_token: 'tok' },
     } as never)
-    expect(r.restored).toBe(2)
-    expect(r.failed).toEqual([])
+    expect(r).toEqual({ restored: 2, failed: [], skipped: [] })
     const urls = calls.map((c) => c.url).sort()
     expect(urls[0]).toContain('course=c5&mode=offline')
     expect(urls[1]).toContain('course=c6&mode=online')
@@ -190,6 +207,7 @@ describe('restoreCourseModes（起 hub 后回灌）', () => {
 
   it('全部失败：逐课点名，摘要含「失败」（不谎报已回灌）', async () => {
     saveConsoleState({ courseModes: { c5: 'offline' } })
+    enable('c5')
     mode = 'reject'
     const note = await restoreCourseModesNote(
       {
@@ -209,18 +227,21 @@ describe('restoreCourseModes（起 hub 后回灌）', () => {
     // 三门离线课各自靠开课时那次重试去赌发现时机，**恰有一门输掉**（最后一次重试与发现
     // 同一秒）⇒ 该课静默留在 online，面板一路显示「在训/切离线」。回灌必须自己重试。
     saveConsoleState({ courseModes: { c5: 'offline' } })
+    enable('c5')
     rejectFirst = 2 // 前两次 400，第三次被接受
     const r = await restoreCourseModes(
       { version: 1, nodes: [], rl: { hub_port: 18787, remote_token: 'tok' } } as never,
       undefined,
       { attempts: 3, delayMs: 0 },
     )
-    expect(r).toEqual({ restored: 1, failed: [] })
+    expect(r).toEqual({ restored: 1, failed: [], skipped: [] })
     expect(calls).toHaveLength(3)
   })
 
   it('★2026-09-23：hub 连不上 ⇒ **不重试**（白等 N×2s 只让「起 hub」变慢，不会因为等而好）', async () => {
     saveConsoleState({ courseModes: { c5: 'offline', c6: 'online' } })
+    enable('c5')
+    enable('c6')
     mode = 'throw'
     const r = await restoreCourseModes(
       { version: 1, nodes: [], rl: { hub_port: 18787, remote_token: 'tok' } } as never,
@@ -240,6 +261,45 @@ describe('restoreCourseModes（起 hub 后回灌）', () => {
     } as never)
     expect(note).toBe('')
     expect(calls).toHaveLength(0)
+  })
+
+  // ── ★2026-09-26 用户报障：起 hub 等很久（像是把停掉的历史课都扫了一遍）──
+  it('★2026-09-26：未开课（无标记）的意图 ⇒ **零 POST、零重试**（历史课不再拖慢起 hub）', async () => {
+    // 现场：`courseModes` 是只增表，停在 tmp/ 下的历史课永久留着一份意图，而 hub 对
+    // **没有开课标记**的课按设计必回 400 ⇒ 回灌为每门课白烧整段有界重试（3×2s ≈ 4s），
+    // 真机 11 门 = 起 hub 白等 ~44s，摘要里还刷出一串「失败 x20-…」。回灌只该推**已开课**的。
+    saveConsoleState({
+      courseModes: { 'x20-clutch': 'offline', 'x20-steady': 'offline', 'x20-live': 'online' },
+    })
+    enable('x20-live') // 只有这一门真开着
+    rejectFirst = 0
+    const r = await restoreCourseModes(
+      { version: 1, nodes: [], rl: { hub_port: 18787, remote_token: 'tok' } } as never,
+      undefined,
+      { attempts: 3, delayMs: 0 },
+    )
+    expect(r).toEqual({ restored: 1, failed: [], skipped: ['x20-clutch', 'x20-steady'] })
+    expect(calls).toHaveLength(1) // 未开课的两门一个字都没打
+    expect(calls[0].url).toContain('course=x20-live')
+    // 意图**没丢**：跳过的课仍在意图表里（开课时按弹窗模式下发）。
+    expect(readCourseModes()).toEqual({
+      'x20-clutch': 'offline',
+      'x20-steady': 'offline',
+      'x20-live': 'online',
+    })
+  })
+
+  it('★2026-09-26：跳过的课在摘要里如实说（不静默丢），且**不算失败**', async () => {
+    saveConsoleState({ courseModes: { 'x20-clutch': 'offline', 'x20-live': 'online' } })
+    enable('x20-live')
+    const note = await restoreCourseModesNote(
+      { version: 1, nodes: [], rl: { hub_port: 18787, remote_token: 'tok' } } as never,
+      undefined,
+      { attempts: 1, delayMs: 0 },
+    )
+    expect(note).toContain('已回灌 1 门课')
+    expect(note).toContain('跳过 1 门未开课')
+    expect(note).not.toContain('失败')
   })
 })
 
@@ -313,6 +373,7 @@ describe('★2026-09-24 L1：`pushCourseMode`（hub+意图的原语）绝不动 
 
   it('回灌（restoreCourseModes）同规：它也不是用户动作，不该改训练配置', async () => {
     saveConsoleState({ courseModes: { 'x20-firstkill': 'offline' } })
+    enable('x20-firstkill')
     const r = await restoreCourseModes({
       version: 1,
       nodes: [],

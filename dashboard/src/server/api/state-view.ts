@@ -3,7 +3,8 @@ import { existsSync } from 'fs'
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
 import type { ConsoleStateView, MetricsView } from '../../web/view'
-import { courseEnableMarkerPath, loadConsoleState, readCourseModes } from '../actions'
+import { courseEnableMarkerPath, isBcCourse } from '../../stack/courses'
+import { loadConsoleState, readCourseModes } from '../actions'
 import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/specs'
 import { readIterMetrics, readPairedReferee } from '../iters'
 import { readArchived } from './archive'
@@ -14,7 +15,6 @@ import { buildOverview, buildWorkerRegistry, getHubAdmin, sharedTrainerAlive } f
 import { detectPpoQueueStall } from './ppo-queue'
 import { readTunnelAbRuns } from './tunnel-ab'
 import { getSlowSnapshot } from './snapshot-refresher'
-import { isBcCourse } from '../../stack/courses'
 
 export async function buildStateView(courseOverride?: string): Promise<ConsoleStateView> {
   const cfg = loadConfigSafe()
