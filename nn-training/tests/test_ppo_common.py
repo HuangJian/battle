@@ -9,6 +9,9 @@
   5) chunk_episodes：按 mb 切块（2026-09-23 起全部恰为 mb，尾部 n%mb 丢弃）、键保持；
   6) checkpoint RNG 往返：_pack/_unpack 后 np.random 状态精确重建；
   7) discover_shards / load_shard_fields：marker 过滤 + 零拷贝 astype 字段表。
+  8) demo_index：复用**同一张设备缓冲**（XLA 图签名恒定）、数值与朴素 numpy 索引逐位相同、
+     buf=None（非 demo 路径）原样返回——原 test_xla_step_diag.py::TestDemoIndexBuffer，
+     2026-09-26 随「该文件的 torch 用例归位到 ppo/common 的家」移入。
 
 运行（经统一启动器进入 venv）：
   python test_ppo_common.py
@@ -423,3 +426,34 @@ def test_ppo_update_kickstart_bites_when_armed() -> None:
     assert any(
         not torch.equal(p, q) for p, q in zip(_kick_state(m1), _kick_state(m2), strict=True)
     ), "缰绳应改变更新轨迹"
+
+
+def test_demo_index_reuses_the_same_tensor_and_keeps_values() -> None:
+    """demo 混 batch 的索引必须走**复用的设备张量**（否则 XLA 每步重编译）。
+
+    真机定案（2026-09-22）：把 host numpy 索引直接交给高级索引 ⇒ 同一批 B/flags 下连续两步
+    各 `新=2`（新编译）；复用同一设备缓冲 / 先 mark 物化 ⇒ `新=0`。离线课程 8~10s/步就是
+    这个（单步 2 次新编译 ≈11s；编译命中的那一步 0.31s）。
+    """
+    buf = torch.zeros(3, dtype=torch.int64)
+    a = ppo_common.demo_index(buf, np.array([2, 0, 1], dtype=np.int64))
+    assert a is buf, "返回的必须是那张缓冲本身（图签名靠它恒定）"
+    assert a.tolist() == [2, 0, 1]
+    b = ppo_common.demo_index(buf, np.array([1, 1, 0], dtype=np.int64))
+    assert b is buf, "第二次调用也不得新建张量"
+    assert b.tolist() == [1, 1, 0]
+
+
+def test_demo_index_selection_matches_plain_numpy_indexing() -> None:
+    """数值逐位相同：换索引来路不得抽到别的样本。"""
+    bank = torch.arange(15, dtype=torch.float32).reshape(5, 3)
+    buf = torch.zeros(4, dtype=torch.int64)
+    for _ in range(5):
+        idx = np.random.randint(0, 5, size=4).astype(np.int64)
+        assert torch.equal(bank[ppo_common.demo_index(buf, idx)], bank[idx])
+
+
+def test_demo_index_none_buffer_returns_the_numpy_index() -> None:
+    """非 demo 路径（buf=None）行为与接线前逐字节一致。"""
+    idx = np.array([3, 1], dtype=np.int64)
+    assert ppo_common.demo_index(None, idx) is idx

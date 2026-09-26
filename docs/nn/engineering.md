@@ -16,6 +16,69 @@
 
 ---
 
+## §29 免 torch 测试路径：把「判据」与「torch 胶水」拆开（2026-09-26，item 5·8·9·6）
+
+### 一句话
+
+nn-training 的 python 门禁里有 31 个测试文件因 `import torch`（或运行期延迟 import）**无法在
+没有 torch 的机器/镜像上跑**；本次把四处「混装模块」的**纯判据半边**抽成同目录孪生模块，测试
+直指孪生模块 ⇒ torch 屏蔽下 **2836 → 2869 passed**（失败 21 → 13、收集错误 18 不变），
+内置/无 GPU 镜像上少拖一整包 torch。同时给 `check()` 家族的静默绿补上守卫（见下）。
+
+**收益是覆盖与可移植性，不是墙钟**。co-accounting 实测（`/usr/bin/time`，门禁同款 env，
+背靠背配对）：单次 `-n12` **33s/35s**；`torch -n1 ‖ notorch -n11` **40s**；
+`torch -n4 ‖ notorch -n8` **41s/41s**；`-n1‖-n12` 41s。机制两条：① 套件墙钟由**免 torch 的重
+用例**决定（免 torch 集单跑 `-n12` 31.1s ≈ 全量 31.0s）⇒ 为 torch 单开池只多付一次 startup +
+每 worker 一次 torch 冷 import；② 拆分把关键路径变成「较慢那一池 + startup」。故**默认门禁不拆**，
+理由写进 `tools/githook/nn-python-gate.sh` 头注（含「为何 12 而非 8」：`-n8` 时 8 个物理核只忙
+4.6~5.1，套件不是 CPU-bound；`-n12` 填满空闲核，`-n16` 只多烧启动 CPU）。
+
+### 拆了什么（2026-09-26，四个孪生模块）
+
+| 孪生模块（免 torch） | 从哪搬出 | 判别与约束 |
+|---|---|---|
+| `ppo/np_core.py`（先例） | `ppo/common.py` | GAE / shard 发现装载 / episode 骨架 / XLA 文本解析 / numpy RNG 打包 |
+| `data/weights_meta.py` | `data/weights_io.py` | JSON 清单强校验（format/schema_major/params）+ 最新版本化权重发现 + 覆盖率常量 |
+| `data/shard_split.py` | `data/dataset.py` | shard 级切分；**顺序仍由调用方 `perm` 给**（`torch.randperm` 未动）⇒ 切分逐字节不变 |
+| `train/device.py` | `train/bc.py` | `cuda-dp` 判据（2+ 卡真 DP / 单卡无卡响亮退化）；**CUDA 探针降成参数** |
+
+`data/dataset.py` 与 `ppo/common.py` / `data/weights_io.py` / `train/bc.py` **再导出**孪生模块的
+名字 ⇒ 既有调用点一行不改。用例侧同步归位：`test_weights_meta`（8）/ `test_shard_plan`（6）/
+`test_bc_device`（14）三个新文件全免 torch；`test_xla_step_diag.py` 整文件免 torch
+（它的 demo_index 三个张量用例搬去 `test_ppo_common.py`——`ppo/common.py` 才是张量的家）；
+接线锚留在需要真 torch 的那一侧（`test_weights_io` 断言 `load_weights_json` 真调了校验器、
+`test_bc_dp` 断言 `cuda-dp` → `torch.device("cuda")` 这条映射）。
+
+### 铁律：导入点与 monkeypatch 点随函数一起搬
+
+本会话踩了两次，两次都是**测试看着绿而没测到东西**：
+
+1. `load_episodes_common` 搬去 `ppo/np_core` 后，`test_log_diet` / `test_ppo_quota` 仍把
+   monkeypatch 打在 `ppo.common` 上——那是**静默空操作**（本仓 S16/S19/S27 记过三次同款）；
+2. `_XLA_CACHE_STATE` 的家在 `ppo/np_core`，测试却从 `ppo.common` `import`（再导出）⇒ 把 torch
+   拖回运行期，`test_xla_step_diag` 的两个 cache 用例在无 torch 机上必红。
+
+### 顺带：静默绿变红（item 5）
+
+10 个测试文件各自定义 `check()` + 模块级 `FAILS`，而全仓**没有一处** `assert not FAILS` ⇒
+`check()` 失败只打印、不影响退出码。新增 `conftest.py` 的 autouse `_no_silent_check_failures`
+（teardown 比对 `len(request.module.FAILS)` 是否增长）+ 自证文件 `test_conftest_check_guard.py`。
+它当场揭出 **3 处过期断言**（都是测试期望错、生产正确）：`test_terminal_stats` 的
+`kills_total` 4.0→3.0（去重保留 nSamples 最大者）、`test_run_rl_m1` 两处
+`kickstart_coef/_kickstart_startup_check` 在 it31 应为 **0.0**（`NEGLIGIBLE_COEF=1e-9` 已归零，
+`0.5**30=9.3e-10`）。
+
+另：`test_no_sleep_as_sync.py` 的墙上界守卫从 Name/Attribute 扩到 `Call` / `Subscript` +
+时长命名（`elapsed|wall|dt|took|duration|sec(s)?`）——此前 `_segment_seconds(...) < 0.2` 这类
+形态是盲区。
+
+**门禁**：`nn-python-gate.sh` 全绿（36s，ruff + mypy + pytest `-n12`）· 根 `bun run check` 绿。
+**测量方法**（可复现）：`PYTHONPATH=tmp/no_torch` 放一个 `torch/__init__.py` 直接
+`raise ImportError`，再按门禁同款 env 跑 `pytest tests/ e2e/ -o addopts="" -n 12 --timeout=60
+--maxfail=0`（必须清 addopts，否则 `-x` 会在第一个红处停）。
+
+---
+
 ## §28 神模块拆分第一步：`loop_steps` 的传输/发布簇搬进 `loop_transport`（2026-09-23，用户指令「重构 nn-training：降低耦合 / 复用代码 / 提可维护性」）
 
 ### 一句话

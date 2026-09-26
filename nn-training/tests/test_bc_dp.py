@@ -1,4 +1,4 @@
-"""train/bc.py 多卡（DataParallel）设备语义 + remote/worker._bc_device 透传测试。
+"""train/bc.py 多卡（DataParallel）设备语义 —— **需要真 torch 的那一半**。
 
 背景（2026-09-13 多卡确认）：云端 2+ GPU 时训练必须真用上多卡——
   * PPO：worker run_job 对 --device cuda-dp 包 DataParallel（既有实现，T4x2 实测 1.92×）；
@@ -6,7 +6,10 @@
     单卡/无卡响亮退化）+ `_bc_raw`（DP state_dict 的 "module." 前缀绝不进 weights.json）；
   * worker `_bc_device` 改为透传（不再代砍单卡）。
 
-全部 hermetic：torch.cuda.is_available/device_count 注入（真 torch，无 CUDA 也能测）；
+2026-09-26（item 6f）：**判据**（哪些读数解析成 cuda-dp/cuda/cpu、退化打不打行、透传与
+拒绝）已抽到顶层零 torch 的 `train/device.py` + `remote/bc_job.py`，判据用例在
+`tests/test_bc_device.py`（免 torch）。本文件只剩**必须真 torch** 的两件事：
+`torch.device` 的构造（含 `cuda-dp` → `torch.device("cuda")` 映射）与 `_bc_raw` 的前缀防线。
 DataParallel 可在 CPU 上构造（forward 才需要卡）。
 """
 
@@ -17,12 +20,18 @@ import torch
 
 import train.bc as bc_mod
 from models.core import NNPolicy
-from remote.worker import _bc_device
 
 # ------------------------------------------------------------------ _resolve_bc_device
+# 判据在 tests/test_bc_device.py（免 torch）；这里只钉「真探针接线 + torch.device 构造」。
 
 
-def test_resolve_cuda_dp_multi_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_maps_the_dp_name_onto_a_real_torch_device(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`cuda-dp` 不是合法 device type：名字留给日志/台账，`torch.device` 必须是 `cuda`。
+
+    这条也是「真 torch.cuda 探针真的接上了」的接线锚——判据那侧传的是替身探针。
+    """
     monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
     monkeypatch.setattr(torch.cuda, "device_count", lambda: 2)
     name, dev, use_dp = bc_mod._resolve_bc_device("cuda-dp")
@@ -30,32 +39,9 @@ def test_resolve_cuda_dp_multi_gpu(monkeypatch: pytest.MonkeyPatch) -> None:
     assert dev.type == "cuda"
 
 
-def test_resolve_cuda_dp_single_gpu_degrades_loud(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
-    name, dev, use_dp = bc_mod._resolve_bc_device("cuda-dp")
-    assert (name, use_dp) == ("cuda", False)
-    assert dev.type == "cuda"
-    assert "退化" in capsys.readouterr().out  # 响亮退化，不静默
-
-
-def test_resolve_cuda_dp_no_gpu_degrades_to_cpu(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
-    name, dev, use_dp = bc_mod._resolve_bc_device("cuda-dp")
-    assert (name, use_dp) == ("cpu", False)
-    assert dev.type == "cpu"
-    assert "退化" in capsys.readouterr().out
-
-
 @pytest.mark.parametrize("arg,expect", [("cuda", "cuda"), ("cpu", "cpu"), ("", "cpu")])
-def test_resolve_passthrough(
-    arg: str, expect: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+def test_resolve_passthrough_builds_a_matching_device(arg: str, expect: str) -> None:
+    """非 cuda-dp 路径原样成 `torch.device`，且不触发 CUDA 探针（没 monkeypatch 也不炸）。"""
     name, dev, use_dp = bc_mod._resolve_bc_device(arg)
     assert name == expect and use_dp is False
     assert dev.type == expect
@@ -85,19 +71,5 @@ def test_bc_raw_preserves_parameter_identity() -> None:
     assert bc_mod._bc_raw(dp) is model
 
 
-# ------------------------------------------------------------------ worker._bc_device 透传
-
-
-@pytest.mark.parametrize(
-    "arg,expect",
-    [("cuda-dp", "cuda-dp"), ("cuda", "cuda"), ("cpu", "cpu"), ("", "cpu")],
-)
-def test_worker_bc_device_passthrough(arg: str, expect: str) -> None:
-    assert _bc_device(arg) == expect
-
-
-def test_worker_bc_device_tpu_rejected() -> None:
-    import common.protocol
-
-    with pytest.raises(common.protocol.ProtocolError, match="cuda/cuda-dp"):
-        _bc_device("tpu")
+# worker._bc_device 的透传与 tpu/xla 拒绝已移到 tests/test_bc_device.py（免 torch）：
+# 那条路径（remote/bc_job._bc_device）本就不 import torch。

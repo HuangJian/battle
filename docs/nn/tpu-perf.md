@@ -373,8 +373,10 @@ B=1024:184步 累计墙钟 45s ← 0.17s/步
 **预期**：188 步从 ~35min 降到 ~1~3min（编译只在前几步付一次）；`PPO_XLA_DIAG` 行应从
 第二个 chunk 起就 `新=0, 命中>0`。**这条修法也让「step 4 那一步的 0.31s」成为常态而不是例外。**
 
-测试：`tests/test_xla_step_diag.py`（复用同张量/数值与朴素 numpy 索引逐位相同/None 路径不变/
-engine 源码守线「不得再 `demo_t[...][_didx]`」）。
+测试：`tests/test_ppo_common.py`（复用同张量/数值与朴素 numpy 索引逐位相同/None 路径不变——
+2026-09-26 从 `tests/test_xla_step_diag.py` 移入：那三个用例要真张量，归位到 `ppo/common.py`
+的家，好让诊断文件整文件免 torch）+ `tests/test_xla_step_diag.py` 的 engine 源码守线
+「不得再 `demo_t[...][_didx]`」。
 
 已知噪声（记录备查）：XLA 的 metrics 计数器会被重置，所以 `编译=−0.56s`、`追踪=−0.825s`
 这类**负 delta** 会偶发出现（探针 A#1 实录）——判读只看 `新=` 与墙钟，量级上不影响结论。

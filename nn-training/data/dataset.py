@@ -45,6 +45,10 @@ from data.mirror import (  # noqa: F401  (re-export：既有调用点不变)
     _flip_direction,
     mirror_x,
 )
+
+# shard 级切分的**纯 numpy**实现（2026-09-26，item 6e）：本模块顶层必须 import torch，
+# 切分判据没必要连坐 —— 切分逻辑住 data/shard_split.py（免 torch），这里只调它。
+from data.shard_split import plan_shard_split, should_split_by_shards
 from schema import FIRE_DIM, MOVE_DIM
 
 
@@ -134,20 +138,16 @@ def make_loaders(
     n_val = int(n * val_split)
     gen = torch.Generator().manual_seed(seed)
     shard_ids = data.get("shard_ids")
-    n_shards = 0 if shard_ids is None else int(shard_ids.max()) + 1
-    if shard_ids is not None and n_shards >= 2:
-        # P2-6d：shard 级切分——val 取整 shard，样本数累计 ≥ n_val 即停
-        shard_sizes = [int((shard_ids == s).sum()) for s in range(n_shards)]
-        val_shards: list[int] = []
-        acc = 0
-        for s in torch.randperm(n_shards, generator=gen).tolist():
-            if val_shards and acc >= n_val:
-                break
-            val_shards.append(s)
-            acc += shard_sizes[s]
-        val_mask = np.isin(shard_ids, val_shards)
-        tr_idx = np.flatnonzero(~val_mask)
-        val_idx = np.flatnonzero(val_mask)
+    if should_split_by_shards(shard_ids):
+        # P2-6d：shard 级切分——val 取整 shard，样本数累计 ≥ n_val 即停。
+        # 抽 shard 的顺序仍是 torch 的 randperm（gen 的消费顺序不变 ⇒ 切分结果逐字节不变），
+        # 切分逻辑本身在 data/shard_split.py（免 torch，见那里的 docstring）。
+        assert shard_ids is not None  # should_split_by_shards 已排掉 None
+        tr_idx, val_idx = plan_shard_split(
+            shard_ids,
+            n_val,
+            torch.randperm(int(shard_ids.max()) + 1, generator=gen).tolist(),
+        )
         train_ds = _AugWrapper(data, tr_idx.tolist(), mirror_p, seed)
         val_ds = torch.utils.data.Subset(full, val_idx.tolist())
         # sizes 用**实际**切分大小（shard 级切分后 val 是整 shard，可能略超 n_val）

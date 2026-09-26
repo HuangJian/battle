@@ -27,8 +27,9 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # 这五个都是纯文本/字典解析，住在免 torch 的 ppo.np_core（2026-09-26 拆分）。
-# 本文件的 TestEngineWiring 里对 ppo.common 的 demo_index / _XLA_CACHE_STATE 仍是延迟 import，
-# 不影响收集期免 torch。
+# 2026-09-26（item 6b）：本文件**整文件免 torch** —— `_XLA_CACHE_STATE` 的家就在 np_core，
+# 此前从 ppo.common 取（导入再导出）会把 torch 拖进运行期；demo_index 的三个张量用例已搬到
+# `tests/test_ppo_common.py`（ppo/common.py 才是它的家）。
 from ppo.np_core import (
     _parse_xla_duration,
     xla_delta_str,
@@ -179,7 +180,7 @@ class TestPersistentCompileCache:
         import sys
         import types
 
-        from ppo.common import _XLA_CACHE_STATE
+        from ppo.np_core import _XLA_CACHE_STATE
 
         calls: list[str] = []
         fake_rt = types.ModuleType("torch_xla.runtime")
@@ -209,7 +210,7 @@ class TestPersistentCompileCache:
         import sys
         import types
 
-        from ppo.common import _XLA_CACHE_STATE
+        from ppo.np_core import _XLA_CACHE_STATE
 
         saved = {k: sys.modules.get(k) for k in ("torch_xla", "torch_xla.runtime")}
         sys.modules["torch_xla"] = types.ModuleType("torch_xla")
@@ -225,51 +226,6 @@ class TestPersistentCompileCache:
                     sys.modules[key] = val
             _XLA_CACHE_STATE.clear()
         assert "不可用" in msg and "initialize_cache" in msg
-
-
-class TestDemoIndexBuffer:
-    """demo 混 batch 的索引必须走**复用的设备张量**（否则 XLA 每步重编译）。
-
-    真机定案（2026-09-22）：把 host numpy 索引直接交给高级索引 ⇒ 同一批 B/flags 下连续两步
-    各 `新=2`（新编译）；复用同一设备缓冲 / 先 mark 物化 ⇒ `新=0`。离线课程 8~10s/步就是
-    这个（单步 2 次新编译 ≈11s；编译命中的那一步 0.31s）。
-    """
-
-    def test_reuses_the_same_tensor_and_keeps_values(self) -> None:
-        import numpy as np
-        import torch
-
-        from ppo.common import demo_index
-
-        buf = torch.zeros(3, dtype=torch.int64)
-        a = demo_index(buf, np.array([2, 0, 1], dtype=np.int64))
-        assert a is buf, "返回的必须是那张缓冲本身（图签名靠它恒定）"
-        assert a.tolist() == [2, 0, 1]
-        b = demo_index(buf, np.array([1, 1, 0], dtype=np.int64))
-        assert b is buf, "第二次调用也不得新建张量"
-        assert b.tolist() == [1, 1, 0]
-
-    def test_selection_is_identical_to_plain_numpy_indexing(self) -> None:
-        """数值逐位相同：换索引来路不得抽到别的样本。"""
-        import numpy as np
-        import torch
-
-        from ppo.common import demo_index
-
-        bank = torch.arange(15, dtype=torch.float32).reshape(5, 3)
-        buf = torch.zeros(4, dtype=torch.int64)
-        for _ in range(5):
-            idx = np.random.randint(0, 5, size=4).astype(np.int64)
-            assert torch.equal(bank[demo_index(buf, idx)], bank[idx])
-
-    def test_none_buffer_returns_the_numpy_index_unchanged(self) -> None:
-        """非 demo 路径（buf=None）行为与接线前逐字节一致。"""
-        import numpy as np
-
-        from ppo.common import demo_index
-
-        idx = np.array([3, 1], dtype=np.int64)
-        assert demo_index(None, idx) is idx
 
 
 class TestEngineWiring:

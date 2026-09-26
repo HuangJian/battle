@@ -57,6 +57,10 @@ from models.core import NNPolicy, param_count
 from models.student import PPOStudent, StudentNet
 from schema import OBS_SCHEMA_MAJOR
 
+# 设备串判据在 train/device.py（顶层零 torch，探针可注入 ⇒ 免 torch 可测）；
+# 本模块只剩「探针接线 + torch.device 构造」（2026-09-26，item 6f）。
+from train.device import resolve_bc_device
+
 
 def _resolve_bc_device(device: str) -> tuple[str, torch.device, bool]:
     """设备解析（BC 多卡 2026-09-13）：
@@ -67,21 +71,14 @@ def _resolve_bc_device(device: str) -> tuple[str, torch.device, bool]:
       * 其余（cuda / cpu / cuda:N）原样。
 
     → (规范化 device 串, torch.device, use_dp)。
+
+    判据住在 `train/device.py`（顶层零 torch，探针可注入 ⇒ `tests/test_bc_device.py`
+    不必 import torch；2026-09-26 item 6f）。本函数只做两件事：**把真探针接上去** +
+    把名字映成真的 `torch.device`——`cuda-dp` 不是合法 device type，多卡时必须是
+    `torch.device("cuda")`（由 `tests/test_bc_dp.py` 钉住），只有名字保留给日志/台账。
     """
-    s = str(device or "cpu").lower()
-    if s in ("cuda-dp", "dp"):
-        n = torch.cuda.device_count() if torch.cuda.is_available() else 0
-        if n > 1:
-            return "cuda-dp", torch.device("cuda"), True
-        print(
-            f"[train] WARNING: 请求 cuda-dp 但可见 {n} 张卡——退化为单卡 "
-            f"{'cuda' if n else 'cpu'}（与 remote/worker 的 cuda-dp 退化语义一致）",
-            flush=True,
-        )
-        if n:
-            return "cuda", torch.device("cuda"), False
-        return "cpu", torch.device("cpu"), False
-    return s or "cpu", torch.device(s or "cpu"), False
+    name, use_dp = resolve_bc_device(device)
+    return name, torch.device("cuda" if use_dp else name), use_dp
 
 
 def _bc_raw(model: torch.nn.Module) -> torch.nn.Module:

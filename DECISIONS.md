@@ -4104,3 +4104,34 @@ e2e 真起 bun ⇒ hermetic 层失约且门禁变慢 · 抄一份「哪个模式
 保留闸门等人下线节点（出路不存在，课程永远停车）。
 
 **违反后果**：向 pool 派发一局 ⇒ 该局标准开局 + 护栏剔除 + 波次凑不齐（无限波次）。
+
+## §2026-09-26-goalnn-notorch-half（2026-09-26，python 门禁的「免 torch 半边」拆分纪律 + 静默绿变红守卫）
+
+**背景**：nn-training 的 python 门禁把 ~3000 用例一次跑完；31 个测试文件因 `import torch`
+（或运行期延迟 import）无法在**没有 torch 的机器/镜像**上跑。拆分的收益是**可移植性 / 覆盖**
+（torch 屏蔽实测：本次 2836→**2869 passed**，失败 21→13、收集错误仍 18；门禁全量
+2987 passed / 3 skipped），**不是墙钟**：
+实测把 torch 集单独开池只会更慢（`torch -n1 ‖ notorch -n11` 40s > 单次 `-n12` 33s；机制 =
+套件墙钟由免 torch 的重用例决定，360 个 torch 用例本就落在 worker 空档里）⇒ 默认门禁**维持
+单次 `-n12`，不做两池拆分**（理由写进 `tools/githook/nn-python-gate.sh` 头注）。
+
+**拆分纪律（就近放 + 顶层零 torch + 原模块再导出）**：一个模块混装「纯 numpy/stdlib 判据」与
+「torch 张量胶水」时，把前者抽成**同目录**的孪生模块，原模块再导出 ⇒ 只测那一半的用例可直指
+孪生模块。已有先例 `data/mirror.py`、`ppo/np_core.py`；本次再四处：`data/weights_meta.py`
+（清单强校验 + 最新权重发现）、`data/shard_split.py`（shard 级切分；随机顺序仍由调用方的
+`perm` 给 ⇒ 切分逐字节不变）、`train/device.py`（`cuda-dp` 判据，**探针降成参数** ⇒ 不必
+`monkeypatch.setattr(torch.cuda, …)`）。
+
+**铁律（本会话踩了两次，会再犯）**：**导入点与 monkeypatch 点必须随函数一起搬到新家**。
+`load_episodes_common` 搬去 `np_core` 后，打在 `ppo.common` 上的 monkeypatch 成了**静默空操作**
+（`test_log_diet` / `test_ppo_quota`）；`_XLA_CACHE_STATE` 的家在 `np_core`，却从 `ppo.common`
+`import`（那只是再导出）⇒ 把 torch 拖回运行期（`test_xla_step_diag`）。判据：搬函数 =
+同时改 import 行、monkeypatch 目标、以及**只测那一半**的用例文件。
+
+**被否决**：① 门禁拆 torch 池 ‖ 免 torch 池（更慢，见上）；② 用 `pytest.importorskip` 静默
+skip torch 用例（掩盖覆盖；torch 真缺失时应当**红**）；③ 为省 torch 把 `demo_index` 搬进
+`np_core`（它是张量胶水，家就该在 `ppo/common.py`——只把它的**用例**搬到 `test_ppo_common.py`）。
+
+**违反后果**：从再导出点 import ⇒ torch 被拖回测试路径（拆分白做）；monkeypatch 打在旧家 ⇒
+静默失效，用例看着绿而根本没测到东西。
+—— 全文（逐项拆分理由 / 测量数据 / 守卫清单）→ `docs/nn/engineering.md` §29

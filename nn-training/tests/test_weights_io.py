@@ -6,6 +6,9 @@
 唯一线索是 stdout 一行 print。P0-4 修复：读入端强校验（format/schema_major）+ 加载
 端覆盖率两档门禁（<50% raise / <95% warn）。
 
+本文件需要真张量（往返/覆盖率/NaN/Inf），故保留顶层 `import torch`；**免 torch 的那一半**
+（清单校验的判据 + 覆盖率常量 + 最新权重发现）在 `tests/test_weights_meta.py`（2026-09-26）。
+
 实测覆盖率基线（2026-09-02）：
   PPOStudent ← StudentNet = 95.2%（合法 warm-start，value 头缺失）→ warn 不 raise
   PPOStudent ← NNPolicy   = 14.3%（错误族）                          → raise
@@ -25,8 +28,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from data.weights_io import (
-    COVERAGE_RAISE,
-    COVERAGE_WARN,
     load_state_into,
     load_weights_json,
     save_weights_json,
@@ -54,6 +55,22 @@ def _save_meta(tmp_path: Path, **meta_overrides) -> Path:
 
 
 # ---- 读入端强校验 ----
+# 校验器本身的判据（schema 不匹配 / 未知 format / 空 params / 正例 / 覆盖率常量）已搬到
+# `tests/test_weights_meta.py`（2026-09-26，item 6d：那半边是纯 stdlib + json，不该被
+# 本文件的 `import torch` 拖进 torch 测试路径）。本文件只留一条**接线锚**。
+
+
+def test_load_weights_json_runs_the_meta_validation(tmp_path: Path) -> None:
+    """接线锚：`load_weights_json` 必须把盘上的 meta 真的交给 weights_meta 的校验器。
+
+    判据只关心「那一步发生了」——具体哪些 meta 该拒在 test_weights_meta.py；没有这条，
+    哪天有人为省一次调用把校验摘掉，那边的用例照样全绿。
+    """
+    p = _save_meta(tmp_path, schema_major=OBS_SCHEMA_MAJOR - 1)
+    with pytest.raises(ValueError, match="schema_major"):
+        load_weights_json(str(p))
+
+
 def test_load_roundtrip_preserves_values(tmp_path: Path) -> None:
     """save → load 往返：张量逐值一致。"""
     p = tmp_path / "rt.json"
@@ -62,25 +79,6 @@ def test_load_roundtrip_preserves_values(tmp_path: Path) -> None:
     _meta, params = load_weights_json(str(p))
     for k, v in model.state_dict().items():
         torch.testing.assert_close(params[k], v)
-
-
-def test_load_schema_mismatch_raises(tmp_path: Path) -> None:
-    """schema_major ≠ 当前 → 拒绝加载（旧布局权重静默灌进新模型 = 逐字段错位）。"""
-    p = _save_meta(tmp_path, schema_major=OBS_SCHEMA_MAJOR - 1)
-    with pytest.raises(ValueError, match="schema_major"):
-        load_weights_json(str(p))
-
-
-def test_load_unknown_format_raises(tmp_path: Path) -> None:
-    p = _save_meta(tmp_path, format="not-nn-weights-json")
-    with pytest.raises(ValueError, match="format"):
-        load_weights_json(str(p))
-
-
-def test_load_empty_params_raises(tmp_path: Path) -> None:
-    p = _save_meta(tmp_path, params={})
-    with pytest.raises(ValueError, match="params"):
-        load_weights_json(str(p))
 
 
 # ---- 加载端覆盖率门禁 ----
@@ -123,14 +121,6 @@ def test_load_exact_family_full_match(tmp_path: Path) -> None:
     dst = StudentNet()
     load_state_into(dst, str(p))
     torch.testing.assert_close(dst.stem.weight, src.stem.weight)
-
-
-def test_coverage_constants_guard_the_legit_boundary() -> None:
-    """门禁常量必须保护合法 warm-start 边界（95.2% ≥ WARN ≥ RAISE），防未来误调。"""
-    assert COVERAGE_RAISE < 0.90 < COVERAGE_WARN
-    # PPOStudent←StudentNet 的覆盖率略高于 0.95（value 头 2/42 缺失）
-    # —— 若未来有人把 COVERAGE_WARN 提到 0.99，合法路径会被误杀，故锚定该值。
-    assert COVERAGE_WARN <= 0.96
 
 
 # ---- P2-6c：NaN/Inf 权重拒绝写出 ----
