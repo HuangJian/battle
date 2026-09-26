@@ -35,6 +35,9 @@ env/
 
 # ---- distributed rollout（plan/distributed-rollout.md v3.3，含密钥严禁入库）----
 rl-config.json
+# 清洗工具的备份（plan/rl-config-cleanup.plan.md §4 S1）：同样含密钥，永不入库。
+# 注意 `rl-config.json` 这一行**不覆盖** `rl-config.json.bak.<ts>`（gitignore 不是前缀匹配）。
+rl-config.json.bak.*
 agent.auth
 dist-agent-meta.jsonl
 

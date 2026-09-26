@@ -179,9 +179,12 @@ class RolloutDispatcher:
         # 主动升级机制（M8）：policy.upgradeBranch 非空时，ping 发现 codeHash stale 的
         # 节点 → POST /v1/restart 指示它 git pull + 重启（本轮不参与，重启后 rescan 纳入）。
         # 节点远控升级分支：永远以训练机当前分支为准（run_rl 启动时锁存到
-        # dist_common.UPGRADE_BRANCH）。config 的 upgradeBranch 只在该锁存缺失时兜底
-        # （2026-08-30 事故：残留 'intent-ai' 把全部节点 reset 回旧代码）。
-        upgrade_branch = dist_common.upgrade_branch_or(str(policy.get("upgradeBranch") or ""))
+        # dist_common.UPGRADE_BRANCH）。**不再读 config 的 upgradeBranch**：
+        # 2026-08-30 事故里残留的 'intent-ai' 把全部节点 reset 回旧代码，而
+        # `upgrade_branch_or` 是「显式值优先于锁存」⇒ 只要配置里有非空值就盖掉锁存。
+        # 该键已从 rl-config.json 删除（plan/rl-config-cleanup.plan.md §3.1），读点
+        # 一并去掉，坑不复活。
+        upgrade_branch = dist_common.upgrade_branch_or(None)
         wver = dist_common.weights_fingerprint(rl_path)
         local_bun = bun_version(bun)
         iter_no = int(iter_id.rsplit(".", 1)[-1])

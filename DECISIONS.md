@@ -4235,3 +4235,97 @@ A/B 课起点入口失效；编造 sha ⇒ 校验仪式变假。
 `dashboard/src/stack/courses.ts::resolveArchivedSeedPath`、
 `dashboard/src/server/actions/course-lifecycle.ts`、`dashboard/src/web/app/panels/OpenCourseModal.tsx`；
 正文同步进 `plan/course-archive.plan.md §1.3-1 / §3.5 / §3.6`。
+
+## §2026-09-26-x20-steady-cont（2026-09-26，B续跑立项：八连阴后唯一阳性斜率 + H1/H2判决实验）
+
+**来历**：noexplore it105 之后八条腿七死一停（floor/firstkill/terminal/demo-mix 判负；
+dodge L1 两档判死、L3 两档判负、L2a 无信号、L2b B2 未开；state-init 154 轮日常反 хуже）。
+唯一阳性是 B：判决 35.5 vs 门 35（差 4 局），终点区日常已摸门。B 结算④遗留总量混杂
+（"每轮更稳还是总量更多"）从未被回答。
+
+**决定**：开 `x20-steady-cont`（`nn-training/curricula/x20-steady-cont.jsonc`）——与 B
+逐字同（奖励/位移/采集全同，validate 零错零警），起点 B-it175 纯 warm start
+（`kickstart_ref=false`，C 教训 kk≈0），200 轮/14h，门沿用 B 原门（414000 ≤35% 且
+p10≥2，不移球门）。过门 = H1（量不够，继续加）；200 轮横盘 = H2（到顶，停烧转蒸馏评审）。
+横盘后不转 state-init（154 轮已阴性）。L3d2 并跑（算力足）。
+
+**被否决**：新价格腿（六条全死，重开是挖坟）；现在接受平台（B 斜率未死，先烧便宜的这枪）；
+continuation 带 kickstart（C 事故：kk=1 前 30 轮全回锚）；续 B 的种子流（B 先于 pinning
+机制，无值可续；新流 + 绝对门，代价是训练曲线只可比趋势）。
+
+**违反后果**：带 kickstart 开 ⇒ 前 30 轮白烧；中途改门 ⇒ 0.5pp 级 verdict 变 p-hacking；
+预算烧完横盘还续 ⇒ L1d2 证明过这是"再等等"无底洞。
+
+**落点**：`nn-training/curricula/x20-steady-cont.jsonc`（结算节待回填）。
+
+## §2026-09-26-hub-mode-restore-enabled-only（2026-09-26，用户报障：起 hub/trainer 等很久——回灌把停掉的历史课逐课重试）
+
+**症状**：控制台首页点「启动服务进程」，停在 `hubServer` 那一步几十秒；回执刷出一串
+`失败 x20-clutch: 需要合法 course（[]）与 mode(...)`、`x20-demo-mix`、`x20-dodge-l1` …（真机 11 门）。
+
+**根因（代码实锤，非「扫盘慢」）**：`courseModes` 是**只增**意图表（开课 / 停课 / 热切都往里写），
+停在 `tmp/` 下的历史课永久留着一份意图；而 `restoreCourseModes`（起 hub 回灌，挂在
+`startComponent('hubServer')` 的**两个分支**上、同步 await）**逐条** 推全部意图。hub 的认课判据是
+**开课标记**（`remote/hub/queue_discover.py::_course_dir_live` / `_serves_course` 都要求
+`training-enabled.txt`）⇒ 停掉的课按设计**必回 400**，于是每门课都白烧整段有界重试
+（`pushModeWithRetry`：3 次首试 + 2×2s ≈ **4s/门**，串行）。11 门 ≈ **44s** 纯 sleep。
+实盘核对：`tmp/*/training-enabled.txt` 存在的两门（`x20-dodge-l3d2`/`x20-steady-cont`）回灌成功，
+其余 11 门全失败——与报障日志一一对应。
+
+**决定**：`restoreCourseModes` **只回灌已开课的课程**（判据 = 开课标记
+`stack/courses.ts::courseEnabled`，与 hub 同源）。未开课的课进 `skipped`（**不是失败**）：
+意图一个字不丢（仍在 `courseModes` 里），摘要如实写「跳过 N 门未开课（意图保留，开课即下发）」，
+真正开课时 `openCourse` 按弹窗模式重新下发。
+
+**落地**：判据从 `server/actions/course-lifecycle.ts` 搬到 `stack/courses.ts`（该文件本就是
+仓库里「课程域共享判据、不断环」的家：`course-lifecycle` 已 import `course-mode`，回灌反向
+import 会成环）；`course-mode.ts`（gate + `RestoreResult.skipped`）· `state-view.ts` 改 import 口 ·
+`course-lifecycle.ts` 改 import；回归 `tests/course-mode.test.ts`（+2：未开课 ⇒ 零 POST 零重试、
+跳过如实上摘要不算失败；既有 5 例补开课标记）。
+
+**备选与否决**：① 只把回灌改成并行（`Promise.all`）——否，省掉串行 sleep 但**仍**白打 33 次
+POST、仍刷一串假「失败」，根因（推了必被拒的课）没治；② 缩短重试窗口 / 去掉重试——否，
+那次有界重试是 2026-09-23 真机事故（新开课 hub 还没扫到）的解药，不能为省时间砍掉；
+③ 停课时删掉意图项——否，丢记录且 `stopCourse` 的 hub 置离线要写它；
+④ 起 hub 时先 `GET /admin/courses` 取 hub 课程表再筛——否，又把「发现时序」引回回灌路径
+（`docs/nn/remote-transport.md §36` 的坑）。
+
+**违反后果**：任何「回灌按意图表全量推」的写法都会随历史课积累线性变慢（且刷假失败）；
+任何把回灌判据换成「hub 课程表」的写法会把发现时序竞态引回来。全文 →
+`docs/nn/console.md §15`。
+
+---
+
+## §2026-09-26-rl-config-scope（2026-09-26，`rl-config.json` 职责边界：只留「别处无处安放」，删配置不删代码）
+
+**触发（用户 2026-09-25/26）**：「已经在其它地方配置过的数据就不该再往里填；`intent_rl` 已废弃，
+后期重启也要配成现在 x 系列一样」→「intent/goal、`stream`/`double_buffer`/`precollect_early`
+**只删配置、不删代码**」。
+
+**决定**：`nn-training/rl-config.json` 只保留五类里的 A（机器/环境级）、C（调度策略）、D（每课
+机器侧旋钮活课）；B（课程文件已有同名键的全局缺省）只留必要兜底；E（废弃/死键）删。
+**新键该写哪**：机器事实 → rl-config；「怎么训」的超参/奖励/关卡/门 → `curricula/<课>.jsonc`。
+
+**本次删除（8 个点号路径，含代码读点）**：`intent_rl`（整块 29 键）、`policy.upgradeBranch`
+（**连 `rl/dispatch.py` 的读点一并去掉**——只删键不删读点，2026-08-30「残留旧分支名 reset 全部
+节点」的坑就还在）、`policy.minDiskFreeMB`（零消费者）、`policy.streamKlCapIntent` /
+`policy.streamWaveGamesIntent`（intent 专属）、`rl.stream` / `rl.double_buffer` / `rl.precollect_early`
+（单一 PPO 路径下 `validate_args` 恒置 0 / 只在 `double_buffer` 开时被读 ⇒ 填了也不生效）。
+
+**代码保留**（用户裁决）：`ppo/intent.py`、`ppo/goal.py`、`rl/modes.py` 的 `intent_rl(legacy)` 回退、
+`rl/eval_m1.py` 与 m1-eval 派发链、`stream`/`double_buffer`/`precollect_early` 的读取点**都不动**
+——重启时复用，不从 git 历史重补。intent/goal 入口仍冻结（`validate_args` 拒启），重启前须先解冻。
+
+**防再长草**：新增 `nn-training/rl_config.schema.json`（键白名单数据）+ `rl_config_schema.py`
+（**只告警不拒**，`run_rl.py` 启动时把未知/已退役键点出来）；清洗工具
+`nn-training/tools/rl_config_clean.py`（dry-run/`--apply` 先备份 sha 校验/`--matrix`/脱敏）；
+顺手修 `tools/agent/agent-setup.md` 里把磁盘阈值当成 rl-config 键的指路。
+
+**备选与否决**：① 连 `ppo/intent.py`、`ppo/goal.py` 一起删——否（用户裁决：删配置不删代码）；
+② 顺手去掉 `rl/modes.py` 的 legacy 回退与改 `e2e/test_run_rl_m1.py` 断言——否（同上）；
+③ 一次性真删（B 类全删、零缺省）——否（会让历史课程无法复现，漏声明时静默落 argparse 默认）；
+④ 未知键硬拒开训——否（用户裁决 O3：只告警不拒）。
+
+**违反后果**：把「怎么训」的超参写回 rl-config = 造第二事实源（用户原则针对的正是这一类）；
+不删 `policy.upgradeBranch` 的读点 = 下次有人手填非空值就再 reset 一遍全部节点。全文 →
+`docs/nn/rl-config.md` §1 · 计划 → `plan/rl-config-cleanup.plan.md`。

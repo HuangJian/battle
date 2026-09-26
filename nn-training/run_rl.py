@@ -28,6 +28,7 @@ from rl.resume import (
     peak_entropy,  # noqa: F401 — F4 ENT 相对崩塌基线回读（§339），re-exported for tests
     resumed_manifests,  # noqa: F401 — re-exported for tests
 )
+from rl_config_schema import check_rl_config
 from train.loop_util import (
     acquire_lock,
     cleanup_lock,
@@ -209,6 +210,14 @@ def main() -> None:
     from rl.config import read_rl_config_file
 
     _cfg = read_rl_config_file()
+    # rl-config 键白名单校验（plan/rl-config-cleanup.plan.md §3.4）：**只告警不拒** ——
+    # 拼错/退役的键此前会静默沉睡（`intent_rl` 沉睡到 2026-09-26）；白名单数据住
+    # `rl_config.schema.json`（与控制台冒烟共用一份）。路径是开课/签名错误的早现手段。
+    # 注：`check_rl_config` 必须在**模块顶层** import——main() 里已经 `os.chdir` 到仓根，
+    # 此时 `sys.path[0]=''` 已指向仓根，惰性 import 会找不到 `rl_config_schema`
+    # （tests/test_serve_wiring.py 的 oracle 子进程实测）。
+    for _adv in check_rl_config(_cfg):
+        log(f"[run_rl] rl-config 告警：{_adv}")
     _rl_args, _rl_src = merged_mode_args(_cfg, mode)
 
     ap = build_argparser(mode, _rl_args)
