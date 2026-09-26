@@ -22,10 +22,13 @@ from pathlib import Path
 
 import numpy as np
 
+from schema import OBS_CHANNELS, SCALAR_DIM
+
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from data.npyio import save_shard
 from data.shard_split import (
     MIN_SHARDS_FOR_SPLIT,
     plan_shard_split,
@@ -105,3 +108,37 @@ def test_val_shards_for_stops_at_the_first_shard_reaching_the_budget() -> None:
     assert val_shards_for(sizes, 10, [0, 1, 2]) == [0]  # acc 恰好到期 ⇒ 停
     assert val_shards_for(sizes, 11, [0, 1, 2]) == [0, 1]  # 差 1 ⇒ 再取一个
     assert val_shards_for(sizes, 25, [2, 1, 0]) == [2, 1, 0]
+
+
+# ------------------------------------------------ 生产侧产出与合成器对账（load_dataset）
+
+def test_shard_ids_from_load_dataset_match_the_synthetic_shape(tmp_path: Path) -> None:
+    """真的 `load_dataset` 产出的 shard_ids 必须与上面 `_corpus` 同形，并通过同一组判据。
+
+    2026-09-26（item 9）：自 `tests/test_shard_split.py` 分家（原用例名
+    `test_shard_ids_are_contiguous_and_complete`）。它只吃 `data/npyio`（numpy），却在那边
+    因 `make_loaders` 要真 DataLoader 而整文件连坐 torch。上面几条用的是**合成** shard_ids，
+    这一条把合成物锚在真产出上——否则纯函数守的是一个可能不存在于生产的形状。
+    """
+    rng = np.random.default_rng(42)
+    for s in range(6):
+        d = tmp_path / f"shard{s}"
+        d.mkdir(parents=True, exist_ok=True)
+        arrays: dict[str, np.ndarray] = {
+            "obs": rng.integers(0, 256, (FRAMES, OBS_CHANNELS, 26, 26), dtype=np.uint8),
+            "scalars": rng.standard_normal((FRAMES, SCALAR_DIM)).astype(np.float32),
+            "actions": rng.integers(0, 5, (FRAMES, 2), dtype=np.int64),
+            "masks": np.ones((FRAMES, 7), dtype=np.float32),
+            "conditions": np.zeros(FRAMES, dtype=np.int64),
+        }
+        save_shard(str(d), arrays, {"stage": s, "seed": s})
+
+    from data.npyio import load_dataset
+
+    data = load_dataset(str(tmp_path))
+    shard_ids = data["shard_ids"]
+    assert shard_ids.shape[0] == data["obs"].shape[0]
+    np.testing.assert_array_equal(shard_ids, _corpus(6))
+    # 真产出必须过同一组判据（合成器 ↔ 生产 的对账）
+    assert shard_sizes(shard_ids) == [FRAMES] * 6
+    assert should_split_by_shards(shard_ids) is True

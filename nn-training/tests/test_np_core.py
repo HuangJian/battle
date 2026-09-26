@@ -250,6 +250,48 @@ def test_load_episodes_common_ret_normalized_when_enabled(tmp_path: Path) -> Non
     assert abs(float(got_adv.mean())) < 1e-5
 
 
+# ---------------------------------------------------------------- GAE 手算 / 边界
+# 2026-09-26（item 9）：自 `tests/test_ppo_numerics.py` 分家——那三条只吃 np_core 的
+# `compute_gae`（numpy 口径），却曾与 KL 三条（要真 torch 张量）同住一个文件而连坐。
+def test_gae_matches_hand_computed() -> None:
+    """GAE 定长路径：3 步例子逐值核对（γ=0.9, λ=0.8）。"""
+    r = np.array([1.0, 0.0, 0.5], dtype=np.float32)
+    v = np.array([0.2, 0.4, 0.3], dtype=np.float32)
+    d = np.array([0, 0, 1], dtype=np.int64)
+    adv, ret = np_core.compute_gae(r, v, d, 0.9, 0.8)
+    # 手工推导（γ=0.9, λ=0.8）：
+    # t=2: δ = 0.5 + 0.9*0 - 0.3 = 0.2;  A2 = 0.2
+    # t=1: δ = 0.0 + 0.9*0.3 - 0.4 = -0.13; A1 = -0.13 + 0.9*0.8*1*0.2 = 0.014
+    # t=0: δ = 1.0 + 0.9*0.4 - 0.2 = 1.16; A0 = 1.16 + 0.9*0.8*1*0.014 = 1.17008
+    np.testing.assert_allclose(adv, [1.17008, 0.014, 0.2], atol=1e-5)
+    np.testing.assert_allclose(ret, adv + v, atol=1e-5)
+
+def test_gae_done_truncates_bootstrap() -> None:
+    """done 截断：λ 递归在终止步之后必须清零（non_term 因子），但终止步**之前**
+    的步仍正常延续。r=[0,0,0,0], v=[1,1,1,1], d=[0,1,0,1], γ=0.9, λ=0.95：
+      t=3: δ = 0+0.9·0-1 = -1（无 next）        → A3 = -1
+      t=2: δ = 0+0.9·1-1 = -0.1；A2 = -0.1 + 0.9·0.95·1·(-1) = -0.955（延续 A3）
+      t=1: done → A1 = -0.1（non_term=0，递归清零）
+      t=0: A0 = -0.1 + 0.9·0.95·1·(-0.1) = -0.1855（延续 A1）
+    """
+    r = np.zeros(4, dtype=np.float32)
+    v = np.ones(4, dtype=np.float32)
+    d = np.array([0, 1, 0, 1], dtype=np.int64)
+    adv, _ = np_core.compute_gae(r, v, d, 0.9, 0.95)
+    np.testing.assert_allclose(adv, [-0.1855, -0.1, -0.955, -1.0], atol=1e-5)
+
+def test_gae_variable_dt_matches_fixed_when_dt1() -> None:
+    """变步长 GAE（dt 数组）在 Δt≡1 时与定长路径逐字节一致。"""
+    rng = np.random.default_rng(3)
+    r = rng.standard_normal(20).astype(np.float32)
+    v = rng.standard_normal(20).astype(np.float32)
+    d = (rng.random(20) < 0.1).astype(np.int64)
+    adv_fixed, ret_fixed = np_core.compute_gae(r, v, d, 0.995, 0.95)
+    adv_var, ret_var = np_core.compute_gae(r, v, d, 0.995, 0.95, dt=np.ones(20, dtype=np.int64))
+    np.testing.assert_array_equal(adv_var, adv_fixed)
+    np.testing.assert_array_equal(ret_var, ret_fixed)
+
+
 def main() -> None:
     _td = tempfile.mkdtemp(dir=str(Path(__file__).resolve().parent.parent / "tmp" / "manual-tests"))
     test_gae_dt1_degradation()

@@ -9,6 +9,10 @@ P2-6d 修复：`load_dataset` 额外产出 `shard_ids`，`make_loaders` 按**整
   1. shard_ids 与样本一一对应、覆盖全部 shard；
   2. 无泄漏：val 中任一 shard 的样本绝不出现在 train；
   3. 旧语料（无 shard_ids）回退样本级切分不崩。
+
+2026-09-26（item 9）：「shard_ids 与样本一一对应、覆盖全部 shard」那一条已搬到
+`tests/test_shard_plan.py`（那边免 torch，且用合成器 ↔ 真产出对账）。本文件留下三条必须
+经**真 DataLoader** 的用例（跨集无泄漏 / 旧语料回退 / 单 shard 回退），故仍需 torch。
 """
 
 from __future__ import annotations
@@ -46,17 +50,6 @@ def _make_corpus(tmp_path: Path, n_shards: int = 6, frames_per_shard: int = 40) 
         }
         save_shard(str(d), arrays, {"stage": s, "seed": s})
     return tmp_path
-
-
-def test_shard_ids_are_contiguous_and_complete(tmp_path: Path) -> None:
-    from data.npyio import load_dataset
-
-    data = load_dataset(str(_make_corpus(tmp_path)))
-    shard_ids = data["shard_ids"]
-    assert shard_ids.shape[0] == data["obs"].shape[0]
-    # 每 shard 恰好 frames_per_shard 帧，索引按 shard 升序连续
-    expected = np.repeat(np.arange(6), 40)
-    np.testing.assert_array_equal(shard_ids, expected)
 
 
 def test_make_loaders_no_cross_shard_leak(tmp_path: Path) -> None:

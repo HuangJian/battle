@@ -198,6 +198,49 @@ tests/test_backend_contract_runtime.py::test_update_accepts_stream_injected_kwar
 **代价（明说）**：无 torch 机上**测试文件数不变**——`test_backend_contract.py` 退出收集失败名单，
 `test_backend_contract_runtime.py` 按「**不静默 skip**」口径顶进来（torch 真缺失时应当红）。
 匀出来的是**用例**：本轮收尾 **2907 → 2918 passed**（+11），收集失败文件仍 16 个。
+### 补记（同日第五轮）：剩下 16 个文件逐条判「这依赖是不是真的」（2918 → **2924 passed**）
+
+收集失败文件收敛到 16 个后逐个判。**判断口径**：先看源码扫描能看出什么（AST 逐用例判「引没引
+`torch`」），再看它到底传什么（**AST 不带 `torch` ≠ 不要 torch**：把 numpy chunk 交给
+`ppo_update` 的用例看起来“干净”，实际由 engine 内部转张量）——两条一起才判。
+
+**能搬的只有 6 条**（都是「被同文件的 torch 邻居连坐」，搬去主题相同且免 torch 的孪生文件）：
+
+| 条数 | 从哪 | 搬到哪 | 为什么它本来就免 torch |
+|---|---|---|---|
+| 3 | `test_ppo_numerics` | `test_np_core` | GAE 手算 / done 截断 / dt≡1 全是 numpy 口径（`np_core.compute_gae`）。留下的 3 条 KL 的定义域是**真张量**（`approx_kl_est` 对张量 mean），所以该文件仍是需要 torch 的那一半 |
+| 1 | `test_shard_split` | `test_shard_plan` | 只吃 `data/npyio.load_dataset`（numpy）；且在孪生文件里可以与合成器**对账**（真产出过同一组切分判据）⇒ 顺带把「合成形状 = 生产形状」钉住 |
+| 1 | `test_coord_golden` | `test_schema_fingerprint` | 只算 `j×255/(BOARD-1)` 无 `.5`（一行不碰 torch），而它守的是**跨语言取整语义**（torch.round 四舍六入五取偶 vs TS `Math.round`）——py↔TS 同锚常量的本家就是后者（`BOARD` 也在 `schema.py`）；顺带补一条「BOARD 字面量 == schema.BOARD」双锚 |
+
+搬迁完备性再测一次（worktree at `a67c2c8` vs 工作树，真 torch 下 `--collect-only`）：
+**3025 → 3026** 个 nodeid，差集只有 1 个改名（shard_ids 那条）× 1 个新增（BOARD 双锚）——
+其余全是同名搬迁。
+
+**剩下的 16 个：每一条的真因（实测帧 = 哪个文件哪一行真 `import torch`）**
+
+| 文件 | 真因（帧） | 为何真的搬不动 |
+|---|---|---|
+| `test_backend_contract_runtime.py` | `ppo/engine.py:47` | **故意**：运行期 ground truth 必须真 import 三后端（不静默 skip） |
+| `test_bc_dp.py` | 自身 `:19` | `DataParallel` 解包/参数身份/前缀只有真 torch 能验；pass-through 那 2 例已由免 torch 的 `test_bc_device.py` 覆盖，此处的副本是**接线锚** |
+| `test_bc_epoch_resume.py` | `train/bc.py:47` | 剩 2 条真跑 `bc_train` 两 epoch（接续编号）；纯存储/课程 6 条已分家 |
+| `test_bc_masked.py` | 自身 | masked CE / masked argmax 本身就是张量运算（4/4） |
+| `test_coord_golden.py` | 自身 | 3 条要 `coord_channels(26)` 真渲染并与 golden 逐值比（golden 是给 TS 侧对账的产物） |
+| `test_ppo_common.py` | 自身 | 剩 7 条是张量助手（masked_logsoftmax / cat_* / ckpt / demo_index / kickstart）+ 1 条要真 import 三后端（`assert_backend_constants`） |
+| `test_ppo_demo_mix.py` | 自身 | 5 条全走 `ppo_update`（numpy chunk 在 engine 里转张量） |
+| `test_ppo_goal.py` | 自身 | 4 条要 `GoalRLNet` / `ppo_update_goal`；另 2 条 dt 用例走 `ppo.goal.compute_gae_variable`——那是该线自己的 `GAMMA_TICK` **别名**（非重复实现） |
+| `test_ppo_intent.py` | 自身 | 同上（intent 侧） |
+| `test_ppo_kickstart_cache.py` | 自身 | 全走 `ppo_update(ref_model=…)`（要真前向计数） |
+| `test_ppo_numerics.py` | 自身 | 剩 3 条 KL 的定义域是真张量 |
+| `test_ppo_scalar_sync.py` | 自身 | `sync_scalars` 的意义就是**张量同步次数** + 三后端 stats 键 |
+| `test_rl_model.py` | 自身 | 3 条要 `RLNet()` 前向 / 取动作 / 参数计数（`count_params(RLNet())`） |
+| `test_shard_split.py` | 自身 | 剩 3 条必须经**真 DataLoader**（跨集无泄漏 / 旧语料回退 / 单 shard 可迭代） |
+| `test_student_model.py` | 自身 | 6 条要 `StudentNet()`（`arch()` 是模型方法、stem 权重、同 seed 初始化、coord 渲染）——这里 AST 又骗过一次：`test_arch_metadata` 看着只比字典，实际靠 `StudentNet()` |
+| `test_weights_io.py` | 自身 | 6 条要真 `state_dict` 序列化（往返 / partial warmstart / NaN-Inf 拒收）；`load_weights_json 真调校验器` 那条是**接线锚**（校验器本体免 torch，在 `test_weights_meta.py` 8 条里） |
+
+⚠ **两条给以后的标准**：① 判「这用例要不要 torch」必须看**它把什么交给谁**，不能只看 AST 里
+有没有 `torch` 字（`test_ppo_demo_mix` / `test_ppo_kickstart_cache` 的“免 torch”用例全是被
+`ppo_update` 转张量的）；② 孪生文件分家时**该文件自己造语料**的 helper 不要跨文件依赖，宁可
+在新家重写一小段（本次 shard_ids 那条就那么处理）。
 
 ---
 

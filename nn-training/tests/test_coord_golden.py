@@ -12,9 +12,9 @@ rounding，四舍六入五取偶），TS 侧 `src/nn/infer.ts:428-429` 用 `Math
 
 任一方向改动公式或 BOARD 都会破坏对应侧的测试——把"靠注释自觉"变成"靠测试守护"。
 
-**`.5` 平局守护**：golden 生成时断言 `j×255/25` 无 `.5` 值（round 语义在 BOARD=26
-下无分歧）；若未来 BOARD 变更引入 `.5`，此断言触发，迫使显式决策（统一两侧 round
-语义或调整公式），而不是静默分叉。
+**`.5` 平局守护（已分家）**：`j×255/25` 无 `.5` 值这条判据本身一行不碰 torch，2026-09-26
+（item 9）搬到 `tests/test_schema_fingerprint.py`（py↔TS 同锚常量的本家，BOARD 在
+`schema.py`）——否则它被本文件那三条「真渲染 golden」用例连坐 torch。
 """
 
 from __future__ import annotations
@@ -48,17 +48,6 @@ def test_coord_channels_match_golden() -> None:
     golden = _load_golden()
     ch = coord_channels(GOLDEN_BOARD, torch.device("cpu")).numpy()
     np.testing.assert_array_equal(ch, golden)
-
-
-def test_coord_formula_no_half_integer_collisions() -> None:
-    """`.5` 平局守护：j×255/25 无半整数——若未来 BOARD 变更引入 `.5`，
-    torch.round 与 Math.round 将分叉，必须显式决策而非静默接受。"""
-    for board in (GOLDEN_BOARD,):  # 新 BOARD 需在此显式登记并重生成 golden
-        vals = np.arange(board) * 255 / (board - 1)
-        assert not np.any(vals % 1 == 0.5), (
-            f"BOARD={board} 下坐标公式出现 .5 平局——torch.round(四舍六入五取偶) 与 "
-            f"Math.round(half-up) 将分叉，请统一两侧 round 语义并重生成 coord_golden.json"
-        )
 
 
 def test_coord_golden_is_committed_fixture() -> None:

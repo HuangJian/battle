@@ -4181,3 +4181,27 @@ top 层源码扫描类闸（`bun test`）成批**假红**，比完立即 `git wo
 **代价（明说）**：无 torch 机上**测试文件数不变**——老文件退出收集失败名单，新的运行期文件
 按「不静默 skip」口径顶进来；匀出来的是用例（2907 → **2918 passed**，收集失败文件仍 16 个）。
 —— 全文（逐项边界 / 突变探针输出 / 自证清单）→ `docs/nn/engineering.md` §29 补记
+
+## §2026-09-26-goalnn-notorch-final-16（2026-09-26，剩下 16 个收集失败文件逐条终判：再匀出 6 条）
+
+**做完的**（都是「被同文件的 torch 邻居连坐」，搬到主题相同且免 torch 的孪生文件）：
+`test_ppo_numerics` 的 3 条 GAE（numpy 口径）→ `test_np_core`；`test_shard_split` 的
+shard_ids 对账 1 条 → `test_shard_plan`（顺带把「合成形状 = load_dataset 生产形状」钉住）；
+`test_coord_golden` 的 `.5` 平局守护 1 条 → `test_schema_fingerprint`（它守的是**跨语言取整
+语义**：torch.round 四舍六入五取偶 vs TS `Math.round`，而 `BOARD` 也在 `schema.py`）。
+**2918 → 2924 passed**，测试名多重集对账：3025 → 3026（1 改名 × 1 新增，其余同名搬迁）。
+
+**剩下 16 个判定为「真需要 torch」**（逐文件真因与理由表 → `docs/nn/engineering.md` §29 第五轮）：
+真张量运算（masked CE / KL / sync_scalars / coord 渲染 / RLNet·StudentNet 模型）、真 DataLoader
+（跨集泄漏）、真 state_dict 序列化、真 `bc_train`、真三后端 import（运行期 ground truth）。
+
+**判据（两次被 AST 骗过，写进规矩）**：判「这用例要不要 torch」必须看**它把什么交给谁**——
+`test_ppo_demo_mix` / `test_ppo_kickstart_cache` 的“免 torch”用例是把 numpy chunk 交给
+`ppo_update`（engine 内部转张量）；`test_student_model::test_arch_metadata` 看着只比字典，
+实际靠 `StudentNet()`。**AST 里没有 `torch` 字 ≠ 不要 torch。**
+
+**被否决**：① 给张量胶水模块（`ppo.common` 的 `sync_scalars` / `demo_index`）再造孪生——
+它们的家就该在 torch 那侧（只把**用例**归位）；② 为 1–2 条用例新建只装那几条的文件——除
+`test_shard_split` 那条有真主题归属外，其余留在原处并在表里写明理由；③ 跨文件借 helper
+（孪生文件里重写一小段自造语料）。
+—— 全文（16 文件逐条真因表 / 搬迁对账 / 两条新标准）→ `docs/nn/engineering.md` §29 补记

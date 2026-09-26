@@ -13,6 +13,10 @@
 **为什么必须用解析解**：现有 test_ppo_intent / test_ppo_goal 只断言早停开关
 是否触发（target_kl=1e-9 / 1e9 两个极端），从不校验 KL 数值——这正是旧缺陷
 长期无覆盖的原因。
+
+2026-09-26（item 9）：GAE 那三条（手算 / done 截断 / dt≡1）已搬到 `tests/test_np_core.py`
+——它们只吃 `np_core.compute_gae`（numpy 口径），本文件留下的 KL 三条的定义域是**真 torch
+张量**（`approx_kl_est` 对张量做 mean），故本文件仍是需要 torch 的那一半。
 """
 
 from __future__ import annotations
@@ -28,7 +32,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ppo.common import approx_kl_est, compute_gae
+# 家仍在 np_core（免 torch）；这里经 ppo.common 再导出取——本文件本就要 torch。
+from ppo.common import approx_kl_est
 
 
 def _cat_kl(p: np.ndarray, q: np.ndarray) -> float:
@@ -97,42 +102,3 @@ def test_approx_kl_est_nonnegative_and_zero_for_identical() -> None:
     assert approx_kl_est(lp_old, lp2).item() >= -1e-6
 
 
-def test_gae_matches_hand_computed() -> None:
-    """GAE 定长路径：3 步例子逐值核对（γ=0.9, λ=0.8）。"""
-    r = np.array([1.0, 0.0, 0.5], dtype=np.float32)
-    v = np.array([0.2, 0.4, 0.3], dtype=np.float32)
-    d = np.array([0, 0, 1], dtype=np.int64)
-    adv, ret = compute_gae(r, v, d, 0.9, 0.8)
-    # 手工推导（γ=0.9, λ=0.8）：
-    # t=2: δ = 0.5 + 0.9*0 - 0.3 = 0.2;  A2 = 0.2
-    # t=1: δ = 0.0 + 0.9*0.3 - 0.4 = -0.13; A1 = -0.13 + 0.9*0.8*1*0.2 = 0.014
-    # t=0: δ = 1.0 + 0.9*0.4 - 0.2 = 1.16; A0 = 1.16 + 0.9*0.8*1*0.014 = 1.17008
-    np.testing.assert_allclose(adv, [1.17008, 0.014, 0.2], atol=1e-5)
-    np.testing.assert_allclose(ret, adv + v, atol=1e-5)
-
-
-def test_gae_done_truncates_bootstrap() -> None:
-    """done 截断：λ 递归在终止步之后必须清零（non_term 因子），但终止步**之前**
-    的步仍正常延续。r=[0,0,0,0], v=[1,1,1,1], d=[0,1,0,1], γ=0.9, λ=0.95：
-      t=3: δ = 0+0.9·0-1 = -1（无 next）        → A3 = -1
-      t=2: δ = 0+0.9·1-1 = -0.1；A2 = -0.1 + 0.9·0.95·1·(-1) = -0.955（延续 A3）
-      t=1: done → A1 = -0.1（non_term=0，递归清零）
-      t=0: A0 = -0.1 + 0.9·0.95·1·(-0.1) = -0.1855（延续 A1）
-    """
-    r = np.zeros(4, dtype=np.float32)
-    v = np.ones(4, dtype=np.float32)
-    d = np.array([0, 1, 0, 1], dtype=np.int64)
-    adv, _ = compute_gae(r, v, d, 0.9, 0.95)
-    np.testing.assert_allclose(adv, [-0.1855, -0.1, -0.955, -1.0], atol=1e-5)
-
-
-def test_gae_variable_dt_matches_fixed_when_dt1() -> None:
-    """变步长 GAE（dt 数组）在 Δt≡1 时与定长路径逐字节一致。"""
-    rng = np.random.default_rng(3)
-    r = rng.standard_normal(20).astype(np.float32)
-    v = rng.standard_normal(20).astype(np.float32)
-    d = (rng.random(20) < 0.1).astype(np.int64)
-    adv_fixed, ret_fixed = compute_gae(r, v, d, 0.995, 0.95)
-    adv_var, ret_var = compute_gae(r, v, d, 0.995, 0.95, dt=np.ones(20, dtype=np.int64))
-    np.testing.assert_array_equal(adv_var, adv_fixed)
-    np.testing.assert_array_equal(ret_var, ret_fixed)
