@@ -144,9 +144,13 @@ bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py --drop-b-class --sc
   `rl_config.schema.json` 做未知键提示——**尚未接线**（本次工作树里有他人未提交的 dashboard 改动，
   不混入；接线属独立小改）。注意：plan §3.4/E8 的验收是「启动日志 **与冒烟面板** 都点出假键」，
   今天只达成前半（已用接线钉子用例钉住启动日志那一半）。
-- **控制台写面仍会写「已退役」三键**（2026-09-26 评审更正）：
-  `dashboard/src/server/actions/preset.ts` 的开课预设 + `TrainLaunchModal` 的 `stream` /
-  `double_buffer` / `precollect_early` 三个开关**仍会**把它们写回 rl-config ⇒ ① 开关在
-  `validate_args`（单一 PPO 路径）下恒被归一化成 0，是**死开关**；② 写回后下次 `run_rl` 启动会打
-  「已退役」告警。这属「只删配置、不删代码」（用户 2026-09-26 裁决）的边界内；**要不要摘掉/标灰
-  这三个开关是独立决定**（控制台手感变化），待定。
+- ~~**控制台写面仍会写「已退役」三键**~~ **已处理（2026-09-26 用户裁决）**：三个开关在
+  `validate_args`（单一 PPO 路径）下恒被归一化成 0，是**死开关**。裁决 = **保留开关但标灰 + 写清
+  「当前不生效」**（否决「摘掉」与「只留文档」）：`TrainLaunchModal.tsx::INERT_TOGGLES` 清单驱动渲染，
+  `disabled` 常闭，显示值取 rl-config 当前值（不再读浏览器本地偏好）；服务端回写白名单
+  （`dashboard/src/server/actions/preset.ts::setMode`）**保留**这三键 ⇒ UI 不再能写回，能力仍在，
+  解冻 intent/多路时直接复用。
+
+  > ⚠ 删改 `TrainLaunchModal.tsx` 时的坑：`dashboard/src/web/**` **禁出现** `server/` + `api|actions`
+  > 的字面路径（`tests/architecture-layering.test.ts` 会把注释也算进去静态扫描）——所以那个弹窗里
+  > 只能写 `preset.ts::setMode`，不能写全路径。

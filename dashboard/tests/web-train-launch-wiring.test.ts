@@ -91,6 +91,38 @@ describe('app.tsx → TrainLaunchModal 启动选项透传', () => {
   })
 })
 
+const PRESET = join(DASHBOARD_ROOT, 'src', 'server', 'actions', 'preset.ts')
+
+describe('行为开关：单一 PPO 路径下恒不生效（呈现保留 · 标灰写清 · 回写能力保留）', () => {
+  const modal = squashCode(MODAL)
+
+  it('三个键都还在、且以 disabled + 「当前不生效」呈现（用户 2026-09-26 裁决）', () => {
+    for (const key of ['rl.stream', 'rl.double_buffer', 'rl.precollect_early']) {
+      expect(modal).toContain(key)
+    }
+    // 清单驱动渲染 + **常闭**（`disabled` 裸写在每个开关上，不再是 readOnly 的联动）——
+    // 这三个开关对谁都不生效，包括本机操作员。
+    expect(modal).toMatch(/INERT_TOGGLES\.map/)
+    expect(modal).toContain('disabled onChange={() => undefined}')
+    expect(modal).toContain('当前不生效')
+  })
+
+  it('显示值 = rl-config 当前值（不再有本地偏好层，也不再能写回去）', () => {
+    // 旧行为：localStorage 偏好优先于服务端 ⇒ 「灰着的开关显示成开」会被读成「开着且有效」
+    expect(modal).not.toContain('TC_TRAIN_TOGGLES')
+    expect(modal).not.toContain('applyToggle')
+    expect(modal).not.toContain("'setMode'")
+    expect(modal).toContain('t.checked(modes)')
+  })
+
+  it('服务端回写白名单**保留**（preset.ts 三键仍在，解冻 intent/多路时可直接复用）', () => {
+    const preset = squash(PRESET)
+    for (const key of ["'rl.stream'", "'rl.double_buffer'", "'rl.precollect_early'"]) {
+      expect(preset).toContain(key)
+    }
+  })
+})
+
 describe('route.ts preset 分支：只认隧道/瘦身两个可选键（课程级选项已迁开课）', () => {
   it('preset 分支里没有 mode / pushEndpoint / pushAuthKey 的读取', () => {
     const route = squash(join(DASHBOARD_ROOT, 'src', 'server', 'api', 'route.ts'))

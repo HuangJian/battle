@@ -1,5 +1,6 @@
 /** TrainLaunchModal.tsx — **启动服务进程**的弹窗（工具行并入此处，用户指令）：
- *  rl-config 行为开关（即时写）+ 隧道/瘦身选项 + 推送链路预演入口。
+ *  隧道/瘦身选项（即时写）+ 行为开关（**已失效，只呈现并标灰**，见 INERT_TOGGLES）
+ *  + 推送链路预演入口。
  *
  *  ★ 2026-09-20 用户口径：「服务进程启动不应与课程绑定。进程启动时不要自动开启课程训练」⇒
  *  本弹窗里的选项**只剩进程级**（`rl.*`）：隧道协议/边缘 IP / 瘦身 / 行为开关 / 降级预演。
@@ -13,12 +14,11 @@
  *  两者都是**部署事实**，不是启动参数；弹窗里因此不再有模式开关与 push 凭据输入。
  *  Esc / 遮罩关闭由 App 全局处理。 */
 
-import { useEffect, useRef, useState } from 'preact/hooks'
+import { useState } from 'preact/hooks'
 import type { SlimMode } from '../../../core/types'
 import type { ModeView } from '../../view'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { Toggle } from '../../components/Toggle'
-import { TC_TRAIN_TOGGLES } from '../../view'
 
 export interface TrainLaunchModalProps {
   open: boolean
@@ -34,6 +34,33 @@ export interface TrainLaunchModalProps {
 const TC_CF_PROTOCOL = 'tc.cfProtocol'
 const TC_CF_EDGE_IP = 'tc.cfEdgeIp'
 const TC_SLIM = 'tc.slim'
+
+/** 「行为开关」这三个键在**单一 PPO 路径下恒不生效**（2026-09-26 用户裁决：别删，标灰 + 写清）。
+ *
+ *  依据：`nn-training/rl/config.py::validate_args` 把 `stream` / `double_buffer` 恒置 0，而
+ *  `precollect_early` 只在 `double_buffer` 开的分支里被读 ⇒ 填什么都不生效。
+ *  服务端那侧的回写白名单（`preset.ts::setMode`）**保留**这三个键 —— 将来解冻
+ *  intent/多路时直接复用 —— 所以这里只**呈现**：值取 rl-config 当前值（`modes.*`），
+ *  **不再**读写 localStorage 偏好（旧行为）：灰着的开关显示成「开」会被读成「它开着且有效」。
+ */
+const INERT_TOGGLES = [
+  { key: 'rl.stream', label: 'stream', checked: (m: ModeView): boolean => m.stream === 1 },
+  {
+    key: 'rl.double_buffer',
+    label: '双缓冲',
+    checked: (m: ModeView): boolean => m.doubleBuffer === 1,
+  },
+  {
+    key: 'rl.precollect_early',
+    label: '预采',
+    checked: (m: ModeView): boolean => m.precollectEarly === 1,
+  },
+] as const
+
+/** 标灰开关上的字样（用户口径原文）。 */
+const INERT_NOTE = '当前不生效'
+const INERT_TITLE =
+  '单一 PPO 路径下恒置 0（validate_args 强制）：填什么都不生效；保留此开关只为解冻时复用'
 
 export interface TunnelLaunchOpts {
   cfProtocol: 'http2' | 'quic' | 'auto'
@@ -89,57 +116,6 @@ export function TrainLaunchModal({
   const [cfEdgeIp, setCfEdgeIp] = useState<'4' | '6' | 'auto'>(() =>
     readTunnelSel(TC_CF_EDGE_IP, modes.cfEdgeIp, ['4', '6', 'auto'] as const, '4'),
   )
-
-  // 行为开关偏好：localStorage 优先 → 服务端 modes 兜底
-  const [toggles, setToggles] = useState<{
-    stream: boolean
-    doubleBuffer: boolean
-    precollectEarly: boolean
-  }>(() => {
-    try {
-      const raw = localStorage.getItem(TC_TRAIN_TOGGLES)
-      if (raw) {
-        const parsed = JSON.parse(raw) as Record<string, boolean>
-        return {
-          stream: parsed.stream == null ? modes.stream === 1 : parsed.stream,
-          doubleBuffer:
-            parsed.doubleBuffer == null ? modes.doubleBuffer === 1 : parsed.doubleBuffer,
-          precollectEarly:
-            parsed.precollectEarly == null ? modes.precollectEarly === 1 : parsed.precollectEarly,
-        }
-      }
-    } catch {
-      /* ignore */
-    }
-    return {
-      stream: modes.stream === 1,
-      doubleBuffer: modes.doubleBuffer === 1,
-      precollectEarly: modes.precollectEarly === 1,
-    }
-  })
-
-  // 每次变化时持久化到 localStorage（服务端写由 onAction 负责，不在此处耦合）
-  const togglesRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!togglesRef.current) return
-    const prev = JSON.parse(localStorage.getItem(TC_TRAIN_TOGGLES) ?? '{}') as Record<
-      string,
-      boolean
-    > | null
-    if (prev && JSON.stringify(prev) === JSON.stringify(toggles)) return
-    try {
-      localStorage.setItem(TC_TRAIN_TOGGLES, JSON.stringify(toggles))
-    } catch {
-      /* ignore */
-    }
-  }, [toggles])
-
-  const applyToggle = (key: string, v: boolean): void => {
-    const next = { ...toggles, [key]: v }
-    setToggles(next)
-    onAction('setMode', { key, value: v ? '1' : '0' })
-  }
 
   const handleLaunchClick = (): void => {
     // 启动即记住本次选项：下次打开弹窗默认继续用它（与服务端 rl-config 双保险）。
@@ -222,30 +198,27 @@ export function TrainLaunchModal({
           当前生效（rl-config）：<b>{modes.slim === 'off' ? '关' : '开'}</b>
           ，取值随每轮写入「传输」页的 瘦身 列（事后可分组统计）。
         </p>
-        <div className="tc-line tc-toggle-group" ref={togglesRef}>
+        <div className="tc-line tc-toggle-group">
           <span className="tc-muted tc-small">行为开关</span>
-          <Toggle
-            label="stream"
-            checked={toggles.stream}
-            title="rl.stream：run_rl 的 --stream；本地默认开，远程内部强制 0"
-            disabled={readOnly}
-            onChange={(v) => applyToggle('rl.stream', v)}
-          />
-          <Toggle
-            label="双缓冲"
-            checked={toggles.doubleBuffer}
-            title="rl.double_buffer"
-            disabled={readOnly}
-            onChange={(v) => applyToggle('rl.double_buffer', v)}
-          />
-          <Toggle
-            label="预采"
-            checked={toggles.precollectEarly}
-            title="rl.precollect_early"
-            disabled={readOnly}
-            onChange={(v) => applyToggle('rl.precollect_early', v)}
-          />
+          {INERT_TOGGLES.map((t) => (
+            <Toggle
+              key={t.key}
+              label={t.label}
+              checked={t.checked(modes)}
+              title={`${t.key}：${INERT_TITLE}`}
+              note={`${t.key} · ${INERT_NOTE}`}
+              disabled
+              onChange={() => undefined}
+            />
+          ))}
         </div>
+        <p className="tc-muted tc-small tc-hint">
+          上面三个行为开关<b>当前不生效</b>：单一 PPO 路径下 `stream` / `double_buffer` 恒被
+          `validate_args` 置 0，`precollect_early` 只在双缓冲开时被读。 开关**保留**（键仍在
+          rl-config 的回写白名单里，解冻 intent/多路时可直接复用），标灰即表示此刻不生效。 显示值 =
+          rl-config 里的当前值（不再读写浏览器本地偏好 —— 灰着的开关显示成「开」会被
+          读成「它开着且有效」）。
+        </p>
         <div className="tc-line">
           <button
             type="button"

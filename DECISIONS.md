@@ -4395,8 +4395,12 @@ plan §8-O1 已否决「零缺省」。
    ⇒ 新增 `tests/test_rl_config_schema.py::test_run_rl_logs_the_advisory_and_still_starts`
    （子进程 oracle，同 `test_serve_wiring` 手法）：假键 ⇒ 启动日志出现告警行且**照常起训**。
 
-**未决（需用户拍板）**：控制台 `stream` / `double_buffer` / `precollect_early` 三个开关**仍在写**
-这三键（死开关 + 会打「已退役」告警）——摘不摘属控制台手感变化，不自行决定。
+**控制台死开关的处置（2026-09-26 用户裁决）**：`stream` / `double_buffer` / `precollect_early`
+三个开关**保留在界面上，但标灰 + 写清「当前不生效」**——否决「摘掉开关」与「只留文档」两档：
+`TrainLaunchModal.tsx::INERT_TOGGLES` 清单驱动渲染，`disabled` **常闭**、`note` 就写「当前不生效」，
+且显示值改成 rl-config 的当前值（**不再**读写 localStorage 偏好——灰着的开关显示成「开」会被读成
+「它开着且有效」）；`preset.ts::setMode` 的回写白名单**保留**这三键（解冻 intent/多路时直接复用）。
+守卫：`dashboard/tests/web-train-launch-wiring.test.ts`（呈现 / 常闭 / 不再写回 / 白名单保留四处）。
 
 ## §2026-09-26-x20-series-close（2026-09-26，x20 全系列关账：八腿结论 + L1/收入侧判死 + 转向新纪元）
 
