@@ -320,6 +320,11 @@ interface EvalResult {
   puGotOther: number
   /** 终局剩余命数（replay 元数据用；报告口径不变——报告顶层本就无 lives，勿消费）。 */
   finalLives: number
+  /** 新纪元死刑通道（plan §2 #9/P1-2 方案 a；可选：旧 bundle 产物无此四列，读数方按缺席处理）。 */
+  moveHist?: number[]
+  decisions?: number
+  idleTicks?: number
+  stopRuns?: number[]
 }
 
 /** 结果 → .replay 状态位（与 replay-writer.statusFromResult 同映射）。 */
@@ -492,6 +497,14 @@ export function runEvalOne(
   let t = 0
   let outcome: SimOutcome = 'max_ticks'
   let lossDetail: 'base_destroyed' | 'lives_exhausted' | undefined
+  // 新纪元死刑通道（plan §2 #9/P1-2 方案 a）：决策动作直方图 + 物理 idle 计数 + stop 段长。
+  // 只读诊断（不进 World、不进 metrics 列、不进 telemetry），旧消费方忽略新字段。
+  // 非 nn 策略（god 等）不走下面的决策分支 ⇒ decisions==0，读数方以后者缺席为无信号。
+  const moveHist = [0, 0, 0, 0, 0]
+  let decisions = 0
+  let idleTicks = 0
+  const stopRuns: number[] = []
+  let curStopRun = 0
 
   while (t < maxTicks) {
     // v3.7：意图执行器每 tick 内部自决（replan 帧跑 NN），无需手动 forward。
@@ -536,9 +549,17 @@ export function runEvalOne(
         }
         const fr = argmaxCat(model!.fireLogits, masks.fire)
         scripted.setAction(mv, fr)
+        moveHist[mv]++
+        decisions++
+        if (mv === 0) curStopRun++
+        else {
+          if (curStopRun > 0) stopRuns.push(curStopRun)
+          curStopRun = 0
+        }
       }
     }
     sim.tick()
+    if (world.player?.alive && !world.player.moving) idleTicks++
     // 录制须在 endFrame 前（endFrame 会清掉本 tick 的决策态）——与 runner 同采样点。
     if (recorder) recorder.recordFrame(ai, null)
     ai.endFrame()
@@ -826,6 +847,10 @@ export function runEvalOne(
     puGotShield: tel.puGotShield,
     puGotOther: tel.puGotOther,
     finalLives: world.lives,
+    moveHist,
+    decisions,
+    idleTicks,
+    stopRuns: curStopRun > 0 ? [...stopRuns, curStopRun] : stopRuns,
   }
 }
 
@@ -965,6 +990,12 @@ export function main(argv: string[]): void {
     firstKillKind: res.firstKillKind,
     killOrder: res.killOrder,
     killerKinds: res.killerKinds,
+    // 新纪元死刑通道（plan §2 #9/P1-2 方案 a）：裸透传；旧 bundle 的 res 无此四列时为
+    // undefined，JSON 落盘即缺席，读数方按无信号处理（与 EvalCourseRow 可选字段同约）。
+    moveHist: res.moveHist,
+    decisions: res.decisions,
+    idleTicks: res.idleTicks,
+    stopRuns: res.stopRuns,
     // feat：本局评估由哪条 features 后端产出（native / wasm / ts）。与 rollout 的 shard
     // manifest 同口径（rollout-eval-opt.plan.md §4 记账）——「以为开了 native 其实回落了」
     // 在 eval 侧同样要能事后看出来。与 wver **解耦**（本机直跑无 wver 也要记）。

@@ -833,6 +833,12 @@ class _UnitLanes:
             # metrics v8 危险暴露四列（与 eval_row 同源，见 eval_v8_fields；
             # 缺键（旧节点/旧报告）= None，下游按缺省处理，不伪造）。
             **eval_v8_fields(manifest),
+            # 新纪元死刑通道（plan §2 #9/P1-2 方案 a）：裸透传；旧报告缺键 = None，
+            # 读数方按无信号处理（与 EvalCourseRow 可选字段同约）。
+            "moveHist": manifest.get("moveHist"),
+            "decisions": manifest.get("decisions"),
+            "idleTicks": manifest.get("idleTicks"),
+            "stopRuns": manifest.get("stopRuns"),
             # B 层归属（ingest → EvalStore 直读）
             "batch_id": self.owner.batch.get("batch_id"),
             "batch_unit": {"idx": self.owner.unit_idx, "of": self.owner.unit_of},

@@ -1,0 +1,125 @@
+// 课程 h1-stop —— **新纪元首腿（H 系列第 1 课）：x1 单臂 STOP-only，从零**（plan/new-era-stop.plan.md §7）
+//
+// 状态：**草稿，待用户手工开训**（agent 不得启动训练）。
+//
+// 立项（glm P0-3/P0-4）：x1-a2 已证 flat critic + 均匀 K 从零可解；B 案让 STOP 首次可表达。
+//   首刀检验"表示"，单臂（无并行对照臂；x1 即对照，后续 rung 以它为对照）。
+//
+// 配方（= x1-a2 v4 包，逐参数 pin；glm P0-3 反转旧 E）：
+//   wKill 3.0 / wHit 0.6 / wWin 2.0 / wDmg 0.03 / wShot 0.05 / **wExplore 0.2**
+//   + terminal lives_exhausted −5.0 / timeout −2.0。
+//   EV 标定（2026-09-27，scratch 采样 rollout 40 局×4 关，B 案语义下）：
+//   walk +2.84 > sit +0.80 > rush −5.36 ⇒ 走优成立，坐吸引子不成立，配方放行。
+//   探索奖按 rung 递减（x1 保留 0.2 → x20 rung 归零，衰减表见 DECISIONS 开腿条目）。
+// 位移包（a2 原样，回基线另议）：lr 0.0005 / epochs 6 / mb 512 / kl 0.02→0.01。
+//
+// 起点：随机初始化（`bc` = scratch-init 占位），`kickstart_ref=false`。
+//   BC = 只读探针（#12 已跑：旧 BC 权重 constant-stop 坍缩，链通、权重已死，禁作 warm-start）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 判据（x1 rung 绝对数门，hy P1-3；前代冠军只作脚注：a2 100%/0.877）
+// ══════════════════════════════════════════════════════════════════════════
+// **门**：日常段（860001，400 局）`pass == 100%` 且 `dmg/局 ≤ 5.0`
+//   （X/Y 由本文件 pin；不达标不停腿持久战，按横盘规则停）。
+// **机制链**：① stopPickRate（日常侧车计数，A5 已落地）② threat/clean（如有）③ pass/dmg 跟随。
+// **约束**：超时 >5% ⇒ 人工决策停；kl 连续 3 轮 ≥0.075 ⇒ 记录 + 人工盯盘；
+//   ent 跌破 0.25 ⇒ break（a2 rationale：探索崩护栏）；mean 不设地板（x1 从零必然爬坡）。
+// **判据一律不得由教师表现反推**（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 止损（人工盯盘执行；P1-6 条件判别臂预注册）
+// ══════════════════════════════════════════════════════════════════════════
+//   · **专属死刑**：stopPickRate 连续 3 个 eval 点 < 10/千tick（前置：#12 探针已证链通）
+//     ⇒ 停腿。但**先看熵**：熵早期塌陷 ⇒ 开判别臂（熵下限抬高优先；BC warm-start 标注陷阱：
+//     BC 收敛权重 + dense-only ⇒ advantage≈0，直进 B2 会误读，glm P2-4），通过后才进 B2；
+//     熵健康 + idle 平 ⇒ 直接 B2（x2 威胁事件 rung）。
+//   · **对称死刑**：stopPickRate 连续 3 点高于人类基线上四分位 ⇒ 停腿 ⇒ B0（EV 核对 → 配方修正案/归档）。
+//   · **机械横盘**：pass/dmg 连续 4 个 eval 点无改善 ⇒ 停腿；宽限一次 +10 轮（x2 先例，不得二次宽限）。
+//   · B1/B3/B4 按 plan §8（B1 = 信用窗优先；B3 死锁回炉；B4 回接条件）。
+
+{
+  "version": 5,
+  "name": "h1-stop",
+  "mode": "per-tick",
+  // 环境：ladder-c01（4 关 a/b/c/d，开阔单敌、max_ticks 1500、lives 1、hard）。
+  // 任务侧一个字不动（AGENTS §0.2）。
+  "level": "ladder-c01",
+
+  // ── 奖励：x1-a2 v4 包逐字 ──────────────────────────────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wWin": 2.0,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.2
+    },
+    "terminal": {
+      "lives_exhausted": -5.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：随机初始化占位，纯 warm start ──────────────────────────────────
+  "bc": "nn-training/weights/x1-rebirth/scratch-init.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // ── 预算（x1 ~50 轮量级；a2 46 轮满分先例）────────────────────────────────
+  "iters": 60,
+  "max_hours": 12,
+  "workers": 8,
+
+  // ── 位移包：a2 原样 ────────────────────────────────────────────────────
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
+    { "kl_coef": 0.01, "lr": 0.00025 }
+  ],
+
+  // ── 采集 ───────────────────────────────────────────────────────────────
+  "target_transitions": 24000,
+  "est_samples_per_game": 120,
+  "seed_rotate": 600,
+
+  // ── 路径：新目录、禁续跑（§15.5）────────────────────────────────────────
+  "out": "tmp/h1-stop/weights.json",
+  "traj": "tmp/h1-stop",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/h1-stop",
+  "backup_prefix": "h1-stop",
+
+  // ── 评估 ───────────────────────────────────────────────────────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 开工前置 ─────────────────────────────────────────────────────────────
+// ① bc 占位存在（scratch-init，已验）。② 公式编译验证（validate_reward；与 a2 逐字同是正确原因）。
+// ③ 新 out/traj 目录（禁续跑）。④ 节点：self 活 + mac 已恢复 + a96 可 enable（A6）；
+//    无远端时本机慢 10x，首腿 x1 局短可接受，真空期用 --dist-local 顶。
+// ⑤ metrics 无变更（v8；日常死刑通道走侧车计数，A5 已落地两端）。
+// ⑥ paired-kill 默认关（opt-in）。
+//
+// 启动（**用户手工；agent 不得启动训练**，经控制台开课）。
+//
+// ── 诊断工具 ─────────────────────────────────────────────────────────────
+// · 日常趋势：it0/it5…（860001 段 400 局）pass/dmg/low%/mean + stopPickRate（侧车）+ cells。
+// · EV 标定数据：`tmp/ev-calib/`（40 局 scratch rollout + x2-ev-table.py 法输出）。
+// · BC 探针数据：`tmp/bc-probe3/probe.jsonl`（旧权重 constant-stop 坍缩，链通）。
+//
+// ── 结算节（跑完回填）──────────────────────────────────────────────────────
+// 必填：① pass/dmg it0 → 终点 ② stopPickRate 是否出现（威胁上下文优先）③ 旧腿无（新纪元首腿）
+//   ④ 分关表 ⑤ 超时/换血 ⑥ 实际轮数与耗时 ⑦ 判语（过门⇒ x2 rung（事件包）；
+//   idle 平 ⇒ B2；停太多 ⇒ B0；横盘 ⇒ 停）。

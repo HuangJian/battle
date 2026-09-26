@@ -9,11 +9,13 @@
     "board": 26,
     "scalarDim": 30,
     "params": 70087,
-    "madds": null,
-    "madds_source": "unknown arch — compute from the net before gating"
+    "params_reconciliation": "70087 = hand-calc 69064 + 1152 (stem in_ch 16->18: +2 coord channels, missed) - 129 (value head: BC file lacks it). Verified by shape summation 2026-09-26.",
+    "madds": 37830000,
+    "madds_source": "computed from weight shapes (stem 7.01M + dw 8.65M + pw 22.15M + fc/heads 0.01M), no model build; consistent with plan ~37M; bench BC_MADDS=30.77e6 is stale old-arch const",
+    "madds_note": "decision rate stays 6Hz (uniform K=10); per-second budget dimension deferred with event-ization"
   },
   "gate": {
     "params_max": 71087,
-    "madds_max": null
+    "madds_max": 37830000
   }
 }

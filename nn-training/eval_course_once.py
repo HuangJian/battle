@@ -216,6 +216,13 @@ def _to_tool_row(row: dict, meta: dict, n_stages: int, seed0: int, games: int) -
         "firstKillKind": row.get("firstKillKind"),
         "killOrder": arr("killOrder"),
         "killerKinds": arr("killerKinds"),
+        # 新纪元死刑通道（plan §2 #9/P1-2 方案 a）：裸透传，None 保持 None
+        # （旧 bundle 的行没有这四列 —— None = 无信号，读数方按缺席处理；
+        # 故意不用 arr()/or 0 垫，否则旧行会被误读成"0 决策"）。
+        "moveHist": row.get("moveHist"),
+        "decisions": row.get("decisions"),
+        "idleTicks": row.get("idleTicks"),
+        "stopRuns": row.get("stopRuns"),
         # 来源（B 层行自带）：判读「这批局谁跑的」不再靠 TS 自报
         "node": row.get("node"),
     }

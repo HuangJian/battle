@@ -77,6 +77,13 @@ export interface EvalCourseRow {
   firstKillKind: string | null
   killOrder: string[]
   killerKinds: (string | null)[]
+  /** 新纪元死刑通道（可选：旧 bundle 的行没有这些字段，读数方按缺席处理）。 */
+  moveHist?: number[]
+  decisions?: number
+  idleTicks?: number
+  stopRuns?: number[]
+  /** EV 标定用（B3）：本局访问格数；旧行缺席即无。 */
+  cellsVisited?: number
 }
 
 self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
@@ -137,6 +144,11 @@ self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
         firstKillKind: res.firstKillKind,
         killOrder: res.killOrder,
         killerKinds: res.killerKinds,
+        moveHist: res.moveHist,
+        decisions: res.decisions,
+        idleTicks: res.idleTicks,
+        stopRuns: res.stopRuns,
+        cellsVisited: res.cellsVisited,
       })
     }
     ;(self as any).postMessage({ results: rows })
