@@ -11,8 +11,9 @@ checkpoint(RNG) / shard 发现与加载 / episode 骨架 样板。本模块把�
   * compute_gae(dt=None) = 原 ppo.compute_gae 定长路径；
     compute_gae(dt=数组) = 原 ppo_intent.compute_gae_variable 变步长路径
     （Δt≡1 时两路径逐字节一致，test_ppo_common.py 断言）。
-  * load_episodes_common 同时覆盖 ppo.load_episodes（只归一 adv）与
-    ppo_intent.load_episodes_intent（adv+ret 双归一）；日志前缀/措辞按原样参数化。
+  * load_episodes_common（2026-09-26 已搬到 ppo/np_core，此处再导出）同时覆盖
+    ppo.load_episodes（只归一 adv）与 ppo_intent.load_episodes_intent（adv+ret 双归一）；
+    日志前缀/措辞按原样参数化。
   * _ppo_save / _ppo_load / _pack_np_state / _unpack_np_state 原样搬移——
     ppo_intent 原内联的 checkpoint 段改为调用本实现（逐字节相同）。
 """
@@ -22,7 +23,6 @@ from __future__ import annotations
 import json
 import os
 import time
-from collections.abc import Callable, Sequence
 from typing import Any, cast
 
 import numpy as np
@@ -47,6 +47,7 @@ from ppo.np_core import (  # noqa: F401  (re-export：既有调用点不变)
     compute_gae,
     discover_shards,
     is_xla,
+    load_episodes_common,
     load_shard_fields,
     tpu_backend_missing_reason,
     trim_shard_arrays,
@@ -55,7 +56,11 @@ from ppo.np_core import (  # noqa: F401  (re-export：既有调用点不变)
     xla_metrics_delta,
     xla_metrics_snapshot,
 )
-from rl.log import log  # 统一时间戳日志（与 ppo 旧 log 逐字节一致）
+
+# 统一时间戳日志（与 ppo 旧 log 逐字节一致）。**再导出**：ppo.intent / ppo.engine /
+# ppo.goal / train.goal_bc 都从本模块取 `log`（load_episodes_common 搬去 np_core 后，
+# 本模块自身不再直接调用它 ⇒ 显式 `log as log` + noqa 标成公开再导出，勿当死代码删）。
+from rl.log import log as log
 
 
 # ---------------- policy helpers ----------------
@@ -367,116 +372,3 @@ def _ppo_load(ckpt_path: str | None, model, opt) -> int:
     opt.load_state_dict(torch.load(op, map_location="cpu"))
     _unpack_np_state(st["rng"])
     return int(st.get("epochs_done", 0))
-
-
-
-
-def load_episodes_common(
-    data_root: str,
-    *,
-    label: str,
-    shard_kind: str,
-    need_files: Sequence[str],
-    shard_loader: Callable[[str], dict[str, np.ndarray]],
-    gae: Callable[[dict[str, np.ndarray]], tuple[np.ndarray, np.ndarray]],
-    gae_name: str,
-    normalize_ret: bool,
-    load_log_every: int = 128,
-    normalize_adv: bool = True,
-    per_stage_quota: int = 0,
-    bundle: Any = None,
-) -> list[dict]:
-    """Discover shards → per-shard GAE → global normalize → episode dicts.
-
-    与原 ppo.load_episodes / ppo_intent.load_episodes_intent 逐字节等价：
-      * 日志前缀/措辞经 label / shard_kind / gae_name 参数化保持原样；
-      * episode 字段 = shard 去掉 (reward, done) + adv/ret（两处原手写字段集一致）；
-      * adv 全局归一（mean 0 / std 1）；normalize_ret=True 时 ret 同步归一
-        （intent 的 value 头目标，ppo 不归）。
-    """
-    shards = discover_shards(data_root, need_files)
-    if not shards:
-        raise SystemExit(f"[{label}] no {shard_kind} shards found under {data_root}")
-    # ★ 2026-09-24（日志节食）：这四行是「装载阶段」的读数集合，传给 bundle 时攒进调用方
-    # 的那**一行**（见 `log_bundle.py`）；bundle=None 时逐字节保持原输出（goal/intent/
-    # 本机三条线共用本函数，行为不变）。
-    if bundle is not None:
-        bundle.add("shards", f"{len(shards)} {shard_kind} ← {data_root}")
-    else:
-        log(f"[{label}] loaded {len(shards)} {shard_kind} shards from {data_root}")
-
-    episodes: list[dict] = []
-    seen_steps: dict[int, int] = {}  # stage → 已收步数（仅 per_stage_quota > 0 时启用）
-    dropped_shards = 0
-    t_load = time.time()
-    for k, sd in enumerate(shards):
-        if k > 0 and k % load_log_every == 0:
-            if bundle is not None:
-                bundle.add("装载", f"{k}/{len(shards)} {time.time() - t_load:.0f}s")
-            else:
-                log(f"[{label}] loading shards {k}/{len(shards)} ({time.time() - t_load:.0f}s)")
-        d = shard_loader(sd)
-        N = d["obs"].shape[0]
-        if N == 0:
-            continue
-        if per_stage_quota > 0:
-            # 逐关严格配额（target_transitions 路线）：每关只收前 per_stage_quota 步。
-            # ① 截断在 GAE **之前**（见 trim_shard_arrays：GAE 反向递推，顺序错了
-            #    保留段的 adv/ret 全错）；② **逐关**而非全局配额，是为保住
-            #    「短局关淹不了长局关」的分关独立达标不变量（全局按序截断会把排在
-            #    后面的关整关丢掉）。配额满后整 shard 丢弃（不切半局进新关）。
-            stage = int(d.get("stage", -1))
-            room = per_stage_quota - seen_steps.get(stage, 0)
-            if room <= 0:
-                dropped_shards += 1
-                continue
-            if room < N:
-                d = trim_shard_arrays(d, room)
-                N = room
-            seen_steps[stage] = seen_steps.get(stage, 0) + N
-        adv, ret = gae(d)
-        episode = {k: v for k, v in d.items() if k not in ("reward", "done", "stage")}
-        episode["adv"] = adv.astype(np.float32)
-        episode["ret"] = ret.astype(np.float32)
-        episodes.append(episode)
-
-    _io_line = (
-        f"shard IO + {gae_name} done for {len(episodes)} episodes "
-        f"({time.time() - t_load:.0f}s)"
-    )
-    if bundle is not None:
-        bundle.add("装载", f"{len(shards)}/{len(shards)} {time.time() - t_load:.0f}s")
-        bundle.add("episodes", f"{len(episodes)} eps（{gae_name} 已算）")
-    else:
-        log(f"[{label}] {_io_line}")
-    if per_stage_quota > 0:
-        total = sum(seen_steps.values())
-        short = {
-            s: per_stage_quota - n
-            for s, n in sorted(seen_steps.items())
-            if n < per_stage_quota
-        }
-        _quota_line = (
-            f"per-stage quota={per_stage_quota}: kept {total} steps / "
-            f"{len(seen_steps)} stages, dropped {dropped_shards} shards"
-        )
-        if bundle is not None:
-            bundle.add("配额", _quota_line)
-            if short:
-                # 供给不足是**要看的**（缺哪关、缺多少），攒行不能把它埋掉 ⇒ 单独一句。
-                bundle.note(f"SHORT (供给不足) stages={short}")
-        else:
-            log(f"[{label}] {_quota_line}" + (f"; SHORT (供给不足) stages={short}" if short else ""))
-    # P1-7（2026-09-02）：adv 归一化粒度参数化（normalize_adv=False 供
-    # --adv-norm none 对照实验；默认 True 保持全局归一现状）。
-    if normalize_adv:
-        all_adv = np.concatenate([e["adv"] for e in episodes])
-        amean, astd = all_adv.mean(), all_adv.std() + 1e-8
-        for e in episodes:
-            e["adv"] = (e["adv"] - amean) / astd
-    if normalize_ret:
-        all_ret = np.concatenate([e["ret"] for e in episodes])
-        rmean, rstd = all_ret.mean(), all_ret.std() + 1e-8
-        for e in episodes:
-            e["ret"] = (e["ret"] - rmean) / rstd
-    return episodes

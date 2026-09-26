@@ -13,7 +13,10 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-import ppo.common as C
+# 本文件测的全是 numpy 纯逻辑（trim_shard_arrays / load_episodes_common / 逐关配额），
+# 这两个函数的家是免 torch 的 `ppo.np_core`（2026-09-26 从 ppo.common 搬出）——
+# 从这里 import 才不把 torch 拖进测试路径；补丁点也随之在本模块命名空间里。
+import ppo.np_core as C
 
 
 def _fake_shard(n: int, stage: int) -> dict:

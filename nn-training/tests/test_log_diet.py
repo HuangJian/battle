@@ -4,7 +4,8 @@
 为什么要自动化钉：这条改动的收益是**行数**（一个跑一次算不出来的量），而它正是把控制台
 日志面板拖死的那个变量——哪天有人为了调试把它改回逐行打印，本文件必须先红。四处接线：
 
-  ① `ppo/common.load_episodes_common(bundle=…)`：装载四行 → 一行；不传 bundle 时逐字不变；
+  ① `ppo/np_core.load_episodes_common(bundle=…)`（2026-09-26 由 `ppo/common` 搬来）：
+     装载四行 → 一行；不传 bundle 时逐字不变；
   ② `ppo/engine.ppo_update(progress=…)`：epoch 行 + 收尾行 → 一行；不传时逐字不变；
   ③ `remote/iter_rollout.run_iter_rollout`：轮设置/看门狗/池/进度/收尾/单局耗时 → 一行，
      **中断时也要打**（否则「为什么被杀了」无从归因）；
@@ -20,7 +21,10 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-import ppo.common as C
+# `load_episodes_common` 的家在 ppo.np_core（2026-09-26 从 ppo/common 搬出）——
+# 它读的是**本模块**全局的 discover_shards / log ⇒ monkeypatch 必须打在 np_core 上，
+# 打在 ppo.common 上会是**静默空操作**（名字还在、没人在读）。
+import ppo.np_core as C
 from log_bundle import LogBundle
 
 
