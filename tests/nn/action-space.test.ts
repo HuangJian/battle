@@ -1,7 +1,13 @@
 import { describe, it, expect } from 'bun:test'
 import { readFileSync, readdirSync, statSync } from 'node:fs'
 import { join } from 'node:path'
-import { decodeMove, encodeMove, MOVE_DECODE, MOVE_DIM } from '../../src/nn/action-space'
+import {
+  decodeMove,
+  encodeMove,
+  MOVE_DECODE,
+  MOVE_DIM,
+  MOVE_LABEL_SEMANTICS,
+} from '../../src/nn/action-space'
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
 import { makeArena } from '../../src/nn/arena-ladder'
@@ -36,6 +42,13 @@ describe('decodeMove / encodeMove (index 0 = STOP)', () => {
   it('MOVE_DIM stays 5 (dims unchanged by B案)', () => {
     expect(MOVE_DIM).toBe(5)
     expect(MOVE_DECODE.length).toBe(4)
+  })
+
+  // Twin anchor with nn-training/schema.py::MOVE_LABEL_SEMANTICS (#7). The tag
+  // enters the Python RL corpus identity so old policy rollout shards are
+  // rejected; if the two sides drift, the rejection stops working silently.
+  it('MOVE_LABEL_SEMANTICS == stop0 (twin-anchored with schema.py)', () => {
+    expect(MOVE_LABEL_SEMANTICS).toBe('stop0')
   })
 })
 

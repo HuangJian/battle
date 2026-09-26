@@ -23,9 +23,19 @@ OBS_SHAPE = (OBS_CHANNELS, BOARD, BOARD)
 SCALAR_DIM = 30
 
 # ---- Action heads (v2: item head REMOVED — AI 不使用主动道具) ----
-MOVE_DIM = 5  # none/up/down/left/right
+MOVE_DIM = 5  # stop/up/down/left/right (B案: index 0 = STOP)
 FIRE_DIM = 2  # hold-state: 0=release, 1=hold
 MASK_DIM = MOVE_DIM + FIRE_DIM  # 7
+
+# Move-label semantics version (plan/new-era-stop.plan.md #7).
+# Index 0 used to mean "keep current heading"; B案 redefines it as **STOP** — the
+# same byte `a_move==0` is now physically opposite. This tag enters
+# `rl.config.corpus_identity_fp`, so every policy rollout shard produced under the
+# old mapping is a *foreign lineage* (rejected by D14 in every funnel) while
+# BC/demo shards stay valid — their null→0 labels were always physically correct,
+# and `bc_corpus_identity_fp` deliberately does not include this tag.
+# MUST match `src/nn/action-space.ts::MOVE_LABEL_SEMANTICS` (twin-anchored tests).
+MOVE_LABEL_SEMANTICS = "stop0"
 
 # Schema major version. Written into every npy shard manifest and into the
 # exported weights file. Bump +1 on ANY channel/scalar/action layout change.

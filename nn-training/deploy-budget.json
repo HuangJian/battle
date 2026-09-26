@@ -1,0 +1,19 @@
+{
+  "_comment": "Deployment actor budget (plan/new-era-stop.plan.md #11). Gate: a new actor's params must be <= baseline + 1000 and its MAdds <= baseline. B案 changes no dims, so the expected delta is +0.",
+  "generated_by": "bun tools/bench-nn-infer.ts --print-params <weights>",
+  "_baseline_note": "Reference = the only committed live student weights in this checkout. At cutover the gate's baseline MUST be re-pointed at the incumbent policy under the new executor (the 'n' re-measurement, plan §3 部署门).",
+  "baseline": {
+    "weights": "nn-training/weights/x20-human-bc/weights.json",
+    "kind": "student",
+    "inCh": 16,
+    "board": 26,
+    "scalarDim": 30,
+    "params": 70087,
+    "madds": null,
+    "madds_source": "unknown arch — compute from the net before gating"
+  },
+  "gate": {
+    "params_max": 71087,
+    "madds_max": null
+  }
+}

@@ -472,6 +472,10 @@ def _payload_ref(course: CourseConfig) -> dict:
     return {
         "obs_schema_major": schema.OBS_SCHEMA_MAJOR,
         "obs_schema_fingerprint": schema.SCHEMA_FINGERPRINT,
+        # 动作标签映射版本：plan/new-era-stop #7 刻意**无条件**进身份（index 0
+        # keep→STOP 是全局语义变更，漂移就是目的）——与本文件「volume 键只在激活
+        # 时进」的规则不同，是唯一一处有意的整体漂移。
+        "move_label_semantics": schema.MOVE_LABEL_SEMANTICS,
         "mode": course.mode,
         "stages": stages,
         "difficulty": course.difficulty,

@@ -11,6 +11,7 @@
  * when the NN player is wired into the runtime).
  *
  * Run:  bun tools/bench-nn-infer.ts [weightsPath]
+ *       bun tools/bench-nn-infer.ts --print-params [weightsPath]   # JSON budget
  * Default weights: the best BC v2 (val 0.9984).
  */
 import { readFileSync } from 'fs'
@@ -21,14 +22,61 @@ const BC_MADDS = 30.77e6
 
 const DEFAULT_WEIGHTS = 'nn-training/weights/weights.20260819-163911_ep40_val0.9984.json'
 
+/** Count parameters in one weights tensor: nested arrays, or {shape,data} form. */
+function countLeaves(x: unknown): number {
+  if (Array.isArray(x)) return x.reduce<number>((a, v) => a + countLeaves(v), 0)
+  if (typeof x === 'number') return 1
+  const shape = (x as { shape?: unknown } | null)?.shape
+  if (Array.isArray(shape)) {
+    return shape.reduce<number>((a, d) => a * (typeof d === 'number' ? d : 0), 1)
+  }
+  return 0
+}
+
 function main() {
-  const path = process.argv[2] ?? DEFAULT_WEIGHTS
-  console.log(`[bench] weights: ${path}`)
+  const argv = process.argv.slice(2)
+  const printParams = argv.includes('--print-params')
+  const path = argv.find((a) => !a.startsWith('--')) ?? DEFAULT_WEIGHTS
+  if (!printParams) console.log(`[bench] weights: ${path}`)
 
   const text = readFileSync(path, 'utf8')
-  const json = JSON.parse(text) as { arch?: Record<string, unknown> }
-  const model = buildModelFromText(text)
+  const json = JSON.parse(text) as {
+    arch?: Record<string, unknown>
+    params?: Record<string, unknown>
+    num_params?: number
+  }
   const arch = json.arch ?? {}
+
+  // Deployment-budget artifact (plan/new-era-stop.plan.md #11): the actor's
+  // parameter count is definitive from the weights (num_params or the sum of
+  // tensor leaves); MAdds is only known for the reference BC arch (30.77e6),
+  // else null. B案 is +0 params — this prints the baseline the deploy gate
+  // compares against. Pure metadata: it never builds the model, so it works on
+  // any weights file.
+  if (printParams) {
+    const params =
+      typeof json.num_params === 'number'
+        ? json.num_params
+        : Object.values(json.params ?? {}).reduce<number>((a, v) => a + countLeaves(v), 0)
+    const isBc = arch.kind === undefined || arch.kind === 'bc'
+    const out = {
+      weights: path,
+      kind: arch.kind ?? 'bc',
+      inCh: arch.in_ch ?? 0,
+      board: arch.board ?? 0,
+      scalarDim: arch.scalar_dim ?? 0,
+      params,
+      madds: isBc ? BC_MADDS : null,
+      madds_source: isBc
+        ? 'reference BC arch (verified vs nn-training/model.py)'
+        : 'unknown arch — compute from the net before gating',
+    }
+    process.stdout.write(JSON.stringify(out, null, 2) + '\n')
+    return
+  }
+
+  const model = buildModelFromText(text)
+
   console.log(
     `[bench] model built: kind=${arch.kind ?? 'bc'} ` +
       `inCh=${model.inCh} board=${model.board} scalar=${model.scalarDim}`,

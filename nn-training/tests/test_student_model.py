@@ -66,6 +66,12 @@ def test_ppo_student_value_head() -> None:
     obs, sc = _dummy()
     mv, fr, val = m(obs, sc)
     check(tuple(val.shape) == (2, 1), f"value head (2,1)（got {tuple(val.shape)}）")
+    # #6 回归断言：线上 move 头出维必须 == schema.MOVE_DIM == 5（B案不改 dims）。
+    check(
+        tuple(m.move_head.weight.shape) == (MOVE_DIM, m.head_hidden),
+        f"move_head.weight shape ({MOVE_DIM},{m.head_hidden})（got {tuple(m.move_head.weight.shape)}）",
+    )
+    check(m.move_head.weight.shape[0] == 5, "线上动作头 == 5 槽（0=STOP,1..4=方向）")
     # value head 是额外参数；学生主干与 StudentNet 同参数
     n_student = param_count(StudentNet())
     n_ppo = param_count(m)

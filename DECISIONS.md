@@ -4526,3 +4526,44 @@ B-cont（25 轮）因表示层缺"停"被叫停，H1/H2 未决移交新纪元。
 
 **落点**：各课程文件结算节（`nn-training/curricula/x20-dodge-*.jsonc`、`x20-state-init.jsonc`、
 `x20-steady-cont.jsonc`）+ `docs/nn/experiments.md` §37–§44；门控数据 `tmp/x20-dodge-l*/settle/`。
+
+## §2026-09-26-goalnn-stop-k-is-training-side（2026-09-26，K=10 决策门周期属训练侧：可动）
+
+**来历**：新纪元首刀（`plan/new-era-stop.plan.md`）反复出现「K 要不要收紧」的悬案——AGENTS §0.2
+规定**任务侧**（命数/敌数/关卡形态/终局标准/物理冷却）不可动，而 K 是 NN 输入侧的决策周期
+（盲 hold 的长度），既非规则也非关卡。
+
+**决定**：**K 是训练侧可动参数**。改 K 只改「策略每隔多少 tick 重新观察一次」，不改任务的胜负
+条件与单位 ⇒ 收紧 K（如 10→5）属于训练侧调参，不触发 §0.2 禁令，也不需要新关卡/新任务口径。
+首腿保持 K=10（Phase -1 实测：人类非冰面停段中位 9 tick ≥ K/2，相容），收紧留作 x2 rung 期权。
+
+**被否决**：把 K 归为任务侧（会让「10 tick 盲 hold」这个已确诊病灶永远不可修，与诊断②矛盾）；
+首刀就收紧 K（与 STOP 单变量声明冲突，hy P0-4）。
+
+## §2026-09-26-goalnn-stop-mdp-no-change（2026-09-26，B案不构成 MDP 变更声明）
+
+**来历**：B案把 move index 0 从「保持朝向」改为 **STOP**——动作空间的**语义**变了，需要明确
+声明它算不算 MDP 变更（会不会波及 state-init bank / 决策门 / divergence-probe）。
+
+**决定**：**B案不是 MDP 变更**。状态空间、转移、奖励、K=10 的均匀决策边界全部未动；变的只是
+「同一个动作索引代表哪个物理命令」，而该映射在仿真里本来就存在（`moveDir=null ⇒ moving=false`）。
+⇒ 决策门 5 处（`t%K`）、divergence-probe、state-init bank 的 `t%K==0` 切点**全部无需改**
+（Phase 0 #4「天然一致即验收」）。真正的 MDP 变更（threat-onset 事件化 / 半 MDP γ^Δt）**defer
+到 x2 rung**，届时按 R2 包重新预注册。
+
+**被否决**：把动作语义翻转也算 MDP 变更（会误导后续把所有基于 K 的装置重算——它们依赖「决策
+边界」而非「索引含义」）；顺带做事件化（等于首刀变多变量，hy P0-4 / glm P0-3）。
+
+**违反后果**：混为一谈 ⇒ 无谓重出 bank / 改决策门，且掩盖真正的 MDP 变更（事件化）根本没做。
+
+## §2026-09-26-goalnn-stop-rng-principle（2026-09-26，RNG/特权观测不进 shard：原则存档）
+
+**来历**：新纪元讨论中反复提出「给 critic/actor 特权观测」（RNG 状态、敌开火倒计时、tick 堆、
+事件堆栈）以降低信用分配难度。评审指出这会改 shard 格式并使既有 value 读数整体偏移。
+
+**决定**：**特权观测一律不进 shard / 不进 obs**。判据①进 shard = 格式变更（`OBS_SCHEMA_MAJOR`
+bump + 全量重转），且会让已训 value 头的输出量纲漂移（旧 checkpoint 不可比）；②敌开火倒计时
+等本就是**超人信息**——人类看不到，进了就破坏「以人类熟练玩家为难度唯一口径」（§0.2）。RNG 只走
+`world.rng`（AGENTS §2.3），不进观测。需要时以**训练侧**手段解决（GAE λ / value 头 / 事件化）。
+
+**被否决**：把 RNG state 塞进 shard（格式 + value 偏移双代价）；观测侧加倒计时列（超人信息出局）。

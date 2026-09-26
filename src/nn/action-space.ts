@@ -27,6 +27,18 @@ export const MOVE_DECODE: ReadonlyArray<Direction> = ['up', 'down', 'left', 'rig
 export const MOVE_DIM = 5
 
 /**
+ * Move-label semantics version (plan/new-era-stop #7). Index 0 used to mean
+ * "keep current heading"; B案 redefines it as STOP — the same stored byte is now
+ * physically opposite. This tag enters the Python corpus identity
+ * (`rl.config.corpus_identity_fp`), so old policy rollout shards become foreign
+ * lineage and are rejected by D14, while BC/demo shards (their null→0 labels
+ * were already physically correct) stay valid.
+ *
+ * MUST match `nn-training/schema.py::MOVE_LABEL_SEMANTICS` (twin-anchored).
+ */
+export const MOVE_LABEL_SEMANTICS = 'stop0'
+
+/**
  * Decode a move-head index (0..4) into a movement command.
  *   0     → null  (STOP; `moving = false`)
  *   1..4  → up / down / left / right

@@ -82,8 +82,8 @@ class StudentNet(nn.Module):
     CoordConv-ConvMixer-Lite student (plan §4.3), BN-free.
 
     Input:
-      obs:     (B, 14, 26, 26) uint8 — encoder output (14 channels)
-      scalars: (B, 19) float32
+      obs:     (B, 16, 26, 26) uint8 — encoder output (v3: 16 channels)
+      scalars: (B, 30) float32  (v3: 30 scalars)
     Output: (move_logits, fire_logits)（v2：双头，item 头已删除）.
     """
 

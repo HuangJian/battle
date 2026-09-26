@@ -6,6 +6,12 @@ PPOStudent). Kept as the teacher-model reference for the P1 phase
 (teacher RL → distill to BN-free student, see plan/RL-Net-Selection.md §4).
 Do not wire into the student pipeline without updating that plan.
 
+★ DEAD CODE (plan/new-era-stop.plan.md #6) — the live move head has 5 slots and
+lives in `models/student.py::PPOStudent`. This module is import-guarded by
+`tests/test_action_head_hygiene.py` (no rl/ppo/remote module may import it) and
+its own contract is pinned by `tests/test_rl_model.py`. Changing this file does
+NOT change the shipped policy.
+
 Architecture:
   obs(14×26×26) → ConvIn(14→64) → 11×ResBlock(64) → ConvOut(64→128) → GAP
   scalars(19) → FC(19→64)

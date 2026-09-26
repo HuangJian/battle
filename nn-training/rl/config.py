@@ -1288,7 +1288,7 @@ def corpus_identity_fp(course: CourseConfig) -> str:
     import hashlib
     import json
 
-    from schema import OBS_SCHEMA_MAJOR, SCHEMA_FINGERPRINT
+    from schema import MOVE_LABEL_SEMANTICS, OBS_SCHEMA_MAJOR, SCHEMA_FINGERPRINT
 
     stages = (
         [s.model_dump() for s in course.stages]
@@ -1299,6 +1299,14 @@ def corpus_identity_fp(course: CourseConfig) -> str:
         # 编码布局：schema bump / 指纹变化 ⇒ 「一个样本是什么」已变，身份必须跟着变
         "obs_schema_major": OBS_SCHEMA_MAJOR,
         "obs_schema_fingerprint": SCHEMA_FINGERPRINT,
+        # 动作标签映射版本（plan/new-era-stop #7）：“同一个 a_move 字节代表什么”
+        # 也是「一个样本是什么」的一部分。B案把 index 0 从 keep 改为 **STOP** ⇒ 旧
+        # policy rollout shard 里的 a_move==0 行语义已翻转 ⇒ 必须让它们成为**异血缘**
+        # （D14 在四个 funnel 统一拒收），而不是静默混训。**无条件进 payload**：这是
+        # 一次全局标签语义变更（不是某条课程的开关），漂移就是目的。demo/BC 语料不走
+        # 本函数（用 bc_corpus_identity_fp，刻意不含此键）⇒ 它们标注的 null→0 物理上
+        # 本来就正确，祖父保留。
+        "move_label_semantics": MOVE_LABEL_SEMANTICS,
         "mode": course.mode,
         "stages": stages,
         "difficulty": course.difficulty,
