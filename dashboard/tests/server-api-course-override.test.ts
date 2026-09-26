@@ -1,7 +1,10 @@
 /**
- * server-api-course-override.test.ts — 课程覆盖只读查看：sanitizeViewCourse 放行真实课程、buildStateView(course) 不写 state、pool 课程键控、componentLogPayload 跟课程
+ * server-api-course-override.test.ts — 课程覆盖只读查看：sanitizeViewCourse 放行真实课程、buildStateView(course) 不写 state、pool 切天不重算、componentLogPayload 跟课程
  *
  * 分层：src/server/api/courses.ts + state-view.ts + pool.ts + component-meta.ts
+ *
+ * ★ 2026-09-26（plan/nodes-decouple-from-course.plan.md）：`/api/pool` 的 `?course=` 已移除
+ *   （池视图与课程无关），改为 `?days=` 窗口 —— 对应用例随之更新。
  *
  * 自 training-console.test.ts 按 src 分层拆出。
  * 夹具（env 重定向 + 被测模块）见 ./helpers/console-fixture.ts。
@@ -35,16 +38,13 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     expect(s2.course).toBe(api.effectiveCourse(before, courses))
   })
 
-  it('buildPoolView 尊重 course 覆盖（视图回显它；探测层跨课程共用，切课不重算）', async () => {
-    const courses = api.discoverCourses(50)
-    const target = courses[0]
-    if (!target) return
-    const p = await api.buildPoolView(false, target)
-    expect(p.course).toBe(target)
-    // 缓存不再按课程键控（2026-09-22 两层拆分）：ping / 池历史 / codeHash / selfNode 都是
-    // **机器事实**，`course` 只是回显字段 —— 换课程不重算探测。
-    const other = await api.buildPoolView(false, courses[1] ?? target)
-    expect(other.cachedAt).toBe(p.cachedAt)
+  it('buildPoolView：?course= 已移除、改为 days 窗口；切天不重算探测', async () => {
+    const p = await api.buildPoolView(false, 'today')
+    expect(p.window.key).toBe('today')
+    // 探测层缓存的是**全量** agg（机器级、与窗口无关）：切天只重投影，命中同一份 cachedAt。
+    const all = await api.buildPoolView(false, 'all')
+    expect(all.window.key).toBe('all')
+    expect(all.cachedAt).toBe(p.cachedAt)
   })
 
   it('componentLogPayload 接受课程覆盖（日志页跟课程）', async () => {

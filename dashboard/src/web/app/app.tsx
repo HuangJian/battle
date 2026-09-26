@@ -599,11 +599,7 @@ export function App({ initial }: AppProps) {
         {page === 'nodes' ? (
           <>
             <PanelErrorBoundary>
-              <NodeStats
-                enabled={documentVisible}
-                poolFreshNonce={poolFreshNonce}
-                course={viewCourse}
-              />
+              <NodeStats enabled={documentVisible} poolFreshNonce={poolFreshNonce} />
             </PanelErrorBoundary>
             <PanelErrorBoundary>
               <WorkerRegistry

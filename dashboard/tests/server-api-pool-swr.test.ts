@@ -28,8 +28,7 @@ import { api, loadConfig, scratchConfig } from './helpers/console-fixture'
 import { describe, expect, it } from 'bun:test'
 import { writeFileSync } from 'fs'
 
-const COURSE =
-  'pool-swr-course' /** 改 seed 配置：第一个节点的 enabled（池行 status 由它决定 = **结构**）+ 本机槽数。 */
+/** 改 seed 配置：第一个节点的 enabled（池行 status 由它决定 = **结构**）+ 本机槽数。 */
 function patchConfig(enabled: boolean, localSlots?: number): string {
   const cfg = loadConfig()
   cfg.nodes[0]!.enabled = enabled
@@ -47,7 +46,7 @@ describe('console/api /api/pool（结构现算 ⊕ 探测 SWR）', () => {
     try {
       const nodeId = patchConfig(true, 0)
       api.invalidatePoolViews()
-      const warm = await api.buildPoolView(false, COURSE)
+      const warm = await api.buildPoolView(false)
       expect(warm.nodes.find((n) => n.id === nodeId)?.status).not.toBe('disabled')
       expect(warm.local?.spec).toBe('0 槽')
       const warmAt = warm.cachedAt
@@ -60,7 +59,7 @@ describe('console/api /api/pool（结构现算 ⊕ 探测 SWR）', () => {
       // ★ 第一读：探测全部悬挂也**必须**立刻回来（硬清会在这里挂死 → 由 guard 明确报红）
       probe.hold()
       const guard = guardMs()
-      const first = await Promise.race([api.buildPoolView(false, COURSE), guard.promise])
+      const first = await Promise.race([api.buildPoolView(false), guard.promise])
       guard.done()
       // ① 结构 = 当下 cfg：第一帧就是新的（这正是「节点编辑真的第一帧就上屏」）
       expect(first.nodes.find((n) => n.id === nodeId)?.status).toBe('disabled')
@@ -79,7 +78,7 @@ describe('console/api /api/pool（结构现算 ⊕ 探测 SWR）', () => {
       let fresh = first
       while (fresh.cachedAt === warmAt && Date.now() < deadline) {
         await sleep(20)
-        fresh = await api.buildPoolView(false, COURSE)
+        fresh = await api.buildPoolView(false)
       }
       expect(fresh.cachedAt).not.toBe(warmAt)
       expect(fresh.nodes.find((n) => n.id === nodeId)?.status).toBe('disabled') // 结构仍是新的
@@ -95,10 +94,10 @@ describe('console/api /api/pool（结构现算 ⊕ 探测 SWR）', () => {
     const probe = probeStub()
     try {
       api.invalidatePoolViews()
-      const warm = await api.buildPoolView(false, COURSE)
+      const warm = await api.buildPoolView(false)
       probe.hold()
       let resolved = false
-      const pending = api.buildPoolView(true, COURSE)
+      const pending = api.buildPoolView(true)
       void pending.then(() => {
         resolved = true
       })

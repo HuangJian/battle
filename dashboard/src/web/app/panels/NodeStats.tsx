@@ -1,10 +1,25 @@
-/** NodeStats.tsx — 抽屉「节点统计」tab：/api/pool 独立慢节奏 + 10 列 + 行展开 + 仅看异常。
- *  迁移自旧 NodesPanel 的 StatsView（控制视图由 NodePills 承接）。 */
+/** NodeStats.tsx — 抽屉「节点统计」tab：/api/pool 独立慢节奏 + 窗口切换 + 列 + 行展开 + 仅看异常。
+ *  迁移自旧 NodesPanel 的 StatsView（控制视图由 NodePills 承接）。
+ *
+ *  ★ 2026-09-26（plan/nodes-decouple-from-course.plan.md）：节点统计与课程解耦 ——
+ *   · 顶部 Segmented 切**本地日窗口**（今天/昨天/7 天/全部）；切天只重取、服务端零重算；
+ *   · 「上轮贡献」→ **窗口内局数**（rollout/eval 两列）；「状态」列改名「成功率」
+ *     （与 pill 的「产能」分列分名）；
+ *   · 课程内序号 `it` 不再出现在任何列（只作服务端内部过滤器）。 */
 
-import { useCallback, useEffect, useState } from 'preact/hooks'
-import { fmtBytes, fmtTs, TC_NODE_VIEW, type NodeHistoryRow, type PoolView } from '../../view'
+import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
+import {
+  fmtBytes,
+  fmtTs,
+  TC_NODE_VIEW,
+  WINDOW_OPTIONS,
+  type NodeHistoryRow,
+  type PoolView,
+  type PoolWindowKey,
+} from '../../view'
 import { Badge, Pill } from '../../components/Pill'
 import { DataTable, type Col } from '../../components/DataTable'
+import { SegmentedControl } from '../../components/SegmentedControl'
 import { usePolling } from '../lib/usePolling'
 import { fetchPool } from '../lib/api-client'
 
@@ -12,16 +27,16 @@ export interface NodeStatsProps {
   /** 抽屉开着才轮询（DS-U5 语义；展开补拉一次）。 */
   enabled: boolean
   poolFreshNonce: number
-  /** 当前查看课程（/api/pool ?course= 只读覆盖，课程键控缓存）。 */
-  course?: string
 }
 
+/** 成功率（窗口内最近 ≤10 次结算的完成率；阈值 ≥90% / ≥70% / <70%）。
+ *  ★ 与 pill 的「产能」（`nodeHealth`：贡献 vs 并发）**分列分名**——两者不是一个指标。 */
 const statusBadge = (s: NodeHistoryRow['status'], okN: number, recentN: number) => {
   switch (s) {
     case 'healthy':
       return (
         <Badge tone="g">
-          健康 {okN}/{recentN}
+          达标 {okN}/{recentN}
         </Badge>
       )
     case 'warn':
@@ -62,7 +77,10 @@ const poolColumns: Col<NodeHistoryRow>[] = [
   },
   {
     key: 'status',
-    label: '状态',
+    label: '成功率',
+    thTitle:
+      '成功率 = 窗口内最近 ≤10 次结算的完成率（≥90% 达标 / ≥70% 波动 / <70% 异常）。' +
+      '与节点 pill 的「产能」（最近完成轮贡献 vs 并发）不是同一个指标。成功率随所选窗口变。',
     sortValue: (r) =>
       ({ healthy: 4, warn: 3, bad: 2, noping: 1, nodata: 1, disabled: 0 })[r.status],
     cell: (r) => statusBadge(r.status, r.okN, r.recentN),
@@ -107,26 +125,16 @@ const poolColumns: Col<NodeHistoryRow>[] = [
     cell: (r) => (r.fail > 0 ? r.fail : <span className="tc-muted">0</span>),
   },
   {
-    // F5（plan/dist-codehash-stale-fix.md）：贡献按 mode 分桶——"只跑 eval 的节点"
-    // 不再看起来在贡献 rollout。合计 contrib 保留，展示 rollout/eval 两数。
-    key: 'contrib',
-    label: '上轮贡献 rl/ev',
+    // 2026-09-26：贡献改**窗口口径**（所选「天」窗口内成功局数），按 mode 分两列。
+    key: 'win',
+    label: '窗口内局数 rl/ev',
     align: 'num',
-    cell: (r) =>
-      r.contrib > 0 ? (
-        <span title={`rollout ${r.contribRollout} · eval ${r.contribEval}`}>
-          {r.contribRollout}/{r.contribEval}
-        </span>
-      ) : r.lastIter >= 0 && r.globalMaxIt >= 0 ? (
-        <span
-          className="tc-muted"
-          title={`该节点在最近完成轮 it${r.globalMaxIt} 无贡献（它最近一次成功结算在 it${r.lastIter}）`}
-        >
-          0/0
-        </span>
-      ) : (
-        '-'
-      ),
+    thTitle: '所选窗口内该节点的成功局数（rollout / eval）。课程内序号 it 不作展示口径。',
+    cell: (r) => (
+      <span title={`rollout ${r.winRollout} · eval ${r.winEval}（窗口内成功局数）`}>
+        {r.winRollout}/{r.winEval}
+      </span>
+    ),
   },
   {
     key: 'avgElapsedSec',
@@ -180,8 +188,9 @@ function rowExpand(r: NodeHistoryRow) {
         <div className="tc-muted">本机直跑槽位（rl-config rl.local_slots）</div>
       ) : (
         <div className="tc-muted">
-          最近贡献轮 it{r.lastIter}（最近完成轮 it{r.globalMaxIt}） · 平均耗时{' '}
-          {secCell(r.avgElapsedSec)} · 机侧墙钟 {secCell(r.avgWallSec)}
+          窗口内 {r.winRollout} rollout / {r.winEval} eval 局 · 最近完成轮贡献{' '}
+          {r.lastContrib < 0 ? '—' : r.lastContrib} 局 · 平均耗时 {secCell(r.avgElapsedSec)} ·
+          机侧墙钟 {secCell(r.avgWallSec)}
         </div>
       )}
       {r.lastError ? (
@@ -194,17 +203,19 @@ function rowExpand(r: NodeHistoryRow) {
   )
 }
 
-export function NodeStats({ enabled, poolFreshNonce, course }: NodeStatsProps) {
+export function NodeStats({ enabled, poolFreshNonce }: NodeStatsProps) {
   const [pool, setPool] = useState<PoolView | null>(null)
   const [err, setErr] = useState<string | null>(null)
   const [showOnlyBad, setShowOnlyBad] = useState(false)
+  /** 统计窗口（本地日）：今天 / 昨天 / 7 天 / 全部。切天只改它 + 重取（服务端零重算）。 */
+  const [days, setDays] = useState<PoolWindowKey>('today')
 
   /** 拉一次池视图。`fresh` = 显式「现在就给我新的」（服务端**硬清 + 等一次重算**，2.5s 级）；
    *  其余一律软拉（服务端在动作后已软作废：立刻给旧值 + 后台重算）。返回本次视图供再校验比对。 */
   const load = useCallback(
     async (fresh: boolean): Promise<PoolView | null> => {
       try {
-        const p = await fetchPool(fresh, course ?? '')
+        const p = await fetchPool(fresh, days)
         setPool(p)
         setErr(null)
         return p
@@ -213,10 +224,20 @@ export function NodeStats({ enabled, poolFreshNonce, course }: NodeStatsProps) {
         return null
       }
     },
-    [course],
+    [days],
   )
 
   usePolling({ enabled, intervalSec: 300, fetch: () => load(false).then(() => undefined) })
+
+  // 切天 → 重取（跳过首次：usePolling 已在 enabled 翻转时补拉）。服务端只重投影、不重算探测。
+  const firstDays = useRef(true)
+  useEffect(() => {
+    if (firstDays.current) {
+      firstDays.current = false
+      return
+    }
+    if (enabled) void load(false)
+  }, [days, enabled, load])
 
   // ── 再校验（2026-09-22）──
   // 动作 / 切课 / iter 前进 / 连接恢复 → `poolFreshNonce++`。这里**不再** `load(true)`：
@@ -277,10 +298,20 @@ export function NodeStats({ enabled, poolFreshNonce, course }: NodeStatsProps) {
         ) : (
           <span className="tc-badge tc-badge--gray">agent 未启动</span>
         )}
-        {pool.activeFlow ? (
-          <span className="tc-badge tc-badge--a">
-            流 {pool.activeFlow.dir}（{pool.activeFlow.lines} 条 · 更新于{' '}
-            {fmtTs(pool.activeFlow.mtimeMs)}）
+        <SegmentedControl<PoolWindowKey>
+          value={days}
+          options={WINDOW_OPTIONS.map((o) => ({ value: o.key, label: o.label }))}
+          onChange={setDays}
+          ariaLabel="统计窗口"
+        />
+        {pool.sources.length > 0 ? (
+          <span
+            className="tc-badge tc-badge--a"
+            title={pool.sources
+              .map((s) => `${s.dir}（${s.lines} 条${s.truncated ? ' · 仅尾部' : ''}）`)
+              .join('\n')}
+          >
+            数据来自 {pool.sources.length} 个训练流 · 最新 {fmtTs(pool.sources[0]!.mtimeMs)}
           </span>
         ) : null}
         <span className="tc-muted tc-small">本机 v{pool.localHash.slice(0, 7) || '-'}</span>
@@ -314,10 +345,12 @@ export function NodeStats({ enabled, poolFreshNonce, course }: NodeStatsProps) {
         ariaLabel="节点统计"
       />
       <p className="tc-caption tc-caption--flush">
-        状态 = 最近 10 次结算完成率（≥90% 健康 / ≥70% 波动 / &lt;70% 异常）；ping
-        仅实时参考。平均耗时 = 最近 50 局节点侧服务时长滑动平均（接单→结果就绪，不含网络）。
-        机侧墙钟 = 训练机派发→结算（含网络/轮询）；历史 meta 无 wallSec 时显示 -。
-        最近错误半小时窗口。启用/停用等结构是实时的（看当下配置）， 探测列（ping/完成率/版本）
+        窗口「{pool.window.label}」内统计（本地日，含所有训练流合并）：成功率 = 窗口内最近 ≤10
+        次结算完成率（≥90% 达标 / ≥70% 波动 / &lt;70% 异常），随窗口变；与节点 pill 的「产能」
+        （最近完成轮贡献 vs 并发）不是一个指标。窗口内局数 = rollout / eval 成功局（无 it 口径）。
+        平均耗时 = 窗口内≤50 局节点侧服务时长均值（接单→结果就绪，不含网络）；机侧墙钟 = 训练机
+        派发→结算（含网络/轮询），历史 meta 无 wallSec 时显示 -。最近错误近一小时窗口。
+        启用/停用等结构实时（看当下配置），探测列（ping/成功率/版本）
         {Math.round((Date.now() - pool.cachedAt) / 1000)}s 前更新。
       </p>
     </div>

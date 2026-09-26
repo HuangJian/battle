@@ -77,7 +77,10 @@ export interface NodeView {
   busy: boolean
   /** 最近**完成**轮贡献数（该轮内该节点成功局数，rollout + eval；-1 = 无池数据）。
    *  「完成」= 训练账本已写该轮 `iteration` 事件——进行中那一轮的半截计数不算数
-   *  （否则先交活的节点看着健康、还没轮到的看着掉线）。 */
+   *  （否则先交活的节点看着健康、还没轮到的看着掉线）。
+   *  ★ 2026-09-26（plan/nodes-decouple-from-course.plan.md）：跨**所有训练流**合并后，
+   *  「最近完成轮」按**完成时刻**选（不是比 `it` 大小——`it` 是课程内序号、不可比）。
+   *  与 `/api/pool` 的窗口内局数（`winRollout/winEval`）**同源同一份 `aggregateNodeHistory`**。 */
   lastContrib: number
 }
 

@@ -13,7 +13,13 @@ import {
   type PushFleetProbe,
   parsePhaseFromLog,
 } from '../../web/view'
-import { type HistoryAggregate, aggregateNodeHistory, isSlowNode } from '../pool-history'
+import {
+  type HistoryAggregate,
+  aggregateNodeHistory,
+  isSlowNode,
+  projectWindow,
+  resolveWindow,
+} from '../pool-history'
 import { courseEditFromLedgerTail } from './ledger'
 import { readLogTail } from './logs'
 import { loopCompleteFromLedgerTail } from './loop-complete'
@@ -106,16 +112,23 @@ export async function computeFleetProbes(cfg: RlConfig): Promise<FleetProbes> {
   } catch {
     /* 池历史不可用 → 慢节点判定退化为全 false、贡献数保持 -1 */
   }
+  // ★ 2026-09-26（plan/nodes-decouple-from-course.plan.md）：agg 现在是**按天分桶**的全量
+  // 聚合，展示行由 `projectWindow` 投影得到。
+  //  · 慢节点判定（可达性，看「最近」）取**全部**窗口 —— 与「看哪天」无关；
+  //  · 贡献数（pill 的 `lastContrib`）取 `agg.lastContrib`（跨课按完成时刻选的最新完成轮）；
+  //    空 map = 无完成信号 = 无池数据（-1）。
+  // local 节点是否出、以及它的 slots，是**结构**（cfg 现算，见 computeSlowSnapshot）；
+  // 这里只给它的贡献数——池历史不可用只是拿不到它（-1），不能因此把 local 节点整块吞掉。
   const slowById = new Map<string, boolean>()
-  if (agg) for (const [id, h] of agg.hist) slowById.set(id, isSlowNode(h))
-  // 最近完成轮贡献数（无池数据 = -1）。local 节点是否出、以及它的 slots，是**结构**（cfg
-  // 现算，见 computeSlowSnapshot）；这里只给它的贡献数——池历史不可用只是拿不到它（-1），
-  // 不能因此把 local 节点整块吞掉（此前它在 try 里，aggregateNodeHistory() 一抛就丢了）。
   const contribById = new Map<string, number>()
   let localContrib = -1
   if (agg) {
-    for (const [id, h] of agg.hist) contribById.set(id, agg.globalMaxIt >= 0 ? h.lastIterOk : -1)
-    localContrib = agg.globalMaxIt >= 0 ? (agg.hist.get('local')?.lastIterOk ?? 0) : -1
+    const all = projectWindow(agg, resolveWindow('all', Date.now(), agg.epochMs))
+    for (const [id, h] of all.hist) slowById.set(id, isSlowNode(h))
+    if (agg.lastContrib.size > 0) {
+      for (const [id, v] of agg.lastContrib) contribById.set(id, v)
+      localContrib = contribById.get('local') ?? 0
+    }
   }
   const [nodes, pushProbes, componentHealth] = await Promise.all([
     nodeProbeResults(cfg),

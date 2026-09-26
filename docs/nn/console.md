@@ -7,6 +7,35 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §16 节点统计与课程解耦：合所有流 + 按天窗口 + `it` 只作内部过滤器（2026-09-26）
+
+「节点是机群级资产」这句话控制台早就写在注释里（`/api/pool` “没有任何按课程的东西”），但数据层
+一直只聚合 `tmp/**` 里 **mtime 最新的那一个** `dist-agent-meta.jsonl`（旧动机：避免旧训练流的
+数千条历史淹没新数据）——节点页实际是「最近活跃那一门课」的页。本轮解耦（plan/
+nodes-decouple-from-course.plan.md）：
+
+* **数据源合并所有流**：递归扫 `tmp/` 下所有 `dist-agent-meta.jsonl`（课程目录 + 独立 eval run
+  目录 `tmp/<name>.jsonl.run/`），逐流取**完成水位**（账本 `training_log.jsonl` 最后一个
+  `iteration` 事件）只用于过滤「进行中那一轮」的行。
+* **单一时间口径**：落桶按**本地日**（`byDay: 'YYYY-MM-DD' → node → DayBucket`），视图按
+  `?days=today|yesterday|7|all|N` 切窗口。**课程内序号 `it` 不出现在任何展示字段**（跨课不可比，
+  它只是服务端解析循环里的过滤器）。
+* **一次算全量、切天纯投影**：`aggregateNodeHistory()`（与窗口无关，进 SWR 缓存）⊕
+  `projectWindow(agg, w)`（纯函数）⇒ 切天零重算。预筛（整份文件 mtime 早于 `POOL_EPOCH_MS`
+  才跳过）**钉在 epoch**，否则「切天零重算」不成立。
+* **健康度 = 最新完成轮的贡献 vs 并发**（判据 `nodeHealth` 现成）：跨课「最新完成轮」按**完成
+  时刻**选（`iteration.time`；读不出用 meta mtime 兜底）——**不是**比 `it` 大小。停摆课因完成
+  时刻旧而自然落选。
+* **两个容器各负责一层**：节点表（`/api/pool`）的「窗口内局数 `winRollout/winEval`」与 pill 行
+  （`/api/state` 的 `lastContrib`）**共用同一份 `aggregateNodeHistory()`**；表格状态列改名
+  **「成功率」**（窗口内最近 ≤10 次结算完成率），与 pill 的**「产能」**分列分名。
+
+⚠ **两条容易踩的**：① meta 行的 `ts` 与账本 `time` 都是 Python `strftime` 写的**训练机本地时间、
+无时区后缀**（UTC `toISOString()` 只出现在 `lastError` 的字符串前缀）；分桶前**禁止** `Date.UTC`。
+② `poolStatus`（成功率）**函数不变但输入随窗口变** —— 用户可在表头看到「成功率随所选窗口变」。
+
+决策条目：`DECISIONS.md §2026-09-26-nodes-decouple-from-course`。
+
 ## §15 「在线/离线」收敛成**一颗开关**（本机配置 + hub 模式一起动）+ 第三源漂移徽标（2026-09-24）
 
 用户 2026-09-24 报障：「离线课切回在线后，Kaggle 仍因缺 bun 拒单」。实锤：切在线后派出的 job

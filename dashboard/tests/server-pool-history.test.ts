@@ -18,12 +18,16 @@ import {
   isSlowNode,
   isSlowNodeRows,
   lastCompletedIter,
+  localDayKey,
   parseTsMs,
   pickBaseIter,
+  projectWindow,
+  pruneByEpoch,
   pushWindowSample,
+  resolveWindow,
   windowMeanSec,
 } from '../src/server/pool-history'
-import { fmtFullTs } from '../src/web/view'
+import { nodeHealth } from '../src/web/view'
 
 // ────────────────────────── 节点 pill 行（慢节点/停用/启停 toggle，2026-09-11 用户指令） ──────────────────────────
 describe('pool-history.isSlowNode（慢节点判定：1.5s ping 误报「离线」的根治）', () => {
@@ -101,27 +105,48 @@ describe('pool-history.isSlowNode（慢节点判定：1.5s ping 误报「离线�
 // 完成水位 = 训练账本的 `iteration` 事件（轮末 rollout + PPO 之后写）。
 
 describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计）', () => {
-  const ts = fmtFullTs(Date.now())
+  const now = Date.now()
+  /** 本地日偏移 → 'YYYY-MM-DD HH:MM:SS'（与 Python strftime 写入同形）。 */
+  const tsAt = (dayOffset: number, hhmmss = '12:00:00'): string => {
+    const d = new Date(now)
+    d.setDate(d.getDate() + dayOffset)
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day} ${hhmmss}`
+  }
+  const metaRowAt = (
+    node: string,
+    it: number,
+    ts: string,
+    mode: 'rollout' | 'eval' = 'rollout',
+    ok = true,
+  ) => JSON.stringify({ node, mode, it, stage: 0, seed: 1, ok, elapsedSec: 1, ts })
   const metaRow = (node: string, it: number, mode: 'rollout' | 'eval' = 'rollout') =>
-    JSON.stringify({ node, mode, it, stage: 0, seed: 1, ok: true, elapsedSec: 1, ts })
-  const iterEvent = (it: number) => JSON.stringify({ event: 'iteration', iter: it, time: 'x' })
+    metaRowAt(node, it, tsAt(0), mode)
+  /** 账本 `iteration` 事件（`time` = 完成时刻，§3.4）。 */
+  const iterEvent = (it: number, time = tsAt(0)) =>
+    JSON.stringify({ event: 'iteration', iter: it, time })
 
-  /** 一个临时池根 + 一条训练流（meta 与账本不同目录时用 `ledgerDir` 单独指）。 */
+  /** 一个临时池根 + 一条或多条训练流（`BCITY_POOL_DIR` 重定向）。 */
   const withPoolRoot = (
-    flow: { meta: string[]; ledger?: string[] | null; ledgerDir?: string },
+    flow:
+      | { name?: string; meta: string[]; ledger?: string[] | null }
+      | Array<{ name: string; meta: string[]; ledger?: string[] | null }>,
     fn: (root: string) => void,
   ): void => {
     const root = mkdtempSync(join(tmpdir(), 'bcity-pool-'))
     const prev = process.env.BCITY_POOL_DIR
     process.env.BCITY_POOL_DIR = root
     try {
-      const dir = join(root, 'flow')
-      mkdirSync(dir, { recursive: true })
-      writeFileSync(join(dir, 'dist-agent-meta.jsonl'), `${flow.meta.join('\n')}\n`, 'utf8')
-      if (flow.ledger) {
-        const ld = flow.ledgerDir ? join(root, flow.ledgerDir) : dir
-        mkdirSync(ld, { recursive: true })
-        writeFileSync(join(ld, 'training_log.jsonl'), `${flow.ledger.join('\n')}\n`, 'utf8')
+      const flows = Array.isArray(flow) ? flow : [{ name: 'flow', ...flow }]
+      for (const f of flows) {
+        const dir = join(root, f.name)
+        mkdirSync(dir, { recursive: true })
+        writeFileSync(join(dir, 'dist-agent-meta.jsonl'), `${f.meta.join('\n')}\n`, 'utf8')
+        if (f.ledger) {
+          writeFileSync(join(dir, 'training_log.jsonl'), `${f.ledger.join('\n')}\n`, 'utf8')
+        }
       }
       fn(root)
     } finally {
@@ -149,34 +174,198 @@ describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计
     ledger: [iterEvent(5), iterEvent(6), iterEvent(7)],
   }
 
-  it('对齐基准 = 账本最后一个 iteration（不是 meta 最大 it）；贡献按该轮计', () => {
+  it('水位 = 逐流账本最后一个 iteration（不是 meta 最大 it）；进行中那一轮的行不进桶', () => {
     withPoolRoot(FLOW, () => {
       const agg = aggregateNodeHistory()
-      expect(agg.globalMaxIt).toBe(7)
-      expect(agg.hist.get('a1')!.lastIterOk).toBe(3)
-      expect(agg.hist.get('a2')!.lastIterOk).toBe(1)
-      // 分桶口径同一基准轮：a1 = rollout 2 / eval 1
-      expect(agg.hist.get('a1')!.contribRollout).toBe(2)
-      expect(agg.hist.get('a1')!.contribEval).toBe(1)
-      // 节点自己的「最近一次结算轮」语义不变（它交到哪一轮就是哪一轮）
-      expect(agg.hist.get('a1')!.lastIter).toBe(8)
+      // it8（进行中）的 6 条行被水位滤掉：只剩 it7 的 4 条（a1 3 条 / a2 1 条）。
+      const win = projectWindow(agg, resolveWindow('all', now, agg.epochMs))
+      expect(win.hist.get('a1')!.ok).toBe(3)
+      expect(win.hist.get('a2')!.ok).toBe(1)
+      expect(win.hist.get('a1')!.winRollout).toBe(2)
+      expect(win.hist.get('a1')!.winEval).toBe(1)
     })
   })
 
   it('无训练账本（一次性 run 目录）→ 退化为 meta 最大 it（旧口径，行为不变）', () => {
     withPoolRoot({ ...FLOW, ledger: null }, () => {
       const agg = aggregateNodeHistory()
-      expect(agg.globalMaxIt).toBe(8)
-      expect(agg.hist.get('a1')!.lastIterOk).toBe(1)
-      expect(agg.hist.get('a2')!.lastIterOk).toBe(5)
+      const win = projectWindow(agg, resolveWindow('all', now, agg.epochMs))
+      expect(win.hist.get('a1')!.ok).toBe(4)
+      expect(win.hist.get('a2')!.ok).toBe(6)
     })
   })
 
   it('完成水位在 meta 里没有任何行（账本与 meta 不同步）→ 退回 meta 最大 it，不把全员算成 0', () => {
     withPoolRoot({ ...FLOW, ledger: [iterEvent(7), iterEvent(9)] }, () => {
       const agg = aggregateNodeHistory()
-      expect(agg.globalMaxIt).toBe(8)
-      expect(agg.hist.get('a2')!.lastIterOk).toBe(5)
+      const win = projectWindow(agg, resolveWindow('all', now, agg.epochMs))
+      expect(win.hist.get('a2')!.ok).toBe(6)
+    })
+  })
+
+  // ── §3.4：最新完成轮跨课按**完成时刻**选（不是比 it 大小） ──
+  it('lastContrib：完成时刻更晚的课胜出（造 completedAt 与 it 大小相反的数据）', () => {
+    withPoolRoot(
+      [
+        {
+          name: 'course-old',
+          // it99 很大，但完成时刻更早
+          meta: [metaRowAt('a1', 99, tsAt(-2, '10:00:00'))],
+          ledger: [iterEvent(99, tsAt(-2, '10:00:00'))],
+        },
+        {
+          name: 'course-new',
+          // it3 很小，但完成时刻更晚 → 胜出
+          meta: [metaRowAt('a1', 3, tsAt(0, '09:00:00')), metaRowAt('a2', 3, tsAt(0, '09:05:00'))],
+          ledger: [iterEvent(3, tsAt(0, '09:00:00'))],
+        },
+      ],
+      () => {
+        const agg = aggregateNodeHistory()
+        expect(agg.latestRound?.dir).toBe('course-new')
+        expect(agg.lastContrib.get('a1')).toBe(1)
+        expect(agg.lastContrib.get('a2')).toBe(1)
+      },
+    )
+  })
+
+  it('lastContrib = 该轮 rollout + eval 成功局数；无 _it 展示口径_', () => {
+    withPoolRoot(
+      {
+        meta: [metaRow('a1', 2), metaRow('a1', 2, 'eval'), metaRow('a1', 2, 'eval')],
+        ledger: [iterEvent(2)],
+      },
+      () => {
+        const agg = aggregateNodeHistory()
+        expect(agg.lastContrib.get('a1')).toBe(3)
+      },
+    )
+  })
+
+  it('所有流都取不到 iteration 时间戳 → 按 meta mtime 兜底（仍选出完成轮、不崩）', () => {
+    withPoolRoot(
+      {
+        meta: [metaRow('a1', 1)],
+        // 账本有 iteration 但无 time → atMs null → 兜底 mtime
+        ledger: [JSON.stringify({ event: 'iteration', iter: 1 })],
+      },
+      () => {
+        const agg = aggregateNodeHistory()
+        expect(agg.latestRound?.it).toBe(1)
+        expect(typeof agg.latestRound?.completedAtMs).toBe('number')
+        expect(agg.lastContrib.get('a1')).toBe(1)
+      },
+    )
+  })
+
+  // ── 多流合并 + 逐流 it 不串味（同一 it 在两门课里是两回事） ──
+  it('两课的行合并到同一节点；同一 it 各自成桶（逐流水位，不串味）', () => {
+    withPoolRoot(
+      [
+        {
+          name: 'cA',
+          // 水位 5：it6 进行中（应被滤掉）
+          meta: [
+            metaRowAt('mac', 5, tsAt(0, '08:00:00')),
+            metaRowAt('mac', 6, tsAt(0, '09:00:00')),
+          ],
+          ledger: [iterEvent(5, tsAt(0, '08:30:00'))],
+        },
+        {
+          name: 'cB',
+          // 另一门课，同一 it5/it6；水位 6 → 保留到 it6
+          meta: [
+            metaRowAt('mac', 5, tsAt(0, '08:10:00')),
+            metaRowAt('mac', 6, tsAt(0, '09:10:00')),
+          ],
+          ledger: [iterEvent(6, tsAt(0, '09:30:00'))],
+        },
+      ],
+      () => {
+        const agg = aggregateNodeHistory()
+        const win = projectWindow(agg, resolveWindow('all', now, agg.epochMs))
+        // cA: it5 进、it6 被滤；cB: it5 + it6 都进 ⇒ mac 共 3 条
+        expect(win.hist.get('mac')!.ok).toBe(3)
+      },
+    )
+  })
+
+  // ── 窗口按本地日切（投影纯函数） ──
+  it('窗口按本地日切：今天 / 昨天 / 7 天 / 全部；投影是纯函数', () => {
+    withPoolRoot(
+      {
+        meta: [
+          metaRowAt('a1', 1, tsAt(0, '08:00:00')),
+          metaRowAt('a1', 1, tsAt(-1, '08:00:00')),
+          metaRowAt('a1', 1, tsAt(-3, '08:00:00')),
+          metaRowAt('a1', 1, tsAt(-10, '08:00:00')),
+        ],
+        ledger: [iterEvent(1)],
+      },
+      () => {
+        const agg = aggregateNodeHistory()
+        expect(
+          projectWindow(agg, resolveWindow('today', now, agg.epochMs)).hist.get('a1')!.ok,
+        ).toBe(1)
+        expect(
+          projectWindow(agg, resolveWindow('yesterday', now, agg.epochMs)).hist.get('a1')!.ok,
+        ).toBe(1)
+        expect(projectWindow(agg, resolveWindow('7', now, agg.epochMs)).hist.get('a1')!.ok).toBe(3)
+        expect(projectWindow(agg, resolveWindow('all', now, agg.epochMs)).hist.get('a1')!.ok).toBe(
+          4,
+        )
+        // 纯投影：同一份 agg 反复切不产生新桶
+        const again = projectWindow(agg, resolveWindow('today', now, agg.epochMs))
+        expect(again.hist.get('a1')!.ok).toBe(1)
+      },
+    )
+  })
+
+  it('resolveWindow：本地日边界正确；epoch 与窗口取交集（startMs = max(日零点, epoch)）', () => {
+    const t = new Date('2026-09-26T15:00:00').getTime()
+    const today = resolveWindow('today', t, 0)
+    expect(today.fromDay).toBe(localDayKey(t))
+    expect(today.toDay).toBe(localDayKey(t))
+    expect(today.startMs).toBe(new Date('2026-09-26T00:00:00').getTime())
+    const yest = resolveWindow('yesterday', t, 0)
+    expect(yest.fromDay).toBe(localDayKey(new Date('2026-09-25T15:00:00').getTime()))
+    expect(yest.fromDay).toBe(yest.toDay)
+    expect(resolveWindow('7', t, 0).fromDay).toBe(
+      localDayKey(new Date('2026-09-20T15:00:00').getTime()),
+    )
+    // epoch 落在窗口内 → 起点与 epoch 取交集
+    const epoch = new Date('2026-09-26T10:00:00').getTime()
+    expect(resolveWindow('today', t, epoch).startMs).toBe(epoch)
+    // epoch 在窗口之前 → 起点仍是当天零点
+    expect(resolveWindow('today', t, new Date('2026-09-01T00:00:00').getTime()).startMs).toBe(
+      new Date('2026-09-26T00:00:00').getTime(),
+    )
+  })
+
+  // ── 产能三档（nodeHealth 现成、本 plan 不改） ──
+  it('nodeHealth 三档：0/-1 → offline；0<贡献<并发 → slow；≥并发 → healthy', () => {
+    expect(nodeHealth(0, 4)).toBe('offline')
+    expect(nodeHealth(-1, 4)).toBe('offline')
+    expect(nodeHealth(2, 4)).toBe('slow')
+    expect(nodeHealth(4, 4)).toBe('healthy')
+    expect(nodeHealth(9, 4)).toBe('healthy')
+  })
+
+  // ── 预筛（钉在 epoch，与看哪天无关） ──
+  it('pruneByEpoch：mtime 早于 epoch 的整份文件跳过；晚于/等于的保留', () => {
+    const cs = [{ mtimeMs: 100 }, { mtimeMs: 200 }, { mtimeMs: 300 }]
+    expect(pruneByEpoch(cs, 200).map((c) => c.mtimeMs)).toEqual([200, 300])
+    expect(pruneByEpoch(cs, 0)).toEqual(cs)
+  })
+
+  // ── 大文件只读尾部（阈值线之上，诚实截断标记） ──
+  it('大文件只读尾部（>2MB 的流标记 truncated）', () => {
+    const big: string[] = []
+    for (let i = 0; i < 30_000; i++) big.push(metaRowAt('a1', 1, tsAt(0, '08:00:00')))
+    withPoolRoot({ meta: big, ledger: [iterEvent(1)] }, () => {
+      const agg = aggregateNodeHistory()
+      expect(agg.sources.length).toBe(1)
+      expect(agg.sources[0]!.truncated).toBe(true)
     })
   })
 

@@ -56,10 +56,11 @@ export async function fetchState(course = ''): Promise<ConsoleStateView> {
   return (await r.json()) as ConsoleStateView
 }
 
-export async function fetchPool(fresh = false, course = ''): Promise<PoolView> {
-  const params = new URLSearchParams()
+/** 拉池视图。`days` = 本地日窗口（today/yesterday/7/all/N，缺省 today）。
+ *  ★ 2026-09-26：`?course=` 已移除（池视图与课程无关，切天只改窗口、不重算探测）。 */
+export async function fetchPool(fresh = false, days = 'today'): Promise<PoolView> {
+  const params = new URLSearchParams({ days })
   if (fresh) params.set('fresh', '1')
-  if (course) params.set('course', course)
   const q = params.toString()
   const r = await fetch(`/api/pool${q ? `?${q}` : ''}`)
   if (!r.ok) throw new Error(`/api/pool HTTP ${r.status}`)

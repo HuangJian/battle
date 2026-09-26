@@ -4121,3 +4121,30 @@ it5/it10（16.0%/15.5%），连跪两点 −4pp。两腿同 V（1789876303）只
 守卫内写死白名单（课程对名单进代码，换一批腿改一次；执行面策略住 rl-config 已有先例）。
 
 **违反后果**：默认开火 ⇒ 任何新腿出生即被拉去跟历史最强点比，连跪即死（state-init it11）。
+
+## §2026-09-26-nodes-decouple-from-course（2026-09-26，节点统计与课程解耦 + 按天窗口）
+
+**来历**：控制台节点页自称“机群级”，但 `aggregateNodeHistory()` 一直只聚合 `tmp/**` 里 mtime
+最新的**那一个** `dist-agent-meta.jsonl`（旧动机：避免旧训练流数千条历史淹没新数据）——实际是
+「最近活跃那一门课」的页。plan/nodes-decouple-from-course.plan.md（2026-09-24 用户指令 + 2026-09-26
+评审修订）。
+
+**决定**：① 数据源合并**所有**训练流（课程目录 + 独立 eval run 目录），逐流取完成水位
+（账本 `iteration`）**只用于过滤进行中那一轮**；② 视图按**本地日**分桶、`?days=` 切窗口
+（today/yesterday/7/all/N）；③ 课程内序号 `it` 是**课程内**序号、跨课不可比，**不进任何展示
+字段**；④ `aggregateNodeHistory()`（全量、与窗口无关、进 SWR 缓存）⊕ `projectWindow()`（纯投影）
+⇒ 切天零重算，预筛钉在 epoch；⑤ 健康度取「最新完成轮」（跨课按**完成时刻**选，`nodeHealth` 判据
+不变）；pill 的 `lastContrib` 与节点表**共用同一份 agg**；表格状态列改名「成功率」（窗口内完成率）
+与 pill「产能」分列分名。
+
+**被否决**：把「全局 it 基准」当跨课对齐口径（`it` 是课程内序号，课 A 的 it300 会把课 B 的 it50
+全算成 0 贡献，看着像掉线）；预筛随窗口变（会让 `days=1` 与 `days=all` 读不同文件集 ⇒
+「切天零重算」不成立）；把「最新完成轮」按 it 大小排序（停摆课的高序号会误胜）。
+
+**违反后果**：展示面出现 `it` ⇒ 跨课比较无意义（同一数字两门课含义不同）；按 it 选最新完成轮 ⇒
+停摆课永久占据基准，活跃节点被算成 0 贡献（假离线）；UTC 换算 ts（训练机本地时间）⇒ 傍晚的局
+跨天错桶。
+
+**落点**：`dashboard/src/server/pool-history.ts`（byDay / projectWindow / resolveWindow /
+lastContrib）、`server/api/pool.ts` + `snapshot-cache.ts`（两个消费者）、`web/view/pool-types.ts` +
+`NodeStats.tsx`（Segmented + 列改名）；正文 `docs/nn/console.md §16`。
