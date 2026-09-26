@@ -1,17 +1,26 @@
 """`rl_config_schema.py` 契约（plan/rl-config-cleanup.plan.md §3.4、E8）。
 
-三条要钉住的性质：
+四条要钉住的性质：
   · **只告警不拒**：未知 / 已退役键只出现在返回列表里，绝不抛（未知键 ≠ 训练起不来）；
   · **已退役比未知更具体**：`rl.stream` 这类给的是「已退役 + 原因」，不是泛泛的「未知键」；
   · **自由形状段不下钻**：`nodes` / `courses` / `rl.remote_hubs` / `rl.intent` / `rl.goal`
-    是每课/每节点/每模式自定的，键名不在白名单里也**不算**未知。
+    是每课/每节点/每模式自定的，键名不在白名单里也**不算**未知；
+  · **接线**：`run_rl` 启动时真的把告警打进日志（E8 的「塞假键 ⇒ 启动日志出现告警」）。
 """
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
 import pytest
 
 import rl_config_schema as S
+
+NN_ROOT = Path(__file__).resolve().parent.parent
 
 
 def _clean_cfg() -> dict:
@@ -98,3 +107,52 @@ def test_schema_data_is_self_consistent() -> None:
 
 def test_retired_reason_is_non_empty() -> None:
     assert all(reason.strip() for reason in S.retired_keys().values())
+
+
+# ------------------------------------------------------------------ 接线（E8）
+
+#: 子进程 oracle（手法同 `tests/test_serve_wiring.py::_ORACLE`）：跑真 `run_rl.main()`，
+#: 用 `--echo-config` 让它在 dump 后早退——否则会一路跑进训练链（导 torch + 读权重）。
+_ORACLE = """
+import sys
+sys.argv = ["run_rl.py", "--course", sys.argv[1], "--echo-config"]
+import rl.config as cfg
+cfg.echo_config = lambda *a, **k: print("ECHO-REACHED")
+import run_rl
+run_rl.main()
+"""
+
+
+def test_run_rl_logs_the_advisory_and_still_starts(tmp_path: Path) -> None:
+    """**接线钉子**：假键 ⇒ 启动日志里真的有告警行，且**照常起训**（只告警不拒）。
+
+    为什么必须有这条（2026-09-26 评审）：单测只钉住 `check_rl_config` 纯函数 ⇒ 谁把
+    `run_rl.py` 里那三行「读配置 → 打告警」挪掉都无人报警——而「静默沉睡」正是本案要防的形态。
+    """
+    fixture = tmp_path / "rl-config.fixture.json"
+    fixture.write_text(
+        json.dumps(
+            {"version": 1, "bogus_top": {}, "rl": {"typo_key": 1, "stream": 0}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    # zh-CN Windows 默认 GBK：oracle stdout 含非 ASCII ⇒ 显式 UTF-8（同 serve_wiring 的教训）。
+    env = {**os.environ, "PYTHONUTF8": "1", "BCITY_RL_CONFIG": str(fixture)}
+    proc = subprocess.run(
+        [sys.executable, "-c", _ORACLE, "c4-dodge"],
+        cwd=str(NN_ROOT),
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=300,
+        env=env,
+    )
+    out = proc.stdout or ""
+    assert "ECHO-REACHED" in out, (
+        f"oracle 没走到 echo_config（与告警无关的链坏了）：{(proc.stderr or '').strip()[-300:]}"
+    )
+    assert "rl-config 告警：bogus_top" in out, f"未知顶层段没被点出：{out[-500:]}"
+    assert "rl.typo_key" in out, f"未知键没被点出：{out[-500:]}"
+    assert "rl.stream（已退役）" in out, f"已退役键没被点出：{out[-500:]}"

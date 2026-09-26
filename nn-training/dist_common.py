@@ -495,9 +495,10 @@ def node_ping(url: str, auth_key: str, timeout: float = 3.0) -> dict | None:
     return None
 
 
-# 训练机当前分支（run_rl.py 启动时锁存）。节点远控升级**永远**用这个分支——
-# rl-config 的 upgradeBranch 已废弃（残留旧战役分支名曾把全部节点 reset 回
-# 旧代码，2026-08-30 事故）。queue/eval_dispatch 传来的 branch 参数为空时用它。
+# 训练机当前分支（run_rl/run_bc/loop_serve 启动时锁存）。节点远控升级**永远**用这个
+# 分支，且它是**唯一**来源——rl-config 的 upgradeBranch 已废弃（残留旧战役分支名曾把
+# 全部节点 reset 回旧代码，2026-08-30 事故）。取值入口 = `current_upgrade_branch()`；
+# 值随派发向下传给 `rl/queue_local`，**没有**「调用方传 branch 进来」那条路了。
 UPGRADE_BRANCH: str | None = None
 
 
@@ -522,9 +523,16 @@ def is_self_node(url: str, node_id: str = "") -> bool:
     return host in ("127.0.0.1", "localhost", "::1")
 
 
-def upgrade_branch_or(explicit: str | None) -> str:
-    if explicit:
-        return explicit
+def current_upgrade_branch() -> str:
+    """节点远控升级要用的分支 = **训练机锁存的那一个**（空串 = 不升级，调用方只告警）。
+
+    ★ 2026-09-26（评审更正）：本函数此前是 `upgrade_branch_or(explicit)`，语义为
+    「**显式值优先于锁存**」——那正是 2026-08-30 事故的载体：rl-config 里残留的
+    `'intent-ai'` 只要非空就盖掉锁存，把全部节点 reset 回旧代码。读点已随
+    `policy.upgradeBranch` 一起删除（plan/rl-config-cleanup.plan.md §3.1），本次评审又把
+    那个 `explicit` 参数拿掉 ⇒「配置能盖锁存」在**签名层面**不再成立——要复发必须改签名，
+    而不是顺手写一行 `or` 兜底回去。
+    """
     return UPGRADE_BRANCH or ""
 
 

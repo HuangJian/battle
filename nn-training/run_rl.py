@@ -212,7 +212,9 @@ def main() -> None:
     _cfg = read_rl_config_file()
     # rl-config 键白名单校验（plan/rl-config-cleanup.plan.md §3.4）：**只告警不拒** ——
     # 拼错/退役的键此前会静默沉睡（`intent_rl` 沉睡到 2026-09-26）；白名单数据住
-    # `rl_config.schema.json`（与控制台冒烟共用一份）。路径是开课/签名错误的早现手段。
+    # `rl_config.schema.json`（今天只有这里读它；控制台冒烟接线待做，见
+    # docs/nn/rl-config.md §1.7 —— 评审更正：早先说「与冒烟共用一份」不成立）。
+    # 注意这里**只打日志**：告警不得变成拒启（用户裁决 O3）。
     # 注：`check_rl_config` 必须在**模块顶层** import——main() 里已经 `os.chdir` 到仓根，
     # 此时 `sys.path[0]=''` 已指向仓根，惰性 import 会找不到 `rl_config_schema`
     # （tests/test_serve_wiring.py 的 oracle 子进程实测）。

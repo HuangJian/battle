@@ -4374,3 +4374,26 @@ plan §8-O1 已否决「零缺省」。
 
 **违反后果**：把 `live` 当唯一范围 ⇒ 全停课时工具永久无法收敛；删 `rl.workers` ⇒ 控制台并发校验假红。
 全文 → `docs/nn/rl-config.md` §1.4b。
+
+**评审补正（2026-09-26 晚，对 `12187fa4` + `9fd0834c` 两个提交）**：另一 agent 逐条核过后，以下四处**改了实现**：
+
+1. **「与控制台冒烟共用一份」的说法作废**（`rl_config_schema.py` docstring / `rl_config.schema.json`
+   `_doc` / `run_rl.py` 注释三处）：`dashboard/src/**` 对该 JSON **零引用**，`rlConfigSmoke` 仍只查
+   port/token/nodes ⇒ plan §3.4/E8 的「冒烟面板也点出假键」**未达成**（只达成启动日志那一半）。
+   改 dashboard 时再接线，那时才恢复「共用一份」的措辞。
+2. **脱敏收敛成一条清单，且不给「打印原文」的口子**：`rl_config_clean.py` 的
+   `_SECRET_PATHS=("rl.remote_token","rl.remote_hub_url")` 与 `desensitize()` 实际只脱
+   token/authKey **不一致** ⇒ 改为 `SECRET_KEYS=("remote_token","authKey")`（打印面与 diff 面
+   共用一份）；同时把误导性的 `--no-redact` 改成诚实的 `--no-preview`。**否决**「按名字实现成
+   打印原文」：plan §1.5 红线 1 说任何输出（含本地排障）都不得带出凭据 ⇒ 那就**不存在**这条路径。
+3. **升级分支的坑在签名层面关死**：`dist_common.upgrade_branch_or(explicit)` ⇒
+   `current_upgrade_branch()`（无参）。读点已验证删除，但「显式值优先于锁存」这个**语义**还留在
+   签名里 ⇒ 顺手写一行 `or` 就能把 2026-08-30 的坑复发。拿掉参数后，复发必须改签名（并改
+   `tests/test_dist_upgrade_cli.py::test_upgrade_branch_has_no_explicit_override_path` 的断言）=
+   一次有意识的决定。备选：保留函数不动——否（评审正确指出那是不可达死分支）。
+4. **接线补钉子**：`check_rl_config` 有单测，但 `run_rl.py` 那三行「读配置 → 打告警」此前无人盯
+   ⇒ 新增 `tests/test_rl_config_schema.py::test_run_rl_logs_the_advisory_and_still_starts`
+   （子进程 oracle，同 `test_serve_wiring` 手法）：假键 ⇒ 启动日志出现告警行且**照常起训**。
+
+**未决（需用户拍板）**：控制台 `stream` / `double_buffer` / `precollect_early` 三个开关**仍在写**
+这三键（死开关 + 会打「已退役」告警）——摘不摘属控制台手感变化，不自行决定。

@@ -6,9 +6,15 @@
 为什么要有它：rl-config 的键只在运行时被 `cfg.get(...)` 顺手读，**拼错/退役的键会静默沉睡**
 （`intent_rl` 就这样沉睡到 2026-09-26）。白名单把「这个键还有人读吗」变成一条可执行的断言。
 
-白名单数据住 `rl_config.schema.json`（与 dashboard `stack/smoke.ts` 共用同一份——一处增删，
-两侧同时生效）。`courses` 块与 `nodes` 表是自由形状（每课/每节点自定），只查顶层与
-`policy`/`rl` 两段的键名。
+白名单数据住 `rl_config.schema.json`；**本模块是它今天唯一的消费者**。
+
+⚠ 2026-09-26 评审更正：本 docstring 与 schema 的 `_doc` 曾写「与 dashboard `stack/smoke.ts`
+共用同一份——一处增删，两侧同时生效」，**那是错的**：`dashboard/src/**` 对该 JSON 零引用，
+`stack/smoke.ts::rlConfigSmoke` 仍只查 port/token/nodes。控制台侧接线**尚未做** ⇒
+plan §3.4/E8 的「塞假键 ⇒ 冒烟面板也点出来」**未达成**（`docs/nn/rl-config.md §1.7` 已如实登记）。
+改 dashboard 时顺手接上，那时再恢复「共用一份」的说法。
+
+`courses` 块与 `nodes` 表是自由形状（每课/每节点自定），只查顶层与 `policy`/`rl` 两段的键名。
 """
 
 from __future__ import annotations

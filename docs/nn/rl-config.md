@@ -108,6 +108,9 @@ bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py --drop-b-class --sc
 - 三类命中：顶层段不在白名单、`policy.*` / `rl.*` 键不在白名单、命中 `retired`（带原因）。
 - 自由形状段不下钻：`nodes` / `courses` / `rl.remote_hubs` / `rl.intent` / `rl.goal`。
 - **新增一个 rl-config 键时，同步 `rl_config.schema.json`**（否则启动会告警）。
+- **消费面（2026-09-26 评审更正）**：今天**只有** `rl_config_schema.py`（`run_rl.py` 启动时校验）
+  读这份 JSON——`dashboard/src/stack/smoke.ts::rlConfigSmoke` **尚未接线**。早先的 docstring / schema `_doc` /
+  `run_rl.py` 注释里写的「与控制台冒烟共用一份、一处增删两侧同时生效」**不成立**，已改掉。
 
 ```bash
 # 自查（纯逻辑，不需要真配置）
@@ -139,4 +142,11 @@ bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py --drop-b-class --sc
   （删 marker = 三处同时退出）对齐后再执行，避免与封存动作打架。
 - **控制台冒烟接线**：`dashboard/src/stack/smoke.ts::rlConfigSmoke` 读同一份
   `rl_config.schema.json` 做未知键提示——**尚未接线**（本次工作树里有他人未提交的 dashboard 改动，
-  不混入；接线属独立小改）。
+  不混入；接线属独立小改）。注意：plan §3.4/E8 的验收是「启动日志 **与冒烟面板** 都点出假键」，
+  今天只达成前半（已用接线钉子用例钉住启动日志那一半）。
+- **控制台写面仍会写「已退役」三键**（2026-09-26 评审更正）：
+  `dashboard/src/server/actions/preset.ts` 的开课预设 + `TrainLaunchModal` 的 `stream` /
+  `double_buffer` / `precollect_early` 三个开关**仍会**把它们写回 rl-config ⇒ ① 开关在
+  `validate_args`（单一 PPO 路径）下恒被归一化成 0，是**死开关**；② 写回后下次 `run_rl` 启动会打
+  「已退役」告警。这属「只删配置、不删代码」（用户 2026-09-26 裁决）的边界内；**要不要摘掉/标灰
+  这三个开关是独立决定**（控制台手感变化），待定。

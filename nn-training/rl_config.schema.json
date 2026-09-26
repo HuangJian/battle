@@ -1,5 +1,5 @@
 {
-  "_doc": "rl-config.json 的已知键清单 —— plan/rl-config-cleanup.plan.md §3.4 的单一数据源（python `rl_config_schema.py` 与 dashboard `stack/smoke.ts` 共用）。只告警不拒：未知键 / 已退役键在启动日志与冒烟面板点出来，但不 block 开训。新增一个 rl-config 键时应同步这里。",
+  "_doc": "rl-config.json 的已知键清单 —— plan/rl-config-cleanup.plan.md §3.4 的数据源。只告警不拒：未知键 / 已退役键在启动日志里点出来，但不 block 开训。新增一个 rl-config 键时应同步这里。⚠ 2026-09-26：控制台侧（`dashboard/src/stack/smoke.ts`）**尚未接线**，本文件今天只被 python `rl_config_schema.py` 消费 —— 早先「与冒烟共用一份」的说法不成立（详见 `docs/nn/rl-config.md §1.7`）。",
   "top": ["version", "policy", "nodes", "rl", "courses"],
   "sections": {
     "policy": [

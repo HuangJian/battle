@@ -84,7 +84,14 @@ CURRICULUM_GLOB = "*.jsonc"
 #: 必须仍然存在的顶层键（删到结构残缺 = 响亮拒启，而不是写坏盘）。`courses` 允许整块消失。
 REQUIRED_SECTIONS: tuple[str, ...] = ("version", "policy", "rl", "nodes")
 
-_SECRET_PATHS: tuple[str, ...] = ("rl.remote_token", "rl.remote_hub_url")
+#: 凭据**键名**（脱敏纪律的唯一清单；plan §1.5 红线 1）。值只以「…（len=N）」出现。
+#:
+#: 为什么是键名而不是点号路径：同一个名字可能住 `rl.<k>`，也可能住在 `nodes[]` 里——
+#: `desensitize`（打印面）与 `plan_deletions`（diff 面）**共用这一份**，两边才不会漂开。
+#: ⚠ 2026-09-26 评审更正：此前这里是 `("rl.remote_token", "rl.remote_hub_url")`，但
+#: `desensitize` 并不脱 `remote_hub_url` ⇒ 两处不一致；而红线只把 token/authKey 当凭据
+#: （hub URL 是 tailnet 地址 / 隧道域名，不是密钥）⇒ 统一按键名收敛。
+SECRET_KEYS: tuple[str, ...] = ("remote_token", "authKey")
 
 
 # ------------------------------------------------------------------ 脱敏 / 结构
@@ -104,12 +111,14 @@ def desensitize(cfg: dict[str, Any]) -> dict[str, Any]:
     out: dict[str, Any] = json.loads(json.dumps(cfg))  # 深拷贝（cfg 是纯 JSON 树）
     rl = out.get("rl")
     if isinstance(rl, dict):
-        for key in ("remote_token",):
+        for key in SECRET_KEYS:
             if key in rl:
                 rl[key] = redact(rl[key])
     for node in out.get("nodes") or []:
-        if isinstance(node, dict) and "authKey" in node:
-            node["authKey"] = redact(node["authKey"])
+        if isinstance(node, dict):
+            for key in SECRET_KEYS:
+                if key in node:
+                    node[key] = redact(node[key])
     return out
 
 
@@ -132,7 +141,7 @@ def plan_deletions(
         val, present = _get_path(cfg, dotted)
         if not present:
             lines.append(f"{dotted}: 不存在，跳过")
-        elif dotted in _SECRET_PATHS or "token" in dotted or "authKey" in dotted:
+        elif any(name in dotted for name in SECRET_KEYS):
             lines.append(f"{dotted}: {redact(val)} → 删除")
         else:
             lines.append(f"{dotted}: {val!r} → 删除")
@@ -377,6 +386,11 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="清洗 rl-config.json（默认 dry-run，零写盘）")
     ap.add_argument("--config", default="", help="rl-config 路径（缺省走 BCITY_RL_CONFIG / 仓里那份）")
     ap.add_argument("--apply", action="store_true", help="真删（先备份 + sha 回读校验）")
+    ap.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="零写盘预览——**缺省就是它**；给 plan/docs 里的显式写法一个正经入口",
+    )
     ap.add_argument("--drop-course", action="append", default=[], help="额外删掉的 courses.<课> 条目（可重复）")
     ap.add_argument("--matrix", action="store_true", help="出「课程 × B 类键」覆盖矩阵后退出")
     ap.add_argument(
@@ -391,8 +405,15 @@ def main(argv: list[str] | None = None) -> int:
         help="--apply 时一并删掉矩阵全绿的 B 类兜底键（机器级键永不在内；缺省关）",
     )
     ap.add_argument("--traj-root", default="", help="在训判据的 traj 根（缺省 <repo>/tmp）")
-    ap.add_argument("--no-redact", action="store_true", help="禁脱敏（**仅本地排障**，默认关）")
+    ap.add_argument(
+        "--no-preview",
+        action="store_true",
+        help="不打印 rl 段预览（缺省打脱敏版；**没有打印原文的路径**——红线 1）",
+    )
     args = ap.parse_args(argv)
+    if args.apply and args.dry_run:
+        print("✗ --apply 与 --dry-run 互斥", file=sys.stderr)
+        return 2
 
     import dist_common
 
@@ -435,8 +456,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  在训课程（marker 判据）：{live_courses(traj_root) or '（无）'}")
     if args.drop_b_class:
         print(f"  全绿 B 类键：{green_keys or '（无）'}（机器级键 {list(MACHINE_KEYS)} 永不删）")
-    if not args.no_redact:
-        print("  nodes/token 预览（脱敏）：")
+    if not args.no_preview:
+        print("  rl 段预览（凭据类键已脱敏）：")
         print("    " + json.dumps(desensitize(cfg).get("rl", {}), ensure_ascii=False))
 
     if not args.apply:

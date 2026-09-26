@@ -158,6 +158,42 @@ def test_redact_reports_length_only() -> None:
     assert clean.redact(12345) == "…"
 
 
+def test_secret_keys_are_the_single_source_of_redaction() -> None:
+    """`SECRET_KEYS` 是脱敏的唯一清单：`rl` 段与 `nodes[]` 两处都按它脱（评审更正）。"""
+    cfg = {
+        "rl": {k: f"v-{k}" for k in clean.SECRET_KEYS},
+        "nodes": [{k: f"n-{k}" for k in clean.SECRET_KEYS}],
+    }
+    out = clean.desensitize(cfg)
+    for key in clean.SECRET_KEYS:
+        assert "len=" in str(out["rl"][key])
+        assert "len=" in str(out["nodes"][0][key])
+    # hub URL / 端口不是凭据（plan §1.5 红线只点名 token/authKey）——别把它列进脱敏清单：
+    # 列了但 `desensitize` 不脱两处就漂开（旧版的形状）。
+    assert "remote_hub_url" not in clean.SECRET_KEYS
+
+
+def test_dry_run_flag_is_accepted_and_conflicts_with_apply(tmp_path: Path) -> None:
+    """`--dry-run` 是显式写法（plan §5 E2 就写的它），与 `--apply` 互斥。"""
+    p = _write(tmp_path, _cfg())
+    before = _sha(p)
+    assert clean.main(["--config", str(p), "--dry-run"]) == 0
+    assert _sha(p) == before and not list(tmp_path.glob("*.bak.*"))
+    assert clean.main(["--config", str(p), "--apply", "--dry-run"]) == 2
+    assert _sha(p) == before and not list(tmp_path.glob("*.bak.*")), "互斥时不得写盘"
+
+
+def test_no_preview_suppresses_the_rl_preview(tmp_path: Path, capsys: Any) -> None:
+    """`--no-preview` = **少打印**（不是「打印原文」）：本工具没有任何泄露凭据的路径。"""
+    p = _write(tmp_path, _cfg())
+    assert clean.main(["--config", str(p)]) == 0
+    assert "rl 段预览" in capsys.readouterr().out
+    assert clean.main(["--config", str(p), "--no-preview"]) == 0
+    out = capsys.readouterr().out
+    assert "rl 段预览" not in out
+    assert TOKEN not in out and AUTH not in out
+
+
 # ------------------------------------------------------------------ 矩阵纯函数
 
 def test_resolve_key_source_precedence() -> None:
