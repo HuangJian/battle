@@ -368,19 +368,36 @@ def warm_up() -> float:
 # ────────────────────────────── CLI ──────────────────────────────
 
 
-def _plan(args: argparse.Namespace) -> list[tuple[str, list[str], str]]:
-    """要测的 (标签, 权重候选, mode) 列表。`--modes` 优先（各 mode 的默认架构）。"""
+def _validate(args: argparse.Namespace) -> None:
+    """CLI 参数校验：**必须在暖机之前跑**（2026-09-26）。
+
+    原来这两个 `SystemExit` 长在 `_plan` 里，而 `main` 先 `warm_up()` 再 `_plan(args)` ⇒
+    参数写错也要先付一次 torch 暖机（惰性 kernel / 分配器建池 / Adam 首步缓存）才报错，
+    fail-fast 名存实亡；而且两条纯参数用例（`--modes` 写错 / 什么都不给）因此在没有 torch
+    的机器上必红（`main` 在暖机里就 ImportError 了）。校验是纯字符串判断，不碰 torch / 不读盘。
+    """
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     if modes:
         bad = [m for m in modes if m not in MODES]
         if bad:
             raise SystemExit(f"[rss] --modes 含未知模式 {bad}（可用：{list(MODES)}）")
+        return
+    names = [c.strip() for c in args.courses.split(",") if c.strip()]
+    if not (args.course or names):
+        raise SystemExit("[rss] 需要 --course / --courses / --modes 之一")
+
+
+def _plan(args: argparse.Namespace) -> list[tuple[str, list[str], str]]:
+    """要测的 (标签, 权重候选, mode) 列表。`--modes` 优先（各 mode 的默认架构）。
+
+    调用前必须先过 `_validate(args)`（校验长在那里，见其 docstring）；本函数只做解析。
+    """
+    modes = [m.strip() for m in args.modes.split(",") if m.strip()]
+    if modes:
         return [(f"{m}:默认架构", [""], m) for m in modes]
     names = [c.strip() for c in args.courses.split(",") if c.strip()]
     if args.course:
         names = [args.course, *names]
-    if not names:
-        raise SystemExit("[rss] 需要 --course / --courses / --modes 之一")
     return [
         (c, resolve_weights(c, args.rl_path or None), _course_mode(c))
         for c in (names[i % len(names)] for i in range(max(1, args.max_courses)))
@@ -401,6 +418,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--json", action="store_true", help="输出 JSON（文档/CI 消费）")
     ap.add_argument("--no-warmup", action="store_true", help="跳过暖机（调试用；数字会偏大）")
     args = ap.parse_args(argv)
+    _validate(args)  # 先校验再做任何昂贵动作（写错参数不该先付一次 torch 暖机）
 
     baseline = round(rss_mb(), 1) if args.no_warmup else warm_up()
     alive: list[Any] = []  # 保命引用：栈活着才是真实占用（见模块 docstring）

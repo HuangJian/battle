@@ -56,20 +56,30 @@ def test_import_run_rl_does_not_load_torch() -> None:
 
 
 def test_modes_import_does_not_load_torch() -> None:
-    """rl.modes 顶层不再 import ppo.*（get_backend 延迟）——run_rl 之外的引用方同样受益。"""
+    """rl.modes 顶层不再 import ppo.*（get_backend 延迟）——run_rl 之外的引用方同样受益。
+
+    映射完整性用 **`importlib.util.find_spec`** 验，不用 `import_module`（2026-09-26）：
+    `find_spec("ppo.engine")` 只解析模块**路径**（顺带 import 父包 `ppo`，而它是 PEP 562
+    惰性的、零 torch），不执行 `ppo/engine.py` ⇒ 这条断言在**没有 torch 的机器上**也成立。
+    此前用 `import_module` 验「延迟后端可解析」，结果是「torch 缺失 ⇒ 本用例必红」，而它想
+    证明的只是「注册表指向真实存在的模块」。
+    """
     code = textwrap.dedent(
         """
+        import importlib.util
         import sys
-        from rl.modes import get_backend, _MODE_BACKEND_NAMES
+        from rl.modes import _MODE_BACKEND_NAMES
         print("torch=" + str("torch" in sys.modules))
         assert set(_MODE_BACKEND_NAMES) == {"per-tick", "intent", "goal"}
-        # 延迟后端可解析（真实加载后 torch 才出现——验证映射完整）
-        import importlib
-        print("per-tick-ok=" + str(importlib.import_module("ppo.engine") is not None))
+        specs = [n for n in _MODE_BACKEND_NAMES.values() if importlib.util.find_spec(n) is None]
+        print("unresolved=" + str(specs))
+        print("torch-after-spec=", "torch" in sys.modules, sep="")
         """
     )
     out = run_utf8([sys.executable, "-c", code], cwd=str(ROOT), timeout=120)
     assert out.returncode == 0, f"modes probe failed: {out.stderr[-2000:]}"
     kv = dict(line.split("=") for line in out.stdout.splitlines() if "=" in line)
     assert kv.get("torch") == "False"
-    assert kv.get("per-tick-ok") == "True"
+    # 三个后端模块都能被解析到（注册表没写错名字），且解析本身不拖 torch
+    assert kv.get("unresolved") == "[]", f"延迟后端注册表指向了不存在的模块: {out.stdout}"
+    assert kv.get("torch-after-spec") == "False", f"find_spec 拖进了 torch:\n{out.stdout}"

@@ -4109,8 +4109,8 @@ e2e 真起 bun ⇒ hermetic 层失约且门禁变慢 · 抄一份「哪个模式
 
 **背景**：nn-training 的 python 门禁把 ~3000 用例一次跑完；31 个测试文件因 `import torch`
 （或运行期延迟 import）无法在**没有 torch 的机器/镜像**上跑。拆分的收益是**可移植性 / 覆盖**
-（torch 屏蔽实测：本次 2836→**2869 passed**，失败 21→13、收集错误仍 18；门禁全量
-2987 passed / 3 skipped），**不是墙钟**：
+（torch 屏蔽实测：本次 2836→**2875 passed**，失败 21→6、收集错误仍 18；门禁全量
+3005 passed / 3 skipped。分两步：先 2869，再扫掉剩余 13 个红里的 6 个），**不是墙钟**：
 实测把 torch 集单独开池只会更慢（`torch -n1 ‖ notorch -n11` 40s > 单次 `-n12` 33s；机制 =
 套件墙钟由免 torch 的重用例决定，360 个 torch 用例本就落在 worker 空档里）⇒ 默认门禁**维持
 单次 `-n12`，不做两池拆分**（理由写进 `tools/githook/nn-python-gate.sh` 头注）。

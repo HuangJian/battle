@@ -501,11 +501,15 @@ def test_resolve_bc_seed_prefers_course_seed() -> None:
 
 
 def test_resolve_fire_pos_weight() -> None:
-    """fire 头正例权重解析：auto = 训练集 neg/pos；数字直用；0/None 关闭。"""
+    """fire 头正例权重解析：auto = 训练集 neg/pos；数字直用；0/None 关闭。
+
+    从 `train.bc_core` 取（2026-09-26）：那是这个纯函数的**家**，`train/bc.py` 只是再导出；
+    从 `train.bc` 取会把整个训练器的 torch 拖进本用例（本文件其余用例都不需要 torch）。
+    """
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from train.bc import resolve_fire_pos_weight
+    from train.bc_core import resolve_fire_pos_weight
 
     counts = {"move": {}, "fire": {0: 5969, 1: 473}}
     assert abs(resolve_fire_pos_weight("auto", counts) - 5969 / 473) < 1e-9

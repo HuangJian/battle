@@ -12,6 +12,10 @@ Sub-modules:
 都 `import torch`，此前 eager `from ppo.common import ...` 使任何 `import ppo.<子模块>`
 （含免 torch 的 `ppo.np_core`）都被顺手拖进 torch。现在只有真的访问 `ppo.ppo_update`
 这类根级名字时才 import 对应模块。
+
+台阶还得踩到底（同日修正）：**惰性还不够，指向还得对**。首版把 `compute_gae` /
+`chunk_episodes` / `discover_shards` / `load_shard_fields` 都指向 `ppo.common`——那是再
+导出的旧家 ⇒ `ppo.compute_gae` 依旧拖 torch。见 `_EXPORTS` 的注释。
 """
 
 from __future__ import annotations
@@ -20,11 +24,17 @@ import importlib
 from typing import Any
 
 #: 根级便捷名 → 源模块。
+#:
+#: **指向可以是免 torch 的 `ppo.np_core`**（2026-09-26 修正）：`np_core` 那边才是
+#: `compute_gae` / `chunk_episodes` / `discover_shards` / `load_shard_fields` 的**家**，
+#: `ppo.common` 只是再导出。此前这五个都指向 `ppo.common` ⇒ 访问 `ppo.compute_gae`
+#: 会把 torch 拖进运行期（同样踩了「导入点没随函数搬家」——e2e/test_run_rl 的两条
+#: 手算用例因此在无 torch 机上必红）。名字指向哪家，就看谁**定义**它。
 _EXPORTS: dict[str, str] = {
-    "chunk_episodes": "ppo.common",
-    "compute_gae": "ppo.common",
-    "discover_shards": "ppo.common",
-    "load_shard_fields": "ppo.common",
+    "chunk_episodes": "ppo.np_core",
+    "compute_gae": "ppo.np_core",
+    "discover_shards": "ppo.np_core",
+    "load_shard_fields": "ppo.np_core",
     "masked_logsoftmax": "ppo.common",
     "build_ppo": "ppo.engine",
     "discover_rl_shards": "ppo.engine",

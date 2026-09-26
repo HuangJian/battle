@@ -74,8 +74,32 @@ nn-training 的 python 门禁里有 31 个测试文件因 `import torch`（或�
 
 **门禁**：`nn-python-gate.sh` 全绿（36s，ruff + mypy + pytest `-n12`）· 根 `bun run check` 绿。
 **测量方法**（可复现）：`PYTHONPATH=tmp/no_torch` 放一个 `torch/__init__.py` 直接
-`raise ImportError`，再按门禁同款 env 跑 `pytest tests/ e2e/ -o addopts="" -n 12 --timeout=60
---maxfail=0`（必须清 addopts，否则 `-x` 会在第一个红处停）。
+`raise ModuleNotFoundError("No module named 'torch'", name="torch")`，再按门禁同款 env 跑
+`pytest tests/ e2e/ -o addopts="" -n 12 --timeout=60 --maxfail=0`（必须清 addopts，否则 `-x`
+会在第一个红处停）。
+⚠ **影子要抛 `ModuleNotFoundError`，不能抛基类 `ImportError`**（2026-09-26 修正）：pytest 9.1
+起 `importorskip` 的默认 `exc_type` 就是 `ModuleNotFoundError`——「模块不存在才 skip，模块在但
+导入失败则报错」。抛基类会让所有 `importorskip("torch")` 的用例**假红**，测出的免 torch 面偏小
+（实测 `test_measure_checkpoint_rss::test_build_stack…` 就是这条：真机无 torch 时它是 skip）。
+
+### 补记（同日）：再扫掉剩余 13 个红里的 6 个
+
+首次测量剩下的 13 个失败**全是 `ImportError`**（不是断言失败），逐条判「这条 torch 依赖是不是
+真的」：7 条可免（含 1 条只是影子假红 ⇒ 真机 skip），6 条真需要 torch。修完
+**2869 → 2875 passed / 失败 13 → 6 / skip 3 → 4**，收集错误仍 18。
+
+| 修掉的 6 条 | 依赖其实长在哪 | 修法 |
+|---|---|---|
+| `e2e/test_run_rl::test_compute_gae` / `test_chunk_episodes` | 走根级便利名 `ppo.compute_gae`，而 `_EXPORTS` 把这两个名字指向 `ppo.common`（再导出的旧家） | `_EXPORTS` 改指 `ppo.np_core`（同一对象，`is` 不变）—— **名字指向哪家，就看谁定义它** |
+| `test_measure_checkpoint_rss::test_cli_rejects_unknown_mode` / `test_cli_requires_something_to_measure` | `main` 先 `warm_up()`（真 torch）才 `_plan()` 校验参数 | 校验提到暖机之前（`_validate`）⇒ 顺带**修掉 fail-fast 名存实亡**：参数写错不再先付一次 torch 暖机 |
+| `test_no_torch_on_import::test_modes_import_does_not_load_torch` | 用 `import_module("ppo.engine")` 验「延迟后端可解析」 | 改 `importlib.util.find_spec`（只解析路径、不执行模块；父包 `ppo` 是 PEP 562 惰性的） |
+| `test_bc_course::test_resolve_fire_pos_weight` | 纯函数住在顶层 `import torch` 的 `train/bc.py` | 抽 `train/bc_core.py`（孪生模块，bc.py 再导出）⇒ 该测试文件**整文件免 torch** |
+| `test_measure_checkpoint_rss::test_build_stack…` | 影子抛基类 `ImportError` ⇒ `importorskip` 假红 | 影子改抛 `ModuleNotFoundError`（真机它是 skip） |
+
+**剩下 6 条是真需要 torch，不动**：`test_log_diet` 3 条要真跑 `ppo_update`（验 epoch 行怎么攒进
+bundle）、`test_remote_ppo` 2 条要真 `state_dict` 序列化 / 真张量注入 NaN、`e2e/test_bc_epoch_e2e`
+1 条是真 BC 训练 e2e。⇒ 免 torch 面收敛到 **2875 passed / 4 skipped**，剩 **6 个失败用例 + 18 个
+收集失败文件**（后者是 `import torch` 在模块层，要免只能继续拆生产模块，不在本次范围内）。
 
 ---
 

@@ -57,8 +57,9 @@ from models.core import NNPolicy, param_count
 from models.student import PPOStudent, StudentNet
 from schema import OBS_SCHEMA_MAJOR
 
-# 设备串判据在 train/device.py（顶层零 torch，探针可注入 ⇒ 免 torch 可测）；
-# 本模块只剩「探针接线 + torch.device 构造」（2026-09-26，item 6f）。
+# 免 torch 的判据半边（2026-09-26，item 6f + 续扫）：BC 旋钮归一在 train/bc_core.py、
+# 设备串在 train/device.py。本模块 import 后自用 + 沿用旧名对外可见（既有调用点一行不改）。
+from train.bc_core import resolve_fire_pos_weight
 from train.device import resolve_bc_device
 
 
@@ -229,32 +230,6 @@ def _majority_baseline(dl) -> dict:
         maj = c.most_common(1)[0][1]
         out[name] = -math.log(maj / total)  # CE of constant majority prediction
     return out
-
-
-def resolve_fire_pos_weight(raw: object, counts: dict) -> float:
-    """fire 头正例权重（2026-09-14）：`"auto"` = 训练集 neg/pos（≈12.6）；数 = 直接用；
-    0/None = 关闭。为什么需要它：语料 fire 正例仅 ~7%，不加权的 CE 下 fire 头实测
-    accuracy 0.770 < "永不发射"常数基线 0.927 —— 即该头是负增益。
-
-    `raw` 来自三处：课程 JSONC（pydantic 已收窄为 float|"auto"）、本机 CLI（字符串）、
-    云端 manifest（float|"auto"）—— 故字符串分支同时接受 "auto" 与数字字面量。
-    """
-    c_f = counts.get("fire") or {}
-    if isinstance(raw, str):
-        s = raw.strip().lower()
-        if s == "auto":
-            pos = int(c_f.get(1, 0))
-            neg = int(c_f.get(0, 0))
-            return (neg / pos) if pos > 0 else 0.0
-        try:
-            return float(s)
-        except ValueError:
-            raise ValueError(f"fire_pos_weight 只接受数字或 'auto'，收到 {raw!r}") from None
-    if raw is None:
-        return 0.0
-    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
-        raise ValueError(f"fire_pos_weight 非法: {raw!r}")
-    return float(raw)
 
 
 def _sanitize_json(o):
