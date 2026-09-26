@@ -19,6 +19,12 @@
 定位到根 conftest（而不是只放 tests/）是因为门禁跑 `pytest tests/ e2e/`：两层都要
 被同一条规则覆盖。实现用 `pytest_runtest_makereport` 改写 outcome —— 超预算的用例
 直接**判失败**（不是 teardown 报错），这样 `-x`、xdist、summary 全是标准语义。
+
+第二项职责（2026-09-26）：**模块级 `check()`/`FAILS` 的静默绿必须变红**。一批从
+standalone 脚本迁来的用例用 `FAILS: list[str]` + `check()` 累积失败，却只有脚本入口
+`main()` 才 `sys.exit(1 if FAILS else 0)` —— 在 pytest 下 `check()` 只追加、无人断言
+（全仓曾 `assert not FAILS` 零命中、9 个文件无 autouse 守卫）⇒ 整批用例永远绿。
+见下方 `_no_silent_check_failures`。
 """
 
 from __future__ import annotations
@@ -93,3 +99,25 @@ def pytest_runtest_makereport(item, call):
             f"{item.nodeid} 耗时 {secs:.2f}s 超过警告阈值 {warn:g}s",
             stacklevel=1,
         )
+
+
+@pytest.fixture(autouse=True)
+def _no_silent_check_failures(request):
+    """模块级 `check()`/`FAILS` 记下的失败必须让 pytest 变红（不许静默通过）。
+
+    历史坑：`check()` 只往模块级 `FAILS` 追加，只有显式写了 `f0 = len(FAILS) … raise`
+    的用例才会红（`e2e/test_run_rl.py` 先加过模块级 `_fail_loudly` 并记录了那次事故）；
+    其余 9 个文件的 `check()` 在 pytest 下是**空转**（`assert not FAILS` 全仓零命中），
+    其中 `test_rl_model` 是 0 真断言 / 10 个 check。把义务交给框架后，新增用例不可能再忘，
+    也不需要每个文件各抄一份 fixture。
+    standalone 入口（各文件 `main()`）不走 fixture，末尾的 `if FAILS: SystemExit(1)` 兜底。
+    """
+    fails = getattr(request.module, "FAILS", None)
+    if not isinstance(fails, list):
+        yield
+        return
+    before = len(fails)
+    yield
+    new = fails[before:]
+    if new:
+        raise AssertionError("check() 静默失败（模块级 FAILS 增长）: " + "; ".join(map(str, new)))

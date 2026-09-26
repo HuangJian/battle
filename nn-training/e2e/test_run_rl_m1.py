@@ -315,9 +315,12 @@ def test_kickstart_coef_ignores_restart() -> None:
     )
     check(abs(kickstart_coef(args, 1) - 1.0) < 1e-9, "it1 满额 1.0（fresh 行为不变）")
     check(abs(kickstart_coef(args, 2) - 0.5) < 1e-9, "it2 衰减 0.5")
+    # it31 ⇒ 0.5^30 = 9.31e-10 < NEGLIGIBLE_COEF(1e-9) ⇒ 系数**精确** 0.0，不是 0.5**30。
+    # 旧断言写的是 `abs(… - 0.5**30) < 1e-12` —— 那是归零机制（2026-09-10）落地前的期望，
+    # 之后一直静默绿（边界与 test_kickstart_coef_anneals_to_exact_zero 完全同处）。
     check(
-        abs(kickstart_coef(args, 31) - 0.5**30) < 1e-12,
-        "it31 ≈ 0（resume 不得回到 1.0——旧代码传 start_it 会满额）",
+        kickstart_coef(args, 31) == 0.0,
+        "it31 精确归零（resume 不得回到 1.0——旧代码传 start_it 会满额）",
     )
     args0 = types.SimpleNamespace(
         epochs=4, warmup_iters=0, kickstart_kl=0.0, kickstart_decay=0.5, seed=7
@@ -345,9 +348,10 @@ def test_kickstart_startup_check() -> None:
             kickstart_ref=True,
             bc=bc,
         )
+        # 同 test_kickstart_coef_ignores_restart：it31 已在 NEGLIGIBLE_COEF 之下 ⇒ 精确 0.0。
         check(
-            abs(_kickstart_startup_check(args, 31) - 0.5**30) < 1e-12,
-            "resume it31 → kk≈0（不回满额）",
+            _kickstart_startup_check(args, 31) == 0.0,
+            "resume it31 → kk == 0.0（不回满额）",
         )
         missing = types.SimpleNamespace(
             epochs=4,

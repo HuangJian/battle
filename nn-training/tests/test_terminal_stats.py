@@ -77,7 +77,11 @@ def test_terminal_stats_basic() -> None:
     check(rec["outcomes"]["lives_exhausted"] == 4, "all 4 lives_exhausted")
     check(rec["win_rate"] == 0.0, "win_rate = 0")
     check(rec["by_stage"]["2000"]["games"] == 2, "stage 2000 has 2 games")
-    check(rec["by_stage"]["2000"]["kills_total"] == 4.0, "stage 2000 kills = 3+1 (took max) = 4")
+    # 去重保留 nSamples 最大者（w0=450 ⇒ kills=3），另一份 (2000,1) kills=1 被丢弃，
+    # 故本 stage 的 kills 是 3+0=3。旧期望 4.0 是「两份都算」的误写（kills["total"]==10
+    # 早已证明去重只留了 3），因 check() 只聚合不抛错而静默绿了很久
+    # （2026-09-26 conftest 的 _no_silent_check_failures 揭出）。
+    check(rec["by_stage"]["2000"]["kills_total"] == 3.0, "stage 2000 kills = 3+0 = 3（去重后）")
     check(rec["by_stage"]["2001"]["games"] == 1, "stage 2001 has 1 game")
     check(rec["by_stage"]["2001"]["kills_total"] == 5.0, "stage 2001 kills = 5")
 
