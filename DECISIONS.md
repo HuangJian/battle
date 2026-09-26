@@ -4162,3 +4162,41 @@ lastContrib）、`server/api/pool.ts` + `snapshot-cache.ts`（两个消费者）
 **被否决（二轮）**：只给候选流数加硬上限（静默丢流，面上看不出、行却少算）；memo 只留指纹不留
 时间下限（训练中 meta 逐秒追加 ⇒ 指纹每秒都变，等于没缓存）；把 `lastFailTs` 从窗口改成窗口无关
 的全量最大（脚注说的近一小时就变成假话）。
+
+---
+
+## §2026-09-26-course-archive-compress（2026-09-26，课程封存默认 gzip：重开 O3「不压缩」）
+
+**来历**：`plan/course-archive.plan.md §8-O3` 原裁决「不压缩」，理由是「单课 ≤80 MB 收益小、
+且会破坏 `eval_log.jsonl` 可直接读」。同日 E0 基线实测 13 门已停课的保留集（L0）合计
+**334 MB**（其中 `eval_log.jsonl` 单门 16–30 MB），用户 2026-09-26 指令重开该裁决。
+
+**决定**：
+① **默认 gzip（level 6）逐件压缩 L0 文本件**（`*.jsonl` / `*.json` / `.console.log` / settle 行）；
+实测 `eval_log.jsonl` 10.5–11.7×、`judge/backtest` 10.0×、`dist-agent-meta` 11.6×、
+`training_log` 8.9× ⇒ 334 MB → **≈50 MB**。
+② **不压**四类：`archive-manifest.json` 与 `ARCHIVE.md`（控制台 S3「只读 manifest、不扫盘」
+必须零解压成本）、L3 保留的 `.npy` shards（dense 数组 + BC 复算要直接 mmap）、
+`ppo_ckpt_remote.tar`（实测仅 1.4×，白搭一层）。
+③ `--codec xz` **可选**，固定 **preset 3**（依 `remote-transport.md §B6`：preset 3→6 已量、
+不采用）；`--no-compress` 为逃生舱（一次性排障要直接 grep）。
+④ manifest 的 `sha256` 一律算**解压后的原字节**，另记 `codec` / `bytes_raw` / `bytes_stored`
+——否则换机/换级别重压 ⇒ sha 变，⑤校验仪式失效。
+⑤ `tools/course_compare.py` **透明读 `.gz`**（照 `remote/protocol.py` 的 gzip 魔数判别先例）；
+G5 断言由「逐行逐字段一致」升为「**解压后逐字节一致**」（更强且更好测）。
+⑥ 封存目录形态 = `<课>/eval_log.jsonl.gz` 等（原名 + `.gz`，逐件、不打包）。
+
+**被否决**：**zstd**（新依赖，§5 要求先论证；仓库既有惯例就是 stdlib gzip）；
+**xz preset 6**（`remote-transport §B6` 已量，体积仅 −2.6…−3.0%）；
+**压整包含 manifest**（控制台列封存课要逐课解压 gz，违背 S3「不扫盘」初衷）；
+**整目录打一个 tar.gz**（丢「一件一文件」的 manifest 模型，也丢单件 sha 可验）。
+
+**违反后果**：sha 算在压缩字节上 ⇒ 换机重压即校验失败，「建→校验→删」的顺序保证被架空；
+压 manifest ⇒ 控制台每次列封存课都要解压。
+
+**落点**：`nn-training/rl/course_archive.py`（未建，E1+ 实现）、`nn-training/tools/course_compare.py`
+（未建，E5）；裁决正文同步进 `plan/course-archive.plan.md §8-O3`，基线数 `docs/nn/course-archive.md §1`。
+
+**边界**：这是一条**便利 vs 体积**的裁决，**不是 G1 的杠杆** —— 封存后 `tmp/` 地板 10.0 GB 里
+L0 只占 0.3 GB（3%），压到 0.05 GB 只把地板降到 9.75 GB。`tmp/ ≤ 1 GB` 的瓶颈是
+在训课 9.0 GB 与非课程 0.70 GB（E0 基线），别拿压缩当空间问题的答案。

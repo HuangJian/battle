@@ -10,7 +10,7 @@
  *    state-view          主快照组装      |  snapshot-cache / snapshot-refresher  慢部件缓存
  *    views               组件与节点视图  |  component-meta  组件元数据表（日志路径/端口）
  *    logs                日志读取与解码  |  ledger / loop-complete  账本尾派生
- *    courses             课程发现与上下文|
+ *    courses             课程发现与上下文| archive  课程封存读面（只读 manifest）
  *    overview            多课程并行总览 + push worker 登记（hub 观测面）
  *    loop-queue          训练调度器每课队列（只读 CLI + 在训事实合并）
  *    pool / eval-games   端点专属视图    |  ppo-queue / curriculum  专项派生
@@ -27,6 +27,7 @@ export { buildEvalBoardView, buildEvalCkptsView, ladderTickAll } from '../eval-b
 export * from './view-types'
 export * from './config'
 export * from './courses'
+export * from './archive'
 export * from './component-meta'
 export * from './logs'
 export * from './views'

@@ -554,6 +554,7 @@ export function App({ initial }: AppProps) {
                 course={viewCourse}
                 onSelectCourse={selectCourse}
                 onAction={doAction}
+                archived={stateView?.archived ?? null}
               />
             </PanelErrorBoundary>
             {/* ★2026-09-22 改版（用户指令）：首页不再有独立「任务包」区域——离线课程的

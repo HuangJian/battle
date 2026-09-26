@@ -172,12 +172,46 @@ export interface CloudHaltView {
   clearReason?: string
 }
 
+/** 已封存课程的一条（plan/course-archive.plan.md §3.4）。
+ *
+ *  数据源**只有一个**：`archive/courses/<课>/archive-manifest.json`——控制台只读它，
+ *  **不扫 tmp、不递归、不解压**（封存档案的文本件是 gzip，一旦读面解压就把「列一下封存课」
+ *  变成「解压 N 份 eval_log」）。 */
+export interface ArchivedCourseView {
+  course: string
+  archivedAt: string
+  /** `A`（旧 `it<N>/dist/`）| `B`（新 `it<N>/w<id>/`）| `C`（offline 回传），或混合 `A+B` / `A+C`。 */
+  form: string
+  parent: string
+  itRange: [number, number]
+  finalIt: number
+  /** 关键轮（opt/ckpt 保留点）——可作新腿起点的 it。 */
+  keyIters: number[]
+  /** 语料 shards 是否留存；`false` ⇒ **不可复算，只可比**。 */
+  shardsKept: boolean
+  codec: string
+  verdict: string
+  bytesTotal: number
+  bytesRawTotal: number
+  filesTotal: number
+  /** 起点（`path` 指向 `nn-training/weights/<课>/`，**不是**已移走的 tmp 路径）。 */
+  weights: { it: number; src: string; path: string }[]
+  /** 封存目录内相对路径（gz 件带 `.gz`/`.xz` 后缀）。 */
+  reads: { evalLog: string; trainLog: string }
+}
+
 export interface ConsoleStateView {
   time: string
   course: string
   /** 控制台当前课程（P5-W1 additive；旧视图无此字段 → 回退 `course`）。 */
   activeCourse?: string
   courses: string[]
+  /** 已封存课程（读面 = `archive/courses/<课>/archive-manifest.json`，**不扫盘、不解压**）。
+   *
+   *  与 `courses` **互斥**：封存课已从 `discoverCourses()` 排除（否则按 N4 保留的
+   *  `curricula/*.jsonc` 会把它回填回课程 select）。UI 把它们放进**默认折叠**的封存分组。
+   *  缺省/null = 旧视图或尚未封存过（UI 不画该分组）。 */
+  archived?: ArchivedCourseView[] | null
   /** 在训课程（多课程并行）：**共享 trainer 在跑**（registry 的空串槽）∧ 该课未收官
    *  （python 队列状态 `state`，2026-09-19 / R3-5）。课程 select 的多课高亮与总览的
    *  「在训」列同源；缺省（旧视图/测试直构）= 无在训课。 */

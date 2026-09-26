@@ -45,6 +45,7 @@ import {
   stopLadder,
 } from '../eval-board'
 import { launchTaskBundleExport, taskBundleInfo } from '../bundles'
+import { runRunPythonAsyncModule } from '../run-python'
 import { launchEvalA } from '../eval-a-run'
 import { ALL_COMPONENTS } from './component-meta'
 import { loadConfigSafe } from './config'
@@ -430,6 +431,60 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
               : []),
             `产物将落在 ${taskBundleInfo(ctx.course).path}`,
           ],
+        })
+      }
+      case 'archiveCourse': {
+        // 课程封存（plan/course-archive.plan.md）：把**已停**课程从 `tmp/<课>/` 搬成只读档案
+        // （`rl/course_archive.py`）。顺序契约在 python 侧（建→校验→删），这里只是入口。
+        //
+        // ★ **默认只跑 `--dry-run`**：`apply` 必须显式给——最贵的错误是「删了才发现没搬成」，
+        //   所以先看清单与字节账。★ 在训硬闸也在 python 侧（marker + 新鲜 ⇒ 拒绝，
+        //   `--force` 只能越**陈旧** marker）：控制台不自己算一份判据，两处必然漂开。
+        if (!ctx.course) return errResp('缺少 course', 400)
+        const apply = body.apply === true
+        const force = body.force === true
+        const args = ['--course', ctx.course, '--json']
+        if (apply) args.push('--apply')
+        if (force) args.push('--force')
+        const r = await runRunPythonAsyncModule('rl.course_archive', args, { timeoutMs: 600_000 })
+        if (r.timeout) {
+          return errResp('封存超时（进程已被杀）——先看 tmp/ 里目录有没有被动过', 504)
+        }
+        // 机器行是 stdout 的最后一个 `{…}`（cmd 汇总在前）
+        const line = r.stdout
+          .split('\n')
+          .map((s) => s.trim())
+          .filter((s) => s.startsWith('{'))
+          .pop()
+        let parsed: Record<string, unknown> | null = null
+        try {
+          parsed = line ? (JSON.parse(line) as Record<string, unknown>) : null
+        } catch {
+          parsed = null
+        }
+        if (!parsed) {
+          return errResp(
+            `封存命令没给出可解析的结果：${(r.stderr || r.stdout).trim().slice(-300) || `rc=${r.code}`}`,
+            500,
+          )
+        }
+        const refused = typeof parsed.refused === 'string' ? parsed.refused : ''
+        if (refused) return errResp(refused, 409)
+        const mb = (v: unknown): string =>
+          typeof v === 'number' ? `${(v / 1_000_000).toFixed(1)} MB` : '—'
+        const failed = Array.isArray(parsed.verify_failed) ? parsed.verify_failed.length : 0
+        const detail = [
+          `形态 ${String(parsed.form ?? '?')} · 保留 ${String(parsed.kept ?? 0)} 件 · 删除 ${String(parsed.deleted ?? 0)} 件`,
+          `保留 ${mb(parsed.bytes_kept_raw)} → ${mb(parsed.bytes_kept_stored)}（已存）· 释放 ${mb(parsed.bytes_freed)}`,
+          ...(failed > 0 ? [`⚠ 校验失败 ${failed} 件 ⇒ 源目录未动`] : []),
+        ]
+        if (failed > 0) return errResp(`${ctx.course} 封存校验失败（源未动）`, 500)
+        return okResp({
+          ok: true,
+          message: apply
+            ? `${ctx.course} 已封存（档案：archive/courses/${ctx.course}/）`
+            : `${ctx.course} 封存预演（--dry-run）完成——确认后再用 apply 真封存`,
+          detail,
         })
       }
       case 'evalReplays': {

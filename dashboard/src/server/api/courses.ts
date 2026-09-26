@@ -2,6 +2,7 @@
 import { existsSync, readdirSync, statSync } from 'fs'
 import path from 'path'
 import { REPO_ROOT, curriculaDir, tmpLogsDir } from '../../core/paths'
+import { archivedCourseSet } from './archive'
 import { type StartCtx, loadConsoleState } from '../actions'
 import { PostBody, bodyStr } from './route'
 
@@ -27,11 +28,17 @@ export function sanitizeViewCourse(raw: string | null): string {
 
 // ────────────────────────── 课程发现 ──────────────────────────
 
-/** 发现可监控课程：tmp/ 下含 training_log.jsonl 的目录（按日志 mtime 新→旧）+ curricula/*.jsonc 中尚未落盘的课程。
+/** 发现可监控课程：tmp/ 下含 training_log.jsonl 的目录（按日志 mtime 新→旧）+ curricula/*.jsonc 中尚未落盘的课程，**排除已封存课**。
  *
  *  窗口（max）默认取足量 500：课程目录随阶梯（+20）/经典（+35）/BC（*.bc.jsonc）持续
  *  增长，小窗口会把课程挤出课程 select——2026-09-14 回归：20 个 ladder-*（mtime 23:32）
- *  占满 12 窗口，bc-c4-v3（23:14）连 bc-c4/c6-chip 一并消失，无法在控制台开启 BC 训练。 */
+ *  占满 12 窗口，bc-c4-v3（23:14）连 bc-c4/c6-chip 一并消失，无法在控制台开启 BC 训练。
+ *
+ *  ★ **已封存课必须显式排除**（plan/course-archive.plan.md §4 S3，2026-09-26 评审发现）：
+ *  封存把 `tmp/<课>/` 移走，却**按 N4 保留 `curricula/<课>.jsonc`** ⇒ 下面那段「curricula
+ *  里尚未落盘的课也收」的回填会把它重新捞回来，课程 select 与开课弹窗里于是仍然看得见
+ *  一门已经封存的课（G2「不进活体视图」直接落空）。所以排除判据只能建在
+ *  `archive-manifest.json` 的存在上，不能指望「tmp 没了它自然消失」。 */
 export function discoverCourses(max = 500): string[] {
   const out: Array<{ name: string; mtime: number }> = []
   const seen = new Set<string>()
@@ -66,7 +73,9 @@ export function discoverCourses(max = 500): string[] {
   } catch {
     /* no curricula dir — fall through */
   }
+  const archived = archivedCourseSet()
   return out
+    .filter((c) => !archived.has(c.name))
     .sort((a, b) => b.mtime - a.mtime)
     .slice(0, max)
     .map((c) => c.name)

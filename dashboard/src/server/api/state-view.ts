@@ -6,6 +6,7 @@ import type { ConsoleStateView, MetricsView } from '../../web/view'
 import { courseEnableMarkerPath, loadConsoleState, readCourseModes } from '../actions'
 import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/specs'
 import { readIterMetrics, readPairedReferee } from '../iters'
+import { readArchived } from './archive'
 import { loadConfigSafe } from './config'
 import { discoverCourses, effectiveCourse } from './courses'
 import { buildLoopQueueView } from './loop-queue'
@@ -98,6 +99,9 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     isBc: isBcCourse(course),
     activeCourse: state.activeCourse || state.course || course,
     courses,
+    // 已封存课程：只读 `archive/courses/*/archive-manifest.json`（不扫盘、不解压）——
+    // 与 `courses` 互斥（封存课已在 discoverCourses 里按 manifest 排除）。
+    archived: readArchived(),
     // 在训（= **已开课**）课程：课程 select 的多课高亮、顶部 pill 行、总览的「在训」列
     // 与门禁动作开关**同源**——一处判据修三次才会三处各说各话，故只在这里算一次。
     trainingCourses: training,
