@@ -4567,3 +4567,38 @@ bump + 全量重转），且会让已训 value 头的输出量纲漂移（旧 ch
 `world.rng`（AGENTS §2.3），不进观测。需要时以**训练侧**手段解决（GAE λ / value 头 / 事件化）。
 
 **被否决**：把 RNG state 塞进 shard（格式 + value 偏移双代价）；观测侧加倒计时列（超人信息出局）。
+
+## §2026-09-27-goalnn-r2-event-gate（2026-09-27，x2 事件门契约：γ 保 per-step + 交棒首段禁事件 + Δt≥3）
+
+**来历**：新纪元 R2 包（`plan/new-era-stop.plan.md §6 R2`）给 x2 rung 预注册「事件驱动决策」——
+决策门从「均匀 K」扩成「均匀 K ∪ threat-ONSET 沿（+最小间隔闸）」，落地前有三件**不能就近表达**
+的裁决：折扣语义、与 state-init 起始分布的共存、决策间隔上界（hy P0-3/P0-6 指出的三条）。
+实施记录与基线数字在同 plan 的「R2 实施记录」节。
+
+**决定**（三项，一次定死）：
+① **γ 保持 per-step**（`nn-training/rl/config.py:974` γ=0.995），**不**切半 MDP `γ^Δt`。换算声明：
+   视界 = 200 决策步 × avg-Δt；事件门实测（x20-noexplore it99 × ladder-c20 四局）
+   avg-Δt = **9.79–9.94** tick ⇒ 视界 **1958–1988** tick（相对均匀 2000 漂移 **−0.6%…−2.1%**）；
+   最小间隔闸 minGap=3 给出硬下界 600 tick（实测未逼近，minDt ∈ {3,4}）。事件密度若因 K 收紧/
+   电平化而显著上升，**重议**本条（`np_core.py::gamma_step = gamma ** dt` 已具备半 MDP 能力）。
+② **state-init 共存 = 方案 i**：银行切点规则**不变**（仍 `t % K == 0`），交棒 tick 恒是决策 tick
+   （决策流首个候选恒放行），且**交棒后第一个 K 段禁 threat 事件**——快照只存当前态、不存
+   `prevThreat` 历史，交棒瞬间的「首次入带」是伪造 onset。**不重出银行、不改切点规格**。
+③ **Δt ≥ 3 是全门不变式**（含均匀边界）：事件后 1–2 tick 的 `t % K == 0` 边界会被跳过
+   ——这是事件模式唯一会改「均匀子集」的路径，无事件的局逐字节不变（HEAD A/B 实测）。
+   门读数（n / events / avg-Δt / min-Δt / max-Δt）落 shard manifest 与 `_eval_report.json`，
+   **仅 `--decision-events` 时写**（缺省调用逐字节不变）。
+
+**被否决**：首版就上 `γ^Δt`（同刀两个自变量，x2 相对 x1 的边际不可归因，hy P0-4）；
+重出 state-init 银行（无理由的语料轮次，§15.1/§15.5）；把 threat **电平**写进谓词
+（持续期每 tick 成立 ⇒ Δt=1 ⇒ 部署 6Hz→60Hz + 视界塌缩，hy P0-3）；给 BC label 导出器
+顺带开事件（那是新语料轮次 + 与 x1 的 BC 教师口径分叉，属 x2 排产决定，不在 R2）。
+
+**违反后果**：改折扣语义 ⇒ 必须新实验（新 `--out`/`--traj` + 新 DECISIONS，§15.5），
+不得与 x1/x2 的读数混算；把电平/无条件事件写进 `decisionDue` ⇒ 部署侧前向频率与视界同时失控。
+
+**落点**：`src/nn/decision-gate.ts`（唯一实现 + 读数）· `src/nn/obs-encoder.ts::decisionTick`
+（`condition === 4`，可选 `prevThreat`）· 五处决策门（`policy-input` / `export-rl-rollout` /
+`export-eval-game` / `export-nn-replays` / `record-games-video`）+ `divergence-probe` 全改调
+`decisionDue` · `build-state-init-bank.ts` 共存契约 · 测试 `tests/nn/decision-gate.test.ts`、
+`tests/sim/eval-game-parity.test.ts`、`tests/state-init.test.ts`。

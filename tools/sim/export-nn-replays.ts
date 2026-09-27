@@ -36,6 +36,12 @@ import { START_LIVES, ENEMIES_PER_STAGE } from '../../src/constants'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
 import { buildModelFromText, type ModelLike } from '../../src/nn/infer'
 import { decodeMove } from '../../src/nn/action-space'
+import {
+  createDecisionGateConfig,
+  createDecisionGateState,
+  decisionDue,
+  decisionReadout,
+} from '../../src/nn/decision-gate'
 import type { InputLike } from '../../src/game/Input'
 import { DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { InputRecorder } from '../../src/replay/InputRecorder'
@@ -43,8 +49,6 @@ import { serializeReplayFile, buildReplayFilename } from '../../src/replay/file'
 import type { SimOutcome } from './simulation-runner'
 import { createHash } from 'node:crypto'
 import { writeFileSync, readFileSync, mkdirSync, existsSync } from 'fs'
-
-const K = 10
 
 /** 掩码 argmax：并列取最小索引（确定性）；全掩码时退化为末位（对齐 eval-game）。 */
 function argmaxCat(logits: Float32Array, mask: number[] | null): number {
@@ -71,6 +75,7 @@ interface RunOut {
   killCount: number
   lives: number
   playerLevel: number
+  decisions: ReturnType<typeof decisionReadout>
   replay: { initialSnapshot: unknown; frames: Uint8Array; tickCount: number }
 }
 
@@ -82,6 +87,8 @@ function runOne(
   maxTicks: number,
   model: ModelLike,
   arenaId?: number,
+  /** x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：默认 false = 均匀 K 旧行为。 */
+  decisionEvents = false,
 ): RunOut {
   const world = new World()
   world.rng.reseed(seed)
@@ -108,13 +115,16 @@ function runOne(
 
   const encoder = new ObsEncoder()
   let firstKillTick: number | undefined
+  // 决策门（唯一实现）：逐 tick 喂（事件模式要沿检测 + 最小间隔闸）。
+  const gateCfg = createDecisionGateConfig(decisionEvents)
+  const gate = createDecisionGateState()
 
   let t = 0
   let outcome: SimOutcome = 'max_ticks'
 
   while (t < maxTicks) {
-    encoder.encode(world)
-    if (t % K === 0) {
+    if (decisionDue(t, world, gate, gateCfg)) {
+      encoder.encode(world)
       model.forward(encoder.obs, encoder.scalars)
       const masks = computeMasks(world)
       const mv = argmaxCat(model.moveLogits, masks.move)
@@ -145,6 +155,7 @@ function runOne(
   const rec = recorder.finalize()
   if (!rec) throw new Error(`recorder empty for seed ${seed}`)
 
+  const decisions = decisionReadout(gate)
   return {
     outcome,
     cleared: allEnemiesCleared(world),
@@ -152,6 +163,7 @@ function runOne(
     killCount: world.killCount,
     lives: world.lives,
     playerLevel: world.playerLevel,
+    decisions,
     replay: {
       initialSnapshot: rec.snapshot,
       frames: rec.frames,
@@ -171,12 +183,16 @@ function main(): void {
   let difficulty = 'hard'
   let maxTicks = 3600
   let weightsPath = ''
+  // x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：显式开启才加 threat-ONSET；
+  // 缺省 = 均匀 K（旧行为逐字节不变）。
+  let decisionEvents = false
   const runs: CliRun[] = []
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--out') outDir = argv[++i]
     else if (argv[i] === '--difficulty') difficulty = argv[++i]
     else if (argv[i] === '--max-ticks') maxTicks = parseInt(argv[++i], 10)
     else if (argv[i] === '--weights') weightsPath = argv[++i]
+    else if (argv[i] === '--decision-events') decisionEvents = true
     else if (argv[i] === '--run') {
       const id = argv[++i]
       const [stageId, seed] = id.split(':').map((x) => parseInt(x, 10))
@@ -213,6 +229,7 @@ function main(): void {
       maxTicks,
       model,
       isArena ? r.stageId : undefined,
+      decisionEvents,
     )
 
     // Filename 用真实竞技场号（s1020/1021/1022，便于区分），envelope 的
@@ -265,7 +282,9 @@ function main(): void {
     writeFileSync(path, text)
     console.log(
       `[export-nn-replays] s${r.stageId} seed${r.seed} weights=${weightsSha} outcome=${out.outcome} ` +
-        `ticks=${out.ticks} kills=${out.killCount} path=${path}`,
+        `ticks=${out.ticks} kills=${out.killCount} decisions=${out.decisions.n} ` +
+        `events=${out.decisions.events} avgDt=${out.decisions.avgDt} minDt=${out.decisions.minDt} ` +
+        `path=${path}`,
     )
   }
 }

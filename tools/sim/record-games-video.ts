@@ -31,6 +31,11 @@ import { dodgeL0 } from '../../src/nn/dodge-l0'
 import { ObsEncoder, computeMasks } from '../../src/nn/obs-encoder'
 import { buildModelFromText } from '../../src/nn/infer'
 import { decodeMove, encodeMove } from '../../src/nn/action-space'
+import {
+  createDecisionGateConfig,
+  createDecisionGateState,
+  decisionDue,
+} from '../../src/nn/decision-gate'
 import type { InputLike } from '../../src/game/Input'
 import { Camera } from '../../src/presentation/Camera'
 import { AnimationSystem } from '../../src/presentation/AnimationSystem'
@@ -45,8 +50,6 @@ import {
   createRenderTarget,
 } from '../perf/headless-canvas'
 import { updateVisualState, DT } from '../perf/fixtures/render-scenarios'
-
-const K = 10
 
 class ScriptedInput {
   moveDir: Direction | null = null
@@ -169,6 +172,8 @@ function recordOne(
     canvas: any
   },
   framesDir: string,
+  /** x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：默认 false = 均匀 K 旧行为。 */
+  decisionEvents = false,
 ): { outcome: string; ticks: number; win: boolean } {
   const world = new World()
   world.rng.reseed(game.seed)
@@ -190,12 +195,15 @@ function recordOne(
   const encoder = new ObsEncoder()
   const rng = mode === 'rollout' ? mulberry32((game.seed ^ 0x85ebca6b) >>> 0) : null
   const acted: string[] = []
+  // 决策门（唯一实现）：逐 tick 喂（事件模式要沿检测 + 最小间隔闸）。
+  const gateCfg = createDecisionGateConfig(decisionEvents)
+  const gate = createDecisionGateState()
   let t = 0
   let outcome = 'timeout'
 
   while (t < maxTicks) {
-    encoder.encode(world)
-    if (t % K === 0) {
+    if (decisionDue(t, world, gate, gateCfg)) {
+      encoder.encode(world)
       model.forward(encoder.obs, encoder.scalars)
       const masks = computeMasks(world)
       let aMove: number
@@ -258,6 +266,8 @@ async function main(): Promise<void> {
   let outDir = 'tmp/vrecord'
   let mode: 'greedy' | 'rollout' = 'greedy'
   let dodgeArg = ''
+  // x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：显式开启才加 threat-ONSET。
+  let decisionEvents = false
   let dumpPath: string | null = null
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--weights') weightsPath = argv[++i]
@@ -268,6 +278,7 @@ async function main(): Promise<void> {
     else if (argv[i] === '--out') outDir = argv[++i]
     else if (argv[i] === '--dump-actions') dumpPath = argv[++i]
     else if (argv[i] === '--dodge') dodgeArg = argv[++i]
+    else if (argv[i] === '--decision-events') decisionEvents = true
     else if (argv[i] === '--mode') {
       const m = argv[++i]
       if (m !== 'greedy' && m !== 'rollout') {
@@ -320,6 +331,7 @@ async function main(): Promise<void> {
       dumpPath,
       snaps,
       framesDir,
+      decisionEvents,
     )
     const mp4 = join(
       outDir,

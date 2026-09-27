@@ -7,6 +7,27 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §25 x2 事件门（R2 包）落地：决策门单点化 + threat-ONSET 沿 + Δt≥3（2026-09-27）
+
+**背景**：新纪元 R2（`plan/new-era-stop.plan.md §6`）要求 x2 rung 具备「事件驱动决策」，且不碰 x1。
+原状：五处决策门各写一份 `t % K === 0`（`policy-input` / `export-rl-rollout` / `export-eval-game` /
+`export-nn-replays` / `record-games-video` + `divergence-probe`）——每多一处就是一次口径分叉机会。
+
+**做法**：新模块 `src/nn/decision-gate.ts` = 唯一谓词 `decisionDue`：均匀 K ∪ threat-ONSET **沿**
+（`!prevThreat && inThreatLane`）+ 最小间隔闸 Δt ≥ 3（含均匀边界）；`events=false` 时**精确退化**为
+`t % K === 0`（不读威胁、零额外开销）。六处调用点全部改调它；各工具加 `--decision-events`（缺省 off）。
+读数（n / events / avg-Δt / min / max）进 shard manifest、`_rl_report.decision`、
+`_eval_report.decisionReadout`——**仅带 flag 时写**（既有产物逐字节不变）。
+
+**基线（ladder-c20 四局，x20-noexplore it99）**：onset 1–4 次/局（+0.5–2% 决策步），avg-Δt 9.79–9.94，
+min-Δt ∈ {3,4}；γ 保持 per-step ⇒ 视界 1958–1988 tick（相对均匀 2000 漂移 −0.6%…−2.1%）。
+state-init 共存 = 方案 i（切点规则不变 + 交棒后首段禁事件）。
+
+**验证**：HEAD `cc9ffdbd` A/B 逐字节一致（rollout shard npy+manifest、eval 报告）；零事件局 shard
+逐字节一致（单测）；部署/judge parity 新增事件局用例。决策全文 → DECISIONS
+`§2026-09-27-goalnn-r2-event-gate`；实施细节与数字表 → `plan/new-era-stop.plan.md` §6「R2 实施记录」。
+
+---
 ## §24 教训：缰绳初值显式化 + 干烧熔断（accident.plan §5，2026-09-21）
 
 **事故**：C 双臂从收敛权重（it175）以 `kk(1)=1` 满 kickstart 复活，锚主导更新连烧 30 轮

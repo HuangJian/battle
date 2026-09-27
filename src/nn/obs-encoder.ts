@@ -41,6 +41,7 @@ import {
   killAssessment,
   enemyDeadline,
 } from '../ai/god/ThreatBudget'
+import { threatOnsetEdge } from './decision-gate'
 
 // ---- Canonical dimensions (mirror nn-training/schema.py) ----
 export const OBS_CHANNELS = 16
@@ -554,8 +555,16 @@ export function isFireEdge(world: World): boolean {
  *   turn-event  : direction changed vs previous frame
  *   fireEdge    : cooldown just elapsed
  *   item-event  : guard/frenzy bit changed vs previous frame
+ *   threatOnset : entered an enemy bullet/barrel lane (edge; x2 rung — see below)
  *   subsample   : t % k === 0  (k=10) — keeps "do nothing" negative samples
- * Priority for `condition`: turn > fire > item > subsample.
+ * Priority for `condition`: turn(0) > fire(1) > item(2) > threat(4) > subsample(3).
+ *
+ * threat-ONSET（plan/new-era-stop.plan.md §6 R2.1）：`condition === 4` 只在调用方传入
+ * `prevThreat` 时可能产出——**沿，不是电平**（电平在威胁持续期每 tick 成立 ⇒ Δt=1 ⇒
+ * 部署 60Hz + 视界塌缩，hy P0-3）。`prevThreat` 必须由调用方**逐 tick**维护（上一 tick
+ * 的 `inThreatLane`）；不传 = 旧四类事件，现有 label 导出器逐字节不变（是否给 BC 语料
+ * 开事件属 x2 rung 的排产决定，不在 R2 内）。RL 侧的事件门走 `decision-gate.ts::decisionDue`
+ * （同一 `threatOnsetEdge` 定义，含最小间隔闸与 state-init 抑制窗）。
  */
 export function decisionTick(
   t: number,
@@ -567,16 +576,19 @@ export function decisionTick(
   prevFrenzy: boolean,
   curFrenzy: boolean,
   k = 10,
+  prevThreat?: boolean,
 ): { isDecision: boolean; condition: number } {
   const turnEvent = prevDir !== null && prevDir !== curDir
   const fireEdge = isFireEdge(world)
   const itemEvent = prevGuard !== curGuard || prevFrenzy !== curFrenzy
+  const threatOnset = prevThreat === undefined ? false : threatOnsetEdge(prevThreat, world)
   const subsample = t % k === 0
-  const isDecision = turnEvent || fireEdge || itemEvent || subsample
+  const isDecision = turnEvent || fireEdge || itemEvent || threatOnset || subsample
   let condition = 3
   if (turnEvent) condition = 0
   else if (fireEdge) condition = 1
   else if (itemEvent) condition = 2
+  else if (threatOnset) condition = 4
   return { isDecision, condition }
 }
 

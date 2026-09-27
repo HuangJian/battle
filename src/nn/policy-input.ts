@@ -18,6 +18,16 @@ import type { World } from '../game/World'
 import type { InputLike } from '../game/Input'
 import { ObsEncoder, computeMasks } from './obs-encoder'
 import { decodeMove } from './action-space'
+import {
+  createDecisionGateConfig,
+  createDecisionGateState,
+  decisionDue,
+  decisionReadout,
+  markDecision,
+  type DecisionGateConfig,
+  type DecisionGateState,
+  type DecisionReadout,
+} from './decision-gate'
 import { buildModelFromText, type ModelLike } from './infer'
 import { resolveLatestWeights } from './weights'
 import { join } from 'path'
@@ -31,6 +41,12 @@ export interface NNInputOptions {
   weightsDir?: string
   /** Decision-tick subsample period K (training default: 10). */
   decisionK?: number
+  /**
+   * x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：给决策门加 threat-ONSET 事件
+   * （均匀 K ∪ 事件，Δt ≥ 3）。默认 false = 均匀 K 旧行为（x1 首刀逐字节不变）。
+   * **判决链与部署链必须同值**（tools/sim/eval-game-parity.test.ts 钉住）。
+   */
+  decisionEvents?: boolean
 }
 
 // ---- module-level model cache (one load per process / per worker thread) ----
@@ -85,6 +101,9 @@ export class NNInput implements InputLike {
   private model: ModelLike
   private encoder = new ObsEncoder()
   private K: number
+  /** 决策门（唯一实现 = src/nn/decision-gate.ts）：均匀 K ∪ threat-ONSET + 最小间隔闸。 */
+  private gateCfg: DecisionGateConfig
+  private gate: DecisionGateState = createDecisionGateState()
 
   // committed (held) action for the current inter-decision window
   private moveDir: Direction | null = null
@@ -102,6 +121,12 @@ export class NNInput implements InputLike {
     this.world = world
     this.model = loadModel(opts)
     this.K = opts.decisionK ?? 10
+    this.gateCfg = createDecisionGateConfig(opts.decisionEvents === true, this.K)
+  }
+
+  /** 决策门读数（Δt/事件计数；测试与部署诊断用；只读）。 */
+  readDecisionStats(): DecisionReadout {
+    return decisionReadout(this.gate)
   }
 
   getMoveDirection(): Direction | null {
@@ -125,18 +150,26 @@ export class NNInput implements InputLike {
    * the decision state the corpus/eval builders observe (`world.frame` = their
    * `t`), so a due tick takes its decision now and holds it into the next tick.
    * Terminal states take no decision — the builders stop at the same point.
+   *
+   * x2：到期判定全部走 `decisionDue`（shared gate）——调用方**每 tick** 调本函数即可，
+   * 沿检测（prevThreat）与最小间隔闸要的就是逐 tick 喂。
    */
   endFrame(): void {
     const w = this.world
-    if (w.state === 'playing' && w.frame % this.K === 0) this.decide()
+    if (w.state === 'playing' && decisionDue(w.frame, w, this.gate, this.gateCfg)) {
+      this.decide()
+    }
   }
 
   reset(): void {
     this.moveDir = null
     this.firing = false
+    // 新一局 = 新决策流（Δt 读数不跨局；suppressEventsUntilTick 归零）。
+    this.gate = createDecisionGateState()
     // Tick 0's decision, on the freshly loaded stage (callers reset() after
     // `world.loadStageData(...)` — the builders' `t = 0` observation).
     this.decide()
+    markDecision(this.gate, this.world.frame)
   }
 
   /**
