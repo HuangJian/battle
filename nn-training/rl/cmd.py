@@ -97,6 +97,11 @@ def build_rollout_cmd(
         # reward）——不再追加 --reward；--dodge 保留透传。
         if getattr(args, "dodge", ""):
             cmd += ["--dodge", args.dodge]
+        # R2 事件 rung（plan/new-era-stop.plan.md §6）：课程 decision_events=True ⇒
+        # rollout 走事件门（均匀 K ∪ threat-ONSET + Δt≥3）；缺席/False = 老行为（导出器缺省）。
+        # 与 --dodge 同形：显式开关才透传，无静默。
+        if bool(getattr(args, "decision_events", False)):
+            cmd += ["--decision-events"]
         # M1d：课程自定义关 stageJson + 命数/星级覆盖（plan §5.2；四守卫在导出器端）。
         # stageJson 只有 stage ∈ [2000..] 的自定义关才有；arena/真实关恒 None。
         from rl.config import args_rollout_overrides, stage_json_for_args

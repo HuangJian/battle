@@ -1240,6 +1240,12 @@ def fetch_task(
     # 缓存键注意：agent taskKey 无 policy 分量——调用方必须用独立 iterId 命名空间
     # 隔离不同 policy（A 层恒 nn；B/C 批用 batch 命名空间），否则 god/nn 同键串局。
     policy: str = "nn",
+    # R2 事件 rung（plan/new-era-stop.plan.md §6）：True ⇒ agent 以事件门跑本局
+    # （均匀 K ∪ threat-ONSET + Δt≥3）；缺席/False = 老行为（agent 侧缺省）。
+    # agent taskKey 含 `:de1` 后缀（与 stageJsonHash 同规），旧缓存不串局；
+    # 不支持的旧 agent 由**调用方**凭 ping.decisionEventsSupport 提前排除（fail-closed，
+    # 同 stageJsonSupport），本函数只负责透传。
+    decision_events: bool = False,
 ) -> tuple[dict, dict]:
     """获取一局结果 → (manifest, files)；失败抛 DistError。
 
@@ -1293,6 +1299,9 @@ def fetch_task(
         params["livesOverride"] = lives_override
     if player_level is not None:
         params["playerLevel"] = player_level
+    # R2 事件 rung：仅激活时透传（缺席 = 老 agent 照旧，老行为逐字节不变）。
+    if decision_events:
+        params["decisionEvents"] = "1"
     if course_fp:
         params["courseFp"] = course_fp
     # v5 多课程：任务自报课程——agent 按 (course, kind) 取权重桶。缺省走进程级身份

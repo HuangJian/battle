@@ -1,0 +1,135 @@
+// 课程 h2-stop —— **新纪元第 2 课：x2 rung（ladder-c02），STOP-only**（plan/new-era-stop.plan.md §7）
+//
+// 状态：**草稿，待用户手工开训**（agent 不得启动训练）。
+//   **前置**：h1 过门 + 冠军权重归档后，才能 pin `bc` 开课（起点占位见下）。
+//
+// 立项：梯子第二 rung（2 敌 / 6 关，`plan/x20-dodge-avoidance.plan.md` 外的 ladder 主线）。
+//   B 案 STOP 语义沿用（0=stop；dims 全不变）；均匀 K=10（事件 rung 另开，plan §6 R2，
+//   不在本文件掺变量）；flat critic（解耦 rung 条件未到）。
+//
+// 配方（= x1-a2 v4 包逐字，x2-rebirth 同款）：
+//   wKill 3.0 / wHit 0.6 / wWin 2.0 / wDmg 0.03 / wShot 0.05 / **wExplore 0.2**
+//   + terminal lives_exhausted −5.0 / timeout −2.0。
+//   wExplore 在 x2 rung 保留（a2 EV 表 + x2-rebirth 成功先例；衰减到 x20 rung 再归零）。
+// 位移包（x2-rebirth 原样）：lr 0.0005 / epochs 6 / mb 512 / kl 0.02（40 轮）→0.01。
+//
+// 起点：h1 冠军 warm start，`kickstart_ref=true`（x1-a2→x2→x3→x4 全链 kk=true 绿过；
+//   与 C 事故区分：新 rung 新敌人，非同任务续命）。
+//   ⚠ `bc` 下面的占位必须在开课前换成 h1 冠军实际文件名，否则拒启。
+//   comparator = 本 rung 绝对门 + 自身趋势（跨 rung/跨纪元不配对）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 判据（x2 rung 绝对数门；脚注：x2-rebirth it15 95.0%/33.9/77.5%）
+// ══════════════════════════════════════════════════════════════════════════
+// **门**：日常段（860001，400 局）`pass ≥ 95%` 且 `dmg/局 ≤ 40` 且 `零伤通关 ≥ 70%`。
+// **机制链**：① stopPickRate（侧车计数）② threat/clean ③ pass/dmg 跟随。
+// **约束**：超时 >5% ⇒ 人工决策停；kl 连续 3 轮 ≥0.075 ⇒ 记录 + 人工盯盘；
+//   ent 跌破 0.25 ⇒ break；分关任一退步 >5pp ⇒ 掉队。
+// **判据一律不得由教师表现反推**（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 止损（人工盯盘执行）
+// ══════════════════════════════════════════════════════════════════════════
+//   · **专属死刑**：stopPickRate 连续 3 个 eval 点 < 10/千tick（前置：探针链通）⇒ 停腿；
+//     熵早期塌陷 ⇒ 先开判别臂（P1-6 改形），通过后才进 B2。
+//   · **对称死刑**：stopPickRate 连续 3 点高于人类基线上四分位 ⇒ 停腿 ⇒ B0。
+//   · **机械横盘**：pass/dmg 连续 4 个 eval 点无改善 ⇒ 停腿；宽限一次 +10 轮（x2 先例，不得二次宽限）。
+//   · B1/B3/B4 按 plan §8。
+
+{
+  "version": 5,
+  "name": "h2-stop",
+  "mode": "per-tick",
+  // 环境：ladder-c02（2 敌 / 6 关）。任务侧一个字不动（AGENTS §0.2）。
+  "level": "ladder-c02",
+
+  // ── 奖励：x1-a2 v4 包逐字 ──────────────────────────────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wWin": 2.0,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.2
+    },
+    "terminal": {
+      "lives_exhausted": -5.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：h1 冠军 warm start（2026-09-27 已 pin：h1 it50 100%/1.8，sha 已验）─────
+  "bc": "nn-training/weights/h1-stop-best/h1-stop.it50.best.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+
+  // ── 预算（x2-rebirth 原样：80 轮 / 12h）──────────────────────────────────
+  "iters": 80,
+  "max_hours": 12,
+  "workers": 8,
+
+  // ── 位移包：x2-rebirth 原样 ─────────────────────────────────────────────
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 40, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
+    { "kl_coef": 0.01, "lr": 0.00025 }
+  ],
+
+  // ── 采集 ───────────────────────────────────────────────────────────────
+  "target_transitions": 24000,
+  "est_samples_per_game": 100,
+  "seed_rotate": 100,
+
+  // ── 路径：新目录、禁续跑（§15.5）────────────────────────────────────────
+  "out": "tmp/h2-stop/weights.json",
+  "traj": "tmp/h2-stop",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/h2-stop",
+  "backup_prefix": "h2-stop",
+
+  // ── 评估 ───────────────────────────────────────────────────────────────
+  "eval_stages": "2000-2005",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 开工前置 ─────────────────────────────────────────────────────────────
+// ① h1 过门（it50 100%/1.8）+ 冠军归档 + `bc` 已 pin 真实文件（已验）。
+// ② 公式编译验证（validate_reward；与 v4 逐字同是正确原因）。
+// ③ 新 out/traj 目录（禁续跑）。④ 节点：self/mac/a96 心跳（A6；无远端本机慢 10x）。
+// ⑤ paired-kill 默认关（opt-in）。
+//
+// 启动（**用户手工；agent 不得启动训练**，经控制台开课）。
+//
+// ── 诊断工具 ─────────────────────────────────────────────────────────────
+// · 日常趋势：it0/it5…（860001 段 400 局）pass/dmg/stopPickRate（侧车）/cells。
+// · 事件 rung（plan §6 R2）另开课程，不进本文件。
+//
+// ── 结算节（跑完回填）──────────────────────────────────────────────────────
+// 必填：① pass/dmg it0 → 终点 ② stopPickRate（威胁上下文优先）③ 分关表（掉队检查）
+//   ④ 超时/换血 ⑤ 实际轮数与耗时 ⑥ 判语（过门⇒ h3（x3 rung）；idle 平 ⇒ B2；停太多 ⇒ B0）。
+//
+// ── 结算（2026-09-27 回填：it1–36，用户到顶停腿；日常到 it35）──
+// ① 日常（860001，it0 300 局 / it5+ 600 局）：it0 84.3%/88.9 → **it25 96.2%/35.9/零伤75.7**
+//    （三门全过：+1.2pp/−4.1/+5.7）；it30 93.3%/43.2、it35 95.7%/45.0 —— dmg 两连涨 +25%，
+//    win 93~96 震荡 = x2-rebirth 翻版（it15 最优后往"更快但更脏"回退；终点≠最后一个 it）。
+//    rollout wr it11 起 0.93~0.95 横盘（天花板，非平台），PPO 健康（kl≤0.0097、ent 0.75→0.62）。
+// ② stopPickRate：**全程盲区**（in-loop 执行器 stale，0% 行带计数；探针链已通但日常链没刷）。
+//    机制未验证即过门——x2 rung 弱威胁下可接受，同 h1 处理。
+// ③ 分关：待补（门已过；需要时从 eval_log 按 stageId 切；s2002 在 h3 探针最弱，x3 rung 盯死它）。
+// ④ 超时全 0（日常）；换血 dmg 88.9→35.9（−60%）。
+// ⑤ 实际：it1–36（~07:35→08:25，~50min；预算 80/12h，大幅提前）。
+// 判语：**过门毕业，终点 = it25**（非 it35！）。冠军归档
+//    `nn-training/weights/h2-stop-best/h2-stop.it25.best.json`（sha 已验）。
+//    下一步 h3（bc 已 pin 冠军，待开）。教训复用 x2：最优 it 立刻归档，横盘宽限只一次。
+// 数据：`tmp/h2-stop/eval_log.jsonl`（it0/5/…/35）。

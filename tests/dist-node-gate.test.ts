@@ -13,6 +13,7 @@ import {
   classifyGate,
   gateWarning,
   nodeGateReason,
+  nodeSupportsDecisionEvents,
   provenanceNote,
   type NodeGateEntry,
 } from '../tools/lib/dist-node-gate'
@@ -64,6 +65,15 @@ describe('nodeGateReason（与 dist_common.check_code_hash 同源口径）', () 
         LOCAL,
       ),
     ).toBeNull()
+  })
+})
+
+describe('nodeSupportsDecisionEvents（R2 事件 rung 能力位）', () => {
+  it('旧 agent（无字段）/null ⇒ false；true ⇒ true', () => {
+    expect(nodeSupportsDecisionEvents(null)).toBe(false)
+    expect(nodeSupportsDecisionEvents({})).toBe(false)
+    expect(nodeSupportsDecisionEvents({ decisionEventsSupport: false })).toBe(false)
+    expect(nodeSupportsDecisionEvents({ decisionEventsSupport: true })).toBe(true)
   })
 })
 

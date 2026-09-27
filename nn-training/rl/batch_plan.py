@@ -67,6 +67,15 @@ def node_gate_reason(ping: dict, local_bun: str, code_hash_local: str) -> str | 
     return dist_common.check_code_hash(ping, code_hash_local)
 
 
+def node_supports_decision_events(ping: dict) -> bool:
+    """R2 事件 rung 能力位（纯函数，单测覆盖）：True = 可派事件任务。
+
+    旧 agent 无此字段 ⇒ False（fail-closed，同 stageJsonSupport：无位不派，
+    否则旧 agent 静默跑均匀局混入事件批）。
+    """
+    return ping.get("decisionEventsSupport") is True
+
+
 #: policy → agent 权重桶 `kind`。agent 的 `/v1/task` 按 **(kind, wver)** 精确查缓存桶
 #: （无 policy 豁免，2026-09-19 核实）⇒ 上传权重与查询任务的 kind **必须同值**，
 #: 否则一律 409 wver-not-cached。B 层（policy nn）与 C 层（policy god）用 'rollout'；

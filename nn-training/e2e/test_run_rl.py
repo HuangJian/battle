@@ -1294,6 +1294,9 @@ def test_eval_local_gate(tmp: Path) -> None:
         stage_json="",
         lives_override=None,
         player_level=None,
+        # 生产侧新增 kwarg（如 R2 decision_events）不得炸替身：注释写死"用 Any 收口"，
+        # 这里兑现（生产签名逐参对齐是无限维护，Any 才是契约）。
+        **_kw: object,
     ):
         calls.append((stage, seed))
         assert Path(snap).read_text(encoding="utf-8") == '{"arch":{}}'

@@ -44,6 +44,7 @@ from rl.batch_plan import (
     is_transient_error,
     kind_for_policy,
     node_gate_reason,
+    node_supports_decision_events,
 )
 from rl.batch_store import BatchStore, data_root
 from rl.eval_local import (
@@ -682,6 +683,16 @@ class _UnitLanes:
                 )
             lane["next_try"] = time.time() + self.recover_ping_sec
             return False
+        # R2 事件 rung：本批要事件门 ⇒ 无能力位节点拒派（旧 agent 静默跑均匀局混入，
+        # 与 stageJsonSupport 同规；self.args 缺席 = 老行为不查）。
+        if bool(getattr(getattr(self.owner, "args", None), "decision_events", False)) and not node_supports_decision_events(ping):
+            if lane["tries"] == 1 or lane["tries"] % 3 == 0:
+                log(
+                    f'[batcheval] node {nid}: 缺 decisionEventsSupport 能力位（旧 agent）——'
+                    f'事件任务被拒；不降级'
+                )
+            lane["next_try"] = time.time() + self.recover_ping_sec
+            return False
         t_w = time.monotonic()
         try:
             mode = dist_common.post_weights(
@@ -913,6 +924,8 @@ class _UnitLanes:
                 lives_override=up["lives"],
                 player_level=up["level"],
                 policy=self.owner.policy,
+                # R2 事件 rung：手动 judge 由 spec.decisionEvents 驱动（缺席 = 老行为）。
+                decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
             )
         else:
             m, _files = dist_common.fetch_task(
@@ -932,6 +945,8 @@ class _UnitLanes:
                 lives_override=up["lives"],
                 player_level=up["level"],
                 policy=self.owner.policy,
+                # R2 事件 rung：与本机份额同源（self.args，缺席 = 老行为）。
+                decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
             )
         why = dist_common.validate_eval_result(m, self.wver)
         if why:

@@ -297,6 +297,9 @@ def main() -> int:
     # args.local_slots 不用：本机份额已在上面解析进 cfg["policy"]["evalLocalSlots"]
     #（显式 spec.localSlots = TS 侧 configLocalSlots 的解析结果，含 rl.local_slots）
     args = SimpleNamespace(mode="per-tick", out="", eval_window_sec=float(spec.get("windowSec") or 86400))
+    # R2 事件 rung：手动 judge 由 TS 侧 --decision-events 驱动（缺席 = 老行为）；
+    # BatchEvalRunner 经 self.args 取（与 distLocal 的内存覆盖不同，这是语义开关）。
+    args.decision_events = bool(spec.get("decisionEvents"))
     bun = shutil.which("bun") or "bun"
     epoch = dist_common.compute_engine_epoch()
 

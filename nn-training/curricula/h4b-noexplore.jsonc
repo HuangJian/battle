@@ -1,0 +1,144 @@
+// 课程 h4b-noexplore —— **对照臂：h4 rung，wExplore 0.2→0 单变量**（plan §7 E 回归项）
+//
+// 状态：**草稿，待用户手工开训**（agent 不得启动训练）。
+//   **前置**：与 h3 宽限期并行（GPU 双课程）；起点取 h3 现行最优 it95（h3 未毕业，先行版，
+//   h3 终审冠军出炉后本臂结论只认"方向"，终点对照以冠军为准）。
+//
+// 立项（用户 2026-09-27 指令：x20-noexplore 系曾出 c20 最佳数 33.0/8.33，h4 试一把）：
+//   单变量 = wExplore 0.2→**0**，其余与 h4-stop.jsonc 逐字同（含 B 案 STOP、均匀 K、flat critic）。
+//   检验"探索奖移除在 warm-start rung 的效应"：noexplore 系在 c20-warmstart 成功过，
+//   在梯子 warm-start rung 从未试过。dodge 项**一个不加**（L1 判死/L2 判负/L3 判死，复活需逐项新证据；
+//   本臂只测 noexplore，dodge 免检）。
+//   双读数预注册：① cells 覆盖若塌陷（<40）⇒ 探索奖是覆盖支柱，0 失败，恢复 0.2；
+//   ② stopPick 若出现（>10/千tick）⇒ 反向梯度解除成立，记一功（与 c20 预期一致）。
+//
+// 配方（= v4 包，**仅 wExplore 0.0**）：
+//   wKill 3.0 / wHit 0.6 / wWin 2.0 / wDmg 0.03 / wShot 0.05 / **wExplore 0.0**
+//   + terminal lives_exhausted −5.0 / timeout −2.0。
+//   （wExplore 衰减表提前到 h4 试点的那一行；若本臂 cells 塌陷，衰减表回滚，记 DECISIONS。）
+// 位移包（x4-rebirth 原样）：lr 0.0005 / epochs 6 / mb 512 / kl 0.02（25 轮）→0.01。
+//
+// 起点：h3-it95 warm start，`kickstart_ref=true`（梯子链 kk=true 绿过；先行版，冠军出炉不重开，
+//   结论限方向性）。comparator = h4 绝对门 + 自身趋势 + **与 h4 主臂同 it 对照**
+//   （同起点流？否——两臂种子流独立（§15.1 各自轮换）；对照只看趋势与终点，不配对）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 判据（x4 rung 绝对数门，与 h4 主臂同门；脚注同 h4 文件：transfer 20.0%/196/5.0%）
+// ══════════════════════════════════════════════════════════════════════════
+// **门**：日常段（860001，单关 200 局）`pass ≥ 80%` 且 `dmg/局 ≤ 80` 且 `零伤通关 ≥ 30%`。
+// **机制链**：① stopPickRate ② cells 覆盖（塌陷即停，见上）③ pass/dmg 跟随。
+// **约束**：超时 >5% ⇒ 人工决策停；kl 连续 3 轮 ≥0.075 ⇒ 记录 + 人工盯盘；
+//   ent 跌破 0.25 ⇒ break；掉队不适用（单关）。
+// **判据一律不得由教师表现反推**（AGENTS §0.2）。
+// **机制链**：① stopPickRate（侧车计数）② threat/clean ③ pass/dmg 跟随。
+// **约束**：超时 >5% ⇒ 人工决策停；kl 连续 3 轮 ≥0.075 ⇒ 记录 + 人工盯盘；
+//   ent 跌破 0.25 ⇒ break；掉队不适用（单关）。
+// **判据一律不得由教师表现反推**（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 止损（人工盯盘执行）
+// ══════════════════════════════════════════════════════════════════════════
+//   · **专属死刑**：stopPickRate 连续 3 个 eval 点 < 10/千tick（前置：探针链通）⇒ 停腿；
+//     熵早期塌陷 ⇒ 先开判别臂，通过后才进 B2。
+//   · **对称死刑**：stopPickRate 连续 3 点高于人类基线上四分位 ⇒ 停腿 ⇒ B0。
+//   · **机械横盘**：pass/dmg 连续 4 个 eval 点无改善 ⇒ 停腿；宽限一次 +10 轮，不得二次宽限。
+//   · B1/B3/B4 按 plan §8。
+//
+//   注：x4 eval 为单关 200 局（x4-rebirth 原样：eval 2000-2000/200/5），分母比别 rung 小，
+//   读数方差大一档，判读留余量（C-0 教训：200 局分母小，±2.65pp 判不了）。
+
+{
+  "version": 5,
+  "name": "h4b-noexplore",
+  "mode": "per-tick",
+  // 环境：ladder-c04。任务侧一个字不动（AGENTS §0.2）。
+  "level": "ladder-c04",
+
+  // ── 奖励：x1-a2 v4 包逐字 ──────────────────────────────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wWin": 2.0,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.0
+    },
+    "terminal": {
+      "lives_exhausted": -5.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：h3 冠军 warm start（2026-09-27 已 pin：h3 it115，sha 已验；先行版 caveat 解除）─
+  "bc": "nn-training/weights/h3-stop-best/h3-stop.it115.best.json",
+  "kickstart_ref": true,
+  "warmup_iters": 0,
+
+  // ── 预算（x4-rebirth 原样：小时封顶；轮数 artifact 化）─────────────────────
+  "iters": 150,
+  "max_hours": 12,
+  "workers": 8,
+
+  // ── 位移包：x4-rebirth 原样 ─────────────────────────────────────────────
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
+    { "kl_coef": 0.01, "lr": 0.00025 }
+  ],
+
+  // ── 采集 ───────────────────────────────────────────────────────────────
+  "target_transitions": 24000,
+  "est_samples_per_game": 180,
+  "seed_rotate": 600,
+
+  // ── 路径：新目录、禁续跑（§15.5）────────────────────────────────────────
+  "out": "tmp/h4b-noexplore/weights.json",
+  "traj": "tmp/h4b-noexplore",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/h4b-noexplore",
+  "backup_prefix": "h4b-noexplore",
+
+  // ── 评估 ───────────────────────────────────────────────────────────────
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 200,
+  "eval_every": 5
+}
+
+// ── 开工前置 ─────────────────────────────────────────────────────────────
+// ① h3 现行最优 it95 已 pin（先行版；h3 终审冠军出炉后结论限方向性，不重开）。
+//    （原 TO-BE-PINNED 占位已替换，见 `bc`。）
+// ② 门 X/Y 按 §1 梯子门原则 pin 死（以 h3 终点 + rung 难度定，不拍脑袋；200 局分母小留余量）。
+// ③ 公式编译验证（validate_reward；与 v4 逐字同是正确原因）。
+// ④ 新 out/traj 目录（禁续跑）。⑤ 节点心跳。⑥ paired-kill 默认关（opt-in）。
+//
+// 启动（**用户手工；agent 不得启动训练**，经控制台开课）。
+//
+// ── 诊断工具 ─────────────────────────────────────────────────────────────
+// · 日常趋势：it0/it5…（860001 段，单关 200 局）pass/dmg/stopPickRate（侧车）/cells。
+// · 事件 rung（plan §6 R2）另开课程，不进本文件。
+//
+// ── 结算节（跑完回填）──────────────────────────────────────────────────────
+// 必填：① pass/dmg it0 → 终点 ② stopPickRate ③ 超时/换血
+//   ④ 实际轮数与耗时 ⑤ 判语（过门⇒ h5/c20 rung（critic 解耦 + 事件包，到时按 R2 开）；
+//   idle 平 ⇒ B2；停太多 ⇒ B0）。
+//
+// ── 结算（2026-09-27 回填：it1–80，用户手工停腿；日常到 it80）──
+// ① 日常：it0 64.0%/136 → it15 82.5%/103（最优）→ it45–55 下沉 66–70%/122–125 →
+//    it60–80 部分收复 76–79%/108–129。全程未过门（80/80/30），终点无。
+// ② Test-A 结论：**wExplore 移除无收益、后段略有害**（it45+ 主臂 win+5~8pp、dmg−10~15 全面包住）。
+//    双读数：cells 57–67 **没塌**（kk warm start 自带覆盖，"探索奖是支柱"证伪）；
+//    stopPick 4.84%→0（死得只比主臂慢半拍；反向梯度解除**不**带来停留——wExplore 不是凶手，v4 价格才是）。
+// ③ 超时全 0；PPO 健康。④ 实际 it1–80（~5h；预算 150 未用满，使命完成即停）。
+// 判语：**判负（对照臂完成使命）**。对照使命达成：noexplore 在 h4-warmstart rung 无增益，
+//    衰减表维持（x20 rung 归零不变）；wExplore 去留不再议，除非 c20 新证据。
+// 数据：`tmp/h4b-noexplore/eval_log.jsonl`（it0/5/…/80）。

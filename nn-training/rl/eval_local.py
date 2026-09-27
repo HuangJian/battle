@@ -450,6 +450,12 @@ def eval_row(
         "firstKillKind": census["firstKillKind"],
         "killOrder": census["killOrder"],
         "killerKinds": census["killerKinds"],
+        # 新纪元死刑通道（plan §2 #9/P1-2 方案 a）：裸透传；旧报告缺键 = None，
+        # 读数方按无信号处理（与 EvalCourseRow 可选字段同约）。
+        "moveHist": manifest.get("moveHist"),
+        "decisions": manifest.get("decisions"),
+        "idleTicks": manifest.get("idleTicks"),
+        "stopRuns": manifest.get("stopRuns"),
     }
 
 
@@ -727,6 +733,11 @@ def run_local_eval_game(
     # 池没能服务这一局就回退下面的一次性 `bun`（行为与池不存在时相同）。本机/控制台路径传 None，
     # 它们走节点集群/本机自己的派发（池是节点侧执行面的事）。
     pool: Any = None,
+    # R2 事件 rung（plan/new-era-stop.plan.md §6）：True ⇒ 本局走事件门
+    # （均匀 K ∪ threat-ONSET + Δt≥3）；缺省 False = 老行为。池路径与一次性路径
+    # 共用同一份 cmd（上条注释），故两侧天然一致；远端 bundle 陈旧由既有 code_hash
+    # 门排除（与 --policy 等既有透传同待遇，不另设门）。
+    decision_events: bool = False,
 ) -> dict:
     """本机直跑一局贪心评估（与节点 agent 同一 runner / 同一报告 schema）。
 
@@ -767,6 +778,10 @@ def run_local_eval_game(
     # T1.2：非 nn 策略透传（god 局权重文件不需要，export 侧忽略 --weights）。
     if policy and policy != "nn":
         cmd += ["--policy", policy]
+    # R2 事件 rung：课程 decision_events=True ⇒ 评估与训练同语义（train/deploy 不一致
+    # 是 plan 点名的静默分裂；缺席 = 老行为，export 侧缺省 false）。
+    if decision_events:
+        cmd += ["--decision-events"]
     if replay_dir:
         cmd += ["--replay", replay_dir]
     t0 = time.time()

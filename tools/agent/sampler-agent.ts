@@ -929,6 +929,8 @@ async function runGame(
   nearMiss = '3',
   // v5 多课程：本局权重该从哪门课的桶里取（空串 = 旧单课程桶）。
   course = '',
+  // R2 事件 rung：`?decisionEvents=1` 时本局走事件门；缺席/false = 老行为。
+  decisionEvents = false,
 ): Promise<Buffer> {
   // 多桶：按 (course, kind, wver) 精确取——同节点可同时服务多个课程/权重的训练流。
   // mode=bc（BC 语料任务，2026-09-13）：God-AI 教师自对弈，无策略权重语义——
@@ -1013,6 +1015,8 @@ async function runGame(
         if (stageJson) args.push('--stage-json', stageJson)
         if (livesOverride) args.push('--lives-override', livesOverride)
         if (playerLevel) args.push('--player-level', playerLevel)
+        // R2 事件 rung：本局走事件门（缺席/false = 老行为；BC 路径不进，语料保持均匀 K 典范）。
+        if (decisionEvents) args.push('--decision-events')
       } else {
         args.push('--stages', String(stage), '--seeds', String(seed))
         if (isIntentRollout && replan > 0) args.push('--replan', String(replan))
@@ -1026,6 +1030,8 @@ async function runGame(
         if (stageJson) args.push('--stage-json', stageJson)
         if (livesOverride) args.push('--lives-override', livesOverride)
         if (playerLevel) args.push('--player-level', playerLevel)
+        // R2 事件 rung：本局走事件门（缺席/false = 老行为）。
+        if (decisionEvents) args.push('--decision-events')
         // D14：语料血缘 course_fp 进 shard manifest（仅 per-tick rollout——
         // goal/intent exporter 不认识该参数）
         if (courseFp && !isGoalRollout && !isIntentRollout) args.push('--course-fp', courseFp)
@@ -1161,7 +1167,8 @@ export function serveResult(key: string, buf: Buffer): Buffer {
 // M1d：resultCache / inflight / failedTasks 的任务键。stageJsonHash 非空时并入
 // 键尾（布局指纹，评审 R0-3）——改 grid 不改 stage id 不会静默复用旧局；无
 // stageJson 时与历史键逐字节一致。
-function taskKey(
+// export 供单测：键形状是跨端契约（提交端/轮询端/python 透传三处同配方），改键必改三处。
+export function taskKey(
   iterId: string,
   mode: string,
   kind: string,
@@ -1169,12 +1176,18 @@ function taskKey(
   seed: number,
   sjHash = '',
   courseFp = '',
+  // R2 事件 rung：决策粒度变了 ⇒ 同一种子也是不同的局。仅激活时进键
+  // （无条件进键会让一切既有键漂移，老缓存/老轮询对不上）。
+  // export 供单测钉住键形状（与 dist_common.fetch_task 的透传 + 轮询端配方一致）。
+  de = '',
 ): string {
+  let base: string
   if (sjHash && courseFp)
-    return `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}:${courseFp.slice(0, 16)}`
-  if (sjHash) return `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}`
-  if (courseFp) return `${iterId}:${mode}:${kind}:${stage}:${seed}:c${courseFp.slice(0, 16)}`
-  return `${iterId}:${mode}:${kind}:${stage}:${seed}`
+    base = `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}:${courseFp.slice(0, 16)}`
+  else if (sjHash) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}`
+  else if (courseFp) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:c${courseFp.slice(0, 16)}`
+  else base = `${iterId}:${mode}:${kind}:${stage}:${seed}`
+  return de ? `${base}:de1` : base
 }
 
 function beginTask(
@@ -1200,6 +1213,9 @@ function beginTask(
   nearMiss = '3',
   // v5 多课程：本局权重该从哪门课的桶里取（空串 = 旧单课程桶）。
   course = '',
+  // R2 事件 rung：`?decisionEvents=1` 时本局走事件门（均匀 K ∪ threat-ONSET + Δt≥3）；
+  // 缺席/false = 均匀 K 老行为（旧训练侧不传 ⇒ 行为与改造前一致）。
+  decisionEvents = false,
 ): void {
   activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
@@ -1225,6 +1241,7 @@ function beginTask(
     wins,
     nearMiss,
     course,
+    decisionEvents,
   )
     .then((buf) => {
       serveResult(key, buf)
@@ -1507,6 +1524,8 @@ async function handle(req: Request): Promise<Response> {
     const playerLevel = url.searchParams.get('playerLevel') ?? ''
     // D14：语料血缘 course_fp（课程文件 sha256，进 shard manifest + 缓存键）
     const courseFp = url.searchParams.get('courseFp') ?? ''
+    // R2 事件 rung：`?decisionEvents=1` 时本局走事件门；缺席 = 老行为（旧训练侧不传）。
+    const decisionEvents = url.searchParams.get('decisionEvents') === '1'
     if (stageJson && (stageJson.length > 16384 || !jsonParseSafe(stageJson)))
       return jsonResponse({ error: 'stageJson invalid/oversized' }, 400)
     if (mode === 'eval' && policy === 'intent-exec' && !latestWeightsOfKind('intent'))
@@ -1526,7 +1545,16 @@ async function handle(req: Request): Promise<Response> {
     const sjHash = stageJson
       ? createHash('sha256').update(stageJson).digest('hex').slice(0, 16)
       : ''
-    const key = taskKey(iterId, mode, kind, stage, seed, sjHash, courseFp)
+    const key = taskKey(
+      iterId,
+      mode,
+      kind,
+      stage,
+      seed,
+      sjHash,
+      courseFp,
+      decisionEvents ? 'de1' : '',
+    )
     const cached = resultCache.get(key)
     if (cached) {
       cacheHits++
@@ -1567,6 +1595,7 @@ async function handle(req: Request): Promise<Response> {
         wins,
         nearMissTimes,
         course, // v5 多课程：异步路径同规（取 (course,kind) 桶）
+        decisionEvents,
       )
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
@@ -1608,6 +1637,7 @@ async function handle(req: Request): Promise<Response> {
           wins,
           nearMissTimes,
           course, // v5 多课程：同步流式路径同规（取 (course,kind) 桶）
+          decisionEvents,
         )
           .then((buf) => {
             if (hb) clearInterval(hb)
@@ -1657,7 +1687,17 @@ async function handle(req: Request): Promise<Response> {
     // 有 courseFp 时 taskKey 格式不同（多 c${fp} 前缀），轮询永远找不到任务。
     const sjHash = url.searchParams.get('stageJsonHash') ?? ''
     const courseFp = url.searchParams.get('courseFp') ?? ''
-    const key = taskKey(iterId, mode, kind, stage, seed, sjHash, courseFp)
+    // R2：轮询端同提交端配方（含决策事件后缀，否则异步任务永远找不到）。
+    const key = taskKey(
+      iterId,
+      mode,
+      kind,
+      stage,
+      seed,
+      sjHash,
+      courseFp,
+      url.searchParams.get('decisionEvents') === '1' ? 'de1' : '',
+    )
     const cached = resultCache.get(key)
     if (cached) {
       // 与提交端（resultCache 命中那一处）对齐：轮询命中也算一次缓存命中。
@@ -1744,6 +1784,9 @@ async function handle(req: Request): Promise<Response> {
       evalSupport: true,
       // M1d：课程自定义关（stageJson）支持位——不支持的节点绝不派 stageJson 任务
       stageJsonSupport: true,
+      // R2 事件 rung 支持位：`/v1/task?decisionEvents=1`（均匀 K ∪ threat-ONSET + Δt≥3）。
+      // 旧 agent 无此字段 ⇒ 训练侧不派事件任务（fail-closed，同 stageJsonSupport）。
+      decisionEventsSupport: true,
       // BC 语料任务支持位（2026-09-13）：/v1/task ?mode=bc（God-AI 单局 → BCV2 npy
       // shard）。旧 agent 无此字段 → bc_dispatch 不派（fail-closed，同 stageJsonSupport）。
       bcSupport: true,
