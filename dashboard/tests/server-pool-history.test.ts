@@ -13,6 +13,7 @@ import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSy
 import { tmpdir } from 'os'
 import { join } from 'path'
 import {
+  aggMemoReusable,
   aggregateNodeHistory,
   emptyHistory,
   invalidateNodeHistoryMemo,
@@ -202,7 +203,9 @@ describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计
     // 一起被推到上一轮完成时刻 —— 一个「轮前段就交完活、轮又长」的节点会在 30 分钟
     // 可达性窗口上从「慢」翻成「离线」（2026-09-11 报障的反面）。
     // 判据：**统计只认已完成轮；「还活着吗」认全部行。**
-    const t = Date.parse('2026-09-26T15:00:00')
+    // 窗口末刻与行时间戳同日（tsAt 随真实日期走）；此前钉死 '2026-09-26T15:00:00'
+    // —— 次日跑就与行（当天）跨天错位，'all' 窗口上界卡在昨天 ⇒ 全部用例静默失败。
+    const t = parseTsMs(tsAt(0, '15:00:00'))!
     const inProgressFail = JSON.stringify({
       node: 'a1',
       mode: 'rollout',
@@ -483,6 +486,55 @@ describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计
       // FLOW 的 a1 在 it7 有 3 条 + 追加 1 条 = 4（重算确实读到了新行）
       const win = projectWindow(c, resolveWindow('all', now, c.epochMs)).hist.get('a1')!
       expect(win.ok).toBe(4)
+    })
+  })
+
+  // ── memo 时间下限的**计时口径**（2026-09-27 实障：命中刷新时刻 ⇒ 窗口无限滑动、聚合永久冻结） ──
+  // 用户可见面：节点页「今天」整窗全空、而「昨天」照旧有数——进程启动后新开的训练流
+  // 一个都没进过 `sources`（池根里当天新生的 3 个流付之阙如），但盘点/时间戳看着都正常。
+  it('aggMemoReusable：指纹相同零重扫；指纹变了按「上次计算」计时（命中不滑动窗口）', () => {
+    const t0 = 1_800_000_000_000
+    const m = { fp: 'A', computedAt: t0 }
+    // 池没动过（指纹相同）：多久都复用 —— 空闲零重扫
+    expect(aggMemoReusable(m, 'A', t0 + 6 * 3_600_000)).toBe(true)
+    // 训练在追加（指纹变了）：窗口内先用旧值，把重扫节奏封顶
+    expect(aggMemoReusable(m, 'B', t0 + 29_999)).toBe(true)
+    // 距**上次计算**满窗口 ⇒ 必须重扫。★ 旧实现下这里恒为 true：每 5s 的调用
+    // （snapshot-cache 机群探测）把时刻一路推后，指纹比较永远轮不到。
+    expect(aggMemoReusable(m, 'B', t0 + 30_000)).toBe(false)
+  })
+
+  it('聚合 memo：稳态每 5s 调用也要在 ≤30s 内重扫一次（新流/新行不能被永久冻结）', () => {
+    withPoolRoot(FLOW, (root) => {
+      let t = Date.now()
+      const first = aggregateNodeHistory(t)
+      let val = first
+      // 模拟 snapshot-cache 的 5s 一拍（池一直在动：meta 每拍都有新行）
+      for (let i = 1; i <= 12; i++) {
+        appendFileSync(join(root, 'flow', 'dist-agent-meta.jsonl'), `${metaRow('a1', 7)}\n`, 'utf8')
+        t += 5_000
+        val = aggregateNodeHistory(t)
+      }
+      expect(val).not.toBe(first) // 60s 里必须至少重扫一次（旧实现：一路复用同一份）
+      const win = projectWindow(val, resolveWindow('all', t, val.epochMs)).hist.get('a1')!
+      expect(win.ok).toBeGreaterThan(3) // 且确实读到了新行
+      // 新开的训练流必须能上屏（本障的用户可见面：当天新生的流整批缺席）——在 ≤30s
+      // 的重扫窗口内出现即可（时间下限是「封顶」，不是「永久冻结」）。
+      mkdirSync(join(root, 'new-flow'), { recursive: true })
+      writeFileSync(
+        join(root, 'new-flow', 'dist-agent-meta.jsonl'),
+        `${metaRow('a9', 7)}\n`,
+        'utf8',
+      )
+      let seenAtTick = 0
+      for (let i = 1; i <= 6 && seenAtTick === 0; i++) {
+        t += 5_000
+        const a = aggregateNodeHistory(t)
+        if (projectWindow(a, resolveWindow('all', t, a.epochMs)).hist.has('a9')) seenAtTick = i
+      }
+      expect(seenAtTick).toBeGreaterThan(0)
+      expect(seenAtTick).toBeLessThanOrEqual(6)
+      invalidateNodeHistoryMemo() // 别把假时钟留给下一个用例
     })
   })
 

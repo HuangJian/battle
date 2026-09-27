@@ -70,10 +70,30 @@ interface AggMemo {
   root: string
   epochMs: number
   fp: string
-  at: number
+  /** ★ 上一次**计算**的时刻（**命中不刷新**——见 `aggMemoReusable`）。 */
+  computedAt: number
   val: HistoryAggregate
 }
 let aggMemo: AggMemo | null = null
+
+/** memo 复用判定（纯函数，可单测）。语义两条：
+ *  · **指纹相同**（池没动过）⇒ 复用，**与时间无关** ⇒ 空闲时零重扫；
+ *  · **指纹变了**（训练在追加 meta）⇒ 距**上次计算**不足 `minMs` 先复用旧值，把重扫节奏封顶。
+ *
+ *  ★ `computedAt` 必须是「上次**计算**时刻」，**不能**是「上次命中时刻」：`snapshot-cache`
+ *  的机群探测每 5s 拍一次本聚合，若命中就把时刻推到现在，时间下限永远成立 ⇒ 指纹比较
+ *  **永远轮不到** ⇒ memo 冻结在进程第一次计算那一刻，此后新开的训练流一个都看不见
+ *  （2026-09-27 实障：节点页「今天」整窗全空、而进程启动前就存在的「昨天」照旧有数——
+ *  池根里当天新生的 3 个流从未进过 `sources`）。 */
+export function aggMemoReusable(
+  m: { fp: string; computedAt: number },
+  fp: string,
+  nowMs: number,
+  minMs = AGG_MEMO_MIN_MS,
+): boolean {
+  if (m.fp === fp) return true
+  return nowMs - m.computedAt < minMs
+}
 
 /** 硬清聚合 memo。生产路径只有 `?fresh=1`（手动刷新：操作员明确要「现在就给我新的」）调；
  *  其余时候无需调用——指纹/时间下限自会失效。单测夹具也用它隔离。 */
@@ -571,7 +591,9 @@ export function pruneByEpoch<T extends { mtimeMs: number }>(cands: T[], epochMs:
   return cands.filter((c) => c.mtimeMs >= epochMs)
 }
 
-export function aggregateNodeHistory(): HistoryAggregate {
+/** 全量聚合。`nowMs` 只喂 memo 的时间下限（生产调用方一律用缺省 `Date.now()`；
+ *  测试注入可控时钟，才好验「稳态每 5s 调用也必须 ≤30s 重扫一次」这条不变量）。 */
+export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggregate {
   const byDay = new Map<string, Map<string, DayBucket>>()
   const tmpDir = tmpPoolDir()
   const epochMs = poolEpochMs()
@@ -620,15 +642,13 @@ export function aggregateNodeHistory(): HistoryAggregate {
   // ── 进程内 memo（二轮评审）──
   // 两个消费者（`api/pool` 探测层 + `snapshot-cache` 机群探测）用同一份聚合；
   // 空闲时靠指纹零重扫，训练中靠 AGG_MEMO_MIN_MS 把重扫节奏封顶。
-  const nowMs = Date.now()
   const fp = candidates.map((c) => `${c.dir}|${c.mtimeMs}|${c.size}`).join('\n')
   if (
     aggMemo &&
     aggMemo.root === tmpDir &&
     aggMemo.epochMs === epochMs &&
-    (nowMs - aggMemo.at < AGG_MEMO_MIN_MS || aggMemo.fp === fp)
+    aggMemoReusable(aggMemo, fp, nowMs)
   ) {
-    aggMemo.at = nowMs
     return aggMemo.val
   }
 
@@ -728,7 +748,8 @@ export function aggregateNodeHistory(): HistoryAggregate {
     : null
 
   const out: HistoryAggregate = { byDay, sources, epochMs, lastContrib, latestRound }
-  aggMemo = { root: tmpDir, epochMs, fp, at: Date.now(), val: out }
+  // ★ 时刻只在**计算**这一遍落，命中路径一个字都不改（见 `aggMemoReusable`）。
+  aggMemo = { root: tmpDir, epochMs, fp, computedAt: nowMs, val: out }
   return out
 }
 
