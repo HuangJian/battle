@@ -24,23 +24,240 @@ test_no_torch_on_import guards the `import run_rl` chain).
 
 from __future__ import annotations
 
-import base64
-import gzip
 import hashlib
-import io
-import json
-import os
 import re
-import struct
-import tarfile
-import zipfile
 from collections.abc import Iterable, Mapping, Sequence
 from pathlib import Path
-from typing import Literal
+
+# ------------------------------------------------------------------ 下沉（S5 第六刀，2026-09-27）
+# 「失败类型族」→ `common/errors.py`；「传输编码 / v1+v2 线格式」→ `common/wire_codec.py`。
+# 实现搬家、名字留门面 ⇒ 全仓 `from common.protocol import …` 一行不改。
+# ⚠ `errors` 是**叶子**（零 import）——`wire_codec` 与 `protocol` 都向下依赖它，勿把边反过来。
+from common.errors import (
+    CodeChangedError as CodeChangedError,
+)
+from common.errors import (
+    JobCancelledError as JobCancelledError,
+)
+from common.errors import (
+    JobFailedError as JobFailedError,
+)
+from common.errors import (
+    ProtocolError as ProtocolError,
+)
+from common.errors import (
+    RetryableError as RetryableError,
+)
+from common.errors import (
+    UnreapableChildError as UnreapableChildError,
+)
+from common.manifest import (
+    _ITER_PATH_FLAGS as _ITER_PATH_FLAGS,
+)
+from common.manifest import (
+    _WIN_DRIVE_RE as _WIN_DRIVE_RE,
+)
+from common.manifest import (
+    EVAL_SCRIPT as EVAL_SCRIPT,
+)
+from common.manifest import (
+    ITER_NODE_LABEL as ITER_NODE_LABEL,
+)
+from common.manifest import (
+    ITER_OUT_REL as ITER_OUT_REL,
+)
+from common.manifest import (
+    KIND_ROLES as KIND_ROLES,
+)
+from common.manifest import (
+    MANIFEST_BC_EXEMPT as MANIFEST_BC_EXEMPT,
+)
+from common.manifest import (
+    MANIFEST_BC_EXTRA as MANIFEST_BC_EXTRA,
+)
+from common.manifest import (
+    MANIFEST_ITER_EXTRA as MANIFEST_ITER_EXTRA,
+)
+from common.manifest import (
+    MANIFEST_KINDS as MANIFEST_KINDS,
+)
+from common.manifest import (
+    MANIFEST_OPTIONAL_DEFAULTS as MANIFEST_OPTIONAL_DEFAULTS,
+)
+from common.manifest import (
+    MANIFEST_REQUIRED as MANIFEST_REQUIRED,
+)
+from common.manifest import (
+    MANIFEST_RUN_EXTRA as MANIFEST_RUN_EXTRA,
+)
+from common.manifest import (
+    PLAN_NAME as PLAN_NAME,
+)
+from common.manifest import (
+    PLAN_PROTO as PLAN_PROTO,
+)
+from common.manifest import (
+    PROTO as PROTO,
+)
+from common.manifest import (
+    ROLE_FIELD as ROLE_FIELD,
+)
+from common.manifest import (
+    ROLE_OFFLINE as ROLE_OFFLINE,
+)
+from common.manifest import (
+    ROLE_ONLINE as ROLE_ONLINE,
+)
+from common.manifest import (
+    ROLES as ROLES,
+)
+from common.manifest import (
+    ROLLOUT_SCRIPT as ROLLOUT_SCRIPT,
+)
+from common.manifest import (
+    ROLLOUT_SCRIPTS as ROLLOUT_SCRIPTS,
+)
+from common.manifest import (
+    ROLLOUT_SPEC_DEFAULTS as ROLLOUT_SPEC_DEFAULTS,
+)
+from common.manifest import (
+    RUN_MAX_ITERS_HARD_CAP as RUN_MAX_ITERS_HARD_CAP,
+)
+from common.manifest import (
+    RUN_NODE_LABEL as RUN_NODE_LABEL,
+)
+
+# ------------------------------------------------------------------ 下沉（S5 第九刀，2026-09-27）
+# 「job manifest 契约」→ `common/manifest.py`（proto/role 词汇 · `MANIFEST_*` schema ·
+# kind→role · TS/plan 产物契约 · rollout 规格校验 · shard 命名与 `data_fp`）。
+# 实现搬家、名字留门面 ⇒ 全仓 `from common.protocol import …` 一行不改。
+# ⚠ `ROLE_HEADER` 与 `role_from_header` 仍住本模块（**请求头**面，不是 manifest）。
+from common.manifest import (
+    DataFpEntries as DataFpEntries,
+)
+from common.manifest import (
+    _iter_flag_value as _iter_flag_value,
+)
+from common.manifest import (
+    _iter_rel_path as _iter_rel_path,
+)
+from common.manifest import (
+    d14_corpus_match as d14_corpus_match,
+)
+from common.manifest import (
+    data_fp as data_fp,
+)
+from common.manifest import (
+    data_fp_entries as data_fp_entries,
+)
+from common.manifest import (
+    iter_declared_entries as iter_declared_entries,
+)
+from common.manifest import (
+    iter_expected_data_fp as iter_expected_data_fp,
+)
+from common.manifest import (
+    normalize_manifest as normalize_manifest,
+)
+from common.manifest import (
+    parse_shard_name as parse_shard_name,
+)
+from common.manifest import (
+    role_of as role_of,
+)
+from common.manifest import (
+    shard_name as shard_name,
+)
+from common.manifest import (
+    validate_rollout_spec as validate_rollout_spec,
+)
+from common.payload import (
+    INIT_WEIGHTS_NAME as INIT_WEIGHTS_NAME,
+)
+from common.payload import (
+    PAYLOAD_LEGACY_NAMES as PAYLOAD_LEGACY_NAMES,
+)
+from common.payload import (
+    PAYLOAD_NAME as PAYLOAD_NAME,
+)
+from common.payload import (
+    PAYLOAD_PERTURB_NAME as PAYLOAD_PERTURB_NAME,
+)
+from common.payload import (
+    PAYLOAD_XZ_PRESET as PAYLOAD_XZ_PRESET,
+)
+from common.payload import (
+    _add_bytes as _add_bytes,
+)
+from common.payload import (
+    _extract_archive as _extract_archive,
+)
+from common.payload import (
+    find_payload as find_payload,
+)
+from common.payload import (
+    pack_payload as pack_payload,
+)
+from common.payload import (
+    unpack_payload as unpack_payload,
+)
+from common.wire_codec import (
+    _GZIP_MAGIC as _GZIP_MAGIC,
+)
+from common.wire_codec import (
+    _HDR_LEN_BYTES as _HDR_LEN_BYTES,
+)
+from common.wire_codec import (
+    _WIRE_GZIP_LEVEL as _WIRE_GZIP_LEVEL,
+)
+from common.wire_codec import (
+    BLOB_FIELDS as BLOB_FIELDS,
+)
+from common.wire_codec import (
+    WIRE_JOB_CONTENT_TYPE as WIRE_JOB_CONTENT_TYPE,
+)
+from common.wire_codec import (
+    WIRE_JOB_MAGIC as WIRE_JOB_MAGIC,
+)
+from common.wire_codec import (
+    WIRE_V2_CONTENT_TYPE as WIRE_V2_CONTENT_TYPE,
+)
+from common.wire_codec import (
+    WIRE_V2_MAGIC as WIRE_V2_MAGIC,
+)
+from common.wire_codec import (
+    _pack_wire as _pack_wire,
+)
+from common.wire_codec import (
+    _unpack_wire as _unpack_wire,
+)
+from common.wire_codec import (
+    decode_opt_tar as decode_opt_tar,
+)
+from common.wire_codec import (
+    decode_weights_json as decode_weights_json,
+)
+from common.wire_codec import (
+    encode_opt_tar as encode_opt_tar,
+)
+from common.wire_codec import (
+    encode_weights_json as encode_weights_json,
+)
+from common.wire_codec import (
+    pack_job_v2 as pack_job_v2,
+)
+from common.wire_codec import (
+    pack_result_v2 as pack_result_v2,
+)
+from common.wire_codec import (
+    unpack_job_v2 as unpack_job_v2,
+)
+from common.wire_codec import (
+    unpack_result_v2 as unpack_result_v2,
+)
 
 # ------------------------------------------------------------------ constants
 
-PROTO = 1  # 协议版本：未知字段忽略，缺失必填 fail fast（D1）
 # §343（2026-09-06）竞速广播 → P3b（2026-09-12，DECISIONS supersede §343）改回
 # 独占加超时：领取即设租约（CLAIM_TTL_SEC），心跳续租，过期回池。LEASE_SEC 只留
 # 旧租约兼容读；HEARTBEAT_SEC 仍是 worker 心跳周期。hub 重启即丢租约（首写锁定兜底）、
@@ -71,12 +288,6 @@ WORKER_SEEN_WINDOW_SEC = 180.0
 ROLE_HEADER = "X-Battle-Offline"
 #: 头的规范值（历史值 `1`；解析同时接受角色字面量 `offline`）。
 ROLE_HEADER_VALUE = "1"
-ROLE_OFFLINE = "offline"
-ROLE_ONLINE = "online"
-#: 两个角色（`manifest.role` 与请求方角色的合法值域，两处共用）。
-ROLES: tuple[str, ...] = (ROLE_ONLINE, ROLE_OFFLINE)
-#: job manifest 里的归属键名。
-ROLE_FIELD = "role"
 
 
 def role_from_header(raw: object) -> str:
@@ -320,159 +531,6 @@ def parse_course_arg(raw: object) -> tuple[str, str]:
         raise ProtocolError(f"课程模式必须是 {list(COURSE_MODES)}，收到 {mode!r}")
     return name, mode
 
-#: manifest 必填字段（附录 A；缺失任一 → 校验失败）
-MANIFEST_REQUIRED = (
-    "proto",
-    "runId",
-    "it",
-    "job_id",
-    "commit",
-    "code_sha256",  # Python 源码 zip sha256（hub 启动时打包，替代 git 同步）
-    "course",  # 课程 jsonc 全文快照（reward_spec 重建输入，D6）
-    "course_fp",  # 课程文件 sha256（语料血缘，D14）
-    "reward_formula",
-    "formula_hash",
-    "metrics_version",
-    "gamma",
-    "lam",
-    "mode",
-    "seed",  # per-job numpy 种子 = hash(runId,it,init_weights_fp)（D5）
-    "epochs",
-    "mb",
-    "lr",
-    "init_weights_fp",
-    "data_fp",
-    "payload_sha256",
-)
-#: kind=bc（行为克隆 job）免除的 PPO 专有必填（BC 无 reward/γ/λ 语义）；
-#: 追加必填 `arch`（bc|student）。plan/bc-cloud-integration.plan.md §1。
-MANIFEST_BC_EXEMPT: tuple[str, ...] = (
-    "reward_formula",
-    "formula_hash",
-    "metrics_version",
-    "gamma",
-    "lam",
-)
-MANIFEST_BC_EXTRA: tuple[str, ...] = ("arch",)
-#: 任务类型（2026-09-13 BC 整合）：缺省 "ppo" = 既有 per-tick PPO job（wire 兼容——
-#: 旧 hub 产出的 manifest 无此键，一律按 ppo 校验）。"bc" = 行为克隆 job（语料 npy
-#: shard 进 payload，云端跑 train/bc.py，回传 BC 权重；无 reward/γ/λ 语义）。
-#: plan/bc-cloud-integration.plan.md §1。
-MANIFEST_OPTIONAL_DEFAULTS: dict[str, object] = {
-    "kind": "ppo",
-    "kl_coef": 0.0,
-    "kl_cap": None,  # None = 不覆盖，由 policy.streamKlCap 决定
-    "ent_coef": None,  # 2026-09-11：None = 用引擎常量 ENT_COEF（0.01）；0.0 是合法值
-    "adv_norm": "auto",
-    "normalize_ret": False,  # R5：ret 归一；缺失（旧 hub）= 关
-    "kickstart_kl": 0.0,  # §363：BC 缰绳系数（已衰减）；0 = 关
-    "ref_weights_b64": "",  # §363：BC ref 权重 base64；空 = 无
-    "ref_weights_fp": "",  # §363：上者 sha256（有字节时必对上）
-    "shuffle": True,
-    "schedule_raw": [],  # ppo_schedule 解析前原始表（审计）
-    "opt_init": "",  # base64 tar（model/opt/numpy RNG）；空 = 无（首轮）
-    # 严格样本量配额（target_transitions 路线）：训练侧逐关只收前 ceil(target/关数) 步。
-    # 0 = 历史行为（全收）；缺失（旧 hub 产出的 manifest）= 0 ⇒ wire 兼容。
-    "per_stage_quota": 0,
-    # ---- M2（plan/remote-wire-remediation §4.2）内容寻址 blob ----
-    #: raw（编码前）opt tar 的 sha256。有它时 `opt_init` 可为空——节点按 sha 去
-    #: blob_cache 取，未命中才下载。**必须进 OPTIONAL**（wire 兼容红线：缺失必填会
-    #: 把旧 hub/旧 worker 的 job 全部拒收）。
-    "opt_sha": "",
-    #: raw ref 权重的 sha256（= ref_weights_fp；同义别名，便于按名寻址）。
-    "ref_sha": "",
-    #: raw 字节数（预检/日志；0 = 未知）。
-    "opt_bytes": 0,
-    "ref_bytes": 0,
-    # ---- demo 混 batch（x20 后续）：demo bank 内容寻址 + BC 系数 ----
-    #: demo bank npz 的 sha256；空 = 关（worker 走 getattr 缺省，老行为）。
-    "demo_sha": "",
-    #: demo BC 辅 loss 系数；0.0 = 关。
-    "demo_bc_coef": 0.0,
-    #: 每 PPO minibatch 步抽的 demo 样本数；0 = 关。
-    "demo_per_mb": 0,
-    #: 本轮是否走瘦身路径（审计/A-B；False = 内联老字段，逐字节回到旧行为）。
-    "slim": False,
-}
-
-# ------------------------------------------------------------------ 归属（role）
-# job 的「该由哪块盘执行」是 **job 自己的属性**（2026-09-25，本节头的 plan）：发布时定死、
-# 此后不随课程 mode 漂移。为什么必须落成字段而不是每次现算：mode 是易变的（hub 内存表、
-# 控制台可热切），用它当判据 ⇒ 切一次模式，历史 job 的归属就跳一次（事故现场：两小时前
-# 缺 bun 被拒的那个 `kind=run` job 在切成在线后被 tailscale 盘领走）。
-#: 合法 kind 全集（`validate_manifest` 与 `KIND_ROLES` 共用一份；穷举由用例钉住）。
-MANIFEST_KINDS: tuple[str, ...] = ("ppo", "bc", "iter", "run")
-#: kind → 归属角色（**唯一**映射）：`run`（整段自主）= 离线盘的活；其余（逐轮/整轮/BC）
-#: 都是在线盘的活。加新 kind 必须同时给出角色，否则 `test_role_routing` 当场红。
-KIND_ROLES: dict[str, str] = {
-    "run": ROLE_OFFLINE,
-    "iter": ROLE_ONLINE,
-    "ppo": ROLE_ONLINE,
-    "bc": ROLE_ONLINE,
-}
-
-
-def role_of(manifest: Mapping[str, object]) -> str:
-    """job 归属角色：`manifest.role` 优先；缺失/非法 ⇒ 按 `kind` 兜底。
-
-    **不拒单**：旧 job（发布早于本字段）不能因为缺字段变孤儿（它们的 kind 就已经说明了
-    归属）；未知 kind 也回落 online（`validate_manifest` 已在入口挡掉未知 kind）。
-    """
-    raw = str(manifest.get(ROLE_FIELD) or "").strip().lower()
-    if raw in ROLES:
-        return raw
-    return KIND_ROLES.get(str(manifest.get("kind") or "ppo"), ROLE_ONLINE)
-
-
-# ------------------------------------------------------------------ M3: kind=iter
-# plan/remote-wire-remediation.plan.md §5.2：新 job kind =「一整轮」——节点自己跑
-# rollout（bun 调 exporter 产 shard）→ 接着跑既有 PPO 链路 → 只回传权重/report。
-# 与 BC 同一条 kind 通道（照 MANIFEST_BC_* 的先例），mode 红线互斥。
-#: kind=iter 追加必填：TS 运行时 zip 的 sha256 + rollout 规格。
-MANIFEST_ITER_EXTRA: tuple[str, ...] = ("ts_code_sha256", "rollout")
-# ------------------------------------------------------------------ TS 导出器路径
-# `tools/sim/*.ts` 的真实文件名 —— 这是 **TS↔Python 的产物契约**，故与 wire 协议同住一层：
-# 长驻池按脚本名建（`remote/serve_pool.py`）、本机停等 cmd 由此拼（`rl/cmd.py`）、
-# 云机找 TS 根时按它探路（`remote/run_loop.py`）—— 各处抄一份字面量就等着谁先漂。
-#: 逐局 rollout 导出器（kind=iter / kind=run）。
-ROLLOUT_SCRIPT = "tools/sim/export-rl-rollout.ts"
-#: 离线评估导出器（云机评估；`rl/eval_local.py` 建 cmd 时也用它）。
-EVAL_SCRIPT = "tools/sim/export-eval-game.ts"
-
-#: TS 源码 zip 里允许出现的 exporter（argv[0] 白名单）。**只**放行 rollout 采集器：
-#: argv 来自 hub（可信方），但白名单让「协议字段被误当命令执行」不可能发生。
-ROLLOUT_SCRIPTS: tuple[str, ...] = (ROLLOUT_SCRIPT,)
-#: rollout 规格里 argv 内嵌路径的允许前缀（job 目录内的相对路径，防越界）。
-#: 端口无关：worker 一律以 job 目录为 cwd 执行 argv。
-ITER_OUT_REL = "w"
-#: 上云 rollout 写进 shard manifest 的 `node` 标签（hub 侧 argv 里的字面量）。
-#: 与本地 `local` 区分（可溯源），同时是 §5.5① 逐位对拍的基准——验收时本地也用
-#: 同一 argv（同标签）重跑，逐字节比对才成立。
-ITER_NODE_LABEL = "node"
-
-# ------------------------------------------------------------------ 半离线: kind="run"
-# 「云端整段自主」job：hub 只在交接时给一次（课程 + 初始权重 + 代码 + **计划**），
-# 节点从此不依赖 hub —— 自己按计划把剩余轮次跑完（rollout + PPO 全在节点），逐轮
-# 把权重/指标写进本地产物目录（Kaggle /kaggle/working、Colab Drive），可打包下载、
-# 可跨会话续跑。
-#
-# 与 kind=iter 的关系（**不是 fork，是延长**）：本 job 自己的那一轮（`it`）与 kind=iter
-# **逐字段同构**（`rollout` + `ts_code_sha256` 必填、data_fp = 该轮声明集），节点走的
-# 也是同一条执行链；区别只在尾巴——跑完本轮到 `plan.json` 继续把后续轮次自己跑完。
-# 于是「离线轮」与「hub 监管轮」的行/产物/校验口径完全一致。
-#: 计划文件名（payload 内，与 init_weights.json 同层；sha 进 manifest 而**不是**全文——
-#: argv 模板 + 逐轮对集可达百 KB 量级，不该让 hub 每轮轮询都解析一遍）。
-PLAN_NAME = "plan.json"
-PLAN_PROTO = 1
-#: kind=run 追加必填：kind=iter 的两项 + 计划的 sha256。
-MANIFEST_RUN_EXTRA: tuple[str, ...] = (*MANIFEST_ITER_EXTRA, "plan_sha256")
-#: 半离线轮写进 shard manifest 的 `node` 标签（与 `node`/`local` 区分：可溯源到
-#: 「这一批局是云端自主段跑的」）。
-RUN_NODE_LABEL = "run"
-#: 计划的**硬上界**（防一份手写/损坏的计划把节点按在机上一整天）。命令行可用
-#: `--run-max-iters` 再降；计划的 end_it 一律按其与 iters_total 的交集钳制。
-RUN_MAX_ITERS_HARD_CAP = 500
-
 #: M2 blob 载荷名（pull 端点 `GET /jobs/{id}/blob?name=opt|ref|demo|init`；push body `blobs`）。
 BLOB_OPT = "opt"
 BLOB_REF = "ref"
@@ -486,460 +544,6 @@ BLOB_INIT = "init"
 BLOB_NAMES: tuple[str, ...] = (BLOB_OPT, BLOB_REF, BLOB_DEMO, BLOB_INIT)
 
 
-class ProtocolError(ValueError):
-    """协议违规（缺失必填 / 类型错 / 哈希不匹配）。调用方（hub/worker）决定拒收方式。"""
-
-
-class RetryableError(Exception):
-    """瞬时失败（网络抖动 / 5xx / 传输损坏）——租约窗口内重试即可修复，非确定性拒绝。
-
-    与 ProtocolError 的分界（2026-09-05，DECISIONS §340 补充 3）：4xx/字段级校验
-    失败 = 确定性拒绝（重试无意义）；网络层异常与 5xx = 可重试。worker_loop 捕获
-    RetryableError 后主动 release 租约回池，立即可重领（不再干等 30min 过期）。"""
-
-
-class UnreapableChildError(RetryableError):
-    """子进程 SIGKILL 之后仍然回收不了（D 状态 / 挂住的挂载点）——**机器**的病，不是内容的错。
-
-    事实基础：`kill()` 只是把信号递进去；子进程若卡在**不可中断**的 IO 里，要等那个系统调用
-    返回才真的死。`platform_utils` 的处置是**有界**回收（`reap_bounded`，预算 = `KILL_REAP_SEC`），
-    收不回来就把这个子进程记进账（`keep_unreaped`）并抛本异常 —— 绝不能在那里等下去
-    （2026-09-25 云机「卡死机器半天」的现场就是一条线程永远停在 `waitpid` 上：92 条线程里一条
-    不返回，整轮就再也收不齐，而日志里什么都看不出来）。
-
-    为什么它**必须**与普通超时分开（两腿都按这个分类分岔，2026-09-25 用户口径）：
-
-      * 普通超时（`TimeoutExpired`）= 这一局慢（内容/负载）：它有自己的出路 —— 原地重跑同一
-        argv，几次之后仍失败就是**这一轮的确定性失败**（响亮记一笔，读数少一局）；
-      * 收不了尸 = 机器卡住：旧写者**可能还活着** ⇒ 在同一个输出目录上重跑就是两个写者写同一
-        份产出（半截/交错）⇒ 静默错数据。所以腿侧的处置只能是**轮内重投**：先把它半截的产出
-        删干净，再与其它没产出的局一起投。判成本轮失败则是把机器的问题记在内容头上
-        （worker 侧 `report_job_failure` ⇒ hub 落终局 ⇒ 停腿 ⇒ 反过来把云机停掉）。
-
-    继承 `RetryableError` 是因为它在语义上就是「可重试、非确定性拒绝」；**重试的粒度由各腿自己
-    定**（rollout 腿 `remote/iter_rollout.run_iter_rollout`、eval 腿
-    `remote/offline_eval.run_cloud_eval` 都是在轮内重投，只补没产出的局；缺省不限，各自留一个
-    操作员上限 env）。worker_loop 里还有一条同名的兜底分支（还租约 + 立即重领，不报失败、
-    不冷却）。
-    """
-
-
-class JobCancelledError(RuntimeError):
-    """本 job 已被**别人赢下**（结果已落盘）⇒ 停算丢弃，**不**回传、**不**报失败。
-
-    为什么它必须是**独立**异常（2026-09-22，plan/transfer-scheduling §2.4）：取消是一个
-    **正常**结局（备份副本被首写锁定判负），而 `worker_loop` 的两个既有分支都会把它读错——
-    `except ProtocolError` ⇒ `report_job_failure`（把合法放弃报成确定性失败 ⇒ 训练停腿）、
-    `except RetryableError` ⇒ `release` 租约（把别人已经赢下的活重新放回池子）。
-
-    唯一正确的处置：丢本地副本 + `POST /jobs/{id}/abandon`（幂等，含 release 租约）+ 走
-    priority 选下家。抛点 = `ppo_update` 的 **epoch 边界**（`on_epoch_done`），
-    实测延迟记 `cancel_latency_s`。
-    """
-
-
-class JobFailedError(RuntimeError):
-    """**确定性**节点失败，且失败原因已随 `POST /jobs/{id}/fail` 回传到控制面。
-
-    与 RetryableError/ProtocolError 的分界（2026-09-17，DECISIONS
-    §2026-09-17-job-fail-report）：节点**已经判定这个 job 在这台机器上跑不成**（bun
-    装不上 / TS 运行时取不到 / argv 非法），并把原因报给了 hub/节点服务。
-
-    在此之前这条信息只落在**云机日志**里：pull 侧 worker 走 `except ProtocolError`
-    静默 skip（不回传、不还租约），训练侧只能等 `wait_job` 25 分钟超时（看到的是
-    "超时"，不是"bun 缺失"）；push 侧节点服务用 500 报失败，而 500 在
-    `push_client.wait_result` 里被当**瞬时错误**重试到预算耗尽。两者都把
-    「确定性能力缺失」伪装成了「网络/排队问题」。
-
-    reason/kind/detail 由回报方填写（`kind` = 异常类名，`detail` = 截断后的原文）。
-    """
-
-    def __init__(self, message: str, *, kind: str = "", detail: str = "") -> None:
-        self.kind = kind
-        self.detail = detail
-        super().__init__(message)
-
-
-class CodeChangedError(RuntimeError):
-    """本进程已 import 的代码与 job 携带的 code_sha256 不一致（热替换事件）。
-
-    成因（2026-09-11 review）：worker 常驻进程在首 job 才 import 代码进 sys.modules；
-    本地改代码后 hub 重打 code.zip（sha 变），后续 job 解压新代码、sys.path.insert(0,
-    新目录)，但 import 只查 sys.modules → 跑的还是旧代码**且零报错**。
-
-    ⚠ 刻意不继承 ProtocolError：worker_loop 对 ProtocolError 是 "skip (not retried)"
-    ——会把该 job 永久跳过，hub 侧干等到 1800s 超时、触发 R9 连败降级/停腿。本异常
-    必须走"重启进程"这条独立分支。
-    """
-
-    def __init__(self, loaded_sha: str, job_sha: str) -> None:
-        self.loaded_sha = loaded_sha
-        self.job_sha = job_sha
-        super().__init__(
-            f"代码已变更：本进程加载 {loaded_sha[:12]}… != job 要求 {job_sha[:12]}…"
-            "（继续跑会用旧代码产出看似正常的结果）"
-        )
-
-
-def normalize_manifest(m: dict) -> dict:
-    """校验 + 归一化 job manifest（proto=1：缺失必填 fail fast，未知字段忽略）。
-
-    返回浅拷贝的 manifest（必填齐全、可选字段带默认值）。校验失败抛
-    `ProtocolError`，错误信息指明缺失字段。
-    """
-    if not isinstance(m, dict):
-        raise ProtocolError(f"manifest 必须是对象，收到 {type(m).__name__}")
-    kind = str(m.get("kind", "ppo") or "ppo")
-    if kind not in MANIFEST_KINDS:
-        # 允许列表与 `KIND_ROLES` 同一份（`MANIFEST_KINDS`）——加 kind 而忘了给角色会当场红。
-        raise ProtocolError(
-            f"kind={kind!r} 未知（只认 {'|'.join(repr(k) for k in MANIFEST_KINDS)}）——拒收"
-        )
-    required = [
-        k for k in MANIFEST_REQUIRED if not (kind == "bc" and k in MANIFEST_BC_EXEMPT)
-    ]
-    if kind == "bc":
-        required += list(MANIFEST_BC_EXTRA)
-    if kind == "iter":
-        required += list(MANIFEST_ITER_EXTRA)
-    if kind == "run":
-        required += list(MANIFEST_RUN_EXTRA)
-    missing = [k for k in required if k not in m]
-    if missing:
-        raise ProtocolError(f"manifest 缺失必填字段: {missing}")
-    if int(m.get("proto", -1)) != PROTO:
-        raise ProtocolError(f"proto={m.get('proto')!r} != {PROTO}（协议版本不匹配）")
-    out = dict(m)
-    for k, v in MANIFEST_OPTIONAL_DEFAULTS.items():
-        out.setdefault(k, v)
-    # 标量类型校验（fail fast，防拼错/串位）——按 kind 实际持有的键校验
-    if not isinstance(out["runId"], str) or not out["runId"]:
-        raise ProtocolError("runId 必须是非空 str")
-    for k in ("it", "epochs", "mb", "metrics_version"):
-        if k not in out:
-            continue
-        if not isinstance(out[k], int) or isinstance(out[k], bool):
-            raise ProtocolError(f"{k} 必须是 int，收到 {out[k]!r}")
-    for k in ("gamma", "lam", "lr"):
-        v = out.get(k)
-        if v is None:
-            continue
-        if not isinstance(v, (int, float)) or isinstance(v, bool):
-            raise ProtocolError(f"{k} 必须是 float，收到 {v!r}")
-        if float(v) <= 0:
-            raise ProtocolError(f"{k} 必须 > 0，收到 {v!r}")
-    for k in (
-        "commit",
-        "code_sha256",
-        "course",
-        "course_fp",
-        "mode",
-        "seed",
-        "init_weights_fp",
-        "data_fp",
-        "payload_sha256",
-        "job_id",
-    ):
-        if not isinstance(out[k], str) or not out[k]:
-            raise ProtocolError(f"{k} 必须是非空 str")
-    # kind 红线（plan/bc-cloud-integration.plan.md §1）：ppo 仅 per-tick（v1 原红线），
-    # bc 仅 mode="bc"——两种任务类型在 mode 通道上互斥，杜绝串型。
-    if kind == "bc":
-        if out["mode"] != "bc":
-            raise ProtocolError(f"kind=bc 要求 mode='bc'，收到 {out['mode']!r}（拒收）")
-        if out["arch"] not in ("bc", "student"):
-            raise ProtocolError(f"bc manifest arch 必须是 'bc'|'student'，收到 {out['arch']!r}")
-    else:
-        if out["mode"] != "per-tick":
-            raise ProtocolError(
-                f"mode={out['mode']!r} != 'per-tick'（v1 红线：仅 per-tick 课程支持远程）"
-            )
-    if kind == "iter":
-        # M3 mode 互斥红线：iter 只承载 per-tick rollout（goal/intent 导出器不在
-        # 上云范围内——它们的 rollout 语义未在协议里建模）。ts_code_sha256 必须是
-        # 非空 str（下面的通用非空串循环已覆盖），rollout 规格逐字段校验。
-        if out["mode"] != "per-tick":
-            raise ProtocolError(
-                f"kind=iter 要求 mode='per-tick'，收到 {out['mode']!r}（M3 只上云 per-tick rollout）"
-            )
-        out["rollout"] = validate_rollout_spec(out["rollout"])
-    # 归属字段（2026-09-25）：**可选**（旧 job 没有它 ⇒ `role_of` 按 kind 兜底），
-    # 但一旦存在就必须合法——一个拼错的 role 静默变成 online 正是那种「看不见」的失败。
-    role_raw = out.get(ROLE_FIELD)
-    if role_raw not in (None, "") and str(role_raw) not in ROLES:
-        raise ProtocolError(f"{ROLE_FIELD}={role_raw!r} 未知（只认 {list(ROLES)}）——拒收")
-    if not isinstance(out.get("normalize_ret", False), bool):
-        raise ProtocolError(f"normalize_ret 必须是 bool，收到 {out.get('normalize_ret')!r}")
-    if not isinstance(out.get("kickstart_kl", 0.0), (int, float)) or isinstance(
-        out.get("kickstart_kl", 0.0), bool
-    ):
-        raise ProtocolError(f"kickstart_kl 必须是 number，收到 {out.get('kickstart_kl')!r}")
-    if float(out.get("kickstart_kl", 0.0)) < 0:
-        raise ProtocolError("kickstart_kl 必须 >= 0")
-    psq = out.get("per_stage_quota", 0)
-    # bool 是 int 的子类 ⇒ 必须先挡 bool（True/False 混进来会让配额变成 1/0 而不报错）。
-    if isinstance(psq, bool) or not isinstance(psq, int) or psq < 0:
-        raise ProtocolError(f"per_stage_quota 必须是非负整数，收到 {psq!r}")
-    return out
-
-
-# ------------------------------------------------------------------ data_fp
-
-
-#: data_fp 条目 = (shard 目录名, wver, stage, seed)。
-DataFpEntries = Sequence[tuple[str, str, int, int]]
-
-
-def data_fp_entries(entries: DataFpEntries) -> str:
-    """data_fp 的核心：对**声明**的 shard 条目集做 sha256（排序后逐字段拼接）。
-
-    单独抽出来是为了 M3：上云 rollout 的 shard 由节点现产，hub 侧没有目录可读，
-    只能对「声明集」（argv 里逐局的 stage/seed + 约定的 wver）算期望值。节点跑完后
-    对**实产**目录调 `data_fp()`（同一函数、同一拼接顺序）再比对——两侧算法同源，
-    所以「相等」严格等价于「实产集 == 声明集」，任一侧漏局/多局都会露出来。
-    """
-    ents = sorted(entries, key=lambda e: e[0])
-    h = hashlib.sha256()
-    for name, wver, stage, seed in ents:
-        h.update(name.encode("utf-8"))
-        h.update(wver.encode("utf-8"))
-        h.update(str(stage).encode("utf-8"))
-        h.update(str(seed).encode("utf-8"))
-    return h.hexdigest()
-
-
-def d14_corpus_match(job_course_fp: str, job_corpus_fp: str, shard_manifest: dict) -> bool:
-    """D14 装载校验的比对规则（DECISIONS §2026-09-13-level-extraction · 全文 → docs/nn/training-stack.md §25）。
-
-    双侧都有 corpus_fp（语料身份 = env+reward 解析值语义哈希）⇒ 比 corpus_fp——
-    预算/路径/注释类课程 mid-run 编辑只动 course_fp（文件血缘），不得触发拒收。
-    任一侧缺 corpus_fp（legacy shard / 旧 job）⇒ 回退文件血缘 course_fp 逐字比对。
-
-    ★ 为什么它住 protocol 而不是 worker：这条规则有**两个**执行端——云 worker 装载时
-    逐 shard 判（拒收），hub 打包时也逐 shard 判（`hub_client.iter_shard_dirs` 只挑
-    匹配的进 payload）。两份实现漂开就是一个死循环：发布端放进一个异血缘 shard、云端
-    整份 job 拒收、训练轮等一个永不回传的结果（2026-09-20 事故：c6-chip it16 的 payload
-    里混进了 21 个旧血缘 shard，云 worker 报 `D14 course_fp 不匹配` 整份退回）。
-    同一函数 = 同一判据，打包集恒等于云端会接受的集合。
-    """
-    s_corpus = str(shard_manifest.get("corpus_fp", "") or "")
-    if job_corpus_fp and s_corpus:
-        return job_corpus_fp == s_corpus
-    return str(shard_manifest.get("course_fp", "")) == job_course_fp
-
-
-def data_fp(shard_dirs: Sequence[str | Path]) -> str:
-    """D1 data_fp：sha256(按字典序排列的 shard 相对路径 + 各 manifest {wver,stage,seed})。
-
-    shard_dirs：本轮应训 shard 目录（绝对/相对路径均可，按 basename 字典序排序——
-    排序以 shard 目录名（rl_s{stage}_seed{seed}）为键，与打包/装载口径一致）。
-    任一侧重算必须得到同一值（hub 打包时写入、验收时本地重算比对——防 ABA，D12）。
-    """
-    entries: list[tuple[str, str, int, int]] = []
-    for d in shard_dirs:
-        p = Path(d)
-        mp = p / "manifest.json"
-        try:
-            with open(mp, encoding="utf-8") as f:
-                mm = json.load(f)
-        except (OSError, ValueError) as e:
-            raise ProtocolError(f"data_fp: 读 {mp} 失败: {e}") from e
-        entries.append(
-            (
-                p.name,  # rl_s{stage}_seed{seed}
-                str(mm.get("wver", "")),
-                int(mm.get("stage", -1)),
-                int(mm.get("seed", -1)),
-            )
-        )
-    return data_fp_entries(entries)
-
-
-# ------------------------------------------------------------------ M3 rollout 规格
-#
-# 为什么 argv 是规格的 SSOT（而不是 stages/seeds/difficulty 一堆字段）：
-# hub 侧本来就有 `rl/cmd.build_rollout_cmd` 拼装本机 rollout 命令（三导出器 + 课程
-# 覆盖 + D14 血缘，单源）。上云时**用同一个函数**、只把路径换成 job 目录内的相对
-# 路径，再把它交给节点执行 ⇒ 「节点跑的采集」与「本机跑的采集」逐字节同命令，
-# 逐位对拍（计划 §5.5①）是构造性质而不是靠人去对对参数。新增一个字段就等于在
-# 协议里复制一份 cmd.py 的知识，迟早漂。
-
-#: argv 里必须携带的相对路径 flag（job 目录为 cwd）。
-_ITER_PATH_FLAGS: tuple[str, ...] = ("--out", "--weights")
-#: rollout 规格默认值（缺省即旧行为，additive）。
-ROLLOUT_SPEC_DEFAULTS: dict[str, object] = {
-    "wver": "",
-    "workers": 1,
-    # 0 = plan 没给 ⇒ **节点兜底硬顶**（`iter_rollout.DEFAULT_GAME_TIMEOUT_SEC`）。
-    # 2026-09-22 改口径：旧注释写的是「0 = 不设单局超时（本机历史行为）」，也就是一个卡住的
-    # bun 子进程可以永远等下去——it34 实测 rollout 中途停了 651s（10 局卡死、日志只有计数）。
-    # 本机 rollout 不受影响（它不看这个字段），云端必须有个上限。
-    "game_timeout_sec": 0.0,
-    "bun": "bun",  # 节点侧 bun 可执行名（PATH 查找）；空 = 用节点默认
-}
-
-
-def shard_name(stage: int, seed: int) -> str:
-    """shard 目录名（与 `export-rl-rollout.ts` 的 `rl_s${si}_seed${seed}` 同源）。"""
-    return f"rl_s{stage}_seed{seed}"
-
-
-def parse_shard_name(name: str) -> tuple[int, int] | None:
-    """`rl_s{stage}_seed{seed}` -> (stage, seed)；不匹配返回 None（不抛）。"""
-    m = re.fullmatch(r"rl_s(\d+)_seed(\d+)", str(name or ""))
-    if m is None:
-        return None
-    return int(m.group(1)), int(m.group(2))
-
-
-#: Windows 盘符前缀（`C:` / `c:`）——绝对值与 drive-relative 都算，跨平台一律拒。
-_WIN_DRIVE_RE = re.compile(r"^[A-Za-z]:")
-
-
-def _iter_flag_value(argv: list[str], flag: str) -> int:
-    """取 argv 里 `flag` 的单个整数值；缺失/重复/非整数一律 ProtocolError。
-
-    重复出列（`--stages 0 --stages 1`）也是个坑：导出器只会吃到一个，声明集却可能
-    按另一个算——声明集必须就是**实际会执行**的那一组，所以重复直接拒收。
-    """
-    vals = [argv[i + 1] for i, a in enumerate(argv) if a == flag]
-    if len(vals) != 1:
-        raise ProtocolError(f"rollout.argv 的 {flag} 必须恰好出现 1 次，实得 {len(vals)} 次")
-    try:
-        return int(vals[0])
-    except (TypeError, ValueError):
-        raise ProtocolError(f"rollout.argv 的 {flag} 必须是单个整数，收到 {vals[0]!r}") from None
-
-
-def _iter_rel_path(value: object, flag: str) -> str:
-    """校验 argv 里的路径参数是 job 目录内的相对路径（拒绝对路径 / `..` / 空）。
-
-    跨平台（2026-09-17 修）：`os.path.isabs` / `Path.is_absolute` 只看**当前内核**的
-    规则——Linux 上 `C:/weights.json` 两者都判 False，于是 Windows 盘符路径能静默过门，
-    到节点上却变成宿主盘上的文件（或直接跑挂）。节点的 cwd 契约不随着 hub 的内核变，
-    所以盘符（含 drive-relative `c:x`）与 UNC 在任何平台都在这里拒收。
-    """
-    s = str(value or "")
-    if not s:
-        raise ProtocolError(f"rollout.argv 的 {flag} 不能为空")
-    if (
-        os.path.isabs(s)
-        or Path(s).is_absolute()
-        or s.startswith(("~", r"\\"))  # ~ 家目录 / UNC（`\\\\host\\share`）
-        or _WIN_DRIVE_RE.match(s)  # `C:/x` / `C:\\x` / `C:x`（drive-relative）
-    ):
-        raise ProtocolError(
-            f"rollout.argv 的 {flag}={s!r} 必须是相对路径（节点以 job 目录为 cwd）"
-        )
-    parts = Path(s).parts
-    if ".." in parts:
-        raise ProtocolError(f"rollout.argv 的 {flag}={s!r} 不得包含 ..（越界）")
-    return s
-
-
-def validate_rollout_spec(spec: object) -> dict:
-    """校验 + 归一化 manifest 的 `rollout` 子字典（kind=iter）。失败抛 ProtocolError。
-
-    归一化后 shape：
-      {argv: [[str, ...], ...], wver: str, workers: int, game_timeout_sec: float, bun: str}
-    argv 每项 = 一局的完整命令，**不含** bun 路径（worker 用自己的 bun；argv[0] 是
-    exporter 脚本，受 `ROLLOUT_SCRIPTS` 白名单约束）。
-    """
-    if not isinstance(spec, dict):
-        raise ProtocolError(f"manifest.rollout 必须是对象，收到 {type(spec).__name__}")
-    allowed = set(ROLLOUT_SPEC_DEFAULTS) | {"argv"}
-    out = dict(ROLLOUT_SPEC_DEFAULTS)
-    for k, v in spec.items():
-        if k not in allowed:
-            raise ProtocolError(
-                f"manifest.rollout 未知字段 {k!r}（允许：{sorted(allowed)}——拒绝，非忽略）"
-            )
-        out[k] = v
-    raw_argv = spec.get("argv")
-    if not isinstance(raw_argv, list) or not raw_argv:
-        raise ProtocolError("manifest.rollout.argv 必须是非空数组（每局一项）")
-    argv_out: list[list[str]] = []
-    seen: set[tuple[int, int]] = set()
-    for i, item in enumerate(raw_argv):
-        if not isinstance(item, list) or len(item) < 2:
-            raise ProtocolError(f"manifest.rollout.argv[{i}] 必须是长度 >=2 的字符串数组")
-        argv = [str(x) for x in item]
-        if not all(isinstance(x, str) for x in item):
-            raise ProtocolError(f"manifest.rollout.argv[{i}] 含非字符串元素（拒收）")
-        script = argv[0].replace("\\", "/").lstrip("./")
-        if script not in ROLLOUT_SCRIPTS:
-            raise ProtocolError(
-                f"manifest.rollout.argv[{i}][0]={argv[0]!r} 不在白名单 {list(ROLLOUT_SCRIPTS)}（拒收）"
-            )
-        argv[0] = script
-        st = _iter_flag_value(argv, "--stages")
-        sd = _iter_flag_value(argv, "--seeds")
-        for flag in _ITER_PATH_FLAGS:
-            if flag not in argv:
-                raise ProtocolError(f"manifest.rollout.argv[{i}] 缺 {flag}（节点无法定位产物）")
-            j = argv.index(flag)
-            if j + 1 >= len(argv):
-                raise ProtocolError(f"manifest.rollout.argv[{i}] 的 {flag} 没有取值")
-            argv[j + 1] = _iter_rel_path(argv[j + 1], flag)
-        if (st, sd) in seen:
-            raise ProtocolError(f"manifest.rollout.argv 重复声明同一局 (stage={st}, seed={sd})")
-        seen.add((st, sd))
-        argv_out.append(argv)
-    out["argv"] = argv_out
-    out["wver"] = str(out["wver"] or "")
-    # workers：缺席 = 1（默认值）；**显式 0 拒收**（不静默改成 1——那会让「配错了」
-    # 与「没配」长得一样，而并发配错正是那种「跑起来了但完全不是你要的」错误）。
-    _w: object = 1 if out["workers"] is None else out["workers"]
-    if isinstance(_w, bool):
-        raise ProtocolError(f"manifest.rollout.workers 必须是整数，收到 {_w!r}")
-    if isinstance(_w, int):
-        _wn = _w
-    elif isinstance(_w, str) and _w.isdigit():
-        _wn = int(_w)
-    else:
-        raise ProtocolError(f"manifest.rollout.workers 必须是整数，收到 {_w!r}")
-    if _wn < 1:
-        raise ProtocolError("manifest.rollout.workers 必须 >= 1（显式 0 拒收，不静默改成 1）")
-    out["workers"] = _wn
-    _t: object = 0.0 if out["game_timeout_sec"] is None else out["game_timeout_sec"]
-    if isinstance(_t, bool) or not isinstance(_t, (int, float)):
-        raise ProtocolError(f"manifest.rollout.game_timeout_sec 必须是数字，收到 {_t!r}")
-    if float(_t) < 0:
-        raise ProtocolError(
-            "manifest.rollout.game_timeout_sec 必须 >= 0（0 = 节点兜底硬顶，不是不限）"
-        )
-    out["game_timeout_sec"] = float(_t)
-    out["bun"] = str(out["bun"] or "bun")
-    return out
-
-
-def iter_declared_entries(spec: dict) -> list[tuple[str, str, int, int]]:
-    """rollout 规格 → 声明的 data_fp 条目集（与 argv 一一对应，不可能漂）。"""
-    wver = str(spec.get("wver") or "")
-    ents: list[tuple[str, str, int, int]] = []
-    for argv in spec["argv"]:
-        st = _iter_flag_value(list(argv), "--stages")
-        sd = _iter_flag_value(list(argv), "--seeds")
-        ents.append((shard_name(st, sd), wver, st, sd))
-    return ents
-
-
-def iter_expected_data_fp(spec: dict) -> str:
-    """kind=iter 的 manifest.data_fp = 对**声明集**的 data_fp（hub 算、节点复算比对）。"""
-    return data_fp_entries(iter_declared_entries(spec))
-
-
-# ------------------------------------------------------------------ payload
-# ---- payload 容器（2026-09-10：zip/deflate -> tar.xz）----
-# 实测（20 个真实 c5-margin shard，裸 22.3 MB，×7.5 折算 150 份）：
-#   ZIP_DEFLATED(6)  241,382 B / 1.8 s
-#   ZIP_LZMA         187,443 B / 9.0 s   （只 −22.3% 且慢 5×，已否决）
-#   tar.xz(preset=3) 123,788 B / 1.9 s   <== 采用：体积 −48.7%，打包耗时持平
-# 折算真实 payload 3.83 MB -> ~1.96 MB，下载 2.3 s -> ~1.2 s。stdlib，无新依赖。
-# 解析端**双读**（zipfile.is_zipfile 判别）⇒ 旧 hub 产的 payload.zip 与新 hub 产的
-# payload.tar.xz 对新旧 worker 都能工作。
-PAYLOAD_NAME = "payload.tar.xz"
-PAYLOAD_LEGACY_NAMES: tuple[str, ...] = ("payload.zip",)
 #: M3：TS 运行时 zip 在 job 目录内的文件名（`GET /jobs/{id}/ts_code` 服务它）。
 TS_CODE_NAME = "ts_code.zip"
 #: 节点确定性失败标记在 job 目录内的文件名（`POST /jobs/{id}/fail` 写、`GET
@@ -1039,28 +643,6 @@ def sanitize_run_id(raw: object) -> str:
             f"{s[:80]!r}"
         )
     return s
-#: kind=iter 的 payload 内要点名的 init 权重文件名（节点跑 rollout 的 --weights）。
-INIT_WEIGHTS_NAME = "init_weights.json"
-#: 发布端自检要求重打时写进归档根的**扰动**文件名（plan/accident.plan.md §4.6，2026-09-21）。
-#: 它**不是数据**：存在的唯一意义是让重打的字节与上一次不同——打包是确定性的
-#: （shard 排序 + tar 记源文件 mtime、lzma 确定性），不扰动就会逐字节相同，旧判别
-#: （`zipfile.is_zipfile` 的 EOCD 启发式）在同一份字节上**永远**为真 ⇒ 重打闭环不收敛。
-#: worker 侧忽略根级未知文件（只按名取 init_weights.json / plan.json，shard 靠扫描
-#: 带 manifest.json 的子目录），故向前兼容。
-PAYLOAD_PERTURB_NAME = "payload.perturb"
-# 标注成 Literal：typeshed 的 tarfile.open("w:xz") 重载要求 preset 为 Literal[0..9]，
-# 普通 int 过不了 mypy。**改档位时这里要同步改**（比如变 5 就写 Literal[5]）。
-#
-# ⛔ **B6（preset 3→6）已量、不采用，别再重测**（2026-09-17，3 份**真** payload ×
-#    240 shard、走本函数、每份独立跑）：体积只 **−2.6…−3.0%**（~34 KB），打包却
-#    **+188…+199%**（3.2s → 9.4s，即关键路径 **+6.2…+6.5s/轮**）；解包未见收益
-#    （5.4→5.8 / 5.7→6.3 / 6.4→5.9 s，噪声内）。按隧道实测 ~3.5 Mbps，那 34 KB 只值
-#    ~0.08s 传输 ⇒ **用 +6.3s CPU 换 0.08s 是净亏**，且计划 §4.2 的门槛是「收益 <10%
-#    就别做」。同批真数据另证 B1/B2/B4：同一批 job 原盘 payload 2,045,276/2,034,536/
-#    2,074,996 B → 仅打 shard 后 1,198,096/1,187,392/1,227,432 B（**−41.4%/−41.6%/−40.8%**）。
-PAYLOAD_XZ_PRESET: Literal[3] = 3
-
-
 def is_content_sha(s: str) -> bool:
     """内容寻址 sha 的形状判据（64 位小写 hex）。
 
@@ -1085,258 +667,21 @@ def blob_path(job_dir: str | Path, name: str) -> Path:
     return Path(job_dir) / f"blob.{name}"
 
 
-def find_payload(job_dir: str | Path) -> Path | None:
-    """定位 job 目录下的 payload（优先新名 tar.xz，回退旧名 zip）——新旧互通。"""
-    jd = Path(job_dir)
-    for name in (PAYLOAD_NAME, *PAYLOAD_LEGACY_NAMES):
-        p = jd / name
-        if p.exists():
-            return p
-    return None
-
-
-def _add_bytes(tf: tarfile.TarFile, name: str, data: bytes) -> None:
-    """把一个内存字节串写进 tar（避免为 manifest 落临时文件）。"""
-    ti = tarfile.TarInfo(name)
-    ti.size = len(data)
-    tf.addfile(ti, io.BytesIO(data))
-
-
-def _extract_archive(src: Path, dest: Path) -> None:
-    """解包 payload 归档：**双读** tar 系 / zip（按内容**行为**判别，不看扩展名）。
-
-    ★ 判别顺序 = **先 tar 后 zip**（2026-09-21 事故，plan/accident.plan.md §4）：
-    原实现先问 `zipfile.is_zipfile()` —— 那是 stdlib 的 EOCD 形似字节启发式，xz 压缩
-    数据里恰好出现该形状时**会误报为 True**。实测事故：3501788 字节的**完好** tar.xz
-    被判成 zip ⇒ `BadZipFile: Bad offset for central directory` ⇒ worker 当瞬态重认领
-    ⇒ 同一份毒包每 5 分钟复现、零告警空转 3.5 小时。
-
-    反过来先试 tar 是**严格更可靠**的判别：tar 系靠 magic/透明度（`r:*`）认领，zip 的
-    local header（`PK\x03\x04`）永远过不了 tar 头验证 ⇒ 行为判别天然 try/except，不再
-    依赖任何启发式；legacy zip 包走后面的回退分支（tar.xz 化之前的包仍可解）。
-
-    打不开 = **内容决定性**失败 ⇒ `ProtocolError`（不是 `BadZipFile`/`TarError`）：
-    同一份字节重领永远不会自愈，必须让 worker 走确定性上报而不是重认领。
-    `OSError`（磁盘/权限）例外——那是基础设施瞬时故障，原样抛出交由重认领处理。
-    """
-    try:
-        with tarfile.open(src, "r:*") as tf:
-            try:
-                tf.extractall(dest, filter="data")
-            except TypeError:  # Python < 3.12 无 filter 参数
-                tf.extractall(dest)
-        return
-    except OSError:
-        raise  # 磁盘/权限类 = 瞬时基础设施问题，不归容器判别
-    except Exception as e:  # 非 tar 系（含 legacy zip）/ 损坏 —— 落 zip 分支再判一次
-        tar_err: BaseException = e
-    if not zipfile.is_zipfile(src):
-        raise ProtocolError(
-            f"payload 容器双读失败（tar 侧 {type(tar_err).__name__}: {tar_err}）——"
-            "内容确定性失败，重领同一份字节不会自愈"
-        ) from tar_err
-    try:
-        with zipfile.ZipFile(src) as z:
-            z.extractall(dest)
-    except Exception as e:
-        raise ProtocolError(
-            f"payload zip 解包失败（内容确定性）：{type(e).__name__}: {e}"
-        ) from e
-
-
-def pack_payload(
-    shard_dirs: Sequence[str | Path],
-    manifest: dict,
-    out_path: str | Path,
-    *,
-    extra_files: Sequence[str | Path] | None = None,
-    perturb: bytes | None = None,
-) -> str:
-    """把 shard 目录（npy + manifest.json）打成 **tar.xz**，写 `out_path`。
-
-    容器演进（2026-09-10）：原为 zip/deflate —— 实测 tar.xz(preset=3) 体积 −48.7%
-    而打包耗时持平（stdlib、无新依赖），解析端 `unpack_payload` 双读兼容。
-    布局不变：每个 shard 目录整体进入（目录名 rl_s{stage}_seed{seed}/…），根下再写
-    一份 manifest.json（payload_sha256 占位空串——最终哈希由调用方对**本函数产出的
-    字节**计算后回填 job 记录，worker 以 job 记录的 payload_sha256 对原始下载字节
-    校验，D1——防隧道截断）。
-
-    返回文件字节 sha256。调用方拿到后应把 sha 写入 job 记录/账本。
-
-    `perturb`（§4.6，2026-09-21）：非 None 时把这段字节以 `PAYLOAD_PERTURB_NAME` 写进
-    归档根——发布端自检要求重打时用它**显式扰动**字节（确定性打包下唯一的换字节手段）。
-    """
-    zpath = Path(out_path)
-    zpath.parent.mkdir(parents=True, exist_ok=True)
-    tmp = zpath.with_suffix(zpath.suffix + ".tmp")
-    with tarfile.open(tmp, "w:xz", preset=PAYLOAD_XZ_PRESET) as tf:
-        for d in shard_dirs:
-            p = Path(d)
-            if not p.is_dir():
-                raise ProtocolError(f"pack_payload: shard 目录不存在 {p}")
-            for f in sorted(p.iterdir()):
-                if f.is_file():
-                    tf.add(f, arcname=f"{p.name}/{f.name}")
-        # 额外文件（落归档**根**：init_weights.json / plan.json 等按名取用）。
-        # 2026-09-17：从 hub_client.pack_payload_zip 合并进来——原来两个打包器
-        # （一个带 extra 一个不带）各自维护 tar.xz 口径，半离线段又需要一个带
-        # extra 的，第三个副本毫无道理：统一到这里，hub 侧那个改为转调。
-        for xf in extra_files or ():
-            fx = Path(xf)
-            if fx.is_file():
-                tf.add(fx, arcname=fx.name)
-        # 显式扰动（仅发布端自检要求重打时；见 `PAYLOAD_PERTURB_NAME`）。写在 extra 之后、
-        # 归档根，非 shard 目录 ⇒ 不进 shard 名单、不影响任何按名取用的文件。
-        if perturb is not None:
-            _add_bytes(tf, PAYLOAD_PERTURB_NAME, bytes(perturb))
-        # M2（B1）：不再写根级占位 manifest.json —— worker.py:896 一直把它当
-        # `_unused_manifest` 丢弃（~0.89MB/轮纯冗余）。权威 manifest 走 job 记录
-        # （peek/claim 返回），本函数只负责搬运 shard 数据。`manifest` 形参保留
-        # 只为调用方签名兼容（不再进字节）。
-    tmp.replace(zpath)
-    return hashlib.sha256(zpath.read_bytes()).hexdigest()
-
-
-def unpack_payload(payload_path: str | Path, dest: str | Path) -> tuple[dict, list[str]]:
-    """解包 payload → (manifest, shard_dir_paths)。**双读**：zip 与 tar.xz 都支持。
-
-    shard_dir_paths 为解包后落在 dest 下的各 shard 目录（含 manifest.json），
-    供 worker 的 load_episodes 消费。返回的 manifest 为归档内副本（payload_sha256
-    为占位空串）——**不作权威校验**；worker 必须用 job 记录（peek/claim 返回）
-    的 manifest 做 payload_sha256 / commit / mode 等全部校验（本函数只解包）。
-    """
-    dest_p = Path(dest)
-    dest_p.mkdir(parents=True, exist_ok=True)
-    _extract_archive(Path(payload_path), dest_p)
-    # 解包产物**非空**断言（2026-09-21，§4）：判别反转后"tar 打开成功却解出空包"是新
-    # 路径特有的失败形态（旧实现误判时是直接抛错）。空包必须响亮——否则下游按"零 shard"
-    # 静默继续（PPO 拿到空语料 = 比报错更坏的静默失败）。
-    if not any(dest_p.iterdir()):
-        raise ProtocolError(
-            f"payload 解包产物为空（{payload_path}）——容器判别/解包路径异常，拒绝静默继续"
-        )
-    # M2（B1）：新 hub 产的 payload 不含根级 manifest.json（占位副本已删）——
-    # 有则读、无则返回 {}（旧 payload 仍兼容；权威校验全走 job 记录 manifest）。
-    mp = dest_p / "manifest.json"
-    if mp.exists():
-        with open(mp, encoding="utf-8") as f:
-            manifest = json.load(f)
-    else:
-        manifest = {}
-    shard_dirs: list[str] = []
-    for p in sorted(dest_p.iterdir()):
-        if p.is_dir() and (p / "manifest.json").exists():
-            shard_dirs.append(str(p))
-    return manifest, shard_dirs
-
-
-# ------------------------------------------------------------------ idempotency
-
-
-def idempotency_key(manifest: dict) -> tuple:
-    """D1 幂等键 = (runId, **course_fp**, it, init_weights_fp, data_fp)。云 worker 崩溃
-    重拉同一 job 时按此去重；hub 账本记 job 状态，不重复发包已完成 job。
-
-    ★ `course_fp` 是 2026-09-24 加的（plan/job-identity-collision.plan.md）：原来的四个
-    分量在**单进程多课程**（`--serve` 共享 trainer）下会**跨课程全同** —— runId 是进程级
-    （`rl/queue.py::RUN_ID`）、`init_weights_fp` 同 warm-start、`data_fp` 只哈希
-    (shard 目录名, wver, stage, seed) 而 per-stage seed 与课程无关、`it` 同轮 ⇒ 两门课
-    发布出**同一个 job_id**，hub 的 per-job 路由取「第一个匹配」⇒ 两个 trainer 读到同一份
-    结果，各自落进自己的 `args.out`（静默污染，且让下一轮 `init_weights_fp` 继续相同 ⇒ 自持）。
-
-    为什么用 `course_fp` 而不是课程名：它是 manifest 必填字段、语义就是「课程身份」，
-    且在**同一进程内恒定**（课程字节装载时冻结：`rl/config.py::course_from_args` 落
-    `args.course_frozen_bytes`）⇒ mid-run 热加载编辑不会换 job id、不产生孤儿。
-    ⚠ 它是**文件血缘**哈希，不是语料身份（那是 `corpus_fp`），也不等于 hub 的课程键
-    （`<discover-root>/<目录名>`，= 课程文件 stem）——本键只用来分开身份，不用来路由。
-    """
-    return (
-        manifest["runId"],
-        manifest["course_fp"],
-        manifest["it"],
-        manifest["init_weights_fp"],
-        manifest["data_fp"],
-    )
-
-
-def job_id(manifest: dict) -> str:
-    """job_id 派生：sha256(幂等键)[:16]——同一 job（幂等键相同）永远同一 job_id，
-    天然幂等（hub kill -9 重启后重发布不产生重复 job）。"""
-    h = hashlib.sha256()
-    for part in idempotency_key(manifest):
-        h.update(str(part).encode("utf-8"))
-        h.update(b"\x00")
-    return h.hexdigest()[:16]
-
-
-#: 兄弟课程的 job 目录相对 job_root 的形状（发布端守卫的扫描面）：
-#: `<job_root>/../*/remote-jobs/*/manifest.json`。抽成常量是为了让「扫描面」只有一处定义。
-SIBLING_MANIFEST_GLOB = "*/remote-jobs/*/manifest.json"
-
-
-def collision_rows(job_root: str | Path, manifest: dict) -> list[dict]:
-    """发布端守卫的**唯一判据**：这份 job 的身份是否已被**别的课程**占用。
-
-    返回命中的行 `[{course, job_id, manifest_path}, …]`（空 = 放行）。
-
-    为什么需要它（2026-09-24 事故，plan/job-identity-collision.plan.md）：同一个 job 身份
-    落在两个 store 时，hub 的 per-job 路由无法区分（`course_of` 只能拒答），两个 trainer
-    会读到同一份结果 ⇒ **静默污染**。`idempotency_key` 进了 `course_fp` 之后正常发布已经
-    撞不出来，所以这道守卫是**哨兵**：手写 manifest、回灌历史 job、跨 hub 搬目录、回滚代码
-    再前进等旁路一旦制造出同身份，必须在**发布那一刻**响亮拒发，而不是等污染被看出来。
-
-    ★ 判据 = 「**完整幂等键**相同 且 落在**别的 store**」——**不是**「四分量相同且 course_fp
-    不同」：后者正是本事故的配置，而它在 `course_fp` 进键之后是**合法**的（两门课各有各的
-    id），拿它当判据会把已经修好的场景全部拒掉。
-
-    成本：一次 glob（兄弟课程数 × 每课 `remote-jobs/` 现存 job 目录数）+ **至多 1 次**
-    manifest 读取（见下方快速闸）。扫描根不存在（节点侧/自定义 `job_root` 布局）⇒ 返回空：
-    它是 best-effort 哨兵，扫不到就放过，绝不误伤。
-
-    ⚠ 快速闸的前提是「**目录名 == 该 manifest 的 `job_id`**」——这是**发布端的写入不变量**
-    （`publish_job` 先算 id、再以它为目录名），也是 `course_of` 认归属用的同一条。手写 manifest
-    若把某个键写进**别的**目录名，它连路由都对不上（`wait_job(<该键的 id>)` 会 404），
-    不构成本守卫要防的「两个 store 抢同一身份」。
-    """
-    root = Path(job_root)
-    own_course = root.parent.name  # `<root>/<课程>/remote-jobs` ⇒ 本课目录名
-    try:
-        want = idempotency_key(manifest)
-    except KeyError:
-        return []  # 本份 manifest 自己就不完整（调用方另有校验）——守卫不越权报错
-    want_jid = job_id(manifest)
-    scan_root = root.parent.parent
-    hits: list[dict] = []
-    for mp in sorted(scan_root.glob(SIBLING_MANIFEST_GLOB)):
-        # ★ 快速闸（E0 实测驱动）：job 身份 = `job_id`，而 **job 目录名就是 job_id**
-        # （`course_of` 的归属证据用的是同一条不变量）⇒ 只有**同名目录**才可能是冲突。
-        # 没有这一闸，每次发布要把兄弟课程的全部 manifest 都 `json.loads` 一遍：
-        # 真语料 82 份（含内联 opt_init/course 全文）实测 **399ms/次**；加上它 = 一次
-        # glob + 至多 1 次读取。
-        if mp.parent.name != want_jid:
-            continue
-        # 相对扫描根取第一段 = 课程目录名（不靠数 `parents`，免得扫描面一变就错位）
-        course = mp.relative_to(scan_root).parts[0]
-        if course == own_course:
-            continue  # 本课自己的历史 job（含重发布的那一份）——不算冲突
-        try:
-            other = json.loads(mp.read_text(encoding="utf-8"))
-            if not isinstance(other, dict):
-                continue
-            same = idempotency_key(other) == want
-        except (OSError, ValueError, KeyError):
-            # 缺键（更旧/手写的 manifest）或读不动 ⇒ 跳过这一行：守卫不把「读不懂」
-            # 升级成「拒发」，否则一次历史残留就能挡住整条腿。
-            continue
-        if same:
-            hits.append(
-                {
-                    "course": course,
-                    "job_id": str(other.get("job_id") or mp.parent.name),
-                    "manifest_path": str(mp),
-                }
-            )
-    return hits
+# ------------------------------------------------------------------ idempotency（S5 第七刀）
+# 「job 身份簇」已下沉 `common/job_identity.py`（幂等键 / job_id / 发布端撞名守卫 + 扫描面常量）。
+# 实现搬家、名字留门面 ⇒ 全仓 `from common.protocol import …` 一行不改。
+from common.job_identity import (
+    SIBLING_MANIFEST_GLOB as SIBLING_MANIFEST_GLOB,
+)
+from common.job_identity import (
+    collision_rows as collision_rows,
+)
+from common.job_identity import (
+    idempotency_key as idempotency_key,
+)
+from common.job_identity import (
+    job_id as job_id,
+)
 
 
 def job_seed(run_id: str, it: int, init_weights_fp: str) -> str:
@@ -1483,13 +828,6 @@ def validate_iter_report(rep: object) -> dict:
     return out
 
 
-# ---- result 回传字段的传输编码 ----
-# 上行只有 220 KB/s（实测），而两字段都是 JSON 文本 / torch 张量，gzip level 6 实测省
-# 29.6%（weights.json 1.35×、opt tar 1.45×，CPU 仅 ~0.05 s）。level 9 换不到额外收益。
-_GZIP_MAGIC = b"\x1f\x8b"
-_WIRE_GZIP_LEVEL = 6
-
-
 # ---- 会退火到 ~0 的系数：低于此阈值即视为"关" ----
 # 依据（2026-09-10 实测）：kickstart / kl 系数按 `kickstart_kl * decay ** N` 几何衰减，
 # **永远到不了精确 0** —— 实测课程跑到 kl = 1.4551915228366852e-11（= 2^-36）时，
@@ -1508,201 +846,3 @@ def coef_active(x: float) -> bool:
     return float(x) > NEGLIGIBLE_COEF
 
 
-# ---- result 回传体的 v2 线格式（方案B：gzip 裸二进制，省掉 base64 的 33%）----
-# 布局:  MAGIC(5) | uint32 BE header_len | header_json | blob0 | blob1 | ...
-# header = {"result": <去掉二进制字段的 dict>, "blob_lens": [len0, len1]}
-# blob 顺序固定 = BLOB_FIELDS。
-# 动机（2026-09-10 实测）：方案A（gzip+base64）线上 1,150,292 B —— base64 白占 33%。
-# 改裸二进制后 862,717 B（再省 25%，相对未压缩的 1,634,596 省 47.2%），上行 ~5.2 -> ~3.9 s。
-# hub 只做 base64（stdlib），并把结果**还原成方案A 的字符串形态**再落盘
-# ⇒ result.json 格式与下游 hub_client.decode_* 零改动。
-WIRE_V2_MAGIC = b"BRV2\n"
-WIRE_V2_CONTENT_TYPE = "application/x-battle-result-v2"
-BLOB_FIELDS: tuple[str, ...] = ("weights_json", "opt_tar_b64")
-_HDR_LEN_BYTES = 4
-
-
-# ---- /job 提交体的 v2 线格式（M2 B5：payload/code/blob 去 base64，省 25%）----
-# 布局:  MAGIC(5) | uint32 BE header_len | header_json | payload | [code] | blob0 | ...
-# header = {"manifest": m, "has_code": bool, "blob_names": [...], "lens": [payload, code?, *blobs]}
-# 动机：push body 原为 JSON + `payload_b64`（base64 白占 33%）。拆成裸二进制后
-# 1.6MB → 1.2MB。解析端保留 JSON 退路（旧节点/旧 hub 混跑时降级）。
-WIRE_JOB_MAGIC = b"BRJ2\n"
-WIRE_JOB_CONTENT_TYPE = "application/x-battle-job-v2"
-
-
-def pack_job_v2(
-    manifest: dict,
-    payload: bytes,
-    code: bytes | None,
-    blobs: dict[str, bytes] | None = None,
-    ts_code: bytes | None = None,
-) -> bytes:
-    """job 提交体 → v2（payload/code/ts_code/blob 走裸二进制段）。blobs 按名字典序。
-
-    段序固定：payload, code?, ts_code?, *blobs。ts_code（M3：节点跑 rollout 需要的
-    TS 运行时 zip）**只有 kind=iter 才有**——其余 job 逐字节与以前一致。
-    """
-    bl = dict(blobs or {})
-    names = sorted(bl)
-    lens = [len(payload)]
-    if code is not None:
-        lens.append(len(code))
-    if ts_code is not None:
-        lens.append(len(ts_code))
-    lens.extend(len(bl[n]) for n in names)
-    # `has_ts` **只在该段真的存在时才写**：非 iter 的 job 体因此逐字节与以前一致
-    # （本仓的「旧轮字节不变」纪律；解包侧 get("has_ts", False) 兼容缺席）。
-    head: dict = {
-        "manifest": manifest,
-        "has_code": code is not None,
-        "blob_names": names,
-        "lens": lens,
-    }
-    if ts_code is not None:
-        head["has_ts"] = True
-    hdr = json.dumps(head, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
-    parts = [WIRE_JOB_MAGIC, struct.pack(">I", len(hdr)), hdr, payload]
-    if code is not None:
-        parts.append(code)
-    if ts_code is not None:
-        parts.append(ts_code)
-    parts.extend(bl[n] for n in names)
-    return b"".join(parts)
-
-
-def unpack_job_v2(body: bytes) -> dict:
-    """v2 job 体 → 旧 JSON 形状的 dict（payload_b64/code_b64/blobs）——服务端零下游改动。
-
-    任何长度不符/尾部余料都响亮拒绝，不静默截断（同 unpack_result_v2 规矩）。
-    """
-    if not body.startswith(WIRE_JOB_MAGIC):
-        raise ProtocolError("v2 job 体缺 BRJ2 魔数")
-    off = len(WIRE_JOB_MAGIC)
-    (hdr_len,) = struct.unpack(">I", body[off : off + _HDR_LEN_BYTES])
-    off += _HDR_LEN_BYTES
-    try:
-        hdr = json.loads(body[off : off + hdr_len].decode("utf-8"))
-        manifest: dict = hdr["manifest"]
-        has_code: bool = bool(hdr["has_code"])
-        # has_ts 缺失（旧 hub 产的 v2 体）= 无 ts_code 段（旧行为，additive）。
-        has_ts: bool = bool(hdr.get("has_ts", False))
-        names: list = hdr["blob_names"]
-        lens: list = hdr["lens"]
-    except (KeyError, ValueError, UnicodeDecodeError) as e:
-        raise ProtocolError(f"v2 job 头解析失败: {e}") from None
-    off += hdr_len
-    expected = 1 + (1 if has_code else 0) + (1 if has_ts else 0) + len(names)
-    if len(lens) != expected:
-        raise ProtocolError(f"v2 job lens 长度 {len(lens)} != {expected}")
-    out: dict = {"manifest": manifest}
-
-    def _chunk(n: int, what: str) -> bytes:
-        nonlocal off
-        blob = body[off : off + n]
-        if len(blob) != n:
-            raise ProtocolError(f"v2 job 体截断：{what} 期望 {n} 字节，实得 {len(blob)}")
-        off += n
-        return blob
-
-    out["payload_b64"] = base64.b64encode(_chunk(int(lens[0]), "payload")).decode("ascii")
-    i = 1
-    if has_code:
-        out["code_b64"] = base64.b64encode(_chunk(int(lens[i]), "code")).decode("ascii")
-        i += 1
-    if has_ts:
-        out["ts_code_b64"] = base64.b64encode(_chunk(int(lens[i]), "ts_code")).decode("ascii")
-        i += 1
-    if names:
-        bm: dict = {}
-        for name in names:
-            bm[str(name)] = base64.b64encode(_chunk(int(lens[i]), f"blob {name}")).decode("ascii")
-            i += 1
-        out["blobs"] = bm
-    if off != len(body):
-        raise ProtocolError(f"v2 job 体尾部有 {len(body) - off} 字节多余数据")
-    return out
-
-
-def pack_result_v2(result: dict) -> bytes:
-    """result dict（二进制字段为方案A 的 base64 串）-> v2 体。
-
-    只把 BLOB_FIELDS 从 JSON 里搬出来当二进制段，**不重新压缩**（入参已是 gzip 后的
-    base64，解开即是 gzip 字节）；JSON 头保留其余全部字段 ⇒ 还原后语义逐字段一致。
-    """
-    blobs = [base64.b64decode(str(result.get(f, "") or "").encode("ascii")) for f in BLOB_FIELDS]
-    head = {k: v for k, v in result.items() if k not in BLOB_FIELDS}
-    hdr = json.dumps(
-        {"result": head, "blob_lens": [len(b) for b in blobs]},
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return WIRE_V2_MAGIC + struct.pack(">I", len(hdr)) + hdr + b"".join(blobs)
-
-
-def unpack_result_v2(body: bytes) -> dict:
-    """v2 体 -> result dict（二进制字段还原成方案A 的 base64 串）。hub 侧用。
-
-    只依赖 base64/json/struct，**不需要 gzip**（blob 原样重新 base64 即可）。
-    任何长度不符/尾部余料都响亮拒绝，不静默截断。
-    """
-    if not body.startswith(WIRE_V2_MAGIC):
-        raise ProtocolError("v2 体缺 BRV2 魔数")
-    off = len(WIRE_V2_MAGIC)
-    (hdr_len,) = struct.unpack(">I", body[off : off + _HDR_LEN_BYTES])
-    off += _HDR_LEN_BYTES
-    try:
-        hdr = json.loads(body[off : off + hdr_len].decode("utf-8"))
-        head: dict = hdr["result"]
-        lens = hdr["blob_lens"]
-    except (KeyError, ValueError, UnicodeDecodeError) as e:
-        raise ProtocolError(f"v2 头解析失败: {e}") from None
-    off += hdr_len
-    if len(lens) != len(BLOB_FIELDS):
-        raise ProtocolError(f"v2 blob_lens 长度 {len(lens)} != {len(BLOB_FIELDS)}")
-    for field, n in zip(BLOB_FIELDS, lens, strict=True):
-        blob = body[off : off + n]
-        if len(blob) != n:
-            raise ProtocolError(f"v2 体截断：{field} 期望 {n} 字节，实得 {len(blob)}")
-        off += n
-        head[field] = base64.b64encode(blob).decode("ascii")
-    if off != len(body):
-        raise ProtocolError(f"v2 体尾部有 {len(body) - off} 字节多余数据")
-    return head
-
-
-def _pack_wire(raw: bytes) -> str:
-    """原始字节 → gzip → base64（JSON 安全的回传字段）。"""
-    return base64.b64encode(gzip.compress(raw, compresslevel=_WIRE_GZIP_LEVEL)).decode("ascii")
-
-
-def _unpack_wire(b64: str) -> bytes:
-    """base64 → (必要时 gunzip) → 原始字节。
-
-    靠 gzip 魔数自动判别，**兼容旧格式**（未压缩的 base64）—— 历史 result.json 与
-    已在途的 payload 都能照常解出。
-    """
-    raw = base64.b64decode(b64.encode("ascii"))
-    if raw[:2] == _GZIP_MAGIC:
-        return gzip.decompress(raw)
-    return raw
-
-
-def encode_weights_json(wj: bytes) -> str:
-    """weights_json 传输编码（gzip + base64）。"""
-    return _pack_wire(wj)
-
-
-def decode_weights_json(b64: str) -> bytes:
-    """weights_json 传输解码（hub 落盘 args.out 前用）；兼容未压缩的旧格式。"""
-    return _unpack_wire(b64)
-
-
-def encode_opt_tar(tar_bytes: bytes) -> str:
-    """opt tar 传输编码（gzip + base64）。"""
-    return _pack_wire(tar_bytes)
-
-
-def decode_opt_tar(b64: str) -> bytes:
-    """opt tar 传输解码；兼容未压缩的旧格式。"""
-    return _unpack_wire(b64)

@@ -161,7 +161,9 @@ def test_a_bank_written_repo_relative_is_accepted_from_either_cwd(
 ) -> None:
     """课程里的数据路径两种基准混用（`nn-training/...` 仓库相对、`data/...` nn-training 相对），
     而训练进程的 cwd 取决于谁拉起来的 ⇒ 两种写法都要认（cwd 与它们都不相同时靠备用基准命中）。"""
-    import rl.config as cfg
+    # S5 第十刀后 CURRICULA_DIR 住 `rl.course_resolve`（resolve_state_init_bank 读它的
+    # 模块全局；打门面 `rl.config` 上的同名副本不会被解析面看到）。
+    import rl.course_resolve as cfg
 
     fake_nn = tmp_path / "repo" / "nn-training"
     monkeypatch.setattr(cfg, "CURRICULA_DIR", fake_nn / "curricula")

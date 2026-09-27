@@ -218,11 +218,12 @@ def test_run_job_forwards_the_hub_course_into_the_backfeed() -> None:
     src = (root / "remote" / "worker.py").read_text(encoding="utf-8")
     assert 'hub_course=str(job.get("course") or "")' not in src  # 队列腿已退役（连带这一跳）
     # 下游每一跳都真的接这个形参（漏一跳 = 云机上 TypeError，或值静默丢掉）。
-    # 2026-09-23 拆 `plan_run` 之后：`run_plan_job` / `open_run_context` 在执行引擎里，
-    # `run_standalone` / `main` 在入口里 ⇒ 两个文件合起来看（三处形参一处都不能少）。
+    # 2026-09-23 拆 `plan_run` / 2026-09-27 第十三刀拆 `plan_handoff` 之后：`run_plan_job`
+    # 在驱动引擎（`plan_run`）里，`open_run_context` 在交接面（`plan_handoff`）里，
+    # `run_standalone` / `main` 在入口里 ⇒ 三个文件合起来看（三处形参一处都不能少）。
     offline_src = "".join(
         (root / "remote" / name).read_text(encoding="utf-8")
-        for name in ("run_loop.py", "plan_run.py")
+        for name in ("run_loop.py", "plan_run.py", "plan_handoff.py")
     )
     assert offline_src.count('hub_course: str = ""') == 3  # run_plan_job/open_run_context/run_standalone
     assert "hub_course=hub_course" in offline_src

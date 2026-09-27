@@ -6,7 +6,7 @@
   * 节点门 / codeHash 判据：`dist_common.check_code_hash`（SSOT = codehash-files.txt）
   * ping + 任务下发 + 退避重试 + 权重下发 + wver/409：`dist_common.fetch_task` / `post_weights_parallel`
   * 失败连击停用（nodeFailStreak）、EVAL_TASK_ATTEMPTS 重排队：`BatchEvalRunner`
-  * 本机份额：`policy.evalLocalSlots`（缺省 `eval_local.EVAL_LOCAL_SLOTS_DEFAULT`）；
+  * 本机份额：`policy.evalLocalSlots`（缺省 `eval_yield.EVAL_LOCAL_SLOTS_DEFAULT`）；
     机器级配置链（`rl.local_slots`）由调用方 TS 侧 `dist-node-gate.configLocalSlots`
     解析后以 `spec.localSlots` 显式传入 —— 本文件**不重读** rl-config 的槽位语义
   * 队列与尾竞速：`rl/queue.py`

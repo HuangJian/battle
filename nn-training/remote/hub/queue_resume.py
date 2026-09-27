@@ -21,7 +21,7 @@
 ## 依赖方向
 
 `queue_resume → {common.protocol, remote.hub.store}`（向下）。**唯一一处 `rl` 引用**
-（`merge_eval_rows` 里的 `from rl.eval_local import append_eval_rows`）是**延迟** import，
+（`merge_eval_rows` 里的 `from rl.eval_rows import append_eval_rows`）是**延迟** import，
 且是本簇原样搬过来的——`hub_server` 里它本来就在函数体内（`assert_remote_module` 的
 「传输/落盘层 L2-pure」那条口径因此对它不适用，守卫按「延迟 + 只此一处」正面钉住）。
 
@@ -115,7 +115,7 @@ class QueueResumeMixin(QueuePeer):
         而云机那侧只看得见自己的产物目录——不并进去，整段的评估读数要等「跑完人工导入」
         才存在，而「一条跑偏的腿」正是这条腿要尽早看见的东西。
 
-        去重按 `(iter, wver, stage, seed)`（`rl.eval_local.eval_row_key`）：补传天然会重传
+        去重按 `(iter, wver, stage, seed)`（`rl.eval_rows.eval_row_key`）：补传天然会重传
         （重连/重启续投），重复行会让曲线出现两个同一点。
 
         **summary 也要并**（单调：只在该 `(iter,wver)` 还没有、或新来的 `games` 更多时追）：
@@ -125,7 +125,7 @@ class QueueResumeMixin(QueuePeer):
         """
         if not isinstance(rows, list) or not rows:
             return (0, 0)
-        from rl.eval_local import append_eval_rows, append_eval_summaries
+        from rl.eval_rows import append_eval_rows, append_eval_summaries
 
         ledger = self._stores[course].job_root.parent / "eval_log.jsonl"
         good = [r for r in rows if isinstance(r, dict)]

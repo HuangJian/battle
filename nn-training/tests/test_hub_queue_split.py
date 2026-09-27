@@ -834,9 +834,10 @@ def test_the_renamed_forward_is_declared_where_it_lives() -> None:
 def test_only_resume_touches_rl_and_only_lazily() -> None:
     """六个混入的仓内依赖是登记过的那些；`queue_resume` 例外但**只准延迟**。
 
-    `merge_eval_rows` 要 `from rl.eval_local import append_eval_rows` —— 它本来就在
-    `hub_server` 的函数体内（第十四刀没动它），搬簇时原样带过来。`assert_remote_module`
-    的口径是「传输/落盘层保持 L2-pure」，所以这一簇单独按「延迟 + 只此一处」正面钉住。
+    `merge_eval_rows` 要 `from rl.eval_rows import append_eval_rows`（S5 第一刀后纯行/账本原语
+    住 `rl.eval_rows`；原 `rl.eval_local`）—— 它本来就在 `hub_server` 的函数体内（第十四刀没动），
+    搬簇时原样带过来。`assert_remote_module` 的口径是「传输/落盘层保持 L2-pure」，所以这一簇单独
+    按「延迟 + 只此一处」正面钉住。
     """
     for mod, allowed in ALLOWED_IMPORTS.items():
         dag.assert_remote_module(mod, allowed_project_imports=allowed)
@@ -855,7 +856,7 @@ def test_only_resume_touches_rl_and_only_lazily() -> None:
             for sub in ast.walk(n):
                 if isinstance(sub, ast.ImportFrom) and (sub.module or "").startswith("rl"):
                     lazy.append(f"{n.name}->{sub.module}")
-    assert lazy == ["merge_eval_rows->rl.eval_local"], lazy
+    assert lazy == ["merge_eval_rows->rl.eval_rows"], lazy
     for other in DOMAINS:
         if other == "queue_resume":
             continue

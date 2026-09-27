@@ -37,6 +37,10 @@ job 执行器（那正是反向 import 的成因）。守卫钉的就是这条�
 
 `tests/test_run_loop.py` 里那条 `monkeypatch.setattr(run_loop_mod, "iter_spec", spy)` 已随本刀迁到
 `plan_run`（`run_loop` **不再转发** `iter_spec` ⇒ patch 它是 AttributeError，**响亮**而不是静默）。
+
+★ 2026-09-27（S5 第十三刀）：**交接面 18 名下沉 `remote/plan_handoff`**（校验 / 取包播种 /
+`RunContext` / 评估装配）——`plan_run` 只余驱动引擎 + 18 名 `X as X` 门面；`HANDOFF_NAMES`
+与交接面守卫见 `tests/test_plan_handoff_split.py`。
 """
 
 from __future__ import annotations
@@ -55,43 +59,49 @@ import remote.worker as worker_mod
 from tests.helpers import remote_dag as dag
 
 ENGINE_FILE = ROOT / "remote" / "plan_run.py"
+HANDOFF_FILE = ROOT / "remote" / "plan_handoff.py"
 ENTRY_FILE = ROOT / "remote" / "run_loop.py"
 WORKER_FILE = ROOT / "remote" / "worker.py"
 
-#: 搬进引擎的名字（引擎的**自有名**；不含它从别处 import 的东西）。
+#: 留守引擎的名字（引擎的**自有名**；不含它从别处 import 的东西）。
 ENGINE_NAMES = {
     "ITER_RETRIES",
-    "RunContext",
-    "TS_CODE_ZIP_NAME",
-    "TS_TREE_DIR",
-    "_blob_roots",
-    "_carry_ts_tree",
     "_checkpoint",
     "_close_eval",
     "_combined",
     "_drive",
     "_encode_opt",
+    "_maybe_cloud_eval",
+    "_opt_bytes_from_result",
+    "_run_iteration",
+    "_run_with_retries",
+    "_weight_bytes",
+    "run_plan_job",
+    "runner_timeout",
+    "with_rollout_workers",
+}
+
+#: 第十三刀搬去 `remote/plan_handoff.py` 的**交接面**名字（18）：校验 / 取包播种 / 上下文 / 评估装配。
+#: `plan_run` 只留 `X as X` 门面 ⇒ 历史 import 与 monkeypatch 面一行不改（「名字是契约，位置不是」）。
+HANDOFF_NAMES = {
+    "EVAL_ALTERNATE_WAIT_SEC",
+    "RunContext",
+    "TS_CODE_ZIP_NAME",
+    "TS_TREE_DIR",
+    "_blob_roots",
+    "_carry_ts_tree",
     "_eval_job_builder",
     "_eval_round_done",
     "_log_default",
-    "_maybe_cloud_eval",
     "_opt_bytes_from_manifest",
-    "_opt_bytes_from_result",
     "_read_opt_file",
-    "_run_iteration",
-    "_run_with_retries",
     "_seed_demo_blob_cache",
     "_seed_start_checkpoint",
     "_setup_cloud_eval",
     "_stored_opt_sha",
     "_ts_tree_root",
-    "_weight_bytes",
     "open_run_context",
-    "run_plan_job",
-    "runner_timeout",
     "verify_plan_file",
-    "with_rollout_workers",
-    # 下面两个 `_drive` 用、但它们是 run_loop 时代的同族助手
 }
 #: 留在入口的名字（只有入口用它）。
 ENTRY_NAMES = {
@@ -139,11 +149,18 @@ def _imports(path: Path) -> set[str]:
 def test_engine_names_live_in_plan_run_and_not_redefined_in_run_loop() -> None:
     """引擎的名字只在 `plan_run.py` 里实现（`run_loop` 只剩入口自己的 + 门面转发）。"""
     assert _defined(ENGINE_FILE) >= ENGINE_NAMES, sorted(ENGINE_NAMES - _defined(ENGINE_FILE))
-    leftovers = ENGINE_NAMES & _defined(ENTRY_FILE)
-    assert leftovers == set(), f"run_loop.py 里仍在实现引擎的名字（应只做转发）：{sorted(leftovers)}"
+    leftovers = (ENGINE_NAMES | HANDOFF_NAMES) & _defined(ENTRY_FILE)
+    assert leftovers == set(), f"run_loop.py 里仍在实现引擎/交接面的名字（应只做转发）：{sorted(leftovers)}"
     # 反向：入口自己的名字不该跑到引擎里去
     bleed = ENTRY_NAMES & _defined(ENGINE_FILE)
     assert bleed == set(), f"入口的名字出现在引擎里（划分错了）：{sorted(bleed)}"
+
+
+def test_handoff_names_live_in_plan_handoff_only() -> None:
+    """第十三刀：交接面 18 名只在 `plan_handoff.py` 里实现；`plan_run` 不得再实现（只留门面）。"""
+    assert _defined(HANDOFF_FILE) >= HANDOFF_NAMES, sorted(HANDOFF_NAMES - _defined(HANDOFF_FILE))
+    moved_back = HANDOFF_NAMES & _defined(ENGINE_FILE)
+    assert moved_back == set(), f"交接面名字又在 plan_run 里实现（应只做门面转发）：{sorted(moved_back)}"
 
 
 def test_entry_keeps_the_entry_only_names() -> None:
@@ -280,8 +297,12 @@ def _top_level_imports(path: Path) -> set[str]:
 
 
 def test_run_loop_facade_forwards_the_same_objects() -> None:
-    """门面是 `X as X` 转发 ⇒ 与引擎里是**同一个对象**（不是副本）。"""
-    for name in sorted(ENGINE_NAMES):
+    """门面是 `X as X` 转发 ⇒ 与实现模块里是**同一个对象**（不是副本）。
+
+    覆盖两段门面：引擎自有名（`plan_run` 直通）与交接面 18 名（`plan_run → plan_handoff` 两跳；
+    `run_loop` 读到的仍是同一对象）。
+    """
+    for name in sorted(ENGINE_NAMES | HANDOFF_NAMES):
         if not hasattr(run_loop_mod, name):
             continue  # 不是所有引擎名都需要门面（只转发被外部引用的那些）
         assert getattr(run_loop_mod, name) is getattr(plan_run_mod, name), (
@@ -344,6 +365,9 @@ def test_deferred_cycle_ledger_is_empty_now() -> None:
     assert dag.DEFERRED_CYCLES == {}, f"账本里还有声明的环：{sorted(dag.DEFERRED_CYCLES)}"
     top, deferred, _ = dag.graph()
     assert dag.cycles({m: set(top[m]) | set(deferred[m]) for m in top}) == []
-    assert dag.LAYERS["remote.plan_run"] < dag.LAYERS["remote.worker"] < dag.LAYERS["remote.run_loop"], (
-        "分层不对：引擎必须在 worker / run_loop **下面**（它是两者共同的底座）"
-    )
+    assert (
+        dag.LAYERS["remote.plan_handoff"]
+        < dag.LAYERS["remote.plan_run"]
+        < dag.LAYERS["remote.worker"]
+        < dag.LAYERS["remote.run_loop"]
+    ), "分层不对：交接面 < 引擎 < worker / run_loop（引擎是两者共同的底座，交接面是引擎的底座）"

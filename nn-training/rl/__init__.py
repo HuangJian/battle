@@ -12,7 +12,13 @@
   queue_local.py   纯本地 rollout / rescan / 竞速选择纯函数
   cmd.py           bun spawn 命令模板（build_rollout_cmd 统一三 exporter）
   eval_dispatch.py 干净评估分发（EvalDispatcher OO；薄包装 + 线程入口）
-  eval_local.py    干净评估纯函数/台账结算（run_local_eval_game 等）
+  eval_local.py    干净评估执行面（run_local_eval_game / 看门狗 / 行账本衔接；S5 ⑫ 后）
+  eval_rows.py     逐局 eval 行 schema + eval_log 账本 I/O（eval_row / merge_eval_rows；S5 第一刀，2026-09-27）
+  eval_track.py    双轨日常评估纯逻辑（种子锚点/轮转分类 + 过拟合报警 + settle_eval_summary；S5 第三刀，2026-09-27）
+  eval_yield.py    评估让位/份额（尾巴）策略（份额预留 / 让位与放行档 / 越窗与收拢判据；S5 第十二刀，2026-09-27）
+  config_file.py   rl-config.json 文件面（路径唯一来源 + 安全读取；S5 第十刀，2026-09-27）
+  course_spec.py   课程配置类面（CourseConfig/GatesSpec 及嵌套模型 + gates 常量；S5 第十刀，2026-09-27）
+  course_resolve.py 课程解析面（curricula/levels 查找 · level 注入 + 冲突拒收 · 字节冻结 · 跨课门校验；S5 第十刀，2026-09-27）
   eval_m1.py       m1-eval 干净评估管线（intent/goal 模式；整批 + Δ 止损，DECISIONS §307）
   stream.py        流式迭代（采集与 PPO 波次重叠）
   loop.py          run_training 入口（薄包装）

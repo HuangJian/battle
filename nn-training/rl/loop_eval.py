@@ -36,7 +36,7 @@ stream 报告里的 eval 线程句柄 pop 进 `_eval_thread`（R4：jsonl 写回
 
 ## DI seam：本模块**没有**新的 patch 点
 
-本簇对外的依赖全是**方法体内的延迟 import**（`rl.eval_dispatch` / `rl.eval_local` /
+本簇对外的依赖全是**方法体内的延迟 import**（`rl.eval_dispatch` / `rl.eval_yield` /
 `rl.queue` / `rl.archive`），测试也一直 patch 那些**实现模块**（`monkeypatch.setattr(ed,
 "dispatch_eval_bg", ...)`）⇒ 方法搬家不改变任何注入点。反过来，对 `rl.loop_steps.*` 的那些
 注入**本来就是空操作**（这些名字从来没住在那儿）。唯一按路径读源码的守卫在
@@ -112,7 +112,7 @@ class TrainingEval:
         2026-09-17 用户指令：先前的硬编码 180s 把 eval 尾巴整段暴露在 PPO 之后
         （本机份额又只在 `_join_eval` 才放行 ⇒ 叠加成 PPO 后的第二次串行等待）。
         """
-        from rl.eval_local import eval_join_soft_sec
+        from rl.eval_yield import eval_join_soft_sec
 
         return eval_join_soft_sec(self._eval_policy_cfg())
 
@@ -140,7 +140,7 @@ class TrainingEval:
         if not thread.is_alive():
             log(f"[eval] tail settled during rollout (+{elapsed:.0f}s) — 已自落账")
             return
-        from rl.eval_local import eval_tail_overran
+        from rl.eval_yield import eval_tail_overran
 
         soft = self._eval_join_soft_sec()
         if soft > 0.0:
@@ -245,7 +245,7 @@ class TrainingEval:
                 f"[eval] it{m}: 归档缺席（backup 失败？）——回落活指针 {src_path} 派发"
                 "（wver 与离线复跑不可比，本轮 eval 仅供参考）"
             )
-        from rl.eval_local import eval_local_early_epochs, local_gate_release_plan
+        from rl.eval_yield import eval_local_early_epochs, local_gate_release_plan
 
         self._eval_gate = threading.Event()
         # 尾巴的窗口起点（收拢时判“是否跑过自己的窗口”）；只作时间基准，不参与等待。

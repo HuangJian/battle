@@ -24,7 +24,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import rl.bc_loop as bc_loop
-from remote import hub_client
+from remote import hub_client, hub_http
 from rl.bc_config import load_bc_course
 from rl.bc_ledger import ROUND_DONE_EVENT, read_events
 from rl.bc_loop import BcLoop, BcRuntime, find_round_job
@@ -80,7 +80,9 @@ class Recorder:
 @pytest.fixture
 def hub(monkeypatch: pytest.MonkeyPatch) -> FakeHub:
     h = FakeHub()
-    monkeypatch.setattr(hub_client, "_request", h.request)
+    # ★ 注入点 = HTTP 面的所有者（`bc_ingest` 也向它取 `_request`）；
+    # `hub_client._request` 是转发名，照它打补丁是**空操作**。
+    monkeypatch.setattr(hub_http, "_request", h.request)
     return h
 
 

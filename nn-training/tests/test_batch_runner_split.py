@@ -72,6 +72,10 @@ RUNNER_IMPORTS = {
     "rl.batch_plan",
     "rl.batch_store",
     "rl.eval_local",
+    # 2026-09-27（S5 第十二刀）登记：本机份额缺省 `EVAL_LOCAL_SLOTS_DEFAULT` 随「让位/
+    # 份额」族搬到 `rl/eval_yield.py` —— 执行器从判决面取份额，不再为一条缺省拖入运行器
+    # （运行器那行仍在：`run_local_eval_game` 是本机槽位的执行面）。
+    "rl.eval_yield",
     "rl.log",
     "rl.queue",
     "rl.queue_local",

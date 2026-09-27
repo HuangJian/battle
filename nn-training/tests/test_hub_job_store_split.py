@@ -207,7 +207,7 @@ ALLOWED_IMPORTS = {
 #: 要读课程 `.jsonc`（`rl.jsonc.strip_comments`）、要复用既有归档口径
 #: （`rl.archive.backup_weights`）。两者都是**纯逻辑**（stdlib-only、不达 `remote` ⇒
 #: `test_layering.RL_ORCHESTRATION` 里没有它们，不构成环），而且都是**延迟** import
-#: ——与 `queue_resume.merge_eval_rows → rl.eval_local` 同一形状（那一条住
+#: ——与 `queue_resume.merge_eval_rows → rl.eval_rows` 同一形状（那一条住
 #: `test_hub_queue_split.py`，因为它只涉及队列侧一个混入）。多一个名字就是多一条未论证的边。
 ALLOWED_RL: dict[str, set[str]] = {
     "remote.hub.store_offline": {"rl.archive", "rl.jsonc"},
