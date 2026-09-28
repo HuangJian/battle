@@ -133,6 +133,15 @@ describe('console SSR renderConsolePage', () => {
     const wire = body(render.renderConsolePage(s, { page: 'wire' }))
     expect(wire).toContain('传输')
     expect(wire).not.toContain('tc-hero')
+
+    // 课程管理页（2026-09-27）：全部课程表 + 封存区两段；不重复总览的 Hero/组件卡。
+    const courses = body(render.renderConsolePage(s, { page: 'courses' }))
+    expect(courses).toContain('课程')
+    expect(courses).toContain('aria-label="课程管理"')
+    expect(courses).toContain('aria-label="封存区"')
+    expect(courses).toContain('tc-ca')
+    expect(courses).not.toContain('tc-hero')
+    expect(courses).not.toContain('tc-comps')
   })
 
   it('引导载荷带 page：客户端 hydrate 与 SSR 首帧同页（无闪跳）', async () => {

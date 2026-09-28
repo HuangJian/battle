@@ -24,7 +24,7 @@ import {
   type PageKey,
 } from '../src/web/view'
 
-const ALL_PAGES: PageKey[] = ['overview', 'metrics', 'nodes', 'wire']
+const ALL_PAGES: PageKey[] = ['overview', 'metrics', 'nodes', 'wire', 'courses']
 
 describe('pageForPath — 路径 → 页面键', () => {
   it('/ 与历史别名 /console 都归到总览', () => {
@@ -37,6 +37,8 @@ describe('pageForPath — 路径 → 页面键', () => {
     expect(pageForPath('/metrics')).toBe('metrics')
     expect(pageForPath('/nodes')).toBe('nodes')
     expect(pageForPath('/wire')).toBe('wire')
+    // 课程管理页（2026-09-27）：全部课程 + 封存区的动作面（不再是只有 API 的封存入口）。
+    expect(pageForPath('/courses')).toBe('courses')
   })
 
   it('容忍尾斜杠 / 重复斜杠 / 大小写（手工输入不 404）', () => {
@@ -145,6 +147,14 @@ describe('isNavActive — 导航激活判定', () => {
     expect(isNavActive(item('overview'), '/metrics')).toBe(false)
     expect(isNavActive(item('nodes'), '/wire')).toBe(false)
     expect(isNavActive(item('wire'), '/nodes')).toBe(false)
+    expect(isNavActive(item('courses'), '/nodes')).toBe(false)
+    expect(isNavActive(item('nodes'), '/courses')).toBe(false)
+  })
+
+  it('课程页在「控制」组（它是一张操作面，不与监控/基础设施混组）', () => {
+    expect(item('courses').group).toBe('control')
+    expect(isNavActive(item('courses'), '/courses')).toBe(true)
+    expect(isNavActive(item('courses'), '/courses/')).toBe(true)
   })
 
   it('日志项按 /log/<key> 前缀点亮，但 /eval 不点亮它', () => {
@@ -165,6 +175,7 @@ describe('bootstrapPage — 首屏引导载荷的页面判定', () => {
   it('服务端 stamp 的 page 优先（首帧不依赖 location）', () => {
     expect(bootstrapPage({ page: 'nodes' }, '/')).toBe('nodes')
     expect(bootstrapPage({ page: 'wire' }, '/metrics')).toBe('wire')
+    expect(bootstrapPage({ page: 'courses' }, '/')).toBe('courses')
   })
 
   it('page 缺失时回退当前 URL 判定', () => {
@@ -223,7 +234,7 @@ describe('NAV_ITEMS / NAV_GROUPS 结构约束（防路由表漂移）', () => {
     }
   })
 
-  it('四个页面键都在导航里可达（没有只能靠手输 URL 到达的页）', () => {
+  it('每个页面键都在导航里可达（没有只能靠手输 URL 到达的页）', () => {
     const routed = new Set(
       NAV_ITEMS.filter((n) => n.kind === 'route').map((n) => n.page as PageKey),
     )

@@ -25,7 +25,7 @@ import { AlertDock } from '../components/AlertDock'
 import { Flash, type FlashState } from '../components/Flash'
 import { PanelErrorBoundary } from '../components/PanelErrorBoundary'
 import { usePolling } from './lib/usePolling'
-import { fetchState, postAction } from './lib/api-client'
+import { type ActionResult, fetchState, postAction } from './lib/api-client'
 import { Shell } from './shell/Shell'
 import { Sidebar } from './shell/Sidebar'
 import { Topbar } from './shell/Topbar'
@@ -38,6 +38,7 @@ import { TrainLaunchModal, type TunnelLaunchOpts } from './panels/TrainLaunchMod
 import { OpenCourseModal } from './panels/OpenCourseModal'
 import { TrainingPills } from './panels/TrainingPills'
 import { BcPanel } from './panels/BcPanel'
+import { CourseAdmin } from './panels/CourseAdmin'
 import { CourseMatrix } from './panels/CourseMatrix'
 import { WorkerRegistry } from './panels/WorkerRegistry'
 
@@ -132,6 +133,10 @@ export function App({ initial }: AppProps) {
   // 开课弹窗（2026-09-20：进程与课程解耦后，「开哪门课」的课程级旋钮住在这里——训练模式 /
   // rollout 位置；而「启动服务进程」弹窗只带进程级选项）。
   const [openCourseModal, setOpenCourseModal] = useState(false)
+  // 开课弹窗的**目标课程**（2026-09-27）：nil = 跟随当前查看课程（侧栏那个入口的老语义）；
+  // 非空 = 课程管理页某一行的「开课」——那一行的课不一定是正在看的那门（管理页是**全课**表），
+  // 而弹窗里的起点权重/训练模式都要落在那门课上。
+  const [openCourseTarget, setOpenCourseTarget] = useState<string | null>(null)
   const [poolFreshNonce, setPoolFreshNonce] = useState(0)
   // 当前页面（§5.1）：首帧取服务端 stamp 的 page（SSR 与客户端同值 → hydrate 一致）；
   // URL 校准放到挂载后的 effect（`/api/state` 直接消费时 initial 无 page）。
@@ -283,8 +288,11 @@ export function App({ initial }: AppProps) {
   // ── 动作派发（POST → flash → 重拉 state） ──
   // 课程敏感动作统一带上当前查看课程：「所见即所控」——操作员启动的 trainer/hub
   // 一定用他正在看的课程，不依赖全局 console-state。
+  // ★ 返回**整份** ActionResult（不只 ok）：有些动作的结果是「要拿给操作员做决定的数字」
+  //   ——课程封存的预演就是（保留几件 / 删几件 / 释放多少 MB）。flash 一闪就没的数字没法
+  //   据此决定，而再走一个专用端点就是同一件事的第二条通道，故这里把 detail 一起交给调用方。
   const doAction = useCallback(
-    async (act: string, body: Record<string, unknown> = {}): Promise<{ ok: boolean }> => {
+    async (act: string, body: Record<string, unknown> = {}): Promise<ActionResult> => {
       const course = viewCourseRef.current
       const fullBody = course ? { course, ...body } : body
       const r = await postAction(act, fullBody)
@@ -294,7 +302,7 @@ export function App({ initial }: AppProps) {
       // 这里推一下 nonce 让面板**立即**再校验 —— 否则「停用节点」要等 300s 的下一次轮询
       // 才在池表里上屏（同一页上下两处事实不合）。
       if (!readOnly) setPoolFreshNonce((n) => n + 1)
-      return { ok: r.ok }
+      return r
     },
     [readOnly, refreshState],
   )
@@ -360,8 +368,14 @@ export function App({ initial }: AppProps) {
     rolloutSrc?: RolloutSrcMode
     seedFrom?: { sourceCourse: string; it: number }
   }): Promise<void> => {
+    // 目标课程：管理页那一行的课 > 当前查看课程（`doAction` 的兜底）。
+    // ★ 课程显式带上（不依赖兜底）——点 B 课的「开课」必须开 B：查看目标与管理页那一行
+    //   本来就可以不同，走兜底会开错一门。
+    const target = openCourseTarget
     setOpenCourseModal(false)
+    setOpenCourseTarget(null)
     await doAction('openCourse', {
+      ...(target ? { course: target } : {}),
       trainMode: opts.trainMode,
       ...(opts.rolloutSrc ? { rolloutSrc: opts.rolloutSrc } : {}),
       // 起点权重（G4-①）：只传 `{sourceCourse, it}`，路径由服务端按 manifest 自解析。
@@ -437,7 +451,10 @@ export function App({ initial }: AppProps) {
             trainingCourses={trainingCourses}
             onCourseChange={selectCourse}
             // 开课入口（课程级）：紧挨课程选择器（操作读序：选课 → 训练 → 看哪几门在训）。
-            onOpenCourse={() => setOpenCourseModal(true)}
+            onOpenCourse={() => {
+              setOpenCourseTarget(null) // 侧栏入口 = 跟着当前查看课程（老语义）
+              setOpenCourseModal(true)
+            }}
             courseEnabled={lifecycle?.enabled ?? null}
             onNavigate={navigate}
             readOnly={readOnly}
@@ -615,6 +632,22 @@ export function App({ initial }: AppProps) {
           </>
         ) : null}
 
+        {/* ══════════════════ 课程（管理） ══════════════════ */}
+        {page === 'courses' ? (
+          <PanelErrorBoundary>
+            <CourseAdmin
+              stateView={stateView}
+              course={viewCourse}
+              onSelectCourse={selectCourse}
+              onOpenCourseFor={(c) => {
+                setOpenCourseTarget(c)
+                setOpenCourseModal(true)
+              }}
+              onAction={doAction}
+            />
+          </PanelErrorBoundary>
+        ) : null}
+
         {/* ══════════════════ 传输 ══════════════════ */}
         {page === 'wire' ? (
           <PanelErrorBoundary>
@@ -635,10 +668,13 @@ export function App({ initial }: AppProps) {
       {stateView ? (
         <OpenCourseModal
           open={openCourseModal}
-          course={viewCourse}
+          course={openCourseTarget ?? viewCourse}
           modes={stateView.modes}
           archived={stateView.archived}
-          onClose={() => setOpenCourseModal(false)}
+          onClose={() => {
+            setOpenCourseModal(false)
+            setOpenCourseTarget(null)
+          }}
           onConfirm={(opts) => void handleOpenCourse(opts)}
           readOnly={readOnly}
         />

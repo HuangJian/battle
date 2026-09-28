@@ -3181,3 +3181,123 @@ a.tc-btn {
 .tc-emptybox--loading {
   border-style: solid;
 }
+
+/* ────────────── 课程管理页（2026-09-27：`/courses`） ──────────────
+   与课程矩阵（`.tc-mx`）同一张脸：同一套 `tc-table` / `tc-badge` 基类，只补管理页独有的
+   三处——「开课标记」三态小字、「最后写入」相对时间列、以及**封存预演**的确认块
+   （预演结果要留在页面上供人做决定，不能像 flash 一样闪一下就没）。 */
+.tc-ca {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: var(--r-3);
+  padding: 6px 12px 8px;
+  margin-bottom: 10px;
+}
+.tc-ca__table thead th {
+  white-space: nowrap;
+}
+.tc-ca__row--cur {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.tc-ca__course {
+  white-space: nowrap;
+}
+.tc-ca__pick {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+.tc-ca__pick:hover b {
+  text-decoration: underline;
+}
+/* 开课标记三态（已开课 / 未开课 / 未落盘）——它不是「在训」：标记在、进程没跑是合法稳态。 */
+.tc-ca__mark {
+  font-size: var(--fs-sm);
+}
+.tc-ca__mark--on {
+  color: var(--green);
+  font-weight: 700;
+}
+.tc-ca__mark--off {
+  color: var(--muted);
+}
+.tc-ca__num {
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.tc-ca__wait {
+  color: var(--muted);
+}
+.tc-ca__ops {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+/* 封存预演（两步中的第一步）：清单 + 字节账留在这里，直到「确认封存」或「取消」。 */
+.tc-ca__confirm {
+  margin: var(--sp-2) 0 4px;
+  padding: 8px 10px;
+  border: 1px solid var(--yellow);
+  border-radius: var(--r-2);
+  background: color-mix(in srgb, var(--yellow) 8%, transparent);
+  font-size: var(--fs-sm);
+}
+.tc-ca__confirm--bad {
+  border-color: var(--red);
+  background: var(--err-bg);
+  color: var(--err-fg);
+}
+.tc-ca__confirmhead {
+  font-weight: 700;
+  margin-bottom: 2px;
+}
+.tc-ca__confirmmsg {
+  color: var(--text);
+}
+.tc-ca__confirmlist {
+  margin: 4px 0 0;
+  padding-left: 18px;
+}
+.tc-ca__confirmacts {
+  display: flex;
+  gap: var(--sp-2);
+  margin-top: 6px;
+}
+/* 封存区：一行一门（形态 / it 区间 / 可复算与否 / 关键轮 / 档案路径）。 */
+.tc-ca__archlist {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0;
+}
+.tc-ca__archrow {
+  display: flex;
+  align-items: baseline;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+  padding: 3px 0;
+  font-size: var(--fs-sm);
+  border-top: 1px solid var(--line);
+}
+.tc-ca__archname {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 220px;
+}
+.tc-ca__archmeta,
+.tc-ca__archkeys,
+.tc-ca__archpath {
+  color: var(--muted);
+}
+.tc-ca__archpath {
+  font-family: var(--mono);
+}
+.tc-ca__ok {
+  color: var(--green);
+}

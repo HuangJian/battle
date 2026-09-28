@@ -5,6 +5,8 @@
  *    - GET  /metrics     → 指标页（同一 App + page=metrics；单 bundle，服务端路由 SSR，
  *    - GET  /nodes         docs/dashboard-redesign.md §3.2 选型）
  *    - GET  /wire
+ *    - GET  /courses     → 课程管理页（全部课程 + 封存区；行内开课/停课/暂停/切模式/封存。
+ *                          2026-09-27）
  *    - GET  /app.js      → 客户端 bundle（build.ts ensureBundle：mtime 失效自动重建；禁词/体积断言）
  *    - GET  /log/<key>   → 日志页 SSR（renderLogPage）+ /app-log.js
  *    - GET  /api/state   → 状态快照（api.buildStateView：组件/节点/模式/指标，3s 全局节奏）

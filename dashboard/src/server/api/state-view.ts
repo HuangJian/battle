@@ -9,7 +9,7 @@ import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/spe
 import { readIterMetrics, readPairedReferee } from '../iters'
 import { readArchived } from './archive'
 import { loadConfigSafe } from './config'
-import { discoverCourses, effectiveCourse } from './courses'
+import { courseFacts, discoverCourses, effectiveCourse } from './courses'
 import { buildLoopQueueView } from './loop-queue'
 import { buildOverview, buildWorkerRegistry, getHubAdmin, sharedTrainerAlive } from './overview'
 import { detectPpoQueueStall } from './ppo-queue'
@@ -102,6 +102,10 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     isBc: isBcCourse(course),
     activeCourse: state.activeCourse || state.course || course,
     courses,
+    // 逐课盘上事实（课程管理页 /courses）：活体 / 开课标记 / 课程文件 / 最后写入。
+    // 纯 stat（不递归、不多读一字节）——几十门课毫秒级，故不进球探测缓存（那层是给秒级
+    // 的 ping/聚合用的，挪过去只会让「刚停课」这种动作要等一个重算周期才上屏）。
+    courseFacts: courseFacts(courses),
     // 已封存课程：只读 `archive/courses/*/archive-manifest.json`（不扫盘、不解压）——
     // 与 `courses` 互斥（封存课已在 discoverCourses 里按 manifest 排除）。
     archived: archivedList,
