@@ -109,6 +109,10 @@ LAYERS: dict[str, int] = {
     "remote.result_upload": 0,
     "remote.serve_pool": 0,
     "remote.tailscale_boot": 0,
+    # 离线引导的交付面（S5 第十四刀）：从 `offline_boot` 搬出的 standalone 兄弟文件；
+    # stdlib-only ⇒ 无仓内依赖 ⇒ **L0**（`offline_boot`(L7) 经 `importlib` 惰性装载——
+    # AST 看不见该边，这是有意的：引导文件集按 raw 拉取，不参与包内环账本）。
+    "remote.offline_deliverable": 0,
     "remote.deliver_zip": 1,
     # HTTP 面（S5 第五刀）：从 `hub_client` 整块搬出的传输薄壳 `_request` + 回传消费
     # （`probe_job_result` / `poll_job` / `wait_job`）+ 停机达令 + `HubClientError`。
@@ -206,10 +210,16 @@ LAYERS: dict[str, int] = {
 #: 即使有声明也会红——因为本仓已经有「下沉 + 注入」这个手段，无需再用环换任何东西。
 DEFERRED_CYCLES: dict[frozenset[str], str] = {}
 
-#: 三个**自包含引导模块**（从 GitHub raw 单独拉取，cell 拿到 `code.zip` 之前就要 import）：
+#: 四个**自包含引导模块**（从 GitHub raw 单独拉取，cell 拿到 `code.zip` 之前就要 import）：
 #: 它们**顶层不得** import 任何 `remote.*`（见 `remote/__init__.py`）。延迟 import 允许
-#: （那正是「先拉起自己、再拉别人」的实现方式）。
-STANDALONE_BOOT_MODULES = ("remote.tailscale_boot", "remote.notebook_boot", "remote.offline_boot")
+#: （那正是「先拉起自己、再拉别人」的实现方式）。`offline_deliverable` 是交付面兄弟文件
+#: （S5 第十四刀）：notebook 与 `offline_boot` 一起拉取，`offline_boot` 惰性装载它。
+STANDALONE_BOOT_MODULES = (
+    "remote.tailscale_boot",
+    "remote.notebook_boot",
+    "remote.offline_boot",
+    "remote.offline_deliverable",
+)
 
 
 def project_roots() -> set[str]:

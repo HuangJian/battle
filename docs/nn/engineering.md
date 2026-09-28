@@ -16,6 +16,135 @@
 
 ---
 
+## §42 `gate_check` 求值器接口 —— 输入面 + 判决面成家 → `rl/gate_inputs.py` + `rl/gate_judges.py`（S5 第十五刀，2026-09-27，用户指令「next」= §5.7.3 入口「量测 + 设计」，随后落刀）
+
+### 一句话
+
+1412 行的课程门巨团一刀切两面：**输入读数面**（15 名 / 379 行，stdlib-only 叶子）与**判决项面**
+（22 名 / 572 行）各自成家，`gate_check` 只余引擎（`evaluate` 两趟 + ADVANCE 附加条件 + CLI）+ 全量
+37 名门面（622 行）；DAG 单向 **`gate_inputs` ← `gate_judges` ← `gate_check`**（无环）。
+
+### 量测与判据（反判据收敛）
+
+引用图（非调用图）：**47 顶层节点 = 46 单团 + 1 孤立**（`sum_train_samples`——模块内无人引用，只被
+`test_train_ledger*` 与账本线 import；原「31 节点」= `recon_god` 口径）。三个候选面（判据 = 块→外为空）：
+
+| 面 | 闭集 | 块→外 | outside→块（门面承接） |
+|---|---|---|---|
+| 判决项面（11×`_eval_*` + 统计助手 + 注册表 + `_Ctx`/`_Partial`） | **25 节点 / 588 行** | 空 ✅ | 4 条（`_eval_one` / `evaluate` / `main` / `normalize_rows`） |
+| 输入读数面（行模型 + trend/override/事件扫描） | **14 节点 / 288 行** | 空 ✅ | 12 条（判决面读 `EvalRow` ×9 等） |
+| 常量+异常面 | 6 节点 / 23 行 | 空 ✅ | 6 条（并入输入面） |
+
+原反判据「按链切不动 ⇒ 必须先设计求值器接口、是真设计改动」收敛为：判决项本就是干净闭集，「独立求值一项」
+（`only_kinds=("duty",)`）已由 `evaluate` 暴露（`loop_guards_gate.py:140` 在用）⇒ 真正的设计点只剩**共享输入
+模型的归属**（`EvalRow`/`_row_from_summary`/`_num`/`BudgetInfo` 归输入面）+ **单向 DAG**。
+
+### 刀口（逐字节纯搬）
+
+| 家 | 名（15 + 22） | 行数 |
+|---|---|---|
+| `rl/gate_inputs.py`（输入面，**stdlib-only 叶子**） | `_TS_FMT`/`_OVERRIDE_VERDICTS`/`GateOverrideError` · `EvalRow`/`BudgetInfo` · `_row_from_summary`/`_num`/`normalize_rows` · `read_trend_rows` · `first_run_start_ts`/`first_iter_end_ts`/`count_iteration_events`/`sum_train_samples`/`sum_train_sec` · `load_override` | 379 |
+| `rl/gate_judges.py`（判决面；`_eval_one` = 判决项接口） | `DUTY_MIN_EVENTS` · `_Partial`/`_Ctx` · `_mean`/`_slope`/`_sustain`/`_window`/`_halves` · 11×`_eval_*` · `_route_by_completion` · `_JUDGES_NO_TEACHER` · `_eval_one` | 572 |
+| `rl/gate_check.py`（引擎 + 全量门面） | `VERDICT_PRIORITY`/`EXIT_CODES` · `RuleReading`/`GateResult` · `_lazy_config` · `evaluate` · `_notes`/`_rotation_notes`/`build_cli`/`main` | 1412 → 622 |
+
+**10 跨度**（输入面 5：`L85–91`/`L96–98`/`L103–126`/`L128–166`/`L277–556`；判决面 5：`L93–94`/`L256–274`/
+`L559–1045`/`L1050–1057`/`L1249–1270`）+ 新头/门面（既知插入）。既知改动：① docstring 分层指针；
+② TYPE_CHECKING 块删（`GatesSpec` 只由 `evaluate` 内 `_lazy_config()` 解包，ruff F401 实提）；
+③ 清 `math`/`Callable`；④ 缝空行归一。
+
+### 接口（守卫钉三件）
+
+① **判决项入口唯一** = `_eval_one(rule, ctx, all_rows, spec, completions=None) -> _Partial`（注册表 6 键 +
+5 分支 = 11 种 kind + 兜底 dormant；`only_kinds` 过滤仍归引擎）；② **方向闭集**：`gate_judges` 允许面 =
+stdlib + `rl.gate_inputs`（+ TYPE_CHECKING `rl.config`；**运行期零 `rl.config`/torch/numpy**——子进程验证），
+`gate_inputs` 允许面 = stdlib only，禁反向 import；③ **门面恒等**（`is`）覆盖 37 名。
+
+### 守卫与验证
+
+新 `tests/test_gate_inputs_split.py` **12 例**（定义唯一 / stdlib 闭集 / 禁反向 / 门面恒等 / 不进 `LAYERS` /
+读数语义：行过滤·去重键·override 响亮报错·事件扫描回落）+ `tests/test_gate_judges_split.py` **11 例**
+（定义唯一 / 依赖闭集 / 禁反向（`rl.gate_check` 一名不许出现）/ 门面恒等 / 判决项接口（注册表键集 +
+分支覆盖 + dormant 兜底）/ 运行期纯净子进程 / 分流语义）；改判 `test_gate_check::test_module_import_has_no_torch_numpy`
+扩面三模块；`rl/__init__.py` 速览补三行（`gate_check.py` 此前未列）。逐段逐字节：10 跨度各 ×1 + 原家
+40 名定义与 `GateRule`/`math` 零残留 + 门面 37 名 `is` + 新家导入零重依赖。门禁：nn **3285 → 3308 passed /
+3 skipped**（+23）· ruff 全过 · mypy **530 → 534** 文件 · 根 `bun run check` **2181 pass / 0 fail** ·
+check-decisions **533 ids / 553 entries**。
+
+### 被否决备选
+
+① 只搬判决面并把它拉入的行模型一并带走 ⇒ 方向倒置（读数面反过来 import 判决面）且锁死输入面独立；
+② 只搬输入面 ⇒ 计划点名的判决项接口未动；③ 按链搬注册表（8 行）/ CLI（闭包 46/47 节点）；
+④ 升名公开化（`_eval_one` → `eval_rule` 等）⇒ 纯搬优先，接口由守卫钉。
+
+## §41 `offline_boot` 交付面 + standalone 运输面 → `remote/offline_deliverable.py`（S5 第十四刀，2026-09-27，用户指令「设计 offline_boot 交付面的 standalone 运输面（懒装载 + 拉取列表 + 守卫改判），再落刀」）
+
+### 一句话
+
+把 `remote/offline_boot.py`（1801）的**交付面**——13 节点 / 179 行**干净闭集**（真交付三函 106 行 +
+课程路径链 68 行 + 4 常量 + `_COURSE_NAME_RE`）——搬成 **standalone 兄弟文件** `remote/offline_deliverable.py`
+（227 行，stdlib-only ⇒ L0）；原家 **1801 → 1647**（−154），交付面经 **懒装载 + PEP 562 `__getattr__` 门面**
+访问。**这是 S5 首例「运输面 > 纯搬」**：前十三刀都是纯搬 + `X as X` 门面（装载方式不变、调用点零迁移），
+本刀的**装载方式必须改**——因为 offline_boot 是 standalone 运输单元（notebook 从 GitHub raw 单文件拉起）。
+
+### 量测（2026-09-27，`tmp/recon_offline_faces.py` / `recon_offline_sizes.py`，用户点名「是否真独立分量」）
+
+| 候选面 | 闭包 | 判决 |
+|---|---|---|
+| 取包面（hub 取包 + 包发现 + 代码解包） | **47/86 节点 · 743 行 ≈ 文件本体**（吞 `is_kaggle`/`_build_opener`/`_load_tailscale_boot` + `read_pack_index`/`find_uploaded_pack` + `ensure_code`/`ensure_ts_tree`） | ❌ 非独立分量 |
+| 心跳/租约簇 | 29 节点 · 349 行（连坐 HTTP 助手与常量） | ❌ 半文件级 |
+| **交付面** | **13 节点 · 179 行**；块→外**为空**；4 条 facade 边（`run_one_course`→{`course_work_dir`,`download_dir`,`package_deliverable`} · `_queue_work_dir`→`download_dir` · `resolve_courses`/`run`→`requested_courses`） | ✅ 引用图上唯一干净闭集 |
+
+### 设计（三条守卫钉死了「顶层 import 兄弟」方案）
+
+1. `test_remote_dag.py::test_standalone_boot_modules_have_no_top_level_intra_remote_import`：offline_boot 在
+   `STANDALONE_BOOT_MODULES` ⇒ `TOP["remote.offline_boot"]` 必须为空；顶层 `try/except` 里的
+   `from remote.offline_deliverable import …` **仍算顶层边**（`Try` 不改变 AST 深度）⇒ 必红。
+2. `test_common_layer.py` 清单（禁 `common`/`rl`/…）+ `test_module_imports_without_remote_on_sys_path`（单文件真 exec）⇒
+   顶层 `from offline_deliverable import …` 在仓库/包内形态找不到顶层模块名 ⇒ 也红。
+
+**=> 三件套**：① **懒装载** `_load_deliverable()`（`importlib.import_module`，顺序
+`("offline_deliverable", "remote.offline_deliverable")`——**引导兄弟优先** = 与会话刚刷新的 offline_boot 同源，
+2026-09-25「看着新跑着旧」教训；与 `_load_tailscale_boot` 的 remote-first 有意不同）；② **门面** = PEP 562
+`__getattr__`，只转发**闭集 13 名**、未知名 `AttributeError`；③ **内部 6 处调用点**改走 `_load_deliverable().x(…)`。
+
+### 刀口形态（逐字节纯搬）
+
+- 跨度 A `L94–100`（4 常量 + 3 条 `#:` 注释，7 行；删时含前导空行 L93 防双空行）；
+- 跨度 B `L1008–1198`（`_COURSE_NAME_RE` 注释起 → `package_partial` 的 `return made`，191 行；删时含首尾空行）；
+- 新模块头 = docstring + `json`/`os`/`re`/`zipfile` + `collections.abc.Callable` + `pathlib.Path`（既知插入）；
+- 原家懒装载/门面块 + 5 处调用点改写 + docstring 两处口径（`is_kaggle` 的 `download_dir` 指向交付面）。
+
+### 守卫（新 12 例 / 改判 4 处）
+
+`tests/test_offline_deliverable_split.py` **12 例**：定义唯一 · **stdlib 闭集**（白名单也不许腐化）· 禁反向
+import（`remote`/`common`/`rl`/`offline_boot`）· 门面 `is` 恒等 · 门面闭集 + 笔误不吞 + 新家无套娃门面 ·
+装载顺序按源码事实钉 · 命名对账/课程三写法/工作目录 · notebook 名单 ×2（主引导格 fetch+pop、取回格兜底成对抓）。
+改判：`test_offline_boot` 的 **exec 守卫升级为「引导文件集形态」**（拷两份文件进临时引导目录、摘仓库路径、
+真 exec、再真调交付面）+ **反例**（兄弟缺失 ⇒ 装载照过、首次用交付面 `ImportError` 点名）；双生常量守卫
+改指新家 + `is` 恒等；`test_offline_notebook` 名单 +1；`test_common_layer` +1；`remote_dag` 两处（LAYERS `0` +
+`STANDALONE_BOOT_MODULES`）。
+
+### 验证
+
+逐段逐字节（`tmp/verify_offline_deliverable_exact.py`：A/B 各 ×1 + 原家 13 处定义/常量 ABSENT + 门面/调用点/
+口径到位）· nn 门禁 **3271 → 3285 passed / 3 skipped / 0 failed**（+14 = 新 12 + 改判 2）· ruff 全过 · mypy
+**528 → 530** 文件 · 根 `bun run check` **2181 pass / 0 fail** · check-decisions **532 ids**。
+
+### 取舍 / 风险
+
+① 首例 `__getattr__` 门面（mypy 面 = `Any`；未知名 `AttributeError` 由守卫钉住，别把打错的属性喂给交付面）；
+② 首例「老 notebook 要重开」（失败响亮、训练不受影响——故意的：训练面不陪葬）；③ 兄弟缺失推迟到首用交付面
+才报错；④ 双生常量权威点移到新家（守卫改指）；⑤ 装载顺序（兄弟优先）与 `_load_tailscale_boot`（remote 优先）
+不同——各有理由，守卫把顺序钉成源码事实。
+
+### 被否决备选
+
+① 顶层 `try/except` 双路 import（DAG 顶层边必红）② 显式转发壳（签名漂移 + 违反定义唯一）③ 调用点全迁
+（notebook 取回格 + ~15 处用例；门面原则无谓失守）④ 放 `nn-training` 根 + `py-modules`（拉取路径/layering/
+清单三处复杂化，脱离 `remote/` 环账本）。
+
+---
+
 ## §40 `plan_run` 交接面 18 节点下沉 → `remote/plan_handoff.py`（S5 第十三刀，2026-09-27，用户指令「按 §5.7.4 落刀：plan_handoff 下沉（4 跨度纯搬 + 守卫 + 门禁）」）
 
 ### 一句话
@@ -4926,6 +5055,50 @@ argmax 恒选同一格。
   - **实测读数（非判决段，仅吞吐参考）**：800/800 全远端 · **local=0** · 653.2s / 1.2 games/s；
     来源分布 self=356 · mac=251 · gcs=122 · a96=32 · a95=25 · a97=14；pass 82/800=10.3% ·
     kills 6.27（与首轮逐值相同：同种子确定性 ✓）。**不要拿它当 it96 capability 读数**（段未预注册）。
+### §2026-09-28-goalnn-python-loc-budget（2026-09-28，python 源文件 LOC 预算：单文件 < 1000 行）
+
+**背景**：S5（2026-09-27）把九个 1000+ 行的神模块拆成 19 个可独立依赖的模块（`plan/nn-training-refactor.md` §5.7），
+但那是**一次性人力侦察**——没有任何断言拦着下一个模块长到 1400 行（`rl/gate_check.py` 拆之前一直是 1412 行）。
+本决策把「>1000 行 = 设计问题，不是笔误」变成每次门禁都问一遍的断言。
+
+**口径**（用户钦定）：`LOC = 物理行 − 空行 − 纯注释行 − docstring 行`；docstring = 模块/类/函数**首语句**的字符串
+（AST 判定、多行算整段）；**语句级多行字符串（长 `log()`/`raise` 文案）算代码**（它们是行数，不是注解）；`>= 1000` 即红。
+实现 = `nn-training/tests/test_python_loc_budget.py`（`loc_of` + `_doc_rows`）。
+
+**扫描面** = `git ls-files -z --cached --others --exclude-standard '*.py'`（跟踪 + **未跟踪未忽略**）。为什么用 git 而不是
+`os.walk`：`nn-training/tmp/` 那类被 ignore 的临时/备份副本实测 **600+ 份**（`origin_*.py`、`headtree/`、`pre_cut_*/`），
+它们不许进预算；而未跟踪的**新源码必须进**——否则新写的巨文件要等下一个人肉发现（提交前正是它还是未跟踪状态的时候）。
+
+**量测（2026-09-28，`tmp/measure_loc_budget.py` / `tmp/measure_offline_budget.py`）**：该口径下全仓只有 **4 个** ≥1000：
+`tests/test_remote_iter.py` **1309** · `tests/test_remote_ppo.py` **1258** · `e2e/test_run_rl.py` **1245** ·
+`remote/offline_boot.py` **1127**；次高危 `rl/batch_runner.py` 949 · `rl/dispatch.py` 936。落刀后实测扫描面
+**542 个 .py（含未跟踪）⇒ 入预算 258 个 · 豁免 284 个 · 超限 0**。
+
+**豁免与否决**（用户 2026-09-28 裁定）：
+
+- `tests/` · `e2e/` **两层整体豁免** —— 测试的体量是「覆盖了多少场景」的函数，压它等于少测；
+- `remote/offline_boot.py` —— standalone 运输单元（notebook 从 GitHub raw 按名单拉取，顶层不得 `import remote.*`），
+  §5.7.3 实测取包面闭包 47/86 节点、心跳簇 29 节点 ≈ 文件本体 ⇒ **拆不开**，只能留档豁免；
+- **否决 ① 超限文件进白名单、不设上限**（巨型文件可无限增长，等于没有规则）；**否决 ② 棘轮**（豁免文件登记当前 LOC
+  只准不涨——行数不是测试的度量）；**否决 ③ 本轮拆那两个超限测试**（1309/1258 的行数来自场景枚举，压它等于少测）；
+- 顺带实测并否决「压缩 `offline_boot` 行数」：行预算（分类有重叠）空行 187 · 纯注释 94 · docstring 292 ·
+  语句级多行字符串 75 · `log()` 语句跨度 153 · `raise` 跨度 58；**真实控制流 902 行 / 825 条 AST 语句 = 2.00 行/语句**
+  （已是可读 Python 的地板），字面重复 ≈ 0（3 行窗全仓只在签名形状上重复 2 次）⇒ 安全压行上限 **~15–25 行（1%）**，
+  代价是碰 95 条事故诊断文案（白等 28 分钟 / Kaggle 代理 / F4 混血）= 删知识 ⇒ 不做。
+
+**三条防漂移断言**（把「静默失效」变成红）：
+
+1. `test_scan_finds_the_repository` —— 扫描必须真扫到货（≥200 个非豁免文件 + 锚文件在列）：git 调用失败 / cwd 不对 /
+   豁免面写宽导致的**空跑不许绿**；
+2. `test_exempt_dirs_are_test_layers_only` —— `tests` / `e2e` 这两个豁免片段只许命中 `nn-training/tests/` · `nn-training/e2e/`
+   （防止哪天有人把它当通配符，顺手豁免掉生产目录）；
+3. `test_exempt_file_is_still_worth_exempting` —— `offline_boot.py` 一旦降到阈值下就红：**豁免会过期，必须收回**
+   （否则它会作为「合法的历史遗留」长存，正是 §5.7.3 反复点名的那种东西）。
+
+**验证**：`tests/test_python_loc_budget.py` **5 例**（口径语义逐条钉死 / 主判据 / 扫描锚 / 豁免面 / 豁免时效），
+主判据 **0.30s**（门禁 per-test 预算 5s 警告、30s 失败）——先用临时探针 `rl/_loc_probe.py`（1103 LOC + 100 行注释
++ 100 空行）确认它**真会红并点名**，再删探针。nn 门禁 **3308 → 3313 passed / 3 skipped / 0 failed** · ruff 全过 ·
+mypy **534 → 535** 文件 · 根 `bun run check` **2181 pass / 0 fail**。
 
 ---
 

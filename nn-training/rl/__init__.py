@@ -16,6 +16,9 @@
   eval_rows.py     逐局 eval 行 schema + eval_log 账本 I/O（eval_row / merge_eval_rows；S5 第一刀，2026-09-27）
   eval_track.py    双轨日常评估纯逻辑（种子锚点/轮转分类 + 过拟合报警 + settle_eval_summary；S5 第三刀，2026-09-27）
   eval_yield.py    评估让位/份额（尾巴）策略（份额预留 / 让位与放行档 / 越窗与收拢判据；S5 第十二刀，2026-09-27）
+  gate_inputs.py   课程门求值器输入读数面（行模型 EvalRow/BudgetInfo + trend/override/事件扫描；S5 第十五刀，2026-09-27）
+  gate_judges.py   课程门求值器判决项面（11 种 kind + 统计助手 + 注册表 + `_eval_one` 接口；S5 第十五刀，2026-09-27）
+  gate_check.py    课程门求值器引擎（两趟调度 + ADVANCE 附加条件 + CLI；S5 第十五刀后 = 引擎 + 门面）
   config_file.py   rl-config.json 文件面（路径唯一来源 + 安全读取；S5 第十刀，2026-09-27）
   course_spec.py   课程配置类面（CourseConfig/GatesSpec 及嵌套模型 + gates 常量；S5 第十刀，2026-09-27）
   course_resolve.py 课程解析面（curricula/levels 查找 · level 注入 + 冲突拒收 · 字节冻结 · 跨课门校验；S5 第十刀，2026-09-27）

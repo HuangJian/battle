@@ -544,3 +544,90 @@ R2 `[83,543]` 461 行（`_log_default` · `verify_plan_file` · `RunContext` · 
 `test_worker_offline_cap`（import 改指新家）· `remote_dag`。门禁 nn **3262 → 3271 passed / 3 skipped**；ruff 全过；
 mypy **526 → 528** 文件绿；根 `bun run check` **2181 pass / 0 fail**；check-decisions **531 ids**。
 决策 → `DECISIONS.md` §2026-09-27-goalnn-plan-handoff-split；全文 → `engineering.md` §40。
+
+### 2026-09-27 S5 第十四刀：`offline_boot` 交付面 + standalone 运输面 → `remote/offline_deliverable.py`（用户指令）
+
+**量测先行**（用户点名「取包/交付是否真独立分量」→ 判决）：取包面闭包 **47/86 节点 · 743 行 ≈ 文件本体**、
+心跳/租约簇 29 节点 · 349 行 ⇒ **两都不切**；**交付面 = 引用图上唯一干净闭集**（13 节点 · 179 行，块→外为空，
+4 条 facade 边，外部触发 = notebook 中途取回格）。障碍是 **standalone 运输面**（本文件是 notebook 从 GitHub raw
+单文件拉起的引导单元）⇒ 用户指令「设计运输面（懒装载 + 拉取列表 + 守卫改判），再落刀」。
+
+**设计（`plan/…§5.7.5`）= 懒装载 + PEP 562 `__getattr__` 门面**（三条守卫钉死顶层 import 兄弟文件：
+DAG 的 `TOP["remote.offline_boot"] == ∅`（`Try` 不改变 AST 深度）+ 单文件真 exec 守卫 + common_layer 清单）：
+① `_load_deliverable()` 按 `("offline_deliverable", "remote.offline_deliverable")` 装载（**引导兄弟优先**——
+与刚刷新的 offline_boot 同源；与 `_load_tailscale_boot` 的 remote-first 有意不同）；② 门面只转发**闭集 13 名**
+（未知名照常 `AttributeError`）⇒ notebook 取回格与 ~15 处用例**零迁移**；③ 内部 **6 处调用点**
+（`run_one_course`×3 / `_queue_work_dir` / `resolve_courses` / `run`）改走 `_load_deliverable().x(…)`。
+
+**刀口**：`remote/offline_boot.py` **1801 → 1647**（−154）· 新模块 **227 行**（stdlib-only ⇒ L0）；
+**2 跨度逐字节纯搬 198 行**（A `L94–100` 常量 7 行 · B `L1008–1198` 交付块 191 行）+ 新头（既知插入）；
+notebook **3 处**（主引导格 fetch 名单 + pop 名单、取回格 raw 兜底改双文件循环）；`remote_dag` 两处登记
+（LAYERS `0` + `STANDALONE_BOOT_MODULES`）；`test_common_layer` 清单 +1。
+
+**验证**：逐段逐字节（`tmp/verify_offline_deliverable_exact.py`：A/B 各 ×1 + 原家 13 处定义/常量 `ABSENT` +
+门面/调用点/口径到位）；新守卫 `tests/test_offline_deliverable_split.py` **12 例**（定义唯一 / **stdlib 闭集** /
+禁反向 import / 门面恒等 / 门面闭集 + 笔误不吞 + 无套娃门面 / 装载顺序 + 命名语义 / notebook 名单 ×2）；
+改判 `test_offline_boot`（exec 守卫升级为**引导文件集形态**（真 exec + 真调交付面）+ 反例
+「兄弟缺失 ⇒ 装载照过、首次用交付面 `ImportError` 点名」；双生常量守卫改指新家 + `is` 恒等）·
+`test_offline_notebook`（名单 +1）· 门禁 nn **3271 → 3285 passed / 3 skipped**；ruff 全过；
+mypy **528 → 530** 文件绿；根 `bun run check` **2181 pass / 0 fail**；check-decisions **532 ids**。
+决策 → `DECISIONS.md` §2026-09-27-goalnn-offline-deliverable-split；全文 → `engineering.md` §41。
+
+### 2026-09-27 S5 第十五刀：`gate_check` 求值器接口 —— 输入面 + 判决面成家 → `rl/gate_inputs.py` + `rl/gate_judges.py`（用户指令「next」= §5.7.3 入口）
+
+**量测（反判据收敛）**：1412 行 `rl/gate_check.py`（`recon_god` 口径「1 组 31 节点巨团」）在**引用图**上实测
+**47 节点 = 46 单团 + 1 孤立**（`sum_train_samples`——模块内零引用，只被测试/账本线 import）；三面判据
+（块→外为空）：判决项面 **25 节点 / 588 行**、输入读数面 **14 节点 / 288 行**、常量面 6 节点。原反判据「按链切
+不动 ⇒ 必须先设计求值器接口、是真设计改动」**收敛**：「独立求值一项」（`only_kinds=("duty",)`）已由
+`evaluate` 暴露（`loop_guards_gate` 在用）⇒ 设计点只剩**共享输入模型归属**（`EvalRow`/`_row_from_summary`/
+`_num`/`BudgetInfo` 归输入面）⇒ DAG 单向 **`gate_inputs` ← `gate_judges` ← `gate_check`**（无环；运行期零
+`rl.config`——判决面只 TYPE_CHECKING 取 `GateRule`/`GatesSpec` 类型，`_lazy_config` 仍归引擎）。
+
+**刀口**：`rl/gate_check.py` **1412 → 622**（引擎：`evaluate` 两趟 + ADVANCE 附加条件 + CLI + 全量 37 名门面）；
+两个新家——**`rl/gate_inputs.py` 379 行**（15 名：`EvalRow`/`BudgetInfo` + 行归一化 + `read_trend_rows` +
+`first_*`/`count_*`/`sum_*` 事件扫描 + `load_override` + 常量/异常；**stdlib-only 叶子**）· **`rl/gate_judges.py`
+572 行**（22 名：`_Partial`/`_Ctx` + 统计助手 + 11×`_eval_*` + `_route_by_completion` + 注册表 + **判决项接口**
+`_eval_one`）。**10 跨度逐字节**（输入面 5 段 `L85–91`/`L96–98`/`L103–126`/`L128–166`/`L277–556`；判决面 5 段
+`L93–94`/`L256–274`/`L559–1045`/`L1050–1057`/`L1249–1270`）+ 新头/门面（既知插入）；既知改动：docstring
+分层指针 · TYPE_CHECKING 块删（`GatesSpec` 只由 `evaluate` 内 `_lazy_config()` 解包，ruff F401 实提）·
+清 `math`/`Callable` 空转 import · 缝空行归一。
+
+**验证**：逐段逐字节（`tmp/verify_gate_faces_exact.py`：10 跨度各 ×1（原文 sha `233caa57…`）+ 原家 40 名定义
+与 `GateRule`/`math` 零残留 + 门面 37 名 `is` 恒等 + 新家导入 `rl.config`/torch/numpy 均不入 `sys.modules`）；
+新守卫 `tests/test_gate_inputs_split.py` **12 例** + `tests/test_gate_judges_split.py` **11 例**（定义唯一 /
+依赖闭集 / 禁反向 / 门面恒等 / 判决项接口（注册表 6 键 + 5 分支 = 11 kind + 兜底 dormant）/ 运行期纯净子进程 /
+不进 `remote_dag.LAYERS` / 读数与分流语义）；改判 `test_gate_check` 的 purity 扩面三模块；`rl/__init__.py`
+速览补三行（`gate_check.py` 此前未列）。nn 门禁 **3285 → 3308 passed / 3 skipped**（+23）；ruff 全过；
+mypy **530 → 534** 文件；根 `bun run check` **2181 pass / 0 fail**；check-decisions **533 ids**。
+决策 → `DECISIONS.md` §2026-09-27-goalnn-gate-faces-split；全文 → `engineering.md` §42。
+
+### 2026-09-28 python 源文件 LOC 预算护栏：单文件 < 1000 行（`tests/` · `e2e/` · `offline_boot` 豁免）
+
+**用户指令**：「给 python 门禁加一个测试：python 源文件 loc 必须 < 1000 行（tests/e2e/offline_boot 除外，
+不包括注释/空行/doc）」⇒ 新增 `nn-training/tests/test_python_loc_budget.py`（**5 例**）进 python 门禁。
+
+**口径**：`LOC = 物理行 − 空行 − 纯注释行 − docstring 行`（docstring = 模块/类/函数首语句字符串，AST 判定；
+语句级多行字符串——长 `log()`/`raise` 文案——**算代码**）；**≥1000 即红**。扫描面 = `git ls-files --cached
+--others --exclude-standard '*.py'`（跟踪 + 未跟踪未忽略；用 git 而非 os.walk 是因为 `nn-training/tmp/` 那类
+被 ignore 的备份副本实测 600+ 份不该进预算，而未跟踪的**新源码必须进**）。
+
+**量测（`tmp/measure_loc_budget.py` / `tmp/measure_offline_budget.py`）**：该口径下全仓只有 4 个 ≥1000 ——
+`tests/test_remote_iter.py` 1309 · `tests/test_remote_ppo.py` 1258 · `e2e/test_run_rl.py` 1245 ·
+`remote/offline_boot.py` 1127（次高危 `rl/batch_runner.py` 949 · `rl/dispatch.py` 936）。落刀后扫描面实测
+**542 个 .py ⇒ 入预算 258 · 豁免 284 · 超限 0**。
+
+**豁免（用户裁定，走 `ask_user`）**：测试层 `tests/` · `e2e/` **整体**豁免（测试体量是「覆盖了多少场景」的函数，
+压它等于少测）；`remote/offline_boot.py` 单文件豁免（standalone 运输单元、§5.7.3 实测拆不开）。被否决：
+超限文件进白名单不设上限 · 棘轮（登记当前 LOC 只准不涨）· 本轮拆那两个超限测试。**顺带实测并否决「压缩
+`offline_boot` 行数」**：行预算（分类重叠）空行 187 / 纯注释 94 / docstring 292 / 多行字符串 75 / `log()` 跨度 153 /
+`raise` 跨度 58，真实控制流 **902 行 / 825 条语句 = 2.00 行/语句**（已是地板），字面重复 ≈ 0 ⇒ 安全压行上限
+~15–25 行（1%），代价是碰 95 条事故诊断文案 ⇒ 不做。
+
+**三条防漂移断言**：扫描必须真扫到货（≥200 非豁免文件 + 锚在列）· 豁免目录名只许命中 `nn-training/tests/` ·
+`nn-training/e2e/`（防当通配符）· `offline_boot.py` 降到阈值下即红（**豁免会过期，必须收回**）。
+
+**验证**：主判据 **0.30s**（per-test 预算 5s/30s）；先用临时探针 `rl/_loc_probe.py`（1103 LOC + 100 行注释 +
+100 空行）确认真会红并点名，再删探针。nn 门禁 **3308 → 3313 passed / 3 skipped / 0 failed**；ruff 全过；
+mypy **534 → 535** 文件；根 `bun run check` **2181 pass / 0 fail**。
+决策 → `DECISIONS.md` §2026-09-28-goalnn-python-loc-budget；全文 → `engineering.md` §20「决策正文归档」·
+锚 `### §2026-09-28-goalnn-python-loc-budget`。

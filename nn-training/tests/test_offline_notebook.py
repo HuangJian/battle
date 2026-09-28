@@ -172,7 +172,9 @@ def test_long_task_logging_is_wired(cell: str) -> None:
 
 
 def test_boot_modules_are_fetched_by_name_and_exist(cell: str) -> None:
-    for name in ("offline_boot.py", "tailscale_boot.py"):
+    # 引导文件集（S5 第十四刀 +）：交付面兄弟文件 `offline_deliverable.py` 也在这个名单里
+    # （`offline_boot` 惰性装载它；名单缺它 ⇒ 交付格会响亮 ImportError）。
+    for name in ("offline_boot.py", "tailscale_boot.py", "offline_deliverable.py"):
         assert f'"{name}"' in cell, f"cell 没拉 {name}"
         assert (NN / "remote" / name).is_file(), f"cell 要拉 {name}，仓库里却没有"
 
