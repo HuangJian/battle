@@ -48,10 +48,43 @@ TS 侧池改成同质入口（`tools/sim/serve-any.ts` + 每行 mode token，§2
 ### 28.3 本轮 nn 门禁的读数
 
 `pytest tests/ e2e/` **3328 passed / 1 skipped**（含上述改动）；`ruff check .` 全绿。
-⚠ mypy 有一条**与本次无关的既有**红：`tests/test_reward_golden.py:1141`
-（另一条线在制的 BC/奖励 WIP 文件，本次未动）。
+mypy 那条**与本次无关的既有**红：`tests/test_reward_golden.py:1141`（数值塔把 `bool` 并进
+`dict[str, float]`，摊参时 `cleared: bool` 报 arg-type）已修（`hide: dict[str, Any]`，同文件既有袋式惯例），
+但按用户裁定**留在工作树**：它和 h5 奖励臂的 191 行在制同处一个 hunk，由那条线自己落地。
 
 参见 DECISIONS §2026-09-28-goalnn-local-serve-pool-homogeneous。
+
+### 28.4 a95 生产形态实测（跑 01daa814 的设备 checkout，2026-09-28）
+
+设备这次不是推文件：GitHub 从手机网络不可达（`git pull` = `Connection timed out after 300103 ms`），
+改用宿主 `git bundle create … 60c4abcd..goal-nn`（2.2MB）→ `adb push` → 容器内 `git fetch <bundle>`
++ `merge --ff-only`（SHA 不变，落点 = origin/goal-nn）。读数因此是**已提交的生产代码**。
+
+启动命令与生产 harness 同形（`--workers 8 --port 8443`），两轮：
+
+| 段 | 读数 |
+|---|---|
+| 启动（8 worker） | `prewarm 8/8 ready` **+77 / +83s** → `listening` **+81 / +86s** → ping 可连 +0.2s（预热自身 58–60s） |
+| 池构成 | `serve-any.ts --serve` **×8**、导出器入口 **×0**（腿在进程表上不存在） |
+| 首批 8 路 rollout（真并发） | WALL 8.26s / 9.95s ⇒ **1.03 / 1.24 s/局**；每局 body 26–51KB（gzip 头 `1f8b`） |
+| 紧接着 4 路 eval（**无任何权重 POST**） | WALL 6.47s ⇒ **1.62 s/局**；body 0.99–1.06KB |
+| 第二批 8 路 rollout | WALL 10.33s ⇒ 1.29 s/局 |
+| 单局（热池、在一发坏任务之后） | **0.90s** |
+| ping | 6–9ms（空载 / 批后 / 批中均无 8s 超时） |
+| 坏任务对照（缺 `--lives-override`） | t=4.04s、**size=0**、日志恰好 1 条 `task failed`；池仍 8/8、streak 0、stopped false |
+| 池事件（spawned / top-up / 停补位 / closed） | **0 条** |
+
+对照（同机、上一轮同脚本的旧形态）：首批冷池 **31.6s/局**；eval 腿错配 **3.1s/局**且必须先 POST 换腿。
+
+**方法与两个坑（写给下一个上机的人）**：① 同步路径**失败也回 HTTP 200** ⇒ 正信号只能是 body：
+成功 = gzip/BCV2 头 + KB 级体积，失败 = `size=0`（本轮用一条故意坏任务证伪了这个信号，
+对照恰好留下 1 条 `task failed`）。② 上一轮探针用的 `find _result.pack` 计数**不可用**——
+`gameDir` 在 `finally` 里 `rmSync`（`sampler-agent.ts:1285`），pack 从不落盘。
+③ 探针脚本的 CMD 文本本身就在会话 argv 里，任何 `sampler-agent` 之类的字面量都会让
+`pkill -f` 命中自己（本轮复现过一次：会话被 SIGTERM）；日志路径也得用变量拼。
+
+启动代价记账：8 worker 逐个预热 ⇒ a95 上 **~80s 端口不可连**（旧形态 26s 上线，但那段本来也要付：
+上线即失联 50s + 首批全冷，§27.5–27.7）。快机上 fork 是 ms 级，这部分基本只剩 worker 启动成本。
 
 ---
 ## §27 a95（Android/Termux·proot）贡献量 1/10 归因：每批首批 N 次冷启（2026-09-28）
