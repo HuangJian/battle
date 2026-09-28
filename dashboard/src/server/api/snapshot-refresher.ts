@@ -7,9 +7,14 @@
  *    · **课程快照** `getSlowSnapshot`（组件表 ⊕ 现算的结构 ⊕ 探测器 + 阶段 + 账本尾派生）——
  *      按课程键控，重算只剩毫秒级的现算 + 账本尾读。
  */
+import path from 'path'
+import { statSync } from 'fs'
+import { tmpLogsDir } from '../../core/paths'
 import type { RlConfig } from '../../core/types'
 import { createSwrCache } from '../../core/swr-cache'
+import { courseEnabled } from '../../stack/courses'
 import { loadConsoleState } from '../actions'
+import { readIterMetrics } from '../iters'
 import { loadConfigSafe } from './config'
 import { discoverCourses, effectiveCourse } from './courses'
 import { getHubAdmin, refreshHubAdmin } from './overview'
@@ -104,13 +109,70 @@ export function invalidateSlowSnapshot(): void {
   fleetProbeCache.clear()
 }
 
+/** 逐轮实际值抄录的节拍。窗口怎么定：课程一轮 ≈1.5min，而 `keep_iters`（rl-config 缺省 3）
+ *  轮转 ⇒ 一轮在盘上活 ≈4.5min ⇒ 15s 有十几次机会，够宽。 */
+const METRICS_HARVEST_MS = 15_000
+
+/** 各课账本 stat 签名（`size:mtime`）——「账本没动过 ⇒ 没有新轮可抄」的便宜闸。
+ *  实测（2026-09-28，h5a-earlydmg 30 行 / h5b-clean 29 行）：冷抄一轮 186/162ms（第一次扫
+ *  `it<N>`），全命中缓存 27/24ms；闸生效时 0ms。长驻服务里这个差别会乘以**在训课数 × 天数**。 */
+const harvestLastStat = new Map<string, string>()
+
+/** 逐轮实际值抄录（副作用 = `iters.ts::readIterMetrics` 的缓存写入）。
+ *
+ *  为什么必须有它（2026-09-28 事故）：这几列**不在账本里**——它们是扫 `it<N>` 现算后缓存的
+ *  派生值，而 `/api/state` 只对**查看课程**算（`state-view.ts`），训练侧每轮又按 `keep_iters`
+ *  删 `it<N>`（`rl/loop_guards_sweep.py::_rotate_cleanup`）⇒ 没人看过的那门课的轮次到第 4 轮
+ *  就永久空白（实测 `h5b-clean` 缺 it7–17、`h5a-earlydmg` 缺 it22–25，两个缺口在时间轴上
+ *  互补 = 「谁在屏幕上谁才有数」）。这里把「看见」从人手上拿走：在训的课每拍都抄一遍。
+ *
+ *  两道闸（都是为了让「每拍」不变成「每拍扫盘」）：
+ *    ① 只抄**已开课**课（`training-enabled.txt`，与训练侧同一道闸）：tmp/ 下几十门历史课的
+ *       账本永远在盘上，逐拍全扫才是真浪费；而训练一停就不再轮转（plan/course-archive
+ *       §3.6 N1），停课后打开控制台现算来得及；
+ *    ② 账本签名未变则跳过——**但只在上一轮把所有轮次都抄到了时才跳过**：云机/回传腿的
+ *       `it<N>/per-game.json` 与账本行是同一次落地的，先后顺序不保证，早一拍抄到 null 若
+ *       不再重试就永远是空白（那正是本函数要治的病）。有缺口 ⇒ 抹掉签名、下一拍重试。
+ *
+ *  单门课失败只少抄一门（观测面坏掉不该带崩刷新器），下一拍重试。
+ *  返回本轮实际抄录（= 账本不再被签名跳过的）课程，观测与单测用。 */
+export function harvestTrainingCourseActuals(): string[] {
+  const harvested: string[] = []
+  for (const course of discoverCourses()) {
+    try {
+      if (!courseEnabled(course)) continue
+      const dir = path.join(tmpLogsDir(), course)
+      let sig: string
+      try {
+        const st = statSync(path.join(dir, 'training_log.jsonl'))
+        sig = `${st.size}:${st.mtimeMs}`
+      } catch {
+        continue // 无账本 ⇒ 还不是课程
+      }
+      if (harvestLastStat.get(course) === sig) continue
+      const { rows } = readIterMetrics(dir)
+      // 有轮次没抄到实际值 ⇒ 不落签名（下一拍重试）；全抄到 ⇒ 记签名（下拍零成本）。
+      if (rows.some((r) => r.iter > 0 && !r.actuals)) harvestLastStat.delete(course)
+      else harvestLastStat.set(course, sig)
+      harvested.push(course)
+    } catch {
+      /* 单门课失败只少抄一门 */
+    }
+  }
+  return harvested
+}
+
 /** 后台刷新器：立即暖一次 + 每 intervalMs 重算（unref，不阻止进程退出）。服务端启动时
  *  调用一次。操作员课程每拍必刷（保持原语义）；近期被查看（SNAPSHOT_VIEW_TTL_MS 内）的
  *  其它课程跟随刷新；超时未看的课程丢弃，不再占用探测预算。
  *
  *  机群级（`getFleetProbes` / `getHubAdmin`）每拍也暖一次：它们跨课程共用，暖一拍
  *  ≠ N 门课各探一遍——这既是切课/动作后的即时性来源，也让探测列在无人看课时不至于陈旧
- *  （新鲜度仍是 ≤1 个刷新周期）。 */
+ *  （新鲜度仍是 ≤1 个刷新周期）。
+ *
+ *  ★ 另挂一条**独立节拍**的逐轮实际值抄录（`harvestTrainingCourseActuals`）：它不做任何
+ *  探测，也不该被节点 ping / 共享 hub 那 1.2–2.5s 的超时预算拖住（抄录的本职是**赶在
+ *  `keep_iters` 轮转前落盘**）。理由见该函数。 */
 export function startSnapshotRefresher(intervalMs: number = SNAPSHOT_REFRESH_MS): void {
   const run = async (): Promise<void> => {
     try {
@@ -138,4 +200,8 @@ export function startSnapshotRefresher(intervalMs: number = SNAPSHOT_REFRESH_MS)
   void run()
   const t = setInterval(() => void run(), intervalMs)
   t.unref?.()
+  // 逐轮实际值抄录（抗轮转）：与慢快照同生共死——`server.ts` 只调这一个入口。
+  void harvestTrainingCourseActuals()
+  const th = setInterval(() => void harvestTrainingCourseActuals(), METRICS_HARVEST_MS)
+  th.unref?.()
 }

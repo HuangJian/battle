@@ -4600,5 +4600,33 @@ bump + 全量重转），且会让已训 value 头的输出量纲漂移（旧 ch
 **落点**：`src/nn/decision-gate.ts`（唯一实现 + 读数）· `src/nn/obs-encoder.ts::decisionTick`
 （`condition === 4`，可选 `prevThreat`）· 五处决策门（`policy-input` / `export-rl-rollout` /
 `export-eval-game` / `export-nn-replays` / `record-games-video`）+ `divergence-probe` 全改调
-`decisionDue` · `build-state-init-bank.ts` 共存契约 · 测试 `tests/nn/decision-gate.test.ts`、
-`tests/sim/eval-game-parity.test.ts`、`tests/state-init.test.ts`。
+`decisionDue` · `build-state-init-bank.ts` 共存契约 · 测试 `tests/nn/decision-gate.test.ts`、`tests/sim/eval-game-parity.test.ts`、`tests/state-init.test.ts`
+
+## §2026-09-28-goalnn-console-metrics-harvest（2026-09-28，逐轮实际值抗轮转抄录：表列不再依赖「谁在屏幕上」）
+
+**来历**：用户报障「两课并行，`h5a-earlydmg` 的击杀/残血/承伤全都有，`h5b-clean` 丢了一大半」。
+查下来那五列（击杀/残血/承伤·杀/道具/耗时）**不是账本字段**，是 `/api/state` 扫 `it<N>` 现算后写
+`<traj>/.pool-actuals-cache.json` 的派生值；而请求路径只算**查看课程**（`state-view.ts`），训练侧每轮
+按 `keep_iters`（rl-config 缺省 3）删 `it<N>`（`rl/loop_guards_sweep.py::_rotate_cleanup`）⇒
+「谁在屏幕上谁才有数」（实测两课缺口在时间轴上互补：h5a 缺 it22–25 ↔ h5b 抄录窗，h5b 缺 it7–17 ↔ h5a 抄录窗）。
+
+**决定**：
+① 控制台侧修：`snapshot-refresher` 新增抗轮转抄录（**独立 15s 节拍**），对**所有已开课**课
+   （`training-enabled.txt`，与训练侧同一道闸）跑一次 `iters.readIterMetrics` 让缓存落盘；
+② 两道闸：只抄在训课；账本 stat 签名（`size:mtime`）未变则跳过——**仅当上一轮把该课所有轮次都抄到**
+   时才允许跳过（云机/回传腿的 `it<N>/per-game.json` 与账本行落地先后不保证，早一拍抄到 null
+   必须重试，否则缺口被签名闸自锁 = 空白）；
+③ 训练侧不动（不改 `keep_iters`、不加跨轮画像文件）：那是另一条腿的改动，留白另议。
+
+**被否决**：调大这两课的 `keep_iters`（只拖长曝光窗口，`it<N>` 目录线性涨盘，且治不了下一门课）；
+训练侧轮末把逐局画像写进跨轮文件（治本但要动账本口径 + python 侧 + 归档清单，超出本次报障范围）；
+控制台侧不加签名闸（长驻服务 × 在训课数 × 天数：实测 27ms/课/拍的稳态整本账本解析纯浪费）；
+抄录挂进慢快照那次 `run()`（会被节点 ping 1.2–2.5s 超时预算拖住，抄录赶不上轮转）。
+
+**违反后果**：抄录节拍挪进慢快照刷新或改成「只抄查看课程」⇒ 本 bug 原样回来（列随轮转永久空白）；
+去掉签名闸 ⇒ 在训课每 15s 解析一次整本账本 + 全量 eval 账本。
+
+**落点**：`dashboard/src/server/api/snapshot-refresher.ts`（`harvestTrainingCourseActuals` /
+`startSnapshotRefresher`）· `dashboard/tests/server-metrics-harvest.test.ts`（4 例）·
+全文 `docs/nn/console.md` §20。
+。
