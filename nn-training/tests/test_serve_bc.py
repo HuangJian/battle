@@ -399,6 +399,25 @@ def test_a_broken_bc_course_does_not_take_down_the_rl_course(world: SimpleNamesp
     assert rep.courses["rl-a"]["rounds_done"] == 1
 
 
+def test_maybe_auto_stop_course_removes_marker_only_for_bc_auto_stop(tmp_path: Path) -> None:
+    """auto-stop：BC＋auto_stop ⇒ 删开课标记；RL/未开此键 ⇒ 不动。"""
+    from rl.loop_serve import maybe_auto_stop_course
+
+    bc_traj = tmp_path / "bc-x"
+    bc_traj.mkdir()
+    (bc_traj / "training-enabled.txt").write_text("open\n", encoding="utf-8")
+    assert maybe_auto_stop_course(kind="bc", auto_stop=True, traj=str(bc_traj)) is True
+    assert not (bc_traj / "training-enabled.txt").exists()
+
+    assert maybe_auto_stop_course(kind="bc", auto_stop=True, traj=str(bc_traj)) is True  # 幂等
+    rl_traj = tmp_path / "rl-x"
+    rl_traj.mkdir()
+    (rl_traj / "training-enabled.txt").write_text("open\n", encoding="utf-8")
+    assert maybe_auto_stop_course(kind="rl", auto_stop=True, traj=str(rl_traj)) is False
+    assert (rl_traj / "training-enabled.txt").exists()
+    assert maybe_auto_stop_course(kind="bc", auto_stop=False, traj=str(bc_traj)) is False
+
+
 def test_open_bc_course_with_empty_serve_argv_resolves_hub_transport(
     world: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:

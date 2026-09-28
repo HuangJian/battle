@@ -120,6 +120,11 @@ class BcTrainBlock(BaseModel):
     #: 基线 0.927。`auto` = 按训练集 neg/pos 自动定（≈12.6）；显式数 = 直接用；
     #: 0 = 关闭（旧行为，保持历史 checkpoint 语义）。
     fire_pos_weight: float | Literal["auto"] = "auto"
+    #: warm-start 起点（权重 JSON 路径；绝对路径或仓库根相对；"" = 从随机起）。
+    #: 发布时随 payload 以 init_weights.json 落 job 目录，worker 以它作 `--resume`
+    #: 起点（优化器/LR 全新；value 头由宽容 loader 忽略）。进行中的续跑归续跑权重所有，
+    #: 不重定起点。init_weights_fp 进幂等键：换起点 = 不同 job（防跨起点污染）。
+    init_from: str = ""
 
     @field_validator("epochs")
     @classmethod
@@ -162,6 +167,9 @@ class BcCourseConfig(BaseModel):
     # ---- 运行 ----
     #: BC 轮数（每轮：新语料（种子轮转）→ 云端 BC 训练 → 权重归档）
     iters: int = 1
+    #: 跑完预定轮自动停课（删开课标记；hub 模式/暂停意图不动，自然收官不是用户停课）。
+    #: 缺省关（RL 语义：收官不清标记，重开即续跑）。一次性的诊断/剂量腿开它。
+    auto_stop: bool = False
     #: 语料派发并发（bc_dispatch 节点任务并发上限参考）
     workers: int = 8
     #: 权重落位路径（verify_and_land_bc 原子写；缺省 tmp/<stem>/weights.json）

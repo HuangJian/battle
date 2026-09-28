@@ -206,6 +206,26 @@ def prune_remote_jobs(job_root: Path, keep: int = 3) -> None:
 # ---- 语料采集 --------------------------------------------------------------
 
 
+def resolve_bc_init_weights(course: BcCourseConfig) -> Path | None:
+    """课程 `train.init_from` → 绝对路径（仓库根相对或绝对）；"" = 从随机起。
+
+    缺失文件响亮 SystemExit（publish 端 HubClientError 也是拒发，但这里先拦，
+    错误信息指到课程字段）。返回的路径原样进 payload（init_weights.json），
+    其 sha 进幂等键（换起点 = 不同 job）。"""
+    raw = str(getattr(course.train, "init_from", "") or "").strip()
+    if not raw:
+        return None
+    p = Path(raw)
+    if not p.is_absolute():
+        p = REPO_ROOT / raw
+    if not p.is_file():
+        raise SystemExit(
+            f"[run_bc] train.init_from 指向不存在的权重文件：{raw}（解析为 {p}）——"
+            "拒发（先确认路径；相对路径按仓库根解析）"
+        )
+    return p
+
+
 def smoke_overrides(course: BcCourseConfig) -> dict:
     """--smoke 尺寸压缩：1 局 / max_ticks≤300 / epochs=1（真一轮，分钟级内）。
 
@@ -328,6 +348,7 @@ def publish_bc_job(
     is_smoke = round_name == "smoke"
     epochs = 1 if is_smoke else int(course.train.epochs)
     batch = min(int(course.train.batch), 256) if is_smoke else int(course.train.batch)
+    init_src = resolve_bc_init_weights(course)
     manifest = publish_job(
         job_root=job_root,
         jsonl_path=jsonl_path,
@@ -347,6 +368,7 @@ def publish_bc_job(
         mb=batch,
         lr=float(course.train.lr),
         kind="bc",
+        init_weights_path=str(init_src) if init_src is not None else "",
         extra=bc_job_extra(course, it, smoke=is_smoke),
         log=log,
     )

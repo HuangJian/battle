@@ -1,0 +1,43 @@
+// 课程 bc-open-fuse-e2 —— **Opening-BC 剂量臂 E2**（docs/nn/experiments.md §55）
+//
+// BC 课程（kind=bc）。it175 warm-start（`train.init_from`）＋人类开局切片
+// （`data_dir` 预摆，61→~3.5k 开局样本，`tickWindow [0,600)/dropTick0` 见 manifest）。
+// `corpus.games_per_stage=0` ⇒ 跳过采集（God 不出现）；`auto_stop` ⇒ 跑完即删标记。
+// 剂量：lr 1e-3 / epochs 2（B 臂 5，课程外唯一变量）。其余 §32 镜像。
+// 门：开局零伤 ≥70% 且 held-out 不比 it175 差；三反证任一即停；停率只观测。
+// 判完不续 PPO（留存按 §52 另议）。
+{
+  "version": 1,
+  "name": "bc-open-fuse-e2",
+  "kind": "bc",
+  "level": "ladder-c20-lives1",
+
+  "corpus": {
+    "games_per_stage": 0,
+    "wins_only": true,
+    "near_miss_times": 0,
+    "seed_rotate": 0
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 2,
+    "batch": 512,
+    "lr": 0.001,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "seed": 1234,
+    "ckpt_every": 10,
+    "fire_pos_weight": "auto",
+    "init_from": "nn-training/weights/x20-steady/x20-steady.it175.20260920-215502.json"
+  },
+
+  "iters": 1,
+  "workers": 8,
+  "auto_stop": true,
+  "out": "tmp/bc-open-fuse-e2/weights.json",
+  "traj": "tmp/bc-open-fuse-e2",
+  "backup_dir": "nn-training/weights/bc-open-fuse-e2",
+  "backup_prefix": "bc-open-fuse-e2"
+}

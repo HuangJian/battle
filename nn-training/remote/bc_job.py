@@ -210,6 +210,19 @@ def normalize_ppo_device(device: object, *, cuda_available: bool | None = None) 
     return "cuda" if cuda_available else "cpu"
 
 
+def bc_init_resume_path(job_dir: str | Path, resume_epoch: int) -> str | None:
+    """warm-start 起点（课程 `train.init_from`，经 payload `init_weights.json` 落盘）。
+
+    仅续跑为空（`resume_epoch == 0`）时生效——进行中的续跑归续跑权重所有，不重定起点；
+    优化器/LR 全新（`train/bc.py` 的 `--resume` 语义：只装权重）。文件缺席（旧 job/
+    从随机起）⇒ None，行为逐字节不变。
+    """
+    if int(resume_epoch) != 0:
+        return None
+    cand = Path(job_dir) / "init_weights.json"
+    return str(cand) if cand.is_file() else None
+
+
 def resolve_bc_seed(manifest: dict) -> tuple[int, str]:
     """BC job 训练种子 → (seed, 来源标签)。
 
@@ -381,6 +394,11 @@ def _run_bc_job(
             resume_in.write_bytes(resume_weights)
             ns.resume = str(resume_in)
             ns.epoch_offset = resume_epoch
+        else:
+            init_resume = bc_init_resume_path(job_dir, resume_epoch)
+            if init_resume is not None:
+                ns.resume = init_resume
+                log(f"job {jid}: warm start——init_weights.json 作起点，优化器/LR 全新")
         log(
             f"job {jid}: BC start arch={ns.arch} epochs={ns.epochs} batch={ns.batch} "
             f"lr={ns.lr} device={dev} seed={seed_int}({seed_src}) shards={len(shard_dirs)}"

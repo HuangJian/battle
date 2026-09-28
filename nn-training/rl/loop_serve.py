@@ -853,6 +853,22 @@ def _planner(runtimes: dict[str, CourseRuntime]) -> Callable[[str, int, Any], li
     return planner
 
 
+def maybe_auto_stop_course(*, kind: str, auto_stop: bool, traj: str | Path) -> bool:
+    """BC 课程 `auto_stop`：自然收官后删开课标记（训练侧不再认领；控制台读标记即停显）。
+
+    hub 模式/暂停意图不动——自然收官不是用户停课，重开走正常开课流程。
+    RL 课无此键（收官不清标记，重开即续跑，2026-09-25 C-0 语义）。"""
+    if kind != "bc" or not auto_stop:
+        return False
+    marker = Path(traj) / COURSE_ENABLE_MARKER
+    try:
+        marker.unlink(missing_ok=True)
+    except OSError:
+        return False
+    log("[serve] auto-stop：已删开课标记（预定轮跑完，课程不再入队）")
+    return True
+
+
 def _settle_rounds(
     sup: Supervisor, runtimes: dict[str, CourseRuntime], done_hooked: set[str]
 ) -> str:
@@ -874,6 +890,13 @@ def _settle_rounds(
         log(
             f"[serve] 课程 {course} 已收官（{q.rounds_done} 轮，指针 it{q.next_it}）——"
             "控制台停→开后自动重新入队（开课标记 mtime 更新即重开信号）"
+        )
+        bc_rt = getattr(rt, "bc", None)
+        bc_course = getattr(bc_rt, "course", None)
+        maybe_auto_stop_course(
+            kind=str(getattr(rt, "kind", "") or ""),
+            auto_stop=bool(getattr(bc_course, "auto_stop", False)),
+            traj=str(getattr(bc_rt, "traj", "") or ""),
         )
     if _all_settled(sup):
         return "all_settled"

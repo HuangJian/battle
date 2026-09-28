@@ -1,0 +1,39 @@
+// 课程 bc-open-fuse-e5 —— **Opening-BC 剂量臂 E5**（docs/nn/experiments.md §55）
+//
+// 与 E2 逐字同，唯一变量：`train.epochs` 2→5（剂量对照；`init_weights_fp` 进幂等键，
+// 两臂 job 身份天然不同）。其余见 bc-open-fuse-e2.bc.jsonc 头注。
+{
+  "version": 1,
+  "name": "bc-open-fuse-e5",
+  "kind": "bc",
+  "level": "ladder-c20-lives1",
+
+  "corpus": {
+    "games_per_stage": 0,
+    "wins_only": true,
+    "near_miss_times": 0,
+    "seed_rotate": 0
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 5,
+    "batch": 512,
+    "lr": 0.001,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "seed": 1234,
+    "ckpt_every": 10,
+    "fire_pos_weight": "auto",
+    "init_from": "nn-training/weights/x20-steady/x20-steady.it175.20260920-215502.json"
+  },
+
+  "iters": 1,
+  "workers": 8,
+  "auto_stop": true,
+  "out": "tmp/bc-open-fuse-e5/weights.json",
+  "traj": "tmp/bc-open-fuse-e5",
+  "backup_dir": "nn-training/weights/bc-open-fuse-e5",
+  "backup_prefix": "bc-open-fuse-e5"
+}

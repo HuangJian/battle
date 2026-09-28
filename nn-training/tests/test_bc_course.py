@@ -562,3 +562,30 @@ def test_bc_course_eval_block_default_off() -> None:
     from rl.bc_config import load_bc_course
 
     assert load_bc_course("bc-e2e").eval.enabled is False  # 夹具不配 eval
+
+
+def test_bc_train_init_from_and_auto_stop_defaults() -> None:
+    """warm-start 缺省关：init_from 空（从随机起）+ auto_stop 关（收官不清标记）。"""
+    from rl.bc_config import load_bc_course
+
+    c = load_bc_course("bc-c4")
+    assert c.train.init_from == ""
+    assert c.auto_stop is False
+
+
+def test_bc_train_init_from_parses(tmp_path: Path) -> None:
+    """train.init_from 透传（路径语义由发布端 resolve，配置层只收字符串）。"""
+    import json as _json
+
+    from rl.bc_config import load_bc_course
+
+    p = tmp_path / "w.bc.jsonc"
+    w = tmp_path / "w.json"
+    w.write_text("{}", encoding="utf-8")
+    p.write_text(
+        _json.dumps({"name": "w", "train": {"init_from": str(w)}, "auto_stop": True}),
+        encoding="utf-8",
+    )
+    c = load_bc_course(str(p))
+    assert c.train.init_from == str(w)
+    assert c.auto_stop is True

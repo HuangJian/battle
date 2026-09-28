@@ -414,3 +414,23 @@ def test_finish_course_does_not_exit_and_skips_smoke(tmp_path: Path, rec: Record
     smoke.finish_course(1)
     assert len(rec.halts) == 1  # 冒烟轮不重复下发
     assert read_events(smoke.runtime.jsonl_path) == []
+
+
+def test_resolve_bc_init_weights_semantics(tmp_path: Path) -> None:
+    """`train.init_from` 解析：空⇒None；相对路径按仓库根锚定；缺失文件响亮拒发。"""
+    from rl.bc_config import BcCourseConfig, BcTrainBlock
+    from rl.bc_loop import resolve_bc_init_weights
+    from rl.queue import REPO_ROOT
+
+    def course_with(init_from: str) -> BcCourseConfig:
+        return BcCourseConfig(name="t", train=BcTrainBlock(init_from=init_from))
+
+    assert resolve_bc_init_weights(course_with("")) is None
+    w = tmp_path / "w.json"
+    w.write_text("{}", encoding="utf-8")
+    assert resolve_bc_init_weights(course_with(str(w))) == w
+    with pytest.raises(SystemExit, match="init_from"):
+        resolve_bc_init_weights(course_with("no/such/file.json"))
+    assert resolve_bc_init_weights(course_with("nn-training/rl-config.json")) == (
+        REPO_ROOT / "nn-training/rl-config.json"
+    )

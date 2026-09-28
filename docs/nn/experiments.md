@@ -22,7 +22,10 @@
   （batch512/mirror0.5/val0.1/value0/seed1234/ckpt10 不触发即等价关）。
 - 门（开训前 pin）：主门＝开局零伤 ≥70%（人类 85.5%）**且** held-out 杀/通关不比 it175 差；
   三反证任一即停（通关崩/超时冒/常量停复现）；停率只观测（h1/h2 教训）。
-- transport：kaggle 手工（控制台表达不了 warm-start）；判完不续 PPO（留存按 §52 另议）。
+- transport：控制台 BC 课直发（课程 `train.init_from`＋`auto_stop` 机制已落地：
+  init 经 payload `init_weights.json`＋fp 进幂等键，worker 作 `--resume` 起点；
+  跑完删标记自动停课；ingest 给工作拷贝打本课血缘戳，原语料只读）。kaggle 手工作为逃生舱保留。
+- 判完不续 PPO（留存按 §52 另议）。
 - 成功→谈下一步融合（残局/C 重开序列）；失败→读死因（洗掉？吸引子重现？无效应？）→
   DAgger 队形不变。
 
