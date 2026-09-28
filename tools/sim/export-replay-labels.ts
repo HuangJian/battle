@@ -18,7 +18,12 @@
  * Usage:
  *   bun tools/sim/export-replay-labels.ts --replays <file|dir> [--replays ...]
  *       --out tmp/human-shards [--verdicts <verdicts.jsonl>] [--teacher-label human]
- *       [--session <name>] [--min-kills 20]
+ *       [--session <name>] [--min-kills 20] [--tick-max <n>] [--drop-tick0]
+ *
+ * 开局切片（§55 Opening-BC）：`--tick-max 600` 只保留 tick < 600 的决策样本，
+ * `--drop-tick0` 额外剔除 tick==0 那一拍（播放入口方向 null 的伪影；tick≥10 全是真行为）。
+ * 保真（tickHashes 全对＋kills 对账）照跑全程，不因子集采样打折；窗口参数进 manifest
+ * （`tickWindow`，默认全量时不写该键 ⇒ 默认行为字节不变）。
  */
 import { World } from '../../src/game/World'
 import { Simulation } from '../../src/game/Simulation'
@@ -66,6 +71,13 @@ function fail(msg: string): never {
   process.exit(2)
 }
 
+/** 开局切片谓词（§55）：tick 窗＋tick0 剔除。纯函数，单测直测。
+ *  tickMax = Infinity（缺省）⇒ 全量旧行为；dropTick0 只剔 tick==0 那一拍。 */
+export function shouldKeepDecision(tick: number, tickMax: number, dropTick0: boolean): boolean {
+  if (dropTick0 && tick === 0) return false
+  return tick < tickMax
+}
+
 function collectReplayFiles(inputs: string[]): string[] {
   const out: string[] = []
   for (const p of inputs) {
@@ -97,6 +109,8 @@ function convertOne(
   file: string,
   verdicts: Map<string, any> | null,
   minKills: number,
+  tickMax: number,
+  dropTick0: boolean,
 ): { ok: boolean; detail: string; samples?: Sample[]; meta?: any } {
   const parsed: any = parseReplayFile(readFileSync(file, 'utf8'))
   if (parsed.error || !parsed.replay) return { ok: false, detail: `parse 失败` }
@@ -161,7 +175,7 @@ function convertOne(
     prevDir = dir
     prevGuard = guard
     prevFrenzy = frenzy
-    if (isDecision) {
+    if (isDecision && shouldKeepDecision(tick, tickMax, dropTick0)) {
       const label = actionFromFrame({ direction: dir, firing })
       const masks = computeMasks(world)
       const ringFrac = encoder.scalars[6]
@@ -219,6 +233,8 @@ function main(): void {
   let teacher = 'human'
   let session = ''
   let minKills = 20
+  let tickMax = Infinity
+  let dropTick0 = false
   const argv = process.argv.slice(2)
   for (let i = 0; i < argv.length; i++) {
     if (argv[i] === '--replays') replayInputs.push(argv[++i])
@@ -227,9 +243,13 @@ function main(): void {
     else if (argv[i] === '--teacher-label') teacher = argv[++i]
     else if (argv[i] === '--session') session = argv[++i]
     else if (argv[i] === '--min-kills') minKills = parseInt(argv[++i], 10)
+    else if (argv[i] === '--tick-max') {
+      tickMax = parseInt(argv[++i], 10)
+      if (!Number.isFinite(tickMax) || tickMax <= 0) fail('--tick-max 须为正整数')
+    } else if (argv[i] === '--drop-tick0') dropTick0 = true
     else
       fail(
-        `未知参数 ${argv[i]}（允许：--replays/--out/--verdicts/--teacher-label/--session/--min-kills）`,
+        `未知参数 ${argv[i]}（允许：--replays/--out/--verdicts/--teacher-label/--session/--min-kills/--tick-max/--drop-tick0）`,
       )
   }
   if (!replayInputs.length) fail('缺少 --replays')
@@ -242,7 +262,7 @@ function main(): void {
   let totalSamples = 0
   const usedNames = new Set<string>()
   for (const f of files) {
-    const r = convertOne(f, verdicts, minKills)
+    const r = convertOne(f, verdicts, minKills, tickMax, dropTick0)
     if (!r.ok || !r.samples || !r.meta) {
       console.log(`[SKIP] ${basename(f)}: ${r.detail}`)
       skipped++
@@ -277,7 +297,7 @@ function main(): void {
     writeNpy(`${dir}/actions.npy`, actions, [N, 2], 'u1')
     writeNpy(`${dir}/masks.npy`, masks, [N, MASK_DIM], 'u1')
     writeNpy(`${dir}/conditions.npy`, conditions, [N], 'u1')
-    const manifest = {
+    const manifest: Record<string, any> = {
       schemaMajor: OBS_SCHEMA_MAJOR,
       obsSchemaMajor: OBS_SCHEMA_MAJOR,
       schemaFingerprint: SCHEMA_FINGERPRINT,
@@ -294,6 +314,10 @@ function main(): void {
       session: session || null,
       nearMissFrames: r.samples.filter((s) => s.nearMiss).length,
     }
+    // 窗口参数只在开窗时落盘：默认全量跑的 manifest 与改前逐字节一致。
+    if (tickMax !== Infinity || dropTick0) {
+      manifest.tickWindow = { max: tickMax === Infinity ? null : tickMax, dropTick0 }
+    }
     writeFileSync(`${dir}/manifest.json`, JSON.stringify(manifest, null, 2))
     kept++
     totalSamples += N
@@ -305,8 +329,12 @@ function main(): void {
   )
   writeFileSync(
     `${outDir}/_export_report.json`,
-    JSON.stringify({ files: files.length, kept, skipped, totalSamples, teacher, session }, null, 2),
+    JSON.stringify(
+      { files: files.length, kept, skipped, totalSamples, teacher, session, tickMax, dropTick0 },
+      null,
+      2,
+    ),
   )
 }
 
-main()
+if (import.meta.main) main()
