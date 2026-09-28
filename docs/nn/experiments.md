@@ -7,6 +7,54 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 ---
 
+## §46 B2@c20 资格修正：c20 不自动继承 B2（2026-09-28）
+
+背景：h5e 在 x5 处理量 ~0.5%（0.75~0.84 次/局，avgDt 9.96 vs 10，minDt≥3 恒成立，
+h5e 课程结算节），判事件无边际；R2 基线 c20 同量级（1~4 次/局，plan/new-era-stop.plan.md
+§6 表）；c05/c20 同 grid 同 forces 串、开局 600tick 同源，而 STOP 是开局技能（人类开局
+54.5% vs 后期 26.3%），信用在 c20 严格更难（视界 3.3 倍，γ 同，死亡截断同）。
+被否决：B2@c20 直开（换个地方重复 h5e，预期读数同带）。
+决定：c20 不自动继承 B2 资格——先验 onset 处理量 >5% 实测（shard manifest 同口径，
+`events×K/ticks`）才开事件腿；否则 B2 归档，信用窗/DAgger 排队。威胁层单位机会停率更高
+（人类 threat 318.8 vs clean 234.3/千tick）记为弱反例，不足以开腿。
+违反后果：直开 c20 事件腿 ⇒ 再烧一条 80~100 轮横盘腿。h5 四腿结算见各课程文件结算节
+（`nn-training/curricula/h5-{stop,e-events,a-earlydmg,b-clean}.jsonc`，commit 118b6ce8）。
+
+---
+
+## §45 BC 翻案重测立项：毒标签死刑的干净重测（2026-09-28）
+
+背景：§32 死刑（61 demos→BC→held-out mean 0.00/按住上零开火）执行于毒标签下：
+当时 0=keep，人类 24.4% 停帧全标成走。B 案（0=stop，`97bffe7a`）后标签字节自动变对
+（`actionFromFrame null→0` 一行未动），死刑依据失效；h5 四腿全阴后，这是最便宜的未执行项。
+
+数据 pin（冻结，实测本日）：`nn-training/data/human-x20-corpus/` 61 shards / 38564 samples
+（与 `x20-human-anchor.jsonc` 结算节⑴同数），teacher 全 human，obsSchemaMajor 3（== 现行），
+zip＋目录双份在库。move 分布 0:27.4%/1:16.9%/2:16.0%/3:19.8%/4:19.9%，fire 正例 28.6%——
+无坍缩标签。弃用规则 corpus 级通过（stop 27.4%≤35%；段长 half 沿用 §5.0 的 62 局 clearance，
+录像已清，判据维持原记录）；61 中 6 shard 个体 >35%（max 42.4%）——保留（clearance 是
+corpus 级），此行即 pin，开训后不得剔除。
+
+训练镜像 §32（唯一变量＝语义修正）：kaggle cuda（或 run_bc 同构链），60 epochs，
+val-split，从随机起（`--resume` 不用），early-stop；val 只记录不判（§32 安慰剂教训保留）。
+配置逐项记录；训练栈自 09-21 的变更如实列差异，不追平。
+
+held-out 重定义（原 255 seed 名单随 tmp 丢失，不考古）：c20-lives1（level 0/hard/1 命/
+12900t，`tmp/heldout-eval.ts` 同 harness）255 个 (stage,seed) 对，排除全部 61 demo 对；
+seed 名单开训前落盘 pin（判决语料固定，不适用 §15.1 轮换）。判决只认此名单。
+
+门（§32 字面，不改数字）：同 held-out 同命令重跑对照（不引用旧数）→ ref low% ≤70%
+且 ref mean ≥ 对照mean+2.0；附 1 局回放解剖（constant-stop/按住上/零开火三指纹任一复现即标注）。
+
+陷阱（预注册）：glm P2-4（BC 收敛＋dense-only ⇒ advantage≈0，下游作 warm-start 标陷阱）；
+C 腿 kk=1（下游锚小开，x20-human-anchor 的 0.1 已有）；val 健康≠行为健康。
+
+成功→填 x20-human-anchor bc 占位并另议开腿（iters:0→>0 另需一条开腿决策）；失败→§32
+死刑维持，转 DAgger 名正言顺。启动由用户（控制台 BC 课或 kaggle 手工，§32 先例）；
+agent 只交规格，不启动训练。
+
+---
+
 ## §44 x20-steady-cont 早停：it1–25，用户叫停，新纪元取代（2026-09-26）
 
 B 续跑（起点 B-it175 纯 warm start，kk=false；200 轮/14h 预算）仅跑出 it1–25 即停：
