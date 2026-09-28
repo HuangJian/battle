@@ -200,6 +200,8 @@ export interface CourseOnceSpec {
   localSlots?: number
   distCfgPath?: string
   windowSec?: number
+  /** R2 事件 rung：True ⇒ 本批走事件门（均匀 K ∪ threat-ONSET + Δt≥3）；缺席 = 老行为。 */
+  decisionEvents?: boolean
 }
 
 export function buildSpec(o: {
@@ -215,6 +217,7 @@ export function buildSpec(o: {
   localSlots?: number
   distCfgPath?: string
   windowSec?: number
+  decisionEvents?: boolean
 }): CourseOnceSpec {
   const spec: CourseOnceSpec = {
     course: o.course,
@@ -230,6 +233,7 @@ export function buildSpec(o: {
   if (o.localSlots !== undefined) spec.localSlots = o.localSlots
   if (o.distCfgPath) spec.distCfgPath = o.distCfgPath
   if (o.windowSec !== undefined) spec.windowSec = o.windowSec
+  if (o.decisionEvents) spec.decisionEvents = true
   return spec
 }
 
@@ -608,6 +612,9 @@ async function main(): Promise<void> {
     localSlots: distLocal,
     distCfgPath: distCfgPath || undefined,
     windowSec,
+    // R2 事件 rung：显式开关才走事件门（缺席 = 老行为；训练课程侧由课程 decision_events 字段驱动，
+    // 手动 judge 由本 flag 驱动，两条腿语义一致）。
+    decisionEvents: flag('decision-events') || undefined,
   })
   process.stderr.write(
     `[eval-course-ckpt] 本机槽位 distLocal=${distLocal}（来源：${distLocalSource}）\n`,

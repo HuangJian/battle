@@ -17,6 +17,7 @@ import {
   applyInitSnapshot,
   loadInitSnapshot,
   runOneBench,
+  type ShardData,
 } from '../tools/sim/export-rl-rollout'
 import { hashIndexFor, materializeCuts } from '../tools/sim/build-state-init-bank'
 
@@ -259,6 +260,95 @@ describe('P1 注入语义（applyInitSnapshot / runOneBench 端到端）', () =>
     expect(a.ticks).toBe(b.ticks)
     expect(a.kills).toBe(b.kills)
     expect(a.shard.metrics.slice(0, 3)).toEqual(b.shard.metrics.slice(0, 3))
+  })
+})
+
+/**
+ * R2.3 的「无事件局与旧版逐字节一致」：把 shard 逐字节铺成字符串数组（typed array 走 Buffer，
+ * 逐位比较；list 型字段走 JSON）。事件模式在**零事件**时必须与均匀模式完全相等。
+ */
+function shardBytes(s: ShardData): string[] {
+  const parts: string[] = [`n=${s.n}`]
+  for (const o of s.obs)
+    parts.push(Buffer.from(o.buffer, o.byteOffset, o.byteLength).toString('base64'))
+  for (const v of s.scalars)
+    parts.push(Buffer.from(v.buffer, v.byteOffset, v.byteLength).toString('base64'))
+  parts.push(
+    JSON.stringify({
+      aMove: s.aMove,
+      aFire: s.aFire,
+      lpMove: s.lpMove,
+      lpFire: s.lpFire,
+      value: s.value,
+      done: s.done,
+      mask: s.mask,
+      metrics: s.metrics,
+    }),
+  )
+  return parts
+}
+
+describe('R2 x2 事件门 × state-init（R2.4 方案 i：交棒首段禁 threat 事件）', () => {
+  it('零事件局：事件模式与均匀模式 shard 逐字节一致（均匀子集回归）', () => {
+    // stage 0 classic / 零权重 / 120 tick：实测 events=0（威胁入带不可能发生在这段短局里）。
+    const uniform = runOneBench(
+      0,
+      STAGES[0],
+      4242,
+      'classic',
+      120,
+      WEIGHTS,
+      'off',
+      false,
+      1,
+      null,
+      null,
+      false,
+    )
+    const events = runOneBench(
+      0,
+      STAGES[0],
+      4242,
+      'classic',
+      120,
+      WEIGHTS,
+      'off',
+      false,
+      1,
+      null,
+      null,
+      true,
+    )
+    expect(events.decisionReadout.events).toBe(0) // 「无事件」是被实测的定义，不是假设
+    expect(events.decisionReadout.minDt).toBe(10)
+    expect(events.shard.n).toBe(uniform.shard.n)
+    expect(shardBytes(events.shard)).toEqual(shardBytes(uniform.shard))
+  })
+
+  it('交棒 tick 必是决策 tick；注入 + 事件模式下 Δt ≥ 3（R2.4 断言落地）', () => {
+    const dir = tmp()
+    const { path } = writeSnapshot(dir)
+    const res = runOneBench(
+      0,
+      STAGES[0],
+      4242,
+      'classic',
+      900,
+      WEIGHTS,
+      'off',
+      false,
+      1,
+      null,
+      { path },
+      true,
+    )
+    expect(res.initTick).toBe(CUT)
+    // metrics 行只在决策步下发 ⇒ 首行 tick == CUT 即「交棒点就是决策点」（与银行切点规则同源）。
+    expect(res.shard.metrics[0][0]).toBe(CUT)
+    const d = res.decisionReadout
+    expect(d.n).toBeGreaterThan(0)
+    expect(d.minDt).toBeGreaterThanOrEqual(3)
+    expect(d.maxDt).toBeLessThanOrEqual(10)
   })
 })
 

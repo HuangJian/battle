@@ -410,6 +410,10 @@ def corpus_identity_fp(course: CourseConfig) -> str:
             "cut_step": si.cut_step,
             "rotate_cuts": bool(si.rotate_cuts),
         }
+    # 决策事件补充（§6 R2）：transition 粒度（Δt 分布）变了 ⇒ 样本身份变；
+    # 同样**仅在激活时**（无条件加入会让一切既有课程指纹漂移，在跑的腿 shard 被判异身份）。
+    if bool(getattr(course, "decision_events", False)):
+        payload["decision_events"] = True
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 

@@ -391,6 +391,8 @@ class EvalDispatcher:
                             mode="eval",
                             kind=EVAL_WEIGHTS_KIND,
                             stage_json=stage_json_for_args(args, task[0]) or "",
+                            # R2 事件 rung：与训练 rollout 同语义（缺席 = 老行为）。
+                            decision_events=bool(getattr(args, "decision_events", False)),
                             lives_override=int(_ov["lives_override"])
                             if "lives_override" in _ov
                             else None,
@@ -576,6 +578,8 @@ class EvalDispatcher:
                             player_level=int(_ov["player_level"])
                             if "player_level" in _ov
                             else None,
+                            # R2 事件 rung：本机直跑与节点同语义（缺席 = 老行为）。
+                            decision_events=bool(getattr(args, "decision_events", False)),
                         )
                         why = dist_common.validate_eval_result(manifest, wver)
                         if why:
@@ -700,6 +704,16 @@ class EvalDispatcher:
                 if need_sj and not ping.get("stageJsonSupport"):
                     log(
                         f"[eval] node {nid}: 自定义关 eval 需 stageJsonSupport 能力位"
+                        f"（旧 agent）—— skipped，任务落本机 local"
+                    )
+                    continue
+                # R2 事件 rung：事件课程的局只派给能力位节点（旧 agent 静默跑均匀局混入）。
+                # 缺席 = 老课程不查（getattr 缺省 False）。
+                if bool(getattr(args, "decision_events", False)) and not ping.get(
+                    "decisionEventsSupport"
+                ):
+                    log(
+                        f"[eval] node {nid}: 事件课程 eval 需 decisionEventsSupport 能力位"
                         f"（旧 agent）—— skipped，任务落本机 local"
                     )
                     continue

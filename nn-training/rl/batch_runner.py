@@ -44,6 +44,7 @@ from rl.batch_plan import (
     is_transient_error,
     kind_for_policy,
     node_gate_reason,
+    node_supports_decision_events,
 )
 from rl.batch_store import BatchStore, data_root
 from rl.eval_local import (
@@ -682,6 +683,16 @@ class _UnitLanes:
                 )
             lane["next_try"] = time.time() + self.recover_ping_sec
             return False
+        # R2 事件 rung：本批要事件门 ⇒ 无能力位节点拒派（旧 agent 静默跑均匀局混入，
+        # 与 stageJsonSupport 同规；self.args 缺席 = 老行为不查）。
+        if bool(getattr(getattr(self.owner, "args", None), "decision_events", False)) and not node_supports_decision_events(ping):
+            if lane["tries"] == 1 or lane["tries"] % 3 == 0:
+                log(
+                    f'[batcheval] node {nid}: 缺 decisionEventsSupport 能力位（旧 agent）——'
+                    f'事件任务被拒；不降级'
+                )
+            lane["next_try"] = time.time() + self.recover_ping_sec
+            return False
         t_w = time.monotonic()
         try:
             mode = dist_common.post_weights(
@@ -833,6 +844,12 @@ class _UnitLanes:
             # metrics v8 危险暴露四列（与 eval_row 同源，见 eval_v8_fields；
             # 缺键（旧节点/旧报告）= None，下游按缺省处理，不伪造）。
             **eval_v8_fields(manifest),
+            # 新纪元死刑通道（plan §2 #9/P1-2 方案 a）：裸透传；旧报告缺键 = None，
+            # 读数方按无信号处理（与 EvalCourseRow 可选字段同约）。
+            "moveHist": manifest.get("moveHist"),
+            "decisions": manifest.get("decisions"),
+            "idleTicks": manifest.get("idleTicks"),
+            "stopRuns": manifest.get("stopRuns"),
             # B 层归属（ingest → EvalStore 直读）
             "batch_id": self.owner.batch.get("batch_id"),
             "batch_unit": {"idx": self.owner.unit_idx, "of": self.owner.unit_of},
@@ -907,6 +924,8 @@ class _UnitLanes:
                 lives_override=up["lives"],
                 player_level=up["level"],
                 policy=self.owner.policy,
+                # R2 事件 rung：手动 judge 由 spec.decisionEvents 驱动（缺席 = 老行为）。
+                decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
             )
         else:
             m, _files = dist_common.fetch_task(
@@ -926,6 +945,8 @@ class _UnitLanes:
                 lives_override=up["lives"],
                 player_level=up["level"],
                 policy=self.owner.policy,
+                # R2 事件 rung：与本机份额同源（self.args，缺席 = 老行为）。
+                decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
             )
         why = dist_common.validate_eval_result(m, self.wver)
         if why:

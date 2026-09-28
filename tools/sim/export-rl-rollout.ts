@@ -84,6 +84,15 @@ import {
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { RNG } from '../../src/utils/RNG'
 import { npyBytes } from '../../src/nn/npy'
+import {
+  DEFAULT_DECISION_K,
+  createDecisionGateConfig,
+  createDecisionGateState,
+  decisionDue,
+  decisionReadout,
+  poolDecisionReadouts,
+  type DecisionReadout,
+} from '../../src/nn/decision-gate'
 import { writeFileSync, mkdirSync, readFileSync, existsSync } from 'fs'
 import { restoreWorld } from '../../src/snapshot/WorldSerializer'
 import type { WorldSnapshot } from '../../src/snapshot/types'
@@ -101,7 +110,8 @@ import {
 import type { RunTelemetry } from './simulation-runner'
 
 const MAX_TICKS = 36000
-const K = 10
+// K 的单一来源（plan/new-era-stop.plan.md §6 R2）：旧字面量 10 保留为别名，语义不变。
+const K = DEFAULT_DECISION_K
 const FIRE_DIM = 2
 export const MASK_DIM = MOVE_DIM + FIRE_DIM // 7 (v2: item head removed)
 
@@ -637,6 +647,8 @@ interface RunResult {
   quality: number
   dims: Record<string, { value: number | null; raw: number }>
   decisionTicks: number
+  /** R2.3 决策门读数（步数 / 事件步 / Δt 分布）；均匀模式下 = `minDt==maxDt==K`。 */
+  decisionReadout: DecisionReadout
   dodgeTicks: number
   playerDeaths: number
   playerHits: number
@@ -674,6 +686,11 @@ function runOne(
   livesOverride: number | null = null,
   playerLevelOverride: number | null = null,
   init: { path: string } | null = null,
+  /**
+   * x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：给决策门加 threat-ONSET
+   * （均匀 K ∪ 事件 + Δt≥3）。缺省 false = 均匀 K 旧行为（既有调用逐字节不变）。
+   */
+  decisionEvents = false,
 ): RunResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -726,6 +743,17 @@ function runOne(
     }
   }
   scripted.reset()
+  // R2 决策门（唯一实现）：逐 tick 喂（事件模式要沿检测 + 最小间隔闸）。
+  const gateCfg = createDecisionGateConfig(decisionEvents)
+  const gate = createDecisionGateState()
+  if (init) {
+    // R2.4 共存裁决（方案 i，DECISIONS §2026-09-27-…）：交棒后首段禁 threat 事件，
+    // 保留均匀 K。理由：注入世界的 `prevThreat` 历史是未知的（快照只存当前态）——
+    // 在交棒瞬间“首次入带”会变成一次伪造的 onset（不是真实的“从安全到危险”转移）。
+    // 抑制窗 = 第一个 K 段（至下一个均匀边界），均匀决策照常；窗内 prevThreat 照常更新，
+    // 所以窗内已开始的威胁不会被憋到窗后追发。
+    gate.suppressEventsUntilTick = initTick + K
+  }
   // god 链臂（A3 A/B 对照专用）：God-AI 探针只读 World（自身独立 RNG，§47），
   // 不参与驱动仿真——每决策 tick 跑一次 think 判 _lastBranch==='dodge'。
   const godProbe =
@@ -799,7 +827,7 @@ function runOne(
   } | null = null
   let t = initTick // 游戏时钟继续走：cut 吃掉 T（max_ticks 仍对游戏时钟算）
   let outcome = 'timeout'
-  let decisionTicks = 0 // 决策 tick 数（K 间隔）
+  let decisionTicks = 0 // 决策步数（K 间隔；事件模式下含事件步——分布看 decisionReadout）
   let dodgeTicks = 0 // L0/保底层覆盖采样动作的决策 tick 数（§3.5 覆盖率口径）
 
   // 每决策步推一行 + 终局再推一行 ⇒ shard.metrics 恒为 [N+1] 行、每行 METRICS_DIM 列
@@ -822,7 +850,7 @@ function runOne(
   }
 
   while (t < maxTicks) {
-    if (t % K === 0) {
+    if (decisionDue(t, world, gate, gateCfg)) {
       // §368 提速③：obs 只在决策 tick 编码（原本每 tick 都编码，占整局 1.8–2.3%；
       // 非决策 tick 的编码结果无人消费——obs 只在下面 forward 与 pending 快照里用）。
       encoder.encode(world)
@@ -1051,6 +1079,7 @@ function runOne(
     quality: scored.quality,
     dims,
     decisionTicks,
+    decisionReadout: decisionReadout(gate),
     dodgeTicks,
     playerDeaths: tel.playerDeaths,
     playerHits: tel.playerHits,
@@ -1140,6 +1169,8 @@ export function runOneBench(
   livesOverride: number | null = null,
   playerLevelOverride: number | null = null,
   init: { path: string } | null = null,
+  /** x2 事件 rung（R2）：同 `runOne`。 */
+  decisionEvents = false,
 ): RunResult {
   return runOne(
     stageIdx,
@@ -1153,6 +1184,7 @@ export function runOneBench(
     livesOverride,
     playerLevelOverride,
     init,
+    decisionEvents,
   )
 }
 
@@ -1221,6 +1253,9 @@ function main(argv: string[] = process.argv.slice(2)): void {
   let packMemory = false
   // 起始分布注入（plan/x20-state-init.plan.md P1）：快照文件路径，'' = 标准开局（旧行为）。
   let initSnapshotPath = ''
+  // x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：显式开启才加 threat-ONSET；
+  // 缺省 = 均匀 K（旧 manifest/_rl_report 逐字节不变）。
+  let decisionEvents = false
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--out') outDir = args[++i]
     else if (args[i] === '--difficulty') difficulty = args[++i]
@@ -1241,6 +1276,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
     else if (args[i] === '--pack') packPath = args[++i]
     else if (args[i] === '--pack-memory') packMemory = true
     else if (args[i] === '--init-snapshot') initSnapshotPath = args[++i]
+    else if (args[i] === '--decision-events') decisionEvents = true
   }
   const stages = parseRange(stagesStr)
   const seeds = parseRange(seedsStr)
@@ -1273,6 +1309,7 @@ function main(argv: string[] = process.argv.slice(2)): void {
   let totalShots = 0
   let totalEnemyHits = 0
   let totalPowerUps = 0
+  const decisionReadouts: DecisionReadout[] = []
   const perGame: string[] = []
 
   for (const si of stages) {
@@ -1308,7 +1345,9 @@ function main(argv: string[] = process.argv.slice(2)): void {
         resolveLivesFlag(livesOverride),
         playerLevelOverride ? parseInt(playerLevelOverride, 10) : null,
         initSnapshotPath ? { path: initSnapshotPath } : null,
+        decisionEvents,
       )
+      decisionReadouts.push(res.decisionReadout)
       outcomes[res.outcome] = (outcomes[res.outcome] ?? 0) + 1
       if (res.win) wins++
       scores.push(res.score)
@@ -1329,6 +1368,8 @@ function main(argv: string[] = process.argv.slice(2)): void {
         ticks: res.ticks,
         nSamples: res.shard.n,
         k: K,
+        // R2.3 决策门读数（`--decision-events` 时才有意义；缺省不写，旧 manifest 逐字节不变）。
+        ...(decisionEvents ? { decisionReadout: res.decisionReadout } : {}),
         score: res.score, // 已 gated（base_destroyed ×BASE_LOSS_MULT）；Python reconcile 输入
         scoreUngated: res.scoreUngated,
         quality: res.quality,
@@ -1437,6 +1478,8 @@ function main(argv: string[] = process.argv.slice(2)): void {
       dodgeTicks: totalDodgeTicks,
       decisionTicks: totalDecisionTicks,
     },
+    // R2.3 avg-Δt 读数（`--decision-events` 时才有意义；缺省不写 = 旧报告逐字节不变）。
+    ...(decisionEvents ? { decision: poolDecisionReadouts(decisionReadouts) } : {}),
     behavior: {
       deathsPerGame: +(totalDeaths / Math.max(1, total)).toFixed(3),
       playerHitsPerGame: +(totalHits / Math.max(1, total)).toFixed(3),
@@ -1466,6 +1509,9 @@ function main(argv: string[] = process.argv.slice(2)): void {
   console.log(`games=${total} winRate=${winRate.toFixed(4)} outcomes=${JSON.stringify(outcomes)}`)
   console.log(`score=${JSON.stringify(summary.scoreStats)}`)
   console.log(`dims=${JSON.stringify(dimMeans)}`)
+  if (decisionEvents) {
+    console.log(`decision=${JSON.stringify(summary.decision)}`)
+  }
   console.log(`totalSamples=${totalSamples} totalTicks=${totalTicks}`)
   // --pack-memory：npy 只在内存里组装后进容器，盘上**没有** shard 目录 —— 再打
   // 「shards under: …」会把排障的人往空目录引（sampler-agent 路径的实际消费方是 pack）。

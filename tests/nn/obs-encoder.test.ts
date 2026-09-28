@@ -190,6 +190,77 @@ describe('decisionTick (event-type predicate)', () => {
   })
 })
 
+/**
+ * threat-ONSET（plan/new-era-stop.plan.md §6 R2.1）：`condition === 4`，只在调用方传入
+ * `prevThreat` 时可能产出；不传 = 旧四类事件（现有导出器逐字节不变）。
+ * 夹具：玩家在 (96,96)，威胁源 = 同列、炮口朝下的敌车（几何恒定，只用 alive 开关）。
+ */
+describe('decisionTick threat-ONSET (edge, condition 4)', () => {
+  const enemyTank = (alive: boolean) =>
+    mkTank({ allegiance: 'enemy', kind: 'basic', x: 96, y: 48, dir: 'down', alive })
+  /** 无 fire-edge 的世界（frame 0 + nextFireInterval 300），免得 condition 被 1 抢走。 */
+  const threatWorld = (alive: boolean) =>
+    mkWorld({
+      frame: 0,
+      player: mkTank({ allegiance: 'player', x: 96, y: 96, dir: 'up' }),
+      allTanks: [enemyTank(alive)],
+    })
+  const inLane = threatWorld(true)
+  const outLane = threatWorld(false)
+
+  it('未传 prevThreat：威胁在场也不产生事件（旧事件集不变）', () => {
+    const r = decisionTick(7, inLane, 'up', 'up', false, false, false, false)
+    expect(r.isDecision).toBe(false)
+    expect(r.condition).toBe(3)
+  })
+
+  it('入带翻沿 ⇒ condition 4（t%k!=0 也到期）', () => {
+    const r = decisionTick(7, inLane, 'up', 'up', false, false, false, false, 10, false)
+    expect(r.isDecision).toBe(true)
+    expect(r.condition).toBe(4)
+  })
+
+  it('持续带（prevThreat=true）不重触发 —— 电平禁止入集', () => {
+    const r = decisionTick(7, inLane, 'up', 'up', false, false, false, false, 10, true)
+    expect(r.isDecision).toBe(false)
+  })
+
+  it('出带消沿（prevThreat=true、当前不在带）不触发', () => {
+    const r = decisionTick(7, outLane, 'up', 'up', false, false, false, false, 10, true)
+    expect(r.isDecision).toBe(false)
+  })
+
+  it('优先级：turn(0)/fire(1)/item(2) 高于 threat(4)', () => {
+    const turn = decisionTick(7, inLane, 'up', 'left', false, false, false, false, 10, false)
+    expect(turn.condition).toBe(0)
+    const fire = decisionTick(
+      7,
+      mkWorld({
+        frame: 18,
+        player: mkTank({ allegiance: 'player', x: 96, y: 96, nextFireInterval: 300, lastFire: 0 }),
+        allTanks: [enemyTank(true)],
+      }),
+      'up',
+      'up',
+      false,
+      false,
+      false,
+      false,
+      10,
+      false,
+    )
+    expect(fire.condition).toBe(1)
+    const item = decisionTick(7, inLane, 'up', 'up', false, true, false, false, 10, false)
+    expect(item.condition).toBe(2)
+  })
+
+  it('威胁 + 均匀边界同日：condition 4 优先于 subsample(3)', () => {
+    const r = decisionTick(20, inLane, 'up', 'up', false, false, false, false, 10, false)
+    expect(r.isDecision).toBe(true)
+    expect(r.condition).toBe(4)
+  })
+})
+
 describe('computeMasks', () => {
   it('masks fire-hold when cooldown not elapsed (v2: no item masks)', () => {
     const w = mkWorld({

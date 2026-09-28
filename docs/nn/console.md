@@ -7,6 +7,49 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §18 节点页「今天」整窗全空：聚合 memo 的时间下限被**每 5s 一拍的命中**无限续期（2026-09-27）
+
+用户报障：「节点页『今天』的数据一直为空，实际一直在训练（rollout/eval 过万局）；『昨天』有数据。」
+
+### 现场取证（长驻进程 vs 池根事实）
+
+`curl '/api/pool?days=today'` 的 `sources` 只有 **16** 个流，全部是**昨天 17:49 之前就存在**的那些；
+而池根里当天新生的 `tmp/h1-stop`、`tmp/h2-stop`、`tmp/h3-stop`（meta 1.4–3.0MB、逐秒在追加）
+**一个都不在**。同一路径 `?fresh=1`（硬清探测 + `invalidateNodeHistoryMemo`）后立刻变成 **19** 个流，
+今天窗口当场有数（self 8535 局 / mac 4658 局）。跑该聚合的进程 `bun src/server/server.ts` pid 31300
+**启动于 09-26 19:52**——比那三个流的 born time（09-27 06:08 / 07:30 / 08:28）都早。
+
+### 根因：`aggMemo.at` 是「上次**命中**时刻」⇒ 时间下限永不成立（滑动窗口反模式）
+
+`aggregateNodeHistory()` 的进程内 memo 判定写作 `(nowMs - aggMemo.at < AGG_MEMO_MIN_MS || fp === aggMemo.fp)`，
+**并在命中路径上 `aggMemo.at = nowMs`**。`snapshot-cache` 的机群探测（`computeFleetProbes`，5s 一拍）
+与 `api/pool` 的探测层都在拍它 ⇒ 两次调用间隔恒 < 30s ⇒ 时间下限**永久成立**（命中即续期），
+`fp === aggMemo.fp` 这一支**永远轮不到** ⇒ memo 冻结在**进程第一次计算那一刻**，此后新开的训练流
+一个都看不见。「昨天有数」纯属巧合：冻结快照的覆盖范围正好到昨晚 17:49。
+
+判据：**时间下限锚「上次计算时刻」；命中路径一个字都不改**（命中 ≠ 续期）。指纹相同仍与时间无关
+（空闲零重扫）；指纹变了（训练在追加）才按「距上次计算」封顶重扫节奏。
+
+### 修法
+
+* `pool-history.ts`：`AggMemo.at` → `computedAt`（只在**计算**那一遍落），判定抽成纯函数
+  `aggMemoReusable(m, fp, nowMs, minMs)`；`aggregateNodeHistory(nowMs = Date.now())` 只给测试注入可控
+  时钟（生产调用方一个字不变），`resolveWindow(spec, nowMs, epochMs)` 早就是这个形。
+* 回归 `dashboard/tests/server-pool-history.test.ts`：① `aggMemoReusable` 边界（同指纹零重扫 /
+  29 999ms 内复用 / 满 30s 必须重扫）；② **稳态每 5s 调用 60s 内必须至少重扫一次**，且新开的训练流
+  **≤30s 内上屏**。两条用例先红后绿（把命中路径临时写回滑动刷新 ⇒ ② 立刻红）。
+* 顺带修同一文件里**日期钉死**的用例：`水位只作用于计数/样本…` 的窗口末刻写死 `'2026-09-26T15:00:00'`，
+  而行时间戳跟真实日期走 ⇒ 次日必红（`resolveWindow('all')` 的 `toDay` 卡在昨天、当天行全被日键挡掉）。
+  改取 `parseTsMs(tsAt(0, '15:00:00'))!`，与行同日。
+
+### 运维口径（修完必须做的事）
+
+memo 只活在**进程内**：改完代码要**重启控制台进程**才生效（旧进程仍在滑动续期）；
+未重启前的应急口子是面板「手动刷新」/ `?fresh=1`（硬清 memo + 等一次重算）。
+判据来源仍是池根事实（`sources[].mtimeMs`）：排查「今天是不是空的」先看 `sources` 里有没有当天的流，
+再谈窗口/口径。
+
+---
 ## §17 起 hub 很慢：回灌把**停掉的历史课**也逐课重试（2026-09-26）
 
 用户报障：「dashboard 上启动 trainer/hub 需要等很久，似乎是以前停掉的训练课程都还要扫一遍？」

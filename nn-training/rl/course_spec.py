@@ -678,6 +678,11 @@ class CourseConfig(BaseModel):
     seeds: str = "0-3"
     player: PlayerBlock = PlayerBlock()
     dodge: Literal["", "off", "l0", "god"] = ""
+    #: 决策事件补充（plan/new-era-stop.plan.md §6 R2：均匀 K ∪ threat-ONSET 沿 + Δt≥3）。
+    #: 缺席/False = 均匀 K 旧行为（老课程逐字节不变）。True ⇒ rollout/评估走事件门；
+    #: 进 `corpus_identity_fp`（仅激活时：transition 粒度变了，"一个样本是什么"已变，
+    #: 与 seed_rotate/state_init 同类；缺席不进，老课程指纹不动）。
+    decision_events: bool = False
     #: rollout **起始分布**（plan/x20-state-init.plan.md）：人类 demo 磁带中段交棒。
     #: 缺席 = 标准开局（老课程逐字节不变）。开训前置（银行 manifest 在盘上）由
     #: `apply_course` 在启动期校验——`load_course` 不多读盘（它只读课程文件本身）。
@@ -885,6 +890,9 @@ class CourseConfig(BaseModel):
             "max_games_per_stage": "max_games_per_stage",
             "seeds": "seeds",
             "dodge": "dodge",
+            # 决策事件补充（§6 R2；漏映射 = 静默失效，ent_break/paired_rotate_seed 前科）：
+            # 缺席 = args 走 getattr 缺省 False ⇒ 均匀 K 老行为。
+            "decision_events": "decision_events",
             "bc": "bc",
             "lr": "lr",
             "epochs": "epochs",

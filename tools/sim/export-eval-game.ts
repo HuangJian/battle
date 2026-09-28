@@ -62,6 +62,13 @@ import {
   inThreatLane,
   playerHpRatio,
 } from '../../src/nn/danger-metrics'
+import {
+  createDecisionGateConfig,
+  createDecisionGateState,
+  decisionDue,
+  decisionReadout,
+  type DecisionReadout,
+} from '../../src/nn/decision-gate'
 import { RNG } from '../../src/utils/RNG'
 import { writeFileSync, mkdirSync, readFileSync } from 'fs'
 import { scoreRun, V7_SCORE_CONFIG, type DimensionKey } from '../eval/godai-score'
@@ -96,7 +103,6 @@ import { buildPack } from './pack-container'
 import { runServe } from './serve-loop'
 
 const MAX_TICKS = 36000
-const K = 10
 const TELEMETRY_SAMPLE_TICKS = 6
 const BASE_PRESSURE_RADIUS = 12
 
@@ -320,6 +326,16 @@ interface EvalResult {
   puGotOther: number
   /** 终局剩余命数（replay 元数据用；报告口径不变——报告顶层本就无 lives，勿消费）。 */
   finalLives: number
+  /** 新纪元死刑通道（plan §2 #9/P1-2 方案 a；可选：旧 bundle 产物无此四列，读数方按缺席处理）。 */
+  moveHist?: number[]
+  decisions?: number
+  idleTicks?: number
+  stopRuns?: number[]
+  /**
+   * R2.3 决策门读数（`--decision-events` 时才有意义）：步数 / 事件步数 / avg-Δt / min-Δt /
+   * max-Δt。均匀模式下 `minDt == maxDt == K`；事件模式下 `minDt >= 3` 是门的不变式。
+   */
+  decisionReadout?: DecisionReadout
 }
 
 /** 结果 → .replay 状态位（与 replay-writer.statusFromResult 同映射）。 */
@@ -352,6 +368,12 @@ export function runEvalOne(
    *  自定义关/arena 传的是 loadIndex（0），文件名须带账本口径的原始 id 才能映射回
    *  (stage, seed)。缺省 = 沿用 stageIdx（真实关两者相等）。 */
   replayStageId: number | null = null,
+  /**
+   * x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：给决策门加 threat-ONSET
+   * （均匀 K ∪ 事件 + Δt≥3）。缺省 false = 均匀 K 旧行为（既有调用逐字节不变）。
+   * 判决链与部署链必须同值（tools/sim/eval-game-parity.test.ts 钉住）。
+   */
+  decisionEvents = false,
 ): EvalResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -492,11 +514,22 @@ export function runEvalOne(
   let t = 0
   let outcome: SimOutcome = 'max_ticks'
   let lossDetail: 'base_destroyed' | 'lives_exhausted' | undefined
+  // 新纪元死刑通道（plan §2 #9/P1-2 方案 a）：决策动作直方图 + 物理 idle 计数 + stop 段长。
+  // 只读诊断（不进 World、不进 metrics 列、不进 telemetry），旧消费方忽略新字段。
+  // 非 nn 策略（god 等）不走下面的决策分支 ⇒ decisions==0，读数方以后者缺席为无信号。
+  const moveHist = [0, 0, 0, 0, 0]
+  let decisions = 0
+  let idleTicks = 0
+  const stopRuns: number[] = []
+  let curStopRun = 0
+  // R2 决策门（唯一实现）：逐 tick 喂；`--decision-events` = 均匀 K ∪ threat-ONSET + Δt≥3。
+  const gateCfg = createDecisionGateConfig(decisionEvents)
+  const gate = createDecisionGateState()
 
   while (t < maxTicks) {
     // v3.7：意图执行器每 tick 内部自决（replan 帧跑 NN），无需手动 forward。
     if (policy === 'nn' || policy === 'nn-goal') {
-      if (t % K === 0) {
+      if (decisionDue(t, world, gate, gateCfg)) {
         // 编码**只在决策 tick**（与 export-rl-rollout.ts 的 §368 提速③ 同式，2026-09-22 补上）：
         // obs 只被下一行的 forward 消费，而 forward 每 K 个 tick 才跑一次 ⇒ 原先把
         // encode 放在守卫外是每 tick 白编码（K=10 ⇒ 9 次浪费）。代价不小：编码器 14–18 µs/次，
@@ -536,9 +569,17 @@ export function runEvalOne(
         }
         const fr = argmaxCat(model!.fireLogits, masks.fire)
         scripted.setAction(mv, fr)
+        moveHist[mv]++
+        decisions++
+        if (mv === 0) curStopRun++
+        else {
+          if (curStopRun > 0) stopRuns.push(curStopRun)
+          curStopRun = 0
+        }
       }
     }
     sim.tick()
+    if (world.player?.alive && !world.player.moving) idleTicks++
     // 录制须在 endFrame 前（endFrame 会清掉本 tick 的决策态）——与 runner 同采样点。
     if (recorder) recorder.recordFrame(ai, null)
     ai.endFrame()
@@ -717,6 +758,7 @@ export function runEvalOne(
   // 单关训练场景下二者等价（道具跨关累积的增益只在多关训练时才存在）⇒ 统一为 win ∪ cleared。
   // `cleared` 字段保留原义，供「全歼率」门单独使用；`outcome` 亦保留原始值。
   const cleared = allEnemiesCleared(world)
+  const gateStats = decisionReadout(gate)
   // 可选录制落盘（canonical 文件名，ReplayBrowser 可直接导入回放）。
   if (recorder) {
     const rec = recorder.finalize()
@@ -826,6 +868,12 @@ export function runEvalOne(
     puGotShield: tel.puGotShield,
     puGotOther: tel.puGotOther,
     finalLives: world.lives,
+    moveHist,
+    decisions,
+    idleTicks,
+    stopRuns: curStopRun > 0 ? [...stopRuns, curStopRun] : stopRuns,
+    // R2.3：决策门读数（Δt 分布）；非 nn 策略 = 全零（读数方按 decisions==0 处理）。
+    decisionReadout: gateStats,
   }
 }
 
@@ -850,6 +898,9 @@ export function main(argv: string[]): void {
   let stageJson = ''
   let livesOverride = ''
   let playerLevelOverride = ''
+  // x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：显式开启才加 threat-ONSET；
+  // 缺省 = 均匀 K（旧报告逐字节不变）。
+  let decisionEvents = false
   // 可选：整局输入录制 → .replay 目录（训练控制台「导出 replay」）。报告 schema 零变化。
   let replayDir = ''
   for (let i = 0; i < argv.length; i++) {
@@ -871,6 +922,7 @@ export function main(argv: string[]): void {
     else if (argv[i] === '--lives-override') livesOverride = argv[++i]
     else if (argv[i] === '--player-level') playerLevelOverride = argv[++i]
     else if (argv[i] === '--replay') replayDir = argv[++i]
+    else if (argv[i] === '--decision-events') decisionEvents = true
   }
   if (!Number.isInteger(stageIdx) || !Number.isInteger(seed)) {
     console.error('[export-eval-game] --stage/--seed required')
@@ -909,6 +961,7 @@ export function main(argv: string[]): void {
     playerLevelOverride ? parseInt(playerLevelOverride, 10) : null,
     replayDir,
     stageIdx,
+    decisionEvents,
   )
   // 权重指纹：eval 报告必须自带"用的是哪份权重"（2026-08-30 A4/A5 评估
   // 排查教训——无指纹时静默回退无法被发现）。
@@ -965,6 +1018,14 @@ export function main(argv: string[]): void {
     firstKillKind: res.firstKillKind,
     killOrder: res.killOrder,
     killerKinds: res.killerKinds,
+    // 新纪元死刑通道（plan §2 #9/P1-2 方案 a）：裸透传；旧 bundle 的 res 无此四列时为
+    // undefined，JSON 落盘即缺席，读数方按无信号处理（与 EvalCourseRow 可选字段同约）。
+    moveHist: res.moveHist,
+    decisions: res.decisions,
+    idleTicks: res.idleTicks,
+    stopRuns: res.stopRuns,
+    // R2.3 决策门读数（`--decision-events` 时才有意义；缺省不写，保旧报告逐字节不变）。
+    ...(decisionEvents ? { decisionReadout: res.decisionReadout } : {}),
     // feat：本局评估由哪条 features 后端产出（native / wasm / ts）。与 rollout 的 shard
     // manifest 同口径（rollout-eval-opt.plan.md §4 记账）——「以为开了 native 其实回落了」
     // 在 eval 侧同样要能事后看出来。与 wver **解耦**（本机直跑无 wver 也要记）。
@@ -985,7 +1046,10 @@ export function main(argv: string[]): void {
   console.log(
     `[eval-game] s${stageIdx} seed${seed} outcome=${res.outcome} ticks=${res.ticks} ` +
       `win=${res.win} score=${res.score.toFixed(3)} kills=${res.kills} ` +
-      `hitRate=${res.playerShots > 0 ? (res.enemyHits / res.playerShots).toFixed(3) : 0} pickups=${res.powerUpsCollected}`,
+      `hitRate=${res.playerShots > 0 ? (res.enemyHits / res.playerShots).toFixed(3) : 0} pickups=${res.powerUpsCollected}` +
+      (decisionEvents
+        ? ` decisions=${res.decisionReadout?.n ?? 0} events=${res.decisionReadout?.events ?? 0} avgDt=${res.decisionReadout?.avgDt ?? 0} minDt=${res.decisionReadout?.minDt ?? 0}`
+        : ''),
   )
 }
 

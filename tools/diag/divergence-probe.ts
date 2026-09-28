@@ -44,9 +44,16 @@ import { writeFileSync } from 'fs'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { NNInput } from '../../src/nn/policy-input'
 import { ObsEncoder } from '../../src/nn/obs-encoder'
+import {
+  DEFAULT_DECISION_K,
+  createDecisionGateConfig,
+  createDecisionGateState,
+  decisionDue,
+} from '../../src/nn/decision-gate'
 
 const MAX_TICKS = 36000
-const K = 10
+// K 的单一来源（plan/new-era-stop.plan.md §6 R2）：旧字面量 10 保留为别名，语义不变。
+const K = DEFAULT_DECISION_K
 const T = 120 // 后果观察窗口
 const BASE_PRESSURE_RADIUS = 12 // 与 export-rl-rollout 同半径
 const ENGAGE_RADIUS = 14 // 交战桶敌距判定（格）
@@ -139,6 +146,8 @@ function runOneDetailed(
   seed: number,
   difficulty: string,
   weightsDir: string,
+  /** x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：默认 false = 均匀 K 旧行为。 */
+  decisionEvents = false,
 ): { recs: TickRec[]; ticks: number; outcome: string } {
   const world = new World()
   world.rng.reseed(seed)
@@ -157,6 +166,9 @@ function runOneDetailed(
   student.reset()
 
   const encoder = new ObsEncoder()
+  // 决策门（唯一实现）：逐 tick 喂（t=0 是均匀边界，旧 `|| t === 0` 与之等价）。
+  const gateCfg = createDecisionGateConfig(decisionEvents)
+  const gate = createDecisionGateState()
   const recs: TickRec[] = []
   // 滚动窗口（最近 T tick）事件 + 玩家位置（含 tick 号）
   const eventsRing: Array<{ tick: number; kind: EvKind }> = []
@@ -179,7 +191,7 @@ function runOneDetailed(
     const tMove = teacherMove ? ({ up: 1, down: 2, left: 3, right: 4 }[teacherMove] ?? 0) : 0
     const tFire = teacherFire ? 1 : 0
 
-    if (t % K === 0 || t === 0) {
+    if (decisionDue(t, world, gate, gateCfg)) {
       student.thinkNow()
       const sMove = student.moveArgmax()
       const sFire = student.fireArgmax()
@@ -289,6 +301,8 @@ function main(): void {
   const seedSpec = arg('seeds', '0-9')!
   const difficulty = arg('difficulty', 'hard')!
   const outPath = arg('out', 'tmp/probe-m1.json')!
+  // x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：探针跟随共享谓词；默认均匀 K。
+  const decisionEvents = process.argv.includes('--decision-events')
   const stages = parseRange(stageSpec)
   const seeds = parseRange(seedSpec)
 
@@ -305,7 +319,13 @@ function main(): void {
 
   for (const si of stages) {
     for (const seed of seeds) {
-      const { recs, ticks, outcome } = runOneDetailed(si, seed, difficulty, weightsDir)
+      const { recs, ticks, outcome } = runOneDetailed(
+        si,
+        seed,
+        difficulty,
+        weightsDir,
+        decisionEvents,
+      )
       process.stderr.write(
         `[probe] s${si} seed${seed} outcome=${outcome} ticks=${ticks} decisions=${recs.length} div=${recs.filter((r) => r.diverged).length}\n`,
       )
@@ -340,6 +360,7 @@ function main(): void {
     difficulty,
     maxTicks: MAX_TICKS,
     K,
+    decisionEvents,
     T,
     totals: { ...totals, divRate: +divRate.toFixed(4) },
     outcomeDist: outcomes,

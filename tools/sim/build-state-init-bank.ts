@@ -36,6 +36,7 @@ import { worldTickHash } from '../../src/replay/tickHash'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
+import { DEFAULT_DECISION_K } from '../../src/nn/decision-gate'
 import {
   existsSync,
   mkdirSync,
@@ -48,8 +49,19 @@ import {
 import { createHash } from 'crypto'
 import { dirname, join } from 'path'
 
-/** 决策间隔（与 `export-rl-rollout.ts::K` 同值；切点必须落在决策边界上——plan §2 B6）。 */
-export const K = 10
+/**
+ * 决策间隔——**单一来源** = `src/nn/decision-gate.ts::DEFAULT_DECISION_K`（旧字面量 10 保持
+ * 同值，语义不变）。切点必须落在决策边界上（plan §2 B6）。
+ *
+ * x2 事件 rung 的共存契约（plan/new-era-stop.plan.md §6 R2.4，裁决 = 方案 i）：
+ *   ① 银行的切点规则**不变**（仍 `t % K == 0`）：决策门在事件模式下仍以均匀 K 为底，
+ *      且每段决策流的首个候选（sentinel `lastDecisionTick < 0`）恒放行 ⇒ **交棒 tick
+ *      必是决策 tick**（`export-rl-rollout.ts` 侧有同一断言：t=initTick 必出决策）。
+ *   ② 交棒后的**第一个 K 段禁 threat 事件**（`gate.suppressEventsUntilTick = initTick + K`）：
+ *      快照只存当前态、不存 `prevThreat` 历史，交棒瞬间的“首次入带”是伪造的 onset。
+ *   ③ 因此本工具**不需要**为事件化重出银行；改切点规格 = 另一个实验（§15.5）。
+ */
+export const K = DEFAULT_DECISION_K
 
 export interface CutRecipe {
   cut_from: number

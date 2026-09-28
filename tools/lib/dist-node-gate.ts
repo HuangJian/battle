@@ -27,6 +27,8 @@ export interface DistPing {
   bunVersion?: string
   evalSupport?: boolean
   stageJsonSupport?: boolean
+  /** R2 事件 rung 能力位（旧 agent 无此字段 ⇒ 不派事件任务，fail-closed）。 */
+  decisionEventsSupport?: boolean
   cpus?: number
 }
 
@@ -111,6 +113,11 @@ export function nodeGateReason(
   if (localCodeHash && ping.codeHash && ping.codeHash !== localCodeHash)
     return `codeHash mismatch (node ${String(ping.codeHash).slice(0, 12)}… local ${localCodeHash.slice(0, 12)}…)`
   return null
+}
+
+/** R2 事件 rung 能力位（纯函数）：旧 agent 无此字段 ⇒ false（不派，fail-closed）。 */
+export function nodeSupportsDecisionEvents(ping: DistPing | null): boolean {
+  return ping?.decisionEventsSupport === true
 }
 
 export interface GateSummary {

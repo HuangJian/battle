@@ -714,6 +714,17 @@ class RolloutDispatcher:
                                 f"node {nd_id} 缺 stageJsonSupport 能力位（旧 agent）——"
                                 "stageJson 任务被拒；不降级（plan §5.2 能力握手）",
                             )
+                        # R2 事件 rung：事件课程的 rollout 只派给能力位节点（旧 agent
+                        # 静默跑均匀局混入 ⇒ 训练数据污染；fail-closed 同上）。
+                        # 缺席 = 老课程不查（getattr 缺省 False）。
+                        if bool(getattr(args, "decision_events", False)) and not (
+                            nd.get("ping") or {}
+                        ).get("decisionEventsSupport"):
+                            raise dist_common.DistError(
+                                0,
+                                f"node {nd_id} 缺 decisionEventsSupport 能力位（旧 agent）——"
+                                "事件任务被拒；不降级（升级 agent 后自动加入）",
+                            )
                         manifest, files = dist_common.fetch_task(
                             nd["url"],
                             nd["key"],
@@ -728,6 +739,8 @@ class RolloutDispatcher:
                             replan=getattr(args, "replan", 0),
                             reward=getattr(args, "reward", ""),
                             dodge=getattr(args, "dodge", ""),
+                            # R2 事件 rung：与课程 decision_events 同步（缺席 = 老行为）。
+                            decision_events=bool(getattr(args, "decision_events", False)),
                             stage_json=_sj or "",
                             lives_override=int(_ov["lives_override"])
                             if "lives_override" in _ov

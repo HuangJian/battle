@@ -286,6 +286,14 @@ agg.lastContrib = latest && latest.baseIt >= 0
 
 ## 7. 修订记录
 
+* **2026-09-27（实障修复）**：进程内 memo（§3.1/§4.3）的时间下限曾锚在「上次**命中**时刻」
+  （命中即续期）⇒ `snapshot-cache` 机群探测每 5s 一拍把窗口无限滑动、`fp === aggMemo.fp`
+  这一支永远轮不到，**聚合冻结在进程第一次计算那一刻**：节点页「今天」整窗全空（当天新生的
+  h1/h2/h3-stop 三个流从未进 `sources`），而「昨天」照旧有数（冻结快照正好覆盖到昨晚）。
+  修法：锚「上次**计算**时刻」+ 判定抽成纯函数 `aggMemoReusable`、`aggregateNodeHistory(nowMs?)`
+  仅作测试时钟；回归 `dashboard/tests/server-pool-history.test.ts`（纯判定边界 + 稳态 5s 调用
+  必须 ≤30s 重扫一次、新流 ≤30s 上屏）。教训全文 → `docs/nn/console.md §18`。
+
 * **2026-09-26（评审）**：修 S8 时区前提（UTC → 训练机本地）、逐流 `itByNode` 结构、`DayBucket`
   补齐窗口投影所需字段、预筛钉 epoch 以保住"切天零重算"、`poolStatus` 口径、点名
   `snapshot-cache.ts` 第二消费者、`?course=` 牵连面、S9–S12 新增现状。

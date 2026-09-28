@@ -193,6 +193,12 @@ def eval_row(
         "firstKillKind": census["firstKillKind"],
         "killOrder": census["killOrder"],
         "killerKinds": census["killerKinds"],
+        # 新纪元死刑通道（plan §2 #9/P1-2 方案 a）：裸透传；旧报告缺键 = None，
+        # 读数方按无信号处理（与 EvalCourseRow 可选字段同约）。
+        "moveHist": manifest.get("moveHist"),
+        "decisions": manifest.get("decisions"),
+        "idleTicks": manifest.get("idleTicks"),
+        "stopRuns": manifest.get("stopRuns"),
     }
 
 

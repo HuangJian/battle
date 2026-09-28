@@ -3,6 +3,7 @@ import { Simulation } from '../../src/game/Simulation'
 import { allEnemiesCleared } from '../../src/game/SimulationEffects'
 import { GodAIInput, type GodAIParams, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { NNInput } from '../../src/nn/policy-input'
+import type { DecisionReadout } from '../../src/nn/decision-gate'
 import { GoalExecutor } from '../../src/nn/goal-executor'
 import { IntentPlayer } from '../../src/nn/intent-player'
 import { IntentExecutor } from '../../src/nn/intent-executor'
@@ -171,6 +172,11 @@ export interface SimResult {
   paramsHash: string
   /** v6 evaluation telemetry (only when `telemetry: true`). */
   telemetry?: RunTelemetry
+  /**
+   * R2.3 决策门读数（仅 'nn' + `nnDecisionEvents` 时挂载）——parity 用例用它把
+   * 「部署链与判决链同局」从 outcome/ticks 加强到决策流（n/events/Δt 分布）。
+   */
+  nnDecisionReadout?: DecisionReadout
   /** Suicide-trade commit ticks (only when `commitCounts: true`). */
   suicideReturnCommits?: number
   /** §121 self-fire base-guard block ticks (only when `commitCounts: true`).
@@ -435,6 +441,12 @@ export interface RunOptions {
   policy?: 'god' | 'nn' | 'intent' | 'intent-exec' | 'intent-oracle' | 'goal' | 'goal-god'
   /** Weights directory for the 'nn' policy (auto-discovers latest). */
   nnWeightsDir?: string
+  /**
+   * x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：'nn' 策略的决策门加 threat-ONSET
+   * （均匀 K ∪ 事件 + Δt≥3）。缺省 = 均匀 K 旧行为；判决链须同值
+   * （export-eval-game `--decision-events`，eval-game-parity 钉住）。
+   */
+  nnDecisionEvents?: boolean
   /** Weights JSON file for the 'intent' policy (M4 stub / M5 trained). */
   intentWeightsDir?: string
   /** Weights JSON file for the 'goal' policy (T8.5). */
@@ -622,7 +634,11 @@ export function runSimulation(opts: RunOptions): SimResult {
   const godRng = new RNG((seed ^ 0x9e3779b9) >>> 0)
   const input: GodAIInput =
     opts.policy === 'nn'
-      ? (new NNInput(world, { weightsDir: opts.nnWeightsDir }) as unknown as GodAIInput)
+      ? (new NNInput(world, {
+          weightsDir: opts.nnWeightsDir,
+          // x2 事件 rung（R2）：与 export-eval-game 的 `--decision-events` 同值（parity 测试钉住）。
+          decisionEvents: opts.nnDecisionEvents,
+        }) as unknown as GodAIInput)
       : opts.policy === 'intent'
         ? (new IntentPlayer(world, {
             weightsText: readFileSync(opts.intentWeightsDir ?? '', 'utf8'),
@@ -1166,6 +1182,11 @@ export function runSimulation(opts: RunOptions): SimResult {
 
   if (opts.branchTotals === true) {
     result.branchTotals = { ...input.branchCounts }
+  }
+
+  if (opts.policy === 'nn' && opts.nnDecisionEvents === true) {
+    // R2.3：只在显式开启事件模式时挂读数（既有产物不加字段）。
+    result.nnDecisionReadout = (input as unknown as NNInput).readDecisionStats()
   }
 
   if (opts.recordGoalTrace === true && opts.policy === 'goal') {

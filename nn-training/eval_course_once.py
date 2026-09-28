@@ -216,6 +216,13 @@ def _to_tool_row(row: dict, meta: dict, n_stages: int, seed0: int, games: int) -
         "firstKillKind": row.get("firstKillKind"),
         "killOrder": arr("killOrder"),
         "killerKinds": arr("killerKinds"),
+        # 新纪元死刑通道（plan §2 #9/P1-2 方案 a）：裸透传，None 保持 None
+        # （旧 bundle 的行没有这四列 —— None = 无信号，读数方按缺席处理；
+        # 故意不用 arr()/or 0 垫，否则旧行会被误读成"0 决策"）。
+        "moveHist": row.get("moveHist"),
+        "decisions": row.get("decisions"),
+        "idleTicks": row.get("idleTicks"),
+        "stopRuns": row.get("stopRuns"),
         # 来源（B 层行自带）：判读「这批局谁跑的」不再靠 TS 自报
         "node": row.get("node"),
     }
@@ -290,6 +297,9 @@ def main() -> int:
     # args.local_slots 不用：本机份额已在上面解析进 cfg["policy"]["evalLocalSlots"]
     #（显式 spec.localSlots = TS 侧 configLocalSlots 的解析结果，含 rl.local_slots）
     args = SimpleNamespace(mode="per-tick", out="", eval_window_sec=float(spec.get("windowSec") or 86400))
+    # R2 事件 rung：手动 judge 由 TS 侧 --decision-events 驱动（缺席 = 老行为）；
+    # BatchEvalRunner 经 self.args 取（与 distLocal 的内存覆盖不同，这是语义开关）。
+    args.decision_events = bool(spec.get("decisionEvents"))
     bun = shutil.which("bun") or "bun"
     epoch = dist_common.compute_engine_epoch()
 
