@@ -169,6 +169,25 @@ else:
     one(sys.argv[1:])
 """
 
+#: 把收到的每行**原样**落盘（`@OUT@`）：钉「送进 stdin 的到底是什么」。
+#: 同步看得到行首的 mode token —— 这就是「用哪个导出器」从池的形状变成每行的事实的证据。
+_STUB_ECHO = """\
+import sys
+from pathlib import Path
+
+sys.stdout.reconfigure(line_buffering=True)
+OUT = Path(r"@OUT@")
+print("__SERVE_READY__")
+for line in sys.stdin:
+    line = line.strip()
+    if not line:
+        continue
+    OUT.parent.mkdir(parents=True, exist_ok=True)
+    with OUT.open("a", encoding="utf-8") as fh:
+        fh.write(line + "\\n")
+    print("__SERVE_OK__")
+"""
+
 #: 完全不认 `--serve`（只会跑一次性路径的桩）：池必须**快速**判定起不来，不等满就绪上限。
 _STUB_NO_SERVE = """\
 import sys
@@ -203,8 +222,28 @@ def _games_run(count_dir: Path) -> int:
 
 
 def _pool(tmp_path: Path, script: Path, *, workers: int = 1, ready: float = 30.0) -> ServePool:
-    """按测试桩建池（`bun` = 本进程 python；ts_dir = 桩所在目录）。"""
-    return ServePool(sys.executable, script.name, tmp_path, workers, ready_timeout_sec=ready)
+    """按测试桩建池（`bun` = 本进程 python；ts_dir = 桩所在目录）。
+
+    `entry=` 是池的**同质入口**注入点：生产固定是 `tools/sim/serve-any.ts`（按每行 mode token
+    分派），单测拿 python 桩替它——协议形状一致（`[mode, ...argv]` 行 / 三个标记），但不起 bun。
+    """
+    return ServePool(sys.executable, tmp_path, workers, entry=script.name, ready_timeout_sec=ready)
+
+
+def _install_entry(ts_root: Path, body: str, **subs: str) -> Path:
+    """把桩再写一份到**生产入口路径**（`<ts_root>/tools/sim/serve-any.ts`）。
+
+    池的入口在生产上是那个 `.ts`（`SERVE_ANY_SCRIPT`），而单测不跑 bun ⇒ 同一个 python
+    桩就是入口（python 不关心扩展名）。这样 `run_iter_rollout` 走的是**生产的**
+    `make_pool`（不注入 `entry`），池才真能起来 —— 注入式只用于直接建 `ServePool` 的用例。
+    """
+    p = Path(ts_root) / Path(serve_pool.SERVE_ANY_SCRIPT)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    text = body
+    for k, v in subs.items():
+        text = text.replace(f"@{k.upper()}@", v)
+    p.write_text(text, encoding="utf-8")
+    return p
 
 
 def _argv(script: Path, stage: int, seed: int, out: str) -> list[str]:
@@ -233,14 +272,31 @@ def _fast_poll(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(game_watch, "GAME_POLL_SEC", 0.05)
 
 
-@pytest.fixture
-def allow_stub(monkeypatch: pytest.MonkeyPatch) -> None:
-    """把测试桩加进白名单（真实节点上这里是 `tools/sim/export-rl-rollout.ts`）。"""
+def _is_stub(path: object) -> bool:
+    """测试桩的判据：本文件的桩一律命名 `stub_*.py`（新增桩不必再改一份名单）。"""
+    return str(path).replace("\\", "/").rsplit("/", 1)[-1].startswith("stub_")
+
+
+@pytest.fixture(autouse=True)
+def _stub_modes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """让测试桩能过池的**准入 + mode 解析**（生产上这两道都在 `common/manifest`）。
+
+    池的 `_submit` 现在要两道：① `serve_mode_for(argv[0])` 给出行首 mode token；
+    ② 该脚本在准入门槛内。真脚本名走真表/真名单（钉 goal/intent 不建池的用例不受影响），
+    桩名（`stub_*`）一律放行并按 `rollout` 一个 token 走 —— 同质池对 token 的**取值**不敏感
+    （语义归 worker；此处只看「行首确实是 token」）。
+    """
+    real_mode = serve_pool.serve_mode_for
+    real_capable = serve_pool.serve_capable
     monkeypatch.setattr(
-        serve_pool, "SERVE_CAPABLE_SCRIPTS",
-        frozenset(
-            {"stub_serve.py", "stub_serve_a.py", "stub_serve_b.py", "stub_slow_one.py"}
-        ),
+        serve_pool,
+        "serve_mode_for",
+        lambda p: real_mode(p) or ("rollout" if _is_stub(p) else None),
+    )
+    monkeypatch.setattr(
+        serve_pool,
+        "serve_capable",
+        lambda argv: real_capable(argv) or (bool(argv) and _is_stub(argv[0])),
     )
 
 
@@ -252,18 +308,41 @@ def test_serve_capable_matches_production_script_and_basename() -> None:
         assert serve_pool.serve_capable([rel, "--out", "w0"])
         assert serve_pool.serve_capable([rel.replace("/", "\\")])  # Windows 分隔符
         assert serve_pool.serve_capable([f"/opt/ts/{rel}"])  # 绝对路径兜底
-    # goal/intent 两个导出器**不在节点侧名单**：iter spec 白名单只允许 export-rl-rollout，
-    # 那两个模式走的是 agent 池（`sampler-agent.PERSIST_SERVE_ENTRIES`）。加了它们而没人消费，
-    # 只会让「名单 = 真的会被池化的东西」这条对应关系失效。
+    # 准入门槛是**策略**（本轮要不要建池），不是池的形状（池已同质、四个 mode 都能派）：
+    # 2026-09-28 用户点名保持现状 —— 本机 goal/intent 轮继续逐局 spawn。要放开只需往这个
+    # frozenset 里加一行，池本身无需任何改动（`serve_mode_for` 已经认这两个脚本）。
     assert not serve_pool.serve_capable(["tools/sim/export-goal-rollout.ts"])
     assert not serve_pool.serve_capable(["tools/sim/export-intent-rollout.ts"])
     assert not serve_pool.serve_capable([])
 
 
+def test_serve_mode_table_mirrors_the_ts_dispatcher() -> None:
+    """脚本 → mode token 的表：四个导出器都有 token，且与 `common/manifest` 同源。
+
+    值域必须与 `tools/sim/serve-any.ts::SERVE_MODES` 的键集逐字相同（那是协议面，TS 侧有
+    `tests/serve-any.test.ts` 对拍）；这里钉 Python 侧真的拿着同一份表，并真的把它送进 worker
+    （送 stdin 的那条在下面 `test_pool_sends_the_mode_token`）。
+    """
+    from common.manifest import SERVE_MODE_BY_SCRIPT, serve_mode_for
+
+    assert SERVE_MODE_BY_SCRIPT == {
+        "tools/sim/export-rl-rollout.ts": "rollout",
+        "tools/sim/export-eval-game.ts": "eval",
+        "tools/sim/export-goal-rollout.ts": "goal",
+        "tools/sim/export-intent-rollout.ts": "intent",
+    }
+    assert serve_mode_for("tools/sim/export-eval-game.ts") == "eval"
+    assert serve_mode_for("./tools/sim/export-eval-game.ts") == "eval"  # 前导 ./
+    assert serve_mode_for("tools\\sim\\export-eval-game.ts") == "eval"  # Windows 分隔符
+    assert serve_mode_for("/opt/ts/tools/sim/export-eval-game.ts") == "eval"  # 绝对路径兜底
+    assert serve_mode_for("tools/sim/export-godai-bc.ts") is None  # 教师口径、不进池
+    assert serve_mode_for("") is None
+
+
 def test_make_pool_gates_on_env_allowlist_and_single_script(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """建池的三个前置（开关 / 白名单 / 单一脚本）——缺一即不建，行为同上云前。"""
+    """建池的三个前置（开关 / 准入名单 / 单一脚本）——缺一即不建，行为同上云前。"""
     ok = [["tools/sim/export-rl-rollout.ts", "--out", "w0"]]
     monkeypatch.delenv(serve_pool.ENV_SWITCH, raising=False)
     assert iter_rollout._make_pool("bun", tmp_path, ok, 2, lambda _m: None) is not None
@@ -357,7 +436,7 @@ def test_try_capture_declines_on_err_like_try_pool(tmp_path: Path) -> None:
     """eval 腿的回退一致：ERR ⇒ None（调用方走一次性 run_eval_runner_capture），worker 被换掉。"""
     script = _write_stub(tmp_path, _STUB_SERVE, count=str(tmp_path / "c"), fail_seed="4")
     msgs: list[str] = []
-    pool = ServePool(sys.executable, script.name, tmp_path, 1, msgs.append)
+    pool = ServePool(sys.executable, tmp_path, 1, msgs.append, entry=script.name)
     pool.start()
     assert pool.try_capture(_argv(script, 0, 4, "w0"), 30.0, label="s0/d4") is None
     assert pool.fallback_reasons == {"err": 1} and pool.killed == 1
@@ -371,7 +450,7 @@ def test_slow_warn_line_carries_the_kind_and_where(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(game_watch, "GAME_MAX_ATTEMPTS", 4)
     script = _write_stub(tmp_path, _STUB_HANGS_ON_TASK, name="stub_hang_task.py")
     msgs: list[str] = []
-    pool = ServePool(sys.executable, script.name, tmp_path, 1, msgs.append)
+    pool = ServePool(sys.executable, tmp_path, 1, msgs.append, entry=script.name)
     pool.start()
     argv = _argv(script, 0, 0, "w0")
     assert pool.try_capture(argv, 0.4, label="s0/d0", kind="eval", where="out-dir-x") is None
@@ -382,29 +461,35 @@ def test_slow_warn_line_carries_the_kind_and_where(tmp_path: Path, monkeypatch) 
 def test_make_pool_is_the_shared_gate_for_both_legs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`make_pool` 是 rollout/eval 两条腿**共用**的准入（开关 + 白名单）。
+    """`make_pool` 是 rollout/eval 两条腿**共用**的准入（开关 + 名单），且池**同质**。
 
-    刻意用**真脚本名**（不 patch 白名单）：这条钉住的就是「两个导出器都在名单里、
-    goal/intent 不在」——eval 腿入池的准入与 rollout 腿逐字同源。`make_pool` 只构造对象，
-    不起进程（`start()` 才起），所以这里不会真的 spawn。
+    刻意用**真脚本名**（不 patch 名单）：这条钉住的就是「两个导出器都在名单里、
+    goal/intent 不在」——eval 腿入池的准入与 rollout 腿逐字同源；而两条腿拿到的池**入口相同**
+    （`for_script` 只是门槛，不再是池的身份）——那正是「同质化」在 Python 侧的体现。
+    `make_pool` 只构造对象，不起进程（`start()` 才起），所以这里不会真的 spawn。
     """
     monkeypatch.delenv(serve_pool.ENV_SWITCH, raising=False)
     for script in (serve_pool.ROLLOUT_SCRIPT, serve_pool.EVAL_SCRIPT):
-        pool = serve_pool.make_pool(sys.executable, script, tmp_path, 2)
+        pool = serve_pool.make_pool(sys.executable, tmp_path, 2, for_script=script)
         assert isinstance(pool, ServePool)
+        assert pool.entry == serve_pool.SERVE_ANY_SCRIPT, "池入口必须恒为同质入口"
         pool.close()  # 没 start 过，close = 空操作（不残留进程）
     assert serve_pool.make_pool(
-        sys.executable, "tools/sim/export-goal-rollout.ts", tmp_path, 2
+        sys.executable, tmp_path, 2, for_script="tools/sim/export-goal-rollout.ts"
     ) is None
-    assert serve_pool.make_pool(sys.executable, "", tmp_path, 2) is None
+    assert serve_pool.make_pool(sys.executable, tmp_path, 2, for_script="") is None
+    assert serve_pool.make_pool(sys.executable, tmp_path, 2) is None  # 不给脚本 = 不给准入门槛
     monkeypatch.setenv(serve_pool.ENV_SWITCH, "0")
-    assert serve_pool.make_pool(sys.executable, serve_pool.ROLLOUT_SCRIPT, tmp_path, 2) is None
+    assert (
+        serve_pool.make_pool(sys.executable, tmp_path, 2, for_script=serve_pool.ROLLOUT_SCRIPT)
+        is None
+    )
 
 
 def test_pool_diagnostic_lines_are_logged(tmp_path: Path) -> None:
     msgs: list[str] = []
     script = _write_stub(tmp_path, _STUB_SERVE, count=str(tmp_path / "c"), fail_seed="")
-    pool = ServePool(sys.executable, script.name, tmp_path, 1, msgs.append)
+    pool = ServePool(sys.executable, tmp_path, 1, msgs.append, entry=script.name)
     pool.start()
     argv, logp = _task(script, 1, 2, "w0", tmp_path)
     assert pool.try_pool(argv, logp, 30.0) is not None
@@ -421,7 +506,7 @@ def test_worker_err_falls_back_once_and_drops_worker(tmp_path: Path) -> None:
         tmp_path, _STUB_SERVE, count=str(tmp_path / "c"), fail_seed="7"
     )
     msgs: list[str] = []
-    pool = ServePool(sys.executable, script.name, tmp_path, 1, msgs.append)
+    pool = ServePool(sys.executable, tmp_path, 1, msgs.append, entry=script.name)
     assert pool.start() == 1
     argv, logp = _task(script, 0, 7, "w0", tmp_path)
     assert pool.try_pool(argv, logp, 30.0) is None
@@ -438,7 +523,7 @@ def test_dead_worker_falls_back_instead_of_waiting_the_cap(tmp_path: Path) -> No
     """worker 中途死掉（OOM/信号）：立刻回退，**不等满单局硬顶**（否则整轮白等一次）。"""
     msgs: list[str] = []
     script = _write_stub(tmp_path, _STUB_DIES, name="stub_dies.py")
-    pool = ServePool(sys.executable, script.name, tmp_path, 1, msgs.append)
+    pool = ServePool(sys.executable, tmp_path, 1, msgs.append, entry=script.name)
     assert pool.start() == 1
     argv, logp = _task(script, 0, 0, "w0", tmp_path)
     t0 = time.time()
@@ -465,7 +550,7 @@ def test_postmortem_reports_exit_code_and_last_words() -> None:
     )
     out, _ = proc.communicate()
     assert proc.poll() == 7
-    worker = serve_pool._Worker(proc, "stub_serve.py")  # 进程已退出 ⇒ reader 立刻 EOF
+    worker = serve_pool._Worker(proc)  # 进程已退出 ⇒ reader 立刻 EOF
     lines = [ln for ln in (out or "").splitlines() if ln.strip()]
     line = ServePool._postmortem(worker, lines)
     assert "rc=7" in line and "0x00000007" in line and "boom-tail" in line, line
@@ -498,7 +583,7 @@ def test_fallback_breaker_stops_rebuilding_workers(
     _fast_poll(monkeypatch)
     script = _write_stub(tmp_path, _STUB_HANGS_ON_TASK, name="stub_hang_task.py")
     msgs: list[str] = []
-    pool = ServePool(sys.executable, script.name, tmp_path, 1, msgs.append)
+    pool = ServePool(sys.executable, tmp_path, 1, msgs.append, entry=script.name)
     assert pool.start() == 1
     assert pool.breaker_after == serve_pool.FALLBACK_BREAKER_MIN  # 小池 = 下限起步
     total = 9
@@ -535,7 +620,7 @@ def test_breaker_stops_replenishing_but_keeps_serving_warm_workers(
     monkeypatch.setattr(serve_pool, "FALLBACK_BREAKER_MIN", 1)
     script = _write_stub(tmp_path, _STUB_SERVE_SLOW_ONE, name="stub_slow_one.py", slow="7")
     msgs: list[str] = []
-    pool = ServePool(sys.executable, script.name, tmp_path, 2, msgs.append)
+    pool = ServePool(sys.executable, tmp_path, 2, msgs.append, entry=script.name)
     assert pool.start() == 2
     assert pool.breaker_after == 1
 
@@ -572,7 +657,7 @@ def test_fallback_detail_lines_are_capped_and_carry_kind_and_where(tmp_path: Pat
     """
     script = _write_stub(tmp_path, _STUB_SERVE, count=str(tmp_path / "c"), fail_seed="5")
     msgs: list[str] = []
-    pool = ServePool(sys.executable, script.name, tmp_path, 1, msgs.append)
+    pool = ServePool(sys.executable, tmp_path, 1, msgs.append, entry=script.name)
     pool.breaker_after = 999  # 单独隔离「详情条数上限」（不带熔断一起测）
     pool.start()
     for i in range(8):
@@ -593,7 +678,9 @@ def test_acquire_gives_up_within_the_game_cap_instead_of_the_ready_timeout(tmp_p
     """
     script = _write_stub(tmp_path, _STUB_SILENT, name="stub_silent.py")
     msgs: list[str] = []
-    pool = ServePool(sys.executable, script.name, tmp_path, 2, msgs.append, ready_timeout_sec=60.0)
+    pool = ServePool(
+        sys.executable, tmp_path, 2, msgs.append, entry=script.name, ready_timeout_sec=60.0
+    )
     argv, logp = _task(script, 0, 0, "w0", tmp_path)
     t0 = time.time()
     assert pool.try_pool(argv, logp, 1.0) is None  # 不 start()：首次取槽就是冷启动
@@ -653,7 +740,7 @@ def _serve_spec(tmp_path: Path, script: Path, games: list[tuple[int, int]], **ov
 
 
 def test_run_iter_rollout_goes_through_the_pool(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allow_stub: None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """接线：整轮走池 ⇒ 同一批 shard、逐局报告/日志齐全、`serve_pool` 计数诚实。
 
@@ -674,6 +761,7 @@ def test_run_iter_rollout_goes_through_the_pool(
     def _round(name: str) -> tuple[Path, dict]:
         d = tmp_path / name
         d.mkdir()
+        _install_entry(d, _STUB_SERVE, count=str(count), fail_seed="")
         return d, iter_rollout.run_iter_rollout(d, spec, log=msgs.append)
 
     job_dir, out = _round("job")
@@ -712,7 +800,7 @@ def test_run_iter_rollout_goes_through_the_pool(
 
 
 def test_concurrent_pool_games_never_hit_the_counter_race(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allow_stub: None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """并发跑局：桩的计数器**不许**被并发读者读到空文件。
 
@@ -729,6 +817,7 @@ def test_concurrent_pool_games_never_hit_the_counter_race(
     msgs: list[str] = []
     job_dir = tmp_path / "job"
     job_dir.mkdir()
+    _install_entry(job_dir, _STUB_SERVE, count=str(count), fail_seed="")
     spec = _serve_spec(tmp_path, script, [(3, s) for s in range(12)], workers=4)
     out = iter_rollout.run_iter_rollout(job_dir, spec, log=msgs.append)
     stats = out["serve_pool"]
@@ -740,7 +829,7 @@ def test_concurrent_pool_games_never_hit_the_counter_race(
 
 
 def test_run_iter_rollout_pool_failure_still_produces_the_round(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allow_stub: None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """池判失败的那一局（ERR）⇒ 回退一次性 spawn，**整轮仍然成功**（池不吞局）。"""
     monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
@@ -750,6 +839,7 @@ def test_run_iter_rollout_pool_failure_still_produces_the_round(
     msgs: list[str] = []
     job_dir = tmp_path / "job"
     job_dir.mkdir()
+    _install_entry(job_dir, _STUB_SERVE, count=str(count), fail_seed="7")
     spec = _serve_spec(tmp_path, script, [(3, 7), (3, 8)])
     # 一次性路径用**同一个桩**（同一份 argv 直接跑，不带 --serve）：它同样能产 shard
     out = iter_rollout.run_iter_rollout(job_dir, spec, log=msgs.append)
@@ -761,7 +851,7 @@ def test_run_iter_rollout_pool_failure_still_produces_the_round(
 
 
 def test_run_iter_rollout_env_switch_returns_to_per_game_spawn(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allow_stub: None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`NN_SERVE_POOL=0` ⇒ 不建池（`serve_pool` 为 None），行为回到上云前。"""
     monkeypatch.setenv(serve_pool.ENV_SWITCH, "0")
@@ -780,7 +870,7 @@ def test_run_iter_rollout_env_switch_returns_to_per_game_spawn(
 
 
 def test_run_iter_rollout_mixed_scripts_never_builds_a_pool(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, allow_stub: None
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """同一轮里出现两个脚本（协议层会拦住，但池这边也要保守）：不建池，全部一次性。"""
     monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
@@ -811,6 +901,25 @@ def test_pool_sends_argv_without_entry_path(tmp_path: Path) -> None:
     # 桩按 val("--stages") 读，等价于「收到的行确实带着全部参数」；再加一条更强的：
     assert argv[0] == str(script) and "--stages" in argv[1:]
     pool.close()
+
+
+def test_pool_sends_the_mode_token(tmp_path: Path) -> None:
+    """送进 stdin 的行 = `[mode token, ...argv[1:]]`（**逐字**核对收到的 JSON）。
+
+    这条是同质化的协议面：worker 是同一个入口（`serve-any.ts`），它靠行首 token 决定跑哪个
+    导出器 —— token 丢了/送成脚本路径，worker 会响亮报 `unknown mode`（而不是静默跑默认网格）。
+    """
+    lines = tmp_path / "lines.jsonl"
+    script = _write_stub(tmp_path, _STUB_ECHO, name="stub_serve.py", out=str(lines))
+    pool = _pool(tmp_path, script)
+    assert pool.start() == 1, (pool.spawned, pool.killed)
+    argv, logp = _task(script, 5, 6, "w0", tmp_path)
+    assert pool.try_pool(argv, logp, 30.0) is not None, (pool.fallback_reasons, pool.killed)
+    pool.close()
+    got = json.loads(lines.read_text(encoding="utf-8").splitlines()[0])
+    assert got[0] == "rollout", got  # 行首 = mode token（不是脚本路径）
+    assert got[1:] == argv[1:], "token 之后必须是**原样**的该局 argv"
+    assert str(script) not in got, "脚本路径不得进 stdin（同质入口在池侧固定）"
 
 
 def test_pool_spawns_nothing_on_empty_argv(tmp_path: Path) -> None:

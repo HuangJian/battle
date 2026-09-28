@@ -447,15 +447,15 @@ def run_cloud_eval(
         # 池上限取 `min(slots, 本轮局数)`：slots 远大于局数时（例：96 vCPU 会话给 92 slots、
         # 本轮只有 8 局），按 slots 起池等于为 8 局预热 92 个进程 —— 纯浪费（冷启动排队）。
         pool = serve_pool.make_pool(
-            bun_bin, serve_pool.EVAL_SCRIPT, ts, min(n_slots, len(todo)), log
+            bun_bin, ts, min(n_slots, len(todo)), log, for_script=serve_pool.EVAL_SCRIPT
         )
         if pool is not None:
             ready_n = pool.start()
             if ready_n:
                 log(
                     f"[eval-cloud] it{it} 长驻 worker 池：{ready_n}/{min(n_slots, len(todo))} 就绪"
-                    f"（{serve_pool.EVAL_SCRIPT}）——逐局进程启动/权重解析只付一次，"
-                    "单局失败自动回退一次性 spawn"
+                    f"（同质入口 {serve_pool.SERVE_ANY_SCRIPT}，mode=eval）"
+                    "——逐局进程启动/权重解析只付一次，单局失败自动回退一次性 spawn"
                 )
             else:
                 log(f"[eval-cloud] it{it} 长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn")

@@ -15,9 +15,10 @@
  * 硬要求：传进来的 `main(argv)` 必须是「一个任务一局、每局新建 World」的入口 —— 只有这样
  * serve 与一次性调用的产物才逐字节一致（各导出器的 serve 测试钉的就是这条）。
  *
- * 本函数是 `PERSIST_SERVE_ENTRIES`（sampler-agent.ts）里每个条目的前置条件：要进池的导出器
- * 调它，别各自抄一份 —— 协议漂移的代价是 agent 侧把 worker 判成失败后**静默回落**一次性
- * spawn（慢，但不错），只有状态接口上的延迟数字会变成唯一的线索。
+ * 本函数是**进池路径的前置条件**：池的同质入口 `serve-any.ts` 调它（按每行 mode token 分派到
+ * 各导出器的 `main`），导出器自己的 `--serve` 分支也调它 —— 别各自抄一份。协议漂移的代价是
+ * agent 侧把 worker 判成失败后**静默回落**一次性 spawn（慢，但不错），只有状态接口上的延迟数字
+ * 会变成唯一的线索。
  */
 export function runServe(main: (argv: string[]) => void): void {
   let buf = ''

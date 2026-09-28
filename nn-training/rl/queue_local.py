@@ -53,7 +53,7 @@ def make_local_pool(
     """按**真 argv** 决定这一轮要不要建长驻池（建不了 ⇒ None，整轮退回逐局 spawn）。
 
     为什么拿真 argv 探、而不是再写一遍「哪个模式用哪个导出器」：`build_rollout_cmd` 是脚本
-    选择的**唯一来源**，抄一份就等着谁先漂。脚本不在 `remote/serve_pool` 的白名单里
+    选择的**唯一来源**，抄一份就等着谁先漂。脚本不在 `remote/serve_pool` 的准入名单里
     （goal / intent 两种 RL 模式）⇒ `make_pool` 返回 None，本轮与本改动前逐字节相同。
 
     池的**生命周期归调用方**（用 try/finally `close()`）：`run_rollout` = 一轮采集；dispatcher
@@ -73,7 +73,9 @@ def make_local_pool(
     )
     if len(cmd) < 2:
         return None
-    pool = serve_pool.make_pool(bun, cmd[1], REPO_ROOT, workers, log)
+    # 池是同质入口（`tools/sim/serve-any.ts`）——本轮跑哪个导出器由**每行的 mode token** 带过去，
+    # `cmd[1]` 只用作准入门槛（名单外 ⇒ None ⇒ 整轮逐局 spawn，与加池前逐字节相同）。
+    pool = serve_pool.make_pool(bun, REPO_ROOT, workers, log, for_script=cmd[1])
     if pool is None:
         return None
     ready = pool.start()
@@ -81,8 +83,9 @@ def make_local_pool(
         pool.close()  # 起不来 = 本轮退回一次性路径（与没有池逐字节相同）
         return None
     log(
-        f"[rollout] 长驻 worker 池：{ready}/{workers} 就绪（{cmd[1]}）——逐局进程启动 / wasm"
-        " 编译 / 权重解析只付一次；单局跑挂就地回退一次性 spawn（只慢不错）"
+        f"[rollout] 长驻 worker 池：{ready}/{workers} 就绪（同质入口"
+        f" {serve_pool.SERVE_ANY_SCRIPT}，mode={serve_pool.serve_mode_for(cmd[1])}）"
+        "——逐局进程启动 / wasm 编译 / 权重解析只付一次；单局跑挂就地回退一次性 spawn（只慢不错）"
     )
     return pool
 

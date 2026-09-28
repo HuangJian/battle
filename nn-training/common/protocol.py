@@ -61,6 +61,12 @@ from common.manifest import (
     EVAL_SCRIPT as EVAL_SCRIPT,
 )
 from common.manifest import (
+    GOAL_SCRIPT as GOAL_SCRIPT,
+)
+from common.manifest import (
+    INTENT_SCRIPT as INTENT_SCRIPT,
+)
+from common.manifest import (
     ITER_NODE_LABEL as ITER_NODE_LABEL,
 )
 from common.manifest import (
@@ -126,6 +132,12 @@ from common.manifest import (
 from common.manifest import (
     RUN_NODE_LABEL as RUN_NODE_LABEL,
 )
+from common.manifest import (
+    SERVE_ANY_SCRIPT as SERVE_ANY_SCRIPT,
+)
+from common.manifest import (
+    SERVE_MODE_BY_SCRIPT as SERVE_MODE_BY_SCRIPT,
+)
 
 # ------------------------------------------------------------------ 下沉（S5 第九刀，2026-09-27）
 # 「job manifest 契约」→ `common/manifest.py`（proto/role 词汇 · `MANIFEST_*` schema ·
@@ -164,6 +176,9 @@ from common.manifest import (
 )
 from common.manifest import (
     role_of as role_of,
+)
+from common.manifest import (
+    serve_mode_for as serve_mode_for,
 )
 from common.manifest import (
     shard_name as shard_name,

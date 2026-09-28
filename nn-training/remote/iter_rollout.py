@@ -558,8 +558,9 @@ def _make_pool(
 ) -> serve_pool.ServePool | None:
     """按 spec 决定要不要建池；建不了就返回 None（整轮退回逐局 spawn，行为同上云前）。
 
-    本函数只管 iter 特有的一条前置：整轮的 argv 指向**同一个**脚本（池按脚本建，混脚本就得混池
-    —— iter 不会混）；剩下的（总开关 + `--serve` 白名单）与 eval 腿共用
+    本函数只管 iter 特有的一条前置：整轮的 argv 指向**同一个**脚本（准入是**按轮**判的：混脚本
+    的轮无法用一句话回答「这一轮该不该建池」——池本身已能混 mode，这条前置保的是准入的
+    确定性，不是池的能力）；剩下的（总开关 + `--serve` 白名单）与 eval 腿共用
     `serve_pool.make_pool` 同一个准入。
     """
     if not argvs:
@@ -567,7 +568,8 @@ def _make_pool(
     scripts = {str(a[0]) for a in argvs if a}
     if len(scripts) != 1:
         return None
-    return serve_pool.make_pool(bun, argvs[0][0], ts_dir, workers, log)
+    # 池同质（入口固定），`for_script` 只用作准入门槛（见 `make_pool` 的注释）。
+    return serve_pool.make_pool(bun, ts_dir, workers, log, for_script=argvs[0][0])
 
 
 def run_iter_rollout(

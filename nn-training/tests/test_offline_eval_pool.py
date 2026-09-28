@@ -103,8 +103,8 @@ def test_cloud_eval_builds_one_pool_and_hands_it_to_every_game(
     pool = FakePool(spawned=2)
     built: list[tuple] = []
 
-    def fake_make(bun: str, script: str, ts_dir: Path, workers: int, log: object, **_kw: object):
-        built.append((bun, script, str(ts_dir), workers))
+    def fake_make(bun: str, ts_dir: Path, workers: int, log: object, **kw: object):
+        built.append((bun, str(ts_dir), workers, kw.get("for_script")))
         return pool
 
     monkeypatch.setattr(offline_eval.serve_pool, "make_pool", fake_make)
@@ -134,11 +134,15 @@ def test_cloud_eval_builds_one_pool_and_hands_it_to_every_game(
         log=log,
     )
     assert out["ran"] and out["settled"] == 2
-    # 建池一次，参数是（bun, eval 导出器, TS 树, min(slots, 本轮局数)）—— 多的槽位不预热
-    assert built == [("bun", serve_pool.EVAL_SCRIPT, str(ts), 2)], built
+    # 建池一次，参数是（bun, TS 树, min(slots, 本轮局数)）—— 多的槽位不预热；
+    # `for_script` 只是准入门槛（池本身是同质入口，不再按脚本建）
+    assert built == [("bun", str(ts), 2, serve_pool.EVAL_SCRIPT)], built
     assert pool.started == 1 and pool.closed >= 1, "池必须起一次、关掉"
     assert seen == [pool, pool], "每一局都要拿到同一个池"
-    assert any(f"长驻 worker 池：2/2 就绪（{serve_pool.EVAL_SCRIPT}）" in m for m in msgs), msgs
+    assert any(
+        f"长驻 worker 池：2/2 就绪（同质入口 {serve_pool.SERVE_ANY_SCRIPT}，mode=eval）" in m
+        for m in msgs
+    ), msgs
     assert any("serve_pool: served=" in m for m in msgs), msgs
     # 计数只进本地返回字典（wire 不认识这个键）
     assert set(out["servePool"]) == {"served", "spawned", "killed", "fallback", "reasons"}

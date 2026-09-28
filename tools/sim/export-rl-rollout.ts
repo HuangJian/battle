@@ -1220,7 +1220,8 @@ function parseRange(s: string): number[] {
   return out
 }
 
-function main(argv: string[] = process.argv.slice(2)): void {
+// export：同质长驻入口 `serve-any.ts` 要按 mode 分派到本导出器（其余三个导出器早已导出）。
+export function main(argv: string[] = process.argv.slice(2)): void {
   const t0 = Date.now()
   const args = argv
   let outDir = 'tmp/rl-traj'

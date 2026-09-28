@@ -230,18 +230,24 @@ describe('goal/intent rollout --serve（persist 池）', () => {
   }
 })
 
-describe('PERSIST_SERVE_ENTRIES 与 --serve 实现同规', () => {
-  it('池里每个条目都真的走 runServe（否则一进池就是「跑完默认网格后退出」）', () => {
-    const src = readFileSync(join(REPO_ROOT, 'tools', 'agent', 'sampler-agent.ts'), 'utf8')
-    const head = src.indexOf('export const PERSIST_SERVE_ENTRIES')
-    expect(head).toBeGreaterThan(0)
-    const block = src.slice(head, src.indexOf('])', head))
-    const entries = [...block.matchAll(/'([^']*\.ts)'/g)].map((m) => m[1]!)
+describe('同质池入口与 --serve 实现同规', () => {
+  it('池入口 serve-any 走 runServe，且 mode 表里每个导出器都是可分派的 main（否则一进池就是「跑完默认网格后退出」）', () => {
+    // 2026-09-28 同质化后，池的入口只有一个（`tools/sim/serve-any.ts`，按每行 mode token 分派）：
+    // 它自己必须走 serve-loop 协议，表里每个导出器必须是可被 `main(argv)` 直接调用的单局入口
+    //（不带入口路径的 flag 列表），并且自己的 `--serve` 分支也别退化成「跑完默认网格」。
+    const serveAny = join(REPO_ROOT, 'tools', 'sim', 'serve-any.ts')
+    expect(existsSync(serveAny)).toBe(true)
+    expect(readFileSync(serveAny, 'utf8').includes('runServe(dispatch)')).toBe(true)
+    const pool = readFileSync(join(REPO_ROOT, 'tools', 'agent', 'persist-pool.ts'), 'utf8')
+    const block = pool.slice(pool.indexOf('export const PERSIST_MODE_BY_ENTRY'))
+    const entries = [...block.matchAll(/'(tools\/sim\/[^']+\.ts)':/g)].map((m) => m[1]!)
     expect(entries.length).toBeGreaterThanOrEqual(4) // rl / eval / goal / intent
     for (const e of entries) {
       const f = join(REPO_ROOT, e)
       expect(existsSync(f)).toBe(true)
-      expect(readFileSync(f, 'utf8').includes('runServe(main)')).toBe(true)
+      const src = readFileSync(f, 'utf8')
+      expect(src.includes('runServe(main)')).toBe(true)
+      expect(src.includes('export function main')).toBe(true)
     }
   })
 })

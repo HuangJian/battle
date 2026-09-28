@@ -158,12 +158,52 @@ def role_of(manifest: Mapping[str, object]) -> str:
 MANIFEST_ITER_EXTRA: tuple[str, ...] = ("ts_code_sha256", "rollout")
 # ------------------------------------------------------------------ TS 导出器路径
 # `tools/sim/*.ts` 的真实文件名 —— 这是 **TS↔Python 的产物契约**，故与 wire 协议同住一层：
-# 长驻池按脚本名建（`remote/serve_pool.py`）、本机停等 cmd 由此拼（`rl/cmd.py`）、
+# 长驻池按**同质入口**建（`remote/serve_pool.py`）、本机停等 cmd 由此拼（`rl/cmd.py`）、
 # 云机找 TS 根时按它探路（`remote/run_loop.py`）—— 各处抄一份字面量就等着谁先漂。
 #: 逐局 rollout 导出器（kind=iter / kind=run）。
 ROLLOUT_SCRIPT = "tools/sim/export-rl-rollout.ts"
 #: 离线评估导出器（云机评估；`rl/eval_local.py` 建 cmd 时也用它）。
 EVAL_SCRIPT = "tools/sim/export-eval-game.ts"
+#: goal / intent 两个半 MDP 导出器（本机 `rl/cmd.py` 按模式选它们；节点侧 argv 白名单不放行）。
+GOAL_SCRIPT = "tools/sim/export-goal-rollout.ts"
+INTENT_SCRIPT = "tools/sim/export-intent-rollout.ts"
+
+#: 长驻池的**同质入口**（2026-09-28）：一个 worker 按每行首个 **mode token** 分派到任一导出器。
+#:
+#: 为什么（用户点名，`docs/nn/runtime-opt.md` §27.10/§28）：原先池按导出器分「腿」——worker 的入口在
+#: 起进程时就烧死（`bun <exporter>.ts --serve`），于是「用哪个导出器」成了池的**形状**，进而长出
+#: 「预热得猜腿 / 换腿要退役空闲 worker / 混模式的轮拿不到池」这一整类问题。而这些导出器都是
+#: `runServe(main)` 的**无状态外壳**（每局新建 World），分家是历史包袱 ⇒ 把「选哪个导出器」从
+#: **起进程时的 argv** 挪到 **每行的 token**。
+SERVE_ANY_SCRIPT = "tools/sim/serve-any.ts"
+
+#: 导出器 → mode token —— `tools/agent/persist-pool.ts::PERSIST_MODE_BY_ENTRY` 的 Python 镜像。
+#: 值域必须与 `tools/sim/serve-any.ts::SERVE_MODES` 的键集逐字相同（那是**协议面**：改一侧=
+#: 改另一侧）；TS 侧有对拍用例（`tests/serve-any.test.ts`），Python 侧由
+#: `tests/test_remote_serve_pool.py` 钉住本表被真的送进了 worker 的 stdin。
+SERVE_MODE_BY_SCRIPT: Mapping[str, str] = {
+    ROLLOUT_SCRIPT: "rollout",
+    EVAL_SCRIPT: "eval",
+    GOAL_SCRIPT: "goal",
+    INTENT_SCRIPT: "intent",
+}
+
+
+def serve_mode_for(argv0: str) -> str | None:
+    """这一局的 argv[0] 该送哪个 mode token；`None` = 这个脚本不进池（未知/不支持的导出器）。
+
+    按**规范化路径**比（正/反斜杠、前导 `./`、绝对路径都认）——与 `serve_pool` 原来的 `owns()`
+    同一套容错，只是判据从「是不是本池那个脚本」换成「是不是池认识的导出器」。
+    """
+    key = str(argv0).replace("\\", "/").lstrip("./")
+    mode = SERVE_MODE_BY_SCRIPT.get(key)
+    if mode is not None:
+        return mode
+    base = key.rsplit("/", 1)[-1]
+    for script, token in SERVE_MODE_BY_SCRIPT.items():
+        if script.rsplit("/", 1)[-1] == base:
+            return token
+    return None
 
 #: TS 源码 zip 里允许出现的 exporter（argv[0] 白名单）。**只**放行 rollout 采集器：
 #: argv 来自 hub（可信方），但白名单让「协议字段被误当命令执行」不可能发生。

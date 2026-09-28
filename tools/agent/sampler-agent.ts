@@ -42,6 +42,18 @@ import {
 import { createRolloutRunner, type LaunchPlan, type RolloutRunner } from './rollout-runner'
 // 权重桶纯逻辑（多课程：(course, kind) 键 / 按 sha 精确查找；单测共享，见 weight-buckets.ts）
 import { bucketKey, findSha, latestOfKind } from './weight-buckets'
+// 长驻池纯策略（预热槽位分配 + 熔断状态机；单测共享，见 persist-pool.ts）
+import {
+  PERSIST_DISABLE_STREAK,
+  PERSIST_REARM_MS,
+  PERSIST_SERVE_ENTRY,
+  newPersistBreaker,
+  notePersistAttempt,
+  persistModeFor,
+  persistSpawningAllowed,
+  type PersistAttempt,
+  type PersistBreaker,
+} from './persist-pool'
 // 工作目录磁盘收敛纯函数（boot 孤儿清理 + 权重文件保留；修正则 2026-09-08，§374）
 import { staleOrphanPlan, sweepWeightFilePlan } from './workdir-cleanup'
 // codeHash 文件集展开（F3/F4 抽出，plan/dist-codehash-stale-fix.md）：纯实现 + 诊断
@@ -94,10 +106,12 @@ let cacheMaxItems = 32
 /** --no-node：强制 rollout 子进程走 bun（A/B 对照与回滚开关；见 rollout-runner.ts）。 */
 let forceBun = false
 /** 长驻 worker（§368 提速④）：默认开（2026-09-08 用户指令"全量开关"）；
- * `--no-persist` 回退每局一次性 spawn；worker 连续失败 PERSIST_DISABLE_STREAK 次自动熔断。 */
+ * `--no-persist` 回退每局一次性 spawn。熔断/预热策略收在 ./persist-pool（纯函数）：连败到阈值
+ * 只**停补位**（暖 worker 继续服务、冷却后放一次探针），不再停用整池。 */
 let persistEnabled = true
-let persistFailStreak = 0
-const PERSIST_DISABLE_STREAK = 3
+/** 启动预热 worker 池（2026-09-28 a95 归因）：默认开，`--no-prewarm` 关。 */
+let prewarmEnabled = true
+let persistBreaker: PersistBreaker = newPersistBreaker()
 /** /v1/result 404 调试：轮询高峰可刷屏——30s 窗口只打首条+suppressed 汇总。 */
 let missLogWindowAt = 0
 let missLogSuppressed = 0
@@ -111,6 +125,7 @@ let missLogSuppressed = 0
     else if (a === '--max-cache-items') cacheMaxItems = Math.max(1, parseInt(argv[++i], 10))
     else if (a === '--no-node') forceBun = true
     else if (a === '--no-persist') persistEnabled = false
+    else if (a === '--no-prewarm') prewarmEnabled = false
   }
 }
 
@@ -765,29 +780,33 @@ export function unpackContainer(buf: Buffer): {
 // 复用到同一进程（export-rl-rollout.ts --serve：stdin 一行一局，`__SERVE_OK__` /
 // `__SERVE_ERR__` 标记结果；per-game shard 与一次性路径逐字节一致，已实测）。
 // 只对 per-tick rollout 生效；worker 异常/超时 → 杀掉并**本局回退一次性 spawn**（不丢局）。
-export const PERSIST_SERVE_ENTRIES = new Set([
-  'tools/sim/export-rl-rollout.ts',
-  // eval 也入池（2026-09-21 真机归因）：不在池里的条目每局都要 `spawn` 一个新 bun ——
-  // a95/Termux 实测那一下 ~2.5s（同机 rollout 走池 0.07s、mac eval 0.03s），且事件循环
-  // 被占满（`/v1/status` 首轮应答拖到 2.59s）⇒ 慢节点上「每局 eval 卡 agent 2.5s」。
-  // 该导出器已支持 `--serve`（协议同 rollout：stdin 一行一局，`__SERVE_OK__`/`__SERVE_ERR__`）。
-  // 代价（已知、可接受）：池上限仍是 `workers`，eval 进池后高峰可能占满池位 ⇒ 落单的 rollout
-  // 回落到一次性 spawn（只慢不错，与加池前的形态相同；一局 eval 通常比一局采样短）。
-  'tools/sim/export-eval-game.ts',
-  // goal/intent 也入池（2026-09-23，plan `src/nn/conv/conv-optimize.plan.md` §4.6 Stage 4）：
-  // 这两个模式原先每局一个 bun，局数多、单局短 ⇒ spawn 成本占比最高（预估 +15–19%）。
-  // 协议一字不差，实现收在 tools/sim/serve-loop.ts（`runServe`）。
-  'tools/sim/export-goal-rollout.ts',
-  'tools/sim/export-intent-rollout.ts',
-])
+// 池 worker 的**同质入口**（`tools/sim/serve-any.ts`，2026-09-28）：一个进程按每行的 mode token
+// 分派到任一导出器 ⇒ 池里没有「腿」，也就不存在「预热猜错腿 / 换腿要退役重补」那一类问题。
+// 历史（为什么要写这一段）：2026-09-21 起 eval 入池、2026-09-23 goal/intent 入池，都是**按导出器
+// 分种类**开长驻 worker（`bun <exporter>.ts --serve`，入口在 spawn 时烧死在 argv[0]）；于是池里
+// 出现「腿」，预热得猜（按盘上权重 mtime），猜错腿 = 池满 ⇒ 这一波每一局退回一次性 spawn。
+// 详见 DECISIONS §2026-09-28-goalnn-persist-homogeneous-serve。
+// 不走的：BC（`export-godai-bc.ts`：教师口径、非 PERSIST_MODE_BY_ENTRY 成员，兜底一次性）。
 const PERSIST_TASK_TIMEOUT_MS = 600_000
 interface PoolWorker {
   child: ChildProcess
-  key: string // plan.argv[0]（bun= .ts 源 / node= .mjs 产物）
   busy: boolean
+  /** 已打出 `__SERVE_READY__`（冷启 = bun + 整图 TS transpile + JIT + 权重装载都付清了）。 */
+  ready: boolean
+  /** 预热「等这一个就绪」的钩子；就绪或退出各调一次（只挂在对它感兴趣的那段时间）。 */
+  readyWait: ((ok: boolean) => void) | null
   buf: string
-  pending: ((ok: boolean, msg: string) => void) | null
+  pending: ((outcome: WorkerSettle, msg: string) => void) | null
 }
+
+/**
+ * worker 一路的结算信号（三态，2026-09-28）：
+ *   · `ok`      = 跑完（`__SERVE_OK__`）；
+ *   · `taskErr` = `__SERVE_ERR__`：**这一局错了，worker 本身健康**（serve-loop 捕获了 main 抛的
+ *                 异常并继续收下一行）⇒ 不能因为一局任务/数据问题把一个好 worker 杀掉；
+ *   · `dead`    = worker 进程异常（spawn 失败 / 中途退出 / 超时）⇒ 必须回收。
+ */
+type WorkerSettle = 'ok' | 'taskErr' | 'dead'
 const persistPool: PoolWorker[] = []
 
 function persistSpawn(plan: LaunchPlan): PoolWorker | null {
@@ -798,13 +817,21 @@ function persistSpawn(plan: LaunchPlan): PoolWorker | null {
       stdio: ['pipe', 'pipe', 'pipe'],
       windowsHide: true,
     })
-    const w: PoolWorker = { child, key: plan.argv[0]!, busy: false, buf: '', pending: null }
-    const settle = (ok: boolean, msg: string): void => {
+    const w: PoolWorker = {
+      child,
+      busy: false,
+      ready: false,
+      readyWait: null,
+      buf: '',
+      pending: null,
+    }
+    const settle = (outcome: WorkerSettle, msg: string): void => {
       const pend = w.pending
       if (pend) {
         w.pending = null
+        // taskErr 也一样：serve-loop 已回到「等下一行」，这个 worker 的下一个任务可以马上发
         w.busy = false
-        pend(ok, msg)
+        pend(outcome, msg)
       }
     }
     child.stdout.setEncoding('utf8')
@@ -814,28 +841,67 @@ function persistSpawn(plan: LaunchPlan): PoolWorker | null {
       while (nl >= 0) {
         const line = w.buf.slice(0, nl).trim()
         w.buf = w.buf.slice(nl + 1)
-        if (line.startsWith('__SERVE_OK__')) settle(true, '')
+        if (line.startsWith('__SERVE_READY__')) {
+          w.ready = true
+          const wait = w.readyWait
+          if (wait) {
+            w.readyWait = null
+            wait(true)
+          }
+        } else if (line.startsWith('__SERVE_OK__')) settle('ok', '')
         else if (line.startsWith('__SERVE_ERR__'))
-          settle(false, line.slice('__SERVE_ERR__'.length).trim() || 'worker error')
+          settle('taskErr', line.slice('__SERVE_ERR__'.length).trim() || 'worker error')
         nl = w.buf.indexOf('\n')
       }
     })
-    child.on('error', () => settle(false, 'spawn error'))
+    child.on('error', () => settle('dead', 'spawn error'))
     child.on('close', (code, signal) => {
+      // 预热等着它就绪却等来了退出 ⇒ 立刻放行，别把启动挂在一个死掉的 worker 上
+      const wait = w.readyWait
+      if (wait) {
+        w.readyWait = null
+        wait(false)
+      }
       // 正常关池（SIGTERM idle / restart）不刷屏；busy 中途被杀或异常退出才留痕
       if (w.busy || (code !== 0 && code !== null) || signal != null) {
         console.log(
           `[sampler-agent] persist worker closed code=${code} signal=${signal} (was busy=${w.busy})`,
         )
       }
-      settle(false, 'worker exited')
-      const i = persistPool.indexOf(w)
-      if (i >= 0) persistPool.splice(i, 1)
+      settle('dead', 'worker exited')
+      recyclePersistWorker(w)
     })
     persistPool.push(w)
     return w
   } catch {
     return null
+  }
+}
+
+/**
+ * 记一次**池的**失败（连败 +1，到阈值就停补位）。只在「一次性兜底跑通」的前提下调：
+ * 那才证明是池这一路（worker 挂了 / 与一次性结论不一致），而不是这一局的任务/数据有问题。
+ */
+function notePoolFailure(): void {
+  persistBreaker = notePersistAttempt(persistBreaker, 'failed', Date.now())
+  if (persistBreaker.stopped)
+    console.log(
+      `[sampler-agent] persist worker 连败 ${PERSIST_DISABLE_STREAK} 次 → 停补位` +
+        `（暖 worker 继续服务；${PERSIST_REARM_MS / 1000}s 后放一次探针）`,
+    )
+}
+
+/** 把一个 worker 从池里摘掉并杀掉（幂等：已死 / 已摘走都安全）。
+ * 只在两种时候调：进程异常（`dead`）与「两路结论不一致」（见 runViaPersistWorker 的调用方）——
+ * 单纯这一局任务失败（两路都挂）留下的 worker 是好的，不能拿它顶罪。 */
+function recyclePersistWorker(w: PoolWorker | null): void {
+  if (!w) return
+  const i = persistPool.indexOf(w)
+  if (i >= 0) persistPool.splice(i, 1)
+  try {
+    w.child.kill('SIGTERM')
+  } catch {
+    /* gone */
   }
 }
 
@@ -850,62 +916,153 @@ function killPersistPool(): void {
   persistPool.length = 0
 }
 
-/** 走长驻 worker 跑一局；true=成功且 _result.pack 已写入。失败/不可用 → false（调用方一次性兜底）。 */
+/**
+ * 单槽等就绪的上限（超了不等它，接着铺下一个）。 */
+const PREWARM_READY_TIMEOUT_MS = 60_000
+/** 预热整体预算（超了就直接上线——别把节点挂在启动里）。 */
+const PREWARM_BUDGET_MS = 180_000
+/** 槽与槽之间让位事件循环的间隔。 */
+const PREWARM_GAP_MS = 200
+/** 连着这么多个 worker 都没到 READY ⇒ 判定入口本身坏了，停止预热（走一次性 spawn）。 */
+const PREWARM_DRY_LIMIT = 2
+
+/** 等一个刚 spawn 的 worker 打出 `__SERVE_READY__`（退出/超时 ⇒ false）。 */
+function waitPersistReady(w: PoolWorker): Promise<boolean> {
+  if (w.ready) return Promise.resolve(true)
+  return new Promise((resolve) => {
+    const t = setTimeout(() => {
+      w.readyWait = null
+      resolve(false)
+    }, PREWARM_READY_TIMEOUT_MS)
+    ;(t as ReturnType<typeof setTimeout>).unref?.()
+    w.readyWait = (ok) => {
+      clearTimeout(t)
+      resolve(ok)
+    }
+  })
+}
+
+/**
+ * 铺满长驻池：同质 worker × `workers` 个（启动预热，调用方**必须**在 bind 之前 await）。
+ *
+ * 依据（a95 真机同批同参数）：冷池 31.6s/局 vs 热池 1.6s/局——冷启成本 = bun + 整图 TS transpile
+ * + JIT + native/权重装载。第三轮上机（同日）又把机理钉死了：**fork 本身**在 a95/proot 上
+ * 就把事件循环占死 ~7s/次，且与子进程无关（`spawn('/bin/true')` 也要 7.1s，50ms 定时器
+ * ticks=0）；7 个槽位连发 = 全程失联 ~50s。而协调器侧 `node_ping(timeout=3s)` ⇒
+ * **边上线边预热 = 上线即被判 `ping failed — excluded`**（账本 2029 次的同一机制）。三条约束：
+ *   ① 启动预热必须**在 bind 之前** await：启动期失联是诚实的（还没开始应答），上线即热池；
+ *      反过来先 bind 再预热 = 对着协调器的探针失踪 50s。
+ *   ② **逐个** spawn 并等这个 worker READY 再铺下一个：一次性连发会把慢机用 N 个 CPU-bound
+ *      启动（TS transpile/JIT）饿死，连自己的 /v1/ping 都答不上（a95 实测 8s 超时）。
+ *   ③ 有整体预算，坏 worker / 慢机不把调用方无限期拖住（--no-prewarm 是总开关）。
+ *
+ * 预热**不需要知道这一波要跑什么**（这正是同质化的收益）：所有 worker 都是 `PERSIST_SERVE_ENTRY`，
+ * 具体跑哪个导出器由每行的 mode token 在进程内分派。被删掉的那一版按「盘上权重 mtime」猜主腿、
+ * 猜错就整批退回一次性（a95 实测 3.0s/局 vs 1.39s/局），还得退役空闲 worker 换腿（一次 ~39s）。
+ */
+async function prewarmPersistPool(): Promise<void> {
+  if (!prewarmEnabled || !persistEnabled) return
+  const t0 = Date.now()
+  let spawned = 0
+  let ready = 0
+  let dry = 0
+  while (persistPool.length < workers) {
+    if (Date.now() - t0 > PREWARM_BUDGET_MS) break
+    // 连着几个都「生出来就死」⇒ 入口本身坏了（缺模块 / 语法错 / 权限），别再一个一个烧预算：
+    // 2026-09-28 上机实测（推上去的 `export-rl-rollout.ts` 引了设备上不存在的模块）：每个 worker
+    // 活 ~7.5s 就 code=1，重试把 180s 预算耗光才 bind —— 那段时间节点**既没上线也没预热**。
+    if (dry >= PREWARM_DRY_LIMIT) {
+      console.log(
+        `[sampler-agent] persist prewarm 中止：连续 ${dry} 个 worker 起不来（入口坏？）—— 本轮走一次性 spawn`,
+      )
+      break
+    }
+    // ⚠️ launch 对 bun 臂**直接透传 argv**（不像 runGame 那样自己拼 entryTs）⇒ argv[0] 必须就是
+    // entryTs。传空数组会 spawn 出 `bun undefined --serve`，预热 worker 立刻 code=1 退出
+    // （2026-09-28 首次上机实测：日志「persist prewarm: 4 worker(s)」紧跟 4 条 `closed code=1`）。
+    const w = persistSpawn(rolloutRunner().launch(PERSIST_SERVE_ENTRY, [PERSIST_SERVE_ENTRY]))
+    if (!w) break
+    spawned++
+    if (await waitPersistReady(w)) {
+      ready++
+      dry = 0
+    } else dry++
+    await new Promise((r) => setTimeout(r, PREWARM_GAP_MS))
+  }
+  if (spawned > 0)
+    console.log(
+      `[sampler-agent] persist prewarm: ${ready}/${spawned} worker(s) ready — ` +
+        `${PERSIST_SERVE_ENTRY}（同质，按每行 mode 分派）(${Date.now() - t0}ms)`,
+    )
+}
+
+/**
+ * 走长驻 worker 跑一局。返回 `{ outcome, worker }`：
+ *   · `ok`      = 跑完且 `_result.pack` 已写入（worker 回池）；
+ *   · `busy`    = **不是失败**（池满 / 停补位冷却）→ 调用方一次性兜底且**不记连败**；
+ *   · `taskErr` = worker 报这一局错，但 **worker 健康、已回池**（`worker` 一并返回，
+ *                  供调用方在「一次性却跑通」时把它换掉）；
+ *   · `failed`  = worker 挂了 / 无产物（已从池里摘掉杀掉）。
+ * 一句话：**这里只判“这一局”的结果，不删账也不定生死** —— 池的账在调用方拿到一次性兜底的结果
+ * 之后才算（2026-09-28 改：以前 `__SERVE_ERR__` 就地杀 worker，一条任务级错误就白付一次冷启）。
+ *
+ * `mode` 是本局要跑的导出器的 mode token（`persistModeFor(entryTs)`）：池是同质的，所以「用哪个
+ * 导出器」是**每行的进程内分派**，不再是 spawn 时烧死的入口——这是「池里没有腿」的落地形态。
+ */
 async function runViaPersistWorker(
-  plan: LaunchPlan,
+  mode: string,
   args: string[],
   gameDir: string,
-): Promise<boolean> {
-  const key = plan.argv[0]!
-  let w: PoolWorker | undefined = persistPool.find((x) => !x.busy && x.key === key)
+): Promise<{ outcome: PersistAttempt; worker: PoolWorker | null }> {
+  // 同质池：任意空闲 worker 都能服务任意 mode（不再按 key 找“对腿的那个”）。
+  let w: PoolWorker | undefined = persistPool.find((x) => !x.busy)
   if (!w) {
-    if (persistPool.length >= workers) return false // 全忙（并发门应阻止）→ 一次性兜底
-    w = persistSpawn(plan) ?? undefined
-    if (w) console.log(`[sampler-agent] persist worker spawned (${path.basename(key)})`)
+    // 池满 = 纯背压（协调器并发门可能 > workers，eval 与 rollout 共池）⇒ busy，不是失败。
+    if (persistPool.length >= workers) return { outcome: 'busy', worker: null }
+    // 熔断/半开冷却 = 停补位：暖 worker 照常服务，只是这一波不再新建。
+    if (!persistSpawningAllowed(persistBreaker, Date.now()))
+      return { outcome: 'busy', worker: null }
+    w =
+      persistSpawn(rolloutRunner().launch(PERSIST_SERVE_ENTRY, [PERSIST_SERVE_ENTRY])) ?? undefined
+    if (w)
+      console.log(`[sampler-agent] persist worker spawned (${path.basename(PERSIST_SERVE_ENTRY)})`)
   }
-  if (!w) return false
+  if (!w) return { outcome: 'failed', worker: null }
   w.busy = true
-  const result = new Promise<boolean>((resolve) => {
-    w!.pending = (ok, _msg) => {
-      if (!ok) {
-        const i = persistPool.indexOf(w!)
-        if (i >= 0) persistPool.splice(i, 1)
-        try {
-          w!.child.kill('SIGTERM')
-        } catch {
-          /* gone */
-        }
-        resolve(false)
-      } else resolve(true)
-    }
+  const result = new Promise<WorkerSettle>((resolve) => {
+    w!.pending = (outcome) => resolve(outcome)
     const timer = setTimeout(() => {
-      if (w!.pending) {
-        const pend = w!.pending
+      const pend = w!.pending
+      if (pend) {
         w!.pending = null
-        try {
-          w!.child.kill('SIGTERM')
-        } catch {
-          /* gone */
-        }
-        const i = persistPool.indexOf(w!)
-        if (i >= 0) persistPool.splice(i, 1)
-        pend(false, 'timeout')
+        // 超时 = 这一局卡在 worker 里 ⇒ worker 可疑，回收（与 dead 同路）
+        recyclePersistWorker(w!)
+        pend('dead', 'timeout')
       }
     }, PERSIST_TASK_TIMEOUT_MS)
     ;(timer as ReturnType<typeof setTimeout>).unref?.()
   })
   if (!w.child.stdin) {
     w.busy = false
-    return false
+    return { outcome: 'failed', worker: null }
   }
   try {
-    w.child.stdin.write(JSON.stringify(args.slice(1)) + '\n')
+    // 送的是 `args.slice(1)`（不含入口路径）+ 行首 mode token：与 `serve-any.dispatch` 同规。
+    w.child.stdin.write(JSON.stringify([mode, ...args.slice(1)]) + '\n')
   } catch {
     w.busy = false
-    return false
+    return { outcome: 'failed', worker: null }
   }
-  const ok = await result
-  return ok && fs.existsSync(path.join(gameDir, '_result.pack'))
+  const settled = await result
+  if (settled === 'ok') {
+    if (fs.existsSync(path.join(gameDir, '_result.pack'))) return { outcome: 'ok', worker: null }
+    // 报 OK 却没产物 ⇒ 这个 worker 不可信，回收
+    recyclePersistWorker(w)
+    return { outcome: 'failed', worker: null }
+  }
+  // taskErr：worker 健康（serve-loop 已在等下一行）⇒ 留着，由调用方按兜底结果定夺
+  if (settled === 'taskErr') return { outcome: 'taskErr', worker: w }
+  return { outcome: 'failed', worker: null } // dead：close / 超时已回收
 }
 
 async function runGame(
@@ -1056,19 +1213,23 @@ async function runGame(
     let packBuf: Buffer | null = null
     // §368：--persist 时 per-tick rollout 走长驻 worker（省每局进程启动/JIT 预热/wasm 编译），
     // 失败自动回退一次性 spawn（本局不丢）。
-    if (persistEnabled && PERSIST_SERVE_ENTRIES.has(entryTs)) {
-      const viaWorker = await runViaPersistWorker(plan, args, gameDir)
-      if (viaWorker) {
-        persistFailStreak = 0
-        runner.noteSuccess(plan.engine)
-        packBuf = fs.readFileSync(packFile)
-      } else if (++persistFailStreak >= PERSIST_DISABLE_STREAK) {
-        // 连续失败 → 本进程余生熔断（worker 产物/运行环境有问题的保险丝）
-        persistEnabled = false
-        console.log(
-          `[sampler-agent] persist worker 连续失败 ${PERSIST_DISABLE_STREAK} 次 → 熔断，改回一次性 spawn`,
-        )
-      }
+    let attempt: PersistAttempt = 'skipped'
+    /** worker 报了「这一局错」时留下的那个**健康**worker：只有「一次性却跑通」才把它换掉。 */
+    let errWorker: PoolWorker | null = null
+    // 进池的准入 = 这个导出器在同质入口的 mode 表里（BC / 未知条目 ⇒ 一次性 spawn）。
+    const persistMode = persistEnabled ? persistModeFor(entryTs) : null
+    if (persistMode) {
+      const run = await runViaPersistWorker(persistMode, args, gameDir)
+      attempt = run.outcome
+      errWorker = run.worker
+    }
+    if (attempt === 'ok') {
+      persistBreaker = notePersistAttempt(persistBreaker, 'ok', Date.now())
+      runner.noteSuccess(plan.engine)
+      packBuf = fs.readFileSync(packFile)
+    } else if (attempt === 'busy') {
+      // 背压显式入账（状态不变）：旧实现把「池满」也算失败，3 连就把池永久关掉。
+      persistBreaker = notePersistAttempt(persistBreaker, 'busy', Date.now())
     }
     if (!packBuf) {
       // ---- 一次性 spawn（默认路径 / 长驻不可用或失败时的兜底）----
@@ -1092,10 +1253,26 @@ async function runGame(
       if (rc !== 0) {
         // 引擎级降级判定：node 连续 NODE_FAIL_LIMIT 次失败 → 该进程余生回退 bun。
         runner.noteFailure(plan.engine, `rc=${rc} ${tail.slice(-200)}`)
+        // 两路都挂 ⇒ 任务/数据问题：池无责——**worker 也留着**（以前这里已经把它杀了，
+        // 于是一条缺参数的请求会让节点白付一次冷启：a95 实测 7–8s/条 vs 热池 1.4s/条）。
+        // 显式记一笔 taskErr（状态不变）只是让「为什么没动池的账」在代码里读得出来。
+        if (attempt === 'taskErr')
+          persistBreaker = notePersistAttempt(persistBreaker, 'taskErr', Date.now())
         throw new Error(`${scriptName} exited ${rc}: ${summarizeChildFailure(tail)}`)
       }
 
       runner.noteSuccess(plan.engine)
+      if (attempt === 'failed') {
+        // 池的账只在「worker 挂但**一次性跑通**」时记：一次性也挂 ⇒ 任务/数据问题（异常照旧上抛），
+        // 不动池。2026-09-28 a95 现场：一条缺 --lives-override 的 rollout 请求 3 连把池熔断了。
+        notePoolFailure()
+      } else if (attempt === 'taskErr') {
+        // worker 说这一局错、而一次性同 argv 却跑通 ⇒ **两路结论不一致**：这不是任务问题，
+        // 是池这一路可疑（serve 与一次性在 argv / 环境上起了分歧——那正是池的收益会被静默
+        // 抵消的形态）。照池的失败记，并把那个 worker 换掉。
+        recyclePersistWorker(errWorker)
+        notePoolFailure()
+      }
       // 子进程已把结果打成 BCV2 容器（manifest 含 stage/seed/mode/elapsedSec 溯源戳），
       // 主线程只做一次顺序读——不再读 12 个 shard + base64 + gzip。
       if (!fs.existsSync(packFile)) {
@@ -1318,6 +1495,8 @@ async function handle(req: Request): Promise<Response> {
     // 缺 X-Course 的旧训练侧照旧落「空课程桶」（升级期两向兼容，见 weight-buckets.ts）。
     const kind = req.headers.get('x-kind') ?? 'rollout'
     const course = req.headers.get('x-course') ?? ''
+    // 这里**不再**有「按 x-kind 补位换腿」（2026-09-28 同质化删掉）：池里的 worker 都能跑任意
+    // mode，收到哪个 kind 都无需重铺——预告这一波要什么已不再影响池的形状。
     const bkey = bucketKey(course, kind)
     let bucket = weightsByBucket.get(bkey)
     if (!bucket) {
@@ -1750,6 +1929,11 @@ async function handle(req: Request): Promise<Response> {
       rolloutEngine: rolloutRunner().engine,
       nodeVersion: rolloutRunner().node?.version ?? null,
       persist: persistEnabled,
+      // 池可观测（2026-09-28）：预热/熔断排障——stopped=停补位中（暖 worker 仍在服务）
+      persistPoolSize: persistPool.length,
+      persistReady: persistPool.filter((w) => w.ready).length,
+      persistFailStreak: persistBreaker.streak,
+      persistStopped: persistBreaker.stopped,
       workers,
       gamesDoneTotal,
       gamesDoneByIter: Object.fromEntries(gamesDoneByIter),
@@ -1811,12 +1995,20 @@ if (import.meta.main) {
   }
   if (showHelp) {
     console.log(
-      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--print-code-hash] [--print-code-hash-files] [--no-node]',
+      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--print-code-hash] [--print-code-hash-files] [--no-node] [--no-persist] [--no-prewarm]',
     )
     process.exit(0)
   }
   // §353：先探测 node + 预打包 exporter（日志进启动行之前，便于巡检一眼看到引擎）。
   rolloutRunner()
+  // 启动预热：**bind 之前** await（理由见 prewarmPersistPool 头注释——a95/proot 上 fork 阻塞
+  // 事件循环 ~7s/次，边上线边预热 ⇒ 上线即被判 ping failed）。best effort，失败不影响服务，
+  // 也不让异常吃掉启动。
+  try {
+    await prewarmPersistPool()
+  } catch {
+    /* best effort：预热失败不影响服务 */
+  }
   console.log(
     `[sampler-agent] listening on 0.0.0.0:${port} workers=${workers} cache=${(cacheMaxBytes / (1024 * 1024)).toFixed(0)}MB/${cacheMaxItems} ` +
       `codeHash=${memoizedCodeHash().slice(0, 12)}… agentVersion=${cachedGitShortHash()} cpus=${CPUS} ` +

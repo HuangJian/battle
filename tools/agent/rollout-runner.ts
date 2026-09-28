@@ -49,6 +49,10 @@ const NODE_BUNDLE_ENTRIES: Record<string, string> = {
   'tools/sim/export-eval-game.ts': 'export-eval-game',
   'tools/sim/export-intent-rollout.ts': 'export-intent-rollout',
   'tools/sim/export-goal-rollout.ts': 'export-goal-rollout',
+  // 长驻池的同质入口（2026-09-28）：**必须在白名单里**——否则 node 引擎的机器上会出现
+  // 「一次性任务跑 node 打包产物、池 worker 跑 bun 源码」两条引擎混用（同一台机两条路径
+  // 产出不该有差，但这种静默分歧正是最难查的一类）。
+  'tools/sim/serve-any.ts': 'serve-any',
 }
 
 export type RolloutEngine = 'node' | 'bun'

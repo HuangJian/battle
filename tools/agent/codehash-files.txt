@@ -26,6 +26,7 @@
 #   src/nn/**                    策略网络（infer / obs-encoder / goal / intent / rl-reward …）
 #   tools/sim/export-*           采样导出器（per-tick / 意图 / goal / 干净评估 schema / BC）
 #   tools/sim/serve-loop.ts      长驻 worker 协议（四个导出器共用；改它 = 改 agent 侧协议行为）
+#   tools/sim/serve-any.ts       长驻池的**同质入口**（按每行 mode token 分派；改它 = 改池的分派语义）
 #   tools/agent/*.ts             agent 本体 + /v1/restart 护栏（重启行为修复须触发升级）
 #   src/types.ts                 事件类型（enemy_hit 等埋点契约）
 #   src/game/**                  Simulation 引擎（改引擎 ⇒ 采样与 eval 的 gameplay 都变）
@@ -50,6 +51,7 @@ tools/sim/export-goal-rollout.ts
 tools/sim/export-eval-game.ts
 tools/sim/export-godai-bc.ts
 tools/sim/serve-loop.ts
+tools/sim/serve-any.ts
 src/types.ts
 src/game/
 src/config/

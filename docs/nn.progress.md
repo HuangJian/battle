@@ -32,7 +32,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
 | [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** | 28 |
 | [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 / 课程管理页 / 指标表抗轮转抄录 | 20 |
-| [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池 | 25 |
+| [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处） | 28 |
 | [`docs/nn/tpu-perf.md`](nn/tpu-perf.md) | TPU / XLA：设备实测 · 单步耗诊断 · 编译缓存 · PPO 吞吐 | 9 |
 
 > **另：每篇多了一个 `决策正文归档` 节（2026-09-23）**。`DECISIONS.md` 同日瘦身，把那批

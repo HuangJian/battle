@@ -2,7 +2,8 @@
  * agent-bench.ts —— 从 PC 侧驱动一个远端 sampler-agent 跑 N 局 rollout（真实 HTTP 协议，非本地直跑）。
  *
  * 用途：回答「某台节点在真实训练路径下每局/吞吐各是多少」——与 `export-rl-rollout.ts` 本机直跑相比，
- * 这里多走 HTTP + 常驻池（`PERSIST_SERVE_ENTRIES`）+ 并发 worker，是训练栈的真实形态。
+ * 这里多走 HTTP + 常驻池（`PERSIST_SERVE_ENTRY` = 同质入口 `tools/sim/serve-any.ts`）+ 并发 worker，
+ * 是训练栈的真实形态。
  *
  * 协议（对齐 `nn-training/dist_common.py::fetch_task`）：
  *   · 鉴权：`Authorization: Bearer <agent.auth 内容>`

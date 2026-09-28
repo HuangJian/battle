@@ -115,7 +115,12 @@ def test_pooled_run_rollout_is_byte_identical_to_per_game_spawn(tmp_path, monkey
 
 @pytest.mark.time_budget(60)
 def test_pool_probe_skips_scripts_that_cannot_serve(tmp_path, monkeypatch) -> None:
-    """池只按**真 argv 的脚本**建：不在 `--serve` 白名单的模式（goal/intent）连池都不起。"""
+    """准入门槛仍按**真 argv 的脚本**判：不在名单的模式（goal/intent）连池都不起。
+
+    2026-09-28 同质化**只改了池的形状**（池入口恒为 `serve-any.ts`，脚本 → mode token 在每行），
+    没有动准入门槛 —— 用户点名保持现状。所以 `make_local_pool` 仍然要拿真 argv 探一次脚本，
+    并把同一个脚本作为 `for_script` 交给 `make_pool`。
+    """
     import rl.queue_local as ql
     from remote import serve_pool
 
@@ -125,12 +130,48 @@ def test_pool_probe_skips_scripts_that_cannot_serve(tmp_path, monkeypatch) -> No
     built: list[str] = []
     real_make = serve_pool.make_pool
 
-    def spy_make(bun, script, ts_dir, workers, log_fn, **kw):
-        built.append(str(script))
-        return real_make(bun, script, ts_dir, workers, log_fn, **kw)
+    def spy_make(bun, ts_dir, workers, log_fn, **kw):
+        built.append(str(kw.get("for_script")))
+        return real_make(bun, ts_dir, workers, log_fn, **kw)
 
     monkeypatch.setattr(serve_pool, "make_pool", spy_make)
     # 真跑一局太贵（intent 模式要 replan 参数）——只钉「探针按真 argv 选脚本」这一步：
-    # `make_local_pool` 的返回值就是判据，脚本不在白名单时必须是 None。
+    # `make_local_pool` 的返回值就是判据，脚本不在名单时必须是 None。
     assert ql.make_local_pool(BUN, weights, tmp_path, PAIRS[0], args, "wver", 2) is None
     assert built == ["tools/sim/export-intent-rollout.ts"], built
+
+
+def test_local_pool_is_built_on_the_homogeneous_entry(tmp_path, monkeypatch) -> None:
+    """本地 rollout 轮建池时：入口 = 同质入口，且日志把 mode token 打出来（不再按脚本建）。"""
+    import rl.queue_local as ql
+    from remote import serve_pool
+
+    weights = _weights(tmp_path)
+    seen: list[dict] = []
+
+    class FakePool:
+        entry = serve_pool.SERVE_ANY_SCRIPT
+        served = 0
+        spawned = 1
+        killed = 0
+        fallback = 0
+        fallback_reasons: dict = {}
+
+        def start(self) -> int:
+            return 1
+
+        def close(self) -> None:
+            pass
+
+    def spy_make(bun, ts_dir, workers, log_fn, **kw):
+        seen.append({"entry_default": serve_pool.SERVE_ANY_SCRIPT, "for_script": kw.get("for_script")})
+        return FakePool()
+
+    monkeypatch.setattr(serve_pool, "make_pool", spy_make)
+    logs: list[str] = []
+    monkeypatch.setattr(ql, "log", logs.append)
+    assert ql.make_local_pool(BUN, weights, tmp_path, PAIRS[0], _args(), "wver", 2) is not None
+    assert seen == [
+        {"entry_default": "tools/sim/serve-any.ts", "for_script": "tools/sim/export-rl-rollout.ts"}
+    ], seen
+    assert any("serve-any.ts" in m and "mode=rollout" in m for m in logs), logs

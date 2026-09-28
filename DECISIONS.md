@@ -5104,3 +5104,163 @@ R2 `[83,543]` 461 行（日志/校验/`RunContext`/取包播种 9 件/评估装�
 - **决定**：c20 开事件腿须先验 onset 处理量 >5%（shard manifest 同口径）；否则 B2 归档，信用窗/DAgger 排队。
 - **违反后果**：直开 ⇒ 再烧 80~100 轮横盘腿，读数与 h5e 同带。
 - 全文 → `docs/nn/experiments.md` §46。
+## §2026-09-28-goalnn-persist-prewarm-breaker（2026-09-28，a95 贡献量 1/10 归因：池启动预热 + 熔断收窄为「只停补位」）
+
+**现场**：a95（Android/Termux/proot，SM7250，rl-config concurrency 6）rollout 贡献 ≤ mac 的 1/10。
+真机取证（adb 上机）：轮参与率 **567/5119**（`ping failed — excluded` 2029 次 + 半路回线 174 次）、
+同轮份额 **3.9% vs mac 35.1%**、单局服务时长 med **9.1s vs mac 1.1s**；而**引擎与 CPU 都不是原因**
+（`engine=bun` + `BENCH-ARM native` 6.47ms、8 核在线无节流、无 swap 参与、单局独立跑 1.6–1.9s、user≈real）。
+
+**根因**：**每批首批必付 N 次冷启**。6 路**真并发**（独立 curl 进程）经 agent 实测：**冷池 31.6s/局**
+（6 个 spawn 互踩、拉开 25s）vs **热池 6 局共 9–11s ≈ 1.6s/局**。冷启成本 = bun + 整图 TS transpile
++ JIT + native/权重装载，而节点每轮（尤其掉线回线后）都是冷池。
+
+**三处落地**（`tools/agent/persist-pool.ts` 纯策略 + sampler-agent 接线）：
+① **启动预热**：按盘上最近用过的权重桶 kind 预 spawn `workers` 个池位，主腿吃满 `workers-(其它腿数)`、
+其它腿各 1（池上限是 `workers` 且一波任务几乎总是同一 kind，摊平会让主腿撞上限退回一次性）；`--no-prewarm` 关。
+② **熔断收窄为「只停补位」**：`runViaPersistWorker` 改三态，**只有「worker 挂但一次性跑通」才记连败**；
+`busy`（池满 / 停补位冷却）是背压不记；熔断不再 `persistEnabled=false`（暖 worker 继续服务），
+冷却 `PERSIST_REARM_MS=60s` 后放一次探针（半开）。**与云端池同规**
+（§2026-09-25-goalnn-cloud-cpu-ledger、§2026-09-25-goalnn-rollout-reap-wedge ④），
+后者已把「熔断=停用整池」明确列为被否决项。
+
+**被否决**：靠调低 concurrency 治（实测 6 路稳态够快，降并发只会更闲）· 靠 `--no-persist` 治
+（每局一次性在慢机上更贵：6 局 29–34s/局）· 预热平均摊给各 kind（见①）· 半开探针失败再升格惩罚
+（只重计时）· 把池满当失败（旧实现这条 + 任务级错误一起把池 3 连打死）。
+
+③ **预热必须在 bind 之前**（同日第三轮上机追加，同一条目）：第一版是「先 bind 再后台铺 worker」，
+上机复验暴露它把「首批冷」换成了「上线即失联」：`listening on` → `persist prewarm` 隔 **51s**，其间
+`/v1/ping` 连续 **8.00s 超时**（`--no-prewarm` 对照组 ping 全程 2–8ms）。机理直测：a95/proot 上
+**每一次 fork 都把父进程事件循环占死 ~7s**，与子进程无关——`spawn('/bin/true')` 也要 **7.1s**
+（`Bun.spawn` 7.06s、绝对路径 7.0s），而 `bun -e '1'` 自身启动只要 34ms；7 个槽位连发 = 全程失联 ~50s。
+协调器 `node_ping(timeout=3s)` ⇒ 这 50s 里的探针必被判 `ping failed — excluded`，**即账本 2029 次的
+同一机制**。故改为「bind 之前 await、逐个 spawn、等 `__SERVE_READY__` 再铺下一个」，带单槽 60s /
+整体 180s 预算。修后同套探针：预热日志在前、4s 后 bind，上线即 `persistPoolSize=7 persistReady=7`，
+ping 2–25ms，首批 6 路 rollout **WALL 8.3s ≈ 1.39s/局**。代价：a95 上线时间 ~26s → ~95s（但这段时间
+旧形态本来也要付：上线后失联 50s + 首批全冷）。
+
+**违反后果**：熔断写成停用整池 ⇒ 在最挤的时刻把每一局换成冷启动（a95 实测慢 20×）· 不预热 ⇒
+首批永远冷（轮内份额 1/9）· 把池满/任务级错误记成失败 ⇒ 一条缺参数的请求就能永久关掉节点最快路径 ·
+**先 bind 再预热 ⇒ 对着协调器的 3s 探针失踪 ~50s（比不预热还糟）**。
+
+④ **任务级错误不再动 worker**（同日第四版）：`__SERVE_ERR__` 只说明**这一局**错了——serve-loop 捕的是
+`main` 抛的异常、捕完继续收下一行，worker 本身是好的；旧写法就地 recycle ⇒ 连发 5 条缺 `--lives-override`
+的 rollout 把池 7 打亏到 2、每条还白付一次冷启。改为：worker 报这一局错 + 一次性**也只 rc≠0** ⇒ 任务/数据
+问题，池无责、**worker 留用**（只记一笔 `taskErr`，状态不变）；worker 报错而一次性同 argv **却跑通** ⇒
+两路结论不一致（serve 与一次性在 argv / 环境上起了分歧）= 池这一路可疑 ⇒ 回收那个 worker + 记连败；
+worker 进程死 / 无产物 / 超时 ⇒ 照旧回收。上机复验：`C after` = `persistPoolSize=7 persistReady=7`
+（改前 2），日志零条 `persist worker closed`，坏任务 4.8–5.8s/条（改前 7.0–7.9s）。
+
+⑤ **权重 POST 后的补位预热**（同日第五版）：启动预热的主腿是「盘上 mtime 最新的 kind」——那只是「上一代
+跑过什么」；真正知道这一波用什么的是协调器的权重 POST（`x-kind`）。改为 `POST /v1/weights` 里
+`queuePersistTopUp(kind)`，把点名的 kind 当主腿重算同一个 `prewarmEntryPlan`（新增第三参 `primaryKind`，
+不参与新鲜度窗过滤）并**把池换到位**：只回收「超出计划且空闲」的 worker（`retireSurplusPlan`，busy 的
+一个都不动 = 不丢局），再逐个 spawn。串行队列 + 先让出一拍——POST 的响应不等 spawn（同拍 spawn 会把本机
+POST 拖到 7.7s，实测 115ms）。同时治了两个病：① 新节点（盘上无权重，启动计划为空）首批永远冷；
+② 老节点猜错腿时池满 ⇒ 这一波每一局都退回一次性 spawn。a95 实测（3 路 eval 真并发）：补位前
+`rollout=6 eval=1` → **3.1s/局**；POST `x-kind=eval` 后 `rollout=1 eval=6` → **1.55s/局**，5 条回收印记
+全是 `was busy=false`。
+
+**待办**：换腿会退役空闲 worker（a95 一次 ~39s），**rollout / eval 轮次交替频繁**时理论上会来回切
+（本轮未量、未做节流）。
+另记一条老行为（本轮只记录不改）：sync 路径上失败任务仍回 HTTP 200（错误走 `controller.error`，
+客户端只能看 body 截断）——探针别拿 `%{http_code}` 当健康信号。
+—— 全文（真机读数表 / 探针清单）→ `docs/nn/runtime-opt.md` §27
+
+## §2026-09-28-goalnn-persist-homogeneous-serve（2026-09-28，长驻池改**同质进程**：单入口 + 每任务 mode token，删掉整套「腿」策略）
+
+**问题**（用户提出）：池按导出器分「腿」（rollout 一类、eval 一类……），于是预热得**猜腿**
+（按盘上权重 mtime）、猜错腿的那一波每局都退回一次性 spawn（a95 实测 **3.1s/局** vs 对腿 **1.39–1.55s/局**），
+换腿还要退役空闲 worker 再补满（一次 **~39s**）。而用户的问题切中要害：**eval / rollout 都是无状态外壳，
+为什么不能复用同一个 bun 进程？** 查证 ⇒ 拦路的三件事**都与状态无关**，「分家」是历史包袱：
+
+* 「腿」在物理上就是「哪个 entry 文件」——worker spawn 时烧死 `bun <exporter>.ts --serve`，池的 key =
+  `argv[0]`，任务只送 `args.slice(1)`（**不含 entry**）⇒ 一个 worker 只能跑那一个导出器；
+* 两个导出器都只是 `runServe(main)` 的**无状态外壳**（每局新建 World；`grep '^let |new Map|new Set'`
+  在两个文件里**一个都没有**；eval 的 import 表已含 `GodAIInput`/`IntentExecutor`/`GoalExecutor`/`danger-metrics`）；
+* 原始分家理由（「别动 `export-rl-rollout.ts`，它在 codeHash 红线里」）**已过期**：`codehash-files.txt`
+  现在把四个导出器 + `serve-loop.ts` 全收进去了（eval 自己也注明「2026-08-31 起本文件入集」）。
+
+**决策**：池改成**同质进程**——`PERSIST_SERVE_ENTRY = 'tools/sim/serve-any.ts'`，一个 worker 按每行第一个
+元素（`rollout` / `eval` / `goal` / `intent`，即 mode token）在进程内分派到对应导出器的 `main`
+（`serve-loop.ts` 一行未改；未知/缺失 mode **抛**，不静默跑默认网格——分派错了不再有进程边界挡着）。
+agent 侧「用哪个导出器」从 **spawn 时的 argv** 变成 **每行的 token**（`persistModeFor(entryTs)`，
+表外条目如 BC ⇒ `null` ⇒ 一次性 spawn），挑 worker 只按「**空闲**」。**删掉**：`prewarmEntryPlan`
+（mtime 主腿）、`retireSurplusPlan`（腾位）、`queuePersistTopUp` + `POST /v1/weights` 钩子（补位换腿）、
+池 worker 的 `key` 字段——预热退化成「铺 `workers` 个 `serve-any`」。**机制被删掉，不是又加一层节流。**
+
+**证据**：
+* 本地 `tests/serve-any.test.ts`：① `PERSIST_MODE_BY_ENTRY` 值域 == `SERVE_MODES` 键集（两侧任何一边加
+  导出器都红）；② **同一进程**交替 `eval` → `goal` → 坏 mode → `eval`，每局容器与一次性调用**逐字节一致**
+  （除墙钟 `elapsedSec`），坏 mode 报 `__SERVE_ERR__` 后 worker 不倒；③ `persistModeFor` 对 BC 给 `null`。
+  加源级钉子（池只 spawn 同质入口 ×2 处、送 `[mode, ...args.slice(1)]`、旧腿部策略不许回来）。
+* a95 真机（同机 `workers 6`）：`persist prewarm: 6/6 worker(s) ready — tools/sim/serve-any.ts (47461ms)`
+  → 4s 后 `listening`；进程表 `serve-any --serve`=**6**、任一导出器入口=**0**；首批 6 路 rollout WALL **8.57s**
+  ≈ **1.43s/局**；**紧接着** 3 路 eval（**无任何 POST**）WALL **5.06s** ≈ **1.69s/局**；任务级错误 ×3 后池
+  `6/6` 不动、`persistFailStreak=0`、`persistStopped=false`；全程 `spawned`（预热之外）/`top-up`/停补位 = 0 条，
+  `agent_errors=3`（=3 条故意坏任务，其余 11 局全成）。本地门禁 **2244 pass / 3 skip / 0 fail（219 files）**。
+
+**代价（已记账）**：rollout 执行路径多一个 entry ⇒ `tools/sim/serve-any.ts` 已入 `codehash-files.txt`
+（否则改分派语义不触发节点升级 ⇒ 节点间静默分歧）并进 `NODE_BUNDLE_ENTRIES`（否则 node 引擎机器上
+「一次性走 node 产物、池 worker 走 bun 源码」两条引擎混用）。丢掉「worker 物理隔离」这条边界。
+
+**被否决**：① **保持异构、把上限解耦**（池容量抬到 `2×workers`，两腿各留满宽）——改动更小，但「腿错配」
+与「上线后换腿」这类问题仍在，且常驻进程翻倍（a95 8 worker ≈ 304MB ⇒ 12–14 个 ≈ 500MB）；同质化是**删代码**
+而不是加容量。② 给换腿加节流（治标：仍在猜腿）。③ 保留 `POST /v1/weights` 补位——同质后它无事可做。
+
+**违反后果**：再按 kind/导出器给池分种类 ⇒ 预热又得猜（猜错整批退回一次性 + 换腿退役重补），
+且这类错配**在账本上表现为节点变慢**（不是报错），最难发现 · 把 mode token 分派成「静默兜底默认网格」
+⇒ 整批数据静默错（故未知 mode 一律抛）· 同质入口不进 codehash 清单 ⇒ 改分派语义不触发升级、
+节点间行为漂移（本仓最敏感的面：准入靠 codehash）。
+
+**顺带（同一条目，上机过程抓到的真缺口）**：`prewarmPersistPool` 新增 `PREWARM_DRY_LIMIT=2` ——
+连着两个 worker 到不了 READY 就**中止预热**并走一次性兜底。上机实测（推错版本的 exporter 引了设备上不存在的
+模块）：每个 worker 活 ~7.5s 就 `code=1`，重试把 **180s** 预算耗光，而这段时间**端口还没开**（既没上线、
+也没预热）；加限制后 **14–15s** 就放行。
+—— 全文（读数表 / 上机两个坑 / 判例清单）→ `docs/nn/runtime-opt.md` §27.10
+
+## §2026-09-28-goalnn-local-serve-pool-homogeneous（2026-09-28，Python 侧长驻池也同质：单入口 + 每任务 mode token，门槛与池的形状解耦）
+
+**问题**（用户点名）：TS 侧 agent 池已改成同质入口（`tools/sim/serve-any.ts` + 每行 mode token，
+§2026-09-28-goalnn-persist-homogeneous-serve），而 Python 侧那份池（`remote/serve_pool.py`，
+服务三条腿：节点 `iter_rollout`、本机 `rl/queue_local`、云机离线 eval）**还停留在旧形状**：
+池的身份就是导出器——建池时烧死一个脚本（`bun <exporter>.ts --serve`），每条任务还要
+`owns(argv[0])` 对一次脚本；于是「腿」这个概念在 Python 侧继续活着，「哪条腿能进池」与
+「池是哪种 worker」被绑成同一件事。
+
+**决策**：
+① **入口固定** —— 池一律起 `tools/sim/serve-any.ts --serve`（`SERVE_ANY_SCRIPT`，与 TS 侧
+`PERSIST_SERVE_ENTRY` 同值）；送进 stdin 的行 = `[mode token, ...该导出器的 argv]`，token 由
+`common/manifest.serve_mode_for(argv[0])` 推出（`SERVE_MODE_BY_SCRIPT` = TS
+`PERSIST_MODE_BY_ENTRY` 的 Python 镜像，值域 = `serve-any.ts::SERVE_MODES` 的键集）。
+`owns()` 退化成 `mode_for()`：**池认不认得这个导出器**（仍按每条任务再过一遍门，池不认识 ⇒
+`not-ours` ⇒ 调用方一次性路径）。
+② **门槛与形状解耦** —— `make_pool(bun, ts_dir, workers, log, *, for_script=…)`：`for_script`
+是「**本轮要池化的是哪条腿**」，不是「池是哪种 worker」。三个建池点（`rl/queue_local.make_local_pool`、
+`remote/iter_rollout._make_pool`、`remote/offline_eval.run_cloud_eval`）跟着改；iter 保留
+「整轮只能一个脚本」——准入是**按轮**判的，不是池的能力限制。
+③ **准入门槛保持现状**（用户明确选择）：`SERVE_CAPABLE_SCRIPTS` 仍是
+`{export-rl-rollout.ts, export-eval-game.ts}` ⇒ **本机 goal/intent 轮继续逐局 spawn**。要放开
+只需往那个 frozenset 加一行（`serve_mode_for` 已经认这两个脚本），池侧零改动。
+
+**证据**：送 stdin 的行逐字核对（新桩 `_STUB_ECHO` 把收到的行落盘 ⇒
+`["rollout", ...argv[1:]]`，脚本路径不得进去）· 池入口恒为 `SERVE_ANY_SCRIPT`（两条腿同一形状）·
+门槛仍按真名单（goal/intent 不建池、`NN_SERVE_POOL=0` 不建池）· 脚本→token 表四个真导出器 +
+路径容错 · **跨语言同源**（TS 侧 `tests/serve-any.test.ts` 读 `nn-training/common/manifest.py`
+逐条对拍：常量定义 + token 值）。桩的接法随之变：新增 `_install_entry()` 把同一个 python 桩写到
+生产入口路径 `<ts_root>/tools/sim/serve-any.ts`，端到端用例（`run_iter_rollout` 那族）因此
+不需要任何注入；直接建 `ServePool` 的用例用 `entry=` 注入 + autouse 夹具把 `stub_*` 放行两道门
+（真脚本名仍走真表）。
+读数：`pytest tests/ e2e/` **3328 passed / 1 skipped**，`ruff check .` 全绿。
+
+**被否决**：① 顺手把本机 eval 腿（`EvalDispatcher` / 批评估的本机槽）也建池（今天只有云机离线
+eval 有池）—— 范围更大、与本次「机制同质化」不同题，留作独立决策。② 顺手放开 goal/intent
+（同质化后它们在结构上已经可以进池）—— 用户点名保持现状，避免把「机制改造」与「把两种模式
+推上生产池」混成一次改动。③ 保留「池按脚本建」而只把 `serve-any` 当一个特殊脚本 —— 那等于
+两套形状并存，迟早要再同质化一次。
+
+**违反后果**：再在 Python 侧按导出器建池 ⇒ 「腿」复活（谁进池、池是什么，重新绑成一件事）·
+`serve_mode_for` 与 `PERSIST_MODE_BY_ENTRY` 漂移 ⇒ worker 当场 `unknown mode`（响亮，但等到
+上机才知道；故有跨语言对拍钉子）· 把 `for_script` 又当成池的身份 ⇒ 同一轮混 mode 时又要建多个池。
+
+—— 全文（判例表 / 读数 / 桩接法）→ `docs/nn/runtime-opt.md` §28

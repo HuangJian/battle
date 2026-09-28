@@ -611,6 +611,8 @@ def test_the_local_pool_serves_every_game_with_the_snapshot(tmp_path, monkeypatc
 
     class _FakePool:
         def __init__(self, script: str) -> None:
+            # 池是**同质**的（入口固定 `serve-any.ts`）；这里记的脚本是准入用的 `for_script`
+            # ——它仍然是「按真 argv 选出来的那个导出器」，即本用例要钉的东西。
             self.script = script
             self.closed = False
 
@@ -633,9 +635,9 @@ def test_the_local_pool_serves_every_game_with_the_snapshot(tmp_path, monkeypatc
         def close(self) -> None:
             self.closed = True
 
-    def fake_make_pool(bun, script, ts_dir, workers, log_fn):
-        scripts.append(str(script))
-        p = _FakePool(str(script))
+    def fake_make_pool(bun, ts_dir, workers, log_fn, **kw):
+        scripts.append(str(kw.get("for_script")))
+        p = _FakePool(str(kw.get("for_script")))
         pools.append(p)
         return p
 
@@ -649,7 +651,8 @@ def test_the_local_pool_serves_every_game_with_the_snapshot(tmp_path, monkeypatc
     monkeypatch.setattr(ql, "log", logs.append)
     report = ql.run_rollout("bun", str(weights), traj, [(2000, 1), (2000, 2), (2000, 3)], args)
 
-    assert scripts == ["tools/sim/export-rl-rollout.ts"], scripts  # 按真 argv 选脚本
+    # 准入仍按**真 argv** 选脚本（同质化只改了池的形状，没动门槛）
+    assert scripts == ["tools/sim/export-rl-rollout.ts"], scripts
     assert len(served) == 3, served
     allowed = {"s2000-414001-t300.json", "s2000-414001-t600.json"}
     for argv in served:

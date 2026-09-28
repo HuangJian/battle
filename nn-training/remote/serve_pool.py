@@ -13,9 +13,14 @@
     不需要逐局日志文件 ⇒ `try_capture` 直接把行交回调用方。
 
 协议（TS 侧唯一实现 = `tools/sim/serve-loop.ts::runServe`，**不要各写一套**）：
-  * 进程按 `[bun, <exporter>.ts, "--serve"]` 起（cwd = TS 代码根）；
+  * 进程按 `[bun, tools/sim/serve-any.ts, "--serve"]` 起（cwd = TS 代码根）——**同质入口**
+    （2026-09-28，`docs/nn/runtime-opt.md` §28）：原先每池烧死一个导出器，池就有了「腿」，
+    于是长出「预热猜腿 / 换腿要退役重补 / 混模式的轮拿不到池」那一整类问题；
   * 就绪先打 `__SERVE_READY__`；
-  * stdin 每行 = 一局的 argv（**JSON 数组，不含脚本路径**，等价于 agent 侧的 `args.slice(1)`）；
+  * stdin 每行 = `[mode token, ...该导出器的 argv]`（JSON 数组，**不含脚本路径**）：
+    mode token ∈ `common/manifest.SERVE_MODE_BY_SCRIPT`（= `serve-any.ts::SERVE_MODES` 的键集），
+    由每局的 argv[0] 推出（`serve_mode_for`）——「用哪个导出器」因此是**每行的事实**，
+    而不是池的形状（同一份池可服务两种 mode，本机轮里每轮只有一种；agent 侧那一份甚至混着用）；
   * 跑完打 `__SERVE_OK__`，失败打 `__SERVE_ERR__ <msg>`；
   * 导出器自己的对局日志混在同一路 stdout 上 ⇒ 池按**任务**收集这些行、落回该局自己的
     `rollout.log`（诊断口径与一次性路径同形）。
@@ -25,6 +30,9 @@ World」，只有这样 serve 与一次性调用的产物才逐字节一致 —�
 
 **失败一律回退一次性 spawn**（与 agent 侧同策略）：池只负责「省掉每局启动」，任何时候拿不准
 就交回调用方的一次性路径 —— **只慢不错、绝不丢局**。
+
+**准入门槛与池的形状是两件事**（2026-09-28）：`SERVE_CAPABLE_SCRIPTS` 只回答「本轮要不要建池」
+（用户点名保持现状：本机 goal/intent 轮仍逐局 spawn）；池本身永远是同一个同质入口。
 
 **但回退本身要有限度**（2026-09-25 云机卡死取证）：一次超时 = kill worker + 该局一次性 spawn
 + 池补位再冷启动一个 ⇒ 一次超时放大成**三份进程**；过载时「回退越多、进程越多、越慢」是
@@ -48,6 +56,8 @@ from pathlib import Path
 from typing import NamedTuple
 
 from common import protocol as _protocol
+from common.protocol import SERVE_ANY_SCRIPT as _SERVE_ANY_SCRIPT
+from common.protocol import serve_mode_for as _serve_mode_for
 from platform_utils import kill_process_tree, popen_own_group
 
 #: 与 `tools/sim/serve-loop.ts` 逐字对齐的三个标记（改一侧必须同步另一侧）。
@@ -55,9 +65,14 @@ SERVE_READY = "__SERVE_READY__"
 SERVE_OK = "__SERVE_OK__"
 SERVE_ERR = "__SERVE_ERR__"
 
-#: 支持 `--serve` 的导出器白名单 —— `tools/agent/sampler-agent.ts::PERSIST_SERVE_ENTRIES`
-#: 的节点侧镜像。**只按这份名单建池**：名单外的 argv（单测里的 python 桩、将来新加的导出器）
-#: 一律走一次性路径，池连起都不起 —— 否则「不支持 serve 的脚本」会安静吃掉一个就绪超时。
+#: **准入门槛**（本条腿值不值得池化）：只放行名单内的导出器——名单外的 argv（单测里的 python 桩、
+#: 将来新加的导出器）一律走一次性路径，池连起都不起 —— 否则「不支持 serve 的脚本」会安静吃掉
+#: 一个就绪超时。
+#:
+#: ⚠ 这是**策略**，不是池的形状：池本身**同质**（所有 worker 都是 `SERVE_ANY_SCRIPT`，按每行
+#: mode token 分派）。2026-09-28 之前这两件事是同一件事（池按导出器分「腿」），于是名单还兼任
+#: 「池是哪种 worker」；现在名单只回答「这一轮要不要建池」。用户点名保留现有门槛：本机
+#: goal/intent 轮继续逐局 spawn（要放开只需往名单里加一行，池无需任何改动）。
 #: 导出器路径的**唯一来源**是 `common/protocol.py`（TS↔Python 产物契约）——此处只做本地名
 #: re-export：`serve_pool.EVAL_SCRIPT` / `serve_pool.ROLLOUT_SCRIPT` 的既有调用点与
 #: `tests/test_remote_serve_pool.py` 零改动。
@@ -65,6 +80,13 @@ ROLLOUT_SCRIPT = _protocol.ROLLOUT_SCRIPT
 EVAL_SCRIPT = _protocol.EVAL_SCRIPT
 
 SERVE_CAPABLE_SCRIPTS: frozenset[str] = frozenset({ROLLOUT_SCRIPT, EVAL_SCRIPT})
+
+#: 池 worker 的**唯一入口**（同质）：一个进程按每行首个 mode token 分派到任一导出器。
+#: 与 TS 侧 `persist-pool.ts::PERSIST_SERVE_ENTRY` 同一个值；mode 表在 `common/manifest.py`
+#: （`SERVE_MODE_BY_SCRIPT` / `serve_mode_for`，与 `tools/sim/serve-any.ts::SERVE_MODES` 同集）。
+SERVE_ANY_SCRIPT = _SERVE_ANY_SCRIPT
+#: 模块级别名（测试可 patch；函数体里**不要**直接 `from … import` 成第二份绑定）。
+serve_mode_for = _serve_mode_for
 
 #: 就绪等待上限：bun 冷启动 + wasm 实例化 + 首用 attestation 都在这里（本机 <1s，
 #: Termux 实测 ~2.5s）——**不占**单局硬顶，否则慢节点上第一局必被看门狗误杀。
@@ -117,27 +139,32 @@ def serve_capable(argv: list[str]) -> bool:
 
 def make_pool(
     bun: str,
-    script: str,
     ts_dir: str | Path,
     workers: int,
     log=lambda msg: None,
     *,
+    for_script: str | None = None,
+    entry: str = SERVE_ANY_SCRIPT,
     ready_timeout_sec: float = READY_TIMEOUT_SEC,
 ) -> ServePool | None:
-    """按导出器建池（**两条腿共用同一个准入**）：开关关着 / 脚本不在白名单 ⇒ 返回 None。
+    """两件**便宜且确定**的事，不靠试：开关开着、且本条腿要跑的导出器在准入名单内。
 
-    两个前置都是**便宜且确定**的判据，不靠试：
-      1. 总开关 `NN_SERVE_POOL` 没关（关了就整条腿回到逐局 spawn）；
-      2. 脚本在 `SERVE_CAPABLE_SCRIPTS` 内（真的实现了 `--serve`）。
+    ⚠ `for_script` 不是「池是哪种 worker」，而是「**本轮要池化的是哪条腿**」：池永远是同一个
+    同质入口（`entry`），脚本只用来过 `SERVE_CAPABLE_SCRIPTS` 这道门槛（并且是**每条任务**都在
+    `_submit` 里再过一次的同一道门）。原先池的身份就是脚本本身，于是「池是哪种 worker」与
+    「准不准入」被绑成了同一件事（长出了「腿」）。
+
     返回 None 的语义 = 「本条腿不建池」，调用方按原样走一次性路径（行为与加池前逐字节相同）。
 
     池的**生命周期由调用方拥有**：rollout = 一个 job（= 一个权重版本）；eval = 一轮评估
     （`run_cloud_eval`）。用 `with` 或 try/finally 保证 `close()`（否则留下常驻进程）。
     """
-    if not pool_enabled() or not script or not serve_capable([str(script)]):
+    if not pool_enabled():
+        return None
+    if for_script is None or not serve_capable([str(for_script)]):
         return None
     return ServePool(
-        bun, str(script), Path(ts_dir), workers, log, ready_timeout_sec=ready_timeout_sec
+        bun, Path(ts_dir), workers, log, entry=entry, ready_timeout_sec=ready_timeout_sec
     )
 
 
@@ -153,9 +180,8 @@ class TaskOutcome(NamedTuple):
 class _Worker:
     """一个长驻 worker：spawn 起来后靠 stdin 喂任务、靠标记行判结果。"""
 
-    def __init__(self, proc: subprocess.Popen, script: str) -> None:
+    def __init__(self, proc: subprocess.Popen) -> None:
         self.proc = proc
-        self.script = script
         self.busy = False
         self.dead = False
         #: 就绪或**已退出**都会置位 —— 等待方靠它立刻醒，不会为一个死进程等满就绪上限。
@@ -215,7 +241,7 @@ class _Worker:
 
 
 class ServePool:
-    """固定大小的长驻 worker 池（一份 spec 一个池 —— iter 的 argv 只有一个脚本）。
+    """固定大小的**同质**长驻 worker 池（所有 worker 都是 `entry`，按每行 mode token 分派）。
 
     线程安全：调用方是 `iter_rollout` 的 `ThreadPoolExecutor`（并发数 = 池上限），
     `try_pool` 可被多线程同时调用。
@@ -224,15 +250,16 @@ class ServePool:
     def __init__(
         self,
         bun: str,
-        script: str,
         ts_dir: Path,
         max_workers: int,
         log=lambda msg: None,
         *,
+        entry: str = SERVE_ANY_SCRIPT,
         ready_timeout_sec: float = READY_TIMEOUT_SEC,
     ) -> None:
         self.bun = bun
-        self.script = script
+        #: 池 worker 的入口（生产固定 = 同质入口；单测用它换成 python 桩）。
+        self.entry = entry
         self.ts_dir = Path(ts_dir)
         self.max_workers = max(1, int(max_workers))
         self.log = log
@@ -257,7 +284,7 @@ class ServePool:
     # ---------------- 生命周期 ----------------
 
     def _spawn(self) -> _Worker | None:
-        argv0 = str(self.ts_dir / self.script)
+        argv0 = str(self.ts_dir / self.entry)
         try:
             proc = subprocess.Popen(
                 [self.bun, argv0, "--serve"],
@@ -275,7 +302,7 @@ class ServePool:
             return None
         with self._lock:  # 计数会被多个任务线程并发加（`_acquire` 里按需补位）
             self.spawned += 1
-        return _Worker(proc, self.script)
+        return _Worker(proc)
 
     def start(self) -> int:
         """起满池并等齐 `__SERVE_READY__`；返回**真正就绪**的 worker 数。
@@ -319,16 +346,14 @@ class ServePool:
 
     # ---------------- 跑一局 ----------------
 
-    def owns(self, argv0: str) -> bool:
-        """这一局是不是**本池那个脚本**的（按 basename 比，兼容相对/绝对两种写法）。
+    def mode_for(self, argv0: str) -> str | None:
+        """这一局的导出器 → 送给 worker 的 mode token；`None` = 不是池认得的导出器。
 
-        只防「喂错池」：真正的准入（白名单 + 开关）在 `iter_rollout._make_pool` 建池那一步。
+        只防「喂错池」：准入（`SERVE_CAPABLE_SCRIPTS` + 开关）已在建池时过一次，这里是
+        **每条任务**再过一次的同一道门（池不认识就交回调用方的一次性路径）。
         """
-
-        def base(p: str) -> str:
-            return str(p).replace("\\", "/").lstrip("./").rsplit("/", 1)[-1]
-
-        return base(argv0) == base(self.script)
+        mode = serve_mode_for(argv0)
+        return mode if mode is not None and serve_capable([str(argv0)]) else None
 
     def _acquire(
         self, timeout_sec: float | None = None, *, replenish: bool = True
@@ -457,15 +482,16 @@ class ServePool:
     ) -> TaskOutcome:
         """把一个任务（一局）交给池里的空闲 worker，返回它的结局 —— **从不抛**。
 
-        `argv` = 与一次性路径**同一份** `[<script>, ...]`（内部去掉脚本路径再送：对齐
-        `serve-loop.ts` 的「不含入口路径」约定）；`kind` 只影响告警行的措辞（`rollout`/`eval`）；
+        `argv` = 与一次性路径**同一份** `[<script>, ...]`（内部去掉脚本路径、前置 mode token 再送：
+        与 `serve-any.dispatch` 的「`[mode, ...argv]`」同规）；`kind` 只影响告警行的措辞（`rollout`/`eval`）；
         `where` 是告警里的「现场」（rollout = 该局日志路径，eval = 该局 out 目录）。
 
         等待**按 `GAME_POLL_SEC` 轮询**（与一次性路径同规）：慢局在卡住期间就能被点名，
         而不是等硬顶到了才知道某一局有问题。超时 → kill + 记账（不在这里判定「这一局是坏的」：
         那种判定归调用方的重试逻辑，池不能把一次可能的成功变成失败）。
         """
-        if self.closed or len(argv) < 2 or not self.owns(argv[0]):
+        mode = None if self.closed or len(argv) < 2 else self.mode_for(argv[0])
+        if mode is None:
             return TaskOutcome(False, 0.0, [], "not-ours")
         if self.disabled:
             # 熔断后**不计回退**（否则计数与日志都被余下几百局灌满），也**不再补位**；但手上还
@@ -492,7 +518,8 @@ class ServePool:
             self._drop(w)
             return TaskOutcome(False, 0.0, [], "no-stdin")
         try:
-            stdin.write(json.dumps(argv[1:]) + "\n")
+            # 行首 mode token + 该导出器的 argv（**不含脚本路径**）——与 `serve-any.dispatch` 同规。
+            stdin.write(json.dumps([mode, *argv[1:]]) + "\n")
             stdin.flush()
         except (OSError, ValueError):
             self._log_fallback(
