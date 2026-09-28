@@ -397,3 +397,23 @@ def test_a_broken_bc_course_does_not_take_down_the_rl_course(world: SimpleNamesp
     assert world.bc in rep.skipped and "pull" in rep.skipped[world.bc]
     assert world.bc not in rep.courses
     assert rep.courses["rl-a"]["rounds_done"] == 1
+
+
+def test_open_bc_course_with_empty_serve_argv_resolves_hub_transport(
+    world: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 生产回放（2026-09-28）：serve 的 argv 是空的（`specs.ts` 不给任何旗标）——
+    BC 课必须自己补 `--remote`（hub 地址/token 走 rl-config），否则
+    `resolve_transport(auto)` 直接 SystemExit：课开了、标记落了，但 supervisor 每拍
+    skip、hub 队列恒空、worker 干等。实测：bc-human-retrial 开课后即如此。
+    （本用例调真 `_open_bc_course` 且 `argv=None`——正是生产 serve 的调用形状；
+    上面 `world` 夹具的 open_course 垫片平时注入的 BC_ARGV 反而盖住了这个形状。）"""
+    import dist_common as dc
+
+    monkeypatch.setattr(
+        dc,
+        "load_dist_config",
+        lambda: {"rl": {"remote_hub_url": "http://hub", "remote_token": "tok"}},
+    )
+    rt = loop_serve._open_bc_course(world.bc, argv=None, traj_root=str(world.tmp))
+    assert rt.bc.transport == "hub"

@@ -379,7 +379,17 @@ def _open_bc_course(
     from rl.bc_loop import bc_course_args, resolve_bc_runtime
     from run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
 
-    args = bc_course_args(course, argv)
+    # ★ 2026-09-28：serve = hub pull 模型，BC 课自己补 `--remote`（hub 地址/token 走
+    #   rl-config，经 `resolve_bc_runtime` 自己的 dist_config 读入）。不补的话
+    #   `resolve_transport(auto)` 响亮 SystemExit：课开了、标记落了，但每拍 skip、hub 队列
+    #   恒空、worker 干等（bc-human-retrial 生产实测；R3-4 只接了引擎，没接传输）。
+    #   已显式给传输（--remote/--local/--remote-transport，含测试）的不动。
+    extra = list(argv or [])
+    if not any(
+        a in ("--remote", "--local") or a.startswith("--remote-transport") for a in extra
+    ):
+        extra.append("--remote")
+    args = bc_course_args(course, extra)
     # 课程机器侧覆盖：与 RL 同源（同一份 rl-config 块、同一个白名单）——BC 解析器缺的键会被
     # 响亮跳过（不 setattr 造字段）。在 `resolve_bc_runtime` **之前**：它按 args 推传输。
     apply_course_machine_overrides(args, course)
