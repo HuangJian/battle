@@ -6,7 +6,7 @@ eval」，档位选定「A 层同口径，每 `eval_every` 轮」）：离线整
 A 层语料自己评，读数就能逐轮回到课程账本（板子/门判读到的与 in-loop 完全同一口径）。
 
 **「同口径」是构造性的，不是承诺**：语料（`eval_stages` × `a_eval_seed_list(it, n)`，含双轨
-锚点+轮转）、行 schema（`rl.eval_local.eval_row`）、summary 结算（`rl.eval_local.settle_eval_summary`）
+锚点+轮转）、行 schema（`rl.eval_rows.eval_row`）、summary 结算（`rl.eval_local.settle_eval_summary`）
 三处都取自 in-loop 的同一份实现；`wver` 也同定义（权重文件字节的 sha256）——于是云机评的
 W(it) 行与本地/节点评的同一 W(it) 行在账本里**可以配对**（同 wver 同 (stage,seed)）。
 
@@ -44,10 +44,10 @@ from remote import serve_pool
 from rl.eval_local import (
     a_eval_seed_list,
     eval_done_keys,
-    eval_row,
     run_local_eval_game,
     settle_eval_summary,
 )
+from rl.eval_rows import eval_row
 from rl.log import log as _rl_log
 
 # 单局评估的硬顶：**与 rollout 共用一份口径**（`common/game_watch.py`）。

@@ -53,7 +53,17 @@ from tests.helpers import source_scan
 NN_ROOT = Path(__file__).resolve().parent.parent
 
 #: L0 的**顶层单文件模块**（stdlib-only；`common/` 是包，单独处理）。
-L0_TOP_MODULES = ("dist_common", "schema", "platform_utils", "pid_probe")
+#: 2026-09-27（S5 第十一刀）：`dist_common` 拆出的两个 stdlib-only 叶子 `dist_shard`（shard 清单 /
+#: 容器校验 / 落盘）与 `dist_weights_ledger`（进程内权重下发账本）登记进来 —— 名单是判据的
+#: 输入面，不登记等于这条「L0 不得依赖 L1/L2」对它们瞎着。
+L0_TOP_MODULES = (
+    "dist_common",
+    "dist_shard",
+    "dist_weights_ledger",
+    "schema",
+    "platform_utils",
+    "pid_probe",
+)
 #: L1 包（纯逻辑）。
 L1_PACKAGES = ("models", "ppo", "data", "train", "scripts")
 #: L2 包（传输 / 应用）。
@@ -93,12 +103,16 @@ L2_PACKAGES = ("remote",)
 #: `eval_*` / `stream` / `queue` / `loop_baseline`·`loop_control`·`loop_eval` 只是**经 rl 传递可达**
 #: （`rl.queue` → `rl.dispatch` → remote 这条链把归集器与批执行面一并拽进来）⇒ 同样先红、再登记。
 #: 这是一次**特征**（本机长驻池）而非拆分的连带登记，故单列一行说明形状。
+#: 2026-09-27（S5 第四刀）：`bc_loop` 拆出 `bc_ingest`（BC job 回传消费：轮询会话/指标·eval 入账
+#: + 节奏常量）——它沿用「`_request` 函数内 import」的口径（测试打的就是那个点）⇒ 直接编排成员，
+#: 同前先红、再登记。`bc_loop` 仍经它可达 ⇒ 名字不动。
 RL_ORCHESTRATION = frozenset(
     {
         "batch_eval",
         "batch_plan",
         "batch_runner",
         "batch_store",
+        "bc_ingest",
         "bc_loop",
         "collect_only",
         "dispatch",

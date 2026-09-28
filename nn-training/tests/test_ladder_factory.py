@@ -123,7 +123,9 @@ def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """生成到 tmp（levels/ 也指到 tmp），并让 resolve_level 能找到（preflight 用）。"""
     levels, courses = tmp_path / "levels", tmp_path / "curricula"
     lf.generate(out_levels=levels, out_courses=courses, plan_path=tmp_path / "ladder" / "plan.jsonc")
-    monkeypatch.setattr("rl.config.LEVELS_DIR", levels)
+    # S5 第十刀后 LEVELS_DIR 住 `rl.course_resolve`（config 只剩门面转发；
+    # 模块全局的 setattr 必须打在**实现模块**上才会被 resolve_level 读到）。
+    monkeypatch.setattr("rl.course_resolve.LEVELS_DIR", levels)
     return courses
 
 

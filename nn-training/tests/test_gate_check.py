@@ -117,17 +117,22 @@ FROZEN_NOW = 1_700_000_000.0
 
 
 def test_module_import_has_no_torch_numpy() -> None:
-    """§3.3/§4.1 红线：求值器禁 torch/numpy（eval 线程与 CLI 都要轻量）。"""
+    """§3.3/§4.1 红线：求值器（引擎 + 判决面 + 输入面）禁 torch/numpy/rl.config 运行期加载。
+
+    S5 第十五刀后扩面：两新家（`rl.gate_inputs` / `rl.gate_judges`）与引擎同验。
+    """
     code = (
-        "import sys, rl.gate_check; "
+        "import sys, rl.gate_check, rl.gate_inputs, rl.gate_judges; "
         "print('torch=' + str('torch' in sys.modules)); "
-        "print('numpy=' + str('numpy' in sys.modules))"
+        "print('numpy=' + str('numpy' in sys.modules)); "
+        "print('rl.config=' + str('rl.config' in sys.modules))"
     )
     out = run_utf8([sys.executable, "-c", code], cwd=str(ROOT), timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
     kv = dict(line.split("=") for line in out.stdout.splitlines() if "=" in line)
     assert kv["torch"] == "False"
     assert kv["numpy"] == "False"
+    assert kv["rl.config"] == "False"
 
 
 def test_no_gates_block_holds() -> None:

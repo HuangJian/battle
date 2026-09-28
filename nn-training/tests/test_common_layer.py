@@ -6,7 +6,7 @@
 1. **单一实现**：`sha256_*` / `bun_version` / `exc_tail` 等只允许有一处 `def`，
    上层只能 re-export（`is` 同一对象）——否则下一份「顺手复制」的实现在门禁里悄悄长回来。
 2. **层契约**：`common/` 只依赖 stdlib（要随 `code.zip` 解到没有 torch 的云机上）。
-3. **豁免是结构性的**：三个从 GitHub raw 单独拉取的引导模块**不得** import `common`
+3. **豁免是结构性的**：引导文件集（含交付面兄弟文件）从 GitHub raw 单独拉取，**不得** import `common`
    ——它们的重复是有意为之，测试防止下一个人「顺手合并」。
 4. **§19 编码坑**：`subprocess` 捕获必须显式 UTF-8（`text=True` 单用会按 locale 解码，
    非 ASCII 输出会让读线程死掉、`stdout` 变 `None`）。
@@ -49,6 +49,8 @@ STANDALONE_BOOT_MODULES = (
     NN_ROOT / "remote" / "tailscale_boot.py",
     NN_ROOT / "remote" / "notebook_boot.py",
     NN_ROOT / "remote" / "offline_boot.py",
+    # 交付面兄弟文件（S5 第十四刀）：notebook 与 `offline_boot` 一起从 raw 拉取。
+    NN_ROOT / "remote" / "offline_deliverable.py",
 )
 
 
@@ -99,7 +101,7 @@ def test_common_package_depends_on_stdlib_only() -> None:
 
 
 def test_standalone_boot_modules_stay_dependency_free() -> None:
-    """三个引导模块必须保持零依赖（重复是**有意**的，别顺手合并）。"""
+    """引导文件集必须保持零依赖（重复是**有意**的，别顺手合并）。"""
     for p in STANDALONE_BOOT_MODULES:
         mods = _module_level_imports(_read(p))
         for m in mods:

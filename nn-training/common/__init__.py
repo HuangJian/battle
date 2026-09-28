@@ -63,7 +63,12 @@ L2  remote/ · 根入口                                              （传输 
 | `common.fs` | `atomic_write_bytes` / `atomic_write_json` / `append_jsonl` / `extract_tar_bytes` |
 | `common.text` | `exc_tail`（异常 traceback 尾段） |
 | `common.logutil` | `log_line` / `stamp`（带时间戳的行格式） |
-| `common.protocol` | 远端 PPO/BC 作业**线协议**（manifest 校验 / payload 打包 / `data_fp` / 结果信封）——原 `remote/protocol.py` |
+| `common.protocol` | 远端 PPO/BC 作业**线协议**（manifest 校验 / job 身份 / payload 打包 / `data_fp` / 结果信封 / `coef_active`）——原 `remote/protocol.py`；失败类型与线格式已下沉（见下两行），留 `X as X` 门面 |
+| `common.errors` | **失败类型族**（`ProtocolError` / `RetryableError` / `UnreapableChildError` / `JobCancelledError` / `JobFailedError` / `CodeChangedError`）——每条继承线 = 一个处置分支。**零依赖叶子**（S5 第六刀） |
+| `common.wire_codec` | **传输编码 / 线格式**（v1 gzip+base64 编解码 + v2 裸二进制 `BRV2`/`BRJ2`）。依赖 = stdlib + `common.errors`（S5 第六刀） |
+| `common.job_identity` | **job 身份**（幂等键 `idempotency_key` / `job_id` / 发布端撞名守卫 `collision_rows` + 扫描面常量）。stdlib-only 叶子（S5 第七刀） |
+| `common.payload` | **语料归档**（`pack_payload` / `unpack_payload` 双读 tar.xz+legacy zip / `find_payload` / 容器名常量）。依赖 = stdlib + `common.errors`（S5 第八刀） |
+| `common.manifest` | **job manifest 契约**（`PROTO` / 角色词汇 / `MANIFEST_*` schema / kind→role / TS·plan 产物契约 / rollout 规格校验 / shard 命名与 `data_fp`）。依赖 = stdlib + `common.errors`（S5 第九刀） |
 | `common.game_watch` | 单局子进程**停滞看门狗**的口径常量与四行日志——原 `remote/game_watch.py` |
 """
 

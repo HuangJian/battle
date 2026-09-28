@@ -29,11 +29,14 @@ dist_common.py — 分布式采样 trainer 侧公共工具（stdlib-only，可�
 
 红线：远端结果必须先过 validate_result() 再落进 traj_dir —— discover_rl_shards()
 对已落盘目录是无条件递归扫描的，落盘之后没有任何兜底。
+
+★ 2026-09-27（S5 第十一刀）：shard 清单 / 结果容器校验 / 落盘 → `dist_shard.py`；
+进程内权重下发账本（`_WEIGHTS_PUSHED` + partition/note/forget）→ `dist_weights_ledger.py`。
+两者都在本模块留 `X as X` 门面（历史调用点一行不改）。
 """
 
 from __future__ import annotations
 
-import base64
 import gzip
 import hashlib
 import json
@@ -48,6 +51,54 @@ import urllib.request
 
 from common.hashing import sha256_file
 from common.proc import run_capture
+
+# ------------------------------------------------------------------ 下沉（S5 第十一刀，2026-09-27）
+# 「shard 清单 + 结果容器校验 + 落盘」→ `dist_shard.py`；「进程内权重下发账本」→
+# `dist_weights_ledger.py`。实现搬家、名字留门面 ⇒ 全仓 `dist_common.X(...)` 与
+# `from dist_common import X` 一律不改；两个新家都是 stdlib-only（零仓内依赖）。
+#
+# ⚠ patch 目标：驻本模块的调用方（`post_weights_parallel` / `refresh_weights`）与
+# `rl.*` 的既有调用点读的都是**本模块全局** ⇒ 打桩打在门面才生效；账本 dict 是同一个
+# 对象（`dist_common._WEIGHTS_PUSHED is dist_weights_ledger._WEIGHTS_PUSHED`）。
+from dist_shard import (
+    BC_COLLECTOR as BC_COLLECTOR,
+)
+from dist_shard import (
+    BC_SHARD_FILES as BC_SHARD_FILES,
+)
+from dist_shard import (
+    INTENT_SHARD_FILES as INTENT_SHARD_FILES,
+)
+from dist_shard import (
+    SHARD_FILES as SHARD_FILES,
+)
+from dist_shard import (
+    _shard_files_for as _shard_files_for,
+)
+from dist_shard import (
+    validate_result as validate_result,
+)
+from dist_shard import (
+    write_shard as write_shard,
+)
+from dist_weights_ledger import (
+    _WEIGHTS_PUSHED as _WEIGHTS_PUSHED,
+)
+from dist_weights_ledger import (
+    forget_weights_node as forget_weights_node,
+)
+from dist_weights_ledger import (
+    note_weights_pushed as note_weights_pushed,
+)
+from dist_weights_ledger import (
+    partition_weights_nodes as partition_weights_nodes,
+)
+from dist_weights_ledger import (
+    weights_already_pushed as weights_already_pushed,
+)
+from dist_weights_ledger import (
+    weights_push_cache_reset as weights_push_cache_reset,
+)
 from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -78,52 +129,8 @@ def rl_config_path() -> str:
 
 CONFIG_PATH = rl_config_path()
 
-SHARD_FILES = (
-    "obs.npy",
-    "scalars.npy",
-    "a_move.npy",
-    "a_fire.npy",
-    "lp_move.npy",
-    "lp_fire.npy",
-    "value.npy",
-    # plan/rl-training-config.md §4.2：per-tick shard 奖励改由 Python 公式引擎按
-    # metrics.npy（[N+1,21] f8）计算 —— TS 侧不再落 reward.npy。
-    "metrics.npy",
-    "done.npy",
-    "mask.npy",
-)
-
-# M8 意图 RL shard 清单（export-intent-rollout.ts 产物）——意图步 semi-MDP：
-# inject（prev one-hot 8 + duration）与 dt（窗口时长 tick，变步长 GAE 用）替换
-# a_move/a_fire/lp_move/lp_fire；mask 为 8 类死类掩码。
-INTENT_SHARD_FILES = (
-    "obs.npy",
-    "scalars.npy",
-    "inject.npy",
-    "a_intent.npy",
-    "lp_intent.npy",
-    "value.npy",
-    "reward.npy",
-    "done.npy",
-    "mask.npy",
-    "dt.npy",
-)
-
-# BC 语料 shard 清单（export-godai-bc.ts 产物，BC 整合 2026-09-13；与
-# nn-training/data/npyio.py SHARD_FILES + OPTIONAL_FILES 同表——bc.py 装载口径）。
-# manifest.json 不在此表（write_shard 单独落）。
-BC_SHARD_FILES = (
-    "obs.npy",
-    "scalars.npy",
-    "actions.npy",
-    "masks.npy",
-    "conditions.npy",
-    "returns.npy",
-)
-
-#: BC 语料任务的模式/能力标识：agent /v1/task ?mode=bc；shard manifest collector。
+#: BC 语料任务的模式标识：agent /v1/task ?mode=bc。
 BC_MODE = "bc"
-BC_COLLECTOR = "BC-GOD"
 #: BC 任务 wver 常量（无权重语义——God-AI 教师自对弈不需要策略权重）。
 BC_WVER = "bc"
 
@@ -918,48 +925,6 @@ def probe_weights_cached(
     return bool(info.get("cached"))
 
 
-# 进程内「已成功下发过该 wver」缓存（volume 同 it 补波复用；跨 it 换 wver 天然失效）。
-# 值 = 成功 POST 过的 node id（键 = (kind, wver)，见下）。失效：ping/codeHash/bun 门 exclude
-# 时调用 forget_weights_node。局限：同 codeHash 手动重启可能残留脏缓存（同 it 窗口内罕见）。
-# 键 = (kind, wver)。**必须带 kind**：节点侧按 kind 分桶缓存权重，而同一个权重文件
-# （同一 sha）会被多条腿使用——训练 rollout 用 'rollout'，其干净评估用 'eval'
-# （2026-09-19 B6）。不带 kind 时先跑的那条腿的 note 会让另一条腿误判「已下发」
-# 而跳过 POST ⇒ 该节点对另一条腿整轮 409（脏缓存，与 A1 同类陷阱、方向相反）。
-_WEIGHTS_PUSHED: dict[tuple[str, str], set[str]] = {}
-
-
-def weights_push_cache_reset() -> None:
-    """测试/运维：清空进程内权重下发缓存。"""
-    _WEIGHTS_PUSHED.clear()
-
-
-def note_weights_pushed(wver: str, node_id: str, kind: str = "rollout") -> None:
-    if wver and node_id:
-        _WEIGHTS_PUSHED.setdefault((kind, wver), set()).add(node_id)
-
-
-def forget_weights_node(node_id: str, kind: str | None = None) -> int:
-    """把某节点从「已下发」账本摘掉 → 返回摘掉的条数（0 = 本来就没有）。
-
-    kind=None（缺省）= 该节点**所有** kind 都摘（节点重启 ⇒ 它的桶全空了）；
-    给 kind 时只摘那一条腿（避免同进程其它腿被无谓重握手；它们各自有 409 自愈兜底）。
-    """
-    if not node_id:
-        return 0
-    n = 0
-    for key, s in _WEIGHTS_PUSHED.items():
-        if kind is not None and key[0] != kind:
-            continue
-        if node_id in s:
-            s.discard(node_id)
-            n += 1
-    return n
-
-
-def weights_already_pushed(wver: str, node_id: str, kind: str = "rollout") -> bool:
-    return bool(node_id) and node_id in _WEIGHTS_PUSHED.get((kind, wver), ())
-
-
 def post_weights(
     url: str,
     auth_key: str,
@@ -1144,27 +1109,6 @@ def rollout_collect_sec(t_dist_start: float | None, last_settle: float | None) -
     if t_dist_start is None or last_settle is None:
         return None
     return round(last_settle - t_dist_start, 1)
-
-
-def partition_weights_nodes(
-    nodes: list, wver: str, kind: str = "rollout"
-) -> tuple[list, list]:
-    """按进程内缓存把节点拆成 (reuse, need)：reuse 跳过 POST，need 要下发。
-
-    volume 同 it 补波：权重不变，首波已成功的节点进 reuse。kind 决定取哪条腿的账（缺省 'rollout'）；ping/codeHash 门
-    exclude 的节点须先 forget_weights_node，否则可能带着脏缓存进 reuse。
-    """
-    reuse = [
-        nd
-        for nd in nodes
-        if weights_already_pushed(wver, str(nd.get("id") or nd.get("url") or "?"), kind=kind)
-    ]
-    need = [
-        nd
-        for nd in nodes
-        if not weights_already_pushed(wver, str(nd.get("id") or nd.get("url") or "?"), kind=kind)
-    ]
-    return reuse, need
 
 
 def unpack_container(raw: bytes) -> tuple[dict, dict]:
@@ -1424,57 +1368,6 @@ def _poll_result(
         raise DistError(status, body[:300].decode("utf-8", "replace"))
 
 
-# ---------------- 结果校验（先验后落盘的红线所在） ----------------
-def _shard_files_for(manifest: dict) -> tuple:
-    """BC 语料 shard（collector=BC-GOD）用 BC_SHARD_FILES；意图 RL shard（collector=
-    INTENT-RL）用 INTENT_SHARD_FILES；其余 per-tick SHARD_FILES。"""
-    if manifest.get("collector") == BC_COLLECTOR:
-        return BC_SHARD_FILES
-    if manifest.get("collector") == "INTENT-RL" or "a_intent.npy" in manifest:
-        return INTENT_SHARD_FILES
-    return SHARD_FILES
-
-
-def validate_result(
-    manifest: dict,
-    files: dict,
-    expected_wver: str,
-    expected_pairs: set[tuple[int, int]],
-    seen_keys: set[tuple[int, int]],
-) -> str | None:
-    """返回 None=通过；否则给出拒收原因。"""
-    if not isinstance(manifest, dict):
-        return "manifest is not an object"
-    if manifest.get("wver") != expected_wver:
-        return f"wver mismatch: got {manifest.get('wver')!r}"
-    key = (manifest.get("stage"), manifest.get("seed"))
-    if key not in expected_pairs:
-        return f"unexpected (stage,seed)={key}"
-    if key in seen_keys:
-        return f"duplicate (stage,seed)={key}"
-    # BC wins-only 败局：合法"跳过"结果（kept:false 空容器），不是任务失败。
-    if manifest.get("collector") == BC_COLLECTOR and manifest.get("kept") is False:
-        if files:
-            return f"bc loss-skip shard must carry no files (got {sorted(files)})"
-        return None
-    want = _shard_files_for(manifest)
-    if set(files.keys()) != set(want):
-        extra = sorted(set(files) - set(want))
-        lack = sorted(set(want) - set(files))
-        return f"file set mismatch (extra={extra}, missing={lack})"
-    for name, val in files.items():
-        try:
-            # v2 容器值为原始 bytes；v1 旧 agent 值为 base64 str——双模兼容。
-            raw = (
-                val if isinstance(val, (bytes, bytearray)) else base64.b64decode(val, validate=True)
-            )
-        except Exception:
-            return f"{name}: invalid base64"
-        if len(raw) == 0:
-            return f"{name}: empty payload"
-    return None
-
-
 def validate_eval_result(manifest: dict, expected_wver: str) -> str | None:
     """干净评估局的轻量校验：无 shards，仅对账 wver、模式回显与关键字段。"""
     if not isinstance(manifest, dict):
@@ -1487,26 +1380,3 @@ def validate_eval_result(manifest: dict, expected_wver: str) -> str | None:
         if k not in manifest:
             return f"missing field {k!r}"
     return None
-
-
-def write_shard(files: dict, manifest: dict, out_dir: str) -> None:
-    """校验通过后的唯一落盘出口：目录名沿用 rl_s{si}_seed{seed} 布局。
-
-    2026-09-03 修正：补写 manifest.json——M1 metrics 方案下 engine 加载器
-    （ppo.engine.load_shard → _reward_from_metrics）需要 outcome/score/metrics_version
-    在**落盘目录内**（分布式/self-node 局的单局 manifest 此前只存在于 fetch 返回的
-    内存对象，落盘即丢 → 被当成 timeout 错标，奖励错算）。queue_local 路径由 exporter
-    直接写盘不受影响；此处补齐 dist 路径两侧同规。
-    """
-    os.makedirs(out_dir, exist_ok=True)
-    for name in _shard_files_for(manifest):
-        val = files[name]
-        raw = val if isinstance(val, (bytes, bytearray)) else base64.b64decode(val, validate=True)
-        with open(os.path.join(out_dir, name), "wb") as f:
-            f.write(raw)
-    # 2026-09-05 修复（F8.3 / plan/remote-ppo-architecture.md §11）：此前**双写**
-    # manifest.json（先紧凑再 indent=2，第二次覆盖第一次）——冗余 IO + 双写窗口
-    # 无谓暴露（中途崩溃留半写文件）。只保留 indent=2 写（与 TS 侧 exporter 同规），
-    # 磁盘产物字节不变（旧代码最终落盘的就是 indent=2 版本）。
-    with open(os.path.join(out_dir, "manifest.json"), "w", encoding="utf-8") as f:
-        json.dump(manifest, f, indent=2)

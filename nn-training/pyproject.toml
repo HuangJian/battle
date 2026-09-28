@@ -126,7 +126,10 @@ explicit = true
 # 2026-09-02（plan/python-refactor.md B4）：此前 py-modules=[] 使 `pip install -e .`
 # 装不进任何东西，各模块只能靠 sys.path hack 互相可见。现在声明包与顶层模块，
 # 安装后可任意目录 `import schema / ppo / rl / models / ...`。
-py-modules = ["dist_common", "schema", "platform_utils"]
+# 2026-09-27（S5 第十一刀）：`dist_common` 现在 import `dist_shard` /
+# `dist_weights_ledger` ⇒ 两者必须同栈声明，否则 editable 安装下 `import dist_common`
+# 直接 ImportError（测试靠 conftest 的 sys.path 看不出来，装机环境才现形）。
+py-modules = ["dist_common", "dist_shard", "dist_weights_ledger", "schema", "platform_utils"]
 
 # 2026-09-23：新增 `common`（共享原语层，stdlib-only）——它同样要给
 # `pack_code_zip` 打进 code.zip，也必须 `pip install -e .` 后可直接 `import common.*`。

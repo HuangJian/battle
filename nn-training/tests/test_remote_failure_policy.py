@@ -24,7 +24,7 @@ from types import SimpleNamespace
 import pytest
 
 from common.protocol import JobFailedError
-from remote.hub_client import wait_job
+from remote.hub_http import wait_job  # 所有者（S5 第五刀）；旧家 hub_client 仍转发此名
 from rl.loop_steps import TrainingSteps
 
 
@@ -207,15 +207,15 @@ def test_wait_job_poll_backoff_on_network_errors() -> None:
             raise OSError("tunnel i/o timeout")
         return 200, b'{"ok": 1}'
 
-    import remote.hub_client as hc
+    import remote.hub_http as hub_http
 
-    orig_req, orig_sleep = hc._request, hc.time.sleep
-    hc._request = fake_request  # type: ignore[assignment]
+    orig_req, orig_sleep = hub_http._request, hub_http.time.sleep
+    hub_http._request = fake_request  # type: ignore[assignment]
     try:
-        hc.time.sleep = lambda s: sleeps.append(float(s))  # type: ignore[assignment]
+        hub_http.time.sleep = lambda s: sleeps.append(float(s))  # type: ignore[assignment]
         out = wait_job("http://x", "t", "j1", timeout_sec=10, poll_sec=5.0, log=lambda m: None)
     finally:
-        hc._request, hc.time.sleep = orig_req, orig_sleep  # type: ignore[assignment]
+        hub_http._request, hub_http.time.sleep = orig_req, orig_sleep  # type: ignore[assignment]
     assert out == {"ok": 1}
     assert sleeps == [5.0, 10.0, 20.0]  # 5 × 2^k，封顶 60
 
@@ -230,13 +230,13 @@ def test_wait_job_404_does_not_backoff() -> None:
         code = next(it)
         return code, b"{}" if code == 404 else b'{"ok": 1}'
 
-    import remote.hub_client as hc
+    import remote.hub_http as hub_http
 
-    orig_req, orig_sleep = hc._request, hc.time.sleep
-    hc._request = fake_request  # type: ignore[assignment]
+    orig_req, orig_sleep = hub_http._request, hub_http.time.sleep
+    hub_http._request = fake_request  # type: ignore[assignment]
     try:
-        hc.time.sleep = lambda s: sleeps.append(float(s))  # type: ignore[assignment]
+        hub_http.time.sleep = lambda s: sleeps.append(float(s))  # type: ignore[assignment]
         wait_job("http://x", "t", "j2", timeout_sec=10, poll_sec=5.0, log=lambda m: None)
     finally:
-        hc._request, hc.time.sleep = orig_req, orig_sleep  # type: ignore[assignment]
+        hub_http._request, hub_http.time.sleep = orig_req, orig_sleep  # type: ignore[assignment]
     assert sleeps == [5.0, 5.0]

@@ -369,7 +369,7 @@ def test_wait_bc_round_zero_wait_sec_means_unlimited(tmp_path: Path, monkeypatch
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from remote import hub_client
+    from remote import hub_http
     from rl import bc_loop
 
     calls = {"n": 0}
@@ -382,7 +382,8 @@ def test_wait_bc_round_zero_wait_sec_means_unlimited(tmp_path: Path, monkeypatch
             return 200, json.dumps({"job_id": "j1", "metrics": {}}).encode("utf-8")
         return 404, b"{}"
 
-    monkeypatch.setattr(hub_client, "_request", fake_request)
+    # 注入点 = HTTP 面的所有者（`bc_ingest` 向它取 `_request`）。
+    monkeypatch.setattr(hub_http, "_request", fake_request)
     monkeypatch.setattr(bc_loop.time, "sleep", lambda _s: None)  # 免真等 poll_sec
 
     out = bc_loop.wait_bc_round(
@@ -407,6 +408,9 @@ def test_finish_all_rounds_issues_cloud_halt(tmp_path: Path, monkeypatch) -> Non
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from remote import hub_client
     from rl import bc_loop
+
+    # `set_cloud_halt` 的调用点（`bc_loop.finish_all_rounds` 内的延迟 import）仍走
+    # `hub_client` 的转发名 ⇒ 这里照旧 patch 它（不是 `_request` 那一档）。
 
     seen: dict = {}
 

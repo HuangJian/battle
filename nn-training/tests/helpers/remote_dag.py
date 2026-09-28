@@ -58,11 +58,12 @@ REMOTE_DIR = ROOT / "remote"
 #:   `offline_deliver` · `offline_eval` · `deliver_zip` · `iter_rollout` ·
 #:   `hub.store_offline`（离线段产物：要靠 L0 的 `artifacts` + `common.fs`，比同族高一层）·
 #:   `hub.task_pack`（任务包判据叶子：`offline` 与 `queue_offline` 的共同依赖）；
-#: * **L2 传输核心**：`http`（所有业务簇的公共底座）· `push_client` · `plan_run`（半离线执行引擎：
-#:   `worker` 与 `run_loop` 都站在它上面，它自己谁都不靠上层靠）· `hub.store`（`_JobStore`
-#:   组合类：六个混入的组装，因 `store_offline` 在 L1 ⇒ 它只能是 L2）；
+#: * **L2 传输核心**：`http`（所有业务簇的公共底座）· `push_client` · `plan_handoff`（半离线交接面：
+#:   计划校验 / 取包播种 / `RunContext` / 评估装配 —— 第十三刀从 `plan_run` 下沉，`plan_run` 站在
+#:   它上面）· `hub.store`（`_JobStore` 组合类：六个混入的组装，因 `store_offline` 在 L1 ⇒ 它只能是 L2）；
 #: * **L3 业务簇**：`bc_job` · `download`（取字节 + **物料落地三兄弟** `_ensure_payload` /
-#:   `_ensure_code` / `_ensure_ts_code`，因此也依赖 L1 的 `job_fs`）· `job_lifecycle` · `push_dispatch`；
+#:   `_ensure_code` / `_ensure_ts_code`，因此也依赖 L1 的 `job_fs`）· `job_lifecycle` · `push_dispatch`
+#:   · `plan_run`（半离线**驱动引擎**：迭代 / 检查点 / 收尾；站 L2 的 `plan_handoff` 上 ⇒ L3）；
 #: * **L3 业务簇**：… · `hub.offline`（离线段面：`store` + `task_pack` ⇒ L3）；
 #: * **L4 状态类/组合层**：`hub.queue`（`_HubQueue` 组合类：八个 L3 混入的组装）· `hub.result`
 #:   （回传路由：要让推与拉共用同一个校验函数，因此要 `push_dispatch` L3）· `train_core`
@@ -108,8 +109,17 @@ LAYERS: dict[str, int] = {
     "remote.result_upload": 0,
     "remote.serve_pool": 0,
     "remote.tailscale_boot": 0,
+    # 离线引导的交付面（S5 第十四刀）：从 `offline_boot` 搬出的 standalone 兄弟文件；
+    # stdlib-only ⇒ 无仓内依赖 ⇒ **L0**（`offline_boot`(L7) 经 `importlib` 惰性装载——
+    # AST 看不见该边，这是有意的：引导文件集按 raw 拉取，不参与包内环账本）。
+    "remote.offline_deliverable": 0,
     "remote.deliver_zip": 1,
-    "remote.hub_client": 1,
+    # HTTP 面（S5 第五刀）：从 `hub_client` 整块搬出的传输薄壳 `_request` + 回传消费
+    # （`probe_job_result` / `poll_job` / `wait_job`）+ 停机达令 + `HubClientError`。
+    # 依赖面 = `common.protocol` + `net_http`(L0，延迟) ⇒ **L1**；`hub_client` 转而站在它
+    # 上面（顶层边）⇒ 从 L1 升到 **L2**。
+    "remote.hub_http": 1,
+    "remote.hub_client": 2,
     "remote.hub.store_offline": 1,
     # `_JobStore` 组合类（S4 第十五刀）：第十四刀把六个域混入拆到 `hub/store_*.py`，本刀把组合类
     # 本身也从 `hub_server` 搬出来 —— 不是对称好看，而是 `_HubQueue` 的课程表域要**构造** store、
@@ -140,11 +150,16 @@ LAYERS: dict[str, int] = {
     "remote.offline_eval": 1,
     "remote.wire": 1,
     "remote.http": 2,
-    "remote.plan_run": 2,
+    # 半离线交接面（第十三刀）：校验 / 取包播种 / `RunContext` / 评估装配；依赖最深
+    # `offline_deliver`(L1) ⇒ L2。
+    "remote.plan_handoff": 2,
     "remote.push_client": 2,
     "remote.bc_job": 3,
     "remote.download": 3,
     "remote.job_lifecycle": 3,
+    # 半离线驱动引擎（第十三刀改判）：交接面下沉后它站 `plan_handoff`(L2) 上 ⇒ 2 → **L3**
+    # （1 + max(deps)；仍在 `worker`(L5) / `run_loop`(L6) 之下）。
+    "remote.plan_run": 3,
     "remote.push_dispatch": 3,
     # `QueuePeer`（S4 第十五刀）：七个混入的**共同声明面**（只声明跨域方法的真签名，不带实现）。
     # 它**不能**声明 `_store_of`（那要 import `hub.store` ⇒ 本模块 L3 ⇒ 七个混入 ≥L4 ⇒
@@ -184,19 +199,27 @@ LAYERS: dict[str, int] = {
 #: 允许的环（键 = 参与环的模块集合，值 = 为什么这是对的）。
 #:
 #: **今天为空**——这是「引擎下沉 + 调用方注入」的结果，不是碰巧：原来 `remote/` 内部唯一那个环
-#: （`run_loop ⇄ worker`）已拆掉：执行引擎下沉到 `remote/plan_run.py`（L2，**不** import
-#: `worker`），`worker` 与 `run_loop` 都从它上面拿 `verify_plan_file` / `run_plan_job`，而「一轮
-#: 怎么跑」由调用方**注入**（`worker` 传 `run_job_fn=run_job`；CLI 侧传 `_real_run_job`）。
+#: （`run_loop ⇄ worker`）已拆掉：执行引擎下沉到 `remote/plan_run.py`（**不** import
+#: `worker`；第十三刀后 L3——交接面 `remote/plan_handoff.py` 在它下面 L2），`worker` 与
+#: `run_loop` 都从它上面拿 `verify_plan_file` / `run_plan_job`（两名字今天经门面转自
+#: `plan_handoff`，路径不变），而「一轮怎么跑」由调用方**注入**（`worker` 传
+#: `run_job_fn=run_job`；CLI 侧传 `_real_run_job`）。
 #:
 #: 机制保留是有用的：真要再引入一个环，必须写在这里 + 在 DECISIONS 里论证，且守卫会把它归入
 #: 「已声明」（而不是静静绿着）。但 `test_remote_dag.py` 里那条**全图零环**的断言比它更严：
 #: 即使有声明也会红——因为本仓已经有「下沉 + 注入」这个手段，无需再用环换任何东西。
 DEFERRED_CYCLES: dict[frozenset[str], str] = {}
 
-#: 三个**自包含引导模块**（从 GitHub raw 单独拉取，cell 拿到 `code.zip` 之前就要 import）：
+#: 四个**自包含引导模块**（从 GitHub raw 单独拉取，cell 拿到 `code.zip` 之前就要 import）：
 #: 它们**顶层不得** import 任何 `remote.*`（见 `remote/__init__.py`）。延迟 import 允许
-#: （那正是「先拉起自己、再拉别人」的实现方式）。
-STANDALONE_BOOT_MODULES = ("remote.tailscale_boot", "remote.notebook_boot", "remote.offline_boot")
+#: （那正是「先拉起自己、再拉别人」的实现方式）。`offline_deliverable` 是交付面兄弟文件
+#: （S5 第十四刀）：notebook 与 `offline_boot` 一起拉取，`offline_boot` 惰性装载它。
+STANDALONE_BOOT_MODULES = (
+    "remote.tailscale_boot",
+    "remote.notebook_boot",
+    "remote.offline_boot",
+    "remote.offline_deliverable",
+)
 
 
 def project_roots() -> set[str]:

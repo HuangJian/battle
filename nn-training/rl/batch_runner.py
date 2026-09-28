@@ -6,7 +6,7 @@
 一个单元 = 一个 100 局批次：通道机器（每节点各自 ping+权重就绪即派单）· 尾段竞速 ·
 背压重排 · 收尾三闸（settled / 僵死 / 零消费者宽限）。
 
-**这个模块的边**：只向下（`dist_common` / `rl.{batch_plan,batch_store,eval_local,log,queue,queue_local}`），
+**这个模块的边**：只向下（`dist_common` / `rl.{batch_plan,batch_store,eval_local,eval_yield,log,queue,queue_local}`），
 **不** import 旧家 `rl.batch_eval`（否则成环）；`rl.batch_eval` 反过来再导出本模块的公开名。
 
 **★ 注入点（patch 目标）**：本模块的依赖注入靠**模块全局**，测试 `monkeypatch.setattr` 打的是
@@ -48,13 +48,13 @@ from rl.batch_plan import (
 )
 from rl.batch_store import BatchStore, data_root
 from rl.eval_local import (
-    EVAL_LOCAL_SLOTS_DEFAULT,
     EVAL_TASK_ATTEMPTS,
     eval_census_fields,
     eval_loot_fields,
     eval_v8_fields,
     run_local_eval_game,
 )
+from rl.eval_yield import EVAL_LOCAL_SLOTS_DEFAULT
 from rl.log import log
 from rl.queue import _record_agent_meta, bun_version
 

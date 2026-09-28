@@ -28,8 +28,9 @@ _eval_covered ← _drain_pending_eval ──────────────
 4. **状态归属唯一**：五个 eval 槽位只在 `TrainingEval` 声明一处；旧类里那两处跨模块使用
    （`_log_report` 写 `_eval_thread`、`_record_iteration` 读 `_eval_join_sec`）**经继承**可见
    ——它们被逐条写死在 `CROSS_MODULE_HANDS` 里，将来要动必须显式改这张表；
-5. 顶层 import 面**闭合**（本模块不许长出重依赖）；DI 目标（`rl.eval_dispatch` / `rl.eval_local`
-   / `rl.queue` / `rl.archive`）**只许在方法体内延迟 import**——测试一直 patch 那些实现模块；
+5. 顶层 import 面**闭合**（本模块不许长出重依赖）；DI 目标（`rl.eval_dispatch` / `rl.eval_yield`
+   / `rl.queue` / `rl.archive`）**只许在方法体内延迟 import**——测试一直 patch 那些实现模块
+   （`rl.eval_local` 于 S5 第十二刀换成 `rl.eval_yield`：让位/份额判据搬出了运行器）；
 6. **★ 两条功能性**：跨模块的流式交棒（`_log_report` → `_join_eval` → `_eval_tail` 落在**同一个
    实例**上）· 占位**响亮失败**（MRO 被改坏时不静默返回 falsy 把 eval 全关掉）。
 """
@@ -86,7 +87,7 @@ TOP_LEVEL_ALLOWED = {
 }
 
 #: DI 目标：只许**方法体内**延迟 import（测试 patch 的是这些实现模块）。
-DI_MODULES = ("rl.eval_dispatch", "rl.eval_local", "rl.queue", "rl.archive")
+DI_MODULES = ("rl.eval_dispatch", "rl.eval_yield", "rl.queue", "rl.archive")
 
 
 def _tree(path: Path) -> ast.Module:
@@ -281,8 +282,10 @@ def test_di_targets_are_lazy_only() -> None:
     inside = _in_function_imports(EVAL_PY)
     for mod in DI_MODULES:
         assert mod not in top, f"{mod} 被提到顶层了——测试的 patch 目标会漂"
-    # 至少 `dispatch_eval_bg` 的宿主（派发的唯一入口）必须在方法体里拿到
-    assert "rl.eval_dispatch" in inside and "rl.eval_local" in inside
+    # 至少 `dispatch_eval_bg` 的宿主（派发的唯一入口）必须在方法体里拿到；
+    # 2026-09-27（S5 第十二刀）：让位/份额判据的宿主从 `rl.eval_local`（运行器）换成
+    # `rl.eval_yield`（判决面）——本簇仍只经延迟 import 拿它，patch 面不变。
+    assert "rl.eval_dispatch" in inside and "rl.eval_yield" in inside
 
 
 def test_loop_eval_does_not_import_the_facade_or_core() -> None:

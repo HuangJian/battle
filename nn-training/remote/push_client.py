@@ -13,11 +13,11 @@ import json
 import time
 
 #: 节点侧结果端点（hub 侧是 `/jobs/{jid}/result`，只差一个 s）——探针靠注入它复用同一份
-#: 状态码分类实现（见 `hub_client.probe_job_result`）。
+#: 状态码分类实现（见 `hub_http.probe_job_result`）。
 NODE_RESULT_PATH = "/job/{jid}/result"
 
-# `_request` / `_job_failed_from_body` 仍是本模块其它函数（缓存查询、submit）的实现细节；
-# 结果探测自身走 `probe_job_result`（状态码分类的唯一实现，见 hub_client）。
+# `_request` 仍是本模块其它函数（缓存查询、submit）的实现细节；结果探测自身走
+# `probe_job_result`（状态码分类的唯一实现，见 hub_http——**HTTP 面的所有者**）。
 from common.protocol import (
     BLOB_INIT,
     WIRE_JOB_CONTENT_TYPE,
@@ -26,7 +26,7 @@ from common.protocol import (
     is_content_sha,
     pack_job_v2,
 )
-from remote.hub_client import PROBE_READY, PROBE_TRANSIENT, _request, probe_job_result
+from remote.hub_http import PROBE_READY, PROBE_TRANSIENT, _request, probe_job_result
 
 
 def _default_log(msg: str) -> None:
@@ -276,7 +276,7 @@ def wait_result(
 ) -> dict:
     """轮询 /job/{id}/result 直到 200（幂等读）——瞬时网络/5xx 容忍至预算。
 
-    单次探测与状态码分类在 `hub_client.probe_job_result`（`path` 注入节点侧端点）；
+    单次探测与状态码分类在 `hub_http.probe_job_result`（`path` 注入节点侧端点）；
     本函数只负责「**固定** poll_sec 重试 + 超时收尾」——与 hub 侧的差别仅在退避策略
     （直推节点是弱链路热点，历史选择不放大频率），而这个差别不该再复制一份分类逻辑。
     """

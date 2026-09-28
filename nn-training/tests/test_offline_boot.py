@@ -80,18 +80,28 @@ def test_constants_track_the_exporter() -> None:
 
 
 def test_product_pack_names_track_the_artifact_store() -> None:
-    """中途取回认的两个包名也是**抄的一份**（本模块不能 import remote）——改名必须两边一起改。"""
+    """中途取回认的两个包名也是**抄的一份**（交付面不能 import remote）——改名必须两边一起改。
+
+    2026-09-27（S5 第十四刀）：常量随交付面搬进 `remote/offline_deliverable.py` ⇒ 对账
+    改打**新家**（真实现处）；`offline_boot.<名>` 经 `__getattr__` 门面解析到**同一对象**。
+    """
     from remote import artifacts as artifacts_mod
+    from remote import offline_deliverable
     from remote.artifacts import ArtifactStore
 
-    assert offline_boot.ALL_ZIP == ArtifactStore.ALL_ZIP
-    assert offline_boot.LATEST_ZIP == ArtifactStore.LATEST_ZIP
-    assert offline_boot.PARTIAL_CANDIDATES == (ArtifactStore.ALL_ZIP, ArtifactStore.LATEST_ZIP)
+    assert offline_deliverable.ALL_ZIP == ArtifactStore.ALL_ZIP
+    assert offline_deliverable.LATEST_ZIP == ArtifactStore.LATEST_ZIP
+    assert offline_deliverable.PARTIAL_CANDIDATES == (ArtifactStore.ALL_ZIP, ArtifactStore.LATEST_ZIP)
+    # 门面恒等（名字是契约）：offline_boot 侧读到的仍是同一个对象
+    assert offline_boot.ALL_ZIP is offline_deliverable.ALL_ZIP
+    assert offline_boot.LATEST_ZIP is offline_deliverable.LATEST_ZIP
+    assert offline_boot.PARTIAL_CANDIDATES is offline_deliverable.PARTIAL_CANDIDATES
     # 元信息名写死在 `remote/artifacts.py::_refresh_latest` 里（没有常量可对）：扫源码对账
     src = Path(str(artifacts_mod.__file__)).read_text(encoding="utf-8")
-    assert f'writestr("{offline_boot.LATEST_ROW_NAME}"' in src, (
-        f"{offline_boot.LATEST_ROW_NAME} 与 artifacts.py 写的那行对不上 —— 中途取回的进度行会退化成 '-'"
+    assert f'writestr("{offline_deliverable.LATEST_ROW_NAME}"' in src, (
+        f"{offline_deliverable.LATEST_ROW_NAME} 与 artifacts.py 写的那行对不上 —— 中途取回的进度行会退化成 '-'"
     )
+    assert offline_boot.LATEST_ROW_NAME is offline_deliverable.LATEST_ROW_NAME
 
 
 def test_read_pack_index_accepts_a_pack_written_by_the_exporter(
@@ -165,26 +175,81 @@ def test_module_level_code_does_not_need_the_remote_package() -> None:
     assert not bad, f"顶层 import 了 remote（拿包前不存在）: {bad}"
 
 
-def test_module_imports_without_remote_on_sys_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """比源码守卫更强的版本：真的在没有 `remote` 的 sys.path 上 import 一次。
+def _boot_file_set(tmp_path: Path, *names: str) -> Path:
+    """把引导文件集拷进一个临时目录（模拟 notebook 的 `/tmp/battle-boot`）。"""
+    boot = tmp_path / "battle-boot"
+    boot.mkdir()
+    here = Path(offline_boot.__file__).resolve()
+    for name in names:
+        (boot / name).write_bytes((here.parent / name).read_bytes())
+    return boot
 
-    用一个空目录当仓库根、把 nn-training 从 sys.path 摘掉再 import 本文件——它能过，
-    才说明「先有包才有代码」这条时序真的成立。
+
+def test_module_imports_without_remote_on_sys_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """比源码守卫更强的版本：在**没有 `remote` 的 sys.path** 上导入**引导文件集**。
+
+    用一个空的引导目录当仓库根、把 nn-training 从 sys.path 摘掉再 import `offline_boot`——
+    它能过，才说明「先有包才有代码」这条时序真的成立。
+
+    2026-09-27（S5 第十四刀）：交付面搬进兄弟文件 `offline_deliverable.py`（notebook 与
+    `offline_boot.py` 一起从 raw 拉取）⇒ 判据升级成真实的**文件集形态**：两份都摆进引导
+    目录、再**真调一次**交付面（证明懒装载链从引导目录装载、不靠仓库里的 `remote`）。
     """
+    boot = _boot_file_set(tmp_path, "offline_boot.py", "offline_deliverable.py")
     here = Path(offline_boot.__file__).resolve()
     name = "_offline_boot_standalone"
-    spec = importlib.util.spec_from_file_location(name, here)
+    spec = importlib.util.spec_from_file_location(name, boot / "offline_boot.py")
     assert spec is not None and spec.loader is not None
     saved = list(sys.path)
     saved_mods = {k: sys.modules.pop(k) for k in list(sys.modules) if k.startswith("remote")}
+    for probe in ("offline_boot", "offline_deliverable"):
+        sys.modules.pop(probe, None)
     try:
-        sys.path[:] = [p for p in sys.path if Path(p or ".").resolve() != here.parent.parent]
+        sys.path[:] = [str(boot)] + [
+            p for p in sys.path if Path(p or ".").resolve() != here.parent.parent
+        ]
         mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)  # 只要顶层不 import remote 就能过
+        spec.loader.exec_module(mod)  # 顶层不 import remote / 不 import 兄弟 ⇒ 能过
         assert mod.CODE_DIR == offline_boot.CODE_DIR
+        # 懒装载链真通：门面名字解析到**刚拷进引导目录的**那份（不是仓库里的 remote 版）
+        assert mod.courses_of({"course": "c5-gae"}) == ["c5-gae"]
+        assert mod.package_partial.__module__.startswith("offline_deliverable")
     finally:
         sys.path[:] = saved
         sys.modules.update(saved_mods)
+        for probe in ("offline_boot", "offline_deliverable"):
+            sys.modules.pop(probe, None)
+
+
+def test_delivery_face_missing_sibling_fails_loudly(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """老 notebook（拉取名单缺新文件）的失败语义：训练面照跑、交付面**响亮**报错。
+
+    引导目录里只摆 `offline_boot.py`（不摆 `offline_deliverable.py`）：`offline_boot` 照样
+    能装载（懒装载的好处——训练不为交付面陪葬），但第一次用交付面时 `ImportError` 点名
+    缺的是谁（不静默、不退化）。
+    """
+    boot = _boot_file_set(tmp_path, "offline_boot.py")
+    here = Path(offline_boot.__file__).resolve()
+    spec = importlib.util.spec_from_file_location("_offline_boot_no_sibling", boot / "offline_boot.py")
+    assert spec is not None and spec.loader is not None
+    saved = list(sys.path)
+    saved_mods = {k: sys.modules.pop(k) for k in list(sys.modules) if k.startswith("remote")}
+    for probe in ("offline_boot", "offline_deliverable"):
+        sys.modules.pop(probe, None)
+    try:
+        sys.path[:] = [str(boot)] + [
+            p for p in sys.path if Path(p or ".").resolve() != here.parent.parent
+        ]
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)  # 装载成功（懒装载：交付面还没被碰）
+        assert callable(mod.run)
+        with pytest.raises(ImportError, match="offline_deliverable"):
+            mod.courses_of({"course": "c5-gae"})
+    finally:
+        sys.path[:] = saved
+        sys.modules.update(saved_mods)
+        for probe in ("offline_boot", "offline_deliverable"):
+            sys.modules.pop(probe, None)
 
 
 # ────────────────────── 取包：两条源、一个循环 ──────────────────────

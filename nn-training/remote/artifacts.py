@@ -328,7 +328,7 @@ class ArtifactStore:
                         z.write(f, arcname=name)
                 for name in (self.METRICS_NAME, self.EVAL_LOG_NAME):
                     # eval_log.jsonl 也要进包：云上评的读数只有这一条路回来
-                    # （`rl.eval_local.merge_eval_rows` 在导入时并进课程账本）——
+                    # （`rl.eval_rows.merge_eval_rows` 在导入时并进课程账本）——
                     # 漏了它就等于「云上白评一轮」。
                     f = self.root / name
                     if f.exists():

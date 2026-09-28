@@ -41,10 +41,11 @@
 
 **为什么本模块顶部不 import `remote.*`**：它在**拿到任务包之前**就要干活——那时
 `code.zip` 还没进 `sys.path`，`remote` 包根本不存在（中途取回那条路也一样：包可能还没下来，
-而产物已经在盘上）。索引名/代码名/产物包名因此在这里各留一份常量（有测试盯着与
-`remote/bundle.py` / `remote/artifacts.py` 逐字相同），读索引只用 `zipfile` + `json`。
-`tailscale_boot` 按 `notebook_boot` 的做法双路加载（包内 `remote.tailscale_boot` 或
-顶层的 `tailscale_boot`）。
+而产物已经在盘上）。索引名/代码名因此在这里各留一份常量（有测试盯着与 `remote/bundle.py`
+逐字相同），读索引只用 `zipfile` + `json`。**产物包名与交付物打包/课程路径（交付面）**住在
+兄弟文件 `remote/offline_deliverable.py`：notebook 把它与本模块一起从 raw 拉取，本模块经
+`_load_deliverable()` 延迟装载、`__getattr__` 转发（S5 第十四刀）。`tailscale_boot` 按
+`notebook_boot` 的做法双路加载（包内 `remote.tailscale_boot` 或顶层的 `tailscale_boot`）。
 """
 
 from __future__ import annotations
@@ -66,6 +67,51 @@ import zipfile
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+# ── 交付面（S5 第十四刀）住兄弟文件 `remote/offline_deliverable.py` ────────────────────
+# notebook 把它与 `offline_boot.py` / `tailscale_boot.py` 一起从 GitHub raw 拉进同一目录
+# （名单见 `ipynb/battle.offline.ipynb` 引导格）；仓库/包内形态回落到
+# `remote.offline_deliverable`。本模块顶层不得 import `remote.*`（standalone 守卫），
+# 也不能在顶层 import 兄弟文件（仓库形态下没有那个顶层模块名）⇒ **延迟装载 + 门面转发**。
+_DELIVERABLE_NAMES = (
+    "requested_courses",
+    "courses_of",
+    "_split_course_names",
+    "course_work_dir",
+    "download_dir",
+    "package_deliverable",
+    "_partial_last_it",
+    "package_partial",
+    "ALL_ZIP",
+    "LATEST_ZIP",
+    "PARTIAL_CANDIDATES",
+    "LATEST_ROW_NAME",
+    "_COURSE_NAME_RE",
+)
+
+
+def _load_deliverable() -> Any:
+    """交付面模块：引导目录里的兄弟文件优先（与会话刚刷新的本模块同源），包内兜底。"""
+    for _name in ("offline_deliverable", "remote.offline_deliverable"):
+        try:
+            return importlib.import_module(_name)
+        except ImportError:
+            continue
+    raise ImportError(
+        "找不到 offline_deliverable（notebook 拉取名单缺它？重新打开最新 notebook；"
+        "或用任务包里的代码引导）"
+    )
+
+
+def __getattr__(name: str) -> Any:
+    """门面（PEP 562）：交付面的名字转发到 `_load_deliverable()`——名字是契约，位置不是。
+
+    只转发 `_DELIVERABLE_NAMES` 闭集（其余名字照常 `AttributeError`，别把打错的属性喂给
+    交付面）；要 patch 交付面的行为请打 `offline_deliverable.<名>`——门面只改副本（本仓纪律）。
+    """
+    if name in _DELIVERABLE_NAMES:
+        return getattr(_load_deliverable(), name)
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 #: 任务包索引名 / 代码件名 / 包身份 magic —— 与 `remote/bundle.py` 逐字相同（测试守）。
 BUNDLE_INDEX = "task.json"
@@ -90,14 +136,6 @@ STATE_NAME = "state.json"
 #: TS 运行时树 / 运行时 zip（与 `bundle.TS_TREE_NAME` / `protocol.TS_CODE_NAME` 逐字相同）。
 TS_TREE_NAME = "ts_code"
 TS_CODE_NAME = "ts_code.zip"
-
-#: 产物目录里的两个包名（与 `remote/artifacts.py::ArtifactStore` 逐字相同；测试守）。
-ALL_ZIP = "artifacts.zip"
-LATEST_ZIP = "LATEST.zip"
-#: 中途取回的优先顺序：全量包（已收尾）优先，其次最新一轮小包（跑到一半）。
-PARTIAL_CANDIDATES = (ALL_ZIP, LATEST_ZIP)
-#: `LATEST.zip` 里那行元信息（名字写死在 `remote/artifacts.py::_refresh_latest`）。
-LATEST_ROW_NAME = "metrics_row.json"
 
 #: 离线**任务清单 / 租约**端点（与 `remote/protocol.py` 逐字相同；**本模块不得 import
 #: `remote.*`**：包到手之前那个包还不存在）。清单协议版本与租约时长同理（测试守逐字相同）。
@@ -161,7 +199,7 @@ def is_kaggle(env: dict | None = None, *, exists: Callable[[str], bool] = os.pat
 
     本模块**不能** import `remote.*`（拿包之前它还不存在），所以判据在这里重写一份，
     由 `tests/test_offline_boot.py` 盯着两边同值：官方标记 `KAGGLE_KERNEL_RUN_TYPE`、
-    本文件 `download_dir()` 已在用的 `KAGGLE_URL_BASE`，或 `/kaggle/working` 存在。
+    交付面 `offline_deliverable.download_dir()` 已在用的 `KAGGLE_URL_BASE`，或 `/kaggle/working` 存在。
     """
     e = os.environ if env is None else env
     if e.get("KAGGLE_KERNEL_RUN_TYPE") or e.get("KAGGLE_URL_BASE"):
@@ -1005,199 +1043,6 @@ def build_run_argv(
     return argv
 
 
-#: 课程名的合法形状（与 `course_from_pack_name` 同一条口径：它是目录名/文件名，不是自由文本）。
-_COURSE_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
-
-
-def requested_courses(cfg: dict) -> list[str]:
-    """`CFG.course` → 课程名列表（去重、保序）；**空 = 没点名**（交给 hub 清单）。
-
-    用户指令（2026-09-22）：「battle.offline.ipynb 的 course 配置项，需支持多个离线课程名。
-    云机串行从 hub 取任务，逐个完成。」——列表即执行顺序（与控制台课程名逐字相同）。
-    用户指令（2026-09-25）：「云机不应该要在 notebook 里配置离线课程名，它应该直接向 hub
-    问询」⇒ 空不再是错误，而是「按清单跑」（`resolve_courses`/`_run_auto`）。
-
-    三种写法都认：`"c5-gae"`、`["c5-gae", "c6-gae"]`、`"c5-gae, c6-gae"`（逗号/空白分隔）。
-    非法名（含路径分隔符、`..` 等）一律 `SystemExit`——课程名会被拼进目录名与
-    `task-<课>.zip`，含糊的名字在这里就得拦下，不能等到写盘。
-    """
-    raw = cfg.get("course")
-    items: list[str] = []
-    if isinstance(raw, (list, tuple)):
-        for x in raw:
-            items.extend(_split_course_names(str(x)))
-    else:
-        items.extend(_split_course_names(str(raw or "")))
-    out: list[str] = []
-    bad: list[str] = []
-    for name in items:
-        if not _COURSE_NAME_RE.fullmatch(name):
-            bad.append(name)
-            continue
-        if name not in out:
-            out.append(name)
-    if bad:
-        raise SystemExit(
-            f"[offline] CFG.course 里的课程名非法（只允许字母/数字/._-，≤64 字）：{bad}"
-            "——课程名会进目录名与任务包名，请与控制台课程名逐字对齐"
-        )
-    return out
-
-
-def courses_of(cfg: dict) -> list[str]:
-    """老入口（既有调用方/用例）：空 ⇒ `SystemExit`（不知道跑哪几门课就别开跑）。"""
-    out = requested_courses(cfg)
-    if not out:
-        raise SystemExit(
-            "[offline] CFG.course 没填 —— 取包/交付物都按课程名走，必须给"
-            "（支持多门课：列表按顺序串行跑完；新 hub 也可以留空 ⇒ 按 /offline/tasks 清单跑）"
-        )
-    return out
-
-def _split_course_names(text: str) -> list[str]:
-    """一个字符串 → 课程名（逗号/空白分隔；单名就是 [name]）。"""
-    return [p for p in re.split(r"[,\s]+", str(text).strip()) if p]
-
-
-def course_work_dir(cfg: dict, course: str, *, multi: bool) -> Path:
-    """该课的临时工作目录（包/产物/hub.token 都在这儿）。
-
-    单课与今日**逐字相同**（缺省 `<download_dir>/battle-offline/<课>`；显式 `work_dir`
-    原样用）；多课时即使给了显式 `work_dir` 也**再套一层课程名**——否则两门课共用
-    `<work_dir>/run/` 这个产物目录，第二门课的 run_loop 会把第一门的产物当成自己的
-    续跑点（权重接错课，且看起来完全正常）。
-    """
-    explicit = str(cfg.get("work_dir") or "").strip()
-    base = Path(explicit).expanduser() if explicit else download_dir(cfg) / "battle-offline"
-    if explicit and not multi:
-        return base
-    return base / course
-
-
-def download_dir(cfg: dict) -> Path:
-    """交付物的落点：Kaggle 的 Output / Colab 的 `/content` / 否则 cwd（人能一眼找到）。"""
-    explicit = str(cfg.get("download_dir") or "").strip()
-    if explicit:
-        return Path(explicit).expanduser()
-    if os.environ.get("KAGGLE_KERNEL_RUN_TYPE") or os.environ.get("KAGGLE_URL_BASE"):
-        return Path("/kaggle/working")
-    if os.environ.get("COLAB_RELEASE_TAG") or os.environ.get("COLAB_GPU"):
-        return Path("/content")
-    return Path.cwd()
-
-
-def package_deliverable(
-    artifacts_dir: Path, course: str, out_dir: Path, log: Callable[[str], None]
-) -> Path | None:
-    """把 `artifacts.zip` 复制成 `deliver-<课>.zip`（控制台的导入习惯名）。
-
-    名字不是装饰：`remote/deliver_zip.py` 会用文件名里的课程与控制台当前课程**对账**
-    （拿 A 课的权重去评 B 课，读数看起来完全正常，只有对账能拦）。`artifacts.zip`
-    落到人手上再改名，就等于把这道对账让给运气。
-    """
-    src = artifacts_dir / "artifacts.zip"
-    if not src.exists():
-        log(f"没找到 {src} —— 产物目录还在：{artifacts_dir}")
-        return None
-    out_dir.mkdir(parents=True, exist_ok=True)
-    name = f"deliver-{course}.zip" if course else "deliver.zip"
-    dest = out_dir / name
-    try:
-        dest.write_bytes(src.read_bytes())
-    except OSError as e:
-        log(f"复制交付物失败（{e}）—— 手动取 {src}")
-        return None
-    log(f"交付物: {dest}（{dest.stat().st_size} bytes）")
-    return dest
-
-
-def _partial_last_it(art: Path, src: Path) -> str:
-    """产物目录/包里最新一轮的编号（纯日志用；拿不到就 `"-"`，不猜、不抛）。
-
-    两个来源：`state.json` 的 `last_it`（每轮都刷新，最权威），其次是包内的
-    `metrics_row.json`（`LATEST.zip` 带的）。中途取回是**人已经慌了才用的路**，
-    所以这一层绝不能因为一个缺字段就炸。
-    """
-    try:
-        st = json.loads((art / "state.json").read_text(encoding="utf-8"))
-        if isinstance(st, dict) and isinstance(st.get("last_it"), int):
-            return str(st["last_it"])
-    except (OSError, ValueError):
-        pass
-    try:
-        with zipfile.ZipFile(src) as zf:
-            row = json.loads(zf.read(LATEST_ROW_NAME).decode("utf-8"))
-        if isinstance(row, dict) and isinstance(row.get("it"), int):
-            return str(row["it"])
-    except (KeyError, OSError, ValueError, zipfile.BadZipFile):
-        pass
-    return "-"
-
-
-def package_partial(
-    cfg: dict,
-    log: Callable[[str], None],
-    *,
-    courses: list[str] | None = None,
-) -> list[Path]:
-    """把「跑到一半」的产物打成 `deliver-<课>.zip`（会话中途下载 → 控制台导入）。
-
-    用户口径 2026-09-23：「battle.offline.ipynb 底部增加一个 cell，用于将训练到中途的
-    课程结果打包下载回来，供导入至 dashboard。」
-
-    为什么需要它：云机会话会到点/被回收，而**跑到一半**的产物已经在盘上
-    （`LATEST.zip` 每次 checkpoint 都刷新）——但没有一个“能交回控制台”的名字，而控制台的
-    导入靠 `deliver-<课>.zip` **对账课程**（拿 A 课的权重去评 B 课，读数看起来完全正常，
-    只有对账能拦）。于是这里只做两件事：
-
-      1. 选出**最能代表当前进度**的那个包（全量包 `artifacts.zip` 优先，其次最新一轮小包
-         `LATEST.zip`——两者形状都被 `remote/deliver_zip.py` 接受）；
-      2. 复制成 `deliver-<课>.zip` 放进 `download_dir`（Kaggle=`/kaggle/working`、
-         Colab=`/content`、否则 cwd）——人一眼能找到、下载、导入。
-
-    **只读 + 复制**：不动产物、不训练、不碰网络。找不到产物就**响亮说明**是哪个目录为空
-    （第一轮 checkpoint 之前本来就没东西）并返回空列表，绝不因拿不到包而抛。
-    跑完全程时打的同名包是**全量**的（`package_deliverable`）——中途包被它覆盖是预期。
-    """
-    names = list(courses) if courses else courses_of(cfg)
-    multi = len(names) > 1
-    out_dir = download_dir(cfg)
-    made: list[Path] = []
-    for course in names:
-        work = course_work_dir(cfg, course, multi=multi)
-        art = work / "run"
-        src = next((art / n for n in PARTIAL_CANDIDATES if (art / n).exists()), None)
-        if src is None:
-            log(
-                f"[pack] {course}: 没有可打包的产物（{art} 下既没有 {ALL_ZIP} 也没有 "
-                f"{LATEST_ZIP}）——第一轮 checkpoint 之前都是这样"
-            )
-            continue
-        if src.name == LATEST_ZIP:
-            log(
-                f"[pack] {course}: 只找到 {LATEST_ZIP}（会话跑完/中途停机时打的全量包还不在）"
-                "——它含最新一轮的 weights/opt + 计划 + 清单，控制台「导入产物」接受"
-            )
-        dest = out_dir / (f"deliver-{course}.zip" if course else "deliver.zip")
-        try:
-            out_dir.mkdir(parents=True, exist_ok=True)
-            dest.write_bytes(src.read_bytes())
-        except OSError as e:
-            log(f"[pack] {course}: 复制失败（{e}）—— 手动取 {src}")
-            continue
-        log(
-            f"[pack] {course}: {dest}（{dest.stat().st_size} bytes，含到 it{_partial_last_it(art, src)}，"
-            f"来源 {src.name}）"
-        )
-        made.append(dest)
-    if made:
-        log(
-            "[pack] 下一步：把上面的 zip 下载到本机 → 控制台「导入产物」上传（中途包与跑完时的 "
-            "deliver-<课>.zip 同名同形，导入后自动起 A 层评估）"
-        )
-    return made
-
-
 def run_one_course(
     cfg: dict,
     creds: dict,
@@ -1213,7 +1058,7 @@ def run_one_course(
     `multi=True`（同一会话里还有别的课）时工作目录再套一层课程名——见 `course_work_dir`。
     `run_loop_main` 是测试用的注入点（生产走 `remote.run_loop.main`）。
     """
-    work = course_work_dir(cfg, course, multi=multi)
+    work = _load_deliverable().course_work_dir(cfg, course, multi=multi)
     work.mkdir(parents=True, exist_ok=True)
     log(f"工作目录: {work}")
     # 本课自己的 cfg：`course` 恒是**单个字符串**（下游放包路径/交付物名/`--hub-course`
@@ -1333,7 +1178,8 @@ def run_one_course(
     rc = int(run_loop_main(argv) or 0)
     log(f"run_loop 退出 rc={rc}；产物目录 {dest}")
 
-    got = package_deliverable(dest, course, download_dir(ccfg), log)
+    deliverable = _load_deliverable()
+    got = deliverable.package_deliverable(dest, course, deliverable.download_dir(ccfg), log)
     if hub:
         log(
             "轮次已尽力回传给 hub（控制台按课程账户看进度）；"
@@ -1383,7 +1229,7 @@ def _post_json(url: str, token: str, log: Callable[[str], None], *, timeout: flo
 def _queue_work_dir(cfg: dict) -> Path:
     """worker 身份的落点：显式 `work_dir`，否则 `<download_dir>/battle-offline`（与 `course_work_dir` 同源）。"""
     explicit = str(cfg.get("work_dir") or "").strip()
-    return Path(explicit).expanduser() if explicit else download_dir(cfg) / "battle-offline"
+    return Path(explicit).expanduser() if explicit else _load_deliverable().download_dir(cfg) / "battle-offline"
 
 
 def worker_id_of(work: Path, log: Callable[[str], None]) -> str:
@@ -1547,7 +1393,7 @@ def resolve_courses(
     `probe` 是调用方持有的小字典（`{"unsupported": True}`）：老 hub 只探测**一次**，
     之后不再每轮刷一个必然失败的端点。
     """
-    explicit = requested_courses(cfg)
+    explicit = _load_deliverable().requested_courses(cfg)
     if explicit:
         return [{"course": c, "pack_sha256": ""} for c in explicit]
     if probe is not None and probe.get("unsupported"):
@@ -1772,7 +1618,7 @@ def run(
         "TS_AUTHKEY": secret("TS_AUTHKEY", cfg.get("ts_authkey")),
     }
     log("凭据就绪（值不落日志）：" + (", ".join(k for k, v in creds.items() if v) or "（一个都没读到）"))
-    explicit = requested_courses(cfg)
+    explicit = _load_deliverable().requested_courses(cfg)
     if explicit:
         log(f"课程队列（{len(explicit)} 门，串行，CFG 点名）：{', '.join(explicit)}")
         return _run_batch(cfg, creds, log, keepalive_stop, explicit, multi=len(explicit) > 1)

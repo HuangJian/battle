@@ -3,7 +3,8 @@
 时机由调用方决定（流式=派发队列清空时经 on_queue_drained → dispatch_eval_bg；
 串行=rollout 返回后藏进 PPO 空窗）。本模块只管单轮评估的派发与对账——
 OO 化（2026-09-02）：原 dispatch_eval_round 函数迁为 EvalDispatcher 类，
-run() 内局部别名 + 闭包保持（行为逐字节不变）；纯函数工具在 rl/eval_local.py。
+run() 内局部别名 + 闭包保持（行为逐字节不变）；执行面工具在 rl/eval_local.py，
+让位/份额（尾巴）策略的判据与公式在 rl/eval_yield.py（S5 第十二刀，2026-09-27）。
 """
 
 from __future__ import annotations
@@ -21,20 +22,26 @@ import dist_common
 # 同 queue.py：Windows 下隐藏本地评估子进程的控制台窗口（避免反复弹黑窗抢焦点）。
 from rl.eval_local import (
     BASELINE_EVAL_ITER,
-    EVAL_INFLIGHT_GRACE_SEC,
     EVAL_ITER_SUFFIX,
-    EVAL_LOCAL_RELEASE_GRACE,
-    EVAL_LOCAL_SLOTS_DEFAULT,
     EVAL_TASK_ATTEMPTS,
     a_eval_seed_list,
     eval_done_keys,
     eval_row,
-    hold_for_local,
-    release_local_gate_if_starved,
     report_winrate_safe,  # noqa: F401 — re-exported（旧模块成员，兼容外部引用）
     run_local_eval_game,
     settle_eval_summary,
     should_dual_track,
+)
+
+# 让位/份额（尾巴）策略在 `rl/eval_yield.py`（S5 第十二刀）：本派发器只消费判据——尾段预留量 /
+# 宽限强制释放点 / 在飞落账宽限的**公式**也住那边（不再是内联表达式）。
+from rl.eval_yield import (
+    EVAL_LOCAL_SLOTS_DEFAULT,
+    hold_for_local,
+    inflight_grace_cap,
+    local_release_due,
+    release_local_gate_if_starved,
+    reserve_local_slots,
 )
 from rl.log import log
 from rl.queue import _record_agent_meta, bun_version, mm
@@ -216,11 +223,13 @@ class EvalDispatcher:
                     log(f"[eval] WARN weights snapshot failed — local participation off: {e}")
 
             total = len(todo)
-            # 尾段预留量：gate 接线且本地可用时，节点不取最后 reserved 局（留给本机直跑）
-            reserved = (
-                min(local_slots, total)
-                if (snapshot_path is not None and local_gate is not None and local_slots > 0)
-                else 0
+            # 尾段预留量（公式在 rl/eval_yield.reserve_local_slots）：gate 接线且本地可用时，
+            # 节点不取最后 reserved 局（留给本机直跑）
+            reserved = reserve_local_slots(
+                total,
+                local_slots,
+                snapshot_ready=snapshot_path is not None,
+                gate_wired=local_gate is not None,
             )
             pending: deque[tuple[int, int]] = deque(todo)
             lock = threading.Lock()
@@ -326,12 +335,12 @@ class EvalDispatcher:
                             return
                         if pending:
                             # 尾段预留：gate 未放行且余量 ≤ reserved 时不取（留给本机直跑）；
-                            # 宽限期强制释放防挂死。hold 中仍可对 in-flight race。
+                            # 宽限期（local_release_due）强制释放防挂死。hold 中仍可对 in-flight race。
                             if not hold_for_local(
                                 len(pending),
                                 reserved,
                                 local_gate is not None and local_gate.is_set(),
-                                time.time() >= deadline - EVAL_LOCAL_RELEASE_GRACE,
+                                local_release_due(time.time(), deadline),
                             ):
                                 task = pending.popleft()
                                 attempts[task] = attempts.get(task, 0) + 1
@@ -779,7 +788,7 @@ class EvalDispatcher:
                 with lock:
                     if live_workers[0] <= 0:
                         break
-            grace_end = time.time() + float(min(task_timeout, EVAL_INFLIGHT_GRACE_SEC))
+            grace_end = time.time() + inflight_grace_cap(task_timeout)
             while not all_done.is_set() and time.time() < grace_end:
                 with lock:
                     if not inflight or live_workers[0] <= 0:

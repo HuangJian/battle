@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 import pytest
 
 import remote.hub_client as hc
+import remote.hub_http as hub_http
 import remote.push_client as pc
 from common.protocol import JobFailedError
 from remote.hub_client import (
@@ -60,7 +61,9 @@ def http(monkeypatch: pytest.MonkeyPatch) -> _FakeHTTP:
             raise AssertionError(f"假件被问了第 {len(fake.seen)} 次：预置响应已用尽")
         return fake.box.pop(0)
 
-    monkeypatch.setattr(hc, "_request", fake_request)
+    # ★ 注入点 = HTTP 面的所有者（S5 第五刀：`_request` 已下沉 `remote.hub_http`）。
+    # 旧家的 `hub_client._request` 是**转发名**，照它打补丁不会影响宿主函数。
+    monkeypatch.setattr(hub_http, "_request", fake_request)
     return fake
 
 
@@ -94,7 +97,7 @@ def test_network_error_is_transient(monkeypatch: pytest.MonkeyPatch) -> None:
     def boom(*a: object, **kw: object):
         raise OSError("tunnel i/o timeout")
 
-    monkeypatch.setattr(hc, "_request", boom)
+    monkeypatch.setattr(hub_http, "_request", boom)
     res = probe_job_result("http://h", "t", "j1")
     assert res.state == PROBE_TRANSIENT and "OSError" in res.detail
 

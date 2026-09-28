@@ -314,8 +314,9 @@ def test_wait_result_polls_until_200(monkeypatch: pytest.MonkeyPatch) -> None:
         return r
 
     # ★ 补丁打在**共用的** HTTP 出口上（R2c-3 起 `wait_result` 的单次探测走
-    # `hub_client.probe_job_result`——两条链路共用一份状态码分类，所以 HTTP 出口也只有一处）。
-    monkeypatch.setattr("remote.hub_client._request", fake_request)
+    # `probe_job_result`——两条链路共用一份状态码分类，所以 HTTP 出口也只有一处）。
+    # S5 第五刀：出口的所有者是 `remote.hub_http`（`hub_client._request` 只是转发名）。
+    monkeypatch.setattr("remote.hub_http._request", fake_request)
     monkeypatch.setattr("remote.push_client.time.sleep", lambda _s: None)
     out = wait_result("http://n", "tok", "j1", timeout_sec=30, poll_sec=0.01, log=lambda m: None)
     assert out["job_id"] == "j1" and out["agg"]["kl"] == 0.1
@@ -326,7 +327,7 @@ def test_wait_result_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_request(url, token, path, *, timeout=30.0, **kw):
         return 202, b'{"status":"running"}'
 
-    monkeypatch.setattr("remote.hub_client._request", fake_request)
+    monkeypatch.setattr("remote.hub_http._request", fake_request)
     # 让 deadline 立刻过期：time.time 先返回 t0 再返回 t0+10
     ticks = iter([1000.0, 1000.0, 1010.0, 1010.0, 1010.0])
 
