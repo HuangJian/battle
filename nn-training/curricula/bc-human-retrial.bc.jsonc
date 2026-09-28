@@ -1,0 +1,50 @@
+// 课程 bc-human-retrial —— **人类 BC 翻案重测**（DECISIONS §2026-09-28-goalnn-bc-retrial ·
+// 全文 → docs/nn/experiments.md §45；门/held-out/陷阱全 pin 在 §45，本文件只 pin 训练输入）
+//
+// ⚠ 2026-09-28 ingest 路径（控制台课可走，勿走 kaggle 手工）：发布侧只认 `bc_s*` 目录名＋
+//   D14 血缘字段（人类 shard 是 `shard_h_*` 且无 fp 字段，直接摆会整批落空）。做法＝
+//   ingest 给**工作拷贝**打戳（与 God 导出器在导出时打戳同一回事，不是绕过 D14）：
+//   `tmp/bc-human-retrial/bc-data/it1/bc_s{stage}_seed{seed}/`（manifest 原样＋
+//   course_fp/corpus_fp＝本文件实时值；npy 字节不动；原语料只读）。此后改本文件任何字节 ⇒
+//   fp 变 ⇒ 工作拷贝整批变异血缘响亮拒收（想要的语义），须重跑 ingest。
+//   语料 = 预采人类 corpus（`nn-training/data/human-x20-corpus/` 61 shards / 38564，实测 stop
+//   27.4%/fire 28.6%/schemaMajor 3）；`corpus.games_per_stage=0` ⇒ want=∅ ⇒ 跳过采集
+//   （`rl/bc_loop.collect_corpus` 原样返回），God 不出现在任何位置。训练读轮目录
+// `tmp/bc-human-retrial/bc-data/it1/`（开课前已把 61 shards 摆好，见 §45 数据 pin）。
+// 训练 = §32 镜像：student/60/batch512/lr3e-3/mirror0.5/val0.1/value0/ckpt10；seed 1234
+// （§32 seed 未记录，本次 pin 1234）；fire_pos_weight=auto（§32 时默认值，本次显式 pin）。
+// in-training eval 关（§32 无；判决走 §45 held-out 255＋对照同场重跑）。
+// 成功→填 x20-human-anchor bc 占位并另议开腿；失败→§32 死刑维持转 DAgger。
+{
+  "version": 1,
+  "name": "bc-human-retrial",
+  "kind": "bc",
+  "level": "ladder-c20-lives1",
+
+  "corpus": {
+    "games_per_stage": 0,
+    "wins_only": true,
+    "near_miss_times": 0,
+    "seed_rotate": 0
+  },
+
+  "train": {
+    "arch": "student",
+    "epochs": 60,
+    "batch": 512,
+    "lr": 0.003,
+    "mirror_p": 0.5,
+    "val_split": 0.1,
+    "value_coef": 0.0,
+    "seed": 1234,
+    "ckpt_every": 10,
+    "fire_pos_weight": "auto"
+  },
+
+  "iters": 1,
+  "workers": 8,
+  "out": "tmp/bc-human-retrial/weights.json",
+  "traj": "tmp/bc-human-retrial",
+  "backup_dir": "nn-training/weights/bc-human-retrial",
+  "backup_prefix": "bc-human-retrial"
+}
