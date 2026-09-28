@@ -20,6 +20,7 @@
  *    legacy-keys    浏览器本地键迁移
  *    course-overview 多课程并行总览（hub 侧）/ push worker 登记
  *    course-matrix  课程矩阵：并行总览 × 训练调度器的 outer join（问题 C5）
+ *    course-admin   课程管理页（`/courses`）：全部课程 + 封存区 + 每行的下一步动作
  *    alerts         告警坞条目（严重度排序 + 折叠 + ack 可见性，问题 C4）
  *    routes         控制台路由（路径 ↔ 页面键、导航项、激活判定）
  */
@@ -45,6 +46,7 @@ export * from './cards'
 export * from './course-overview'
 export * from './loop-queue'
 export * from './course-matrix'
+export * from './course-admin'
 export * from './alerts'
 export * from './routes'
 export * from './metric-columns'

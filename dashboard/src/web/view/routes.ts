@@ -19,7 +19,7 @@ import type { ConsoleStateView } from './console-types'
 // ────────────────────────── 类型 ──────────────────────────
 
 /** 本 bundle 内的页面键（/eval 与 /log 是独立页，不在此列）。 */
-export type PageKey = 'overview' | 'metrics' | 'nodes' | 'wire'
+export type PageKey = 'overview' | 'metrics' | 'nodes' | 'wire' | 'courses'
 
 /** **全部成页**的页面键 = 控制台四页 + 两个独立页（/eval · /log，各自 bundle）。
  *
@@ -33,7 +33,7 @@ export type PageKey = 'overview' | 'metrics' | 'nodes' | 'wire'
 export type AnyPageKey = PageKey | 'eval' | 'log'
 
 /** 侧栏分组 id（渲染顺序 = 数组顺序）。 */
-export type NavGroupId = 'monitor' | 'infra'
+export type NavGroupId = 'monitor' | 'control' | 'infra'
 
 export interface PageMeta {
   key: AnyPageKey
@@ -72,6 +72,15 @@ export const PAGES: Readonly<Record<AnyPageKey, PageMeta>> = {
     title: '总览',
     desc: '现在能不能跑？这轮跑到哪了？',
     path: '/',
+  },
+  // 课程管理（2026-09-27）：总览那张表只列**在训**的几门（盯着跑的那几门），
+  // 而「历史课占着 27 GB」「该封存谁」「课程文件里声明了却没跑过的课在哪」都回答不了——
+  // 这一页把**全部课程**摊开，并把每门课的动作（开课/停课/暂停/切模式/封存）收到一处。
+  courses: {
+    key: 'courses',
+    title: '课程',
+    desc: '有哪些课？现在什么状态？这一门下一步该做什么？',
+    path: '/courses',
   },
   metrics: {
     key: 'metrics',
@@ -114,6 +123,7 @@ export const DEFAULT_LOG_COMPONENT = 'trainingLoop'
 
 export const NAV_GROUPS: ReadonlyArray<{ id: NavGroupId; title: string }> = [
   { id: 'monitor', title: '监控' },
+  { id: 'control', title: '控制' },
   { id: 'infra', title: '基础设施' },
 ]
 
@@ -147,6 +157,16 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: '◎',
     group: 'monitor',
     kind: 'link',
+  },
+  {
+    id: 'courses',
+    label: '课程',
+    href: '/courses',
+    title: '课程管理：全部课程（在训/已停/仅课程文件）+ 封存区；每门课的开课/停课/暂停/切模式/封存',
+    icon: '▣',
+    group: 'control',
+    kind: 'route',
+    page: 'courses',
   },
   {
     id: 'nodes',
@@ -199,7 +219,8 @@ export function bootstrapPage(
   pathname: string,
 ): PageKey {
   const p = init?.page
-  if (p === 'overview' || p === 'metrics' || p === 'nodes' || p === 'wire') return p
+  if (p === 'overview' || p === 'metrics' || p === 'nodes' || p === 'wire' || p === 'courses')
+    return p
   return pageForPath(pathname) ?? DEFAULT_PAGE
 }
 
@@ -222,6 +243,7 @@ export function pageForPath(pathname: string): PageKey | null {
   if (p === '/metrics') return 'metrics'
   if (p === '/nodes') return 'nodes'
   if (p === '/wire') return 'wire'
+  if (p === '/courses') return 'courses'
   return null
 }
 

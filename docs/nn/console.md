@@ -7,6 +7,50 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §19 新增「课程」页（`/courses`）：全部课程一张表 + 封存入口（2026-09-27）
+
+用户报障起头：「课程封存机制开发完了，但 dashboard 上看不到操作入口，该怎么操作？」——查下来
+落点确实只到 **API/CLI**（`POST /api/archiveCourse` 默认 `--dry-run`、`python -m rl.course_archive`），
+plan §4 S3 只把**读面**进了控制台（`stateView.archived` → 总览底部折叠分组），操作面没有按钮；
+而总览那张课程矩阵**只列在训的几门**，于是「哪些课存在 / 该封存谁 / 下一步做什么」三件事在界面上
+都没有读面（`tmp/` 实测 28 GB 里的 27.3 GB 是 17 门课程目录）。
+
+### 交付物
+
+* **新页 `/courses`**（`PageKey + PAGES + NAV_ITEMS`，侧栏新分组「控制」）：
+  ① **全部课程表**——在训（开课标记）/ 已停 / 未落盘三类合一张表，列：状态（**矩阵同一个词表**）·
+  开课标记 · 账本指针 · 在等什么 · **最后写入**（`tmp/<课>/` 的 mtime：最久没动的排最后，那批正是
+  该封存的）· 动作；过滤档默认「有活体」（60+ 门仅课程文件的档条目会把在跑的那几行挤出首屏）。
+  ② **封存区**——只读 `archive/courses/<课>/archive-manifest.json`（形态 / it 区间 / 可复算与否 /
+  关键轮 / 档案路径），与总览那个折叠分组同一事实源。
+* **行内动作**：查看 · 开课（带课程级选项与**封存课起点**选择器的弹窗）· 停课 · 暂停/恢复 ·
+  hub 切离线/在线 · **封存**。
+* **封存两步**（顺序即契约的界面化）：点「封存」先跑 `--dry-run`（零写零删），把**清单与字节账**
+  留在页面上（保留几件 / 删几件 / 释放多少 MB）——预演结果**不进 flash**（一闪而过、没法据此做
+  决定），再点「确认封存」才带 `apply:true` 真搬真删；服务端 409（在训课 / 目录新鲜）原文上屏，
+  控制台**不自己算第二份判据**。
+
+### 两个新接口（都是 stat 级、不递归）
+
+* `courseFacts(courses)` → `ConsoleStateView.courseFacts`：逐课 `{tmp, enabled, declared, lastWriteMs}`
+  （`existsSync` + `statSync`，几十门课毫秒级；体积/文件数只有封存预演才给）。
+* `doAction` 返回**整份** `ActionResult`（不只 `ok`）：预演的数字要拿给操作员做决定，
+  而 flash 一闪就没；再开一个专用端点就是同一件事的第二条通道。
+
+### 口径分工（不多写第二种说法）
+
+| 列 | 口径 | 出处 |
+|---|---|---|
+| 状态 | 进程/hub：「在训 / 未在训 / 离线（只收回传）/ 在训 · hub 未注册」 | `matrixStatus`（矩阵复用） |
+| 开课标记 | `training-enabled.txt`（训练侧与 hub 的**同一个闸**）——它不是「进程在跑」 | `courseFacts.enabled` |
+| 在等什么 | 训练侧队列 / 离线课的云机回传 | `waitingCell` / `offlineWaitCell`（复用） |
+| 最后写入 | `tmp/<课>/` 的 mtime | `courseFacts.lastWriteMs` |
+
+回归：`dashboard/tests/web-view-course-admin.test.ts`（行集/排序/列口径/封存可用性）、
+`web-app-courseadmin.test.ts`（接线 + 两步顺序源码锚点）、`server-api-courses-facts.test.ts`（三态事实）、
+`web-view-routes.test.ts`（路由/导航）、`web-ssr-console.test.ts`（`/courses` 真渲染两段都在）。
+
+---
 ## §18 节点页「今天」整窗全空：聚合 memo 的时间下限被**每 5s 一拍的命中**无限续期（2026-09-27）
 
 用户报障：「节点页『今天』的数据一直为空，实际一直在训练（rollout/eval 过万局）；『昨天』有数据。」

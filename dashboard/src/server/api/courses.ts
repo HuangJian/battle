@@ -2,6 +2,8 @@
 import { existsSync, readdirSync, statSync } from 'fs'
 import path from 'path'
 import { REPO_ROOT, curriculaDir, tmpLogsDir } from '../../core/paths'
+import type { CourseFactView } from '../../web/view'
+import { courseEnableMarkerPath } from '../../stack/courses'
 import { archivedCourseSet } from './archive'
 import { type StartCtx, loadConsoleState } from '../actions'
 import { PostBody, bodyStr } from './route'
@@ -81,6 +83,47 @@ export function discoverCourses(max = 500, archivedNames?: Set<string>): string[
     .sort((a, b) => b.mtime - a.mtime)
     .slice(0, max)
     .map((c) => c.name)
+}
+
+// ───────────────────── 逐课盘上事实（课程管理页 /courses） ─────────────────────
+
+/** 课程文件的可能落点（`<课>.jsonc` / `<课>.bc.jsonc`；封存**不删**它——N4）。 */
+function curriculaPathFor(course: string): string | null {
+  for (const name of [`${course}.jsonc`, `${course}.bc.jsonc`]) {
+    const p = path.join(curriculaDir(), name)
+    if (existsSync(p)) return p
+  }
+  return null
+}
+
+/** 逐课盘上事实（`existsSync` + `statSync`，**不递归**）：活体 / 开课标记 / 课程文件 / 最后写入。
+ *
+ *  与 `discoverCourses` 同一份路径纪律（tmpLogsDir / curriculaDir 惰性取值，单测可重定向）。
+ *  为什么要它：管理页要回答「这门课还有活体吗」「它多久没被写过了」——后者正是封存判断的
+ *  输入（封存硬闸：目录新鲜 ⇒ 拒，不论有没有开课标记）；而体积得靠封存预演给。
+ *  每课 2–3 次 syscall，几十门课 = 毫秒级，不进探测层缓存。 */
+function courseFactFor(course: string): CourseFactView {
+  const dir = path.join(tmpLogsDir(), course)
+  let tmp = false
+  let lastWriteMs: number | null = null
+  try {
+    lastWriteMs = statSync(dir).mtimeMs
+    tmp = true
+  } catch {
+    /* 无活体工作区（仅课程文件 / 已封存） */
+  }
+  let enabled = false
+  try {
+    enabled = existsSync(courseEnableMarkerPath(course))
+  } catch {
+    /* 标记不可读 ⇒ 按未开课渲染（保守方向：不会把一门没开的课说成在训） */
+  }
+  return { course, tmp, enabled, declared: curriculaPathFor(course) !== null, lastWriteMs }
+}
+
+/** 逐课事实表（输入顺序 = 入参顺序，不重排：上屏顺序由视图层的行排序决定）。 */
+export function courseFacts(courses: string[]): CourseFactView[] {
+  return courses.map(courseFactFor)
 }
 
 // ───────────────────── 课程单一事实源（DECISIONS §351 bug 1） ─────────────────────

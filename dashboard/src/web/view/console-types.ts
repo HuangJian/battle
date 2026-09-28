@@ -203,12 +203,37 @@ export interface ArchivedCourseView {
   reads: { evalLog: string; trainLog: string }
 }
 
+/** 一门课程的**盘上事实**（课程管理页用；2026-09-27）。
+ *
+ *  为什么要有它：`courses` 只给课名（tmp 有账本的 + curricula 里尚未落盘的），回答不了
+ *  管理页最常问的两件事——「这门课还有活体工作区吗」与「它多久没被写过了」。而后者正是
+ *  封存判断的输入（封存硬闸：目录**新鲜**就拒，不论有没有开课标记）。
+ *
+ *  成本纪律：全部来自 `existsSync` + `statSync`（每课 2–3 次），**绝不递归扫目录**——
+ *  体积/文件数那种读数只有封存预演（`archiveCourse` 的 `--dry-run`）才给。 */
+export interface CourseFactView {
+  course: string
+  /** 活体工作区在（`tmp/<课>/`）。 */
+  tmp: boolean
+  /** 开课标记（`tmp/<课>/training-enabled.txt`）——训练侧 `enabled_courses` 与 hub
+   *  `_course_dir_live` 的**同一个闸**（与 `trainingCourses` 同源，这里逐课带上是为了让
+   *  管理页不必自己去 `includes` 一遍）。 */
+  enabled: boolean
+  /** 课程文件在 `curricula/`（`<课>.jsonc` 或 `<课>.bc.jsonc`；封存**不删**它）。 */
+  declared: boolean
+  /** 活体目录最后一次被写是什么时候（mtime，ms）；无活体 = null。 */
+  lastWriteMs: number | null
+}
+
 export interface ConsoleStateView {
   time: string
   course: string
   /** 控制台当前课程（P5-W1 additive；旧视图无此字段 → 回退 `course`）。 */
   activeCourse?: string
   courses: string[]
+  /** 逐课盘上事实（2026-09-27，课程管理页 /courses 用）：活体/开课标记/课程文件/最后写入。
+   *  缺省/null = 旧视图（管理页按 `courses` + `trainingCourses` 退化，不编事实）。 */
+  courseFacts?: CourseFactView[] | null
   /** 已封存课程（读面 = `archive/courses/<课>/archive-manifest.json`，**不扫盘、不解压**）。
    *
    *  与 `courses` **互斥**：封存课已从 `discoverCourses()` 排除（否则按 N4 保留的
