@@ -129,6 +129,79 @@ def test_metrics_version_mismatch_loud(tmp_path: Path) -> None:
         load_episodes(str(tmp_path))
 
 
+def test_old_metrics_version_wins_over_shape_guess(tmp_path: Path) -> None:
+    """行宽不符 + 声明旧版本 ⇒ 报**声明的那一版**（真因），不是形状猜问号（2026-09-29 事故）。
+
+    现场：节点 a98 的 rollout 写 (74,45) 而云端按 54 列读，旧顺序只报「形状应为
+    [N+1,54]，收到 (74,45)——metrics_version 不匹配？」——排障人看不到是谁写旧了。
+    """
+    n = 8
+    _write_shard(
+        tmp_path,
+        "g1",
+        n,
+        _synthetic_metrics(n)[:, :45],  # v8 行宽（MEMETRICS_DIM 45 时代的字节）
+        {"metrics_version": 8, "nSamples": n, "outcome": "timeout", "score": 0.0},
+    )
+    with (
+        Scoped(reward_fn=_s4b_fn(), gamma=0.995, lam=0.95, it=1),
+        pytest.raises(ValueError, match="metrics_version=8") as ei,
+    ):
+        load_episodes(str(tmp_path))
+    msg = str(ei.value)
+    assert "形状应为" not in msg, "旧版本必须报版本，不得退回形状猜问号"
+    assert "导出器" in msg, "真因（产出端/读取端版本不同）要写进报错"
+
+
+def test_publish_set_drops_shards_from_another_metrics_version(tmp_path: Path) -> None:
+    """发布端行宽版本门：声明旧版本的 shard 不进 payload（默认行为逐字节不变）。
+
+    2026-09-29 事故：旧导出器写的 shard 进了 payload，云端 grad 第 1 秒就炸、同份字节
+    重领也炸 ⇒ 5 轮连续失败、整门课 aborted。同血缘、同 wver 的语料看不出版本差
+    （`data_fp` 只按 (stage,seed,wver) 对账），故必须在发布端按 shard 自己的声明拦。
+    """
+    from remote.hub_client import iter_shard_dirs
+
+    it_dir = tmp_path / "it1"
+    ok = _write_shard(
+        it_dir,
+        "rl_s2000_seed1",
+        4,
+        _synthetic_metrics(4),
+        {"metrics_version": METRICS_VERSION, "nSamples": 4, "outcome": "timeout", "score": 0.0},
+    )
+    old = _write_shard(
+        it_dir,
+        "rl_s2000_seed2",
+        4,
+        _synthetic_metrics(4)[:, :45],
+        {"metrics_version": METRICS_VERSION - 1, "nSamples": 4, "outcome": "timeout", "score": 0.0},
+    )
+    logs: list[str] = []
+    # 默认（不传）= 旧行为：两份都在（顺序按目录名排序）
+    assert iter_shard_dirs(tmp_path, 1) == [ok, old]
+    kept = iter_shard_dirs(tmp_path, 1, log=logs.append, metrics_version=METRICS_VERSION)
+    assert kept == [ok], "声明旧版本的 shard 必须被拦在 payload 之外"
+    assert any("metrics" in m and "剔除 1" in m for m in logs), logs
+
+
+def test_publish_set_drops_shards_without_a_declared_version(tmp_path: Path) -> None:
+    """声明缺失同样算不符（读不到 = 不收），且日志点名「缺字段」。"""
+    from remote.hub_client import iter_shard_dirs
+
+    it_dir = tmp_path / "it1"
+    _write_shard(
+        it_dir,
+        "rl_s2000_seed1",
+        4,
+        _synthetic_metrics(4),
+        {"nSamples": 4, "outcome": "timeout", "score": 0.0},
+    )
+    logs: list[str] = []
+    assert iter_shard_dirs(tmp_path, 1, log=logs.append, metrics_version=METRICS_VERSION) == []
+    assert any("缺字段" in m for m in logs), logs
+
+
 def test_no_holder_loud_error(tmp_path: Path) -> None:
     """旧 reward.npy 直读路径已删除：无 holder 时响亮报错并指向 --course。"""
     n = 8

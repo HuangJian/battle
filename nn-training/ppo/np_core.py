@@ -636,15 +636,23 @@ def _reward_from_metrics(metrics: np.ndarray, manifest: dict, dirpath: str) -> n
 
     ctx = _ctx_current()
     m = np.asarray(metrics, dtype=np.float64)
-    if m.ndim != 2 or m.shape[1] != METRICS_DIM:
-        raise ValueError(
-            f"metrics 形状应为 [N+1,{METRICS_DIM}]，收到 {m.shape}（{dirpath}）——metrics_version 不匹配？"
-        )
+    # ★ 先判**声明**再判形状（2026-09-29 事故）：行宽不符时旧顺序只报形状，把真因
+    #   （产出端导出器版本比读取端旧/新）藏在「metrics_version 不匹配？」的猜问号里。
+    #   声明的版本是产出端自己写的、唯一自述，先信它 —— 行宽检查降为兜底
+    #   （声明缺失/写错时仍要响亮）。
     mver = manifest.get("metrics_version")
     if mver is not None and int(mver) != ctx.metrics_version:
         raise ValueError(
             f"shard metrics_version={mver} != 期望 {ctx.metrics_version}（{dirpath}）——"
-            "shard 格式版本不匹配，禁止静默错读（评审 LC §1.1）"
+            f"行宽 {m.shape} vs 期望 [N+1,{METRICS_DIM}]；产出端 rollout 导出器与"
+            "读取端版本不同（节点代码旧/新、池暖 worker 未随磁盘代码换代），禁止静默错读"
+            "（评审 LC §1.1）"
+        )
+    if m.ndim != 2 or m.shape[1] != METRICS_DIM:
+        raise ValueError(
+            f"metrics 形状应为 [N+1,{METRICS_DIM}]，收到 {m.shape}（{dirpath}）——"
+            f"manifest 声明 metrics_version={mver}（与本机一致或无声明）但行宽不符，"
+            "写盘端行构造与列常量脱钩（同一版本内的 bug）"
         )
     if ctx.reward_fn is None:
         raise RuntimeError(

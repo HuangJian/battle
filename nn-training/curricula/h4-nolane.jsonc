@@ -1,0 +1,156 @@
+// 课程 h4-nolane —— **h4-geo 的穿越税对照腿（x4 rung；移动中在线按速率计价；channel-2）**
+//
+// 状态：**草稿，禁开训**（比 h4-geo 更严一档）。前置四件缺一即拒启：
+//   ① bc 已验（`h3-geo.it45.20260929-115713.json`：379114B、权重 JSON（arch/format/params）、
+//      sha256 `3a5cba10…e8ac`——本项已勾；与 h4-geo 同起点平行臂）；
+//   ② wLane 已 pin（200.0，见立项 2——本项已勾）；
+//   ③ DECISIONS 新实验条目（奖励语义变更，§15.5：新 out/traj＋一条 DECISIONS）；
+//   ④ channel-2 重开条件（`docs/nn/experiments.md` §63：通道 1 毕业后残余伤害仍 lane-shaped，
+//      或剂量＋半径＋冻住守卫全 pin 成数字——当前 channel-1 机制零位移，条件未满足；
+//      开课需用户显式豁免并记一条 DECISIONS）。
+//   公式引用新列时旧版控制台/节点会响亮拒收（未知 metrics），属预期行为。
+//   包络仪注：validate 报 1 个 warning（(onLaneMoveTicks,ticks)=(36000,0) 角峰值超限），
+//   该角被 `onLaneMoveTicks≤ticks` 不变量证伪、不可达——L2b 同款误报，除此外零警告（2026-09-29 实测）。
+//
+// 立项：由 h4-geo.jsonc 逐字节派生，仅改动以下 5 处，其余逐字同：
+//   1. name/out/traj/backup → tmp/h4-nolane（fresh，新实验隔离，§15.5）。
+//   2. 配方：h4-geo 公式逐字 ＋ 尾部追加一项（唯一变量）：
+//      `- wLane*onLaneMoveTicks/(ticks+1)`
+//      （速率口径，L2b `-wThreat*threatTicks/(ticks+1)` 同形，有界恒 <wLane；**移动中才罚**：
+//      §62 存活形态——罚静止打掉人类架枪（人类在线静止 74% 在开火），只罚移动中穿过；
+//      移动×豁免无列，暂无豁免项，单变量纯度优先；`onLaneHoldFireTicks` 作架枪反证门专用，
+//      不进公式。plan 的 raw 全量示例 `-w*d(onLaneTicks)+w*d(onLaneExemptTicks)` 在此**否决**：
+//      它连带罚架枪，与 §62 证据冲突。）
+//      wLane **已 pin = 200.0**（2026-09-29，it0 实测：bc 在 h4 上 860001 段 200 局，
+//      move 率均值 0.003868（中位 0.0022/max 0.021，右偏）、killEV 10.23/局；
+//      规则取中点 7.5% ⇒ 0.075×10.23/0.003868 = 198.4 → 取整 **200**（5%/10% 界为 132/264）。
+//      税 EV ≈ 0.77/局 ≈ wDmg 罚（0.03×110 = 3.3/局）的 23%——可见但不主导。
+//      数据：`tmp/h4-nolane/pin-it0-h4.jsonl`（全列账本在同名 `.run/eval_log.jsonl`）。
+//      it0 基线（同批）：pass 75.5% / dmg 110.1 / 零伤 32.0% / kills 3.41；b/e 0.308、
+//      holdFire 13.64/局（反证门基线）、cells 61.7、ticks 1422；禁教师反推（AGENTS §0.2）。
+//   3. `bc`：与 h4-geo 同起点（`nn-training/weights/h3-geo/h3-geo.it45.20260929-115713.json`，
+//      sha 待核验）——两臂平行，comparator = h4-geo 同 it 趋势 ＋ h4 绝对门。
+//   4. 判据见下（h4 门＋移动税机制链＋架枪反证；跨 rung/跨纪元不配对）。
+//   5. `paired_rotate_seed` → **1790491796**（与 h4-geo 同值：两臂同种子流，McNemar 前提；
+//      值取 h4-stop 实测流，与 h4-stop 历史同流可比；声明≠生效即拒启，开课核对）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 判据（x4 rung 门，h4-stop 原样；SE≈3.5pp，留余量。不达标按横盘停，不判死。）
+// ══════════════════════════════════════════════════════════════════════════
+// **门**：日常段（860001，单关 200 局）`pass ≥ 80%` 且 `dmg/局 ≤ 80` 且 `零伤通关 ≥ 30%`。
+// **机制链**：① onLaneMove 率（it0 首测即基线）下降 ② onLaneHoldFire 率不塌（架枪反证门：
+// 持枪率塌 ⇒ 罚到架枪，停腿）③ pass/dmg/零伤跟随（三环缺一不算）。
+// **约束**：超时 >5% ⇒ 人工决策停；kl 连续 3 轮 ≥0.075 ⇒ 记录＋人工盯盘；
+//   ent 跌破 0.25 ⇒ break；掉队不适用（单关）；刷甲哨兵同 h4-geo。
+// **判据一律不得由教师表现反推**（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 止损（人工盯盘执行）
+// ══════════════════════════════════════════════════════════════════════════
+//   · **机械横盘**：pass/dmg 连续 4 个 eval 点无改善 ⇒ 停腿；宽限一次 ＋10 轮，不得二次宽限。
+//   · **专属死刑**：holdFire 率塌（it0 基线 −30%）或 threat 上升伴随 dmg 不降 ⇒ 罚错对象，停腿。
+//   · B1/B3/B4 按 plan/new-era-stop.plan.md §8。
+
+{
+  "version": 5,
+  "name": "h4-nolane",
+  "mode": "per-tick",
+  // 环境：ladder-c04（单关 4 敌、max_ticks 3300、lives 1、hard）。
+  // 任务侧一个字不动（AGENTS §0.2）。
+  "level": "ladder-c04",
+
+  // ── 奖励：h4-geo 逐字 ＋ 移动穿越税一项（唯一变量）─────────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wGeoBack*backHits + wGeoSide*sideHits + wGeoBack*frontHitsExempt - wLane*onLaneMoveTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wWin": 2.0,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wGeoBack": 1.0,
+      "wGeoSide": 0.5,
+      "wLane": 200.0
+    },
+    "terminal": {
+      "lives_exhausted": -5.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：h3-geo 最佳跨 rung warm start ＋ 小缰绳（与 h4-geo 平行臂）────────────
+  "bc": "nn-training/weights/h3-geo/h3-geo.it45.20260929-115713.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 预算（150 轮 / 12h；h4-geo 同形）───────────────────────────────────────
+  "iters": 150,
+  "max_hours": 12,
+  "workers": 8,
+
+  // ── 位移包：x4-rebirth 原样 ───────────────────────────────────────────────
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
+    { "kl_coef": 0.01, "lr": 0.00025 }
+  ],
+
+  // ── 采集：mb 对齐（48 × mb(512)；单关无 per-stage 配额问题）─────────────────
+  "target_transitions": 24576,
+  "est_samples_per_game": 180,
+  "seed_rotate": 600,
+  // 同种子流配对键（与 h4-geo 同值；种子流一致是 McNemar 前提，见立项 5）。
+  "paired_rotate_seed": 1790491796,
+
+  // ── 路径：新目录、禁续跑（§15.5）────────────────────────────────────────
+  "out": "tmp/h4-nolane/weights.json",
+  "traj": "tmp/h4-nolane",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/h4-nolane",
+  "backup_prefix": "h4-nolane",
+
+  // ── 评估 ───────────────────────────────────────────────────────────────
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 200,
+  "eval_every": 5
+}
+
+// ── 开工前置（agent 不得启动训练，用户手工经控制台开课）────────────────────
+// ① 头注四件套打勾。② 公式编译验证（validate_reward；新列未知符号拒启是正确行为）。
+// ③ 新 out/traj 为空目录（禁续跑）。④ 节点心跳。⑤ paired-kill 默认关。
+//
+// ── 诊断工具 ─────────────────────────────────────────────────────────────
+// · 日常趋势：it0/it5…（860001 段，单关 200 局）pass/dmg/零伤/move 率/holdFire 率/cells。
+// · 与 h4-geo 同 it 趋势对照（平行臂；同种子流配对，逐轮 McNemar 可比）。
+//
+// ── 结算节（跑完回填）──────────────────────────────────────────────────────
+// 必填：① pass/dmg/零伤 it0 → 终点 ② move 率 it0 → 终点 ③ holdFire 反证 ④ 超时/换血/cells
+//   ⑤ 实际轮数与耗时 ⑥ 判语（过门⇒ h5 是否跟随 nolane 另议；横盘⇒停并回填 channel-2
+//   第二笔负证据，封存维持）。
+//
+// ── 结算（2026-09-29 回填：it1–104，用户手工停腿；日常到 it100）──
+// ① 日常（860001，单关 200 局）：it0 75.5%/110/32.0% → 峰 it55 90.5%/91/34.5% →
+//    it80 塌 75.5%/108/29.5% → 末 it100 84.5%/95/38.0%（it55→100 四十五轮低于峰值，横盘）。
+//    门（80/80/30）：pass ✓（多半）、dmg ✗（最优 89，差 9 点）、零伤边缘（it80/90/95 不及格）。
+// ② move 率：it0 4.01 → it15 配对 −1.36±0.31（p<0.001，税咬住）→ it35 起配对差归零，
+//    3.4~4.3 横盘（−15% 最深后弹回）；lane/threat 与兄弟臂同降 22% 后横盘（rung 学习非税效应）。
+// ③ holdFire 反证：13.64 → 10.8~14.4，全程未塌——没罚到架枪（税"无害"成立，"有效"不成立）。
+// ④ 超时全 0；cells 58~60 稳；kl 单发 ≤0.044、ent ≥0.49（健康）；与兄弟臂 McNemar
+//    it80 p≈0.19、it85 p≈0.14（税无显著效应）。
+// ⑤ 实际 it1–104（~4h10m；预算 150 未用满，用户停腿；GPU 配额紧，横盘实质＋B3 停烧）。
+// 判语：**门未过＋横盘（45 轮）＋税效应 transient → 税无效**；回填 channel-2 **第二笔负证据**，
+//    封存维持（§63）。终点 = **it55**（峰值；h4 冠军仍是 h4-stop.it60）。
+//    池外 401000（800 局，it55，同种子与 h4-geo-it35 天然配对）：pass 81.87%
+//    （CI 79.2–84.5）/ dmg 99.0 / 零伤 35.63%——日常峰值未全复现（90.5→81.87，选择偏差＋
+//    噪声）；McNemar 配对 χ²=0.18（p≈0.67），双臂无显著差（b 101 / c 94）；门仍 2/3 弱
+//    （dmg 差 19 点）。数据 `tmp/h4-nolane/settle/poolout-401000-it55.jsonl`。
+// 数据：`tmp/h4-nolane/eval_log.jsonl`（it0/5/…/100）。

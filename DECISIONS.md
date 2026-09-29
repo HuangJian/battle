@@ -5373,3 +5373,60 @@ eval 有池）—— 范围更大、与本次「机制同质化」不同题，�
   `v7_phi_ts_oracle.json` 宽度同步）。
 - 全文 → `docs/nn/experiments.md` §64；审计（读者/写者闭集 + 语料身份 + 决策门半径）→
   `docs/geo-threat-audit.md`。
+
+---
+
+## §2026-09-29-goalnn-publish-metrics-version-gate（2026-09-29，行宽版本门进**发布端**：按 shard 自己的声明剔，不送必炸字节上 GPU）
+
+- **背景（现场）**：metrics v9 落地后（commit `b49b52ff`），h3-geo / x20-geo 的 it1 采集中，节点 `a98`
+  同一轮内**同时**产出两种版本（`bun-26105` 4 份 (74,**45**)/metrics_version=8，`bun-12841` 3 份 (136,**54**)/9）。
+  旧版 shard 进了 payload ⇒ 云 GPU worker（`code.zip` = 本机 v9）在 `_reward_from_metrics` 首秒炸
+  `ValueError: metrics 形状应为 [N+1,54]，收到 (74,45)`；内容决定性 ⇒ 同份字节重领必炸 ⇒
+  hub 侧 5 轮连续失败 → `aborted ppo 连续失败 5 次（≥5）`（整门课停）。
+- **判据（为什么现有门都没拦住）**：`wver`/`course_fp`/`corpus_fp` 血缘与行宽**正交**——两者都是
+  「同血缘、同权重、同关卡」，只是导出器列数变了；`corpus_identity_fp` **不含** metrics 列（见 §2026-09-29-goalnn-metrics-v9）。
+  云 worker 的响亮报错只能**事后**止损（那时 GPU 轮次已经废了），不是判决门。
+- **决定**：发布端 `remote.hub_client.iter_shard_dirs(..., metrics_version=<本机 METRICS_VERSION>)` ——
+  manifest 声明的 `metrics_version` ≠ 本机 ⇒ **不进 payload**（与 D14 血缘过滤、state_init 起始分布过滤同族语义：
+  「云端会整份拒收/必炸，故不进 payload」），逐版本点名日志（含节点指纹线索）。缺省 `None` = 逐字节旧行为。
+  读取端 `ppo.np_core._reward_from_metrics` 改为**先判声明版本、形状检查降为兜底**，报错直接点「产出端导出器与读取端版本不同」。
+- **被否决的备选**：① **硬失败**（发布端 raise）——会把「一个节点跑旧代码」升级成训练中止，与
+  D14 的处置不一致（同一类问题的既有答案就是「剔掉 + 响亮日志」，剩余局由 tail-race/重采补）；
+  ② 只加**节点门**（比对 node codeHash 更严）——挡不住本次现象（池暖 worker 与磁盘代码脱钩时，
+  节点自报的 memo codeHash 描述不了它实际执行的那份；见「下一步」）；③ 改 `corpus_identity_fp`
+  纳入 metrics 版本——语义上错（那是**语料身份**，不是读取格式），且会让所有历史课整批断代。
+- **可逆性与代价**：不改行宽、不改公式、不进 codehash 集（`nn-training/**` 不在其中）⇒ 不触发节点升级波；
+  代价 = 一轮可能少几局样本（缺口由既有重采补齐），换来「绝不把必炸字节送上 GPU」。
+- **下一步（未做，属独立刀）**：产出端**代码版本钉住**——节点池暖 worker 读磁盘代码（子进程启动时 re-read），
+  而 agent 的 `codeHash` memo 是「进程启动那份」（`sampler-agent.ts` F2 设计）⇒ 磁盘换代码、进程不重启时
+  「报旧跑新 / 报新跑旧」双向漏网，同一节点混出两种行宽。要么池 worker 钉住快照代码，
+  要么 agent 发现「磁盘 hash ≠ memo」时**自报 stale**（让训练侧按既有门排除并重启）。
+- **证据**：`tests/test_metrics_shard.py` 新增 3 例（旧版本报版本不报形状 / 发布集剔旧版本 / 缺声明算不符）；
+  `tests/{test_remote_iter,test_state_init,test_rl_remote_fixes,test_payload_split,test_remote_ppo}.py` 106 例绿；
+  ruff check / mypy（`--config-file pyproject.toml`）过。
+
+---
+
+## §2026-09-29-h4-nolane-open（2026-09-29，h4 移动穿越税新实验；§63 豁免待用户）
+
+- **背景**：h3-geo 最佳落定 it45（pass 三方持平 93.0 中零伤 64.5% 最高，Pareto 占优，非 it50）；
+  h4 it0 预跑（bc=h3-geo.it45 × ladder-c04 × 860001 × 200 局）lane 暴露 78.7/局 ≈ h3 的 2.3×、
+  move 率均值 0.003868、dmg 110.1——lane-shaped 残余摆在面上，channel-2 在 h4 有可测目标。
+- **决定**：开 h4 平行双臂（h4-geo 去 explore／h4-nolane 加移动税，两臂公式只差一项）；
+  同 bc（h3-geo.it45，379114B，sha256 `3a5cba10…e8ac` 已验）＋同 `paired_rotate_seed=1790491796`
+  （h4-stop 实测流，与 h4-stop 历史可比；McNemar 前提；声明≠生效拒启）；
+  新 out/traj（`tmp/h4-{geo,nolane}`，空目录，禁续跑）；wLane=200.0 已 pin
+  （it0：0.075×10.23/0.003868=198.4→取整；5%/10% 界 132/264；税 EV≈0.77/局≈wDmg 罚的 23%，
+  可见不主导）；wGeo 沿用 1.0/0.5 未 pin（保与 h4-geo 单变量纯度，见否决③）。
+- **被否决的备选**：① raw 全量形态 `-w*d(onLaneTicks)+w*d(onLaneExemptTicks)`——连带罚架枪，
+  与 §62 证据冲突；② wLane 沿用 L2b 的 30——h4 move 率下 EV~0.12/局（~1% killEV），不可见；
+  ③ h4-nolane 内顺手把 wGeo 改成 0.37/0.18——破与 h4-geo 的单变量纯度；geo 修正等 h4-geo
+  自己的 pin 流程（若 h4-geo 后改剂量，本腿禁中途跟改，比较带剂量 caveat）。
+- **可逆性与代价**：课程文件零代码改动（`nn-training/**` 不在 codehash 集）⇒ 不触发节点升级波；
+  代价＝150 轮/12h 预算（横盘门常备：pass/dmg 连续 4 点无改善即停，宽限一次）。
+- **证据**：`validate_reward` 两文件零错误（h4-nolane 仅 1 不可达角包络 warning，L2b 同款）；
+  it0 预跑 `tmp/h4-nolane/pin-it0-h4.jsonl`（200 局：pass75.5/dmg110/零伤32/b/e0.308/
+  holdFire13.64/cells61.7）。
+- **未决（开课前用户拍板）**：§63 重开条件——channel-1 机制零位移（h3 back 占比 45 轮 +0.006），
+  条件（a）未满足；条件（b）wLane 已 pin 但 wGeo/冻住守卫未全 pin。豁免开课需在此条下记一行
+  用户批示；不豁免则本腿维持草稿，只跑 h4-geo。

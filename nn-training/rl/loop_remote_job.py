@@ -226,6 +226,10 @@ class TrainingRemoteJob(TrainingRemotePush):
         # 一并进 job 里就等于云端训的是另一个起始分布，而 data_fp 账面对得上（静默换实验）。
         from rl.resume import state_init_enabled
 
+        # ppo_schedule 解析后值（执行用）——_course_iter 已按 it 折算进 args。
+        # （提到扫 shard 之前：行宽版本门也要用它。）
+        from rl.reward_library import METRICS_VERSION
+
         local_shards = iter_shard_dirs(
             args.traj,
             it,
@@ -233,6 +237,10 @@ class TrainingRemoteJob(TrainingRemotePush):
             course_fp=course_fp,
             corpus_fp=corpus_fp,
             state_init=state_init_enabled(args),
+            # 行宽版本门（2026-09-29 事故）：节点侧 rollout 代码比本机旧/新时，shard 的
+            # metrics 行宽与云端读取口径不符 ⇒ 发布端按 shard 自己的声明拦下，不把
+            # 「必炸的字节」送去占 GPU。判据同源 = 本进程的 METRICS_VERSION。
+            metrics_version=int(METRICS_VERSION),
         )
         shard_dirs = _gate_round_shards(
             local_shards=local_shards,
@@ -241,8 +249,6 @@ class TrainingRemoteJob(TrainingRemotePush):
             it=it,
             it_dir=str(it_dir),
         )
-        # ppo_schedule 解析后值（执行用）——_course_iter 已按 it 折算进 args
-        from rl.reward_library import METRICS_VERSION
 
         commit = git_head()
         # 启动时一次打包源文件 code.zip（避免后继并行修改干扰云端代码一致性）

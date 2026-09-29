@@ -1,0 +1,143 @@
+// 课程 h3-geo —— **h3-stop 的几何塑形后续腿（x3 rung；back/side hits＋豁免桶定价；目标准无伤通关）**
+//
+// 状态：**草稿，禁开训**。前置三件缺一即拒启（与 x20-geo.jsonc 头注同三件：
+//   instrumentation 落地＋hit 剂量 pin＋DECISIONS 新实验条目）。
+//   当前 1.0/0.5 是 kill 口径锚（**TO-BE-PINNED**；per-hit 价 = kill 口径 ÷ hit/kill 比，
+//   实测 2.4–3，plan §1.1 H2）。
+//   公式引用新列时旧版控制台/节点会响亮拒收（未知 metrics），属预期行为。
+//
+// 立项：由 h3-stop.jsonc 逐字节派生，仅改动以下 7 处，其余逐字同：
+//   1. name/out/traj/backup → tmp/h3-geo（fresh，新实验隔离，§15.5）。
+//   2. 配方：v4 包逐字 ＋ 尾部追加三项（唯一变量）：
+//      `+ wGeoBack*backHits + wGeoSide*sideHits + wGeoBack*frontHitsExempt`
+//      （豁免桶按 back 价，用户口径；普通 front 免费；farHits/geoFallback 无项）。
+//   3. `bc`：h2 冠军 → **h3 冠军 warm start**
+//      （`nn-training/weights/h3-stop-best/h3-stop.it115.best.json`，
+//      日常 87.5%/59/零伤58.2 现役最优；核验 sha 后 pin）。
+//   4. `kickstart_init`：缺省 → **0.1**（新奖励项需要小锚防洗；C 腿教训；梯子链 kk=true 绿过）。
+//   5. 判据见下（准无伤门；跨 rung/跨纪元不配对）。
+//   6. 预算 150/12h 不变（h3 用 40%，本腿同形）。
+//   7. 采集：target 24000 → **24576**（mb 对齐现行标准：48 × mb(512)，per-stage 配额
+//      6144 = 12 × mb，无 ragged tail，TPU 静态 shape；采样量 +2.4%，标准见 x20-state-init）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 判据（x3 rung 准无伤门，2026-09-28 已 pin；脚注：h3-it115 87.5%/59/零伤58.2%，
+//   门要求三项都不退步：win/零伤在起点上沿小幅上探（87.5→90、58.2→60），dmg 腰斩
+//   （59→30）；SE≈3.5pp（零伤项 200 局口径；门跑 400 局，SE≈2.5pp），留余量。
+//   不达标按横盘停，不判死。）
+// ══════════════════════════════════════════════════════════════════════════
+// **门**：日常段（860001，400 局）`pass ≥ 90%` 且 `dmg/局 ≤ 30` 且 `零伤通关 ≥ 60%`。
+// **机制链**：① backHits 占比（it0 新列首测即基线）上升 ② threat/clean（如有）
+// ③ pass/dmg/零伤跟随（三环缺一不算）。
+// **约束**：超时 >5% ⇒ 人工决策停；kl 连续 3 轮 ≥0.075 ⇒ 记录＋人工盯盘；
+//   ent 跌破 0.25 ⇒ break；分关任一退步 >5pp ⇒ 掉队；刷甲哨兵同 x20-geo。
+// **判据一律不得由教师表现反推**（AGENTS §0.2）。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 止损（人工盯盘执行）
+// ══════════════════════════════════════════════════════════════════════════
+//   · **机械横盘**：pass/dmg 连续 4 个 eval 点无改善 ⇒ 停腿；宽限一次 ＋10 轮，不得二次宽限。
+//   · B1/B3/B4 按 plan/new-era-stop.plan.md §8。
+
+{
+  "version": 5,
+  "name": "h3-geo",
+  "mode": "per-tick",
+  // 环境：ladder-c03（4 关 abc/abd/acd/bcd，每关 3 敌，max_ticks 2700、lives 1、hard）。
+  // 任务侧一个字不动（AGENTS §0.2）。
+  "level": "ladder-c03",
+
+  // ── 奖励：x1-a2 v4 包逐字 ＋ 单变量三项 ──────────────────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wGeoBack*backHits + wGeoSide*sideHits + wGeoBack*frontHitsExempt",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wWin": 2.0,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.2,
+      "wGeoBack": 1.0,
+      "wGeoSide": 0.5
+    },
+    "terminal": {
+      "lives_exhausted": -5.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：h3 冠军 warm start ＋ 小缰绳 ────────────────────────────────────
+  "bc": "nn-training/weights/h3-stop-best/h3-stop.it115.best.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 预算（150 轮 / 12h；h3 用 40%，同形）──────────────────────────────────
+  "iters": 150,
+  "max_hours": 12,
+  "workers": 8,
+
+  // ── 位移包：x3-rebirth 原样 ─────────────────────────────────────────────
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
+    { "kl_coef": 0.01, "lr": 0.00025 }
+  ],
+
+  // ── 采集：mb 对齐（现行标准，见 x20-state-init）──────────────────────────
+  // 24576 = 48 × mb(512)；per-stage 配额 6144 = 12 × mb ⇒ 无 ragged tail（TPU 静态 shape）。
+  "target_transitions": 24576,
+  "est_samples_per_game": 130,
+  "seed_rotate": 150,
+
+  // ── 路径：新目录、禁续跑（§15.5）────────────────────────────────────────
+  "out": "tmp/h3-geo/weights.json",
+  "traj": "tmp/h3-geo",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/h3-geo",
+  "backup_prefix": "h3-geo",
+
+  // ── 评估 ───────────────────────────────────────────────────────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 开工前置（agent 不得启动训练，用户手工经控制台开课）────────────────────
+// ① 本文件头三件套打勾。② 公式编译验证（validate_reward；新列未知符号拒启是正确行为）。
+// ③ 新 out/traj 为空目录（禁续跑）。④ 节点心跳。⑤ paired-kill 默认关。
+//
+// ── 诊断工具 ─────────────────────────────────────────────────────────────
+// · 日常趋势：it0/it5…（860001 段 400 局）pass/dmg/零伤/backHits 占比/cells。
+// · 分关掉队表（x3 四关，任一退步 >5pp 即掉队）。
+//
+// ── 结算节（跑完回填）──────────────────────────────────────────────────────
+// 必填：① pass/dmg/零伤 it0 → 终点 ② backHits 占比 it0 → 终点 ③ 分关表
+//   ④ 超时/换血 ⑤ 实际轮数与耗时 ⑥ 判语（过门⇒ x4 rung（事件/critic 条件按 R2）；横盘⇒停）。
+//
+// ── 结算（2026-09-29 回填：it1–56，用户手工停腿；日常到 it55，池外 it45 800 局）──
+// ① 日常（860001，400 局/点）：it0 85.0%/68.5/52.5% → it45 93.0%/52.2/64.5%（峰值；
+//    it50 同 pass/dmg、零伤 61.8%；it55 回落 90.7%/56.0/60.8%）。
+//    门（90/30/60）：pass ✓（it30 起）、零伤 ✓（it20 起 61.8%）、dmg ✗（最低 it20 50.0，差 20 点）。
+// ② back 占比：it0 0.293 → it45 0.299（日常）→ 池外 0.314；全程 ±0.02 噪声带横盘，机制零位移。
+//    side 0.639 → 0.622；far/fb 全程 0。
+// ③ 池外 400600（800 局，it45）：pass 94.75%（CI 93.2–96.3）/ dmg 53.0 / 零伤 61.6%——
+//    与日常一致（93.0/52.2/64.5），无过拟合；分关 s2002 最弱（91.5%/60.4）但 pass 全员 ≥90，
+//    dmg 全员未过（38–65）。门 2/3（dmg 差 23 点）。
+//    数据 `tmp/h3-geo/settle/poolout-400600-it45.jsonl`（全列账本在同名 `.run/eval_log.jsonl`）。
+// ④ 超时全 0；cells 54.1 → 54.3（无刷甲）；ticks ~1160 稳；kl 0.008–0.014、ent 0.51–0.61
+//   （PPO 健康）；threat 43 → 29/局微降（lane 暴露降但 dmg 门远，不认作机制成立）。
+//    it30 池外 800（92.4%/51.5/61.5%）已归档同目录。
+// ⑤ 实际 it1–56（~1h52m；预算 150 未用满，用户停腿）。
+// 判语：**门未过（dmg 差 23 点）＋机制零位移 → 几何无效**；任务涨分（pass +9.8pp、零伤 +12pp）
+//    归因不到几何价。终点 = **it45**（pass 并列最高＋零伤最高；已作 h4 双臂 bc，sha 见
+//    DECISIONS §2026-09-29-h4-nolane-open）。不开剂量 ladder（ladder 要"机制动＋门远"）。
+// 数据：`tmp/h3-geo/eval_log.jsonl`（it0/5/…/55）＋池外见③。

@@ -158,6 +158,7 @@ def iter_shard_dirs(
     course_fp: str = "",
     corpus_fp: str = "",
     state_init: bool = False,
+    metrics_version: int | None = None,
 ) -> list[Path]:
     """本轮应训 shard 集：it{it} 下全部 rl_s*_seed*/manifest.json 目录（与
     `_serial_ppo` 的 load_episodes 装载口径一致——D1「wver 过滤 + resume 剔除
@@ -174,6 +175,15 @@ def iter_shard_dirs(
     的 shard——一份标准开局的 shard 进了 payload，云端训的就经不是本轮的起始分布，
     而 data_fp（按 (stage,seed,wver) 声明）照样匹配（静默换实验那一类）。
 
+    ★ metrics 版本过滤（`metrics_version` 非 None 时）：只挑 manifest `metrics_version`
+    与本机 `rl.reward_library.METRICS_VERSION` **相等**的 shard。为什么（2026-09-29 事故）：
+    产出 shard 的 rollout 代码可能与训练机（乃至同一台机器的**池暖 worker**）不同版本
+    ——节点上跑旧导出器写 45 列、训练机/云 worker 已按 54 列读，云端 grad 第 1 秒就
+    `ValueError: metrics 形状应为 [N+1,54]，收到 (74,45)`，同一份字节重领必炸 ⇒ hub 侧
+    5 轮连续失败、整门课 `aborted ppo 连续失败`。`data_fp`/`wver` 血缘**看不见**这一层
+    （两者都是同血缘、同权重，只是行宽变了）⇒ 必须在发布端按 shard 自己的声明拦下，
+    与 D14 血缘、state_init 同一族「云端会整份拒收/必炸，故不进 payload」的判据。
+
     同名 shard 去重（发布端不变量）：同一 seed 只允许一份进 payload——重复
     arcname 的 zip 由解包顺序决定训练吃哪份（偶然语义），且 data_fp 账面与
     expectedGames 不平。正常路径由 dispatch 结算退场输家副本（2026-09-06），
@@ -183,10 +193,14 @@ def iter_shard_dirs(
     it_dir = Path(traj_dir) / f"it{it}"
     if not it_dir.exists():
         return []
+    expected_mver = int(metrics_version) if metrics_version is not None else None
     cands: dict[str, list[Path]] = {}
     skipped = 0
     skipped_init = 0
     first_init_miss = ""
+    skipped_mver = 0
+    first_mver_miss = ""
+    mver_bad: dict[int | None, int] = {}
     # walk_shard_dirs 而非 rglob：发布与 dup-settle 输家退场（dispatch 结算线程 rmtree）
     # 同轮并发，rglob 会在迭代里抛 FileNotFoundError 把发布打红（2026-09-20 事故：
     # `stream collector failed` 同源；栈顶 pathlib._select_from）。见 rl/resume.py 的说明。
@@ -200,6 +214,13 @@ def iter_shard_dirs(
             skipped_init += 1
             first_init_miss = first_init_miss or str(d)
             continue
+        if expected_mver is not None:
+            got_mver = _shard_metrics_version(d)
+            if got_mver != expected_mver:
+                skipped_mver += 1
+                first_mver_miss = first_mver_miss or str(d)
+                mver_bad[got_mver] = mver_bad.get(got_mver, 0) + 1
+                continue
         cands.setdefault(d.name, []).append(d)
     if skipped:
         log(
@@ -210,6 +231,20 @@ def iter_shard_dirs(
         log(
             f"[publish] state_init: 剔除 {skipped_init} 个缺 initTick 的 shard（标准开局产物，"
             f"本轮的起始分布不是它；首例 {first_init_miss}）"
+        )
+    if skipped_mver:
+        # 逐版本点名（谁写的、写了多少）：这一条同时是**节点侧版本漂移的现场证据**——
+        # 同一台节点在同一轮内既产 8 又产 9 是池暖 worker 与磁盘代码脱钩的指纹
+        # （2026-09-29 事故：a98 一节点两种版本，云端 5 连炸）。
+        detail = "、".join(
+            f"metrics_version={k if k is not None else '缺字段'}×{v}"
+            for k, v in sorted(mver_bad.items(), key=lambda kv: str(kv[0]))
+        )
+        log(
+            f"[publish] metrics: 剔除 {skipped_mver} 个行宽版本不符的 shard"
+            f"（本机期望 {expected_mver}；实得 {detail}）——云端 grad 会按本机列数读，"
+            f"旧/新导出器产的行宽必炸（不是静默错读），故不进 payload；"
+            f"首例 {first_mver_miss}"
         )
     dirs: list[Path] = []
     for name in sorted(cands):
@@ -222,6 +257,21 @@ def iter_shard_dirs(
                 log(f"[publish] duplicate shard {name}: retire {loser} (keep {ds[0]})")
         dirs.append(ds[0])
     return dirs
+
+
+def _shard_metrics_version(d: Path) -> int | None:
+    """shard manifest 声明的 `metrics_version`；读不到/非整数一律 `None` = 视为不符。
+
+    只读声明、**不碰 metrics.npy**（发布端逐 shard 只读几百字节的 manifest；行宽是否真的
+    等于声明由云端 `ppo.np_core` 的响亮报错兜底）。不抛：清单读不动时的正确结局是
+    剔掉这一份，而不是把整轮发布打红。
+    """
+    try:
+        mm = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+        raw = mm.get("metrics_version")
+        return int(raw) if raw is not None else None
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def _shard_state_init_ok(d: Path, log=lambda msg: None) -> bool:

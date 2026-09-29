@@ -37,6 +37,7 @@ nn-training/weights/**/*.json
 nn-training/weights/**/*.ckpt.*
 nn-training/weights/**/*.md
 nn-training/archive
+nn-training/data
 
 # 课程封存区（plan/course-archive.plan.md §3.1）：只入库索引两件（可查/可比的载体：
 # ARCHIVE.md + archive-manifest.json），权重/账本/判决行/gz 件留本地——与上面
