@@ -43,6 +43,10 @@
 # GAMEPLAY_SPECS 双份清单已并入本文件。
 src/nn/
 tools/agent/sampler-agent.ts
+# 单实例互斥判定（起听前 lock + HTTP 探活；plan/sampler-single-instance.plan.md §4-S1）：
+# 它是「一个 node = 一个监听实例」的判据源，改它 = 改节点监听行为 ⇒ 必须入集
+#（漏登记 = 改它不触发升级波，正是 :30 那条 `tools/agent/*.ts` 注释要防的漏网）。
+tools/agent/single-instance.ts
 tools/agent/restart-guard.ts
 tools/agent/codehash-files.ts
 tools/sim/export-rl-rollout.ts

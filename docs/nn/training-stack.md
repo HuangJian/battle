@@ -7,6 +7,65 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §26 节点门多一道「本轮 bootId 一致」：训练侧用 ping 的 pid/bootId 判 stale 并排除（2026-09-29）
+
+> 用户裁定（plan/sampler-single-instance.plan.md §8-Q2）：**采纳备选**——让训练侧把「同 node 的
+> bootId 与本轮账本不一致」判为 stale 并排除（plan 原推荐是「先只记进 meta 供归因，不加门」）。
+> 起因：a98（2026-09-29）一台机器两个 agent 同听 8443，一轮 192 局被内核按 4 元组哈希分给两个
+> 代码版本 ⇒ 45 列旧 shard 混进 payload ⇒ 云 worker `grad` 5 连炸、整门课 aborted。
+> agent 侧的第一道防线（应用层互斥）见 `docs/nn/runtime-opt.md` §29；**本节取代其 §29.3 的
+> 原口径**（「训练侧暂不看这些字段」——现在看了，且是门）。
+
+### 26.1 判据：一个进程内小账本 + 四次 ping 点的消费
+
+新模块 `nn-training/rl/node_identity.py`（纯逻辑、零依赖、进程内账本，无 IO）：
+
+* **本轮** = `round_key(腿, 采集单元 id)`（`"rollout:it42"` / `"eval:it42.eval"` / `"batch:run.b7u3"`）；
+  一次采集单元一枚键。腿后缀不能省：同一 iterId 的 rollout 与 eval 是两轮采集。
+* 本轮**第一次** ping 到的 `bootId` 就是该节点的**钉子**（只钉一次，不一致后不改写 ⇒ 重复 ping
+  原因幂等）；之后任何一次同键 ping 不同 ⇒ 返回一行人读原因（两侧 bootId/pid + 指路）。
+* **旧 agent 无 `bootId` ⇒ 恒无意见**（fail-open）：这道门只在新 agent 上生效，否则升级波期间会把
+  还没升级的节点整批排除（比它要防的事更大的事故）。
+* 账本只留最近 8 轮；钉子按轮清 ⇒ **下一轮自动重新钉**。
+
+消费面（节点门旁各加一条，判据与 codeHash/bun 门平级）：
+
+| 腿 | 钉/核点 |「排除」的形式 |
+|---|---|---|
+| rollout 轮内准入 | `rl/dispatch.py`（`online` 之前） | 本轮不派 + 一行 `excluded this round (stale bootId)` + 一条 meta 行 |
+| rollout 中途上线/回场 | `rl/queue_local.py::rescan_nodes`（与上行**同一个键**） | `本轮不再回场`（下一轮重新钉） |
+| A-eval 轮准入 | `rl/eval_dispatch.py`（codeHash 门之后） | `skipped` + 一条 `mode:"eval"` meta 行 |
+| B/C 批单元回场 | `rl/batch_runner.py::_UnitLanes.bringup` | `lane["given_up"]=True`（复用「放弃该通道」⇒ 主循环的「全部通道已放弃 ⇒ 收摊」与「本机槽位 0」退出条件照旧成立，不会把单元拖满整窗） |
+
+**它不是重启/升级触发器**：mismatch 只上报 + 排除，**绝不**下发 `/v1/restart`——两个进程同时服务
+不是重启一个能修好的事（要人去停掉多出来的那个；`/proc/net/tcp` 配方见 §29.4）。
+
+### 26.2 为什么按轮、以及已知代价（用户已拍板）
+
+一次**正常**升级/重启也会换 bootId。按轮钉把影响面限在「触发变化的那一轮」，下一轮自动回场；
+代价是 —— **一个节点在轮中途重启后，本轮不再被用**（它对这一轮的贡献止于重启前；在飞的局本就
+丢了、会重投）。plan §8-Q2 原话把这个代价记作「可能误伤正常重启前后的一轮」；本轮裁定为**接受**，
+因为混一个代码版本进 payload 的代价（整门课 aborted）远大于一台节点少跑半轮。要回退：删四处
+`node_identity.note_ping(...)` 调用即可（模块本身无副作用）。
+
+判据比 codeHash 门**更早、更便宜**：codeHash 门要等一个代码版本差异，而 bootId 变化在**同一份
+代码**的进程换代上也看得见；两个 agent 同听一个端口时 codeHash 门是**抽签**（同一轮 ping 落在哪个
+进程上看 4 元组哈希），bootId 变化则是这个缺陷的指纹。
+
+### 26.3 钉在哪 / 读数
+
+* 测试：`nn-training/tests/test_node_identity.py`（10 例：钉/不一致/不复写/旧 agent fail-open/按轮隔离/
+  账本有界/坏输入不炸 + **接线守卫**：四个门点都真调该判据、rollout 的钉与核共用同一个 round key 表达式）；
+  `tests/test_batch_lanes_split.py::test_bringup_rejects_a_node_whose_bootid_changed_within_the_unit`
+  （消费面行为例：门全放行、唯一变量 = bootId 换代 ⇒ 拒派且 `given_up`）。
+* 结构守卫连带登记：`rl/batch_runner.py` 的顶层 import 闭集（`tests/test_batch_runner_split.py`
+  `RUNNER_IMPORTS`）多了裸包 `rl`（`from rl import node_identity`）——先红、再登记（本仓惯例）。
+* 门禁读数（2026-09-29，Linux/forkdist）：`bun run pygate` **3368 passed / 3 skipped**，ruff + mypy 全绿（18s）。
+
+决策全文 → DECISIONS `§2026-09-29-goalnn-node-bootid-gate`；agent 侧契约与真机配方 →
+`docs/nn/runtime-opt.md` §29。
+
+---
 ## §25 x2 事件门（R2 包）落地：决策门单点化 + threat-ONSET 沿 + Δt≥3（2026-09-27）
 
 **背景**：新纪元 R2（`plan/new-era-stop.plan.md §6`）要求 x2 rung 具备「事件驱动决策」，且不碰 x1。

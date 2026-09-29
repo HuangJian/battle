@@ -5549,3 +5549,63 @@ torch-在-fork-前已有 import 的面未验证）。
 
 —— 全文（入口实测表 / CI 两规模实测表 / `auto` 语义 / 接线护栏与 `MAKEFLAGS` 那个坑 / 复现配方）
 → `docs/nn/engineering.md` §50
+
+## §2026-09-29-goalnn-single-instance-guard（2026-09-29，一个 node id 只准有一个 agent 在听：互斥在应用层，不靠内核 EADDRINUSE）
+
+**决策**：「一个 node = 一个监听实例」是 codeHash 门的前提，必须由 agent 自己保证。起听**之前**做一次
+互斥判定（`tools/agent/single-instance.ts` 纯函数，判定表见全文）：**HTTP 探活 `/v1/status` 优先于 pid
+锁文件**；`<WORK_DIR>/agent.lock`（`tmp/dist-agent/agent.lock`）用 `fs` 的 `'wx'` 独占创建作唯一互斥
+原语（同时冷启动只有一个赢家），且锁在**预热之前**就抢。缺省 **fail-closed：拒起**（`exit(2)` + 一行
+指路日志：既有实例的 `pid`/`codeHash`/`bootId`/`uptime` + 怎么停它）；接管只认两个显式入口——
+`--takeover`、或 `/v1/restart` 交接时由父进程注入的 `SAMPLER_HANDOFF=1`（+父的 bootId；child 只准接管
+**自己的父进程**）。`/v1/status` 与 `/v1/ping` 加法新增 `pid`/`bootId`/`instanceGuard`（旧字段逐字不变）。
+
+**为什么**（h3-geo / x20-geo it1 云端 `grad` 5 连炸）：`serveWithRetry` 为重启链在 Linux 开了
+`SO_REUSEPORT`（TIME_WAIT 期间即时重绑），副作用是**第二个实例绑同一端口也静默成功**——EADDRINUSE
+这条护栏被拆掉了。a98 上两个 agent 并存 ⇒ 一轮 192 局被内核按 4 元组哈希分到两个代码版本 ⇒ 旧版本
+（metrics 45 列）shard 进 payload、云 worker 是 v9 ⇒ 5 轮连炸、整门课 aborted；同时 `/v1/restart` 可能
+重启错那个实例、`codeHash` 门变成抽签。Termux/proot 无豁免（proot 只伪造 `getuid()` 视图，内核看到的
+仍是同一个 Termux app UID ⇒ 同 euid 约束天然满足）。
+
+**被否决**：① 删 `reusePort`（TIME_WAIT 那条腿会退化成 120s 重试 / 崩——内核那条路是重启链的底座，
+不能拿来当互斥）· ② 只靠 pid 文件当判据（pid 只在交接路径写、且会被系统复用；`reusePort` 下 bind 必
+成功 ⇒ 没有「真的有人在服务」的判据）· ③ 缺省自动杀旧实例（共享 Termux/proot 环境里杀错进程代价高；
+要接管就显式说）· ④ 「换个端口 / 不带 `reusePort` 再试」当兜底（把「同 node 两版本」变成「同 node 两
+端口」，门与账本照样失效）。
+
+**违反后果**：退回「第二个实例静默共存」⇒ `metrics_version` 混血、`grad` 连炸、整门课 aborted（发布端
+的行宽版本门只拦得住「已进 payload 的旧版本」，拦不住「一个 node 两个版本」这个更上游的事实）；把
+`'wx'` 换成「先 stat 再 write」⇒ 同时冷启动的两个实例双双通过判定。
+
+—— 全文（现场 / 三平台对照 / 判定表 / 交接标记 / 观测字段 / 真机排查配方 / 本机复验读数）
+→ `docs/nn/runtime-opt.md` §29
+
+## §2026-09-29-goalnn-node-bootid-gate（2026-09-29，节点门多一道「本轮 bootId 一致」：训练侧用 ping 的 pid/bootId 判 stale 并排除）
+
+**决策**（用户裁定，采纳 `plan/sampler-single-instance.plan.md` §8-Q2 的**备选**而非其原推荐）：训练侧
+节点门在 codeHash/bun 之外多一条「**本轮 bootId 一致**」——新模块 `nn-training/rl/node_identity.py`
+（纯逻辑 + 进程内小账本，零依赖）按 `round_key(腿, 采集单元 id)`（`rollout:it42` / `eval:it42.eval` /
+`batch:run.b7u3`）在**本轮**第一次 ping 时钉住该节点的 `bootId`（只钉一次，不一致后不改写 ⇒ 重复 ping
+原因幂等），之后同键 ping 不同 ⇒ 本轮**排除**该节点：rollout 准入与回场（`rl/dispatch.py` /
+`rl/queue_local.py`，两处共用同一个键）· A-eval 准入（`rl/eval_dispatch.py`）· B/C 回场
+（`rl/batch_runner.py::_UnitLanes.bringup`，复用 `given_up` 以保住「全部通道已放弃 ⇒ 收摊」的退出条件）。
+**只上报 + 排除，绝不下发 `/v1/restart`**（两个进程同时服务不是重启一个能修好的事）。
+
+**为什么**：① a98（2026-09-29）一台机器两个 agent 同听 8443，一轮 192 局被内核按 4 元组哈希分给两个
+代码版本 ⇒ 45 列旧 shard 混进 payload ⇒ 云 worker `grad` 5 连炸、整门课 aborted；② agent 侧的应用层互斥
+（`tools/agent/single-instance.ts`，本次同批上线）是**节点自证**，本门是**客户端观测**的第二道；
+③ 与 codeHash 门相比它**更早**（不需等一个代码版本差异，同一份代码的进程换代也看得见），且在同端口双
+进程下 codeHash 门是**抽签**（同一轮 ping 落在哪个进程上看 4 元组哈希），而 bootId 变化正是这个缺陷的指纹。
+
+**被否决**：① plan 原推荐「先只记进 `dist-agent-meta.jsonl` 供归因、不加门」（用户改判：要更早止损）·
+② **全局**（跨轮）钉：一次正常升级/重启就换 bootId ⇒ 会把「重启前后的一轮」误伤；按轮钉把影响面限在
+触发变化的那一轮、下一轮自动回场（代价：轮中途重启的节点本轮不再被用——已接受并写进文档）·
+③ 把这条塞进纯函数 `node_gate_reason`（判据需要**状态/账本**，纯函数不许长状态）·
+④ mismatch 时顺手重启/升级节点（§1.4-2「不自动杀旧」同理）。
+
+**违反后果**：对新 agent 以外也生效（对旧 agent 不 fail-open）⇒ 升级波期间把还没升级的节点整批排除；
+拿 bootId 当**跨轮**判据 ⇒ 每次正常升级都白搭一轮；把这条判据换成「看 ping 命中哪个进程」（不做账本）⇒
+它在只 ping 一次的腿上永远不会响（判据名存实亡）。
+
+—— 全文（判据 / 四个消费面 / 已知代价 / 接线守卫与测试 / 门禁读数）→ `docs/nn/training-stack.md` §26
+（agent 侧契约与真机配方 → `docs/nn/runtime-opt.md` §29）

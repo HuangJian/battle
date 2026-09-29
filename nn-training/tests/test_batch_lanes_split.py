@@ -263,3 +263,57 @@ def test_window_open_follows_the_owner_event_and_falls_back_to_deadline() -> Non
     assert lanes.window_open() is False, "窗关了就不许派新局（即使墙钟还早）"
     owner.window_event.set()
     assert lanes.window_open() is True
+
+
+def test_bringup_rejects_a_node_whose_bootid_changed_within_the_unit(monkeypatch) -> None:
+    """回场时同一单元里 bootId 变了（= 这个端口上换过进程）⇒ 拒派，且本单元不再重探。
+
+    判据住 `rl/node_identity.py`（plan/sampler-single-instance.plan.md §8-Q2）；这里是它的
+    **消费面**。触发场景（a98，2026-09-29）：两个 agent 同听 8443，内核按 4 元组哈希把一轮
+    192 局的请求分给两个代码版本 ⇒ 45 列的旧 shard 混进 payload、云 worker 5 连炸。
+    """
+    logged: list[str] = []
+    monkeypatch.setattr(br, "log", logged.append)
+    monkeypatch.setattr(br, "_record_agent_meta", lambda *a, **k: None)
+
+    def _ping(boot: str, pid: int) -> dict:
+        # 节点门（能力位 / bun / codeHash）全部放行 ⇒ 唯一变量就是 bootId
+        return {
+            "bootId": boot,
+            "pid": pid,
+            "cpus": 2,
+            "evalSupport": True,
+            "stageJsonSupport": True,
+            "bunVersion": "1.4.2",
+            "codeHash": "abc",
+        }
+
+    pings = iter([_ping("genA", 11), _ping("genB", 22)])
+    monkeypatch.setattr(br.dist_common, "node_ping", lambda *a, **k: next(pings))
+    monkeypatch.setattr(br.dist_common, "post_weights", lambda *a, **k: "kept")
+    monkeypatch.setattr(br.dist_common, "note_weights_pushed", lambda *a, **k: None)
+
+    lanes = _lanes()
+    lanes.iter_id = "run.b0u0"  # 本轮的账本键 = 本单元的 iterId（每个单元一枚）
+    lanes.kind = "eval"
+    lanes.wver = "w" * 16
+    lanes.weights_bytes = b""
+    lanes.task_timeout = 60.0
+    lanes.status_timeout = 1.0
+    lanes.local_bun = "1.4.2"
+    lanes.code_hash_local = "abc"
+    lanes.node_pings = {}
+    lanes.node_ready_at = {}
+    lanes.nodes_ready_ever = set()
+    lanes.owner.eval_log = Path("tmp") / "eval_log.jsonl"  # 仅供 meta 行取父目录（写面已打桩）
+    lanes.owner.batch = {"iter": 3}
+
+    lane = lanes.lane_state({"id": "a98", "url": "http://a98"})
+    assert lanes.bringup(lane) is True, "首次 ping：钉住本轮 bootId 并正常就绪"
+    lane["ready"] = False  # 掉线（连续真失败）⇒ 回场走同一条 bringup
+    assert lanes.bringup(lane) is False, "同一单元里 bootId 变了 ⇒ 拒派"
+    assert lane["given_up"] is True, (
+        "本单元不再等它（复用的是已有的「放弃该通道」语义 ⇒ 主循环的收摊判据照旧成立），"
+        "否则每 recover_ping_sec 白探一次"
+    )
+    assert any("bootId" in m for m in logged), "必须留痕（静默排除是排查黑洞）"

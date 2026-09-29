@@ -69,6 +69,10 @@ RUNNER_IMPORTS = {
     "time",
     "typing",
     "dist_common",
+    # 2026-09-29 登记（plan/sampler-single-instance §8-Q2）：节点门多一道「本轮 bootId 一致」
+    # —— 节点 ping 结果的同一性账本（纯逻辑，零依赖）在 `rl/node_identity.py`，执行器在
+    # `bringup` 的回场口消费它。`from rl import node_identity` 的顶层名就是裸包 `rl`。
+    "rl",
     "rl.batch_plan",
     "rl.batch_store",
     "rl.eval_local",

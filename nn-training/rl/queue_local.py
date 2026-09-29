@@ -26,6 +26,7 @@ from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 # 进度行节流口径与节点侧 rollout 共用一份（`progress_due`，见 `common.game_watch`）；
 # serve_pool = 节点侧同一份长驻池（`remote/serve_pool.py`）。
 from remote import serve_pool
+from rl import node_identity
 from rl.cmd import build_rollout_cmd
 from rl.log import log
 from rl.reports import combine_reports
@@ -412,6 +413,15 @@ def rescan_nodes(
             remote_full = str(ping.get("bunVersion", "?"))
             # mm 就地内联（param 已删）：major.minor 一致性红线（确定性，M4）
             if ".".join(remote_full.split(".")[:2]) != ".".join(str(local_bun).split(".")[:2]):
+                continue
+            # 中途上线/回场前再核一次本轮 bootId（与 dispatch 的钉**同一个键**——两处必
+            # 共用 `round_key("rollout", iter_id)`，见 rl/node_identity 与它的接线守卫）：
+            # 不一致 = 这一轮里这个端口换过进程 ⇒ 本轮不再回场（下一轮重新钉）。
+            boot_why = node_identity.note_ping(
+                node_identity.round_key("rollout", iter_id), nid, ping
+            )
+            if boot_why:
+                log(f"[dist] rescan {nid}: {boot_why} — 本轮不再回场")
                 continue
             c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
             # 权重：新上线节点走进程内复用缓存；**回场节点强制重握手**（它可能刚重启，

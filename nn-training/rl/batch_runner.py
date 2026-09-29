@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import dist_common
+from rl import node_identity
 from rl.batch_plan import (
     batch_iter_id,
     is_transient_error,
@@ -693,6 +694,28 @@ class _UnitLanes:
                     f'事件任务被拒；不降级'
                 )
             lane["next_try"] = time.time() + self.recover_ping_sec
+            return False
+        # 本轮（本单元）bootId 核（plan/sampler-single-instance.plan.md §8-Q2）：就绪节点永不
+        # 进本函数 ⇒ 这条只在「掉线重探 / 中途上线」上生效——回场时发现端口上换过进程，
+        # 本单元拒派。复用 `given_up`（= 本单元不再等它）：主循环的「全部通道已放弃 ⇒ 收摊」
+        # 与「本机槽位 0」的退出条件因此照旧成立，不会把单元拖满整窗。
+        boot_why = node_identity.note_ping(
+            node_identity.round_key("batch", self.iter_id), nid, ping
+        )
+        if boot_why:
+            lane["given_up"] = True
+            log(f"[batcheval] node {nid}: {boot_why} — 本单元拒派（不再重探）")
+            _record_agent_meta(
+                self.owner.eval_log.parent / "dist-agent-meta.jsonl",
+                {
+                    "node": nid,
+                    "mode": "eval",
+                    "it": self.owner.batch.get("iter", 0),
+                    "ok": False,
+                    "reason": boot_why,
+                    "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                },
+            )
             return False
         t_w = time.monotonic()
         try:

@@ -17,6 +17,7 @@ from common.proc import bun_version as _bun_version
 from common.proc import version_mm as _mm
 from platform_utils import rmtree_best_effort
 from remote import serve_pool
+from rl import node_identity
 from rl.agent_meta import record_agent_meta as _record_agent_meta_impl
 from rl.log import log
 from rl.queue_local import (
@@ -320,6 +321,26 @@ class RolloutDispatcher:
                 log(
                     f"[dist] node {nid}: bun patch differs ({remote_full} vs {local_bun}) — allowed (yellow)"
                 )
+            # 本轮 bootId 钉（plan/sampler-single-instance.plan.md §8-Q2）：**本轮**第一次看到的
+            # bootId 就是钉子，之后（回场 rescan / 重探）不一致 ⇒ 这个端口上换过进程 ⇒ 本轮排除。
+            # 比 codeHash 门更早：两个 agent 同听一个端口时 codeHash 门是抽签，bootId 变化看得见。
+            boot_why = node_identity.note_ping(
+                node_identity.round_key("rollout", iter_id), nid, ping
+            )
+            if boot_why:
+                log(f"[dist] node {nid}: {boot_why} — excluded this round (stale bootId)")
+                _record_agent_meta(
+                    meta_path,
+                    {
+                        "node": nid,
+                        "mode": "rollout",
+                        "it": iter_no,
+                        "ok": False,
+                        "reason": boot_why,
+                        "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    },
+                )
+                continue
             c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
             log(f"[dist] node {nid}: online, concurrency={c_n}")
             nodes.append(

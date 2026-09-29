@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import dist_common
+from rl import node_identity
 
 # 同 queue.py：Windows 下隐藏本地评估子进程的控制台窗口（避免反复弹黑窗抢焦点）。
 from rl.eval_local import (
@@ -723,6 +724,25 @@ class EvalDispatcher:
                 ch_why = dist_common.check_code_hash(ping, code_hash_local)
                 if ch_why:
                     log(f"[eval] node {nid}: {ch_why} — skipped")
+                    continue
+                # 本轮（本 eval 轮）bootId 钉 + 核（与 rollout 同判据，按**腿**分账本：
+                # 同一 iterId 的 eval 与 rollout 是两轮采集，不能共用一个键）。
+                boot_why = node_identity.note_ping(
+                    node_identity.round_key("eval", eval_iter_id), nid, ping
+                )
+                if boot_why:
+                    log(f"[eval] node {nid}: {boot_why} — skipped")
+                    _record_agent_meta(
+                        meta_path,
+                        {
+                            "node": nid,
+                            "mode": "eval",
+                            "it": it,
+                            "ok": False,
+                            "reason": boot_why,
+                            "ts": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                        },
+                    )
                     continue
                 c_n = max(1, int(n.get("concurrency") or ping.get("cpus") or 1))
                 alive.append({"id": nid, "url": n["url"], "key": n.get("authKey", ""), "c": c_n})

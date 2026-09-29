@@ -7,6 +7,116 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §29 一个 node id 只准有一个 agent 在听：`SO_REUSEPORT` 把 EADDRINUSE 护栏关掉了（2026-09-29）
+
+> 落地 = `plan/sampler-single-instance.plan.md`；决策 = DECISIONS §2026-09-29-goalnn-single-instance-lock。
+> 触发：h3-geo / x20-geo it1 云端 `grad` 5 连炸（`ValueError: metrics 形状应为 [N+1,54]，收到 (74,45)`）
+> ⇒ `aborted ppo 连续失败 5 次`。
+
+### 29.1 现场：一台节点、一轮、两个代码版本
+
+`tmp/h3-geo/it1/dist/a98/` 同一轮（09:57）里两种版本并存：
+
+| shard（同 job、同轮） | metrics.npy | metrics_version | `node` 字段 |
+|---|---|---|---|
+| `rl_s2001_seed248545960` | **(74, 45)** | `8` | `bun-26105` |
+| `rl_s2000_seed167983141` | (136, 54) | `9` | `bun-12841` |
+
+`bun-26105` 的 `/v1/status` 实测 `uptimeSec≈50600`（起于前一天 20:06）、`codeHash=c3cc5d88…`
+= **v9 之前**那棵树的哈希；同轮另外四台（self/mac/a95/a97）全部产 54 列。用户在 a98 上重启，
+旧进程消失、现象停止。**根因 = a98 上两个 agent 同时在听 8443**，一轮 192 局的请求被内核按 4 元组
+哈希分到两个代码版本上（旧版本 shard 进 payload ⇒ 云 worker 的 `code.zip` 是 v9 ⇒ 第 1 秒就炸，
+内容决定性 ⇒ 连炸 5 轮 ⇒ 整门课 aborted）。
+
+### 29.2 机制：为什么 Linux 允许，为什么护栏失效
+
+**①「不允许多进程监听同一端口」只是默认值，不是禁令。** Linux ≥3.9 的 `SO_REUSEPORT`：
+**所有** socket 都设该选项、且**同一 euid** 时，多进程可绑同一 `addr:port`，新连接由内核按 4 元组
+哈希分发（nginx / haproxy 多 worker 就靠它）。Termux/proot **没有豁免**——它跑的就是同一个 Linux
+内核：proot 只伪造 `getuid()` 的视图，内核看到的真实 UID 仍是 Termux app UID（同 euid 约束天然
+满足）；8443 是非特权端口，Android 的 SELinux / `ip_unprivileged_port_start` 只管 <1024。
+
+**② 本仓库的 agent 正是开着它**（`sampler-agent.ts::serveWithRetry`）：
+
+```ts
+...(process.platform === 'linux' ? { reusePort: true } : {})   // 重启链：TIME_WAIT 期间即时重绑
+```
+
+动机（写在函数头注释里）：`/v1/restart` 后新实例撞 `EADDRINUSE` 有两种来源——① 旧实例尚在退出；
+② 旧实例退出后 socket 留在 `TIME_WAIT`（最长 ~60s，`lsof` 看不到任何进程）。处置 = 开
+`SO_REUSEPORT` 即时重绑 + `240 × 500ms` 重试预算兜底（`restart-guard.ts` 管的是另一个面：重启风暴）。
+
+**③ 于是 EADDRINUSE 这条「第二实例会被拒」的护栏在 Linux 上被静默拆掉了。** `Bun.serve` 不报错
+⇒ 重试循环不进 ⇒ 两个 agent 长期并存、连接按 4 元组哈希乱归。三平台对照（代码为什么只在 linux 开）：
+
+| 平台 | 同端口多监听 | 语义 | 本仓库 |
+|---|---|---|---|
+| Linux（Android 内核 / proot / Termux） | `SO_REUSEPORT` 允许 | 新连接按 4 元组哈希分发（真多 worker） | **开** ⇒ 双实例静默共存 |
+| macOS / BSD | 也有 `SO_REUSEPORT`，但 BSD 系是「后绑者接管」语义（按连接哈希分发要 FreeBSD 12+ 的 `SO_REUSEPORT_LB`） | 不是我们要的「短窗口热接管」 | 不开 ⇒ 靠 EADDRINUSE + 重试 |
+| Windows | `SO_REUSEADDR` 语义更松（**能抢占已有绑定**），安全做法是 `SO_EXCLUSIVEADDRUSE` | 容易「端口被偷」 | 不开 |
+
+⇒ **正解不是删 `reusePort`**（删了 TIME_WAIT 那条腿会退化成 120s 重试 / 崩），而是把互斥搬到
+**应用层**：起听前先证明「这个端口 / 这个 node id 没有人正在服务」。
+
+**④ 为什么「一个 node id 两个代码版本」是致命的**：`codeHash` 门的前提是**一个 node = 一个版本**。
+双实例下这个前提不成立：`/v1/ping` 落哪个进程看 4 元组哈希 ⇒ 门看到的是**抽签结果**（09:57 抽到
+新进程 ⇒ 判 online；10:10 的 curl 抽到旧进程 ⇒ 看到 stale）；`/v1/restart` 同样抽签 ⇒ **升级可能
+重启错那个实例**，旧的照旧服务。另：交接链本身是「先 `stop(true)` 再 spawn」的（无并存窗口），但
+**任何非交接启动**（手工敲命令、Termux/proot 会话重启脚本、supervisor 重新拉起、控制台 stop 漏杀）
+都不走那条腿，而 `reusePort` 让它们**全部成功**。
+
+### 29.3 新契约：起听前的互斥判定（`tools/agent/single-instance.ts` + `sampler-agent`）
+
+判定表（纯函数 `decideSingleInstance`，按序第一命中；判据优先级 = **HTTP 探活 > pid 锁文件**——
+锁只在交接路径写、pid 会被系统复用，而「真的有人在服务」的自我证明最可靠）：
+
+| # | 条件 | 动作 |
+|---|---|---|
+| 1 | `--takeover` | `serve`（显式接管，随后覆盖锁） |
+| 2 | 探活命中且 pid ≠ self | `handoff` 且父子核对通过 ⇒ `serve-handoff`；否则 **`refuse`** |
+| 3 | 探活落空但锁在活进程手上（非 self） | 同上二分（保守；正常交接不会走到这里——父进程先删锁） |
+| 4 | 锁陈旧（owner 已死 / 是自己上一代） | `serve-took-over-stale`（自愈，不要求人工清盘） |
+| 5 | 其余 | `serve`（fresh） |
+
+* **锁**：`<WORK_DIR>/agent.lock`（`tmp/dist-agent/agent.lock`），内容 `{pid, bootId, startedAt,
+  codeHash8}`。`fs` 的 **`'wx'` 独占创建是唯一互斥原语** ⇒ 同时冷启动只有一个赢家（输家 `exit 2`）。
+  锁在**预热之前**就抢（预热在弱机上可达 ~80s，先预热再抢锁 = 两个冷启动实例双双通过判定）；
+  起听成功后再刷新一次（把「已在服务」写实）。
+* **交接标记**：父进程 spawn child 时注入 `SAMPLER_HANDOFF=1`（+ `SAMPLER_HANDOFF_BOOTID=<父的 bootId>`）；
+  child 只准接管**自己的父进程**（对不上就拒起——防误传到别的 agent 上把一台真在服务的机器顶掉）。
+  父在 `stop(true)` 之后、spawn 之前删锁；spawn 失败则把锁写回（父仍在服务）。
+* **探活**：起听**之前** `fetch('http://127.0.0.1:<port>/v1/status')`（带 `AUTH_KEY`，1s 超时，任何失败 =
+  探不到）。**不能靠 bind 探测**——`reusePort` 下 bind 必成功。
+* **拒起**：`console.error` 一行（含既有实例的 `pid`/`codeHash`/`uptime` 与「怎么停它」）+ `exit(2)`；
+  **不许** fallback 到「换个端口」或「不带 reusePort 再试」。
+* **观测**：`/v1/status` 与 `/v1/ping` 新增 `pid` / `bootId`（进程启动随机 8 hex）/ `instanceGuard`
+  （`fresh` / `handoff` / `took-over-stale`）——**加法**，旧字段逐字不变；起听日志追加
+  `guard=<verdict> pid=<pid> bootId=<bootId>`。训练侧暂不看这些字段（先给人看，见 plan §8-Q2）。
+
+### 29.4 真机排查配方（无需 root，Termux/proot 可用）
+
+```bash
+# 8443 = 0x20FB；同一 addr:port 出现**两行** st=0A ⇒ 两个监听 socket
+awk '$4=="0A" && $2 ~ /:20FB$/' /proc/net/tcp /proc/net/tcp6
+ps -ef | grep sampler-agent          # 期望只剩一个
+curl -s -H "Authorization: Bearer $(cat tools/agent/agent.auth)" \
+     http://127.0.0.1:8443/v1/status  # 看 pid / bootId / instanceGuard / codeHash
+```
+
+对账手法：`/proc/<pid>/fd` 与 `/proc/net/tcp` 的 inode 列对得上，就知道哪个 pid 持有监听 socket。
+正常重启交接全程**不应出现两行** `st=0A`（本机 dev 复验：交接窗口内 0 行 → 换版后 1 行）。
+
+### 29.5 落地代价与证据
+
+* `tools/agent/sampler-agent.ts` **在 codehash 集内** ⇒ 本次改动触发**升级波**（全节点 stale）；
+  新模块 `tools/agent/single-instance.ts` 已登记进 `tools/agent/codehash-files.txt`（改它必须触发升级波）。
+  **落地后每台节点需各重启一次**（预期内）。
+* 本机 dev 复验（2026-09-29，空 workdir + 备用端口，`--no-persist --no-prewarm --no-node`）：
+  ① 第二个实例 `exit=2` + 日志点名 `pid/codeHash/bootId/uptime` 与 `kill <pid>` 指路；
+  ② `/v1/restart` 交接：父 2305811 → child 2305851，`/proc/net/tcp` 交接窗口 0 行 → 换版后 1 行（**从未出现 2 行**）；
+  ③ 陈旧锁（`pid=999999` 已死）⇒ `guard=took-over-stale` 正常起服；④ SIGTERM 后锁文件消失。
+
+---
 ## §28 Python 侧长驻池也同质：单入口 + 每任务 mode token（本机腿 / 节点腿 / 云机离线 eval，2026-09-28）
 
 > 接 §27.10（agent 侧池同质化）· §26（本机腿入池）· §20/§21/§22（池的收益与纪律）。
