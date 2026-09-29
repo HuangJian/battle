@@ -30,6 +30,22 @@ describe('export CLI（集成：fixture replay）', () => {
     for (const d of tmpRoots) rmSync(d, { recursive: true, force: true })
   })
 
+  // `replays/` 是 gitignored 的本地语料 —— clean checkout 里根本没有这个目录，而 CLI 在
+  // 「目录不存在 / 目录里没有 .replay」时按设计**响亮退 2**（`replays 路径不存在`）。所以这里跟
+  // tests/replay-v1-compat.test.ts 同款：没有语料就没什么可导 ⇒ 跳过，而不是把「本机没录过」
+  // 判成回归。丢一个 .replay 进 replays/，下面两条集成用例自动开跑（判据见 `readdirSync`）。
+  const storedReplays = (() => {
+    try {
+      return readdirSync(join(import.meta.dir, '..', '..', 'replays')).filter((f) =>
+        f.endsWith('.replay'),
+      )
+    } catch {
+      return []
+    }
+  })()
+  //: 没有语料就没有可导的东西（"跳过而不是判红"的判据本身就是这一条）。
+  const noCorpus = storedReplays.length === 0
+
   function readManifests(dir: string): any[] {
     const out: any[] = []
     for (const e of readdirSync(dir, { withFileTypes: true })) {
@@ -40,7 +56,7 @@ describe('export CLI（集成：fixture replay）', () => {
     return out
   }
 
-  it('开窗跑通：manifest 记窗口，保真不跳过 fixture 局', () => {
+  it.skipIf(noCorpus)('开窗跑通：manifest 记窗口，保真不跳过 fixture 局', () => {
     const dir = mkdtempSync(join(tmpdir(), 'openwin-'))
     tmpRoots.push(dir)
     const p = Bun.spawnSync(
@@ -68,7 +84,7 @@ describe('export CLI（集成：fixture replay）', () => {
     }
   })
 
-  it('默认全量：manifest 无 tickWindow 键（与改前字节兼容）', () => {
+  it.skipIf(noCorpus)('默认全量：manifest 无 tickWindow 键（与改前字节兼容）', () => {
     const dir = mkdtempSync(join(tmpdir(), 'openwin-'))
     tmpRoots.push(dir)
     const p = Bun.spawnSync(
