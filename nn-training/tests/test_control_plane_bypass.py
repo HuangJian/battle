@@ -111,7 +111,12 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 @pytest.fixture()
-def hub():
+def hub(monkeypatch: pytest.MonkeyPatch):
+    # 让路单步 0.5s → 0.1s（2026-09-29，§43）：本文件的墙钟就是「bulk 的一个让路单步」
+    # （控制面的窗口要等到 `yield_count >= 1`，而那要等一整步 `time.sleep(step)` 走完）。
+    # 判定与步长无关（让路**发生过**、控制面与之**并行**、预算仍受 5s 约束），0.1s 的步长
+    # 仍能造出「在途 ∧ 让路」且采样数不受影响（窗口外的轮询一直采到 bulk 结束）。
+    monkeypatch.setattr(W._BULK, "_yield_step", 0.1)
     srv = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
     srv.daemon_threads = True
     t = threading.Thread(target=srv.serve_forever, daemon=True)

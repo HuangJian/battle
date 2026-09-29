@@ -84,8 +84,11 @@ def _deliverer(root: Path, rec: _Recorder, **kw) -> OfflineDeliverer:
 
 def test_submit_does_not_wait_for_the_network(tmp_path: Path) -> None:
     """回归：入队必须**立刻**返回（慢 hub 不得给下一轮 PPO 收税）。"""
+    # delay 0.25 → 0.1（2026-09-29，§43）：判据是「入队不阻塞」（`queued < 0.1`），而假 hub 的
+    # 传输耗时只决定后台要排多久 —— 0.1s × 每轮 2 趟 = 0.2s/轮，**如果**入队真被网络拖住，
+    # 单轮就超过 0.1s 阀值（守卫不会变瞎），而本用例的墙钟跟着降一半。
     root = _make_artifacts(tmp_path)
-    rec = _Recorder(delay=0.25)
+    rec = _Recorder(delay=0.1)
     d = _deliverer(root, rec)
     d.start()
     try:
@@ -96,7 +99,7 @@ def test_submit_does_not_wait_for_the_network(tmp_path: Path) -> None:
         assert queued < 0.1, f"入队被网络拖住了 {queued:.3f}s（应只置位即回）"
     finally:
         d.close(timeout=10.0)
-    # 后台把三轮回传都推完了（延迟 0.25s/趟 × 每轮 2 趟）
+    # 后台把三轮回传都推完了（延迟 0.1s/趟 × 每轮 2 趟）
     assert rec.posts(OFFLINE_ARTIFACT_PATH) == 3
     assert d.pending() == []
 

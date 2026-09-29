@@ -549,6 +549,16 @@ def _manifest(
     )
 
 
+#: 波次夹具的配额 —— 原为 600000，2026-09-29（§43）缩到 **1/10**。
+#:
+#: 这类用例的真开销是「每局一个 manifest 目录」：`_manifest` 里一次真 `mkdir`
+#:（实测 `_settle_first_wave` 的 768 次调用 = 0.52s，其中 `posix.mkdir` 0.39s），
+#: 而**配额只决定波次算术的比例**。缩到 1/10 后 g0/w2/w3 = 16/8/4（原 156/75/36
+#: 的同比例结构），断言按同一比例改写 ⇒ 语义不变、文件数 ~10×↓、账本扫描同步变便宜。
+#: （同一手法 2026-09-15 已在 `test_volume_topup_partial_ledger_…` 上用过。）
+_TARGET_VOLUME = 60000
+
+
 class _StubLoop:
     """最小 TrainingLoop 替身：只带动态采集接线用得着的属性/方法。
 
@@ -780,42 +790,43 @@ def test_continuous_restart_quota_met_backfills_winrate_from_shards(
 
 def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None) -> None:
     """初波就达标：不补波，只记账（est 估准的正常情形）。"""
-    stub = _StubLoop(tmp_path, target=600000, est=967, samples=967)
+    stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=967)
     stub._iteration_pairs(1)
     stub._volume_waves = 1  # wave 测试：初波已跑（生产连续配额不再预置）
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
     assert stub.dispatched == []  # 无需补波
-    assert stub._volume_collected == 4 * 156 * 967
+    assert stub._volume_collected == 4 * 16 * 967  # g0=ceil(15000/967)=16
     assert stub._journal.pending() == []
 
 
 def test_volume_topup_iterates_until_wave_cap(tmp_path: Path, _patch_wver: None) -> None:
     """每局 samples 偏少（est 声明值偏大）⇒ 逐关补波，至多 3 波后停（不无限补）。"""
-    stub = _StubLoop(tmp_path, target=600000, est=967, samples=500)
+    stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500)
     stub._iteration_pairs(1)
     stub._volume_waves = 1
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
     sizes = [len(w) for w in stub.dispatched]
-    assert sizes == [4 * 75, 4 * 36]  # w1 ceil(72000/967)=75，w2 ceil(34500/967)=36（samples 口径）
+    # w1 ceil(7000/967)=8，w2 ceil(3000/967)=4（分关缺口，samples 口径）
+    assert sizes == [4 * 8, 4 * 4]
     assert stub._volume_waves == 3
-    assert stub._volume_collected == 4 * (156 + 75 + 36) * 500
+    assert stub._volume_collected == 4 * (16 + 8 + 4) * 500
     assert stub._volume_capped is False
     assert stub._journal.pending() == []  # 每波 start 都有配对的 finish
     # 报告已逐波并入（补波确实是本轮报告的一部分）
-    assert stub._report["games"] == 4 * (156 + 75 + 36)
+    assert stub._report["games"] == 4 * (16 + 8 + 4)
     assert stub._report["totalSamples"] == stub._volume_collected
 
 
 def test_volume_topup_hard_cap_marks_capped(tmp_path: Path, _patch_wver: None) -> None:
     """局数硬顶：本波截断到剩余额度，触顶后停采并打标（配额未满但停）。"""
-    stub = _StubLoop(tmp_path, target=600000, est=967, samples=500, max_games_per_stage=200)
+    stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500, max_games_per_stage=20)
     stub._iteration_pairs(1)
     stub._volume_waves = 1
     _settle_first_wave(stub)
     stub._volume_topup(1, None)
-    assert [len(w) for w in stub.dispatched] == [4 * 44]  # 200-156 剩余额度
+    assert [len(w) for w in stub.dispatched] == [4 * 4]  # 20-16 剩余额度（本波想要 8）
     assert stub._volume_capped is True
     assert stub._volume_waves == 2
 
@@ -892,12 +903,12 @@ def test_volume_topup_replays_unfinished_wave(tmp_path: Path, _patch_wver: None)
     """
     from rl.volume_waves import WAVE_PHASE, wave_round_key
 
-    stub = _StubLoop(tmp_path, target=600000, est=967, samples=500)
+    stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500)
     stub._iteration_pairs(1)
     stub._volume_waves = 1
     _settle_first_wave(stub)
-    # 造「崩在 w2 中间」的 WAL：w2 有 start、无 finish（对局表 = 每关 36 局）
-    games = {0: 36, 1: 36, 2: 36, 3: 36}
+    # 造「崩在 w2 中间」的 WAL：w2 有 start、无 finish（对局表 = 每关 8 局）
+    games = {0: 8, 1: 8, 2: 8, 3: 8}
     stub._journal.start(
         WAVE_PHASE, wave_round_key(1, 2), games={str(k): v for k, v in games.items()}
     )
@@ -913,11 +924,11 @@ def test_volume_topup_does_not_replay_finished_wave(tmp_path: Path, _patch_wver:
     """已闭环的波不重放（WAL 只在「停在波中」时才作判据）。"""
     from rl.volume_waves import WAVE_PHASE, wave_round_key
 
-    stub = _StubLoop(tmp_path, target=600000, est=967, samples=500)
+    stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500)
     stub._iteration_pairs(1)
     stub._volume_waves = 1
     _settle_first_wave(stub)
-    stub._journal.start(WAVE_PHASE, wave_round_key(1, 2), games={"0": 36})
+    stub._journal.start(WAVE_PHASE, wave_round_key(1, 2), games={"0": 8})
     stub._journal.finish(WAVE_PHASE, wave_round_key(1, 2))
     stub._volume_topup(1, None)
     assert stub.dispatched == []  # 预算已用满（w2 ⇒ waves=3）⇒ 无新波
@@ -926,7 +937,7 @@ def test_volume_topup_does_not_replay_finished_wave(tmp_path: Path, _patch_wver:
 
 def test_volume_topup_skips_stream_path(tmp_path: Path, _patch_wver: None) -> None:
     """v1 边界：stream 路径保持老语义（只记日志，不补波）。"""
-    stub = _StubLoop(tmp_path, target=600000, est=967, samples=500)
+    stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500)
     stub._iteration_pairs(1)
     stub._volume_waves = 1
     _settle_first_wave(stub)
@@ -946,7 +957,7 @@ def _topup_from_ledger(
     tmp: Path,
     half: list[tuple[int, int]],
     *,
-    target: int = 600000,
+    target: int = _TARGET_VOLUME,
     est: int = 967,
     samples: int = 500,
 ) -> _StubLoop:

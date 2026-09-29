@@ -563,7 +563,9 @@ def test_hung_task_hits_the_cap_then_falls_back(tmp_path: Path, monkeypatch: pyt
     pool = _pool(tmp_path, script)
     assert pool.start() == 1
     argv, logp = _task(script, 0, 0, "w0", tmp_path)
-    assert pool.try_pool(argv, logp, 0.3) is None
+    # 0.3 → 0.15（2026-09-29，§43）：真开销是「真等满这一局的硬顶」，而断言只看「到顶 ⇒
+    # kill ⇒ 回退 timeout」这个判定；桩进程的就绪等待另有 1s 地板预算（不受此值影响）。
+    assert pool.try_pool(argv, logp, 0.15) is None
     assert pool.fallback_reasons == {"timeout": 1} and pool.killed == 1
     pool.close()
 
@@ -589,7 +591,9 @@ def test_fallback_breaker_stops_rebuilding_workers(
     total = 9
     for i in range(total):
         argv, logp = _task(script, 0, i, f"w{i}", tmp_path)
-        assert pool.try_pool(argv, logp, 0.2) is None  # 每局都超时（桩睡死）
+        # 硬顶 0.2 → 0.1（2026-09-29，§43）：4 次真超时 × 硬顶就是本用例的全部墙钟；
+        # 判定（超时 ⇒ kill ⇒ 回退 ⇒ 到阈值熔断）与硬顶长度无关。
+        assert pool.try_pool(argv, logp, 0.1) is None  # 每局都超时（桩睡死）
     # 熔断后：不再 spawn / 不再计回退 / 余下局被绕过（走一次性）
     assert pool.disabled is True
     assert pool.fallback == pool.breaker_after == 4, pool.fallback
@@ -626,7 +630,7 @@ def test_breaker_stops_replenishing_but_keeps_serving_warm_workers(
 
     # ① 睡死的局：硬顶到点 ⇒ kill 一个 worker + 回退，同时把熔断闸拉下
     hang_argv, hang_log = _task(script, 0, 7, "w0", tmp_path)
-    assert pool.try_pool(hang_argv, hang_log, 0.3) is None
+    assert pool.try_pool(hang_argv, hang_log, 0.15) is None
     assert pool.disabled is True and pool.fallback == 1 and pool.spawned == 2
 
     # ② 健康局 + 还有一个暖 worker ⇒ 必须由它服务（不是绕过池）
@@ -636,7 +640,7 @@ def test_breaker_stops_replenishing_but_keeps_serving_warm_workers(
     assert pool.spawned == 2, f"熔断后不得新建 worker（冷启动就是第三份进程）：{pool.spawned}"
 
     # ③ 最后一个暖 worker 也被带走 ⇒ 池真的没法服务了，余下局才走一次性
-    assert pool.try_pool(hang_argv, hang_log, 0.3) is None
+    assert pool.try_pool(hang_argv, hang_log, 0.15) is None
     assert pool.spawned == 2, "熔断后哪怕在连续回退，也一个都不许重建"
     argv3, log3 = _task(script, 0, 9, "w3", tmp_path)
     assert pool.try_pool(argv3, log3, 30.0) is None
@@ -681,9 +685,14 @@ def test_acquire_gives_up_within_the_game_cap_instead_of_the_ready_timeout(tmp_p
     pool = ServePool(
         sys.executable, tmp_path, 2, msgs.append, entry=script.name, ready_timeout_sec=60.0
     )
+    # 就绪等待的**下限**调到毫秒级（2026-09-29，§43）：判据是「受**本次尝试的硬顶**约束，
+    # 而不是 60s 就绪上限」，与下限的绝对长度无关；下限不调的话本用例就得跑满 1s 下限
+    # （硬顶传多小都一样）—— 那 1s 是本用例的全部墙钟，不是被测语义。
+    # 调完后等待 = 本次硬顶（下面传的 0.3）：**更**贴近断言所描述的形状。
+    pool.READY_BUDGET_FLOOR_SEC = 0.02
     argv, logp = _task(script, 0, 0, "w0", tmp_path)
     t0 = time.time()
-    assert pool.try_pool(argv, logp, 1.0) is None  # 不 start()：首次取槽就是冷启动
+    assert pool.try_pool(argv, logp, 0.3) is None  # 不 start()：首次取槽就是冷启动
     # timing-ok: 上界兜底（就绪等待应受本次硬顶约束，10s 只挡挂起）
     assert time.time() - t0 < 10.0, "就绪等待必须受本次尝试的硬顶约束，不是固定 60s"
     assert pool.fallback_reasons == {"no-slot": 1} and pool.killed == 1

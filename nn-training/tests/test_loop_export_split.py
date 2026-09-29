@@ -47,8 +47,11 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, cast
+
+from tests.helpers import source_scan
 
 NN_ROOT = Path(__file__).resolve().parent.parent
 EXPORT_PY = NN_ROOT / "rl/loop_export.py"
@@ -142,33 +145,20 @@ def _methods(path: Path, cls_name: str) -> dict[str, ast.FunctionDef]:
     return {m.name: m for m in _cls(path, cls_name).body if isinstance(m, ast.FunctionDef)}
 
 
-def _self_call_counts(path: Path) -> dict[str, int]:
-    """AST 计真实 `self.<attr>(…)` 调用（文档字符串/注释里提到不算——见 S4 第二十刀那条教训）。"""
-    out: dict[str, int] = {}
-    tree = ast.parse(path.read_text(encoding="utf-8"))
-    for node in ast.walk(tree):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "self"
-        ):
-            out[node.func.attr] = out.get(node.func.attr, 0) + 1
-    return out
+def _self_call_counts(path: Path, only: frozenset[str] | None = None) -> Mapping[str, int]:
+    """AST 计真实 `self.<attr>(…)` 调用（文档字符串/注释里提到不算——见 S4 第二十刀那条教训）。
+
+    实现搬进 `tests.helpers.source_scan.self_call_counts`（缓存版）：本用例对全 `rl/`（102 文件）
+    跑两遍解析（入边 + 定义面），同一个模块里还有别处也要同一份数据。
+
+    `only` = 只关心这些名字（白名单）；入边闭集那几条传它就走上廉价子串预筛，
+    与判据无关的文件（全 `rl/` 里的绝大多数）连 `ast.parse` 都不做。
+    """
+    return source_scan.self_call_counts(str(path), only)
 
 
-def _defined_names(path: Path) -> set[str]:
-    out: set[str] = set()
-    for n in ast.parse(path.read_text(encoding="utf-8")).body:
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            out.add(n.name)
-            if isinstance(n, ast.ClassDef):
-                out.update(
-                    m.name
-                    for m in n.body
-                    if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
-                )
-    return out
+def _defined_names(path: Path, only: frozenset[str] | None = None) -> frozenset[str]:
+    return source_scan.top_level_defs(str(path), only)
 
 
 def _top_imports(path: Path) -> set[str]:
@@ -315,8 +305,9 @@ def test_inbound_hands_closed_set() -> None:
     """入边闭集：只有登记的调用者，且呼叫点数逐一对账（AST，见 S20 的教训）。"""
     rl_dir = NN_ROOT / "rl"
     files = sorted(rl_dir.glob("*.py"))
-    calls = {p.name: _self_call_counts(p) for p in files}
-    defined = {p.name: _defined_names(p) for p in files}
+    only = frozenset(INBOUND_CALLS)
+    calls = {p.name: _self_call_counts(p, only) for p in files}
+    defined = {p.name: _defined_names(p, only) for p in files}
     for member, want in INBOUND_CALLS.items():
         got = {name: c[member] for name, c in calls.items() if member in c}
         assert got == want, f"{member} 的入边变了：{got}"

@@ -20,6 +20,7 @@ import json
 import re
 import subprocess
 import sys
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -70,14 +71,20 @@ def _module_level_imports(src: str) -> list[str]:
     return out
 
 
+#: 生产代码面的文件清单（缓存：`rglob` 会走进 `.venv` 的 5.8k 个 `.py`，每次 ~0.12s；
+#: 本文件有好几个用例各自扫一遍全仓，而仓库源码在一次 pytest 进程里不变）。
+@cache
+def _production_py() -> tuple[Path, ...]:
+    skip_parts = {".venv", "__pycache__", "tests", "e2e", "tmp", "weights", "ipynb"}
+    return tuple(p for p in sorted(NN_ROOT.rglob("*.py")) if not (skip_parts & set(p.parts)))
+
+
 def _defs_of(name: str, *, roots: tuple[Path, ...] = (NN_ROOT,)) -> list[str]:
     """全仓（生产代码面）里 `def <name>` 出现的文件列表。"""
-    skip_parts = {".venv", "__pycache__", "tests", "e2e", "tmp", "weights", "ipynb"}
     found: list[str] = []
     for root in roots:
-        for p in root.rglob("*.py"):
-            if skip_parts & set(p.parts):
-                continue
+        files = _production_py() if root == NN_ROOT else tuple(root.rglob("*.py"))
+        for p in files:
             if re.search(rf"^def {re.escape(name)}\b", _read(p), re.MULTILINE):
                 found.append(str(p.relative_to(NN_ROOT)).replace("\\", "/"))
     return sorted(found)
@@ -198,6 +205,10 @@ def test_run_capture_survives_undecodable_bytes_and_keeps_chinese() -> None:
     assert "\ufffd" in proc.stdout, "非法字节必须变成替换符而不是丢掉整段输出"
 
 
+#: `...text=True` 关键字实参的廉价预筛（kwarg 名 + `=` 都是源码字面量 ⇒ 充分）。
+_TEXT_KWARG_RE = re.compile(r"\btext\s*=")
+
+
 def test_every_production_capture_site_pins_encoding() -> None:
     """源码守卫（AST，不看注释/文档串）：不得再有裸的 `text=True` 捕获调用。
 
@@ -215,6 +226,12 @@ def test_every_production_capture_site_pins_encoding() -> None:
     offenders: list[str] = []
     for p in NN_ROOT.rglob("*.py"):
         if skip_parts & set(p.parts):
+            continue
+        # 廉价预筛（`read_text` 走缓存）：判据是 `...text=True` 这个关键字实参 ⇒ 源码里必有
+        # `text` + 可选空白 + `=`（kwarg 名与 `=` 都是字面量），`re` 是**充分**的。
+        # 只用裸子串 `"text"` 太弱（103/252 文件命中），本式只剩 22 个；不加预筛则要对全部
+        # 生产文件 `ast.walk`（实测 37.5 万节点 / 1.3s，本用例的全部开销）。
+        if not _TEXT_KWARG_RE.search(source_scan.read_text(str(p))):
             continue
         for node in ast.walk(source_scan.parse(str(p))):
             if not isinstance(node, ast.Call):

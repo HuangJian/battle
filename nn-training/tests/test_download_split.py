@@ -309,12 +309,19 @@ def test_payload_and_code_downloads_resolve_in_this_module(monkeypatch, tmp_path
 
 
 def test_progress_logger_still_has_exactly_two_production_copies() -> None:
-    """`_progress_logger` 的孪生是**有意**的（tailscale_boot 独立拉取）⇒ 全仓恰好两份。"""
+    """`_progress_logger` 的孪生是**有意**的（tailscale_boot 独立拉取）⇒ 全仓恰好两份。
+
+    先撤一道**廉价子串预筛**（`read_text`，缓存，~0.05ms/文件）再解析：判据是「这个文件里
+    定义了 `_progress_logger`」，而函数名本身就是源码里的字面量 ⇒ 不含该子串的文件
+    **不可能**定义它，预筛不丢判据。原来对 653 个文件全量 `ast.parse`（冷启动 ~2.7s，
+    大头是 GC 在遍历刚建出来的 AST —— 见 `tests/helpers/source_scan.py` 的 2026-09-29 改判）。
+    """
     found = sorted(
         path.relative_to(ROOT).as_posix()
         for path in ROOT.rglob("*.py")
         if ".venv" not in path.parts
         and "__pycache__" not in path.parts
+        and "_progress_logger" in source_scan.read_text(str(path))
         and "_progress_logger" in _defined(path)
     )
     assert found == ["remote/download.py", "remote/tailscale_boot.py"], found

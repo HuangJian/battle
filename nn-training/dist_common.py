@@ -1295,6 +1295,13 @@ def fetch_task(
         raise DistError(0, f"task fetch failed: {e}") from e
 
 
+#: `_poll_result` 预算的**下限**（生产语义：防住「预算小到没意义」的调用）。
+#: 独立成模块常量而非内联 `max(1.0, …)`，是为了让用例能把它调到「毫秒级」而**不改判据**：
+#: 「未置位 ⇒ 持续轮询到预算耗尽」这条断言与预算绝对长度无关，但预算就是那些用例的
+#: 固有墙钟（2026-09-29，§43：`tests/test_dist_common_poll.py` 两例共 ~1s 全花在跑满下限）。
+POLL_MIN_BUDGET_SEC = 1.0
+
+
 def _poll_result(
     base_url: str,
     auth_key: str,
@@ -1329,7 +1336,7 @@ def _poll_result(
     if params.get("courseFp"):
         qparams["courseFp"] = params["courseFp"]
     qs = urllib.parse.urlencode(qparams)
-    deadline = time.monotonic() + max(1.0, budget)
+    deadline = time.monotonic() + max(POLL_MIN_BUDGET_SEC, budget)
     while True:
         if abandon_event is not None and abandon_event.is_set():
             raise DistError(0, "abandoned: all tasks settled — race-loser copy dropped")

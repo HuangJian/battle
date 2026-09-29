@@ -115,6 +115,11 @@ def test_production_code_has_no_trace_of_the_retired_leg() -> None:
     """
     hits: list[str] = []
     for rel, src in _prod_sources().items():
+        # 廉价预筛：`_code_only` 只会**删** token（注释/字符串），不会造出新名字 ⇒
+        # 源码文本里一个标识都不出现就不可能在 token 流里出现。tokenize 是本条的实测热点
+        # （174 个文件全量走 `tokenize.generate_tokens` ≈ 独占秒级）。
+        if not any(tok in src for tok in _RETIRED_TOKENS):
+            continue
         code = _code_only(src)
         for tok in _RETIRED_TOKENS:
             if tok in code:

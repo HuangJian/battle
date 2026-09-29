@@ -34,6 +34,9 @@ from dist_common import (
     write_shard,
 )
 
+#: 熔断后队列暂空时的让位轮询步长（秒）——与 `tripped_idle_polls` 相乘 = 等待总预算。
+TRIPPED_IDLE_STEP_SEC = 0.05
+
 
 class BcDispatchError(RuntimeError):
     """BC 语料派发失败（无可用节点 / 任务彻底失败）。"""
@@ -89,6 +92,10 @@ def dispatch_bc_corpus(
     #: 不消耗 attempt 配额，只放回队列 + 线性退避；超上限才认失败。
     busy_retry_limit: int = 6,
     busy_backoff_sec: float = 0.25,
+    #: 熔断后「队列暂空但可能还有任务在飞」时的让位等待**轮数**（每轮 `TRIPPED_IDLE_STEP_SEC`
+    #: = 0.05s，缺省 40 轮 = 2s）：给健康节点留出接手被放回任务的时间窗。只在有熔断时生效
+    #: （正常轮次直接 return，零开销）。测试侧拧小（§14 先例：把配速旋钮提为参数，生产缺省不变）。
+    tripped_idle_polls: int = 40,
     log=lambda msg: print(msg, flush=True),
 ) -> dict:
     """并发派发 BC 语料任务到节点，落盘 shard 目录。返回统计 dict。
@@ -151,10 +158,10 @@ def dispatch_bc_corpus(
                 stage, seed = work.get_nowait()
             except queue.Empty:
                 # 熔断发生后，被放回的任务要等健康节点接手：队列暂空时多等一会儿再退
-                # （最多 2s）。无熔断的正常轮次零开销——直接退出。
-                if tripped and empty_waits < 40:
+                # （最多 tripped_idle_polls 轮，缺省 2s）。无熔断的正常轮次零开销——直接退出。
+                if tripped and empty_waits < tripped_idle_polls:
                     empty_waits += 1
-                    time.sleep(0.05)
+                    time.sleep(TRIPPED_IDLE_STEP_SEC)
                     continue
                 return
             # 熔断：本节点已摘掉 → 手上这个任务**无条件放回**队列，然后本 worker 退出。

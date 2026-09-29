@@ -25,11 +25,14 @@ S4 第二步把「远端 PPO 腿」13 个方法（862 行，**一条连通分量
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 
 import pytest
+
+from tests.helpers import source_scan
 
 NN_ROOT = Path(__file__).resolve().parent.parent
 RL = NN_ROOT / "rl"
@@ -269,17 +272,12 @@ def _self_calls(node: ast.AST) -> set[str]:
     }
 
 
-def _self_call_counts(path: Path) -> dict[str, int]:
-    counts: dict[str, int] = {}
-    for n in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if (
-            isinstance(n, ast.Call)
-            and isinstance(n.func, ast.Attribute)
-            and isinstance(n.func.value, ast.Name)
-            and n.func.value.id == "self"
-        ):
-            counts[n.func.attr] = counts.get(n.func.attr, 0) + 1
-    return counts
+def _self_call_counts(path: Path, only: frozenset[str] | None = None) -> Mapping[str, int]:
+    """AST 计真实 `self.<attr>(…)` 调用（缓存版：本用例对全 `rl/` 走一遍）。
+
+    `only` = 只关心这些名字（白名单）；入边闭集那条传它就走廉价子串预筛。
+    """
+    return source_scan.self_call_counts(str(path), only)
 
 
 def _top_level_names(path: Path) -> set[str]:
@@ -435,7 +433,7 @@ def test_helper_hands_are_declared_where_they_are_used() -> None:
 def test_inbound_hands_closed_set() -> None:
     """入边闭集：只有登记的调用者，呼叫点数逐一对账（AST 计**真实 Call**）。"""
     files = sorted(RL.glob("*.py"))
-    calls = {p.name: _self_call_counts(p) for p in files}
+    calls = {p.name: _self_call_counts(p, frozenset(INBOUND_CALLS)) for p in files}
     for member, want in INBOUND_CALLS.items():
         got = {name: c[member] for name, c in calls.items() if member in c}
         assert got == want, f"{member} 的入边变了：{got}"

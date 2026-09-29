@@ -26,7 +26,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import remote.job_round as JR
 from remote.worker_server import WORKER_QUEUE_MAX, WorkerServerState, make_worker_server
+
+# 说明（下面两个用例的 `with` 里各钉两处）：假 hub（`http://h0`/`http://h1`）下 worker 一轮
+# 里**唯二**会真发 HTTP 的缝 = 预取填充器的 `peek_jobs` 与阶段通知 `job_ready`。不打桩就白等
+# （本机 ~1.4s/次，走代理的 502；见 tests/helpers/hub_seams.py 与 docs/nn/engineering.md §14）。
 
 
 def _mini_manifest(jid: str, payload: bytes) -> dict:
@@ -213,6 +218,8 @@ def test_single_hub_unchanged_layout(tmp_path: Path) -> None:
         patch.object(W, "acquire_job", return_value=job),
         patch.object(W, "run_job", side_effect=lambda *a, **k: seen.update(k) or {}) as _r,
         patch.object(W, "post_result", return_value=None),
+        patch.object(JR, "peek_jobs", return_value=([], False)),
+        patch.object(JR, "job_ready", return_value=None),
     ):
         n = W.worker_loop(
             "http://h0", "tok", work_dir=tmp_path, once=True, poll_sec=0.01, echo=True
@@ -239,6 +246,8 @@ def test_multi_hub_round_robin_and_partition(tmp_path: Path) -> None:
         patch.object(W, "acquire_job", side_effect=fake_poll),
         patch.object(W, "run_job", side_effect=lambda *a, **k: seen.update(k) or {}),
         patch.object(W, "post_result", return_value=None),
+        patch.object(JR, "peek_jobs", return_value=([], False)),
+        patch.object(JR, "job_ready", return_value=None),
     ):
         n = W.worker_loop(
             "http://h0",

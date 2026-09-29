@@ -42,6 +42,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests.helpers import source_scan
+
 NN_ROOT = Path(__file__).resolve().parent.parent
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
@@ -445,18 +447,17 @@ def test_root_declares_the_slots_and_four_homes_declare_none_of_them() -> None:
 
 
 def test_inbound_hands_closed_set() -> None:
-    """入边逐项对账（AST 计真实 `Call`，不数源码字符串——S20 的假红教训）。"""
+    """入边逐项对账（AST 计真实 `Call`，不数源码字符串——S20 的假红教训）。
+
+    走 `source_scan.self_call_counts(..., only=…)`（共享缓存 + 廉价子串预筛）：
+    判据不变（还是 AST 真的 `self.<attr>(…)` 调用），但全 `rl/` 里与这十来个成员名
+    无关的文件不再付 `ast.parse` + `ast.walk`。
+    """
+    only = frozenset(INBOUND_CALLS)
     got: dict[str, dict[str, int]] = {m: {} for m in INBOUND_CALLS}
     for path in sorted(RL.glob("*.py")):
-        for n in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-            if (
-                isinstance(n, ast.Call)
-                and isinstance(n.func, ast.Attribute)
-                and isinstance(n.func.value, ast.Name)
-                and n.func.value.id == "self"
-                and n.func.attr in got
-            ):
-                got[n.func.attr][path.name] = got[n.func.attr].get(path.name, 0) + 1
+        for member, n in source_scan.self_call_counts(str(path), only).items():
+            got[member][path.name] = n
     for member, want in INBOUND_CALLS.items():
         assert got[member] == want, f"{member} 的入边变了：{got[member]}"
 

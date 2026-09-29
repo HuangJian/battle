@@ -909,7 +909,11 @@ def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     try:
         traj = tmp_path / "i7"
         traj.mkdir()
-        srv.eval_delay = 1.0
+        # 「慢 eval」的注入延迟：判据是「采集完成时 eval 还在飞」（`eval_th.is_alive()`），
+        # 而 round 尾巴（本用例最后那次 `join`）完全由它决定——eval 轮 = 3 stage × 2 局，
+        # 每局 delay。原值 1.0s ⇒ 尾已 ~2.2s（本用例总耗时的 ~85%）。0.5s 下 eval 轮
+        # 仍是采集的 4 倍以上（采集实测 ~0.35s），「在飞」前提不变。
+        srv.eval_delay = 0.5
         args_eval = types.SimpleNamespace(
             **{**vars(args), "eval_games_per_stage": 2, "eval_stages": "0-2"}
         )

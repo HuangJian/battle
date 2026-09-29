@@ -249,13 +249,31 @@ def main() -> None:
             flush=True,
         )
         if args.discover:
+            # 启动先**立刻**扫一次（force，绕开 `DISCOVER_SCAN_MIN_SEC` 最小间隔闸）：课程表
+            # 是磁盘事实（<traj_root>/<course>/{remote-jobs,offline}），盘上已经有的课没有理由
+            # 等一个节拍才登记。2026-09-29 实测：缺这一步时，控制台/worker 在启动后的第一个
+            # 节拍窗口内看到的是**空课程表**（缺省节拍 5s；e2e 用例按 0.2s 起 hub 也要白等
+            # 1s —— 读面 `/admin/queue` 自身不触发扫描，只有 pull 的 `claim_next`/后台线程会）。
+            try:
+                hub.discover(force=True)
+            except Exception as e:  # 扫描失败不该让调度面死掉（与后台线程同策略）
+                print(f"[hub-server] 启动发现扫描失败: {e}", flush=True)
+
             # 后台节拍只是「没人轮询（push 模式 / 无 worker）」时的兜底：pull 路径的
             # `claim_next` 自己会先扫一次（带最小间隔闸），不让新课程等一个节拍。
+            #
+            # 两处节奏都不再被**隐式地板**盖住（2026-09-29，§14 坑 2 同型）：
+            #   ① `max(1.0, discover_sec)` —— 写死 1s 地板让 `--discover-sec 0.2` 形同虚设；
+            #   ② `discover()` 的 `DISCOVER_SCAN_MIN_SEC`（2s 最小间隔闸，为**派发热路径**减
+            #      重扫而设）—— 兜底线程本就被 `discover_sec` 限流，再叠一层 2s 反而把
+            #      「新课程多久被登记」变成 `max(discover_sec, 2s)`（实测用例：盘上已有课
+            #      启动即登记变快了，但新发布的课反而要多等 1.5s）。所以兜底线程用 `force=True`
+            #      —— 它的节拍就该**只是** `--discover-sec`（生产缺省 5s，不变）。
             def _scan_loop() -> None:
                 while True:
-                    time.sleep(max(1.0, float(args.discover_sec)))
+                    time.sleep(max(0.05, float(args.discover_sec)))
                     try:
-                        hub.discover()
+                        hub.discover(force=True)
                     except Exception as e:  # 扫描失败不该让调度面死掉
                         print(f"[hub-server] discover 扫描失败: {e}", flush=True)
 

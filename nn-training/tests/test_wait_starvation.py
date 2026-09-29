@@ -52,7 +52,10 @@ def test_wait_reports_starvation_with_zero_workers(tmp_path: Path) -> None:
                 base,
                 "sekret",
                 jid,
-                timeout_sec=0.6,
+                # timeout 0.6 → 0.3（2026-09-29，§43）：本用例只关心「等待期说过什么」，
+                # 超时那一瞬是预期结局 —— 它是本用例的固有开销，0.3s 仍容 6 次探测（0.05s 步长）
+                # 与 ≥2 次节流后的报告（report_every_sec=0.1）。
+                timeout_sec=0.3,
                 poll_sec=0.05,
                 report_every_sec=0.1,
                 log=lines.append,
@@ -70,7 +73,7 @@ def test_wait_reports_starvation_with_zero_workers(tmp_path: Path) -> None:
     assert any("起 worker" in ln for ln in starvation), starvation
     # 与「执行中」不混：零认领时不该出现 leased 的措辞
     assert not [ln for ln in lines if "执行中" in ln], lines
-    # 节流是真的节流（不是每个 poll 一行）：0.6s / 0.05s ≈ 12 次探测，报告应远少于它
+    # 节流是真的节流（不是每个 poll 一行）：0.3s / 0.05s ≈ 6 次探测，报告应远少于它
     assert len(lines) <= 6, lines
 
 

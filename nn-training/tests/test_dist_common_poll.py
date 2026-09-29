@@ -24,8 +24,10 @@ def test_poll_result_abandon_fires_immediately(monkeypatch) -> None:
     monkeypatch.setattr(dist_common, "_request", fake_request)
     monkeypatch.setattr(dist_common.time, "sleep", lambda _s: None)
 
+    # 0.9 → 0.25（2026-09-29，§43）：判据是「**置位后立刻**放弃、不是等 budget（600s）耗尽」——
+    # 定时器值只决定这个事件何时发生；而 `fake_request` 每趟 0.4s ⇒ 放弃最多晚一趟被看到。
     ev = threading.Event()
-    threading.Timer(0.9, ev.set).start()
+    threading.Timer(0.25, ev.set).start()
     t0 = time.monotonic()
     with pytest.raises(dist_common.DistError) as ei:
         dist_common._poll_result(
@@ -38,8 +40,8 @@ def test_poll_result_abandon_fires_immediately(monkeypatch) -> None:
         )
     dt = time.monotonic() - t0
     assert "abandoned" in str(ei.value)
-    # timing-ok: 上界兜底（放弃应在 ~1s，5s 只挡挂起）
-    assert dt < 5.0, f"放弃应在 ~1s 内发生，实际 {dt:.1f}s（budget=600 远未耗尽）"
+    # timing-ok: 上界兜底（放弃应在 ~0.5s = 定时器 0.25 + 一趟假请求 0.4 的下一轮，5s 只挡挂起）
+    assert dt < 5.0, f"放弃应在 ~0.5s 内发生，实际 {dt:.1f}s（budget=600 远未耗尽）"
 
 
 def test_poll_result_no_abandon_keeps_polling(monkeypatch) -> None:
@@ -51,13 +53,17 @@ def test_poll_result_no_abandon_keeps_polling(monkeypatch) -> None:
     monkeypatch.setattr(dist_common, "_request", fake_request)
     monkeypatch.setattr(dist_common.time, "sleep", lambda _s: None)
 
+    # 预算地板调成毫秒级（2026-09-29，§43）：生产地板（1.0s）是「防住预算小到没意义的调用」，
+    # 而本用例要验的是「预算耗尽 + deadline exceeded」这条**形状**，与预算绝对长度无关。
+    # 不调时本用例就是「空转跑满 1s」（sleep 被打桩 ⇒ 还是满核忙等，并行下是真伤害）。
+    monkeypatch.setattr(dist_common, "POLL_MIN_BUDGET_SEC", 0.05)
     with pytest.raises(dist_common.DistError) as ei:
         dist_common._poll_result(
             "http://node",
             "tok",
             {"iterId": "r.1", "stage": 0, "seed": 1},
-            budget=1.0,
-            poll_s=0.2,
+            budget=0.05,
+            poll_s=0.02,
         )
     assert "deadline exceeded" in str(ei.value)
 
@@ -255,6 +261,10 @@ def test_transient_judgement_defined_once_and_wired() -> None:
     def definers_of(name: str) -> list[str]:
         found = []
         for path in [root / "dist_common.py", *sorted((root / "rl").glob("*.py"))]:
+            # 廉价预筛：`def <name>` 的 FunctionDef 要求名字本身就是源码里的一个标识符
+            # ⇒ 文本里没有 `name` 就不可能有定义（全量解析 `rl/` 只为了找它一次的性价比太低）。
+            if name not in source_scan.read_text(str(path)):
+                continue
             tree = source_scan.parse(str(path))
             for node in ast.walk(tree):
                 if isinstance(node, ast.FunctionDef) and node.name == name:

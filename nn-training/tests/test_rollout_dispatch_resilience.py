@@ -78,6 +78,11 @@ class _Harness:
                 "nodeFailStreak": 3,
                 "queueWindowSec": 30,
                 "tailGraceJoinSec": 0,
+                # 窗口到期后的在飞 join grace（生产默认 5s）：这里给得极小——
+                # 「全员停派/回场用尽」的用例里在飞 worker 本就结算不了任何一局，
+                # 5s 只是白等墙钟（2026-09-29，§43：实测每例 ~0.4s 花在这上面）。
+                # 窗口到期的**语义**仍被覆盖（join 照跑，只是别拖长）。
+                "tailGraceJoinSecDeadline": 0.1,
                 # 测试用小节奏（真实缺省 5s / 20s / 5s）
                 "nodeRecoverFirstSec": 0.05,
                 "recoverPingSec": 0.05,
@@ -278,8 +283,11 @@ def test_soft_streak_still_bounded_when_cluster_is_down(tmp_path, monkeypatch, s
         tmp_path,
         monkeypatch,
         games=4,
-        # 窗只要盖住「4 轮×2 取活」的工时（回场地板修好后 ~0.3s）+ 负载余量。
-        policy={"nodeSoftFailStreak": 2, "queueWindowSec": 1.5},
+        # 窗只要盖住「4 轮×2 取活」的工时 + 负载余量。2026-09-29 实测（tmp/dur/window_probe.py）：
+        # 首次→第 8 次取活的跨度稳定在 **0.173s**，而窗的长度就是本用例的墙钟（轮里再没有
+        # 能结算的人，只能等到 deadline）——故 1.5s 里 ~1.3s 是纯等待。取 0.6s = 实测工时的
+        # 3.5×（作者原估 0.3s 的 2×），断言（8 次取活 + 4 局全进 missing）与窗长无关。
+        policy={"nodeSoftFailStreak": 2, "queueWindowSec": 0.6},
     )
     calls = {"n": 0}
 
@@ -378,7 +386,8 @@ def test_rescan_rearm_bounded_by_limit(tmp_path, monkeypatch) -> None:
         tmp_path,
         monkeypatch,
         games=6,
-        policy={"nodeRearmLimit": 1, "queueWindowSec": 1.5},
+        # 同上：窗长 = 本用例的墙钟（6 次取活的工时 ~0.2s），只当配速。
+        policy={"nodeRearmLimit": 1, "queueWindowSec": 0.6},
     )
     calls = {"n": 0}
 

@@ -19,7 +19,9 @@ from __future__ import annotations
 import ast
 import json
 import os
+import re
 import sys
+from functools import cache
 from pathlib import Path
 from typing import Any
 
@@ -143,9 +145,18 @@ def _public_methods(src: str, cls: str) -> set[str]:
     raise AssertionError(f"{cls} 不在 {STORE_PATH.name}")
 
 
-def _non_test_py() -> list[Path]:
+@cache
+def _non_test_py() -> tuple[Path, ...]:
+    """全仓非测试 .py（缓存：`rglob` 会走进 .venv 的 5.8k 个文件，每次 ~0.12s）。"""
     skip = {".venv", "tmp", "tests", "e2e", "__pycache__", "ipynb", "weights"}
-    return [p for p in sorted(ROOT.rglob("*.py")) if not (set(p.relative_to(ROOT).parts) & skip)]
+    return tuple(
+        p for p in sorted(ROOT.rglob("*.py")) if not (set(p.relative_to(ROOT).parts) & skip)
+    )
+
+
+#: `x["status"] = …` 的廉价预筛：下标的字符串字面量在源码里就是 `["status"]`
+#: （如果写得难认一点，`[ "status" ]` 也容得过；判据是 AST 的 `Constant == "status"`）。
+_STATUS_SUBSCRIPT_RE = re.compile(r"\[\s*[\"']status[\"']\s*\]")
 
 
 def _wreq(root: Path, *reqs: dict) -> None:
@@ -216,7 +227,12 @@ def test_status_assignments_live_only_in_the_named_transitions() -> None:
     """
     hits: dict[str, list[str]] = {}
     for p in _non_test_py():
-        owners = _subscript_store_owners(source_scan.read_text(str(p)), "status")
+        src = source_scan.read_text(str(p))
+        # 先廉价预筛再解析：全仓 250+ 文件逐个 `iter_child_nodes` 递归（本用例 1.0s 的大头，
+        # 同文件 `test_ledger_publish_is_the_single_writer` 的 `"_publish("` 预筛同型）。
+        if not _STATUS_SUBSCRIPT_RE.search(src):
+            continue
+        owners = _subscript_store_owners(src, "status")
         if owners:
             hits[p.relative_to(ROOT).as_posix()] = owners
     assert hits == {"rl/batch_store.py": sorted(STATUS_WRITERS)}, hits

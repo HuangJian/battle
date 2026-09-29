@@ -370,13 +370,16 @@ def test_reroll_probe_uses_the_net_elapsed(monkeypatch) -> None:
     monkeypatch.setattr(http_mod, "_reroll_decision", spy)
     calls = {"n": 0}
 
+    # 让路时长 1.0 → 0.3（2026-09-29，§43）：判据是**相对**的（`wall - seen[0]` 必须约等于
+    # 让路时长 ⇒ 净值扣掉了它），1.0 只是「大到看得出来」；0.3 下阈值 0.15 仍与「没扣」
+    # （= 0）拉开 2×，而扣账是 impl 自己返回的数（确定性，不看机器脸色）。
     def pace() -> float:
         calls["n"] += 1
         if calls["n"] > 1:  # 只有首块前那一次真让路（后两次别把用例拖慢）
             return 0.0
-        # sleep-ok: 夹具模拟的工作量：一次停满一秒的让路（不是同步手段）
-        time.sleep(1.0)
-        return 1.0
+        # sleep-ok: 夹具模拟的工作量：一次停满 0.3s 的让路（不是同步手段）
+        time.sleep(0.3)
+        return 0.3
 
     resp = _FakeResp([b"x" * (256 * 1024)], total=8 * MB)
     t0 = time.time()
@@ -385,12 +388,12 @@ def test_reroll_probe_uses_the_net_elapsed(monkeypatch) -> None:
     )
     wall = time.time() - t0
     assert len(out) == 256 * 1024
-    assert wall >= 1.0, "夹具没真让路（探针没被测到）"
+    assert wall >= 0.3, "夹具没真让路（探针没被测到）"
     assert len(seen) == 1, f"首块只该判一次：{seen}"
-    # **相对判据**（2026-09-26）：净值必须比墙钟小掉那次让路（1.0s）——满载时线程被剥夺
+    # **相对判据**（2026-09-26）：净值必须比墙钟小掉那次让路（0.3s）——满载时线程被剥夺
     # 2.6s 会让净值一起涨（实测 elapsed=2.611 / wall=3.61），绝对上界（原 `seen[0] < 0.5`）
     # 在负载下是假红；「让路被扣掉了」只看 seen[0] 是否明显小于 wall（没扣 ⇒ 两者≈相等）。
-    assert wall - seen[0] >= 0.5, f"让路时间没被扣掉：elapsed={seen[0]:.3f}（墙钟 ≈{wall:.2f}）"
+    assert wall - seen[0] >= 0.15, f"让路时间没被扣掉：elapsed={seen[0]:.3f}（墙钟 ≈{wall:.2f}）"
 
 
 def test_net_elapsed_does_not_extend_the_wall_clock_timeout() -> None:

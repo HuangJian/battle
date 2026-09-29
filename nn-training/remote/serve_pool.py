@@ -247,6 +247,12 @@ class ServePool:
     `try_pool` 可被多线程同时调用。
     """
 
+    #: 补位冷启动就绪等待的**下限**（生产语义：一次尝试的硬顶太小也别把冷启动掐死在启动中）。
+    #: 独立成类常量而非内联 `max(1.0, …)`，是为了让用例能把它调到「毫秒级」而**不改判据**：
+    #: 「等待受本次尝试的硬顶约束（而不是 60s 就绪上限）」与下限的绝对长度无关，但下限就是
+    #: 那条例外的固有墙钟（2026-09-29，§43）。实例可覆写（同 `pool.breaker_after` 的旋钮惯例）。
+    READY_BUDGET_FLOOR_SEC = 1.0
+
     def __init__(
         self,
         bun: str,
@@ -385,7 +391,7 @@ class ServePool:
             return None
         budget = self.ready_timeout_sec
         if timeout_sec is not None:
-            budget = min(budget, max(1.0, float(timeout_sec)))
+            budget = min(budget, max(self.READY_BUDGET_FLOOR_SEC, float(timeout_sec)))
         ready = fresh.ready.wait(budget)
         with self._lock:
             if (

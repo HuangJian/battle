@@ -40,6 +40,7 @@ from common.protocol import CodeChangedError, ProtocolError
 from platform_utils import sandbox_delete_blocked
 from remote import worker as W
 from remote.worker import prune_job_dirs
+from tests.helpers import hub_seams
 
 
 def test_code_changed_error_is_not_protocol_error() -> None:
@@ -72,6 +73,7 @@ def test_worker_loop_hotswap_exits_for_supervisor_respawn(monkeypatch: pytest.Mo
     """
     polls: list[dict | None] = [{"job_id": "j-hot", "manifest": {"job_id": "j-hot"}}, None]
     monkeypatch.setattr(W, "acquire_job", lambda *a, **k: polls.pop(0), raising=True)
+    hub_seams.stub_round_http(monkeypatch)  # 假 hub：别真发 peek / ready（每次 ~1.4s 代理空等）
 
     def _raise_hotswap(*a, **k):
         raise CodeChangedError("a" * 64, "b" * 64)
@@ -103,6 +105,7 @@ def test_worker_loop_hotswap_no_supervisor_returns(monkeypatch: pytest.MonkeyPat
     """无监督器（restart_argv=None 的裸直调）→ 降级为提示人工重启并返回，不退出进程。"""
     polls: list[dict | None] = [{"job_id": "j-hot", "manifest": {"job_id": "j-hot"}}, None]
     monkeypatch.setattr(W, "acquire_job", lambda *a, **k: polls.pop(0), raising=True)
+    hub_seams.stub_round_http(monkeypatch)  # 假 hub：别真发 peek / ready（每次 ~1.4s 代理空等）
 
     def _raise_hotswap(*a, **k):
         raise CodeChangedError("a" * 64, "b" * 64)
@@ -215,6 +218,7 @@ def test_worker_halt_attempts_stop_then_keeps_working(monkeypatch: pytest.Monkey
         None,  # 停机解除（acquire_job 对空候选返回 None）→ once 退出
     ]
     monkeypatch.setattr(W, "acquire_job", lambda *a, **k: polls.pop(0), raising=True)
+    hub_seams.stub_round_http(monkeypatch)  # 假 hub：别真发 peek / ready（每次 ~1.4s 代理空等）
     ran: list[str] = []
 
     def _run_job(*a: object, **k: object) -> dict:
@@ -254,6 +258,7 @@ def test_worker_halt_attempt_once_then_reset_on_clear(
         None,  # 收尾 None → idle 超限（job 重置点在 t=5，此处 15-5=10 ≥ max_idle）
     ]
     monkeypatch.setattr(W, "acquire_job", lambda *a, **k: polls.pop(0), raising=True)
+    hub_seams.stub_round_http(monkeypatch)  # 假 hub：别真发 peek / ready（每次 ~1.4s 代理空等）
     monkeypatch.setattr(W, "run_job", lambda *a, **k: {"rc": 0}, raising=True)
     monkeypatch.setattr(W, "post_result", lambda *a, **k: None, raising=True)
     W.worker_loop(

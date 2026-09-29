@@ -276,6 +276,11 @@ def test_every_send_timeout_patch_targets_the_owner_module() -> None:
     owner = SEND_TIMEOUT_READER[0].removesuffix(".py").replace("/", ".")
     targets: list[str] = []
     for p in sorted((NN_ROOT / "tests").glob("*.py")) + sorted((NN_ROOT / "e2e").glob("*.py")):
+        # 廉价预筛：判据要的是「`setattr(…, "<名字>…", …)` 的第一个实参是含 SEND_TIMEOUT_SEC 的字符串」
+        # ⇒ 源码里必须先有这段子串（合法 Python 里字符串常量就是源码字面量）。全量 279 个文件里
+        # 只有个位数命中，解析省掉 95%+（`ast.walk` 是这条的实测热点，见 docs/nn/engineering.md）。
+        if "SEND_TIMEOUT_SEC" not in source_scan.read_text(str(p)):
+            continue
         for node in ast.walk(source_scan.parse(str(p))):
             if not isinstance(node, ast.Call):
                 continue

@@ -45,7 +45,6 @@ TS 导出器路径收进 `common/protocol.py`（`EVAL_SCRIPT`）之后，**`rl` 
 
 from __future__ import annotations
 
-import ast
 from pathlib import Path
 
 from tests.helpers import source_scan
@@ -149,18 +148,7 @@ RL_ORCHESTRATION = frozenset(
 )
 
 
-def _subpackages() -> set[str]:
-    """仓内的包子目录名（`rl` / `remote` / `common` …）——`from <pkg> import x` 要展开成
-    `<pkg>.x` 才能当作"一条指向子模块的依赖边"对账。
-    """
-    return {
-        p.name
-        for p in NN_ROOT.iterdir()
-        if p.is_dir() and (p / "__init__.py").exists()
-    }
-
-
-def _imports(path: Path) -> set[str]:
+def _imports(path: Path) -> frozenset[str]:
     """该文件里出现的**完整点分模块名**集合（AST，含函数内 import）。
 
     `from rl.log import log` → `rl.log`；`from remote import hub_client` → `remote` 与
@@ -168,19 +156,11 @@ def _imports(path: Path) -> set[str]:
 
     ⚠ 展开必须**对所有子包**生效：只给某个包开小灶，`from rl import loop_steps` 就会被
     记成裸 `rl`，环与切线的断言会**静默失效**（2026-09-23 反向探针实测到，见本文件头部）。
+
+    实现搬进 `tests.helpers.source_scan.imports`（带缓存的派生小结果，见该模块头）：本文件有
+    一条**固定点**循环（`_rl_reaching_remote`）会反复问同一批文件，原先每次都重新解析全 `rl/`。
     """
-    tree = source_scan.parse(str(path))
-    subs = _subpackages()
-    out: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            out.update(a.name for a in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
-            mod = node.module
-            out.add(mod)
-            if mod in subs:  # 仅裸包：`from remote import hub_client`
-                out.update(f"{mod}.{a.name}" for a in node.names if a.name != "*")
-    return out
+    return source_scan.imports(str(path), str(NN_ROOT))
 
 
 def _top_modules(path: Path) -> set[str]:
@@ -188,8 +168,8 @@ def _top_modules(path: Path) -> set[str]:
     return {d.split(".")[0] for d in _imports(path)}
 
 
-def _py_files(root: Path) -> list[Path]:
-    return sorted(root.rglob("*.py"))
+def _py_files(root: Path) -> tuple[Path, ...]:
+    return source_scan.py_files(str(root))
 
 
 def _rl_modules() -> dict[str, Path]:

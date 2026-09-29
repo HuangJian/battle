@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import ast
 import re
+from functools import cache
 from pathlib import Path
 
 import pytest
@@ -30,14 +31,26 @@ SOURCE_ROOTS = ("rl", "remote", "train", "ppo", "models", "data")
 SOURCE_FILES = ("run_rl.py", "run_rl_cluster.py", "dist_common.py")
 
 
-def _source_paths() -> list[Path]:
+@cache
+def _source_paths() -> tuple[Path, ...]:
+    """非测试源码文件（缓存：三个用例都要同一份列表，`rglob` 不必各走一遍）。"""
     out: list[Path] = []
     for root in SOURCE_ROOTS:
         d = NN_DIR / root
         if d.is_dir():
             out.extend(p for p in d.rglob("*.py") if "__pycache__" not in p.parts)
     out.extend(p for f in SOURCE_FILES if (p := NN_DIR / f).exists())
-    return out
+    return tuple(out)
+
+
+def _mentions(p: Path, needle: str) -> bool:
+    """廉价预筛（超集判据）：源码文本里出现过 `needle` 才可能命中 AST 判据。
+
+    合法 Python 里属性名 / 关键字实参名 / 字符串常量都是源码字面量，所以「文本没有」⇒「AST
+    也不会有」——不会漏判，只是少解析。实测（`--durations`）：本条把 204 个文件的 `ast.walk`
+    降到个位数个。
+    """
+    return needle in source_scan.read_text(str(p), "replace")
 
 
 def _option_strings(argv_parser) -> list[str]:
@@ -80,6 +93,12 @@ def test_source_has_no_ppo_placement_reads() -> None:
     """
     offenders: list[str] = []
     for p in _source_paths():
+        # 预筛（超集，两条件都必要）：① 名字 `ppo` 在源码里；② 命中形态只可能是
+        # `args.ppo`（⇒ 源码里有 `args`）或 `getattr(…, "ppo"…)`（⇒ 源码里有 `getattr`）。
+        if not _mentions(p, "ppo"):
+            continue
+        if not (_mentions(p, "args") or _mentions(p, "getattr")):
+            continue
         tree = source_scan.parse(str(p), errors="replace")
         for node in ast.walk(tree):
             # args.ppo
@@ -108,7 +127,9 @@ def test_no_ppo_backend_env_knob() -> None:
     offenders: list[str] = []
     pat = re.compile(r"PPO[_A-Z]*BACKEND|BACKEND[_A-Z]*PPO")
     for p in _source_paths():
-        for i, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+        if not _mentions(p, "PPO"):  # 预筛：正则只认含 `PPO` 的文本
+            continue
+        for i, line in enumerate(source_scan.read_text(str(p), "replace").splitlines(), 1):
             if pat.search(line):
                 offenders.append(f"{p.relative_to(NN_DIR)}:{i}: {line.strip()}")
     assert not offenders, "backend env 旋钮残留：\n" + "\n".join(offenders)

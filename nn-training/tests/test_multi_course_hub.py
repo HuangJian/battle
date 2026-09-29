@@ -1187,8 +1187,10 @@ def test_main_discover_picks_up_course_from_disk(tmp_path: Path) -> None:
                     break
             except Exception:  # 启动窗口内的连接失败是常态
                 pass
+            # 0.25 → 0.05（2026-09-29，§43）：步长只决定探测粒度，而本用例的墙钟就是「启动 +
+            # 等发现线程登记」——python 冷启动 ~0.5s，0.25 的粒度白付平均 ~0.12s/个循环。
             # sleep-ok: 轮询步长（等的是「hub 已就绪」这个状态，30s 只当挂起兜底）
-            time.sleep(0.25)
+            time.sleep(0.05)
         else:
             raise AssertionError(f"hub-server 未在 30s 内就绪（rc={proc.poll()}）")
         assert st == 200, f"启动失败：{body}；输出：{srv.tail()}"
@@ -1202,8 +1204,9 @@ def test_main_discover_picks_up_course_from_disk(tmp_path: Path) -> None:
             if "late" in body["courses"]:
                 seen = body
                 break
+            # 同上，0.25 → 0.05：`/admin/queue` 是只读观测面，探密一点只是多几次本地 HTTP。
             # sleep-ok: 轮询步长（等的是「发现线程已登记新课程」这个状态，deadline 只当兜底）
-            time.sleep(0.25)
+            time.sleep(0.05)
         assert seen is not None, f"--discover 没把新课程登记进来：{body}"
         assert seen["courses"]["late"]["pending_n"] == 1
 

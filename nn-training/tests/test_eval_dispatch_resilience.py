@@ -565,9 +565,12 @@ def test_window_expiry_still_lands_inflight_games(tmp_path, monkeypatch) -> None
     vs 窗口 1.0s —— 那局其实在窗口内就结算了，「到点仍在飞」这个契约根本没被测到）。
     宽限常量是 120s，所以就算机器满载，`elapsed` 也该、且只该在窗口后一点点就返回。
     """
+    # 窗 1.0 → 0.4（2026-09-29，§43）：判据是「回包**在窗过期之后**才落地、但照样入账」，
+    # 窗长就是本用例的固有开销（fetch 必须真等到窗过期）；局在 `play()` 一开局就派出去
+    # （mock 节点、零延迟）⇒ 0.4s 对「在窗内起跑」仍有 10× 余量。
     nodes = [{"id": "a97", "url": "http://a97.local", "concurrency": 1}]
     h = _LaneHarness(
-        tmp_path, monkeypatch, games=1, nodes=nodes, local_slots=0, window_sec=1.0
+        tmp_path, monkeypatch, games=1, nodes=nodes, local_slots=0, window_sec=0.4
     )
     past_window: list[bool] = []
 

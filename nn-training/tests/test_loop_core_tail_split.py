@@ -56,7 +56,10 @@ S18/S19 的守卫各自钉过一份（两处逐字重复、会各自漂）⇒ �
 from __future__ import annotations
 
 import ast
+from collections.abc import Mapping
 from pathlib import Path
+
+from tests.helpers import source_scan
 
 NN_ROOT = Path(__file__).resolve().parent.parent
 CORE_PY = NN_ROOT / "rl/loop_core.py"
@@ -189,38 +192,24 @@ def _top_names(path: Path) -> set[str]:
     return out
 
 
-def _self_call_counts(path: Path) -> dict[str, int]:
+def _self_call_counts(path: Path, only: frozenset[str] | None = None) -> Mapping[str, int]:
     """AST 计数源码里**真实的** `self.<attr>(…)` 调用。
 
     为什么不用 `src.count("self.x(")`（S17~S19 的老写法）：文档字符串/注释里提到一次
     调用形态就会被算成**一条入边**，守卫于是对着「合法的文档」报假红（本刀的 `_maybe_dispatch_baseline_eval`
     头注恰好写了自己的调用形态）。入边是**语法事实**，就该用语法量。
+
+    实现搬进 `tests.helpers.source_scan`（缓存版）：本用例对全 `rl/` 跑两遍解析（入边 + 定义面）。
+
+    `only` = 只关心这些名字（白名单）；入边闭集那条传它就走廉价子串预筛，与判据无关的
+    文件直接跳过解析。
     """
-    out: dict[str, int] = {}
-    for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
-        if (
-            isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Attribute)
-            and isinstance(node.func.value, ast.Name)
-            and node.func.value.id == "self"
-        ):
-            out[node.func.attr] = out.get(node.func.attr, 0) + 1
-    return out
+    return source_scan.self_call_counts(str(path), only)
 
 
-def _defined_names(path: Path) -> set[str]:
+def _defined_names(path: Path, only: frozenset[str] | None = None) -> frozenset[str]:
     """源码里**会占住名字**的定义：顶层 def/class + 顶层类体的方法（文档字符串不算）。"""
-    out: set[str] = set()
-    for n in ast.parse(path.read_text(encoding="utf-8")).body:
-        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-            out.add(n.name)
-            if isinstance(n, ast.ClassDef):
-                out.update(
-                    m.name
-                    for m in n.body
-                    if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
-                )
-    return out
+    return source_scan.top_level_defs(str(path), only)
 
 
 def _top_imports(path: Path) -> set[str]:
@@ -366,8 +355,9 @@ def test_inbound_hands_closed_set() -> None:
     """入边闭集：每个成员只有登记的调用者，且呼叫点数逐一对账。"""
     rl_dir = NN_ROOT / "rl"
     files = sorted(rl_dir.glob("*.py"))
-    calls = {p.name: _self_call_counts(p) for p in files}
-    defined = {p.name: _defined_names(p) for p in files}
+    only = frozenset(INBOUND_CALLS)
+    calls = {p.name: _self_call_counts(p, only) for p in files}
+    defined = {p.name: _defined_names(p, only) for p in files}
     owners = {m: rel.split("/")[-1] for rel, (_, members) in CLUSTERS.items() for m in members}
     for member, want in INBOUND_CALLS.items():
         got = {name: c[member] for name, c in calls.items() if member in c}

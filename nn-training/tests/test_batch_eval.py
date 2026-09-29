@@ -564,7 +564,9 @@ def test_settle_stall_exits_loudly_not_at_deadline(tmp_path: Path, monkeypatch) 
     import rl.batch_runner as br
 
     # 常量与执行器同住（S27/B3）⇒ 注入口也是 `rl.batch_runner`；打在旧家会是静默空操作。
-    monkeypatch.setattr(br, "STUCK_GRACE_SEC", 0.5)
+    # 0.5 → 0.2（2026-09-29，§43）：判据是「在 STUCK_GRACE_SEC 内响亮收工」（日志里有
+    # 「收尾僵死」），宽限值就是本用例的固有开销（僵死必须真被守到）。
+    monkeypatch.setattr(br, "STUCK_GRACE_SEC", 0.2)
 
     victim: list[tuple[int, int]] = []
 
@@ -584,7 +586,9 @@ def test_settle_stall_exits_loudly_not_at_deadline(tmp_path: Path, monkeypatch) 
         tmp_path,
         monkeypatch,
         cfg_policy={
-            "statusTimeoutSec": 1,
+            # 节点探活/取活的**请求超时**：本用例的 fake_fetch 是瞬时 mock ⇒ 0.05 足够，
+            # 而 1s 只是开跑前的白等（2026-09-29，§43 同族）。
+            "statusTimeoutSec": 0.05,
             "taskTimeoutSec": 30,
             "nodeFailStreak": 3,
             "evalLocalSlots": 0,

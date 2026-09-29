@@ -239,18 +239,28 @@ def test_pid_zero_lock_is_not_treated_as_live(tmp_path: Path) -> None:
         assert acquire_lock(lock) is True, f"PID {bogus} 的残锁应被清理后接管"
 
 
+#: `.kill` 属性访问的廉价预筛（判据里 `attr == "kill"` 在源码里就是这个字面量）。
+_DOT_KILL_RE = re.compile(r"\.\s*kill\b")
+
+
 # ────────────────────────── 源码门禁：安全分支不得被删回去 ──────────────────────────
 
 
 def _os_kill_zero_lines(path: Path) -> list[int]:
-    """源码里真调用 `os.kill(<pid>, 0)`（= 存活探测）的行号——用 AST 而非字符串匹配。
+    r"""源码里真调用 `os.kill(<pid>, 0)`（= 存活探测）的行号——用 AST 而非字符串匹配。
 
     两个理由：① 新写的 docstring 里到处在讨论 `os.kill(pid, 0)` 这个坑，字符串匹配会把
     注释/文档算成违规；② **只抓信号 0**：`os.kill(pid, 15)`（SIGTERM）是**故意发的信号**
     （`notebook_runtime` 关闭 push 服务时就是这么干的），那是正常用法，不属本不变量。
+
+    先撤一道**廉价子串预筛**（`read_text` 走缓存）：AST 判据要的是 `Attribute(attr="kill")`
+    ⇒ 源码里必有 `.kill`（属性名就是字面量；`os . kill(...)` 这种写法由 `\s*` 捕住）。
+    不加这一步就要对全部 368 个生产文件 50 万节点 `ast.walk`（本用例 1.1s 的大头）。
     """
     import ast
 
+    if not _DOT_KILL_RE.search(source_scan.read_text(str(path))):
+        return []
     tree = source_scan.parse(str(path))
     out: list[int] = []
     for node in ast.walk(tree):

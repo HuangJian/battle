@@ -1225,7 +1225,9 @@ def test_retry_gets_relaxed_cap_only_when_plan_did_not_set_one(
 ) -> None:
     """重试的上限：plan 没给 ⇒ ×4（兜底不让一次主机抖动判死整轮）；plan 给了 ⇒ 一字不改。"""
     _fast_watchdog(monkeypatch)
-    monkeypatch.setattr(game_watch, "DEFAULT_GAME_TIMEOUT_SEC", 0.1)
+    # 基准硬顶 0.1 → 0.05（2026-09-29，§43）：判据是「**倍率**」（非显式 ⇒ ×RETRY_TIMEOUT_FACTOR，
+    # 显式 ⇒ 一字不改），而硬顶值就是本用例的固有开销（两个 hang 子进程各要真跑满它）。
+    monkeypatch.setattr(game_watch, "DEFAULT_GAME_TIMEOUT_SEC", 0.05)
     script = tmp_path / "hang.py"
     script.write_text(_STUB_HANG, encoding="utf-8")
     job_dir = tmp_path / "job"
@@ -1235,16 +1237,18 @@ def test_retry_gets_relaxed_cap_only_when_plan_did_not_set_one(
         run_iter_rollout(
             job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=0.0), log=msgs.append
         )
-    assert any("本次上限 0.4s" in m for m in msgs), msgs  # 0.1s × RETRY_TIMEOUT_FACTOR(4)
+    assert any("本次上限 0.2s" in m for m in msgs), msgs  # 0.05s × RETRY_TIMEOUT_FACTOR(4)
 
     msgs_explicit: list[str] = []
     job_dir2 = tmp_path / "job2"
     job_dir2.mkdir()
     with pytest.raises(RetryableError):
         run_iter_rollout(
-            job_dir2, _one_game_spec(tmp_path, script, game_timeout_sec=0.1), log=msgs_explicit.append
+            job_dir2,
+            _one_game_spec(tmp_path, script, game_timeout_sec=0.05),
+            log=msgs_explicit.append,
         )
-    assert any("本次上限 0.1s" in m for m in msgs_explicit), msgs_explicit
+    assert any("本次上限 0.05s" in m for m in msgs_explicit), msgs_explicit
 
 
 def test_round_logs_game_time_distribution(tmp_path: Path, monkeypatch) -> None:
@@ -1455,8 +1459,10 @@ def test_a_child_that_cannot_be_reaped_is_retried_in_round_never_failing(
     _fast_watchdog(monkeypatch)
     # 留 2 次好让「万一走了单局重跑」在日志里看得出来（默认 3 次会把重跑藏进正常重试里）
     monkeypatch.setattr(game_watch, "GAME_MAX_ATTEMPTS", 2)
-    # ⚠ 硬顶必须比**真 python 启动开销**大（替身只占第一次；重投那次是真跑桩脚本，
-    # xdist 满载时启动能到几百毫秒——给 0.05s 会把「本该成功的重投」误杀成超时）
+    # ⚠ 硬顶必须比**真 python 启动开销**大（替身只占第一次；重投那次是真跑桩脚本）；
+    # 而**第一次（替身）必须把硬顶跑满**才能走到「杀不掉」那条路 ⇒ 硬顶值 = 本用例的固有开销。
+    # 原值 2.0s（本用例 ~2.05s，是本文件最慢的一条）。2026-09-29 实测「12 个 CPU 烧满时
+    # 真 python 启动」：10 连跑 0.69s 合计（均 69ms）⇒ 0.5s 仍有 7× 余量，而开销降到 ~0.53s。
     script = tmp_path / "ok.py"
     script.write_text(_STUB_SLOW.replace("@SECS@", "0"), encoding="utf-8")
     _flaky_popen(monkeypatch, script, fail_first=1)
@@ -1466,7 +1472,7 @@ def test_a_child_that_cannot_be_reaped_is_retried_in_round_never_failing(
     t0 = time.time()
     try:
         out = run_iter_rollout(
-            job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=2.0), log=msgs.append
+            job_dir, _one_game_spec(tmp_path, script, game_timeout_sec=0.5), log=msgs.append
         )
         wall = time.time() - t0
     finally:

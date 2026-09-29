@@ -185,7 +185,9 @@ def test_hub_big_send_is_bounded_and_loud(tmp_path, monkeypatch) -> None:
     **静默空操作**（名字还在、没人读它）：本用例第一版正是这么挂的（hub 一个字都没打）。
     `tests/test_hub_entry_split.py` 把「谁读它」机械钉住。
     """
-    monkeypatch.setattr("remote.hub.http_face.SEND_TIMEOUT_SEC", 0.5)
+    # 0.5 → 0.2（2026-09-29，§43）：判据是「在发送超时内断开并**响亮打印**已发字节」这个**事件**，
+    # 不是那个 0.5s 本身；而半开是在第一块写进去之后才发生的，0.2s 与 0.5s 走的是同一条路径。
+    monkeypatch.setattr("remote.hub.http_face.SEND_TIMEOUT_SEC", 0.2)
     payload = b"P" * (4 * 1024 * 1024)
     srv, port, jid = _payload_server(tmp_path, payload)
     lines: list[str] = []

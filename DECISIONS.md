@@ -5430,3 +5430,47 @@ eval 有池）—— 范围更大、与本次「机制同质化」不同题，�
 - **未决（开课前用户拍板）**：§63 重开条件——channel-1 机制零位移（h3 back 占比 45 轮 +0.006），
   条件（a）未满足；条件（b）wLane 已 pin 但 wGeo/冻住守卫未全 pin。豁免开课需在此条下记一行
   用户批示；不豁免则本腿维持草稿，只跑 h4-geo。
+## §2026-09-29-goalnn-pytest-scan-cache（2026-09-29，最慢用例清算：全仓扫描「先廉价预筛、再 parse」+ 派生小结果才可缓存）
+
+**决策**：仓库内**任何「全仓源码扫描」守卫**（分层 / 单一来源 / 注入点 / 退役标识 …）都必须先付一道
+**廉价子串预筛**，再 `ast.parse` 或 `tokenize`；跨用例重复要的**派生小结果**（模块名集合 / 顶层定义面
+/ `self.<attr>` 调用计数 / 文件清单）统一住 `tests/helpers/source_scan.py` 并 `functools.cache`。
+**AST 本身不得常驻**（原 `parse` 的 `@cache` 已删：常驻 653 份 AST 让之后每次 `gc.collect()` 多付
+~0.74s，GC 开着实测 2.55s vs 0.82s）。
+
+**被否决**：① 给 `source_scan.parse` 恢复 `@cache`（重复解析的毫秒 vs 常驻 AST 的秒级 GC）·
+② 用单次 `--durations` 判「最慢」（本机负载 1.13× 波动 ⇒ 排名随负载换人、改前改后不可比）·
+③ 把真训练用例（`test_bc_epoch_resume`）改小来提排名（会削窄守卫语义）·
+④ 调生产缺省去迁就测试（一律提为参数，生产缺省不动）。
+
+**违反后果**：新写的守卫又对全仓 `ast.walk`/`tokenize` ⇒ 单条用例秒级、`sum_min` 静默回涨
+（本机 653 文件 × 每条判据一次解析）；把 AST 挂进模块级容器 ⇒ 之后每次 GC 都遍历百万级节点图。
+
+—— 全文（测速配方 / 十条对照 / 硬顶 0.5s 的实测依据 / 效果表）→ `docs/nn/engineering.md` §43
+
+## §2026-09-29-goalnn-wait-gates-not-test-walls（2026-09-29，剩余 ~1s 用例群清算：「闸门时长」不得同时是用例的墙钟）
+
+**决策**：测试侧提速时，凡遇到「墙钟 = 等满某个**为生产语义**写的闸门/地板/步长」，一律
+**把那个量提成旋钮**（具名模块/类常量、参数或实例属性），**生产缺省逐字不变**，用例按自己的
+判据需要调小；**不得**改判据去迁就时长，也**不得**为了让排名好看去改生产缺省。
+本批落地的旋钮：`ServePool.READY_BUDGET_FLOOR_SEC`（就绪预算 1.0s 地板）、
+`dist_common.POLL_MIN_BUDGET_SEC`（轮询预算 1.0s 地板）、`policy.tailGraceJoinSecDeadline`
+（窗到期后的在飞 join grace，生产缺省 5s）、`BulkScheduler._yield_step`（让路单步 0.5s）。
+同类先例：`tripped_idle_polls`（熔断后空等）、`transientBackoffSec` / `nodeRecoverFirstSec`
+/ `recoverPingSec`（回场与退避配速）、`pool.breaker_after`。
+
+配套一条**真的行为修正**：`rl/dispatch.py` 收尾的 `all_settled.wait(0.5)` 现在**钳到 deadline**
+（原实现退出条件下一轮才检查 ⇒ 「窗口到期」实际晚到最多 0.5s；`queue_local` 的 rescan 循环
+早已同源钳过）。生产窗 1800s 无感，且**不改任何结局**——窗口到期后循环本来也只会退出。
+
+**被否决**：① 把 `test_rollout_dispatch_resilience` 的窗口 0.6s 缩到 0.35s（实测工时极稳
+0.173s，但余量从 3.5× 掉到 2×；本仓为负载抖动付过太多假红）· ② 收紧
+`test_single_ppo_path` 预筛到 `.ppo` 字面量（68→10 文件）：会漏「`args` 与 `.ppo` 间插注释」
+的合法写法，而守卫失效是**静默**的，0.2s 不值一个盲区 · ③ 给 `tests/helpers/remote_dag.py`
+的 `graph()/remote_modules()` 加缓存（返回可变嵌套字典 ⇒ 跨用例污染）· ④ 硬压 `e2e/`
+（真进程/真 I/O 的集成层，要压得动分发与装载面，是另一个题目）。
+
+**违反后果**：新用例又盯着生产地板过日子 ⇒ 单条 1s 级安静回归（不占 CPU、不报错，只在墙钟
+上现形）；或反过来，为了测试把生产地板调小 ⇒ 生产语义被测试绑定（§14 的「死测试」镜像）。
+
+—— 全文（定位手法 cProfile / 20 条对照 / 效果表 / 被否决）→ `docs/nn/engineering.md` §44

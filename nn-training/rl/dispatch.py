@@ -1139,7 +1139,12 @@ class RolloutDispatcher:
         while not all_settled.is_set() and time.time() < deadline:
             if halt_event is not None and halt_event.is_set():
                 break
-            all_settled.wait(0.5)
+            # 步长**钳到 deadline**（与 `queue_local` 的 rescan 循环同源）：裸 `wait(0.5)`
+            # 会让「窗口到期」实际晚到最多 0.5s（退出条件在下一轮才被检查）。生产窗
+            # 1800s 无所谓，但窗口就是小窗用例的全部墙钟（实测 `test_soft_streak…`：
+            # 窗 0.6s / 工时 0.17s，却花 1.04s = 窗 + 一个 0.5 步长的过冲）。
+            # 2026-09-29（§43）：钳住后退出时刻 = deadline，与窗口语义逐字对齐。
+            all_settled.wait(min(0.5, max(0.0, deadline - time.time())))
         halted = halt_event is not None and halt_event.is_set()
         tail_join_sec = resolve_tail_join_sec(policy, all_settled.is_set(), halted)
         join_until = time.time() + max(0.0, tail_join_sec)

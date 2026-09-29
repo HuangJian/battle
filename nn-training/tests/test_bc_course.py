@@ -215,6 +215,11 @@ def test_bc_dispatch_trips_broken_node_and_requeues(tmp_path: Path, monkeypatch)
         max_ticks=100,
         nodes=nodes,
         node_fail_limit=3,
+        # 熔断后的让位等待缺省 2s（生产配速）；本用例的节点是打桩的，没有任何真延迟，
+        # 放回队列是轮开始后几毫秒内的事——8 轮（0.4s）已有百倍余量（实测 set 4/8/16/40
+        # 四档的 games/failed/改派行完全一致）。§14 先例：测试侧拧小配速旋钮、生产缺省不变
+        # （不拧的话每个健康节点槽都要空等满 2s = 本用例的全部耗时）。
+        tripped_idle_polls=8,
         log=msgs.append,
     )
     # 熔断：坏节点被摘掉并在统计里点名
@@ -222,6 +227,11 @@ def test_bc_dispatch_trips_broken_node_and_requeues(tmp_path: Path, monkeypatch)
     assert any("熔断" in m for m in msgs)
     # 全部任务有归宿（games + failed == 任务数），没有静默漏采
     assert stats["games"] + stats["failed"] == len(tasks)
+    # ★ 被放回的任务必须真的被健康节点接手（而不是拖到收尾时被对账成 failed）——这条
+    # 把上面那个让位旋钮钉住：窗口拧得太小时，余下的任务会走到「未被任何节点消费」
+    # 那条收尾日志，这里就红（否则games+failed==任务数 依旧成立，旋钮拧坏也看不出来）。
+    assert not any("未被任何节点消费" in m for m in msgs), msgs
+    assert any("改派其它节点" in m for m in msgs), "没有被放回的任务：前提没成立"
     # 熔断生效：坏节点最多吃掉「阈值 × 槽位」个任务（每次 2 attempt），不再霸占整轮
     assert calls["bad"] <= 3 * 2 * 2, f"熔断太晚：bad 被调用 {calls['bad']} 次"
     assert calls["bad"] < len(tasks) * 2, "熔断后坏节点仍在霸占任务"

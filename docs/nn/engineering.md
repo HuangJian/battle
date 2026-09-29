@@ -16,6 +16,211 @@
 
 ---
 
+## §44 剩余 ~1s 用例群清算：「等满闸门 / 等满步长」一族 → 点名 20 条 −11.8s、全量 sum_min −30s（2026-09-29，用户指令「把剩下的 ~1s 用例群也清一遍（tests/ 与 e2e/ 各取前 30），能压多少压多少」）
+
+**一句话**：§43 清掉的是「重复解析 + 无预筛」（CPU 型）；本批清的是**另一族**——它们的墙钟
+既不是解析也不是计算，而是**等一个比判据需要的时间长得多的闸门**：等满一个 `Event.wait(0.5)`
+的步长、等满「关服要等服务循环醒来」的一个轮询周期、等满一个为生产写的 1.0s 预算地板、等满
+一次「每局一个 manifest 目录」的真 `mkdir`。全量 `sum_min` **150.8s → 120.8s（−20%）**，
+门禁 `pytest` 段 **31s → 25.9s**。
+
+### 定位手法：**先问「这 1 秒花在哪个 wait 上」**
+
+§43 的配方（四连跑取 min → 取最慢 → 串行复测）继续用；本批多一步：**被点名的那条链上做
+cProfile，看累计时间落在哪个 wait/`mkdir`/`join`**（`tmp/dur/prof_plugin.py`，按 `cumtime`
+即可读出「1.0s 在 `Event.wait`、0.4s 在 `Thread.join`、0.39s 在 `posix.mkdir`」）。
+`--durations` 只会告诉你「这条用例慢」，`cProfile` 才告诉你**慢在哪一行**——本批七处修法
+里有五处是这么找到的（另两处是源码阅读 + 已知地板值）。
+
+### 改动的 20 条（下表 before/after 一律取两批的 `min`；括号里的单进程值是串行复测）
+
+| 用例 | 改前 | 改后 | 根因 / 修法 |
+|---|---|---|---|
+| `test_no_sleep_as_sync.py::…wallclock_upper_bound_assert…` | 2.56 | **1.77**（单进程 0.70） | 预筛形同虚设：`_DURATION_WORD_RE` 是裸词根 `sec`/`dt`，而 `dtype`/`section`/`seeds` 遍地都是 ⇒ 286 个文件几乎全进 `ast.parse`。改成**标识符边界版**（与 `_DURATION_NAME` 同判） |
+| `test_rollout_volume.py::test_volume_topup_iterates_until_wave_cap` | 1.58 | **0.23**（单进程 0.11） | 夹具每局写一个 manifest（768 次真 `mkdir` = 0.52s）⇒ 配额 600000 → 60000（1/10，波次算术同比例 16/8/4），断言同比例改写 |
+| 同上 `…hard_cap_marks_capped` | 1.18 | **0.16**（单进程 0.05） | 同上（`max_games_per_stage` 200 → 20） |
+| 同上 `…replays_unfinished_wave` | 1.02 | **0.12**（单进程 0.06） | 同上 |
+| `test_rollout_dispatch_resilience.py::…soft_streak…[500/502/503/504]` | 1.06–1.09 ×4 | **0.76–0.78 ×4**（单进程 0.73） | 窗到期后的在飞 join grace 吃了生产缺省 **5s**（`tailGraceJoinSecDeadline`）⇒ 夹具调到 0.1s（窗口 = 0.6s 是判据所需，保留）；顺带把 `rl/dispatch.py` 的收尾 `wait(0.5)` **钳到 deadline**（见下「生产侧改动」） |
+| 同上 `…rescan_rearm_bounded_by_limit` | 1.09 | **0.77**（单进程 0.73） | 同上 |
+| `test_control_plane_bypass.py::test_control_round_trip…` | 1.06 | **0.32**（单进程 0.22） | 墙钟 = bulk 的**一个让路单步**（`BULK_YIELD_STEP_SEC` 0.5s；控制面窗口要等 `yield_count≥1`，而那要等一整步走完）⇒ 夹具里把实例步长调到 0.1s |
+| （同一 `hub` 夹具的邻居，作对照）`test_result_upload_holds_single_channel` | 0.31 | **0.31** | 同族，但它本来就只等一个短让路 |
+| `test_remote_serve_pool.py::test_acquire_gives_up_within_the_game_cap…` | 1.00 | **0.30**（单进程 0.30） | `_acquire` 的就绪预算有 **1.0s 地板**（`max(1.0, 硬顶)`），硬顶传多小都跑满 1s ⇒ 地板提为类常量 `READY_BUDGET_FLOOR_SEC`（生产缺省不变），用例调到 0.02 |
+| 同上 `test_fallback_breaker_stops_rebuilding_workers` | 1.02 | **0.62**（单进程 0.49） | 4 次真超时 × 硬顶（0.2s）= 全部墙钟 ⇒ 硬顶 0.1（判定与硬顶长度无关） |
+| 同上 `test_breaker_stops_replenishing_but_keeps_serving_warm_workers` | 0.68 | **0.35**（单进程 0.33） | 同族（0.3 → 0.15） |
+| 同上 `test_hung_task_hits_the_cap_then_falls_back` | 0.35 | **0.19**（单进程 0.17） | 同族（0.3 → 0.15） |
+| `test_dist_common_poll.py::test_poll_result_no_abandon_keeps_polling` | 1.00 | **0.05** | `_poll_result` 的 `max(1.0, budget)` 地板 + 用例把 `time.sleep` 打桩 ⇒ **满核忙等 1s**。地板提为模块常量 `POLL_MIN_BUDGET_SEC`（生产缺省不变），用例调到 0.05 |
+| `test_loop_export_split.py::test_inbound_hands_closed_set` | 0.91 | **0.06**（单进程 0.05） | 「入边闭集」对全 `rl/` 的 102 个文件做 AST 计数，而白名单只有十来个成员名 ⇒ `source_scan.self_call_counts(path, only=…)`：先判「名字在不在源码里」，不在就**不解析** |
+| `test_loop_core_tail_split.py::…` | 0.70 | **0.11** | 同族（`top_level_defs(only=…)` 同路） |
+| `test_loop_remote_split.py::…` | 0.93 | **0.06** | 同族 |
+| `test_loop_guards_split.py::…` | 0.90 | **0.28**（单进程 0.08） | 它还在手写 `ast.walk(ast.parse(read_text))`（未接共享缓存）⇒ 改接 `source_scan`（同一进程内四簇共享一次解析） |
+
+**评估后判定「不动」的两条（列在这里是为了留下为什么）**：
+
+| 用例 | 现状 | 判定 |
+|---|---|---|
+| `test_multi_course_hub.py::test_main_discover_picks_up_course_from_disk` | 1.31–1.64 | 真子进程 hub（python 冷启动 ~0.5s + 发现线程节拍）；轮询步长已在更早一段收到 0.05s。**剩下的 1.3s 是「真起一个 hub 进程」本身**，不可动 |
+| `test_single_ppo_path.py::test_source_has_no_ppo_placement_reads` | 1.06–1.57 | §43 已加预筛；`ppo` ∧（`args` ∨ `getattr`）仍命中 68/204 文件（实测 parse+walk 0.22s）。再收紧要赌「`args` 与 `.ppo` 之间插注释/反斜杠」这种极罕见写法，不值得为 0.2s 在守卫上开盲区（见「被否决」） |
+
+### 生产侧改动（两处「改成旋钮」，一处「让语义与名字对齐」）
+
+1. **`rl/dispatch.py`：收尾 `all_settled.wait(0.5)` 钳到 deadline**（真行为改动）。原实现退出
+   条件在下一轮才被检查 ⇒ 「窗口到期」实际晚到最多 0.5s；`queue_local` 的 rescan 循环早就这么
+   钳了，这里补同源。生产窗 1800s 无感（差 ≤0.5s），小窗用例少付一整个步长。**不改任何结局**：
+   窗口到期后循环本来也只会退出。
+2. **`dist_common.POLL_MIN_BUDGET_SEC` / `ServePool.READY_BUDGET_FLOOR_SEC`**：把内联的
+   `max(1.0, …)` 提成**具名常量**（生产缺省逐字不变，签名不变）。理由同 §43 的「配速旋钮」先例：
+   那个 1.0s 是**语义**（防住「预算小到没意义」的调用），但不该同时是**用例的墙钟**。
+3. **`conftest.py`：`socketserver` 轮询周期缺省 0.5s → 10ms**（本次会话更早一段，见 §43 里
+   同一主题）：`shutdown()` 无条件等 `__is_shut_down` ⇒ 仓库里约 40 处测试服务的「关服」各白付
+   0~0.5s（实测某用例 1.09s 里 1.005s 全在两次 `shutdown()`）。
+
+### 效果（同一 16 核容器；两批取 min，注意本机负载仍会波动）
+
+| 指标 | 本批前（§43 末，4 连跑） | 本批后（3 连跑） |
+|---|---|---|
+| 全量 `sum_min`（1353–1395 条可见 call） | 150.8s | **120.8s（−20%）** |
+| 本批 20 条合计（`pytest_durations.py ab`：q 批 vs t 批逐条对账） | 20.6s | **8.8s（−11.8s）** |
+| 门禁 `pytest` 段 | 28.9s | **25.9s** |
+| 门禁 | 3330 passed / 3 skipped | 3330 passed / 3 skipped（ruff + mypy 绿） |
+
+**tests/ 前 14 名改后长什么样（这就是「清完了」的样子）**：`test_bc_epoch_resume` ×2（3.75/3.02）、
+`test_ppo_goal`（2.73）、`test_ppo_scalar_sync`（2.08）、`test_instance_lock` ×2（1.93/1.22）、
+`test_ppo_common::test_ppo_save_load`（1.93）、`test_measure_checkpoint_rss`（1.88）、
+`test_no_sleep_as_sync`（1.77）、`test_ppo_intent`（1.32）、`test_multi_course_hub`（1.31）、
+`test_single_ppo_path`（1.06）、`test_layering`（0.78）。
+其中 **9 条是真 torch**（真训练/真优化器/真存取权重，§43 已论证过它们的固定成本 + 不许拆小），
+**2 条是真起进程**（`instance_lock` 起两个 hub、`multi_course_hub` 起一个 hub），**2 条是全仓源码
+守卫**（已经预筛过；再压要动守卫的判据面），**e2e 全部 ≤1.6s**（真进程/真 HTTP 的集成层）。
+
+### 被否决
+
+* **把 `soft_streak` 的窗口 0.6s → 0.35s**（按实测工时 0.173s ×2 余量）：工时确实极稳
+  （`tmp/dur/soft_span.py` 五连跑 0.169–0.174s，让路是**事件驱动**的 0.05s 步长，不吃 CPU 负载），
+  但省下的是 0.25s/例、代价是余量从 3.5× 掉到 2×——本仓为「负载抖动」付过太多假红，不值。
+* **收紧 `test_single_ppo_path` 的预筛到 `.ppo` / `"ppo"` 字面量**（68 → 10 个文件）：它会漏掉
+  「`args` 与 `.ppo` 之间插注释/反斜杠」的合法写法，而这条守卫的失效方式是**静默**的。0.2s 换
+  一个盲区，不合算（§43 的「子串判据必须充分」那条纪律就是为了防这个）。
+* **给 `tests/helpers/remote_dag.py::graph()/remote_modules()` 加缓存**：`test_remote_dag` 的
+  0.74–0.86s 确实来自「整张图解析两遍」，但返回值是可变的嵌套字典，缓存会让**跨用例污染**
+  （一个用例若就地改了就悄悄改掉下一个的输入）；收益 ~0.3s，不值。
+* **`e2e/` 那批 0.6–1.6s 的用例**：它们是「真 hub / 真 worker / 真 HTTP / 真文件系统」的集成
+  层，墙钟本来就是真实 I/O 与进程启动，不是等待闸门。清 e2e 要压的是**进程启动与装载面**
+  （与 §43 末尾同一条结论），那是另一个题目。
+
+---
+
+## §43 最慢用例清算：全仓扫描的「重复解析 + 无预筛」两坑 → 15 条 −26s（2026-09-29，用户指令「找出十个耗时最长的 pytest，尽可能优化提速」）
+
+**一句话**：先把「最慢十个」**量准**（本机负载会剧烈波动，单次 `--durations` 不可信），再逐个
+定位；15 条被点名的用例合计 **32.1s → 5.9s**，全量 `sum_min` **213s → 167s**。根因只有两类
+（都属 §14 那族的变体）：**同一份源码被反复 AST 解析**，以及**全仓扫描没有廉价预筛**。
+
+### 测速手法（负载波动是主敌，先解决量法）
+
+| 现象 | 手法 |
+|---|---|
+| 四次同配置全量跑的 user 时间 199→225s（1.13×），墙钟只被负载**单向拉长** | **四连跑取 min**：单次 `--durations` 的排序里混着噪声，min 是最接近「干净机器」的估计，也是改前/改后唯一可比的量 |
+| 并行跑（`-n 12`）里每个用例的墙钟含**争用等待**，与「这条用例本身多贵」不是一回事 | 被点名的用例另跑**单进程串行三连跑取 min** 复测（既有串行基线见本节的对照表） |
+| 只看排序看不出「优化头部能省多少」 | 同时看 `sum_min`（全部用例 min 之和 = CPU 上的净工作量）与头部累计占比 |
+
+配方（工具已入库，`nn-training/tools/pytest_durations.py`，只读不跑 pytest）：
+
+```bash
+# ① 四连跑（门禁同配置：worker = 12、CPU 内线程 = 1）
+for i in 1 2 3 4; do NN_GATE_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 \
+  OPENBLAS_NUM_THREADS=1 bash ../tools/githook/nn-py-safe.sh -m pytest tests/ e2e/ \
+  -n 12 -q -p no:cacheprovider --durations=0 > ../tmp/dur/g$i.log 2>&1; done
+# ② 量：最慢 N 条 / 总量与头部占比 / 导出 nodeid
+bash ../tools/githook/nn-py-safe.sh tools/pytest_durations.py table ../tmp/dur/g?.log -n 30
+bash ../tools/githook/nn-py-safe.sh tools/pytest_durations.py total ../tmp/dur/g?.log
+bash ../tools/githook/nn-py-safe.sh tools/pytest_durations.py top 20 ../tmp/dur/g?.log > ../tmp/dur/slow.ids
+# ③ 单进程串行复测（同一 nodeid 三连跑取 min）——排除并行争用
+while read -r nid; do for i in 1 2 3; do bash ../tools/githook/nn-py-safe.sh -m pytest "$nid" \
+  -p no:randomly -q --durations=0; done; done < ../tmp/dur/slow.ids
+# ④ 改前/改后逐条对账（两批各 4 连跑取 min）
+bash ../tools/githook/nn-py-safe.sh tools/pytest_durations.py ab --ids ../tmp/dur/slow.ids \
+  --left ../tmp/dur/before-?.log --right ../tmp/dur/after-?.log
+```
+
+### 十个最慢（改前 = 会话起点的四连跑 min；改后 = 同一量法）
+
+| # | 用例 | 改前 | 改后 | 根因 / 修法 |
+|---|---|---|---|---|
+| 1 | `test_bc_epoch_resume.py::test_bc_train_resume_continues_epoch_numbering` | 3.55 | 3.70 | **不可动**：真 torch（2×`bc_train`）+ 首次构造优化器触发 `torch._dynamo` 懒导入 ~1.2–1.5s |
+| 2 | `test_bc_epoch_resume.py::test_bc_train_on_epoch_called_per_epoch` | 2.54 | 2.58 | **不可动**：同上（每 worker 一次的 torch 固定成本 + 真 BC 训练） |
+| 3 | `test_remote_iter.py::test_a_child_that_cannot_be_reaped_is_retried_in_round_never_failing` | 2.06 | **0.56** | **硬顶烧满**：替身那一局要走满 `game_timeout_sec` 才进「杀不掉」分支 ⇒ 硬顶值就是本用例的固有开销（2.0s → 0.5s，见下「配速旋钮」） |
+| 4 | `test_instance_lock.py::test_real_second_instance_refused_by_lock` | 1.83 | 1.83 | **不可动**：真起两个 `python -m remote.hub_server`（端到端语义） |
+| 5 | `test_layering.py::test_rl_orchestration_set_is_exactly_the_modules_reaching_remote` | 1.82 | **0.23** | **重复解析**：固定点循环每轮把全 `rl/` 重解析一遍 ⇒ 派生小结果缓存 |
+| 6 | `test_measure_checkpoint_rss.py::test_build_stack_is_cheap_and_keepalive_holds_it` | 1.67 | 1.58 | **不可动**：真起模型 + Adam（同上） |
+| 7 | `test_ppo_goal.py::test_ppo_update_smoke` | 1.67 | 1.79 | **不可动**：6 次真 PPO update（同上） |
+| 8 | `test_single_ppo_path.py::test_source_has_no_ppo_placement_reads` | 1.57 | **0.78** | **无预筛**：204 个非测试源码全量 `ast.walk` ⇒ 子串预筛（`ppo` ∧（`args` ∨ `getattr`）） |
+| 9 | `e2e/test_run_rl.py::test_it_eval_deferred` | 1.55 | 1.55 | **不可动**：判据是「采集完成时 eval 仍在飞」⇒ eval 轮必须比采集慢（尾 = 3 stage×2 局×0.5s，原 1.0s 已经砍过一刀） |
+| 10 | `test_hub_entry_split.py::test_every_send_timeout_patch_targets_the_owner_module` | 1.53 | **0.03** | **无预筛**：`tests/`+`e2e/` 全部 279 个文件 `ast.walk` ⇒ 先判子串 `SEND_TIMEOUT_SEC` |
+
+**★ 十条里有四条（#1/#2/#6/#7）改写不了**：它们是「每 worker 一次的 torch 固定成本」——
+`torch.optim.*` 的 `Optimizer.add_param_group` 挂了 `@torch._disable_dynamo`，**首次调用**才
+`import torch._dynamo`（实测 1.19s，占 `Adam.__init__` 的 1.19/1.53）。谁先构造优化器谁付，
+`-n 12` 下每个 worker 各付一次。**不要**为了让排名好看把它挪进 collection（总量不变）。
+
+### 另外 5 条（同期一并清掉，都在同一族里）
+
+| 用例 | 改前 | 改后 | 一句话 |
+|---|---|---|---|
+| `test_download_split.py::test_progress_logger_still_has_exactly_two_production_copies` | 6.03 | 0.40 | 全仓 653 文件 AST ⇒ 子串预筛（`_progress_logger`） |
+| `test_pid_probe_windows_safe.py::test_os_kill_probe_exists_in_exactly_one_place` | 3.01 | 0.33 | 同族（先判 `.kill`；368 个生产文件 50 万节点） |
+| `test_soft_hold_prefetch.py::test_worker_loop_uses_prefetched_payload_without_downloading` | 2.88 | 0.31 | 真 HTTP 空等 `job_ready` ⇒ 打桩（`tests/helpers/hub_seams.py`） |
+| `test_common_layer.py::test_every_production_capture_site_pins_encoding` | 2.65 | 0.40 | 同族 + 文件清单缓存 |
+| `test_batch_store_txn.py::test_status_assignments_live_only_in_the_named_transitions` | 2.20 | 0.28 | 同族 |
+| `test_bc_course.py::test_bc_dispatch_trips_broken_node_and_requeues` | 2.01 | 0.40 | 熔断后空等 2s ⇒ 提为 `tripped_idle_polls` 旋钮（生产缺省不变） |
+| `test_offline_leg_retired.py::…no_trace_of_the_retired_leg` | 1.09 | 0.04 | `tokenize` 全量 174 文件 ⇒ 先判退役标识子串（剥注释只会删 token，不会造新名字） |
+| `test_dist_common_poll.py::test_transient_judgement_defined_once_and_wired` | 1.53 | 0.33 | 定义面扫描 ⇒ `name in src` 预筛 |
+| `test_loop_export_split.py::test_inbound_hands_closed_set`（+`core_tail`/`remote` 同族） | 1.05 / 1.09 / 0.45 | 0.70 / 0.56 / 0.46 | 全 `rl/` 两遍解析（入边 + 定义面）⇒ 一次解析导出两份派生结果 |
+
+### 两条可复用的规矩（新扫描用例照这个写）
+
+1. **先廉价预筛，再 `ast.parse`**：AST 判据几乎都能对应到源码里的一个字面量（标识符 / kwarg 名 /
+   字符串常量）。子串判据是**充分的**（合法 Python 里它们就是源码字面量）⇒ 不会漏判，只是少解析。
+   子串级判据（如「剥注释/字符串后的 token」）同理：剥只**删** token，文本里没有就不可能在 token 流里。
+2. **派生小结果可以缓存，AST 不行**（§「AST 不常驻」→ `tests/helpers/source_scan.py` 模块头）：
+   常驻 AST 的 cyclic-GC 代价（653 文件 2.55s vs 0.82s）远大于重复解析；而「模块名集合 /
+   定义面 / self 调用计数」这类小容器适合 `functools.cache`。三条守卫曾各自把全 `rl/` 解析两遍，
+   现已收进 `source_scan.imports / top_level_defs / self_call_counts`（含 `py_files` 的 `rglob` 缓存）。
+
+### 效果（同一 16 核容器；两批各四连跑取 min）
+
+| 指标 | 改前 | 改后 |
+|---|---|---|
+| 被点名的 15 条合计 | 32.1s | **5.9s** |
+| 全量 `sum_min`（1175 条可见 call） | 212.9s | **167.4s** |
+| 最慢单测 | 6.03s（`test_download_split`） | **3.70s**（torch 固定成本） |
+| `pytest tests/ e2e/ -n 12` 墙钟 | 31.0–31.9s | 28.8–31.4s |
+| 门禁 | — | 3330 passed / 3 skipped，ruff + mypy 全绿 |
+
+**墙钟只降 ~2s 的原因（有意留档）**：`sum_min 167s / 12 worker ≈ 14s` 的理想墙钟，与实测 29–31s
+之间的差不是「还有慢用例」，而是 ① 每 worker 一次 torch/`_dynamo` 装载；② `e2e/` 那批真进程/真
+HTTP 用例的**非 CPU 等待**（并行度上不去）；③ 长尾不平衡（最后收尾的是几条 2–4s 的真训练用例）。
+要继续压墙钟要动的是「分发/装载面」（`--dist loadfile`、按代价分桶、共享 conftest 装载），
+不是继续抠单条用例——那是另一个题目。
+
+### 被否决
+
+* **把「最慢」的度量口径换成 `--durations=0` 单次**（省事）：本机负载 1.13× 波动 ⇒ 排名会随
+  负载换人，且改前/改后不可比（不取 min 的对照里「没动过的用例」能凭空 ±2s）。
+* **给 `source_scan.parse` 加 `@cache`**：见模块头「2026-09-29 改判」——常驻 653 份 AST 让之后的
+  每次 `gc.collect()` 多付 ~0.74s（GC 开着实测 2.55s vs 0.82s）。
+* **把两条真训练用例（#1/#2）拆小**：判据是「接续编号 / 每 epoch 回调」的**真训练**语义，
+  改小语料只会把守卫变窄（§14 的「死测试」教训）；torch 固定成本不是它们的错。
+* **改生产缺省去迁就测试**（硬顶 → 0.5s、熔断让位 → 关掉）：一律提为**参数/旋钮**，生产缺省不动
+  （§14 先例：`transientBackoffSec` / `nodeRecoverFirstSec` / `push_attempts`）。
+
+### 超参数依据（写死数字前先测）
+
+`test_remote_iter` 那个硬顶（2.0 → 0.5s）来自实测：**12 个 CPU 烧满时**真 python 启动 10 连跑
+合计 0.69s（均 69ms，远小于备注里凭印象写的「几百毫秒」）⇒ 0.5s 仍有 ~7× 余量，而本用例的
+固有开销正是这个硬顶值。这类「配速旋钮」的取值一律这样定：先量，再写死 + 把量法留在注释里。
+
+---
+
 ## §42 `gate_check` 求值器接口 —— 输入面 + 判决面成家 → `rl/gate_inputs.py` + `rl/gate_judges.py`（S5 第十五刀，2026-09-27，用户指令「next」= §5.7.3 入口「量测 + 设计」，随后落刀）
 
 ### 一句话

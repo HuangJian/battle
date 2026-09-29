@@ -307,6 +307,11 @@ def test_worker_loop_uses_prefetched_payload_without_downloading(tmp_path: Path,
     monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: ([], False))
     monkeypatch.setattr(JR, "start_cancel_watcher", lambda *a, **k: None)
     monkeypatch.setattr(W, "_release_cloud_machine", lambda *a, **k: None)
+    # 阶段通知 `job_ready`（`POST /jobs/{id}/ready`）**也要打桩**：不打就会对着
+    # `base_url="http://hub"` 发真 HTTP，靠 `except Exception: pass` 吞掉连接失败。
+    # 那条路径本机实测每次 1.4s（不可达地址 + 重试），两个 job = 2.9s 纯空等
+    # （本用例总耗时几乎全是它）——§14 的「测试空等生产超时」同型。
+    monkeypatch.setattr(JR, "job_ready", lambda *a, **k: None)
 
     store = PrefetchStore(tmp_path)
     real_init = PrefetchStore.__init__

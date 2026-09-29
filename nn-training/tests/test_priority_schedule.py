@@ -61,6 +61,7 @@ from common.protocol import (
     job_priority,
 )
 from remote.hub_server import _HubQueue, _JobStore, make_server
+from tests.helpers import hub_seams
 
 TOKEN = "sekret"
 JID = "j" * 16
@@ -621,6 +622,7 @@ def test_worker_loop_cancel_abandons_and_never_reports_failure(
         None,
     ]
     monkeypatch.setattr(W, "acquire_job", lambda *a, **k: jobs.pop(0), raising=True)
+    hub_seams.stub_round_http(monkeypatch)  # 假 hub：别真发 peek / ready（每次 ~1.4s 代理空等）
 
     def _cancel(*a, **k):
         raise JobCancelledError("landed")
