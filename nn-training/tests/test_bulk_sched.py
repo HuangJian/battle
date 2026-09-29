@@ -380,7 +380,7 @@ def test_p1_not_preempted_by_control():
 
 
 def test_yield_stops_at_budget_even_if_control_stays():
-    """控制面一直不走也不能停超预算：单次让路总时长 ≤ 预算（+一步）。"""
+    """控制面一直不走也不能停超预算：单次让路**记账与步数**都受预算约束。"""
     budget, step = 0.12, 0.02
     s = _sched(yield_budget_sec=budget, yield_step_sec=step)
     with s.slot(BULK_P1_CRITICAL, label="result") as tok:
@@ -398,15 +398,19 @@ def test_yield_stops_at_budget_even_if_control_stays():
         # 原来 `time.sleep(0.05)` 赌线程已经跑起来：满载时会停到 `control_active()` 还是
         # False ⇒ `pause_if_needed` 返回 0 ⇒ `yield_count == 0` ⇒ 用例红。
         assert entered.wait(5), "控制面没能进入在途状态"
-        t0 = time.time()
         spent = s.pause_if_needed(tok)
-        elapsed = time.time() - t0
         stop.set()
         t.join(5)
     assert spent <= budget + step + 1e-6, f"让路超预算：{spent}"
-    # timing-ok: 相对判据（阈值随让路预算 budget/step 走）
-    assert elapsed <= budget + step + 0.25, f"让路墙钟超预算：{elapsed}"
-    assert s.stats()["yield_count"] >= 1
+    # 让路**步数**恰好是 ceil(budget/step)：这是「受预算约束」的确定性陈述（spent 是循环
+    # 自己的记账，yield_count 是它真走了几格），与机器快慢无关。
+    assert s.stats()["yield_count"] == 6, s.stats()
+    # ❌ 曾经这里有一条 `elapsed <= budget + step + 0.25` 的**墙钟**断言（"让路墙钟超预算"）：
+    # 它赌的是「一次 `sleep(0.02)` 真的只花 0.02s」，而在负载 13 的机器上实测该让路墙钟
+    # 2.06s（每格睡成 ~0.34s，17×）⇒ 门禁在满机时假红（2026-09-29 全量第 1 轮实测）。
+    # 判据侧有两个问题：① 它就是 §21 那族「拿绝对数字当机器够快」；② 它**分不清**
+    # 「循环多睡了几格」（真回归，已被上面两条钉住）与「OS 把 sleep 跑晚了」（环境）。
+    # 故删除：契约由 `spent`（循环记账）+ `yield_count`（步数）确定性钉住。
 
 
 def test_no_yield_when_no_control():

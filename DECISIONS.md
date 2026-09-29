@@ -5474,3 +5474,78 @@ eval 有池）—— 范围更大、与本次「机制同质化」不同题，�
 上现形）；或反过来，为了测试把生产地板调小 ⇒ 生产语义被测试绑定（§14 的「死测试」镜像）。
 
 —— 全文（定位手法 cProfile / 20 条对照 / 效果表 / 被否决）→ `docs/nn/engineering.md` §44
+
+## §2026-09-29-goalnn-fork-after-collect-runner（2026-09-29，Linux 门禁的 pytest 分发改成「收集一次 + fork」）
+
+**决策**：nn-training 的 pytest 分发在 **Linux** 上改用「master 收集一次 → `os.fork()` 出 worker」
+（`nn-training/tools/forkdist.py`，POSIX-only 插件，`--forkdist N` 显式开启，与 xdist 的 `-n`
+**互斥**）；**Windows/macOS 继续 xdist**。判据与既有的「双向路径」同源：**看选中的 python 是
+什么**（`case "$NN_PY" in *.exe) → xdist`），再看内核（`uname -s` = Linux 才 forkdist），
+**不看 uname/wslpath 存不存在**（2026-09-20 同型事故）。逃生口 `NN_GATE_FORKDIST=0/1`。
+
+**为什么**（§48.5 记的「唯一剩下的结构性杠杆」）：`-n 12` 下**每个 worker 都要收集全部 ~275 个
+测试模块**，12 份里 11 份纯冗（占 worker 自用 CPU 的 35%）。fork 让子进程经 COW 继承
+`sys.modules` 与已收集的 `Item`，收集相从「12 × 4.8s 争用」降到「1 × 2.4s」。16 核实测
+（各 3 轮轮转取 min）：墙钟 **22.69 → 19.81s（−12.7%）**、user **191.7 → 115.3s（−39.9%）**、
+sys −4.5s；门禁 24~26s → **20s**。整树峰值 RSS 持平（4.77 → 4.81GB）——**别拿省内存当理由**。
+
+**换 runner 不许换测试语义**（逐条对齐 xdist）：逐条动态派发（= `--dist=load`，不按文件切块——
+§47 已实测批派更慢）· `nextitem` 预留（module/class 夹具不被提前收）· 报告经
+`pytest_report_to_serializable` / `pytest_report_from_serializable`（xdist 同源的那对**核心 hook**）
+回传并重放 ⇒ 汇总行 / `-ra` / `--tb=short` / `-x`(maxfail) / `--timeout` 全是 pytest 自己的语义 ·
+子进程摘 TerminalReporter（否则 12 份进度/汇总打在共享 stdout 上）· 填 `config.workerinput`
+（cacheprovider 的 `lastfailed` / junitxml / stepwise 据此跳过 master-only 收尾）· 子进程自己跑
+`pytest_sessionfinish`（session 夹具 finalizer + `tests/conftest.py` 的临时目录清理）·
+Linux 上 `PR_SET_PDEATHSIG`（`nn-wall.py` 在 POSIX 只杀树根，否则留下孤儿 worker）。
+
+**两条红线**（都是一旦丢掉「不会立刻红」的失效）：① **丢用例必须响**——worker 死在半途时 master
+对「派了但没上报」的用例合成失败报告并点名 worker（否则整批少跑而退出码仍是 0）；
+② **子进程必须重建全局捕获**——继承来的捕获临时文件是同一个 open file description（共享偏移）
+⇒ 12 个进程互相读到**半个 UTF-8 字符**，且被归因到**前一条**用例的 setup（实测 5/5 轮红）。
+两条都在 `tests/test_forkdist.py` 里钉住；门禁分支选择用假仓库骨架真跑两种 python 钉住。
+
+**被否决**：按文件静态切块（本套用例异质，长尾拖死整块，同 §47 否决 `loadfile` 的理由）·
+`pytest-forked`（per-test fork、不并行）· 拿「fork 省内存」当卖点（实测持平）· 把 forkdist 推广到
+`task.py` / Makefile / CI（那些入口没有实测收益记录，保持 `-n`）。
+
+**违反后果**：把 `-n` 加回 Linux 分支 ⇒ 每轮多付约 11 份收集（+76s CPU、+2.9s 墙钟）；
+删掉 `_reset_global_capture` 或「先关命令管道再 waitpid」⇒ 满机时以「随机用例报半个字符」或
+「门禁整段挂死」的形式假红。
+
+—— 全文（实测表 / 为什么 CPU −40% 而墙钟只 −2.9s / 设计要点 / 两个坑的定位手法 / 复现配方）
+→ `docs/nn/engineering.md` §49
+
+## §2026-09-29-goalnn-forkdist-entrypoints（2026-09-29，`task.py` / Makefile 的 pytest 分发也改 forkdist，CI 实测后继续 `-n 2`）
+
+**决策**：把 §2026-09-29-goalnn-fork-after-collect-runner（当时**只接了门禁**、并把「推广到
+`task.py` / Makefile / CI」列为未做）逐个入口实测后处置——**`task.py`（`check` / `test*`）与 `Makefile`（`test` / `test-fast` / `test-e2e`）采纳**：
+Linux 上分别走
+`-p tools.forkdist --forkdist auto` 与 `-p tools.forkdist --forkdist $(NPROC)`，Windows/macOS 继续
+`-n auto` / `-n $(NPROC)`（判据与门禁同源：**Linux 且 `os.fork` 在**）；**CI 两层继续 `-n 2`**，
+那句「为什么不用 forkdist」的实测依据写进 workflow 文件本身。
+
+**为什么（各自实测，16 核，交错 2 轮取 min）**：Makefile 真入口 `make -s test-fast` min 墙钟
+**19.73 → 15.05s（−23.7%）**、user **203.9 → 111.4s**；`task.py test-fast` 真跑 rc=0 / 15.43s；
+两入口共用的 fast 路径（`tests/` + `e2e/`）**21.99 → 17.57s（−20.1%）**、user −48%。比门禁那次的
+−12.7% 更大是因为**收益 = 冗工份数 = worker 数**：门禁 `min(核数, 12)` = 12，这些入口 `auto` = 16。
+
+**CI 为什么不换（实测否决）**：forkdist 省的是「N 个 worker 同时收集」的**争用**，而 runner 只有
+2 个 worker ⇒ 无争用可省。`taskset` 模拟 runner 规模（分层单跑、`--maxfail=0`）：2 vCPU 单测层
+**44.95 vs 45.03s（同价）**、e2e 层 7.05 vs 7.80s（xdist 反而快）；4 vCPU 单测层 41.51 vs 40.93s
+（1.4%，噪声内）。CPU 仍低 ~12%，但 CI 的判据是墙钟。**换多核 runner 要重测**——护栏钉的是
+「换之前必须先有实测且记录不能丢」，不是「永不许换」。
+
+**配套**：`--forkdist auto` 必须解析成 `platform_utils.effective_cores()`（本仓「本机几核」只允许
+一个答案；容器里 `os.cpu_count()` 报宿主机核数——2026-09-25 云机卡死那笔账），拿不到就拒绝而非
+猜数；解析值挂 `config.forkdist_workers`，校验两道（选项转换器 + `pytest_configure`）。
+`NPROC=8 make test` / `PYTEST_DISPATCH=…` / `THREADS=…` 这些覆盖旋钮的打法一律不变。
+
+**被否决**：CI 换 `--forkdist 2`（上面实测）· 给 `task.py` / Makefile 的 **Windows 分支也塞
+forkdist**（没有 `os.fork`，插件当场 `UsageError`，等于写个假分支）· macOS 上开 forkdist（§49.5 的
+torch-在-fork-前已有 import 的面未验证）。
+
+**违反后果**：把 `-n auto` 加回两个入口的 Linux 分支 ⇒ 每轮白付 ~4.7s 墙钟与近一倍 user；
+给 CI 换 forkdist ⇒ 只拿到 CPU 降幅、墙钟不动，而且下一个人会以为「没试过」再测一遍。
+
+—— 全文（入口实测表 / CI 两规模实测表 / `auto` 语义 / 接线护栏与 `MAKEFLAGS` 那个坑 / 复现配方）
+→ `docs/nn/engineering.md` §50

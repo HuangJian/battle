@@ -16,6 +16,583 @@
 
 ---
 
+## §50 另外三个入口（`task.py` / `Makefile` / CI）也逐个实测：两个采纳、CI 否决（2026-09-29，用户指令「让 task.py / Makefile / CI 也用 forkdist，先各自实测收益再改」）
+
+**结论先行**：§49 只把 forkdist 接进了**门禁**（`nn-python-gate.sh`）。本条把剩下三个入口**各自**
+实测后分别处置——
+
+| 入口 | 处置 | 实测 |
+|---|---|---|
+| `Makefile`（`test` / `test-fast` / `test-e2e`） | **采纳**：Linux 走 `-p tools.forkdist --forkdist $(NPROC)` | min 墙钟 19.73 → **15.05s（−23.7%）**、user 203.9 → 111.4s |
+| `task.py`（`check` / `test*`） | **采纳**：Linux 走 `-p tools.forkdist --forkdist auto` | 真入口 `task.py test-fast` rc=0 / 15.43s；共用 fast 路径 21.99 → **17.57s（−20.1%）** |
+| CI（`.github/workflows/nn-training.yml`） | **否决**：两层继续 `-n 2` | 2 vCPU：44.95 vs 45.03s（同价）；4 vCPU：41.51 vs 40.93s（噪声） |
+
+三条接线共用同一条判据（与门禁同源）：**Linux 且 `os.fork` 在 ⇒ forkdist，否则 xdist** ——
+Windows 没有 `os.fork`（插件会当场拒绝），macOS 上 master 在 fork 前已 import torch
+（libgomp/dyld 与 fork 的组合本仓未验证，§49.5）。CI 那句「为什么不用」直接写进 workflow 文件里。
+
+### 50.1 两个采纳入口的实测（16 核，交错 2 轮）
+
+**Makefile 真入口**（`make -s test-fast` = `tests/` 单测层，用 `PYTEST_DISPATCH` 整体覆盖两臂 ⇒
+两臂只差分发器；load_before 0.92 → load_after 10.27）：
+
+| `make test-fast` | xdist `-n auto`（=16） | forkdist `--forkdist auto` |
+|---|---|---|
+| wall | 19.73 / 20.44 | 15.05 / 15.18 |
+| user | 203.9 / 217.7 | 111.4 / 111.4 |
+| **min** | **19.73** | **15.05（−4.68s，−23.7%）** |
+
+**task.py 真入口**：`./.venv/bin/python task.py test-fast` **rc=0**、wall **15.43s** / user 111.4s ——
+与 make 的 forkdist 臂同价（两入口拼出的 argv 同形，`task.py` 只是额外带一个与 `addopts` 同值的
+`--timeout=60`）。
+
+**两入口共用的 fast 路径**（`tests/` + `e2e/`，= `task.py check` / `make test` 的目标集；
+`-n auto` vs `--forkdist 16`，load_before 0.36，4/4 绿）：wall 21.99 / 23.25 →
+**17.72 / 17.57**（min −4.42s，−20.1%），user 233.9 → 121.6（**−48%**）。
+
+**为什么比门禁那次的 −12.7% 更大**：forkdist 赚的是「**每个 worker 各收一遍 ~275 个模块**」的冗工，
+冗工份数 = worker 数 ⇒ 收益随 worker 数增长。门禁是 `min(核数, 12)` = **12**，这三个入口是
+`auto` = **16**（§49.1 的 −12.7% 是 12 worker 口径，两边不矛盾）。这条也正好解释 50.2：
+**2 个 worker 时几乎没有冗工可省**。
+
+### 50.2 CI 为什么不换（实测否决，判据＝墙钟）
+
+用 `taskset` 把本机压成 runner 规模，按 CI 的两步**分层单跑**（`tests/` 与 `e2e/` 各一层）、
+交错 2 轮、轮内轮转（`--maxfail=0`——`addopts` 里的 `-x` 会把首败后的轮次截短）：
+
+| runner 规模 | 层 | xdist | forkdist | 判据 |
+|---|---|---|---|---|
+| 2 vCPU（`taskset -c 0,1`），`-n 2` | `tests/` | 48.19 / 44.95 | 45.71 / 45.03 | min 44.95 vs 45.03 ⇒ **同价** |
+| | `e2e/` | 7.31 / 7.05 | 8.36 / 7.80 | min 7.05 vs 7.80 ⇒ xdist 反而快 0.75s |
+| 4 vCPU（`taskset -c 0-3`），`-n 2` | `tests/` | 41.51 / 42.69 | 40.93 / 41.68 | min 41.51 vs 40.93 ⇒ 1.4%，噪声内 |
+| | `e2e/` | 7.65 / 7.29 | 7.04 / 7.29 | 持平 |
+
+**机理**：forkdist 省的是**争用**（N 个 worker 同时收集时互相挤内存带宽/缓存，§48.1），CI 只有
+2 个 worker、runner 只有 2–4 vCPU ⇒ 没什么可缓解的。CPU 仍然低 ~12%（`user` 53.96 → 48.22 那一档），
+但 CI 的判据是**墙钟** ⇒ 不换。
+
+**换 runner 规模就得重测**：`tests/test_forkdist.py::test_ci_keeps_xdist_with_the_measured_reason_in_the_file`
+钉的是「换之前必须先有实测、且记录不能丢」，不是「永远不许换」——多核 runner 上重测若赢，照着
+50.1 的配方改即可。
+
+**那两轮里的两条红（都与分发器无关，A/B 两臂同红 ⇒ 不影响对照）**：
+
+* `tests/test_forkdist.py::test_configure_rejects_nonsense_worker_count`（`DID NOT RAISE`）：这是 §50
+  接线**当天的中间态**（`pytest_configure` 的第二道校验还没写），随后补上（负/0 两处都拒），
+  现该文件 **13 passed**（standalone 与整层都绿）。
+* `tests/test_remote_serve_pool.py::test_run_iter_rollout_goes_through_the_pool`
+  （`assert stats["spawned"] == 2` 得 `{'served': 3, 'spawned': 1, 'killed': 0, ...}`）：**既存**、
+  与分发器无关——**A 臂是纯 xdist，同样红**。它是「2 vCPU 饥饿时池子起不满 2 个 worker」的
+  测试侧脆弱性，属另一个题目，本条不动它（记在这里是为了下一个人别把它记到 forkdist 头上）。
+
+### 50.3 `--forkdist auto`：为了不改旋钮的打法，不是图省事
+
+* `Makefile` 的 `NPROC ?= auto` 与 `task.py` 原来的 `-n auto` 本来就是这个语义 ⇒ `auto` 必须被接受，
+  并解析成 **`platform_utils.effective_cores()`**（本仓「本机几核」只允许一个答案：容器里
+  `os.cpu_count()` 报的是宿主机核数——2026-09-25 云机卡死那笔账；门禁的 `NPROC` 也问的它）。
+  拿不到就**拒绝**而不是猜一个错数。
+* 解析后的值挂 `config.forkdist_workers`（`pytest_runtestloop` 与测试都读它）。校验两道：
+  `--forkdist` 的转换器 `_worker_count_option`（第一道）+ `pytest_configure`（第二道）。
+* 于是 `NPROC=8 make test`、`make test PYTEST_DISPATCH=…`、`make test THREADS=4` 全部照旧可用。
+
+### 50.4 接线护栏 + 一个「调用方环境会改判据」的坑
+
+三条用例（都在 `tests/test_forkdist.py`）：`test_task_py_dispatches_per_platform`（真 import `task.py`
+看它拼出的 argv）、`test_makefile_dispatches_per_kernel`（真跑 `make -n test test-fast test-e2e`，
+三条 recipe 都必须 `--forkdist auto` 且不搭 `-n`）、
+`test_ci_keeps_xdist_with_the_measured_reason_in_the_file`（CI 两层仍是 `-n 2`，且
+「为什么不用 forkdist」的记录必须留在文件里）。
+
+**踩到的坑：make 会把命令行变量经 `MAKEFLAGS` 传给子 make。** `PYTEST_DISPATCH` 是 Makefile
+**文档化**的覆盖旋钮，于是 `PYTEST_DISPATCH='-n auto' make test-fast`（50.1 的 A 臂就是这个打法）下，
+`test_makefile_dispatches_per_kernel` 里那个子 `make -n` 继承了覆盖 ⇒ 打出 `-n auto` ⇒ 用例**假红**，
+整轮首败即停（实测两轮 A 臂都死在这一条上，而我误以为是 forkdist 的锅）。修法：子进程 env 里
+剔掉 `NPROC` / `PYTEST_DISPATCH`，**并把 `MAKEFLAGS` / `MFLAGS` 清空**——用例的对象是**缺省行为**，
+不是调用方的环境。（`MAKEOVERRIDES` 不用动：实测 `MAKEFLAGS=` 已足够，单独清 `MAKEOVERRIDES` 无效。）
+
+### 50.5 复现配方
+
+```bash
+export NN_GATE_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUTF8=1
+cd nn-training
+# 入口 A/B（Makefile）：PYTEST_DISPATCH 整体覆盖两臂，交错 2 轮取 min
+for r in 1 2; do for over in "-n auto" "-p tools.forkdist --forkdist auto"; do
+  /usr/bin/time -f 'wall=%e user=%U' make -s test-fast PYTEST_DISPATCH="$over"; done; done
+./.venv/bin/python task.py test-fast            # task.py 真入口（Linux 上自己就带 --forkdist auto）
+# CI 规模（2 / 4 vCPU）：分层单跑 + --maxfail=0（addopts 的 -x 会把轮次截短）
+taskset -c 0,1 bash ../tools/githook/nn-py-safe.sh -m pytest tests/ -n 2 --timeout=60 --maxfail=0
+taskset -c 0,1 bash ../tools/githook/nn-py-safe.sh -m pytest tests/ -p tools.forkdist --forkdist 2 \
+  --timeout=60 --maxfail=0
+```
+
+坑：`make test*` 的 recipe 自带 `-q`，而 `addopts` 里也有 `-q` ⇒ `-qq` **吞掉结尾那行 `N passed`**
+⇒ 入口跑的判据是**退出码**（失败时 FAILURES 段落仍会打印）；要看汇总就整体覆盖
+`PYTEST_ADDOPTS` 或直接照上面两条 `pytest` 命令跑。
+
+### 50.6 被否决 / 未做
+
+* **CI 换 `--forkdist 2`**：实测否决（50.2，墙钟同价、e2e 层还略差）。
+* **CI 改 `-n` 的数量**：不在本条（`-n 2` 是既有结论，见 workflow 注释）。
+* **给 `task.py` / Makefile 的 Windows 分支也塞 forkdist**：不做——没有 `os.fork`，插件当场
+  `UsageError`，那等于把一个假分支写进代码。
+* **macOS 验证**：同 §49.5，未做 ⇒ 两个入口在 macOS 继续 xdist（`PYTEST_DISPATCH` 可整体覆盖）。
+
+---
+
+## §49 「收集一次、fork 出 worker」落地：Linux 门禁换成 `--forkdist`（2026-09-29，用户指令「做 fork runner，windows 还按现在形式跑」）
+
+**结论先行**：新增 `nn-training/tools/forkdist.py`（pytest 插件，POSIX-only、显式 `--forkdist N`
+才生效）：master **收集一次** → `os.fork()` 出 N 个 worker（COW 继承 `sys.modules` 与已收集的
+`Item`）→ 逐条**动态派发** + 报告经 pytest 核心 hook 序列化回传重放。16 核实测（各 3 轮轮转取
+min）：**墙钟 22.69 → 19.81s（−12.8%）**、**user 191.7 → 115.3s（−40%）**、sys −4.5s；内存峰值
+持平。**Linux 门禁已默认走它**（`nn-python-gate.sh` v3.19，门禁 24~26s → **20s**）；
+Windows/macOS 继续 xdist（判据见 49.5）。§48.5 记的那个「唯一剩下的结构性杠杆」就此结清。
+
+### 49.1 实测（16 核，`tests/` + `e2e/` 全量 3333 条，9/9 绿）
+
+交错发车、轮内轮转起始模式（§47 配方），每模式 3 轮：
+
+| | xdist `-n 12` | forkdist `--forkdist 12` |
+|---|---|---|
+| wall（三轮） | 22.69 / 23.44 / 24.43 | 20.33 / 19.81 / 19.81 |
+| user（三轮） | 191.7 / 197.4 / 203.8 | 115.3 / 120.7 / 118.3 |
+| sys（三轮） | 32.3 / 33.5 / 33.4 | 28.3 / 28.5 / 27.8 |
+| **min wall** | 22.69 | **19.81（−2.88s，−12.7%）** |
+| **min user** | 191.7 | **115.3（−76.4s，−39.9%）** |
+| 整棵树峰值 RSS | 4.77GB | 4.81GB（**持平**，见 49.2） |
+
+三轮全部同向（Δwall = −2.36 / −3.63 / −4.62s），不是噪声。
+
+### 49.2 为什么 CPU 掉 40%、墙钟只掉 2.9s（以及内存为什么没省）
+
+* **墙钟**：套件里**只有收集相是串行段**（§48.1：12 个 worker 各收全部 275 模块，全核互相
+  争内存带宽/缓存 ⇒ 每份 4.8s）。改成 master 一份**不受争用**的收集：单进程全量 `--collect-only`
+  实测 2.386s（§48.3）⇒ 收集相 4.8 → ~2.4s，其余（执行相）本来就是并行的、没动。
+  账对得上：19.81 ≈ 2.4 + 17.4，22.69 ≈ 4.8 + 17.9。
+* **CPU**：三个来源**都只在收集/启动期**，且都是「12 份 → 1 份」：
+  ① 收集相 57.8s → ~2.4s；② **torch 经产品侧 import 的整条链**（§48.2：warm 1.6–2.5s/模块）
+  12 份 → 1 份（≈ −25s 量级）；③ 每个 worker 自己那套 pytest 插件装载/session 初始化。
+  这三笔 CPU 在 xdist 里是**并行重叠**的（所以以前没怎么伤墙钟），fork 后索性整笔消失。
+* **内存没省**（4.77 → 4.81GB）：COW 只在页**没被写过**时共享，而子进程很快就写脏了 torch/numpy
+  的分配面。所以「fork 省内存」在本套件上**不成立**——别拿它当理由（`-n 12` 的 3.9GB 量级封顶
+  依旧要守，`NPROC` 上界照旧 ≤12）。
+
+### 49.3 设计要点（每一条都对应一个踩过的语义坑）
+
+* **逐条动态派发**（= xdist `--dist=load`），不按文件切块：本套用例异质（真 torch / 真起进程 /
+  真 HTTP 都在长尾），§47 已实测按文件批派会慢 1.0s。
+* **`nextitem` 预留**：派发当前用例时，把「跑完这条接下来轮到的那条」（从全局队列**取出并
+  预留**给该 worker）一并告诉它。module/class 级夹具因此不会被提前收掉——与 xdist
+  `run_one_test` 同款（`self.nextitem_index = self.torun.get()`）。
+* **报告走核心 hook**：子进程用 `pytest_report_to_serializable`（`_pytest/reports.py`，**xdist 的
+  同一对**），master `pytest_report_from_serializable` 还原后**原样重放**
+  `pytest_runtest_logstart/logreport/logfinish` ⇒ 汇总行、`-ra`、`--tb=short`、`-x`(maxfail)、
+  `--timeout` 全是 pytest 自己的语义，不是另写一套。告警同理转发（`pytest_warning_recorded`
+  是 **historic** hook，必须 `call_historic`，直接调会被 pluggy 断言拒绝）。
+* **子进程摘掉 TerminalReporter**：报告由 master 打印，12 份进度点/12 个自己的汇总打到共享
+  stdout 上只会变成乱码；摘它不影响测试本身（capsys/capfd 归 capture 插件）。
+* **子进程伪装成 worker**：填 `config.workerinput`（xdist 的既有约定）⇒ `cacheprovider` 的
+  `lastfailed` 写入、`junitxml`、`stepwise` 自动跳过「只能由 master 做」的收尾，不再有 12 个
+  进程抢写同一个缓存文件。
+* **子进程必须自己跑 `pytest_sessionfinish`**：session 级夹具的 finalizer 在这里收（关
+  FakeServer / 杀子进程），`tests/conftest.py` 的「通过用例临时目录入队清理」也挂在这个 hook 上
+  ——漏了它每轮全量多堆几百个目录（2026-09-14 那笔账）。
+* **丢用例必须响**：worker 死了（段错误/OOM/被外部杀）时，master 对「派了但没上报」的用例
+  **合成一条失败报告**并点名 worker；否则这批用例静默消失、退出码还是 0（runner 最危险的失效模式，
+  `tests/test_forkdist.py` 用 `os._exit(9)` 把这条钉住）。
+* **Linux 上加 `PR_SET_PDEATHSIG`**：`nn-wall.py` 在 POSIX 只能杀进程树的**根**（连树杀是
+  Windows 的 taskkill /T）⇒ master 被墙钟杀掉后，卡在测试里的 worker 会变孤儿继续烧 CPU。
+  prctl 拿不到就静默跳过（止损，不是正确性依赖）。
+
+### 49.4 两个坑：都是「不会立刻红」的那种
+
+**① 重放阶段的异常会把 `waitpid` 变成死等**（第一次跑全量就踩到，现象是「日志停在 `...s` 不动」）。
+原实现在 `finally` 里先 `waitpid` 后关命令管道 ⇒ worker 永远读不到 EOF、整个门禁挂死，而**那条
+真异常（`call_historic`）被永远压在 `_reap` 后面看不到**。定位手法值得记：
+
+```bash
+PYTHONFAULTHANDLER=1 nohup bash tools/githook/nn-py-safe.sh -m pytest … --forkdist 3 & sleep 8
+ps -eo pid,ppid,stat,wchan:20,args | grep pytest     # 看谁卡在哪：master=do_wait / 子进程=anon_pipe_read
+kill -ABRT <master pid>                              # faulthandler 当场打出 Python 栈
+```
+
+修法：`finally` 里**先 `_close_cmd` 再 `_reap`**（worker 读到 EOF 就退出，重放异常正常上抛成
+INTERNALERROR）。`tests/test_forkdist.py` 用源码顺序把这条钉住。
+
+**② 子进程继承了 master 的全局捕获临时文件**（同一个 open file description ⇒ **共享文件偏移**）。
+pytest 在 session 开始（= fork 之前）就打开了 fd 捕获的临时文件；`_pytest/capture.py` 每次出报告都
+`lseek(tmpfile, 0)` + 读一遍全局捕获（报告里那个 "Captured stdout" 段落就是这么来的）⇒ 12 个
+子进程互相把对方的偏移挪走，谁都可能**从别人的半个 UTF-8 字符开始读**：
+
+```
+UnicodeDecodeError: 'utf-8' codec can't decode byte 0x96 in position 0
+  contextlib.py:142 __exit__ → codecs.py:322 decode   # 只有两帧：生成器被 resume，外层栈丢失
+```
+
+而且被 pytest **归因到「当前这条用例 setup 失败」**——真正出错的是**前一条**用例的夹具收尾
+（同一次还有 `test_plan_never_mixes_a_shard_across_train_and_val` 这种纯 numpy 用例“报”解码错，
+因为它前面的用例在收尾）。修法：子进程 `stop_global_capturing()` + `start_global_capturing()`
+重建自己的捕获（`_reset_global_capture`）；修前 5/5 轮红，修后 **4/4 全绿**。
+判据是 `tests/test_forkdist.py` 的源码护栏 + 全量复跑——**丢掉它不会立刻红**，只在满载时以
+「随机某条用例报半个字符」的形式假红。
+
+### 49.5 Windows / macOS 为什么继续 xdist
+
+* **Windows**：没有 `os.fork`（`.venv/Scripts/python.exe`，MSYS 与 WSL 两种 bash 下都是它）
+  ⇒ 插件当场 `UsageError`。门禁的选择判据与路径转换同源：
+  `case "$NN_PY" in *.exe) → xdist ;; *) → 再看 uname -s = Linux 才 forkdist`。
+  `tests/test_githook_scripts.py::test_gate_dispatcher_branch_is_pinned_by_python_flavor`
+  用假仓库骨架**真跑一遍**两种 python，断言发出去的 argv 一个是 `-n`、一个是 `--forkdist`。
+* **macOS**：`os.fork` 有，但 master 在 fork 之前已经 import torch（收集期），libgomp/dyld 与
+  fork 的组合本仓**没验证过**（xdist 每次都是新进程，天然没有这个面）⇒ 保守继续 xdist。
+  逃生口：`NN_GATE_FORKDIST=1`（自担风险）、`=0` 强制 xdist。
+* **`tools/__init__.py` 是这次补的**：没有它，`tools/` 是 namespace package，同一个文件在 mypy
+  眼里同时是 `forkdist` 与 `tools.forkdist` ⇒ `Source file found twice under different module names`，
+  门禁当场红（`tests/`、`e2e/` 本来就有，`packages.find` 也早写了 `tools*`）。
+
+### 49.6 复现配方
+
+```bash
+export NN_GATE_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUTF8=1
+cd nn-training
+# 两种分发器交错、各 3 轮取 min（脚本见 tmp/dur/，判据：min 墙钟；先看 loadavg < 核数）
+/usr/bin/time -f 'wall=%e user=%U' bash ../tools/githook/nn-py-safe.sh \
+  -m pytest tests/ e2e/ --forkdist 12 -p tools.forkdist --timeout=60     # 或 -n 12（xdist）
+# 门禁（Linux 上现在默认 forkdist；横幅会写明用了哪个）
+bash tools/githook/nn-python-gate.sh
+```
+
+坑：探针/插件必须从 `nn-training` 起（`-p tools.forkdist` 靠 cwd 在 `sys.path` 上）；
+`--forkdist` 与 `-n` **互斥**（同时给插件当场拒绝，见 49.3）。
+
+### 49.7 被否决 / 未做
+
+* **按文件静态切块**（每 worker 一坨文件）：否决——本套用例异质，长尾文件会拖死整块（与 §47
+  否决 `loadfile` 同一个理由）。
+* **`pytest-forked`**：它是 per-test fork，不并行，且每个用例都重付一次 fork + 夹具重建。
+* **内存收益当卖点**：实测持平（49.2），不写进任何理由。
+* **把 forkdist 推广到 `task.py` / Makefile / CI**：未做——那些入口没有实测收益记录，保持 `-n`
+  不动（改它们要先有各自的测量）。
+
+  > **2026-09-29 同日续（已做）**：三个入口各自实测后——`task.py` / `Makefile` **采纳**（Linux 走
+  > `--forkdist auto` / `--forkdist $(NPROC)`，实测 −20% ~ −24% 墙钟），**CI 否决**（runner 规模下
+  > 墙钟同价，继续 `-n 2`）。全文见 **§50**。
+* **macOS 验证**：未做（见 49.5）。
+
+---
+
+## §48 「被吃掉的 ~100s user」的账：**12× 收集地板**是大头，两笔 import 期计算已清（2026-09-29，用户指令「找到同一进程内被串行段/长尾吃掉的 ~100s user 时间来源并压掉一部分」）
+
+**结论先行**：缺口的大头是 **xdist 的 12× 收集地板**——`-n 12` 下**每个 worker 都要收集全部
+275 个测试模块**（实测 `load` / `loadfile` **都是 274 模块/worker**，顺带解释了 §47「两种 dist 模式
+user 时间无差」）。它实测占 **worker 自用 CPU 的 35%**。已清掉其中两笔**纯 import 期计算**
+（合计 **−0.77s/进程**、×12 ≈ **−9.2s CPU**）；剩下的大头（torch 经**产品侧** import 拉起）
+已实测证明**不可就近切**（见 48.4）。
+
+### 48.1 账（全域实测，非估算）
+
+探针（tmp/，不入库）：`cpuacct.py`（每进程 `RUSAGE_SELF`/`RUSAGE_CHILDREN`）、`colltime.py`
+（包住 `Module.collect` 量**每个测试模块**的收集耗时；worker 侧各落一份 `.gwN`）。安静窗口一次跑
+（wall 20.8s / user 175.4 / sys 30.2；3330 passed）：
+
+| 项 | 实测 | 说明 |
+|---|---|---|
+| worker 自用 CPU | **165.0s**（user 141.5 + sys 23.5） | 12 个 worker 之和 |
+| └ **收集相** | **57.8s（35%）** | 每 worker 4.8s；**只有这一相是串行段**（12 进程满核） |
+| └ 执行相 | ~107s | 用例 call+setup+teardown（§44 的 `sum_min` ≈ 92s + 夹具/收尾） |
+| worker 子进程 | 17.2s | 真 bun / 真 hub / 真训练（真工作，不动） |
+| master 自用 | 6.1s | 它自己那份收集 + 派发 |
+| worker 墙钟 | 17.8–19.0s | **极差 1.2s** ⇒ 长尾**不**失衡，没有排序/LPT 可赚 |
+
+⇒ 早先「user 197s − `sum_min` 92s ≈ 100s 缺口」的答案：**约 58s 是 12× 收集地板**，其余是子进程真算 +
+master + 执行期的 Python/GC/syscall 开销。
+
+### 48.2 那 4.8s/worker 里是什么
+
+* **torch 经产品侧 import**：`test_bc_dp.py` 的收集 = **2.4s（争夺态）**——它只 `from models.core
+  import NNPolicy` / `import train.bc`，而这两者顶层 `import torch`（实测 warm 1.6–2.5s；`models.core`
+  与 `train.bc` 各自 import 1.6s）。每个 worker 都会跑到需要它们的用例 ⇒ 必付。
+* **~270 个测试模块自己的 import/exec** ≈ 2.4s/worker：除少数首导（`remote.*` 链、`rl.loop_core`）外
+  均匀到 ~10ms/模块，无单点（与 §45 的 cProfile 结论一致）。
+
+### 48.3 已清的两笔（都在收集相 ⇒ 1:1 换墙钟）
+
+| 位置 | 原来 | 现在 | 实测 |
+|---|---|---|---|
+| `remote/hub/admin.py` `_PROBE_BLOCK` | 顶层跑 65536 次 `Random.getrandbits(8)` 建 64KiB 填充块 | 首次使用时才建（`_probe_block()`） | `import remote.backfill_offline` **0.65s → 0.06s**；importtime 拆解显示 `remote.hub.admin` self 0.531s |
+| `tests/test_remote_dag.py` 顶层 `dag.graph()` | 导入即 AST 扫 40+ 个 `remote/*.py` | 模块级 autouse fixture 首次加载（用例读的全局不变） | 该模块收集 **0.348s → 0.004s**（单进程）；争夺态 0.75s/worker |
+
+**合计 −0.77s/进程**（低方差对账：单进程全量 `--collect-only` min-of-2：HEAD 3.156s → 现 2.386s）、
+×12 worker ≈ **−9.2s CPU**；实测 Σ收集相 68.6–74.7s → **57.8s**，门禁 pytest 段 **22.2s → 20.8s**。
+
+**为什么专挑收集相**：这一相是 12 进程满核的**串行段**（每个 worker 收完才开跑），而执行相只有
+~7.6/16 核忙 ⇒ **把工作从收集相搬到执行相能换墙钟，反之不能**。本轮两次 A/B 都印证
+Δ墙钟 ≈ Δ(每 worker 收集相)（§46 那批：−0.5s 收集 ⇒ −0.5s 墙钟）。
+⚠ 单次全量墙钟的**分辨率只有 ±1s**，且会被本机负载漂移污染（本轮一次 now/head 对比因 load
+3.7→9.0 漂移而作废）⇒ 判据取**低方差量**（单进程收集、import 计时），不要拿单跑墙钟下结论。
+
+### 48.4 被实测否决的三条（做过，别重做）
+
+1. **把 14 个测试模块的顶层 `import torch` 改成函数内延迟导入**（实测改了 50 处）：**无效**。torch
+   不是被测试模块自己拉起的，是被它们 import 的**产品模块**（`models.core` / `train.bc` / `ppo.*`）
+   拉起的 ⇒ 收集相照付（Σ收集 68.6 → 65.3s，噪声内）。已整体回退，不留无效 churn。
+2. **`test_backend_contract_runtime.py` 的 `_backends()` 从模块级挪进 fixture**：单进程 collect 里该
+   模块 1.09s → 0.02s，但 torch 被**下一个**需要它的模块（`test_bc_dp.py`）接手 ⇒ 全量净收益 ≈ 0
+   （A+B 的 −6.1s 已验证**全部**来自第 1 笔 `_PROBE_BLOCK`）。已回退。
+3. **`--dist=loadfile` 减少导入**：两种模式**都是** 274 模块/worker ⇒ 与 §47「user 无差」互为解释；
+   它的墙钟反而 +1.0s（§47）。
+
+### 48.5 唯一剩下的结构性杠杆（未做，记档）
+
+**「收集一次、fork 出 worker」**：12 份收集里有 11 份是冗的。若 runner 先收集再 `fork()`
+（子进程 COW 继承 `sys.modules`），收集相从 4.8s/worker 降到 ~0.4s（只 master 一份）⇒
+预期 **−50s CPU、−4~5s 墙钟**（目前本文件里最大的单项）。**没做**的原因：① 无现成插件
+（xdist 不支持 fork-after-collect；`pytest-forked` 不并行）；② **Windows 无 fork** ⇒ 只有 Linux 收益，
+而本仓两端都跑；③ 自研 runner 要自己做分片/IPC/结果聚合，与 xdist 既有语义重复。
+真要做：先写 20 行原型量墙钟，再决定是否值得替掉 xdist。
+
+> **2026-09-29 已做**（用户指令「做 fork runner，windows 还按现在形式跑」）：`tools/forkdist.py`
+> + Linux 门禁默认走它，实测 wall −2.88s（−12.7%）、user −76.4s（−39.9%）。本条里「预期 −4~5s
+> 墙钟」偏乐观（实际 −2.9s，因为收集相本来就是**并行但争用**的，换单进程只赚到「不受争用」那
+> 部分）；「Windows 只有 Linux 收益」一条按 49.5 的方式处理（Windows/macOS 继续 xdist）。
+> 全文见 **§49**。
+
+### 48.6 复现配方
+
+```bash
+# 账（每进程自用 vs 子进程）
+CPUACCT_OUT=<abs>/ca.tsv PYTHONPATH=<abs>/tmp/dur \
+  bash tools/githook/nn-py-safe.sh -m pytest tests/ e2e/ -n 12 --timeout=60 -p cpuacct
+# 收集相：每个测试模块的导入+收集耗时（worker 各落一份 .gwN）
+CPUACCT_OUT=… COLLTIME_OUT=<abs>/ct.tsv PYTHONPATH=<abs>/tmp/dur \
+  bash tools/githook/nn-py-safe.sh -m pytest tests/ e2e/ -n 12 --timeout=60 -p colltime
+# 低方差 A/B（排负载漂移）：只收集、取 min
+COLLTIME_OUT=<abs>/ct.tsv PYTHONPATH=<abs>/tmp/dur bash tools/githook/nn-py-safe.sh \
+  -m pytest tests/ e2e/ --collect-only -p colltime
+```
+
+⚠ 三个坑：探针必须给 `PYTHONPATH` 的**绝对**路径（`nn-py-safe.sh` 会换 cwd）；
+`pytest --collect-only` 的 `CollectReport.duration` 恒 0、`Module._importtestmodule` 在 pytest 9 已不存在
+⇒ 只能包 `Module.collect`；`nproc` 认 `OMP_NUM_THREADS`（export 后问它会打出 `cores=1` 的假象）。
+
+---
+
+## §47 §45 遗留定案：`--dist=loadfile` **不**写进门禁（2026-09-29，安静窗口 3 轮×3 模式实测）
+
+**结论**：`--dist` 保持缺省（`load`）。§45 的判据是「loadfile 的 min 墙钟稳定低 ≥1.5s 且 user 也低」——
+实测**方向相反**（loadfile 的 min 墙钟低 **−1.0s**，即它更慢），判据不成立 ⇒ 门禁那一行不动。
+
+**方法**：§45 配方（门禁同款 env + `nn-py-safe.sh`），安静窗口（load_before **1.3 → 11.8**，
+本轮无外来 co-tenant），**轮内轮转起始模式**消掉「每轮首个模式拿空机」的偏差。
+注意：**不能加 `-q`**（`addopts` 已有 `-q`，重复变 `-qq` 会把结尾汇总行吞掉）。
+
+| 模式 | r1 wall/user | r2 | r3 | **min wall** | **min user** |
+|---|---|---|---|---|---|
+| `load`（缺省，现状） | 22.82 / 196.9 | 22.33 / 198.4 | 22.33 / 201.4 | **22.33** | **196.9** |
+| `loadfile` | 23.33 / 196.7 | 23.82 / 200.6 | 24.33 / 205.8 | 23.33 | 196.7 |
+| `worksteal` | 23.32 / 207.4 | 23.83 / 205.7 | 23.33 / 203.5 | 23.32 | 203.5 |
+
+9 轮全绿（3330 passed / 3 skipped）。**极差只有 ±1.0s**（22.33–24.33）——安静窗口下三模式的差异
+比 §45 看到的（load 29.3 vs loadfile 26.4）小一个量级。
+
+### 为什么 §45 那条「低 6~9%」是错的：当时机器不安静
+
+§45 自己也记了「同模式内极差 ±5s（loadfile 两轮 26.4 与 33.3）、有外来负载 load 10–14」——
+那轮 **6~9% 的差落在噪声里**，而本节 3 轮交错的极差只有 ±1.0s，足以判负。教训：
+**分发模式的比较只能在本机 loadavg 低于核数时做**，否则量的是 co-tenant 的不公平调度，不是 xdist。
+
+### 机理（为什么 batch 派发在这套用例上不赚）
+
+* `min user` 三模式**基本同价**（196.7 / 196.9 / 203.5）⇒ 省下的 IPC（1676 次单测来回 → 292 次按文件）
+  在墙钟上本来就不是瓶颈（§43 已把地板拆成「收集 ~4.5s + 调度尾 ~10s」）。
+* `loadfile` 的代价无补偿：**一个文件整批钉在一个 worker**，本套用例是**异质**的——9 条真 torch（§43：
+  `Adam.__init__` 冷路径 ~1.5s/worker）、真起进程的 `instance_lock`、真 HTTP e2e——批内慢文件
+  拖死整批，动态补位的自由度恰好是 `load` 在长尾上占的那点便宜。
+* `worksteal` 多花 **~7s user**（偷活/改派的开销）且从未赢过一轮 ⇒ 也不采纳。
+
+**仍然开着的**：`user` 大头（196.9s vs 理想 `sum_min` ~92s，见 §44）在**同一进程内被 GIL/串行段+
+长尾**吃掉，不属分发面；要动就得动「按代价分桶」或装载面，那是另一个题目。
+
+---
+
+## §46 满机 flake 抓取：24 轮载重全量 → 3 条红，逐条归因（2026-09-29，用户指令「再抓一轮满机 flake：多跑几遍全量，把 FAILED 逐条归因」）
+
+**结论先行**：把负载拉起来（合成 co-tenant）连跑全量，**24 轮里 3 条红**——全部归因为
+**测试自身在满机下的脆弱**，**零条**产品回归、**零条**新引入。三条都已按「确定性判据」修掉：
+两条是**时序判据用错了同步物**（异步 drain 的日志 / 异步退休的盘上账），一条是**断言了竞速硬币**。
+门禁在负载 16–21（16 核）下 8 连跑全绿（§46.5）。
+
+### 46.1 测法：合成 co-tenant + 逐轮落盘（抓取器已入库 `nn-training/tools/pytest_loadrun.sh`）
+
+```bash
+bash tools/pytest_loadrun.sh <tag> <rounds> [burners]   # 缺省 6 burners + `-n 12` ⇒ loadavg ≈ burners+12
+export NN_GATE_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 PYTHONUTF8=1
+# 与 nn-python-gate.sh 同款 env（内线程封 1）；每轮 stdout 落 tmp/dur/lr-<tag>/rN.log，stdout 记 load_before
+```
+
+* burners 自带寿命（`timeout`），外层 kill 也不会留下占核的孤儿；`-rf` 收集 FAILED，**不**加 `-x`
+  （`addopts` 已有 `-x`，门禁语义是首败即停——抓 flake 时要关掉才能一轮看全）。
+* **必须记 `load_before`**：本机 loadavg 从 0.1 爬到 20 要 ~1min（1 分钟平均衰减），不记就分不清
+  「红在满机」还是「红在空机」。另：`nproc` 认 `OMP_NUM_THREADS`——在 `export …THREADS=1` 之后
+  问它会打出「cores=1」的假象（脚本改用 `getconf _NPROCESSORS_ONLN`）。
+
+| 批次 | 轮数 | burners | 实测 load | 红 |
+|---|---|---|---|---|
+| a/b（修前两轮） | 3+3 | 6 | 8–17 | 2（下节 ①②） |
+| c（修后复跑） | 4 | 6 | 9–18 | 0 |
+| d | 6 | 6 | 9–21 | 1（下节 ③） |
+| e（③ 修后复跑） | 8 | 6 | 16–21 | **0** |
+
+### 46.2 ① 离线 e2e：把「请求已 200」当成「日志行已到」
+
+```
+e2e/test_offline_training_e2e.py::test_offline_segment_is_claimable_only_by_a_marked_worker
+AssertionError: assert any("整段交领" in ln and "marked-1" in ln for ln in hub.lines)
+```
+
+`_Hub.lines` 由**异步 drain 线程**追加（`tests/subproc_util.spawn_bound_port`）：hub **已经服务完**
+这个请求，与那一行**已进列表**之间存在真实窗口，满载下 drain 线程可能还没被调度。
+**修法**：新增 `_Hub.wait_line(*needles, timeout)`，判据换成**日志行这个谓词本身**（超时只当挂起兜底）——
+不看机器脸色。
+
+### 46.3 ② volume e2e：等式比较了两个时刻（记账扫描 vs 异步退休）
+
+```
+e2e/test_volume_e2e.py::test_racing_double_settle_never_inflates_and_quota_stays_sound
+assert loop._volume_collected == sum(t for _g, t in settled.values())   # 238 vs 224
+```
+
+`_volume_collected` 是本轮 dispatcher 在**「退休之前」那一刻**对盘上的扫描，而竞速两份副本落在
+**不同节点**、各自写一份 shard 目录 ⇒ 盘上**短暂同时存在两份**；输家副本的退休（`rmtree`）
+发生在 `round done` **之后**的异步线程里。实测（load≈24）差额恰好 1 局（17 vs 16），日志里
+`round done: ok=16/16` 之后才出现 `dup settle … — dropped (+retired …)`。
+**修法**：抽出 `_assert_accounting_matches_ledger()`，等式 → **三条与交错无关的上界**：
+① 盘上账本 ≤ 采集记账（方向反了 = 漏记）② 盘上局数 ≤ **去重**派发对数（不得重复计数）
+③ 采集记账 ≤ **真派发次数**（含副本）代入的样本数（凭空多出局 = 重复计数）。
+「绝不重复计数」被钉得更死，且不再依赖两个时刻对齐。
+
+### 46.4 ③ I5b：断言了竞速道的一枚硬币（`e2e/test_run_rl.py::test_it_local_suspend`）
+
+```
+AssertionError: I5b no-suspend -> local owns head tasks ({'local': 1, 'fake': 1})
+[dist] tail-race s0/seed111 node=fake (inflight x2) — race lane
+[dist] round done: ok=2/2 missing=0 retried=0 byNode={"local": 1, "fake": 1}
+[dist] dup settle s0/seed111 node=local — dropped (+retired …/i5b/w0/rl_s0_seed111)
+```
+
+**机理（代码路径）**：`--local-slots` 的头部保留段只挡**队列出队**（`dispatch.py`：
+`src = head_tasks or pending`），**不挡竞速道**；竞速道对 node 线程恒开（`_local_lane_ok = nd is not None`），
+而 `head_tasks` 派发出去的本机副本**已经登记 inflight** ⇒ 节点可以把本机保留段里的头任务复制一份。
+两份都是桩（本机走 `_stub_local_rollout`、节点走 FakeServer 的 `/v1/task`），**谁先返回纯看线程调度**
+⇒ `byNode` 是硬币，满机下节点副本先到（本机那份按 `dup settle` 丢弃）。
+
+**归属**：*不是*产品回归、*也不*是本次改动引入——竞速道语义是 §2026-09-16 的用户裁定（
+「不判快慢、无 dup 上限、先返回者结算」），断言自 `be51c96`（R6 三段式调度）就在；
+`58f797c` 对 `rl/dispatch.py` 只动了收尾 `all_settled.wait` 的钳位（与本路径无关）。
+
+**修法（夹具，不动生产）**：`srv.dup_hang = 0.5` 给**竞速副本**一个确定性的劣势
+（既有旋钮，先例 `test_volume_e2e`：「race 副本略慢 ⇒ 主副本/先返回者赢」）——主副本（本机）稳赢，
+竞速道照旧被触发（dup 仍会派发，只是不再与断言赛跑）。
+
+**「不是产品 bug」的判据链**（而不是我说它没事）：
+
+1. 断言的是**结算归属**，而竞速道按定义由「先返回者」结算 —— 保留段保证的是**派发**，不是**赢**。
+2. 本机副本仍然**跑了**（它先登记 inflight）；输家只被 dedup 丢弃 ⇒ R6 的目的（本机不让位时参战）成立。
+3. 竞赛投入的重复算力是竞速道的**既有**代价（`rl/batch_runner.py` 注释「纯烧算力」）。
+
+**被否决的替代**：① 放宽断言成「`local` 至少结算 1 局」——仍是硬币（两份都归节点时就红），只是概率低；
+② 生产侧把「仅本机在飞」的任务排除出竞速道——改的是 §2026-09-16 的裁定，而该裁定在当前场景
+（本机被 torch 占着、远端可能更快）是对的，为了一个夹具断言改产品语义不划算。
+
+**为什么这条必须治**：不是「偶尔红一次无所谓」——`addopts` 里 `-x` 首败即停，一条满机假红
+会把整段 pytest 判负；而它**在空机上 22 次全绿**（`e2e/test_run_rl.py` 单文件 `-n 6` + 8 burners
+10 轮、单用例 12 次），即**只在满机复现**——正是最难在本地「复跑一下看看」抓到的那类。
+
+**确定性复现（不是靠碰运气）**：把本机直跑桩拖慢 0.4s（= 满机下本机副本后到的等价物）后，
+在**真实用例**上做 red/green 对账（`tmp/dur/i5b_redgreen.py`）：
+
+| 夹具 | 扰动 | 结果 |
+|---|---|---|
+| 修复前语义（强制 `dup_hang=0`） | 本机桩 +0.4s | **FAIL** `I5b … ({'fake': 2})`（与满机红同族） |
+| 当前仓库（`dup_hang=0.5`） | 本机桩 +0.4s | **PASS** |
+
+### 46.5 收尾：修后门禁 + 满机 8 连跑
+
+* 门禁（`nn-python-gate.sh`）：**3330 passed / 3 skipped in 24.17s**，ruff + mypy 绿，rc=0。
+* 满机 8 连跑（batch e，load 16–21）：**8/8 全绿**，wall 30.4–39.6s。
+* **警告面也是干净的**：三批 18 轮里越过 5s 警告线的只有 §43/§44 已认定的「真 torch / 真进程」5 条
+  （`bc_epoch_resume`×2 / `ppo_goal` / `log_diet` / `instance_lock`），最大 9.91s vs 30s 报错红线（3×余量）
+  ⇒ 没有新的「快要点爆」的用例。
+
+---
+
+## §45 门禁还能怎么快？——「-n 之外」的杠杆逐项实测（2026-09-29，用户指令「python 门禁，还有其它提速的办法吗？-n 调参已经做过不要再试了」）
+
+**结论先行**：把用例级的「等满闸门」清完之后（§43/§44，全量 `sum_min` 213→121s），门禁墙钟
+只剩三块：**① 收集/启动地板 ~4.5s（每个 worker + master 各一份，硬地板）② 调度尾 ~10s
+③ 真 torch / 真进程的冷启动**。本节的每一项都是**实测**（不是估算），其中两项被实测**否决**、
+一项**测不出来**（本机有外来负载，无法下结论）。
+
+| 杠杆 | 实测 | 判定 |
+|---|---|---|
+| 「三路工具串行？」 | 门禁**已经**是 ruff‖mypy‖pytest 三路并行（`run_tool … &`），门禁 26s ≈ pytest 24.7s | ✅ 已榨干，无可动 |
+| **收集/启动地板** | `--collect-only`：串行 4.54s；`-n 12` 并行 4.53/4.79s —— **并行不降** | ⚠ 硬地板（每 worker 各自收全量） |
+| ┗ 地板的成分 | cProfile：`_collect_one_node` 292 个模块 = 5.04s（累计）；**没有热点**（自耗时 top：C 扩展加载 0.34s、`compile` 0.31s、`marshal` 0.32s、`Random.seed` 0.24s、`gc.collect` 0.19s） | ⚠ 无单点可切 |
+| **GC 开销**（`gc.callbacks` 进程内直计，与负载无关） | worker 侧 **1.3–1.7s / 段（≈7%）**，21000 次回收/段 | ⚠ 有账，但见下 |
+| ┗ `gc.freeze()` 收完就冻结堆 | 两轮 A/B：1.26→1.46s、1.66→1.71s（回收次数不变 21020→21055） | ❌ **无效**：GC 的账在**测试期间新造的对象**（第 0 代短命对象），不在导入堆 |
+| **分发模式**（不是 `-n`）`--dist=loadfile` / `worksteal` vs 默认 `load` | 交错 3 轮取 min：`load` 29.3/31.1（user 257/268）、`worksteal` 29.8/33.5（257/282）、`loadfile` **26.4/27.6**（**234**/260） | ⚠ **未定论**（见下）→ 2026-09-29 定案**不采纳**（§47） |
+| 单测层里最长的 9 条真 torch（合计 ~15s CPU） | —— | ❌ 不改（§43 已论证） |
+
+### 两件被实测否决的「看起来很美」
+
+* **`gc.freeze()` / 调 GC**：§43 量到过「常驻 AST 让每轮 `gc.collect()` 多付 0.74s」，于是
+  很自然想到「收完冻结堆」。实测（`tmp/dur/gcstats.py` + `tmp/dur/gcfreeze.py`）**没用**：
+  GC 时间 1.3–1.7s/worker 里绝大部分是**用例自己造的对象**（numpy/pydantic/dict 树，跑完就死），
+  冻结导入堆动不了它。⇒ 这套件的 GC 账只能靠**少造对象**还，不靠开关。
+* **拆开跑（两池/两层各自 `-n`）**：门禁头部已有 2026-09-26 的实测结论——torch 池‖免 torch 池一律
+  ≥ 单次 `-n12`（33s → 40/41s），因为要**多付一次 startup + 每 worker 一次 torch 冷 import**，
+  且关键路径变成较慢的那一池。本节的「收集地板 ~4.5s/进程」正是这条结论的机理（进程数越多地板越多份）。
+
+### 唯一未定论的杠杆：`--dist`（下一步只需要一个安静窗口）
+
+> **2026-09-29 已定案：不采纳** —— 安静窗口 3 轮×3 模式交错实测，`loadfile` 的 min 墙钟反而高 1.0s
+> （22.33 vs 23.33），`user` 三模式同价 ⇒ 判据不成立、门禁不动。全文见 §47。
+
+观测：`loadfile` 的最小墙钟 **26.4s** 与最小 user **234s** 都比 `load`（29.3s / 257s）低 ~6~9%，
+而 `worksteal` 居中；机理上说得通——`load` 是**一个用例一次 IPC**（1676 次来回），`loadfile` 按
+**文件**批量派（292 次），调度开销与 master 序列化都少一个量级。
+
+**但不能据此改门禁**：本机当时有外来负载（load 10–14，另一个会话常驻 40% CPU），同模式内
+墙钟极差达 ±5s（`loadfile` 两轮 26.4 与 33.3）⇒ 差值落在噪声里。安静机上这样定案（各 3 轮、轮内轮转）：
+
+```bash
+export NN_GATE_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+for r in 1 2 3; do for m in load loadfile worksteal; do
+  /usr/bin/time -f "$m wall=%e user=%U" bash ../tools/githook/nn-py-safe.sh \
+    -m pytest tests/ e2e/ -n 12 --dist=$m --timeout=60 -q
+done; done
+# 判据：取各模式 min；若 loadfile 的 min 墙钟稳定低 ≥1.5s 且 user 也低，再把 --dist=loadfile
+# 写进 nn-python-gate.sh（并在此节记下安静机数据）。
+```
+
+### 与本题目无关但同期收获：门禁在**满机时假红**的那条
+
+测速过程中抓到一条真 flake（**不是**本次改动引入的，`test_bulk_sched.py` 不在改动范围）：
+
+```
+tests/test_bulk_sched.py::test_yield_stops_at_budget_even_if_control_stays
+assert elapsed <= budget + step + 0.25
+AssertionError: 让路墙钟超预算：2.063（阈值 0.12+0.02+0.25 = 0.39）
+```
+
+它在负载 13 的机器上把 6 格 × `sleep(0.02)` 睡成了 **2.06s**（每格 ~0.34s，17×）——正是 §21 那族
+「拿绝对数字当机器够快」。**修法**：删掉墙钟断言，把契约钉在**确定性**的两条上——
+`spent ≤ budget + step`（循环自己的记账）与 `yield_count == ceil(budget/step) == 6`（真走了几格）；
+理由写进用例注释（墙钟与负载不可分：分不清「循环多睡了几格」与「OS 把 sleep 跑晚了」）。
+⇒ **门禁剩下的真风险是「满机假红」，不是墙钟**；抓这类 flake 的办法就是本节这套「多轮全量 + 看 `FAILED`」。
+
+---
+
 ## §44 剩余 ~1s 用例群清算：「等满闸门 / 等满步长」一族 → 点名 20 条 −11.8s、全量 sum_min −30s（2026-09-29，用户指令「把剩下的 ~1s 用例群也清一遍（tests/ 与 e2e/ 各取前 30），能压多少压多少」）
 
 **一句话**：§43 清掉的是「重复解析 + 无预筛」（CPU 型）；本批清的是**另一族**——它们的墙钟

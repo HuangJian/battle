@@ -293,6 +293,24 @@ class _Hub:
     def output(self) -> str:
         return "\n".join(self.lines)[-1200:]
 
+    def wait_line(self, *needles: str, timeout: float = 10.0) -> bool:
+        """等日志里出现**同时含**这些片段的一行（`timeout` 只是挂起兜底，不是同步手段）。
+
+        为什么不能「请求 200 了 ⇒ 日志已到」：`self.lines` 是子进程 stdout 由 **drain 线程
+        异步**追加的（`tests/subproc_util.spawn_bound_port`）。满载时那个线程可能还没被调度到，
+        于是「hub 已经服务完这个请求」与「那一行已经在列表里」之间有个真实窗口。
+        2026-09-29 全量实测：`test_offline_segment_is_claimable_only_by_a_marked_worker`
+        在 load≈4 时就这么红过一次（失败输里能看到 hub 其实已经服务了）。
+        判据是**日志行**本身（谓词）；等到它出现才继续，就不看机器脸色。
+        """
+        end = time.time() + timeout
+        while time.time() < end:
+            if any(all(n in ln for n in needles) for ln in self.lines):
+                return True
+            # sleep-ok: 轮询步长（等的是「日志里出现这一行」这个谓词，超时只当挂起兜底）
+            time.sleep(0.02)
+        return False
+
     def ready(self, *, expect: list[str], timeout: float = 40.0) -> None:
         """`/admin/queue` 能答 **且**课程表已就位（课程表是后台扫描登记进来的）。"""
         end = time.time() + timeout
@@ -369,7 +387,7 @@ def test_offline_segment_is_claimable_only_by_a_marked_worker(tmp_path: Path) ->
         # 观测：hub 日志里有一行「整段交领」（现场排障的第一只手电）。
         # 文案 2026-09-25 改过：判据从「课程当前 mode」换成 **job 自己的 role**，
         # 所以行里报的是「请求方自称的角色」而不是「这是离线课」。
-        assert any("整段交领" in ln and "marked-1" in ln for ln in hub.lines), hub.output()
+        assert hub.wait_line("整段交领", "marked-1"), hub.output()
     finally:
         hub.close()
 

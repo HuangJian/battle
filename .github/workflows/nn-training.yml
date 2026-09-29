@@ -74,9 +74,14 @@ jobs:
       # 60e5f69 已被搬到 e2e/，于是这一步自那以后每跑必挂（且无 continue-on-error）。
       # 其覆盖已包含在下面的 e2e 层里（pytest 收集同一批用例）。
       - name: unit layer (tests/)
-        # -n 2：GitHub runner 只有 2-4 vCPU（本机 python-gate 的 min(核数, 12) 是 16 核
-        # 下的最优口径，照抄到 runner 就是超订，故这里**不**用 auto）。2026-09-17 起
+        # worker = 2：GitHub runner 只有 2-4 vCPU（本机 python-gate 的 min(核数, 12) 是 16
+        # 核下的最优口径，照抄到 runner 就是超订，故这里**不**用 auto）。2026-09-17 起
         # 单测层同样并行——此前它是不带 -n 的单进程，是 job 里最长的 pytest 步。
+        # ⚠ **不要给 CI 换 `--forkdist`**（2026-09-29 实测，docs/nn/engineering.md §50）：
+        # `-p tools.forkdist --forkdist 2` 在本仓的 runner 规模下**没有墙钟收益**
+        # （taskset 模拟 2 vCPU：45.03 vs 44.95s；4 vCPU：40.93 vs 41.51s；e2e 层两边互有
+        # 胜负、都在 ±0.7s 噪声内）。那份收益来自「多 worker 重复收集」的**争用缓解**，
+        # runner 只有 2 个 worker，没什么可缓解的（CPU 仍降 ~12%，但不换墙钟）。
         run: uv run pytest tests/ -n 2 -q --no-header
 
       - name: e2e layer (e2e/)

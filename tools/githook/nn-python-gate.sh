@@ -9,7 +9,9 @@
 # 并行架构（v3.15 2026-09-03；v3.16 2026-09-15 起 pytest 目标含 e2e/；
 # v3.17 2026-09-17 起 worker 数 × 线程数按实测重调，见下节；
 # v3.18 2026-09-20 起双向路径改按「python 是不是 Windows 二进制」判定，
-# 不再只看 wslpath 存不存在，见下方「双向路径」一节）：
+# 不再只看 wslpath 存不存在，见下方「双向路径」一节；
+# v3.19 2026-09-29 起 pytest 在 **Linux** 上走 forkdist（收集一次 + fork），Windows/macOS 仍走
+# xdist，见下方「pytest 分发器」一节）：
 #   ruff(~1s) / mypy(~4s 热缓存) / pytest xdist 全量 三路并行。
 #   全量 = tests/（单测层）+ e2e/（集成层）。**两层同一次 xdist 调用**：实测（16 核）
 #   tests/ 22s → tests/+e2e/ 27s，只 +5s（另外单跑一次要重复付 torch import 与
@@ -181,6 +183,30 @@ NPROC=${NN_GATE_NPROC:-$CORES}
 [ "$NPROC" -gt 12 ] && NPROC=12
 [ "$NPROC" -lt 1 ] && NPROC=1
 
+# ---- pytest 分发器：Linux = 「收集一次 + fork」，其余 = xdist -n（v3.19 2026-09-29）----
+# 为什么换：`-n 12` 下**每个 worker 都收集全部 ~275 个测试模块**（12 份里 11 份是冗的），
+# 实测占 worker 自用 CPU 的 35%。`tools/forkdist.py` 让 master 收集一次再 `os.fork()` 出
+# worker（COW 继承 sys.modules 与已收集的 Item），逐条动态派发 + 报告重放，语义与 xdist 的
+# `--dist=load` 对齐。16 核安静窗口实测（各 3 轮轮转取 min）：墙钟 22.69 → **19.81s**，
+# user 191.7 → **115.3s**（内存峰值两者持平，约 4.8GB）。详见 docs/nn/engineering.md §49。
+# 判据（与路径转换同源：看「选中的 python 是什么」，不看 uname/wslpath 存不存在）：
+#   · Windows 二进制 python（`.venv/Scripts/python.exe`，MSYS/WSL 两种 bash 都算）
+#     —— 没有 os.fork，只能在 xdist 上跑；
+#   · macOS —— master 在 fork 之前已经 import torch（收集期），libgomp/dyld 与 fork 的组合
+#     本仓没有验证，保守继续用 xdist（xdist 每次都是新进程，天然没有这个面）。
+# NN_GATE_FORKDIST=0 强制 xdist；=1 强制走 forkdist（非 Linux 上自担风险）。
+FORKDIST=0
+case "$NN_PY" in
+  *.exe) : ;;
+  *)
+    [ "$(uname -s 2>/dev/null)" = "Linux" ] && FORKDIST=1
+    ;;
+esac
+case "${NN_GATE_FORKDIST:-auto}" in
+  0) FORKDIST=0 ;;
+  1) FORKDIST=1 ;;
+esac
+
 SKIP_LIST=${NN_GATE_SKIP:-}
 has_skip() {
   case ",$SKIP_LIST," in
@@ -190,7 +216,11 @@ has_skip() {
 }
 
 cd "$NN_ROOT"
-echo "▶ nn-training python gate（ruff + mypy + pytest xdist -n $NPROC，CPU 内线程 $GATE_THREADS，parallel）"
+if [ "$FORKDIST" = "1" ]; then
+  echo "▶ nn-training python gate（ruff + mypy + pytest forkdist --forkdist $NPROC，CPU 内线程 $GATE_THREADS，parallel）"
+else
+  echo "▶ nn-training python gate（ruff + mypy + pytest xdist -n $NPROC，CPU 内线程 $GATE_THREADS，parallel）"
+fi
 # 门禁前清理过期测试临时目录（python -S 绕过沙箱删除保护，仅限 tmp/pytest-tmp
 # 下 KEEP_DAYS 天前的子目录；NN_TMP_KEEP_DAYS 可调，默认 7）。失败静默（清理
 # 是锦上添花，不阻塞门禁）。
@@ -261,9 +291,16 @@ fi
 if has_skip pytest; then
   echo " ▸ pytest skipped（NN_GATE_SKIP=$SKIP_LIST）"
 else
-  # 全量：xdist -n $NPROC，带单测墙钟护栏（--timeout，见文件头）。
+  # 全量：分发器见「pytest 分发器」一节；带单测墙钟护栏（--timeout，见文件头）。
+  # --forkdist 与 -n **互斥**（两者都接管 pytest_runtestloop，同时给会被插件当场拒绝）。
   # shellcheck disable=SC2086
-  run_tool pytest "$NN_PY" -m pytest $PYTEST_TARGETS -n "$NPROC" --timeout="${NN_PYTEST_TIMEOUT_S:-60}"
+  if [ "$FORKDIST" = "1" ]; then
+    run_tool pytest "$NN_PY" -m pytest $PYTEST_TARGETS -p tools.forkdist --forkdist "$NPROC" \
+      --timeout="${NN_PYTEST_TIMEOUT_S:-60}"
+  else
+    run_tool pytest "$NN_PY" -m pytest $PYTEST_TARGETS -n "$NPROC" \
+      --timeout="${NN_PYTEST_TIMEOUT_S:-60}"
+  fi
 fi
 
 RC=0

@@ -49,7 +49,7 @@ def clean_env() -> dict[str, str]:
     """剥离删除保护沙箱的环境副本（2026-09-15，task.py 侧对齐拉闸）。
 
     背景：workbuddy/mimo 沙箱经环境变量注入 python sitecustomize 守卫（队列配额/
-    删除确认/FAIL_CLOSED），task.py 直接 spawn 的 pytest（`-n auto` × CPU 核数、
+    删除确认/FAIL_CLOSED），task.py 直接 spawn 的 pytest（`pytest_dispatch()` × CPU 核数、
     无超时）会被打穿——见 .workbuddy/memory/2026-09-15.md「追问 2」。剥离 BASH_ENV
     注入载体 + CODEBUDDY/SAFE_* 变量，并显式关掉 python 侧守卫开关（惰性变量，
     普通机器无害）。
@@ -124,6 +124,25 @@ def target_setup() -> int:
     return run([PYTHON, str(HERE / "bootstrap.py"), *EXTRA_ARGS])
 
 
+def pytest_dispatch() -> list[str]:
+    """pytest 的分发器参数（2026-09-29，docs/nn/engineering.md §50）。
+
+    **Linux** 上用「收集一次 + fork」（`tools/forkdist.py`）：master 收集一次，子进程经 COW
+    继承 `sys.modules` 与已收集的 Item，避掉 xdist「每个 worker 各收全部 ~275 个模块」那份冗工。
+    16 核实测（tests/ + e2e/）：wall 21.99 → 17.57s、user 233.9 → 121.6s（轮数越多越赚）。
+
+    `-n auto` 的**语义不变**（`--forkdist auto` 同样解析成机器核数，走
+    `platform_utils.effective_cores()`——容器里比 `os.cpu_count()` 更准），所以
+    `task.py check` / `task test` 的 worker 打法与以前一致。
+
+    为何只在 Linux：Windows 没有 `os.fork`（插件会当场拒绝）；macOS 上 master 在 fork 前
+    已经 import torch，libgomp/dyld 与 fork 的组合本仓没有验证过。两者继续 xdist。
+    """
+    if sys.platform.startswith("linux") and hasattr(os, "fork"):
+        return ["-p", "tools.forkdist", "--forkdist", "auto"]
+    return ["-n", "auto"]
+
+
 def target_check() -> int:
     # 并行 + fail-fast（2026-09-15）：lint/typecheck/test 三者互相独立，
     # 任一红立即终止其余（与 nn-python-gate.sh 并行语义同构）；env=clean_env()
@@ -135,31 +154,31 @@ def target_check() -> int:
         [
             [PYTHON, "-m", "ruff", "check", "."],
             [PYTHON, "-m", "mypy", ".", "--config-file", str(HERE / "pyproject.toml")],
-            [PYTHON, "-m", "pytest", "tests/", "e2e/", "-n", "auto", "-q", "--timeout=60"],
+            [PYTHON, "-m", "pytest", "tests/", "e2e/", *pytest_dispatch(), "-q", "--timeout=60"],
         ],
         env=clean_env(),
     )
 
 
 def target_test() -> int:
-    # worker 数 = `-n auto`（= CPU 核数），**不是写死的 4**（2026-09-17 修正）：
+    # worker 数 = `pytest_dispatch()` 里的 auto（= CPU 核数），**不是写死的 4**（2026-09-17 修正）：
     # 2026-09-15 曾把 `-n auto` 判为「沙箱 ~34% 停滞」的头号嫌疑并退回 -n 4，那是
     # 误判——真正的杀手是超订（每个 worker 默认开满物理核线程），已由 clean_env()
     # 的线程封顶根治；封顶后 16 核实测 auto/n=12 同一水平（~23s）、写死 4 反而最慢
     # （36s）。数据见 tools/githook/nn-python-gate.sh 头注。
     return run(
-        [PYTHON, "-m", "pytest", "tests/", "e2e/", "-n", "auto", "-v", "--timeout=60"],
+        [PYTHON, "-m", "pytest", "tests/", "e2e/", *pytest_dispatch(), "-v", "--timeout=60"],
         env=clean_env(),
     )
 
 
 def target_test_fast() -> int:
-    # `-n auto` + `--timeout=60`（与 target_test / nn-python-gate.sh 对齐）：
+    # `pytest_dispatch()`（worker 数 = auto）+ `--timeout=60`（与 target_test / 门禁对齐）：
     # `task.py check` 此前无超时——沙箱里 hang 则无限挂；看门禁/日常两侧护栏必须
     # 一致，只改一处就是破口。层 = 路径：这里是单测层（tests/）。
     # 单位是**秒**（pytest-timeout）——原值 50000 是从 bun 的毫秒制误搬的，= 无护栏。
     return run(
-        [PYTHON, "-m", "pytest", "tests/", "-n", "auto", "-q", "--timeout=60"],
+        [PYTHON, "-m", "pytest", "tests/", *pytest_dispatch(), "-q", "--timeout=60"],
         env=clean_env(),
     )
 
@@ -167,7 +186,7 @@ def target_test_fast() -> int:
 def target_test_e2e() -> int:
     # 集成层单独入口（e2e/）：调试 / 复核时只跑这一层，不付全量单测的钱。
     return run(
-        [PYTHON, "-m", "pytest", "e2e/", "-n", "auto", "-q", "--timeout=60"],
+        [PYTHON, "-m", "pytest", "e2e/", *pytest_dispatch(), "-q", "--timeout=60"],
         env=clean_env(),
     )
 

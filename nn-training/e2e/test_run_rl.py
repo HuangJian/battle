@@ -837,6 +837,15 @@ def test_it_local_suspend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         )
         traj = tmp_path / "i5b"
         traj.mkdir()
+        # 2026-09-29（§46 满机 flake 复现）：I5b 断言「本机**拥有**头部任务」，但竞速道
+        # （§2026-09-16 裁定：不判快慢、无 dup 上限、先返回者结算）可以把**任何**
+        # in-flight 任务复制到节点上——包括本机保留段里的头任务（保留段只挡队列出队
+        # `src = head_tasks or pending`，不挡竞速道）。两份都是桩，谁先返回纯看线程调度
+        # ⇒ byNode 是硬币：满机全量（load≈20）实测红过 `{'local': 1, 'fake': 1}`
+        # （本机副本后到 → dup settle 丢弃）。这里给竞速副本一个确定性的劣势（既有夹具
+        # 旋钮，与 test_volume_e2e「副本略慢 ⇒ 主副本赢」同一用法）：主副本（本机）稳赢，
+        # 竞速道照旧被触发（dup 仍会派发，只是不再与断言赛跑）。
+        srv.dup_hang = 0.5
         rep5b = run_rl.run_rollout_queue(
             bun,
             str(WEIGHTS),

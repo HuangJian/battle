@@ -38,7 +38,21 @@ if str(ROOT) not in sys.path:
 
 from tests.helpers import remote_dag as dag
 
-TOP, DEFERRED, UNRESOLVED = dag.graph()
+# 2026-09-29（§48）：**收集期不算整张图**。原来这里是模块级 `dag.graph()`，它用 AST
+# 扫一遍 `remote/` 下 40+ 个模块（实测 0.35s/进程，争夺态 ~0.75s）；而 `-n 12` 下**每个
+# worker 都要收集全部测试模块**，收集相又是满核串行段 ⇒ 这笔钱白堵在开跑前。
+# 改成模块级 autouse fixture 首次加载：用例体读的是模块全局（fixture 先跑 ⇒ 语义不变），
+# 工作落到执行相（机器在那儿只有 ~7.6/16 核忙，能与其他 worker 重叠）。
+# 合成源码用例自己调 `dag.graph()`（monkeypatch 掉 `dag.REMOTE_DIR`），不受这里影响。
+TOP: dict[str, set[str]] = {}
+DEFERRED: dict[str, set[str]] = {}
+UNRESOLVED: dict[str, set[str]] = {}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _load_graph() -> None:
+    global TOP, DEFERRED, UNRESOLVED
+    TOP, DEFERRED, UNRESOLVED = dag.graph()
 
 
 # ───────────────────────── ① 账本恰好覆盖 ─────────────────────────

@@ -45,13 +45,29 @@ from common.protocol import COURSE_MODES, ProtocolError
 NET_PROBE_MAX = 16 * 1024 * 1024
 #: 确定性填充块（固定种子，绝不用随机——同一 bytes=N 每次必须逐字节相同，
 #: 这样隧道 A/B 的差异只可能来自协议，不可能来自载荷）。
-_PROBE_BLOCK = bytes(random.Random(0x5EED).getrandbits(8) for _ in range(65536))
+#:
+#: 2026-09-29（§48）：**首次使用时才建**。原来在模块顶层跑那 65536 次
+#: `Random.getrandbits(8)`，实测 **0.53s/进程**；而 `hub.admin` 被
+#: `hub_server → hub.boot → http_face → admin` 这条链拖进**每个 import hub 的进程**
+#: （真 hub 进程、每个 rollout worker、以及 12 个 pytest worker）⇒ 白付 0.53s×N。
+#: 构造只服务 `/admin/net-probe`（`_deterministic_fill`），延迟不改任何语义；
+#: 内容逐字节不变（同一种子、同一生成式、同一长度）。
+_PROBE_BLOCK: bytes | None = None
+
+
+def _probe_block() -> bytes:
+    """取（惰性构造的）64KiB 确定性填充块。"""
+    global _PROBE_BLOCK
+    if _PROBE_BLOCK is None:
+        _PROBE_BLOCK = bytes(random.Random(0x5EED).getrandbits(8) for _ in range(65536))
+    return _PROBE_BLOCK
 
 
 def _deterministic_fill(n: int) -> bytes:
     """生成 n 字节确定性填充（重复 64KiB 固定块，省 CPU）。"""
-    q, rem = divmod(n, len(_PROBE_BLOCK))
-    return _PROBE_BLOCK * q + _PROBE_BLOCK[:rem]
+    block = _probe_block()
+    q, rem = divmod(n, len(block))
+    return block * q + block[:rem]
 
 
 class AdminRoutes:
