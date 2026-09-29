@@ -112,6 +112,40 @@ def eval_v8_fields(manifest: dict | None) -> dict:
     return out
 
 
+#: metrics v9 命中方位 + 穿越税观测族（plan/geo-threat-instrumentation §1.1/§1.3；
+#: `src/nn/hit-geometry.ts` / `danger-metrics.ts` 同名同义）。`export-eval-game.ts` 顶层
+#: 直出；旧报告/未同步节点缺键 = None（与 v8 同约）。
+EVAL_V9_KEYS = (
+    "backHits",
+    "sideHits",
+    "frontHitsExempt",
+    "farHits",
+    "geoFallback",
+    "onLaneTicks",
+    "onLaneExemptTicks",
+    "onLaneMoveTicks",
+    "onLaneHoldFireTicks",
+)
+
+
+def eval_v9_fields(manifest: dict | None) -> dict:
+    """从 eval 报告 manifest 抽出 v9 九列（缺键 = 整键省略，不写 None）。
+
+    与 `eval_v8_fields` 逐字同形、同一个理由（0 是合法读数，不能伪造缺失值；
+    下游 `eval-course-ckpt` 以键缺席判未知）与同一条纪律：`eval_row` 与
+    `rl/batch_eval.py::record` 两处行构造点必须**经本函数**取数，不得各自手写
+    字段表（2026-09-24 v8 提交就是 Python 两处全漏 ⇒ 日常 eval 失明）。
+    """
+    out: dict = {}
+    if not isinstance(manifest, dict):
+        return out
+    for k in EVAL_V9_KEYS:
+        v = manifest.get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
 def eval_row(
     manifest: dict,
     *,
@@ -174,6 +208,8 @@ def eval_row(
         "stuckTicks": manifest.get("stuckTicks"),
         # metrics v8 危险暴露四列（与 batch_eval.record 同源，见 eval_v8_fields）。
         **eval_v8_fields(manifest),
+        # metrics v9 命中方位 + 穿越税观测族（与 batch_eval.record 同源，见 eval_v9_fields）。
+        **eval_v9_fields(manifest),
         "puSpawnBomb": manifest.get("puSpawnBomb"),
         "puSpawnTank": manifest.get("puSpawnTank"),
         "puSpawnFreeze": manifest.get("puSpawnFreeze"),

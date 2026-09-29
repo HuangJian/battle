@@ -117,7 +117,18 @@ function fixtureWeights(): string {
   return JSON.stringify({ arch: { kind: 'student', h: g.h, d: g.d }, params: g.params })
 }
 
-/** 26×26 全空 + 基地；玩家/单敌出生点可配（onset 需要「先不在带内、后对齐」的几何）。 */
+/**
+ * 26×26 全空 + 基地；玩家/单敌出生点可配。
+ *
+ * 翻沿的**构造**（2026-09-29 metrics v9 重写：旧注释的「斜上方、必须转向对齐」在 19px 带下
+ * 已不成立）：单敌出生在玩家**正上方同列** —— `inThreatLane` 会跳过 `spawnTimer > 0` 的
+ * 敌车（生成中不算威胁），于是「敌车激活那一拍」必然是一次 `!prevThreat && inLane` 的入带翻沿。
+ * 这与 AI 走位无关，不依赖运气，也不依赖「转向对齐」。
+ *
+ * 为什么不能改回偏轴：带宽 = 坦克半宽 16 + 子弹半高 3 = 19px，而 1 格 = 16px ⇒ 偏 1 格在
+ * t=0 就已经「在线上」（prevThreat 初值吃掉唯一的翻沿，events=0）；偏 2 格（32px）则只能靠
+ * 敌车横向走位进带 —— 空场无阻挡、AI 不会横移，实测 1200 tick 内一次都没进过带。
+ */
 function onsetStage(): StageData {
   const tiles: string[] = []
   for (let r = 0; r < GRID; r++) {
@@ -135,7 +146,7 @@ function onsetStage(): StageData {
     enemies: ['basic'],
     enemyCount: 1,
     playerSpawn: { col: 12, row: 20 },
-    enemySpawns: [{ col: 13, row: 15 }],
+    enemySpawns: [{ col: 12, row: 15 }],
   }
 }
 

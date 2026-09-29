@@ -194,14 +194,27 @@ describe('decisionTick (event-type predicate)', () => {
  * threat-ONSET（plan/new-era-stop.plan.md §6 R2.1）：`condition === 4`，只在调用方传入
  * `prevThreat` 时可能产出；不传 = 旧四类事件（现有导出器逐字节不变）。
  * 夹具：玩家在 (96,96)，威胁源 = 同列、炮口朝下的敌车（几何恒定，只用 alive 开关）。
+ *
+ * ⚠ **枪线必须是空的**（2026-09-29 metrics v9）：`inThreatLane` 现在判墙体遮挡
+ * （plan/geo-threat-instrumentation.plan.md §1.2 子项③），而 `mkWorld` 的假 tileMap
+ * `get: () => 'brick'`（那是给基地环通道用的）会把**每一条**枪线都判成有掩体 ⇒
+ * 威胁恒为 false。本 describe 只需谓词本身，故显式给一张空场地。
  */
 describe('decisionTick threat-ONSET (edge, condition 4)', () => {
   const enemyTank = (alive: boolean) =>
     mkTank({ allegiance: 'enemy', kind: 'basic', x: 96, y: 48, dir: 'down', alive })
+  /** 空场地：本 describe 只测「入带翻沿」，遮挡另有专项（tests/sim/danger-metrics.test.ts）。 */
+  const openField = {
+    grid: Array.from({ length: BOARD }, () => Array.from({ length: BOARD }, () => 'empty')),
+    isBaseDestroyed: () => false,
+    get: () => 'empty',
+    hasBase: () => true,
+  }
   /** 无 fire-edge 的世界（frame 0 + nextFireInterval 300），免得 condition 被 1 抢走。 */
   const threatWorld = (alive: boolean) =>
     mkWorld({
       frame: 0,
+      tileMap: openField,
       player: mkTank({ allegiance: 'player', x: 96, y: 96, dir: 'up' }),
       allTanks: [enemyTank(alive)],
     })
@@ -237,6 +250,7 @@ describe('decisionTick threat-ONSET (edge, condition 4)', () => {
       7,
       mkWorld({
         frame: 18,
+        tileMap: openField,
         player: mkTank({ allegiance: 'player', x: 96, y: 96, nextFireInterval: 300, lastFire: 0 }),
         allTanks: [enemyTank(true)],
       }),

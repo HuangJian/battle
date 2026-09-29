@@ -68,6 +68,17 @@ export interface EvalCourseRow {
   dangerTicks?: number
   threatTicks?: number
   dmgFirst600?: number
+  /** metrics v9 命中方位 + 穿越税观测族（可选：远端/旧 bundle 的行没有这些字段）。
+   *  与 rollout metrics 行同名同义（同一实现 `src/nn/hit-geometry.ts` / `danger-metrics.ts`）。 */
+  backHits?: number
+  sideHits?: number
+  frontHitsExempt?: number
+  farHits?: number
+  geoFallback?: number
+  onLaneTicks?: number
+  onLaneExemptTicks?: number
+  onLaneMoveTicks?: number
+  onLaneHoldFireTicks?: number
   /** Phase 0 逐敌种画像（T3）：索引 = ENEMY_KIND_ORDER = [basic, fast, power, armor]。
    *  `exposureByKind` = 存活×接战 tick 积分（④ 的归一化分母）。 */
   hitsByKind: number[]
@@ -137,6 +148,15 @@ self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
         dangerTicks: res.dangerTicks,
         threatTicks: res.threatTicks,
         dmgFirst600: res.dmgFirst600,
+        backHits: res.backHits,
+        sideHits: res.sideHits,
+        frontHitsExempt: res.frontHitsExempt,
+        farHits: res.farHits,
+        geoFallback: res.geoFallback,
+        onLaneTicks: res.onLaneTicks,
+        onLaneExemptTicks: res.onLaneExemptTicks,
+        onLaneMoveTicks: res.onLaneMoveTicks,
+        onLaneHoldFireTicks: res.onLaneHoldFireTicks,
         hitsByKind: res.hitsByKind,
         killsByKind: res.killsByKind,
         exposureByKind: res.exposureByKind,

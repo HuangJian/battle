@@ -54,7 +54,7 @@ import { isStuckTick, playerCenterCell } from '../../src/game/stuck-detect'
 import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { STAGES } from '../../src/config/stages'
-import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID } from '../../src/constants'
+import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID, TANK } from '../../src/constants'
 import { type Direction } from '../../src/constants'
 import {
   ObsEncoder,
@@ -80,7 +80,18 @@ import {
   DMG_FIRST_WINDOW_TICKS,
   inThreatLane,
   playerHpRatio,
+  threatLaneExempt,
 } from '../../src/nn/danger-metrics'
+import {
+  HIT_BACK,
+  HIT_FAR,
+  HIT_SIDE,
+  centerCellKey,
+  classifyHit,
+  fireOriginCellKey,
+  keyCol,
+  keyRow,
+} from '../../src/nn/hit-geometry'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { RNG } from '../../src/utils/RNG'
 import { npyBytes } from '../../src/nn/npy'
@@ -156,12 +167,30 @@ export const RL_SHARD_FILES = [
 //   事件本就不含致死一击，见 `SimulationCombat.ts:604-609`）。与 v7 同规：**不进任何
 //   现存公式**（只加观测、不改公式），但 bump METRICS_VERSION ⇒ 旧 v7 语料不兼容
 //   （加载期按行宽/版本响亮报错，不静默错读）。
+// idx45–49=命中方位计数（metrics v9，plan/geo-threat-instrumentation.plan.md §1.1）：
+//   backHits / sideHits / frontHitsExempt / farHits / geoFallback。分类器唯一实现 =
+//   `src/nn/hit-geometry.ts::classifyHit`（纯逻辑、真值表单测）。
+//   · 几何取**开火时刻**的 shooter 格 + **命中时刻**的受害车快照（`enemy_hit`
+//     新增 targetId/targetDir/targetX/targetY/bulletId，加法只读字段）；
+//   · `farHits` = 轴向开火**物理不可能命中**的份额（开火后目标自己走进弹道），只作监视、
+//     不定价。⚠ 它**不是**「非瞄准份额」的全量：地雷/牺牲等爆炸类击杀不推 `enemy_hit`
+//     （全仓唯一推点 = `SimulationCombat.bulletHitsTank`）⇒ 那些击杀不落任何方位桶；
+//   · **普通 front 不单列**：frontHits ≡ enemyHits − back − side − frontHitsExempt − far
+//     （可测守恒；跨局对账用它，不要另立第 10 列）；
+//   · `geoFallback` = bulletId 反查不到开火记录的命中数（state-init 交棒时已在飞的弹），
+//     不进 front 推导，跨局对账时单独列示。
+//   · 击杀**不单列**：击中即按同几何计同样激励，wKill 照旧在终点结算（plan §1.1）。
+// idx50–53=穿越税观测族（metrics v9，plan §1.3）：onLaneTicks（raw 永真）·
+//   onLaneExemptTicks（lane ∧ 冻/盾，**加法列**，不是从 raw 里扣）· onLaneMoveTicks
+//   （在线且本 tick 中心格变化）· onLaneHoldFireTicks（在线且静止且本 tick 开火输出）。
+//   公式侧净价 = `-w*d(onLaneTicks) + w*d(onLaneExemptTicks)`；四个都是累计 tick
+//   计数器（Φ 逐行差分 ⇒ 直接入公式 = 每 tick 罚款且 Φ 无界，须封顶或改深度型势）。
 // **本常量必须与 `buildMetricsRow` 的行宽一致** —— 2026-09-12 的 P0：只改了行、没改
 // 这里，`metrics.set(row, i * METRICS_DIM)` 每局越界抛 RangeError，整条采集腿零产出。
 // 导出仅供测试断言行宽（tests/export-rl-rollout-metrics.test.ts）。
-export const METRICS_DIM = 45
-/** metrics v8：危险暴露四列（idx41–44）。与 Python METRICS_VERSION 同步。 */
-export const METRICS_VERSION = 8
+export const METRICS_DIM = 54
+/** metrics v9：命中方位 5 列 + 穿越税 4 列（idx45–53）。与 Python METRICS_VERSION 同步。 */
+export const METRICS_VERSION = 9
 /**
  * pickupDist 哨兵：无存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
  * 的 -1 哨兵同构。真实曼哈顿距离恒 ≥0（同格 = 0），-1 不可能与真实值混淆。
@@ -310,10 +339,33 @@ export interface Telemetry {
   // ---- metrics v8：危险暴露（plan/x20-dodge-avoidance.plan.md §2）----
   /** 累计 `hpRatio < DANGER_HP_THRESHOLD` 的 tick（仅玩家存活时计）。 */
   dangerTicks: number
-  /** 累计「在敌方弹道/炮口线上」的 tick（仅玩家存活时计；口径 = danger-metrics.ts）。 */
+  /** 累计「在敌方弹道/炮口线上」的 tick（仅玩家存活时计）。
+   *  ⚠ v9 起**谓词已改定义**（19px 带 + 无半径上限 + 判墙体遮挡）⇒ 与 v8 读数
+   *  不可比（plan §1.2 祖父条款）。 */
   threatTicks: number
   /** tick < `DMG_FIRST_WINDOW_TICKS` 的累计承伤（致死一击本就不在 player_damage 里）。 */
   dmgFirst600: number
+  // ---- metrics v9：命中方位计入（plan/geo-threat-instrumentation.plan.md §1.1）----
+  /** 背刺命中（受害者身后开火）。 */
+  backHits: number
+  /** 侧击命中（含同格贴身 + 近身对角 scrum）。 */
+  sideHits: number
+  /** 正面命中**但冻/盾豁免**（aimed 域非 far 一律进此桶；公式侧按 back 价给）。 */
+  frontHitsExempt: number
+  /** 轴向开火物理不可能命中的份额（开火后目标自己走进弹道）；只观测、不定价。
+   *  ⚠ 不含爆炸类击杀（地雷/牺牲不走 `enemy_hit`）⇒ 不是「非瞄准份额」的全量。 */
+  farHits: number
+  /** bulletId 反查不到开火记录的命中数（state-init 交棒时已在飞的弹）。 */
+  geoFallback: number
+  // ---- metrics v9：穿越税观测族（plan §1.3）----
+  /** 在线 tick 累计（raw，永真；含豁免拍）。 */
+  onLaneTicks: number
+  /** 在线 ∧ 冻/盾 的 tick 累计（raw 的**子集**，加法列）。 */
+  onLaneExemptTicks: number
+  /** 在线 ∧ 本 tick 中心格变化。 */
+  onLaneMoveTicks: number
+  /** 在线 ∧ 静止 ∧ 本 tick 开火输出（架枪直读，反证门用）。 */
+  onLaneHoldFireTicks: number
 }
 
 function countBaseWall(world: World): number {
@@ -416,8 +468,17 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     nearestPickupDist(world), // 40 pickupDist（v7：最近存活拾取中心格曼哈顿距离，哨兵 -1）
     playerHpRatio(world), // 41 playerHpRatio（v8：hp/maxHp，clamp01；玩家不在场 = 0）
     tel.dangerTicks, // 42 dangerTicks（v8：累计 hpRatio<0.4 的 tick）
-    tel.threatTicks, // 43 threatTicks（v8：累计在敌方弹道/炮口线上的 tick）
+    tel.threatTicks, // 43 threatTicks（v9 改定义：19px 带 + 无半径 + 判遮挡）
     tel.dmgFirst600, // 44 dmgFirst600（v8：tick<600 的累计承伤，不含致死一击）
+    tel.backHits, // 45 backHits（v9：背刺命中）
+    tel.sideHits, // 46 sideHits（v9：侧击命中，含同格 + scrum）
+    tel.frontHitsExempt, // 47 frontHitsExempt（v9：正面的冻/盾豁免桶）
+    tel.farHits, // 48 farHits（v9：轴向打不到的炸弹/流弹份额，不定价）
+    tel.geoFallback, // 49 geoFallback（v9：开火记录反查失败数，不进 front 推导）
+    tel.onLaneTicks, // 50 onLaneTicks（v9：在线 tick raw）
+    tel.onLaneExemptTicks, // 51 onLaneExemptTicks（v9：raw 的冻/盾子集）
+    tel.onLaneMoveTicks, // 52 onLaneMoveTicks（v9：在线且中心格变化）
+    tel.onLaneHoldFireTicks, // 53 onLaneHoldFireTicks（v9：在线且静止且开火）
   ]
 }
 
@@ -662,6 +723,16 @@ interface RunResult {
   dmgFirst600: number
   dangerTicks: number
   threatTicks: number
+  /** metrics v9 命中方位 + 穿越税（每局标量读数；逐决策步分布见 metrics 行）。 */
+  backHits: number
+  sideHits: number
+  frontHitsExempt: number
+  farHits: number
+  geoFallback: number
+  onLaneTicks: number
+  onLaneExemptTicks: number
+  onLaneMoveTicks: number
+  onLaneHoldFireTicks: number
   enemyTotal: number
   startLives: number
   puGotTank: number
@@ -800,10 +871,27 @@ function runOne(
     dangerTicks: 0,
     threatTicks: 0,
     dmgFirst600: 0,
+    backHits: 0,
+    sideHits: 0,
+    frontHitsExempt: 0,
+    farHits: 0,
+    geoFallback: 0,
+    onLaneTicks: 0,
+    onLaneExemptTicks: 0,
+    onLaneMoveTicks: 0,
+    onLaneHoldFireTicks: 0,
   }
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
   let prevCell = { col: -1, row: -1 }
+  /** metrics v9：bulletId → **开火时刻** shooter 中心格键（`bullet_fired` 事件登记）。
+   *  为什么必须有这张表：弹命中时已位移，「命中时刻弹坐标」推不出开火点；而
+   *  `bullet_fired` 事件里的弹坐标就是开火那一拍的生成位置（生成式见
+   *  `hit-geometry.ts::fireOriginCellKey`），故事件侧登记即真值 —— 不需要
+   *  「新生弹首见」那类采样启发式（评审 M3）。上界 = 本局开火数（数百条）。 */
+  const fireOriginByBullet = new Map<number, number>()
+  /** 本 tick 的开火输出（fire head，held 到下一个决策步；非冷却态）。 */
+  let fireHeld = false
   if (init) {
     // 交棒基线（plan §2 M2/M3）：metrics 只描述**交棒之后**的窗口，但不得让场上既有的东西被
     // 当成「刚发生」。seenPuIds 预置 ⇒ `powerUpsSpawned` 不把交棒时已存在的道具算成新 spawn；
@@ -902,6 +990,11 @@ function runOne(
         mask: [...masks.move, ...masks.fire],
       }
       scripted.setAction(aMove, fr.idx)
+      // 本决策步选定的 fire head（held 到下一个决策步；`onLaneHoldFireTicks` 用它，
+      // 不用 `bullet_fired` —— 后者被冷却/弹量上限门掉，是「实弹」不是「开火输出」）。
+      // ≡ export-eval-game 的 `ai.isFiring()`（nn 策略下同 ScriptedInput 持有实现，
+      // endFrame 无脉冲，两边读的是同一个 held head；god 策略只走 eval 侧，不跨源对账）。
+      fireHeld = fr.idx === 1
     }
     sim.tick()
     scripted.endFrame()
@@ -939,6 +1032,9 @@ function runOne(
         if (t - 1 < DMG_FIRST_WINDOW_TICKS) tel.dmgFirst600 += e.damage
       } else if (e.type === 'bullet_fired' && (e as any).bullet?.isPlayer) {
         tel.playerShots++
+        // metrics v9：登记**开火时刻** shooter 中心格（弹的生成位置是真值，
+        // 命中侧以 bulletId 反查；晚一步采样只会更差，见评审 M3）。
+        fireOriginByBullet.set((e as any).bullet.id, fireOriginCellKey((e as any).bullet))
       } else if (e.type === 'powerup_collected') {
         collectedThisTick++
         tel.powerUpsCollected++
@@ -954,6 +1050,35 @@ function runOne(
         hitThisTick = true
         const ki = enemyKindIndex((e as any).targetKind)
         if (ki >= 0) tel.hitsByKind[ki]++
+        // ---- metrics v9：方位计数（plan/geo-threat-instrumentation.plan.md §1.1）----
+        // V = 玩家格 − 受害敌格：受害人取**命中时刻快照**（事件字段；致死命中同 tick
+        // 被 removeDeadEntities 压实，回查必落空）；玩家取**开火时刻** shooter 格。
+        const vKey = centerCellKey(e.targetX, e.targetY, TANK, TANK)
+        const pKey = fireOriginByBullet.get(e.bulletId)
+        let pCol: number
+        let pRow: number
+        if (pKey === undefined) {
+          // state-init 交棒时已在飞的弹（本局没有它的 bullet_fired）⇒ 回退命中时刻
+          // 玩家格 + 记 geoFallback。双记是刻意的：该命中仍按 proxy 落某一个桶
+          // （front ≡ 总数 − back − side − exempt − far 守恒），geoFallback 列本身
+          // 不参与相减，只供跨局对账时标出"桶里有几发是 proxy 定位"。
+          tel.geoFallback++
+          const p = world.player
+          const fbKey = p ? centerCellKey(p.x, p.y, p.w, p.h) : vKey
+          pCol = keyCol(fbKey)
+          pRow = keyRow(fbKey)
+        } else {
+          pCol = keyCol(pKey)
+          pRow = keyRow(pKey)
+        }
+        const geo = classifyHit(pCol, pRow, keyCol(vKey), keyRow(vKey), e.targetDir)
+        if (geo === HIT_FAR) tel.farHits++
+        // 冻/盾豁免（用户口径）：raw 几何先算出（含 far 判定），**非 far 的 aimed 域**
+        // 不论 raw 是什么一律进豁免桶；far 不受豁免影响。普通 front 由总数减出。
+        else if (threatLaneExempt(world)) tel.frontHitsExempt++
+        else if (geo === HIT_BACK) tel.backHits++
+        else if (geo === HIT_SIDE) tel.sideHits++
+        // geo === HIT_FRONT ⇒ 不落桶（frontHits = enemyHits − back − side − exempt − far）
       }
     }
     // power-up census（seen-ids + same-tick pickup 对账，镜像 runner）
@@ -980,6 +1105,8 @@ function runOne(
     // 命中敌车 → stuckTicks++；否则清零。实现 = src/game/stuck-detect.ts 共享纯
     // 函数（与 Simulation.updatePlaying 末尾的 World.stuckTicks 维护同一实现）。
     const cur = playerCenterCell(world.player)
+    // metrics v9：「本 tick 位移≠0」= 中心格变化（`stuck-detect` 同口径，不另发明）。
+    const movedThisTick = cur !== null && (cur.col !== prevCell.col || cur.row !== prevCell.row)
     if (isStuckTick(world.player?.alive ?? false, cur, prevCell, hitThisTick)) {
       tel.stuckTicks++
     } else {
@@ -992,7 +1119,18 @@ function runOne(
     // （「残血」以活着为前提，死亡帧不算暴露）。
     if (world.player?.alive) {
       if (playerHpRatio(world) < DANGER_HP_THRESHOLD) tel.dangerTicks++
-      if (inThreatLane(world)) tel.threatTicks++
+      if (inThreatLane(world)) {
+        tel.threatTicks++
+        // ---- metrics v9：穿越税观测族（plan §1.3）----
+        // raw 永真：冻/盾拍**照记** onLaneTicks，豁免以**加法列**另记（不是从 raw 里扣）。
+        // 两个累计量的差分各自干净 —— 逐行 flag 相乘会在翻转拍打出幻影 ± 尖峰，
+        // 且公式引擎禁跨步归约（reward_library.py 白名单无 sum/cumsum），交集必须在
+        // 共位处一次算好（plan §1.3 机制注）。
+        tel.onLaneTicks++
+        if (threatLaneExempt(world)) tel.onLaneExemptTicks++
+        if (movedThisTick) tel.onLaneMoveTicks++
+        else if (fireHeld) tel.onLaneHoldFireTicks++
+      }
     }
 
     if (t % TELEMETRY_SAMPLE_TICKS === 0) {
@@ -1092,6 +1230,15 @@ function runOne(
     dmgFirst600: tel.dmgFirst600,
     dangerTicks: tel.dangerTicks,
     threatTicks: tel.threatTicks,
+    backHits: tel.backHits,
+    sideHits: tel.sideHits,
+    frontHitsExempt: tel.frontHitsExempt,
+    farHits: tel.farHits,
+    geoFallback: tel.geoFallback,
+    onLaneTicks: tel.onLaneTicks,
+    onLaneExemptTicks: tel.onLaneExemptTicks,
+    onLaneMoveTicks: tel.onLaneMoveTicks,
+    onLaneHoldFireTicks: tel.onLaneHoldFireTicks,
     enemyTotal: tel.enemyTotal,
     startLives: tel.startLives,
     puGotTank: tel.puGotTank,

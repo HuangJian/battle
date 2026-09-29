@@ -616,6 +616,15 @@ export class CombatSystem {
           damage: bullet.damage,
           // 目标 kind：只读观测字段（Phase 0 逐敌种画像），不回流 gameplay。
           targetKind: tank.kind,
+          // 受害车 id + 命中时刻几何快照（metrics v9 方位计数，只读观测）：
+          // ⚠ 必须在**此处**取快照——本 tick 末尾 killTank + removeDeadEntities
+          // 会把这个 tank 压实出数组，导出器晚一步回查就落空了（致死命中尤甚）。
+          targetId: tank.id,
+          targetDir: tank.dir,
+          targetX: tank.x,
+          targetY: tank.y,
+          // 命中弹 id：导出器用 bullet_fired 事件反推开火时刻 shooter 格。
+          bulletId: bullet.id,
         })
         // obs v3 sN4 / reward stuckTicks（dsf A4 同源）：本 tick 玩家命中敌车——
         // stuck 判定在 updatePlaying 末尾消费此标记后清零（不与导出器抢事件流）。

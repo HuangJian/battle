@@ -115,6 +115,15 @@ function makeTel(over: Partial<Telemetry> = {}): Telemetry {
     dangerTicks: 0,
     threatTicks: 0,
     dmgFirst600: 0,
+    backHits: 0,
+    sideHits: 0,
+    frontHitsExempt: 0,
+    farHits: 0,
+    geoFallback: 0,
+    onLaneTicks: 0,
+    onLaneExemptTicks: 0,
+    onLaneMoveTicks: 0,
+    onLaneHoldFireTicks: 0,
     ...over,
   }
 }

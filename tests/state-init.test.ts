@@ -255,7 +255,7 @@ describe('P1 注入语义（applyInitSnapshot / runOneBench 端到端）', () =>
     expect(a.initCounters).toBeNull()
     expect(a.initSnapshot).toBe('')
     expect(a.shard.metrics[0][0]).toBe(0)
-    expect(METRICS_VERSION).toBe(8) // 本 plan 不动 metrics 版本/列宽
+    expect(METRICS_VERSION).toBe(9) // v9：命中方位 5 列 + 穿越税 4 列（行宽 45→54）
     expect(a.shard.n).toBe(b.shard.n)
     expect(a.ticks).toBe(b.ticks)
     expect(a.kills).toBe(b.kills)
@@ -347,8 +347,18 @@ describe('R2 x2 事件门 × state-init（R2.4 方案 i：交棒首段禁 threat
     expect(res.shard.metrics[0][0]).toBe(CUT)
     const d = res.decisionReadout
     expect(d.n).toBeGreaterThan(0)
+    // Δt 下界 = 最小间隔闸（R2.3）。
     expect(d.minDt).toBeGreaterThanOrEqual(3)
-    expect(d.maxDt).toBeLessThanOrEqual(10)
+    // Δt 上界的两个来源（metrics v9 起本局不再是无事件局，故两者都真）：
+    //   ① 均匀边界之间 = K = 10；
+    //   ② **事件落在 K 边界前 1–2 tick ⇒ 那个均匀边界被跳过**（R2.3 唯一会改均匀子集的
+    //      路径），于是间隔 = K+1 或 K+2；
+    // 即 Δt ≤ 12。谓词判遮挡（v9 §1.2 子项③）后本局真的进事件（旧谓词下 events=0、
+    // maxDt 恒 10）—— 把上界写死成 10 就是没把这件事实记下来。
+    expect(d.maxDt).toBeLessThanOrEqual(12)
+    // 不是假设而是推导：只有事件步才可能带出非 K 的间隔（均匀子集下 b − L 恒为 0）
+    // ⇒ maxDt ≠ 10 蕴含 events > 0。
+    expect(d.events).toBeGreaterThan(0)
   })
 })
 

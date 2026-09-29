@@ -7,12 +7,13 @@
  *   ③ **最小间隔闸**（两次决策 Δt ≥ minGap；含「事件后紧邻的均匀边界被跳过」这条罕见语义）；
  *   ④ **state-init 交棒首段禁事件**（R2.4 方案 i：窗内开始的威胁不追发）。
  *
- * 夹具确定性：固定 seed、威胁态由 `alive` 开关控制（几何不变）、无墙钟、无 Math.random。
+ * 夹具确定性：固定 seed、威胁态由 `alive` 开关控制（几何不变）、场地先 `clearArena`
+ * 扫空（v9 起谓词判遮挡 ⇒ 地形是夹具的隐藏输入）、无墙钟、无 Math.random。
  */
 import { describe, expect, it } from 'bun:test'
 import { BULLET, CELL } from '../../src/constants'
 import { World } from '../../src/game/World'
-import { makeBullet, placeEnemy, positionPlayer, seedWorld } from '../helpers'
+import { clearArena, makeBullet, placeEnemy, positionPlayer, seedWorld } from '../helpers'
 import {
   DEFAULT_DECISION_K,
   DEFAULT_DECISION_MIN_GAP,
@@ -32,10 +33,21 @@ const PR = 5
 const EL = 5 // 敌车同列，3 格上方、炮口朝下
 const ER = 2
 
-/** 玩家 + 一枚可控威胁源（`enemy.alive` 即威胁开关，几何恒定）。 */
+/**
+ * 玩家 + 一枚可控威胁源（`enemy.alive` 即威胁开关，几何恒定）。
+ *
+ * ⚠ **必须 `clearArena`**（2026-09-29 metrics v9）：`inThreatLane` 现在判墙体遮挡
+ * （plan/geo-threat-instrumentation.plan.md §1.2 子项③），关卡自带地形于是成了夹具的
+ * 隐藏输入 —— 本夹具的枪线（列 6、行 4）在 hard stage 0 上恰好有砖，旧谓词不看遮挡
+ * 所以看不出来；不扫空场地，这些用例测的就是「那一格砖」而不是门的语义。
+ *
+ * 基地（BASE_POS，底部中央）与这里的几何（列 6 / 行 2–6）不相交，扫空后仍有唯一的
+ * 威胁源 = 本夹具的那辆敌车。
+ */
 function fixture(seed = 1): { world: World; enemy: { alive: boolean } } {
   const world = seedWorld(seed)
   world.startGame('hard', 'modern', 0)
+  clearArena(world)
   positionPlayer(world, PL, PR)
   const enemy = placeEnemy(world, EL, ER, 'basic', 'down')
   enemy.alive = false // 默认无威胁

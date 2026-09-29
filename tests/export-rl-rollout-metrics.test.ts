@@ -59,6 +59,15 @@ function makeTelemetry(over: Partial<Telemetry> = {}): Telemetry {
     dangerTicks: 0,
     threatTicks: 0,
     dmgFirst600: 0,
+    backHits: 0,
+    sideHits: 0,
+    frontHitsExempt: 0,
+    farHits: 0,
+    geoFallback: 0,
+    onLaneTicks: 0,
+    onLaneExemptTicks: 0,
+    onLaneMoveTicks: 0,
+    onLaneHoldFireTicks: 0,
     ...over,
   }
 }
@@ -103,8 +112,58 @@ describe('export-rl-rollout metrics 行宽', () => {
     expect(names[42]).toBe('dangerTicks')
     expect(names[43]).toBe('threatTicks')
     expect(names[44]).toBe('dmgFirst600')
+    // metrics v9（plan/geo-threat-instrumentation §1.1/§1.3）：命中方位 5 列 + 穿越税 4 列，
+    // 同样永久追加在尾部（0–44 列号不动）。**普通 front 不单列**（由总数减出）。
+    expect(names[45]).toBe('backHits')
+    expect(names[46]).toBe('sideHits')
+    expect(names[47]).toBe('frontHitsExempt')
+    expect(names[48]).toBe('farHits')
+    expect(names[49]).toBe('geoFallback')
+    expect(names[50]).toBe('onLaneTicks')
+    expect(names[51]).toBe('onLaneExemptTicks')
+    expect(names[52]).toBe('onLaneMoveTicks')
+    expect(names[53]).toBe('onLaneHoldFireTicks')
     // 列数变更必须 bump 版本（旧 shard 靠它响亮报错，不静默错读）
-    expect(py).toContain('METRICS_VERSION = 8')
+    expect(py).toContain('METRICS_VERSION = 9')
+  })
+
+  it('命中方位 5 列 + 穿越税 4 列写入 idx45–53（metrics v9）', () => {
+    const world = seedWorld(1)
+    const row = buildMetricsRow(
+      0,
+      world,
+      makeTelemetry({
+        backHits: 1,
+        sideHits: 2,
+        frontHitsExempt: 3,
+        farHits: 4,
+        geoFallback: 5,
+        onLaneTicks: 60,
+        onLaneExemptTicks: 7,
+        onLaneMoveTicks: 50,
+        onLaneHoldFireTicks: 8,
+      }),
+    )
+    expect(row.length).toBe(METRICS_DIM)
+    expect(row.slice(45, 54)).toEqual([1, 2, 3, 4, 5, 60, 7, 50, 8])
+  })
+
+  it('豁免列是 raw 的子集（onLaneExemptTicks ≤ onLaneTicks 恒成立）', () => {
+    // 交集恒包含性（plan §3）：豁免列是 raw 的加法列，**不是**从 raw 里扣出来的 ——
+    // 两个累计量各自干净，公式侧才差得出净价。这条断言把「子集」关系钉死。
+    const world = seedWorld(1)
+    const row = buildMetricsRow(
+      0,
+      world,
+      makeTelemetry({
+        onLaneTicks: 10,
+        onLaneExemptTicks: 4,
+        onLaneMoveTicks: 9,
+        onLaneHoldFireTicks: 1,
+      }),
+    )
+    expect(row[51]).toBeLessThanOrEqual(row[50])
+    expect(row[52] + row[53]).toBeLessThanOrEqual(row[50]) // 移动/架枪互斥且 ⊆ raw
   })
 
   it('危险暴露四列写入 idx41–44（metrics v8）', () => {

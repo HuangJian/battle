@@ -259,6 +259,17 @@ interface LabelAgg {
   dangerTicks: number
   threatTicks: number
   dmgFirst600: number
+  /** metrics v9：命中方位（back/side/frontHitsExempt/far + geoFallback）与穿越税观测族
+   *  （onLane 四列）的逐 label 求和；`onLaneHoldFireTicks` 是架枪直读（反证门）。 */
+  backHits: number
+  sideHits: number
+  frontHitsExempt: number
+  farHits: number
+  geoFallback: number
+  onLaneTicks: number
+  onLaneExemptTicks: number
+  onLaneMoveTicks: number
+  onLaneHoldFireTicks: number
   /** 有 `dmgFirst600` 字段的局数（clean600 的分母）。 */
   dmg600Known: number
   /** `dmgFirst600 === 0` 的局数（「前 600 tick 零承伤」，plan §1 T2）。 */
@@ -293,6 +304,15 @@ function summarize(
         dangerTicks: 0,
         threatTicks: 0,
         dmgFirst600: 0,
+        backHits: 0,
+        sideHits: 0,
+        frontHitsExempt: 0,
+        farHits: 0,
+        geoFallback: 0,
+        onLaneTicks: 0,
+        onLaneExemptTicks: 0,
+        onLaneMoveTicks: 0,
+        onLaneHoldFireTicks: 0,
         dmg600Known: 0,
         clean600: 0,
       }
@@ -312,6 +332,15 @@ function summarize(
     a.dangerTicks += r.dangerTicks ?? 0
     a.threatTicks += r.threatTicks ?? 0
     a.dmgFirst600 += r.dmgFirst600 ?? 0
+    a.backHits += r.backHits ?? 0
+    a.sideHits += r.sideHits ?? 0
+    a.frontHitsExempt += r.frontHitsExempt ?? 0
+    a.farHits += r.farHits ?? 0
+    a.geoFallback += r.geoFallback ?? 0
+    a.onLaneTicks += r.onLaneTicks ?? 0
+    a.onLaneExemptTicks += r.onLaneExemptTicks ?? 0
+    a.onLaneMoveTicks += r.onLaneMoveTicks ?? 0
+    a.onLaneHoldFireTicks += r.onLaneHoldFireTicks ?? 0
     if (r.dmgFirst600 !== undefined) {
       a.dmg600Known++
       if (r.dmgFirst600 === 0) a.clean600++
@@ -343,6 +372,15 @@ function summarize(
           .padEnd(7)} ${Math.round(a.dangerTicks / per)
           .toString()
           .padEnd(7)} ${`${a.clean600}/${a.dmg600Known}`}\n`,
+    )
+    // metrics v9（plan/geo-threat-instrumentation.plan.md §3）：命中方位 + 穿越税观测族。
+    // 逐局均值（per = 局数）；far/geoFallback 是**监视列**（不定价），hold 是架枪直读。
+    process.stderr.write(
+      `${''.padEnd(28)}   ↳ v9 back ${(a.backHits / per).toFixed(2)} side ${(a.sideHits / per).toFixed(2)}` +
+        ` fExempt ${(a.frontHitsExempt / per).toFixed(2)} far ${(a.farHits / per).toFixed(2)}` +
+        ` geofb ${(a.geoFallback / per).toFixed(2)} | onLane ${(a.onLaneTicks / per).toFixed(1)}` +
+        ` exempt ${(a.onLaneExemptTicks / per).toFixed(1)} move ${(a.onLaneMoveTicks / per).toFixed(1)}` +
+        ` holdFire ${(a.onLaneHoldFireTicks / per).toFixed(2)}\n`,
     )
   }
   // 参与度账（provenance）：**谁跑的必须自证**。只打汇总表会让“熔断/满负荷静默降本地”

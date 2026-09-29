@@ -3,20 +3,27 @@
  *
  * 体例仿 `pickup-dist-metric.test.ts`：**独立重实现**对账（本文件不看生产 helper 的实现，
  * 只按口径自己写一遍），再加边界用例与「纯函数不改 World」的断言。
- * 口径冻结在 `src/nn/danger-metrics.ts` 头注释：
- *   ① 敌弹：同轴 ±0.75 格 + 逼近 + ≤6 格；② 敌车：同轴 ±0.75 格 + 炮口朝玩家 + ≤6 格。
+ *
+ * 口径（**2026-09-29 metrics v9 改定义**，plan/geo-threat-instrumentation.plan.md §1.2）：
+ *   ① 敌弹/敌车：同轴 **< 19px**（= 坦克半宽 16 + 子弹半高 3，物理判据）+ 弹逼近 /
+ *      炮口朝玩家；
+ *   ② **无半径上限**（lane 是 lane，不论远近）；
+ *   ③ **判墙体遮挡**（沿源自己的轴 raycast，`TileMap.blocksBullet` 阻弹）。
+ * 旧口径（±0.75 格 / ≤6 格 / 不判遮挡）的读数与 v9 **不可比**（plan §1.2 祖父条款）。
  */
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { BULLET, CELL, type Direction } from '../../src/constants'
+import { BULLET, CELL, GRID, TANK, type Direction } from '../../src/constants'
 import {
   DANGER_HP_THRESHOLD,
   DMG_FIRST_WINDOW_TICKS,
   THREAT_ALIGN_BAND,
+  THREAT_ALIGN_BAND_PX,
   THREAT_RADIUS_CELLS,
   inThreatLane,
   playerHpRatio,
+  threatLaneExempt,
   threatLaneSources,
 } from '../../src/nn/danger-metrics'
 import type { Bullet } from '../../src/types'
@@ -59,10 +66,37 @@ function indepThreatSources(w: World): number {
   if (!p || !p.alive) return 0
   const pcx = p.x + p.w / 2
   const pcy = p.y + p.h / 2
-  /** 同轴 + 朝向玩家 + 半径内。 */
+  const BAND = TANK / 2 + BULLET / 2 // 19px（物理判据，不是调参）
+  // 身体的像素精确格跨度（与生产侧同口径：骑线时可能跨 3 格）。
+  const colLow = Math.floor(p.x / CELL)
+  const colHigh = Math.floor((p.x + p.w - 1) / CELL)
+  const rowLow = Math.floor(p.y / CELL)
+  const rowHigh = Math.floor((p.y + p.h - 1) / CELL)
+  const blocks = (col: number, row: number): boolean => {
+    const t = w.tileMap.get(col, row)
+    return t === 'brick' || t === 'steel' || t === 'base'
+  }
+  /** 沿源自己的轴向玩家走到玩家身体的近边，中间有无阻弹格。 */
+  const occluded = (sc: number, sr: number, vertical: boolean): boolean => {
+    if (vertical) {
+      if (sr < rowLow) {
+        for (let r = sr + 1; r < rowLow; r++) if (blocks(sc, r)) return true
+      } else {
+        for (let r = sr - 1; r > rowHigh; r--) if (blocks(sc, r)) return true
+      }
+      return false
+    }
+    if (sc < colLow) {
+      for (let c = sc + 1; c < colLow; c++) if (blocks(c, sr)) return true
+    } else {
+      for (let c = sc - 1; c > colHigh; c--) if (blocks(c, sr)) return true
+    }
+    return false
+  }
+  /** 同轴 + 朝向玩家 + 无半径上限 + 无遮挡。 */
   const counts = (ex: number, ey: number, dir: Direction): boolean => {
     const vertical = dir === 'up' || dir === 'down'
-    const aligned = vertical ? Math.abs(ex - pcx) < CELL * 0.75 : Math.abs(ey - pcy) < CELL * 0.75
+    const aligned = vertical ? Math.abs(ex - pcx) < BAND : Math.abs(ey - pcy) < BAND
     if (!aligned) return false
     const toward =
       (dir === 'down' && ey < pcy) ||
@@ -70,8 +104,7 @@ function indepThreatSources(w: World): number {
       (dir === 'right' && ex < pcx) ||
       (dir === 'left' && ex > pcx)
     if (!toward) return false
-    const dist = vertical ? Math.abs(ey - pcy) : Math.abs(ex - pcx)
-    return dist <= 6 * CELL
+    return !occluded(Math.floor(ex / CELL), Math.floor(ey / CELL), vertical)
   }
   let n = 0
   for (const b of w.bullets) {
@@ -83,6 +116,14 @@ function indepThreatSources(w: World): number {
     if (counts(t.x + t.w / 2, t.y + t.h / 2, t.dir)) n++
   }
   return n
+}
+
+/** 把整张场地清成空地（**合成世界**，plan §3）：让「同轴/带宽」用例只测谓词本身，
+ *  遮挡另设专项（显式放墙）。不带它的话关卡自带地形会让断言随关卡漂移。 */
+function emptyField(w: World): void {
+  for (let r = 0; r < GRID; r++) {
+    for (let c = 0; c < GRID; c++) w.tileMap.set(c, r, 'empty')
+  }
 }
 
 describe('danger-metrics：玩家 hp 比例', () => {
@@ -110,14 +151,19 @@ describe('danger-metrics：玩家 hp 比例', () => {
     // 与 goal-mask 的撤退阈值、paired §5.1 的 dmgFirst600 窗一致；改它们 = 改实验口径。
     expect(DANGER_HP_THRESHOLD).toBe(0.4)
     expect(DMG_FIRST_WINDOW_TICKS).toBe(600)
-    expect(THREAT_RADIUS_CELLS).toBe(6)
+    // v9：旧带宽常量仍在（dodge-l0/decision-trace 三处镜像按旧值各自实现，不得静默改），
+    // 但 `inThreatLane` 已改用**物理值** 19px（坦克半宽 16 + 子弹半高 3）。
     expect(THREAT_ALIGN_BAND).toBe(CELL * 0.75)
+    expect(THREAT_RADIUS_CELLS).toBe(6)
+    expect(THREAT_ALIGN_BAND_PX).toBe(TANK / 2 + BULLET / 2)
+    expect(THREAT_ALIGN_BAND_PX).toBe(19)
   })
 })
 
 describe('danger-metrics：弹道/炮口线威胁（弹）', () => {
-  it('同轴逼近且 ≤6 格 = 威胁；远离/超半径/偏轴 = 不威胁', () => {
+  it('同轴逼近 = 威胁（无半径上限）；远离/偏轴 = 不威胁', () => {
     const w = worldWithPlayer()
+    emptyField(w)
     const { cx, cy } = center(w)
     const push = (b: Bullet): void => {
       w.bullets.push(b)
@@ -134,14 +180,33 @@ describe('danger-metrics：弹道/炮口线威胁（弹）', () => {
     push(bulletAtCenter(cx, cy - 3 * CELL, 'up'))
     expect(sources()).toBe(0)
 
-    // 正上方 7 格（超 6 格半径）
+    // 正上方 **7 格**（旧口径超 6 格半径 ⇒ 漏判；v9 无半径上限 ⇒ 算）
     w.bullets.length = 0
     push(bulletAtCenter(cx, cy - 7 * CELL, 'down'))
-    expect(sources()).toBe(0)
+    expect(sources()).toBe(1)
 
-    // 偏轴 1 格（>0.75 格带宽）
+    // **远离旧半径**：把玩家挪到场地中部，弹在顶行（距离 13 格 > 旧 6 格）
+    // —— v9 无半径上限 ⇒ 照样算在线（远端噪声由剂量侧承担，观测不预过滤）。
+    positionPlayer(w, 12, 12)
+    emptyField(w)
+    w.bullets.length = 0
+    const mid = center(w)
+    push(bulletAtCenter(mid.cx, 0 * CELL + 3, 'down'))
+    expect(sources()).toBe(1)
+    // 复原（后续断言都用 (5,5) 的 cx/cy）
+    w.bullets.length = 0
+    positionPlayer(w, PCOL, PROW)
+    emptyField(w)
+
+    // 偏轴 1 格（16px）= **仍在 19px 带内** ⇒ 算在线。这正是 §60 的发现：
+    // 坦克 2 格宽、格子只有 16px，旧 12px 带把「中心线差一行」的炮弹全漏了。
     w.bullets.length = 0
     push(bulletAtCenter(cx + CELL, cy - 3 * CELL, 'down'))
+    expect(sources()).toBe(1)
+
+    // 偏轴 2 格（32px > 19px）⇒ 出带（这一发真打不到我）
+    w.bullets.length = 0
+    push(bulletAtCenter(cx + 2 * CELL, cy - 3 * CELL, 'down'))
     expect(sources()).toBe(0)
 
     // 正右方 2 格朝左（逼近）
@@ -166,11 +231,51 @@ describe('danger-metrics：弹道/炮口线威胁（弹）', () => {
     push(bulletAtCenter(cx, cy - 3 * CELL, 'down', { alive: false }))
     expect(sources()).toBe(0)
   })
+
+  it('带宽 19px 边界：16px 偏轴在带内（打得中），32px 出带', () => {
+    // §60：旧 12px 带漏判「中心线差一行」的炮弹（人类 4.07% → 8.19%）。
+    // 19px = 16(坦克半宽) + 3(子弹半高)，即「这一发打不打得中我」的精确判据。
+    const w = worldWithPlayer()
+    emptyField(w)
+    const { cx, cy } = center(w)
+    w.bullets.push(bulletAtCenter(cx + 16, cy - 3 * CELL, 'down')) // 16 < 19 ⇒ 在线
+    expect(threatLaneSources(w)).toBe(1)
+    w.bullets.length = 0
+    w.bullets.push(bulletAtCenter(cx + 20, cy - 3 * CELL, 'down')) // 20 > 19 ⇒ 出带
+    expect(threatLaneSources(w)).toBe(0)
+  })
+
+  it('障碍 raycast：同线有墙 ⇒ 不算在线（墙在别处不影响）', () => {
+    const w = worldWithPlayer()
+    emptyField(w)
+    const { cx, cy } = center(w)
+    // 弹自己的单格线（弹道线）的列：中心 96px ⇒ 格 6。
+    const col = Math.floor(cx / CELL)
+    // 弹在玩家正上方 4 格：先无墙 = 在线
+    w.bullets.push(bulletAtCenter(cx, cy - 4 * CELL, 'down'))
+    expect(threatLaneSources(w)).toBe(1)
+    // 在弹与玩家身体之间（行 4）插一格砖 ⇒ 弹打不到玩家 ⇒ 不算在线
+    w.tileMap.set(col, 4, 'brick')
+    expect(threatLaneSources(w)).toBe(0)
+    // 那格砖挪到**旁边一列**：不影响本弹道 ⇒ 仍在线
+    w.tileMap.set(col, 4, 'empty')
+    w.tileMap.set(col + 2, 4, 'brick')
+    expect(threatLaneSources(w)).toBe(1)
+    // 钢同理（blocksBullet = brick/steel/base）；水**不**阻弹 ⇒ 仍在线
+    w.tileMap.set(col + 2, 4, 'empty')
+    w.tileMap.set(col, 4, 'water')
+    expect(threatLaneSources(w)).toBe(1)
+    // 玩家身体那一格上的墙不算遮挡（不可能共存；确认边界不会自伤）
+    w.tileMap.set(col, 4, 'empty')
+    w.tileMap.set(col, 5, 'brick')
+    expect(threatLaneSources(w)).toBe(1)
+  })
 })
 
 describe('danger-metrics：炮口线（敌车）', () => {
-  it('同轴 + 朝玩家 + ≤6 格 = 威胁；背对/超半径/未入场/友军 = 不威胁', () => {
+  it('同轴 + 朝玩家 = 威胁（无半径上限）；背对/未入场/友军 = 不威胁', () => {
     const w = worldWithPlayer()
+    emptyField(w)
     const sources = (): number => threatLaneSources(w)
 
     // 同列 3 格、朝下（朝玩家）
@@ -183,9 +288,9 @@ describe('danger-metrics：炮口线（敌车）', () => {
     expect(sources()).toBe(0)
     w.tanks.length = 0
 
-    // 同列 7 格（超半径）——注意行号可为 0，距离用像素算
+    // 同列 7 格（旧口径超半径 ⇒ 漏判；v9 算）——注意行号可为 0，距离用像素算
     placeEnemy(w, PCOL, PROW - 7, 'basic', 'down')
-    expect(sources()).toBe(0)
+    expect(sources()).toBe(1)
     w.tanks.length = 0
 
     // 未入场（spawnTimer > 0）
@@ -200,6 +305,15 @@ describe('danger-metrics：炮口线（敌车）', () => {
     ally.allegiance = 'ally'
     expect(sources()).toBe(0)
     w.tanks.length = 0
+
+    // 障碍 raycast：炮口朝向玩家的同列上有砖 ⇒ 打不到 ⇒ 不算在线
+    const e = placeEnemy(w, PCOL, PROW - 4, 'basic', 'down')
+    expect(sources()).toBe(1)
+    const line = Math.floor((e.x + e.w / 2) / CELL)
+    w.tileMap.set(line, 4, 'brick')
+    expect(sources()).toBe(0)
+    w.tileMap.set(line, 4, 'empty')
+    w.tanks.length = 0
   })
 
   it('玩家阵亡/不在场 ⇒ 一律无威胁', () => {
@@ -212,6 +326,22 @@ describe('danger-metrics：炮口线（敌车）', () => {
     w.player!.alive = false
     expect(threatLaneSources(w)).toBe(0)
     expect(inThreatLane(w)).toBe(false)
+  })
+})
+
+describe('danger-metrics：冻/盾豁免（v9 穿越税族的加法列判据）', () => {
+  it('freezeTimer>0 或 player.shieldTimer>0 ⇒ 豁免；两者都 0 ⇒ 不豁免', () => {
+    const w = worldWithPlayer()
+    expect(threatLaneExempt(w)).toBe(false)
+    w.freezeTimer = 1
+    expect(threatLaneExempt(w)).toBe(true)
+    w.freezeTimer = 0
+    w.player!.shieldTimer = 120
+    expect(threatLaneExempt(w)).toBe(true)
+    w.player!.shieldTimer = 0
+    expect(threatLaneExempt(w)).toBe(false)
+    // 无玩家（未 startGame）⇒ 不豁免（纯读、不抛）
+    expect(threatLaneExempt(seedWorld(9))).toBe(false)
   })
 })
 

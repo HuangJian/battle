@@ -298,6 +298,22 @@ export type GameEvent =
        *  分敌种命中/击杀 + 首命中目标 + killer-kind 归因）。与 `tank_destroyed.byId`
        *  同构：只被 tools/sim 取证消费，**永不回流 World gameplay**。 */
       targetKind: TankKind
+      /** 受害车 id（additive 只读观测，2026-09-29 metrics v9 方位计数）。
+       *  ⚠ **不要**在消费侧按 id 回查几何：致死命中在同一次 `sim.tick()` 内就被
+       *  `removeDeadEntities` 压实出 `world.allTanks` ⇒ 回查落空（且非致死时也已是
+       *  拍末态）。受害几何一律读下面的快照字段。 */
+      targetId: number
+      /** 受害车**命中时刻**快照（朝向 + 左上角坐标，与 `Tank` 同构）。
+       *  为什么快照而不是回查：push 点在 `bulletHitsTank` 命中行，此处 `tank` 仍是
+       *  命中那一拍的真值；同 tick 末 `killTank` + `removeDeadEntities` 之后对象就
+       *  没了。三种几何（方位计数 / 目标格 / 朝向）都只认这一份快照。 */
+      targetDir: Direction
+      targetX: number
+      targetY: number
+      /** 命中弹的 id（additive 只读观测）：遥测侧以 `bullet_fired.bullet.id` 为同键，
+       *  反查 shooter 的**开火时刻**中心格（弹在后续 tick 里已位移，命中时刻的弹坐标
+       *  不能代推开火点）。查不到 ⇒ 该次命中记 `geoFallback`（见导出器）。 */
+      bulletId: number
     }
   | { type: 'explosion'; x: number; y: number; kind: 'small' | 'big' }
   | {

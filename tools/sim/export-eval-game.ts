@@ -42,7 +42,7 @@ import { createHash } from 'node:crypto'
 import { STAGES } from '../../src/config/stages'
 import { isArenaId, resolveArenaStage, arenaLevelOfId } from '../../src/nn/arena-ladder'
 import { decodeStageGrid } from '../../src/nn/config-stage'
-import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID } from '../../src/constants'
+import { START_LIVES, ENEMIES_PER_STAGE, BASE_POS, CELL, GRID, TANK } from '../../src/constants'
 import { type Direction, TICK_MS } from '../../src/constants'
 import { InputRecorder } from '../../src/replay/InputRecorder'
 import { buildReplayFilename, serializeReplayFile } from '../../src/replay/file'
@@ -61,7 +61,18 @@ import {
   DMG_FIRST_WINDOW_TICKS,
   inThreatLane,
   playerHpRatio,
+  threatLaneExempt,
 } from '../../src/nn/danger-metrics'
+import {
+  HIT_BACK,
+  HIT_FAR,
+  HIT_SIDE,
+  centerCellKey,
+  classifyHit,
+  fireOriginCellKey,
+  keyCol,
+  keyRow,
+} from '../../src/nn/hit-geometry'
 import {
   createDecisionGateConfig,
   createDecisionGateState,
@@ -205,10 +216,27 @@ interface Telemetry {
   // 同语义，同一实现 `src/nn/danger-metrics.ts`）----
   /** 累计 `hpRatio < 0.4` 的 tick（仅玩家存活时计）。 */
   dangerTicks: number
-  /** 累计「在敌方弹道/炮口线上」的 tick（仅玩家存活时计）。 */
+  /** 累计「在敌方弹道/炮口线上」的 tick（仅玩家存活时计）。
+   *  ⚠ v9 起**谓词已改定义**（19px 带 + 无半径上限 + 判墙体遮挡）⇒ 与 v8 读数不可比。 */
   threatTicks: number
   /** tick < 600 的累计承伤（`player_damage` 本就不含致死一击）。 */
   dmgFirst600: number
+  // ---- metrics v9：命中方位（plan/geo-threat-instrumentation.plan.md §1.1）----
+  /** 背刺命中。 */
+  backHits: number
+  /** 侧击命中（含同格 + 近身对角 scrum）。 */
+  sideHits: number
+  /** 正面命中但冻/盾豁免（aimed 域非 far 一律进此桶）。 */
+  frontHitsExempt: number
+  /** 轴向开火物理不可能命中的份额（炸弹/流弹）；只观测、不定价。 */
+  farHits: number
+  /** bulletId 反查不到开火记录的命中数（state-init 交棒时已在飞的弹）。 */
+  geoFallback: number
+  // ---- metrics v9：穿越税观测族（plan §1.3）----
+  onLaneTicks: number
+  onLaneExemptTicks: number
+  onLaneMoveTicks: number
+  onLaneHoldFireTicks: number
   /**
    * Phase 0 逐敌种画像（T3；索引 = ENEMY_KIND_ORDER）：
    * `hitsByKind` = `enemy_hit` 事件按**目标 kind** 累计；`killsByKind` = `by='player'`
@@ -293,6 +321,16 @@ interface EvalResult {
   dangerTicks: number
   threatTicks: number
   dmgFirst600: number
+  /** metrics v9：命中方位 5 列 + 穿越税 4 列（与 rollout metrics 列同名同义）。 */
+  backHits: number
+  sideHits: number
+  frontHitsExempt: number
+  farHits: number
+  geoFallback: number
+  onLaneTicks: number
+  onLaneExemptTicks: number
+  onLaneMoveTicks: number
+  onLaneHoldFireTicks: number
   playerShots: number
   powerUpsCollected: number
   /** T0.4 提顶层（scorable 有、需提顶层 §3.3 🟠）。 */
@@ -495,6 +533,15 @@ export function runEvalOne(
     dangerTicks: 0,
     threatTicks: 0,
     dmgFirst600: 0,
+    backHits: 0,
+    sideHits: 0,
+    frontHitsExempt: 0,
+    farHits: 0,
+    geoFallback: 0,
+    onLaneTicks: 0,
+    onLaneExemptTicks: 0,
+    onLaneMoveTicks: 0,
+    onLaneHoldFireTicks: 0,
     hitsByKind: [0, 0, 0, 0],
     killsByKind: [0, 0, 0, 0],
     exposureByKind: [0, 0, 0, 0],
@@ -506,6 +553,9 @@ export function runEvalOne(
   }
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
+  /** metrics v9：bulletId → **开火时刻** shooter 中心格键（与 export-rl-rollout 同式；
+   *  理由见 hit-geometry.ts::fireOriginCellKey —— 命中侧不能用弹的当前坐标反推开火点）。 */
+  const fireOriginByBullet = new Map<number, number>()
   // stuck 检出状态（与 export-rl-rollout 同式；上报取 max streak）。
   let stuckStreak = 0
   let stuckMax = 0
@@ -580,6 +630,11 @@ export function runEvalOne(
     }
     sim.tick()
     if (world.player?.alive && !world.player.moving) idleTicks++
+    // metrics v9：「本 tick 开火输出」（fire head，非冷却态、非实弹）—— 读当前驱动 tick 的
+    // 输入对象（nn 的 ScriptedInput 与 god 的 GodAIInput 都实现了 `isFiring()`）。
+    // 刻意不用 `bullet_fired`：那被冷却/弹量上限门掉，是「实弹」不是「开火输出」。
+    // nn 策略下 ≡ export-rl-rollout 的 fireHeld（同 held head，见该文件 setAction 注释）。
+    const fireOutThisTick = ai.isFiring()
     // 录制须在 endFrame 前（endFrame 会清掉本 tick 的决策态）——与 runner 同采样点。
     if (recorder) recorder.recordFrame(ai, null)
     ai.endFrame()
@@ -629,6 +684,8 @@ export function runEvalOne(
         if (t - 1 < DMG_FIRST_WINDOW_TICKS) tel.dmgFirst600 += (e as { damage: number }).damage
       } else if (e.type === 'bullet_fired' && (e as any).bullet?.isPlayer) {
         tel.playerShots++
+        // metrics v9：登记开火时刻 shooter 格（命中侧以 bulletId 反查）。
+        fireOriginByBullet.set((e as any).bullet.id, fireOriginCellKey((e as any).bullet))
       } else if (e.type === 'enemy_hit') {
         tel.enemyHits++
         hitThisTick = true
@@ -637,6 +694,29 @@ export function runEvalOne(
         if (tel.firstHitKind === null) tel.firstHitKind = hk
         const ki = enemyKindIndex(hk)
         if (ki >= 0) tel.hitsByKind[ki]++
+        // ---- metrics v9：方位计数（与 export-rl-rollout 同式，同一分类器）----
+        const vKey = centerCellKey(e.targetX, e.targetY, TANK, TANK)
+        const pKey = fireOriginByBullet.get(e.bulletId)
+        let pCol: number
+        let pRow: number
+        // geoFallback 双记与 export-rl-rollout 同式（见该文件 fallback 注释）：proxy 命中
+        // 仍落桶，geoFallback 列不参与 front 相减，只标 proxy 数。
+        if (pKey === undefined) {
+          tel.geoFallback++
+          const p = world.player
+          const fbKey = p ? centerCellKey(p.x, p.y, p.w, p.h) : vKey
+          pCol = keyCol(fbKey)
+          pRow = keyRow(fbKey)
+        } else {
+          pCol = keyCol(pKey)
+          pRow = keyRow(pKey)
+        }
+        const geo = classifyHit(pCol, pRow, keyCol(vKey), keyRow(vKey), e.targetDir)
+        if (geo === HIT_FAR) tel.farHits++
+        else if (threatLaneExempt(world)) tel.frontHitsExempt++
+        else if (geo === HIT_BACK) tel.backHits++
+        else if (geo === HIT_SIDE) tel.sideHits++
+        // geo === HIT_FRONT ⇒ 不落桶（frontHits = enemyHits − back − side − exempt − far）
       } else if (e.type === 'powerup_collected') {
         collectedThisTick++
         tel.powerUpsCollected++
@@ -670,9 +750,13 @@ export function runEvalOne(
       prevLivePuIds = live
     }
     // 停滞检出（与 export-rl-rollout 同式；上报取整局 max streak）。
+    // metrics v9：「本 tick 位移≠0」= 中心格变化（`stuck-detect` 同口径）。
+    let movedThisTick = false
     {
       const pcx = Math.floor(((world.player?.x ?? 0) + 16) / CELL)
       const pcy = Math.floor(((world.player?.y ?? 0) + 16) / CELL)
+      movedThisTick =
+        (world.player?.alive ?? false) && (pcx !== prevCell.col || pcy !== prevCell.row)
       if (world.player?.alive && pcx === prevCell.col && pcy === prevCell.row && !hitThisTick) {
         stuckStreak++
         if (stuckStreak > stuckMax) stuckMax = stuckStreak
@@ -681,10 +765,17 @@ export function runEvalOne(
       }
       prevCell = { col: pcx, row: pcy }
     }
-    // 危险暴露累加（metrics v8）：与 stuck 检出同刻（本 tick 终态）；玩家阵亡期间不计。
+    // 危险暴露累加（metrics v8/v9）：与 stuck 检出同刻（本 tick 终态）；玩家阵亡期间不计。
     if (world.player?.alive) {
       if (playerHpRatio(world) < DANGER_HP_THRESHOLD) tel.dangerTicks++
-      if (inThreatLane(world)) tel.threatTicks++
+      if (inThreatLane(world)) {
+        tel.threatTicks++
+        // metrics v9：穿越税观测族（与 export-rl-rollout 同式；raw 永真 + 豁免加法列）。
+        tel.onLaneTicks++
+        if (threatLaneExempt(world)) tel.onLaneExemptTicks++
+        if (movedThisTick) tel.onLaneMoveTicks++
+        else if (fireOutThisTick) tel.onLaneHoldFireTicks++
+      }
     }
     if (t % TELEMETRY_SAMPLE_TICKS === 0) {
       tel.basePressureSum += sampleBasePressure(world)
@@ -847,6 +938,15 @@ export function runEvalOne(
     dangerTicks: tel.dangerTicks,
     threatTicks: tel.threatTicks,
     dmgFirst600: tel.dmgFirst600,
+    backHits: tel.backHits,
+    sideHits: tel.sideHits,
+    frontHitsExempt: tel.frontHitsExempt,
+    farHits: tel.farHits,
+    geoFallback: tel.geoFallback,
+    onLaneTicks: tel.onLaneTicks,
+    onLaneExemptTicks: tel.onLaneExemptTicks,
+    onLaneMoveTicks: tel.onLaneMoveTicks,
+    onLaneHoldFireTicks: tel.onLaneHoldFireTicks,
     cellsVisited: tel.cellsVisited.size,
     firstKillTick: tel.firstKillTick ?? null,
     stuckTicks: tel.stuckTicks,
@@ -990,6 +1090,16 @@ export function main(argv: string[]): void {
     dangerTicks: res.dangerTicks,
     threatTicks: res.threatTicks,
     dmgFirst600: res.dmgFirst600,
+    // metrics v9：命中方位 5 列 + 穿越税 4 列（顶层直出，与 rollout metrics 行同源）。
+    backHits: res.backHits,
+    sideHits: res.sideHits,
+    frontHitsExempt: res.frontHitsExempt,
+    farHits: res.farHits,
+    geoFallback: res.geoFallback,
+    onLaneTicks: res.onLaneTicks,
+    onLaneExemptTicks: res.onLaneExemptTicks,
+    onLaneMoveTicks: res.onLaneMoveTicks,
+    onLaneHoldFireTicks: res.onLaneHoldFireTicks,
     hitRate: res.playerShots > 0 ? +(res.enemyHits / res.playerShots).toFixed(4) : 0,
     powerUpsCollected: res.powerUpsCollected,
     // T0.4 顶层贯通（§3.3 🟠🔴）：EvalStore / eval_dispatch.record() 直读这些键。

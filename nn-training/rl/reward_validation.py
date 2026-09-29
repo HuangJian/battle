@@ -85,6 +85,18 @@ DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     "dangerTicks": (0.0, 36000.0),  # 累计 tick 的上界 = maxTicks
     "threatTicks": (0.0, 36000.0),
     "dmgFirst600": (0.0, 500.0),  # 开局窗承伤上界同 playerDamageTaken
+    # metrics v9：命中方位 5 列 + 穿越税 4 列（plan/geo-threat-instrumentation §1.1/§1.3）。
+    # 加列必须登记域，否则 symbolic_envelope 角点无法求值
+    # （test_all_metrics_have_envelope_range 锁）。
+    "backHits": (0.0, 500.0),  # 上界同 enemyHits（命中数 ≥ backHits）
+    "sideHits": (0.0, 500.0),
+    "frontHitsExempt": (0.0, 500.0),
+    "farHits": (0.0, 500.0),
+    "geoFallback": (0.0, 500.0),
+    "onLaneTicks": (0.0, 36000.0),  # 累计 tick 的上界 = maxTicks
+    "onLaneExemptTicks": (0.0, 36000.0),  # raw 的子集，同界
+    "onLaneMoveTicks": (0.0, 36000.0),
+    "onLaneHoldFireTicks": (0.0, 36000.0),
 }
 
 #: 单加性项在角点上的绝对上界（超过即判为数值爆炸风险）。

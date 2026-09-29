@@ -5326,3 +5326,50 @@ eval 有池）—— 范围更大、与本次「机制同质化」不同题，�
 上机才知道；故有跨语言对拍钉子）· 把 `for_script` 又当成池的身份 ⇒ 同一轮混 mode 时又要建多个池。
 
 —— 全文（判例表 / 读数 / 桩接法）→ `docs/nn/runtime-opt.md` §28
+
+## §2026-09-28-goalnn-gate-baseline-8（2026-09-28，门必须配平凡基线）
+
+- **背景**：wait-gate 的 F1≥0.60 门被一行“重复上一步”（F1≈0.69–0.72）击穿——
+  门立了半年（plan §3 同款写法），从没人问过平凡基线是多少。
+- **备选与否决**：“门数字面合理即可” —— 否；合理数字可能全是粘性/多数类/同义反复
+  （本案三样占全：粘性 a=0.689、多数类、s22 后果变量）。
+- **决定**：一切行为门（plan 课程/探针的通过线）在 pin 数字的同时，必须 pin 一个
+  同口径平凡基线（重复上一步/多数类常数/单特征，共位计算），门过线且**显著超基线**
+  才算过；泄漏消融（去后果变量重跑）是 P0 第一道门。
+- **违反后果**：门成了同义反复的毕业典礼——模型学到粘性，账本记成功劳，下一腿在
+  沙子上继续盖。
+- 全文 → `docs/nn/experiments.md` §58。
+
+## §2026-09-29-goalnn-metrics-v9（2026-09-29，观测列先于定价；改谓词必须断代）
+
+- **背景**：三件事都是「先有数才有门」——通道 1（背面奖）缺方位参数；生产 `threatTicks` 漏判约六成
+  （12px vs 19px，`docs/nn/experiments.md` §60）；穿越税立法缺观测列。合并为一次 metrics 批量改动。
+- **决定**：`METRICS_VERSION 8→9`、行宽 `45→54`，尾部追加 9 列：`backHits/sideHits/frontHitsExempt/`
+  `farHits/geoFallback`（idx45–49）＋`onLaneTicks/onLaneExemptTicks/onLaneMoveTicks/onLaneHoldFireTicks`
+  （idx50–53）；`threatTicks` 谓词**原地改定义**（19px = 坦克半宽 16 + 子弹半高 3 / 去半径上限 /
+  判墙体遮挡）；**公式一个字不动**（零调参；`wGeo*`/`wMuzzle*` 另开课程文件）。
+- **豁免住公式侧**：观测只记事实——raw 列不因豁免而重定义，冻/盾以**加法列**（`*Exempt`）另记，
+  交集必须在共位处一次算好（逐行 flag 相乘会在翻转沿打出幻影 ± 尖峰；且公式引擎禁跨步归约
+  `reward_library.assert_no_time_axis_reducers`）。定价权在课程公式。
+- **备选与否决**：① §60 的「新增 `threatTicks2` 并存」——否：近义列污染立法侧，且旧谓词下
+  逐 tick 状态已丢、**复算本来就不可能**，新列只是把「已知偏低」留在 schema 里被后人误引；
+  ② 逐行 flag 相乘——否（见上）；③ 靠 `targetId` 回查受害几何——否：致死命中同 tick 被
+  `removeDeadEntities` 压实 ⇒ 改事件侧**快照**（`targetDir/targetX/targetY`）＋`bulletId`
+  反查开火时刻（`bullet_fired` 登记，非首见采样）。
+- **口径断代（祖父条款）**：新旧 `threatTicks` 不可比 ⇒ L1/L1d2/L2b/dodge-l3 的「机制零位移」
+  verdict 维持原判但**标注断代**；l2a 用 `dangerTicks` 不受影响。
+- **断代义务（评审 B2/B3，已核）**：`corpus_identity_fp` 的 payload 只含 obs schema/课程/reward
+  （`nn-training/rl/config.py`）——**不含 metrics 列/版本，也不含 `decision_events`** ⇒ 换谓词后
+  旧/新 shard 同血缘、D14 不拒收、可静默混训。故：本刀不开训练腿；要开腿必须新 `--out`/`--traj`，
+  或照 `move_label_semantics` 先例把语义标签**无条件**写进 payload。`inThreatLane` 同时是**决策门**
+  输入（7 处调用，含部署链 `policy-input.ts` 与 `obs-encoder.decisionTick` condition 4）⇒ 已训过的
+  `decision_events` 课换谓词同样必须先断代（`h5e-events` 是草稿未开训，无需）。
+- **违反后果**：① 按旧口径引用 v8 之前的 `threatTicks` 与 L 系 verdict ⇒ 结论错误且无从察觉
+  （没有任何门拦得住）；② 给 `decision_events` 课换谓词不换 `--out` ⇒ 同一课程目录混两种 MDP
+  采样，账本写着「同一分布」；③ 再往 schema 加近义列 ⇒ 立法侧引用分叉。
+- **证据（不是承诺）**：`freeze:check` 绿（事件加字段不进 det 签名）· reward golden 64 例 reward
+  **逐位不变**（只多 9 尾列）· `bun run check` 2264 pass/0 fail · nn 门禁 3339 passed。lockstep
+  **七处 + ⑧** 全部登记（⑦含 `test_item_metrics_layout_locked` 尾部清单；⑥含
+  `v7_phi_ts_oracle.json` 宽度同步）。
+- 全文 → `docs/nn/experiments.md` §64；审计（读者/写者闭集 + 语料身份 + 决策门半径）→
+  `docs/geo-threat-audit.md`。

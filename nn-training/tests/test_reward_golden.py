@@ -732,6 +732,15 @@ def test_item_metrics_layout_locked() -> None:
         "dangerTicks",  # idx42（v8：累计 hpRatio<0.4 的 tick）
         "threatTicks",  # idx43（v8：累计在敌方弹道/炮口线上的 tick；口径冻结在 danger-metrics.ts）
         "dmgFirst600",  # idx44（v8：tick<600 累计承伤，不含致死一击）
+        "backHits",  # idx45（v9：背刺命中；分类器 = src/nn/hit-geometry.ts）
+        "sideHits",  # idx46（v9：侧击命中，含同格 + 2 格 scrum）
+        "frontHitsExempt",  # idx47（v9：正面但冻/盾豁免；公式侧按 back 价给）
+        "farHits",  # idx48（v9：轴向打不到的炸弹/流弹份额，只观测不定价）
+        "geoFallback",  # idx49（v9：开火记录反查失败数，不进 front 推导）
+        "onLaneTicks",  # idx50（v9：在线 tick raw，永真）
+        "onLaneExemptTicks",  # idx51（v9：raw 的冻/盾子集，加法列）
+        "onLaneMoveTicks",  # idx52（v9：在线且中心格变化）
+        "onLaneHoldFireTicks",  # idx53（v9：在线且静止且开火输出）
     ]
     assert METRIC_INDEX["puGotBomb"] == 25
     assert METRIC_INDEX["puSpawnShield"] == 24
@@ -859,7 +868,7 @@ def test_credit_p6_formula_and_course() -> None:
     rep = _vr(c.reward_spec())
     assert rep.ok, rep.errors
     assert rep.warnings == (), rep.warnings
-    assert METRICS_VERSION == 8
+    assert METRICS_VERSION == 9
 
     # 公式按列加权：杀 1 basic 再杀 1 power 的两步势差 = +3 / +6（wHit/wWin 本例为 0）
     spec = RewardSpec(
@@ -986,6 +995,198 @@ def test_envelope_virtual_term_evaluates_zero_outside_outcome() -> None:
     assert term.at == (36000.0,)
 
 
+# ================================================================== x5 价格双臂
+# h5a-earlydmg / h5b-clean（2026-09-28）：两条单变量价格臂，取代 h5-stop / h5e-events。
+# 起因是一个可算的等式：玩家血池 250、basic 敌弹 100 伤/发 ⇒ 原配方下
+# **一次中弹 = wDmg 0.03×100 = 3.0 = 恰好一个 kill（wKill 3.0）**，而门测零伤通关
+# ⇒ 零伤通关在同价下是理性不作为。臂 A 抬惩罚侧（一枪 = 6.0 = 两个 kill），
+# 臂 B 加奖励侧（干净通关一次性 +6.0）。下面的用例把「单变量」与两条价格语义钉住。
+
+
+def _h5_arm(name: str) -> CourseConfig:
+    return load_course(name)
+
+
+def _h5_episode(
+    fn,
+    *,
+    dmg: float,
+    cleared: bool,
+    kills: float = 5.0,
+    cells: float = 83.0,
+    hits: float = 13.4,
+    shots: float = 28.0,
+) -> np.ndarray:
+    """一局两行（起手 + 终局）的指标矩阵；`cleared` 只动 clearTick 哨兵。
+
+    默认列 = h5-stop it65 **通关局**条件均值（kills 5.0 / hits 13.4 / shots 28 /
+    cells 83）。躲藏档要显式传 kills/cells/hits —— 拿通关局的计数器去比"躲到超时"
+    是拿两局不可比的行做比较（承伤少就赢），那种断言测不出任何东西。
+    """
+    m = np.zeros((2, METRICS_DIM), dtype=np.float64)
+    m[:, METRIC_INDEX["ticks"]] = [0.0, 1500.0]
+    # row 0 = tick 0 快照：**哨兵 −1**（未清场）。np.zeros 的默认 0.0 是**合法值**
+    # （"第 0 tick 就已清场"）⇒ 若两行都写 1500，`where(clearTick>=0,…)` 会在 row 0
+    # 就成立，Φ[0] 与 Φ[1] 里的 +wWin/+wClean 互相抵消，差分把整项抹掉（读数恒 0）。
+    m[:, METRIC_INDEX["clearTick"]] = -1.0
+    m[1, METRIC_INDEX["clearTick"]] = 1500.0 if cleared else -1.0
+    m[1, METRIC_INDEX["kills"]] = kills
+    m[1, METRIC_INDEX["enemyHits"]] = hits
+    m[1, METRIC_INDEX["playerShots"]] = shots
+    m[1, METRIC_INDEX["cellsVisited"]] = cells
+    m[1, METRIC_INDEX["playerDamageTaken"]] = dmg
+    return m
+
+
+def test_h5_arms_single_variable() -> None:
+    """两臂与 h5-stop 的差异**只有**价格那一处（环境/预算/优化器/评估/起点全同）。
+
+    单变量是这两条腿的全部实验价值：任何第二处差异都会让读数不可归因。
+    """
+    base = _h5_arm("h5-stop")
+    a = _h5_arm("h5a-earlydmg")
+    b = _h5_arm("h5b-clean")
+    same = (
+        "mode",
+        "level",
+        "stages",
+        "max_ticks",
+        "difficulty",
+        "player",
+        "max_hours",
+        "workers",
+        "lr",
+        "epochs",
+        "mb",
+        "normalize_ret",
+        "gamma",
+        "lam",
+        "ppo_schedule",
+        "target_transitions",
+        "est_samples_per_game",
+        "seed_rotate",
+        "ent_break",
+        "eval_stages",
+        "eval_games_per_stage",
+        "eval_every",
+        "bc",
+        "kickstart_ref",
+        "warmup_iters",
+        "decision_events",
+    )
+    for key in same:
+        assert getattr(a, key) == getattr(base, key), f"臂 A 在 {key} 上偏离 h5-stop"
+        assert getattr(b, key) == getattr(base, key), f"臂 B 在 {key} 上偏离 h5-stop"
+    # stream：两臂显式钉 0；h5-stop 文件未声明（CourseConfig 缺省 1），但课程→args 只搬
+    # `model_fields_set` 里的键 ⇒ 未声明 = args 走 argparse 缺省 0，两条老腿的 run_start
+    # 实测就是 `stream: 0, _explicit_stream: false`。这里钉 0 是**行为等价 + 把 §15.6
+    # 的理由写进文件**，不是第二处变量。
+    assert a.stream == b.stream == 0 and base.stream == 1
+    # 预算：两臂是**诊断腿**（判决点 it50 = 10 个评估点），刻意比 h5-stop 的 150 轮短。
+    # 两臂之间必须相等（等预算才可比），与 h5-stop 不同是**有意的**、不是第二处变量。
+    assert a.iters == b.iters == 80 and base.iters == 150
+    assert a.max_hours == b.max_hours == base.max_hours
+    # v4 配方其余五项 + 终端分配不动
+    for key, v in base.reward.params.items():
+        assert b.reward.params[key] == v, f"臂 B 改了 {key}"
+    assert dict(a.reward.params) == {**base.reward.params, "wEarlyDmg": 0.06}
+    assert a.reward.terminal == base.reward.terminal
+    assert b.reward.terminal == base.reward.terminal
+    assert b.reward.formula.startswith(base.reward.formula + " + wClean*")
+    assert a.reward.formula.startswith(base.reward.formula + " - wEarlyDmg*")
+    assert "wClean" not in base.reward.params and "wClean" not in a.reward.params
+    assert "wEarlyDmg" not in base.reward.params and "wEarlyDmg" not in b.reward.params
+    # 路径互不相犯（§15.5 禁续跑：out/traj/backup 三处都必须新目录）
+    paths = {c.name: (c.out, c.traj, c.backup_dir) for c in (base, a, b)}
+    assert len(set(paths.values())) == 3, paths
+
+
+def test_h5a_early_window_price() -> None:
+    """臂 A：**只罚开局 600 tick**（`-wEarlyDmg*dmgFirst600`），全局 `wDmg` 保持 0.03。
+
+    钉三件事：
+      ① 全局血价不动（h5-stop 的 3.0/发还在）—— 加窗口项**不是**把全局项翻倍；
+      ② 开局一发（100 伤）额外再罚 6.0 = 两个 kill ⇒ 总价 9.0；
+      ③ **600 tick 之后挨打不额外加价**（人类后期本来就不等，全局提价会罚错窗口）。
+    """
+    fn_a = build_reward_fn(_h5_arm("h5a-earlydmg").reward_spec())
+    fn_b = build_reward_fn(_h5_arm("h5-stop").reward_spec())
+
+    def window(dmg_at: int, *, dmg: float, early: float) -> np.ndarray:
+        """三行 metrics：伤害落在第 `dmg_at`→`dmg_at+1` 步（tick 300 = 开局窗内，
+        tick 900 = 窗外）；`dmgFirst600` 按 TS 侧口径只在 tick<600 累加。"""
+        ticks = [0.0, 300.0, 900.0]
+        m = np.zeros((3, METRICS_DIM), dtype=np.float64)
+        m[:, METRIC_INDEX["ticks"]] = ticks
+        m[:, METRIC_INDEX["clearTick"]] = -1.0
+        m[:, METRIC_INDEX["firstKillTick"]] = -1.0
+        if dmg_at == 1:  # 落在 300 → 900 之间 ⇒ 开局窗内（300 < 600）
+            m[2, METRIC_INDEX["playerDamageTaken"]] = dmg
+            m[2, METRIC_INDEX["dmgFirst600"]] = early
+        else:  # 落在 900 之后（窗外来不及，故本用例只验证「窗外不加价」）
+            m[2, METRIC_INDEX["playerDamageTaken"]] = dmg
+            m[2, METRIC_INDEX["dmgFirst600"]] = 0.0
+        return m
+
+    early_hit = float(fn_a(window(1, dmg=100.0, early=100.0), "stage_clear", 0.0, 1).sum())
+    early_clean = float(fn_a(window(1, dmg=0.0, early=0.0), "stage_clear", 0.0, 1).sum())
+    # ① + ②：开局一发总罚 3.0（全局）+ 6.0（窗口）= 9.0
+    assert early_clean - early_hit == pytest.approx(9.0)
+    # 全局项没被动：同一发在原配方里只罚 3.0
+    assert early_clean - float(fn_b(window(1, dmg=100.0, early=100.0), "stage_clear", 0.0, 1).sum()) == (
+        pytest.approx(3.0)
+    )
+    # ③ 窗外：600 tick 之后挨的一发只吃全局 3.0，窗口项恒 0
+    late_clean = float(fn_a(window(1, dmg=0.0, early=0.0), "stage_clear", 0.0, 1).sum())
+    late_hit = float(fn_a(_h5_late_damage(100.0), "stage_clear", 0.0, 1).sum())
+    assert late_clean - late_hit == pytest.approx(3.0)
+    # 剂量锚：wEarlyDmg 0.06 ⇒ 开局一枪 = 6.0 = 两个 kill（wKill 3.0）
+    params = _h5_arm("h5a-earlydmg").reward.params
+    assert params["wEarlyDmg"] * 100.0 == pytest.approx(2.0 * params["wKill"])
+    assert params["wDmg"] == 0.03
+    # 不制造躲藏最优：脏通关 ≫ 躲到超时
+    trade = float(fn_a(_h5_episode(fn_a, dmg=106.0, cleared=True), "stage_clear", 0.0, 1).sum())
+    # `Any` 是必要的：这袋 kwargs 混了 float 与 bool，mypy 会按数值塔把它们并成
+    # `dict[str, float]`，摊参时 `cleared: bool` 就报 arg-type（值本身全对）。
+    hide: dict[str, Any] = dict(
+        dmg=30.0, cleared=False, kills=2.0, cells=60.0, hits=6.0, shots=20.0
+    )
+    timeout = float(fn_a(_h5_episode(fn_a, **hide), "timeout", 0.0, 1).sum())
+    assert trade > timeout + 10.0, (trade, timeout)
+
+
+def _h5_late_damage(dmg: float) -> np.ndarray:
+    """伤害发生在 600 tick **之后**的三行 metrics（`dmgFirst600` 恒 0，TS 侧口径）。"""
+    m = np.zeros((3, METRICS_DIM), dtype=np.float64)
+    m[:, METRIC_INDEX["ticks"]] = [0.0, 700.0, 1500.0]
+    m[:, METRIC_INDEX["clearTick"]] = -1.0
+    m[:, METRIC_INDEX["firstKillTick"]] = -1.0
+    m[2, METRIC_INDEX["playerDamageTaken"]] = dmg
+    return m
+
+
+def test_h5b_clean_clear_term() -> None:
+    """臂 B：一次性 +6.0 只在「清场 **且** 零伤」时付；`clearTick=-1` 或伤 >0 都不付。"""
+    fn = build_reward_fn(_h5_arm("h5b-clean").reward_spec())
+    total = lambda **kw: float(  # noqa: E731
+        fn(_h5_episode(fn, **kw), "stage_clear", 0.0, 1).sum()
+    )
+    # 清场增量 = wWin(2.0) + wClean(6.0) = 8.0（零伤时）；有伤时只剩 wWin = 2.0
+    assert total(dmg=0.0, cleared=True) - total(dmg=0.0, cleared=False) == pytest.approx(8.0)
+    assert total(dmg=100.0, cleared=True) - total(dmg=100.0, cleared=False) == pytest.approx(2.0)
+    # 边界：`playerDamageTaken <= 0` 是闭区间 —— 0 付、0.5 不付（实战伤是整数）。
+    # 差额 = 6.0（clean 项熄灭）+ 0.03×0.5（0.5 点伤的价格）
+    assert total(dmg=0.0, cleared=True) - total(dmg=0.5, cleared=True) == pytest.approx(
+        6.0 + 0.03 * 0.5
+    )
+    # 与原配方比：干净通关 +6.0，脏通关 +0
+    base = build_reward_fn(_h5_arm("h5-stop").reward_spec())
+    for dmg in (0.0, 100.0):
+        got = float(fn(_h5_episode(fn, dmg=dmg, cleared=True), "stage_clear", 0.0, 1).sum())
+        ref = float(base(_h5_episode(base, dmg=dmg, cleared=True), "stage_clear", 0.0, 1).sum())
+        assert got - ref == pytest.approx(6.0 if dmg == 0.0 else 0.0), dmg
+
+
 if __name__ == "__main__":
     for fn in (
         test_no_time_axis_reducers,
@@ -1006,6 +1207,9 @@ if __name__ == "__main__":
         test_envelope_handles_outcome_virtual_terms,
         test_envelope_virtual_term_evaluates_zero_outside_outcome,
         test_c6_bonus_clear_compensation,
+        test_h5_arms_single_variable,
+        test_h5a_early_window_price,
+        test_h5b_clean_clear_term,
         test_param_schedule_linear_and_step,
         test_v7_formula_matches_builtin_bitwise,
         test_v7_first_kill_sentinel,

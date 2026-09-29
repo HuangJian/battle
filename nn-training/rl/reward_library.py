@@ -127,14 +127,40 @@ METRICS: tuple[str, ...] = (
     "dmgFirst600",  # 44  ← v8：tick < 600 的累计承伤（开局窗）。`player_damage` 事件本就
     #                     不含致死一击（src/game/SimulationCombat.ts:604-609）⇒ 与
     #                     paired §5.1 的「不含致死那一击」口径天然一致。
+    # ---- metrics v9：命中方位计入 + 穿越税观测族（plan/geo-threat-instrumentation
+    #      .plan.md §1.1/§1.3；idx 永久追加在尾部，0–44 列号不动）----
+    "backHits",  # 45  ← v9：背刺命中（分类器唯一实现 src/nn/hit-geometry.ts；
+    #                     shooter 格取**开火时刻**、受害车几何取**命中时刻快照**）。
+    "sideHits",  # 46  ← v9：侧击命中（含同格贴身 + 2 格近身对角 scrum 区）。
+    "frontHitsExempt",  # 47  ← v9：正面命中**但冻/盾豁免**（aimed 域非 far 一律进此桶；
+    #                     公式侧按 back 价给）。与 onLaneExemptTicks 同构：豁免以
+    #                     **加法列**存在，raw 列永不被重定义。
+    "farHits",  # 48  ← v9：轴向开火**物理不可能命中**的份额（开火后目标自己走进弹道）。
+    #                     **只观测、不定价**（非瞄准份额 monitor）。⚠ 不是全量：地雷/牺牲
+    #                     等爆炸类击杀不推 enemy_hit（唯一推点 SimulationCombat.bulletHitsTank）
+    #                     ⇒ 它们不落任何方位桶。
+    "geoFallback",  # 49  ← v9：bulletId 反查不到开火记录的命中数（state-init 交棒时已在飞的弹）。
+    #                     不进 front 推导（frontHits ≡ enemyHits − back 均 − side − exempt − far）。
+    "onLaneTicks",  # 50  ← v9：在线 tick 累计（raw，**永真**；含豁免拍）。与 threatTicks 同谓词
+    #                     同值 —— 分列是为了给「未来换谓词只动一族」留位（plan §1.3）。
+    "onLaneExemptTicks",  # 51  ← v9：raw 的冻/盾子集（lane ∧ 豁免），**加法列**。
+    #                     公式侧净价示例：`-w*d(onLaneTicks) + w*d(onLaneExemptTicks)`。
+    #                     ⚠ 逐行 flag 相乘会在翻转拍打出幻影 ± 尖峰，且引擎禁跨步归约
+    #                     （白名单无 sum/cumsum）⇒ 交集必须在共位处一次算好。
+    "onLaneMoveTicks",  # 52  ← v9：在线 ∧ 本 tick 中心格变化（stuck-detect 同口径）。
+    "onLaneHoldFireTicks",  # 53  ← v9：在线 ∧ 静止 ∧ 本 tick 开火输出（架枪直读，反证门专用）。
+    #                     上四列均为累计 tick 计数器：Φ 逐行差分 ⇒ 直接入公式 = 每 tick
+    #                     罚款且 Φ 无界，入公式请封顶或改深度型势（同 dangerTicks 警告）。
 )
 
 METRIC_INDEX: dict[str, int] = {name: i for i, name in enumerate(METRICS)}
 METRICS_DIM = len(METRICS)
 #: shard manifest 版本：`[N+1,45] f8（idx0–44）` 布局。任何用 `shape[0]` 推 episode 长度的
 #: 下游在版本不匹配时必须响亮报错，而非静默错读（评审 LC §1.1）。
-#: v8（plan/x20-dodge-avoidance §2）：危险暴露四列 —— 旧 v7 语料与本版不兼容。
-METRICS_VERSION = 8
+#: v8（plan/x20-dodge-avoidance §2）：危险暴露四列。
+#: v9（plan/geo-threat-instrumentation §1.1/§1.3）：命中方位 5 列 + 穿越税 4 列；
+#: **同时** threatTicks 谓词原地改定义（19px 带 / 无半径 / 判遮挡）—— 新旧读数不可比。
+METRICS_VERSION = 9
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
@@ -861,7 +887,8 @@ def assert_no_time_axis_reducers() -> None:
 def _self_check() -> None:
     assert_no_time_axis_reducers()
     # v8：追加 idx41–44 playerHpRatio/dangerTicks/threatTicks/dmgFirst600
-    assert len(METRICS) == METRICS_DIM == 45, METRICS_DIM
+    # v9：追加 idx45–53 命中方位 5 列 + 穿越税 4 列
+    assert len(METRICS) == METRICS_DIM == 54, METRICS_DIM
     assert len(set(METRICS)) == METRICS_DIM
 
 
