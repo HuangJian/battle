@@ -35,7 +35,6 @@ if str(ROOT) not in sys.path:
 
 import common.platform_utils as pu
 import worker.iter_rollout as iter_rollout
-from biz.iter_job import build_iter_spec
 from common import game_watch
 from common.protocol import (
     INIT_WEIGHTS_NAME,
@@ -55,6 +54,7 @@ from common.protocol import (
     validate_rollout_spec,
 )
 from trainer.loop_steps import TrainingSteps
+from worker.iter_job import build_iter_spec
 from worker.iter_rollout import run_iter_rollout, scan_shard_dirs, verify_shards
 
 # ------------------------------------------------------------------ fixtures
@@ -353,7 +353,7 @@ def test_per_game_comes_from_shard_manifests_not_batch_reports(tmp_path: Path) -
     数组 `stages`/`seeds`、没有 `kills` 这些单局字段 ⇒ 「无 (stage,seed) 就丢」把每行都丢掉
     ⇒ 落地方不写 `it<N>/per-game.json` ⇒ 读方（`readRoundActuals`）四列恒空。
     """
-    from biz.reports import compact_per_game
+    from worker.reports import compact_per_game
 
     # 真实单局 manifest 的字段集（`tools/sim/export-rl-rollout.ts` 的 manifest 对象）：
     # 读方 `entryFromManifest` 读的就是这一套名字（两腿同字段，没有翻译层）。
@@ -1712,7 +1712,7 @@ class _IterStub(TrainingSteps):
 
 def _stub_iter_spec(monkeypatch) -> None:
     """`build_iter_spec` 需要真课程对象——本用例只验失败分类，规格换桩。"""
-    monkeypatch.setattr("biz.iter_job.build_iter_spec", lambda *a, **k: {"argv": [], "wver": "w"})
+    monkeypatch.setattr("worker.iter_job.build_iter_spec", lambda *a, **k: {"argv": [], "wver": "w"})
 
 
 def test_remote_iter_fatal_http_aborts_without_retry(tmp_path: Path, monkeypatch) -> None:

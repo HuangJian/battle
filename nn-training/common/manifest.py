@@ -416,7 +416,7 @@ def data_fp(shard_dirs: Sequence[str | Path]) -> str:
 # ------------------------------------------------------------------ M3 rollout 规格
 #
 # 为什么 argv 是规格的 SSOT（而不是 stages/seeds/difficulty 一堆字段）：
-# hub 侧本来就有 `rl/cmd.build_rollout_cmd` 拼装本机 rollout 命令（三导出器 + 课程
+# hub 侧本来就有 `biz/cmd.build_rollout_cmd` 拼装本机 rollout 命令（三导出器 + 课程
 # 覆盖 + D14 血缘，单源）。上云时**用同一个函数**、只把路径换成 job 目录内的相对
 # 路径，再把它交给节点执行 ⇒ 「节点跑的采集」与「本机跑的采集」逐字节同命令，
 # 逐位对拍（计划 §5.5①）是构造性质而不是靠人去对对参数。新增一个字段就等于在

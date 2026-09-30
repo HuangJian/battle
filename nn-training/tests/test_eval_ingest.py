@@ -12,14 +12,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.eval_ingest import (
+from trainer.eval_m1 import parse_m1_eval_report
+from worker.eval_ingest import (
     iter_eval_rows,
     m1_game_row,
     seed_space_of,
     segment_of_seed,
     write_m1_game_rows,
 )
-from trainer.eval_m1 import parse_m1_eval_report
 
 
 def test_segments_mirror_store_ts() -> None:

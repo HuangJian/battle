@@ -2,7 +2,7 @@
 
 **为什么需要它**：R2c-2/R2c-3 把「一轮」拆成了可让位的细粒度任务、给了调度器（`loop_scheduler`）
 与任务体↔引擎的桥（`loop_runner`），但**没有任何东西真的驱动它**——今天仍是「一门课一个
-`run_rl.py` 进程」。本模块就是那个驱动者：一个进程、一个 supervisor、N 门课，一门课等外部
+`trainer/run_rl.py` 进程」。本模块就是那个驱动者：一个进程、一个 supervisor、N 门课，一门课等外部
 （云端 PPO / 预采子进程）时**执行权交给别的课**。
 
 三个层次，**每层各做一次**（越界做两次都会伤到既有护栏，所以按层显式分开）：
@@ -10,7 +10,7 @@
 | 层 | 频率 | 内容 |
 |---|---|---|
 | 进程级 | 一次 | UTF-8 stdio / `faulthandler` / `chdir(repo)` / 启动前 `git push`（`.git_push.lock` 串行化）/ bun 存在性 → `prepare_process()` |
-| 课程级 | 每课一次 | 解析课程配置（与 `run_rl.py --course` **逐字段一致**）→ `validate_args` → **按课程的单实例锁**（同课双开响亮拒启）→ 日志镜像 → 清本课 hub 停机态 → 引擎对象（`TrainingLoop`，torch 由引擎自己 `_setup()` 在首次执行时才拉起） |
+| 课程级 | 每课一次 | 解析课程配置（与 `trainer/run_rl.py --course` **逐字段一致**）→ `validate_args` → **按课程的单实例锁**（同课双开响亮拒启）→ 日志镜像 → 清本课 hub 停机态 → 引擎对象（`TrainingLoop`，torch 由引擎自己 `_setup()` 在首次执行时才拉起） |
 | 一步级 | 每步 | `Supervisor.step()` → `EnginePool.get(课)` → `LoopRunner.executor(task, queue)` |
 
 **刻意与单课程入口不同的两处**（都在文档里写死，防「统一」时被顺手改回去）：
@@ -38,14 +38,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from biz.engine_pool import DEFAULT_CACHE_COURSES, DEFAULT_CACHE_MB, EnginePool
-from biz.log import close_course_sinks, log, open_course_sink, prefix_scope
-from biz.loop_scheduler import ABORTED, QUEUE_DONE, Supervisor
-from biz.loop_tasks import RoundFacts, Task, abort, pending_tasks
-from biz.modes import apply_mode_flags, merged_mode_args, resolve_mode
+from common.log import close_course_sinks, log, open_course_sink, prefix_scope
 from common.platform_utils import force_utf8_stdio
 from common.proc import run_capture
-from train.loop_util import acquire_lock, cleanup_lock, course_lock_path
 from trainer.loop_control import ControlApplier, read_control
 from trainer.loop_plan import (
     COURSE_ENABLE_MARKER,
@@ -57,11 +52,16 @@ from trainer.loop_plan import (
 )
 from trainer.loop_runner import ROUND_KIND, LoopRunner
 from trainer.queue import REPO_ROOT
+from worker.engine_pool import DEFAULT_CACHE_COURSES, DEFAULT_CACHE_MB, EnginePool
+from worker.loop_scheduler import ABORTED, QUEUE_DONE, Supervisor
+from worker.loop_tasks import RoundFacts, Task, abort, pending_tasks
+from worker.modes import apply_mode_flags, merged_mode_args, resolve_mode
+from worker.train.loop_util import acquire_lock, cleanup_lock, course_lock_path
 
-#: nn-training 目录（锁文件/课程文件都相对它——与 `run_rl.py` 的 `Path(__file__).parent` 同一个）。
+#: nn-training 目录（锁文件/课程文件都相对它——与 `trainer/run_rl.py` 的 `Path(__file__).parent` 同一个）。
 NN_DIR = Path(__file__).resolve().parent.parent
 
-#: 本机资源池默认容量（与 `run_rl_cluster.py` 的 CLI 默认值同一套；plan §6.2 定案 PPO/eval=1）。
+#: 本机资源池默认容量（与 `trainer/run_rl_cluster.py` 的 CLI 默认值同一套；plan §6.2 定案 PPO/eval=1）。
 DEFAULT_CAPACITIES: dict[str, int] = {"local_ppo": 1, "eval_local": 1, "local_rollout": 4}
 
 #: `Supervisor` 的空转让位粒度（秒）：全部课都在等外部时按这个间隔再问一遍。
@@ -107,7 +107,7 @@ class ServeReport:
 def prepare_process(argv: list[str] | None = None) -> str:
     """进程级一次性准备，返回 bun 路径（rollout 需要它）。**副作用：启动前 push 当前分支。**
 
-    与 `run_rl.py` 的对应片段同序同义（B7 之后 torch 仍不在启动路径上）：UTF-8 stdio →
+    与 `trainer/run_rl.py` 的对应片段同序同义（B7 之后 torch 仍不在启动路径上）：UTF-8 stdio →
     faulthandler → `chdir(REPO_ROOT)` → 启动前 `git push`（repo 级 O_EXCL 锁串行化——多课并发
     push 会顶成 non-fast-forward/锁竞争）→ 节点升级分支锁到训练机当前分支 → bun 存在性。
 
@@ -119,7 +119,7 @@ def prepare_process(argv: list[str] | None = None) -> str:
     faulthandler.enable()
     os.chdir(str(REPO_ROOT))
 
-    from biz.archive import ensure_current_branch_pushed
+    from worker.archive import ensure_current_branch_pushed
 
     push_lock = str(REPO_ROOT / ".git_push.lock")
     if acquire_lock(push_lock, tag="git push"):
@@ -175,7 +175,7 @@ COURSE_MACHINE_OVERRIDE_KEYS: tuple[str, ...] = (
 
 def cluster_lock_path() -> str:
     """单进程服务器的锁文件：`nn-training/.run_cluster.lock`（`course=''` ⇒ 无课程名后缀）。"""
-    from train.loop_util import course_lock_path
+    from worker.train.loop_util import course_lock_path
 
     return course_lock_path(str(NN_DIR), "", "run_cluster")
 
@@ -187,14 +187,14 @@ def acquire_cluster_lock(lock_path: str, *, force: bool = False) -> bool:
     实现复用 `run_rl._acquire_run_rl_lock`（O_CREAT|O_EXCL；holder 死了自动收回）——
     锁文件里写 `pid|python|ts`，与其它锁同一种形状（控制台按同一读法看它）。
     """
-    from run_rl import _acquire_run_rl_lock
+    from trainer.run_rl import _acquire_run_rl_lock
 
     return _acquire_run_rl_lock(str(lock_path), force=force)
 
 
 def release_cluster_lock(lock_path: str) -> None:
     """释放自己持有的单实例锁（已易主则不删——与 `_cleanup_run_rl_lock` 同契约）。"""
-    from run_rl import _cleanup_run_rl_lock
+    from trainer.run_rl import _cleanup_run_rl_lock
 
     _cleanup_run_rl_lock(str(lock_path))
 
@@ -205,10 +205,10 @@ def _read_rl_config() -> dict:
     """读 rl-config.json（读不到 / 形状不对 → 空 dict）。
 
     **读面只读一处**：路径走 `biz.config.rl_config_path()`（env `BCITY_RL_CONFIG` 可重定向，
-    与 `run_rl.py` 完全同源）——否则「用例自带夹具」在 serve 侧做不到，读的还是本机那份
+    与 `trainer/run_rl.py` 完全同源）——否则「用例自带夹具」在 serve 侧做不到，读的还是本机那份
     未入库的配置。本函数仍是测试注入点（用例可以直接换掉它）。
     """
-    from biz.config import read_rl_config_file
+    from worker.config import read_rl_config_file
 
     return read_rl_config_file()
 
@@ -257,11 +257,11 @@ def apply_course_machine_overrides(
 
 
 def course_args(course: str, argv: list[str] | None = None) -> Any:
-    """课程 stem → 生效 args（**与 `run_rl.py --course <stem>` 逐字段一致**）。
+    """课程 stem → 生效 args（**与 `trainer/run_rl.py --course <stem>` 逐字段一致**）。
 
-    解析链一字不差地复刻 `run_rl.py::main` 的启动段（rl-config.json 默认 → argparse →
+    解析链一字不差地复刻 `trainer/run_rl.py::main` 的启动段（rl-config.json 默认 → argparse →
     `apply_course` 课程覆盖 → 冲突检测 → 显式 stream 标记 → `validate_args`）。**不作弊**：
-    参数语义没有第二份实现，`tests/test_serve_args.py` 用 `run_rl.py --course X --echo-config`
+    参数语义没有第二份实现，`tests/test_serve_args.py` 用 `trainer/run_rl.py --course X --echo-config`
     对拍本函数的每一字段（漂移即红）。
 
     `argv` = serve 级附加参数（如 `--mode goal`）；课程由**课程列表**给出，故这里拒绝
@@ -272,16 +272,16 @@ def course_args(course: str, argv: list[str] | None = None) -> Any:
         raise SystemExit("[serve] 课程由课程列表给出，不要在附加参数里再传 --course/--course-file")
 
     mode = resolve_mode(extra)
-    cfg = _read_rl_config()  # 与 run_rl.py 同源（`BCITY_RL_CONFIG` 可重定向）
+    cfg = _read_rl_config()  # 与 trainer/run_rl.py 同源（`BCITY_RL_CONFIG` 可重定向）
     rl_args, _src = merged_mode_args(cfg, mode)
 
-    from biz.cli import build_argparser
+    from worker.cli import build_argparser
 
     ap = build_argparser(mode, rl_args)
     args = ap.parse_args([*extra, "--course", course])
     apply_mode_flags(args)
 
-    from biz.config import apply_course, course_cli_conflicts, course_from_args, validate_args
+    from worker.config import apply_course, course_cli_conflicts, course_from_args, validate_args
 
     # 课程配置化（plan/rl-training-config.md §3）：优先级 课程 > rl-config.json > argparse 默认。
     # `resolve_course` 找不到 `<stem>.jsonc` 时抛 FileNotFoundError（含可用课程列表）——
@@ -325,7 +325,7 @@ def open_course(
     ⑤ 清本课 hub 停机态（残留 halt 会让首轮 PPO job 进无人区）。
 
     BC 课程走 `_open_bc_course`（**同一个函数名/同一份副作用**，只是解析链与锁名不同：
-    `run_bc.py` 用的是 `run_bc` 锁——共用 `run_rl` 锁会让「控制台起 run_bc」与「serve 起同一个
+    `trainer/run_bc.py` 用的是 `run_bc` 锁——共用 `run_rl` 锁会让「控制台起 run_bc」与「serve 起同一个
     BC 课」互相看不见，两边同时开课）。
 
     **不在这里** `_setup()`：那会拉起 torch 并写 `run_start`——「扫到但本轮没在训」的课
@@ -333,7 +333,7 @@ def open_course(
     """
     if course_kind(course) == "bc":
         return _open_bc_course(course, argv=argv, traj_root=traj_root)
-    from run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
+    from trainer.run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
 
     args = course_args(course, argv)
     traj = Path(args.traj)
@@ -370,14 +370,14 @@ def open_course(
 def _open_bc_course(
     course: str, *, argv: list[str] | None = None, traj_root: str = "tmp"
 ) -> CourseRuntime:
-    """开一门 BC 课（R3-4）：与 `run_bc.py` 的启动段**同义**，只是不做进程级那几件（utf8 /
+    """开一门 BC 课（R3-4）：与 `trainer/run_bc.py` 的启动段**同义**，只是不做进程级那几件（utf8 /
     chdir / 启动前 git push）——那些由 `prepare_process` 在进程级做过一次。
 
-    锁用 `run_bc`（与单课程入口同名同路径）：控制台起的 `run_bc.py --course X` 与 serve 里的
+    锁用 `run_bc`（与单课程入口同名同路径）：控制台起的 `trainer/run_bc.py --course X` 与 serve 里的
     同一门 BC 课必须互相看得见（2026-09-06 双 trainer 写同一 traj 的护栏）。
     """
-    from run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
     from trainer.bc_loop import bc_course_args, resolve_bc_runtime
+    from trainer.run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
 
     # ★ 2026-09-28：serve = hub pull 模型，BC 课自己补 `--remote`（hub 地址/token 走
     #   rl-config，经 `resolve_bc_runtime` 自己的 dist_config 读入）。不补的话
@@ -473,7 +473,7 @@ def build_factory(
                 facts_fn=facts_fn,
             )
             return engine
-        from run_rl import update_kwargs
+        from trainer.run_rl import update_kwargs
 
         # ★ §3：单一 PPO 路径 ⇒ 引擎不建本机 PPO 栈，后端传 None（hub 免 torch，D2）。
         engine = TrainingLoop(rt.args, None, bun, update_kwargs)

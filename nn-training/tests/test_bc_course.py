@@ -9,13 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from biz.bc_config import (
+from worker.bc_config import (
     bc_corpus_identity_fp,
     load_bc_course,
     resolve_bc_course,
     round_seeds,
 )
-from biz.bc_dispatch import landed_pairs
+from worker.bc_dispatch import landed_pairs
 
 
 def test_load_bc_c4_course_with_level_injection() -> None:
@@ -65,7 +65,7 @@ def test_bc_corpus_identity_fp_semantics() -> None:
     d2["train"]["epochs"] = 999
     d2["iters"] = 7
     d2["out"] = "tmp/other/weights.json"
-    from biz.bc_config import BcCourseConfig
+    from worker.bc_config import BcCourseConfig
 
     c2 = BcCourseConfig(**d2)
     assert bc_corpus_identity_fp(c2) == fp
@@ -132,7 +132,7 @@ def test_bc_ledger_completed_rounds(tmp_path: Path) -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from biz import bc_ledger
+    from worker import bc_ledger
 
     j = tmp_path / "training_log.jsonl"
     j.write_text(
@@ -185,7 +185,7 @@ def _loss_skipped_manifest(stage: int, seed: int):
 
 def test_bc_dispatch_trips_broken_node_and_requeues(tmp_path: Path, monkeypatch) -> None:
     """2026-09-14 mac 事故回归：单节点连续真失败 → 本轮熔断，剩余任务改派健康节点。"""
-    from biz import bc_dispatch as D
+    from worker import bc_dispatch as D
 
     calls: dict[str, int] = {"bad": 0, "good": 0}
 
@@ -244,7 +244,7 @@ def test_bc_dispatch_trips_broken_node_and_requeues(tmp_path: Path, monkeypatch)
 
 def test_bc_dispatch_failfast_disabled_keeps_old_behavior(tmp_path: Path, monkeypatch) -> None:
     """node_fail_limit=0：关闭熔断（所有节点都试，行为与旧版一致）。"""
-    from biz import bc_dispatch as D
+    from worker import bc_dispatch as D
 
     seen: list[str] = []
 
@@ -272,7 +272,7 @@ def test_bc_dispatch_failfast_disabled_keeps_old_behavior(tmp_path: Path, monkey
 
 def test_bc_dispatch_busy_is_not_a_node_fault(tmp_path: Path, monkeypatch) -> None:
     """busy（并发槽满）不计入失败 streak —— 否则健康节点会被误熔断。"""
-    from biz import bc_dispatch as D
+    from worker import bc_dispatch as D
 
     calls = {"n": 0}
 
@@ -309,7 +309,7 @@ def test_bc_dispatch_busy_backpressure_then_success(tmp_path: Path, monkeypatch)
     事故形态：40 局瞬间推送，节点并发槽占满，溢出任务两次「立刻重试」都撞 busy
     ⇒ 直接计 failed（实测 7 局）⇒ BcDispatchError 把整轮训练打死。
     """
-    from biz import bc_dispatch as D
+    from worker import bc_dispatch as D
 
     state = {"busy": 3}
 
@@ -523,7 +523,7 @@ def test_resolve_fire_pos_weight() -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from train.bc_core import resolve_fire_pos_weight
+    from worker.train.bc_core import resolve_fire_pos_weight
 
     counts = {"move": {}, "fire": {0: 5969, 1: 473}}
     assert abs(resolve_fire_pos_weight("auto", counts) - 5969 / 473) < 1e-9
@@ -560,7 +560,7 @@ def test_bc_c4_v3_corpus_scaled_up() -> None:
 
 
 def test_bc_course_eval_block_multi_level() -> None:
-    from biz.bc_config import load_bc_course
+    from worker.bc_config import load_bc_course
 
     c = load_bc_course("bc-c4")
     assert c.eval.enabled is True
@@ -569,14 +569,14 @@ def test_bc_course_eval_block_multi_level() -> None:
     assert c.eval.levels == ["arena4", "arena6"]  # 多地图
 
 def test_bc_course_eval_block_default_off() -> None:
-    from biz.bc_config import load_bc_course
+    from worker.bc_config import load_bc_course
 
     assert load_bc_course("bc-e2e").eval.enabled is False  # 夹具不配 eval
 
 
 def test_bc_train_init_from_and_auto_stop_defaults() -> None:
     """warm-start 缺省关：init_from 空（从随机起）+ auto_stop 关（收官不清标记）。"""
-    from biz.bc_config import load_bc_course
+    from worker.bc_config import load_bc_course
 
     c = load_bc_course("bc-c4")
     assert c.train.init_from == ""
@@ -587,7 +587,7 @@ def test_bc_train_init_from_parses(tmp_path: Path) -> None:
     """train.init_from 透传（路径语义由发布端 resolve，配置层只收字符串）。"""
     import json as _json
 
-    from biz.bc_config import load_bc_course
+    from worker.bc_config import load_bc_course
 
     p = tmp_path / "w.bc.jsonc"
     w = tmp_path / "w.json"

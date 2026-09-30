@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.engine_pool import MEASURED_COURSE_STACK_MB, EnginePool
+from worker.engine_pool import MEASURED_COURSE_STACK_MB, EnginePool
 
 
 class FakeEngine:

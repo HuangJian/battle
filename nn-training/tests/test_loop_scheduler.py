@@ -22,7 +22,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.loop_scheduler import (
+from trainer.loop_plan import (
+    course_traj,
+    discover_courses,
+    inflight_from_journals,
+    plan_course,
+    settled_shards,
+)
+from worker.loop_scheduler import (
     ABORTED,
     QUEUE_DONE,
     READY,
@@ -32,14 +39,7 @@ from biz.loop_scheduler import (
     PoolSet,
     Supervisor,
 )
-from biz.loop_tasks import ROUND_TASKS, Task, abort, done, retry, waiting
-from trainer.loop_plan import (
-    course_traj,
-    discover_courses,
-    inflight_from_journals,
-    plan_course,
-    settled_shards,
-)
+from worker.loop_tasks import ROUND_TASKS, Task, abort, done, retry, waiting
 
 # ------------------------------------------------------------------ 资源池
 
@@ -371,7 +371,7 @@ def test_plan_course_marks_settled_round_as_empty(tmp_path: Path) -> None:
     # last_iter=3 ⇒ next_it=4，而账本里没有 it4 ⇒ 仍应给出完整任务表
     assert it == 4 and tasks
     # 人为把账本改成「it1 已结算且 next_it=1」不可能（next_it 单调），故直接测判据层：
-    from biz.loop_tasks import RoundFacts, pending_tasks, round_tasks
+    from worker.loop_tasks import RoundFacts, pending_tasks, round_tasks
 
     assert pending_tasks(round_tasks("c4", 1), RoundFacts(it=1, iteration_recorded=True)) == []
 

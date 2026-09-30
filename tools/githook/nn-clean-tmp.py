@@ -48,7 +48,7 @@ def remove_listed(list_path: Path) -> int:
     记录）——50 个临时目录的批量 rmtree 实测可把本清理器烧到 100% CPU 数分钟，
     连带 pytest session 收尾挂起（2026-09-15 实测卡 7 分钟）。预算到期即止损：
     清理是锦上添花，**完成提交/门禁比删干净重要**；余量由 KEEP_DAYS 兜底或人工
-    `task.py clean` 清。
+    `tools/task.py clean` 清。
     """
     if not list_path.is_file():
         return 0
@@ -117,7 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         if budget > 0 and time.monotonic() - t0 > budget:
             print(
                 f"[nn-clean-tmp] delete budget {budget:g}s hit → stopped after {removed} "
-                f"expired dir(s); 余量下轮/人工 `task.py clean` 清"
+                f"expired dir(s); 余量下轮/人工 `tools/task.py clean` 清"
             )
             break
         if mtime < cutoff:

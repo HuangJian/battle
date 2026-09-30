@@ -832,30 +832,33 @@ def test_the_renamed_forward_is_declared_where_it_lives() -> None:
 
 
 def _logic_layer_import(node: ast.ImportFrom) -> str:
-    """该 `ImportFrom` 指向的**业务层**模块（`rl` 编排 / `biz` 纯逻辑两棵树），否则空串。
+    """该 `ImportFrom` 指向的**下层业务面**模块（`trainer` 编排 / `worker` 训练栈 / `biz`
+    游戏业务），否则空串。
 
-    2026-09-30（刀 4）：判据从「碰了 `rl`」拆成两棵树 —— `rl`（编排）仍是**零**容忍，
-    `biz`（纯逻辑）是经豁免表点名登记的那类（表在 `test_hub_job_store_split.ALLOWED_BIZ`）。
+    2026-09-30（刀 4/刀 5/刀 6）判据改了两路：`rl`（编排，零容忍）→ 刀 5 整包改名
+    `trainer`；刀 4 出包的 `biz` 与刀 6 搬进 `worker/` 的训练栈都是「要经豁免表点名登记」
+    的那类（表在 `test_hub_job_store_split.ALLOWED_BIZ`）。
     """
     mod = node.module or ""
-    return mod if mod.split(".")[0] in {"trainer", "biz"} else ""
+    return mod if mod.split(".")[0] in {"trainer", "worker", "biz"} else ""
 
 
 def test_only_resume_touches_the_logic_layer_and_only_lazily() -> None:
     """六个混入的仓内依赖是登记过的那些；`queue_resume` 例外但**只准延迟**。
 
-    `merge_eval_rows` 要 `from biz.eval_rows import append_eval_rows`（S5 第一刀后纯行/账本原语
-    住 `biz.eval_rows`；原 `biz.eval_local`）—— 它本来就在 `hub_server` 的函数体内（第十四刀没动），
+    `merge_eval_rows` 要 `from worker.eval_rows import append_eval_rows`（S5 第一刀后纯行/账本原语
+    住 `worker.eval_rows` —— 刀 6 前在 `biz/`，更早是 `biz.eval_local`）—— 它本来就在
+    `hub_server` 的函数体内（第十四刀没动），
     搬簇时原样带过来。`assert_remote_module` 的口径是「传输/落盘层保持 L2-pure」，所以这一簇单独
     按「延迟 + 只此一处」正面钉住。
     """
-    # `queue_resume` 的那条延迟 `biz.eval_rows` 是本用例下面正面钉住的那一条（`merge_eval_rows`）
+    # `queue_resume` 的那条延迟 `worker.eval_rows` 是本用例下面正面钉住的那一条（`merge_eval_rows`）
     # ⇒ 在共用账本判据这里点名登记（同 `test_hub_job_store_split.ALLOWED_BIZ` 的口径）。
     for mod, allowed in ALLOWED_IMPORTS.items():
         dag.assert_remote_module(
             mod,
             allowed_project_imports=allowed,
-            allowed_biz={"biz.eval_rows"} if mod == "hub.queue_resume" else set(),
+            allowed_biz={"worker.eval_rows"} if mod == "hub.queue_resume" else set(),
         )
 
     resume = HUB_DIR / "queue_resume.py"
@@ -870,14 +873,17 @@ def test_only_resume_touches_the_logic_layer_and_only_lazily() -> None:
             for sub in ast.walk(n):
                 if isinstance(sub, ast.ImportFrom) and _logic_layer_import(sub):
                     lazy.append(f"{n.name}->{_logic_layer_import(sub)}")
-    assert lazy == ["merge_eval_rows->biz.eval_rows"], lazy
+    assert lazy == ["merge_eval_rows->worker.eval_rows"], lazy
     for other in DOMAINS:
         if other == "queue_resume":
             continue
         src = (HUB_DIR / f"{other}.py").read_text(encoding="utf-8")
-        # 两棵树都不许碰：`rl` = 编排（零容忍），`biz` = 纯逻辑（要经 ALLOWED_BIZ 点名）。
-        assert "rl." not in src and "rl import" not in src, f"{other} 碰了编排 rl"
-        assert "biz." not in src and "biz import" not in src, f"{other} 碰了纯逻辑 biz（需点名登记）"
+        # 三个下层业务面都不许碰：`trainer` = 编排（零容忍），`worker` = 训练栈、
+        # `biz` = 游戏业务（两者都要经 ALLOWED_BIZ 点名登记）。
+        assert "trainer." not in src, f"{other} 碰了编排 trainer"
+        assert "worker." not in src and "biz." not in src, (
+            f"{other} 碰了训练栈 worker / 游戏业务 biz（需点名登记）"
+        )
 
 
 def test_the_mixins_never_import_each_other_nor_the_host() -> None:

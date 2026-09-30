@@ -1,10 +1,10 @@
 /** train.ts — 本地 CPU 训练脚本启动器 + CLI（DECISIONS §349：原 start.ts train 模式
  *  的全部能力；原 nn-training/start-training.sh/.ps1 的能力在此逐项等价）。
  *  职责（与旧双平台启动器逐项等价）：
- *    - venv+torch 未就绪 → 委派 bootstrap.py（安装逻辑只在 bootstrap.py 一份）；
+ *    - venv+torch 未就绪 → 委派 tools/bootstrap.py（安装逻辑只在 tools/bootstrap.py 一份）；
  *    - torch 线程 env（任何 torch import 之前设置，含 OMP_PROC_BIND §17 定案）；
  *    - --script 解析（根裸名 / 子包路径 / 旧扁平名别名，DECISIONS §324）+ 路径守卫；
- *    - pre-flight：train_loop.py 锁检查（--force 跳过）；
+ *    - pre-flight：trainer/train_loop.py 锁检查（--force 跳过）；
  *    - --kill-previous：按脚本名清杀旧 python 训练进程（Bun 原生实现，替代
  *      pgrep/CIM 双平台分支——见 killPreviousTrainers）；
  *    - 冒烟门禁：启动前跑轻量冒烟（venv torch import + 权重文件契约 + BCV2 回环）；
@@ -42,15 +42,15 @@ import { containerSmoke, summarizeSmoke, weightsSmoke } from '../stack/smoke'
 
 /** --script 旧扁平名别名（DECISIONS §324，2026-09-04；与旧启动器同一映射）。 */
 const LEGACY_ALIAS: Record<string, string> = {
-  'train_bc.py': 'train/bc.py',
-  'train_goal_bc.py': 'train/goal_bc.py',
-  'train_intent_probe.py': 'train/intent_probe.py',
-  'eval_bridge.py': 'scripts/eval_bridge.py',
-  'eval_intent_m5.py': 'scripts/eval_intent_m5.py',
-  'gen_self_inj.py': 'scripts/gen_self_inj.py',
-  'init_scratch_weights.py': 'scripts/init_scratch_weights.py',
-  'validate_export.py': 'scripts/validate_export.py',
-  'train_rl.py': 'run_rl.py',
+  'train_bc.py': 'worker/train/bc.py',
+  'train_goal_bc.py': 'worker/train/goal_bc.py',
+  'train_intent_probe.py': 'worker/train/intent_probe.py',
+  'eval_bridge.py': 'worker/scripts/eval_bridge.py',
+  'eval_intent_m5.py': 'worker/scripts/eval_intent_m5.py',
+  'gen_self_inj.py': 'worker/scripts/gen_self_inj.py',
+  'init_scratch_weights.py': 'worker/scripts/init_scratch_weights.py',
+  'validate_export.py': 'worker/scripts/validate_export.py',
+  'train_rl.py': 'trainer/run_rl.py',
 }
 
 export interface TrainOptions {
@@ -66,7 +66,7 @@ export interface TrainOptions {
 
 /** 解析 --script：别名归一 + 路径守卫（相对 nn-training/，拒绝绝对/盘符/越级）。 */
 export function resolveTrainScript(raw: string): string {
-  let s = raw || 'train_loop.py'
+  let s = raw || 'trainer/train_loop.py'
   if (LEGACY_ALIAS[s]) {
     log(`alias: ${s} -> ${LEGACY_ALIAS[s]} (DECISIONS §324)`)
     s = LEGACY_ALIAS[s]!
@@ -121,13 +121,18 @@ function lockHolderOf(lockPath: string): number | null {
 
 /** pre-flight：**按课程**的实例锁预检——本课已在跑则退出 0（--force 跳过）。
  *
- *  单实例护栏的权威在 python 侧（`run_rl.py::_acquire_run_rl_lock` /
- *  `train_loop.py::acquire_lock`）；本函数只是让无头通道早退、不白启 venv。
+ *  单实例护栏的权威在 python 侧（`trainer/run_rl.py::_acquire_run_rl_lock` /
+ *  `trainer/train_loop.py::acquire_lock`）；本函数只是让无头通道早退、不白启 venv。
  *  锁名唯一来源 slots.ts::lockName（与 python `train.loop_util::course_lock_path`
  *  同构）。无课程时沿用旧全局锁名（默认行为零变化）。 */
 export function preflightCourseLocks(force: boolean, script: string, course = ''): void {
   if (force) return
-  const kind = script === 'train_loop.py' ? 'train_loop' : script === 'run_rl.py' ? 'run_rl' : null
+  const kind =
+    script === 'trainer/train_loop.py'
+      ? 'train_loop'
+      : script === 'trainer/run_rl.py'
+        ? 'run_rl'
+        : null
   if (!kind) return
   const name = lockName(course, kind)
   const holder = lockHolderOf(lockPathFor(course, kind))
@@ -276,12 +281,12 @@ export async function killPreviousTrainers(script: string, course = ''): Promise
 
 /** 锁 kind → python 训练脚本（身份核验的指纹来源）。 */
 export const TRAINER_SCRIPT: Record<LockKind, string> = {
-  run_rl: 'run_rl.py',
-  run_bc: 'run_bc.py',
-  train_loop: 'train_loop.py',
+  run_rl: 'trainer/run_rl.py',
+  run_bc: 'trainer/run_bc.py',
+  train_loop: 'trainer/train_loop.py',
   // 共享 trainer 的单实例锁（2026-09-19 / R3-5）：一个进程服务**所有**课程。
   // 它的持有者命令行里没有 `--course`（发现模式），故 isTrainerFor(..., course='') 正好匹配。
-  run_cluster: 'run_rl_cluster.py',
+  run_cluster: 'trainer/run_rl_cluster.py',
 }
 
 /** 锁文件 → 持有人（`PID|EXE|TS`，兼容裸 PID）；不可读/残缺 → null。 */
@@ -393,7 +398,7 @@ export async function releaseTrainerLocks(course = '', io: TrainerLockIO = {}): 
  *
  *  为什么单列一个函数而不是塞进 `releaseTrainerLocks`：那个函数按**课程**横扫两个锁，
  *  而这一把锁是**进程级**的（`course=''`）。身份核验同规：持有者命令行必须是
- *  `run_rl_cluster.py` 且**不带 `--course`**（`isTrainerFor` 里查的是「命令行里有没有别的课」），
+ *  `trainer/run_rl_cluster.py` 且**不带 `--course`**（`isTrainerFor` 里查的是「命令行里有没有别的课」），
  *  绝不按 PID 复用误杀。
  */
 export async function releaseClusterLock(io: TrainerLockIO = {}): Promise<string> {
@@ -432,7 +437,7 @@ export function launchTraining(opts: TrainOptions): TrainLaunchResult {
   const script = resolveTrainScript(opts.script)
 
   // --echo：只打印命令、不执行，**不碰 venv/torch**。必须排在 ensureVenv() 之前 ——
-  // 否则一次「纯打印」会触发 bootstrap.py 联网装 torch（pre-commit 门禁曾因此卡 40s+
+  // 否则一次「纯打印」会触发 tools/bootstrap.py 联网装 torch（pre-commit 门禁曾因此卡 40s+
   // 并以 exit 4 失败）。resolveVenvPython() 是纯路径解析（读 pyvenv.cfg），零副作用。
   if (opts.echo) {
     const { python } = resolveVenvPython()
@@ -457,7 +462,7 @@ export function launchTraining(opts: TrainOptions): TrainLaunchResult {
   preflightCourseLocks(opts.force, script, course)
   if (course) void preflightSlotPorts(course)
 
-  // venv+torch（缺了委派 bootstrap.py；失败退出码 4 对齐旧启动器）
+  // venv+torch（缺了委派 tools/bootstrap.py；失败退出码 4 对齐旧启动器）
   if (!ensureVenv()) process.exit(4)
   const { python, sitePackages } = resolveVenvPython()
   const cfg = (() => {
@@ -558,7 +563,7 @@ function usage(): void {
   本地 CPU 训练脚本启动器（AGENTS §5.6 "never raw python" 的无头执行通道；
   训练组件的日常 启/停/冒烟/模式 管理走控制台 bun run dashboard）。
 
-  --script <name>.py   训练脚本（相对 nn-training/；缺省 train_loop.py；旧扁平名自动别名）
+  --script <name>.py   训练脚本（相对 nn-training/；缺省 trainer/train_loop.py；旧扁平名自动别名）
   --force              跳过本课单实例锁检查（只接管本课锁，绝不跨课抢占）
   --kill-previous      清杀本课上一轮训练进程（按 (script, --course) 匹配；
                        不带 --course 只杀同样不带课的老进程）
@@ -582,7 +587,7 @@ function usage(): void {
  */
 export function parseCli(argv: string[]): Cli {
   const opts: TrainOptions = {
-    script: 'train_loop.py',
+    script: 'trainer/train_loop.py',
     scriptArgs: [],
     force: false,
     killPrevious: false,

@@ -5,8 +5,8 @@
 1. **只依赖 stdlib**（包**内**互相 import 不算越界 —— 2026-09-30 刀 2 之后
    `platform_utils` / `pid_probe` / `schema` / `distribution` 等同层模块都住在本包里了）。
    本包会被 `remote.hub_client.pack_code_zip` 打进 `code.zip` 解到云机 `sys.path`
-   ——那里没有 torch、没有 numpy、也没有 `rl/` 的运行前提。因此本包**不得** import
-   `rl.*` / `remote.*` / `ppo.*` / `torch` / `numpy`，否则云端解包即 ImportError。
+   ——那里没有 torch、没有 numpy、也没有 `trainer/` 的运行前提。因此本包**不得** import
+   `trainer.*` / `remote.*` / `ppo.*` / `torch` / `numpy`，否则云端解包即 ImportError。
 2. **本包不得反向 import 上层**（同上；依赖方向永远是 `上层 → common`）。
 3. **无副作用**：import 本包不读环境变量、不开文件、不起线程、不发网络请求。
 4. **无模块级可变状态**（`pid_probe` 那种只读常量表除外）——只放纯函数与不可变常量。
@@ -89,7 +89,7 @@ L4  hub/ · trainer/                          （hub 服务端 / 本机训练编
 | `common.platform_utils` | 跨平台子进程 / 核数（`effective_cores`，cgroup 配额优先）/ `rmtree_best_effort` |
 | `common.pid_probe` | `pid_alive`（唯一实现；进程重用判别） |
 | `common.log_bundle` | 纯文本攒行（无状态） |
-| `common.jsonc` | JSONC 解析（`dashboard/src/core/jsonc.ts` 的权威）——原 `rl/jsonc.py` |
+| `common.jsonc` | JSONC 解析（`dashboard/src/core/jsonc.ts` 的权威）——原 `common/jsonc.py` |
 | `common.net_http` | 回环 HTTP **绕代理**（4 处消费者跨 3 层）——原 `remote/net_http.py` |
 | `common.instance_lock` | 单实例锁（`O_CREAT|O_EXCL` + 可接管陈旧锁）——原 `remote/_instance_lock.py`（去 `_` 前缀） |
 | `common.port_guard` | 双监听守卫（Windows `SO_REUSEADDR` 允许双绑 ⇒ bind 前探测）——原 `remote/_port_guard.py`（同上） |

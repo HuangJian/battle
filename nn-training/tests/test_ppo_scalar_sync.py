@@ -25,9 +25,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from models.student import PPOStudent
-from ppo.common import sync_scalars
-from ppo.engine import ppo_update
+from worker.models.student import PPOStudent
+from worker.ppo.common import sync_scalars
+from worker.ppo.engine import ppo_update
 
 ENGINE_KEYS = {
     "policy",
@@ -130,7 +130,7 @@ def test_engine_stats_keys_unchanged() -> None:
 
 def _intent_fixture(n: int = 64, seed: int = 11):
     """复刻 tests/test_ppo_intent.py::test_ppo_update_smoke 的数据构造。"""
-    import ppo.intent as ppo_intent
+    import worker.ppo.intent as ppo_intent
 
     rng = np.random.RandomState(seed)
     obs = rng.randint(0, 256, (n, OBS_CHANNELS, 26, 26)).astype(np.uint8)
@@ -191,7 +191,7 @@ def test_engine_aggregate_bit_identical_to_per_item_path(monkeypatch) -> None:
 
     这是「批量化不改变数值」的最终证据 —— 不是靠读代码断言，而是同种子跑两遍比对。
     """
-    import ppo.engine as eng
+    import worker.ppo.engine as eng
 
     chunks = _chunks(seed=5)
 
@@ -219,7 +219,7 @@ def test_engine_aggregate_bit_identical_to_per_item_path(monkeypatch) -> None:
 
 def test_goal_stats_keys_include_bc() -> None:
     """goal：键集须含 bc（schema 兼容占位），且批量化后仍存在。"""
-    import ppo.goal as ppo_goal
+    import worker.ppo.goal as ppo_goal
 
     torch.manual_seed(12)
     rng = np.random.RandomState(12)

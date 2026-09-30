@@ -149,7 +149,7 @@ def test_main_offline_flag_reaches_worker_loop(
     monkeypatch.setattr(
         W.sys,
         "argv",
-        ["remote_worker", "--poll", "http://x", "--token-file", str(tok), "--offline"],
+        ["remote.remote_worker", "--poll", "http://x", "--token-file", str(tok), "--offline"],
     )
     with pytest.raises(SystemExit):
         W.main()

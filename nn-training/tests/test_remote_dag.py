@@ -230,18 +230,39 @@ def test_the_graph_matches_a_second_independent_scan() -> None:
     import ast as _ast
 
     known = set(dag.LAYERS)
-    for module, path in dag.remote_modules().items():
+
+    def depth0_imports(path) -> set[str]:
+        """等价重实现：**顶层深度**上的 import（只 Function/Class 体算延迟）。
+
+        ⚠ 递归的是 `iter_child_nodes`而不是只 `tree.body`（2026-09-30 刀 6 纠正）：
+        `if TYPE_CHECKING:` 块里的 import 在 `_collect` 口径下**算顶层边**（它只按
+        Function/Class 增深度）——本重实现原先只看 `tree.body`，于是
+        `worker.gate_judges` 那条 `if TYPE_CHECKING: from worker.config import …`
+        只有一边看得见（旧家 `biz.config` 在账本外时永远被过滤掉 ⇒ 两边显得一致；
+        刀 6 把 config 搬进账本后当场露头）。
+        """
+        out: set[str] = set()
         tree = _ast.parse(path.read_text(encoding="utf-8"))
-        seen: set[str] = set()
-        for node in tree.body:  # 只看顶层
-            if isinstance(node, _ast.Import):
-                seen |= {a.name for a in node.names if a.name.startswith("remote.")}
-            elif isinstance(node, _ast.ImportFrom) and not node.level and node.module:
-                for a in node.names:
-                    base = "remote" if node.module == "remote" else node.module
-                    seen.add(f"{base}.{a.name}")
-                seen.add(node.module)
-        seen = {s for s in seen if s in known} - {module}
+
+        def walk(node, depth: int) -> None:
+            for child in _ast.iter_child_nodes(node):
+                if isinstance(child, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                    walk(child, depth + 1)
+                    continue
+                if depth:
+                    continue
+                if isinstance(child, _ast.Import):
+                    out.update(a.name for a in child.names)
+                elif isinstance(child, _ast.ImportFrom) and not child.level and child.module:
+                    out.add(child.module)
+                    out.update(f"{child.module}.{a.name}" for a in child.names)
+                walk(child, depth)
+
+        walk(tree, 0)
+        return out
+
+    for module, path in dag.remote_modules().items():
+        seen = {s for s in depth0_imports(path) if s in known} - {module}
         assert seen == TOP[module], f"{module}: 两次扫描不一致 {sorted(seen ^ TOP[module])}"
 
 

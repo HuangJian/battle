@@ -35,7 +35,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import common.platform_utils as pu
-from biz.eval_local import a_eval_seed_list
 from common import game_watch
 from common.platform_utils import cpu_worker_slots
 from common.protocol import UnreapableChildError
@@ -50,6 +49,7 @@ from remote.offline_eval import (
     run_cloud_eval,
 )
 from worker import serve_pool
+from worker.eval_local import a_eval_seed_list
 
 
 @pytest.fixture(autouse=True)

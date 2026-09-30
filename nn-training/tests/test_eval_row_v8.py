@@ -4,7 +4,7 @@
 （biz/eval_local.eval_row、trainer/batch_eval.record）没跟进 ⇒ 日常 eval_log 的
 dmgFirst600/dangerTicks/threatTicks/playerHpRatio 全缺，机制先行读数失明。
 """
-from biz.eval_local import eval_row, eval_v8_fields
+from worker.eval_local import eval_row, eval_v8_fields
 
 EVAL_V8_KEYS = ("playerHpRatio", "dangerTicks", "threatTicks", "dmgFirst600")
 

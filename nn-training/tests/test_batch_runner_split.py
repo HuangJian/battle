@@ -70,18 +70,18 @@ RUNNER_IMPORTS = {
     "typing",
     "common.distribution",
     # 2026-09-29 登记（plan/sampler-single-instance §8-Q2）：节点门多一道「本轮 bootId 一致」
-    # —— 节点 ping 结果的同一性账本（纯逻辑，零依赖）在 `biz/node_identity.py`，执行器在
-    # `bringup` 的回场口消费它。`from biz import node_identity` 的顶层名就是**裸包 `biz`**
-    # （2026-09-30 刀 4 前它写作 `from rl import node_identity` ⇒ 裸名是 `rl`）。
-    "biz",
+    # —— 节点 ping 结果的同一性账本（纯逻辑，零依赖）在 `worker/node_identity.py`，执行器在
+    # `bringup` 的回场口消费它。`from worker import node_identity` 的顶层名就是**裸包
+    # `worker`**（2026-09-30 刀 6 前它在 `biz/`，刀 4 前写作 `from rl import node_identity`）。
+    "worker",
     "trainer.batch_plan",
     "trainer.batch_store",
-    "biz.eval_local",
+    "worker.eval_local",
     # 2026-09-27（S5 第十二刀）登记：本机份额缺省 `EVAL_LOCAL_SLOTS_DEFAULT` 随「让位/
     # 份额」族搬到 `biz/eval_yield.py` —— 执行器从判决面取份额，不再为一条缺省拖入运行器
     # （运行器那行仍在：`run_local_eval_game` 是本机槽位的执行面）。
-    "biz.eval_yield",
-    "biz.log",
+    "worker.eval_yield",
+    "common.log",
     "trainer.queue",
     "trainer.queue_local",
 }
@@ -274,7 +274,7 @@ def test_constructor_call_in_dispatch_is_a_bare_global() -> None:
 
 def test_heartbeat_writes_state_and_swallows_failure(monkeypatch) -> None:
     """心跳写点从新家走；失败必须**静默**（心跳绝不打断单元）。"""
-    import biz.eval_heartbeat as hb
+    import worker.eval_heartbeat as hb
 
     seen: list[dict] = []
     monkeypatch.setattr(hb, "write_state", lambda **kw: seen.append(kw))

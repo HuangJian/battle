@@ -40,17 +40,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 import common.distribution
-from biz import node_identity
-from biz.eval_local import (
-    EVAL_TASK_ATTEMPTS,
-    eval_census_fields,
-    eval_loot_fields,
-    eval_v8_fields,
-    eval_v9_fields,
-    run_local_eval_game,
-)
-from biz.eval_yield import EVAL_LOCAL_SLOTS_DEFAULT
-from biz.log import log
+from common.log import log
 from trainer.batch_plan import (
     batch_iter_id,
     is_transient_error,
@@ -68,6 +58,16 @@ from trainer.queue_local import (
     pop_inflight,
     register_inflight,
 )
+from worker import node_identity
+from worker.eval_local import (
+    EVAL_TASK_ATTEMPTS,
+    eval_census_fields,
+    eval_loot_fields,
+    eval_v8_fields,
+    eval_v9_fields,
+    run_local_eval_game,
+)
+from worker.eval_yield import EVAL_LOCAL_SLOTS_DEFAULT
 
 #: 背压退避封顶（秒）。指数序列 0.25/0.5/1/2/4/8 覆盖 6 次重排。
 BUSY_BACKOFF_CAP_SEC = 8.0
@@ -93,7 +93,7 @@ NODE_RECOVERY_TRIES = 3
 def _heartbeat(**patch: object) -> None:
     """R4-G1：写 EvalBoard 心跳（失败静默——心跳绝不打断单元）。"""
     try:
-        from biz.eval_heartbeat import write_state
+        from worker.eval_heartbeat import write_state
 
         write_state(**patch)
     except Exception:

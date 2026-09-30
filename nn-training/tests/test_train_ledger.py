@@ -17,17 +17,17 @@ from pathlib import Path
 
 import pytest
 
-from biz.breaker import ENT_BREAK, ENT_BREAK_MAX_WINRATE, KL_BREAK
-from biz.gate_check import (
+from trainer.loop_guards import TrainingGuards
+from worker.breaker import ENT_BREAK, ENT_BREAK_MAX_WINRATE, KL_BREAK
+from worker.gate_check import (
     count_iteration_events,
     first_iter_end_ts,
     first_run_start_ts,
     sum_train_samples,
     sum_train_sec,
 )
-from biz.resume import last_completed_iter, last_rotate_seed, peak_entropy
-from biz.train_ledger import LedgerSpec, LedgerView, load_ledger
-from trainer.loop_guards import TrainingGuards
+from worker.resume import last_completed_iter, last_rotate_seed, peak_entropy
+from worker.train_ledger import LedgerSpec, LedgerView, load_ledger
 
 TS = "2026-09-18 12:00:00"
 

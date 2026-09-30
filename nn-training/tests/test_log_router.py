@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.log import (
+from common.log import (
     close_course_sink,
     close_course_sinks,
     format_line,
@@ -96,7 +96,7 @@ def test_missing_or_bad_sink_never_breaks_logging(capsys: pytest.CaptureFixture[
         def flush(self) -> None:
             raise OSError("disk gone")
 
-    from biz.log import _COURSE_SINKS
+    from common.log import _COURSE_SINKS
 
     _COURSE_SINKS["a"] = Boom()
     with prefix_scope("a"):

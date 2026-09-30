@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import pytest
 
-from biz.cli import build_argparser
 from trainer.loop_steps import REMOTE_TRANSPORTS, resolve_hub_push, resolve_transport
+from worker.cli import build_argparser
 
 NODE = {"url": "https://gpu.example", "authKey": "k"}
 

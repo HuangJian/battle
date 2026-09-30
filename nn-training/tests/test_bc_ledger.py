@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.bc_ledger import (
+from worker.bc_ledger import (
     JOB_DONE_EVENT,
     ROUND_DONE_EVENT,
     append_ledger,

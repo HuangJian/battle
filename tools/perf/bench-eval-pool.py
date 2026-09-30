@@ -2,7 +2,7 @@
 
 口径：真 bun + 真导出器（`tools/sim/export-eval-game.ts`）+ 真权重，n 局并发与
 `remote/offline_eval.run_cloud_eval` 同构（ThreadPoolExecutor + 同一个
-`rl/eval_local.run_local_eval_game`），唯一变量 = 有没有池（`NN_SERVE_POOL=0` 关）。每档
+`biz/eval_local.run_local_eval_game`），唯一变量 = 有没有池（`NN_SERVE_POOL=0` 关）。每档
 **pool / spawn 交替跑两轮**（既有纪律：交错防频率漂移），并**逐字段对比**两臂的
 `_eval_report.json`（`elapsedSec` 除外）+ `ticks` ⇒ 池只许更快、不许改产物。
 

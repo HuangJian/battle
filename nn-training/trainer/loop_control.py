@@ -37,7 +37,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from biz.log import log
+from common.log import log
 from trainer.queue import REPO_ROOT
 
 #: 控制文件默认位置（repo 根 `tmp/`——训练机与控制台共享的工作区）。

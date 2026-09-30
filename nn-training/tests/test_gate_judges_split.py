@@ -25,14 +25,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import biz.gate_check as gate_check_mod
-import biz.gate_inputs as gate_inputs_mod
-import biz.gate_judges as gate_judges_mod
+import worker.gate_check as gate_check_mod
+import worker.gate_inputs as gate_inputs_mod
+import worker.gate_judges as gate_judges_mod
 from tests.helpers import remote_dag as dag
 from tests.subproc_util import run_utf8
 
-JUDGES_FILE = ROOT / "biz" / "gate_judges.py"
-CHECK_FILE = ROOT / "biz" / "gate_check.py"
+JUDGES_FILE = ROOT / "worker" / "gate_judges.py"
+CHECK_FILE = ROOT / "worker" / "gate_check.py"
 
 #: 本次搬走的**定义**（常量 / 类 / 函数）——只许在 `gate_judges.py` 里出现。
 MOVED_NAMES = {
@@ -68,8 +68,8 @@ ALLOWED_IMPORTS = {
     "dataclasses",
     "math",
     "typing",
-    "biz.gate_inputs",
-    "biz.config",
+    "worker.gate_inputs",
+    "worker.config",
 }
 
 #: 判决项接口的 kind 覆盖：注册表 6 键 + `_eval_one` 5 分支（skill_floor / plateau /
@@ -151,26 +151,31 @@ def test_gate_check_kept_the_engine_surface() -> None:
 def test_gate_judges_import_face_is_closed() -> None:
     """判决面只许 stdlib + `biz.gate_inputs`（`biz.config` 类型例外，见 ALLOWED_IMPORTS 注释）。"""
     extra = sorted(_imports(JUDGES_FILE) - ALLOWED_IMPORTS)
-    assert extra == [], f"biz/gate_judges.py 引入了依赖：{extra}"
+    assert extra == [], f"worker/gate_judges.py 引入了依赖：{extra}"
 
 
 def test_gate_judges_never_imports_the_engine() -> None:
     """★ 本刀的意义：判决面是**底座**，任何 `biz.gate_check` 反向 import（哪怕 TYPE_CHECKING
     块）都会倒置方向（引擎才许 import 判决面）；业务依赖只许是输入面与 config 类型。
 
-    2026-09-30（刀 4）：判决面 `gate_judges` 与它的两个依赖（`gate_inputs` / `config`）
-    都是**纯逻辑**，随整族搬进 `biz/` ⇒ 这里比的是 `biz.` 前缀；`rl.`（编排）**一处都不许**。
+    2026-09-30（刀 6）：判决面与它的两个依赖（`gate_inputs` / `config`）都搬进
+    `worker/`（本地训练栈）⇒ 这里比的是 `worker.` 前缀，且**只许**这两个；
+    `trainer.`（编排）**一处都不许**。
     """
-    biz = sorted(m for m in _imports(JUDGES_FILE) if m.startswith("biz."))
-    assert biz == ["biz.config", "biz.gate_inputs"], biz
-    orch = sorted(m for m in _imports(JUDGES_FILE) if m.startswith("rl."))
-    assert orch == [], f"判决面不得碰编排 rl：{orch}"
-    assert "biz.gate_judges" in _imports(CHECK_FILE)  # 门面链在引擎侧，方向如上
+    deps = sorted(m for m in _imports(JUDGES_FILE) if m.startswith("worker."))
+    assert deps == ["worker.config", "worker.gate_inputs"], deps
+    orch = sorted(m for m in _imports(JUDGES_FILE) if m.startswith("trainer."))
+    assert orch == [], f"判决面不得碰编排 trainer：{orch}"
+    assert "worker.gate_judges" in _imports(CHECK_FILE)  # 门面链在引擎侧，方向如上
 
 
 def test_gate_judges_stays_pure_logic() -> None:
-    """它在分层里是纯逻辑（不达 remote）——不在 `remote_dag` 的传输账本里，也不该进去。"""
-    assert "biz.gate_judges" not in dag.LAYERS
+    """纯逻辑（不达传输面）：账本里它没有任何通往 `remote.*` 的路径。
+
+    2026-09-30（刀 6）：判据从「不在 `remote_dag` 的账本里」改成**可达性**——
+    `worker/` 整包入账之后，前者的写法恒为假（哑守卫）。
+    """
+    assert dag.reaches_transport("worker.gate_judges") is False
 
 
 # ───────────────────────── ⑤ 门面恒等 ─────────────────────────
@@ -187,7 +192,7 @@ def test_gate_check_facade_forwards_the_same_objects() -> None:
 
 def test_public_call_sites_can_still_import_from_gate_check() -> None:
     """名字是契约：旧写法 `from biz.gate_check import evaluate, BudgetInfo` 必须仍然成立。"""
-    from biz.gate_check import BudgetInfo, evaluate
+    from worker.gate_check import BudgetInfo, evaluate
 
     assert BudgetInfo is gate_inputs_mod.BudgetInfo  # 门面两段链：check → judges/inputs 都是同一对象
     assert callable(evaluate)
@@ -224,17 +229,17 @@ def test_eval_one_is_the_only_entry_and_falls_back_to_dormant() -> None:
 
 
 def test_gate_judges_and_inputs_import_without_heavy_deps() -> None:
-    """红线随家：导入判决面 / 输入面后，`biz.config` / torch / numpy 均不入 `sys.modules`。"""
+    """红线随家：导入判决面 / 输入面后，`worker.config` / torch / numpy 均不入 `sys.modules`。"""
     code = (
-        "import sys, biz.gate_inputs, biz.gate_judges; "
-        "print('biz.config=' + str('biz.config' in sys.modules)); "
+        "import sys, worker.gate_inputs, worker.gate_judges; "
+        "print('worker.config=' + str('worker.config' in sys.modules)); "
         "print('torch=' + str('torch' in sys.modules)); "
         "print('numpy=' + str('numpy' in sys.modules))"
     )
     out = run_utf8([sys.executable, "-c", code], cwd=str(ROOT), timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
     kv = dict(line.split("=") for line in out.stdout.splitlines() if "=" in line)
-    assert kv["biz.config"] == "False"
+    assert kv["worker.config"] == "False"
     assert kv["torch"] == "False"
     assert kv["numpy"] == "False"
 

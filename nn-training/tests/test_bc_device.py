@@ -33,7 +33,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import ProtocolError
 from remote.bc_job import _bc_device
-from train.device import DP_DEVICE_ALIASES, resolve_bc_device
+from worker.train.device import DP_DEVICE_ALIASES, resolve_bc_device
 
 
 def _probe(available: bool, count: int):

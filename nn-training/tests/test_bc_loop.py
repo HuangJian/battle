@@ -24,11 +24,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import trainer.bc_loop as bc_loop
-from biz.bc_config import load_bc_course
-from biz.bc_ledger import ROUND_DONE_EVENT, read_events
-from biz.loop_round import ROUND_NEXT, ROUND_SMOKE_STOP, ROUND_WAIT
 from remote import hub_client, hub_http
 from trainer.bc_loop import BcLoop, BcRuntime, find_round_job
+from worker.bc_config import load_bc_course
+from worker.bc_ledger import ROUND_DONE_EVENT, read_events
+from worker.loop_round import ROUND_NEXT, ROUND_SMOKE_STOP, ROUND_WAIT
 
 
 class FakeHub:
@@ -194,12 +194,12 @@ def _loop(tmp_path: Path, **kw: Any) -> BcLoop:
 
 
 def test_entry_is_a_thin_shell_over_the_engine() -> None:
-    """`run_bc.py` 不得再养第二份编排——它必须与引擎共用**同一个对象**。
+    """`trainer/run_bc.py` 不得再养第二份编排——它必须与引擎共用**同一个对象**。
 
     这条是「一轮只有一份实现」的结构性护栏：谁把编排体搬回入口（或复制一份），谁就给了
     「重发布 ⇒ bc-resume 失效 ⇒ 从头训」第二次机会。
     """
-    import run_bc
+    from trainer import run_bc
 
     assert run_bc.BcLoop is bc_loop.BcLoop
     assert run_bc.resolve_bc_runtime is bc_loop.resolve_bc_runtime
@@ -418,9 +418,9 @@ def test_finish_course_does_not_exit_and_skips_smoke(tmp_path: Path, rec: Record
 
 def test_resolve_bc_init_weights_semantics(tmp_path: Path) -> None:
     """`train.init_from` 解析：空⇒None；相对路径按仓库根锚定；缺失文件响亮拒发。"""
-    from biz.bc_config import BcCourseConfig, BcTrainBlock
     from trainer.bc_loop import resolve_bc_init_weights
     from trainer.queue import REPO_ROOT
+    from worker.bc_config import BcCourseConfig, BcTrainBlock
 
     def course_with(init_from: str) -> BcCourseConfig:
         return BcCourseConfig(name="t", train=BcTrainBlock(init_from=init_from))

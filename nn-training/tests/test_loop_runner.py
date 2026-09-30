@@ -21,9 +21,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.loop_scheduler import CourseQueue
-from biz.loop_tasks import ROUND_TASKS, WAIT, Task, TaskResult
 from trainer.loop_runner import WAIT_HOOKS, LoopRunner
+from worker.loop_scheduler import CourseQueue
+from worker.loop_tasks import ROUND_TASKS, WAIT, Task, TaskResult
 
 
 def _loop(*, ready: bool | None) -> types.SimpleNamespace:

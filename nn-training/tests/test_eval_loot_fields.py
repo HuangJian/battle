@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.eval_local import EVAL_LOOT_KEYS, eval_loot_fields
+from worker.eval_local import EVAL_LOOT_KEYS, eval_loot_fields
 
 
 def test_loot_keys_are_the_three_missing_columns() -> None:
@@ -102,7 +102,7 @@ def test_writers_wire_three_loot_columns() -> None:
 
 
 def test_m1_ingest_row_has_loot_schema_keys() -> None:
-    from biz.eval_ingest import m1_game_row
+    from worker.eval_ingest import m1_game_row
 
     r = m1_game_row(
         {"stage": 0, "seed": 1, "win": False, "cleared": False},

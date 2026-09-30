@@ -25,10 +25,6 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.commit_journal import CommitJournal
-from biz.loop_scheduler import CourseQueue, Supervisor
-from biz.loop_tasks import Task, TaskResult
-from run_rl_cluster import build_rows, main
 from trainer.loop_plan import (
     WAIT_COLLECT,
     WAIT_IDLE,
@@ -37,6 +33,10 @@ from trainer.loop_plan import (
     enabled_courses,
     waiting_state,
 )
+from trainer.run_rl_cluster import build_rows, main
+from worker.commit_journal import CommitJournal
+from worker.loop_scheduler import CourseQueue, Supervisor
+from worker.loop_tasks import Task, TaskResult
 
 
 def _state(**kw: object) -> tuple[str, str]:

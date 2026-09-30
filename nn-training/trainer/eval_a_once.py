@@ -88,7 +88,7 @@ def _write_summary_for_wver(eval_jsonl: Path, key16: str, it: int, t0: float) ->
     只是本 iter 的读数入口。双轨：按 seed 落段拆出 anchor_wr/rotor_wr/overfit_gap_pp
     （与 settle 同口径）。返回聚合到的局数（0 = 账本里根本没有该 wver 的局）。
     """
-    from biz.eval_local import is_anchor_seed, is_rotor_seed, overfit_gap_pp
+    from worker.eval_local import is_anchor_seed, is_rotor_seed, overfit_gap_pp
 
     wins = 0
     clears = 0
@@ -206,10 +206,10 @@ def main() -> int:
 
     force_utf8_stdio()
 
-    from biz.config import apply_course, load_course
-    from biz.eval_local import BASELINE_EVAL_ITER
-    from biz.log import log
+    from common.log import log
     from trainer.eval_dispatch import dispatch_eval_round
+    from worker.config import apply_course, load_course
+    from worker.eval_local import BASELINE_EVAL_ITER
 
     # it0 基线 = 「W(0) 的读数」这件事本身：iter 不是 0 就不是基线（落进别的 iter 槽会被
     # 控制台当成那一轮的读数）。响亮拒，不静默改口。
@@ -265,7 +265,7 @@ def main() -> int:
     # 分派配置：与主循环同一份 rl-config.json（节点池 / policy）。
     cfg = dict(common.distribution.load_dist_config() or {})
     if args.local_slots is not None:
-        # 只在**内存里**覆盖（同 eval_course_once.py --dist-local），绝不回写 rl-config.json。
+        # 只在**内存里**覆盖（同 trainer/eval_course_once.py --dist-local），绝不回写 rl-config.json。
         cfg["policy"] = {**(cfg.get("policy") or {}), "evalLocalSlots": int(args.local_slots)}
     rl_cfg = cfg.get("rl") or {}
     # 主循环的 args 由 CLI 默认值 + rl-config 拼出；本脚本没有 CLI 默认值那层，

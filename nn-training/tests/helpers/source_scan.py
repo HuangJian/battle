@@ -92,7 +92,8 @@ def py_files(root: str) -> tuple[Path, ...]:
     return tuple(sorted(Path(root).rglob("*.py")))
 
 
-#: 业务源码的**两棵树**（2026-09-30 刀 4 分家、刀 5 改名）：编排 `trainer/` + 纯逻辑 `biz/`。
+#: 业务源码的**三棵树**（2026-09-30 刀 4 分家、刀 5 改名、**刀 6 加 `worker/`**）：
+#: 训练编排 `trainer/` + **本地训练全栈 `worker/`**（五包 + 52 个训练侧单体）+ 游戏业务 `biz/`。
 #:
 #: `rl/` 曾经一个包住两种东西 —— **纯逻辑**（课程 / 奖励 / 门 / 账本…，不碰传输层）与
 #: **编排**（驱动 rollout / eval / 远端腿的应用层）。同一个包名让「谁在谁上面」读不出来：
@@ -104,7 +105,10 @@ def py_files(root: str) -> tuple[Path, ...]:
 #: 搬家会让守卫两种症状二选一 —— 硬编码路径当场 `FileNotFoundError`（**响的**，好在）与
 #: `glob` 面缩水后**判据变永真**（**哑的**，刀 4 一次撞见 8 处）。所以别在各文件里各写一份
 #: `(root/"trainer").glob("*.py")`，一律经 `logic_py_files` / `logic_module` / `logic_dotted`。
-LOGIC_PACKAGES: tuple[str, ...] = ("trainer", "biz")
+#: 2026-09-30（刀 6）：`biz/` 里 52 个训练侧单体与五大算法包（models/ppo/data/train/scripts + 52 = …）
+#: 搬进 `worker/` ⇒ 扫描面必须跟着扩，否则这批文件的入边/定义面对账会**静默变空**（本文件头部
+#: 记过的那类哑故障：`glob` 面缩水 = 判据永真）。三棵树基名不重（`test_layering` 的机械守卫钉着）。
+LOGIC_PACKAGES: tuple[str, ...] = ("trainer", "worker", "biz")
 
 
 @cache

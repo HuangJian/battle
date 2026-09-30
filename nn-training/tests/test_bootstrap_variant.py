@@ -1,4 +1,4 @@
-"""bootstrap.py 变体选择的表驱动测试（纯逻辑，无网络、无 subprocess、无 torch）。
+"""tools/bootstrap.py 变体选择的表驱动测试（纯逻辑，无网络、无 subprocess、无 torch）。
 
 **为什么需要**：变体选择错了的代价很高 —— 无 GPU 的机器白下 ~3GB 的 nvidia-* 依赖，
 有 GPU 的机器装 CPU 构建则完全用不上显卡。而这条逻辑在本机只能覆盖 CPU 分支
@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import bootstrap
+from tools import bootstrap
 
 # ---------------------------------------------------------------------------
 # 假命令执行器：模拟 nvidia-smi 的存在与输出

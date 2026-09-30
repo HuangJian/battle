@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.schema import OBS_SCHEMA_MAJOR
-from data.weights_meta import COVERAGE_RAISE, COVERAGE_WARN, validate_weights_meta
+from worker.data.weights_meta import COVERAGE_RAISE, COVERAGE_WARN, validate_weights_meta
 
 #: 手写的 `data` 字段：四个 little-endian float32 `1.0`（2×2 全 1 张量）的 base64。
 #: 校验器**不碰** `data`（base64 → 张量在 weights_io 那一半），写成真值只是为了让
@@ -109,7 +109,7 @@ def test_coverage_constants_guard_the_legit_boundary() -> None:
 
 def test_latest_weights_path_prefers_newest_versioned_and_falls_back(tmp_path: Path) -> None:
     """自动发现规则（无版本化文件时回落 `weights.json`，全无则 None）。"""
-    from data.weights_meta import latest_weights_path
+    from worker.data.weights_meta import latest_weights_path
 
     assert latest_weights_path(str(tmp_path / "missing")) is None
     assert latest_weights_path(str(tmp_path)) is None

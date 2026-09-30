@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 import common.distribution
-from biz.log import log
+from common.log import log
 from trainer.queue import RUN_ID
 
 
@@ -95,7 +95,7 @@ class TrainingBaseline:
             bc = self._baseline_eval_weights(dist_cfg)
             if bc is None:
                 return
-            from biz.eval_local import baseline_summary_landed
+            from worker.eval_local import baseline_summary_landed
 
             try:
                 wver16 = common.distribution.weights_fingerprint(bc)[:16]
@@ -106,8 +106,8 @@ class TrainingBaseline:
             if baseline_summary_landed(self._traj_dir, wver16):
                 self._baseline_landed_wver = wver16
                 return
-            from biz.eval_local import BASELINE_EVAL_ITER
             from trainer.eval_dispatch import dispatch_eval_bg
+            from worker.eval_local import BASELINE_EVAL_ITER
 
             self._baseline_eval_thread = dispatch_eval_bg(
                 self.bun,

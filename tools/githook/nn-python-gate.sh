@@ -40,7 +40,7 @@
 #                 -n 12 峰值 pytest 进程树 RSS ≈ 3.9GB，≈ -n 4 的 3 倍）。NN_GATE_NPROC 覆盖。
 #   默认内线程   = 1（OMP/MKL/OPENBLAS，须在 python 启动前 export）。NN_GATE_THREADS 覆盖
 #                 （0 = 不设，退回 torch 自己的默认 = 各 worker 开满物理核）。
-#   注：该 env 随进程树继承到测试 spawn 的子进程（如 train_loop.py 的 os.environ.setdefault）；
+#   注：该 env 随进程树继承到测试 spawn 的子进程（如 trainer/train_loop.py 的 os.environ.setdefault）；
 #   训练入口里的 torch.set_num_threads(--threads) 是进程内显式覆盖，不受此影响。
 #   为何 12 而非 8（2026-09-26 CPU 记账，/usr/bin/time 记 user+sys）：-n8 时 8 物理核
 #   平均只 busy 4.6~5.1 核（每 worker 约 57% 在 CPU 上）—— 本套件大量时间在等子进程/
@@ -55,7 +55,7 @@
 #   的机器/镜像可跑 2620/2980 用例），不作加速。
 #
 # 单测墙钟护栏（2026-09-15）：pytest 加 `--timeout=${NN_PYTEST_TIMEOUT_S:-60}`
-#  ——与 task.py check 同款 60s/用例（本仓最慢单测实测 22s，有 ~2.7× 余量）。
+#  ——与 tools/task.py check 同款 60s/用例（本仓最慢单测实测 22s，有 ~2.7× 余量）。
 #   背景：编码 agent 沙箱里全量曾「~34% 处 hang」（2026-09-15 Mimo；2026-09-14 无按键
 #   KeyboardInterrupt 见 memory 记录）——无超时时门禁永远挂着，agent 反复重试 commit。
 #   现在超时 → 响亮超时报错 + 调用栈，可诊断可重试；被误伤（慢机超 60s）用

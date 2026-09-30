@@ -99,7 +99,7 @@ def test_kind_role_map_covers_every_manifest_kind() -> None:
     assert KIND_ROLES["run"] == ROLE_OFFLINE, "整段自主 = 离线盘的活"
     assert KIND_ROLES["iter"] == ROLE_ONLINE
     assert KIND_ROLES["ppo"] == ROLE_ONLINE
-    assert KIND_ROLES["bc"] == ROLE_ONLINE, "BC job 由云机跑 train/bc.py ⇒ 在线盘的活"
+    assert KIND_ROLES["bc"] == ROLE_ONLINE, "BC job 由云机跑 worker/train/bc.py ⇒ 在线盘的活"
 
 
 @pytest.mark.parametrize(

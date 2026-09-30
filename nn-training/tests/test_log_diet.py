@@ -24,7 +24,7 @@ import pytest
 # `load_episodes_common` 的家在 ppo.np_core（2026-09-26 从 ppo/common 搬出）——
 # 它读的是**本模块**全局的 discover_shards / log ⇒ monkeypatch 必须打在 np_core 上，
 # 打在 ppo.common 上会是**静默空操作**（名字还在、没人在读）。
-import ppo.np_core as C
+import worker.ppo.np_core as C
 from common.log_bundle import LogBundle
 
 
@@ -110,7 +110,7 @@ def test_load_without_bundle_is_byte_for_byte_the_old_output(
 
 
 def _engine_rig(monkeypatch: pytest.MonkeyPatch):
-    import ppo.engine as engine
+    import worker.ppo.engine as engine
     from tests.test_ppo_common import _kick_chunks, _kick_models
 
     torch, model, _m2, _ref = _kick_models()

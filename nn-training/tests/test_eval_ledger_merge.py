@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.eval_local import (
+from worker.eval_local import (
     append_eval_summaries,
     eval_summary_key,
     merge_eval_rows,

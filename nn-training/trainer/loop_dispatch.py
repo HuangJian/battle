@@ -90,7 +90,7 @@ class TrainingDispatch:
         self._eb_thread = None
         # R4-G1 心跳：关窗 + 关窗时刻（console 只读，用来显示「训练忙碌中已等 N 分钟」）。
         try:
-            from biz.eval_heartbeat import now_ms, write_state
+            from worker.eval_heartbeat import now_ms, write_state
 
             write_state(window_open=False, last_window_closed_ts=now_ms())
         except Exception:

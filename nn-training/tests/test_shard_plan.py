@@ -28,8 +28,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.npyio import save_shard
-from data.shard_split import (
+from worker.data.npyio import save_shard
+from worker.data.shard_split import (
     MIN_SHARDS_FOR_SPLIT,
     plan_shard_split,
     shard_sizes,
@@ -133,7 +133,7 @@ def test_shard_ids_from_load_dataset_match_the_synthetic_shape(tmp_path: Path) -
         }
         save_shard(str(d), arrays, {"stage": s, "seed": s})
 
-    from data.npyio import load_dataset
+    from worker.data.npyio import load_dataset
 
     data = load_dataset(str(tmp_path))
     shard_ids = data["shard_ids"]

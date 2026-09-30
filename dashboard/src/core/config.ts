@@ -1,4 +1,4 @@
-/** config.ts — rl-config.json 读取 / 写回 / 课程校验（rl/config.resolve_course 同规则）。 */
+/** config.ts — rl-config.json 读取 / 写回 / 课程校验（biz/config.resolve_course 同规则）。 */
 
 import { existsSync, readdirSync, readFileSync, statSync, writeFileSync } from 'fs'
 import path from 'path'

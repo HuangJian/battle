@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz import eval_heartbeat as hb
+from worker import eval_heartbeat as hb
 
 
 def _read(root: Path) -> dict[str, Any]:

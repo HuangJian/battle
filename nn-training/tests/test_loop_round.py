@@ -21,7 +21,10 @@ from pathlib import Path
 
 import pytest
 
-from biz.loop_round import (
+from trainer.loop_core import TrainingLoop
+from trainer.loop_round_steps import RoundSteps
+from trainer.loop_steps import SmokeVoidRoundError
+from worker.loop_round import (
     COLLECT_LOCAL,
     COLLECT_NODE,
     COLLECT_OFFLINE,
@@ -39,10 +42,7 @@ from biz.loop_round import (
     resolve_collect_mode,
     wait_for,
 )
-from biz.loop_tasks import ROUND_TASKS
-from trainer.loop_core import TrainingLoop
-from trainer.loop_round_steps import RoundSteps
-from trainer.loop_steps import SmokeVoidRoundError
+from worker.loop_tasks import ROUND_TASKS
 
 
 def _stub(obj: object, name: str, fn: object) -> None:

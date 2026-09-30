@@ -80,7 +80,7 @@ function writeLedger(course: string, lines: string[]): string {
 // ────────────────────────── ① 镜像常量（对着 python 源码核对） ──────────────────────────
 
 describe('镜像常量（权威在 python；这里防漂）', () => {
-  const burnPy = readFileSync(path.join(REPO_ROOT, 'nn-training/biz/kickstart_burn.py'), 'utf-8')
+  const burnPy = readFileSync(path.join(REPO_ROOT, 'nn-training/worker/kickstart_burn.py'), 'utf-8')
 
   /**
    * 按**定义**在 `nn-training/trainer/` 源码树里找（不写死文件）：按写死路径读源码的守卫会在下一
@@ -117,7 +117,7 @@ describe('镜像常量（权威在 python；这里防漂）', () => {
   })
 
   it('账本筛选键与 python `read_trend_rows` 同一字面量（event=eval_summary）', () => {
-    const gatePy = readFileSync(path.join(REPO_ROOT, 'nn-training/biz/gate_check.py'), 'utf-8')
+    const gatePy = readFileSync(path.join(REPO_ROOT, 'nn-training/worker/gate_check.py'), 'utf-8')
     expect(gatePy).toContain('r.get("event") != "eval_summary"')
   })
 })

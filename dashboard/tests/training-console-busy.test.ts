@@ -78,7 +78,7 @@ describe('busy 键同源：guard 与 release 必须同键', () => {
     // 槽 = `scopeOf('trainingLoop', …)`：共享 trainer 的条目只活在空串槽里。
     saveAnyComponent('trainingLoop', '', {
       pid: process.pid,
-      entry: 'run_rl_cluster.py',
+      entry: 'trainer/run_rl_cluster.py',
       course: '',
     })
     const r = await actions.startComponent('trainingLoop', { course: COURSE })
@@ -102,7 +102,7 @@ describe('busy 键同源：guard 与 release 必须同键', () => {
     try {
       saveAnyComponent('trainingLoop', '', {
         pid: process.pid, // 必活：命中幂等早退分支
-        entry: 'run_rl_cluster.py',
+        entry: 'trainer/run_rl_cluster.py',
         course: '',
       })
       const r = await actions.startComponent('trainingLoop', { course: COURSE })
@@ -177,7 +177,7 @@ describe('busy 自愈：漏 release 的键超过 TTL 自动解锁', () => {
     // 清扫后同课程可再次启动（不被 409 挡 ⇒ 消息是「已在运行」而非「动作进行中」）
     saveAnyComponent('trainingLoop', '', {
       pid: process.pid,
-      entry: 'run_rl_cluster.py',
+      entry: 'trainer/run_rl_cluster.py',
       course: '',
     })
     const again = await actions.startComponent('trainingLoop', { course: COURSE })

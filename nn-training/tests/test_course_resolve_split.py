@@ -29,10 +29,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import biz.config as config_mod
 import biz.course_resolve as resolve_mod
+import worker.config as config_mod
 
-CONFIG_FILE = ROOT / "biz" / "config.py"
+CONFIG_FILE = ROOT / "worker" / "config.py"
 NEW_FILE = ROOT / "biz" / "course_resolve.py"
 
 MOVED_NAMES = {
@@ -53,7 +53,7 @@ ALLOWED_IMPORTS = {
     "biz.course_spec",
     "common.jsonc",  # load_course 的**函数内**延迟导入（读 JSONC 实现）
 }
-TOP_LEVEL_BANNED = {"biz.config", "common.jsonc"}
+TOP_LEVEL_BANNED = {"worker.config", "common.jsonc"}
 
 
 def _tree(path: Path) -> ast.Module:
@@ -104,7 +104,7 @@ def test_course_resolve_import_surface_is_closed() -> None:
     mods = _imported_modules(NEW_FILE)
     extra = sorted(mods - ALLOWED_IMPORTS)
     assert extra == [], f"course_resolve 引入了允许面之外的依赖：{extra}"
-    assert "biz.config" not in mods, "解析面反向 import 门面 ⇒ 与 config → course_resolve 成环"
+    assert "worker.config" not in mods, "解析面反向 import 门面 ⇒ 与 config → course_resolve 成环"
 
 
 def test_lazy_edges_are_function_local_not_top_level() -> None:
@@ -191,11 +191,11 @@ def test_course_from_args_freezes_bytes_and_refuses_mutual_flags(tmp_path, monke
 
 def test_resolve_state_init_bank_accepts_three_bases(tmp_path, monkeypatch) -> None:
     repo = tmp_path / "repo" / "nn-training"
-    (repo / "data").mkdir(parents=True)
-    (repo / "data" / "manifest.json").write_text("{}", encoding="utf-8")
+    (repo / "worker" / "data").mkdir(parents=True)
+    (repo / "worker" / "data" / "manifest.json").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(resolve_mod, "CURRICULA_DIR", repo / "curricula")
     monkeypatch.chdir(tmp_path)  # cwd 与两个基准都不同 ⇒ 靠仓库根/ nn-training 基准命中
-    assert resolve_mod.resolve_state_init_bank("nn-training/data/manifest.json") is not None
-    assert resolve_mod.resolve_state_init_bank("data/manifest.json") is not None
+    assert resolve_mod.resolve_state_init_bank("nn-training/worker/data/manifest.json") is not None
+    assert resolve_mod.resolve_state_init_bank("worker/data/manifest.json") is not None
     assert resolve_mod.resolve_state_init_bank("") is None
     assert resolve_mod.resolve_state_init_bank("no/such/file.json") is None

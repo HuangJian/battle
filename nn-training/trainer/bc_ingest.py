@@ -27,11 +27,11 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from biz.bc_config import BcCourseConfig
-from biz.bc_eval import BcEvalError, dispatch_bc_eval
-from biz.bc_ledger import append_ledger
-from biz.log import log
+from common.log import log
 from common.protocol import decode_weights_json
+from worker.bc_config import BcCourseConfig
+from worker.bc_eval import BcEvalError, dispatch_bc_eval
+from worker.bc_ledger import append_ledger
 
 #: 无进展告警阈值（秒）：等 job 时超过这么久没有新 epoch 入账 ⇒ 提示检查云机 worker（一次）。
 IDLE_WARN_SEC = 900.0

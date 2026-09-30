@@ -1,12 +1,12 @@
 """CoordConv 坐标通道 golden 双向校验（plan/python-refactor.md P2-5）。
 
-**背景**：Python 侧 `models/student.py:coord_channels` 用 `torch.round()`（banker's
+**背景**：Python 侧 `worker/models/student.py:coord_channels` 用 `torch.round()`（banker's
 rounding，四舍六入五取偶），TS 侧 `src/nn/infer.ts:428-429` 用 `Math.round()`
 （half-up）。BOARD=26 时 `j×255/25 = j×10.2` 恰好不产生 `.5` 平局，两侧侥幸一致；
 **一旦 BOARD 变更，两侧会静默分叉**，而 TS 运行时逐字节复现前向是硬约束
 （BN-free 的同一原因）。
 
-本文件把坐标通道固化为 golden（`models/coord_golden.json`）：
+本文件把坐标通道固化为 golden（`worker/models/coord_golden.json`）：
   * Python 侧：`coord_channels(26)` 必须与 golden 逐值相等；
   * TS 侧（tests/nn/coord-golden.test.ts）：infer.ts 的坐标公式必须与 golden 逐值相等。
 
@@ -31,9 +31,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from models.student import coord_channels
+from worker.models.student import coord_channels
 
-GOLDEN_PATH = ROOT / "models" / "coord_golden.json"
+GOLDEN_PATH = ROOT / "worker" / "models" / "coord_golden.json"
 GOLDEN_BOARD = 26
 
 

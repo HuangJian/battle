@@ -101,7 +101,7 @@ SLOT_HANDS: dict[str, tuple[str, ...]] = {
 }
 
 #: 顶层 import 闭集（非 stdlib；本模块不许长出重依赖）。
-TOP_IMPORTS = frozenset({"common.distribution", "biz.archive", "biz.log", "biz.modes"})
+TOP_IMPORTS = frozenset({"common.distribution", "worker.archive", "common.log", "worker.modes"})
 STDLIB_IMPORTS = frozenset({"pathlib", "typing"})
 
 #: 反向边（禁）：成环或把叶子拉回编排上游。
@@ -128,10 +128,10 @@ GONE_FROM_STEPS = ("common", "backup_weights", "_MODE_BACKUP_PREFIX")
 DELAYED_IMPORTS = frozenset(
     {
         "remote.hub_client",  # `_ensure_ts_code` → pack_ts_code_zip（本模块唯一的 remote 触点）
-        "biz.iter_job",  # `_export_offline_bundle` → build_iter_spec
-        "biz.plan",  # `_export_offline_bundle` → build_plan / dump_plan / planned_iters / RUN_NODE_LABEL
-        "biz.resume",  # `_volume_plan_block` → trailing_samples_per_game
-        "biz.volume_waves",  # `_volume_plan_block` → volume_block
+        "worker.iter_job",  # `_export_offline_bundle` → build_iter_spec
+        "worker.plan",  # `_export_offline_bundle` → build_plan / dump_plan / planned_iters / RUN_NODE_LABEL
+        "worker.resume",  # `_volume_plan_block` → trailing_samples_per_game
+        "worker.volume_waves",  # `_volume_plan_block` → volume_block
     }
 )
 #: 注：`biz.modes`（`_MODE_BACKUP_PREFIX`）是**顶层** import，不在上面那张表里（那张表只要

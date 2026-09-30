@@ -25,8 +25,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import biz.eval_local as eval_local
 import remote.offline_eval as offline_eval
+import worker.eval_local as eval_local
 import worker.serve_pool as serve_pool
 from remote.artifacts import sha256_file
 from remote.offline_eval import CLOUD_NODE, eval_plan_of, run_cloud_eval

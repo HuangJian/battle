@@ -268,7 +268,7 @@ describe('本机伪节点不在启动面/受管面（防回流）', () => {
     expect(specs).not.toContain('WORKER_SERVE_ENTRY')
     // 预演侧确实自起自停（同一份远端入口）
     const push = code('stack/push.ts')
-    expect(push).toContain("'remote_worker_serve'")
+    expect(push).toContain("'remote.remote_worker_serve'")
     expect(push).toContain('killPid')
   })
 })

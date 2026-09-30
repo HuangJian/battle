@@ -1,14 +1,14 @@
 """bc_loop —— BC（行为克隆）课程引擎：让**单进程 supervisor** 也能带 BC 课（R3-4）。
 
-**为什么需要它**：`run_bc.py` 原本是「一个进程服务一门 BC 课程」的脚本（`main()` 里一大段
+**为什么需要它**：`trainer/run_bc.py` 原本是「一个进程服务一门 BC 课程」的脚本（`main()` 里一大段
 procedural 编排），而多课程并行之后训练侧收敛为**一个进程**（`trainer/loop_serve.py` 的
-`run_rl_cluster.py --serve`，2026-09-19）。BC 课要进那个 supervisor，缺的不是调度器（R2c 已好），
+`trainer/run_rl_cluster.py --serve`，2026-09-19）。BC 课要进那个 supervisor，缺的不是调度器（R2c 已好），
 而是**一个能被它驱动的引擎**——本模块就是那个引擎，并把编排器拆成两层：
 
 | 层 | 归属 | 干什么 |
 |---|---|---|
 | 引擎（本模块） | `trainer/bc_loop.py` | 一轮怎么跑（采集/发布 → 等回传 → 落位归档）、账本指针语义、收官 |
-| 入口（薄壳） | `run_bc.py` | 只做进程级一次性准备（utf8/chdir/git push）+ 解析 + 建引擎 + **阻塞式**驱动 |
+| 入口（薄壳） | `trainer/run_bc.py` | 只做进程级一次性准备（utf8/chdir/git push）+ 解析 + 建引擎 + **阻塞式**驱动 |
 
 **一轮被切成三段（可重入）**：`run_one_round(it)` 每次最多做一件事就返回——
 
@@ -43,20 +43,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from biz.archive import backup_weights
-from biz.bc_config import (
-    BC_SUFFIX,
-    BcCourseConfig,
-    bc_corpus_identity_fp,
-    load_bc_course,
-    resolve_bc_course,
-    round_seeds,
-)
-from biz.bc_dispatch import BcDispatchError, dispatch_bc_corpus, landed_pairs
-from biz.bc_eval import BcEvalError, dispatch_bc_eval
-from biz.bc_ledger import ROUND_DONE_EVENT, append_ledger, bc_progress, completed_jobs
-from biz.log import log
-from biz.loop_round import ROUND_NEXT, ROUND_SMOKE_STOP, ROUND_WAIT, RoundOutcome
+from common.log import log
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from remote.hub_client import (
     git_head,
@@ -67,8 +54,21 @@ from remote.hub_client import (
     verify_and_land_bc,
 )
 from trainer.queue import REPO_ROOT
+from worker.archive import backup_weights
+from worker.bc_config import (
+    BC_SUFFIX,
+    BcCourseConfig,
+    bc_corpus_identity_fp,
+    load_bc_course,
+    resolve_bc_course,
+    round_seeds,
+)
+from worker.bc_dispatch import BcDispatchError, dispatch_bc_corpus, landed_pairs
+from worker.bc_eval import BcEvalError, dispatch_bc_eval
+from worker.bc_ledger import ROUND_DONE_EVENT, append_ledger, bc_progress, completed_jobs
+from worker.loop_round import ROUND_NEXT, ROUND_SMOKE_STOP, ROUND_WAIT, RoundOutcome
 
-#: nn-training 目录（入口路径/子进程 cwd 都相对它——与 `run_bc.py` 的 `NN_ROOT` 同一个）。
+#: nn-training 目录（入口路径/子进程 cwd 都相对它——与 `trainer/run_bc.py` 的 `NN_ROOT` 同一个）。
 NN_ROOT = REPO_ROOT / "nn-training"
 
 #: per-job 等待上限（秒）。**0 = 无上限**（2026-09-14 用户定案）。
@@ -449,7 +449,7 @@ def train_local_bc(
     cmd = [
         sys.executable,
         "-u",
-        str(NN_ROOT / "train" / "bc.py"),
+        str(NN_ROOT / "worker" / "train" / "bc.py"),
         "--data-dir",
         str(data_round_dir),
         "--arch",
@@ -637,7 +637,7 @@ def resolve_transport(
 
 @dataclass
 class BcRuntime:
-    """一门 BC 课程在**本进程**里的全部解析结果（`run_bc.py` 与 supervisor 共用一份）。
+    """一门 BC 课程在**本进程**里的全部解析结果（`trainer/run_bc.py` 与 supervisor 共用一份）。
 
     「解析」= 课程文件 → 语料身份 → 路径派生 → 传输裁决 → hub/push 地址。**只算一次**：
     这些值在一轮之内不会变，重算只会引入「两处解析得出两个答案」的可能（例如 mid-run
@@ -744,7 +744,7 @@ def resolve_bc_runtime(
 def bc_argparser(
     description: str = "BC training orchestrator (云-HUB-LAN)",
 ) -> argparse.ArgumentParser:
-    """BC 课程的参数表（**唯一一份**：`run_bc.py` 的 CLI 与 supervisor 的开课都走它）。"""
+    """BC 课程的参数表（**唯一一份**：`trainer/run_bc.py` 的 CLI 与 supervisor 的开课都走它）。"""
     ap = argparse.ArgumentParser(description=description)
     ap.add_argument("--course", required=True, help="BC 课程（curricula/<name>.bc.jsonc）")
     ap.add_argument(
@@ -775,7 +775,7 @@ def bc_argparser(
 
 
 def bc_course_args(course: str, argv: list[str] | None = None) -> argparse.Namespace:
-    """课程 stem → 生效 BC args（**与 `run_bc.py --course <stem>` 同一份解析**）。
+    """课程 stem → 生效 BC args（**与 `trainer/run_bc.py --course <stem>` 同一份解析**）。
 
     supervisor 按课程表开课，故这里拒绝 `--course`（避免「课程表里的课」与「argv 里的课」
     两个来源打架——与 `trainer/loop_serve.py::course_args` 同一条纪律）。
@@ -883,7 +883,7 @@ def finish_all_rounds(
         "（云机侧用 `--once` 可在处理完一个 job 后自动退出；否则请直接关机）"
     )
     try:
-        from biz.events import write_run_complete
+        from worker.events import write_run_complete
 
         write_run_complete(
             Path(jsonl_path),
@@ -1214,7 +1214,7 @@ class BcLoop:
             log=self.log,
         )
 
-    # ---- 阻塞式驱动（单课程入口 `run_bc.py` 用；supervisor 走自己的调度环） ----
+    # ---- 阻塞式驱动（单课程入口 `trainer/run_bc.py` 用；supervisor 走自己的调度环） ----
 
     def run_blocking(self) -> None:
         """单课程阻塞驱动：等外部时**原地重问**（无让位对象），语义与改造前的 for 循环一致。"""

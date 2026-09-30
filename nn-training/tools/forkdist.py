@@ -31,7 +31,7 @@ xdist（见 tools/githook/nn-python-gate.sh 的分支）。判据是「有没有
     python -m pytest tests/ e2e/ -p tools.forkdist --forkdist auto --timeout=60   # = 机器核数
 
 `auto` = `common.platform_utils.effective_cores()`（cgroup 配额/亲和掩码优先，与门禁的 `NPROC` 同源）；
-`Makefile` 的 `NPROC ?= auto` 与 `task.py` 的 `-n auto` 就是靠它原样搬过来的。
+`Makefile` 的 `NPROC ?= auto` 与 `tools/task.py` 的 `-n auto` 就是靠它原样搬过来的。
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ _WORKERS_ATTR = "forkdist_workers"
 def _worker_count_option(value: str) -> int:
     """`--forkdist` 的参数：正整数，或 `auto`（= 机器核数，同 xdist 的 `-n auto` 直觉）。
 
-    `auto` 不是偷懒：`nn-training/Makefile` 的 `NPROC ?= auto` 与 `task.py` 的 `-n auto`
+    `auto` 不是偷懒：`nn-training/Makefile` 的 `NPROC ?= auto` 与 `tools/task.py` 的 `-n auto`
     本来就是这个语义，换了分发器不该把这个旋钮的打法也换掉（`make test NPROC=8` 仍要能用）。
     """
     text = value.strip().lower()

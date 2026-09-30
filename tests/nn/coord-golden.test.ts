@@ -16,7 +16,7 @@ import { join } from 'node:path'
  */
 const GOLDEN = JSON.parse(
   readFileSync(
-    join(import.meta.dir, '..', '..', 'nn-training', 'models', 'coord_golden.json'),
+    join(import.meta.dir, '..', '..', 'nn-training', 'worker', 'models', 'coord_golden.json'),
     'utf8',
   ),
 ) as { board: number; coords: number[] }

@@ -138,7 +138,7 @@ def _argv(port: int, lock: Path, tmp_path: Path) -> list[str]:
     return [
         sys.executable,
         "-m",
-        "remote_worker_serve",
+        "remote.remote_worker_serve",
         "--port",
         str(port),
         "--token",

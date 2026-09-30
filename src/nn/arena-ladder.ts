@@ -13,7 +13,7 @@
  *   * 每级 3 张布局变异（写死 3，不许中途加，§2.3a）——arena 无地图级随机性，
  *     只有 agent 级随机性，背图过门靠这 3 张变异 + P1 探针免疫。
  *   * arena 编号命名空间 1000+n，与真实 stage 下标 0..34 不相交（卡 A1）；
- *     该整数原样流经 course.py → run_rl.py → queue.py → sampler-agent →
+ *     该整数原样流经 course.py → trainer/run_rl.py → queue.py → sampler-agent →
  *     导出器解析层，六环节只在导出器解析层落地。
  */
 

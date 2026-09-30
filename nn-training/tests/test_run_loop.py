@@ -35,7 +35,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.run_loop as run_loop_mod
-from biz.plan import build_plan, dump_plan, pairs_for, planned_iters
 from common.protocol import (
     ProtocolError,
     RetryableError,
@@ -55,6 +54,7 @@ from remote.run_loop import (
     run_standalone,
     verify_plan_file,
 )
+from worker.plan import build_plan, dump_plan, pairs_for, planned_iters
 
 
 def _quiet(_msg: str) -> None:  # 测试日志静音

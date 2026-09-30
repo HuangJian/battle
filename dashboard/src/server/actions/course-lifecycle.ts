@@ -126,9 +126,9 @@ export function declaredCourseIters(course: string): number | null {
  *  三件事各解决一个具体的坑（每一件都是「不做就会静默地不对」的那类）：
  *
  *   ① **权重播种**（RL 才有；BC 无 warm-start）：`tmp/<课>/weights.json` 不在则从 BC 种子复制。
- *      共享 trainer 不接受每课的权重参数，它按 traj 目录自己找（与 `run_rl.py` 同约定）。
+ *      共享 trainer 不接受每课的权重参数，它按 traj 目录自己找（与 `trainer/run_rl.py` 同约定）。
  *   ② **发现事实**：`tmp/<课>/training_log.jsonl` 必须存在。训练侧的课程表**就是**这个文件
- *      （`rl/loop_plan.discover_courses` 与控制台 `discoverCourses` 同一判据），而共享 trainer 是
+ *      （`trainer/loop_plan.discover_courses` 与控制台 `discoverCourses` 同一判据），而共享 trainer 是
  *      「先起进程、后加课」的模型 —— 不建它，这门新课永远不会被发现（症状极难查：进程活着、
  *      队列正常、就是这门课一轮都不跑）。空账本 = 合法状态（第 1 轮从头开始）。
  *   ③ **hub 发现判据**：`tmp/<课>/remote-jobs/` 目录存在且新鲜（`hub_server._course_dir_live`）。
@@ -237,13 +237,13 @@ export async function pushHubMode(
  *
  *  ★ **必须带身份看，不能只看「锁活着」**（2026-09-20 用户报障：「❌ x20-steady 未开课：
  *  run_rl 锁被 PID 18364 持有」）——那个 PID 就是控制台自己起的**共享 trainer**
- *  （`run_rl_cluster.py --serve`）：它服务多课，每开一门课就取该课自己的 per-course 锁
+ *  （`trainer/run_rl_cluster.py --serve`）：它服务多课，每开一门课就取该课自己的 per-course 锁
  *  （单进程多课模型的正常持有）。把这种持有当成冲突 ⇒ **每次开课都被自己人拒**，
  *  而拒的同时盘上已经写过开课标记（见下面 ① 的顺序注释）= 一句假回执。
  *
  *  判据：该课锁的持有人 == **共享 trainer 的进程级锁**（`nn-training/.run_cluster.lock`）
  *  持有人 ⇒ 同一个进程 ⇒ 正常状态，不拦；持有者活着但不是它 ⇒ 真冲突（有人在手工跑
- *  `run_rl.py --course <本课>`，与共享 trainer 抢同一批 traj）⇒ 拦。陈旧锁（持有人已死）
+ *  `trainer/run_rl.py --course <本课>`，与共享 trainer 抢同一批 traj）⇒ 拦。陈旧锁（持有人已死）
  *  在 `runRlLockHolder` / `runBcLockHolder` 里已经归 null ⇒ 不拦。
  */
 export interface CourseRunnerFacts {

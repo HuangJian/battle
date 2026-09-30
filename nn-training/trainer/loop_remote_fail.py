@@ -16,10 +16,10 @@ from __future__ import annotations
 
 from typing import Any
 
-from biz.events import write_gate_verdict
-from biz.log import log
+from common.log import log
 from common.protocol import JobFailedError
 from trainer.loop_transport import fatal_remote_http
+from worker.events import write_gate_verdict
 
 
 class TrainingRemoteFail:

@@ -26,12 +26,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import biz.eval_local as eval_local_mod
-import biz.eval_track as eval_track_mod
+import worker.eval_local as eval_local_mod
+import worker.eval_track as eval_track_mod
 from tests.helpers import remote_dag as dag
 
-TRACK_FILE = ROOT / "biz" / "eval_track.py"
-LOCAL_FILE = ROOT / "biz" / "eval_local.py"
+TRACK_FILE = ROOT / "worker" / "eval_track.py"
+LOCAL_FILE = ROOT / "worker" / "eval_local.py"
 
 #: 本次搬走的**定义**（常量 / 函数）——只许在 `eval_track.py` 里出现。
 MOVED_NAMES = {
@@ -61,7 +61,7 @@ MOVED_NAMES = {
 }
 
 #: `eval_track.py` 允许的 import 面（stdlib + 本仓唯一的日志原语 `biz.log`；多一个即红）。
-ALLOWED_IMPORTS = {"__future__", "json", "threading", "time", "collections.abc", "pathlib", "biz.log"}
+ALLOWED_IMPORTS = {"__future__", "json", "threading", "time", "collections.abc", "pathlib", "common.log"}
 
 
 def _tree(path: Path) -> ast.Module:
@@ -122,18 +122,22 @@ def test_eval_local_kept_the_execution_surface() -> None:
 def test_eval_track_imports_only_stdlib_and_the_log_primitive() -> None:
     """纯逻辑模块：不得 import `remote.*` / torch / numpy（`biz.log` 是唯一允许的仓内依赖）。"""
     extra = sorted(_imports(TRACK_FILE) - ALLOWED_IMPORTS)
-    assert extra == [], f"biz/eval_track.py 引入了允许面之外的依赖：{extra}"
+    assert extra == [], f"worker/eval_track.py 引入了允许面之外的依赖：{extra}"
 
 
 def test_eval_track_never_imports_eval_local() -> None:
     """★ 本刀的意义：`eval_track` 是**底座**，反向 import 运行器立刻成环。"""
-    back = sorted(m for m in _imports(TRACK_FILE) if m.startswith("biz.eval_local"))
-    assert back == [], f"biz/eval_track.py 反向 import 了运行器：{back}"
+    back = sorted(m for m in _imports(TRACK_FILE) if m.startswith("worker.eval_local"))
+    assert back == [], f"worker/eval_track.py 反向 import 了运行器：{back}"
 
 
 def test_eval_track_stays_pure_logic() -> None:
-    """它在分层里是 L1 纯逻辑（不达 remote）——不在 `remote_dag` 的传输账本里，也不该进去。"""
-    assert "biz.eval_track" not in dag.LAYERS
+    """纯逻辑（不达传输面）：账本里它没有任何通往 `remote.*` 的路径。
+
+    2026-09-30（刀 6）：判据从「不在 `remote_dag` 的账本里」改成**可达性**——
+    `worker/` 整包入账之后，前者的写法恒为假（哑守卫）。
+    """
+    assert dag.reaches_transport("worker.eval_track") is False
 
 
 # ───────────────────────── ③ 门面 ─────────────────────────
@@ -150,7 +154,7 @@ def test_eval_local_facade_forwards_the_same_objects() -> None:
 
 def test_public_call_sites_can_still_import_from_eval_local() -> None:
     """名字是契约：旧的 `from biz.eval_local import settle_eval_summary`（多处在用）必须仍然成立。"""
-    from biz.eval_local import dual_track_seeds, overfit_fires, settle_eval_summary
+    from worker.eval_local import dual_track_seeds, overfit_fires, settle_eval_summary
 
     assert dual_track_seeds is eval_track_mod.dual_track_seeds
     assert overfit_fires is eval_track_mod.overfit_fires

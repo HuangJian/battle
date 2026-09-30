@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.loop_tasks import (
+from worker.loop_tasks import (
     ABORT,
     DONE,
     RESOURCE_OF,

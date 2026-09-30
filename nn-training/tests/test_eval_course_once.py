@@ -21,7 +21,7 @@ sys.path.insert(0, str(ROOT / "nn-training"))
 
 def _load():
     spec = importlib.util.spec_from_file_location(
-        "eval_course_once", str(ROOT / "nn-training" / "eval_course_once.py")
+        "trainer.eval_course_once", str(ROOT / "nn-training" / "trainer/eval_course_once.py")
     )
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
@@ -165,7 +165,7 @@ def test_oneshot_runner_uses_dedicated_weight_kind() -> None:
 
     # 源码契约：kind 必须**按关键字**传（它前面还有 init_sha16，位置写错会静默回落
     # 'rollout' —— 本守卫的第一版真就踩了这个坑，写进 14 号位置后行为与修复前一模一样）。
-    for entry in ("eval_course_once.py", "eval_m1_once.py"):
+    for entry in ("trainer/eval_course_once.py", "trainer/eval_m1_once.py"):
         src = (ROOT / "nn-training" / entry).read_text(encoding="utf-8")
         assert "kind=ONESHOT_EVAL_KIND" in src, f"{entry} 未把专用 kind 交给 BatchEvalRunner"
         assert inspect.cleandoc(src).count("BatchEvalRunner(") == 1

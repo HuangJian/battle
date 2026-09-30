@@ -27,17 +27,17 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.config import CourseConfig, apply_course, corpus_identity_fp, course_cli_conflicts
 from biz.hot_reload import RESTART_ONLY_FIELDS, apply_hot_fields, plan_reload
-from biz.kickstart_burn import (
+from trainer.loop_guards import TrainingGuards
+from trainer.loop_steps import kickstart_coef
+from worker.config import CourseConfig, apply_course, corpus_identity_fp, course_cli_conflicts
+from worker.kickstart_burn import (
     BURN_MARGIN_PP,
     BURN_POINTS,
     baseline_reading,
     burn_overrides,
     burn_verdict,
 )
-from trainer.loop_guards import TrainingGuards
-from trainer.loop_steps import kickstart_coef
 
 
 def _course(**kw) -> CourseConfig:

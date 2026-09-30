@@ -91,7 +91,7 @@ def test_shard_import_surface_is_closed_and_acyclic() -> None:
 
 def test_dist_shard_does_not_touch_an_upper_layer() -> None:
     """L0 是叶子：不得 import 上层包。"""
-    banned = {"torch", "numpy", "trainer", "biz", "remote", "models", "data", "train", "common.distribution"}
+    banned = {"torch", "numpy", "trainer", "worker", "biz", "remote", "models", "data", "train", "common.distribution"}
     tops = {m.split(".")[0] for m in _imported_modules(SHARD_FILE)}
     hit = sorted(tops & banned)
     assert hit == [], f"common.shard 依赖了上层：{hit}"

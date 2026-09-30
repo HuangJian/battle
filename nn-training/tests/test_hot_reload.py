@@ -8,9 +8,9 @@
 import types
 from pathlib import Path
 
-from biz.cmd import course_fp_for_args
-from biz.config import corpus_identity_fp, load_course
 from biz.hot_reload import apply_hot_fields, changed_field_names, plan_reload
+from worker.cmd import course_fp_for_args
+from worker.config import corpus_identity_fp, load_course
 
 REPO = Path(__file__).resolve().parents[2]
 C6_DMGFIX = REPO / "nn-training" / "curricula" / "c6-dmgfix.jsonc"

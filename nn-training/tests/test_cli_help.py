@@ -3,7 +3,7 @@
 两件事：
 
 ① **裸 `%` 会让整个 `--help` 崩**（argparse 的 `_expand_help` 对 help 再做一次 `% params`）——
-   2026-09-21 实测：`run_rl.py --help` 抛 `ValueError: unsupported format character '?' (0xff0c)`，
+   2026-09-21 实测：`trainer/run_rl.py --help` 抛 `ValueError: unsupported format character '?' (0xff0c)`，
    病灶是 `--remote-precollect` 的一行 help 里的 `30%`（全仓唯一裸 `%`）。这个 bug 平时不会暴露
    （训练从不打印 help），但它是**唯一的自保手段**在人工排查时失效——守住它只需一个 format_help()。
 
@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.cli import build_argparser
+from worker.cli import build_argparser
 
 
 def _help_text() -> str:

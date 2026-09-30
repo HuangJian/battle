@@ -26,10 +26,21 @@ from collections.abc import Callable
 from typing import Any
 
 import common.distribution
-from biz.config import course_key_of, resolve_course_quota
-from biz.events import log_iter_error
-from biz.log import log
-from biz.loop_round import (
+from common.log import log
+from trainer.loop_baseline import TrainingBaseline
+from trainer.loop_dispatch import TrainingDispatch
+from trainer.loop_iter_dir import TrainingIterDir
+from trainer.loop_steps import (
+    BundleExportedError,
+    SmokeVoidRoundError,
+    _rollout_source,
+    _run_segment_iters,
+)
+from trainer.loop_volume import TrainingVolume
+from trainer.rollout_phase import join_precollect_child, precollect_ready, spawn_next_collect
+from worker.config import course_key_of, resolve_course_quota
+from worker.events import log_iter_error
+from worker.loop_round import (
     COLLECT_LOCAL,
     COLLECT_NODE,
     COLLECT_OFFLINE,
@@ -47,18 +58,7 @@ from biz.loop_round import (
     finish,
     resolve_collect_mode,
 )
-from biz.loop_tasks import ROUND_TASKS
-from trainer.loop_baseline import TrainingBaseline
-from trainer.loop_dispatch import TrainingDispatch
-from trainer.loop_iter_dir import TrainingIterDir
-from trainer.loop_steps import (
-    BundleExportedError,
-    SmokeVoidRoundError,
-    _rollout_source,
-    _run_segment_iters,
-)
-from trainer.loop_volume import TrainingVolume
-from trainer.rollout_phase import join_precollect_child, precollect_ready, spawn_next_collect
+from worker.loop_tasks import ROUND_TASKS
 
 #: 离线课的**唯一**执行者指路（日志/报错共用一句，免得几处各写一份说法）。
 #: 背景：半离线整段腿（发一份 `kind=run` 队列项、本机等 8h）2026-09-25 退役。

@@ -29,8 +29,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import common.distribution
-from biz.eval_local import BASELINE_EVAL_ITER, baseline_summary_landed, eval_done_keys
 from trainer.loop_core import TrainingLoop
+from worker.eval_local import BASELINE_EVAL_ITER, baseline_summary_landed, eval_done_keys
 
 WVER = "a" * 16
 
@@ -134,7 +134,7 @@ def test_start_it_zero_rejected() -> None:
     """--start-it 0 与基线的 dist 键空间（{runId}.0）撞键 → 启动期响亮拒绝；≥1 放行。"""
     import types
 
-    from biz.config import validate_args
+    from worker.config import validate_args
 
     with pytest.raises(SystemExit):
         validate_args(types.SimpleNamespace(start_it=0))

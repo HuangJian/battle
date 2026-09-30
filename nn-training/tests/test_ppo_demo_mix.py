@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from models.student import PPOStudent
-from ppo.engine import ppo_update
+from worker.models.student import PPOStudent
+from worker.ppo.engine import ppo_update
 
 
 def _chunks(n_chunks: int = 2, b: int = 8, seed: int = 0) -> list[dict]:

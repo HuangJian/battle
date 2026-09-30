@@ -48,8 +48,6 @@ import zipfile
 
 import pytest
 
-from biz.iter_job import build_iter_spec
-from biz.plan import build_plan, dump_plan
 from common import net_http
 from common.protocol import (
     COURSE_ENABLE_MARKER,
@@ -63,6 +61,8 @@ from remote.hub_client import publish_job
 from remote.offline_deliver import OfflineDeliverer
 from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
+from worker.iter_job import build_iter_spec
+from worker.plan import build_plan, dump_plan
 
 
 @pytest.fixture(autouse=True)

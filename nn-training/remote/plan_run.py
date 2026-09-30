@@ -38,7 +38,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from biz.plan import iter_spec, pairs_for
 from common.log_bundle import LogBundle
 from common.protocol import (
     PAYLOAD_NAME,
@@ -122,6 +121,7 @@ from remote.plan_handoff import (
 from remote.plan_handoff import (
     verify_plan_file as verify_plan_file,
 )
+from worker.plan import iter_spec, pairs_for
 
 #: 单轮的瞬时失败重试上限（自主模式没有 hub 兜底：重试够了就干净停下留产物）。
 ITER_RETRIES = 2

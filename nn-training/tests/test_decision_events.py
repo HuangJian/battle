@@ -9,9 +9,9 @@ import types
 
 import pytest
 
-from biz.cmd import build_rollout_cmd
-from biz.config import CourseConfig, corpus_identity_fp
 from trainer.batch_plan import node_supports_decision_events
+from worker.cmd import build_rollout_cmd
+from worker.config import CourseConfig, corpus_identity_fp
 
 
 def _course(**kw) -> CourseConfig:

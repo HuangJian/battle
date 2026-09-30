@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from ppo.np_core import (
+from worker.ppo.np_core import (
     _SPEED_PROBE,
     TPU_ATTR_KEYS,
     tpu_backend_missing_reason,

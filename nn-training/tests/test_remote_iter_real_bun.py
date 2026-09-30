@@ -33,7 +33,6 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import worker.iter_rollout as iter_rollout
-from biz.iter_job import build_iter_spec
 from common.protocol import (
     TS_CODE_NAME,
     data_fp,
@@ -42,6 +41,7 @@ from common.protocol import (
 )
 from remote.hub_client import pack_ts_code_zip
 from tests.subproc_util import run_utf8
+from worker.iter_job import build_iter_spec
 from worker.iter_rollout import run_iter_rollout
 
 REPO_ROOT = ROOT.parent

@@ -384,7 +384,7 @@ class _Loop:
 
     def _commit_journal(self) -> Any:
         if self._journal is None:
-            from biz.commit_journal import CommitJournal
+            from worker.commit_journal import CommitJournal
 
             # 与生产同路径（loop_steps._commit_journal = <traj_dir>/commit_journal.jsonl）
             self._journal = CommitJournal(self._traj_dir / "commit_journal.jsonl")
@@ -470,7 +470,7 @@ def _env(
 
 def _settled(traj: Path, out: Path) -> dict[int, tuple[int, int]]:
     """盘上账本（与 loop 同口径：真 resume 实现 + 真 wver）。"""
-    from biz.resume import settled_stage_totals
+    from worker.resume import settled_stage_totals
 
     return settled_stage_totals(traj, common.distribution.weights_fingerprint(str(out)))
 

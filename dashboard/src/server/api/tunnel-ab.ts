@@ -4,7 +4,7 @@
  *  独立 run 才作数（墙钟类指标有 run-to-run 噪声地板）。数字埋在 JSON 里就等于没有
  *  —— 操作员需要一个「不翻日志就能读趋势」的地方。
  *
- *  数据源：`nn-training/remote/tunnel_ab_probe.py` 的 `--json-out` 产物（本机路径，
+ *  数据源：`nn-training/hub/tunnel_ab_probe.py` 的 `--json-out` 产物（本机路径，
  *  与 iters 读 `tmp/<course>/` 同口径）。文件被 tmp 轮转清掉 = available:false 空态，
  *  不是错误。纯函数解析（`parseTunnelAb`）与磁盘读分离，便于单测喂字符串。
  */

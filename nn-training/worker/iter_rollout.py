@@ -3,7 +3,7 @@
 job kind = `iter` 的语义：**一整轮**上云。节点拿到的 payload 里没有 shard（只有 init
 权重 + 可选 blob），shard 由本模块现场产出：
 
-  argv（hub 用 `rl/cmd.build_rollout_cmd` 拼的、逐局一条，路径一律 job 目录内相对路径）
+  argv（hub 用 `biz/cmd.build_rollout_cmd` 拼的、逐局一条，路径一律 job 目录内相对路径）
     → 线程池跑 `bun tools/sim/export-rl-rollout.ts …`（cwd = TS 代码根）
     → 每局一个 `w{i}/` 目录 + `_rl_report.json`
     → **逐位**校验实产 shard 集 == 声明集（data_fp 两侧同函数）
@@ -587,7 +587,7 @@ def run_iter_rollout(
     `ts_dir` = 解包后的 TS 代码根（带 `src/` `tools/`）；缺省 = job 目录（单测里桩脚本
     是绝对路径，不需要独立的 TS 根）。真实节点侧必须传，否则 `tools/sim/...` 找不到。
     """
-    from biz.reports import combine_reports, compact_per_game
+    from worker.reports import combine_reports, compact_per_game
 
     jd = Path(job_dir)
     tsd = Path(ts_dir) if ts_dir is not None else jd
@@ -768,13 +768,13 @@ def run_iter_rollout(
     per_game = collect_shard_manifests(shard_dirs)
     # 逐局压缩画像随轮账本行走：云机离线腿没人把单局 manifest 拉回本机（轮末 prune 就删了），
     # 而控制台的「耗时/击杀/残血/道具」列是**逐局**聚合的 ⇒ 不带它那几列永远空（见
-    # `rl/reports.compact_per_game` 的 docstring）。在线腿已有 `dist/<节点>/rl_s*/` 路也不冲突
+    # `biz/reports.compact_per_game` 的 docstring）。在线腿已有 `dist/<节点>/rl_s*/` 路也不冲突
     # （同一份数据，读方优先用账本里的这一块）。
     report["perGame"] = compact_per_game(per_game)
     report["shards"] = len(shard_dirs)
     report["elapsedSec"] = round(time.time() - t0, 3)
     report["perGameSecs"] = game_secs
-    # 与本机 rollout 的 manifest 同规（`rl/cmd` 的 --node-label 决定；上云 = "node"）。
+    # 与本机 rollout 的 manifest 同规（`biz/cmd` 的 --node-label 决定；上云 = "node"）。
     report["rolloutSrc"] = "node"
     rb.add("shards", len(shard_dirs))
     rb.add("games", report["games"])

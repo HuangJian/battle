@@ -22,8 +22,7 @@ import time
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from biz.events import write_iteration
-from biz.log import log
+from common.log import log
 
 # in-loop 评估链（S4 第十七刀）：派发 / 尾巴收拢 / join / 收官 drain 与 `_eval_on_round`
 # 的占位搬到 `trainer/loop_eval.py`。方向仍是「调用者依赖被调用者」——本类是调用者（轮内
@@ -33,9 +32,10 @@ from biz.log import log
 from trainer.loop_eval import TrainingEval
 from trainer.loop_export import TrainingExport
 from trainer.loop_remote import TrainingRemote
+from worker.events import write_iteration
 
 if TYPE_CHECKING:
-    from biz.commit_journal import CommitJournal
+    from worker.commit_journal import CommitJournal
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -183,7 +183,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
         from biz.hot_reload import apply_hot_fields, changed_field_names, plan_reload
 
         try:
-            from biz.config import load_course
+            from worker.config import load_course
 
             new_course = load_course(path)
         except Exception as e:  # 半行写/编码竞态——下轮重试
@@ -196,7 +196,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
         verdict, hot, restart = plan_reload(course, new_course)
         if verdict == "same":
             if getattr(self, "_hr_verdict", "") == "rejected":
-                from biz.events import write_event
+                from worker.events import write_event
 
                 write_event(
                     self._jsonl_path,
@@ -207,8 +207,8 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
             return
 
         if verdict == "rejected":
-            from biz.config import corpus_identity_fp
-            from biz.events import write_event
+            from worker.config import corpus_identity_fp
+            from worker.events import write_event
 
             new_fp = corpus_identity_fp(new_course)
             if getattr(self, "_hr_reject_fp", "") != new_fp:
@@ -233,7 +233,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
             self._hr_verdict = "rejected"
             return
 
-        from biz.events import write_event
+        from worker.events import write_event
 
         changed = apply_hot_fields(args, new_course)
         if "max_hours" in changed:
@@ -301,7 +301,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
         )
         sch: dict = {}
         if course.ppo_schedule:
-            from biz.schedule import resolve_ppo_schedule
+            from worker.schedule import resolve_ppo_schedule
 
             sch = resolve_ppo_schedule(course.ppo_schedule_dicts(), it)
         if "lr" in sch:
@@ -347,7 +347,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
         if course is None:
             return
         try:
-            from biz.metrics_stats import metrics_stats
+            from worker.metrics_stats import metrics_stats
 
             identity = {
                 "course": course.name,
@@ -424,7 +424,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
         """
         j = getattr(self, "_commit_journal_obj", None)
         if j is None:
-            from biz.commit_journal import CommitJournal
+            from worker.commit_journal import CommitJournal
 
             j = CommitJournal(Path(self._traj_dir) / "commit_journal.jsonl")
             self._commit_journal_obj = j
@@ -452,7 +452,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
         = 写盘失败实锤）。任何失败只记日志，绝不反杀训练。
         """
         try:
-            from biz.forensics import log_snapshot
+            from worker.forensics import log_snapshot
 
             log_snapshot(tag, self._jsonl_path, paths=[self._traj_dir])
         except Exception as e:  # 取证失败不阻断训练（诊断手段不是新故障面）
@@ -480,7 +480,7 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
         target = int(getattr(self.args, "target_transitions", 0) or 0)
         if target <= 0:
             return 0
-        from biz.volume_waves import parse_stages_arg, target_per_stage
+        from worker.volume_waves import parse_stages_arg, target_per_stage
 
         try:
             n_stages = len(parse_stages_arg(getattr(self.args, "stages", "")))

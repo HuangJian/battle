@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.eval_local import EVAL_CENSUS_KEYS, eval_census_fields
+from worker.eval_local import EVAL_CENSUS_KEYS, eval_census_fields
 
 
 def test_keys_are_the_seven_phase0_columns() -> None:

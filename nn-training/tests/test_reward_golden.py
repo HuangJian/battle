@@ -26,7 +26,6 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.config import CURRICULA_DIR, CourseConfig, load_course
 from biz.reward_builtin import V7_DEFAULT_PARAMS, v7_phi
 from biz.reward_library import (
     CORE_FUNCS,
@@ -46,6 +45,7 @@ from biz.reward_library import (
 )
 from biz.reward_validation import DEFAULT_RANGES, symbolic_envelope, validate_reward
 from common.jsonc import strip_comments
+from worker.config import CURRICULA_DIR, CourseConfig, load_course
 
 GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 
@@ -369,7 +369,7 @@ def test_jsonc_courses_load() -> None:
     for f in files:
         if f.name.endswith(".bc.jsonc"):
             # BC 课程（2026-09-13）：独立文件种类，BcCourseConfig 校验
-            from biz.bc_config import load_bc_course
+            from worker.bc_config import load_bc_course
 
             bc = load_bc_course(f)
             assert bc.kind == "bc" and bc.name
@@ -554,7 +554,7 @@ def test_golden_file() -> None:
     """golden-file 回归：入库的期望值与当前实现逐位一致。"""
     path = GOLDEN_DIR / "reward_golden.json"
     if not path.exists():
-        pytest.skip(f"golden 文件不存在（用 scripts/regen_reward_golden.py 生成）：{path}")
+        pytest.skip(f"golden 文件不存在（用 worker/scripts/regen_reward_golden.py 生成）：{path}")
     golden = json.loads(path.read_text(encoding="utf-8"))
     # 版本号读 SSOT（`reward_library.METRICS_VERSION`），不再硬编码 —— 2026-09-12 修：
     # 此前写死 4，metrics v5 重生成后 golden 内容正确却被该断言误判为"需重新生成"。
@@ -827,9 +827,9 @@ def test_credit_p6_formula_and_course() -> None:
 
     机械 diff vs x3-start：非白名单差异仅奖励公式/params + 身份字段（name/out/traj/backup）。
     """
-    from biz.config import load_course
     from biz.reward_library import METRICS_VERSION
     from biz.reward_validation import validate_reward as _vr
+    from worker.config import load_course
 
     c = load_course("x3-credit-p6")
     c2 = load_course("x3-credit-p6-r2")

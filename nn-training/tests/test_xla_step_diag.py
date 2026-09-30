@@ -30,7 +30,7 @@ if str(ROOT) not in sys.path:
 # 2026-09-26（item 6b）：本文件**整文件免 torch** —— `_XLA_CACHE_STATE` 的家就在 np_core，
 # 此前从 ppo.common 取（导入再导出）会把 torch 拖进运行期；demo_index 的三个张量用例已搬到
 # `tests/test_ppo_common.py`（ppo/common.py 才是它的家）。
-from ppo.np_core import (
+from worker.ppo.np_core import (
     _parse_xla_duration,
     xla_delta_str,
     xla_enable_compile_cache,
@@ -180,7 +180,7 @@ class TestPersistentCompileCache:
         import sys
         import types
 
-        from ppo.np_core import _XLA_CACHE_STATE
+        from worker.ppo.np_core import _XLA_CACHE_STATE
 
         calls: list[str] = []
         fake_rt = types.ModuleType("torch_xla.runtime")
@@ -210,7 +210,7 @@ class TestPersistentCompileCache:
         import sys
         import types
 
-        from ppo.np_core import _XLA_CACHE_STATE
+        from worker.ppo.np_core import _XLA_CACHE_STATE
 
         saved = {k: sys.modules.get(k) for k in ("torch_xla", "torch_xla.runtime")}
         sys.modules["torch_xla"] = types.ModuleType("torch_xla")
@@ -232,7 +232,7 @@ class TestEngineWiring:
     """源码守线：诊断行必须真的接在 update 循环里，且可关。"""
 
     def setup_method(self) -> None:
-        self.src = (ROOT / "ppo" / "engine.py").read_text(encoding="utf-8")
+        self.src = (ROOT / "worker" / "ppo" / "engine.py").read_text(encoding="utf-8")
 
     def test_engine_samples_diag_and_has_the_switch(self) -> None:
         assert "PPO_XLA_DIAG" in self.src

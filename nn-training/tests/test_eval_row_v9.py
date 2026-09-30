@@ -4,7 +4,7 @@
 是**两个**行构造点，只改一处就会让日常 eval_log 失明（2026-09-24 v8 提交的实际事故）。
 本文件按 v8 的 `test_eval_row_v8.py` 逐条镜像，覆盖命中方位 5 列 + 穿越税 4 列。
 """
-from biz.eval_local import eval_row, eval_v9_fields
+from worker.eval_local import eval_row, eval_v9_fields
 
 EVAL_V9_KEYS = (
     "backHits",

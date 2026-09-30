@@ -28,9 +28,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.backend import REQUIRED_UPDATE_KWARGS, RolloutBackend
-from biz.modes import _MODE_BACKEND_NAMES, _MODES, get_backend
 from tests.helpers import backend_contract_scan as scan
+from worker.backend import REQUIRED_UPDATE_KWARGS, RolloutBackend
+from worker.modes import _MODE_BACKEND_NAMES, _MODES, get_backend
 
 
 def _backends() -> list[tuple[str, Any]]:

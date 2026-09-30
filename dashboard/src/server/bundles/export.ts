@@ -1,6 +1,6 @@
 /** export.ts — 任务包导出（`task-<课程>.zip`）：把「整段剩余」交给云机的入口。
  *
- *  这条腿的全部智能在 python 一侧（`run_rl.py --export-bundle` 复用发布链造 manifest +
+ *  这条腿的全部智能在 python 一侧（`trainer/run_rl.py --export-bundle` 复用发布链造 manifest +
  *  计划 + 代码快照）。控制台只做三件事：**拼参数**、**起一次**、**把文件交给浏览器**。
  *  刻意不在这里重造包内容——「拿一个不含 args 的 CLI 去重造它等于造第二份真相」
  *  （`remote/bundle.py` 的模块注释里写着这条）。
@@ -210,7 +210,7 @@ export function exportGuard(course: string): string | null {
 /** 导出一次性进程的 argv（纯函数，便于测试）。 */
 export function taskBundleArgs(course: string): string[] {
   return [
-    'nn-training/run_rl.py',
+    'nn-training/trainer/run_rl.py',
     '--course',
     course,
     '--run-iters',

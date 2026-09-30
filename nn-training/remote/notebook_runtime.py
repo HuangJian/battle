@@ -409,7 +409,7 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
     serve_env["PYTHONPATH"] = (str(boot_dir) + os.pathsep + serve_env.get("PYTHONPATH", "")).rstrip(os.pathsep)
     with open(serve_log, "w") as log_f:
         serve_proc = subprocess.Popen(
-            [sys.executable, "-u", "-m", "remote_worker_serve",
+            [sys.executable, "-u", "-m", "remote.remote_worker_serve",
              "--port", str(cfg["push_port"]), "--token", str(cfg["push_token"]),
              "--work", str(work_dir), "--device", str(cfg["device_resolved"])],
             stdout=log_f, stderr=subprocess.STDOUT, env=serve_env,

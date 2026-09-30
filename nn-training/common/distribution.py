@@ -115,8 +115,8 @@ def rl_config_path() -> str:
     """rl-config.json 的**唯一**路径来源（env `BCITY_RL_CONFIG` > `nn-training/rl-config.json`）。
 
     为什么要有这个缝（2026-09-22，用户指令「测试应该使用自己的 fixtures」）：路径原本硬编码在
-    三处（`run_rl.py` / `trainer/loop_serve.py::_read_rl_config` / 本文件），于是**任何读它的用例都
-    隐式依赖本机那份未入库的配置**——本机 `rl.stream=1` 就让「`course_args` ≡ `run_rl.py`」的
+    三处（`trainer/run_rl.py` / `trainer/loop_serve.py::_read_rl_config` / 本文件），于是**任何读它的用例都
+    隐式依赖本机那份未入库的配置**——本机 `rl.stream=1` 就让「`course_args` ≡ `trainer/run_rl.py`」的
     解析对拍变红（`tests/test_serve_wiring.py` 实测）：绿不绿取决于**别人机器上文件的内容**。
     有缝之后用例自带 tmp 夹具，两侧的读取点都走同一个 env。
 
@@ -159,7 +159,7 @@ class DistError(RuntimeError):
 
     transient=True 表示**限流/抖动信号**（并发槽满 503 busy、连接被重置 10054、
     408/429/5xx）而非节点故障：调用方应背压重排 + 退避，**不计**节点失败 streak。
-    判据在这里落地而不是调用方各自做字符串匹配 —— 与 rl/bc_dispatch 的 busy
+    判据在这里落地而不是调用方各自做字符串匹配 —— 与 biz/bc_dispatch 的 busy
     背压同源（那边 2026-09-14 事故：busy 被当故障熔断，整轮训练被打死）。
     """
 
@@ -315,7 +315,7 @@ def check_code_hash(ping: dict, expected: str) -> str | None:
 # ---------------- HTTP ----------------
 #: 视为瞬断/背压的 HTTP 状态码（不是节点故障）。
 TRANSIENT_HTTP_STATUS: frozenset[int] = frozenset({408, 425, 429, 500, 502, 503, 504})
-#: 无 status 的异常（节点 SDK 直抛）里的 busy 文案判据，与 rl/bc_dispatch.is_busy_hint 同源。
+#: 无 status 的异常（节点 SDK 直抛）里的 busy 文案判据，与 biz/bc_dispatch.is_busy_hint 同源。
 _BUSY_HINT = "busy"
 
 

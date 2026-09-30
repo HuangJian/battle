@@ -318,7 +318,7 @@ export function latestIterFromLedgerTail(lines: string[]): number | null {
  *
  *  `latestIterFromLedgerTail` 只要轮次；池历史还要「这一轮是**什么时候**完成的」
  *  （跨课按完成时刻选最新完成轮，见 `server/pool-history` §3.4）——`time` 由
- *  `rl/events.write_iteration` 写成 `strftime("%Y-%m-%d %H:%M:%S")`（训练机本地、无时区）。
+ *  `biz/events.write_iteration` 写成 `strftime("%Y-%m-%d %H:%M:%S")`（训练机本地、无时区）。
  *  两者共用这里的一条读法，避免「只认 iteration」的判据出现第二份实现。 */
 export function latestIterationFromLedgerTail(
   lines: string[],

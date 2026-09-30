@@ -419,7 +419,7 @@ LEDGER_FIELDS: tuple[tuple[str, str, str | tuple[str, ...]], ...] = (
     ("mean_ret", "agg", "mean_ret"),
     # 缰绳与 demo 遥测（2026-09-23，用户发现「demo_bc 全缺」）：这两个键**产物行里一直有**
     # （`agg.kickstart` / `agg.demo_bc`，见 `remote/worker.py` 的 result.agg），只是这张
-    # 搬运表没收 ⇒ `iteration` 行永远看不到它们——本机腿（`rl/events.write_iteration`）
+    # 搬运表没收 ⇒ `iteration` 行永远看不到它们——本机腿（`biz/events.write_iteration`）
     # 逐轮都写，回传/导入腿却恒空，同一张表两腿不可比。「缺数据」与「真的为 0」也不是
     # 一回事：`_dig` 给 None 就不写（旧包无此键），真 0 照写。
     ("kickstart", "agg", "kickstart"),
@@ -518,7 +518,7 @@ def metrics_row(
             "outcomes": dict(report.get("outcomes", {})),
         }
         # 逐维度均值与分数统计（2026-09-22，additive）：本机账本行是带 `dim_means`/`score_mean`
-        # 的（`rl/events.write_iteration` 读 `report.dimMeans`/`report.scoreStats`），而产物行
+        # 的（`biz/events.write_iteration` 读 `report.dimMeans`/`report.scoreStats`），而产物行
         # 此前只留摘要 ⇒ 导入后控制台那张表的 kills/accuracy/loot 与 score 列恒空——同一张
         # 表上「本机腿」与「导入腿」逐列不可比（两腿同字段是硬要求）。
         # 代价：`dimMeans` ~15 个 float + 2 个 float/轮（刻意**不**搬 600 点的 scoreList）。

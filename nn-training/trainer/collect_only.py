@@ -1,4 +1,4 @@
-"""collect-only 采样子进程（T4 双缓冲）——2026-09-02 从 run_rl.py 拆出。"""
+"""collect-only 采样子进程（T4 双缓冲）——2026-09-02 从 trainer/run_rl.py 拆出。"""
 
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ from pathlib import Path
 
 import common.distribution
 from biz.course import build_pairs
-from biz.log import log
+from common.log import log
 from trainer.queue import REPO_ROOT, RUN_ID, local_slots_max_of, run_rollout, run_rollout_queue
 
 

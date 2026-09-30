@@ -214,7 +214,7 @@ ALLOWED_IMPORTS = {
 #: 从来就是**纯逻辑**，而纯逻辑现在有自己的名字（`biz/`）。编排态 `trainer/` 则是**零**豁免
 #: （`assert_remote_module` 的 ③ 现在把两件事分开断言），名字跟着语义走。
 ALLOWED_BIZ: dict[str, set[str]] = {
-    "hub.store_offline": {"biz.archive", "common.jsonc"},
+    "hub.store_offline": {"worker.archive", "common.jsonc"},
 }
 
 

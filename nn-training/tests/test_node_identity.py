@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 
 import pytest
 
-from biz import node_identity as ni
+from worker import node_identity as ni
 
 
 @pytest.fixture(autouse=True)

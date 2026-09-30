@@ -196,7 +196,7 @@ def spawn_full_worker_server(
             sys.executable,
             "-u",
             "-m",
-            "remote_worker_serve",
+            "remote.remote_worker_serve",
             "--port",
             str(port),
             "--token",

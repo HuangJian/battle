@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from biz.config import corpus_identity_fp, load_course
+from worker.config import corpus_identity_fp, load_course
 
 REPO = Path(__file__).resolve().parents[2]
 C6_DMGFIX = REPO / "nn-training" / "curricula" / "c6-dmgfix.jsonc"

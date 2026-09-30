@@ -4,7 +4,7 @@
 // tmp/x2-bc-diag.jsonl 即在此分布上跑出），不是新任务，是 x2 任务的子集：
 //   2000 arena2-ac  basic+power  ·  2001 arena2-bc  fast+power
 // （ID = 关卡内序号 2000+i；与 arena2 下的 2001/2003 同形不同 ID，语料身份按
-// 解析值哈希，同形关卡同指纹——见 rl/config.corpus_identity_fp）。
+// 解析值哈希，同形关卡同指纹——见 biz/config.corpus_identity_fp）。
 //
 // 为何单立关卡：level 引用后课程侧禁写 stages（写即 raise），rollout 取关卡
 // 全部 stage——子集选择只能走派生新关卡（配置修改分类学：改任务=新关卡）。

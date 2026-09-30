@@ -18,12 +18,12 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, cast
 
-from biz.log import log
-from biz.loop_round import RemotePpoJob
+from common.log import log
 from common.protocol import ProtocolError, find_payload
 from remote.push_client import submit_job as _push_submit
 from remote.push_client import wait_result as _push_wait_result
 from trainer.loop_transport import _push_over_nodes
+from worker.loop_round import RemotePpoJob
 
 
 class TrainingRemotePush:

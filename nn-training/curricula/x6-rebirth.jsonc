@@ -27,7 +27,7 @@
 //   **单关**：ladder-c06，forces `abcdabcdabcdabcdabcd`（20 长），`count 6` ⇒
 //   队列 20 取前 6 = **a+b+c+d+a+b**（basic×2/fast×2/power/armor 各一）。
 //   max_ticks **4500**、lives 1、hard、空场 13×13。
-//   自定义关 ID **2000-2000**（单关沿用，`rl/ladder_factory.py:228`）。
+//   自定义关 ID **2000-2000**（单关沿用，`biz/ladder_factory.py:228`）。
 //   任务侧一个字不动（AGENTS §0.2）—— 只动训练侧。
 //   单关结构后果与 x4/x5 同（无分关掉队 / seed_rotate 600 / per-stage = 总量）。
 //

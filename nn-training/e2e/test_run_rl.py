@@ -1,4 +1,4 @@
-"""test_run_rl.py — run_rl.py 常驻回归测试（无 torch 训练、不碰真实节点）。
+"""test_run_rl.py — trainer/run_rl.py 常驻回归测试（无 torch 训练、不碰真实节点）。
 
 两层：
   快速层（默认）：已迁移到 tests/ 独立文件（test_rl_course / test_rl_reports /
@@ -44,12 +44,12 @@ sys.path.insert(0, str(REPO))
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
 import common.distribution
-import run_rl
 import trainer.dispatch as _rdispatch  # monkeypatch 目标：run_local_rollout 的查找命名空间
 from biz.reward_library import METRICS_DIM  # fake shard 与落盘同维（metric v3）
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from common.schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 from tests.subproc_util import run_utf8
+from trainer import run_rl
 from trainer.stream import (
     run_rollout_stream as _run_rollout_stream,  # B7：run_rl 模块级不再 re-export
 )
@@ -88,7 +88,7 @@ def test_mirror_scalar_lockstep() -> None:
     之后追加 29=iceVx，见 common/schema.py:94/127）——mirrorX 前后 (obs, scalars, move) 自洽；
     旧索引 [20,23] 必须不再翻转（防回归）。"""
     from common.schema import SCALAR_DIM, SCALAR_X_INDICES
-    from data.mirror import mirror_x
+    from worker.data.mirror import mirror_x
 
     # 2026-09-20：本行原写死 [15,18]，schema 追加 29=iceVx 后已过期 —— 因 check() 只聚合
     # 不抛错，它**静默 FAIL 了很长一段时间**（由模块级 _fail_loudly 揭出）。
@@ -1217,7 +1217,7 @@ def test_it_tail_join_grace_v317(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 def test_compute_gae() -> None:
     import numpy as np
 
-    import ppo as ppo_mod
+    import worker.ppo as ppo_mod
 
     print("[fast] ppo.compute_gae (手算用例)")
     rewards = np.array([1.0, 0.0])
@@ -1233,7 +1233,7 @@ def test_compute_gae() -> None:
 
 
 def test_chunk_episodes() -> None:
-    import ppo as ppo_mod
+    import worker.ppo as ppo_mod
 
     print("[fast] ppo.chunk_episodes (mb 对齐；无 ragged 末块)")
     # 多 episode 池才走「全局重排」路径——单池分支不重排（对齐单池会丢到"局末"，有偏）。
@@ -1256,8 +1256,8 @@ def test_chunk_episodes() -> None:
 
 
 def test_backup_weights(tmp: Path) -> None:
-    import run_rl
-    from biz import archive as rl_archive
+    from trainer import run_rl
+    from worker import archive as rl_archive
 
     print("[fast] backup_weights (归档；只归档不自动清理——2026-09-02 用户指令)")
     bdir = tmp / "weights-archive"
@@ -1572,7 +1572,7 @@ def main() -> None:
 
 def test_scan_shards_mtime_cache(tmp: Path) -> None:
     """P2-2：_scan_shards 目录签名缓存——新 shard 落盘后签名变化 → 重扫；未变 → 复用。"""
-    from biz import resume as rl_resume
+    from worker import resume as rl_resume
 
     print("[fast] _scan_shards mtime cache（热路径零 IO）")
     traj = tmp / "cache-traj"
@@ -1619,7 +1619,7 @@ def test_rl_config_validation() -> None:
 
     from pydantic import ValidationError
 
-    from biz.config import RLConfig, validate_args
+    from worker.config import RLConfig, validate_args
 
     print("[fast] RLConfig 校验（pydantic：互斥/范围构造即抛）")
 

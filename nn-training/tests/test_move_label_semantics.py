@@ -23,8 +23,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import common.schema
-from biz.config import CourseConfig, corpus_identity_fp
 from common.protocol import d14_corpus_match
+from worker.config import CourseConfig, corpus_identity_fp
 
 MOVE_LABEL_SEMANTICS = common.schema.MOVE_LABEL_SEMANTICS
 
@@ -57,13 +57,13 @@ def test_old_policy_rollout_shard_is_rejected_new_is_accepted() -> None:
 
 def test_demo_identity_excludes_move_label_semantics() -> None:
     """祖父保留：BC 语料身份不引用该键 ⇒ 旧 demo shard 不会被本次变更拒收。"""
-    src = (ROOT / "biz" / "bc_config.py").read_text(encoding="utf-8")
+    src = (ROOT / "worker" / "bc_config.py").read_text(encoding="utf-8")
     assert "MOVE_LABEL_SEMANTICS" not in src
 
 
 def test_all_funnels_share_one_d14_predicate() -> None:
     """四漏斗必须共用 `common.protocol.d14_corpus_match`——判据单点，否则标签版本只在
     部分漏斗生效（本地拒、云端收，或反之）。"""
-    for rel in ("biz/resume.py", "remote/hub_client.py"):
+    for rel in ("worker/resume.py", "remote/hub_client.py"):
         src = (ROOT / rel).read_text(encoding="utf-8")
         assert "d14_corpus_match" in src, f"{rel} 未走共享 D14 判据（标签版本执法会漏）"

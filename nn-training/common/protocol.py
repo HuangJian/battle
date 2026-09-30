@@ -19,7 +19,7 @@ Contents (all pure functions / constants — no torch, no ppo import):
 Rationale for torch-free: the hub (TrainingLoop remote branch + hub-server) must
 never import torch (D2) — this module is imported by both hub-side and worker-side
 code, so it must be importable with zero torch/numpy cost (numpy is acceptable;
-test_no_torch_on_import guards the `import run_rl` chain).
+test_no_torch_on_import guards the `import trainer.run_rl` chain).
 """
 
 from __future__ import annotations
@@ -453,7 +453,7 @@ def push_worker_id_of(worker_id: str) -> str:
 def push_worker_from_node(node: object) -> dict | None:
     """rl-config `nodes[]` 条目 → push worker；不是 push 节点 → None。
 
-    判据与训练侧 `rl/loop_steps._gpu_push_nodes` **同一把尺子**（`gpu_push` 且
+    判据与训练侧 `trainer/loop_steps._gpu_push_nodes` **同一把尺子**（`gpu_push` 且
     `enabled` 缺省视为 true、url 非空）：两边若判据不同，就会出现「训练侧认为该推这台、
     hub 却认为一台都没有」——症状是 job 永远躺在队首（最难查的一种）。
 
@@ -589,7 +589,7 @@ OFFLINE_ARTIFACT_PATH = "/offline/artifact"
 
 #: **「已开课」标记**文件名（落在课程 traj 目录下：`<traj-root>/<课>/training-enabled.txt`）。
 #:
-#: 控制台「开课」写它、「停课」删它；训练侧（`rl/loop_plan.enabled_courses`）与 hub
+#: 控制台「开课」写它、「停课」删它；训练侧（`trainer/loop_plan.enabled_courses`）与 hub
 #: （`_course_dir_live`）的**发现判据**都要求它存在。
 #:
 #: 为什么需要一个显式标记，而不是「有账本 = 在训」（2026-09-20 用户报障）：共享 trainer 是
@@ -798,7 +798,7 @@ def validate_result(
     return r
 
 
-#: kind=iter 结果必须回传的采集报告字段（照 `rl/reports.combine_reports` 的输出名）。
+#: kind=iter 结果必须回传的采集报告字段（照 `biz/reports.combine_reports` 的输出名）。
 ITER_REPORT_REQUIRED: tuple[str, ...] = (
     "games",
     "winRate",

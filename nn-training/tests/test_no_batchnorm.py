@@ -37,10 +37,10 @@ from tests.helpers import source_scan
 #: TS 消费的模型模块（新增导出给 TS 的网络必须登记到这里）。教师网 `models/rl_model.py`
 #: 有意用 BN（只在 Python 侧蒸馏用），**刻意不在**名单里。
 TS_CONSUMED_MODULES = (
-    "models/core.py",  # NNPolicy（BC 基座，也被 TS 消费）
-    "models/student.py",  # StudentNet / PPOStudent
-    "models/intent_net.py",  # IntentNet
-    "models/goal_net.py",  # GoalNet
+    "worker/models/core.py",  # NNPolicy（BC 基座，也被 TS 消费）
+    "worker/models/student.py",  # StudentNet / PPOStudent
+    "worker/models/intent_net.py",  # IntentNet
+    "worker/models/goal_net.py",  # GoalNet
 )
 
 #: 禁止的层名：`nn.X(...)` 的属性名，或 `from torch.nn import X` 的名字（精确匹配，

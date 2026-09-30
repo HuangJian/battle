@@ -4,7 +4,7 @@ RL 入口整合，plan/RL-Entry-Consolidation.md P3）。
 与 trainer/eval_dispatch.py（per-tick 模式）双轨并存（DECISIONS §307 D3）：两者的
 语料/判门协议不同——本模块走 `tools/sim/m1-eval.ts --policy intent-exec|goal`
 固定语料（35 关 × eval_seeds）整批贪心局 + error 局整批重跑；eval_dispatch 走
-逐局派发 + eval_log.jsonl wver 键对账。入口统一在 run_rl.py，按 --mode 分派。
+逐局派发 + eval_log.jsonl wver 键对账。入口统一在 trainer/run_rl.py，按 --mode 分派。
 
 职责：
   - parse_m1_eval_report：m1-eval 输出解析（纯函数，可单测）
@@ -22,7 +22,7 @@ import threading
 import time
 from pathlib import Path
 
-from biz.log import log
+from common.log import log
 
 # Windows：spawn 子进程（bun 评估）时用 CREATE_NO_WINDOW，避免黑控制台窗口抢焦点。
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
@@ -191,7 +191,7 @@ def dispatch_eval_bg_m1(
             # D5(a)：m1 逐局行落盘（与 per-tick 链路同文件同口径，wver+iter 对账）。
             try:
                 import common.distribution
-                from biz.eval_ingest import write_m1_game_rows
+                from worker.eval_ingest import write_m1_game_rows
 
                 _wver16 = common.distribution.weights_fingerprint(rl_path)[:16]
                 _n = write_m1_game_rows(

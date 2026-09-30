@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from biz.resume import (
+from worker.resume import (
     MANIFEST_NAME,
     _dir_signature,
     _scan_shards,

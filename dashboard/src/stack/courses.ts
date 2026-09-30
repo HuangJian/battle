@@ -51,8 +51,8 @@ export function resolveCourseBc(course: string): string {
   return legacy
 }
 
-/** 课程种类判定（BC 整合 2026-09-13）：`.bc.jsonc` = BC 课程（编排器 run_bc.py），
- *  其余 `.jsonc` = RL 课程（run_rl.py）。控制台按此分流 spec / 冒烟 / 种子播种。 */
+/** 课程种类判定（BC 整合 2026-09-13）：`.bc.jsonc` = BC 课程（编排器 trainer/run_bc.py），
+ *  其余 `.jsonc` = RL 课程（trainer/run_rl.py）。控制台按此分流 spec / 冒烟 / 种子播种。 */
 export function isBcCourse(course: string): boolean {
   if (!course) return false
   try {
@@ -73,7 +73,7 @@ export function isBcCourse(course: string): boolean {
  *  为什么需要它（2026-09-20 用户报障）：「共享 trainer 是发现式的」+「tmp/ 下堆着几十门历史课
  *  的账本」⇒ 进程一启动就把**所有历史课**一起拉进训练（实测：起 trainer 后控制台列出 21 门
  *  「正在训练」）。用户口径：「课程开训需要用户手动开启」⇒ 课程表 = 账本 ∧ **开课标记**；
- *  训练侧与 hub 的发现判据都加这一道闸（`rl/loop_plan.enabled_courses`、`_course_dir_live`）。
+ *  训练侧与 hub 的发现判据都加这一道闸（`trainer/loop_plan.enabled_courses`、`_course_dir_live`）。
  *  标记与账本同住课程目录：一个判据、一处位置，开/停课各是一次文件操作（不涉及共享 JSON 的
  *  读-改-写竞态），且控制台重启不丢「哪几门开着」。 */
 export const COURSE_ENABLE_MARKER = 'training-enabled.txt'

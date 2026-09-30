@@ -379,7 +379,7 @@ class OfflineRoundsMixin:
         ① **交付镜像**：同一轮也写进 `<traj>/deliver/<run_id>/it-NNN/`。`deliver/` 此前只有
            人工导入写 ⇒「导入的段」与「回传的段」分居两棵树，找东西要翻两处。
         ② **活动权重推进**：`<traj>/weights.json` 在**确证没有更新的轮次**时原子替换。此前它
-           整段不动（x20-demo-mix 实测停在段起点指纹），而 `rl/eval_replays_once` 的「活动
+           整段不动（x20-demo-mix 实测停在段起点指纹），而 `biz/eval_replays_once` 的「活动
            权重」兜底、本机续跑、控制台显示读的都是它 ⇒ 整段期间「当前权重」是假的。
         ③ **归档**：`<归档根>/<课>/<prefix>.it<N>.<时间戳>.json`（同 `biz.archive.backup_weights`）。
            控制台 evalA 的 iter 选择器只扫那个目录（`eval-board/ckpts.ts`）⇒ 不归档就看不见
@@ -418,7 +418,7 @@ class OfflineRoundsMixin:
                 print(f"[hub-server] 补传 it{it} 活动权重推进失败（忽略）：{e}", flush=True)
         # ③ 归档（evalA 的 iter 选择器只扫归档目录；**同一轮只写一次**）
         try:
-            from biz.archive import backup_weights
+            from worker.archive import backup_weights
 
             prefix, bdir = self._course_backup_target(course)
             # 幂等：这一轮的归档已在就不再写。归档名带时间戳（同轮重跑用改名区分），任其重写

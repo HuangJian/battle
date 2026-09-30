@@ -43,7 +43,7 @@ def test_eval_a_once_dispatches_through_in_loop_dispatcher() -> None:
     # 五次）；同时把「拿到这个名字的模块里必须住着 in-loop 那一簇」也钉住，免得将来搬到别处后
     # 这句断言退化成一个跟 in-loop 无关的模块在替它绿。
     # 2026-09-30（刀 4）：「谁从 eval_dispatch 拿 dispatch_eval_bg」是**跨两棵树**的问题
-    # （`rl/` 编排 + `biz/` 纯逻辑）——只扫 `rl/` 会让这条判据随着搬家静默变瞎。
+    # （`trainer/` 编排 + `biz/` 纯逻辑）——只扫 `trainer/` 会让这条判据随着搬家静默变瞎。
     from tests.helpers import source_scan
 
     holders = {

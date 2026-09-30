@@ -30,7 +30,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / wire 账 | 42 |
 | [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart · **节点门的 bootId 一致性**（§26） | 25 |
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
-| [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** | 28 |
+| [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** · **六包重组（刀 1–6）** | 29 |
 | [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 / 课程管理页 / 指标表抗轮转抄录 | 20 |
 | [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处）· **节点单实例互斥**（§29） | 29 |
 | [`docs/nn/tpu-perf.md`](nn/tpu-perf.md) | TPU / XLA：设备实测 · 单步耗诊断 · 编译缓存 · PPO 吞吐 | 9 |
@@ -120,7 +120,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 
 | # | 事项 | 出处 | 关闭判据 |
 |---|---|---|---|
-| 17 | ~~**`nn-training` 六包重组还剩一刀**~~ **已收官（2026-09-30）**：刀 1 `hub/` 出包 · 刀 2 `common/` 收口（**唯一 L0**）· 刀 3 `worker/` 出包（**L2**，坐在 `remote/` 下面）· 刀 4 `biz/` 出包（**L1**，纯逻辑 **64**，比计划里的 65 少一个——以快照为准）· 刀 5 编排整包改名 `rl/` → **`trainer/`**（37 个模块，成员一个没变，`rl/` 从此不存在；快照 `RL_ORCHESTRATION` → `TRAINER_ORCHESTRATION`）。判据自始至终是**机械快照**，刀 4 已把 `plan` §3.6 那 28 个误列名的争议按它判完（归 `biz/`） | `docs/nn/engineering.md` §51–§53 · `plan/nn-training-module-reorg.plan.md` §5 | ✅ 已验：nn 门禁 **3373 passed / 3 skipped**（ruff 只剩预存 N999 + mypy **547** 文件干净）· 根 `bun run check` **2277 / 0** · dashboard typecheck + **1229 / 0** + 三份 bundle · 反探针 `tmp/cut5_probe.sh` **7/7 红（复位即绿）** · `DECISIONS.md` 每刀一条 |
+| 17 | ~~**`nn-training` 六包重组还剩一刀**~~ **已收官（2026-09-30）**：刀 1 `hub/` 出包 · 刀 2 `common/` 收口（**唯一 L0**）· 刀 3 `worker/` 出包（**L2**，坐在 `remote/` 下面）· 刀 4 `biz/` 出包（**L1**，纯逻辑 **64**，比计划里的 65 少一个——以快照为准）· 刀 5 编排整包改名 `rl/` → **`trainer/`**（37 个模块，成员一个没变，`rl/` 从此不存在；快照 `RL_ORCHESTRATION` → `TRAINER_ORCHESTRATION`）。**刀 6（同日追加，用户口径改判）**：`worker/` = 本地 torch 训练全栈（算法栈五包 39 文件 + 52 个训练侧单体搬入），`biz/` 只留 **12** 个游戏业务模块，`biz/log.py` → `common/log.py`；账本把 `worker/` 整族入账（150 模块）并按拓扑秩重排（12 抬 / 6 压）。判据自始至终是**机械快照**，刀 4 已把 `plan` §3.6 那 28 个误列名的争议按它判完（归 `biz/`） | `docs/nn/engineering.md` §51–§55 · `plan/nn-training-module-reorg.plan.md` §5.5–§5.6 | ✅ 已验：nn 门禁 **3373 passed / 3 skipped**（ruff 只剩预存 N999 + mypy **547** 文件干净）· 根 `bun run check` **2277 / 0** · dashboard typecheck + **1232 / 0** + 三份 bundle · 反探针 `tmp/cut5_probe.sh` **7/7 红（复位即绿）** · 搬家后的**散文残渣四轮清完**（判据 = 名实，末轮扫描面提到仓库根）+ 顺手修掉 **`specs.ts` 的孤儿哨兵**（指着刀 2 就搬走的 `remote/protocol.py` ⇒ 永不触发）与新守卫 · `DECISIONS.md` 每刀一条 + 哨兵一条。**刀 6 追加读数**：nn 门禁 **3373 / 3 skipped**（ruff 全过，117 处 isort `--fix`）· 根 **2277 / 0** · dashboard **1232 / 0** · `bun run build` 过 · 反探针 `tmp/cut6_probe.py` **5/5** · **刀 7（同日，用户指令「把 nn-training 下剩下的 py 移到合适的目录」）**：14 个入口脚本归位（六个训练/评估入口 → `trainer/` · 两个 worker 入口 → `remote/` · `rl_config_schema` → `worker/` · 五个环境/运维脚本 → `tools/`），`nn-training/` 顶层只剩 `conftest.py`；三条真机前提重算（脚本模式 `sys.path[0]` 遮蔽 stdlib `queue` · `Path(__file__)` 上溯层数 · 启动器 `--script` 写相对路径），快照 37 → **43**、账本 +3（L0/L6/L7）；新守卫 `tests/test_entry_scripts_in_place.py`（顶层只许 `conftest.py` + 11 个入口真起一次）；nn **3373 / 3 skipped** · 根 **2277 / 0** · dashboard **1232 / 0** + 三份 bundle · 反探针 **4/4**（逐条红、复位即绿） |
 
 ---
 

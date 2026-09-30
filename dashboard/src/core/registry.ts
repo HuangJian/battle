@@ -78,7 +78,7 @@ export function isCourseComponent(key: Component): key is CourseComponent {
 
 /** **单实例（共享）组件**：`hubServer`/`cloudflared`（2026-09-18）+ `trainingLoop`（2026-09-19）
  *  + `localWorker`（2026-09-19）不再是「每课一份」——一个 hub 进程服务所有并行课程、一条隧道
- *  指向它，一个 trainer 进程（`run_rl_cluster.py --serve`）服务所有课程的训练循环，
+ *  指向它，一个 trainer 进程（`trainer/run_rl_cluster.py --serve`）服务所有课程的训练循环，
  *  一个本机 PPO worker 领任何课程的 job。
  *
  *  ★ `localWorker` 为什么也进来（用户口径：「localWorker 也不应绑定课程，它和云端 worker 一样，

@@ -83,11 +83,11 @@ TOP_LEVEL_ALLOWED = {
     "pathlib",
     "typing",
     "trainer.eval_m1",
-    "biz.log",
+    "common.log",
 }
 
 #: DI 目标：只许**方法体内**延迟 import（测试 patch 的是这些实现模块）。
-DI_MODULES = ("trainer.eval_dispatch", "biz.eval_yield", "trainer.queue", "biz.archive")
+DI_MODULES = ("trainer.eval_dispatch", "worker.eval_yield", "trainer.queue", "worker.archive")
 
 
 def _tree(path: Path) -> ast.Module:
@@ -285,7 +285,7 @@ def test_di_targets_are_lazy_only() -> None:
     # 至少 `dispatch_eval_bg` 的宿主（派发的唯一入口）必须在方法体里拿到；
     # 2026-09-27（S5 第十二刀）：让位/份额判据的宿主从 `biz.eval_local`（运行器）换成
     # `biz.eval_yield`（判决面）——本簇仍只经延迟 import 拿它，patch 面不变。
-    assert "trainer.eval_dispatch" in inside and "biz.eval_yield" in inside
+    assert "trainer.eval_dispatch" in inside and "worker.eval_yield" in inside
 
 
 def test_loop_eval_does_not_import_the_facade_or_core() -> None:

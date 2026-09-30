@@ -410,9 +410,9 @@ def test_push_over_nodes_prefers_the_deterministic_cause() -> None:
 
 def _push_session(tmp_path: Path, *, bad_first: bool = True):
     """造一份直推会话 + 真 job 目录（换节点时要重读盘上 payload）。"""
-    from biz.loop_round import RemotePpoJob
     from common.protocol import PAYLOAD_NAME
     from trainer.loop_steps import TrainingSteps
+    from worker.loop_round import RemotePpoJob
 
     job_root = tmp_path / "remote-jobs"
     (job_root / "j7").mkdir(parents=True)

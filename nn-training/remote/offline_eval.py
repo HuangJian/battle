@@ -35,21 +35,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from biz.eval_local import (
+# 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
+# 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
+from common import game_watch
+from common.log import log as _rl_log
+from common.platform_utils import cpu_worker_slots, rmtree_best_effort
+from common.protocol import UnreapableChildError
+from worker import serve_pool
+from worker.eval_local import (
     a_eval_seed_list,
     eval_done_keys,
     run_local_eval_game,
     settle_eval_summary,
 )
-from biz.eval_rows import eval_row
-from biz.log import log as _rl_log
-
-# 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
-# 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
-from common import game_watch
-from common.platform_utils import cpu_worker_slots, rmtree_best_effort
-from common.protocol import UnreapableChildError
-from worker import serve_pool
+from worker.eval_rows import eval_row
 
 # 单局评估的硬顶：**与 rollout 共用一份口径**（`common/game_watch.py`）。
 # 旧值 900s（= policy.taskTimeoutSec）：一个卡住的评估局会占着一个 slot 15 分钟，而本轮

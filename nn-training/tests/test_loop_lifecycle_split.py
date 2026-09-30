@@ -109,17 +109,17 @@ SLOT_HANDS_WRITTEN_BY = {
 TOP_IMPORTS = frozenset(
     {
         "common.distribution",
-        "biz.breaker",
+        "worker.breaker",
         "biz.course",
-        "biz.events",
-        "biz.log",
+        "worker.events",
+        "common.log",
         "trainer.loop_guards",
-        "biz.loop_round",
+        "worker.loop_round",
         "trainer.loop_steps",
         "trainer.queue",
-        "biz.resume",
+        "worker.resume",
         "trainer.rollout_phase",
-        "biz.train_ledger",
+        "worker.train_ledger",
     }
 )
 
@@ -396,8 +396,8 @@ def test_one_round_runs_through_the_new_home() -> None:
     import types
     from typing import Any, cast
 
-    from biz.loop_round import ROUND_NEXT, ROUND_RETRY, RoundOutcome, finish
     from trainer.loop_core import TrainingLoop
+    from worker.loop_round import ROUND_NEXT, ROUND_RETRY, RoundOutcome, finish
 
     obj = TrainingLoop.__new__(TrainingLoop)
     seen: list[int] = []
@@ -423,7 +423,7 @@ def test_one_round_runs_through_the_new_home() -> None:
     cast(Any, obj).round_failure = fake_failure
     assert cast(Any, obj).run_one_round(8).status == ROUND_RETRY
     # 让位（is_wait）在组合路径是**响亮报错**，不是静默停住。
-    from biz.loop_round import RoundYieldError, wait_for
+    from worker.loop_round import RoundYieldError, wait_for
 
     cast(Any, obj).round_steps = lambda: [lambda ctx: wait_for("等 job")]
     try:

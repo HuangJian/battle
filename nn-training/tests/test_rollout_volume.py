@@ -17,10 +17,12 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
-from biz.commit_journal import CommitJournal
-from biz.config import CourseConfig, corpus_identity_fp
 from biz.course import build_pairs
-from biz.volume_waves import (
+from tests.conftest import bp_args
+from trainer.loop_core import TrainingLoop
+from worker.commit_journal import CommitJournal
+from worker.config import CourseConfig, corpus_identity_fp
+from worker.volume_waves import (
     DEFAULT_MAX_WAVES,
     STOP_GAME_CAP,
     STOP_QUOTA_MET,
@@ -36,8 +38,6 @@ from biz.volume_waves import (
     wave_pairs,
     wave_seeds,
 )
-from tests.conftest import bp_args
-from trainer.loop_core import TrainingLoop
 
 # ─────────────────── ① 配额数学 ───────────────────
 
@@ -697,7 +697,7 @@ def test_settled_totals_accept_both_manifest_schemas(tmp_path: Path) -> None:
     只认前者 ⇒ 后者那些关永远「零样本」、补波永不达标（白烧到波次上限）——2026-09-15
     e2e 实测踩到（`e2e/test_volume_e2e.py::test_short_stage_does_not_starve_long_stage`）。
     """
-    from biz.resume import settled_stage_totals
+    from worker.resume import settled_stage_totals
 
     traj = tmp_path / "traj"
     wver = "w" * 12
@@ -877,7 +877,7 @@ def test_volume_topup_partial_ledger_replays_same_continuation(
 
 def test_parse_wave_records_roundtrip(tmp_path: Path) -> None:
     """WAL 行 → 波次记录（本迭代、末条 op 定成败、games 字符串键转回 int）。"""
-    from biz.volume_waves import WAVE_PHASE, parse_wave_records, wave_round_key
+    from worker.volume_waves import WAVE_PHASE, parse_wave_records, wave_round_key
 
     j = CommitJournal(tmp_path / "commit_journal.jsonl")
     j.start(WAVE_PHASE, wave_round_key(9, 1), games={"0": 3, "1": 4}, wave_idx=1)
@@ -901,7 +901,7 @@ def test_volume_topup_replays_unfinished_wave(tmp_path: Path, _patch_wver: None)
     若只按账本重算，计数器会回到 wave 1，用 wave-1 的种子去补 wave-2 的缺口——
     同观测史、不同波次序列（plan §2.3.1 禁止的「重新抛硬币」）。
     """
-    from biz.volume_waves import WAVE_PHASE, wave_round_key
+    from worker.volume_waves import WAVE_PHASE, wave_round_key
 
     stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500)
     stub._iteration_pairs(1)
@@ -922,7 +922,7 @@ def test_volume_topup_replays_unfinished_wave(tmp_path: Path, _patch_wver: None)
 
 def test_volume_topup_does_not_replay_finished_wave(tmp_path: Path, _patch_wver: None) -> None:
     """已闭环的波不重放（WAL 只在「停在波中」时才作判据）。"""
-    from biz.volume_waves import WAVE_PHASE, wave_round_key
+    from worker.volume_waves import WAVE_PHASE, wave_round_key
 
     stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500)
     stub._iteration_pairs(1)

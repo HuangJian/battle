@@ -8,7 +8,7 @@
  * 2026-09-09 mac 事故）/ 跨代去重 (agent codeHash, 期望 hash) / self 节点纯重启禁 pull。
  *
  * 本模块**不重写任何一条上述逻辑**：把 cfg 路径交给
- * `nn-training/dist_upgrade_cli.py`（经仓库规定的 `bash tools/githook/nn-py-safe.sh`
+ * `nn-training/tools/dist_upgrade_cli.py`（经仓库规定的 `bash tools/githook/nn-py-safe.sh`
  * 启动），由它自己 ping、自己判 stale、自己走守卫。TS 侧只负责：拼 spec、读 JSON、
  * 打日志/告警、持久化跨调用 memo。
  *
@@ -76,7 +76,7 @@ export interface UpgradeDeps {
 
 /** 仓库规定的沙箱免疫 python 启动器（**不要**裸起 python）。 */
 export const NN_PY_SAFE = 'tools/githook/nn-py-safe.sh'
-export const UPGRADE_CLI = 'nn-training/dist_upgrade_cli.py'
+export const UPGRADE_CLI = 'nn-training/tools/dist_upgrade_cli.py'
 
 export function buildUpgradeSpec(input: UpgradeSpecInput): Record<string, unknown> {
   const spec: Record<string, unknown> = {

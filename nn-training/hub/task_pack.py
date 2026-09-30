@@ -50,7 +50,7 @@ from common.protocol import PLAN_NAME
 # 几十上百轮，白烧算力。过期的包比没有包更危险（404 只让云机多等一拍），所以宁可偏严。
 
 #: 包索引名（与 `remote/bundle.py::BUNDLE_INDEX` 逐字相同；本模块不 import bundle 以免边，测试守）。
-TASK_PACK_INDEX_NAME = "task.json"
+TASK_PACK_INDEX_NAME = "tools.task.json"
 #: 控制台地址（触发「重导任务包」用）：**调用时读** env（测试要能 monkeypatch）。
 CONSOLE_URL_ENV = "BCITY_CONSOLE_URL"
 DEFAULT_CONSOLE_URL = "http://127.0.0.1:8900"

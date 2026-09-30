@@ -2,7 +2,7 @@
 //
 // 这些课程**不再实际训练**（用户 2026-09-02 决策）：只作配置机制的可用性
 // 测试夹具——能由配置公式完整表达、能启动、golden 测试锁行为即可。
-// 启动：python run_rl.py --course s1
+// 启动：python trainer/run_rl.py --course s1
 {
   "version": 5,
   "name": "s1-kill2",

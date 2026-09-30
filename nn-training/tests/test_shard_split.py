@@ -30,8 +30,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from data.dataset import make_loaders
-from data.npyio import save_shard
+from worker.data.dataset import make_loaders
+from worker.data.npyio import save_shard
 
 
 def _make_corpus(tmp_path: Path, n_shards: int = 6, frames_per_shard: int = 40) -> Path:
@@ -54,7 +54,7 @@ def _make_corpus(tmp_path: Path, n_shards: int = 6, frames_per_shard: int = 40) 
 
 def test_make_loaders_no_cross_shard_leak(tmp_path: Path) -> None:
     """val 中任一 shard 的样本绝不出现在 train（P2-6d 核心断言）。"""
-    from data.npyio import load_dataset
+    from worker.data.npyio import load_dataset
 
     data = load_dataset(str(_make_corpus(tmp_path)))
     shard_ids = data["shard_ids"]
@@ -82,7 +82,7 @@ def test_make_loaders_no_cross_shard_leak(tmp_path: Path) -> None:
 
 def test_make_loaders_old_corpus_falls_back(tmp_path: Path) -> None:
     """无 shard_ids 的旧语料回退样本级切分，不崩。"""
-    from data.npyio import load_dataset
+    from worker.data.npyio import load_dataset
 
     data = load_dataset(str(_make_corpus(tmp_path)))
     data.pop("shard_ids")  # 模拟旧语料

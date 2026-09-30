@@ -516,7 +516,7 @@ def _engine_mode(bk: Backend, args) -> None:
     if args.tail and args.tail > 0:
         chunks.append(make_chunk(args.tail, rng))
     print("=" * 72)
-    print("[E 段] 真实 job 形态复现（复刻 ppo/engine.py 主循环）")
+    print("[E 段] 真实 job 形态复现（复刻 worker/ppo/engine.py 主循环）")
     print(f"       chunks={args.chunks}"
           + (f"(+尾块 {args.tail})" if args.tail and args.tail > 0 else "（无尾块，固定 shape）")
           + f" x epochs={args.epochs} "
@@ -594,7 +594,7 @@ def _engine_mode(bk: Backend, args) -> None:
             print("  → 复现成功：engine 现役形态显著慢于干净探针。")
             if m0 and m0.get("compile_s", 0) > e0_s * 0.5:
                 print("     CompileTime 占大头 ⇒ 每步 XLA 重编译（图签名漂移）。")
-            print("     E1 vs E0 判断 ref 预计算执行时机是否是修复。（改 ppo/engine.py 对应处验证）")
+            print("     E1 vs E0 判断 ref 预计算执行时机是否是修复。（改 worker/ppo/engine.py 对应处验证）")
     else:
         full1 = _sum(seq1) / max(e2_s * 1000.0, 1e-9)
         print(f"[E 判据] （E0 已跳过）E1/E2 倍率 = {full1:.1f}x" + ("（E1 带每步 mark）" if args.step_mark else ""))

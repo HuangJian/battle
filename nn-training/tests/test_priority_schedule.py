@@ -724,13 +724,13 @@ def test_race_judgment_has_no_production_path() -> None:
     )
     hits: list[str] = []
     # 2026-09-30（刀 4）：`biz/` 是 `rl/` 的纯逻辑半，同属生产代码面 ⇒ 一并扫。
-    for sub in ("remote", "trainer", "biz"):
+    for sub in ("remote", "trainer", "worker", "biz"):
         for f in (root / sub).rglob("*.py"):
             text = f.read_text(encoding="utf-8")
             for b in banned:
                 if b in text:
                     hits.append(f"{f.relative_to(root)}: {b}")
-    for f in (root / "run_rl.py", root / "common/distribution.py"):
+    for f in (root / "trainer/run_rl.py", root / "common/distribution.py"):
         text = f.read_text(encoding="utf-8")
         for b in banned:
             if b in text:

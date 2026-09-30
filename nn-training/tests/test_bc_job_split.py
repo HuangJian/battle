@@ -50,8 +50,8 @@ ALLOWED_IMPORTS = {
     "common.protocol",
     "remote.http",
     "remote.job_fs",
-    "data.weights_io",
-    "train.bc",
+    "worker.data.weights_io",
+    "worker.train.bc",
 }
 
 
@@ -112,7 +112,7 @@ def test_torch_stays_a_deferred_import_inside_run_bc_job() -> None:
     """**顶层零 torch**：`import torch` 与 `train.bc` 必须仍在函数内（延迟 import）。"""
     top = _top_level_imports(BC_FILE)
     assert "torch" not in top, "bc_job 顶层 import torch（本仓硬规：顶层零 torch）"
-    assert "train.bc" not in top, "train.bc 必须在 _run_bc_job 内延迟 import"
+    assert "worker.train.bc" not in top, "train.bc 必须在 _run_bc_job 内延迟 import"
 
     # 而它们确实在 `_run_bc_job` 体内（否则就是漏搬）
     fn = next(
@@ -126,7 +126,7 @@ def test_torch_stays_a_deferred_import_inside_run_bc_job() -> None:
             inner.update(a.name for a in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             inner.add(node.module)
-    assert {"torch", "train.bc"} <= inner, sorted(inner)
+    assert {"torch", "worker.train.bc"} <= inner, sorted(inner)
 
 
 def test_bc_job_has_no_top_level_mutable_container() -> None:

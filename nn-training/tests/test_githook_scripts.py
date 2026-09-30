@@ -12,7 +12,7 @@
 2. **门禁的 pytest 目标必须同时含两层**（tests/ + e2e/）。e2e 曾在 60e5f69 后掉出所有
    自动化（门禁不跑、CI 那步指向不存在的文件），本断言把「e2e 在门禁里」钉成回归。
 
-3. **pytest 的 `--timeout` 单位是秒，不是毫秒**（2026-09-15 发现）。门禁/task.py 曾
+3. **pytest 的 `--timeout` 单位是秒，不是毫秒**（2026-09-15 发现）。门禁/tools/task.py 曾
    写 `--timeout=50000`——那是从 **bun** 的 `--timeout=50000`（bun 才是毫秒）误搬的，
    等于把上限抬到 13.9 小时并**覆盖掉** pyproject addopts 的 `--timeout=60` ⇒ 所谓
    「>1 分钟即红旗」的护栏名存实亡，hang 又能无限挂。本测试把量级钉死。
@@ -62,7 +62,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 NN_ROOT = REPO_ROOT / "nn-training"
 WRAPPER = REPO_ROOT / "tools" / "githook" / "nn-py-safe.sh"
 GATE = REPO_ROOT / "tools" / "githook" / "nn-python-gate.sh"
-TASK_PY = NN_ROOT / "task.py"
+TASK_PY = NN_ROOT / "tools/task.py"
 
 #: `--timeout=<n>` 或 `NN_PYTEST_TIMEOUT_S:-<n>}` 里的数值（只看非注释行）。
 _TIMEOUT_VALUE = re.compile(r"(?:--timeout|NN_PYTEST_TIMEOUT_S[:=])\D*(\d+)")
@@ -193,7 +193,7 @@ def _timeout_values(text: str) -> list[int]:
     return [int(m.group(1)) for m in _TIMEOUT_VALUE.finditer(strip_comments(text))]
 
 
-@pytest.mark.parametrize("script", [GATE, TASK_PY], ids=["nn-python-gate.sh", "task.py"])
+@pytest.mark.parametrize("script", [GATE, TASK_PY], ids=["nn-python-gate.sh", "tools/task.py"])
 def test_pytest_timeout_is_seconds_not_milliseconds(script: Path) -> None:
     """超时必须按**秒**给，且不能是 0/天量值（0 = 关掉护栏）。"""
     values = _timeout_values(script.read_text(encoding="utf-8"))

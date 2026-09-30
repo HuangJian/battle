@@ -176,7 +176,7 @@ def test_kill_reap_sec_is_one_small_positive_number() -> None:
     assert 0 < plat.KILL_REAP_SEC <= 30.0
     src = (ROOT / "common/platform_utils.py").read_text(encoding="utf-8")
     assert "KILL_REAP_SEC = " in src
-    for leg in ("worker/iter_rollout.py", "biz/eval_local.py"):
+    for leg in ("worker/iter_rollout.py", "worker/eval_local.py"):
         text = (ROOT / leg).read_text(encoding="utf-8")
         assert "KILL_REAP_SEC" in text, leg
 

@@ -51,7 +51,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from biz.log import log
+from common.log import log
 from trainer.eval_m1 import read_eval_summary
 
 
@@ -112,7 +112,7 @@ class TrainingEval:
         2026-09-17 用户指令：先前的硬编码 180s 把 eval 尾巴整段暴露在 PPO 之后
         （本机份额又只在 `_join_eval` 才放行 ⇒ 叠加成 PPO 后的第二次串行等待）。
         """
-        from biz.eval_yield import eval_join_soft_sec
+        from worker.eval_yield import eval_join_soft_sec
 
         return eval_join_soft_sec(self._eval_policy_cfg())
 
@@ -140,7 +140,7 @@ class TrainingEval:
         if not thread.is_alive():
             log(f"[eval] tail settled during rollout (+{elapsed:.0f}s) — 已自落账")
             return
-        from biz.eval_yield import eval_tail_overran
+        from worker.eval_yield import eval_tail_overran
 
         soft = self._eval_join_soft_sec()
         if soft > 0.0:
@@ -249,7 +249,7 @@ class TrainingEval:
                 f"[eval] it{m}: 归档缺席（backup 失败？）——回落活指针 {src_path} 派发"
                 "（wver 与离线复跑不可比，本轮 eval 仅供参考）"
             )
-        from biz.eval_yield import eval_local_early_epochs, local_gate_release_plan
+        from worker.eval_yield import eval_local_early_epochs, local_gate_release_plan
 
         self._eval_gate = threading.Event()
         # 尾巴的窗口起点（收拢时判“是否跑过自己的窗口”）；只作时间基准，不参与等待。
@@ -325,7 +325,7 @@ class TrainingEval:
             bpre = str(getattr(args, "backup_prefix", "") or "")
             if bdir and bpre:
                 try:
-                    from biz.archive import REPO_ROOT
+                    from worker.archive import REPO_ROOT
 
                     root = REPO_ROOT
                 except Exception:

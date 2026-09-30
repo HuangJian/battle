@@ -4,21 +4,30 @@
 
 ```
 L0  common/                                   （stdlib-only，无 torch）
-L1  biz/ · models/ · ppo/ · data/ · train/ · scripts/   （纯逻辑：领域判据 + 算法栈）
-L2  worker/                                   （节点侧执行体：iter_rollout · serve_pool）
-L3  remote/                                   （跨端线路 + 云引导 + 云 worker）
-L4  trainer/ · hub/ · 根入口（run_rl.py / run_bc.py …）
+L1  biz/                                      （游戏业务：课程 / 奖励 / 关卡 / 账本）
+L2  worker/                                   （本地 torch 训练全栈：算法栈 + 节点侧执行体）
+L3  remote/                                   （跨端线路 + 云引导 —— 云机 worker = 本地 worker + remote）
+L4  trainer/（编排层 + 六个入口：trainer/run_rl.py … trainer/eval_m1_once.py） · hub/
 ```
 
 允许 `L4 → L3 → L2 → L1 → L0`；**反向禁止**。
 
 > 2026-09-30（刀 4）：`biz/` 从 `rl/` 出包 —— 纯逻辑（64 个模块）与编排分家。
 > 2026-09-30（刀 5）：编排那一半（37 个模块）随整包改名 `rl/` → **`trainer/`**，`rl/` 这个包
+> 2026-09-30（刀 7）：六个**入口脚本**（`run_rl` / `run_bc` / `run_rl_cluster` / `train_loop` /
+> `eval_course_once` / `eval_m1_once`）从 `nn-training/` 顶层搬进本包 ⇒ 快照 **37 → 43**，
+> 「根入口」这个位置从此不存在（`nn-training/` 下只剩 `conftest.py`）。
 > **从此不存在**。判据仍是那条机械定义，两边都换了家名：
 > `biz/` = 「与 `TRAINER_ORCHESTRATION` 互补的那棵纯逻辑树」，`TRAINER_ORCHESTRATION`
 > （见下方快照）= 「`trainer/` 中直接或经包内传递可达 `remote|worker` 的模块」。
 > 刀 4 当天这句写作 `biz = rl/*.py − RL_ORCHESTRATION`，刀 5 之后按今天的名字读。
 > 于是「谁是纯逻辑、谁是编排」在**包名**上就看得见，而不必逐个模块读 import。
+>
+> 2026-09-30（刀 6）：**`biz/` 只留游戏业务**（12 个模块），算法栈（`models/` `ppo/`
+> `data/` `train/` `scripts/`，39 模块）与 52 个训练侧单体一起并入 **`worker/`**
+> （口径：`worker/` = 「支持本地 torch 训练的全部代码」）。于是本文件的 L1 只剩
+> `biz/` 一个包：「`biz/` 里没有一个模块达远端」这条断言不变；算法栈内部的先后
+> 从本文件挪到 `tests/helpers/remote_dag.py` 的账本（`worker.*` 整族在册，层号 = 拓扑秩）。
 
 > 本文件只判**粗粒度**的「面」：L0/L1 不许碰上层，而「编排」是一个声明式快照。
 > `remote/` · `hub/` · `worker/` 三个包**内部**的先后由 `tests/helpers/remote_dag.py` 的
@@ -79,11 +88,13 @@ NN_ROOT = Path(__file__).resolve().parent.parent
 #: 「本名单」与「`common/` 目录」，名单是用来接住**下一个**顶层 L0 单文件的 —— 删掉它，
 #: 下次有人往根下丢一个 stdlib-only 模块，判据会静默瞎着（本文件头部那条教训的同型）。
 L0_TOP_MODULES: tuple[str, ...] = ()
-#: L1 包（纯逻辑）。
+#: L1 包（游戏业务）。
 #:
 #: 2026-09-30（刀 4）：`biz` 从 `rl/` 出包成 L1 的一员 —— 本名单里的每个包都必须**零**引用
 #: 上层包面（见 `test_l1_packages_never_import_the_upper_face`），`biz/` 也不例外。
-L1_PACKAGES = ("models", "ppo", "data", "train", "scripts", "biz")
+#: 2026-09-30（刀 6）：算法栈（`models/` `ppo/` `data/` `train/` `scripts/`）整族搬进
+#: `worker/` ⇒ **L1 只剩 `biz/`**。算法栈的分层没消失，换账本管（见上：`worker.*` 入账）。
+L1_PACKAGES = ("biz",)
 #: **上层包**：对 L0 / L1 来说它们都是「不许碰」的上层。
 #:
 #: 合成一个面（而不是分开列 L2/L3/L4）是有意的：这个文件判的是「面」，先后顺序由账本管；
@@ -97,7 +108,9 @@ UPPER_PACKAGES = ("remote", "hub", "worker", "trainer")
 #:
 #: 这不是「豁免名单」而是**声明式快照**：测试会把它与「trainer 中可达 remote|worker 的模块
 #: 集合」逐项对账，多一个 / 少一个都红。2026-09-30（刀 4 + 刀 5）后这份名单**就是 `trainer/`
-#: 的全部** —— 纯逻辑那一半（64 个模块）已搬进 `biz/`，剩下的 37 个随整包改名 `rl/` → `trainer/`
+#: 的全部** —— 纯逻辑那一半（64 个模块）已搬进 `biz/`（刀 6 再把训练侧的 52 个挪进 `worker/`），
+#: 剩下的 37 个随整包改名 `rl/` → `trainer/`（刀 7 再把六个入口从 `nn-training/` 顶层
+#: 并进来 ⇒ **43 个**，仍然是「trainer/ 的全部」）
 #: （判据两边都成立：`trainer/` 里没有「不达远端」的模块，`biz/` 里没有一个达远端）。
 #: 2026-09-23 下沉 `EVAL_SCRIPT` 后由 17 个收敛到 11 个——
 #: `eval_local` / `eval_dispatch` / `gate_check` / `batch_eval` / `eval_a_once` /
@@ -116,7 +129,7 @@ UPPER_PACKAGES = ("remote", "hub", "worker", "trainer")
 #: 同日（S4 第二十刀）：`loop_core` 收尾拆出三簇——实测只有两簇“经 rl 传递可达”：
 #: `loop_iter_dir`（拿 `trainer.collect_only` 的 `precollect_snapshot_wver`）· `loop_dispatch`（拿
 #: `trainer.rollout_phase` 的 `dispatch_rollout_phase`）；**`loop_baseline` 反而回到纯逻辑**（它只拿
-#: `common.distribution` / `biz.log` / `trainer.queue.RUN_ID`，三者都不达 remote）⇒ 只登记前两个。
+#: `common.distribution` / `common.log` / `trainer.queue.RUN_ID`，三者都不达 remote）⇒ 只登记前两个。
 #: 同日（S4 第二十一刀）：`loop_steps` 拆出 `loop_export`（产物出包 4 方法的混入），它拿
 #: `remote.hub_client.pack_ts_code_zip`（`_ensure_ts_code` 里**延迟** import——本快照的 AST 也看
 #: 函数内 import）⇒ 同样先红、再登记（第六次）。
@@ -137,6 +150,14 @@ UPPER_PACKAGES = ("remote", "hub", "worker", "trainer")
 #: 「经包内传递可达」那一步必须跟着改（`d.startswith("trainer.")`），否则固定点会**静默塌成
 #: 「只算直接可达」**：37 个成员里有一批（`batch_*` / `eval_*` / `stream` / `queue` …）正是
 #: 只经这条内部链才达远端的 ⇒ 快照会假性 `shrank`（不是真回纯逻辑）。本刀实测到的就是这个。
+#: ⚠ 2026-09-30（刀 7，入口归位）：`run_rl` / `run_bc` / `run_rl_cluster` / `train_loop` /
+#: `eval_course_once` / `eval_m1_once` 六个**入口脚本**从 `nn-training/` 顶层搬进 `trainer/`
+#: ⇒ 本快照 +6（37 → 43）。判据没变（「可达 remote|worker」），这六个本来就是**直接**成员：
+#: `run_rl` 延迟 import `remote.push_client` / 顶层 `worker.*`、`run_bc` 与 `train_loop` 顶层
+#: `worker.*`、`run_rl_cluster` 顶层 `worker.loop_scheduler`、两个 `eval_*_once` 经 `trainer.*`
+#: 传递达 worker。它们搬进来之前**不在本文件视野里**（本文件只扫 `trainer/`）—— 这正是
+#: `test_trainer_holds_only_orchestration_modules`（集合相等那条）先红的原因：一搬进来，
+#: 「trainer 里每个模块都必须是编排」立刻看见这六个。
 TRAINER_ORCHESTRATION = frozenset(
     {
         "batch_eval",
@@ -148,8 +169,10 @@ TRAINER_ORCHESTRATION = frozenset(
         "collect_only",
         "dispatch",
         "eval_a_once",
+        "eval_course_once",
         "eval_dispatch",
         "eval_m1",
+        "eval_m1_once",
         "loop",
         "loop_baseline",
         "loop_control",
@@ -175,7 +198,11 @@ TRAINER_ORCHESTRATION = frozenset(
         "queue",
         "queue_local",
         "rollout_phase",
+        "run_bc",
+        "run_rl",
+        "run_rl_cluster",
         "stream",
+        "train_loop",
     }
 )
 
@@ -295,9 +322,9 @@ def test_l0_never_imports_l1_or_l2() -> None:
 
 
 def test_l1_packages_never_import_the_upper_face() -> None:
-    """L1（纯逻辑）不得依赖它的任何上层（`remote/` · `hub/` · `worker/`）。
+    """L1（游戏业务）不得依赖它的任何上层（`remote/` · `hub/` · `worker/` · `trainer/`）。
 
-    `ppo/` `train/` `models/` `data/` `scripts/` `biz/` 必须**零**引用。
+    刀 6 之后 L1 只剩 `biz/` 一个包（算法栈已并入 `worker/`）；`biz/` 必须**零**引用。
 
     2026-09-30（刀 1/刀 3）：判据从「只查 `remote`」改成查**整个上层包面** —— `hub` 与
     `worker` 成为顶层包后，`models/` 里 `import worker` 这种向上边原先会静默通过。
@@ -320,7 +347,11 @@ def test_l1_packages_never_import_the_upper_face() -> None:
 
 
 def test_l1_packages_never_import_trainer_orchestration() -> None:
-    """采样器 / 训练器 / 模型 / 纯逻辑不得依赖 `trainer/` 的编排模块（否则间接拖入传输层）。"""
+    """L1（刀 6 后 = `biz/`）不得依赖 `trainer/` 的编排模块（否则间接拖入传输层）。
+
+    刀 6 把算法栈并入 `worker/` 后本判据只剩一个包；`worker/` 与 `trainer/` 的关系由
+    账本与 `test_remote_never_reaches_trainer_orchestration` 管。
+    """
     offenders: list[str] = []
     for pkg in L1_PACKAGES:
         root = NN_ROOT / pkg
@@ -366,22 +397,37 @@ def test_trainer_holds_only_orchestration_modules() -> None:
     # `__init__.py` 不入账（包门面/文档，不是依赖图的节点 —— 同 `remote_dag.remote_modules()` 的口径）。
     extra = sorted(set(_trainer_modules()) - set(TRAINER_ORCHESTRATION) - {"__init__"})
     assert extra == [], (
-        f"trainer/ 里出现非编排模块（它们该住 biz/，见 plan/nn-training-module-reorg.plan.md 刀 4）：{extra}"
+        f"trainer/ 里出现非编排模块（游戏业务该住 biz/、训练栈该住 worker/，见 plan/nn-training-module-reorg.plan.md 刀 4/刀 6）：{extra}"
     )
 
 
 def test_the_pure_logic_tree_is_gone_from_trainer() -> None:
-    """机械事实：两棵树**零同名文件**，且 `biz/` 不是空壳（刀 4 未落地/被回退就会红）。
+    """机械事实：`biz/`（游戏业务）与 `worker/`（训练栈）**互不重名**，且 64 个模块还在。
 
-    刀 4 搬的是 64 个模块；「搬回去」是最容易发生的静默回退（旧路径被某个写死路径的守卫
-    读着、或有人顺手 cp 一份），所以按**基名集合**正面钉死。
+    刀 4 把 64 个纯逻辑模块搬出 `rl/`；刀 6 又把其中训练侧的 52 个挪进 `worker/`
+    （口径：`biz/` 只留游戏业务）。「搬回去」是最容易发生的静默回退（旧路径被某个写死
+    路径的守卫读着、或有人顺手 cp 一份），所以按**基名集合**正面钉死：三棵树两两不重名
+    —— 重名就说明有人复制了一份回旧家；而 64 个模块的**总数**不许缩水（少一个 = 被删或被
+    塞回 `trainer/`）。
     """
-    biz_dir, trainer_dir = NN_ROOT / "biz", NN_ROOT / "trainer"
+    def mods(d: Path) -> set[str]:
+        return {p.name for p in d.glob("*.py")} - {"__init__.py"}
+
+    biz_dir = NN_ROOT / "biz"
     assert biz_dir.is_dir(), "biz/ 不存在（2026-09-30 刀 4 未落地？）"
-    biz = {p.name for p in biz_dir.glob("*.py")} - {"__init__.py"}
-    trainer = {p.name for p in trainer_dir.glob("*.py")} - {"__init__.py"}
-    assert len(biz) > 50, f"biz/ 只有 {len(biz)} 个文件——刀 4 的 64 个模块没搬全？"
-    assert not (biz & trainer), f"同名文件同时住两棵树：{sorted(biz & trainer)}"
+    biz, worker, trainer = mods(biz_dir), mods(NN_ROOT / "worker"), mods(NN_ROOT / "trainer")
+    # 66 = 12 个游戏业务（`biz/`）+ 54 个 `worker/` 顶层（52 个从 `biz/` 搬来 + 刀 3 的
+    # `iter_rollout` / `serve_pool`）；少一个 = 被删，或被塞回 `trainer/`（本用例的靶子）。
+    assert len(biz) + len(worker) >= 66, (
+        f"biz ∪ worker 只有 {len(biz) + len(worker)} 个模块——刀 4/刀 6 的分家缩水了？"
+    )
+    assert len(biz) < 20, f"biz/ 长到 {len(biz)} 个模块了——它只该留游戏业务（刀 6 口径）"
+    for a, b, na, nb in (
+        (biz, worker, "biz", "worker"),
+        (biz, trainer, "biz", "trainer"),
+        (worker, trainer, "worker", "trainer"),
+    ):
+        assert not (a & b), f"同名文件同时住 {na}/ 与 {nb}/：{sorted(a & b)}"
 
 
 def test_trainer_orchestration_set_is_exactly_the_modules_reaching_remote() -> None:
@@ -482,7 +528,7 @@ def test_the_moved_modules_are_gone_from_remote() -> None:
 def test_the_old_rl_package_is_gone_after_the_rename() -> None:
     """机械事实（2026-09-30 刀 5）：`rl/` 这个包**不存在**了，编排全在 `trainer/`。
 
-    为什么值得单独钉：`NN_ROOT` 在 `sys.path` 上，留一个 `rl/__init__.py`（哪怕只是空壳）
+    为什么值得单独钉：`NN_ROOT` 在 `sys.path` 上，留一个 `trainer/__init__.py`（哪怕只是空壳）
     就能让 `import rl.x` 继续解析得到 —— 于是「整包改名」退化成「两个名字并存」，
     任何漏改的 `rl.*` 都不再报错（扫描面缩水是哑的，本文件头部的同型教训）。
     所以旧家的存在性本身就是判据，不靠「没搜到 `rl.` 字面量」这种间接证据。

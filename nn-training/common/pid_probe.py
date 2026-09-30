@@ -1,7 +1,7 @@
 """common.pid_probe —— 进程存活探测的**唯一实现**（stdlib-only；无 torch、无包依赖）。
 
 放在 nn-training 根目录（与 `common/platform_utils.py` 同层）是为了让所有入口都能 `from common.pid_probe
-import pid_alive`：`run_rl.py` / `run_bc.py` / `train/loop_util.py` / `remote/*`，而**不**引入
+import pid_alive`：`trainer/run_rl.py` / `trainer/run_bc.py` / `train/loop_util.py` / `remote/*`，而**不**引入
 任何包依赖——`remote/` 要独立打进 code.zip、`train/loop_util` 刻意保持 torch-free，两者都不能
 反向依赖对方的 `__init__`。
 

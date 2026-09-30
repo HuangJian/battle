@@ -400,7 +400,7 @@ describe('课程矩阵：表头两半的机群级读数与空态', () => {
       pools: {},
       rows: [],
       trainingCount: 0,
-      error: 'run_rl_cluster.py 退出码 1：ModuleNotFoundError',
+      error: 'trainer/run_rl_cluster.py 退出码 1：ModuleNotFoundError',
     }
     const empty = await render({ overview: null, loopQueue: failed })
     expect(empty).toContain('只读视图不可用')

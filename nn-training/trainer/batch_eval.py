@@ -34,7 +34,7 @@ import threading
 from pathlib import Path
 
 import common.distribution
-from biz.log import log
+from common.log import log
 
 # 再导出约定：`from <home> import X as X` 自别名，逐条一行（ruff `combine-as-imports = false`）。
 # 这是「已有 import 点一行不改」与 `batch_eval.X is <home>.X` 的全部依据；

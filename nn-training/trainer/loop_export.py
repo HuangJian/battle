@@ -47,9 +47,9 @@ from pathlib import Path
 from typing import Any
 
 import common.distribution
-from biz.archive import backup_weights
-from biz.log import log
-from biz.modes import _MODE_BACKUP_PREFIX
+from common.log import log
+from worker.archive import backup_weights
+from worker.modes import _MODE_BACKUP_PREFIX
 
 
 class TrainingExport:
@@ -107,8 +107,8 @@ class TrainingExport:
             return None
         if int(getattr(args, "target_transitions", 0) or 0) <= 0:
             return None
-        from biz.resume import trailing_samples_per_game
-        from biz.volume_waves import volume_block
+        from worker.resume import trailing_samples_per_game
+        from worker.volume_waves import volume_block
 
         declared = int(getattr(args, "est_samples_per_game", 0) or 0)
         jsonl = getattr(self, "_jsonl_path", None)
@@ -153,8 +153,8 @@ class TrainingExport:
                 f"[run_rl] --export-bundle: 没有起点权重（{args.out}）——先跑至少一轮，"
                 "或把已有权重放到 --out 指向的位置"
             )
-        from biz.iter_job import build_iter_spec
-        from biz.plan import RUN_NODE_LABEL, build_plan, dump_plan, planned_iters
+        from worker.iter_job import build_iter_spec
+        from worker.plan import RUN_NODE_LABEL, build_plan, dump_plan, planned_iters
 
         wver = common.distribution.weights_fingerprint(args.out)
         workers = int(getattr(args, "remote_iter_workers", 0) or 0) or int(

@@ -104,14 +104,14 @@ TOP_LEVEL_ALLOWED = {
     "pathlib",
     "typing",
     "biz.course",
-    "biz.log",
-    "biz.reports",
-    "biz.resume",
+    "common.log",
+    "worker.reports",
+    "worker.resume",
     "trainer.rollout_phase",
 }
 
 #: DI 目标：只许**方法体内**延迟 import（测试 patch 的是这些实现模块）。
-LAZY_ONLY = ("biz.volume_waves", "biz.volume_quota")
+LAZY_ONLY = ("worker.volume_waves", "worker.volume_quota")
 
 
 def _tree(path: Path) -> ast.Module:
@@ -303,10 +303,10 @@ def test_cross_module_hands_are_the_declared_ones() -> None:
     # **只读旧文件会让本用例静默失去那 12 个成员的覆盖**（组合根现在只剩 4 个 sink）。
     guards_family = (
         (NN_ROOT / "trainer" / "loop_guards.py", "TrainingGuards"),
-        (NN_ROOT / "biz" / "loop_guards_trip.py", "TrainingGuardsTrip"),
-        (NN_ROOT / "biz" / "loop_guards_leg.py", "TrainingGuardsLeg"),
-        (NN_ROOT / "biz" / "loop_guards_gate.py", "TrainingGuardsGate"),
-        (NN_ROOT / "biz" / "loop_guards_sweep.py", "TrainingGuardsSweep"),
+        (NN_ROOT / "worker" / "loop_guards_trip.py", "TrainingGuardsTrip"),
+        (NN_ROOT / "worker" / "loop_guards_leg.py", "TrainingGuardsLeg"),
+        (NN_ROOT / "worker" / "loop_guards_gate.py", "TrainingGuardsGate"),
+        (NN_ROOT / "worker" / "loop_guards_sweep.py", "TrainingGuardsSweep"),
     )
     for path, cls in (
         (CORE_PY, "TrainingLoop"),

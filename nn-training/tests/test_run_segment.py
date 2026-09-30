@@ -30,9 +30,6 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.cli import build_argparser
-from biz.iter_job import build_iter_spec
-from biz.plan import build_plan, dump_plan, planned_iters
 from common.protocol import PLAN_NAME, TS_CODE_NAME, unpack_payload
 from remote.hub_client import HubClientError, publish_job
 from trainer.loop_steps import (
@@ -40,6 +37,9 @@ from trainer.loop_steps import (
     _rollout_source,
     _run_segment_iters,
 )
+from worker.cli import build_argparser
+from worker.iter_job import build_iter_spec
+from worker.plan import build_plan, dump_plan, planned_iters
 
 
 def _args(**over: object) -> SimpleNamespace:
@@ -86,7 +86,7 @@ def test_segment_iters_cli_wins_over_config() -> None:
 
 def test_segment_iters_reads_course_then_rl() -> None:
     """课程键优先于 rl.*（与 rollout_src 同口径）；配置读不到 → 关（不炸训练）。"""
-    from train.loop_util import course_key_from_path
+    from worker.train.loop_util import course_key_from_path
 
     stem = course_key_from_path("curricula/x1.jsonc")
     with patch("trainer.loop_transport.common.distribution") as dc:

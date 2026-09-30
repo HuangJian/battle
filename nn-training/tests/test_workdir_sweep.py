@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from biz.workdir_sweep import plan_failed_wave_dirs, sweep_failed_wave_dirs
 from common.platform_utils import sandbox_delete_blocked
+from worker.workdir_sweep import plan_failed_wave_dirs, sweep_failed_wave_dirs
 
 
 def _complete_wave(iter_dir: Path, name: str) -> None:

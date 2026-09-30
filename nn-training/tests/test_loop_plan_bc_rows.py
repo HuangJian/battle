@@ -25,12 +25,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import biz.bc_config as bc_config
-from biz.bc_ledger import ROUND_DONE_EVENT
-from biz.loop_scheduler import CourseQueue, Supervisor
-from biz.loop_tasks import Task, TaskResult
-from run_rl_cluster import _fmt_table, build_rows
+import worker.bc_config as bc_config
 from trainer.loop_plan import WAIT_IDLE, WAIT_INFLIGHT, WAIT_READY, bc_inflight
+from trainer.run_rl_cluster import _fmt_table, build_rows
+from worker.bc_ledger import ROUND_DONE_EVENT
+from worker.loop_scheduler import CourseQueue, Supervisor
+from worker.loop_tasks import Task, TaskResult
 
 
 def _never(task: Task, queue: CourseQueue) -> TaskResult:

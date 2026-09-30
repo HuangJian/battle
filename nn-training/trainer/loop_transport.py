@@ -69,7 +69,7 @@ def _course_cf_tunnel(args: Any) -> tuple[str | None, str | None]:
     if proto and edge:
         return proto, edge  # 两个都由 CLI 给定 → 不必读盘
     try:
-        from train.loop_util import course_key_from_path
+        from worker.train.loop_util import course_key_from_path
 
         stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
     except Exception:
@@ -113,7 +113,7 @@ def _rollout_source(args: Any) -> str:
             )
         return mode
     try:
-        from train.loop_util import course_key_from_path
+        from worker.train.loop_util import course_key_from_path
 
         stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
     except Exception:
@@ -148,7 +148,7 @@ def _run_segment_iters(args: Any) -> int:
     if n:
         return n
     try:
-        from train.loop_util import course_key_from_path
+        from worker.train.loop_util import course_key_from_path
 
         stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
     except Exception:
@@ -499,7 +499,7 @@ def kickstart_coef(args: Any, it: int) -> float:
     kk=1.0 实证；kb1 复跑 it53 KL 0.315 同源）。warmup 恒 0（kickstart 腿
     validate_args 强制配对），故原点恒为 1，与 intent/goal 的 warmup 语义无交集。
     """
-    from run_rl import update_kwargs  # 延迟导入：run_rl 侧持有 loop 入口，顶层互引成环
+    from trainer.run_rl import update_kwargs  # 延迟导入：run_rl 侧持有 loop 入口，顶层互引成环
 
     return float(update_kwargs(args, it, 1, None)["kl_coef"])
 

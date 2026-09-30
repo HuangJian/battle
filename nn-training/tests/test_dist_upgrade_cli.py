@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import common.distribution
-import dist_upgrade_cli
+from tools import dist_upgrade_cli
 
 NODE = {"id": "mac", "url": "http://192.168.0.88:8443", "authKey": "k", "pingHash": "a" * 64}
 SPEC = {"expected_hash": "b" * 64, "branch": "goal-nn", "nodes": [NODE]}
@@ -131,7 +131,7 @@ def test_cli_end_to_end_stdin_stdout(tmp_path: Path) -> None:
     py = sys.executable
     spec = {**SPEC, "dry_run": True, "dirty": []}
     proc = subprocess.run(
-        [py, str(ROOT / "dist_upgrade_cli.py")],
+        [py, str(ROOT / "tools/dist_upgrade_cli.py")],
         input=json.dumps(spec).encode("utf-8"),
         capture_output=True,
         cwd=ROOT,
@@ -144,7 +144,7 @@ def test_cli_end_to_end_stdin_stdout(tmp_path: Path) -> None:
 
 def test_cli_bad_spec_exit_2() -> None:
     proc = subprocess.run(
-        [sys.executable, str(ROOT / "dist_upgrade_cli.py")],
+        [sys.executable, str(ROOT / "tools/dist_upgrade_cli.py")],
         input=b"{}",
         capture_output=True,
         cwd=ROOT,

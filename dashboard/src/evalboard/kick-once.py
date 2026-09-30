@@ -25,7 +25,7 @@ from trainer.batch_eval import (  # noqa: E402
     select_next_unit,
     units_for_batch,
 )
-from biz.log import log  # noqa: E402
+from common.log import log  # noqa: E402
 import common.distribution  # noqa: E402
 from trainer.queue import RUN_ID  # noqa: E402
 

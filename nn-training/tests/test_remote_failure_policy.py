@@ -148,8 +148,8 @@ def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
         （ROUND_RETRY）。下面用发布钩子把「有没有人又发了一次」变成可断言的事实。
     """
     import remote.hub_client as hc
-    from biz.loop_round import ROUND_RETRY
     from trainer.loop_core import TrainingLoop
+    from worker.loop_round import ROUND_RETRY
 
     st = _Stub(tmp_path)
     err = JobFailedError("job 43a4eb01cf9fe35c 失败: BadZipFile[kind=ProtocolError]", kind="ProtocolError")

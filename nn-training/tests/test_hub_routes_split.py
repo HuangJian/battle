@@ -321,8 +321,9 @@ def test_the_ledger_puts_the_handler_above_all_mixins() -> None:
     server = layers[_ledger_key("server")]
     for mod in MIXINS:
         assert layers[f"hub.{mod}"] < server, mod
-    # `result` 那一组的秩是**算出来的**：`accept_result` 在 L3 ⇒ 它只能 L4，宿主因此 L5。
-    assert layers["hub.result"] == 4
+    # `result` 那一组的秩是**算出来的**：它只压 `remote.push_dispatch`(L2) ⇒ 只能是 L3
+    # （2026-09-30 刀 6：`worker/` 整族入账后 `common.*` 的边不再计层，一批既有秩随之回落）。
+    assert layers["hub.result"] == 3
     assert layers["remote.push_dispatch"] < layers["hub.result"] < server
     # S4 第十六刀之后 `HubHandler` 住 `hub/http_face.py`（L5）：它才是「组装五组混入」的那一层，
     # 与 `worker`（作业壳）同层；而 `hub_server` 这个**入口**在它上面两格（L7）。

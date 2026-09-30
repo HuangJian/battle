@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import types
 
-from biz.cmd import build_rollout_cmd
+from worker.cmd import build_rollout_cmd
 
 
 def _args(**kw) -> types.SimpleNamespace:

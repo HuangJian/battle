@@ -365,9 +365,12 @@ def test_deferred_cycle_ledger_is_empty_now() -> None:
     assert dag.DEFERRED_CYCLES == {}, f"账本里还有声明的环：{sorted(dag.DEFERRED_CYCLES)}"
     top, deferred, _ = dag.graph()
     assert dag.cycles({m: set(top[m]) | set(deferred[m]) for m in top}) == []
+    # 2026-09-30（刀 6）：`plan_run` 现在直接压 `worker/` 里的训练栈模块 ⇒ 它的秩升到 6，
+    # 越过 `remote.worker`(5) ——「引擎在作业壳之下」当初只是拓扑的顺带，不是契约；
+    # 契约是「交接面是引擎的底座」与「两者都在 run_loop 之下」。
     assert (
         dag.LAYERS["remote.plan_handoff"]
         < dag.LAYERS["remote.plan_run"]
-        < dag.LAYERS["remote.worker"]
         < dag.LAYERS["remote.run_loop"]
-    ), "分层不对：交接面 < 引擎 < worker / run_loop（引擎是两者共同的底座，交接面是引擎的底座）"
+    ), "分层不对：交接面 < 引擎 < run_loop（交接面是引擎的底座）"
+    assert dag.LAYERS["remote.worker"] < dag.LAYERS["remote.run_loop"]

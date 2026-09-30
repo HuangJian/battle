@@ -18,13 +18,13 @@ import threading
 import time
 from pathlib import Path
 
-from biz.log import log
-from biz.resume import completed_pairs, state_init_enabled
+from common.log import log
 from trainer.collect_only import precollect_snapshot_wver, spawn_collect_next
 from trainer.eval_dispatch import dispatch_eval_bg
 from trainer.eval_m1 import dispatch_eval_bg_m1
 from trainer.queue import RUN_ID, local_slots_max_of, run_rollout, run_rollout_queue
 from trainer.stream import run_rollout_stream
+from worker.resume import completed_pairs, state_init_enabled
 
 
 def precollect_min_wave() -> int:
@@ -232,7 +232,7 @@ def dispatch_rollout_phase(
                 # 冻结当前权重快照（θ_{N,e3}）→ spawn；ppo_backend 尾段自然完成临时文件。
                 _snap = str(Path(args.out).with_name(f"weights-collect-{it + 1}.json"))
                 try:
-                    from data.weights_io import save_weights_json as _save_json
+                    from worker.data.weights_io import save_weights_json as _save_json
 
                     _save_json(_mdl, _snap)
                     log(f"[double-buffer] early snapshot θ_{{N,e{ep_done}}} -> {_snap}")

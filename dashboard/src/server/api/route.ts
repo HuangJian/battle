@@ -534,9 +534,9 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
             : path.join(NN_TRAINING, '.venv', 'bin', 'python3')
         const pyBin = existsSync(venvEntry) ? venvEntry : resolved.python
         const sitePackages = resolved.sitePackages
-        // 2026-09-30（刀 4）：`eval_replays_once` 是**纯逻辑**（biz/），不是编排（rl/）——
+        // 2026-09-30（刀 6）：`eval_replays_once` 是**纯逻辑/训练栈**（`worker/`；刀 4 时在 `biz/`）——
         // 这是一条真 spawn 的路径，写错就是「导出 replay」静默找不到脚本。
-        const script = path.join(NN_TRAINING, 'biz', 'eval_replays_once.py')
+        const script = path.join(NN_TRAINING, 'worker', 'eval_replays_once.py')
         const p = replayExportPaths(ctx.course)
         try {
           mkdirSync(path.dirname(p.gamesFile), { recursive: true })

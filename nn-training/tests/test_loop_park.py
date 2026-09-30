@@ -25,9 +25,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.events import write_run_complete
 from trainer.loop_core import TrainingLoop
 from trainer.loop_lifecycle import should_park_on_done
+from worker.events import write_run_complete
 
 
 def _args(**kw) -> types.SimpleNamespace:

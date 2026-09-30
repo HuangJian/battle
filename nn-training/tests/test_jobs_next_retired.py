@@ -38,7 +38,7 @@ _PROD_FILES = [
     ROOT / "remote" / "hub_client.py",
     ROOT / "remote" / "run_loop.py",
     ROOT / "remote" / "offline_deliver.py",
-    ROOT / "run_rl.py",
+    ROOT / "trainer/run_rl.py",
 ]
 
 

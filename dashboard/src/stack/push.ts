@@ -52,7 +52,7 @@ export async function startLocalWorkerServer(ctx: PushSmokeContext): Promise<Pus
       ctx.venv.python,
       '-u',
       '-m',
-      'remote_worker_serve',
+      'remote.remote_worker_serve',
       '--port',
       String(pushPort),
       '--token',

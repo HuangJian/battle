@@ -33,7 +33,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 # 家仍在 np_core（免 torch）；这里经 ppo.common 再导出取——本文件本就要 torch。
-from ppo.common import approx_kl_est
+from worker.ppo.common import approx_kl_est
 
 
 def _cat_kl(p: np.ndarray, q: np.ndarray) -> float:

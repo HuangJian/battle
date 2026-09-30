@@ -3,7 +3,7 @@
 原则（用户 2026-09-25）：**已经在别处能配的数据就不再往里填**。本工具只做两件有边界的事：
 
 1. **删显式白名单里的键**（`DELETE_PATHS` + `--drop-course <课>`）——不做「未知键一律删」
-   （那是 `rl_config_schema.py` 的活，且**只告警不拒**）。
+   （那是 `worker/rl_config_schema.py` 的活，且**只告警不拒**）。
 2. **出「课程 × B 类键」覆盖矩阵**（`--matrix`），标出「只靠 rl-config 兜底」的格子；
    全绿的键可经 `--apply --drop-b-class` 删掉（plan §3.2）。
 
@@ -292,7 +292,7 @@ def load_jsonc(path: Path) -> dict[str, Any]:
 
 def load_course_keys(course: str) -> dict[str, Any]:
     """课程文件的**原始顶层键**（不经 pydantic 补默认——补了就分不出「显式声明」）。"""
-    from biz.config import CURRICULA_DIR
+    from worker.config import CURRICULA_DIR
 
     for suffix in (".jsonc", ".bc.jsonc"):
         p = CURRICULA_DIR / f"{course}{suffix}"
@@ -302,7 +302,7 @@ def load_course_keys(course: str) -> dict[str, Any]:
 
 
 def load_level_keys(course_keys: dict[str, Any]) -> dict[str, Any]:
-    from biz.config import LEVELS_DIR
+    from worker.config import LEVELS_DIR
 
     level = str(course_keys.get("level") or "").strip()
     if not level:
@@ -319,7 +319,7 @@ def all_courses() -> list[str]:
     「任何课程没声明该键时落到 rl-config 的值」⇒「全部课程都不靠它」是**更强**的证据
     （全绿于 `all` ⇒ 全绿于 `live`；反之不然）。
     """
-    from biz.config import CURRICULA_DIR
+    from worker.config import CURRICULA_DIR
 
     return sorted(p.name[: -len(".jsonc")] for p in CURRICULA_DIR.glob(CURRICULUM_GLOB))
 

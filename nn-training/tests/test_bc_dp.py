@@ -18,8 +18,8 @@ from __future__ import annotations
 import pytest
 import torch
 
-import train.bc as bc_mod
-from models.core import NNPolicy
+import worker.train.bc as bc_mod
+from worker.models.core import NNPolicy
 
 # ------------------------------------------------------------------ _resolve_bc_device
 # 判据在 tests/test_bc_device.py（免 torch）；这里只钉「真探针接线 + torch.device 构造」。

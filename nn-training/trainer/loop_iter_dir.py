@@ -20,10 +20,10 @@ from __future__ import annotations
 from typing import Any
 
 import common.distribution
-from biz.log import log
-from biz.resume import completed_pairs
+from common.log import log
 from common.platform_utils import rmtree_best_effort
 from trainer.collect_only import precollect_snapshot_wver
+from worker.resume import completed_pairs
 
 
 class TrainingIterDir:

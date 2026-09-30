@@ -28,7 +28,7 @@ from common.schema import OBS_CHANNELS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import ppo.np_core as np_core
+import worker.ppo.np_core as np_core
 
 FAILS: list[str] = []
 

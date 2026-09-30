@@ -1,5 +1,5 @@
 // 课程 S2 —— 公式引擎验收夹具（原 kill 臂：kill2 + 线性存活项）。
-// 启动：python run_rl.py --course s2
+// 启动：python trainer/run_rl.py --course s2
 {
   "version": 5,
   "name": "s2-kill",

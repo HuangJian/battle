@@ -114,7 +114,7 @@ def __getattr__(name: str) -> Any:
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 #: 任务包索引名 / 代码件名 / 包身份 magic —— 与 `remote/bundle.py` 逐字相同（测试守）。
-BUNDLE_INDEX = "task.json"
+BUNDLE_INDEX = "tools.task.json"
 CODE_NAME = "code.zip"
 BUNDLE_MAGIC = "battle2-task-bundle"
 

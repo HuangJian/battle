@@ -47,9 +47,9 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 
-from biz.log import log
-from train.loop_util import acquire_lock, cleanup_lock
+from common.log import log
 from trainer.batch_plan import REPO_ROOT
+from worker.train.loop_util import acquire_lock, cleanup_lock
 
 #: EvalStore 数据根（`EVALBOARD_DATA` 覆盖）。`data_root()` 同口径。
 DEFAULT_DATA_ROOT = REPO_ROOT / "dashboard" / "data" / "evalboard"

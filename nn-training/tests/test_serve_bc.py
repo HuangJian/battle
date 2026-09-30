@@ -32,16 +32,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import biz.bc_config as bc_config
-import biz.train_ledger as train_ledger
 import trainer.bc_loop as bc_loop
 import trainer.loop_core as loop_core
 import trainer.loop_plan as loop_plan
 import trainer.loop_serve as loop_serve
-from biz.bc_ledger import ROUND_DONE_EVENT, read_events
-from biz.loop_tasks import ROUND_TASKS
+import worker.bc_config as bc_config
+import worker.train_ledger as train_ledger
 from remote import hub_client, hub_http
 from trainer.loop_serve import CourseRuntime, serve
+from worker.bc_ledger import ROUND_DONE_EVENT, read_events
+from worker.loop_tasks import ROUND_TASKS
 
 #: BC 课的附加参数（serve 级 argv）：强制 pull + 本机 hub（否则会真去打 rl-config 里的地址）
 BC_ARGV = [
@@ -229,8 +229,8 @@ def world(bc_course: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Si
         locks.append(str(path))
         return True
 
-    monkeypatch.setattr("run_rl._acquire_run_rl_lock", fake_acquire)
-    monkeypatch.setattr("run_rl._cleanup_run_rl_lock", lambda path: None)
+    monkeypatch.setattr("trainer.run_rl._acquire_run_rl_lock", fake_acquire)
+    monkeypatch.setattr("trainer.run_rl._cleanup_run_rl_lock", lambda path: None)
 
     # ---- open_course：BC 课走**真**分支，RL 课给假 args ----
     real_open = loop_serve.open_course
@@ -357,7 +357,7 @@ def test_bc_round_is_not_republished_when_the_engine_is_evicted(world: SimpleNam
 
 
 def test_bc_course_is_opened_with_the_run_bc_lock_and_its_own_traj(world: SimpleNamespace) -> None:
-    """开课：① 锁用 `run_bc`（与 `run_bc.py --course X` 互相看得见）；② traj 来自课程配置。"""
+    """开课：① 锁用 `run_bc`（与 `trainer/run_bc.py --course X` 互相看得见）；② traj 来自课程配置。"""
     clock = FakeClock()
     serve(
         [world.bc],
@@ -371,7 +371,7 @@ def test_bc_course_is_opened_with_the_run_bc_lock_and_its_own_traj(world: Simple
     )
 
     assert len(world.locks) == 1
-    # `.run_bc.<course>.lock`（与 `run_bc.py` 同名同路径 ⇒ 两条启动路径互相看得见）
+    # `.run_bc.<course>.lock`（与 `trainer/run_bc.py` 同名同路径 ⇒ 两条启动路径互相看得见）
     assert Path(world.locks[0]).name == f".run_bc.{world.bc}.lock"
     assert world.clear_halt == ["http://hub"]  # hub 传输 ⇒ 启动即清停机态
 

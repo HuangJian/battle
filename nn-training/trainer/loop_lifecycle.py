@@ -61,11 +61,15 @@ from pathlib import Path
 from typing import Any
 
 import common.distribution
-from biz.breaker import CIRCUIT_EXIT_CODE
 from biz.course import resolve_rotate_seed
-from biz.events import write_run_complete, write_run_start
-from biz.log import log
-from biz.loop_round import (
+from common.log import log
+from trainer.loop_guards import TrainingGuards
+from trainer.loop_steps import kickstart_coef
+from trainer.queue import REPO_ROOT, RUN_ID
+from trainer.rollout_phase import join_precollect_child
+from worker.breaker import CIRCUIT_EXIT_CODE
+from worker.events import write_run_complete, write_run_start
+from worker.loop_round import (
     ROUND_BUNDLE_EXIT,
     ROUND_NEXT,
     ROUND_OFFLINE_EXIT,
@@ -77,12 +81,8 @@ from biz.loop_round import (
     RoundOutcome,
     RoundYieldError,
 )
-from biz.resume import state_init_enabled
-from biz.train_ledger import LedgerSpec, load_ledger
-from trainer.loop_guards import TrainingGuards
-from trainer.loop_steps import kickstart_coef
-from trainer.queue import REPO_ROOT, RUN_ID
-from trainer.rollout_phase import join_precollect_child
+from worker.resume import state_init_enabled
+from worker.train_ledger import LedgerSpec, load_ledger
 
 #: `run()` 撞上 `ROUND_WAIT` 时的再问间隔（秒）。单课程驱动器是阻塞语义（退避后再问同一轮），
 #: 不是让位——真正的让位在 supervisor（`trainer/loop_runner` 的 `waiting()`，间隔 `poll_interval`）。
@@ -110,7 +110,7 @@ def _course_file_fp(args) -> str | None:
         return hashlib.sha256(frozen).hexdigest()
     path = getattr(args, "course_path", "") or ""
     if not path:
-        from biz.config import resolve_course
+        from worker.config import resolve_course
 
         try:
             path = str(resolve_course(course.name))
@@ -177,7 +177,7 @@ def _paired_seed_startup_check(args: Any, rotate_seed: int, rs_source: str) -> N
 
     未声明 `paired_rotate_seed` 的课程照旧（单腿口径），只打一行说明——不打扰既有课程。
     """
-    from biz.paired import declared_paired_seed, pair_check
+    from worker.paired import declared_paired_seed, pair_check
 
     course = getattr(args, "course_obj", None)
     declared = declared_paired_seed(course)
@@ -215,8 +215,8 @@ def _kickstart_baseline_row(args: Any) -> None:
     if not traj:
         return
     try:
-        from biz.gate_check import read_trend_rows
-        from biz.kickstart_burn import baseline_reading
+        from worker.gate_check import read_trend_rows
+        from worker.kickstart_burn import baseline_reading
 
         # 与 `_gate` / 干烧熔断同一个读者与同一个文件（per-tick 评估行在 eval_log.jsonl）。
         rows = read_trend_rows(Path(traj) / "eval_log.jsonl", include_baseline=True)
@@ -524,7 +524,7 @@ class TrainingLifecycle:
         # 只比文件字节时，改一下课程里的预算/路径/注释就把自己历史的 shard 全判成异血缘
         # ⇒ 全量重采（而云端照收）。两者都传给 `completed_pairs`/`settled_stage_totals`，
         # 由 `d14_corpus_match` 按同一条规则决定“优先比语义、缺则回退字节”。
-        from biz.cmd import corpus_fp_for_args
+        from worker.cmd import corpus_fp_for_args
 
         self._corpus_fp = corpus_fp_for_args(args)
         # 起始分布（plan/x20-state-init.plan.md P3.5）：本地对账/shard 侧的护栏开关。
@@ -654,7 +654,7 @@ class TrainingLifecycle:
         self._eb_window.set()
         # R4-G1 心跳：开窗（后续单元起止由 batch_eval 续写 batch/unit/rung）。
         try:
-            from biz.eval_heartbeat import write_state
+            from worker.eval_heartbeat import write_state
 
             write_state(window_open=True)
         except Exception:

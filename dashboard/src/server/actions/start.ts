@@ -70,9 +70,9 @@ export function runClusterLockHolder(): number | null {
   }
 }
 
-/** **启动共享 trainer**（`run_rl_cluster.py --serve`）——一个进程服务所有课程（R3-5）。
+/** **启动共享 trainer**（`trainer/run_rl_cluster.py --serve`）——一个进程服务所有课程（R3-5）。
  *
- *  为什么不再是「每课一个 `run_rl.py --course`」：用户口径「hubserver/trainingloop/selfNode/
+ *  为什么不再是「每课一个 `trainer/run_rl.py --course`」：用户口径「hubserver/trainingloop/selfNode/
  *  cloudflared 都只需要开一个进程，就能同时支持所有并行训练课程」。R2d 已造好单进程驱动者
  *  （按课锁 / 按课日志镜像 / 引擎池 / 故障隔离 / 暂停恢复），R3-4 又让同一个进程能带 BC 课，
  *  而 BC 与 RL **共用 `trainingLoop` 这一个角色键** —— 两个进程并存是旧形状。
@@ -90,7 +90,7 @@ export function runClusterLockHolder(): number | null {
  *  入口（停课 = 暂停意图 + 该课 hub 置离线；队列与账本一个字不动）。
  *
  *  BC 课与 RL 课走**同一条路**（R3-4 起 `--serve` 按课程种类选引擎/粒度/指针）：BC 不再有
- *  单独的 `run_bc.py` 启动分支。 */
+ *  单独的 `trainer/run_bc.py` 启动分支。 */
 async function startSharedTrainer(
   cfg: RlConfig,
   venv: { python: string; sitePackages: string },

@@ -9,7 +9,7 @@
 //   fp 变 ⇒ 工作拷贝整批变异血缘响亮拒收（想要的语义），须重跑 ingest。
 //   语料 = 预采人类 corpus（`nn-training/data/human-x20-corpus/` 61 shards / 38564，实测 stop
 //   27.4%/fire 28.6%/schemaMajor 3）；`corpus.games_per_stage=0` ⇒ want=∅ ⇒ 跳过采集
-//   （`rl/bc_loop.collect_corpus` 原样返回），God 不出现在任何位置。训练读轮目录
+//   （`trainer/bc_loop.collect_corpus` 原样返回），God 不出现在任何位置。训练读轮目录
 // `tmp/bc-human-retrial/bc-data/it1/`（开课前已把 61 shards 摆好，见 §45 数据 pin）。
 // 训练 = §32 镜像：student/60/batch512/lr3e-3/mirror0.5/val0.1/value0/ckpt10；seed 1234
 // （§32 seed 未记录，本次 pin 1234）；fire_pos_weight=auto（§32 时默认值，本次显式 pin）。

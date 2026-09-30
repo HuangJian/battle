@@ -11,17 +11,17 @@ from typing import Any, TypedDict
 import numpy as np
 
 import common.distribution
-from biz.log import log
-from biz.resume import _scan_shards, completed_pairs, state_init_enabled
+from common.log import log
 from common.text import exc_tail
 from trainer.queue import local_slots_max_of, run_rollout_queue
+from worker.resume import _scan_shards, completed_pairs, state_init_enabled
 
 
 def _default_ppo_backend():
     """默认 PPO 后端（per-tick）。延迟导入（B7，2026-09-02）：本模块可能被
-    run_rl.py --collect-only 子进程间接加载，而 ppo.engine 会 import torch——
+    trainer/run_rl.py --collect-only 子进程间接加载，而 ppo.engine 会 import torch——
     采样路径不需要 torch，不得在模块级拉起它。"""
-    import ppo.engine as ppo_mod
+    import worker.ppo.engine as ppo_mod
 
     return ppo_mod
 

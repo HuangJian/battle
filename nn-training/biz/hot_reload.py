@@ -74,7 +74,9 @@ def plan_reload(old: Any, new: Any) -> tuple[str, list[str], list[str]]:
     `"rejected"`（corpus_identity_fp 变了 = A 类破坏性，整单拒绝——包括与 hot/restart
     字段同时出现的 env/reward 改动，不做部分应用，避免半新半旧配置）。
     """
-    from biz.config import corpus_identity_fp
+    # 2026-09-30（刀 6）：指纹的家是 `biz/corpus_fp.py`（游戏域）——经 `worker.config`
+    # 取会成 `biz → worker` 的向上边（`test_l1_packages_never_import_the_upper_face`）。
+    from biz.corpus_fp import corpus_identity_fp
 
     if corpus_identity_fp(new) != corpus_identity_fp(old):
         return ("rejected", [], [])

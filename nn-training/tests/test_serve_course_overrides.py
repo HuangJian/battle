@@ -143,8 +143,8 @@ def test_rl_config_path_is_env_overridable(tmp_path: Path, monkeypatch: pytest.M
     """
     import json as _json
 
-    from biz.config import read_rl_config_file, rl_config_path
     from common.distribution import rl_config_path as dist_path
+    from worker.config import read_rl_config_file, rl_config_path
 
     fixture = tmp_path / "rl-config.fixture.json"
     fixture.write_text(_json.dumps({"courses": {"c5-tick": {"gate_halt_mode": "notify"}}}), "utf-8")

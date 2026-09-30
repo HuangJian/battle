@@ -47,7 +47,7 @@ from common.protocol import (
 )
 
 #: 包索引名（zip 根）。
-BUNDLE_INDEX = "task.json"
+BUNDLE_INDEX = "tools.task.json"
 #: 包身份标记（防「拿错 zip」这类最贵的错误）。
 BUNDLE_MAGIC = "battle2-task-bundle"
 BUNDLE_PROTO = 1
@@ -191,7 +191,7 @@ run_id      : {index['run_id']}    计划区间 : it{index['it']} → it{index['
 
 包里是什么（task.json 逐件记 sha256，导入时对账）
 -------------------------------------------------
-  plan.json         本段要跑的每一轮：对集 + argv 模板 + 终点（`biz/plan.py`）
+  plan.json         本段要跑的每一轮：对集 + argv 模板 + 终点（`worker/plan.py`）
   manifest.json     课程全文 + 超参 + 血缘（D13/D14）
   init_weights.json 起点权重（= it{index['it']} 的输入）
   opt.tar           Adam 动量（**续训必需**；缺失 = 动量静默归零）

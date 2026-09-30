@@ -3,7 +3,7 @@
 // 云端 BC 训练 → 回传落位 → 作废/归档）。§15.2 哨兵：不读它的任何学习曲线。
 // wins_only=false：E2E 冒烟把 max_ticks 压到 300，wins-only 会把唯一一局也过滤掉
 // （run_bc.smoke_overrides 已在 smoke 时自动关闭 wins_only——本夹具直接配 false，
-// 让手工单跑 `run_bc.py --course bc-e2e --smoke` 不依赖覆盖逻辑也能产出 shard）。
+// 让手工单跑 `trainer/run_bc.py --course bc-e2e --smoke` 不依赖覆盖逻辑也能产出 shard）。
 {
   "version": 1,
   "name": "bc-e2e-flowcheck",

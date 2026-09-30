@@ -1,7 +1,7 @@
 """
 common/platform_utils.py — 跨平台进程/文件工具（工程化抽取，行为零变化）。
 
-历史：train_bc.py / train_loop.py / run_rl.py / run_rl_intent.py / trainer/eval_dispatch.py /
+历史：train_bc.py / trainer/train_loop.py / trainer/run_rl.py / run_rl_intent.py / trainer/eval_dispatch.py /
 trainer/queue.py 各自维护了一份逐字节相同的 `_POPEN_NO_WINDOW`（Windows 下隐藏子进程
 控制台窗口，避免黑窗弹窗抢焦点）。本模块统一这一份，其余文件改 import。
 

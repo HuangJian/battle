@@ -19,8 +19,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from biz.log import log
-from biz.loop_round import RemotePpoJob
+from common.log import log
 from common.protocol import coef_active
 from trainer.loop_remote_push import TrainingRemotePush
 from trainer.loop_transport import (
@@ -39,6 +38,7 @@ from trainer.loop_transport import (
     resolve_hub_push,
     resolve_transport,
 )
+from worker.loop_round import RemotePpoJob
 
 
 class TrainingRemoteJob(TrainingRemotePush):
@@ -198,7 +198,7 @@ class TrainingRemoteJob(TrainingRemotePush):
         if not course_path.exists():
             course_path = Path(getattr(args, "course", "") or "")
         if not course_path.exists():
-            from biz.config import resolve_course
+            from worker.config import resolve_course
 
             course_path = resolve_course(course.name)
         # 课程全文快照 + course_fp = sha256(**启动冻结字节**)——与
@@ -212,7 +212,7 @@ class TrainingRemoteJob(TrainingRemotePush):
         # D14 语义版：corpus_fp = 语料身份（env+reward 解析值哈希，biz/config.corpus_identity_fp）。
         # 与 course_fp（文件血缘）并存进 manifest；worker 装载校验优先比 corpus_fp——
         # 预算/路径类 mid-run 课程编辑只动 course_fp，不再触发整轮 shard 拒收。
-        from biz.config import corpus_identity_fp
+        from worker.config import corpus_identity_fp
 
         corpus_fp = corpus_identity_fp(course)
         # 本轮应训 shard 集（与 _serial_ppo load_episodes 装载口径一致）；
@@ -224,11 +224,10 @@ class TrainingRemoteJob(TrainingRemotePush):
         # 恒等于「云端会接受的集合」；`verify_and_land` 用同样的两个 fp 重算 data_fp。
         # 起始分布（P3.5）：开了 state_init 时，缺 initTick 的 shard 不进 payload——
         # 一并进 job 里就等于云端训的是另一个起始分布，而 data_fp 账面对得上（静默换实验）。
-        from biz.resume import state_init_enabled
-
         # ppo_schedule 解析后值（执行用）——_course_iter 已按 it 折算进 args。
         # （提到扫 shard 之前：行宽版本门也要用它。）
         from biz.reward_library import METRICS_VERSION
+        from worker.resume import state_init_enabled
 
         local_shards = iter_shard_dirs(
             args.traj,
@@ -475,8 +474,8 @@ class TrainingRemoteJob(TrainingRemotePush):
         """
         args = self.args
         # 三重校验 + 落位（D12）：任一不等响亮拒绝，不落盘
-        from biz.resume import state_init_enabled
         from remote.hub_client import mark_job_completed, verify_and_land
+        from worker.resume import state_init_enabled
 
         verify_and_land(
             result,

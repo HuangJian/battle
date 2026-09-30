@@ -32,7 +32,7 @@ from common.schema import OBS_CHANNELS, SCALAR_DIM
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-import ppo.common as ppo_common
+import worker.ppo.common as ppo_common
 
 FAILS: list[str] = []
 
@@ -49,7 +49,7 @@ def test_masked_logsoftmax() -> None:
     logits = torch.tensor([[1.0, 2.0, 3.0], [0.5, -1.0, 4.0]])
     mask = torch.tensor([[1, 1, 0], [0, 1, 1]])
     out = ppo_common.masked_logsoftmax(logits, mask)
-    # 无效位被压到极负（原实现用 -1e9 近似 -inf，与 ppo.py 历史行为一致）
+    # 无效位被压到极负（原实现用 -1e9 近似 -inf，与 worker.ppo.py 历史行为一致）
     check(bool((out[0, 2] < -1e6).item()), "无效类 logp ≈ -inf（极负）")
     # 有效位 = 仅在有效子集上的 log_softmax
     exp_0 = torch.log_softmax(logits[0, :2], dim=-1)
@@ -116,7 +116,7 @@ if __name__ == "__main__":
 
 def test_backend_params_match_config() -> None:
     """P1-1 守护：三后端本地超参与 ppo/config.py BACKEND_PARAMS 一致（调参必须同步）。"""
-    from ppo.config import assert_backend_constants
+    from worker.ppo.config import assert_backend_constants
 
     assert_backend_constants()
 
@@ -127,15 +127,15 @@ def test_engine_and_common_still_re_export_the_np_core_names() -> None:
     2026-09-26 实测踩坑（本守卫的由来）：trajectory 装载块搬去 `ppo/np_core` 后，
     engine 里那四个**只被属性取用**的再导出（`compute_gae` / `discover_shards` /
     `load_episodes_common` / `load_shard_fields`）被 ruff F401 判成死代码删掉 ⇒
-    `tests/test_ppo_goal.py`（`import ppo.engine as ppo; ppo.compute_gae(...)` 当定长
+    `tests/test_ppo_goal.py`（`import worker.ppo.engine as ppo; worker.ppo.compute_gae(...)` 当定长
     参照）当场 AttributeError。**「没人 `import` 这个名」≠「没人在属性上取它」**。
     """
-    import ppo
-    import ppo.engine as engine
-    import ppo.np_core as np_core
+    import worker.ppo
+    import worker.ppo.engine as engine
+    import worker.ppo.np_core as np_core
 
     # 两条再导出链各自的公开面：common 从最早那一刀起就有的四个，engine 还多带
-    # trajectory 装载那一组（2026-09-26 搬来，旧访问点 `ppo.engine.load_episodes` 等要活）。
+    # trajectory 装载那一组（2026-09-26 搬来，旧访问点 `worker.ppo.engine.load_episodes` 等要活）。
     BOTH = ("compute_gae", "discover_shards", "load_episodes_common", "load_shard_fields")
     ENGINE_ONLY = (
         "discover_rl_shards",
@@ -148,15 +148,15 @@ def test_engine_and_common_still_re_export_the_np_core_names() -> None:
     )
     for name in BOTH + ENGINE_ONLY:
         assert getattr(engine, name) is getattr(np_core, name), (
-            f"ppo.engine.{name} 不再是 np_core 的同一个对象（再导出断了/被抄了一份）"
+            f"worker.ppo.engine.{name} 不再是 np_core 的同一个对象（再导出断了/被抄了一份）"
         )
     for name in BOTH:
         assert getattr(ppo_common, name) is getattr(np_core, name), (
-            f"ppo.common.{name} 不再是 np_core 的同一个对象（再导出断了/被抄了一份）"
+            f"worker.ppo.common.{name} 不再是 np_core 的同一个对象（再导出断了/被抄了一份）"
         )
-    # 根级便捷名也指向新家（`ppo.compute_gae` 不得再拖 torch）。
-    assert ppo.compute_gae is np_core.compute_gae
-    assert ppo.load_episodes is np_core.load_episodes
+    # 根级便捷名也指向新家（`worker.ppo.compute_gae` 不得再拖 torch）。
+    assert worker.ppo.compute_gae is np_core.compute_gae
+    assert worker.ppo.load_episodes is np_core.load_episodes
 
 
 def _kick_chunks() -> list[dict]:
@@ -181,7 +181,7 @@ def _kick_chunks() -> list[dict]:
 def _kick_models():
     import torch
 
-    from models.student import PPOStudent
+    from worker.models.student import PPOStudent
 
     torch.manual_seed(0)
     m = PPOStudent()
@@ -202,7 +202,7 @@ def _kick_state(m) -> list:
 def test_ppo_update_kickstart_off_is_identity() -> None:
     """缺省路径恒等：ref=None（无论 kl 为何值）与 kl=0（无论 ref 有无）跑出逐字节
     相同的权重——旧行为回归锚。"""
-    import ppo.engine as engine
+    import worker.ppo.engine as engine
 
     torch, m1, m2, ref = _kick_models()
     chunks = _kick_chunks()
@@ -221,7 +221,7 @@ def test_ppo_update_kickstart_off_is_identity() -> None:
 
 def test_ppo_update_kickstart_bites_when_armed() -> None:
     """武装路径：ref 就绪＋kl>0 → kickstart 列 >0 且权重偏离关闭路径。"""
-    import ppo.engine as engine
+    import worker.ppo.engine as engine
 
     torch, m1, m2, ref = _kick_models()
     chunks = _kick_chunks()

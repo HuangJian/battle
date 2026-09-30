@@ -61,9 +61,6 @@ if str(ROOT) not in sys.path:
 #: 仓根（只读面板源码做双端锚，见用例末尾）。
 _REPO = ROOT.parent
 
-from biz.cli import build_argparser  # 模块级：真 CLI 解析器（大对象，别在用例内首次 import）
-from biz.config import apply_course, course_from_args
-from biz.reports import combine_reports
 from common.protocol import (
     decode_opt_tar,
     encode_opt_tar,
@@ -78,7 +75,10 @@ from hub.server import _JobStore, make_server
 from remote.worker import d14_corpus_match  # 该模块顶层零 torch（延迟导入）
 from tests.helpers.hub_poll import hub_poll
 from trainer.loop_core import TrainingLoop
+from worker.cli import build_argparser  # 模块级：真 CLI 解析器（大对象，别在用例内首次 import）
+from worker.config import apply_course, course_from_args
 from worker.iter_rollout import collect_reports, verify_shards
+from worker.reports import combine_reports
 
 #: 本轮 it（>1，避免与 it0 基线评估的语义混淆）。
 IT = 7

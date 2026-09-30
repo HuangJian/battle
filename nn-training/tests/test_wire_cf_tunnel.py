@@ -25,8 +25,8 @@ NN_ROOT = Path(__file__).resolve().parent.parent
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
 
-from biz.cli import build_argparser
 from trainer.loop_steps import _course_cf_tunnel
+from worker.cli import build_argparser
 
 COURSE = "nn-training/curricula/s-dodge.jsonc"
 

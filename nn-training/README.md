@@ -11,20 +11,20 @@
 nn-training/
 ├── pyproject.toml           # 包元数据 + uv 变体/索引配置 + ruff/mypy/pytest 配置
 ├── uv.lock                  # universal lockfile（6 个 torch 变体一次锁全）
-├── bootstrap.py             # 【一条命令搭环境】探测 GPU → 选 torch 变体 → sync → 自检
-├── .python-version          # uv 默认解释器档（3.10；bootstrap 可用 --python 覆盖）
-├── task.py                  # 跨平台 task runner  ("make check" 等价；含 setup)
-├── Makefile                 # 同上的 make 封装（Git Bash 用户）
+├── .python-version          # uv 默认解释器档（3.10；tools/bootstrap.py 可用 --python 覆盖）
+├── Makefile                 # 跨平台 task runner 的 make 封装（Git Bash 用户）
+├── conftest.py              # pytest rootdir 全局守卫 —— **本目录下唯一的 .py**
 ├── rl-config.json           # RL 训练配置（rl-mode 默认值、workers、eval-seeds 等）
 ├── ../dashboard/src/       # 训练控制台 server.ts（bun run dashboard；组件启/停/冒烟/模式/节点/
 │                             #   变更检测重启）+ train.ts 无头单次启动器（venv 未就绪委派
-│                             #   bootstrap.py；DECISIONS §346/§349）
+│                             #   tools/bootstrap.py；DECISIONS §346/§349）
 │
-├── run_rl.py                # 【RL 编排入口】三模式 CLI + 迭代主循环 + 权重归档/熔断
-│                              #   --mode {per-tick, intent, goal}（DECISIONS §307 整合）
-├── train_loop.py            # 【BC 训练入口】连续行为克隆（与 run_rl 并列）
-│
-├── weights_prune.py         # 权重文件归档轮转管理器（保留最近 K 份，自动更新 WEIGHTS.md）
+│   # 2026-09-30 刀 7：**入口脚本全部归位到各自的包**（此前散在本目录顶层）——
+│   #   trainer/{run_rl,run_bc,run_rl_cluster,train_loop,eval_course_once,eval_m1_once}.py
+│   #   tools/{bootstrap,task,smoke_test,weights_prune,dist_upgrade_cli}.py
+│   #   remote/{remote_worker,remote_worker_serve}.py · worker/rl_config_schema.py
+│   #   （它们各自的 sys.path 前置 / 上溯层数 / `python -m` 名字见文件头与
+│   #     tests/test_entry_scripts_in_place.py —— 那条守卫把它们真起一次）
 │
 ├── common/                  # 【L0 全层】纯 stdlib，零上层依赖；单一定义防语义漂移
 │                            #   2026-09-30 刀 2：L0 不再散在 nn-training/ 根下，全部收进本包
@@ -59,55 +59,43 @@ nn-training/
 │   ├── boot.py              #    as_hub / make_server / main（单实例锁 + 端口守卫 + 发现线程）
 │   └── {admin,blob,offline,result,schedule}.py  五组路由混入
 │
-├── worker/                  # 【节点侧执行体 L2】把一局（一轮）真的跑起来——坐在 remote/ **下面**
+├── worker/                  # 【本地 torch 训练全栈 L2】「所有支持本地 torch 训练的东西」；坐在 remote/ **下面**
+│                            #   2026-09-30 刀 3：节点侧执行体（serve_pool / iter_rollout）从 remote/ 出包
+│                            #   2026-09-30 刀 6（用户口径）：算法栈五包（原顶层 models/ ppo/ data/ train/
+│                            #     scripts/）+ 52 个训练侧单体（原 biz/）搬进本包 ——
+│                            #     云机 worker = **本地 worker + remote/**（remote → worker 是向下边）
 │   ├── serve_pool.py        #    节点长驻 worker 池（`--serve` 协议；同质入口 serve-any）
-│   └── iter_rollout.py      #    节点侧「本轮 rollout」执行器（看门狗 / 补局 / 聚合 / 收尾）
-│                            #   它零 remote.* 依赖，却被云机侧与 trainer 侧同时引用 ⇒ 下层
+│   ├── iter_rollout.py      #    节点侧「本轮 rollout」执行器（看门狗 / 补局 / 聚合 / 收尾）
+│   ├── models/              #    【模型包】core（NNPolicy，BC 基座）· student（PPOStudent，P1.5 蒸馏）
+│   │                        #      · rl_model（ResNet-11 教师网；**死文件**）· intent_net · goal_net
+│   ├── ppo/                 #    【PPO 包】engine（ppo_update / build_ppo）· common（GAE / masked_logsoftmax）
+│   │                        #      · intent / goal 适配（变步长 GAE）· bench（吞吐基准）
+│   ├── data/                #    【数据包】dataset（mirrorX 在线增强）· npyio（shard 读写）· weights_io
+│   │                        #      · mirror · shard_split · weights_meta
+│   ├── train/               #    【训练器脚本】bc.py（masked CE + value MC）· goal_bc.py · intent_probe.py
+│   ├── scripts/             #    【辅助脚本】eval_bridge · eval_intent_m5 · gen_self_inj · init_scratch_weights · validate_export
+│   ├── loop_guards_*.py     #    四簇护栏混入（trip/leg/gate/sweep；组合根仍住 trainer/loop_guards.py）
+│   ├── gate_*.py            #    课程结束门：输入面 / 判决面 / 引擎（读的是训练读数 ⇒ 属训练栈）
+│   ├── config.py            #    启动参数校验层（pydantic）；语料身份今住 biz/corpus_fp.py（这里只 re-export）
+│   ├── rl_config_schema.py  #    rl-config.json 键白名单校验（只告警不拒；数据 = nn-training/rl_config.schema.json；刀 7 从顶层搬到本包）
+│   └── …                    #    其余：cmd / plan / iter_job（节点侧编排）· eval_*（读数/入账/双轨/让位/replay 导出）
+│                            #      · volume_*（配额/波次）· *_ledger · node_identity · state_init · breaker · resume · reports
 │
 ├── remote/                  # 【跨端传输与云机执行体 L3】线路 + 云引导 + 云 worker
 │                            #   （hub 客户端 hub_client/hub_http 在这里；2026-09-30 刀 1 服务端已出包
 │                            #    到 hub/；刀 3 节点侧执行体已出包到 worker/）
+│   ├── remote_worker.py     #    【云 worker 入口】`python -m remote.remote_worker`（薄包装 remote.worker.main；刀 7 搬到本包）
+│   └── remote_worker_serve.py  #  【push 模式服务端入口】`python -m remote.remote_worker_serve`（刀 7 搬到本包）
 │
-├── models/                  # 【模型包】神经网络定义 + 权重导入导出
-│   ├── core.py              #    NNPolicy：Conv(14→32→48→64) + GAP + FC + 双头（BC 基座）
-│   ├── student.py           #    StudentNet / PPOStudent：CoordConv-ConvMixer-Lite（P1.5 蒸馏）
-│   ├── rl_model.py          #    RLNet：ResNet-11 教师网（P1 参考实现，~999K 参数）
-│   ├── intent_net.py        #    IntentNet：意图策略网（8 类意图 + 注入 + 敌人/锚点三头）
-│   └── goal_net.py          #    GoalNet：目标值网络（676/169 路目标格 + 心跳承诺期）
-│
-├── data/                    # 【数据包】数据集加载 + npy/JSON 权重序列化
-│   ├── dataset.py           #    Dataset + mirrorX 在线增强（BC）
-│   ├── npyio.py             #    npy 打包工具（shard 写入/读取）
-│   └── weights_io.py        #    权重 JSON（反）序列化（save/load_state_into）
-│
-├── train/                   # 【训练包】训练器脚本（各自含 argparse CLI）
-│   ├── bc.py                #    BC 行为克隆训练器（masked CE + value MC 预置）
-│   ├── goal_bc.py           #    Goal-Space BC 蒸馏训练器（反事实软目标 CE）
-│   └── intent_probe.py      #    M0b 意图可学习性前置探针（divergence-probe 三桶评估）
-│
-├── ppo/                     # 【PPO 包】on-policy policy gradient 后端
-│   ├── engine.py            #    ppo_update / build_ppo / load_episodes / discover_rl_shards
-│   ├── common.py            #    masked_logsoftmax / compute_gae / discover_shards / chunk_episodes
-│   ├── intent.py            #    IntentNet PPO 适配（意图步 semi-MDP，变步长 GAE γ^Δt）
-│   ├── goal.py              #    GoalNet PPO 适配（goal 承诺步，心跳承诺期）
-│   └── bench.py             #    PPO 吞吐基准（T1/T2 优化测量）
-│
-├── biz/                     # 【领域纯逻辑 L1】「怎么算」——课程/奖励/门/账本/配额；零传输层依赖
-│                            #   2026-09-30 刀 4：从 rl/ 出包 64 个纯逻辑模块（判据 = 编排树快照
-│                            #   的补集；旧名 RL_ORCHESTRATION，今 TRAINER_ORCHESTRATION）。
+├── biz/                     # 【游戏业务 L1】只放和**游戏**（关卡/课程/奖励）相关的东西；零传输层依赖
+│                            #   2026-09-30 刀 4：从 rl/ 出包（判据 = 编排树快照的补集，64 个模块）
+│                            #   2026-09-30 刀 6：训练侧 52 个搬去 worker/ ⇒ 本包只剩 **12** 个游戏业务模块
 │                            #   契约与模块表 → biz/__init__.py
-│   ├── config.py            #    RLConfig 启动参数校验层（pydantic）；+ config_file / cli / modes
 │   ├── course*.py           #    课程：配对与课程（course）· 类面（course_spec）· 查找（course_resolve）· 封存（course_archive）
 │   ├── reward_*.py          #    奖励公式引擎（reward_library）+ 内置势函数 + 校验 + 加载期 holder
-│   ├── gate_*.py            #    课程结束门：读数面（gate_inputs）· 判决面（gate_judges）· 引擎（gate_check）
-│   ├── eval_*.py            #    评估读数/账本：逐局行（eval_rows）· 入账（eval_ingest）· 双轨（eval_track）
-│   │                        #      · 让位份额（eval_yield）· 执行面（eval_local）· replay 导出（eval_replays_once）
-│   ├── *_ledger.py          #    账本：训练（train_ledger）· BC（bc_ledger）· 阶梯（ladder_ledger）
-│   ├── loop_guards_*.py     #    四簇护栏混入（trip/leg/gate/sweep；组合根仍住 trainer/loop_guards.py）
-│   ├── volume_*.py          #    采集配额：配额感知连续采集（volume_quota）· 波次纯逻辑（volume_waves）
-│   ├── log.py               #    log() 落盘（带时间戳统一格式）· + events（training_log.jsonl 事件写）
-│   └── …                    #    其余 50 个：archive · paired* · kickstart_burn · stop_loss · breaker · resume
-│                            #      · reports · state_init · model_build · engine_pool · node_identity · plan …
+│   ├── ladder_*.py          #    阶梯：账本（ladder_ledger）· 工厂（ladder_factory）
+│   ├── corpus_fp.py         #    语料身份指纹（corpus_identity_fp + 规则版本常量；刀 6 从 config 下沉 —— 身份属游戏域）
+│   └── hot_reload.py        #    课程热重载判决（same / apply / rejected：身份变了整单拒）
 │
 ├── trainer/                 # 【训练编排 L4】驱动 rollout/eval/远端腿——只剩会碰传输层的那一层
 │                            #   2026-09-30 刀 4：纯逻辑整族已搬进 biz/ ⇒ 本包**只有**编排
@@ -130,15 +118,14 @@ nn-training/
 │   ├── loop_iter_dir.py     #    本轮目录与产出健康 mixin：续跑保留/重建 + 零 shard 告警（RoundSteps 的基类，S4 第二十刀）
 │   ├── loop_dispatch.py     #    本轮派发与让位 mixin：采集三路 / A-eval 稀疏化 / EvalBoard 关窗（RoundSteps 的基类，S4 第二十刀）
 │   ├── loop_guards.py       #    训练护栏**组合根**：共享 sink（账本视图增量 + 判决→云机达令，S4 第二十三刀）
-│   │                        #      四簇混入（trip/leg/gate/sweep）住 biz/（2026-09-30 刀 4）
+│   │                        #      四簇混入（trip/leg/gate/sweep）住 worker/（刀 4 出包到 biz/，刀 6 随训练栈搬进 worker/）
+│   ├── run_rl.py            #    【RL 入口】三模式 CLI（--mode per-tick/intent/goal）+ 迭代主循环 + 权重归档/熔断（刀 7 从顶层搬入）
+│   ├── run_bc.py            #    【BC 入口】编排器薄壳（一轮实现只在 trainer/bc_loop.py；刀 7 搬入）
+│   ├── run_rl_cluster.py    #    【多课调度入口】`--serve` 写的一半 / `--json` 读的一半（刀 7 搬入）
+│   ├── train_loop.py        #    【BC 单进程入口】轮次驱动 + 单实例锁（刀 7 搬入）
+│   ├── eval_course_once.py  #    【一次性评估入口】课程（节点通信在 Python 侧；刀 7 搬入）
+│   ├── eval_m1_once.py      #    【一次性评估入口】m1（给 tools/sim/m1-eval.ts 用；刀 7 搬入）
 │   └── __init__.py          #    包入口文档
-│
-├── scripts/                 # 【辅助脚本】一次性/诊断工具
-│   ├── eval_bridge.py       #    评估桥接（TS ↔ Python 互评）
-│   ├── eval_intent_m5.py    #    M5 意图模型端到端评估
-│   ├── gen_self_inj.py      #    离线 self-feed 注入生成（scheduled sampling 数据源）
-│   ├── init_scratch_weights.py  #  纯从零 RL 的合理随机初始化（A2/A5）
-│   └── validate_export.py   #    导出权重验证（shape/格式断言）
 │
 ├── tests/                   # 【测试包】纯逻辑回归 + torch 常驻回归
 │   ├── conftest.py          #    共享 fixture（bp_args 等）
@@ -146,17 +133,22 @@ nn-training/
 │   ├── test_rl_breaker.py   #    熔断状态机
 │   ├── test_rl_reports.py   #    聚合不变式
 │   ├── test_rl_stream.py    #    wave-params + 残局 clamp
-│   ├── test_run_rl.py       #    run_rl.py 编排层回归（含镜像、断点、JSONL 锚点、race-tier）
+│   ├── test_run_rl.py       #    trainer/run_rl.py 编排层回归（含镜像、断点、JSONL 锚点、race-tier）
 │   ├── test_run_rl_m1.py    #    三模式整合 + m1-eval 评估管线回归
 │   ├── test_ppo_common.py   #    PPO 共享基础设施回归
 │   ├── test_ppo_goal.py     #    ppo_goal.py 常驻回归
 │   ├── test_ppo_intent.py   #    ppo_intent.py 常驻回归
 │   ├── test_rl_model.py     #    rl_model.py（ResNet 教师网）回归
 │   ├── test_student_model.py #   student_model.py（CoordConv-ConvMixer-Lite）回归
-│   ├── test_train_loop_pure.py  # train_loop.py 纯函数回归
+│   ├── test_train_loop_pure.py  # trainer/train_loop.py 纯函数回归
 │   └── test_upgrade.py      #    common.distribution 主动升级机制回归
 │
-├── tools/                   # 可视化工具
+├── tools/                   # 开发/运维脚本（带 __init__.py 的包；刀 7 把顶层五个脚本收进来）
+│   ├── bootstrap.py         #    【一条命令搭环境】探测 GPU → 选 torch 变体 → uv sync → 自检（冷机器上唯一能自举的那个）
+│   ├── task.py              #    跨平台 task runner（= Makefile 的 python 版：check / test / lint / typecheck / clean / setup）
+│   ├── smoke_test.py        #    torch 冒烟（真跑一轮小训练，读 val loss）
+│   ├── weights_prune.py     #    权重文件归档轮转（保留最近 K 份，自动更新 WEIGHTS.md）
+│   ├── dist_upgrade_cli.py  #    节点升级指令的一次性入口（供 tools/sim/*.ts 复用训练循环的守卫）
 │   └── plot_training.py     #    train.log 快速取证（无外部依赖）
 │
 ├── tmp/                     # 训练产物（已 .gitignore）
@@ -177,15 +169,15 @@ nn-training/
 # 全部在 nn-training/ 目录下执行
 
 # ── 一条命令搭环境（新机器 / 换机器 / 换 GPU）──
-python bootstrap.py              # 推荐：探测 GPU → 选 torch 变体 → uv sync → 装后自检
-python bootstrap.py --check      # 只读模式：打印本机探测结果与环境健康度，不改任何东西
-make setup                       # 等价于 python bootstrap.py
-python task.py setup --variant cu128   # 显式指定变体（跳过自动探测）
+python tools/bootstrap.py              # 推荐：探测 GPU → 选 torch 变体 → uv sync → 装后自检
+python tools/bootstrap.py --check      # 只读模式：打印本机探测结果与环境健康度，不改任何东西
+make setup                             # 等价于 python tools/bootstrap.py
+python tools/task.py setup --variant cu128   # 显式指定变体（跳过自动探测）
 
 # ── ruff + mypy + fast-test ──
-make check               # 或:  python task.py check
-make lint                # 或:  python task.py lint
-make typecheck           # 或:  python task.py typecheck
+make check               # 或:  python tools/task.py check
+make lint                # 或:  python tools/task.py lint
+make typecheck           # 或:  python tools/task.py typecheck
 
 # ── 测试分层（层 = 路径：tests/ 单测层 · e2e/ 集成层）──
 make test-fast           # 单测层（tests/）
@@ -202,17 +194,17 @@ make weights-prune-apply # 实际裁剪权重文件
 make weights-update-md   # 重新生成 weights/WEIGHTS.md 目录清单
 
 # ── 训练启动器（venv 由它 bootstrap；取代旧 start-training.sh/.ps1）──
-bun dashboard/src/launch/cli.ts --script run_rl.py --mode intent-rl --stream 1
+bun dashboard/src/launch/cli.ts --script trainer/run_rl.py --mode intent-rl --stream 1
 ```
 
 ---
 
-## 环境搭建与 GPU 变体（bootstrap.py）
+## 环境搭建与 GPU 变体（tools/bootstrap.py）
 
 **目标：任何机器上一条命令搭出可用环境，torch 自动装对机器的那一版。**
 
 ```sh
-python bootstrap.py          # 探测 → 装 → 自检，全自动
+python tools/bootstrap.py    # 探测 → 装 → 自检，全自动
 ```
 
 内部流水线（详见 `plan/python-env-bootstrap-and-device.md`）：
@@ -232,12 +224,12 @@ python bootstrap.py          # 探测 → 装 → 自检，全自动
 **为什么训练时不能只写 `torch.device('cpu')` 了**：机器若装了 cu128 变体，训练段
 （PPO update / BC step）是实打实的算力瓶颈（前向+反传 ~220 MFLOPs/样本，165K
 帧/epoch ≈ 36 TFLOPs）。rollout 已由 bun 分布式集群承担（节点零 Python，GPU 无
-用武之地），GPU 只属于 orchestrator —— 设备层（P2，`rl/device.py`）会让 PPO/BC
+用武之地），GPU 只属于 orchestrator —— 设备层（P2，`worker/train/device.py`）会让 PPO/BC
 自动 `cuda` + TF32 + AMP，无 GPU 机器自动回落 CPU + 线程数自适配。在 P2 落地前，
 统一启动器（`dashboard/src/launch/cli.ts`）仍以 CPU + OMP 线程档运行（OMP≤8 时 `PROC_BIND=close`）。
 
 **机器画像**：bootstrap 把探测结果写入 `.venv/machine-profile.json`
-（platform / python / gpu / variant / probe），`bootstrap.py --check` 只读展示。
+（platform / python / gpu / variant / probe），`tools/bootstrap.py --check` 只读展示。
 
 ---
 
@@ -248,7 +240,7 @@ python bootstrap.py          # 探测 → 装 → 自检，全自动
    （ALL PASS 集合）。
 3. **不删测试**：搬迁后的原函数体必须同步从 test_run_rl.py 中删除以避免重复定义。
 4. **不引入新依赖**：Python 侧仅用 torch / numpy + stdlib；工具链（ruff/mypy/pytest）是 dev-only。
-5. **不扩大 scope**：Mermaid 图入口（`run_rl.py` 的 CLI 解析块）暂不拆——改动影响三模式调度。
+5. **不扩大 scope**：Mermaid 图入口（`trainer/run_rl.py` 的 CLI 解析块）暂不拆——改动影响三模式调度。
 
 ---
 
@@ -267,13 +259,13 @@ python bootstrap.py          # 探测 → 装 → 自检，全自动
 
 ## 三模式架构（DECISIONS §307）
 
-`run_rl.py` 是唯一的 RL 入口，通过 `--mode` 选择后端：
+`trainer/run_rl.py` 是唯一的 RL 入口，通过 `--mode` 选择后端：
 
 | 模式 | 后端 | 模型 | GAE | 说明 |
 |------|------|------|-----|------|
-| `per-tick` | `ppo/engine.py` | PPOStudent (ConvMixer) | 标准 γ | 逐 tick move/fire PPO |
-| `intent` | `ppo/intent.py` | IntentNet (三头) | 变步长 γ^Δt | 意图步 semi-MDP，8 类意图 |
-| `goal` | `ppo/goal.py` | GoalNet (目标格) | 变步长 γ^Δt | goal 承诺步，676/169 路目标格 |
+| `per-tick` | `worker/ppo/engine.py` | PPOStudent (ConvMixer) | 标准 γ | 逐 tick move/fire PPO |
+| `intent` | `worker/ppo/intent.py` | IntentNet (三头) | 变步长 γ^Δt | 意图步 semi-MDP，8 类意图 |
+| `goal` | `worker/ppo/goal.py` | GoalNet (目标格) | 变步长 γ^Δt | goal 承诺步，676/169 路目标格 |
 
 `--goal` 是 `--mode goal` 的兼容别名（原 `run_rl_intent.py` 已退役并入本文件）。
 
@@ -282,24 +274,26 @@ python bootstrap.py          # 探测 → 装 → 自检，全自动
 ## 依赖关系图
 
 ```
-run_rl.py
-  ├─→ trainer/{queue,stream,eval_dispatch,eval_m1}（编排）+ biz/{modes,course,breaker,resume,reports,archive,log}
+trainer/run_rl.py
+  ├─→ trainer/{queue,stream,eval_dispatch,eval_m1}（编排）+ worker/{cli,modes,archive,resume,reports,breaker}
+  │     + biz/course（游戏业务）+ common.log（统一日志）
   │     2026-09-30 刀 4：纯逻辑那一半住 biz/（编排树只剩编排）
   │     2026-09-30 刀 5：编排树整包改名 rl/ → trainer/
-  ├─→ ppo/{engine,goal,intent}
-  ├─→ data/weights_io
+  │     2026-09-30 刀 6：训练栈整族住 worker/（算法栈五包 + 52 个训练侧单体；biz/ 只剩游戏业务）
+  ├─→ worker/ppo/{engine,goal,intent}
+  ├─→ worker/data/weights_io
   ├─→ common.distribution
   └─→ common.platform_utils
 
-train_loop.py
-  ├─→ train/bc
-  ├─→ models/{core,student}
-  ├─→ data/{dataset,weights_io}
-  └─→ schema
+trainer/train_loop.py
+  ├─→ worker/train/bc
+  ├─→ worker/models/{core,student}
+  ├─→ worker/data/{dataset,weights_io}
+  └─→ common.schema
 
-train/goal_bc.py → models/goal_net → data/weights_io
-train/intent_probe.py → models/{intent_net,student}
-scripts/* → models/*, ppo/*
+worker/train/goal_bc.py → worker/models/goal_net → worker/data/weights_io
+worker/train/intent_probe.py → worker/models/{intent_net,student}
+worker/scripts/* → worker/models/*, worker/ppo/*
 ```
 
 ---
@@ -307,9 +301,9 @@ scripts/* → models/*, ppo/*
 ## 状态
 
 - [x] P0 可复现基座（pyproject.toml / Makefile / task.py）
-- [x] P1 type hints（biz/course.py, biz/resume.py）+ ruff/mypy 配置
+- [x] P1 type hints（课程侧 `biz/course.py` 与 `worker/resume.py`）+ ruff/mypy 配置
 - [x] P2 测试架构（新增 tests/ + 瘦身 test_run_rl.py + 20 项 pytest 通过）
-- [x] P2.5 包化重组（models/ + data/ + train/ + ppo/ + rl/ + scripts/）
+- [x] P2.5 包化重组（models/ + data/ + train/ + ppo/ + rl/ + scripts/）· 2026-09-30 六包重组（common/biz/worker/remote/hub/trainer：`worker/` = 本地训练全栈、`biz/` = 游戏业务）
 - [ ] P3 配置治理（config schema 校验）
 - [ ] P4 CI（GitHub Actions + 权重归档自动化）
 

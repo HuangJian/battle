@@ -18,11 +18,11 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from biz.bc_ledger import inflight_jobs
-from biz.commit_journal import CommitJournal
-from biz.loop_tasks import RoundFacts, Task, pending_tasks, round_tasks
-from biz.train_ledger import LedgerSpec, LedgerView, load_ledger
 from common.protocol import COURSE_ENABLE_MARKER
+from worker.bc_ledger import inflight_jobs
+from worker.commit_journal import CommitJournal
+from worker.loop_tasks import RoundFacts, Task, pending_tasks, round_tasks
+from worker.train_ledger import LedgerSpec, LedgerView, load_ledger
 
 
 def course_traj(traj_root: str | Path, course: str) -> Path:
@@ -71,7 +71,7 @@ def course_kind(course: str) -> str:
     与 `biz/bc_config.is_bc_course` / 控制台 `isBcCourse` 同一份事实（不靠账本事件推断）。
     延迟导入：RL 课程的读面（只读 CLI / 控制台）不因此多付一次 pydantic 导入。
     """
-    from biz.bc_config import is_bc_course
+    from worker.bc_config import is_bc_course
 
     return "bc" if is_bc_course(course) else "rl"
 
@@ -162,7 +162,7 @@ def course_facts(
     """
     traj = Path(traj)
     if course and course_kind(course) == "bc":
-        from biz.bc_ledger import bc_progress
+        from worker.bc_ledger import bc_progress
 
         prog = bc_progress(traj / "training_log.jsonl", int(iters or 0))
         facts = RoundFacts(

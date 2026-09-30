@@ -213,7 +213,7 @@ def test_child_output_survives_non_ascii_marker() -> None:
 #: `imp == "hub.server"` 是名字比较；用旧标记（不带逗号）会把 `test_hub_admin_split.py` /
 #: `test_hub_routes_split.py` 这两个**不起任何服务**的守卫误判成 spawner（实测当场红）。
 #: 尾逗号正是「它是一个 argv 列表元素」这件事在源码里的形状。
-_SERVICE_SPAWN_MARKERS = ('"hub.server",', '"remote_worker_serve",', '"remote.worker_server",')
+_SERVICE_SPAWN_MARKERS = ('"hub.server",', '"remote.remote_worker_serve",', '"remote.worker_server",')
 
 #: 本模块自身与本文（讲原理要引用那个名字）不参与守卫。
 _GUARD_EXEMPT = {"tests/subproc_util.py", "tests/test_subproc_util.py"}

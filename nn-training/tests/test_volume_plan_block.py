@@ -40,7 +40,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.plan import (
+from common.protocol import ProtocolError, normalize_manifest
+from worker.plan import (
     build_plan,
     check_plan_against_args,
     dump_plan,
@@ -48,15 +49,14 @@ from biz.plan import (
     planned_iters,
     validate_plan,
 )
-from biz.volume_quota import continuous_pairs, target_per_stage
-from biz.volume_waves import (
+from worker.volume_quota import continuous_pairs, target_per_stage
+from worker.volume_waves import (
     initial_wave_pairs,
     validate_volume_block,
     volume_block,
     volume_pairs_from_args,
     wave_pairs,
 )
-from common.protocol import ProtocolError, normalize_manifest
 
 
 def _args(**over: object) -> SimpleNamespace:

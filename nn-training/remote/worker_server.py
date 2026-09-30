@@ -510,7 +510,7 @@ def serve_forever(
     # 指纹给多个：本服务既有 `-m remote_worker_serve` 入口，也可能被以模块名拉起。
     lock_path = lock_file or default_instance_lock_path("worker_server", port)
     if not acquire_instance_lock(
-        lock_path, marker=("remote_worker_serve", "worker_server"), tag="worker-serve"
+        lock_path, marker=("remote.remote_worker_serve", "worker_server"), tag="worker-serve"
     ):
         raise SystemExit(f"[worker-serve] ERROR: 已有实例在运行（锁 {lock_path}）——拒绝启动")
     atexit.register(release_instance_lock, lock_path)

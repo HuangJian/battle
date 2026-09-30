@@ -18,10 +18,13 @@ from pathlib import Path
 from typing import Any
 
 import common.distribution
-from biz import node_identity
+from common.log import log
+from trainer.queue import _record_agent_meta, bun_version, mm
+from trainer.queue_local import pick_race_target, register_inflight
+from worker import node_identity
 
 # 同 queue.py：Windows 下隐藏本地评估子进程的控制台窗口（避免反复弹黑窗抢焦点）。
-from biz.eval_local import (
+from worker.eval_local import (
     BASELINE_EVAL_ITER,
     EVAL_ITER_SUFFIX,
     EVAL_TASK_ATTEMPTS,
@@ -36,7 +39,7 @@ from biz.eval_local import (
 
 # 让位/份额（尾巴）策略在 `biz/eval_yield.py`（S5 第十二刀）：本派发器只消费判据——尾段预留量 /
 # 宽限强制释放点 / 在飞落账宽限的**公式**也住那边（不再是内联表达式）。
-from biz.eval_yield import (
+from worker.eval_yield import (
     EVAL_LOCAL_SLOTS_DEFAULT,
     hold_for_local,
     inflight_grace_cap,
@@ -44,9 +47,6 @@ from biz.eval_yield import (
     release_local_gate_if_starved,
     reserve_local_slots,
 )
-from biz.log import log
-from trainer.queue import _record_agent_meta, bun_version, mm
-from trainer.queue_local import pick_race_target, register_inflight
 
 #: 干净评估的权重 kind（B6，2026-09-19）：节点按 (kind, wver) 分桶缓存权重
 #: （sampler-agent `weightsByKindSha`）。旧实现与训练 rollout 共用 'rollout' 桶 ⇒ 训练每轮
@@ -84,7 +84,7 @@ def find_archive_weights(backup_dir: str, backup_prefix: str, it: int) -> str | 
         return None
     _repo_root: Any = None
     try:
-        from biz.archive import REPO_ROOT
+        from worker.archive import REPO_ROOT
 
         _repo_root = REPO_ROOT
     except Exception:
@@ -376,7 +376,7 @@ class EvalDispatcher:
                     task_lost = False  # 取包丢失（节点重启/清场；common.distribution.is_task_lost_error）
                     manifest: dict = {}
                     try:
-                        from biz.config import args_rollout_overrides, stage_json_for_args
+                        from worker.config import args_rollout_overrides, stage_json_for_args
 
                         _ov = args_rollout_overrides(args)
                         manifest, _files = common.distribution.fetch_task(
@@ -559,7 +559,7 @@ class EvalDispatcher:
                     err = ""
                     manifest: dict = {}
                     try:
-                        from biz.config import args_rollout_overrides, stage_json_for_args
+                        from worker.config import args_rollout_overrides, stage_json_for_args
 
                         _ov = args_rollout_overrides(args)
                         manifest = run_local_eval_game(
@@ -849,7 +849,7 @@ class EvalDispatcher:
                 t_.join(timeout=max(0.01, join_deadline - time.monotonic()))
 
             # 课程血缘进 summary 行（门控趋势过滤；延迟导入避免 biz.cmd ↔ 本模块环）。
-            from biz.cmd import course_fp_for_args
+            from worker.cmd import course_fp_for_args
 
             settle_eval_summary(
                 eval_jsonl=eval_jsonl,

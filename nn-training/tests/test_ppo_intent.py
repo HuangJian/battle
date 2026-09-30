@@ -26,10 +26,10 @@ from common.schema import OBS_CHANNELS, SCALAR_DIM
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import ppo.engine as ppo
-import ppo.intent as ppo_intent
-from data.weights_io import load_weights_json
-from models.intent_net import export_intent_weights
+import worker.ppo.engine as ppo
+import worker.ppo.intent as ppo_intent
+from worker.data.weights_io import load_weights_json
+from worker.models.intent_net import export_intent_weights
 
 FAILS: list[str] = []
 
@@ -125,7 +125,7 @@ def test_rl_net_roundtrip_value_head(tmp_path: Path) -> None:
     check(meta["arch"]["kind"] == "intent", "arch.kind=intent")
     check("value_head.weight" in params, "exported value_head.weight present")
     m2 = ppo_intent.IntentRLNet(h=64, d=8)
-    from models.intent_net import load_intent_weights
+    from worker.models.intent_net import load_intent_weights
 
     load_intent_weights(m2, p)
     check(True, "load_intent_weights roundtrip ok")

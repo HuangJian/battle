@@ -1,6 +1,6 @@
 /** course-knobs.ts — **课程机器侧旋钮**（rl-config `courses.<课>.*`，2026-09-19 / R3-5）。
  *
- *  为什么需要这一层：trainer 收敛成**一个进程服务所有课程**（`run_rl_cluster.py --serve`）之后，
+ *  为什么需要这一层：trainer 收敛成**一个进程服务所有课程**（`trainer/run_rl_cluster.py --serve`）之后，
  *  「这门课怎么跑」不能再是那个进程的命令行参数（一个进程服务 N 门课，命令行只有一份）。
  *  它搬到这里 —— 机器侧旋钮住 rl-config，**永不进 `curricula/*.jsonc`**（课程文件字节 =
  *  `course_fp` 语料血缘 / 熔断口径，D14；往里加一个旋钮，熔断会把同一份语料读成新语料）。

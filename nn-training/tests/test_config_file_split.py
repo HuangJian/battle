@@ -22,12 +22,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import biz.config as config_mod
-import biz.config_file as file_mod
 import common.distribution
+import worker.config as config_mod
+import worker.config_file as file_mod
 
-CONFIG_FILE = ROOT / "biz" / "config.py"
-NEW_FILE = ROOT / "biz" / "config_file.py"
+CONFIG_FILE = ROOT / "worker" / "config.py"
+NEW_FILE = ROOT / "worker" / "config_file.py"
 
 MOVED_NAMES = {"RL_CONFIG_ENV", "read_rl_config_file", "rl_config_path"}
 

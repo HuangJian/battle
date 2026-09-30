@@ -149,16 +149,15 @@ py-modules = []
 # 不声明 `biz*` 的话，装机环境（`pip install -e .`）里 `import biz.*` 直接 ImportError，
 # 而 conftest 的 sys.path 会让测试全绿（刀 1/刀 2/刀 3 各踩过一次同型的坑）。
 # 2026-09-30（刀 5）：编排那一半随整包改名 `rl*` → `trainer*`（`rl/` 这个包从此不存在）。
-# 留 `trainer*` 与 `biz*` 都在：两个包都要在装机环境里可直接 import。
+# 2026-09-30（刀 6）：算法栈五包（`models` / `ppo` / `data` / `train` / `scripts`）整族搬进
+# `worker/` ⇒ 它们不再是顶层包，本清单里对应的五行**已删**（留着就是「清单腐烂」：装机
+# 环境下 `import models` 本就不该可用，而矩阵里的空 pattern 谁也看不出来）。
+# 2026-09-30（刀 7）：14 个入口脚本归位（`trainer/` · `tools/` · `remote/` · `worker/`）——
+# 全部落在**已声明**的包内，故清单本身无新增；`nn-training/` 顶层从此只剩 `conftest.py`。
 [tool.setuptools.packages.find]
 include = [
-  "models*",
-  "ppo*",
   "trainer*",
   "biz*",
-  "data*",
-  "train*",
-  "scripts*",
   "tools*",
   "common*",
   "remote*",

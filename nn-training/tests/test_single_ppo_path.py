@@ -28,8 +28,8 @@ NN_DIR = Path(__file__).resolve().parents[1]
 
 #: 非测试代码根（tests/ 与 e2e/ 除外：它们要**提到**这些名字来钉「已删除」）。
 #: 2026-09-30（刀 4）：`biz/` 是 `rl/` 的纯逻辑半，同属「生产代码面」⇒ 一并扫。
-SOURCE_ROOTS = ("trainer", "biz", "remote", "train", "ppo", "models", "data")
-SOURCE_FILES = ("run_rl.py", "run_rl_cluster.py", "common/distribution.py")
+SOURCE_ROOTS = ("trainer", "worker", "biz", "remote")  # 2026-09-30 刀 6：五包进 worker
+SOURCE_FILES = ("trainer/run_rl.py", "trainer/run_rl_cluster.py", "common/distribution.py")
 
 
 @cache
@@ -62,7 +62,7 @@ def _option_strings(argv_parser) -> list[str]:
 
 def test_argparser_has_no_ppo_flag_nor_attribute() -> None:
     """`--ppo` 旗标与 `args.ppo` 属性**都不存在**（不是一个「留着但没用」的空壳）。"""
-    from biz.cli import build_argparser
+    from worker.cli import build_argparser
 
     ap = build_argparser("per-tick", {})
     assert not [s for s in _option_strings(ap) if "ppo" in s.lower()]
@@ -75,7 +75,7 @@ def test_argparser_has_no_ppo_flag_nor_attribute() -> None:
 
 def test_no_degrade_chain_flags() -> None:
     """`--remote-degrade-after`（整条降级链的入口）同样不存在。"""
-    from biz.cli import build_argparser
+    from worker.cli import build_argparser
 
     ap = build_argparser("per-tick", {})
     assert not [s for s in _option_strings(ap) if "degrade" in s.lower()]
@@ -138,7 +138,7 @@ def test_no_ppo_backend_env_knob() -> None:
 
 def test_course_schema_rejects_backend_keys(tmp_path: Path) -> None:
     """课程文件里任何 backend 类键**响亮失败**（`extra="forbid"` 仍在，不是放宽校验）。"""
-    from biz.config import CourseConfig
+    from worker.config import CourseConfig
 
     with pytest.raises(Exception) as ei:
         CourseConfig.model_validate({"name": "c", "ppo_backend": "remote"})

@@ -60,10 +60,10 @@ ALLOWED_IMPORTS = {
     # S5 第五刀（2026-09-27）：HTTP 面下沉 `remote/hub_http.py`；`_request` 的所有者搬了家，
     # 本模块（函数内 import 那个注入点）随之改指。
     "remote.hub_http",
-    "biz.bc_config",
-    "biz.bc_eval",
-    "biz.bc_ledger",
-    "biz.log",
+    "worker.bc_config",
+    "worker.bc_eval",
+    "worker.bc_ledger",
+    "common.log",
 }
 
 
@@ -195,7 +195,7 @@ def test_poll_once_classifies_ready_pending_transient(tmp_path: Path, monkeypatc
     def fake(_base, _token, _path, timeout=0.0):
         return reply["status"], reply["body"]
 
-    from biz.bc_config import load_bc_course
+    from worker.bc_config import load_bc_course
 
     # S5 第五刀：`_request` 的宿主是 `remote.hub_http`（patch `hub_client` 的转发名不再有效）。
     monkeypatch.setattr(hub_http, "_request", fake)

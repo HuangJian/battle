@@ -44,7 +44,7 @@ async function smokeTrainBc(course: string): Promise<ActionResult> {
     const { pushUrl, servePid: pid } = await startLocalWorkerServer({ course, cfg, venv })
     servePid = pid
 
-    // 2) 真 BC 课程 run_bc.py --smoke（REMOTE_PUSH_NODE 注入伪节点）
+    // 2) 真 BC 课程 trainer/run_bc.py --smoke（REMOTE_PUSH_NODE 注入伪节点）
     const trainLog = path.join(LOG_DIR, course, 'training-loop.log')
     const spec = bcLoopSpec(cfg, {
       course,

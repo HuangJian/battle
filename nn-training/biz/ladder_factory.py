@@ -395,7 +395,9 @@ def generate(
 
 def preflight(out_levels: Path, out_courses: Path) -> list[str]:
     """CI 预检（总纲 I3）：对生成的课程跑 load_course + validate_reward，返回错误列表。"""
-    from biz.config import load_course
+    # 2026-09-30：`load_course` 的真家在 course_resolve（config 只是 re-export），
+    # 而 config 搬去 worker/ ⇒ 直接指真家，保持「留 biz 的模块不指 worker」这条线。
+    from biz.course_resolve import load_course
     from biz.reward_validation import validate_reward
 
     errors: list[str] = []

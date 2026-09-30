@@ -6,7 +6,7 @@
 | 原语 | 曾有两份 | 为什么必须唯一 |
 |------|---------|---------------|
 | 原子写 | `remote/artifacts.atomic_write_bytes` ↔ `hub.server._write_bytes` | 「半截权重比没有权重更危险」「半截的记账文件会把续跑判据带偏」——两处都写了这句，而实现必须是 tmp + `os.replace` 这一种写法才成立 |
-| 追加 JSONL | `rl/bc_ledger.append_ledger` ↔ `remote/hub_client._append_ledger` | 账本是**多进程追加**的：父目录创建、`ensure_ascii=False`、单行 JSON + 换行，任一处漏掉就让读侧解析出坏行 |
+| 追加 JSONL | `biz/bc_ledger.append_ledger` ↔ `remote/hub_client._append_ledger` | 账本是**多进程追加**的：父目录创建、`ensure_ascii=False`、单行 JSON + 换行，任一处漏掉就让读侧解析出坏行 |
 | tar 解包 | `remote/worker.unpack_opt_tar` ↔ `remote/hub_client._extract_tar` | 都要兼容 Py<3.12（`extractall` 的 `filter=` 参数），漏掉就 `TypeError` |
 
 `extract_tar_bytes` 用 `filter="data"`（Py≥3.12）并回退裸 `extractall`：
@@ -47,7 +47,7 @@ def append_jsonl(jsonl_path: str | Path, event: dict) -> None:
     """向账本追加一行 JSON（父目录按需创建）。
 
     账本文件随时可能被**另一个进程**追加/读取 ⇒ 只做「打开-追加-关闭」，
-    绝不读改写；半写行由读侧负责跳过（见 `rl/bc_ledger.read_events`）。
+    绝不读改写；半写行由读侧负责跳过（见 `biz/bc_ledger.read_events`）。
     """
     p = Path(jsonl_path)
     p.parent.mkdir(parents=True, exist_ok=True)

@@ -252,7 +252,7 @@ def test_torch_stays_a_deferred_import_inside_the_core() -> None:
     两面一起钉：顶层**没有**（防回归）+ 函数体**有**（防漏搬）。
     """
     top = _top_imports(CORE_FILE)
-    for mod in ("torch", "numpy", "ppo", "ppo.engine", "ppo.common", "torch_xla", "data.weights_io"):
+    for mod in ("torch", "numpy", "ppo", "worker.ppo.engine", "worker.ppo.common", "torch_xla", "worker.data.weights_io"):
         assert not any(m == mod or m.startswith(mod + ".") for m in top), (
             f"train_core 顶层 import 了 {mod}（本仓硬规：顶层零 torch）"
         )
@@ -263,7 +263,7 @@ def test_torch_stays_a_deferred_import_inside_the_core() -> None:
             inner.update(a.name for a in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             inner.add(node.module)
-    for mod in ("torch", "numpy", "ppo.engine", "ppo.common", "data.weights_io"):
+    for mod in ("torch", "numpy", "worker.ppo.engine", "worker.ppo.common", "worker.data.weights_io"):
         assert any(m == mod or m.startswith(mod + ".") for m in inner), (
             f"{mod} 没在训练核体内出现 —— 要么漏搬，要么改成了顶层 import"
         )

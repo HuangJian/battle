@@ -25,7 +25,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from hub.server import _JobStore
-from train.bc import train as bc_train
+from worker.train.bc import train as bc_train
 
 # ------------------------------------------------------------------ hub 存储
 
@@ -53,7 +53,7 @@ def _make_corpus(tmp_path: Path, n: int = 16) -> Path:
         "conditions": np.zeros(n, dtype=np.int64),
         "returns": rng.standard_normal(n).astype(np.float32),
     }
-    from data.npyio import save_shard
+    from worker.data.npyio import save_shard
 
     save_shard(str(d), arrays, {"stage": 0, "seed": 1})
     return tmp_path

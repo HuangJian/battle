@@ -125,7 +125,7 @@ class QueueResumeMixin(QueuePeer):
         """
         if not isinstance(rows, list) or not rows:
             return (0, 0)
-        from biz.eval_rows import append_eval_rows, append_eval_summaries
+        from worker.eval_rows import append_eval_rows, append_eval_summaries
 
         ledger = self._stores[course].job_root.parent / "eval_log.jsonl"
         good = [r for r in rows if isinstance(r, dict)]

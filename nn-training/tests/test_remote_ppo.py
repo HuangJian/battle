@@ -527,7 +527,7 @@ def test_weights_json_local_vs_cloud_byte_identical(tmp_path: Path) -> None:
     """
     import torch
 
-    from data.weights_io import save_weights_json
+    from worker.data.weights_io import save_weights_json
 
     torch.manual_seed(7)
     net = torch.nn.Sequential(torch.nn.Linear(8, 8), torch.nn.ReLU(), torch.nn.Linear(8, 4))
@@ -551,7 +551,7 @@ def test_nan_weights_fail_fast(tmp_path: Path) -> None:
     """NaN 注入 → save_weights_json 拒绝写出（云路径同一函数 → 同样 fail-fast）。"""
     import torch
 
-    from data.weights_io import save_weights_json
+    from worker.data.weights_io import save_weights_json
 
     net = torch.nn.Linear(4, 4)
     with torch.no_grad():
@@ -563,13 +563,13 @@ def test_nan_weights_fail_fast(tmp_path: Path) -> None:
 
 def test_reward_nonfinite_rejected(tmp_path: Path) -> None:
     """reward 公式产出非有限值 → 响亮拒绝（防污染 GAE）。"""
-    from biz.config import load_course
     from biz.reward_library import (
         METRICS_DIM,
         FormulaError,
         build_reward_fn,
         reward_from_spec,
     )
+    from worker.config import load_course
 
     course = load_course(str(ROOT / "curricula" / "p4-onset.jsonc"))
     spec = course.reward_spec()
@@ -592,7 +592,7 @@ def test_reward_nonfinite_rejected(tmp_path: Path) -> None:
 
 def test_ledger_new_events_do_not_break_last_completed_iter(tmp_path: Path) -> None:
     """job_pending/job_completed 事件混入 jsonl → last_completed_iter 不受影响。"""
-    from biz.resume import last_completed_iter
+    from worker.resume import last_completed_iter
 
     jl = tmp_path / "training_log.jsonl"
     lines = [
@@ -608,7 +608,7 @@ def test_ledger_new_events_do_not_break_last_completed_iter(tmp_path: Path) -> N
 
 def test_resume_course_fp_filter(tmp_path: Path) -> None:
     """D14：completed_pairs 按 course_fp 过滤——跨课程 shard 不参与对账。"""
-    from biz.resume import completed_pairs
+    from worker.resume import completed_pairs
 
     traj = tmp_path / "traj" / "it3"
     _write_shard(traj / "rl_s1_seed10", 1, 10, course_fp="a" * 64)
@@ -642,8 +642,8 @@ def test_write_shard_single_write_indent2(tmp_path: Path) -> None:
 
 def test_publish_time_course_validation_bad_formula(tmp_path: Path) -> None:
     """D13：坏公式课程 publish 前必须被 load_course/build_reward_fn 响亮拒绝（免 torch）。"""
-    from biz.config import load_course
     from biz.reward_library import build_reward_fn
+    from worker.config import load_course
 
     bad = tmp_path / "bad-formula.jsonc"
     bad.write_text(
@@ -659,7 +659,7 @@ def test_publish_time_course_validation_bad_formula(tmp_path: Path) -> None:
 
 def test_publish_time_course_validation_bad_stage(tmp_path: Path) -> None:
     """D13：坏关卡（grid 非 13×13）课程发布前响亮拒绝（pydantic fail fast）。"""
-    from biz.config import load_course
+    from worker.config import load_course
 
     bad = tmp_path / "bad-stage.jsonc"
     bad.write_text(
@@ -679,7 +679,7 @@ def test_course_path_mounted_on_args() -> None:
     """course_from_args 挂 args.course_path（远程发布 snapshot 用，D13）。"""
     import types
 
-    from biz.config import course_from_args
+    from worker.config import course_from_args
 
     args = types.SimpleNamespace(course="p4-onset", course_file="")
     course = course_from_args(args)

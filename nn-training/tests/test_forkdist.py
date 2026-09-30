@@ -41,7 +41,7 @@ NN_ROOT = REPO_ROOT / "nn-training"
 PLUGIN = NN_ROOT / "tools" / "forkdist.py"
 WRAPPER = REPO_ROOT / "tools" / "githook" / "nn-py-safe.sh"
 MAKEFILE = NN_ROOT / "Makefile"
-TASK_PY = NN_ROOT / "task.py"
+TASK_PY = NN_ROOT / "tools/task.py"
 CI = REPO_ROOT / ".github" / "workflows" / "nn-training.yml"
 
 #: 覆盖五种结局的冒烟用例（判断「有没有少跑」用的就是它们的计数）。
@@ -130,7 +130,7 @@ def test_configure_rejects_mixing_with_xdist() -> None:
 
 
 def test_worker_count_option_accepts_ints_and_auto() -> None:
-    """`--forkdist auto` 的解析（`make test NPROC=auto` / `task.py` 的 `-n auto` 靠它）。"""
+    """`--forkdist auto` 的解析（`make test NPROC=auto` / `tools/task.py` 的 `-n auto` 靠它）。"""
     fc = _plugin()
     assert fc._worker_count_option("12") == 12
     assert fc._worker_count_option(" auto ") == fc._AUTO
@@ -178,24 +178,24 @@ def test_child_rebuilds_its_own_global_capture() -> None:
 
 
 # ----------------------------------------------------------------------------------------
-# 三个入口的接线（task.py / Makefile / CI）：判据都是「Linux ⇒ forkdist，其余 ⇒ xdist -n」
+# 三个入口的接线（tools/task.py / Makefile / CI）：判据都是「Linux ⇒ forkdist，其余 ⇒ xdist -n」
 # ----------------------------------------------------------------------------------------
 
 
 def test_task_py_dispatches_per_platform() -> None:
-    """`python task.py <target>` 在 Linux 上走 forkdist，在其它平台保留 xdist。
+    """`python tools/task.py <target>` 在 Linux 上走 forkdist，在其它平台保留 xdist。
 
-    真 import 一次 task.py（它模块级没有副作用）并看它拼出来的 argv —— 比 grep 文本强。
+    真 import 一次 tools/task.py（它模块级没有副作用）并看它拼出来的 argv —— 比 grep 文本强。
     """
     sys.path.insert(0, str(NN_ROOT))
     try:
-        import task
+        from tools import task
 
         got = task.pytest_dispatch()
     finally:
         sys.path.pop(0)
     src = TASK_PY.read_text(encoding="utf-8")
-    assert 'hasattr(os, "fork")' in src, "task.py 的分发判据里丢了「有没有 os.fork」"
+    assert 'hasattr(os, "fork")' in src, "tools/task.py 的分发判据里丢了「有没有 os.fork」"
     if sys.platform.startswith("linux"):
         assert got == ["-p", "tools.forkdist", "--forkdist", "auto"], got
     else:

@@ -15,7 +15,7 @@
 #   make weights-prune-apply  Actually prune weights/ keeping latest K per family
 #   make weights-update-md    Regenerate weights/WEIGHTS.md inventory
 #
-# Note: Windows users without `make` can use `python task.py <target>` instead.
+# Note: Windows users without `make` can use `python tools/task.py <target>` instead.
 
 .PHONY: check test test-fast test-e2e smoke clean format lint typecheck setup
 # 层 = 路径（2026-09-15）：tests/ = 单测层、e2e/ = 集成层。旧 `-m "not heavy"` 已删——
@@ -55,7 +55,7 @@ endif
 
 # 一条指令搭环境：探测 GPU → 选 torch 变体 → uv sync → 装后自检
 setup:
-	python bootstrap.py
+	python tools/bootstrap.py
 
 # check 直接委派给门禁脚本——单一实现，杜绝“日常命令”与“提交门禁”漂移。
 check: python-gate
@@ -101,7 +101,7 @@ test-e2e:
 
 smoke:
 	$(PREFIX) $(PYTHON) -c "import torch; print('torch', torch.__version__)"
-	$(PREFIX) $(PYTHON) smoke_test.py
+	$(PREFIX) $(PYTHON) tools/smoke_test.py
 
 format:
 	$(PREFIX) $(PYTHON) -m ruff format .
@@ -120,10 +120,10 @@ clean:
 
 # ---- weights pruning (NEW) ----
 weights-prune:
-	$(PREFIX) $(PYTHON) weights_prune.py --keep $(WEIGHTS_KEEP) --dir weights/ --dry-run
+	$(PREFIX) $(PYTHON) tools/weights_prune.py --keep $(WEIGHTS_KEEP) --dir weights/ --dry-run
 
 weights-prune-apply:
-	$(PREFIX) $(PYTHON) weights_prune.py --keep $(WEIGHTS_KEEP) --dir weights/ --apply
+	$(PREFIX) $(PYTHON) tools/weights_prune.py --keep $(WEIGHTS_KEEP) --dir weights/ --apply
 
 weights-update-md:
-	$(PREFIX) $(PYTHON) weights_prune.py --dir weights/ --update-md
+	$(PREFIX) $(PYTHON) tools/weights_prune.py --dir weights/ --update-md

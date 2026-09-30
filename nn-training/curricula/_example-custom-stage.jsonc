@@ -5,7 +5,7 @@
 // `fetch_task` → sampler-agent → `--stage-json` 透传到远端导出器解码。
 // 第 i 个自定义关 → **stage ID 2000+i**（本例 2000/2001）。
 //
-// 启动：python run_rl.py --course _example-custom-stage
+// 启动：python trainer/run_rl.py --course _example-custom-stage
 {
   "version": 5,
   "name": "example-custom-stage",
@@ -70,7 +70,7 @@
   // ── 按样本量动态采集（可选；缺席 = 用 seed_rotate 固定局数，老行为逐字节不变）──
   // 什么时候用：想让「每轮采多少」以 samples 计而非局数计时（PPO 吃的是 transitions；
   // 固定局数下样本量会随局长漂移）。语义、边界与决策见 DECISIONS
-  // §2026-09-15-goalnn-dynamic-rollout-volume；纯逻辑在 rl/volume_waves.py。
+  // §2026-09-15-goalnn-dynamic-rollout-volume；纯逻辑在 biz/volume_waves.py。
   //   分关达标线 = ceil(target_transitions / 关数)；初波每关 G0 = max(1, ceil(达标线/est))；
   //   结算后逐关补波 ceil(缺口/est)，每关至多 3 波；掉局零样本不计（天然触发补采）。
   // ⚠ **量纲（2026-09-15 T9）**：`target_transitions` 与 `est_samples_per_game` **同单位**

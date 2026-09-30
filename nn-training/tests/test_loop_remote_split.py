@@ -148,29 +148,29 @@ SLOT_WRITERS: dict[str, frozenset[str]] = {
 TOP_IMPORTS: dict[str, frozenset[str]] = {
     "loop_remote.py": frozenset({"trainer.loop_remote_drive"}),
     "loop_remote_push.py": frozenset(
-        {"common.protocol", "remote.push_client", "biz.log", "biz.loop_round", "trainer.loop_transport"}
+        {"common.protocol", "remote.push_client", "common.log", "worker.loop_round", "trainer.loop_transport"}
     ),
     "loop_remote_job.py": frozenset(
         {
             "common.protocol",
-            "biz.log",
+            "common.log",
             "trainer.loop_remote_push",
-            "biz.loop_round",
+            "worker.loop_round",
             "trainer.loop_transport",
         }
     ),
     "loop_remote_fail.py": frozenset(
-        {"common.protocol", "biz.events", "biz.log", "trainer.loop_transport"}
+        {"common.protocol", "worker.events", "common.log", "trainer.loop_transport"}
     ),
     "loop_remote_drive.py": frozenset(
         {
             "common.protocol",
             "common.distribution",
-            "biz.events",
-            "biz.log",
+            "worker.events",
+            "common.log",
             "trainer.loop_remote_fail",
             "trainer.loop_remote_job",
-            "biz.loop_round",
+            "worker.loop_round",
             "trainer.loop_transport",
         }
     ),
@@ -187,15 +187,15 @@ DELAYED_IMPORTS: dict[str, frozenset[str]] = {
             "remote.hub_client",
             "remote.push_client",
             "trainer.collect_only",
-            "biz.config",
+            "worker.config",
             "trainer.queue",
-            "biz.resume",
+            "worker.resume",
             "biz.reward_library",
         }
     ),
     "loop_remote_fail.py": frozenset(),
     # `biz.plan` 随半离线整段（`_remote_run_segment`）退役 —— 它原来是那条腿算计划用的。
-    "loop_remote_drive.py": frozenset({"biz.iter_job"}),
+    "loop_remote_drive.py": frozenset({"worker.iter_job"}),
 }
 
 #: 反向边（禁）：本族谁都不许 import 这些（它只靠 `self.*` 回调 / 组合根除外）。

@@ -68,11 +68,11 @@ describe('training venv helpers (dashboard/src/venv.ts)', () => {
 
 describe('train script resolution (dashboard/src/launch/cli.ts, DECISIONS §324)', () => {
   it('resolves legacy flat aliases', () => {
-    expect(resolveTrainScript('train_bc.py')).toBe('train/bc.py')
-    expect(resolveTrainScript('train_rl.py')).toBe('run_rl.py')
+    expect(resolveTrainScript('train_bc.py')).toBe('worker/train/bc.py')
+    expect(resolveTrainScript('train_rl.py')).toBe('trainer/run_rl.py')
   })
   it('passes through subpackage paths that exist', () => {
-    expect(resolveTrainScript('smoke_test.py')).toBe('smoke_test.py')
+    expect(resolveTrainScript('tools/smoke_test.py')).toBe('tools/smoke_test.py')
   })
   it('rejects traversal / absolute / drive paths with exit 2', () => {
     for (const bad of ['../evil.py', 'C:\\evil.py', '/abs/evil.py', 'a/../b.py']) {
@@ -219,7 +219,7 @@ describe('training path constants', () => {
 
 describe('ProcSpec path semantics (dashboard/src/specs.ts, DECISIONS §349 regression)', () => {
   it('trainingLoop cmd points at an existing file (entry is repo-relative, not doubled)', () => {
-    // 回归：entry 曾被 join(NN_TRAINING) 再拼一次 → nn-training/nn-training/run_rl.py
+    // 回归：entry 曾被 join(NN_TRAINING) 再拼一次 → nn-training/nn-training/run_rl.py（当时它还住顶层）
     // python 秒退 "can't open file"，预演空烧 180s。cmd[2] 必须真实存在。
     const cfg = {
       version: 1,
@@ -230,10 +230,10 @@ describe('ProcSpec path semantics (dashboard/src/specs.ts, DECISIONS §349 regre
       course: 'spec-path-test',
       venv: { python: 'python', sitePackages: '' },
     })
-    expect(spec.cmd[2]).toBe(join(REPO_ROOT, 'nn-training', 'run_rl.py'))
+    expect(spec.cmd[2]).toBe(join(REPO_ROOT, 'nn-training', 'trainer/run_rl.py'))
     const { existsSync } = require('fs') as { existsSync: (p: string) => boolean }
     expect(existsSync(spec.cmd[2]!)).toBe(true)
-    expect(TRAINING_LOOP_ENTRY).toBe('nn-training/run_rl.py')
+    expect(TRAINING_LOOP_ENTRY).toBe('nn-training/trainer/run_rl.py')
   })
 })
 
@@ -241,7 +241,7 @@ describe('train CLI arg parsing (dashboard/src/launch/cli.ts, DECISIONS §349)',
   // 纯参数解析：不 spawn、不碰 venv/torch。
   // 历史教训（2026-09-08，详见 train.ts parseCli 上方注释）：这两条分支曾用
   // 「spawn 真实 CLI」来测，pre-commit 门禁 fallback 全量时命中它们 →
-  // ensureVenv() 委派 bootstrap.py 联网装 torch，单用例 40s+ 且 exit 4。
+  // ensureVenv() 委派 tools/bootstrap.py 联网装 torch，单用例 40s+ 且 exit 4。
   // 参数解析是纯函数，就该纯函数测；只有真要起训练的路径才允许碰 torch。
   it('--check / --echo 标志被识别，互不串台', () => {
     expect(parseCli(['--check']).opts.check).toBe(true)
@@ -252,8 +252,8 @@ describe('train CLI arg parsing (dashboard/src/launch/cli.ts, DECISIONS §349)',
   })
 
   it('--script 取值，其余参数按序进 scriptArgs', () => {
-    const { opts } = parseCli(['--script', 'ppo/bench.py', '--iters', '1', '--foo', 'bar'])
-    expect(opts.script).toBe('ppo/bench.py')
+    const { opts } = parseCli(['--script', 'worker/ppo/bench.py', '--iters', '1', '--foo', 'bar'])
+    expect(opts.script).toBe('worker/ppo/bench.py')
     expect(opts.scriptArgs).toEqual(['--iters', '1', '--foo', 'bar'])
   })
 
@@ -284,7 +284,15 @@ describe('train CLI arg parsing (dashboard/src/launch/cli.ts, DECISIONS §349)',
   // 装 torch，必然超时变红（而不是悄悄慢下来）。
   it('--echo 端到端：只打印命令、不触发 torch 引导', () => {
     const r = Bun.spawnSync(
-      ['bun', 'dashboard/src/launch/cli.ts', '--echo', '--script', 'ppo/bench.py', '--iters', '1'],
+      [
+        'bun',
+        'dashboard/src/launch/cli.ts',
+        '--echo',
+        '--script',
+        'worker/ppo/bench.py',
+        '--iters',
+        '1',
+      ],
       {
         cwd: REPO_ROOT,
         stdout: 'pipe',

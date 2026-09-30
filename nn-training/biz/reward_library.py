@@ -802,7 +802,7 @@ class RewardFn:
                 # 降级卡：**仅量化触发面**（长度/深度超限）回退内置，warning 带真实原因；
                 # 语法/白名单/未知名等 FormulaError 不在此捕获——原样传播响亮报错
                 # （评审 F1：调参手误不得静默回退掩盖真因）。
-                from biz.log import log
+                from common.log import log
 
                 log(
                     f"[reward] WARNING: formula 触发降级卡（{e}）—— 回退内置 "

@@ -1462,7 +1462,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
 
   for (const si of stages) {
     // arena 编号命名空间（goal-nn 卡 A1）：si >= 1000 经 ARENA_LADDER 解析为
-    // 玩具场；真实关走 STAGES。同一整数贯穿 course.py → run_rl.py → queue.py →
+    // 玩具场；真实关走 STAGES。同一整数贯穿 course.py → trainer/run_rl.py → queue.py →
     // sampler-agent → 本解析层 → shard 命名，六环节零改动（agent 原样透传）。
     //
     // 守卫①（plan §5.2）：--stage-json 存在时**先**解码自定义关，短路
@@ -1640,7 +1640,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     // 未门控的纯 v7 分：与 God-AI 基线口径可比，用于诊断门控前后的行为分化
     scoreStatsUngated: stat(scoresUngated),
     dimMeans,
-    // 原始值列表：供 run_rl.py 跨 worker 精确重聚合
+    // 原始值列表：供 trainer/run_rl.py 跨 worker 精确重聚合
     scoreList: scores.map((x) => +x.toFixed(5)),
     dimLists: Object.fromEntries(
       Object.entries(dimAcc).map(([k, xs]) => [k, xs.map((x) => +x.toFixed(5))]),

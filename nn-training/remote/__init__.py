@@ -24,6 +24,13 @@ L4  hub/ · trainer/              （2026-09-30 刀 1：hub 从本包**出包**�
 > `trainer/queue_local` 的本机槽）同时引用 ⇒ 留在包里「谁在谁上面」读不出来，坐下面四条边全朝下。
 > `remote/worker.py`（**云** worker）**留在本包**：它是云机上的作业壳，与 `worker/`（节点长驻池）
 > 是两件不同的事——名字相近但层号相反（L5 vs L2）。
+>
+> 2026-09-30（刀 7，入口归位）：两个**进程入口**从 `nn-training/` 顶层搬进本包 ——
+> `remote/remote_worker.py`（云 worker 入口，`python -m remote.remote_worker`，薄包装
+> `remote.worker.main`）与 `remote/remote_worker_serve.py`（push 模式服务端入口，
+> `python -m remote.remote_worker_serve`）。它们是「模块名解析壳」，层号在账本里分别是
+> **L6 / L7**（`remote.worker`(L5) 与 `remote.worker_server`(L6) 之上各一层），不改任何方向。
+> 与本包 `remote/worker.py`（**作业壳**，L5）的区别：那两个是**入口门面**。
 
 两个本来属于「纯逻辑」的子模块已下沉 `common/`：`protocol.py` / `game_watch.py`（它们被 `rl/`
 引用，与 `remote/ → rl/` 构成包级循环 ⇒ 循环已由下沉消除，不再靠函数内延迟 import 维持）。

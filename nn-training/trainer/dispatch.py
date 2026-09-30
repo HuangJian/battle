@@ -11,11 +11,7 @@ from collections import deque
 from pathlib import Path
 
 import common.distribution
-from biz import node_identity
-from biz.agent_meta import record_agent_meta as _record_agent_meta_impl
-from biz.log import log
-from biz.reports import combine_reports, win_of
-from biz.resume import completed_pairs, resumed_manifests, state_init_enabled
+from common.log import log
 from common.platform_utils import rmtree_best_effort
 
 # 本地对局子进程的无窗口 spawn 由 `trainer.queue_local` 负责（Windows 下不弹黑色 cmd 抢焦点）。
@@ -29,7 +25,10 @@ from trainer.queue_local import (
     run_local_rollout,
     run_rollout,
 )
-from worker import serve_pool
+from worker import node_identity, serve_pool
+from worker.agent_meta import record_agent_meta as _record_agent_meta_impl
+from worker.reports import combine_reports, win_of
+from worker.resume import completed_pairs, resumed_manifests, state_init_enabled
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -721,8 +720,8 @@ class RolloutDispatcher:
                     else:
                         # M1d：课程自定义关 stageJson / 命数星级覆盖（本地 slot 分支经
                         # cmd.py 透传；dist 分支在这里进查询参数）。
-                        from biz.cmd import course_fp_for_args
-                        from biz.config import args_rollout_overrides, stage_json_for_args
+                        from worker.cmd import course_fp_for_args
+                        from worker.config import args_rollout_overrides, stage_json_for_args
 
                         _sj = stage_json_for_args(args, task[0])
                         _ov = args_rollout_overrides(args)

@@ -32,9 +32,9 @@ if str(ROOT) not in sys.path:
 
 import pytest
 
-from biz.loop_scheduler import Supervisor
 from trainer.loop_core import TrainingLoop
 from trainer.loop_runner import LoopRunner
+from worker.loop_scheduler import Supervisor
 
 TS = "2026-09-18 12:00:00"
 
@@ -150,7 +150,7 @@ def _make_loop(
     # 故意**不**替换 `_remote_ppo_step`（让位点住在它里面，用例的价值就是走真驱动）；
     # 只换三个对外动作。fail_rounds 用 TimeoutError 注入（在可重试集合里 ⇒ 与真链路的
     # 连败计数/原地重试语义一致）。
-    from biz.loop_round import RemotePpoJob
+    from worker.loop_round import RemotePpoJob
 
     def fake_publish(it: int) -> RemotePpoJob:
         if fail_rounds and it in fail_rounds:
@@ -206,7 +206,7 @@ def _install_fake_remote(loop: TrainingLoop, course: str, ready: dict[str, bool]
     走真驱动。假掉的只有三个对外动作：发布（回一个会话）、探一次（说不就绪或给结果）、
     落位（把结算字段填成真引擎会填的样子）。
     """
-    from biz.loop_round import RemotePpoJob
+    from worker.loop_round import RemotePpoJob
 
     def publish(it: int) -> RemotePpoJob:
         return RemotePpoJob(
@@ -297,7 +297,7 @@ def _wrap_steps(
     的步（让位的那一次不算完）——R2c-3 之后「进入」与「走完」不再是同一件事，用例需要
     分别看见它们（让位不是失败、步骤也没丢，只是这一次没做完）。
     """
-    from biz.loop_round import STEP_METHOD, StepResult
+    from worker.loop_round import STEP_METHOD, StepResult
 
     for kind, method in STEP_METHOD.items():
         fn = getattr(loop, method)
@@ -468,7 +468,7 @@ def test_engine_exception_retries_same_iteration(tmp_path: Path) -> None:
 
 def test_step_mode_walks_all_steps_and_rotates_per_step(tmp_path: Path) -> None:
     """细粒度驱动：每课各自走完全部 13 步，且**步级轮转**（让位点密度 = 每步一个）。"""
-    from biz.loop_tasks import ROUND_TASKS
+    from worker.loop_tasks import ROUND_TASKS
 
     order: list[tuple[str, str]] = []
     clock = {"t": 1000.0}
@@ -503,7 +503,7 @@ def test_step_mode_yields_at_ppo_and_the_other_course_finishes(tmp_path: Path) -
     让位是 `_remote_ppo_step` 在步骤内部产生的，而且它落在「job 已经发布」这个**真状态**
     上——所以用例同时断言「在飞集里有那份 job 的 id」（发布发生过了）。
     """
-    from biz.loop_tasks import ROUND_TASKS
+    from worker.loop_tasks import ROUND_TASKS
 
     order: list[tuple[str, str]] = []
     entered: list[tuple[str, str]] = []
@@ -560,7 +560,7 @@ def test_step_mode_yields_at_precollect_and_the_other_course_finishes(tmp_path: 
     （双缓冲预采的尾段）。旧形态下那一小时里整个进程都在原地等；单进程多课程下
     这一处就是「一个慢子进程拖垮所有课」的入口。
     """
-    from biz.loop_tasks import ROUND_TASKS
+    from worker.loop_tasks import ROUND_TASKS
 
     order: list[tuple[str, str]] = []
     clock = {"t": 1000.0}

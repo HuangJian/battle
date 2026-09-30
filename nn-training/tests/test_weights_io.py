@@ -28,14 +28,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.schema import OBS_SCHEMA_MAJOR
-from data.weights_io import (
+from worker.data.weights_io import (
     load_state_into,
     load_weights_json,
     save_weights_json,
     tensor_to_b64,
 )
-from models.core import NNPolicy
-from models.student import PPOStudent, StudentNet
+from worker.models.core import NNPolicy
+from worker.models.student import PPOStudent, StudentNet
 
 
 def _save_meta(tmp_path: Path, **meta_overrides) -> Path:

@@ -1,5 +1,5 @@
 /**
- * training-shared-trainer.test.ts — 共享 trainer（`run_rl_cluster.py --serve`，2026-09-19 / R3-5）。
+ * training-shared-trainer.test.ts — 共享 trainer（`trainer/run_rl_cluster.py --serve`，2026-09-19 / R3-5）。
  *
  *  用户口径：「hubserver/trainingloop/selfNode/cloudflared 都只需要开一个进程，就能同时支持
  *  所有并行训练课程」。本文件钉的是**训练侧之外的每一半**（python 那一半由
@@ -94,7 +94,7 @@ describe('① 形状：共享 trainer = 一个进程 + 发现模式', () => {
   it('restartSpecFor(trainingLoop, 共享槽) 重建出的 argv 不绑课程表', () => {
     saveAnyComponent('trainingLoop', '', {
       pid: 999999999, // 死 pid：只用于让条目存在，restartSpecFor 不探活
-      entry: 'nn-training/run_rl_cluster.py',
+      entry: 'nn-training/trainer/run_rl_cluster.py',
       course: '',
     })
     const spec = actions.restartSpecFor('trainingLoop', COURSE)
@@ -102,7 +102,7 @@ describe('① 形状：共享 trainer = 一个进程 + 发现模式', () => {
     expect(spec!.key).toBe('trainingLoop')
     expect(spec!.course).toBe('')
     const cmd = spec!.cmd.join(' ')
-    expect(cmd).toContain('run_rl_cluster.py')
+    expect(cmd).toContain('trainer/run_rl_cluster.py')
     expect(cmd).toContain('--serve')
     // 发现模式：不给课程表（课程 = `<traj-root>/<课>/training_log.jsonl` 这个文件系统事实）
     expect(cmd).not.toContain('--courses')
@@ -119,7 +119,7 @@ describe('① 形状：共享 trainer = 一个进程 + 发现模式', () => {
   it('旧形状（每课一条 trainingLoop 记录）→ 拒重建（守「同一批 traj 只有一个跑者」）', () => {
     saveAnyComponent('trainingLoop', COURSE, {
       pid: 999999999,
-      entry: 'nn-training/run_rl.py',
+      entry: 'nn-training/trainer/run_rl.py',
       course: COURSE,
     })
     expect(actions.restartSpecFor('trainingLoop', COURSE)).toBeNull()
@@ -248,7 +248,7 @@ describe('③ 停止：共享槽被清 + 语义说清楚', () => {
   it('停 trainer 报「所有课程的训练随之停止」，并清掉共享槽', async () => {
     saveAnyComponent('trainingLoop', '', {
       pid: 999999999, // 死 pid ⇒ 走「已退出」分支，不 kill 任何真进程
-      entry: 'nn-training/run_rl_cluster.py',
+      entry: 'nn-training/trainer/run_rl_cluster.py',
       course: '',
     })
     const r = await actions.stopComponent('trainingLoop', COURSE)
@@ -264,7 +264,7 @@ describe('④ 冒烟预演：共享 trainer 在跑时响亮拒绝（预演要独
   it('共享 trainer 存活 ⇒ 预演不启动、消息说清原因', async () => {
     saveAnyComponent('trainingLoop', '', {
       pid: process.pid, // 本进程 = 必活
-      entry: 'nn-training/run_rl_cluster.py',
+      entry: 'nn-training/trainer/run_rl_cluster.py',
       course: '',
     })
     const r = await actions.smokeTrain(COURSE)

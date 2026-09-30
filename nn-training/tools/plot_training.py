@@ -16,7 +16,7 @@ import re
 import sys
 from pathlib import Path
 
-DEFAULT_LOG = "train.log"
+DEFAULT_LOG = "worker.train.log"
 ROUND_RE = re.compile(r"=== ROUND (\d+) ===")
 VAL_RE = re.compile(r"val[:=]\s*([0-9.]+)")
 WIN_RE = re.compile(r"win[:=]\s*([0-9.]+)")

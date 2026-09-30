@@ -1,5 +1,5 @@
 // 课程 S3-balanced —— 公式引擎验收夹具（原 balanced 臂：被命中惩罚更重）。
-// 启动：python run_rl.py --course s3-balanced
+// 启动：python trainer/run_rl.py --course s3-balanced
 {
   "version": 5,
   "name": "s3-balanced",

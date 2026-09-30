@@ -25,9 +25,9 @@ if str(ROOT) not in sys.path:
 
 import pytest
 
-from biz.loop_round import RemotePpoJob, RoundContext
 from common.protocol import JobFailedError
 from trainer.loop_steps import TrainingSteps
+from worker.loop_round import RemotePpoJob, RoundContext
 
 
 def _stub(obj: object, name: str, fn: object) -> None:

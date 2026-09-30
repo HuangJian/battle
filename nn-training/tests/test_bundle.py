@@ -25,7 +25,6 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.plan import build_plan, dump_plan, planned_iters
 from common.protocol import (
     ProtocolError,
     encode_opt_tar,
@@ -42,6 +41,7 @@ from remote.bundle import (
     read_bundle_index,
 )
 from remote.run_loop import run_standalone
+from worker.plan import build_plan, dump_plan, planned_iters
 
 INIT_W = b'{"format":"nn-weights-json","params":{"w":0}}'
 CODE_ZIP = b"PK\x03\x04" + b"py-code" * 50
@@ -125,7 +125,7 @@ def _export(tmp_path: Path, *, it: int = 3, n: int = 3) -> tuple[Path, dict, dic
     with zipfile.ZipFile(src / "ts_code.zip", "w") as z:
         z.writestr("tools/sim/export-rl-rollout.ts", "// ts\n")
     (src / "opt.tar").write_bytes(b"opt-" + b"x" * 32)
-    out = tmp_path / "task.zip"
+    out = tmp_path / "tools.task.zip"
     index = export_bundle(
         out,
         manifest=m,

@@ -20,7 +20,7 @@
 //
 //   1. name/out/traj/backup_dir/backup_prefix → c6-pickup2（fresh，绝不复用旧腿目录）
 //   2. bc: c5-gae.it160 → **c6-pickup.it35**（见下“为什么换 bc”）
-//   3. 新增 `gates` 块（本仓第一条课程内显著性门；字段逐项对过 rl/config.py 校验器，
+//   3. 新增 `gates` 块（本仓第一条课程内显著性门；字段逐项对过 biz/config.py 校验器，
 //      模板取 c6b-margin：sustain/teacher/verdict/tol_pp/advance_frac 全必填项齐备）
 //
 // ── 为什么换 bc（2026-09-12 实测）────────────────────────────────────────────

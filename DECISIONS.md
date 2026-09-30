@@ -5942,13 +5942,137 @@ dashboard typecheck + **1229 pass / 0 fail**；`bun run build` 过 + 三份 bund
 **第三轮（同日）**：同一判据往前扫，清掉刀 1/3 的同类残渣 —— 散文里指向**已搬走的 `remote/*`** 的路径
 （`remote/protocol.py` → `common/`、`remote/smoke_loopback.py` → `hub/`、`remote/serve_pool.py` → `worker/`
 等 9 个模块），12 个文件 / 19 处；`remote/` 作**旧家**引用（「原 …」/「刀 1 后从 … 搬进」）与夹具里的
-**合成 zip 成员**（`z.writestr("remote/_marker.py", …)`）照旧保留。顺带发现一处**不是散文**的同类残渣：
-dashboard 的 `localWorker` / `trainingLoop` **哨兵**仍写 `nn-training/remote/protocol.py`（自刀 2 起就不存在
-⇒ 哨兵永不触发 = 「worker 用旧协议跑新 job」那条注释要防的事；`dashboard/tests/local-worker.test.ts` 还把
-旧路径断言住了）—— 修它要动 dashboard 代码 + 先写失败用例，另案，本轮不动。
+**合成 zip 成员**（`z.writestr("remote/_marker.py", …)`）照旧保留。
+**第四轮（同日）—— 扫描面放大到全树**：前三轮只扫 `trainer/**` 与 `tests/**`，漏了 `biz/`、`common/`、
+`hub/`、`worker/`、`remote/`、根脚本、`curricula/*.jsonc`、`levels/*.jsonc` 里的百来处 `rl/<module>`。
+判据不变（**名实**），但扫描面按**仓库根**枚举 ⇒ 同一处残渣不再因「住哪个目录」而漏。命中分三类：
+① 指向**今天仍实存的 `rl.stream` 配置节**（`rl.stream` / `["rl"]` / `rl-config.json` 等 ~26 处，**不改**）；
+② 指向**已搬走的模块名** ⇒ 按名改到 `trainer/` 或 `biz/`；③ 散文里的**目录名**（`全 rl/`、`rl/ 编排 + biz/ 纯逻辑`）
+⇒ `trainer/`。**坑**：改写器第一版把 `["rl", "stream"]` 这类「多义 token 表」整个丢进 keep 名单，
+而同一批里 `config.py` 的每一条 `rl.*` 键都带 `stream` 兄弟键 ⇒ 静默漏改 26 处；`test_rl_config_clean`
+（钉 config 里不许残留旧键名）当场红 ⇒ 兜住。**这是本轮唯一的真信号**，其余全绿。
+改写器 `tmp/prose_rl_wide.py` + `tmp/prose_rl_hand.py`（后者 7 条 hunk / 7 文件，收机器判不了的四类：
+`parents[N]` 自述深度、「不 import 任何 `rl/*`」这类跨层声明、`rn-training/…` 拼写事故、碰撞名 `stream`
+的模块口径），逐条断言命中数。
 **刻意保留**：`test_layering` 钉「`rl/` 不存在」那条守卫的字面量、`test_hub_client_code_zip` 的合成 zip
 成员表（不是真路径）、以及所有把 `rl/` 当**旧名**引用的历史句。代码里的旧**标识符**（`test_loop_guards_split`
 的 `RL = NN_ROOT / "trainer"` 已是死常量、`test_batch_eval` 的局部名 `rl_dir`）本轮不动：不改行为。
 
 —— 五刀总账与映射表 → `plan/nn-training-module-reorg.plan.md` §5；全文（字段名对照 / 反探针表）→
 `docs/nn/engineering.md` §53；改写器 → `nn-training/tmp/cut5_trainer_rewrite.py`（AST + 文本两条通行证 + 零残留断言）。
+
+## §2026-09-30-goalnn-dashboard-sentinel-paths-must-exist（2026-09-30，`specs.ts` 哨兵路径必须实存 —— 孤儿哨兵修复 + 机械守卫）
+
+**背景**：`dashboard/src/stack/specs.ts` 的 `localWorker` / `trainingLoop` 各有 `sentinel`（`core/reload.ts`
+的 `snap()` 记 mtime，变了就重启进程；`core/sentinels.ts` 比对）。它是 `codehash-files.txt` 之外的**手工补面**，
+注释写明「漏报 = worker 用旧协议跑新 job」。
+
+**问题**：刀 2（S3，5624856，2026-09-23）把 `remote/protocol.py` 下沉进 `common/`，两条哨兵仍指旧路径。
+`snap()` 对**不存在的文件**返回 `null` ⇒ 哨兵**永不触发**、一行日志都没有 —— 恰好就是它要防的那件事。
+更糟：`dashboard/tests/local-worker.test.ts` 用 `endsWith('remote/protocol.py')` 把旧路径**断言住了**
+（把 bug 钉成契约），于是 1229 个 dashboard 测试全绿，没有任何信号。
+
+**决策**：① 哨兵路径改指真实家（`common/protocol.py`）；② 加**机械守卫**
+`dashboard/tests/stack-sentinel-paths.test.ts` —— 扫 `specs.ts` 源码里所有 `'nn-training/…'` / `'tools/…'`
+**文件**字面量，逐条断言 ①扫描面 ≥5 条（防「扫描面缩水 = 哑绿」）②`existsSync` ③是文件不是目录（目录 mtime 只在
+增删条目时变，当哨兵同样哑）。**否决的备选**（只改路径、不加守卫）：搬家是本仓常态，而这种失效**完全哑**
+（无报错、无日志，面板照常显示），下一次搬家必重犯。先证明守卫在**旧**代码上红，再改代码。
+
+**理由**：可机械判定的不变量就该机械判定；「按路径监视」的东西被搬家静默孤儿化是这一类残渣的**共同根因**
+（同源先例：`hub` 侧 S4 用 `hubImplementationFiles()` 目录枚举修过同一个坑）。
+
+**影响面**：`specs.ts`（2 处哨兵路径）、`local-worker.test.ts`（断言改到新路径）、`WirePanel.tsx` /
+`server/api/tunnel-ab.ts` 文案，新增 1 个测试文件。**不动**：`snap()` 语义与重启策略。
+
+—— 全文（守卫口径 / 事故链）→ `docs/nn/engineering.md` §53 末节。
+
+## §2026-09-30-goalnn-worker-local-training-stack（2026-09-30，刀 6：`worker/` = 本地 torch 训练全栈；`biz/` 只留游戏业务）
+
+**背景**：用户 2026-09-30 三句话逐步收紧口径 —— ①「纯训练的内容都放在 `worker/` 下，比如 `rl/bc/ppo` 这些与业务
+（游戏）逻辑无关的训练代码」②「`worker/` 应该包含所有支持**本地 torch 训练**的所有代码，**云机 worker = local
+worker + `remote/`**」③「`biz/` 只放和业务（游戏）逻辑相关的内容」。这推翻了 `plan/nn-training-module-reorg.plan.md`
+§8-Q5（算法栈保持顶层并列）：Q5 当年否决并入的是 **`trainer/`（L4）**（会产生 9 条 `remote → trainer` 向上边），
+而 `worker/` 坐在 `remote/` **下面**（L2）⇒ `remote → worker` 是**向下**边，「云机 worker = 本地 worker + remote」
+正是这条偏序的自然读法。
+
+**搬移集**（机械）：A 算法栈五包 `models/` `ppo/` `data/` `train/` `scripts/` → `worker/<同名>/`（39 文件）·
+B 训练侧单体 `biz/<m>.py` → `worker/<m>.py`（**52**）· C `biz/log.py` → **`common/log.py`**（统一日志是通用基础设施：
+stdlib-only，`biz/worker/remote/hub` 共用）。`biz/` 剩 **12** 个游戏业务模块（11 个领域模块 + 前置修边新建的
+`corpus_fp`）。三处边界用户逐条拍板：课程结束门一族（`gate_check` / `gate_inputs` / `gate_judges` / `loop_guards_gate`）
+⇒ `worker/`（它们读的是 eval 行/指标与阈值）· `state_init`（人类中段快照 → rollout 起始分布）⇒ `worker/`（服务
+rollout 采样）· `log` ⇒ `common/`（既不是游戏也不是训练）。
+
+**★ 刀口 = 留在 `biz/` 的模块不得 import 搬走的**（实测 4 条向上边，`tmp/biz_split_recon.py`）：
+`hot_reload → config.corpus_identity_fp`（指纹下沉成 **`biz/corpus_fp.py`** —— 语料身份由游戏域定义）·
+`ladder_factory → config.load_course`（改指真家 `biz.course_resolve`）· `reward_library → log`（`common.log` ⇒ 向下）·
+`state_init → config`（自身进 `worker/` ⇒ 同包消解）。
+
+**账本后果**（`tests/helpers/remote_dag.py`）：`worker/` **整包入账** —— 150 个模块一账三包。不入账，`remote/hub`
+与算法栈之间的边会静默消失（刀 3 的同一条理由）。层号仍是**算出来的**拓扑秩，于是 12 条既有条目被抬
+（`remote.plan_run` 3→6 · `remote.plan_handoff` 2→5 · `remote.run_loop` 6→7 · `remote.offline_boot` 7→8 ·
+`remote.bc_job` 3→4 · `remote.offline_eval` 1→2 … —— 它们的依赖从「账本外的 `biz.*`」变成「账本内的 `worker.*`」），
+6 条被压（`hub.task_pack` 1→0 · `remote.hub_http` 1→0 · `remote.hub_client` 2→1 · `remote.push_client` 2→1 ·
+`remote.push_dispatch` 3→2 · `hub.result` 4→3）—— `common.*` 的边自刀 2 起就不在账本里，秩按「账本内最大依赖 +1」
+重算。逼出这次重排的是守卫 `test_every_layer_number_equals_its_topological_rank`（它把「秩 = 拓扑秩」写成契约）。
+
+**守卫修复（本刀最值钱的部分）——「哑守卫」三型**：
+① **集合成员型**：`assert "worker.X" not in dag.LAYERS` —— 它想说的是「X 不达传输面」，但「不在账本里」只是
+代理判断：刀 4 写 `"biz.X" not in dag.LAYERS` 时是**哑真**（`biz/` 从不进账本 ⇒ 恒过，判据是瞎的），
+刀 6 写 `"worker.X" not in dag.LAYERS` 时是**恒假**（`worker/` 整族入账 ⇒ 必红 = 假警报）。改判成直接表达那句话的
+`dag.reaches_transport("worker.X")`（账本内能否传递可达 `remote.*`）；五个纯逻辑守卫（`eval_rows` / `eval_track` /
+`eval_yield` / `gate_inputs` / `gate_judges`）全部改判。
+② **前缀型**：`startswith("rl.")`（`test_eval_yield_split` 的「不反向 import 运行器」· `test_gate_judges_split` 的
+「不碰编排」）⇒ 改成 `worker.eval_local` / `trainer.`（前者是**永远为空**的哑判据，后者才是它想说的那句话）。
+③ **扫描面缩水型**：`test_action_head_hygiene` 手写包名清单里的 `ppo` 搬家后成空目录（`rglob` 静默返回空）
+⇒ 按**目录枚举**（生产树全部包 + 根脚本）并加「扫描面 > 100 文件」自证；`test_hub_queue_split._logic_layer_import`
+的包集加 `worker`；子进程探针里的 `biz.gate_*` 字面量与打印标签（`test_gate_check` / `test_gate_judges_split` /
+`test_no_torch_on_import`）逐条对账 —— **标签与 import 必须同名**，不同名时断言恒真（这也是哑守卫的一种）。
+
+**路径修复**（三轮扫描，判据 = existence；按仓库根枚举）：`dashboard/src/launch/cli.ts` 的 `LEGACY_ALIAS` 八条
+（`'train_bc.py' → 'worker/train/bc.py'` …；它是 `--script` 旧扁平名映射，写错就是启动器报 `script not found`）·
+`dashboard/src/stack/specs.ts` 两条**哨兵**（`biz/bc_config.py` / `biz/bc_dispatch.py` → `worker/`，被上一刀新加的
+`dashboard/tests/stack-sentinel-paths.test.ts` 当场抓出）· `dashboard/src/server/api/route.ts` 的 replay 导出
+spawn 路径 · `dashboard/src/evalboard/kick-once.py` 的 `from biz.log` → `common.log` ·
+`curricula/x20-state-init.jsonc` 的银行路径 · `tests/golden/reward_golden.json` 的 `generated_by` ·
+`dashboard/tests/{kickstart-receipt,training-train}.test.ts` · 根 `tests/nn/coord-golden.test.ts` ·
+`nn-training/README.md` 模块地图 · `tools/tpu-probe.py`（内嵌 notebook 经 `tools/sync_tpu_probe_nb.py` 重生成）。
+
+**读数**：nn 门禁 **3373 passed / 3 skipped**（ruff `All checks passed`，**117 处** isort 漂移 `--fix`；mypy **548**
+文件干净）· 根 `bun run check` **2277 pass / 0 fail** · dashboard typecheck + **1232 pass / 0 fail** ·
+`bun run build` 过 · 反探针 `tmp/cut6_probe.py` **5/5**（`biz → worker` 向上边 · `worker.eval_rows` 直达 `remote` ·
+模块搬回 `trainer/` · 账本秩贴高 · dashboard 哨兵指向不存在的文件 —— 逐条红、复位即绿）。
+
+—— 全文（哑守卫三型的前后代码 / 路径清单 / 分家计数）→ `docs/nn/engineering.md` §54；搬移集与三处边界 →
+`plan/nn-training-module-reorg.plan.md` §5.5。
+
+## §2026-09-30-goalnn-entry-scripts-into-packages（2026-09-30，刀 7：14 个入口脚本归位 —— `nn-training/` 顶层只剩 `conftest.py`）
+
+**背景**：用户「nn-training 目录下还有几个 py 文件，把它们移动到合适的目录下」。按功能归位：六个训练/评估入口 →
+`trainer/`；两个 worker 入口 → `remote/`；`rl_config_schema` → `worker/`；五个环境/运维脚本 → `tools/`；`conftest.py`
+留根（pytest rootdir 守卫 + `tests/test_conftest_check_guard.py` 直接 import 它）。
+
+**三条前提随搬家重算**（本刀真正的技术含量 —— 前两条**只在真机启动时现形**，单测天然看不见）：
+① **脚本模式下 `sys.path[0]` = 脚本目录**（不再 nn-training）⇒ 六个入口各自前置「摘掉脚本目录项 + 放回 nn-training
+根」：`trainer/queue.py` 会遮蔽 stdlib `queue`，`concurrent.futures` 一导入就循环炸（惯用法抄 `trainer/eval_a_once.py`）；
+② **`Path(__file__)` 上溯层数 +1**：`HERE` / `NN_ROOT` / `ROOT` 的**语义**不变（nn-training 根 / 仓根），只改推导；
+③ **启动器**：`--script` 一直是「`nn-training/` 下的相对路径」（`resolveTrainScript` 只拒绝对路径/盘符/`..`），
+故写成 `trainer/run_rl.py`；`LEGACY_ALIAS` 里 `'train_rl.py'` 的值同步改。
+
+**刻意不加别名**（被否决的备选）：给 14 个旧裸名补 `LEGACY_ALIAS` 能让旧命令行继续可用，但别名森林让「脚本搬家了」
+永远没人发现（旧名与新路径两份真相）。取**响亮失败**：`--script run_rl.py` 现在报 `script not found`。
+
+**新守卫** `tests/test_entry_scripts_in_place.py`：① `nn-training/` 顶层只有 `conftest.py`；② 9 个文件入口以
+**脚本方式**真起一次（`python nn-training/<入口> --help`，退码 0 无栈）；③ 两个 `-m` 模块名
+（`remote.remote_worker[_serve]` —— 控制台 `specs.ts` / `push.ts` 与 Kaggle notebook 的契约面）。它填的正是既有守卫的盲区：
+单测里没人以脚本方式起过入口（`importlib` / `-c` 的 `sys.path[0]` 不是脚本目录）。
+
+**快照与账本**：`TRAINER_ORCHESTRATION` 37 → **43**（六个入口本来就是「可达 remote|worker」的直接成员，只是此前不在
+`trainer/` 视野里）；`tests/helpers/remote_dag.py` 账本 +3：`worker.rl_config_schema` **L0** · `remote.remote_worker`
+**L6** · `remote.remote_worker_serve` **L7**（层号 = 1 + max(依赖)，仍是算出来的，不是贴上去的）。
+
+**改写器踩的两个坑**：① 路径正则**尾部**缺否定前瞻 ⇒ `task.pytest_dispatch()` 里的 `task.py` 被当成路径
+（改出 `tools/task.pytest_dispatch()`，测试当场炸）；② 裸字符串规则误伤**锁种类**字面量（`"run_bc"` →
+`"trainer.run_bc"`）—— 锁名 `.run_rl.<course>.lock` 是**跨语言契约**（`slots.ts::lockName` ↔ python `course_lock_path`
+必须逐字节一致），由 `tests/test_serve_bc.py::…own_traj` 当场抓出。两条都写进 `docs/nn/engineering.md` §55。
+
+—— 全文（14 个文件的新老家 / 读数 / 反探针 / 未做）→ `docs/nn/engineering.md` §55；`plan/nn-training-module-reorg.plan.md` §5.6。

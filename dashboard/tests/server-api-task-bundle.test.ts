@@ -81,7 +81,7 @@ describe('与 python 共享的跨语言常量', () => {
 describe('任务包导出', () => {
   it('argv 走 trainer 自己的 --export-bundle（不在这侧重造包内容）', () => {
     const args = taskBundleArgs(COURSE)
-    expect(args[0]).toBe('nn-training/run_rl.py')
+    expect(args[0]).toBe('nn-training/trainer/run_rl.py')
     expect(args).toContain(COURSE)
     // 整段剩余：-1（跑到课程末尾）；★ §3 起 argv 不再带 --ppo（单一 PPO 路径）
     expect(args[args.indexOf('--run-iters') + 1]).toBe('-1')

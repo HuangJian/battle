@@ -1,4 +1,4 @@
-"""`rl_config_schema.py` 契约（plan/rl-config-cleanup.plan.md §3.4、E8）。
+"""`worker/rl_config_schema.py` 契约（plan/rl-config-cleanup.plan.md §3.4、E8）。
 
 四条要钉住的性质：
   · **只告警不拒**：未知 / 已退役键只出现在返回列表里，绝不抛（未知键 ≠ 训练起不来）；
@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-import rl_config_schema as S
+import worker.rl_config_schema as S
 
 NN_ROOT = Path(__file__).resolve().parent.parent
 
@@ -115,10 +115,10 @@ def test_retired_reason_is_non_empty() -> None:
 #: 用 `--echo-config` 让它在 dump 后早退——否则会一路跑进训练链（导 torch + 读权重）。
 _ORACLE = """
 import sys
-sys.argv = ["run_rl.py", "--course", sys.argv[1], "--echo-config"]
-import biz.config as cfg
+sys.argv = ["trainer/run_rl.py", "--course", sys.argv[1], "--echo-config"]
+import worker.config as cfg
 cfg.echo_config = lambda *a, **k: print("ECHO-REACHED")
-import run_rl
+from trainer import run_rl
 run_rl.main()
 """
 
@@ -127,7 +127,7 @@ def test_run_rl_logs_the_advisory_and_still_starts(tmp_path: Path) -> None:
     """**接线钉子**：假键 ⇒ 启动日志里真的有告警行，且**照常起训**（只告警不拒）。
 
     为什么必须有这条（2026-09-26 评审）：单测只钉住 `check_rl_config` 纯函数 ⇒ 谁把
-    `run_rl.py` 里那三行「读配置 → 打告警」挪掉都无人报警——而「静默沉睡」正是本案要防的形态。
+    `trainer/run_rl.py` 里那三行「读配置 → 打告警」挪掉都无人报警——而「静默沉睡」正是本案要防的形态。
     """
     fixture = tmp_path / "rl-config.fixture.json"
     fixture.write_text(

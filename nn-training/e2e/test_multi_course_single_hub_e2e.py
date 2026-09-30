@@ -285,7 +285,7 @@ def _make_code_zip(tmp_path: Path, name: str) -> Path:
     p = tmp_path / name
     with zipfile.ZipFile(p, "w") as z:
         z.writestr("remote/__init__.py", "")
-        z.writestr("remote_worker.py", "# fake code snapshot\n")
+        z.writestr("remote/remote_worker.py", "# fake code snapshot\n")
     return p
 
 

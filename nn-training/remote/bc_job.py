@@ -316,8 +316,8 @@ def _run_bc_job(
         torch.set_num_threads(torch_threads)
     from types import SimpleNamespace
 
-    from data.weights_io import save_weights_json
-    from train.bc import train as bc_train
+    from worker.data.weights_io import save_weights_json
+    from worker.train.bc import train as bc_train
 
     # 训练种子（2026-09-14 修正）：课程/调用方指定优先 —— 见 resolve_bc_seed。
     seed_int, seed_src = resolve_bc_seed(manifest)

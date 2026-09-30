@@ -27,11 +27,17 @@ import threading
 from pathlib import Path
 from typing import Any
 
-from biz.log import log
+from common.log import log
+from common.proc import run_capture
+from trainer.loop_guards import TrainingGuards
+from trainer.loop_lifecycle import TrainingLifecycle
+from trainer.loop_round_steps import RoundSteps
+from trainer.loop_steps import TrainingSteps
+from trainer.queue import REPO_ROOT
 
 # 一轮的终态与轮内上下文（R2c-3 起由 `biz.loop_round` 定义）——本模块**原样再导出**：
 # `from trainer.loop_core import ROUND_NEXT` 这类既有调用点（loop_runner / CLI）不受影响。
-from biz.loop_round import (
+from worker.loop_round import (
     ROUND_BUNDLE_EXIT,
     ROUND_NEXT,
     ROUND_RETRY,
@@ -42,12 +48,6 @@ from biz.loop_round import (
     RoundOutcome,
     RoundYieldError,
 )
-from common.proc import run_capture
-from trainer.loop_guards import TrainingGuards
-from trainer.loop_lifecycle import TrainingLifecycle
-from trainer.loop_round_steps import RoundSteps
-from trainer.loop_steps import TrainingSteps
-from trainer.queue import REPO_ROOT
 
 #: 本模块的公开面。`ROUND_*` / `RoundOutcome` / `RoundContext` / `RoundYieldError` 是
 #: **再导出**（定义在 `biz.loop_round`，`trainer/loop_runner.py` 从这里取）——S4 第十九刀后本模块

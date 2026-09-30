@@ -105,13 +105,13 @@ def _probes() -> list[tuple[str, Callable[[int], bool]]]:
     from common.instance_lock import _pid_alive as instance_probe
     from common.pid_probe import pid_alive as canonical_probe
     from remote.notebook_runtime import _pid_alive as notebook_probe
-    from run_rl import _runrl_pid_alive as runrl_probe
-    from train.loop_util import _pid_alive as loop_probe
+    from trainer.run_rl import _runrl_pid_alive as runrl_probe
+    from worker.train.loop_util import _pid_alive as loop_probe
 
     return [
         ("common.pid_probe.pid_alive（唯一实现）", canonical_probe),
-        ("train.loop_util._pid_alive", loop_probe),
-        ("run_rl._runrl_pid_alive", runrl_probe),
+        ("worker.train.loop_util._pid_alive", loop_probe),
+        ("trainer.run_rl._runrl_pid_alive", runrl_probe),
         ("common.instance_lock._pid_alive", instance_probe),
         ("remote.notebook_runtime._pid_alive", notebook_probe),
         ("tools/tmp-clean.py::_pid_alive（保留副本）", _load_tmp_clean_probe()),
@@ -219,7 +219,7 @@ def test_posix_branch_still_uses_signal_zero() -> None:
 
 def test_stale_lock_still_cleaned_after_windows_fix(tmp_path: Path) -> None:
     """锁语义不受影响：持有者已死 → 陈旧锁被接管（修复不得把清理能力弄丢）。"""
-    from train.loop_util import acquire_lock, cleanup_lock
+    from worker.train.loop_util import acquire_lock, cleanup_lock
 
     lock = str(tmp_path / ".train_loop.course-a.lock")
     Path(lock).write_text(f"{_dead_pid()}|python|0", encoding="utf-8")
@@ -231,7 +231,7 @@ def test_stale_lock_still_cleaned_after_windows_fix(tmp_path: Path) -> None:
 
 def test_pid_zero_lock_is_not_treated_as_live(tmp_path: Path) -> None:
     """残缺锁文件（PID 0 / 负数）不得被当成「有人持有」——否则同名课永久拒启。"""
-    from train.loop_util import acquire_lock
+    from worker.train.loop_util import acquire_lock
 
     for bogus in ("0", "-1"):
         lock = str(tmp_path / f".train_loop.bogus{bogus.replace('-', 'm')}.lock")
@@ -320,8 +320,8 @@ def test_os_kill_probe_exists_in_exactly_one_place() -> None:
 def test_delegation_shells_do_not_reimplement() -> None:
     """四份薄壳必须**委托**而不是复制：源码里不得再出现 `ctypes.windll`（Windows 分支的标志）。"""
     for rel in (
-        "train/loop_util.py",
-        "run_rl.py",
+        "worker/train/loop_util.py",
+        "trainer/run_rl.py",
         "common/instance_lock.py",
         "remote/notebook_runtime.py",
     ):

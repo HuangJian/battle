@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from biz.volume_quota import (
+from worker.volume_quota import (
     DEFAULT_MAX_BATCHES,
     VOLUME_RULE_V2,
     allocate_stage_games,

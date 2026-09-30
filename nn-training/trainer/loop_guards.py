@@ -29,12 +29,12 @@ from pathlib import Path
 from typing import Any
 
 import common.distribution
-from biz.log import log
-from biz.loop_guards_gate import TrainingGuardsGate
-from biz.loop_guards_leg import TrainingGuardsLeg
-from biz.loop_guards_sweep import TrainingGuardsSweep
-from biz.loop_guards_trip import TrainingGuardsTrip
+from common.log import log
 from remote.hub_client import set_cloud_halt
+from worker.loop_guards_gate import TrainingGuardsGate
+from worker.loop_guards_leg import TrainingGuardsLeg
+from worker.loop_guards_sweep import TrainingGuardsSweep
+from worker.loop_guards_trip import TrainingGuardsTrip
 
 
 class TrainingGuards(

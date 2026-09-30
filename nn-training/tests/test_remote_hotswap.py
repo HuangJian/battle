@@ -204,7 +204,7 @@ def test_main_child_mode_forwards_restart_argv(monkeypatch: pytest.MonkeyPatch) 
 
     monkeypatch.setattr(W, "worker_loop", _fake_worker_loop, raising=True)
     monkeypatch.setenv("REMOTE_WORKER_CHILD", "1")
-    monkeypatch.setattr(sys, "argv", ["remote_worker", "--poll", "http://x", "--token", "t"])
+    monkeypatch.setattr(sys, "argv", ["remote.remote_worker", "--poll", "http://x", "--token", "t"])
     with pytest.raises(SystemExit):
         W.main()
     assert seen["restart_argv"] == ["--poll", "http://x", "--token", "t"]  # 非空=有监督器

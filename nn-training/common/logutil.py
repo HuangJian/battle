@@ -3,7 +3,7 @@
 本仓有两套日志出口，用途不同但**时间戳格式必须一致**（复盘时要能把两边按时间对齐）：
 
 * `biz/log.py::log` —— 训练主通道，带**课程前缀路由**（`prefix_scope` 把同一行镜像进
-  该课的日志文件）。它有模块级可变状态，属上层设施，留在 `rl/`。
+  该课的日志文件）。它有模块级可变状态，属上层设施，留在 `trainer/`。
 * 带**固定 tag** 的轻量出口 —— `remote/run_loop.py` / `remote/push_dispatch.py` /
   `remote/offline_deliver.py` / `remote/notebook_runtime.py` 各自的 `_log_default`。
   它们刻意不依赖 `biz/log.py`（`remote/run_loop` 要在**没有 rl 包**的上下文里当自主循环

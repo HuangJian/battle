@@ -28,10 +28,10 @@ from common.schema import OBS_CHANNELS, SCALAR_DIM
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import ppo.engine as ppo
-import ppo.goal as ppo_goal
-from data.weights_io import load_weights_json
-from models.goal_net import export_goal_weights
+import worker.ppo.engine as ppo
+import worker.ppo.goal as ppo_goal
+from worker.data.weights_io import load_weights_json
+from worker.models.goal_net import export_goal_weights
 
 FAILS: list[str] = []
 

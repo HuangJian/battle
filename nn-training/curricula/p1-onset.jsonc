@@ -29,7 +29,7 @@
 //   horizon ≈1/(1-γλ)=26.7 决策步，覆盖接敌段；0.99/0.95 只有 16.8 步=168 tick，
 //   追击段零信用分配）；kl_coef 0.6→0.2→0（BC 起点无需 0.8 的强信任域压制）；
 //   kl_cap 1e9→0.2（流式 KL 波门，前段 warmup 不裁）。
-// 启动：python run_rl.py --course p1-onset（bc 指向 tmp/p1-bc/weights.json）
+// 启动：python trainer/run_rl.py --course p1-onset（bc 指向 tmp/p1-bc/weights.json）
 {
   "version": 5,
   "name": "p1-onset",

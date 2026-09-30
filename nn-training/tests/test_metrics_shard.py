@@ -22,10 +22,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.config import load_course
 from biz.reward_context import Scoped, current, reset
 from biz.reward_library import METRIC_INDEX, METRICS_DIM, METRICS_VERSION, build_reward_fn
-from ppo.np_core import load_episodes
+from worker.config import load_course
+from worker.ppo.np_core import load_episodes
 
 
 def _write_shard(root: Path, name: str, n: int, metrics: np.ndarray, manifest: dict) -> Path:

@@ -1,4 +1,4 @@
-"""rl/course_spec —— **课程配置的类面**（S5 第十刀，2026-09-27）。
+"""biz/course_spec —— **课程配置的类面**（S5 第十刀，2026-09-27）。
 
 从 `biz/config.py` 整块搬出（**逐字节不动**）。这里是 `curricula/*.jsonc` / `levels/*.jsonc`
 在代码里的**形状**：全部 pydantic 模型（`CourseConfig` 及其嵌套块 · `StageSpec` ·
@@ -946,7 +946,7 @@ class CourseConfig(BaseModel):
             out["backup_prefix"] = self.backup_prefix
         if "state_init" in explicit and self.state_init is not None:
             # 嵌套块 → **dict**（不进上面的 mapping：那一张是标量与异名映射表）。下游
-            # （P3 的 `rl/cmd.build_rollout_cmd`）只要 JSON 可序列化的数据——`echo_config`
+            # （P3 的 `biz/cmd.build_rollout_cmd`）只要 JSON 可序列化的数据——`echo_config`
             # 也会 json.dumps 它，pydantic 模型对象在那里直接炸。
             out["state_init"] = self.state_init.model_dump()
         return out

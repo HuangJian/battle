@@ -24,9 +24,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import biz.paired as paired_mod
-from biz.config import CourseConfig
-from biz.paired_kill import (
+import worker.paired as paired_mod
+from trainer.loop_guards import TrainingGuards
+from worker.config import CourseConfig
+from worker.paired_kill import (
     PAIRED_KILL_MARGIN_PP,
     PAIRED_KILL_POINTS,
     paired_kill_enabled,
@@ -35,7 +36,6 @@ from biz.paired_kill import (
     paired_kill_verdict,
     readings_by_iter,
 )
-from trainer.loop_guards import TrainingGuards
 
 V = 20260921
 

@@ -18,10 +18,10 @@ import time
 
 import pytest
 
-import biz.eval_local as eval_local
-from biz.eval_local import run_eval_runner_capture
+import worker.eval_local as eval_local
 from common.platform_utils import KILL_REAP_SEC
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from worker.eval_local import run_eval_runner_capture
 
 #: 故意混字节：UTF-8 的中文 + 单独的 0xaf（在 gbk 与 utf-8 下都不是合法序列）。
 _CHILD = (
@@ -50,7 +50,7 @@ def test_capture_helper_is_what_the_runner_uses() -> None:
     """接线：本机局的输出捕获必须走这个 helper（否则 encoding 又悄悄丢了）。"""
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parent.parent / "biz" / "eval_local.py").read_text(
+    src = (Path(__file__).resolve().parent.parent / "worker" / "eval_local.py").read_text(
         encoding="utf-8"
     )
     # 调用点带 cwd（云机离线评估要跑在 TS 树根上）+ 慢局告警的身份/落点（2026-09-22）

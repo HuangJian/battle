@@ -37,7 +37,6 @@ ROOT = Path(__file__).resolve().parent.parent
 from test_role_routing import OFF_JID, _manifest, _store  # type: ignore
 from test_worker_bun_precheck import _job as _worker_job  # type: ignore
 
-from biz.loop_round import COLLECT_OFFLINE, ROUND_OFFLINE_EXIT, RoundContext
 from common.protocol import (
     ROLE_HEADER,
     ROLE_HEADER_VALUE,
@@ -47,13 +46,14 @@ from hub.server import _HubQueue, make_server
 from remote import worker as W
 from trainer.loop_round_steps import RoundSteps
 from trainer.loop_steps import TrainingSteps
+from worker.loop_round import COLLECT_OFFLINE, ROUND_OFFLINE_EXIT, RoundContext
 
 TOKEN = "sekret"
 # 2026-09-30（刀 4）：`biz/` 是 `rl/` 的纯逻辑半（搬家前就在扫描面里）⇒ 必须补上，
 # 否则「已退役契约不得回流」的判据会静默少扫 64 个模块。
 PROD_DIRS = ("trainer", "biz", "remote")
 #: 根目录上的两块生产代码（与 `trainer/`、`biz/` 同级，别漏）。
-PROD_FILES = ("run_rl.py", "common/distribution.py")
+PROD_FILES = ("trainer/run_rl.py", "common/distribution.py")
 
 
 def _prod_sources() -> dict[str, str]:
@@ -281,7 +281,7 @@ def test_export_bundle_still_wins_over_the_offline_early_exit(
     monkeypatch.setattr(lrs.common.distribution, "load_dist_config", lambda: {})
     exported: list[tuple] = []
     steps = _bare_steps()
-    steps.args.export_bundle = "task.zip"
+    steps.args.export_bundle = "tools.task.zip"
     steps._export_offline_bundle = lambda *a: exported.append(a)
     steps.step_course_iter(RoundContext(it=2, pairs=[]))
     assert len(exported) == 1

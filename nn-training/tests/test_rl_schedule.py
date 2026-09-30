@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.schedule import ScheduleError, resolve_ppo_schedule
+from worker.schedule import ScheduleError, resolve_ppo_schedule
 
 ENTRIES = [
     {"until_iter": 10, "lr": 1e-4, "epochs": 2, "mb": 256, "kl_coef": 1.0},

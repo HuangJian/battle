@@ -151,12 +151,12 @@ def test_multiple_markers_any_hit_refuses(
     """多指纹：同一个服务有多个合法入口（`-m remote_worker_serve` / 模块名拉起）时，
     任一枚命中就算同一程序，仍然拒启（不得因为指纹表没写全而误接管）。"""
     lock = tmp_path / ".worker_server.8790.lock"
-    holder = _spawn_lock_holder(lock, marker="remote_worker_serve")
+    holder = _spawn_lock_holder(lock, marker="remote.remote_worker_serve")
     try:
         assert _wait_lock_owner(lock, holder)
         assert (
             il.acquire_instance_lock(
-                str(lock), marker=("remote_worker_serve", "worker_server"), tag="worker-serve"
+                str(lock), marker=("remote.remote_worker_serve", "worker_server"), tag="worker-serve"
             )
             is False
         )

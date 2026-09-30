@@ -20,13 +20,13 @@ from __future__ import annotations
 import time
 
 import common.distribution
-from biz.events import write_gate_verdict
-from biz.log import log
-from biz.loop_round import RoundContext, StepResult, wait_for
+from common.log import log
 from common.protocol import JobFailedError
 from trainer.loop_remote_fail import TrainingRemoteFail
 from trainer.loop_remote_job import TrainingRemoteJob
 from trainer.loop_transport import fatal_remote_http, remote_retryable_exceptions
+from worker.events import write_gate_verdict
+from worker.loop_round import RoundContext, StepResult, wait_for
 
 
 class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
@@ -108,7 +108,7 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
                 "补波需要训练侧反复读本地 shard，而上云轮的 shard 在节点上（跑完即毁）。"
                 "要动态采集就保持 rollout_src=local"
             )
-        from biz.iter_job import build_iter_spec
+        from worker.iter_job import build_iter_spec
 
         wver = common.distribution.weights_fingerprint(args.out)
         workers = int(getattr(args, "remote_iter_workers", 0) or 0) or int(

@@ -406,7 +406,7 @@ def run_job(
     ts_code_cache_dir: Path | None = None,
     lease_token: str = "",
     # 日志节食（2026-09-24）：本 job 的「入口 + 启动 + 装载」读数攒进这个 bundle。
-    # 调用方（`rl/` 的常驻轮 loop）先往里放它自己那几行（`it<N>: N 局 wver=…`），本函数
+    # 调用方（`trainer/` 的常驻轮 loop）先往里放它自己那几行（`it<N>: N 局 wver=…`），本函数
     # 再把入口/设备读数放进去，训练核把装载读数补上，装载完成时打**一行**
     # （`nn-training/common/log_bundle.py`）；不传就自建（只在行数上有差别，信息量不变）。
     prep: Any = None,
@@ -643,7 +643,7 @@ def run_job(
     # init 权重与指纹原样回传为 job 结果（hub-start --smoke-only 的 Kaggle 交互预演，
     # 用户拍板：真课程 + 作废轮，不建虚拟课程）。三重校验按构造必过
     # （init_weights_fp/data_fp/commit_echo 均为 manifest 回显）；消费方
-    # （rl/loop_steps._remote_ppo）见 result["smoke"] 作废本轮（it 不前进）。
+    # （trainer/loop_steps._remote_ppo）见 result["smoke"] 作废本轮（it 不前进）。
     if echo:
         init_w = job_dir / "init_weights.json"
         if not init_w.exists():

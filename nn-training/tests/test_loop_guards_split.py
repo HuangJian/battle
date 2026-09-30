@@ -177,27 +177,27 @@ TOP_IMPORTS: dict[str, frozenset[str]] = {
         {
             "common.distribution",
             "remote.hub_client",
-            "biz.log",
-            "biz.loop_guards_gate",
-            "biz.loop_guards_leg",
-            "biz.loop_guards_sweep",
-            "biz.loop_guards_trip",
+            "common.log",
+            "worker.loop_guards_gate",
+            "worker.loop_guards_leg",
+            "worker.loop_guards_sweep",
+            "worker.loop_guards_trip",
         }
     ),
-    "loop_guards_trip.py": frozenset({"biz.breaker", "biz.events", "biz.log", "biz.stop_loss"}),
+    "loop_guards_trip.py": frozenset({"worker.breaker", "worker.events", "common.log", "worker.stop_loss"}),
     "loop_guards_leg.py": frozenset(
         {
-            "biz.config",
-            "biz.events",
-            "biz.gate_check",
-            "biz.kickstart_burn",
-            "biz.log",
-            "biz.paired",
-            "biz.paired_kill",
+            "worker.config",
+            "worker.events",
+            "worker.gate_check",
+            "worker.kickstart_burn",
+            "common.log",
+            "worker.paired",
+            "worker.paired_kill",
         }
     ),
-    "loop_guards_gate.py": frozenset({"biz.events", "biz.gate_check", "biz.log"}),
-    "loop_guards_sweep.py": frozenset({"common.platform_utils", "biz.log", "biz.workdir_sweep"}),
+    "loop_guards_gate.py": frozenset({"worker.events", "worker.gate_check", "common.log"}),
+    "loop_guards_sweep.py": frozenset({"common.platform_utils", "common.log", "worker.workdir_sweep"}),
 }
 
 #: 允许的 stdlib 顶层 import（闭集的一部分）。
@@ -400,10 +400,6 @@ def test_no_member_name_shadowed_across_the_family() -> None:
 def test_composition_is_exact() -> None:
     """组合根仍是 `TrainingGuards`、仍住 `trainer/loop_guards.py`，基类元组逐字；组合类一行不改。"""
     import trainer.loop_guards as root
-    from biz.loop_guards_gate import TrainingGuardsGate
-    from biz.loop_guards_leg import TrainingGuardsLeg
-    from biz.loop_guards_sweep import TrainingGuardsSweep
-    from biz.loop_guards_trip import TrainingGuardsTrip
     from trainer.loop_core import TrainingLoop
     from trainer.loop_eval import TrainingEval
     from trainer.loop_export import TrainingExport
@@ -412,6 +408,10 @@ def test_composition_is_exact() -> None:
     from trainer.loop_remote import TrainingRemote
     from trainer.loop_round_steps import RoundSteps
     from trainer.loop_steps import TrainingSteps
+    from worker.loop_guards_gate import TrainingGuardsGate
+    from worker.loop_guards_leg import TrainingGuardsLeg
+    from worker.loop_guards_sweep import TrainingGuardsSweep
+    from worker.loop_guards_trip import TrainingGuardsTrip
 
     for fname, want in BASES.items():
         mod = root if fname == "loop_guards.py" else __import__(
@@ -630,8 +630,8 @@ def test_trip_breaker_really_trips_on_nonfinite(tmp_path: Path) -> None:
 
     seam 断言：判决写入解析到**新家**的 `write_gate_verdict`——打旧家的名字打不中。
     """
-    import biz.loop_guards_trip as trip
     import trainer.loop_guards as root
+    import worker.loop_guards_trip as trip
 
     seen: list[str] = []
     jsonl = tmp_path / "training_log.jsonl"
@@ -662,7 +662,7 @@ def test_trip_breaker_really_trips_on_nonfinite(tmp_path: Path) -> None:
 
 def test_trip_stop_loss_needs_two_consecutive_significant_rounds(tmp_path: Path) -> None:
     """★ 过程面：Δ≤−2σ 一轮只记数，**连续两轮**才停车（P1-9）。"""
-    from biz.loop_guards_trip import TrainingGuardsTrip
+    from worker.loop_guards_trip import TrainingGuardsTrip
 
     jsonl = tmp_path / "training_log.jsonl"
     obj = _obj(
@@ -680,7 +680,7 @@ def test_trip_stop_loss_needs_two_consecutive_significant_rounds(tmp_path: Path)
 
 def test_leg_kickstart_burn_really_stops_the_leg(tmp_path: Path) -> None:
     """★ 结果面：连续 3 点低于起点基线 ⇒ 停腿（True）+ 可回放的账本。"""
-    from biz.loop_guards_leg import TrainingGuardsLeg
+    from worker.loop_guards_leg import TrainingGuardsLeg
 
     jsonl = tmp_path / "training_log.jsonl"
     (tmp_path / "eval_log.jsonl").write_text(
@@ -704,7 +704,7 @@ def test_leg_kickstart_burn_really_stops_the_leg(tmp_path: Path) -> None:
 
 def test_leg_paired_kill_is_inert_without_a_paired_course(tmp_path: Path) -> None:
     """★ 结果面：没声明 `paired_rotate_seed` 就没有「对端」这回事 ⇒ 零行为。"""
-    from biz.loop_guards_leg import TrainingGuardsLeg
+    from worker.loop_guards_leg import TrainingGuardsLeg
 
     obj = _obj(
         args=_base_args(),
@@ -718,7 +718,7 @@ def test_leg_paired_kill_is_inert_without_a_paired_course(tmp_path: Path) -> Non
 
 def test_gate_budget_hard_cut_really_stops(tmp_path: Path) -> None:
     """★ 门族：max_hours 到顶 ⇒ 轮级硬断 True + 落 STOP（exit-watchdog 认它是设计内停车）。"""
-    from biz.loop_guards_gate import TrainingGuardsGate
+    from worker.loop_guards_gate import TrainingGuardsGate
 
     jsonl = tmp_path / "training_log.jsonl"
     started = datetime.now() - timedelta(hours=10)
@@ -734,7 +734,7 @@ def test_gate_budget_hard_cut_really_stops(tmp_path: Path) -> None:
 
 def test_gate_is_inert_without_a_gates_block(tmp_path: Path) -> None:
     """★ 门族：老课程（无 `gates` 块）恒 False——零行为变化。"""
-    from biz.loop_guards_gate import TrainingGuardsGate
+    from worker.loop_guards_gate import TrainingGuardsGate
 
     obj = _obj(args=_base_args(), _jsonl_path=tmp_path / "training_log.jsonl", _traj_root=tmp_path)
     assert TrainingGuardsGate._gate(obj, 3) is False  # type: ignore[arg-type]
@@ -746,7 +746,7 @@ def test_gate_is_inert_without_a_gates_block(tmp_path: Path) -> None:
 
 def test_sweep_really_rotates_the_iter_dirs(tmp_path: Path) -> None:
     """★ 磁盘回收：keep_iters=1 在 it3 时删 it1/it2、留 it3；job 清理由 manifest 定。"""
-    from biz.loop_guards_sweep import TrainingGuardsSweep
+    from worker.loop_guards_sweep import TrainingGuardsSweep
 
     for name in ("it1", "it2", "it3"):
         (tmp_path / name).mkdir()

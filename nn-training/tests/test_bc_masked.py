@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from train.bc import _masked_acc, _masked_ce
+from worker.train.bc import _masked_acc, _masked_ce
 
 
 def test_masked_ce_ignores_illegal_class() -> None:

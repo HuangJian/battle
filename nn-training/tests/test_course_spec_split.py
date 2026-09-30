@@ -27,10 +27,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import biz.config as config_mod
 import biz.course_spec as spec_mod
+import worker.config as config_mod
 
-CONFIG_FILE = ROOT / "biz" / "config.py"
+CONFIG_FILE = ROOT / "worker" / "config.py"
 NEW_FILE = ROOT / "biz" / "course_spec.py"
 
 MOVED_NAMES = {
@@ -71,7 +71,7 @@ ALLOWED_IMPORTS = {
     "biz.course_resolve",  # GatesSpec 校验期的**函数内**延迟导入（见下一条）
     "biz.course",  # CourseConfig.stage_ids 的**函数内**延迟导入（parse_range）
 }
-TOP_LEVEL_BANNED = {"biz.config", "biz.course_resolve"}
+TOP_LEVEL_BANNED = {"worker.config", "biz.course_resolve"}
 
 
 def _tree(path: Path) -> ast.Module:
@@ -122,7 +122,7 @@ def test_course_spec_import_surface_is_closed() -> None:
     mods = _imported_modules(NEW_FILE)
     extra = sorted(mods - ALLOWED_IMPORTS)
     assert extra == [], f"course_spec 引入了允许面之外的依赖：{extra}"
-    assert "biz.config" not in mods, "类面反向 import 门面 ⇒ 与 config → course_spec 成环"
+    assert "worker.config" not in mods, "类面反向 import 门面 ⇒ 与 config → course_spec 成环"
 
 
 def test_cross_face_call_is_function_local_not_top_level() -> None:

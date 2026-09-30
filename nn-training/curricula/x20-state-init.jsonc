@@ -66,7 +66,7 @@
   "level": "ladder-c20-lives1",
 
   // ── 奖励：noexplore 原公式逐字 ──────────────────────────────────────────
-  // 计数器列一律是**游戏真值**（继承的击杀也在里面）；奖励 = Φ 的差分（rl/reward_library），
+  // 计数器列一律是**游戏真值**（继承的击杀也在里面）；奖励 = Φ 的差分（biz/reward_library），
   // 对「继承的进度」天然不付钱 —— 不需要、也不许在 TS 侧做 rebase（那会让 metrics.kills
   // 与 manifest 的游戏真值分叉）。分析侧要 rebase 就用 shard manifest 的 `initCounters`。
   "reward": {
@@ -95,8 +95,8 @@
   "state_init": {
     // 快照银行 manifest（P0 产物）：`{recipe, games:[{id, stage, demoSeed, ticks, cuts[]}]}`
     // + 同目录 `snapshots/<stage>-<demoSeed>-t<tick>.json`。两种基准都认（仓库相对 /
-    // nn-training 相对），见 `rl.config.resolve_state_init_bank`。
-    "bank": "nn-training/data/state-init-bank/manifest.json",
+    // nn-training 相对），见 `biz.course_resolve.resolve_state_init_bank`。
+    "bank": "nn-training/worker/data/state-init-bank/manifest.json",
     // 切点 recipe：[cut_from, cut_to] 步 cut_step（cut_to 负值 = 从局尾回退）。
     // ⚠ 它只是 P0 的**物化规则**：真正的每局 cuts[] 已在 manifest 里，采集侧（P3）只从
     // manifest 抽（选哪个状态进语料身份）——改这里必须重跑 P0 银行，否则对不上。
@@ -136,7 +136,7 @@
   // ── 采集：mb 对齐 ────────────────────────────────────────────────────────
   // 49152 = 48 × mb(1024)；est_samples_per_game = P0 实测**首轮兜底**：全银行 972 个切点
   // 的剩余决策步均值 = 250（中段局的剩余时长分布与标准开局不同，不能沿用父腿的 147）。
-  // 首轮之后由 trailing 5 轮的实测局均覆盖（rl/resume.trailing_samples_per_game）。
+  // 首轮之后由 trailing 5 轮的实测局均覆盖（biz/resume.trailing_samples_per_game）。
   "target_transitions": 49152,
   "est_samples_per_game": 250,
   "seed_rotate": 150,
@@ -170,7 +170,7 @@
 //   rebase 后看存活/击杀）+ value.npy 首行 V 均值趋势 + 与 noexplore 同绝对 it 点配对对照
 //   （abs≤180）。
 // · 交棒自检：每局 restore 后 tickHash 与 manifest 对不上 ⇒ 该局响亮失败（日志里直接可见）；
-//   银行侧的历史对账读数在 `data/state-init-bank/manifest.json`（逐局 hashChecks）。
+//   银行侧的历史对账读数在 `worker/data/state-init-bank/manifest.json`（逐局 hashChecks）。
 // · 起始状态重复度：shard manifest 的 `initSnapshot` 频次分布（池小 ⇒ V 头记忆化风险读数）。
 //
 // ── 结算节（跑完回填）─────────────────────────────────────────────────────

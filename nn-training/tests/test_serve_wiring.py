@@ -26,14 +26,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import biz.train_ledger as train_ledger
 import trainer.loop_core as loop_core
 import trainer.loop_plan as loop_plan
 import trainer.loop_serve as loop_serve
-from biz.loop_round import STEP_METHOD
-from biz.loop_tasks import ROUND_TASKS
+import worker.train_ledger as train_ledger
 from common.protocol import COURSE_ENABLE_MARKER
 from trainer.loop_serve import CourseRuntime, serve
+from worker.loop_round import STEP_METHOD
+from worker.loop_tasks import ROUND_TASKS
 
 
 def _enable_course(root: Path, name: str) -> None:
@@ -613,7 +613,7 @@ def test_cli_serve_without_courses_means_discovery(
     那时这条只关心 argv 转发形状的用例会因别人的锁 `SystemExit` 而红（2026-09-20 实测：
     pre-commit 门禁被一条与本改动无关的活进程染红）。测试不得依赖「此刻本机没在训练」。
     """
-    import run_rl_cluster
+    from trainer import run_rl_cluster
 
     seen: dict[str, Any] = {}
 
@@ -651,7 +651,7 @@ def test_cli_serve_takes_a_process_level_single_instance_lock(
     锁在 `serve()` **之前**把关（真跑起来就晚了），故这里用一个已被自己持有的锁文件表达
     「另一个服务器正在跑」。`--force` 是显式接管（先确认无人在跑）。
     """
-    import run_rl_cluster
+    from trainer import run_rl_cluster
 
     lock = tmp_path / ".run_cluster.lock"
     lock.write_text(f"{os.getpid()}|python|0", encoding="utf-8")
@@ -686,7 +686,7 @@ def test_course_args_unknown_course_is_loud() -> None:
 
 
 # 2026-09-20：argv 里必须有 `--echo-config`。原版没传——而 run_rl.main() 的 echo 调用点在
-# `if getattr(args, "echo_config", False):` 之后（run_rl.py:212），所以那次 dump **从来没
+# `if getattr(args, "echo_config", False):` 之后（trainer/run_rl.py:212），所以那次 dump **从来没
 # 被调用过**：main() 继续往下跑 validate_args → loop 启动 → build_model → 导入 torch
 # 并去找 weights/<course>/*.json ⇒ 表现为「本机缺权重 → skip」（本环境）或「有权重但没
 # PARITY → pytest.fail」（真机），把一个纯解析链对拍变成了环境/训练链依赖。
@@ -705,8 +705,8 @@ def test_course_args_unknown_course_is_loud() -> None:
 #      于是用例可以用自己的 tmp 配置当夹具，不再隐式依赖本机那份**未入库**的 rl-config.json。
 _ORACLE = """
 import json, sys
-sys.argv = ["run_rl.py", "--course", sys.argv[1], "--echo-config"]
-import biz.config as cfg
+sys.argv = ["trainer/run_rl.py", "--course", sys.argv[1], "--echo-config"]
+import worker.config as cfg
 def fake_echo(args, course, it=1):
     # 与 course_args 的终态对齐：它也跑 validate_args（单一 PPO 路径的归一化就在里面）。
     cfg.validate_args(args)
@@ -716,13 +716,13 @@ def fake_echo(args, course, it=1):
                                   if not k.startswith("_") and k != "echo_config"},
                                  ensure_ascii=False))
 cfg.echo_config = fake_echo
-import run_rl
+from trainer import run_rl
 run_rl.main()
 """
 
 
 def test_course_args_match_run_rl_echo_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """对拍：`course_args(stem)` ≡ `run_rl.py --course <stem> --echo-config` 的解析快照。
+    """对拍：`course_args(stem)` ≡ `trainer/run_rl.py --course <stem> --echo-config` 的解析快照。
 
     oracle = 在**子进程里跑 `run_rl.main()` 自己**、把 `echo_config` 换成 dump（同一调用点、
     同一份解析链）——见 `_ORACLE` 上的注释：必须带 `--echo-config` 才会真的走到那次 dump，

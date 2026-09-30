@@ -22,7 +22,7 @@
 //   **单关**：ladder-c04-abcd，forces `abcdabcdabcdabcdabcd`（20 长），
 //   `count 4` ⇒ 队列 20 取前 4 = **a+b+c+d 各一**（每局固定全套，无变体）。
 //   max_ticks **3300**、lives 1、hard、空场 13×13。
-//   自定义关 ID **2000-2000**（单关沿用，`rl/ladder_factory.py:228 eval_stages_for`）。
+//   自定义关 ID **2000-2000**（单关沿用，`biz/ladder_factory.py:228 eval_stages_for`）。
 //   任务侧一个字不动（AGENTS §0.2）—— 只动训练侧。
 //   ⚠ **单关的结构后果**（本腿与 c01–c03 三腿最大的不同）：
 //     ① 没有「分关掉队」可探测 —— 掉队规则退化为单关相对 it0（见 §5）；

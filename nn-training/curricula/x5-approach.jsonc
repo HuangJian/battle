@@ -335,7 +335,7 @@
 //   ② 横盘读法采纳对方读法 C（"从未比 it0 好 5%+" = 40 点）—— 比 4 点回归更稳，
 //   后续腿统一用 C；③ 对方发现 `eval_log.jsonl` 缺三列（powerUpsSpawned/puGotOther/
 //   starsCollected，`eval_dispatch.py` 未接线）⇒ **已补齐（2026-09-18，Python-only）**：
-//   `rl/eval_local.eval_loot_fields` 接入 dispatch/batch/eval_a_once/ingest；spawn/stars
+//   `biz/eval_local.eval_loot_fields` 接入 dispatch/batch/eval_a_once/ingest；spawn/stars
 //   自 `scorable.telemetry` 回落（不改 codehash 内 export-eval-game.ts）。下次判读免反推；④ 课程文件头"待开训"过期文案已在本结算节更新。
 // 终点已另存 `nn-training/weights/x5-approach-best/x5-approach.it155.best.json`
 //   （379KB、`nn-weights-json`、`schema_major 3`、42 键，已核验）。

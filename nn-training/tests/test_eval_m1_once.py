@@ -22,7 +22,7 @@ sys.path.insert(0, str(ROOT / "nn-training"))
 
 def _load():
     spec = importlib.util.spec_from_file_location(
-        "eval_m1_once", str(ROOT / "nn-training" / "eval_m1_once.py")
+        "trainer.eval_m1_once", str(ROOT / "nn-training" / "trainer/eval_m1_once.py")
     )
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)

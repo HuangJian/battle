@@ -6,7 +6,7 @@
 //
 //   1. name/out/traj/backup_prefix → c6b-margin（fresh，绝不复用 c6 目录）
 //   2. R3 重定价：`wTick` 0.01 → **0.001**；`terminal.stage_clear` 2.0 → **6.0**
-//      · 病灶（§12-D6）：用真实公式（`rl/reward_library`，整局 Σr）验算 c6 定价：
+//      · 病灶（§12-D6）：用真实公式（`biz/reward_library`，整局 Σr）验算 c6 定价：
 //          6杀全歼 t600 +16.5 > 6杀全歼 t2000 +2.5 > 3杀t800阵亡 +0.7
 //          > 0杀t300速死 −5.0 > 5杀t2400超时 −9.1
 //        →「早死(3杀t800) − 慢输(5杀t2400) = **+9.8**」：多打 2 个敌人并多活 1600
@@ -173,7 +173,7 @@
   "eval_every": 3,
   // ── 课程结束门（plan/course-exit-and-shutdown.md §3.2）────────────────────
   // 阈值进文件 = 进 course_fp：改阈值就是新实验版本（§331-D14）。
-  // 求值器 rl/gate_check.py（纯函数，每 eval_every 由 loop_guards 第四守卫调用）。
+  // 求值器 biz/gate_check.py（纯函数，每 eval_every 由 loop_guards 第四守卫调用）。
   "gates": {
     "sustain": 3,
     "teacher": {

@@ -28,7 +28,8 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from biz.course import build_pairs
-from biz.plan import (
+from common.protocol import ProtocolError
+from worker.plan import (
     argv_fp,
     build_plan,
     check_plan_against_args,
@@ -40,7 +41,6 @@ from biz.plan import (
     retarget_argv,
     validate_plan,
 )
-from common.protocol import ProtocolError
 
 
 def _args(**over: object) -> SimpleNamespace:

@@ -1,6 +1,6 @@
 /** loop-queue.ts — 训练调度器（单例）每课队列视图的读取面（R2c-3 控制台接线）。
  *
- *  数据源 = `nn-training/run_rl_cluster.py --json`（训练侧**只读**入口：不训练、不发布、
+ *  数据源 = `nn-training/trainer/run_rl_cluster.py --json`（训练侧**只读**入口：不训练、不发布、
  *  不等待）。为什么走子进程而不是在 TS 里读账本重算：那一份判据（`pending_tasks` /
  *  `RoundFacts` / `waiting_state`）已经存在且被 python 侧用例钉住，在控制台重写一遍 =
  *  第二份真相，两边会以不同的速度演化（R2b 否决 `loop-state.json` 的同一条理由）。
@@ -47,7 +47,7 @@ export type LoopQueueRunner = () => RunPythonResult | Promise<RunPythonResult>
 
 function defaultLoopQueueRunner(): Promise<RunPythonResult> {
   return runRunPythonAsyncScript(
-    'nn-training/run_rl_cluster.py',
+    'nn-training/trainer/run_rl_cluster.py',
     ['--traj-root', path.join(REPO_ROOT, 'tmp'), '--json'],
     { timeoutMs: LOOP_QUEUE_TIMEOUT_MS },
   )
@@ -66,14 +66,14 @@ export function viewFromRunResult(r: RunPythonResult): LoopQueueView {
     const tail = (r.stderr || '').trim().split('\n').slice(-1)[0] ?? ''
     return {
       ...empty,
-      error: `run_rl_cluster.py 退出码 ${r.code ?? 'null'}${tail ? `：${tail}` : ''}`,
+      error: `trainer/run_rl_cluster.py 退出码 ${r.code ?? 'null'}${tail ? `：${tail}` : ''}`,
     }
   }
   let raw: unknown
   try {
     raw = JSON.parse(r.stdout.trim())
   } catch {
-    return { ...empty, error: 'run_rl_cluster.py --json 输出不可解析（stdout 不是 JSON）' }
+    return { ...empty, error: 'trainer/run_rl_cluster.py --json 输出不可解析（stdout 不是 JSON）' }
   }
   const view = parseLoopQueue(raw)
   if (!view) return { ...empty, error: '--json 形状不符（缺 courses 数组）' }

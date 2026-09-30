@@ -130,7 +130,7 @@ def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 def test_generated_course_invariants(generated: Path) -> None:
-    from biz.config import load_course
+    from worker.config import load_course
 
     for c in (1, 4, 7, 8, 14, 15, 20):
         name = lf.level_name(c)
@@ -155,7 +155,7 @@ def test_generated_course_invariants(generated: Path) -> None:
 def test_early_levels_multi_variant(generated: Path) -> None:
     """B 案：c01-c03 = C(4,1/2/3) = 4/6/4 关（xN 试点语义入厂）；
     c01 单出生点降噪保持（spawn_points_for 原样）。"""
-    from biz.config import load_course
+    from worker.config import load_course
 
     for c, n in ((1, 4), (2, 6), (3, 4)):
         course = load_course(generated / f"{lf.level_name(c)}.jsonc")

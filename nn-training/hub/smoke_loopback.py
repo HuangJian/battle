@@ -38,7 +38,6 @@ ROOT = Path(__file__).resolve().parent.parent  # nn-training/
 REPO = ROOT.parent  # git 根
 sys.path.insert(0, str(ROOT))
 
-from biz.config import load_course
 from biz.reward_library import METRICS_VERSION
 from common.protocol import find_payload
 from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # v3：合成语料形状随 schema
@@ -51,6 +50,7 @@ from remote.hub_client import (
     verify_and_land,
     wait_job,
 )
+from worker.config import load_course
 
 # ------------------------------------------------------------------ shard 合成
 
@@ -159,8 +159,8 @@ def main() -> int:
     # 旧归档的 schema_major 会被 worker 的 weights_io 红线响亮拒收；直接在当前
     # 布局下构建一个随机初始化模型并 save_weights_json（schema_major 自然匹配）。
     init_w = work / "init_weights.json"
-    import ppo.engine as _ppo_engine
-    from data.weights_io import save_weights_json as _save_wj
+    import worker.ppo.engine as _ppo_engine
+    from worker.data.weights_io import save_weights_json as _save_wj
 
     _save_wj(_ppo_engine.build_ppo(None), str(init_w))
     init_weights_fp = hashlib.sha256(init_w.read_bytes()).hexdigest()
@@ -202,7 +202,7 @@ def main() -> int:
     worker_cmd = [
         sys.executable,
         "-m",
-        "remote_worker",
+        "remote.remote_worker",
         "--poll",
         hub_url,
         "--token",

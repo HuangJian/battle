@@ -36,9 +36,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.backend import REQUIRED_UPDATE_KWARGS
-from biz.modes import _MODE_BACKEND_NAMES, _MODES
 from tests.helpers import backend_contract_scan as scan
+from worker.backend import REQUIRED_UPDATE_KWARGS
+from worker.modes import _MODE_BACKEND_NAMES, _MODES
 
 #: 模式 → 静态契约结论（模块级：parametrize 在收集期就要值）。
 _SCANS: dict[str, scan.ModuleScan] = {m: scan.scan_module(_MODE_BACKEND_NAMES[m]) for m in _MODES}
@@ -137,7 +137,7 @@ def test_update_accepts_stream_injected_kwargs(mode: str) -> None:
     """签名契约（P0-1 捕获器）：update 必须接受 stream.py 无条件注入的所有关键字。
 
     `trainer/stream.py:123-124` 在 `on_epoch_done` 非空时把它塞进 `update_kwargs`，
-    `:286` 再 `backend.update(..., **update_kwargs)`。`run_rl.py` 恒传该回调
+    `:286` 再 `backend.update(..., **update_kwargs)`。`trainer/run_rl.py` 恒传该回调
     （双缓冲提前预采的触发点），故不接受它的后端在流式模式下必然 TypeError。
     """
     sig = scan.update_signature(_SCANS[mode])

@@ -46,9 +46,18 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from biz.loop_round import ROUND_OFFLINE_EXIT, STEP_METHOD, RoundContext, StepResult
-from biz.loop_scheduler import CourseQueue
-from biz.loop_tasks import (
+from trainer.loop_core import (
+    ROUND_BUNDLE_EXIT,
+    ROUND_NEXT,
+    ROUND_RETRY,
+    ROUND_SMOKE_STOP,
+    ROUND_STOP,
+    ROUND_WAIT,
+    RoundOutcome,
+)
+from worker.loop_round import ROUND_OFFLINE_EXIT, STEP_METHOD, RoundContext, StepResult
+from worker.loop_scheduler import CourseQueue
+from worker.loop_tasks import (
     ROUND_TASKS,
     RoundFacts,
     Task,
@@ -59,15 +68,6 @@ from biz.loop_tasks import (
     retry,
     round_tasks,
     waiting,
-)
-from trainer.loop_core import (
-    ROUND_BUNDLE_EXIT,
-    ROUND_NEXT,
-    ROUND_RETRY,
-    ROUND_SMOKE_STOP,
-    ROUND_STOP,
-    ROUND_WAIT,
-    RoundOutcome,
 )
 
 #: `WAIT` 后的再问间隔（秒）——远小于本机轮询密度需求，且不烧 CPU（调度器是事件驱动）。
@@ -163,7 +163,7 @@ class LoopRunner:
             except Exception:  # 同上：读盘失败不得卡住调度
                 return int(fallback)
         try:
-            from biz.train_ledger import load_ledger
+            from worker.train_ledger import load_ledger
 
             traj = Path(self.loop.args.traj)
             view = load_ledger(traj / "training_log.jsonl")

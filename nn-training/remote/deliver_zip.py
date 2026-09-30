@@ -225,7 +225,7 @@ def _merge_carried_eval_rows(final: Path, dest_root: Path) -> tuple[int, int]:
     if not src_jsonl.exists():
         return (0, 0)
     try:
-        from biz.eval_rows import merge_eval_rows
+        from worker.eval_rows import merge_eval_rows
 
         n_games, n_sums = merge_eval_rows(src_jsonl, Path(dest_root).parent / "eval_log.jsonl")
     except Exception as e:  # rl 包不在（截断快照）/磁盘错——不拖垮导入

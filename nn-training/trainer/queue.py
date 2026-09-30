@@ -4,8 +4,6 @@ import secrets
 import threading
 from pathlib import Path
 
-from biz.agent_meta import record_agent_meta as _record_agent_meta  # noqa: F401 — re-export
-
 # 以下五个名字是本模块的**公共 re-export 面**（原为本地定义，2026-09-23 收敛到唯一实现）。
 # 调用方（`trainer/batch_runner.py` / `trainer/eval_dispatch.py` / `trainer/rollout_phase.py` / e2e）与
 # 既有测试都从 `trainer.queue` 取这些名字 ⇒ 名字留在原位，定义只留一份。
@@ -13,6 +11,7 @@ from biz.agent_meta import record_agent_meta as _record_agent_meta  # noqa: F401
 #   · _record_agent_meta → `biz.agent_meta`（dist-agent-meta.jsonl 的唯一写面）
 from common.proc import bun_version as _bun_version
 from common.proc import version_mm as mm  # noqa: F401 — re-export
+from worker.agent_meta import record_agent_meta as _record_agent_meta  # noqa: F401 — re-export
 
 REPO_ROOT = Path(__file__).resolve().parents[2]  # 仓库根 = battle2（nn-training/trainer/ 上溯 3 层）
 RUN_ID = secrets.token_hex(8)  # runId 使 iterId 全局唯一（跨 relaunch 防混叠）

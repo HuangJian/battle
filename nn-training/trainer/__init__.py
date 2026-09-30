@@ -7,10 +7,10 @@
 
 ```text
 L0  common/                                     （stdlib-only 原语）
-L1  biz/ · models/ · ppo/ · data/ · train/ · scripts/
-L2  worker/                                     （节点侧执行体）
+L1  biz/                                       （游戏业务）
+L2  worker/                                     （本地 torch 训练全栈）
 L3  remote/                                     （跨端线路 + 云引导 + 云 worker）
-L4  trainer/（刀 5 前的 rl/） · hub/ · 根入口（run_rl.py / run_bc.py / run_rl_cluster.py …）
+L4  trainer/（刀 5 前的 rl/） · hub/ · 根入口（trainer/run_rl.py / trainer/run_bc.py / trainer/run_rl_cluster.py …）
 ```
 
 ## 为什么只剩编排（2026-09-30 刀 4，家名于刀 5 改成 trainer）
@@ -29,11 +29,23 @@ biz/<mod>.py  ⇔  <旧 rl 树里不属于 TRAINER_ORCHESTRATION 的模块>
 `test_trainer_orchestration_set_is_exactly_the_modules_reaching_remote` 双向钉住
 （往这里丢一个纯逻辑模块、或让某个模块不再碰传输层，都红）。
 
-## 模块（37）
+## 模块（43）
+
+> 2026-09-30（刀 7）：六个**入口脚本**从 `nn-training/` 顶层搬进本包（此前它们只能靠
+> 「与本包并列的根文件」这一形状存在）⇒ `nn-training/` 下如今只剩 `conftest.py`。入口进包后
+> 三条既有前提要重算：脚本目录 `trainer/` 会进 `sys.path[0]`（其 `queue.py` 遮蔽 stdlib
+> `queue`）⇒ 六个入口各自前置一段「摘目录项 + 放回 nn-training 根」（惯用法见
+> `trainer/eval_a_once.py`）；`Path(__file__)` 的上溯层数 +1；启动器 `--script` 随之写成
+> `trainer/run_rl.py`（它本来就接受 nn-training/ 下的相对路径，见 `launch/cli.ts`）。
 
 | 簇 | 模块 | 内容 |
 |----|------|------|
-| **入口** | `loop` | `run_training` 入口（薄包装） |
+| **入口** | `run_rl` | RL 训练入口（两阶段 argparse / `--mode` 分派；刀 7 前住 `nn-training/` 顶层） |
+| | `run_bc` | BC 编排器入口薄壳（引擎在 `trainer/bc_loop.py`；刀 7 前住顶层） |
+| | `run_rl_cluster` | 单进程多课程调度器入口（`--serve` / `--json`；刀 7 前住顶层） |
+| | `train_loop` | 单进程 BC 训练入口（轮次驱动 + 锁；刀 7 前住顶层） |
+| | `eval_course_once` · `eval_m1_once` | 一次性评估入口（课程 / m1；刀 7 前住顶层） |
+| | `loop` | `run_training` 入口（薄包装） |
 | | `loop_runner` | 训练主循环的启动/接管面 |
 | | `loop_serve` | 常驻服务模式（`--serve`：从 hub 领任务跑课程；`kind ∈ {rl, bc}`） |
 | **主循环组合** | `loop_core` | `TrainingLoop` **组合根**（只剩 `__init__` 槽位 + `_run_inspect`） |
@@ -70,7 +82,10 @@ biz/<mod>.py  ⇔  <旧 rl 树里不属于 TRAINER_ORCHESTRATION 的模块>
 | **计划与轮** | `loop_plan` | 课程种类判定与轮计划（`kind ∈ {rl, bc}`） |
 
 > 纯逻辑（课程 / 奖励 / 门 / 账本 / 配额 / 四簇护栏混入 …）→ `biz/__init__.py`（64 个模块，含模块表）。
-> 入口约定仍然成立：`run_rl.py` 必须留在 `nn-training/` 顶层 —— 统一启动器只接受裸文件名。
+> 入口约定（2026-09-30 刀 7 更新）：入口**住在本包**，启动器按 `nn-training/` 下的相对路径取
+> 脚本（`--script trainer/run_rl.py`；`resolveTrainScript` 只拒绝对路径/盘符/`..`，子目录一直
+> 是允许的）。旧的裸文件名（`--script run_rl.py`）**不再接受**——它现在会响亮失败
+> `script not found`（故意不补 `LEGACY_ALIAS`：别名森林会让「脚本搬家了」永远没人发现）。
 """
 
 from __future__ import annotations

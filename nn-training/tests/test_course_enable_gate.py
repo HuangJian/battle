@@ -22,7 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.protocol import COURSE_ENABLE_MARKER
-from run_rl import _require_course_open
+from trainer.run_rl import _require_course_open
 
 
 def _args(**over: object) -> types.SimpleNamespace:

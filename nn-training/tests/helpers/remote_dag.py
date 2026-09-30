@@ -134,7 +134,7 @@ LAYERS: dict[str, int] = {
     # 任务包新鲜度门 / 缺包自愈门 / 清单读数的**纯判据**（合并 origin 时新拆的叶子）：只靠
     # `common.protocol` + `net_http`(L0) ⇒ **L1**。放在这里（而不是挂在 `hub/http_face`）是因为
     # 它有两个低层读者：`hub.offline`（取包端点）与 `hub.queue_offline`（离线清单）。
-    "hub.task_pack": 1,
+    "hub.task_pack": 0,
 
     "remote.result_upload": 0,
     # 2026-09-30（刀 3）：`serve_pool` / `iter_rollout` 出包到 `worker/` ⇒ 键前缀随之改。
@@ -153,8 +153,8 @@ LAYERS: dict[str, int] = {
     # （`probe_job_result` / `poll_job` / `wait_job`）+ 停机达令 + `HubClientError`。
     # 依赖面 = `common.protocol` + `net_http`(L0，延迟) ⇒ **L1**；`hub_client` 转而站在它
     # 上面（顶层边）⇒ 从 L1 升到 **L2**。
-    "remote.hub_http": 1,
-    "remote.hub_client": 2,
+    "remote.hub_http": 0,
+    "remote.hub_client": 1,
     "hub.store_offline": 1,
     # `_JobStore` 组合类（S4 第十五刀）：第十四刀把六个域混入拆到 `hub/store_*.py`，本刀把组合类
     # 本身也从 `hub_server` 搬出来 —— 不是对称好看，而是 `_HubQueue` 的课程表域要**构造** store、
@@ -184,20 +184,20 @@ LAYERS: dict[str, int] = {
     "worker.iter_rollout": 1,
     "remote.job_fs": 1,
     "remote.offline_deliver": 1,
-    "remote.offline_eval": 1,
+    "remote.offline_eval": 2,
     "remote.wire": 1,
     "remote.http": 2,
     # 半离线交接面（第十三刀）：校验 / 取包播种 / `RunContext` / 评估装配；依赖最深
     # `offline_deliver`(L1) ⇒ L2。
-    "remote.plan_handoff": 2,
-    "remote.push_client": 2,
-    "remote.bc_job": 3,
+    "remote.plan_handoff": 5,
+    "remote.push_client": 1,
+    "remote.bc_job": 4,
     "remote.download": 3,
     "remote.job_lifecycle": 3,
     # 半离线驱动引擎（第十三刀改判）：交接面下沉后它站 `plan_handoff`(L2) 上 ⇒ 2 → **L3**
     # （1 + max(deps)；仍在 `worker`(L5) / `run_loop`(L6) 之下）。
-    "remote.plan_run": 3,
-    "remote.push_dispatch": 3,
+    "remote.plan_run": 6,
+    "remote.push_dispatch": 2,
     # `QueuePeer`（S4 第十五刀）：七个混入的**共同声明面**（只声明跨域方法的真签名，不带实现）。
     # 它**不能**声明 `_store_of`（那要 import `hub.store` ⇒ 本模块 L3 ⇒ 七个混入 ≥L4 ⇒
     # `hub.queue` L5 ⇒ `hub_server` L6，与 `smoke_loopback`(L6) 同层而后者 import 前者）——
@@ -205,7 +205,7 @@ LAYERS: dict[str, int] = {
     # `store_leases`（`ClaimOutcome`）⇒ **L1**。
     "hub.queue_peer": 1,
     "hub.queue": 4,
-    "hub.result": 4,
+    "hub.result": 3,
     "remote.job_round": 4,
     "remote.train_core": 4,
     # HTTP 面（S4 第十六刀）：`HubHandler` 本体 + 通用助手 + 来源判定从 `hub_server` 搬到这里。
@@ -217,12 +217,12 @@ LAYERS: dict[str, int] = {
     # 读者是 `hub_server`（L7）—— 方向是「入口 → 引导链 → HTTP 面 → 路由混入」，不反向。
     "hub.boot": 6,
     "remote.notebook_runtime": 6,
-    "remote.run_loop": 6,
+    "remote.run_loop": 7,
     "remote.worker_server": 6,
     # hub-server 入口 + 门面（S4 第十六刀收口）：本模块自己**零实现**，只剩 re-export 与
     # `python -m hub.server` 的分发。依赖最深到 `hub.boot`(L6) ⇒ **L7**。
     "hub.server": 7,
-    "remote.offline_boot": 7,
+    "remote.offline_boot": 8,
     "remote.push_bootstrap": 7,
     # 站在门面之上的探针：都 import `hub_server` 起真服务 ⇒ 随它 ****L6 → L8**（第十六刀的级联）。
     "hub.smoke_loopback": 8,
@@ -231,6 +231,116 @@ LAYERS: dict[str, int] = {
     # 一次性修复工具（origin 侧新增）：把**已经落地的回传轮**补做课程侧落位。它 import
     # `hub.server`（拿 `_JobStore` 起真 store）——与探针同一个位置（L8，站在门面上）。
     "hub.backfill_offline": 8,
+
+    # ── 2026-09-30（刀 7：入口脚本归位 —— 三个新模块入账）────────────────────────────
+    # `remote.remote_worker`（云 worker 入口，刀 7 前住 `nn-training/` 顶层）只 import
+    # `remote.worker`(L5) ⇒ 1 + 5 = **L6**；`remote.remote_worker_serve`（push 模式服务端
+    # 入口）只 import `remote.worker_server`(L6) ⇒ **L7**（与 `remote.run_loop` 同层）。
+    # 两者都是「模块名解析壳」（`python -m remote.remote_worker[_serve]`），本身不碰别的。
+    # `worker.rl_config_schema`（rl-config 键白名单：json/functools/pathlib）⇒ **L0**。
+    "worker.rl_config_schema": 0,
+    "remote.remote_worker": 6,
+    "remote.remote_worker_serve": 7,
+
+    # ── 2026-09-30（刀 6：本地 torch 训练全栈搬进 worker/）────────────────────────────
+    # 用户口径：`worker/` = 「所有支持本地 torch 训练的所有代码」，云机 worker = local worker
+    # + remote；`biz/` 只留游戏业务。于是五大算法包（models/ppo/data/train/scripts 39 模块）
+    # 与 52 个训练侧单体从顶层/biz 搬进 worker/ ⇒ **全部入账**（它们与 worker/remote 之间有边，
+    # 不入账那些边会静默消失 —— 刀 3 的同一条理由）。层号仍是**算出来的**拓扑秩：
+    # 搬进来同时抬了 12 条既有条目的秩（`remote.plan_run` 3→6 · `remote.plan_handoff` 2→5 ·
+    # `remote.run_loop` 6→7 · `remote.bc_job` 3→4 · `remote.offline_boot` 7→8 等），
+    # 因为它们的依赖从「账本外的 biz.*」变成了「账本内的 worker.*」。
+    # L0（43 个）
+    "worker.agent_meta": 0,
+    "worker.archive": 0,
+    "worker.backend": 0,
+    "worker.bc_dispatch": 0,
+    "worker.bc_ledger": 0,
+    "worker.breaker": 0,
+    "worker.commit_journal": 0,
+    "worker.config_file": 0,
+    "worker.data.mirror": 0,
+    "worker.data.npyio": 0,
+    "worker.data.shard_split": 0,
+    "worker.data.weights_meta": 0,
+    "worker.engine_pool": 0,
+    "worker.eval_heartbeat": 0,
+    "worker.eval_ingest": 0,
+    "worker.eval_rows": 0,
+    "worker.eval_track": 0,
+    "worker.eval_yield": 0,
+    "worker.events": 0,
+    "worker.forensics": 0,
+    "worker.gate_inputs": 0,
+    "worker.kickstart_burn": 0,
+    "worker.loop_tasks": 0,
+    "worker.metrics_stats": 0,
+    "worker.models.core": 0,
+    "worker.models.rl_model": 0,
+    "worker.modes": 0,
+    "worker.node_identity": 0,
+    "worker.paired_kill": 0,
+    "worker.ppo.np_core": 0,
+    "worker.ppo.trainer": 0,
+    "worker.reports": 0,
+    "worker.resume": 0,
+    "worker.schedule": 0,
+    "worker.scripts.validate_export": 0,
+    "worker.stop_loss": 0,
+    "worker.terminal_stats": 0,
+    "worker.train.bc_core": 0,
+    "worker.train.device": 0,
+    "worker.train.loop_util": 0,
+    "worker.volume_quota": 0,
+    "worker.volume_waves": 0,
+    "worker.workdir_sweep": 0,
+    # L1（11 个）
+    "worker.cli": 1,
+    "worker.config": 1,
+    "worker.data.dataset": 1,
+    "worker.data.weights_io": 1,
+    "worker.eval_local": 1,
+    "worker.loop_guards_sweep": 1,
+    "worker.loop_guards_trip": 1,
+    "worker.loop_round": 1,
+    "worker.loop_scheduler": 1,
+    "worker.ppo.common": 1,
+    "worker.train_ledger": 1,
+    # L2（10 个）
+    "worker.bc_config": 2,
+    "worker.bc_eval": 2,
+    "worker.eval_replays_once": 2,
+    "worker.gate_judges": 2,
+    "worker.models.student": 2,
+    "worker.paired": 2,
+    "worker.scripts.eval_bridge": 2,
+    "worker.scripts.regen_reward_golden": 2,
+    "worker.scripts.regen_v7_ts_oracle": 2,
+    "worker.state_init": 2,
+    # L3（6 个）
+    "worker.cmd": 3,
+    "worker.gate_check": 3,
+    "worker.models.goal_net": 3,
+    "worker.models.intent_net": 3,
+    "worker.ppo.engine": 3,
+    "worker.train.bc": 3,
+    # L4（12 个）
+    "worker.iter_job": 4,
+    "worker.loop_guards_gate": 4,
+    "worker.loop_guards_leg": 4,
+    "worker.plan": 4,
+    "worker.ppo.bench": 4,
+    "worker.ppo.goal": 4,
+    "worker.ppo.intent": 4,
+    "worker.scripts.eval_intent_m5": 4,
+    "worker.scripts.gen_self_inj": 4,
+    "worker.scripts.init_scratch_weights": 4,
+    "worker.train.goal_bc": 4,
+    "worker.train.intent_probe": 4,
+    # L5（3 个）
+    "worker.model_build": 5,
+    "worker.ppo.config": 5,
+    "worker.scripts.measure_checkpoint_rss": 5,
 }
 
 #: 允许的环（键 = 参与环的模块集合，值 = 为什么这是对的）。
@@ -370,6 +480,32 @@ def graph() -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, set[str
         if u:
             unresolved[module] = u
     return top, deferred, unresolved
+
+
+def reaches_transport(module: str) -> bool:
+    """账本里 `module` 能否**经账本内边**到达 `remote.*`（= 传输面）。
+
+    给「某模块保持纯逻辑（不达远端）」这类守卫用。比「不在 `LAYERS` 里」强：后者在
+    2026-09-30（刀 6，`worker/` 整包入账）之后**恒为假**——写成它的守卫是哑的，
+    测试全绿而判据早已失效（本文件头部记过同型的教训）。
+    """
+    top, deferred, _ = graph()
+    edges = {
+        m: set(top.get(m, ())) | set(deferred.get(m, ())) for m in remote_modules()
+    }
+    seen: set[str] = set()
+    stack = [module]
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        for dep in edges.get(cur, ()):
+            if dep.split(".")[0] == "remote":
+                return True
+            if dep not in seen:
+                stack.append(dep)
+    return False
 
 
 def cycles(edges: dict[str, set[str]]) -> list[list[str]]:
@@ -530,7 +666,9 @@ def assert_remote_module(
         "remote/ 内部的边必须严格向下（见 tests/test_remote_dag.py 的分层账本）"
     )
     logic = sorted(
-        m for m in module_project_imports(module, top_only=False) if m.split(".")[0] in {"trainer", "biz"}
+        m
+        for m in module_project_imports(module, top_only=False)
+        if m.split(".")[0] in {"trainer", "worker", "biz"}
     )
     orch = [m for m in logic if m.split(".")[0] == "trainer"]
     assert orch == [], (

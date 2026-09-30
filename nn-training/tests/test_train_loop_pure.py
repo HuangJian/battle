@@ -1,4 +1,4 @@
-"""test_train_loop_pure.py — train_loop.py 纯函数常驻回归测试。
+"""test_train_loop_pure.py — trainer/train_loop.py 纯函数常驻回归测试。
 
 只测无 IO / 无子进程的纯函数（_fmt_dur / parse_val_loss_from_output），
 不启动训练循环、不碰锁/信号/线程。
@@ -15,7 +15,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-import train_loop
+from trainer import train_loop
 
 FAILS: list[str] = []
 

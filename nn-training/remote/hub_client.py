@@ -24,7 +24,6 @@ import time
 import zipfile
 from pathlib import Path
 
-from biz.resume import shard_state_init_ok, walk_shard_dirs
 from common.fs import append_jsonl, extract_tar_bytes
 from common.hashing import sha256_bytes, sha256_file
 from common.platform_utils import rmtree_best_effort
@@ -58,6 +57,7 @@ from common.protocol import (
 from common.protocol import (
     job_id as make_job_id,
 )
+from worker.resume import shard_state_init_ok, walk_shard_dirs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -782,7 +782,7 @@ def publish_job(
     # 半离线（kind="run"，2026-09-17）：`plan.json` 的**字节**（由 `biz.plan.dump_plan`
     # 规范序列化）。节点靠它自主跑完 it+1..end_it——payload 必须带此文件，manifest 记
     # 它的 sha（`plan_sha256`）。传 bytes 而不是 dict：本模块是 `remote/` 层，不 import
-    # `rl/`（方向单一）；规范化序列化只有 `biz.plan.dump_plan` 一份，调用方自己 dump。
+    # `trainer/`（方向单一）；规范化序列化只有 `biz.plan.dump_plan` 一份，调用方自己 dump。
     plan_bytes: bytes | None = None,
     # 全离线（2026-09-17）：`register=False` = **只建 job 目录、不记账本也不进待领池**。
     # 用途：把这一段任务打成可上传云机的任务包（`remote/bundle.py`）——包里的 manifest

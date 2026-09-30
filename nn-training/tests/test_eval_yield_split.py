@@ -31,13 +31,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import biz.eval_local as eval_local_mod
-import biz.eval_yield as eval_yield_mod
 import trainer.eval_dispatch as eval_dispatch_mod
+import worker.eval_local as eval_local_mod
+import worker.eval_yield as eval_yield_mod
 from tests.helpers import remote_dag as dag
 
-YIELD_FILE = ROOT / "biz" / "eval_yield.py"
-LOCAL_FILE = ROOT / "biz" / "eval_local.py"
+YIELD_FILE = ROOT / "worker" / "eval_yield.py"
+LOCAL_FILE = ROOT / "worker" / "eval_local.py"
 DISPATCH_FILE = ROOT / "trainer" / "eval_dispatch.py"
 LOOP_EVAL_FILE = ROOT / "trainer" / "loop_eval.py"
 BATCH_RUNNER_FILE = ROOT / "trainer" / "batch_runner.py"
@@ -152,18 +152,22 @@ def test_eval_local_kept_the_execution_surface() -> None:
 def test_eval_yield_is_a_zero_dependency_leaf() -> None:
     """纯判决模块：**不 import 任何模块**（`__future__` 之外多一个即红——连 `biz.log` 都不需要）。"""
     extra = sorted(_imports(YIELD_FILE) - ALLOWED_IMPORTS)
-    assert extra == [], f"biz/eval_yield.py 引入了依赖：{extra}"
+    assert extra == [], f"worker/eval_yield.py 引入了依赖：{extra}"
 
 
 def test_eval_yield_never_imports_the_runner() -> None:
-    """★ 本刀的意义：判决面是**底座**，反向 import 运行器（`biz.eval_local`）立刻成环。"""
-    back = sorted(m for m in _imports(YIELD_FILE) if m.startswith("rl."))
-    assert back == [], f"biz/eval_yield.py 反向 import 了仓内模块：{back}"
+    """★ 本刀的意义：判决面是**底座**，反向 import 运行器（`worker.eval_local`）立刻成环。"""
+    back = sorted(m for m in _imports(YIELD_FILE) if m.startswith("worker.eval_local"))
+    assert back == [], f"worker/eval_yield.py 反向 import 了仓内模块：{back}"
 
 
 def test_eval_yield_stays_pure_logic() -> None:
-    """它在分层里是 L1 纯逻辑（不达 remote）——不在 `remote_dag` 的传输账本里，也不该进去。"""
-    assert "biz.eval_yield" not in dag.LAYERS
+    """纯逻辑（不达传输面）：账本里它没有任何通往 `remote.*` 的路径。
+
+    2026-09-30（刀 6）：判据从「不在 `remote_dag` 的账本里」改成**可达性**——
+    `worker/` 整包入账之后，前者的写法恒为假（哑守卫）。
+    """
+    assert dag.reaches_transport("worker.eval_yield") is False
 
 
 # ───────────────────────── ⑤ 门面 ─────────────────────────
@@ -180,7 +184,7 @@ def test_eval_local_facade_forwards_the_same_objects() -> None:
 
 def test_public_call_sites_can_still_import_from_eval_local() -> None:
     """名字是契约：旧写法 `from biz.eval_local import hold_for_local` 必须仍然成立。"""
-    from biz.eval_local import eval_join_soft_sec, hold_for_local, release_local_gate_if_starved
+    from worker.eval_local import eval_join_soft_sec, hold_for_local, release_local_gate_if_starved
 
     assert hold_for_local is eval_yield_mod.hold_for_local
     assert eval_join_soft_sec is eval_yield_mod.eval_join_soft_sec
@@ -199,7 +203,7 @@ def test_readers_take_the_verdicts_from_eval_yield() -> None:
     """判据读者从新家取（不再经 573 行的运行器）——逐模块逐名钉住。"""
     for rel, names in READERS.items():
         src = _import_sources(ROOT / rel)
-        bad = sorted(n for n in names if src.get(n) != "biz.eval_yield")
+        bad = sorted(n for n in names if src.get(n) != "worker.eval_yield")
         assert bad == [], f"{rel} 里这些名字的来源不是 biz.eval_yield：{bad}"
 
 
@@ -207,9 +211,9 @@ def test_eval_dispatch_no_longer_imports_policy_from_the_runner() -> None:
     """派发器只从运行器拿执行面（runner / 账本 / 重试配额），判据一律走新家。"""
     src = _import_sources(DISPATCH_FILE)
     for name in ("hold_for_local", "release_local_gate_if_starved", "EVAL_LOCAL_SLOTS_DEFAULT"):
-        assert src.get(name) == "biz.eval_yield", name
+        assert src.get(name) == "worker.eval_yield", name
     for name in ("run_local_eval_game", "eval_row", "eval_done_keys", "EVAL_TASK_ATTEMPTS"):
-        assert src.get(name) == "biz.eval_local", name
+        assert src.get(name) == "worker.eval_local", name
 
 
 def test_eval_dispatch_inline_formulas_are_gone() -> None:
@@ -231,7 +235,7 @@ def test_eval_dispatch_inline_formulas_are_gone() -> None:
 
 def test_loop_eval_no_longer_reaches_the_runner_for_policy() -> None:
     """边界侧（收拢 / 交棒 / 放行档）不得再 import 运行器——它只要判据。"""
-    assert "biz.eval_local" not in _imports(LOOP_EVAL_FILE)
+    assert "worker.eval_local" not in _imports(LOOP_EVAL_FILE)
 
 
 # ─────────────────────── ⑦ 语义（功能用例，逐条钉住） ───────────────────────

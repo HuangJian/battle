@@ -30,12 +30,12 @@ if str(ROOT) not in sys.path:
 
 import pytest
 
-import biz.gate_check as gate_check_mod
-import biz.gate_inputs as gate_inputs_mod
+import worker.gate_check as gate_check_mod
+import worker.gate_inputs as gate_inputs_mod
 from tests.helpers import remote_dag as dag
 
-INPUTS_FILE = ROOT / "biz" / "gate_inputs.py"
-CHECK_FILE = ROOT / "biz" / "gate_check.py"
+INPUTS_FILE = ROOT / "worker" / "gate_inputs.py"
+CHECK_FILE = ROOT / "worker" / "gate_check.py"
 
 #: 本次搬走的**定义**（常量 / 异常 / 类 / 函数）——只许在 `gate_inputs.py` 里出现。
 MOVED_NAMES = {
@@ -133,19 +133,23 @@ def test_gate_check_kept_the_engine_surface() -> None:
 def test_gate_inputs_is_a_stdlib_only_leaf() -> None:
     """输入读数面是**叶子**：只许 stdlib（多一个即红）——连 `biz.log` 都不需要。"""
     extra = sorted(_imports(INPUTS_FILE) - ALLOWED_IMPORTS)
-    assert extra == [], f"biz/gate_inputs.py 引入了依赖：{extra}"
+    assert extra == [], f"worker/gate_inputs.py 引入了依赖：{extra}"
 
 
 def test_gate_inputs_never_imports_repo_modules() -> None:
     """★ 本刀的意义：输入面是**底座**，任何仓内 import（尤其 `biz.gate_check` / `biz.gate_judges`）
     都会成环或倒置方向。"""
     back = sorted(m for m in _imports(INPUTS_FILE) if m.split(".")[0] in {"trainer", "remote", "common", "models", "train", "ppo", "data", "scripts"})
-    assert back == [], f"biz/gate_inputs.py 反向 import 了仓内模块：{back}"
+    assert back == [], f"worker/gate_inputs.py 反向 import 了仓内模块：{back}"
 
 
 def test_gate_inputs_stays_pure_logic() -> None:
-    """它在分层里是纯逻辑（不达 remote）——不在 `remote_dag` 的传输账本里，也不该进去。"""
-    assert "biz.gate_inputs" not in dag.LAYERS
+    """纯逻辑（不达传输面）：账本里它没有任何通往 `remote.*` 的路径。
+
+    2026-09-30（刀 6）：判据从「不在 `remote_dag` 的账本里」改成**可达性**——
+    `worker/` 整包入账之后，前者的写法恒为假（哑守卫）。
+    """
+    assert dag.reaches_transport("worker.gate_inputs") is False
 
 
 # ───────────────────────── ⑤⑥ 门面恒等 / 旧 import 面 ─────────────────────────
@@ -162,7 +166,7 @@ def test_gate_check_facade_forwards_the_same_objects() -> None:
 
 def test_public_call_sites_can_still_import_from_gate_check() -> None:
     """名字是契约：旧写法 `from biz.gate_check import EvalRow, load_override` 必须仍然成立。"""
-    from biz.gate_check import (
+    from worker.gate_check import (
         BudgetInfo,
         EvalRow,
         GateOverrideError,

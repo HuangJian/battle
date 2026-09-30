@@ -41,7 +41,6 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from biz.plan import plan_pairs_fp, planned_iters, validate_plan
 from common.logutil import log_line
 from common.platform_utils import cpu_worker_slots
 from common.protocol import (
@@ -64,6 +63,7 @@ from remote.offline_deliver import (
     OfflineDeliverer,
     make_deliverer,
 )
+from worker.plan import plan_pairs_fp, planned_iters, validate_plan
 
 #: 产物目录里随段携带的 TS 运行时树（让「只下载产物 zip」的机器也能续跑）。
 TS_TREE_DIR = "ts_code"

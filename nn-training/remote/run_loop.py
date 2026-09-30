@@ -32,7 +32,6 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from biz.plan import validate_plan
 from common.protocol import ProtocolError, RetryableError, normalize_manifest
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.plan_run import (
@@ -78,6 +77,7 @@ from remote.plan_run import (
 from remote.plan_run import (
     with_rollout_workers as with_rollout_workers,
 )
+from worker.plan import validate_plan
 
 
 def _real_run_job(*args: Any, **kw: Any) -> dict:
@@ -172,7 +172,7 @@ def run_standalone(
     course = None
     if course_path.exists():
         try:
-            from biz.config import load_course
+            from worker.config import load_course
 
             course = load_course(str(course_path))
         except Exception as e:

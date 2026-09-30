@@ -57,10 +57,10 @@ from pathlib import Path
 from typing import Any
 
 from biz.course import build_pairs
-from biz.log import log
-from biz.reports import combine_reports
-from biz.resume import settled_stage_totals, trailing_samples_per_game
+from common.log import log
 from trainer.rollout_phase import dispatch_rollout_phase
+from worker.reports import combine_reports
+from worker.resume import settled_stage_totals, trailing_samples_per_game
 
 
 class TrainingVolume:
@@ -139,7 +139,7 @@ class TrainingVolume:
                 "[volume] target_transitions 与 --curriculum-stages / --rotate-stages 的"
                 "门控窗口 v1 不兼容（配额按课程声明的关集分关）——改用显式 --stages"
             )
-        from biz.volume_waves import parse_stages_arg
+        from worker.volume_waves import parse_stages_arg
 
         raw = str(getattr(args, "stages", "") or "").strip()
         # P2-c（2026-09-15）：原先是 `parse_range(str(... or "0-3"))` —— 缺 --stages
@@ -185,8 +185,8 @@ class TrainingVolume:
             self._volume_target = None
             self._volume_collected = None
             return build_pairs(self.args, it, self._rotate_seed)
-        from biz.volume_quota import target_per_stage
-        from biz.volume_waves import initial_games, initial_wave_pairs
+        from worker.volume_quota import target_per_stage
+        from worker.volume_waves import initial_games, initial_wave_pairs
 
         args = self.args
         stages = self._volume_stages()
@@ -211,8 +211,8 @@ class TrainingVolume:
 
     def _volume_stage_ests_map(self) -> dict[int, int]:
         """分关 est_s：近轮盘上 shard 局均 nSamples，缺省回退全局 est。"""
-        from biz.resume import trailing_stage_samples_per_game
-        from biz.volume_waves import parse_stages_arg
+        from worker.resume import trailing_stage_samples_per_game
+        from worker.volume_waves import parse_stages_arg
 
         stages = self._volume_stages()
         fallback = int(self._volume_est or self._volume_est_samples() or 1)
@@ -268,7 +268,7 @@ class TrainingVolume:
           · 停在波次中间（有 start 无 finish 的最后那一波）→ 原样重放它的对局表
             （同 wave_idx ⇒ 同种子流；已结算的由调度器剔除，缺口原样补齐）。
         """
-        from biz.volume_waves import parse_wave_records
+        from worker.volume_waves import parse_wave_records
 
         path = Path(self._traj_dir) / "commit_journal.jsonl"
         try:
@@ -301,7 +301,7 @@ class TrainingVolume:
         if int(getattr(args, "collect_only", 0) or 0):
             return
         import common.distribution
-        from biz.volume_waves import (
+        from worker.volume_waves import (
             DEFAULT_MAX_WAVES,
             WAVE_PHASE,
             plan_topup,
@@ -429,18 +429,18 @@ class TrainingVolume:
         args = self.args
         if self._stream_meta is not None:
             log("[volume] 流式路径不支持连续配额 v2（保持 stream 老语义）")
-            from biz.reports import adopt_volume_report
+            from worker.reports import adopt_volume_report
 
             self._report = adopt_volume_report(None)
             return
         if int(getattr(args, "collect_only", 0) or 0):
-            from biz.reports import adopt_volume_report
+            from worker.reports import adopt_volume_report
 
             self._report = adopt_volume_report(None)
             return
         import common.distribution
-        from biz.resume import settled_stage_totals
-        from biz.volume_quota import (
+        from worker.resume import settled_stage_totals
+        from worker.volume_quota import (
             DEFAULT_MAX_BATCHES,
             continuous_pairs,
             default_game_cap,
@@ -551,8 +551,8 @@ class TrainingVolume:
         # 禁止 combine 进上一轮 _report（pure_collect 起点会钉在历史波，§adopt_volume_report）。
         # 配额已满重启 ⇒ batches=0，若只 adopt(combined=None) 会把除零保护的 winRate=0
         # 写进账本（x20-steady it76 / §107）——必须从 shard 回填 outcomes。
-        from biz.reports import merge_volume_report
-        from biz.resume import resumed_manifests
+        from worker.reports import merge_volume_report
+        from worker.resume import resumed_manifests
 
         disk_reports = resumed_manifests(
             self._traj_dir,

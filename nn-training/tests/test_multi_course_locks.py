@@ -2,7 +2,7 @@
 
 plan: `plan/multi-course-parallel-training.md`（S1/S2、§1.2、P1c）。
 
-P0 时的现状：`run_rl.py` / `train_loop.py` 各持一把**全局**锁
+P0 时的现状：`trainer/run_rl.py` / `trainer/train_loop.py` 各持一把**全局**锁
 （`.run_rl.lock` / `.train_loop.lock`），第二门课程直接拒启——多课并行训练的第一道
 硬阻塞（2026-09-06 双 trainer 事故的护栏，护栏本身不能删，只能按课程实例化）。
 
@@ -24,7 +24,7 @@ if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
 
 from tests.subproc_util import run_utf8
-from train.loop_util import (
+from worker.train.loop_util import (
     acquire_lock,
     cleanup_lock,
     course_key_from_path,
@@ -102,13 +102,13 @@ def test_course_name_traversal_rejected() -> None:
 
 
 def test_train_loop_cli_accepts_course_flag() -> None:
-    """CLI 层：`train_loop.py --course x --help` 可达（P0 时为 unrecognized arguments）。
+    """CLI 层：`trainer/train_loop.py --course x --help` 可达（P0 时为 unrecognized arguments）。
 
     没有 `--course` 参数时，CLI 层永远到不了 per-course 锁路径——这条断言就是
     「参数已接线」的证据（F-B4）。
     """
     proc = run_utf8(
-        [sys.executable, str(NN_ROOT / "train_loop.py"), "--course", "s1", "--help"],
+        [sys.executable, str(NN_ROOT / "trainer/train_loop.py"), "--course", "s1", "--help"],
         cwd=str(NN_ROOT),
         timeout=180,
     )
@@ -133,7 +133,7 @@ def test_runrl_stale_lock_taken_over(tmp_path: Path) -> None:
     路径——Linux 上凡遇**已存在**的锁文件（无论持有者死活）一律 AttributeError，
     陈旧锁永不清理、同课双开变成崩溃而非响亮拒启（2026-09-13 s1/s-dodge 双课
     验收实测：P1 验收遗留的 stale 锁让第二次启动当场崩）。"""
-    from run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
+    from trainer.run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
 
     p = str(tmp_path / ".run_rl.course-a.lock")
     Path(p).write_text(f"{_dead_pid()}|python|0", encoding="utf-8")
@@ -145,7 +145,7 @@ def test_runrl_stale_lock_taken_over(tmp_path: Path) -> None:
 
 def test_runrl_same_course_refused_while_holder_alive(tmp_path: Path) -> None:
     """同课双开且持有人活着 → 响亮拒启（返回 False），不是异常崩溃。"""
-    from run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
+    from trainer.run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
 
     p = str(tmp_path / ".run_rl.course-a.lock")
     Path(p).write_text(f"{os.getpid()}|python|0", encoding="utf-8")

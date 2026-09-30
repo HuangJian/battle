@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from biz.eval_local import (
+from worker.eval_local import (
     DUAL_TRACK_ANCHOR,
     DUAL_TRACK_ROTOR,
     EVAL_SEEDS,
@@ -105,7 +105,7 @@ def test_segment_membership_is_index_based_not_numeric_range() -> None:
 
     数值区间版在池子有洞/乱序时比真实成员集更宽——会把不属于锚点的局算进锚点轨。
     """
-    from biz.eval_local import _ANCHOR_SEED_SET, _ROTOR_SEED_SET
+    from worker.eval_local import _ANCHOR_SEED_SET, _ROTOR_SEED_SET
 
     assert len(_ANCHOR_SEED_SET) == DUAL_TRACK_ANCHOR
     assert len(_ROTOR_SEED_SET) == len(EVAL_SEEDS) - DUAL_TRACK_ANCHOR
@@ -120,7 +120,7 @@ def test_segment_membership_is_index_based_not_numeric_range() -> None:
 
 def test_eval_seeds_pool_must_be_contiguous_ascending() -> None:
     """P2-7 前提：段成员集按下标切分 ⇒ 池子必须严格递增无重复（否则加载即炸）。"""
-    import biz.eval_local as m
+    import worker.eval_local as m
 
     assert tuple(sorted(set(m.EVAL_SEEDS))) == m.EVAL_SEEDS
     assert len(m.EVAL_SEEDS) == 200
@@ -270,7 +270,7 @@ def test_rotation_notes_fires_only_on_real_degeneracy() -> None:
 
     `rotor_offset` 周期 3，两次 eval 的 iter 间隔若恒为 3 的倍数，每轮落同一段。
     """
-    from biz.gate_check import _rotation_notes
+    from worker.gate_check import _rotation_notes
 
     def _rows(its: list[int]) -> list[dict]:
         return [{"event": "eval_summary", "iter": i, "rotor_wr": 0.5} for i in its]

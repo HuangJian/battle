@@ -27,12 +27,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import biz.eval_local as eval_local_mod
-import biz.eval_rows as eval_rows_mod
+import worker.eval_local as eval_local_mod
+import worker.eval_rows as eval_rows_mod
 from tests.helpers import remote_dag as dag
 
-ROWS_FILE = ROOT / "biz" / "eval_rows.py"
-LOCAL_FILE = ROOT / "biz" / "eval_local.py"
+ROWS_FILE = ROOT / "worker" / "eval_rows.py"
+LOCAL_FILE = ROOT / "worker" / "eval_local.py"
 
 #: 本次搬走的**定义**（常量 / 函数）——只许在 `eval_rows.py` 里出现。
 MOVED_NAMES = {
@@ -115,18 +115,22 @@ def test_eval_rows_imports_only_stdlib() -> None:
     """纯数据模块：不得 import `rl.*` / `remote.*` / torch / numpy（多一个即深层耦合）。"""
     imported = {m.split(".")[0] for m in _imports(ROWS_FILE)}
     extra = sorted(imported - ALLOWED_IMPORTS)
-    assert extra == [], f"biz/eval_rows.py 引入了 stdlib 之外的依赖：{extra}"
+    assert extra == [], f"worker/eval_rows.py 引入了 stdlib 之外的依赖：{extra}"
 
 
 def test_eval_rows_never_imports_eval_local() -> None:
     """★ 本刀的意义：`eval_rows` 是**底座**，反向 import 运行器立刻成环。"""
-    back = sorted(m for m in _imports(ROWS_FILE) if m.startswith("biz.eval_local"))
-    assert back == [], f"biz/eval_rows.py 反向 import 了运行器：{back}"
+    back = sorted(m for m in _imports(ROWS_FILE) if m.startswith("worker.eval_local"))
+    assert back == [], f"worker/eval_rows.py 反向 import 了运行器：{back}"
 
 
 def test_eval_rows_stays_pure_logic() -> None:
-    """它在分层里是 L1 纯逻辑（不达 remote）——不在 `remote_dag` 的传输账本里，也不该进去。"""
-    assert "biz.eval_rows" not in dag.LAYERS
+    """纯逻辑（不达传输面）：账本里它没有任何通往 `remote.*` 的路径。
+
+    2026-09-30（刀 6）：判据从「不在 `remote_dag` 的账本里」改成**可达性**——
+    `worker/` 整包入账之后，前者的写法恒为假（哑守卫）。
+    """
+    assert dag.reaches_transport("worker.eval_rows") is False
 
 
 # ───────────────────────── ③ 门面 ─────────────────────────
@@ -143,7 +147,7 @@ def test_eval_local_facade_forwards_the_same_objects() -> None:
 
 def test_public_call_sites_can_still_import_from_eval_local() -> None:
     """名字是契约：旧的 `from biz.eval_local import eval_row`（多处在用）必须仍然成立。"""
-    from biz.eval_local import eval_row, eval_row_key, merge_eval_rows
+    from worker.eval_local import eval_row, eval_row_key, merge_eval_rows
 
     assert eval_row is eval_rows_mod.eval_row
     assert eval_row_key is eval_rows_mod.eval_row_key
@@ -195,12 +199,12 @@ def test_remote_pure_ledger_callers_use_eval_rows_not_eval_local() -> None:
     """
     for rel, names in REMOTE_PURE_CALLERS.items():
         path = ROOT / rel
-        from_local = _imported_from(path, "biz.eval_local")
+        from_local = _imported_from(path, "worker.eval_local")
         assert not (from_local & names), (
             f"{rel} 仍从 biz.eval_local 取纯行/账本原语 {sorted(from_local & names)}"
             "（应 import biz.eval_rows）"
         )
-        from_rows = _imported_from(path, "biz.eval_rows")
+        from_rows = _imported_from(path, "worker.eval_rows")
         assert names <= from_rows, (
             f"{rel} 没从 biz.eval_rows 取 {sorted(names - from_rows)}"
         )
@@ -211,9 +215,9 @@ def test_offline_eval_takes_eval_row_from_eval_rows_but_keeps_the_runner() -> No
     `settle_eval_summary`）——那条边是**合法**的，本刀不动；只有 `eval_row`（纯 schema）改指纯模块。
     """
     path = ROOT / "remote" / "offline_eval.py"
-    assert "eval_row" in _imported_from(path, "biz.eval_rows"), "eval_row 没走 biz.eval_rows"
-    assert "eval_row" not in _imported_from(path, "biz.eval_local"), "eval_row 仍从 biz.eval_local 取"
-    assert {"run_local_eval_game", "settle_eval_summary"} & _imported_from(path, "biz.eval_local"), (
+    assert "eval_row" in _imported_from(path, "worker.eval_rows"), "eval_row 没走 biz.eval_rows"
+    assert "eval_row" not in _imported_from(path, "worker.eval_local"), "eval_row 仍从 biz.eval_local 取"
+    assert {"run_local_eval_game", "settle_eval_summary"} & _imported_from(path, "worker.eval_local"), (
         "offline_eval 不再 import 运行器了（这条边本应保留）——是否搬错了？"
     )
 

@@ -29,7 +29,7 @@ def _make_tree(root: Path) -> None:
         "rl/sub/deep.py",
         "curricula/x3-power.jsonc",
         "remote/worker.py",
-        "run_rl.py",
+        "trainer/run_rl.py",
     ]
     drop = [
         # 点目录 —— 本次修复的主角
@@ -72,7 +72,7 @@ def test_code_zip_excludes_all_dot_dirs(tmp_path: Path) -> None:
         "rl/sub/deep.py",
         "curricula/x3-power.jsonc",
         "remote/worker.py",
-        "run_rl.py",
+        "trainer/run_rl.py",
     }
 
 
