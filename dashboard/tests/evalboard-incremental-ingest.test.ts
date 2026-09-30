@@ -10,6 +10,7 @@ import {
   rmSync,
   statSync,
   truncateSync,
+  utimesSync,
   writeFileSync,
 } from 'fs'
 import { tmpdir } from 'os'
@@ -78,6 +79,18 @@ const storeLines = (): string[] => {
   return out
 }
 
+/**
+ * 把文件的 mtime 显式推后 1s。
+ *
+ * 「同尺寸原地改写」这条判据只能靠 mtime 识别，而**文件系统时间戳粒度 ≈1ms**：背靠背的两次
+ * 写入有概率与上一次 stat 落在同一格（本机 NTFS 实测 ~25%/次），判据就瞎了 ⇒ 用例要覆盖它，
+ * 必须自己把 mtime 推开（同 `server-api-logs.test.ts` 的 utimes 手法）。
+ */
+const bumpMtime = (f: string): void => {
+  const t = new Date(statSync(f).mtimeMs + 1000)
+  utimesSync(f, t, t)
+}
+
 describe('readTail（按字节偏移读新增尾巴）', () => {
   it('首读全量；末行没写完则留到下一拍，写完才消费', () => {
     writeFileSync(LOG, evalLine(860001) + evalLine(860002) + '{"event":"eval","seed":860003')
@@ -114,6 +127,7 @@ describe('readTail（按字节偏移读新增尾巴）', () => {
     writeFileSync(LOG, evalLine(860001))
     const first = readTail(LOG, undefined)
     writeFileSync(LOG, evalLine(860009)) // 同字节数：只有 mtime 变了
+    bumpMtime(LOG) // 否则同格 mtime ⇒ 判据不可判（flaky）
     const after = readTail(LOG, first.next)
     expect(after.reset).toBe(true)
     expect(JSON.parse(after.lines[0]).seed).toBe(860009)
@@ -192,6 +206,7 @@ describe('ingestCourseEvalLog（增量）', () => {
     expect(ingestCourseEvalLog(COURSE)).toBe(2)
     // 同尺寸覆盖**首行**：偏移不可信 ⇒ 整份重读；旧行去重丢掉，只有新行入账
     writeFileSync(LOG, evalLine(860009) + evalLine(860002))
+    bumpMtime(LOG) // 否则同格 mtime ⇒ 判据不可判（flaky）
     expect(ingestCourseEvalLog(COURSE)).toBe(1)
     expect(storeLines().length).toBe(3)
   })

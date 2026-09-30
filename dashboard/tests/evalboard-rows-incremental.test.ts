@@ -1,7 +1,15 @@
 /** evalboard-rows-incremental.test.ts ↔ dashboard/src/server/eval-board/rows.ts 的
  *  账本行增量读：未动零 IO、只增长读尾巴、被改写整片重解析。 */
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test'
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
 import { appendRow, gamesDir, loadRows, type EvalGameRow } from '../src/evalboard/store'
@@ -54,6 +62,18 @@ const sameRows = (a: EvalGameRow[], b: EvalGameRow[]): boolean =>
   JSON.stringify(a.map((r) => JSON.stringify(r)).sort()) ===
   JSON.stringify(b.map((r) => JSON.stringify(r)).sort())
 
+/**
+ * 把文件的 mtime 显式推后 1s。
+ *
+ * 「同尺寸原地改写」这条判据只能靠 mtime 识别，而**文件系统时间戳粒度 ≈1ms**：背靠背的两次
+ * 写入有概率与上一次 stat 落在同一格（本机 NTFS 实测 ~25%/次），判据就瞎了 ⇒ 用例要覆盖它，
+ * 必须自己把 mtime 推开（同 `server-api-logs.test.ts` 的 utimes 手法）。
+ */
+const bumpMtime = (f: string): void => {
+  const t = new Date(statSync(f).mtimeMs + 1000)
+  utimesSync(f, t, t)
+}
+
 describe('loadRowsCached（账本行增量读）', () => {
   it('内容与 store.loadRows 一致；未变动时是**同一个实例**（零 IO 零解析）', () => {
     writeShard('2026-08.jsonl', [row(1, '2026-08'), row(2, '2026-08')])
@@ -93,6 +113,7 @@ describe('loadRowsCached（账本行增量读）', () => {
     writeShard('2026-09.jsonl', [row(1), row(2)])
     expect(loadRowsCached(ROOT).length).toBe(2)
     writeShard('2026-09.jsonl', [row(7), row(2)]) // 同字节数、只改了首行
+    bumpMtime(path.join(gamesDir(ROOT), '2026-09.jsonl')) // 否则同格 mtime ⇒ 判据不可判（flaky）
     const after = loadRowsCached(ROOT)
     expect(after.length).toBe(2)
     expect(after.map((r) => r.seed).sort()).toEqual([2, 7])
