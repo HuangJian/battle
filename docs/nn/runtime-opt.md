@@ -86,6 +86,50 @@ mypy 那条**与本次无关的既有**红：`tests/test_reward_golden.py:1141`�
 启动代价记账：8 worker 逐个预热 ⇒ a95 上 **~80s 端口不可连**（旧形态 26s 上线，但那段本来也要付：
 上线即失联 50s + 首批全冷，§27.5–27.7）。快机上 fork 是 ms 级，这部分基本只剩 worker 启动成本。
 
+### 28.5 a98（第二台 Termux 节点）同代码对拍：它在生产并发下与 a95 同级（+9%）（2026-09-28）
+
+设备 a98 = adb `4P7TY5SWOJ6HK7S8`（MT6789，Android 14，8 核 / 5.9GB，proot；与 a95 同布局）。
+它**已经自己拉到 `01daa814`**（`goal-nn`、工作区 clean、`tools/sim/serve-any.ts` 在位），agent 是人工起的
+（`bun tools/agent/sampler-agent.ts --port 8443 --workers 7`，stdout 在 `/dev/pts/0`、**没有日志文件**）。
+
+同一份工作负载（stage 7 / 同 seed / 同权重 `f3c5ec0f`（已同时放进两个节点的 dist 缓存）/ 7 worker / bun）：
+
+| 项 | a95（6444d390） | a98（4P7…） | 比值 |
+|---|---|---|---|
+| 启动：`prewarm 7/7` | 51.8–55.3s（≈7.5s/worker） | **15.4–17.6s**（≈2.2s/worker） | a98 **快 3×** |
+| 启动：到 `listening` | 63.7s | 19.3s | 3.3× |
+| 逐局（并发 1，8 rollout + 4 eval seed） | 合计 35.0s | 合计 47.8s | a98 慢 **1.37×** |
+| 6 路 rollout（同 6 seed，设备回环） | 9.3–11.7s ⇒ 1.55–1.95 s/局 | 11.7–13.2s ⇒ 1.94–2.19 s/局 | a98 慢 ~1.2× |
+| **生产路径**（宿主 → 节点经局域网，同 6 seed） | WALL 7.13s ⇒ **1188 ms/局** | WALL 7.78s ⇒ **1296 ms/局** | **a98 +9%** |
+| 负载中 ping（协调器超时 3s） | max **0.167s**，全 200 | max **0.173s**，全 200 | 都远低于 3s |
+| 池健康 / 失败 | 7/7、0 fail、0 池事件 | 7/7、0 fail、0 池事件 | 同 |
+| 每局 body | 22–91KB（gzip/BCV2） | 22–91KB，**逐 seed 同量** | 同工作、同内容 |
+
+⇒ **生产并发下 a98 与 a95 同级（差 ~9%），不是「一半」**。a98 的单局（单核）确实慢 ~1.35×，但它有 8 个
+可用核，而 **a95 只有 6**：`/proc/cpuinfo` = 8、`/sys/.../cpu/online = 0-7`，但 proot 里 `nproc` = **6**（a98 = 8）
+—— Android 对后台 app 的 cpuset 限制；agent 仍起 7 worker ⇒ a95 长期超订。两边在 6–7 并发都被打满，
+单核差距被抹平，这也把「a95 天生更强」这个前提削掉了。
+
+**「贡献差一倍」不在 CPU，在配置与环境**（两条都可查）：
+
+1. `nn-training/rl-config.json` 里 **a95/a97/a98/a96/lite/gcs 全是 `"enabled": false`**，只有 self/mac 为 true；
+   `rl/dispatch.py:214` 就是 `[n for n in cfg["nodes"] if n.get("enabled", True)]` ⇒ 这两台今天**一局都没拿到**。
+   控制台同口径（`/api/pool?days=all`）：a95/a98 均 `disabled`、`lastContrib = -1`、`ok = 0`。
+2. 账本（`tmp/**/dist-agent-meta.jsonl` 全量 ≈24 万行）：**a98 全期为 0 行**；a95 全期 4218 局、近 7 天 871 局
+   （631 rollout / 240 eval，平均 elapsed 11.7s、墙钟 17.7s/局 —— 全是旧形态的数），最后一局停在 **09-26 17:49**。
+   即：这个仓库的账本里找不到「a98 ≈ a95 的一半」对应读数；若读数来自别处，需要那个窗口/来源才核得动。
+
+**结论**：新代码对 a98 的改善是实的（同质池 / 预热先于 bind / 任务级错误不重铺 worker 都生效：两节点
+0 fail、0 池事件、负载中 ping ≤0.17s）；**a98 能达到 a95 的生产级水平（+9%），启动还快 3×**。
+若要它真正开始贡献，动作在配置侧（`enabled: true`）而不是代码侧。
+
+**探针与副作用如实记**：① 两台的 agent 都是我按生产形状起的（a98 原来那只是人工起的，被我的探针重启过，
+现已恢复并改为 `/data/data/com.termux/files/home/sampler-agent.log` 落盘）；② 自包含探针必需 ——
+**proot 会话退出会把它里面 `nohup setsid` 起的 agent 一起带走**；持久起法 = 在 termux 侧
+`nohup setsid proot-distro login ubuntu -- bash -lc "... exec bun …"`；③ `wait` 不带参数会把无限 ping 循环
+也等下去（本轮又踩一次）；④ proot 里没有 `bc`，计时别用它；⑤ 复用同一 `(wver,stage,seed)` 会命中 agent 的
+`resultCache` 秒回（测吞吐必须每次换 seed）。
+
 ---
 ## §27 a95（Android/Termux·proot）贡献量 1/10 归因：每批首批 N 次冷启（2026-09-28）
 
