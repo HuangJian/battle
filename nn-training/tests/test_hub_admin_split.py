@@ -1,10 +1,10 @@
-"""S4 第三步契约（2026-09-23）—— `HubHandler` 的 admin 控制面拆成 `remote/hub/admin.py::AdminRoutes`。
+"""S4 第三步契约（2026-09-23）—— `HubHandler` 的 admin 控制面拆成 `hub/admin.py::AdminRoutes`。
 
-`remote/hub_server.py` 3974 行里有三个大状态类（`_JobStore` 1002 / `_HubQueue` 1033 /
+`hub/server.py` 3974 行里有三个大状态类（`_JobStore` 1002 / `_HubQueue` 1033 /
 `HubHandler` 1343）与零散小函数。第三刀取 `HubHandler`（49 方法 / 1343 行）里**最安全**的一组：
 admin 控制面 9 方法（停机恢复 / 课程热切 / 队列与状态 / push-worker 清单 / net-probe）。
 依据（plan §5.3.2 实测）：`HubHandler` 只有 3 个类属性 ⇒ 本组方法近乎无状态；本组只往外调 4 个
-通用助手；**测试接缝为零**（全仓对 `remote.hub_server` 的 patch 只有 `SEND_TIMEOUT_SEC`）。
+通用助手；**测试接缝为零**（全仓对 `hub.server` 的 patch 只有 `SEND_TIMEOUT_SEC`）。
 
 方向：`class HubHandler(AdminRoutes, BaseHTTPRequestHandler)` —— 组合类依赖混入（派发表调用它）。
 `NET_PROBE_MAX` / `_deterministic_fill` 只被本组使用，**随迁**以免与「hub_server import admin
@@ -16,7 +16,7 @@ admin 控制面 9 方法（停机恢复 / 课程热切 / 队列与状态 / push-
 1. 9 个 admin 方法**定义**在 `AdminRoutes`；`HubHandler` **不得**再定义（组合类只能是组合类）；
 2. `HubHandler` 的 MRO 里 `AdminRoutes` 在 `BaseHTTPRequestHandler` **之前**（否则 typeshed 的
    `headers` / `rfile` 精确类型会被混入的声明遮蔽——`no-any-return` 的成因）；
-3. `remote/hub/` **不 import `remote.hub_server`**（混入包不得反向依赖组装模块，否则成环）；
+3. `hub/` **不 import `hub.server`**（混入包不得反向依赖组装模块，否则成环）；
 4. net-probe 行为：确定性填充（固定种子 / 64KiB 块重复）· `bytes` 越界 400 · 上行体越界 413。
 """
 
@@ -28,8 +28,8 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-import remote.hub.admin as admin_mod
-from remote.hub.admin import NET_PROBE_MAX, AdminRoutes, _deterministic_fill
+import hub.admin as admin_mod
+from hub.admin import NET_PROBE_MAX, AdminRoutes, _deterministic_fill
 
 NN_ROOT = Path(__file__).resolve().parent.parent
 
@@ -74,9 +74,9 @@ def test_admin_methods_are_defined_in_admin_routes_only() -> None:
     S4 第十六刀：`HubHandler` 的类体从 `hub_server.py` 搬到 `hub/http_face.py` ⇒ 这条要读
     **新家**（读旧路会 `StopIteration` —— 薄入口里根本没有那个类）。
     """
-    defined = _class_methods(NN_ROOT / "remote" / "hub" / "admin.py", "AdminRoutes")
+    defined = _class_methods(NN_ROOT / "hub" / "admin.py", "AdminRoutes")
     assert set(ADMIN_METHODS) <= defined, sorted(set(ADMIN_METHODS) - defined)
-    left = _class_methods(NN_ROOT / "remote" / "hub" / "http_face.py", "HubHandler")
+    left = _class_methods(NN_ROOT / "hub" / "http_face.py", "HubHandler")
     crept_back = sorted(set(ADMIN_METHODS) & left)
     assert crept_back == [], f"这些方法又回到 HubHandler 了：{crept_back}"
 
@@ -97,7 +97,7 @@ def test_hub_handler_declares_all_mixins_before_the_base_handler() -> None:
     它也因此不触发 `tests/test_subproc_util.py` 的「起服务必须借端口」源码守卫。
     """
     # S4 第十六刀：类体现在住 `hub/http_face.py`。
-    tree = ast.parse((NN_ROOT / "remote" / "hub" / "http_face.py").read_text(encoding="utf-8"))
+    tree = ast.parse((NN_ROOT / "hub" / "http_face.py").read_text(encoding="utf-8"))
     cls = next(
         n for n in ast.walk(tree) if isinstance(n, ast.ClassDef) and n.name == "HubHandler"
     )
@@ -118,7 +118,7 @@ def test_net_probe_support_names_moved_with_the_group() -> None:
     里」—— 旧写法在新布局下是空话（薄入口本来就没有实现），而 handler 侧才是可能长回来的地方。
     """
     assert NET_PROBE_MAX == 16 * 1024 * 1024
-    for rel in ("remote/hub_server.py", "remote/hub/http_face.py"):
+    for rel in ("hub/server.py", "hub/http_face.py"):
         src = (NN_ROOT / rel).read_text(encoding="utf-8")
         for name in ("NET_PROBE_MAX", "_deterministic_fill", "_PROBE_BLOCK", "random."):
             assert name not in src, f"{name} 仍留在 {rel}（应随 admin 组迁走）"
@@ -137,8 +137,14 @@ def test_hub_package_never_imports_hub_server() -> None:
         # 用**叶子名**判据而不是带引号的点分字面量：后者是 `tests/test_subproc_util.py`
         # 「起服务必须借端口」源码守卫的标记（它假设「写过那个 patch 目标 = 会 spawn」）。
         # 本文件确实不起服务（用进程内 stub），所以不该被那个守卫接管。
-        leaves = {imp.rsplit(".", 1)[-1] for imp in _imports(NN_ROOT / "remote" / "hub" / name)}
-        assert "hub_server" not in leaves, name
+        # 判据是**点分全名**（刀 1：组装模块 = `hub.server`）而不是叶子名 —— 叶子 `server`
+        # 会撞上标准库的 `from http.server import …`。
+        hits = sorted(
+            imp
+            for imp in _imports(NN_ROOT / "hub" / name)
+            if imp == "hub.server" or imp.startswith("hub.server.")
+        )
+        assert hits == [], f"{name} 反向 import 了组装模块：{hits}"
 
 
 # ────────────────────────── 功能性：net-probe 的不变量 ──────────────────────────
@@ -211,6 +217,6 @@ def test_admin_module_has_no_module_level_mutable_state() -> None:
         for name, value in vars(admin_mod).items()
         if not name.startswith("__")
         and isinstance(value, (list, dict, set))
-        and getattr(value, "__module__", None) == "remote.hub.admin"
+        and getattr(value, "__module__", None) == "hub.admin"
     }
     assert mutable == set(), f"admin 模块出现了模块级可变状态：{sorted(mutable)}"

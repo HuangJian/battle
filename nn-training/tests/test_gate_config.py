@@ -1,4 +1,4 @@
-"""rl/config.py `gates` 块 —— 解析期校验测试（plan/course-exit-and-shutdown.md §3.4）。
+"""biz/config.py `gates` 块 —— 解析期校验测试（plan/course-exit-and-shutdown.md §3.4）。
 
 纯逻辑（无 torch / 无 bun）。覆盖：好配置加载、§3.4 八条校验逐条响亮报错、
 无 gates 老课程逐字节不变、分流声明折叠、budget 可行性 WARNING。
@@ -12,7 +12,7 @@ from typing import Any
 import pytest
 from pydantic import ValidationError
 
-from rl.config import GATE_KINDS, GATE_SPLIT, CourseConfig, GatesSpec
+from biz.config import GATE_KINDS, GATE_SPLIT, CourseConfig, GatesSpec
 
 BASE: dict[str, Any] = {
     "version": 5,
@@ -282,7 +282,7 @@ def test_gates_budget_warning_when_budget_too_tight() -> None:
 
 def test_real_courses_still_load() -> None:
     """存量课程（无 gates 块）解析不受影响。"""
-    from rl.config import load_course
+    from biz.config import load_course
 
     for name in ("c5-margin", "c6-margin", "p4-onset"):
         c = load_course(name)
@@ -296,7 +296,7 @@ def test_c6b_course_gates_block_is_machine_readable() -> None:
     kills/phits 未测 = 0（依赖它们的相对子项按 §3.4-7 跳过，不许编造）；
     ③ 预算可行（300 局/轮 + eval_every 3 容得下 sustain×2 轮）。
     """
-    from rl.config import load_course
+    from biz.config import load_course
 
     c = load_course("c6b-margin")
     assert c.gates is not None

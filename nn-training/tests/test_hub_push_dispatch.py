@@ -38,7 +38,7 @@ from common.protocol import (
     push_worker_from_node,
     push_worker_id_of,
 )
-from remote.hub_server import _HubQueue, _JobStore, make_server
+from hub.server import _HubQueue, _JobStore, make_server
 from remote.push_dispatch import PushDispatcher, PushWorkers
 from tests.helpers.push_worker import PAYLOAD
 

@@ -22,8 +22,8 @@ REPO = ROOT.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from biz.reward_library import METRIC_INDEX, METRICS_DIM
 from common.proc import run_capture
-from rl.reward_library import METRIC_INDEX, METRICS_DIM
 
 GOLDEN_DIR = ROOT / "tests" / "golden"
 OUT_PATH = GOLDEN_DIR / "v7_phi_ts_oracle.json"
@@ -99,8 +99,8 @@ def main() -> None:
     OUT_PATH.write_text(json.dumps(doc, indent=1), encoding="utf-8")
     # 本地自检：Python v7 对 golden 立即对账
     sys.path.insert(0, str(ROOT))
-    from rl.config import load_course
-    from rl.reward_library import build_reward_fn
+    from biz.config import load_course
+    from biz.reward_library import build_reward_fn
 
     fn = build_reward_fn(load_course("s4b").reward_spec())
     M = np.asarray(doc["metrics"], dtype=np.float64)

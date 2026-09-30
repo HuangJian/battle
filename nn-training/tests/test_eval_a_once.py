@@ -1,6 +1,6 @@
 """test_eval_a_once — 手动 evalA 必须与 in-loop eval **同一条派发路**（2026-09-22 用户指令）。
 
-缺口：`rl/eval_a_once.py` 曾自带一个「本机串行」循环 —— 400 局 × ~0.85s ≈ 340s
+缺口：`trainer/eval_a_once.py` 曾自带一个「本机串行」循环 —— 400 局 × ~0.85s ≈ 340s
 （实测 x20-noexplore it177 = 339.2s，账本 `nodes` 只有 `{"local-evalA": 400}`），
 而 in-loop 同一份语料 50–64s（三台节点分摊）。手动 evalA 是**同一次评估的手动触发**：
 语料 / 节点池 / 账本 schema 都必须与 in-loop 同源，否则指标表里两种行不可比。
@@ -18,19 +18,19 @@ from pathlib import Path
 
 import pytest
 
-from rl import eval_a_once
+from trainer import eval_a_once
 
 ROOT = Path(__file__).resolve().parent.parent
 
 
 def test_eval_a_once_dispatches_through_in_loop_dispatcher() -> None:
-    """回归：手动 evalA 必须经 `rl/eval_dispatch` 派到节点，不得自己串行跑局。
+    """回归：手动 evalA 必须经 `trainer/eval_dispatch` 派到节点，不得自己串行跑局。
 
     源码级断言（同 test_eval_loot_fields.py 的接线口径）——它抓的正是那 339s 的根因：
     本地-only 的 `for stage, seed in todo: run_local_eval_game(...)`。
     """
-    src = (ROOT / "rl" / "eval_a_once.py").read_text(encoding="utf-8")
-    assert "from rl.eval_dispatch import dispatch_eval_round" in src
+    src = (ROOT / "trainer" / "eval_a_once.py").read_text(encoding="utf-8")
+    assert "from trainer.eval_dispatch import dispatch_eval_round" in src
     assert "dispatch_eval_round(" in src
     # 不再直接调本地 runner（自己跑局 = 又把节点池甩掉了）
     assert "run_local_eval_game" not in src
@@ -38,12 +38,16 @@ def test_eval_a_once_dispatches_through_in_loop_dispatcher() -> None:
     assert "evalLocalSlots" in src
     # in-loop 的调用点也用同一模块（两边同源，不是各写一套）。
     # 2026-09-24（S4 第十七刀）：in-loop 派发链（`_dispatch_delayed_eval` / `_drain_pending_eval`）
-    # 从 `rl/loop_steps.py` 搬到 `rl/loop_eval.py`。这里**在 rl/ 源码树里找**「谁从 eval_dispatch
+    # 从 `trainer/loop_steps.py` 搬到 `trainer/loop_eval.py`。这里**在业务源码树（`trainer/` + `biz/`）里找**「谁从 eval_dispatch
     # 拿 `dispatch_eval_bg`」，而不是写死一个路径 —— 写死的那份会在搬文件时静默失效（本仓已撞过
     # 五次）；同时把「拿到这个名字的模块里必须住着 in-loop 那一簇」也钉住，免得将来搬到别处后
     # 这句断言退化成一个跟 in-loop 无关的模块在替它绿。
+    # 2026-09-30（刀 4）：「谁从 eval_dispatch 拿 dispatch_eval_bg」是**跨两棵树**的问题
+    # （`rl/` 编排 + `biz/` 纯逻辑）——只扫 `rl/` 会让这条判据随着搬家静默变瞎。
+    from tests.helpers import source_scan
+
     holders = {
-        p.stem: p for p in (ROOT / "rl").glob("*.py")
+        p.stem: p for p in source_scan.logic_py_files(str(ROOT))
         if "eval_dispatch import dispatch_eval_bg" in p.read_text(encoding="utf-8")
     }
     assert "loop_eval" in holders, sorted(holders)
@@ -170,15 +174,15 @@ def test_main_baseline_defaults_ckpt_to_course_out(
     traj = tmp_path / "traj"
     course_p = _course_file_with_bc(tmp_path, bc=bc, out=out, traj=traj)
 
-    import dist_common
-    from rl import eval_dispatch
+    import common.distribution
+    from trainer import eval_dispatch
 
     seen: dict = {}
 
     def _fake_dispatch(bun, rl_path, traj_dir, args, cfg, iter_id, it, **kw):
         seen.update(rl_path=rl_path, it_dir=Path(traj_dir), it=it, iter_id=iter_id, **kw)
         # 落一条逐局行（与真派发器同册同 schema）——把 main 的读回/回填路径真的走一遍。
-        fp = dist_common.weights_fingerprint(rl_path)[:16]
+        fp = common.distribution.weights_fingerprint(rl_path)[:16]
         with open(Path(traj_dir).parent / "eval_log.jsonl", "a", encoding="utf-8") as f:
             f.write(
                 json.dumps(
@@ -197,7 +201,7 @@ def test_main_baseline_defaults_ckpt_to_course_out(
                 + "\n"
             )
 
-    monkeypatch.setattr(dist_common, "load_dist_config", lambda: {})
+    monkeypatch.setattr(common.distribution, "load_dist_config", lambda: {})
     monkeypatch.setattr(eval_dispatch, "dispatch_eval_round", _fake_dispatch)
 
     rc = _run_main(monkeypatch, ["--course", str(course_p), "--iter", "0", "--baseline"])
@@ -206,7 +210,7 @@ def test_main_baseline_defaults_ckpt_to_course_out(
     assert seen["rl_path"] == str(bc)  # 起点冻结权重 = 课程 bc，不是 live out
     assert seen["it"] == 0 and seen["baseline"] is True
     assert seen["iter_id"] == "evalA.0"
-    fp = dist_common.weights_fingerprint(str(bc))[:16]
+    fp = common.distribution.weights_fingerprint(str(bc))[:16]
     summ = [r for r in _ledger_rows(traj) if r.get("event") == "eval_summary"]
     assert summ and summ[-1]["iter"] == 0 and summ[-1]["wver"] == fp
 
@@ -221,16 +225,16 @@ def test_main_baseline_skips_when_summary_landed(
     traj.mkdir(parents=True, exist_ok=True)
     course_p = _course_file(tmp_path, out=out, traj=traj)
 
-    import dist_common
-    from rl import eval_dispatch
+    import common.distribution
+    from trainer import eval_dispatch
 
-    fp = dist_common.weights_fingerprint(str(tmp_path / "bc.json"))[:16]
+    fp = common.distribution.weights_fingerprint(str(tmp_path / "bc.json"))[:16]
     (traj / "eval_log.jsonl").write_text(
         json.dumps({"event": "eval_summary", "iter": 0, "wver": fp, "games": 2, "wins": 1}) + "\n",
         encoding="utf-8",
     )
     calls: list[str] = []
-    monkeypatch.setattr(dist_common, "load_dist_config", lambda: {})
+    monkeypatch.setattr(common.distribution, "load_dist_config", lambda: {})
     monkeypatch.setattr(eval_dispatch, "dispatch_eval_round", lambda *a, **k: calls.append("x"))
 
     assert _run_main(monkeypatch, ["--course", str(course_p), "--iter", "0", "--baseline"]) == 0
@@ -246,11 +250,11 @@ def test_main_requires_ckpt_without_baseline(
     traj = tmp_path / "traj"
     course_p = _course_file(tmp_path, out=out, traj=traj)
 
-    import dist_common
-    from rl import eval_dispatch
+    import common.distribution
+    from trainer import eval_dispatch
 
     calls: list[str] = []
-    monkeypatch.setattr(dist_common, "load_dist_config", lambda: {})
+    monkeypatch.setattr(common.distribution, "load_dist_config", lambda: {})
     monkeypatch.setattr(eval_dispatch, "dispatch_eval_round", lambda *a, **k: calls.append("x"))
 
     assert _run_main(monkeypatch, ["--course", str(course_p), "--iter", "27"]) == 2
@@ -290,14 +294,14 @@ def _course_file_with_bc(tmp_path: Path, bc: Path, out: Path, traj: Path) -> Pat
 
 
 def _fake_dispatch_recorder(monkeypatch: pytest.MonkeyPatch):
-    import dist_common
-    from rl import eval_dispatch
+    import common.distribution
+    from trainer import eval_dispatch
 
     seen: dict = {}
 
     def _fake_dispatch(bun, rl_path, traj_dir, args, cfg, iter_id, it, **kw):
         seen.update(rl_path=rl_path, it=it, **kw)
-        fp = dist_common.weights_fingerprint(rl_path)[:16]
+        fp = common.distribution.weights_fingerprint(rl_path)[:16]
         with open(Path(traj_dir).parent / "eval_log.jsonl", "a", encoding="utf-8") as f:
             f.write(
                 json.dumps(
@@ -316,7 +320,7 @@ def _fake_dispatch_recorder(monkeypatch: pytest.MonkeyPatch):
                 + "\n"
             )
 
-    monkeypatch.setattr(dist_common, "load_dist_config", lambda: {})
+    monkeypatch.setattr(common.distribution, "load_dist_config", lambda: {})
     monkeypatch.setattr(eval_dispatch, "dispatch_eval_round", _fake_dispatch)
     return seen
 
@@ -352,9 +356,9 @@ def test_main_baseline_after_restart_does_not_append_foreign_wver(
     traj.mkdir(parents=True, exist_ok=True)
     course_p = _course_file_with_bc(tmp_path, bc=bc, out=out, traj=traj)
 
-    import dist_common
+    import common.distribution
 
-    fp_bc = dist_common.weights_fingerprint(str(bc))[:16]
+    fp_bc = common.distribution.weights_fingerprint(str(bc))[:16]
     (traj / "eval_log.jsonl").write_text(
         json.dumps({"event": "eval_summary", "iter": 0, "wver": fp_bc, "games": 2, "wins": 1})
         + "\n",

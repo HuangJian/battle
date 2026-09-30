@@ -73,18 +73,18 @@ export function selfNodeSpec(cfg: RlConfig): ProcSpec {
 
 // ────────────────────────── hub-server ──────────────────────────
 
-export const HUB_SERVER_ENTRY = 'nn-training/remote/hub_server.py'
+export const HUB_SERVER_ENTRY = 'nn-training/hub/server.py'
 
-/** hub 的**实现文件**（`nn-training/remote/hub/*.py`，仓库相对 posix 路径，排序）。
+/** hub 的**实现文件**（`nn-training/hub/*.py`，仓库相对 posix 路径，排序）。
  *
  *  为什么哨兵必须跟着实现走（2026-09-24 S4 第十六刀）：hub 的代码在三次拆分（路由混入 / 状态类 /
- *  调度面 / HTTP 面 / 引导链）中散到了 `remote/hub/` 下，而哨兵集一直只写入口那一个文件 ⇒
+ *  调度面 / HTTP 面 / 引导链）中散到了 `hub/` 下，而哨兵集一直只写入口那一个文件 ⇒
  *  **改 `hub/http_face.py` 的 handler 不会触发重启**，监督器会让进程继续跑旧代码（而 `hub_server.py`
  *  自己已经只剩 re-export，它的 mtime 不再随实现变）。目录哨兵也不行：`sentinelsChangedSince`
  *  比的是文件 mtime，目录 mtime 只在增删条目时变。所以这里**枚举文件**；`readdirSync` 失败
  *  （部署环境没有源码）就返回空——宁少不炸（本函数只在构造 spec 时调用，不碰网络）。 */
 export function hubImplementationFiles(): string[] {
-  const rel = 'nn-training/remote/hub'
+  const rel = 'nn-training/hub'
   try {
     return readdirSync(path.join(REPO_ROOT, rel))
       .filter((f) => f.endsWith('.py'))
@@ -115,7 +115,7 @@ export function hubServerSpec(cfg: RlConfig): ProcSpec {
       resolveVenvPython().python,
       '-u',
       '-m',
-      'remote.hub_server',
+      'hub.server',
       '--port',
       String(port),
       '--token',
@@ -129,7 +129,7 @@ export function hubServerSpec(cfg: RlConfig): ProcSpec {
       // 默认关：不打开连探活线程都不起，行为与改造前逐字节一致。
       ...(cfg.rl.hub_push ? ['--push', '--push-config', CONFIG_PATH] : []),
     ],
-    // cwd 钉死 REPO_ROOT：入口是包路径（`-m remote.hub_server`）靠 PYTHONPATH，
+    // cwd 钉死 REPO_ROOT：入口是包路径（`-m hub.server`）靠 PYTHONPATH，
     // 而它内部的默认路径/日志相对 cwd；控制台以 dashboard/ 为 cwd 启动时不能漂。
     cwd: REPO_ROOT,
     env: { PYTHONPATH: NN_TRAINING },
@@ -210,7 +210,7 @@ export function resolveRolloutSrc(cfg: RlConfig, course = ''): RolloutSrcMode {
   const raw = cc?.rollout_src ?? cfg.rl.rollout_src
   // `run`（离线训练模式；2026-09-19）也是合法值——漏掉它 = 离线课在 UI 上显示成 `local`，
   // 而那正是「云机在跑」与「本机在跑」看起来一样的那类静默分叉。域与 python
-  // `rl/loop_transport.py::ROLLOUT_SRCS` 同源（有测试对账；S4 首簇前在 `loop_steps.py`）。
+  // `trainer/loop_transport.py::ROLLOUT_SRCS` 同源（有测试对账；S4 首簇前在 `loop_steps.py`）。
   return raw === 'node' || raw === 'run' || raw === 'auto' ? raw : 'local'
 }
 
@@ -376,8 +376,8 @@ export function bcLoopSpec(cfg: RlConfig, s: BcLoopSpecOpts): ProcSpec {
     healthy: async () => pidAlive(entryForCourse(loadRegistry(), 'trainingLoop', s.course)?.pid),
     sentinels: pySentinels(
       BC_LOOP_ENTRY,
-      'nn-training/rl/bc_config.py',
-      'nn-training/rl/bc_dispatch.py',
+      'nn-training/biz/bc_config.py',
+      'nn-training/biz/bc_dispatch.py',
       'nn-training/remote/protocol.py',
       'nn-training/remote/worker.py',
       'nn-training/remote/hub_client.py',
@@ -414,7 +414,7 @@ export type GateHaltMode = 'halt' | 'notify'
 
 /**
  * 标志文件路径：`<traj>/gate-halt-mode.txt`。
- * Python 侧 `rl/loop_guards.py::_gate_halt_mode` 每轮门判定读它（优先于启动参数）。
+ * Python 侧 `trainer/loop_guards.py::_gate_halt_mode` 每轮门判定读它（优先于启动参数）。
  * traj 在课程里恒写作 `tmp/<name>`，故这里按 course 拼即可与 Python 对齐。
  */
 export function gateHaltModePath(course: string): string {

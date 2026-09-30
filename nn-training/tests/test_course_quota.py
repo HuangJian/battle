@@ -18,7 +18,7 @@ NN_ROOT = Path(__file__).resolve().parent.parent
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
 
-from rl.config import resolve_course_quota
+from biz.config import resolve_course_quota
 
 
 def _cfg(rl: dict | None = None, courses: dict | None = None) -> dict:

@@ -1,11 +1,11 @@
-"""拆分的**契约守卫**：双轨种子分类 + 过拟合报警 + summary 结算永住 `rl/eval_track.py`（S5 第三刀，2026-09-27）。
+"""拆分的**契约守卫**：双轨种子分类 + 过拟合报警 + summary 结算永住 `biz/eval_track.py`（S5 第三刀，2026-09-27）。
 
-`rl/eval_local.py` **870 → 573 行**；四段跨度（`EVAL_SEEDS` 池 · 双轨种子块 · `report_winrate_safe` ·
+`biz/eval_local.py` **870 → 573 行**；四段跨度（`EVAL_SEEDS` 池 · 双轨种子块 · `report_winrate_safe` ·
 `_acc`/`_ratio`/`_read_recent_track_wrs`/`_maybe_warn_overfit`/`settle_eval_summary`）整块搬到
-`rl/eval_track.py`（404 行）。本文件钉五件事：
+`biz/eval_track.py`（404 行）。本文件钉五件事：
 
 1. **定义唯一**——这 23 个名字不许在 `eval_local.py` 里再实现一遍（否则「搬了一半」）；
-2. **无环 / 方向**——`eval_track` 只依赖 stdlib + `rl.log`，且**不得** import `rl.eval_local`（反向边 = 环）；
+2. **无环 / 方向**——`eval_track` 只依赖 stdlib + `biz.log`，且**不得** import `biz.eval_local`（反向边 = 环）；
 3. **同一对象**——`eval_local` 的那些名字必须是 `eval_track` 的转发（不是副本）；
 4. **搬走的语义没变**——双轨种子分段（锚点固定 / 轮转周期 3 / 无重叠）+ 过拟合判决（功能性用例）；
 5. **它在分层里是 L1 纯逻辑**——不在 `remote_dag` 的传输账本里。
@@ -26,12 +26,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.eval_local as eval_local_mod
-import rl.eval_track as eval_track_mod
+import biz.eval_local as eval_local_mod
+import biz.eval_track as eval_track_mod
 from tests.helpers import remote_dag as dag
 
-TRACK_FILE = ROOT / "rl" / "eval_track.py"
-LOCAL_FILE = ROOT / "rl" / "eval_local.py"
+TRACK_FILE = ROOT / "biz" / "eval_track.py"
+LOCAL_FILE = ROOT / "biz" / "eval_local.py"
 
 #: 本次搬走的**定义**（常量 / 函数）——只许在 `eval_track.py` 里出现。
 MOVED_NAMES = {
@@ -60,8 +60,8 @@ MOVED_NAMES = {
     "split_anchor_rotor",
 }
 
-#: `eval_track.py` 允许的 import 面（stdlib + 本仓唯一的日志原语 `rl.log`；多一个即红）。
-ALLOWED_IMPORTS = {"__future__", "json", "threading", "time", "collections.abc", "pathlib", "rl.log"}
+#: `eval_track.py` 允许的 import 面（stdlib + 本仓唯一的日志原语 `biz.log`；多一个即红）。
+ALLOWED_IMPORTS = {"__future__", "json", "threading", "time", "collections.abc", "pathlib", "biz.log"}
 
 
 def _tree(path: Path) -> ast.Module:
@@ -107,7 +107,7 @@ def test_eval_local_kept_the_execution_surface() -> None:
 
     ★ 2026-09-27（S5 第十二刀）**改判**：本断言原先还写在 `hold_for_local` 上（当时的口径
     是「尾巴策略与运行器同属本机评估运行这一事务 ⇒ 留守」）。第十二刀按「独立所有者 +
-    独立触发条件」把让位/份额（尾巴）策略整族搬到 `rl/eval_yield.py`（旧路径留 `X as X`
+    独立触发条件」把让位/份额（尾巴）策略整族搬到 `biz/eval_yield.py`（旧路径留 `X as X`
     门面）——「留守」名单随之收窄到执行面；该族的契约守卫在
     `tests/test_eval_yield_split.py`。当事口径见 `plan/nn-training-refactor.md` §5.7.2/§5.7.3。
     """
@@ -116,24 +116,24 @@ def test_eval_local_kept_the_execution_surface() -> None:
         assert name in defined, f"eval_local.py 丢了执行面 {name}"
 
 
-# ─────────────────────── ② 依赖方向：stdlib(+rl.log)，无环 ───────────────────────
+# ─────────────────────── ② 依赖方向：stdlib(+biz.log)，无环 ───────────────────────
 
 
 def test_eval_track_imports_only_stdlib_and_the_log_primitive() -> None:
-    """纯逻辑模块：不得 import `remote.*` / torch / numpy（`rl.log` 是唯一允许的仓内依赖）。"""
+    """纯逻辑模块：不得 import `remote.*` / torch / numpy（`biz.log` 是唯一允许的仓内依赖）。"""
     extra = sorted(_imports(TRACK_FILE) - ALLOWED_IMPORTS)
-    assert extra == [], f"rl/eval_track.py 引入了允许面之外的依赖：{extra}"
+    assert extra == [], f"biz/eval_track.py 引入了允许面之外的依赖：{extra}"
 
 
 def test_eval_track_never_imports_eval_local() -> None:
     """★ 本刀的意义：`eval_track` 是**底座**，反向 import 运行器立刻成环。"""
-    back = sorted(m for m in _imports(TRACK_FILE) if m.startswith("rl.eval_local"))
-    assert back == [], f"rl/eval_track.py 反向 import 了运行器：{back}"
+    back = sorted(m for m in _imports(TRACK_FILE) if m.startswith("biz.eval_local"))
+    assert back == [], f"biz/eval_track.py 反向 import 了运行器：{back}"
 
 
 def test_eval_track_stays_pure_logic() -> None:
     """它在分层里是 L1 纯逻辑（不达 remote）——不在 `remote_dag` 的传输账本里，也不该进去。"""
-    assert "rl.eval_track" not in dag.LAYERS
+    assert "biz.eval_track" not in dag.LAYERS
 
 
 # ───────────────────────── ③ 门面 ─────────────────────────
@@ -142,15 +142,15 @@ def test_eval_track_stays_pure_logic() -> None:
 def test_eval_local_facade_forwards_the_same_objects() -> None:
     """门面是 `X as X` 转发 ⇒ 与 `eval_track` 里是**同一个对象**（不是副本）。"""
     for name in sorted(MOVED_NAMES):
-        assert hasattr(eval_local_mod, name), f"rl.eval_local 丢了门面 {name}"
+        assert hasattr(eval_local_mod, name), f"biz.eval_local 丢了门面 {name}"
         assert getattr(eval_local_mod, name) is getattr(eval_track_mod, name), (
-            f"rl.eval_local.{name} 不是 rl.eval_track.{name}（转发成了副本）"
+            f"biz.eval_local.{name} 不是 biz.eval_track.{name}（转发成了副本）"
         )
 
 
 def test_public_call_sites_can_still_import_from_eval_local() -> None:
-    """名字是契约：旧的 `from rl.eval_local import settle_eval_summary`（多处在用）必须仍然成立。"""
-    from rl.eval_local import dual_track_seeds, overfit_fires, settle_eval_summary
+    """名字是契约：旧的 `from biz.eval_local import settle_eval_summary`（多处在用）必须仍然成立。"""
+    from biz.eval_local import dual_track_seeds, overfit_fires, settle_eval_summary
 
     assert dual_track_seeds is eval_track_mod.dual_track_seeds
     assert overfit_fires is eval_track_mod.overfit_fires

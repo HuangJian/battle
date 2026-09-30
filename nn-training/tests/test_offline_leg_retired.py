@@ -37,21 +37,23 @@ ROOT = Path(__file__).resolve().parent.parent
 from test_role_routing import OFF_JID, _manifest, _store  # type: ignore
 from test_worker_bun_precheck import _job as _worker_job  # type: ignore
 
+from biz.loop_round import COLLECT_OFFLINE, ROUND_OFFLINE_EXIT, RoundContext
 from common.protocol import (
     ROLE_HEADER,
     ROLE_HEADER_VALUE,
     ProtocolError,
 )
+from hub.server import _HubQueue, make_server
 from remote import worker as W
-from remote.hub_server import _HubQueue, make_server
-from rl.loop_round import COLLECT_OFFLINE, ROUND_OFFLINE_EXIT, RoundContext
-from rl.loop_round_steps import RoundSteps
-from rl.loop_steps import TrainingSteps
+from trainer.loop_round_steps import RoundSteps
+from trainer.loop_steps import TrainingSteps
 
 TOKEN = "sekret"
-PROD_DIRS = ("rl", "remote")
-#: 根目录上的两块生产代码（与 `rl/` 同级，别漏）。
-PROD_FILES = ("run_rl.py", "dist_common.py")
+# 2026-09-30（刀 4）：`biz/` 是 `rl/` 的纯逻辑半（搬家前就在扫描面里）⇒ 必须补上，
+# 否则「已退役契约不得回流」的判据会静默少扫 64 个模块。
+PROD_DIRS = ("trainer", "biz", "remote")
+#: 根目录上的两块生产代码（与 `trainer/`、`biz/` 同级，别漏）。
+PROD_FILES = ("run_rl.py", "common/distribution.py")
 
 
 def _prod_sources() -> dict[str, str]:
@@ -135,11 +137,11 @@ def test_run_manifest_is_published_from_exactly_one_place_with_export_path() -> 
     行为面的兜底在 `test_publish_choke_point_refuses_a_run_queue_job_loudly`。
     """
     # 三处家随本地拆分（S4 第二十一/二十二刀）分散了：
-    #   · **生产点**（交出计划那一处）：`rl/loop_export.py::_export_offline_bundle`；
-    #   · **转发跳**（`_remote_ppo` → `_remote_ppo_publish`）：`rl/loop_remote_job.py`；
-    #   · **真发布点**（`publish_job`）：同一个 `rl/loop_remote_job.py`。
-    # 继续只读 `rl/loop_steps.py` 会让这条守卫**静默空过**（那里已经没有调用点）。
-    prod = (ROOT / "rl" / "loop_export.py").read_text(encoding="utf-8")
+    #   · **生产点**（交出计划那一处）：`trainer/loop_export.py::_export_offline_bundle`；
+    #   · **转发跳**（`_remote_ppo` → `_remote_ppo_publish`）：`trainer/loop_remote_job.py`；
+    #   · **真发布点**（`publish_job`）：同一个 `trainer/loop_remote_job.py`。
+    # 继续只读 `trainer/loop_steps.py` 会让这条守卫**静默空过**（那里已经没有调用点）。
+    prod = (ROOT / "trainer" / "loop_export.py").read_text(encoding="utf-8")
     producers = [
         _call_args(prod, m.start())
         for m in re.finditer(r"self\._remote_ppo\(", prod)
@@ -150,7 +152,7 @@ def test_run_manifest_is_published_from_exactly_one_place_with_export_path() -> 
     assert "export_path" in producers[0], f"唯一发布点没带 export_path ⇒ 复活了队列腿：{producers[0]}"
     # ② 转发跳（`_remote_ppo` → `_remote_ppo_publish`）：两件都必须原样带上，少带一件
     #    就在咽喉点被拒（那是**响亮**的，但仍要钉住形状，免得靠「能跑」反推）。
-    job = (ROOT / "rl" / "loop_remote_job.py").read_text(encoding="utf-8")
+    job = (ROOT / "trainer" / "loop_remote_job.py").read_text(encoding="utf-8")
     forwards = [
         _call_args(job, m.start())
         for m in re.finditer(r"self\._remote_ppo_publish\(", job)
@@ -165,7 +167,7 @@ def test_run_manifest_is_published_from_exactly_one_place_with_export_path() -> 
         for m in re.finditer(r"(?<!def )\bpublish_job\(", s)  # 排除函数定义那一行
         if "plan_bytes" in _call_args(s, m.start())
     ]
-    assert calls == ["rl/loop_remote_job.py"], f"多出一个造 kind=run manifest 的生产点：{calls}"
+    assert calls == ["trainer/loop_remote_job.py"], f"多出一个造 kind=run manifest 的生产点：{calls}"
 
 
 def test_publish_choke_point_refuses_a_run_queue_job_loudly(tmp_path: Path) -> None:
@@ -245,11 +247,11 @@ def test_offline_course_stops_the_round_cleanly_with_a_pointing_line(
     `run_iters=0`（只写了来源、没写段长）也在内：回落 `COLLECT_LOCAL` 的代价是本机偷偷自己
     采样、与云机取包链**双跑**（plan §7.2-1 那个坑），所以「来源是 run」就足够判离线。
     """
-    import rl.loop_round_steps as lrs
+    import trainer.loop_round_steps as lrs
 
     lines: list[str] = []
     monkeypatch.setattr(lrs, "log", lines.append)
-    monkeypatch.setattr(lrs.dist_common, "load_dist_config", lambda: {})
+    monkeypatch.setattr(lrs.common.distribution, "load_dist_config", lambda: {})
     exported: list[tuple] = []
     steps = _bare_steps()
     steps.args.run_iters = run_iters
@@ -273,10 +275,10 @@ def test_export_bundle_still_wins_over_the_offline_early_exit(
     顺序是被钉住的：导出腿是**唯一**合法的 kind=run 形状，若被离线早退挡在前面，
     控制台「切离线」的自动导出会静默什么都不做。
     """
-    import rl.loop_round_steps as lrs
+    import trainer.loop_round_steps as lrs
 
     monkeypatch.setattr(lrs, "log", lambda _m: None)
-    monkeypatch.setattr(lrs.dist_common, "load_dist_config", lambda: {})
+    monkeypatch.setattr(lrs.common.distribution, "load_dist_config", lambda: {})
     exported: list[tuple] = []
     steps = _bare_steps()
     steps.args.export_bundle = "task.zip"

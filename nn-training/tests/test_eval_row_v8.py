@@ -1,10 +1,10 @@
 """metrics v8 四列必须出现在逐局 eval 账本行里（eval_row + batch_eval.record 共用 helper）。
 
 回归来源：v8 提交只改了 TS 导出器与 reward_library，Python 两处行构造点
-（rl/eval_local.eval_row、rl/batch_eval.record）没跟进 ⇒ 日常 eval_log 的
+（biz/eval_local.eval_row、trainer/batch_eval.record）没跟进 ⇒ 日常 eval_log 的
 dmgFirst600/dangerTicks/threatTicks/playerHpRatio 全缺，机制先行读数失明。
 """
-from rl.eval_local import eval_row, eval_v8_fields
+from biz.eval_local import eval_row, eval_v8_fields
 
 EVAL_V8_KEYS = ("playerHpRatio", "dangerTicks", "threatTicks", "dmgFirst600")
 
@@ -65,10 +65,10 @@ def test_batch_eval_record_uses_shared_helper():
 
     # 从本文件反推仓根：门禁（`nn-python-gate.sh`）的 cwd 是 `nn-training/`，
     # 写死仓根相对路径会 FileNotFoundError（2026-09-24 修）。
-    # 2026-09-25 并入 origin 后：`batch_eval` 已拆成门面（`rl/batch_eval.py`），执行器与它的
-    # `record` 住在 `rl/batch_runner.py` ⇒ 锚点跟着搬（写死旧路径会让这条守卫**静默失效**：
+    # 2026-09-25 并入 origin 后：`batch_eval` 已拆成门面（`trainer/batch_eval.py`），执行器与它的
+    # `record` 住在 `trainer/batch_runner.py` ⇒ 锚点跟着搬（写死旧路径会让这条守卫**静默失效**：
     # 门面里没有 `record`，断言只会变成在读一份无关文件）。
-    src = (pathlib.Path(__file__).resolve().parents[2] / "nn-training/rl/batch_runner.py").read_text(
+    src = (pathlib.Path(__file__).resolve().parents[2] / "nn-training/trainer/batch_runner.py").read_text(
         encoding="utf-8"
     )
     assert "eval_v8_fields" in src

@@ -6,7 +6,7 @@ import json
 import secrets
 from pathlib import Path
 
-from rl.terminal_stats import terminal_stats
+from biz.terminal_stats import terminal_stats
 
 REPO = Path(__file__).resolve().parents[2]  # 仓库根（2026-09-08 双 tmp 统一：tmp/ 在仓库根）
 FAILS: list[str] = []

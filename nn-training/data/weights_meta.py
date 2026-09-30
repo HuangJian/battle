@@ -19,7 +19,7 @@ import os
 import re
 from typing import Any
 
-from schema import OBS_SCHEMA_MAJOR
+from common.schema import OBS_SCHEMA_MAJOR
 
 #: 权重文件格式标识（TS 运行时 `src/nn/load-weights.ts` 按同一串认）。
 FORMAT = "nn-weights-json"
@@ -41,7 +41,7 @@ def validate_weights_meta(meta: Any, path: str) -> None:
 
       * 文件必须有非空 params；format 若存在必须为 "nn-weights-json"；
       * **schema_major 必须等于当前 OBS_SCHEMA_MAJOR**——schema 变更意味着 obs/
-        scalar/action 布局已变（schema.py 红线：MAJOR bump 必须全量重导），旧文件
+        scalar/action 布局已变（common/schema.py 红线：MAJOR bump 必须全量重导），旧文件
         静默加载只会把 24 维 scalar 的旧权重灌进 19 维模型，逐字段错位。
     不匹配直接 raise（fail fast）：训练前的崩溃永远比训练后的错误结论便宜。
     """
@@ -58,7 +58,7 @@ def validate_weights_meta(meta: Any, path: str) -> None:
     if sm is not None and int(sm) != OBS_SCHEMA_MAJOR:
         raise ValueError(
             f"[weights] {path}: schema_major={sm} ≠ 当前 {OBS_SCHEMA_MAJOR} —— "
-            f"obs/scalar/action 布局已变更（schema.py 红线），该权重必须全量重导后使用"
+            f"obs/scalar/action 布局已变更（common/schema.py 红线），该权重必须全量重导后使用"
         )
 
 

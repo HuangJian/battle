@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from rl.loop_steps import require_remote_transport
+from trainer.loop_steps import require_remote_transport
 
 
 def test_push_gpu_nodes_allow_empty_hub_url() -> None:

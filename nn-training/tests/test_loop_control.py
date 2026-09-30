@@ -1,4 +1,4 @@
-"""R2d 操作面：控制文件契约（`rl/loop_control.py`）。
+"""R2d 操作面：控制文件契约（`trainer/loop_control.py`）。
 
 控制台（TS 侧 `server/actions/loop-control.ts`）写、训练侧读 —— 两侧唯一的耦合就是这份 JSON
 的形状，所以这里逐条钉住「什么算合法」「坏掉时往哪边保守」，以及**只在意图变化时**产出日志
@@ -21,7 +21,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.loop_control import (
+from trainer.loop_control import (
     Control,
     ControlApplier,
     applied_path,

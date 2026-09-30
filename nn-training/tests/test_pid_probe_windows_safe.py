@@ -5,10 +5,10 @@
 `TerminateProcess(handle, 0)`：查询会**直接把锁持有者杀掉**（最坏情况：打死正在训练的
 trainer），而且 `except Exception → False` 还会把「我把它杀了」记成「它本来就是死的」，
 于是陈旧锁被「清理」、双开护栏静默失效。同口径的正确写法 = `GetExitCodeProcess ==
-STILL_ACTIVE`（`run_rl._runrl_pid_alive` / `remote._instance_lock._pid_alive` 一直如此）。
+STILL_ACTIVE`（`run_rl._runrl_pid_alive` / `common.instance_lock._pid_alive` 一直如此）。
 
-**2026-09-17 收口后**：实现只有一份（`nn-training/pid_probe.py`），四份薄壳全部委托它——
-`train.loop_util` / `run_rl` / `remote._instance_lock` / `remote.notebook_runtime`（后者原是
+**2026-09-17 收口后**：实现只有一份（`nn-training/common/pid_probe.py`），四份薄壳全部委托它——
+`train.loop_util` / `run_rl` / `common.instance_lock` / `remote.notebook_runtime`（后者原是
 函数内的嵌套闭包，不可测，已提到模块层）；`tools/tmp-clean.py` 是唯一有意保留的副本
 （仓根开发工具不能依赖 nn-training 的包布局），由源码门禁守契约。
 
@@ -99,20 +99,20 @@ def _probes() -> list[tuple[str, Callable[[int], bool]]]:
     """全部存活探测入口（懒导入：run_rl 会拉起 torch）。
 
     四份薄壳（loop_util / run_rl / _instance_lock / notebook_runtime）现在**全部委托**
-    `pid_probe.pid_alive`；额外把「唯一实现」本身与唯一的保留副本（`tools/tmp-clean.py`）
+    `common.pid_probe.pid_alive`；额外把「唯一实现」本身与唯一的保留副本（`tools/tmp-clean.py`）
     一起纳入同一组断言——它们才是真正跑那段逻辑的地方。
     """
-    from pid_probe import pid_alive as canonical_probe
-    from remote._instance_lock import _pid_alive as instance_probe
+    from common.instance_lock import _pid_alive as instance_probe
+    from common.pid_probe import pid_alive as canonical_probe
     from remote.notebook_runtime import _pid_alive as notebook_probe
     from run_rl import _runrl_pid_alive as runrl_probe
     from train.loop_util import _pid_alive as loop_probe
 
     return [
-        ("pid_probe.pid_alive（唯一实现）", canonical_probe),
+        ("common.pid_probe.pid_alive（唯一实现）", canonical_probe),
         ("train.loop_util._pid_alive", loop_probe),
         ("run_rl._runrl_pid_alive", runrl_probe),
-        ("remote._instance_lock._pid_alive", instance_probe),
+        ("common.instance_lock._pid_alive", instance_probe),
         ("remote.notebook_runtime._pid_alive", notebook_probe),
         ("tools/tmp-clean.py::_pid_alive（保留副本）", _load_tmp_clean_probe()),
     ]
@@ -123,7 +123,7 @@ def _windows_env(fake: _FakeK32, kills: list[tuple[int, int]]) -> Iterator[None]
     """把当前进程伪装成 Windows（仅在 with 体内生效；退出前必定还原）。"""
     had_windll = hasattr(ctypes, "windll")
     prev_windll = getattr(ctypes, "windll", None)
-    # 两种「我在 Windows 上吗」的写法都要翻：pid_probe 系列看 `os.name`，
+    # 两种「我在 Windows 上吗」的写法都要翻：common.pid_probe 系列看 `os.name`，
     # tools/tmp-clean.py 看 `sys.platform` —— 只翻一个会让另一个副本走 POSIX 分支被漏测。
     real_name, real_kill, real_platform = os.name, os.kill, sys.platform
 
@@ -297,24 +297,24 @@ def test_os_kill_probe_exists_in_exactly_one_place() -> None:
 
     这就是这类隐患反复出现的根因面：从前是「三处同源」——每加一个调用点就多一份可漂移的
     实现（2026-09-17 一天内就在 `loop_util` / `notebook_runtime` 两处踩到不同的坑）。
-    现在所有入口都委托 `pid_probe.py`，于是「Windows 安全」只需在一个地方成立。
+    现在所有入口都委托 `common/pid_probe.py`，于是「Windows 安全」只需在一个地方成立。
     """
     offenders = [
         p.relative_to(NN_ROOT).as_posix() for p in _production_py_files() if _os_kill_zero_lines(p)
     ]
-    assert offenders == ["pid_probe.py"], (
-        f"`os.kill(pid, 0)` 存活探测只允许出现在 pid_probe.py（唯一实现），实际: {offenders} —— "
-        "新增调用点请 `from pid_probe import pid_alive`，不要再复制实现"
+    assert offenders == ["common/pid_probe.py"], (
+        f"`os.kill(pid, 0)` 存活探测只允许出现在 common/pid_probe.py（唯一实现），实际: {offenders} —— "
+        "新增调用点请 `from common.pid_probe import pid_alive`，不要再复制实现"
     )
-    # 守住“唯一”的另一面：pid_probe 的 POSIX 分支必须真的存在（别为了过门禁把它删了，
+    # 守住“唯一”的另一面：common.pid_probe 的 POSIX 分支必须真的存在（别为了过门禁把它删了，
     # 那会让 Linux/本机全部判「不活」）
     assert any(
         "os.kill" in line and "pid, 0" in line
-        for line in (NN_ROOT / "pid_probe.py").read_text(encoding="utf-8").splitlines()
+        for line in (NN_ROOT / "common/pid_probe.py").read_text(encoding="utf-8").splitlines()
         if not line.strip().startswith("#")
-    ), "pid_probe 的 POSIX 分支不得缺失"
+    ), "common.pid_probe 的 POSIX 分支不得缺失"
     # 且它必须靠 `os.name == "nt"` 分流（Windows 侧禁 os.kill）
-    assert 'os.name == "nt"' in (NN_ROOT / "pid_probe.py").read_text(encoding="utf-8")
+    assert 'os.name == "nt"' in (NN_ROOT / "common/pid_probe.py").read_text(encoding="utf-8")
 
 
 def test_delegation_shells_do_not_reimplement() -> None:
@@ -322,11 +322,11 @@ def test_delegation_shells_do_not_reimplement() -> None:
     for rel in (
         "train/loop_util.py",
         "run_rl.py",
-        "remote/_instance_lock.py",
+        "common/instance_lock.py",
         "remote/notebook_runtime.py",
     ):
         src = (NN_ROOT / rel).read_text(encoding="utf-8")
-        assert "from pid_probe import" in src, f"{rel}: 必须从 pid_probe 导入唯一实现"
+        assert "from common.pid_probe import" in src, f"{rel}: 必须从 common.pid_probe 导入唯一实现"
         assert re.search(r"return\s+\w*pid_alive\w*\(\s*pid\s*\)", src), (
             f"{rel}: 探测函数体必须是 `return ...pid_alive(pid)`（不得再自己写实现）"
         )

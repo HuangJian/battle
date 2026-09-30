@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 
-from rl.dispatch import resolve_tail_join_sec
+from trainer.dispatch import resolve_tail_join_sec
 
 
 def test_tail_grace_default_zero_when_settled() -> None:

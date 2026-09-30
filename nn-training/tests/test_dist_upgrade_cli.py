@@ -1,6 +1,6 @@
 """test_dist_upgrade_cli — 节点升级指令一次性入口（TS 工具复用的那份守卫）。
 
-契约：spec → 逐节点 `dist_common.request_upgrade_guarded`（**不允许**本文件自行
+契约：spec → 逐节点 `common.distribution.request_upgrade_guarded`（**不允许**本文件自行
 实现护栏逻辑——单源就在这里）；结构性错误退出码 2；`dry_run` 不发任何 POST。
 """
 
@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import dist_common
+import common.distribution
 import dist_upgrade_cli
 
 NODE = {"id": "mac", "url": "http://192.168.0.88:8443", "authKey": "k", "pingHash": "a" * 64}
@@ -48,7 +48,7 @@ def test_current_node_short_circuits(monkeypatch: pytest.MonkeyPatch) -> None:
         called.append((a, k))
         return True, "x"
 
-    monkeypatch.setattr(dist_common, "request_upgrade_guarded", fake)
+    monkeypatch.setattr(common.distribution, "request_upgrade_guarded", fake)
     out = dist_upgrade_cli.run_spec({**SPEC, "nodes": [{**NODE, "pingHash": "b" * 64}], "dirty": []})
     assert out["results"] == [{"id": "mac", "ok": False, "reason": "current"}]
     assert called == []  # hash 相同 ⇒ 一个 POST 都不该发
@@ -67,13 +67,13 @@ def test_stale_node_maps_to_shared_guard(monkeypatch: pytest.MonkeyPatch) -> Non
         )
         return True, "restart-requested"
 
-    monkeypatch.setattr(dist_common, "request_upgrade_guarded", fake)
+    monkeypatch.setattr(common.distribution, "request_upgrade_guarded", fake)
     out = dist_upgrade_cli.run_spec({**SPEC, "dirty": ["src/x.ts"], "cooldown_sec": 30})
     assert out["results"] == [{"id": "mac", "ok": True, "reason": "restart-requested"}]
     assert out["dirty"] == ["src/x.ts"]
     # 显式 dirty 透传（调用方每轮已检测则复用，不重复探测）；期望 hash 必须显式传（F1）。
     assert seen["dirty"] == ["src/x.ts"] and seen["exp"] == "b" * 64 and seen["branch"] == "goal-nn"
-    # F3：spec.cooldown_sec 透传到守卫（缺省 None ⇒ 由 dist_common 决定 env/常量）。
+    # F3：spec.cooldown_sec 透传到守卫（缺省 None ⇒ 由 common.distribution 决定 env/常量）。
     assert seen["cooldown"] == 30.0
 
 
@@ -84,23 +84,23 @@ def test_dirty_none_probes_really(monkeypatch: pytest.MonkeyPatch) -> None:
         probed.append(1)
         return ["src/y.ts"]
 
-    monkeypatch.setattr(dist_common, "dirty_hash_files", probe)
-    monkeypatch.setattr(dist_common, "request_upgrade_guarded", lambda *a, **k: (False, "dirty-tree:1"))
+    monkeypatch.setattr(common.distribution, "dirty_hash_files", probe)
+    monkeypatch.setattr(common.distribution, "request_upgrade_guarded", lambda *a, **k: (False, "dirty-tree:1"))
     out = dist_upgrade_cli.run_spec({**SPEC, "dirty": None})
-    assert probed, "dirty=null 必须由本进程探测（字节级判据单源在 dist_common）"
+    assert probed, "dirty=null 必须由本进程探测（字节级判据单源在 common.distribution）"
     assert out["dirty"] == ["src/y.ts"]
     assert out["results"][0]["reason"] == "dirty-tree:1"
 
 
 def test_self_node_skips_dirty_probe(monkeypatch: pytest.MonkeyPatch) -> None:
-    """self/回环节点：不探 dirty（同 dist_common 语义），且分支必须置空（禁 pull）。"""
+    """self/回环节点：不探 dirty（同 common.distribution 语义），且分支必须置空（禁 pull）。"""
     seen: dict = {}
 
     def fake(nid, url, auth, branch, *a, **k):
         seen["branch"] = branch
         return True, "restart-requested"
 
-    monkeypatch.setattr(dist_common, "request_upgrade_guarded", fake)
+    monkeypatch.setattr(common.distribution, "request_upgrade_guarded", fake)
     out = dist_upgrade_cli.run_spec(
         {
             "expected_hash": "b" * 64,
@@ -108,10 +108,10 @@ def test_self_node_skips_dirty_probe(monkeypatch: pytest.MonkeyPatch) -> None:
             "nodes": [{"id": "self", "url": "http://127.0.0.1:8443", "pingHash": "a" * 64}],
         }
     )
-    # 判定 self 的是 dist_common.is_self_node（真函数，未打桩）——这正是「复用」的意义。
-    assert dist_common.is_self_node("http://127.0.0.1:8443", "self") is True
+    # 判定 self 的是 common.distribution.is_self_node（真函数，未打桩）——这正是「复用」的意义。
+    assert common.distribution.is_self_node("http://127.0.0.1:8443", "self") is True
     assert out["results"][0]["reason"] == "restart-requested"
-    assert seen["branch"] == "goal-nn"  # 分支由 dist_common 内部按 self 置空，调用方不需要知道
+    assert seen["branch"] == "goal-nn"  # 分支由 common.distribution 内部按 self 置空，调用方不需要知道
 
 
 def test_dry_run_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -121,7 +121,7 @@ def test_dry_run_sends_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
         called.append(1)
         return True, "x"
 
-    monkeypatch.setattr(dist_common, "request_upgrade_guarded", fake)
+    monkeypatch.setattr(common.distribution, "request_upgrade_guarded", fake)
     out = dist_upgrade_cli.run_spec({**SPEC, "dry_run": True, "dirty": ["src/z.ts"]})
     assert called == []
     assert out["results"][0]["reason"] == "dirty-tree:1"
@@ -154,7 +154,7 @@ def test_cli_bad_spec_exit_2() -> None:
     assert json.loads(proc.stdout.decode("utf-8"))["error"]
 
 
-# ---------------- 扫描模式（cfg_path）：判 stale 这一步必须复用 dist_common ----------------
+# ---------------- 扫描模式（cfg_path）：判 stale 这一步必须复用 common.distribution ----------------
 
 CFG = {
     "nodes": [
@@ -189,9 +189,9 @@ def _recorder(posts: list[str]) -> Callable[..., bool]:
 def test_scan_pings_itself_and_only_stale_is_upgraded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """扫描模式自己 ping（调用方不再 ping）——判据是 dist_common 那一层。"""
+    """扫描模式自己 ping（调用方不再 ping）——判据是 common.distribution 那一层。"""
     cfg_path = _write_cfg(tmp_path, CFG)
-    dist_common.reset_restart_state()
+    common.distribution.reset_restart_state()
     pinged: list[str] = []
 
     def fake_ping(url: str, auth: str = "", timeout: float = 3.0) -> dict | None:
@@ -200,10 +200,10 @@ def test_scan_pings_itself_and_only_stale_is_upgraded(
             return {"codeHash": "a" * 64, "agentVersion": "abc"}
         return {"codeHash": "b" * 64, "agentVersion": "def"}
 
-    monkeypatch.setattr(dist_common, "node_ping", fake_ping)
-    monkeypatch.setattr(dist_common, "dirty_hash_files", lambda: [])
+    monkeypatch.setattr(common.distribution, "node_ping", fake_ping)
+    monkeypatch.setattr(common.distribution, "dirty_hash_files", lambda: [])
     posted: list[str] = []
-    monkeypatch.setattr(dist_common, "request_upgrade", _recorder(posted))
+    monkeypatch.setattr(common.distribution, "request_upgrade", _recorder(posted))
     out = dist_upgrade_cli.run_scan(
         {"cfg_path": cfg_path, "branch": "goal-nn", "dirty": [], "expected_hash": "b" * 64}
     )
@@ -218,11 +218,11 @@ def test_scan_pings_itself_and_only_stale_is_upgraded(
 
 def test_scan_expected_hash_defaults_to_local(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg_path = _write_cfg(tmp_path, {"nodes": [CFG["nodes"][0]]})
-    dist_common.reset_restart_state()
-    monkeypatch.setattr(dist_common, "compute_code_hash", lambda: "a" * 64)
-    monkeypatch.setattr(dist_common, "node_ping", _ping_a)
+    common.distribution.reset_restart_state()
+    monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "a" * 64)
+    monkeypatch.setattr(common.distribution, "node_ping", _ping_a)
     posted: list[str] = []
-    monkeypatch.setattr(dist_common, "request_upgrade", _recorder(posted))
+    monkeypatch.setattr(common.distribution, "request_upgrade", _recorder(posted))
     out = dist_upgrade_cli.run_scan({"cfg_path": cfg_path, "branch": "goal-nn"})
     assert out["results"][0]["reason"] == "current" and posted == []
 
@@ -230,21 +230,21 @@ def test_scan_expected_hash_defaults_to_local(tmp_path: Path, monkeypatch: pytes
 def test_scan_seen_memo_suppresses_restart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """跨调用 memo（seen）预置回 _RESTART_SEEN ⇒ dedup 分支与常驻循环逐字一致。"""
     cfg_path = _write_cfg(tmp_path, {"nodes": [CFG["nodes"][0]]})
-    dist_common.reset_restart_state()
-    monkeypatch.setattr(dist_common, "node_ping", _ping_a)
+    common.distribution.reset_restart_state()
+    monkeypatch.setattr(common.distribution, "node_ping", _ping_a)
     # 工作区脏不脏与用例语义无关（scan 不传 dirty ⇒ 守卫会字节级探测）——如果断言真的
     # 依赖「本仓此刻恰好没有未提交的 SSOT 文件」，那改 tools/agent/** 就会把这个用例弄红
     # （实测 2026-09-19 F2）。固定为「干净」。
-    monkeypatch.setattr(dist_common, "dirty_hash_files", lambda: [])
+    monkeypatch.setattr(common.distribution, "dirty_hash_files", lambda: [])
     posted: list[str] = []
-    monkeypatch.setattr(dist_common, "request_upgrade", _recorder(posted))
+    monkeypatch.setattr(common.distribution, "request_upgrade", _recorder(posted))
     # 第一次：真发（并返回 pingHash 供调用方持久化）。
     first = dist_upgrade_cli.run_scan(
         {"cfg_path": cfg_path, "branch": "goal-nn", "dirty": [], "expected_hash": "b" * 64}
     )
     assert first["results"][0]["reason"] == "restart-requested"
     # 第二次（新进程语义）：调用方把上次下发写进 memo 并预置回来 ⇒ 不再打扰节点。
-    dist_common.reset_restart_state()
+    common.distribution.reset_restart_state()
     seen = [
         {"id": "stale", "pingHash": first["results"][0]["pingHash"], "expectedHash": "b" * 64}
     ]
@@ -257,15 +257,15 @@ def test_scan_seen_memo_suppresses_restart(tmp_path: Path, monkeypatch: pytest.M
 
 def test_scan_dry_run_sends_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg_path = _write_cfg(tmp_path, CFG)
-    dist_common.reset_restart_state()
-    monkeypatch.setattr(dist_common, "node_ping", _ping_a)
+    common.distribution.reset_restart_state()
+    monkeypatch.setattr(common.distribution, "node_ping", _ping_a)
     called: list[str] = []
 
     def _fake_scan(cfg: dict, *a: object, **k: object) -> list:
         called.append("x")
         return []
 
-    monkeypatch.setattr(dist_common, "upgrade_stale_nodes", _fake_scan)
+    monkeypatch.setattr(common.distribution, "upgrade_stale_nodes", _fake_scan)
     out = dist_upgrade_cli.run_scan({"cfg_path": cfg_path, "dry_run": True, "expected_hash": "b" * 64})
     assert called == []  # dry 连扫描升级路径都不进
     assert {r["id"]: r["reason"] for r in out["results"]} == {"stale": "stale", "current": "stale"}
@@ -286,8 +286,8 @@ def test_scan_empty_nodes_is_noop(tmp_path: Path) -> None:
 
 
 def test_seed_restart_state_contract() -> None:
-    dist_common.reset_restart_state()
-    n = dist_common.seed_restart_state(
+    common.distribution.reset_restart_state()
+    n = common.distribution.seed_restart_state(
         [
             {"id": "mac", "pingHash": "a" * 64, "expectedHash": "b" * 64},
             {"id": "bad"},  # 缺 hash → 忽略
@@ -296,7 +296,7 @@ def test_seed_restart_state_contract() -> None:
     )
     assert n == 1
     # 第三项是「该次下发时刻」（F3 冷却窗靠它）：缺 atSec ⇒ 记作现在（旧语义 = 立即 dedup）
-    got = dist_common._RESTART_SEEN["mac"]
+    got = common.distribution._RESTART_SEEN["mac"]
     assert got[:2] == ("a" * 64, "b" * 64)
     assert isinstance(got[2], float) and abs(got[2] - time.time()) < 5
 
@@ -310,13 +310,13 @@ def test_scan_seen_atsec_expires_dedup_cooldown(
     该节点再也收不到升级指令（跨调用持续压制）。
     """
     cfg_path = _write_cfg(tmp_path, {"nodes": [CFG["nodes"][0]]})
-    monkeypatch.setattr(dist_common, "node_ping", _ping_a)
-    monkeypatch.setattr(dist_common, "dirty_hash_files", lambda: [])  # 同上一用例：与工作区无关
+    monkeypatch.setattr(common.distribution, "node_ping", _ping_a)
+    monkeypatch.setattr(common.distribution, "dirty_hash_files", lambda: [])  # 同上一用例：与工作区无关
     posted: list[str] = []
-    monkeypatch.setattr(dist_common, "request_upgrade", _recorder(posted))
+    monkeypatch.setattr(common.distribution, "request_upgrade", _recorder(posted))
 
     # 一小时前下发过（memo 里带着当时的时刻）⇒ 冷却窗（缺省 600s）已过 ⇒ 再发一次
-    dist_common.reset_restart_state()
+    common.distribution.reset_restart_state()
     old = dist_upgrade_cli.run_scan(
         {
             "cfg_path": cfg_path,
@@ -337,7 +337,7 @@ def test_scan_seen_atsec_expires_dedup_cooldown(
     assert posted == ["http://10.0.0.1:8443"]
 
     # 刚刚下发过（同一 memo 键、时刻为现在）⇒ 窗内 dedup，不打扰节点
-    dist_common.reset_restart_state()
+    common.distribution.reset_restart_state()
     fresh = dist_upgrade_cli.run_scan(
         {
             "cfg_path": cfg_path,
@@ -356,7 +356,7 @@ def test_scan_seen_atsec_expires_dedup_cooldown(
     )
     assert fresh["results"][0]["reason"] == "dedup", fresh["results"]
     assert posted == ["http://10.0.0.1:8443"], "窗内不得再发 POST"
-    dist_common.reset_restart_state()
+    common.distribution.reset_restart_state()
 
 
 def test_upgrade_branch_has_no_explicit_override_path() -> None:
@@ -370,12 +370,12 @@ def test_upgrade_branch_has_no_explicit_override_path() -> None:
     """
     import inspect
 
-    assert not hasattr(dist_common, "upgrade_branch_or"), "旧的「显式优先」入口不得复活"
-    assert list(inspect.signature(dist_common.current_upgrade_branch).parameters) == []
-    dist_common.set_upgrade_branch("goal-nn")
+    assert not hasattr(common.distribution, "upgrade_branch_or"), "旧的「显式优先」入口不得复活"
+    assert list(inspect.signature(common.distribution.current_upgrade_branch).parameters) == []
+    common.distribution.set_upgrade_branch("goal-nn")
     try:
-        assert dist_common.current_upgrade_branch() == "goal-nn"
-        dist_common.set_upgrade_branch("")
-        assert dist_common.current_upgrade_branch() == "", "锁存为空 = 不升级（调用方只告警）"
+        assert common.distribution.current_upgrade_branch() == "goal-nn"
+        common.distribution.set_upgrade_branch("")
+        assert common.distribution.current_upgrade_branch() == "", "锁存为空 = 不升级（调用方只告警）"
     finally:
-        dist_common.set_upgrade_branch("")
+        common.distribution.set_upgrade_branch("")

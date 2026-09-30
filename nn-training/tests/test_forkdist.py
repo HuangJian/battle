@@ -33,7 +33,7 @@ from pathlib import Path
 
 import pytest
 
-import platform_utils
+import common.platform_utils
 from tests.test_githook_scripts import _bash_path, _bash_usable
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -144,11 +144,11 @@ def test_worker_count_option_accepts_ints_and_auto() -> None:
 def test_configure_resolves_auto_from_platform_utils(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`auto` 必须解析成 `platform_utils.effective_cores()`（容器里比 `os.cpu_count()` 准）。"""
+    """`auto` 必须解析成 `common.platform_utils.effective_cores()`（容器里比 `os.cpu_count()` 准）。"""
     if not hasattr(os, "fork"):
         pytest.skip("Windows")
     fc = _plugin()
-    monkeypatch.setattr(platform_utils, "effective_cores", lambda: 7)
+    monkeypatch.setattr(common.platform_utils, "effective_cores", lambda: 7)
     cfg = _StubConfig(fc._AUTO)
     fc.pytest_configure(cfg)
     assert cfg.forkdist_workers == 7, (

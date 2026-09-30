@@ -113,7 +113,7 @@ export const SHARD_FILES = [
 
 // ---------------- CLI ----------------
 /** 本机可用核数：`effectiveCores()` 是唯一口径（容器配额/亲和掩码 > 宿主机裸数，
- * 见 tools/lib/cores.ts 与 nn-training/platform_utils.py::effective_cores）。
+ * 见 tools/lib/cores.ts 与 nn-training/common/platform_utils.py::effective_cores）。
  * 用 `os.cpus().length` 会在容器里报宿主机核数（Kaggle 224 vs 配额 96）⇒ 派工与上报的
  * cpus 都跟着虚高 2.3×（2026-09-25 云机 rollout 卡死的那条账）。 */
 const CPUS = effectiveCores()
@@ -285,7 +285,7 @@ function serveWithRetry(
   }
 }
 
-// ---------------- codeHash（与 nn-training/dist_common.py 逐字节一致的双语契约） ----------------
+// ---------------- codeHash（与 nn-training/common/distribution.py 逐字节一致的双语契约） ----------------
 // 实现已迁至 ./codehash-files（纯模块，无本文件模块加载副作用）；此处仅 re-export。
 
 /**
@@ -295,7 +295,7 @@ function serveWithRetry(
  *
  * F2（2026-09-19 审计）：POST /v1/update 只 pull、**不重启**，进程里跑的仍是启动时那份
  * 代码 ⇒ 这个 memo 必须继续报「运行中代码」的 hash。旧实现在 pull 成功后把它置空重算 ⇒ 节点会
- * 「报新代码、跑旧代码」，codeHash 门（dist_common.check_code_hash）随即放行它——正是该门
+ * 「报新代码、跑旧代码」，codeHash 门（common.distribution.check_code_hash）随即放行它——正是该门
  * 要拦的东西的反向漏网。要换 hash，只有重启（/v1/restart，可带 pullBranch）。
  */
 export function memoizedCodeHash(): string {
@@ -357,7 +357,7 @@ const gitShortMemo: { value: string | null } = { value: null }
 // ---------------- engine_epoch 已**不再**是节点门字段（2026-09-17） ----------------
 // 用户指令：唯一事实来源 = tools/agent/codehash-files.txt，rollout 与 eval 同源。
 // 故 /v1/ping 只报 codeHash，eval 侧与 rollout 侧比的是**同一个值**；engine_epoch 退为
-// **账本记录值**（= sha256(codeHash)[0:16]，训练机侧算：dist_common.compute_engine_epoch /
+// **账本记录值**（= sha256(codeHash)[0:16]，训练机侧算：common.distribution.compute_engine_epoch /
 // dashboard/src/evalboard/engine.ts）——它不再是节点门判据，也就没有 node↔trainer 的
 // 字段契约，不必出现在 ping 里（旧 agent 的 engineEpoch 字段被忽略即可）。
 
@@ -910,7 +910,7 @@ async function runInstanceGuard(): Promise<void> {
 // ---------------- game execution ----------------
 let gameSeq = 0
 
-/** 结果容器：gzip(JSON {manifest, files:{name:base64}})——TS/Python 双语契约，见 dist_common.py。 */
+/** 结果容器：gzip(JSON {manifest, files:{name:base64}})——TS/Python 双语契约，见 common/distribution.py。 */
 export function packContainer(
   report: Record<string, unknown>,
   files: Record<string, string>,
@@ -1505,7 +1505,7 @@ export function taskKey(
   courseFp = '',
   // R2 事件 rung：决策粒度变了 ⇒ 同一种子也是不同的局。仅激活时进键
   // （无条件进键会让一切既有键漂移，老缓存/老轮询对不上）。
-  // export 供单测钉住键形状（与 dist_common.fetch_task 的透传 + 轮询端配方一致）。
+  // export 供单测钉住键形状（与 common.distribution.fetch_task 的透传 + 轮询端配方一致）。
   de = '',
 ): string {
   let base: string
@@ -1875,7 +1875,7 @@ async function handle(req: Request): Promise<Response> {
       return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
 
     // key 含 mode+kind：避免同 iterId 下 eval 与 rollout 同 (stage,seed) 撞缓存。
-    // M1d：stageJson 布局指纹进键（python 端算同一 sha256[:16]，见 dist_common）。
+    // M1d：stageJson 布局指纹进键（python 端算同一 sha256[:16]，见 common.distribution）。
     const sjHash = stageJson
       ? createHash('sha256').update(stageJson).digest('hex').slice(0, 16)
       : ''
@@ -1939,7 +1939,7 @@ async function handle(req: Request): Promise<Response> {
     // 保活流式响应：单局可能长达 ~480s，而 Bun.serve idleTimeout 上限仅 255s。若连接全程静默，
     // server 回收连接 → trainer 端报 "Remote end closed"。用合法 chunk 字节(' '空格)每 20s 发一次
     // 保活，防 server 空闲回收；单局完成后追加 gzip payload 并结束。trainer 在 gunzip 前 strip 空格
-    // （见 dist_common.fetch_task）。注意不能用非法 chunk(如 ':\n')——那会让 urllib 丢弃整个 body。
+    // （见 common.distribution.fetch_task）。注意不能用非法 chunk(如 ':\n')——那会让 urllib 丢弃整个 body。
     const enc = new TextEncoder()
     let hb: ReturnType<typeof setInterval> | undefined
     const stream = new ReadableStream<Uint8Array>({
@@ -2152,7 +2152,7 @@ if (import.meta.main) {
     process.exit(0)
   }
   if (process.argv.includes('--print-code-hash-files')) {
-    // F4：TSV 报告（与 codehash-report.ts / dist_common.code_hash_report() 同格式）。
+    // F4：TSV 报告（与 codehash-report.ts / common.distribution.code_hash_report() 同格式）。
     // console.log 已被时间戳包装覆盖，用 process.stdout.write 保证输出可 diff。
     process.stdout.write(codeHashReport() + '\n')
     process.exit(0)
@@ -2185,7 +2185,7 @@ if (import.meta.main) {
   // Bun.serve 的 idleTimeout 上限 255s，而单局最长 ~480s——仅靠它不足以阻止长静默 task 连接被回收。
   // 因此设 idleTimeout=255(允许的最大值) + task 响应流式的"保活 chunk"（每 20s 发一个空格字节），
   // 双重保证等待中的 task 连接不被 server 空闲回收（否则 trainer 端报 Remote end closed）。
-  // trainer 在 gunzip 前 strip 掉这些空格字节（见 dist_common.fetch_task）。
+  // trainer 在 gunzip 前 strip 掉这些空格字节（见 common.distribution.fetch_task）。
   // serveWithRetry：/v1/restart 后新实例可能瞬间撞 EADDRINUSE（旧实例尚在退出），轮询重试。
   // SIGTERM/SIGINT（手动停止）时取消未完成的 restart 交接——避免"手动停了服务，
   // 重启交接的 detached 子进程又把服务拉起来"（2026-08-30 用户报告）。

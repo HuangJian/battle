@@ -26,10 +26,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.config import CURRICULA_DIR, CourseConfig, load_course
-from rl.jsonc import strip_comments
-from rl.reward_builtin import V7_DEFAULT_PARAMS, v7_phi
-from rl.reward_library import (
+from biz.config import CURRICULA_DIR, CourseConfig, load_course
+from biz.reward_builtin import V7_DEFAULT_PARAMS, v7_phi
+from biz.reward_library import (
     CORE_FUNCS,
     EXT_FUNCS,
     METRIC_INDEX,
@@ -45,7 +44,8 @@ from rl.reward_library import (
     compile_formula,
     parse_formula,
 )
-from rl.reward_validation import DEFAULT_RANGES, symbolic_envelope, validate_reward
+from biz.reward_validation import DEFAULT_RANGES, symbolic_envelope, validate_reward
+from common.jsonc import strip_comments
 
 GOLDEN_DIR = Path(__file__).resolve().parent / "golden"
 
@@ -355,7 +355,7 @@ def test_strip_comments() -> None:
 
 def test_jsonc_trailing_commas_and_loads() -> None:
     """JSONC 加载器：注释 + 尾逗号（`, }`/`, ]`）双容忍；字符串内不受影响。"""
-    from rl.jsonc import loads as jsonc_loads
+    from common.jsonc import loads as jsonc_loads
 
     d = jsonc_loads('{\n  "a": [1, 2,],  // 尾逗号+注释\n  "b": {"x": 1,},\n}')
     assert d == {"a": [1, 2], "b": {"x": 1}}
@@ -369,7 +369,7 @@ def test_jsonc_courses_load() -> None:
     for f in files:
         if f.name.endswith(".bc.jsonc"):
             # BC 课程（2026-09-13）：独立文件种类，BcCourseConfig 校验
-            from rl.bc_config import load_bc_course
+            from biz.bc_config import load_bc_course
 
             bc = load_bc_course(f)
             assert bc.kind == "bc" and bc.name
@@ -704,7 +704,7 @@ def test_item_metrics_layout_locked() -> None:
     尾部清单是**穷举**断言 ⇒ 每次加列都必须来这里登记（v5 加 `clearTick` 时漏登记过，
     这正是本测试存在的意义）。
     """
-    from rl.reward_library import METRIC_INDEX, METRICS
+    from biz.reward_library import METRIC_INDEX, METRICS
 
     assert METRICS[20] == "enemyTotal"
     assert list(METRICS[21:]) == [
@@ -827,9 +827,9 @@ def test_credit_p6_formula_and_course() -> None:
 
     机械 diff vs x3-start：非白名单差异仅奖励公式/params + 身份字段（name/out/traj/backup）。
     """
-    from rl.config import load_course
-    from rl.reward_library import METRICS_VERSION
-    from rl.reward_validation import validate_reward as _vr
+    from biz.config import load_course
+    from biz.reward_library import METRICS_VERSION
+    from biz.reward_validation import validate_reward as _vr
 
     c = load_course("x3-credit-p6")
     c2 = load_course("x3-credit-p6-r2")

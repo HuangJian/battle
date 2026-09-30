@@ -21,10 +21,7 @@ import tempfile
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from data.npyio import save_shard, scan_shards
-from data.weights_io import load_state_into, load_weights_json
-from models.core import NNPolicy
-from schema import (
+from common.schema import (
     BOARD,
     FIRE_DIM,
     MASK_DIM,
@@ -33,6 +30,9 @@ from schema import (
     OBS_SCHEMA_MAJOR,
     SCALAR_DIM,
 )
+from data.npyio import save_shard, scan_shards
+from data.weights_io import load_state_into, load_weights_json
+from models.core import NNPolicy
 from train.bc import train
 
 

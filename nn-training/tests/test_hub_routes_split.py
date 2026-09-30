@@ -1,9 +1,9 @@
-"""拆分的**契约守卫**：`HubHandler` 的 25 个路由方法永住 `remote/hub/{schedule,result,blob,offline}.py`
+"""拆分的**契约守卫**：`HubHandler` 的 25 个路由方法永住 `hub/{schedule,result,blob,offline}.py`
 （S4 第十一刀，2026-09-24），且四组共用的形状**只准有一份实现**。
 
 ## 这一刀切了什么
 
-`remote/hub_server.py` 3728 → 3017 行：`HubHandler` 里 13 个 `_get_*` + 12 个 `_post_*`
+`hub/server.py` 3728 → 3017 行：`HubHandler` 里 13 个 `_get_*` + 12 个 `_post_*`
 （644 行）按**域**分成四组混入，与第三步的 `AdminRoutes` 并列进 MRO：
 
 ```
@@ -57,16 +57,16 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-import remote.hub.blob as blob_mod
-import remote.hub.offline as offline_mod
-import remote.hub.result as result_mod
-import remote.hub.schedule as schedule_mod
-from remote import hub_server as hs
+import hub.blob as blob_mod
+import hub.offline as offline_mod
+import hub.result as result_mod
+import hub.schedule as schedule_mod
+from hub import server as hs
 from tests.helpers import remote_dag as dag
 
 NN_ROOT = Path(__file__).resolve().parent.parent
-HUB_DIR = NN_ROOT / "remote" / "hub"
-HUB_SERVER = NN_ROOT / "remote" / "hub_server.py"
+HUB_DIR = NN_ROOT / "hub"
+HUB_SERVER = NN_ROOT / "hub" / "server.py"
 #: ★ `HubHandler` 的**真家**（S4 第十六刀从 `hub_server.py` 搬出）。本文件里凡是「读 `HubHandler`
 #: 的类体 / 看它挂着哪些 import」的地方都必须读**这里** —— 读 `HUB_SERVER` 会读到薄入口（只
 #: 剩 re-export），于是断言变成「对空气下判据」（第十六刀前它就是那么挂的：`StopIteration`）。
@@ -138,12 +138,12 @@ DRIFT = {
 ALLOWED_INLINE_AUTH = {"schedule": 2, "result": 0, "blob": 1, "offline": 7}
 
 ALLOWED_IMPORTS = {
-    "remote.hub.blob": {"common.protocol"},
+    "hub.blob": {"common.protocol"},
     # 离线段面并入 origin 的新语义后要多两处：`hub.store`（构造/注解 `_JobStore`，并要它那里的
     # 租约/归属状态）与 `hub.task_pack`（任务包新鲜度门 / 缺包自愈门的纯判据）。
-    "remote.hub.offline": {"common.protocol", "remote.hub.store", "remote.hub.task_pack"},
-    "remote.hub.result": {"common.protocol", "remote.push_dispatch"},
-    "remote.hub.schedule": {"common.protocol"},
+    "hub.offline": {"common.protocol", "hub.store", "hub.task_pack"},
+    "hub.result": {"common.protocol", "remote.push_dispatch"},
+    "hub.schedule": {"common.protocol"},
 }
 
 
@@ -256,11 +256,42 @@ def test_the_mixins_only_import_downward() -> None:
         dag.assert_remote_module(mod, allowed_project_imports=allowed)
 
 
+def _implementation_files() -> list[Path]:
+    """`hub/` 下的**实现模块** —— 账本秩严格低于组装模块的那些（判据取自账本，不写死人名单）。
+
+    刀 1 后组装模块从 `remote/hub_server.py` 搬进 `hub/server.py`，而且**三个站在门面上的
+    运维工具**（`smoke_loopback` / `tunnel_ab_probe` / `backfill_offline`）也随 hub 出包一起
+    搬了进来 —— 它们本来就是「import 门面起真服务」的消费者（这正是它们必须跟着 hub 走的理由，
+    见 plan/nn-training-module-reorg.plan.md §3.3）。所以「`hub/` 下所有 .py」不再是实现面：
+    `server.py` 自己是门面，三个工具是门面的消费者。
+    """
+    entry_rank = dag.LAYERS[_ledger_key("server")]
+    return [
+        p
+        for p in sorted(HUB_DIR.glob("*.py"))
+        if p.name != "__init__.py" and dag.LAYERS.get(f"hub.{p.stem}", 99) < entry_rank
+    ]
+
+
+def _assembly_imports(path: Path) -> list[str]:
+    """该文件对**组装模块**（`hub.server`）的 import。
+
+    判据是**点分全名**而不是叶子名：刀 1 后叶子变成 `server`，而 `from http.server import …`
+    （标准库）的叶子也是 `server` ⇒ 叶子名判据会把 `hub/boot.py`（它 import `ThreadingHTTPServer`）
+    误判成环。旧判据之所以能用叶子名，只是因为 `hub_server` 这个叶子名足够独特。
+    """
+    return sorted(
+        i for i in _imports_of(path) if i == "hub.server" or i.startswith("hub.server.")
+    )
+
+
 def test_the_hub_package_never_imports_the_assembly_module() -> None:
-    """`hub/` 包不得反向依赖组装模块（否则 `hub_server → hub.x → hub_server` 成环）。"""
-    for p in sorted(HUB_DIR.glob("*.py")):
-        leaves = {i.rsplit(".", 1)[-1] for i in _imports_of(p)}
-        assert "hub_server" not in leaves, p.name
+    """`hub/` 的**实现模块**不得反向依赖组装模块（否则 `server → hub.x → server` 成环）。"""
+    impl = _implementation_files()
+    assert impl, "扫描面为空 ⇒ 这条守卫是瞎的（_implementation_files 的判据坏了）"
+    for p in impl:
+        hits = _assembly_imports(p)
+        assert hits == [], f"{p.name} 反向 import 了组装模块：{hits}"
 
 
 def _imports_of(path: Path) -> list[str]:
@@ -287,15 +318,15 @@ def _ledger_key(leaf: str) -> str:
 def test_the_ledger_puts_the_handler_above_all_mixins() -> None:
     """宿主的秩必须**严格大于**每个混入——否则顶层边就成「同层边」，账本会当场红。"""
     layers = dag.LAYERS
-    server = layers[_ledger_key("hub_server")]
+    server = layers[_ledger_key("server")]
     for mod in MIXINS:
-        assert layers[f"remote.hub.{mod}"] < server, mod
+        assert layers[f"hub.{mod}"] < server, mod
     # `result` 那一组的秩是**算出来的**：`accept_result` 在 L3 ⇒ 它只能 L4，宿主因此 L5。
-    assert layers["remote.hub.result"] == 4
-    assert layers["remote.push_dispatch"] < layers["remote.hub.result"] < server
+    assert layers["hub.result"] == 4
+    assert layers["remote.push_dispatch"] < layers["hub.result"] < server
     # S4 第十六刀之后 `HubHandler` 住 `hub/http_face.py`（L5）：它才是「组装五组混入」的那一层，
     # 与 `worker`（作业壳）同层；而 `hub_server` 这个**入口**在它上面两格（L7）。
-    assert layers["remote.hub.http_face"] == layers[_ledger_key("worker")] == 5
+    assert layers["hub.http_face"] == layers[_ledger_key("worker")] == 5
     assert server == 7
 
 

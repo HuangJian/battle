@@ -1,4 +1,4 @@
-"""R2d：单进程多课程 serve 的接线（`rl/loop_serve.py`）——**假引擎 / 假账本**，不碰 torch。
+"""R2d：单进程多课程 serve 的接线（`trainer/loop_serve.py`）——**假引擎 / 假账本**，不碰 torch。
 
 钉的是「驱动者」这一层的性质（plan/r2-loop-task-queue §8）：
 
@@ -26,14 +26,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.loop_core as loop_core
-import rl.loop_plan as loop_plan
-import rl.loop_serve as loop_serve
-import rl.train_ledger as train_ledger
+import biz.train_ledger as train_ledger
+import trainer.loop_core as loop_core
+import trainer.loop_plan as loop_plan
+import trainer.loop_serve as loop_serve
+from biz.loop_round import STEP_METHOD
+from biz.loop_tasks import ROUND_TASKS
 from common.protocol import COURSE_ENABLE_MARKER
-from rl.loop_round import STEP_METHOD
-from rl.loop_serve import CourseRuntime, serve
-from rl.loop_tasks import ROUND_TASKS
+from trainer.loop_serve import CourseRuntime, serve
 
 
 def _enable_course(root: Path, name: str) -> None:
@@ -697,16 +697,16 @@ def test_course_args_unknown_course_is_loud() -> None:
 # 2026-09-22（用户指令「测试应该使用自己的 fixtures」，修本机那条既有环境红）：
 #   ① **阶段对齐**：`--echo-config` 的 dump 在 `validate_args` **之前**（文档化短路），
 #      而 `course_args` 的返回值是 validate **之后**的终态 —— 两边比的是**不同阶段**，
-#      于是「单一 PPO 路径恒置 stream/double_buffer=0」（`rl/config.py` §3）这一归一化只在
+#      于是「单一 PPO 路径恒置 stream/double_buffer=0」（`biz/config.py` §3）这一归一化只在
 #      一侧生效。本机 `rl-config.json` 的 `rl.stream=1` 恰好让这个差异显形（本机红、别处绿，
 #      取决于未入库文件的内容）。现在 oracle 在 dump 前自己跑一次 `validate_args`，
 #      与 `course_args` 的终态同阶段 ⇒ 对拍才是真对拍（顺带把归一化也钉进去了）。
-#   ② **自带夹具**：两份读取点都走 `rl.config.rl_config_path()`（env `BCITY_RL_CONFIG`），
+#   ② **自带夹具**：两份读取点都走 `biz.config.rl_config_path()`（env `BCITY_RL_CONFIG`），
 #      于是用例可以用自己的 tmp 配置当夹具，不再隐式依赖本机那份**未入库**的 rl-config.json。
 _ORACLE = """
 import json, sys
 sys.argv = ["run_rl.py", "--course", sys.argv[1], "--echo-config"]
-import rl.config as cfg
+import biz.config as cfg
 def fake_echo(args, course, it=1):
     # 与 course_args 的终态对齐：它也跑 validate_args（单一 PPO 路径的归一化就在里面）。
     cfg.validate_args(args)

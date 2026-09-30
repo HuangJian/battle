@@ -168,7 +168,7 @@ def close_bootstrap_server(srv: ThreadingHTTPServer) -> None:
     而 push-first 的设计是引导服务与升级后的完整 worker_server **共用同一个
     `push_port`**：`run_push_first` 先 bind 该端口，收到首个 job 后再起
     `remote_worker_serve` 绑**同一个端口**。只 `shutdown()` 不 `server_close()` ⇒
-    父进程一直占着端口 ⇒ 子进程被 `remote/_port_guard.py` 拒绝
+    父进程一直占着端口 ⇒ 子进程被 `common/port_guard.py` 拒绝
     （"端口 ... 已被占用——拒绝启动（禁止双监听）"）⇒ `wait_ping` 30s 超时 ⇒
     `SystemExit: -1` ⇒ cell 挂、隧道下线 ⇒ 控制台侧只看到「推送成功但状态查询 530」，
     而真因藏在 `<work>/serve.log` 里，极难定位。

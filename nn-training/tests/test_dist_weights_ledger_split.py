@@ -1,16 +1,16 @@
-"""拆分的**契约守卫**：进程内权重下发账本永住 `dist_weights_ledger.py`（S5 第十一刀，2026-09-27）。
+"""拆分的**契约守卫**：进程内权重下发账本永住 `common/weights_ledger.py`（S5 第十一刀，2026-09-27）。
 
-`dist_common.py` **1503 → 1373 行**；搬走**两段跨度共 6 名（逐字节不动）**：
+`common/distribution.py` **1503 → 1373 行**；搬走**两段跨度共 6 名（逐字节不动）**：
 `_WEIGHTS_PUSHED`（键 `(kind, wver)` → 成功 POST 过的 node id）· `weights_push_cache_reset` ·
 `note_weights_pushed` · `forget_weights_node` · `weights_already_pushed` · `partition_weights_nodes`。
 
 本文件钉五件事：
 
-1. **定义唯一**——搬走名不许在 `dist_common.py` 里再实现一遍；
-2. **依赖面闭集**——零仓内依赖（连 stdlib 都不用）；**不** import `dist_common`（无环）；
+1. **定义唯一**——搬走名不许在 `common/distribution.py` 里再实现一遍；
+2. **依赖面闭集**——零仓内依赖（连 stdlib 都不用）；**不** import `common.distribution`（无环）；
 3. **门面对象恒等 + 账本是同一个 dict 对象**（两模块共享状态，不是副本）；
 4. **契约语义没变**（功能性）：kind 分桶 · note 幂等 · forget 范围与计数 · partition 拆 reuse/need；
-5. **模块全局是活读取点**——驻 `dist_common` 的调用方（`post_weights_parallel` / `refresh_weights`）
+5. **模块全局是活读取点**——驻 `common.distribution` 的调用方（`post_weights_parallel` / `refresh_weights`）
    与 `rl.*` 的既有调用点读的都是**门面**的全局 ⇒ 打桩必须打在门面上（打新家是静默空操作）。
 """
 
@@ -27,12 +27,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import dist_common as common_mod
-import dist_weights_ledger as ledger_mod
+import common.distribution as common_mod
+import common.weights_ledger as ledger_mod
 from tests.helpers import source_scan
 
-LEDGER_FILE = ROOT / "dist_weights_ledger.py"
-COMMON_FILE = ROOT / "dist_common.py"
+LEDGER_FILE = ROOT / "common/weights_ledger.py"
+COMMON_FILE = ROOT / "common/distribution.py"
 
 MOVED_NAMES = {
     "_WEIGHTS_PUSHED",
@@ -84,27 +84,27 @@ def test_moved_names_are_defined_in_the_ledger_and_not_in_dist_common() -> None:
     """定义唯一：搬走的名字只在新家实现（原家只留门面转发）。"""
     assert _defined(LEDGER_FILE) >= MOVED_NAMES, sorted(MOVED_NAMES - _defined(LEDGER_FILE))
     leftovers = MOVED_NAMES & _defined(COMMON_FILE)
-    assert leftovers == set(), f"dist_common.py 里仍在实现这些名字（应只做转发）：{sorted(leftovers)}"
+    assert leftovers == set(), f"common/distribution.py 里仍在实现这些名字（应只做转发）：{sorted(leftovers)}"
 
 
 def test_ledger_has_no_project_imports() -> None:
-    """★ 依赖面闭集：连 stdlib 都不需要；**不得** import `dist_common`（门面反向 ⇒ 成环）。"""
+    """★ 依赖面闭集：连 stdlib 都不需要；**不得** import `common.distribution`（门面反向 ⇒ 成环）。"""
     mods = _imported_modules(LEDGER_FILE)
     extra = sorted(mods - ALLOWED_IMPORTS)
-    assert extra == [], f"dist_weights_ledger.py 引入了依赖：{extra}"
-    assert "dist_common" not in mods, "账本反向 import 了门面 ⇒ 顶层互引成环"
+    assert extra == [], f"common/weights_ledger.py 引入了依赖：{extra}"
+    assert "common.distribution" not in mods, "账本反向 import 了门面 ⇒ 顶层互引成环"
 
 
 def test_dist_common_forwards_every_moved_name() -> None:
-    """门面：每个搬走名都还在 `dist_common`，且与新家是**同一个对象**；源码里是 `X as X`。"""
+    """门面：每个搬走名都还在 `common.distribution`，且与新家是**同一个对象**；源码里是 `X as X`。"""
     src = source_scan.read_text(str(COMMON_FILE))
-    assert "from dist_weights_ledger import (" in src
+    assert "from common.weights_ledger import (" in src
     for name in sorted(MOVED_NAMES):
-        assert hasattr(common_mod, name), f"dist_common 丢了转发名 {name}"
+        assert hasattr(common_mod, name), f"common.distribution 丢了转发名 {name}"
         assert getattr(common_mod, name) is getattr(ledger_mod, name), (
-            f"dist_common.{name} 不是 dist_weights_ledger.{name}（转发成了副本）"
+            f"common.distribution.{name} 不是 common.weights_ledger.{name}（转发成了副本）"
         )
-        assert f"    {name} as {name},\n" in src, f"dist_common 的转发不是自别名形态：{name}"
+        assert f"    {name} as {name},\n" in src, f"common.distribution 的转发不是自别名形态：{name}"
 
 
 # ─────────────────────── ⑤ 契约语义没变（功能性） ───────────────────────
@@ -172,10 +172,10 @@ def test_the_two_modules_share_one_ledger_object() -> None:
 
 
 def test_patching_the_facade_reaches_its_in_module_callers(monkeypatch: pytest.MonkeyPatch) -> None:
-    """★ 活读取点：`post_weights_parallel` 读的是 `dist_common` 的全局。
+    """★ 活读取点：`post_weights_parallel` 读的是 `common.distribution` 的全局。
 
     驻本模块的调用方（`post_weights_parallel` / `refresh_weights`）与 `rl.*` 的既有调用点
-    都按门面解析名字 ⇒ 打桩打门面才生效（打 `dist_weights_ledger` 是静默空操作——
+    都按门面解析名字 ⇒ 打桩打门面才生效（打 `common.weights_ledger` 是静默空操作——
     S5 第七/十一刀同款坑，patch 目标随实现走）。
     """
     seen: list[tuple] = []

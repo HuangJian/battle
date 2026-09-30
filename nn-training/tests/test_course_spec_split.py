@@ -1,15 +1,15 @@
-"""拆分的**契约守卫**：课程配置类面永住 `rl/course_spec.py`（S5 第十刀，2026-09-27）。
+"""拆分的**契约守卫**：课程配置类面永住 `biz/course_spec.py`（S5 第十刀，2026-09-27）。
 
-`rl/config.py` **1566 → 598 行**（本刀三面合计）；类面搬走 25 名（`CourseConfig` ·
+`biz/config.py` **1566 → 598 行**（本刀三面合计）；类面搬走 25 名（`CourseConfig` ·
 `GatesSpec` · `StageSpec` · `RewardBlock` · `PpoScheduleEntry` · gates 常量族 ·
 `_default_lives` · `STAGE_JSON_MAX_BYTES`/`CUSTOM_STAGE_BASE` 等，逐字节不动）。
 
 本文件钉五件事：
 
 1. **定义唯一**——25 名不许在 `config.py` 里再实现一遍；
-2. **依赖面闭集**——stdlib + `pydantic` + `rl.reward_library`；唯一向上的引用是
-   `GatesSpec` 跨课门校验对 `rl.course_resolve` 的**函数内**延迟导入（顶层禁止，防成环）；
-3. **无反向门面依赖**——顶层不得 import `rl.config` / `rl.course_resolve`；
+2. **依赖面闭集**——stdlib + `pydantic` + `biz.reward_library`；唯一向上的引用是
+   `GatesSpec` 跨课门校验对 `biz.course_resolve` 的**函数内**延迟导入（顶层禁止，防成环）；
+3. **无反向门面依赖**——顶层不得 import `biz.config` / `biz.course_resolve`；
 4. **转发同一对象**——门面每个名与新家是 `is`；
 5. **契约语义没变**（功能性）：未知 kind / 跨课引用找不到都响亮拒 · 内联与自定义关的
    `stage_ids` · `stage_json` 形状 · `_default_lives` 兜底 · `terminal` 键词表。
@@ -27,11 +27,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.config as config_mod
-import rl.course_spec as spec_mod
+import biz.config as config_mod
+import biz.course_spec as spec_mod
 
-CONFIG_FILE = ROOT / "rl" / "config.py"
-NEW_FILE = ROOT / "rl" / "course_spec.py"
+CONFIG_FILE = ROOT / "biz" / "config.py"
+NEW_FILE = ROOT / "biz" / "course_spec.py"
 
 MOVED_NAMES = {
     "STAGE_JSON_MAX_BYTES",
@@ -67,11 +67,11 @@ ALLOWED_IMPORTS = {
     "math",
     "typing",
     "pydantic",
-    "rl.reward_library",
-    "rl.course_resolve",  # GatesSpec 校验期的**函数内**延迟导入（见下一条）
-    "rl.course",  # CourseConfig.stage_ids 的**函数内**延迟导入（parse_range）
+    "biz.reward_library",
+    "biz.course_resolve",  # GatesSpec 校验期的**函数内**延迟导入（见下一条）
+    "biz.course",  # CourseConfig.stage_ids 的**函数内**延迟导入（parse_range）
 }
-TOP_LEVEL_BANNED = {"rl.config", "rl.course_resolve"}
+TOP_LEVEL_BANNED = {"biz.config", "biz.course_resolve"}
 
 
 def _tree(path: Path) -> ast.Module:
@@ -122,7 +122,7 @@ def test_course_spec_import_surface_is_closed() -> None:
     mods = _imported_modules(NEW_FILE)
     extra = sorted(mods - ALLOWED_IMPORTS)
     assert extra == [], f"course_spec 引入了允许面之外的依赖：{extra}"
-    assert "rl.config" not in mods, "类面反向 import 门面 ⇒ 与 config → course_spec 成环"
+    assert "biz.config" not in mods, "类面反向 import 门面 ⇒ 与 config → course_spec 成环"
 
 
 def test_cross_face_call_is_function_local_not_top_level() -> None:
@@ -133,11 +133,11 @@ def test_cross_face_call_is_function_local_not_top_level() -> None:
 
 
 def test_course_facade_forwards_every_moved_name() -> None:
-    """门面：每个搬走名都还在 `rl.config`，且与新家是**同一个对象**。"""
+    """门面：每个搬走名都还在 `biz.config`，且与新家是**同一个对象**。"""
     for name in sorted(MOVED_NAMES):
-        assert hasattr(config_mod, name), f"rl.config 丢了转发名 {name}"
+        assert hasattr(config_mod, name), f"biz.config 丢了转发名 {name}"
         assert getattr(config_mod, name) is getattr(spec_mod, name), (
-            f"rl.config.{name} 不是 rl.course_spec.{name}（转发成了副本）"
+            f"biz.config.{name} 不是 biz.course_spec.{name}（转发成了副本）"
         )
 
 
@@ -165,7 +165,7 @@ def test_gates_spec_rejects_unknown_kind_and_accepts_a_minimal_one() -> None:
 
 
 def test_gates_cross_course_ref_is_resolved_through_the_lazy_edge() -> None:
-    """跨课门校验走 `rl.course_resolve._resolve_courses`（既知延迟边）——引用不存在即拒。"""
+    """跨课门校验走 `biz.course_resolve._resolve_courses`（既知延迟边）——引用不存在即拒。"""
     with pytest.raises(ValueError, match="找不到"):
         spec_mod.GatesSpec.model_validate(
             {

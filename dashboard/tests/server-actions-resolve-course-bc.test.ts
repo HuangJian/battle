@@ -65,7 +65,7 @@ describe('console/actions.resolveCourseBc（§384：种子路径读课程 bc 字
   })
 })
 
-describe('core/jsonc（与 python rl/jsonc.py 同语义）', () => {
+describe('core/jsonc（与 python common/jsonc.py 同语义）', () => {
   it('字符串内的 // 原样保留，注释被剥掉', () => {
     expect(parseJsonc('{\n  "url": "https://a/b", // 注释\n  "n": 1\n}\n')).toEqual({
       url: 'https://a/b',

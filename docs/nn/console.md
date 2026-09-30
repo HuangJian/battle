@@ -70,7 +70,7 @@ h5a `it1/it26–29`、h5b `it1/it23–26`，`remote-jobs` 也只留最近 3–4 
 ## §19 新增「课程」页（`/courses`）：全部课程一张表 + 封存入口（2026-09-27）
 
 用户报障起头：「课程封存机制开发完了，但 dashboard 上看不到操作入口，该怎么操作？」——查下来
-落点确实只到 **API/CLI**（`POST /api/archiveCourse` 默认 `--dry-run`、`python -m rl.course_archive`），
+落点确实只到 **API/CLI**（`POST /api/archiveCourse` 默认 `--dry-run`、`python -m biz.course_archive`），
 plan §4 S3 只把**读面**进了控制台（`stateView.archived` → 总览底部折叠分组），操作面没有按钮；
 而总览那张课程矩阵**只列在训的几门**，于是「哪些课存在 / 该封存谁 / 下一步做什么」三件事在界面上
 都没有读面（`tmp/` 实测 28 GB 里的 27.3 GB 是 17 门课程目录）。
@@ -166,7 +166,7 @@ memo 只活在**进程内**：改完代码要**重启控制台进程**才生效�
 热切写 ⇒ 停在 `tmp/` 下的历史课**永久**留着一份意图。而 `restoreCourseModes`（R3-2 的起 hub 回灌，
 挂在 `startComponent('hubServer')` 的两个分支上、**同步 await**）逐条把全部意图推给 hub。
 
-hub 的认课判据是**开课标记**（`remote/hub/queue_discover.py::_course_dir_live` 与 `_serves_course`
+hub 的认课判据是**开课标记**（`hub/queue_discover.py::_course_dir_live` 与 `_serves_course`
 都要求 `training-enabled.txt`）：没标记 ⇒ 按设计**必回** 400。于是每一门停掉的课都白烧整段有界重试
 （`pushModeWithRetry`：首试 + 2 次重试 × 2s ≈ **4s/门**，**串行**）——11 门 ≈ **44s** 纯 sleep，
 外加 33 次必然被拒的 POST 和一串看起来像坏了的「失败 x20-…」。
@@ -255,14 +255,14 @@ nodes-decouple-from-course.plan.md）：
 |---|---|---|
 | F1 | 两个「离线」：hub 派发模式（`setCourseMode`：只写意图 + POST hub）与训练模式（`trainModeKnobs` → `courses.<课>.rollout_src=run` + `run_iters=-1`） | `server/actions/course-mode.ts`、`stack/specs.ts::trainModeKnobs` |
 | F2 | 两者**各只有一条入口且不是同一条**：训练模式**只有开课**能写（运行中往 `start` 动作发 `trainMode` 被 400 拒），hub 模式有独立开关 ⇒ 只翻后者必然半状态 | `course-lifecycle.ts`、`api/route.ts` |
-| F3 | job 的 kind 只有一个判定点：有 `plan_bytes` ⇒ `run`；有 `rollout_spec` ⇒ `iter`；都无 ⇒ `ppo` | `rl/loop_steps.py::publish_job` 调用点 |
-| F4 | bun 只在**云机自己跑 rollout** 时需要（`kind in ("iter","run")` ⇒ `run_iter_rollout` ⇒ `resolve_bun`） | `remote/worker.py`、`remote/iter_rollout.py::resolve_bun` |
+| F3 | job 的 kind 只有一个判定点：有 `plan_bytes` ⇒ `run`；有 `rollout_spec` ⇒ `iter`；都无 ⇒ `ppo` | `trainer/loop_steps.py::publish_job` 调用点 |
+| F4 | bun 只在**云机自己跑 rollout** 时需要（`kind in ("iter","run")` ⇒ `run_iter_rollout` ⇒ `resolve_bun`） | `remote/worker.py`、`worker/iter_rollout.py::resolve_bun` |
 
 ### 决定（plan/train-mode-hot-switch.plan.md L1）
 
 **那颗开关 = 唯一的模式开关**：`setCourseMode` ① 先落本机配置（同步写盘，python 每轮读的那份
 rl-config）② 再推 hub 镜像。机制上不需要重开课：`_rollout_source` / `_run_segment_iters` **每轮**
-各读一次 `dist_common.load_dist_config()`（`rl/loop_round_steps.py`），且控制台从不把
+各读一次 `common.distribution.load_dist_config()`（`trainer/loop_round_steps.py`），且控制台从不把
 `--rollout-src` / `--run-iters` 传进 trainer argv（唯一传 `--run-iters` 的是 bundle 导出，只读快照）。
 
 **语义边界（已写进回执文案）**：
@@ -344,7 +344,7 @@ hub 不可达时配置照样落 / 文案含「本机不跑这门课」「不需�
 
 ### 修法（四处，两层各治一半）
 
-1. **hub 侧**（`remote/hub_server.py`）：`POST /admin/courses` 在「课不在表里」时**按需真扫一次**
+1. **hub 侧**（`hub/server.py`）：`POST /admin/courses` 在「课不在表里」时**按需真扫一次**
    （`discover(force=True)` 跳 2s 间隔闸）再试；模式非法**不**扫盘（直接 400）。全文 →
    `docs/nn/remote-transport.md §36`。
 2. **控制台回灌**（`server/actions/course-mode.ts`）：`restoreCourseModes` 每课**有界重试**
@@ -423,7 +423,7 @@ hub 不可达时配置照样落 / 文案含「本机不跑这门课」「不需�
 | 指标表 eval 列 / 配对基准 / 衍生列（`avgTicks` 等） | `server/iters.ts::readEvalSummaries` | `event === 'eval_summary'` |
 | eval 逐局弹窗 | `iters.ts::readLatestEvalGames` | 先按 summary 找最大 iter |
 | 开课回执「起点-基线对照」 | `stack/kickstart-receipt.ts` | 同 |
-| 门判据趋势（python 侧） | `rl/gate_check.py::read_trend_rows` | 同 |
+| 门判据趋势（python 侧） | `biz/gate_check.py::read_trend_rows` | 同 |
 
 ⇒ 修在写方（回传/导入合并时把 summary 一并并进去，单调规则），**读方一字未动**。
 
@@ -536,7 +536,7 @@ find tmp -name per-game.json → 0 个
 
 **lesson**：
 - **镜像常量必须对着 python 源码核对**（单测在 python 源码树里**搜定义**取字面量——不写死
-  文件路径：S4 第十九刀实测，写死 `loop_core.py` 的那版在常量搬到 `rl/loop_lifecycle.py` 后就静默
+  文件路径：S4 第十九刀实测，写死 `loop_core.py` 的那版在常量搬到 `trainer/loop_lifecycle.py` 后就静默
   空转了）：TS 侧抄一份阈值是不可避免的（控制台不能 import python），但抄完不设闸 = 两处判据
   各自安好、对不上号（与 §2/A 的 course_fp/corpus_fp 同一个病的预防）。
 - **同一份账本两个读法要当面对账**：控制台的 `readEvalSummaries` 全量 parse（视图构建用），
@@ -778,7 +778,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
 优先级 inflight > collect > idle > ready：**进程外的等待排第一**（结果在别的进程/机器上，
 运维唯一能干预的那一类）。
 
-★ **`games_planned` 的诚实性**：盘上今天**没有**任何地方记「本轮计划多少局」（只有 `rl/plan.py`
+★ **`games_planned` 的诚实性**：盘上今天**没有**任何地方记「本轮计划多少局」（只有 `biz/plan.py`
 的课程计划知道）⇒ CLI 传 0 = 未知，此时 `collect` 只报已落局数、**不报分数**（绝不出现 `78/0`）。
 真 supervisor 带上课程计划后会走到带分母的文案。这与 `already_done` 同一条规矩：算不出来的事实
 不得当成完成，也不得编出分母。
@@ -942,9 +942,9 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
 
 **改法（纯增量，训练侧与 console 两侧）**
 
-- **训练侧**（`rl/loop_baseline.py::TrainingBaseline._maybe_dispatch_baseline_eval`；S4 第二十刀前
+- **训练侧**（`trainer/loop_baseline.py::TrainingBaseline._maybe_dispatch_baseline_eval`；S4 第二十刀前
   住 `loop_core.py`）：在本 run **首次 rollout 收官后**（`it == _start_it`；全新腿 = it1）立刻用课程 `args.bc` 派一条 `iter=0` 的干净评估作恒定基线。守卫 `_baseline_eval_weights`：per-tick / 有课程 / `eval_games_per_stage>0` / `eval_every>0` / 有 enabled dist 节点（`nodes=[]` 纯本地路径本就不派 A-eval）/ bc 文件在盘；幂等（在飞跳过 + 跨重启按 `iter==0` 去重）；**失败自吞**（基线是观测设施，不得拖垮主线）。课程默认 `eval_every>1`（c6-bonus=5）⇒ 该轮本无 A-eval，**零重复计算**。
-- **`eval_done_keys` 新增 `iter_filter`**（`rl/eval_local.py`）：it0 的已评估账本按 `iter==0` 隔离。必须如此——bc 与 it1 的 `args.out` 指纹**可能相同**（it1 就是 PPO 前的 bc 初始化权重），只按 wver 去重会让 it1 的 A-eval 把基线局吞成「已评估」，it0 行永远不落盘。`dispatch_eval_round/bg` 与 `EvalDispatcher` 加尾参 `baseline=False`；it0 用独立 `iter_id = {runId}.0`（与 A-eval 的 `{runId}.N` 在 agent 结果缓存里键空间隔离）。
+- **`eval_done_keys` 新增 `iter_filter`**（`biz/eval_local.py`）：it0 的已评估账本按 `iter==0` 隔离。必须如此——bc 与 it1 的 `args.out` 指纹**可能相同**（it1 就是 PPO 前的 bc 初始化权重），只按 wver 去重会让 it1 的 A-eval 把基线局吞成「已评估」，it0 行永远不落盘。`dispatch_eval_round/bg` 与 `EvalDispatcher` 加尾参 `baseline=False`；it0 用独立 `iter_id = {runId}.0`（与 A-eval 的 `{runId}.N` 在 agent 结果缓存里键空间隔离）。
 - **门判据排除 it0**（`gate_check.read_trend_rows`）：`iter <= 0` 的 summary 不进趋势（用户定案：只当监控/配对基线）。否则会虚增 sustain 的「连续通过」计数、把 plateau 的上升趋势起点拉回 PPO 前。缺 `iter` 字段的旧行照旧保留（不过度收口）。
 - **Console**（`console/iters.ts`）：配对基线改为「有 it0 取 0，否则退回首个 eval 轮」（老腿逐字节兼容）；`readIterMetrics` 在有 ≥1 条真实 iteration 行时合成一条 it0 行（只有 `evalData`，rollout 派生字段一律 `NaN` —— 趋势图的缺口约定，写 0 会在图上多画一个假零点）；`MetricsTable.buildRows` 跳过 `iter<=0` 的主行，只出 eval 子行（UI 标「基线」）。
 
@@ -984,7 +984,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
 - **决策**：训练控制台首页「最新 6 轮完整指标」行新增「导出 replay」——弹窗列出最新
   in-loop eval（= eval_summary 最大 iter，与指标表 eval 视图同口径）的全部逐局行
   （类型/击杀/承伤/杀/残血/道具/得分/耗时，表头排序 + 行勾选 + 全部/胜利/失败/超时/
-  kills=N 批量选择），导出 = **按需确定性重放**：`rl/eval_replays_once.py` 以课程
+  kills=N 批量选择），导出 = **按需确定性重放**：`biz/eval_replays_once.py` 以课程
   curricula（load_course+apply_course 单一事实来源）重建 difficulty/max_ticks/
   stageJson/lives/level，按 wver（sha256[:16]）解析冻结权重快照（it*/_eval_frozen_weights*
   → 活动权重 → weights/<course> 归档），并行调 `export-eval-game.ts --replay` 重放并录制
@@ -1002,7 +1002,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
   不一致（理论不该发生）在 manifest 里诚实标记，不静默；单次导出上限 400 局；
   replay 文件名 stage 段 = 原始 --stage id（自定义关 2000+ 非映射前 loadIndex）+1
   （buildReplayFilename 1-based 显示口径），python 映射时减回。
-- **教训入册**：nn-training 内脚本目录 rl/ 会遮蔽 stdlib `queue`（rl/queue.py）——
+- **教训入册**：nn-training 内脚本目录 rl/ 会遮蔽 stdlib `queue`（trainer/queue.py）——
   顶层 `from concurrent.futures import ...` 必须在移除 sys.path 脚本目录项之后
   （eval_replays_once.py 头部 scrub，实测循环 import 崩）。
 - **同日注记（用户裁定）**：交付形态改为**逐文件**——不打 tar.gz；完成后每局一个
@@ -1243,7 +1243,7 @@ hub 一重启就**静默**恢复派发。这是「功能存在但不可达 + 重
   这七列是 4 元数组 + 序列表），且无端改 codehash 集内文件的报告形态；④ 直接进
   `REQUIRED_FIELDS` 不设豁免 —— 否，本批次之前的资产行会全量报缺（P0 覆盖率要求
   100% **或明示豁免**）。
-- **决定**：`rl/eval_local.py::eval_census_fields` 单源（**只认顶层**，缺键 = None
+- **决定**：`biz/eval_local.py::eval_census_fields` 单源（**只认顶层**，缺键 = None
   不伪造），A/B/C/m1 四个写点接线；`ingest.ts` 映射（畸形计数列/非字符串归零或空）；
   `store.ts` 七列进 `EvalGameRow` + `GAMEPLAY_FIELDS` + `REQUIRED_FIELDS`，并新增
   `PHASE0_FIELDS` 作为**旧资产行的明示豁免清单**（豁免由调用方传，不写死在
@@ -1251,7 +1251,7 @@ hub 一重启就**静默**恢复派发。这是「功能存在但不可达 + 重
 - **违反后果**：七列改走 telemetry 回退 ⇒ 同一字段两种形态、旧值真假难辨；缺键填零
   却不进豁免清单 ⇒ 覆盖率报表冤报旧行、真缺失被噪声淹没；把七列排除在
   `GAMEPLAY_FIELDS` 外 ⇒ 双跑不一致无人发现（§3.4 确定性契约失效）。
-- **落地**：`nn-training/rl/eval_local.py`（`EVAL_CENSUS_KEYS` / `eval_census_fields`）、
+- **落地**：`nn-training/biz/eval_local.py`（`EVAL_CENSUS_KEYS` / `eval_census_fields`）、
   `rl/{eval_dispatch,batch_eval,eval_a_once,eval_ingest}.py`；`dashboard/src/evalboard/
   {ingest,store}.ts`；回归 `nn-training/tests/test_eval_census_fields.py`（5 例）+  
   `dashboard/tests/evalboard-{ingest,store}.test.ts`（映射/豁免）。验证：真实
@@ -1653,9 +1653,9 @@ CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路�
    `JSON.parse` 这段 stdout（`server/api/loop-queue.ts`）⇒ 在默认状态下常年报「输出不可解析」的红错。
    定案：空表也回 `{"courses": [], "pools": {...}}`（形状在所有分支一致；池容量是进程事实，与有没有课无关）。
 
-**落地**：`nn-training/remote/protocol.py`（`COURSE_ENABLE_MARKER`）· `nn-training/rl/loop_plan.py`
-（`course_enabled` / `enabled_courses`）· `nn-training/rl/loop_serve.py`（发现模式两处扫描）·
-`nn-training/run_rl_cluster.py`（只读课程表）· `nn-training/remote/hub_server.py`（`_course_dir_live`）·
+**落地**：`nn-training/remote/protocol.py`（`COURSE_ENABLE_MARKER`）· `nn-training/trainer/loop_plan.py`
+（`course_enabled` / `enabled_courses`）· `nn-training/trainer/loop_serve.py`（发现模式两处扫描）·
+`nn-training/run_rl_cluster.py`（只读课程表）· `nn-training/hub/server.py`（`_course_dir_live`）·
 `dashboard/src/server/actions/course-lifecycle.ts`（标记写/删）· `dashboard/src/server/api/state-view.ts`
 （`trainingCourses` = 已开课）· `dashboard/src/web/view/loop-queue.ts`（`coursePills` 纯函数）·
 `dashboard/src/web/app/panels/TrainingPills.tsx`（新）· `dashboard/src/web/app/app.tsx`（顶部形状）·

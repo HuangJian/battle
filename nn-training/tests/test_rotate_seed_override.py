@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import types
 
-from rl.course import build_pairs, resolve_rotate_seed
+from biz.course import build_pairs, resolve_rotate_seed
 
 
 def test_explicit_beats_inherited() -> None:

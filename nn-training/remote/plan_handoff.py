@@ -19,8 +19,8 @@
 
 ## 依赖方向
 
-`plan_handoff → {common.logutil, common.protocol, platform_utils, remote.artifacts, remote.bundle,
-remote.offline_deliver, rl.plan}`（全向下，DAG）。**零**引用 `remote.plan_run` / `remote.worker` /
+`plan_handoff → {common.logutil, common.protocol, common.platform_utils, remote.artifacts, remote.bundle,
+remote.offline_deliver, biz.plan}`（全向下，DAG）。**零**引用 `remote.plan_run` / `remote.worker` /
 `remote.run_loop`——反向由 `plan_run` 的门面承接（`X as X`，历史 import 路径一行不改）。
 
 ## 注入点（patch 纪律）
@@ -41,7 +41,9 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from biz.plan import plan_pairs_fp, planned_iters, validate_plan
 from common.logutil import log_line
+from common.platform_utils import cpu_worker_slots
 from common.protocol import (
     BLOB_DEMO,
     EVAL_SCRIPT,
@@ -50,7 +52,6 @@ from common.protocol import (
     blob_path,
     decode_opt_tar,
 )
-from platform_utils import cpu_worker_slots
 from remote.artifacts import (
     ArtifactStore,
     resolve_artifact_dir,
@@ -63,7 +64,6 @@ from remote.offline_deliver import (
     OfflineDeliverer,
     make_deliverer,
 )
-from rl.plan import plan_pairs_fp, planned_iters, validate_plan
 
 #: 产物目录里随段携带的 TS 运行时树（让「只下载产物 zip」的机器也能续跑）。
 TS_TREE_DIR = "ts_code"
@@ -76,7 +76,7 @@ TS_CODE_ZIP_NAME = "ts_code.zip"
 #: 为什么必须等（2026-09-25 云机卡死取证）：`_maybe_cloud_eval` 在 checkpoint 之后提交评估，
 #: 而**下一轮的第一步就是 rollout**（`_run_with_retries` → `run_job` → `run_iter_rollout`），
 #: 两条腿因此是**同时**各开满一份（96 核配额上 220+220；而那个 220 本身就是把宿主机报的
-#: 224 核当成配额的产物，见 `platform_utils.effective_cores`）—— 旧注释那句「rollout 与 eval
+#: 224 核当成配额的产物，见 `common.platform_utils.effective_cores`）—— 旧注释那句「rollout 与 eval
 #: 交替跑、互不预留」与代码事实不符。2× 超订把单局墙钟从 p90≈2.6s 推到 5s 硬顶之外 ⇒
 #: 成批超时 ⇒ 池回退放大（一次超时 = 三份进程）⇒ 整轮停不下来。
 #:
@@ -176,7 +176,7 @@ class RunContext:
         #: rollout 的并行局数（`--rollout-workers`）。**它覆盖计划里钉着的 `plan.workers`**：
         #: 后者是**导出那台机器**的规模（常在 8~16 核的本机导出，却要在 96 vCPU 的云机上跑），
         #: 而 rollout 与 eval 是（**且必须**）交替跑的 ⇒ 两者共用同一口径
-        #: `platform_utils.cpu_worker_slots()`（用户 2026-09-22：「两者都使用 max(cores − 4,
+        #: `common.platform_utils.cpu_worker_slots()`（用户 2026-09-22：「两者都使用 max(cores − 4,
         #: cores × 0.8)」）。「交替」由 `EVAL_ALTERNATE_WAIT_SEC` 那条有界等保证（见它）。
         #: 0 = 按本机核数自动。
         rollout_workers: int = 0,

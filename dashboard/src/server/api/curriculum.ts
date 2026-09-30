@@ -24,7 +24,7 @@ export function readCurriculumLedger(
   try {
     const raw = readFileSync(ledgerPath, 'utf8')
     // LEDGER 由程序生成（纯 JSON），但解析走共用 JSONC 解析器（core/jsonc.ts，与
-    // python `rl/jsonc.py` 同语义）——原先手搓的「只剥整行 `//`」遇行内注释即崩，
+    // python `common/jsonc.py` 同语义）——原先手搓的「只剥整行 `//`」遇行内注释即崩，
     // 与 2026-09-17 课程种子事故同一根因；共用实现接受严格超集，行为只增不减。
     const data = parseJsonc(raw) as {
       levels?: Record<string, Record<string, unknown>>

@@ -15,7 +15,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.eval_local import EVAL_LOOT_KEYS, eval_loot_fields
+from biz.eval_local import EVAL_LOOT_KEYS, eval_loot_fields
 
 
 def test_loot_keys_are_the_three_missing_columns() -> None:
@@ -74,20 +74,20 @@ def test_missing_everywhere_returns_none() -> None:
 def test_writers_wire_three_loot_columns() -> None:
     """源码级接线断言：eval_log 的写入方都必须落这三列。
 
-    2026-09-22：手动 evalA（`rl/eval_a_once.py`）不再自己写行——它改为薄包装
-    `rl/eval_dispatch.py::dispatch_eval_round`（与 in-loop 同一条派发路），三个
+    2026-09-22：手动 evalA（`trainer/eval_a_once.py`）不再自己写行——它改为薄包装
+    `trainer/eval_dispatch.py::dispatch_eval_round`（与 in-loop 同一条派发路），三个
     写入方就此收敛成两个（见 docs/nn/runtime-opt.md §6）。
 
-    2026-09-22（云机评估）：行构造收敛为**唯一实现点** `rl/eval_local.eval_row`
+    2026-09-22（云机评估）：行构造收敛为**唯一实现点** `biz/eval_local.eval_row`
     （in-loop 派发器与 `remote/offline_eval.py` 共用）。于是判据分两档：
 
       * 走 `eval_row` 的写入方：三列由那一处保证（本文件只断言它们接了共享构造点）；
-      * 自己拼行的写入方（`rl/batch_runner.py`，原住 `rl/batch_eval.py`）：必须
+      * 自己拼行的写入方（`trainer/batch_runner.py`，原住 `trainer/batch_eval.py`）：必须
         自己接到 `eval_loot_fields`。
     """
     for rel, marker in (
-        ("rl/eval_dispatch.py", "eval_row"),
-        ("rl/batch_runner.py", "eval_loot_fields"),
+        ("trainer/eval_dispatch.py", "eval_row"),
+        ("trainer/batch_runner.py", "eval_loot_fields"),
         ("remote/offline_eval.py", "eval_row"),
     ):
         src = (ROOT / rel).read_text(encoding="utf-8")
@@ -102,7 +102,7 @@ def test_writers_wire_three_loot_columns() -> None:
 
 
 def test_m1_ingest_row_has_loot_schema_keys() -> None:
-    from rl.eval_ingest import m1_game_row
+    from biz.eval_ingest import m1_game_row
 
     r = m1_game_row(
         {"stage": 0, "seed": 1, "win": False, "cleared": False},

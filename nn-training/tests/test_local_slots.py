@@ -17,7 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from rl.queue import local_slots_max_of
+from trainer.queue import local_slots_max_of
 
 
 class _Args:

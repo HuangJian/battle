@@ -45,8 +45,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 import torch
 import torch.nn as nn
 
+from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 from models.student import StudentNet, coord_channels
-from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 
 GOAL_HEATMAP_DIM = BOARD * BOARD  # 676（动作空间 = 坦克顶点热图；§9.4.0 合法顶点 25×25=625）
 ENGAGE_DIM = 2

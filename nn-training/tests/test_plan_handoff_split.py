@@ -26,9 +26,9 @@ if str(ROOT) not in sys.path:
 
 import remote.plan_handoff as handoff_mod
 import remote.plan_run as plan_run_mod
+from biz.plan import build_plan, dump_plan
 from common.protocol import ProtocolError
 from remote.artifacts import sha256_bytes
-from rl.plan import build_plan, dump_plan
 
 HANDOFF_FILE = ROOT / "remote" / "plan_handoff.py"
 ENGINE_FILE = ROOT / "remote" / "plan_run.py"
@@ -71,12 +71,12 @@ ALLOWED_IMPORTS = {
     "typing",
     "common.logutil",
     "common.protocol",
-    "platform_utils",
+    "common.platform_utils",
     "remote.artifacts",
     "remote.bundle",
     "remote.offline_deliver",
     "remote.offline_eval",
-    "rl.plan",
+    "biz.plan",
 }
 
 

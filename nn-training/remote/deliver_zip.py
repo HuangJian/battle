@@ -2,7 +2,7 @@
 
 控制台上的那条腿：导出任务包 → 上传 Kaggle/Colab 跑完 → 把产出的 zip 交回来 →
 导入并**自动按课程配置跑 A 层评估**。本模块只管「把 zip 变成一份可评估的产物目录」，
-评估由控制台接着发起（`rl/eval_a_once.py`，复用现有 evalA 动作）。
+评估由控制台接着发起（`trainer/eval_a_once.py`，复用现有 evalA 动作）。
 
 **产物 zip 是什么**：`remote/artifacts.py` 收尾时打的 `artifacts.zip`（人从 Kaggle
 output / Colab Drive 下载下来，文件名习惯是 `deliver-<课程>.zip`）。形状：
@@ -216,7 +216,7 @@ def _merge_carried_eval_rows(final: Path, dest_root: Path) -> tuple[int, int]:
     也成立），而控制台/门判只看 `tmp/<课程>/eval_log.jsonl`。盘上布局就是它的位置：
     导入根是 `tmp/<课程>/deliver`，账本在它的同级（`tmp/<课程>/eval_log.jsonl`）。
 
-    summary 一并并进去（`rl.eval_rows.merge_eval_rows` 的单调规则）：控制台的 eval 列 /
+    summary 一并并进去（`biz.eval_rows.merge_eval_rows` 的单调规则）：控制台的 eval 列 /
     弹窗 / 开课回执与门判据都只认 summary 行，纯云腿没人替它算（2026-09-23）。
 
     任何失败都只记一笔：导入的主价值是「权重可评估」，少一份读数不是导入失败。
@@ -225,7 +225,7 @@ def _merge_carried_eval_rows(final: Path, dest_root: Path) -> tuple[int, int]:
     if not src_jsonl.exists():
         return (0, 0)
     try:
-        from rl.eval_rows import merge_eval_rows
+        from biz.eval_rows import merge_eval_rows
 
         n_games, n_sums = merge_eval_rows(src_jsonl, Path(dest_root).parent / "eval_log.jsonl")
     except Exception as e:  # rl 包不在（截断快照）/磁盘错——不拖垮导入
@@ -253,7 +253,7 @@ def _merge_carried_metric_rows(
     两件事，分开幂等：
 
       * **课程账本行**：由 `remote.artifacts.ledger_row_from_metrics` 搬运（与实时补传
-        `remote/hub_server` 共用同一张翻译表），打上 `source="deliver_import"`；账本里已有
+        `hub.server` 共用同一张翻译表），打上 `source="deliver_import"`；账本里已有
         同 it 的 `iteration` 行就跳过（重复导入不写第二遍）。搬不到的（旧包没有
         `dimMeans`/`scoreStats`）**留空**——写 0 会被读成「真的零击杀」。
       * **逐局画像**：`it<N>/per-game.json`（读方优先它，见下）。控制台的「耗时/击杀/残血/

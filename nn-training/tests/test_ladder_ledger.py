@@ -13,7 +13,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.ladder_ledger import TIER_BOUNDARIES, LadderLedger
+from biz.ladder_ledger import TIER_BOUNDARIES, LadderLedger
 from tests.subproc_util import run_utf8
 
 
@@ -75,7 +75,7 @@ def test_graduate_tier_boundary_requires_ack(tmp_path: Path) -> None:
         [
             sys.executable,
             "-m",
-            "rl.ladder_ledger",
+            "biz.ladder_ledger",
             "graduate",
             "--level",
             "ladder-c07",
@@ -93,7 +93,7 @@ def test_graduate_tier_boundary_requires_ack(tmp_path: Path) -> None:
         [
             sys.executable,
             "-m",
-            "rl.ladder_ledger",
+            "biz.ladder_ledger",
             "graduate",
             "--level",
             "ladder-c07",
@@ -122,7 +122,7 @@ def test_graduate_non_boundary_has_no_ack(tmp_path: Path) -> None:
         [
             sys.executable,
             "-m",
-            "rl.ladder_ledger",
+            "biz.ladder_ledger",
             "graduate",
             "--level",
             "ladder-c04",

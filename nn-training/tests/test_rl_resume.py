@@ -1,9 +1,9 @@
-"""`rl/resume.py` 磁盘对账的**并发删除安全**（2026-09-20 门禁事故回归）。
+"""`biz/resume.py` 磁盘对账的**并发删除安全**（2026-09-20 门禁事故回归）。
 
 事故现场（e2e `-n 12`，栈完整）：
 
-    rl/dispatch.py:1121 in run → resumed_manifests(...)
-    rl/resume.py:248 in resumed_manifests → traj_dir.rglob("rl_s*_seed*/manifest.json")
+    trainer/dispatch.py:1121 in run → resumed_manifests(...)
+    biz/resume.py:248 in resumed_manifests → traj_dir.rglob("rl_s*_seed*/manifest.json")
     pathlib.py:440 in _select_from → scandir(parent_path)
     FileNotFoundError: [Errno 2] No such file or directory: '…/i9/dist/fake/rl_s0_seed111'
     ⇒ RuntimeError: stream collector failed: …
@@ -28,7 +28,7 @@ from pathlib import Path
 
 import pytest
 
-from rl.resume import (
+from biz.resume import (
     MANIFEST_NAME,
     _dir_signature,
     _scan_shards,

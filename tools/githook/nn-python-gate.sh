@@ -93,7 +93,7 @@
 #   会通过**——这就是判据：单跑绿、全量红，且日志里有 [safe-delete] 行 = 环境。
 #   干净验证方式（临时停用 shim，不改仓库）：
 #     CODEBUDDY_SAFE_DELETE_ENABLED=0 bash tools/githook/nn-python-gate.sh
-#   仓库侧的正交修复（已完成）：nn-training/platform_utils.rmtree_best_effort
+#   仓库侧的正交修复（已完成）：nn-training/common/platform_utils.py::rmtree_best_effort
 #   ——shutil 的 ignore_errors=True 挡不住 SystemExit（BaseException），会把调用
 #   线程打死；所有清理路径一律走该助手。
 set -u
@@ -170,12 +170,12 @@ fi
 
 # ---- worker 数：默认 min(核数, 12)（见文件头实测那一节），NN_GATE_NPROC 覆盖 ----
 # 核数用 venv python 自己问（`-S` 跳过 site：秒级、且唯一跨平台可靠口径）；
-# **口径是 platform_utils.effective_cores()**（容器 cgroup 配额/亲和掩码 > 宿主机裸数）：
+# **口径是 common.platform_utils.effective_cores()**（容器 cgroup 配额/亲和掩码 > 宿主机裸数）：
 # 容器里 `os.cpu_count()` 报的是宿主机的核数（Kaggle 224 vs cgroup 96）—— 门禁虽另有 12 的
 # 上界兜着，但「按哪个数算」只允许有一个答案（见 2026-09-25 云机卡死那笔账）。
-# 求值必须在 nn-training 目录内（`-S` 下 sys.path[0] 是 cwd，platform_utils 在仓库里）。
+# 求值必须在 nn-training 目录内（`-S` 下 sys.path[0] 是 cwd，common.platform_utils 在仓库里）。
 # 结果不是纯数字（python 起不来等）就退回 4（旧默认，安全）。
-CORES=$(cd "$NN_ROOT" && "$NN_PY" -S -c 'from platform_utils import effective_cores; print(effective_cores())' 2>/dev/null || echo "")
+CORES=$(cd "$NN_ROOT" && "$NN_PY" -S -c 'from common.platform_utils import effective_cores; print(effective_cores())' 2>/dev/null || echo "")
 case "$CORES" in
   '' | *[!0-9]*) CORES=4 ;;
 esac

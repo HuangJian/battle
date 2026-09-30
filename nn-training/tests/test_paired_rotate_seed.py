@@ -23,8 +23,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.config import CourseConfig, apply_course, corpus_identity_fp, load_course
-from rl.course import build_pairs, resolve_rotate_seed
+from biz.config import CourseConfig, apply_course, corpus_identity_fp, load_course
+from biz.course import build_pairs, resolve_rotate_seed
 
 V = 20260921
 

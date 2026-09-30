@@ -4,7 +4,7 @@
 （dashboard 不可见）、暂停意图解禁（两臂显示「已暂停」）、hub 课程模式；agent 只好
 手写控制台拥有的状态文件（`training-enabled.txt` / `loop-control.json`）。
 
-契约：训练循环**只**认控制台写的开课标记；判据同源 = `rl.loop_plan.course_enabled`
+契约：训练循环**只**认控制台写的开课标记；判据同源 = `trainer.loop_plan.course_enabled`
 （禁第二份"标记存在性检查"）。范围只卡训练循环——`--smoke` 预演、collect-only
 （调用点在其后）、无课程的 legacy 路径都不受影响。
 """

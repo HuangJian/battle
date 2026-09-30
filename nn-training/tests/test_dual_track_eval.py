@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.eval_local import (
+from biz.eval_local import (
     DUAL_TRACK_ANCHOR,
     DUAL_TRACK_ROTOR,
     EVAL_SEEDS,
@@ -105,7 +105,7 @@ def test_segment_membership_is_index_based_not_numeric_range() -> None:
 
     数值区间版在池子有洞/乱序时比真实成员集更宽——会把不属于锚点的局算进锚点轨。
     """
-    from rl.eval_local import _ANCHOR_SEED_SET, _ROTOR_SEED_SET
+    from biz.eval_local import _ANCHOR_SEED_SET, _ROTOR_SEED_SET
 
     assert len(_ANCHOR_SEED_SET) == DUAL_TRACK_ANCHOR
     assert len(_ROTOR_SEED_SET) == len(EVAL_SEEDS) - DUAL_TRACK_ANCHOR
@@ -120,7 +120,7 @@ def test_segment_membership_is_index_based_not_numeric_range() -> None:
 
 def test_eval_seeds_pool_must_be_contiguous_ascending() -> None:
     """P2-7 前提：段成员集按下标切分 ⇒ 池子必须严格递增无重复（否则加载即炸）。"""
-    import rl.eval_local as m
+    import biz.eval_local as m
 
     assert tuple(sorted(set(m.EVAL_SEEDS))) == m.EVAL_SEEDS
     assert len(m.EVAL_SEEDS) == 200
@@ -224,7 +224,7 @@ def test_settle_summary_dual_track_fields(tmp_path: Path) -> None:
 def test_settle_summary_ignores_bc_evalboard_rows(tmp_path: Path) -> None:
     """P2-7：B/C evalboard 行（同为 `event:"eval"`）不得混进本臂胜率与双轨拆段。
 
-    病根：台账过滤只有 (event, wver, iter)，而 `rl/batch_eval.py` 的
+    病根：台账过滤只有 (event, wver, iter)，而 `trainer/batch_eval.py` 的
     `BatchEvalRunner._run.record` 落的 B/C 行同样满足这三条（畸形批 iter=0 能撞上同
     (iter,wver)）⇒ 混进来既抬高胜率分母，又把 B/C 的种子算进锚点/轮转段。
     """
@@ -270,7 +270,7 @@ def test_rotation_notes_fires_only_on_real_degeneracy() -> None:
 
     `rotor_offset` 周期 3，两次 eval 的 iter 间隔若恒为 3 的倍数，每轮落同一段。
     """
-    from rl.gate_check import _rotation_notes
+    from biz.gate_check import _rotation_notes
 
     def _rows(its: list[int]) -> list[dict]:
         return [{"event": "eval_summary", "iter": i, "rotor_wr": 0.5} for i in its]
@@ -335,7 +335,7 @@ def test_dispatcher_local_dual_track_round(tmp_path: Path, monkeypatch) -> None:
     """本地 runner 注入：n_seeds=50 → 100 局双轨 + summary 三字段 + 续跑/换段。"""
     import types
 
-    import rl.eval_dispatch as ed
+    import trainer.eval_dispatch as ed
 
     work = tmp_path / "dt"
     work.mkdir()
@@ -418,7 +418,7 @@ def test_dispatcher_prefix_when_not_daily_n(tmp_path: Path, monkeypatch) -> None
     """n_seeds=2（单测/冒烟）仍走前缀切片，不被双轨扩成 100。"""
     import types
 
-    import rl.eval_dispatch as ed
+    import trainer.eval_dispatch as ed
 
     work = tmp_path / "pre"
     work.mkdir()

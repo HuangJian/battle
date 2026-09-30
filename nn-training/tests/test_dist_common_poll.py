@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-import dist_common
+import common.distribution
 from tests.helpers import source_scan
 
 
@@ -21,16 +21,16 @@ def test_poll_result_abandon_fires_immediately(monkeypatch) -> None:
         time.sleep(0.4)
         return 202, b'{"status": "running"}'
 
-    monkeypatch.setattr(dist_common, "_request", fake_request)
-    monkeypatch.setattr(dist_common.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(common.distribution, "_request", fake_request)
+    monkeypatch.setattr(common.distribution.time, "sleep", lambda _s: None)
 
     # 0.9 → 0.25（2026-09-29，§43）：判据是「**置位后立刻**放弃、不是等 budget（600s）耗尽」——
     # 定时器值只决定这个事件何时发生；而 `fake_request` 每趟 0.4s ⇒ 放弃最多晚一趟被看到。
     ev = threading.Event()
     threading.Timer(0.25, ev.set).start()
     t0 = time.monotonic()
-    with pytest.raises(dist_common.DistError) as ei:
-        dist_common._poll_result(
+    with pytest.raises(common.distribution.DistError) as ei:
+        common.distribution._poll_result(
             "http://node",
             "tok",
             {"iterId": "r.1", "stage": 0, "seed": 1},
@@ -50,15 +50,15 @@ def test_poll_result_no_abandon_keeps_polling(monkeypatch) -> None:
     def fake_request(url: str, auth_key: str, timeout: float = 30.0, **kw):
         return 202, b'{"status": "running"}'
 
-    monkeypatch.setattr(dist_common, "_request", fake_request)
-    monkeypatch.setattr(dist_common.time, "sleep", lambda _s: None)
+    monkeypatch.setattr(common.distribution, "_request", fake_request)
+    monkeypatch.setattr(common.distribution.time, "sleep", lambda _s: None)
 
     # 预算地板调成毫秒级（2026-09-29，§43）：生产地板（1.0s）是「防住预算小到没意义的调用」，
     # 而本用例要验的是「预算耗尽 + deadline exceeded」这条**形状**，与预算绝对长度无关。
     # 不调时本用例就是「空转跑满 1s」（sleep 被打桩 ⇒ 还是满核忙等，并行下是真伤害）。
-    monkeypatch.setattr(dist_common, "POLL_MIN_BUDGET_SEC", 0.05)
-    with pytest.raises(dist_common.DistError) as ei:
-        dist_common._poll_result(
+    monkeypatch.setattr(common.distribution, "POLL_MIN_BUDGET_SEC", 0.05)
+    with pytest.raises(common.distribution.DistError) as ei:
+        common.distribution._poll_result(
             "http://node",
             "tok",
             {"iterId": "r.1", "stage": 0, "seed": 1},
@@ -69,7 +69,7 @@ def test_poll_result_no_abandon_keeps_polling(monkeypatch) -> None:
 
 
 def _fetch(url: str = "http://node") -> dict:
-    m, _ = dist_common.fetch_task(
+    m, _ = common.distribution.fetch_task(
         url,
         "tok",
         iter_id="r.1",
@@ -90,8 +90,8 @@ def test_fetch_task_marks_transport_reset_transient(monkeypatch) -> None:
     def boom(*a, **k):
         raise ConnectionResetError(10054, "An existing connection was forcibly closed")
 
-    monkeypatch.setattr(dist_common, "_request", boom)
-    with pytest.raises(dist_common.DistError) as ei:
+    monkeypatch.setattr(common.distribution, "_request", boom)
+    with pytest.raises(common.distribution.DistError) as ei:
         _fetch()
     assert ei.value.transient is True
     assert "task fetch failed" in ei.value.reason
@@ -108,45 +108,45 @@ def test_fetch_task_marks_5xx_and_429_transient_but_not_4xx(monkeypatch) -> None
         return boom
 
     for code in (503, 429, 502):
-        monkeypatch.setattr(dist_common, "_request", http(code))
-        with pytest.raises(dist_common.DistError) as ei:
+        monkeypatch.setattr(common.distribution, "_request", http(code))
+        with pytest.raises(common.distribution.DistError) as ei:
             _fetch()
         assert ei.value.status == code and ei.value.transient is True, code
     for code in (409, 404):
-        monkeypatch.setattr(dist_common, "_request", http(code))
-        with pytest.raises(dist_common.DistError) as ei:
+        monkeypatch.setattr(common.distribution, "_request", http(code))
+        with pytest.raises(common.distribution.DistError) as ei:
             _fetch()
         assert ei.value.status == code and ei.value.transient is False, code
 
 
 def test_transient_judgement_single_source_delegated() -> None:
-    """背压/瞬断判据：单一实现在 dist_common，B 层薄转发（A/C 层直调同一实现）。"""
-    from rl.batch_eval import is_transient_error as be_is_transient
+    """背压/瞬断判据：单一实现在 common.distribution，B 层薄转发（A/C 层直调同一实现）。"""
+    from trainer.batch_eval import is_transient_error as be_is_transient
 
-    assert be_is_transient(dist_common.DistError(0, "busy")) is True
+    assert be_is_transient(common.distribution.DistError(0, "busy")) is True
     assert be_is_transient(ConnectionResetError(10054, "x")) is True
-    assert be_is_transient(dist_common.DistError(409, "wver not cached")) is False
-    assert be_is_transient(dist_common.DistError(0, "validate: wver mismatch")) is False
+    assert be_is_transient(common.distribution.DistError(409, "wver not cached")) is False
+    assert be_is_transient(common.distribution.DistError(0, "validate: wver mismatch")) is False
     for probe in (
-        dist_common.DistError(0, "busy"),
-        dist_common.DistError(502, ""),
-        dist_common.DistError(409, "x"),
+        common.distribution.DistError(0, "busy"),
+        common.distribution.DistError(502, ""),
+        common.distribution.DistError(409, "x"),
         TimeoutError("read timed out"),
     ):
-        assert be_is_transient(probe) == dist_common.is_transient_error(probe), probe
+        assert be_is_transient(probe) == common.distribution.is_transient_error(probe), probe
 
 
 def test_transient_classification_table() -> None:
     """分类表：隧道/背压/瞬断 = True；409 wver-not-cached 与确定性失败 = False。"""
-    it = dist_common.is_transient_error
+    it = common.distribution.is_transient_error
     for code in (408, 425, 429, 500, 502, 503, 504):
-        assert it(dist_common.DistError(code, "")) is True, code
+        assert it(common.distribution.DistError(code, "")) is True, code
     for code in (400, 404, 409, 422):
-        assert it(dist_common.DistError(code, "")) is False, code
-    assert it(dist_common.DistError(0, "busy")) is True
-    assert it(dist_common.DistError(0, "node busy: slot saturated")) is True
+        assert it(common.distribution.DistError(code, "")) is False, code
+    assert it(common.distribution.DistError(0, "busy")) is True
+    assert it(common.distribution.DistError(0, "node busy: slot saturated")) is True
     assert it(ConnectionResetError(10054, "forcibly closed")) is True
-    assert it(dist_common.DistError(0, "validate: wver mismatch")) is False
+    assert it(common.distribution.DistError(0, "validate: wver mismatch")) is False
     assert it(ValueError("corrupt container")) is False
 
 
@@ -156,41 +156,41 @@ def test_task_lost_classification_table() -> None:
     裸 404（路径写错之类客户端 bug）必须继续响亮失败——把它当成「节点重启」会把真实
     客户端 bug 静默成无限回队。
     """
-    tl = dist_common.is_task_lost_error
-    marker = dist_common.TASK_LOST_MARKER
+    tl = common.distribution.is_task_lost_error
+    marker = common.distribution.TASK_LOST_MARKER
     assert marker == "task lost on node"  # 与 _poll_result 的文案同源
-    assert tl(dist_common.DistError(404, f"{marker} (restart/purge): {{}}")) is True
-    assert tl(dist_common.DistError(404, "not found")) is False
-    assert tl(dist_common.DistError(404, "")) is False
-    assert tl(dist_common.DistError(503, marker)) is False  # 状态不对
-    assert tl(dist_common.DistError(409, "wver not cached here")) is False
+    assert tl(common.distribution.DistError(404, f"{marker} (restart/purge): {{}}")) is True
+    assert tl(common.distribution.DistError(404, "not found")) is False
+    assert tl(common.distribution.DistError(404, "")) is False
+    assert tl(common.distribution.DistError(503, marker)) is False  # 状态不对
+    assert tl(common.distribution.DistError(409, "wver not cached here")) is False
     assert tl(ConnectionResetError(10054, "x")) is False
     assert tl(ValueError("corrupt container")) is False
     # 与瞬断**分开**：处置不同（回队重跑 vs 背压退避），404 不属背压分类
-    assert dist_common.is_transient_error(dist_common.DistError(404, marker)) is False
+    assert common.distribution.is_transient_error(common.distribution.DistError(404, marker)) is False
 
 
 def test_forget_weights_node_scope() -> None:
     """账本摘除范围：给 kind 时只摘那条腿，缺省摘该节点全部 kind，不误伤别的节点。"""
-    dist_common.weights_push_cache_reset()
-    dist_common.note_weights_pushed("w1", "a97", kind="rollout")
-    dist_common.note_weights_pushed("w1", "a97", kind="eval")
-    dist_common.note_weights_pushed("w1", "mac", kind="rollout")
-    dist_common.note_weights_pushed("w1", "a97", kind="rollout")  # 幂等
+    common.distribution.weights_push_cache_reset()
+    common.distribution.note_weights_pushed("w1", "a97", kind="rollout")
+    common.distribution.note_weights_pushed("w1", "a97", kind="eval")
+    common.distribution.note_weights_pushed("w1", "mac", kind="rollout")
+    common.distribution.note_weights_pushed("w1", "a97", kind="rollout")  # 幂等
 
-    assert dist_common.forget_weights_node("a97", kind="rollout") == 1
-    assert dist_common.weights_already_pushed("w1", "a97", kind="rollout") is False
-    assert dist_common.weights_already_pushed("w1", "a97", kind="eval") is True
-    assert dist_common.weights_already_pushed("w1", "mac", kind="rollout") is True
-    assert dist_common.forget_weights_node("a97") == 1  # 缺省 = 全 kind
-    assert dist_common.weights_already_pushed("w1", "a97", kind="eval") is False
-    assert dist_common.forget_weights_node("a97") == 0  # 再摘一次 = 0 条
-    assert dist_common.forget_weights_node("") == 0  # 空 id 不炸
+    assert common.distribution.forget_weights_node("a97", kind="rollout") == 1
+    assert common.distribution.weights_already_pushed("w1", "a97", kind="rollout") is False
+    assert common.distribution.weights_already_pushed("w1", "a97", kind="eval") is True
+    assert common.distribution.weights_already_pushed("w1", "mac", kind="rollout") is True
+    assert common.distribution.forget_weights_node("a97") == 1  # 缺省 = 全 kind
+    assert common.distribution.weights_already_pushed("w1", "a97", kind="eval") is False
+    assert common.distribution.forget_weights_node("a97") == 0  # 再摘一次 = 0 条
+    assert common.distribution.forget_weights_node("") == 0  # 空 id 不炸
 
 
 def test_refresh_weights_reposts_and_forgets_cache(monkeypatch) -> None:
     """409 自愈：清 reuse 缓存 → 就地重发 → 重新入账（同一节点继续用）。"""
-    dist_common.weights_push_cache_reset()
+    common.distribution.weights_push_cache_reset()
     node = {"id": "a97", "url": "http://node-a97", "key": "k"}
     seen: list[tuple] = []
 
@@ -198,13 +198,13 @@ def test_refresh_weights_reposts_and_forgets_cache(monkeypatch) -> None:
         seen.append((url, auth_key, iter_id, sha, kind))
         return "purged"
 
-    monkeypatch.setattr(dist_common, "post_weights", ok_post)
-    dist_common.note_weights_pushed("w1", "a97")  # 脏缓存：客户端以为节点还持有
-    assert dist_common.weights_already_pushed("w1", "a97") is True
+    monkeypatch.setattr(common.distribution, "post_weights", ok_post)
+    common.distribution.note_weights_pushed("w1", "a97")  # 脏缓存：客户端以为节点还持有
+    assert common.distribution.weights_already_pushed("w1", "a97") is True
 
     logs: list[str] = []
     assert (
-        dist_common.refresh_weights(
+        common.distribution.refresh_weights(
             node,
             iter_id="it1",
             wver="w1",
@@ -215,31 +215,31 @@ def test_refresh_weights_reposts_and_forgets_cache(monkeypatch) -> None:
         is True
     )
     assert seen == [("http://node-a97", "k", "it1", "w1", "rollout")]
-    assert dist_common.weights_already_pushed("w1", "a97") is True  # 重发成功 ⇒ 重新入账
+    assert common.distribution.weights_already_pushed("w1", "a97") is True  # 重发成功 ⇒ 重新入账
     assert logs and "wver not cached" in logs[0]
 
 
 def test_refresh_weights_failure_stays_cold(monkeypatch) -> None:
     """重发也失败 ⇒ 返回 False（调用方按真失败处理）且缓存必须保持清空。"""
-    dist_common.weights_push_cache_reset()
+    common.distribution.weights_push_cache_reset()
     node = {"id": "a97", "url": "http://node-a97", "authKey": "k2"}  # authKey 兼容键
     seen: list[str] = []
 
     def boom(url, auth_key, *_a, **_kw):
         seen.append(auth_key)
-        raise dist_common.DistError(503, "busy")
+        raise common.distribution.DistError(503, "busy")
 
-    monkeypatch.setattr(dist_common, "post_weights", boom)
-    dist_common.note_weights_pushed("w1", "a97")
+    monkeypatch.setattr(common.distribution, "post_weights", boom)
+    common.distribution.note_weights_pushed("w1", "a97")
     logs: list[str] = []
     assert (
-        dist_common.refresh_weights(
+        common.distribution.refresh_weights(
             node, iter_id="it1", wver="w1", weights_bytes=b"{}", log=logs.append
         )
         is False
     )
     assert seen == ["k2"]
-    assert dist_common.weights_already_pushed("w1", "a97") is False  # 下次必须重新握手
+    assert common.distribution.weights_already_pushed("w1", "a97") is False  # 下次必须重新握手
     assert logs and "重发失败" in logs[0]
 
 
@@ -247,10 +247,10 @@ def test_transient_judgement_defined_once_and_wired() -> None:
     """源码级守卫：判据只有一份实现，A/C 层真的接线（409 自愈也不得各写一套）。
 
     2026-09-25（S25/B1）：B 层那份**薄转发**随「批语料规划 + 判据/门」出包搬到了
-    `rl/batch_plan.py`（原住 `rl/batch_eval.py`）。本守卫因此不再写死文件名（写死的路径
+    `trainer/batch_plan.py`（原住 `trainer/batch_eval.py`）。本守卫因此不再写死文件名（写死的路径
     下一次搬家就会**静默失效**），改成两条与位置无关的东西：
-      ① 非 `dist_common` 的同名定义**恰好一个**，且它必须是**纯转发**（判据不得复制回来）；
-      ② `rl.batch_eval` 仍拿得到**同一对象**（门面再导出）—— 按 ① 找到的那个模块比 `is`。
+      ① 非 `common.distribution` 的同名定义**恰好一个**，且它必须是**纯转发**（判据不得复制回来）；
+      ② `trainer.batch_eval` 仍拿得到**同一对象**（门面再导出）—— 按 ① 找到的那个模块比 `is`。
     """
     import ast
     import importlib
@@ -259,10 +259,14 @@ def test_transient_judgement_defined_once_and_wired() -> None:
     root = Path(__file__).resolve().parents[1]
 
     def definers_of(name: str) -> list[str]:
+        """定义者的**基名**列表（`path.name`）—— 断言比的就是基名，不是相对路径。"""
         found = []
-        for path in [root / "dist_common.py", *sorted((root / "rl").glob("*.py"))]:
+        # 扫描面 = `common.distribution` + **两棵业务树**（`trainer/` 编排 + `biz/` 纯逻辑，
+        # 2026-09-30 刀 4）：只扫 `trainer/` 的话，B 层的同名转发若随家族搬进 `biz/`，
+        # 「同名定义恰好一份」这条判据会静默少扫。
+        for path in [root / "common/distribution.py", *source_scan.logic_py_files(str(root))]:
             # 廉价预筛：`def <name>` 的 FunctionDef 要求名字本身就是源码里的一个标识符
-            # ⇒ 文本里没有 `name` 就不可能有定义（全量解析 `rl/` 只为了找它一次的性价比太低）。
+            # ⇒ 文本里没有 `name` 就不可能有定义（全量解析两棵业务树只为了找它一次的性价比太低）。
             if name not in source_scan.read_text(str(path)):
                 continue
             tree = source_scan.parse(str(path))
@@ -272,56 +276,57 @@ def test_transient_judgement_defined_once_and_wired() -> None:
         return found
 
     definers = definers_of("is_transient_error")
-    # 只有 dist_common 是真实实现；B 层允许同名但必须是纯转发，且**恰好一份**。
-    assert "dist_common.py" in definers, definers
-    forwarders = [d for d in definers if d != "dist_common.py"]
+    # 只有 common.distribution 是真实实现；B 层允许同名但必须是纯转发，且**恰好一份**。
+    assert "distribution.py" in definers, definers
+    forwarders = [d for d in definers if d != "distribution.py"]
     assert len(forwarders) == 1, definers
-    fwd_src = source_scan.read_text(str(root / "rl" / forwarders[0]))
-    assert "return dist_common.is_transient_error(e)" in fwd_src
+    # 转发件的家由**实存**决定（可能在 `trainer/` 或 `biz/`）——不写死某一棵树。
+    fwd_src = source_scan.read_text(str(source_scan.logic_module(str(root), forwarders[0])))
+    assert "return common.distribution.is_transient_error(e)" in fwd_src
     assert "TRANSIENT_HTTP_STATUS" not in fwd_src  # 判据逻辑不得复制回 B 层
     assert "_BUSY_HINT" not in fwd_src
 
-    # B 层调用点不变：`import rl.batch_eval` 拿到的那一名字必须就是上面那份转发。
-    import rl.batch_eval as be
+    # B 层调用点不变：`import trainer.batch_eval` 拿到的那一名字必须就是上面那份转发。
+    import trainer.batch_eval as be
 
-    home = importlib.import_module(f"rl.{forwarders[0][:-3]}")
+    home = importlib.import_module(source_scan.logic_dotted(str(root), forwarders[0]))
     assert be.is_transient_error is home.is_transient_error, forwarders
 
-    a_layer = source_scan.read_text(str(root / "rl" / "dispatch.py"))
-    c_layer = source_scan.read_text(str(root / "rl" / "eval_dispatch.py"))
+    a_layer = source_scan.read_text(str(root / "trainer" / "dispatch.py"))
+    c_layer = source_scan.read_text(str(root / "trainer" / "eval_dispatch.py"))
     for src in (a_layer, c_layer):
-        assert "dist_common.is_transient_error(" in src
-        assert "dist_common.refresh_weights(" in src
+        assert "common.distribution.is_transient_error(" in src
+        assert "common.distribution.refresh_weights(" in src
         assert "409" in src  # 409 是可刷新条件，必须显式分支
-        # F1：取包丢失（404 重启）也必须接线；判据与标记只在 dist_common（单源）
-        assert "dist_common.is_task_lost_error(" in src
-        assert "dist_common.forget_weights_node(" in src
-        # 带引号的标记字面量只许待在 dist_common（注释里提到它无所谓）
+        # F1：取包丢失（404 重启）也必须接线；判据与标记只在 common.distribution（单源）
+        assert "common.distribution.is_task_lost_error(" in src
+        assert "common.distribution.forget_weights_node(" in src
+        # 带引号的标记字面量只许待在 common.distribution（注释里提到它无所谓）
         assert '"task lost on node"' not in src
     # is_task_lost_error 只许有一份实现（不得复制回 A/B/C 层）
-    assert definers_of("is_task_lost_error") == ["dist_common.py"]
+    assert definers_of("is_task_lost_error") == ["distribution.py"]
 
 
 def test_trace_enabled_env_contract(monkeypatch) -> None:
     """事件级追踪开关：缺省由调用方定，`EVAL_TRACE_EVENTS` 可强制开/关。"""
     monkeypatch.delenv("EVAL_TRACE_EVENTS", raising=False)
-    assert dist_common.trace_enabled() is False
-    assert dist_common.trace_enabled(default=True) is True
+    assert common.distribution.trace_enabled() is False
+    assert common.distribution.trace_enabled(default=True) is True
     for truthy in ("1", "true", "YES", "on"):
         monkeypatch.setenv("EVAL_TRACE_EVENTS", truthy)
-        assert dist_common.trace_enabled(default=False) is True
+        assert common.distribution.trace_enabled(default=False) is True
     for falsy in ("0", "false", "off", ""):
         monkeypatch.setenv("EVAL_TRACE_EVENTS", falsy)
-        assert dist_common.trace_enabled(default=True) is False
+        assert common.distribution.trace_enabled(default=True) is False
 
 
 def test_post_weights_parallel_logs_per_node_and_ready(monkeypatch) -> None:
     """权重阶段必须留下可判读的事件：逐节点耗时 + 「ready on N/M … in Xs」总计。"""
     lines: list[str] = []
-    monkeypatch.setattr(dist_common, "post_weights", lambda *a, **kw: "kept")
+    monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **kw: "kept")
 
     nd = {"id": "n1", "url": "http://n1"}
-    ok = dist_common.post_weights_parallel(
+    ok = common.distribution.post_weights_parallel(
         [nd], "it1", "ab" * 32, b"{}", timeout=5.0, kind="eval", log=lines.append
     )
 
@@ -342,29 +347,29 @@ def test_abort_active_requests_never_blocks_and_gates_new_requests() -> None:
             # sleep-ok: 夹具模拟的工作量：close() 等读线程让出内部锁的那 81s（实测值）
             time.sleep(5.0)
 
-    dist_common.set_request_tag("t-abort")
+    common.distribution.set_request_tag("t-abort")
     key = ("t-abort", SlowResp())
-    with dist_common._ACTIVE_LOCK:
-        dist_common._ACTIVE.add(key)
+    with common.distribution._ACTIVE_LOCK:
+        common.distribution._ACTIVE.add(key)
     try:
         t0 = time.monotonic()
-        n = dist_common.abort_active_requests("t-abort")
+        n = common.distribution.abort_active_requests("t-abort")
         dt = time.monotonic() - t0
         assert n == 1, n
         # timing-ok: 契约上界（收工路径不许等 close，上界即契约）
         assert dt < 0.5, f"abort 阻塞了 {dt:.2f}s（收工路径不许等 close）"
-        assert dist_common.abort_scope("t-abort") is True
-        with pytest.raises(dist_common.DistError) as ei:
-            dist_common._request("http://127.0.0.1:9/never", "", 1.0)
+        assert common.distribution.abort_scope("t-abort") is True
+        with pytest.raises(common.distribution.DistError) as ei:
+            common.distribution._request("http://127.0.0.1:9/never", "", 1.0)
         assert ei.value.transient is True, "收工态拒绝必须按瞬断分类（调用方丢弃/背压）"
         # 别的作用域不受影响（rollout 与 eval 同进程并发，绝不能误伤）
-        assert dist_common.abort_scope("rollout") is False
+        assert common.distribution.abort_scope("rollout") is False
     finally:
-        with dist_common._ACTIVE_LOCK:
-            dist_common._ACTIVE.discard(key)
-        dist_common.clear_abort()
-        dist_common.set_request_tag("")
-        assert dist_common.abort_scope("t-abort") is False  # clear_abort 复位（下一单元可用）
+        with common.distribution._ACTIVE_LOCK:
+            common.distribution._ACTIVE.discard(key)
+        common.distribution.clear_abort()
+        common.distribution.set_request_tag("")
+        assert common.distribution.abort_scope("t-abort") is False  # clear_abort 复位（下一单元可用）
 
 
 def test_ping_nodes_parallel_accepts_key_and_authkey(monkeypatch) -> None:
@@ -379,12 +384,12 @@ def test_ping_nodes_parallel_accepts_key_and_authkey(monkeypatch) -> None:
         seen.append((url, auth_key))
         return {"evalSupport": True}
 
-    monkeypatch.setattr(dist_common, "node_ping", fake_ping)
+    monkeypatch.setattr(common.distribution, "node_ping", fake_ping)
     nodes = [
         {"id": "a", "url": "http://a", "key": "K1"},
         {"id": "b", "url": "http://b", "authKey": "K2"},
         {"id": "c", "url": "http://c", "key": "K3", "authKey": "STALE"},
     ]
-    out = dist_common.ping_nodes_parallel(nodes, timeout=1.0)
+    out = common.distribution.ping_nodes_parallel(nodes, timeout=1.0)
     assert [x is not None for x in out] == [True, True, True]
     assert seen == [("http://a", "K1"), ("http://b", "K2"), ("http://c", "K3")]

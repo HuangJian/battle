@@ -9,9 +9,9 @@ import types
 
 import pytest
 
-from rl.batch_plan import node_supports_decision_events
-from rl.cmd import build_rollout_cmd
-from rl.config import CourseConfig, corpus_identity_fp
+from biz.cmd import build_rollout_cmd
+from biz.config import CourseConfig, corpus_identity_fp
+from trainer.batch_plan import node_supports_decision_events
 
 
 def _course(**kw) -> CourseConfig:
@@ -78,7 +78,7 @@ def test_node_gate_predicate() -> None:
 
 def test_fetch_task_encodes_flag(monkeypatch) -> None:
     """透传不断：flag 开 ⇒ 查询串带 decisionEvents=1；关 ⇒ 不带（旧 agent 照旧）。"""
-    import dist_common
+    import common.distribution
 
     seen: dict = {}
 
@@ -89,16 +89,16 @@ def test_fetch_task_encodes_flag(monkeypatch) -> None:
         seen["url"] = url
         raise _BoomError()
 
-    monkeypatch.setattr(dist_common, "_request", fake_request)
+    monkeypatch.setattr(common.distribution, "_request", fake_request)
     # _request 的异常会被包成 DistError——URL 已在抛错前捕获，断它即可。
-    with pytest.raises(dist_common.DistError):
-        dist_common.fetch_task(
+    with pytest.raises(common.distribution.DistError):
+        common.distribution.fetch_task(
             "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,
             max_ticks=100, difficulty="hard", timeout=5.0, decision_events=True,
         )
     assert "decisionEvents=1" in seen["url"]
-    with pytest.raises(dist_common.DistError):
-        dist_common.fetch_task(
+    with pytest.raises(common.distribution.DistError):
+        common.distribution.fetch_task(
             "http://x/", "k", iter_id="i", wver="w", stage=2000, seed=7,
             max_ticks=100, difficulty="hard", timeout=5.0,
         )

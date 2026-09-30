@@ -43,7 +43,7 @@ from common.protocol import (
     role_from_header,
     role_of,
 )
-from remote.hub_server import _HubQueue, _JobStore
+from hub.server import _HubQueue, _JobStore
 from remote.push_dispatch import PushDispatcher
 from tests.helpers.hub_poll import ROLE_HEADER as HELPER_ROLE_HEADER
 
@@ -217,9 +217,9 @@ def test_role_gate_lives_in_the_lease_critical_section() -> None:
     必然漏掉 push 这一条（这就是本设计把闸下沉的理由）。
     """
     # ★ 位置（2026-09-25 并入 `origin/goal-nn`）：`_JobStore` 随 S4 第十四/十五刀拆进
-    # `remote/hub/store*.py` —— `_claim_locked` 与 `role_blocked` 现在住 `store_leases.py`。
+    # `hub/store*.py` —— `_claim_locked` 与 `role_blocked` 现在住 `store_leases.py`。
     # 断言本身钉的是**形状**（闸在临界区里、两道闸共用一份判据），不是文件名。
-    src = (ROOT / "remote" / "hub" / "store_leases.py").read_text(encoding="utf-8")
+    src = (ROOT / "hub" / "store_leases.py").read_text(encoding="utf-8")
     i = src.index("def _claim_locked(")
     body = src[i : i + 8000]
     assert "blocked = self.role_blocked(job_id, role)" in body
@@ -273,27 +273,27 @@ def test_job_role_cache_is_invalidated_by_republish(tmp_path: Path) -> None:
 _PAID_CALL = re.compile(
     r"\b[a-zA-Z_][\w.]*\.(?P<callee>claim|claim_outcome|claim_job|claim_next)\("
 )
-#: ⚠ 文件名列的是**当前布局**（S4 第十五刀把 `_HubQueue` 拆进 `remote/hub/queue_*.py`）：
+#: ⚠ 文件名列的是**当前布局**（S4 第十五刀把 `_HubQueue` 拆进 `hub/queue_*.py`）：
 #: 名字是契约，位置不是 —— 搬家时改这张表，别改判据。
 _EXPECTED_CALL_SITES: dict[tuple[str, str], int] = {
     # 两条腿都住 `hub/queue_claims.py`：`claim_next`（多课程轮转挑选）+ `Hub.claim`（push 派发腿）
-    ("remote/hub/queue_claims.py", "claim"): 2,
+    ("hub/queue_claims.py", "claim"): 2,
     # `Hub.claim_job`（HTTP `POST /jobs/{id}/claim` 的唯一实现入口）
-    ("remote/hub/queue_claims.py", "claim_outcome"): 1,
+    ("hub/queue_claims.py", "claim_outcome"): 1,
     # HTTP 面本体（路由混入 `schedule.py` 的 claim handler）
-    ("remote/hub/schedule.py", "claim_job"): 1,
+    ("hub/schedule.py", "claim_job"): 1,
     # push 派发
     ("remote/push_dispatch.py", "claim"): 1,
 }
 
-#: 认领调用点的扫描面：**整个** `remote/hub/` 目录 + push 派发腿。
+#: 认领调用点的扫描面：**整个** `hub/` 目录 + push 派发腿。
 #:
 #: 为什么是目录而不是三个文件名：枚举式判据的强度全在扫描面上——只列已知文件，第 5 条路径
 #: 只要落在一个新拆出来的 `hub/*.py` 里就不见了（而它的表现是静默的：活被错的盘领走）。
 _CALL_SITE_MODULES = (
     *sorted(
         str(p.relative_to(ROOT)).replace("\\", "/")
-        for p in (ROOT / "remote" / "hub").glob("*.py")
+        for p in (ROOT / "hub").glob("*.py")
     ),
     "remote/push_dispatch.py",
 )

@@ -42,7 +42,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.distributions import Categorical
 
-from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
+from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 
 # Action space dimensions (v2: item 删除 —— AI 不使用主动道具)
 MOVE_DIM = 5  # none/up/down/left/right

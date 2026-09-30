@@ -4,14 +4,14 @@
 该做什么、在等什么、被什么资源挡住」打成一张表。它不训练、不发布、不等待——是调度器的
 **只读一半**，也是运维视图（今天要开 N 个终端看 N 份日志才知道这些）。
 
-**`--serve` = 写的一半**（R2d）：真跑一个 supervisor（`rl/loop_serve.py`），N 门课共用一份
-资源池与一份 torch 引擎池（`rl/engine_pool.py`）。**进程不绑课程**（用户 2026-09-18 口径）：
+**`--serve` = 写的一半**（R2d）：真跑一个 supervisor（`trainer/loop_serve.py`），N 门课共用一份
+资源池与一份 torch 引擎池（`biz/engine_pool.py`）。**进程不绑课程**（用户 2026-09-18 口径）：
 不给 `--courses` 就是**发现模式**——扫 `--traj-root` 下所有有账本的课、之后每个空转拍再扫，
 一门课都没有也照常运行（队列空着等，不退出）；显式给 `--courses` 则退化为「只看这几门」，
 全收官即退出（e2e / 单课调试用）。
 
 **控制面**（`--control-file`，默认 `tmp/loop-control.json`）：控制台写暂停意图，训练侧每拍读
-一次并施加到调度器（`rl/loop_control.py`）。暂停**只影响调度**——队列与账本一个字不动。
+一次并施加到调度器（`trainer/loop_control.py`）。暂停**只影响调度**——队列与账本一个字不动。
 
 用法：
   python run_rl_cluster.py                          # 自动发现 tmp/*/training_log.jsonl
@@ -36,7 +36,9 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
-from rl.loop_plan import (
+from biz.loop_scheduler import CourseQueue, Supervisor
+from biz.loop_tasks import Task, TaskResult
+from trainer.loop_plan import (
     course_kind,
     course_traj,
     enabled_courses,
@@ -44,8 +46,6 @@ from rl.loop_plan import (
     plan_course,
     waiting_state,
 )
-from rl.loop_scheduler import CourseQueue, Supervisor
-from rl.loop_tasks import Task, TaskResult
 
 
 def _never(task: Task, queue: CourseQueue) -> TaskResult:
@@ -141,7 +141,7 @@ def _fmt_table(rows: list[dict]) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     # CLI 入口钉 UTF-8（见 tests/subproc_util.py 的契约：每个 CLI 入口都要调）
-    from platform_utils import force_utf8_stdio
+    from common.platform_utils import force_utf8_stdio
 
     force_utf8_stdio()
     ap = argparse.ArgumentParser(description="单进程多课程训练调度器（R2c-1：只读计划视图）")
@@ -199,7 +199,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.serve:
         # 惰性导入：只读路径（控制台每 10s 跑一次 --json）不得为 torch/网络付导入代价。
-        from rl.loop_serve import (
+        from trainer.loop_serve import (
             acquire_cluster_lock,
             cluster_lock_path,
             release_cluster_lock,
@@ -298,7 +298,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         print(
             "[cluster] 只读计划视图（本入口不训练、不发布、不等待）。单进程 supervisor 的"
-            "执行体已就位（rl/loop_runner.py：任务体↔引擎的唯一桥，回退路径逐字节同旧行为），"
+            "执行体已就位（trainer/loop_runner.py：任务体↔引擎的唯一桥，回退路径逐字节同旧行为），"
             "“入队/暂停/单例 trainingLoop 卡片”的操作面见 plan/r2-loop-task-queue.md §8 的 R2d。"
         )
     return 0

@@ -37,8 +37,8 @@ from common.protocol import (
 from common.protocol import (
     job_id as make_job_id,
 )
+from hub.server import _HubQueue, _JobStore
 from remote.hub_client import HubClientError, publish_job
-from remote.hub_server import _HubQueue, _JobStore
 
 #: 两门课共用的四分量（事故现场的「全同」部分）。
 _SHARED = {

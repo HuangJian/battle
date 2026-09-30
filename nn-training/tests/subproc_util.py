@@ -7,7 +7,7 @@ PYTHONUTF8 / PYTHONIOENCODING 又各异）。子进程按其它编码输出时�
 CPython 读线程在 ``subprocess._readerthread`` 里解码失败死亡 → ``stdout=None`` →
 远处的 ``json.loads(None)`` 抛 TypeError。跨 agent/沙箱唯一确定的做法：
 
-  * 子侧：CLI 入口 ``platform_utils.force_utf8_stdio()`` 把字节流钉成 UTF-8；
+  * 子侧：CLI 入口 ``common.platform_utils.force_utf8_stdio()`` 把字节流钉成 UTF-8；
   * 父侧：本 helper 显式 ``encoding="utf-8"`` 解码，并对 ``stdout is None``
     （读线程死亡的唯一痕迹）就地报错，而不是让它漏到远处的 TypeError。
 
@@ -26,7 +26,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any, TypeVar
 
-#: 服务进程「端口已被占用」的拒绝文案（`remote/_port_guard.py::ensure_port_free`）。
+#: 服务进程「端口已被占用」的拒绝文案（`common/port_guard.py::ensure_port_free`）。
 #: 不硬编码在调用点：`tests/test_subproc_util.py` 拿真守卫把它钉死。
 PORT_TAKEN_MARKER = "已被占用——拒绝启动"
 
@@ -165,7 +165,7 @@ def spawn_bound_port(
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             # 显式 utf-8 + replace（与 run_utf8 同一条理由，AGENTS §17.6）：服务子进程按
-            # platform_utils.force_utf8_stdio() / PYTHONIOENCODING=UTF-8 写 UTF-8，而
+            # common.platform_utils.force_utf8_stdio() / PYTHONIOENCODING=UTF-8 写 UTF-8，而
             # `text=True` 按**控制台代码页**解码（zh-CN Windows = gbk）——中文输出会让读线程
             # 抛 UnicodeDecodeError 静默死掉（`stdout` 变 None / 此处 `lines` 永远空 ⇒ 自报
             # 监听看不见、端口竞争也识别不出）。`errors="replace"` 保证读线程绝不因编码而死。

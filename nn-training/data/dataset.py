@@ -35,6 +35,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset, random_split
 
+from common.schema import FIRE_DIM, MOVE_DIM
+
 # mirrorX 的**纯 numpy**实现已抽到 data/mirror.py（2026-09-26：让只测镜像自洽的用例
 # 不必把 torch 拖进测试路径——本模块因 NNDataset/_AugWrapper 继承 Dataset 必须顶层
 # import torch）。这里再导出；本模块内与外部 `from data.dataset import mirror_x` 一行不改。
@@ -49,7 +51,6 @@ from data.mirror import (  # noqa: F401  (re-export：既有调用点不变)
 # shard 级切分的**纯 numpy**实现（2026-09-26，item 6e）：本模块顶层必须 import torch，
 # 切分判据没必要连坐 —— 切分逻辑住 data/shard_split.py（免 torch），这里只调它。
 from data.shard_split import plan_shard_split, should_split_by_shards
-from schema import FIRE_DIM, MOVE_DIM
 
 
 class NNDataset(Dataset):

@@ -25,7 +25,7 @@ import pytest
 NN_TRAINING = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(NN_TRAINING))
 
-from remote._instance_lock import default_instance_lock_path
+from common.instance_lock import default_instance_lock_path
 from tests.subproc_util import (
     PORT_TAKEN_MARKER,
     PortStolenError,

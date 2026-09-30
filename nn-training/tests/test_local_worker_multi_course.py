@@ -26,7 +26,7 @@ import threading
 from pathlib import Path
 
 from common.protocol import COURSE_ENABLE_MARKER, COURSE_MODE_ONLINE, normalize_manifest
-from remote.hub_server import _HubQueue, _JobStore, make_server
+from hub.server import _HubQueue, _JobStore, make_server
 from remote.worker import acquire_job
 
 ROOT = Path(__file__).resolve().parent.parent

@@ -41,8 +41,8 @@ ROOT = Path(__file__).resolve().parent.parent  # nn-training/
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common import net_http
 from common.protocol import COURSE_ENABLE_MARKER
-from remote import net_http
 from remote.hub_client import mark_job_completed, publish_job, wait_job
 from remote.worker_server import WorkerServerState, make_worker_server
 from tests.subproc_util import spawn_bound_port
@@ -101,7 +101,7 @@ def _http(
 
     try:
         # 回环绕开环境代理：本机若有 HTTP_PROXY，裸 urllib 会把 127.0.0.1 也送出去
-        # （`no_proxy` 的 `127.*` 通配 Python 不认，见 remote/net_http.py）。
+        # （`no_proxy` 的 `127.*` 通配 Python 不认，见 common/net_http.py）。
         with net_http.urlopen(req, timeout=timeout) as resp:
             return resp.status, _as_dict(resp.read())
     except urllib.error.HTTPError as e:
@@ -164,7 +164,7 @@ class _LiveWorker:
 
 
 class _Hub:
-    """真 `remote.hub_server` 子进程（控制台实际启动的那条 argv）。"""
+    """真 `hub.server` 子进程（控制台实际启动的那条 argv）。"""
 
     def __init__(self, traj_root: Path, push_config: Path, *, extra: list[str] | None = None) -> None:
         def _argv(port: int) -> list[str]:
@@ -172,7 +172,7 @@ class _Hub:
                 sys.executable,
                 "-u",
                 "-m",
-                "remote.hub_server",
+                "hub.server",
                 "--port",
                 str(port),
                 "--host",

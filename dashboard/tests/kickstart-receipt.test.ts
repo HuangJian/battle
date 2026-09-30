@@ -80,21 +80,22 @@ function writeLedger(course: string, lines: string[]): string {
 // ────────────────────────── ① 镜像常量（对着 python 源码核对） ──────────────────────────
 
 describe('镜像常量（权威在 python；这里防漂）', () => {
-  const burnPy = readFileSync(path.join(REPO_ROOT, 'nn-training/rl/kickstart_burn.py'), 'utf-8')
+  const burnPy = readFileSync(path.join(REPO_ROOT, 'nn-training/biz/kickstart_burn.py'), 'utf-8')
 
   /**
-   * 按**定义**在 `nn-training/rl/` 源码树里找（不写死文件）：按写死路径读源码的守卫会在下一
+   * 按**定义**在 `nn-training/trainer/` 源码树里找（不写死文件）：按写死路径读源码的守卫会在下一
    * 次搬家时静默失效或假红（S16 事故）。2026-09-25（S4 第十九刀）`KICKSTART_DEFAULT_WARN`
    * 随主循环骨架从 `loop_core.py` 搬到 `loop_lifecycle.py`，本函数就是那次修的形态。
+   * 2026-09-30（nn-training 刀 5）：整包 `rl/` → `trainer/`（改名不改成员）——扫描面跟着改名。
    */
   function rlSourceDefining(name: string): string {
-    const dir = path.join(REPO_ROOT, 'nn-training/rl')
+    const dir = path.join(REPO_ROOT, 'nn-training/trainer')
     for (const f of readdirSync(dir)) {
       if (!f.endsWith('.py')) continue
       const src = readFileSync(path.join(dir, f), 'utf-8')
       if (new RegExp(`^${name}\\s*=`, 'm').test(src)) return src
     }
-    throw new Error(`${name} 在 nn-training/rl/ 里找不到（改名了？同步本文件与镜像常量）`)
+    throw new Error(`${name} 在 nn-training/trainer/ 里找不到（改名了？同步本文件与镜像常量）`)
   }
 
   /** 取 `NAME = <数字>` 的字面量（源码级核对：不 import python，只读文本）。 */
@@ -104,19 +105,19 @@ describe('镜像常量（权威在 python；这里防漂）', () => {
     return Number(m![1])
   }
 
-  it('噪声带 / 连续点数 = `rl/kickstart_burn.py` 的常量', () => {
+  it('噪声带 / 连续点数 = `biz/kickstart_burn.py` 的常量', () => {
     expect(BURN_MARGIN_PP).toBe(literal(burnPy, 'BURN_MARGIN_PP'))
     expect(BURN_POINTS).toBe(literal(burnPy, 'BURN_POINTS'))
   })
 
-  it('响亮阈值 = `rl/loop_lifecycle.py::KICKSTART_DEFAULT_WARN`（S4 第十九刀起）', () => {
+  it('响亮阈值 = `trainer/loop_lifecycle.py::KICKSTART_DEFAULT_WARN`（S4 第十九刀起）', () => {
     expect(KICKSTART_DEFAULT_WARN).toBe(
       literal(rlSourceDefining('KICKSTART_DEFAULT_WARN'), 'KICKSTART_DEFAULT_WARN'),
     )
   })
 
   it('账本筛选键与 python `read_trend_rows` 同一字面量（event=eval_summary）', () => {
-    const gatePy = readFileSync(path.join(REPO_ROOT, 'nn-training/rl/gate_check.py'), 'utf-8')
+    const gatePy = readFileSync(path.join(REPO_ROOT, 'nn-training/biz/gate_check.py'), 'utf-8')
     expect(gatePy).toContain('r.get("event") != "eval_summary"')
   })
 })

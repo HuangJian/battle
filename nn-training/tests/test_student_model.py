@@ -21,6 +21,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from common.schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 from models.student import (
     DEFAULT_D,
     DEFAULT_H,
@@ -29,7 +30,6 @@ from models.student import (
     coord_channels,
     param_count,
 )
-from schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 
 FAILS: list[str] = []
 
@@ -66,7 +66,7 @@ def test_ppo_student_value_head() -> None:
     obs, sc = _dummy()
     mv, fr, val = m(obs, sc)
     check(tuple(val.shape) == (2, 1), f"value head (2,1)（got {tuple(val.shape)}）")
-    # #6 回归断言：线上 move 头出维必须 == schema.MOVE_DIM == 5（B案不改 dims）。
+    # #6 回归断言：线上 move 头出维必须 == common.schema.MOVE_DIM == 5（B案不改 dims）。
     check(
         tuple(m.move_head.weight.shape) == (MOVE_DIM, m.head_hidden),
         f"move_head.weight shape ({MOVE_DIM},{m.head_hidden})（got {tuple(m.move_head.weight.shape)}）",

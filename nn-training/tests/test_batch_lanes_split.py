@@ -27,9 +27,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.batch_runner as br
+import trainer.batch_runner as br
 
-SRC = (ROOT / "rl" / "batch_runner.py").read_text(encoding="utf-8")
+SRC = (ROOT / "trainer" / "batch_runner.py").read_text(encoding="utf-8")
 TREE = ast.parse(SRC)
 LANES = next(n for n in TREE.body if isinstance(n, ast.ClassDef) and n.name == "_UnitLanes")
 RUNNER = next(n for n in TREE.body if isinstance(n, ast.ClassDef) and n.name == "BatchEvalRunner")
@@ -105,13 +105,17 @@ def _self_attrs(node: ast.AST) -> list[str]:
 
 
 def test_machine_class_is_defined_exactly_once_in_the_runner_module() -> None:
-    """类只许住 `rl/batch_runner.py` 一次 —— 换家（另一个模块）要让本用例显式改。"""
+    """类只许住 `trainer/batch_runner.py` 一次 —— 换家（另一个模块）要让本用例显式改。"""
+    # 2026-09-30（刀 4）：扫描面 = 两棵业务树（`trainer/` 编排 + `biz/` 纯逻辑）——
+    # 只扫 `trainer/` 的话，同一个类在 `biz/` 里长出来第二份也是绿的（表面缩小 = 守卫变瞎）。
+    from tests.helpers import source_scan
+
     homes = sorted(
         p.relative_to(ROOT).as_posix()
-        for p in (ROOT / "rl").rglob("*.py")
+        for p in source_scan.logic_py_files(str(ROOT))
         if p.name != "__pycache__" and "class _UnitLanes" in p.read_text(encoding="utf-8")
     )
-    assert homes == ["rl/batch_runner.py"], homes
+    assert homes == ["trainer/batch_runner.py"], homes
     assert SRC.count("class _UnitLanes") == 1
 
 
@@ -268,7 +272,7 @@ def test_window_open_follows_the_owner_event_and_falls_back_to_deadline() -> Non
 def test_bringup_rejects_a_node_whose_bootid_changed_within_the_unit(monkeypatch) -> None:
     """回场时同一单元里 bootId 变了（= 这个端口上换过进程）⇒ 拒派，且本单元不再重探。
 
-    判据住 `rl/node_identity.py`（plan/sampler-single-instance.plan.md §8-Q2）；这里是它的
+    判据住 `biz/node_identity.py`（plan/sampler-single-instance.plan.md §8-Q2）；这里是它的
     **消费面**。触发场景（a98，2026-09-29）：两个 agent 同听 8443，内核按 4 元组哈希把一轮
     192 局的请求分给两个代码版本 ⇒ 45 列的旧 shard 混进 payload、云 worker 5 连炸。
     """
@@ -289,9 +293,9 @@ def test_bringup_rejects_a_node_whose_bootid_changed_within_the_unit(monkeypatch
         }
 
     pings = iter([_ping("genA", 11), _ping("genB", 22)])
-    monkeypatch.setattr(br.dist_common, "node_ping", lambda *a, **k: next(pings))
-    monkeypatch.setattr(br.dist_common, "post_weights", lambda *a, **k: "kept")
-    monkeypatch.setattr(br.dist_common, "note_weights_pushed", lambda *a, **k: None)
+    monkeypatch.setattr(br.common.distribution, "node_ping", lambda *a, **k: next(pings))
+    monkeypatch.setattr(br.common.distribution, "post_weights", lambda *a, **k: "kept")
+    monkeypatch.setattr(br.common.distribution, "note_weights_pushed", lambda *a, **k: None)
 
     lanes = _lanes()
     lanes.iter_id = "run.b0u0"  # 本轮的账本键 = 本单元的 iterId（每个单元一枚）

@@ -58,7 +58,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ---------------------------------------------------------------- 常量（= schema.py）
+# ---------------------------------------------------------------- 常量（= common/schema.py）
 BOARD = 26
 OBS_CHANNELS = 14
 SCALAR_DIM = 19

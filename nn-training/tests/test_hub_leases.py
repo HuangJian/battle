@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.protocol import CLAIM_TTL_SEC, PAYLOAD_NAME
-from remote.hub_server import _JobStore
+from hub.server import _JobStore
 
 
 def _mini_manifest(jid: str = "j" * 16) -> dict:

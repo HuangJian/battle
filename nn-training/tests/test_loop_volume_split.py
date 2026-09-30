@@ -1,11 +1,11 @@
-"""拆分的**契约守卫**：`TrainingLoop` 的动态采集（按样本量）编排永住 `rl/loop_volume.py`
+"""拆分的**契约守卫**：`TrainingLoop` 的动态采集（按样本量）编排永住 `trainer/loop_volume.py`
 （S4 第十八刀，2026-09-25）。
 
 ## 这一刀切了什么
 
-`rl/loop_core.py` 1386 → 923 行；`TrainingLoop`（25 方法）里**唯一一条真正的方法间调用链**
+`trainer/loop_core.py` 1386 → 923 行；`TrainingLoop`（25 方法）里**唯一一条真正的方法间调用链**
 ——9 个成员 / 445 行（占原模块 32%，且恰好是旧类的**尾块**）——搬到
-`rl/loop_volume.py::TrainingVolume`：
+`trainer/loop_volume.py::TrainingVolume`：
 
 ```
 _iteration_pairs ─┬─► _volume_active
@@ -40,10 +40,10 @@ _volume_collect_continuous（VOLUME_RULE_V2 生产路径）───────
    那个 sibling mixin 继承不到 `TrainingVolume`，不给声明 mypy 就报 attr-defined；
 5. **跨模块手闭集**：除 `__init__`（Store × 7）与 `TrainingSteps._record_iteration`
    （Load × 3）外，任何宿主方法碰 volume 槽位都要显式改这张表；
-6. 顶层 import 面**闭合**；`rl.volume_waves` / `rl.volume_quota` 只许在方法体内延迟 import
+6. 顶层 import 面**闭合**；`biz.volume_waves` / `biz.volume_quota` 只许在方法体内延迟 import
    （那是原有的 DI 面，测试 patch 的一直是实现模块）；
-7. 不得反向 import `rl.loop_core` / `rl.loop_steps` / `rl.loop_round_steps`；
-8. **★ 两条功能性**：`log` seam 住在**本模块**（打 `rl.loop_core.log` 是静默空操作——
+7. 不得反向 import `trainer.loop_core` / `trainer.loop_steps` / `trainer.loop_round_steps`；
+8. **★ 两条功能性**：`log` seam 住在**本模块**（打 `trainer.loop_core.log` 是静默空操作——
    本刀的题眼）· unbound 绑定经 MRO 取到真实现。
 """
 
@@ -55,10 +55,10 @@ from types import SimpleNamespace
 from typing import Any, cast
 
 NN_ROOT = Path(__file__).resolve().parent.parent
-VOLUME_PY = NN_ROOT / "rl" / "loop_volume.py"
-CORE_PY = NN_ROOT / "rl" / "loop_core.py"
-STEPS_PY = NN_ROOT / "rl" / "loop_steps.py"
-ROUND_STEPS_PY = NN_ROOT / "rl" / "loop_round_steps.py"
+VOLUME_PY = NN_ROOT / "trainer" / "loop_volume.py"
+CORE_PY = NN_ROOT / "trainer" / "loop_core.py"
+STEPS_PY = NN_ROOT / "trainer" / "loop_steps.py"
+ROUND_STEPS_PY = NN_ROOT / "trainer" / "loop_round_steps.py"
 
 #: 这一簇的成员（闭集）：9 个方法 —— 新方法要么住在 `TrainingLoop`，要么改这张表。
 CLUSTER = (
@@ -103,15 +103,15 @@ TOP_LEVEL_ALLOWED = {
     "__future__",
     "pathlib",
     "typing",
-    "rl.course",
-    "rl.log",
-    "rl.reports",
-    "rl.resume",
-    "rl.rollout_phase",
+    "biz.course",
+    "biz.log",
+    "biz.reports",
+    "biz.resume",
+    "trainer.rollout_phase",
 }
 
 #: DI 目标：只许**方法体内**延迟 import（测试 patch 的是这些实现模块）。
-LAZY_ONLY = ("rl.volume_waves", "rl.volume_quota")
+LAZY_ONLY = ("biz.volume_waves", "biz.volume_quota")
 
 
 def _tree(path: Path) -> ast.Module:
@@ -195,15 +195,15 @@ def test_cluster_is_defined_in_loop_volume_only() -> None:
     assert in_volume == set(CLUSTER), sorted(in_volume ^ set(CLUSTER))
     # 旧模块里只剩**指路注释**（不是实现）：读者找 `_volume_topup` 时不会两手空空。
     core_src = CORE_PY.read_text(encoding="utf-8")
-    assert "已整体搬到" in core_src and "rl/loop_volume.py::TrainingVolume" in core_src
+    assert "已整体搬到" in core_src and "trainer/loop_volume.py::TrainingVolume" in core_src
     for name in CLUSTER:
         assert f"def {name}" not in core_src, name
 
 
 def test_wiring_is_by_object_identity_not_copies() -> None:
     """`TrainingLoop.X is TrainingVolume.X`（同一个函数对象，不是同名副本）。"""
-    from rl.loop_core import TrainingLoop
-    from rl.loop_volume import TrainingVolume
+    from trainer.loop_core import TrainingLoop
+    from trainer.loop_volume import TrainingVolume
 
     for name in CLUSTER:
         assert getattr(TrainingLoop, name) is getattr(TrainingVolume, name), name
@@ -218,13 +218,13 @@ def test_composition_is_on_the_caller_side() -> None:
     **逐字元组与全量 MRO 名单的唯一所有者**是 `test_loop_core_tail_split.py`（本刀收尾的那份）；
     本用例只钉与本簇有关的结构关系，免得同一事实在三个文件里各写一份、各自漂。
     """
-    from rl.loop_core import TrainingLoop
-    from rl.loop_guards import TrainingGuards
-    from rl.loop_lifecycle import TrainingLifecycle
-    from rl.loop_remote import TrainingRemote
-    from rl.loop_round_steps import RoundSteps
-    from rl.loop_steps import TrainingEval, TrainingSteps
-    from rl.loop_volume import TrainingVolume
+    from trainer.loop_core import TrainingLoop
+    from trainer.loop_guards import TrainingGuards
+    from trainer.loop_lifecycle import TrainingLifecycle
+    from trainer.loop_remote import TrainingRemote
+    from trainer.loop_round_steps import RoundSteps
+    from trainer.loop_steps import TrainingEval, TrainingSteps
+    from trainer.loop_volume import TrainingVolume
 
     assert RoundSteps.__bases__[0] is TrainingVolume
     assert RoundSteps.__mro__[1] is TrainingVolume
@@ -259,8 +259,8 @@ def test_composition_is_on_the_caller_side() -> None:
 
 def test_volume_slots_are_declared_in_the_new_home() -> None:
     """七个槽位在 `TrainingVolume` 声明；`TrainingSteps` 的三处**有意并存**（并集闭合）。"""
-    from rl.loop_steps import TrainingSteps
-    from rl.loop_volume import TrainingVolume
+    from trainer.loop_steps import TrainingSteps
+    from trainer.loop_volume import TrainingVolume
 
     declared_here = _declared(VOLUME_PY, "TrainingVolume")
     for slot in CLUSTER_SLOTS:
@@ -293,20 +293,20 @@ def test_cross_module_hands_are_the_declared_ones() -> None:
     # S4 第二十二刀把 `loop_remote` 的类体切成四个混入 ⇒ 远端一族的覆盖改成“四个新家 + 组合根”
     # （组合根现在零方法，保留它是为了钉住「没被顺手塞回」；只读旧文件会让本用例**静默失去覆盖**）。
     remote_family = (
-        (NN_ROOT / "rl" / "loop_remote.py", "TrainingRemote"),
-        (NN_ROOT / "rl" / "loop_remote_drive.py", "TrainingRemoteDrive"),
-        (NN_ROOT / "rl" / "loop_remote_job.py", "TrainingRemoteJob"),
-        (NN_ROOT / "rl" / "loop_remote_fail.py", "TrainingRemoteFail"),
-        (NN_ROOT / "rl" / "loop_remote_push.py", "TrainingRemotePush"),
+        (NN_ROOT / "trainer" / "loop_remote.py", "TrainingRemote"),
+        (NN_ROOT / "trainer" / "loop_remote_drive.py", "TrainingRemoteDrive"),
+        (NN_ROOT / "trainer" / "loop_remote_job.py", "TrainingRemoteJob"),
+        (NN_ROOT / "trainer" / "loop_remote_fail.py", "TrainingRemoteFail"),
+        (NN_ROOT / "trainer" / "loop_remote_push.py", "TrainingRemotePush"),
     )
     # S4 第二十三刀同款：`loop_guards` 的 12 个成员切进四个新混入 ⇒ 覆盖也改成「四新家 + 组合根」。
     # **只读旧文件会让本用例静默失去那 12 个成员的覆盖**（组合根现在只剩 4 个 sink）。
     guards_family = (
-        (NN_ROOT / "rl" / "loop_guards.py", "TrainingGuards"),
-        (NN_ROOT / "rl" / "loop_guards_trip.py", "TrainingGuardsTrip"),
-        (NN_ROOT / "rl" / "loop_guards_leg.py", "TrainingGuardsLeg"),
-        (NN_ROOT / "rl" / "loop_guards_gate.py", "TrainingGuardsGate"),
-        (NN_ROOT / "rl" / "loop_guards_sweep.py", "TrainingGuardsSweep"),
+        (NN_ROOT / "trainer" / "loop_guards.py", "TrainingGuards"),
+        (NN_ROOT / "biz" / "loop_guards_trip.py", "TrainingGuardsTrip"),
+        (NN_ROOT / "biz" / "loop_guards_leg.py", "TrainingGuardsLeg"),
+        (NN_ROOT / "biz" / "loop_guards_gate.py", "TrainingGuardsGate"),
+        (NN_ROOT / "biz" / "loop_guards_sweep.py", "TrainingGuardsSweep"),
     )
     for path, cls in (
         (CORE_PY, "TrainingLoop"),
@@ -333,7 +333,7 @@ def test_top_level_import_surface_is_closed() -> None:
 
 
 def test_lazy_targets_stay_lazy() -> None:
-    """`rl.volume_waves` / `rl.volume_quota` 只许方法体内延迟 import（原有的 DI 面）。"""
+    """`biz.volume_waves` / `biz.volume_quota` 只许方法体内延迟 import（原有的 DI 面）。"""
     top = _top_level_imports(VOLUME_PY)
     inside = _in_function_imports(VOLUME_PY)
     for mod in LAZY_ONLY:
@@ -342,9 +342,9 @@ def test_lazy_targets_stay_lazy() -> None:
 
 
 def test_loop_volume_does_not_import_the_hosts() -> None:
-    """不得成环：新家不许 import `rl.loop_core` / `rl.loop_steps` / `rl.loop_round_steps`。"""
+    """不得成环：新家不许 import `trainer.loop_core` / `trainer.loop_steps` / `trainer.loop_round_steps`。"""
     got = _top_level_imports(VOLUME_PY) | _in_function_imports(VOLUME_PY)
-    for bad in ("rl.loop_core", "rl.loop_steps", "rl.loop_round_steps"):
+    for bad in ("trainer.loop_core", "trainer.loop_steps", "trainer.loop_round_steps"):
         assert bad not in got, bad
 
 
@@ -354,12 +354,12 @@ def test_loop_volume_does_not_import_the_hosts() -> None:
 def test_log_seam_lives_here_not_in_loop_core(monkeypatch) -> None:
     """★ 本刀的题眼：`_volume_topup` 的日志按**本模块**的 `log` 解析。
 
-    方法一搬走，`monkeypatch.setattr(rl.loop_core, "log", …)` 就成了**静默空操作**（同名 seam
+    方法一搬走，`monkeypatch.setattr(trainer.loop_core, "log", …)` 就成了**静默空操作**（同名 seam
     在两个命名空间里是两个各自真实的注入点——S4 第二步的教训）。这里把两个方向都钉住：
-    打在本模块 → 命中；打在 `rl.loop_core` → 一个字节都收不到。
+    打在本模块 → 命中；打在 `trainer.loop_core` → 一个字节都收不到。
     """
-    import rl.loop_core as core_mod
-    import rl.loop_volume as vol_mod
+    import trainer.loop_core as core_mod
+    import trainer.loop_volume as vol_mod
 
     # 真的 mixin 实例（不是 SimpleNamespace）：`_volume_topup` 内部要 `self._volume_active()`，
     # 而那条只能经真类解析——这本身就说明「这一簇是一个整体」。
@@ -379,7 +379,7 @@ def test_log_seam_lives_here_not_in_loop_core(monkeypatch) -> None:
 
 def test_unbound_lookup_through_the_composition_class_still_works() -> None:
     """★ 既有用例的形态：`TrainingLoop._volume_active(cast(Any, stub))` —— 经 MRO 取真实现。"""
-    from rl.loop_core import TrainingLoop
+    from trainer.loop_core import TrainingLoop
 
     off = cast(Any, SimpleNamespace(args=SimpleNamespace(target_transitions=0)))
     on = cast(Any, SimpleNamespace(args=SimpleNamespace(target_transitions=7)))

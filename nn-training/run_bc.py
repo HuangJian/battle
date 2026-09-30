@@ -1,9 +1,9 @@
-"""run_bc.py — BC 训练编排器的**入口薄壳**（引擎在 `rl/bc_loop.py`；plan §3.4 / R3-4）。
+"""run_bc.py — BC 训练编排器的**入口薄壳**（引擎在 `trainer/bc_loop.py`；plan §3.4 / R3-4）。
 
 把 BC（行为克隆）从本地手工流程升级为与 PPO 同构的分布式管线：
   每轮 it：
     1. 账本已有 `bc_round_completed(it)` → 跳过（断点续跑）；
-    2. 语料缺额 → rl/bc_dispatch.py 派 LAN 节点采 God-AI 语料（mode=bc）；
+    2. 语料缺额 → biz/bc_dispatch.py 派 LAN 节点采 God-AI 语料（mode=bc）；
     3. publish_job(kind=bc) → 云端 worker 跑 train/bc.py → 回传 BC 权重；
     4. verify_and_land_bc → `tmp/<course>/weights.json`；
     5. 归档 backup_weights → `nn-training/weights/<prefix>/…it<N>.<ts>.json` + WEIGHTS.md 行。
@@ -18,7 +18,7 @@
 （不覆盖 out、不归档），打 `BC SMOKE PASS`——控制台 smokeTrain 的三里程碑之一。
 
 **本模块只做进程级一次性副作用 + 阻塞式驱动**（`force_utf8_stdio` / `chdir` / 单实例锁 /
-启动前 `git push` / hub 停机态清零）——「一轮怎么跑」全部在 `rl/bc_loop.py`，因为单进程
+启动前 `git push` / hub 停机态清零）——「一轮怎么跑」全部在 `trainer/bc_loop.py`，因为单进程
 supervisor（`run_rl_cluster.py --serve`）也要用**同一份**一轮实现（两套实现必然分叉：
 BC 的续跑判据是 `bc_round_completed` / job 认领 / bc-resume，任何一处写成第二份就是重发布
 = resume 失效 = 从头训）。
@@ -31,15 +31,15 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+from biz.archive import ensure_current_branch_pushed
+from biz.log import log
+from common.platform_utils import force_utf8_stdio
 from common.proc import run_capture
-from platform_utils import force_utf8_stdio
-from rl.archive import ensure_current_branch_pushed
-from rl.bc_loop import BcLoop, bc_argparser, resolve_bc_runtime
-from rl.log import log
-from rl.queue import REPO_ROOT
 from train.loop_util import acquire_lock, cleanup_lock, course_lock_path
+from trainer.bc_loop import BcLoop, bc_argparser, resolve_bc_runtime
+from trainer.queue import REPO_ROOT
 
-#: nn-training 目录（锁文件与子进程 cwd 都相对它——与 `rl/loop_serve.py` 的 `NN_DIR` 同一个）。
+#: nn-training 目录（锁文件与子进程 cwd 都相对它——与 `trainer/loop_serve.py` 的 `NN_DIR` 同一个）。
 NN_ROOT = Path(__file__).resolve().parent
 
 
@@ -60,7 +60,7 @@ def main(argv: list[str] | None = None) -> None:
             ensure_current_branch_pushed(REPO_ROOT)
         finally:
             cleanup_lock(push_lock)
-    import dist_common as dc
+    import common.distribution as dc
 
     current_branch = run_capture(
         ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT, timeout=30

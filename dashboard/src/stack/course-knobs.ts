@@ -5,7 +5,7 @@
  *  它搬到这里 —— 机器侧旋钮住 rl-config，**永不进 `curricula/*.jsonc`**（课程文件字节 =
  *  `course_fp` 语料血缘 / 熔断口径，D14；往里加一个旋钮，熔断会把同一份语料读成新语料）。
  *
- *  读面在 python：`rl/loop_serve.py::apply_course_machine_overrides` 在开课时施加（白名单 +
+ *  读面在 python：`trainer/loop_serve.py::apply_course_machine_overrides` 在开课时施加（白名单 +
  *  逐键打印生效值）；本模块是**写面**（控制台唯一写法）。
  *
  *  | 键 | 谁关心 | 为什么需要 |

@@ -116,7 +116,7 @@ def test_retired_reason_is_non_empty() -> None:
 _ORACLE = """
 import sys
 sys.argv = ["run_rl.py", "--course", sys.argv[1], "--echo-config"]
-import rl.config as cfg
+import biz.config as cfg
 cfg.echo_config = lambda *a, **k: print("ECHO-REACHED")
 import run_rl
 run_rl.main()

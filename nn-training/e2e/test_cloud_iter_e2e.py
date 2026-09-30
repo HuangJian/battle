@@ -9,7 +9,7 @@ torch、不跑一局游戏）；其余每一段都走真代码。
     训练侧 TrainingLoop._remote_iter(it)
       ├─ 真 build_iter_spec（课程 + 逐局 argv，与 _serial_ppo 同一个拼命令函数）
       ├─ 真 publish_job（磁盘 IPC：job 目录三件套 + payload.tar.xz + 账本 job_pending）
-      ├─ 真 hub-server（remote.hub_server，127.0.0.1 临时端口；真租约 / 真账本）
+      ├─ 真 hub-server（hub.server，127.0.0.1 临时端口；真租约 / 真账本）
       ├─ 假云机（本测试的线程）
       │    ├─ peek + claim  → 真领取（真租约 token）
       │    ├─ GET payload / code / ts_code → 真下载 + 逐 sha 对账（节点启动自检同规）
@@ -61,6 +61,9 @@ if str(ROOT) not in sys.path:
 #: 仓根（只读面板源码做双端锚，见用例末尾）。
 _REPO = ROOT.parent
 
+from biz.cli import build_argparser  # 模块级：真 CLI 解析器（大对象，别在用例内首次 import）
+from biz.config import apply_course, course_from_args
+from biz.reports import combine_reports
 from common.protocol import (
     decode_opt_tar,
     encode_opt_tar,
@@ -71,14 +74,11 @@ from common.protocol import (
     unpack_payload,
     validate_result,
 )
-from remote.hub_server import _JobStore, make_server
-from remote.iter_rollout import collect_reports, verify_shards
+from hub.server import _JobStore, make_server
 from remote.worker import d14_corpus_match  # 该模块顶层零 torch（延迟导入）
-from rl.cli import build_argparser  # 模块级：真 CLI 解析器（大对象，别在用例内首次 import）
-from rl.config import apply_course, course_from_args
-from rl.loop_core import TrainingLoop
-from rl.reports import combine_reports
 from tests.helpers.hub_poll import hub_poll
+from trainer.loop_core import TrainingLoop
+from worker.iter_rollout import collect_reports, verify_shards
 
 #: 本轮 it（>1，避免与 it0 基线评估的语义混淆）。
 IT = 7
@@ -340,7 +340,7 @@ def _args_and_loop(tmp_path: Path, hub_url: str, weights: Path) -> tuple[Trainin
     args.remote_token = TOKEN
     args.remote_transport = "pull"
     # 整轮上云 = 每轮一次结算（单一 PPO 路径的语义；课程自带 stream=1 是历史本地腿的默认，
-    # 单一 PPO 路径下 stream/double-buffer 恒置 0——见 `rl/config.py` §3 块）。
+    # 单一 PPO 路径下 stream/double-buffer 恒置 0——见 `biz/config.py` §3 块）。
     args.stream = 0
     args.max_ticks = 60
     loop = TrainingLoop(args, None, "bun", {})

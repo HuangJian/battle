@@ -551,10 +551,10 @@ CUDA→TPU→CPU 探测。**踩坑四条**（全部来自真机）：
 
 ### 1.4 门禁两项修复
 
-- **`platform_utils.rmtree_best_effort`**：沙箱删除保护抛 `SystemExit`（BaseException），
-  `shutil.rmtree(..., ignore_errors=True)` **挡不住** ⇒ 直接打死调用线程（实证：`rl/dispatch.py`
+- **`common.platform_utils.rmtree_best_effort`**：沙箱删除保护抛 `SystemExit`（BaseException），
+  `shutil.rmtree(..., ignore_errors=True)` **挡不住** ⇒ 直接打死调用线程（实证：`trainer/dispatch.py`
   派发线程被打死后不再派发，竞态日志缺失导致 `test_it_early_race_v314` 假红）。
-  全部清理路径改走该助手；`rl/workdir_sweep.py` 的计数改挂到返回值上。
+  全部清理路径改走该助手；`biz/workdir_sweep.py` 的计数改挂到返回值上。
 - **`test_it_early_race_v314` 假红的真根因（结构性）**：单节点配置下
   `pick_race_target` 的 `nd_id not in inflight_nodes[task]` **恒假** ⇒ v3.10 race lane
   **永不触发**（失败日志里一条 `— race lane` 都没有），断言只能靠 v3.7 fan-out 的
@@ -579,7 +579,7 @@ CUDA→TPU→CPU 探测。**踩坑四条**（全部来自真机）：
 |---|---|
 | `remote/protocol.py` | 新增 `NEGLIGIBLE_COEF = 1e-9` + `coef_active()`（顶层免 torch，hub 侧也可 import） |
 | `run_rl.py::update_kwargs` | **唯一的衰减源**归零：低于阈值直接置 0.0。`rl/loop_steps.kickstart_coef` 只是它的薄包装 ⇒ 单点归零即贯通全链 |
-| `rl/loop_steps.py` | 附 ref 字节的条件由 `kick_on` 改为 `kick_on and coef_active(kick_kl)` —— 原先"缰绳早已松开、ref 权重还在每轮空运" |
+| `trainer/loop_steps.py` | 附 ref 字节的条件由 `kick_on` 改为 `kick_on and coef_active(kick_kl)` —— 原先"缰绳早已松开、ref 权重还在每轮空运" |
 | `remote/worker.py` | 判据换 `coef_active` 并打日志，兜住"旧 hub 产出的、仍带微小系数的在途 manifest" |
 
 **行为**（decay=0.5）：`it=30` → 1.86e-9 仍活跃；**`it=31` 起精确 0.0**；实测踩到的 `it=37`
@@ -617,7 +617,7 @@ pull 模式下 `hub_server._get_payload()` 是 `self._bytes(p.read_bytes())`，*
 - 消费侧**双读**：`_extract_archive()` 用 `zipfile.is_zipfile` 判别，zip 与 tar.xz 都能解
   ⇒ 旧 hub 产的 `payload.zip` 对新 worker、新 hub 产的 `payload.tar.xz` 对旧 worker 都能工作；
 - 触点：`protocol.py`（容器+find_payload）/ `hub_client.py`（打包+落盘名）/
-  `hub_server.py`（存在性检查、落盘、服务三处）/ `worker.py`（落盘名）/ `rl/loop_steps.py`（push 读字节）。
+  `hub_server.py`（存在性检查、落盘、服务三处）/ `worker.py`（落盘名）/ `trainer/loop_steps.py`（push 读字节）。
 
 **验证**：tar.xz 往返逐文件一致；**双读**（旧 zip 仍可解）；`find_payload` 两名并存时优先新名；
 同素材体积 **−44.2%**（6 个真实 shard）。回归测试 3 项：容器魔数+体积、旧 zip 双读、find_payload 优先级。

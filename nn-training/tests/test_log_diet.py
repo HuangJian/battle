@@ -7,7 +7,7 @@
   ① `ppo/np_core.load_episodes_common(bundle=…)`（2026-09-26 由 `ppo/common` 搬来）：
      装载四行 → 一行；不传 bundle 时逐字不变；
   ② `ppo/engine.ppo_update(progress=…)`：epoch 行 + 收尾行 → 一行；不传时逐字不变；
-  ③ `remote/iter_rollout.run_iter_rollout`：轮设置/看门狗/池/进度/收尾/单局耗时 → 一行，
+  ③ `worker/iter_rollout.run_iter_rollout`：轮设置/看门狗/池/进度/收尾/单局耗时 → 一行，
      **中断时也要打**（否则「为什么被杀了」无从归因）；
   ④ `remote/worker` 侧的两个攒行出口（`prune_job_dirs` / `_ensure_ts_code`）。
 
@@ -25,7 +25,7 @@ import pytest
 # 它读的是**本模块**全局的 discover_shards / log ⇒ monkeypatch 必须打在 np_core 上，
 # 打在 ppo.common 上会是**静默空操作**（名字还在、没人在读）。
 import ppo.np_core as C
-from log_bundle import LogBundle
+from common.log_bundle import LogBundle
 
 
 def _rig() -> tuple[LogBundle, list[str]]:
@@ -167,8 +167,8 @@ def test_engine_diag_is_one_line_not_one_per_window(monkeypatch: pytest.MonkeyPa
 
 def test_iter_round_is_one_line(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """成功一轮：**一行**收尾，且设置/进度/单局耗时都在那一行里。"""
-    from remote.iter_rollout import run_iter_rollout
     from tests.test_remote_iter import _STUB_FLAKY, _fast_watchdog, _one_game_spec
+    from worker.iter_rollout import run_iter_rollout
 
     _fast_watchdog(monkeypatch)
     marker = tmp_path / "flaky.marker"
@@ -196,8 +196,8 @@ def test_iter_abort_still_prints_the_watchdog_contract(
 ) -> None:
     """中断（整轮失败）也必须交代现场：看门狗口径 + 已结算到哪一局在同一行。"""
     from common.protocol import RetryableError
-    from remote.iter_rollout import run_iter_rollout
     from tests.test_remote_iter import _STUB_HANG, _fast_watchdog, _one_game_spec
+    from worker.iter_rollout import run_iter_rollout
 
     _fast_watchdog(monkeypatch)
     script = tmp_path / "hang.py"

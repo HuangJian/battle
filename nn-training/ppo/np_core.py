@@ -22,7 +22,7 @@ from typing import Any, cast
 import numpy as np
 import numpy.typing as npt
 
-from rl.log import log
+from biz.log import log
 
 # numpy 的 RandomState.get_state() 存根把 legacy 默认标成 False（→ dict），但 numpy 2.x
 # 实测返回的是 legacy 元组。显式传 legacy=True 并断言元组形态，双层保险。
@@ -481,7 +481,7 @@ def load_episodes_common(
     if not shards:
         raise SystemExit(f"[{label}] no {shard_kind} shards found under {data_root}")
     # ★ 2026-09-24（日志节食）：这四行是「装载阶段」的读数集合，传给 bundle 时攒进调用方
-    # 的那**一行**（见 `log_bundle.py`）；bundle=None 时逐字节保持原输出（goal/intent/
+    # 的那**一行**（见 `common/log_bundle.py`）；bundle=None 时逐字节保持原输出（goal/intent/
     # 本机三条线共用本函数，行为不变）。
     if bundle is not None:
         bundle.add("shards", f"{len(shards)} {shard_kind} ← {data_root}")
@@ -578,7 +578,7 @@ LAM = 0.95
 # RL shard 字段表：{key: (filename, dtype)} —— 与旧 load_shard 逐字段一致（copy=False 零拷贝）。
 # plan/rl-training-config.md §4.2：per-tick shard 的 reward 由 TS 落盘改为 Python
 # 公式引擎计算——TS 只落 `metrics.npy`（[N+1,21] f8：N 个决策快照 + 1 个终局快照），
-# 加载器读 holder（rl.reward_context）的 RewardFn 按配置公式算 reward。
+# 加载器读 holder（biz.reward_context）的 RewardFn 按配置公式算 reward。
 _RL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
     "obs": ("obs.npy", np.uint8),
     "scalars": ("scalars.npy", np.float32),
@@ -631,8 +631,8 @@ def _reward_from_metrics(metrics: np.ndarray, manifest: dict, dirpath: str) -> n
     wrapper（§4.3.3）：Φ = formula(metrics)；r[i] = Φ[i+1]−Φ[i]；末样本 +=
     reconcile（score_reconcile → scale·score(gated)−(Φ[N]−Φ[0])；toy → terminal）。
     """
-    from rl.reward_context import current as _ctx_current
-    from rl.reward_library import METRICS_DIM
+    from biz.reward_context import current as _ctx_current
+    from biz.reward_library import METRICS_DIM
 
     ctx = _ctx_current()
     m = np.asarray(metrics, dtype=np.float64)
@@ -666,7 +666,7 @@ def _reward_from_metrics(metrics: np.ndarray, manifest: dict, dirpath: str) -> n
 
 
 def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM) -> dict | None:
-    """流式 backend 接口（rl/stream.py）：单个 shard → 可训练 episode（adv/ret 未归一）。
+    """流式 backend 接口（trainer/stream.py）：单个 shard → 可训练 episode（adv/ret 未归一）。
 
     ppo_intent.load_episode_from_shard 同签名——run_rollout_stream 以 backend 参数
     复用同一套流式基础设施（工程化共享，勿在 stream 内复制第二份加载逻辑）。
@@ -708,7 +708,7 @@ def load_episodes(
     备注：GAE 自举仍用 rollout 时 head 输出的原始尺度 V——baseline 不改变策略
     梯度的无偏性，只改变方差；当前 V 近乎常数（MSE≫return 方差）时归一化只会
     把 baseline 从"无"变"有"，不会变坏。stream 路径不走本函数（见
-    rl/stream.py），该 flag 只覆盖串行（local/remote）路径。
+    trainer/stream.py），该 flag 只覆盖串行（local/remote）路径。
     """
     return load_episodes_common(
         data_root,

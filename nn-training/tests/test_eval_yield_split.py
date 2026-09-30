@@ -1,22 +1,22 @@
-"""拆分的**契约守卫**：评估的「让位/份额（尾巴）策略」永住 `rl/eval_yield.py`（S5 第十二刀，2026-09-27）。
+"""拆分的**契约守卫**：评估的「让位/份额（尾巴）策略」永住 `biz/eval_yield.py`（S5 第十二刀，2026-09-27）。
 
 本刀从**两处一起**切（plan §5.7.3 记的同族候选——`EvalDispatcher` 的尾巴策略与 `eval_local`
 留守的那族同一所有者）：
 
-* `rl/eval_local.py` 的 L110–L226（117 行，5 常量 + 7 判决函数 + 两段族注释）**逐字节**
+* `biz/eval_local.py` 的 L110–L226（117 行，5 常量 + 7 判决函数 + 两段族注释）**逐字节**
   搬进新家；
-* `rl/eval_dispatch.py`（`EvalDispatcher.run`）里**只有实现、没有名字**的三个判决点提出成
+* `trainer/eval_dispatch.py`（`EvalDispatcher.run`）里**只有实现、没有名字**的三个判决点提出成
   `reserve_local_slots` / `local_release_due` / `inflight_grace_cap`（原式逐项等价），派发器
-  改为调用它们；`rl/loop_eval.py` 与 `rl/batch_runner.py` 的判据 / 份额缺省也改指新家。
+  改为调用它们；`trainer/loop_eval.py` 与 `trainer/batch_runner.py` 的判据 / 份额缺省也改指新家。
 
 本文件钉七件事：① 定义唯一（12 名只许在新家实现）② 执行面**反向留守**（不然搬错了对象）
-③ 依赖面闭集（**零依赖叶子**：只许 `__future__`）④ 不得反向 import（import `rl.eval_local`
+③ 依赖面闭集（**零依赖叶子**：只许 `__future__`）④ 不得反向 import（import `biz.eval_local`
 = 伸手回运行器，成环即红）⑤ 门面对象恒等（`is`，不是副本）⑥ 边缘重指 + 判决点迁移（派发器
 里三条旧表达式必须消失）⑦ 语义（三条新公式 + 让位/放行/收拢判据）。
 
 为什么单独成家（独立所有者 + 独立触发条件）：这些判决的触发者是**边界事件**——派发那一刻的
 份额分档、PPO 收官的 join/交棒、下一轮 rollout 收官时的收拢、窗口到期后的在飞宽限——与
-「怎么在本机跑一局评估」（子进程 / 看门狗 / 账本，`rl/eval_local.py`）零共享状态。留在 573 行
+「怎么在本机跑一局评估」（子进程 / 看门狗 / 账本，`biz/eval_local.py`）零共享状态。留在 573 行
 的运行器里时，派发器为一条判据就得拖入整台运行器。
 """
 
@@ -31,16 +31,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.eval_dispatch as eval_dispatch_mod
-import rl.eval_local as eval_local_mod
-import rl.eval_yield as eval_yield_mod
+import biz.eval_local as eval_local_mod
+import biz.eval_yield as eval_yield_mod
+import trainer.eval_dispatch as eval_dispatch_mod
 from tests.helpers import remote_dag as dag
 
-YIELD_FILE = ROOT / "rl" / "eval_yield.py"
-LOCAL_FILE = ROOT / "rl" / "eval_local.py"
-DISPATCH_FILE = ROOT / "rl" / "eval_dispatch.py"
-LOOP_EVAL_FILE = ROOT / "rl" / "loop_eval.py"
-BATCH_RUNNER_FILE = ROOT / "rl" / "batch_runner.py"
+YIELD_FILE = ROOT / "biz" / "eval_yield.py"
+LOCAL_FILE = ROOT / "biz" / "eval_local.py"
+DISPATCH_FILE = ROOT / "trainer" / "eval_dispatch.py"
+LOOP_EVAL_FILE = ROOT / "trainer" / "loop_eval.py"
+BATCH_RUNNER_FILE = ROOT / "trainer" / "batch_runner.py"
 
 #: 本次搬走的**定义**（常量 / 函数）——只许在 `eval_yield.py` 里出现。
 MOVED_NAMES = {
@@ -64,9 +64,9 @@ NEW_FORMULAS = {"reserve_local_slots", "local_release_due", "inflight_grace_cap"
 #: `eval_yield.py` 允许的 import 面（**零依赖叶子**；多一个即红）。
 ALLOWED_IMPORTS = {"__future__"}
 
-#: 读者把它们从哪取（边缘重指：不再经运行器 `rl.eval_local`）。
+#: 读者把它们从哪取（边缘重指：不再经运行器 `biz.eval_local`）。
 READERS = {
-    "rl/eval_dispatch.py": (
+    "trainer/eval_dispatch.py": (
         "EVAL_LOCAL_SLOTS_DEFAULT",
         "hold_for_local",
         "release_local_gate_if_starved",
@@ -74,13 +74,13 @@ READERS = {
         "local_release_due",
         "inflight_grace_cap",
     ),
-    "rl/loop_eval.py": (
+    "trainer/loop_eval.py": (
         "eval_join_soft_sec",
         "eval_tail_overran",
         "eval_local_early_epochs",
         "local_gate_release_plan",
     ),
-    "rl/batch_runner.py": ("EVAL_LOCAL_SLOTS_DEFAULT",),
+    "trainer/batch_runner.py": ("EVAL_LOCAL_SLOTS_DEFAULT",),
 }
 
 
@@ -150,20 +150,20 @@ def test_eval_local_kept_the_execution_surface() -> None:
 
 
 def test_eval_yield_is_a_zero_dependency_leaf() -> None:
-    """纯判决模块：**不 import 任何模块**（`__future__` 之外多一个即红——连 `rl.log` 都不需要）。"""
+    """纯判决模块：**不 import 任何模块**（`__future__` 之外多一个即红——连 `biz.log` 都不需要）。"""
     extra = sorted(_imports(YIELD_FILE) - ALLOWED_IMPORTS)
-    assert extra == [], f"rl/eval_yield.py 引入了依赖：{extra}"
+    assert extra == [], f"biz/eval_yield.py 引入了依赖：{extra}"
 
 
 def test_eval_yield_never_imports_the_runner() -> None:
-    """★ 本刀的意义：判决面是**底座**，反向 import 运行器（`rl.eval_local`）立刻成环。"""
+    """★ 本刀的意义：判决面是**底座**，反向 import 运行器（`biz.eval_local`）立刻成环。"""
     back = sorted(m for m in _imports(YIELD_FILE) if m.startswith("rl."))
-    assert back == [], f"rl/eval_yield.py 反向 import 了仓内模块：{back}"
+    assert back == [], f"biz/eval_yield.py 反向 import 了仓内模块：{back}"
 
 
 def test_eval_yield_stays_pure_logic() -> None:
     """它在分层里是 L1 纯逻辑（不达 remote）——不在 `remote_dag` 的传输账本里，也不该进去。"""
-    assert "rl.eval_yield" not in dag.LAYERS
+    assert "biz.eval_yield" not in dag.LAYERS
 
 
 # ───────────────────────── ⑤ 门面 ─────────────────────────
@@ -172,15 +172,15 @@ def test_eval_yield_stays_pure_logic() -> None:
 def test_eval_local_facade_forwards_the_same_objects() -> None:
     """门面是 `X as X` 转发 ⇒ 与 `eval_yield` 里是**同一个对象**（不是副本）。"""
     for name in sorted(MOVED_NAMES):
-        assert hasattr(eval_local_mod, name), f"rl.eval_local 丢了门面 {name}"
+        assert hasattr(eval_local_mod, name), f"biz.eval_local 丢了门面 {name}"
         assert getattr(eval_local_mod, name) is getattr(eval_yield_mod, name), (
-            f"rl.eval_local.{name} 不是 rl.eval_yield.{name}（转发成了副本）"
+            f"biz.eval_local.{name} 不是 biz.eval_yield.{name}（转发成了副本）"
         )
 
 
 def test_public_call_sites_can_still_import_from_eval_local() -> None:
-    """名字是契约：旧写法 `from rl.eval_local import hold_for_local` 必须仍然成立。"""
-    from rl.eval_local import eval_join_soft_sec, hold_for_local, release_local_gate_if_starved
+    """名字是契约：旧写法 `from biz.eval_local import hold_for_local` 必须仍然成立。"""
+    from biz.eval_local import eval_join_soft_sec, hold_for_local, release_local_gate_if_starved
 
     assert hold_for_local is eval_yield_mod.hold_for_local
     assert eval_join_soft_sec is eval_yield_mod.eval_join_soft_sec
@@ -188,7 +188,7 @@ def test_public_call_sites_can_still_import_from_eval_local() -> None:
 
 
 def test_eval_dispatch_namespace_still_exposes_the_verdicts() -> None:
-    """e2e 里写的是 `ed.hold_for_local(...)`（`ed` = `rl.eval_dispatch`）——那条路不许断。"""
+    """e2e 里写的是 `ed.hold_for_local(...)`（`ed` = `trainer.eval_dispatch`）——那条路不许断。"""
     assert eval_dispatch_mod.hold_for_local is eval_yield_mod.hold_for_local
 
 
@@ -199,17 +199,17 @@ def test_readers_take_the_verdicts_from_eval_yield() -> None:
     """判据读者从新家取（不再经 573 行的运行器）——逐模块逐名钉住。"""
     for rel, names in READERS.items():
         src = _import_sources(ROOT / rel)
-        bad = sorted(n for n in names if src.get(n) != "rl.eval_yield")
-        assert bad == [], f"{rel} 里这些名字的来源不是 rl.eval_yield：{bad}"
+        bad = sorted(n for n in names if src.get(n) != "biz.eval_yield")
+        assert bad == [], f"{rel} 里这些名字的来源不是 biz.eval_yield：{bad}"
 
 
 def test_eval_dispatch_no_longer_imports_policy_from_the_runner() -> None:
     """派发器只从运行器拿执行面（runner / 账本 / 重试配额），判据一律走新家。"""
     src = _import_sources(DISPATCH_FILE)
     for name in ("hold_for_local", "release_local_gate_if_starved", "EVAL_LOCAL_SLOTS_DEFAULT"):
-        assert src.get(name) == "rl.eval_yield", name
+        assert src.get(name) == "biz.eval_yield", name
     for name in ("run_local_eval_game", "eval_row", "eval_done_keys", "EVAL_TASK_ATTEMPTS"):
-        assert src.get(name) == "rl.eval_local", name
+        assert src.get(name) == "biz.eval_local", name
 
 
 def test_eval_dispatch_inline_formulas_are_gone() -> None:
@@ -231,7 +231,7 @@ def test_eval_dispatch_inline_formulas_are_gone() -> None:
 
 def test_loop_eval_no_longer_reaches_the_runner_for_policy() -> None:
     """边界侧（收拢 / 交棒 / 放行档）不得再 import 运行器——它只要判据。"""
-    assert "rl.eval_local" not in _imports(LOOP_EVAL_FILE)
+    assert "biz.eval_local" not in _imports(LOOP_EVAL_FILE)
 
 
 # ─────────────────────── ⑦ 语义（功能用例，逐条钉住） ───────────────────────

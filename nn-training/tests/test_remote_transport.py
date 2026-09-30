@@ -7,7 +7,7 @@
 永远领不到活，而日志看起来「训练正常」（最贵的那类错误）。
 
 本文件覆盖两侧纯函数（run_rl 的 `resolve_transport` / BC 的 `resolve_transport`，后者 R3-4 后
-住在 `rl/bc_loop.py`）
+住在 `trainer/bc_loop.py`）
 与 argparse 接线（默认值 + choices），不碰 torch。
 """
 
@@ -15,13 +15,13 @@ from __future__ import annotations
 
 import pytest
 
-from rl.cli import build_argparser
-from rl.loop_steps import REMOTE_TRANSPORTS, resolve_hub_push, resolve_transport
+from biz.cli import build_argparser
+from trainer.loop_steps import REMOTE_TRANSPORTS, resolve_hub_push, resolve_transport
 
 NODE = {"url": "https://gpu.example", "authKey": "k"}
 
 
-# ────────────────────────── run_rl（rl/loop_steps.resolve_transport） ──────────────────────────
+# ────────────────────────── run_rl（trainer/loop_steps.resolve_transport） ──────────────────────────
 
 
 def test_rl_auto_keeps_historical_priority() -> None:
@@ -101,11 +101,11 @@ def test_hubpush_has_no_direct_nodes() -> None:
     assert resolve_transport("hubpush", "https://hub", "tok", [NODE]) == []
 
 
-# ────────────────── BC（rl/bc_loop.resolve_transport；R3-4 引擎化后移出 run_bc） ──────────────────
+# ────────────────── BC（trainer/bc_loop.resolve_transport；R3-4 引擎化后移出 run_bc） ──────────────────
 
 
 def test_bc_auto_keeps_historical_priority() -> None:
-    from rl import bc_loop
+    from trainer import bc_loop
 
     assert (
         bc_loop.resolve_transport(
@@ -133,7 +133,7 @@ def test_bc_auto_keeps_historical_priority() -> None:
 
 def test_bc_pull_overrides_configured_push_url() -> None:
     """--remote-transport pull 压过 courses.<课>.push_node_url（本地 worker 的唯一活路）。"""
-    from rl import bc_loop
+    from trainer import bc_loop
 
     assert (
         bc_loop.resolve_transport(
@@ -149,7 +149,7 @@ def test_bc_pull_overrides_configured_push_url() -> None:
 
 
 def test_bc_pull_needs_full_hub_triple() -> None:
-    from rl import bc_loop
+    from trainer import bc_loop
 
     with pytest.raises(SystemExit, match="pull"):
         bc_loop.resolve_transport(
@@ -158,7 +158,7 @@ def test_bc_pull_needs_full_hub_triple() -> None:
 
 
 def test_bc_push_needs_node_and_local_wins() -> None:
-    from rl import bc_loop
+    from trainer import bc_loop
 
     with pytest.raises(SystemExit, match="push"):
         bc_loop.resolve_transport(
@@ -179,7 +179,7 @@ def test_bc_push_needs_node_and_local_wins() -> None:
 
 
 def test_bc_no_transport_is_loud() -> None:
-    from rl import bc_loop
+    from trainer import bc_loop
 
     with pytest.raises(SystemExit, match="无法确定传输"):
         bc_loop.resolve_transport(

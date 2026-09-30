@@ -9,12 +9,12 @@ hub 记的 blob 键要与 worker 找的相等。任何一处实现被「顺手�
 
 本仓曾有 3 份字形相同的实现 + 1 处 inline：
 
-* `dist_common.weights_fingerprint`（被 20+ 处调用，是事实上的公共 API）
+* `common.distribution.weights_fingerprint`（被 20+ 处调用，是事实上的公共 API）
 * `remote/artifacts.sha256_file` / `sha256_bytes`
 * `remote/hub_client._sha256_file`
 * `remote/bundle.sha256_file` / `sha256_bytes`（函数内 `import hashlib`）
 
-`remote/artifacts.py` 原 docstring 写「不依赖 dist_common 的导入，纯 stdlib」——这个
+`remote/artifacts.py` 原 docstring 写「不依赖 common.distribution 的导入，纯 stdlib」——这个
 诉求是对的，但**换成依赖本模块同样成立**：本模块就是那个纯 stdlib 的落点，且两侧不再
 各留一份定义。旧名字全部保留为 re-export（`from common.hashing import sha256_file`），
 调用点与契约测试一个字都不用改。

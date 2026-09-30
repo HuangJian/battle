@@ -6,7 +6,7 @@
  *  多一处故障域，用户 2026-09-18 定案）。
  *
  *  通道 = 两侧本来就共享的工作区里的一份**意图文件**（`tmp/loop-control.json`）：
- *  控制台写、训练进程每拍读一次并施加到调度器（`nn-training/rl/loop_control.py`）。
+ *  控制台写、训练进程每拍读一次并施加到调度器（`nn-training/trainer/loop_control.py`）。
  *  hub 挂了也能用，进程重启后意图仍在（对比 hub 的 course-mode 是 volatile，那里要靠
  *  `restoreCourseModes` 回灌；这里**文件本身就是状态**，不需要回灌）。
  *

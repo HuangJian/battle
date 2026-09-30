@@ -126,16 +126,45 @@ explicit = true
 # 2026-09-02（plan/python-refactor.md B4）：此前 py-modules=[] 使 `pip install -e .`
 # 装不进任何东西，各模块只能靠 sys.path hack 互相可见。现在声明包与顶层模块，
 # 安装后可任意目录 `import schema / ppo / rl / models / ...`。
-# 2026-09-27（S5 第十一刀）：`dist_common` 现在 import `dist_shard` /
-# `dist_weights_ledger` ⇒ 两者必须同栈声明，否则 editable 安装下 `import dist_common`
+# 2026-09-27（S5 第十一刀）：`common.distribution` 现在 import `common.shard` /
+# `common.weights_ledger` ⇒ 两者必须同栈声明，否则 editable 安装下 `import common.distribution`
 # 直接 ImportError（测试靠 conftest 的 sys.path 看不出来，装机环境才现形）。
-py-modules = ["dist_common", "dist_shard", "dist_weights_ledger", "schema", "platform_utils"]
+# 2026-09-30（刀 2，`common/` 收口）：五个顶层单文件（`dist_common` / `dist_shard` /
+# `dist_weights_ledger` / `schema` / `platform_utils`，外加 `pid_probe`）全部搬进 `common/`
+# ⇒ `py-modules` 清空。它们仍然会给 `pack_code_zip` 打进 code.zip、也仍然 `pip install -e .`
+# 后可直接 import —— 但**形状从「顶层模块」变成了「`common` 包的子模块」**（`from common.schema import …`）。
+py-modules = []
 
 # 2026-09-23：新增 `common`（共享原语层，stdlib-only）——它同样要给
 # `pack_code_zip` 打进 code.zip，也必须 `pip install -e .` 后可直接 `import common.*`。
+# 2026-09-30（刀 2）：`common` 现在就是**全部 L0**（原根下六个单文件 + `rl/jsonc` +
+# `remote/` 的三个原语都收进来了）⇒ 本清单里 `common*` 是 L0 的唯一入口。
 # 层契约与「谁不能用它」见 common/__init__.py。
+# 2026-09-30（刀 1）：`hub` 从 `remote/hub/` 出包成为顶层包 ⇒ 必须与 `remote*` 一样在
+# 装机环境（`pip install -e .`）下可直接 `import hub.*`（测试靠 conftest 的 sys.path 看不出来）。
+# `remote*` 本来就漏在清单外（今日补上）：它是云机 `code.zip` 的 sys.path 契约包之一。
+# 2026-09-30（刀 3）：`worker` 从 `remote/` 出包同样要声明 —— `remote/offline_eval.py` 与
+# `remote/worker.py` 都 `from worker …`，不声明则在装机环境里直接 ImportError（同上次的教训）。
+# 2026-09-30（刀 4）：`biz` 从 `rl/` 出包（纯逻辑整族 64 个模块）—— `rl*` 只覆盖编排，
+# 不声明 `biz*` 的话，装机环境（`pip install -e .`）里 `import biz.*` 直接 ImportError，
+# 而 conftest 的 sys.path 会让测试全绿（刀 1/刀 2/刀 3 各踩过一次同型的坑）。
+# 2026-09-30（刀 5）：编排那一半随整包改名 `rl*` → `trainer*`（`rl/` 这个包从此不存在）。
+# 留 `trainer*` 与 `biz*` 都在：两个包都要在装机环境里可直接 import。
 [tool.setuptools.packages.find]
-include = ["models*", "ppo*", "rl*", "data*", "train*", "scripts*", "tools*", "common*"]
+include = [
+  "models*",
+  "ppo*",
+  "trainer*",
+  "biz*",
+  "data*",
+  "train*",
+  "scripts*",
+  "tools*",
+  "common*",
+  "remote*",
+  "hub*",
+  "worker*",
+]
 
 # ---------------------------------------------------------------------------
 # ruff - lint + format (replaces flake8/black/isort)
@@ -181,6 +210,12 @@ unfixable = ["F401"] # don't auto-remove unused imports (may be intentional re-e
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["F401"] # test imports are often re-exports for pytest discovery
 "e2e/*" = ["F401"] # same for integration/e2e suite
+# 2026-09-30：`tools/tpu-probe.py` 是**带连字符的一次性 CLI 探针**，不是可导入模块
+# （全仓无人 `import tpu_probe`）⇒ N999（模块命名规则）不适用。它此前一直让
+# `ruff check` 返非零，于是 nn 门禁的**总体退出码常年是红的**（`Found 1 error`，内容
+# 与本次改动无关）——「狼来了」久了就没人看门禁了。改名 `tpu_probe.py` 是另一条路，
+# 但要动 docs / 命令行引用，不值当。
+"tools/tpu-probe.py" = ["N999"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

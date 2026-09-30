@@ -1,4 +1,4 @@
-"""rl/bc_ledger.py —— BC 轮账本的读/写面（R3-4；BC 指针与 RL **不同源**）。
+"""biz/bc_ledger.py —— BC 轮账本的读/写面（R3-4；BC 指针与 RL **不同源**）。
 
 钉的是「指针语义只有一份」这件事：单进程 supervisor 与 BC 编排器都必须从
 `bc_round_completed` 读「下一轮是几」，而不是从 RL 的 `iteration` 事件推断。
@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.bc_ledger import (
+from biz.bc_ledger import (
     JOB_DONE_EVENT,
     ROUND_DONE_EVENT,
     append_ledger,

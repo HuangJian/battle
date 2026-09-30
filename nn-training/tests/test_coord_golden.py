@@ -14,7 +14,7 @@ rounding，四舍六入五取偶），TS 侧 `src/nn/infer.ts:428-429` 用 `Math
 
 **`.5` 平局守护（已分家）**：`j×255/25` 无 `.5` 值这条判据本身一行不碰 torch，2026-09-26
 （item 9）搬到 `tests/test_schema_fingerprint.py`（py↔TS 同锚常量的本家，BOARD 在
-`schema.py`）——否则它被本文件那三条「真渲染 golden」用例连坐 torch。
+`common/schema.py`）——否则它被本文件那三条「真渲染 golden」用例连坐 torch。
 """
 
 from __future__ import annotations

@@ -27,13 +27,13 @@
 //
 // 真护栏清单（课程评审 2026-09-07，P0-1/P1-3/P2-6；原"KL>0.05 连 3 轮回滚"已删除——
 //   它落在 4× 步数下的健康工作带 0.04–0.08 内，第 1–3 轮即误杀，实验自我否定）：
-//   - KL：绑定护栏是内建 F4 熔断 kl≥0.075 连 3 轮停车（rl/loop_guards.py per-tick
+//   - KL：绑定护栏是内建 F4 熔断 kl≥0.075 连 3 轮停车（trainer/loop_guards.py per-tick
 //     硬编码，课程/CLI 均不可覆盖；training_log 口径 = 全 update 步均值）。任何
 //     >0.075 的自定义阀都因内建先开枪而永不触发，故不设。运行规则：kl≥0.06 连 2 轮
 //     → 在内建开枪前人工降档（epochs 8→4，或 kl_coef 0.2→0.3），以 worker 日志末
 //     epoch KL（"[ppo] epoch 8/8 done … kl=" 行，同轮 off-policy 漂移实锤）>0.10
 //     为确认。KL_WARN 0.04 黄线仅日志告警。
-//   - kl_cap 0.2 在本路径不执行：只在 rl/stream.py 流式路径生效，remote 串行
+//   - kl_cap 0.2 在本路径不执行：只在 trainer/stream.py 流式路径生效，remote 串行
 //     （stream=0，waves=null）下 manifest 透传但无人消费；engine 无 target_kl 早停，
 //     只有 kl_coef 0.2 软惩罚。禁止再写"vs cap 余量"表述。
 //   - 熵：F4 相对崩塌语义（峰值>0.25 后跌破 0.25，或相对峰值跌幅≥0.10 才停车）；

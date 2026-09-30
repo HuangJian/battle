@@ -49,7 +49,7 @@ from common.protocol import (
     role_from_header,
     rotation_order,
 )
-from remote.hub_server import _HubQueue, _JobStore, as_hub, make_server
+from hub.server import _HubQueue, _JobStore, as_hub, make_server
 from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
 
@@ -1130,7 +1130,7 @@ def test_offline_backfeed_without_a_course_is_refused_loudly_on_a_multi_course_h
 def test_spawn_hub_argv_is_the_console_shape(tmp_path: Path) -> None:
     """控制台实际启动的 argv 形状（`--traj-root <traj> --discover`）——防漂移锚点。"""
     argv = _spawn_hub(1234, tmp_path)
-    assert "remote.hub_server" in argv
+    assert "hub.server" in argv
     assert argv[argv.index("--traj-root") + 1] == str(tmp_path)
     assert "--discover" in argv
 
@@ -1141,7 +1141,7 @@ def _spawn_hub(port: int, tmp_path: Path) -> list[str]:
         sys.executable,
         "-u",
         "-m",
-        "remote.hub_server",
+        "hub.server",
         "--port",
         str(port),
         "--host",

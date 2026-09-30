@@ -48,9 +48,9 @@ RUN_IT_RE = r"it\d+"
 
 
 def _pid_alive(pid: int) -> bool:
-    """跨平台进程存活探测（Windows 用 GetExitCodeProcess，与 `nn-training/pid_probe.py` 同口径）。
+    """跨平台进程存活探测（Windows 用 GetExitCodeProcess，与 `nn-training/common/pid_probe.py` 同口径）。
 
-    **不复用 `nn-training/pid_probe.py`**（2026-09-17 收口时的选择）：本脚本是**仓根**开发工具，
+    **不复用 `nn-training/common/pid_probe.py`**（2026-09-17 收口时的选择）：本脚本是**仓根**开发工具，
     不能依赖 nn-training 的包/路径布局（那里是可独立打包发运的训练代码），故按契约重复一份
     Windows 安全分支；一致性由 `tests/tmp-clean-probe-guard.test.ts` 的源码门禁守住。
 

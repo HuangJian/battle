@@ -37,7 +37,7 @@ const TC_SLIM = 'tc.slim'
 
 /** 「行为开关」这三个键在**单一 PPO 路径下恒不生效**（2026-09-26 用户裁决：别删，标灰 + 写清）。
  *
- *  依据：`nn-training/rl/config.py::validate_args` 把 `stream` / `double_buffer` 恒置 0，而
+ *  依据：`nn-training/biz/config.py::validate_args` 把 `stream` / `double_buffer` 恒置 0，而
  *  `precollect_early` 只在 `double_buffer` 开的分支里被读 ⇒ 填什么都不生效。
  *  服务端那侧的回写白名单（`preset.ts::setMode`）**保留**这三个键 —— 将来解冻
  *  intent/多路时直接复用 —— 所以这里只**呈现**：值取 rl-config 当前值（`modes.*`），

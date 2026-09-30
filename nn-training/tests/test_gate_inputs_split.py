@@ -1,9 +1,9 @@
-"""拆分的**契约守卫**：课程门求值器的「输入读数面」永住 `rl/gate_inputs.py`（S5 第十五刀，2026-09-27）。
+"""拆分的**契约守卫**：课程门求值器的「输入读数面」永住 `biz/gate_inputs.py`（S5 第十五刀，2026-09-27）。
 
-本刀把 1412 行 `rl/gate_check.py` 的输入读数面（15 名）**逐字节**搬进新家：`EvalRow` /
+本刀把 1412 行 `biz/gate_check.py` 的输入读数面（15 名）**逐字节**搬进新家：`EvalRow` /
 `BudgetInfo` 两个模型 + 行归一化（`_row_from_summary` / `_num` / `normalize_rows`）+
 `read_trend_rows` + `first_*` / `count_*` / `sum_*` 事件扫描 + `load_override` 与常量/异常；
-判决面 `rl.gate_judges` 从本家取行模型，引擎 `rl.gate_check` 留全量门面（依赖单向：
+判决面 `biz.gate_judges` 从本家取行模型，引擎 `biz.gate_check` 留全量门面（依赖单向：
 inputs ← judges ← check）。
 
 本文件钉八件事：① 定义唯一（15 名只许在新家实现）② 引擎**反向留守**（evaluate / main /
@@ -12,7 +12,7 @@ GateResult 不动）③ 依赖面闭集（**stdlib-only 叶子**，多一个即�
 ⑦ 读数语义（行过滤 / 去重键 / override 响亮报错）⑧ 不进 `remote_dag.LAYERS`（纯逻辑）。
 
 为什么单独成家（独立所有者 + 独立触发条件）：这些读数的触发者是「判决前的一次读数」
-（trend 行 / 事件账本 / override 文件），与判决本身（`rl.gate_judges` 的纯计算）和引擎
+（trend 行 / 事件账本 / override 文件），与判决本身（`biz.gate_judges` 的纯计算）和引擎
 （`evaluate` 的两趟调度与 CLI）零共享状态；行模型是三者**共用**的输入，归本家才能让
 判决面单向依赖它、而不是反向。
 """
@@ -30,12 +30,12 @@ if str(ROOT) not in sys.path:
 
 import pytest
 
-import rl.gate_check as gate_check_mod
-import rl.gate_inputs as gate_inputs_mod
+import biz.gate_check as gate_check_mod
+import biz.gate_inputs as gate_inputs_mod
 from tests.helpers import remote_dag as dag
 
-INPUTS_FILE = ROOT / "rl" / "gate_inputs.py"
-CHECK_FILE = ROOT / "rl" / "gate_check.py"
+INPUTS_FILE = ROOT / "biz" / "gate_inputs.py"
+CHECK_FILE = ROOT / "biz" / "gate_check.py"
 
 #: 本次搬走的**定义**（常量 / 异常 / 类 / 函数）——只许在 `gate_inputs.py` 里出现。
 MOVED_NAMES = {
@@ -131,21 +131,21 @@ def test_gate_check_kept_the_engine_surface() -> None:
 
 
 def test_gate_inputs_is_a_stdlib_only_leaf() -> None:
-    """输入读数面是**叶子**：只许 stdlib（多一个即红）——连 `rl.log` 都不需要。"""
+    """输入读数面是**叶子**：只许 stdlib（多一个即红）——连 `biz.log` 都不需要。"""
     extra = sorted(_imports(INPUTS_FILE) - ALLOWED_IMPORTS)
-    assert extra == [], f"rl/gate_inputs.py 引入了依赖：{extra}"
+    assert extra == [], f"biz/gate_inputs.py 引入了依赖：{extra}"
 
 
 def test_gate_inputs_never_imports_repo_modules() -> None:
-    """★ 本刀的意义：输入面是**底座**，任何仓内 import（尤其 `rl.gate_check` / `rl.gate_judges`）
+    """★ 本刀的意义：输入面是**底座**，任何仓内 import（尤其 `biz.gate_check` / `biz.gate_judges`）
     都会成环或倒置方向。"""
-    back = sorted(m for m in _imports(INPUTS_FILE) if m.split(".")[0] in {"rl", "remote", "common", "models", "train", "ppo", "data", "scripts"})
-    assert back == [], f"rl/gate_inputs.py 反向 import 了仓内模块：{back}"
+    back = sorted(m for m in _imports(INPUTS_FILE) if m.split(".")[0] in {"trainer", "remote", "common", "models", "train", "ppo", "data", "scripts"})
+    assert back == [], f"biz/gate_inputs.py 反向 import 了仓内模块：{back}"
 
 
 def test_gate_inputs_stays_pure_logic() -> None:
     """它在分层里是纯逻辑（不达 remote）——不在 `remote_dag` 的传输账本里，也不该进去。"""
-    assert "rl.gate_inputs" not in dag.LAYERS
+    assert "biz.gate_inputs" not in dag.LAYERS
 
 
 # ───────────────────────── ⑤⑥ 门面恒等 / 旧 import 面 ─────────────────────────
@@ -154,15 +154,21 @@ def test_gate_inputs_stays_pure_logic() -> None:
 def test_gate_check_facade_forwards_the_same_objects() -> None:
     """门面是 `X as X` 转发 ⇒ 与 `gate_inputs` 里是**同一个对象**（不是副本）。"""
     for name in sorted(MOVED_NAMES):
-        assert hasattr(gate_check_mod, name), f"rl.gate_check 丢了门面 {name}"
+        assert hasattr(gate_check_mod, name), f"biz.gate_check 丢了门面 {name}"
         assert getattr(gate_check_mod, name) is getattr(gate_inputs_mod, name), (
-            f"rl.gate_check.{name} 不是 rl.gate_inputs.{name}（转发成了副本）"
+            f"biz.gate_check.{name} 不是 biz.gate_inputs.{name}（转发成了副本）"
         )
 
 
 def test_public_call_sites_can_still_import_from_gate_check() -> None:
-    """名字是契约：旧写法 `from rl.gate_check import EvalRow, load_override` 必须仍然成立。"""
-    from rl.gate_check import BudgetInfo, EvalRow, GateOverrideError, load_override, read_trend_rows
+    """名字是契约：旧写法 `from biz.gate_check import EvalRow, load_override` 必须仍然成立。"""
+    from biz.gate_check import (
+        BudgetInfo,
+        EvalRow,
+        GateOverrideError,
+        load_override,
+        read_trend_rows,
+    )
 
     assert EvalRow is gate_inputs_mod.EvalRow
     assert BudgetInfo is gate_inputs_mod.BudgetInfo

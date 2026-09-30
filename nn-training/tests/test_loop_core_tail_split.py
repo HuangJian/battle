@@ -2,14 +2,14 @@
 
 ## 这一刀切了什么
 
-`rl/loop_core.py` **446 → 240 行**：余下的 7 个方法都是**叶子**（类内零互调），按**判据同源**
+`trainer/loop_core.py` **446 → 240 行**：余下的 7 个方法都是**叶子**（类内零互调），按**判据同源**
 分成三簇，各自成模块：
 
 | 新家 | 成员 | 判据（谁调它 / 同源在哪） |
 |---|---|---|
-| `rl/loop_baseline.py::TrainingBaseline` | `_baseline_eval_weights` · `_maybe_dispatch_baseline_eval` | it0 基线（wver 指纹 + 落地摘）——`step_course_iter` |
-| `rl/loop_iter_dir.py::TrainingIterDir` | `_prepare_iter_dir` · `_check_quota_incident` | **`self._traj_dir` 里有没有本轮的活**——`step_prepare_iter` / `step_course_iter` |
-| `rl/loop_dispatch.py::TrainingDispatch` | `_rollout_phase` · `_eval_on_round` · `_evalboard_yield` | **本轮把活派给谁 / 让位给谁**——`step_rollout` / `step_eval_dispatch` / `step_record_iteration` |
+| `trainer/loop_baseline.py::TrainingBaseline` | `_baseline_eval_weights` · `_maybe_dispatch_baseline_eval` | it0 基线（wver 指纹 + 落地摘）——`step_course_iter` |
+| `trainer/loop_iter_dir.py::TrainingIterDir` | `_prepare_iter_dir` · `_check_quota_incident` | **`self._traj_dir` 里有没有本轮的活**——`step_prepare_iter` / `step_course_iter` |
+| `trainer/loop_dispatch.py::TrainingDispatch` | `_rollout_phase` · `_eval_on_round` · `_evalboard_yield` | **本轮把活派给谁 / 让位给谁**——`step_rollout` / `step_eval_dispatch` / `step_record_iteration` |
 
 组合根余下 **只有** `__init__`（槽位持有者）与 `_run_inspect`（见下）。
 
@@ -21,15 +21,15 @@ mixin 级父调用者**全部**是 `RoundSteps`（`_eval_on_round` 另有 `Train
 方向仍是本仓规则「调用者依赖被调用者」⇒ `class RoundSteps(TrainingVolume, TrainingBaseline,
 TrainingIterDir, TrainingDispatch)`，`TrainingLoop.__bases__` **一行不改**。
 
-⚠ **`_eval_on_round` 的顺序契约**（本刀唯一的真约束）：`rl/loop_eval.py` 的同名成员是**占位**
+⚠ **`_eval_on_round` 的顺序契约**（本刀唯一的真约束）：`trainer/loop_eval.py` 的同名成员是**占位**
 （body `raise`，MRO 被改坏就响亮失败），真实现必须在**线性化里更靠前**。挂 `RoundSteps` 一侧
 天然满足（`TrainingDispatch` 的位置早于 `TrainingEval`）；若把本簇改成组合根的**末位**基类，
 占位会反过来胜出 ⇒ `test_eval_on_round_position_contract` 钉住。
 
 ## 组合根的**结构性例外**：`_run_inspect` + `run_inspect` 必须同住 loop_core
 
-`_run_inspect` 按**模块全局**解析 `run_inspect`（那是文档化的可替换点，`rl/loop.py` 再导出
-它）。两者必须同住一个模块，而那个模块**不能** import `rl.loop_core`（loop_core import 它当
+`_run_inspect` 按**模块全局**解析 `run_inspect`（那是文档化的可替换点，`trainer/loop.py` 再导出
+它）。两者必须同住一个模块，而那个模块**不能** import `trainer.loop_core`（loop_core import 它当
 基类 ⇒ 成环）⇒ 只能在 `loop_core`。所以「组合根 = 纯组合类」在本仓的答案是**是，但留一个方法**：
 `__init__` + `_run_inspect`。这条被 `test_composition_root_keeps_only_the_structural_pair` 钉住。
 
@@ -44,11 +44,11 @@ S18/S19 的守卫各自钉过一份（两处逐字重复、会各自漂）⇒ �
 2. 接线是**对象级**同一（`TrainingLoop.X is <簇>.X`）；
 3. 组装逐字：`RoundSteps.__bases__` 四件套 + `TrainingLoop.__bases__` 四件套 + **全量 MRO 名单**；
 4. 组合根的方法闭集**恰好** `{__init__, _run_inspect}`；
-5. 三簇的**借用声明**闭集 = 派生集（同 `rl/loop_volume.py` 的约定），且类体零带值槽位；
+5. 三簇的**借用声明**闭集 = 派生集（同 `trainer/loop_volume.py` 的约定），且类体零带值槽位；
 6. **入边闭集**（谁以 `self.` 调本簇成员）+ **出边为空**（三簇互不调兄弟方法）
    + **槽位读者**（本刀三簇恰各一处）与**写手唯一**（赋值点只许 `loop_lifecycle._setup_common`）；
 7. 顶层 import 闭集 / 禁反向 import / DI seam 只许方法体内延迟 import；
-8. ★ **功能性**：`_check_quota_incident` 真跑（含 `log` seam 在本模块 = 打 `rl.loop_core.log` 收不到）
+8. ★ **功能性**：`_check_quota_incident` 真跑（含 `log` seam 在本模块 = 打 `trainer.loop_core.log` 收不到）
    · `_eval_on_round` 位置契约（真实现压住占位；裸 `TrainingEval` 调它**响亮报错**）
    · 旧家不再吸收 patch（搬走的名字在旧家**不存在** ⇒ 陈旧 patch 响亮失败）。
 """
@@ -62,16 +62,16 @@ from pathlib import Path
 from tests.helpers import source_scan
 
 NN_ROOT = Path(__file__).resolve().parent.parent
-CORE_PY = NN_ROOT / "rl/loop_core.py"
-ROUND_STEPS_PY = NN_ROOT / "rl/loop_round_steps.py"
-LIFE_PY = NN_ROOT / "rl/loop_lifecycle.py"
-EVAL_PY = NN_ROOT / "rl/loop_eval.py"
+CORE_PY = NN_ROOT / "trainer/loop_core.py"
+ROUND_STEPS_PY = NN_ROOT / "trainer/loop_round_steps.py"
+LIFE_PY = NN_ROOT / "trainer/loop_lifecycle.py"
+EVAL_PY = NN_ROOT / "trainer/loop_eval.py"
 
 #: 三簇：新家路径 → (类名, 成员闭集)。
 CLUSTERS = {
-    "rl/loop_baseline.py": ("TrainingBaseline", ("_baseline_eval_weights", "_maybe_dispatch_baseline_eval")),
-    "rl/loop_iter_dir.py": ("TrainingIterDir", ("_check_quota_incident", "_prepare_iter_dir")),
-    "rl/loop_dispatch.py": ("TrainingDispatch", ("_eval_on_round", "_evalboard_yield", "_rollout_phase")),
+    "trainer/loop_baseline.py": ("TrainingBaseline", ("_baseline_eval_weights", "_maybe_dispatch_baseline_eval")),
+    "trainer/loop_iter_dir.py": ("TrainingIterDir", ("_check_quota_incident", "_prepare_iter_dir")),
+    "trainer/loop_dispatch.py": ("TrainingDispatch", ("_eval_on_round", "_evalboard_yield", "_rollout_phase")),
 }
 
 #: 组合根**只许**留这两个成员（`__init__` = 槽位持有者；`_run_inspect` = 结构性例外）。
@@ -127,35 +127,35 @@ INBOUND_CALLS = {
 #: 写手另有所有权断言（`test_slot_writer_is_unique`：赋值点只许在 `loop_lifecycle._setup_common`）。
 SLOT_READERS = {
     "_course_fp": {
-        "rl/loop_iter_dir.py": "_prepare_iter_dir",
-        "rl/loop_dispatch.py": "_rollout_phase",
+        "trainer/loop_iter_dir.py": "_prepare_iter_dir",
+        "trainer/loop_dispatch.py": "_rollout_phase",
     },
     "_corpus_fp": {
-        "rl/loop_iter_dir.py": "_prepare_iter_dir",
-        "rl/loop_dispatch.py": "_rollout_phase",
+        "trainer/loop_iter_dir.py": "_prepare_iter_dir",
+        "trainer/loop_dispatch.py": "_rollout_phase",
     },
 }
 
 #: 顶层 import 闭集（非 stdlib）：本模块不许长出重依赖。
 TOP_IMPORTS = {
-    "rl/loop_baseline.py": frozenset({"dist_common", "rl.log", "rl.queue"}),
-    "rl/loop_iter_dir.py": frozenset(
-        {"dist_common", "platform_utils", "rl.collect_only", "rl.log", "rl.resume"}
+    "trainer/loop_baseline.py": frozenset({"common.distribution", "biz.log", "trainer.queue"}),
+    "trainer/loop_iter_dir.py": frozenset(
+        {"common.distribution", "common.platform_utils", "trainer.collect_only", "biz.log", "biz.resume"}
     ),
-    "rl/loop_dispatch.py": frozenset({"rl.rollout_phase"}),
+    "trainer/loop_dispatch.py": frozenset({"trainer.rollout_phase"}),
 }
 STDLIB_IMPORTS = frozenset({"pathlib", "typing"})
 
 #: 反向边（禁）：成环或把叶子拉回编排上游。
 FORBIDDEN_IMPORTS = frozenset(
     {
-        "rl.loop_core",
-        "rl.loop_eval",
-        "rl.loop_lifecycle",
-        "rl.loop_remote",
-        "rl.loop_round_steps",
-        "rl.loop_steps",
-        "rl.loop_volume",
+        "trainer.loop_core",
+        "trainer.loop_eval",
+        "trainer.loop_lifecycle",
+        "trainer.loop_remote",
+        "trainer.loop_round_steps",
+        "trainer.loop_steps",
+        "trainer.loop_volume",
     }
 )
 
@@ -164,7 +164,7 @@ PLACEHOLDERS: dict[str, tuple[str, ...]] = {"_eval_on_round": ("loop_eval.py",)}
 
 #: 搬走后旧家**不再持有**的模块全局（陈旧 patch 会响亮 AttributeError，而不是静默空操作）。
 GONE_FROM_CORE = (
-    "dist_common",
+    "common.distribution",
     "rmtree_best_effort",
     "precollect_snapshot_wver",
     "completed_pairs",
@@ -199,7 +199,7 @@ def _self_call_counts(path: Path, only: frozenset[str] | None = None) -> Mapping
     调用形态就会被算成**一条入边**，守卫于是对着「合法的文档」报假红（本刀的 `_maybe_dispatch_baseline_eval`
     头注恰好写了自己的调用形态）。入边是**语法事实**，就该用语法量。
 
-    实现搬进 `tests.helpers.source_scan`（缓存版）：本用例对全 `rl/` 跑两遍解析（入边 + 定义面）。
+    实现搬进 `tests.helpers.source_scan`（缓存版）：本用例对两棵业务树跑两遍解析（入边 + 定义面）。
 
     `only` = 只关心这些名字（白名单）；入边闭集那条传它就走廉价子串预筛，与判据无关的
     文件直接跳过解析。
@@ -290,12 +290,12 @@ def test_members_live_in_the_new_homes_only() -> None:
 
 def test_wiring_is_object_identity() -> None:
     """`TrainingLoop.X is <簇>.X`（同一个函数对象，不是同名副本）。"""
-    import rl.loop_baseline as bl
-    import rl.loop_core as core_mod
-    import rl.loop_dispatch as dp
-    import rl.loop_iter_dir as lid
+    import trainer.loop_baseline as bl
+    import trainer.loop_core as core_mod
+    import trainer.loop_dispatch as dp
+    import trainer.loop_iter_dir as lid
 
-    homes = {"rl/loop_baseline.py": bl, "rl/loop_iter_dir.py": lid, "rl/loop_dispatch.py": dp}
+    homes = {"trainer/loop_baseline.py": bl, "trainer/loop_iter_dir.py": lid, "trainer/loop_dispatch.py": dp}
     for rel, (cls, members) in CLUSTERS.items():
         home = getattr(homes[rel], cls)
         for name in members:
@@ -306,8 +306,8 @@ def test_wiring_is_object_identity() -> None:
 
 def test_composition_is_exact() -> None:
     """组装逐字对账（本文件是唯一所有者）：`RoundSteps.__bases__` + 全量 MRO 名单。"""
-    from rl.loop_core import TrainingLoop
-    from rl.loop_round_steps import RoundSteps
+    from trainer.loop_core import TrainingLoop
+    from trainer.loop_round_steps import RoundSteps
 
     assert tuple(c.__name__ for c in RoundSteps.__bases__) == ROUND_STEPS_BASES
     assert tuple(c.__name__ for c in TrainingLoop.__bases__) == TRAINING_LOOP_BASES
@@ -353,8 +353,10 @@ def test_borrowed_declarations_are_exactly_the_touched_set() -> None:
 
 def test_inbound_hands_closed_set() -> None:
     """入边闭集：每个成员只有登记的调用者，且呼叫点数逐一对账。"""
-    rl_dir = NN_ROOT / "rl"
-    files = sorted(rl_dir.glob("*.py"))
+    # 2026-09-30（刀 4）：族的调用者两棵树上都有（`trainer/` 编排 + `biz/` 纯逻辑，
+    # `_eval_on_round` 的唯一 external 调用点随 `_gate` 搬去了 `biz/loop_guards_gate.py`）
+    # ⇒ 扫描面必须走 `logic_py_files`（两棵树），否则这里是**永真**的守卫。
+    files = source_scan.logic_py_files(str(NN_ROOT))
     only = frozenset(INBOUND_CALLS)
     calls = {p.name: _self_call_counts(p, only) for p in files}
     defined = {p.name: _defined_names(p, only) for p in files}
@@ -425,8 +427,8 @@ def test_quota_incident_runs_from_the_new_home(tmp_path, monkeypatch) -> None:
     import types
     from typing import Any, cast
 
-    import rl.loop_core as core_mod
-    import rl.loop_iter_dir as lid
+    import trainer.loop_core as core_mod
+    import trainer.loop_iter_dir as lid
 
     seen: list[str] = []
     core_seen: list[str] = []
@@ -445,7 +447,7 @@ def test_quota_incident_runs_from_the_new_home(tmp_path, monkeypatch) -> None:
     cast(Any, lid.TrainingIterDir._check_quota_incident)(obj, 8)  # 第 2 轮：响亮告警
     assert obj._zero_shard_streak == 2
     assert any("quota" in m for m in seen), seen
-    assert core_seen == [], "打 rl.loop_core.log 竟收到了——seam 的落点不对"
+    assert core_seen == [], "打 trainer.loop_core.log 竟收到了——seam 的落点不对"
     # 上云轮：本地零 shard 是**预期** ⇒ 不喊、计数归零
     node = _stub(True)
     node._zero_shard_streak = 5
@@ -456,9 +458,9 @@ def test_quota_incident_runs_from_the_new_home(tmp_path, monkeypatch) -> None:
 
 def test_eval_on_round_position_contract() -> None:
     """★ 顺序契约：真实现压住 `TrainingEval` 的占位；占位被直接调用时**响亮报错**。"""
-    from rl.loop_core import TrainingLoop
-    from rl.loop_dispatch import TrainingDispatch
-    from rl.loop_eval import TrainingEval
+    from trainer.loop_core import TrainingLoop
+    from trainer.loop_dispatch import TrainingDispatch
+    from trainer.loop_eval import TrainingEval
 
     assert TrainingLoop._eval_on_round is TrainingDispatch._eval_on_round
     assert TrainingLoop._eval_on_round is not TrainingEval._eval_on_round
@@ -475,14 +477,14 @@ def test_eval_on_round_position_contract() -> None:
 
 
 def test_old_home_no_longer_absorbs_patches() -> None:
-    """★ 旧家不再吸收 patch：搬走的模块全局在 `rl.loop_core` 里**不存在**（响亮 AttributeError）。"""
-    import rl.loop_baseline as bl
-    import rl.loop_core as core_mod
-    import rl.loop_dispatch as dp
-    import rl.loop_iter_dir as lid
+    """★ 旧家不再吸收 patch：搬走的模块全局在 `trainer.loop_core` 里**不存在**（响亮 AttributeError）。"""
+    import trainer.loop_baseline as bl
+    import trainer.loop_core as core_mod
+    import trainer.loop_dispatch as dp
+    import trainer.loop_iter_dir as lid
 
     for name in GONE_FROM_CORE:
-        assert not hasattr(core_mod, name), f"rl.loop_core.{name} 还在——陈旧 patch 会静默失效"
+        assert not hasattr(core_mod, name), f"trainer.loop_core.{name} 还在——陈旧 patch 会静默失效"
     # 新家各自持有自己真正用到的那个（= 真注入点）。
     assert hasattr(bl, "RUN_ID")
     assert hasattr(lid, "completed_pairs") and hasattr(lid, "precollect_snapshot_wver")

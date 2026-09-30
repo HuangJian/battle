@@ -1,4 +1,4 @@
-"""rl/cmd.py — 本地 rollout 命令模板的 flag 口径锁死。
+"""biz/cmd.py — 本地 rollout 命令模板的 flag 口径锁死。
 
 回归背景（2026-09-12 c6-gae 核验）：`args_rollout_overrides()` 的键是下划线
 （`lives_override`/`player_level`），`build_rollout_cmd` 曾用 `f\"--{k}\"` 原样
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import types
 
-from rl.cmd import build_rollout_cmd
+from biz.cmd import build_rollout_cmd
 
 
 def _args(**kw) -> types.SimpleNamespace:

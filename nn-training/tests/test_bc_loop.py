@@ -1,4 +1,4 @@
-"""rl/bc_loop.py —— BC 课程引擎（R3-4）：一轮切段可重入，让 supervisor 能带 BC 课。
+"""trainer/bc_loop.py —— BC 课程引擎（R3-4）：一轮切段可重入，让 supervisor 能带 BC 课。
 
 只钉**性质**，不钉实现（假件：语料采集 / 发布 / 落位 / 归档 / hub 全换成假体，零真运算）：
 
@@ -7,7 +7,7 @@
    「让位后再来问」与「进程重启后再来问」都必须先认领已有的那份 job。
 2. **让位不改 task 语义**——等远端时返回 `ROUND_WAIT`（本轮**未完**，不是失败也不是完成）。
 3. **账本零污染**——冒烟轮不写 `run_start`/`bc_round_completed`；真轮恰好写一次。
-4. **一条指针**——`bc_round_completed`（`rl/bc_ledger.py`），不是 RL 的 `iteration`。
+4. **一条指针**——`bc_round_completed`（`biz/bc_ledger.py`），不是 RL 的 `iteration`。
 """
 
 from __future__ import annotations
@@ -23,12 +23,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.bc_loop as bc_loop
+import trainer.bc_loop as bc_loop
+from biz.bc_config import load_bc_course
+from biz.bc_ledger import ROUND_DONE_EVENT, read_events
+from biz.loop_round import ROUND_NEXT, ROUND_SMOKE_STOP, ROUND_WAIT
 from remote import hub_client, hub_http
-from rl.bc_config import load_bc_course
-from rl.bc_ledger import ROUND_DONE_EVENT, read_events
-from rl.bc_loop import BcLoop, BcRuntime, find_round_job
-from rl.loop_round import ROUND_NEXT, ROUND_SMOKE_STOP, ROUND_WAIT
+from trainer.bc_loop import BcLoop, BcRuntime, find_round_job
 
 
 class FakeHub:
@@ -206,7 +206,7 @@ def test_entry_is_a_thin_shell_over_the_engine() -> None:
     assert run_bc.bc_argparser is bc_loop.bc_argparser
     # 搬走的编排体不得在入口里复活（旧私有名一个都不该再有定义）
     for gone in ("collect_corpus", "publish_bc_job", "wait_bc_round", "_finish_all_rounds"):
-        assert not hasattr(run_bc, gone), f"{gone} 不该再住在 run_bc（它归 rl/bc_loop.py）"
+        assert not hasattr(run_bc, gone), f"{gone} 不该再住在 run_bc（它归 trainer/bc_loop.py）"
 
 
 def test_ledger_next_it_reads_bc_round_completed(tmp_path: Path) -> None:
@@ -418,9 +418,9 @@ def test_finish_course_does_not_exit_and_skips_smoke(tmp_path: Path, rec: Record
 
 def test_resolve_bc_init_weights_semantics(tmp_path: Path) -> None:
     """`train.init_from` 解析：空⇒None；相对路径按仓库根锚定；缺失文件响亮拒发。"""
-    from rl.bc_config import BcCourseConfig, BcTrainBlock
-    from rl.bc_loop import resolve_bc_init_weights
-    from rl.queue import REPO_ROOT
+    from biz.bc_config import BcCourseConfig, BcTrainBlock
+    from trainer.bc_loop import resolve_bc_init_weights
+    from trainer.queue import REPO_ROOT
 
     def course_with(init_from: str) -> BcCourseConfig:
         return BcCourseConfig(name="t", train=BcTrainBlock(init_from=init_from))

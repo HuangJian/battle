@@ -2,7 +2,7 @@
 
 **为什么是 Python 而不是 TS 里再写一套调度**（用户 2026-09-19 裁定，与
 `eval_course_once.py` 同一决定）：节点通信与重试机制早已在 Python 侧且经长期实战
-检验——`dist_common.fetch_task`（ping/门/退避重试/权重下发/wver 409）、
+检验——`common.distribution.fetch_task`（ping/门/退避重试/权重下发/wver 409）、
 `BatchEvalRunner`（失败连击停用 + 单局重排队 + 窗口 yield + 断点去重）、
 `policy.evalLocalSlots`（本机份额）。TS 侧只在**无分派**时用本机 worker 池跑
 （那是游戏引擎本身，不是节点通信）。
@@ -36,19 +36,19 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-# 入口放 nn-training/ 顶层（不能放 rl/：脚本目录进 sys.path[0] 会把 rl/queue.py 认成
+# 入口放 nn-training/ 顶层（不能放 rl/：脚本目录进 sys.path[0] 会把 trainer/queue.py 认成
 # stdlib `queue` ⇒ concurrent.futures 导入即炸）。仓库根 = 本文件上溯 1 层。
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nn-training"))
 
 # 本入口的 stdout 是**调用方的产物通道**（`tools/sim/m1-eval.ts` 的 JSON 报告就写在
-# stdout，`rl/eval_m1.py` 解析它取 perGame），而训练栈的 `rl.log.log()` 按设计写 stdout
+# stdout，`trainer/eval_m1.py` 解析它取 perGame），而训练栈的 `biz.log.log()` 按设计写 stdout
 #（run_rl 的日志流）。这里整体改道 stderr——否则调用方的 stdout 会被日志行污染，
 # 逐局行解析**静默失败**（2026-09-19 实测：[dist] weights[…] 行混进了 stdout）。
 sys.stdout = sys.stderr
 
-#: 可经 agent 分派的 policy（kind 见 rl/batch_plan.KIND_FOR_POLICY；`rl.batch_eval`
-#: 只是它的再导出门面，S25/B1 起实现住 `rl/batch_plan.py`）。其余 policy
+#: 可经 agent 分派的 policy（kind 见 rl/batch_plan.KIND_FOR_POLICY；`trainer.batch_eval`
+#: 只是它的再导出门面，S25/B1 起实现住 `trainer/batch_plan.py`）。其余 policy
 #: （intent / intent-oracle / goal-god）无远端对应物，TS 侧只在本机跑，不进这里。
 DISPATCHABLE = ("nn", "intent-exec", "goal", "god")
 
@@ -92,7 +92,7 @@ def plan_units(spec: dict) -> list[dict]:
 def to_m1_row(row: dict) -> dict:
     """B 层逐局行 → m1-eval 的 JSONL 契约（纯函数，可单测）。
 
-    字段名与 `tools/sim/m1-eval.ts` 的 `perGame` 同源（`rl/eval_m1.py` 按它入账），
+    字段名与 `tools/sim/m1-eval.ts` 的 `perGame` 同源（`trainer/eval_m1.py` 按它入账），
     另加 `node`（本批谁跑的，节点侧自报）与 `scorable`（scoreV7 原始输入）。
     """
     scorable = row.get("scorable") if isinstance(row.get("scorable"), dict) else None
@@ -137,9 +137,9 @@ def main() -> int:
     # 临时批次：EvalBoard 数据根指向本次 runDir（心跳/台账不进控制台既有数据）
     os.environ.setdefault("EVALBOARD_DATA", str(run_dir / "evalboard"))
 
-    import dist_common
-    from rl.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner
-    from rl.queue import RUN_ID
+    import common.distribution
+    from trainer.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner
+    from trainer.queue import RUN_ID
 
     units = plan_units(spec)
     if not units:
@@ -147,7 +147,7 @@ def main() -> int:
         return 2
     games = sum(len(u["seeds"]) for u in units)
 
-    cfg = dict(dist_common.load_dist_config(str(spec.get("distCfgPath") or dist_common.CONFIG_PATH)) or {})
+    cfg = dict(common.distribution.load_dist_config(str(spec.get("distCfgPath") or common.distribution.CONFIG_PATH)) or {})
     if spec.get("noNodes"):
         cfg = {**cfg, "nodes": []}
     policy_cfg = dict(cfg.get("policy") or {})
@@ -184,7 +184,7 @@ def main() -> int:
         eval_window_sec=float(spec.get("windowSec") or 86400),
     )
     bun = shutil.which("bun") or "bun"
-    epoch = dist_common.compute_engine_epoch()
+    epoch = common.distribution.compute_engine_epoch()
     weights_path = str(spec.get("weights") or "") or None
 
     for i, unit in enumerate(units):

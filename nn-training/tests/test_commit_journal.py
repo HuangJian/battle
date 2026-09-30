@@ -20,8 +20,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.commit_journal import CommitJournal
-from rl.forensics import log_snapshot, rss_mb, snapshot
+from biz.commit_journal import CommitJournal
+from biz.forensics import log_snapshot, rss_mb, snapshot
 
 # ---- CommitJournal：WAL 语义 ----
 
@@ -76,7 +76,7 @@ def test_hard_exit_replay(tmp_path: Path) -> None:
     child = (
         "import os, sys\n"
         f"sys.path.insert(0, r'{ROOT}')\n"
-        "from rl.commit_journal import CommitJournal\n"
+        "from biz.commit_journal import CommitJournal\n"
         f"j = CommitJournal(r'{jpath}')\n"
         "j.start('ppo_remote', '41')\n"
         "os._exit(1)\n"  # 硬死：不跑 finally/atexit，与 kill -9 / OOM 同构
@@ -155,7 +155,7 @@ def test_inflight_survives_hard_exit_with_job_id(tmp_path: Path) -> None:
     child = (
         "import os, sys\n"
         f"sys.path.insert(0, r'{ROOT}')\n"
-        "from rl.commit_journal import CommitJournal\n"
+        "from biz.commit_journal import CommitJournal\n"
         f"j = CommitJournal(r'{jpath}')\n"
         "j.start('ppo_remote', '41')\n"
         "j.attach('ppo_remote', '41', jid='job-zzz', dispatch='push')\n"

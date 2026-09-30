@@ -20,8 +20,8 @@ if str(ROOT) not in sys.path:
 
 import numpy as np
 
-from rl.config import load_course
-from rl.reward_library import METRICS_DIM, METRICS_VERSION, build_reward_fn
+from biz.config import load_course
+from biz.reward_library import METRICS_DIM, METRICS_VERSION, build_reward_fn
 
 GOLDEN_DIR = ROOT / "tests" / "golden"
 GOLDEN_PATH = GOLDEN_DIR / "reward_golden.json"

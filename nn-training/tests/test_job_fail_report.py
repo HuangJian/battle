@@ -40,8 +40,8 @@ if str(ROOT) not in sys.path:
 from test_remote_ppo import _boot_server, _http, _mini_manifest, _write_shard  # type: ignore
 
 from common.protocol import FAIL_NAME, JobFailedError, normalize_manifest
+from hub.server import _JobStore
 from remote.hub_client import publish_job, report_job_failure, wait_job
-from remote.hub_server import _JobStore
 
 _QUIET = lambda _m: None  # noqa: E731 — 测试日志静音
 
@@ -303,8 +303,8 @@ def test_push_round_promotes_node_failure_over_retryable() -> None:
     """push：节点 410（JobFailedError）不得被包成 RetryableError（那会重试 3 次）。"""
     from types import SimpleNamespace
 
-    # `_push_job_round` 与其 DI seam 都住在 rl/loop_transport.py（S4 拆出）。
-    import rl.loop_transport as lt
+    # `_push_job_round` 与其 DI seam 都住在 trainer/loop_transport.py（S4 拆出）。
+    import trainer.loop_transport as lt
 
     def _boom(*_a: object, **_k: object) -> dict:
         raise JobFailedError("job j 失败: bun 未安装 [kind=ProtocolError]", kind="ProtocolError")

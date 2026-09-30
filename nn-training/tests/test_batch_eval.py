@@ -11,7 +11,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.batch_eval import (
+from trainer.batch_eval import (
     batch_iter_id,
     claim_pending,
     load_ladder,
@@ -88,7 +88,7 @@ def test_batch_ledger_publish_is_atomic(tmp_path: Path, monkeypatch) -> None:
 
 def test_queue_claim_done_cycle(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("EVALBOARD_DATA", str(tmp_path))
-    import rl.batch_eval as be
+    import trainer.batch_eval as be
 
     assert be.data_root() == tmp_path
     b = {"batch_id": "b1", "status": "pending", "units": {"of": 2, "done": []}}
@@ -113,13 +113,13 @@ def test_queue_claim_done_cycle(tmp_path: Path, monkeypatch) -> None:
 
 def test_hooks_decoupled_from_a_eval() -> None:
     """B/C 批与 A-eval 解耦（2026-09-11）：rollout 不再领批；TrainingLoop idle 窗领取。"""
-    src = (ROOT / "rl" / "rollout_phase.py").read_text(encoding="utf-8")
+    src = (ROOT / "trainer" / "rollout_phase.py").read_text(encoding="utf-8")
     assert "maybe_dispatch_batch" not in src
     # S4 第十九/二十刀起，EvalBoard 的两个口子分住两处（认领口 `_evalboard_idle` →
-    # `rl/loop_lifecycle.py`；让位口 `_evalboard_yield` → `rl/loop_dispatch.py`）⇒ 本断言按
-    # **持有者**在整个 `rl/` 源码树里读，不按写死的文件路径读（同 S16 的修法：写死路径的守卫
+    # `trainer/loop_lifecycle.py`；让位口 `_evalboard_yield` → `trainer/loop_dispatch.py`）⇒ 本断言按
+    # **持有者**在整个 `trainer/` 源码树里读，不按写死的文件路径读（同 S16 的修法：写死路径的守卫
     # 会在下一次搬家时静默失效或假红——本文件已因此修过两次）。
-    rl_dir = ROOT / "rl"
+    rl_dir = ROOT / "trainer"
     loop_src = "".join(
         p.read_text(encoding="utf-8") for p in sorted(rl_dir.glob("loop_*.py"))
     ) + (rl_dir / "loop_core.py").read_text(encoding="utf-8")
@@ -127,24 +127,24 @@ def test_hooks_decoupled_from_a_eval() -> None:
         assert loop_src.count(f"def {name}") == 1, f"{name} 搬家后必须恰好一处定义"
     assert "maybe_dispatch_batch" in loop_src
     assert "window_event=self._eb_window" in loop_src
-    ed = (ROOT / "rl" / "eval_dispatch.py").read_text(encoding="utf-8")
+    ed = (ROOT / "trainer" / "eval_dispatch.py").read_text(encoding="utf-8")
     # 节点门判定在 eval_dispatch 里（2026-09-17 起 = check_code_hash，与 rollout 同源）
     assert "check_code_hash" in ed
-    import dist_common
+    import common.distribution
 
     # engine_epoch 仍是账本记录值（EvalGameRow.engine / 心跳），但不再是节点门判据
-    assert hasattr(dist_common, "compute_engine_epoch")
-    assert hasattr(dist_common, "check_code_hash")
+    assert hasattr(common.distribution, "compute_engine_epoch")
+    assert hasattr(common.distribution, "check_code_hash")
 
 
 def test_partial_unit_reopens_batch(tmp_path: Path, monkeypatch) -> None:
     """yield/超时部分完成：不标 unit done，批回 pending 供续跑。"""
     monkeypatch.setenv("EVALBOARD_DATA", str(tmp_path))
-    from rl.batch_eval import read_batches
+    from trainer.batch_eval import read_batches
 
     # 私有 seam 自 S26/B2 起住 store（`_reopen_for_resume` 不再经门面再导出）——
     # 它是「台账转移」，就该在台账的具名转移上测。
-    from rl.batch_store import BatchStore
+    from trainer.batch_store import BatchStore
 
     write_batches(
         tmp_path,
@@ -157,7 +157,7 @@ def test_partial_unit_reopens_batch(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_select_next_unit_only_rungs() -> None:
-    from rl.batch_eval import select_next_unit
+    from trainer.batch_eval import select_next_unit
 
     units = [{"rung": "c4l1"}, {"rung": "c6l1"}, {"rung": "c4l1"}]
     u, i, one = select_next_unit(units, set(), ["c6l1"])
@@ -175,24 +175,24 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
     import threading
     import types
 
-    import dist_common
-    import rl.batch_eval as be
+    import common.distribution
+    import trainer.batch_eval as be
 
     weights = tmp_path / "w.json"
     weights.write_text("{}", encoding="utf-8")
     eval_log = tmp_path / "eval_log.jsonl"
-    epoch = dist_common.compute_engine_epoch()
+    epoch = common.distribution.compute_engine_epoch()
     ping = {
         "evalSupport": True,
         "stageJsonSupport": True,
         "bunVersion": "9.9.9",
         "cpus": 1,
         # 节点门指纹 = codeHash（2026-09-17 起；engine_epoch 不再进 ping）
-        "codeHash": dist_common.compute_code_hash(),
+        "codeHash": common.distribution.compute_code_hash(),
     }
-    monkeypatch.setattr(dist_common, "node_ping", lambda *a, **k: dict(ping))
-    monkeypatch.setattr(dist_common, "post_weights", lambda *a, **k: "kept")
-    monkeypatch.setattr("rl.batch_runner.bun_version", lambda *a, **k: "9.9.9")
+    monkeypatch.setattr(common.distribution, "node_ping", lambda *a, **k: dict(ping))
+    monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **k: "kept")
+    monkeypatch.setattr("trainer.batch_runner.bun_version", lambda *a, **k: "9.9.9")
 
     def fake_fetch(url, key, **kw):
         return (
@@ -209,7 +209,7 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
             {},
         )
 
-    monkeypatch.setattr(dist_common, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
     # 窗只当「跑一会儿就关」的配速（断言只看「关窗后不派新局」，不看窗长）：
     # 2s → 0.4s（2026-09-26 墙钟收敛；fake 节点一局是瞬时的）。
     args = types.SimpleNamespace(eval_window_sec=0.4)
@@ -281,7 +281,7 @@ def test_window_close_no_new_games(tmp_path: Path, monkeypatch) -> None:
 # 十几条 `task fetch failed: [WinError 10054]`。原实现把它们计入 nodeFailStreak ⇒
 # 6 个节点在同一秒内全被停派 ⇒ 200 局**全部**落本地（逐局行 node 列 = local），
 # 单元墙钟 172–191s，而日志只有十几行“requeued”看不出降级。
-# 判据与 rl/bc_dispatch 的 busy 背压同源（busy 是限流信号，不是故障）。
+# 判据与 biz/bc_dispatch 的 busy 背压同源（busy 是限流信号，不是故障）。
 
 
 def _run_unit(
@@ -290,24 +290,24 @@ def _run_unit(
 ):
     import types
 
-    import dist_common
-    import rl.batch_eval as be
+    import common.distribution
+    import trainer.batch_eval as be
 
     weights = tmp_path / "w.json"
     weights.write_text("{}", encoding="utf-8")
     eval_log = tmp_path / "eval_log.jsonl"
-    epoch = dist_common.compute_engine_epoch()
+    epoch = common.distribution.compute_engine_epoch()
     ping = {
         "evalSupport": True,
         "stageJsonSupport": True,
         "bunVersion": "9.9.9",
         "cpus": 1,
-        "codeHash": dist_common.compute_code_hash(),
+        "codeHash": common.distribution.compute_code_hash(),
     }
-    monkeypatch.setattr(dist_common, "node_ping", lambda *a, **k: dict(ping))
-    monkeypatch.setattr(dist_common, "post_weights", lambda *a, **k: "kept")
-    monkeypatch.setattr("rl.batch_runner.bun_version", lambda *a, **k: "9.9.9")
-    monkeypatch.setattr(dist_common, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.distribution, "node_ping", lambda *a, **k: dict(ping))
+    monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **k: "kept")
+    monkeypatch.setattr("trainer.batch_runner.bun_version", lambda *a, **k: "9.9.9")
+    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
     args = types.SimpleNamespace(eval_window_sec=window)
     cfg = {
         "policy": cfg_policy,
@@ -327,7 +327,7 @@ def _run_unit(
     unit = units_pick(units) if units_pick else units[0]
     batch = {"batch_id": "bp", "iter": 1, "units": {"of": 1, "done": []}}
     logs: list[str] = []
-    monkeypatch.setattr("rl.batch_runner.log", lambda m: logs.append(str(m)))
+    monkeypatch.setattr("trainer.batch_runner.log", lambda m: logs.append(str(m)))
     r = be.BatchEvalRunner(
         "bun", str(weights), eval_log, args, cfg, batch, unit, 0, 1, "run1", epoch, "nn", None, ""
     )
@@ -350,7 +350,7 @@ def _ok_manifest(stage: int, seed: int, wver: str) -> dict:
 
 def test_transient_reset_is_backpressure_not_node_fault(tmp_path: Path, monkeypatch) -> None:
     """连接被重置（10054）→ 背压重排、不计节点失败：全部仍由节点完成。"""
-    import dist_common
+    import common.distribution
 
     seen_calls: dict[tuple[int, int], int] = {}
 
@@ -359,7 +359,7 @@ def test_transient_reset_is_backpressure_not_node_fault(tmp_path: Path, monkeypa
         n = seen_calls.get(task, 0) + 1
         seen_calls[task] = n
         if n <= 3:  # 一瞬的 10054（节点满负荷）
-            raise dist_common.DistError(
+            raise common.distribution.DistError(
                 0,
                 "task fetch failed: [WinError 10054] An existing connection was forcibly closed",
                 transient=True,
@@ -392,10 +392,10 @@ def test_transient_reset_is_backpressure_not_node_fault(tmp_path: Path, monkeypa
 
 def test_hard_failure_still_trips_node(tmp_path: Path, monkeypatch) -> None:
     """真失败（非瞬断）照旧熔断——背压通道不能把坏节点洗成健康。"""
-    import dist_common
+    import common.distribution
 
     def fake_fetch(url, key, **kw):
-        raise dist_common.DistError(0, "TypeError: undefined is not an object ('s.obs')")
+        raise common.distribution.DistError(0, "TypeError: undefined is not an object ('s.obs')")
 
     out, logs, _ = _run_unit(
         tmp_path,
@@ -423,7 +423,7 @@ def test_hard_failure_still_trips_node(tmp_path: Path, monkeypatch) -> None:
 
 def test_remote_zero_participation_is_loud(tmp_path: Path, monkeypatch) -> None:
     """远端 0 参与（全节点失败 + 本地槽位兜底）→ 响亮告警，不再静默降级。"""
-    import dist_common
+    import common.distribution
 
     calls = {"n": 0}
 
@@ -431,13 +431,13 @@ def test_remote_zero_participation_is_loud(tmp_path: Path, monkeypatch) -> None:
         # 前几次瞬断耗尽背压额度，随后一律硬失败 → 节点停派。
         calls["n"] += 1
         if calls["n"] % 2 == 0:
-            raise dist_common.DistError(0, "boom")
-        raise dist_common.DistError(0, "task fetch failed: connection reset", transient=True)
+            raise common.distribution.DistError(0, "boom")
+        raise common.distribution.DistError(0, "task fetch failed: connection reset", transient=True)
 
     # 本机槽位签名：run_local_eval_game(bun, weights, stage, seed, dir, wver=…) —— manifest
     # 必须回显 wver（validate_eval_result 按 wver 对账）。
     monkeypatch.setattr(
-        "rl.batch_runner.run_local_eval_game",
+        "trainer.batch_runner.run_local_eval_game",
         lambda *a, **k: _ok_manifest(int(a[2]), int(a[3]), str(k.get("wver", ""))),
         raising=False,
     )
@@ -459,7 +459,7 @@ def test_remote_zero_participation_is_loud(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_tail_race_steals_slow_node_tail(tmp_path: Path, monkeypatch) -> None:
-    """尾段竞速（与 A 层 rl/eval_dispatch 同机制）：队列空了但还有局在慢节点上 ⇒
+    """尾段竞速（与 A 层 trainer/eval_dispatch 同机制）：队列空了但还有局在慢节点上 ⇒
     空闲的快节点复制一份抢单，先返回者结算、败者按 dup 丢弃。
 
     事故背景（2026-09-19 800 局探针）：单元前 ~30s 快节点就干完，之后只剩 3 台慢节点
@@ -467,7 +467,7 @@ def test_tail_race_steals_slow_node_tail(tmp_path: Path, monkeypatch) -> None:
     """
     import time
 
-    import dist_common
+    import common.distribution
 
     calls: list[tuple[str, tuple[int, int]]] = []
 
@@ -516,7 +516,7 @@ def test_backpressure_requeue_does_not_drain_attempts(tmp_path: Path, monkeypatc
 
     本用例：一局连吃 8 次 503（> busyRetryLimit=6）之后才成功 —— 修复前该局会被丢弃。
     """
-    import dist_common
+    import common.distribution
 
     calls: dict[tuple[int, int], int] = {}
     victim: list[tuple[int, int]] = []
@@ -528,7 +528,7 @@ def test_backpressure_requeue_does_not_drain_attempts(tmp_path: Path, monkeypatc
         n = calls.get(task, 0) + 1
         calls[task] = n
         if task == victim[0] and n <= 8:
-            raise dist_common.DistError(503, 'HTTP 503: {"error":"busy"}', transient=True)
+            raise common.distribution.DistError(503, 'HTTP 503: {"error":"busy"}', transient=True)
         return _ok_manifest(task[0], task[1], kw["wver"]), {}
 
     out, logs, _ = _run_unit(
@@ -560,10 +560,10 @@ def test_settle_stall_exits_loudly_not_at_deadline(tmp_path: Path, monkeypatch) 
     本用例：一局始终硬失败（HTTP 400，非瞬断）直到被丢弃，其余 99 局正常完成 ⇒
     收尾必须在 STUCK_GRACE_SEC 内以「收尾僵死」收工。
     """
-    import dist_common
-    import rl.batch_runner as br
+    import common.distribution
+    import trainer.batch_runner as br
 
-    # 常量与执行器同住（S27/B3）⇒ 注入口也是 `rl.batch_runner`；打在旧家会是静默空操作。
+    # 常量与执行器同住（S27/B3）⇒ 注入口也是 `trainer.batch_runner`；打在旧家会是静默空操作。
     # 0.5 → 0.2（2026-09-29，§43）：判据是「在 STUCK_GRACE_SEC 内响亮收工」（日志里有
     # 「收尾僵死」），宽限值就是本用例的固有开销（僵死必须真被守到）。
     monkeypatch.setattr(br, "STUCK_GRACE_SEC", 0.2)
@@ -575,7 +575,7 @@ def test_settle_stall_exits_loudly_not_at_deadline(tmp_path: Path, monkeypatch) 
         if not victim:
             victim.append(task)
         if task == victim[0]:
-            raise dist_common.DistError(400, "HTTP 400 bad request (not transient)")
+            raise common.distribution.DistError(400, "HTTP 400 bad request (not transient)")
         return _ok_manifest(task[0], task[1], kw["wver"]), {}
 
     nodes = [
@@ -614,16 +614,16 @@ def test_settle_stall_exits_loudly_not_at_deadline(tmp_path: Path, monkeypatch) 
 def _channels_runner(
     tmp_path: Path, monkeypatch, *, nodes: list, cfg_policy: dict | None = None, unit=None, window=30.0
 ):
-    """通道测试基座：调用方自己 patch `dist_common.{node_ping,post_weights,fetch_task}`。"""
+    """通道测试基座：调用方自己 patch `common.distribution.{node_ping,post_weights,fetch_task}`。"""
     import types
 
-    import dist_common
-    import rl.batch_eval as be
+    import common.distribution
+    import trainer.batch_eval as be
 
     weights = tmp_path / "w.json"
     weights.write_text("{}", encoding="utf-8")
     eval_log = tmp_path / "eval_log.jsonl"
-    monkeypatch.setattr("rl.batch_runner.bun_version", lambda *a, **k: "9.9.9")
+    monkeypatch.setattr("trainer.batch_runner.bun_version", lambda *a, **k: "9.9.9")
     args = types.SimpleNamespace(eval_window_sec=window)
     cfg = {
         "policy": {
@@ -638,7 +638,7 @@ def _channels_runner(
     u = unit if unit is not None else plan_units(load_ladder(), 0, 0)[0]
     batch = {"batch_id": "bch", "iter": 1, "units": {"of": 1, "done": []}}
     logs: list[str] = []
-    monkeypatch.setattr("rl.batch_runner.log", lambda m: logs.append(str(m)))
+    monkeypatch.setattr("trainer.batch_runner.log", lambda m: logs.append(str(m)))
     r = be.BatchEvalRunner(
         "bun",
         str(weights),
@@ -650,7 +650,7 @@ def _channels_runner(
         0,
         1,
         "run1",
-        dist_common.compute_engine_epoch(),
+        common.distribution.compute_engine_epoch(),
         "nn",
         None,
         "",
@@ -659,23 +659,23 @@ def _channels_runner(
 
 
 def _ok_ping() -> dict:
-    import dist_common
+    import common.distribution
 
     return {
         "evalSupport": True,
         "stageJsonSupport": True,
         "bunVersion": "9.9.9",
         "cpus": 2,
-        "codeHash": dist_common.compute_code_hash(),
+        "codeHash": common.distribution.compute_code_hash(),
     }
 
 
 def test_node_gate_reason_pure() -> None:
     """节点门判据是纯函数（单测直接钉四种拒绝原因，不必起线程）。"""
-    import dist_common
-    from rl.batch_eval import node_gate_reason
+    import common.distribution
+    from trainer.batch_eval import node_gate_reason
 
-    h = dist_common.compute_code_hash()
+    h = common.distribution.compute_code_hash()
     ok = _ok_ping()
     assert node_gate_reason(ok, "9.9.9", h) is None
     assert "evalSupport" in (node_gate_reason({**ok, "evalSupport": False}, "9.9.9", h) or "")
@@ -687,7 +687,7 @@ def test_node_gate_reason_pure() -> None:
 
 def test_working_node_is_never_repinged_or_reuploaded(tmp_path: Path, monkeypatch) -> None:
     """req 3：一个节点跑 100 局，只允许 1 次 ping + 1 次权重 POST。"""
-    import dist_common
+    import common.distribution
 
     counts = {"ping": 0, "post": 0}
 
@@ -702,9 +702,9 @@ def test_working_node_is_never_repinged_or_reuploaded(tmp_path: Path, monkeypatc
     def fake_fetch(url, key, **kw):
         return _ok_manifest(int(kw["stage"]), int(kw["seed"]), kw["wver"]), {}
 
-    monkeypatch.setattr(dist_common, "node_ping", fake_ping)
-    monkeypatch.setattr(dist_common, "post_weights", fake_post)
-    monkeypatch.setattr(dist_common, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.distribution, "node_ping", fake_ping)
+    monkeypatch.setattr(common.distribution, "post_weights", fake_post)
+    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
     nodes = [{"id": "n1", "url": "http://n1", "authKey": "", "enabled": True, "concurrency": 2}]
     r, logs, _ = _channels_runner(tmp_path, monkeypatch, nodes=nodes)
     out = r.run()
@@ -717,7 +717,7 @@ def test_unreachable_node_is_retried_then_joins(tmp_path: Path, monkeypatch) -> 
     """req 5：首探失联（agent 重启中）⇒ recover_ping_sec 后重探，通了立即派单。"""
     import time
 
-    import dist_common
+    import common.distribution
 
     st: dict[str, float] = {"pings": 0.0, "ping_ok_at": 0.0, "first_fetch_at": 0.0}
 
@@ -736,9 +736,9 @@ def test_unreachable_node_is_retried_then_joins(tmp_path: Path, monkeypatch) -> 
             st["first_fetch_at"] = time.monotonic()
         return _ok_manifest(int(kw["stage"]), int(kw["seed"]), kw["wver"]), {}
 
-    monkeypatch.setattr(dist_common, "node_ping", fake_ping)
-    monkeypatch.setattr(dist_common, "post_weights", fake_post)
-    monkeypatch.setattr(dist_common, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.distribution, "node_ping", fake_ping)
+    monkeypatch.setattr(common.distribution, "post_weights", fake_post)
+    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
     nodes = [{"id": "n1", "url": "http://n1", "authKey": "", "enabled": True, "concurrency": 2}]
     r, logs, _ = _channels_runner(
         tmp_path, monkeypatch, nodes=nodes, cfg_policy={"recoverPingSec": 0.05}
@@ -765,7 +765,7 @@ def test_fast_node_dispatches_without_waiting_for_slow_bringup(
     import threading
     import time
 
-    import dist_common
+    import common.distribution
 
     t: dict[str, float] = {}
     fast_dispatched = threading.Event()
@@ -788,9 +788,9 @@ def test_fast_node_dispatches_without_waiting_for_slow_bringup(
             fast_dispatched.set()
         return _ok_manifest(int(kw["stage"]), int(kw["seed"]), kw["wver"]), {}
 
-    monkeypatch.setattr(dist_common, "node_ping", fake_ping)
-    monkeypatch.setattr(dist_common, "post_weights", fake_post)
-    monkeypatch.setattr(dist_common, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.distribution, "node_ping", fake_ping)
+    monkeypatch.setattr(common.distribution, "post_weights", fake_post)
+    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
     nodes = [
         {"id": "fast", "url": "http://fast", "authKey": "", "enabled": True, "concurrency": 1},
         {"id": "slow", "url": "http://slow", "authKey": "", "enabled": True, "concurrency": 2},
@@ -810,7 +810,7 @@ def test_settle_complete_closes_inflight_connections(tmp_path: Path, monkeypatch
     import threading
     import time
 
-    import dist_common
+    import common.distribution
 
     release = threading.Event()
     aborted = {"n": 0}
@@ -824,13 +824,13 @@ def test_settle_complete_closes_inflight_connections(tmp_path: Path, monkeypatch
         if "slow" in url:
             release.wait(30.0)
             # 连接被关闭 → 与真实现同类的瞬断异常（回包已无用 ⇒ 必须按「无关」丢弃）
-            raise dist_common.DistError(0, "connection reset by abort", transient=True)
+            raise common.distribution.DistError(0, "connection reset by abort", transient=True)
         return _ok_manifest(int(kw["stage"]), int(kw["seed"]), kw["wver"]), {}
 
-    monkeypatch.setattr(dist_common, "node_ping", lambda *a, **k: _ok_ping())
-    monkeypatch.setattr(dist_common, "post_weights", lambda *a, **k: "kept")
-    monkeypatch.setattr(dist_common, "fetch_task", fake_fetch)
-    monkeypatch.setattr(dist_common, "abort_active_requests", fake_abort)
+    monkeypatch.setattr(common.distribution, "node_ping", lambda *a, **k: _ok_ping())
+    monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **k: "kept")
+    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.distribution, "abort_active_requests", fake_abort)
     nodes = [
         {"id": "fast", "url": "http://fast", "authKey": "", "enabled": True, "concurrency": 2},
         {"id": "slow", "url": "http://slow", "authKey": "", "enabled": True, "concurrency": 2},
@@ -853,7 +853,7 @@ def test_settle_complete_closes_inflight_connections(tmp_path: Path, monkeypatch
 
 def test_unit_pairs_route_per_stage_params(tmp_path: Path, monkeypatch) -> None:
     """req 2 接线：单单元跨多关时，逐局必须拿到**本关**的 stageJson/lives/level/maxTicks。"""
-    import dist_common
+    import common.distribution
 
     got: dict[int, dict] = {}
 
@@ -866,9 +866,9 @@ def test_unit_pairs_route_per_stage_params(tmp_path: Path, monkeypatch) -> None:
         }
         return _ok_manifest(int(kw["stage"]), int(kw["seed"]), kw["wver"]), {}
 
-    monkeypatch.setattr(dist_common, "node_ping", lambda *a, **k: _ok_ping())
-    monkeypatch.setattr(dist_common, "post_weights", lambda *a, **k: "kept")
-    monkeypatch.setattr(dist_common, "fetch_task", fake_fetch)
+    monkeypatch.setattr(common.distribution, "node_ping", lambda *a, **k: _ok_ping())
+    monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **k: "kept")
+    monkeypatch.setattr(common.distribution, "fetch_task", fake_fetch)
     unit = {
         "rung": "multi",
         "stageId": 2000,

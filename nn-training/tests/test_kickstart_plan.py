@@ -27,17 +27,17 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.config import CourseConfig, apply_course, corpus_identity_fp, course_cli_conflicts
-from rl.hot_reload import RESTART_ONLY_FIELDS, apply_hot_fields, plan_reload
-from rl.kickstart_burn import (
+from biz.config import CourseConfig, apply_course, corpus_identity_fp, course_cli_conflicts
+from biz.hot_reload import RESTART_ONLY_FIELDS, apply_hot_fields, plan_reload
+from biz.kickstart_burn import (
     BURN_MARGIN_PP,
     BURN_POINTS,
     baseline_reading,
     burn_overrides,
     burn_verdict,
 )
-from rl.loop_guards import TrainingGuards
-from rl.loop_steps import kickstart_coef
+from trainer.loop_guards import TrainingGuards
+from trainer.loop_steps import kickstart_coef
 
 
 def _course(**kw) -> CourseConfig:
@@ -259,8 +259,8 @@ def test_guard_also_halts_the_cloud_on_the_same_course(
         calls.append((halt, course))
         return True
 
-    monkeypatch.setattr("rl.loop_guards.set_cloud_halt", _fake_set, raising=True)
-    monkeypatch.setattr("rl.loop_guards.dist_common.course_name_of", lambda: "t5-kk", raising=True)
+    monkeypatch.setattr("trainer.loop_guards.set_cloud_halt", _fake_set, raising=True)
+    monkeypatch.setattr("trainer.loop_guards.common.distribution.course_name_of", lambda: "t5-kk", raising=True)
     _write_eval_rows(tmp_path, _rows(0.35, 0.29, 0.28, 0.27))
     g = _guards(tmp_path, remote_hub_url="http://hub", remote_token="tok")
     g._cloud_halted = False

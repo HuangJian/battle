@@ -466,7 +466,7 @@ def _ensure_payload(
         raw = download_payload(base_url, token, jid)
         payload_dl_sec = round(time.time() - t_dl, 3)
         _line = f"下载 {len(raw)} bytes / {payload_dl_sec:.1f}s"
-    # 日志节食（2026-09-24）：给了 bundle 就攒进调用方那一行（短口径，见 log_bundle）；
+    # 日志节食（2026-09-24）：给了 bundle 就攒进调用方那一行（短口径，见 common.log_bundle）；
     # 不传时逐字节保持改造前的输出。
     if bundle is not None:
         bundle.add("payload", _line)
@@ -480,7 +480,7 @@ def _ensure_payload(
 
     job_dir = work_dir / jid
     if job_dir.exists():
-        from platform_utils import rmtree_best_effort
+        from common.platform_utils import rmtree_best_effort
 
         rmtree_best_effort(job_dir)
     job_dir.mkdir(parents=True)
@@ -622,7 +622,7 @@ def _ensure_ts_code(
         raise RetryableError("ts_code_sha256 不匹配——传输损坏（重下可修复）")
     tmp = ts_root / (sha + ".tmp")
     if tmp.exists():
-        from platform_utils import rmtree_best_effort
+        from common.platform_utils import rmtree_best_effort
 
         rmtree_best_effort(tmp, ignore_errors=True)
     tmp.mkdir(parents=True, exist_ok=True)
@@ -632,7 +632,7 @@ def _ensure_ts_code(
         zf.extractall(tmp)
     ts_root.mkdir(parents=True, exist_ok=True)
     if cache.exists():  # 并发窗口：别人已解好 → 用别人的
-        from platform_utils import rmtree_best_effort as _rm
+        from common.platform_utils import rmtree_best_effort as _rm
 
         _rm(tmp, ignore_errors=True)
         _rm(zip_path, ignore_errors=True)

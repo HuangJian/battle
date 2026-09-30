@@ -5,7 +5,7 @@
  * codeHash → 排除不合格节点」，此前一个各写一份（m1-eval 连 codeHash 门都**没有**
  * ——2026-09-19 核实：`tryActivate` 只看 HTTP 200，会把陈旧节点当作可用算力，
  * 让不同 era 的结果混进同一份读数）。门口径本身与 Python 侧
- * `dist_common.check_code_hash` 同源（同一份 `tools/agent/codehash-files.txt`）。
+ * `common.distribution.check_code_hash` 同源（同一份 `tools/agent/codehash-files.txt`）。
  *
  * 「响亮告警」的目标：判读时**一眼看出**远端算力是否真的参与了，以及为什么没参与
  * ——`--dist-local 0` 也挡不住的全灭回落本地（`hybrid failed … falling back to local`）
@@ -100,7 +100,7 @@ export function bunMajorMinor(v: string): string {
   return String(v).split('.').slice(0, 2).join('.')
 }
 
-/** 节点门：返回拒绝原因或 null（与 `dist_common.check_code_hash` + 能力位同源）。 */
+/** 节点门：返回拒绝原因或 null（与 `common.distribution.check_code_hash` + 能力位同源）。 */
 export function nodeGateReason(
   ping: DistPing | null,
   localBunMM: string,
@@ -154,7 +154,7 @@ export function classifyGate(entries: NodeGateEntry[]): GateSummary {
  * （本机不参与，全交集群）。一次性评估工具此前缺省 `--dist-local` = 物理核数，
  * 把「本机不参与」静默变成「本机跑近一半」（2026-09-19 实测：配置 local_slots=0，
  * 1600 局的批本地跑了 730 局，5 台节点只分到 870）。取值优先级与 Python 评测栈
- * 同序：`policy.evalLocalSlots`（评测专用旋钮，`rl/eval_local.py`）→ `rl.local_slots`
+ * 同序：`policy.evalLocalSlots`（评测专用旋钮，`biz/eval_local.py`）→ `rl.local_slots`
  * （机器级，`dashboard/src/core/slots.ts` 同源）。
  */
 export interface LocalSlotsFromConfig {

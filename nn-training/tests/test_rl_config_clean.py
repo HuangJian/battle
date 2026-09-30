@@ -234,7 +234,7 @@ def test_load_jsonc_uses_the_product_loader(tmp_path: Path) -> None:
     ⇒ `curricula/*.jsonc` 108 个里 88 个、`levels/*.jsonc` 25 个里 25 个都读不了，
     `--matrix` 只要遇到一门在训课程就 `JSONDecodeError` 崩掉（而「文件没读进来」
     会被误读成「课程没声明该键」= 静默删兜底）。产品侧 `load_course` 走
-    `rl.jsonc.loads`（`strip_comments` → `_drop_trailing_commas` → `json.loads`）
+    `common.jsonc.loads`（`strip_comments` → `_drop_trailing_commas` → `json.loads`）
     ——本工具必须同源。
     """
     p = tmp_path / "c.jsonc"

@@ -1,4 +1,4 @@
-"""S23 契约（2026-09-25）—— `rl/loop_guards.py` 按判据同源切成四簇后不得腐烂。
+"""S23 契约（2026-09-25）—— `trainer/loop_guards.py` 按判据同源切成四簇后不得腐烂。
 
 S4 第二十三刀把 `TrainingGuards` 的 13 个成员按**判据同源**切成四簇——每一簇是「同一件事
 的一条轴」，不是按大小或物理位置切（`_rotate_cleanup` 只有 52 行却独立成簇，302 行的
@@ -6,22 +6,22 @@ S4 第二十三刀把 `TrainingGuards` 的 13 个成员按**判据同源**切成
 
 | 混入 | 判据 | 模块 | 成员 |
 |---|---|---|---|
-| `TrainingGuardsTrip` | **过程面**硬边界（更新健康度 / 评估显著度，连击式） | `rl/loop_guards_trip.py` | `_breaker` · `_stop_loss` |
-| `TrainingGuardsLeg` | **结果面**停腿（退回了吗 / 比对照臂差吗） | `rl/loop_guards_leg.py` | `_kickstart_burn` · `_paired_kill` |
-| `TrainingGuardsGate` | **课程结束门一整族**（求值 → 判决落地 → 预算硬断） | `rl/loop_guards_gate.py` | `_gate` · `_apply_verdict` · `_warn_min_train_unreachable` · `_budget_hard_cut` |
-| `TrainingGuardsSweep` | **轮级磁盘回收** | `rl/loop_guards_sweep.py` | `_rotate_cleanup` |
+| `TrainingGuardsTrip` | **过程面**硬边界（更新健康度 / 评估显著度，连击式） | `biz/loop_guards_trip.py` | `_breaker` · `_stop_loss` |
+| `TrainingGuardsLeg` | **结果面**停腿（退回了吗 / 比对照臂差吗） | `biz/loop_guards_leg.py` | `_kickstart_burn` · `_paired_kill` |
+| `TrainingGuardsGate` | **课程结束门一整族**（求值 → 判决落地 → 预算硬断） | `biz/loop_guards_gate.py` | `_gate` · `_apply_verdict` · `_warn_min_train_unreachable` · `_budget_hard_cut` |
+| `TrainingGuardsSweep` | **轮级磁盘回收** | `biz/loop_guards_sweep.py` | `_rotate_cleanup` |
 
 DAG 与 S22（一条连通分量）**不同**：这是一个**多 sink 的 DAG**——`_ledger_apply` 被 3 簇调、
 `_sync_cloud_halt` 被 2 簇 + 外部 `loop_lifecycle.finish_course` 调。按「入边来自多个 sibling
 ⇒ 锁进组合根」的既有规则（第十九刀），**提供者留根、调用者出包**：
 
-| 留根（`rl/loop_guards.py::TrainingGuards`） | 判据 |
+| 留根（`trainer/loop_guards.py::TrainingGuards`） | 判据 |
 |---|---|
 | `_ledger_apply` | 事件 → 账本视图增量（3 簇共用） |
 | `_sync_cloud_halt` · `_is_soft_verdict` · `_gate_halt_mode` + 三个判决词表常量 | 判决 → 云机达令（2 簇共用 + 外部） |
 
-★ 二者留根还有一条**硬理由**：它们是 `rl.loop_guards` 的 **patch 锚点**——`set_cloud_halt` /
-`dist_common` 被四个测试文件以 `monkeypatch.setattr("rl.loop_guards.…", …, raising=True)`
+★ 二者留根还有一条**硬理由**：它们是 `trainer.loop_guards` 的 **patch 锚点**——`set_cloud_halt` /
+`common.distribution` 被四个测试文件以 `monkeypatch.setattr("trainer.loop_guards.…", …, raising=True)`
 打桩；搬走会让桩**静静失效**（本文件 `test_patch_anchor_stays_in_the_root` 正面钉住）。
 
 本文件钉住这条切分不腐烂的若干面：定义面唯一（**旧家零残留**）· 对象恒等 · 组装逐字 ·
@@ -48,7 +48,28 @@ NN_ROOT = Path(__file__).resolve().parent.parent
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
 
-RL = NN_ROOT / "rl"
+RL = NN_ROOT / "trainer"
+
+
+def _home(fname: str) -> Path:
+    """族里五个文件的**住址** —— 组合根在 `trainer/`（编排），四簇在 `biz/`（纯逻辑）。
+
+    2026-09-30（刀 4）：`loop_guards_{trip,leg,gate,sweep}` 随纯逻辑整族搬进 `biz/`，
+    组合根 `loop_guards.py` 住 `trainer/`。**家族的成员没变、只是分住两棵树** ——
+    写死 `RL / fname` 的地方当场 `FileNotFoundError`（响的），而 `RL.glob("*.py")`
+    那种扫描面会**静默缩水**（哑的）⇒ 一律经 `_home` / `source_scan.logic_py_files`。
+    """
+    return source_scan.logic_module(str(NN_ROOT), fname)
+
+
+def _dotted(fname: str) -> str:
+    """它的**点分模块名**（`trainer.loop_guards` / `biz.loop_guards_gate`）。
+
+    给 `f"rl.{fname[:-3]}"` 那类模板串用：模板串里的全名**文本改写看不见**，搬家后不改
+    就是 `ModuleNotFoundError`；`assert got.__module__ == …` 那种更坏——它会去比一个
+    **不存在的名字**（要么当场红、要么被 `hasattr` 类判据吃成永真）。
+    """
+    return source_scan.logic_dotted(str(NN_ROOT), fname)
 
 #: 成员 → (文件, 类)。搬走的 9 个，一个不漏。
 HOMES: dict[str, tuple[str, str]] = {
@@ -64,7 +85,7 @@ HOMES: dict[str, tuple[str, str]] = {
 }
 MEMBERS = tuple(HOMES)
 
-#: 留根四人 + 三个判决词表常量（常量是**类属性**，不是模块级名——`rl.loop_lifecycle` 与
+#: 留根四人 + 三个判决词表常量（常量是**类属性**，不是模块级名——`trainer.loop_lifecycle` 与
 #: `test_train_ledger.py` 按 `TrainingGuards.NO_CLOUD_HALT_KINDS` 取，故必须仍挂在根上）。
 STAYS = ("_ledger_apply", "_is_soft_verdict", "_gate_halt_mode", "_sync_cloud_halt")
 ROOT_CONSTS = ("CLOUD_HALT_VERDICTS", "NO_CLOUD_HALT_KINDS", "GATE_HALT_MODES")
@@ -139,13 +160,13 @@ OUTBOUND_HANDS: dict[str, frozenset[str]] = {
 #: 借用的**方法**（不在本簇里、以 `self.` 调）：文件 → {方法: 真实现住哪}。
 #: 它们必须在类体里声明 `Any`，否则 mypy 报 `attr-defined`（同 S22 的 HELPER_HANDS 口径）。
 BORROWED_METHODS: dict[str, dict[str, str]] = {
-    "loop_guards_trip.py": {"_ledger_apply": "rl.loop_guards"},
-    "loop_guards_leg.py": {"_ledger_apply": "rl.loop_guards", "_sync_cloud_halt": "rl.loop_guards"},
+    "loop_guards_trip.py": {"_ledger_apply": "trainer.loop_guards"},
+    "loop_guards_leg.py": {"_ledger_apply": "trainer.loop_guards", "_sync_cloud_halt": "trainer.loop_guards"},
     "loop_guards_gate.py": {
-        "_ledger_apply": "rl.loop_guards",
-        "_sync_cloud_halt": "rl.loop_guards",
-        "_is_soft_verdict": "rl.loop_guards",
-        "_eval_on_round": "rl.loop_dispatch",
+        "_ledger_apply": "trainer.loop_guards",
+        "_sync_cloud_halt": "trainer.loop_guards",
+        "_is_soft_verdict": "trainer.loop_guards",
+        "_eval_on_round": "trainer.loop_dispatch",
     },
     "loop_guards_sweep.py": {},
 }
@@ -154,29 +175,29 @@ BORROWED_METHODS: dict[str, dict[str, str]] = {
 TOP_IMPORTS: dict[str, frozenset[str]] = {
     "loop_guards.py": frozenset(
         {
-            "dist_common",
+            "common.distribution",
             "remote.hub_client",
-            "rl.log",
-            "rl.loop_guards_gate",
-            "rl.loop_guards_leg",
-            "rl.loop_guards_sweep",
-            "rl.loop_guards_trip",
+            "biz.log",
+            "biz.loop_guards_gate",
+            "biz.loop_guards_leg",
+            "biz.loop_guards_sweep",
+            "biz.loop_guards_trip",
         }
     ),
-    "loop_guards_trip.py": frozenset({"rl.breaker", "rl.events", "rl.log", "rl.stop_loss"}),
+    "loop_guards_trip.py": frozenset({"biz.breaker", "biz.events", "biz.log", "biz.stop_loss"}),
     "loop_guards_leg.py": frozenset(
         {
-            "rl.config",
-            "rl.events",
-            "rl.gate_check",
-            "rl.kickstart_burn",
-            "rl.log",
-            "rl.paired",
-            "rl.paired_kill",
+            "biz.config",
+            "biz.events",
+            "biz.gate_check",
+            "biz.kickstart_burn",
+            "biz.log",
+            "biz.paired",
+            "biz.paired_kill",
         }
     ),
-    "loop_guards_gate.py": frozenset({"rl.events", "rl.gate_check", "rl.log"}),
-    "loop_guards_sweep.py": frozenset({"platform_utils", "rl.log", "rl.workdir_sweep"}),
+    "loop_guards_gate.py": frozenset({"biz.events", "biz.gate_check", "biz.log"}),
+    "loop_guards_sweep.py": frozenset({"common.platform_utils", "biz.log", "biz.workdir_sweep"}),
 }
 
 #: 允许的 stdlib 顶层 import（闭集的一部分）。
@@ -187,20 +208,22 @@ STDLIB_IMPORTS = frozenset(
 #: 反向边（禁）：成环或把叶子拉回编排上游。
 FORBIDDEN_IMPORTS = frozenset(
     {
-        "rl.loop_core",
-        "rl.loop_guards",
-        "rl.loop_lifecycle",
-        "rl.loop_round_steps",
-        "rl.loop_steps",
-        "rl.loop_volume",
+        "trainer.loop_core",
+        "trainer.loop_guards",
+        "trainer.loop_lifecycle",
+        "trainer.loop_round_steps",
+        "trainer.loop_steps",
+        "trainer.loop_volume",
     }
 )
 
-#: ★ patch 锚点：这四个**模块全局名**必须只住组合根（四个测试文件按 `rl.loop_guards.<名>`
+#: ★ patch 锚点：这两个**顶层 import 名**必须只住组合根（四个测试文件按 `trainer.loop_guards.<名>`
 #: 打桩；搬走会让桩静静失效 —— `raising=True` 只能保证打桩那一刻响亮）。
-PATCH_ANCHORS = ("set_cloud_halt", "dist_common")
+#: 口径 = `_module_globals`，所以模块写**全点分路径**（`import common.distribution` ⇒
+#: `common.distribution`，2026-09-30 刀 2 前是单段的 `dist_common`）。
+PATCH_ANCHORS = ("set_cloud_halt", "common.distribution")
 
-#: 搬走后就**不该**在 `rl.loop_guards` 命名空间里存在的名字（旧家不再吸收 patch）。
+#: 搬走后就**不该**在 `trainer.loop_guards` 命名空间里存在的名字（旧家不再吸收 patch）。
 GONE_FROM_ROOT = (
     "breaker_update",
     "write_circuit_break",
@@ -278,12 +301,19 @@ def _top_level_names(path: Path) -> set[str]:
 
 
 def _module_globals(path: Path) -> set[str]:
-    """顶层 import 绑定的**名字**（`from remote.hub_client import set_cloud_halt` → `set_cloud_halt`）。"""
+    """顶层 import 的**模块路径 / 导入名**：
+
+      · `import a.b` → `a.b`（全点分路径；带 `as` 则取别名）
+      · `from remote.hub_client import set_cloud_halt` → `set_cloud_halt`
+
+    2026-09-30（刀 2）：`ast.Import` 那一支原取 `a.name.split(".")[0]`（根名），
+    只在「顶层模块都是单段名」时与另一支等价；`dist_common` 下沉成 `common.distribution`
+    后，`PATCH_ANCHORS` 里写的就是全点分模块路径，这一支得对得上（见该常量注释）。
+    """
     out: set[str] = set()
     for n in ast.parse(path.read_text(encoding="utf-8")).body:
-        if isinstance(n, ast.Import):
-            out.update((a.asname or a.name.split(".")[0]) for a in n.names)
-        elif isinstance(n, ast.ImportFrom) and not n.level:
+        # `Import` 与「非相对 `ImportFrom`」两支取的都是 `a.asname or a.name`（见 docstring 口径）。
+        if isinstance(n, ast.Import) or (isinstance(n, ast.ImportFrom) and not n.level):
             out.update((a.asname or a.name) for a in n.names)
     return out
 
@@ -309,7 +339,7 @@ def _declared(path: Path, cls_name: str) -> set[str]:
 def _family_reads(fname: str, *, assign: bool) -> dict[str, set[str]]:
     """本簇成员里 `self.<名>` 的读/写面（名字 → 出现它的成员名集合）。"""
     out: dict[str, set[str]] = {}
-    for member, fn in _methods(RL / fname, FAMILY[fname]).items():
+    for member, fn in _methods(_home(fname), FAMILY[fname]).items():
         names = _self_assigns(fn) if assign else (_self_attrs(fn) - _self_calls(fn))
         for name in names:
             out.setdefault(name, set()).add(member)
@@ -322,45 +352,45 @@ def _family_reads(fname: str, *, assign: bool) -> dict[str, set[str]]:
 def test_members_live_in_exactly_their_new_home() -> None:
     """9 个搬走的成员各自只在新家定义一次；旧家（组合根）里**不得**再有同名。"""
     for member, (fname, _cls_name) in HOMES.items():
-        definers = [name for name, cn in FAMILY.items() if member in _methods(RL / name, cn)]
+        definers = [name for name, cn in FAMILY.items() if member in _methods(_home(name), cn)]
         assert definers == [fname], f"{member} 的定义面：{definers}（期望 {fname}）"
-    root_src = (RL / "loop_guards.py").read_text(encoding="utf-8")
+    root_src = _home("loop_guards.py").read_text(encoding="utf-8")
     for member in MEMBERS:
         assert f"def {member}(" not in root_src, f"{member} 又回到组合根了"
 
 
 def test_root_keeps_exactly_the_shared_sinks() -> None:
     """组合根的成员闭集**恰好**是四个共享 sink（多一个 = 有人顺手塞了新方法）。"""
-    got = sorted(_methods(RL / "loop_guards.py", "TrainingGuards"))
+    got = sorted(_methods(_home("loop_guards.py"), "TrainingGuards"))
     assert got == sorted(STAYS), f"组合根多/少了方法：{got}"
 
 
 def test_helpers_moved_with_their_only_consumer() -> None:
     """三个模块级助手跟着唯一使用者走；组合根顶层只剩类本身。"""
-    assert _top_level_names(RL / "loop_guards.py") == {"TrainingGuards"}
+    assert _top_level_names(_home("loop_guards.py")) == {"TrainingGuards"}
     for helper, fname in HELPERS.items():
-        assert helper in _top_level_names(RL / fname), f"{helper} 应住 {fname}"
+        assert helper in _top_level_names(_home(fname)), f"{helper} 应住 {fname}"
         for other in FAMILY:
             if other != fname:
-                assert helper not in _top_level_names(RL / other), f"{helper} 出现在 {other}"
+                assert helper not in _top_level_names(_home(other)), f"{helper} 出现在 {other}"
 
 
 def test_identity_through_the_composition_root() -> None:
     """`TrainingGuards.X is 新家.X`——接线是**对象级**，不是同名副本。"""
-    import rl.loop_guards as root
+    import trainer.loop_guards as root
 
     for member, (fname, cls_name) in HOMES.items():
-        home = getattr(__import__(f"rl.{fname[:-3]}", fromlist=[cls_name]), cls_name)
+        home = getattr(__import__(_dotted(fname), fromlist=[cls_name]), cls_name)
         got = getattr(root.TrainingGuards, member)
         assert got is getattr(home, member), member
-        assert got.__module__ == f"rl.{fname[:-3]}", member
+        assert got.__module__ == _dotted(fname), member
 
 
 def test_no_member_name_shadowed_across_the_family() -> None:
     """13 个成员名在族里**零重名**（MRO 遮罩的充要条件）——声明的顺序恒惰性。"""
     all_names = MEMBERS + STAYS
     for name in all_names:
-        definers = [f for f, cn in FAMILY.items() if name in _methods(RL / f, cn)]
+        definers = [f for f, cn in FAMILY.items() if name in _methods(_home(f), cn)]
         assert len(definers) == 1, f"{name} 被定义在 {definers}"
 
 
@@ -368,28 +398,29 @@ def test_no_member_name_shadowed_across_the_family() -> None:
 
 
 def test_composition_is_exact() -> None:
-    """组合根仍是 `TrainingGuards`、仍住 `rl/loop_guards.py`，基类元组逐字；组合类一行不改。"""
-    import rl.loop_guards as root
-    from rl.loop_core import TrainingLoop
-    from rl.loop_eval import TrainingEval
-    from rl.loop_export import TrainingExport
-    from rl.loop_guards import TrainingGuards
-    from rl.loop_guards_gate import TrainingGuardsGate
-    from rl.loop_guards_leg import TrainingGuardsLeg
-    from rl.loop_guards_sweep import TrainingGuardsSweep
-    from rl.loop_guards_trip import TrainingGuardsTrip
-    from rl.loop_lifecycle import TrainingLifecycle
-    from rl.loop_remote import TrainingRemote
-    from rl.loop_round_steps import RoundSteps
-    from rl.loop_steps import TrainingSteps
+    """组合根仍是 `TrainingGuards`、仍住 `trainer/loop_guards.py`，基类元组逐字；组合类一行不改。"""
+    import trainer.loop_guards as root
+    from biz.loop_guards_gate import TrainingGuardsGate
+    from biz.loop_guards_leg import TrainingGuardsLeg
+    from biz.loop_guards_sweep import TrainingGuardsSweep
+    from biz.loop_guards_trip import TrainingGuardsTrip
+    from trainer.loop_core import TrainingLoop
+    from trainer.loop_eval import TrainingEval
+    from trainer.loop_export import TrainingExport
+    from trainer.loop_guards import TrainingGuards
+    from trainer.loop_lifecycle import TrainingLifecycle
+    from trainer.loop_remote import TrainingRemote
+    from trainer.loop_round_steps import RoundSteps
+    from trainer.loop_steps import TrainingSteps
 
     for fname, want in BASES.items():
-        cls = getattr(root if fname == "loop_guards.py" else __import__(
-            f"rl.{fname[:-3]}", fromlist=[FAMILY[fname]]
-        ), FAMILY[fname])
+        mod = root if fname == "loop_guards.py" else __import__(
+            _dotted(fname), fromlist=[FAMILY[fname]]
+        )
+        cls = getattr(mod, FAMILY[fname])
         assert tuple(c.__name__ for c in cls.__bases__) == want, fname
 
-    assert root.TrainingGuards.__module__ == "rl.loop_guards"
+    assert root.TrainingGuards.__module__ == "trainer.loop_guards"
     # 组合类与**既有守卫一行不改**（本簇挂的是 `TrainingGuards` 一侧的链）。
     assert TrainingLoop.__bases__ == (
         RoundSteps,
@@ -423,24 +454,24 @@ def test_borrowed_declarations_are_exactly_the_derived_set() -> None:
             name for name in _family_reads(fname, assign=True)
         }
         want = derived | set(borrowed)
-        assert _declared(RL / fname, FAMILY[fname]) == want, fname
+        assert _declared(_home(fname), FAMILY[fname]) == want, fname
         # 借用的方法集 == 实际以 `self.` 调的非本簇方法（不能声明了却没人调）
         called: set[str] = set()
-        for fn in _methods(RL / fname, FAMILY[fname]).values():
+        for fn in _methods(_home(fname), FAMILY[fname]).values():
             called |= _self_calls(fn)
-        assert called - set(_methods(RL / fname, FAMILY[fname])) == set(borrowed), fname
+        assert called - set(_methods(_home(fname), FAMILY[fname])) == set(borrowed), fname
 
 
 def test_root_declares_the_slots_and_four_homes_declare_none_of_them() -> None:
     """训练状态槽位只在组合根声明一处；四簇**借**（`self.`）而不重复声明。"""
-    root_decl = _declared(RL / "loop_guards.py", "TrainingGuards")
+    root_decl = _declared(_home("loop_guards.py"), "TrainingGuards")
     assert {"args", "_jsonl_path", "_ledger", "_cloud_halted", "_eval_on_round"} <= root_decl
     for fname in HOMES.values():
         f = fname[0]
         if f == "loop_guards_sweep.py":
             continue
         for slot in ("_ledger", "_cloud_halted"):
-            assert slot not in _declared(RL / f, FAMILY[f]), (f, slot)
+            assert slot not in _declared(_home(f), FAMILY[f]), (f, slot)
 
 
 # ─────────────────────────────── 入边 / 出边 / 状态 ───────────────────────────────
@@ -450,12 +481,13 @@ def test_inbound_hands_closed_set() -> None:
     """入边逐项对账（AST 计真实 `Call`，不数源码字符串——S20 的假红教训）。
 
     走 `source_scan.self_call_counts(..., only=…)`（共享缓存 + 廉价子串预筛）：
-    判据不变（还是 AST 真的 `self.<attr>(…)` 调用），但全 `rl/` 里与这十来个成员名
+    判据不变（还是 AST 真的 `self.<attr>(…)` 调用），但两棵业务树里与这十来个成员名
     无关的文件不再付 `ast.parse` + `ast.walk`。
     """
     only = frozenset(INBOUND_CALLS)
     got: dict[str, dict[str, int]] = {m: {} for m in INBOUND_CALLS}
-    for path in sorted(RL.glob("*.py")):
+    # 两棵树都扫：族的成员分住 `trainer/`（组合根）与 `biz/`（四簇），调用者两棵树上都有。
+    for path in source_scan.logic_py_files(str(NN_ROOT)):
         for member, n in source_scan.self_call_counts(str(path), only).items():
             got[member][path.name] = n
     for member, want in INBOUND_CALLS.items():
@@ -468,7 +500,7 @@ def test_outbound_hands_closed_set() -> None:
     home_of.update({m: "loop_guards.py" for m in STAYS})
     for fname, want in OUTBOUND_HANDS.items():
         called: set[str] = set()
-        for fn in _methods(RL / fname, FAMILY[fname]).values():
+        for fn in _methods(_home(fname), FAMILY[fname]).values():
             called |= _self_calls(fn)
         cross = {m for m in called if m in home_of and home_of[m] != fname}
         assert cross == set(want), f"{fname} 的跨簇出边变了：{sorted(cross)}"
@@ -481,7 +513,7 @@ def test_root_calls_nobody() -> None:
     钉的是「根 → 簇」这条方向不存在。
     """
     called: set[str] = set()
-    for fn in _methods(RL / "loop_guards.py", "TrainingGuards").values():
+    for fn in _methods(_home("loop_guards.py"), "TrainingGuards").values():
         called |= _self_calls(fn)
     assert called & set(HOMES) == set(), sorted(called & set(HOMES))
     assert called <= set(STAYS)
@@ -496,14 +528,14 @@ def test_cloud_halt_state_has_a_single_writer() -> None:
     readers = {
         fname
         for fname in FAMILY
-        if any("_cloud_halted" in _self_attrs(fn) for fn in _methods(RL / fname, FAMILY[fname]).values())
+        if any("_cloud_halted" in _self_attrs(fn) for fn in _methods(_home(fname), FAMILY[fname]).values())
     }
     assert readers <= {"loop_guards.py"}, readers
 
 
 def test_root_keeps_the_verdict_vocabulary_constants() -> None:
     """三个判决词表常量仍是 `TrainingGuards` 的**类属性**（外部按类取，不按模块取）。"""
-    from rl.loop_guards import TrainingGuards
+    from trainer.loop_guards import TrainingGuards
 
     for const in ROOT_CONSTS:
         assert const in TrainingGuards.__dict__, const
@@ -517,7 +549,7 @@ def test_root_keeps_the_verdict_vocabulary_constants() -> None:
 
 def test_top_level_import_surface_is_closed() -> None:
     for fname, want in TOP_IMPORTS.items():
-        got = _top_imports(RL / fname)
+        got = _top_imports(_home(fname))
         assert got <= (want | STDLIB_IMPORTS), f"{fname} 长出非申报 import：{sorted(got - want)}"
         assert got >= want, f"{fname} 少了申报 import：{sorted(want - got)}"
 
@@ -525,26 +557,28 @@ def test_top_level_import_surface_is_closed() -> None:
 def test_no_reverse_edges() -> None:
     """四簇不许 import 编排上游（只靠 `self.` 回调 / 组合根）。"""
     for fname in HOMES.values():
-        got = _top_imports(RL / fname[0])
+        got = _top_imports(_home(fname[0]))
         assert not (got & FORBIDDEN_IMPORTS), f"{fname[0]} 出现反向边：{sorted(got & FORBIDDEN_IMPORTS)}"
 
 
 def test_patch_anchor_stays_in_the_root() -> None:
-    """★ 两个 patch 锚点（`set_cloud_halt` / `dist_common`）必须只住组合根。
+    """★ 两个 patch 锚点（`set_cloud_halt` / `common.distribution`）必须只住组合根。
 
-    四个测试文件按 `rl.loop_guards.<名>` 打桩；搬走会让桩**静静失效**（最坏的一种：
+    四个测试文件按 `trainer.loop_guards.<名>` 打桩；搬走会让桩**静静失效**（最坏的一种：
     测试仍绿，但打的是空气）。
     """
-    root_globals = _module_globals(RL / "loop_guards.py")
+    root_globals = _module_globals(_home("loop_guards.py"))
+    # 组合根在 trainer/（编排）；两个锚点必须只在它里面 —— 四簇（biz/）里出现同名 import 就是越位。
     for anchor in PATCH_ANCHORS:
         assert anchor in root_globals, anchor
         for fname in HOMES.values():
-            assert anchor not in _module_globals(RL / fname[0]), f"{anchor} 跑到 {fname[0]}"
+            assert anchor not in _module_globals(_home(fname[0])), f"{anchor} 跑到 {fname[0]}"
 
 
 def test_old_home_no_longer_absorbs_the_moved_seams() -> None:
-    """搬走的名称不得留在 `rl.loop_guards` 命名空间（否则旧桩会「打中一个没人用的名字」）。"""
-    root_globals = _module_globals(RL / "loop_guards.py")
+    """搬走的名称不得留在 `trainer.loop_guards` 命名空间（否则旧桩会「打中一个没人用的名字」）。"""
+    root_globals = _module_globals(_home("loop_guards.py"))
+    # 组合根在 trainer/（编排）；两个锚点必须只在它里面 —— 四簇（biz/）里出现同名 import 就是越位。
     leaked = sorted(set(GONE_FROM_ROOT) & root_globals)
     assert leaked == [], f"这些 seam 还挂在旧家：{leaked}"
 
@@ -553,7 +587,7 @@ def test_old_home_no_longer_absorbs_the_moved_seams() -> None:
 
 
 def _obj(**attrs: object) -> object:
-    from rl.loop_guards import TrainingGuards
+    from trainer.loop_guards import TrainingGuards
 
     obj = TrainingGuards.__new__(TrainingGuards)
     for k, v in attrs.items():
@@ -596,8 +630,8 @@ def test_trip_breaker_really_trips_on_nonfinite(tmp_path: Path) -> None:
 
     seam 断言：判决写入解析到**新家**的 `write_gate_verdict`——打旧家的名字打不中。
     """
-    import rl.loop_guards as root
-    import rl.loop_guards_trip as trip
+    import biz.loop_guards_trip as trip
+    import trainer.loop_guards as root
 
     seen: list[str] = []
     jsonl = tmp_path / "training_log.jsonl"
@@ -628,7 +662,7 @@ def test_trip_breaker_really_trips_on_nonfinite(tmp_path: Path) -> None:
 
 def test_trip_stop_loss_needs_two_consecutive_significant_rounds(tmp_path: Path) -> None:
     """★ 过程面：Δ≤−2σ 一轮只记数，**连续两轮**才停车（P1-9）。"""
-    from rl.loop_guards_trip import TrainingGuardsTrip
+    from biz.loop_guards_trip import TrainingGuardsTrip
 
     jsonl = tmp_path / "training_log.jsonl"
     obj = _obj(
@@ -646,7 +680,7 @@ def test_trip_stop_loss_needs_two_consecutive_significant_rounds(tmp_path: Path)
 
 def test_leg_kickstart_burn_really_stops_the_leg(tmp_path: Path) -> None:
     """★ 结果面：连续 3 点低于起点基线 ⇒ 停腿（True）+ 可回放的账本。"""
-    from rl.loop_guards_leg import TrainingGuardsLeg
+    from biz.loop_guards_leg import TrainingGuardsLeg
 
     jsonl = tmp_path / "training_log.jsonl"
     (tmp_path / "eval_log.jsonl").write_text(
@@ -670,7 +704,7 @@ def test_leg_kickstart_burn_really_stops_the_leg(tmp_path: Path) -> None:
 
 def test_leg_paired_kill_is_inert_without_a_paired_course(tmp_path: Path) -> None:
     """★ 结果面：没声明 `paired_rotate_seed` 就没有「对端」这回事 ⇒ 零行为。"""
-    from rl.loop_guards_leg import TrainingGuardsLeg
+    from biz.loop_guards_leg import TrainingGuardsLeg
 
     obj = _obj(
         args=_base_args(),
@@ -684,7 +718,7 @@ def test_leg_paired_kill_is_inert_without_a_paired_course(tmp_path: Path) -> Non
 
 def test_gate_budget_hard_cut_really_stops(tmp_path: Path) -> None:
     """★ 门族：max_hours 到顶 ⇒ 轮级硬断 True + 落 STOP（exit-watchdog 认它是设计内停车）。"""
-    from rl.loop_guards_gate import TrainingGuardsGate
+    from biz.loop_guards_gate import TrainingGuardsGate
 
     jsonl = tmp_path / "training_log.jsonl"
     started = datetime.now() - timedelta(hours=10)
@@ -700,7 +734,7 @@ def test_gate_budget_hard_cut_really_stops(tmp_path: Path) -> None:
 
 def test_gate_is_inert_without_a_gates_block(tmp_path: Path) -> None:
     """★ 门族：老课程（无 `gates` 块）恒 False——零行为变化。"""
-    from rl.loop_guards_gate import TrainingGuardsGate
+    from biz.loop_guards_gate import TrainingGuardsGate
 
     obj = _obj(args=_base_args(), _jsonl_path=tmp_path / "training_log.jsonl", _traj_root=tmp_path)
     assert TrainingGuardsGate._gate(obj, 3) is False  # type: ignore[arg-type]
@@ -712,7 +746,7 @@ def test_gate_is_inert_without_a_gates_block(tmp_path: Path) -> None:
 
 def test_sweep_really_rotates_the_iter_dirs(tmp_path: Path) -> None:
     """★ 磁盘回收：keep_iters=1 在 it3 时删 it1/it2、留 it3；job 清理由 manifest 定。"""
-    from rl.loop_guards_sweep import TrainingGuardsSweep
+    from biz.loop_guards_sweep import TrainingGuardsSweep
 
     for name in ("it1", "it2", "it3"):
         (tmp_path / name).mkdir()
@@ -729,7 +763,7 @@ def test_sweep_really_rotates_the_iter_dirs(tmp_path: Path) -> None:
 
 def test_root_ledger_view_advances_by_increment() -> None:
     """★ 共享 sink：写入账本处顺手并入视图；视图缺失/抛错都不得阻断训练。"""
-    from rl.loop_guards import TrainingGuards
+    from trainer.loop_guards import TrainingGuards
 
     seen: list[str] = []
 
@@ -752,20 +786,20 @@ def test_root_ledger_view_advances_by_increment() -> None:
 def test_patch_anchor_really_intercepts_the_cloud_halt(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """★ patch 锚点真拦截：按 `rl.loop_guards.set_cloud_halt` 打桩能拦住真调用。"""
+    """★ patch 锚点真拦截：按 `trainer.loop_guards.set_cloud_halt` 打桩能拦住真调用。"""
     sent: list[tuple[str, str, bool]] = []
 
     def _fake(url: str, tok: str, halt: bool, **kw: object) -> bool:
         sent.append((url, tok, halt))
         return True
 
-    monkeypatch.setattr("rl.loop_guards.set_cloud_halt", _fake, raising=True)
+    monkeypatch.setattr("trainer.loop_guards.set_cloud_halt", _fake, raising=True)
     obj = _obj(
         args=_base_args(remote_hub_url="http://hub", remote_token="tok"),
         _traj_root=tmp_path,
         _cloud_halted=False,
     )
-    from rl.loop_guards import TrainingGuards
+    from trainer.loop_guards import TrainingGuards
 
     TrainingGuards._sync_cloud_halt(obj, 5, "ABORT")  # type: ignore[arg-type]
     assert sent == [("http://hub", "tok", True)]
@@ -777,7 +811,7 @@ def test_wall_clock_is_only_used_by_the_budget_guard() -> None:
     """本文件的确定性前提：四簇里只有 `_budget_hard_cut` 碰墙钟（明写在审查口径里）。"""
     importers: list[str] = []
     for fname in FAMILY:
-        for fn in _methods(RL / fname, FAMILY[fname]).values():
+        for fn in _methods(_home(fname), FAMILY[fname]).values():
             if any(
                 isinstance(n, ast.Attribute) and n.attr in {"time", "mktime", "strptime"}
                 for n in ast.walk(fn)

@@ -25,7 +25,7 @@ from remote.hub_client import pack_code_zip
 def _make_tree(root: Path) -> None:
     """造一棵覆盖所有排除规则的假 nn_root。"""
     keep = [
-        "rl/loop.py",
+        "trainer/loop.py",
         "rl/sub/deep.py",
         "curricula/x3-power.jsonc",
         "remote/worker.py",
@@ -68,7 +68,7 @@ def test_code_zip_excludes_all_dot_dirs(tmp_path: Path) -> None:
 
     # 保留：源码与 jsonc（递归子目录也要在）
     assert names == {
-        "rl/loop.py",
+        "trainer/loop.py",
         "rl/sub/deep.py",
         "curricula/x3-power.jsonc",
         "remote/worker.py",

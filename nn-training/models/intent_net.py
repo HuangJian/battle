@@ -32,8 +32,8 @@ import torch.nn as nn
 if _ilu.find_spec("schema") is None:
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent))
 
+from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 from models.student import StudentNet
-from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 
 # 仓库根（models/ 上溯 3 层；2026-09-08 双 tmp 统一：相对 tmp/ 一律锚定仓库根 tmp/）
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -200,7 +200,7 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
     torch.manual_seed(seed)
     # 输入：确定性伪随机 obs（0..255）+ 非零 scalars/inject（覆盖注入路径）。
     # v3（obs-schema-v3.plan.md v4.0）：14/19 硬编码 → schema 常量（OBS_CHANNELS/SCALAR_DIM）。
-    from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
+    from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 
     rng = torch.Generator().manual_seed(seed)
     obs = torch.randint(0, 256, (1, OBS_CHANNELS, BOARD, BOARD), generator=rng, dtype=torch.uint8)

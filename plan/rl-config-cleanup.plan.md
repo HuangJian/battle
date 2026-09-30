@@ -40,7 +40,7 @@
 | §1.1 计数 | `rl` 13 叶 · `nodes` 9 条 · `courses` 13 条 · 总 90 叶 | `rl` **24** 叶（+13 `remote_hubs`）· `nodes` **8** 条 · `courses` **17** 条 |
 | §1.2/§9 坐标 | `dispatch.py:191` · `stream.py:193-194` · `modes.py:83-95` · `load_course:1269` · rl/courses `:1339-1340` | `:184` · `:188-189` · `:80-96` · `:1225` · `:1465-1466` |
 | §1.2/§9 引用 | `plan/accident.plan.md §3` | **该文件已删** ⇒ 单一 PPO 路径的家 = `docs/nn/training-stack.md §23`（`DECISIONS.md:1323` 同指） |
-| §1.4 `upgradeBranch` | 只「删键」 | **同时删读点**：`rl/dispatch.py:184` 的 `policy.get("upgradeBranch")` 去掉（`dist_common.py:499` 注释已声明废弃） |
+| §1.4 `upgradeBranch` | 只「删键」 | **同时删读点**：`rl/dispatch.py:184` 的 `policy.get("upgradeBranch")` 去掉（`common/distribution.py:499` 注释已声明废弃） |
 | §3.2 `stream`/`double_buffer`/`precollect_early` | 归 B 类「全局缺省」 | 实为**恒不生效**（`validate_args` 强制 `stream=0`/`double_buffer=0`；`precollect_early` 只在 `if double_buffer` 分支里读）⇒ 按死键处理 |
 | §4 S2/S3 | 自造在训判据与停课候选表 | 判据与计数**对齐 `plan/course-archive.plan.md §1.1`**（17 课程目录 / **4 在训**：`x20-dodge-l1d2/l2a/l2b/l3d2` / 13 已停）；且**只能在训练机执行**（本机 `tmp/` 无课程目录） |
 | §3.4 P2 | `--strict-rl-config` 缺省关 | 改为**恒告警、不拒**（E8 的验收要「塞假键 ⇒ 启动日志/冒烟出现告警」，缺省关就达不到）；白名单数据与冒烟共用一份 JSON |
@@ -73,7 +73,7 @@
 
 | 读点 | 位置 | 说明 |
 |---|---|---|
-| 唯一路径来源 | `dist_common.rl_config_path()`（`dist_common.py:59-71`） | env `BCITY_RL_CONFIG` > `nn-training/rl-config.json` |
+| 唯一路径来源 | `common.distribution.rl_config_path()`（`common/distribution.py:59-71`） | env `BCITY_RL_CONFIG` > `nn-training/rl-config.json` |
 | 唯一读入口 | `rl/config.py::read_rl_config_file()`（`:49-52`） | 读不到/形状不对 → 空 dict |
 | **合并优先级** | `rl/config.py::load_course`（`:1269`） | **课程文件 > rl-config > argparse 默认**；`:1339-1340` 读 `cfg["rl"]` 与 `cfg["courses"][课]` |
 | 模式块合并 | `rl/modes.py::merged_mode_args`（`:83-95`） | `rl.<mode>` → **`intent_rl`（legacy）** → `rl`。⚠ **legacy 覆盖 `rl` 同名键** |
@@ -93,7 +93,7 @@
 
 | 键 | 判据 | 结论 |
 |---|---|---|
-| `policy.upgradeBranch` | ⚠ **不是零消费者**：`rl/dispatch.py:191` 仍读它作兜底 `upgrade_branch_or(str(policy.get("upgradeBranch") or ""))`，而 `upgrade_branch_or`（`dist_common.py:522-525`）**显式值优先于锁存**（`if explicit: return explicit`）。**当前值 = `""`** ⇒ 落回 `run_rl.py:309` 锁存的当前分支 ⇒ **删除零行为变化**；但它正是 2026-08-30「残留旧战役分支名把全部节点 reset」的载体（**填任何非空值都会盖掉锁存**） | **删**（铲掉坑，行为等价）+ **去掉 `rl/dispatch.py:184` 的读点**（只删键不删读点，坑还在） |
+| `policy.upgradeBranch` | ⚠ **不是零消费者**：`rl/dispatch.py:191` 仍读它作兜底 `upgrade_branch_or(str(policy.get("upgradeBranch") or ""))`，而 `upgrade_branch_or`（`common/distribution.py:522-525`）**显式值优先于锁存**（`if explicit: return explicit`）。**当前值 = `""`** ⇒ 落回 `run_rl.py:309` 锁存的当前分支 ⇒ **删除零行为变化**；但它正是 2026-08-30「残留旧战役分支名把全部节点 reset」的载体（**填任何非空值都会盖掉锁存**） | **删**（铲掉坑，行为等价）+ **去掉 `rl/dispatch.py:184` 的读点**（只删键不删读点，坑还在） |
 | `policy.minDiskFreeMB` | 全域（nn-training + dashboard + tools + md）= **仅 1 处文档命中**（`tools/agent/agent-setup.md:56`），无任何代码消费者 —— 那句文档说的是 **TS 侧**的 `tools/agent/sampler-agent.ts:689 diskFreeMB()`（函数名，不是 rl-config 键） | **删** + 顺手把 `agent-setup.md:56` 的指向写清（免得下一个人以为配置里有这个键） |
 | `policy.streamKlCapIntent` / `policy.streamWaveGamesIntent` | 各自只有 1 处消费者（`rl/stream.py:193-194`），都是 intent 流式专属 | 与 intent 线同批 ⇒ **删**（重启 intent 时按当时口径重设） |
 | `courses.<已停课程>` | §4 S3 判据 | 删条目 |
@@ -179,7 +179,7 @@
 
 ### 3.4 P2（**已裁决：做，默认告警不拒**）— 固化 schema，防再长草
 
-新增 `nn-training/rl_config_schema.py`（或并入 `schema.py`）：顶层键白名单 + 每段键白名单；
+新增 `nn-training/rl_config_schema.py`（或并入 `common/schema.py`）：顶层键白名单 + 每段键白名单；
 `read_rl_config_file()` 之后由 `--strict-rl-config` 打开校验（缺省**关**，只显式开启时才检查）；
 控制台 `stack/smoke.ts:64` 的「rl-config 契约」冒烟接上它 ⇒ **未知键在开训前就被点出来**（而不是静默沉睡成 legacy）。
 **分级（已定）**：未知键一律**只告警不拒**（`log` 一行 + 冒烟面板红字提示），**不 block 开训**
@@ -314,10 +314,10 @@ cd dashboard && bun run typecheck && bun run test
 ## 9. 证据与参考（仓内）
 
 - 现状：`nn-training/rl-config.json`（90 叶子；本节所有值均为实测）。
-- 读链：`dist_common.py:59-71`、`rl/config.py:49-52`（读入口）、`:1269`（合并优先级）、`:1339-1340`（`rl`/`courses` 段）、
+- 读链：`common/distribution.py:59-71`、`rl/config.py:49-52`（读入口）、`:1269`（合并优先级）、`:1339-1340`（`rl`/`courses` 段）、
   `rl/modes.py:83-95`（`intent_rl` legacy 回退，**cleanup 的主对象**）、`rl/loop_serve.py:224-255`（课程级机器旋钮）、
   `rl/loop_steps.py:87/131/171/235`（训练期热读）、`rl/kickstart_burn.py:125-128`、`rl/paired_kill.py:128`。
-- 死键证据：`rl/dispatch.py:191`（`upgradeBranch` 的**兜底读点**，配 `dist_common.py:522-525 upgrade_branch_or`：显式值优先于锁存 ⇒ 非空即盖锁存 ⇒ 事故载体；当前空值 ⇒ 删除等价）；
+- 死键证据：`rl/dispatch.py:191`（`upgradeBranch` 的**兜底读点**，配 `common/distribution.py:522-525 upgrade_branch_or`：显式值优先于锁存 ⇒ 非空即盖锁存 ⇒ 事故载体；当前空值 ⇒ 删除等价）；
   `tools/agent/agent-setup.md:56`（`minDiskFreeMB` 唯一命中，实为 TS 侧 `sampler-agent.ts:689` 的函数名）；
   `rl/stream.py:193-194`（两个 `*Intent` 的唯一消费者）。
 - 控制台面：`dashboard/src/core/config.ts`（load/save）、`stack/specs.ts:163`（`trainModeKnobs` 唯一换算）、

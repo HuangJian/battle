@@ -45,7 +45,7 @@ export interface CourseConf {
   //  一个进程服务所有课程 ⇒ 「这门课怎么跑」不能是那个进程的命令行参数（只有一份）。
   //  住这里而**不能**住 `curricula/*.jsonc`：课程文件字节 = course_fp（语料血缘 / 熔断口径
   //  D14）——往里加一个旋钮，熔断会把同一份语料读成新语料。
-  //  读面：python `rl/loop_serve.py::apply_course_machine_overrides`（开课时施加）。
+  //  读面：python `trainer/loop_serve.py::apply_course_machine_overrides`（开课时施加）。
   //  传输/节点指针**不在**这里（课程与 worker 节点正交）。
   //
   //  ★ 2026-09-21 删掉 `remote_degrade_after`（plan/accident.plan.md §3）：单一 PPO 路径下
@@ -54,7 +54,7 @@ export interface CourseConf {
   /** 门禁失败语义（halt = 打进停机态）。 */
   gate_halt_mode?: string
   /** kickstart 干烧熔断阈值覆盖（plan/accident.plan.md §5.2；读面在 python
-   *  `rl/kickstart_burn.py::burn_overrides`，缺席即那边的常量）。
+   *  `biz/kickstart_burn.py::burn_overrides`，缺席即那边的常量）。
    *
    *  控制台**只读**：开课回执拿 `margin_pp`/`points` 说清「连续几点低于基线多少 pp 停腿」
    *  （`stack/kickstart-receipt.ts`），按需手改 rl-config——不做写面/UI（execution-face

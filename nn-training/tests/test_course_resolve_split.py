@@ -1,14 +1,14 @@
-"""拆分的**契约守卫**：课程/关卡解析面永住 `rl/course_resolve.py`（S5 第十刀，2026-09-27）。
+"""拆分的**契约守卫**：课程/关卡解析面永住 `biz/course_resolve.py`（S5 第十刀，2026-09-27）。
 
-`rl/config.py` **1566 → 598 行**（本刀三面合计）；解析面搬走 9 名（`CURRICULA_DIR` ·
+`biz/config.py` **1566 → 598 行**（本刀三面合计）；解析面搬走 9 名（`CURRICULA_DIR` ·
 `LEVELS_DIR` · `resolve_level` · `load_course` · `resolve_course` · `course_from_args` ·
 `resolve_state_init_bank` · `_resolve_courses` · `_LEVEL_ENV_KEYS`，逐字节不动）。
 
 本文件钉五件事：
 
 1. **定义唯一**——9 名不许在 `config.py` 里再实现一遍；
-2. **依赖面闭集**——stdlib + `rl.course_spec`；`rl.jsonc` 只准**函数内**延迟导入；
-   **不** import `rl.config`（无环）；
+2. **依赖面闭集**——stdlib + `biz.course_spec`；`common.jsonc` 只准**函数内**延迟导入；
+   **不** import `biz.config`（无环）；
 3. **模块全局是活的读取点**——`CURRICULA_DIR`/`LEVELS_DIR` 的 monkeypatch 必须打在
    本模块上（门面转发只是同一对象的一份引用，setattr 门面不改变读取点）；
 4. **转发同一对象**——门面每个名与新家是 `is`；
@@ -29,11 +29,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.config as config_mod
-import rl.course_resolve as resolve_mod
+import biz.config as config_mod
+import biz.course_resolve as resolve_mod
 
-CONFIG_FILE = ROOT / "rl" / "config.py"
-NEW_FILE = ROOT / "rl" / "course_resolve.py"
+CONFIG_FILE = ROOT / "biz" / "config.py"
+NEW_FILE = ROOT / "biz" / "course_resolve.py"
 
 MOVED_NAMES = {
     "CURRICULA_DIR",
@@ -50,10 +50,10 @@ MOVED_NAMES = {
 ALLOWED_IMPORTS = {
     "__future__",
     "pathlib",
-    "rl.course_spec",
-    "rl.jsonc",  # load_course 的**函数内**延迟导入（读 JSONC 实现）
+    "biz.course_spec",
+    "common.jsonc",  # load_course 的**函数内**延迟导入（读 JSONC 实现）
 }
-TOP_LEVEL_BANNED = {"rl.config", "rl.jsonc"}
+TOP_LEVEL_BANNED = {"biz.config", "common.jsonc"}
 
 
 def _tree(path: Path) -> ast.Module:
@@ -104,22 +104,22 @@ def test_course_resolve_import_surface_is_closed() -> None:
     mods = _imported_modules(NEW_FILE)
     extra = sorted(mods - ALLOWED_IMPORTS)
     assert extra == [], f"course_resolve 引入了允许面之外的依赖：{extra}"
-    assert "rl.config" not in mods, "解析面反向 import 门面 ⇒ 与 config → course_resolve 成环"
+    assert "biz.config" not in mods, "解析面反向 import 门面 ⇒ 与 config → course_resolve 成环"
 
 
 def test_lazy_edges_are_function_local_not_top_level() -> None:
-    """`rl.jsonc` 只准函数内（顶层会拖重导入）；`rl.config` 任何位置都不准。"""
+    """`common.jsonc` 只准函数内（顶层会拖重导入）；`biz.config` 任何位置都不准。"""
     tops = _top_level_imports(NEW_FILE)
     hit = sorted(tops & TOP_LEVEL_BANNED)
     assert hit == [], f"顶层出现了不该有的 import：{hit}"
 
 
 def test_course_resolve_facade_forwards_every_moved_name() -> None:
-    """门面：每个搬走名都还在 `rl.config`，且与新家是**同一个对象**。"""
+    """门面：每个搬走名都还在 `biz.config`，且与新家是**同一个对象**。"""
     for name in sorted(MOVED_NAMES):
-        assert hasattr(config_mod, name), f"rl.config 丢了转发名 {name}"
+        assert hasattr(config_mod, name), f"biz.config 丢了转发名 {name}"
         assert getattr(config_mod, name) is getattr(resolve_mod, name), (
-            f"rl.config.{name} 不是 rl.course_resolve.{name}（转发成了副本）"
+            f"biz.config.{name} 不是 biz.course_resolve.{name}（转发成了副本）"
         )
 
 

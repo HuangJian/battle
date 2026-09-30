@@ -1,14 +1,14 @@
 """test_batch_plan_split — B 层「批语料规划 + 判据/门」出包（S25/B1）的契约守卫。
 
-2026-09-25：`rl/batch_eval.py`（1805 行 / 35 顶层函数）拆它的**第一步 B1** —— 纯规划 +
-判据/门（23 个成员）纯搬到新模块 `rl/batch_plan.py`（`plan/nn-training-refactor.md` §5.5.4）。
+2026-09-25：`trainer/batch_eval.py`（1805 行 / 35 顶层函数）拆它的**第一步 B1** —— 纯规划 +
+判据/门（23 个成员）纯搬到新模块 `trainer/batch_plan.py`（`plan/nn-training-refactor.md` §5.5.4）。
 
 本文件钉的不是「行为」（那是既有用例的事，如 `test_batch_eval` / `test_verdict_corpus` /
 `test_dist_common_poll`），而是**这次搬家的契约**：
 
-  ① **定义唯一**：23 个成员只在 `rl/batch_plan.py` 里定义，旧家不再有同名定义；
-  ② **门面再导出**：`rl.batch_eval.X is rl.batch_plan.X` 逐条恒等 —— 这是「既有
-     `from rl.batch_eval import plan_units` 等调用点一行不改」的机器形式；
+  ① **定义唯一**：23 个成员只在 `trainer/batch_plan.py` 里定义，旧家不再有同名定义；
+  ② **门面再导出**：`trainer.batch_eval.X is trainer.batch_plan.X` 逐条恒等 —— 这是「既有
+     `from trainer.batch_eval import plan_units` 等调用点一行不改」的机器形式；
   ③ **纯函数面**：零锁、零台账读写（`_claim_locked` / `read_batches` / `write_batches` … 一个都不许
      出现）、零类、禁反向边（不得 import 旧家）、顶层 import 闭集；
   ④ **入边闭集**：旧家剩下的调用点恰好 6 条、归属者逐条对得上（AST 计真实 `Call`）；
@@ -30,11 +30,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import dist_common
-import rl.batch_eval as be
-import rl.batch_plan as bp
+import common.distribution
+import trainer.batch_eval as be
+import trainer.batch_plan as bp
 
-RL = ROOT / "rl"
+RL = ROOT / "trainer"
 PLAN_PATH = RL / "batch_plan.py"
 EVAL_PATH = RL / "batch_eval.py"
 #: S27/B3：执行器（`BatchEvalRunner` / `dispatch_batch_bg`）纯搬到本模块，四个入边
@@ -102,9 +102,9 @@ PLAN_IMPORTS = {
     "json",
     "os",
     "pathlib",
-    "dist_common",
-    "rl.jsonc",
-    "rl.queue",
+    "common.distribution",
+    "common.jsonc",
+    "trainer.queue",
 }
 
 #: 批规划模块里**不许出现**的名字（锁 / 台账 / 执行器 / 进程生命周期）。
@@ -186,10 +186,18 @@ def _all_names(src: str) -> set[str]:
 
 
 def _top_imports(src: str) -> set[str]:
+    """顶层 import 的**全点分名**集合（两种形状同口径）。
+
+    `import a.b` 取 `a.b`，`from a.b import c` 也取 `a.b` —— 两条都记全路径。
+    2026-09-30（刀 2）修正：原先 `ast.Import` 那一支取 `a.name.split(".")[0]`，
+    只在「顶层模块都是单段名」时与 `ImportFrom` 同口径；`dist_common` 下沉成
+    `common.distribution` 后，全仓第一次出现 `import common.distribution`，
+    这一支就只记下裸 `common`，与本集合里点分名的写法对不上。
+    """
     out: set[str] = set()
     for node in ast.parse(src).body:
         if isinstance(node, ast.Import):
-            out.update(a.name.split(".")[0] for a in node.names)
+            out.update(a.name for a in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             out.add(node.module)
     return out
@@ -201,7 +209,7 @@ def _ok_ping() -> dict:
         "stageJsonSupport": True,
         "bunVersion": "9.9.9",
         "cpus": 2,
-        "codeHash": dist_common.compute_code_hash(),
+        "codeHash": common.distribution.compute_code_hash(),
     }
 
 
@@ -211,8 +219,8 @@ def _ok_ping() -> dict:
 def test_moved_members_are_defined_only_in_the_new_home() -> None:
     plan, old = _top_bound(PLAN_SRC), _top_bound(EVAL_SRC)
     for name in MOVED:
-        assert name in plan, f"{name} 不在 rl/batch_plan.py"
-        assert name not in old, f"{name} 仍定义在 rl/batch_eval.py"
+        assert name in plan, f"{name} 不在 trainer/batch_plan.py"
+        assert name not in old, f"{name} 仍定义在 trainer/batch_eval.py"
 
 
 def test_facade_reexports_are_the_same_objects() -> None:
@@ -245,11 +253,11 @@ def test_no_back_edge_no_transport_no_torch() -> None:
     """不得 import 旧家（成环）、不得 import `remote`（传输层）、不得 import torch。
 
     「有没有反向引用」用 **AST** 判，不用文本搜：本模块的 docstring 里必然写着
-    「既有 `from rl.batch_eval import plan_units` 一行不改」这类**合法散文**（S20 的教训：
+    「既有 `from trainer.batch_eval import plan_units` 一行不改」这类**合法散文**（S20 的教训：
     入边是语法事实，就该用语法量）。
     """
     actual = _top_imports(PLAN_SRC)
-    assert "rl.batch_eval" not in actual
+    assert "trainer.batch_eval" not in actual
     assert not {m for m in actual if m.split(".")[0] in {"remote", "torch"}}
     tree = ast.parse(PLAN_SRC)
     attrs = [n.attr for n in ast.walk(tree) if isinstance(n, ast.Attribute)]
@@ -268,7 +276,7 @@ def test_old_home_has_no_back_edge_to_new_home_members_beyond_the_import() -> No
     tree = ast.parse(EVAL_SRC)
     imported = set()
     for node in tree.body:
-        if isinstance(node, ast.ImportFrom) and node.module == "rl.batch_plan":
+        if isinstance(node, ast.ImportFrom) and node.module == "trainer.batch_plan":
             imported |= {a.name for a in node.names}
     assert imported == set(PUBLIC_MOVED), sorted(imported ^ set(PUBLIC_MOVED))
 
@@ -279,7 +287,7 @@ def test_old_home_has_no_back_edge_to_new_home_members_beyond_the_import() -> No
 def _inbound_calls() -> dict[str, dict[str, int]]:
     """门面 + 执行器两个宿主的真实 `Call` 合并计数 —— 成员搬到哪就数到哪。
 
-    B3 把 `BatchEvalRunner` 整段搬进 `rl/batch_runner.py`，四个入边调用点跟着搬家；
+    B3 把 `BatchEvalRunner` 整段搬进 `trainer/batch_runner.py`，四个入边调用点跟着搬家；
     只数旧家会**静默**退化成「2/6」（漏掉执行侧那四条），所以宿主要显式列出。
     """
     got = _calls_by_owner(EVAL_SRC, set(MOVED_FUNCS))
@@ -299,7 +307,7 @@ def test_moved_constants_are_only_reexported_never_used_by_the_old_home() -> Non
     """旧家对搬走的常量**一个都不再读**（全部只经 `import … as …` 再导出）。
 
     B1 时旧家还读一次 `REPO_ROOT`（派生 `DEFAULT_DATA_ROOT`）；S26/B2 把这个派生也交给了
-    `rl/batch_store.py`（与台账同住——它描述「存储」而不是「执行」）⇒ 现在旧家 = 零次。
+    `trainer/batch_store.py`（与台账同住——它描述「存储」而不是「执行」）⇒ 现在旧家 = 零次。
     本用例仍然钉「常量有没有人真的在用」：`REPO_ROOT` 的使用者现在是 `batch_store.py`，
     数它只读一次（防「顺手到处派生」）。
     """
@@ -398,15 +406,15 @@ def test_select_next_unit_runs_from_the_new_home() -> None:
 
 
 def test_gate_and_classification_run_from_the_new_home() -> None:
-    h = dist_common.compute_code_hash()
+    h = common.distribution.compute_code_hash()
     ok = _ok_ping()
     assert bp.node_gate_reason(ok, "9.9.9", h) is None
     assert "evalSupport" in (bp.node_gate_reason({**ok, "evalSupport": False}, "9.9.9", h) or "")
     assert "bun" in (bp.node_gate_reason({**ok, "bunVersion": "1.0.0"}, "9.9.9", h) or "")
     assert "deadbeef" in (bp.node_gate_reason({**ok, "codeHash": "deadbeef"}, "9.9.9", h) or "")
-    # 背压/瞬断：B 层是**纯转发**（判据单源仍在 dist_common）
-    assert bp.is_transient_error(dist_common.DistError(503, "busy")) is True
-    assert bp.is_transient_error(dist_common.DistError(409, "wver not cached")) is False
+    # 背压/瞬断：B 层是**纯转发**（判据单源仍在 common.distribution）
+    assert bp.is_transient_error(common.distribution.DistError(503, "busy")) is True
+    assert bp.is_transient_error(common.distribution.DistError(409, "wver not cached")) is False
     assert bp.is_transient_error(ConnectionResetError(10054, "x")) is True
     # policy → 权重桶（未知回落 'rollout'，与旧调用方逐字一致）
     assert bp.kind_for_policy("nn") == "rollout" and bp.kind_for_policy("goal") == "goal"

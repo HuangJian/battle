@@ -58,7 +58,7 @@ BACKEND_PARAMS: dict[str, dict[str, float | int | bool | None]] = {
         "ENT_COEF": 0.08,
         "LR": 1e-4,
         "MAX_GRAD_NORM": 1.0,
-        "BOARD": 26,  # goal 动作空间 676 = 26×26（schema.BOARD 同步值）
+        "BOARD": 26,  # goal 动作空间 676 = 26×26（common.schema.BOARD 同步值）
         "TARGET_KL": 0.02,
         "normalize_ret": True,
     },

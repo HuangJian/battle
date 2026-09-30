@@ -18,9 +18,10 @@ import sys
 import threading
 import time
 
+from common.pid_probe import pid_alive
+
 # 子进程捕获统一走 common.proc.run_capture（显式 UTF-8 + Windows 隐藏窗口）。
 from common.proc import run_capture
-from pid_probe import pid_alive
 
 NN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 REPO_ROOT = os.path.dirname(NN_ROOT)
@@ -160,10 +161,10 @@ def _pid_alive(pid: int) -> bool:
     `TerminateProcess(handle, 0)`——**查询动作会杀死锁持有者**（最坏：正在训练的 trainer），
     且 `except Exception → False` 会把「我杀了它」记成「它本来就是死的」，双开护栏静默失效。
 
-    现已**委托唯一实现** `pid_probe.pid_alive`（stdlib-only 顶层模块，与 platform_utils 同层）：
+    现已**委托唯一实现** `common.pid_probe.pid_alive`（stdlib-only 顶层模块，与 common.platform_utils 同层）：
     该模块集中记录三个坑（Windows TerminateProcess / `pid<=0` 的进程组语义 / 宽捕获），
     并由 `tests/test_pid_probe_windows_safe.py` 用注入的假 kernel32 直接回归。保留本函数名
-    只为调用点与测试稳定；**新增探测请直接用 `pid_probe.pid_alive`，不要再复制实现**。
+    只为调用点与测试稳定；**新增探测请直接用 `common.pid_probe.pid_alive`，不要再复制实现**。
     """
     return pid_alive(pid)
 

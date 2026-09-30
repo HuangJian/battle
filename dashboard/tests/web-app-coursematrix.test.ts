@@ -741,7 +741,7 @@ describe('接线：面板挂载、跨区分流与动作路由同源', () => {
 
 // ────────────────────────── 封存分组（plan/course-archive.plan.md §4 S3） ──────────────────────────
 
-/** 一条封存档案（字段与 python `rl/course_archive.py::_build_manifest` 同形）。 */
+/** 一条封存档案（字段与 python `biz/course_archive.py::_build_manifest` 同形）。 */
 function archRow(patch: Partial<ArchivedCourseView> & { course: string }): ArchivedCourseView {
   return {
     archivedAt: '2026-09-26 10:00:00',

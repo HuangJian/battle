@@ -232,7 +232,7 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         if (trainMode && !['online', 'offline'].includes(trainMode)) {
           return errResp(`未知训练模式: ${trainMode}（只接受 online|offline）`, 400)
         }
-        // rollout 位置：与 python `rl/loop_transport.py::ROLLOUT_SRCS` 同字面量域。
+        // rollout 位置：与 python `trainer/loop_transport.py::ROLLOUT_SRCS` 同字面量域。
         const rolloutSrc = bodyStr(body, 'rolloutSrc')
         if (rolloutSrc && !['auto', 'local', 'node', 'run'].includes(rolloutSrc)) {
           return errResp(`未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node|run）`, 400)
@@ -449,7 +449,7 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
       }
       case 'archiveCourse': {
         // 课程封存（plan/course-archive.plan.md）：把**已停**课程从 `tmp/<课>/` 搬成只读档案
-        // （`rl/course_archive.py`）。顺序契约在 python 侧（建→校验→删），这里只是入口。
+        // （`biz/course_archive.py`）。顺序契约在 python 侧（建→校验→删），这里只是入口。
         //
         // ★ **默认只跑 `--dry-run`**：`apply` 必须显式给——最贵的错误是「删了才发现没搬成」，
         //   所以先看清单与字节账。★ 硬闸全在 python 侧（`marker + 新鲜` ⇒ 拒；**无 marker 但
@@ -461,7 +461,7 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         const args = ['--course', ctx.course, '--json']
         if (apply) args.push('--apply')
         if (force) args.push('--force')
-        const r = await runRunPythonAsyncModule('rl.course_archive', args, { timeoutMs: 600_000 })
+        const r = await runRunPythonAsyncModule('biz.course_archive', args, { timeoutMs: 600_000 })
         if (r.timeout) {
           return errResp('封存超时（进程已被杀）——先看 tmp/ 里目录有没有被动过', 504)
         }
@@ -503,7 +503,7 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         })
       }
       case 'evalReplays': {
-        // 导出 replay：确定性重放所选 eval 局 → .replay（rl/eval_replays_once.py；
+        // 导出 replay：确定性重放所选 eval 局 → .replay（biz/eval_replays_once.py；
         // 同 evalA 的 spawn-detached + 日志 + busy 互斥模式，弹窗轮询 /api/evalReplayJob）。
         if (!ctx.course) return errResp('缺少 course', 400)
         const iterRaw = Number(body.iter)
@@ -534,7 +534,9 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
             : path.join(NN_TRAINING, '.venv', 'bin', 'python3')
         const pyBin = existsSync(venvEntry) ? venvEntry : resolved.python
         const sitePackages = resolved.sitePackages
-        const script = path.join(NN_TRAINING, 'rl', 'eval_replays_once.py')
+        // 2026-09-30（刀 4）：`eval_replays_once` 是**纯逻辑**（biz/），不是编排（rl/）——
+        // 这是一条真 spawn 的路径，写错就是「导出 replay」静默找不到脚本。
+        const script = path.join(NN_TRAINING, 'biz', 'eval_replays_once.py')
         const p = replayExportPaths(ctx.course)
         try {
           mkdirSync(path.dirname(p.gamesFile), { recursive: true })
@@ -663,7 +665,7 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
 // ================================================================
 // curriculumLadderView —— I5（roadmap v2.0 §4-I5）：阶梯统一 identity 台账的
 // 控制台 LAN 只读渲染。读 nn-training/ladder/LEDGER.jsonc（I4 gate runner 与
-// rl/ladder_ledger.py 双写方，字段级 merge），返回 20 级 + 经典的 status /
+// biz/ladder_ledger.py 双写方，字段级 merge），返回 20 级 + 经典的 status /
 // lastGate / hypothesis / teacherWR 摘要。与 God-AI evalboard 的 ladder.json
 // （LadderRung）完全无关——命名特意区分。
 // ================================================================

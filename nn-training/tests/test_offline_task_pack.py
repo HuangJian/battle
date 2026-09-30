@@ -33,10 +33,10 @@ from common.protocol import (
     ROLE_HEADER_VALUE,
     ProtocolError,
 )
-from remote import hub_server
-from remote.hub import offline as offline_mod
-from remote.hub import task_pack as task_pack_mod
-from remote.hub_server import _HubQueue, _JobStore, as_hub, make_server
+from hub import offline as offline_mod
+from hub import server as hub_server
+from hub import task_pack as task_pack_mod
+from hub.server import _HubQueue, _JobStore, as_hub, make_server
 
 TOKEN = "sekret"
 
@@ -298,7 +298,7 @@ def _stub_trigger(monkeypatch, result: tuple[bool, str] = (True, "ok")) -> list[
         calls.append(course)
         return result
 
-    # ★ patch 面 = `remote.hub.offline`：**调用点**在离线段面（它 import 这个门），
+    # ★ patch 面 = `hub.offline`：**调用点**在离线段面（它 import 这个门），
     # `hub_server` 只是门面转发名（patch 它是静默空操作——第一轮跑出来的是真去连控制台）。
     monkeypatch.setattr(offline_mod, "trigger_task_bundle_export", fake)
     return calls

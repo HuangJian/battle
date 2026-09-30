@@ -1,8 +1,8 @@
-"""拆分的**契约守卫**：`_HubQueue` 的八个域混入永住 `remote/hub/queue_*.py`（S4 第十五刀，2026-09-24）。
+"""拆分的**契约守卫**：`_HubQueue` 的八个域混入永住 `hub/queue_*.py`（S4 第十五刀，2026-09-24）。
 
 ## 这一刀切了什么
 
-`remote/hub_server.py` 2072 → 889 行：`_HubQueue`（1033 行 / 76 个成员）按**域**拆成七个混入，
+`hub/server.py` 2072 → 889 行：`_HubQueue`（1033 行 / 76 个成员）按**域**拆成七个混入，
 组合类住 `hub/queue.py`，只剩 docstring + 两个类常量 + `__init__`：
 
 ```
@@ -27,7 +27,7 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 
 同一刀还把**两个组合类搬出自己的家**（这是本刀能成立的**使能缝**，不是顺手清洁）：第十四刀只搬了
 `_JobStore` 的六个混入，组合类还在 `hub_server` 里；而 `queue_scope.add_course` 要**构造** store、
-`_store_of` 要**注解**它，`remote/hub/*` 又不得 import `hub_server`（成环）⇒
+`_store_of` 要**注解**它，`hub/*` 又不得 import `hub_server`（成环）⇒
 `_AuthGuard`/`_is_loopback` → `hub/auth.py`、`_JobStore` → `hub/store.py`。
 
 ## 为什么是「混入」而不是「协作对象」（与第十四刀同源）
@@ -68,24 +68,24 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import remote.hub.queue_auth as auth_mix
-import remote.hub.queue_claims as claims_mix
-import remote.hub.queue_discover as discover_mix
-import remote.hub.queue_observe as observe_mix
-import remote.hub.queue_offline as offline_mix
-import remote.hub.queue_peer as peer_mod
-import remote.hub.queue_resume as resume_mix
-import remote.hub.queue_scope as scope_mix
-import remote.hub.queue_store_face as face_mix
-import remote.hub.store as store_mod
-from remote import hub_server as hs
-from remote.hub.queue import _HubQueue
-from remote.hub.store import _JobStore
+import hub.queue_auth as auth_mix
+import hub.queue_claims as claims_mix
+import hub.queue_discover as discover_mix
+import hub.queue_observe as observe_mix
+import hub.queue_offline as offline_mix
+import hub.queue_peer as peer_mod
+import hub.queue_resume as resume_mix
+import hub.queue_scope as scope_mix
+import hub.queue_store_face as face_mix
+import hub.store as store_mod
+from hub import server as hs
+from hub.queue import _HubQueue
+from hub.store import _JobStore
 from tests.helpers import remote_dag as dag
 
 NN_ROOT = ROOT
-HUB_DIR = NN_ROOT / "remote" / "hub"
-HUB_SERVER = NN_ROOT / "remote" / "hub_server.py"
+HUB_DIR = NN_ROOT / "hub"
+HUB_SERVER = NN_ROOT / "hub" / "server.py"
 #: 引导链的家（S4 第十六刀）：`main` 的 argparse 缺省值用到的那个常量住这里。
 BOOT = HUB_DIR / "boot.py"
 QUEUE_MOD = HUB_DIR / "queue.py"
@@ -308,34 +308,34 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
 #: 八个混入 + 声明面允许的仓内依赖（多一个就说明又搬漏/搬多了）。
 #: `queue_resume` 不在表里：它有一处**延迟** `rl` 引用（见 `test_only_resume_touches_rl`）。
 ALLOWED_IMPORTS = {
-    "remote.hub.queue_scope": {"common.protocol", "remote.hub.queue_peer", "remote.hub.store"},
-    "remote.hub.queue_discover": {"common.protocol", "remote.hub.queue_peer", "remote.hub.store"},
-    "remote.hub.queue_auth": {
-        "remote.hub.auth",
-        "remote.hub.queue_peer",
-        "remote.hub.store",
+    "hub.queue_scope": {"common.protocol", "hub.queue_peer", "hub.store"},
+    "hub.queue_discover": {"common.protocol", "hub.queue_peer", "hub.store"},
+    "hub.queue_auth": {
+        "hub.auth",
+        "hub.queue_peer",
+        "hub.store",
     },
-    "remote.hub.queue_claims": {
+    "hub.queue_claims": {
         "common.protocol",
-        "remote.hub.queue_peer",
-        "remote.hub.store",
-        "remote.hub.store_leases",
+        "hub.queue_peer",
+        "hub.store",
+        "hub.store_leases",
     },
-    "remote.hub.queue_observe": {
+    "hub.queue_observe": {
         "common.protocol",
-        "remote.hub.queue_peer",
-        "remote.hub.store",
+        "hub.queue_peer",
+        "hub.store",
         # 离线盘读数的两个窗口常量住 `hub/task_pack.py`（与 `hub.offline` 共用同一份口径）
-        "remote.hub.task_pack",
+        "hub.task_pack",
     },
-    "remote.hub.queue_offline": {
+    "hub.queue_offline": {
         "common.protocol",
-        "remote.hub.queue_peer",
-        "remote.hub.store",
-        "remote.hub.task_pack",
+        "hub.queue_peer",
+        "hub.store",
+        "hub.task_pack",
     },
-    "remote.hub.queue_store_face": {"remote.hub.queue_peer", "remote.hub.store"},
-    "remote.hub.queue_peer": {"common.protocol", "remote.hub.store_leases"},
+    "hub.queue_store_face": {"hub.queue_peer", "hub.store"},
+    "hub.queue_peer": {"common.protocol", "hub.store_leases"},
 }
 
 
@@ -800,7 +800,7 @@ def test_queue_peer_is_declarations_only() -> None:
         "混入 ≥L4 ⇒ hub.queue L5 ⇒ hub_server L6，与 smoke_loopback(L6) 同层"
     )
     # 它因此只能靠协议层 + `store_leases`（ClaimOutcome）⇒ L1
-dag.assert_remote_module("remote.hub.queue_peer", allowed_project_imports=ALLOWED_IMPORTS["remote.hub.queue_peer"])
+dag.assert_remote_module("hub.queue_peer", allowed_project_imports=ALLOWED_IMPORTS["hub.queue_peer"])
 
 
 def test_queue_peer_signatures_match_the_real_implementations() -> None:
@@ -831,42 +831,58 @@ def test_the_renamed_forward_is_declared_where_it_lives() -> None:
 # ────────────── ⑥ 依赖方向 / 账本 ──────────────
 
 
-def test_only_resume_touches_rl_and_only_lazily() -> None:
+def _logic_layer_import(node: ast.ImportFrom) -> str:
+    """该 `ImportFrom` 指向的**业务层**模块（`rl` 编排 / `biz` 纯逻辑两棵树），否则空串。
+
+    2026-09-30（刀 4）：判据从「碰了 `rl`」拆成两棵树 —— `rl`（编排）仍是**零**容忍，
+    `biz`（纯逻辑）是经豁免表点名登记的那类（表在 `test_hub_job_store_split.ALLOWED_BIZ`）。
+    """
+    mod = node.module or ""
+    return mod if mod.split(".")[0] in {"trainer", "biz"} else ""
+
+
+def test_only_resume_touches_the_logic_layer_and_only_lazily() -> None:
     """六个混入的仓内依赖是登记过的那些；`queue_resume` 例外但**只准延迟**。
 
-    `merge_eval_rows` 要 `from rl.eval_rows import append_eval_rows`（S5 第一刀后纯行/账本原语
-    住 `rl.eval_rows`；原 `rl.eval_local`）—— 它本来就在 `hub_server` 的函数体内（第十四刀没动），
+    `merge_eval_rows` 要 `from biz.eval_rows import append_eval_rows`（S5 第一刀后纯行/账本原语
+    住 `biz.eval_rows`；原 `biz.eval_local`）—— 它本来就在 `hub_server` 的函数体内（第十四刀没动），
     搬簇时原样带过来。`assert_remote_module` 的口径是「传输/落盘层保持 L2-pure」，所以这一簇单独
     按「延迟 + 只此一处」正面钉住。
     """
+    # `queue_resume` 的那条延迟 `biz.eval_rows` 是本用例下面正面钉住的那一条（`merge_eval_rows`）
+    # ⇒ 在共用账本判据这里点名登记（同 `test_hub_job_store_split.ALLOWED_BIZ` 的口径）。
     for mod, allowed in ALLOWED_IMPORTS.items():
-        dag.assert_remote_module(mod, allowed_project_imports=allowed)
+        dag.assert_remote_module(
+            mod,
+            allowed_project_imports=allowed,
+            allowed_biz={"biz.eval_rows"} if mod == "hub.queue_resume" else set(),
+        )
 
     resume = HUB_DIR / "queue_resume.py"
     tree = _tree(resume)
-    top_rl = {
-        n.module
-        for n in tree.body
-        if isinstance(n, ast.ImportFrom) and (n.module or "").startswith("rl")
-    }
-    assert top_rl == set(), f"queue_resume 顶层碰了 rl：{top_rl}"
+    top_logic = {
+        _logic_layer_import(n) for n in tree.body if isinstance(n, ast.ImportFrom)
+    } - {""}
+    assert top_logic == set(), f"queue_resume 顶层碰了业务层（trainer/biz）：{top_logic}"
     lazy: list[str] = []
     for n in ast.walk(tree):
         if isinstance(n, (ast.FunctionDef,)):
             for sub in ast.walk(n):
-                if isinstance(sub, ast.ImportFrom) and (sub.module or "").startswith("rl"):
-                    lazy.append(f"{n.name}->{sub.module}")
-    assert lazy == ["merge_eval_rows->rl.eval_rows"], lazy
+                if isinstance(sub, ast.ImportFrom) and _logic_layer_import(sub):
+                    lazy.append(f"{n.name}->{_logic_layer_import(sub)}")
+    assert lazy == ["merge_eval_rows->biz.eval_rows"], lazy
     for other in DOMAINS:
         if other == "queue_resume":
             continue
         src = (HUB_DIR / f"{other}.py").read_text(encoding="utf-8")
-        assert "rl." not in src and "rl import" not in src, f"{other} 碰了 rl"
+        # 两棵树都不许碰：`rl` = 编排（零容忍），`biz` = 纯逻辑（要经 ALLOWED_BIZ 点名）。
+        assert "rl." not in src and "rl import" not in src, f"{other} 碰了编排 rl"
+        assert "biz." not in src and "biz import" not in src, f"{other} 碰了纯逻辑 biz（需点名登记）"
 
 
 def test_the_mixins_never_import_each_other_nor_the_host() -> None:
     """★ 跨域调用**一律经 `self`**：混入之间零 import，也不得反向 import 组装模块。"""
-    siblings = {f"remote.hub.{d}" for d in DOMAINS}
+    siblings = {f"hub.{d}" for d in DOMAINS}
     host_key = hs.__name__  # 从**对象**取名字，不写带引号的字面量（`test_subproc_util` 的 spawn marker）
     for domain in DOMAINS:
         tree = _tree(HUB_DIR / f"{domain}.py")
@@ -886,14 +902,14 @@ def test_the_layers_match_the_ledger() -> None:
     （S4 第十六刀把它收口成薄门面，它下面还有 `hub.boot`(L6)）——`smoke_loopback` 站在入口上
     ⇒ 随迁 L8，必须仍严格向下。"""
     for domain in DOMAINS:
-        assert dag.LAYERS[f"remote.hub.{domain}"] == 3, domain
-    assert dag.LAYERS["remote.hub.queue_peer"] == 1
-    assert dag.LAYERS["remote.hub.store"] == 2
-    assert dag.LAYERS["remote.hub.queue"] == 4
-    assert dag.LAYERS["remote.hub.http_face"] == 5
-    assert dag.LAYERS["remote.hub.boot"] == 6
+        assert dag.LAYERS[f"hub.{domain}"] == 3, domain
+    assert dag.LAYERS["hub.queue_peer"] == 1
+    assert dag.LAYERS["hub.store"] == 2
+    assert dag.LAYERS["hub.queue"] == 4
+    assert dag.LAYERS["hub.http_face"] == 5
+    assert dag.LAYERS["hub.boot"] == 6
     assert dag.LAYERS[hs.__name__] == 7
-    assert dag.LAYERS["remote.smoke_loopback"] == 8
+    assert dag.LAYERS["hub.smoke_loopback"] == 8
 
 
 def test_the_sentinel_moved_with_its_only_reader() -> None:

@@ -3,7 +3,7 @@
  *  流程（用户 2026-09-17 需求）：
  *    浏览器上传 zip → 落到 `tmp/<课程>/deliver-uploads/`（留证）→ python
  *    `remote.deliver_zip` 解成产物目录（`tmp/<课程>/deliver/<run_id>/`，三道门在那边）
- *    → **接着起 evalA**（`rl/eval_a_once.py`，与训练每 eval_every 轮同口径的干净评估，
+ *    → **接着起 evalA**（`trainer/eval_a_once.py`，与训练每 eval_every 轮同口径的干净评估，
  *    语料就来自课程配置的 eval_stages/eval_games_per_stage）。
  *
  *  为什么评估复用 evalA 而不是自己拼一套：那条命令的语料口径、双轨种子、账本格式

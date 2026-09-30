@@ -1,4 +1,4 @@
-"""R3-4：控制台「调度器」卡片里的 **BC 行**（`rl/loop_plan.py` + `run_rl_cluster.build_rows`）。
+"""R3-4：控制台「调度器」卡片里的 **BC 行**（`trainer/loop_plan.py` + `run_rl_cluster.build_rows`）。
 
 用户口径：BC 课与 RL 课在**同一张卡片**里并列展示。要并列而不互相冒充，三件事必须成立：
 
@@ -25,12 +25,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.bc_config as bc_config
-from rl.bc_ledger import ROUND_DONE_EVENT
-from rl.loop_plan import WAIT_IDLE, WAIT_INFLIGHT, WAIT_READY, bc_inflight
-from rl.loop_scheduler import CourseQueue, Supervisor
-from rl.loop_tasks import Task, TaskResult
+import biz.bc_config as bc_config
+from biz.bc_ledger import ROUND_DONE_EVENT
+from biz.loop_scheduler import CourseQueue, Supervisor
+from biz.loop_tasks import Task, TaskResult
 from run_rl_cluster import _fmt_table, build_rows
+from trainer.loop_plan import WAIT_IDLE, WAIT_INFLIGHT, WAIT_READY, bc_inflight
 
 
 def _never(task: Task, queue: CourseQueue) -> TaskResult:

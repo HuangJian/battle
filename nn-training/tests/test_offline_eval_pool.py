@@ -5,7 +5,7 @@
   * **接线**（`remote/offline_eval.run_cloud_eval`）：每轮**建一个池**、把同一个池交给每一局、
     轮末关掉并把计数放进本地返回字典（不进 wire）。这里把 `run_local_eval_game` 换成**假**执行器
     ⇒ 断言的正是「池有没有被建/传/关」，不依赖真 bun。
-  * **执行面**（`rl/eval_local.run_local_eval_game`）：池在则**先试池**（用它的输出行长出一个
+  * **执行面**（`biz/eval_local.run_local_eval_game`）：池在则**先试池**（用它的输出行长出一个
     `CompletedProcess`），池说不行则**回退**一次性 `run_eval_runner_capture`，两条路的返回值
     形状完全一致（同一个 `_eval_report.json` → manifest + `mode="eval"` + `elapsedSec`）。
 
@@ -25,9 +25,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import biz.eval_local as eval_local
 import remote.offline_eval as offline_eval
-import remote.serve_pool as serve_pool
-import rl.eval_local as eval_local
+import worker.serve_pool as serve_pool
 from remote.artifacts import sha256_file
 from remote.offline_eval import CLOUD_NODE, eval_plan_of, run_cloud_eval
 

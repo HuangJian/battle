@@ -44,7 +44,7 @@ from test_remote_ppo import (  # type: ignore
     normalize_manifest,
 )
 
-from remote.hub_server import (  # isort: skip
+from hub.server import (  # isort: skip
     CF_SOURCE_HEADER,
     HubHandler,
     _is_loopback,

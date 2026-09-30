@@ -158,13 +158,13 @@ def role_of(manifest: Mapping[str, object]) -> str:
 MANIFEST_ITER_EXTRA: tuple[str, ...] = ("ts_code_sha256", "rollout")
 # ------------------------------------------------------------------ TS 导出器路径
 # `tools/sim/*.ts` 的真实文件名 —— 这是 **TS↔Python 的产物契约**，故与 wire 协议同住一层：
-# 长驻池按**同质入口**建（`remote/serve_pool.py`）、本机停等 cmd 由此拼（`rl/cmd.py`）、
+# 长驻池按**同质入口**建（`worker/serve_pool.py`）、本机停等 cmd 由此拼（`biz/cmd.py`）、
 # 云机找 TS 根时按它探路（`remote/run_loop.py`）—— 各处抄一份字面量就等着谁先漂。
 #: 逐局 rollout 导出器（kind=iter / kind=run）。
 ROLLOUT_SCRIPT = "tools/sim/export-rl-rollout.ts"
-#: 离线评估导出器（云机评估；`rl/eval_local.py` 建 cmd 时也用它）。
+#: 离线评估导出器（云机评估；`biz/eval_local.py` 建 cmd 时也用它）。
 EVAL_SCRIPT = "tools/sim/export-eval-game.ts"
-#: goal / intent 两个半 MDP 导出器（本机 `rl/cmd.py` 按模式选它们；节点侧 argv 白名单不放行）。
+#: goal / intent 两个半 MDP 导出器（本机 `biz/cmd.py` 按模式选它们；节点侧 argv 白名单不放行）。
 GOAL_SCRIPT = "tools/sim/export-goal-rollout.ts"
 INTENT_SCRIPT = "tools/sim/export-intent-rollout.ts"
 

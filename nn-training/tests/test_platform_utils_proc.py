@@ -1,4 +1,4 @@
-"""test_platform_utils_proc.py — 子进程回收原语（`platform_utils`: popen_own_group / kill_process_tree /
+"""test_platform_utils_proc.py — 子进程回收原语（`common.platform_utils`: popen_own_group / kill_process_tree /
 reap_bounded / keep_unreaped / sweep_unreaped）。
 
 为什么单独测这一层（2026-09-25 云机二次取证「rollout 卡死机器半天」）：训练轮里 92 条线程同时在
@@ -32,7 +32,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import platform_utils as plat
+import common.platform_utils as plat
 
 
 def _spawn(code: str) -> subprocess.Popen:
@@ -174,9 +174,9 @@ def test_sweep_unreaped_collects_only_dead_ones() -> None:
 def test_kill_reap_sec_is_one_small_positive_number() -> None:
     """那个数字是**唯一**的一份（各条腿都 import 它），而且必须小:大数字只是把「挂住」改名。"""
     assert 0 < plat.KILL_REAP_SEC <= 30.0
-    src = (ROOT / "platform_utils.py").read_text(encoding="utf-8")
+    src = (ROOT / "common/platform_utils.py").read_text(encoding="utf-8")
     assert "KILL_REAP_SEC = " in src
-    for leg in ("remote/iter_rollout.py", "rl/eval_local.py"):
+    for leg in ("worker/iter_rollout.py", "biz/eval_local.py"):
         text = (ROOT / leg).read_text(encoding="utf-8")
         assert "KILL_REAP_SEC" in text, leg
 

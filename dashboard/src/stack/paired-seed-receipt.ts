@@ -11,12 +11,12 @@
  *      把 V 上；无账本 ⇒ 还没跑过）；
  *    · 声明了却没有对端 ⇒ ★ 配对无对端（不许按配对口径结算）。
  *
- *  与训练侧 `rl/paired.py` 同一口径、同一措辞（两侧都是「读 + 判 + 组装」，判据只有一份：
+ *  与训练侧 `biz/paired.py` 同一口径、同一措辞（两侧都是「读 + 判 + 组装」，判据只有一份：
  *  「声明 = `paired_rotate_seed`」「对端 = 同 V 课程」「实测 = 账本末条 run_start」）。
  *
  *  **为什么这里只报不拦**：跨臂比对读的是**历史累积**的账本——对端刚开课还没写 run_start、
  *  或对端上一腿用的是旧 V，都会让「不等」成立而并没有错配；据此拒开课会挡住正当的腿。
- *  真正的硬闸在训练侧启动期（本课声明 ≠ 实际生效 ⇒ 拒启，见 `rl/loop_lifecycle.py`），
+ *  真正的硬闸在训练侧启动期（本课声明 ≠ 实际生效 ⇒ 拒启，见 `trainer/loop_lifecycle.py`），
  *  而本屏的价值是：**别在凌晨点完开课就走，让错配跑 80 轮**。
  *
  *  读取失败一律降级为一行说明，**永不阻断开课**（与 §5.3 对照行同一纪律）。
@@ -27,7 +27,7 @@ import path from 'path'
 import { readJsoncFile } from '../core/jsonc'
 import { curriculaDir, tmpLogsDir } from '../core/paths'
 
-/** 课程键名（与 python `rl/paired.py::PAIRED_KEY`、`CourseConfig.paired_rotate_seed` 同名）。 */
+/** 课程键名（与 python `biz/paired.py::PAIRED_KEY`、`CourseConfig.paired_rotate_seed` 同名）。 */
 export const PAIRED_KEY = 'paired_rotate_seed'
 
 /** 账本里要读的事件名（`training_log.jsonl` 的启动事件，与 python 侧同字面量）。 */

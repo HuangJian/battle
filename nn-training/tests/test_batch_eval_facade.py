@@ -1,4 +1,4 @@
-"""test_batch_eval_facade — `rl/batch_eval.py` 作为**门面**的契约（S28/B4 收尾）。
+"""test_batch_eval_facade — `trainer/batch_eval.py` 作为**门面**的契约（S28/B4 收尾）。
 
 B1–B3（plan §5.5.4）把规划面 / 台账面 / 执行面依次搬出，`batch_eval.py` 退成
 「常量 + `maybe_dispatch_batch` + 逐个再导出」。本文件钉两类东西：
@@ -26,12 +26,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.batch_eval as be
-import rl.batch_plan as bp
-import rl.batch_runner as br
-import rl.batch_store as bs
+import trainer.batch_eval as be
+import trainer.batch_plan as bp
+import trainer.batch_runner as br
+import trainer.batch_store as bs
 
-EVAL_PATH = ROOT / "rl" / "batch_eval.py"
+EVAL_PATH = ROOT / "trainer" / "batch_eval.py"
 EVAL_SRC = EVAL_PATH.read_text(encoding="utf-8")
 TREE = ast.parse(EVAL_SRC)
 
@@ -84,14 +84,14 @@ STORE_EXPORTS = (
 )
 RUNNER_EXPORTS = ("BatchEvalRunner", "dispatch_batch_bg")
 
-HOMES = {"rl.batch_plan": PLAN_EXPORTS, "rl.batch_store": STORE_EXPORTS, "rl.batch_runner": RUNNER_EXPORTS}
-HOME_MODULES = {"rl.batch_plan": bp, "rl.batch_store": bs, "rl.batch_runner": br}
+HOMES = {"trainer.batch_plan": PLAN_EXPORTS, "trainer.batch_store": STORE_EXPORTS, "trainer.batch_runner": RUNNER_EXPORTS}
+HOME_MODULES = {"trainer.batch_plan": bp, "trainer.batch_store": bs, "trainer.batch_runner": br}
 
 #: 刻意**不**经门面转发的名字。它们只被新家的代码读，所以转发只会制造
 #: 「名字还在旧家、没人读」的静默空操作（S16/S19 记过两次的坑）⇒ 在门面上必须**响亮**
 #: AttributeError。
 NOT_FORWARDED = (
-    # 执行器独占的五个常量 + 心跳（只被 `rl/batch_runner` 自己读）
+    # 执行器独占的五个常量 + 心跳（只被 `trainer/batch_runner` 自己读）
     "BUSY_BACKOFF_CAP_SEC",
     "STUCK_GRACE_SEC",
     "RECOVER_PING_SEC",

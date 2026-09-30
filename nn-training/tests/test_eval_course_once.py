@@ -6,7 +6,7 @@
   2. `_row_id` 是 `buildCourseJobs` 的 `wi * games + g` 的反解（行序对齐）；
   3. `_to_tool_row` 的 B 层行 → 工具 JSONL 契约映射（字段名/布尔化/缺列不伪造）。
 
-节点通信与重试**不在此测**：那是 `BatchEvalRunner` + `dist_common` 的既有测试面。
+节点通信与重试**不在此测**：那是 `BatchEvalRunner` + `common.distribution` 的既有测试面。
 """
 
 from __future__ import annotations
@@ -138,7 +138,7 @@ def test_oneshot_runner_uses_dedicated_weight_kind() -> None:
     from types import SimpleNamespace
 
     sys.path.insert(0, str(ROOT / "nn-training"))
-    from rl.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner
+    from trainer.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner
 
     def mk(**kw) -> BatchEvalRunner:
         return BatchEvalRunner(

@@ -122,7 +122,7 @@ const harvestLastStat = new Map<string, string>()
  *
  *  为什么必须有它（2026-09-28 事故）：这几列**不在账本里**——它们是扫 `it<N>` 现算后缓存的
  *  派生值，而 `/api/state` 只对**查看课程**算（`state-view.ts`），训练侧每轮又按 `keep_iters`
- *  删 `it<N>`（`rl/loop_guards_sweep.py::_rotate_cleanup`）⇒ 没人看过的那门课的轮次到第 4 轮
+ *  删 `it<N>`（`biz/loop_guards_sweep.py::_rotate_cleanup`）⇒ 没人看过的那门课的轮次到第 4 轮
  *  就永久空白（实测 `h5b-clean` 缺 it7–17、`h5a-earlydmg` 缺 it22–25，两个缺口在时间轴上
  *  互补 = 「谁在屏幕上谁才有数」）。这里把「看见」从人手上拿走：在训的课每拍都抄一遍。
  *

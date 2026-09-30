@@ -48,8 +48,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from common.log_bundle import LogBundle
+from common.schema import FIRE_DIM, MOVE_DIM
 from data.weights_io import load_weights_json, save_weights_json
-from log_bundle import LogBundle
 from models.student import PPOStudent
 
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
@@ -96,7 +97,6 @@ from ppo.np_core import (  # noqa: F401  (re-export：既有调用点不变)
     load_shard_fields,
 )
 from ppo.trainer import aggregate_stats, tensored_chunks
-from schema import FIRE_DIM, MOVE_DIM
 
 # ---------------- hyper-params (CLI-overridable) ----------------
 # R6（2026-08-25 训练质量审计）：it1–it68 未收敛（winRate ~10% 水平、value 预测量级
@@ -136,7 +136,7 @@ def build_ppo(weights_path: str | None) -> PPOStudent:
 
 # 2026-09-26：trajectory 装载（shard 发现 / metrics→reward / GAE / 配额；**免 torch**）
 # 已搬进 `ppo/np_core.py`（与 load_episodes_common 同家）——本模块只从那里再导出，
-# 调用点（rl/stream.py / remote/train_core.py / ppo/bench.py / ppo/__init__ 的便捷名）一行不改。
+# 调用点（trainer/stream.py / remote/train_core.py / ppo/bench.py / ppo/__init__ 的便捷名）一行不改。
 
 
 
@@ -620,7 +620,7 @@ def ppo_update(
     return agg
 
 
-# rl/stream.py 的 backend 契约要求模块暴露 update(...)（intent 的 ppo_intent 已有）；
+# trainer/stream.py 的 backend 契约要求模块暴露 update(...)（intent 的 ppo_intent 已有）；
 # 普通训练器的流式路径（run_rl.py --stream 1）此前从未被拉通——补此别名。
 # 签名与 ppo_update 完全一致（ckpt_path 经 update_kwargs 透传）。
 update = ppo_update

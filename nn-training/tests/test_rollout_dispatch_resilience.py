@@ -9,7 +9,7 @@
     `agentRescanSec`（120s），而 234 轮全部 <120s（p50 7s / max 115s），线程每轮都在
     首个 sleep 里被结算事件唤醒并退出；且已熔断的节点因 `spawned_ids` 命中被永久跳过。
 
-修法：判据统一到 dist_common（is_transient_error / refresh_weights）；409 走
+修法：判据统一到 common.distribution（is_transient_error / refresh_weights）；409 走
 「就地重发 + 清 reuse 缓存」；瞬时失败不计节点故障（连续软失败仍有上界）；rescan
 首个 pass 提前到 `nodeRecoverFirstSec`、ping 并行、并把**已停派节点**也纳入回场
 （重置失败计数 + 强制重握手 + 补孵线程，每节点 `nodeRearmLimit` 次上界）。
@@ -25,9 +25,9 @@ from typing import Any
 
 import pytest
 
-import dist_common
-import rl.dispatch as disp
-import rl.queue_local as ql
+import common.distribution
+import trainer.dispatch as disp
+import trainer.queue_local as ql
 
 GOOD_PING: dict[str, Any] = {
     "codeHash": "deadbeef",
@@ -93,27 +93,27 @@ class _Harness:
             },
         }
         self.games = games
-        monkeypatch.setattr(dist_common, "compute_code_hash", lambda: "deadbeef")
+        monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "deadbeef")
         monkeypatch.setattr(disp, "bun_version", lambda _bun: "1.1.0")
         monkeypatch.setattr(
-            dist_common,
+            common.distribution,
             "node_ping",
             ping_fn or (lambda *a, **k: dict(GOOD_PING)),
         )
-        monkeypatch.setattr(dist_common, "post_weights", lambda *a, **k: "kept")
+        monkeypatch.setattr(common.distribution, "post_weights", lambda *a, **k: "kept")
         monkeypatch.setattr(
-            dist_common, "validate_result", lambda manifest, files, wver, pairs, seen: ""
+            common.distribution, "validate_result", lambda manifest, files, wver, pairs, seen: ""
         )
-        monkeypatch.setattr(dist_common, "write_shard", lambda *a, **k: {})
+        monkeypatch.setattr(common.distribution, "write_shard", lambda *a, **k: {})
         monkeypatch.setattr(disp, "log", self.logs.append)
-        # rescan 线程在自己的模块里持有 log 引用（rl.queue_local.log），单 patcher 不够。
+        # rescan 线程在自己的模块里持有 log 引用（trainer.queue_local.log），单 patcher 不够。
         monkeypatch.setattr(ql, "log", self.logs.append)
 
         def fake_refresh(node: dict, **kw: Any) -> bool:
             self.refreshed.append({"node": node["id"], **kw})
             return True
 
-        monkeypatch.setattr(dist_common, "refresh_weights", fake_refresh)
+        monkeypatch.setattr(common.distribution, "refresh_weights", fake_refresh)
 
         def fake_post(
             nodes, iter_id, wver, weights_bytes, timeout, kind="rollout", log=None, on_alive=None
@@ -132,11 +132,11 @@ class _Harness:
                 out.append(nd)
             return out
 
-        monkeypatch.setattr(dist_common, "post_weights_parallel", fake_post)
+        monkeypatch.setattr(common.distribution, "post_weights_parallel", fake_post)
 
     def run(self, fetch, halt_event=None) -> dict:
-        dist_common.weights_push_cache_reset()
-        self.mp.setattr(dist_common, "fetch_task", fetch)
+        common.distribution.weights_push_cache_reset()
+        self.mp.setattr(common.distribution, "fetch_task", fetch)
         pairs = [(2000, i + 1) for i in range(self.games)]
         return disp.RolloutDispatcher(
             "bun",
@@ -171,7 +171,7 @@ def test_transient_502_does_not_circuit_break_node(tmp_path, monkeypatch) -> Non
     def fetch(*_a, **_kw):
         calls["n"] += 1
         if calls["n"] <= 3:
-            raise dist_common.DistError(502, "")
+            raise common.distribution.DistError(502, "")
         return h.manifest(), {}
 
     report = h.run(fetch)
@@ -193,7 +193,7 @@ def test_hard_failure_trips_then_bounded_rearm(tmp_path, monkeypatch) -> None:
 
     def fetch(*_a, **_kw):
         calls["n"] += 1
-        raise dist_common.DistError(0, "validate: bad manifest")
+        raise common.distribution.DistError(0, "validate: bad manifest")
 
     report = h.run(fetch)
     assert report["dist"]["nodes"] == {}, report["dist"]
@@ -213,7 +213,7 @@ def test_wver_409_reposts_and_keeps_node(tmp_path, monkeypatch) -> None:
     def fetch(*_a, **_kw):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise dist_common.DistError(409, '{"error":"wver not cached here"}')
+            raise common.distribution.DistError(409, '{"error":"wver not cached here"}')
         return h.manifest(), {}
 
     report = h.run(fetch)
@@ -234,21 +234,21 @@ def test_task_lost_404_requeues_without_tripping_node(tmp_path, monkeypatch) -> 
     """
     h = _Harness(tmp_path, monkeypatch, games=2)
     forgotten: list[str] = []
-    real_forget = dist_common.forget_weights_node
+    real_forget = common.distribution.forget_weights_node
 
     def spy_forget(nid: str, kind: str | None = None) -> int:
         forgotten.append(nid)
         return real_forget(nid, kind)
 
-    monkeypatch.setattr(dist_common, "forget_weights_node", spy_forget)
+    monkeypatch.setattr(common.distribution, "forget_weights_node", spy_forget)
     calls = {"n": 0}
 
     def fetch(*_a, **_kw):
         calls["n"] += 1
         if calls["n"] <= 4:
-            raise dist_common.DistError(
+            raise common.distribution.DistError(
                 404,
-                f"{dist_common.TASK_LOST_MARKER} (restart/purge): "
+                f"{common.distribution.TASK_LOST_MARKER} (restart/purge): "
                 '{"error":"unknown task (expired/purged/restart)"}',
             )
         return h.manifest(), {}
@@ -275,7 +275,7 @@ def test_soft_streak_still_bounded_when_cluster_is_down(tmp_path, monkeypatch, s
     窗口在这里只是**配速**（同 nodeRecoverFirstSec/recoverPingSec 的「小节奏」用法），
     断言只看取活次数与漏局集，与窗口长度无关；配小后本用例 ~1.5s（不再 26.5s）。
     注：回场节奏的 1.0s 地板当轮也会随之暴露（旋钮 0.05s 不生效）——已在
-    rl/queue_local.py 改为与 wait 同源地板，故 4 轮在这里只需零点几秒。
+    trainer/queue_local.py 改为与 wait 同源地板，故 4 轮在这里只需零点几秒。
     （遗留议题：生产缺省窗 1800s，「全员停派且回场用尽」时整轮会空等到窗口——
      已在 §98 记录，属终止语义变更，未擅自改。）
     """
@@ -293,7 +293,7 @@ def test_soft_streak_still_bounded_when_cluster_is_down(tmp_path, monkeypatch, s
 
     def fetch(*_a, **_kw):
         calls["n"] += 1
-        raise dist_common.DistError(status, "")
+        raise common.distribution.DistError(status, "")
 
     report = h.run(fetch)
     assert calls["n"] == 8, f"软停 + 有界回场应共 8 次取活（实测 {calls['n']}）"
@@ -369,7 +369,7 @@ def test_rescan_rearms_tripped_node_within_round(tmp_path, monkeypatch) -> None:
     def fetch(*_a, **_kw):
         calls["n"] += 1
         if calls["n"] <= 3:
-            raise dist_common.DistError(0, "validate: bad manifest")  # 真失败 → 熔断
+            raise common.distribution.DistError(0, "validate: bad manifest")  # 真失败 → 熔断
         return h.manifest(), {}
 
     report = h.run(fetch)
@@ -393,7 +393,7 @@ def test_rescan_rearm_bounded_by_limit(tmp_path, monkeypatch) -> None:
 
     def fetch(*_a, **_kw):
         calls["n"] += 1
-        raise dist_common.DistError(0, "validate: bad manifest")
+        raise common.distribution.DistError(0, "validate: bad manifest")
 
     h.run(fetch)
     # 熔断 3 次 → 回场 1 次（再 3 次）→ 上界用尽，不再补孵。
@@ -411,7 +411,7 @@ def test_halt_stops_round_without_waiting_window(tmp_path, monkeypatch) -> None:
         # 还在跑」——2026-09-20 回场节奏地板修正后轮在 <0.3s 就跑完了，halt 落空、
         # `halt_aborted` 缺失（测试自身的时间依赖，不是生产行为回归）。
         halt.set()
-        raise dist_common.DistError(0, "validate: bad manifest")
+        raise common.distribution.DistError(0, "validate: bad manifest")
 
     t0 = time.monotonic()
     report = h.run(fetch, halt_event=halt)

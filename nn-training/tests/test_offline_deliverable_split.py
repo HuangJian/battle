@@ -115,7 +115,7 @@ def test_deliverable_never_imports_boot_or_repo_packages() -> None:
     banned = [
         m
         for m in _imports(DELIVERABLE_FILE)
-        if m.startswith(("remote", "common", "rl", "offline_boot", "offline_deliverable"))
+        if m.startswith(("remote", "common", "trainer", "biz", "offline_boot", "offline_deliverable"))
     ]
     assert banned == [], f"交付面反向 import 了 {banned}（standalone 拿不到 code.zip）"
 

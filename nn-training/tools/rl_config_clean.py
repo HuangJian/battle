@@ -275,16 +275,16 @@ def verdict_for(key: str, sources: list[str]) -> str:
 
 
 def load_jsonc(path: Path) -> dict[str, Any]:
-    """读 JSONC —— **必须用产品同一个加载器** `rl.jsonc.loads`。
+    """读 JSONC —— **必须用产品同一个加载器** `common.jsonc.loads`。
 
     ★ 2026-09-26 修（回归）：此前是 `strip_comments` + `json.loads`，**漏了去尾逗号**。
     实测 `curricula/*.jsonc` 108 个里 88 个、`levels/*.jsonc` 25 个里 25 个都带尾逗号
     ⇒ `--matrix` 只要遇到一门在训课程就直接 `JSONDecodeError` 崩掉；更糟的是若哪天
     有人在调用点吞掉异常，「文件没读进来」会被读成「课程没声明该键」= 静默删兜底。
-    产品侧 `load_course` 走 `rl.jsonc.loads`（`strip_comments` → `_drop_trailing_commas`
+    产品侧 `load_course` 走 `common.jsonc.loads`（`strip_comments` → `_drop_trailing_commas`
     → `json.loads`），本工具必须同源。
     """
-    from rl.jsonc import loads
+    from common.jsonc import loads
 
     raw: Any = loads(path.read_text(encoding="utf-8"))
     return raw if isinstance(raw, dict) else {}
@@ -292,7 +292,7 @@ def load_jsonc(path: Path) -> dict[str, Any]:
 
 def load_course_keys(course: str) -> dict[str, Any]:
     """课程文件的**原始顶层键**（不经 pydantic 补默认——补了就分不出「显式声明」）。"""
-    from rl.config import CURRICULA_DIR
+    from biz.config import CURRICULA_DIR
 
     for suffix in (".jsonc", ".bc.jsonc"):
         p = CURRICULA_DIR / f"{course}{suffix}"
@@ -302,7 +302,7 @@ def load_course_keys(course: str) -> dict[str, Any]:
 
 
 def load_level_keys(course_keys: dict[str, Any]) -> dict[str, Any]:
-    from rl.config import LEVELS_DIR
+    from biz.config import LEVELS_DIR
 
     level = str(course_keys.get("level") or "").strip()
     if not level:
@@ -319,7 +319,7 @@ def all_courses() -> list[str]:
     「任何课程没声明该键时落到 rl-config 的值」⇒「全部课程都不靠它」是**更强**的证据
     （全绿于 `all` ⇒ 全绿于 `live`；反之不然）。
     """
-    from rl.config import CURRICULA_DIR
+    from biz.config import CURRICULA_DIR
 
     return sorted(p.name[: -len(".jsonc")] for p in CURRICULA_DIR.glob(CURRICULUM_GLOB))
 
@@ -415,11 +415,11 @@ def main(argv: list[str] | None = None) -> int:
         print("✗ --apply 与 --dry-run 互斥", file=sys.stderr)
         return 2
 
-    import dist_common
+    import common.distribution
 
     nn_dir = Path(__file__).resolve().parent.parent
     repo_root = nn_dir.parent
-    config_path = Path(args.config) if args.config else Path(dist_common.rl_config_path())
+    config_path = Path(args.config) if args.config else Path(common.distribution.rl_config_path())
     traj_root = Path(args.traj_root) if args.traj_root else repo_root / "tmp"
 
     cfg = json.loads(config_path.read_text(encoding="utf-8"))
@@ -473,7 +473,7 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover
-    # 以脚本直跑时 `sys.path[0]` 是 `tools/` ⇒ 仓库内 `common` / `rl` / `dist_common` 找不到；
+    # 以脚本直跑时 `sys.path[0]` 是 `tools/` ⇒ 仓库内 `common` / `rl` / `common.distribution` 找不到；
     # 把 nn-training/ 塞回去（测试里由 tests/conftest.py 做同一件事）。
     _NN_DIR = Path(__file__).resolve().parent.parent
     if str(_NN_DIR) not in sys.path:

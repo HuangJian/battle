@@ -89,7 +89,7 @@ it3/ppo_ckpt_remote.tar  l1=60F416489E710602  l3=60F416489E710602
 | 幂等键 / job id | `(runId, it, init_weights_fp, data_fp)` → `sha256[:16]` | `remote/protocol.py::idempotency_key` / `::job_id` |
 | 发布端生成 id | `m["job_id"] = make_job_id(m)`（`course_fp` 已在 `m` 里，**在 id 之前注入**） | `remote/hub_client.py::publish_job` |
 | 离线合成 job | 同一条 `make_job_id`（`m` 由 hub 的 manifest 派生 ⇒ 自动继承新键） | `remote/run_loop.py::_build_iter_manifest`（`:655`） |
-| 归属解析 | `course_of(jid)`：**第一个** `job_root/<jid>` 存在的课程（带 `_locate_cache` 记忆化） | `remote/hub_server.py::course_of`（`:1816`） |
+| 归属解析 | `course_of(jid)`：**第一个** `job_root/<jid>` 存在的课程（带 `_locate_cache` 记忆化） | `hub/server.py::course_of`（`:1816`） |
 | store / 目录解析 | `_store_of(jid)` = `course_of` → store；`_job_dir(jid)` 同源（找不到落 `_MISSING_ROOT` 哨兵） | 同上（`:1842` / `:2145`） |
 | claim 拒绝 | `frozen` / `held` / `demoted` / `stale_holder` / `unknown` → 409（除 `demoted` 回 200） | `hub_server.py::_claim_locked`（`:615`）/ `::_post_claim`（`:2914`） |
 | **委派层（全部走 `_store_of` 首匹配）** | `heartbeat` / `release` / `result_token_ok` / `store_result` / `store_job_failure` / `job_failure` / `get_result` / `mark_completed` / `append_ledger` / `lease_expires_in` / `last_heartbeat_ago` / `epoch_of` | `hub_server.py::_HubQueue`（`:2425-2506` 一带） |
@@ -276,11 +276,11 @@ publish_job(...)：
 | `remote/protocol.py` | `idempotency_key` 加 `course_fp`（§3.1）；新增纯函数 `collision_rows(job_root, manifest)`（§3.3 判据唯一实现）。`job_id`/`job_seed`/`data_fp_entries` 其余不动 |
 | `remote/hub_client.py::publish_job` | 计算 jid 后、**写盘前**调 `collision_rows`，命中 ⇒ `HubClientError`（§3.3）；`tmp_extra_dir.mkdir()` 后移到守卫之后 |
 | `remote/run_loop.py::_build_iter_manifest` | **无需改**：`m` 由 hub 的 manifest 派生、`make_job_id` 同实现 ⇒ 自动继承新键。它是节点侧（无兄弟课程目录），守卫在此无意义 |
-| `remote/hub_server.py::course_of` | 唯一化（§3.2）：≥2 命中 ⇒ `None` + 一行歧义日志；`_locate_cache` 只缓存唯一命中 |
-| `remote/hub_server.py::_HubQueue.__init__` | 新增歧义日志去重集（jid → 已报过） |
-| `remote/hub_server.py::queue_state` | 新增 `ambiguous_jids`（§3.4） |
-| `remote/hub_server.py::_HubQueue` docstring | 改掉「runId ⇒ 跨课程天然不撞」的陈旧前提（§1.2 末行） |
-| `remote/hub_server.py::_post_claim` / `::_post_result` | 4xx 路径打一行拒绝日志（§3.4 hub 侧） |
+| `hub/server.py::course_of` | 唯一化（§3.2）：≥2 命中 ⇒ `None` + 一行歧义日志；`_locate_cache` 只缓存唯一命中 |
+| `hub/server.py::_HubQueue.__init__` | 新增歧义日志去重集（jid → 已报过） |
+| `hub/server.py::queue_state` | 新增 `ambiguous_jids`（§3.4） |
+| `hub/server.py::_HubQueue` docstring | 改掉「runId ⇒ 跨课程天然不撞」的陈旧前提（§1.2 末行） |
+| `hub/server.py::_post_claim` / `::_post_result` | 4xx 路径打一行拒绝日志（§3.4 hub 侧） |
 | `remote/worker.py::_warn_non_200` | 签名加 `body`/`jid`，按 §3.4 文案表分派（**409 ≠ hub 异常**）；三个调用点传体与 jid |
 | 控制台（dashboard） | 二期：`/admin/queue` 的 `ambiguous_jids` 非空 ⇒ 红标。本 plan 只保证字段在 hub 侧产出 |
 | **不改** | `remote/worker.py` 的请求形状、`remote/push_client.py`、`remote/push_dispatch.py`、`rl/**`（§2.2） |
@@ -401,7 +401,7 @@ publish_job(...)：
 - 幂等键与键分量：`remote/protocol.py::idempotency_key` / `::job_id` / `::data_fp_entries`。
 - 课程字节冻结（选 `course_fp` 的依据）：`rl/config.py:1264`、`rl/cmd.py:120-138`、`rl/loop_steps.py:1189-1192`。
 - 课程键 ≠ course_name：`train/loop_util.py::course_key_from_path`、`remote/worker.py:2833-2836`。
-- 路由与拒绝面：`remote/hub_server.py::course_of` / `::_store_of` / `::_job_dir` / `::_claim_locked`
+- 路由与拒绝面：`hub/server.py::course_of` / `::_store_of` / `::_job_dir` / `::_claim_locked`
   （`held` 在 `:655-661`）/ `::_post_claim`（409 出口 `:2979`）/ `::_post_result` / `::_facts_locked(exclude_worker=…)`。
 - 发布端：`remote/hub_client.py::publish_job`（`course_fp` 在 `make_job_id` 之前注入）；离线腿
   `remote/run_loop.py::_build_iter_manifest`；会话载体 `rl/loop_steps.py::_remote_ppo_round`。

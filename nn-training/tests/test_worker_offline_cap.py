@@ -39,7 +39,7 @@ from common.protocol import (
     ROLE_ONLINE,
     WORKER_ID_HEADER,
 )
-from remote.hub_server import _HubQueue, make_server
+from hub.server import _HubQueue, make_server
 from tests.helpers.hub_poll import hub_poll
 
 TOKEN = "sekret"
@@ -237,7 +237,7 @@ def _publish_offline_course(root: Path, course: str, jid: str) -> None:
     ⚠ 这里**不**调 `set_mode(OFFLINE)`：归属是 job 自己的属性（发布时定死），与课程当前
     mode 无关——这正是本文件要钉住的那条（旧口径靠 mode，切一次就漂）。
     """
-    from remote.hub_server import _JobStore
+    from hub.server import _JobStore
 
     job_root = root / course / "remote-jobs"
     job_root.mkdir(parents=True, exist_ok=True)

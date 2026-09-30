@@ -1,8 +1,8 @@
 /**
  * node-upgrade.ts — 节点升级指令的 TS 客户端（**复用训练循环的守卫与探测**）。
  *
- * 训练循环（`nn-training/rl/dispatch.py` ping 门）发现节点 codeHash stale 时会
- * `dist_common.upgrade_stale_nodes(...)`：逐节点 ping → codeHash ≠ 期望 →
+ * 训练循环（`nn-training/trainer/dispatch.py` ping 门）发现节点 codeHash stale 时会
+ * `common.distribution.upgrade_stale_nodes(...)`：逐节点 ping → codeHash ≠ 期望 →
  * `request_upgrade_guarded(...)`（POST `/v1/restart {pullBranch}`），三重护栏 =
  * 脏工作区拒发（字节级判据，**不是** `git status`——autocrlf 会藏 CRLF 污染，
  * 2026-09-09 mac 事故）/ 跨代去重 (agent codeHash, 期望 hash) / self 节点纯重启禁 pull。
@@ -13,12 +13,12 @@
  * 打日志/告警、持久化跨调用 memo。
  *
  * 已知边界：子进程是一次性的 ⇒ 守卫内部的跨代去重只在单次调用内生效；跨调用由本模块的
- * memo 文件兜底（key = nid + agent ping hash + 期望 hash，**语义与 dist_common._RESTART_SEEN
+ * memo 文件兜底（key = nid + agent ping hash + 期望 hash，**语义与 common.distribution._RESTART_SEEN
  * 一致**，落 `tmp/node-upgrade-memo.json`，可用 NN_UPGRADE_MEMO 覆盖）：调用前按节点取
  * memo 里最新的一条经 spec.`seen` 预置回子进程，判据（含**去重冷却窗**）仍只有一处实现。
  *
  * F3（2026-09-19）：去重不是永久的——memo 值就是该次下发的 ISO 时刻，本模块把它换算成
- * `atSec`（epoch 秒）随 `seen` 传给 Python，由 `dist_common.request_upgrade_guarded` 按
+ * `atSec`（epoch 秒）随 `seen` 传给 Python，由 `common.distribution.request_upgrade_guarded` 按
  * `RESTART_DEDUP_COOLDOWN_SEC`（缺省 600s）判定「还在窗内 ⇒ dedup」/「窗已过 ⇒ 再发一次」。
  * 旧行为下，pull 失败（或节点环境不支持远端升级）的节点会带着同一个 codeHash 回来、
  * memo 键永久命中 ⇒ 该节点再也收不到升级指令且跨调用持续被压制。
@@ -28,14 +28,14 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'fs'
 import path from 'path'
 
 export interface UpgradeSpecInput {
-  /** 期望 codeHash；缺省由 Python 侧 `dist_common.compute_code_hash()` 现算。 */
+  /** 期望 codeHash；缺省由 Python 侧 `common.distribution.compute_code_hash()` 现算。 */
   expectedHash?: string
   branch: string
   /** 节点配置（`rl-config.json` 或 `--dist-nodes` 指定的文件）。 */
   cfgPath: string
-  /** 跨调用去重 memo（预置回 `dist_common._RESTART_SEEN`；`atSec` = 该次下发时刻）。 */
+  /** 跨调用去重 memo（预置回 `common.distribution._RESTART_SEEN`；`atSec` = 该次下发时刻）。 */
   seen?: Array<{ id: string; pingHash: string; expectedHash: string; atSec?: number }>
-  /** null/缺省 ⇒ 子进程用 `dist_common.dirty_hash_files()` 字节级探测。 */
+  /** null/缺省 ⇒ 子进程用 `common.distribution.dirty_hash_files()` 字节级探测。 */
   dirty?: string[] | null
   dryRun?: boolean
   /** 重启请求超时（秒）。 */
@@ -122,7 +122,7 @@ export function parseUpgradeOutput(stdout: string): {
   }
 }
 
-/** memo 键（与 dist_common._RESTART_SEEN 的 (agent ping hash, 期望 hash) 同语义，全量 hex）。 */
+/** memo 键（与 common.distribution._RESTART_SEEN 的 (agent ping hash, 期望 hash) 同语义，全量 hex）。 */
 export function memoKey(nid: string, pingHash: string, expectedHash: string): string {
   return `${nid}|${pingHash}|${expectedHash}`
 }
@@ -182,7 +182,7 @@ export function latestSeenEntries(
 /**
  * memo 值（该次下发的时刻）→ epoch 秒。认 ISO 8601（本模块写入的形态）与纯数字两种；
  * 解不出来时回 **0**（= 最旧）——由 Python 侧的冷却窗判它「已过期 ⇒ 允许再发一次」。
- * 这里**不做去重判断**（判据只在 dist_common，单一实现），只负责把时刻送达。
+ * 这里**不做去重判断**（判据只在 common.distribution，单一实现），只负责把时刻送达。
  */
 export function memoAtSec(at: unknown): number {
   const s = String(at ?? '').trim()

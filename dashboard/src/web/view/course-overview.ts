@@ -11,7 +11,7 @@
 
 // ────────────────────────── hub 观测面（GET /admin/queue） ──────────────────────────
 
-/** hub 的毒包熔断阈值（`remote/hub_server.py::FREEZE_AFTER_RECLAIMS` 的**镜像常量**）。
+/** hub 的毒包熔断阈值（`hub/server.py::FREEZE_AFTER_RECLAIMS` 的**镜像常量**）。
  *
  *  为什么镜像在这里：面板要把「零回传 3 次」说成「到了阈值」才读得懂，而控制台不能 import python。
  *  权威仍在 python —— `tests/poison-unfreeze.test.ts` 对着源码文本核对这一个字面量，

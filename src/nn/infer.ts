@@ -9,7 +9,7 @@
  * ReLU activations + a self-implemented softmax, so the forward pass is
  * exactly reproducible in TS. See model.py for the reference implementation.
  *
- * Layout conventions (must match nn-training/schema.py + obs-encoder.ts):
+ * Layout conventions (must match nn-training/common/schema.py + obs-encoder.ts):
  *   obs  : flat Uint8  [ch * 26 * 26]  (NCHW: ch, row, col)
  *   GAP  : global average pool over the 26x26 spatial -> divide by 676
  *   heads: move(5) / fire(2) / item(3); backbone ignores scalars.

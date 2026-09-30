@@ -1,4 +1,4 @@
-"""R3-4：`serve` 带 BC 课 —— 单进程 supervisor × BC 引擎（`rl/loop_serve.py` × `rl/bc_loop.py`）。
+"""R3-4：`serve` 带 BC 课 —— 单进程 supervisor × BC 引擎（`trainer/loop_serve.py` × `trainer/bc_loop.py`）。
 
 **这是「让 serve 也能带 BC 课」的验收用例**（用户口径：一个 trainer 进程服务所有课程，
 BC 课不再需要一个专属进程）。只把最重的活换成假件——真组件全在环上：
@@ -32,16 +32,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.bc_config as bc_config
-import rl.bc_loop as bc_loop
-import rl.loop_core as loop_core
-import rl.loop_plan as loop_plan
-import rl.loop_serve as loop_serve
-import rl.train_ledger as train_ledger
+import biz.bc_config as bc_config
+import biz.train_ledger as train_ledger
+import trainer.bc_loop as bc_loop
+import trainer.loop_core as loop_core
+import trainer.loop_plan as loop_plan
+import trainer.loop_serve as loop_serve
+from biz.bc_ledger import ROUND_DONE_EVENT, read_events
+from biz.loop_tasks import ROUND_TASKS
 from remote import hub_client, hub_http
-from rl.bc_ledger import ROUND_DONE_EVENT, read_events
-from rl.loop_serve import CourseRuntime, serve
-from rl.loop_tasks import ROUND_TASKS
+from trainer.loop_serve import CourseRuntime, serve
 
 #: BC 课的附加参数（serve 级 argv）：强制 pull + 本机 hub（否则会真去打 rl-config 里的地址）
 BC_ARGV = [
@@ -130,10 +130,10 @@ def bc_course(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     """在**临时 curricula 目录**里造一门真 BC 课程（真配置解析，不碰仓根课程与 tmp/）。
 
     直接改写仓根真实课程的 `traj/out/data_dir/backup_dir` 会把测试写进真账本/真归档——
-    所以整份课程文件进临时 curricula，并把 `rl.bc_config.CURRICULA_DIR` 指过去（
+    所以整份课程文件进临时 curricula，并把 `biz.bc_config.CURRICULA_DIR` 指过去（
     `is_bc_course` / `resolve_bc_runtime` 都读这个模块常量 ⇒ 一处即可）。
     """
-    from rl.jsonc import load as load_jsonc
+    from common.jsonc import load as load_jsonc
 
     name = "bc-int"
     d = load_jsonc(str(ROOT / "curricula" / "bc-c4-v3.bc.jsonc"))
@@ -305,7 +305,7 @@ def test_bc_course_runs_alongside_rl_and_yields_while_waiting(world: SimpleNames
 
 def test_bc_course_uses_round_granularity_even_in_step_mode(world: SimpleNamespace) -> None:
     """13 步表是 RL 的一轮；BC 课即使 serve 开了细粒度也必须是「一轮 = 一个任务」。"""
-    from rl.loop_plan import round_tasks_for
+    from trainer.loop_plan import round_tasks_for
 
     assert [t.kind for t in round_tasks_for(world.bc, 1)] == ["round"]
     assert len(round_tasks_for("rl-a", 1)) == len(ROUND_TASKS) == 13
@@ -401,7 +401,7 @@ def test_a_broken_bc_course_does_not_take_down_the_rl_course(world: SimpleNamesp
 
 def test_maybe_auto_stop_course_removes_marker_only_for_bc_auto_stop(tmp_path: Path) -> None:
     """auto-stop：BC＋auto_stop ⇒ 删开课标记；RL/未开此键 ⇒ 不动。"""
-    from rl.loop_serve import maybe_auto_stop_course
+    from trainer.loop_serve import maybe_auto_stop_course
 
     bc_traj = tmp_path / "bc-x"
     bc_traj.mkdir()
@@ -427,7 +427,7 @@ def test_open_bc_course_with_empty_serve_argv_resolves_hub_transport(
     skip、hub 队列恒空、worker 干等。实测：bc-human-retrial 开课后即如此。
     （本用例调真 `_open_bc_course` 且 `argv=None`——正是生产 serve 的调用形状；
     上面 `world` 夹具的 open_course 垫片平时注入的 BC_ARGV 反而盖住了这个形状。）"""
-    import dist_common as dc
+    import common.distribution as dc
 
     monkeypatch.setattr(
         dc,

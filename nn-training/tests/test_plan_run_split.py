@@ -179,7 +179,7 @@ def test_plan_run_never_imports_worker_or_run_loop() -> None:
         f"remote/plan_run.py 反向 import 了 {back} —— `run_loop ⇄ worker` 那个环会立刻回来；"
         "「一轮怎么跑」必须由调用方用 run_job_fn 注入（见本文件头部）"
     )
-    # 也不许碰 rl 之外的回合层：引擎在 L2，`rl.plan` 是它的正常依赖，但不得 import 入口
+    # 也不许碰 rl 之外的回合层：引擎在 L2，`biz.plan` 是它的正常依赖，但不得 import 入口
     assert "remote.run_loop" not in imported
 
 
@@ -357,7 +357,7 @@ def test_iter_spec_seam_is_the_engine_module() -> None:
         if isinstance(n, ast.ImportFrom)
         for a in n.names
     }
-    assert "iter_spec" in imported, "引擎不再从 `rl.plan` 取 iter_spec（seam 需重判）"
+    assert "iter_spec" in imported, "引擎不再从 `biz.plan` 取 iter_spec（seam 需重判）"
 
 
 def test_deferred_cycle_ledger_is_empty_now() -> None:

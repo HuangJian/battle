@@ -1,4 +1,4 @@
-"""R2c-3：让位闸门（`rl/loop_runner.LoopRunner._wait_gate` 与 `WAIT_HOOKS` 表）。
+"""R2c-3：让位闸门（`trainer/loop_runner.LoopRunner._wait_gate` 与 `WAIT_HOOKS` 表）。
 
 表本身是一条**设计决定**（哪一步该让位、哪一步刻意不让），所以要有用例钉住它——
 「加一步就顺手加个让位钩子」这种改法在这里最容易把已经压掉的墙钟又贴回来。
@@ -21,9 +21,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.loop_runner import WAIT_HOOKS, LoopRunner
-from rl.loop_scheduler import CourseQueue
-from rl.loop_tasks import ROUND_TASKS, WAIT, Task, TaskResult
+from biz.loop_scheduler import CourseQueue
+from biz.loop_tasks import ROUND_TASKS, WAIT, Task, TaskResult
+from trainer.loop_runner import WAIT_HOOKS, LoopRunner
 
 
 def _loop(*, ready: bool | None) -> types.SimpleNamespace:

@@ -23,7 +23,7 @@ hub 调度语义的一次加法（纯 server 侧，worker 零改动——云机�
 ## 1. 根因（定案，不重证）
 
 - `remote/job_lifecycle.py::claim_job`：`lease_token` 装在 claim 响应 body 里；
-  hub 侧（`remote/hub/schedule.py::_claim_locked`）POST 到达即设 owner+expiry。
+  hub 侧（`hub/schedule.py::_claim_locked`）POST 到达即设 owner+expiry。
   读超时 ⇒ hub 有租约、worker 无 token（`acquire failed: The read operation timed out`）。
 - 还租两条路（`abandon`/`release`）都要出示 token（H2，`schedule.py` 注释行“须与原租者一致”）；
   心跳也要 token。孤儿租约在 hub 看来与“正常下载中的租约”**不可区分**——直到 TTL 跑完。

@@ -20,7 +20,7 @@ if str(ROOT) not in sys.path:
 # Python 的 urllib.request.proxy_bypass() 只认 host == entry / *.suffix / .suffix，
 # 于是每一次打到测试临时端口（127.0.0.1）的请求都被送进外部代理：多一跳，代理抖动时回 502
 # 或直接连接被拒（test_offline_deliver 读到 502、test_multi_course_hub 读到 Errno 111 ——
-# 两次被测服务自己的日志都好好的）。生产侧靠 `remote/net_http.py` 兑（不依赖环境变量），
+# 两次被测服务自己的日志都好好的）。生产侧靠 `common/net_http.py` 兑（不依赖环境变量），
 # 测试侧就没地补**精确主名**进 no_proxy：一行兜住所有裸 `urlopen` 的用例（8 个文件在用）。
 _LOOPBACK_NO_PROXY = ("127.0.0.1", "localhost", "::1")
 for _key in ("no_proxy", "NO_PROXY"):
@@ -187,7 +187,7 @@ def pytest_sessionfinish(session, exitstatus):
             fh.write("\n".join(victims))
             list_path = fh.name
         try:
-            from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+            from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
             # 比 CREATE_NO_WINDOW 更强：DETACHED_PROCESS 脱离父控制台，清理器
             # 既吃不到 git hook 控制台的幽灵 CTRL_C_EVENT，也不会向该控制台

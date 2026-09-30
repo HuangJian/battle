@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
-from remote._port_guard import ensure_port_free
+from common.port_guard import ensure_port_free
 from tests.subproc_util import free_port
 
 

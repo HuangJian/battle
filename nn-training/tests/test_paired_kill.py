@@ -24,10 +24,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.paired as paired_mod
-from rl.config import CourseConfig
-from rl.loop_guards import TrainingGuards
-from rl.paired_kill import (
+import biz.paired as paired_mod
+from biz.config import CourseConfig
+from biz.paired_kill import (
     PAIRED_KILL_MARGIN_PP,
     PAIRED_KILL_POINTS,
     paired_kill_enabled,
@@ -36,6 +35,7 @@ from rl.paired_kill import (
     paired_kill_verdict,
     readings_by_iter,
 )
+from trainer.loop_guards import TrainingGuards
 
 V = 20260921
 
@@ -196,8 +196,8 @@ def test_guard_stops_the_leg_and_writes_a_replayable_event(
         calls.append((halt, course))
         return True
 
-    monkeypatch.setattr("rl.loop_guards.set_cloud_halt", _fake_set, raising=True)
-    monkeypatch.setattr("rl.loop_guards.dist_common.course_name_of", lambda: "t-own", raising=True)
+    monkeypatch.setattr("trainer.loop_guards.set_cloud_halt", _fake_set, raising=True)
+    monkeypatch.setattr("trainer.loop_guards.common.distribution.course_name_of", lambda: "t-own", raising=True)
     _write_eval(tmp_path / "own", _own(0.40, 0.35, 0.32))
     _write_eval(tmp_path / "t-peer", _own(0.40, 0.40, 0.40))
     _write_peer_run_start(tmp_path, V)
@@ -254,8 +254,8 @@ def test_control_leg_trips_but_does_not_stop(
         calls.append((halt, course))
         return True
 
-    monkeypatch.setattr("rl.loop_guards.set_cloud_halt", _fake_set, raising=True)
-    monkeypatch.setattr("rl.loop_guards.dist_common.course_name_of", lambda: "t-own", raising=True)
+    monkeypatch.setattr("trainer.loop_guards.set_cloud_halt", _fake_set, raising=True)
+    monkeypatch.setattr("trainer.loop_guards.common.distribution.course_name_of", lambda: "t-own", raising=True)
     _write_eval(tmp_path / "own", _own(0.40, 0.35, 0.32))
     _write_eval(tmp_path / "t-peer", _own(0.40, 0.40, 0.40))
     _write_peer_run_start(tmp_path, V)

@@ -39,6 +39,7 @@ import urllib.request
 from contextlib import nullcontext
 from typing import Any
 
+from common import net_http
 from common.protocol import (
     AUTH_HEADER,
     ROLE_HEADER,
@@ -49,7 +50,6 @@ from common.protocol import (
     ProtocolError,
     RetryableError,
 )
-from remote import net_http
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError, control_path
 from remote.wire import (
     _BULK,

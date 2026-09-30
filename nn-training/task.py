@@ -26,7 +26,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from platform_utils import rmtree_best_effort
+from common.platform_utils import rmtree_best_effort
 
 HERE = Path(__file__).resolve().parent
 PYTHON = sys.executable
@@ -132,7 +132,7 @@ def pytest_dispatch() -> list[str]:
     16 核实测（tests/ + e2e/）：wall 21.99 → 17.57s、user 233.9 → 121.6s（轮数越多越赚）。
 
     `-n auto` 的**语义不变**（`--forkdist auto` 同样解析成机器核数，走
-    `platform_utils.effective_cores()`——容器里比 `os.cpu_count()` 更准），所以
+    `common.platform_utils.effective_cores()`——容器里比 `os.cpu_count()` 更准），所以
     `task.py check` / `task test` 的 worker 打法与以前一致。
 
     为何只在 Linux：Windows 没有 `os.fork`（插件会当场拒绝）；macOS 上 master 在 fork 前

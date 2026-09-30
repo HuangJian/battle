@@ -491,7 +491,7 @@ def pick_push_worker(
     本次避让名单里（刚跑死这份 job 的那台）。
 
     顺序 = 注册序（稳定 ⇒ 行为可测）；**不按快慢排序**——「谁空谁接」是既定口径
-    （EWMA 快慢 hold 已被用户裁定删除，见 `rl/dispatch.py` 注释）。
+    （EWMA 快慢 hold 已被用户裁定删除，见 `trainer/dispatch.py` 注释）。
     """
     blocked = set(avoid)
     for w in workers:

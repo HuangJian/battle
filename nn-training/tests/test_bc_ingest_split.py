@@ -1,12 +1,12 @@
 """拆分的**契约守卫**：BC job 回传消费（轮询会话 + 指标/eval/账本写入 + 节奏常量）永住
-`rl/bc_ingest.py`（S5 第四刀，2026-09-27）。
+`trainer/bc_ingest.py`（S5 第四刀，2026-09-27）。
 
-`rl/bc_loop.py` **1433 → 1213 行**；两段跨度（轮询/退避常量 + 「账本（事件写入）+ 等待」连续整段）
-逐字节搬到 `rl/bc_ingest.py`（291 行）。本文件钉六件事：
+`trainer/bc_loop.py` **1433 → 1213 行**；两段跨度（轮询/退避常量 + 「账本（事件写入）+ 等待」连续整段）
+逐字节搬到 `trainer/bc_ingest.py`（291 行）。本文件钉六件事：
 
 1. **定义唯一**——这 11 个名字不许在 `bc_loop.py` 里再实现一遍（否则「搬了一半」）；
 2. **反向**——编排面（引擎 / 采集 / 发布 / 训练 / 归档 / 盘上 job）必须**留守** `bc_loop.py`；
-3. **无环**——`bc_ingest` 不得 import `rl.bc_loop`（回传消费是底座，反向 import 编排 = 环）；
+3. **无环**——`bc_ingest` 不得 import `trainer.bc_loop`（回传消费是底座，反向 import 编排 = 环）；
 4. **门面**——`bc_loop` 的那些名字必须是 `bc_ingest` 的转发（不是副本）；
 5. **monkeypatch 点没断**——`bc_loop.time`（共享 stdlib 模块对象）与 `bc_loop.wait_bc_round`
    仍是同一对象（现有用例打的就是它们）；
@@ -28,11 +28,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.bc_ingest as bc_ingest_mod
-import rl.bc_loop as bc_loop_mod
+import trainer.bc_ingest as bc_ingest_mod
+import trainer.bc_loop as bc_loop_mod
 
-INGEST_FILE = ROOT / "rl" / "bc_ingest.py"
-LOOP_FILE = ROOT / "rl" / "bc_loop.py"
+INGEST_FILE = ROOT / "trainer" / "bc_ingest.py"
+LOOP_FILE = ROOT / "trainer" / "bc_loop.py"
 
 #: 本次搬走的**定义**（常量 / 类 / 函数）——只许在 `bc_ingest.py` 里出现。
 MOVED_NAMES = {
@@ -60,10 +60,10 @@ ALLOWED_IMPORTS = {
     # S5 第五刀（2026-09-27）：HTTP 面下沉 `remote/hub_http.py`；`_request` 的所有者搬了家，
     # 本模块（函数内 import 那个注入点）随之改指。
     "remote.hub_http",
-    "rl.bc_config",
-    "rl.bc_eval",
-    "rl.bc_ledger",
-    "rl.log",
+    "biz.bc_config",
+    "biz.bc_eval",
+    "biz.bc_ledger",
+    "biz.log",
 }
 
 
@@ -136,13 +136,13 @@ def test_bc_loop_kept_the_orchestration_surface() -> None:
 
 def test_bc_ingest_imports_stay_within_the_allowed_surface() -> None:
     extra = sorted(_imports(INGEST_FILE) - ALLOWED_IMPORTS)
-    assert extra == [], f"rl/bc_ingest.py 引入了允许面之外的依赖：{extra}"
+    assert extra == [], f"trainer/bc_ingest.py 引入了允许面之外的依赖：{extra}"
 
 
 def test_bc_ingest_never_imports_bc_loop() -> None:
     """★ 本刀的意义：回传消费是**底座**，反向 import 编排立刻成环。"""
-    back = sorted(m for m in _imports(INGEST_FILE) if m.startswith("rl.bc_loop"))
-    assert back == [], f"rl/bc_ingest.py 反向 import 了编排模块：{back}"
+    back = sorted(m for m in _imports(INGEST_FILE) if m.startswith("trainer.bc_loop"))
+    assert back == [], f"trainer/bc_ingest.py 反向 import 了编排模块：{back}"
 
 
 # ───────────────────────── ④ 门面 ─────────────────────────
@@ -150,15 +150,15 @@ def test_bc_ingest_never_imports_bc_loop() -> None:
 
 def test_bc_loop_facade_forwards_the_same_objects() -> None:
     for name in sorted(MOVED_NAMES):
-        assert hasattr(bc_loop_mod, name), f"rl.bc_loop 丢了门面 {name}"
+        assert hasattr(bc_loop_mod, name), f"trainer.bc_loop 丢了门面 {name}"
         assert getattr(bc_loop_mod, name) is getattr(bc_ingest_mod, name), (
-            f"rl.bc_loop.{name} 不是 rl.bc_ingest.{name}（转发成了副本）"
+            f"trainer.bc_loop.{name} 不是 trainer.bc_ingest.{name}（转发成了副本）"
         )
 
 
 def test_facade_uses_exactly_the_declared_names() -> None:
     """门面是 `X as X` 且**只**列这 11 个（多列一个 = 悄悄扩大了搬家面）。"""
-    assert _imported_from(LOOP_FILE, "rl.bc_ingest") == MOVED_NAMES
+    assert _imported_from(LOOP_FILE, "trainer.bc_ingest") == MOVED_NAMES
 
 
 # ─────────────────── ⑤ monkeypatch 点没断（既有用例打的） ───────────────────
@@ -195,7 +195,7 @@ def test_poll_once_classifies_ready_pending_transient(tmp_path: Path, monkeypatc
     def fake(_base, _token, _path, timeout=0.0):
         return reply["status"], reply["body"]
 
-    from rl.bc_config import load_bc_course
+    from biz.bc_config import load_bc_course
 
     # S5 第五刀：`_request` 的宿主是 `remote.hub_http`（patch `hub_client` 的转发名不再有效）。
     monkeypatch.setattr(hub_http, "_request", fake)

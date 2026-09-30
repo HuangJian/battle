@@ -7,7 +7,7 @@ plan/remote-wire-remediation.plan.md §5.2/§5.5。覆盖：
     正确性靠这条守着——两侧漂了就等于「实产集 == 声明集」不再成立）；
   * result：iter 结果必须带采集报告（冒烟回显豁免）；
   * v2 job 体：ts_code 段往返 + 旧体（无 has_ts）仍能解（wire 兼容红线）；
-  * hub 侧 build_iter_spec：命令来自 `rl/cmd.build_rollout_cmd`（单源），路径一律
+  * hub 侧 build_iter_spec：命令来自 `biz/cmd.build_rollout_cmd`（单源），路径一律
     job 目录内相对路径，bun 路径被剥掉（节点用自己的）；
   * 节点侧 run_iter_rollout：用**假 bun**（python 桩）跑全流程——产 shard、聚合报告、
     实产集与声明集不符时响亮拒绝。
@@ -33,8 +33,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import platform_utils as pu
-import remote.iter_rollout as iter_rollout
+import common.platform_utils as pu
+import worker.iter_rollout as iter_rollout
+from biz.iter_job import build_iter_spec
 from common import game_watch
 from common.protocol import (
     INIT_WEIGHTS_NAME,
@@ -53,9 +54,8 @@ from common.protocol import (
     validate_result,
     validate_rollout_spec,
 )
-from remote.iter_rollout import run_iter_rollout, scan_shard_dirs, verify_shards
-from rl.iter_job import build_iter_spec
-from rl.loop_steps import TrainingSteps
+from trainer.loop_steps import TrainingSteps
+from worker.iter_rollout import run_iter_rollout, scan_shard_dirs, verify_shards
 
 # ------------------------------------------------------------------ fixtures
 
@@ -353,7 +353,7 @@ def test_per_game_comes_from_shard_manifests_not_batch_reports(tmp_path: Path) -
     数组 `stages`/`seeds`、没有 `kills` 这些单局字段 ⇒ 「无 (stage,seed) 就丢」把每行都丢掉
     ⇒ 落地方不写 `it<N>/per-game.json` ⇒ 读方（`readRoundActuals`）四列恒空。
     """
-    from rl.reports import compact_per_game
+    from biz.reports import compact_per_game
 
     # 真实单局 manifest 的字段集（`tools/sim/export-rl-rollout.ts` 的 manifest 对象）：
     # 读方 `entryFromManifest` 读的就是这一套名字（两腿同字段，没有翻译层）。
@@ -1037,7 +1037,7 @@ def test_workers_cap_falls_back_to_cores_on_garbage_env(monkeypatch: pytest.Monk
 def test_workers_cap_reads_the_container_quota_not_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
     """云机现场：`os.cpu_count()` 报 **224**（宿主机）而 cgroup 只给 **96** ⇒ 上限 **92**。
 
-    这就是「不要把 96 核读成 240/224 核」那颗钉子：核数走 `platform_utils.effective_cores()`
+    这就是「不要把 96 核读成 240/224 核」那颗钉子：核数走 `common.platform_utils.effective_cores()`
     （配额/亲和掩码取小），于是日志里那个 `workers=220`（按 224 核算出来的）在云机上会被夹到
     92 —— 2.3× 超订就地消失，而不是等它把单局墙钟推过 5s 硬顶。
     """
@@ -1712,7 +1712,7 @@ class _IterStub(TrainingSteps):
 
 def _stub_iter_spec(monkeypatch) -> None:
     """`build_iter_spec` 需要真课程对象——本用例只验失败分类，规格换桩。"""
-    monkeypatch.setattr("rl.iter_job.build_iter_spec", lambda *a, **k: {"argv": [], "wver": "w"})
+    monkeypatch.setattr("biz.iter_job.build_iter_spec", lambda *a, **k: {"argv": [], "wver": "w"})
 
 
 def test_remote_iter_fatal_http_aborts_without_retry(tmp_path: Path, monkeypatch) -> None:
@@ -1759,7 +1759,7 @@ def test_remote_iter_transient_failure_stays_retryable(tmp_path: Path, monkeypat
 def test_iter_stats_and_quota_check_skip_on_node_rollout(
     tmp_path: Path, monkeypatch
 ) -> None:
-    from rl import loop_steps as ls
+    from trainer import loop_steps as ls
 
     msgs: list[str] = []
     monkeypatch.setattr(ls, "log", lambda m: msgs.append(m))
@@ -1772,12 +1772,12 @@ def test_iter_stats_and_quota_check_skip_on_node_rollout(
 
 
 def test_quota_incident_not_triggered_on_node_rollout(tmp_path: Path, monkeypatch) -> None:
-    from rl import loop_iter_dir as lid
-    from rl.loop_core import TrainingLoop
+    from trainer import loop_iter_dir as lid
+    from trainer.loop_core import TrainingLoop
 
     msgs: list[str] = []
-    # `_check_quota_incident` 自 S4 第二十刀起住 `rl/loop_iter_dir.py`——`log` 是它**自己模块**
-    # 的全局，打 `rl.loop_core.log` 会变成**静默空操作**（本仓撞过多次的同族陷阱）。
+    # `_check_quota_incident` 自 S4 第二十刀起住 `trainer/loop_iter_dir.py`——`log` 是它**自己模块**
+    # 的全局，打 `trainer.loop_core.log` 会变成**静默空操作**（本仓撞过多次的同族陷阱）。
     monkeypatch.setattr(lid, "log", lambda m: msgs.append(m))
     args = SimpleNamespace(course_name="c4")
     # 被测方法只碰这三个属性 + args ⇒ 用 cast 声明「这是测试替身」

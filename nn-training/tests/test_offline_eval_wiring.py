@@ -27,14 +27,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import platform_utils as pu
+import common.platform_utils as pu
 import remote.plan_run as plan_run_mod
 import remote.run_loop as run_loop
 from common.game_watch import DEFAULT_GAME_TIMEOUT_SEC
-from platform_utils import cpu_worker_slots
+from common.platform_utils import cpu_worker_slots
+from hub.server import _HubQueue, _JobStore
 from remote import offline_boot, offline_eval
 from remote.artifacts import ArtifactStore
-from remote.hub_server import _HubQueue, _JobStore
 from remote.run_loop import (
     _close_eval,
     _maybe_cloud_eval,
@@ -143,7 +143,7 @@ def test_default_slots_does_not_reserve_for_the_planned_rollout_workers(
     """计划里的 rollout 并行度**不进**缺省公式：两者交替跑，按对方扣一次等于两笔账扣同一份钱
 
     用户 2026-09-22：「不应该为 eval 保留 CPU 核数，两者都使用 max(cores − 4, cores × 0.8)」。
-    其中 cores 走 `platform_utils.effective_cores`（容器配额/亲和掩码，**不是**宿主机的
+    其中 cores 走 `common.platform_utils.effective_cores`（容器配额/亲和掩码，**不是**宿主机的
     `os.cpu_count()`——见它那节的 224/96 事故）⇒ 用例 patch 的也是那个单一来源。
     """
     monkeypatch.setattr(pu, "effective_cores", lambda: 40)

@@ -234,7 +234,7 @@ def resolve_bc_seed(manifest: dict) -> tuple[int, str]:
     —— 但它含 runId，而 runId 每轮启动都变 ⇒ 复现性只限同一 job 的重发）。
 
     键名刻意不用 `seed`：manifest 里 `seed` 已有历史口径（hex per-job 种子占位，
-    见 tests/test_bc_epoch_e2e.py 的 fixture，以及 dist_common 的 stage/seed 语义）。
+    见 tests/test_bc_epoch_e2e.py 的 fixture，以及 common.distribution 的 stage/seed 语义）。
     """
     explicit = manifest.get("train_seed")
     if explicit is None:

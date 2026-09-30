@@ -187,7 +187,7 @@ def rss_mb() -> float:
     try:
         with open("/proc/self/statm", encoding="ascii") as f:
             pages = int(f.read().split()[1])
-        # os.sysconf is Unix-only; Windows stubs omit it (same as rl/forensics.py).
+        # os.sysconf is Unix-only; Windows stubs omit it (same as biz/forensics.py).
         page_size = int(os.sysconf("SC_PAGE_SIZE"))  # type: ignore[attr-defined]
         return float(pages * page_size) / 1e6
     except (OSError, ValueError, IndexError, AttributeError):
@@ -213,7 +213,7 @@ def build_net(mode: str, path: str) -> Any:
     if mode in ("intent", "goal"):
         import ppo.goal as ppo_goal
         import ppo.intent as ppo_intent
-        from rl.modes import get_backend
+        from biz.modes import get_backend
 
         model = get_backend(mode).build_rl_net(path or None)
         if path:  # 空路径 = 默认架构（不装载）——`load_*_weights("")` 会 FileNotFoundError
@@ -243,7 +243,7 @@ def resolve_weights(course: str, explicit: str | None) -> list[str]:
         return [str(p), ""]
     out: list[str] = []
     try:
-        from rl.config import load_course
+        from biz.config import load_course
 
         cfg = load_course(CURRICULA / f"{course}.jsonc")
         for rel in (cfg.out, cfg.bc):
@@ -334,7 +334,7 @@ def build_stack(
 def _course_bc_path(course: str) -> str:
     """课程 `kickstart_ref` 冻结快照的源文件（per-tick 缰绳）；不启用/文件缺失 → 空串。"""
     try:
-        from rl.config import load_course
+        from biz.config import load_course
 
         cfg = load_course(CURRICULA / f"{course}.jsonc")
         if not bool(getattr(cfg, "kickstart_ref", False)):
@@ -348,7 +348,7 @@ def _course_bc_path(course: str) -> str:
 
 def _course_mode(course: str) -> str:
     try:
-        from rl.config import load_course
+        from biz.config import load_course
 
         return str(load_course(CURRICULA / f"{course}.jsonc").mode)
     except Exception:
@@ -405,7 +405,7 @@ def _plan(args: argparse.Namespace) -> list[tuple[str, list[str], str]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    from platform_utils import force_utf8_stdio
+    from common.platform_utils import force_utf8_stdio
 
     force_utf8_stdio()
     ap = argparse.ArgumentParser(description="单进程 N 课的 torch 栈 RSS 实测（R2c-3 余项）")

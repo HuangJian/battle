@@ -66,7 +66,7 @@ def verify_shard_schema(shard_dir: str, arrays: dict[str, np.ndarray]) -> None:
       · 指纹（manifest 有 `schemaFingerprint` 时判）：与当前 schema 常量不符即错。
     manifest 缺指纹（v2 及更早产物）不豁免形状判据——形状不符同样 raise。
     """
-    from schema import BOARD, OBS_CHANNELS, SCALAR_DIM, SCHEMA_FINGERPRINT
+    from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM, SCHEMA_FINGERPRINT
 
     obs = arrays.get("obs")
     if obs is not None and (obs.ndim != 4 or tuple(obs.shape[1:]) != (OBS_CHANNELS, BOARD, BOARD)):

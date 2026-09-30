@@ -1,17 +1,17 @@
-"""拆分的**契约守卫**：`TrainingSteps` 的 in-loop 评估链永住 `rl/loop_eval.py`
+"""拆分的**契约守卫**：`TrainingSteps` 的 in-loop 评估链永住 `trainer/loop_eval.py`
 （S4 第十七刀，2026-09-24）。
 
 ## 这一刀切了什么
 
-`rl/loop_steps.py` 940 → 666 行；`TrainingSteps`（845 行 / 20 方法）里**唯一一条真正的方法间
-调用链**——8 个成员——搬到 `rl/loop_eval.py::TrainingEval`：
+`trainer/loop_steps.py` 940 → 666 行；`TrainingSteps`（845 行 / 20 方法）里**唯一一条真正的方法间
+调用链**——8 个成员——搬到 `trainer/loop_eval.py::TrainingEval`：
 
 ```
 _eval_policy_cfg ← _eval_join_soft_sec ← _sweep_eval_tail ← _dispatch_delayed_eval
                                             ↑                        ↑
 _join_eval ←────────────────────────────────┘                        │
 _eval_covered ← _drain_pending_eval ──────────────────────────────────┘
-（另有 `_eval_on_round` 的占位：真实现住 `rl/loop_dispatch.py`，MRO 胜过——S4 第二十刀前住 loop_core）
+（另有 `_eval_on_round` 的占位：真实现住 `trainer/loop_dispatch.py`，MRO 胜过——S4 第二十刀前住 loop_core）
 ```
 
 切法是**混入**（与第十四/十五刀同源）：同一把锁、同一个 `self`、**零行为变化**——
@@ -28,9 +28,9 @@ _eval_covered ← _drain_pending_eval ──────────────
 4. **状态归属唯一**：五个 eval 槽位只在 `TrainingEval` 声明一处；旧类里那两处跨模块使用
    （`_log_report` 写 `_eval_thread`、`_record_iteration` 读 `_eval_join_sec`）**经继承**可见
    ——它们被逐条写死在 `CROSS_MODULE_HANDS` 里，将来要动必须显式改这张表；
-5. 顶层 import 面**闭合**（本模块不许长出重依赖）；DI 目标（`rl.eval_dispatch` / `rl.eval_yield`
-   / `rl.queue` / `rl.archive`）**只许在方法体内延迟 import**——测试一直 patch 那些实现模块
-   （`rl.eval_local` 于 S5 第十二刀换成 `rl.eval_yield`：让位/份额判据搬出了运行器）；
+5. 顶层 import 面**闭合**（本模块不许长出重依赖）；DI 目标（`trainer.eval_dispatch` / `biz.eval_yield`
+   / `trainer.queue` / `biz.archive`）**只许在方法体内延迟 import**——测试一直 patch 那些实现模块
+   （`biz.eval_local` 于 S5 第十二刀换成 `biz.eval_yield`：让位/份额判据搬出了运行器）；
 6. **★ 两条功能性**：跨模块的流式交棒（`_log_report` → `_join_eval` → `_eval_tail` 落在**同一个
    实例**上）· 占位**响亮失败**（MRO 被改坏时不静默返回 falsy 把 eval 全关掉）。
 """
@@ -43,9 +43,9 @@ from pathlib import Path
 from types import SimpleNamespace
 
 NN_ROOT = Path(__file__).resolve().parent.parent
-EVAL_PY = NN_ROOT / "rl" / "loop_eval.py"
-STEPS_PY = NN_ROOT / "rl" / "loop_steps.py"
-CORE_PY = NN_ROOT / "rl" / "loop_core.py"
+EVAL_PY = NN_ROOT / "trainer" / "loop_eval.py"
+STEPS_PY = NN_ROOT / "trainer" / "loop_steps.py"
+CORE_PY = NN_ROOT / "trainer" / "loop_core.py"
 
 #: 这一簇的成员（闭集）：8 个方法 —— 新方法要么住在 `TrainingSteps`，要么改这张表。
 CLUSTER = (
@@ -68,7 +68,7 @@ CLUSTER_SLOTS = (
     "_eval_join_sec",
 )
 
-#: 旧类里对这几个槽位的**跨模块使用**（写者/读者留在 `rl/loop_steps.py`，经继承解析）。
+#: 旧类里对这几个槽位的**跨模块使用**（写者/读者留在 `trainer/loop_steps.py`，经继承解析）。
 CROSS_MODULE_HANDS = (
     ("_log_report", "_eval_thread", "Store"),
     ("_record_iteration", "_eval_join_sec", "Load"),
@@ -82,12 +82,12 @@ TOP_LEVEL_ALLOWED = {
     "time",
     "pathlib",
     "typing",
-    "rl.eval_m1",
-    "rl.log",
+    "trainer.eval_m1",
+    "biz.log",
 }
 
 #: DI 目标：只许**方法体内**延迟 import（测试 patch 的是这些实现模块）。
-DI_MODULES = ("rl.eval_dispatch", "rl.eval_yield", "rl.queue", "rl.archive")
+DI_MODULES = ("trainer.eval_dispatch", "biz.eval_yield", "trainer.queue", "biz.archive")
 
 
 def _tree(path: Path) -> ast.Module:
@@ -173,8 +173,8 @@ def test_cluster_is_defined_in_loop_eval_only() -> None:
 
 def test_wiring_is_by_object_identity_not_copies() -> None:
     """`TrainingSteps.X is TrainingEval.X`（同一个函数对象，不是同名副本）。"""
-    from rl.loop_eval import TrainingEval
-    from rl.loop_steps import TrainingSteps
+    from trainer.loop_eval import TrainingEval
+    from trainer.loop_steps import TrainingSteps
 
     for name in CLUSTER:
         assert getattr(TrainingSteps, name) is getattr(TrainingEval, name), name
@@ -188,19 +188,19 @@ def test_composition_appends_the_new_mixin() -> None:
     把心不变：本簇**不是**组合类的直接基类（逐字元组见 `test_loop_lifecycle_split.py`）。
 
     `_eval_on_round` 那条占位/真实现的顺序契约本刀**也动了家**（真实现从组合根搬到
-    `rl/loop_dispatch.py`，仍须早于 `TrainingEval`）——这里只钉「不是同一个对象 + 真实现不在旧家」，
+    `trainer/loop_dispatch.py`，仍须早于 `TrainingEval`）——这里只钉「不是同一个对象 + 真实现不在旧家」，
     位置顺序钉在 `test_loop_core_tail_split.py`。
     """
-    from rl.loop_core import TrainingLoop
-    from rl.loop_eval import TrainingEval
+    from trainer.loop_core import TrainingLoop
+    from trainer.loop_eval import TrainingEval
 
     # S4 第二十一刀又在**末位**追加了 `TrainingExport`（产物出包）——本簇仍在原位置。
-    from rl.loop_export import TrainingExport
-    from rl.loop_guards import TrainingGuards
-    from rl.loop_lifecycle import TrainingLifecycle
-    from rl.loop_remote import TrainingRemote
-    from rl.loop_round_steps import RoundSteps
-    from rl.loop_steps import TrainingSteps
+    from trainer.loop_export import TrainingExport
+    from trainer.loop_guards import TrainingGuards
+    from trainer.loop_lifecycle import TrainingLifecycle
+    from trainer.loop_remote import TrainingRemote
+    from trainer.loop_round_steps import RoundSteps
+    from trainer.loop_steps import TrainingSteps
 
     assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval, TrainingExport)
     # 追加（而不是插队）的判据：2026-09-23 写下的 MRO 第 2 位断言逐字仍成立。
@@ -213,9 +213,9 @@ def test_composition_appends_the_new_mixin() -> None:
         TrainingLifecycle,
     )
     assert TrainingEval not in TrainingLoop.__bases__
-    # 真实现（S4 第二十刀起住 rl/loop_dispatch，之前住组合根）；占位在 TrainingEval —— MRO 胜过它。
+    # 真实现（S4 第二十刀起住 trainer/loop_dispatch，之前住组合根）；占位在 TrainingEval —— MRO 胜过它。
     assert TrainingLoop._eval_on_round is not TrainingEval._eval_on_round
-    assert TrainingLoop._eval_on_round.__module__ == "rl.loop_dispatch"
+    assert TrainingLoop._eval_on_round.__module__ == "trainer.loop_dispatch"
     assert "def _eval_on_round" not in CORE_PY.read_text(encoding="utf-8")
 
 
@@ -224,8 +224,8 @@ def test_composition_appends_the_new_mixin() -> None:
 
 def test_eval_slots_are_declared_exactly_once() -> None:
     """五个槽位只在 `TrainingEval` 声明一处；旧类里**不得**再声明（那是重复，不是契约）。"""
-    from rl.loop_eval import TrainingEval
-    from rl.loop_steps import TrainingSteps
+    from trainer.loop_eval import TrainingEval
+    from trainer.loop_steps import TrainingSteps
 
     declared_here = _declared(EVAL_PY, "TrainingEval")
     for slot in CLUSTER_SLOTS:
@@ -242,8 +242,8 @@ def test_eval_slots_are_declared_exactly_once() -> None:
 
 def test_slots_resolve_through_inheritance_on_a_bare_instance() -> None:
     """裸 `TrainingSteps()` 上五个槽位都在（继承解析）——单测脚手架依赖这条。"""
-    from rl.loop_eval import TrainingEval
-    from rl.loop_steps import TrainingSteps
+    from trainer.loop_eval import TrainingEval
+    from trainer.loop_steps import TrainingSteps
 
     for slot in CLUSTER_SLOTS:
         assert slot in TrainingEval.__annotations__, slot
@@ -283,16 +283,16 @@ def test_di_targets_are_lazy_only() -> None:
     for mod in DI_MODULES:
         assert mod not in top, f"{mod} 被提到顶层了——测试的 patch 目标会漂"
     # 至少 `dispatch_eval_bg` 的宿主（派发的唯一入口）必须在方法体里拿到；
-    # 2026-09-27（S5 第十二刀）：让位/份额判据的宿主从 `rl.eval_local`（运行器）换成
-    # `rl.eval_yield`（判决面）——本簇仍只经延迟 import 拿它，patch 面不变。
-    assert "rl.eval_dispatch" in inside and "rl.eval_yield" in inside
+    # 2026-09-27（S5 第十二刀）：让位/份额判据的宿主从 `biz.eval_local`（运行器）换成
+    # `biz.eval_yield`（判决面）——本簇仍只经延迟 import 拿它，patch 面不变。
+    assert "trainer.eval_dispatch" in inside and "biz.eval_yield" in inside
 
 
 def test_loop_eval_does_not_import_the_facade_or_core() -> None:
-    """不得成环：新家不许 import `rl.loop_steps`（门面）也不许 import `rl.loop_core`。"""
+    """不得成环：新家不许 import `trainer.loop_steps`（门面）也不许 import `trainer.loop_core`。"""
     got = _top_level_imports(EVAL_PY) | _in_function_imports(EVAL_PY)
-    assert "rl.loop_steps" not in got
-    assert "rl.loop_core" not in got
+    assert "trainer.loop_steps" not in got
+    assert "trainer.loop_core" not in got
 
 
 # ─────────────────────────────── 功能性 ───────────────────────────────
@@ -312,13 +312,13 @@ class _AliveThread:
 
 
 def test_stream_report_thread_hands_off_across_the_module_boundary() -> None:
-    """★ 跨模块接线：写者住 `rl/loop_steps.py`，读者住 `rl/loop_eval.py`，落在同一个实例上。
+    """★ 跨模块接线：写者住 `trainer/loop_steps.py`，读者住 `trainer/loop_eval.py`，落在同一个实例上。
 
     `_log_report`（旧类）把 stream 报告里的 eval 线程句柄 pop 进 `_eval_thread`；
     `_join_eval`（新家）读到它、放行本机份额并把没跑完的尾巴交棒给下一轮 rollout 边界。
     这一步走了「继承 + 混入组装」，是本刀最需要被钉住的一条真实链路。
     """
-    from rl.loop_steps import TrainingSteps
+    from trainer.loop_steps import TrainingSteps
 
     ts = TrainingSteps()
     thread = _AliveThread()
@@ -342,9 +342,9 @@ def test_stream_report_thread_hands_off_across_the_module_boundary() -> None:
     # `TrainingLoop.__init__` 赋值，裸 mixin 脚手架要自己给——与 tests/test_eval_timing.py 同款。
     ts._eval_gate = None
 
-    ts._log_report(5, time.time())  # 写：rl/loop_steps.py::_log_report
+    ts._log_report(5, time.time())  # 写：trainer/loop_steps.py::_log_report
     assert ts._eval_thread is thread, "stream 报告的线程句柄没落进 _eval_thread"
-    ts._join_eval(5)  # 读：rl/loop_eval.py::_join_eval
+    ts._join_eval(5)  # 读：trainer/loop_eval.py::_join_eval
 
     assert ts._eval_tail is not None, "没跑完的尾巴应交棒给下一轮 rollout 边界"
     assert ts._eval_tail[0] is thread
@@ -359,12 +359,12 @@ def test_eval_on_round_placeholder_fails_loudly() -> None:
     """
     import pytest
 
-    from rl.loop_eval import TrainingEval
-    from rl.loop_steps import TrainingSteps
+    from trainer.loop_eval import TrainingEval
+    from trainer.loop_steps import TrainingSteps
 
     ts = TrainingSteps()
     with pytest.raises(NotImplementedError) as ei:
         ts._eval_on_round(6)
     assert "MRO" in str(ei.value)
     assert "TrainingEval" in str(ei.value), "文案要点名新家（旧文案写死 TrainingSteps）"
-    assert TrainingEval._eval_on_round.__module__ == "rl.loop_eval"
+    assert TrainingEval._eval_on_round.__module__ == "trainer.loop_eval"

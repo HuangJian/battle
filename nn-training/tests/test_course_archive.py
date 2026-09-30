@@ -24,7 +24,7 @@ NN_ROOT = Path(__file__).resolve().parent.parent
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
 
-from rl import course_archive as CA
+from biz import course_archive as CA
 
 # ────────────────────────── 纯函数表 ──────────────────────────
 
@@ -443,6 +443,6 @@ def test_no_bare_shutil_rmtree_call():
 
     只查调用（注释/文档里的名字是说明，不是违规）。
     """
-    src = (NN_ROOT / "rl" / "course_archive.py").read_text(encoding="utf-8")
+    src = (NN_ROOT / "biz" / "course_archive.py").read_text(encoding="utf-8")
     assert not re.search(r"\bshutil\.rmtree\s*\(", src)
     assert "rmtree_best_effort" in src

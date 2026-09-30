@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.batch_eval import (
+from trainer.batch_eval import (
     claim_pending,
     consume_requests,
     mark_requests_done,
@@ -72,7 +72,7 @@ def test_enqueue_dedupes_pending_and_materialized(tmp_path: Path) -> None:
     # 同 key 仍 pending：重复消费（done 标记被删的极端）不造重复批
     (b,) = read_batches(tmp_path)
     assert b["status"] == "pending"
-    from rl.batch_eval import REQUESTS_DONE_FILE
+    from trainer.batch_eval import REQUESTS_DONE_FILE
 
     (tmp_path / REQUESTS_DONE_FILE).write_text("", encoding="utf-8")
     c = consume_requests(tmp_path)
@@ -144,7 +144,7 @@ def test_aborted_stays_aborted_and_unclaimable(tmp_path: Path) -> None:
     (b,) = read_batches(tmp_path)
     assert b["status"] == "aborted" and b["node_dist"] == {"local": 100}
     # requeue 同样不复活（私有 seam 自 S26/B2 起住 store：`_requeue` 不再经门面再导出）
-    from rl.batch_store import BatchStore
+    from trainer.batch_store import BatchStore
 
     BatchStore(tmp_path).requeue("b-x")
     assert read_batches(tmp_path)[0]["status"] == "aborted"
@@ -206,9 +206,9 @@ def test_claim_lock_busy_skips_without_deleting_holder(tmp_path: Path, monkeypat
     """另一进程持锁 → 本轮跳过（返回 None），且绝不删掉别人的锁文件。"""
     import os
 
-    # 锁与等待时长自 S26/B2 起住 store（`rl/batch_store.py`）—— 本用例测的就是那条
+    # 锁与等待时长自 S26/B2 起住 store（`trainer/batch_store.py`）—— 本用例测的就是那条
     # 锁语义（拿不到 ⇒ 本轮跳过、绝不删别人的锁），故改址到它的新家。
-    import rl.batch_store as batch_store
+    import trainer.batch_store as batch_store
 
     monkeypatch.setattr(batch_store, "_CLAIM_WAIT_SEC", 0.2)  # 不真等 2s
     lp = tmp_path / "claim.lock"

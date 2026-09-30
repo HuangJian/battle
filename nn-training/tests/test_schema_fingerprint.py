@@ -15,7 +15,7 @@ if str(ROOT) not in sys.path:
 
 import numpy as np
 
-from schema import (
+from common.schema import (
     BOARD,
     OBS_CHANNELS,
     OBS_SCHEMA_MAJOR,
@@ -98,7 +98,7 @@ def test_coord_formula_no_half_integer_collisions() -> None:
 
     2026-09-26（item 9）自 `tests/test_coord_golden.py` 分家：这条判据一行不碰 torch，却被那边
     三条「真渲染 golden」用例连坐（那三条要 `coord_channels` ⇒ 要 torch）⇒ 搬到本文件——
-    py↔TS 同锚常量的本家（BOARD 也在 `schema.py`）。
+    py↔TS 同锚常量的本家（BOARD 也在 `common/schema.py`）。
     """
     for board in (BOARD_ANCHOR,):  # 新 BOARD 需在此显式登记并重生成 golden
         vals = np.arange(board) * 255 / (board - 1)
@@ -109,5 +109,5 @@ def test_coord_formula_no_half_integer_collisions() -> None:
 
 
 def test_the_coord_board_anchor_matches_schema() -> None:
-    """坐标公式用的 board 就是 `schema.BOARD`（双锚：字面量 + 常量，与本文件其它用例同式）。"""
+    """坐标公式用的 board 就是 `common.schema.BOARD`（双锚：字面量 + 常量，与本文件其它用例同式）。"""
     assert BOARD_ANCHOR == BOARD

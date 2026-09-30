@@ -20,8 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.eval_dispatch import find_archive_weights, select_delayed_eval_it
-from rl.eval_local import (
+from biz.eval_local import (
     EVAL_JOIN_SOFT_SEC_DEFAULT,
     EVAL_LOCAL_EARLY_EPOCHS_DEFAULT,
     early_epoch_reached,
@@ -30,7 +29,8 @@ from rl.eval_local import (
     eval_tail_overran,
     local_gate_release_plan,
 )
-from rl.loop_steps import TrainingSteps
+from trainer.eval_dispatch import find_archive_weights, select_delayed_eval_it
+from trainer.loop_steps import TrainingSteps
 
 
 def _every5(m: int) -> bool:
@@ -98,7 +98,7 @@ def _archive(ts: TrainingSteps, it: int, body: str) -> Path:
 
 def test_dispatch_delayed_eval_wiring(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """接线回归：第 6 轮派发标 it=5、读 it5 归档（P0 核心断言）。"""
-    import rl.eval_dispatch as ed
+    import trainer.eval_dispatch as ed
 
     calls: list[dict] = []
 
@@ -118,7 +118,7 @@ def test_dispatch_delayed_eval_wiring(tmp_path: Path, monkeypatch: pytest.Monkey
 
 def test_dispatch_delayed_eval_skips(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """非评估权重轮不派发；intent 模式不碰 m1 线；归档缺席回落活指针。"""
-    import rl.eval_dispatch as ed
+    import trainer.eval_dispatch as ed
 
     calls: list[tuple] = []
 
@@ -219,7 +219,7 @@ def test_dispatch_always_immediate_in_single_ppo_path(
     为什么用**裸 args**（连 `ppo` 键都没有）钉：旧实现读的就是 `args.ppo`，那条读路径
     一旦复活，这个用例当场红。
     """
-    import rl.eval_dispatch as ed
+    import trainer.eval_dispatch as ed
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", lambda *a, **k: threading.Thread())
     ts = _steps(tmp_path, epochs=4)
@@ -324,7 +324,7 @@ def test_tail_harvested_when_next_rollout_ends(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """集成：上一轮尾巴在下一轮采集落幕时被收拢（_dispatch_delayed_eval 入口）。"""
-    import rl.eval_dispatch as ed
+    import trainer.eval_dispatch as ed
 
     monkeypatch.setattr(ed, "dispatch_eval_bg", lambda *a, **k: threading.Thread())
     ts = _steps(tmp_path)
@@ -372,7 +372,7 @@ class _DummyThread:
 
 def test_drain_pending_eval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """drain：只收尾最新未覆盖评估轮；全覆盖/无归档则静默跳过。"""
-    import rl.eval_dispatch as ed
+    import trainer.eval_dispatch as ed
 
     calls: list[dict] = []
     joins: list = []

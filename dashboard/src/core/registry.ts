@@ -93,7 +93,7 @@ export function isCourseComponent(key: Component): key is CourseComponent {
  *
  *  ★ `trainingLoop` 为什么也进来（用户口径：「hubserver/trainingloop/selfNode/cloudflared
  *  都只需要开一个进程，就能同时支持所有并行训练课程」）：R2d 已经造好了单进程驱动者
- *  （`rl/loop_serve.py`：按课锁/按课日志镜像/引擎池/故障隔离），且 R3-4 让同一个进程也能
+ *  （`trainer/loop_serve.py`：按课锁/按课日志镜像/引擎池/故障隔离），且 R3-4 让同一个进程也能
  *  带 BC 课——而 BC 与 RL **共用 `trainingLoop` 这一个角色键**，按课键控意味着
  *  「BC 课 A + RL 课 B」只能靠两个进程并存。收敛后一个进程两种课都跑。
  *

@@ -1,4 +1,4 @@
-"""R2b：任务模型纯逻辑单测（`rl/loop_tasks.py`，plan/r2-loop-task-queue §3）。
+"""R2b：任务模型纯逻辑单测（`biz/loop_tasks.py`，plan/r2-loop-task-queue §3）。
 
 三条要钉死的东西（它们决定 R2c 单进程调度器能不能安全重放）：
 1. **任务表与顺序**：一轮的 13 步、顺序、以及哪些步骤要占资源池；
@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.loop_tasks import (
+from biz.loop_tasks import (
     ABORT,
     DONE,
     RESOURCE_OF,

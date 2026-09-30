@@ -1,4 +1,4 @@
-"""R2c-3：「在等什么」判据（`rl/loop_plan.py::waiting_state`）+ CLI 行组装（`build_rows`）。
+"""R2c-3：「在等什么」判据（`trainer/loop_plan.py::waiting_state`）+ CLI 行组装（`build_rows`）。
 
 这一列是控制台调度器卡片的唯一新增语义，也是 `--json` 契约的一部分（dashboard
 `server/api/loop-queue.ts` 消费），所以要钉死三件事：
@@ -25,8 +25,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.commit_journal import CommitJournal
-from rl.loop_plan import (
+from biz.commit_journal import CommitJournal
+from biz.loop_scheduler import CourseQueue, Supervisor
+from biz.loop_tasks import Task, TaskResult
+from run_rl_cluster import build_rows, main
+from trainer.loop_plan import (
     WAIT_COLLECT,
     WAIT_IDLE,
     WAIT_INFLIGHT,
@@ -34,9 +37,6 @@ from rl.loop_plan import (
     enabled_courses,
     waiting_state,
 )
-from rl.loop_scheduler import CourseQueue, Supervisor
-from rl.loop_tasks import Task, TaskResult
-from run_rl_cluster import build_rows, main
 
 
 def _state(**kw: object) -> tuple[str, str]:

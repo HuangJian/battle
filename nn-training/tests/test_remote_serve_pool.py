@@ -1,4 +1,4 @@
-"""test_remote_serve_pool.py — 节点侧长驻 worker 池（`remote/serve_pool.py`）单测。
+"""test_remote_serve_pool.py — 节点侧长驻 worker 池（`worker/serve_pool.py`）单测。
 
 覆盖（对应 plan `conv-optimize.plan.md` / `docs/nn/runtime-opt.md` §21 的 A 方案）：
   * 复用：N 局共用**一个**进程（`spawned` 不随局数涨）—— 这就是 1.59× 的全部来源；
@@ -27,11 +27,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import remote.iter_rollout as iter_rollout
-import remote.serve_pool as serve_pool
+import worker.iter_rollout as iter_rollout
+import worker.serve_pool as serve_pool
 from common import game_watch
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from remote.serve_pool import ServePool
+from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from worker.serve_pool import ServePool
 
 # ------------------------------------------------------------------ 桩
 

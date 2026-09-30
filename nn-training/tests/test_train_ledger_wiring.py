@@ -21,9 +21,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.breaker import KL_BREAK
-from rl.gate_check import sum_train_samples, sum_train_sec
-from rl.loop_core import TrainingLoop
+from biz.breaker import KL_BREAK
+from biz.gate_check import sum_train_samples, sum_train_sec
+from trainer.loop_core import TrainingLoop
 
 TS = "2026-09-18 12:00:00"
 

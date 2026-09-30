@@ -48,14 +48,14 @@ import torch
 import torch.nn.functional as F
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common.schema import OBS_SCHEMA_MAJOR
 from data.dataset import make_loaders
 from data.weights_io import load_state_into, save_weights_json
 from models.core import NNPolicy, param_count
 from models.student import PPOStudent, StudentNet
-from schema import OBS_SCHEMA_MAJOR
 
 # 免 torch 的判据半边（2026-09-26，item 6f + 续扫）：BC 旋钮归一在 train/bc_core.py、
 # 设备串在 train/device.py。本模块 import 后自用 + 沿用旧名对外可见（既有调用点一行不改）。

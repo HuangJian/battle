@@ -26,14 +26,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.schema import CH, DIRECTION_CHANNELS, SCALAR_DIM, SCALAR_X_INDICES
 from data.mirror import mirror_x  # 纯 numpy 模块：本文件不需要 torch
-from schema import CH, DIRECTION_CHANNELS, SCALAR_DIM, SCALAR_X_INDICES
 
 TANK_CHANNELS = sorted(DIRECTION_CHANNELS - {CH["bullet"]})
 BULLET_CH = CH["bullet"]
 N_CH = 16
 
-# dirIdx 顺序（schema.DIR_INDEX）：up=0, down=1, left=2, right=3
+# dirIdx 顺序（common.schema.DIR_INDEX）：up=0, down=1, left=2, right=3
 # 子弹混合基：val = (sb<<3) + (owner<<2) + (d+1)；敌 owner=0、玩家 owner=1、sb=0。
 BULLET_VAL = {
     ("enemy", sb, d): (sb << 3) + (0 << 2) + (d + 1) for sb in range(4) for d in range(4)

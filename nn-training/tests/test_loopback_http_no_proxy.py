@@ -24,7 +24,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parent.parent
 
-from remote import net_http
+from common import net_http
 from remote.hub_client import _request as hub_request
 from remote.push_dispatch import _http as push_http
 from remote.worker import _request as worker_request
@@ -93,7 +93,7 @@ def test_is_loopback_forms() -> None:
 def test_suite_env_bypasses_loopback_proxy() -> None:
     """conftest 把**精确回环主名**补进 `no_proxy`：连裸 `urlopen` 的既有用例也不走代理。
 
-    生产侧走 `remote/net_http.py`（不靠环境变量）；测试侧这一行是兑底——否则每个用
+    生产侧走 `common/net_http.py`（不靠环境变量）；测试侧这一行是兑底——否则每个用
     `urllib.request.urlopen` 打本机临时端口的用例都在外面套一层代理。
     """
     for key in ("no_proxy", "NO_PROXY"):

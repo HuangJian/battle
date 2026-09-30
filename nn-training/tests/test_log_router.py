@@ -1,4 +1,4 @@
-"""R2d：日志**行路由**（`rl/log.py` 的 `prefix_scope` / `open_course_sink`）。
+"""R2d：日志**行路由**（`biz/log.py` 的 `prefix_scope` / `open_course_sink`）。
 
 单进程服务多门课不能换 `sys.stdout`（两个 Tee 套起来会把每行复制进两份课日志），所以课程
 归属改成行级：`log()` 在前缀作用域内带 `[课]` 前缀，并**同一行**镜像到该课自己的日志文件。
@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.log import (
+from biz.log import (
     close_course_sink,
     close_course_sinks,
     format_line,
@@ -96,7 +96,7 @@ def test_missing_or_bad_sink_never_breaks_logging(capsys: pytest.CaptureFixture[
         def flush(self) -> None:
             raise OSError("disk gone")
 
-    from rl.log import _COURSE_SINKS
+    from biz.log import _COURSE_SINKS
 
     _COURSE_SINKS["a"] = Boom()
     with prefix_scope("a"):

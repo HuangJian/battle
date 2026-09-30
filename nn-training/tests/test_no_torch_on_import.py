@@ -29,10 +29,11 @@ def _run_probe() -> str:
         print("torch=" + str("torch" in sys.modules))
         print("numpy=" + str("numpy" in sys.modules))
         print("ppo.engine=" + str("ppo.engine" in sys.modules))
-        print("rl.modes=" + str("rl.modes" in sys.modules))
-        print("rl.stream=" + str("rl.stream" in sys.modules))
-        # rl.stream 显式导入后仍不得拉起 ppo.engine（其默认后端已延迟导入）
-        import rl.stream  # noqa: F401
+        print("biz.modes=" + str("biz.modes" in sys.modules))
+        print("trainer.stream=" + str("trainer.stream" in sys.modules))
+        # trainer.stream（2026-09-30 刀 5 前的 rl.stream）显式导入后仍不得拉起 ppo.engine
+        # （其默认后端已延迟导入）
+        import trainer.stream  # noqa: F401
         print("torch-after-stream=" + str("torch" in sys.modules))
         """
     )
@@ -48,15 +49,15 @@ def test_import_run_rl_does_not_load_torch() -> None:
     assert kv.get("torch") == "False", f"import run_rl 触发了 torch 加载:\n{stdout}"
     assert kv.get("numpy") == "False", f"import run_rl 触发了 numpy 加载:\n{stdout}"
     assert kv.get("ppo.engine") == "False", f"import run_rl 触发了 ppo.engine（torch 链）:\n{stdout}"
-    # rl.stream 顶层也不得拉起 ppo.engine（其默认后端已延迟导入）
-    # 注：run_rollout_stream 的引用已下沉到 main()，模块级本就不该加载 rl.stream；
+    # trainer.stream 顶层也不得拉起 ppo.engine（其默认后端已延迟导入）
+    # 注：run_rollout_stream 的引用已下沉到 main()，模块级本就不该加载 trainer.stream；
     # 显式导入它之后 torch 仍必须保持未加载。
-    assert kv.get("rl.stream") == "False", f"模块级不应加载 rl.stream:\n{stdout}"
-    assert kv.get("torch-after-stream") == "False", f"导入 rl.stream 触发了 torch:\n{stdout}"
+    assert kv.get("trainer.stream") == "False", f"模块级不应加载 trainer.stream:\n{stdout}"
+    assert kv.get("torch-after-stream") == "False", f"导入 trainer.stream 触发了 torch:\n{stdout}"
 
 
 def test_modes_import_does_not_load_torch() -> None:
-    """rl.modes 顶层不再 import ppo.*（get_backend 延迟）——run_rl 之外的引用方同样受益。
+    """biz.modes 顶层不再 import ppo.*（get_backend 延迟）——run_rl 之外的引用方同样受益。
 
     映射完整性用 **`importlib.util.find_spec`** 验，不用 `import_module`（2026-09-26）：
     `find_spec("ppo.engine")` 只解析模块**路径**（顺带 import 父包 `ppo`，而它是 PEP 562
@@ -68,7 +69,7 @@ def test_modes_import_does_not_load_torch() -> None:
         """
         import importlib.util
         import sys
-        from rl.modes import _MODE_BACKEND_NAMES
+        from biz.modes import _MODE_BACKEND_NAMES
         print("torch=" + str("torch" in sys.modules))
         assert set(_MODE_BACKEND_NAMES) == {"per-tick", "intent", "goal"}
         specs = [n for n in _MODE_BACKEND_NAMES.values() if importlib.util.find_spec(n) is None]

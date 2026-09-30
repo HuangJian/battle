@@ -5,7 +5,7 @@
   2. `to_m1_row` 的 B 层行 → m1 JSONL 契约映射（0/1 → bool、scorable 原样带回、error 局 ok=False）；
   3. policy → kind 分桶表（上传与查询必须同 kind，否则 agent 一律 409）。
 
-节点通信与重试**不在此测**：那是 `BatchEvalRunner` + `dist_common` 的既有测试面。
+节点通信与重试**不在此测**：那是 `BatchEvalRunner` + `common.distribution` 的既有测试面。
 """
 
 from __future__ import annotations
@@ -118,7 +118,7 @@ def test_to_m1_row_error_game_and_missing_scorable() -> None:
 
 def test_dispatchable_policies_match_kind_table() -> None:
     """可分派集合与 kind 分桶表必须互相对得上（kind 错 = 一律 409，静默全 error）。"""
-    from rl.batch_eval import KIND_FOR_POLICY, kind_for_policy
+    from trainer.batch_eval import KIND_FOR_POLICY, kind_for_policy
 
     assert set(emo.DISPATCHABLE) == {"nn", "intent-exec", "goal", "god"}
     assert kind_for_policy("intent-exec") == "intent"

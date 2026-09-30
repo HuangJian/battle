@@ -39,7 +39,7 @@
 | 键 | 类 | 理由 |
 |---|---|---|
 | `intent_rl`（整块 29 键） | E | intent/goal 线入口已冻结（单一 PPO 路径，`docs/nn/training-stack.md §23`）+ hub 收敛为单实例；需要时按 x 系列重配 |
-| `policy.upgradeBranch` | E | 2026-08-30 事故载体：非空值会盖掉「训练机当前分支」锁存。**读点也一并删掉**（`rl/dispatch.py`） |
+| `policy.upgradeBranch` | E | 2026-08-30 事故载体：非空值会盖掉「训练机当前分支」锁存。**读点也一并删掉**（`trainer/dispatch.py`） |
 | `policy.minDiskFreeMB` | E | 全域零代码消费者（磁盘余量检查在 TS 侧 `tools/agent/sampler-agent.ts`） |
 | `policy.streamKlCapIntent` | E | intent 流式专属，随 intent 线一起下线 |
 | `policy.streamWaveGamesIntent` | E | 同上 |
@@ -60,10 +60,10 @@ B 类全绿键 → 备份 `nn-training/rl-config.json.bak.20260926-181554`
 用户 2026-09-26 裁决：`intent_rl` 与 `stream / double_buffer / precollect_early` **只删配置，
 代码保留**——需要重启 intent 线时能直接复用，不必从 git 历史重补：
 
-- `rl/modes.py::merged_mode_args` 的 `rl.<mode> → intent_rl(legacy) → rl` 三级回退**仍认得**
-  `intent_rl`；但 intent/goal 的入口目前**冻结**（`rl/config.py::validate_args` 对
+- `biz/modes.py::merged_mode_args` 的 `rl.<mode> → intent_rl(legacy) → rl` 三级回退**仍认得**
+  `intent_rl`；但 intent/goal 的入口目前**冻结**（`biz/config.py::validate_args` 对
   `mode != per-tick` 响亮拒启）⇒ 重启前须先解冻，且新配置按 x 系列写进 `curricula/*.jsonc`。
-- `rl/cli.py` / `rl/rollout_phase.py` 仍认得 `stream`/`double_buffer`/`precollect_early`
+- `biz/cli.py` / `trainer/rollout_phase.py` 仍认得 `stream`/`double_buffer`/`precollect_early`
   （`rollout_phase` 的提前预采只在 `double_buffer` 开时生效）。
 
 ### 1.4b B 类「全绿」判据与本次执行（2026-09-26）
@@ -84,7 +84,7 @@ B 类全绿键 → 备份 `nn-training/rl-config.json.bak.20260926-181554`
 **机器级键永不删**（`tools/rl_config_clean.py::MACHINE_KEYS`）：`local_slots`、`workers`。
 它们在 `--scope all` 下会判「全绿」（108/108 课程都写了 `workers`），但 rl-config 里这条是
 **裸机读数**而不是课程兜底——`dashboard/src/core/slots.ts::bareCapacity` = `max(rl.workers, rl.local_slots)`，
-`rl/config.py::apply_course_machine_overrides` 也把 `rl.{workers,local_slots}` 当本机配额缺省。
+`biz/config.py::apply_course_machine_overrides` 也把 `rl.{workers,local_slots}` 当本机配额缺省。
 删掉 ⇒ `Number(undefined ?? 0)` = 0 ⇒ 容量塌成 0、`checkCapacity` 把每门课都报成超量（假红）。
 
 **保留兜底的（没删）**：`mb` `seed_rotate` `keep_iters` `eval_window_sec` `total_stages`

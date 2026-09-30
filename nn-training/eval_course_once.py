@@ -3,13 +3,13 @@
 **为什么是 Python 而不是再写一套 TS 调度器**（用户 2026-09-19 质问，判定成立）：
 节点通信与重试机制早已在 Python 侧且经长期实战检验——
 
-  * 节点门 / codeHash 判据：`dist_common.check_code_hash`（SSOT = codehash-files.txt）
-  * ping + 任务下发 + 退避重试 + 权重下发 + wver/409：`dist_common.fetch_task` / `post_weights_parallel`
+  * 节点门 / codeHash 判据：`common.distribution.check_code_hash`（SSOT = codehash-files.txt）
+  * ping + 任务下发 + 退避重试 + 权重下发 + wver/409：`common.distribution.fetch_task` / `post_weights_parallel`
   * 失败连击停用（nodeFailStreak）、EVAL_TASK_ATTEMPTS 重排队：`BatchEvalRunner`
   * 本机份额：`policy.evalLocalSlots`（缺省 `eval_yield.EVAL_LOCAL_SLOTS_DEFAULT`）；
     机器级配置链（`rl.local_slots`）由调用方 TS 侧 `dist-node-gate.configLocalSlots`
     解析后以 `spec.localSlots` 显式传入 —— 本文件**不重读** rl-config 的槽位语义
-  * 队列与尾竞速：`rl/queue.py`
+  * 队列与尾竞速：`trainer/queue.py`
 
 TS 侧曾把这些又实现了一遍（探测/重试/rescan/停用/本机槽位），既漂移又漏护栏。
 本文件只做**入口翻译**：把「课程文件 + 多权重 + 种子段 + 局数」翻成 B 层的
@@ -35,13 +35,13 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-# 入口放在 nn-training/ 顶层（不能放 rl/：脚本目录会在 sys.path[0]，rn-training/rl/queue.py
+# 入口放在 nn-training/ 顶层（不能放 rl/：脚本目录会在 sys.path[0]，rn-training/trainer/queue.py
 # 会遮蔽 stdlib `queue` ⇒ concurrent.futures 导入即爆循环导入）。仓库根 = 本文件上溯 1 层。
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "nn-training"))
 
 # 本入口的 stdout 是**调用方的产物通道**（`--out` 缺省时 eval-course-ckpt 的行就走
-# stdout），而训练栈的 `rl.log.log()` 按设计写 stdout（run_rl 的日志流）。整体改道
+# stdout），而训练栈的 `biz.log.log()` 按设计写 stdout（run_rl 的日志流）。整体改道
 # stderr——否则调用方的 stdout 会被日志行污染（2026-09-19 实测于 m1 链路）。
 sys.stdout = sys.stderr
 
@@ -78,12 +78,12 @@ def weight_key16(w: dict) -> str:
     同一次调用跑两个权重时两张表键完全相同 ⇒ 后一个权重把前者的 label/weightIdx 全盖掉，
     于是逐行 label 全错、`_row_id` 的 `wi * games` 也全错（多权重产物实际不可用）。
     """
-    import dist_common
+    import common.distribution
 
     path = str(w.get("path") or "")
     if not path:
-        return f"god-{dist_common.compute_engine_epoch()[:12]}"
-    return dist_common.weights_fingerprint(path)[:16]
+        return f"god-{common.distribution.compute_engine_epoch()[:12]}"
+    return common.distribution.weights_fingerprint(path)[:16]
 
 
 def build_course_units(
@@ -242,10 +242,10 @@ def main() -> int:
     # 临时批次：EvalBoard 数据根指向本次 runDir（心跳/台账都不进控制台既有数据）
     os.environ.setdefault("EVALBOARD_DATA", str(run_dir / "evalboard"))
 
-    import dist_common
-    from rl.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner, data_root
-    from rl.jsonc import load as jsonc_load
-    from rl.queue import RUN_ID
+    import common.distribution
+    from common.jsonc import load as jsonc_load
+    from trainer.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner, data_root
+    from trainer.queue import RUN_ID
 
     course_path = str(spec["course"])
     course = jsonc_load(course_path)
@@ -269,7 +269,7 @@ def main() -> int:
     plan = _stage_plan(games, n_stages, seed0)
 
     # 配置文件：显式 --dist-nodes 优先（`load_dist_config` 接受路径），否则默认 rl-config.json
-    cfg = dict(dist_common.load_dist_config(str(spec.get("distCfgPath") or dist_common.CONFIG_PATH)) or {})
+    cfg = dict(common.distribution.load_dist_config(str(spec.get("distCfgPath") or common.distribution.CONFIG_PATH)) or {})
     if spec.get("noNodes"):
         cfg = {**cfg, "nodes": []}
     # 本机槽位：默认由配置决定（`policy.evalLocalSlots` → `EVAL_LOCAL_SLOTS_DEFAULT`，
@@ -301,7 +301,7 @@ def main() -> int:
     # BatchEvalRunner 经 self.args 取（与 distLocal 的内存覆盖不同，这是语义开关）。
     args.decision_events = bool(spec.get("decisionEvents"))
     bun = shutil.which("bun") or "bun"
-    epoch = dist_common.compute_engine_epoch()
+    epoch = common.distribution.compute_engine_epoch()
 
     units, meta = build_course_units(
         weights if policy != "god" else [{"label": "god", "path": ""}],

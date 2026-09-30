@@ -44,6 +44,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from common.log_bundle import LogBundle
 from common.protocol import (
     ROLE_OFFLINE,
     ROLE_ONLINE,
@@ -65,7 +66,6 @@ from common.protocol import (
 from common.protocol import (
     d14_corpus_match as protocol_d14_corpus_match,
 )
-from log_bundle import LogBundle
 
 # BC 作业（S4 第六步之二 → `remote/bc_job.py`）：**显式转发**（e2e / tests 直接 import
 # 这些名字，见该模块头部；本组无 monkeypatch 接缝）。
@@ -184,7 +184,6 @@ from remote.http import (
 from remote.http import (
     _warn_non_200 as _warn_non_200,
 )
-from remote.iter_rollout import resolve_bun, run_iter_rollout
 
 # 作业工作区 / 产物落盘 / TAR / git 物化（S4 第六步 → `remote/job_fs.py`）：**显式转发**。
 # 本组无 monkeypatch 接缝（全仓都是直接调用）⇒ 转发即够。
@@ -383,6 +382,7 @@ from remote.worker_proc import (
 from remote.worker_proc import (
     supervise_worker as supervise_worker,
 )
+from worker.iter_rollout import resolve_bun, run_iter_rollout
 
 # ------------------------------------------------------------------ PPO 执行
 
@@ -408,7 +408,7 @@ def run_job(
     # 日志节食（2026-09-24）：本 job 的「入口 + 启动 + 装载」读数攒进这个 bundle。
     # 调用方（`rl/` 的常驻轮 loop）先往里放它自己那几行（`it<N>: N 局 wver=…`），本函数
     # 再把入口/设备读数放进去，训练核把装载读数补上，装载完成时打**一行**
-    # （`nn-training/log_bundle.py`）；不传就自建（只在行数上有差别，信息量不变）。
+    # （`nn-training/common/log_bundle.py`）；不传就自建（只在行数上有差别，信息量不变）。
     prep: Any = None,
     # 注：半离线（kind=run）那条腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
     # 三个入参随 2026-09-25 的退休一起没了（`plan/online-offline-role-routing.plan.md` §7）。

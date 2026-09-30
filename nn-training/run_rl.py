@@ -7,33 +7,33 @@ import sys
 import time
 from pathlib import Path
 
-from common.proc import run_capture
-from common.protocol import COURSE_ENABLE_MARKER, coef_active
-from pid_probe import pid_alive as _pid_alive_impl
-from platform_utils import force_utf8_stdio
-from rl.archive import ensure_current_branch_pushed
-from rl.cli import build_argparser
-from rl.collect_only import run_collect_only
-from rl.log import Tee as _Tee
-from rl.log import log
-from rl.modes import apply_mode_flags, merged_mode_args, resolve_mode
-from rl.queue import (  # noqa: F401 — run_rollout_queue re-exported for tests
-    REPO_ROOT,
-    run_rollout_queue,
-)
-from rl.resume import (
+from biz.archive import ensure_current_branch_pushed
+from biz.cli import build_argparser
+from biz.log import Tee as _Tee
+from biz.log import log
+from biz.modes import apply_mode_flags, merged_mode_args, resolve_mode
+from biz.resume import (
     completed_pairs,  # noqa: F401 — re-exported for tests
     last_completed_iter,  # noqa: F401 — re-exported for tests
     last_rotate_seed,
     peak_entropy,  # noqa: F401 — F4 ENT 相对崩塌基线回读（§339），re-exported for tests
     resumed_manifests,  # noqa: F401 — re-exported for tests
 )
+from common.pid_probe import pid_alive as _pid_alive_impl
+from common.platform_utils import force_utf8_stdio
+from common.proc import run_capture
+from common.protocol import COURSE_ENABLE_MARKER, coef_active
 from rl_config_schema import check_rl_config
 from train.loop_util import (
     acquire_lock,
     cleanup_lock,
     course_key_from_path,
     course_lock_path,  # per-course 锁名（plan §1.2）
+)
+from trainer.collect_only import run_collect_only
+from trainer.queue import (  # noqa: F401 — run_rollout_queue re-exported for tests
+    REPO_ROOT,
+    run_rollout_queue,
 )
 
 
@@ -93,9 +93,9 @@ def _log_rl_args(src: dict, merged: dict) -> None:
 
 
 def _runrl_pid_alive(pid: int) -> bool:
-    """跨平台的进程存活探测（委托唯一实现 `pid_probe.pid_alive`）。
+    """跨平台的进程存活探测（委托唯一实现 `common.pid_probe.pid_alive`）。
 
-    保留本名字只为调用点稳定。历史教训（都写进 `pid_probe` 模块 docstring）：① Windows 侧
+    保留本名字只为调用点稳定。历史教训（都写进 `common.pid_probe` 模块 docstring）：① Windows 侧
     `os.kill(pid, 0)` 是 `TerminateProcess`，会把锁持有人直接杀掉；② 2026-09-13 曾把 Windows
     分支写成无条件路径，Linux 上遇到**已存在**的锁文件就 AttributeError——陈旧锁永不清理、
     同课双开从「响亮拒启」退化成崩溃（P1 验收被 stale 锁连续打崩两门课）；③ `pid <= 0` 命中的
@@ -160,7 +160,7 @@ def _require_course_open(args, traj_root: Path) -> None:
     （漏开课标记 / 暂停意图解禁 / hub 课程模式三件套），并让 agent 去手写控制台拥有的
     状态文件（`training-enabled.txt` / `loop-control.json`）与控制台写面打架。
 
-    判据**同源调用** `rl.loop_plan.course_enabled`（= `enabled_courses` 的谓词；标记与
+    判据**同源调用** `trainer.loop_plan.course_enabled`（= `enabled_courses` 的谓词；标记与
     traj 目录同址 `<traj>/training-enabled.txt`）——**禁**在这里另写第二份"标记存在性
     检查"（第二份判据 drift 就是这类事故的老 pattern）。
 
@@ -173,7 +173,7 @@ def _require_course_open(args, traj_root: Path) -> None:
         return
     if getattr(args, "course_obj", None) is None:
         return  # 非课程路径：老用法逐字节不变（开课标记只存在于课程 traj 目录下）
-    from rl.loop_plan import course_enabled
+    from trainer.loop_plan import course_enabled
 
     if course_enabled(traj_root):
         return
@@ -191,7 +191,7 @@ def main() -> None:
     force_utf8_stdio()
     # I1 快速缓解（hy E4/dsf）：fatal 信号（SIGSEGV/SIGABRT/SIGFPE…）时把 Python 栈
     # 倾倒到 stderr——随 §16.2 的 run.log 落文件，两起「无堆栈消失」事故不再完全盲区。
-    # OOM killer（SIGKILL）不经过信号处理器——那种死法由 rl/forensics.py 的提交边界
+    # OOM killer（SIGKILL）不经过信号处理器——那种死法由 biz/forensics.py 的提交边界
     # 快照兜底取证（最后一条 forensics = 临终状态）。
     import faulthandler
 
@@ -205,9 +205,9 @@ def main() -> None:
     mode = resolve_mode(sys.argv[1:])
     # 启动参数默认取自 rl-config.json（单一事实来源；CLI 显式传参覆盖 json 默认）。
     # 查找优先级 rl.<mode> → intent_rl 遗留块（intent/goal 迁移期）→ rl（D2）。
-    # 路径的唯一来源是 `rl.config.rl_config_path()`（`BCITY_RL_CONFIG` 可重定向）——与
-    # `rl/loop_serve.py::_read_rl_config` 同源，用例才能用自带夹具做「解析链对拍」。
-    from rl.config import read_rl_config_file
+    # 路径的唯一来源是 `biz.config.rl_config_path()`（`BCITY_RL_CONFIG` 可重定向）——与
+    # `trainer/loop_serve.py::_read_rl_config` 同源，用例才能用自带夹具做「解析链对拍」。
+    from biz.config import read_rl_config_file
 
     _cfg = read_rl_config_file()
     # rl-config 键白名单校验（plan/rl-config-cleanup.plan.md §3.4）：**只告警不拒** ——
@@ -228,7 +228,7 @@ def main() -> None:
     # ===== 课程配置化（plan/rl-training-config.md §3）：唯一启动入口 =====
     # 优先级 课程 > rl-config.json > argparse 默认；无 CLI 逐参覆盖。课程自带
     # 关卡布局/奖励公式/超参 schedule，apply 后由各阶段消费。
-    from rl.config import (
+    from biz.config import (
         apply_course,
         course_cli_conflicts,
         course_from_args,
@@ -266,7 +266,7 @@ def main() -> None:
     # P1-3（2026-09-02）：启动期配置校验（互斥/范围 fail fast——此前这些错误
     # 要等训练中途才暴露）。课程覆盖后校验（课程值是单一事实来源）。
     # stream/double-buffer 的显式传参判定：单一 PPO 路径下两者恒置 0（本机没有 PPO 窗口，
-    # 见 `rl/config.py` §3 块），但**显式** `--stream 1` / `--double-buffer 1` 仍要响亮报错
+    # 见 `biz/config.py` §3 块），但**显式** `--stream 1` / `--double-buffer 1` 仍要响亮报错
     # （用户要求的能力已退役 ≠ 参数可以静默失效）⇒ 需区分「显式传参」与「吃 config 默认」。
     # 存到 args 供 validate_args 消费。
     _defaults_ns2 = ap.parse_args([])
@@ -276,7 +276,7 @@ def main() -> None:
     args._explicit_double_buffer = int(getattr(args, "double_buffer", 0) or 0) != int(
         getattr(_defaults_ns2, "double_buffer", 0) or 0
     )
-    from rl.config import validate_args
+    from biz.config import validate_args
 
     validate_args(args)
 
@@ -309,7 +309,7 @@ def main() -> None:
         ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT, timeout=30
     ).stdout.strip()
     if _current_branch and _current_branch != "HEAD":
-        import dist_common as _dc
+        import common.distribution as _dc
 
         _dc.set_upgrade_branch(_current_branch)
         log(f"[run_rl] node upgrade branch locked to training-machine branch: {_current_branch}")
@@ -384,8 +384,8 @@ def main() -> None:
         course=_hub_course_key,
     )
 
-    # ===== 主循环（rl/loop.py::run_training）=====
-    from rl.loop import run_training
+    # ===== 主循环（trainer/loop.py::run_training）=====
+    from trainer.loop import run_training
 
     # ★ 2026-09-21（§3 单一 PPO 路径）：训练进程不建本机 PPO 后端（hub 免 torch，D2）——
     # 传 None；PPO 由 hub 队列上认领到的 worker 执行（本机 worker = 控制台起的同一协议）。

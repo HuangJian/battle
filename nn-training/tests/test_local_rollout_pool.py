@@ -1,6 +1,6 @@
 """test_local_rollout_pool.py — 本机腿的长驻池：与逐局 spawn **逐字节同产物**（真 bun）。
 
-为什么值得（2026-09-25）：`rl/queue_local.py` 的两条本机腿（`run_rollout` / dispatcher 的本机槽）
+为什么值得（2026-09-25）：`trainer/queue_local.py` 的两条本机腿（`run_rollout` / dispatcher 的本机槽）
 原先**每局** `Popen` 一个 bun——进程启动 + 模块加载 + wasm 编译 + 权重解析每局重付一次（节点侧
 同款池实测 1.59×，见 `docs/nn/runtime-opt.md` §20/§21）。现在默认交给 `--serve` 长驻池。
 
@@ -79,7 +79,7 @@ def _shard_files(d: Path) -> dict[str, bytes]:
 @pytest.mark.time_budget(60)  # 真 bun：两条腿 × 两局 + 池冷启动
 def test_pooled_run_rollout_is_byte_identical_to_per_game_spawn(tmp_path, monkeypatch) -> None:
     """池化那轮与本改动前的逐局 spawn 那轮：shard **逐文件逐字节**相同。"""
-    import rl.queue_local as ql
+    import trainer.queue_local as ql
 
     weights = _weights(tmp_path)
 
@@ -121,8 +121,8 @@ def test_pool_probe_skips_scripts_that_cannot_serve(tmp_path, monkeypatch) -> No
     没有动准入门槛 —— 用户点名保持现状。所以 `make_local_pool` 仍然要拿真 argv 探一次脚本，
     并把同一个脚本作为 `for_script` 交给 `make_pool`。
     """
-    import rl.queue_local as ql
-    from remote import serve_pool
+    import trainer.queue_local as ql
+    from worker import serve_pool
 
     weights = _weights(tmp_path)
     args = _args()
@@ -143,8 +143,8 @@ def test_pool_probe_skips_scripts_that_cannot_serve(tmp_path, monkeypatch) -> No
 
 def test_local_pool_is_built_on_the_homogeneous_entry(tmp_path, monkeypatch) -> None:
     """本地 rollout 轮建池时：入口 = 同质入口，且日志把 mode token 打出来（不再按脚本建）。"""
-    import rl.queue_local as ql
-    from remote import serve_pool
+    import trainer.queue_local as ql
+    from worker import serve_pool
 
     weights = _weights(tmp_path)
     seen: list[dict] = []

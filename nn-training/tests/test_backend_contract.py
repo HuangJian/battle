@@ -1,11 +1,11 @@
 """Rollout 后端契约回归（plan/python-refactor.md P0-1 / P1-2）—— **免 torch 的源码扫描层**。
 
-**为什么需要这个文件**：三套 PPO 后端被 `rl/stream.py` 以 duck typing 复用，
+**为什么需要这个文件**：三套 PPO 后端被 `trainer/stream.py` 以 duck typing 复用，
 长期没有任何类型约束。goal 后端的 `ppo_update_goal` 因此缺少 `on_epoch_done`
 形参而无人察觉——`stream.py:123-124` 无条件注入它，缺陷直到训练中途第一个
 wave 才以 TypeError 爆炸（默认配置下 `--mode goal` 100% 崩溃）。
 
-契约本体在 `rl/backend.py`。本文件把两条约束变成可执行断言：
+契约本体在 `biz/backend.py`。本文件把两条约束变成可执行断言：
 
 1. **结构契约**：后端具备 5 个必需成员。
 2. **签名契约**：`update` 必须能绑定 `stream.py` 无条件注入的关键字参数
@@ -17,7 +17,7 @@ wave 才以 TypeError 爆炸（默认配置下 `--mode goal` 100% 崩溃）。
 P0-1 那类缺陷在那边一条都守不住。对照口径写在 `test_backend_contract_runtime.py`：
 
 * 结构契约与 `isinstance(mod, RolloutBackend)` **同义**——`@runtime_checkable` 只查属性存在、
-  不查签名（见 `rl/backend.py` 模块 doc）；静态层额外能看见名字的**来路**（`from X import y`
+  不查签名（见 `biz/backend.py` 模块 doc）；静态层额外能看见名字的**来路**（`from X import y`
   会递归确认 y 在 X 里还在）。
 * 签名契约由 AST 形参表翻成 `inspect.Signature` 后跑**同一段** `sig.bind(...)`；那半边文件
   在真 torch 下做**双向交叉校验**（静态结论 ⇔ 运行期结论），保证这一层不弱化。
@@ -36,8 +36,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.backend import REQUIRED_UPDATE_KWARGS
-from rl.modes import _MODE_BACKEND_NAMES, _MODES
+from biz.backend import REQUIRED_UPDATE_KWARGS
+from biz.modes import _MODE_BACKEND_NAMES, _MODES
 from tests.helpers import backend_contract_scan as scan
 
 #: 模式 → 静态契约结论（模块级：parametrize 在收集期就要值）。
@@ -136,7 +136,7 @@ def test_backend_exposes_the_five_contract_members(mode: str) -> None:
 def test_update_accepts_stream_injected_kwargs(mode: str) -> None:
     """签名契约（P0-1 捕获器）：update 必须接受 stream.py 无条件注入的所有关键字。
 
-    `rl/stream.py:123-124` 在 `on_epoch_done` 非空时把它塞进 `update_kwargs`，
+    `trainer/stream.py:123-124` 在 `on_epoch_done` 非空时把它塞进 `update_kwargs`，
     `:286` 再 `backend.update(..., **update_kwargs)`。`run_rl.py` 恒传该回调
     （双缓冲提前预采的触发点），故不接受它的后端在流式模式下必然 TypeError。
     """

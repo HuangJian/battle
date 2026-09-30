@@ -37,6 +37,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from common.log_bundle import LogBundle
 from common.protocol import (
     BLOB_DEMO,
     BLOB_OPT,
@@ -49,7 +50,6 @@ from common.protocol import (
     job_seed,
     pack_result_v2,
 )
-from log_bundle import LogBundle
 from remote.download import WEIGHT_SOURCES, _cache_blob, _cache_produced_weights, _resolve_blob
 from remote.job_fs import pack_opt_tar, unpack_opt_tar
 from remote.job_lifecycle import job_body_error
@@ -86,7 +86,7 @@ def run_training_core(
     blob_hits: int,
     blob_miss_bytes: int,
     # 日志节食（2026-09-24）：作业壳把本 job 的「入口」读数先放进 prep 这个 bundle，
-    # 本模块再叠加「设备/装载」读数，装载完成时打**一行**（`nn-training/log_bundle.py`）。
+    # 本模块再叠加「设备/装载」读数，装载完成时打**一行**（`nn-training/common/log_bundle.py`）。
     prep: Any = None,
     t_prep: float = 0.0,
     should_cancel: Callable[[], bool] | None = None,
@@ -109,7 +109,7 @@ def run_training_core(
     course_text = manifest["course"]
     course_path = job_dir / "course.jsonc"
     course_path.write_text(course_text, encoding="utf-8")
-    from rl.config import load_course
+    from biz.config import load_course
 
     course = load_course(str(course_path))
     if course.reward_spec().identity() != manifest["formula_hash"]:
@@ -117,8 +117,8 @@ def run_training_core(
             f"course formula_hash 与快照不符：manifest={manifest['formula_hash']} "
             f"本地算={course.reward_spec().identity()}"
         )
-    from rl.reward_context import update as ctx_update
-    from rl.reward_library import build_reward_fn
+    from biz.reward_context import update as ctx_update
+    from biz.reward_library import build_reward_fn
 
     reward_fn = build_reward_fn(course.reward_spec())
     ctx_update(
@@ -488,7 +488,7 @@ def run_training_core(
             demo_bc_coef=demo_coef,
             demo_per_mb=demo_per_mb,
             # ★ 取消接线（R2-5）：今天这条调用**没有**传它——不传则取消延迟永远是
-            # 「跑完才响应」。训练侧那条（`rl/stream.py`）传的是双缓冲预采回调，
+            # 「跑完才响应」。训练侧那条（`trainer/stream.py`）传的是双缓冲预采回调，
             # 与这里不是同一个调用点，别去动那一条。
             on_epoch_done=_cancel_at_epoch_boundary if should_cancel is not None else None,
             # 组 3（日志节食）：epoch 行 + PPO 完成行攒成一行，未完成时每 60s 心跳一次。

@@ -16,8 +16,8 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 from models.rl_model import TOTAL_ACTION_DIM, RLNet, count_params
-from schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 
 FAILS: list[str] = []
 

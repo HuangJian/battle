@@ -1,4 +1,4 @@
-"""tests/test_plan.py —— 半离线计划（`rl/plan.py`）：云上是**重放**而不是重新发明。
+"""tests/test_plan.py —— 半离线计划（`biz/plan.py`）：云上是**重放**而不是重新发明。
 
 plan/remote-wire-remediation 的 M3 记了「命令拼装只有 `build_rollout_cmd` 一份，节点重算
 等于把这份知识复制到协议里」。整段自主（kind=run）面对同一个张力：云机必须能自己决定
@@ -27,9 +27,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from common.protocol import ProtocolError
-from rl.course import build_pairs
-from rl.plan import (
+from biz.course import build_pairs
+from biz.plan import (
     argv_fp,
     build_plan,
     check_plan_against_args,
@@ -41,6 +40,7 @@ from rl.plan import (
     retarget_argv,
     validate_plan,
 )
+from common.protocol import ProtocolError
 
 
 def _args(**over: object) -> SimpleNamespace:

@@ -12,14 +12,14 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.eval_ingest import (
+from biz.eval_ingest import (
     iter_eval_rows,
     m1_game_row,
     seed_space_of,
     segment_of_seed,
     write_m1_game_rows,
 )
-from rl.eval_m1 import parse_m1_eval_report
+from trainer.eval_m1 import parse_m1_eval_report
 
 
 def test_segments_mirror_store_ts() -> None:
@@ -82,16 +82,16 @@ def test_engine_epoch_derives_from_ssot_codehash() -> None:
     import hashlib
     import inspect
 
-    import dist_common
+    import common.distribution
 
-    ch = dist_common.compute_code_hash()
-    ep = dist_common.compute_engine_epoch()
+    ch = common.distribution.compute_code_hash()
+    ep = common.distribution.compute_engine_epoch()
     assert ep == hashlib.sha256(ch.encode()).hexdigest()[:16]
     assert len(ep) == 16
     # 不掺 git：实现里不得出现 git 调用（旧式为 sha256(git_head + gameplay)）
-    assert "git" not in inspect.getsource(dist_common.compute_engine_epoch)
+    assert "git" not in inspect.getsource(common.distribution.compute_engine_epoch)
     # 引擎文件已并入 SSOT 清单（改引擎 ⇒ codeHash 变 ⇒ eval 节点门变红）
-    rels = [rel for rel, _c in dist_common._collect_code_hash_files()]
+    rels = [rel for rel, _c in common.distribution._collect_code_hash_files()]
     for need in (
         "src/game/SimulationCombat.ts",
         "tools/det-golden.v1.sha256",
@@ -104,7 +104,7 @@ def test_engine_epoch_derives_from_ssot_codehash() -> None:
     assert not any(r.startswith(("dashboard/", "nn-training/")) for r in rels)
     # 节点门（2026-09-17 统一）：rollout 与 eval 同一判据 = codeHash；
     # engine_epoch 只是账本记录值，不再进 /v1/ping、也不再是门。
-    assert dist_common.check_code_hash({"codeHash": ch}, ch) is None
-    assert dist_common.check_code_hash({}, ch) is not None
-    assert dist_common.check_code_hash({"codeHash": "0" * 64}, ch) is not None
-    assert not hasattr(dist_common, "check_engine_epoch")
+    assert common.distribution.check_code_hash({"codeHash": ch}, ch) is None
+    assert common.distribution.check_code_hash({}, ch) is not None
+    assert common.distribution.check_code_hash({"codeHash": "0" * 64}, ch) is not None
+    assert not hasattr(common.distribution, "check_engine_epoch")

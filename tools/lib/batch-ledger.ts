@@ -1,7 +1,7 @@
 /**
  * batch-ledger.ts — 跑批逐局账本：断点续跑 + 错误局重跑（rollout 机制的 TS 提取）。
  *
- * 对齐 nn-training/rl/resume.py 的语义（completed_pairs + wver 匹配 + 跨进程续跑），
+ * 对齐 nn-training/biz/resume.py 的语义（completed_pairs + wver 匹配 + 跨进程续跑），
  * 供 m1-eval 及后续 TS 跑批工具复用（rollout 侧 python 已有同名机制——见
  * docs/goal-nn.progress.md §6 的能力映射表）。
  *

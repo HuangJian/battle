@@ -25,7 +25,7 @@ import pytest
 
 from common.protocol import JobFailedError
 from remote.hub_http import wait_job  # 所有者（S5 第五刀）；旧家 hub_client 仍转发此名
-from rl.loop_steps import TrainingSteps
+from trainer.loop_steps import TrainingSteps
 
 
 class _Stub(TrainingSteps):
@@ -106,7 +106,7 @@ def test_node_failure_in_remote_retryable_set() -> None:
     不在集合里就会冒泡到 `loop_core` 的通用兜底（连败即杀进程），专为远端失败写的
     停腿判决一行不写 —— x3-step 事故（`HubClientError` 缺席）的同一个坑。
     """
-    from rl.loop_steps import remote_retryable_exceptions
+    from trainer.loop_steps import remote_retryable_exceptions
 
     assert JobFailedError in remote_retryable_exceptions()
 
@@ -148,8 +148,8 @@ def test_jobfailed_marks_leg_dead_and_never_republishes(tmp_path: Path) -> None:
         （ROUND_RETRY）。下面用发布钩子把「有没有人又发了一次」变成可断言的事实。
     """
     import remote.hub_client as hc
-    from rl.loop_core import TrainingLoop
-    from rl.loop_round import ROUND_RETRY
+    from biz.loop_round import ROUND_RETRY
+    from trainer.loop_core import TrainingLoop
 
     st = _Stub(tmp_path)
     err = JobFailedError("job 43a4eb01cf9fe35c 失败: BadZipFile[kind=ProtocolError]", kind="ProtocolError")

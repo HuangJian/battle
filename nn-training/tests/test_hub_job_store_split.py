@@ -1,4 +1,4 @@
-"""拆分的**契约守卫**：`_JobStore` 的六个域混入永住 `remote/hub/store_*.py`（S4 第十四刀，2026-09-24）。
+"""拆分的**契约守卫**：`_JobStore` 的六个域混入永住 `hub/store_*.py`（S4 第十四刀，2026-09-24）。
 
 > **S4 第十五刀补记**：第十四刀只搬了**六个混入**，组合类 `_JobStore` 还留在 `hub_server.py`；
 > 第十五刀（`_HubQueue` 拆分）把组合类与鉴权原语一起下沉到 `hub/store.py` / `hub/auth.py`。
@@ -7,7 +7,7 @@
 
 ## 这一刀切了什么
 
-`remote/hub_server.py` 3017 → 2072 行：`_JobStore`（1002 行 / 49 方法）按**域**拆成六个混入
+`hub/server.py` 3017 → 2072 行：`_JobStore`（1002 行 / 49 方法）按**域**拆成六个混入
 （2026-09-25 并入 `origin/goal-nn` 后 `store_offline` 多了两条课程侧落位方法 ⇒ 域方法 49 个、
 含组合类的两个共 51 个），
 组合类只留 `__init__` / `note_worker` 与**进程级状态**：
@@ -60,18 +60,18 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import remote.hub.store_leases as leases_mod
-import remote.hub.store_ledger as ledger_mod
-import remote.hub.store_offline as offline_mod
-import remote.hub.store_results as results_mod
-import remote.hub.store_scheduling as scheduling_mod
-import remote.hub.store_wire as wire_mod
-from remote import hub_server as hs
+import hub.store_leases as leases_mod
+import hub.store_ledger as ledger_mod
+import hub.store_offline as offline_mod
+import hub.store_results as results_mod
+import hub.store_scheduling as scheduling_mod
+import hub.store_wire as wire_mod
+from hub import server as hs
 from tests.helpers import remote_dag as dag
 
 NN_ROOT = ROOT
-HUB_DIR = NN_ROOT / "remote" / "hub"
-HUB_SERVER = NN_ROOT / "remote" / "hub_server.py"
+HUB_DIR = NN_ROOT / "hub"
+HUB_SERVER = NN_ROOT / "hub" / "server.py"
 #: 组合类与鉴权原语的**新家**（S4 第十五刀从 `hub_server.py` 搬出）。本文件原先一律读
 #: `HUB_SERVER` 取 `_JobStore` / `_AuthGuard` 的类体；搬走之后读源码的那几条要改路
 #: ——「名字是契约，位置不是」对**对象**成立（`hs._JobStore` 仍可解析），对**源码文本**不成立。
@@ -182,35 +182,39 @@ PROCESS_STATE = ("halt_workers", "_workers")
 #: 六个混入 + 两个「搬出后新增的邻居」允许的仓内依赖（多一个就说明又搬漏/搬多了）。
 ALLOWED_IMPORTS = {
     # 鉴权原语（S4 第十五刀）：只靠标准库（`time` / `threading`）⇒ 零仓内依赖。
-    "remote.hub.auth": set(),
+    "hub.auth": set(),
     # 组合类的**新家**（S4 第十五刀）：六个混入 + 鉴权原语，全是向下。
-    "remote.hub.store": {
-        "remote.hub.auth",
-        "remote.hub.store_ledger",
-        "remote.hub.store_leases",
-        "remote.hub.store_offline",
-        "remote.hub.store_results",
-        "remote.hub.store_scheduling",
-        "remote.hub.store_wire",
+    "hub.store": {
+        "hub.auth",
+        "hub.store_ledger",
+        "hub.store_leases",
+        "hub.store_offline",
+        "hub.store_results",
+        "hub.store_scheduling",
+        "hub.store_wire",
     },
-    "remote.hub.store_ledger": {"common.protocol"},
-    "remote.hub.store_wire": set(),
-    "remote.hub.store_scheduling": {"common.protocol"},
-    "remote.hub.store_leases": {"common.protocol"},
-    "remote.hub.store_results": {"common.protocol"},
-    "remote.hub.store_offline": {"common.fs", "common.protocol", "remote.artifacts"},
+    "hub.store_ledger": {"common.protocol"},
+    "hub.store_wire": set(),
+    "hub.store_scheduling": {"common.protocol"},
+    "hub.store_leases": {"common.protocol"},
+    "hub.store_results": {"common.protocol"},
+    "hub.store_offline": {"common.fs", "common.protocol", "remote.artifacts"},
 }
 
-#: ★ 点名豁免：允许碰哪些 `rl` 模块（缺省空 = 一个都不许）。
+#: ★ 点名登记：允许碰哪些**纯逻辑** `biz` 模块（缺省空 = 一个都不许）。
 #:
 #: 唯一一条是 `store_offline`：回传轮的**课程侧落位**（镜像 + 权重归档 + 活动权重指针）
-#: 要读课程 `.jsonc`（`rl.jsonc.strip_comments`）、要复用既有归档口径
-#: （`rl.archive.backup_weights`）。两者都是**纯逻辑**（stdlib-only、不达 `remote` ⇒
-#: `test_layering.RL_ORCHESTRATION` 里没有它们，不构成环），而且都是**延迟** import
-#: ——与 `queue_resume.merge_eval_rows → rl.eval_rows` 同一形状（那一条住
+#: 要读课程 `.jsonc`（`common.jsonc.strip_comments`）、要复用既有归档口径
+#: （`biz.archive.backup_weights`）。两者都是**纯逻辑**（stdlib-only、不达 `remote` ⇒
+#: `test_layering.TRAINER_ORCHESTRATION` 里没有它们，不构成环），而且都是**延迟** import
+#: ——与 `queue_resume.merge_eval_rows → biz.eval_rows` 同一形状（那一条住
 #: `test_hub_queue_split.py`，因为它只涉及队列侧一个混入）。多一个名字就是多一条未论证的边。
-ALLOWED_RL: dict[str, set[str]] = {
-    "remote.hub.store_offline": {"rl.archive", "rl.jsonc"},
+#:
+#: 2026-09-30（刀 4）：这张表原名 `ALLOWED_RL`（口径 = 「允许碰哪些 `rl` 模块」）—— 它列的
+#: 从来就是**纯逻辑**，而纯逻辑现在有自己的名字（`biz/`）。编排态 `trainer/` 则是**零**豁免
+#: （`assert_remote_module` 的 ③ 现在把两件事分开断言），名字跟着语义走。
+ALLOWED_BIZ: dict[str, set[str]] = {
+    "hub.store_offline": {"biz.archive", "common.jsonc"},
 }
 
 
@@ -348,7 +352,7 @@ def test_the_moved_class_constants_stay_reachable_through_the_mro() -> None:
     assert hs._JobStore.RESUME_PARTS == ("weights.json", "opt.tar", "row.json")
     assert hs._JobStore.BC_EPOCH_BODY_MAX == 4 * 1024 * 1024
     assert hs._JobStore.BC_RESUME_NAME == "bc-resume.json"
-    # 熔断阈值与 ClaimOutcome 也随租约簇搬走，但 `remote.hub_server` 仍是取名字的入口
+    # 熔断阈值与 ClaimOutcome 也随租约簇搬走，但 `hub.server` 仍是取名字的入口
     assert hs.FREEZE_AFTER_RECLAIMS == leases_mod.FREEZE_AFTER_RECLAIMS == 3
     assert hs.ClaimOutcome is leases_mod.ClaimOutcome
     assert hs._JobStore.BC_EPOCH_BODY_MAX == hs._HubQueue.BC_EPOCH_BODY_MAX
@@ -476,20 +480,20 @@ def test_the_mixins_only_import_downward() -> None:
     """六个混入（+ `hub.auth` / `hub.store`）的仓内依赖是登记过的那些（多一个就说明搬漏/搬多了）。"""
     for mod, allowed in ALLOWED_IMPORTS.items():
         dag.assert_remote_module(
-            mod, allowed_project_imports=allowed, allowed_rl=ALLOWED_RL.get(mod, set())
+            mod, allowed_project_imports=allowed, allowed_biz=ALLOWED_BIZ.get(mod, set())
         )
 
 
 def test_the_composed_class_moved_below_the_mixins() -> None:
     """★ 第十五刀的使能缝：组合类的家必须在六个混入**上面**、在宿主**下面**。
 
-    这是「下游要构造/注解 `_JobStore`，而 `remote/hub/*` 不得 import `hub_server`」那条约束的
+    这是「下游要构造/注解 `_JobStore`，而 `hub/*` 不得 import `hub_server`」那条约束的
     机械化形式——若哪天有人把 `_JobStore` 搬回 `hub_server`，层号算术当场对不上。
     """
     for domain in DOMAINS:
-        assert dag.LAYERS[f"remote.hub.{domain}"] < dag.LAYERS["remote.hub.store"], domain
-    assert dag.LAYERS["remote.hub.auth"] < dag.LAYERS["remote.hub.store"]
-    assert dag.LAYERS["remote.hub.store"] < dag.LAYERS[hs.__name__]
+        assert dag.LAYERS[f"hub.{domain}"] < dag.LAYERS["hub.store"], domain
+    assert dag.LAYERS["hub.auth"] < dag.LAYERS["hub.store"]
+    assert dag.LAYERS["hub.store"] < dag.LAYERS[hs.__name__]
     # 组合类的类体只剩三样：docstring · 两个成员 · 零个「域」方法
     body = _cls(_tree(STORE_MOD), "_JobStore").body
     kinds = [
@@ -500,7 +504,7 @@ def test_the_composed_class_moved_below_the_mixins() -> None:
 
 def test_the_mixins_never_import_each_other() -> None:
     """★ 跨域调用**一律经 `self`**：混入之间零 import（有边就不是「一个对象一把锁」了）。"""
-    siblings = {f"remote.hub.{d}" for d in DOMAINS}
+    siblings = {f"hub.{d}" for d in DOMAINS}
     for domain in DOMAINS:
         tree = _tree(HUB_DIR / f"{domain}.py")
         got = set()
@@ -520,11 +524,11 @@ def test_the_layers_match_the_ledger() -> None:
     """层号是算出来的：五个只靠协议层（L0），`store_offline` 另需 `artifacts` ⇒ L1，全在宿主下面。"""
     host_key = hs.__name__  # 不写带引号的组装模块名（`test_subproc_util` 的 spawn marker）
     for domain in DOMAINS:
-        lv = dag.LAYERS[f"remote.hub.{domain}"]
+        lv = dag.LAYERS[f"hub.{domain}"]
         assert lv < dag.LAYERS[host_key], domain
-    assert dag.LAYERS["remote.hub.store_offline"] == 1
+    assert dag.LAYERS["hub.store_offline"] == 1
     for domain in (*STATEFUL, "store_results"):
-        assert dag.LAYERS[f"remote.hub.{domain}"] == 0, domain
+        assert dag.LAYERS[f"hub.{domain}"] == 0, domain
 
 
 def test_the_offline_writer_moved_with_its_only_caller() -> None:

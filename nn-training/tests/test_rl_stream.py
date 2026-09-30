@@ -1,7 +1,7 @@
-"""rl/stream.py — wave-params and chunking pure-logic tests."""
+"""trainer/stream.py — wave-params and chunking pure-logic tests."""
 from __future__ import annotations
 
-from rl.stream import wave_params
+from trainer.stream import wave_params
 
 
 def test_wave_params_normal() -> None:

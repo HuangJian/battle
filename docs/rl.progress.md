@@ -12,12 +12,12 @@
 > 决策全文 → `DECISIONS.md` §2026-09-10-course-exit-gates。
 >
 > **R1 门槛进代码（M0+M1，全绿）**
-> - `rl/config.py`：`GateTeacher` / `GateRule` / `GatesSpec`（解析期强校验 §3.4 全 8 条；
+> - `biz/config.py`：`GateTeacher` / `GateRule` / `GatesSpec`（解析期强校验 §3.4 全 8 条；
 >   `*_frac` ∈[0,1] 与 `*_rel` ≥0 分家——§3.2 示例的 `max_phits_rel: 1.5` 本就是相对倍数）。
-> - **新增 `rl/gate_check.py`**：纯函数求值器 `evaluate(course, trend_rows, health, budget, now=None)`，
+> - **新增 `biz/gate_check.py`**：纯函数求值器 `evaluate(course, trend_rows, health, budget, now=None)`，
 >   9 种 kind + lattice `override>ABORT>PAUSE>STOP>REMEDIATE>ADVANCE>HOLD` + sustain 去重
 >   （按 `(course_fp, wver)`：同 wver 重跑不虚增连击）+ 薄壳 CLI（dry-run / 重放，exit 码 0/10/20/30/40/50）。
->   禁 torch/numpy（单测在子进程断言；`rl.config` 延迟导入以避开 numpy 链）。
+>   禁 torch/numpy（单测在子进程断言；`biz.config` 延迟导入以避开 numpy 链）。
 > - `loop_guards._gate` = 第四守卫（每 eval_every 调一次），判决写 `gate_verdict` 事件；
 >   `_breaker` 熔断**同写 ABORT 行**（此前执行面在真 ABORT 场景读不到判决）＋补 NaN/inf 检测
 >   （NaN 与阈值比较恒 False → 旧代码永不熔断）。

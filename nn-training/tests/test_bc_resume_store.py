@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from remote.hub_server import _JobStore
+from hub.server import _JobStore
 
 
 def _clock(t: float = 1000.0):

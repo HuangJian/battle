@@ -9,8 +9,8 @@ agent 的 `/v1/task` 用 `weightsOf(kind, wver)` 在**全量 sha** 的桶里精�
 本用例按 AST 钉住 `batch_runner.py` 的 wver 实参：不得是 `key16` 变量，也不得是
 切片表达式（`[:16]` 一类）。新增调用点时同样受约束。
 
-2026-09-25（S27/B3）：`BatchEvalRunner` 从 `rl/batch_eval.py` 纯搬到
-`rl/batch_runner.py`，wver 调用点随之移家 ⇒ SRC 跟着搬家（搬走的是调用点本身，
+2026-09-25（S27/B3）：`BatchEvalRunner` 从 `trainer/batch_eval.py` 纯搬到
+`trainer/batch_runner.py`，wver 调用点随之移家 ⇒ SRC 跟着搬家（搬走的是调用点本身，
 不是「另找一个文件替代」）。
 """
 
@@ -19,7 +19,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-SRC = Path(__file__).resolve().parents[1] / "rl" / "batch_runner.py"
+SRC = Path(__file__).resolve().parents[1] / "trainer" / "batch_runner.py"
 
 #: 需要 wver 身份的调用点（远端取任务 / 本机直跑 / manifest 对账）。
 WVER_CALLS = ("fetch_task", "run_local_eval_game")

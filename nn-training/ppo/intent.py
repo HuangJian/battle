@@ -74,7 +74,7 @@ LR = 1e-4  # 低于 per-tick 的 3e-4：强策略微调，慢而稳（B′ 逐�
 MAX_GRAD_NORM = 1.0
 INTENT_DIM = 8
 # target_kl 早停：单 epoch 平均近似 KL 超此值即停止剩余 epoch。参照现有 per-tick RL
-# 健康稳态 kl≈0.045-0.054/iter（rl/breaker.py，熔断 0.15×连续 3）——per-epoch 预算取 0.1
+# 健康稳态 kl≈0.045-0.054/iter（biz/breaker.py，熔断 0.15×连续 3）——per-epoch 预算取 0.1
 # （2026-08-27 §30 改：0.1 → **0.04**。意图 8 类小空间 ~280 步/轮，单 epoch KL=0.101 的
 # 大更新就把策略从多样（熵 0.346）推到近单点（0.098）——too coarse。0.04 把单轮漂移
 # 压到意图熵正则（0.08）能拉回的幅度内）
@@ -148,7 +148,7 @@ def compute_gae_variable(
 
 
 def load_episode_from_shard(dirpath: str) -> dict | None:
-    """流式 backend 接口（rl/stream.py）：意图 shard → 可训练 episode（adv/ret 未归一）。
+    """流式 backend 接口（trainer/stream.py）：意图 shard → 可训练 episode（adv/ret 未归一）。
 
     与 ppo.load_episode_from_shard 同签名——run_rollout_stream 以 backend 参数复用
     同一套流式基础设施（意图步变步长 GAE + inject/dt 字段）。"""
@@ -367,8 +367,8 @@ def ppo_update_intent(
     return agg
 
 
-# ---- stream backend 接口别名（rl/stream.py 的 backend.update / load_episodes / _ppo_load）----
-# ---- stream backend 接口别名（rl/stream.py 的 backend.update / load_episodes）----
+# ---- stream backend 接口别名（trainer/stream.py 的 backend.update / load_episodes / _ppo_load）----
+# ---- stream backend 接口别名（trainer/stream.py 的 backend.update / load_episodes）----
 # 意图 RL 与 per-tick RL 共用同一套流式基础设施；checkpoint 原语由 ppo_common
 # 提供（顶部 import _ppo_save/_ppo_load）。ppo 不依赖本模块，无环。
 update = ppo_update_intent

@@ -1,16 +1,16 @@
-"""拆分的**契约守卫**：shard 清单 + 结果容器校验 + 唯一落盘出口永住 `dist_shard.py`（S5 第十一刀，2026-09-27）。
+"""拆分的**契约守卫**：shard 清单 + 结果容器校验 + 唯一落盘出口永住 `common/shard.py`（S5 第十一刀，2026-09-27）。
 
-`dist_common.py` **1503 → 1373 行**；搬走**七段跨度共 7 名（逐字节不动）**：
+`common/distribution.py` **1503 → 1373 行**；搬走**七段跨度共 7 名（逐字节不动）**：
 `SHARD_FILES` · `INTENT_SHARD_FILES` · `BC_SHARD_FILES` · `BC_COLLECTOR` ·
 `_shard_files_for` · `validate_result` · `write_shard`。
 
 本文件钉五件事：
 
-1. **定义唯一**——搬走名不许在 `dist_common.py` 里再实现一遍；
-2. **依赖面闭集（且无环）**——只准 stdlib（`base64`/`json`/`os`）；**不** import `dist_common`
+1. **定义唯一**——搬走名不许在 `common/distribution.py` 里再实现一遍；
+2. **依赖面闭集（且无环）**——只准 stdlib（`base64`/`json`/`os`）；**不** import `common.distribution`
    （否则与门面成环）；
 3. **不得碰上层包**（L0：要能随 code.zip 解到云机上）；
-4. **门面对象恒等**——`dist_common.X is dist_shard.X`（历史调用点一行不改）；
+4. **门面对象恒等**——`common.distribution.X is common.shard.X`（历史调用点一行不改）；
 5. **契约语义没变**（功能性）：三份清单 = 与 TS 侧同表的双语契约 · collector/marker 三态选择 ·
    七条拒收理由 + BC 败局跳过分支 · 落盘只写清单内文件 + `manifest.json`（indent=2）·
    v1 base64 / v2 bytes 双模。
@@ -28,12 +28,12 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import dist_common as common_mod
-import dist_shard as shard_mod
+import common.distribution as common_mod
+import common.shard as shard_mod
 from tests.helpers import source_scan
 
-SHARD_FILE = ROOT / "dist_shard.py"
-COMMON_FILE = ROOT / "dist_common.py"
+SHARD_FILE = ROOT / "common/shard.py"
+COMMON_FILE = ROOT / "common/distribution.py"
 
 MOVED_NAMES = {
     "SHARD_FILES",
@@ -78,35 +78,35 @@ def test_moved_names_are_defined_in_dist_shard_and_not_in_dist_common() -> None:
     """定义唯一：搬走的名字只在新家实现（原家只留门面转发）。"""
     assert _defined(SHARD_FILE) >= MOVED_NAMES, sorted(MOVED_NAMES - _defined(SHARD_FILE))
     leftovers = MOVED_NAMES & _defined(COMMON_FILE)
-    assert leftovers == set(), f"dist_common.py 里仍在实现这些名字（应只做转发）：{sorted(leftovers)}"
+    assert leftovers == set(), f"common/distribution.py 里仍在实现这些名字（应只做转发）：{sorted(leftovers)}"
 
 
 def test_shard_import_surface_is_closed_and_acyclic() -> None:
-    """★ 依赖面闭集：stdlib-only；**不得** import `dist_common`（门面反向 ⇒ 成环）。"""
+    """★ 依赖面闭集：stdlib-only；**不得** import `common.distribution`（门面反向 ⇒ 成环）。"""
     mods = _imported_modules(SHARD_FILE)
     extra = sorted(mods - ALLOWED_IMPORTS)
-    assert extra == [], f"dist_shard.py 引入了允许面之外的依赖：{extra}"
-    assert "dist_common" not in mods, "dist_shard 反向 import 了门面 ⇒ 顶层互引成环"
+    assert extra == [], f"common/shard.py 引入了允许面之外的依赖：{extra}"
+    assert "common.distribution" not in mods, "common.shard 反向 import 了门面 ⇒ 顶层互引成环"
 
 
 def test_dist_shard_does_not_touch_an_upper_layer() -> None:
     """L0 是叶子：不得 import 上层包。"""
-    banned = {"torch", "numpy", "rl", "remote", "models", "data", "train", "dist_common"}
+    banned = {"torch", "numpy", "trainer", "biz", "remote", "models", "data", "train", "common.distribution"}
     tops = {m.split(".")[0] for m in _imported_modules(SHARD_FILE)}
     hit = sorted(tops & banned)
-    assert hit == [], f"dist_shard 依赖了上层：{hit}"
+    assert hit == [], f"common.shard 依赖了上层：{hit}"
 
 
 def test_dist_common_forwards_every_moved_name() -> None:
-    """门面：每个搬走名都还在 `dist_common`，且与新家是**同一个对象**；源码里是 `X as X`。"""
+    """门面：每个搬走名都还在 `common.distribution`，且与新家是**同一个对象**；源码里是 `X as X`。"""
     src = source_scan.read_text(str(COMMON_FILE))
-    assert "from dist_shard import (" in src
+    assert "from common.shard import (" in src
     for name in sorted(MOVED_NAMES):
-        assert hasattr(common_mod, name), f"dist_common 丢了转发名 {name}"
+        assert hasattr(common_mod, name), f"common.distribution 丢了转发名 {name}"
         assert getattr(common_mod, name) is getattr(shard_mod, name), (
-            f"dist_common.{name} 不是 dist_shard.{name}（转发成了副本）"
+            f"common.distribution.{name} 不是 common.shard.{name}（转发成了副本）"
         )
-        assert f"    {name} as {name},\n" in src, f"dist_common 的转发不是自别名形态：{name}"
+        assert f"    {name} as {name},\n" in src, f"common.distribution 的转发不是自别名形态：{name}"
 
 
 # ─────────────────────── ⑤ 契约语义没变（功能性） ───────────────────────

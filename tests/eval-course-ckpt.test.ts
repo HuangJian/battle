@@ -2,8 +2,9 @@
  * eval-course-ckpt.test.ts ↔ tools/sim/eval-course-ckpt.ts + tools/lib/hybrid-batch.ts
  *
  * 2026-09-19 重构后：节点通信/重试/探测全部搬去 Python（`nn-training/eval_course_once.py`
- * → `rl.batch_eval.BatchEvalRunner`），本文件只覆盖 TS 侧仍然拥有的东西：
- *   * 课程 JSONC 解析（与 Python `rl/jsonc.py` 同口径，两端都读同一批关卡文件）
+ * → `trainer.batch_eval.BatchEvalRunner`），本文件只覆盖 TS 侧仍然拥有的东西：
+ *   * 课程 JSONC 解析（与 Python `common/jsonc.py` 同口径 —— 2026-09-30 刀 2 从 `rl/jsonc.py`
+ *     下沉进 `common/`；两端都读同一批关卡文件）
  *   * `--weights label=path` 解析、spec 构造（本机份额/noNodes/dist 配置如何透传）
  *   * `TailRaceBatch` 的纯逻辑（Python 队列的 TS 镜像）
  */

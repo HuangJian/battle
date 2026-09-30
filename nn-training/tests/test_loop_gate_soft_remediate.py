@@ -25,7 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.loop_guards import TrainingGuards
+from trainer.loop_guards import TrainingGuards
 
 
 def _fake(hub: str = "http://hub", token: str = "tok", jsonl: Path | None = None) -> TrainingGuards:
@@ -70,7 +70,7 @@ def halt_calls(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
         calls.append(halt)
         return True
 
-    monkeypatch.setattr("rl.loop_guards.set_cloud_halt", _fake_set, raising=True)
+    monkeypatch.setattr("trainer.loop_guards.set_cloud_halt", _fake_set, raising=True)
     return calls
 
 

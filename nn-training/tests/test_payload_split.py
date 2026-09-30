@@ -109,7 +109,7 @@ def test_payload_import_surface_is_closed_and_acyclic() -> None:
 
 def test_payload_does_not_touch_an_upper_layer() -> None:
     """`common/` 是 L0：不得 import 上层包。"""
-    banned = {"torch", "numpy", "rl", "remote", "models", "data", "train", "dist_common"}
+    banned = {"torch", "numpy", "trainer", "biz", "remote", "models", "data", "train", "common.distribution"}
     tops = {m.split(".")[0] for m in _imported_modules(PAYLOAD_FILE)}
     hit = sorted(tops & banned)
     assert hit == [], f"payload 依赖了上层：{hit}"

@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
 
 @pytest.fixture(autouse=True)
 def _no_serve_pool(monkeypatch: pytest.MonkeyPatch) -> None:
-    """e2e 层不开本机长驻池（`--serve` 会起**真 bun** 常驻 worker，见 `remote/serve_pool.py`）。
+    """e2e 层不开本机长驻池（`--serve` 会起**真 bun** 常驻 worker，见 `worker/serve_pool.py`）。
 
     本层是 hermetic 的（FakeServer + tmp 落盘，不需要 bun；各用例把 `run_local_rollout`
     打成桩），所以 `make_local_pool` 直接返回 None、本机腿回到逐局 spawn（正是打桩的那条路）。

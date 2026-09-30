@@ -19,7 +19,7 @@
  *   - `cleared` = 全歼率口径（方案 §2.1「全歼率」门）：敌人全灭即算，不受 BONUS TIME
  *     窗口截断影响。分布式 eval 的门判定与巡检必须读它（P0-1/§15）。
  *
- * codeHash：2026-08-31 起本文件入 dist 哈希集（dist_common.py + sampler-agent.ts 双语）——
+ * codeHash：2026-08-31 起本文件入 dist 哈希集（common/distribution.py + sampler-agent.ts 双语）——
  * 评估报告 schema 一旦变更（如 cleared），节点必须随新代码同步，否则本地/节点混合数据
  * 不可比。早先"不在哈希集内，旧 agent 忽略 eval 任务"的灰度说明已过时。
  *
@@ -400,7 +400,7 @@ export function runEvalOne(
   playerLevelOverride: number | null = null,
   /** 非空 = 额外把整局输入录成 .replay 写入该目录（文件名 canonical；评估语义零变化
    *  ——recorder 被动采样，不进仿真循环。训练控制台「导出 replay」用，见
-   *  rl/eval_replays_once.py）。 */
+   *  biz/eval_replays_once.py）。 */
   replayDir = '',
   /** replay 文件名/元数据用的**原始关卡 id**（--stage 原值）：本参数 stageIdx 对
    *  自定义关/arena 传的是 loadIndex（0），文件名须带账本口径的原始 id 才能映射回

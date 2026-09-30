@@ -5609,3 +5609,346 @@ torch-在-fork-前已有 import 的面未验证）。
 
 —— 全文（判据 / 四个消费面 / 已知代价 / 接线守卫与测试 / 门禁读数）→ `docs/nn/training-stack.md` §26
 （agent 侧契约与真机配方 → `docs/nn/runtime-opt.md` §29）
+
+## §2026-09-30-goalnn-nn-training-module-reorg（2026-09-30，nn-training 按角色重组为六包：`common/biz/worker/remote/hub/trainer`；第一刀 hub 出包）
+
+**决策**（用户 2026-09-29 拍板口径，2026-09-30 追加 Q5 并落地第一刀）：把 `nn-training/` 的文件从
+「按历史拆分动机散落」重排为**六个按角色命名的包**，并把依赖方向写成**可机器校验的偏序**：
+
+```
+L0 common/                 stdlib-only（含 platform_utils / pid_probe / schema / dist_* / jsonc）
+L1 biz/ · models/ ppo/ data/ train/ scripts/     纯逻辑：领域判据（biz）与**算法栈**（保持顶层并列）
+L2 worker/                 iter_rollout · serve_pool（节点侧执行体）
+L3 remote/                 跨端线路 + 云引导 + 云 worker
+L4 hub/ · trainer/         hub 服务端 / 本机训练编排（+ 根入口薄壳）
+```
+
+**第一刀（本次已落地）**：hub 服务端从 `remote/hub/` + `remote/hub_server.py` 出包为**顶层 `hub/`**，
+入口从 `-m remote.hub_server` 改为 `-m hub.server`；三个「站在门面上的运维工具」（`smoke_loopback` /
+`tunnel_ab_probe` / `backfill_offline`）随刀搬进 `hub/`；`remote/hub_client.py` / `remote/hub_http.py`
+**不动**（它们是客户端侧线路，不是服务端）。
+
+**为什么**：① `remote/` 原来是一只大伞包（传输 + 云机执行体 + hub 服务端三件事一包），
+「这段代码在哪个角色上跑、能依赖谁」读不出来；② 分层守卫（`tests/test_layering.py` 三层 +
+`tests/helpers/remote_dag.py` 的秩账本）已经存在，但 `remote/hub/` 把服务端藏在传输包下面，
+「hub 不许依赖 trainer」这类判据写不出来；③ 出包后 hub 与 trainer 成为**同层对端**，
+「互不 import」第一次成为可断言的性质（实测零条）。
+
+**被否决**：
+
+- **Q2 原答复「算法栈并入 trainer/」**（用户先选，审计后改判 Q5「保持顶层并列」）：实测
+  `remote/bc_job.py` 与 `remote/train_core.py` **就是云机 worker 的训练/评估执行体**，import
+  `ppo.engine` / `ppo.common` / `ppo.goal` / `ppo.intent` / `data.weights_io` / `train.bc` ⇒
+  算法栈进 L4 会立刻长出 **9 条 `remote → trainer` 向上边**（外加 2 条 `biz → trainer`）；
+  另有硬编码跨项目路径 `nn-training/data/state-init-bank`（`tools/sim/build-state-init-bank.ts`）与
+  `nn-training/scripts/regen_v7_ts_oracle.py`（`tools/diag/v7-phi-oracle.ts`），且 `data/` 同时是算法包
+  与数据目录 ⇒ 搬它等于顺手动数据目录与 TS 硬编码路径。
+- **`worker/` 与 `remote/` 并列（同为 L3）**：`serve_pool` / `iter_rollout` 实测零 `remote.*` 依赖，
+  却同时被云机侧（`remote/offline_eval.py`、`remote/worker.py`）与 trainer 侧（`rl/dispatch.py`、
+  `rl/queue_local.py`）引用 ⇒ 放在 `remote/` 之上会得到 4 条向上边；坐在它**下面**（L2）则四条全是
+  向下边、零豁免。
+- **`common/` 里 `dist_*` 保留前缀**：用户裁定**去前缀**（`dist_shard` → `common/shard.py` 等；
+  刀 2 落地），理由是同包内再带 `dist_` 只重复「分布式」这个已由包名隐含的词。
+- **`tests/` 目录同步重组**：用户裁定暂不动（目录不重排，但里面**写死模块路径/点分名的断言必须随刀改**）。
+
+**本刀踩到並记档的四个坑**（都是「测试绿也会静默瞎掉」那一类）：
+
+1. **`remote_dag` 的 AST 门禁写的是 `startswith("remote")`** ⇒ hub 出包后 `from hub.http_face import …`
+   被整支跳过，hub 内部边**一条都不进账本**（症状：层号对账报 `hub.boot` 应为 L4）；修成
+   `ledger_package()`（同时覆盖 `remote` / `hub`），账本扩成**一账两包**（不另开一份会漂的名单）。
+2. **按叶子名判据会被标准库撞车**：守卫原来用叶子 `"hub_server"` 判「混入不得反向 import 组装模块」；
+   改名后叶子是 `"server"`，而 `from http.server import ThreadingHTTPServer` 的叶子也是 `server` ⇒
+   `hub/boot.py` 被误判成环。改成**点分全名**（`hub.server`）判据。
+3. **`test_subproc_util` 的 spawn 标记要跟着改形**：入口改名后 `"hub.server"` 不再只出现在 argv 里
+   （账本的字典键 `"hub.server": 7`、守卫里的名字比较都带这个串）⇒ 拿旧标记会把两个**不起服务**的
+   守卫误判成 spawner；标记改成**带尾逗号**的 argv 元素形态（那正是「它是一个 argv 列表元素」的形状）。
+4. **⚠ 搬家会静默改掉 `__file__` 深度算术**：`hub/store_offline.py` 的 `REPO_ROOT = parents[3]`
+   在原 `remote/hub/` 下是对的，搬到 `hub/` 后少一层 ⇒ REPO_ROOT 指到仓库的**父目录**（不报错、
+   只是路径全错，由工装用例当场抓住）。以后搬 python 文件必须 grep `parents[` / `__file__`。
+
+**违反后果**：① 保留 `remote/hub/` 或留一个转发壳 ⇒ 两套名字长期共存，「谁是真家」再次失守
+（本仓第十刀起就定过「名字是契约、位置不是」，出包是这条规矩第一次真正被执行）；② 在 `hub/*` 里
+import `hub.server` ⇒ 与「`server` import 实现簇」成环，本仓对环只有「下沉共同依赖」与「参数注入」
+两种处理（`DEFERRED_CYCLES` 至今为空）；③ 忘改 `pyproject.toml` 的 `packages.find` ⇒ 装机环境
+（`pip install -e .`）下 `import hub.*` 直接 ImportError，而测试靠 conftest 的 `sys.path` **看不出来**。
+
+—— 全文（六桶判据 / 完整文件→包映射表 / 契约与守卫迁移清单 / 五刀刀序 / 反探针）
+→ `plan/nn-training-module-reorg.plan.md`；目标分层审计器 → `nn-training/tmp/reorg_audit.py`
+（AST 扫全部 import 边，当前违规边为 **0**）。
+
+---
+
+## §2026-09-30-goalnn-nn-training-l0-consolidation（2026-09-30，刀 2：`common/` 收口为**唯一 L0**；`dist_*` 去前缀）
+
+**决策**：把散在 `nn-training/` 根下的 11 个 L0 模块全部收进 `common/`，其中三个 `dist_*` 去前缀：
+
+| 旧家 | 新家 | 备注 |
+|---|---|---|
+| 根下 `platform_utils.py` / `pid_probe.py` / `schema.py` / `log_bundle.py` | `common/{platform_utils,pid_probe,schema,log_bundle}.py` | 形状从「顶层模块」变成「`common` 包的子模块」 |
+| 根下 `dist_common.py` / `dist_shard.py` / `dist_weights_ledger.py` | `common/{distribution,shard,weights_ledger}.py` | **去 `dist_` 前缀**（用户裁定） |
+| `rl/jsonc.py` | `common/jsonc.py` | `rl/` 是上层，L0 的解析器不该住那 |
+| `remote/net_http.py` / `remote/_instance_lock.py` / `remote/_port_guard.py` | `common/{net_http,instance_lock,port_guard}.py` | 后两个**去下划线私有前缀**（同包内本来就要用，`_` 名实不符） |
+
+配套：`pyproject.toml` 的 `py-modules` **清空**（旧清单里那五个顶层单文件已不存在），`common*` 成为 L0 的唯一入口；
+`tests/test_layering.py` 新增两条机械守卫 —— `test_l0_top_level_single_files_are_gone_from_the_root`
+（根下不留旧名，且新家必须存在）与 `test_the_moved_modules_are_gone_from_remote`（`remote/` 不留旧家）。
+
+**为什么**：① L0 的定义是「stdlib-only、零上层依赖」，但它当时**散在根下**，只能靠「`NN_ROOT` 进 `sys.path`」
+被 import —— 「哪一层」这件事读不出来，`test_common_is_a_leaf_package` 也扫不到根下的文件；
+② 三个引导模块（`dist_common` 族）本来就与 `common/` 同层级、同依赖纪律，住一起才让「L0 = 一个包」这句话成立；
+③ `remote/` 里那两个下划线哨兵模块（单实例锁 / 端口守卫）**同时被 `hub/` 与根入口引用**，坐在 `remote/` 里是
+「下层依赖上层」，收到 L0 是唯一合法位置。
+
+**被否决**：
+
+- **保留旧名转发壳**：搬完在根下留 `dist_common.py` 那种「`from common.distribution import *`」壳，会让
+  「两处都能 import」长期共存 —— 本仓第十刀定的「名字是契约、位置不是」正是靠「删掉旧家」执行的。
+- **保留 `dist_` 前缀**：用户裁定去前缀（同包内 `dist_` 只是重复包名已隐含的词）。
+- **`schema` / `jsonc` 这类「通用词」不改名**：它们在 L0 里是**协议常量/解析器的唯一实现**，改名会牵动
+  TS 侧逐字镜像（`src/nn/obs-encoder.ts`、`dashboard/src/core/jsonc.ts`）与 fixture 文本，收益低于代价。
+
+**本刀踩到並记档的四个坑**（同样是「测试绿也会静默瞎掉」那一类）：
+
+1. **⚠ 文本通行证对「新名里含旧名」的四个模块重复加前缀**：`platform_utils` / `pid_probe` / `log_bundle` /
+   `schema` 的**新名里含着旧名**，AST 通行证先写成 `from common.platform_utils import …`，文本通行证接着又加一次
+   前缀 ⇒ `common.common.platform_utils`，文件路径形态则是 `common/common.log_bundle.py`（21 个文件 38 处，
+   含 `nn-training/README.md` 的模块树与 4 个测试里**真的读这个路径**的断言）。修正无歧义（`common/common.` → `common/`），
+   但必须有**零残留断言**才算完（两次补丁：`common.common.` / `common/common/`，再补 `common/common.<mod>.py`）。
+2. **⚠ 改名会把两类守卫的「名字口径」搅混** —— 这是本刀最隐蔽的一类。同一个名字在两种口径下写法不同：
+   *「模块路径」口径（import 闭集/账本）* 写 `common.distribution`；
+   *「绑定名」口径（`hasattr(mod, name)` / `ast.Name` 读 / `_module_globals`）* 写 `common`（因为
+   `import common.distribution` 绑定的名字就是 `common`）。
+   两者混着写出来的断言不是报错，而是**永真或永假**（`hasattr(m, "common.distribution")` 恒 False）。
+   本刀改了 6 处：`test_batch_plan_split` / `test_batch_runner_split` 的 `_top_imports`（改为**模块路径**口径）、
+   `test_loop_guards_split` 的 `_module_globals` + `PATCH_ANCHORS`（模块路径）、
+   `test_loop_export_split` 的 `GONE_FROM_STEPS`、`test_loop_transport_split` 的 `expect`（两者为**绑定名**口径）。
+3. **文本通行证会把「局部变量同名的属性访问」当模块引用**：`rl_config_schema.py` 里 `schema = load_schema()`
+   是**局部 dict**，`test_volume_e2e.py` 里 `self._srv.schema` 是**对象属性** —— 都被改成了 `common.schema.*`。
+   该类**mypy 抓得住**（`name-defined` / `attr-defined`），所以本刀的查错顺序是 mypy → 测试。
+4. **写死的**基名**被当成模块路径改**：`tests/test_dist_common_poll.py` 的 `definers_of()` 返回的是
+   `path.name`（**基名**），断言里写的 `"dist_common.py"` 被改成 `"common/distribution.py"` ⇒ 断言**永假**
+   （只有真跑才炸）。凡「拿文件名当期望值」的断言，改名时必须看它的生产者是拼接路径还是取 `name`。
+
+**环境备注（与本刀无关，已复现于 HEAD）**：venv 里的 ruff 是 0.16.6（`pyproject` 只要求 `>=0.6.0`，venv 比仓库
+上次格式化时新），`ruff format .` 会重排 **296 个无关文件**（已回退、**不得再跑**）；`ruff check .` 在 HEAD 上
+就已经报 `N999 tools/tpu-probe.py`（文件名带连字符，与内容无关）。本刀只跑 `ruff check --select I --fix`
+（50 个文件的 import 顺序，由改名强制），跑完 `ruff check .` 只剩那一条 N999。
+
+**违反后果**：① 在根下留旧名 ⇒ `test_l0_top_level_single_files_are_gone_from_the_root` 红（**已反探针验证**：
+把 `common/log_bundle.py` 放回根下，该守卫当场红）；② 把某个模块搬回 `remote/` ⇒
+`test_the_moved_modules_are_gone_from_remote` 红（同样反探针验证）；③ 忘改 `pyproject.toml` 的 `packages.find` /
+`py-modules` ⇒ 装机环境（`pip install -e .`）下 `import common.*` 直接 ImportError，而测试靠 conftest 的
+`sys.path` **看不出来**。
+
+—— 全文与剩余两刀（`biz/` · `trainer/`）的判据 → `plan/nn-training-module-reorg.plan.md`；
+刀 2 的普查/改写/修复/审计工具 → `nn-training/tmp/cut2_*.py`（一次性工具，全部带零残留断言）。
+
+---
+
+## §2026-09-30-goalnn-nn-training-worker-package（2026-09-30，刀 3：节点侧执行体出包为**顶层 `worker/`**，坐在 `remote/` **下面**）
+
+**决策**：`remote/iter_rollout.py` + `remote/serve_pool.py` → 顶层 **`worker/`** 包，位于 **L2**
+（`remote/` 是 L3、`hub/`/`trainer/` 是 L4）。**就这两个**：其余候选（`job_fs` / `job_lifecycle` /
+`job_round` / `download` / `wire` / `http`）按 Q1 判为云机专属，留 `remote/`。
+
+```
+L0 common/          ┐
+L1 biz/ · algo 栈   ├─ 向下依赖（严格：每条边 importer 层号 > imported）
+L2 worker/          │   ★ 本刀：serve_pool · iter_rollout
+L3 remote/          │   remote/worker.py → worker.iter_rollout（云 worker 用它）
+L4 hub/ · trainer/  ┘   remote/offline_eval.py → worker.serve_pool；rl/dispatch + rl/queue_local 也用它
+```
+
+**为什么坐在 `remote/` 下面（而不是并列）**：两模块实测**零 `remote.*` 依赖**（只靠 `common/`），
+却被三层引用 —— 云机侧（`remote/offline_eval.py`、`remote/worker.py`）与 trainer 侧
+（`rl/dispatch.py`、`rl/queue_local.py`，本机槽位的长驻池）。放 `remote/` 之上/并列会长出
+**4 条向上边**；坐下则四条全是向下边、**零豁免**。
+
+**为什么出包而不是留在 `remote/`**：出包后「这段代码在哪台机器上跑、能依赖谁」才读得出来；
+而且它们是 `remote/` 里唯一不依赖 `remote/` 的模块，留在包里是分层叙事里的一个假成员。
+
+**被否决**：
+
+- **把 `worker/` 与 `remote/` 并列（同为 L3）**：实测会得到 4 条向上边（见上）。
+- **允许 `worker → remote`**：方向反了 —— worker 是**下层**，合法方向是 `remote|hub|trainer → worker`。
+- **把 `worker → rl.reports` 当成违规而把 `reports.py` 划进 `trainer/`**：`rl/reports.py`
+  **不在** `RL_ORCHESTRATION` 里 ⇒ 按机械定义它归 `biz/`（L1），于是 `worker(L2) → biz(L1)`
+  是**合法向下边**。反过来把它当 `trainer/`（L4）会立刻把这条边变成向上边。
+- **给 `worker/` 另排一套层号**：层号是**拓扑秩**，必须跨包全局一致；另排一套等于把
+  「谁在谁上面」变成三份各自会漂的真相。做法是 `LEDGER_PACKAGES` + `package_roots()` 各加一项，
+  层号沿用（`worker.serve_pool`=0 · `worker.iter_rollout`=1）。
+
+**本刀踩到並记档的四个坑**：
+
+1. ⚠ **快照的语义会被搬包整批失效**：`_rl_reaching_remote()` 判的是「可达 `remote`」，
+   `serve_pool` 一走就一次失效 **14 个** `RL_ORCHESTRATION` 成员（它们只是把
+   `import remote.serve_pool` 写成 `import worker.serve_pool`，成员一个没变）。
+   正解是**扩判据**（「远端」= `remote` **或** `worker`），不是改清单 —— 改清单就等于把一次
+   机械搬家记成一次架构变更。
+2. ⚠ **`from <pkg> import a, b` 一条语句里一半留下、一半搬走**：
+   `tests/test_offline_eval_cloud.py` 的 `from remote import offline_eval, serve_pool` 必须**拆成两条**。
+   通配正则抓不到这个形状，靠 mypy（`Module "remote" has no attribute "serve_pool"`）抓到。
+3. ⚠ **合成用例的账本要跟着扩**：`test_remote_dag.py::_synth` 是把**每个** ledger 包目录都指向 tmp。
+   刀 1 漏了 `HUB_DIR` 会「被真包的边淹没」（静默），刀 3 漏了 `WORKER_DIR` 则当场 `KeyError`
+   —— 同一根因，两种症状。两刀都把教训写进了 `_synth` 的 docstring。
+4. **排序型断言会因目录名变序**：`test_common_layer.py` 的 `_defs_of("bun_version")` 比的是
+   **路径排序**：`remote/…` < `rl/…`（`e`<`l`），而 `worker/…` > `rl/…` ⇒ 期望列表要**重排**
+   （成员没变）。
+
+**违反后果**：① `worker/` 里 import `remote` / `hub` ⇒ 新守卫
+`test_worker_never_reaches_the_transport_the_hub_or_the_orchestration` 红（已反探针验证：塞一行
+`from remote import hub_client` 当场红）；② 把模块搬回 `remote/` ⇒
+`test_the_moved_modules_are_gone_from_remote` 红（已反探针）；③ 给 `worker/` 另排一套层号 ⇒
+`test_layer_numbers_are_dense_and_meaningful` 报空洞；④ 忘改 `pyproject.toml` 的 `packages.find`
+⇒ 装机环境（`pip install -e .`）下 `from worker import serve_pool` 直接 ImportError，
+而测试靠 conftest 的 `sys.path` **看不出来**。
+
+—— 全文与剩余两刀 → `plan/nn-training-module-reorg.plan.md`；审计器（已扩成**三源**扫描：
+`remote` + `hub` + `worker`）→ `nn-training/tmp/reorg_audit.py`，向上边 **0**；
+改写器 → `nn-training/tmp/cut3_worker_rewrite.py`（有序规则 + 每条实中数 + 零残留断言）。
+
+## §2026-09-30-goalnn-nn-training-biz-package（2026-09-30，刀 4：`rl/` 拆出**顶层 `biz/`** —— 纯逻辑与编排分家）
+
+**决策**：`rl/` 里**不达传输/执行面**的 **64 个模块** → 顶层 **`biz/`** 包（L1，与
+`models/` `ppo/` `data/` `train/` `scripts/` 并列）。判据**不是手感**，是刀 3 之前就存在的
+那张机械快照：
+
+```
+biz/<mod>.py  ⇔  <mod> ∈ rl/*.py − RL_ORCHESTRATION
+RL_ORCHESTRATION = 「rl 中直接或经 rl 内部传递可达 remote|worker 的模块」
+```
+
+分家后 `rl/` **只剩编排**（37 个模块，每个都可达 `remote|worker`），「谁是纯逻辑」在名字上
+直接看得见 —— 不再需要逐个读 import。
+
+**为什么必须拆**（而不是「rl 一个包也挺好」）：同一个包名住着两种东西时**依赖方向读不出来**。
+`rl/queue.py`（编排，import `remote`）与 `rl/course.py`（纯逻辑，只碰 stdlib）看上去是同一层；
+刀 3 出包 `worker/` 时已经暴露过一次（`rl.reports` 是**向下**边、`rl.queue_local` 是**向上**边，
+同名前缀分不出来）。拆完：`biz` 零上层依赖（可被云机 worker / hub / 编排三层安全引用），
+`rl` 每个模块都在快照里。
+
+**为什么 `biz` 是 L1 而不是并入 `trainer/`（用户 Q2 的改判，§8-Q5 已记）**：
+`remote/bc_job.py` 与 `remote/train_core.py`（**云 worker 的训练/评估体**）import
+`ppo.*` / `data.weights_io` / `train.bc`；`rl/model_build.py`（纯逻辑）import `models.student` +
+`ppo.*`。把算法栈并入 `trainer/`（L4）会立刻长出 **9 条 `remote → trainer` 向上边**，另有硬编码
+跨项目路径（`nn-training/data/state-init-bank`、`nn-training/scripts/…`）⇒ 保持顶层并列。
+
+**被否决**：
+
+- **挑一份「看着像纯逻辑」的名单手工搬**：判据会是第三种真相（与 `RL_ORCHESTRATION` 快照各漂各的）。
+  实测：`rl/` 的 101 个模块里 64 个是纯逻辑，其中 `loop_guards_trip/leg/gate/sweep` 这四个
+  「护栏混入」很容易被误判成编排（它们调 `self.` 共享 sink，但**自己不经传输层**）。
+- **把 `test_pure_rl_never_imports_orchestration` 删掉**（`rl/` 里没有纯逻辑半了 ⇒ 判据变永真）：
+  改为 `test_biz_never_imports_the_orchestration_rl` —— **判据一字不改，扫描面跟着家走**。
+- **让 `biz` 进 `remote_dag` 的层号账本**：账本是 `remote/hub/worker` 三包的**内部拓扑秩**，
+  `biz` 是 L1 单层叶子（零仓内依赖的两个包之一，另一个是 `common`）⇒ 进账本只会引入空段。
+- **把 `allowed_rl` 直接改名不改语义**：原表里列的**从来就是纯逻辑**（`rl.archive` / `rl.eval_rows`），
+  所以把它改成 `allowed_biz` 并**拆成两条断言**：编排 `rl` **零豁免**（硬红），纯逻辑 `biz` 需**点名登记**。
+
+**本刀踩到并记档的五个坑**（详见 `docs/nn/engineering.md` §52）：
+
+1. ⚠ **扫描面缩水是哑的**：8 个守卫用 `(ROOT/"rl").glob("*.py")` 扫「谁调用 / 谁定义 X」
+   （入边闭集那批）—— 搬走 64 个文件后扫描面**静默变窄**，判据变**永真**。正解：
+   `tests/helpers/source_scan` 新增**两棵树口径**（`LOGIC_PACKAGES` / `logic_py_files` /
+   `logic_module` / `logic_dotted`），8 处扫描面 + 4 处目录元组 + 7 处 banned 名单统一补齐。
+   同一次也撞见硬编码路径的**响**症状（`RL / fname` ⇒ `FileNotFoundError`）—— **哑症状才是贵的**。
+2. ⚠ **一族文件可以跨两棵树**：`rl/loop_guards.py`（组合根）+ 4 个 `biz/loop_guards_*.py`（混入簇）
+   是**一族**，刀 4 后分住两棵树。正解是**两棵树解析器**（`_home` / `_dotted`），判据与期望值一个字不改。
+3. ⚠ **模板串文本通行证看不见**：`f"rl.{fname[:-3]}"`（`__import__` / `__module__` 断言）全名是
+   **运行时拼的**（7 处人工）；其中一处兼任 `importlib.import_module`，改成 `logic_dotted` 才真正位置无关。
+4. ⚠ **逗号分片路径**：`path.join(NN_TRAINING, 'rl', 'eval_replays_once.py')` 是**两个独立字面量** ⇒
+   整条字面量规则看不见，实测漏掉 1 处**真 spawn**（dashboard「导出 replay」）：五条门禁全绿、
+   **点按钮才炸**。补 dashboard 守卫 `tests/python-spawn-paths.test.ts`（已反探针）。
+5. ⚠ **改写范围漏了仓库根 `tests/`**：`tests/export-rl-rollout-metrics.test.ts` 按路径读
+   `nn-training/rl/reward_library.py`（跨语言 SSOT）⇒ 根 `bun run check` 1 红。教训：跨项目读者的
+   范围表要**按仓库根枚举**（`dashboard/src` · `dashboard/tests` · **`tests/`** · `tools` · `src`）。
+
+**钉住它的新契约**：`test_rl_holds_only_orchestration_modules`（`rl/` 的模块集合**恰好**等于快照 ——
+往 `rl/` 丢一个不达远端的纯逻辑模块，快照对账的两个方向都看不见它）·
+`test_the_pure_logic_tree_is_gone_from_rl`（两棵树零同名 + `biz/` 不是空壳）·
+`L1_PACKAGES` 加 `biz`（L1 零上层引用）· `pyproject.packages.find` 加 `biz*`。
+
+**违反后果**：① 纯逻辑搬回 `rl/`（或同名留两份）⇒ 两条机械守卫红（已反探针）；
+② `biz` 里 import 编排 `rl` ⇒ 两条切线守卫红（已反探针）；③ `remote`/`hub`/`worker` 未登记地
+import `biz` ⇒ `assert_remote_module` 红（已反探针）；④ dashboard spawn 一个已搬家的 `.py` 路径 ⇒
+`python-spawn-paths.test.ts` 红（已反探针）；⑤ 忘改 `packages.find` ⇒ 装机环境 ImportError
+（测试靠 conftest 的 `sys.path` 看不出来）。
+
+—— 全文与最后一刀（`trainer/`）→ `plan/nn-training-module-reorg.plan.md`；审计器（三源 + biz 桶）→
+`nn-training/tmp/reorg_audit.py`，向上边 **0**；改写器 → `nn-training/tmp/cut4_biz_rewrite.py`
+（AST + 文本两条通行证 + 零残留断言）。
+
+## §2026-09-30-goalnn-nn-training-trainer-package（2026-09-30，刀 5 收官：编排整包改名 `rl/` → **顶层 `trainer/`**，`rl/` 从此不存在）
+
+**决策**：`rl/` 剩下的 **37 个编排模块**（每个都直接或经包内传递可达 `remote|worker`）整包改名
+**`trainer/`**（L4，与 `hub/` 同层、互不 import）；**成员一个没变**，只是整包换门牌，`rl/` 这个包
+从此**不存在**。声明式快照随之改名 `RL_ORCHESTRATION` → **`TRAINER_ORCHESTRATION`**。五刀至此收官：
+`common`(L0) · `biz`/`models`/`ppo`/`data`/`train`/`scripts`(L1) · `worker`(L2) · `remote`(L3) ·
+`trainer`/`hub` + 根入口(L4)。
+
+**为什么改名**：「rl」这个名字在本仓有**三套口径** —— 模块路径（`rl.queue`）· 配置节名与启动参数
+前缀（`cfg["rl"]` / `rl.stream` / `--rl.<k>` / `rl-config.json`）· 任务种类（`kind ∈ {rl, bc}`）。同一个词
+同时指包与配置节，读代码要靠上下文猜。改名后「包名 = 职责」：`trainer/` = 训练编排；配置节名与
+它无关，因此 `cfg["rl"]` 与 `rl-config.json` **一个字没动**。
+
+**★ 本刀的题眼 —— 快照的固定点前缀与切片必须同改**：`_trainer_reaching_remote()` 判「可达
+`remote|worker`」靠的是**包内传递** —— 内部边前缀 `d.startswith("rl.")` → `"trainer."`，切片
+`d[3:]` → `d[8:]`。只改一处**不报错**，而是静默塌成「只算直接可达」⇒ 一批只经内部链达远端的
+成员（`batch_*` / `eval_*` / `stream` / `queue`…）假性 `shrank`（像一次架构变更，其实只是改错名字）；
+切片留在 `[3:]` 则算出垃圾名 ⇒ `grew`。双向对账把两个方向都抓住（反探针 ④/⑤）。前四刀是
+「从包里切一族」（包名不动），本刀是「整包改名」（判据自己的内部口径也变）。
+
+**本刀踩到并记档的八个坑**（全部是「改名型哑故障」，症状都不是报错；详见 `engineering.md` §53）：
+
+1. ⚠ 固定点前缀 / 切片（见上）。
+2. ⚠ 模板串 `f"rl.{fname[:-3]}"` 文本通行证看不见 ⇒ `tests/test_loop_remote_split.py` 全量门禁才红
+   （`ModuleNotFoundError: No module named 'rl'`）；正解走 `source_scan.logic_dotted`（第九次同型）。
+3. ⚠ 两处**永真断言**：`remote_dag.assert_remote_module` 的 `== "rl"` 比较（扫描面已换 `trainer`）
+   与 `test_config_file_split` 的 `assert "rl" not in tops` ⇒ 守卫静默失效，都改成 `trainer`。
+4. ⚠ `packages.find` 漏 `trainer*` ⇒ 装机环境 ImportError 而测试全绿（刀 1–4 各一次，第五次）。
+5. ⚠ 裸 `rl.stream` 探针（`test_no_torch_on_import`；唯一「模块名 == 配置键」的碰撞名，人工处理）。
+6. import 顺序整体漂移（`rl.X` → `trainer.X` 改变 isort 排序位）⇒ `ruff --select I --fix` 修 12 个文件。
+7. 长串 / 逗号分片路径 `path.join(REPO_ROOT, 'nn-training/rl')`（dashboard 守卫）看不到 ⇒ 真跑才现形。
+8. **旧包的存在性本身要判**：留一个 `rl/__init__.py` 就能让 `import rl.x` 继续解析，改名退化成
+   「两个名字并存」（扫描面缩水是哑的）⇒ 新守卫 `test_the_old_rl_package_is_gone_after_the_rename`。
+
+**被否决**：① 保留 `rl/` 当兼容别名（`import rl.x` 仍可用）——否：本仓第十刀起「名字是契约、位置不是」
+的要义就是**删掉旧家**，别名会让漏改 forever 静默；② 只改包名不改快照名（继续叫 `RL_ORCHESTRATION`）
+——否：名字里的 `RL` 那时指向一个不存在的包，下一个人会去 `rl/` 找它；③ 顺手再重命名/细分那 37 个模块
+——否：本刀只做搬家 + 改名，语义改动单开。
+
+**违反后果（反探针 7/7 全红，复位即绿）**：① 旧 `rl/` 复活 ⇒ 机械守卫红；② `biz/` 越位 import
+`trainer` ⇒ **3 条**红（上层面包 / 编排闭集 / 真切线）；③ `worker/` 越位 ⇒ **2 条**红（含「环回来了」）；
+④ 固定点前缀回退 ⇒ 快照对账红；⑤ 切片 `[3:]` ⇒ 红；⑥ 快照多一个假成员 ⇒ `shrank` 红；
+⑦ 摘掉一个真成员 ⇒ 集合相等红。（探针 → `nn-training/tmp/cut5_probe.sh`）
+
+**纯搬对账**（`nn-training/tmp/cut5_verify_move.py`，五刀改名全逆 + 括号内 import 折回一行再比非空行
+多重集）：37 个模块 **0 个不等** —— 本刀没增删改任何一行代码，只有 `loop_eval.py` 一处 import 因
+名字变长被 ruff 折成括号多行（纯格式）。
+
+**门禁**：nn **3372 → 3373 passed / 3 skipped**（+1 = 新守卫）；mypy **547** 文件绿；ruff 只剩**预存**的
+`N999 tools/tpu-probe.py`（文件名带连字符，HEAD 上就有）；根 `bun run check` **2277 pass / 0 fail**；
+dashboard typecheck + **1229 pass / 0 fail**；`bun run build` 过 + 三份 bundle 过。`DECISIONS.md` / `plan/` /
+`docs/**` 的**历史正文**一律不改写。
+
+**追加（2026-09-30，同日第二轮）—— 散文里的旧路径必须跟着搬家**：首轮把 `trainer/**` 与 `tests/**`
+里**散文**中的旧 `rl` 路径留了下来（照刀 2–4 的先例「只改代码不改注释」）。复审改判：这是**最坏的一种
+残渣** —— 注释是下一个人唯一的导航，它指向一个**不存在的目录**时把人带沟里，而门禁全绿 ⇒ 没有任何信号。
+判据是**名实**，不是「见 `rl` 就改」（`rl` 在本仓另有配置节名 / 启动参数前缀 / 任务种类三种合法含义）：
+`rl/` 指**今天还叫这个名字的东西**（当年的包，与「出包 / 曾经 / 刀 X 前 / 今 `trainer/` / 前 `rl/`」同句）
+⇒ 不改；其余一律改到今天的家名 `trainer/`（`biz/` 那半刀 4 已改）。首轮 21 个文件（`rl/<module>` 与
+`rl.<module>` 形状）· 次轮 18 个文件 / 30 处（裸 `rl/` 目录名），逐条断言命中数、锚点写错不写盘
+（`tmp/prose_rl_rewrite.py` / `tmp/prose_rl_dir_rewrite.py`；规则表 → `docs/nn/engineering.md` §53）。
+**第三轮（同日）**：同一判据往前扫，清掉刀 1/3 的同类残渣 —— 散文里指向**已搬走的 `remote/*`** 的路径
+（`remote/protocol.py` → `common/`、`remote/smoke_loopback.py` → `hub/`、`remote/serve_pool.py` → `worker/`
+等 9 个模块），12 个文件 / 19 处；`remote/` 作**旧家**引用（「原 …」/「刀 1 后从 … 搬进」）与夹具里的
+**合成 zip 成员**（`z.writestr("remote/_marker.py", …)`）照旧保留。顺带发现一处**不是散文**的同类残渣：
+dashboard 的 `localWorker` / `trainingLoop` **哨兵**仍写 `nn-training/remote/protocol.py`（自刀 2 起就不存在
+⇒ 哨兵永不触发 = 「worker 用旧协议跑新 job」那条注释要防的事；`dashboard/tests/local-worker.test.ts` 还把
+旧路径断言住了）—— 修它要动 dashboard 代码 + 先写失败用例，另案，本轮不动。
+**刻意保留**：`test_layering` 钉「`rl/` 不存在」那条守卫的字面量、`test_hub_client_code_zip` 的合成 zip
+成员表（不是真路径）、以及所有把 `rl/` 当**旧名**引用的历史句。代码里的旧**标识符**（`test_loop_guards_split`
+的 `RL = NN_ROOT / "trainer"` 已是死常量、`test_batch_eval` 的局部名 `rl_dir`）本轮不动：不改行为。
+
+—— 五刀总账与映射表 → `plan/nn-training-module-reorg.plan.md` §5；全文（字段名对照 / 反探针表）→
+`docs/nn/engineering.md` §53；改写器 → `nn-training/tmp/cut5_trainer_rewrite.py`（AST + 文本两条通行证 + 零残留断言）。

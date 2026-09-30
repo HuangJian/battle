@@ -528,7 +528,7 @@ Have/omit 只是 **带宽优化提示**，不是正确性来源。实现与测�
 | **传输计量 / 坏签重抽（M1）** | `worker.py` `_request` / `_read_body`（已有停滞判据）· `hub_server.py` `_bytes` | 只动传输层 |
 | course_cache 写入 | `worker.py` result 组装与 `_cache_blob` 附近 | **过 §4.3 门槛后** |
 | prune 豁免 | `worker.py` `prune_job_dirs` | 仅当 `course_cache` 落地 |
-| Hub next | `nn-training/remote/hub_server.py` `_get_next` | omit 计算与响应 |
+| Hub next | `nn-training/hub/server.py` `_get_next` | omit 计算与响应 |
 | Blob 端点 | `hub_server.py` `_get_blob` | 不变；miss 照旧 |
 | 发布 manifest 字段 | `hub_client.py` `publish_job` | 已有 opt_sha 等；一般不必加字段 |
 | 线格式 | `protocol.py` `pack_result_v2` / `pack_job_v2` | result **不减** opt；job push 可裁段 |

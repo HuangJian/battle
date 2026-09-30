@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl import ladder_factory as lf
+from biz import ladder_factory as lf
 
 # ---- 纯函数：tier / max_ticks / 剂量 ----
 
@@ -123,14 +123,14 @@ def generated(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """生成到 tmp（levels/ 也指到 tmp），并让 resolve_level 能找到（preflight 用）。"""
     levels, courses = tmp_path / "levels", tmp_path / "curricula"
     lf.generate(out_levels=levels, out_courses=courses, plan_path=tmp_path / "ladder" / "plan.jsonc")
-    # S5 第十刀后 LEVELS_DIR 住 `rl.course_resolve`（config 只剩门面转发；
+    # S5 第十刀后 LEVELS_DIR 住 `biz.course_resolve`（config 只剩门面转发；
     # 模块全局的 setattr 必须打在**实现模块**上才会被 resolve_level 读到）。
-    monkeypatch.setattr("rl.course_resolve.LEVELS_DIR", levels)
+    monkeypatch.setattr("biz.course_resolve.LEVELS_DIR", levels)
     return courses
 
 
 def test_generated_course_invariants(generated: Path) -> None:
-    from rl.config import load_course
+    from biz.config import load_course
 
     for c in (1, 4, 7, 8, 14, 15, 20):
         name = lf.level_name(c)
@@ -155,7 +155,7 @@ def test_generated_course_invariants(generated: Path) -> None:
 def test_early_levels_multi_variant(generated: Path) -> None:
     """B 案：c01-c03 = C(4,1/2/3) = 4/6/4 关（xN 试点语义入厂）；
     c01 单出生点降噪保持（spawn_points_for 原样）。"""
-    from rl.config import load_course
+    from biz.config import load_course
 
     for c, n in ((1, 4), (2, 6), (3, 4)):
         course = load_course(generated / f"{lf.level_name(c)}.jsonc")

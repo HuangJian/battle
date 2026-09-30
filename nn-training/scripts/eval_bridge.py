@@ -43,10 +43,10 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common.schema import FIRE_DIM, MOVE_DIM
 from data.npyio import load_dataset
 from data.weights_io import latest_weights_path, load_state_into
 from models.core import NNPolicy
-from schema import FIRE_DIM, MOVE_DIM
 
 
 def quick_eval(weights_path: str, data_dir: str) -> dict:

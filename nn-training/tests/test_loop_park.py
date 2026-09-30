@@ -25,9 +25,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.events import write_run_complete
-from rl.loop_core import TrainingLoop
-from rl.loop_lifecycle import should_park_on_done
+from biz.events import write_run_complete
+from trainer.loop_core import TrainingLoop
+from trainer.loop_lifecycle import should_park_on_done
 
 
 def _args(**kw) -> types.SimpleNamespace:
@@ -118,7 +118,7 @@ def test_park_drains_live_precollect_child(
 
 def test_park_without_hub_is_still_quiet(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """无 hub（纯本机）时 _sync_cloud_halt 真跑也不碰网络、不抛。"""
-    import rl.loop_guards as guards
+    import trainer.loop_guards as guards
 
     sent: list[tuple[str, str, bool]] = []
     monkeypatch.setattr(
@@ -136,12 +136,12 @@ def test_park_keeps_claiming_evalboard_batches(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """停车期每轮唤醒复用 idle 窗认领 EvalBoard B 批（60s 粒度，配置热读）。"""
-    import dist_common
+    import common.distribution
 
     loop = _loop(tmp_path)
     monkeypatch.setattr(TrainingLoop, "_sync_cloud_halt", lambda self, it, v: None)
     cfg: dict = {"nodes": [], "policy": {}}
-    monkeypatch.setattr(dist_common, "load_dist_config", lambda: cfg)
+    monkeypatch.setattr(common.distribution, "load_dist_config", lambda: cfg)
     idles: list[tuple[int, object]] = []
     monkeypatch.setattr(
         TrainingLoop, "_evalboard_idle", lambda self, it, dc: idles.append((it, dc))

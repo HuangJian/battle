@@ -21,7 +21,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.batch_eval import (
+from common.jsonc import load as jsonc_load
+from trainer.batch_eval import (
     BATCH_STAGE_BASE,
     consume_requests,
     corpora_path,
@@ -30,7 +31,6 @@ from rl.batch_eval import (
     plan_verdict_units,
     units_for_batch,
 )
-from rl.jsonc import load as jsonc_load
 
 CKPTS = [
     {"label": "bc", "path": "nn-training/weights/bc.json"},

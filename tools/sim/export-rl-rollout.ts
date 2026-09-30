@@ -143,7 +143,7 @@ export const RL_SHARD_FILES = [
   'mask.npy',
 ] as const
 
-// ---- 41 维指标列序（MUST mirror `nn-training/rl/reward_library.py::METRICS`）----
+// ---- 41 维指标列序（MUST mirror `nn-training/biz/reward_library.py::METRICS`）----
 // 改任一侧必须同步另一侧 + manifest metrics_version 不变则任何 shape[0] 下游
 // 会静默错读。idx10=starsCollected 补 plan §4.1 表的空槽（连续编号 0..20）。
 // idx21–28=道具流分类型计数（§9，metric v3：spawn/got × bomb/tank/freeze/shield，
@@ -1342,7 +1342,7 @@ export function runOneBench(
  * 而课程/关卡语义（`CourseConfig.player.lives` ← 关卡 `player.lives` 合并）走的
  * 正是这个 flag —— 裸调 CLI 忘传 = 静默 3 命，烧掉整批 it0 标定语料（x2–x7 全中招，
  * 训练侧因必经课程合并从未中招）。从此缺席/非法 = 响亮失败，不设默认值。
- * 训练调用链（`rl/cmd.py` ← `apply_course` ← 关卡合并）恒传此 flag，不受影响。
+ * 训练调用链（`biz/cmd.py` ← `apply_course` ← 关卡合并）恒传此 flag，不受影响。
  */
 export function resolveLivesFlag(raw: string): number {
   const v = parseInt(raw, 10)

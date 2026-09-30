@@ -8,7 +8,7 @@
  * 「BC 暖启 + PPO」。它不判关卡难度 / 不设门 / 不评梯度（教师是有缺陷的规则系统，
  * 不是天花板）。因此本工具只产出观测值，不产出任何 verdict。
  *
- * 种子 = Python 侧 `nn-training/rl/eval_local.py::EVAL_SEEDS = range(860001, 860201)`
+ * 种子 = Python 侧 `nn-training/biz/eval_local.py::EVAL_SEEDS = range(860001, 860201)`
  * 的前缀（200 局）；level 单关 ⇒ eval-course-ckpt 的 seed = seed0 + g，逐值对齐。
  *
  * 用法：
@@ -33,7 +33,7 @@ export function levelMaxTicks(level: string): number | null {
   try {
     // 关卡文件是 JSONC（`.jsonc`；oxfmt `trailingComma: all` 会主动加尾逗号，
     // 2026-09-19 格式化后裸 JSON.parse 对全部 levels 抛错→返回 null）。
-    // 与 Python `rl/jsonc.py` / eval-course-ckpt 同口径：去注释 + 去尾逗号再 parse。
+    // 与 Python `common/jsonc.py` / eval-course-ckpt 同口径：去注释 + 去尾逗号再 parse。
     const doc = parseCourseJsonc(readFileSync(levelFilePath(level), 'utf-8')) as {
       max_ticks?: unknown
     }
@@ -54,7 +54,7 @@ export const TEACHER_LEVELS = [
   'ladder-c07',
 ] as const
 
-/** 与 nn-training/rl/eval_local.py::EVAL_SEEDS 首值一致（range(860001, 860201)）。 */
+/** 与 nn-training/biz/eval_local.py::EVAL_SEEDS 首值一致（range(860001, 860201)）。 */
 export const EVAL_SEED0 = 860001
 
 export interface ScoreStats {

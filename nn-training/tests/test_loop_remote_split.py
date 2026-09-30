@@ -1,18 +1,18 @@
-"""S22 契约（2026-09-25）—— `rl/loop_remote.py` 的 862 行连通分量切成四簇后不得腐烂。
+"""S22 契约（2026-09-25）—— `trainer/loop_remote.py` 的 862 行连通分量切成四簇后不得腐烂。
 
 S4 第二步把「远端 PPO 腿」13 个方法（862 行，**一条连通分量**）从 `TrainingSteps` 搬进
-`rl/loop_remote.py::TrainingRemote`。第二十二刀再把这条分量**按判据同源**切成四簇——每一簇
+`trainer/loop_remote.py::TrainingRemote`。第二十二刀再把这条分量**按判据同源**切成四簇——每一簇
 是「同一件事 / 同一套失败语义」，不是按大小或物理位置切：
 
 | 混入 | 判据 | 模块 | 方法 |
 |---|---|---|---|
-| `TrainingRemotePush` | 把一份 job **送到节点**（提交 / 首发 / 取回） | `rl/loop_remote_push.py` | `_push_submit_node` · `_push_submit_first` · `_push_fetch` |
-| `TrainingRemoteJob` | **一份远端 PPO job 的四步** + 组合入口 | `rl/loop_remote_job.py` | `_remote_ppo` · `_remote_ppo_publish` · `_remote_ppo_probe` · `_remote_ppo_fetch` · `_remote_ppo_land` |
-| `TrainingRemoteFail` | **远端失败的唯一处置策略** | `rl/loop_remote_fail.py` | `_abort_node_failure` · `_handle_remote_failure` |
-| `TrainingRemoteDrive` | **谁驱动这条腿**（轮内 / 整轮；整段已退役） | `rl/loop_remote_drive.py` | `_remote_ppo_step` · `_remote_iter` |
+| `TrainingRemotePush` | 把一份 job **送到节点**（提交 / 首发 / 取回） | `trainer/loop_remote_push.py` | `_push_submit_node` · `_push_submit_first` · `_push_fetch` |
+| `TrainingRemoteJob` | **一份远端 PPO job 的四步** + 组合入口 | `trainer/loop_remote_job.py` | `_remote_ppo` · `_remote_ppo_publish` · `_remote_ppo_probe` · `_remote_ppo_fetch` · `_remote_ppo_land` |
+| `TrainingRemoteFail` | **远端失败的唯一处置策略** | `trainer/loop_remote_fail.py` | `_abort_node_failure` · `_handle_remote_failure` |
+| `TrainingRemoteDrive` | **谁驱动这条腿**（轮内 / 整轮；整段已退役） | `trainer/loop_remote_drive.py` | `_remote_ppo_step` · `_remote_iter` |
 
 依赖是**一条链**（调用者依赖被调用者）：`Push ← Job ← {Fail, Job} ← Drive`。`TrainingRemote`
-退成**零方法的组合根**（仍住 `rl/loop_remote.py` ⇒ `from rl.loop_remote import TrainingRemote`
+退成**零方法的组合根**（仍住 `trainer/loop_remote.py` ⇒ `from trainer.loop_remote import TrainingRemote`
 零迁移），`TrainingSteps.__bases__` / `TrainingLoop.__bases__` 与四个「继承真混入」的测试宿主
 **一行不改**。
 
@@ -35,7 +35,7 @@ import pytest
 from tests.helpers import source_scan
 
 NN_ROOT = Path(__file__).resolve().parent.parent
-RL = NN_ROOT / "rl"
+RL = NN_ROOT / "trainer"
 
 #: 成员 → (文件, 类)。13 个，一个不漏。
 HOMES: dict[str, tuple[str, str]] = {
@@ -146,32 +146,32 @@ SLOT_WRITERS: dict[str, frozenset[str]] = {
 
 #: 顶层 import 面（非 stdlib）：逐文件闭集。
 TOP_IMPORTS: dict[str, frozenset[str]] = {
-    "loop_remote.py": frozenset({"rl.loop_remote_drive"}),
+    "loop_remote.py": frozenset({"trainer.loop_remote_drive"}),
     "loop_remote_push.py": frozenset(
-        {"common.protocol", "remote.push_client", "rl.log", "rl.loop_round", "rl.loop_transport"}
+        {"common.protocol", "remote.push_client", "biz.log", "biz.loop_round", "trainer.loop_transport"}
     ),
     "loop_remote_job.py": frozenset(
         {
             "common.protocol",
-            "rl.log",
-            "rl.loop_remote_push",
-            "rl.loop_round",
-            "rl.loop_transport",
+            "biz.log",
+            "trainer.loop_remote_push",
+            "biz.loop_round",
+            "trainer.loop_transport",
         }
     ),
     "loop_remote_fail.py": frozenset(
-        {"common.protocol", "rl.events", "rl.log", "rl.loop_transport"}
+        {"common.protocol", "biz.events", "biz.log", "trainer.loop_transport"}
     ),
     "loop_remote_drive.py": frozenset(
         {
             "common.protocol",
-            "dist_common",
-            "rl.events",
-            "rl.log",
-            "rl.loop_remote_fail",
-            "rl.loop_remote_job",
-            "rl.loop_round",
-            "rl.loop_transport",
+            "common.distribution",
+            "biz.events",
+            "biz.log",
+            "trainer.loop_remote_fail",
+            "trainer.loop_remote_job",
+            "biz.loop_round",
+            "trainer.loop_transport",
         }
     ),
 }
@@ -186,33 +186,33 @@ DELAYED_IMPORTS: dict[str, frozenset[str]] = {
             "remote.bundle",
             "remote.hub_client",
             "remote.push_client",
-            "rl.collect_only",
-            "rl.config",
-            "rl.queue",
-            "rl.resume",
-            "rl.reward_library",
+            "trainer.collect_only",
+            "biz.config",
+            "trainer.queue",
+            "biz.resume",
+            "biz.reward_library",
         }
     ),
     "loop_remote_fail.py": frozenset(),
-    # `rl.plan` 随半离线整段（`_remote_run_segment`）退役 —— 它原来是那条腿算计划用的。
-    "loop_remote_drive.py": frozenset({"rl.iter_job"}),
+    # `biz.plan` 随半离线整段（`_remote_run_segment`）退役 —— 它原来是那条腿算计划用的。
+    "loop_remote_drive.py": frozenset({"biz.iter_job"}),
 }
 
 #: 反向边（禁）：本族谁都不许 import 这些（它只靠 `self.*` 回调 / 组合根除外）。
 FORBIDDEN_IMPORTS = frozenset(
     {
-        "rl.loop_core",
-        "rl.loop_guards",
-        "rl.loop_lifecycle",
-        "rl.loop_round_steps",
-        "rl.loop_steps",
-        "rl.loop_volume",
+        "trainer.loop_core",
+        "trainer.loop_guards",
+        "trainer.loop_lifecycle",
+        "trainer.loop_round_steps",
+        "trainer.loop_steps",
+        "trainer.loop_volume",
     }
 )
 
 #: 组合根**不得**持有的模块全局（陈旧 patch 会静默失效）。
 GONE_FROM_ROOT = (
-    "dist_common",
+    "common.distribution",
     "log",
     "_push_submit",
     "_push_wait_result",
@@ -273,7 +273,7 @@ def _self_calls(node: ast.AST) -> set[str]:
 
 
 def _self_call_counts(path: Path, only: frozenset[str] | None = None) -> Mapping[str, int]:
-    """AST 计真实 `self.<attr>(…)` 调用（缓存版：本用例对全 `rl/` 走一遍）。
+    """AST 计真实 `self.<attr>(…)` 调用（缓存版：本用例对两棵业务树走一遍）。
 
     `only` = 只关心这些名字（白名单）；入边闭集那条传它就走廉价子串预筛。
     """
@@ -331,31 +331,37 @@ def test_members_live_in_exactly_their_new_home() -> None:
             name for name, cn in FAMILY.items() if member in _methods(RL / name, cn)
         ]
         assert definers == [fname], f"{member} 的定义面：{definers}（期望 {fname}）"
-    left = _methods(NN_ROOT / "rl" / "loop_steps.py", "TrainingSteps")
+    left = _methods(NN_ROOT / "trainer" / "loop_steps.py", "TrainingSteps")
     crept_back = sorted(set(MEMBERS) & set(left))
     assert crept_back == [], f"这些方法又回到 TrainingSteps 了：{crept_back}"
 
 
 def test_identity_through_the_composition_root() -> None:
-    """`TrainingRemote.X is 新家.X`——接线是**对象级**，不是同名副本。"""
-    import rl.loop_remote as root
+    """`TrainingRemote.X is 新家.X`——接线是**对象级**，不是同名副本。
+
+    点分名走 `source_scan.logic_dotted`：`f"rl.{fname[:-3]}"` 那种**模板串**是文本改写
+    看不见的形状，2026-09-30 刀 5（整包别名 `rl/` → `trainer/`）就是被它顶红一次
+    （`ModuleNotFoundError: No module named 'rl'`）。
+    """
+    import trainer.loop_remote as root
 
     for member, (fname, cls_name) in HOMES.items():
-        home = getattr(__import__(f"rl.{fname[:-3]}", fromlist=[cls_name]), cls_name)
+        dotted = source_scan.logic_dotted(str(NN_ROOT), fname)
+        home = getattr(__import__(dotted, fromlist=[cls_name]), cls_name)
         got = getattr(root.TrainingRemote, member)
         assert got is getattr(home, member), member
-        assert got.__module__ == f"rl.{fname[:-3]}", member
+        assert got.__module__ == dotted, member
 
 
 def test_composition_is_exact() -> None:
     """组装逐字：五件链 + `TrainingSteps` / `TrainingLoop` 的元组一行不改。"""
-    import rl.loop_core as core
-    import rl.loop_remote as root
-    import rl.loop_remote_drive as drive
-    import rl.loop_remote_fail as fail_mod
-    import rl.loop_remote_job as job
-    import rl.loop_remote_push as push
-    import rl.loop_steps as steps
+    import trainer.loop_core as core
+    import trainer.loop_remote as root
+    import trainer.loop_remote_drive as drive
+    import trainer.loop_remote_fail as fail_mod
+    import trainer.loop_remote_job as job
+    import trainer.loop_remote_push as push
+    import trainer.loop_steps as steps
 
     mods = {
         "loop_remote_push.py": push,
@@ -368,7 +374,7 @@ def test_composition_is_exact() -> None:
         cls = getattr(mods[fname], cls_name)
         assert tuple(c.__name__ for c in cls.__bases__) == want, fname
     # 组合根仍在原文件、仍是被 `TrainingSteps` 继承的第一个基类。
-    assert root.TrainingRemote.__module__ == "rl.loop_remote"
+    assert root.TrainingRemote.__module__ == "trainer.loop_remote"
     assert steps.TrainingSteps.__bases__ == (root.TrainingRemote, steps.TrainingEval, steps.TrainingExport)
     assert steps.TrainingSteps.__mro__[1] is root.TrainingRemote
     assert core.TrainingLoop.__bases__ == (
@@ -389,7 +395,7 @@ def test_composition_root_has_zero_methods() -> None:
     fns = [m.name for m in _cls(RL / "loop_remote.py", "TrainingRemote").body if isinstance(m, ast.FunctionDef)]
     assert fns == [], fns
     assert _declared(RL / "loop_remote.py", "TrainingRemote") == set()
-    import rl.loop_remote as root
+    import trainer.loop_remote as root
 
     for name in GONE_FROM_ROOT:
         assert not hasattr(root, name), f"组合根不该持有 {name}"
@@ -432,7 +438,8 @@ def test_helper_hands_are_declared_where_they_are_used() -> None:
 
 def test_inbound_hands_closed_set() -> None:
     """入边闭集：只有登记的调用者，呼叫点数逐一对账（AST 计**真实 Call**）。"""
-    files = sorted(RL.glob("*.py"))
+    # 2026-09-30（刀 4）：调用者两棵树上都有（`trainer/` 编排 + `biz/` 纯逻辑）⇒ 走两棵树扫描面。
+    files = source_scan.logic_py_files(str(NN_ROOT))
     calls = {p.name: _self_call_counts(p, frozenset(INBOUND_CALLS)) for p in files}
     for member, want in INBOUND_CALLS.items():
         got = {name: c[member] for name, c in calls.items() if member in c}
@@ -448,7 +455,7 @@ def test_outbound_hands_closed_set() -> None:
             ext |= {c for c in _self_calls(m) if c in MEMBERS and c not in own}
         assert ext == set(OUTBOUND_HANDS[fname]), f"{fname} 出边变了：{sorted(ext)}"
     # 跨簇兄弟经**真继承**解析（不是 `Any` 声明）⇒ 组合根上全部可达。
-    import rl.loop_remote as root
+    import trainer.loop_remote as root
 
     for hands in OUTBOUND_HANDS.values():
         for hand in hands:
@@ -500,14 +507,14 @@ def test_no_reverse_edges() -> None:
 
 
 def test_fail_abort_writes_the_verdict_through_this_modules_seam(monkeypatch: pytest.MonkeyPatch) -> None:
-    """★ `_abort_node_failure` 真跑：判决与日志都按 **`rl.loop_remote_fail`** 的全局解析。
+    """★ `_abort_node_failure` 真跑：判决与日志都按 **`trainer.loop_remote_fail`** 的全局解析。
 
-    打在本模块 → 命中；打在旧家 `rl.loop_remote` → 一个字节都收不到（「seam 只剩一份」的
+    打在本模块 → 命中；打在旧家 `trainer.loop_remote` → 一个字节都收不到（「seam 只剩一份」的
     机械形式：同名 seam 在两个命名空间里是两个各自真实的注入点，patch 错的那个是**静默空操作**）。
     """
-    import rl.loop_remote as root_mod
-    import rl.loop_remote_fail as fail_mod
-    from rl.loop_remote_fail import TrainingRemoteFail
+    import trainer.loop_remote as root_mod
+    import trainer.loop_remote_fail as fail_mod
+    from trainer.loop_remote_fail import TrainingRemoteFail
 
     host = SimpleNamespace(_jsonl_path=Path("unused.jsonl"), _leg_abort=False)
     verdicts: list[tuple[tuple, dict]] = []
@@ -530,9 +537,9 @@ def test_fail_abort_writes_the_verdict_through_this_modules_seam(monkeypatch: py
 
 def test_fail_policy_stops_the_leg(monkeypatch: pytest.MonkeyPatch) -> None:
     """★ `_handle_remote_failure` 真跑：确定性失败**不消耗配额**直接停腿；可重试失败第 3 次停腿。"""
-    import rl.loop_remote_fail as fail_mod
+    import trainer.loop_remote_fail as fail_mod
     from common.protocol import JobFailedError
-    from rl.loop_remote_fail import TrainingRemoteFail
+    from trainer.loop_remote_fail import TrainingRemoteFail
 
     monkeypatch.setattr(fail_mod, "write_gate_verdict", lambda *a, **k: None)
     monkeypatch.setattr(fail_mod, "log", lambda m: None)
@@ -560,10 +567,10 @@ def test_fail_policy_stops_the_leg(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_cross_cluster_handoff_resolves_to_one_object() -> None:
     """★ 跨簇交棒：Drive 借 Fail / Job，Job 借 Push——在**同一个对象**上解析到真实现。"""
-    from rl.loop_core import TrainingLoop
-    from rl.loop_remote_fail import TrainingRemoteFail
-    from rl.loop_remote_job import TrainingRemoteJob
-    from rl.loop_remote_push import TrainingRemotePush
+    from trainer.loop_core import TrainingLoop
+    from trainer.loop_remote_fail import TrainingRemoteFail
+    from trainer.loop_remote_job import TrainingRemoteJob
+    from trainer.loop_remote_push import TrainingRemotePush
 
     assert TrainingLoop._abort_node_failure is TrainingRemoteFail._abort_node_failure
     assert TrainingLoop._handle_remote_failure is TrainingRemoteFail._handle_remote_failure

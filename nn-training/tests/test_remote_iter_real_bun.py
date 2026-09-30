@@ -4,7 +4,7 @@ plan/remote-wire-remediation.plan.md §5.5①：「同 (stage, seed)、同权重
 shard 与本地 bun rollout 逐字节一致（data_fp 相等是必要不充分，要直接 diff 文件）」。
 
 本文件的做法比「节点 vs 本机」更严格也更便宜：**同一个 argv**（由
-`rl.iter_job.build_iter_spec` 生成，与上云时发给节点的完全一样）跑两遍——
+`biz.iter_job.build_iter_spec` 生成，与上云时发给节点的完全一样）跑两遍——
   A 直跑（subprocess + cwd=dirA）
   B 过 `run_iter_rollout`（cwd=job_dir）
 然后逐文件 diff。命令都一样还一致，说明节点路径没有引入任何差异（剩下的只是导出器
@@ -32,7 +32,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import remote.iter_rollout as iter_rollout
+import worker.iter_rollout as iter_rollout
+from biz.iter_job import build_iter_spec
 from common.protocol import (
     TS_CODE_NAME,
     data_fp,
@@ -40,9 +41,8 @@ from common.protocol import (
     validate_rollout_spec,
 )
 from remote.hub_client import pack_ts_code_zip
-from remote.iter_rollout import run_iter_rollout
-from rl.iter_job import build_iter_spec
 from tests.subproc_util import run_utf8
+from worker.iter_rollout import run_iter_rollout
 
 REPO_ROOT = ROOT.parent
 #: 每局 tick 上限——验收只要「采到 shard 并逐位可比」，不要长局（本文件要秒级跑完）。

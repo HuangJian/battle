@@ -122,7 +122,7 @@ curl -s -H "Authorization: Bearer $(cat tools/agent/agent.auth)" \
 > 接 §27.10（agent 侧池同质化）· §26（本机腿入池）· §20/§21/§22（池的收益与纪律）。
 
 TS 侧池改成同质入口（`tools/sim/serve-any.ts` + 每行 mode token，§27.10）后，Python 侧那份池
-（`remote/serve_pool.py`，服务三条腿：节点 `iter_rollout`、本机 `rl/queue_local`、云机离线 eval）
+（`worker/serve_pool.py`，服务三条腿：节点 `iter_rollout`、本机 `trainer/queue_local`、云机离线 eval）
 立刻显出旧形状的残留：**池的身份就是导出器**——建池时烧死一个脚本（`bun <exporter>.ts --serve`），
 每条任务还要 `owns(argv[0])` 对一次脚本。
 
@@ -136,7 +136,7 @@ TS 侧池改成同质入口（`tools/sim/serve-any.ts` + 每行 mode token，§2
 * **门槛与形状解耦**：`make_pool(bun, ts_dir, workers, log, *, for_script=…)` —— `for_script` 不是
   「池是哪种 worker」，而是「**本轮要池化的是哪条腿**」。`SERVE_CAPABLE_SCRIPTS` 保留为**策略**
   （用户点名：本机 goal/intent 轮继续逐局 spawn；要放开只需往名单加一行，池不需任何改动）。
-* `rl/queue_local.make_local_pool` / `remote/iter_rollout._make_pool` / `remote/offline_eval`
+* `rl/queue_local.make_local_pool` / `worker/iter_rollout._make_pool` / `remote/offline_eval`
   三个建池点跟着改；iter 的「整轮只能一个脚本」保留（准入是**按轮**判的，不是池的能力限制）。
 
 ### 28.2 判例（都在现成文件里，不新建目录）
@@ -258,7 +258,7 @@ mypy 那条**与本次无关的既有**红：`tests/test_reward_golden.py:1141`�
 | 是不是「子进程太大/启动慢」 | **不是**：`spawn('/bin/true')` **7.1s**、`Bun.spawn` 7.06s、绝对路径 7.0s —— 而 `bun -e '1'` 自身启动只要 **34ms** |
 
 ⇒ a95/proot 上**每一次 fork 都把父进程事件循环占死 ~7s**，与子进程无关。而协调器侧
-`node_ping(timeout=3s)`（`nn-training/rl/dispatch.py`）⇒ fork 只要落在探针窗口里，节点当场被判
+`node_ping(timeout=3s)`（`nn-training/trainer/dispatch.py`）⇒ fork 只要落在探针窗口里，节点当场被判
 `ping failed — excluded` —— 账本那 **2029** 次的同一机制（掉线回线后的首批、以及此后每次冷补位，
 各欠一次）。
 
@@ -395,15 +395,15 @@ mypy 那条**与本次无关的既有**红：`tests/test_reward_golden.py:1141`�
 ## §26 本机腿入池：trainer 自己的两条本机腿（`run_rollout` / dispatcher 本机槽）接长驻池（2026-09-25）
 
 > 接 §20/§21/§22。§22 把池接进了**节点侧** rollout 与云机离线 eval，但**训练机自己**的两条
-> 本机腿一直是逐局 `Popen`：`rl/queue_local.py::run_rollout`（无可用节点时的整轮本机采集，
+> 本机腿一直是逐局 `Popen`：`trainer/queue_local.py::run_rollout`（无可用节点时的整轮本机采集，
 > 也是 state_init 的唯一可跑腿）与 `RolloutDispatcher` 的本机槽（`run_local_rollout`）。
 > 两者都在每局重付「进程启动 + 模块加载 + wasm 编译 + 权重解析」——而它们跑的局往往更短
 > （x20-state-init 一局 ≈ 250 样本 vs 标准局 ≈ 1290），固定开销占比反而更高。
 
 ### 26.1 改了什么
 
-* `rl/queue_local.py::make_local_pool`：拿**真 argv**（`build_rollout_cmd` 为第一个 pair 拼出的
-  那份，`out_dir` 只用于取名、不落盘）去问 `remote/serve_pool.make_pool`——脚本不在
+* `trainer/queue_local.py::make_local_pool`：拿**真 argv**（`build_rollout_cmd` 为第一个 pair 拼出的
+  那份，`out_dir` 只用于取名、不落盘）去问 `worker/serve_pool.make_pool`——脚本不在
   `SERVE_CAPABLE_SCRIPTS`（goal / intent 两种 RL 模式）就返回 None，整轮退回逐局 spawn，与
   改动前**逐字节相同**。不再抄一份「哪个模式用哪个导出器」的判断（那是脚本选择的唯一来源）。
 * `run_rollout`：整轮建一个池（宽度 = `max(1, min(args.workers, len(pairs)))`，即本轮本机并发），
@@ -464,9 +464,9 @@ mypy 那条**与本次无关的既有**红：`tests/test_reward_golden.py:1141`�
 ### 25.2 分类就住在抛出点上：`UnreapableChildError` 是两腿共用的
 
 * **定义上移**到 `remote/protocol.py`（紧挨 `RetryableError`：它是「可重试、非确定性拒绝」里最特殊的
-  一档 —— 重试的**粒度**由各腿自己定）。`remote/iter_rollout.py` 只 `import` 它当模块属性，
+  一档 —— 重试的**粒度**由各腿自己定）。`worker/iter_rollout.py` 只 `import` 它当模块属性，
   `remote/worker.py` 与既有用例零改动（`_iter_rollout.UnreapableChildError` 仍是同一个类）。
-  为什么不放在 `platform_utils`：那是**没有** `RetryableError` 概念的最底层（wire/分类异常都在 protocol）。
+  为什么不放在 `common.platform_utils`：那是**没有** `RetryableError` 概念的最底层（wire/分类异常都在 protocol）。
 * `rl/eval_local.run_eval_runner_capture`：`communicate(timeout=KILL_REAP_SEC)` 再超时就
   `keep_unreaped(proc)` + 抛 `UnreapableChildError`（日志照旧点名「单局子进程杀不掉」）。
   **普通超时（收得了尸）仍是 `TimeoutExpired`** —— 两档绝不能混：
@@ -507,7 +507,7 @@ WARN [eval-cloud] it12 整轮重投第 1 次：本次尝试有 1 局收不了尸
 2. `WARN [eval-cloud] itN 整轮重投第 M 次：…只补这 K 局`：`K` 应当远小于本轮局数（它是**没做完的**
    那几局，不是整轮重跑）；`K` 每趟不降反而是机器越来越糟的指纹。
 3. `WARN eval 单局子进程杀不掉：sX/dY —— SIGKILL 之后 5s 内连输出都收不回来`：收不了尸的现场
-   （带局身份），与 `platform_utils.unreaped_count()` 那本账对应。
+   （带局身份），与 `common.platform_utils.unreaped_count()` 那本账对应。
 4. 轮末「失败 N」里有没有成批的机器级停滞：只有操作员设了 `NN_EVAL_ROUND_RETRY_MAX` 才该出现
    （缺省不限 ⇒ 机器一好就自己接上）。
 
@@ -562,9 +562,9 @@ D 状态），`waitpid` 要等那个系统调用返回才收得到尸。后果�
 
 | 位置 | 改动 | 用例 |
 |---|---|---|
-| **新增 `platform_utils` 四个原语** | `popen_own_group()`（POSIX 下自带进程组）· `kill_process_tree()`（SIGKILL 整个进程组、**不等回收**）· `reap_bounded()`（有界回收，超时 False）· `keep_unreaped()`/`sweep_unreaped()`（收不了尸的记账 + 之后非阻塞再收）· `KILL_REAP_SEC=5.0` = 全仓唯一那个数 | `test_platform_utils_proc`（真进程：孙进程跟着进程组一起走（**管道 EOF** 作判据）、有界回收活着的子进程返回 False、记账只收死的不收活的） |
-| `remote/iter_rollout` | 超时路径改 `_kill_and_reap`（进程组 + 有界回收）；**回收不了 ⇒ `UnreapableChildError`**（本局**不就地重跑** —— 直接重跑会在同一 `w{i}/` 上再起一个写者）；主循环从 `as_completed` 改**带超时的 `wait`** + 停滞按 `STALL_WARN_SEC` 点名；**机器级停滞在轮内重投**（只补没产出的那几局，先 `_clean_attempt`；不睡、不报失败、不消耗调用方重试预算；次数缺省不限，`ENV_ROUND_RETRY_MAX` = 操作员退出阀） | `test_remote_iter::test_a_child_that_cannot_be_reaped_is_retried_in_round_never_failing`（替身：第一次收不了尸、第二次真跑桩脚本 ⇒ 整轮**跑成**；无上限 wait = 0；不走单局重跑；轮账带 `整轮重投=1 次`）· `::test_reap_stall_round_retry_is_unbounded_unless_operator_caps_it`（`ENV_ROUND_RETRY_MAX=2` ⇒ 重投两次后响亮上抛，每轮仍有界）· `::test_kill_and_reap_bounds_the_wait_and_books_the_leftover` · `::test_a_round_that_stalls_names_the_games_still_in_flight` |
-| `remote/serve_pool` | 熔断语义收窄为「**只停补位**」：暖 worker 继续服务、**一个都不许新建**；worker 也走 `popen_own_group` + `kill_process_tree`（孤儿吃 CPU ⇒ 机器越跑越卡） | `test_remote_serve_pool::test_breaker_stops_replenishing_but_keeps_serving_warm_workers` |
+| **新增 `common.platform_utils` 四个原语** | `popen_own_group()`（POSIX 下自带进程组）· `kill_process_tree()`（SIGKILL 整个进程组、**不等回收**）· `reap_bounded()`（有界回收，超时 False）· `keep_unreaped()`/`sweep_unreaped()`（收不了尸的记账 + 之后非阻塞再收）· `KILL_REAP_SEC=5.0` = 全仓唯一那个数 | `test_platform_utils_proc`（真进程：孙进程跟着进程组一起走（**管道 EOF** 作判据）、有界回收活着的子进程返回 False、记账只收死的不收活的） |
+| `worker/iter_rollout` | 超时路径改 `_kill_and_reap`（进程组 + 有界回收）；**回收不了 ⇒ `UnreapableChildError`**（本局**不就地重跑** —— 直接重跑会在同一 `w{i}/` 上再起一个写者）；主循环从 `as_completed` 改**带超时的 `wait`** + 停滞按 `STALL_WARN_SEC` 点名；**机器级停滞在轮内重投**（只补没产出的那几局，先 `_clean_attempt`；不睡、不报失败、不消耗调用方重试预算；次数缺省不限，`ENV_ROUND_RETRY_MAX` = 操作员退出阀） | `test_remote_iter::test_a_child_that_cannot_be_reaped_is_retried_in_round_never_failing`（替身：第一次收不了尸、第二次真跑桩脚本 ⇒ 整轮**跑成**；无上限 wait = 0；不走单局重跑；轮账带 `整轮重投=1 次`）· `::test_reap_stall_round_retry_is_unbounded_unless_operator_caps_it`（`ENV_ROUND_RETRY_MAX=2` ⇒ 重投两次后响亮上抛，每轮仍有界）· `::test_kill_and_reap_bounds_the_wait_and_books_the_leftover` · `::test_a_round_that_stalls_names_the_games_still_in_flight` |
+| `worker/serve_pool` | 熔断语义收窄为「**只停补位**」：暖 worker 继续服务、**一个都不许新建**；worker 也走 `popen_own_group` + `kill_process_tree`（孤儿吃 CPU ⇒ 机器越跑越卡） | `test_remote_serve_pool::test_breaker_stops_replenishing_but_keeps_serving_warm_workers` |
 | `remote/game_watch` | `STALL_WARN_SEC=120` + `stall_line()`：整轮停滞时点名（带**还在飞的局身份**）——进度行/心跳只在「有局结算」时才打，全卡住时它们**一起哑**（这就是 890s 里一行都没有的成因） | `test_game_watch::test_stall_line_names_the_games_still_in_flight` |
 | `remote/worker`（`worker_loop`） | 回落档（轮内已接住的不会到这里：只有操作员设了 `ENV_ROUND_RETRY_MAX` 或非 rollout 腿抛的同一个类才上抛）：`UnreapableChildError` ⇒ 还租约 + **立即**重领，**不睡、不**报 `report_job_failure`（那是把机器的病记在内容头上 ⇒ hub 落终局 failed ⇒ 停腿 ⇒ 反手把云机停掉） | `test_worker_reap_stall`（立即重领而不是等；反复连卡仍继续重领；**对照腿**：普通 `RetryableError` 同路） |
 | `rl/eval_local` | 同源的裸 `communicate()`（kill 之后无上限，读不到 EOF 就永远不返回）改成有界；收不回尾巴就响亮一行、按超时上抛 | 既有 `test_eval_local_capture` 覆盖硬顶语义 |
@@ -629,13 +629,13 @@ D 状态），`waitpid` 要等那个系统调用返回才收得到尸。后果�
 1. **两条 CPU 腿同时开满**（主因）。`remote/run_loop._maybe_cloud_eval` 在**本轮 checkpoint
    之后**提交评估，而**下一轮的第一步就是 rollout**（`_run_with_retries` → `run_job` →
    `run_iter_rollout`）⇒ 评估(220 局) 与 rollout(220 局) 是**同时**开跑。旧注释写的
-   「rollout 与 eval 交替跑、互不预留」（`platform_utils.cpu_worker_slots`、
+   「rollout 与 eval 交替跑、互不预留」（`common.platform_utils.cpu_worker_slots`、
    `offline_eval.default_slots`、`run_loop` 启用日志）**与代码事实不符**：两条腿同时各开满一份
    ⇒ 超订。而超订**还不止一层**：`cpu_worker_slots()` 用的 `os.cpu_count()` 在容器里报的是
    **宿主机**的核数（224），不是 cgroup 配额（96）⇒ 单人 220（= 按 224 算出来的）本身就是
    2.3× 超订，叠加 2× 后单局墙钟从 p90≈2.6s 推到 **5s 硬顶之外** ⇒ 成批被判超时。
    顺带解释了读数形态：`rc=<仍在运行>` + 尾行只有 native 一行 = **活着的慢局**，不是卡死的局。
-2. **池没有熔断/背压**（放大器）。`remote/serve_pool.ServePool` 一次超时 = ① kill worker
+2. **池没有熔断/背压**（放大器）。`worker/serve_pool.ServePool` 一次超时 = ① kill worker
    ② 这一局改一次性 `spawn`（再冷启动 bun）③ `_acquire` 补位又冷启动一个 = **一次超时放大
    成三份进程**；过载时「回退越多 → 进程越多 → 越慢」是正反馈。且 `_acquire` 对新 worker 的
    `ready.wait(60s)` 会**把一个游戏线程按 60s**（远超 5s 硬顶），而看门狗在这段里什么都打不出来
@@ -654,9 +654,9 @@ D 状态），`waitpid` 要等那个系统调用返回才收得到尸。后果�
 | 位置 | 改动 | 用例 |
 |---|---|---|
 | `remote/run_loop` | `EVAL_ALTERNATE_WAIT_SEC=300`：`_maybe_cloud_eval` 提交后**有界等本轮评估收线**再交回训练循环（超时只记一行 WARN，训练照常）——「交替」从注释假设变成代码保证；两者共用 `cpu_worker_slots()` 的口径因此才自洽 | `test_offline_eval_wiring::test_maybe_cloud_eval_waits_for_the_round_so_the_two_legs_really_alternate`、`::test_close_eval_drains_and_is_safe_when_disabled` |
-| `remote/serve_pool` | **熔断**：累计回退 ≥ `max(4, workers//4)` ⇒ 停用池、不再补位、余下局直接一次性（只打一行刹车现场）；回退**详情**只留前 5 条，且**带 kind/label/where**；`_acquire` 的补位就绪等待受**本次尝试硬顶**约束（等不到就交回调用方，不再固定 60s） | `test_remote_serve_pool::test_fallback_breaker_stops_rebuilding_workers`、`::test_fallback_detail_lines_are_capped_and_carry_kind_and_where`、`::test_acquire_gives_up_within_the_game_cap_instead_of_the_ready_timeout` |
-| `remote/iter_rollout` | hub 给的 `workers` 按**本机核数**夹取（旧状态只有 `MAX_WORKERS=256` 一道闸）——云机上 `220 → 92`；夹取进轮末日志；`NN_ROLLOUT_WORKERS_MAX` 可覆盖、`=0` = 不夹（实验用） | `test_remote_iter::test_rollout_workers_are_clamped_to_the_local_core_budget`、`::test_workers_cap_reads_the_container_quota_not_the_host`、`::test_workers_cap_falls_back_to_cores_on_garbage_env` |
-| `platform_utils` | **核数改走物理数目**：`effective_cores()` = min(cgroup 配额, 亲和掩码) 优先，两者都读不到才回落 `os.cpu_count()`；`cpu_worker_slots()` 缺省用它（96 核配额 ⇒ 92，不再是 220） | `test_platform_utils_cores::test_cgroup_v2_quota_converts_to_cores`、`::test_cgroup_v1_quota_converts_to_cores`、`::test_effective_cores_takes_the_smallest_signal_then_falls_back`、`::test_cpu_worker_slots_uses_the_effective_cores` |
+| `worker/serve_pool` | **熔断**：累计回退 ≥ `max(4, workers//4)` ⇒ 停用池、不再补位、余下局直接一次性（只打一行刹车现场）；回退**详情**只留前 5 条，且**带 kind/label/where**；`_acquire` 的补位就绪等待受**本次尝试硬顶**约束（等不到就交回调用方，不再固定 60s） | `test_remote_serve_pool::test_fallback_breaker_stops_rebuilding_workers`、`::test_fallback_detail_lines_are_capped_and_carry_kind_and_where`、`::test_acquire_gives_up_within_the_game_cap_instead_of_the_ready_timeout` |
+| `worker/iter_rollout` | hub 给的 `workers` 按**本机核数**夹取（旧状态只有 `MAX_WORKERS=256` 一道闸）——云机上 `220 → 92`；夹取进轮末日志；`NN_ROLLOUT_WORKERS_MAX` 可覆盖、`=0` = 不夹（实验用） | `test_remote_iter::test_rollout_workers_are_clamped_to_the_local_core_budget`、`::test_workers_cap_reads_the_container_quota_not_the_host`、`::test_workers_cap_falls_back_to_cores_on_garbage_env` |
+| `common.platform_utils` | **核数改走物理数目**：`effective_cores()` = min(cgroup 配额, 亲和掩码) 优先，两者都读不到才回落 `os.cpu_count()`；`cpu_worker_slots()` 缺省用它（96 核配额 ⇒ 92，不再是 220） | `test_platform_utils_cores::test_cgroup_v2_quota_converts_to_cores`、`::test_cgroup_v1_quota_converts_to_cores`、`::test_effective_cores_takes_the_smallest_signal_then_falls_back`、`::test_cpu_worker_slots_uses_the_effective_cores` |
 
 读数与口径：熔断阈值随池宽度走（220 宽 ⇒ 55；小池 4 条起步），熔断后 `summary()` 打
 `已熔断：余下 N 局走一次性`；`disabled` 后的局**不计进 fallback**（否则计数与日志被余下几百局灌满）。
@@ -691,9 +691,9 @@ D 状态），`waitpid` 要等那个系统调用返回才收得到尸。后果�
 | `tools/agent/sampler-agent.ts::CPUS` | `os.cpus().length` | `effectiveCores()` —— 它同时是**默认 `workers`** 和心跳/hello 上报的 `cpus`（控制台那行「N 核」） |
 | `tools/sim/perf-cmp-rollout.ts::detectPhysicalCores` | `availableParallelism() ?? os.cpus().length` | 再 `min(…, effectiveCores())` |
 | `dashboard/src/core/venv.ts::resolveTorchThreads` | `navigator.hardwareConcurrency` | `effectiveCores()`（仍 clamp 1..12） |
-| `nn-training/rl/cli.py --workers` | `min(os.cpu_count() or 4, 12)` | `min(effective_cores(), 12)` |
+| `nn-training/biz/cli.py --workers` | `min(os.cpu_count() or 4, 12)` | `min(effective_cores(), 12)` |
 | `tools/githook/nn-python-gate.sh` 的 `-n` | `os.cpu_count()` | `effective_cores()`（求值在 nn-training 目录内，`-S` 下 `sys.path[0]` = cwd）；`test_githook_scripts::test_gate_worker_count_scales_with_cores` 改成钉这条 |
-| `ipynb/rollout.cloudflared.ipynb`（并发度单元格）、`ipynb/battle-bc.ipynb`（EVAL_WORKERS） | `os.cpu_count()` | `effective_cores()`，拉不到 platform_utils 时才回落 `os.cpu_count()`（兜底语义保留） |
+| `ipynb/rollout.cloudflared.ipynb`（并发度单元格）、`ipynb/battle-bc.ipynb`（EVAL_WORKERS） | `os.cpu_count()` | `effective_cores()`，拉不到 common.platform_utils 时才回落 `os.cpu_count()`（兜底语义保留） |
 
 **夹取只降不升**：裸机/Windows/macOS 上没有 cgroup 配额可读 ⇒ `effective_cores()` 就等于宿主机
 核数，所有下游读数**逐位不变**（本机 16 核：`effectiveCores()==16`，与改前一致）。真机收益：
@@ -707,7 +707,7 @@ sampler-agent 上报的 `cpus` 从 224 变 96。
 垃圾格式、取小优先级、永不为 0、本机不变量 `1 ≤ effectiveCores() ≤ hostLogicalCores()`）。
 
 ---
-## §22 A 方案落地：节点侧 rollout **与**云机离线 eval 接入长驻池（`remote/serve_pool.py`）—— 1.45–1.47× / 1.19–1.39×，产物逐位不变（2026-09-23）
+## §22 A 方案落地：节点侧 rollout **与**云机离线 eval 接入长驻池（`worker/serve_pool.py`）—— 1.45–1.47× / 1.19–1.39×，产物逐位不变（2026-09-23）
 
 > 起因：§21 追证出「离线（云机自主段）三条腿全是逐局 spawn」；用户拍板走 **A 方案**（把 `--serve`
 > 长驻协议接进节点侧执行器），随后点名「云机离线 eval 也要池化」。本条 = 落地记录：改了什么、
@@ -720,9 +720,9 @@ sampler-agent 上报的 `cpus` 从 224 变 96。
 
 | 位置 | 内容 |
 |---|---|
-| **新增 `nn-training/remote/serve_pool.py`** | 节点侧池：协议与 `tools/sim/serve-loop.ts` **逐字对齐**（`__SERVE_READY__`/`__SERVE_OK__`/`__SERVE_ERR__`，stdin 一行 = 一局 argv 的 JSON **数组且不含入口路径**） |
-| `remote/iter_rollout.py` | **rollout 腿**：`run_iter_rollout` 建池（每 job 一个）→ `_run_one_game_with_retries` **先试池**、任何不确定立刻回退原本的逐局 `Popen`；轮末打一行 `serve_pool:` 汇总 |
-| `remote/offline_eval.py` + `rl/eval_local.py` | **云机离线 eval 腿**（同一份池，另一种消费方式）：`run_cloud_eval` 每轮建池 → 交给每局的 `run_local_eval_game` → 池里跑成就用它的输出行拼一个 `CompletedProcess`（该腿只把 stdout 当**失败尾巴**用，不需要逐局日志文件）；轮末 `finally` 关池 |
+| **新增 `nn-training/worker/serve_pool.py`** | 节点侧池：协议与 `tools/sim/serve-loop.ts` **逐字对齐**（`__SERVE_READY__`/`__SERVE_OK__`/`__SERVE_ERR__`，stdin 一行 = 一局 argv 的 JSON **数组且不含入口路径**） |
+| `worker/iter_rollout.py` | **rollout 腿**：`run_iter_rollout` 建池（每 job 一个）→ `_run_one_game_with_retries` **先试池**、任何不确定立刻回退原本的逐局 `Popen`；轮末打一行 `serve_pool:` 汇总 |
+| `remote/offline_eval.py` + `biz/eval_local.py` | **云机离线 eval 腿**（同一份池，另一种消费方式）：`run_cloud_eval` 每轮建池 → 交给每局的 `run_local_eval_game` → 池里跑成就用它的输出行拼一个 `CompletedProcess`（该腿只把 stdout 当**失败尾巴**用，不需要逐局日志文件）；轮末 `finally` 关池 |
 | 开关 / 白名单 | `NN_SERVE_POOL=0` 整轮退回旧行为；`SERVE_CAPABLE_SCRIPTS`（= `sampler-agent.ts::PERSIST_SERVE_ENTRIES` 的节点侧镜像）外的脚本**连池都不建** |
 | wire 形状 | **零改动**：池的计数只进节点本地返回字典（`out["serve_pool"]`），不进 `report` ⇒ hub 侧不需要任何改动、不可能因此拒收 job |
 | 复用粒度 | rollout = **一个 job = 一个权重版本**；eval = **一轮评估**（两个 `finally` 都关池）。权重在池里**不需要作 key**：每局的 `--weights` 在 `main(argv)` 里逐局重读 ⇒ agent 侧那套 key（含 wver）匹配在这里天然不需要，也没有「槽位重建」 |
@@ -839,12 +839,12 @@ bash tools/githook/nn-py-safe.sh -m pytest nn-training/tests/test_remote_serve_p
 
 | 腿 | 入口 | 执行方式 | 池？ |
 |---|---|---|---|
-| 逐轮上云（kind=iter） | `remote/worker.py:2236` | `remote/iter_rollout.py::run_iter_rollout` → **逐局 `subprocess.Popen([bun, export-rl-rollout.ts, …])`**（线程池控并发，:202） | ❌ |
+| 逐轮上云（kind=iter） | `remote/worker.py:2236` | `worker/iter_rollout.py::run_iter_rollout` → **逐局 `subprocess.Popen([bun, export-rl-rollout.ts, …])`**（线程池控并发，:202） | ❌ |
 | 半离线整段 / 全离线包（kind=run） | `remote/plan_run.py`（模块 docstring：每轮合一个与 kind=iter **逐字段同构**的 job 再喂回 `run_job`；CLI/入口在 `remote/run_loop.py`） | 同上（走的就是同一条 iter 路径） | ❌ |
-| 云机离线 eval | `remote/offline_eval.py` → `rl/eval_local.py::run_local_eval_game` | 逐局 Popen `bun export-eval-game.ts`（:596–630 组 cmd + `game_watch`） | ❌ |
+| 云机离线 eval | `remote/offline_eval.py` → `biz/eval_local.py::run_local_eval_game` | 逐局 Popen `bun export-eval-game.ts`（:596–630 组 cmd + `game_watch`） | ❌ |
 
 * **池只存在于 `tools/agent/sampler-agent.ts`**（`persistPool` + `PERSIST_SERVE_ENTRIES` 里的 `--serve` 常驻进程），
-  而它只在 **hub/agent 的 `/v1/task` 认领路径**（`dist_common.fetch_task`）上被用到。离线包/半离线段
+  而它只在 **hub/agent 的 `/v1/task` 认领路径**（`common.distribution.fetch_task`）上被用到。离线包/半离线段
   **不启动 agent**（`nn-training/**` 里 `sampler-agent` 只出现在注释里）⇒ 那条路永远拿不到池。
 * 池的**复用粒度 = 一次权重版本内**：`persistPool` 按 `key`（含 wver/argv）匹配，换 wver 后旧槽位被丢弃
   （`sampler-agent.ts:828–831`）⇒ 每轮（新 wver）每槽重起一次、轮内所有局复用 —— §20 的 1.59× 正是这个口径。
@@ -875,12 +875,12 @@ bash tools/githook/nn-py-safe.sh -m pytest nn-training/tests/test_remote_serve_p
 * **A ÷ B1 = 1.59×**（19.60 / 12.12 平均）；**A ÷ B2 = 1.05×**。
 * 分解：B1 每局比 A 多花 **~0.41 s**（p50 1277 → 866 ms）= bun 启动 + 模块加载 + 首用 attestation×3 + 权重加载
   —— 在 8 条 lane 上就是 100 局 × 0.41 s ÷ 8 = **5.1 s**，正好是 19.60 − 12.12 的差。
-* ⚠ **B2 不是可部署选项**：hub 用 `rl/cmd.build_rollout_cmd` **逐局一条 argv**（`remote/iter_rollout.py` 也是），
+* ⚠ **B2 不是可部署选项**：hub 用 `rl/cmd.build_rollout_cmd` **逐局一条 argv**（`worker/iter_rollout.py` 也是），
   批化只是用来把「池」与「批化」两个效应分开。两者都能干掉 per-game spawn ⇒ **池的独立价值很小（~5%）**，
   真正值钱的是「别每局新起进程」（~1.6×）。
 * 手机侧同口径（均为 8 并发、100 局）：**逐局直开 13.30 s / 8 局 = 2165 局/h**（§18 并发实验）
   对**池 104.80 s / 100 局 = 3435 局/h** ⇒ **1.59×**，与 PC 同值。
-  ⇒ **arm64/小设备节点不要跑「每局 spawn」的路径**（如 `remote/iter_rollout.py` 那种逐局 spawn）：
+  ⇒ **arm64/小设备节点不要跑「每局 spawn」的路径**（如 `worker/iter_rollout.py` 那种逐局 spawn）：
   它把启动成本按局重付，而 §19 的 hub/agent 路径没这一项。
 * ⚠ **本节曾写过一条错的手机推论**（「池在手机上 ≈2.1–2.3×」）：那是拿「8 进程各跑 1 局」的单局延迟
   （12.2–13.1 s，含 8 个启动同时抢 CPU）去比池的**稳态** p50（5.77 s）—— 两种结构不可比。
@@ -926,12 +926,12 @@ PC 侧新驱动 **`tools/perf/agent-bench.ts`** 走训练栈同一协议：
   而**延迟排序单调：4 < 6 < 8**（p90 6.7 / 9.1 / 13.4 s）；`rep` 内部离散：4 = 2.5% · 6 = 2.0% · **8 = 8.7%**
   （8 worker 的离散度也最大——小核被抢得最凶）。
 * **结论（手机上该开几个 worker）**：**6** —— 吞吐最优（两轮一致）、且正好等于 python 侧
-  `cpu_worker_slots(8) = 6`（`platform_utils.py` 无需改）；**8 是双输**（吞吐无优势、延迟与离散度最差）。
+  `cpu_worker_slots(8) = 6`（`common/platform_utils.py` 无需改）；**8 是双输**（吞吐无优势、延迟与离散度最差）。
   只有**在乎单局延迟**（eval、以及 `remote/game_watch.py` 那个 5s 首轮硬顶，见下）时才降到 **4**
   （p90 6.7 s vs 9.1 s，代价 ≈9% 吞吐）。
 * ⚠ **要核对的旋钮（本次未直接复现，但数摆着）**：`remote/game_watch.py` 的单局看门狗
   首次尝试硬顶 **5s**（重试放宽 ×4 = 20s，最多 3 次）——手机上 8w 的 **p50 已经是 5.77 s**
-  ⇒ 走**节点侧逐局 spawn** 的路径（`remote/iter_rollout.py`，以及 eval 的 `--eval-game-timeout-sec`）时
+  ⇒ 走**节点侧逐局 spawn** 的路径（`worker/iter_rollout.py`，以及 eval 的 `--eval-game-timeout-sec`）时
   会大量「首轮被砍→重跑」；而 hub/agent 路径（本节测的）trainer 只是等 HTTP，不受该硬顶影响。
   建议：arm64/手机节点跑 iter/eval 时显式给 `--remote-iter-game-timeout`（给 ≥ 60s）并同步 eval 那一侧。
 * **跨平台确定性**：四种配置（含两端）`总 tick` 全部 **272675**，`unpack 失败=0`、`503 重试=0`
@@ -1387,7 +1387,7 @@ p50 1.8s / p90 3.4s / p99 16.8s；eval `wallSec` p50 1.2~1.6s / p90 3.2~4.2s / p
 
 argv 不变 ⇒ out 目录不变 ⇒ 声明的 shard 集（`data_fp`）逐字节不变；副本会多产一个同
 (stage,seed) 的 shard 目录，直接撞上「实产集 == 声明集」那道门。竞速在**多节点**在线路径上
-成立是因为那里有 hub 侧候选表（`rl/queue_local.py::pick_race_target`）；云机离线只有一个节点，
+成立是因为那里有 hub 侧候选表（`trainer/queue_local.py::pick_race_target`）；云机离线只有一个节点，
 重试是同一效果的最小实现。
 
 ### 落地
@@ -1396,10 +1396,10 @@ argv 不变 ⇒ out 目录不变 ⇒ 声明的 shard 集（`data_fp`）逐字节
   四行日志（`slow_warn_line` / `hard_cap_line` / `retry_line` / `game_time_summary`）。
   **调用点一律模块属性读**（`game_watch.X`）——`from ... import X` 会抄出第二份绑定，
   patch 了 game_watch 那份而调用点还在读旧绑定就是静默的错口径。
-* `remote/iter_rollout.py`：`Popen` + 轮询代替一次 `wait(timeout)`（卡住期间就有告警）；
+* `worker/iter_rollout.py`：`Popen` + 轮询代替一次 `wait(timeout)`（卡住期间就有告警）；
   `_run_one_game_with_retries` 逐尝试算上限、清理上一次的半截 shard 后重跑；整轮收尾打
   **单局耗时分布**（p50/p90/p99/max + ≥5s 计数 + 重试次数 + 最慢 3 局点名）。
-* `remote/offline_eval.py` + `rl/eval_local.py`：同款看门狗（`run_eval_runner_capture` 的
+* `remote/offline_eval.py` + `biz/eval_local.py`：同款看门狗（`run_eval_runner_capture` 的
   Popen 轮询版保留 `TimeoutExpired` 的 captured output —— 诊断不被超时吃掉）；单局失败
   原地重跑，且 `wall_sec` 与 in-loop 腿同字段（两腿逐条可比）。
 * `remote/protocol.py`：`game_timeout_sec` 的注释口径改写（0 = 节点兜底，不是「不限」）；
@@ -1412,9 +1412,9 @@ argv 不变 ⇒ out 目录不变 ⇒ 声明的 shard 集（`data_fp`）逐字节
 
 ### 未做（明确留白）
 
-* **在线多节点腿**（`rl/dispatch.py`）不变：它有 `taskTimeoutSec`（缺省 900s）+ 竞速候选表 +
+* **在线多节点腿**（`trainer/dispatch.py`）不变：它有 `taskTimeoutSec`（缺省 900s）+ 竞速候选表 +
   超时冷却黑名单，是另一套成熟机制；本节只治云机离线这条腿。
-* **本机 in-loop eval**（`rl/eval_dispatch` / `rl/batch_eval`）的上限仍由调用方显式给：本机实测
+* **本机 in-loop eval**（`trainer/eval_dispatch` / `trainer/batch_eval`）的上限仍由调用方显式给：本机实测
   eval p90 已 3~8s（机器慢、并发高），拿 5s 当硬顶会频繁误杀；云机 96 核上的 p50 亚秒，
   两者不是同一档。
 
@@ -1427,7 +1427,7 @@ argv 不变 ⇒ out 目录不变 ⇒ 声明的 shard 集（`data_fp`）逐字节
 用户口径：**「rollout 和 eval 是交替进行的，所以不应该为 eval 保留 CPU 核数，两者都使用
 `max(cores − 4, cores × 0.8)`；只要留两三个核给数据回传任务就够了。」**
 
-* **唯一口径落地**：`platform_utils.cpu_worker_slots(cores=None)`（新）= `max(1, min(n, max(n−4,
+* **唯一口径落地**：`common.platform_utils.cpu_worker_slots(cores=None)`（新）= `max(1, min(n, max(n−4,
   floor(n×0.8))))`。96 核 → 92；40 → 36；16 → 12；8 → 6（留 2）；1 → 1。
 * **eval 侧**：`remote/offline_eval.default_slots()` 直接跟着它（**删掉**「扣 `plan.workers` 再卡
   64」的老口径——96 核上那是白掉整三成；也删掉 `DEFAULT_SLOTS_CAP/RESERVE` 两个常量）。
@@ -1461,12 +1461,12 @@ argv 不变 ⇒ out 目录不变 ⇒ 声明的 shard 集（`data_fp`）逐字节
 | **it177（手动 evalA）** | **339.2** | **`{"local-evalA": 400}`** |
 
 根因：**不是评估变慢，是手动触发绕开了节点池**。in-loop 的 ~60s 靠三台节点分摊 400 局；
-`rl/eval_a_once.py`（控制台 evalA 按钮 + 导入后自动评估的**唯一**启动点）自带一个
+`trainer/eval_a_once.py`（控制台 evalA 按钮 + 导入后自动评估的**唯一**启动点）自带一个
 `for stage, seed in todo:` **本机串行**循环 —— 339.2 / 400 = 0.848 s/局，与串行假设逐位吻合
 （`local-evalA` 这个 node 标签本身就是「自己跑的」指纹；同时刻并跑的 judge-414000 只贡献次要噪声）。
 
 修复（**用户 2026-09-22 指令：evalA 不要只在 local 跑，和 in-loop 等同对待**）：删掉自带的串行
-循环，改为**薄包装 `rl/eval_dispatch.py::dispatch_eval_round`**（= in-loop 的同一个
+循环，改为**薄包装 `trainer/eval_dispatch.py::dispatch_eval_round`**（= in-loop 的同一个
 `EvalDispatcher`），于是语料（`a_eval_seed_list` 双轨）、去重（`eval_done_keys(min_iter=1)`）、
 **节点门**（evalSupport / stageJsonSupport / bun 版本 / codeHash）、并行 ping + 并行权重下发、
 本机份额（`policy.evalLocalSlots`，缺省 4）、账本 schema（`node=<节点 id>` / `wallSec`）、
@@ -1479,8 +1479,8 @@ summary 落账全部与 in-loop 同一份实现 —— 手动行与 in-loop 行�
   权重解析按 `traj/it*/_eval_frozen_weights*.json` 找，同址才有得找）；本机局目录收工即清。
 - 本机 gate **立即置位**：手动评估不在训练的 PPO 窗口里，没有要让位的对象
   （不置位 = 本机槽位一路空等到 deadline）。
-- ⚠ 一个必须先摘掉的坑：`rl/queue.py` 遮蔽 stdlib `queue`（脚本目录被插进 `sys.path[0]`），
-  而节点派发要走 `dist_common.ping_nodes_parallel` / `post_weights_parallel` 的
+- ⚠ 一个必须先摘掉的坑：`trainer/queue.py` 遮蔽 stdlib `queue`（脚本目录被插进 `sys.path[0]`），
+  而节点派发要走 `common.distribution.ping_nodes_parallel` / `post_weights_parallel` 的
   `concurrent.futures`（内部 `import queue`）⇒ **导入派发器之前必须先 scrub 脚本目录**，
   否则一 ping 就炸（旧实现从不派发，所以这个坑从没暴露过；同 `eval_replays_once.py`）。
 
@@ -1511,7 +1511,7 @@ in-loop 同样如此），100 局 18s 完成；it177 折算 339s → **~50s**（
 **起因（用户指令）**：「mac 和 a95 节点都已经更新到最新代码，请做一轮真机 rollout/eval 测试」——
 补上 T2 DoD 唯一剩项（本机无法代跑的那一条）。
 
-**方法**（生产同源，不绕协议）：读 `rl-config.json` 的 mac/a95 → `dist_common.node_ping`（含
+**方法**（生产同源，不绕协议）：读 `rl-config.json` 的 mac/a95 → `common.distribution.node_ping`（含
 `check_code_hash`）→ `post_weights`（rollout/eval 两个 kind）→ `fetch_task` 真派任务（
 per-tick rollout `kind=rollout` + 干净评估 `mode=eval,kind=eval`）→ 解容器读 manifest。
 环境与课程逐字同源：`x20-clutch`（stage 2000、stageJson 577B、lives 1、level 0、hard、12900 ticks），
@@ -1748,16 +1748,16 @@ greedy eval 是节点侧跑的量最大的一类任务，这里看不见后端�
 
 ### 改动
 
-1. **`dist_common.post_weights_parallel`** + dispatch/eval_dispatch/batch_eval 接线：
+1. **`common.distribution.post_weights_parallel`** + dispatch/eval_dispatch/batch_eval 接线：
    ThreadPool 并行 POST，日志按配置顺序回放。`pure_collect_sec` 锚点**不变**
    （仍 = 全部节点权重就绪时刻）。
 2. **kept 短路径**：`GET /v1/weights/cached`（头 X-Weights-Sha256 / X-Kind）→
    命中则不传 body 直接 kept。旧 agent 404 → 回退完整 POST。trainer
    `post_weights` 内先探针；agent `sampler-agent.ts` 新增该 GET + 纯函数
    `weightsCachedInBucket`。
-3. **`resolve_tail_join_sec`**（`rl/dispatch.py`）：all_settled/halt 默认 **0**；
+3. **`resolve_tail_join_sec`**（`trainer/dispatch.py`）：all_settled/halt 默认 **0**；
    窗口到期未齐默认 5s（`tailGraceJoinSecDeadline`）。policy 可覆写（e2e 用 2s）。
-4. **同 it 波次权重复用**（本条追加）：`dist_common` 进程内 `_WEIGHTS_PUSHED[wver]→nodes`。
+4. **同 it 波次权重复用**（本条追加）：`common.distribution` 进程内 `_WEIGHTS_PUSHED[wver]→nodes`。
    `partition_weights_nodes` 拆 reuse/need；补波只对 need POST。ping/codeHash/bun
    exclude 时 `forget_weights_node`。`post_weights_parallel` 成功后自动 note。
 5. **边分发边开采 + rollout 口径**（用户 2026-09-19，DECISIONS §2026-09-19-rollout-pipeline-metric · 全文 → 本文件 §9）：
@@ -1770,7 +1770,7 @@ greedy eval 是节点侧跑的量最大的一类任务，这里看不见后端�
    `rollout_collect_aggregated` / `rollout_collect_waves`。
 6. **连续配额采集 VOLUME_RULE_V2**（用户 2026-09-19，DECISIONS
    §2026-09-19-volume-continuous-quota）：**退役离散补波**——串行 volume 路径改为
-   `loop_core._volume_collect_continuous`（S4 第十八刀后搬到 `rl/loop_volume.py::TrainingVolume`，
+   `loop_core._volume_collect_continuous`（S4 第十八刀后搬到 `trainer/loop_volume.py::TrainingVolume`，
 下文方法名与路径不变）：读账本 → 按分关差额+软停
    （`collected+inflight*est_s≥quota` 不再派）→ 小批派发 → 直到达标/game_cap/
    batch 安全阀。种子 `(it,stage,k)`；`resume.trailing_stage_samples_per_game`
@@ -1810,8 +1810,8 @@ greedy eval 是节点侧跑的量最大的一类任务，这里看不见后端�
 
 **为什么记这一笔**：用户检查训练流程后确认「eval 已藏进下一轮 PPO」——`_dispatch_delayed_eval(it)`
 排在 `_serial_ppo(it)` **之前**、读归档 W(it-1)、事后只软等（`select_delayed_eval_it(6)==5`）。
-但仍有**两段墙钟暴露在 PPO 之后**（写这段时都在 `rl/loop_steps.py` —— S4 第十七刀（2026-09-24）后这一簇（`_join_eval` /
-`_sweep_eval_tail` / `_dispatch_delayed_eval` 等 8 个成员）搬到了 `rl/loop_eval.py::TrainingEval`；
+但仍有**两段墙钟暴露在 PPO 之后**（写这段时都在 `trainer/loop_steps.py` —— S4 第十七刀（2026-09-24）后这一簇（`_join_eval` /
+`_sweep_eval_tail` / `_dispatch_delayed_eval` 等 8 个成员）搬到了 `trainer/loop_eval.py::TrainingEval`；
 下文方法名不变）：
 
 ```
@@ -1878,7 +1878,7 @@ stream 腿才可见），已在上一轮的流检查中记录，待单独处置�
 
 ### §2026-09-12-rollout-flag-bug（2026-09-12，local rollout 3命1星污染事件；已修、已记录、暂不重训）
 
-- **背景**：`nn-training/rl/cmd.py` `build_rollout_cmd` 用 `f"--{k}"` 拼 override 键
+- **背景**：`nn-training/biz/cmd.py` `build_rollout_cmd` 用 `f"--{k}"` 拼 override 键
   （`lives_override`/`player_level` 下划线），而 `tools/sim/export-rl-rollout.ts` 只认连字符
   `--lives-override`/`--player-level`（未知 flag 静默忽略）⇒ **local 直跑全程以 hard 缺省
   （3命1星）执行，远端节点以课程覆盖（1命0星）执行**。commit `1ee8955`（2026-09-12 16:55）
@@ -1914,14 +1914,14 @@ stream 腿才可见），已在上一轮的流检查中记录，待单独处置�
   `pure_collect_sec` = `last_settle − t_dist_start`（**含**与采集重叠的分发墙钟，端到端）。
   旧口径（2026-08-24：末局结算 − **全部**权重分发完毕）作废——在「先等全节点再开采」下
   把分发墙钟藏进 net/dist_phase，volume 多波时 dashboard 显示的 rollout 与真实采集周期脱节。
-- **实现**：`dist_common.post_weights_parallel(..., on_alive=)` 每节点 POST 成功即回调；
-  `rl/dispatch.py` 先起 local/reuse 采样线程，need 节点后台 POST 成功立刻 spawn（边分发边开采）。
+- **实现**：`common.distribution.post_weights_parallel(..., on_alive=)` 每节点 POST 成功即回调；
+  `trainer/dispatch.py` 先起 local/reuse 采样线程，need 节点后台 POST 成功立刻 spawn（边分发边开采）。
   `weights_dist_start_at` / `weights_dist_done_at` 作诊断锚点；`dist_phase_sec` 仍为
   ping→权重分发完成（与采集重叠部分不再从 rollout 里抠掉）。
 - **备选与否决**：保持「等全节点 ready 再开采 + pure_collect=末局−全 ready」——否，与用户
   端到端口径冲突，且 it19 实测串行分发 50s×多波白白空转；rollout 只记纯仿真（末局−各节点
   自 ready）——否，用户明确要「开始分发→样本齐」一体读数。
-- **落地**：`dist_common.rollout_collect_sec` / `partition_weights_nodes` / `_WEIGHTS_PUSHED`
+- **落地**：`common.distribution.rollout_collect_sec` / `partition_weights_nodes` / `_WEIGHTS_PUSHED`
   同 it 补波复用；dashboard `phaseSecs` 注释同步。DECISIONS 本条 = 口径变更备案（防再
   「优化」回旧锚点）。
 - **多波聚合（同日补充）**：`rl/reports.aggregate_rollout_collect`——volume 各波报告带
@@ -1951,7 +1951,7 @@ stream 腿才可见），已在上一轮的流检查中记录，待单独处置�
 - **违反后果**：任何把上一轮 `_report` 再 combine 进本轮采集的改动，都会让指标表
   rollout 列再次单调暴涨；任何让 volume 收官后 `_report` 停在 `{}` 的改动都会
   在 `_log_report` 打 KeyError 打死 trainer。
-- **落地**：`nn-training/rl/reports.py`（`adopt_volume_report`/`empty_collect_report`/combine 跳空）、
+- **落地**：`nn-training/biz/reports.py`（`adopt_volume_report`/`empty_collect_report`/combine 跳空）、
   `loop_core.py`（轮初复位 + continuous 恒 adopt）、`loop_steps.py`/`events.py`（.get）；
   回归 `tests/test_rl_reports.py::test_adopt_volume_report_*`。
 
@@ -1969,17 +1969,17 @@ stream 腿才可见），已在上一轮的流检查中记录，待单独处置�
   与 cadence 探针）也留在本机池。`goal-god` **不再分派**：远端 goal 执行器需要 goal 权重桶，
   而它按 kind='none' 分派时远端必然缺权重（旧实现看似分派、实则不可用）⇒ 要跑用 `--no-dist`。
 - **Python 侧三处扩展（都是加法；既有调用方行为逐字节不变）**：
-  1. `rl/batch_eval.py`：`kind` 由 policy 推（`KIND_FOR_POLICY`：intent-exec→'intent'、goal→'goal'、
+  1. `trainer/batch_eval.py`：`kind` 由 policy 推（`KIND_FOR_POLICY`：intent-exec→'intent'、goal→'goal'、
      nn/god→'rollout'），**上传与查询同 kind**（此前写死 'rollout' ⇒ intent/goal 一律 409）；
      `include_scorable`（默认关；True 时逐局行多带 agent 报告的原始 `scorable` = scoreV7 的完整输入，
      原样回传、不做字段级搬运 ⇒ 不可能两端漂移）；unit 的 `lives`/`level` 缺省 = **不覆盖**
      （difficulty/关卡默认说了算；写死 3 会把「难度默认」硬编码成常数，改难度即错）。
-  2. `rl/eval_m1.py`：`subprocess.run(text=True)` 补 `encoding="utf-8", errors="replace"`——父进程不传
+  2. `trainer/eval_m1.py`：`subprocess.run(text=True)` 补 `encoding="utf-8", errors="replace"`——父进程不传
      encoding 时按 locale 解码（zh-CN Windows = cp936），而 m1-eval 的 stderr 带中文 ⇒
      UnicodeDecodeError 被 `dispatch_eval_bg_m1` 的 except 吞成「clean eval failed (ignored)」，
      **干净评估静默消失**（2026-09-19 实测：本地/分布式两种调用都复现；与 gate_check §30 同类坑，
      那边靠 ensure_ascii 免疫）。
-  3. 两个一次性入口（m1 / course）把 `sys.stdout` 改道 stderr：训练栈 `rl.log.log()` 按设计写 stdout，
+  3. 两个一次性入口（m1 / course）把 `sys.stdout` 改道 stderr：训练栈 `biz.log.log()` 按设计写 stdout，
      而这两个入口的 stdout 是调用方的**产物通道**（m1 的 JSON 报告 / 课程行）——实测 `[dist] weights[…]`
      行混进 stdout 后 `json.loads(stdout)` 取 perGame 会**静默失败**（D5(a) 入账缺口）。
 - **验证（真集群 + 真消费方）**：
@@ -1987,7 +1987,7 @@ stream 腿才可见），已在上一轮的流检查中记录，待单独处置�
     `goal` 用形状合法的合成权重）：6 节点在线、配置 `rl.local_slots: 0` ⇒ 逐局 `node:…` 全远端、本地 0；
   - **跨 runner 对拍**（同 stage/seed/权重，dist=export-eval-game vs 本机池=sim-worker）：逐字段一致，
     唯一差异是 `firstKillTick` ±1 tick 的采样口径（scoreV7 suite 完全相同）；
-  - **训练循环真入口** `rl/eval_m1.py::run_clean_eval` 实跑 35 关 × 1 seed →
+  - **训练循环真入口** `trainer/eval_m1.py::run_clean_eval` 实跑 35 关 × 1 seed →
     `winRate=0.714 total=35 cleared=25 error=0 retries=0 perGame=35`；
   - 断点：dist 走 Python run dir 台账（二次运行 `already settled — skip`，0.0s；`--fresh` 才清），
     本机池仍走 TS ledger（`ledger resume: N/M already settled`）——两套各自完整，不叠加。

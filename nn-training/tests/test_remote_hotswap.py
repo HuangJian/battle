@@ -34,10 +34,10 @@ from pathlib import Path
 
 import pytest
 
-import platform_utils
+import common.platform_utils
 import remote.job_round as JR
+from common.platform_utils import sandbox_delete_blocked
 from common.protocol import CodeChangedError, ProtocolError
-from platform_utils import sandbox_delete_blocked
 from remote import worker as W
 from remote.worker import prune_job_dirs
 from tests.helpers import hub_seams
@@ -339,7 +339,7 @@ def test_prune_job_dirs_tolerates_failure(tmp_path: Path, monkeypatch: pytest.Mo
     def _boom(*a, **k):
         raise SystemExit("sandbox delete guard")
 
-    monkeypatch.setattr(platform_utils, "rmtree_best_effort", _boom, raising=True)
+    monkeypatch.setattr(common.platform_utils, "rmtree_best_effort", _boom, raising=True)
     logs: list[str] = []
     assert prune_job_dirs(work, keep=1, log=logs.append) == 0
     assert any("跳过" in m for m in logs)

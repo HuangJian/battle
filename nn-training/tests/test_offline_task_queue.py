@@ -43,8 +43,9 @@ from common.protocol import (
     OFFLINE_TASKS_PATH,
     PLAN_NAME,
 )
-from remote import hub_server, offline_boot
-from remote.hub_server import _HubQueue, make_server
+from hub import server as hub_server
+from hub.server import _HubQueue, make_server
+from remote import offline_boot
 
 TOKEN = "sekret"
 INIT = b'{"format":"nn-weights-json","params":{"w":1}}'

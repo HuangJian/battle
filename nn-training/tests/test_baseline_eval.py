@@ -28,9 +28,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import dist_common
-from rl.eval_local import BASELINE_EVAL_ITER, baseline_summary_landed, eval_done_keys
-from rl.loop_core import TrainingLoop
+import common.distribution
+from biz.eval_local import BASELINE_EVAL_ITER, baseline_summary_landed, eval_done_keys
+from trainer.loop_core import TrainingLoop
 
 WVER = "a" * 16
 
@@ -134,7 +134,7 @@ def test_start_it_zero_rejected() -> None:
     """--start-it 0 与基线的 dist 键空间（{runId}.0）撞键 → 启动期响亮拒绝；≥1 放行。"""
     import types
 
-    from rl.config import validate_args
+    from biz.config import validate_args
 
     with pytest.raises(SystemExit):
         validate_args(types.SimpleNamespace(start_it=0))
@@ -197,7 +197,7 @@ def test_dispatch_retries_until_landed(
         calls.append({"bun": bun, "rl_path": rl_path, "traj_dir": traj_dir, "cfg": cfg, **kw})
         return _FakeThread(False)  # 线程立刻结束 → 下一轮可重试
 
-    monkeypatch.setattr("rl.eval_dispatch.dispatch_eval_bg", _fake_bg)
+    monkeypatch.setattr("trainer.eval_dispatch.dispatch_eval_bg", _fake_bg)
 
     loop._maybe_dispatch_baseline_eval(NODES)  # 首轮（it1）：未落账 → 派
     assert len(calls) == 1
@@ -219,7 +219,7 @@ def test_dispatch_retries_until_landed(
     loop._baseline_eval_thread = None
 
     # 落账（同 wver 的 it0 summary）→ 停止派发（缓存命中，连账都不再扫）
-    wver = dist_common.weights_fingerprint(str(bc))
+    wver = common.distribution.weights_fingerprint(str(bc))
     (tmp_path / "eval_log.jsonl").write_text(
         json.dumps(
             {"event": "eval_summary", "iter": 0, "wver": wver[:16], "games": 1, "wins": 0}
@@ -249,7 +249,7 @@ def test_dispatch_failure_never_raises(tmp_path: Path, monkeypatch: pytest.Monke
     def _boom(*_a, **_k):
         raise RuntimeError("dist config unreadable")
 
-    monkeypatch.setattr("rl.eval_dispatch.dispatch_eval_bg", _boom)
+    monkeypatch.setattr("trainer.eval_dispatch.dispatch_eval_bg", _boom)
     loop._maybe_dispatch_baseline_eval(NODES)  # 不抛即过
     assert loop._baseline_eval_thread is None
 
@@ -263,7 +263,7 @@ def test_dispatch_baseline_writes_iter0_rows(
     bc 与 it1 的 args.out 指纹本就可能相同），若按 wver 去重会把基线局吞成"已评估"，
     it0 行永远不落盘。
     """
-    import rl.eval_dispatch as ed
+    import trainer.eval_dispatch as ed
 
     work = tmp_path / "baseline"
     work.mkdir()
@@ -271,7 +271,7 @@ def test_dispatch_baseline_writes_iter0_rows(
     bc.write_text('{"arch":{}}', encoding="utf-8")
     traj = work / "it1"
     traj.mkdir()
-    wver = dist_common.weights_fingerprint(str(bc))
+    wver = common.distribution.weights_fingerprint(str(bc))
     (work / "eval_log.jsonl").write_text(
         json.dumps(
             {"event": "eval", "iter": 1, "wver": wver[:16], "stage": 2000, "seed": 860001}

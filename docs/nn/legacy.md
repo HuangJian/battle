@@ -33,7 +33,7 @@
 ## §21 tail fan-out 反向竞速修复 + 三节点就绪验证（2026-08-27）
 
 ### 21.1 背景
-rollout 尾部分发（`nn-training/rl/queue.py` v3.7 tail fan-out）在末段把尾部任务重复派发
+rollout 尾部分发（`nn-training/trainer/queue.py` v3.7 tail fan-out）在末段把尾部任务重复派发
 竞速取先返回。此前只修了「fan-out 副本迟到被 duplicate 拒收后误回队」的一面（主副本
 已 settled → inflight key 被删 → 副本落入正常失败分支 → 无限循环）。单节点 20 局测试
 暴露**反向竞速**：fan-out 副本抢先结算、**主副本**（`fanout_copy=False`）迟到被判
@@ -93,7 +93,7 @@ PASS gate）。**ε=0.3 过猛**——自喂注入把重防御类（RETURN_DEFEN
 回 ~68-70%），或仅对非 HUNT 类做 SS 注入。
 
 ### 21.6 v3.9 动态节点发现（用户需求 2026-08-27）
-跑批中途上线的 agent 也能贡献算力：rollout（`rl/queue.py`）与 m1-eval
+跑批中途上线的 agent 也能贡献算力：rollout（`trainer/queue.py`）与 m1-eval
 （`tools/sim/m1-eval.ts` runHybrid）都加了周期 agent 发现。
 
 - **rollout**：rescan 线程周期（policy `agentRescanSec`，默认 120s）ping 配置里未在跑的
@@ -168,7 +168,7 @@ wins 底料 fire 高度饱和）。
 ### 19.1 打包改动（一次 MAJOR，全部落地并提交 f4afb43）
 - **① item 头删除**：动作空间 10→7（MASK_DIM 7）；actions→(N,2) [move,fire]、masks→(N,7)。
   TS（infer/policy-input/npy/observations）与 Python（schema/model/student_model/ppo/
-  train_bc/dataset/npyio/validate_export/eval_bridge/dist_common/rl-model/rl·stream）锁步。
+  train_bc/dataset/npyio/validate_export/eval_bridge/common.distribution/rl-model/rl·stream）锁步。
 - **② SCALAR_DIM 24→19**（删 guard/frenzy/rewind stock + frenzyActive/frenzyShotsLeft）；
   **SCALAR_X_INDICES [20,23]→[15,18]**（mirrorX 索引锁步 + 反例测试 test_mirror_scalar_lockstep）。
 - **③ wins-only 口径**（export-godai-labels 默认 --wins 1）；near-miss 守家帧超采样默认 3×
@@ -239,7 +239,7 @@ wins 底料 fire 高度饱和）。
 > 用户指出的容量缺口：eval 只派 HTTP 节点，PPO/采集收尾后训练机 idle 无贡献；
 > 极端情形（无可用节点）整轮评估直接 skip。
 
-- **实现**（rl/eval_dispatch.py + run_rl.py）：① 派发时刻把 rl_path 复制为
+- **实现**（trainer/eval_dispatch.py + run_rl.py）：① 派发时刻把 rl_path 复制为
   traj_dir/_eval_frozen_weights.json 冻结快照（主循环 PPO 写回会原地覆盖
   rl_path，本地局读错版本=对账灾难）；② `run_local_eval_game` 本机直跑
   export-eval-game.ts，补 wver/mode 戳后走同一 validate_eval_result 与台账聚合，
@@ -283,7 +283,7 @@ wins 底料 fire 高度饱和）。
 - **两个潜伏 bug 修复**（评审独立复核属实）：① tempo 曾除以 `w.tempo(=0.026)`
   → 恒饱和无梯度；② accuracy 因旧 DEFAULT_LOSS_WEIGHTS 无键恒 null。现统一用
   `DEFAULT_STAGE_REFS`（kpmRef=8 / accuracyRef=0.3）。
-- **课程化**（rl/course.py + run_rl.py）：`--curriculum-stages/start/every/grow`，
+- **课程化**（biz/course.py + run_rl.py）：`--curriculum-stages/start/every/grow`，
   纯函数 `(order_len,it)` 确定性扩展，种子流 `[rotateSeed,0xC0E,it]` 键控，
   断点续跑安全；排序取自逐关干净评估胜率（与数据重算一致，差异在平局噪声内）。
 - **PPO**：GAMMA 0.99→0.995（K=10 决策间隔下信用时域 16.7s→33s，守家是长时域
@@ -410,7 +410,7 @@ run_rl.py 从 ~1700 行瘦身为 ~500 行入口（CLI + 迭代主循环 + 权重
 编排逻辑抽取至 `rl/`：course（课程纯函数）/ queue（中央队列+本地回退）/
 stream（流式波次）/ eval_dispatch（干净评估）/ resume（断点对账）/
 reports（聚合）/ breaker（F4 纯逻辑）/ log。入口必须留在顶层——启动器只接受
-裸 .py 文件名；`rl/queue.py` 自算 REPO_ROOT（parents[2]）。run_rl 保留全部
+裸 .py 文件名；`trainer/queue.py` 自算 REPO_ROOT（parents[2]）。run_rl 保留全部
 re-export，旧引用路径不破。
 
 ### 13.2 可测试性抽取与潜在缺陷修复
@@ -510,7 +510,7 @@ SearchReplace 且改后必 py_compile。
 - `sampler-agent.ts`：`mode=eval` 任务路由 + ping/status `evalSupport` 能力声明 +
   manifest 回显 mode；权重切换删除改尽力而为 + retention 清扫（修在飞评估局
   Windows EBUSY 竞态——此前切换只在 140/140 全结算后发生故未暴露）。
-- `dist_common.py`：`fetch_task(mode=)` + `validate_eval_result()`。
+- `common/distribution.py`：`fetch_task(mode=)` + `validate_eval_result()`。
 - `run_rl.py`：rollout 返回后 spawn 守护线程；语料 `EVAL_SEEDS=(860001,860002)` ×35 关；
   收账 `tmp/rl-traj/eval_log.jsonl`（逐局行 + eval_summary 行，按 wver16 去重断点不重评）。
 

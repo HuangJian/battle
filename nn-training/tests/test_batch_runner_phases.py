@@ -30,10 +30,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.batch_runner as br
-from rl.batch_store import BatchStore
+import trainer.batch_runner as br
+from trainer.batch_store import BatchStore
 
-SRC = (ROOT / "rl" / "batch_runner.py").read_text(encoding="utf-8")
+SRC = (ROOT / "trainer" / "batch_runner.py").read_text(encoding="utf-8")
 TREE = ast.parse(SRC)
 CLS = next(
     n for n in TREE.body if isinstance(n, ast.ClassDef) and n.name == "BatchEvalRunner"
@@ -376,7 +376,7 @@ def test_open_unit_short_circuits_when_every_pair_is_settled(tmp_path, monkeypat
     weights = tmp_path / "w.json"
     weights.write_bytes(b"{}")
     wver = "deadbeef" * 8  # 指纹固定 => `key16 = wver[:16]` 可预期
-    monkeypatch.setattr(br.dist_common, "weights_fingerprint", lambda p: wver)
+    monkeypatch.setattr(br.common.distribution, "weights_fingerprint", lambda p: wver)
     log_path.write_text(
         "\n".join(
             [

@@ -1,4 +1,4 @@
-"""R2c-3：预采让位判据（`rl/rollout_phase.precollect_ready`）。
+"""R2c-3：预采让位判据（`trainer/rollout_phase.precollect_ready`）。
 
 为什么单独立一组用例：这是「长等待真让位」三处里**唯一已装**的一处，而它的正确性全靠
 两条性质，两条都不是「看起来对」能保证的：
@@ -27,8 +27,8 @@ if str(ROOT) not in sys.path:
 
 import pytest
 
-import dist_common
-import rl.rollout_phase as rp
+import common.distribution
+import trainer.rollout_phase as rp
 
 
 class _Child:
@@ -57,8 +57,8 @@ def _as_popen(child: _Child) -> subprocess.Popen[bytes]:
 def _fake_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """把「盘上事实」钉成常量：半波阈值 = 4（`streamWaveGames=8`）。"""
 
-    monkeypatch.setattr(dist_common, "load_dist_config", lambda: {"policy": {"streamWaveGames": 8}})
-    monkeypatch.setattr(dist_common, "weights_fingerprint", lambda _p: "w0")
+    monkeypatch.setattr(common.distribution, "load_dist_config", lambda: {"policy": {"streamWaveGames": 8}})
+    monkeypatch.setattr(common.distribution, "weights_fingerprint", lambda _p: "w0")
     monkeypatch.setattr(rp, "precollect_snapshot_wver", lambda _p, _it: "w0-extra")
 
 

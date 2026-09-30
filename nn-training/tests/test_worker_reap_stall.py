@@ -29,9 +29,9 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote import iter_rollout as _iter_rollout
 from remote import job_round as JR
 from remote import worker as W
+from worker import iter_rollout as _iter_rollout
 
 #: 一轮之内与 hub 打交道的那批名字，**实现与调用点都在 `remote/job_round.py`**（S4 第十刀把
 #: `run_one_round` 从 worker 搬走）。所以要拦它们必须 patch **该模块**：patch `remote.worker.X`

@@ -18,10 +18,10 @@ import time
 
 import pytest
 
-import rl.eval_local as eval_local
-from platform_utils import KILL_REAP_SEC
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from rl.eval_local import run_eval_runner_capture
+import biz.eval_local as eval_local
+from biz.eval_local import run_eval_runner_capture
+from common.platform_utils import KILL_REAP_SEC
+from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 #: 故意混字节：UTF-8 的中文 + 单独的 0xaf（在 gbk 与 utf-8 下都不是合法序列）。
 _CHILD = (
@@ -50,7 +50,7 @@ def test_capture_helper_is_what_the_runner_uses() -> None:
     """接线：本机局的输出捕获必须走这个 helper（否则 encoding 又悄悄丢了）。"""
     from pathlib import Path
 
-    src = (Path(__file__).resolve().parent.parent / "rl" / "eval_local.py").read_text(
+    src = (Path(__file__).resolve().parent.parent / "biz" / "eval_local.py").read_text(
         encoding="utf-8"
     )
     # 调用点带 cwd（云机离线评估要跑在 TS 树根上）+ 慢局告警的身份/落点（2026-09-22）
@@ -134,7 +134,7 @@ def test_capture_hard_cap_kills_and_keeps_output(monkeypatch) -> None:
 class _UnreapablePopen:
     """SIGKILL 之后也回收不了的子进程替身（D 状态没法在单测里造出来，同 `test_remote_iter`）。
 
-    契约只有「pid / communicate(timeout) / kill / poll」四条（`platform_utils` 就是按 Any 写的）。
+    契约只有「pid / communicate(timeout) / kill / poll」四条（`common.platform_utils` 就是按 Any 写的）。
     pid 取一个不可能存在的值 ⇒ `killpg` 走 ESRCH 分支，**绝不会**打到自己这个进程组。
     """
 
@@ -174,7 +174,7 @@ def test_capture_distinguishes_an_unreapable_child_from_a_plain_timeout(monkeypa
     两者混成一个 `TimeoutExpired`，调用方就只能二选一：要么把机器问题记成内容失败，要么把
     内容失败当成机器问题无限重投 —— 两条都是错的。
     """
-    import platform_utils as pu
+    import common.platform_utils as pu
     from common import game_watch
     from common.protocol import UnreapableChildError
 

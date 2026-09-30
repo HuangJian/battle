@@ -30,7 +30,7 @@ xdist（见 tools/githook/nn-python-gate.sh 的分支）。判据是「有没有
     python -m pytest tests/ e2e/ -p tools.forkdist --forkdist 12 --timeout=60
     python -m pytest tests/ e2e/ -p tools.forkdist --forkdist auto --timeout=60   # = 机器核数
 
-`auto` = `platform_utils.effective_cores()`（cgroup 配额/亲和掩码优先，与门禁的 `NPROC` 同源）；
+`auto` = `common.platform_utils.effective_cores()`（cgroup 配额/亲和掩码优先，与门禁的 `NPROC` 同源）；
 `Makefile` 的 `NPROC ?= auto` 与 `task.py` 的 `-n auto` 就是靠它原样搬过来的。
 """
 
@@ -94,7 +94,7 @@ def _worker_count_option(value: str) -> int:
 
 
 def _resolve_workers(raw: int) -> int:
-    """把 `auto` 解析成核数。**只看 `platform_utils.effective_cores()`**。
+    """把 `auto` 解析成核数。**只看 `common.platform_utils.effective_cores()`**。
 
     为什么不 `os.cpu_count()`：容器里它报的是**宿主机**核数（本仓 2026-09-25 云机卡死那笔账
     ——Kaggle 224 vs cgroup 配额 96），而「本机几核」在本仓只允许一个答案，就是
@@ -104,10 +104,10 @@ def _resolve_workers(raw: int) -> int:
     if raw != _AUTO:
         return raw
     try:
-        from platform_utils import effective_cores
+        from common.platform_utils import effective_cores
     except ImportError as e:  # 插件被脱离仓库使用（cwd 不在 nn-training）
         raise pytest.UsageError(
-            "--forkdist auto 需要 nn-training/platform_utils.effective_cores()"
+            "--forkdist auto 需要 nn-training/common/platform_utils.py::effective_cores()"
             "（请从 nn-training 目录运行 pytest，或直接给一个明确的正整数）"
         ) from e
     return int(effective_cores())

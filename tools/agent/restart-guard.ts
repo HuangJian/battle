@@ -8,7 +8,7 @@
  *
  * 处置：进程启动后 RESTART_GRACE_MS 内拒绝一切 /v1/restart（409）——旧实例退出
  * 回声与协调器重扫回声都被吸收，协调器下轮 rescan 再试。与训练侧
- * dist_common.request_upgrade_guarded（跨代去重 + 脏工作区拒发）构成双层收敛。
+ * common.distribution.request_upgrade_guarded（跨代去重 + 脏工作区拒发）构成双层收敛。
  */
 /** grace 窗口：覆盖协调器 rescan 周期（~15s）的两个周期，实测回声 ≤1 个周期到达。 */
 export const RESTART_GRACE_MS = 30_000

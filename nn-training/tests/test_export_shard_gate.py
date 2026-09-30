@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from rl.loop_steps import _gate_round_shards
+from trainer.loop_steps import _gate_round_shards
 
 
 def _gate(**kw: object) -> list:

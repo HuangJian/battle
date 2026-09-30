@@ -33,7 +33,7 @@ afterAll(() => {
   rmSync(curriculaRoot, { recursive: true, force: true })
 })
 
-/** 一局压缩画像（字段名与单局 manifest 逐字相同，见 `rl/reports.py::_PER_GAME_FIELDS`）。 */
+/** 一局压缩画像（字段名与单局 manifest 逐字相同，见 `biz/reports.py::_PER_GAME_FIELDS`）。 */
 function game(stage: number, seed: number) {
   return {
     stage,

@@ -1,5 +1,5 @@
 /**
- * cores.ts — 「本机到底有多少核」的**唯一口径**（TS 侧镜像 `nn-training/platform_utils.py`
+ * cores.ts — 「本机到底有多少核」的**唯一口径**（TS 侧镜像 `nn-training/common/platform_utils.py`
  * 的 `effective_cores`，两边必须同口径：谁在容器里都按**配额**算，不按宿主机报的大数字算）。
  *
  * 为什么需要它（2026-09-25 云机 rollout 卡死取证，见 docs/nn/runtime-opt.md §23）：
@@ -120,7 +120,7 @@ export function resolveEffective(signals: Array<number | null>, host: number): n
 /**
  * 本进程**真正能用**的核数（单一口径）。
  *
- * 与 `nn-training/platform_utils.py::effective_cores` 逐条同源——改一边就得改另一边
+ * 与 `nn-training/common/platform_utils.py::effective_cores` 逐条同源——改一边就得改另一边
  * （Kaggle 上 224 vs 96 的读数就是这条口径的考题）。
  */
 export function effectiveCores(): number {

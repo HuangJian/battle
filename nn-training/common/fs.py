@@ -5,7 +5,7 @@
 
 | 原语 | 曾有两份 | 为什么必须唯一 |
 |------|---------|---------------|
-| 原子写 | `remote/artifacts.atomic_write_bytes` ↔ `remote/hub_server._write_bytes` | 「半截权重比没有权重更危险」「半截的记账文件会把续跑判据带偏」——两处都写了这句，而实现必须是 tmp + `os.replace` 这一种写法才成立 |
+| 原子写 | `remote/artifacts.atomic_write_bytes` ↔ `hub.server._write_bytes` | 「半截权重比没有权重更危险」「半截的记账文件会把续跑判据带偏」——两处都写了这句，而实现必须是 tmp + `os.replace` 这一种写法才成立 |
 | 追加 JSONL | `rl/bc_ledger.append_ledger` ↔ `remote/hub_client._append_ledger` | 账本是**多进程追加**的：父目录创建、`ensure_ascii=False`、单行 JSON + 换行，任一处漏掉就让读侧解析出坏行 |
 | tar 解包 | `remote/worker.unpack_opt_tar` ↔ `remote/hub_client._extract_tar` | 都要兼容 Py<3.12（`extractall` 的 `filter=` 参数），漏掉就 `TypeError` |
 

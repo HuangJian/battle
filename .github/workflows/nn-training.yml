@@ -63,7 +63,7 @@ jobs:
       # 2026-09-15：原为 `continue-on-error: true` + 一句注释里的错误数快照。
       # 那个数字是 733b66f（首次加 CI）时的快照，此后 mypy 目标升到 3.12（正是那次
       # 消灭了大批 site-packages 假红）+ 几处放宽，真实错误数一路降到 1；最后一条
-      # （rl/reward_library.py 的 no-any-return）也已修掉 ⇒ 现在要求**零错误**。
+      # （biz/reward_library.py 的 no-any-return）也已修掉 ⇒ 现在要求**零错误**。
       # 零容忍比「计数基线」更强（换一个错误也算红），也不再要一份会腐烂的数字。
       # **不要再加 continue-on-error** —— 那等于把会腐烂的基线又请回来。
       - name: mypy typecheck

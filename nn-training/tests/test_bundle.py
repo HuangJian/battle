@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from biz.plan import build_plan, dump_plan, planned_iters
 from common.protocol import (
     ProtocolError,
     encode_opt_tar,
@@ -41,7 +42,6 @@ from remote.bundle import (
     read_bundle_index,
 )
 from remote.run_loop import run_standalone
-from rl.plan import build_plan, dump_plan, planned_iters
 
 INIT_W = b'{"format":"nn-weights-json","params":{"w":0}}'
 CODE_ZIP = b"PK\x03\x04" + b"py-code" * 50

@@ -1,7 +1,7 @@
 """test_batch_store_txn — B 层「台账唯一所有者」的契约守卫（S26/B2，plan §5.5.5）。
 
-2026-09-25：`rl/batch_eval.py` 拆分的第二步 B2 —— 台账 / 请求面收进新模块
-`rl/batch_store.py` 的 `BatchStore`（**一次具名转移 = 一次事务 = 一次落盘**）。
+2026-09-25：`trainer/batch_eval.py` 拆分的第二步 B2 —— 台账 / 请求面收进新模块
+`trainer/batch_store.py` 的 `BatchStore`（**一次具名转移 = 一次事务 = 一次落盘**）。
 
 本文件钉两类东西，两者都不是「搬得对」：
 
@@ -31,17 +31,17 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.batch_eval as be
-import rl.batch_store as bs
+import trainer.batch_eval as be
+import trainer.batch_store as bs
 from tests.helpers import source_scan
 
-RL = ROOT / "rl"
+RL = ROOT / "trainer"
 STORE_PATH = RL / "batch_store.py"
 EVAL_PATH = RL / "batch_eval.py"
 STORE_SRC = source_scan.read_text(str(STORE_PATH))
 EVAL_SRC = source_scan.read_text(str(EVAL_PATH))
 
-#: 搬进 store 的公开名（**必须**经 `rl.batch_eval` 再导出 ⇒ 调用点与测试一行不改）。
+#: 搬进 store 的公开名（**必须**经 `trainer.batch_eval` 再导出 ⇒ 调用点与测试一行不改）。
 REEXPORTED = (
     "DEFAULT_DATA_ROOT",
     "REQUESTS_DONE_FILE",
@@ -193,8 +193,8 @@ def _pub_counter(monkeypatch) -> dict[str, int]:
 def test_store_members_are_defined_only_in_the_new_home() -> None:
     store, old = _top_bound(STORE_SRC), _top_bound(EVAL_SRC)
     for name in ("BatchStore", *[n for n in REEXPORTED if not n.isupper()], "read_requests"):
-        assert name in store, f"{name} 不在 rl/batch_store.py"
-        assert name not in old, f"{name} 仍定义在 rl/batch_eval.py"
+        assert name in store, f"{name} 不在 trainer/batch_store.py"
+        assert name not in old, f"{name} 仍定义在 trainer/batch_eval.py"
 
 
 def test_facade_reexports_are_the_same_objects() -> None:
@@ -235,7 +235,7 @@ def test_status_assignments_live_only_in_the_named_transitions() -> None:
         owners = _subscript_store_owners(src, "status")
         if owners:
             hits[p.relative_to(ROOT).as_posix()] = owners
-    assert hits == {"rl/batch_store.py": sorted(STATUS_WRITERS)}, hits
+    assert hits == {"trainer/batch_store.py": sorted(STATUS_WRITERS)}, hits
 
 
 def test_ledger_publish_is_the_single_writer() -> None:
@@ -264,8 +264,8 @@ def test_ledger_publish_is_the_single_writer() -> None:
         if owners:
             callers[p.relative_to(ROOT).as_posix()] = sorted(set(owners))
     allowed = [*sorted(TRANSITIONS), "write_batches"]
-    assert set(callers) == {"rl/batch_store.py"}, callers
-    assert set(callers["rl/batch_store.py"]) <= {"BatchStore." + t for t in allowed} | {"write_batches"}, (
+    assert set(callers) == {"trainer/batch_store.py"}, callers
+    assert set(callers["trainer/batch_store.py"]) <= {"BatchStore." + t for t in allowed} | {"write_batches"}, (
         callers
     )
     # 台账文件的字面写手：只有 `_publish` 那一段出现 `os.replace` + `BATCHES_FILE`

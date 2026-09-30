@@ -88,7 +88,7 @@ function assertCourseExists(course: string): void {
 
 /** 课程文件声明的 `iters`（终点轮数）；读不到 / 没声明 → null。
  *
- *  与 python 侧导出腿的守卫同口径（`rl/loop_export.py::_export_offline_bundle`：`--export-bundle`
+ *  与 python 侧导出腿的守卫同口径（`trainer/loop_export.py::_export_offline_bundle`：`--export-bundle`
  *  需要课程声明 iters——**任务包里的计划必须有终点**，不能靠云机猜）：离线（云机接手）模式 =
  *  跑到课程末尾，没有有限终点云机会一直跑下去。开课预校验在这里读课程文件，**在 trainer
  *  接触坏配置之前**就把配备错拦下。
@@ -265,7 +265,7 @@ export function courseRunnerFacts(course: string, bc: boolean): CourseRunnerFact
  *
  *  为什么在开课那一刻补（2026-09-24）：离线档 = `rollout_src:'run'`（**本机不跑训练**），
  *  于是 it0 读数两条产路都不通——云机侧 `remote/offline_eval.CloudEvalPlan.due()` 对
- *  `it < 1` 恒 False，而本机主循环的基线派发（`rl/loop_baseline.py::_maybe_dispatch_baseline_eval`）
+ *  `it < 1` 恒 False，而本机主循环的基线派发（`trainer/loop_baseline.py::_maybe_dispatch_baseline_eval`）
  *  压根不在场上。缺了它，控制台的配对基线退化成「第一条 eval 轮」（随 run 起点漂移，
  *  跨腿不可比：`iters.ts` 的 `evalIters.includes(0) ? 0 : evalIters[0]`）。
  *

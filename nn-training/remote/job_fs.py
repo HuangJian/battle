@@ -86,7 +86,7 @@ def prune_job_dirs(
     if len(dirs) <= keep:
         return 0
     dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
-    from platform_utils import rmtree_best_effort
+    from common.platform_utils import rmtree_best_effort
 
     removed = 0
     for d in dirs[keep:]:

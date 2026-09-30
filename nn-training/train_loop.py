@@ -96,7 +96,7 @@ def main() -> None:
     # tests/subproc_util.run_utf8 严格按 UTF-8 解码即读线程死亡、stdout 变 None
     # （test_train_loop_cli_accepts_course_flag 读 proc.stdout 时炸）。契约见
     # tests/subproc_util.py docstring：**每个 CLI 入口**都要调。
-    from platform_utils import force_utf8_stdio
+    from common.platform_utils import force_utf8_stdio
 
     force_utf8_stdio()
     ap = argparse.ArgumentParser(description="Continuous multi-round BC training")

@@ -4,7 +4,7 @@
 （响亮），**不**给兼容层。本文件钉三件事：
 
   ① 端点已删（404）——不保留别名；
-  ② 生产代码（`remote/`、`rl/`、根入口）引用 `"/jobs/next"` **零命中**；
+  ② 生产代码（`hub/`、`remote/`、`common/`、根入口）引用 `"/jobs/next"` **零命中**；
   ③ 测试侧统一走 `tests/helpers/hub_poll.py`（R2-8：10 个文件机械替换，不各写一份分叉）。
 """
 
@@ -19,7 +19,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.hub_server import _HubQueue, make_server
+from hub.server import _HubQueue, make_server
 from tests.helpers.hub_poll import hub_poll
 
 #: 生产代码（非测试）搜索根：这些一律不得再引用退役端点。
@@ -28,8 +28,8 @@ _PROD_FILES = [
     # S4 第十六刀：路由表（`/jobs/...` 的派发）从 `hub_server.py` 搬到 `hub/http_face.py` ——
     # 这条扫描必须**跟着代码走**，否则搬完就变成「扫一个只剩 re-export 的空壳」，
     # 而且会**静默地**放过一个把退役端点加回路由表的人（本仓第三次撞上这类盲区）。
-    ROOT / "remote" / "hub" / "http_face.py",
-    ROOT / "remote" / "hub_server.py",
+    ROOT / "hub" / "http_face.py",
+    ROOT / "hub" / "server.py",
     ROOT / "remote" / "worker.py",
     ROOT / "remote" / "worker_server.py",
     ROOT / "remote" / "push_dispatch.py",

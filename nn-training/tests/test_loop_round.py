@@ -1,4 +1,4 @@
-"""R2c-3：轮内 13 步表与 `RoundContext`（`rl/loop_round.py` + `rl/loop_round_steps.py`）。
+"""R2c-3：轮内 13 步表与 `RoundContext`（`biz/loop_round.py` + `trainer/loop_round_steps.py`）。
 
 本文件钉两件事：
 
@@ -21,8 +21,7 @@ from pathlib import Path
 
 import pytest
 
-from rl.loop_core import TrainingLoop
-from rl.loop_round import (
+from biz.loop_round import (
     COLLECT_LOCAL,
     COLLECT_NODE,
     COLLECT_OFFLINE,
@@ -40,9 +39,10 @@ from rl.loop_round import (
     resolve_collect_mode,
     wait_for,
 )
-from rl.loop_round_steps import RoundSteps
-from rl.loop_steps import SmokeVoidRoundError
-from rl.loop_tasks import ROUND_TASKS
+from biz.loop_tasks import ROUND_TASKS
+from trainer.loop_core import TrainingLoop
+from trainer.loop_round_steps import RoundSteps
+from trainer.loop_steps import SmokeVoidRoundError
 
 
 def _stub(obj: object, name: str, fn: object) -> None:
@@ -217,7 +217,7 @@ def test_composition_returns_the_it_advanced_by_a_step(tmp_path: Path) -> None:
 def test_composition_writes_iter_error_and_retries_on_exception(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import rl.loop_round_steps as lrs
+    import trainer.loop_round_steps as lrs
 
     sleeps: list[float] = []
     monkeypatch.setattr(lrs.time, "sleep", lambda s: sleeps.append(s))
@@ -242,7 +242,7 @@ def test_composition_writes_iter_error_and_retries_on_exception(
 def test_composition_raises_after_five_consecutive_failures(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import rl.loop_round_steps as lrs
+    import trainer.loop_round_steps as lrs
 
     monkeypatch.setattr(lrs.time, "sleep", lambda _s: None)
     loop = _bare_loop(tmp_path)
@@ -256,7 +256,7 @@ def test_composition_raises_on_a_dead_leg_instead_of_retrying(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """R9：已判死腿（如远端 401/403）⇒ 直接上抛，不再 5×30s 空转重试。"""
-    import rl.loop_round_steps as lrs
+    import trainer.loop_round_steps as lrs
 
     monkeypatch.setattr(lrs.time, "sleep", lambda _s: None)
     loop = _bare_loop(tmp_path)
@@ -284,7 +284,7 @@ def test_composition_refuses_to_yield_loudly(tmp_path: Path) -> None:
 def test_smoke_void_round_stops_cleanly_without_counting_a_failure(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import rl.loop_round_steps as lrs
+    import trainer.loop_round_steps as lrs
 
     monkeypatch.setattr(lrs.time, "sleep", lambda _s: None)
     loop = _bare_loop(tmp_path)

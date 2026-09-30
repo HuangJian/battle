@@ -1,4 +1,4 @@
-"""R2d：引擎池（`rl/engine_pool.py`）—— 惰性构建 / LRU / 两道上限 / 响亮驱逐。
+"""R2d：引擎池（`biz/engine_pool.py`）—— 惰性构建 / LRU / 两道上限 / 响亮驱逐。
 
 这些性质是「单进程多课程」的内存契约（plan/r2-loop-task-queue §6.2 的实测表）：
 每课栈是 MB 级、驱逐的代价是 **Adam 动量重置**，所以策略必须是「尽量不发生 + 一旦发生
@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.engine_pool import MEASURED_COURSE_STACK_MB, EnginePool
+from biz.engine_pool import MEASURED_COURSE_STACK_MB, EnginePool
 
 
 class FakeEngine:

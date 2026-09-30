@@ -23,7 +23,7 @@ from typing import Any
 
 import pytest
 
-from rl import loop_serve
+from trainer import loop_serve
 
 
 def _args(**kw: Any) -> Namespace:
@@ -135,7 +135,7 @@ def test_overlay_reads_rl_config_through_one_seam(monkeypatch: pytest.MonkeyPatc
 
 
 def test_rl_config_path_is_env_overridable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`BCITY_RL_CONFIG` = rl-config 路径的**唯一**缝（`rl.config` 委托 `dist_common`）。
+    """`BCITY_RL_CONFIG` = rl-config 路径的**唯一**缝（`biz.config` 委托 `common.distribution`）。
 
     为什么这条重要（2026-09-22，用户指令「测试应该使用自己的 fixtures」）：rl-config.json
     **永不入库**（gitignore），于是不用夹具的用例实际上是在「读别人机器上的文件」——
@@ -143,8 +143,8 @@ def test_rl_config_path_is_env_overridable(tmp_path: Path, monkeypatch: pytest.M
     """
     import json as _json
 
-    from dist_common import rl_config_path as dist_path
-    from rl.config import read_rl_config_file, rl_config_path
+    from biz.config import read_rl_config_file, rl_config_path
+    from common.distribution import rl_config_path as dist_path
 
     fixture = tmp_path / "rl-config.fixture.json"
     fixture.write_text(_json.dumps({"courses": {"c5-tick": {"gate_halt_mode": "notify"}}}), "utf-8")

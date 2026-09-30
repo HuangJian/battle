@@ -23,7 +23,7 @@ if str(ROOT) not in sys.path:
 
 import pytest
 
-from rl import node_identity as ni
+from biz import node_identity as ni
 
 
 @pytest.fixture(autouse=True)
@@ -112,7 +112,7 @@ GATE_SITES = ("dispatch.py", "queue_local.py", "eval_dispatch.py", "batch_runner
 
 
 def _src(name: str) -> str:
-    return (ROOT / "rl" / name).read_text(encoding="utf-8")
+    return (ROOT / "trainer" / name).read_text(encoding="utf-8")
 
 
 def test_every_node_gate_site_consults_the_bootid_ledger() -> None:

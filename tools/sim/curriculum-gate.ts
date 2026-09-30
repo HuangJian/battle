@@ -289,7 +289,7 @@ export function upsertLedgerEntry(
   const entry = (levels[level] as Record<string, unknown>) ?? {}
   levels[level] = { ...entry, ...patch }
   ledger.levels = levels
-  // 与 Python 侧 rl/ladder_ledger.py 同形（version/updated_at），控制台读 updated_at。
+  // 与 Python 侧 biz/ladder_ledger.py 同形（version/updated_at），控制台读 updated_at。
   ledger.version = ledger.version ?? 1
   ledger.updated_at = new Date().toISOString()
   saveLedger(ledger, ledgerPath)

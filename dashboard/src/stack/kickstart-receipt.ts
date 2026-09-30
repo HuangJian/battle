@@ -33,11 +33,11 @@ import type { RlConfig } from '../core/types'
 
 // ────────────────────────── 镜像常量（权威在 python，测试核对） ──────────────────────────
 
-/** 干烧熔断的噪声带（pp）。权威：`nn-training/rl/kickstart_burn.py::BURN_MARGIN_PP`。 */
+/** 干烧熔断的噪声带（pp）。权威：`nn-training/biz/kickstart_burn.py::BURN_MARGIN_PP`。 */
 export const BURN_MARGIN_PP = 5.0
-/** 干烧熔断的连续点数。权威：`nn-training/rl/kickstart_burn.py::BURN_POINTS`。 */
+/** 干烧熔断的连续点数。权威：`nn-training/biz/kickstart_burn.py::BURN_POINTS`。 */
 export const BURN_POINTS = 3
-/** 「缺省初值大到该被警告」的阈值。权威：`nn-training/rl/loop_lifecycle.py::KICKSTART_DEFAULT_WARN`。 */
+/** 「缺省初值大到该被警告」的阈值。权威：`nn-training/trainer/loop_lifecycle.py::KICKSTART_DEFAULT_WARN`。 */
 export const KICKSTART_DEFAULT_WARN = 0.5
 
 /** 账本里干净评估汇总行的 `event` 字面量（与 python `read_trend_rows` 同一筛选键）。 */

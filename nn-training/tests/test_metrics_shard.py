@@ -16,16 +16,16 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from schema import OBS_CHANNELS, SCALAR_DIM
+from common.schema import OBS_CHANNELS, SCALAR_DIM
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from biz.config import load_course
+from biz.reward_context import Scoped, current, reset
+from biz.reward_library import METRIC_INDEX, METRICS_DIM, METRICS_VERSION, build_reward_fn
 from ppo.np_core import load_episodes
-from rl.config import load_course
-from rl.reward_context import Scoped, current, reset
-from rl.reward_library import METRIC_INDEX, METRICS_DIM, METRICS_VERSION, build_reward_fn
 
 
 def _write_shard(root: Path, name: str, n: int, metrics: np.ndarray, manifest: dict) -> Path:

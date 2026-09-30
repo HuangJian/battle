@@ -28,7 +28,7 @@ import {
  *      错误的种子开腿（§384 原事故），要么报出误导性的下游错误（本次事故）；
  *   ③ 解析成功但无 `bc` 键 → legacy 硬编码（老课程兼容）。
  *
- *  解析器用 `core/jsonc.ts`（与 python `rl/jsonc.py` 同一语义）——**不再手搓
+ *  解析器用 `core/jsonc.ts`（与 python `common/jsonc.py` 同一语义）——**不再手搓
  *  「只剥整行 `//`」的弱实现**，那正是本次事故根因。 */
 export function resolveCourseBc(course: string): string {
   const legacy = path.join(REPO_ROOT, 'tmp/ep60/battle2-p1bc/run/weights.json')

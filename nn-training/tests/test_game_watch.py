@@ -108,7 +108,7 @@ def test_stall_line_names_the_games_still_in_flight() -> None:
 
 def test_rollout_progress_paths_use_the_shared_cadence() -> None:
     """两条 rollout 腿都走 `progress_due`：各自留一份「每 N 局一句」就等于刷屏会重现。"""
-    for rel in ("remote/iter_rollout.py", "rl/queue_local.py"):
+    for rel in ("worker/iter_rollout.py", "trainer/queue_local.py"):
         src = (ROOT / rel).read_text(encoding="utf-8")
         assert "progress_due(" in src, f"{rel} 没用共享节流口径"
         assert "ROLLOUT_LOG_EVERY" not in src, f"{rel} 还留着按局数节流的旧口径"

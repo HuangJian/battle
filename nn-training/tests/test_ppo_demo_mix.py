@@ -17,7 +17,7 @@ from typing import Any
 import numpy as np
 import torch
 
-from schema import OBS_CHANNELS, SCALAR_DIM
+from common.schema import OBS_CHANNELS, SCALAR_DIM
 
 ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:

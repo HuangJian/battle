@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from schema import CH, DIRECTION_CHANNELS, SCALAR_X_INDICES
+from common.schema import CH, DIRECTION_CHANNELS, SCALAR_X_INDICES
 
 _MOVE_FLIP = np.array([0, 1, 2, 4, 3], dtype=np.int64)  # none,up,down,left<->right
 

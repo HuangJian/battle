@@ -3,7 +3,7 @@
 从 `remote/hub_client.py` 整块搬出（**逐字节不动**）。这里是「怎么把一次请求发到 hub、怎么分类
 它的回答、怎么等一个 job 回传」的**唯一**实现：
 
-* **传输薄壳**：`_request` —— 全模块**唯一**碰 `urlopen` 的地方（回环走 `remote.net_http` 绕代理）；
+* **传输薄壳**：`_request` —— 全模块**唯一**碰 `urlopen` 的地方（回环走 `common.net_http` 绕代理）；
 * **回传消费**：`probe_job_result`（状态码分类的唯一实现，hub 与节点两条链路共用）· `poll_job`
   （非阻塞探针）· `wait_job`（阻塞等待 + 退避 + 饥饿响亮）· `_wait_state_note`；
 * **行政面**：`report_job_failure`（确定性失败回报）· `set_cloud_halt` / `hub_halted` /
@@ -17,10 +17,10 @@
 * 注入点单一且显式：**`remote.hub_http._request`**（宿主函数的命名空间解析就在本模块）。
   旧家的 `hub_client._request` 是转发名；照它打补丁**不再**影响宿主函数，这是**刻意**的分档
   （见 `tests/test_hub_http_split.py` 的档位断言）——patch 打偏而测试全绿是本仓最贵的坑之一。
-* 节点侧客户端（`remote/push_client`）与 `rl/bc_ingest` 都直接依赖本模块，而不再依赖 1688 行的
+* 节点侧客户端（`remote/push_client`）与 `trainer/bc_ingest` 都直接依赖本模块，而不再依赖 1688 行的
   `hub_client` 门面。
 
-依赖面 = stdlib（`json` / `time` / `urllib.parse`）+ `common.protocol` + `remote.net_http`（延迟）。
+依赖面 = stdlib（`json` / `time` / `urllib.parse`）+ `common.protocol` + `common.net_http`（延迟）。
 **不** import `remote.hub_client`（无环）。
 
 `remote/hub_client.py` 保留 `X as X` 门面：历史 `from remote.hub_client import …` 一行不改。
@@ -54,7 +54,7 @@ def _request(
     import urllib.error
     import urllib.request
 
-    from remote.net_http import urlopen as _urlopen
+    from common.net_http import urlopen as _urlopen
 
     req = urllib.request.Request(
         f"{base_url.rstrip('/')}{path}",
@@ -64,7 +64,7 @@ def _request(
     )
     try:
         # 回环（本机 hub）绕开环境代理——`no_proxy` 里的 `127.*` 通配 Python 不认，
-        # 见 remote/net_http.py 模块头。
+        # 见 common/net_http.py 模块头。
         with _urlopen(req, timeout=timeout) as resp:
             return resp.status, resp.read()
     except urllib.error.HTTPError as e:

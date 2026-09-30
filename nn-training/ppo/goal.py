@@ -46,6 +46,7 @@ import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 
+from common.schema import BOARD
 from models.goal_net import GoalNet, export_goal_weights, load_goal_weights
 from ppo.common import (
     _ppo_load,
@@ -62,7 +63,6 @@ from ppo.common import (
     sync_scalars,
 )
 from ppo.trainer import tensored_chunks
-from schema import BOARD
 
 # ---- hyper-params（与 ppo_intent 同源；γ 口径 §12.1 γ_step = 0.995^dt）----
 GAMMA_TICK = 0.995
@@ -181,7 +181,7 @@ def compute_gae_variable(
 
 
 def load_episode_from_shard(dirpath: str) -> dict | None:
-    """流式 backend 接口（rl/stream.py）：goal shard → 可训练 episode（adv/ret 未归一）。"""
+    """流式 backend 接口（trainer/stream.py）：goal shard → 可训练 episode（adv/ret 未归一）。"""
     d = load_goal_shard(dirpath)
     N = d["obs"].shape[0]
     if N == 0:
@@ -240,7 +240,7 @@ def ppo_update_goal(
 
     on_epoch_done(ep_done, model)：每个 epoch 完成后同步回调（与 ppo / ppo_intent 逐
     行对齐）——双缓冲提前预采的触发点：stream 在 epoch3 完成时把 θ_{N,e3} 存盘 spawn
-    首波预采，PPO 继续最后一个 epoch。rl/stream.py:123-124 **无条件**注入该回调，
+    首波预采，PPO 继续最后一个 epoch。trainer/stream.py:123-124 **无条件**注入该回调，
     故本形参是契约的一部分（缺失即 `--mode goal --stream 1` 首个波次 TypeError，
     plan/python-refactor.md P0-1；由 tests/test_backend_contract.py 守护）。
 
@@ -411,7 +411,7 @@ def ppo_update_goal(
     return agg
 
 
-# ---- stream backend 接口别名（rl/stream.py 的 backend.update / load_episodes / _ppo_load）----
+# ---- stream backend 接口别名（trainer/stream.py 的 backend.update / load_episodes / _ppo_load）----
 update = ppo_update_goal
 load_episodes = load_episodes_goal
 

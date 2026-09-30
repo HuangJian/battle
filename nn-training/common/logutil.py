@@ -2,15 +2,15 @@
 
 本仓有两套日志出口，用途不同但**时间戳格式必须一致**（复盘时要能把两边按时间对齐）：
 
-* `rl/log.py::log` —— 训练主通道，带**课程前缀路由**（`prefix_scope` 把同一行镜像进
+* `biz/log.py::log` —— 训练主通道，带**课程前缀路由**（`prefix_scope` 把同一行镜像进
   该课的日志文件）。它有模块级可变状态，属上层设施，留在 `rl/`。
 * 带**固定 tag** 的轻量出口 —— `remote/run_loop.py` / `remote/push_dispatch.py` /
   `remote/offline_deliver.py` / `remote/notebook_runtime.py` 各自的 `_log_default`。
-  它们刻意不依赖 `rl/log.py`（`remote/run_loop` 要在**没有 rl 包**的上下文里当自主循环
+  它们刻意不依赖 `biz/log.py`（`remote/run_loop` 要在**没有 rl 包**的上下文里当自主循环
   的默认日志），于是「`[{时间}] [{tag}] {消息}` + flush」这段格式被抄了 4 遍。
 
 本模块只收**格式**：tag 由调用方给，时钟由调用方传（关键——见下），不做路由、不留状态。
-`rl/log.py::format_line` 也改用这里的 `stamp()`，两边的时间戳因此不可能再漂移。
+`biz/log.py::format_line` 也改用这里的 `stamp()`，两边的时间戳因此不可能再漂移。
 
 **为什么 `clock` 是形参而不是模块级 `time`**：`tests/test_notebook_runtime.py` 用
 `monkeypatch.setattr(nbr, "time", clock)` 注入假钟（只重绑该模块的引用、不污染全局
@@ -38,7 +38,7 @@ STAMP_FMT = "%H:%M:%S"
 
 
 def stamp(clock: Clock = time) -> str:
-    """`[HH:MM:SS]`（含方括号，与 `rl/log.py` 的历史输出逐字节一致）。"""
+    """`[HH:MM:SS]`（含方括号，与 `biz/log.py` 的历史输出逐字节一致）。"""
     return f"[{clock.strftime(STAMP_FMT)}]"
 
 

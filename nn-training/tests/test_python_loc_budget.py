@@ -2,7 +2,7 @@
 
 **为什么要有它**：S5 那一轮（`plan/nn-training-refactor.md` §5.7）把九个 1000+ 行的「神模块」
 拆成 19 个可独立依赖的模块 —— 但那是一次性的人力侦察，没有任何东西拦着下一个模块长到
-1400 行（`rl/gate_check.py` 从 1412 拆到 622 之前就一直是那个形状）。本测试把
+1400 行（`biz/gate_check.py` 从 1412 拆到 622 之前就一直是那个形状）。本测试把
 「>1000 行 = 设计问题，不是笔误」变成门禁：**每次门禁都在问同一个问题**。
 
 **口径**（用户钦定，与 `tmp/measure_loc_budget.py` 一致）：
@@ -51,7 +51,7 @@ EXEMPT_DIR_ROOTS = ("nn-training/tests/", "nn-training/e2e/")
 #: 扫描锚：这些**非豁免**文件必须在扫描结果里（防「扫了个寂寞」也算绿）。
 SCAN_ANCHORS = (
     "nn-training/remote/worker.py",
-    "nn-training/rl/dispatch.py",
+    "nn-training/trainer/dispatch.py",
     "nn-training/common/protocol.py",
 )
 

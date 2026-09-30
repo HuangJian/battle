@@ -23,7 +23,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from schema import OBS_CHANNELS, SCALAR_DIM
+from common.schema import OBS_CHANNELS, SCALAR_DIM
 
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))

@@ -135,7 +135,7 @@ def test_wire_codec_only_depends_on_stdlib_and_errors() -> None:
 
 def test_neither_new_module_touches_an_upper_layer() -> None:
     """`common/` 是 L0：两个新家都不得 import 上层包（要随 code.zip 解到云机上）。"""
-    banned = {"torch", "numpy", "rl", "remote", "models", "data", "train", "dist_common"}
+    banned = {"torch", "numpy", "trainer", "biz", "remote", "models", "data", "train", "common.distribution"}
     for path in (ERRORS_FILE, WIRE_FILE):
         tops = {m.split(".")[0] for m in _imported_modules(path)}
         hit = sorted(tops & banned)

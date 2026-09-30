@@ -24,7 +24,7 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
-from schema import OBS_CHANNELS
+from common.schema import OBS_CHANNELS
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

@@ -31,13 +31,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import dist_common
+import common.distribution
+from biz.bc_config import BcEvalBlock, load_bc_course
 from common.protocol import AUTH_HEADER, decode_weights_json, encode_weights_json
+from hub.server import _JobStore, make_server
 from remote import worker as worker_mod
-from remote.hub_server import _JobStore, make_server
-from rl import bc_loop
-from rl.bc_config import BcEvalBlock, load_bc_course
 from tests.helpers.hub_poll import hub_poll
+from trainer import bc_loop
 
 TOKEN = "test-token"
 COURSE_FP = "course-fp-e2e"
@@ -192,7 +192,7 @@ class _FakeEvalNodeHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "evalSupport": True,
-                    "codeHash": dist_common.compute_code_hash(),
+                    "codeHash": common.distribution.compute_code_hash(),
                     "concurrency": 2,
                 }
             )

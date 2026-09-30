@@ -3,9 +3,9 @@
 需求原文（用户）：**「离线课程，请确保云端是按照 target_transitions 来产生足够样本，与本地
 集群 rollout 一致」**。
 
-缺陷：`target_transitions` 的采样量由 `rl.volume_waves` 的配额反解决定（本地集群靠
-`rl.volume_quota` 的连续派发逼近达标线），而全离线/半离线腿（kind=run）的逐轮语料来自
-`rl/plan.pairs_for` → 老的 `build_pairs`，它**只认 `seeds_per_stage` / `seed_rotate`**，
+缺陷：`target_transitions` 的采样量由 `biz.volume_waves` 的配额反解决定（本地集群靠
+`biz.volume_quota` 的连续派发逼近达标线），而全离线/半离线腿（kind=run）的逐轮语料来自
+`biz/plan.pairs_for` → 老的 `build_pairs`，它**只认 `seeds_per_stage` / `seed_rotate`**，
 完全不认 `target_transitions`。后果有两个，都是静默的：
 
   * 采多少局 = 课程里那个 `seed_rotate` 数字（与目标脱钩）；配得比 `G0` 小就**少采**，
@@ -17,7 +17,7 @@
 
   1. **同函数**：`plan.pairs_for`（节点重放）与 `TrainingLoop._iteration_pairs`（本地预排表）
      都走 `volume_waves.initial_wave_pairs` —— 每关 `G0 = ceil(ceil(target/关数)/est)` 局；
-  2. **同种子**：该初波就等于**连续配额流的前缀**（`rl.volume_quota.continuous_pairs`
+  2. **同种子**：该初波就等于**连续配额流的前缀**（`biz.volume_quota.continuous_pairs`
      start_idx=0 那一路，即本地集群本轮真正派出去的前 G0 局），两支流的键逐位相同
      （`[rotate_seed, 0x5EED, it, stage, 0]`）；
   3. **同训练量**：计划里的 `per_stage_quota` 被逐轮带进节点合成的 manifest（训练侧
@@ -40,8 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from common.protocol import ProtocolError, normalize_manifest
-from rl.plan import (
+from biz.plan import (
     build_plan,
     check_plan_against_args,
     dump_plan,
@@ -49,14 +48,15 @@ from rl.plan import (
     planned_iters,
     validate_plan,
 )
-from rl.volume_quota import continuous_pairs, target_per_stage
-from rl.volume_waves import (
+from biz.volume_quota import continuous_pairs, target_per_stage
+from biz.volume_waves import (
     initial_wave_pairs,
     validate_volume_block,
     volume_block,
     volume_pairs_from_args,
     wave_pairs,
 )
+from common.protocol import ProtocolError, normalize_manifest
 
 
 def _args(**over: object) -> SimpleNamespace:
@@ -161,7 +161,7 @@ def test_validate_volume_block_rejects_drift(patch: dict) -> None:
 def test_initial_wave_pairs_are_continuous_prefix() -> None:
     """★「与本地集群 rollout 一致」的实现基础：初波就是连续配额流的前 G0 局。
 
-    本地集群本轮走 `rl.volume_quota`（连续派发）：逐关从 `(rotate_seed, it, stage)` 独立流
+    本地集群本轮走 `biz.volume_quota`（连续派发）：逐关从 `(rotate_seed, it, stage)` 独立流
     的第 0 个 seed 开始抽。云机的初波必须与它是**同一批**（不是「差不多」——逐位相同）。
     """
     rs, it = 4242, 17
@@ -210,7 +210,7 @@ def test_plan_without_volume_keeps_build_pairs() -> None:
     args = _args(seed_rotate=150)
     plan = build_plan(args, it=3, iters_total=6, rotate_seed=4242, log=lambda _m: None)
     assert "volume" not in plan
-    from rl.course import build_pairs
+    from biz.course import build_pairs
 
     assert pairs_for(plan, 4) == build_pairs(args, 4, 4242)
 

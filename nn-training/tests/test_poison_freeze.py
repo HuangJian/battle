@@ -43,8 +43,8 @@ from common.protocol import (
     WORKER_ID_HEADER,
     JobFailedError,
 )
+from hub.server import FREEZE_AFTER_RECLAIMS, _JobStore, make_server
 from remote.hub_client import wait_job
-from remote.hub_server import FREEZE_AFTER_RECLAIMS, _JobStore, make_server
 from tests.helpers.hub_poll import hub_poll
 
 TOKEN = "sekret"

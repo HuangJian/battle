@@ -14,9 +14,9 @@ from pathlib import Path
 
 import pytest
 
-from rl.config import GatesSpec
-from rl.events import write_gate_verdict
-from rl.gate_check import (
+from biz.config import GatesSpec
+from biz.events import write_gate_verdict
+from biz.gate_check import (
     EXIT_CODES,
     BudgetInfo,
     GateOverrideError,
@@ -117,22 +117,22 @@ FROZEN_NOW = 1_700_000_000.0
 
 
 def test_module_import_has_no_torch_numpy() -> None:
-    """§3.3/§4.1 红线：求值器（引擎 + 判决面 + 输入面）禁 torch/numpy/rl.config 运行期加载。
+    """§3.3/§4.1 红线：求值器（引擎 + 判决面 + 输入面）禁 torch/numpy/biz.config 运行期加载。
 
-    S5 第十五刀后扩面：两新家（`rl.gate_inputs` / `rl.gate_judges`）与引擎同验。
+    S5 第十五刀后扩面：两新家（`biz.gate_inputs` / `biz.gate_judges`）与引擎同验。
     """
     code = (
-        "import sys, rl.gate_check, rl.gate_inputs, rl.gate_judges; "
+        "import sys, biz.gate_check, biz.gate_inputs, biz.gate_judges; "
         "print('torch=' + str('torch' in sys.modules)); "
         "print('numpy=' + str('numpy' in sys.modules)); "
-        "print('rl.config=' + str('rl.config' in sys.modules))"
+        "print('biz.config=' + str('biz.config' in sys.modules))"
     )
     out = run_utf8([sys.executable, "-c", code], cwd=str(ROOT), timeout=120)
     assert out.returncode == 0, out.stderr[-2000:]
     kv = dict(line.split("=") for line in out.stdout.splitlines() if "=" in line)
     assert kv["torch"] == "False"
     assert kv["numpy"] == "False"
-    assert kv["rl.config"] == "False"
+    assert kv["biz.config"] == "False"
 
 
 def test_no_gates_block_holds() -> None:
@@ -410,7 +410,7 @@ def test_evaluate_only_kinds_filters_rules() -> None:
 
 def test_iter_ledger_helpers(tmp_path: Path) -> None:
     """§385：first_iter_end_ts 返回**首个** iteration 事件结束时刻；count 数事件。"""
-    import rl.gate_check as gc
+    import biz.gate_check as gc
 
     fmt: str = gc._TS_FMT
     p = tmp_path / "training_log.jsonl"
@@ -433,7 +433,7 @@ def test_iter_ledger_helpers(tmp_path: Path) -> None:
 
 def test_sum_train_sec_sums_iteration_events(tmp_path: Path) -> None:
     """分子跨重启从账本重算（内存累计重启归零 → 占空比被低估 → 误报烧事故）。"""
-    from rl.gate_check import sum_train_sec
+    from biz.gate_check import sum_train_sec
 
     p = tmp_path / "training_log.jsonl"
     rows = [
@@ -848,7 +848,7 @@ def test_cli_dry_run_exit_code(tmp_path: Path) -> None:
         [
             sys.executable,
             "-m",
-            "rl.gate_check",
+            "biz.gate_check",
             "--course",
             "c6-margin",
             "--traj",
@@ -1005,7 +1005,7 @@ def _write_iterations(path: Path, rows: list[dict]) -> None:
 
 def test_sum_train_samples_counts_sample_passes(tmp_path: Path) -> None:
     """样本通过量 = Σ(samples × epochs)；缺 epochs 按 1 计（旧行兼容）。"""
-    from rl.gate_check import sum_train_samples
+    from biz.gate_check import sum_train_samples
 
     p = tmp_path / "training_log.jsonl"
     _write_iterations(
@@ -1042,7 +1042,7 @@ def test_min_train_samples_blocks_advance_with_note() -> None:
 
 def test_sum_train_sec_prefers_cloud_reported_seconds(tmp_path: Path) -> None:
     """真训练秒优先（ppo_cloud_sec），旧行回落 ppo_sec —— 传输/排队不再冒充训练。"""
-    from rl.gate_check import sum_train_sec
+    from biz.gate_check import sum_train_sec
 
     p = tmp_path / "training_log.jsonl"
     _write_iterations(

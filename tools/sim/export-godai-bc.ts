@@ -9,10 +9,10 @@
  *
  * 与批量导出器（export-godai-labels.ts）的分工：本文件只做「单局 + 容器」——
  * 批量/确定性校验/覆盖报告仍归批量导出器；(stage, seed) 的编排水在
- * nn-training/rl/bc_dispatch.py。
+ * nn-training/biz/bc_dispatch.py。
  *
  * wins-only 败局不是错误：容器 manifest 带 `kept:false`、零文件条目——Python 侧
- * dist_common.validate_result 认定合法"跳过"（plan/bc-cloud-integration.plan.md §5）。
+ * common.distribution.validate_result 认定合法"跳过"（plan/bc-cloud-integration.plan.md §5）。
  *
  * Determinism: same (stage, seed, difficulty, stageJson) → identical container bytes
  * （God-AI driver 独立 RNG `seed ^ 0x9e3779b9`，与批量导出器一致）。
@@ -105,7 +105,7 @@ function main(): void {
 
   // 命局：内存构造 npy 字节（npyBytes 与 writeNpy/numpy.load 字节契约同源——容器内
   // .npy 字节 = 本机直跑 export-godai-labels 的落盘产物）→ BCV2 容器。
-  // 条目清单与 nn-training/dist_common.BC_SHARD_FILES 逐一对齐（manifest.json 由
+  // 条目清单与 nn-training/common/distribution.BC_SHARD_FILES 逐一对齐（manifest.json 由
   // Python 侧 write_shard 落盘时重写补血缘键，不随容器携带）。
   const N = res.samples.length
   const OBS_N = OBS_CHANNELS * BOARD * BOARD

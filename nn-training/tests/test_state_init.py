@@ -26,8 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.dispatch as disp
-from rl.config import (
+import trainer.dispatch as disp
+from biz.config import (
     CourseConfig,
     StateInitBlock,
     apply_course,
@@ -161,9 +161,9 @@ def test_a_bank_written_repo_relative_is_accepted_from_either_cwd(
 ) -> None:
     """课程里的数据路径两种基准混用（`nn-training/...` 仓库相对、`data/...` nn-training 相对），
     而训练进程的 cwd 取决于谁拉起来的 ⇒ 两种写法都要认（cwd 与它们都不相同时靠备用基准命中）。"""
-    # S5 第十刀后 CURRICULA_DIR 住 `rl.course_resolve`（resolve_state_init_bank 读它的
-    # 模块全局；打门面 `rl.config` 上的同名副本不会被解析面看到）。
-    import rl.course_resolve as cfg
+    # S5 第十刀后 CURRICULA_DIR 住 `biz.course_resolve`（resolve_state_init_bank 读它的
+    # 模块全局；打门面 `biz.config` 上的同名副本不会被解析面看到）。
+    import biz.course_resolve as cfg
 
     fake_nn = tmp_path / "repo" / "nn-training"
     monkeypatch.setattr(cfg, "CURRICULA_DIR", fake_nn / "curricula")
@@ -211,14 +211,14 @@ def test_rebase_counters_is_gone(tmp_path: Path) -> None:
 
 
 def _index(tmp_path: Path):
-    from rl.state_init import load_bank
+    from biz.state_init import load_bank
 
     return load_bank(_bank(tmp_path))
 
 
 def test_pick_is_a_pure_function_of_its_key(tmp_path: Path) -> None:
     """同 key 必同值（断点续跑/跨机重放不得换起始状态）+ 切点落在两条对齐线上。"""
-    from rl.state_init import pick
+    from biz.state_init import pick
 
     idx = _index(tmp_path)
     a = pick(idx, rotate_seed=99, it=3, stage=2000, seed=7, rotate_cuts=True)
@@ -231,7 +231,7 @@ def test_pick_is_a_pure_function_of_its_key(tmp_path: Path) -> None:
 
 def test_pick_rotates_with_it_and_never_crosses_stages(tmp_path: Path) -> None:
     """换 it 必换（§15.1：起始状态也是语料）；stage 2001 的局只可能来自 2001。"""
-    from rl.state_init import pick
+    from biz.state_init import pick
 
     idx = _index(tmp_path)
     seen: set[str] = set()
@@ -247,7 +247,7 @@ def test_pick_rotates_with_it_and_never_crosses_stages(tmp_path: Path) -> None:
 
 def test_pick_pins_the_first_cut_when_rotation_is_off(tmp_path: Path) -> None:
     """`rotate_cuts=False` = 切点固定、局仍轮换（不消耗随机数）。"""
-    from rl.state_init import pick
+    from biz.state_init import pick
 
     idx = _index(tmp_path)
     for it in range(8):
@@ -257,7 +257,7 @@ def test_pick_pins_the_first_cut_when_rotation_is_off(tmp_path: Path) -> None:
 
 def test_pick_is_none_for_a_stage_the_bank_does_not_cover(tmp_path: Path) -> None:
     """银行没这个关的人类局 ⇒ None（课程层面的事实，不是错误）。"""
-    from rl.state_init import pick
+    from biz.state_init import pick
 
     assert pick(_index(tmp_path), rotate_seed=1, it=0, stage=2003, seed=5, rotate_cuts=True) is None
 
@@ -283,7 +283,7 @@ def _si_args(bank: Path, **kw) -> SimpleNamespace:
 
 
 def test_argv_init_for_derives_a_snapshot_path(tmp_path: Path) -> None:
-    from rl.state_init import argv_init_for
+    from biz.state_init import argv_init_for
 
     ref = argv_init_for(_si_args(_bank(tmp_path)), stage=2000, seed=7)
     assert ref is not None and ref.path.endswith(".json") and ref.tick % 10 == 0
@@ -291,14 +291,14 @@ def test_argv_init_for_derives_a_snapshot_path(tmp_path: Path) -> None:
 
 def test_argv_init_for_is_a_noop_without_the_course_block() -> None:
     """没开 state_init 的课程 ⇒ None（零回归）；即使 args 上什么都没有也不炸。"""
-    from rl.state_init import argv_init_for
+    from biz.state_init import argv_init_for
 
     assert argv_init_for(_args(), stage=2000, seed=7) is None
 
 
 def test_argv_init_for_refuses_without_the_rotation_key_halves(tmp_path: Path) -> None:
     """缺 `_it`/`_rotate_seed` = 采集入口没走 `_course_iter` ⇒ 拒发，不猜另一个轮次。"""
-    from rl.state_init import argv_init_for
+    from biz.state_init import argv_init_for
 
     for missing in ("_it", "_rotate_seed"):
         args = _si_args(_bank(tmp_path))
@@ -310,7 +310,7 @@ def test_argv_init_for_refuses_without_the_rotation_key_halves(tmp_path: Path) -
 def test_argv_init_for_refuses_cloud_rounds(tmp_path: Path) -> None:
     """云侧快照搬运未落地（plan §P2.5）：上云轮的 argv 里给一个仓库相对路径，节点上没有那个
     文件，而老导出器**静默忽略未知 flag** ⇒ 云上跑标准开局、账本写中段起跑。宁可不发。"""
-    from rl.state_init import argv_init_for
+    from biz.state_init import argv_init_for
 
     with pytest.raises(SystemExit, match="云侧"):
         argv_init_for(_si_args(_bank(tmp_path)), stage=2000, seed=7, node_side=True)
@@ -318,7 +318,7 @@ def test_argv_init_for_refuses_cloud_rounds(tmp_path: Path) -> None:
 
 def test_argv_init_for_refuses_a_stage_without_bank_games(tmp_path: Path) -> None:
     """银行不覆盖这个关 ⇒ 响亮拒（不静默退回标准开局：那是另一个实验）。"""
-    from rl.state_init import argv_init_for
+    from biz.state_init import argv_init_for
 
     with pytest.raises(SystemExit, match="没有 stage"):
         argv_init_for(_si_args(_bank(tmp_path)), stage=2003, seed=7)
@@ -326,7 +326,7 @@ def test_argv_init_for_refuses_a_stage_without_bank_games(tmp_path: Path) -> Non
 
 def test_build_rollout_cmd_appends_the_snapshot_flag(tmp_path: Path) -> None:
     """命令拼装唯一点：开了 state_init 才追加 `--init-snapshot`（其余 flag 不受影响）。"""
-    from rl.cmd import build_rollout_cmd
+    from biz.cmd import build_rollout_cmd
 
     bank = _bank(tmp_path)
     with_flag = build_rollout_cmd(
@@ -357,7 +357,7 @@ def test_build_rollout_cmd_appends_the_snapshot_flag(tmp_path: Path) -> None:
 
 def test_build_rollout_cmd_refuses_node_side_runs(tmp_path: Path) -> None:
     """同一门课由**节点**执行（逐轮上云 / 半离线整段）⇒ 发布前就拒，不留半份 job。"""
-    from rl.cmd import build_rollout_cmd
+    from biz.cmd import build_rollout_cmd
 
     with pytest.raises(SystemExit, match="云侧"):
         build_rollout_cmd(
@@ -394,7 +394,7 @@ def test_scan_shards_drops_shards_that_did_not_start_from_a_snapshot(tmp_path: P
 
     默认 `state_init=False` 必须逐字节旧行为——同一个目录、同一份 manifest。
     """
-    from rl.resume import completed_pairs, settled_stage_totals
+    from biz.resume import completed_pairs, settled_stage_totals
 
     _shard(tmp_path, 2000, 11, init_tick=300)
     _shard(tmp_path, 2000, 12, init_tick=None)
@@ -422,7 +422,7 @@ def test_corpus_identity_carries_the_start_distribution(tmp_path: Path) -> None:
     路径写法（仓库相对 vs 绝对）**不得**改变身份——否则 hub（cwd=仓库）与节点（cwd=job 目录）
     算出的指纹不同，整份 job 被拒。
     """
-    from rl.config import corpus_identity_fp
+    from biz.config import corpus_identity_fp
 
     bank = _bank(tmp_path / "bank")
     plain = CourseConfig(name="t", mode="per-tick", level="ladder-c20-lives1")
@@ -456,7 +456,7 @@ def test_corpus_identity_carries_the_start_distribution(tmp_path: Path) -> None:
 
 def test_state_init_enabled_reads_args_only() -> None:
     """护栏开关的唯一来源：`args.state_init`（缺席 = False，老路径零开销）。"""
-    from rl.resume import state_init_enabled
+    from biz.resume import state_init_enabled
 
     assert state_init_enabled(_args()) is False
     assert state_init_enabled(_args(state_init={"bank": "x"})) is True
@@ -553,7 +553,7 @@ def test_every_local_argv_carries_a_snapshot(tmp_path, monkeypatch) -> None:
     """
     import subprocess as sp
 
-    import rl.queue_local as ql
+    import trainer.queue_local as ql
 
     monkeypatch.setenv("NN_SERVE_POOL", "0")  # 本条钉一次性路径（池化版见下一例）
     bank = _bank(tmp_path / "bank")
@@ -596,8 +596,8 @@ def test_the_local_pool_serves_every_game_with_the_snapshot(tmp_path, monkeypatc
     （`cmd[1:]`，不含 bun 本身）——送错一段（带上 bun / 带上脚本路径）或忘了注入快照，都会表现为
     「跑起来了、但起始分布不是你要的那个」，而日志里只有一行「已结算」。
     """
-    import rl.queue_local as ql
-    from remote import serve_pool
+    import trainer.queue_local as ql
+    from worker import serve_pool
 
     bank = _bank(tmp_path / "bank")
     weights = tmp_path / "w.json"

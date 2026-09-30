@@ -4,7 +4,7 @@
  * RL 课程训练的环境阶梯：S1 开火命中 → S2 闪避走位 → S3 砖墙+道具 → S4a 有基地
  * maze → S4b 真实关卡。本模块是 arena 布局的**唯一权威源**（curriculum.ts re-export
  * 兼容旧消费方），刻意放在 `src/nn/` 下：分布式 rollout 的 codeHash 只覆盖
- * `src/nn/**` + 两个 rollout 导出器（dist_common.py / sampler-agent.ts 双语契约），
+ * `src/nn/**` + 两个 rollout 导出器（common/distribution.py / sampler-agent.ts 双语契约），
  * arena 定义进这个集合才能保证 dist 节点代码同步（plan 卡 A1 步骤 4）。
  *
  * 硬纪律（plan §0.2 / §2.3）：

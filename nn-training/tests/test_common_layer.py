@@ -25,21 +25,21 @@ from pathlib import Path
 
 import pytest
 
+import biz.agent_meta
+import biz.bc_ledger
+import common.distribution
 import common.fs
 import common.hashing
 import common.logutil
 import common.proc
 import common.text
-import dist_common
 import remote.artifacts
 import remote.bundle
 import remote.hub_client
-import remote.iter_rollout
 import remote.run_loop
-import rl.agent_meta
-import rl.bc_ledger
-import rl.queue
-import rl.stream
+import trainer.queue
+import trainer.stream
+import worker.iter_rollout
 from tests.helpers import source_scan
 
 NN_ROOT = Path(__file__).resolve().parent.parent
@@ -95,8 +95,11 @@ def _defs_of(name: str, *, roots: tuple[Path, ...] = (NN_ROOT,)) -> list[str]:
 
 def test_common_package_depends_on_stdlib_only() -> None:
     """`common/*` 只能 import stdlib —— 它要随 code.zip 解到没有 torch 的云机上。"""
-    allowed_first_party = {"platform_utils", "common"}
-    banned = {"torch", "numpy", "rl", "remote", "ppo", "models", "data", "train"}
+    allowed_first_party = {"common.platform_utils", "common"}
+    # 2026-09-30（刀 4）：`biz` 是 L1 的纯逻辑包，**同样**不许被 L0 引用（`common → biz` 就是
+    # 反向依赖）；漏掉它，`import biz.x` 会从此处静默通过（同本条上面那句「名单是用来接住
+    # 下一个」的道理）。
+    banned = {"torch", "numpy", "trainer", "biz", "remote", "ppo", "models", "data", "train"}
     for p in sorted((NN_ROOT / "common").glob("*.py")):
         mods = _module_level_imports(_read(p))
         for m in mods:
@@ -113,7 +116,7 @@ def test_standalone_boot_modules_stay_dependency_free() -> None:
         mods = _module_level_imports(_read(p))
         for m in mods:
             top = m.split(".")[0]
-            assert top not in {"common", "rl", "ppo", "models", "data", "train"}, (
+            assert top not in {"common", "trainer", "biz", "ppo", "models", "data", "train"}, (
                 f"{p.name} 从 GitHub raw 单独拉取，不得 import {m}"
                 "（拿不到 code.zip ⇒ 云端 ImportError）"
             )
@@ -143,17 +146,19 @@ def test_sha256_matches_independent_reimplementation(tmp_path: Path) -> None:
     assert common.hashing.sha256_bytes(raw) == hashlib.sha256(raw).hexdigest()
     assert common.hashing.sha256_file(f) == hashlib.sha256(raw).hexdigest()
     # 账本口径必须与文件口径同源（wver / init_weights_fp / blob 键都靠这条）
-    assert dist_common.weights_fingerprint(str(f)) == hashlib.sha256(raw).hexdigest()
+    assert common.distribution.weights_fingerprint(str(f)) == hashlib.sha256(raw).hexdigest()
 
 
 def test_bun_version_and_exc_tail_and_atomic_write_have_single_definition() -> None:
     # `bun_version` 唯一实现 = common/proc.py；另两处是**声明式薄包装**，各自钉住历史
     # 默认值（训练机侧 timeout=10/fallback="?"、节点侧 timeout=30/fallback=""/require_zero），
     # 同时保住 1 参签名与 monkeypatch 接缝。再多一份实现就红。
+    # ⚠ 顺序 = `_defs_of` 的**路径排序**（不是重要性）：2026-09-30 刀 3 把 `iter_rollout`
+    # 从 `remote/` 搬到 `worker/` ⇒ 它从 `trainer/queue.py` 的**前面**排到后面。
     assert _defs_of("bun_version") == [
         "common/proc.py",
-        "remote/iter_rollout.py",
-        "rl/queue.py",
+        "trainer/queue.py",
+        "worker/iter_rollout.py",
     ]
     assert _defs_of("exc_tail") == ["common/text.py"]
     assert _defs_of("atomic_write_bytes") == ["common/fs.py"]
@@ -163,16 +168,16 @@ def test_bun_version_and_exc_tail_and_atomic_write_have_single_definition() -> N
 
 def test_delegating_call_sites_keep_their_public_names() -> None:
     """收敛的是**定义**，不是名字：历史调用点与测试的 monkeypatch 接缝必须还在。"""
-    # rl.queue 是公共 re-export 面（batch_eval / eval_dispatch / e2e 从这里取）
-    assert rl.queue.bun_version("definitely-not-a-real-bun-binary") == "?"
-    assert rl.queue.mm("1.2.3") == "1.2"
-    assert rl.queue._record_agent_meta is rl.agent_meta.record_agent_meta
+    # trainer.queue 是公共 re-export 面（batch_eval / eval_dispatch / e2e 从这里取）
+    assert trainer.queue.bun_version("definitely-not-a-real-bun-binary") == "?"
+    assert trainer.queue.mm("1.2.3") == "1.2"
+    assert trainer.queue._record_agent_meta is biz.agent_meta.record_agent_meta
     # 私有别名仍在各自模块命名空间里（monkeypatch.setattr(mod, "bun_version", ...) 依赖它）
-    assert callable(remote.iter_rollout.bun_version)
+    assert callable(worker.iter_rollout.bun_version)
     assert callable(remote.hub_client._sha256_file)
     # 转发的薄包装不改变语义
     assert remote.hub_client._sha256_bytes(b"x") == common.hashing.sha256_bytes(b"x")
-    assert remote.iter_rollout.bun_version("definitely-not-a-real-bun-binary") == ""
+    assert worker.iter_rollout.bun_version("definitely-not-a-real-bun-binary") == ""
 
 
 def test_bun_version_require_zero_keeps_the_two_historical_flavors() -> None:
@@ -269,12 +274,12 @@ def test_atomic_write_json_replaces_and_append_jsonl_appends(tmp_path: Path) -> 
 
 def test_agent_meta_is_best_effort_and_uses_the_shared_writer(tmp_path: Path) -> None:
     """账本写不进去绝不影响结算（写点在最要救命的那条路径上）。"""
-    rl.agent_meta.record_agent_meta(tmp_path / "sub" / "dist-agent-meta.jsonl", {"node": "n0"})
+    biz.agent_meta.record_agent_meta(tmp_path / "sub" / "dist-agent-meta.jsonl", {"node": "n0"})
     # 目录不可建（父“目录”是个文件）⇒ 必须静默吞掉，不能抛
     blocker = tmp_path / "blocker"
     blocker.write_text("x", encoding="utf-8")
-    rl.agent_meta.record_agent_meta(blocker / "x.jsonl", {"node": "n1"})
-    rl.bc_ledger.append_ledger(tmp_path / "sub" / "dist-agent-meta.jsonl", {"node": "n2"})
+    biz.agent_meta.record_agent_meta(blocker / "x.jsonl", {"node": "n1"})
+    biz.bc_ledger.append_ledger(tmp_path / "sub" / "dist-agent-meta.jsonl", {"node": "n2"})
 
 
 def test_exc_tail_keeps_the_tail_not_the_head() -> None:
@@ -347,7 +352,7 @@ def test_no_production_module_reintroduces_a_progress_logger_duplicate() -> None
 
 def test_subprocess_import_is_not_left_dangling_by_the_capture_migration() -> None:
     """迁移到 run_capture 后留下的 `import subprocess` 必须清掉（ruff 会抓，这里留个语义锚）。"""
-    for rel in ("rl/archive.py", "run_rl.py", "run_bc.py", "rl/loop_serve.py"):
+    for rel in ("biz/archive.py", "run_rl.py", "run_bc.py", "trainer/loop_serve.py"):
         src = _read(NN_ROOT / rel)
         if "import subprocess" in src:
             assert re.search(r"subprocess\.", src), f"{rel} 的 import subprocess 已悬空"

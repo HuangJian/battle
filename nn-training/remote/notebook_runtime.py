@@ -36,8 +36,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from common.logutil import log_line
+from common.pid_probe import pid_alive
 from common.proc import run_capture
-from pid_probe import pid_alive
 
 # cell 端 /code 引导（fetch+unpack+sys.path）已完成；本模块只管运行时。
 
@@ -266,7 +266,7 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
 
 
 def _pid_alive(pid: int | None) -> bool:
-    """存活探测（委托唯一实现 `pid_probe.pid_alive`）。
+    """存活探测（委托唯一实现 `common.pid_probe.pid_alive`）。
 
     2026-09-17 收口：此处原是**函数内的嵌套闭包**，且直接 `os.kill(int(pid), 0)` —— 两个问题：
     ① 在 Windows 上 `os.kill(pid, 0)` 是 `TerminateProcess(handle, 0)`，而本函数用来判断

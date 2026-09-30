@@ -2,7 +2,7 @@
  * codehash-report.ts — 双侧 codeHash 诊断工具（F4，plan/dist-codehash-stale-fix.md）。
  *
  * 定位「节点被永久误判 stale」时唯一的双侧 diff 手段：在训练机跑
- *   python -c "import dist_common;print(dist_common.code_hash_report())" > local.tsv
+ *   python -c "import common.distribution;print(common.distribution.code_hash_report())" > local.tsv
  * 在节点跑
  *   bun tools/agent/codehash-report.ts > mac.tsv
  * 然后 `diff local.tsv mac.tsv`——多文件 / 少文件 / 内容不同一目了然。

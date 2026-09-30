@@ -37,7 +37,7 @@ if _ilu.find_spec("schema") is None:
 import torch
 import torch.nn as nn
 
-from schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
+from common.schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 
 DEFAULT_CONV_CH = (32, 48, 64)
 DEFAULT_HEAD_HIDDEN = 64

@@ -87,7 +87,7 @@ def test_identity_depends_on_stdlib_only_and_never_on_protocol() -> None:
 
 def test_identity_does_not_touch_an_upper_layer() -> None:
     """`common/` 是 L0：不得 import 上层包（否则云端解包即 ImportError）。"""
-    banned = {"torch", "numpy", "rl", "remote", "models", "data", "train", "dist_common"}
+    banned = {"torch", "numpy", "trainer", "biz", "remote", "models", "data", "train", "common.distribution"}
     tops = {m.split(".")[0] for m in _imported_modules(IDENTITY_FILE)}
     hit = sorted(tops & banned)
     assert hit == [], f"job_identity 依赖了上层：{hit}"

@@ -4,7 +4,7 @@
  *  它内部一台单线程调度器持有**每课一条任务队列**。于是控制台需要回答一个今天只能靠翻
  *  N 份日志回答的问题：**「这门课在等什么」**。
  *
- *  数据源 = 训练侧只读入口 `nn-training/run_rl_cluster.py --json`（同一个 `rl/loop_plan.py`，
+ *  数据源 = 训练侧只读入口 `nn-training/run_rl_cluster.py --json`（同一个 `trainer/loop_plan.py`，
  *  与 CLI 表逐字段同源）。**判据不在本层重算**：`waiting` 的文案由 python 侧
  *  `loop_plan.waiting_state` 单点给出——TS 里从 facts 再推一遍就是把同一条语义写第二遍，
  *  两边迟早各说各话（这正是 R2b 否决 `loop-state.json` 的同一条理由）。

@@ -4,7 +4,7 @@
 的逐局读数**全在**账本里，控制台的 eval 列 / eval 弹窗 / 开课回执与门判据却一栏都不显示。
 根因不在读方，在写方：两条腿（回传 / 导入）合并时都只并 `event:"eval"` 逐局行，把
 `eval_summary` 丢掉了，而上面那些读方**只认 summary 行**（`dashboard/src/server/iters.ts`
-的 `readEvalSummaries`、`rl/gate_check.py` 的 `read_trend_rows`）。原注释里那句「summary 由
+的 `readEvalSummaries`、`biz/gate_check.py` 的 `read_trend_rows`）。原注释里那句「summary 由
 课程侧按合并后的台账重算」对纯云腿不成立——没有本地循环，没人替它算。
 
 本文件钉住合并的三条性质：
@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.eval_local import (
+from biz.eval_local import (
     append_eval_summaries,
     eval_summary_key,
     merge_eval_rows,

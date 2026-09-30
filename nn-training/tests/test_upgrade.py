@@ -1,4 +1,4 @@
-"""test_upgrade.py — dist_common 主动升级机制（M8）单元测试。
+"""test_upgrade.py — common.distribution 主动升级机制（M8）单元测试。
 
 编排层 ping 发现 agent codeHash stale → POST /v1/restart 指示 git pull + 重启。
 用真实本地 HTTP mock agent 验证：
@@ -22,16 +22,16 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
-from platform_utils import rmtree_best_effort
+from common.platform_utils import rmtree_best_effort
 
-# 仓库根 battle2（tests/ 上溯 3 层，与 rl/queue_local.py 同约定）——bun 侧脚本在
+# 仓库根 battle2（tests/ 上溯 3 层，与 trainer/queue_local.py 同约定）——bun 侧脚本在
 # tools/agent/ 下，旧 REPO=nn-training 让对拍测试的 bun 路径指向不存在的
 # nn-training/tools/agent/sampler-agent.ts（2026-09-09 修复）。
 REPO = Path(__file__).resolve().parents[2]
 NN_DIR = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(NN_DIR))
 
-import dist_common
+import common.distribution
 from tests.subproc_util import run_utf8
 
 FAILS: list[str] = []
@@ -124,7 +124,7 @@ def make_cfg(mock_url: str, enabled: bool = True) -> dict:
 def test_request_upgrade() -> None:
     mock = MockAgent()
     try:
-        ok = dist_common.request_upgrade(mock.url(), "KEY_X", "intent-ai")
+        ok = common.distribution.request_upgrade(mock.url(), "KEY_X", "intent-ai")
         check(ok, "request_upgrade stale node → True")
         check(len(mock.restart_calls) == 1, "POST /v1/restart 恰好一次")
         if mock.restart_calls:
@@ -135,7 +135,7 @@ def test_request_upgrade() -> None:
             )
             check(c["auth"] == "Bearer KEY_X", "Authorization: Bearer KEY_X")
         # 非 200/202 → False。
-        ok2 = dist_common.request_upgrade(
+        ok2 = common.distribution.request_upgrade(
             f"http://127.0.0.1:{mock.port + 1}", "K", "x", timeout=1.0
         )
         check(ok2 is False, "request_upgrade 失败节点 → False（不抛）")
@@ -144,7 +144,7 @@ def test_request_upgrade() -> None:
 
 
 def test_upgrade_stale_nodes() -> None:
-    dist_common.reset_restart_state()
+    common.distribution.reset_restart_state()
     EXPECTED = "current-hash-xyz"
     stale = MockAgent(code_hash="stale-hash-abc")  # ≠ expected → 应升级
     current = MockAgent(code_hash=EXPECTED)  # == expected → 不升级
@@ -158,7 +158,7 @@ def test_upgrade_stale_nodes() -> None:
     }
     try:
         # dirty=[] 显式注入干净工作区（真实仓库可能是脏的——护栏用例单独测）。
-        res = dist_common.upgrade_stale_nodes(
+        res = common.distribution.upgrade_stale_nodes(
             cfg,
             expected_hash=EXPECTED,
             branch="intent-ai",
@@ -202,10 +202,10 @@ def test_request_upgrade_guarded_dedup() -> None:
 
     F1（plan/dist-codehash-stale-fix.md）：dedup 键纳入期望 hash——agent hash 没变但
     训练机期望值变了（本机 commit/切分支/改集内文件）⇒ 允许再发一次升级。"""
-    dist_common.reset_restart_state()
+    common.distribution.reset_restart_state()
     mock = MockAgent(code_hash="stale-hash-abc")
     try:
-        ok1, r1 = dist_common.request_upgrade_guarded(
+        ok1, r1 = common.distribution.request_upgrade_guarded(
             "n1",
             mock.url(),
             "K",
@@ -217,7 +217,7 @@ def test_request_upgrade_guarded_dedup() -> None:
         check(ok1 and r1 == "restart-requested", f"首次 → restart-requested, got {r1}")
         check(len(mock.restart_calls) == 1, "首次恰好 1 次 POST")
         # 同一节点、同一 agent codeHash + 同一期望 hash 再请求 → dedup，不杀进程。
-        ok2, r2 = dist_common.request_upgrade_guarded(
+        ok2, r2 = common.distribution.request_upgrade_guarded(
             "n1",
             mock.url(),
             "K",
@@ -230,7 +230,7 @@ def test_request_upgrade_guarded_dedup() -> None:
         check(len(mock.restart_calls) == 1, "dedup 不再发 POST")
         # F1 核心回归：agent hash 没变但训练机期望 hash 变了 ⇒ 能收到第二次升级请求
         # （mac 事故「pull+重启 后 hash 不变 → 永远无法重新纳管」的修复）。
-        ok3, r3 = dist_common.request_upgrade_guarded(
+        ok3, r3 = common.distribution.request_upgrade_guarded(
             "n1",
             mock.url(),
             "K",
@@ -242,7 +242,7 @@ def test_request_upgrade_guarded_dedup() -> None:
         check(ok3 and r3 == "restart-requested", f"期望 hash 变化 → 可再次重启, got {r3}")
         check(len(mock.restart_calls) == 2, "期望 hash 变化后的重启恰好发出")
         # 期望 hash 不变 + ping_hash 不变 ⇒ 仍 dedup（防 F1 把去重改成失效）。
-        ok4, r4 = dist_common.request_upgrade_guarded(
+        ok4, r4 = common.distribution.request_upgrade_guarded(
             "n1",
             mock.url(),
             "K",
@@ -255,7 +255,7 @@ def test_request_upgrade_guarded_dedup() -> None:
         check(len(mock.restart_calls) == 2, "仍 dedup 不再发 POST")
         # 节点 hash 变化（pull 生效 / 手动更新成功但仍 stale）→ 恢复重启资格。
         mock.code_hash = "still-stale-but-new"
-        ok5, r5 = dist_common.request_upgrade_guarded(
+        ok5, r5 = common.distribution.request_upgrade_guarded(
             "n1",
             mock.url(),
             "K",
@@ -267,7 +267,7 @@ def test_request_upgrade_guarded_dedup() -> None:
         check(ok5 and r5 == "restart-requested", f"hash 变化后 → 可再次重启, got {r5}")
         check(len(mock.restart_calls) == 3, "第三次重启恰好发出")
         # 不同节点互不影响（去重按 nid 隔离）。
-        ok6, r6 = dist_common.request_upgrade_guarded(
+        ok6, r6 = common.distribution.request_upgrade_guarded(
             "n2",
             mock.url(),
             "K",
@@ -289,34 +289,34 @@ def test_request_upgrade_guarded_cooldown() -> None:
     远端升级的节点（带着同一个 codeHash 回来）再也收不到升级指令，且 TS 工具的落盘 memo
     会跨调用继续压制。现在：窗内 dedup（防连环杀），窗过后允许再发一次并重置时钟。
     """
-    dist_common.reset_restart_state()
+    common.distribution.reset_restart_state()
     mock = MockAgent(code_hash="stale-hash-abc")
     args = ("n1", mock.url(), "K", "goal-nn", "stale-hash-abc")
     try:
-        ok1, r1 = dist_common.request_upgrade_guarded(
+        ok1, r1 = common.distribution.request_upgrade_guarded(
             *args, dirty=[], expected_hash="E", cooldown_sec=60
         )
         check(ok1 and r1 == "restart-requested", f"首次 → restart-requested, got {r1}")
-        ok2, r2 = dist_common.request_upgrade_guarded(
+        ok2, r2 = common.distribution.request_upgrade_guarded(
             *args, dirty=[], expected_hash="E", cooldown_sec=60
         )
         check(ok2 is False and r2 == "dedup", f"窗内 → dedup, got {r2}")
         check(len(mock.restart_calls) == 1, "窗内不再发 POST")
         # 窗过期（用 cooldown=0 等价于「已过 10 分钟」）⇒ 允许再发一次（自愈路径）。
-        ok3, r3 = dist_common.request_upgrade_guarded(
+        ok3, r3 = common.distribution.request_upgrade_guarded(
             *args, dirty=[], expected_hash="E", cooldown_sec=0
         )
         check(ok3 and r3 == "restart-requested", f"窗过期 → 可再发, got {r3}")
         check(len(mock.restart_calls) == 2, "重发恰好一次")
         # 重发后时钟重置：窗内再问又回到 dedup（防连环杀没被废掉）。
-        ok4, r4 = dist_common.request_upgrade_guarded(
+        ok4, r4 = common.distribution.request_upgrade_guarded(
             *args, dirty=[], expected_hash="E", cooldown_sec=60
         )
         check(ok4 is False and r4 == "dedup", f"重发后窗内 → dedup, got {r4}")
         check(len(mock.restart_calls) == 2, "重发后时钟重置，窗内不发 POST")
         # 调用方持久化 memo（TS 落盘那条腿）预置 atSec：一小时前的下发 ⇒ 已过期 ⇒ 可重发。
-        dist_common.reset_restart_state()
-        dist_common.seed_restart_state(
+        common.distribution.reset_restart_state()
+        common.distribution.seed_restart_state(
             [
                 {
                     "id": "n1",
@@ -326,18 +326,18 @@ def test_request_upgrade_guarded_cooldown() -> None:
                 }
             ]
         )
-        ok5, r5 = dist_common.request_upgrade_guarded(*args, dirty=[], expected_hash="E")
+        ok5, r5 = common.distribution.request_upgrade_guarded(*args, dirty=[], expected_hash="E")
         check(ok5 and r5 == "restart-requested", f"memo 里 1h 前的下发应已过期, got {r5}")
         check(len(mock.restart_calls) == 3, "过期 memo 后的重发发出")
         # 旧 memo（无 atSec）视作「刚刚下发」⇒ 保持旧的永久去重语义（向后兼容）。
-        dist_common.reset_restart_state()
-        dist_common.seed_restart_state(
+        common.distribution.reset_restart_state()
+        common.distribution.seed_restart_state(
             [{"id": "n1", "pingHash": "stale-hash-abc", "expectedHash": "E"}]
         )
-        ok6, r6 = dist_common.request_upgrade_guarded(*args, dirty=[], expected_hash="E")
+        ok6, r6 = common.distribution.request_upgrade_guarded(*args, dirty=[], expected_hash="E")
         check(ok6 is False and r6 == "dedup", f"旧 memo（无 atSec）→ dedup, got {r6}")
     finally:
-        dist_common.reset_restart_state()
+        common.distribution.reset_restart_state()
         mock.close()
 
 
@@ -347,20 +347,20 @@ def test_request_upgrade_guarded_dirty_tree() -> None:
     （代码同源，纯重启拾取工作区代码）且强制 pullBranch=""（共享工作区禁 pull）。
     注意：mock agent 绑 127.0.0.1 会被 is_self_node 判为 self——monkeypatch 模拟
     真实远端（非回环主机）与 self 两种身份。"""
-    dist_common.reset_restart_state()
+    common.distribution.reset_restart_state()
     remote = MockAgent(code_hash="stale-hash-abc")
     self_mock = MockAgent(code_hash="stale-hash-abc")
-    real_is_self = dist_common.is_self_node
-    dist_common.is_self_node = lambda url, node_id="": node_id == "self"
+    real_is_self = common.distribution.is_self_node
+    common.distribution.is_self_node = lambda url, node_id="": node_id == "self"
     try:
         dirty = ["src/types.ts", "src/game/SimulationCombat.ts"]
-        ok, r = dist_common.request_upgrade_guarded(
+        ok, r = common.distribution.request_upgrade_guarded(
             "remote", remote.url(), "K", "goal-nn", "stale-hash-abc", dirty=dirty
         )
         check(ok is False and r == "dirty-tree:2", f"远端脏树 → 拒发, got {r}")
         check(len(remote.restart_calls) == 0, "远端脏树 → 不杀进程")
         # self 节点：dirty 仍放行，纯重启。
-        ok2, r2 = dist_common.request_upgrade_guarded(
+        ok2, r2 = common.distribution.request_upgrade_guarded(
             "self", self_mock.url(), "K", "goal-nn", "stale-hash-abc", dirty=dirty
         )
         check(ok2 and r2 == "restart-requested", f"self 脏树 → 纯重启放行, got {r2}")
@@ -370,26 +370,26 @@ def test_request_upgrade_guarded_dirty_tree() -> None:
                 "self 重启 pullBranch 强制为空（禁 pull）",
             )
         # dirty=None 自动检测：不抛异常、reason 合法即可（真实仓库状态不确定）。
-        ok3, r3 = dist_common.request_upgrade_guarded(
+        ok3, r3 = common.distribution.request_upgrade_guarded(
             "auto", remote.url(), "K", "goal-nn", "auto-hash", dirty=None
         )
         check(isinstance(ok3, bool) and isinstance(r3, str), f"dirty=None 自动检测不抛, got {r3}")
     finally:
-        dist_common.is_self_node = real_is_self
+        common.distribution.is_self_node = real_is_self
         remote.close()
         self_mock.close()
 
 
 def test_upgrade_stale_nodes_dirty_tree() -> None:
     """upgrade_stale_nodes 在脏工作区下对远端节点全部拒发（零 restart POST）。"""
-    dist_common.reset_restart_state()
+    common.distribution.reset_restart_state()
     EXPECTED = "current-hash-xyz"
     stale = MockAgent(code_hash="stale-hash-abc")
     cfg = {"nodes": [{"id": "stale", "url": stale.url(), "authKey": "K1", "enabled": True}]}
-    real_is_self = dist_common.is_self_node
-    dist_common.is_self_node = lambda url, node_id="": False  # 模拟非回环远端节点
+    real_is_self = common.distribution.is_self_node
+    common.distribution.is_self_node = lambda url, node_id="": False  # 模拟非回环远端节点
     try:
-        res = dist_common.upgrade_stale_nodes(
+        res = common.distribution.upgrade_stale_nodes(
             cfg,
             EXPECTED,
             "goal-nn",
@@ -405,7 +405,7 @@ def test_upgrade_stale_nodes_dirty_tree() -> None:
         )
         check(len(stale.restart_calls) == 0, "脏树 → 零 restart POST")
     finally:
-        dist_common.is_self_node = real_is_self
+        common.distribution.is_self_node = real_is_self
         stale.close()
 
 
@@ -418,7 +418,7 @@ def test_parse_porcelain() -> None:
         'R  old_name.ts -> "new name.ts"\n'
         "\n"
     )
-    got = dist_common._parse_porcelain(text)
+    got = common.distribution._parse_porcelain(text)
     check(
         got
         == [
@@ -433,7 +433,7 @@ def test_parse_porcelain() -> None:
 
 def test_dirty_hash_files_smoke() -> None:
     """dirty_hash_files 冒烟：真实仓库上不抛异常、返回 list。"""
-    d = dist_common.dirty_hash_files()
+    d = common.distribution.dirty_hash_files()
     check(isinstance(d, list), f"dirty_hash_files 返回 list（不抛）, got {type(d).__name__}")
 
 
@@ -444,26 +444,26 @@ def test_dirty_hash_files_eol_blindspot() -> None:
     git status（core.autocrlf=input 会先规范化再比较）判为干净 ⇒ dirty=[] ⇒
     训练机期望 codeHash 与远端干净 checkout 不等，节点卡了 40 分钟零贡献。
     """
-    real = dist_common._collect_code_hash_files()
+    real = common.distribution._collect_code_hash_files()
     if not real:
         check(False, "codeHash 文件集非空（前置条件）")
         return
     rel, content = real[0]
-    orig = dist_common._collect_code_hash_files
+    orig = common.distribution._collect_code_hash_files
     try:
-        dist_common._collect_code_hash_files = lambda: [(rel, content)]
-        got = dist_common.dirty_hash_files()
+        common.distribution._collect_code_hash_files = lambda: [(rel, content)]
+        got = common.distribution.dirty_hash_files()
         check(got == [], f"工作区字节=索引 → clean, got {got}")
         # 仅行尾差异（语义等价、字节不同）必须判 dirty——git status 看不见它
-        dist_common._collect_code_hash_files = lambda: [(rel, content.replace(b"\n", b"\r\n"))]
-        got = dist_common.dirty_hash_files()
+        common.distribution._collect_code_hash_files = lambda: [(rel, content.replace(b"\n", b"\r\n"))]
+        got = common.distribution.dirty_hash_files()
         check(got == [rel], f"纯 CRLF 污染 → dirty（autocrlf 盲区）, got {got}")
         # 未跟踪文件（远端 pull 拿不到）同样 dirty
-        dist_common._collect_code_hash_files = lambda: [("no/such/untracked.ts", b"x")]
-        got = dist_common.dirty_hash_files()
+        common.distribution._collect_code_hash_files = lambda: [("no/such/untracked.ts", b"x")]
+        got = common.distribution.dirty_hash_files()
         check(got == ["no/such/untracked.ts"], f"未跟踪 → dirty, got {got}")
     finally:
-        dist_common._collect_code_hash_files = orig
+        common.distribution._collect_code_hash_files = orig
 
 
 def test_codehash_f3_noise_filtering() -> None:
@@ -473,9 +473,9 @@ def test_codehash_f3_noise_filtering() -> None:
     （禁止污染仓库），测试后清理。"""
     import time
 
-    real_manifest = dist_common.CODE_HASH_MANIFEST
+    real_manifest = common.distribution.CODE_HASH_MANIFEST
     base = (
-        Path(dist_common.REPO_ROOT)
+        Path(common.distribution.REPO_ROOT)
         / "tmp"
         / "pytest-tmp"
         / f"chfix-f3-{os.getpid()}-{int(time.time() * 1000)}"
@@ -498,7 +498,7 @@ def test_codehash_f3_noise_filtering() -> None:
     (fixture / "x.log").write_text("x", encoding="utf-8")
     (fixture / "x.swp").write_text("x", encoding="utf-8")
     (fixture / "x~").write_text("x", encoding="utf-8")
-    rel_dir = os.path.relpath(fixture, dist_common.REPO_ROOT).replace("\\", "/")
+    rel_dir = os.path.relpath(fixture, common.distribution.REPO_ROOT).replace("\\", "/")
     manifest = base / "codehash-files.txt"
     # 目录条目（受过滤）+ 显式单文件条目（不过滤）+ 不存在条目（跳过）。
     manifest.write_text(
@@ -506,8 +506,8 @@ def test_codehash_f3_noise_filtering() -> None:
         encoding="utf-8",
     )
     try:
-        dist_common.CODE_HASH_MANIFEST = str(manifest)
-        entries = dist_common._collect_code_hash_files()
+        common.distribution.CODE_HASH_MANIFEST = str(manifest)
+        entries = common.distribution._collect_code_hash_files()
         rels = [rel for rel, _c in entries]
         included = sorted(r for r in rels if r.startswith(rel_dir))
         want = sorted(
@@ -536,7 +536,7 @@ def test_codehash_f3_noise_filtering() -> None:
                 f"目录递归过滤 {bad}",
             )
     finally:
-        dist_common.CODE_HASH_MANIFEST = real_manifest
+        common.distribution.CODE_HASH_MANIFEST = real_manifest
         rmtree_best_effort(base, ignore_errors=True)
 
 
@@ -544,9 +544,9 @@ def test_code_hash_report() -> None:
     """F4：code_hash_report() 输出格式——每行 `sha8\tsize\trelPath`，末行
     `codeHash=<full>`；行数 = 文件数 + 1。与 codehash-report.ts 同格式（双侧
     diff 定位 stale 的前提）。"""
-    report = dist_common.code_hash_report()
+    report = common.distribution.code_hash_report()
     lines = report.splitlines()
-    n_files = len(dist_common._collect_code_hash_files())
+    n_files = len(common.distribution._collect_code_hash_files())
     check(
         len(lines) == n_files + 1,
         f"报告行数 = 文件数+1 (got {len(lines)} vs {n_files}+1)",
@@ -563,7 +563,7 @@ def test_code_hash_report() -> None:
 def test_codehash_manifest_expansion() -> None:
     """SSOT 清单 codehash-files.txt 展开：目录条目递归、文件条目直接纳入，relPath 全
     正斜杠且无重复；本次事故的 3 个关键文件必须在集内。"""
-    entries = dist_common._collect_code_hash_files()
+    entries = common.distribution._collect_code_hash_files()
     rels = [rel for rel, _content in entries]
     check(len(rels) > 10, f"清单展开非空（got {len(rels)} files）")
     # 2026-09-01 事故：Python 侧加了这 3 个文件、TS 侧漏同步 → 节点被永久误判 stale。
@@ -608,7 +608,7 @@ def test_codehash_bilingual_contract() -> None:
         return
     # --print-code-hash 输出带 [HH:MM:SS] 时间戳前缀，取最后一个 token。
     ts_hash = proc.stdout.strip().split()[-1]
-    py_hash = dist_common.compute_code_hash()
+    py_hash = common.distribution.compute_code_hash()
     check(
         len(ts_hash) == 64 and ts_hash == py_hash,
         f"双语 codeHash 一致 (TS={ts_hash[:12]}… Python={py_hash[:12]}…)",
@@ -621,7 +621,7 @@ def test_codehash_bilingual_contract() -> None:
         return
     ts_lines = proc2.stdout.strip().splitlines()
     ts_files = {ln.split("\t")[2] for ln in ts_lines[:-1]}
-    py_files = {rel for rel, _c in dist_common._collect_code_hash_files()}
+    py_files = {rel for rel, _c in common.distribution._collect_code_hash_files()}
     check(
         ts_files == py_files,
         f"双侧文件集逐文件一致 (TS={len(ts_files)} vs Python={len(py_files)})",

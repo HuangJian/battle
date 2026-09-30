@@ -5,7 +5,7 @@ ppo_common.py — PPO 训练基础设施共享模块（工程化抽取，行为�
 log / masked_logsoftmax / cat_logprob / cat_entropy / chunk_episodes / GAE /
 checkpoint(RNG) / shard 发现与加载 / episode 骨架 样板。本模块把这些"逐字节相同或
 仅参数化差异"的逻辑收拢为单一实现；两个训练器保留各自模块级公共名（re-export），
-对外行为不变（run_rl.py / rl/stream.py / 测试按原名字引用）。
+对外行为不变（run_rl.py / trainer/stream.py / 测试按原名字引用）。
 
 统一点（与原实现逐字节等价）：
   * compute_gae(dt=None) = 原 ppo.compute_gae 定长路径；
@@ -34,6 +34,11 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import torch.nn.functional as F
+
+# 统一时间戳日志（与 ppo 旧 log 逐字节一致）。**再导出**：ppo.intent / ppo.engine /
+# ppo.goal / train.goal_bc 都从本模块取 `log`（load_episodes_common 搬去 np_core 后，
+# 本模块自身不再直接调用它 ⇒ 显式 `log as log` + noqa 标成公开再导出，勿当死代码删）。
+from biz.log import log as log
 
 # 纯 numpy/stdlib 核心已拆到 ppo/np_core.py（2026-09-26：让业务逻辑用例不必拖 torch）。
 # 这里再导出，既有 `from ppo.common import compute_gae / chunk_episodes / ...` 一行不改。
@@ -68,11 +73,6 @@ from ppo.np_core import (  # noqa: F401  (re-export：既有调用点不变)
     xla_metrics_snapshot,
     xla_world_size,
 )
-
-# 统一时间戳日志（与 ppo 旧 log 逐字节一致）。**再导出**：ppo.intent / ppo.engine /
-# ppo.goal / train.goal_bc 都从本模块取 `log`（load_episodes_common 搬去 np_core 后，
-# 本模块自身不再直接调用它 ⇒ 显式 `log as log` + noqa 标成公开再导出，勿当死代码删）。
-from rl.log import log as log
 
 
 # ---------------- 标量同步（N 次 device→host 同步收成 1 次） ----------------

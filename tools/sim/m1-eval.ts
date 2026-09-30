@@ -30,7 +30,7 @@
  *   bun tools/sim/m1-eval.ts --stages all --seeds 1-12 --out tmp/m1_eval_scorecard.html
  *
  * 分派（dist）：节点通信 / 重试 / 权重下发 / rescan **只有 Python 一份实现**
- * （`nn-training/eval_m1_once.py` → `rl/batch_eval.BatchEvalRunner` + `dist_common`，
+ * （`nn-training/eval_m1_once.py` → `rl/batch_eval.BatchEvalRunner` + `common.distribution`，
  * 即训练循环长期在用的那套）。本文件在 dist 路径上只做三件事：写 spec → 读回逐局行
  * → 打分/报告。`--policy intent-exec|goal|god` 可经 agent 分派；其余策略与 `--no-dist`
  * 走本机 worker 池（那是游戏引擎本身，不涉节点通信）。本机份额由配置决定
@@ -471,7 +471,7 @@ async function main(): Promise<void> {
     todo = tasks.filter((t) => results[t.id] && results[t.id]!.ok === false)
   }
 
-  // 收尾：来源注脚 + 可选节点升级（扫描/判 stale 全在 Python：dist_common.upgrade_stale_nodes）。
+  // 收尾：来源注脚 + 可选节点升级（扫描/判 stale 全在 Python：common.distribution.upgrade_stale_nodes）。
   // 注：个别节点环境上就是不支持远控升级（隧道后 agent 返 502 等）——那是环境事实，
   // Python 逐节点报告，不阻塞其他节点。
   if (distNodesPath) {
@@ -734,7 +734,7 @@ async function main(): Promise<void> {
 //
 // 这里**只**做三件事：把任务子集翻成 spec、调 Python、把逐局行归位。节点 ping/门/
 // 退避重试/rescan/失败停用/权重下发/wver 409/本机份额全在 `nn-training/eval_m1_once.py`
-// → `rl/batch_eval.BatchEvalRunner` + `dist_common`（训练循环长期实战的那套）——本文件
+// → `rl/batch_eval.BatchEvalRunner` + `common.distribution`（训练循环长期实战的那套）——本文件
 // 不再有第二份实现（2026-09-19 用户裁定：Python 端已有这些机制，别再在 TS 里重建）。
 
 /** 分派上下文（main 构造；runPythonDist 只读；测试直接构造）。 */

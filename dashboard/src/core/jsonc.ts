@@ -1,6 +1,6 @@
 /** jsonc.ts — JSONC 子集解析（`//` 行注释 + 尾逗号）。
  *
- *  **权威实现是 python 侧 `nn-training/rl/jsonc.py`**（训练栈读同一批课程/账本文件）；
+ *  **权威实现是 python 侧 `nn-training/common/jsonc.py`**（训练栈读同一批课程/账本文件）；
  *  本文件是它的逐条移植，两侧语义必须一致——改任一侧都要同步改另一侧。
  *
  *  语义（与 python 版逐条对齐）：

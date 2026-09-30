@@ -1,7 +1,7 @@
 """test_batch_runner_split — B 层执行面出包的契约守卫（S27/B3，plan §5.5.4 第三步）。
 
-2026-09-25：`rl/batch_eval.py` 拆分的第三步 —— `BatchEvalRunner` / `dispatch_batch_bg`
-（连同它独占的五个常量与 `_heartbeat`）**纯搬**到 `rl/batch_runner.py`。
+2026-09-25：`trainer/batch_eval.py` 拆分的第三步 —— `BatchEvalRunner` / `dispatch_batch_bg`
+（连同它独占的五个常量与 `_heartbeat`）**纯搬**到 `trainer/batch_runner.py`。
 
 本文件钉两类东西，两者都不是「搬得对」（逐字节对账在 `tmp/verify_b3.py`），而是
 **搬完之后仍然成立、且只有搬完才需要守**的契约：
@@ -11,7 +11,7 @@
      台账零手写（写面只有 `BatchStore`）。
   ② **★ 注入点契约（B3 的真理由）**：执行器的依赖注入靠**模块全局**，所以 `log` /
      `bun_version` / `run_local_eval_game` 与五个常量必须在**本模块**里被**裸名**读取 ——
-     测试 `monkeypatch.setattr("rl.batch_runner.X")` 才生效；打在旧家 = 静默空操作。
+     测试 `monkeypatch.setattr("trainer.batch_runner.X")` 才生效；打在旧家 = 静默空操作。
      本文件按 AST 钉「裸名调用/读取」，这比「跑一遍看有没有效果」更早、更准。
   ③ **功能性**：从**新家**直接调（不经门面）—— 心跳写点 + 失败静默 · `dispatch_batch_bg`
      起的线程 · `_done_keys` 的读盘口径。
@@ -30,10 +30,10 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import rl.batch_eval as be
-import rl.batch_runner as br
+import trainer.batch_eval as be
+import trainer.batch_runner as br
 
-RL = ROOT / "rl"
+RL = ROOT / "trainer"
 RUNNER_PATH = RL / "batch_runner.py"
 EVAL_PATH = RL / "batch_eval.py"
 RUNNER_SRC = RUNNER_PATH.read_text(encoding="utf-8")
@@ -68,21 +68,22 @@ RUNNER_IMPORTS = {
     "threading",
     "time",
     "typing",
-    "dist_common",
+    "common.distribution",
     # 2026-09-29 登记（plan/sampler-single-instance §8-Q2）：节点门多一道「本轮 bootId 一致」
-    # —— 节点 ping 结果的同一性账本（纯逻辑，零依赖）在 `rl/node_identity.py`，执行器在
-    # `bringup` 的回场口消费它。`from rl import node_identity` 的顶层名就是裸包 `rl`。
-    "rl",
-    "rl.batch_plan",
-    "rl.batch_store",
-    "rl.eval_local",
+    # —— 节点 ping 结果的同一性账本（纯逻辑，零依赖）在 `biz/node_identity.py`，执行器在
+    # `bringup` 的回场口消费它。`from biz import node_identity` 的顶层名就是**裸包 `biz`**
+    # （2026-09-30 刀 4 前它写作 `from rl import node_identity` ⇒ 裸名是 `rl`）。
+    "biz",
+    "trainer.batch_plan",
+    "trainer.batch_store",
+    "biz.eval_local",
     # 2026-09-27（S5 第十二刀）登记：本机份额缺省 `EVAL_LOCAL_SLOTS_DEFAULT` 随「让位/
-    # 份额」族搬到 `rl/eval_yield.py` —— 执行器从判决面取份额，不再为一条缺省拖入运行器
+    # 份额」族搬到 `biz/eval_yield.py` —— 执行器从判决面取份额，不再为一条缺省拖入运行器
     # （运行器那行仍在：`run_local_eval_game` 是本机槽位的执行面）。
-    "rl.eval_yield",
-    "rl.log",
-    "rl.queue",
-    "rl.queue_local",
+    "biz.eval_yield",
+    "biz.log",
+    "trainer.queue",
+    "trainer.queue_local",
 }
 
 
@@ -104,10 +105,18 @@ def _top_bound(src: str) -> set[str]:
 
 
 def _top_imports(src: str) -> set[str]:
+    """顶层 import 的**全点分名**集合（两种形状同口径）。
+
+    `import a.b` 取 `a.b`，`from a.b import c` 也取 `a.b` —— 两条都记全路径。
+    2026-09-30（刀 2）修正：原先 `ast.Import` 那一支取 `a.name.split(".")[0]`，
+    只在「顶层模块都是单段名」时与 `ImportFrom` 同口径；`dist_common` 下沉成
+    `common.distribution` 后，全仓第一次出现 `import common.distribution`，
+    这一支就只记下裸 `common`，与本集合里点分名的写法对不上。
+    """
     out: set[str] = set()
     for node in ast.parse(src).body:
         if isinstance(node, ast.Import):
-            out.update(a.name.split(".")[0] for a in node.names)
+            out.update(a.name for a in node.names)
         elif isinstance(node, ast.ImportFrom) and node.module:
             out.add(node.module)
     return out
@@ -151,8 +160,8 @@ def _load_names_in(fragment: str) -> set[str]:
 def test_moved_members_are_defined_only_in_the_new_home() -> None:
     runner, old = _top_bound(RUNNER_SRC), _top_bound(EVAL_SRC)
     for name in MOVED:
-        assert name in runner, f"{name} 不在 rl/batch_runner.py"
-        assert name not in old, f"{name} 仍定义在 rl/batch_eval.py"
+        assert name in runner, f"{name} 不在 trainer/batch_runner.py"
+        assert name not in old, f"{name} 仍定义在 trainer/batch_eval.py"
 
 
 def test_facade_reexports_are_the_same_objects() -> None:
@@ -163,24 +172,24 @@ def test_facade_reexports_are_the_same_objects() -> None:
 
 
 def test_runner_only_symbols_are_not_forwarded_by_the_facade() -> None:
-    """执行器独占的符号**不**转发 ⇒ `rl.batch_eval.<X>` 响亮 AttributeError。
+    """执行器独占的符号**不**转发 ⇒ `trainer.batch_eval.<X>` 响亮 AttributeError。
 
     S16/S19 记过两次的同款坑：名字还留着（转发一份）时，`monkeypatch.setattr` 打在旧家
     会**静默**变成空操作 —— 单测仍绿、生产不生效。这里正面钉「不许有这条路」。
     """
     for name in NOT_FORWARDED:
-        assert hasattr(br, name), f"{name} 应住 rl/batch_runner"
+        assert hasattr(br, name), f"{name} 应住 trainer/batch_runner"
         assert not hasattr(be, name), f"{name} 不该经门面转发（patch 会静默失效）"
 
 
 def test_no_back_edge_to_the_old_home() -> None:
     """不得 import 旧家（成环）—— 用 **AST** 判，不用文本搜。
 
-    本模块 docstring 里必然写着「`rl.batch_eval` 反过来再导出本模块的公开名」这类
+    本模块 docstring 里必然写着「`trainer.batch_eval` 反过来再导出本模块的公开名」这类
     **合法散文**（S20 的教训：入边是语法事实，就该用语法量）。
     """
     actual = _top_imports(RUNNER_SRC)
-    assert "rl.batch_eval" not in actual
+    assert "trainer.batch_eval" not in actual
     attrs = [n.attr for n in ast.walk(ast.parse(RUNNER_SRC)) if isinstance(n, ast.Attribute)]
     assert "batch_eval" not in attrs
 
@@ -220,14 +229,14 @@ def test_ledger_is_never_written_by_hand() -> None:
 def test_di_names_are_bound_and_called_bare_in_the_runner_module() -> None:
     """三个注入点必须是**本模块的全局**、且以**裸名**调用。
 
-    `monkeypatch.setattr("rl.batch_runner.bun_version", …)` 只改本模块的全局；调用点若写成
-    `dist_common.bun_version(...)` 一类限定名，patch 就**静默失效**。这里两种形态都数。
+    `monkeypatch.setattr("trainer.batch_runner.bun_version", …)` 只改本模块的全局；调用点若写成
+    `common.distribution.bun_version(...)` 一类限定名，patch 就**静默失效**。这里两种形态都数。
     """
     bare, qualified = _callee_forms(RUNNER_SRC, DI_NAMES)
     assert all(n > 0 for n in bare.values()), bare
     assert all(n == 0 for n in qualified.values()), qualified
     for name in DI_NAMES:
-        assert hasattr(br, name), f"{name} 没绑进 rl.batch_runner（patch 会静默失效）"
+        assert hasattr(br, name), f"{name} 没绑进 trainer.batch_runner（patch 会静默失效）"
 
 
 def test_runner_constants_are_read_bare_inside_the_runner_classes() -> None:
@@ -236,7 +245,7 @@ def test_runner_constants_are_read_bare_inside_the_runner_classes() -> None:
     2026-09-25（S31/B5b）：执行侧现在有两个类 —— 开单元/收尾住 `BatchEvalRunner`，通道机器住
     `_UnitLanes`（常量读取随机器搬过去：`BUSY_BACKOFF_CAP_SEC` / `STUCK_GRACE_SEC`）。
     只扫旧类会**静默**退化成「3/5」—— 与 `test_batch_plan_split` 的入边归属者同型。
-    两个类都在同一模块 ⇒ 裸名 patch 锚点（`rl.batch_runner.X`）不迁移。
+    两个类都在同一模块 ⇒ 裸名 patch 锚点（`trainer.batch_runner.X`）不迁移。
     """
     loads: set[str] = set()
     for cls in ("BatchEvalRunner", "_UnitLanes"):
@@ -265,7 +274,7 @@ def test_constructor_call_in_dispatch_is_a_bare_global() -> None:
 
 def test_heartbeat_writes_state_and_swallows_failure(monkeypatch) -> None:
     """心跳写点从新家走；失败必须**静默**（心跳绝不打断单元）。"""
-    import rl.eval_heartbeat as hb
+    import biz.eval_heartbeat as hb
 
     seen: list[dict] = []
     monkeypatch.setattr(hb, "write_state", lambda **kw: seen.append(kw))

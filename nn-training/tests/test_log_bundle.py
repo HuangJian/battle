@@ -1,4 +1,4 @@
-"""tests/test_log_bundle.py —— 日志节食的攒行原语（`log_bundle.py`）。
+"""tests/test_log_bundle.py —— 日志节食的攒行原语（`common/log_bundle.py`）。
 
 钉的是**契约**（不是实现）：同 key 就地替换（装载进度只留最后那个值）、`final_only` 只在
 阶段完成时出现、`beat` 只按墙钟节流且**不清空**、空内容不打空行、打完就不再心跳。
@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from log_bundle import LogBundle
+from common.log_bundle import LogBundle
 
 
 @pytest.fixture()

@@ -1,4 +1,4 @@
-"""test_platform_utils_cores.py —— 「本机到底有多少核」的单一口径（`platform_utils.effective_cores`）。
+"""test_platform_utils_cores.py —— 「本机到底有多少核」的单一口径（`common.platform_utils.effective_cores`）。
 
 为什么单列一个文件（2026-09-25 云机卡死取证）：容器里的 `os.cpu_count()` 报的是**宿主机**的
 逻辑核数，不是配额——Kaggle 的 TPU 会话报 224，而 cgroup 只给 **96** 核 ⇒ `cpu_worker_slots()`
@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import platform_utils as pu
+import common.platform_utils as pu
 
 
 def _fake_fs(files: dict[str, str], monkeypatch: pytest.MonkeyPatch) -> None:

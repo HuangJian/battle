@@ -41,12 +41,12 @@ GC 开着的实际代价：常驻 **2.55s** vs 不常驻 **0.82s**（3.1×）。
 
 **派生小结果可以缓存**（与 AST 相反：它们是字符串集合，小、GC 友好）：
 
-    files = source_scan.py_files(str(NN_ROOT / "rl"))      # 该目录下 *.py（排序、缓存）
+    files = source_scan.py_files(str(NN_ROOT / "trainer"))      # 该目录下 *.py（排序、缓存）
     mods = source_scan.imports(str(path), root=str(NN_ROOT))  # 完整点分模块名集合（缓存）
 
 `imports` 是「读一次 AST 换一份 string set」——同一份文件被分层的固定点循环、多个用例反复问时
-只付一次解析；`test_layering` 的 `_rl_reaching_remote` 以前在 while 循环里每次重新解析全 `rl/`
-（每次 ~650 文件），现在退化成一次集合运算。
+只付一次解析；`test_layering` 的 `_trainer_reaching_remote` 以前在 while 循环里每次重新解析整棵
+编排树（每次 ~650 文件），现在退化成一次集合运算。
 
 ## 给「全仓扫描」用例的两条提速建议（都不改判据语义）
 
@@ -92,6 +92,58 @@ def py_files(root: str) -> tuple[Path, ...]:
     return tuple(sorted(Path(root).rglob("*.py")))
 
 
+#: 业务源码的**两棵树**（2026-09-30 刀 4 分家、刀 5 改名）：编排 `trainer/` + 纯逻辑 `biz/`。
+#:
+#: `rl/` 曾经一个包住两种东西 —— **纯逻辑**（课程 / 奖励 / 门 / 账本…，不碰传输层）与
+#: **编排**（驱动 rollout / eval / 远端腿的应用层）。同一个包名让「谁在谁上面」读不出来：
+#: 编排的 `queue.py`（import `remote`）与纯逻辑的 `course.py`（只碰 stdlib）看上去同层。
+#: 刀 4 把纯逻辑整族（64 个模块）搬进 `biz/`；刀 5 把剩下的编排整包改名 `rl/` → `trainer/`。
+#:
+#: ⚠ **口径（本仓的第九刀起那条「名字是契约」在代码位置的版本）**：凡「谁是 X 的调用者 /
+#: X 定义在哪 / 谁碰了 Y」这类**跨业务树**的判据，扫描面必须同时覆盖两棵树。只扫一棵，
+#: 搬家会让守卫两种症状二选一 —— 硬编码路径当场 `FileNotFoundError`（**响的**，好在）与
+#: `glob` 面缩水后**判据变永真**（**哑的**，刀 4 一次撞见 8 处）。所以别在各文件里各写一份
+#: `(root/"trainer").glob("*.py")`，一律经 `logic_py_files` / `logic_module` / `logic_dotted`。
+LOGIC_PACKAGES: tuple[str, ...] = ("trainer", "biz")
+
+
+@cache
+def logic_py_files(root: str) -> tuple[Path, ...]:
+    """`<root>/{trainer,biz}` 下的全部 `*.py`（排序、缓存）—— `py_files()` 的**两棵树版**。
+
+    调用方按 `path.name`（基名）keying 的表（入边/定义面那类）可以直接换上来：两棵树下
+    不会有同名文件（`test_layering` 的机械守卫钉着），基名因此仍是唯一键。
+    """
+    out: list[Path] = []
+    for pkg in LOGIC_PACKAGES:
+        d = Path(root) / pkg
+        if d.is_dir():
+            out += list(py_files(str(d)))
+    return tuple(sorted(out))
+
+
+def logic_module(root: str, fname: str) -> Path:
+    """`fname`（如 `loop_guards_gate.py`）住哪棵树 —— 找不到**抛**，不静默返回 `None`。
+
+    给「一族文件跨在两棵树里」的守卫用（实例：`trainer/loop_guards.py` + 四个
+    `biz/loop_guards_*.py` 的混入家族）。
+    """
+    for pkg in LOGIC_PACKAGES:
+        p = Path(root) / pkg / fname
+        if p.exists():
+            return p
+    raise FileNotFoundError(f"{fname} 不在 {root}/{{{','.join(LOGIC_PACKAGES)}}} 下")
+
+
+def logic_dotted(root: str, fname: str) -> str:
+    """`fname` 的**点分模块名**（`trainer.loop_guards` / `biz.loop_guards_gate`）。
+
+    给 `f"{pkg}.{x}"` 那类**模板串**用 —— 模板串里的全名文本通行证看不见，搬家后不改就是
+    `ModuleNotFoundError` 或更糟的「断言比了个不存在的名字」（`__module__` 那类）。
+    """
+    return f"{logic_module(root, fname).parent.name}.{fname.removesuffix('.py')}"
+
+
 @cache
 def _subpackages(root: str) -> frozenset[str]:
     """`root` 下**带 `__init__.py`** 的包子目录名。
@@ -115,7 +167,7 @@ def _facts_for(
     字面量却不在源码里」的情况），跳过只可能跳过「本来就不含它的文件」。
 
     预筛是**近似免费**的：102 个文件 × 十来个名字的子串扫描 ≈ 毫秒级；而被它挡掉的
-    `ast.parse` + `ast.walk`（每文件 ~5ms，全 `rl/` 一次 ~0.5s）才是那批守卫的成本。
+    `ast.parse` + `ast.walk`（每文件 ~5ms，整棵编排树一次 ~0.5s）才是那批守卫的成本。
     """
     text = read_text(path)
     if not any(name in text for name in only):
@@ -131,7 +183,7 @@ def _facts_for(
 def _module_facts(path: str) -> tuple[Mapping[str, int], frozenset[str]]:
     """文件的 (self 调用计数, 占名定义) —— **一次解析**导出两份派生小结果。
 
-    「入边 / 出边 / 槽位」那批三张表守卫对全 `rl/`（102 文件）两样都要，而且分散在三个用例
+    「入边 / 出边 / 槽位」那批三张表守卫对整棵业务树（编排 + 纯逻辑，102 文件）两样都要，而且分散在三个用例
     模块里各问一次：合在这里解析一遍，换来的是「重复解析」消失、而常驻物只是两个小容器
     （AST 本身用完即释放，见模块头）。
     """
@@ -166,7 +218,7 @@ def self_call_counts(path: str, only: frozenset[str] | None = None) -> Mapping[s
 
     `only` = 只关心这些属性名（**白名单**，返回只保证它们的计数完备，别的属性名一律不出现）。
     给了它就能走上**廉价子串预筛**：源码里连这个名字都找不到的文件直接返回空，不解析
-    （「入边闭集」那批守卫对全 `rl/` 只问十来个成员名，102 个文件里绝大多数与本判据无关）。
+    （「入边闭集」那批守卫对整棵业务树只问十来个成员名，102 个文件里绝大多数与本判据无关）。
     """
     if only is None:
         return _module_facts(path)[0]
@@ -187,7 +239,7 @@ def top_level_defs(path: str, only: frozenset[str] | None = None) -> frozenset[s
 def imports(path: str, root: str) -> frozenset[str]:
     """该文件里出现的**完整点分模块名**集合（AST，含函数内的延迟 import）。
 
-    `from rl.log import log` → `rl.log`；`from remote import hub_client` → `remote` 与
+    `from biz.log import log` → `biz.log`；`from remote import hub_client` → `remote` 与
     `remote.hub_client` **两条都记**（`root` 下带 `__init__.py` 的子包都会被展开）。
 
     缓存的是**字符串集合**（派生小结果），不是 AST —— 见模块头「AST 不常驻」的理由。

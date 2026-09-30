@@ -873,7 +873,7 @@ protocol and is indistinguishable to the loop.
   update, so throughput collapses without any signal in the logs (and the "waiting for claim" line is
   the diagnostic you would otherwise never see).
 - **Why the console is the only entry** (AGENTS §5): the launcher tripod — training-enabled marker
-  (`<traj>/training-enabled.txt`, same predicate as `rl/loop_plan.py::course_enabled`), pause/release
+  (`<traj>/training-enabled.txt`, same predicate as `trainer/loop_plan.py::course_enabled`), pause/release
   bookkeeping, and hub mode — is applied at the console/launch layer. Bypassing it
   (`python nn-training/run_rl.py` directly) hits the gateway and refuses loudly, but a partial bypass
   that satisfies the gateway while skipping the other two leaves the course un-pausable/un-resumable —
@@ -982,7 +982,7 @@ Fixes that worked, in `run_rl.py build_model` (!resume path) and
 - **Stream mode is the default (AGENTS 15.6)**: serial runs idle the whole
   collection cluster during every PPO window (measured: ~8 min idle per
   150-game iteration ≈ half of wall time). Two rot hazards to keep in check:
-  ① `rl/stream.py` requires the backend module to expose `update(...)` — the
+  ① `trainer/stream.py` requires the backend module to expose `update(...)` — the
   plain `ppo` backend lacked the alias for months (built for intent only, never
   exercised by run_rl); any new trainer backend must implement the full stream
   contract (`update` / `_ppo_load` / `load_episodes` / `chunk_episodes`).

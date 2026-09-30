@@ -6,7 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 
-from rl.eval_replays_once import _FILENAME_RE, _manifest_for, _sha16, resolve_weights
+from biz.eval_replays_once import _FILENAME_RE, _manifest_for, _sha16, resolve_weights
 
 
 def _write_weights(path: Path, payload: bytes) -> str:

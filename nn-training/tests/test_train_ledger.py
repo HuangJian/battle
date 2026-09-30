@@ -1,7 +1,7 @@
-"""R2a：`rl/train_ledger.py` 的奇偶/差分测试（plan/r2-loop-task-queue §5.2）。
+"""R2a：`biz/train_ledger.py` 的奇偶/差分测试（plan/r2-loop-task-queue §5.2）。
 
 三层钉法：
-1. **与既有五个扫描器奇偶**（`rl/resume.py` / `rl/gate_check.py`）——旧实现即参考语义，
+1. **与既有五个扫描器奇偶**（`biz/resume.py` / `biz/gate_check.py`）——旧实现即参考语义，
    新视图与它逐字段相等才算「扫账本」没走样；
 2. **增量 == 单次扫描**——`apply_event` 与 `load_ledger` 必须给出同一个视图
    （否则「只在开课读一遍 + 之后增量」这条设计会悄悄分叉）；
@@ -17,17 +17,17 @@ from pathlib import Path
 
 import pytest
 
-from rl.breaker import ENT_BREAK, ENT_BREAK_MAX_WINRATE, KL_BREAK
-from rl.gate_check import (
+from biz.breaker import ENT_BREAK, ENT_BREAK_MAX_WINRATE, KL_BREAK
+from biz.gate_check import (
     count_iteration_events,
     first_iter_end_ts,
     first_run_start_ts,
     sum_train_samples,
     sum_train_sec,
 )
-from rl.loop_guards import TrainingGuards
-from rl.resume import last_completed_iter, last_rotate_seed, peak_entropy
-from rl.train_ledger import LedgerSpec, LedgerView, load_ledger
+from biz.resume import last_completed_iter, last_rotate_seed, peak_entropy
+from biz.train_ledger import LedgerSpec, LedgerView, load_ledger
+from trainer.loop_guards import TrainingGuards
 
 TS = "2026-09-18 12:00:00"
 
@@ -161,7 +161,7 @@ def test_incremental_equals_load(tmp_path: Path) -> None:
 # ------------------------------------------------- 3) 连击：独立参考实现
 
 def _ref_streaks(rows: list[tuple[float, float, float]], ent_peak: float | None) -> tuple[int, int]:
-    """`rl/breaker.py` 文档语义的独立复算（不调用生产函数，只按文档写一遍）。"""
+    """`biz/breaker.py` 文档语义的独立复算（不调用生产函数，只按文档写一遍）。"""
     kl_streak = ent_streak = 0
     peak = ent_peak
     for kl, entropy, win_rate in rows:

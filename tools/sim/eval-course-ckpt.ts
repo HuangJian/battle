@@ -5,9 +5,9 @@
  *
  * 架构（2026-09-19 重构；用户裁定「不要在 TS 里重新实现一套节点通信和重试」）：
  *   * **本地与分布式都由 Python 引擎跑**：`nn-training/eval_course_once.py` →
- *     `rl.batch_eval.BatchEvalRunner`。节点门 / ping / 退避重试 / 失败连击停用 /
+ *     `trainer.batch_eval.BatchEvalRunner`。节点门 / ping / 退避重试 / 失败连击停用 /
  *     权重下发 / wver(409) / 本机份额 / 队列尾竞速，全部是训练栈里长期实战的
- *     那一份（`dist_common.fetch_task`、`post_weights_parallel`、`rl/queue.py`）。
+ *     那一份（`common.distribution.fetch_task`、`post_weights_parallel`、`trainer/queue.py`）。
  *     TS 侧**不再**复制任何节点通信逻辑（旧实现探测/重试/rescan/停用/本机槽位
  *     各写一份，既漂移又漏护栏，已删除）。
  *   * 本文件只做四件事：解析参数 → 写 spec → 经 `nn-py-safe.sh` 调 Python →
@@ -87,7 +87,7 @@ export function parseWeightSpec(spec: string): { path: string; label: string } {
 
 /**
  * 去尾逗号（`,]` / `,}`，含跨行）：逐字符扫描，字符串内原样保留（转义感知）。
- * 背景：Python 侧 rl/jsonc.py 容忍尾逗号，课程文件（c6-pickup 起）普遍带尾逗号
+ * 背景：Python 侧 common/jsonc.py 容忍尾逗号，课程文件（c6-pickup 起）普遍带尾逗号
  * （oxfmt `trailingComma: all` 还会主动加）；本函数让 TS 侧与 Python 同口径，
  * 否则探针读课程文件直接崩（2026-09-12 实测）。只删 `]`/`}` 前的逗号，中部逗号不动。
  */
@@ -425,7 +425,7 @@ function readRows(outPath: string): EvalCourseRow[] {
 /**
  * `--upgrade-nodes`：扫描 stale 节点并下发 pull+restart。**探测与判 stale 都不在 TS 里**
  * ——`nn-training/dist_upgrade_cli.py` 直接调训练循环的
- * `dist_common.upgrade_stale_nodes`（ping → codeHash ≠ expected → request_upgrade_guarded），
+ * `common.distribution.upgrade_stale_nodes`（ping → codeHash ≠ expected → request_upgrade_guarded），
  * TS 只拼 spec、读结果、打日志（升级要 pull+重启，本步会阻塞至多 ~3s/节点，属显式开关）。
  */
 function maybeUpgradeNodes(cfgPath: string): void {

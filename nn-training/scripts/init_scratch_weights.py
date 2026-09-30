@@ -35,9 +35,9 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # v3：dummy 前向形状随 schema 常量
 from data.weights_io import save_weights_json
 from ppo.engine import build_ppo
-from schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # v3：dummy 前向形状随 schema 常量
 
 TRUNK_SCALE = 0.1
 HEAD_SCALE = 0.01

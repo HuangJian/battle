@@ -11,7 +11,7 @@ Windows = cp936），而子进程吐的是 UTF-8 字节 ⇒ 解码在 `subproces
    ⇒ 失败路径的 `RuntimeError(f"rc={rc} ({stderr[-160:]})")` 只剩 rc，诊断全没，
    **响亮错误变哑巴**。
 
-同族的第二个实例（§30 / `remote/iter_rollout`）：GBK 解码把中文输出读死。修法都是
+同族的第二个实例（§30 / `worker/iter_rollout`）：GBK 解码把中文输出读死。修法都是
 同一条——显式 `encoding="utf-8", errors="replace"`。本模块把这句写**一次**，
 调用点不再有机会漏。仓内曾同时有 13 处裸 `text=True`（其中 4 处是 git 调用，
 现状安全但随时会踩），全量收敛到本函数。
@@ -23,8 +23,8 @@ Windows = cp936），而子进程吐的是 UTF-8 字节 ⇒ 解码在 `subproces
 
 ## 2. `bun_version`：版本探测的两种历史口径
 
-训练机侧（`rl/queue.py`、`rl/dispatch.py`）要的是「拿不到就 `?`」，节点侧
-（`remote/iter_rollout.py`）要的是「拿不到就空串」（自检行里空串 = 没装上）。
+训练机侧（`trainer/queue.py`、`trainer/dispatch.py`）要的是「拿不到就 `?`」，节点侧
+（`worker/iter_rollout.py`）要的是「拿不到就空串」（自检行里空串 = 没装上）。
 两种口径都合法，但**实现**只该有一份 ⇒ 这里收 `fallback` 参数，调用方保留自己的
 1 参签名做薄包装（同时保住测试的 `monkeypatch.setattr(mod, "bun_version", ...)` 接缝）。
 """
@@ -35,7 +35,7 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 
-from platform_utils import POPEN_NO_WINDOW
+from common.platform_utils import POPEN_NO_WINDOW
 
 __all__ = ["POPEN_NO_WINDOW", "bun_version", "run_capture", "version_mm"]
 
@@ -59,7 +59,7 @@ def run_capture(
     与裸调用的差异**只有**三处，且都是修 bug：
       * `capture_output=True` 恒定（本来每个调用点都这么写）；
       * `text=True` 恒定，且**总是**显式带 `encoding` / `errors`；
-      * 自动带上 `platform_utils.POPEN_NO_WINDOW`（Windows 下不弹黑窗抢焦点）。
+      * 自动带上 `common.platform_utils.POPEN_NO_WINDOW`（Windows 下不弹黑窗抢焦点）。
 
     `errors="replace"` 是有意选的：解码失败要变成 `U+FFFD` 而不是丢掉整段输出。
     机器可读通道应为 ASCII/JSON（可解析性不受影响），人类可读行的中文正常显示。
@@ -94,8 +94,8 @@ def bun_version(
 
     `require_zero`：非零退出码是否也算「探测失败」。**这不是旋钮，是两个调用点的
     既有差异**，刻意保留而不是「统一」掉（统一会静默改行为）：
-      * 训练机侧（`rl/queue.py` / `rl/dispatch.py`）历史实现不看退出码 ⇒ 默认 False；
-      * 节点侧自检（`remote/iter_rollout.py`）历史实现 `returncode == 0` 才认 ⇒ 传 True。
+      * 训练机侧（`trainer/queue.py` / `trainer/dispatch.py`）历史实现不看退出码 ⇒ 默认 False；
+      * 节点侧自检（`worker/iter_rollout.py`）历史实现 `returncode == 0` 才认 ⇒ 传 True。
     两条路径的差异窗口是「bun 存在、退出码非 0、却打印了版本串」——现实中不存在，
     但把它写成一个参数比写在注释里可靠。
     """
@@ -115,7 +115,7 @@ def version_mm(version: str) -> str:
     """版本串取 major.minor（`"1.2.3"` → `"1.2"`；`"1"` → `"1"`）。
 
     用途：节点侧 bun 与训练机 bun 的「同不同代」判据——补丁号差异不影响协议兼容，
-    所以比对只到 minor（`rl/dispatch.py` 的 `mm(remote_full) != mm(local_bun)`）。
+    所以比对只到 minor（`trainer/dispatch.py` 的 `mm(remote_full) != mm(local_bun)`）。
     非数字/畸形输入原样按 `.` 切分，绝不抛：它出现在派发前的对账路径上，
     把畸形版本号变成异常会把「版本对不上」误报成「派发崩了」。
     """

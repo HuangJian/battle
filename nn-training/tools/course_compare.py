@@ -3,7 +3,7 @@
 用途：把「与 x20-noexplore 同 it 点对照」这类评审里手工拼的表变成随时可出的东西。
 
 输入**既可以是活体目录也可以是封存目录**——只读 `eval_log.jsonl`（或它的 `.gz` / `.xz`，
-按 magic 判别，照 `remote/protocol.py` 先例），不扫盘、不递归。
+按 magic 判别，照 `common/protocol.py` 先例），不扫盘、不递归。
 
 **缺键 ≠ 0**（`reports/x20-dodge.review.md` P0 的教训）：某列在任一侧**一行都没有**时显示
 `未知`，而不是把它算成 0 拉低分母。合法的 0 值（零击杀的局）照常计入。

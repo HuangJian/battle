@@ -38,7 +38,7 @@ from common.protocol import (
 )
 from remote.push_client import submit_job, wait_result
 from remote.worker_server import WorkerServerState, make_worker_server
-from rl.loop_steps import _push_job_round, require_remote_transport
+from trainer.loop_steps import _push_job_round, require_remote_transport
 
 
 def _sha(data: bytes) -> str:
@@ -354,9 +354,9 @@ def test_push_job_round_failover_to_second_node(monkeypatch: pytest.MonkeyPatch)
         waited.append(url)
         return {"job_id": jid, "from": url}
 
-    # `_push_job_round` 住在 rl/loop_transport.py（S4 拆出）——patch 目标随实现走。
-    monkeypatch.setattr("rl.loop_transport._push_submit", fake_submit)
-    monkeypatch.setattr("rl.loop_transport._push_wait_result", fake_wait)
+    # `_push_job_round` 住在 trainer/loop_transport.py（S4 拆出）——patch 目标随实现走。
+    monkeypatch.setattr("trainer.loop_transport._push_submit", fake_submit)
+    monkeypatch.setattr("trainer.loop_transport._push_wait_result", fake_wait)
     nodes = [
         {"url": "http://bad.example", "authKey": "k"},
         {"url": "http://good.example", "authKey": "k"},
@@ -373,7 +373,7 @@ def test_push_job_round_all_nodes_fail(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_submit(url, key, manifest, payload, code, *, echo=False, log=None, **kw):
         raise RetryableError(f"node {url} down")
 
-    monkeypatch.setattr("rl.loop_transport._push_submit", fake_submit)
+    monkeypatch.setattr("trainer.loop_transport._push_submit", fake_submit)
     with pytest.raises(RetryableError, match="全部节点失败"):
         _push_job_round(
             [{"url": "http://a", "authKey": "k"}, {"url": "http://b", "authKey": "k"}],
@@ -394,7 +394,7 @@ def test_push_over_nodes_prefers_the_deterministic_cause() -> None:
     等满超时）。这条是组合路径与拆相路径**共用**的那份 failover 判决。
     """
     from common.protocol import JobFailedError
-    from rl.loop_steps import _push_over_nodes
+    from trainer.loop_steps import _push_over_nodes
 
     def step(i: int, _node: dict):
         if i == 0:
@@ -410,9 +410,9 @@ def test_push_over_nodes_prefers_the_deterministic_cause() -> None:
 
 def _push_session(tmp_path: Path, *, bad_first: bool = True):
     """造一份直推会话 + 真 job 目录（换节点时要重读盘上 payload）。"""
+    from biz.loop_round import RemotePpoJob
     from common.protocol import PAYLOAD_NAME
-    from rl.loop_round import RemotePpoJob
-    from rl.loop_steps import TrainingSteps
+    from trainer.loop_steps import TrainingSteps
 
     job_root = tmp_path / "remote-jobs"
     (job_root / "j7").mkdir(parents=True)
@@ -457,11 +457,11 @@ def test_push_publish_phase_submits_and_wait_phase_switches_node(
             raise RetryableError("node down mid-wait")
         return {"job_id": jid, "from": url}
 
-    # `_push_submit_first` / `_push_fetch` 住在 rl/loop_remote_push.py（S4 第二十二刀从
+    # `_push_submit_first` / `_push_fetch` 住在 trainer/loop_remote_push.py（S4 第二十二刀从
     # loop_remote.py 切出的直推腿）——patch 目标随实现走：`_push_submit` / `_push_wait_result`
-    # 在**新模块**命名空间解析，patch 旧的 `rl.loop_remote.*` 会变成静默空操作。
-    monkeypatch.setattr("rl.loop_remote_push._push_submit", fake_submit)
-    monkeypatch.setattr("rl.loop_remote_push._push_wait_result", fake_wait)
+    # 在**新模块**命名空间解析，patch 旧的 `trainer.loop_remote.*` 会变成静默空操作。
+    monkeypatch.setattr("trainer.loop_remote_push._push_submit", fake_submit)
+    monkeypatch.setattr("trainer.loop_remote_push._push_wait_result", fake_wait)
     st, sess = _push_session(tmp_path)
 
     st._push_submit_first(sess)

@@ -1,4 +1,4 @@
-"""rl/workdir_sweep.py — pure-function + sweep tests (no torch, no bun).
+"""biz/workdir_sweep.py — pure-function + sweep tests (no torch, no bun).
 
 §374 同步（2026-09-08）：local_slots 直跑每局一个 it{N}/w{idx}/ 波次目录，失败/废弃
 局（无 _rl_report.json）无人清理。本测试验证 plan/sweep 只删失败波次、完整波次与
@@ -12,8 +12,8 @@ from pathlib import Path
 
 import pytest
 
-from platform_utils import sandbox_delete_blocked
-from rl.workdir_sweep import plan_failed_wave_dirs, sweep_failed_wave_dirs
+from biz.workdir_sweep import plan_failed_wave_dirs, sweep_failed_wave_dirs
+from common.platform_utils import sandbox_delete_blocked
 
 
 def _complete_wave(iter_dir: Path, name: str) -> None:

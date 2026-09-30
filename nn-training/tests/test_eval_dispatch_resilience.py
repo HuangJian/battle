@@ -8,7 +8,7 @@
      7 个槽位整轮闲置。
 
 本文件按行为钉住修法：瞬断不计节点故障且任务继续重排；409 就地重发权重后继续用
-同一节点。判据本身（dist_common.is_transient_error / refresh_weights）在
+同一节点。判据本身（common.distribution.is_transient_error / refresh_weights）在
 test_dist_common_poll.py 有单测。
 """
 
@@ -22,8 +22,8 @@ from typing import Any
 
 import pytest
 
-import dist_common
-import rl.eval_dispatch as ed
+import common.distribution
+import trainer.eval_dispatch as ed
 
 #: 慢节点的模拟单局耗时（秒）——用例断言一律与它比，不写死别的绝对数。
 SLOW_NODE_SEC = 3.0
@@ -58,7 +58,7 @@ class _Harness:
         self.weights.write_text('{"arch":{}}', encoding="utf-8")
         self.traj = self.work / "it1"
         self.traj.mkdir()
-        self.wver = dist_common.weights_fingerprint(str(self.weights))
+        self.wver = common.distribution.weights_fingerprint(str(self.weights))
         self.logs: list[str] = []
         self.refreshed: list[dict] = []
         self.tasks: list[tuple[int, int]] = []
@@ -74,9 +74,9 @@ class _Harness:
             "nodes": [{"id": "a97", "url": "http://a97.local", "concurrency": 1}],
             "policy": {"nodeFailStreak": 3},
         }
-        monkeypatch.setattr(dist_common, "compute_code_hash", lambda: "deadbeef")
+        monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "deadbeef")
         monkeypatch.setattr(
-            dist_common,
+            common.distribution,
             "node_ping",
             lambda *a, **k: {
                 "evalSupport": True,
@@ -87,7 +87,7 @@ class _Harness:
             },
         )
         monkeypatch.setattr(
-            dist_common,
+            common.distribution,
             "post_weights_parallel",
             lambda nodes, *a, **k: [
                 {"id": n["id"], "url": n["url"], "key": "", "c": 1} for n in nodes
@@ -100,12 +100,12 @@ class _Harness:
             self.refreshed.append({"node": node["id"], **kw})
             return True
 
-        monkeypatch.setattr(dist_common, "refresh_weights", fake_refresh)
+        monkeypatch.setattr(common.distribution, "refresh_weights", fake_refresh)
 
     def run(self, fetch) -> list[dict]:
         """装好假节点（不碰网络）后跑一轮，返回 eval_log.jsonl 全部行。"""
-        dist_common.weights_push_cache_reset()
-        self.mp.setattr(dist_common, "fetch_task", fetch)
+        common.distribution.weights_push_cache_reset()
+        self.mp.setattr(common.distribution, "fetch_task", fetch)
         ed.dispatch_eval_round("bun", str(self.weights), self.traj, self.args, self.cfg, "rid.c", 5)
         rows = [
             json.loads(line)
@@ -141,7 +141,7 @@ def test_transient_502_does_not_trip_node_and_games_settle(tmp_path, monkeypatch
         calls["n"] += 1
         h.tasks.append((kw["stage"], kw["seed"]))
         if calls["n"] <= 3:
-            raise dist_common.DistError(502, "")
+            raise common.distribution.DistError(502, "")
         return h.manifest(kw["stage"], kw["seed"]), {}
 
     rows = h.run(fetch)
@@ -163,7 +163,7 @@ def test_wver_409_reposts_weights_and_keeps_node(tmp_path, monkeypatch) -> None:
     def fetch(*_a, **kw):
         calls["n"] += 1
         if calls["n"] == 1:
-            raise dist_common.DistError(409, '{"error":"wver not cached here"}')
+            raise common.distribution.DistError(409, '{"error":"wver not cached here"}')
         return h.manifest(kw["stage"], kw["seed"]), {}
 
     rows = h.run(fetch)
@@ -184,22 +184,22 @@ def test_task_lost_404_requeues_without_tripping_node(tmp_path, monkeypatch) -> 
     """
     h = _Harness(tmp_path, monkeypatch, games=2)
     forgotten: list[str] = []
-    real_forget = dist_common.forget_weights_node
+    real_forget = common.distribution.forget_weights_node
 
     def spy_forget(nid: str, kind: str | None = None) -> int:
         forgotten.append(nid)
         return real_forget(nid, kind)
 
-    monkeypatch.setattr(dist_common, "forget_weights_node", spy_forget)
+    monkeypatch.setattr(common.distribution, "forget_weights_node", spy_forget)
     calls = {"n": 0}
 
     def fetch(*_a, **kw):
         calls["n"] += 1
         h.tasks.append((kw["stage"], kw["seed"]))
         if calls["n"] <= 4:
-            raise dist_common.DistError(
+            raise common.distribution.DistError(
                 404,
-                f"{dist_common.TASK_LOST_MARKER} (restart/purge): "
+                f"{common.distribution.TASK_LOST_MARKER} (restart/purge): "
                 '{"error":"unknown task (expired/purged/restart)"}',
             )
         return h.manifest(kw["stage"], kw["seed"]), {}
@@ -226,7 +226,7 @@ def test_hard_failure_still_trips_node(tmp_path, monkeypatch) -> None:
 
     def fetch(*_a, **_kw):
         calls["n"] += 1
-        raise dist_common.DistError(0, "validate: wver mismatch")
+        raise common.distribution.DistError(0, "validate: wver mismatch")
 
     rows = h.run(fetch)
     assert [r for r in rows if r.get("event") == "eval"] == []
@@ -236,7 +236,7 @@ def test_hard_failure_still_trips_node(tmp_path, monkeypatch) -> None:
 @pytest.mark.parametrize("status", [502, 503, 504, 429, 408])
 def test_shared_classifier_covers_tunnel_and_backpressure(status: int) -> None:
     """三层共用判据：隧道/背压状态码一律 transient（不得计节点故障）。"""
-    assert dist_common.is_transient_error(dist_common.DistError(status, "")) is True
+    assert common.distribution.is_transient_error(common.distribution.DistError(status, "")) is True
 
 # ---------------------------------------------------------------------------
 # 2026-09-19 审计 B1–B5（门/收工形态）行为钉：
@@ -279,7 +279,7 @@ class _LaneHarness:
         self.weights.write_text('{"arch":{}}', encoding="utf-8")
         self.traj = self.work / "it1"
         self.traj.mkdir()
-        self.wver = dist_common.weights_fingerprint(str(self.weights))
+        self.wver = common.distribution.weights_fingerprint(str(self.weights))
         self.logs: list[str] = []
         self.pinged: list[str] = []
         self.local_games: list[int] = []
@@ -348,10 +348,10 @@ class _LaneHarness:
                 for n in nodes_
             ]
 
-        monkeypatch.setattr(dist_common, "compute_code_hash", lambda: "deadbeef")
-        monkeypatch.setattr(dist_common, "node_ping", ping)
-        monkeypatch.setattr(dist_common, "post_weights_parallel", post)
-        monkeypatch.setattr(dist_common, "refresh_weights", lambda *a, **k: True)
+        monkeypatch.setattr(common.distribution, "compute_code_hash", lambda: "deadbeef")
+        monkeypatch.setattr(common.distribution, "node_ping", ping)
+        monkeypatch.setattr(common.distribution, "post_weights_parallel", post)
+        monkeypatch.setattr(common.distribution, "refresh_weights", lambda *a, **k: True)
         monkeypatch.setattr(ed, "bun_version", lambda _bun: "1.1.0")
         monkeypatch.setattr(ed, "log", self.logs.append)
 
@@ -384,8 +384,8 @@ class _LaneHarness:
 
     def play(self, fetch) -> tuple[list[dict], float]:
         """跑一轮（假节点，不碰网络），返回 (全部日志行, 墙钟秒)。"""
-        dist_common.weights_push_cache_reset()
-        self.mp.setattr(dist_common, "fetch_task", fetch)
+        common.distribution.weights_push_cache_reset()
+        self.mp.setattr(common.distribution, "fetch_task", fetch)
         t0 = self.time.monotonic()
         self.play_t0 = t0
         ed.dispatch_eval_round(
@@ -615,7 +615,7 @@ def test_eval_leg_uses_its_own_weights_kind(tmp_path, monkeypatch) -> None:
         seen.append(kw)
         return h.manifest(kw["stage"], kw["seed"]), {}
 
-    h.mp.setattr(dist_common, "post_weights_parallel", spy_post)
+    h.mp.setattr(common.distribution, "post_weights_parallel", spy_post)
     rows = h.run(fetch)
 
     assert ed.EVAL_WEIGHTS_KIND == "eval"  # 节点侧桶名（协议的一部分）

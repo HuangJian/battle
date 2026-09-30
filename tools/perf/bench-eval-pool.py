@@ -1,4 +1,4 @@
-"""bench-eval-pool.py —— 云机离线 **eval** 腿的长驻池 A/B 台架（`remote/serve_pool.py`）。
+"""bench-eval-pool.py —— 云机离线 **eval** 腿的长驻池 A/B 台架（`worker/serve_pool.py`）。
 
 口径：真 bun + 真导出器（`tools/sim/export-eval-game.ts`）+ 真权重，n 局并发与
 `remote/offline_eval.run_cloud_eval` 同构（ThreadPoolExecutor + 同一个
@@ -30,8 +30,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent  # tools/perf/ 往上是仓根
 sys.path.insert(0, str(ROOT / "nn-training"))
 
-import remote.serve_pool as serve_pool  # noqa: E402
-from rl.eval_local import run_local_eval_game  # noqa: E402
+import worker.serve_pool as serve_pool  # noqa: E402
+from biz.eval_local import run_local_eval_game  # noqa: E402
 
 
 def _ints(name: str, default: str) -> tuple[int, ...]:

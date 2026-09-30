@@ -150,7 +150,7 @@ CFG["offline_worker"] → supervisor argv `--offline` → worker_loop(role=…) 
 | **P2** | §2.4 取包端点补 mode 闸 | `hub_server.py` | ✅ 已实施 |
 | **P3** | §2.5 配置短路 | `rl/cli.py` | ✅ 已实施 |
 | **P4** | I6 第三块盘：`battle.cloudflared.ipynb` —— **不退役**（cloudflared 公网隧道 / tailscale 盘 = 两条不同接入方式）；两块在线盘**都不跑 rollout** ⇒ 去掉它们的 **bun 依赖**（见 §9） | `remote/tailscale_boot.py` / `remote/iter_rollout.py` / 两个守卫用例 | ✅ 已实施（2026-09-25，含误判撤回） |
-| **P5** | **§7 的收尾**：`kind=run` 的队列项退役（砍在发布点）+ 无消费者时的响亮拒 + 离线盘报名与读数 | `rl/loop_steps.py` / `rl/loop_round_steps.py` / `rl/loop_round.py` / `rl/loop_core.py` / `rl/loop_runner.py` / `rl/cli.py` / `remote/worker.py` / `remote/run_loop.py` / `remote/offline_boot.py` / `remote/hub_server.py` | ✅ 已实施 |
+| **P5** | **§7 的收尾**：`kind=run` 的队列项退役（砍在发布点）+ 无消费者时的响亮拒 + 离线盘报名与读数 | `rl/loop_steps.py` / `rl/loop_round_steps.py` / `rl/loop_round.py` / `rl/loop_core.py` / `rl/loop_runner.py` / `rl/cli.py` / `remote/worker.py` / `remote/run_loop.py` / `remote/offline_boot.py` / `hub/server.py` | ✅ 已实施 |
 
 **实施顺序（已按此落）**：`protocol.py` 常量+映射 → `hub_client.py` 写字段 → `hub_server.py`
 闸下沉 + 三个面透传 role → `worker.py` 两跳带头 → push 腿同源 → notebook 文案同步。
@@ -163,7 +163,7 @@ CFG["offline_worker"] → supervisor argv `--offline` → worker_loop(role=…) 
 
 | 装置 | 位置 | 用途 |
 |---|---|---|
-| `_Hub` / `_HubQueue` + `make_server` | `e2e/test_offline_training_e2e.py` / `remote/hub_server.py` | 真 hub 进程（`--discover`）+ `ready()/set_mode()/lines/close()` |
+| `_Hub` / `_HubQueue` + `make_server` | `e2e/test_offline_training_e2e.py` / `hub/server.py` | 真 hub 进程（`--discover`）+ `ready()/set_mode()/lines/close()` |
 | `hub_poll` | `tests/helpers/hub_poll.py` | 旧 `/jobs/next` 同形替代（peek + claim，**peek 与 claim 都带角色头**） |
 | `_hub` / `_publish` / `_workers_with` / `_pump` | `tests/test_hub_push_dispatch.py` | push 腿派发装置 |
 | `spawn_bound_port` | `tests/subproc_util.py` | 起进程 + 等端口（端口竞态由它消化） |

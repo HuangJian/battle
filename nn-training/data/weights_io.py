@@ -46,6 +46,7 @@ from typing import Any
 
 import torch
 
+from common.schema import OBS_SCHEMA_MAJOR
 from data.weights_meta import (  # noqa: F401  (re-export：既有调用点不变)
     COVERAGE_RAISE,
     COVERAGE_WARN,
@@ -53,7 +54,6 @@ from data.weights_meta import (  # noqa: F401  (re-export：既有调用点不�
     latest_weights_path,
     validate_weights_meta,
 )
-from schema import OBS_SCHEMA_MAJOR
 
 
 def tensor_to_b64(t: torch.Tensor) -> str:

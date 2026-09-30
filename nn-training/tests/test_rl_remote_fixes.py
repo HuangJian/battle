@@ -19,8 +19,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.config import CourseConfig, PpoScheduleEntry, RewardBlock
-from rl.loop_steps import TrainingSteps, _remote_forward_agg, kickstart_warn_kind
+from biz.config import CourseConfig, PpoScheduleEntry, RewardBlock
+from trainer.loop_steps import TrainingSteps, _remote_forward_agg, kickstart_warn_kind
 
 # 与 p4-onset 课程同形的分段表 + 已知可编译的奖励公式（build_reward_fn 白名单内）。
 SCHEDULE = [
@@ -234,7 +234,7 @@ def test_d14_predicate_is_single_implementation() -> None:
 
 def test_eval_seeds_support_200_games() -> None:
     """eval_games_per_stage:200 不再被常量截断；前 100 seed 历史前缀逐字节不变。"""
-    from rl.eval_local import EVAL_SEEDS
+    from biz.eval_local import EVAL_SEEDS
 
     assert len(EVAL_SEEDS) == 200
     assert EVAL_SEEDS[0] == 860001 and EVAL_SEEDS[1] == 860002
@@ -262,7 +262,7 @@ def test_d14_corpus_match_prefers_semantic_identity() -> None:
 
 
 def test_backup_weights_honors_course_dir(tmp_path: Path) -> None:
-    from rl.archive import backup_weights
+    from biz.archive import backup_weights
 
     src = tmp_path / "w.json"
     src.write_text("{}", encoding="utf-8")
@@ -277,7 +277,7 @@ def test_backup_relative_dir_resolves_repo_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """相对 backup_dir 按仓库根解析（与 TrainingLoop cwd 无关）。"""
-    import rl.archive as archive
+    import biz.archive as archive
 
     src = tmp_path / "w.json"
     src.write_text("{}", encoding="utf-8")

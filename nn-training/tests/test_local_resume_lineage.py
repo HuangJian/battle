@@ -24,7 +24,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.resume import (
+from biz.resume import (
     _scan_shards,
     completed_pairs,
     resumed_manifests,
@@ -106,8 +106,8 @@ def test_corpus_fp_comes_from_the_same_source_as_the_remote_publish() -> None:
     """`corpus_fp_for_args` 与远端发布同源（loop 与 hub 判的是同一件事）。"""
     from types import SimpleNamespace
 
-    from rl.cmd import corpus_fp_for_args
-    from rl.config import CourseConfig, corpus_identity_fp
+    from biz.cmd import corpus_fp_for_args
+    from biz.config import CourseConfig, corpus_identity_fp
 
     course = CourseConfig(name="t5-lineage", mode="per-tick")
     args = SimpleNamespace(course_obj=course, mode="per-tick")

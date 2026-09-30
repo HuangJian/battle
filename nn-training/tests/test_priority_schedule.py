@@ -60,7 +60,7 @@ from common.protocol import (
     RetryableError,
     job_priority,
 )
-from remote.hub_server import _HubQueue, _JobStore, make_server
+from hub.server import _HubQueue, _JobStore, make_server
 from tests.helpers import hub_seams
 
 TOKEN = "sekret"
@@ -723,13 +723,14 @@ def test_race_judgment_has_no_production_path() -> None:
         "HUB_SCOPE", "parse_hub_scope", "set_race_mode", "race_state(",
     )
     hits: list[str] = []
-    for sub in ("remote", "rl"):
+    # 2026-09-30（刀 4）：`biz/` 是 `rl/` 的纯逻辑半，同属生产代码面 ⇒ 一并扫。
+    for sub in ("remote", "trainer", "biz"):
         for f in (root / sub).rglob("*.py"):
             text = f.read_text(encoding="utf-8")
             for b in banned:
                 if b in text:
                     hits.append(f"{f.relative_to(root)}: {b}")
-    for f in (root / "run_rl.py", root / "dist_common.py"):
+    for f in (root / "run_rl.py", root / "common/distribution.py"):
         text = f.read_text(encoding="utf-8")
         for b in banned:
             if b in text:

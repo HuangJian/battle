@@ -1,0 +1,484 @@
+"""流式迭代：采集与 PPO 波次重叠（--stream 1）。"""
+
+from __future__ import annotations
+
+import collections
+import os
+import threading
+import time
+from typing import Any, TypedDict
+
+import numpy as np
+
+import common.distribution
+from biz.log import log
+from biz.resume import _scan_shards, completed_pairs, state_init_enabled
+from common.text import exc_tail
+from trainer.queue import local_slots_max_of, run_rollout_queue
+
+
+def _default_ppo_backend():
+    """默认 PPO 后端（per-tick）。延迟导入（B7，2026-09-02）：本模块可能被
+    run_rl.py --collect-only 子进程间接加载，而 ppo.engine 会 import torch——
+    采样路径不需要 torch，不得在模块级拉起它。"""
+    import ppo.engine as ppo_mod
+
+    return ppo_mod
+
+
+class _StreamState(TypedDict):
+    """流式迭代的演进状态（原为 dict[str, float|int|bool|dict|None]，取值后
+    类型发散到 union，参与算术/round/float 时全部报错——改 TypedDict 后按字段
+    精确收窄，行为零变化）。"""
+
+    cum_kl: float
+    steps: int
+    chunks: int
+    waves: int
+    ppo_sec: float
+    load_sec: float
+    dropped: int
+    halted: bool
+    last_agg: dict[str, Any] | None
+
+
+def wave_params(
+    cum_kl: float, kl_cap: float, wave_games: int, wave_cap: int, remaining: int | None = None
+) -> tuple[int, int]:
+    """波次阈值/容量：软降档（R1）+ 残局上限。
+
+    软降档：cum_kl 过 70% 上限后收缩 wave 规模——把熔断过冲从一整个 wave
+    （24 局 ≈ +0.03~0.04 kl）压到个位数局。
+    残局上限（2026-08-25）：断点续跑轮本轮最多只会到账 remaining 局，阈值超过它
+    会让主循环静默空等到收官才在尾巴排水训练（it63：计划 105/已盘 103，只剩 2 局
+    却要等满阈值 4）。取 min 后「来多少训多少」；cap 不低于阈值。"""
+    if cum_kl > 0.7 * kl_cap:
+        thr, cap = max(4, wave_games // 3), max(4, wave_cap // 3)
+    else:
+        thr, cap = wave_games, wave_cap
+    if remaining is not None and remaining >= 0:
+        thr = max(1, min(thr, remaining))
+        cap = max(thr, min(cap, remaining))
+    return thr, cap
+
+
+def _exc_tail(e: BaseException, limit: int = 4000) -> str:
+    """异常现场（traceback 尾段）——唯一实现见 `common.text.exc_tail`。
+
+    本模块不得 import `remote.worker`（训练侧，会把 torch 拖进采样路径）——但这条
+    理由对 `common` **不成立**（它只依赖 stdlib）⇒ 原先「就地保留同款小助手」的豁免
+    不再需要。名字保留：本模块内的调用点与测试引用都不变。
+    """
+    return exc_tail(e, limit)
+
+
+def _shard_dir(entry: str) -> str | None:
+    """本地局 _dir 指向 rollout 工作目录（w9/rl_s30_seed619823394/*.npy 多一层
+    子目录），远程局 _dir 直接就是 shard 目录（obs.npy 平铺）。探测含 obs.npy 的一层。"""
+    if os.path.exists(os.path.join(entry, "obs.npy")):
+        return entry
+    try:
+        for sub in os.listdir(entry):
+            cand = os.path.join(entry, sub)
+            if os.path.isfile(os.path.join(cand, "obs.npy")):
+                return cand
+    except OSError:
+        pass
+    return None
+
+
+def run_rollout_stream(
+    bun: str,
+    rl_path: str,
+    traj_dir,
+    pairs: list[tuple[int, int]],
+    args,
+    cfg: dict,
+    iter_id: str,
+    model,
+    opt,
+    device,
+    on_collect_done=None,
+    on_ppo_started=None,
+    on_epoch_done=None,
+    backend=None,
+    update_kwargs: dict | None = None,
+    extra_wver: str | None = None,
+    course_fp: str | None = None,
+    corpus_fp: str | None = None,
+) -> dict:
+    """流式迭代（--stream 1）：采集与 PPO 重叠。
+
+    backend（工程化共享）：per-tick RL 用 ppo（默认），意图 RL 用 ppo_intent——
+    两者都实现 load_episode_from_shard / chunk_episodes / update / load_episodes /
+    _ppo_load，本函数不复制第二份加载/更新逻辑。update_kwargs 透传给 backend.update
+    （意图 RL：value_warmup_epochs / ref_model / kl_coef / seed）。
+
+    正确性依据：整轮权重冻结为 W(N)（分发只发生在迭代边界），故任意时刻到达的
+    语料都出自同一策略版本，on-policy 比率数学不受到达顺序影响；GAE 用采样时
+    存储的 value 计算，与装载时机无关。
+
+    机制：collector 线程跑 run_rollout_queue（本机槽压到 max(2, workers//4)
+    给 torch 让核），每局结算回调注入待处理队列；主线程每当积压 ≥
+    policy.streamWaveGames（默认 12）局就把这批 shard 装载（load_shard + GAE，
+    wave 内 advantage 归一化）、chunkify 后按 --epochs 遍更新——每局总更新遍数
+    与串行模式一致。轮内累计 KL 过 policy.streamKlCap（默认 0.12）的 70% 后
+    软降档收缩 wave；触顶则停止训练、停派发后续采集任务（halt_event 贯穿队列，
+    在途局自然收尾），已结算未训练的语料按 dropped 记账。
+
+    干净评估时机（2026-08-25 用户指令修订）：中央派发队列清空——全部采集任务已
+    派到节点/本地线程、结果仍在途——即刻派发评估，顺势填收尾空出的节点槽位；
+    熔断与 collector 收官仅作兜底再触发点（护栏去重）。线程句柄经
+    report["_eval_thread"] 回传主循环，下轮分发前 join。
+
+    与串行模式的语义差异（已记录 `docs/nn/legacy.md` §10.7）：①adv 归一化从"全轮"
+    变为"每 wave"；②早期 wave 的更新发生在 θ 漂移更早处（PPO clip 容忍范围）；
+    ③PPO epoch checkpoint 流式期间不落盘（崩溃重启该轮重训，语料靠
+    completed_pairs 秒回）；④断点续跑轮里此前已落盘的旧局不参与本轮更新。
+    """
+    pend: collections.deque = collections.deque()
+    lock = threading.Lock()
+    box: dict = {}
+    backend = backend or _default_ppo_backend()
+    update_kwargs = update_kwargs or {}
+    if on_epoch_done is not None:
+        update_kwargs["on_epoch_done"] = on_epoch_done
+    halt_ev = threading.Event()  # 置位 → 队列停止派发新任务（R1 熔断止损）
+    # R6 语义：首个 PPO 波次启动即置位 → 本机 dist 槽位让位训练（集群停摆豁免在
+    # queue 侧）；PPO 全部收尾后本机转投 eval 尾段（local_gate，主循环置位）。
+    ppo_started_ev = threading.Event()
+    eval_fired = [False]  # 干净评估一次性护栏：队列清空主触发，熔断/收官兜底
+    state: _StreamState = {
+        "cum_kl": 0.0,
+        "steps": 0,
+        "chunks": 0,
+        "waves": 0,
+        "ppo_sec": 0.0,
+        "load_sec": 0.0,
+        "dropped": 0,
+        "halted": False,
+        "last_agg": None,
+    }
+
+    def _on_result(summary):
+        with lock:
+            pend.append(dict(summary))
+
+    # 本机直跑槽位（2026-09-09 统一语义，与 queue.local_slots_max_of 一致）：
+    #   显式 >0 = 槽位数；0 = 关闭本机直跑（全交给远端，失联仍兜底）；
+    #   负数/未设置 = auto max(2, workers//4)（给 torch 让核的历史折中，
+    #   课程起步期每轮仅 12 局时保底采样份额，2026-08-25 实测 local=0）。
+    # 旧写法 `or 0` 把 0 也当 auto，关不掉本机直跑。
+    _ls = local_slots_max_of(args)
+    local_slots = _ls if _ls is not None else max(2, int(args.workers) // 4)
+    policy = cfg.get("policy", {})
+    kl_cap = float(policy.get("streamKlCap", 0.06))  # 0.12 为旧 2× 口径（P0-3 换算）
+    _kl_cap_override = getattr(args, "_kl_cap", None)
+    if _kl_cap_override is not None:
+        kl_cap = float(_kl_cap_override)  # ppo_schedule 指定本轮 KL 上限（覆盖 policy.streamKlCap）
+    wave_games = max(4, int(policy.get("streamWaveGames", 12)))
+    # M8 意图 RL：streamKlCap=0.2（旧 2× 口径，新口径 0.1）是为 per-tick RL（单波数千步）标定的——意图 RL 单波
+    # 仅 ~12 局（~14 chunks），单波 KL 已达 ~0.32–0.49（旧 2× 口径，新口径 ~0.16–0.245），会在第 1 波即触顶 → 派发停摆 →
+    # ~90% rollout 被丢弃、整轮空等 1800s 窗口。意图 RL 改用「单波覆盖整缓冲」语义：
+    # 大 wave_games（>每轮局数）→ 全量 140 局合成 1 波训完（均属 W(N) 同策略、完全
+    # on-policy），cum_kl ~0.15（旧 2× 口径）远低于放宽后的 Intent 上限，不再半途 halt。
+    if getattr(args, "intent_rollout", False) or getattr(args, "goal_rollout", False):
+        # 意图/goal 同为 semi-MDP 小步数采样：单波覆盖整缓冲语义（goal 单局步数更少，
+        # 同样不能让 per-tick 的小 wave 阈值把采集器饿死）。
+        kl_cap = float(policy.get("streamKlCapIntent", kl_cap))
+        wave_games = max(4, int(policy.get("streamWaveGamesIntent", wave_games)))
+    # 残局感知：本轮最多会到账多少新结算（计划 − 已在盘）。断点续跑常剩个位数
+    # 缺口（it63：103/105），波次阈值以此为上限，避免静默空等收官。
+    # 吞吐 T4 提前预采：extra_wver（θ_{N,e3} 快照）的首波局也算"已在盘"，不算进
+    # 等待窗口（它们作为首波语料已注入 pend，collector 只补采真正缺失的局）。
+    try:
+        wver_start = common.distribution.weights_fingerprint(rl_path)
+        _done_start = completed_pairs(
+            traj_dir,
+            wver_start,
+            extra_wver=extra_wver,
+            course_fp=course_fp,
+            corpus_fp=corpus_fp,
+            state_init=state_init_enabled(args),
+        )
+        remaining_games = max(0, len(pairs) - len(_done_start))
+    except OSError:
+        remaining_games = None
+
+    def _fire_eval_once(tag: str) -> None:
+        """干净评估一次性触发（去重守卫）。
+
+        2026-08-27（M8 意图 RL）触发点修订：per-tick RL 保持『派发队列清空』
+        （on_collect_done，节点进入收尾空转顺势填槽）；**意图 RL 改传
+        on_collect_done=None + on_ppo_started=_fire_eval**——『PPO 启动』才是
+        节点真正全部空闲的窗口（140 局单波全量 to_ack 后 PPO 才开始），此前
+        『队列清空』触发会撞尾局收结算（tail_drain）→ 节点槽位被占 → eval 350 局
+        大批 503 → 假阳性止损（§30）。PPO 本地跑、eval 远端跑、两不抢，远端算力
+        全程不被闲置。熔断 / collector 收官仍作兜底再触发点。
+        """
+        if eval_fired[0] or (on_collect_done is None and on_ppo_started is None):
+            return
+        eval_fired[0] = True
+        cb = (
+            on_ppo_started
+            if (tag == "ppo started" and on_collect_done is None)
+            else on_collect_done
+        )
+        if cb is None:
+            eval_fired[0] = False
+            return
+        # 措辞按**真实契约**（2026-09-20 修订）：清空 = 「采集任务已全部交出（节点/本地）」，
+        # **不**等于「节点权重已落地」——本地槽复用可以让队列在后台 weights-push 仍在途时
+        # 就清空（实测 push 落后 drain 19ms）。评估腿自带 kind='eval' 权重握手，不依赖后者。
+        log(
+            f"[stream] clean-eval dispatched ({tag}) — 采集任务已全部交出（节点/本地在途），"
+            f"评估与其并行"
+        )
+        try:
+            box["eval_thread"] = cb()
+        except Exception as cb_err:
+            log(f"[stream] on_collect_done error: {str(cb_err)[:120]}")
+
+    def _collector():
+        try:
+            box["report"] = run_rollout_queue(
+                bun,
+                rl_path,
+                traj_dir,
+                pairs,
+                args,
+                cfg,
+                iter_id,
+                on_result=_on_result,
+                local_slots_max=local_slots,
+                tail_dispatch=False,
+                halt_event=halt_ev,
+                local_suspend=ppo_started_ev,
+                on_queue_drained=lambda: _fire_eval_once("dispatch queue drained"),
+                extra_wver=extra_wver,
+                course_fp=course_fp,
+                corpus_fp=corpus_fp,
+            )
+            # 兜底：本地回退路径不会触发队列清空回调，收官时补触发（护栏幂等）。
+            _fire_eval_once("collector done")
+        except Exception as e:
+            box["err"] = str(e)
+            box["err_tb"] = _exc_tail(e)
+        finally:
+            box["t_end"] = time.time()  # rollout_sec 锚点：collector 真实退出时刻
+
+    def _load_wave(summaries: list[dict]) -> list[dict]:
+        t_load = time.time()
+        eps = []
+        for s in summaries:
+            d = s.get("_dir")
+            if not d:
+                continue
+            shard = _shard_dir(d)
+            if shard is None:
+                continue
+            try:
+                ep = backend.load_episode_from_shard(
+                    shard, float(getattr(args, "gamma", 0.995)), float(getattr(args, "lam", 0.95))
+                )
+            except Exception as e:
+                log(f"[stream] skip bad shard {shard}: {str(e)[:100]}")
+                continue
+            if ep is None:
+                continue
+            eps.append(ep)
+        # P1-7：wave 内 adv 归一化受 --adv-norm 控制（auto=流式默认 wave 归一；
+        # none 跳过——供对照实验，与串行 global 归一形成三档可测粒度）。
+        adv_norm = getattr(args, "adv_norm", "auto")
+        if eps and adv_norm != "none":
+            all_adv = np.concatenate([ep["adv"] for ep in eps])
+            mean, std = all_adv.mean(), all_adv.std() + 1e-8
+            for ep in eps:
+                ep["adv"] = ((ep["adv"] - mean) / std).astype(np.float32)
+        state["load_sec"] += time.time() - t_load
+        return eps
+
+    def _drain(final: bool, cap: int | None = None) -> None:
+        took: list[dict] = []
+        with lock:
+            # cap 限制单波规模：it15 教训——无上限 drain 曾一口吞 90 局，
+            # 单波 376 步算了 20 分钟，流水线碎度全毁、KL 曲线也变粗。
+            while pend and (cap is None or len(took) < cap):
+                took.append(pend.popleft())
+        if not took:
+            return
+        if state["halted"]:
+            state["dropped"] += len(took)
+            log(f"[stream] KL cap reached — dropped {len(took)} settled games from training")
+            return
+        eps = _load_wave(took)
+        if not eps:
+            return
+        chs = backend.chunk_episodes(eps, args.mb)
+        t_p = time.time()
+        if not ppo_started_ev.is_set():
+            ppo_started_ev.set()  # 首个梯度步 = 「PPO 启动」→ 本机 dist 槽位让位
+            log(
+                "[stream] PPO phase started — local dist slots suspending "
+                "(auto-resume if cluster stalls)"
+            )
+            # M8 意图 RL：PPO 启动 = 全量结算到账 + 节点空闲 → 在此派发 eval（远端并行）。
+            # per-tick 模式不在此触发（on_collect_done 有值 → 维持队列清空触发语义）。
+            if on_collect_done is None and on_ppo_started is not None:
+                _fire_eval_once("ppo started")
+        agg_w = backend.update(model, opt, chs, args.epochs, device, **update_kwargs)
+        state["ppo_sec"] += time.time() - t_p
+        state["cum_kl"] += float(agg_w["kl"])
+        state["steps"] += len(chs) * args.epochs
+        state["chunks"] += len(chs)
+        state["waves"] += 1
+        state["last_agg"] = agg_w
+        log(
+            f"[stream] wave: {len(took)} games -> {len(chs)} chunks x{args.epochs}ep "
+            f"kl={agg_w['kl']:.4f} cum_kl={state['cum_kl']:.4f} "
+            f"ent={agg_w['entropy']:.3f}"
+        )
+        if state["cum_kl"] > kl_cap:
+            state["halted"] = True
+            halt_ev.set()  # R1：预算耗尽，队列停止派发新任务（在途局自然收尾）
+            _fire_eval_once("kl-cap halt")
+            log(
+                f"[stream] cumulative KL {state['cum_kl']:.4f} > cap {kl_cap} — "
+                f"collect-only for the rest of this round; task dispatch stopped"
+            )
+
+    th = threading.Thread(target=_collector, daemon=True)
+    t0 = time.time()
+    log(
+        f"[stream] collector started (local_slots={local_slots}, "
+        f"wave={wave_games} games, kl_cap={kl_cap})"
+    )
+    wave_cap = max(wave_games * 2, 24)
+    # 吞吐 T4 提前预采：上一轮 epoch3 快照（θ_{N,e3}）采的首波 shard 已在盘且 wver=
+    # extra_wver（≠ 本轮 θ_N 的 wver）。把它们作为**第一波语料**直接注入训练（不等待
+    # 现场采集）——这正是"预采墙钟藏进上轮 PPO 尾段"的落点；collector 会跳过这些已完成局
+    # （resume 对账含 extra_wver），只现场采计划内剩余局，两批语料本轮都被训练。
+    _pre_seeded = 0
+    if extra_wver and extra_wver != wver_start:
+        plan_set_ = {(int(a), int(b)) for a, b in pairs}
+        for _pair, _dir in _scan_shards(
+            traj_dir,
+            wver_start,
+            extra_wver=extra_wver,
+            course_fp=course_fp,
+            corpus_fp=corpus_fp,
+            state_init=state_init_enabled(args),
+        ):
+            if _pair not in plan_set_:
+                continue
+            with lock:
+                pend.append({"_dir": str(_dir), "_pre": True})
+            _pre_seeded += 1
+        if _pre_seeded:
+            log(
+                f"[stream] seeded {_pre_seeded} precollected first-wave shards "
+                f"(extra wver {extra_wver[:12]}…) into training queue"
+            )
+    th.start()
+    while True:
+        with lock:
+            n_pending = len(pend)
+        w_thr, w_cap = wave_params(
+            float(state["cum_kl"]), kl_cap, wave_games, wave_cap, remaining=remaining_games
+        )
+        if n_pending >= w_thr:
+            _drain(False, cap=w_cap)
+            continue
+        if not th.is_alive():
+            break
+        th.join(timeout=3.0)
+    # rollout_sec 锚点改为 collector 线程真实退出时刻（box["t_end"]）：此前在
+    # 主线程测量，最后一个 in-flight wave 的更新时长会被误计入采集窗口。
+    collect_done = box.get("t_end") or time.time()
+    th.join(timeout=5.0)
+    with lock:
+        n_left = len(pend)
+    log(
+        f"[stream] collector done in {collect_done - t0:.0f}s — "
+        f"draining {n_left} settled-but-untrained games"
+    )
+    while True:
+        with lock:
+            n_pending = len(pend)
+        if n_pending == 0:
+            break
+        _, tw_cap = wave_params(
+            float(state["cum_kl"]), kl_cap, wave_games, wave_cap, remaining=remaining_games
+        )
+        _drain(True, cap=tw_cap)
+    if "err" in box:
+        tb = str(box.get("err_tb") or "")
+        raise RuntimeError(
+            f"stream collector failed: {box['err']}" + (f"\n--- collector traceback ---\n{tb}" if tb else "")
+        )
+    report: dict[str, Any] | None = box.get("report")
+    if report is None:
+        raise RuntimeError("stream collector produced no report")
+    # 断点续跑轮可能零结算（全部秒回）
+    if state["chunks"] == 0 and int(getattr(args, "epochs", 0)) > 0:
+        eps_done = backend._ppo_load(str(traj_dir / "ppo_ckpt"), model, opt)
+        if eps_done >= args.epochs:
+            # 该轮 PPO 已在先前进程中完整跑完：权重以当前状态收尾即可，
+            # 重复调用 ppo_update 会走"剩余 0 epoch"路径（空聚合）。
+            log(
+                f"[stream] no fresh settles + PPO checkpoint already complete "
+                f"({eps_done}/{args.epochs} epochs) — weights final, skipping update"
+            )
+        else:
+            log("[stream] no fresh settles this round — falling back to full-disk update")
+            episodes = backend.load_episodes(
+                str(traj_dir),
+                float(getattr(args, "gamma", 0.995)),
+                float(getattr(args, "lam", 0.95)),
+            )
+            chunks = backend.chunk_episodes(episodes, args.mb)
+            t_p = time.time()
+            state["last_agg"] = backend.update(
+                model,
+                opt,
+                chunks,
+                args.epochs,
+                device,
+                ckpt_path=str(traj_dir / "ppo_ckpt"),
+                **update_kwargs,
+            )
+            state["ppo_sec"] += time.time() - t_p
+            state["steps"] = sum(e["obs"].shape[0] for e in episodes)
+            state["chunks"] = len(chunks)
+    rollout_sec = round(collect_done - t0, 1)  # 采集窗口（collector 真实退出锚点）
+    tail_sec = round(time.time() - collect_done, 1)
+    log(
+        f"[stream] done: games={report['games']} kl_cum={state['cum_kl']:.4f} "
+        f"steps={state['steps']} chunks={state['chunks']} waves={state['waves']} "
+        f"halted={state['halted']} dropped={state['dropped']} "
+        f"collect_wall={rollout_sec}s tail_update={tail_sec}s "
+        f"ppo_cpu={state['ppo_sec']:.0f}s load_cpu={state['load_sec']:.0f}s"
+    )
+    # agg=None 表示本轮没有发生任何梯度步（checkpoint 已在先前进程完整跑完）。
+    # 指标不伪造为 0——jsonl 写 null，报告显示 '—'，健康判定自动忽略该轮。
+    last = state["last_agg"]
+    # pure_collect_sec 由 run_rollout_queue 实测（用户口径 2026-09-19：
+    # 权重开始分发 → 样本齐可交 PPO），经 box["report"] 顶层透传——此处不派生。
+    report["_stream"] = {
+        "rollout_sec": rollout_sec,
+        "tail_drain_sec": tail_sec,
+        "ppo_sec": round(state["ppo_sec"], 1),
+        "load_sec": round(state["load_sec"], 1),
+        "steps": state["steps"],
+        "chunks": state["chunks"],
+        "waves": state["waves"],
+        "kl_cum": round(state["cum_kl"], 4),
+        "halted": state["halted"],
+        "dropped_games": state["dropped"],
+        "agg": last,
+    }
+    # 评估线程句柄随报告回传主循环（R4）：下轮权重分发前必须 join——否则提前触发
+    # 或长尾的评估会被下一轮异 sha 权重的原子清场杀掉（eval_log 记 dropped）。
+    if box.get("eval_thread") is not None:
+        report["_eval_thread"] = box["eval_thread"]
+    return report

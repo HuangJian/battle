@@ -30,16 +30,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from biz.cli import build_argparser
+from biz.iter_job import build_iter_spec
+from biz.plan import build_plan, dump_plan, planned_iters
 from common.protocol import PLAN_NAME, TS_CODE_NAME, unpack_payload
 from remote.hub_client import HubClientError, publish_job
-from rl.cli import build_argparser
-from rl.iter_job import build_iter_spec
-from rl.loop_steps import (
+from trainer.loop_steps import (
     ROLLOUT_SRCS,
     _rollout_source,
     _run_segment_iters,
 )
-from rl.plan import build_plan, dump_plan, planned_iters
 
 
 def _args(**over: object) -> SimpleNamespace:
@@ -79,7 +79,7 @@ def test_segment_iters_defaults_to_off() -> None:
 
 def test_segment_iters_cli_wins_over_config() -> None:
     """CLI > courses.<课> > rl.*：显式给的值不许被 rl-config 覆盖。"""
-    with patch("rl.loop_transport.dist_common") as dc:
+    with patch("trainer.loop_transport.common.distribution") as dc:
         dc.load_dist_config.return_value = {"courses": {"x1": {"run_iters": 9}}, "rl": {"run_iters": 5}}
         assert _run_segment_iters(_args(run_iters=2, course_path="curricula/x1.jsonc")) == 2
 
@@ -89,7 +89,7 @@ def test_segment_iters_reads_course_then_rl() -> None:
     from train.loop_util import course_key_from_path
 
     stem = course_key_from_path("curricula/x1.jsonc")
-    with patch("rl.loop_transport.dist_common") as dc:
+    with patch("trainer.loop_transport.common.distribution") as dc:
         dc.load_dist_config.return_value = {"courses": {stem: {"run_iters": 6}}, "rl": {"run_iters": 3}}
         assert _run_segment_iters(_args(course_path="curricula/x1.jsonc")) == 6
         dc.load_dist_config.return_value = {"courses": {}, "rl": {"run_iters": 3}}
@@ -103,7 +103,7 @@ def test_console_written_course_keys_drive_the_per_round_read() -> None:
 
     plan/train-mode-hot-switch.plan.md L1：dashboard 侧 `applyTrainModeToConfig`（唯一写面）
     写的形状就是这两把键；训练侧在 `loop_round_steps` **每轮**各读一次
-    （`_rollout_source` / `_run_segment_iters`，读的是 `dist_common.load_dist_config()`）
+    （`_rollout_source` / `_run_segment_iters`，读的是 `common.distribution.load_dist_config()`）
     ⇒ 机制上不需要重开课。本用例把「写面 ↔ 读面」钉在一起，防两腿各自漂：
 
       * 离线（云机接手）= `rollout_src="run"` **与** `run_iters=-1` 两键都在 ⇒ `run` + `-1`；
@@ -117,7 +117,7 @@ def test_console_written_course_keys_drive_the_per_round_read() -> None:
         ({"courses": {"x1": {}}}, "local", 0),
     )
     for cfg, want_src, want_seg in cases:
-        with patch("rl.loop_transport.dist_common") as dc:
+        with patch("trainer.loop_transport.common.distribution") as dc:
             dc.load_dist_config.return_value = cfg
             args = _args(rollout_src="auto", course_path="curricula/x1.jsonc")
             assert _rollout_source(args) == want_src
@@ -137,7 +137,7 @@ def test_rollout_src_run_is_a_declared_source() -> None:
     with pytest.raises(SystemExit, match="未知 --rollout-src"):
         _rollout_source(_args(rollout_src="cloud"))
     # 配置里给了垃圾值 ⇒ 容忍成 local（旧行为逐字节不变：配置写错不该炸训练）
-    with patch("rl.loop_transport.dist_common") as dc:
+    with patch("trainer.loop_transport.common.distribution") as dc:
         dc.load_dist_config.return_value = {"courses": {"x1": {"rollout_src": "cloud"}}}
         assert _rollout_source(_args(rollout_src="auto", course_path="curricula/x1.jsonc")) == "local"
 
@@ -164,13 +164,13 @@ def test_cli_default_rollout_src_never_shadows_the_course_level_key() -> None:
     ns = build_argparser("rl", {"rollout_src": "node"}).parse_args([])
     assert ns.rollout_src == "auto"
     # 课程级优先
-    with patch("rl.loop_transport.dist_common") as dc:
+    with patch("trainer.loop_transport.common.distribution") as dc:
         dc.load_dist_config.return_value = {"courses": {"x1": {"rollout_src": "run"}}}
         assert (
             _rollout_source(_args(rollout_src=ns.rollout_src, course_path="curricula/x1.jsonc")) == "run"
         )
     # 课程级为空 ⇒ 顶层照旧生效（这条保证上面那次改动不是「把顶层配置关掉了」）
-    with patch("rl.loop_transport.dist_common") as dc:
+    with patch("trainer.loop_transport.common.distribution") as dc:
         dc.load_dist_config.return_value = {"rl": {"rollout_src": "node"}}
         assert (
             _rollout_source(_args(rollout_src=ns.rollout_src, course_path="curricula/x1.jsonc"))

@@ -1,14 +1,14 @@
-"""拆分的**契约守卫**：rl-config.json 文件面永住 `rl/config_file.py`（S5 第十刀，2026-09-27）。
+"""拆分的**契约守卫**：rl-config.json 文件面永住 `biz/config_file.py`（S5 第十刀，2026-09-27）。
 
-`rl/config.py` **1566 → 598 行**（本刀三面合计）；文件面搬走 `RL_CONFIG_ENV` ·
+`biz/config.py` **1566 → 598 行**（本刀三面合计）；文件面搬走 `RL_CONFIG_ENV` ·
 `rl_config_path` · `read_rl_config_file`（逐字节不动）。
 
 本文件钉四件事：
 
 1. **定义唯一**——三名不许在 `config.py` 里再实现一遍；
-2. **依赖面闭集**——只准 stdlib（`json`/`pathlib`/`typing`）+ `dist_common`；**不** import `rl.*`；
+2. **依赖面闭集**——只准 stdlib（`json`/`pathlib`/`typing`）+ `common.distribution`；**不** import `rl.*`；
 3. **转发同一对象**——门面每个名与新家是 `is`；
-4. **契约语义没变**（功能性）：路径唯一来源 = `dist_common.rl_config_path()`（env
+4. **契约语义没变**（功能性）：路径唯一来源 = `common.distribution.rl_config_path()`（env
    `BCITY_RL_CONFIG` 可重定向）· 读不到 / 顶层不是 dict / 坏 JSON ⇒ 空 dict（等价「没配旋钮」）。
 """
 
@@ -22,16 +22,16 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import dist_common
-import rl.config as config_mod
-import rl.config_file as file_mod
+import biz.config as config_mod
+import biz.config_file as file_mod
+import common.distribution
 
-CONFIG_FILE = ROOT / "rl" / "config.py"
-NEW_FILE = ROOT / "rl" / "config_file.py"
+CONFIG_FILE = ROOT / "biz" / "config.py"
+NEW_FILE = ROOT / "biz" / "config_file.py"
 
 MOVED_NAMES = {"RL_CONFIG_ENV", "read_rl_config_file", "rl_config_path"}
 
-ALLOWED_IMPORTS = {"__future__", "json", "pathlib", "typing", "dist_common"}
+ALLOWED_IMPORTS = {"__future__", "json", "pathlib", "typing", "common.distribution"}
 
 
 def _tree(path: Path) -> ast.Module:
@@ -68,30 +68,31 @@ def test_moved_names_are_defined_in_config_file_and_not_in_config() -> None:
 
 
 def test_config_file_import_surface_is_closed() -> None:
-    """★ 依赖面闭集：stdlib + `dist_common`；**不得** import `rl.*`（反向成环）。"""
+    """★ 依赖面闭集：stdlib + `common.distribution`；**不得** import `trainer.*`（反向成环）。"""
     mods = _imported_modules(NEW_FILE)
     extra = sorted(mods - ALLOWED_IMPORTS)
     assert extra == [], f"common 之外的依赖：{extra}"
     tops = {m.split(".")[0] for m in mods}
-    assert "rl" not in tops, "config_file 反向 import 了 rl 包内模块"
+    assert "trainer" not in tops, "config_file 反向 import 了编排树模块"
+    assert "rl" not in tops, "rl 包已不存在（2026-09-30 刀 5 改名 trainer）——这行只留着接住旧名回来"
 
 
 def test_config_facade_forwards_every_moved_name() -> None:
-    """门面：每个搬走名都还在 `rl.config`，且与新家是**同一个对象**。"""
+    """门面：每个搬走名都还在 `biz.config`，且与新家是**同一个对象**。"""
     for name in sorted(MOVED_NAMES):
-        assert hasattr(config_mod, name), f"rl.config 丢了转发名 {name}"
+        assert hasattr(config_mod, name), f"biz.config 丢了转发名 {name}"
         assert getattr(config_mod, name) is getattr(file_mod, name), (
-            f"rl.config.{name} 不是 rl.config_file.{name}（转发成了副本）"
+            f"biz.config.{name} 不是 biz.config_file.{name}（转发成了副本）"
         )
 
 
 def test_rl_config_path_is_the_single_redirection_point(tmp_path, monkeypatch) -> None:
-    """路径唯一来源：env `BCITY_RL_CONFIG` 一改，两处读取点同步（委托 dist_common）。"""
+    """路径唯一来源：env `BCITY_RL_CONFIG` 一改，两处读取点同步（委托 common.distribution）。"""
     fixture = tmp_path / "rl-config.fixture.json"
     fixture.write_text('{"rl": {"stream": 0}}', encoding="utf-8")
     monkeypatch.setenv(file_mod.RL_CONFIG_ENV, str(fixture))
     assert file_mod.rl_config_path() == fixture
-    assert file_mod.rl_config_path() == Path(dist_common.rl_config_path())
+    assert file_mod.rl_config_path() == Path(common.distribution.rl_config_path())
     assert file_mod.read_rl_config_file()["rl"]["stream"] == 0
 
 

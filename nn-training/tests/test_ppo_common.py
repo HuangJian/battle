@@ -28,7 +28,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
-from schema import OBS_CHANNELS, SCALAR_DIM
+from common.schema import OBS_CHANNELS, SCALAR_DIM
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 

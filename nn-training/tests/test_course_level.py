@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from rl.config import corpus_identity_fp, load_course
+from biz.config import corpus_identity_fp, load_course
 
 REPO = Path(__file__).resolve().parents[2]
 C6_DMGFIX = REPO / "nn-training" / "curricula" / "c6-dmgfix.jsonc"
@@ -59,7 +59,7 @@ def test_level_file_missing_raises() -> None:
 
 
 def _course_from(path: Path) -> dict:
-    from rl.jsonc import load as _load_jsonc
+    from common.jsonc import load as _load_jsonc
 
     return _load_jsonc(str(path))
 
@@ -77,15 +77,15 @@ def test_corpus_fp_covers_obs_schema(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     判为**同一身份**，D14 放行 ⇒ 形状不同的 shard 混进同一次训练（加载侧
     data.npyio.verify_shard_schema 只能事后 raise，那时已经在崩）。
     """
-    import schema
+    import common.schema
 
     base = _course_from(C6_DMGFIX)
     c = load_course(_write_course(tmp_path, base))
     fp = corpus_identity_fp(c)
 
-    monkeypatch.setattr(schema, "OBS_SCHEMA_MAJOR", schema.OBS_SCHEMA_MAJOR + 1)
+    monkeypatch.setattr(common.schema, "OBS_SCHEMA_MAJOR", common.schema.OBS_SCHEMA_MAJOR + 1)
     assert corpus_identity_fp(c) != fp
-    monkeypatch.setattr(schema, "SCHEMA_FINGERPRINT", "deadbeef")
+    monkeypatch.setattr(common.schema, "SCHEMA_FINGERPRINT", "deadbeef")
     assert corpus_identity_fp(c) != fp
 
 

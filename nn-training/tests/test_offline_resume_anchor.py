@@ -35,7 +35,7 @@ from common.protocol import (
     OFFLINE_RESUME_PATH,
     encode_weights_json,
 )
-from remote.hub_server import _HubQueue, _JobStore, make_server
+from hub.server import _HubQueue, _JobStore, make_server
 
 TOKEN = "sekret"
 COURSE = "c5-gae"

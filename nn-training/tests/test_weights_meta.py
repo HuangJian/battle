@@ -24,8 +24,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.schema import OBS_SCHEMA_MAJOR
 from data.weights_meta import COVERAGE_RAISE, COVERAGE_WARN, validate_weights_meta
-from schema import OBS_SCHEMA_MAJOR
 
 #: 手写的 `data` 字段：四个 little-endian float32 `1.0`（2×2 全 1 张量）的 base64。
 #: 校验器**不碰** `data`（base64 → 张量在 weights_io 那一半），写成真值只是为了让

@@ -17,7 +17,7 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[3]
 sys.path.insert(0, str(ROOT / "nn-training"))
 
-from rl.batch_eval import (  # noqa: E402
+from trainer.batch_eval import (  # noqa: E402
     claim_pending,
     consume_requests,
     data_root,
@@ -25,9 +25,9 @@ from rl.batch_eval import (  # noqa: E402
     select_next_unit,
     units_for_batch,
 )
-from rl.log import log  # noqa: E402
-import dist_common  # noqa: E402
-from rl.queue import RUN_ID  # noqa: E402
+from biz.log import log  # noqa: E402
+import common.distribution  # noqa: E402
+from trainer.queue import RUN_ID  # noqa: E402
 
 
 def main() -> int:
@@ -59,7 +59,7 @@ def main() -> int:
         log("[kick] no remaining unit")
         return 0
     batch.setdefault("units", {})["of"] = len(units)
-    cfg = dist_common.load_dist_config() or {}
+    cfg = common.distribution.load_dist_config() or {}
     args = SimpleNamespace(
         mode="per-tick",
         out=str(ROOT / "tmp" / course / "weights.json") if course else "",
@@ -83,7 +83,7 @@ def main() -> int:
     # 必须传 bun 可执行路径，不能把 bun_version() 的版本串回写成路径。
     bun = shutil.which("bun") or "bun"
     log(f"[kick] bun={bun} unit={unit.get('rung')} u{nxt}/{len(units)}")
-    epoch = dist_common.compute_engine_epoch()
+    epoch = common.distribution.compute_engine_epoch()
     t = dispatch_batch_bg(
         bun,
         rl_path,

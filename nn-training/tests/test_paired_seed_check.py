@@ -26,9 +26,8 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from rl.config import CourseConfig
-from rl.loop_lifecycle import _paired_seed_startup_check
-from rl.paired import (
+from biz.config import CourseConfig
+from biz.paired import (
     PAIRED_KEY,
     compose_lines,
     declared_paired_seed,
@@ -36,6 +35,7 @@ from rl.paired import (
     pair_check,
     scan_paired_courses,
 )
+from trainer.loop_lifecycle import _paired_seed_startup_check
 
 V = 20260921
 

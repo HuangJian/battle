@@ -1,5 +1,5 @@
-"""rl/bc_config.py + rl/bc_loop.py + rl/bc_ledger.py 纯函数 — BC 课程与编排器测试
-（plan/bc-cloud-integration.plan.md §2/§6；R3-4 后编排体归 `rl/bc_loop`）。
+"""biz/bc_config.py + trainer/bc_loop.py + biz/bc_ledger.py 纯函数 — BC 课程与编排器测试
+（plan/bc-cloud-integration.plan.md §2/§6；R3-4 后编排体归 `trainer/bc_loop`）。
 """
 
 from __future__ import annotations
@@ -9,13 +9,13 @@ from pathlib import Path
 
 import pytest
 
-from rl.bc_config import (
+from biz.bc_config import (
     bc_corpus_identity_fp,
     load_bc_course,
     resolve_bc_course,
     round_seeds,
 )
-from rl.bc_dispatch import landed_pairs
+from biz.bc_dispatch import landed_pairs
 
 
 def test_load_bc_c4_course_with_level_injection() -> None:
@@ -65,7 +65,7 @@ def test_bc_corpus_identity_fp_semantics() -> None:
     d2["train"]["epochs"] = 999
     d2["iters"] = 7
     d2["out"] = "tmp/other/weights.json"
-    from rl.bc_config import BcCourseConfig
+    from biz.bc_config import BcCourseConfig
 
     c2 = BcCourseConfig(**d2)
     assert bc_corpus_identity_fp(c2) == fp
@@ -79,12 +79,12 @@ def test_bc_corpus_identity_fp_semantics() -> None:
 def test_bc_corpus_identity_fp_covers_obs_schema(monkeypatch: pytest.MonkeyPatch) -> None:
     """★ schema 必须在语料身份里（2026-09-13 修复的回归锁）。
 
-    为什么致命：agent 结果缓存键 = `iterId:mode:kind:stage:seed`（dist_common.py:813，
+    为什么致命：agent 结果缓存键 = `iterId:mode:kind:stage:seed`（common/distribution.py:813，
     不含 codehash），而 BC 的 iterId = `bc-it{it}-{fp12}`（bc_dispatch.py:109）**既不含
     课程名也不含 runId**。身份里漏掉 schema ⇒ v2→v3 的 MAJOR bump 后重跑同一课程 fp 逐字
     不变 ⇒ 同一 iterId ⇒ 节点直接回放旧 era 的 shard，v3 编码器一次都跑不到。
     """
-    import schema
+    import common.schema
 
     c = load_bc_course("bc-c4")
     fp = bc_corpus_identity_fp(c)
@@ -99,9 +99,9 @@ def test_bc_corpus_identity_fp_covers_obs_schema(monkeypatch: pytest.MonkeyPatch
     assert bc_corpus_identity_fp(load_bc_course("bc-c4-v3")) != fp
 
     # ③ schema 的两个分量各自都在 payload 里（改任一个，身份必须变）。
-    monkeypatch.setattr(schema, "OBS_SCHEMA_MAJOR", schema.OBS_SCHEMA_MAJOR + 1)
+    monkeypatch.setattr(common.schema, "OBS_SCHEMA_MAJOR", common.schema.OBS_SCHEMA_MAJOR + 1)
     assert bc_corpus_identity_fp(c) != fp
-    monkeypatch.setattr(schema, "SCHEMA_FINGERPRINT", "deadbeef")
+    monkeypatch.setattr(common.schema, "SCHEMA_FINGERPRINT", "deadbeef")
     assert bc_corpus_identity_fp(c) != fp
 
 
@@ -132,7 +132,7 @@ def test_bc_ledger_completed_rounds(tmp_path: Path) -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from rl import bc_ledger
+    from biz import bc_ledger
 
     j = tmp_path / "training_log.jsonl"
     j.write_text(
@@ -156,7 +156,7 @@ def test_bc_loop_smoke_overrides() -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from rl import bc_loop
+    from trainer import bc_loop
 
     c = load_bc_course("bc-c4")
     ov = bc_loop.smoke_overrides(c)
@@ -170,7 +170,7 @@ def test_bc_loop_smoke_overrides() -> None:
 
 def _loss_skipped_manifest(stage: int, seed: int):
     """合法的 wins-only 败局容器（validate_result 的 loss-skip 分支）。"""
-    from dist_common import BC_COLLECTOR, BC_WVER
+    from common.distribution import BC_COLLECTOR, BC_WVER
 
     return {
         "wver": BC_WVER,
@@ -185,7 +185,7 @@ def _loss_skipped_manifest(stage: int, seed: int):
 
 def test_bc_dispatch_trips_broken_node_and_requeues(tmp_path: Path, monkeypatch) -> None:
     """2026-09-14 mac 事故回归：单节点连续真失败 → 本轮熔断，剩余任务改派健康节点。"""
-    from rl import bc_dispatch as D
+    from biz import bc_dispatch as D
 
     calls: dict[str, int] = {"bad": 0, "good": 0}
 
@@ -193,7 +193,7 @@ def test_bc_dispatch_trips_broken_node_and_requeues(tmp_path: Path, monkeypatch)
         nid = "bad" if "bad" in url else "good"
         calls[nid] += 1
         if nid == "bad":
-            raise D.dist_common.DistError(
+            raise D.common.distribution.DistError(
                 0, "TypeError: undefined is not an object (evaluating 's.obs')"
             )
         return _loss_skipped_manifest(int(kw["stage"]), int(kw["seed"])), {}
@@ -244,13 +244,13 @@ def test_bc_dispatch_trips_broken_node_and_requeues(tmp_path: Path, monkeypatch)
 
 def test_bc_dispatch_failfast_disabled_keeps_old_behavior(tmp_path: Path, monkeypatch) -> None:
     """node_fail_limit=0：关闭熔断（所有节点都试，行为与旧版一致）。"""
-    from rl import bc_dispatch as D
+    from biz import bc_dispatch as D
 
     seen: list[str] = []
 
     def fake_fetch(url: str, _auth: str, **kw):
         seen.append(url)
-        raise D.dist_common.DistError(0, "boom")
+        raise D.common.distribution.DistError(0, "boom")
 
     monkeypatch.setattr(D, "fetch_task", fake_fetch)
     stats = D.dispatch_bc_corpus(
@@ -272,14 +272,14 @@ def test_bc_dispatch_failfast_disabled_keeps_old_behavior(tmp_path: Path, monkey
 
 def test_bc_dispatch_busy_is_not_a_node_fault(tmp_path: Path, monkeypatch) -> None:
     """busy（并发槽满）不计入失败 streak —— 否则健康节点会被误熔断。"""
-    from rl import bc_dispatch as D
+    from biz import bc_dispatch as D
 
     calls = {"n": 0}
 
     def fake_fetch(_url: str, _auth: str, **kw):
         calls["n"] += 1
         if int(kw["seed"]) == 1:  # seed1 一直 busy；其余正常
-            raise D.dist_common.DistError(0, "busy")
+            raise D.common.distribution.DistError(0, "busy")
         return _loss_skipped_manifest(int(kw["stage"]), int(kw["seed"])), {}
 
     monkeypatch.setattr(D, "fetch_task", fake_fetch)
@@ -309,14 +309,14 @@ def test_bc_dispatch_busy_backpressure_then_success(tmp_path: Path, monkeypatch)
     事故形态：40 局瞬间推送，节点并发槽占满，溢出任务两次「立刻重试」都撞 busy
     ⇒ 直接计 failed（实测 7 局）⇒ BcDispatchError 把整轮训练打死。
     """
-    from rl import bc_dispatch as D
+    from biz import bc_dispatch as D
 
     state = {"busy": 3}
 
     def fake_fetch(_url: str, _auth: str, **kw):
         if state["busy"] > 0:
             state["busy"] -= 1
-            raise D.dist_common.DistError(0, "busy")
+            raise D.common.distribution.DistError(0, "busy")
         return _loss_skipped_manifest(int(kw["stage"]), int(kw["seed"])), {}
 
     monkeypatch.setattr(D, "fetch_task", fake_fetch)
@@ -352,7 +352,7 @@ def test_bc_loop_finish_all_rounds_writes_run_complete(tmp_path: Path) -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from rl import bc_loop
+    from trainer import bc_loop
 
     j = tmp_path / "training_log.jsonl"
     msgs: list[str] = []
@@ -380,7 +380,7 @@ def test_wait_bc_round_zero_wait_sec_means_unlimited(tmp_path: Path, monkeypatch
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from remote import hub_http
-    from rl import bc_loop
+    from trainer import bc_loop
 
     calls = {"n": 0}
 
@@ -417,7 +417,7 @@ def test_finish_all_rounds_issues_cloud_halt(tmp_path: Path, monkeypatch) -> Non
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
     from remote import hub_client
-    from rl import bc_loop
+    from trainer import bc_loop
 
     # `set_cloud_halt` 的调用点（`bc_loop.finish_all_rounds` 内的延迟 import）仍走
     # `hub_client` 的转发名 ⇒ 这里照旧 patch 它（不是 `_request` 那一档）。
@@ -453,7 +453,7 @@ def test_bc_run_start_event_is_segmentation_anchor() -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from rl import bc_loop
+    from trainer import bc_loop
 
     c = load_bc_course("bc-c4-v3")
     e = bc_loop.bc_run_start_event(c, "bc-c4-v3", run_id="bc-unit-test")
@@ -475,7 +475,7 @@ def test_bc_job_extra_keeps_auto_fire_pos_weight() -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from rl import bc_loop
+    from trainer import bc_loop
 
     c = load_bc_course("bc-c4-v3")
     ex = bc_loop.bc_job_extra(c, 2)
@@ -560,7 +560,7 @@ def test_bc_c4_v3_corpus_scaled_up() -> None:
 
 
 def test_bc_course_eval_block_multi_level() -> None:
-    from rl.bc_config import load_bc_course
+    from biz.bc_config import load_bc_course
 
     c = load_bc_course("bc-c4")
     assert c.eval.enabled is True
@@ -569,14 +569,14 @@ def test_bc_course_eval_block_multi_level() -> None:
     assert c.eval.levels == ["arena4", "arena6"]  # 多地图
 
 def test_bc_course_eval_block_default_off() -> None:
-    from rl.bc_config import load_bc_course
+    from biz.bc_config import load_bc_course
 
     assert load_bc_course("bc-e2e").eval.enabled is False  # 夹具不配 eval
 
 
 def test_bc_train_init_from_and_auto_stop_defaults() -> None:
     """warm-start 缺省关：init_from 空（从随机起）+ auto_stop 关（收官不清标记）。"""
-    from rl.bc_config import load_bc_course
+    from biz.bc_config import load_bc_course
 
     c = load_bc_course("bc-c4")
     assert c.train.init_from == ""
@@ -587,7 +587,7 @@ def test_bc_train_init_from_parses(tmp_path: Path) -> None:
     """train.init_from 透传（路径语义由发布端 resolve，配置层只收字符串）。"""
     import json as _json
 
-    from rl.bc_config import load_bc_course
+    from biz.bc_config import load_bc_course
 
     p = tmp_path / "w.bc.jsonc"
     w = tmp_path / "w.json"

@@ -48,18 +48,19 @@ import zipfile
 
 import pytest
 
+from biz.iter_job import build_iter_spec
+from biz.plan import build_plan, dump_plan
+from common import net_http
 from common.protocol import (
     COURSE_ENABLE_MARKER,
     INIT_WEIGHTS_NAME,
     TS_CODE_NAME,
     encode_weights_json,
 )
-from remote import net_http, offline_boot
+from remote import offline_boot
 from remote.artifacts import ArtifactStore
 from remote.hub_client import publish_job
 from remote.offline_deliver import OfflineDeliverer
-from rl.iter_job import build_iter_spec
-from rl.plan import build_plan, dump_plan
 from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
 
@@ -68,7 +69,7 @@ from tests.subproc_util import spawn_bound_port
 def _isolate_weights_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """把**权重归档根**指到 tmp（2026-09-23）。
 
-    本文件拉的是**真 hub 子进程**（`remote.hub_server`），子进程继承本测试的环境 ⇒ 用 env
+    本文件拉的是**真 hub 子进程**（`hub.server`），子进程继承本测试的环境 ⇒ 用 env
     而不是 patch 模块常量。不隔离的话回传轮会往真 `nn-training/weights/` 写归档，而控制台
     的 evalA 权重选择器会把它们当成真训练轮次列出来。
     """
@@ -255,7 +256,7 @@ def _publish_plain_job(course: str, job_root: Path, jsonl: Path, tmp_path: Path)
 
 
 class _Hub:
-    """真 `remote.hub_server` 子进程（控制台实际启动的那条 argv：`--traj-root --discover`）。"""
+    """真 `hub.server` 子进程（控制台实际启动的那条 argv：`--traj-root --discover`）。"""
 
     def __init__(self, traj_root: Path) -> None:
         def _argv(port: int) -> list[str]:
@@ -263,7 +264,7 @@ class _Hub:
                 sys.executable,
                 "-u",
                 "-m",
-                "remote.hub_server",
+                "hub.server",
                 "--port",
                 str(port),
                 "--host",

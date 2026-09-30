@@ -2,8 +2,8 @@
 
 ## 这一刀切了什么
 
-`rl/loop_steps.py` **667 → 541 行**：4 个方法按**判据同源**（「这一轮要给出去的东西」）搬到
-`rl/loop_export.py::TrainingExport`：
+`trainer/loop_steps.py` **667 → 541 行**：4 个方法按**判据同源**（「这一轮要给出去的东西」）搬到
+`trainer/loop_export.py::TrainingExport`：
 
 | 成员 | 判据（给出去的是什么） | 调用者（入边） |
 |---|---|---|
@@ -54,9 +54,9 @@ from typing import Any, cast
 from tests.helpers import source_scan
 
 NN_ROOT = Path(__file__).resolve().parent.parent
-EXPORT_PY = NN_ROOT / "rl/loop_export.py"
-STEPS_PY = NN_ROOT / "rl/loop_steps.py"
-ROUND_STEPS_PY = NN_ROOT / "rl/loop_round_steps.py"
+EXPORT_PY = NN_ROOT / "trainer/loop_export.py"
+STEPS_PY = NN_ROOT / "trainer/loop_steps.py"
+ROUND_STEPS_PY = NN_ROOT / "trainer/loop_round_steps.py"
 
 CLASS = "TrainingExport"
 MEMBERS = ("_ensure_ts_code", "_volume_plan_block", "_export_offline_bundle", "_export_weights")
@@ -96,43 +96,45 @@ OUTBOUND_HANDS = frozenset({"_remote_ppo"})
 #: 槽位写-读手：本模块**写**、别处**读**的槽（写-读手契约；读者少一个也红）。
 #: S4 第二十二刀后读者在两个新家里：`_remote_ppo_publish`（Job）与 `_push_submit_node`（Push）。
 SLOT_HANDS: dict[str, tuple[str, ...]] = {
-    "_ts_code_sha256": ("rl/loop_remote_job.py",),
-    "_ts_code_zip_path": ("rl/loop_remote_job.py", "rl/loop_remote_push.py"),
+    "_ts_code_sha256": ("trainer/loop_remote_job.py",),
+    "_ts_code_zip_path": ("trainer/loop_remote_job.py", "trainer/loop_remote_push.py"),
 }
 
 #: 顶层 import 闭集（非 stdlib；本模块不许长出重依赖）。
-TOP_IMPORTS = frozenset({"dist_common", "rl.archive", "rl.log", "rl.modes"})
+TOP_IMPORTS = frozenset({"common.distribution", "biz.archive", "biz.log", "biz.modes"})
 STDLIB_IMPORTS = frozenset({"pathlib", "typing"})
 
 #: 反向边（禁）：成环或把叶子拉回编排上游。
 FORBIDDEN_IMPORTS = frozenset(
     {
-        "rl.loop_core",
-        "rl.loop_eval",
-        "rl.loop_remote",
-        "rl.loop_remote_drive",
-        "rl.loop_remote_fail",
-        "rl.loop_remote_job",
-        "rl.loop_remote_push",
-        "rl.loop_round_steps",
-        "rl.loop_steps",
+        "trainer.loop_core",
+        "trainer.loop_eval",
+        "trainer.loop_remote",
+        "trainer.loop_remote_drive",
+        "trainer.loop_remote_fail",
+        "trainer.loop_remote_job",
+        "trainer.loop_remote_push",
+        "trainer.loop_round_steps",
+        "trainer.loop_steps",
     }
 )
 
 #: 搬走后旧家**不再持有**的模块全局（陈旧 patch 会响亮 AttributeError，而不是静默空操作）。
-GONE_FROM_STEPS = ("dist_common", "backup_weights", "_MODE_BACKUP_PREFIX")
+#: 旧家**全局名**名单（`hasattr(mod, name)` 的口径 = 绑定名，不是点分模块路径）——
+#: `dist_common` 随 2026-09-30 刀 2 下沉后，`import common.distribution` 绑定的名字就是 `common`。
+GONE_FROM_STEPS = ("common", "backup_weights", "_MODE_BACKUP_PREFIX")
 
 #: 本模块允许的**延迟** import 目标（方法体内；那是原有的注入面）。
 DELAYED_IMPORTS = frozenset(
     {
         "remote.hub_client",  # `_ensure_ts_code` → pack_ts_code_zip（本模块唯一的 remote 触点）
-        "rl.iter_job",  # `_export_offline_bundle` → build_iter_spec
-        "rl.plan",  # `_export_offline_bundle` → build_plan / dump_plan / planned_iters / RUN_NODE_LABEL
-        "rl.resume",  # `_volume_plan_block` → trailing_samples_per_game
-        "rl.volume_waves",  # `_volume_plan_block` → volume_block
+        "biz.iter_job",  # `_export_offline_bundle` → build_iter_spec
+        "biz.plan",  # `_export_offline_bundle` → build_plan / dump_plan / planned_iters / RUN_NODE_LABEL
+        "biz.resume",  # `_volume_plan_block` → trailing_samples_per_game
+        "biz.volume_waves",  # `_volume_plan_block` → volume_block
     }
 )
-#: 注：`rl.modes`（`_MODE_BACKUP_PREFIX`）是**顶层** import，不在上面那张表里（那张表只要
+#: 注：`biz.modes`（`_MODE_BACKUP_PREFIX`）是**顶层** import，不在上面那张表里（那张表只要
 #: 「方法体内 import」，见 `_delayed_imports` 的 `- top`）。
 
 
@@ -148,11 +150,11 @@ def _methods(path: Path, cls_name: str) -> dict[str, ast.FunctionDef]:
 def _self_call_counts(path: Path, only: frozenset[str] | None = None) -> Mapping[str, int]:
     """AST 计真实 `self.<attr>(…)` 调用（文档字符串/注释里提到不算——见 S4 第二十刀那条教训）。
 
-    实现搬进 `tests.helpers.source_scan.self_call_counts`（缓存版）：本用例对全 `rl/`（102 文件）
+    实现搬进 `tests.helpers.source_scan.self_call_counts`（缓存版）：本用例对两棵业务树（`trainer/` + `biz/`）
     跑两遍解析（入边 + 定义面），同一个模块里还有别处也要同一份数据。
 
     `only` = 只关心这些名字（白名单）；入边闭集那几条传它就走上廉价子串预筛，
-    与判据无关的文件（全 `rl/` 里的绝大多数）连 `ast.parse` 都不做。
+    与判据无关的文件（两棵业务树里的绝大多数）连 `ast.parse` 都不做。
     """
     return source_scan.self_call_counts(str(path), only)
 
@@ -247,23 +249,23 @@ def test_members_live_in_the_new_home_only() -> None:
 
 def test_wiring_is_object_identity() -> None:
     """`TrainingSteps.X is TrainingExport.X`（同一个函数对象，不是同名副本）。"""
-    import rl.loop_export as exp_mod
-    from rl.loop_steps import TrainingSteps
+    import trainer.loop_export as exp_mod
+    from trainer.loop_steps import TrainingSteps
 
     home = exp_mod.TrainingExport
     for name in MEMBERS:
         got = getattr(TrainingSteps, name)
         assert got is getattr(home, name), name
-        assert got.__module__ == "rl.loop_export", name
+        assert got.__module__ == "trainer.loop_export", name
 
 
 def test_composition_is_exact() -> None:
     """组装逐字：基类三件套 + `__mro__[1]` + 本簇**不在**组合类直接基类里。"""
-    from rl.loop_core import TrainingLoop
-    from rl.loop_eval import TrainingEval
-    from rl.loop_export import TrainingExport
-    from rl.loop_remote import TrainingRemote
-    from rl.loop_steps import TrainingSteps
+    from trainer.loop_core import TrainingLoop
+    from trainer.loop_eval import TrainingEval
+    from trainer.loop_export import TrainingExport
+    from trainer.loop_remote import TrainingRemote
+    from trainer.loop_steps import TrainingSteps
 
     assert tuple(c.__name__ for c in TrainingSteps.__bases__) == STEPS_BASES
     assert TrainingSteps.__bases__ == (TrainingRemote, TrainingEval, TrainingExport)
@@ -290,7 +292,7 @@ def test_borrowed_declarations_are_exactly_the_touched_set() -> None:
             top.update(t.id for t in n.targets if isinstance(t, ast.Name))
     borrowed = {n for n in touched - own - top if not n.startswith("__")}
     assert borrowed, "派生集为空说明重建坏了"
-    import rl.loop_export as exp_mod
+    import trainer.loop_export as exp_mod
 
     assert set(exp_mod.TrainingExport.__annotations__) == borrowed, sorted(borrowed)
     body = _cls(EXPORT_PY, CLASS).body
@@ -303,8 +305,8 @@ def test_borrowed_declarations_are_exactly_the_touched_set() -> None:
 
 def test_inbound_hands_closed_set() -> None:
     """入边闭集：只有登记的调用者，且呼叫点数逐一对账（AST，见 S20 的教训）。"""
-    rl_dir = NN_ROOT / "rl"
-    files = sorted(rl_dir.glob("*.py"))
+    # 2026-09-30（刀 4）：调用者两棵树上都有（`trainer/` 编排 + `biz/` 纯逻辑）⇒ 走两棵树扫描面。
+    files = source_scan.logic_py_files(str(NN_ROOT))
     only = frozenset(INBOUND_CALLS)
     calls = {p.name: _self_call_counts(p, only) for p in files}
     defined = {p.name: _defined_names(p, only) for p in files}
@@ -325,7 +327,7 @@ def test_outbound_hands_closed_set() -> None:
         }
     assert ext == set(OUTBOUND_HANDS), f"出边变了：{sorted(ext)}"
     # 声明块里必须有它（混入常态：在组合实例上解析，故声明类型）。
-    import rl.loop_export as exp_mod
+    import trainer.loop_export as exp_mod
 
     for hand in OUTBOUND_HANDS:
         assert hand in exp_mod.TrainingExport.__annotations__, hand
@@ -344,15 +346,15 @@ def test_slot_write_read_hands() -> None:
 
 
 def test_old_home_no_longer_absorbs_patches() -> None:
-    """★ 旧家不再吸收 patch：搬走的模块全局在 `rl.loop_steps` 里**不存在**。"""
-    import rl.loop_steps as steps_mod
+    """★ 旧家不再吸收 patch：搬走的模块全局在 `trainer.loop_steps` 里**不存在**。"""
+    import trainer.loop_steps as steps_mod
 
     for name in GONE_FROM_STEPS:
-        assert not hasattr(steps_mod, name), f"rl.loop_steps.{name} 还在——陈旧 patch 会静默失效"
+        assert not hasattr(steps_mod, name), f"trainer.loop_steps.{name} 还在——陈旧 patch 会静默失效"
     # 新家持有本簇真正用到的那些（= 真注入点）。
-    import rl.loop_export as exp_mod
+    import trainer.loop_export as exp_mod
 
-    assert hasattr(exp_mod, "dist_common") and hasattr(exp_mod, "log")
+    assert hasattr(exp_mod, "common") and hasattr(exp_mod, "log")
     assert hasattr(exp_mod, "backup_weights") and hasattr(exp_mod, "_MODE_BACKUP_PREFIX")
 
 
@@ -389,7 +391,7 @@ def _stub(**kw: Any) -> Any:
 
 def test_volume_plan_block_gates_run_from_the_new_home() -> None:
     """★ `_volume_plan_block` 两道门真跑：非 per-tick / target≤0 一律 None（无声返回）。"""
-    from rl.loop_export import TrainingExport
+    from trainer.loop_export import TrainingExport
 
     fn = cast(Any, TrainingExport._volume_plan_block)
     assert fn(_stub(mode="intent", target_transitions=100)) is None  # mode 门
@@ -403,7 +405,7 @@ def test_ensure_ts_code_cache_semantics(monkeypatch, tmp_path) -> None:
     所以这里直接断言「注入点就是实现模块」。
     """
     import remote.hub_client as hub_client
-    from rl.loop_export import TrainingExport
+    from trainer.loop_export import TrainingExport
 
     calls: list[str] = []
 
@@ -422,10 +424,10 @@ def test_ensure_ts_code_cache_semantics(monkeypatch, tmp_path) -> None:
 
 
 def test_export_weights_runs_and_log_seam_lands_here(monkeypatch, tmp_path) -> None:
-    """★ `_export_weights` 真跑，且 `log` seam **在本模块**（打旧家 `rl.loop_steps.log` 收不到）。"""
-    import rl.loop_export as exp_mod
-    import rl.loop_steps as steps_mod
-    from rl.loop_export import TrainingExport
+    """★ `_export_weights` 真跑，且 `log` seam **在本模块**（打旧家 `trainer.loop_steps.log` 收不到）。"""
+    import trainer.loop_export as exp_mod
+    import trainer.loop_steps as steps_mod
+    from trainer.loop_export import TrainingExport
 
     seen: list[str] = []
     old_seen: list[str] = []
@@ -439,18 +441,18 @@ def test_export_weights_runs_and_log_seam_lands_here(monkeypatch, tmp_path) -> N
     cast(Any, TrainingExport._export_weights)(obj, 1)
     assert any("already landed" in m for m in seen), seen
     assert any("archived" in m for m in seen), seen
-    assert old_seen == [], "打 rl.loop_steps.log 竟收到了——seam 的落点不对"
+    assert old_seen == [], "打 trainer.loop_steps.log 竟收到了——seam 的落点不对"
 
 
 def test_export_offline_bundle_fails_loud_without_iters(tmp_path) -> None:
     """★ `_export_offline_bundle` 的响亮门真跑：课程没声明 iters ⇒ `SystemExit`（不猜终点）。
 
     为什么测这道门而不测「无起点权重」那道：后者第一刀就落到
-    `dist_common.weights_fingerprint(args.out)`——**文件不存在时它响亮 `FileNotFoundError`**
+    `common.distribution.weights_fingerprint(args.out)`——**文件不存在时它响亮 `FileNotFoundError`**
     （不是返回 falsy），所以「无起点权重」在盘上根本走不到（既有行为，本刀不动它）；
     而 iters 这道门在第 **一** 行，是真正能断言的响亮退出。
     """
-    from rl.loop_export import TrainingExport
+    from trainer.loop_export import TrainingExport
 
     obj = _stub(out=str(tmp_path / "w.json"), iters=0)
     obj._rotate_seed = 0

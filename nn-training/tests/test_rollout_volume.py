@@ -1,4 +1,4 @@
-"""rl/volume_waves.py —— 按样本量动态采集的纯逻辑（plan/dynamic-rollout-volume）。
+"""biz/volume_waves.py —— 按样本量动态采集的纯逻辑（plan/dynamic-rollout-volume）。
 
 三条不变量各有一节：
   ① **老行为逐字节不变**：无键课程走 build_pairs 原路（含冻结摘要，任何流变更即红）；
@@ -17,11 +17,10 @@ from typing import Any, cast
 import pytest
 from pydantic import ValidationError
 
-from rl.commit_journal import CommitJournal
-from rl.config import CourseConfig, corpus_identity_fp
-from rl.course import build_pairs
-from rl.loop_core import TrainingLoop
-from rl.volume_waves import (
+from biz.commit_journal import CommitJournal
+from biz.config import CourseConfig, corpus_identity_fp
+from biz.course import build_pairs
+from biz.volume_waves import (
     DEFAULT_MAX_WAVES,
     STOP_GAME_CAP,
     STOP_QUOTA_MET,
@@ -38,6 +37,7 @@ from rl.volume_waves import (
     wave_seeds,
 )
 from tests.conftest import bp_args
+from trainer.loop_core import TrainingLoop
 
 # ─────────────────── ① 配额数学 ───────────────────
 
@@ -462,7 +462,7 @@ def test_course_volume_keys_reject_negative() -> None:
 
 def _payload_ref(course: CourseConfig) -> dict:
     """`corpus_identity_fp` 的独立重实现（tests/stages.test.ts 式对照，独立于实现）。"""
-    import schema
+    import common.schema
 
     stages = (
         [s.model_dump() for s in course.stages]
@@ -470,12 +470,12 @@ def _payload_ref(course: CourseConfig) -> dict:
         else course.stages
     )
     return {
-        "obs_schema_major": schema.OBS_SCHEMA_MAJOR,
-        "obs_schema_fingerprint": schema.SCHEMA_FINGERPRINT,
+        "obs_schema_major": common.schema.OBS_SCHEMA_MAJOR,
+        "obs_schema_fingerprint": common.schema.SCHEMA_FINGERPRINT,
         # 动作标签映射版本：plan/new-era-stop #7 刻意**无条件**进身份（index 0
         # keep→STOP 是全局语义变更，漂移就是目的）——与本文件「volume 键只在激活
         # 时进」的规则不同，是唯一一处有意的整体漂移。
-        "move_label_semantics": schema.MOVE_LABEL_SEMANTICS,
+        "move_label_semantics": common.schema.MOVE_LABEL_SEMANTICS,
         "mode": course.mode,
         "stages": stages,
         "difficulty": course.difficulty,
@@ -685,19 +685,19 @@ _WVER = "wver-volume-test"
 @pytest.fixture
 def _patch_wver(monkeypatch: pytest.MonkeyPatch) -> None:
     """固定 wver（真实实现要读盘上的权重文件，测试不为此造一个假权重）。"""
-    import dist_common
+    import common.distribution
 
-    monkeypatch.setattr(dist_common, "weights_fingerprint", lambda _p: _WVER)
+    monkeypatch.setattr(common.distribution, "weights_fingerprint", lambda _p: _WVER)
 
 
 def test_settled_totals_accept_both_manifest_schemas(tmp_path: Path) -> None:
-    """★ 账本必须认两种落盘 schema（`dist_common.write_shard` 原样写 agent 的 manifest）：
+    """★ 账本必须认两种落盘 schema（`common.distribution.write_shard` 原样写 agent 的 manifest）：
 
     单局 `nSamples`（TS exporter 正规形）与聚合单局 `totalSamples`（队列/远端 path）。
     只认前者 ⇒ 后者那些关永远「零样本」、补波永不达标（白烧到波次上限）——2026-09-15
     e2e 实测踩到（`e2e/test_volume_e2e.py::test_short_stage_does_not_starve_long_stage`）。
     """
-    from rl.resume import settled_stage_totals
+    from biz.resume import settled_stage_totals
 
     traj = tmp_path / "traj"
     wver = "w" * 12
@@ -877,7 +877,7 @@ def test_volume_topup_partial_ledger_replays_same_continuation(
 
 def test_parse_wave_records_roundtrip(tmp_path: Path) -> None:
     """WAL 行 → 波次记录（本迭代、末条 op 定成败、games 字符串键转回 int）。"""
-    from rl.volume_waves import WAVE_PHASE, parse_wave_records, wave_round_key
+    from biz.volume_waves import WAVE_PHASE, parse_wave_records, wave_round_key
 
     j = CommitJournal(tmp_path / "commit_journal.jsonl")
     j.start(WAVE_PHASE, wave_round_key(9, 1), games={"0": 3, "1": 4}, wave_idx=1)
@@ -901,7 +901,7 @@ def test_volume_topup_replays_unfinished_wave(tmp_path: Path, _patch_wver: None)
     若只按账本重算，计数器会回到 wave 1，用 wave-1 的种子去补 wave-2 的缺口——
     同观测史、不同波次序列（plan §2.3.1 禁止的「重新抛硬币」）。
     """
-    from rl.volume_waves import WAVE_PHASE, wave_round_key
+    from biz.volume_waves import WAVE_PHASE, wave_round_key
 
     stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500)
     stub._iteration_pairs(1)
@@ -922,7 +922,7 @@ def test_volume_topup_replays_unfinished_wave(tmp_path: Path, _patch_wver: None)
 
 def test_volume_topup_does_not_replay_finished_wave(tmp_path: Path, _patch_wver: None) -> None:
     """已闭环的波不重放（WAL 只在「停在波中」时才作判据）。"""
-    from rl.volume_waves import WAVE_PHASE, wave_round_key
+    from biz.volume_waves import WAVE_PHASE, wave_round_key
 
     stub = _StubLoop(tmp_path, target=_TARGET_VOLUME, est=967, samples=500)
     stub._iteration_pairs(1)

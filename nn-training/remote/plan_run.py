@@ -17,7 +17,7 @@
 代码 + `plan.json`），此后云机自主把计划里的轮次跑完，每轮合成一个与 kind=iter **逐字段同构**的
 job 再喂回 `run_job`——离线轮与 hub 监管轮走的是字面同一条代码路径。
 
-链条的三个衔接点：① 对集 `rl.plan.pairs_for`；② argv `rl.plan.iter_spec`；③ 权重与 opt
+链条的三个衔接点：① 对集 `biz.plan.pairs_for`；② argv `biz.plan.iter_spec`；③ 权重与 opt
 （上一轮结果 → 下一轮 payload/`opt_sha`，Adam 动量不丢）。产物（`remote/artifacts.py`）是**唯一**
 长期记录；补传（`remote/offline_deliver.py`）永远 best-effort、不阻塞、不抛。
 
@@ -38,6 +38,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from biz.plan import iter_spec, pairs_for
+from common.log_bundle import LogBundle
 from common.protocol import (
     PAYLOAD_NAME,
     ProtocolError,
@@ -55,7 +57,6 @@ from common.protocol import (
 from common.protocol import (
     job_id as make_job_id,
 )
-from log_bundle import LogBundle
 from remote.artifacts import (
     ArtifactStore,
     metrics_row,
@@ -121,7 +122,6 @@ from remote.plan_handoff import (
 from remote.plan_handoff import (
     verify_plan_file as verify_plan_file,
 )
-from rl.plan import iter_spec, pairs_for
 
 #: 单轮的瞬时失败重试上限（自主模式没有 hub 兜底：重试够了就干净停下留产物）。
 ITER_RETRIES = 2
@@ -134,7 +134,7 @@ def with_rollout_workers(spec: dict, workers: int) -> dict:
 
     为什么要换：计划里钉着的 `plan.workers` 是**导出那台机器**的规模（常在 8~16 核的本机导出，
     却要在 96 vCPU 的云机上整段跑），而 rollout 与云机 eval 是交替的 ⇒ 两者用同一个
-    `platform_utils.cpu_worker_slots()`（用户 2026-09-22）。
+    `common.platform_utils.cpu_worker_slots()`（用户 2026-09-22）。
 
     安全性：`workers` **不进** `data_fp`（`iter_declared_entries` 只取每条 argv 的 stage/seed），
     所以换并行度不会动摇任何指纹、也不改声明集。

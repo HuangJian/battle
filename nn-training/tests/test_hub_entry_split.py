@@ -1,30 +1,30 @@
-"""拆分的**契约守卫**：`remote/hub_server.py` 收口成「薄入口 + 门面」，实现住 `hub/` 下两处
+"""拆分的**契约守卫**：`hub/server.py` 收口成「薄入口 + 门面」，实现住 `hub/` 下两处
 （S4 第十六刀，2026-09-24）。
 
 ## 这一刀切了什么
 
-`remote/hub_server.py` **887 → 100 行**（上一刀结束时它还有 887；第十四·十五刀把它从 3017 压到
+`hub/server.py` **887 → 100 行**（上一刀结束时它还有 887；第十四·十五刀把它从 3017 压到
 这里）。剩下的一百行里 **20 行代码**，其余是 docstring 与门面。实现按「谁对什么负责」分两处：
 
 | 新模块 | 层 | 行 | 内容 |
 |---|---|---|---|
 | `hub/http_face.py` | L5 | 575 | 来源判定（`CF_SOURCE_HEADER` / `SEND_*` / `_is_ip_literal` / `attributed_source`）+ `HubHandler`（五组路由混入的组装 + 通用助手） |
 | `hub/boot.py` | L6 | 310 | 引导链：`DISCOVER_SCAN_SEC` · `as_hub` · `make_server` · `main`（argparse + 单实例锁 + 端口守卫 + 发现线程 + push 派发） |
-| `hub_server.py` | L7 | 100 | **入口与门面**：`python -m remote.hub_server` + 17 个自别名 re-export |
+| `hub_server.py` | L7 | 100 | **入口与门面**：`python -m hub.server` + 17 个自别名 re-export |
 
 **为什么两处而不是一处**：HTTP 面对**每个请求**负责，引导链对**一次进程启动**负责。合成一个模块
 就得让 argparse 与 `BaseHTTPRequestHandler` 住在同一文件里 —— 而它们的读者、生命周期、失败模式
 （请求级 500 vs 启动即 exit(1)）完全不同。
 
-**为什么 `hub_server` 仍留 100 行**：约 20 个测试、`e2e/`、`remote/smoke_loopback.py`、
-`remote/tunnel_ab_probe.py` 与控制台的进程 spec 都写死了 `remote.hub_server`（`-m` 入口 + 取名字
+**为什么 `hub_server` 仍留 100 行**：约 20 个测试、`e2e/`、`hub/smoke_loopback.py`、
+`hub/tunnel_ab_probe.py` 与控制台的进程 spec 都写死了 `hub.server`（`-m` 入口 + 取名字
 入口）—— **名字是契约，位置不是**。
 
 ## ★ 这一刀踩到的真坑（本文件第 ⑤ 条钉的就是它）
 
 `SEND_TIMEOUT_SEC` 的唯一读者是 `HubHandler._bytes`，它读的是**本模块的全局**。搬走之后
-`remote.hub_server.SEND_TIMEOUT_SEC` 只是同一个对象的 re-export ⇒
-`monkeypatch.setattr("remote.hub_server.SEND_TIMEOUT_SEC", 0.5)` 变成**静默空操作**：
+`hub.server.SEND_TIMEOUT_SEC` 只是同一个对象的 re-export ⇒
+`monkeypatch.setattr("hub.server.SEND_TIMEOUT_SEC", 0.5)` 变成**静默空操作**：
 名字还在、没人读它。`tests/test_body_transfer_guard.py` 的「对端半开必须在超时内断开并打印」
 当场变红（hub 一个字都没打）—— 这正是「名字 ≠ 注入点」（第十三刀）的第二次现身。
 
@@ -36,7 +36,7 @@
    恰好等于这份名单（删一条 re-export 就红，多一条无人读的死门面也红）；
 4. **入口不挂实现用的 import**（`argparse` / `ipaddress` / `http.server` …）——搬漏的痕迹；
 5. **★ patch 点与读者同源**：`_bytes` 里 `SEND_TIMEOUT_SEC` 必须是**裸 `Name`**（吃 http_face
-   的全局），且全仓唯一那处 patch 写在 `remote.hub.http_face.…`；对入口 patch 必须**零命中**；
+   的全局），且全仓唯一那处 patch 写在 `hub.http_face.…`；对入口 patch 必须**零命中**；
 6. **层号是算出来的**：`http_face`(L5) < `boot`(L6) < `hub_server`(L7)，站在入口上的两个探针 L8；
 7. **★ 功能性**：用**门面上的** `make_server` 真起一个 127.0.0.1 服务并打通 `/ping` ——
    证明「入口 → 引导链 → HTTP 面 → 路由混入」这条组装链在搬完之后仍然连通（结构断言看不出这个）。
@@ -55,49 +55,49 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import remote.hub.boot as boot_mod
-import remote.hub.http_face as face_mod
-import remote.hub.task_pack as pack_mod
-from remote import hub_server as hs
-from remote.hub.queue import _HubQueue
-from remote.hub.store import _JobStore
+import hub.boot as boot_mod
+import hub.http_face as face_mod
+import hub.task_pack as pack_mod
+from hub import server as hs
+from hub.queue import _HubQueue
+from hub.store import _JobStore
 from tests.helpers import remote_dag as dag
 from tests.helpers import source_scan
 
 NN_ROOT = ROOT
-ENTRY = NN_ROOT / "remote" / "hub_server.py"
+ENTRY = NN_ROOT / "hub" / "server.py"
 HOMES = {
-    "remote/hub/http_face.py": face_mod,
-    "remote/hub/boot.py": boot_mod,
-    "remote/hub/task_pack.py": pack_mod,
+    "hub/http_face.py": face_mod,
+    "hub/boot.py": boot_mod,
+    "hub/task_pack.py": pack_mod,
 }
 
 #: 搬走的 21 个成员 → 它的唯一新家（`hub_server` 一律**不得**再定义其中任何一个）。
 MOVED: dict[str, str] = {
-    "CF_SOURCE_HEADER": "remote/hub/http_face.py",
-    "SEND_TIMEOUT_SEC": "remote/hub/http_face.py",
-    "SEND_CHUNK": "remote/hub/http_face.py",
-    "SEND_LOG_MIN_BYTES": "remote/hub/http_face.py",
-    "_is_ip_literal": "remote/hub/http_face.py",
-    "attributed_source": "remote/hub/http_face.py",
-    "HubHandler": "remote/hub/http_face.py",
-    "DISCOVER_SCAN_SEC": "remote/hub/boot.py",
-    "as_hub": "remote/hub/boot.py",
-    "make_server": "remote/hub/boot.py",
-    "main": "remote/hub/boot.py",
+    "CF_SOURCE_HEADER": "hub/http_face.py",
+    "SEND_TIMEOUT_SEC": "hub/http_face.py",
+    "SEND_CHUNK": "hub/http_face.py",
+    "SEND_LOG_MIN_BYTES": "hub/http_face.py",
+    "_is_ip_literal": "hub/http_face.py",
+    "attributed_source": "hub/http_face.py",
+    "HubHandler": "hub/http_face.py",
+    "DISCOVER_SCAN_SEC": "hub/boot.py",
+    "as_hub": "hub/boot.py",
+    "make_server": "hub/boot.py",
+    "main": "hub/boot.py",
     # 任务包链（2026-09-25 合并 origin 时随门面一起暴露）：实现住 `hub/task_pack.py`——
     # 它是**叶子模块**，因为 `hub/offline.py`（路由）与 `hub/queue_offline.py`（队列）两侧都要
     # 这批判据；挂在 http_face（L5）上会让两个低层读者向上 import（账本当场红）。
-    "TASK_PACK_INDEX_NAME": "remote/hub/task_pack.py",
-    "TASK_PACK_MISS_TRIGGER_LIMIT": "remote/hub/task_pack.py",
-    "TASK_PACK_STALE_THROTTLE_SEC": "remote/hub/task_pack.py",
-    "TASK_PACK_STALE_TRIGGER_LIMIT": "remote/hub/task_pack.py",
-    "_TASK_PACK_TRIGGERS": "remote/hub/task_pack.py",
-    "decide_task_pack": "remote/hub/task_pack.py",
-    "reset_task_pack_miss_triggers": "remote/hub/task_pack.py",
-    "reset_task_pack_triggers": "remote/hub/task_pack.py",
-    "task_pack_stale_reason": "remote/hub/task_pack.py",
-    "trigger_task_bundle_export": "remote/hub/task_pack.py",
+    "TASK_PACK_INDEX_NAME": "hub/task_pack.py",
+    "TASK_PACK_MISS_TRIGGER_LIMIT": "hub/task_pack.py",
+    "TASK_PACK_STALE_THROTTLE_SEC": "hub/task_pack.py",
+    "TASK_PACK_STALE_TRIGGER_LIMIT": "hub/task_pack.py",
+    "_TASK_PACK_TRIGGERS": "hub/task_pack.py",
+    "decide_task_pack": "hub/task_pack.py",
+    "reset_task_pack_miss_triggers": "hub/task_pack.py",
+    "reset_task_pack_triggers": "hub/task_pack.py",
+    "task_pack_stale_reason": "hub/task_pack.py",
+    "trigger_task_bundle_export": "hub/task_pack.py",
 }
 
 #: 门面的对外承诺集（= `hub_server.__all__`，逐字对账）。
@@ -140,13 +140,13 @@ FORBIDDEN_ENTRY_IMPORTS = (
     "time",
     "urllib.parse",
     "http.server",
-    "remote._instance_lock",
-    "remote._port_guard",
+    "common.instance_lock",
+    "common.port_guard",
     "remote.push_dispatch",
 )
 
 #: `SEND_TIMEOUT_SEC` 的**唯一读者**：`HubHandler._bytes`（它决定 patch 要写在哪）。
-SEND_TIMEOUT_READER = ("remote/hub/http_face.py", "HubHandler", "_bytes")
+SEND_TIMEOUT_READER = ("hub/http_face.py", "HubHandler", "_bytes")
 
 
 def _tree(rel: str) -> ast.Module:
@@ -174,7 +174,7 @@ def test_every_moved_member_lives_in_exactly_one_new_home() -> None:
     assert len(MOVED) == 21, len(MOVED)
     for name, home in MOVED.items():
         assert name in _own_defs(home), f"{home} 少了 {name}"
-        for other in ("remote/hub_server.py", *HOMES):
+        for other in ("hub/server.py", *HOMES):
             if other == home:
                 continue
             assert name not in _own_defs(other), f"{name} 又出现在 {other}（搬漏/搬回）"
@@ -186,7 +186,7 @@ def test_the_entry_defines_nothing_at_all() -> None:
     这条比「那 11 个成员不在」更硬：它挡的是「顺手在入口里补个小函数」——入口一旦重新长出实现，
     「薄入口」就退化成第二个组装点，而层号断言是看不出「只长了一个小函数」的。
     """
-    body = _tree("remote/hub_server.py").body
+    body = _tree("hub/server.py").body
     kinds = [type(n).__name__ for n in body]
     assert kinds.count("ClassDef") == 0 and kinds.count("FunctionDef") == 0, kinds
     allowed = {"ImportFrom", "Import", "Assign", "Expr", "If"}
@@ -197,9 +197,9 @@ def test_the_entry_defines_nothing_at_all() -> None:
 
 
 def test_the_main_block_still_reaches_the_real_main() -> None:
-    """`python -m remote.hub_server` 必须落到 `hub/boot.py::main`（同一个对象，不是同名副本）。"""
+    """`python -m hub.server` 必须落到 `hub/boot.py::main`（同一个对象，不是同名副本）。"""
     assert hs.main is boot_mod.main
-    guard = [n for n in _tree("remote/hub_server.py").body if isinstance(n, ast.If)]
+    guard = [n for n in _tree("hub/server.py").body if isinstance(n, ast.If)]
     assert len(guard) == 1, guard
     assert ast.unparse(guard[0].test) == "__name__ == '__main__'"
     assert [ast.unparse(s) for s in guard[0].body] == ["main()"]
@@ -229,15 +229,15 @@ def test_the_facade_surface_is_exactly_the_declared_closed_set() -> None:
 def test_the_entry_no_longer_imports_implementation_only_modules() -> None:
     """搬漏的痕迹：实现用的 import 不该还挂在入口上。"""
     mods: set[str] = set()
-    for n in _tree("remote/hub_server.py").body:
+    for n in _tree("hub/server.py").body:
         if isinstance(n, ast.ImportFrom) and n.module:
             mods.add(n.module)
         elif isinstance(n, ast.Import):
             mods |= {a.name for a in n.names}
     crept = sorted(m for m in FORBIDDEN_ENTRY_IMPORTS if m in mods)
     assert crept == [], f"入口还挂着实现用的 import：{crept}"
-    # 反向：入口的仓内 import 只准来自 `remote.hub.*`（入口只装配，不直接依赖业务簇）。
-    inner = sorted(m for m in mods if m.startswith("remote.") and not m.startswith("remote.hub"))
+    # 反向：入口的仓内 import 只准来自 `hub.*`（入口只装配，不直接依赖业务簇）。
+    inner = sorted(m for m in mods if m.startswith("remote.") and not m.startswith("hub"))
     assert inner == [], f"入口直接依赖了 hub 包之外的模块：{inner}"
 
 
@@ -269,7 +269,7 @@ def test_every_send_timeout_patch_targets_the_owner_module() -> None:
     """全仓唯一的 `SEND_TIMEOUT_SEC` patch 必须写在**实现所在模块**上（写在入口上是静默空操作）。
 
     ⚠ 判据用 **AST** 而不是「逐行找子串」：本文件自己的 docstring 里就有一段
-    `monkeypatch.setattr("remote.hub_server.SEND_TIMEOUT_SEC", 0.5)`（解释这个坑的原文），
+    `monkeypatch.setattr("hub.server.SEND_TIMEOUT_SEC", 0.5)`（解释这个坑的原文），
     逐行扫描会把它当成一处真 patch 而自相矛盾 —— 本仓第四次撞上「读源码文本的守卫」
     （前三次：`test_subproc_util` 的 spawn marker 与两处 prefix 匹配）。
     """
@@ -305,13 +305,13 @@ def test_every_send_timeout_patch_targets_the_owner_module() -> None:
 
 def test_the_layers_are_the_arithmetic_result() -> None:
     """层号是算出来的（`1 + max(依赖)`）：HTTP 面 L5 < 引导链 L6 < 入口 L7 < 探针 L8。"""
-    assert dag.LAYERS["remote.hub.http_face"] == 5
-    assert dag.LAYERS["remote.hub.boot"] == 6
+    assert dag.LAYERS["hub.http_face"] == 5
+    assert dag.LAYERS["hub.boot"] == 6
     assert dag.LAYERS[hs.__name__] == 7
-    for probe in ("remote.smoke_loopback", "remote.tunnel_ab_probe"):
+    for probe in ("hub.smoke_loopback", "hub.tunnel_ab_probe"):
         assert dag.LAYERS[probe] == 8, probe
     # 与 `worker` 对称（两个宿主各组装自己的 L4 执行单元）—— HTTP 面就是 hub 侧那个宿主。
-    assert dag.LAYERS["remote.worker"] == dag.LAYERS["remote.hub.http_face"] == 5
+    assert dag.LAYERS["remote.worker"] == dag.LAYERS["hub.http_face"] == 5
 
 
 def test_the_two_new_modules_only_import_downward() -> None:
@@ -327,8 +327,8 @@ def test_the_two_new_modules_only_import_downward() -> None:
         # `tests/test_subproc_util.py`「起服务必须借端口」源码守卫的 spawn marker，会把本文件
         # 误判成「起了真服务进程」（本仓第五次撞上这类盲区 —— 前四次都靠改写法而不仅仅是改注释）。
         assert hs.__name__ not in mods, f"{rel} 反向 import 了入口"
-    assert "remote.hub.http_face" in {
-        n.module for n in ast.walk(_tree("remote/hub/boot.py")) if isinstance(n, ast.ImportFrom) and n.module
+    assert "hub.http_face" in {
+        n.module for n in ast.walk(_tree("hub/boot.py")) if isinstance(n, ast.ImportFrom) and n.module
     }, "引导链应当站在 HTTP 面上（否则 make_server 得自己找 HubHandler）"
 
 
@@ -389,5 +389,5 @@ def test_the_entry_module_still_looks_like_an_entry() -> None:
     # `__all__` 与实现模块的存在性断言共同担保，本行只挡“实现被搬回来”。
     assert len(lines) < 160, len(lines)
     assert not any("serve_forever" in ln for ln in lines), "入口自己起了服务（副作用）"
-    boot_lines = (ROOT / "remote/hub/boot.py").read_text(encoding="utf-8").splitlines()
+    boot_lines = (ROOT / "hub/boot.py").read_text(encoding="utf-8").splitlines()
     assert sum("serve_forever" in ln for ln in boot_lines) == 1, "起服务应当只有一处（main 的尾巴）"

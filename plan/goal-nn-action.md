@@ -196,13 +196,13 @@ spawn 与 `enemyKinds` 每场固定 ⇒ **有 agent 级随机性、无地图级�
 arena 与真实关卡**必须同构**，否则每级升级都要重训主干、迁移失效。
 
 > ⚠️ **别信注释，信代码**：`export-rl-rollout.ts:32` 的注释写 `scalars (N,24)` / `mask (N,10)`，
-> 都是 v2 删 item 头之前的旧值。真实值见 `schema.py:22`（`SCALAR_DIM=19`）与
-> `schema.py:27`（`MASK_DIM = MOVE_DIM+FIRE_DIM = 7`，导出器 `:607,629`）。
+> 都是 v2 删 item 头之前的旧值。真实值见 `common/schema.py:22`（`SCALAR_DIM=19`）与
+> `common/schema.py:27`（`MASK_DIM = MOVE_DIM+FIRE_DIM = 7`，导出器 `:607,629`）。
 >
 > ⚠️ **mask 是 u1 硬掩码，不是软偏置**：应用处 `mask[i] !== 1 ? -1e9 : logits[i]`
 > （`:296,302`）⇒ 只能"**禁止**"动作，**无法"鼓励"**动作。这决定了 §3.6 方案 1 的边界。
 >
-> ⚠️ **通道已占满**：14 个 obs 通道（`schema.py:34-49`）与 19 个 scalars（`schema.py:57-77`）
+> ⚠️ **通道已占满**：14 个 obs 通道（`common/schema.py:34-49`）与 19 个 scalars（`common/schema.py:57-77`）
 > **均无空位、无保留维** ⇒ 任何"加一路目标输入"都必然改 shape、触发止损线 4。
 
 **幻影基地（必须修）**：`obs-encoder.ts:184` 无条件写鹰 `isBaseDestroyed() ? 0 : 2`，
@@ -902,7 +902,7 @@ A0 与 A1 的布局散列一致性验收。
 | 课程配对（只出整数 stage） | `nn-training/rl/course.py:31` |
 | 采集命令构造 | `nn-training/rl/queue.py:415-431` |
 | 训练器参数 | `nn-training/run_rl.py`（`--bc` `:194`、`--max-ticks` 默认 12000 `:227`、`--workers` `:228`、`--curriculum-*` `:214-224`、`device=cpu` `:266`） |
-| schema 真值 | `nn-training/schema.py`（`OBS_CHANNELS=14` `:14`、`SCALAR_DIM=19` `:22`、`MASK_DIM=7` `:27`、通道表 `:34-49`、scalars 表 `:57-77`） |
+| schema 真值 | `nn-training/common/schema.py`（`OBS_CHANNELS=14` `:14`、`SCALAR_DIM=19` `:22`、`MASK_DIM=7` `:27`、通道表 `:34-49`、scalars 表 `:57-77`） |
 | obs 编码（幻影基地） | `src/nn/obs-encoder.ts:184-189` |
 | 无基地 guard | `src/game/TileMap.ts:227-230`；God-AI 侧 `hasBase` 保护 `src/ai/GodAIInput.ts:213-217` |
 | 世界态感知基元 | `src/ai/perception.ts:107`（`scanAhead`）、`:178`（`computeOpenDirs`）、`:198`（`perceive`） |

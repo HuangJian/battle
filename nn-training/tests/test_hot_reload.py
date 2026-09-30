@@ -8,9 +8,9 @@
 import types
 from pathlib import Path
 
-from rl.cmd import course_fp_for_args
-from rl.config import corpus_identity_fp, load_course
-from rl.hot_reload import apply_hot_fields, changed_field_names, plan_reload
+from biz.cmd import course_fp_for_args
+from biz.config import corpus_identity_fp, load_course
+from biz.hot_reload import apply_hot_fields, changed_field_names, plan_reload
 
 REPO = Path(__file__).resolve().parents[2]
 C6_DMGFIX = REPO / "nn-training" / "curricula" / "c6-dmgfix.jsonc"
@@ -25,7 +25,7 @@ def _write_course(tmp_path: Path, d: dict, name: str = "course.jsonc") -> Path:
 
 
 def _course_dict() -> dict:
-    from rl.jsonc import load as _load_jsonc
+    from common.jsonc import load as _load_jsonc
 
     return _load_jsonc(str(C6_DMGFIX))
 
@@ -67,7 +67,7 @@ def test_apply_hot_fields_updates_args_and_marks_restart_only(tmp_path: Path) ->
     这里直接以「新课程对象 vs 启动 args」驱动；args 的初始值从启动课程取。"""
     old = load_course(C6_DMGFIX)
     # 模拟 apply_course 后的 args：old 的全部 HOT/RESTART 字段铺平
-    from rl.hot_reload import HOT_FIELDS, RESTART_ONLY_FIELDS
+    from biz.hot_reload import HOT_FIELDS, RESTART_ONLY_FIELDS
 
     args = _args()
     for f in (*HOT_FIELDS, *RESTART_ONLY_FIELDS):
@@ -114,7 +114,7 @@ def test_course_fp_frozen_against_midrun_edit(tmp_path: Path) -> None:
     args.course_frozen_bytes = work.read_bytes()
     fp0 = course_fp_for_args(args)
 
-    from rl.jsonc import load as _load_jsonc
+    from common.jsonc import load as _load_jsonc
 
     edited = _load_jsonc(str(work))
     edited["iters"] = 99

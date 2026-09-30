@@ -137,7 +137,7 @@ STATE_NAME = "state.json"
 TS_TREE_NAME = "ts_code"
 TS_CODE_NAME = "ts_code.zip"
 
-#: 离线**任务清单 / 租约**端点（与 `remote/protocol.py` 逐字相同；**本模块不得 import
+#: 离线**任务清单 / 租约**端点（与 `common/protocol.py` 逐字相同；**本模块不得 import
 #: `remote.*`**：包到手之前那个包还不存在）。清单协议版本与租约时长同理（测试守逐字相同）。
 #: 为什么 cloud 侧也要有一份：`offline_boot.py` 是 notebook 每次会话从 GitHub raw 刷新的那份，
 #: 而 hub 可能在**更旧**的机器上跑（老 hub 没有清单端点）⇒ 兼容必须靠运行时降级，不能靠一起发版。
@@ -153,7 +153,7 @@ WORKER_ID_NAME = ".worker-id"
 #: 心跳周期（秒）：租约 900s ⇒ 60s 一跳留了 15 次补跳的余量（网络抖动 / 长轮之间）。
 HEARTBEAT_SEC = 60.0
 
-#: 角色头（与 `remote/protocol.py::ROLE_HEADER` / `ROLE_HEADER_VALUE` 逐字相同；测试守——
+#: 角色头（与 `common/protocol.py::ROLE_HEADER` / `ROLE_HEADER_VALUE` 逐字相同；测试守——
 #: 本模块**不得 import `remote.*`**，理由见文件头）。
 #:
 #: ★ 2026-09-25（plan/online-offline-role-routing §7.0.1 #2）：跑本 notebook 的云机**天生

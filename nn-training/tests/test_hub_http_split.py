@@ -15,7 +15,7 @@
    `remote.hub_client._request` 是**转发名**，照它打补丁**不再**影响任何调用点——
    「patch 打偏而测试全绿」是本仓最贵的坑之一，故正反各一条断言；
 5. **可注入薄壳的边界**——`hub_http` 顶层只准用 stdlib + `common.protocol`；`urllib.request` /
-   `urllib.error` 只许出现在 `_request`（函数内），且 `remote.net_http` 也是延迟；
+   `urllib.error` 只许出现在 `_request`（函数内），且 `common.net_http` 也是延迟；
 6. **依赖面闭集**——`hub_http` 不得 import `remote.hub_client`（否则成环）；
 7. **回传语义没变**（功能性）：`probe_job_result` 的三态分类（ready / pending / transient）
    与终局失败（410 → `JobFailedError`）就在这里判。
@@ -73,11 +73,11 @@ ALLOWED_IMPORTS = {
     "urllib.parse",
     "urllib.request",
     "common.protocol",
-    "remote.net_http",
+    "common.net_http",
 }
 
 #: 只许出现在**函数体内**（延迟）的模块名——与 `common/protocol` 这类顶层契约分开。
-DEFERRED_ONLY_IMPORTS = {"urllib.error", "urllib.request", "remote.net_http"}
+DEFERRED_ONLY_IMPORTS = {"urllib.error", "urllib.request", "common.net_http"}
 
 
 def _tree(path: Path) -> ast.Module:
@@ -226,7 +226,7 @@ def test_patching_the_forwarding_name_is_a_no_op_by_design(monkeypatch) -> None:
 
 
 def test_hub_http_imports_stay_within_the_allowed_surface() -> None:
-    """依赖面闭集：stdlib + `common.protocol`；`urllib.*` / `remote.net_http` 只许函数内。"""
+    """依赖面闭集：stdlib + `common.protocol`；`urllib.*` / `common.net_http` 只许函数内。"""
     modules = _module_names(HTTP_FILE, top_only=False)
     extra = sorted(modules - ALLOWED_IMPORTS)
     assert extra == [], f"remote/hub_http.py 引入了允许面之外的依赖：{extra}"

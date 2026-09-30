@@ -1,4 +1,4 @@
-"""remote/_instance_lock.py 单测 —— 启动守卫（第二道闸）：原子 PID 单实例锁。
+"""common/instance_lock.py 单测 —— 启动守卫（第二道闸）：原子 PID 单实例锁。
 
 覆盖：
   1. 取锁写 `PID|EXE|TS`、释放只清自己的；
@@ -25,7 +25,7 @@ import pytest
 NN_TRAINING = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(NN_TRAINING))
 
-from remote import _instance_lock as il
+from common import instance_lock as il
 from tests.subproc_util import (
     PORT_TAKEN_MARKER,
     PortStolenError,
@@ -268,7 +268,7 @@ def _hub_argv(port: int, lock: Path, tmp_path: Path) -> list[str]:
     return [
         sys.executable,
         "-m",
-        "remote.hub_server",
+        "hub.server",
         "--port",
         str(port),
         "--host",
@@ -351,7 +351,7 @@ def _spawn_lock_holder(lock: Path, marker: str = "hub_server") -> subprocess.Pop
     code = (
         "import os, sys, time;"
         f"sys.path.insert(0, {str(NN_TRAINING)!r});"
-        "from remote._instance_lock import acquire_instance_lock;"
+        "from common.instance_lock import acquire_instance_lock;"
         f"print('HOLDER', os.getpid(),"
         f" acquire_instance_lock({str(lock)!r}, marker={marker!r}), flush=True);"
         "time.sleep(120)"

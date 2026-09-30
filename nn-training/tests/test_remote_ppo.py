@@ -36,6 +36,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from biz.reward_library import METRICS_DIM  # numpy-only 模块，守免 torch 原则
 from common.protocol import (
     AUTH_HEADER,
     BLOB_INIT,
@@ -71,8 +72,7 @@ from common.protocol import (
 from common.protocol import (
     job_id as make_job_id,
 )
-from remote.hub_server import _JobStore, make_server
-from rl.reward_library import METRICS_DIM  # numpy-only 模块，守免 torch 原则
+from hub.server import _JobStore, make_server
 from tests.helpers.hub_poll import hub_poll
 
 REPO = ROOT.parent  # git 根（hub_client.REPO_ROOT 与 git_head 用）
@@ -563,8 +563,8 @@ def test_nan_weights_fail_fast(tmp_path: Path) -> None:
 
 def test_reward_nonfinite_rejected(tmp_path: Path) -> None:
     """reward 公式产出非有限值 → 响亮拒绝（防污染 GAE）。"""
-    from rl.config import load_course
-    from rl.reward_library import (
+    from biz.config import load_course
+    from biz.reward_library import (
         METRICS_DIM,
         FormulaError,
         build_reward_fn,
@@ -592,7 +592,7 @@ def test_reward_nonfinite_rejected(tmp_path: Path) -> None:
 
 def test_ledger_new_events_do_not_break_last_completed_iter(tmp_path: Path) -> None:
     """job_pending/job_completed 事件混入 jsonl → last_completed_iter 不受影响。"""
-    from rl.resume import last_completed_iter
+    from biz.resume import last_completed_iter
 
     jl = tmp_path / "training_log.jsonl"
     lines = [
@@ -608,7 +608,7 @@ def test_ledger_new_events_do_not_break_last_completed_iter(tmp_path: Path) -> N
 
 def test_resume_course_fp_filter(tmp_path: Path) -> None:
     """D14：completed_pairs 按 course_fp 过滤——跨课程 shard 不参与对账。"""
-    from rl.resume import completed_pairs
+    from biz.resume import completed_pairs
 
     traj = tmp_path / "traj" / "it3"
     _write_shard(traj / "rl_s1_seed10", 1, 10, course_fp="a" * 64)
@@ -624,13 +624,13 @@ def test_resume_course_fp_filter(tmp_path: Path) -> None:
 
 def test_write_shard_single_write_indent2(tmp_path: Path) -> None:
     """F8.3 修复：write_shard 只写一次 manifest（indent=2），磁盘字节无紧凑残留。"""
-    import dist_common
+    import common.distribution
 
     out = tmp_path / "shard"
     out.mkdir(parents=True)
     mm = {"stage": 1, "seed": 2, "wver": "w" * 64}
-    files = {name: b"\x00" * 16 for name in dist_common.SHARD_FILES}
-    dist_common.write_shard(files, mm, str(out))
+    files = {name: b"\x00" * 16 for name in common.distribution.SHARD_FILES}
+    common.distribution.write_shard(files, mm, str(out))
     text = (out / "manifest.json").read_text(encoding="utf-8")
     # 唯一一份、indent=2 规格（与 TS exporter 同规）
     assert text == json.dumps(mm, ensure_ascii=False, indent=2)
@@ -642,15 +642,15 @@ def test_write_shard_single_write_indent2(tmp_path: Path) -> None:
 
 def test_publish_time_course_validation_bad_formula(tmp_path: Path) -> None:
     """D13：坏公式课程 publish 前必须被 load_course/build_reward_fn 响亮拒绝（免 torch）。"""
-    from rl.config import load_course
-    from rl.reward_library import build_reward_fn
+    from biz.config import load_course
+    from biz.reward_library import build_reward_fn
 
     bad = tmp_path / "bad-formula.jsonc"
     bad.write_text(
         json.dumps({"reward": {"formula": "not_a_real_function_xyz(1)"}}),
         encoding="utf-8",
     )
-    from rl.reward_library import FormulaError
+    from biz.reward_library import FormulaError
 
     with pytest.raises(FormulaError):
         course = load_course(str(bad))
@@ -659,7 +659,7 @@ def test_publish_time_course_validation_bad_formula(tmp_path: Path) -> None:
 
 def test_publish_time_course_validation_bad_stage(tmp_path: Path) -> None:
     """D13：坏关卡（grid 非 13×13）课程发布前响亮拒绝（pydantic fail fast）。"""
-    from rl.config import load_course
+    from biz.config import load_course
 
     bad = tmp_path / "bad-stage.jsonc"
     bad.write_text(
@@ -679,7 +679,7 @@ def test_course_path_mounted_on_args() -> None:
     """course_from_args 挂 args.course_path（远程发布 snapshot 用，D13）。"""
     import types
 
-    from rl.config import course_from_args
+    from biz.config import course_from_args
 
     args = types.SimpleNamespace(course="p4-onset", course_file="")
     course = course_from_args(args)
@@ -928,7 +928,7 @@ def test_validate_result_accepts_wire_additive() -> None:
 
 def test_wire_from_result_maps_both_halves() -> None:
     """M0：_wire_from_result 把 worker 半与 hub 半汇总成 iteration 事件的 wire 子字典。"""
-    from rl.loop_steps import _wire_from_result
+    from trainer.loop_steps import _wire_from_result
 
     r = {
         "wire": {"payload_bytes": 100, "blob_miss": 2},

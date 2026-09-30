@@ -39,7 +39,7 @@ export function gitCommit(repoRoot: string): string {
   }
 }
 
-/** engine_epoch = sha256(codeHash)[0:16]（与 dist_common.compute_engine_epoch 同式）。 */
+/** engine_epoch = sha256(codeHash)[0:16]（与 common.distribution.compute_engine_epoch 同式）。 */
 export function engineEpoch(codeHash: string): string {
   return engineEpochFromCodeHash(codeHash)
 }

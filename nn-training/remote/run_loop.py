@@ -32,6 +32,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from biz.plan import validate_plan
 from common.protocol import ProtocolError, RetryableError, normalize_manifest
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.plan_run import (
@@ -77,7 +78,6 @@ from remote.plan_run import (
 from remote.plan_run import (
     with_rollout_workers as with_rollout_workers,
 )
-from rl.plan import validate_plan
 
 
 def _real_run_job(*args: Any, **kw: Any) -> dict:
@@ -167,12 +167,12 @@ def run_standalone(
     # `iter_spec` 里 `stage_json_of(course, stage)` 拿不到自定义关（ladder 2000+）的
     # stageJson ⇒ `retarget_argv` 把计划里的 `--stage-json` **整对删掉** ⇒ 导出器解析
     # stage 2000 失败 → 静默空局（0 samples、rc=0、零 shard）→「没有任何 shard」误报
-    # 成环境问题。与交互 worker 同款加载（`rl.config.load_course`，快照即来源）。
+    # 成环境问题。与交互 worker 同款加载（`biz.config.load_course`，快照即来源）。
     course_path = root / "course.jsonc"
     course = None
     if course_path.exists():
         try:
-            from rl.config import load_course
+            from biz.config import load_course
 
             course = load_course(str(course_path))
         except Exception as e:

@@ -1,7 +1,7 @@
-"""rl/breaker.py — F4 circuit-breaker pure-logic tests."""
+"""biz/breaker.py — F4 circuit-breaker pure-logic tests."""
 from __future__ import annotations
 
-from rl.breaker import breaker_update
+from biz.breaker import breaker_update
 
 
 def test_breaker_healthy_does_not_trip() -> None:

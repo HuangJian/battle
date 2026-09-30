@@ -20,7 +20,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote.backfill_offline import backfill_course, main
+from hub.backfill_offline import backfill_course, main
 
 
 @pytest.fixture(autouse=True)
