@@ -25,6 +25,9 @@ import { REPO_ROOT } from '../src/core/paths'
 import type { RlConfig } from '../src/core/types'
 import {
   BURN_MARGIN_PP,
+  BURN_MODE_AUTO,
+  BURN_MODE_BASELINE,
+  BURN_MODE_PAIRED,
   BURN_POINTS,
   KICKSTART_DEFAULT_WARN,
   burnThresholds,
@@ -104,9 +107,24 @@ describe('镜像常量（权威在 python；这里防漂）', () => {
     return Number(m![1])
   }
 
+  /** 取 `NAME = "<串>"` 的字面量（模式常量是字符串，与上面的数字版同规）。 */
+  function strLiteral(src: string, name: string): string {
+    const m = src.match(new RegExp(`^${name}\\s*=\\s*"([^"]*)"`, 'm'))
+    expect(m, `${name} 未在 python 源码里找到（改名了？同步本文件与镜像常量）`).not.toBeNull()
+    return m![1]
+  }
+
   it('噪声带 / 连续点数 = `rl/kickstart_burn.py` 的常量', () => {
     expect(BURN_MARGIN_PP).toBe(literal(burnPy, 'BURN_MARGIN_PP'))
     expect(BURN_POINTS).toBe(literal(burnPy, 'BURN_POINTS'))
+  })
+
+  it('参照物三档 = `rl/kickstart_burn.py` 的 `MODE_*` 字面量（2026-09-30）', () => {
+    expect(BURN_MODE_BASELINE).toBe(strLiteral(burnPy, 'MODE_BASELINE'))
+    expect(BURN_MODE_PAIRED).toBe(strLiteral(burnPy, 'MODE_PAIRED'))
+    expect(BURN_MODE_AUTO).toBe(strLiteral(burnPy, 'MODE_AUTO'))
+    // 合法闭集只此三档（python `MODES` 元组），镜像不得多一个少一个
+    expect(burnPy).toContain('MODES: tuple[str, ...] = (MODE_AUTO, MODE_BASELINE, MODE_PAIRED)')
   })
 
   it('响亮阈值 = `rl/loop_lifecycle.py::KICKSTART_DEFAULT_WARN`（S4 第十九刀起）', () => {
@@ -232,18 +250,34 @@ describe('burnThresholds：阈值走 rl-config `courses.<课>.kickstart_burn`（
   } as RlConfig
 
   it('有覆盖用覆盖，缺席用 python 常量镜像', () => {
-    expect(burnThresholds('kk-thr', cfg)).toEqual({ marginPp: 8, points: 2 })
+    expect(burnThresholds('kk-thr', cfg)).toEqual({ marginPp: 8, points: 2, mode: BURN_MODE_AUTO })
     expect(burnThresholds('kk-none', cfg)).toEqual({
       marginPp: BURN_MARGIN_PP,
       points: BURN_POINTS,
+      mode: BURN_MODE_AUTO,
     })
+    // 非法模式 → 回 auto（不拿坏配置去描述规则）
+    const weird = {
+      version: 1,
+      nodes: [],
+      rl: { hub_port: 1, agent_port: 2, remote_token: 't' },
+      courses: { 'kk-bad': { kickstart_burn: { mode: 'whatever' } } },
+    } as unknown as RlConfig
+    expect(burnThresholds('kk-bad', weird).mode).toBe(BURN_MODE_AUTO)
+    const paired = {
+      version: 1,
+      nodes: [],
+      rl: { hub_port: 1, agent_port: 2, remote_token: 't' },
+      courses: { 'kk-pair': { kickstart_burn: { mode: BURN_MODE_PAIRED } } },
+    } as RlConfig
+    expect(burnThresholds('kk-pair', paired).mode).toBe(BURN_MODE_PAIRED)
   })
 })
 
 // ────────────────────────── ④ 对照行（纯函数分支） ──────────────────────────
 
 describe('composeBaselineLines：C 例本该被拦下来问一句', () => {
-  const burn = { marginPp: 5.0, points: 3 }
+  const burn = { marginPp: 5.0, points: 3, mode: BURN_MODE_AUTO }
   const logPath = 'tmp/x20-clutch/eval_log.jsonl'
   const kk = (over: Partial<ReturnType<typeof kickstartKnobs>> = {}) => ({
     ref: true,
@@ -274,6 +308,20 @@ describe('composeBaselineLines：C 例本该被拦下来问一句', () => {
     expect(lines.join('\n')).toContain('vs 基线 35.0%（it0 = 课程 bc 权重） → 差 +0.5pp')
     expect(lines.join('\n')).toContain('★ 起点与基线只差 0.5pp')
     expect(lines.join('\n')).toContain('kl=0.90')
+  })
+
+  it('参照物随 mode 说清（auto / baseline / paired 三档）', () => {
+    const line = (mode: string) =>
+      composeBaselineLines({
+        knobs: kk(),
+        readings: rd(),
+        burn: { ...burn, mode },
+        logPath,
+      }).join('\n')
+    expect(line(BURN_MODE_AUTO)).toContain('连续 3 个评估点落后参照物 >5pp')
+    expect(line(BURN_MODE_AUTO)).toContain('无唯一对端则本腿起点')
+    expect(line(BURN_MODE_BASELINE)).toContain('**本腿起点**（it0）')
+    expect(line(BURN_MODE_PAIRED)).toContain('**对端臂**（同 it 配对差）')
   })
 
   it('起点已低于基线 ⇒ ★ 另一支（熔断从第一个评估点就起算）', () => {
@@ -390,7 +438,7 @@ describe('kickstartReceipt：真账本 + 真课程文件（开课回执用它）
       courses: { 'kk-e2e2': { kickstart_burn: { margin_pp: 8, points: 2 } } },
     } as RlConfig
     const text = kickstartReceipt('kk-e2e2', cfg).join('\n')
-    expect(text).toContain('连续 2 个评估点低于基线 8pp')
+    expect(text).toContain('连续 2 个评估点落后参照物 >8pp')
     expect(text).toContain('★ 起点与基线只差 6.0pp')
   })
 

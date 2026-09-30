@@ -90,6 +90,9 @@ def write_kickstart_burn(
     baseline: float | None = None,
     last: float | None = None,
     margin_pp: float = 0.0,
+    mode: str = "baseline",
+    delta_pp: float | None = None,
+    peer: float | None = None,
 ) -> dict:
     """kickstart_burn 事件：干烧熔断的**计数与判定依据**落账（§5.2，2026-09-21）。
 
@@ -99,6 +102,10 @@ def write_kickstart_burn(
     行重算，必须得到同一份 `streak`（`rl/kickstart_burn.py` 是唯一判据，这里只搬运数字）。
 
     写入时机 = 命中或计数变化（每轮都写会把账本淹掉）。
+
+    `mode` / `delta_pp` / `peer` 三个新字段（2026-09-30）只在参照物换成对端臂时才有意义：
+    `baseline`/`last` 两格**语义未变**（本腿 it0 / 本腿尾部），所以控制台按旧口径对账照旧
+    成立；`delta_pp` = 尾部对齐点的 Δ（百分点），`peer` = 对端在那点的读数。
     """
     return write_event(
         jsonl_path,
@@ -110,6 +117,9 @@ def write_kickstart_burn(
             "baseline": baseline,
             "last": last,
             "margin_pp": margin_pp,
+            "mode": mode,
+            "delta_pp": delta_pp,
+            "peer": peer,
         },
     )
 

@@ -19,7 +19,7 @@ from typing import Any
 from rl.config import course_key_of
 from rl.events import write_gate_verdict, write_kickstart_burn, write_paired_kill
 from rl.gate_check import read_trend_rows
-from rl.kickstart_burn import burn_overrides, burn_verdict
+from rl.kickstart_burn import MODE_BASELINE, MODE_PAIRED, burn_mode, burn_overrides, burn_verdict
 from rl.log import log
 from rl.paired import declared_paired_seed, latest_run_start_seed, scan_paired_courses
 from rl.paired_kill import (
@@ -38,9 +38,44 @@ class TrainingGuardsLeg:
     _jsonl_path: Any
     _burn_streak: int
     _pair_kill_streak: int
+    #: 「配对模式解析不出唯一对端」那声警告只喊一次（本簇自己赋值，用 getattr 兜缺省）。
+    _burn_fallback_logged: bool
     #: 共享 sink（真实现住组合根 `rl/loop_guards.py`）：账本视图增量 / 判决 → 云机达令。
     _ledger_apply: Any
     _sync_cloud_halt: Any
+
+    def _burn_paired_rows(self, peer_name: str) -> tuple[str, tuple] | None:
+        """配对模式的参照账本：显式 `peer` 优先；否则要求**唯一**同 V 对端。
+
+        前提闸与 `_paired_kill` 同源（本课声明了 `paired_rotate_seed` + 对端账本末条 run_start
+        就是同一把 V）——同 V 的读数才构成配对差。
+
+        **对端不唯一时不猜**：多臂家族（a0/a1/a2 这种）里「谁是控」是实验设计，机器不替操作者
+        挑；≥2 条同 V 腿 ⇒ 返回 None，调用方退回 `MODE_BASELINE` 并响亮提示（宁可沿用旧的、
+        过于敏感的判据，也不要拿一条选错的对照去停腿）。显式 `peer` 指了名但那边不在同一把 V
+        上/账本读不到 ⇒ 同样返回 None。
+        """
+        declared = declared_paired_seed(getattr(self.args, "course_obj", None))
+        if declared is None:
+            return None  # 单腿口径：没有「对端」这回事
+        traj_root = Path(str(getattr(self, "_traj_root", Path(str(self._jsonl_path)).parent)))
+        if peer_name:
+            cands: list[tuple[str, Any]] = [(peer_name, None)]
+        else:
+            cands = list(scan_paired_courses(declared, self_name=str(getattr(self.args, "course", "") or "")))
+        resolved: list[tuple[str, tuple]] = []
+        for name, _v in cands:
+            peer_dir = traj_root.parent / name
+            seed = latest_run_start_seed(peer_dir)
+            if seed is not None and int(seed) != int(declared):
+                continue  # 不同种子流的读数不成对（与 _paired_kill 同一道闸）
+            try:
+                resolved.append((name, read_trend_rows(peer_dir / "eval_log.jsonl")))
+            except Exception:
+                continue
+        if len(resolved) != 1:
+            return None
+        return resolved[0]
 
     def _kickstart_burn(self, it: int, dist_cfg: dict | None) -> bool:
         """§5 干烧熔断（结果面，plan/accident.plan.md §5.2）：返 True = 停腿告警。
@@ -52,6 +87,12 @@ class TrainingGuardsLeg:
         与 F4 过程熔断的分工：那个看更新健康度（kl/ent），这个看**结果有没有退回去**。
         停腿而不只是告警：C 事故那里两臂 × 12h 全是白烧，读数是 `it1` 就低的；单点低是
         噪声，连着三个点低是趋势（阈值走执行面 `courses.<课>.kickstart_burn`，缺席用常量）。
+
+        **参照物两档**（`courses.<课>.kickstart_burn.mode`，2026-09-30）：`baseline`（默认）比
+        **本腿自己的 it0**；`paired` 比**对端臂的同 it 读数**（同网格配对差）。`auto`（缺省值）
+        = 能解析出唯一同 V 对端就走 `paired`，否则回 `baseline`。选 `paired` 的实测理由：
+        h4-lane 三腿回测里零奖励的对照臂自己也飘到 streak 2、有可归因效应的那条反而挨杀，
+        而 Δ 把两臂共享的漂移减掉（零假设 FP 49.3% → 0.56%，详见 `rl/kickstart_burn.py` 头注）。
 
         账本行是唯一数据源（`eval_log.jsonl` + `read_trend_rows(..., include_baseline=True)`）
         ⇒ 重启可回放、控制台可复算；判据本体在 `rl/kickstart_burn.py`，此处只做
@@ -71,22 +112,61 @@ class TrainingGuardsLeg:
             log(f"[run_rl] WARN kickstart-burn 读账本失败（{type(e).__name__}: {e}）——本轮不判")
             return False
         margin_pp, points = burn_overrides(dist_cfg, course_key_of(args))
-        v = burn_verdict(rows, points=points, margin_pp=margin_pp)
-        if v.baseline is None:
+        mode, peer_name = burn_mode(dist_cfg, course_key_of(args))
+        peer_rows: tuple | None = None
+        peer = ""
+        if mode != MODE_BASELINE:
+            got = self._burn_paired_rows(peer_name)
+            if got is not None:
+                peer, peer_rows = got
+            elif not getattr(self, "_burn_fallback_logged", False):
+                # 只喊一次（每轮都喊会把日志淹掉）：这是操作者可动的配置问题
+                # ——要么把 `peer` 点名，要么把 `mode` 显式写成 `baseline`。
+                log(
+                    f"[run_rl] WARN kickstart-burn: mode={mode} 但解析不出**唯一**同 V 对端"
+                    + (f"（peer={peer_name}）" if peer_name else "（同 V 腿数 ≠ 1）")
+                    + "——本腿回退 `baseline`（参照 = 本腿自己的 it0）"
+                )
+                self._burn_fallback_logged = True
+        v = burn_verdict(
+            rows, points=points, margin_pp=margin_pp, peer_rows=peer_rows, peer_name=peer
+        )
+        # 基线段（MODE_BASELINE）没它就无从比较；配对模式仍可判，所以只在 baseline 下退。
+        if v.baseline is None and v.mode == MODE_BASELINE:
             return False
         prev = int(getattr(self, "_burn_streak", 0) or 0)
         if v.streak != prev:
             # **状态转移才落账**（同 `_stop_loss` 的口径）：每轮都写会把账本淹掉，
             # 而 0 → 0 无需记录。日志也只在计数上升时说，别拿同一句话刷屏。
             if v.streak:
+                if v.mode == MODE_PAIRED:
+                    detail = (
+                        f"（Δ {v.delta_pp or 0.0:+.1f}pp：本臂 {(v.last or 0.0) * 100:.1f}%"
+                        f" vs {peer} {(v.peer or 0.0) * 100:.1f}%）"
+                    )
+                else:
+                    detail = (
+                        f"（起点 {(v.baseline or 0.0) * 100:.1f}%，最新 {(v.last or 0.0) * 100:.1f}%）"
+                    )
                 log(
-                    f"[run_rl] WARN kickstart-burn it{it}: 连续 {v.streak}/{points} 个评估点"
-                    f"低于基线 {margin_pp:.1f}pp"
-                    f"（基线 {v.baseline * 100:.1f}%，最新 {(v.last or 0.0) * 100:.1f}%）"
-                    "——再低就停腿（疑似回锚）"
+                    f"[run_rl] WARN kickstart-burn it{it}: 参照"
+                    + (f"对端 {peer}" if v.mode == MODE_PAIRED else "本腿起点")
+                    + f"，连续 {v.streak}/{points} 个评估点落后 >{margin_pp:.1f}pp "
+                    + detail
+                    + "——再低就停腿（疑似回锚）"
                 )
             self._ledger_apply(
-                write_kickstart_burn(self._jsonl_path, it, v.streak, v.baseline, v.last, margin_pp)
+                write_kickstart_burn(
+                    self._jsonl_path,
+                    it,
+                    v.streak,
+                    v.baseline,
+                    v.last,
+                    margin_pp,
+                    mode=v.mode,
+                    delta_pp=v.delta_pp,
+                    peer=v.peer,
+                )
             )
         self._burn_streak = v.streak
         if not v.tripped:
@@ -94,7 +174,11 @@ class TrainingGuardsLeg:
         log(f"[run_rl] CRITICAL KICKSTART-BURN it{it}: {v.reason}")
         log(
             f"[run_rl] training PAUSED; weights kept at {args.out}; "
-            "疑似回锚/塌陷——检查起点（bc 权重判决段读数）与 kk 初值是否匹配"
+            + (
+                f"本臂已落后对照臂 {peer} 连续 {v.streak} 个评估点——检查本臂的奖励/超参变更是否真带来了分岔"
+                if v.mode == MODE_PAIRED
+                else "疑似回锚/塌陷——检查起点（bc 权重判决段读数）与 kk 初值是否匹配"
+            )
         )
         # 本地停腿（本轮即终点）之外，顺手把远端云机的达令也发下去（按课程，
         # 共享 hub 不连坐其它课；无 hub/提示模式自动短路）——停腿的意义就是**停止烧钱**，

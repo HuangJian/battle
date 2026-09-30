@@ -27,12 +27,17 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import rl.paired as paired_mod
 from rl.config import CourseConfig, apply_course, corpus_identity_fp, course_cli_conflicts
 from rl.hot_reload import RESTART_ONLY_FIELDS, apply_hot_fields, plan_reload
 from rl.kickstart_burn import (
     BURN_MARGIN_PP,
     BURN_POINTS,
+    MODE_AUTO,
+    MODE_BASELINE,
+    MODE_PAIRED,
     baseline_reading,
+    burn_mode,
     burn_overrides,
     burn_verdict,
 )
@@ -281,3 +286,205 @@ def test_guard_counts_down_loudly_before_tripping(tmp_path: Path, capsys=None) -
     assert g._kickstart_burn(2, None) is False
     lines2 = (tmp_path / "training_log.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert len(lines2) == len(lines)
+
+
+# ══════════════════ ⑤ 参照物两档（`baseline` vs `paired`，2026-09-30） ══════════════════
+#
+# 为什么加 `paired`：h4-lane Wave 1 三腿的实测回测
+# （`nn-training/tools/backtest-burn-rule.py`，可重跑）——
+# 零奖励的对照臂 a0 自己也飘到 streak 2，有可归因效应的 a2 反而挨杀（假阳性 1/3）；
+# 零假设 MC 下旧规则从 0.005% 跳到 49.3%，**假阳性来自「自己的起点」这个参照物会飘**。
+
+
+def test_burn_mode_comes_from_execution_side_config() -> None:
+    """`courses.<课>.kickstart_burn.{mode,peer}`；缺席/脏值 → auto + 空 peer。"""
+    assert burn_mode(None, "t5-kk") == (MODE_AUTO, "")
+    cfg = {"courses": {"t5-kk": {"kickstart_burn": {"mode": MODE_PAIRED, "peer": " a0 "}}}}
+    assert burn_mode(cfg, "t5-kk") == (MODE_PAIRED, "a0")
+    # 类型不对/非法值 → 回 auto（不拿坏配置去停腿）
+    bad = {"courses": {"t5-kk": {"kickstart_burn": {"mode": "whatever", "peer": 7}}}}
+    assert burn_mode(bad, "t5-kk") == (MODE_AUTO, "")
+
+
+def test_paired_mode_ignores_drift_the_control_also_has() -> None:
+    """★ 回归（Wave 1 假阳性形态）：本腿落后**自己起点** 3 连点，但对端同步落后 ⇒ 不停腿。
+
+    实测形状（h4-lane）：a0（零奖励）逐点 pattern `..TT.T.`、a2 = `.TTT` ⇒ 旧口径杀 a2。
+    """
+    own = _rows(0.86, 0.79, 0.78, 0.77)  # 连 3 点低于自己起点 5pp
+    peer = _rows(0.86, 0.79, 0.78, 0.77)  # 对端同步落后同样多
+    assert burn_verdict(own).tripped is True, "旧口径（参照 = 自己的 it0）会停腿"
+    v = burn_verdict(own, peer_rows=peer)
+    assert v.tripped is False and v.mode == MODE_PAIRED
+    assert v.streak == 0 and v.delta_pp == pytest.approx(0.0)
+    assert v.baseline == pytest.approx(0.86), "baseline 格仍填本腿 it0（控制台对账口径不变）"
+
+
+def test_paired_mode_stops_on_an_attributable_regression() -> None:
+    """本腿比**对端**连续 3 点落后 >5pp ⇒ 停腿（Δ 才是可归因的那部分）。"""
+    own = _rows(0.86, 0.77, 0.77, 0.77)
+    peer = _rows(0.86, 0.86, 0.86, 0.86)
+    v = burn_verdict(own, peer_rows=peer, peer_name="a0")
+    assert v.tripped is True and v.mode == MODE_PAIRED and v.streak == BURN_POINTS
+    assert v.delta_pp == pytest.approx(-9.0) and v.peer == pytest.approx(0.86)
+    assert v.last == pytest.approx(0.77) and v.baseline == pytest.approx(0.86)
+    assert "a0" in v.reason and "配对差" in v.reason
+    # 恰好压在门槛上（落后 5.0pp 不算「超过 5pp」）
+    assert burn_verdict(_rows(0.86, 0.81, 0.81, 0.81), peer_rows=peer).tripped is False
+
+
+def test_paired_mode_only_counts_aligned_its_and_refuses_thin_data() -> None:
+    """只比两臂**都**有读数的 it（末条）；it0 不参战；对齐点 < points ⇒ 不判。"""
+    own = _rows(0.86, 0.70, 0.70, 0.70)
+    v = burn_verdict(own, peer_rows=_rows(0.86, 0.86, 0.86, 0.86))
+    assert v.tripped is True and v.streak == 3
+    # 对端缺 it1 ⇒ 只剩 it2/it3 两个对齐点 < points=3 ⇒ 不判（数据不足不是证据）
+    thin = [
+        {"event": "eval_summary", "iter": 0, "winRate": 0.86},
+        {"event": "eval_summary", "iter": 2, "winRate": 0.86},
+        {"event": "eval_summary", "iter": 3, "winRate": 0.86},
+    ]
+    v2 = burn_verdict(own, peer_rows=thin)
+    assert v2.tripped is False and v2.delta_pp is None, "对齐点不够 ⇒ 不判、不算 streak"
+    assert v2.streak == 0
+
+
+# ── 执行面接线（与 `test_paired_kill.py` 同构：本臂 `<tmp>/own`、对端 `<tmp>/t-peer`）──
+
+BURN_V = 20260930
+
+
+def _burn_curricula(tmp: Path, *, peer_v: int) -> Path:
+    d = tmp / "curricula"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "t-own.jsonc").write_text(
+        json.dumps({"name": "t-own", "paired_rotate_seed": BURN_V}), "utf-8"
+    )
+    (d / "t-peer.jsonc").write_text(
+        json.dumps({"name": "t-peer", "paired_rotate_seed": peer_v}), "utf-8"
+    )
+    return d
+
+
+def _burn_guard(tmp_path: Path, *, declared: int | None = BURN_V) -> TrainingGuards:
+    """本臂 traj = `<tmp>/own`，对端 = `<tmp>/t-peer`（与生产同构）。"""
+    obj = _guards(tmp_path, course_path="curricula/t-own.jsonc")
+    raw: dict[str, object] = {"name": "t-own", "mode": "per-tick"}
+    if declared is not None:
+        raw["paired_rotate_seed"] = declared
+    obj.args.course_obj = CourseConfig.model_validate(raw)
+    obj.args.course = "t-own"
+    obj._traj_root = tmp_path / "own"
+    return obj
+
+
+def _burn_write(dir_: Path, rows: list[dict]) -> None:
+    dir_.mkdir(parents=True, exist_ok=True)
+    (dir_ / "eval_log.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8"
+    )
+
+
+def _burn_peer_run_start(tmp: Path, seed: int | None) -> None:
+    p = tmp / "t-peer"
+    p.mkdir(parents=True, exist_ok=True)
+    if seed is not None:
+        (p / "training_log.jsonl").write_text(
+            json.dumps({"event": "run_start", "iter": 0, "rotateSeed": seed}) + "\n",
+            "utf-8",
+        )
+
+
+def _burn_events(tmp: Path) -> list[dict]:
+    p = tmp / "training_log.jsonl"
+    if not p.exists():
+        return []
+    return [
+        json.loads(x) for x in p.read_text(encoding="utf-8").strip().splitlines() if x.strip()
+    ]
+
+
+def test_paired_wiring_uses_the_peer_and_survives_shared_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """接线：`mode=paired` + 同 V 对端 ⇒ 参照换成对端，**共享漂移不再停腿**。"""
+    monkeypatch.setattr(paired_mod, "CURRICULA_DIR", _burn_curricula(tmp_path, peer_v=BURN_V), raising=True)
+    _burn_write(tmp_path / "own", _rows(0.86, 0.79, 0.78, 0.77))
+    _burn_write(tmp_path / "t-peer", _rows(0.86, 0.79, 0.78, 0.77))
+    _burn_peer_run_start(tmp_path, BURN_V)
+    base = {"courses": {"t-own": {"kickstart_burn": {"mode": MODE_BASELINE}}}}
+
+    assert _burn_guard(tmp_path)._kickstart_burn(3, base) is True, "显式 baseline ⇒ 按自己的起点停腿"
+    assert _burn_guard(tmp_path)._kickstart_burn(3, None) is False, "auto 解析出同 V 对端 ⇒ 改走配对读"
+    g = _burn_guard(tmp_path)
+    assert g._kickstart_burn(3, {"courses": {"t-own": {"kickstart_burn": {"mode": MODE_PAIRED}}}}) is False
+    assert _burn_events(tmp_path)[-1]["event"] == "gate_verdict"
+
+
+def test_paired_wiring_stops_and_records_the_delta(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """接线：本臂落后对端 3 连点 ⇒ 停腿 + 事件带 mode/delta_pp/peer（可回放）。"""
+    monkeypatch.setattr(paired_mod, "CURRICULA_DIR", _burn_curricula(tmp_path, peer_v=BURN_V), raising=True)
+    _burn_write(tmp_path / "own", _rows(0.86, 0.77, 0.77, 0.77))
+    _burn_write(tmp_path / "t-peer", _rows(0.86, 0.86, 0.86, 0.86))
+    _burn_peer_run_start(tmp_path, BURN_V)
+    cfg = {"courses": {"t-own": {"kickstart_burn": {"mode": MODE_PAIRED}}}}
+
+    assert _burn_guard(tmp_path)._kickstart_burn(3, cfg) is True
+    events = _burn_events(tmp_path)
+    burn = [e for e in events if e["event"] == "kickstart_burn"][-1]
+    assert burn["mode"] == MODE_PAIRED and burn["streak"] == BURN_POINTS
+    assert burn["delta_pp"] == pytest.approx(-9.0) and burn["peer"] == pytest.approx(0.86)
+    assert burn["baseline"] == pytest.approx(0.86)
+    verdicts = [e for e in events if e["event"] == "gate_verdict"]
+    assert verdicts[-1]["verdict"] == "ABORT" and "配对参照" in verdicts[-1]["reason"]
+
+
+def test_paired_wiring_refuses_a_mispaired_peer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ 前提闸：对端不在同一把 V 上 ⇒ 不拿错配读数判 ⇒ 退回 baseline 并响亮提示。"""
+    monkeypatch.setattr(
+        paired_mod, "CURRICULA_DIR", _burn_curricula(tmp_path, peer_v=BURN_V + 82), raising=True
+    )
+    _burn_write(tmp_path / "own", _rows(0.86, 0.79, 0.78, 0.77))
+    _burn_write(tmp_path / "t-peer", _rows(0.86, 0.86, 0.86, 0.86))
+    _burn_peer_run_start(tmp_path, BURN_V + 82)
+    cfg = {"courses": {"t-own": {"kickstart_burn": {"mode": MODE_PAIRED}}}}
+
+    assert _burn_guard(tmp_path)._kickstart_burn(3, cfg) is True, "退回 baseline ⇒ 按本腿起点停腿"
+    burn = [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"][-1]
+    assert burn["mode"] == MODE_BASELINE
+
+
+def test_ambiguous_peer_falls_back_to_baseline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """多臂家族（≥2 条同 V 腿）里「谁是控」是实验设计 ⇒ 不猜，退回 baseline。"""
+    d = _burn_curricula(tmp_path, peer_v=BURN_V)
+    (d / "t-peer2.jsonc").write_text(
+        json.dumps({"name": "t-peer2", "paired_rotate_seed": BURN_V}), "utf-8"
+    )
+    monkeypatch.setattr(paired_mod, "CURRICULA_DIR", d, raising=True)
+    _burn_write(tmp_path / "own", _rows(0.86, 0.79, 0.78, 0.77))
+    for name in ("t-peer", "t-peer2"):
+        _burn_write(tmp_path / name, _rows(0.86, 0.86, 0.86, 0.86))
+        _burn_peer_run_start(tmp_path, BURN_V)
+        (tmp_path / name / "training_log.jsonl").write_text(
+            json.dumps({"event": "run_start", "iter": 0, "rotateSeed": BURN_V}) + "\n",
+            "utf-8",
+        )
+    cfg = {"courses": {"t-own": {"kickstart_burn": {"mode": MODE_PAIRED}}}}
+
+    assert _burn_guard(tmp_path)._kickstart_burn(3, cfg) is True
+    burn = [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"][-1]
+    assert burn["mode"] == MODE_BASELINE, "对端不唯一 ⇒ 不猜，退回本腿起点"
+
+
+def test_single_leg_keeps_the_baseline_rule(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """未声明 `paired_rotate_seed` ⇒ 没有对端这种事，auto 就是 baseline（零行为）。"""
+    monkeypatch.setattr(paired_mod, "CURRICULA_DIR", _burn_curricula(tmp_path, peer_v=BURN_V), raising=True)
+    _burn_write(tmp_path / "own", _rows(0.86, 0.79, 0.78, 0.77))
+    _burn_write(tmp_path / "t-peer", _rows(0.86, 0.86, 0.86, 0.86))
+    _burn_peer_run_start(tmp_path, BURN_V)
+
+    assert _burn_guard(tmp_path, declared=None)._kickstart_burn(3, None) is True
+    burn = [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"][-1]
+    assert burn["mode"] == MODE_BASELINE

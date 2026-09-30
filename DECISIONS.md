@@ -5495,3 +5495,33 @@ eval 有池）—— 范围更大、与本次「机制同质化」不同题，�
   （新 `--out`/`--traj` + 新 `paired_rotate_seed` + 本条后继）；④ **Wave 2 的几何选择**——保留 A1 几何
   （127 打在 0.314% 稀有事件 = 稀疏·尖锐；胜率三臂最好 84.0 vs A0 79.1 / A2 77.6），A2 几何
   （7.0 抹在 5.66% 常见状态 = 稠密·钝）退为对照。
+## §2026-09-30-goalnn-kickstart-burn-paired（2026-09-30，止损参照物改为同网格配对差；`auto` 缺省 = 对已配对课的行为变更）
+
+- **背景**：Wave 1 判无效（§2026-09-30-h4-lane-wave1-verdict）——A2 的 ABORT 查实为**假阳性**：旧
+  `kickstart_burn` 的参照物是**本腿自己的 it0 基线**，而控制臂 a0（零奖励 = 真零效应）自身漂移到位
+  （逐点 pattern `..TT.T.` ⇒ 峰值 streak 2，只差 1 点被自己的规则杀掉）。参照物会飘 ⇒ 任何腿都可能
+  被自己的起点误杀，与效应无关。
+- **决定**：参照物两档。`baseline` = 旧口径（本腿 `it<=0` 末条）；`paired` = Δ = 本臂 − **对端同 it**
+  读数（pp），尾部连续 `points` 点 Δ < −`margin_pp` ⇒ 触发。常量不变（`BURN_POINTS=3` /
+  `BURN_MARGIN_PP=5.0` / `METRIC=winRate`）——只换参照物 = 最小改动。
+- **接线**：`rl/kickstart_burn.py` 增 `MODE_BASELINE/PAIRED/AUTO` + `burn_mode()`；`burn_verdict(peer_rows=…)`
+  非 None 时**整段委托** `rl/paired_kill.py::paired_kill_verdict`（Δ 判据只留一份，不写第二实现）；
+  `BurnVerdict` 增 `mode/delta_pp/peer`（带缺省 ⇒ 既有五元位置构造不变）；事件 `write_kickstart_burn`
+  同步落三字段。`loop_guards_leg.py::_burn_paired_rows` 前提闸同 `_paired_kill`（`declared_paired_seed`
+  + 对端账本末条 `run_start.rotateSeed` 同 V）；**对端不唯一不猜 ⇒ 回退 baseline 并只 WARN 一次**。
+- **★ 行为变更**：`mode=auto` 是**缺省值**；现 `rl-config.json` 已被配对的课（`x20-clutch` 等）**没有任何
+  `kickstart_burn` 覆盖** ⇒ 下次开训会**静默**从 baseline 切到 paired 参照物。有意（正是要修假阳性），
+  但读旧日志须知道两档口径不同。
+- **回测证据**（可复算：`nn-training/tools/backtest-burn-rule.py`，语料 `tmp/h4-lane-{a0,a1,a2}/eval_log.jsonl`）：
+  - 旧规则实测：a0 峰值 streak 2 / a1 1 / **a2 3 ⇒ 触发**（即那条被误杀的腿）⇒ 三腿假阳性 1/3。
+  - 新规则实测：a1 vs a0 峰值 0；a2 vs a0 Δ = (+0.00, −5.50, +5.00, −5.50) 峰值 1 ⇒ **两臂都不触发**。
+  - MC 20000 次（每点 200 局二项噪声，7 点 it5..35）：N1 无漂移 旧 **0.0050%** / 新 **0.3100%**；
+    N2 共享漂移（两臂共享对照臂实测轨迹）旧 **49.3350%** / 新 **0.4650%**（**低 106×**）⇒ 假阳性来自
+    「参照物会飘」而非抽样噪声。阈值 grid 复测：现常量 (5pp,3点) 在 N2 下 FP = **0.56%**，比旧规则
+    低 **88×**，且全 grid 三腿实际触发均 [False, False]。
+  - **代价明买明卖**：无漂移下新规则略差（0.005% → 0.31%），因配对差抽样方差更大
+    （σ_Δ = √2·σ ≈ 3.48pp vs 单臂 2.46pp）。
+- **被否决备选**：① 只调常量（margin 3→8 / points 3→4）——参照物漂移仍在，且会拖死真效应；
+  ② 止损改硬失败（crash）——丢掉「停训但留证据」的诊断价值；③ 要求 `kl`/`entropy` 同时异常才触发——
+  无回测支撑，判据复杂化一倍；④ 为 burn 单写 Δ 判据——与 `paired_kill` 两套实现会分叉。
+- **未决（用户拍板）**：控制臂漂移处置 · 是否按 lane 项占回报 5% 重锚（新实验 §15.5）· Wave 2 几何选择。

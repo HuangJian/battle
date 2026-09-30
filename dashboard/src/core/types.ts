@@ -53,13 +53,17 @@ export interface CourseConf {
   //  旧 rl-config 里的残留值由 `pruneLegacyCourseKnobs` 清掉。
   /** 门禁失败语义（halt = 打进停机态）。 */
   gate_halt_mode?: string
-  /** kickstart 干烧熔断阈值覆盖（plan/accident.plan.md §5.2；读面在 python
-   *  `rl/kickstart_burn.py::burn_overrides`，缺席即那边的常量）。
+  /** kickstart 干烧熔断阈值/参照物覆盖（plan/accident.plan.md §5.2；读面在 python
+   *  `rl/kickstart_burn.py::burn_overrides`（margin/points）与 `::burn_mode`（mode/peer），
+   *  缺席即那边的常量）。
    *
-   *  控制台**只读**：开课回执拿 `margin_pp`/`points` 说清「连续几点低于基线多少 pp 停腿」
-   *  （`stack/kickstart-receipt.ts`），按需手改 rl-config——不做写面/UI（execution-face
-   *  旋钮，与 `gate_halt_mode` 的写面同规，但今天没有面板需求）。 */
-  kickstart_burn?: { margin_pp?: number; points?: number }
+   *  控制台**只读**：开课回执拿 `margin_pp`/`points`/`mode` 说清「连续几点落后参照物多少 pp
+   *  停腿、参照物是谁」（`stack/kickstart-receipt.ts`），按需手改 rl-config——不做写面/UI
+   *  （execution-face 旋钮，与 `gate_halt_mode` 的写面同规，但今天没有面板需求）。
+   *
+   *  `mode`：`auto`（缺省；能解析出唯一同 V 对端就走 `paired`，否则 `baseline`）/`baseline`
+   *  （参照 = 本腿 it0）/`paired`（参照 = 对端臂同 it 读数）。`peer` = 显式点名对照臂。 */
+  kickstart_burn?: { margin_pp?: number; points?: number; mode?: string; peer?: string }
 }
 
 /** cloudflared 隧道协议（M1，plan/remote-wire-remediation §3）：

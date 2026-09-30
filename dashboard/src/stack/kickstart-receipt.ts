@@ -37,6 +37,12 @@ import type { RlConfig } from '../core/types'
 export const BURN_MARGIN_PP = 5.0
 /** 干烧熔断的连续点数。权威：`nn-training/rl/kickstart_burn.py::BURN_POINTS`。 */
 export const BURN_POINTS = 3
+/** 参照物 = 本腿自己的 it0。权威：`nn-training/rl/kickstart_burn.py::MODE_BASELINE`。 */
+export const BURN_MODE_BASELINE = 'baseline'
+/** 参照物 = 对端臂同 it 读数。权威：`nn-training/rl/kickstart_burn.py::MODE_PAIRED`。 */
+export const BURN_MODE_PAIRED = 'paired'
+/** 缺省：能解析出唯一同 V 对端就走 paired，否则 baseline。权威：`…::MODE_AUTO`。 */
+export const BURN_MODE_AUTO = 'auto'
 /** 「缺省初值大到该被警告」的阈值。权威：`nn-training/rl/loop_lifecycle.py::KICKSTART_DEFAULT_WARN`。 */
 export const KICKSTART_DEFAULT_WARN = 0.5
 
@@ -142,18 +148,39 @@ export function kickstartKnobs(course: string, cfg: RlConfig | null): KickstartK
   }
 }
 
-/** 本课的干烧熔断阈值（`courses.<课>.kickstart_burn.*`；缺席 = python 常量）。 */
+/** 本课的干烧熔断阈值与参照物（`courses.<课>.kickstart_burn.*`；缺席 = python 常量）。 */
 export function burnThresholds(
   course: string,
   cfg: RlConfig | null,
-): { marginPp: number; points: number } {
+): { marginPp: number; points: number; mode: string } {
   const kb = cfg?.courses?.[course]?.kickstart_burn
   const m = kb?.margin_pp
   const p = kb?.points
+  const mode = kb?.mode
   return {
     marginPp: typeof m === 'number' && Number.isFinite(m) ? m : BURN_MARGIN_PP,
     points: typeof p === 'number' && Number.isInteger(p) && p > 0 ? p : BURN_POINTS,
+    // 合法模式闭集同 python `MODES`；脏值一律回 auto（不拿坏配置去描述规则）。
+    mode:
+      mode === BURN_MODE_BASELINE || mode === BURN_MODE_PAIRED || mode === BURN_MODE_AUTO
+        ? mode
+        : BURN_MODE_AUTO,
   }
+}
+
+/** 干烧熔断那一句（参照物随 `mode` 变；2026-09-30 起有两档）。 */
+function burnNote(burn: { marginPp: number; points: number; mode: string }): string {
+  const head = `干烧熔断：连续 ${burn.points} 个评估点落后`
+  const tail = ` >${burn.marginPp}pp 即停腿`
+  if (burn.mode === BURN_MODE_BASELINE) {
+    return `${head}**本腿起点**（it0）${tail}（已显式关掉配对参照）。`
+  }
+  if (burn.mode === BURN_MODE_PAIRED) {
+    return (
+      `${head}**对端臂**（同 it 配对差）${tail}` + `（须有唯一同 V 对端，解析不出时回退本腿起点）。`
+    )
+  }
+  return `${head}参照物${tail}（参照物 = 同 V 对端臂；无唯一对端则本腿起点）。`
 }
 
 // ────────────────────────── 对照行（纯函数，可单测） ──────────────────────────
@@ -161,7 +188,7 @@ export function burnThresholds(
 export interface BaselineInput {
   knobs: KickstartKnobs
   readings: LedgerReadings
-  burn: { marginPp: number; points: number }
+  burn: { marginPp: number; points: number; mode: string }
   /** 账本路径（只在「暂无」那几行里露出来给操作员看；由调用方注入 ⇒ 本函数保持纯）。 */
   logPath: string
 }
@@ -183,10 +210,10 @@ export function composeBaselineLines(inp: BaselineInput): string[] {
     )
   }
   if (k.ref) {
-    const burnNote = `干烧熔断：连续 ${burn.points} 个评估点低于基线 ${burn.marginPp}pp 即停腿。`
+    const note = burnNote(burn)
     out.push(
       k.init > 0
-        ? `kickstart 缰绳：开（课程 kickstart_ref）；kk 初值 ${num(k.init)}（来源：${k.source}）——${burnNote}`
+        ? `kickstart 缰绳：开（课程 kickstart_ref）；kk 初值 ${num(k.init)}（来源：${k.source}）——${note}`
         : `kickstart 缰绳：课程说开，但 kk 初值 0（来源：${k.source}）⇒ 锚**实际不生效**`,
     )
   } else {
@@ -218,8 +245,8 @@ export function composeBaselineLines(inp: BaselineInput): string[] {
     if (gap < -burn.marginPp) {
       out.push(
         `★ 起点已低于基线 ${(-gap).toFixed(1)}pp（噪声带 ±${burn.marginPp}pp）却配 kk=${num(k.init)}：` +
-          `本腿开跑就在基线下方，干烧熔断从第一个评估点就起算（连续 ${burn.points} 点 ⇒ ` +
-          `停腿告警「疑似回锚/塌陷」）——确认这是有意为之再开课。`,
+          `本腿开跑就在基线下方，**若参照物 = 本腿起点**则干烧熔断从第一个评估点就起算` +
+          `（连续 ${burn.points} 点 ⇒ 停腿告警「疑似回锚/塌陷」）——确认这是有意为之再开课。`,
       )
     } else if (Math.abs(gap) < burn.marginPp) {
       out.push(
