@@ -113,7 +113,7 @@ export const SCALAR_X_INDICES = [15, 18, 29]
  * 进 SCHEMA_FINGERPRINT（hy X4 / obs spec §3.4-7）：只钉 SCALAR_DIM 挡不住「交换
  * 两个标量含义」这种漏同步（维度不变、指纹不变、golden 前向仍绿，但语义错位）。
  * 改任一端 ⇒ 指纹变 ⇒ tests/nn/schema-fingerprint.test.ts 与
- * nn-training/tests/test_schema_fingerprint.py 双端同红。
+ * nn-training/tests/common/test_schema_fingerprint.py 双端同红。
  */
 export const SCALAR_NAMES = [
   'slack',

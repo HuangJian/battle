@@ -256,7 +256,7 @@ python 侧 `bash tools/githook/nn-py-safe.sh -m pytest tests/test_rl_config*.py 
 
 ```bash
 cd nn-training
-bash ../tools/githook/nn-py-safe.sh -m pytest tests/test_rl_config_clean.py -q
+bash ../tools/githook/nn-py-safe.sh -m pytest tests/tools/test_rl_config_clean.py -q
 cd dashboard && bun run typecheck && bun run test
 # 全量：bash tools/githook/nn-python-gate.sh（用户跑）
 ```
@@ -269,9 +269,9 @@ cd dashboard && bun run typecheck && bun run test
 
 | 文件 | 动作 | 用例 |
 |---|---|---|
-| `nn-training/tests/test_rl_config_clean.py`（新） | 新增 | dry-run 零写盘（mtime+sha 双验）· 备份先于删除 · **只删白名单键**（未知键不动）· 脱敏（token/authKey 不出现在输出）· `courses` 只删指定条目 · 顶层结构完整性断言 |
+| `nn-training/tests/tools/test_rl_config_clean.py`（新） | 新增 | dry-run 零写盘（mtime+sha 双验）· 备份先于删除 · **只删白名单键**（未知键不动）· 脱敏（token/authKey 不出现在输出）· `courses` 只删指定条目 · 顶层结构完整性断言 |
 | 同上 | 新增 | S2 矩阵纯函数：来源判定（课程 > level 注入 > rl-config > 缺省）与「全绿」判定 |
-| `nn-training/tests/test_rl_config_schema.py`（E8） | 新增 | 未知键**告警**（不是拒）· 已知键不误报 · 白名单与 `read_rl_config_file` 的字段表不漂 |
+| `nn-training/tests/worker/test_rl_config_schema.py`（E8） | 新增 | 未知键**告警**（不是拒）· 已知键不误报 · 白名单与 `read_rl_config_file` 的字段表不漂 |
 | 既有 | 保留 | `worker/config.py::read_rl_config_file` 与 `worker/modes.py::merged_mode_args` 的既有用例（含 `e2e/test_run_rl_m1.py:157-170` 的 legacy 回退断言 —— **删 intent_rl 后这条要按新语义改**，见 §7-R3） |
 
 ### 6.2 DoD

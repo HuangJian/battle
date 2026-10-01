@@ -109,7 +109,7 @@
 unit 展开 → 2 局派给 `self` → 回包 → `tmp/smoke-ladder-c01/eval_log.jsonl` 行带齐
 Phase-0 七列（`exposureByKind [1439,0,0,0]` 等）+ `source=B` + 真 `batch_id`。
 
-**门禁**：nn-python-gate 1277 绿（新增 `tests/test_verdict_corpus.py` 10 例）·
+**门禁**：nn-python-gate 1277 绿（新增 `tests/trainer/test_verdict_corpus.py` 10 例）·
 dashboard typecheck + 530 绿（新增 `tests/evalboard-corpora.test.ts` 17 例）·
 根 `bun run check` 1875 绿。
 

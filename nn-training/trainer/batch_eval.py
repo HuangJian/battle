@@ -2,7 +2,7 @@
 
 **本模块是门面，不是实现**：常量 + `maybe_dispatch_batch`（轮内接线）+ 逐个再导出下面三家
 的公开名（`X as X`）⇒ 既有 import 点一行不改。四步拆分见 plan §5.5.4，契约守卫见
-`tests/test_batch_eval_facade.py`。
+`tests/trainer/test_batch_eval_facade.py`。
 
 | 面 | 实现在哪 | 搬出日期 |
 |---|---|---|
@@ -38,7 +38,7 @@ from common.log import log
 
 # 再导出约定：`from <home> import X as X` 自别名，逐条一行（ruff `combine-as-imports = false`）。
 # 这是「已有 import 点一行不改」与 `batch_eval.X is <home>.X` 的全部依据；
-# 面与面的分工见顶部 docstring 的表，闭集守卫见 tests/test_batch_eval_facade.py。
+# 面与面的分工见顶部 docstring 的表，闭集守卫见 tests/trainer/test_batch_eval_facade.py。
 # 规划 / 判据面 → `trainer/batch_plan.py`（S25/B1）
 from trainer.batch_plan import BATCH_STAGE_BASE as BATCH_STAGE_BASE
 from trainer.batch_plan import CORPORA_JSON as CORPORA_JSON
@@ -156,7 +156,7 @@ def maybe_dispatch_batch(
     eval_log = traj_dir.parent / "eval_log.jsonl"
     # 定型只走 store 的具名转移。这里**不**再就地改 `batch`（旧实现「就地改台账再落盘」的残留：
     # store 交回的是**认领时的快照**，执行器只读它的 batch_id/iter（`unit_of` 走参数传入）
-    # ⇒ 就地改只是「第二写者」的假象，门面契约见 tests/test_batch_eval_facade.py。
+    # ⇒ 就地改只是「第二写者」的假象，门面契约见 tests/trainer/test_batch_eval_facade.py。
     store.set_units_of(str(batch.get("batch_id")), len(units))
     return dispatch_batch_bg(
         bun,

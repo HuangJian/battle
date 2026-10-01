@@ -83,7 +83,7 @@ def _flip_direction(channel: np.ndarray, is_bullet: bool) -> np.ndarray:
       子弹 ch11（**混合基**，全程加法）：val = (sb<<3) + (owner<<2) + (d+1)；
         sb/owner 翻转不变，仅 d 翻转。
       `mirror(mirror(v))==v` 与「speedBucket 翻转前后不变」由
-      tests/test_dataset_mirror.py 全值域断言（敌机 (bonus,tier,d) 全组合、子弹 32 值）。
+      tests/worker/test_dataset_mirror.py 全值域断言（敌机 (bonus,tier,d) 全组合、子弹 32 值）。
 
     历史（v2 修复记录，P0-2）：旧实现只翻 d∈{2,3}，玩家子弹（5..7/0 槽）从不翻转——
     修复改为 slot 解码 + 加法重编码；v3 升 LUT（敌机 hi 位侥幸保 bonus 属巧合，

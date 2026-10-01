@@ -6,13 +6,13 @@
 分别解析成什么、退化时是否**响亮**（打一行 WARNING）」这条**策略**，在测试里必须连坐
 torch，还得 `monkeypatch.setattr(torch.cuda, ...)` 去装探针。策略本身只吃两个读数
 （`cuda_available` / `device_count`）⇒ 把**探针**降成一个参数，判据就能免 torch 测
-（`tests/test_bc_device.py`）。
+（`tests/worker/test_bc_device.py`）。
 
 ## 约定
 
 * 返回 `(规范化 device 串, use_dp)`；`use_dp=True` 时名字是 `"cuda-dp"`，但**真实的
   `torch.device` 由调用方按 `"cuda"` 构造**——`cuda-dp` 不是合法 device type（见
-  `train/bc.py::_resolve_bc_device` 的映射，`tests/test_bc_dp.py` 钉住这一条）。
+  `train/bc.py::_resolve_bc_device` 的映射，`tests/worker/test_bc_dp.py` 钉住这一条）。
 * 退化（单卡/无卡）**必须响亮**：一行 `[train] WARNING: …退化为…`。这条日志的措辞是
   既有产物（云端日志面板按 `[train]` 抓），一字不改。
 * 除 `cuda-dp` / `dp` 外一律原样返回（`""` ⇒ `cpu`），**不触发探针**——`torch.cuda.is_available()`
@@ -30,7 +30,7 @@ DP_DEVICE_ALIASES = ("cuda-dp", "dp")
 def _probe_cuda() -> tuple[bool, int]:
     """默认探针：`(是否可用, 可见卡数)`；函数内**延迟** `import torch`。
 
-    延迟 import 是刻意的：本模块顶层零 torch ⇒ `tests/test_bc_device.py` 不 import torch
+    延迟 import 是刻意的：本模块顶层零 torch ⇒ `tests/worker/test_bc_device.py` 不 import torch
     也能测判据（探针从参数注入，默认这条路径在测试里根本不执行）。
     """
     import torch

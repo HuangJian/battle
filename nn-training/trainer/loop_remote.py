@@ -20,7 +20,7 @@
 ⚠ DI seam 已随实现分散到四个新模块（每个模块的同名全局是**各自真实的注入点**）：
 `trainer.loop_remote_push._push_submit` / `_push_wait_result` · `trainer.loop_remote_drive` 的
 `common.distribution` / `_run_wait_sec` 等。patch 旧的 `trainer.loop_remote.*` 现在会变成**静默空操作**
-——见 `tests/test_loop_remote_split.py`。
+——见 `tests/trainer/test_loop_remote_split.py`。
 """
 
 from __future__ import annotations

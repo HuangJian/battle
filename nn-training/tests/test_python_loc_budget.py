@@ -16,7 +16,7 @@
 **豁免**（用户 2026-09-28 裁定）：
 
   · `tests/` 与 `e2e/` 两层**整体**不设限 —— 测试的体量是「覆盖了多少场景」的函数，
-    压它等于少测（同日的实测：`tests/test_remote_iter.py` 1309、`tests/test_remote_ppo.py`
+    压它等于少测（同日的实测：`tests/remote/test_remote_iter.py` 1309、`tests/remote/test_remote_ppo.py`
     1258 在这一口径下超限，但它们的行数来自场景枚举，不是结构冗余）；
   · `remote/offline_boot.py` —— standalone 运输单元（notebook 从 GitHub raw 按名单拉取，
     顶层不得 `import remote.*`），§5.7.3 实测「取包面闭包 47/86 节点、心跳簇 29 节点」

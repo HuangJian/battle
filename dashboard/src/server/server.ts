@@ -290,7 +290,7 @@ async function main(): Promise<void> {
       try {
         // 只读门控：一切 POST 动作仅限回环来源（本机）；LAN 只能 GET 查看。
         // fail closed——requestIP 不可得（null）时视为非回环，动作被拒。
-        // 判定抽在 net.ts::isReadonlyAction（纯函数，回归测试见 training-console.test.ts）。
+        // 判定抽在 net.ts::isReadonlyAction（纯函数，回归测试见 tests/server-lan-gate.test.ts）。
         if (isReadonlyAction(req.method, server.requestIP(req)?.address)) {
           return json(
             {

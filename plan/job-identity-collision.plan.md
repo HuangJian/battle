@@ -302,7 +302,7 @@ publish_job(...)：
 - 测试：worker 侧「409 时日志含 reason 与 jid」；hub 侧拒绝行断言。
 
 ### E2 — L1 幂等键加 `course_fp`（含失败测试先行，AGENTS §7）
-- 先在 `tests/test_job_identity_collision.py` 写**红**用例：两个 manifest 只差 `course`/`course_fp`
+- 先在 `tests/remote/test_job_identity_collision.py` 写**红**用例：两个 manifest 只差 `course`/`course_fp`
   ⇒ 现在断言 id 相同（复现事故），改后断言不同；同时保留既有「同键同 id」幂等用例。
 - 改 `protocol.idempotency_key`；跑全量红→绿。
 - **迁移**：事故课程按 §3.5-A 换 runId 重跑。
@@ -337,7 +337,7 @@ publish_job(...)：
 
 | 位置 | 用例 | 压哪条不变式 |
 |------|------|--------------|
-| 新增 `tests/test_job_identity_collision.py` | `test_job_id_differs_across_courses_same_key_components`：两 manifest 只差 `course`/`course_fp` ⇒ id 不同 | §3.6-1 |
+| 新增 `tests/remote/test_job_identity_collision.py` | `test_job_id_differs_across_courses_same_key_components`：两 manifest 只差 `course`/`course_fp` ⇒ id 不同 | §3.6-1 |
 | 同上 | `test_old_key_formula_still_collides`：测试内**重实现旧公式**（4 分量）⇒ 断言旧公式下确实撞——把 bug 焊成回归锚 | §3.6-1 + 事故锚 |
 | 同上 | `test_collision_rows_flags_only_other_store`：同完整键异 store ⇒ 命中且消息含双方 course；同 store ⇒ 不命中；不同 it/course_fp ⇒ 不命中 | §3.3 |
 | 同上 | `test_publish_refuses_cross_store_identity`：同完整键、两个 job_root ⇒ 第二次抛 `HubClientError`，且**无 job 目录、无 job_pending 账本行** | §3.6-8 |
@@ -346,7 +346,7 @@ publish_job(...)：
 | 同上（`test_job_identity_collision.py`，实施时归到这里 —— 与 L1/L3 同文件便于对读；hub 侧用例的夹具与 `test_multi_course_hub.py` 同构） | `test_ambiguous_job_id_is_refused_not_guessed`：两课各放同 jid 目录 ⇒ `course_of` 为 None、job 作用域请求 404、`_locate_cache` 未写入 | §3.6-3 |
 | 同上 | `test_queue_state_reports_ambiguous_jids`：`queue_state()["ambiguous_jids"]` 列出该 jid 与两门课 | §3.4 |
 | 同上 | `test_single_course_legacy_semantics_unchanged`：单课程（空串课程名）下 `course_of` 仍返回 `""`、`ambiguous_jids == {}` | §3.6-7 |
-| `tests/test_remote_ppo.py` / `test_bc_protocol.py` | 既有「同键同 id」幂等用例保持绿 | §3.6-2 |
+| `tests/remote/test_remote_ppo.py` / `test_bc_protocol.py` | 既有「同键同 id」幂等用例保持绿 | §3.6-2 |
 | `e2e/test_multi_course_single_hub_e2e.py` | E5 改造（刻意同四分量 + 异 course_fp） | §3.6-1/4/5 |
 
 ### 6.2 DoD（全过才收）
@@ -407,7 +407,7 @@ publish_job(...)：
   `remote/run_loop.py::_build_iter_manifest`；会话载体 `trainer/loop_steps.py::_remote_ppo_round`。
 - 进程级 runId：`trainer/queue.py:11`。
 - 既有意图未被压过的证据：`e2e/test_multi_course_single_hub_e2e.py::test_single_hub_dispatches_two_courses_to_one_worker`。
-- 多课程测试基座：`tests/test_multi_course_hub.py`（`_HubFixture`、两课 store、`course_of` 语义用例）。
+- 多课程测试基座：`tests/hub/test_multi_course_hub.py`（`_HubFixture`、两课 store、`course_of` 语义用例）。
 - 相关 plan：`plan/opt-blob-diet.plan.md`（共享 remote-transport 章节编号预算）。
 
 ---

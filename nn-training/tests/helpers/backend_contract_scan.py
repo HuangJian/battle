@@ -9,7 +9,7 @@
 
     「模块里能解析出这 5 个成员，且 `update` 的参数表能绑定 stream.py 无条件注入的关键字」
 
-## 与运行期判据的等价性（**不能弱化** ⇒ 见 `tests/test_backend_contract_runtime.py` 交叉校验）
+## 与运行期判据的等价性（**不能弱化** ⇒ 见 `tests/worker/test_backend_contract_runtime.py` 交叉校验）
 
 * **成员存在**：`@runtime_checkable` 的 `isinstance(mod, Protocol)` **只检查属性存在、不查签名**
   （`biz/backend.py` 模块 doc 已写明），故「静态成员表 ⊇ 5 个必需名」与 `isinstance` 同义。

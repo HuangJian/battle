@@ -317,7 +317,7 @@ hub 与意图都回到在线，而配置里还是 `run` ⇒ 下一段照样派 `
 * `tests/course-mode.test.ts`：切离线落两键 / 切在线两键都不在 / **node 往返回到 node** / `local` 不留痕 /
 hub 不可达时配置照样落 / 文案含「本机不跑这门课」「不需要 bun」「轮边界生效」；
 * 逆测试：`pushCourseMode` 与 `restoreCourseModes` **一个字都不写** rl-config（防 F9 复发）；
-* 跨语言钉子：`nn-training/tests/test_run_segment.py` 钉「控制台写的两键 ↔ `_rollout_source`/`_run_segment_iters`」；
+* 跨语言钉子：`nn-training/tests/worker/test_run_segment.py` 钉「控制台写的两键 ↔ `_rollout_source`/`_run_segment_iters`」；
 * 既有源码断言跟着写面搬家（`tests/train-mode-offline.test.ts`、`tests/rollout-src-launch-option.test.ts`）。
 
 ---
@@ -501,10 +501,10 @@ find tmp -name per-game.json → 0 个
 
 ### 验证
 
-* python：`tests/test_multi_course_hub.py::test_offline_backfeed_moves_the_console_table`
+* python：`tests/hub/test_multi_course_hub.py::test_offline_backfeed_moves_the_console_table`
   （回传一轮 ⇒ `it3/per-game.json` 逐字节等于 `row.perGame`、账本恰一行 `iteration`、
   字段搬运 `winRate/samples/expectedGames/ticks/rollout_sec/ppo_sec/kl/dim_means/score_mean`、
-  重复投递仍是 `duplicate` 且不写第二行）；`tests/test_deliver_zip.py` 同规（来源标记键从
+  重复投递仍是 `duplicate` 且不写第二行）；`tests/remote/test_deliver_zip.py` 同规（来源标记键从
   `import_run_id` 改为共享表的 `run_id`+`source`）。
 * dashboard：`tests/server-iters-round-actuals.test.ts` 5 例（只有 per-game.json 也能算四列 /
   (stage,seed) 取样本多者 / 缺席回落 manifest / 坏 JSON 与非法行跳过 / `readIterMetrics` 行带
@@ -722,9 +722,9 @@ R3-6 曾把它的收敛列为「节点轴」(否决④) 的延后项。但它的
 
 ### 回归
 
-`tests/test_loop_plan_bc_rows.py`(9，读面：种类 / 指针跟 `bc_round_completed` / 在飞来自
+`tests/worker/test_loop_plan_bc_rows.py`(9，读面：种类 / 指针跟 `bc_round_completed` / 在飞来自
 `job_pending` / 作废也是终局 / manifest 缺失不丢在飞 / 未知课程默认 `rl` / 两行共存 / 人读表带列)
-· `dashboard/tests/web-app-loopqueue.test.ts`(+3：BC 行与 RL 行并列渲染且只有一行带 BC 徽标 /
+· `dashboard/tests/web-app-loopqueue.test.ts`(+3【今 → `dashboard/tests/web-app-coursematrix.test.ts`——P2a 面板断言汇合处】：BC 行与 RL 行并列渲染且只有一行带 BC 徽标 /
 两边悬停各说各的 / 卡片不再被 `isBc` 门控——用正则断言那个包裹形状不再存在)
 · `dashboard/tests/server-api-loop-queue.test.ts`(+1：`kind` 的保守默认)。
 
@@ -760,7 +760,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
   journal/shard 目录，亚秒级）。服务器启动时暖一次缓存，避免 SSR 首屏等子进程。
 - `LoopQueueRunner` 是**可注入接缝**（与 `deliver_zip` 导入同惯例）：控制台这一半（argv 形状 /
   结果翻译 / TTL / 单飞 / 与在训事实合并）在 dashboard 用例里全测到，python 那一半由
-  `nn-training/tests/test_loop_plan_waiting.py` 钉死——两边各测自己那一半，中间不再叠一层端到端。
+  `nn-training/tests/trainer/test_loop_plan_waiting.py` 钉死——两边各测自己那一半，中间不再叠一层端到端。
 - 读失败（解释器缺失 / 超时 / 输出不可解析 / 形状不符）**不抛**：视图带 `error` 上屏，UI 显因 + 空态。
   观测面坏掉不该把整页 `/api/state` 带崩（与 hub 总览 / 隧道 A/B 同口径）。
 
@@ -799,7 +799,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
 ### 门禁
 
 - nn python gate：**1446 passed / 3 skipped**（ruff + mypy 干净；+14 新例）
-- dashboard：typecheck 绿、**567 passed**（+25：`server-api-loop-queue.test.ts` 13 / `web-app-loopqueue.test.ts` 12）、
+- dashboard：typecheck 绿、**567 passed**（+25：`server-api-loop-queue.test.ts` 13 / `web-app-loopqueue.test.ts` 12【今 → 视图 `dashboard/tests/web-loop-queue.test.ts` + 面板 `dashboard/tests/web-app-coursematrix.test.ts`】）、
   `bun dashboard/src/server/build.ts` 三份 bundle 通过
 - 根 `bun run check` 绿、`bun run build` 绿
 
@@ -909,7 +909,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
    拿任何**跑过一轮**的课导包（traj 下有历史残留 shard）都会 `SystemExit`，包产不出来。
    即「控制台上这个按钮对真课全程不可用」。修法：判定抽成纯函数 `_gate_round_shards`，
    `exporting` 时直接返回空集（`register=False` 是同一条思路：导出不参与发布语义），
-   回归 `tests/test_export_shard_gate.py` 同时钉住「关掉 exporting，两条门照旧生效」。
+   回归 `tests/trainer/test_export_shard_gate.py` 同时钉住「关掉 exporting，两条门照旧生效」。
 
 **代理侧踩坑（与功能无关，但会再踩）**：python 一次性进程的 cwd **不是**你 `cd` 的目录
 （trainer 内部会切），**手工验证时必须给绝对路径**；相对路径带 `..` 的写入在沙箱下还可能
@@ -948,7 +948,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
 - **门判据排除 it0**（`gate_check.read_trend_rows`）：`iter <= 0` 的 summary 不进趋势（用户定案：只当监控/配对基线）。否则会虚增 sustain 的「连续通过」计数、把 plateau 的上升趋势起点拉回 PPO 前。缺 `iter` 字段的旧行照旧保留（不过度收口）。
 - **Console**（`console/iters.ts`）：配对基线改为「有 it0 取 0，否则退回首个 eval 轮」（老腿逐字节兼容）；`readIterMetrics` 在有 ≥1 条真实 iteration 行时合成一条 it0 行（只有 `evalData`，rollout 派生字段一律 `NaN` —— 趋势图的缺口约定，写 0 会在图上多画一个假零点）；`MetricsTable.buildRows` 跳过 `iter<=0` 的主行，只出 eval 子行（UI 标「基线」）。
 
-**验证**：`tests/test_baseline_eval.py`（新，6 例：iter 隔离 / 守卫逐条反证 / 只在 `_start_it` 派一次 / 失败不抛 / **端到端** baseline 派发把逐局行与 summary 都写成 `iter=0` 且预置同 wver 的 it1 行不吞它 / 幂等）+ `tests/console-paired.test.ts`（新增 3 例：it0 为开腿基准、无 it0 退回首个 eval 轮、合成行与老腿兼容）+ `test_gate_check.py` 的 `read_trend_rows` 过滤。门禁：nn-python-gate（ruff + mypy 145 文件 + pytest 全量）绿；`bun run check` / `bun run build` 绿。
+**验证**：`tests/worker/test_baseline_eval.py`（新，6 例：iter 隔离 / 守卫逐条反证 / 只在 `_start_it` 派一次 / 失败不抛 / **端到端** baseline 派发把逐局行与 summary 都写成 `iter=0` 且预置同 wver 的 it1 行不吞它 / 幂等）+ `tests/console-paired.test.ts`（新增 3 例：it0 为开腿基准、无 it0 退回首个 eval 轮、合成行与老腿兼容）+ `test_gate_check.py` 的 `read_trend_rows` 过滤。门禁：nn-python-gate（ruff + mypy 145 文件 + pytest 全量）绿；`bun run check` / `bun run build` 绿。
 
 **遗留**：`eval_every == 1` 的课程在 it1 既有 A-eval 又有 it0 基线（测的是同一套 PPO 前权重）⇒ 会多跑一遍语料（账本按 iter 隔离，it0 行仍落盘）；本腿 c6-bonus 为 `eval_every=5`，不受影响。
 
@@ -1118,7 +1118,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
   （轮询 pid），在请求里删 = 没有锁；② **`--export-bundle` 被轮内 shard 门误杀**——导出
   既不发 job 也不训练，`rollout_spec` 非空 + traj 有历史残留 shard 会命中「M3 上云轮必须
   空 shard」⇒ 任何跑过一轮的课都导不出包（实测 c6-chip）。判定抽成纯函数
-  `_gate_round_shards`，例外**只**覆盖导出（`tests/test_export_shard_gate.py` 同时钉住
+  `_gate_round_shards`，例外**只**覆盖导出（`tests/trainer/test_export_shard_gate.py` 同时钉住
   「关掉 exporting 两条门照旧生效」，防顺手删门）。
 - **边界（未做）**：① 真云端端到端一次（本机无节点）；② 导入是**同步**阻塞（几 MB 秒级，
   几十 MB 会让控制台这段时间不响应轮询——可接受，量大再挪后台+状态位）；③ 导出期间刷新
@@ -1185,7 +1185,7 @@ hub 一重启就**静默**恢复派发。这是「功能存在但不可达 + 重
   - **观测面一律容错**：任何失败（无 hub / 401 / 坏 JSON / 账本不可读）→ null/空态/零值，绝不把 `/api/state` 带崩；总览与登记表共用一次 hub 探测（5s TTL + 单飞）——进程级全局观测不该按查看课程各探一遍。
 - **备选与否决**：把登记做成控制台自己的 worker 表 —— 否（hub 与训练侧都按 rl-config 判定，第二份表 = 三处口径）；登记时 ping 不通即拒 —— 否（见上，堵死正常工序）；把总览塞进慢快照 —— 否（慢快照按课程键控，进程级全局观测会乘上查看课程数）；由 hub 的 course 表推「在训」 —— 否（hub 不知道训练循环是否停在两轮之间）；**组件卡片按「单例角色 / 按课程」拆两种形状** —— **推迟**：卡片的数据源仍是 per-course 账本条目，而 hub/隧道收敛为单例（单隧道那一步）之前拆形状只会做出一个「看着像已经支持多课程」的假象。
 - **违反后果**：面板另存一份登记 ⇒ 三处漂、hub 与训练侧对「哪几台能接活」判断不一致（症状是 job 永远躺在队首）；登记拒掉 ping 不通的机器 ⇒ 正常工序被堵、操作员绕开面板去手改配置；改 url 不收口课程指针 ⇒ 指向死 URL ⇒ python 静默回落 pull（故障被伪装成正常）；用 hub 的 job 历史判「在训」⇒ 训练间歇期课程被从 UI 上抹掉；把 `job_completed.it` 当轮次 ⇒ 总览显示还没跑完的那一轮。
-- **落地**：`dashboard/src/web/view/course-overview.ts`（新：视图类型 + `parseHubQueue` / `latestIterFromLedgerTail` / `overviewCourseNames` / `buildCourseRows` / `validWorkerId`）、`dashboard/src/stack/hub-admin.ts`（新：`hubCandidates` / `liveHub` / `hubPushWorkers` / `hubReloadPushWorkers` / `probePushWorker` / `withWorkerProbes`）、`dashboard/src/server/api/overview.ts`（新：`trainingCourses` / `getHubAdmin` 5s 缓存 + 单飞 / `buildOverview` / `buildWorkerRegistry` / `courseIter`）、`dashboard/src/server/actions/workers.ts`（新：`registerPushWorker` / `removePushWorker` / `reloadPushWorkers`）、`dashboard/src/server/api/route.ts`（三个动作接线）、`dashboard/src/server/server.ts`（动作后与慢快照同一时机置空 hub 观测缓存——一个失效点，不在 route 层重复）、`dashboard/src/server/api/state-view.ts`（注入 `trainingCourses` / `overview` / `workerRegistry`）、`dashboard/src/web/app/panels/CourseOverview.tsx`（新）、`dashboard/src/web/app/panels/WorkerRegistry.tsx`（新，表单独立成 `WorkerForm` 以便 SSR 断言）、`dashboard/src/web/app/app.tsx`（解锁课程 select、在训课程全高亮、挂载两个面板）、`dashboard/src/web/theme.css`（`.tc-cov*` / `.tc-wreg*`）；回归：`dashboard/tests/server-api-overview.test.ts`（12 例）、`dashboard/tests/server-actions-worker-register.test.ts`（16 例）、`dashboard/tests/web-app-course-overview.test.ts`（12 例），并改写 `dashboard/tests/web-ssr-readonly.test.ts` 的课程 select 用例（锁定语义随本轮变更）。
+- **落地**：`dashboard/src/web/view/course-overview.ts`（新：视图类型 + `parseHubQueue` / `latestIterFromLedgerTail` / `overviewCourseNames` / `buildCourseRows` / `validWorkerId`）、`dashboard/src/stack/hub-admin.ts`（新：`hubCandidates` / `liveHub` / `hubPushWorkers` / `hubReloadPushWorkers` / `probePushWorker` / `withWorkerProbes`）、`dashboard/src/server/api/overview.ts`（新：`trainingCourses` / `getHubAdmin` 5s 缓存 + 单飞 / `buildOverview` / `buildWorkerRegistry` / `courseIter`）、`dashboard/src/server/actions/workers.ts`（新：`registerPushWorker` / `removePushWorker` / `reloadPushWorkers`）、`dashboard/src/server/api/route.ts`（三个动作接线）、`dashboard/src/server/server.ts`（动作后与慢快照同一时机置空 hub 观测缓存——一个失效点，不在 route 层重复）、`dashboard/src/server/api/state-view.ts`（注入 `trainingCourses` / `overview` / `workerRegistry`）、`dashboard/src/web/app/panels/CourseOverview.tsx`（新）、`dashboard/src/web/app/panels/WorkerRegistry.tsx`（新，表单独立成 `WorkerForm` 以便 SSR 断言）、`dashboard/src/web/app/app.tsx`（解锁课程 select、在训课程全高亮、挂载两个面板）、`dashboard/src/web/theme.css`（`.tc-cov*` / `.tc-wreg*`）；回归：`dashboard/tests/server-api-overview.test.ts`（12 例）、`dashboard/tests/server-actions-worker-register.test.ts`（16 例）、`dashboard/tests/web-app-course-overview.test.ts`（12 例【今 → `dashboard/tests/web-app-coursematrix.test.ts`——P2a 面板断言汇合处】），并改写 `dashboard/tests/web-ssr-readonly.test.ts` 的课程 select 用例（锁定语义随本轮变更）。
 - **本轮未做（P1 余下）**：① 单隧道——hub / cloudflared / trainingLoop 收敛为单例（现在仍是 per-course 拉起），随之把组件卡片拆成「单例角色」与「按课程」两种形状；② 多课程单 hub 的端到端 e2e（训练侧 hubpush → hub → 真 worker_server + 假 PPO）。
 
 ---
@@ -1253,7 +1253,7 @@ hub 一重启就**静默**恢复派发。这是「功能存在但不可达 + 重
   `GAMEPLAY_FIELDS` 外 ⇒ 双跑不一致无人发现（§3.4 确定性契约失效）。
 - **落地**：`nn-training/biz/eval_local.py`（`EVAL_CENSUS_KEYS` / `eval_census_fields`）、
   `rl/{eval_dispatch,batch_eval,eval_a_once,eval_ingest}.py`；`dashboard/src/evalboard/
-  {ingest,store}.ts`；回归 `nn-training/tests/test_eval_census_fields.py`（5 例）+  
+  {ingest,store}.ts`；回归 `nn-training/tests/worker/test_eval_census_fields.py`（5 例）+  
   `dashboard/tests/evalboard-{ingest,store}.test.ts`（映射/豁免）。验证：真实
   `_eval_report.json` 七列齐全可抽；nn-python-gate 1263 绿 · dashboard 513 绿 +
   typecheck · 根 `bun run check` 1875 绿。
@@ -1661,7 +1661,7 @@ CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路�
 `dashboard/src/web/app/panels/TrainingPills.tsx`（新）· `dashboard/src/web/app/app.tsx`（顶部形状）·
 `dashboard/src/web/theme.css`（`.tc-tpills` / `.tc-tpill`）。
 
-**回归**：`nn-training/tests/test_loop_plan_waiting.py`（+2 例：空课程表的 `--json` 形状 · 默认课程表 = 已开课）·
+**回归**：`nn-training/tests/trainer/test_loop_plan_waiting.py`（+2 例：空课程表的 `--json` 形状 · 默认课程表 = 已开课）·
 `dashboard/tests/training-pills.test.ts`（新，14 例：pill 推导四态 + 确定性事实优先 +
 「待进程」/「视图不可用」不编造 · `trainingCourses` = 标记而非账本 · SSR 上屏/高亮/BC 徽标/停课键/
 空行不渲染/顶栏只有「训练」）· `course-lifecycle.test.ts`（+2 例：开课写标记、停课删标记、可逆）·

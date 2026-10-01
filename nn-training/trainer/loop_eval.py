@@ -17,7 +17,7 @@ _eval_covered ◄── _drain_pending_eval ────────────
 者**（轮内 `_dispatch_delayed_eval` / `_join_eval` 由 `RoundSteps` 调，收官
 `_drain_pending_eval` 由 `TrainingLoop` 调），所以它是基类。**追加**在既有基类之后：两个混入
 之间零重名、零互调、零 `super()` ⇒ 顺序今天完全惰性，没有理由去动已经写在文档与守卫里的
-`TrainingRemote` 位置（见 tests/test_loop_transport_split.py 的 MRO 断言）。
+`TrainingRemote` 位置（见 tests/trainer/test_loop_transport_split.py 的 MRO 断言）。
 
 ## 状态归属：五个 eval 槽位随簇搬来（声明只有这一处）
 
@@ -40,7 +40,7 @@ stream 报告里的 eval 线程句柄 pop 进 `_eval_thread`（R4：jsonl 写回
 `trainer.queue` / `biz.archive`），测试也一直 patch 那些**实现模块**（`monkeypatch.setattr(ed,
 "dispatch_eval_bg", ...)`）⇒ 方法搬家不改变任何注入点。反过来，对 `trainer.loop_steps.*` 的那些
 注入**本来就是空操作**（这些名字从来没住在那儿）。唯一按路径读源码的守卫在
-`tests/test_eval_a_once.py`，已随本刀重定向到本文件。
+`tests/trainer/test_eval_a_once.py`，已随本刀重定向到本文件。
 """
 
 from __future__ import annotations

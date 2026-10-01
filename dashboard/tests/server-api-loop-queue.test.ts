@@ -5,7 +5,7 @@
  *
  * **不跑 python**：`LoopQueueRunner` 是可注入接缝（与 `deliver_zip` 导入同惯例）——
  * python 那一侧的判据（`waiting_state` 的取值域、`build_rows` 的真读盘）由
- * `nn-training/tests/test_loop_plan_waiting.py` 钉死，这边只测控制台这一半：
+ * `nn-training/tests/trainer/test_loop_plan_waiting.py` 钉死，这边只测控制台这一半：
  * argv 形状 / 结果翻译的每条失败分支 / TTL 与单飞 / 与 registry 在训事实的合并。
  */
 

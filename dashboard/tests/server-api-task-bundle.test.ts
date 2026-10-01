@@ -6,7 +6,7 @@
  *
  * 两侧各测自己那一半（不叠第二层端到端）：
  *   * python 一侧的三道门（zip-slip / 拿错包 / 轮次发现）由
- *     `nn-training/tests/test_deliver_zip.py` 钉死；
+ *     `nn-training/tests/remote/test_deliver_zip.py` 钉死；
  *   * 这里钉**控制台这一侧**：argv 形状、产出文件信息、拒启理由、上传体的门、
  *     与 python 共享的跨语言常量（直接读 python 源码对账——改一边忘另一边会红）、
  *     以及「导入成功后要不要接着起评估」。

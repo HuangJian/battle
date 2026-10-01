@@ -7,7 +7,7 @@
  *  控制台的配对基线退化成「第一条 eval 轮」（`iters.ts`：`evalIters.includes(0) ? 0 : evalIters[0]`）
  *  ⇒ 随 run 起点漂移，跨腿（demo-mix vs firstkill）失去共同锚。
  *
- *  本文件钉**控制台这一侧**的两件事（python 一侧由 `nn-training/tests/test_eval_a_once.py` 钉）：
+ *  本文件钉**控制台这一侧**的两件事（python 一侧由 `nn-training/tests/trainer/test_eval_a_once.py` 钉）：
  *   ① `evalAArgs` 的 argv 形状：baseline ⇒ 带 `--baseline`；`ckpt` 空 ⇒ **不传** `--ckpt`
  *      （空串到 python 手里 `Path("")` 是 `.` = 存在的目录，会被当权重算指纹）；
  *   ② `shouldAutoBaseline` 的三态：离线补 / 在线不补 / 逃生阀置位不补。

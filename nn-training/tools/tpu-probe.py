@@ -15,7 +15,7 @@
        D1 = B + ref 每步重算（旧 engine 行为） 双前向税
        D2 = B + ref 预计算缓存（新 engine 行为）ref 成本降到 1/epochs
      D1 vs D2 就是 ppo/engine.py 本次落地的 ref_cache 优化的实测收益
-     （数值逐位不变，见 tests/test_ppo_kickstart_cache.py）。
+     （数值逐位不变，见 tests/worker/test_ppo_kickstart_cache.py）。
 
   ③ **E 段：真实 job 形态复现（2026-09-11）**：Kiwi c6b-margin 首个 TPU job
      （Colab）PPO 单步 45~52 s（eta~5.9h、chunks 142 x 4 ep），而同模型同

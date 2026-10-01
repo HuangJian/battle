@@ -288,7 +288,7 @@ class RoundYieldError(RuntimeError):
 STEP_ORDER: tuple[str, ...] = ROUND_TASKS
 
 #: kind → 引擎方法名。组合路径与细粒度驱动器**都**从这张表取步骤 ⇒ 不可能漂移；
-#: `tests/test_loop_round.py` 断言它与 `STEP_ORDER` 一一对应（加一步必须同时加实现）。
+#: `tests/worker/test_loop_round.py` 断言它与 `STEP_ORDER` 一一对应（加一步必须同时加实现）。
 STEP_METHOD: dict[str, str] = {
     "precollect_join": "step_precollect_join",
     "prepare_iter": "step_prepare_iter",

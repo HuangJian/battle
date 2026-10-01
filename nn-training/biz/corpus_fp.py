@@ -82,7 +82,7 @@ def corpus_identity_fp(course: CourseConfig) -> str:
         payload["target_transitions"] = course.target_transitions
     # 配对 rotateSeed（2026-09-21 §2）：与 seed_rotate 同类（决定**抽哪些**样本），故进身份；
     # 但同样**仅在激活时**——无条件加入会让所有既有课程的指纹全体漂移（在跑的腿把已落盘
-    # shard 判成异身份，先例 `tests/test_rollout_volume.py:492-499`）。
+    # shard 判成异身份，先例 `tests/worker/test_rollout_volume.py:492-499`）。
     if course.paired_rotate_seed is not None:
         payload["paired_rotate_seed"] = int(course.paired_rotate_seed)
     # 起始分布（plan/x20-state-init.plan.md P2/P3.5，2026-09-25）：**决定一个样本从哪个世界

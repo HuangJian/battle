@@ -11,7 +11,7 @@ DECISIONS §307 三模式基础设施（RL 入口整合 2026-09-01）：
                      RolloutBackend Protocol：load_episode_from_shard /
                      chunk_episodes / update / load_episodes / _ppo_load 五者，
                      且 update 必须接受 stream.py 注入的 ckpt_path / on_epoch_done；
-                     由 tests/test_backend_contract.py 逐后端断言，勿退化回注释契约）
+                     由 tests/worker/test_backend_contract.py 逐后端断言，勿退化回注释契约）
   _MODE_BACKUP_PREFIX 模式 → 归档文件前缀（backup_weights 按前缀分桶 prune）
 
 函数

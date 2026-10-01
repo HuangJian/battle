@@ -12,7 +12,7 @@
 本模块只收**格式**：tag 由调用方给，时钟由调用方传（关键——见下），不做路由、不留状态。
 `biz/log.py::format_line` 也改用这里的 `stamp()`，两边的时间戳因此不可能再漂移。
 
-**为什么 `clock` 是形参而不是模块级 `time`**：`tests/test_notebook_runtime.py` 用
+**为什么 `clock` 是形参而不是模块级 `time`**：`tests/remote/test_notebook_runtime.py` 用
 `monkeypatch.setattr(nbr, "time", clock)` 注入假钟（只重绑该模块的引用、不污染全局
 `time`）。若本模块自己抓 `time.strftime`，那次注入就失效了 ⇒ 调用方必须把自己的
 `time` 传进来（`clock=time`），假钟才拦得到。

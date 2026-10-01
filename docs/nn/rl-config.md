@@ -114,7 +114,7 @@ bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py --drop-b-class --sc
 
 ```bash
 # 自查（纯逻辑，不需要真配置）
-cd nn-training && bash ../tools/githook/nn-py-safe.sh -m pytest tests/test_rl_config_schema.py -q
+cd nn-training && bash ../tools/githook/nn-py-safe.sh -m pytest tests/worker/test_rl_config_schema.py -q
 ```
 
 ### 1.6 清洗命令与回退

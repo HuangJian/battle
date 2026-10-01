@@ -43,7 +43,7 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 
 代价照旧明确记在案：七个混入各自的类体里，**状态一律是裸注解**（`_stores: dict[str, _JobStore]`，
 无值）—— 组合类的 `__init__` 是这些字段**唯一**的带值声明点。守卫
-`tests/test_hub_queue_split.py` 钉住这条，并逐字段对账「谁写它」。
+`tests/hub/test_hub_queue_split.py` 钉住这条，并逐字段对账「谁写它」。
 
 ## 依赖方向
 

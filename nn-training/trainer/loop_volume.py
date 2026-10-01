@@ -25,11 +25,11 @@ _volume_collect_continuous（VOLUME_RULE_V2 生产路径）──► _dispatch_v
 （`_volume_topup` 的**离散补波**规则自 2026-09-19 VOLUME_RULE_V2 起已退役：生产路径全部走
 `_volume_collect_continuous`，`step_volume_topup` 只是 `STEP_ORDER` 要求的**保留空步**，已经不调
 本簇任何方法。它仍留在此处，因为既有 e2e（`e2e/test_volume_e2e.py`）与单测
-（`tests/test_rollout_volume.py`）以 unbound 形式直接驱动它，而 `volume_waves` 的纯逻辑是那条
+（`tests/worker/test_rollout_volume.py`）以 unbound 形式直接驱动它，而 `volume_waves` 的纯逻辑是那条
 规则的可复算实现。）
 
 为什么不「给 `TrainingLoop` 加一个基类」：那要改组合类 + 四个「继承真混入」的测试宿主，并让
-`tests/test_loop_eval_split.py` 里「组合类三件套不变」那句失守。走 `RoundSteps` 这一侧，
+`tests/trainer/test_loop_eval_split.py` 里「组合类三件套不变」那句失守。走 `RoundSteps` 这一侧，
 `TrainingLoop.__bases__ == (RoundSteps, TrainingSteps, TrainingGuards)` 与全部既有守卫**一行不改**
 （本刀零守卫改动，只有一处 patch 目标迁移，见下）。
 

@@ -245,7 +245,7 @@ def ppo_update_goal(
     行对齐）——双缓冲提前预采的触发点：stream 在 epoch3 完成时把 θ_{N,e3} 存盘 spawn
     首波预采，PPO 继续最后一个 epoch。trainer/stream.py:123-124 **无条件**注入该回调，
     故本形参是契约的一部分（缺失即 `--mode goal --stream 1` 首个波次 TypeError，
-    plan/python-refactor.md P0-1；由 tests/test_backend_contract.py 守护）。
+    plan/python-refactor.md P0-1；由 tests/worker/test_backend_contract.py 守护）。
 
     value_warmup：同 ppo_intent——前 N epoch 冻结主干只训 value 头（goal-BC 冷启动
     value 随机，直接 PPO 会被 value 噪声主导）。

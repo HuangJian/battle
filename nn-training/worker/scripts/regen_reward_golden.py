@@ -49,7 +49,7 @@ def v7_corpus(n: int, seed: int) -> np.ndarray:
 
 
 def main() -> None:
-    from tests.test_reward_golden import _golden_vectors  # reuse 同一输入定义
+    from tests.biz.test_reward_golden import _golden_vectors  # reuse 同一输入定义
 
     cache = {}
     cases = []

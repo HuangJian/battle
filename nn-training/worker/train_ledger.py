@@ -11,7 +11,7 @@ R2 把它们收敛成**一次扫描**得到的 `LedgerView`：每课开课/续�
 
 **三条硬口径**
 
-1. **账本是 SSOT**：`LedgerView` 必须能重建内存计数——`tests/test_train_ledger.py`
+1. **账本是 SSOT**：`LedgerView` 必须能重建内存计数——`tests/worker/test_train_ledger.py`
    与既有五个扫描器做**奇偶断言**（旧扫描器即参考语义）。`loop-state.json` 只是加速器，
    冲突时以账本为准。
 2. **向前兼容**：未知事件名直接忽略（hub 追加的 `job_completed`/`job_failed` 对旧读者
@@ -202,7 +202,7 @@ class LedgerView:
         """把一条刚写进账本的事件并入视图（**唯一**增量入口）。
 
         与 `load_ledger` 走同一段逻辑 ⇒ 二者对同一事件序列必然一致
-        （`tests/test_train_ledger.py::test_incremental_equals_load` 钉住）。
+        （`tests/worker/test_train_ledger.py::test_incremental_equals_load` 钉住）。
         """
         name = event.get("event")
         if name == "iteration":

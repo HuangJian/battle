@@ -23,7 +23,7 @@
 >   （NaN 与阈值比较恒 False → 旧代码永不熔断）。
 > - `settle_eval_summary` 顺带落 kills_mean / zero_kill_frac / phits_mean / pickup_mean /
 >   timeout_frac / course_fp（门控技能子指标单源；缺数据一律 None = unknown，不伪装成 0）。
-> - 单测：`tests/test_gate_config.py`（32）+ `tests/test_gate_check.py`（22）。
+> - 单测：`tests/worker/test_gate_config.py`（32）+ `tests/worker/test_gate_check.py`（22）。
 >
 > **R3+R7 重开腿 `curricula/c6b-margin.jsonc`**（fresh out/traj）
 > - `wTick` 0.01 → **0.001**；`terminal.stage_clear` 2.0 → **6.0**（＝2× wKill）。
@@ -42,7 +42,7 @@
 > - `wait_job` 轮询指数退避（5s×2^k，封顶 60s；404 = 正常排队不退避）。
 > - 新增 `--remote-degrade-after N`（默认 3）：连败达阈值 → `args.ppo="local"` + `remote_degrade`
 >   事件 + 本轮继续（训练活着）；`N=0` 连败 3 次 → 写 `gate_verdict: ABORT` 后停腿。
-> - 单测：`tests/test_remote_degrade.py`（6）。
+> - 单测：`tests/test_remote_degrade.py`（6；**今 → `nn-training/tests/trainer/test_remote_failure_policy.py`**——降级退役后的「去降级版」）。
 >
 > **§12 复盘评审的处置（2026-09-11，逐条核过数据，非照单全收）**
 > - **接受**：D10 单变量失真、D11 假说链、Phase 顺序、effect size ≥5pp、有效训练

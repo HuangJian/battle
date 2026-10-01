@@ -35,7 +35,7 @@ def rl_config_path() -> Path:
     路径）——**一处实现、三处读取点共用**。缘由（2026-09-22，用户指令「测试应该使用自己的
     fixtures」）：路径原本硬编码在多处，于是**任何读它的用例都隐式依赖本机那份未入库的配置**
     ——本机 `rl.stream=1` 就让「`course_args` ≡ `trainer/run_rl.py`」的解析对拍变红
-    （`tests/test_serve_wiring.py` 实测）：绿不绿取决于**别人机器上文件的内容**。有缝之后
+    （`tests/trainer/test_serve_wiring.py` 实测）：绿不绿取决于**别人机器上文件的内容**。有缝之后
     用例自带 tmp 夹具，两侧读取点都走同一个 env，对拍才是真对拍。
     """
     return Path(common.distribution.rl_config_path())

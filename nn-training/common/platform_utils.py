@@ -281,7 +281,7 @@ def kill_process_tree(proc: Any) -> None:
     sigkill = getattr(signal, "SIGKILL", None)
     # `proc.pid is not None` 是必需的（旧调用点/取不到 pid）：`os.killpg(None, …)` 抛的是
     # **TypeError**（不是 OSError）⇒ 那个异常会直接冲出本助手。Windows 上这条分支根本不走
-    # （`os.name != "posix"`），所以只在 POSIX 显形 —— 见 `tests/test_platform_utils_proc.py`
+    # （`os.name != "posix"`），所以只在 POSIX 显形 —— 见 `tests/common/test_platform_utils_proc.py`
     # 的「没自带进程组时退回单进程 kill」。
     if (
         os.name == "posix"

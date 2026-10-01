@@ -26,7 +26,7 @@
 所以 `worker` 侧不必留转发名（只 `run_training_core` 一个是新名字）。
 
 ★ **顶层零 torch / 零 numpy / 零 ppo**：三者都是**函数内**延迟 import（`_run_bc_job` 那条纪律的
-同款；`tests/test_train_core_split.py` 机械钉住「顶层没有」+「函数体里有」）。
+同款；`tests/remote/test_train_core_split.py` 机械钉住「顶层没有」+「函数体里有」）。
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@
  *
  * obs spec §3.4-7 / §4：schema.py 与 obs-encoder.ts 导出同名常量，任一端常量
  * 变动（通道数/标量布局/打包值域/镜像索引/弹速桶）指纹必变。本测试把 TS 侧钉在
- * 与 Python 侧**同一字面量**上；`nn-training/tests/test_schema_fingerprint.py`
+ * 与 Python 侧**同一字面量**上；`nn-training/tests/common/test_schema_fingerprint.py`
  * 把 Python 侧钉在同一值——任一端漏同步即红，而不是等 golden 前向对不上才发现。
  */
 import { describe, it, expect } from 'bun:test'

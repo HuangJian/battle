@@ -45,7 +45,7 @@ from common.proc import run_capture
 def _log_default(msg: str) -> None:
     """默认日志（tag=`battle-rl`）——行格式见 `common.logutil`（`clock=time` 保可注入）。
 
-    ⚠ `tests/test_notebook_runtime.py` 用 `monkeypatch.setattr(nbr, "time", clock)`
+    ⚠ `tests/remote/test_notebook_runtime.py` 用 `monkeypatch.setattr(nbr, "time", clock)`
     注入假钟 ⇒ 必须把本模块的 `time` 传进去，不能让 logutil 自己取全局 `time`。
     """
     log_line("battle-rl", msg, clock=time)

@@ -27,7 +27,7 @@ hub/auth.py                                   _AuthGuard + _is_loopback（第十
      但它的**唯一读者**是 `hub/http_face.py::HubHandler._bytes` —— 那个函数体里读的是
      *http_face 的模块全局*。所以 `monkeypatch.setattr("hub.server.SEND_TIMEOUT_SEC", …)`
      会**静默失效**（名字还在、没人读它）。全仓唯一的这处 patch 已随实现迁到
-     `hub.http_face.SEND_TIMEOUT_SEC`（`tests/test_hub_entry_split.py` 钉住这条）。
+     `hub.http_face.SEND_TIMEOUT_SEC`（`tests/hub/test_hub_entry_split.py` 钉住这条）。
   ② **不留无读者的转发名**。本模块只暴露下面 `__all__` 里那批**有读者**的名字 —— 一个没有读者
      的转发名就是一个静默空操作的 patch 目标（第十刀的 `_prefetch_fill` 教训）。
 
@@ -108,7 +108,7 @@ from hub.task_pack import (
 )
 
 #: 本门面**对外承诺**的名字全集（即上面每一条 re-export 的目标）。
-#: `tests/test_hub_entry_split.py` 正面钉住「这个集合 == 实际暴露的集合」：删一条 re-export
+#: `tests/hub/test_hub_entry_split.py` 正面钉住「这个集合 == 实际暴露的集合」：删一条 re-export
 #: 就红（而不是等到某个测试 ImportError 才发现），多一条无名读者也红（死门面）。
 __all__ = [
     "CF_SOURCE_HEADER",

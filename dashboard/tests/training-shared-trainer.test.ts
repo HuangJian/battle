@@ -3,7 +3,7 @@
  *
  *  用户口径：「hubserver/trainingloop/selfNode/cloudflared 都只需要开一个进程，就能同时支持
  *  所有并行训练课程」。本文件钉的是**训练侧之外的每一半**（python 那一半由
- *  nn-training/tests/test_serve_course_overrides.py · test_serve_wiring.py 承担）：
+ *  nn-training/tests/worker/test_serve_course_overrides.py · test_serve_wiring.py 承担）：
  *
  *   ① **形状**：共享槽（`scopeOf` 归一为 `''`）+ `restartSpecFor` 重建出来的 argv 必须是
  *      「发现模式」（**不给 `--courses`**、给 `--traj-root`/`--cluster-lock`）——把课程写进

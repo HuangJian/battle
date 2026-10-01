@@ -577,7 +577,7 @@ def pack_code_zip(
 #: `tools/` **整棵**（不是只 `tools/sim`）：2026-09-17 实测 `export-rl-rollout.ts`
 #: 的依赖闭包会跨出 tools/sim——它 import `../eval/godai-score`（v7 评分口径）。
 #: 手写「该包哪几个子目录」就是在猜依赖图；靠
-#: `tests/test_remote_iter_real_bun.py` 真跑一遍才是判据（那条测试就是这个事故的哨兵）。
+#: `tests/worker/test_remote_iter_real_bun.py` 真跑一遍才是判据（那条测试就是这个事故的哨兵）。
 TS_CODE_DIRS: tuple[str, ...] = ("src", "tools")
 #: 允许进 zip 的后缀（.ts 源码 + .jsonc 数据 + .wasm 权重——`src/nn/conv/conv_wasm_adapter.ts`
 #: 经 `import.meta.url` 读 `src/nn/conv/prebuilt/wasm/conv.wasm`，漏了它节点上卷积直接炸）。

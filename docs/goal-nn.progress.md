@@ -21,7 +21,7 @@
 采集**（分钟级）里自己能跑完并自落账（wver 键控、幂等），到边界只需零成本观测/清账；还在跑
 （异常）只打 WARN 并交后台，时间基准用它自己的 `eval_window_sec`。
 
-**验证**：`tests/test_eval_timing.py` 16 例（旋钮/坏值、放行档三分支、epoch 边界、派发即放行与降级收回、
+**验证**：`tests/worker/test_eval_timing.py` 16 例（旋钮/坏值、放行档三分支、epoch 边界、派发即放行与降级收回、
 钩子不放/不放行、缺省零 join + 边界收拢、应急旋钮超预算夹回）；e2e `test_run_rl.py -k "eval_deferred|eval_post_ppo_weights|
 eval_local_gate|tail_join_grace|early_race"` 5 passed；nn python 全量绿 + ruff/mypy 干净。
 详见 `docs/nn/runtime-opt.md` §1、`DECISIONS.md §2026-09-17-goalnn-eval-wallclock`。

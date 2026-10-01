@@ -11,7 +11,7 @@
 落盘策略统一成「改了才落盘 + 原子发布」（六种旧策略里有两种在什么都没变时也整文件重写）。
 
 **两条刻意保留的特例语义**（集中化时最容易被「统一」掉 ⇒ 守卫正面钉在
-`tests/test_batch_store_txn.py`，不许只靠「搬得对」）：
+`tests/trainer/test_batch_store_txn.py`，不许只靠「搬得对」）：
   * `units.of == 0`（未定型）时 `mark_unit_done` **不判 done**（否则判决批会在
     `plan_verdict_units` 回填 `of` 之前就被标成 done）；
   * `aborted` 批的在途 unit 只回填 `node_dist`、**不复活**，`requeue` **不改** `aborted`。
@@ -250,7 +250,7 @@ class BatchStore:
         """原子发布台账（**全模块唯一写点**；只被具名转移与下面的 `write_batches` 缝调用）。
 
         ★ 为什么不是 `Path.write_text`（2026-09-25 修，复现用例
-        `tests/test_batch_eval.py::test_batch_ledger_publish_is_atomic`）：它先 `open('w')`
+        `tests/trainer/test_batch_eval.py::test_batch_ledger_publish_is_atomic`）：它先 `open('w')`
         **原地截断** live 文件再写字节 ⇒「截断」到「写完」之间存在一个**读者可见**的窗口。
         本文件的读者里有一个**无锁的跳语言读者** —— console/TS 的
         `batches.ts::loadBatches`（「runner 单写；console 只读」，坏行**静默跳过**），而它的
@@ -273,7 +273,7 @@ class BatchStore:
     # ───────────────────────────── 写面：八个具名转移 ─────────────────────────────
     # 每条 = 一次事务（读 → 改 → 原子写）；`dirty` 才落盘（内容等价，少整文件重写）。
     # `status` 的赋值点闭集 = 下面这五个带状态转移的方法（守卫见
-    # `tests/test_batch_store_txn.py::test_status_assignments_live_only_in_the_named_transitions`）。
+    # `tests/trainer/test_batch_store_txn.py::test_status_assignments_live_only_in_the_named_transitions`）。
 
     def enqueue(
         self,

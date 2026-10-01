@@ -22,7 +22,7 @@
 
 **`--json` 是控制台「调度器」卡片的契约面**（dashboard `server/api/loop-queue.ts` 消费，
 TTL 缓存）：改 `--json` 的字段名/语义 = 改控制台，两边必须在同一次改动里对齐（`waiting`
-那一列就是「每课在等什么」，`tests/test_loop_plan_waiting.py` 盯住它的取值域）。
+那一列就是「每课在等什么」，`tests/trainer/test_loop_plan_waiting.py` 盯住它的取值域）。
 """
 
 from __future__ import annotations

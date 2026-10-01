@@ -114,7 +114,7 @@ def tpu_backend_missing_reason(fp: dict) -> str:
 # ---------------- XLA 设备 / 诊断助手（2026-09-26 从 ppo/common.py 搬来） ----------------
 # 顶层零 torch：torch / torch_xla 全部延迟到调用点（未装 torch_xla 的机器行为逐字节不变）。
 # 为什么搬：这一簇本就是「判据 + 诊断」（读设备属性 / 打一行自检日志），却与 torch 张量
-# 助手同住 ppo/common.py ⇒ 想测它们的用例只能连坐 torch（tests/test_tpu_backend_guard.py）。
+# 助手同住 ppo/common.py ⇒ 想测它们的用例只能连坐 torch（tests/worker/test_tpu_backend_guard.py）。
 
 def xla_device():
     """取 XLA 设备句柄。优先 `torch_xla.device()`（2.5+ 推荐），旧版回退 `xm.xla_device()`。

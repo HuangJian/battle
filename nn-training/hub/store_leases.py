@@ -31,7 +31,7 @@
 ## 两个对外名字（**名字是契约**）
 
 `ClaimOutcome` 与 `FREEZE_AFTER_RECLAIMS` 随本簇搬进本模块：`_HubQueue` 与
-`tests/test_poison_freeze.py` 都要它们，而谁都 import 不了 `hub_server`（成环）
+`tests/hub/test_poison_freeze.py` 都要它们，而谁都 import 不了 `hub_server`（成环）
 ⇒ 由 `hub_server` 反过来 import 本模块（`FREEZE_AFTER_RECLAIMS as FREEZE_AFTER_RECLAIMS`
 保留 `hub.server.FREEZE_AFTER_RECLAIMS` 这个取名字的入口）。
 """

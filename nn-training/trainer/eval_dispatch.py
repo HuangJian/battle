@@ -887,7 +887,7 @@ def dispatch_eval_round(
     """固定语料干净评估（阻塞版，调用方放后台线程跑）。任何失败只记日志，绝不抛出。
 
     薄包装：OO 实现在 EvalDispatcher（trainer/eval_dispatch.py 同模块——本地直跑
-    runner 的 monkeypatch 需落在本模块全局名上，见 tests/test_run_rl.py）。
+    runner 的 monkeypatch 需落在本模块全局名上，见 e2e/test_run_rl.py）。
     """
     EvalDispatcher(
         bun, rl_path, traj_dir, args, cfg, iter_id, it, rollout_winrate, local_gate, baseline

@@ -1,7 +1,7 @@
 """batch_plan — 批语料规划 + 判据 / 门（B 层纯函数面）。
 
 2026-09-25（S25/B1）从 `trainer/batch_eval.py` **纯搬**出来（成员逐字节对账见
-`tests/test_batch_plan_split.py`）。它只回答两个问题：
+`tests/trainer/test_batch_plan_split.py`）。它只回答两个问题：
 
   ① **这一批要跑哪些 unit** —— ladder 批读 `dashboard/src/evalboard/ladder.json`，
      verdict 批读课程关卡文件的 `stages[]`（`plan_units` / `plan_verdict_units` /

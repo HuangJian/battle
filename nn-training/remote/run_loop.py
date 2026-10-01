@@ -40,7 +40,7 @@ from remote.plan_run import (
 
 # ---- 门面：引擎的公开名在入口侧转发一份（历史调用方与测试的 import 一行不改）--------
 # 注入点口径：这些名字的**实现**在 `remote/plan_run.py`，patch 那里才生效；这里的转发名
-# 只为 import 兼容（`tests/test_plan_run_split.py` 把两个方向都钉住）。
+# 只为 import 兼容（`tests/remote/test_plan_run_split.py` 把两个方向都钉住）。
 from remote.plan_run import (
     RunContext as RunContext,
 )

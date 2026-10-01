@@ -54,11 +54,11 @@
 
 ### 26.3 钉在哪 / 读数
 
-* 测试：`nn-training/tests/test_node_identity.py`（10 例：钉/不一致/不复写/旧 agent fail-open/按轮隔离/
+* 测试：`nn-training/tests/worker/test_node_identity.py`（10 例：钉/不一致/不复写/旧 agent fail-open/按轮隔离/
   账本有界/坏输入不炸 + **接线守卫**：四个门点都真调该判据、rollout 的钉与核共用同一个 round key 表达式）；
-  `tests/test_batch_lanes_split.py::test_bringup_rejects_a_node_whose_bootid_changed_within_the_unit`
+  `tests/trainer/test_batch_lanes_split.py::test_bringup_rejects_a_node_whose_bootid_changed_within_the_unit`
   （消费面行为例：门全放行、唯一变量 = bootId 换代 ⇒ 拒派且 `given_up`）。
-* 结构守卫连带登记：`trainer/batch_runner.py` 的顶层 import 闭集（`tests/test_batch_runner_split.py`
+* 结构守卫连带登记：`trainer/batch_runner.py` 的顶层 import 闭集（`tests/trainer/test_batch_runner_split.py`
   `RUNNER_IMPORTS`）多了裸包 `rl`（`from rl import node_identity`）——先红、再登记（本仓惯例）。
 * 门禁读数（2026-09-29，Linux/forkdist）：`bun run pygate` **3368 passed / 3 skipped**，ruff + mypy 全绿（18s）。
 
@@ -117,7 +117,7 @@ state-init 共存 = 方案 i（切点规则不变 + 交棒后首段禁事件）�
 - **状态转移才落账**（同 `_stop_loss`）：streak 变才写，0→0 不写（否则每轮一行淹账本）。
 - 读数缺失的行（0 局的轮）**既不计数也不清零**：当 0 会误停腿，清零会打断真趋势。
 
-**验收（盘上）**：`tests/test_kickstart_plan.py`（15：四管道逐条 / 公式三点 / 缺席逐字节不变 /
+**验收（盘上）**：`tests/worker/test_kickstart_plan.py`（15：四管道逐条 / 公式三点 / 缺席逐字节不变 /
 自洽拒启 / CLI 冲突仍被拦 / 基础线缺失不判 / 门槛边界 / 反弹清零 / 缺失读数 / 执行面阈值覆盖 /
 停腿+账本回放 / 云端达令按课程 / 缰绳关着零行为 / 计数不重复写）；nn 门禁全绿 **1955 passed**。
 未做（有意）：§5.3 的**控制台开课回执**（需 dashboard 侧开发；训练侧日志先行）。
@@ -160,9 +160,9 @@ state-init 共存 = 方案 i（切点规则不变 + 交棒后首段禁事件）�
 调到 0.05，次数节流当场刷爆日志；按墙钟推进下一个报告点。另：`leased` 的收尾语义是「再给一个完整
 预算」（H3），小 timeout 下会无限递归——测试必须在后台线程里等、落结果收兵。
 
-**验收（盘上）**：`tests/test_single_ppo_path.py`（5 例：argparse 无 `--ppo`/无 `args.ppo` 属性且传参报错、
+**验收（盘上）**：`tests/worker/test_single_ppo_path.py`（5 例：argparse 无 `--ppo`/无 `args.ppo` 属性且传参报错、
 无 degrade 旗标、AST 零 `args.ppo` 引用、无 `*PPO*BACKEND*` env 读点、课程 schema 拒 backend 键）；
-`tests/test_wait_starvation.py`（3 例：零 worker 响亮 / leased 不喊饥饿 / 可关）；
+`tests/remote/test_wait_starvation.py`（3 例：零 worker 响亮 / leased 不喊饥饿 / 可关）；
 nn 门禁（ruff+mypy+全量 pytest 1919）、`bun run check`、`dashboard typecheck/test`（967）、`build:ui` 全绿。
 细节与调用面清单：`plan/accident.plan.md` §0.1「§3 落地实录」。
 
@@ -186,8 +186,8 @@ wver/course 匹配的 shard manifest 重聚合 outcomes。
   `trainer/loop_volume.py::TrainingVolume`，方法名不变）
   `resumed_manifests(traj_dir, wver, extra_wver, course_fp)` + stages 过滤 → merge。
   `_traj_dir = traj/it{N}` 已是迭代作用域。
-- **验证**：`tests/test_rollout_volume.py::test_continuous_restart_quota_met_backfills_winrate_from_shards`
-  + `tests/test_rl_reports.py` 三条 merge 不变量；volume/ledger/scheduler/e2e 相关
+- **验证**：`tests/worker/test_rollout_volume.py::test_continuous_restart_quota_met_backfills_winrate_from_shards`
+  + `tests/worker/test_rl_reports.py` 三条 merge 不变量；volume/ledger/scheduler/e2e 相关
   113 用例绿。
 - **不在 DECISIONS**：bugfix 口径（HOW-TO-ADD §1：防重犯靠测试断言 + 本条）。
 - **遗留（未修）**：continuous `start_idx` 重启后从 0 重抽种子流，首批可能整批命中
@@ -241,7 +241,7 @@ sharedHubUrl(cfg)`」——正是 local 预设写下的那两个键。**刻意�
 ### 训练侧一行未改（这才是重点）
 
 `remote.worker` 本来就与课程无关（`poll_job(base_url, token, …)` 没有课程参数）。新增集成用例
-`tests/test_local_worker_multi_course.py`(3) 用**进程内真 hub（HTTP）+ 真 worker 领活函数**钉住：
+`tests/remote/test_local_worker_multi_course.py`(3) 用**进程内真 hub（HTTP）+ 真 worker 领活函数**钉住：
 ① 同一 worker 身份依次领到两门课的 job（跨课程轮转 + 响应自报 `course`）；②「先起 worker、
 后加课」时同一进程立刻能领新课的活；③ 形参围栏——领活链路里不得出现「课程」（哪天有人给
 worker 加 `--course`，这条会红；否则它不会崩，只会表现为「另一门课的 job 永远没人领」）。
@@ -386,9 +386,9 @@ BC 的续训按 `jid` 存（hub `/jobs/{jid}/resume`、worker 本地 `bc-resume/
 
 ### 回归
 
-`tests/test_bc_ledger.py`(9) · `tests/test_bc_loop.py`(16：重入不重发布 / 盘上认领 / 已完成轮跳过 /
+`tests/worker/test_bc_ledger.py`(9) · `tests/trainer/test_bc_loop.py`(16：重入不重发布 / 盘上认领 / 已完成轮跳过 /
 push 每轮一次 / 本机一枪到底 / 冒烟与回显作废 / 指标增量不重复且失败不致命 / 阻塞驱动收官) ·
-`tests/test_serve_bc.py`(5，**serve × BC 集成**：BC 让位时 RL 课照常跑完 / 细粒度下 BC 仍是轮粒度 /
+`tests/trainer/test_serve_bc.py`(5，**serve × BC 集成**：BC 让位时 RL 课照常跑完 / 细粒度下 BC 仍是轮粒度 /
 容量 1 驱逐后认领而**不重发** / 锁 = `.run_bc.<课>.lock` / 坏 BC 课不带倒 RL 课)。
 既有 BC 用例改指向新家（`test_bc_course.py` / `test_remote_transport.py` / `e2e/test_bc_epoch_e2e.py`）。
 
@@ -455,10 +455,10 @@ push 每轮一次 / 本机一枪到底 / 冒烟与回显作废 / 指标增量不
 
 ### 回归与门禁
 
-- python：`tests/test_loop_control.py`(22：解析边界 / 保守方向 / 幂等 / 坏文件不覆盖 / 回执原子性与
-  **未变化不写盘**／pid 语义) + `tests/test_serve_wiring.py`(+8：零课程照跑 / 中途出现的课自动入队 /
+- python：`tests/trainer/test_loop_control.py`(22：解析边界 / 保守方向 / 幂等 / 坏文件不覆盖 / 回执原子性与
+  **未变化不写盘**／pid 语义) + `tests/trainer/test_serve_wiring.py`(+8：零课程照跑 / 中途出现的课自动入队 /
   坏课只试一次 / 暂停只停点名课 / 恢复从原处接着跑 / 坏控制文件保守继续 / CLI 转发形状)。
-- dashboard：`tests/loop-control.test.ts`(22) + `web-app-loopqueue.test.ts`(+9：四态 / 文案 / 徽标 /
+- dashboard：`tests/loop-control.test.ts`(22) + `web-app-loopqueue.test.ts`(+9【今 → `dashboard/tests/web-loop-queue.test.ts` + `dashboard/tests/web-app-coursematrix.test.ts`】：四态 / 文案 / 徽标 /
   只读不渲染开关 / route+cache 接线) + `server-api-loop-queue.test.ts`(+1)。
 - 门禁：nn python gate **1511 passed / 4 skipped**；dashboard **621 passed**；三份 bundle 构建 +
   根 `bun run check`（1864 passed）+ `bun run build` 全绿。
@@ -488,7 +488,7 @@ PAUSE/`run_complete` 落账，与单课程路径共用一份实现），停车�
 ④ 初次入队的粒度必须匹配执行体（细粒度 13 步 / 轮粒度单个 `round`），且只用判据原语
 （`course_facts` + `pending_tasks(round_tasks(...))`），不拉 `plan_course` 的展示面字段。
 
-**回归**：`tests/test_engine_pool.py`(9) + `tests/test_log_router.py`(6) + `tests/test_serve_wiring.py`(8，
+**回归**：`tests/worker/test_engine_pool.py`(9) + `tests/common/test_log_router.py`(6) + `tests/trainer/test_serve_wiring.py`(8，
 含「轮转交替 a,b,a,b」「13 步全表」「让位让别的课跑完」「容量 1 时驱逐重建再 setup」「坏课隔离」
 「参数与 `trainer/run_rl.py` 对拍」——对拍 oracle 是在子进程里跑 `run_rl.main()` 本体，本机缺当前 era 权重时
 跳过并写清理由，其余情况失败即红）。门禁：python gate **1476 passed / 4 skipped**；根 `bun run check` 绿。
@@ -529,7 +529,7 @@ R2c-3 的最后一项：单进程 supervisor 要为 N 门课各持一份 torch �
 
 ### 门禁
 
-`nn-training/tests/test_measure_checkpoint_rss.py`（7 例：推荐值取整/余量、候选表恒有默认架构兼底、
+`nn-training/tests/worker/test_measure_checkpoint_rss.py`（7 例：推荐值取整/余量、候选表恒有默认架构兼底、
 表格必须自带「测的哪份权重 / 跳过了谁 / 理论 vs 实测」、真造一份栈的量级保护带）；
 nn python gate **1453 passed / 3 skipped**（ruff + mypy 干净）；根 `bun run check` 绿。
 
@@ -604,7 +604,7 @@ job）。failover 判决抽成 `_push_over_nodes`：组合入口 `_push_job_roun
 ### ⑥ `WAIT_HOOKS` 里不再有 `ppo`（不得加回去）
 
 表里的闸门跑在**步骤之前**，对 ppo 来说那是「还没发布」。让位已由 `step_ppo` 自己产生——
-`tests/test_loop_runner.py` 把「不在表里」写成了断言（这个坑已经踩过一轮）。
+`tests/worker/test_loop_runner.py` 把「不在表里」写成了断言（这个坑已经踩过一轮）。
 
 ### ⑦ 验收与实测
 
@@ -617,8 +617,8 @@ job）。failover 判决抽成 `_push_over_nodes`：组合入口 `_push_job_roun
 
 | 文件 | 例 | 钉住 |
 |---|---|---|
-| `tests/test_remote_probe.py` | 14 | 三态分类 · 410 抛而 202/404 不抛 · **只问一次**（预置第二个响应没被消费）· 探针超时 ≤10s · 两条链路端点各自正确 |
-| `tests/test_remote_ppo_phases.py` | 8 | 未就绪⇒让位且不取结果 · **再入不重发布** · 不可续跑⇒就地阻塞 · 成功复位连败 · 发布/取结果/落位失败**都**进同一份判决 · 真策略接线（连败到阈值即降级） |
+| `tests/remote/test_remote_probe.py` | 14 | 三态分类 · 410 抛而 202/404 不抛 · **只问一次**（预置第二个响应没被消费）· 探针超时 ≤10s · 两条链路端点各自正确 |
+| `tests/worker/test_remote_ppo_phases.py` | 8 | 未就绪⇒让位且不取结果 · **再入不重发布** · 不可续跑⇒就地阻塞 · 成功复位连败 · 发布/取结果/落位失败**都**进同一份判决 · 真策略接线（连败到阈值即降级） |
 | `e2e/test_loop_supervisor_integration.py` | 改 | ppo 让位用例改为驱动**真三相**（假件只替 `publish`/`probe`/`land`）：a 让位时 b 跑完整轮；`entered` 里 ppo 连着两次（第一次让位、第二次落位）；走完的仍是 13 步各一次 |
 | `e2e/test_push_mode_integration.py` | +3 | 发布相位提交 / 换节点**重提交**（断言 payload 真从盘上重读）· 确定性原因优先上抛 · 探针跟着当前节点 |
 
@@ -695,7 +695,7 @@ ROUND_TASKS (biz.loop_tasks)  ← 唯一顺序来源
 
 **⛔ `eval_join` 不加让位**：本机 eval 局的墙钟是**故意藏在下一轮 rollout 里**的（`_eval_tail` 交棒、
 `_dispatch_delayed_eval` 入口收拢）。给它让位 = 把那条尾巴重新串回轮边界，正好抵消掉当初压掉的
-软等窗口。`tests/test_loop_runner.py` 把这个「缺席」写成断言，防止后来者顺手补上。
+软等窗口。`tests/worker/test_loop_runner.py` 把这个「缺席」写成断言，防止后来者顺手补上。
 
 ### ④ 已装的那一处：预采（1 小时轮询 → 让位）
 
@@ -723,9 +723,9 @@ ROUND_TASKS (biz.loop_tasks)  ← 唯一顺序来源
 
 | 文件 | 例数 | 钉住 |
 |---|---|---|
-| `tests/test_loop_round.py` | 13 | 表 == `ROUND_TASKS`、`STEP_METHOD` 与实现一一对应、`precollect_join` 必须最前、组合循环按表施加终止/异常分类 |
-| `tests/test_loop_runner.py` | 5 | `WAIT_HOOKS` 的 kind 都在表里、`eval_join` 刻意缺席、钩子缺失⇒不让位、不就绪⇒`WAIT`+原因+`resume_at` |
-| `tests/test_precollect_ready.py` | 7 | 非阻塞（<0.5s）、半波即就绪、已退出即就绪、与 `join` 同源、超时仍 terminate |
+| `tests/worker/test_loop_round.py` | 13 | 表 == `ROUND_TASKS`、`STEP_METHOD` 与实现一一对应、`precollect_join` 必须最前、组合循环按表施加终止/异常分类 |
+| `tests/worker/test_loop_runner.py` | 5 | `WAIT_HOOKS` 的 kind 都在表里、`eval_join` 刻意缺席、钩子缺失⇒不让位、不就绪⇒`WAIT`+原因+`resume_at` |
+| `tests/trainer/test_precollect_ready.py` | 7 | 非阻塞（<0.5s）、半波即就绪、已退出即就绪、与 `join` 同源、超时仍 terminate |
 | `e2e/test_loop_supervisor_integration.py` | +3 | 13 步逐一走完 + **步级轮转**（前两步来自不同课）、ppo 处让位、预采处让位；细粒度与轮粒度**账本形状逐行一致** |
 
 ### ⑦ 踩坑记录
@@ -942,8 +942,8 @@ WAL replay-check: 1 个未完成提交 [ppo_remote@37 jid=... via push] —— �
 | nn python gate（ruff + mypy + pytest） | ✔ **1351 passed / 3 skipped**（25s；+14 新例） |
 | 根 `bun run check` | ✔ 38s 绿 |
 
-新回归：`tests/test_loop_tasks.py`（10 例：任务表/幂等键/资源池/四态/幂等铁律/失败语义）、
-`tests/test_commit_journal.py`（+4 例：attach 不动状态机、孤立 attach 不造在飞、finish 后不可复活、
+新回归：`tests/worker/test_loop_tasks.py`（10 例：任务表/幂等键/资源池/四态/幂等铁律/失败语义）、
+`tests/worker/test_commit_journal.py`（+4 例：attach 不动状态机、孤立 attach 不造在飞、finish 后不可复活、
 **硬死后带 job_id 的在飞集**）。
 
 ### 踩坑
@@ -1022,8 +1022,8 @@ R2b 加字段后再接）。
 | nn python gate（ruff + mypy + pytest） | ✔ **1338 passed / 3 skipped**（26s；+18 新例） |
 | 根 `bun run check` | ✔ 21s 绿 |
 
-新回归：`tests/test_train_ledger.py`（15 例：与五个旧扫描器**奇偶断言**、增量==单遍、
-独立复算连击、坏行/未知事件透明、提示类计数口径）、`tests/test_train_ledger_wiring.py`
+新回归：`tests/worker/test_train_ledger.py`（15 例：与五个旧扫描器**奇偶断言**、增量==单遍、
+独立复算连击、坏行/未知事件透明、提示类计数口径）、`tests/worker/test_train_ledger_wiring.py`
 （3 例：`_setup_common` 继承、继承计数当轮停腿、空账本从零起）。
 
 ### 踩坑（本轮）
@@ -1068,11 +1068,11 @@ supervisor（资源池容量 1）+ R2d 控制台单例卡片/队列视图 + R2e 
 **同批修掉的文档/注释**：`curricula/x3-start.jsonc`（收官总结「23 万 transitions/轮」勘误 = ticks）、
 `curricula/_example-custom-stage.jsonc`（量纲节 + 示例键名）、`plan/dynamic-rollout-volume.plan.md` §1/§2.1。
 
-**钉死单测**（`tests/test_rollout_volume.py`）：新增「① T9 量纲钉死（600000/4/980）」——
+**钉死单测**（`tests/worker/test_rollout_volume.py`）：新增「① T9 量纲钉死（600000/4/980）」——
 同一条 target=600000、4 关：新语义（est=98 samples）`G0=1531` **一波达标**；旧语义（est=980 ticks）
 `G0=154` **补满 `DEFAULT_MAX_WAVES`=3 波仍 < 达标线的 1/3**。另加
 `test_t9_old_ticks_key_name_is_rejected`（改名护栏：旧键照写必须响亮报错）。桩里 `totalTicks` 刻意写成
-`10×samples`，任何误读 ticks 的路径都会 10× 暴露。回归：`tests/test_rollout_volume.py` 52 用例 + 
+`10×samples`，任何误读 ticks 的路径都会 10× 暴露。回归：`tests/worker/test_rollout_volume.py` 52 用例 + 
 `e2e/test_volume_e2e.py` 10 用例（真调度器/真 shard）绿，nn python gate + 根 `bun run check` 绿。
 
 ---
@@ -1099,7 +1099,7 @@ supervisor（资源池容量 1）+ R2d 控制台单例卡片/队列视图 + R2e 
 种子段注册表注释）；`settle_eval_summary` 拆分台账 seed 落段并写三字段；
 `EvalDispatcher.run` pairs 构造处接线（日志带 `[dual-track anchor+rotor]`）。
 
-**验证**：`tests/test_dual_track_eval.py` 10 用例（周期/无重叠/报警 4.9 静默・5.0×3 响・
+**验证**：`tests/worker/test_dual_track_eval.py` 10 用例（周期/无重叠/报警 4.9 静默・5.0×3 响・
 2 轮不响/summary 三字段/续跑去重/本地 runner 注入 100 局双轨 + it=2 换段 + n_seeds=2
 前缀不扩）；相关 eval 回归 53 用例绿；ruff+mypy 189 文件绿；根 `bun run check` 1825 pass。
 **全量 nn pytest xdist 在本机环境 ~34% 处稳定 KeyboardInterrupt（排除本测试文件后复现）**
@@ -1234,7 +1234,7 @@ http://127.0.0.1:<本课 hub> --out tmp/local-worker-<课> --device cpu`（配�
 **验证（2026-09-15）**：dashboard `tsc` 干净 + 351 pass / 0 fail（59 文件，新增
 `tests/local-worker.test.ts` 11 用例：spec 形态 / poll 目标 / killTree / 双课隔离 / pull 注射 /
 重建逐字段一致 / 接线 grep 门禁）；根 `bun run check` 1819 pass / 4 skip / 0 fail；
-nn-training python gate 绿（新增 `tests/test_remote_transport.py`：run_rl 与 run_bc 两侧裁决
+nn-training python gate 绿（新增 `tests/trainer/test_remote_transport.py`：run_rl 与 run_bc 两侧裁决
 + argparse 默认值与 choices）；`bun dashboard/src/server/build.ts` 三份 bundle 与根 `bun run build`
 均通过。顺手补了 HEAD 上已红的 `selfNodeSpec.cwd`（控制台以 dashboard/ 为 cwd 启动时的
 `Module not found` 回归护栏）。
@@ -1299,7 +1299,7 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
 
 - **性质**：纯工程化改造（课程 = 并行单元），不碰任何训练算法；PPO/BC/课程/熔断/奖励公式零改动。
 - **已落地**：
-  - **P0**：`tests/training-multi-course.test.ts`（双课 spec/锁/配额/门禁）、`nn-training/tests/test_multi_course_locks.py`、`docs/multi-course-audit.md`。
+  - **P0**：`tests/training-multi-course.test.ts`（双课 spec/锁/配额/门禁）、`nn-training/tests/trainer/test_multi_course_locks.py`、`docs/multi-course-audit.md`。
   - **P1**：`tools/training/slots.ts`（端口算术 `hub_base + slot*10` 唯一归宿 + `checkCapacity`/`allocateSlot`）；锁 per-course（`.run_rl.<course>.lock`/`.train_loop.<course>.lock`，无课程沿用旧名）；账本 `Record<course, Entry>` 四新键 + 旧扁平键读兼容（R1）+ 旧条目一次性回填迁移；`train.ts` 双锁 per-course 预检 + `kill (script, course)`（R3）；`git push` 串行化 `.git_push.lock`。
   - **P2**：hub per-course（jobRoot/jsonl/端口），BC 种子 `courses.ts::seedWeightsFromBc`（缺文件 fail loud）。
   - **P3**：cloudflared/workerServe per-course；`rl.remote_hubs[course]` + 兼容单键；`gpu_push` 清单按 `push_node_url` 过滤（非空零匹配 → WARN + manifest 打标，不抛）；notebook 引导文本。
@@ -1334,7 +1334,7 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
 - **事故与根因**：c4-dodge 一天内两次"设计内停车"——G13 占空比（it7/it8）与 G4 plateau（it36，win_rate 0.69→0.74 横盘 6 轮）。原语义"非 HOLD 门判决即停车"（§4.3）让 loop 每次停车 → console exit-watchdog 按 §385 自动 halt 云机 + 红横幅，loop 等人手重启，每 ~6-7 轮一次停线。
 - **现场误判**：kaggle 收到停机达令后日志静默（纯达令分支不打 60s 存活日志）被读成"罢工"——实际 worker 每 5s 照常轮询（无 poll failed），只是 halt 期无任务可接。
 - **改动**：① `trainer/loop_guards.py`：`_park_on_gate`→`_apply_verdict`，非 HOLD 判决仅落 `gate_verdict` 事件并返回 False（继续训练）；新增 `_sync_cloud_halt`——REMEDIATE/PAUSE/ABORT→hub halt，HOLD/ADVANCE→resume，实例态 `_cloud_halted` 防重发；② `remote/hub_client.py` 新增 `set_cloud_halt`（console 与 loop 共用 /admin/workers/{} 端点）；③ `remote/worker.py` 停机达令分支补 60s 存活日志。停车只剩预算到顶/F4 熔断/止损 2σ/远端不可用 ABORT 等硬边界。
-- **验证**：新增 `tests/test_loop_gate_nopark.py`（REMEDIATE 不停车+halt、HOLD resume、STOP 不发、无 hub 短路）+ `test_remote_hotswap.py` 停机期存活日志 + `test_remote_ppo.py` set_cloud_halt 链路；gate_check/degrade/run_rl -k gate 全绿，mypy 干净。
+- **验证**：新增 `tests/trainer/test_loop_gate_nopark.py`（REMEDIATE 不停车+halt、HOLD resume、STOP 不发、无 hub 短路）+ `test_remote_hotswap.py` 停机期存活日志 + `test_remote_ppo.py` set_cloud_halt 链路；gate_check/degrade/run_rl -k gate 全绿，mypy 干净。
 - **遗留**：loop 直连 hub 的停机不走 console-state（`cloudHalt`），控制台红横幅不会显示门引发的云机停机；如需横幅需 console 侧从 hub /admin/workers/status 同步状态（待办，未做）。
 
 ---
@@ -1584,7 +1584,7 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
   860001-860200）max 胜局 tick / 新上限余量：c01 1121/+34% · c02 1640/+28% · c03 1775/+52% ·
   c04 2510/+31% · c05 2720/+43% · c06 2776/+62% · c07 3381/+51% · c10 3677/+88% · c14 4823/+93%，
   逐点零超时；**上界不缩**（12900 ≥ 原式 12000）。单一实现 = `biz/ladder_factory.max_ticks_for()`，
-  由 `nn-training/tests/test_ladder_factory.py` 钉死。
+  由 `nn-training/tests/biz/test_ladder_factory.py` 钉死。
 - **违反后果**：低 count 端截断会把可赢局记成超时 ⇒ 门（pooled 400 ≥80%）构造性不可达，或超时率被
   误读成能力信号去调训练侧；终局标准反复改则 §6「现线证据沿用」与跨级/跨版本可比性失效。
 
@@ -1660,7 +1660,7 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
 - **本相位**刻意**的行为变化**（就是修复内容，必须知道）：门禁计数**不再随进程重启清零**——① I2「提示类门 REMEDIATE ×N 即停腿」的计数读**整条账本**（换新 traj = 新纪元，重新计数）；② F4 `kl_streak`/`ent_streak` 与 `ent_peak` 同源继承（连击是**连续**计数，只有下一轮再越线才续，继承既真又无害）；③ 止损连击靠新事件跨重启成立。**刻意不继承**：`_consec_fail`（重试连击是单腿内的进程护栏，继承会「重启即秒死」）、`_zero_shard_streak`（口径还依赖 `_node_rollout`，而 `iteration` 行今天没有 `rollout_src` ⇒ 从账本重算会对节点轮报假事故——R2b 给事件加该字段后再接）。
 - **备选与否决**：另造一份「训练状态账本」JSON 作 SSOT——否（两份真相必然分叉，且旧扫描器/读盘面/控制台全部已在读 `training_log.jsonl`）；把 13 步合并成「一轮一个任务」——否（用户定案：轮粒度下 executor 串行，一门课的远程等待会挡住其它课，单进程只省了进程数、没换来并行）；重启时把 torch 对象序列化恢复——否（Adam 动量序列化成本高且不必要：落盘面已有权重，缓存是**加速器**不是真相）；用 `Math.random`-式时间戳推断在飞任务 —— 否（幂等判据必须来自账本/盘面，不能来自时间猜测）。
 - **违反后果**：任何新增的跨轮门禁计数若写在内存里，就会重演本轮修掉的 bug（重启即洗白，`c6-pickup3` 6 次 / `c6-bonus` 10 次 REMEDIATE 那类判据被无限延长）；任何绕过 `_ledger_apply` 的账本写入会让视图与盘面分叉（R2b/R2c 的任务幂等判据随之失效）；把 E 类轮内瞬态写进 `loop-state.json` 会让重启后的记账与真实轮次错位。
-- **落地**：`nn-training/biz/train_ledger.py`（新）、`biz/events.py`（`write_*` 返回事件 + `write_stop_loss`）、`trainer/loop_core.py`（`_setup_common` 继承）、`trainer/loop_guards.py`（`_ledger_apply` + 止损落账）、`trainer/loop_steps.py`（`_record_iteration` 增量并入 + 类型声明）；回归 `nn-training/tests/test_train_ledger.py`（15 例：与五个旧扫描器**奇偶**、增量==单遍、独立复算连击、坏行/未知事件透明）、`tests/test_train_ledger_wiring.py`（3 例：`_setup_common` 继承 + 继承计数当轮停腿 + 空账本从零）。设计稿 `plan/r2-loop-task-queue.md`；进度 `docs/nn/training-stack.md` §10。
+- **落地**：`nn-training/biz/train_ledger.py`（新）、`biz/events.py`（`write_*` 返回事件 + `write_stop_loss`）、`trainer/loop_core.py`（`_setup_common` 继承）、`trainer/loop_guards.py`（`_ledger_apply` + 止损落账）、`trainer/loop_steps.py`（`_record_iteration` 增量并入 + 类型声明）；回归 `nn-training/tests/worker/test_train_ledger.py`（15 例：与五个旧扫描器**奇偶**、增量==单遍、独立复算连击、坏行/未知事件透明）、`tests/worker/test_train_ledger_wiring.py`（3 例：`_setup_common` 继承 + 继承计数当轮停腿 + 空账本从零）。设计稿 `plan/r2-loop-task-queue.md`；进度 `docs/nn/training-stack.md` §10。
 **R2b 落地（2026-09-18 续）——任务模型 + 在飞集，并把 `loop-state.json` 否决掉**：
 
 - **`biz/loop_tasks.py`**（新，纯逻辑）：`Task`（`task_id = course:it:kind` = 幂等键；重试只动 `attempt`）·
@@ -1680,8 +1680,8 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
   （`WAIT.resume_at`、资源池票），它可重算。（备选否决：写它当加速器——内容为零独立信息并集，只带来分叉风险；
   把在飞集写进账本——账本是**事件流**，在飞是**状态**，混进去污染所有账本读者。）
 - **落地**：`nn-training/biz/loop_tasks.py`（新）、`biz/commit_journal.py`（attach/inflight）、`trainer/loop_steps.py`
-  （`_remote_ppo` attach + `_commit_journal` 在飞集日志）；回归 `tests/test_loop_tasks.py`（10 例）、
-  `tests/test_commit_journal.py`（+4 例，含硬死注入带 `job_id`）。
+  （`_remote_ppo` attach + `_commit_journal` 在飞集日志）；回归 `tests/worker/test_loop_tasks.py`（10 例）、
+  `tests/worker/test_commit_journal.py`（+4 例，含硬死注入带 `job_id`）。
 **R2c-1 落地（2026-09-18 再续）——单进程调度核心 + 只读计划视图**：
 
 - **`biz/loop_scheduler.py`**（新，纯调度：无 torch/网络/IO）：`PoolSet`（资源票 + 记账，
@@ -1703,7 +1703,7 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
 - **R2c 拆相**：R2c-1（本段，机制 + 只读面）已完成；**R2c-2** = 抽 `run_one_round` 并把任务体接到
   真 `TrainingLoop` + 三处长等待改 `WAIT` 让位 + 进控制台 + `checkpointCacheMb` 真机 RSS 实测。
 - **落地**：`nn-training/rl/{loop_scheduler,loop_plan}.py`、`nn-training/trainer/run_rl_cluster.py`（均新）；
-  回归 `tests/test_loop_scheduler.py`（18 例）；实测：`trainer/run_rl_cluster.py --traj-root tmp` 在真课程
+  回归 `tests/worker/test_loop_scheduler.py`（18 例）；实测：`trainer/run_rl_cluster.py --traj-root tmp` 在真课程
   目录上读出 5 门课的计划（含「采集完成但账本未结算」那一态）。
 **R2c-2 落地（2026-09-18 三续）——轮体抽出 + 任务体↔引擎的桥 + 假件集成测试**：
 
@@ -1762,14 +1762,14 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
   就地阻塞取结果（拆分前语义）。于是「组合路径没有让位点」从一个运行期异常（`RoundYieldError`）
   变成了一个**事实字段**。
 - **`WAIT_HOOKS` 里不再有 `ppo`（且不得加回去）**：表里的闸门跑在步骤之前，对 ppo 来说那是「还没发布」。
-  让位已由 `step_ppo` 自己产生（`tests/test_loop_runner.py` 把「不在表里」写成断言）。预采那一处不变。
+  让位已由 `step_ppo` 自己产生（`tests/worker/test_loop_runner.py` 把「不在表里」写成断言）。预采那一处不变。
 - **失败判决只留一份**：`_handle_remote_failure`（从 `_remote_ppo_or_degrade` 的 except 分支抽出，
   逐字搬移）；发布 / 取结果 / 落位任何一段失败都进它——三段各自演化出不同的连败计数/停腿口径是本仓
   最贵的一类分叉。`_remote_ppo_or_degrade` 保留原签名与原 docstring（有 9 个既有用例钉着它）。
 - **落地**：`nn-training/{remote/hub_client.py,remote/push_client.py,trainer/loop_steps.py,biz/loop_round.py,
   trainer/loop_round_steps.py,trainer/loop_runner.py}`；拆分用一次性脚本（逐 hunk `assert` + `ast.parse`，
-  被搬的行逐字节不变，跑完即删）。回归：`tests/test_remote_probe.py`（14）·
-  `tests/test_remote_ppo_phases.py`（8）· `e2e/test_loop_supervisor_integration.py`（ppo 让位用例改为
+  被搬的行逐字节不变，跑完即删）。回归：`tests/remote/test_remote_probe.py`（14）·
+  `tests/worker/test_remote_ppo_phases.py`（8）· `e2e/test_loop_supervisor_integration.py`（ppo 让位用例改为
   驱动真三相）· `e2e/test_push_mode_integration.py`（+3：发布相位提交 / 换节点重提交 / 探针目标）。
 - **仍未做**：`Supervisor` 进控制台（单例卡片 + 每课队列视图）· `checkpointCacheMb` 真机 RSS 实测表。
 **R2d 写的一半（2026-09-19 八续）——单进程 supervisor 真的能跑了：进程级/课程级/步骤级三层各做一次**：
@@ -1783,7 +1783,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
 - **进程级一次**（`prepare_process`）：UTF-8 stdio / faulthandler / `chdir(repo)` / 启动前 `git push`
   （`.git_push.lock` 串行化）/ 节点升级分支锁到训练机分支 / bun 存在性。每课各做一次 = 每课都推一遍 git。
 - **课程级一次**（`open_course`）：参数解析（与 `trainer/run_rl.py --course` **逐字段一致**；对拍见
-  `tests/test_serve_wiring.py::test_course_args_match_run_rl_echo_config`——oracle 是在子进程里跑
+  `tests/trainer/test_serve_wiring.py::test_course_args_match_run_rl_echo_config`——oracle 是在子进程里跑
   `run_rl.main()` 自己、把 `echo_config` 换成 dump，本机缺当前 era 权重则**跳过并写清理由**）+ `validate_args`
   + **按课程的单实例锁**（同课双开响亮拒启；2026-09-06 双 trainer 并写同一 traj 的护栏不删，只是文件名
   按课程命名）+ 清本课 hub 停机态。
@@ -1806,9 +1806,9 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
    `pending_tasks(round_tasks(...))`（判据原语与只读计划视图同源），**不**调 `plan_course`——那会连 CLI 表格
    用的展示面字段（累计量/verdict）一起算。
 
-**回归**：`tests/test_engine_pool.py`(9：惰性/命中/LRU/两道上限/不驱逐在用/响亮超预算/释放钩子/快照) ·
-`tests/test_log_router.py`(6：无前缀逐字节不变/作用域还原含异常/镜像到本课/坏 sink 不崩/重复注册换句柄) ·
-`tests/test_serve_wiring.py`(8：轮转交替 a,b,a,b / 13 步全表 / 让位让别的课跑完 / 容量 1 时驱逐重建再 setup /
+**回归**：`tests/worker/test_engine_pool.py`(9：惰性/命中/LRU/两道上限/不驱逐在用/响亮超预算/释放钩子/快照) ·
+`tests/common/test_log_router.py`(6：无前缀逐字节不变/作用域还原含异常/镜像到本课/坏 sink 不崩/重复注册换句柄) ·
+`tests/trainer/test_serve_wiring.py`(8：轮转交替 a,b,a,b / 13 步全表 / 让位让别的课跑完 / 容量 1 时驱逐重建再 setup /
 账本已结算不建引擎 / 坏课隔离 / 参数对拍)。门禁：nn python gate **1476 passed / 4 skipped**；根 `bun run check` 绿。
 
 **未做（R2d 剩下的操作面）**：控制台的入队/暂停 + 单例 `trainingLoop` 卡片（读面卡 R2c-3 已交付）；**R2e**：
@@ -1855,11 +1855,11 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
 恢复意图永远没人执行。现改为只认 `done`/`aborted`（暂停的课会让显式课程模式的进程一直等，用
 `--max-seconds` 兜底；发现模式本来就不退）。
 
-**回归**：`tests/test_serve_wiring.py`(+8：零课程照跑 / 中途出现的课自动入队 / 开不起来的课只试一次 /
+**回归**：`tests/trainer/test_serve_wiring.py`(+8：零课程照跑 / 中途出现的课自动入队 / 开不起来的课只试一次 /
 暂停只停被点名的课 / 恢复从原处接着跑 / 坏控制文件保守继续 / CLI 发现模式与 `--control-file`/`--mode` 转发) ·
-`tests/test_loop_control.py`(22：解析边界 / 非法名不废整份意图 / 保守方向 / 幂等 / 坏文件不被覆盖 /
+`tests/trainer/test_loop_control.py`(22：解析边界 / 非法名不废整份意图 / 保守方向 / 幂等 / 坏文件不被覆盖 /
 回执形状与原子性 / **未变化不写盘** / pid 存活语义) ·
-`dashboard/tests/loop-control.test.ts`(22) · `dashboard/tests/web-app-loopqueue.test.ts`(+9：四态 / 文案 /
+`dashboard/tests/loop-control.test.ts`(22) · `dashboard/tests/web-app-loopqueue.test.ts`(+9【今 → `dashboard/tests/web-loop-queue.test.ts` + `dashboard/tests/web-app-coursematrix.test.ts`】：四态 / 文案 /
 徽标 / 只读不渲染开关 / route+cache 接线) · `dashboard/tests/server-api-loop-queue.test.ts`(+1)。
 门禁：nn python gate **1511 passed / 4 skipped**；dashboard **621 passed**；三份 bundle + 根 `bun run check` +
 `bun run build` 绿。
@@ -1883,7 +1883,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
   ——torch 惰性初始化（首次 kernel 选择 / 分配器建池 / Adam 首步）会让**第一份**栈看起来贵两个
   量级（实测 78MB vs 真值 0.75MB）；② **栈必须活着**——被 gc 回收后第二课的增量会变成 0
   （分配器复用），累计曲线就是假的。实测工具本身有回归：
-  `nn-training/tests/test_measure_checkpoint_rss.py`（7 例：推荐值取整/余量、候选表恒有默认架构兼底、
+  `nn-training/tests/worker/test_measure_checkpoint_rss.py`（7 例：推荐值取整/余量、候选表恒有默认架构兼底、
   表格必须自带「测的哪份权重 / 跳过了谁 / 理论 vs 实测」、真造一份栈的量级保护带）。
 - **不测且写明的**：单轮 episodes/chunk 缓冲是**另一处峰值**（由 `mb` 与本轮样本量决定）——
   它是每轮瞬态、且本机 PPO 池容量 1 ⇒ 同一时刻只有一份；已由 forensics 埋点，不属缓存上限管的常驻量。
@@ -1918,9 +1918,9 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
   `server/server.ts`（启动暖一次）；训练侧 `nn-training/trainer/loop_plan.py`（`waiting_state`）+
   `trainer/run_rl_cluster.py`（抽 `build_rows`、JSON 加 `waiting`、表里也打印）。
 - **回归**：`dashboard/tests/server-api-loop-queue.test.ts`（13：解析容错 / 结果翻译四条失败分支 /
-  TTL 复用 / 单飞 / 在训合并 / state 注入）· `dashboard/tests/web-app-loopqueue.test.ts`（12：SSR 每课
+  TTL 复用 / 单飞 / 在训合并 / state 注入）· `dashboard/tests/web-app-loopqueue.test.ts`（12【今 → 面板 `dashboard/tests/web-app-coursematrix.test.ts` / 视图 `dashboard/tests/web-loop-queue.test.ts`】：SSR 每课
   一行 / 四态着色 / 未在训淡档 + 悬停 / 排队与页脚 / 读失败显因 / 接线断言）·
-  `nn-training/tests/test_loop_plan_waiting.py`（14：优先级 / 未知配额不编分母 / 真读盘组装）。
+  `nn-training/tests/trainer/test_loop_plan_waiting.py`（14：优先级 / 未知配额不编分母 / 真读盘组装）。
   子进程是**可注入接缝**（同 `deliver_zip` 导入惯例）⇒ dashboard 用例不跑 python，python 用例不碰
   控制台，两边各测自己那一半。
 - **仍未做**：① `checkpointCacheMb` 真机 RSS 实测表（R2c 上线前置条件）；② R2d 操作面（入队 / 暂停 /
@@ -1932,7 +1932,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
   `it`）与 `STEP_ORDER`（= `ROUND_TASKS`，**单一来源**）+ `STEP_METHOD`（kind → 引擎方法名）。
   步骤实现在 `trainer/loop_round_steps.py`（`RoundSteps` mixin，逐行从轮体搬来）；组合路径
   `run_one_round` 与细粒度驱动器**都从同一张表取步骤** ⇒ 加一步必须同时进表，两条驱动不可能漂移
-  （`tests/test_loop_round.py` 断言表与实现一一对应）。轮内状态**不长在引擎实例上**（§2.2 无隐藏
+  （`tests/worker/test_loop_round.py` 断言表与实现一一对应）。轮内状态**不长在引擎实例上**（§2.2 无隐藏
   状态：单进程多课程会互相覆盖）。
 - **顺序错纠正（真发现）**：`precollect_join` 必须排在 `prepare_iter` **之前**——它产出的是本轮
   `it{it}` 的 shard，而 `prepare_iter` 靠 `completed_pairs` 看盘决定「保留续跑 / 清场重建」；
@@ -1953,8 +1953,8 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
 - **读面补全「在等什么」**：`WAIT` 时把原因落到队列（`q.reason`），并在推进/收官时清空——
   状态 + 原因 + 在飞 `job_id` 三者合起来才够定位；过期原因比没有原因更坏。
 - **落地**：`nn-training/rl/{loop_round,loop_round_steps,loop_runner,loop_scheduler,loop_core,loop_tasks}.py`
-  （前两个新）、`nn-training/trainer/rollout_phase.py`（抽判据）；回归 `tests/test_loop_round.py`（13 例）、
-  `tests/test_loop_runner.py`（5 例）、`tests/test_precollect_ready.py`（7 例）、
+  （前两个新）、`nn-training/trainer/rollout_phase.py`（抽判据）；回归 `tests/worker/test_loop_round.py`（13 例）、
+  `tests/worker/test_loop_runner.py`（5 例）、`tests/trainer/test_precollect_ready.py`（7 例）、
   `e2e/test_loop_supervisor_integration.py`（+3 例：13 步逐一走完 + 步级轮转 / ppo 处让位 /
   预采处让位，账本形状与轮粒度逐行一致）。
 - **仍未做**：① `ppo` 的三相拆分（让位点从「每轮」变成「每步」的最后一块）；② `Supervisor` 进控制台
@@ -1973,7 +1973,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
   - **让位点只落在「等远端」这一段**：`BcLoop.run_one_round` 每次最多做一件事，等 GPU 回传时返回 `ROUND_WAIT`（新增的第三种轮终态：**本轮未完**，既不是失败也不是完成）⇒ 调度器把执行权交给别的课，过一会儿回来问同一轮。本机训练（`--local`）与 push 直推照旧阻塞（墙钟花在本机/邻居节点上，没有可让的余地）——与 RL 的 `eval_join` **刻意不进让位表**是同一条纪律。
 - **备选与否决**：让 serve 把 BC 课委托给 `bcRound(course, it)` 子任务类型（另一条执行路径）——否（第二条「一轮」实现，正是上面第一条要禁的）；把 BC 课也拆成细粒度步骤（采集/发布/等/落位各自一个任务）——本相位否（收益只是更细的让位点，而 BC 的墙钟几乎全在「等 GPU 回传」这一段，已让位；留作需要时再下沉）；让 `trainer/run_bc.py` 变成只 import 新模块的 re-export 壳（保持旧测试导入路径）——否（同一对象两个名字会让「谁是家」含混，改为把测试指向新家）；BC 课仍用一个专属进程（本轮不动）——否（与用户口径冲突）。
 - **违反后果**：任何在 `trainer/bc_loop.py` 之外再写一遍「一轮」（含控制台/工具脚本自己发布 job）都会重新引入「重发布 ⇒ bc-resume 失效 ⇒ 从头训」这条最贵的错误；任何把 BC 课按 RL 读账本的地方都会得到 `next_it=1`（看起来「这课没在训」）；给 BC 课发 13 步任务表会让该课在第一次执行时就 ABORT。
-- **落地**：`nn-training/trainer/bc_loop.py`（新，1395 行；14 个函数体从 `trainer/run_bc.py` **AST 逐字节搬迁**、`_append_ledger`/`_ledger_bc_epoch`/`_run_epoch_eval`/`_finish_all_rounds`/`_archive_round` 去下划线）· `biz/bc_ledger.py`（新，BC 指针/完成集/收口 job 的单一读面）· `biz/loop_round.py`（新终态 `ROUND_WAIT` + `RoundOutcome.detail`）· `trainer/loop_runner.py`（`ROUND_WAIT` → `waiting(..., jid=..)`；`ledger_next_it` 钩子）· `trainer/loop_core.py`（单课程驱动器对 `ROUND_WAIT` 的阻塞语义：退避重问同一轮）· `trainer/loop_plan.py`（`course_kind` / `round_tasks_for` / `course_facts(course=)`）· `biz/bc_config.py`（`is_bc_course`）· `trainer/loop_serve.py`（`_open_bc_course` + 工厂分派 + 入队粒度）· `trainer/run_bc.py`（薄壳）· `trainer/run_rl_cluster.py`（`build_rows` 带 `kind` + 人读表加种类列 + BC 行的 facts 行不再摆一排 RL 的零）· 控制台：`web/view/loop-queue.ts`（`LoopCourseKind` + `kindBadge`/`stepTitle`/`pendingTitle`）· `web/app/panels/LoopQueue.tsx` · `web/app/app.tsx`（解除 `isBc` 门控）· `web/theme.css`（`.tc-loopq__kind--bc`）。回归：`tests/test_bc_ledger.py`(9) · `tests/test_bc_loop.py`(16) · `tests/test_serve_bc.py`(5，serve × BC 集成：让位/驱逐认领/粒度/锁/故障隔离) · `tests/test_loop_plan_bc_rows.py`(9，读面：种类/指针/在飞/两行共存) · `dashboard/tests/web-app-loopqueue.test.ts`（+3：BC 行与 RL 行并列 / 悬停各说各的 / 卡片不再被 `isBc` 门控）· `dashboard/tests/server-api-loop-queue.test.ts`（+1：`kind` 的保守默认）· 既有 BC 用例改为指向新家（`tests/test_bc_course.py`、`tests/test_remote_transport.py`、`e2e/test_bc_epoch_e2e.py`）。进度 `docs/nn/training-stack.md` §19 / `docs/nn/console.md` §6；plan `plan/r2-loop-task-queue.md §8 R3-4`。
+- **落地**：`nn-training/trainer/bc_loop.py`（新，1395 行；14 个函数体从 `trainer/run_bc.py` **AST 逐字节搬迁**、`_append_ledger`/`_ledger_bc_epoch`/`_run_epoch_eval`/`_finish_all_rounds`/`_archive_round` 去下划线）· `biz/bc_ledger.py`（新，BC 指针/完成集/收口 job 的单一读面）· `biz/loop_round.py`（新终态 `ROUND_WAIT` + `RoundOutcome.detail`）· `trainer/loop_runner.py`（`ROUND_WAIT` → `waiting(..., jid=..)`；`ledger_next_it` 钩子）· `trainer/loop_core.py`（单课程驱动器对 `ROUND_WAIT` 的阻塞语义：退避重问同一轮）· `trainer/loop_plan.py`（`course_kind` / `round_tasks_for` / `course_facts(course=)`）· `biz/bc_config.py`（`is_bc_course`）· `trainer/loop_serve.py`（`_open_bc_course` + 工厂分派 + 入队粒度）· `trainer/run_bc.py`（薄壳）· `trainer/run_rl_cluster.py`（`build_rows` 带 `kind` + 人读表加种类列 + BC 行的 facts 行不再摆一排 RL 的零）· 控制台：`web/view/loop-queue.ts`（`LoopCourseKind` + `kindBadge`/`stepTitle`/`pendingTitle`）· `web/app/panels/LoopQueue.tsx` · `web/app/app.tsx`（解除 `isBc` 门控）· `web/theme.css`（`.tc-loopq__kind--bc`）。回归：`tests/worker/test_bc_ledger.py`(9) · `tests/trainer/test_bc_loop.py`(16) · `tests/trainer/test_serve_bc.py`(5，serve × BC 集成：让位/驱逐认领/粒度/锁/故障隔离) · `tests/worker/test_loop_plan_bc_rows.py`(9，读面：种类/指针/在飞/两行共存) · `dashboard/tests/web-app-loopqueue.test.ts`（+3【今 → `dashboard/tests/web-app-coursematrix.test.ts`】：BC 行与 RL 行并列 / 悬停各说各的 / 卡片不再被 `isBc` 门控）· `dashboard/tests/server-api-loop-queue.test.ts`（+1：`kind` 的保守默认）· 既有 BC 用例改为指向新家（`tests/worker/test_bc_course.py`、`tests/trainer/test_remote_transport.py`、`e2e/test_bc_epoch_e2e.py`）。进度 `docs/nn/training-stack.md` §19 / `docs/nn/console.md` §6；plan `plan/r2-loop-task-queue.md §8 R3-4`。
 - **控制台半（2026-09-19 同日接上）**：调度器卡片是**跨课程**卡（一次列出所有账本可发现的课），BC 行与 RL 行**并列**——读面（`trainer/run_rl_cluster.py --json` 的 `kind`）早在 R3-4 就通了，缺的只是 UI。三处关键决定：
   - **行上带课程种类**（`build_rows` 的 `kind` / 视图层 `LoopCourseKind`）：BC 的指针（`bc_round_completed`）、粒度（单个轮任务）、在飞来源（账本 `job_pending`）与 RL 全不同，不带种类 UI 只能猜（猜错就把 BC 读成一排看着像真的零）。种类判据 = `curricula/<课>.bc.jsonc` 是否存在（`loop_plan.course_kind`，与控制台 `isBcCourse` 同源）。
   - **`kind` 缺省/未知一律按 `rl` 渲染**（保守方向单侧）：python 比控制台旧时（还没这个字段）少一个徽标只是少信息；凭空空贴 BC 标签则会对外宣称「一轮 = 一个任务」（而它有 13 步）——假承诺比缺标签贵。`BC` 这种大小写不符也不认（只认 python 的确切取值）。
@@ -1995,7 +1995,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
   - **「在训」判据随之改口径**：registry 里不再有每课条目，故「哪几门课在训」= **调度器（`sharedTrainerAlive()`）+ 该课未收官**（`loop-queue` 的行），总览与课程 select 高亮同源。
 - **备选与否决**：① 给 `--serve` 传 `--courses <课表>`——否（进程绑死课程表，「先起 trainer、后加课」当场失效，而 hub 已确立「课程 = 发现」的口径）；② 每课传输旋钮塞进 `curricula/*.jsonc`——否（熔断口径，见上）；③ 共享 trainer 改住扁平单例键——否（旧账本里的 per-course 条目必须继续可见、可枚举、可停止；静默失监督是事故。共用一张表天然做到，靠槽 `''` 区分）；④ 顺手把 `localWorker`/`workerServe` 也收敛——**不做**（本机 PPO worker 的语义就是「poll **本课** hub」，每课一个是对的；`worker_server` 的语义轴是节点，见 `NODE_FACE_COMPONENTS`）。
 - **违反后果**：任何「按课起一个 trainer」的残留路径都会与共享调度器抢同一批 traj（症状：同一轮被两个进程各跑一半、账本交错、锁语义失效）；任何把本课准备失败说成 trainer 启动失败的话术，都会让操作员停掉所有课程。
-- **落地（训练侧）**：`nn-training/trainer/loop_serve.py`（`apply_course_machine_overrides` + 覆盖叠加与优先级 + 非法值响亮）· `nn-training/trainer/run_rl_cluster.py`（`--serve` 进程级单实例锁 + `--ppo` 直通）。回归：`tests/test_serve_course_overrides.py`(10：覆盖叠加/优先级/非法值响亮/未知键不认) · `tests/test_serve_wiring.py`(+1：单实例锁接线)。
+- **落地（训练侧）**：`nn-training/trainer/loop_serve.py`（`apply_course_machine_overrides` + 覆盖叠加与优先级 + 非法值响亮）· `nn-training/trainer/run_rl_cluster.py`（`--serve` 进程级单实例锁 + `--ppo` 直通）。回归：`tests/worker/test_serve_course_overrides.py`(10：覆盖叠加/优先级/非法值响亮/未知键不认) · `tests/trainer/test_serve_wiring.py`(+1：单实例锁接线)。
 - **落地（控制台）**：`core/registry.ts`（`trainingLoop` 进共享表）· `core/slots.ts`（锁名归一）· `core/types.ts` · `launch/cli.ts` · `stack/specs.ts`（`trainerServeSpec`，发现模式 argv）· `stack/course-knobs.ts`（新：机器侧旋钮写面）· `server/actions/{start,stop,restart,preset,smoke,train-smoke}.ts`（启动/换代/锁/停止语义/冒烟独占）· `server/api/{overview,loop-queue,state-view}.ts`（在训判据）· `web/`（视图同源）。回归：`tests/training-shared-trainer.test.ts`(9：argv 不绑课程表 / 每课条目拒重建 / mode→transport 逐条 / 账本=发现判据 / 进程级锁 / 停止语义 / 冒烟独占) · `tests/training-console-busy.test.ts`(9：**幂等早退仍释放 busy 键** + **准备失败不许冒充「启动失败」**，夹具已重定向 traj 根与 rl-config——此前它把断言挂在「本机 tmp 恰好有没有权重文件」上)。进度 `docs/nn/training-stack.md` §20。
 - **未做（明确记录，不是漏）**：① 真机「一个 serve 进程同时带 RL 课 + BC 课」的实弹运行（本轮全在夹具/假件下证明逻辑，与 R2e 同口径）；② `workerServe` 账本键的轴仍是课程（展示面已按节点例外声明，账本键未动）；③ `TrainLaunchModal` 的精简（模式仍按课选，落点已改为课程旋钮）。
 
@@ -2018,7 +2018,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
   提供分关 est_s。
 - **落地**：`biz/volume_quota.py`、`loop_core._volume_collect_continuous`（S4 第十八刀后住
   `trainer/loop_volume.py`）、
-  `tests/test_volume_quota.py`。回归：相关 pytest + parse 绿。
+  `tests/worker/test_volume_quota.py`。回归：相关 pytest + parse 绿。
 
 ---
 

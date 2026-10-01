@@ -13,7 +13,7 @@ numpy，P2-6d 的三条性质都能在纯 numpy 下钉住；`make_loaders` 只�
 抽哪些 shard 进 val 完全由调用方给的 `perm` 决定——`make_loaders` 里仍是
 `torch.randperm(shard_ids.max() + 1, generator=gen)`，`gen = torch.Generator().manual_seed(seed)`
 的消费顺序一字未改。本模块**不自己造随机数**：同一个 perm 必然得到同一组 val shard，
-所以既有语料的切分结果与拆分前逐字节相同（`tests/test_shard_plan.py` 用固定 perm 把这条钉住）。
+所以既有语料的切分结果与拆分前逐字节相同（`tests/worker/test_shard_plan.py` 用固定 perm 把这条钉住）。
 """
 
 from __future__ import annotations

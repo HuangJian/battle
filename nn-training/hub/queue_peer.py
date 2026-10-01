@@ -62,7 +62,7 @@ class QueuePeer(Protocol):
     """七个域混入互为**对端**：这里只声明「别的簇必须提供什么」，不带实现。
 
     签名逐条来自拆分前的 `_HubQueue`（每个方法原样搬进某一个混入，所以本文件是那些签名的
-    副本）——守卫 `tests/test_hub_queue_split.py` 把它与**真实现**逐参数对账，防止漂移。
+    副本）——守卫 `tests/hub/test_hub_queue_split.py` 把它与**真实现**逐参数对账，防止漂移。
     """
 
     def halt_of(self, course: str) -> bool: ...

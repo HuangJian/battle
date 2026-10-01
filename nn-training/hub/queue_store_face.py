@@ -18,7 +18,7 @@
 * **缺归属时的默认值逐方法不同**（`False` / `None` / `{}` / `[]` / `0` / 不返回）；
 * 名字表 + `getattr(st, "start_job")` 会把 `_JobStore` 是否真有这个方法从 **mypy 的检查范围**
   里拿掉——本仓 mypy 是绿的门禁项，拿它换 12 行样板不划算；
-* 守卫 `tests/test_hub_queue_split.py` 反而能做一件更强的事：把 docstring 承诺的
+* 守卫 `tests/hub/test_hub_queue_split.py` 反而能做一件更强的事：把 docstring 承诺的
   「**同名同签名**」变成**可执行断言**（逐参数名 + 默认值 + 注解对账）。写得越显式，这条
   断言越有信息量。
 

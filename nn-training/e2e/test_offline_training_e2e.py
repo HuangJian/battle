@@ -147,7 +147,7 @@ def _course_dirs(traj_root: Path, course: str) -> tuple[Path, Path]:
 
 
 def _plan_args() -> SimpleNamespace:
-    """`build_plan` / `build_iter_spec` 需要的最小 args（与 tests/test_plan.py 同源）。"""
+    """`build_plan` / `build_iter_spec` 需要的最小 args（与 tests/worker/test_plan.py 同源）。"""
     return SimpleNamespace(
         curriculum_stages="",
         curriculum_start=4,
@@ -355,7 +355,7 @@ def test_offline_segment_is_claimable_only_by_a_marked_worker(tmp_path: Path) ->
 
     2026-09-25：头的语义从「能力」升为**归属**（一个盘一种任务）——旧口径「带标仍可领
     在线课」已作废，对应的断言不再存在（归属闸会当场拒，见
-    `tests/test_role_routing.py`）。本文件保留的是跨进程那条真链路。
+    `tests/hub/test_role_routing.py`）。本文件保留的是跨进程那条真链路。
     """
     traj = tmp_path / "traj"
     off_job_root, off_jsonl = _course_dirs(traj, C_OFF)
@@ -474,7 +474,7 @@ def _real_pack(
     """用**真导出器**写一个任务包（控制台 `--export-bundle` 走的就是它）。
 
     `normalize_manifest` 被替换成恒等（最小 manifest 缺时间戳/字段时会拒），与
-    `tests/test_offline_task_pack.py::_export_real_pack` 同一口径。
+    `tests/hub/test_offline_task_pack.py::_export_real_pack` 同一口径。
     """
     from remote import bundle as bundle_mod
 

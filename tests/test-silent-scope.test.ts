@@ -24,8 +24,8 @@ describe('根套件范围 — dashboard 是独立项目', () => {
   })
 
   it('isRootSuiteTestPath 排除 dashboard/，但保留根测试', () => {
-    expect(isRootSuiteTestPath('dashboard/tests/training-console.test.ts')).toBe(false)
-    expect(isRootSuiteTestPath('dashboard\\tests\\training-console.test.ts')).toBe(false)
+    expect(isRootSuiteTestPath('dashboard/tests/training-console-busy.test.ts')).toBe(false)
+    expect(isRootSuiteTestPath('dashboard\\tests\\training-console-busy.test.ts')).toBe(false)
     expect(isRootSuiteTestPath('tests/test-silent-scope.test.ts')).toBe(true)
     expect(isRootSuiteTestPath('tests/not-a-test.ts')).toBe(false)
     expect(isRootSuiteTestPath('node_modules/pkg/x.test.ts')).toBe(false)

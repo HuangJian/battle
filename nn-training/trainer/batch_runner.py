@@ -1,7 +1,7 @@
 """batch_runner — B 层单元执行器（`BatchEvalRunner` / `dispatch_batch_bg`）。
 
 2026-09-25（S27/B3）从 `trainer/batch_eval.py` **纯搬**出来（成员逐字节对账见
-`tests/test_batch_runner_split.py`）—— 那是 §5.5.4 的第三步：B1 把纯规划/判据送到
+`tests/trainer/test_batch_runner_split.py`）—— 那是 §5.5.4 的第三步：B1 把纯规划/判据送到
 `trainer/batch_plan.py`、B2 把台账收进 `trainer/batch_store.py`，本模块收走**执行面**。
 一个单元 = 一个 100 局批次：通道机器（每节点各自 ping+权重就绪即派单）· 尾段竞速 ·
 背压重排 · 收尾三闸（settled / 僵死 / 零消费者宽限）。

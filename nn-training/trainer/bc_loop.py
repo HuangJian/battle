@@ -393,7 +393,7 @@ def bc_job_extra(course: BcCourseConfig, it: int, *, smoke: bool = False) -> dic
         # 训练种子（2026-09-14）：课程 `train.seed` 显式下发到云端 job ——
         # ① 同课程重跑可复现；② R1（v2/v3 obs 对照）两臂能同 seed ⇒ 同 val 划分
         # ⇒ val_loss 可比。键名用 `train_seed` 而非 `seed`：manifest 里 `seed` 已有
-        # hex per-job 占位的历史口径（tests/test_bc_epoch_e2e.py fixture），不复用。
+        # hex per-job 占位的历史口径（e2e/test_bc_epoch_e2e.py fixture），不复用。
         "train_seed": int(course.train.seed),
         # fire 头正例权重（2026-09-14）：语料 fire 正例仅 ~7%，不补偿则 fire_acc
         # 低于"永不发射"常数基线（实测 0.770 < 0.927）。**原值直传**：数字或 "auto"

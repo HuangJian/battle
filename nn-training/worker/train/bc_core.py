@@ -4,7 +4,7 @@
 
 `train/bc.py` 顶层 `import torch`（整个训练器都要），于是同住一个文件的**纯函数**
 （「课程 JSONC / 本机 CLI / 云端 manifest 三种来路的旋钮怎么归一」）在测试里也只能连坐
-torch——`tests/test_bc_course.py::test_resolve_fire_pos_weight` 因此在没有 torch 的机器上必红。
+torch——`tests/worker/test_bc_course.py::test_resolve_fire_pos_weight` 因此在没有 torch 的机器上必红。
 按 `ppo/np_core.py` / `train/device.py` 的同一手法抽出来；`train/bc.py` 再导出，
 既有 `from train.bc import resolve_fire_pos_weight` 一行不改。
 

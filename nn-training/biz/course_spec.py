@@ -274,7 +274,7 @@ class GateRule(BaseModel):
     require_rising: bool = False
     # 判决力（2026-09-11）：池化判据 + 噪声带——逐点判在 100 局/点下 SE=4.3pp，
     # 根本分辨不出 min_gain_pp=5pp（细节见 docs/agents.details.md 无关；依据在
-    # gates 块的 pool_window/conf_z 注释与 tests/test_gate_check.py）。
+    # gates 块的 pool_window/conf_z 注释与 tests/worker/test_gate_check.py）。
     #: 用最近 N 个评估点**合并局数**判（p=Σwins/Σgames，SE=√(p(1-p)/N)）。
     #: None = 逐点判（历史行为，其它课程零变化）。
     pool_window: int | None = None
@@ -713,7 +713,7 @@ class CourseConfig(BaseModel):
     #: 能区分「课程写的」与「吃缺省」（缺省大值 = 响亮 warning）。
     #: ⚠ 经 `flat_overrides` 映射到 argparse dest `kickstart_kl`（异名）；
     #: 它**不进** `corpus_identity_fp`（ref/优化器语义 ≠ 「一个样本是什么」，进去会让
-    #: 全体课程指纹漂移）——见 `tests/test_kickstart_plan.py` 的断言。
+    #: 全体课程指纹漂移）——见 `tests/worker/test_kickstart_plan.py` 的断言。
     kickstart_init: float | None = None
     #: demo 混 batch（x20 后续）：demo bank npz 路径（仓库相对，如
     #: `nn-training/data/human-x20-corpus/demo_bank.npz`）；"" = 关闭，老行为逐字节不变。

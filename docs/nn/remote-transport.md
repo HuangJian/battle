@@ -16,7 +16,7 @@
 | # | 问题 | 处置 | 判据 / 触发条件 |
 |---|---|---|---|
 | 1 | `post_result` 因 `stream=False` 不进 `_read_body` ⇒ 回传期间不让路，可能是 `p0_p95` 的另一半来源 | **不做（前提不成立）** | ① 上传本身不吃带宽：现场 `result=0.63MB/18-19s` ≈ 34 KB/s，而同一链路的 payload 下载能到 300 KB/s+（预取单跑 324 KB/s）⇒ 远未吃满；② P0 **从不进 bulk 队列**（红线 #1，独立 socket），让路与否只影响带宽竞争，而带宽竞争已由让路覆盖；③ 那 18-19s 的主体是**排队**（同段日志 `排队 17.6s 才拿到单通道`）—— 那是本轮已修的缺陷；④ 真要给回传接让路，`pace` **做不到**：POST 的大 body 是 `urlopen` 写请求体时发生的，而 `pace` 只在读**响应**时被调（回传的响应是几十字节 JSON）⇒ 得改成「`data` 传 file-like + `read(n)` 里 pace」的分块上传，属新传输改造 |
-| 2 | 取消环 1.5s 是否降频 | **保持 1.5s** | `JOB_CANCEL_POLL_SEC` 是记录在案的**用户口径**（`protocol.py:151`「1–2s 是用户口径」）且被 `tests/test_priority_schedule.py:696` 钉住（`<= 2.0`）⇒ 降频是改用户口径，不由 agent 单方面决定。且**判据上也不需要**：取消点在 **epoch 边界**（<20s 是硬需求，interval 只占其中一小段）；本轮修复后 P2 不再怕它，唯一残余影响是「控制面在途时 P2 开不了工」—— 1.5s 的间隙足够开工（P2 一旦开工就不会被控制面打断） |
+| 2 | 取消环 1.5s 是否降频 | **保持 1.5s** | `JOB_CANCEL_POLL_SEC` 是记录在案的**用户口径**（`protocol.py:151`「1–2s 是用户口径」）且被 `tests/hub/test_priority_schedule.py:696` 钉住（`<= 2.0`）⇒ 降频是改用户口径，不由 agent 单方面决定。且**判据上也不需要**：取消点在 **epoch 边界**（<20s 是硬需求，interval 只占其中一小段）；本轮修复后 P2 不再怕它，唯一残余影响是「控制面在途时 P2 开不了工」—— 1.5s 的间隙足够开工（P2 一旦开工就不会被控制面打断） |
 | 3 | 抢占不做 Range 续传 ⇒ 每次被 P1 打断的半截是纯浪费 | **先量后裁（已预注册门槛）** | 本轮已把作废字节入账（§50：wire 行 `preempt=N(wasted X.XXMB)`），真机跑 ≥3 个 job 即可读出真实浪费。**立项门槛**：单会话 Σwasted ≥ 一份 payload（≈3.4MB）或单次预取作废 ≥2MB ⇒ 立项做双端 Range（hub 解析 `Range` + 206/`Content-Range`；worker `_get_with_retry` 保半截 + `resume_from` 重放）；否则不做 |
 
 **顺带修正（查证 §8.1 时发现的度量 bug）**：段账的秒数是从**进槽前**起算的
@@ -25,7 +25,7 @@
 **不可比**（`tools/wire_report.py` 文档里「与 hub 侧同段对账即可本地化慢腿」的前提被破坏；现场
 `payload=…/321.8s` 里含 `排队 17.6s`）。改法：段账改用「进槽之后」的墙钟（`t_xfer`），排队归调度账
 （`wait=` / `排队 … 才拿到单通道`）；`_note_rate`（会话最好速率）**仍按含排队的墙钟**（保守侧，
-不抬高 `_min_rate` —— 与 §50 的口径一致）。判据：`tests/test_wire_reroll.py::test_segment_seconds_exclude_the_queue_wait` /
+不抬高 `_min_rate` —— 与 §50 的口径一致）。判据：`tests/remote/test_wire_reroll.py::test_segment_seconds_exclude_the_queue_wait` /
 `::test_result_segment_seconds_exclude_the_queue_wait`（改前红：段秒数 = 0.3s 的排队）。
 
 
@@ -82,10 +82,10 @@ wire 账（`preempt=N(wasted X.XXMB)`，仅 N>0 打印）。
 净值喂判据、把已收字节挂上异常；`_get_with_retry` 改**外层 while + 内层 for**：抢占走独立预算且
 不消耗 `attempts`；`_wire_note_preempt` + wire 行 `preempt=`）。
 
-**门禁**：`tests/test_bulk_sched.py`（+3 条与 1 条改写：`test_p2_not_preempted_by_control_yields_only` /
+**门禁**：`tests/remote/test_bulk_sched.py`（+3 条与 1 条改写：`test_p2_not_preempted_by_control_yields_only` /
 `test_p1_waiting_blocks_p2` / `test_control_waiting_blocks_p2` / `test_p1_is_not_gated_by_p1_waiting`）·
-`tests/test_wire_reroll.py`（+7：净值探针 / 净值不放宽墙钟超时 / `bytes_read` 入账 / 真慢仍重抽 /
-抢占独立预算三条）· `tests/test_soft_hold_prefetch.py`（+1 现场回归：取消环在跑时预取能传完并入库，
+`tests/remote/test_wire_reroll.py`（+7：净值探针 / 净值不放宽墙钟超时 / `bytes_read` 入账 / 真慢仍重抽 /
+抢占独立预算三条）· `tests/remote/test_soft_hold_prefetch.py`（+1 现场回归：取消环在跑时预取能传完并入库，
 `preempted == 0`）。**改前必红**：把新用例拿到 HEAD 的旧代码上跑 ⇒ 12 条红（`plan/bulk-p2-preempt-fix.plan.md` §11）。
 
 **真机复核（用户操作，未取）**：合入后重拉云 worker，同一双课程场景跑 ≥3 个 job — 预取 ≥1 次
@@ -150,7 +150,7 @@ wire 账（`preempt=N(wasted X.XXMB)`，仅 N>0 打印）。
 | `biz/loop_round.py::resolve_collect_mode` | `COLLECT_SEGMENT` → `COLLECT_OFFLINE`：**绝不**回落 `COLLECT_LOCAL`（回落 = 本机偷偷自己采样、与云机双跑） |
 | `trainer/loop_steps.py::_remote_ppo_publish` | **咽喉点守卫**：带 `plan_bytes` 而不带 `export_path` ⇒ `SystemExit`，消息指路 `battle.offline.ipynb` + `--export-bundle` |
 | `remote/worker.py::run_job` | `kind=run` **响亮拒收**（最前，零指令零下载；不是「当成 iter 跑一轮」——半跑会产出权重、让控制面看着像在推进） |
-| `remote/run_loop.py::run_plan_job` | 保留但**无生产调用者**：它是「从首轮结果续下去」的唯一入口，`tests/test_run_loop.py` 的 4 组段语义回归挂在它上面 |
+| `remote/run_loop.py::run_plan_job` | 保留但**无生产调用者**：它是「从首轮结果续下去」的唯一入口，`tests/remote/test_run_loop.py` 的 4 组段语义回归挂在它上面 |
 | `kind=run` 的 **manifest 形状** | **保留**（`--export-bundle` 仍造它，只是 `register=False` ⇒ 只建 job 目录当打包源、不进待领池） |
 | 配置（`rollout_src=run` + `run_iters`） | **不动**：它是「这门课由云机接手」的既有声明，也是导出腿的终点口径（删字段会让本机悄悄退回自己采样） |
 
@@ -168,7 +168,7 @@ wire 账（`preempt=N(wasted X.XXMB)`，仅 N>0 打印）。
 e2e 全绿）。
 
 **门禁**：`nn-python-gate` 2484 passed（ruff + mypy + tests/+e2e）· 新增
-`tests/test_offline_leg_retired.py`（13 条：发布点枚举 / 咽喉点响亮拒 / worker 拒收 / 本机循环
+`tests/trainer/test_offline_leg_retired.py`（13 条：发布点枚举 / 咽喉点响亮拒 / worker 拒收 / 本机循环
 收官 / 读数 / 报名）· dashboard `bun run typecheck` + 1158 测试绿（文案改词同步）· 一条
 `DECISIONS`。
 
@@ -343,7 +343,7 @@ sys.modules.pop(_m, None)`；② `offline_boot.py` 新增 `BOOT_SELF`（内存�
 **两个盘都改了（同日）**：`battle.tailscale.ipynb` 的 `_load_boot` 原来停在更早的形态
 （「有缓存先用缓存」+ `_branch.txt` + 无 sha 日志 + 无 `sys.modules.pop`）—— 一并升到与
 offline 盘同级。两个盘的 loader 是**各自内联的两份**（没有共享实现），所以漂移风险靠
-`tests/test_notebook_boot_refresh.py` 守：关键行为（`已刷新` / `@ sha12=` / `用上一份缓存继续` /
+`tests/remote/test_notebook_boot_refresh.py` 守：关键行为（`已刷新` / `@ sha12=` / `用上一份缓存继续` /
 `.replace(_dst)` / `sys.modules.pop` / `BOOT_SELF`，加「先摘再导」顺序与「无 `_branch.txt`」）
 做成一组 needle，两个 cell 各跑一遍。
 
@@ -463,7 +463,7 @@ bc 同 wver，与历史腿的 in-loop 锚天然对齐）；`--iter` 恒 0，派�
 = **关数 × `eval_games_per_stage`**。x20 课（4 关 × 50）= 200 局，是 A-eval（4×100 双轨 400）的一半；
 `eval_games_per_stage` 为 100/200 的课与 A-eval 等量。
 
-**门禁证据**：`tests/test_eval_a_once.py`（+4 例：缺省取 out / 已落账早退 / 缺 ckpt 拒 / iter≠0 拒）·
+**门禁证据**：`tests/trainer/test_eval_a_once.py`（+4 例：缺省取 out / 已落账早退 / 缺 ckpt 拒 / iter≠0 拒）·
 `dashboard/tests/eval-a-baseline.test.ts`（argv 形状 + `shouldAutoBaseline` 三态）·
 `course-lifecycle.test.ts`（逃生阀置位不起子进程）· ruff/mypy 全绿、`pytest tests/ e2e/` 2283 passed、
 `dashboard` 1143 passed、根 `bun run check` 2139 passed。
@@ -506,7 +506,7 @@ bc 同 wver，与历史腿的 in-loop 锚天然对齐）；`--iter` 恒 0，派�
    `_read_opt_file(root, "code.zip")`；不修会在 worker 侧报"传输损坏"，一条指向错误原因的报错）。
    TS 同规（`ts_code_sha256`），已有 `ts_code/` 就直接用、不重解。
 6. **`CFG.force_pack` / `CFG.task_zip` = 显式老行为**（包覆盖计划/清单，日志写明本机 it 与计划区间）。
-   `CFG.force_pack` 是本 plan 新加的 notebook 键（`tests/test_offline_notebook.py` 的 `CFG_KEYS` 守着）。
+   `CFG.force_pack` 是本 plan 新加的 notebook 键（`tests/remote/test_offline_notebook.py` 的 `CFG_KEYS` 守着）。
 7. **G3 文案**（`run_loop._drive`）：`todo` 空时区分「本机段落已完成（it{N} ≥ end_it{M}）——要用新段请清空
    产物目录 / 等新包（或置 `CFG.force_pack`）」与「计划内的轮次都已在产物里——无事可做」。
 8. **为什么决策住在 `offline_boot` 而不是 `run_loop`/`bundle`**（评审 F1，P0）：notebook 每次会话从
@@ -556,9 +556,9 @@ hub 只触发；`common/net_http.urlopen` 保证回环不走代理）⇒ 409「�
 * `nn-training/hub/server.py`：`TASK_PACK_INDEX_NAME` / `CONSOLE_URL_ENV` / `TASK_PACK_STALE_THROTTLE_SEC` /
   `TASK_PACK_STALE_TRIGGER_LIMIT` / `task_pack_stale_reason` / `decide_task_pack` / `pack_index_part_sha` /
   `trigger_task_bundle_export` / `reset_task_pack_triggers` + `_get_task_pack` 的新鲜度门。
-* 测试：`tests/test_offline_local_first.py`（20 条：判定表 / sha 门 / 修复 / 半截目录 / optional 取包 /
-  argv 形状）· `tests/test_offline_task_pack.py` 新增 11 条（新鲜⇒逐字节一致 / 过期⇒409 且恰好触发一次 /
-  节流 / 上界⇒照发 / 控制台不可达⇒降级 / 无权重⇒照发 / busy 视为成功）· `tests/test_run_loop.py` 新增 2 条
+* 测试：`tests/remote/test_offline_local_first.py`（20 条：判定表 / sha 门 / 修复 / 半截目录 / optional 取包 /
+  argv 形状）· `tests/hub/test_offline_task_pack.py` 新增 11 条（新鲜⇒逐字节一致 / 过期⇒409 且恰好触发一次 /
+  节流 / 上界⇒照发 / 控制台不可达⇒降级 / 无权重⇒照发 / busy 视为成功）· `tests/remote/test_run_loop.py` 新增 2 条
   （`--artifacts` 单用合法且不动本机 plan/manifest · G3 文案）。
 
 ## §40 opt blob 只装优化器状态、权重走内容寻址：每轮上行 −35.3%（plan/opt-blob-diet.plan.md，2026-09-24）
@@ -633,7 +633,7 @@ init blob）会被要求补一个永远不存在的 blob ⇒ **428 死循环、j
 
 ### 判据
 
-`nn-training/tests/test_opt_blob_shape.py`（15 用例：tar 形状 / 五源优先级 / 失败分类 / 哨兵 /
+`nn-training/tests/remote/test_opt_blob_shape.py`（15 用例：tar 形状 / 五源优先级 / 失败分类 / 哨兵 /
 产物缓存闭环 / `missing_blobs` 两闸）· `test_remote_ppo.py`（blob 端点 `?name=init` 200 · 未知名 400 · 缺失 404（同一白名单路径） +
 payload diet + slim=false 臂不落 init blob）· `test_remote_iter.py`（it≥2 不带 payload 权重 / 首轮带 /
 kind=iter 发布端守卫 / opt-only tar 落位）· `hub/smoke_loopback.py`（第 2 轮起 `blob_hits ≥ 2`、
@@ -672,7 +672,7 @@ bulk payload: 让路合计 9.5s / 6 次（控制面在途；单次预算 ≤ 5s�
 ```
 
 `stats()` 的 `yield_count` / `yield_sec`（**步数**口径，wire 行在用）**不动** —— 只动日志。
-判据：`tests/test_bulk_sched.py::test_yield_log_is_one_line_per_transfer`（同场景旧实现打 3 行 ⇒ 改前红）。
+判据：`tests/remote/test_bulk_sched.py::test_yield_log_is_one_line_per_transfer`（同场景旧实现打 3 行 ⇒ 改前红）。
 
 ---
 ## §38 job 身份跨课程碰撞：幂等键纳入课程 + 归属唯一化 + 发布端守卫（2026-09-24）
@@ -752,7 +752,7 @@ idempotency_key = (runId, course_fp, it, init_weights_fp, data_fp)
 
 | 位置 | 用例 | 压什么 |
 |---|---|---|
-| `tests/test_job_identity_collision.py` | `test_job_id_differs_across_courses_same_key_components` | L1：异课程 ⇒ 异 id |
+| `tests/remote/test_job_identity_collision.py` | `test_job_id_differs_across_courses_same_key_components` | L1：异课程 ⇒ 异 id |
 | 同上 | `test_old_key_formula_still_collides`（测试内**独立重实现**旧 4 分量公式） | 把 bug 焊成回归锚 |
 | 同上 | `test_collision_rows_flags_only_other_store` | 守卫判据（异 store 命中；同 store/异键不命中） |
 | 同上 | `test_publish_refuses_cross_store_identity` | 拒发且**不落任何文件、不记账本** |
@@ -815,7 +815,7 @@ if str(manifest["kind"]) in ("iter", "run") and not echo:
     resolve_bun(str((manifest.get("rollout") or {}).get("bun") or ""))
 ```
 
-四条判据都必须写进测试（`nn-training/tests/test_worker_bun_precheck.py`）：
+四条判据都必须写进测试（`nn-training/tests/remote/test_worker_bun_precheck.py`）：
 
 | # | 判据 | 为什么 |
 |---|---|---|
@@ -871,7 +871,7 @@ if str(manifest["kind"]) in ("iter", "run") and not echo:
 
 ### 门禁
 
-`nn-training`：`tests/test_multi_course_hub.py::test_mode_post_discovers_the_course_on_demand`
+`nn-training`：`tests/hub/test_multi_course_hub.py::test_mode_post_discovers_the_course_on_demand`
 （刚建目录、间隔闸未过期时，一条 mode POST 必须接住；`ghost` 课仍 400 且不改变课程表；非法模式不扫盘）；
 `dashboard`：`tests/course-mode.test.ts` 两例（重试成功 / 连不上不重试）。
 
@@ -924,11 +924,11 @@ if str(manifest["kind"]) in ("iter", "run") and not echo:
 ——口径一分为二正是 §10/§12 治的那个病。把云机**同一份实现**（它自己就调
 `settle_eval_summary`）算出的 summary 搬回账本，才是「同一份读数」。
 
-**验证**：`tests/test_eval_ledger_merge.py`（单调/幂等/坏行不抛/两类计数）、
-`tests/test_offline_resume_anchor.py`（端到端补传：summary 落账 + 重投幂等）、
-`tests/test_offline_eval_wiring.py`（体里带 summary + 导入腿并两类）、
-`tests/test_offline_eval_cloud.py`（`_eval_rows_for` 只带本轮、不带 B/C 与别轮）、
-`tests/test_deliver_zip.py`（包里的 summary 落到课程账本）。
+**验证**：`tests/worker/test_eval_ledger_merge.py`（单调/幂等/坏行不抛/两类计数）、
+`tests/hub/test_offline_resume_anchor.py`（端到端补传：summary 落账 + 重投幂等）、
+`tests/remote/test_offline_eval_wiring.py`（体里带 summary + 导入腿并两类）、
+`tests/remote/test_offline_eval_cloud.py`（`_eval_rows_for` 只带本轮、不带 B/C 与别轮）、
+`tests/remote/test_deliver_zip.py`（包里的 summary 落到课程账本）。
 
 **存量数据**：已并过但无 summary 的旧轮（如那份 it50–110）**只能重导一遍产物 zip** 才能补上
 （重导对逐局行幂等、对 summary 是新增）；数据目录已删则不可补（本轮修复只对未来生效）。
@@ -1083,7 +1083,7 @@ P2 预取只治 `in`，`out` 无人管。两者正交：命中让 `in`→0，`ou
 | 读方 | `tools/wire_report.py`：`overlap=` 可选组（旧日志当 0）+ `out_overlap_sec` + 渲染「不占关键路径 / 仍压在关键路径上」 |
 | 安全网 | 队列满 / 入队超时 / 上传器已收尾 ⇒ **退回同步**（绝不丢）；失败落带 jid 的 `★` 行 + 收尾汇总；`--once` 先 drain 再判成败（H8 不退让） |
 
-**验证**：`tests/test_async_result_upload.py`（18 例）——核心是 **A/B 次序**（async 下第二份 job
+**验证**：`tests/remote/test_async_result_upload.py`（18 例）——核心是 **A/B 次序**（async 下第二份 job
 开算早于第一份回传结束；sync 基线必须晚于，否则用例是空转），另有「退出必 drain」（用事件闸住上传，
 确定性可判，不赌调度）「队列满退同步不丢」「失败响亮」「每 job 恰好一行阶段账」「取消路径照旧收账」。
 **8 刀改坏必红全红**（submit 恒同步 / close 不等落定 / 队列满丢结果 / 失败不响亮 / 忘传 wall_end /
@@ -1140,7 +1140,7 @@ eval 侧长尾竞速**没有**被误删）· `test_push_priority_dispatch.py`（
 
 **一处改名（R2-10d 对齐）**：让路预算 `BULK_YIELD_BUDGET_SEC` → **`PAUSE_BUDGET_SEC`**（与 plan
 `docs/nn/legacy.md` §6 #5 同名；§29 里写的是旧名），安全裕度断言从 `test_bulk_sched.py` 拆到 plan 点名的
-`tests/test_pause_budget.py`，并改为引用 hub 的 `SEND_TIMEOUT_SEC` 常量（原先写死 60.0）。
+`tests/remote/test_pause_budget.py`，并改为引用 hub 的 `SEND_TIMEOUT_SEC` 常量（原先写死 60.0）。
 
 **未完成（不是已交付）**：P0.5 的**实机数字**（阶段账 `in/out/ppo/wall` 占比、`p90` 取消延迟）
 ——需一次云-hub-LAN 会话跑 `tools/wire_report.py`；在那之前 P2 预取的收益结论不成立，可用
@@ -1222,7 +1222,7 @@ plan 的完整语义是「软持有预取 + 优先级调度 + landed 取消 + �
 `highest` 的唯一性闸与 claim 同临界区（epoch 只在 claim 一处校验）；掉队阈值只认 `computing_at`；
 取消只认 `landed` 且必须是独立异常（不可落进 `ProtocolError`/`RetryableError`）。
 
-**门禁**：`nn-training/tests/test_priority_schedule.py` 17 例（纯函数五分支 / 两把时钟 / 备份租约 /
+**门禁**：`nn-training/tests/hub/test_priority_schedule.py` 17 例（纯函数五分支 / 两把时钟 / 备份租约 /
 abandon 零 reclaim / highest 唯一性闸 / peek 无副作用 / 真实 HTTP 端到端 / 403 丢弃 / 取活三件套 /
 取消环 / 源码级接线断言）；迁移 3 个既有文件到 `acquire_job`（`test_remote_hotswap.py` /
 `test_worker_offline_cap.py` / `e2e/test_worker_queue.py`）。四刀改坏必红已自查（门禁有效性）。
@@ -1233,7 +1233,7 @@ race 判定 / `poll_job` + 控制台同批改造 + push 腿 R1-7）。**本批�
 与 race 判定（两套并存，`test_race_broadcast.py` 仍绿），故 2026-09-17 的 race 条目尚未 supersede。
 
 **门禁口径**：nn 侧 `bash tools/githook/nn-py-safe.sh -m pytest -q tests/ e2e/` —— 全绿，唯一红是
-`tests/test_serve_wiring.py::test_course_args_match_run_rl_echo_config`（**既有环境失败**：本机
+`tests/trainer/test_serve_wiring.py::test_course_args_match_run_rl_echo_config`（**既有环境失败**：本机
 `nn-training/rl-config.json` 是未入库的机器本地配置，`course_args` 吃到机器侧覆盖而 oracle 不会；
 已用「把三个文件还原成 HEAD 版本」在同一工作树上复现同一红，证明与本批无关）。
 
@@ -1284,7 +1284,7 @@ steps/chunks/kl/policy/value/entropy/mean_ret`），带 `import_run_id` 来源�
 真因是 notebook 的 `_load_boot` 旧策略「**有缓存先用缓存**」：同一个 kernel 里跑过一次旧
 代码之后，之后每次 Run 都在跑那份旧的，而日志只打 branch（同分支看不出新旧）。
 现在：每次会话先拉最新、`Path.replace` **原子替换**，拉不到才回落到缓存（并响亮说明用的是
-上一份），并把**实际加载那份**的 `sha12` 打进日志。`tests/test_offline_notebook.py` 钉住这四点
+上一份），并把**实际加载那份**的 `sha12` 打进日志。`tests/remote/test_offline_notebook.py` 钉住这四点
 （旧策略的 `_branch.txt` 不得回潮）。
 
 #### 复审（2026-09-22 晚）：为什么用户导入后还是空的 + 补上两列
@@ -1317,11 +1317,11 @@ rolloutSec/ppoSec 均真实。⇒ 「重复导入」是支持的（同 run_id �
 ### 验证
 
 `nn-python-gate` 2128 passed（连跑绿）、根 `bun run check` 绿、`dashboard` typecheck+test
-1103 passed 绿。测试新增：`tests/test_deliver_zip.py` 三条（导入 ⇒ 账本 / 字段搬运（含
-`expectedGames`）/ it0 与坏行不进账本）；`tests/test_offline_deliver.py` 三条
+1103 passed 绿。测试新增：`tests/remote/test_deliver_zip.py` 三条（导入 ⇒ 账本 / 字段搬运（含
+`expectedGames`）/ it0 与坏行不进账本）；`tests/remote/test_offline_deliver.py` 三条
 （`test_rejected_round_is_skipped_but_the_rest_keep_flowing` /
 `test_row_is_picked_by_matching_bytes_not_by_first_same_iter` /
-`test_row_with_mismatching_fingerprint_is_dropped_not_sent`）；`tests/test_offline_notebook.py`
+`test_row_with_mismatching_fingerprint_is_dropped_not_sent`）；`tests/remote/test_offline_notebook.py`
 一条（引导模块每次刷新 + 实际加载那份的 sha12）。
 
 ---
@@ -1385,7 +1385,7 @@ rolloutSec/ppoSec 均真实。⇒ 「重复导入」是支持的（同 run_id �
 有界等 120s 交接，仍不空闲就**跳过本轮**而不是排队——排队的 eval 只会越落越远）；段末 `drain`
 给在飞的局 600s 有界时间落账（超时只记 WARN：已落的逐局行有效）。三个出口（complete/noop/failed）
 都调 `_close_eval`，且**先收评估再 finalize**——否则 artifacts.zip 里少掉刚评的那一段。
-回归钉在 `tests/test_offline_eval_cloud.py::test_submit_does_not_block_ppo`（量的是提交耗时 < 0.5s，
+回归钉在 `tests/remote/test_offline_eval_cloud.py::test_submit_does_not_block_ppo`（量的是提交耗时 < 0.5s，
 谁把它改回同步这个用例立刻红）。
 
 ### 读数回程（三条，都必要）
@@ -1410,7 +1410,7 @@ rolloutSec/ppoSec 均真实。⇒ 「重复导入」是支持的（同 run_id �
 * hub 的两个来源：`<job_root>/offline/<run>/it-NNN/`（自回传）与 `<traj>/<课>/deliver/<run>/it-NNN/`
   （控制台「导入产物」）；三件（`weights.json`/`opt.tar`/`row.json`）缺一就**不认**这一轮，从更大的
   it 往下退；同一 it 两个来源取目录 mtime 更新的那份。缺 opt 只是 Adam 归零、缺 row 只是曲线少一点
-  ——两者都「看起来能跑」，所以判据卡在选轮这一步（`tests/test_offline_resume_anchor.py`）。
+  ——两者都「看起来能跑」，所以判据卡在选轮这一步（`tests/hub/test_offline_resume_anchor.py`）。
 * 云机侧：`fetch_resume` 三件拿不齐就**整个锚点作废**（半套锚点比没有更危险）；`apply_resume_overlay`
   只采纳比产物当前 `last_it` 更新的锚点，指纹不符即拒（传输损坏不得进产物目录），同轮同名幂等。
 * 端点：`GET /offline/resume?course=X` 的 `resume: null` 是**正常应答**（云机要能区分「hub 说没有」
@@ -1422,8 +1422,8 @@ rolloutSec/ppoSec 均真实。⇒ 「重复导入」是支持的（同 run_id �
   （F821）——`--hub-course` 会带空串/直接炸；同处还修了 `RUF034` 的恒假三元。
 * `remote/offline_eval` 参与 `sys.path` 时的 stdlib `queue` 遮蔽风险：本模块**不用** `queue`，
   用 `deque`+`Event` 手写单飞（`trainer/queue.py` 会遮蔽 stdlib，历史上已踩过一次）。
-* 测试：`tests/test_offline_eval_cloud.py`（口径/执行/并行/采纳）、`tests/test_offline_resume_anchor.py`
-  （hub 选轮 + 端点 + 补传并账）、`tests/test_offline_eval_wiring.py`（装配/收线/argv/拉取/导入合并/多课程）。
+* 测试：`tests/remote/test_offline_eval_cloud.py`（口径/执行/并行/采纳）、`tests/hub/test_offline_resume_anchor.py`
+  （hub 选轮 + 端点 + 补传并账）、`tests/remote/test_offline_eval_wiring.py`（装配/收线/argv/拉取/导入合并/多课程）。
   门禁：`nn-python-gate`（ruff+mypy+pytest 2065 用例）39s 绿、`bun run check` 38s 绿。
 * **未做**（下一手可接）：云机 eval 的读数不进 `dist-agent-meta.jsonl`（采样机健康表不含云机腿）；
   云机 eval 用的是云机自己的 CPU（不是节点池）——「云上的 eval 与 in-loop 的节点集群版差多少」
@@ -1480,11 +1480,11 @@ tar 后 zip）；本轮补的是「**炸了要有人知道**」那一层。
 会 `raise SystemExit` ⇒ `ignore_errors` 拦不住、当场打死线程）——改 job 目录下 `.selfcheck/` +
 `rmtree_best_effort`。
 
-**验收（盘上）**：`tests/test_poison_freeze.py`（9：达阈冻结 / 主动 release 不算 / 已结算不算 /
+**验收（盘上）**：`tests/hub/test_poison_freeze.py`（9：达阈冻结 / 主动 release 不算 / 已结算不算 /
 `/admin/queue` 路径也计数 / 告警只喊一次 / **重发不清冻结 + 解冻回池** / 训练侧立刻 `JobFailedError` /
-解冻端点 400·404·409 / claim 与冻结各一行日志）；`tests/test_payload_selfcheck.py`（7：真字节分叉 /
+解冻端点 400·404·409 / claim 与冻结各一行日志）；`tests/remote/test_payload_selfcheck.py`（7：真字节分叉 /
 探测确实用旧启发式 / 好包一次通过且无扰动标记 / 产物不符·垃圾·缺额外文件三种不通过 / 误判 ⇒ 扰动重打 /
-自检失败也重打 / 触顶响亮放弃 + 三次字节各不相同）；`tests/test_job_body_crash.py`（5：内容决定性 →
+自检失败也重打 / 触顶响亮放弃 + 三次字节各不相同）；`tests/remote/test_job_body_crash.py`（5：内容决定性 →
 `ProtocolError`、瞬态原样放回、restore/grad 两段确实被包、已判定 `ProtocolError` 原样上抛）；
 顺带修掉一个**既有 flake**：`test_hub_push_dispatch.py` 用例依赖 mtime 判定，Windows 系统时钟
 节拍（~15.6ms）内两次写会拿到相同 mtime ⇒ 全量套件下偶发假红；改为显式 `os.utime` 递增。
@@ -1539,8 +1539,8 @@ tar 后 zip）；本轮补的是「**炸了要有人知道**」那一层。
 
 ### 验证
 
-- 新增 `tests/test_boot_wire_guard.py` **17 例**（判据/停滞正文/超预算/有界重抽/末次硬传/两处接线/
-  护栏不可用的兜底）+ `tests/test_wire_report.py` **11 例**（现场原文解析/最近秩/命中不采样/
+- 新增 `tests/remote/test_boot_wire_guard.py` **17 例**（判据/停滞正文/超预算/有界重抽/末次硬传/两处接线/
+  护栏不可用的兜底）+ `tests/remote/test_wire_report.py` **11 例**（现场原文解析/最近秩/命中不采样/
   重抽不重复计数/CLI）+ `test_wire_reroll.py` 补 1 例（ts_code 命中进账）。
 - `tools/wire_report.py` 对现场原文**实跑**：`job:payload` p50 3.9 s / p90 **321.8 s**、worst 11 KB/s、
   bad% 50%、reroll 1（正是 §22 那两次坏签的形状）。
@@ -1599,7 +1599,7 @@ tar 后 zip）；本轮补的是「**炸了要有人知道**」那一层。
 - 验收：12:59 那次若带本改动 ⇒ 首块（39 s 处）即判坏签 ⇒ 预期 ~50 s（而非 321.8 s）。
 - 教训：**可观测性先于优化**——「13.5 KB/s 与 3 秒后 ≥120 KB/s」这种对比，只有在有了进度行
   之后才看得见；上一节（§21）加的停滞/进度判据是本节判据能出台的前提。
-- 门禁：nn python 全量 **1859 passed**（ruff + mypy 绿），新增 `tests/test_wire_reroll.py`
+- 门禁：nn python 全量 **1859 passed**（ruff + mypy 绿），新增 `tests/remote/test_wire_reroll.py`
   17 例（判据/相对阈值/上限/最后一次不重抽/浪费有界/账行形状/产物不重抽）。
 
 ---
@@ -1631,7 +1631,7 @@ tar 后 zip）；本轮补的是「**炸了要有人知道**」那一层。
 缺省路径未变：`_request` 只在给了 `idle_timeout`/`progress` 的下载路径上改走分块读，
 `poll_job`/`post_result` 等小请求行为逐字节不变。
 
-回归：`tests/test_body_transfer_guard.py`（8 例；含真 TCP socket 的「读端不读 ⇒ hub
+回归：`tests/remote/test_body_transfer_guard.py`（8 例；含真 TCP socket 的「读端不读 ⇒ hub
 ≤发送超时断开并打印已发字节数」，以及「停滞 ⇒ 一条带原因的日志 + 退避重试」）。
 
 **同窗口的 hub 停服 = 人工操作（用户确认手动关的）**：`stopComponent` 杀进程后正是
@@ -1775,7 +1775,7 @@ hub accept_result（对账→租约→首写）  →  本课 result/result.json
 Colab 需求不受影响）、`offline_deliver._urllib_opener`；非回环分支刻意仍调
 `urllib.request.urlopen`（保住测试里那条 monkeypatch 缝）。
 
-复现→修复（§7）：`tests/test_loopback_http_no_proxy.py`（5 例）——把环境代理指到**死端口**
+复现→修复（§7）：`tests/remote/test_loopback_http_no_proxy.py`（5 例）——把环境代理指到**死端口**
 再打本机真服务，修复前三条出口全部 `ConnectionRefused`（我用临时脚本实测过：raw urllib
 URLError、`net_http.urlopen` 200），修复后全绿；另有一例断言非回环仍走 urllib 默认。
 
@@ -1991,7 +1991,7 @@ CFG hub_url 含 "<" → 视为未填（返空串，由调用方响亮失败并�
 `diagnose` 里那句「未配 hub_url，跳过」也改成「未配地址（HUB_IP 凭据 / CFG hub_url）」——
 体检报告里的跳过一次不该让人再去猜该填哪个键。
 
-**回归守卫**：新增 `nn-training/tests/test_notebook_hub_ip.py`（**14 例**）。notebook 不 import
+**回归守卫**：新增 `nn-training/tests/remote/test_notebook_hub_ip.py`（**14 例**）。notebook 不 import
 仓库代码，所以按 `test_tpu_probe_notebook.py` 的做法把 cell 文本抠出来**独立执行**——
 但不止「有这几行」，而是把内联回退算出的 `_hub` 与 `resolve_hub_url` 的返回值**逐例对账**
 （8 例取值 + 2 例未填→`SystemExit` 且点名两个键 + 缺省端口跟随 `HUB_DEFAULT_PORT`），
@@ -2049,7 +2049,7 @@ HUB_IP（100.64.0.5）**压过** CFG hub_url（故意留成不同的 100.64.0.9�
 是秒级；训练侧另跑在独立线程 + 45s 限时监督（不会陪 `wait_job` 等满 30min）。
 
 **边界（其余面由既有测试承担）**：push 直推云机 → `e2e/test_push_mode_integration.py`；
-真 bun rollout → `tests/test_remote_iter_real_bun.py`（本机无 bun/权重时 skip）；
+真 bun rollout → `tests/worker/test_remote_iter_real_bun.py`（本机无 bun/权重时 skip）；
 竞速输家叫停仍是后续项（旧的竞速广播条，§67）。
 （**2026-09-23 注**：竞速随下面 P3 整体退役（见 §30），此后续项已消失；§67 本体亦随 2026-09-23 拆分删除。）
 
@@ -2105,7 +2105,7 @@ hub：<job_root>/offline/<run_id>/it-NNN/{weights.json,opt.tar,row.json} + metri
 
 ### 验证面（本机可跑的）
 
-`tests/test_offline_deliver.py`(16)：接通后落位/幂等/重启续投/**hub 关机期间零影响 + 重连一次补齐**
+`tests/remote/test_offline_deliver.py`(16)：接通后落位/幂等/重启续投/**hub 关机期间零影响 + 重连一次补齐**
 （核心需求）/坏 token 只试一次不多出网/体被拒即停用/`SYNC_CAP` 分次/传输异常不破记账/
 越界 `run_id` 拒收且不落盘/指纹不符拒收/重复投递首写锁定/摘要覆盖写 + 审计/未鉴权 401/超限 413/
 `sanitize_run_id` 纯函数/**真 hub + 替身 run_job 的整段集成**（逐轮在跑的过程中到达 hub）/hub 无人
@@ -2168,7 +2168,7 @@ worker 自己那一轮从 hub 下好、已落进内容寻址缓存的——那�
 
 ### 验证面（本机可跑的）
 
-`tests/test_bundle.py`(7)：导出→导入的目录形状（起点 checkpoint + opt + TS 树）；改一个字节就
+`tests/remote/test_bundle.py`(7)：导出→导入的目录形状（起点 checkpoint + opt + TS 树）；改一个字节就
 逐件对账拒收；zip-slip 成员拒收且不落盘；拿错包/坏 zip 在读索引这一步停；导出侧三道自检（计划
 sha 不符 / 缺 code.zip / 缺 ts_code.zip）；**导入后 `run_standalone` 无网无仓跑到 end_it**
 （替身断言 payload 里带了 code.zip 与 ts_code.zip 字节、`base_url/token` 必须为空），再跑一次是
@@ -2231,13 +2231,13 @@ hub（哨兵）                                  云机（自主段执行器）
 
 ### 验证面（本机可跑的）
 
-- `tests/test_plan.py`(8)：对集重放逐位一致（rotate / curriculum / seed-rotate 三模式）、
+- `tests/worker/test_plan.py`(8)：对集重放逐位一致（rotate / curriculum / seed-rotate 三模式）、
   argv 模板重定向恒等、`PAIR_ARG_FIELDS` 漏字段在**发布期**就红、`pairs_fp` 顺序敏感。
-- `tests/test_run_loop.py`(11)：**注入 run_job 替身**跑整条链——替身自己开 payload 验
+- `tests/remote/test_run_loop.py`(11)：**注入 run_job 替身**跑整条链——替身自己开 payload 验
   `init_weights.json` 的字节（所以「权重逐轮传下去了」不是自报），逐轮 job 与 kind=iter 逐字段同构
   （逐局 stage/seed、`--wver` = 该轮 init 的 sha），合并结果**过 `validate_result`**；预算/上限/重领/
   失败四种停机点都能续跑且账本 `it` 唯一。
-- `tests/test_run_segment.py`(12)：段长与等待上限的解析优先级（CLI > courses > rl > 缺省关）、
+- `tests/worker/test_run_segment.py`(12)：段长与等待上限的解析优先级（CLI > courses > rl > 缺省关）、
   `max_iters=n-1` 的区间语义、`publish_job(kind="run")` 把 `plan.json` 放进 payload 且 manifest 记 sha、
   缺计划/缺规格/带本地 shard/缺 ts_code sha 一律拒发、同一计划重发同 job_id、发布结果过协议层校验。
 - 门禁：nn python gate（ruff + mypy + pytest tests/ + e2e）**1147 passed / exit 0**；
@@ -2303,10 +2303,10 @@ job 钉死）。
 
 ### 回归与实测
 
-- `nn-training/tests/test_job_fail_report.py`（**9 例**）：端点/校验/租约/首写/410/status/账本、`wait_job`
+- `nn-training/tests/remote/test_job_fail_report.py`（**9 例**）：端点/校验/租约/首写/410/status/账本、`wait_job`
   **秒级**失败（断言 `<10s`，旧路 1500s）、收尾二次确认也认失败、worker 回报到位、push 410、
   push round 不被包成 RetryableError、**重发清标记**（不清 = 重试永久钉死，故必须钉住）。
-- `nn-training/tests/test_remote_degrade.py`（+2 例）：`JobFailedError` 首败即 ABORT 且 `_remote_fail==0`、
+- `nn-training/tests/trainer/test_remote_failure_policy.py`（承 `test_remote_degrade.py` 的「去降级版」，本处 +2 例）：`JobFailedError` 首败即 ABORT 且 `_remote_fail==0`、
   不降级、`remote_calls==1`（不重试）；在捕获集合里。
 - `dashboard/tests/server-api-ppo-queue.test.ts`（+2 例）：`job_failed`/`fail.json` 不误报；失败后重发又被盯排队。
 - 实测（2026-09-17 本机）：整个 `wait_job` 快速失败用例含起服务仅 **0.52s**（预算 25min）。
@@ -2387,11 +2387,11 @@ job 钉死）。
 
 | 计划 §5.5 条目 | 状态 |
 |---|---|
-| ① 逐位对拍（节点 shard == 本机 rollout，逐字节 diff） | **已验**：`tests/test_remote_iter_real_bun.py`（真 bun + 真权重 + 真 `pack_ts_code_zip` 解包），同 argv 跑两遍逐文件比对，含 `_rl_report.json` 全字段（除 `elapsedSec`） |
+| ① 逐位对拍（节点 shard == 本机 rollout，逐字节 diff） | **已验**：`tests/worker/test_remote_iter_real_bun.py`（真 bun + 真权重 + 真 `pack_ts_code_zip` 解包），同 argv 跑两遍逐文件比对，含 `_rl_report.json` 全字段（除 `elapsedSec`） |
 | ② report 等价（winRate/outcomes/ticks 同种子） | **已验**：同上，聚合报告 `totalTicks/totalSamples/outcomes/winRate` 落在单局口径上 |
 | ③ 电量账 `up_bytes ≈ 0` | **部分**：payload 确实只剩 `init_weights.json`（单测断言「不含 shard」），但**真远程轮次的绝对值未测**（本机无节点可跑） |
 | ④ 可回退 `rollout_src=local` | **已验（构造性）**：非 iter 轮 manifest 不含新键、`shard_dirs` 走原路 ⇒ 逐字节旧行为 |
-| ⑤ 协议用例（缺字段拒收 / mode 互斥 / report 校验） | **已验**：`tests/test_remote_iter.py`（51 例）+ `test_remote_ppo.py` 扩 1 例 |
+| ⑤ 协议用例（缺字段拒收 / mode 互斥 / report 校验） | **已验**：`tests/remote/test_remote_iter.py`（51 例）+ `test_remote_ppo.py` 扩 1 例 |
 
 **未做（不写成已做）**：真云机/真远程轮次的绝对值（`wire.up_sec`、每轮墙钟、TPU 腿上的 target ~10s 量级）；
 本机也没有跑过「hub + localWorker + trainer `--rollout-src node`」的整条本机闭环（那需要一次真 PPO 轮）。
@@ -2399,10 +2399,10 @@ job 钉死）。
 
 ### 测试与门禁
 
-新增/扩写：`tests/test_remote_iter.py`（协议 + 规格 + 节点执行器 + ts_code 缓存 + 失败语义 + 控制面两处跳过）、
-`tests/test_remote_iter_real_bun.py`（逐位对拍）、`tests/test_remote_ppo.py`（`/ts_code` × `/blob` 两条 GET 端点）、
+新增/扩写：`tests/remote/test_remote_iter.py`（协议 + 规格 + 节点执行器 + ts_code 缓存 + 失败语义 + 控制面两处跳过）、
+`tests/worker/test_remote_iter_real_bun.py`（逐位对拍）、`tests/remote/test_remote_ppo.py`（`/ts_code` × `/blob` 两条 GET 端点）、
 `e2e/test_push_mode_integration.py`（+5：ts 缓存命中/未命中/428 补传/缺字节响亮失败/真 worker_server 闭环）、
-`tests/test_remote_hotswap.py`（豁免名单扩到三棵树）、`dashboard/tests/rollout-src-launch-option.test.ts`（+8）。
+`tests/remote/test_remote_hotswap.py`（豁免名单扩到三棵树）、`dashboard/tests/rollout-src-launch-option.test.ts`（+8）。
 门禁：nn pytest+e2e **exit 0**（ruff/mypy 干净）、root `bun run check` **1853 pass / 0 fail**、
 dashboard **427 pass / 0 fail** + 三份 bundle ok。
 
@@ -2524,7 +2524,7 @@ python 侧只出现在那两行读取处）⇒ M1 §1.4「开关取值必须写�
 `biz/cli.py` 加 `--remote-cf-protocol` / `--remote-cf-edge-ip`（缺省取 rl-config，即控制台回写的键），
 `trainer/loop_steps.py` 新增 `_course_cf_tunnel(args)`（与 `_course_push_url` 同口径：CLI >
 `courses.<stem>.cf_*` > `rl.cf_*` > None；选项住 rl-config，**永不进 curricula**，D14）。
-测试 `nn-training/tests/test_wire_cf_tunnel.py`（12 例：CLI 声明与缺省、四级优先级、不串课、
+测试 `nn-training/tests/trainer/test_wire_cf_tunnel.py`（12 例：CLI 声明与缺省、四级优先级、不串课、
 旧 args/坏 config 不炸训练、端到端进 wire）。
 
 > ⚠ 修正一条早前的说法：前文表格里「push 侧 B5」的实测与本次均为本机闭环；
@@ -2605,7 +2605,7 @@ B 一生效就重复了；而 B 若失效（头可伪造），最坏后果**两�
 `[hub-server 127.0.0.1 src=<真实 IP> via=cf]`，本机组件与直连对端逐字保持旧格式（不加噪）。
 `log_message` 只打非常规事件，不刷屏；`self.headers is None` 的早期错误路径有护栏。
 
-**回归**：`nn-training/tests/test_hub_auth_d9_order.py` 11 → **19 例**（归因矩阵 / 隧道源 5 次封禁第 6 次
+**回归**：`nn-training/tests/hub/test_hub_auth_d9_order.py` 11 → **19 例**（归因矩阵 / 隧道源 5 次封禁第 6 次
 403 / 被封归因 IP 持合法 token 仍放行 / 本机无头组件仍豁免 / 直连对端自带头不算数 / 伪造头无害 /
 访问日志带 `src=` 及两个负例 / `headers is None` 不抛）。
 A/B 行为取证（`tmp/cf-red-behavior.log`，detached worktree 跑修复前代码）：
@@ -2636,7 +2636,7 @@ A/B 行为取证（`tmp/cf-red-behavior.log`，detached worktree 跑修复前代
 - **修**：两处同口径 —— Windows 分支走 `GetExitCodeProcess == STILL_ACTIVE`，并补 `pid <= 0 → 不活`
   护栏（POSIX 上 `os.kill(0, 0)` / `os.kill(-1, 0)` 命中**进程组**、实测成功，会把残缺锁文件里的
   0/-1 当成活人持有 ⇒ 同名课永久拒启）。三处同源：`loop_util` / `run_rl` / `common.instance_lock`。
-- **回归**：`nn-training/tests/test_pid_probe_windows_safe.py`（6 例）——注入假 kernel32 + 监视
+- **回归**：`nn-training/tests/common/test_pid_probe_windows_safe.py`（6 例）——注入假 kernel32 + 监视
   `os.kill`，断言 Windows 分支**零 os.kill**、退出码语义、句柄不泄漏、POSIX 分支不变、残缺锁可清理，
   外加一条行程门禁（三处探测必须保留 `os.name == "nt"` 分支）。
   A/B：修复前红 —— `AssertionError: train.loop_util._pid_alive: Windows 分支不得调用 os.kill，实际: [(pid, 0)]`。
@@ -2690,7 +2690,7 @@ hub-server 重启事故的相位（账本 pid ≠ 真在服务的那一个）。
 
 ### 四、验收
 
-- `nn-training/tests/test_hub_auth_d9_order.py`（11 例）、`nn-training/tests/test_instance_lock.py`（9 例，
+- `nn-training/tests/hub/test_hub_auth_d9_order.py`（11 例）、`nn-training/tests/common/test_instance_lock.py`（9 例，
   含真进程顺序双启被拒 / 同时三启恰好存活一个）、`dashboard/tests/trainer-lock-release.test.ts`（13 例）。
 - A/B 取证：detached worktree 对 HEAD 跑新测试 → 红（`assert 403 == 200`；日志里 127.0.0.1 被 BLOCKED）。
 - 第三/四批（存活探测/隧道闸/就绪归属）：`test_pid_probe_windows_safe.py` 6 → **8 例**、
@@ -2699,7 +2699,7 @@ hub-server 重启事故的相位（账本 pid ≠ 真在服务的那一个）。
   6 红（含行为级 `tmp-clean._pid_alive(0) = True`），cloudflared 侧 HEAD 上既无 `reclaimPort`
   也无 `tunnelOwnsMetrics`、就绪判定是裸 `tunnelEdgeReady`。门禁：nn python gate（205 源文件）✓、
   `cd dashboard && bun run typecheck && bun run test`（406 例）✓、`bun run check`（1849 例）✓。
-  ⚠️ 本批 gate **首跑红过一次**：`tests/test_remote_ppo.py::test_hub_server_auth_and_job_lifecycle`
+  ⚠️ 本批 gate **首跑红过一次**：`tests/remote/test_remote_ppo.py::test_hub_server_auth_and_job_lifecycle`
   报 `Con…`（连接错误）——单跑该文件绿、`--maxfail=99` 单跑绿、重跑全量 gate 也绿 ⇒ 满编 `-n 4`
   下的**负载型 flake**（同 §313 已归档的那一类），与本次改动无关（日志已删，仅存档此判定）。
 - 门禁：`bash tools/githook/nn-python-gate.sh` ✓；`cd dashboard && bun run typecheck && bun run test` ✓；
@@ -2786,7 +2786,7 @@ hub-server 重启事故的相位（账本 pid ≠ 真在服务的那一个）。
 ## §3 四项监控修复落地 + PPO job 竞速模型（§343）+ it24 孤儿租约事故复盘（2026-09-06）
 
 §2 的三处发现（+ backup_prefix 第④项）经用户拍板「修全部问题」后全部落地，
-回归测试 nn-training/tests/test_rl_remote_fixes.py（6 项）+ 全量 pytest 312 绿：
+回归测试 nn-training/tests/worker/test_rl_remote_fixes.py（6 项）+ 全量 pytest 312 绿：
 
 ### 3.1 修复清单（DECISIONS §342）
 1. **lr 折算**：`trainer/loop_steps.py _course_iter` 把 `sch['lr']` 同步折进 `args.lr`
@@ -3102,7 +3102,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   `tests/local-worker.test.ts` 11 用例：spec 形态/poll 目标/killTree/双课隔离/`--remote-transport pull`
   注射/重建逐字段一致/接线 grep 门禁）；根 `bun run check` **1819 pass / 4 skip / 0 fail**；
   nn-training python gate（ruff + mypy + pytest xdist -n 4）绿，含新增
-  `tests/test_remote_transport.py`（run_rl 与 run_bc 两侧裁决 + argparse 接线）；
+  `tests/trainer/test_remote_transport.py`（run_rl 与 run_bc 两侧裁决 + argparse 接线）；
   `bun dashboard/src/server/build.ts` 三份 bundle 与根 `bun run build` 均通过。
 
 ---
@@ -3135,7 +3135,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
 - **配套事实（同批）**：`code.zip` 是 **TrainingLoop 启动时**的快照（`trainer/loop_steps.py::pack_code_zip`，
   hub `/code` 直接回文件）——改了 `remote/` **必须重启 loop**，否则云机跑的是旧运行时；日志里的
   `sha12` 就是用来跟 loop 侧对账的（§2026-09-16-kaggle-kernel-no-torch 的子进程探测修复正是靠它才生效）。
-- **回归测试**：`nn-training/tests/test_bootstrap_proxy.py`（7 例：NO_PROXY 合并 / 平台代理还原 /
+- **回归测试**：`nn-training/tests/remote/test_bootstrap_proxy.py`（7 例：NO_PROXY 合并 / 平台代理还原 /
   异常路径还原 / 引擎顺序 / ★凭据前置 / `_pull` 签名 / 缺 token 点名）；`tmp/repro-old-order.py`
   对 HEAD 的**修复前**代码复现了「引导后读 HUB_TOKEN」，断言当场抓住（§7.1）。
 - **未决（下一步验证）**：E1 用落盘日志跑一次 Kaggle 定位真实死点；E2 「boot 完静置 5 分钟不 import
@@ -3161,7 +3161,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   - **违反后果**：把 `HUB_IP` 的读取挪到 `ensure()`/`_inline_ensure()` 之后，Kaggle 上会复现
     「凭据读成空串 → /code 401 → 会话终结」；把内联回退的解析改得与 `resolve_hub_url` 不同源，
     则两条路会连到不同的 hub（GitHub raw 不可达时才暴露，最难复现的一种）。
-  - **回归测试**：`nn-training/tests/test_notebook_hub_ip.py`（14 例：内联回退的解析与
+  - **回归测试**：`nn-training/tests/remote/test_notebook_hub_ip.py`（14 例：内联回退的解析与
     `resolve_hub_url` **逐例对账**（8 例取值 + 2 例未填 → `SystemExit` 且点名两个键）、缺省端口
     跟随模块常量、两个 cell 的 HUB_IP 读取位置早于代理引导、体检 cell 把 `hub_ip`/`hub_port`
     喂进 `diagnose`）；notebook 侧接线改动用**先红后绿**验过（把缺省端口字面量改成 9999，
@@ -3241,7 +3241,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
 - **三问门（通过）**：① 被否决备选见上；② 未来再犯 ——「节点自己重算调度规格」「上云轮降级本机」
   「内容寻址缓存忘了加进 prune 豁免名单」每条都会再出现（第三条 M2 已经犯过一次）；③ 无法就近表达 ——
   横跨协议 / 两个执行端 / 控制面读取点 / 回退开关 / 控制台 UI。
-- **配套事实**：逐位对拍已验（`tests/test_remote_iter_real_bun.py`，真 bun + 真权重，同 argv 跑两遍逐文件 diff，
+- **配套事实**：逐位对拍已验（`tests/worker/test_remote_iter_real_bun.py`，真 bun + 真权重，同 argv 跑两遍逐文件 diff，
   含 `_rl_report.json` 除 `elapsedSec` 全字段）；协议/规格/执行器/失败语义/传输端点共 ~70 例。
   **未做（不写成已做）**：真远程轮次的绝对值（`wire.up_sec`、每轮墙钟）与 TPU 腿上的 target ~10s ——
   本机无节点可跑；M2 的云机绝对值确认同样仍欠。细节见 `docs/nn/remote-transport.md` §8（合并时曾改号，2026-09-23 重组后统一重排）。
@@ -3298,7 +3298,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   断言该分支的用例）。
 - **违反后果**：把封禁检查挪回 token 校验之前 = 整机自锁；让回环重新计数/封禁 = 隧道流量与本机组件
   互相连坐；停止 trainer 只杀账本 pid = 「停止→启动」死锁回归。
-- **回归测试（第二批）**：`nn-training/tests/test_pid_probe_windows_safe.py`（6 → **8**，覆盖六处入口，
+- **回归测试（第二批）**：`nn-training/tests/common/test_pid_probe_windows_safe.py`（6 → **8**，覆盖六处入口，
   含 AST 唯一实现门禁与 tmp-clean 副本契约）；`dashboard/tests/training-port-reclaim.test.ts`
   （6 → **15**：stepCloudflared 接线门禁、`ownsResource` 声明/监督器接线门禁、
   `portOwnedBy` 注入/真实监听/空清单两义三组）。
@@ -3306,10 +3306,10 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   6 红（含 `tmp-clean._pid_alive(0) = True`、`_pid_alive(-1) = True` 的行为级红）；cloudflared 侧
   HEAD 上 `stepCloudflared` 既无 `reclaimPort` 也无端口归属校验、就绪判定是裸 `tunnelEdgeReady`；
   监督器侧 HEAD 上 `ownsResource` 在 `ProcSpec`/`specs.ts`/`server.ts` 三处**全都为 0 次**。
-- **回归测试（第一批）**：`nn-training/tests/test_hub_auth_d9_order.py`（11 → **19**，2026-09-17 追加 8 例：
+- **回归测试（第一批）**：`nn-training/tests/hub/test_hub_auth_d9_order.py`（11 → **19**，2026-09-17 追加 8 例：
   归因矩阵 / 隧道来源 5 次即封且第 6 次 403 / 被封归因 IP 持合法 token 仍放行 / 本机无头组件仍豁免 /
   直连对端自带头不算数 / 伪造头无害 / 访问日志带 `src=`（含直连与无头两负例）/
-  `headers is None` 的早期错误路径不抛）、`nn-training/tests/test_instance_lock.py`（9，含真进程同时三启
+  `headers is None` 的早期错误路径不抛）、`nn-training/tests/common/test_instance_lock.py`（9，含真进程同时三启
   恰好存活一个）、`dashboard/tests/trainer-lock-release.test.ts`（13）；A/B 取证 = detached worktree 跑
   新测试对 HEAD 红（`assert 403 == 200`；归因来源一节另附行为取证
   `tmp/cf-red-behavior.log`：修复前 5 次「回环+CF 头」无效鉴权后 `is_blocked(203.0.113.7) = False`、
@@ -3334,7 +3334,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   **为什么必须唯一**（18 小时内同类隐患在 3 个不同文件各自踩了一次：`loop_util` 裸 `os.kill`、
   `notebook_runtime` 嵌套闭包+裸 `os.kill`、`tmp-clean` 缺 `pid<=0`）：「每加一个调用点就多一份
   可漂移的实现」就是这类 bug 的根因面；收敛成一份后，“Windows 安全”只需在一个地方成立。
-  回归 + 行程门禁：`nn-training/tests/test_pid_probe_windows_safe.py`（六处入口全纳入同一组断言：
+  回归 + 行程门禁：`nn-training/tests/common/test_pid_probe_windows_safe.py`（六处入口全纳入同一组断言：
   注入假 kernel32 断言 Windows 分支**零 os.kill**；AST 门禁断言 `nn-training/` 里真调用
   `os.kill(pid, 0)` 的文件**只有 `common/pid_probe.py` 一个**——已排除注释/docstring 与
   `os.kill(pid, 15)` 这类**故意发的信号**；并断言四份薄壳不得再自带 `import ctypes`）。
@@ -3494,7 +3494,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
 - **落地**：`remote/bundle.py`（导出/导入/索引/README/zip-slip 防护）、`remote/run_loop.py`
   （`--bundle` 导入即跑；代码与 TS 字节走 `preloaded`；standalone 的代码快照硬门）、
   `remote/hub_client.publish_job(register=False)`、`trainer/loop_steps.py`（`--export-bundle` 导出钩子 +
-  `BundleExportedError` 干净退出）、`trainer/loop_core.py`、`biz/cli.py`。回归：`tests/test_bundle.py`(7)。
+  `BundleExportedError` 干净退出）、`trainer/loop_core.py`、`biz/cli.py`。回归：`tests/remote/test_bundle.py`(7)。
 
 ---
 
@@ -3533,7 +3533,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   `hub/server.py`（`POST /offline/artifact`·`/offline/result` + `store_offline_*` +
   `offline/<run_id>/` 落位 + 账本审计事件）、`common/protocol.py`（`sanitize_run_id` + 契约常量）、
   `remote/run_loop.py`（逐轮/收尾钩子 + `--hub-url`/`--hub-token[-file]`/`BATTLE_HUB_TOKEN`）、
-  `remote/worker.py`（kind=run 默认开启）。回归：`tests/test_offline_deliver.py`(16)。
+  `remote/worker.py`（kind=run 默认开启）。回归：`tests/remote/test_offline_deliver.py`(16)。
 
 ---
 
@@ -3589,7 +3589,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   - **CLI**：`--course NAME[=online|offline]`（可重复）+ `--traj-root`（派生每课程 job-root/jsonl）；`--job-root`/`--jsonl` 保留为单课程旧形状，两者同时给 = 响亮拒启。观测面新增 `GET /admin/queue`（每课程 深度/在飞/心跳/队首 + 轮转游标 + 两个竞速判据数）与 `GET|POST /admin/courses`（看课程表 / 热切 online|offline，volatile）。
 - **备选与否决**：把课程状态做成「无状态执行器 + 任务队列」（用户 2026-09-18 追问的方向）——**不作为本轮**：它要求把 12 个跨轮内存变量逐个迁到磁盘并把门禁语义从「内存计数」改成「扫账本」，是一次独立的、风险集中在**审计**上的改造（漏一个 = 静默语义漂移），已定为本轮之后的 P2（形态由用户拍板 = 迭代任务化；验收 = 「断开续跑 == 连续跑，逐字节等价」）。逐调用点加 `course` 参数而不是进程级 env —— 否（十几个签名 + 每加一处都要记得穿，且「这个进程是哪门课」本就是进程级身份）。给权重上传加「先 HEAD 再 POST」之外的第三条路（只在 hub 侧做去重）——否，白传发生在**训练侧到节点**这一段，hub 管不到。竞速的 auto 判据保留「worker 自报 scope」——是（它同时挡住「worker 还配着旧 hub」这类现场，见同日另一条）。
 - **违反后果**：让多课程退回「每课一套进程」⇒ 进程数线性增长且无跨课程调度（一门课的积压独占自己的 worker 池）；把「找不到归属」写成空串而不是 None ⇒ 单课程队列（课程名**就是空串**）每一次 `/jobs/next`/补传都 500/400（本次实测踩过两次）；在队列层判 stale 身份 ⇒ 避让永不生效、超时过的 job 只会还给跑死它的那台；按课程各存一份鉴权计数 ⇒ 封禁阈值 5×N；按课程各存一份权重桶却让旧调用方落错桶 ⇒ 慢节点 409 停活（因此保留旧桶 + 同 kind 兜底查找）。
-- **落地**：`nn-training/common/protocol.py`（`COURSE_MODE_*`/`COURSE_MODES`/`parse_course_arg`/`rotation_order`/`may_avoid_stale_holder`/`race_decision(active_courses)`）、`nn-training/hub/server.py`（`_AuthGuard` 提取、`_JobStore` 租约持有人身份 + stale 避让 + `inflight`、`_HubQueue` 调度面、`as_hub` 兼容包装、`make_server` 双形状、`/admin/queue`+`/admin/courses`、补传按课程路由、`--course`/`--traj-root`）、`nn-training/common/distribution.py`（`COURSE_ENV`/`course_name_of`/`weights_cached_on_node`/`post_weights_cached`/`post_weights(course)`/`fetch_task(course)`）、`nn-training/biz/config.py`（`apply_course` 导出进程身份）、`nn-training/rl/{eval_dispatch,batch_eval,dispatch,queue_local,bc_eval}.py`（改用带预检的上报）、`tools/agent/weight-buckets.ts`（新，桶纯逻辑）+ `tools/agent/sampler-agent.ts`（按 (course,kind) 分桶 + `GET /v1/weights` 预检 + 任务 URL 带 `course`）；回归：`nn-training/tests/test_multi_course_hub.py`（17 例）、`nn-training/tests/test_weight_course_buckets.py`（12 例）、`tests/agent/weight-buckets.test.ts`（13 例）。
+- **落地**：`nn-training/common/protocol.py`（`COURSE_MODE_*`/`COURSE_MODES`/`parse_course_arg`/`rotation_order`/`may_avoid_stale_holder`/`race_decision(active_courses)`）、`nn-training/hub/server.py`（`_AuthGuard` 提取、`_JobStore` 租约持有人身份 + stale 避让 + `inflight`、`_HubQueue` 调度面、`as_hub` 兼容包装、`make_server` 双形状、`/admin/queue`+`/admin/courses`、补传按课程路由、`--course`/`--traj-root`）、`nn-training/common/distribution.py`（`COURSE_ENV`/`course_name_of`/`weights_cached_on_node`/`post_weights_cached`/`post_weights(course)`/`fetch_task(course)`）、`nn-training/biz/config.py`（`apply_course` 导出进程身份）、`nn-training/rl/{eval_dispatch,batch_eval,dispatch,queue_local,bc_eval}.py`（改用带预检的上报）、`tools/agent/weight-buckets.ts`（新，桶纯逻辑）+ `tools/agent/sampler-agent.ts`（按 (course,kind) 分桶 + `GET /v1/weights` 预检 + 任务 URL 带 `course`）；回归：`nn-training/tests/hub/test_multi_course_hub.py`（17 例）、`nn-training/tests/biz/test_weight_course_buckets.py`（12 例）、`tests/agent/weight-buckets.test.ts`（13 例）。
 - **本轮未做（P1 余下 + P2）**：hub 中介的 push 派发（hub 主动推给空闲 worker + worker 登记入口 + 周期 ping 探活）与训练侧 push 改走 hub；单隧道（hub/cloudflared 收敛为单例，随单 hub 自然成立）；dashboard 重组（课程 select 自由可切 + 在训课程高亮 + 队列总览 + worker 登记入口）；多课程单 hub 的 e2e；P2 = 训练循环迭代任务化。
 
 ---
@@ -3609,7 +3609,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   - **缺省关**（`--push` 才启用）：不打开时连探活线程都不起，既有单课程用例与线上行为逐字节不变；控制台经 `rl.hub_push` 透传（`dashboard/src/stack/specs.ts`），`--push-config` 显式指向仓库那份 rl-config（登记表住那里，指到 per-course 目录 = 登记表恒空）。
 - **备选与否决**：训练侧自己维护 worker 池并推 —— 否（那是把 P1 刚收敛掉的「每个训练进程各算各的」再放大 N 倍，且多课程下训练进程看不见别课的占用）；hub 侧另写一套 job 上传 —— 否（`push_client.submit_job` 已有 v2 体 / 内容寻址 / 428 补传 / 409 退避，两条腿必须是**同一份**传输语义，否则失败分类会漂）；按「worker 自报 scope」决定要不要推 —— 否（那是 pull 竞速的判据，与「这份活该谁推」无关）；把派发做成「拉不到时才兜底」 —— 否（push 腿的队头阻塞原样保留）；「跑太久就抢回来」当超时 —— 否（PPO 一轮 10–30min，正常与卡死无法区分，抢回来 = 白扔算力）。
 - **违反后果**：训练侧与 hub 各写一份 `dispatch` 字面量 ⇒ job 永远躺在队首（两边日志都很安静，最难查的一种）；「从没答过」当在线 ⇒ 往死机器上推 payload 并白等一轮；失败未达阈值不当忙 ⇒ 一次抖动触发同一门课的二次推送（两份 PPO 抢同一轮）；不卡「每课程单在途」⇒ 同一课轮次并行跑、后一轮拿到过期 init 权重；push 结果跳过对账 ⇒ 错结果静默落盘成「看起来正常」的一轮。
-- **落地**：`nn-training/remote/push_dispatch.py`（新：`PushWorkers` 登记表 + 探活、`PushDispatcher` 派发拍 + 每 job 线程 + 回落、`accept_result` 共用入账）、`nn-training/common/protocol.py`（`DISPATCH_HUB_PUSH` / `PUSH_*` 常量、`push_worker_from_node` / `pick_push_worker` / `push_job_wants_hub_push` / `push_worker_id_of`）、`nn-training/hub/server.py`（`_post_result` 改走 `accept_result`、`/admin/push-workers`、`--push` / `--push-config` / `--push-poll-sec` / `--push-timeout-sec`、`record_push_wire`）、`nn-training/remote/hub_client.py`（`publish_job(dispatch=)`）、`nn-training/trainer/loop_steps.py`（`hubpush` 传输 + `_course_hub_push` + `resolve_hub_push` + wire 口径）、`nn-training/biz/cli.py`（choices 四值）、`dashboard/src/{stack/specs.ts,core/types.ts}`（`rl.hub_push` 透传）；回归：`nn-training/tests/test_hub_push_dispatch.py`（14 例）、`nn-training/tests/test_remote_transport.py`（+5 例）、`dashboard/tests/hub-server-push-arg.test.ts`（3 例）。
+- **落地**：`nn-training/remote/push_dispatch.py`（新：`PushWorkers` 登记表 + 探活、`PushDispatcher` 派发拍 + 每 job 线程 + 回落、`accept_result` 共用入账）、`nn-training/common/protocol.py`（`DISPATCH_HUB_PUSH` / `PUSH_*` 常量、`push_worker_from_node` / `pick_push_worker` / `push_job_wants_hub_push` / `push_worker_id_of`）、`nn-training/hub/server.py`（`_post_result` 改走 `accept_result`、`/admin/push-workers`、`--push` / `--push-config` / `--push-poll-sec` / `--push-timeout-sec`、`record_push_wire`）、`nn-training/remote/hub_client.py`（`publish_job(dispatch=)`）、`nn-training/trainer/loop_steps.py`（`hubpush` 传输 + `_course_hub_push` + `resolve_hub_push` + wire 口径）、`nn-training/biz/cli.py`（choices 四值）、`dashboard/src/{stack/specs.ts,core/types.ts}`（`rl.hub_push` 透传）；回归：`nn-training/tests/remote/test_hub_push_dispatch.py`（14 例）、`nn-training/tests/trainer/test_remote_transport.py`（+5 例）、`dashboard/tests/hub-server-push-arg.test.ts`（3 例）。
 - **本轮未做（P1 余下）**：控制台「worker 登记入口」UI（写 `nodes[].gpu_push`）与面板重组（课程 select 自由可切 / 在训课程高亮 / 队列与 push 总览）、单隧道（hub/cloudflared 收敛为单例）、多课程单 hub 的端到端 e2e（训练侧 hubpush → hub → 真 worker_server + 假 PPO）。
 
 ---
@@ -3632,23 +3632,23 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   - **本机 worker 与共享 hub**：`localWorker` 的 `--poll` 指向共享 hub（两个本机 worker 轮询同一地址），「领到哪门课的 job 就干哪门课的活」——job 自带课程快照，结果按 job_id 回家；隔离面只剩工作目录与日志（per-course）。
 - **备选与否决**：让控制台在启动时把课程表传给 hub（`--course A --course B`）+ 新课程走 HTTP 热加 —— 否（启动顺序脆弱 + 漏调即永久饿死；盘上事实已经够用）；把 hub/隧道改成扁平单例键 + 一次性迁移 —— 否（多出来的迁移要么静默丢监督、要么逼着挑一个 per-course 赢家，收益只是「形状好看」）；看到 `remote-jobs` 目录就登记（不做新鲜度判定）—— 否（见上，误登记 = 真金白银）；每课一条隧道 + 共享 hub —— 否（同一 hub 的连接多几份出网状态，还复现 2026-09-17 的隧道回源 → 127.0.0.1 归并 → D9 闭锁连坐训练主循环）；**训练循环也一并收敛** —— 否（有状态会话，P2 任务队列改造的命题）。
 - **违反后果**：拿课程槽去读写共享组件 ⇒ 「看 A 课的卡片说 hub 停了」（其实在跑）、「停 A 课把共享 hub 杀了」；不搬 `_solo` 状态 ⇒ 新开一门课静默清掉停机达令 / 竞速模式 / 鉴权闭锁；不换代接管 ⇒ 两个进程读同一棵 job 目录（双派发、双租约、结果回错家）；允许 per-course 重建 ⇒ 凭空再造一个 hub；继续读 `remote_hubs[<课>]` ⇒ 训练指向不存在的每课隧道（job 永远发不出去）；误登记陈旧课程目录 ⇒ 死课程的 job 派给真 GPU worker；停机达令仍走进程级布尔 ⇒ 一门课的门禁 ABORT 连坐停掉其它课的云机（症状是「云机莫名停机」，极难归因）。
-- **落地**：python —— `nn-training/hub/server.py`（`--discover` / `--discover-sec` + `DISCOVER_SCAN_SEC` / `_HubQueue.add_course` / `_adopt_solo` / `discover` / `_course_dir_live` / `claim_next` 前置扫描 / 后台节拍线程；`--course` 显式路径与旧单课程 `--job-root/--jsonl` 行为不变），`trainer/run_rl.py` / `trainer/run_bc.py`（删 per-course hub URL 回填，只认单键；`clear_halt_on_startup(course=)` 按课程清停机态）、`remote/hub_client.py`（`set_cloud_halt(course=)` / `hub_halted(course=)`；hub 侧 `/admin/workers/{halt,resume,status}?course=`）、`trainer/loop_guards.py`（门禁 ABORT 带本课课程名）；dashboard —— `core/registry.ts`（`SHARED_COMPONENTS` / `isSharedComponent` / `scopeOf`）、`core/slots.ts`（`sharedHubPort` / `sharedHubUrl` / `sharedTunnelMetricsPort`）、`core/config.ts`（`writeRemoteHubUrl` 单键）、`stack/specs.ts`（`hubServerSpec(cfg)` / `cloudflaredSpec` 单例化 + `--traj-root <REPO_ROOT>/tmp --discover`；`cfTunnelArgs` 去 course）、`stack/hub.ts`（`hubServerHealthy(cfg)` / `stepHubServer(cfg)` / `stepCloudflared(cfg, noTunnel)` / `supersedeLegacyInstances` 取代 `supersedeSlotTunnels`）、`dashboard/src/server/actions/cloud-halt.ts`（`hubAdminOk(cfg, path, course)` 拼 `?course=` + `triggerCloudHalt` / `markCloudHaltRecovered` 按课程下发达令）、`server/api/{component-meta,views}.ts`、`launch/cli.ts`、`stack/{hub-admin,local-worker}.ts`、`web/view/console-types.ts`（`shared?`）、`web/app/panels/ComponentCards.tsx` + `web/theme.css`（「共享」徽章）；回归 —— `dashboard/tests/single-hub-tunnel.test.ts`（新，7 例：槽位唯一 / 地址唯一 + grep 门禁 / 旧条目拒重建 / URL 全局）、`dashboard/tests/training-multi-course.test.ts`（改写 W1-W4-W6-P2-P3）、`dashboard/tests/cloud-halt.test.ts`（+2 例：假 hub 上的线上字节形状 `?course=` 与「A 课停机不碰 B 课记录」）、`nn-training/tests/test_loop_gate_{nopark,soft_remediate}.py`（门禁 ABORT 断言带课程名）、`dashboard/tests/local-worker.test.ts`、`hub-server-{push,race}-arg.test.ts`、`training-port-reclaim.test.ts`、`nn-training/tests/test_multi_course_hub.py`（+8 例：发现判定 5 例 + 真进程 `--discover` 主流程 1 例 + 节流/状态搬迁）。
+- **落地**：python —— `nn-training/hub/server.py`（`--discover` / `--discover-sec` + `DISCOVER_SCAN_SEC` / `_HubQueue.add_course` / `_adopt_solo` / `discover` / `_course_dir_live` / `claim_next` 前置扫描 / 后台节拍线程；`--course` 显式路径与旧单课程 `--job-root/--jsonl` 行为不变），`trainer/run_rl.py` / `trainer/run_bc.py`（删 per-course hub URL 回填，只认单键；`clear_halt_on_startup(course=)` 按课程清停机态）、`remote/hub_client.py`（`set_cloud_halt(course=)` / `hub_halted(course=)`；hub 侧 `/admin/workers/{halt,resume,status}?course=`）、`trainer/loop_guards.py`（门禁 ABORT 带本课课程名）；dashboard —— `core/registry.ts`（`SHARED_COMPONENTS` / `isSharedComponent` / `scopeOf`）、`core/slots.ts`（`sharedHubPort` / `sharedHubUrl` / `sharedTunnelMetricsPort`）、`core/config.ts`（`writeRemoteHubUrl` 单键）、`stack/specs.ts`（`hubServerSpec(cfg)` / `cloudflaredSpec` 单例化 + `--traj-root <REPO_ROOT>/tmp --discover`；`cfTunnelArgs` 去 course）、`stack/hub.ts`（`hubServerHealthy(cfg)` / `stepHubServer(cfg)` / `stepCloudflared(cfg, noTunnel)` / `supersedeLegacyInstances` 取代 `supersedeSlotTunnels`）、`dashboard/src/server/actions/cloud-halt.ts`（`hubAdminOk(cfg, path, course)` 拼 `?course=` + `triggerCloudHalt` / `markCloudHaltRecovered` 按课程下发达令）、`server/api/{component-meta,views}.ts`、`launch/cli.ts`、`stack/{hub-admin,local-worker}.ts`、`web/view/console-types.ts`（`shared?`）、`web/app/panels/ComponentCards.tsx` + `web/theme.css`（「共享」徽章）；回归 —— `dashboard/tests/single-hub-tunnel.test.ts`（新，7 例：槽位唯一 / 地址唯一 + grep 门禁 / 旧条目拒重建 / URL 全局）、`dashboard/tests/training-multi-course.test.ts`（改写 W1-W4-W6-P2-P3）、`dashboard/tests/cloud-halt.test.ts`（+2 例：假 hub 上的线上字节形状 `?course=` 与「A 课停机不碰 B 课记录」）、`nn-training/tests/test_loop_gate_{nopark,soft_remediate}.py`（门禁 ABORT 断言带课程名）、`dashboard/tests/local-worker.test.ts`、`hub-server-{push,race}-arg.test.ts`、`training-port-reclaim.test.ts`、`nn-training/tests/hub/test_multi_course_hub.py`（+8 例：发现判定 5 例 + 真进程 `--discover` 主流程 1 例 + 节流/状态搬迁）。
 - **本轮未做（P1 余下）**：多课程单 hub 的端到端 e2e（训练侧 hubpush → hub → 真 worker_server + 假 PPO）；组件卡片按「单例角色 / 按课程」**分组**（本轮只做到「共享徽章 + 共享槽取数」，卡片仍是同一形状）。
 
 ---
 
 ### §2026-09-18-goalnn-loopback-http-no-proxy（2026-09-18，门禁实测红：本机 127.0.0.1 请求被环境代理截走）
 
-- **背景**：`tests/test_offline_deliver.py::test_offline_endpoints_require_auth` 在全量门禁里偶发红：hub-server 日志明明白白写了两次 `401`（鉴权边界是对的），测试侧读到的却是 **502**。根因不在被测代码：本机**用户级**环境带 `HTTP_PROXY`/`HTTPS_PROXY`（指向局域网代理），而 `no_proxy` 里写的是 `127.*` 这种通配——Python 的 `urllib.request.proxy_bypass()` 只认 `host == entry` / `*.suffix` / `.suffix` 三种形式，**不认 `127.*`**，实测 `proxy_bypass("127.0.0.1") is False`。于是每一发去 `http://127.0.0.1:<hub|worker|agent>` 的请求都被送进外部代理再转回来（代理抖动/回错误页 ⇒ 502），本机训练也凭空多一跳。
+- **背景**：`tests/remote/test_offline_deliver.py::test_offline_endpoints_require_auth` 在全量门禁里偶发红：hub-server 日志明明白白写了两次 `401`（鉴权边界是对的），测试侧读到的却是 **502**。根因不在被测代码：本机**用户级**环境带 `HTTP_PROXY`/`HTTPS_PROXY`（指向局域网代理），而 `no_proxy` 里写的是 `127.*` 这种通配——Python 的 `urllib.request.proxy_bypass()` 只认 `host == entry` / `*.suffix` / `.suffix` 三种形式，**不认 `127.*`**，实测 `proxy_bypass("127.0.0.1") is False`。于是每一发去 `http://127.0.0.1:<hub|worker|agent>` 的请求都被送进外部代理再转回来（代理抖动/回错误页 ⇒ 502），本机训练也凭空多一跳。
 - **决定**：
   - **回环地址的 HTTP 一律绕开环境代理**，实现落在唯一的 `common/net_http.py`（`is_loopback` / `no_proxy_opener` / `urlopen` 替身，与 `urllib.request.urlopen` 同签名、返回值同形）。
   - 四条本机出口全部接上它：`remote/hub_client.py::_request`（训练侧↔hub）、`remote/push_dispatch.py::_http`（hub↔GPU worker 的探活与推送）、`remote/worker.py::_request`（worker↔hub）、`remote/offline_deliver.py::_urllib_opener`（产物补传）。**非回环分支保持原样**：`net_http.urlopen` 在非回环时仍调 `urllib.request.urlopen`（保住测试的 monkeypatch 缝），`worker._get_opener()` 的显式 ProxyHandler 只服务非回环（Colab userspace 实测需求，不受影响）。
   - **判据只看 host**：`127.0.0.0/8`、`::1`、`localhost`、`*.localhost`；不做 LAN（10./172./192.168.）例外——那些在架构上不是「本机通信」，擅自绕过会改掉真实拓扑下的行为。
   - **测试侧另加一层兜底**：`nn-training/tests/conftest.py` 把**精确回环主名**（`127.0.0.1` / `localhost` / `::1`）补进 `no_proxy`/`NO_PROXY`——`proxy_bypass()` 认精确匹配，所以 8 个仍用**裸 `urllib.request.urlopen`** 打本机临时端口的既有用例（hub/worker/agent 的真实进程用例）一并脱离代理；生产侧不靠环境变量（就在 `net_http` 里）。两层分工：**生产靠代码、测试靠环境**，任一层单独失效都不会再让门禁变红（2026-09-18 实测：只改生产侧时 `test_multi_course_hub` 在满载下仍会吃到代理的 `Errno 111`）。
-  - 回归（复现→修复，§7）：`nn-training/tests/test_loopback_http_no_proxy.py`（6 例，含一例钉 conftest 那层环境归一）——环境代理指到**死端口**后打本机真服务，三条出口必须仍通（修复前 `ConnectionRefused`，已用临时脚本实测 raw urllib 挂 / `net_http.urlopen` 200），另有一例钉「非回环仍走 urllib 默认」。
+  - 回归（复现→修复，§7）：`nn-training/tests/remote/test_loopback_http_no_proxy.py`（6 例，含一例钉 conftest 那层环境归一）——环境代理指到**死端口**后打本机真服务，三条出口必须仍通（修复前 `ConnectionRefused`，已用临时脚本实测 raw urllib 挂 / `net_http.urlopen` 200），另有一例钉「非回环仍走 urllib 默认」。
 - **备选与否决**：让运维去改用户级 `no_proxy`（写成 `localhost,127.0.0.1`）——否（改环境不修代码，换台机器/换个人就复发，且**云机侧**同样可能带着代理变量）；一处处地改 `urlopen` 调用点、不建公共模块——否（同一个坑会被下一个新写的本机 HTTP 路径再踩一次，且「哪几条出口算本机」会失去唯一答案）；把回环判断塞进 `remote/worker.py::_get_opener()`——否（那个 opener 的存在意义就是「Colab 必须走代理」，两件事混在一个函数里迟早互相破坏）。
 - **违反后果**：新写的本机 HTTP 路径若直接用 `urllib.request.urlopen`，在有代理变量的机器上会**静默**多一跳并可能收到代理的 502（症状像「hub 挂了」/「worker 离场」，实际两者都好好的）；反过来，若把非回环请求也一并绕开代理，Colab userspace 那条唯一出网路径会直接断（云机取不到 job/payload）。
-- **落地**：`nn-training/common/net_http.py`（新）、`remote/{hub_client,push_dispatch,worker,offline_deliver}.py`（改四处出口）、`nn-training/tests/conftest.py`（测试侧 `no_proxy` 归一，兜住裸 `urlopen` 的既有用例）；回归 `nn-training/tests/test_loopback_http_no_proxy.py`（6 例）。
+- **落地**：`nn-training/common/net_http.py`（新）、`remote/{hub_client,push_dispatch,worker,offline_deliver}.py`（改四处出口）、`nn-training/tests/conftest.py`（测试侧 `no_proxy` 归一，兜住裸 `urlopen` 的既有用例）；回归 `nn-training/tests/remote/test_loopback_http_no_proxy.py`（6 例）。
 - **本轮未做（P1 余下的形状整理）**：组件卡片按「单例角色 / 按课程」分组（见 §2026-09-18-goalnn-single-hub-single-tunnel 的「本轮未做」）。
 
 ---
@@ -3666,7 +3666,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
 - **备选与否决**：① 保留每课一份 worker——否（见上三样副作用；且多份进程的日志把「谁在干活」彻底打散）；② 给 worker 加 `--course` 按课领活——否（hub 是**单队列**模型：job 自带课程快照，过滤只会制造「某门课的活没人领」这种静默饥饿）；③ 让 worker 按课起多个实例（worker 身份轴）——否（同一台机器多份进程抢同一份队列 = 旧的竞态，只是换了个名字）；④ 顺手把 `workerServe`（本机伪 GPU 节点）也收敛为节点轴——**本轮不做**：它的端口按课程派生（`slotPort(cfg, course, 'push')`，R3-1 刚把每课 push 端口摊开防撞），与 push 目标解析耦合，值得单独一轮。
 - **违反后果**：任何「按课起一个 worker」的残留路径都会让同一份 job 被两份进程抢（一个白跑一轮）；任何无脑「离开 local 就停 worker」的写法会把其它 local 课的 job 变成无人领取（**表面训练正常**——最坏的一类静默失败）；反过来把 worker 常驻留着，则会把云机 pull 课的 job 抢来本机跑（云机空转，同样『正常』）——这三点正是判据要从配置算出来的理由。
 - **落地（控制台）**：`core/registry.ts`（`localWorker` 进共享表；新增 `SharedComponent` 类型让换代/停止按它窄化，不再各自写名单）· `core/types.ts`（槽位契约注释）· `stack/specs.ts`（`localWorkerSpec(cfg, venv)`）· `stack/local-worker.ts`（共享启动 + `coursesInLocalMode`）· `stack/hub.ts`（`supersedeLegacyInstances` 收 localWorker）· `server/actions/{start,stop,restart,smoke,preset}.ts` · `server/api/component-meta.ts`（单一日志路径）。回归：`tests/local-worker.test.ts`（重写为共享形状 19 例：spec 与课程无关 / 槽归一 / 账本住空串槽 / 重建只认共享槽 / **换代不碰共享实例** / `coursesInLocalMode` 的五种配置 / 接线五处门禁）· `tests/{single-hub-tunnel,web-component-groups,web-components}.test.ts`（scope 与分族同步到真值）。
-- **落地（训练侧）**：**一行未改**——worker 本来就行得通（`poll_job(base_url, token, …)` 无课程参数）。新增集成用例 `tests/test_local_worker_multi_course.py`(3，真 hub 进程内 HTTP + 真 worker 领活函数)：① 同一 worker 身份依次领到两门课的 job（跨课程轮转 + 响应自报 `course`）；②「先起 worker、后加课」时同一进程立刻能领新课的活；③ 形参围栏——领活链路里不得出现「课程」（哪天有人给 worker 加 `--course`，这条会红）。
+- **落地（训练侧）**：**一行未改**——worker 本来就行得通（`poll_job(base_url, token, …)` 无课程参数）。新增集成用例 `tests/remote/test_local_worker_multi_course.py`(3，真 hub 进程内 HTTP + 真 worker 领活函数)：① 同一 worker 身份依次领到两门课的 job（跨课程轮转 + 响应自报 `course`）；②「先起 worker、后加课」时同一进程立刻能领新课的活；③ 形参围栏——领活链路里不得出现「课程」（哪天有人给 worker 加 `--course`，这条会红）。
 - **未做（明确记录，不是漏）**：① `workerServe` 的节点轴收敛（见否决④）；② 本机多 worker 实例（worker 身份轴）——当前是「一份进程 + 云端多 worker」的并发模型；③ 真机实弹：本机 worker 领两门并行课的真实 PPO job（本轮是夹具级 + 进程内真 hub 的证据，与 R2e 同口径）。
 
 ---
@@ -3683,7 +3683,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   - **冒烟预演改用 env 独占**：`REMOTE_PUSH_NODE` 一旦设置就**只有它**（登记节点一律不参与），否则伪节点失败时 failover 会把预演的 job 送去真 GPU 上跑。
 - **备选与否决**：① 保留模式但默认 `auto`（少改 UI）——否（「模式」这个词本身就是误诊源：它让人以为 pull/push 是每门课的属性，而实际是机群的部署形态）；② 保留 `courses.<课>.push_node_url` 但默认不写——否（留着就有「这次启动写了没写」的二义，且用户口径是彻底删掉；N:1 共享由「登记一次、全体候选」天然得到）；③ 只删读面、保留键「以防万一」——否（`local_push` 那条仍**有读者**：留一条指向本机死端点的 gpu_push 条目会让训练静默地跑不起来，而表面一切正常）；④ 让控制台继续往 `rl.hub_push` 写 `1`——否（缺省已是开，写死反而让「显式关掉」在下次启动被覆盖）；⑤ 保留 `trainerPpo` 只为展示历史模式——否（它的唯一用途就是启动时选路，没有読者就成了一个会误导人的死键）。
 - **违反后果**：任何重新引入按课程的传输旋钮（`courses.<课>.remote_transport|push_node_url|hub_push`）的改动都会重新制造「同一门课换个机器就得改课程配置」与「某课被某台机器独占」的耦合；把 `rl.hub_push` 缺省改回 `false` 会让「配了节点」不再够用（还得记得去开开关）——用户明确要的是「配了就走 hub 派发」；把 `REMOTE_PUSH_NODE` 的独占性去掉会让冒烟预演在伪节点失败时把 job 送上真 GPU。
-- **落地**：训练侧 `rl/{loop_steps,loop_serve,bc_loop,cli}.py` · `trainer/run_bc.py` · 回归 `tests/{test_course_push,test_serve_course_overrides}.py`；控制台 `core/types.ts` · `stack/{course-knobs,push-config,specs,local-worker}.ts` · `server/actions/{start,preset,workers,console-state,train-smoke}.ts` · `server/api/{route,courses,overview,snapshot-cache,state-view}.ts` · `web/view/{console-types,course-overview,legacy-keys}.ts` · `web/app/{app.tsx,panels/{TrainLaunchModal,WorkerRegistry,ComponentCards}.tsx}` · `theme.css`；回归 `tests/{push-config,web-train-launch-wiring,server-actions-worker-register,server-api-state-view,server-api-route,training-shared-trainer,training-multi-course,training-train,local-worker,slim-launch-option,rollout-src-launch-option,web-components,web-app-course-overview,web-app-bc-rl-exclusive,web-app-hero-overview,web-view-trend-range,training-console-busy}.test.ts`（`push-config` 重写为「部署事实推导表 + 防回流尺子」，其中一把尺子剥注释后扫代码，因为文档注释里恰恰写着这些键已退役）。
+- **落地**：训练侧 `rl/{loop_steps,loop_serve,bc_loop,cli}.py` · `trainer/run_bc.py` · 回归 `tests/{test_course_push,test_serve_course_overrides}.py`；控制台 `core/types.ts` · `stack/{course-knobs,push-config,specs,local-worker}.ts` · `server/actions/{start,preset,workers,console-state,train-smoke}.ts` · `server/api/{route,courses,overview,snapshot-cache,state-view}.ts` · `web/view/{console-types,course-overview,legacy-keys}.ts` · `web/app/{app.tsx,panels/{TrainLaunchModal,WorkerRegistry,ComponentCards}.tsx}` · `theme.css`；回归 `tests/{push-config,web-train-launch-wiring,server-actions-worker-register,server-api-state-view,server-api-route,training-shared-trainer,training-multi-course,training-train,local-worker,slim-launch-option,rollout-src-launch-option,web-components,web-app-course-overview,web-app-bc-rl-exclusive,web-app-hero-overview,web-view-trend-range,training-console-busy}.test.ts`（`push-config` 重写为「部署事实推导表 + 防回流尺子」，其中一把尺子剥注释后扫代码，因为文档注释里恰恰写着这些键已退役）。【另：本行回归列里的 `web-app-course-overview` 今 → `dashboard/tests/web-app-coursematrix.test.ts`（P2a 合并课程矩阵时面板断言迁入）。】
 - **仍未做（明确记录）**：① 真机实弹——「一个 serve 进程同时带 RL + BC 并行课 + 云机登记节点」的端到端（本轮全在夹具下证明逻辑）；② `Dashboard README / docs/features.md` 里的模式说明未同步（属文档面）；③ 冒烟预演仍是「本机伪节点 + env 独占」形态——若将来支持「预演也用真节点」，需另开一轮设计（当前口径是预演绝不碰真训练）。
 
 ---
@@ -3875,9 +3875,9 @@ stageJson/lives/level/maxTicks/difficulty；B 层 `params_for` 逐字段回落 u
    整体脉停时整轮空转到 deadline（见 3）；④ 让 rollout 也改用一次性评估的专用 kind 隔离权重——
    rollout 的权重就是节点采样要用的那份，无法隔离，只能保证丢了能立刻补。
 
-**实测（单测，非仅源码断言）**：A 层新 `tests/test_rollout_dispatch_resilience.py`（7 例）——502×3 后
+**实测（单测，非仅源码断言）**：A 层新 `tests/trainer/test_rollout_dispatch_resilience.py`（7 例）——502×3 后
 4/4 局全结算（`dist.nodes={"a97":4}`、retried=3、无 `circuit-broken`）／真故障连续 3 次即停派（只取活 3 次）／
-409 触发一次就地重发且节点继续跑完整轮／软失败上界停派；C 层新 `tests/test_eval_dispatch_resilience.py`（8 例）
+409 触发一次就地重发且节点继续跑完整轮／软失败上界停派；C 层新 `tests/trainer/test_eval_dispatch_resilience.py`（8 例）
 ——502×3 后 4/4 结算、409 自愈、真故障仍熔断；`test_dist_common_poll.py` +4（分类表、刷新语义与缓存清空、
 单源守卫：全仓只有 common.distribution 一份实现、B 层必须是纯转发、A/C 层必须接线 409 分支）。
 **两套行为测试都在旧代码上实测变红**（A 层：`missing=[全部 4 局]`；C 层：0/4 结算、`refreshed==[]`），
@@ -3919,7 +3919,7 @@ stageJson/lives/level/maxTicks/difficulty；B 层 `params_for` 逐字段回落 u
 cadence（2026-09-05 修过的老毛病复活）；③ 回场不做上界——节点持续失败时会无限补孵线程；
 ④ 回场沿用进程内权重缓存（跳过 POST）——节点刚重启/桶被挤时缓存是脏的，正是 A1/A2 的教训。
 
-**契约（测试钉住，11 例）**：`tests/test_rollout_dispatch_resilience.py`
+**契约（测试钉住，11 例）**：`tests/trainer/test_rollout_dispatch_resilience.py`
 中途上线节点在轮内供样（旧实现 `{'self': 6}`，新实现 a97 拿到 ≥2 局）／熔断后轮内回场把剩余任务跑完
 （旧实现 6 局全 missing，新实现 6/6）／真失败「熔断 + 有界回场」= 3×(`nodeFailStreak`)×(1+`nodeRearmLimit`)
 = 12 次取活、回场日志恰好 3 条／`nodeRearmLimit=1` 时上界告警且共 6 次取活／halt 置位后 3s 内收工
@@ -3965,7 +3965,7 @@ it40 32s / it80 76s，而这些行在 `all_done` 置位前就已全部落盘—�
 ③ 门/权重段整体前移到快照之前——`nodes_ok` 必须先于 `streaks`/日志，前移等于把闭包拆散；改为「本机先开工 +
 门后移」；④ 本机槽位在门失败时也照旧 `return`（旧行为）——用户点名要「POST 全败走本地」。
 
-**契约（测试钉住，新增 7 例）**：`tests/test_eval_dispatch_resilience.py`
+**契约（测试钉住，新增 7 例）**：`tests/trainer/test_eval_dispatch_resilience.py`
 并行门（3 台 × 0.3s 实测 <0.7s；串行基线实测 0.906s）／ping 失败逐条留痕（含节点 id）／
 POST 全败 + 本机可用 ⇒ 2/2 局全由 `local` 结算且日志为 `— local-only eval this round`／
 本机也不可用时仍响亮跳过／本机首局早于权重门完成（`post_delay=1.0s`）／
@@ -4022,12 +4022,12 @@ codeHash SSOT 内 ⇒ 需 push + 集群重启），而 kind 是现成的**零升
 （`tools/sim/eval-course-ckpt.ts` / `trainer/batch_eval.py`，kind 走 `'rollout'`/`'none'`）**本轮不动**：
 它是独立命名空间（iterId 自带 `evalcourse-`），且迭代节奏与训练循环无关。
 
-**契约（测试钉住，新增 3 例 + 补 1 例断言）**：`tests/test_dist_weights.py::test_push_cache_is_keyed_by_kind`
+**契约（测试钉住，新增 3 例 + 补 1 例断言）**：`tests/common/test_dist_weights.py::test_push_cache_is_keyed_by_kind`
 （同 sha 的 eval 不得被 rollout 的账判成 reuse；缺省 kind 行为不变；`forget_weights_node` 两条腿一起清）／
-`tests/test_eval_dispatch_resilience.py::test_eval_leg_uses_its_own_weights_kind`（POST 与请求同 kind）＋
+`tests/trainer/test_eval_dispatch_resilience.py::test_eval_leg_uses_its_own_weights_kind`（POST 与请求同 kind）＋
 `test_wver_409_reposts_weights_and_keeps_node` 补断言（重发也走 `EVAL_WEIGHTS_KIND`）＋
 `test_eval_dispatch_kind_is_single_sourced`（源码守卫：该文件不得残留 `kind="rollout"` 字面量）／
-`tests/test_dist_common_poll.py::test_ping_nodes_parallel_accepts_key_and_authkey`。
+`tests/common/test_dist_common_poll.py::test_ping_nodes_parallel_accepts_key_and_authkey`。
 **其中 3 例在旧实现上实测变红**（`git show HEAD:` 换回旧实现跑同一套：`AttributeError: module
 'trainer.eval_dispatch' has no attribute 'EVAL_WEIGHTS_KIND'` ×2 + 键参数 `TypeError` ×1）。
 
@@ -4332,7 +4332,7 @@ exit-watchdog 没有可标记的对象），控制台由此显示 `stopped`。**
 排查会往「谁杀的」方向空转（本次就绕了这一圈）。下次同类「集群突然静默」的报障，**先问
 一句是不是手动停的**，再翻日志；要让机器自己回答，得把组件级决策也落盘。
 
-**gate**：nn python 全量 **1842 passed**（ruff + mypy 绿，含新 `tests/test_body_transfer_guard.py`
+**gate**：nn python 全量 **1842 passed**（ruff + mypy 绿，含新 `tests/remote/test_body_transfer_guard.py`
 8 例：停滞有名/进度可查/预算生效/停滞即响亮重试，以及真 TCP socket 的
 「读端不读 ⇒ hub ≤发送超时断开并打印已发字节数」）。
 
@@ -4389,7 +4389,7 @@ exit-watchdog 没有可标记的对象），控制台由此显示 `stopped`。**
 治不了**在途线程**——前一个用例的收尾 push 可能在下一个用例 reset **之后**才记账，而全仓库
 哑权重内容都是 `{"stub": true}` ⇒ `wver`（文件指纹）相同 ⇒ 被判 `kept / skip POST` ⇒
 `test_it_stream_smoke` 的 I3 断言假红（xdist 下随机）。修法：哑权重内容带**每用例唯一**标记
-（`{"stub": true, "case": <tmp 名>}`）——只有**键不同**才与线程时序无关；reset 保留作双保险。**gate**：nn python 全量 **1859 passed**（ruff + mypy 绿；新增 `tests/test_wire_reroll.py` 17 例：判据/相对阈值/上限/末次不重抽/浪费有界/账行形状/产物不重抽）。
+（`{"stub": true, "case": <tmp 名>}`）——只有**键不同**才与线程时序无关；reset 保留作双保险。**gate**：nn python 全量 **1859 passed**（ruff + mypy 绿；新增 `tests/remote/test_wire_reroll.py` 17 例：判据/相对阈值/上限/末次不重抽/浪费有界/账行形状/产物不重抽）。
 签入前与 §108（continuous 报告真源）合并复跑：**1863 passed in 34.65s**（ruff/mypy 绿）。
 
 **收尾（同日）**：本条的覆盖范围只到 worker 侧四段 GET；引导期两段（code.zip / task-pack）与账的
@@ -4421,7 +4421,7 @@ notebook（训练 cell / 连接体检 / 离线盘）的 GitHub raw 拉取清单*
 
 **与 worker 侧的关系 = 孪生实现**（阈值同值、「首块判一次」同纪律、末次不重抽同保证）。不能抽
 共享件：引导期能 import 的只有它自己与 `tailscale_boot`。**改一边要同步另一边**；两侧单测各自钉住
-同一组数字（`tests/test_wire_reroll.py` · `tests/test_boot_wire_guard.py`）。
+同一组数字（`tests/remote/test_wire_reroll.py` · `tests/remote/test_boot_wire_guard.py`）。
 
 **同一批的另两个口子**：
 
@@ -4448,7 +4448,7 @@ notebook（训练 cell / 连接体检 / 离线盘）的 GitHub raw 拉取清单*
   无法就地复现；已在 plan §6/§7.3/§9 标注，替代口径 = worker 的 `result=` 字节数 + 协议层用例。
 
 **gate**：nn python 全量绿（ruff + mypy **303 files** + pytest `tests/` & `e2e/`，门禁 **37s**）；
-新增 `tests/test_boot_wire_guard.py` 17 例 + `tests/test_wire_report.py` 11 例（用例数 与 `ts_code` 命中
+新增 `tests/remote/test_boot_wire_guard.py` 17 例 + `tests/remote/test_wire_report.py` 11 例（用例数 与 `ts_code` 命中
 那条改动一并在改后全量中确认）。`tools/wire_report.py` 对现场原文的实跑输出已核对：
 `job:payload` p50 3.9 s / p90 **321.8 s**、worst 11 KB/s、bad% 50%、reroll 1。
 
@@ -4502,14 +4502,14 @@ notebook（训练 cell / 连接体检 / 离线盘）的 GitHub raw 拉取清单*
   `_JobStore.claim_outcome/_claim_locked`、`_claimed/_computing/_ready/_epoch/_backup_authorized`、
   `scheduling_facts/priority_for/start_job/set_ready/abandon_job`；`common/protocol.py` 的
   `job_priority`（§1.4 优先级表纯函数）与 `JobCancelledError`。
-  门禁 = `nn-training/tests/test_priority_schedule.py`（17 例：纯函数五分支、两把时钟、备份租约、
+  门禁 = `nn-training/tests/hub/test_priority_schedule.py`（17 例：纯函数五分支、两把时钟、备份租约、
   abandon 零 reclaim、highest 唯一性闸、peek 无副作用、403 丢弃、取活三件套、取消环）。
 - **否决与否决理由（这几条是本条目的存在理由）**：
   ① **`mode="backup"` 不是「pop 掉原租约」**（评审第二轮 R2-3 推翻第一版）：pop 掉会让原 worker
     硬死之后**无租约可过期 ⇒ 毒包熔断失明**，job 立刻回池 ⇒ 第三/第四份可自由领取，且 push 腿
     「hub 持租约防同一份活两处跑」的自保失效。改用「逐 job 的 `_backup_authorized` 标记 + 
     `result_token_ok` 对该 job 放行」——只放行**回传**，租约与 `_claimed` 一字不动。
-    `tests/test_priority_schedule.py::test_backup_claim_does_not_poison_or_reclaim` 就是那个失明的探针。
+    `tests/hub/test_priority_schedule.py::test_backup_claim_does_not_poison_or_reclaim` 就是那个失明的探针。
   ② **删 race 判定 ≠ 删机制**：`claim` 的无租约分支（原 `race=True`）换名为 `mode="backup"` 保留
     ——它是「多卡空转防护」的唯一实现面；删掉就等于「空闲的卡只能空转」。
   ③ **`highest` 的唯一性闸在 claim 的同一临界区**（不是「问询即授予」）：N 个 worker 同拍问询必然
@@ -4536,7 +4536,9 @@ notebook（训练 cell / 连接体检 / 离线盘）的 GitHub raw 拉取清单*
   `T_in/T_out/T_ppo` 与 GPU 空转占比的基线）、**P3**（退役 `/jobs/next` + race 判定 + `poll_job`，
   含 **push 腿 R1-7** 与 **控制台同批改造 R2-1**）。本批**只换 pull 线的取活面**：`/jobs/next`、
   `poll_job`、race 判定原样保留继续可用（`tests/test_race_broadcast.py` 仍绿），故
-  2026-09-17 的 race broadcast 条目**尚未**被 supersede。P3 落地时按 plan §8【R2-10c】写 supersede。
+  2026-09-17 的 race broadcast 条目当时**尚未**被 supersede（**后话 2026-10-01**：P3 已落地，supersede 见
+  ▼ §2026-09-22-goalnn-race-retired-priority-only；用例继任 = `nn-training/tests/hub/test_priority_schedule.py`）。
+  P3 落地时已按 plan §8【R2-10c】完成 supersede。
 - **违反后果**：把 backup 改回 pop 租约 ⇒ 熔断失明 + 多份自由领取（无报错，只有冻结阈值悄悄失效）；
   把 highest 闸去掉 ⇒ 多卡同抢一份（看着像「机群更快」，实际白烧 GPU）；把 `ready` 判在 computing 之后
   ⇒ 备份保险消失；让取消落进 ProtocolError ⇒ 训练停腿且现场看着像「worker 确定性失败」。
@@ -4628,10 +4630,10 @@ plan §8【R2-10c】写 supersede §2026-09-17，并**保留** `claim(mode="back
 旧同形，10 个登录点机械替换）· `tests/helpers/push_worker.py` + `tests/conftest.py`（共享假 worker：
 跨测试文件 import 夹具会撞 ruff `F811`）。
 
-**回归（常驻闸）**：`tests/test_priority_schedule.py::test_race_judgment_has_no_production_path`
-（判定零命中）· `tests/test_jobs_next_retired.py`（真 HTTP 404 + 生产零命中）·
-`tests/test_scope_unrelated_race.py`（R1-10 负向：eval 侧长尾竞速**没有**被误删）·
-`tests/test_push_priority_dispatch.py`（6）· `tests/test_pause_budget.py`（4）。
+**回归（常驻闸）**：`tests/hub/test_priority_schedule.py::test_race_judgment_has_no_production_path`
+（判定零命中）· `tests/hub/test_jobs_next_retired.py`（真 HTTP 404 + 生产零命中）·
+`tests/trainer/test_scope_unrelated_race.py`（R1-10 负向：eval 侧长尾竞速**没有**被误删）·
+`tests/remote/test_push_priority_dispatch.py`（6）· `tests/remote/test_pause_budget.py`（4）。
 
 **违反后果**
 
@@ -4685,8 +4687,8 @@ plan §8【R2-10c】写 supersede §2026-09-17，并**保留** `claim(mode="back
 `RESULT_UPLOAD_MODES`）· `remote/worker.py`（`worker_loop` 接线 + `_result_settled` 落定回调 +
 job 级 `uploaded` 标志 + 主循环 `try/finally` 收尾 + `--result-upload`；`_wire_flush(wall_end=)` +
 `overlap=` 字段；`WIRE_MAX_JOBS` 4→8）· `tools/wire_report.py`（可选 `overlap=` 组 +
-`out_overlap_sec` + 渲染行；旧日志缺省当 0）· `tests/test_async_result_upload.py`（新，18 例）·
-`tests/test_wire_report.py`（async/sync 对照 + 旧日志兼容）。设计稿 `plan/transfer-scheduling.plan.md`
+`out_overlap_sec` + 渲染行；旧日志缺省当 0）· `tests/remote/test_async_result_upload.py`（新，18 例）·
+`tests/remote/test_wire_report.py`（async/sync 对照 + 旧日志兼容）。设计稿 `plan/transfer-scheduling.plan.md`
 §1.1 / §4 P2.5 / §9.5；进度 `docs/nn/remote-transport.md` §31。
 
 ---
@@ -4718,7 +4720,7 @@ job 级 `uploaded` 标志 + 主循环 `try/finally` 收尾 + `--result-upload`�
 **落地物**：`nn-training/trainer/eval_a_once.py`（`--baseline` / ckpt 缺省取 `ns.out` / `iter` 必 0 /
 同 wver 早退 / 透传 `baseline`）· `dashboard/src/server/eval-a-run.ts`（`evalAArgs` 纯函数 + opts）·
 `dashboard/src/server/actions/course-lifecycle.ts`（`shouldAutoBaseline` + 开课后 best-effort 派发 + 回执 note）·
-`nn-training/tests/test_eval_a_once.py`（+4 例）· `dashboard/tests/eval-a-baseline.test.ts`（新）·
+`nn-training/tests/trainer/test_eval_a_once.py`（+4 例）· `dashboard/tests/eval-a-baseline.test.ts`（新）·
 `dashboard/tests/course-lifecycle.test.ts`（逃生阀 + 不派发断言）。plan：`plan/offline-it0-baseline-eval.plan.md`。
 
 ---

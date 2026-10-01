@@ -143,7 +143,7 @@ TS 侧池改成同质入口（`tools/sim/serve-any.ts` + 每行 mode token，§2
 
 | 钉什么 | 在哪 |
 |---|---|
-| 送进 stdin 的行 = `[mode, ...argv[1:]]`（**逐字**核对 JSON；脚本路径不得进去） | `tests/test_remote_serve_pool.py::test_pool_sends_the_mode_token`（新桩 `_STUB_ECHO` 把收到的行落盘） |
+| 送进 stdin 的行 = `[mode, ...argv[1:]]`（**逐字**核对 JSON；脚本路径不得进去） | `tests/worker/test_remote_serve_pool.py::test_pool_sends_the_mode_token`（新桩 `_STUB_ECHO` 把收到的行落盘） |
 | 池入口恒为 `SERVE_ANY_SCRIPT`（两条腿拿到的池同一形状） | 同文件 `test_make_pool_is_the_shared_gate_for_both_legs` |
 | 门槛仍是策略：`goal/intent` 不建池、开关 `NN_SERVE_POOL=0` 不建池 | 同文件 `test_make_pool_gates_on_env_allowlist_and_single_script`、`test_local_rollout_pool.py` 的探针用例 |
 | 脚本 → token 表 = 四个真导出器、路径容错（`./` / `\\` / 绝对路径） | `test_serve_mode_table_mirrors_the_ts_dispatcher` |
@@ -158,7 +158,7 @@ TS 侧池改成同质入口（`tools/sim/serve-any.ts` + 每行 mode token，§2
 ### 28.3 本轮 nn 门禁的读数
 
 `pytest tests/ e2e/` **3328 passed / 1 skipped**（含上述改动）；`ruff check .` 全绿。
-mypy 那条**与本次无关的既有**红：`tests/test_reward_golden.py:1141`（数值塔把 `bool` 并进
+mypy 那条**与本次无关的既有**红：`tests/biz/test_reward_golden.py:1141`（数值塔把 `bool` 并进
 `dict[str, float]`，摊参时 `cleared: bool` 报 arg-type）已修（`hide: dict[str, Any]`，同文件既有袋式惯例），
 但按用户裁定**留在工作树**：它和 h5 奖励臂的 191 行在制同处一个 hunk，由那条线自己落地。
 
@@ -425,10 +425,10 @@ mypy 那条**与本次无关的既有**红：`tests/test_reward_golden.py:1141`�
   B 同一个 serve 进程连跑两局——shard 目录**逐文件逐字节**相同，且两边 manifest 都带 `initTick`。
   起始分布是这条前提上最容易被突破的一处（restore 换世界；池里任何跨局残留都会让账本写着
   「中段起跑」而样本来自别的世界）。
-* `nn-training/tests/test_local_rollout_pool.py`（真 bun + `tests/fixtures/student-golden.json`）：
+* `nn-training/tests/worker/test_local_rollout_pool.py`（真 bun + `tests/fixtures/student-golden.json`）：
   池开 vs `NN_SERVE_POOL=0`，同一批 `(stage, seed)` 的 shard **逐文件逐字节**相同；并断言
   `serve_pool: served=2`（池真的服务了，不是静默回退）。
-* 桩级：`tests/test_state_init.py` 断言池服务时每局 argv 仍带 `--init-snapshot`（送错一段 argv、
+* 桩级：`tests/worker/test_state_init.py` 断言池服务时每局 argv 仍带 `--init-snapshot`（送错一段 argv、
   或忘了注入，都是「跑起来了但起始分布不是那个」）；`make_local_pool` 对 goal/intent 返回 None。
 * hermetic 边界：e2e 层（不需要 bun）用 **autouse 夹具** `NN_SERVE_POOL=0` 关池。
   ⚠ 不能写在 `e2e/conftest.py` 模块级：门禁跑的是 `pytest tests/ e2e/` 一次进程，模块级 setenv
@@ -513,10 +513,10 @@ WARN [eval-cloud] it12 整轮重投第 1 次：本次尝试有 1 局收不了尸
 
 ### 25.5 用例（钉住的契约）
 
-* `tests/test_eval_local_capture.py::test_capture_distinguishes_an_unreapable_child_from_a_plain_timeout`
+* `tests/worker/test_eval_local_capture.py::test_capture_distinguishes_an_unreapable_child_from_a_plain_timeout`
   —— 替身子进程（`communicate` 永远超时）⇒ 抛的是 `UnreapableChildError`、回收等待有上限（无上限的
   `communicate` 会让用例直接炸）、账本记了 1 个；对照组：收得了尸的超时仍是 `TimeoutExpired`。
-* `tests/test_offline_eval_cloud.py::test_unreapable_eval_game_is_resubmitted_in_round_never_failing`
+* `tests/remote/test_offline_eval_cloud.py::test_unreapable_eval_game_is_resubmitted_in_round_never_failing`
   —— 一局第一次收不了尸、第二次真跑 ⇒ 整轮 4/4 落账 + `failed=0` + `roundRetries=1`；其余三局**各只
   跑一次**（只补缺口）。
 * `…::test_eval_round_retry_cap_is_the_operators_exit_valve` —— `NN_EVAL_ROUND_RETRY_MAX=2` ⇒ 重投 2 次
@@ -768,10 +768,10 @@ sampler-agent 上报的 `cpus` 从 224 变 96。
 
 ### 22.4 测试
 
-* 新增 `nn-training/tests/test_remote_serve_pool.py`（**23 用例**，池本体）：复用（`spawned` 不随局数涨 + 日志 pid 一致）/ 日志隔离（每局日志只含自己）/ `try_capture`（行交回、**不落盘**）/ 三类回退（ERR、进程死掉、硬顶超时）/ 白名单与开关（两条腿共用 `make_pool`）/ 同名脚本拒绝 / 端到端接线（同一批 shard + 报告 + 计数诚实）/ 开关退回旧行为 / 混脚本不建池。
-* 新增 `nn-training/tests/test_offline_eval_pool.py`（**8 用例**，eval 腿）：接线（一轮一池、每局拿到同一个池、`min(slots, 局数)` 上限、轮末关池且异常路径不漏关、池起不来则整轮一次性）+ 执行面（池优先时**绝不** spawn、池拒绝则回退且返回值形状不变、不传池时行为与加池前相同、`wver` 口径不变）。
-* `tests/test_remote_iter_real_bun.py` 补 `served == 1`（全仓唯一「真 bun + 真导出器」走池的路径）、`tests/test_eval_local_capture.py` 补「池优先于一次性」的源码顺序断言。
-* `tests/test_offline_eval_cloud.py` 加 autouse fixture 关池（那一层的假执行器让池无意义；接线由上面那个新文件验）。
+* 新增 `nn-training/tests/worker/test_remote_serve_pool.py`（**23 用例**，池本体）：复用（`spawned` 不随局数涨 + 日志 pid 一致）/ 日志隔离（每局日志只含自己）/ `try_capture`（行交回、**不落盘**）/ 三类回退（ERR、进程死掉、硬顶超时）/ 白名单与开关（两条腿共用 `make_pool`）/ 同名脚本拒绝 / 端到端接线（同一批 shard + 报告 + 计数诚实）/ 开关退回旧行为 / 混脚本不建池。
+* 新增 `nn-training/tests/remote/test_offline_eval_pool.py`（**8 用例**，eval 腿）：接线（一轮一池、每局拿到同一个池、`min(slots, 局数)` 上限、轮末关池且异常路径不漏关、池起不来则整轮一次性）+ 执行面（池优先时**绝不** spawn、池拒绝则回退且返回值形状不变、不传池时行为与加池前相同、`wver` 口径不变）。
+* `tests/worker/test_remote_iter_real_bun.py` 补 `served == 1`（全仓唯一「真 bun + 真导出器」走池的路径）、`tests/worker/test_eval_local_capture.py` 补「池优先于一次性」的源码顺序断言。
+* `tests/remote/test_offline_eval_cloud.py` 加 autouse fixture 关池（那一层的假执行器让池无意义；接线由上面那个新文件验）。
 * 门禁：`bash tools/githook/nn-python-gate.sh` 绿（ruff + mypy + **2217 passed**）。
 
 ### 22.5 云机离线 eval 腿（同日落地，用户点名）
@@ -806,8 +806,8 @@ sampler-agent 上报的 `cpus` 从 224 变 96。
 **第三个坑（真机实测才暴露）**：`run_local_eval_game` 的 `cmd[0]` 是 **bun**，而池的任务口径与
 iter 腿一致（argv 以**导出器脚本**开头）⇒ 送 `cmd[1:]`。送错的症状是最难查的那种：
 池静默拒绝（`not-ours`）、一局都没服务、两臂看起来一样快（首轮实测 1.000×，`served=0`）。
-⇒ 再一次印证：**「池真接上了」需要断言**（`tests/test_offline_eval_pool.py` 钉 `try_capture` 的入参，
-`tests/test_remote_iter_real_bun.py` 钉真 bun 路径的 `served==1`）。
+⇒ 再一次印证：**「池真接上了」需要断言**（`tests/remote/test_offline_eval_pool.py` 钉 `try_capture` 的入参，
+`tests/worker/test_remote_iter_real_bun.py` 钉真 bun 路径的 `served==1`）。
 
 ### 22.6 复跑
 
@@ -821,8 +821,8 @@ EV_BENCH_SEEDS=0,1,...,15 bash tools/githook/nn-py-safe.sh tools/perf/bench-eval
 # 关池（两条腿一起回到旧行为，随时可回退）
 NN_SERVE_POOL=0 <原来那条命令>
 # 单测（池本体 + 两条腿的接线）
-bash tools/githook/nn-py-safe.sh -m pytest nn-training/tests/test_remote_serve_pool.py \
-  nn-training/tests/test_offline_eval_pool.py -q
+bash tools/githook/nn-py-safe.sh -m pytest nn-training/tests/worker/test_remote_serve_pool.py \
+  nn-training/tests/remote/test_offline_eval_pool.py -q
 ```
 
 ---
@@ -1207,7 +1207,7 @@ pw 的吞吐翻倍正是 x64 +44%（§14）的来源。）
   类型（入参只是 buffer 视图）⇒ 可单独当作参考实现对拍。
 * **`src/nn/native-prebuilt.ts` → `src/nn/conv/native-prebuilt.ts`**（分发矩阵 / 构建 flags / ABI 与内核同目录；
   `tools/agent/native-build.ts` 仍在 tools/ —— 它是构建器不是卷积代码）。引用同步：两个适配器 ·
-  native-build · tests/native-prebuilt · tools/perf/conv-ab · `nn-training/tests/test_ts_code_pack.py` 的
+  native-build · tests/native-prebuilt · tools/perf/conv-ab · `nn-training/tests/remote/test_ts_code_pack.py` 的
   打包清单。`src/nn/` 本就在 codeHash 目录集内 ⇒ 无需改 `codehash-files.txt`。
 * **wasm 产物可重现（实测发现并修复）**：`conv.wasm` **每次重建 sha 都不同**（连编 3 次 3 个 sha）。
   定位：wasm-ld 把 `name` 自定义段的 **module name 写成输出文件名**，而构建为原子落盘写的是
@@ -1405,9 +1405,9 @@ argv 不变 ⇒ out 目录不变 ⇒ 声明的 shard 集（`data_fp`）逐字节
 * `common/protocol.py`：`game_timeout_sec` 的注释口径改写（0 = 节点兜底，不是「不限」）；
   `remote/run_loop.py` 的 eval 侧**原样传 0**（不提前解析——「显式 vs 兜底」决定重试要不要
   放宽，解析一次就丢了这个信息）。
-* 测试：`tests/test_game_watch.py`（7 条纯函数：默认值即用户口径 / 首试 vs 重试 / 显式优先 /
-  告警冗余判定 / 四行日志带局身份 / 分布行 / 零局不崩）；`tests/test_remote_iter.py` 加
-  「重试上限只在 plan 没给时放宽」与「轮末分布行」；`tests/test_offline_eval_cloud.py` 加
+* 测试：`tests/common/test_game_watch.py`（7 条纯函数：默认值即用户口径 / 首试 vs 重试 / 显式优先 /
+  告警冗余判定 / 四行日志带局身份 / 分布行 / 零局不崩）；`tests/remote/test_remote_iter.py` 加
+  「重试上限只在 plan 没给时放宽」与「轮末分布行」；`tests/remote/test_offline_eval_cloud.py` 加
   「首次 5s、重试 20s；显式 120 ⇒ 两次都 120」。
 
 ### 未做（明确留白）
@@ -1495,7 +1495,7 @@ summary 落账全部与 in-loop 同一份实现 —— 手动行与 in-loop 行�
 
 节点确实参与（mac 37 局；self 背压停派、a97/a96 未结算 = 派发器既有的节点门/软失败熔断行为，
 in-loop 同样如此），100 局 18s 完成；it177 折算 339s → **~50s**（400 局，与 in-loop 50–64s 同量级）。
-回归测试 `tests/test_eval_a_once.py`（派发器接线 + summary 读回契约）。
+回归测试 `tests/trainer/test_eval_a_once.py`（派发器接线 + summary 读回契约）。
 
 半路被否的方案（留档）：先只做了「本机并发」——`--workers`（min(8,CPU)）+ ThreadPoolExecutor，
 实测 7.3×（scratch 100 局 144.3s → 19.9s）。用户口径：手动 evalA 不是「另一套本机评估」，
@@ -1639,7 +1639,7 @@ android termux 的 native 库直接给它们使用吗？」——查节点池：
 **静默回落 wasm**（不报错，只是每局回到 1338ms）—— 正是最难查的那种。修法：新增
 `TS_CODE_BINARY_DIRS=("src/nn/native/prebuilt",)` + `TS_CODE_BINARY_SUFFIXES=(".dll",".so",".dylib")`
 （只对该目录生效，不给 `.so` 开全局口子），6 目标全带、写 0755，目录缺失就 `HubClientError`
-+ 提示重建命令。门禁两道：`tests/test_ts_code_pack.py`（4 例）+ real-bun 哨兵里「把 zip 解到临时树、
++ 提示重建命令。门禁两道：`tests/remote/test_ts_code_pack.py`（4 例）+ real-bun 哨兵里「把 zip 解到临时树、
 以它为 cwd 跑 rollout，断言 shard manifest `feat == native`」（探针验过断言是活的）。
 
 ---
@@ -1788,8 +1788,8 @@ greedy eval 是节点侧跑的量最大的一类任务，这里看不见后端�
 
 ### 回归
 
-- `nn-training/tests/test_dist_weights.py`（探针命中/404 回退/并行顺序）
-- `nn-training/tests/test_tail_grace.py`（grace 默认 0 / deadline 5s）
+- `nn-training/tests/common/test_dist_weights.py`（探针命中/404 回退/并行顺序）
+- `nn-training/tests/trainer/test_tail_grace.py`（grace 默认 0 / deadline 5s）
 - `e2e/test_run_rl.py::test_it_tail_join_grace_v317`（policy 覆写仍有界）
 - `tests/dist-agent.test.ts` weightsCachedInBucket
 - `bash tools/githook/nn-python-gate.sh` 绿（1243+ 用例）
@@ -1839,7 +1839,7 @@ greedy eval 是节点侧跑的量最大的一类任务，这里看不见后端�
 **自己的** `eval_window_sec`（不引入新魔数），它自己的 deadline 会结束它。intent/goal 模式**不动**：
 止损判门要吃同轮 summary，仍走全预算 join（`window+60`）。
 
-**验证**：`nn-training/tests/test_eval_timing.py` 新增/更新为 16 例（含「缺省零 join」「边界收拢」）——旋钮读数与坏值回落、放行档三分支、
+**验证**：`nn-training/tests/worker/test_eval_timing.py` 新增/更新为 16 例（含「缺省零 join」「边界收拢」）——旋钮读数与坏值回落、放行档三分支、
 `early_epoch_reached` 边界（early=0 / early>epochs）、派发即放行 + 降级收回、本机 PPO 未放行 /
 epoch 钩子到点放行 / `evalLocalEarlyEpochs=0` 不加钩子、缺省零 join + 边界收拢（已收官/在跑/应急旋钮>0/无尾巴）、`evalJoinSoftSec` 应急值超预算夹回。
 门禁：`e2e/test_run_rl.py -k "eval_deferred|eval_post_ppo_weights|eval_local_gate|tail_join_grace|early_race"
@@ -1882,7 +1882,7 @@ stream 腿才可见），已在上一轮的流检查中记录，待单独处置�
   （`lives_override`/`player_level` 下划线），而 `tools/sim/export-rl-rollout.ts` 只认连字符
   `--lives-override`/`--player-level`（未知 flag 静默忽略）⇒ **local 直跑全程以 hard 缺省
   （3命1星）执行，远端节点以课程覆盖（1命0星）执行**。commit `1ee8955`（2026-09-12 16:55）
-  修复（下划线→连字符，`tests/test_rl_cmd.py` 锁死口径）。bug 自 `e828331`（2026-09-02 22:55，
+  修复（下划线→连字符，`tests/worker/test_rl_cmd.py` 锁死口径）。bug 自 `e828331`（2026-09-02 22:55，
   M1 配置化）引入。
 - **污染范围**：e828331 → 1ee8955 之间所有课程的 **local 直跑 rollout 轨迹**（PPO 吃进
   3命1星环境的样本）。各课程 local 局占比实测（`tmp/<course>/dist-agent-meta.jsonl`）：
@@ -1953,7 +1953,7 @@ stream 腿才可见），已在上一轮的流检查中记录，待单独处置�
   在 `_log_report` 打 KeyError 打死 trainer。
 - **落地**：`nn-training/biz/reports.py`（`adopt_volume_report`/`empty_collect_report`/combine 跳空）、
   `loop_core.py`（轮初复位 + continuous 恒 adopt）、`loop_steps.py`/`events.py`（.get）；
-  回归 `tests/test_rl_reports.py::test_adopt_volume_report_*`。
+  回归 `tests/worker/test_rl_reports.py::test_adopt_volume_report_*`。
 
 ---
 
@@ -2119,9 +2119,9 @@ KERNEL32/api-ms-win/ucrtbase/VCRUNTIME；有 llvm 时再断言 `llvm-nm -u` 空 
 ④ **真执行**：WSL + python3 ctypes 加载入库的 linux-x64 `.so`，pooled+bufA 与 wasm **逐字节相同**
    （本机唯一能真跑非本平台产物的通道；win32-x64 那份由 `tests/native-parity.test.ts` 在生产入口真加载
    + attestation 3/3 覆盖；darwin/*-arm64 只能靠节点首用 attestation）。
-⑤ **云机通道**：`nn-training/tests/test_ts_code_pack.py`（4 例：manifest 每个目标都进包且字节数/可执行位对、
+⑤ **云机通道**：`nn-training/tests/remote/test_ts_code_pack.py`（4 例：manifest 每个目标都进包且字节数/可执行位对、
    `.ts/.wasm/native-conv.ts/native-prebuilt.ts` 仍在包、同内容两次打包 sha 相同、缺目录响亮报错）；
-   并在 `tests/test_remote_iter_real_bun.py`（真 bun 哨兵）里把 zip 解到临时树、**以它为 cwd 跑 rollout**，
+   并在 `tests/worker/test_remote_iter_real_bun.py`（真 bun 哨兵）里把 zip 解到临时树、**以它为 cwd 跑 rollout**，
    断言 shard manifest 的 `feat == "native"`（探针验过这条断言是活的：改成期望 wasm 会红）。
    `bun run check` / `bun run build` / `nn-python-gate.sh` 绿。
 

@@ -919,7 +919,7 @@ C 事故的中点条件（同 it 配对差连续 2 点 <−3pp）在 it25+it30 *
 
 **其余落地**：毒包熔断的控制台面（`CourseMatrix` 毒包横幅 + 「解冻」按钮 →
 `actions/poison.ts::unfreezeJob` → `POST /admin/unfreeze`；job_id 形状错 = **400** 不是 409，
-判据 `jobIdError` 路由与动作层同源）；`tests/test_remote_failure_policy.py` 补上
+判据 `jobIdError` 路由与动作层同源）；`tests/trainer/test_remote_failure_policy.py` 补上
 「`JobFailedError` 之后不得自动重发同 job_id」的专门回归（发布钩子钉零重发）。
 
 **lesson**：计划里那些「必须有人/闹钟执行」的规则，最后都会退化成「规则不存在」——
@@ -1047,7 +1047,7 @@ it55 差 −0.7pp，|Δ|<2）。
 - **`--rotate-seed` 配对旗标**（致命伤 2，成立）：全新跑 rotateSeed 带时刻抖动
   （`loop_core` 旧逻辑），同 `--seed` 不同秒起 = 种子流完全不同。新增显式覆盖
   （`biz/course.py::resolve_rotate_seed` 三级：显式 > 继承 > 抖动）+ CLI 旗标 +
-  `tests/test_rotate_seed_override.py` 6 例。官方门禁 **1903 passed**。
+  `tests/biz/test_rotate_seed_override.py` 6 例。官方门禁 **1903 passed**。
 - **统计**（成立）：门 = 配对差 ≥+2pp **且 McNemar p<0.05**；|差|<2pp = 无结论；
   配对失败回退非配对 z、门提到 +5pp；中点杀臂改连续 2 点 <−3pp（单点误杀约半）。
 - **半速/无结论风险**（成立）：双臂各半速约 85–90 轮，B 转折在 it90 —— 写进 §6⑤，
@@ -1499,7 +1499,7 @@ x1-rebirth 跑 42 轮后**衰退**（it19 峰值 0.168 → it42 0.063），当�
 - **新增共享解析器** `volume_waves.parse_stages_arg()`：采集侧（`_volume_stages`，失败
   **响亮 SystemExit**）与训练侧（`_per_stage_quota`，失败**静默返 0 = 全收**）策略仍不同
   （有意的），但「什么算可解析」从此同源 —— 消除「采集说合法、训练说非法」的裂缝。
-- **单测** `tests/test_ppo_quota.py`（4）：trim 边界（0 维字段不切 / `keep≥N` 零拷贝 /
+- **单测** `tests/worker/test_ppo_quota.py`（4）：trim 边界（0 维字段不切 / `keep≥N` 零拷贝 /
   `keep≤0` 空）；逐关精确（**GAE 收到截断后的长度** ⇒ 证明截在 GAE 之前）；
   配额满丢整 shard 且不跨关借；`quota=0` 全收且 episode 字段集不含 `stage`。
   ⚠ 测试用**旁路 meta** 记录「episode ↔ stage」而不是 `zip` 位置对齐 —— 丢 shard 时位置会错。
@@ -1927,7 +1927,7 @@ it30 vs bc，逐局证据 `tmp/c4chip03-it30-probe.jsonl`）：
 **EVAL_SEEDS 100→200 修复**（§7 测试先行，nn-python-gate 绿）：
 
 - `biz/eval_local.py`：语料扩至 `range(860001, 860201)`；前 100 seed 逐字节不变 = 旧口径兼容
-  （消费方全部 `[:n_seeds]` 前缀切片，已核验）。`tests/test_rl_remote_fixes.py` 钉新契约
+  （消费方全部 `[:n_seeds]` 前缀切片，已核验）。`tests/worker/test_rl_remote_fixes.py` 钉新契约
   （len 200 + 前缀 100 逐字节 + 860101/860200 边界），红→绿。
 
 **c6-chip 主腿已备好**（`nn-training/curricula/c6-chip.jsonc`，启动前预检通过：
@@ -2339,7 +2339,7 @@ it30 vs bc，逐局证据 `tmp/c4chip03-it30-probe.jsonl`）：
   + 单元权重透传）。**同批修两处硬伤**：god 局不 POST 权重且 wver 传 12 位 `key16` ⇒ agent
   `/v1/task` 按全量 sha 查桶必然 409（现 god 也 POST 占位 `{}` 并把其 sha 当 wver；`key16`
   仍是行身份/续跑键）；`kick-once.py` 的 `ROOT` 路径算错（2026-09-15 目录迁移遗留）⇒ 脚本
-  一直 import 不到 nn-training。回归：`nn-training/tests/test_verdict_corpus.py`（10 例）+
+  一直 import 不到 nn-training。回归：`nn-training/tests/trainer/test_verdict_corpus.py`（10 例）+
   `dashboard/tests/evalboard-corpora.test.ts`（17 例）+ `test_batch_eval_wver.py` +
   `test_kick_once_paths.py`。验证：一次真判决批 kick（本机 self）行带齐 Phase-0 七列 +
   真 batch_id；nn-python-gate 1277 绿 · dashboard typecheck + 530 绿 · 根 `bun run check`

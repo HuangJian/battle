@@ -23,7 +23,7 @@ job 再喂回 `run_job`——离线轮与 hub 监管轮走的是字面同一条�
 
 ★ 注入点：本模块里读的模块全局（`iter_spec` / `pairs_for` / `time` / `DRAIN_FLUSH_SEC` …）都是
 **本模块命名空间**的——测试要拦它们请 patch `remote.plan_run.*`，patch `remote.run_loop.*` 打不着
-（`run_loop` 只保留门面转发名，见 `tests/test_plan_run_split.py`）。
+（`run_loop` 只保留门面转发名，见 `tests/remote/test_plan_run_split.py`）。
 
 ★ **计划交接面（校验 / 取包播种 / 上下文 / 评估装配）已于 S5 第十三刀逐字节下沉
 `remote/plan_handoff`**：本模块只余驱动引擎 + 18 名 `X as X` 门面；要 patch 交接面的
@@ -389,7 +389,7 @@ def run_plan_job(
     worker 接着跑完」那条腿的尾巴——那条腿已退役（`plan/online-offline-role-routing.plan.md`
     §7：hub 侧不再发这种活，`remote/worker.py` 对它响亮拒收；离线课走任务包 + `run_standalone`）。
     保留它的理由只有一个，但很实在：它是把 `_drive` **从首轮结果续下去**的唯一入口，而
-    `tests/test_run_loop.py` 的 4 组段语义回归（整段逐轮同构 / 锚点续跑不重复记账 /
+    `tests/remote/test_run_loop.py` 的 4 组段语义回归（整段逐轮同构 / 锚点续跑不重复记账 /
     `max_iters` 上限 / 轮失败后产物仍可续）全挂在它上面——删它等于把这些回归一起删。
 
     返回**合并结果**（末轮形状 + `iters` 明细 + `it_end` + `artifacts`）。

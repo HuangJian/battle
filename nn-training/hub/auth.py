@@ -17,8 +17,8 @@
 
 ## 名字是契约，位置不是
 
-`hub.server` 仍 re-export `_is_loopback` / `_AuthGuard`（`tests/test_hub_auth_d9_order.py`
-取 `_is_loopback`，`tests/test_hub_job_store_split.py` 取 `_AuthGuard` 核 `_lock` 的唯一来源）。
+`hub.server` 仍 re-export `_is_loopback` / `_AuthGuard`（`tests/hub/test_hub_auth_d9_order.py`
+取 `_is_loopback`，`tests/hub/test_hub_job_store_split.py` 取 `_AuthGuard` 核 `_lock` 的唯一来源）。
 """
 
 from __future__ import annotations

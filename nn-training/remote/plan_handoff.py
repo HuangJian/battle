@@ -15,7 +15,7 @@
 本模块**写**：`eval_on_cloud` / `eval_plan` / `eval_slots` / `eval_runner`（`_setup_cloud_eval` 一处
 写入；失败路径只写 `eval_on_cloud=False`），并在 `_eval_job_builder` 里**读** `eval_game_timeout_sec`。
 引擎（`_maybe_cloud_eval` / `runner_timeout` / `_close_eval`）**读**前四个槽并驱动收线。
-改任一槽的名字/含义 = 同时改两模块（守卫 `tests/test_plan_handoff_split.py` 钉住写入面）。
+改任一槽的名字/含义 = 同时改两模块（守卫 `tests/remote/test_plan_handoff_split.py` 钉住写入面）。
 
 ## 依赖方向
 

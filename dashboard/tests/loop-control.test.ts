@@ -3,7 +3,7 @@
  *
  * 分层：src/server/actions/loop-control.ts（意图文件读写）+ core/paths.ts（路径常量）
  *
- * python 侧契约（`nn-training/trainer/loop_control.py`，由 `nn-training/tests/test_loop_control.py`
+ * python 侧契约（`nn-training/trainer/loop_control.py`，由 `nn-training/tests/trainer/test_loop_control.py`
  * 钉死）与本层是**同一份 JSON 的两个半边**：控制台写、训练进程读。所以这里逐条对齐的是
  * 「写出去的形状」「坏文件怎么办」「什么时候一次都不写盘」，而不是 UI 文案。
  *

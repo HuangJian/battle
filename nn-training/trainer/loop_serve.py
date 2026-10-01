@@ -24,7 +24,7 @@
    `prefix_scope`）：每行带 `[课]` 前缀，并镜像到该课自己的 `out_log`。
 
 **可测性**：`serve(..., prepare=False)` + 注入 `pool` / `supervisor` ⇒ 全流程不碰 torch、不碰
-网络、不起进程（见 `tests/test_serve_courses.py` 与 `e2e/test_serve_integration.py`）。
+网络、不起进程（见 `tests/trainer/test_serve_wiring.py` 与 `e2e/test_loop_supervisor_integration.py`）。
 """
 
 from __future__ import annotations
@@ -261,8 +261,8 @@ def course_args(course: str, argv: list[str] | None = None) -> Any:
 
     解析链一字不差地复刻 `trainer/run_rl.py::main` 的启动段（rl-config.json 默认 → argparse →
     `apply_course` 课程覆盖 → 冲突检测 → 显式 stream 标记 → `validate_args`）。**不作弊**：
-    参数语义没有第二份实现，`tests/test_serve_args.py` 用 `trainer/run_rl.py --course X --echo-config`
-    对拍本函数的每一字段（漂移即红）。
+    参数语义没有第二份实现，`tests/trainer/test_serve_wiring.py::test_course_args_match_run_rl_echo_config`
+    用 `trainer/run_rl.py --course X --echo-config` 对拍本函数的每一字段（漂移即红）。
 
     `argv` = serve 级附加参数（如 `--mode goal`）；课程由**课程列表**给出，故这里拒绝
     `--course`（避免「列表里的课」与「argv 里的课」两个来源）。

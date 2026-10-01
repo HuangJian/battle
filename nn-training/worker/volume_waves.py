@@ -523,7 +523,7 @@ def initial_wave_pairs(
     `[rotate_seed, 0x5EED, it, stage, 0]` —— **同一个键**（见 `wave_seed_stream`：
     `wave_idx <= 0` 取 tag 0x5EED，第 5 键就是 wave_idx 本身⇒ 0）。所以本函数输出的
     正是各关连续流上 **第 0..G0 个** seed ⇒ 云机采的就是本地集群同一轮的前缀批
-    （`tests/test_volume_plan_block.py::test_initial_pairs_are_continuous_prefix` 钉住）。
+    （`tests/worker/test_volume_plan_block.py::test_initial_pairs_are_continuous_prefix` 钉住）。
     """
     return wave_pairs(
         int(rotate_seed),

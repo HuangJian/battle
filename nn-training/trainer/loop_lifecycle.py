@@ -41,13 +41,13 @@
 
 槽位声明**全在** `TrainingLoop.__init__`（跨轮字段的持有者不动），本模块只赋值/读取；
 `_course_fp` / `_corpus_fp` 由 `_setup_common` 赋值、被 `_prepare_iter_dir` / `_rollout_phase`
-读取——这条写-读手闭集写在 `tests/test_loop_lifecycle_split.py` 里。
+读取——这条写-读手闭集写在 `tests/trainer/test_loop_lifecycle_split.py` 里。
 
 ## patch 点
 
 7 个模块级名字**零 monkeypatch 点**（实测），只有 4 处普通 import，已同步到本模块：
-`trainer/collect_only.py`（延迟 import，保环断）、`tests/test_loop_park.py`、
-`tests/test_paired_seed_check.py`、`e2e/test_run_rl_m1.py`。
+`trainer/collect_only.py`（延迟 import，保环断）、`tests/trainer/test_loop_park.py`、
+`tests/worker/test_paired_seed_check.py`、`e2e/test_run_rl_m1.py`。
 `trainer/loop_core.py::run_inspect`（`_run_inspect` 的委托点）**刻意留在旧家**——那是文档化的
 可替换点（`trainer/loop.py` 再导出它、测试替换它）。
 """

@@ -208,6 +208,9 @@ unfixable = ["F401"] # don't auto-remove unused imports (may be intentional re-e
 
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["F401"] # test imports are often re-exports for pytest discovery
+# 2026-10-01：tests/ 按源码包树拆成子目录（tests/<pkg>/）后，`tests/*` 这个单层通配
+# 不再覆盖子目录里的用例 —— 补一条深层通配，两层的豁免语义保持一致。
+"tests/**/*" = ["F401"]
 "e2e/*" = ["F401"] # same for integration/e2e suite
 # 2026-09-30：`tools/tpu-probe.py` 是**带连字符的一次性 CLI 探针**，不是可导入模块
 # （全仓无人 `import tpu_probe`）⇒ N999（模块命名规则）不适用。它此前一直让

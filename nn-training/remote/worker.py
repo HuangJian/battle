@@ -57,7 +57,7 @@ from common.protocol import (
     validate_result,
 )
 
-# `RetryableError` 是**显式转发**（`as` 自别名）：`tests/test_soft_hold_prefetch.py` 从本模块
+# `RetryableError` 是**显式转发**（`as` 自别名）：`tests/remote/test_soft_hold_prefetch.py` 从本模块
 # 命名空间取它（`W.RetryableError`）来构造瞬时失败。本模块自己已不用它（payload/code 的
 # sha 对账随物料落地搬到 `remote/download.py`）——但名字是契约：它曾是 worker 的公共面。
 from common.protocol import (
@@ -215,7 +215,7 @@ from remote.job_fs import (
 # `request_priority` / `claim_job` / `_priority_rank`、`start_cancel_watcher` → `job_status`、
 # `report_job_failure` → `worker_tag`）与本簇直调 `_request` / `_wire_add` 的调用点解析在
 # `remote.job_lifecycle` ⇒ 那类测试必须 patch **该模块**（见该模块头部与
-# `tests/test_job_lifecycle_split.py`）。
+# `tests/remote/test_job_lifecycle_split.py`）。
 from remote.job_lifecycle import (
     _failure_detail as _failure_detail,
 )
@@ -274,7 +274,7 @@ from remote.job_lifecycle import (
 # 本簇其余名字（`job_ready` / `abandon_job` / `release_job` / `report_job_failure` /
 # `start_cancel_watcher` / `peek_jobs` / `download_payload` / `PREFETCH_ROUND_SEC`）的解析
 # 已随块搬到 `remote.job_round` ⇒ 拦截它们要 patch **该模块**（见其头部与
-# `tests/test_job_round_split.py`）。
+# `tests/remote/test_job_round_split.py`）。
 from remote.job_round import run_one_round
 from remote.prefetch import (
     PREFETCH_DEPTH_DEFAULT,
@@ -745,7 +745,7 @@ def _alive_log(log: Any, *, halted: bool, done: int, polls: int, idle_since: flo
     """空闲期打一行存活日志：周期内请求数（验证轮询周期真在生效）+ 连续空闲秒数（判孤儿 job）。
 
     「到点没有」与计数器复位**留给调用方**：那两个变量是宿主的账，本模块不留模块级状态；
-    这里只负责把那一行写对（含 `cloud halted,` 前缀——`tests/test_remote_hotswap.py` 在断言它）。
+    这里只负责把那一行写对（含 `cloud halted,` 前缀——`tests/remote/test_remote_hotswap.py` 在断言它）。
     """
     where = "cloud halted, polling hub" if halted else "polling hub"
     log(f"{where} (no job yet, {done} done, {polls} polls, idle {int(time.time() - idle_since)}s)")

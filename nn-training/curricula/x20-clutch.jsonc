@@ -123,7 +123,7 @@
 //    85–90 轮 ⇒ 很可能跑完两条都没信号，得到「无结论」而不是证伪。接受（差值 verdict 比
 //    绝对门需要的数据少，部分对冲；中点规则防误杀，不防无结论 —— 无结论也是答案）。
 // 6. **配对是代码保证的**：`--rotate-seed` 同值 → `biz/course.py::resolve_rotate_seed` 三级
-//    优先级（显式 > 继承 > 抖动），单测 `tests/test_rotate_seed_override.py`。
+//    优先级（显式 > 继承 > 抖动），单测 `tests/biz/test_rotate_seed_override.py`。
 // 7. **2026-09-25 redesign 记录**：基座 B→noexplore（wExplore 无罪但机制阴性；C-0 从
 //    "B 续命"改"noexplore 续跑"）· 起点 B-it175→noex-it105（门控 35.5→33.0；回应 09-21
 //    kk=1 洗起点事故）· 缰绳 true→false（L1 验证过的安全组合）· 采样 48000→49152

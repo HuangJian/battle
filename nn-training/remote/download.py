@@ -42,7 +42,7 @@
    `_resolve_blob` / `_progress_logger` 在 `worker` 命名空间**已无读者**，那些转发仍留着是因为
    tests 把 `remote.worker` 当**取名字的入口**直接调（名字是契约，位置不是）；但它们**不再是注入点**
    ——`monkeypatch.setattr(worker, "download_payload", …)` 会静默失效（这正是
-   `tests/test_remote_ppo.py` 的缓存命中用例要交给本模块的原因）。
+   `tests/remote/test_remote_ppo.py` 的缓存命中用例要交给本模块的原因）。
 """
 
 from __future__ import annotations

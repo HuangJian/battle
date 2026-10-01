@@ -117,7 +117,7 @@ def rl_config_path() -> str:
     为什么要有这个缝（2026-09-22，用户指令「测试应该使用自己的 fixtures」）：路径原本硬编码在
     三处（`trainer/run_rl.py` / `trainer/loop_serve.py::_read_rl_config` / 本文件），于是**任何读它的用例都
     隐式依赖本机那份未入库的配置**——本机 `rl.stream=1` 就让「`course_args` ≡ `trainer/run_rl.py`」的
-    解析对拍变红（`tests/test_serve_wiring.py` 实测）：绿不绿取决于**别人机器上文件的内容**。
+    解析对拍变红（`tests/trainer/test_serve_wiring.py` 实测）：绿不绿取决于**别人机器上文件的内容**。
     有缝之后用例自带 tmp 夹具，两侧的读取点都走同一个 env。
 
     相对路径按「nn-training/ 下」解析（绝对路径原样），与默认值同一约定。
@@ -1301,7 +1301,7 @@ def fetch_task(
 #: `_poll_result` 预算的**下限**（生产语义：防住「预算小到没意义」的调用）。
 #: 独立成模块常量而非内联 `max(1.0, …)`，是为了让用例能把它调到「毫秒级」而**不改判据**：
 #: 「未置位 ⇒ 持续轮询到预算耗尽」这条断言与预算绝对长度无关，但预算就是那些用例的
-#: 固有墙钟（2026-09-29，§43：`tests/test_dist_common_poll.py` 两例共 ~1s 全花在跑满下限）。
+#: 固有墙钟（2026-09-29，§43：`tests/common/test_dist_common_poll.py` 两例共 ~1s 全花在跑满下限）。
 POLL_MIN_BUDGET_SEC = 1.0
 
 

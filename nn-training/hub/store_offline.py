@@ -38,7 +38,7 @@ from remote.artifacts import ArtifactStore, ledger_row_from_metrics
 #: 2026-09-30（刀 1，hub 出包）：本模块从 `nn-training/remote/hub/store_offline.py` 搬到
 #: `nn-training/hub/store_offline.py`，**少了一层** ⇒ 上溯 4 层变 3 层（`parents[3]` → `parents[2]`）。
 #: 这是个静默类错误：层数是错的，但代码不报错，只是 REPO_ROOT 指到了仓库的**父目录**
-#: （工装用例 `tests/test_multi_course_hub.py::test_backup_target_follows_the_course_config` 当场抓住）。
+#: （工装用例 `tests/hub/test_multi_course_hub.py::test_backup_target_follows_the_course_config` 当场抓住）。
 REPO_ROOT = Path(__file__).resolve().parents[2]
 #: 权重归档根（`nn-training/weights/`；即 `biz.archive.backup_weights` 的缺省目录）。
 WEIGHTS_ARCHIVE_ROOT = REPO_ROOT / "nn-training" / "weights"

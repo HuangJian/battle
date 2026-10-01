@@ -56,7 +56,7 @@ hub 调度语义的一次加法（纯 server 侧，worker 零改动——云机�
 ## 4. 分阶段
 
 - P0：`_JobStore` 加早收判定（fake 时钟可测）＋ `lease-orphan-reaped` 账本事件；
-  单测进 `nn-training/tests/test_hub_leases.py`（与 P3b 同文件，§5 有现成 fake 时钟）。
+  单测进 `nn-training/tests/hub/test_hub_leases.py`（与 P3b 同文件，§5 有现成 fake 时钟）。
 - P1：DECISIONS 索引入账（传输语义加法，按 HOW-TO-ADD 三问：被否决备选 ✓ 会重犯 ✓
   不能就近表达 ✓）；`bun run check` 绿；hub-server 经控制台重启生效（本地组件，
   worker 不动）。

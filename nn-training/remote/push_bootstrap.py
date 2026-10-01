@@ -172,7 +172,7 @@ def close_bootstrap_server(srv: ThreadingHTTPServer) -> None:
     （"端口 ... 已被占用——拒绝启动（禁止双监听）"）⇒ `wait_ping` 30s 超时 ⇒
     `SystemExit: -1` ⇒ cell 挂、隧道下线 ⇒ 控制台侧只看到「推送成功但状态查询 530」，
     而真因藏在 `<work>/serve.log` 里，极难定位。
-    本仓库其它处（`tests/test_upgrade.py`、`tests/test_port_guard.py`、
+    本仓库其它处（`tests/common/test_upgrade.py`、`tests/common/test_port_guard.py`、
     `e2e/test_push_mode_integration.py`）都是 shutdown+server_close 成对写，此处曾遗漏。
     """
     srv.shutdown()

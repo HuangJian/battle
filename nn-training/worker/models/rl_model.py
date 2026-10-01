@@ -8,8 +8,8 @@ Do not wire into the student pipeline without updating that plan.
 
 ★ DEAD CODE (plan/new-era-stop.plan.md #6) — the live move head has 5 slots and
 lives in `models/student.py::PPOStudent`. This module is import-guarded by
-`tests/test_action_head_hygiene.py` (no trainer/biz/ppo/remote module may import it) and
-its own contract is pinned by `tests/test_rl_model.py`. Changing this file does
+`tests/worker/test_action_head_hygiene.py` (no trainer/biz/ppo/remote module may import it) and
+its own contract is pinned by `tests/worker/test_rl_model.py`. Changing this file does
 NOT change the shipped policy.
 
 Architecture:

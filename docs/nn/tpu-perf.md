@@ -51,7 +51,7 @@ B=709 :   4 步 / 墙钟 50s（12.5s/步）    ← 83.8s 里 50s 买的是编译
 **可观测**：`remote/worker.py` 的 `PPO done ... steps=<训练>/<池子>`（`result.agg.steps` = 实际
 训练量、`steps_pooled` = 池子量），`chunk_episodes` 打一行 `[chunk] mb 对齐：pooled=N → 丢弃尾部 M 步`。
 
-**验证**：`tests/test_ppo_common.py::test_chunk_episodes`（每块恰为 mb + 尾部丢弃 + 对照路径/单池
+**验证**：`tests/worker/test_ppo_common.py::test_chunk_episodes`（每块恰为 mb + 尾部丢弃 + 对照路径/单池
 不变 + 池子 < mb 不裁）、`e2e/test_run_rl.py::test_chunk_episodes`。提交 `7130f880`。
 
 **尚未真机验证**：需要点「训练」重打包（`diag 累计汇总` 应只剩 `B=1024`）。
@@ -373,9 +373,9 @@ B=1024:184步 累计墙钟 45s ← 0.17s/步
 **预期**：188 步从 ~35min 降到 ~1~3min（编译只在前几步付一次）；`PPO_XLA_DIAG` 行应从
 第二个 chunk 起就 `新=0, 命中>0`。**这条修法也让「step 4 那一步的 0.31s」成为常态而不是例外。**
 
-测试：`tests/test_ppo_common.py`（复用同张量/数值与朴素 numpy 索引逐位相同/None 路径不变——
-2026-09-26 从 `tests/test_xla_step_diag.py` 移入：那三个用例要真张量，归位到 `worker/ppo/common.py`
-的家，好让诊断文件整文件免 torch）+ `tests/test_xla_step_diag.py` 的 engine 源码守线
+测试：`tests/worker/test_ppo_common.py`（复用同张量/数值与朴素 numpy 索引逐位相同/None 路径不变——
+2026-09-26 从 `tests/worker/test_xla_step_diag.py` 移入：那三个用例要真张量，归位到 `worker/ppo/common.py`
+的家，好让诊断文件整文件免 torch）+ `tests/worker/test_xla_step_diag.py` 的 engine 源码守线
 「不得再 `demo_t[...][_didx]`」。
 
 已知噪声（记录备查）：XLA 的 metrics 计数器会被重置，所以 `编译=−0.56s`、`追踪=−0.825s`
@@ -413,11 +413,11 @@ B=1024:184步 累计墙钟 45s ← 0.17s/步
 判断口径（写进日志，避免下次再靠面板猜）：**每步「新编译=1」+ 编译秒级 ⇒ 图签名每步都在变
 （真正的病）；「新编译=0、命中>0」而墙钟仍秒级 ⇒ 病不在编译**（看执行/主机侧）。
 
-测试：`tests/test_xla_step_diag.py`（真机 metrics 原文解析、单位混排、delta/格式化、
-engine 接线与「基线只在取样分支里推进」的源码守线）；`tests/test_tpu_backend_guard.py` 同步。
+测试：`tests/worker/test_xla_step_diag.py`（真机 metrics 原文解析、单位混排、delta/格式化、
+engine 接线与「基线只在取样分支里推进」的源码守线）；`tests/worker/test_tpu_backend_guard.py` 同步。
 
 顺带修掉一个间歇红的门禁噪声（与本改动无关、但会挡绿）：
-`tests/test_measure_checkpoint_rss.py::test_build_stack_is_cheap_and_keepalive_holds_it`
+`tests/worker/test_measure_checkpoint_rss.py::test_build_stack_is_cheap_and_keepalive_holds_it`
 把 ΔRSS 的**符号**当不变量（`adam_mb >= 0`），而同机 `xdist -n 12` 下分配器回收会让它为负
 （实录 `-0.03`/`-0.05`，单文件跑恒正）。改为「必须是 MB 量级的数」（`abs < 100`）+ 原有的
 确定性 `theory_mb` 结论，符号/绝对值一律不钉（与该模块 docstring 的既有口径一致）。
@@ -583,7 +583,7 @@ CUDA→TPU→CPU 探测。**踩坑四条**（全部来自真机）：
 | `remote/worker.py` | 判据换 `coef_active` 并打日志，兜住"旧 hub 产出的、仍带微小系数的在途 manifest" |
 
 **行为**（decay=0.5）：`it=30` → 1.86e-9 仍活跃；**`it=31` 起精确 0.0**；实测踩到的 `it=37`
-现在精确为 0.0。回归测试 `tests/test_run_rl_m1.py::test_kickstart_coef_anneals_to_exact_zero`
+现在精确为 0.0。回归测试 `e2e/test_run_rl_m1.py::test_kickstart_coef_anneals_to_exact_zero`
 （含 1e-9 上下边界）。
 
 **兼容性**：新 hub + 旧 worker、旧 hub + 新 worker 两条组合都安全（精确 0.0 两侧都判"关"；

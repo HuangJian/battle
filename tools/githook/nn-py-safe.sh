@@ -11,7 +11,7 @@
 # source tools/githook/_sandbox-sanitize.sh —— 与 pre-commit 同一套进程树级拉闸。
 #
 # 用法（把 `python.exe …` 整体换成 `bash tools/githook/nn-py-safe.sh …`）：
-#   bash tools/githook/nn-py-safe.sh -m pytest -q tests/test_dual_track_eval.py -x
+#   bash tools/githook/nn-py-safe.sh -m pytest -q tests/worker/test_dual_track_eval.py -x
 #   bash tools/githook/nn-py-safe.sh -c 'print("hi")'
 # 解释器默认 = nn-training/.venv（与 nn-python-gate.sh 同源）；覆盖：
 #   NN_PY=/path/to/python.exe bash tools/githook/nn-py-safe.sh -m pytest …

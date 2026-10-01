@@ -163,7 +163,7 @@ def _pid_alive(pid: int) -> bool:
 
     现已**委托唯一实现** `common.pid_probe.pid_alive`（stdlib-only 顶层模块，与 common.platform_utils 同层）：
     该模块集中记录三个坑（Windows TerminateProcess / `pid<=0` 的进程组语义 / 宽捕获），
-    并由 `tests/test_pid_probe_windows_safe.py` 用注入的假 kernel32 直接回归。保留本函数名
+    并由 `tests/common/test_pid_probe_windows_safe.py` 用注入的假 kernel32 直接回归。保留本函数名
     只为调用点与测试稳定；**新增探测请直接用 `common.pid_probe.pid_alive`，不要再复制实现**。
     """
     return pid_alive(pid)

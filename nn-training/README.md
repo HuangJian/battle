@@ -127,21 +127,14 @@ nn-training/
 │   ├── eval_m1_once.py      #    【一次性评估入口】m1（给 tools/sim/m1-eval.ts 用；刀 7 搬入）
 │   └── __init__.py          #    包入口文档
 │
-├── tests/                   # 【测试包】纯逻辑回归 + torch 常驻回归
+├── tests/                   # 【测试包】纯逻辑回归 + torch 常驻回归（2026-10-01 起按源码包树镜像）
 │   ├── conftest.py          #    共享 fixture（bp_args 等）
-│   ├── test_rl_course.py    #    确定性配对 + 课程扩展
-│   ├── test_rl_breaker.py   #    熔断状态机
-│   ├── test_rl_reports.py   #    聚合不变式
-│   ├── test_rl_stream.py    #    wave-params + 残局 clamp
-│   ├── test_run_rl.py       #    trainer/run_rl.py 编排层回归（含镜像、断点、JSONL 锚点、race-tier）
-│   ├── test_run_rl_m1.py    #    三模式整合 + m1-eval 评估管线回归
-│   ├── test_ppo_common.py   #    PPO 共享基础设施回归
-│   ├── test_ppo_goal.py     #    ppo_goal.py 常驻回归
-│   ├── test_ppo_intent.py   #    ppo_intent.py 常驻回归
-│   ├── test_rl_model.py     #    rl_model.py（ResNet 教师网）回归
-│   ├── test_student_model.py #   student_model.py（CoordConv-ConvMixer-Lite）回归
-│   ├── test_train_loop_pure.py  # trainer/train_loop.py 纯函数回归
-│   └── test_upgrade.py      #    common.distribution 主动升级机制回归
+│   ├── helpers/             #    测试基建（source_scan / hub_poll / push_worker / remote_dag 账本 …）
+│   ├── golden/              #    黄金向量（reward_golden / v7_phi_ts_oracle）
+│   ├── subproc_util.py      #    端口 / 子进程助手（起真服务的用例必须借它）
+│   ├── common/ biz/ worker/ remote/ hub/ trainer/   # 逐包镜像：tests/<pkg>/test_*.py
+│   ├── tools/               #    nn-training/tools/ 的镜像（forkdist / bootstrap / tpu-probe / …）
+│   └── test_layering.py     #    跨包守卫留根（+ test_remote_dag / test_python_loc_budget / test_no_sleep_as_sync / …）
 │
 ├── tools/                   # 开发/运维脚本（带 __init__.py 的包；刀 7 把顶层五个脚本收进来）
 │   ├── bootstrap.py         #    【一条命令搭环境】探测 GPU → 选 torch 变体 → uv sync → 自检（冷机器上唯一能自举的那个）

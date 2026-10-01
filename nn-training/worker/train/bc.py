@@ -76,10 +76,10 @@ def _resolve_bc_device(device: str) -> tuple[str, torch.device, bool]:
 
     → (规范化 device 串, torch.device, use_dp)。
 
-    判据住在 `train/device.py`（顶层零 torch，探针可注入 ⇒ `tests/test_bc_device.py`
+    判据住在 `train/device.py`（顶层零 torch，探针可注入 ⇒ `tests/worker/test_bc_device.py`
     不必 import torch；2026-09-26 item 6f）。本函数只做两件事：**把真探针接上去** +
     把名字映成真的 `torch.device`——`cuda-dp` 不是合法 device type，多卡时必须是
-    `torch.device("cuda")`（由 `tests/test_bc_dp.py` 钉住），只有名字保留给日志/台账。
+    `torch.device("cuda")`（由 `tests/worker/test_bc_dp.py` 钉住），只有名字保留给日志/台账。
     """
     name, use_dp = resolve_bc_device(device)
     return name, torch.device("cuda" if use_dp else name), use_dp

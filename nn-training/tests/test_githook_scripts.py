@@ -33,7 +33,7 @@
    `test_gate_keeps_native_paths_when_wslpath_maps_elsewhere` 真起一次假仓库骨架复现事故。
 
 7. **分发器选择只看「选中的 python 是什么」，不看 uname 存不存在**（2026-09-29，v3.19）。
-   Linux 上 pytest 改走 `--forkdist`（收集一次 + fork，见 tests/test_forkdist.py 与
+   Linux 上 pytest 改走 `--forkdist`（收集一次 + fork，见 tests/tools/test_forkdist.py 与
    docs/nn/engineering.md §49），Windows/macOS 继续 `-n`。掉进旧陷阱的写法是
    「问 uname/有没有 os.fork」这种间接判据——本仓已有一次同型事故（第 6 条）。
    另钉一条：`--forkdist` 与 `-n` 互斥，任何一行命令行不得同时出现（同时给会让两个

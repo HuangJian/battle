@@ -88,7 +88,7 @@
 #        拦截 → safe-delete FAIL_CLOSED 抛 SystemExit → mypy INTERNAL ERROR；
 #     2. 同一 turn 内累积删除数越过阈值（实测 count 56 > threshold 50,
 #        scope=turn）→ 之后所有删除被拒 → 依赖真实删除的用例（如
-#        tests/test_workdir_sweep.py）批量转红。
+#        tests/worker/test_workdir_sweep.py）批量转红。
 #   典型触发场景：一个会话里反复跑全量（跑十几次必然踩满配额）。**单跑该文件
 #   会通过**——这就是判据：单跑绿、全量红，且日志里有 [safe-delete] 行 = 环境。
 #   干净验证方式（临时停用 shim，不改仓库）：

@@ -32,7 +32,7 @@
 | 本簇**直调** `_request` / `_wire_add` / `_BULK` / `_bulk_pace`（`post_result` / `peek_jobs` / `heartbeat` …） | **本模块** | **`job_lifecycle`** |
 
 第三行是本刀最险的一处：`worker.py` 在本刀之后**已无 `_request` 调用点**——`patch
-remote.worker._request` 从此不再影响任何东西（`tests/test_job_lifecycle_split.py` 把这条
+remote.worker._request` 从此不再影响任何东西（`tests/remote/test_job_lifecycle_split.py` 把这条
 钉成警报）。
 """
 

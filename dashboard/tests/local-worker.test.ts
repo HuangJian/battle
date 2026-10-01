@@ -15,7 +15,7 @@
  *  ④ **接线门禁**：启动/停止/重建/冒烟/日志/标签五处都在（缺一处 = UI 无声失败）。
  *
  * 行为层（一个进程领多门课的活）由 python 侧假 hub 用例逐条演示：
- * `nn-training/tests/test_local_worker_multi_course.py`。
+ * `nn-training/tests/remote/test_local_worker_multi_course.py`。
  *
  * 纪律：端口/容量一律从真实 rl-config 推导（不写死数字）；本文件不 spawn 任何进程。
  */

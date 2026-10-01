@@ -120,7 +120,7 @@ dashboard 必改项、gate 改动、minibatch/PPO 超参联动。
 - `volume_waves.py`（新文件，`rl/` 下，禁 torch/numpy 以外重依赖）：
   `initial_games()` / `topup_games()` / `wave_seed_stream()` /
   `terminate()` 四纯函数。
-- 单测（`tests/test_rollout_volume.py`）：配额数学（整除/ceil/封顶/地板）、
+- 单测（`tests/worker/test_rollout_volume.py`）：配额数学（整除/ceil/封顶/地板）、
   跨关独立性（A 加波 B 种子不变）、终止谓词、journal schema round-trip、
   **老行为回归**（无键课程 pairs == 今日 `build_pairs` 输出逐字节）。
 - 门禁：`ruff + mypy + pytest` 该文件全绿。

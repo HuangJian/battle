@@ -16,7 +16,7 @@
 
 * 注入点单一且显式：**`remote.hub_http._request`**（宿主函数的命名空间解析就在本模块）。
   旧家的 `hub_client._request` 是转发名；照它打补丁**不再**影响宿主函数，这是**刻意**的分档
-  （见 `tests/test_hub_http_split.py` 的档位断言）——patch 打偏而测试全绿是本仓最贵的坑之一。
+  （见 `tests/remote/test_hub_http_split.py` 的档位断言）——patch 打偏而测试全绿是本仓最贵的坑之一。
 * 节点侧客户端（`remote/push_client`）与 `trainer/bc_ingest` 都直接依赖本模块，而不再依赖 1688 行的
   `hub_client` 门面。
 

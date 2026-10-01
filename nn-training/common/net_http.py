@@ -8,7 +8,7 @@
 后果：每一发去 `http://127.0.0.1:<hub/worker>` 的请求都被送到外部代理再转回来——
 
   * 本机训练（local 预设的 hub、本机 worker、控制台的健康探测）凭空多一跳；
-  * 代理抖动时回 **502**（门禁里 `tests/test_offline_deliver.py::test_offline_endpoints_require_auth`
+  * 代理抖动时回 **502**（门禁里 `tests/remote/test_offline_deliver.py::test_offline_endpoints_require_auth`
     实测红过一次：hub 日志明明白白写了两次 401，测试侧读到的却是 502）。
 
 回环流量在定义上就是本机的，绕开代理永远是对的；非回环（隧道/公网 URL）保持 urllib 默认

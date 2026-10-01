@@ -447,7 +447,7 @@ Have/omit 只是 **带宽优化提示**，不是正确性来源。实现与测�
 | flush 点 | pull：job 循环 `finally`；push：`worker_server` 后台作业 `finally` | 两条路径都有一行账 |
 | 不重抽面 | `post_result`（POST result） | 只记账不算重抽（它是产物上行，走既有 5 次退避） |
 
-单测：`nn-training/tests/test_wire_reroll.py`（判据/上限/不退避/产物不重抽/账行形状）。
+单测：`nn-training/tests/remote/test_wire_reroll.py`（判据/上限/不退避/产物不重抽/账行形状）。
 
 **★ 收尾（2026-09-20，同一批）——**原表只盖了 worker 侧四段 GET，三个口子已堵：
 
@@ -457,8 +457,8 @@ Have/omit 只是 **带宽优化提示**，不是正确性来源。实现与测�
 | `wire` 只有原文、没有聚合 | 验收口径是 p50/p90 + 每组 ≥10 job，人眼扫不出来 | `nn-training/tools/wire_report.py`（三类行 → 逐段 p50/p90 秒 · p50/worst 速率 · bad% · reroll · 命中） |
 | ts_code 缓存命中不进账 | 只漏了这一处（code/blob 都记了） | `_ensure_ts_code` 命中即 `_wire_hit(jid, "ts_code")`——否则「本段没走网络」在账上看不见 |
 
-单测：`nn-training/tests/test_boot_wire_guard.py`（判据/停滞正文/超预算/有界重抽/最后一次硬传/
-两处接线）· `nn-training/tests/test_wire_report.py`（现场原文解析/最近秩/命中不采样/重抽不重复
+单测：`nn-training/tests/remote/test_boot_wire_guard.py`（判据/停滞正文/超预算/有界重抽/最后一次硬传/
+两处接线）· `nn-training/tests/remote/test_wire_report.py`（现场原文解析/最近秩/命中不采样/重抽不重复
 计数/CLI）。DoD 项：坏签场景 p50/p90 有记录（§7.2）→ 现在可复算。
 
 ### 4.0.1 引导期大 body 护栏（与 worker 侧**孪生**，`remote/tailscale_boot.py::fetch_guarded`）
@@ -565,7 +565,7 @@ Have/omit 只是 **带宽优化提示**，不是正确性来源。实现与测�
 - [x] **坏签有界重抽**（2026-09-20 达成）：低速（< `WIRE_MIN_RATE`）时 ≤3 次重抽内可完成；
       重抽不产生重复的全量传输；日志有 `wire: re-roll` 行可统计坏签比例。
       覆盖六段 GET：payload / code / ts_code / blob（worker）+ 引导期 code.zip / task-pack（§4.0.1）。
-      单测：`tests/test_wire_reroll.py` · `tests/test_boot_wire_guard.py`。
+      单测：`tests/remote/test_wire_reroll.py` · `tests/remote/test_boot_wire_guard.py`。
 - [x] **报 p50/p90，不报均值**（2026-09-20 工具就位）：`tools/wire_report.py`
       （最近秩分位；速率改报 p50 + worst + bad%，理由见 §4.0-1）。仍欠的是**在实机上采一组
       ≥10 job 的样本**并拿它校准 §8-4 的阀值——那需要一次真跑，属训练侧行动。
@@ -584,7 +584,7 @@ Have/omit 只是 **带宽优化提示**，不是正确性来源。实现与测�
 1. 本地 loopback hub + 两门假课程，连续发布 job，统计 download 次数应随命中下降。
 2. **result 体积不变**：`tools/remote_wire_scan.py` **不在本仓**（§6 已标）——现在的等价手段是
    ① worker 的 `wire:` 行里 `result=` 那段的字节数（改前后直接比）；② 协议层
-   `tests/test_remote_ppo.py` 的 `validate_result` / `pack_result_v2` 用例（含 `opt.pt` 必带）。
+   `tests/remote/test_remote_ppo.py` 的 `validate_result` / `pack_result_v2` 用例（含 `opt.pt` 必带）。
    要恢复「合成路径扫描」得先把该工具写回仓——**独立小活，未做**。
 3. AI Studio 实机：看 `wire:` 日志，对比优化前后「payload/POST 耗时 / PPO 耗时」。
    ⚠ **方差下必须配对**：单跑对比是噪声（同机同 hub 实测 44× 双峰，§4.0）⇒ 每组 ≥10 job，
@@ -629,7 +629,7 @@ Have/omit 只是 **带宽优化提示**，不是正确性来源。实现与测�
 ## 9. 证据与参考（仓内）
 
 - 字段体积扫描：`nn-training/tools/remote_wire_scan.py` ⚠ **本仓不存在**（2026-09-20 全仓核对：
-  `git ls-files | grep wire` 只有 `tests/test_wire_cf_tunnel.py` / `tests/test_wire_reroll.py`）。
+  `git ls-files | grep wire` 只有 `tests/trainer/test_wire_cf_tunnel.py` / `tests/remote/test_wire_reroll.py`）。
   §1.2 的两张体积表因此**无法就地复现**——它们是一次现场测量的记录，不是可重跑的工具输出。
   要重跑就把该工具写回仓（未做，见 §7.3-2 的替代口径）。
 - 传输账聚合：`nn-training/tools/wire_report.py`（p50/p90 + bad% + reroll；纯只读）

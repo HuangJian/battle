@@ -180,7 +180,7 @@ SERVE_ANY_SCRIPT = "tools/sim/serve-any.ts"
 #: 导出器 → mode token —— `tools/agent/persist-pool.ts::PERSIST_MODE_BY_ENTRY` 的 Python 镜像。
 #: 值域必须与 `tools/sim/serve-any.ts::SERVE_MODES` 的键集逐字相同（那是**协议面**：改一侧=
 #: 改另一侧）；TS 侧有对拍用例（`tests/serve-any.test.ts`），Python 侧由
-#: `tests/test_remote_serve_pool.py` 钉住本表被真的送进了 worker 的 stdin。
+#: `tests/worker/test_remote_serve_pool.py` 钉住本表被真的送进了 worker 的 stdin。
 SERVE_MODE_BY_SCRIPT: Mapping[str, str] = {
     ROLLOUT_SCRIPT: "rollout",
     EVAL_SCRIPT: "eval",

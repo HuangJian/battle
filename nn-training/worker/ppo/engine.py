@@ -82,7 +82,7 @@ from worker.ppo.common import (
 # 访问点不变（`ppo.engine.load_episodes` / `load_shard` / `_rl_shard_spec`）。
 #
 # ★ `compute_gae` / `discover_shards` / `load_episodes_common` / `load_shard_fields`
-#   这四个也**必须留着**：engine 是对外的访问点——`tests/test_ppo_goal.py` /
+#   这四个也**必须留着**：engine 是对外的访问点——`tests/worker/test_ppo_goal.py` /
 #   `test_ppo_intent.py` 用 `import ppo.engine as ppo` 后把 `ppo.compute_gae(...)`
 #   当定长参照。搬走装载块后它们一度被 ruff F401 判成死代码而删掉，门禁当场红：
 #   **「没人 `import` 这个名字」≠「没人在属性上取」**。

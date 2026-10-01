@@ -47,7 +47,7 @@ from hub.store_wire import WireMeterMixin
 # 被显式调用的）。
 #
 # 混入顺序只影响同名的解析，而六个混入**零重名**（守卫
-# `tests/test_hub_job_store_split.py` 钉住）；这里按「越底层越靠后」排在便于读。
+# `tests/hub/test_hub_job_store_split.py` 钉住）；这里按「越底层越靠后」排在便于读。
 
 
 

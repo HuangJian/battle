@@ -218,7 +218,7 @@ def write_backup(config_path: Path, *, now: datetime | None = None) -> Path:
     """写 `rl-config.json.bak.<YYYYMMDD-HHMMSS>` 并**回读校验 sha256**；不符即抛。
 
     刻意**不用** `common.hashing.sha256_file`：本工具要能独立于包布局跑，且
-    `tests/test_common_layer.py` 钉住 `sha256_file` 只在 `common/hashing.py` 定义一处
+    `tests/common/test_common_layer.py` 钉住 `sha256_file` 只在 `common/hashing.py` 定义一处
     （同名的第二处定义会直接让门禁转红）。这里只需一次文件对账，直接 hashlib。
     """
     stamp = (now or datetime.now()).strftime("%Y%m%d-%H%M%S")

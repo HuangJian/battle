@@ -230,11 +230,11 @@ def _code_of(rel: str) -> str:
 
 
 def _test_files() -> list[str]:
-    """全部测试文件（相对 nn-training/），排除豁免名单。"""
+    """全部测试文件（相对 nn-training/，逐层递归），排除豁免名单。"""
     out: list[str] = []
     for layer in ("tests", "e2e"):
-        for p in sorted((ROOT / layer).glob("*.py")):
-            rel = f"{layer}/{p.name}"
+        for p in sorted((ROOT / layer).rglob("*.py")):
+            rel = p.relative_to(ROOT).as_posix()
             if rel not in _GUARD_EXEMPT:
                 out.append(rel)
     assert len(out) > 50, f"测试文件扫得太少（{len(out)}）——路径写错了？"

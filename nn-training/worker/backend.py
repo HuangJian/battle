@@ -8,7 +8,7 @@
 `stream.py:123-124` 无条件注入它 —— 该缺陷直到训练中途第一个 wave 才以
 `TypeError` 爆炸，表现为"每轮卡 30 秒、5 连败退出"，极易被误读为节点故障。
 
-本模块把契约固化为 `typing.Protocol`，并在 `tests/test_backend_contract.py` 中对
+本模块把契约固化为 `typing.Protocol`，并在 `tests/worker/test_backend_contract.py` 中对
 `biz.modes._MODE_BACKENDS` 的每个成员做**启动期断言**——签名不匹配在测试期即暴露，
 而非训练中途。
 

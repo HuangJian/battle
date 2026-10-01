@@ -198,7 +198,7 @@ def is_kaggle(env: dict | None = None, *, exists: Callable[[str], bool] = os.pat
     """是否在 Kaggle 容器里（与 `remote/artifacts.py::is_kaggle` 同一判据）。
 
     本模块**不能** import `remote.*`（拿包之前它还不存在），所以判据在这里重写一份，
-    由 `tests/test_offline_boot.py` 盯着两边同值：官方标记 `KAGGLE_KERNEL_RUN_TYPE`、
+    由 `tests/remote/test_offline_boot.py` 盯着两边同值：官方标记 `KAGGLE_KERNEL_RUN_TYPE`、
     交付面 `offline_deliverable.download_dir()` 已在用的 `KAGGLE_URL_BASE`，或 `/kaggle/working` 存在。
     """
     e = os.environ if env is None else env

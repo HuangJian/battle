@@ -1,6 +1,6 @@
 """test_volume_e2e.py — 按样本量动态采集的端到端验证（plan §3-P2）。
 
-与 `tests/test_rollout_volume.py` 的分工：那边用桩 `_dispatch_volume_wave` 验配额逻辑与接线；
+与 `tests/worker/test_rollout_volume.py` 的分工：那边用桩 `_dispatch_volume_wave` 验配额逻辑与接线；
 这里**不桩任何采集侧代码**——真 `dispatch_rollout_phase` → 真 `run_rollout_queue`
 （`trainer/dispatch.py` 的完整调度器）→ 假 sim 节点（HTTP）落真 shard（真 manifest schema）→
 真 `settled_stage_totals` 账本 → 真 `_volume_topup` 补波循环。torch 只在 import 层面存在，

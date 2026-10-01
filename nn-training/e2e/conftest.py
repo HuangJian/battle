@@ -34,8 +34,8 @@ def _no_serve_pool(monkeypatch: pytest.MonkeyPatch) -> None:
     ⚠ 必须挂在**夹具**上，不能在 conftest 模块级写 `os.environ`：门禁跑的是
     `pytest tests/ e2e/` **一次进程**，模块级 setenv 会把 `tests/` 里的池用例一并关掉
     （实测：三个真 bun 池用例全红，报「长驻 worker 池」不在日志里）。
-    池的真东西由与真 bun 的用例钉：`tests/test_local_rollout_pool.py`（本机腿）、
-    `tests/test_remote_iter_real_bun.py` / `test_remote_serve_pool.py`（节点腿）、
+    池的真东西由与真 bun 的用例钉：`tests/worker/test_local_rollout_pool.py`（本机腿）、
+    `tests/worker/test_remote_iter_real_bun.py` / `test_remote_serve_pool.py`（节点腿）、
     `tests/state-init.test.ts`（serve ≡ 一次性，含起始分布）。显式 `NN_SERVE_POOL=1` 仍可覆盖。
     """
     monkeypatch.setenv("NN_SERVE_POOL", "0")

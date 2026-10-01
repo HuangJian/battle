@@ -232,7 +232,7 @@ def main() -> None:
     # 注意这里**只打日志**：告警不得变成拒启（用户裁决 O3）。
     # 注：`check_rl_config` 必须在**模块顶层** import——main() 里已经 `os.chdir` 到仓根，
     # 此时 `sys.path[0]=''` 已指向仓根，惰性 import 会找不到 `worker.rl_config_schema`
-    # （tests/test_serve_wiring.py 的 oracle 子进程实测；刀 7 前该模块住 nn-training 顶层）。
+    # （tests/trainer/test_serve_wiring.py 的 oracle 子进程实测；刀 7 前该模块住 nn-training 顶层）。
     for _adv in check_rl_config(_cfg):
         log(f"[run_rl] rl-config 告警：{_adv}")
     _rl_args, _rl_src = merged_mode_args(_cfg, mode)

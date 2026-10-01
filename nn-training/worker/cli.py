@@ -501,7 +501,7 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         default=_d("remote_precollect", 0),
         # ⚠ `%%` 不是笔误：argparse 的 `_expand_help` 对 help 再做一次 `% params`，
         # 裸 `%` 会让**整个 `--help` 崩**（ValueError: unsupported format character）
-        # ——2026-09-21 实测（本行曾是全仓唯一裸 `%`），由 `tests/test_cli_help.py` 守住。
+        # ——2026-09-21 实测（本行曾是全仓唯一裸 `%`），由 `tests/worker/test_cli_help.py` 守住。
         help="远程模式预采（D3/Q10，默认 0=测后开）：1=PPO 等待窗口 spawn 下一轮首波"
         "预采（stale 上限 30%%，超量下轮现场重采）",
     )

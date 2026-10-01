@@ -14,8 +14,8 @@ hub/task_pack.py         任务包新鲜度门 / 缺包自愈门（纯判据叶�
 hub/{smoke_loopback,tunnel_ab_probe,backfill_offline}.py  站在门面上的运维/验收工具
 ```
 
-**不 import `hub.server`** —— 实现模块反向依赖组装模块就成环（`tests/test_hub_routes_split.py` 与
-`tests/test_hub_admin_split.py` 各有一条守卫；本仓对环的处理只有「下沉共同依赖」与「参数注入」两种）。
+**不 import `hub.server`** —— 实现模块反向依赖组装模块就成环（`tests/hub/test_hub_routes_split.py` 与
+`tests/hub/test_hub_admin_split.py` 各有一条守卫；本仓对环的处理只有「下沉共同依赖」与「参数注入」两种）。
 
 ## 三个「站在门面上的工具」为什么住在本包（而不是 `remote/`）
 

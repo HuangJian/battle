@@ -75,7 +75,7 @@ SERVE_ERR = "__SERVE_ERR__"
 #: goal/intent 轮继续逐局 spawn（要放开只需往名单里加一行，池无需任何改动）。
 #: 导出器路径的**唯一来源**是 `common/protocol.py`（TS↔Python 产物契约）——此处只做本地名
 #: re-export：`serve_pool.EVAL_SCRIPT` / `serve_pool.ROLLOUT_SCRIPT` 的既有调用点与
-#: `tests/test_remote_serve_pool.py` 零改动。
+#: `tests/worker/test_remote_serve_pool.py` 零改动。
 ROLLOUT_SCRIPT = _protocol.ROLLOUT_SCRIPT
 EVAL_SCRIPT = _protocol.EVAL_SCRIPT
 

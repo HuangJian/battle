@@ -320,7 +320,7 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         非配额课程下 `_volume_topup` 本来就立即返回。
 
         步骤本体保留：`STEP_ORDER` / `STEP_METHOD` 要求每个 kind 有实现（加一步必须
-        同时加实现，见 `tests/test_loop_round.py`），且细粒度驱动器要能在这两个 kind
+        同时加实现，见 `tests/worker/test_loop_round.py`），且细粒度驱动器要能在这两个 kind
         之间把执行权交给别的课程。
         """
         return None
