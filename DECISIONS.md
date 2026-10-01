@@ -18,6 +18,13 @@
 > 末尾的 **「决策正文归档」** 节，锚点 `### §<本文件的编号>`；② `docs/decisions/details/<领域>.md`，
 > 锚点 `## §<本文件的编号>`。读细节：先看索引行，再走指针，最后才回 git 历史。
 >
+> **旧路径约定（2026-10-01）**：本文件是**追加型日志** —— 条目里的文件 / 模块路径与**行号**是
+> **写下当时**的坐标（早期 `rl/…` · `remote/protocol.py` · 算法栈五包等），**不就地改名**：改名会把
+> 「当时那个文件的第 N 行」读成「今天这个文件的第 N 行」（**假精确**，比旧名更坑），且条目里大量行
+> 本身就是旧→新映射 / 引文（改了自相矛盾）。**新写的条目用今天的名字**；读旧条目对不上时走对照：
+> `nn-training/README.md` 模块图 · `docs/nn/engineering.md` §51–§55（§53 改名刀 · §55 两轮散文 keep 表）。
+> 口径来源（含被否决备选）→ `§2026-10-01-goalnn-log-keeps-era-names`。
+>
 > **历史编号占位**（外部文档仍引用的旧编号，正文已归档）：
 >
 > | 编号 | 主题 | 现落点 |
@@ -6075,4 +6082,38 @@ spawn 路径 · `dashboard/src/evalboard/kick-once.py` 的 `from biz.log` → `c
 `"trainer.run_bc"`）—— 锁名 `.run_rl.<course>.lock` 是**跨语言契约**（`slots.ts::lockName` ↔ python `course_lock_path`
 必须逐字节一致），由 `tests/test_serve_bc.py::…own_traj` 当场抓出。两条都写进 `docs/nn/engineering.md` §55。
 
+**同日续（`.md` 散文轮，2026-09-30）**：代码面改写器显式跳过 `*.md`，散文单独一轮清完 —— 42 个命中文件（含
+`tmp/` 两份草稿副本）去掉草稿后 40 个里，**21 个文件 / 147 处路径 + 10 处同行连带**改到今天家
+（`tmp/md_prose_refs.py`：逐文件断言命中数 + keep 锚点）；**19 个文件整文件留**（`DECISIONS.md` / memory 这类
+追加型日志 · `tmp/` 草稿 · 四篇年代快照 · 本轮 plan 的决策表）。五类例外（映射左列 / 令牌·事故记录 /
+已死启动器记录 / 日志与草稿 / 快照）→ `docs/nn/engineering.md` §55「散文里的旧路径（`.md` 轮）」。
+门禁：根 `bun run check` **2277 / 0** · dashboard **1232 / 0**。
+
+**同日续二（`.md` 散文轮二：更早层残渣，2026-09-30）**：第一轮只清刀 7 的 14 个扁平入口；刀 1–6 之前的旧形
+（`rl/…` · `remote/…` · `models|ppo|data|train|scripts/…` · 根 L0 `dist_*`）同日续清 —— **20 个文件 / 418 处**
+（改写器 `tmp/older_refs.py`：逐行 keep 锚 + 三道守卫 —— 旧形已在新家前缀内 / 解析无解 / keep；落盘后
+`tmp/older_rescan.py` 复查 **WOULD-CHANGE 0**）。keep 55 处 = 映射左列 /「原 X」自述 · 事故·字面量
+（`SRC = rl/batch_eval.py` · `endsWith('remote/protocol.py')` · `setattr("rl.…")` · `git show HEAD:rl/…` · 断言错误原文）·
+决策记录（算法栈并入 `trainer/` 的「9 条向上边」分析 · 六包重组第一刀行 · `rl.queue/stream` 缩写列）。
+已知残留：日志/草稿/年代快照/本 plan 决策表（判据同 §55 首表）· brace 列表 `rl/{…}.py` · 裸 `rl/` 统称 ·
+根下未跟踪草稿 `transfer-scheduling.*`（不在扫描面）。门禁：根 `bun run check` **2277 / 0**。
+
 —— 全文（14 个文件的新老家 / 读数 / 反探针 / 未做）→ `docs/nn/engineering.md` §55；`plan/nn-training-module-reorg.plan.md` §5.6。
+
+## §2026-10-01-goalnn-log-keeps-era-names（2026-10-01，`DECISIONS.md` 的旧路径口径：追加型日志**不就地改名**，头部落一条译注）
+
+刀 7 两轮 `.md` 散文清理（§2026-09-30-goalnn-entry-scripts-into-packages 同日续 / 续二）后清点本文件：仍有
+**327 处**可解析旧形（`rl/…` · `remote/<搬走的>` · 算法栈五包路径 · 根 L0 名），散在 **108 个条目**里 ——
+其中 **107 行自带映射 / 引文**（旧→新对 ·「原/旧/改名」· 断言字面量 · `git show HEAD:` 引用），其余多是刀口
+条目里「当时那个文件 / 第 N 行」的坐标（`tmp/decisions_probe.py` → `tmp/decisions_probe.txt`）。
+
+**决策**：全部**保持原文**，只在文件头（「正文在哪」段后）落一条**旧路径约定**译注（读者/agent 的进入点，
+写一次管全部）；**新条目用今天的名字**。
+
+**被否决的备选**：① **就地改**（200 处纯 locator）—— 条目里的 `rl/config.py:1264` 这类**行号**是当时文件的
+坐标，改名后读成今天文件的行号（假精确）；且要逐行判 108 个条目、107 行映射/引文不能碰 —— 成本高、零收益。
+② **只手写一份映射表**（不落进文件头）—— 读者/agent 从文件头进，映射放别处等于没放。
+
+**判据 / 先例**：AGENTS §6.3（就近表达）· 本文件头部「永不删除、永不重排」· `docs/nn/engineering.md` §55
+keep 表（追加型日志整文件不动；改字面量 = 篡改记录）。**对照指针**：`nn-training/README.md` 模块图 ·
+`docs/nn/engineering.md` §51–§55。

@@ -274,7 +274,7 @@ BC 语料（稀疏分布）从未演示过。c6 起点 26 对老师 50——24pp
 gameover 终结，terminal 主导回报；胜负手在"一次失误"，不在技能。
 
 **D6 定价结构把梯度指向"抢时间"而非"别死"（用真实公式验算，2026-09-11 补）。**
-用 `rl/reward_library.reward_from_spec`（整局 Σr，非估值）跑同一组算例：
+用 `biz/reward_library.reward_from_spec`（整局 Σr，非估值）跑同一组算例：
 
 | 算例 | c6 定价（wTick .01 / clear 2.0） | c6b 定价（wTick .001 / clear 6.0） |
 |---|---|---|
@@ -301,7 +301,7 @@ c4/c5 的毕业点。c6 是迁移腿，it40 时零进展，缰绳却在此刻松
 150 局 / 132–368 个梯度步（远端实测 chunks=33×4ep），属欠训练量级。
 
 **D8 缰绳与先验（2026-09-11 重写；旧版量纲错误，评审 F1 一半对）。**
-遥测 `agg["kickstart"]` 是 **KL(π‖BC) 距离本身**（`ppo/engine.py:372` 的 `kick_mean`），
+遥测 `agg["kickstart"]` 是 **KL(π‖BC) 距离本身**（`worker/ppo/engine.py:372` 的 `kick_mean`），
 不是缰绳系数；系数是 manifest 里的 `kk`。两条轨迹要分开读：
 
 | it | 1 | 5 | 20 | 40 | 49 |
@@ -338,7 +338,7 @@ eval 中途；19:14 该 job 仍 `/result` 404。hub 是 trycloudflare 快速隧�
 ### 12.3 修正方案
 
 - **R1（P0）落地 course-exit M0/M1** —— **已完成（2026-09-11，commit 1380b6e）**：
-  gates schema（`rl/config.py`）+ 求值器（**新增 `rl/gate_check.py`**）+ `loop_guards`
+  gates schema（`worker/config.py`）+ 求值器（**新增 `worker/gate_check.py`**）+ `loop_guards`
   第四守卫 + `gate_verdict` 事件 + `settle_eval_summary` 技能子指标富化。
   旧版"从零实现求值器"的范围描述过时（评审 F3；评审时库已存在、守卫未接线，
   现两者都已完成）。
@@ -420,7 +420,7 @@ R6 并入 Phase 1 的排程默认值，不单列（D6 未修时调 lr 无意义�
 
 代码 → `DECISIONS.md` §2026-09-10-course-exit-gates；过程记录 → `docs/rl.progress.md` §23。
 
-- **R1 已落地（M0+M1）**：`rl/config.py` gates schema ＋ `rl/gate_check.py` 求值器 ＋
+- **R1 已落地（M0+M1）**：`worker/config.py` gates schema ＋ `worker/gate_check.py` 求值器 ＋
   `loop_guards._gate` 第四守卫 ＋ `gate_verdict` 事件（`_breaker` 熔断同写 ABORT）
   ＋ `settle_eval_summary` 技能子指标富化。单测 60 条（config 32 / check 24 / degrade 6 划到 R9）。
 - **R3/R7 载体 `curricula/c6b-margin.jsonc`**：wTick 0.001、stage_clear 6.0、

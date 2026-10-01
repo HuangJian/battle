@@ -47,7 +47,7 @@ cd dashboard && bun install     # 只需一次；按 bun.lock 还原
 
 ```bash
 bun run start        # 启动控制台（:8900；--port N 可改）
-bun run launch       # python 无头启动器：bun run launch --script run_rl.py --check
+bun run launch       # python 无头启动器：bun run launch --script trainer/run_rl.py --check
 bun run build:ui     # 手动重建客户端 bundle（--analyze 看模块体积 top10）
 bun run typecheck    # tsc --noEmit（独立于仓库根）
 bun run test         # bun test --parallel --timeout=50000 tests

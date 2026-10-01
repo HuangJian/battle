@@ -300,7 +300,7 @@ worker/scripts/* → worker/models/*, worker/ppo/*
 
 ## 状态
 
-- [x] P0 可复现基座（pyproject.toml / Makefile / task.py）
+- [x] P0 可复现基座（pyproject.toml / Makefile / tools/task.py）
 - [x] P1 type hints（课程侧 `biz/course.py` 与 `worker/resume.py`）+ ruff/mypy 配置
 - [x] P2 测试架构（新增 tests/ + 瘦身 test_run_rl.py + 20 项 pytest 通过）
 - [x] P2.5 包化重组（models/ + data/ + train/ + ppo/ + rl/ + scripts/）· 2026-09-30 六包重组（common/biz/worker/remote/hub/trainer：`worker/` = 本地训练全栈、`biz/` = 游戏业务）

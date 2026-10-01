@@ -271,7 +271,7 @@ PPO job（本轮为夹具级 + 进程内真 hub 的证据）。
 
 ## §20 R3-5：trainer 收敛为「一个进程服务所有课程」（2026-09-19）
 
-**一句话**：`trainingLoop` 从「每课一进程」收敛为**共享槽单进程**（`run_rl_cluster.py --serve`，
+**一句话**：`trainingLoop` 从「每课一进程」收敛为**共享槽单进程**（`trainer/run_rl_cluster.py --serve`，
 发现模式），于是 hub / 隧道 / selfNode / trainer 四者各只有一个进程就能服务所有并行课程；
 RL 与 BC 课走同一条启动路径。
 
@@ -279,7 +279,7 @@ RL 与 BC 课走同一条启动路径。
 
 R3-3 把组件卡分成「服务面 · 单例」与「课程面 · 按课程」，但只交付了**读面**：判据表里
 `SHARED_COMPONENTS = ['hubServer','cloudflared']`，trainer 仍在课程面。这不是显示问题而是形状问题——
-控制台仍按课起 `run_rl.py --course`，于是：
+控制台仍按课起 `trainer/run_rl.py --course`，于是：
 
 1. 「BC 课 A + RL 课 B」要**两个进程**，而 BC 与 RL 共用 `trainingLoop` 这一个角色键；
 2. 训练侧明明已有单进程驱动者（R2d `trainer/loop_serve.py`：按课锁 / 按课日志镜像 / 引擎池 / 故障隔离 /
@@ -348,8 +348,8 @@ R3-3 把组件卡分成「服务面 · 单例」与「课程面 · 按课程」�
 
 ## §19 R3-4：serve 也能带 BC 课（BC 编排体引擎化，单进程 supervisor 收编 BC）（2026-09-19）
 
-**一句话**：`run_bc.py` 从「一个进程服务一门 BC 课」的脚本变成**入口薄壳**，编排体搬进
-`trainer/bc_loop.py::BcLoop` —— 于是 `run_rl_cluster.py --serve` 那一个进程现在能同时带 RL 课与
+**一句话**：`trainer/run_bc.py` 从「一个进程服务一门 BC 课」的脚本变成**入口薄壳**，编排体搬进
+`trainer/bc_loop.py::BcLoop` —— 于是 `trainer/run_rl_cluster.py --serve` 那一个进程现在能同时带 RL 课与
 BC 课，BC 等云端 GPU 回传时把执行权让给别的课。
 
 ### 为什么必须搬（不是「统一风格」）
@@ -363,7 +363,7 @@ BC 的 `main()` 是整段 procedural 编排，而 supervisor 要的是**引擎�
 14 个函数体（`collect_corpus` / `publish_bc_job` / `train_local_bc` / `wait_bc_round` 的重构件 /
 `finish_all_rounds` / `archive_round` / `resolve_transport` …）用脚本按 `ast` 段落整体搬，
 **只在内部调用名上去下划线**（`_append_ledger` → `append_ledger` 等）；搬完用
-`ast.dump` 对拍（14/14 逐节点相同）才落盘。`run_bc.py` 剩下的只有：utf8/chdir/单实例锁/
+`ast.dump` 对拍（14/14 逐节点相同）才落盘。`trainer/run_bc.py` 剩下的只有：utf8/chdir/单实例锁/
 启动前 `git push`/清 hub 停机态 + **阻塞式**驱动（单课程语义：等外部时原地退避重问）。
 
 ### 三条新机制
@@ -473,11 +473,11 @@ push 每轮一次 / 本机一枪到底 / 冒烟与回显作废 / 指标增量不
 ## §17 R2d 写的一半：单进程 supervisor 真的能跑（serve + 引擎池 + 日志行路由）（2026-09-19）
 
 R2c 造好了调度器（`loop_scheduler`）与任务体↔引擎的桥（`loop_runner`），但**没有驱动者**——今天仍是
-「一门课一个 `run_rl.py` 进程」。本轮交付驱动者：`trainer/loop_serve.py` + `biz/engine_pool.py` + `biz/log.py`
-的行路由，入口 `run_rl_cluster.py --serve --courses a,b`（默认仍是只读计划视图）。
+「一门课一个 `trainer/run_rl.py` 进程」。本轮交付驱动者：`trainer/loop_serve.py` + `biz/engine_pool.py` + `biz/log.py`
+的行路由，入口 `trainer/run_rl_cluster.py --serve --courses a,b`（默认仍是只读计划视图）。
 
 **分层各做一次**：进程级（utf8/faulthandler/chdir/启动前 push 一次/bun 检查）→ 课程级（参数解析与
-`run_rl.py --course` 逐字段一致 / validate_args / **按课程的单实例锁** / 清本课 hub 停机态 / 建引擎对象）
+`trainer/run_rl.py --course` 逐字段一致 / validate_args / **按课程的单实例锁** / 清本课 hub 停机态 / 建引擎对象）
 → 步骤级（`EnginePool.get` → `ensure_ready` → `LoopRunner.executor`，包在 `prefix_scope(课)` 里）。
 `ensure_ready` 按**对象身份**判断：对象换了（首用/被驱逐后重建）走 `_setup()`，没换则幂等补栈。
 
@@ -490,7 +490,7 @@ PAUSE/`run_complete` 落账，与单课程路径共用一份实现），停车�
 
 **回归**：`tests/test_engine_pool.py`(9) + `tests/test_log_router.py`(6) + `tests/test_serve_wiring.py`(8，
 含「轮转交替 a,b,a,b」「13 步全表」「让位让别的课跑完」「容量 1 时驱逐重建再 setup」「坏课隔离」
-「参数与 `run_rl.py` 对拍」——对拍 oracle 是在子进程里跑 `run_rl.main()` 本体，本机缺当前 era 权重时
+「参数与 `trainer/run_rl.py` 对拍」——对拍 oracle 是在子进程里跑 `run_rl.main()` 本体，本机缺当前 era 权重时
 跳过并写清理由，其余情况失败即红）。门禁：python gate **1476 passed / 4 skipped**；根 `bun run check` 绿。
 
 **仍未做**：控制台的入队/暂停 + 单例 `trainingLoop` 卡片（读面卡 R2c-3 已交付）；**R2e** 多课 e2e 与
@@ -501,7 +501,7 @@ PAUSE/`run_complete` 落账，与单课程路径共用一份实现），停车�
 ## §16 R2c-3 收口：真机 RSS 实测（checkpoint 缓存上限的真实约束是「数量」）（2026-09-19）
 
 R2c-3 的最后一项：单进程 supervisor 要为 N 门课各持一份 torch 栈，`checkpointCacheMb` 给多少
-此前只能拍脑袋（本机 0 卡、remote 为主）。新增 `nn-training/scripts/measure_checkpoint_rss.py`
+此前只能拍脑袋（本机 0 卡、remote 为主）。新增 `nn-training/worker/scripts/measure_checkpoint_rss.py`
 按训练路径**同一套构建代码**把栈造出来，逐课累加测 RSS。
 
 ### 实测（本机 CPU-only torch 2.7.1+cpu，单位 MB）
@@ -563,7 +563,7 @@ nn python gate **1453 passed / 3 skipped**（ruff + mypy 干净）；根 `bun ru
 
 ### ② 会话：纯数据，住轮内上下文
 
-`rl/loop_round.RemotePpoJob`（`RoundContext.remote`）：**不进引擎实例属性**（§2.2；单进程多课程会
+`worker/loop_round.RemotePpoJob`（`RoundContext.remote`）：**不进引擎实例属性**（§2.2；单进程多课程会
 互相覆盖），**不落盘**（第二份真相）。刻意**不持有 payload 字节**（几十 MB）——直推换节点重发时从
 job 目录重读（`find_payload`），于是它会话很小、可打印、读面不触发 IO。
 
@@ -680,7 +680,7 @@ ROUND_TASKS (biz.loop_tasks)  ← 唯一顺序来源
 
 ### ③ 让位闸门：一张表，且只有两处能装
 
-`rl/loop_runner.WAIT_HOOKS`（kind → 引擎钩子名）。**钩子不存在 ⇒ 不让位**（老引擎行为逐字节不变），
+`trainer/loop_runner.WAIT_HOOKS`（kind → 引擎钩子名）。**钩子不存在 ⇒ 不让位**（老引擎行为逐字节不变），
 所以表可以只先装能吃的部分。
 
 | kind | 钩子 | 状态 |
@@ -702,7 +702,7 @@ ROUND_TASKS (biz.loop_tasks)  ← 唯一顺序来源
 `join_precollect_child` 旧形态每 2s 轮询 `completed_pairs`、上限 **1 小时**。单课程前台跑时这只
 是「等一下」；单进程多课程下它就是**一个慢子进程拖垮所有课**的入口。
 
-判据抽成 `rl/rollout_phase.precollect_ready`（**非阻塞**：句柄为空 / 子进程已退出 / 就绪 shard ≥
+判据抽成 `trainer/rollout_phase.precollect_ready`（**非阻塞**：句柄为空 / 子进程已退出 / 就绪 shard ≥
 半波），**步骤内部循环改成调同一个函数** ⇒「调度器认为可以往下走」与「步骤进去真的不阻塞」不可能
 分叉（两个口径分叉的症状是「调度器说开训、步骤进去还在轮询」，极难排查）。外部语义不变：超时仍
 `terminate` + 回合自己采。`min_wave` 也抽成 `precollect_min_wave()`（两处共用同一个数）。
@@ -830,7 +830,7 @@ R2 第三相位的第一半。设计稿 `plan/r2-loop-task-queue.md` §4/§8 同
 |---|---|
 | `nn-training/biz/loop_scheduler.py` | **纯调度**（无 torch/网络/IO）：`PoolSet` 资源票 + `CourseQueue` + `Supervisor`（公平轮转 → 闸门 → 单线程执行 → 四态收敛） |
 | `nn-training/trainer/loop_plan.py` | 唯一碰盘的 IO 边缘：账本指针（`LedgerView`）→ `RoundFacts` → `pending_tasks`；shard 结算数；`commit_journal` 在飞集；课程发现 |
-| `nn-training/run_rl_cluster.py` | 入口：**一个进程**读所有并行课程，输出「下一步 / 待办 / 在等谁（含 job_id）/ 被什么挡住 / 关键事实」 |
+| `nn-training/trainer/run_rl_cluster.py` | 入口：**一个进程**读所有并行课程，输出「下一步 / 待办 / 在等谁（含 job_id）/ 被什么挡住 / 关键事实」 |
 
 ### 三条不可交易的性质（测试逐条钉住）
 
@@ -1122,8 +1122,8 @@ supervisor（资源池容量 1）+ R2d 控制台单例卡片/队列视图 + R2e 
 
 **实现**：课程三键 `target_transitions` / `est_ticks_per_game` / `max_games_per_stage`（缺席 = 老行为
 逐字节不变）。纯逻辑 `biz/volume_waves.py`（配额数学 + 按 (stage,wave) 独立种子流 + 终止谓词 +
-补波计划 + WAL 行解析）；账本 `rl/resume.settled_stage_totals`；est 来自 jsonl trailing 均值
-（`rl/resume.trailing_ticks_per_game`，纯函数可 replay）；接线 `trainer/loop_core.py::{_iteration_pairs,
+补波计划 + WAL 行解析）；账本 `worker/resume.settled_stage_totals`；est 来自 jsonl trailing 均值
+（`worker/resume.trailing_ticks_per_game`，纯函数可 replay）；接线 `trainer/loop_core.py::{_iteration_pairs,
 _volume_topup,_dispatch_volume_wave,_volume_journal_replay}`；iteration 事件追加
 `transitions_target/_collected/_capped`。**v1 边界**：只接串行路径（stream 保持老语义 + 写日志说明），
 与 curriculum/rotate 门控窗口不兼容（响亮 SystemExit）。
@@ -1248,7 +1248,7 @@ nn-training python gate 绿（新增 `tests/test_remote_transport.py`：run_rl �
 **机制**（DECISIONS §2026-09-13-hot-reload · 全文 → 本文件 §25）：trainer 每 iter（rollout 前）重读课程文件，按
 `corpus_identity_fp` 分流——
 
-- **未变（B/C 类）**：`rl/hot_reload.apply_hot_fields` 白名单写回 args（消费点每轮活读：
+- **未变（B/C 类）**：`biz/hot_reload.apply_hot_fields` 白名单写回 args（消费点每轮活读：
   iters/gamma/lam/lr/epochs/mb/eval_*/ent_break*），**下一 iter 生效**；结构绑定字段
   （bc/workers/out/traj/backup_*/freeze*/update_kwargs 一次构建族）记 restart-only（`*`），
   响亮日志不静默；max_hours 热应用重算 deadline。
@@ -1304,7 +1304,7 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
   - **P2**：hub per-course（jobRoot/jsonl/端口），BC 种子 `courses.ts::seedWeightsFromBc`（缺文件 fail loud）。
   - **P3**：cloudflared/workerServe per-course；`rl.remote_hubs[course]` + 兼容单键；`gpu_push` 清单按 `push_node_url` 过滤（非空零匹配 → WARN + manifest 打标，不抛）；notebook 引导文本。
   - **P3b**（DECISIONS §2026-09-12-multi-course-p3b-supersedes-343 · 全文 → docs/nn/remote-transport.md §32）：hub 独占租约 `CLAIM_TTL_SEC=300`（领取即设 owner+expiry+heartbeat，心跳续租，过期回池，有活租约验 `X-Lease-Token`）；worker_server 有界 FIFO `WORKER_QUEUE_MAX=8` + 同 jid 幂等 + `/ping queued`。
-  - **P4**：`saveConfig` 落盘前 `capacityError` 加法校验（`Σ eff ≤ max(rl.workers, rl.local_slots)`）；`biz/config.py::resolve_course_quota` 热读 `courses.<课>` 优先 + 响亮行 `[quota] workers X -> Y (multi-course split)`；连续 2 轮零 shard 落盘告警；manifest `course_name`（审计短名，不进幂等键） + dispatch 报告带 course；EvalBoard `batches.jsonl` 跨进程 `claim.lock`（复用 `train.loop_util` 锁，拒绝第三套实现）。
+  - **P4**：`saveConfig` 落盘前 `capacityError` 加法校验（`Σ eff ≤ max(rl.workers, rl.local_slots)`）；`biz/config.py::resolve_course_quota` 热读 `courses.<课>` 优先 + 响亮行 `[quota] workers X -> Y (multi-course split)`；连续 2 轮零 shard 落盘告警；manifest `course_name`（审计短名，不进幂等键） + dispatch 报告带 course；EvalBoard `batches.jsonl` 跨进程 `claim.lock`（复用 `worker.train.loop_util` 锁，拒绝第三套实现）。
 - **P5**：`ConsoleState.activeCourse`（additive + 旧 `course` 回填）；`cloudHalts` per-course（S17，旧 `cloudHalt` 一次性迁移）+ 横幅按课 `立即恢复`；busy 键按课程（S10）+ 监督/watchdog 三元组；`restartSpecFor(key, course)` fail-closed。
   - **W4（R2：删旧扁平账本键读写）**：`loadRegistry()` 每次加载把旧扁平单键（`hubServer`/`cloudflared`/`trainingLoop`/`workerServe` + hub-start 分文件账本）**搬迁**进 per-course 表再删键（`migrateFlatCourseEntries`，缺 `course` 取 console-state、缺 `slot` 取 0；同课已有新条目则保新弃旧）；迁移后 `entryForCourse` 严格按课（不再兜底扁平键）、`registryTriples` 不再枚举扁平键、`saveComponent`/`clearComponent` 类型收窄为 `SingletonComponent`（课程组件写不了扁平键）、`Registry` 类型**不再声明**扁平键（`LegacyFlatRegistry` 只给搬迁读）。修掉 `specs.ts::trainingLoopSpec.healthy` 的遗留扁平读（改 `entryForCourse`，此前多课下恒 false）。
   - **W5（LAN 只读回归）**：门控判定抽成纯函数 `net.ts::isReadonlyAction(method, ip)`（`server.ts` fetch 首行唯一调用点），使「LAN 的 POST 必 403 / 回环放行 / GET 放行 / 来源不可得 fail closed」成为可回归断言；另加一条接线回归（扫 `server.ts` 确认门控与 403 仍在）。
@@ -1467,12 +1467,12 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
 
 - **背景**：P1 活体验收前发现 `s-dodge.jsonc` 内部 `name` 是 `s-dodge-mix`，而控制台课程选择 /
   `tmp/<course>/` / `out` 路径 / TS launcher `peekCourse` 全用文件名 stem（`s-dodge`）。
-  `run_rl.py` 锁曾用 `args.course_name`（内部名）→ `.run_rl.s-dodge-mix.lock`，与 TS 预检查的
+  `trainer/run_rl.py` 锁曾用 `args.course_name`（内部名）→ `.run_rl.s-dodge-mix.lock`，与 TS 预检查的
   `.run_rl.s-dodge.lock` 对不上：preflight 永远查不到在跑进程，同课双开只能靠 python 侧兜底。
 - **备选与否决**：锁用内部名、TS 侧改读内部名 —— 否（内部名要解析课程文件才知道，launcher
   preflight/kill 匹配全要变重；且 `tmp/`、`out`、`courses` 块全是 stem，改一边不如统一到多数方）。
-- **决定**：命名空间键 = 课程文件 stem。`train/loop_util.py::course_key_from_path()` 为唯一推导点；
-  `run_rl.py` 锁改调它；`train_loop.py --course` 文档写明传短名（与 `--course s-dodge` 同拼写）；
+- **决定**：命名空间键 = 课程文件 stem。`worker/train/loop_util.py::course_key_from_path()` 为唯一推导点；
+  `trainer/run_rl.py` 锁改调它；`trainer/train_loop.py --course` 文档写明传短名（与 `--course s-dodge` 同拼写）；
   内部 `name` 退为 S9 归属标注（events/gate 内用，不参与调度）。回归测试
   `test_course_key_is_file_stem_not_inner_name` 锁死 stem 规则。
 - **违反后果**：回到内部名 → 双课 preflight/kill/账本课程键三方错位（静默错位，最难查的一类）。
@@ -1525,7 +1525,7 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
     keep_iters、eval_stages/eval_games_per_stage/eval_every、out/traj/backup_*、ent_break*。
 - **第一步（本条）——关卡抽离**：`nn-training/levels/*.jsonc` 持有环境语义
   （stages/difficulty/max_ticks/player），课程以 `"level": "<name>"` 引用；课程侧内联重复
-  声明四类环境键 = 配置冲突 raise（`rl/config.load_course` 合并）。内联 stages 旧用法逐字节
+  声明四类环境键 = 配置冲突 raise（`worker/config.load_course` 合并）。内联 stages 旧用法逐字节
   兼容（在跑课程不迁移照常跑）。首两份：arena6（c6 家族）/ arena4（c4 家族）。
 - **D14 升级为双指纹**：新增 **corpus_fp** = `config.corpus_identity_fp`（env+reward **解析值**
   规范化 JSON 的 sha256；内联与 level 引用同形同指纹，文件内注释/格式不敏感），经 rollout cmd
@@ -1543,7 +1543,7 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
 
 - **机制**：trainer 每 iter（rollout 前，`loop_core.run` → `_hot_reload_course`）重读课程文件，
   以 `corpus_identity_fp` 分流（§2026-09-13-level-extraction 分类学的机制化）：
-  - **未变（B/C 类）**：`rl/hot_reload.apply_hot_fields` 把白名单字段写回 args——消费点每轮
+  - **未变（B/C 类）**：`biz/hot_reload.apply_hot_fields` 把白名单字段写回 args——消费点每轮
     活读（iters `loop_core:207` / gamma,lam / lr,epochs,mb / eval_* / ent_break*，
     `loop_steps._course_iter`），**下一 iter 即生效**；结构绑定字段（bc/workers/stream/
     out/traj/backup_*/freeze*/clip/vf/ent_coef/normalize_ret/warmup_iters/kickstart_ref）
@@ -1583,7 +1583,7 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
   一次性开销。判据 = 上限 ≥ 1.25× 实测胜局最大 tick。实测（200 局 God/级，EVAL_SEEDS
   860001-860200）max 胜局 tick / 新上限余量：c01 1121/+34% · c02 1640/+28% · c03 1775/+52% ·
   c04 2510/+31% · c05 2720/+43% · c06 2776/+62% · c07 3381/+51% · c10 3677/+88% · c14 4823/+93%，
-  逐点零超时；**上界不缩**（12900 ≥ 原式 12000）。单一实现 = `rl/ladder_factory.max_ticks_for()`，
+  逐点零超时；**上界不缩**（12900 ≥ 原式 12000）。单一实现 = `biz/ladder_factory.max_ticks_for()`，
   由 `nn-training/tests/test_ladder_factory.py` 钉死。
 - **违反后果**：低 count 端截断会把可赢局记成超时 ⇒ 门（pooled 400 ≥80%）构造性不可达，或超时率被
   误读成能力信号去调训练侧；终局标准反复改则 §6「现线证据沿用」与跨级/跨版本可比性失效。
@@ -1601,7 +1601,7 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
   `max_games_per_stage`（0 = 默认「初波 × 4」）。语义：分关达标线 `ceil(target/关数)`；初波
   `G0 = max(1, ceil(关达标线/est))`；结算后**逐关独立**补波 `ceil(缺口/est)`，每关至多 3 波；掉局零样本不计
   （天然触发补采——特性）、超时局计入；触硬顶 = 停采 + 响亮日志 + iteration 事件 `transitions_capped`。
-  纯逻辑住 `biz/volume_waves.py`，账本口径 `rl/resume.settled_stage_totals`，接线 `trainer/loop_core.py::_volume_topup`
+  纯逻辑住 `biz/volume_waves.py`，账本口径 `worker/resume.settled_stage_totals`，接线 `trainer/loop_core.py::_volume_topup`
   （S4 第十八刀后接线整簇搬到 `trainer/loop_volume.py::TrainingVolume`；`_volume_topup` 的 wave 规则自
   VOLUME_RULE_V2 起退役，生产路径走 `_volume_collect_continuous`）；
   iteration 事件追加 `transitions_target` / `transitions_collected`（additive，旧行无此键）。
@@ -1697,13 +1697,13 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
 - **`trainer/loop_plan.py`**（新，唯一碰盘之处）：账本指针 → `RoundFacts` → `pending_tasks`；
   shard 结算数；`commit_journal` 在飞集；课程发现（`<traj-root>/*/training_log.jsonl`）。
   判据永远朝「不跳」保守：算不出的留 `False`/`0`。
-- **`nn-training/run_rl_cluster.py`**（新入口）：**一个进程**读出所有并行课程的「下一步 /
+- **`nn-training/trainer/run_rl_cluster.py`**（新入口）：**一个进程**读出所有并行课程的「下一步 /
   待办 / 在等谁（含 job_id）/ 被什么挡住 / 关键事实」。当前只提供只读计划视图（不训练、
   不发布、不等待）——它零训练行为变化且立刻可用，同时把调度核心放在真数据上跑通。
 - **R2c 拆相**：R2c-1（本段，机制 + 只读面）已完成；**R2c-2** = 抽 `run_one_round` 并把任务体接到
   真 `TrainingLoop` + 三处长等待改 `WAIT` 让位 + 进控制台 + `checkpointCacheMb` 真机 RSS 实测。
-- **落地**：`nn-training/rl/{loop_scheduler,loop_plan}.py`、`nn-training/run_rl_cluster.py`（均新）；
-  回归 `tests/test_loop_scheduler.py`（18 例）；实测：`run_rl_cluster.py --traj-root tmp` 在真课程
+- **落地**：`nn-training/rl/{loop_scheduler,loop_plan}.py`、`nn-training/trainer/run_rl_cluster.py`（均新）；
+  回归 `tests/test_loop_scheduler.py`（18 例）；实测：`trainer/run_rl_cluster.py --traj-root tmp` 在真课程
   目录上读出 5 门课的计划（含「采集完成但账本未结算」那一态）。
 **R2c-2 落地（2026-09-18 三续）——轮体抽出 + 任务体↔引擎的桥 + 假件集成测试**：
 
@@ -1742,7 +1742,7 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
   **为什么不拆成 `ppo_publish` + `ppo_wait` 两个任务**：三相共享一份会话（jid / 超时预算 / 打包墙钟 /
   运输方式），拆任务就得把它序列化到盘上才能跨任务传 —— 那正是 R2b 否决过的「第二份真相」
   （§2026-09-18-goalnn-r2-loop-task-queue 的 `loop-state.json` 段）。任务粒度只决定让位点密度。
-- **会话是纯数据、住在轮内上下文里**（`rl/loop_round.RemotePpoJob`，`RoundContext.remote`）：
+- **会话是纯数据、住在轮内上下文里**（`worker/loop_round.RemotePpoJob`，`RoundContext.remote`）：
   不进引擎实例属性（§2.2 无隐藏状态；单进程多课程会互相覆盖），也不落盘（同上）。刻意**不持有**
   payload 字节（几十 MB 级）——直推换节点重发时从 job 目录重读（`find_payload`）。
 - **非阻塞探针是新的唯一分类实现**（`remote/hub_client.probe_job_result`）：一次请求 → 三态
@@ -1757,7 +1757,7 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
   job），failover 判决与组合入口 `_push_job_round` 共用 `_push_over_nodes`（一份实现，三个调用方）。
 - **evalboard idle 窗提前到发布相位**：它的用途是「等待期集群空闲，赶紧开窗领批」。细粒度路径会让位，
   若仍留在等待相位，窗口要等结果回来才开 ⇒ 永远错过它要服务的那段空闲。
-- **`ctx.resumable`：让位点由「谁在驱动」决定**（`rl/loop_round.RoundContext`）。细粒度驱动器
+- **`ctx.resumable`：让位点由「谁在驱动」决定**（`worker/loop_round.RoundContext`）。细粒度驱动器
   （`LoopRunner`）造上下文时置 True ⇒ 未就绪就 `wait_for`；组合路径 `run_one_round` 保持 False ⇒
   就地阻塞取结果（拆分前语义）。于是「组合路径没有让位点」从一个运行期异常（`RoundYieldError`）
   变成了一个**事实字段**。
@@ -1775,14 +1775,14 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
 **R2d 写的一半（2026-09-19 八续）——单进程 supervisor 真的能跑了：进程级/课程级/步骤级三层各做一次**：
 
 用户 2026-09-18 指令（「训练循环任务队列化 —— trainingLoop 由一个进程服务所有并行课程」）的落地前半：
-R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一门课一个 `run_rl.py` 进程」）。本轮交付
+R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一门课一个 `trainer/run_rl.py` 进程」）。本轮交付
 `trainer/loop_serve.py`（驱动者）、`biz/engine_pool.py`（N 课共享的 torch 栈缓存）、`biz/log.py` 的**行路由**
-（单进程下的课程归属），入口 = `run_rl_cluster.py --serve --courses a,b`。
+（单进程下的课程归属），入口 = `trainer/run_rl_cluster.py --serve --courses a,b`。
 
 **分层纪律（每层各做一次；越界做两次会伤到既有护栏）**：
 - **进程级一次**（`prepare_process`）：UTF-8 stdio / faulthandler / `chdir(repo)` / 启动前 `git push`
   （`.git_push.lock` 串行化）/ 节点升级分支锁到训练机分支 / bun 存在性。每课各做一次 = 每课都推一遍 git。
-- **课程级一次**（`open_course`）：参数解析（与 `run_rl.py --course` **逐字段一致**；对拍见
+- **课程级一次**（`open_course`）：参数解析（与 `trainer/run_rl.py --course` **逐字段一致**；对拍见
   `tests/test_serve_wiring.py::test_course_args_match_run_rl_echo_config`——oracle 是在子进程里跑
   `run_rl.main()` 自己、把 `echo_config` 换成 dump，本机缺当前 era 权重则**跳过并写清理由**）+ `validate_args`
   + **按课程的单实例锁**（同课双开响亮拒启；2026-09-06 双 trainer 并写同一 traj 的护栏不删，只是文件名
@@ -1872,7 +1872,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
 - **为什么要实**：单进程 supervisor 要为 N 门课各持一份 torch 栈（model + Adam + 冻结 ref），
   `checkpointCacheCourses` / `checkpointCacheMb` 的默认值此前**只能拍脑袋**（本机 0 卡、remote 为主）。
   plan §6 把这张表列为 R2c 上线前置条件。
-- **实测（`nn-training/scripts/measure_checkpoint_rss.py`；本机 CPU-only torch 2.7.1+cpu）**：
+- **实测（`nn-training/worker/scripts/measure_checkpoint_rss.py`；本机 CPU-only torch 2.7.1+cpu）**：
   每课增量 per-tick **≈1.3MB**（70,216 参：model 0.7 + Adam 0.6，无 ref）/ intent **≈1.8MB** /
   goal **≈1.8MB**（各含一份冻结 ref）；**torch 基线 294.5MB 与课程数无关**；
   N=5 混合档累计 **294.8 → 301.8MB（仅 +7MB）**。
@@ -1892,7 +1892,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
 **R2c-3 余下（2026-09-19 六续）——控制台接线：单例调度器卡片 + 每课队列视图（「在等什么」）**：
 
 - **数据源 = python 只读入口，★ 控制台不得在 TS 重算判据**（防再犯条款）：卡片走
-  `nn-training/run_rl_cluster.py --json`（训练侧只读：不训练/不发布/不等待），与 CLI 表逐字段同源。
+  `nn-training/trainer/run_rl_cluster.py --json`（训练侧只读：不训练/不发布/不等待），与 CLI 表逐字段同源。
   指针 → `RoundFacts` → `pending_tasks` / `waiting_state` 这套判据已在 python 侧被用例钉住；
   在 TS 里照账本重写一遍 = **第二份真相**（同 `loop-state.json` 段），两边会以不同速度演化。
   谁想「顺手在 TS 里读账本省掉一个子进程」，先重读本段：省下的是亚秒级冷算，换来的是两套语义。
@@ -1916,7 +1916,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
   （三个新）+ `server/run-python.ts`（新增同步脚本入口 `runRunPythonSyncScript`，与模块入口共用一份
   实现）+ `api/{state-view,index}.ts` / `web/view/console-types.ts` / `web/app/app.tsx` / `web/theme.css` /
   `server/server.ts`（启动暖一次）；训练侧 `nn-training/trainer/loop_plan.py`（`waiting_state`）+
-  `run_rl_cluster.py`（抽 `build_rows`、JSON 加 `waiting`、表里也打印）。
+  `trainer/run_rl_cluster.py`（抽 `build_rows`、JSON 加 `waiting`、表里也打印）。
 - **回归**：`dashboard/tests/server-api-loop-queue.test.ts`（13：解析容错 / 结果翻译四条失败分支 /
   TTL 复用 / 单飞 / 在训合并 / state 注入）· `dashboard/tests/web-app-loopqueue.test.ts`（12：SSR 每课
   一行 / 四态着色 / 未在训淡档 + 悬停 / 排队与页脚 / 读失败显因 / 接线断言）·
@@ -1937,7 +1937,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
 - **顺序错纠正（真发现）**：`precollect_join` 必须排在 `prepare_iter` **之前**——它产出的是本轮
   `it{it}` 的 shard，而 `prepare_iter` 靠 `completed_pairs` 看盘决定「保留续跑 / 清场重建」；
   反了就把上一轮的预采整个作废。
-- **让位闸门 = 一张表**（`rl/loop_runner.WAIT_HOOKS`：kind → 引擎钩子名）。**钩子不存在 ⇒ 不让位**
+- **让位闸门 = 一张表**（`trainer/loop_runner.WAIT_HOOKS`：kind → 引擎钩子名）。**钩子不存在 ⇒ 不让位**
   （行为与改造前逐字节一致）⇒ 表可以只先装能吃的两处。
 - **★ `eval_join` 刻意不进表**（防再犯）：本机 eval 局的墙钟是「藏在下一轮 rollout 里」的
   （`_eval_tail` 交棒 → `_dispatch_delayed_eval` 入口收拢，2026-09-17 用户口径）。给它加让位 =
@@ -1947,7 +1947,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
   落位」三相拆分；**宁可不装也不装错**（本轮不装，表里留位 + 理由写在 `loop_runner` docstring）。
 - **已装的一处：预采**（`precollect_join` → `TrainingLoop.precollect_ready`）。`join_precollect_child`
   旧形态每 2s 轮询、上限**1 小时**——单进程多课程下这就是「一个慢子进程拖垮所有课」的入口。
-  判据抽成 `rl/rollout_phase.precollect_ready`（非阻塞：句柄为空 / 子进程已退出 / 就绪 shard ≥ 半波），
+  判据抽成 `trainer/rollout_phase.precollect_ready`（非阻塞：句柄为空 / 子进程已退出 / 就绪 shard ≥ 半波），
   步骤内部循环**改成调同一个函数** ⇒ 「调度器认为可以往下走」与「步骤进去真的不阻塞」不可能分叉。
   `join_precollect_child` 的外部语义（含 1h 超时 terminate）逐条不变。
 - **读面补全「在等什么」**：`WAIT` 时把原因落到队列（`q.reason`），并在推进/收官时清空——
@@ -1964,17 +1964,17 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
 
 ### §2026-09-19-goalnn-serve-bc-course（2026-09-19，R3-4：单进程 supervisor 也能带 BC 课）
 
-- **背景**：多课程并行之后训练侧收敛为**一个进程**（`run_rl_cluster.py --serve` → `trainer/loop_serve.py`，§2026-09-18）。但 BC 课当时仍只能靠 `run_bc.py` 单开一个进程——理由不是需求，而是**形状**：`run_bc.py` 的 `main()` 是一整段 procedural 编排（解析 → 采集 → 发布 → 阻塞等待 → 落位归档），没有 supervisor 要的引擎子集（`_setup` / `run_one_round` / `finish_course` / `release_torch` / `ledger_next_it`）。用户口径「一个 trainer 进程服务所有课程」⇒ BC 必须能被同一个进程驱动。
-- **决定**：把 BC 的编排体**逐字节**搬进 `trainer/bc_loop.py`（`BcLoop` 引擎 + `BcRuntime` 解析 + 纯函数），`run_bc.py` 退为**入口薄壳**（进程级一次性副作用 + 阻塞式驱动）；`serve` 按课程种类分派引擎与粒度。
+- **背景**：多课程并行之后训练侧收敛为**一个进程**（`trainer/run_rl_cluster.py --serve` → `trainer/loop_serve.py`，§2026-09-18）。但 BC 课当时仍只能靠 `trainer/run_bc.py` 单开一个进程——理由不是需求，而是**形状**：`trainer/run_bc.py` 的 `main()` 是一整段 procedural 编排（解析 → 采集 → 发布 → 阻塞等待 → 落位归档），没有 supervisor 要的引擎子集（`_setup` / `run_one_round` / `finish_course` / `release_torch` / `ledger_next_it`）。用户口径「一个 trainer 进程服务所有课程」⇒ BC 必须能被同一个进程驱动。
+- **决定**：把 BC 的编排体**逐字节**搬进 `trainer/bc_loop.py`（`BcLoop` 引擎 + `BcRuntime` 解析 + 纯函数），`trainer/run_bc.py` 退为**入口薄壳**（进程级一次性副作用 + 阻塞式驱动）；`serve` 按课程种类分派引擎与粒度。
 - **关键的四个取舍（都是「另一条路更好写但不该走」）**：
   - **不给 BC 造第二份一轮实现**：引擎里一轮的三段（开轮 → 等回传 → 落位归档）与单课程路径**共用同一份代码**。BC 的续训按 `jid` 存（hub `/jobs/{jid}/resume`、worker 本地 `bc-resume/<jid>`）⇒ 任何一次重发布 = 新 jid = **从头训**；两份实现里只要有一份漏了「先认领盘上 job」，代价就是一轮 GPU 时间。
   - **BC 课恒为「一轮 = 一个任务」**，不进 13 步表：13 步是 RL 的一轮（rollout/ppo/eval/门禁/记账），BC 的一轮是「采语料 → 发布 → 等回传 → 落位归档」。硬套 = 给 BC 发它不认识的待办（执行体响亮 ABORT，不是静默跳步）。粒度由 `loop_plan.round_tasks_for(course, it)` 单点决定（按课程种类选表），`LoopRunner(step_mode=False)` 由 `build_factory` 按同一判据设置。
   - **指针的语义归引擎**（`LoopRunner._ledger_next_it` 的 `ledger_next_it` 钩子）：BC 的「跑到第几轮」= `bc_round_completed`（`biz/bc_ledger.py`），RL 的 = `iteration`（`LedgerSpec`）。在桥里写死一种就是给另一类课程读错指针（症状：BC 课永远停在 it1）。读面（`loop_plan.course_facts(course=...)`）走**同一份**判据，`course_kind` = `curricula/<课>.bc.jsonc` 是否存在（与控制台 `isBcCourse` 同源，不靠账本事件推断——刚建的 BC 课账本是空的）。
   - **让位点只落在「等远端」这一段**：`BcLoop.run_one_round` 每次最多做一件事，等 GPU 回传时返回 `ROUND_WAIT`（新增的第三种轮终态：**本轮未完**，既不是失败也不是完成）⇒ 调度器把执行权交给别的课，过一会儿回来问同一轮。本机训练（`--local`）与 push 直推照旧阻塞（墙钟花在本机/邻居节点上，没有可让的余地）——与 RL 的 `eval_join` **刻意不进让位表**是同一条纪律。
-- **备选与否决**：让 serve 把 BC 课委托给 `bcRound(course, it)` 子任务类型（另一条执行路径）——否（第二条「一轮」实现，正是上面第一条要禁的）；把 BC 课也拆成细粒度步骤（采集/发布/等/落位各自一个任务）——本相位否（收益只是更细的让位点，而 BC 的墙钟几乎全在「等 GPU 回传」这一段，已让位；留作需要时再下沉）；让 `run_bc.py` 变成只 import 新模块的 re-export 壳（保持旧测试导入路径）——否（同一对象两个名字会让「谁是家」含混，改为把测试指向新家）；BC 课仍用一个专属进程（本轮不动）——否（与用户口径冲突）。
+- **备选与否决**：让 serve 把 BC 课委托给 `bcRound(course, it)` 子任务类型（另一条执行路径）——否（第二条「一轮」实现，正是上面第一条要禁的）；把 BC 课也拆成细粒度步骤（采集/发布/等/落位各自一个任务）——本相位否（收益只是更细的让位点，而 BC 的墙钟几乎全在「等 GPU 回传」这一段，已让位；留作需要时再下沉）；让 `trainer/run_bc.py` 变成只 import 新模块的 re-export 壳（保持旧测试导入路径）——否（同一对象两个名字会让「谁是家」含混，改为把测试指向新家）；BC 课仍用一个专属进程（本轮不动）——否（与用户口径冲突）。
 - **违反后果**：任何在 `trainer/bc_loop.py` 之外再写一遍「一轮」（含控制台/工具脚本自己发布 job）都会重新引入「重发布 ⇒ bc-resume 失效 ⇒ 从头训」这条最贵的错误；任何把 BC 课按 RL 读账本的地方都会得到 `next_it=1`（看起来「这课没在训」）；给 BC 课发 13 步任务表会让该课在第一次执行时就 ABORT。
-- **落地**：`nn-training/trainer/bc_loop.py`（新，1395 行；14 个函数体从 `run_bc.py` **AST 逐字节搬迁**、`_append_ledger`/`_ledger_bc_epoch`/`_run_epoch_eval`/`_finish_all_rounds`/`_archive_round` 去下划线）· `biz/bc_ledger.py`（新，BC 指针/完成集/收口 job 的单一读面）· `biz/loop_round.py`（新终态 `ROUND_WAIT` + `RoundOutcome.detail`）· `trainer/loop_runner.py`（`ROUND_WAIT` → `waiting(..., jid=..)`；`ledger_next_it` 钩子）· `trainer/loop_core.py`（单课程驱动器对 `ROUND_WAIT` 的阻塞语义：退避重问同一轮）· `trainer/loop_plan.py`（`course_kind` / `round_tasks_for` / `course_facts(course=)`）· `biz/bc_config.py`（`is_bc_course`）· `trainer/loop_serve.py`（`_open_bc_course` + 工厂分派 + 入队粒度）· `run_bc.py`（薄壳）· `run_rl_cluster.py`（`build_rows` 带 `kind` + 人读表加种类列 + BC 行的 facts 行不再摆一排 RL 的零）· 控制台：`web/view/loop-queue.ts`（`LoopCourseKind` + `kindBadge`/`stepTitle`/`pendingTitle`）· `web/app/panels/LoopQueue.tsx` · `web/app/app.tsx`（解除 `isBc` 门控）· `web/theme.css`（`.tc-loopq__kind--bc`）。回归：`tests/test_bc_ledger.py`(9) · `tests/test_bc_loop.py`(16) · `tests/test_serve_bc.py`(5，serve × BC 集成：让位/驱逐认领/粒度/锁/故障隔离) · `tests/test_loop_plan_bc_rows.py`(9，读面：种类/指针/在飞/两行共存) · `dashboard/tests/web-app-loopqueue.test.ts`（+3：BC 行与 RL 行并列 / 悬停各说各的 / 卡片不再被 `isBc` 门控）· `dashboard/tests/server-api-loop-queue.test.ts`（+1：`kind` 的保守默认）· 既有 BC 用例改为指向新家（`tests/test_bc_course.py`、`tests/test_remote_transport.py`、`e2e/test_bc_epoch_e2e.py`）。进度 `docs/nn/training-stack.md` §19 / `docs/nn/console.md` §6；plan `plan/r2-loop-task-queue.md §8 R3-4`。
-- **控制台半（2026-09-19 同日接上）**：调度器卡片是**跨课程**卡（一次列出所有账本可发现的课），BC 行与 RL 行**并列**——读面（`run_rl_cluster.py --json` 的 `kind`）早在 R3-4 就通了，缺的只是 UI。三处关键决定：
+- **落地**：`nn-training/trainer/bc_loop.py`（新，1395 行；14 个函数体从 `trainer/run_bc.py` **AST 逐字节搬迁**、`_append_ledger`/`_ledger_bc_epoch`/`_run_epoch_eval`/`_finish_all_rounds`/`_archive_round` 去下划线）· `biz/bc_ledger.py`（新，BC 指针/完成集/收口 job 的单一读面）· `biz/loop_round.py`（新终态 `ROUND_WAIT` + `RoundOutcome.detail`）· `trainer/loop_runner.py`（`ROUND_WAIT` → `waiting(..., jid=..)`；`ledger_next_it` 钩子）· `trainer/loop_core.py`（单课程驱动器对 `ROUND_WAIT` 的阻塞语义：退避重问同一轮）· `trainer/loop_plan.py`（`course_kind` / `round_tasks_for` / `course_facts(course=)`）· `biz/bc_config.py`（`is_bc_course`）· `trainer/loop_serve.py`（`_open_bc_course` + 工厂分派 + 入队粒度）· `trainer/run_bc.py`（薄壳）· `trainer/run_rl_cluster.py`（`build_rows` 带 `kind` + 人读表加种类列 + BC 行的 facts 行不再摆一排 RL 的零）· 控制台：`web/view/loop-queue.ts`（`LoopCourseKind` + `kindBadge`/`stepTitle`/`pendingTitle`）· `web/app/panels/LoopQueue.tsx` · `web/app/app.tsx`（解除 `isBc` 门控）· `web/theme.css`（`.tc-loopq__kind--bc`）。回归：`tests/test_bc_ledger.py`(9) · `tests/test_bc_loop.py`(16) · `tests/test_serve_bc.py`(5，serve × BC 集成：让位/驱逐认领/粒度/锁/故障隔离) · `tests/test_loop_plan_bc_rows.py`(9，读面：种类/指针/在飞/两行共存) · `dashboard/tests/web-app-loopqueue.test.ts`（+3：BC 行与 RL 行并列 / 悬停各说各的 / 卡片不再被 `isBc` 门控）· `dashboard/tests/server-api-loop-queue.test.ts`（+1：`kind` 的保守默认）· 既有 BC 用例改为指向新家（`tests/test_bc_course.py`、`tests/test_remote_transport.py`、`e2e/test_bc_epoch_e2e.py`）。进度 `docs/nn/training-stack.md` §19 / `docs/nn/console.md` §6；plan `plan/r2-loop-task-queue.md §8 R3-4`。
+- **控制台半（2026-09-19 同日接上）**：调度器卡片是**跨课程**卡（一次列出所有账本可发现的课），BC 行与 RL 行**并列**——读面（`trainer/run_rl_cluster.py --json` 的 `kind`）早在 R3-4 就通了，缺的只是 UI。三处关键决定：
   - **行上带课程种类**（`build_rows` 的 `kind` / 视图层 `LoopCourseKind`）：BC 的指针（`bc_round_completed`）、粒度（单个轮任务）、在飞来源（账本 `job_pending`）与 RL 全不同，不带种类 UI 只能猜（猜错就把 BC 读成一排看着像真的零）。种类判据 = `curricula/<课>.bc.jsonc` 是否存在（`loop_plan.course_kind`，与控制台 `isBcCourse` 同源）。
   - **`kind` 缺省/未知一律按 `rl` 渲染**（保守方向单侧）：python 比控制台旧时（还没这个字段）少一个徽标只是少信息；凭空空贴 BC 标签则会对外宣称「一轮 = 一个任务」（而它有 13 步）——假承诺比缺标签贵。`BC` 这种大小写不符也不认（只认 python 的确切取值）。
   - **卡片解除 `isBc` 门控**：`stateView.isBc` 说的是**当前查看的那门课**，而这张卡是**跨课程**的——用它门控是范畴错误，后果是「选中一门 BC 课 ⇒ 整张卡片消失」，于是 BC 课在调度器视图里根本不存在（而 BC 课正是最需要看「在等哪个 GPU job 回传」的那种）。BC 行只多一个 `BC` 徽标 + 换成「一轮 = 一个任务」的悬停文案（不出现 RL 的门禁/verdict/KL 字眼）。
@@ -1984,9 +1984,9 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
 
 ### §2026-09-19-goalnn-shared-trainer-single-process（2026-09-19，R3-5：trainer 收敛为「一个进程服务所有课程」）
 
-- **背景**：R3-3 分族时留了一条明写的边界——分族只交付**读面**，账本键的真收敛未做：控制台仍按课起 `run_rl.py --course`，于是「BC 课 A + RL 课 B」要两个进程，尽管 ① R2d 已造好单进程驱动者（`trainer/loop_serve.py`：按课锁 / 按课日志镜像 / 引擎池 / 故障隔离 / 暂停恢复）、② R3-4 让同一个进程也能带 BC 课。用户口径：「hubserver/trainingloop/selfNode/cloudflared 都只需要开一个进程，就能同时支持所有并行训练课程」。
-- **决定**：`trainingLoop` 进 `SHARED_COMPONENTS`（账本槽恒 `''`，与 hub/隧道同一张表同一套哨兵），控制台一律拉起 `run_rl_cluster.py --serve`；卡片自动从课程面落到**服务面**（族归属是 `componentScope` 的函数，R3-3 已把这条路修好——本轮只改判据，不改 UI）。
-  - **课程 = 文件系统事实**（`<traj-root>/<课>/training_log.jsonl` 存在，与训练侧 `rl/loop_plan.discover_courses` 同一判据）⇒ 启动时**不给 `--courses`**，「先起 trainer、后加课」不需要重启进程；代价是控制台得替**这门课**把账本文件建出来（`prepareCourseForSharedTrainer` ②）。
+- **背景**：R3-3 分族时留了一条明写的边界——分族只交付**读面**，账本键的真收敛未做：控制台仍按课起 `trainer/run_rl.py --course`，于是「BC 课 A + RL 课 B」要两个进程，尽管 ① R2d 已造好单进程驱动者（`trainer/loop_serve.py`：按课锁 / 按课日志镜像 / 引擎池 / 故障隔离 / 暂停恢复）、② R3-4 让同一个进程也能带 BC 课。用户口径：「hubserver/trainingloop/selfNode/cloudflared 都只需要开一个进程，就能同时支持所有并行训练课程」。
+- **决定**：`trainingLoop` 进 `SHARED_COMPONENTS`（账本槽恒 `''`，与 hub/隧道同一张表同一套哨兵），控制台一律拉起 `trainer/run_rl_cluster.py --serve`；卡片自动从课程面落到**服务面**（族归属是 `componentScope` 的函数，R3-3 已把这条路修好——本轮只改判据，不改 UI）。
+  - **课程 = 文件系统事实**（`<traj-root>/<课>/training_log.jsonl` 存在，与训练侧 `trainer/loop_plan.discover_courses` 同一判据）⇒ 启动时**不给 `--courses`**，「先起 trainer、后加课」不需要重启进程；代价是控制台得替**这门课**把账本文件建出来（`prepareCourseForSharedTrainer` ②）。
   - **每课旋钮住 rl-config**（`courses.<课>.{remote_transport,remote_hub_url,remote_degrade_after}`；新 `stack/course-knobs.ts` 是唯一写面，python `loop_serve.apply_course_machine_overrides` 在**开课时**施加：白名单 + 值域校验 + 逐键打印）。单进程没有「这门课的 flag」这一说（命令行只有一份）。**绝不写进 `curricula/*.jsonc`**——课程文件字节 = `course_fp` 语料血缘/熔断口径（D14），往里加一个传输旋钮，熔断会把同一份语料读成新语料。已开课的课程要**重开**才换传输（暂停该课 → 重启共享 trainer / 等引擎驱逐），这一点写进了动作返回值。
   - **幂等早退仍做本课准备，但准备失败不改事实**：早退前照样写本课旋钮 + 建账本（不写则「给这门课换成 push」是静默无效的动作），但准备阶段抛错时**不冒泡成通用失败**——消息必须以「已在运行 / 服务所有课程」开头、失败只说本课。理由很具体：说成「trainer 启动失败」会诱使操作员去停/重启它，而**停共享 trainer = 停掉所有课程的训练**。
   - **进程级单实例锁**（`nn-training/.run_cluster.lock`，`lockName('', 'run_cluster')`）：按课锁拦不住「两套调度器各跑一半课程，每门课都恰好只有一个跑者」。python `--serve` 自己响亮拒启 + 控制台在 spawn 之前先探（错误落在动作返回值里，不在日志里）；停机时释放。
@@ -1995,7 +1995,7 @@ R2c 造好了调度器与任务体，但**没有驱动者**（至今仍是「一
   - **「在训」判据随之改口径**：registry 里不再有每课条目，故「哪几门课在训」= **调度器（`sharedTrainerAlive()`）+ 该课未收官**（`loop-queue` 的行），总览与课程 select 高亮同源。
 - **备选与否决**：① 给 `--serve` 传 `--courses <课表>`——否（进程绑死课程表，「先起 trainer、后加课」当场失效，而 hub 已确立「课程 = 发现」的口径）；② 每课传输旋钮塞进 `curricula/*.jsonc`——否（熔断口径，见上）；③ 共享 trainer 改住扁平单例键——否（旧账本里的 per-course 条目必须继续可见、可枚举、可停止；静默失监督是事故。共用一张表天然做到，靠槽 `''` 区分）；④ 顺手把 `localWorker`/`workerServe` 也收敛——**不做**（本机 PPO worker 的语义就是「poll **本课** hub」，每课一个是对的；`worker_server` 的语义轴是节点，见 `NODE_FACE_COMPONENTS`）。
 - **违反后果**：任何「按课起一个 trainer」的残留路径都会与共享调度器抢同一批 traj（症状：同一轮被两个进程各跑一半、账本交错、锁语义失效）；任何把本课准备失败说成 trainer 启动失败的话术，都会让操作员停掉所有课程。
-- **落地（训练侧）**：`nn-training/trainer/loop_serve.py`（`apply_course_machine_overrides` + 覆盖叠加与优先级 + 非法值响亮）· `nn-training/run_rl_cluster.py`（`--serve` 进程级单实例锁 + `--ppo` 直通）。回归：`tests/test_serve_course_overrides.py`(10：覆盖叠加/优先级/非法值响亮/未知键不认) · `tests/test_serve_wiring.py`(+1：单实例锁接线)。
+- **落地（训练侧）**：`nn-training/trainer/loop_serve.py`（`apply_course_machine_overrides` + 覆盖叠加与优先级 + 非法值响亮）· `nn-training/trainer/run_rl_cluster.py`（`--serve` 进程级单实例锁 + `--ppo` 直通）。回归：`tests/test_serve_course_overrides.py`(10：覆盖叠加/优先级/非法值响亮/未知键不认) · `tests/test_serve_wiring.py`(+1：单实例锁接线)。
 - **落地（控制台）**：`core/registry.ts`（`trainingLoop` 进共享表）· `core/slots.ts`（锁名归一）· `core/types.ts` · `launch/cli.ts` · `stack/specs.ts`（`trainerServeSpec`，发现模式 argv）· `stack/course-knobs.ts`（新：机器侧旋钮写面）· `server/actions/{start,stop,restart,preset,smoke,train-smoke}.ts`（启动/换代/锁/停止语义/冒烟独占）· `server/api/{overview,loop-queue,state-view}.ts`（在训判据）· `web/`（视图同源）。回归：`tests/training-shared-trainer.test.ts`(9：argv 不绑课程表 / 每课条目拒重建 / mode→transport 逐条 / 账本=发现判据 / 进程级锁 / 停止语义 / 冒烟独占) · `tests/training-console-busy.test.ts`(9：**幂等早退仍释放 busy 键** + **准备失败不许冒充「启动失败」**，夹具已重定向 traj 根与 rl-config——此前它把断言挂在「本机 tmp 恰好有没有权重文件」上)。进度 `docs/nn/training-stack.md` §20。
 - **未做（明确记录，不是漏）**：① 真机「一个 serve 进程同时带 RL 课 + BC 课」的实弹运行（本轮全在夹具/假件下证明逻辑，与 R2e 同口径）；② `workerServe` 账本键的轴仍是课程（展示面已按节点例外声明，账本键未动）；③ `TrainLaunchModal` 的精简（模式仍按课选，落点已改为课程旋钮）。
 
@@ -2039,7 +2039,7 @@ trainingLoop: 共享 trainer 启动即退出 (PID 2496)
   只能靠 `PYTHONPATH` 挂 venv site-packages。R3-5 新增的 `trainerServeSpec` 只挂了 `NN_TRAINING`
   ⇒ `ModuleNotFoundError: No module named 'pydantic'` ⇒ 「启动即退出」（`tmp/trainer-cluster.log` 实锤）。
   hub/其余组件无恙：它们要么只用 stdlib，要么本就带这一项（`localWorker` / `trainingLoop` / BC spec 都是
-  `${sitePackages};${NN_TRAINING}`）。**定案**：`trainerServeSpec` 与它们同规；实测 `run_rl_cluster.py --help`
+  `${sitePackages};${NN_TRAINING}`）。**定案**：`trainerServeSpec` 与它们同规；实测 `trainer/run_rl_cluster.py --help`
   在该 PYTHONPATH 下 import 链全通。
 - **② 「需要合法 course（[]）」= 时序错位**：hub 的课程表是**扫盘发现**
   （`<traj-root>/<课>/{remote-jobs,offline}` 存在且新鲜，`_course_dir_live`），而旧形状把「置 hub 模式」挂在
@@ -2126,10 +2126,10 @@ rollout 位置覆盖：courses.x20-steady.rollout_src=local
 
 两处独立缺陷叠在一起：
 
-1. **判据错**：PID 18364 = 控制台自己起的**共享 trainer**（`run_rl_cluster.py --serve`）。
+1. **判据错**：PID 18364 = 控制台自己起的**共享 trainer**（`trainer/run_rl_cluster.py --serve`）。
    它服务多课，每开一门课就取该课自己的**按课锁**（单进程多课模型的正常持有）——而检查的
    判据是「该课锁活着就拒」⇒ **每次开课都被自己人拒**，只要 trainer 在跑就永远开不了课。
-   真冲突的形状是「另一份**按课** runner（手工 `run_rl.py --course <本课>`）活着」——它与
+   真冲突的形状是「另一份**按课** runner（手工 `trainer/run_rl.py --course <本课>`）活着」——它与
    共享 trainer 抢同一批 traj（两套调度器各跑一半课程、互相覆盖权重）。
 2. **写序错**：检查排在写面**之后** ⇒ 被拒的那一次照样写了课程旋钮 + **开课标记**（标记就是
    训练侧/hub 的「在训」闸）+ 撤了离线标记，而暂停意图还留着。于是三种口径并存：控制台说
@@ -2150,7 +2150,7 @@ rollout 位置覆盖：courses.x20-steady.rollout_src=local
 
 **备选与否决**：
 
-* **去掉开课时的锁检查，直接开**——否：手工跑着 `run_rl.py --course <本课>` 时开课就是两套
+* **去掉开课时的锁检查，直接开**——否：手工跑着 `trainer/run_rl.py --course <本课>` 时开课就是两套
   调度器抢同一批 traj（静默互相覆盖权重），这一类必须拦。
 * **按「锁文件存在」判、不看持有人身份**——否：陈旧锁（崩溃残留）会把课永久锁死，而陈旧态
   在盘上极常见（`nn-training/` 里就躺着 20+ 把 09-14/09-20 的旧锁）。

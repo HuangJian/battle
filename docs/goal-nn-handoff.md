@@ -74,7 +74,7 @@
 
 ```bash
 # 启动/续跑（stream 默认开；--kill-previous 杀旧训练进程，在途 bun 局自然结算）
-bun dashboard/src/launch/cli.ts --kill-previous --torch-threads 8 --script run_rl.py \
+bun dashboard/src/launch/cli.ts --kill-previous --torch-threads 8 --script trainer/run_rl.py \
   --bc <warm.json> --out <dir>/weights.json --traj <dir> \
   --iters N --max-hours H --stages <arena-ids> --seed-rotate 50 \
   --max-ticks <per-level> --workers 8 --stream 1 \

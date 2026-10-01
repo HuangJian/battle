@@ -1484,7 +1484,7 @@ x1-rebirth 跑 42 轮后**衰退**（it19 峰值 0.168 → it42 0.063），当�
   学习曲线被采样量本身污染。改为按 **samples** 配额后仍只剩「过冲几个百分点」的抖动
   （采集按整局补波）。**再往下压到严格相等**的收益是：`n` 恒定 ⇒ `n % mb` 恒定
   ⇒ **所有 minibatch 的 shape 恒定**（TPU 侧无 host 抖动）。
-- **实现（新增 `per_stage_quota`）**：`ppo/common.trim_shard_arrays()` +
+- **实现（新增 `per_stage_quota`）**：`worker/ppo/common.trim_shard_arrays()` +
   `load_episodes_common(per_stage_quota=)`。三条不变量：
   1. **截断在 GAE 之前** —— GAE 反向递推，先算完再丢尾部会让保留段的 adv/ret 全错；
   2. **截断处不改 `done`** —— 原为 0 时 `compute_gae` 自然用 value bootstrap
@@ -1492,7 +1492,7 @@ x1-rebirth 跑 42 轮后**衰退**（it19 峰值 0.168 → it42 0.063），当�
   3. **逐关而非全局** —— 全局按序截断会把排在后面的关整关丢掉，破坏
      「短局关淹不了长局关」的分关独立达标不变量。采集侧补波与训练侧截断共用同一个
      `volume_waves.target_per_stage`，两侧不会漂。
-- **全链**：`ppo/engine.py`（`load_shard` 带 stage、`--per-stage-quota`、update 模式）→
+- **全链**：`worker/ppo/engine.py`（`load_shard` 带 stage、`--per-stage-quota`、update 模式）→
   `trainer/loop_steps.py`（`_per_stage_quota()`，**自带 mode 门**使 serial 与 remote 不会一个
   gate 一个不 gate）→ `remote/{protocol,hub_client,worker}.py`（manifest 字段 + 校验，
   **先挡 bool** 因为 bool 是 int 子类 + worker 接线）。
@@ -1511,7 +1511,7 @@ x1-rebirth 跑 42 轮后**衰退**（it19 峰值 0.168 → it42 0.063），当�
   ⇒ **从零是唯一能离开「教师吸引域」的路径**。（另注：goal-nn §5 早就定过同路线，
   `docs/nn/legacy.md` §14 的 S1 过门是唯一先例 —— 但那是 **3 命 1 星**，学到的其实是「莽」，
   到 x10 冲不上去 ⇒ **不可当可行性证据**。）
-- **初始化**：`scripts/init_scratch_weights.py --seed 7`（trunk×0.1 / 头×0.01 / value×0.1）。
+- **初始化**：`worker/scripts/init_scratch_weights.py --seed 7`（trunk×0.1 / 头×0.01 / value×0.1）。
   朴素 kaiming 会让 logits 随机即 ±2000 ⇒ 熵≈0、首个更新自锁（实测 kl=11930 后恒 0）。
 - **`kickstart_ref=false`**：它是相对 **`bc`** 的 KL 锚，而本腿 `bc` 就是随机策略 ——
   开着等于把策略钉在噪声上，且恰在 it1–30 探索窗口最猛。
@@ -2012,7 +2012,7 @@ it30 vs bc，逐局证据 `tmp/c4chip03-it30-probe.jsonl`）：
   充分论证。评审指认三处事实错误（F1 kickstart 机制、F2 it50 口径、F3 R1 设施状态）、
   三点诊断偏漏、以及"R 清单缺执行顺序"这一最大缺口。
 - **核实方法**：一律回到盘面与代码——`tmp/c6-margin/{training_log,eval_log}.jsonl`、
-  `remote-jobs/*/manifest.json`、`rl/reward_library.reward_from_spec`（真实公式而非笔算）。
+  `remote-jobs/*/manifest.json`、`biz/reward_library.reward_from_spec`（真实公式而非笔算）。
 - **接受（已改文档/配置）**：① D10 单变量失真（c6 注释写"单变量=敌数"，但 bc 同时
   从 c4-it140 换成 c5-it40）；② D11 无梯度假说链（稀疏通关+廉价死亡+时间税 → terminal
   主导 → PPO 只能学"更快结束"）；③ `§12.3.1` Phase 0–4 执行顺序 + R3/R4/R5 互斥；
@@ -2213,7 +2213,7 @@ it30 vs bc，逐局证据 `tmp/c4chip03-it30-probe.jsonl`）：
 ### §2026-09-15-goalnn-kl-cap-unwired（2026-09-15，x3-step 评审 P0-1：串行/远端路径 kl_cap 不接线）
 
 - **背景**：`ppo_schedule` 的 `kl_cap` 在 per-tick **remote/serial** 执行路径**不接线**——
-  `ppo/engine.py::ppo_update` 无形参；`remote/worker.py` 只读 `kl_coef`；全仓消费者仅
+  `worker/ppo/engine.py::ppo_update` 无形参；`remote/worker.py` 只读 `kl_coef`；全仓消费者仅
   `trainer/stream.py`（stream 波次闸）与 manifest 打包。x3 线 `stream=0`（remote 强制）⇒
   字段写了也不生效。`p4-fast.jsonc` 已写对；但 x3-step / x3-power 结算 / `docs/nn/experiments.md` §4、`docs/nn/remote-transport.md` §2.1 仍把「kl_cap 从未咬合 / 回落兜底」当成生效护栏叙事。
 - **备选与否决**：A 继续当护栏写 —— 否，机制假、后腿会按「失去护栏」解释第二段；

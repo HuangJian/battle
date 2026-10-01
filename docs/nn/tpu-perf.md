@@ -35,7 +35,7 @@ B=709 :   4 步 / 墙钟 50s（12.5s/步）    ← 83.8s 里 50s 买的是编译
 
 ### 修法（零数学改动）
 
-`ppo/common.chunk_episodes` 的重排分支：`idx = permutation(n)` 之后只取前 `(n // mb) * mb`
+`worker/ppo/common.chunk_episodes` 的重排分支：`idx = permutation(n)` 之后只取前 `(n // mb) * mb`
 步。性质：
 
 * 丢的是**重排序列的尾部** ⇒ 均匀随机子集，**无偏**；
@@ -70,7 +70,7 @@ permutation → `range(0, n, mb)`），所以 ragged tail = `n % mb`，与「哪
 总步数：
 
 ```
-quota/关 = ceil(target_transitions / S)      # rl/volume_quota.target_per_stage
+quota/关 = ceil(target_transitions / S)      # worker/volume_quota.target_per_stage
 n = S × quota                                # 各关收满时
 ```
 
@@ -272,7 +272,7 @@ GPU 侧则散（159 / 261 ms/步），符合「池子里的 GPU 型号不一」�
 
 ### 落地
 
-* `ppo/common.py`：`xla_enable_compile_cache(path, enabled=None) -> str`（绝不抛；未装
+* `worker/ppo/common.py`：`xla_enable_compile_cache(path, enabled=None) -> str`（绝不抛；未装
   torch_xla / 老版无此 API / 初始化失败 ⇒ 各自返回一行状态）。硬约束一并照顾：必须在**任何
   计算之前**调、同进程重复调会抛 ⇒ 内部记账做幂等；`XLA_PERSISTENT_CACHE=0` 关。
 * `remote/worker.py`：tpu 分支在 `xla_device()`/指纹/速度自检**之前**开启（那些自检已会产生
@@ -364,9 +364,9 @@ B=1024:184步 累计墙钟 45s ← 0.17s/步
 
 **修法（纯训练侧实现修复，不碰任务定义/不降难度）**：
 
-* `ppo/common.py`：新增 `demo_index(buf, didx)` —— 有缓冲就 `copy_` 就地改值并**返回同一张量**
+* `worker/ppo/common.py`：新增 `demo_index(buf, didx)` —— 有缓冲就 `copy_` 就地改值并**返回同一张量**
  （图输入恒定 ⇒ 签名恒定），`buf=None` 时原样返回 numpy 索引（非 demo 路径逐字节不变）。
-* `ppo/engine.py`：循环外建一次 `demo_idx_dev = torch.zeros(per_mb, int64, device)`，
+* `worker/ppo/engine.py`：循环外建一次 `demo_idx_dev = torch.zeros(per_mb, int64, device)`，
  每步仍用 `np.random.randint` 抽样本（**抽哪些样本、RNG 顺序一字未改** ⇒ 数值逐位相同），
  只是索引先落到复用缓冲再 `demo_t[...][_didx_t]`。
 
@@ -374,7 +374,7 @@ B=1024:184步 累计墙钟 45s ← 0.17s/步
 第二个 chunk 起就 `新=0, 命中>0`。**这条修法也让「step 4 那一步的 0.31s」成为常态而不是例外。**
 
 测试：`tests/test_ppo_common.py`（复用同张量/数值与朴素 numpy 索引逐位相同/None 路径不变——
-2026-09-26 从 `tests/test_xla_step_diag.py` 移入：那三个用例要真张量，归位到 `ppo/common.py`
+2026-09-26 从 `tests/test_xla_step_diag.py` 移入：那三个用例要真张量，归位到 `worker/ppo/common.py`
 的家，好让诊断文件整文件免 torch）+ `tests/test_xla_step_diag.py` 的 engine 源码守线
 「不得再 `demo_t[...][_didx]`」。
 
@@ -398,12 +398,12 @@ B=1024:184步 累计墙钟 45s ← 0.17s/步
 
 但探针只有 2 个 chunk，无法区分「每**调用**编一次」与「每**步**编一次」。于是本轮**不动算法、只加观测**：
 
-* `ppo/common.py`：`xla_metrics_snapshot()`（读 `torch_xla.debug.metrics` 的 CompileTime /
+* `worker/ppo/common.py`：`xla_metrics_snapshot()`（读 `torch_xla.debug.metrics` 的 CompileTime /
   ExecuteTime / LazyTracing / 拷贝耗时 + `UncachedCompile`/`CachedCompile`/`ExecuteComputation`
   计数）/ `xla_metrics_delta()` / `xla_delta_str()`。非 XLA 或未装 torch_xla ⇒ `{}`，尽管调用点
   整体跳过（**零开销**）；解析只读 `Accumulator`/`Value` 行（第一版 `(.*)$` + `re.S` 会把报告里
   剩下所有指标错加进 CompileTime——测试用真机报告原文钉住）。
-* `ppo/engine.py`：`ppo_update` 每 chunk 迭代在 `xla_mark_step` 之后取一次快照，打印
+* `worker/ppo/engine.py`：`ppo_update` 每 chunk 迭代在 `xla_mark_step` 之后取一次快照，打印
   「窗口步数/墙钟/图签名(B/demo/kl/ref)/编译·执行·追踪·拷贝增量」，编译占窗口 >50% 时额外打一行
   **判定**。采样节奏有预算：前 `PPO_XLA_DIAG_FIRST`（12）步逐步、之后每 `PPO_XLA_DIAG_EVERY`
   （16）步一次，**未取样的步不推进基线**（delta 累积，期间的编译会落进下一次读数）；
@@ -470,9 +470,9 @@ torch_xla 惰性模式下，`.tolist()` materialize 只断言其依赖子图；`
 
 | 位置 | 改动 |
 |---|---|
-| `ppo/engine.py::ppo_update` | 每步 stats append 后 `xla_mark_step(device)`（图执行边界；非 XLA no-op，CPU/CUDA 逐位不变） |
-| `ppo/engine.py` | ref 预计算后一次性 mark（防首步巨图编译） |
-| `ppo/common.py` | `xla_world_size()` helper（新版 `torch_xla.runtime.world_size()` / 旧版 `xm.xrt_world_size()` 双探） |
+| `worker/ppo/engine.py::ppo_update` | 每步 stats append 后 `xla_mark_step(device)`（图执行边界；非 XLA no-op，CPU/CUDA 逐位不变） |
+| `worker/ppo/engine.py` | ref 预计算后一次性 mark（防首步巨图编译） |
+| `worker/ppo/common.py` | `xla_world_size()` helper（新版 `torch_xla.runtime.world_size()` / 旧版 `xm.xrt_world_size()` 双探） |
 | `remote/worker.py` | TPU 分支日志：device + world_size（H2 诊断不再静默） |
 | `tools/tpu-probe.py` | E 段全套：`--engine/--per-step/--skip-e0/--tail 0/--step-mark` + XLA metrics 累计 + world_size 诊断 |
 
@@ -518,9 +518,9 @@ claim 08:28:02 -> payload 下行 3.83 MB (2.3 s) -> code 缓存命中 + model/op
 
 | 项 | 改动 | 实测 | 数值 |
 |---|---|---|---|
-| **ref 前向缓存** | `ppo/engine.py`：kickstart 的 ref 输出只依赖 (obs,scalars,mask)，逐 chunk 固定且 ref 冻结（BN-free）⇒ 跨 epoch 不变；原「每梯度步重算」改为「按 chunk 预计算一次 + 索引复用」 | CPU +18.6% / **GPU +22.7%** / TPU +31.5%（比例随设备变快而升）；真实日志确认省 **~9 s/轮（20%）** | ✅ 逐位不变 |
-| **标量同步批量化** | `ppo/common.py::sync_scalars` + 三后端：每步 6-8 处 `.item()`/`float()` 合为 1 次 `stack().tolist()` | GPU **+2 ms（0.8%）⇒ 收益≈0**（见 21.1 #1） | ✅ 逐位不变 |
-| **传输压缩** | `remote/protocol.py`：① 4 个编解码函数改 gzip(level 6)+base64（魔数自动判别，旧格式可解）；② **方案B v2 体**——result 上行改 `BRV2` 魔数 + JSON 头 + gzip **裸二进制段**，省掉 base64 的 33% | ① 上行 1,634,596 → 1,150,292 B（−29.6%）；② **再 → 863,023 B（合计 −47.2%）**，上行 7.4 s → **~3.9 s**；`opt_init` 下行 −31.3% | ✅ 无损；v2 往返逐字段一致 |
+| **ref 前向缓存** | `worker/ppo/engine.py`：kickstart 的 ref 输出只依赖 (obs,scalars,mask)，逐 chunk 固定且 ref 冻结（BN-free）⇒ 跨 epoch 不变；原「每梯度步重算」改为「按 chunk 预计算一次 + 索引复用」 | CPU +18.6% / **GPU +22.7%** / TPU +31.5%（比例随设备变快而升）；真实日志确认省 **~9 s/轮（20%）** | ✅ 逐位不变 |
+| **标量同步批量化** | `worker/ppo/common.py::sync_scalars` + 三后端：每步 6-8 处 `.item()`/`float()` 合为 1 次 `stack().tolist()` | GPU **+2 ms（0.8%）⇒ 收益≈0**（见 21.1 #1） | ✅ 逐位不变 |
+| **传输压缩** | `common/protocol.py`：① 4 个编解码函数改 gzip(level 6)+base64（魔数自动判别，旧格式可解）；② **方案B v2 体**——result 上行改 `BRV2` 魔数 + JSON 头 + gzip **裸二进制段**，省掉 base64 的 33% | ① 上行 1,634,596 → 1,150,292 B（−29.6%）；② **再 → 863,023 B（合计 −47.2%）**，上行 7.4 s → **~3.9 s**；`opt_init` 下行 −31.3% | ✅ 无损；v2 往返逐字段一致 |
 | **多卡** | `remote/worker.py` opt-in `--device cuda-dp`（`nn.DataParallel`，单卡自动退化）；产物落盘一律用未包装的 `raw_model` | **B_new 192 → 100 ms/step = 1.92×**（接近线性） | ⚠ 归约顺序变 ⇒ ulp 变，属新开实验臂 |
 
 **三设备实测矩阵**（s/轮 = s/step x 148）：本机 CPU 3.607 s / Kaggle GPU T4x2 191 ms /
@@ -533,7 +533,7 @@ claim 08:28:02 -> payload 下行 3.83 MB (2.3 s) -> code 缓存命中 + model/op
 
 ### 1.3 TPU 设备层（扩容，非提速）
 
-`ppo/common.py` 增 `is_xla / xla_device / optimizer_step / xla_mark_step / _to_cpu_state`；
+`worker/ppo/common.py` 增 `is_xla / xla_device / optimizer_step / xla_mark_step / _to_cpu_state`；
 三后端 `opt.step()` → `optimizer_step(opt, device)`；`_ppo_save` 落盘前把 XLA 张量物化到 CPU；
 `remote/worker.py` 支持 `--device tpu|xla`；`ipynb/battle-rl.ipynb` cell3/4 改为
 CUDA→TPU→CPU 探测。**踩坑四条**（全部来自真机）：
@@ -577,8 +577,8 @@ CUDA→TPU→CPU 探测。**踩坑四条**（全部来自真机）：
 
 | 位置 | 改动 |
 |---|---|
-| `remote/protocol.py` | 新增 `NEGLIGIBLE_COEF = 1e-9` + `coef_active()`（顶层免 torch，hub 侧也可 import） |
-| `run_rl.py::update_kwargs` | **唯一的衰减源**归零：低于阈值直接置 0.0。`rl/loop_steps.kickstart_coef` 只是它的薄包装 ⇒ 单点归零即贯通全链 |
+| `common/protocol.py` | 新增 `NEGLIGIBLE_COEF = 1e-9` + `coef_active()`（顶层免 torch，hub 侧也可 import） |
+| `trainer/run_rl.py::update_kwargs` | **唯一的衰减源**归零：低于阈值直接置 0.0。`trainer/loop_steps.kickstart_coef` 只是它的薄包装 ⇒ 单点归零即贯通全链 |
 | `trainer/loop_steps.py` | 附 ref 字节的条件由 `kick_on` 改为 `kick_on and coef_active(kick_kl)` —— 原先"缰绳早已松开、ref 权重还在每轮空运" |
 | `remote/worker.py` | 判据换 `coef_active` 并打日志，兜住"旧 hub 产出的、仍带微小系数的在途 manifest" |
 
@@ -647,7 +647,7 @@ pull 模式下 `hub_server._get_payload()` 是 `self._bytes(p.read_bytes())`，*
   （PJRT 回退）—— 否，E1 + 每步 mark **收敛回 44ms**，正是旧微基准数字。
 - **决定**：根因 = torch_xla 惰性模式下 `.tolist()` materialize 只断言依赖子图，backward/
   optimizer 在途节点不 drain、跨步骤累积 → 图线性变大 → 单步耗时 ∝ 步数。修复 =
-  `ppo/engine.py::ppo_update` 每步 stats 后 `xla_mark_step(device)`（图执行边界；非 XLA
+  `worker/ppo/engine.py::ppo_update` 每步 stats 后 `xla_mark_step(device)`（图执行边界；非 XLA
   no-op，CPU/CUDA 数值逐位不变）+ ref 预计算后一次 mark（防首步巨图）+ worker 日志打印
   device/world_size。**修正旧结论**：`plan/ppo-optimization.plan.md` §0.5「TPU 快 GPU 4.7× /
   44ms」是 ≤3 步微基准测量假象；44ms 只属于「每步有 mark」形态。
@@ -666,8 +666,8 @@ pull 模式下 `hub_server._get_payload()` 是 `self._bytes(p.read_bytes())`，*
 - rollout 侧掺 demo——否：BC 梯度必须进 PPO update，采样侧掺只会污染 advantage 血缘。
 
 **落点**（单变量纯度：loss 侧加项，corpus 不动）：
-- `ppo/engine.ppo_update` 新三参（`demo_bank/demo_bc_coef/demo_per_mb`，缺省全关、数学逐字节不变）；
-  每 minibatch 步 np RNG 抽样（ckpt 精确复现）、合法类掩码 CE 与 `train.bc._masked_ce` 同数学。
+- `worker/ppo/engine.ppo_update` 新三参（`demo_bank/demo_bc_coef/demo_per_mb`，缺省全关、数学逐字节不变）；
+  每 minibatch 步 np RNG 抽样（ckpt 精确复现）、合法类掩码 CE 与 `worker.train.bc._masked_ce` 同数学。
 - worker 经 manifest 取 blob（`BLOB_DEMO`，缺 bank 而 coef>0 即拒收，mirror kickstart 安全阀）；
   pack（hub_client.post）、训练侧（loop_steps 发布 + `_remote_forward_agg` + iteration 行
   `demo_bc`）、课程 schema（CourseConfig 三键 + flat_overrides）全链打通。

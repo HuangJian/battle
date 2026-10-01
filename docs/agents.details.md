@@ -416,11 +416,11 @@ was folded into them; it had already replaced `nn-training/start-training.{sh,ps
   is staged (escape hatch `SKIP_DASHBOARD_GATE=1`). Both directions verified: the root can no
   longer resolve `preact`, dashboard can.
 
-- Raw `python train_loop.py` / `python train_bc.py` bypasses pre-flight checks and can spawn
+- Raw `python trainer/train_loop.py` / `python worker/train/bc.py` bypasses pre-flight checks and can spawn
   duplicate training processes competing for the same lock file and weights.
 - If training is already running, the runner detects it and exits cleanly; a stale lock (crashed
   process) is auto-cleaned; force-restart after a crash with `--force`.
-- The lock file (`.train_loop.lock`) is managed exclusively by `train_loop.py` — the runner
+- The lock file (`.train_loop.lock`) is managed exclusively by `trainer/train_loop.py` — the runner
   never writes to it (eliminates the shell-PID/Python-PID mismatch that caused double-spawn on Windows).
 - **torch lives only in `nn-training/.venv`** (per-platform venv) — the system `python` has no torch
   (`ModuleNotFoundError: torch`). Do NOT probe with `python -c "import torch"`; use the runner's
@@ -428,13 +428,13 @@ was folded into them; it had already replaced `nn-training/start-training.{sh,ps
   - `bun dashboard/src/launch/cli.ts --check` — verifies venv+torch and prints the absolute
     torch interpreter path; exit 0 = usable.
   - Print the exact command without running it: `bun dashboard/src/launch/cli.ts --echo --script <name>.py [args]`.
-- The runner is not just `train_loop.py`: `--script <path>.py [args]` (path relative to
-  `nn-training/`) runs root runners
-  (`run_rl.py`, `train_loop.py`, `smoke_test.py`) or subpackage entries (`train/bc.py --arch student`,
-  `train/goal_bc.py`, `train/intent_probe.py`, `scripts/eval_bridge.py`, `scripts/validate_export.py`, …)
+- The runner is not just `trainer/train_loop.py`: `--script <path>.py [args]` (path relative to
+  `nn-training/`) runs entry runners
+  (`trainer/run_rl.py`, `trainer/train_loop.py`, `tools/smoke_test.py`) or subpackage entries (`worker/train/bc.py --arch student`,
+  `worker/train/goal_bc.py`, `worker/train/intent_probe.py`, `worker/scripts/eval_bridge.py`, `worker/scripts/validate_export.py`, …)
   through the same venv, so all torch work shares one entry and agents never hit "no torch".
-  Legacy flat names auto-alias to their package home (`train_bc.py` → `train/bc.py`,
-  `gen_self_inj.py` → `scripts/gen_self_inj.py`, `train_rl.py` → `run_rl.py`; DECISIONS §324).
+  Legacy flat names auto-alias to their package home (`train_bc.py` → `worker/train/bc.py`,
+  `gen_self_inj.py` → `worker/scripts/gen_self_inj.py`, `train_rl.py` → `trainer/run_rl.py`; DECISIONS §324).
 
 ### 5.7 pwsh git commit — the reliable recipe (Windows agents)
 The shell is **PowerShell 7 (pwsh)**, not bash; redirect-and-heredoc tricks that work in bash silently break
@@ -875,7 +875,7 @@ protocol and is indistinguishable to the loop.
 - **Why the console is the only entry** (AGENTS §5): the launcher tripod — training-enabled marker
   (`<traj>/training-enabled.txt`, same predicate as `trainer/loop_plan.py::course_enabled`), pause/release
   bookkeeping, and hub mode — is applied at the console/launch layer. Bypassing it
-  (`python nn-training/run_rl.py` directly) hits the gateway and refuses loudly, but a partial bypass
+  (`python nn-training/trainer/run_rl.py` directly) hits the gateway and refuses loudly, but a partial bypass
   that satisfies the gateway while skipping the other two leaves the course un-pausable/un-resumable —
   the accounting the loop reads is then wrong.
 - **Deployment mode ≠ sampling mode** is a related trap: a policy's greedy/deployment win rate is not
@@ -943,8 +943,8 @@ order an operator should learn to recognize them:
 | 119 | scratch init, kaiming | ConvMixer trunk activations ~1000 (inputs 0..255, no norm) amplify even clip-1.0 grads into 100-nat logp swings |
 | 32905 | scratch init after partial fix | real-obs activations were 13× the synthetic probe's estimate; 1/α-rescaled heads hypersensitive to trunk drift |
 
-Fixes that worked, in `run_rl.py build_model` (!resume path) and
-`nn-training/init_scratch_weights.py`:
+Fixes that worked, in `trainer/run_rl.py build_model` (!resume path) and
+`nn-training/worker/scripts/init_scratch_weights.py`:
 
 - **warm_start_normalize**: sample REAL obs (multi-shard max-union + synthetic
   extremes — a single degenerate shard once read feat_max=1 and α blew up 14×),
@@ -1017,7 +1017,7 @@ both now rules (AGENTS 16.1-16.4).
   "unverifiable progress" is one step from "restart from scratch".
 - **Mid-run artifacts (16.3)**. Emit one line per epoch/step (loss, acc, value
   loss, lr, elapsed). For weight-producing runs, checkpoint periodically:
-  `train/bc.py --ckpt-every N` writes `{out}.ckpt.{epoch}` (meta carries
+  `worker/train/bc.py --ckpt-every N` writes `{out}.ckpt.{epoch}` (meta carries
   epoch/best_val_loss) resumable via `--resume` — any moment is a valid stopping
   point, so an over-budget run keeps its best work.
 - **Kill-vs-wait on data (16.4)**. When a run overruns: sample process CPU time

@@ -8,7 +8,7 @@
 ## 0. 架构与数据流（谁连谁）
 
 ```
-协调器（Windows, run_rl.py 常驻）
+协调器（Windows, trainer/run_rl.py 常驻）
   │  每轮迭代开始时：读 rl-config.json → GET /v1/ping 各节点
   │  → POST /v1/weights 下发权重 → 中央队列派局
   ▼
@@ -211,7 +211,7 @@ gcloud auth login                # 浏览器完成 OAuth
 # 首次 gcloud cloud-shell ssh 会生成 SSH 密钥对并请求会话授权，按提示确认即可
 ```
 
-保活循环（随训练窗口启停；断线自动重连，可并进 run_rl.py 的启动脚本）：
+保活循环（随训练窗口启停；断线自动重连，可并进 trainer/run_rl.py 的启动脚本）：
 
 ```powershell
 while ($true) {

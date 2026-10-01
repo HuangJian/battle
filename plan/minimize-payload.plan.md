@@ -634,7 +634,7 @@ Have/omit 只是 **带宽优化提示**，不是正确性来源。实现与测�
   要重跑就把该工具写回仓（未做，见 §7.3-2 的替代口径）。
 - 传输账聚合：`nn-training/tools/wire_report.py`（p50/p90 + bad% + reroll；纯只读）
 - 引导期护栏：`nn-training/remote/tailscale_boot.py::fetch_guarded`（§4.0.1）
-- Result v2 / Job v2：`nn-training/remote/protocol.py`（`pack_result_v2` / `pack_job_v2`）
+- Result v2 / Job v2：`nn-training/common/protocol.py`（`pack_result_v2` / `pack_job_v2`）
 - Blob 安全阀：`nn-training/remote/worker.py` `_resolve_blob`
 - 发布 slim 字段：`nn-training/remote/hub_client.py` `publish_job`
 - AI Studio 环境与限速：`.workbuddy/memory/2026-09-18.md`

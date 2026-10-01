@@ -101,16 +101,16 @@ bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py --drop-b-class --sc
 
 ### 1.5 键白名单（防再长草）
 
-`nn-training/rl_config.schema.json`（数据，单一来源）+ `nn-training/rl_config_schema.py`（校验）。
+`nn-training/rl_config.schema.json`（数据，单一来源）+ `nn-training/worker/rl_config_schema.py`（校验）。
 
-- **只告警不拒**：未知键 / 已退役键在 `run_rl.py` 启动日志里点出来（`[run_rl] rl-config 告警：…`），
+- **只告警不拒**：未知键 / 已退役键在 `trainer/run_rl.py` 启动日志里点出来（`[run_rl] rl-config 告警：…`），
   但**绝不 block 开训**——把「配置里多了一个手写键」变成「训练起不来」代价远大于收益。
 - 三类命中：顶层段不在白名单、`policy.*` / `rl.*` 键不在白名单、命中 `retired`（带原因）。
 - 自由形状段不下钻：`nodes` / `courses` / `rl.remote_hubs` / `rl.intent` / `rl.goal`。
 - **新增一个 rl-config 键时，同步 `rl_config.schema.json`**（否则启动会告警）。
-- **消费面（2026-09-26 评审更正）**：今天**只有** `rl_config_schema.py`（`run_rl.py` 启动时校验）
+- **消费面（2026-09-26 评审更正）**：今天**只有** `worker/rl_config_schema.py`（`trainer/run_rl.py` 启动时校验）
   读这份 JSON——`dashboard/src/stack/smoke.ts::rlConfigSmoke` **尚未接线**。早先的 docstring / schema `_doc` /
-  `run_rl.py` 注释里写的「与控制台冒烟共用一份、一处增删两侧同时生效」**不成立**，已改掉。
+  `trainer/run_rl.py` 注释里写的「与控制台冒烟共用一份、一处增删两侧同时生效」**不成立**，已改掉。
 
 ```bash
 # 自查（纯逻辑，不需要真配置）

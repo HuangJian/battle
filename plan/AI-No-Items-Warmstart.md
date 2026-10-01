@@ -120,7 +120,7 @@ superItemGuardThreat: 1 → 0
 **schema 消费方清单（2026-08-25 grep 生成，M2 执行时重新生成逐项对勾）**：
 - TS 运行时：`src/nn/infer.ts`、`src/nn/obs-encoder.ts`、`src/nn/policy-input.ts`
 - 导出/评估（bun）：`export-dagger-labels.ts`、`export-godai-labels.ts`、`collect-godai.ts`、`export-rl-rollout.ts`、`export-observations.ts`、`export-eval-game.ts`、`nn-trace.ts`、`student-accuracy.ts`、`m1-eval.ts`
-- 训练（python）：`common/schema.py`、`student_model.py`、`model.py`、`rl_model.py`、`dataset.py`、`ppo.py`、`eval_bridge.py`、`weights_io.py`、`train_bc.py`、`smoke_test.py`、`test_run_rl.py`、`validate_export.py`、`npyio.py`
+- 训练（python）：`common/schema.py`、`student_model.py`、`model.py`、`rl_model.py`、`dataset.py`、`ppo.py`、`eval_bridge.py`、`weights_io.py`、`train_bc.py`、`tools/smoke_test.py`、`test_run_rl.py`、`validate_export.py`、`npyio.py`
 
 ---
 

@@ -727,7 +727,7 @@ p3→p4 门连续 2 eval ≥70）。
 
 ## §3 p4-BC 全程蒸馏评估：45 checkpoints × 100 局（2026-09-04）
 
-> p4-BC（ep60 热启动 + p4 语料，`train/bc.py --arch student --value-coef 0.5`，
+> p4-BC（ep60 热启动 + p4 语料，`worker/train/bc.py --arch student --value-coef 0.5`，
 > seed 1234，Colab T4）的 ep1–45 每轮 ckpt 各跑 100 局 p4-onset（共 4500 局），
 > 回答 §2 留下的问题：蒸馏曲线是"缓慢爬升"还是"平台期"？权重备份见
 > `nn-training/weights/WEIGHTS.md`（`p4-BC-checkpoints-45.zip`）。
@@ -855,7 +855,7 @@ Block 均值（每 block 1500 局）：胜率 8.9 → 10.1 → **13.7**/100；�
 ### 1.1 训练侧（BC 60 epoch 全量，DECISIONS §325）
 
 - 语料：`tmp/p1-godai-v2`（p1-godai 1892 胜局 / 165K 帧，含 returns.npy）。
-- 命令：`train/bc.py --data-dir ... --arch student --value-coef 0.5 --epochs 60
+- 命令：`worker/train/bc.py --data-dir ... --arch student --value-coef 0.5 --epochs 60
   --ckpt-every 1 --batch 256 --lr 0.003 --val-split 0.1 --mirror-p 0.5
   --seed 1234 --device cuda`（Colab T4，~82 s/epoch，总计 4911 s）。
 - 收敛：val_loss 1.108 → **0.5084**（ep60 = best，全程无过拟合平台）；move acc

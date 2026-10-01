@@ -47,8 +47,8 @@
 `tools/` 五个只需放回 —— 那里没有与 stdlib 同名的模块）。
 
 **② `Path(__file__)` 的上溯层数 +1**：`HERE` / `NN_ROOT` / `ROOT` 这些常量的**语义**一字不变（nn-training 根 /
-仓根），只改了推导（`parent` → `parents[1]` / `parents[2]`）。写错的后果不是报错而是**错位**：`run_rl.py` 的
-`os.chdir` 少上溯一层 ⇒ cwd 停在 nn-training ⇒ `tmp/` 默认路径全错；`remote_worker_serve.py` 的 `--work` 同理。
+仓根），只改了推导（`parent` → `parents[1]` / `parents[2]`）。写错的后果不是报错而是**错位**：`trainer/run_rl.py` 的
+`os.chdir` 少上溯一层 ⇒ cwd 停在 nn-training ⇒ `tmp/` 默认路径全错；`remote/remote_worker_serve.py` 的 `--work` 同理。
 
 **③ 启动器 `--script` 的取值**：`resolveTrainScript` 一直接受「`nn-training/` 下的相对路径」（只拒绝对路径 / 盘符 /
 `..`）⇒ 新写法 `--script trainer/run_rl.py`。`LEGACY_ALIAS` 的 `'train_rl.py' → 'trainer/run_rl.py'` 同步。
@@ -106,14 +106,72 @@
 | nn 门禁 | **3373 passed / 3 skipped**；ruff `All checks passed`（5 处 isort 漂移 `--fix`）；mypy **548** 文件干净 |
 | 根 `bun run check` | **2277 pass / 0 fail**（2289 用例 / 0 fail 含 skip） |
 | dashboard | typecheck 过 + **1232 pass / 0 fail** · `bun dashboard/src/server/build.ts` 三份 bundle 过 · `bun run build` 过 |
-| 反探针 | ① `cp biz/course_resolve.py trainer/_probe_extra.py` ⇒ 集合相等那条红（列 `['_probe_extra']`）· ② 删 `remote.remote_worker` 账本条目 ⇒ 「没登记层号」红 · ③ 把 `remote_worker_serve` 层号 7 改 2 ⇒ 「层号不是拓扑秩」红 · ④ 删 `run_rl.py` 的 sys.path prelude ⇒ 入口守卫红（`No module named 'common'`）。复位逐条绿 |
+| 反探针 | ① `cp biz/course_resolve.py trainer/_probe_extra.py` ⇒ 集合相等那条红（列 `['_probe_extra']`）· ② 删 `remote.remote_worker` 账本条目 ⇒ 「没登记层号」红 · ③ 把 `remote_worker_serve` 层号 7 改 2 ⇒ 「层号不是拓扑秩」红 · ④ 删 `trainer/run_rl.py` 的 sys.path prelude ⇒ 入口守卫红（`No module named 'common'`）。复位逐条绿 |
 | 真机脚本冒烟 | 11 个入口逐个 `python nn-training/<入口> --help`（仓根 cwd）退码 0 —— 已固化成守卫 |
+
+### 散文里的旧路径（`.md` 轮，同日第三件）
+
+刀 7 的改写器（`tmp/cut7_refs.py`）显式跳过 `*.md`（散文另起一轮，同刀 3–6 先例）；用户口径：「`.md` 散文里还有
+42 个文件写着旧扁平路径」—— 本轮清掉。判据仍是**名实**，扫描面第一次盖到归档文档：42 个命中文件（含 `tmp/` 两份
+草稿副本）去掉草稿后 **40 个**，逐行读后 **21 个文件 / 147 处路径 + 10 处同行连带**改到今天各包的家
+（改写器 `tmp/md_prose_refs.py`：逐文件断言命中数 + keep 行锚点；干跑清单先与扫描清单逐一对账）。
+
+| 形状 | 处置 |
+|---|---|
+| 路径形 / 会失败的命令行（`nn-training/run_rl.py` · `--script run_rl.py` · `./.venv/bin/python task.py` · `train_loop.py --course`） | 改到今天家（`trainer/` · `tools/` · `remote/` · `worker/`）；旧前缀 `rl/` 整体换掉、不叠加 |
+| 旧→新映射的左列（§55 开头的新旧对照表 · README 树里由缩进给路径的行 · `LEGACY_ALIAS` 左列） | **不动** —— 改它等于把映射表改坏 |
+| 令牌 / 事故记录（`task.pytest_dispatch()` 的坑 · 拼写事故 · oracle 旧 argv · 锁种类 `.run_rl.<course>.lock`） | **不动** —— 改它等于篡改记录；本节「响亮失败」句同此（那里的 `run_rl.py` 是**被拒的输入**） |
+| 已死启动器 `start-training.{sh,ps1}` 的命令与 bug 故事（`legacy.md` §7.8/§9.x） | **不动** —— 命令整体已不可执行，改半截只是给死命令贴金 |
+| 追加型日志（`DECISIONS.md` · `.workbuddy/memory/**`）· gitignore 草稿（`tmp/**`）· 年代快照（`NN-Training-Foundation-Overview` · `multi-course-audit` · `goal-nn.progress` · `nn.progress.intent`） | **整文件不动** —— 日期化的「当时是什么」；`DECISIONS.md` 里 327 处旧形 / 108 条目于 2026-10-01 定口径 = **不就地改名 + 头部落译注** → `DECISIONS.md` §2026-10-01-goalnn-log-keeps-era-names（行号会变假精确） |
+| `plan/nn-training-module-reorg.plan.md`（本轮 plan） | 决策表（§1.1 现状 / §3.7「不搬」）**不动**；§5.6 补「已做」 |
+
+**连带修**（同行、刀 6/刀 5 搬走、不在这 14 名里，凡动过的行顺手清）：`agents.details.md` 的 `train/bc.py` →
+`worker/train/bc.py` · `train/{goal_bc,intent_probe}.py` 与 `scripts/*.py` → `worker/…` · `init_scratch_weights.py` →
+`worker/scripts/`。**更早层的旧路径（`rl/…` 等，刀 1–6 之前）**：同日第二轮已清 —— 见下节
+「散文里的更早层旧路径（`.md` 轮二）」（第一轮没碰、只点了「尚有存量」的那些）。
+
+门禁：根 `bun run check` **2277 / 0** · dashboard typecheck + **1232 / 0**（`dashboard/README.md` 一行命令改了）；
+nn 门禁不涉（纯 `.md`）。
+
+### 散文里的更早层旧路径（`.md` 轮二，同日第四件）
+
+第一轮只清了刀 7 的 14 个扁平入口（`run_rl.py` 一类）；**更早四层的旧形**（刀 4/5/6 前的 `rl/…` · 刀 1–3 前的
+`remote/…` · 刀 6 前的 `models|ppo|data|train|scripts/…` · 刀 2 前的根 L0 名 `dist_common|dist_shard|dist_weights_ledger`）
+同日续清 —— 用户口径「继续清归档文档里更早层的旧路径残渣（如 `training-stack` 里 18 处 `rl/` 引用）」。
+
+**工具链**：`tmp/older_reprobe.py` 先把每个旧路径解析到今天各包的家（报告 1638 行 / 908 行有解 → `tmp/older_report.txt`）；
+`tmp/older_refs.py` 落盘（逐行 keep 锚断言），三道守卫：① 旧形**已被新家前缀包住**（`worker/train/bc.py` 里的
+`train/bc`、`worker/scripts/*`、`nn-training/worker/…`）⇒ 不动（首版没有这道闸门，会把 `worker/train/bc` 改成
+`worker/worker/train/bc`）；② **解析无解**即跳过（配置键 `rl.local_slots` / `rl.hub_push` · 计划的 `args`/`checkpoint`/
+`batch_lanes` · 仍住原地 `remote/hub_client` 一类）；③ 逐行 keep 锚（下表判据）。
+
+**落盘：20 个文件 / 418 处** —— `docs/nn/engineering.md`（68）· `plan/nn-training-refactor.md`（146）·
+`docs/nn/{remote-transport,runtime-opt,tpu-perf,training-stack,console,experiments}.md`（44/15/20/19/5/5）·
+`plan/{rl-config-cleanup,online-offline-role-routing,job-identity-collision,nodes-decouple-from-course,feasibility-map,`
+`goal-nn-action,obs-schema-v3,minimize-payload,dynamic-rollout-volume}.plan.md`（30/20/17/9/6/4/1/1/1）·
+`docs/{nn.progress,rl.progress}.md`（4/2）· `docs/agents.details.md`（1）。
+
+**本轮 keep 的三类**（55 处命中）：
+
+| 类 | 例 |
+|---|---|
+| 旧→新映射左列 /「原 X」自述 | README 树 9 行 · `engineering` 刀 1/2/3 行（477–479）· refactor §5.4 表②③ 行 · 4953「保留为薄门面」被否决的备选 · 4964 同步记录 |
+| 事故 / 字面量（改了就是篡改记录） | `endsWith('remote/protocol.py')` · `SRC = rl/batch_eval.py` · `setattr("rl.batch_runner.X")` · `git show HEAD:rl/batch_runner.py` · `train.loop_util._pid_alive` 的断言错误原文 · 打印标签 `print("ppo.engine=…")` · 拼写事故 `rn-training/…` · 刀 2 哨兵「指着**不存在**的 `remote/protocol.py`」 |
+| 决策 / 盘点记录（半改会自相矛盾） | 算法栈并入 `trainer/` 的「9 条向上边」分析（467 · `nn.progress` 651–652）· 六包重组第一刀行（654）· `rl.queue/stream` 缩写列（`Goal-Space-Policy-Rebuild:1561`）· `rl.stream` 碰撞名口径（331） |
+
+**已知残留（本轮集外）**：`DECISIONS.md`（口径：**不就地改名 + 头部落译注** →
+`DECISIONS.md` §2026-10-01-goalnn-log-keeps-era-names）· `.workbuddy/memory/**` · `tmp/**` · 四篇年代快照 · 本 plan 决策表
+（判据同本节首表）；根下两份**未跟踪草稿**（`transfer-scheduling.plan.md` / `transfer-scheduling.review-R2.md`，不在扫描面）；
+**brace 列表**（`nn-training/rl/{eval_dispatch,…}.py` · `train/{goal_bc,intent_probe}.py`）与**裸 `rl/` 统称**
+（「从 `rl/` 里 `import remote.*`」）· 行号坐标表里的裸模块名（`dispatch.py:191`）—— 都不构成「照着敲就失败」的路径形。
+
+落盘后复查 `tmp/older_rescan.py`：**WOULD-CHANGE 0**（keep 55 · already-home 92 · still-home 352 · 无解 193）。
+门禁：根 `bun run check` **2277 / 0**（纯 `.md`，nn 门禁不涉）。
 
 ### 未做（刻意）
 
-* `.md` 散文里的旧路径（**42 个文件**）留后一轮：判据与前几轮相同（名实），但扫描面大且要逐条读
-  （`bootstrap.py` / `task.py` 在散文里常指「那个脚本」而非路径）。`nn-training/README.md` 已在本刀更新
-  （它是本包门面，树与命令都是结构事实）。
+* `.md` 散文里的旧路径（**42 个文件**）—— 见上节，**同日已做**；更早层（`rl/…` 等，**20 个文件 / 418 处**）——
+  见上节，**同日第二轮已做**。
 * `hub/smoke_loopback.py` 等 `-m` 字符串已改（见前表）；`remote/worker.py`（作业壳，L5）**没动** —— 它是另一件事。
 
 ## §54 `nn-training` 刀 6：`worker/` 收编本地训练全栈，`biz/` 只留游戏业务（2026-09-30，续 §53）
@@ -303,7 +361,7 @@ assert len(files) > 100, f"扫描面只有 {len(files)} 个文件——包被搬
 
 **机器判不了的那一批**：`prose_rl_hand.py` 收 7 条 hunk / 7 个文件，四类 —— ① **自述路径深度**
 （`biz/archive.py` / `eval_local.py` / `eval_replays_once.py` 的 `parents[2]` 注释：文件自己住在 `biz/`，
-裸目录规则只会给 `trainer/`）② **跨层声明**（`biz/resume.py`「不 import 任何 `rl/*`」、`models/rl_model.py`
+裸目录规则只会给 `trainer/`）② **跨层声明**（`biz/resume.py`「不 import 任何 `rl/*`」、`worker/models/rl_model.py`
 「不得被 `rl/ppo/remote` import」、`common/__init__.py` 的禁 import 名单：这里的 `rl/` 是「上层业务面」的统称，
 今天要写全 `trainer/*` / `biz/*`）③ **拼写事故**（`eval_course_once.py` 里 `rn-training/trainer/queue.py`，
 早前某次 sed 吃了 `n`）④ 碰撞名 `stream` 的**模块口径**（只出现在 `rl/stream.…` 这种路径里，裸目录规则能安全吃下；
@@ -498,7 +556,7 @@ venv 里的 ruff 是 **0.16.6**（`pyproject` 只要求 `>=0.6.0`，venv 比仓�
 
 ---
 
-## §50 另外三个入口（`task.py` / `Makefile` / CI）也逐个实测：两个采纳、CI 否决（2026-09-29，用户指令「让 task.py / Makefile / CI 也用 forkdist，先各自实测收益再改」）
+## §50 另外三个入口（`tools/task.py` / `Makefile` / CI）也逐个实测：两个采纳、CI 否决（2026-09-29，用户指令「让 tools/task.py / Makefile / CI 也用 forkdist，先各自实测收益再改」）
 
 **结论先行**：§49 只把 forkdist 接进了**门禁**（`nn-python-gate.sh`）。本条把剩下三个入口**各自**
 实测后分别处置——
@@ -506,7 +564,7 @@ venv 里的 ruff 是 **0.16.6**（`pyproject` 只要求 `>=0.6.0`，venv 比仓�
 | 入口 | 处置 | 实测 |
 |---|---|---|
 | `Makefile`（`test` / `test-fast` / `test-e2e`） | **采纳**：Linux 走 `-p tools.forkdist --forkdist $(NPROC)` | min 墙钟 19.73 → **15.05s（−23.7%）**、user 203.9 → 111.4s |
-| `task.py`（`check` / `test*`） | **采纳**：Linux 走 `-p tools.forkdist --forkdist auto` | 真入口 `task.py test-fast` rc=0 / 15.43s；共用 fast 路径 21.99 → **17.57s（−20.1%）** |
+| `tools/task.py`（`check` / `test*`） | **采纳**：Linux 走 `-p tools.forkdist --forkdist auto` | 真入口 `tools/task.py test-fast` rc=0 / 15.43s；共用 fast 路径 21.99 → **17.57s（−20.1%）** |
 | CI（`.github/workflows/nn-training.yml`） | **否决**：两层继续 `-n 2` | 2 vCPU：44.95 vs 45.03s（同价）；4 vCPU：41.51 vs 40.93s（噪声） |
 
 三条接线共用同一条判据（与门禁同源）：**Linux 且 `os.fork` 在 ⇒ forkdist，否则 xdist** ——
@@ -524,11 +582,11 @@ Windows 没有 `os.fork`（插件会当场拒绝），macOS 上 master 在 fork 
 | user | 203.9 / 217.7 | 111.4 / 111.4 |
 | **min** | **19.73** | **15.05（−4.68s，−23.7%）** |
 
-**task.py 真入口**：`./.venv/bin/python task.py test-fast` **rc=0**、wall **15.43s** / user 111.4s ——
-与 make 的 forkdist 臂同价（两入口拼出的 argv 同形，`task.py` 只是额外带一个与 `addopts` 同值的
+**tools/task.py 真入口**：`./.venv/bin/python tools/task.py test-fast` **rc=0**、wall **15.43s** / user 111.4s ——
+与 make 的 forkdist 臂同价（两入口拼出的 argv 同形，`tools/task.py` 只是额外带一个与 `addopts` 同值的
 `--timeout=60`）。
 
-**两入口共用的 fast 路径**（`tests/` + `e2e/`，= `task.py check` / `make test` 的目标集；
+**两入口共用的 fast 路径**（`tests/` + `e2e/`，= `tools/task.py check` / `make test` 的目标集；
 `-n auto` vs `--forkdist 16`，load_before 0.36，4/4 绿）：wall 21.99 / 23.25 →
 **17.72 / 17.57**（min −4.42s，−20.1%），user 233.9 → 121.6（**−48%**）。
 
@@ -569,7 +627,7 @@ Windows 没有 `os.fork`（插件会当场拒绝），macOS 上 master 在 fork 
 
 ### 50.3 `--forkdist auto`：为了不改旋钮的打法，不是图省事
 
-* `Makefile` 的 `NPROC ?= auto` 与 `task.py` 原来的 `-n auto` 本来就是这个语义 ⇒ `auto` 必须被接受，
+* `Makefile` 的 `NPROC ?= auto` 与 `tools/task.py` 原来的 `-n auto` 本来就是这个语义 ⇒ `auto` 必须被接受，
   并解析成 **`common.platform_utils.effective_cores()`**（本仓「本机几核」只允许一个答案：容器里
   `os.cpu_count()` 报的是宿主机核数——2026-09-25 云机卡死那笔账；门禁的 `NPROC` 也问的它）。
   拿不到就**拒绝**而不是猜一个错数。
@@ -579,7 +637,7 @@ Windows 没有 `os.fork`（插件会当场拒绝），macOS 上 master 在 fork 
 
 ### 50.4 接线护栏 + 一个「调用方环境会改判据」的坑
 
-三条用例（都在 `tests/test_forkdist.py`）：`test_task_py_dispatches_per_platform`（真 import `task.py`
+三条用例（都在 `tests/test_forkdist.py`）：`test_task_py_dispatches_per_platform`（真 import `tools/task.py`
 看它拼出的 argv）、`test_makefile_dispatches_per_kernel`（真跑 `make -n test test-fast test-e2e`，
 三条 recipe 都必须 `--forkdist auto` 且不搭 `-n`）、
 `test_ci_keeps_xdist_with_the_measured_reason_in_the_file`（CI 两层仍是 `-n 2`，且
@@ -600,7 +658,7 @@ cd nn-training
 # 入口 A/B（Makefile）：PYTEST_DISPATCH 整体覆盖两臂，交错 2 轮取 min
 for r in 1 2; do for over in "-n auto" "-p tools.forkdist --forkdist auto"; do
   /usr/bin/time -f 'wall=%e user=%U' make -s test-fast PYTEST_DISPATCH="$over"; done; done
-./.venv/bin/python task.py test-fast            # task.py 真入口（Linux 上自己就带 --forkdist auto）
+./.venv/bin/python tools/task.py test-fast            # tools/task.py 真入口（Linux 上自己就带 --forkdist auto）
 # CI 规模（2 / 4 vCPU）：分层单跑 + --maxfail=0（addopts 的 -x 会把轮次截短）
 taskset -c 0,1 bash ../tools/githook/nn-py-safe.sh -m pytest tests/ -n 2 --timeout=60 --maxfail=0
 taskset -c 0,1 bash ../tools/githook/nn-py-safe.sh -m pytest tests/ -p tools.forkdist --forkdist 2 \
@@ -615,7 +673,7 @@ taskset -c 0,1 bash ../tools/githook/nn-py-safe.sh -m pytest tests/ -p tools.for
 
 * **CI 换 `--forkdist 2`**：实测否决（50.2，墙钟同价、e2e 层还略差）。
 * **CI 改 `-n` 的数量**：不在本条（`-n 2` 是既有结论，见 workflow 注释）。
-* **给 `task.py` / Makefile 的 Windows 分支也塞 forkdist**：不做——没有 `os.fork`，插件当场
+* **给 `tools/task.py` / Makefile 的 Windows 分支也塞 forkdist**：不做——没有 `os.fork`，插件当场
   `UsageError`，那等于把一个假分支写进代码。
 * **macOS 验证**：同 §49.5，未做 ⇒ 两个入口在 macOS 继续 xdist（`PYTEST_DISPATCH` 可整体覆盖）。
 
@@ -753,10 +811,10 @@ bash tools/githook/nn-python-gate.sh
   否决 `loadfile` 同一个理由）。
 * **`pytest-forked`**：它是 per-test fork，不并行，且每个用例都重付一次 fork + 夹具重建。
 * **内存收益当卖点**：实测持平（49.2），不写进任何理由。
-* **把 forkdist 推广到 `task.py` / Makefile / CI**：未做——那些入口没有实测收益记录，保持 `-n`
+* **把 forkdist 推广到 `tools/task.py` / Makefile / CI**：未做——那些入口没有实测收益记录，保持 `-n`
   不动（改它们要先有各自的测量）。
 
-  > **2026-09-29 同日续（已做）**：三个入口各自实测后——`task.py` / `Makefile` **采纳**（Linux 走
+  > **2026-09-29 同日续（已做）**：三个入口各自实测后——`tools/task.py` / `Makefile` **采纳**（Linux 走
   > `--forkdist auto` / `--forkdist $(NPROC)`，实测 −20% ~ −24% 墙钟），**CI 否决**（runner 规模下
   > 墙钟同价，继续 `-n 2`）。全文见 **§50**。
 * **macOS 验证**：未做（见 49.5）。
@@ -791,9 +849,9 @@ master + 执行期的 Python/GC/syscall 开销。
 
 ### 48.2 那 4.8s/worker 里是什么
 
-* **torch 经产品侧 import**：`test_bc_dp.py` 的收集 = **2.4s（争夺态）**——它只 `from models.core
-  import NNPolicy` / `import train.bc`，而这两者顶层 `import torch`（实测 warm 1.6–2.5s；`models.core`
-  与 `train.bc` 各自 import 1.6s）。每个 worker 都会跑到需要它们的用例 ⇒ 必付。
+* **torch 经产品侧 import**：`test_bc_dp.py` 的收集 = **2.4s（争夺态）**——它只 `from worker.models.core
+  import NNPolicy` / `import worker.train.bc`，而这两者顶层 `import torch`（实测 warm 1.6–2.5s；`worker.models.core`
+  与 `worker.train.bc` 各自 import 1.6s）。每个 worker 都会跑到需要它们的用例 ⇒ 必付。
 * **~270 个测试模块自己的 import/exec** ≈ 2.4s/worker：除少数首导（`remote.*` 链、`trainer.loop_core`）外
   均匀到 ~10ms/模块，无单点（与 §45 的 cProfile 结论一致）。
 
@@ -816,7 +874,7 @@ master + 执行期的 Python/GC/syscall 开销。
 ### 48.4 被实测否决的三条（做过，别重做）
 
 1. **把 14 个测试模块的顶层 `import torch` 改成函数内延迟导入**（实测改了 50 处）：**无效**。torch
-   不是被测试模块自己拉起的，是被它们 import 的**产品模块**（`models.core` / `train.bc` / `ppo.*`）
+   不是被测试模块自己拉起的，是被它们 import 的**产品模块**（`worker.models.core` / `worker.train.bc` / `ppo.*`）
    拉起的 ⇒ 收集相照付（Σ收集 68.6 → 65.3s，噪声内）。已整体回退，不留无效 churn。
 2. **`test_backend_contract_runtime.py` 的 `_backends()` 从模块级挪进 fixture**：单进程 collect 里该
    模块 1.09s → 0.02s，但 torch 被**下一个**需要它的模块（`test_bc_dp.py`）接手 ⇒ 全量净收益 ≈ 0
@@ -1924,7 +1982,7 @@ common.errors   ←── common.wire_codec
 ### 下一步
 
 `hub_client` 余下的是「打包（payload/TS/code zip）/ 磁盘 IPC 发布 `publish_job` / 校验落位
-`verify_and_land`」——都在同一发布事务里；下一刀按同判据从 `common/protocol`（7 组）、`rl/config`（4 组）、
+`verify_and_land`」——都在同一发布事务里；下一刀按同判据从 `common/protocol`（7 组）、`worker/config`（4 组）、
 `common.distribution`（3 组）里选。（候选清单与判据 → `plan/nn-training-refactor.md` §5.7。）
 
 ---
@@ -2003,13 +2061,13 @@ common.errors   ←── common.wire_codec
 
 ---
 
-## §30 `rl/eval_local` 分簇下沉（S5 第一/二/三刀：`rl/eval_rows` + 改指调用点 + `rl/eval_track`，2026-09-27，用户指令「重构 nn-training：降低模块耦合 / 复用代码 / 提可维护性与可扩展性」）
+## §30 `worker/eval_local` 分簇下沉（S5 第一/二/三刀：`worker/eval_rows` + 改指调用点 + `worker/eval_track`，2026-09-27，用户指令「重构 nn-training：降低模块耦合 / 复用代码 / 提可维护性与可扩展性」）
 
 ### 一句话
 
 把 `biz/eval_local.py`（**1130 行**）按关注点分簇下沉，三刀、每刀逐字节纯搬 + 原模块留 `X as X` 门面
 （全仓调用点与测试**一行不改**）：① 「逐局 eval 行 schema + `eval_log` 账本 I/O」（连续行 287–602，17 名）
-→ **`biz/eval_rows.py`**（345 行，stdlib-only）；② `remote/` 只用纯原语的三处调用点改指 `rl/eval_rows`；
+→ **`biz/eval_rows.py`**（345 行，stdlib-only）；② `remote/` 只用纯原语的三处调用点改指 `worker/eval_rows`；
 ③ 「双轨 / 过拟合 / 结算」簇（23 名）→ **`biz/eval_track.py`**（404 行）。终态 `biz/eval_local.py` **573 行**。
 门禁 **3128 → 3130 → 3139 passed / 3 skipped / 0 failed**。
 
@@ -2039,7 +2097,7 @@ common.errors   ←── common.wire_codec
 * `remote/offline_eval.py` 的行构造（模块级 `eval_row`）
 
 也就是说，**传输层为了拿「一行读数长什么样」而 import 了整个「本机评估运行器」**。把这层纯数据逻辑
-独立成 `rl/eval_rows`（只依赖 `json`/`time`/`pathlib`）之后，任一侧都能依赖它而不拖入运行器——这正是
+独立成 `worker/eval_rows`（只依赖 `json`/`time`/`pathlib`）之后，任一侧都能依赖它而不拖入运行器——这正是
 「降低耦合」的机械含义。
 
 ### 刀法与验证（本仓的纯搬纪律，逐条）
@@ -2082,7 +2140,7 @@ common.errors   ←── common.wire_codec
 **新增两条边守卫**（`tests/test_eval_rows_split.py` ⑤）：① 两处纯调用点**不得**再从 `biz.eval_local` 取纯原语、
 且必须从 `biz.eval_rows` 取；② `offline_eval` 的 `eval_row` 走纯模块、而运行器边**保留**（防搬错）。
 
-### 同日续二：双轨 / 过拟合 / 结算簇下沉 `rl/eval_track`（S5 第三刀，2026-09-27）
+### 同日续二：双轨 / 过拟合 / 结算簇下沉 `worker/eval_track`（S5 第三刀，2026-09-27）
 
 **为什么是它**：`eval_local` 侦察出的 5 个分量里，「overfit 监视（11 节点）」与「seed 调度（5 节点）」
 合起来正是**同一个关注点**——双轨日常评估：**种子怎么分段**（锚点固定 / 轮转按 it 换）+ **过拟合怎么判**
@@ -2096,7 +2154,7 @@ common.errors   ←── common.wire_codec
 `overfit_gap_pp` / `overfit_fires`）· `report_winrate_safe`（B）· `_acc` / `_ratio` /
 `_read_recent_track_wrs` / `_maybe_warn_overfit` / `settle_eval_summary`（C）⇒ 新模块 **`biz/eval_track.py`**
 （404 行，依赖面 = stdlib + 本仓唯一日志原语 `biz.log`）。`biz/eval_local.py` **870 → 573 行**，留 `X as X`
-门面 ⇒ 调用点（`rl/gate_check` / `trainer/eval_a_once` / `trainer/eval_dispatch` / `remote/offline_eval`…）与
+门面 ⇒ 调用点（`worker/gate_check` / `trainer/eval_a_once` / `trainer/eval_dispatch` / `remote/offline_eval`…）与
 `tests/test_dual_track_eval.py` 的 `from biz.eval_local import …` **一行不改**。
 
 > **刻意不搬**：`EVAL_ITER_SUFFIX`（它是 **dispatch 的 eval iterId**，不是双轨——留在 `eval_local`）。
@@ -2129,7 +2187,7 @@ common.errors   ←── common.wire_codec
 ### 违反后果
 
 * 在 `eval_local.py` 里再实现一份 `eval_row` / `merge_eval_rows`（「搬了一半」）⇒ 守卫红。
-* `rl/eval_rows`（纯数据）反向 import `biz.eval_local`（运行器）⇒ 依赖成环，守卫红。
+* `worker/eval_rows`（纯数据）反向 import `biz.eval_local`（运行器）⇒ 依赖成环，守卫红。
 * 把 `biz.eval_rows` 加进 `remote_dag.LAYERS`（当成传输层）⇒ 守卫红（它是纯逻辑 L1）。
 * 在 `eval_local.py` 里再实现一份 `settle_eval_summary` / `dual_track_seeds`（第三刀「搬了一半」）⇒ 守卫红。
 
@@ -2156,15 +2214,15 @@ nn-training 的 python 门禁里有 31 个测试文件因 `import torch`（或�
 
 | 孪生模块（免 torch） | 从哪搬出 | 判别与约束 |
 |---|---|---|
-| `ppo/np_core.py`（先例） | `ppo/common.py` | GAE / shard 发现装载 / episode 骨架 / XLA 文本解析 / numpy RNG 打包 |
-| `data/weights_meta.py` | `data/weights_io.py` | JSON 清单强校验（format/schema_major/params）+ 最新版本化权重发现 + 覆盖率常量 |
-| `data/shard_split.py` | `data/dataset.py` | shard 级切分；**顺序仍由调用方 `perm` 给**（`torch.randperm` 未动）⇒ 切分逐字节不变 |
-| `train/device.py` | `train/bc.py` | `cuda-dp` 判据（2+ 卡真 DP / 单卡无卡响亮退化）；**CUDA 探针降成参数** |
+| `worker/ppo/np_core.py`（先例） | `worker/ppo/common.py` | GAE / shard 发现装载 / episode 骨架 / XLA 文本解析 / numpy RNG 打包 |
+| `worker/data/weights_meta.py` | `worker/data/weights_io.py` | JSON 清单强校验（format/schema_major/params）+ 最新版本化权重发现 + 覆盖率常量 |
+| `worker/data/shard_split.py` | `worker/data/dataset.py` | shard 级切分；**顺序仍由调用方 `perm` 给**（`torch.randperm` 未动）⇒ 切分逐字节不变 |
+| `worker/train/device.py` | `worker/train/bc.py` | `cuda-dp` 判据（2+ 卡真 DP / 单卡无卡响亮退化）；**CUDA 探针降成参数** |
 
-`data/dataset.py` 与 `ppo/common.py` / `data/weights_io.py` / `train/bc.py` **再导出**孪生模块的
+`worker/data/dataset.py` 与 `worker/ppo/common.py` / `worker/data/weights_io.py` / `worker/train/bc.py` **再导出**孪生模块的
 名字 ⇒ 既有调用点一行不改。用例侧同步归位：`test_weights_meta`（8）/ `test_shard_plan`（6）/
 `test_bc_device`（14）三个新文件全免 torch；`test_xla_step_diag.py` 整文件免 torch
-（它的 demo_index 三个张量用例搬去 `test_ppo_common.py`——`ppo/common.py` 才是张量的家）；
+（它的 demo_index 三个张量用例搬去 `test_ppo_common.py`——`worker/ppo/common.py` 才是张量的家）；
 接线锚留在需要真 torch 的那一侧（`test_weights_io` 断言 `load_weights_json` 真调了校验器、
 `test_bc_dp` 断言 `cuda-dp` → `torch.device("cuda")` 这条映射）。
 
@@ -2172,9 +2230,9 @@ nn-training 的 python 门禁里有 31 个测试文件因 `import torch`（或�
 
 本会话踩了两次，两次都是**测试看着绿而没测到东西**：
 
-1. `load_episodes_common` 搬去 `ppo/np_core` 后，`test_log_diet` / `test_ppo_quota` 仍把
-   monkeypatch 打在 `ppo.common` 上——那是**静默空操作**（本仓 S16/S19/S27 记过三次同款）；
-2. `_XLA_CACHE_STATE` 的家在 `ppo/np_core`，测试却从 `ppo.common` `import`（再导出）⇒ 把 torch
+1. `load_episodes_common` 搬去 `worker/ppo/np_core` 后，`test_log_diet` / `test_ppo_quota` 仍把
+   monkeypatch 打在 `worker.ppo.common` 上——那是**静默空操作**（本仓 S16/S19/S27 记过三次同款）；
+2. `_XLA_CACHE_STATE` 的家在 `worker/ppo/np_core`，测试却从 `worker.ppo.common` `import`（再导出）⇒ 把 torch
    拖回运行期，`test_xla_step_diag` 的两个 cache 用例在无 torch 机上必红。
 
 ### 顺带：静默绿变红（item 5）
@@ -2209,10 +2267,10 @@ nn-training 的 python 门禁里有 31 个测试文件因 `import torch`（或�
 
 | 修掉的 6 条 | 依赖其实长在哪 | 修法 |
 |---|---|---|
-| `e2e/test_run_rl::test_compute_gae` / `test_chunk_episodes` | 走根级便利名 `ppo.compute_gae`，而 `_EXPORTS` 把这两个名字指向 `ppo.common`（再导出的旧家） | `_EXPORTS` 改指 `ppo.np_core`（同一对象，`is` 不变）—— **名字指向哪家，就看谁定义它** |
+| `e2e/test_run_rl::test_compute_gae` / `test_chunk_episodes` | 走根级便利名 `ppo.compute_gae`，而 `_EXPORTS` 把这两个名字指向 `worker.ppo.common`（再导出的旧家） | `_EXPORTS` 改指 `worker.ppo.np_core`（同一对象，`is` 不变）—— **名字指向哪家，就看谁定义它** |
 | `test_measure_checkpoint_rss::test_cli_rejects_unknown_mode` / `test_cli_requires_something_to_measure` | `main` 先 `warm_up()`（真 torch）才 `_plan()` 校验参数 | 校验提到暖机之前（`_validate`）⇒ 顺带**修掉 fail-fast 名存实亡**：参数写错不再先付一次 torch 暖机 |
-| `test_no_torch_on_import::test_modes_import_does_not_load_torch` | 用 `import_module("ppo.engine")` 验「延迟后端可解析」 | 改 `importlib.util.find_spec`（只解析路径、不执行模块；父包 `ppo` 是 PEP 562 惰性的） |
-| `test_bc_course::test_resolve_fire_pos_weight` | 纯函数住在顶层 `import torch` 的 `train/bc.py` | 抽 `train/bc_core.py`（孪生模块，bc.py 再导出）⇒ 该测试文件**整文件免 torch** |
+| `test_no_torch_on_import::test_modes_import_does_not_load_torch` | 用 `import_module("worker.ppo.engine")` 验「延迟后端可解析」 | 改 `importlib.util.find_spec`（只解析路径、不执行模块；父包 `ppo` 是 PEP 562 惰性的） |
+| `test_bc_course::test_resolve_fire_pos_weight` | 纯函数住在顶层 `import torch` 的 `worker/train/bc.py` | 抽 `worker/train/bc_core.py`（孪生模块，bc.py 再导出）⇒ 该测试文件**整文件免 torch** |
 | `test_measure_checkpoint_rss::test_build_stack…` | 影子抛基类 `ImportError` ⇒ `importorskip` 假红 | 影子改抛 `ModuleNotFoundError`（真机它是 skip） |
 
 **剩下 6 条是真需要 torch，不动**：`test_log_diet` 3 条要真跑 `ppo_update`（验 epoch 行怎么攒进
@@ -2224,14 +2282,14 @@ bundle）、`test_remote_ppo` 2 条要真 `state_dict` 序列化 / 真张量注�
 第二轮收尾时剩 **18 个「模块层 `import torch`」的测试文件**（收集期就红）。这一轮按
 「**先看依赖长在谁身上**」逐个判，能整文件救回的只有两条，其余要拆生产模块或改测试归属：
 
-**① 生产侧一刀：`ppo/engine.py` 的 trajectory 装载半边 → `ppo/np_core.py`**
+**① 生产侧一刀：`worker/ppo/engine.py` 的 trajectory 装载半边 → `worker/ppo/np_core.py`**
 
 `engine.py` 里 `_RL_SHARD_SPEC` / `discover_rl_shards` / `load_shard` / `_reward_from_metrics` /
 `load_episode_from_shard` / `load_episodes` 六者**一行都不碰 torch**（numpy + `rl.reward_*`），
-却与 PPO 更新循环同住一个顶层 `import torch` 的模块。整块搬进 `ppo/np_core`（与
+却与 PPO 更新循环同住一个顶层 `import torch` 的模块。整块搬进 `worker/ppo/np_core`（与
 `load_episodes_common` 合家），`GAMMA` / `LAM` 的**权威定义**也一并搬去（装载默认值，
-R6 收紧理由随迁；engine 仍 `--gamma/--lam` 覆盖）⇒ `ppo.engine.load_episodes` 等访问点由
-engine 再导出，`trainer/stream.py` / `remote/train_core.py` / `ppo/bench.py` 一行不改。
+R6 收紧理由随迁；engine 仍 `--gamma/--lam` 覆盖）⇒ `worker.ppo.engine.load_episodes` 等访问点由
+engine 再导出，`trainer/stream.py` / `remote/train_core.py` / `worker/ppo/bench.py` 一行不改。
 `ppo/__init__._EXPORTS` 里 `discover_rl_shards` / `load_episodes` / `load_shard` 三个便捷名
 同步改指 `np_core`——**这是本会话第三次踩「指向没随函数搬家」**（第一次 `compute_gae` 等四个、
 第二次 `_XLA_CACHE_STATE`）；判据固定：**名字指向哪家，就看谁定义它**。
@@ -2239,8 +2297,8 @@ engine 再导出，`trainer/stream.py` / `remote/train_core.py` / `ppo/bench.py`
 **①b 同一刀的另一半：XLA 设备/诊断助手也从 `common.py` 搬进 `np_core`**（上一轮实现、本轮一并交付）：
 `xla_device` / `optimizer_step` / `xla_mark_step` / `_SPEED_PROBE` / `xla_fingerprint` /
 `xla_device_speed_probe` / `xla_world_size` 本就顶层零 torch（torch / torch_xla 全部延迟 import），
-却与 torch 张量助手同住 `ppo/common.py` ⇒ 逼得「只测 TPU 判据」的 `test_tpu_backend_guard.py`
-连坐 torch（收集期就红）。搬走后该文件改从 `ppo.np_core` 取判据函数，**整文件免 torch**
+却与 torch 张量助手同住 `worker/ppo/common.py` ⇒ 逼得「只测 TPU 判据」的 `test_tpu_backend_guard.py`
+连坐 torch（收集期就红）。搬走后该文件改从 `worker.ppo.np_core` 取判据函数，**整文件免 torch**
 （它守的那条源码线本来就读 `remote/train_core.py`，与判据函数的家无关）。
 命名面用脚本对账（`names(HEAD 版) − names(工作树)`）核过：`common` 只少 `cast` / `time` 两个
 不再用的 import，其余名称一条不丢（全部经再导出保留）；`engine` 只少 `_reward_from_metrics`
@@ -2253,7 +2311,7 @@ engine 再导出，`trainer/stream.py` / `remote/train_core.py` / `ppo/bench.py`
 | `tests/test_np_core.py` | `test_ppo_common.py` | 9 | 只吃 np_core：GAE 手算/退化、`chunk_episodes` 对齐、RNG 打包往返、shard 发现/字段表、`load_episodes_common` 的 ret 归一 |
 | `tests/test_bc_resume_store.py` | `test_bc_epoch_resume.py` | 4 | 只碰 `_JobStore`（resume 单文件 + 指标 jsonl + 租约门，假时钟注入）——原文件为 2 条真训练用例付了整文件的 torch 代价 |
 | `test_bc_course.py`（既有） | `test_bc_epoch_resume.py` | 2 | 课程 `eval` 块解析，属 bc_config 课程 schema |
-| `test_metrics_shard.py`（就地改 import） | — | 5 | 只 `from ppo import engine` 取 `engine.load_episodes` ⇒ 改直取 `ppo.np_core.load_episodes` |
+| `test_metrics_shard.py`（就地改 import） | — | 5 | 只 `from ppo import engine` 取 `engine.load_episodes` ⇒ 改直取 `worker.ppo.np_core.load_episodes` |
 
 **测量**（`tmp/wt-before` worktree at `d23ad38` vs 工作树，**同一条命令**）：
 
@@ -2270,7 +2328,7 @@ engine 再导出，`trainer/stream.py` / `remote/train_core.py` / `ppo/bench.py`
 
 搬走装载块后，engine 里 `compute_gae` / `discover_shards` / `load_episodes_common` /
 `load_shard_fields` 四个名字被 ruff 判 F401 死代码（search 不到 `import 它们` 的地方），删掉后
-门禁当场红：`tests/test_ppo_goal.py::test_dt1_degradation` 用 `import ppo.engine as ppo` 后
+门禁当场红：`tests/test_ppo_goal.py::test_dt1_degradation` 用 `import worker.ppo.engine as ppo` 后
 `ppo.compute_gae(...)` 当定长参照。**「没人 `import` 这个名字」≠「没人在属性上取它」**。
 守卫落 `test_ppo_common.py::test_engine_and_common_still_re_export_the_np_core_names`
 （逐名 `is` 断言两条再导出链 + 根级便捷名）。
@@ -2282,7 +2340,7 @@ engine 再导出，`trainer/stream.py` / `remote/train_core.py` / `ppo/bench.py`
 的「免 torch」用例是把 numpy 交给 `ppo_update`（engine 内部转张量）；`test_ppo_numerics` 的
 KL 三条经 `_sample_logprobs` 造的是 torch 张量。可动的只剩两类，都不便宜：
 (a) `test_backend_contract` 改用**源码扫描**替签名/结构契约（会换掉 `isinstance(RolloutBackend)`
-这条真结构断言，需单独决策）；(b) `ppo/goal.py` / `ppo/intent.py` 的装载簇搬 np_core——但那些
+这条真结构断言，需单独决策）；(b) `worker/ppo/goal.py` / `worker/ppo/intent.py` 的装载簇搬 np_core——但那些
 `compute_gae_variable` 是**各线自己的 `GAMMA_TICK` 别名**（不是重复实现），搬走反而丢语义。
 ### 补记（同日第四轮）：运行期契约判据拆成「源码扫描层 + ground truth + 交叉校验」
 
@@ -2306,7 +2364,7 @@ KL 三条经 `_sample_logprobs` 造的是 torch 张量。可动的只剩两类�
 
 ```
 tests/test_backend_contract.py::test_update_accepts_stream_injected_kwargs[goal]        FAILED
-tests/test_backend_contract_runtime.py::test_update_accepts_stream_injected_kwargs[goal-ppo.goal]  FAILED
+tests/test_backend_contract_runtime.py::test_update_accepts_stream_injected_kwargs[goal-worker.ppo.goal]  FAILED
 ```
 
 且静态层那一条在 **`PYTHONPATH=tmp/no_torch`（无 torch）下也红**——这正是旧版做不到的；两条
@@ -2328,7 +2386,7 @@ tests/test_backend_contract_runtime.py::test_update_accepts_stream_injected_kwar
 | 条数 | 从哪 | 搬到哪 | 为什么它本来就免 torch |
 |---|---|---|---|
 | 3 | `test_ppo_numerics` | `test_np_core` | GAE 手算 / done 截断 / dt≡1 全是 numpy 口径（`np_core.compute_gae`）。留下的 3 条 KL 的定义域是**真张量**（`approx_kl_est` 对张量 mean），所以该文件仍是需要 torch 的那一半 |
-| 1 | `test_shard_split` | `test_shard_plan` | 只吃 `data/npyio.load_dataset`（numpy）；且在孪生文件里可以与合成器**对账**（真产出过同一组切分判据）⇒ 顺带把「合成形状 = 生产形状」钉住 |
+| 1 | `test_shard_split` | `test_shard_plan` | 只吃 `worker/data/npyio.load_dataset`（numpy）；且在孪生文件里可以与合成器**对账**（真产出过同一组切分判据）⇒ 顺带把「合成形状 = 生产形状」钉住 |
 | 1 | `test_coord_golden` | `test_schema_fingerprint` | 只算 `j×255/(BOARD-1)` 无 `.5`（一行不碰 torch），而它守的是**跨语言取整语义**（torch.round 四舍六入五取偶 vs TS `Math.round`）——py↔TS 同锚常量的本家就是后者（`BOARD` 也在 `common/schema.py`）；顺带补一条「BOARD 字面量 == common.schema.BOARD」双锚 |
 
 搬迁完备性再测一次（worktree at `a67c2c8` vs 工作树，真 torch 下 `--collect-only`）：
@@ -2339,14 +2397,14 @@ tests/test_backend_contract_runtime.py::test_update_accepts_stream_injected_kwar
 
 | 文件 | 真因（帧） | 为何真的搬不动 |
 |---|---|---|
-| `test_backend_contract_runtime.py` | `ppo/engine.py:47` | **故意**：运行期 ground truth 必须真 import 三后端（不静默 skip） |
+| `test_backend_contract_runtime.py` | `worker/ppo/engine.py:47` | **故意**：运行期 ground truth 必须真 import 三后端（不静默 skip） |
 | `test_bc_dp.py` | 自身 `:19` | `DataParallel` 解包/参数身份/前缀只有真 torch 能验；pass-through 那 2 例已由免 torch 的 `test_bc_device.py` 覆盖，此处的副本是**接线锚** |
-| `test_bc_epoch_resume.py` | `train/bc.py:47` | 剩 2 条真跑 `bc_train` 两 epoch（接续编号）；纯存储/课程 6 条已分家 |
+| `test_bc_epoch_resume.py` | `worker/train/bc.py:47` | 剩 2 条真跑 `bc_train` 两 epoch（接续编号）；纯存储/课程 6 条已分家 |
 | `test_bc_masked.py` | 自身 | masked CE / masked argmax 本身就是张量运算（4/4） |
 | `test_coord_golden.py` | 自身 | 3 条要 `coord_channels(26)` 真渲染并与 golden 逐值比（golden 是给 TS 侧对账的产物） |
 | `test_ppo_common.py` | 自身 | 剩 7 条是张量助手（masked_logsoftmax / cat_* / ckpt / demo_index / kickstart）+ 1 条要真 import 三后端（`assert_backend_constants`） |
 | `test_ppo_demo_mix.py` | 自身 | 5 条全走 `ppo_update`（numpy chunk 在 engine 里转张量） |
-| `test_ppo_goal.py` | 自身 | 4 条要 `GoalRLNet` / `ppo_update_goal`；另 2 条 dt 用例走 `ppo.goal.compute_gae_variable`——那是该线自己的 `GAMMA_TICK` **别名**（非重复实现） |
+| `test_ppo_goal.py` | 自身 | 4 条要 `GoalRLNet` / `ppo_update_goal`；另 2 条 dt 用例走 `worker.ppo.goal.compute_gae_variable`——那是该线自己的 `GAMMA_TICK` **别名**（非重复实现） |
 | `test_ppo_intent.py` | 自身 | 同上（intent 侧） |
 | `test_ppo_kickstart_cache.py` | 自身 | 全走 `ppo_update(ref_model=…)`（要真前向计数） |
 | `test_ppo_numerics.py` | 自身 | 剩 3 条 KL 的定义域是真张量 |
@@ -4228,7 +4286,7 @@ console 只读」，坏行**静默跳过**），它的 `enqueueBatch` 去重（�
 - 临时名**固定**为 `batches.jsonl.tmp`（不随机）⇒ 上次崩溃残留的 `.tmp` 被本次直接覆盖，**不累积** ⇒
   **不需要** `finally` 清理、**不需要**改 `.gitignore`（`dashboard/data/evalboard/*` 整目录已忽略；
   `store.ts` 的 `.jsonl` 后缀过滤也不会把它当行文件）。原设计里写的 `finally` 清理因此作废。
-- 字节格式与写者唯一性**一字不改**：仍是同一个写者、同一把 `train.loop_util` 锁、同一份 JSONL 文本。
+- 字节格式与写者唯一性**一字不改**：仍是同一个写者、同一把 `worker.train.loop_util` 锁、同一份 JSONL 文本。
 
 #### 被否决的备选
 
@@ -4337,7 +4395,7 @@ B2 会让它们进 `BatchStore`；现在搬进去 = 下一刀还得再搬一次�
 - **门禁**：nn **2567 → 2586 passed / 3 skipped**（ruff `All checks passed` + mypy 绿）·
   根 `bun run check` 2120 / 0 · dashboard typecheck + **1105 / 0**（改过 `corpora.ts` 的两行注释 ⇒
   按规矩跑过）· `check-decisions` ok。
-- **provenance 同步**：`nn-training/eval_m1_once.py`（`trainer.batch_eval.KIND_FOR_POLICY` →
+- **provenance 同步**：`nn-training/trainer/eval_m1_once.py`（`trainer.batch_eval.KIND_FOR_POLICY` →
   `trainer.batch_plan.KIND_FOR_POLICY`）· `dashboard/src/evalboard/corpora.ts`（双侧契约的 Python 路径
   → `batch_plan.py::`，并注明旧名仍在再导出）。
 
@@ -4364,7 +4422,7 @@ B1 之后继续按 §5.5.4 开工 B2：`trainer/batch_eval.py` **1616 → 1190 �
 | 请求面（4） | `pending_requests` · `done_request_ids` · `mark_requests_done` · `consume_requests` |
 
 `_claim_guard` / `_claim_locked`（装饰器）→ `BatchStore._tx`（上下文管理器）：跨进程仍用
-`train.loop_util` 的 `claim.lock`（**拒绝第三套锁**），进程内 `RLock` + 同线程同 root **可重入**
+`worker.train.loop_util` 的 `claim.lock`（**拒绝第三套锁**），进程内 `RLock` + 同线程同 root **可重入**
 ⇒ `claim()` 里直接嵌套 `consume_requests()`，thread-local 缝保留但已只是「我持有这个 root 的锁吗」
 的标记。存量名 `_persist_of` **消失**（并入 `set_units_of`）。
 
@@ -4862,7 +4920,7 @@ HTTP 面（`hub/http_face.py` L5）与引导链（`hub/boot.py` L6）分开，�
 
 ### 一句话
 
-`remote/protocol.py`（采样协议）与 `remote/game_watch.py`（对局转播纯逻辑）**模块级零上层依赖**
+`common/protocol.py`（采样协议）与 `common/game_watch.py`（对局转播纯逻辑）**模块级零上层依赖**
 ⇒ 下沉为 `common/protocol.py` / `common/game_watch.py`；新增 `tests/test_layering.py` 把
 「`L2 remote → L1 纯逻辑 → L0 原语`」的**单一依赖方向**变成断言，并配一张**会腐烂就会红**的
 过渡白名单。门禁 **2247 → 2252**（+5 守卫用例）全绿。
@@ -4889,7 +4947,7 @@ S1 结束时测到：`rl/` 有 **10 个文件** import `remote/*`，`remote/` �
 两条最容易踩的坑，提前钉住：
 
 * **门面不能用 `import *`**：`game_watch.__all__` **漏了** `PROGRESS_LOG_SEC` / `progress_due`，
-  而 `trainer/queue_local` 正在用 ⇒ `import *` 会静默少导出。故 `remote/game_watch.py` 保留显式
+  而 `trainer/queue_local` 正在用 ⇒ `import *` 会静默少导出。故 `common/game_watch.py` 保留显式
   `from common.game_watch import (...)` 完整清单的门面，`protocol` 同理（别名 re-export 保住
   全部历史名字，30+ 调用点与 `monkeypatch.setattr(mod, "bun_version", …)` 类接缝**零改动**）。
 * **多模块混合导入**：原文有 `from remote import game_watch, serve_pool` 这种一行导两个模块的写法，
@@ -5012,7 +5070,7 @@ remote / 纯逻辑碰编排 / remote 碰编排 / 上层包碰 remote）全部命
 | `bun_version` | 3 份 | 训练机侧失败返 `"?"`（timeout 10）；节点侧失败返 `""`（timeout 30、且要求 `rc==0`） |
 | `exc_tail` | 2 份 | `remote/worker.py::_failure_detail` ↔ `trainer/stream.py::_exc_tail`，后者 docstring 写着「与前者同口径…**故就地保留同款小助手**」 |
 | 原子写 | 2 份 | `remote/artifacts.atomic_write_bytes` ↔ `hub.server._write_bytes`（两份注释都在解释「半截文件比没有文件更危险」） |
-| 追加 JSONL | 2 份 | `rl/bc_ledger.append_ledger` ↔ `remote/hub_client._append_ledger` |
+| 追加 JSONL | 2 份 | `worker/bc_ledger.append_ledger` ↔ `remote/hub_client._append_ledger` |
 | tar 解包 | 2 份 | `remote/worker.unpack_opt_tar` ↔ `remote/hub_client._extract_tar`（都要兼容 Py<3.12 的 `filter=`） |
 | `_log_default`（tag 化日志） | 4 份 | 差别只有 tag（`[run]` / `[hub-push]` / `[deliver]` / `[battle-rl]`），格式字面量被抄 4 遍 |
 | 子进程捕获 | **13 处裸 `text=True`** | 见 §19——这条正是「封装各写各的」的直接代价 |
@@ -5086,11 +5144,11 @@ L1 日常 it0 被带成 34.0/8.16（真值 40.0/7.64），污染仅 it0、其余
 **账本没有**：过程读数在采集腿与 EvalBoard 上失明（探针看得到、逐轮行看不到）。
 
 **成因**：§23 的 lockstep 清单在 Python 侧只点了 ④（`METRICS`/版本/行数断言），漏掉**行构造点**：
-`rl/eval_local.eval_row`（本地 resim 逐局行）与 `rl/batch_eval.record`（in-loop 日常评估行）。
+`worker/eval_local.eval_row`（本地 resim 逐局行）与 `trainer/batch_eval.record`（in-loop 日常评估行）。
 v8 提交只改了 TS 导出器 + `reward_library.py`，两处 Python 行构造点**各自手写字段表** ⇒ 新列无声掉地。
 注意 ④ 类的行宽/列名对账**全绿也抓不到** —— 缺的是「行里有没有这个键」，不是「行宽对不对」。
 
-**修法（同源 helper，禁两处手写）**：`rl/eval_local.eval_v8_fields(manifest)` 单点取数，
+**修法（同源 helper，禁两处手写）**：`worker/eval_local.eval_v8_fields(manifest)` 单点取数，
 `eval_row` 与 `batch_eval.record` 都 `**eval_v8_fields(manifest)` 展开。
 
 **缺键语义（与 census 列故意不同，别「统一」）**：缺键 ⇒ **整键省略**，不是写 `None`。
@@ -5133,7 +5191,7 @@ v8 提交只改了 TS 导出器 + `reward_library.py`，两处 Python 行构造�
 ⑦ 测试（行宽/跨语言列名/独立重实现/确定性/口径源码哨兵）。
 
 > ⚠ 2026-09-25 补：本清单漏了第 ⑧ 项 —— Python 两处 `eval_log` 行构造点
-> （`rl/eval_local.eval_row` / `rl/batch_eval.record`），实测就是这么漏掉的，见 §24。
+> （`worker/eval_local.eval_row` / `trainer/batch_eval.record`），实测就是这么漏掉的，见 §24。
 
 **验证（实测）**：reward golden **64/64 case 的 reward 逐位不变**、前 41 列逐位不变；
 `v7_phi_ts_oracle` phi **逐位不变**（256 行，前 31 列亦逐位不变）；nn 门禁 ruff+mypy+pytest
@@ -5157,7 +5215,7 @@ Phase 2 探针表与训练侧读数从此同口径可比 —— 这是「加列�
 
 | 阶段 | 攒什么 | 完成行 |
 |---|---|---|
-| 本轮上云 + 本 job 准备 | `it<N>`/动量（`run_loop`）＋ payload/prune/code/ts_code/XLA 缓存/设备/opt/demo bank（`worker.run_job`）＋ shards/装载/episodes/配额（`ppo.common.load_episodes_common`） | `job <jid>: 准备完成 <t>s` |
+| 本轮上云 + 本 job 准备 | `it<N>`/动量（`run_loop`）＋ payload/prune/code/ts_code/XLA 缓存/设备/opt/demo bank（`worker.run_job`）＋ shards/装载/episodes/配额（`worker.ppo.common.load_episodes_common`） | `job <jid>: 准备完成 <t>s` |
 | PPO 训练 | epoch 行（只留**最后一个 epoch** 的 kl/entropy/policy/value/gnorm）＋ 60s 心跳 | `job <jid>: PPO done in <t>s` |
 | XLA 步耗诊断 | 逐窗口**只累计**：最慢窗口（带它那次的原始指标串）、编译主导窗口计数、metrics 重置计数、图签名、逐 epoch 汇总 | `[ppo] XLA 步耗诊断（N 步 / T s）` |
 | iter rollout | 设置/看门狗口径/池/进度/收尾/单局耗时分布 | `kind=iter rollout done in <t>s`（中断另有 `… 中断`） |
@@ -5254,7 +5312,7 @@ xdist 调用、同样的机理）里**每一处** `.sleep(...)`（桩子进程�
    `RuntimeError(f"rc={rc} ({stderr[-160:]})")` 只剩 rc，诊断信息全没 —— 响亮错误变哑巴。
 
 修复：抽出 `run_eval_runner_capture(cmd, timeout)`，显式 `encoding="utf-8", errors="replace"`
-（`rl/queue.bun_version` 早就这么写，本处是漏网的一个）。复现/回归：
+（`trainer/queue.bun_version` 早就这么写，本处是漏网的一个）。复现/回归：
 `tests/test_eval_local_capture.py`（真子进程写不可解码字节，断言输出还在 + 中文正常 + 替换符命中；
 旧实现在同一命令下 `stdout`/`stderr` 都是 `None`）。实测同一 scratch 课程 100 局：traceback
 **65 → 0**，本机局输出全部可读。
@@ -5395,7 +5453,7 @@ FakeServer 收不到 weights 事件 ⇒ `test_it_stream_smoke` 的 I3 断言
 
 - oracle 的 argv 是 `["run_rl.py", "--course", stem]`，**没传 `--echo-config`**；
 - 而 `run_rl.main()` 的 echo 调用点在 `if getattr(args, "echo_config", False):`
-  （run_rl.py:212）之后 ⇒ 那次 dump **从未被调用**；
+  （trainer/run_rl.py:212）之后 ⇒ 那次 dump **从未被调用**；
 - 于是 main() 一路往下：`validate_args` → loop 启动 → `build_model` → **导入 torch** + 读
   `weights/<course>/*.json` ⇒ 5s 全耗在这条与判据无关的链上；
 - 后果更重：本机缺权重 ⇒ 永远 skip（实测如此）；真机有权重 ⇒ 没 PARITY ⇒ `pytest.fail`。
@@ -5734,7 +5792,7 @@ RSS ≈ 3.9GB ≈ `-n 4` 的 3 倍）；② 三路工具启动去重成 `run_too
 用例数与耗时）——现在日志里是 `1010 passed in 21.2s`；④ `t0` 提到启动工具之前，报告的秒数 = 门禁
 真实墙钟（旧版只算「等最慢那个」）。
 
-**同策推广**（防「门禁快、日常入口慢」的漂移）：`task.py` 四个 target 共用 `clean_env()`，线程封顶
+**同策推广**（防「门禁快、日常入口慢」的漂移）：`tools/task.py` 四个 target 共用 `clean_env()`，线程封顶
 只改一处即全生效，worker 一律 `-n auto`（**2026-09-15 把 `-n auto` 判为「沙箱 ~34% 停滞」头号嫌疑
 是误判，本次回退**）；`nn-training/Makefile` 加 `NPROC ?= auto` / `THREADS ?= 1` + export；
 CI `nn-training.yml` 加 job 级线程封顶，单测层从**无 `-n`**（job 里最长的 pytest 步）改为 `-n 2`
@@ -6152,7 +6210,7 @@ argmax 恒选同一格。
   但峰值 RSS 随核数线性涨）；④ 把新数字写死（如 `-n 12`）——否（换机器就错），改「核数派生 + 上界」。
 - **决定**：门禁 worker = `min(核数, 12)`（`NN_GATE_NPROC` 覆盖）、CPU 内线程 = 1
   （`NN_GATE_THREADS` 覆盖，0 = 不设；须在 python 启动前 export OMP/MKL/OPENBLAS）。
-  **同策推广到所有本地入口**（防「门禁快、日常慢」漂移）：`task.py`（线程封顶收在共用的
+  **同策推广到所有本地入口**（防「门禁快、日常慢」漂移）：`tools/task.py`（线程封顶收在共用的
   `clean_env()`，四个 target 一律 `-n auto`——**同时回退 2026-09-15 把 `-n auto` 判为
   「沙箱 ~34% 停滞头号嫌疑」的误判**）、`nn-training/Makefile`（`NPROC ?= auto` / `THREADS ?= 1`）、
   CI `nn-training.yml`（job 级封顶 + 单测层由串行改 `-n 2`）。**`-n 4` 不再是任何入口的默认值。**
@@ -6176,7 +6234,7 @@ argmax 恒选同一格。
   事故），重写就是双语漂移 + 重演事故；② 只告警不升级 —— 否，用户要「能推升级」；③ 在 TS 里
   内联 `python -c` 拼脚本 —— 否（argv 引号/路径脆弱，且仓库规定 nn python 须经
   `tools/githook/nn-py-safe.sh`）；④ 升级默认开 —— 否，一次性判读工具不该默默重启别人的机器。
-- **决定**：① 新增 `nn-training/dist_upgrade_cli.py`（stdin JSON spec → 逐节点调
+- **决定**：① 新增 `nn-training/tools/dist_upgrade_cli.py`（stdin JSON spec → 逐节点调
   `common.distribution.request_upgrade_guarded`，**单源**：护栏与 dirty 判据仍只在 Python 一处）；
   ② 新增 `tools/lib/node-upgrade.ts`（经 `nn-py-safe.sh` 拉起该 CLI；memo 文件
   `tmp/node-upgrade-memo.json` 跨调用去重，语义同 `_RESTART_SEEN`；**永不抛**——失败以
@@ -6188,7 +6246,7 @@ argmax 恒选同一格。
 - **违反后果**：TS 重写 dirty 判据 ⇒ 重演 autocrlf 掩盖 CRLF（mac 卡 40 分钟）；升级默认开 ⇒
   判读脚本随处重启节点；不回填 memo ⇒ 每次跑 CLI 都再捶一遍同一 stale 节点；m1-eval 无门 ⇒
   陈旧节点的局混进 gate/scoreV7 读数且**看不出来**（本条的起点）。
-- **落地**：`nn-training/dist_upgrade_cli.py` + `tests/test_dist_upgrade_cli.py`（8 例：spec 校验 /
+- **落地**：`nn-training/tools/dist_upgrade_cli.py` + `tests/test_dist_upgrade_cli.py`（8 例：spec 校验 /
   current 短路 / 映射到共享守卫 / dirty=null 真探测 / self 不探 dirty / dry-run 零 POST / 端到端）；
   `tools/lib/{dist-node-gate,node-upgrade}.ts` + `tests/{dist-node-gate,node-upgrade}.test.ts`
   （+21 例，含真子进程 dry-run）；`tools/sim/{eval-course-ckpt,m1-eval}.ts` 接线。
@@ -6227,10 +6285,10 @@ argmax 恒选同一格。
      每节点各 1 条），只改启动顺序，共享游标 + 尾部竞速语义不变；纯函数 + 单测 `fanOutOrder`。
 - **追记三（同日，节点探测/判 stale 也回归 Python 单源——用户裁定）**：用户指出「Python 侧早就有这套
   节点通信与重试且经长期实战检验，别再在 TS 里重建」。复核属实：上一条的 `--upgrade-nodes` 虽然把
-  **护栏**（dirty 判据/去重/self 禁 pull）交给了 `dist_upgrade_cli.py`，但**「谁是 stale」这一步仍在 TS 里
+  **护栏**（dirty 判据/去重/self 禁 pull）交给了 `tools/dist_upgrade_cli.py`，但**「谁是 stale」这一步仍在 TS 里
   自己 ping + 比 codeHash**——而 `common.distribution.upgrade_stale_nodes(cfg, expected, branch, ...)` 早就是
   训练循环里那个「ping 每个 enabled 节点 → hash ≠ expected → request_upgrade_guarded」的完整实现。
-  - **决定**：探测与判门也**只能有一处实现**。`dist_upgrade_cli.py` 增扫描模式（spec 给 `cfg_path`，
+  - **决定**：探测与判门也**只能有一处实现**。`tools/dist_upgrade_cli.py` 增扫描模式（spec 给 `cfg_path`，
     由它自己 ping）；新增 `common.distribution.seed_restart_state(entries)` 让一次性进程把调用方持久化的
     跨调用 memo 预置回 `_RESTART_SEEN`（判据仍是同一函数，调用方只存状态不写规则）；
     `upgrade_stale_nodes` 的结果补 `pingHash`（调用方写 memo 用的键）。`tools/lib/node-upgrade.ts`
@@ -6259,7 +6317,7 @@ argmax 恒选同一格。
   1. **本机槽位链被我上一轮的重构悄悄弄回归了**（用户上一轮报障原样复活）：`configLocalSlots()`
      是上一轮为「`rl.local_slots: 0` 必须真的 0」建的共享纯函数，m1-eval 还在用，但
      **`eval-course-ckpt` 改成调 Python 后把它丢了** —— 缺省 `localSlots` 不写进 spec ⇒ Python 侧
-     取 `policy.evalLocalSlots` 缺省 **4** ⇒ 整条配置链被跳过（`eval_course_once.py` 的注释甚至
+     取 `policy.evalLocalSlots` 缺省 **4** ⇒ 整条配置链被跳过（`trainer/eval_course_once.py` 的注释甚至
      声称读了 `rl.local_slots`，而 Python 侧从来没读过）。
      - **修**：求解器收敛成 `dist-node-gate.pickDistLocal(explicit, cfg, fallback)`（纯函数，
        **两个工具共用**，m1-eval 的内联三元也换掉）；`eval-course-ckpt` 启动日志打印生效值 + 来源，
@@ -6282,7 +6340,7 @@ argmax 恒选同一格。
      连接被重置/超时/408·429·5xx 标为 `transient`（`DistError.transient`），`batch_eval` 对它**背压
      重排 + 指数退避**（上限 8s）而**不计** `nodeFailStreak`，并把「背压次数/真失败次数」与
      `provenance` 一起入账；单元 0 局且本机槽位 0 时打一行**响亮提示**指向权重文件缺失这一真因。
-     旧行为：一瞬 10 次 10054 把 6 个节点在 1 秒内全部熔断（与 rl/bc_dispatch 的 busy 背压同源问题）。
+     旧行为：一瞬 10 次 10054 把 6 个节点在 1 秒内全部熔断（与 worker/bc_dispatch 的 busy 背压同源问题）。
   4. **runDir 复用会污染 provenance 判读**：`eval_log.jsonl` 每次运行都重建，而
      `dist-agent-meta.jsonl` 只追加 ⇒ 200 局的重跑里 meta 积 343 条（含上一轮 114 条远端条目），
      照它判「是否降级本地」会得出**反的**结论。新增 `_reset_run_ledgers()` 开跑前两个都清。

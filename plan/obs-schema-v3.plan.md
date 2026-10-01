@@ -124,7 +124,7 @@ C7 船（boatTimer）· C8 奖励车 `tank.bonus`（modern `bonusEnemyEveryNSpaw
 3. `src/nn/npy.ts`：`writeShard` 硬编码 `[N,14,26,26]`/`[N,19]`（`:82-83`）→ 参数化 `[N,16,26,26]`/`[N,30]`。
 4. `src/nn/infer.ts`：StudentModel stem 16→18（`in_ch+2`，`student.py:107`）+ coord 偏移 14→16 +
    in16 缓冲与拷贝长度（`:423/553-554`）；BC 参考模型 `NNModel.conv.0` 14→16。
-5. `nn-training/data/dataset.py`：`_flip_direction` bullet 分支换 32 项 LUT（保 speedBucket、
+5. `nn-training/worker/data/dataset.py`：`_flip_direction` bullet 分支换 32 项 LUT（保 speedBucket、
    owner=rest>=5）；敌机分支换显式 LUT（不依赖 hi 位巧合）。
 6. **`src/nn/wasm/conv_feats.c` + 重编**：`#define PAD3 (28*28*16)`（:20）、`pad3(in16,16,…)`（:153）
    → 18；clang 重编提交新 `conv_feats.wasm`；`conv-wasm.ts` 契约校验同步。**漏编后果：run()
