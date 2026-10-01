@@ -13,7 +13,7 @@
   2. 退役的三个符号**不许回来** —— 谁要再给在线盘加 bun，先回来读这段；
   3. **该有 bun 的链仍然有**：`battle.offline.ipynb`（Kaggle/TPU，Kaggle 不给 tailnet ⇒ 只能走
      cloudflared 隧道，它自己跑 rollout）的 cell 里必须还装着 bun —— 只删不加，会把「谁需要 bun」
-     这件事做没。（采样节点 `rollout.cloudflared.ipynb` 从未入库，见 `ROLLOUT_DISKS` 上面的说明。）
+     这件事做没。（采样节点 `rollout.cloudflared.ipynb` 2026-10-01 已入库，见 `ROLLOUT_DISKS` 上面的说明。）
 """
 
 from __future__ import annotations
@@ -46,9 +46,12 @@ ONLINE_MODULES = {
 #: （采样节点）——**那个文件在本仓不存在**（本仓、`origin/goal-nn`、合并基三者都没有，也不在
 #: `.gitignore` 里），所以那条断言在任何干净检出的机器上都是 `FileNotFoundError`（原分支上
 #: 它是红的，计划里「gate 绿」那份读数出自文件未入库的作者机）。守着一个不存在的文件不是
-#: 守卫而是噪音，故列表只留**真实存在**的那块盘；`rollout.cloudflared.ipynb` 若要回来，
-#: 得先把 notebook 本身入库，再把名字加回这里（见本仓 `DECISIONS.md` 的合并条目）。
-ROLLOUT_DISKS = ("battle.offline.ipynb",)
+#: 守卫而是噪音，故当时只留**真实存在**的那块盘，并留下约定：「若要回来，得先把 notebook 本身
+#: 入库，再把名字加回这里」。
+#: ★ 2026-10-01：约定履行 —— `ipynb/rollout.cloudflared.ipynb` 已入库（用户裁决），名字加回；
+#: 采样节点自己装 bun（cell 里 `bun.sh/install`），属于这条链（见 `DECISIONS.md`
+#: §2026-09-25-goalnn-online-worker-no-bun）。
+ROLLOUT_DISKS = ("battle.offline.ipynb", "rollout.cloudflared.ipynb")
 
 
 def _cell_source(name: str) -> str:
@@ -103,8 +106,8 @@ def test_rollout_disks_still_provide_bun() -> None:
     `battle.offline.ipynb` = Kaggle/TPU 上的离线盘（Kaggle 不给 tailnet ⇒ 只能走 cloudflared
     隧道进 hub），它自己跑 rollout。
 
-    （采样节点 `rollout.cloudflared.ipynb` 曾在这里，但那份 notebook 从未入库 ⇒ 断言只能对着
-    一个不存在的路径报 FileNotFoundError，见 `ROLLOUT_DISKS` 上面的说明。）
+    （采样节点 `rollout.cloudflared.ipynb` 曾因未入库被移出本列表；2026-10-01 notebook 入库后
+    已加回，见 `ROLLOUT_DISKS` 上面的说明。）
     """
     missing = [n for n in ROLLOUT_DISKS if not any(m in _cell_source(n) for m in INSTALL_MARKERS)]
     assert missing == [], (

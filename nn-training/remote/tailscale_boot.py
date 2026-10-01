@@ -413,9 +413,11 @@ def platform_net_env() -> Iterator[None]:
 # 谁才需要 bun：**自己跑 rollout 的那些链** —— `battle.offline.ipynb`（Kaggle/TPU，连不了 tailnet，
 # 只能走 cloudflared 隧道进 hub）；它的 cell 里装着 bun，与在线 worker 的引导链无关
 # （`tests/test_tailscale_boot_bun.py` 钉住这三条边界）。
-# ⚠ 采样节点 `rollout.cloudflared.ipynb` 也在旧口径里被点名过，但**那份 notebook 从来没入库**
-# （本仓、`origin/goal-nn`、合并基三者都没有）⇒ 任何断言/指路都只能对着一个不存在的路径，
-# 已在并入时按实况收口（见 `DECISIONS.md` 的合并条目）。
+# ⚠ 采样节点 `rollout.cloudflared.ipynb` 在旧口径里被点名过，但并入时**那份 notebook 不在本仓**
+# （本仓、`origin/goal-nn`、合并基三者都没有）⇒ 断言/指路只能对着一个不存在的路径，故按实况
+# 收口（只留真实存在的盘）。2026-10-01 notebook 已入库，名字已加回
+# `tests/test_tailscale_boot_bun.py` 的 `ROLLOUT_DISKS`（见 `DECISIONS.md`
+# §2026-09-25-goalnn-online-worker-no-bun）。
 #
 # 后果（若有课程显式选 `rollout_src=node`「整轮上云」）：在线 worker 盘会被零下载拒单
 # （`resolve_bun` 响亮报 `REJECTED: 节点上找不到 'bun'`）—— 这是**正确**的：要跑 rollout 就该用
