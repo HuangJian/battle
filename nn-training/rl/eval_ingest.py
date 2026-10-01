@@ -46,7 +46,12 @@ def m1_game_row(
     policy: str,
     node: str = "m1",
 ) -> dict:
-    """m1-eval perGame 条目 → eval_log.jsonl 行（event=eval，键与 record() 对齐）。"""
+    """m1-eval perGame 条目 → eval_log.jsonl 行（event=eval，键与 record() 对齐）。
+
+    ⚠ 本通道**不接** v9 命中方位/v10 差距列/aim-dodge 8 列（plan/aim-dodge-levers
+    §6.2-9 显式裁决）：m1 perGame 快照没有这些键，硬接会写出伪值（0 是合法读数 ⇒
+    静默错读）。需要这些列请走 `eval_rows.eval_row` / `batch_runner` 通道。
+    """
     win = bool(g.get("win"))
     return {
         "event": "eval",

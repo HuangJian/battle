@@ -289,8 +289,12 @@ export type GameEvent =
   | { type: 'powerup_collected'; powerUp: PowerUpType; by: 'player' }
   | { type: 'base_destroyed'; by: TankKind }
   | { type: 'stage_clear'; stage: number }
-  | { type: 'player_hit' }
-  | { type: 'player_damage'; damage: number }
+  /** 玩家被击中（致死命中，或 3★ 星盾消耗——两者都由本事件记一笔）。
+   *  `bulletId` = additive 只读观测（携带者弹 id，2026-10-01 aim-dodge-levers
+   *  `hurtWeight` 归因键）；非弹源（炸弹/地雷）不填。 */
+  | { type: 'player_hit'; bulletId?: number }
+  /** 玩家被击伤（非致死；致死已由 `player_hit` 覆盖）。`bulletId` 同 `player_hit`。 */
+  | { type: 'player_damage'; damage: number; bulletId?: number }
   | {
       type: 'enemy_hit'
       damage: number
@@ -321,6 +325,19 @@ export type GameEvent =
       col: number
       row: number
       by: TankKind
+      /** 拆除弹 id（additive **只读观测**，2026-10-01 aim-dodge-levers
+       *  `aimBricks` 归因）。⚠ 同一颗弹同一 tick 可推**多条**（`bulletHitsTerrain`
+       *  的 2×2 扫射不 break）⇒ 消费侧必须**按弹去重**（settle-once）；
+       *  多条事件都带同一 bulletId。非弹源不填。 */
+      bulletId?: number
+    }
+  | {
+      type: 'bullet_cancelled'
+      /** 参与对消的两颗弹 id（顺序 = 处理顺序：a = 当前被处理的弹，b = 对侧弹）。
+       *  additive 只读观测（2026-10-01 aim-dodge-levers：`aimIgnited` 的唯一归因口；
+       *  替代旧几何近似）。 */
+      aId: number
+      bId: number
     }
 
 // ============================================================

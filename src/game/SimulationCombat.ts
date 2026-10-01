@@ -473,14 +473,26 @@ export class CombatSystem {
           const type = row && c >= 0 && c < GRID ? row[c] : 'steel'
           if (type === 'brick') {
             w.tileMap.destroy(c, r)
-            w.pushEvent({ type: 'terrain_destroyed', col: c, row: r, by: bullet.ownerKind })
+            w.pushEvent({
+              type: 'terrain_destroyed',
+              col: c,
+              row: r,
+              by: bullet.ownerKind,
+              bulletId: bullet.id,
+            })
             this.d.effects.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
             return true
           }
           if (type === 'steel') {
             if (bullet.power >= 2) {
               w.tileMap.destroy(c, r)
-              w.pushEvent({ type: 'terrain_destroyed', col: c, row: r, by: bullet.ownerKind })
+              w.pushEvent({
+                type: 'terrain_destroyed',
+                col: c,
+                row: r,
+                by: bullet.ownerKind,
+                bulletId: bullet.id,
+              })
               this.d.effects.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
             } else {
               this.d.effects.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
@@ -508,13 +520,25 @@ export class CombatSystem {
           return true
         } else if (type === 'brick') {
           w.tileMap.destroy(c, r)
-          w.pushEvent({ type: 'terrain_destroyed', col: c, row: r, by: bullet.ownerKind })
+          w.pushEvent({
+            type: 'terrain_destroyed',
+            col: c,
+            row: r,
+            by: bullet.ownerKind,
+            bulletId: bullet.id,
+          })
           hit = true
           this.d.effects.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
         } else if (type === 'steel') {
           if (bullet.power >= 2) {
             w.tileMap.destroy(c, r)
-            w.pushEvent({ type: 'terrain_destroyed', col: c, row: r, by: bullet.ownerKind })
+            w.pushEvent({
+              type: 'terrain_destroyed',
+              col: c,
+              row: r,
+              by: bullet.ownerKind,
+              bulletId: bullet.id,
+            })
             this.d.effects.createExplosion(c * CELL + CELL / 2, r * CELL + CELL / 2, 'small')
           } else {
             // Ricochet effect on steel — small spark explosion even when not destroyed
@@ -605,7 +629,11 @@ export class CombatSystem {
       // 致死命（hp ≤ 0）与星盾消耗（shield 分支）不推——致死已由 player_hit 覆盖，
       // 星盾 HP 回满净失血=0。口径 = bullet.damage（非致命时 = 实际失血）。
       if (tank.hp > 0 && tank.isPlayer) {
-        this.d.world.pushEvent({ type: 'player_damage', damage: bullet.damage })
+        this.d.world.pushEvent({
+          type: 'player_damage',
+          damage: bullet.damage,
+          bulletId: bullet.id,
+        })
       }
       // 玩家子弹命中敌方（含致死命中，命中即有意义）。
       // 击杀那一枪同时推 enemy_hit（+wHit 命中）与 tank_destroyed（+wKill 击杀）——
@@ -638,7 +666,7 @@ export class CombatSystem {
         // drops back to 2★, keeping its life. 0..2★ players die on a lethal hit
         // (classic 一击毙命; pool-model players still burn their whole HP buffer).
         if (tank.isPlayer && (tank.level ?? 0) >= PLAYER_PROGRESSION.maximumLevel) {
-          this.spendStarShield(tank)
+          this.spendStarShield(tank, bullet)
           return true
         }
         this.killTank(bullet, tank)
@@ -664,7 +692,7 @@ export class CombatSystem {
 
     if (tank.isPlayer) {
       w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy', byId: bullet.ownerId })
-      w.pushEvent({ type: 'player_hit' })
+      w.pushEvent({ type: 'player_hit', bulletId: bullet.id })
     } else if (tank.allegiance === 'ally') {
       // Allied guard destroyed — no score, no kill credit, no drops. The
       // guard simply stops fighting (§31 Phase 2).
@@ -768,8 +796,12 @@ export class CombatSystem {
    * unboundedly) a 4★+ player therefore loses more than one star in a single
    * spend, but the shield can NEVER chain (a demoted player is below the
    * threshold), preserving the classic single-spend privilege.
+   *
+   * `bullet`（2026-10-01 aim-dodge-levers）：星盾消耗也是一次「被击中」，
+   * `player_hit.bulletId` 需要携带者归因（`hurtWeight` 结算）——旧签名拿不到弹，
+   * 星盾承伤会静默漏记（仅此一处调用点）。
    */
-  private spendStarShield(tank: Tank): void {
+  private spendStarShield(tank: Tank, bullet: Bullet): void {
     const w = this.d.world
     const newLevel = PLAYER_PROGRESSION.maximumLevel - 1 // 3★ → 2★
     tank.level = newLevel
@@ -795,7 +827,7 @@ export class CombatSystem {
     // Brief grace: the shield was just spent, so a same-volley bullet can't
     // immediately re-kill the demoted 2★ player.
     tank.shieldTimer = STAR_SHIELD_GRACE_MS
-    w.pushEvent({ type: 'player_hit' })
+    w.pushEvent({ type: 'player_hit', bulletId: bullet.id })
   }
 
   private bulletHitsBullet(bullet: Bullet): boolean {
@@ -809,6 +841,8 @@ export class CombatSystem {
       const otherEnemy = other.allegiance === 'enemy'
       if (bulletEnemy === otherEnemy) continue
       if (aabb(bullet.x, bullet.y, bullet.w, bullet.h, other.x, other.y, other.w, other.h)) {
+        // additive 只读观测（aim-dodge-levers `aimIgnited` 归因口）；不进 gameplay。
+        w.pushEvent({ type: 'bullet_cancelled', aId: bullet.id, bId: other.id })
         other.alive = false
         w._needsCleanup = true
         this.d.effects.createExplosion((bullet.x + other.x) / 2, (bullet.y + other.y) / 2, 'small')

@@ -741,6 +741,26 @@ def test_item_metrics_layout_locked() -> None:
         "onLaneExemptTicks",  # idx51（v9：raw 的冻/盾子集，加法列）
         "onLaneMoveTicks",  # idx52（v9：在线且中心格变化）
         "onLaneHoldFireTicks",  # idx53（v9：在线且静止且开火输出）
+        "stopTicks",  # idx54（v10：本 tick 无移动输出的累计；动作头 idx0 = STOP）
+        "fireHeldTicks",  # idx55（v10：本 tick 开火输出为真；非 playerShots 实弹）
+        "idleTicks",  # idx56（v10：player.moving === false 的累计）
+        "enemyDist",  # idx57（v10：最近已激活敌车距 px，每行采样；哨兵 -1）
+        "nearEnemy4Ticks",  # idx58（v10：最近敌距 ≤ 4 格（64px）的 tick）
+        "damageBursts",  # idx59（v10：相邻扣血 ≤120t 的次数；单调增）
+        "maxDamage120",  # idx60（v10：120t 滑窗最大承伤；单调增）
+        "damageWhileLow",  # idx61（v10：低血期承伤；份额分母 = playerDamageTaken）
+        "encl1Ticks",  # idx62（v10：同拍同行/同列敌车 = 1；谓词 alignedEnemyCount）
+        "encl2Ticks",  # idx63（v10：= 2）
+        "encl3pTicks",  # idx64（v10：≥ 3）
+        "enclMax",  # idx65（v10：同拍包围敌数峰值；aim-dodge 批次内顺位自 68）
+        "aimHits",  # idx66（aim-dodge：玩家弹命中，含致死；回写列）
+        "aimHitDistSum",  # idx67（aim-dodge：命中拍切比雪夫格距 Σd）
+        "aimBricks",  # idx68（aim-dodge：真拆砖/破钢；一弹多格只落一次）
+        "aimIgnited",  # idx69（aim-dodge：弹弹对消；只观测）
+        "aimMisses",  # idx70（aim-dodge：未命中一律 miss，含局末在飞；≡ hit 镜像）
+        "hurtWeight",  # idx71（aim-dodge：敌弹火线承伤 Σmax(0,6−x)，拌入豁免 A；回写列）
+        "enclWeightTicks",  # idx72（aim-dodge：n≥2 ⇒ Σmax(0,5−d)，拌入豁免 A）
+        "cornerWeightTicks",  # idx73（aim-dodge：四角锚点 Σmax(0,4−d)，拌入豁免 A）
     ]
     assert METRIC_INDEX["puGotBomb"] == 25
     assert METRIC_INDEX["puSpawnShield"] == 24
@@ -756,6 +776,10 @@ def test_item_metrics_layout_locked() -> None:
     assert METRIC_INDEX["dangerTicks"] == 42
     assert METRIC_INDEX["threatTicks"] == 43
     assert METRIC_INDEX["dmgFirst600"] == 44
+    assert METRIC_INDEX["enclMax"] == 65
+    assert METRIC_INDEX["aimHits"] == 66
+    assert METRIC_INDEX["aimHitDistSum"] == 67
+    assert METRIC_INDEX["cornerWeightTicks"] == 73
 
 
 def test_item_metrics_formula_and_envelope() -> None:
@@ -868,7 +892,8 @@ def test_credit_p6_formula_and_course() -> None:
     rep = _vr(c.reward_spec())
     assert rep.ok, rep.errors
     assert rep.warnings == (), rep.warnings
-    assert METRICS_VERSION == 9
+    # v10（plan/metrics-v10-gap-columns §1）：列宽 69、版本 10。
+    assert METRICS_VERSION == 10
 
     # 公式按列加权：杀 1 basic 再杀 1 power 的两步势差 = +3 / +6（wHit/wWin 本例为 0）
     spec = RewardSpec(

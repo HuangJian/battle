@@ -79,6 +79,27 @@ export interface EvalCourseRow {
   onLaneExemptTicks?: number
   onLaneMoveTicks?: number
   onLaneHoldFireTicks?: number
+  /** metrics v10 差距四族（可选：远端/旧 bundle 的行没有这些字段，汇总侧按 0 计）。
+   *  与 rollout metrics 行同名同义（同一实现 `src/nn/danger-metrics.ts`）。 */
+  stopTicks?: number
+  fireHeldTicks?: number
+  nearEnemy4Ticks?: number
+  damageBursts?: number
+  maxDamage120?: number
+  damageWhileLow?: number
+  encl1Ticks?: number
+  encl2Ticks?: number
+  encl3pTicks?: number
+  enclMax?: number
+  /** aim-dodge-levers 8 列（可选：旧 bundle 的行缺席按 0 计）。 */
+  aimHits?: number
+  aimHitDistSum?: number
+  aimBricks?: number
+  aimIgnited?: number
+  aimMisses?: number
+  hurtWeight?: number
+  enclWeightTicks?: number
+  cornerWeightTicks?: number
   /** Phase 0 逐敌种画像（T3）：索引 = ENEMY_KIND_ORDER = [basic, fast, power, armor]。
    *  `exposureByKind` = 存活×接战 tick 积分（④ 的归一化分母）。 */
   hitsByKind: number[]
@@ -157,6 +178,24 @@ self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
         onLaneExemptTicks: res.onLaneExemptTicks,
         onLaneMoveTicks: res.onLaneMoveTicks,
         onLaneHoldFireTicks: res.onLaneHoldFireTicks,
+        stopTicks: res.stopTicks,
+        fireHeldTicks: res.fireHeldTicks,
+        nearEnemy4Ticks: res.nearEnemy4Ticks,
+        damageBursts: res.damageBursts,
+        maxDamage120: res.maxDamage120,
+        damageWhileLow: res.damageWhileLow,
+        encl1Ticks: res.encl1Ticks,
+        encl2Ticks: res.encl2Ticks,
+        encl3pTicks: res.encl3pTicks,
+        enclMax: res.enclMax,
+        aimHits: res.aimHits,
+        aimHitDistSum: res.aimHitDistSum,
+        aimBricks: res.aimBricks,
+        aimIgnited: res.aimIgnited,
+        aimMisses: res.aimMisses,
+        hurtWeight: res.hurtWeight,
+        enclWeightTicks: res.enclWeightTicks,
+        cornerWeightTicks: res.cornerWeightTicks,
         hitsByKind: res.hitsByKind,
         killsByKind: res.killsByKind,
         exposureByKind: res.exposureByKind,

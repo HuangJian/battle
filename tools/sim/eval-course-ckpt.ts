@@ -270,6 +270,27 @@ interface LabelAgg {
   onLaneExemptTicks: number
   onLaneMoveTicks: number
   onLaneHoldFireTicks: number
+  /** metrics v10 差距四族 15 列的逐 label 求和（可选字段；旧行缺席按 0 计）。 */
+  stopTicks: number
+  fireHeldTicks: number
+  idleTicks: number
+  nearEnemy4Ticks: number
+  damageBursts: number
+  maxDamage120: number
+  damageWhileLow: number
+  encl1Ticks: number
+  encl2Ticks: number
+  encl3pTicks: number
+  enclMax: number
+  /** aim-dodge-levers 8 列的逐 label 求和（可选字段；旧行缺席按 0 计）。 */
+  aimHits: number
+  aimHitDistSum: number
+  aimBricks: number
+  aimIgnited: number
+  aimMisses: number
+  hurtWeight: number
+  enclWeightTicks: number
+  cornerWeightTicks: number
   /** 有 `dmgFirst600` 字段的局数（clean600 的分母）。 */
   dmg600Known: number
   /** `dmgFirst600 === 0` 的局数（「前 600 tick 零承伤」，plan §1 T2）。 */
@@ -313,6 +334,25 @@ function summarize(
         onLaneExemptTicks: 0,
         onLaneMoveTicks: 0,
         onLaneHoldFireTicks: 0,
+        stopTicks: 0,
+        fireHeldTicks: 0,
+        idleTicks: 0,
+        nearEnemy4Ticks: 0,
+        damageBursts: 0,
+        maxDamage120: 0,
+        damageWhileLow: 0,
+        encl1Ticks: 0,
+        encl2Ticks: 0,
+        encl3pTicks: 0,
+        enclMax: 0,
+        aimHits: 0,
+        aimHitDistSum: 0,
+        aimBricks: 0,
+        aimIgnited: 0,
+        aimMisses: 0,
+        hurtWeight: 0,
+        enclWeightTicks: 0,
+        cornerWeightTicks: 0,
         dmg600Known: 0,
         clean600: 0,
       }
@@ -341,6 +381,27 @@ function summarize(
     a.onLaneExemptTicks += r.onLaneExemptTicks ?? 0
     a.onLaneMoveTicks += r.onLaneMoveTicks ?? 0
     a.onLaneHoldFireTicks += r.onLaneHoldFireTicks ?? 0
+    // metrics v10（可选字段，与 v9 同约：旧行缺席按 0 计）。
+    a.stopTicks += r.stopTicks ?? 0
+    a.fireHeldTicks += r.fireHeldTicks ?? 0
+    a.idleTicks += r.idleTicks ?? 0
+    a.nearEnemy4Ticks += r.nearEnemy4Ticks ?? 0
+    a.damageBursts += r.damageBursts ?? 0
+    a.maxDamage120 += r.maxDamage120 ?? 0
+    a.damageWhileLow += r.damageWhileLow ?? 0
+    a.encl1Ticks += r.encl1Ticks ?? 0
+    a.encl2Ticks += r.encl2Ticks ?? 0
+    a.encl3pTicks += r.encl3pTicks ?? 0
+    a.enclMax += r.enclMax ?? 0
+    // aim-dodge-levers（可选字段，与 v10 同约：旧行缺席按 0 计）。
+    a.aimHits += r.aimHits ?? 0
+    a.aimHitDistSum += r.aimHitDistSum ?? 0
+    a.aimBricks += r.aimBricks ?? 0
+    a.aimIgnited += r.aimIgnited ?? 0
+    a.aimMisses += r.aimMisses ?? 0
+    a.hurtWeight += r.hurtWeight ?? 0
+    a.enclWeightTicks += r.enclWeightTicks ?? 0
+    a.cornerWeightTicks += r.cornerWeightTicks ?? 0
     if (r.dmgFirst600 !== undefined) {
       a.dmg600Known++
       if (r.dmgFirst600 === 0) a.clean600++
@@ -381,6 +442,23 @@ function summarize(
         ` geofb ${(a.geoFallback / per).toFixed(2)} | onLane ${(a.onLaneTicks / per).toFixed(1)}` +
         ` exempt ${(a.onLaneExemptTicks / per).toFixed(1)} move ${(a.onLaneMoveTicks / per).toFixed(1)}` +
         ` holdFire ${(a.onLaneHoldFireTicks / per).toFixed(2)}\n`,
+    )
+    // metrics v10（plan/metrics-v10-gap-columns.plan.md §1）：差距四族逐局均值。
+    // 输入级 3 列 + 距离 + 伤害成簇 3 列 + 被包围族 7 列；包围族带豁免对照组（净价先看差）。
+    process.stderr.write(
+      `${''.padEnd(28)}   ↳ v10 stop ${(a.stopTicks / per).toFixed(1)} idle ${(a.idleTicks / per).toFixed(1)}` +
+        ` fireHeld ${(a.fireHeldTicks / per).toFixed(1)} near4 ${(a.nearEnemy4Ticks / per).toFixed(1)}` +
+        ` bursts ${(a.damageBursts / per).toFixed(2)} max120 ${(a.maxDamage120 / per).toFixed(1)}` +
+        ` dmgLow ${(a.damageWhileLow / per).toFixed(1)} |` +
+        ` encl ${(a.encl1Ticks / per).toFixed(1)}/${(a.encl2Ticks / per).toFixed(1)}/${(a.encl3pTicks / per).toFixed(1)}` +
+        ` max ${(a.enclMax / per).toFixed(2)}\n`,
+    )
+    // aim-dodge-levers（plan/aim-dodge-levers.plan.md §4）：开火结果族 + 承伤/暴露杠杆逐局均值。
+    process.stderr.write(
+      `${''.padEnd(28)}   ↳ ad  hits ${(a.aimHits / per).toFixed(2)} dist ${(a.aimHitDistSum / per).toFixed(2)}` +
+        ` brick ${(a.aimBricks / per).toFixed(2)} ign ${(a.aimIgnited / per).toFixed(2)} miss ${(a.aimMisses / per).toFixed(2)}` +
+        ` | hurt ${(a.hurtWeight / per).toFixed(2)} enclW ${(a.enclWeightTicks / per).toFixed(1)}` +
+        ` cornerW ${(a.cornerWeightTicks / per).toFixed(1)}\n`,
     )
   }
   // 参与度账（provenance）：**谁跑的必须自证**。只打汇总表会让“熔断/满负荷静默降本地”

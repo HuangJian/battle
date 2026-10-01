@@ -53,6 +53,7 @@ from rl.eval_local import (
     eval_loot_fields,
     eval_v8_fields,
     eval_v9_fields,
+    eval_v10_fields,
     run_local_eval_game,
 )
 from rl.eval_yield import EVAL_LOCAL_SLOTS_DEFAULT
@@ -847,6 +848,8 @@ class _UnitLanes:
             **eval_v8_fields(manifest),
             # metrics v9 命中方位 + 穿越税观测族（与 eval_row 同源，见 eval_v9_fields）。
             **eval_v9_fields(manifest),
+            # metrics v10 差距四族（与 eval_row 同源，见 eval_v10_fields）。
+            **eval_v10_fields(manifest),
             # 新纪元死刑通道（plan §2 #9/P1-2 方案 a）：裸透传；旧报告缺键 = None，
             # 读数方按无信号处理（与 EvalCourseRow 可选字段同约）。
             "moveHist": manifest.get("moveHist"),

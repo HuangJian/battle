@@ -115,6 +115,32 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 - 「多敌关是否需要真正的朝向信号」尚未验证 —— `docs/nn/experiments.md` §11
 - EVAL_SEEDS 扩池 / 正式门口径 / dashboard 必改 —— `docs/nn/training-stack.md` §8
 - 控制台开课回执（起点-基线对照行的 dashboard 侧）—— `docs/nn/training-stack.md` §24
+- 人类 c20 语料补录（`x20-fill`，到 30 + 到 40 两档）**已收官（2026-09-30）**：pack 99 局 kit 全过（0 error /
+  0 warn，校准局 pass）→ 追加 98 席（跳过复打校准局）＋ 补回历史漏导的 2002/414038 ⇒ `human-x20-corpus`
+  **160 shards / 101153 决策步 / 分关 40×4**（`demo_bank.npz` 未重建）；③ 同口径复算脚本 = `tmp/human-lane-census.ts`
+  （老 61 局逐局 0 失配）⇒ 主基线 FILL n=98：**R 8.851% / R₁₂₀₀ 4.146%** —— `docs/nn/experiments.md` §68 ①③⑦
+- **Wave 2（b 腿）剂量轴已到顶**：7.5% 未过绿线（−10.60%）、15% 判零效应 ⇒ 下一步是**换塑形杠杆**。
+  选型已出（2026-09-30）：**停轴退场**（H 系列已实付、全链阴性）；唯一新价候选 = 伤害「时间形态」
+  （先补列再定价）；lane 第三档 / 危险税 / 卡死税 / 固定开局窗**退场** ——
+  `docs/nn/experiments.md` §70 · 决策 `DECISIONS.md` §2026-09-30-goalnn-lever-scan
+- **metrics v10 已落地**（差距四族 15 列，`idx54–68`；只加观测、零公式、零训练腿）——「伤害时间形态」
+  定价所需的列已备好（`damageBursts`/`maxDamage120`/`damageWhileLow`）—— `docs/nn/experiments.md` §72 ·
+  工程侧 `docs/nn/engineering.md` §43 · 决策 `DECISIONS.md` §2026-09-30-goalnn-metrics-v10
+- **伤害「时间形态」立项后 E0 判红 ⇒ 家族退场**（不再有「唯一新价候选」）：三形状全不过预注册 K 表；
+  机制 = 低血段承伤天花板是剩余 hp（105）+ 致死一击不在 `player_damage` 口径 ⇒ 该列量的是「**跨线**」
+  而非「跨线后继续挨打」（中位 0 决策步、π_new 0.10）⇒ 语义退化为总量税的尾部加权。
+  开腿前先跑这个 E0 的做法本身是收获 —— `docs/nn/experiments.md` §73 · 预注册 `plan/damage-time-form.plan.md` §5 ·
+  决策 `DECISIONS.md` §2026-09-30-goalnn-damage-form-retired
+- **`kickstart_burn` 的 `paired` 口径在同网格多臂课上会静默回退 `baseline`**（三臂共享 `paired_rotate_seed`
+  ⇒ 对端不唯一）⇒ 需要「显式指定对端」的机制，否则新止损在 Wave 2/b 腿这类课上**形同未装** ——
+  `docs/nn/experiments.md` §69 ⑧
+- **aim-dodge 杠杆 8 列已落地**（`idx66–73`，dim 74；v10 批次内移除 `enclExempt*` 三列；事件扩展 +
+  settle-once registry + 回写机制；零训练腿）⇒ E1–E4 仍待在控制台开课 —— 工程侧
+  `docs/nn/engineering.md` §44 · 自标定接口 `docs/nn/threat-lane-reward.md` §12 ·
+  决策 `DECISIONS.md` §2026-10-01-goalnn-aim-dodge-metrics · 规格 `plan/aim-dodge-levers.plan.md` §11
+- **E2 前置门已跑**（离线 Pearson，b0 探针 160 局）：r(hurtWeight, playerDamageTaken) = 0.533 < 0.8
+  ⇒ 不替换 `wDmg`；hurtW/hurtN ≈ 常数（28.97 / CV 0.474）⇒ E2 记档按剂量而非机制 ——
+  `docs/nn/engineering.md` §44 验证节
 
 ---
 

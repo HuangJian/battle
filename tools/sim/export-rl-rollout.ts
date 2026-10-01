@@ -78,10 +78,19 @@ import { dodgeL0 } from '../../src/nn/dodge-l0'
 import {
   DANGER_HP_THRESHOLD,
   DMG_FIRST_WINDOW_TICKS,
+  NEAR_ENEMY_BAND_PX,
+  alignedEnemyCount,
+  cornerWeightTick,
+  damageClusterStats,
+  enclWeightTick,
+  enemyBulletLaneWeightTick,
+  exposureExempt,
   inThreatLane,
+  nearestEnemyDistPx,
   playerHpRatio,
   threatLaneExempt,
 } from '../../src/nn/danger-metrics'
+import { createShieldWindow } from '../../src/nn/shield-window'
 import {
   HIT_BACK,
   HIT_FAR,
@@ -92,6 +101,13 @@ import {
   keyCol,
   keyRow,
 } from '../../src/nn/hit-geometry'
+import {
+  registerEnemyAimShot,
+  registerPlayerAimShot,
+  takeAimShot,
+  type AimShotRec,
+  type AimShotTable,
+} from './aim-shot-registry'
 import { GodAIInput, DEFAULT_GOD_AI_PARAMS } from '../../src/ai/GodAIInput'
 import { RNG } from '../../src/utils/RNG'
 import { npyBytes } from '../../src/nn/npy'
@@ -185,12 +201,129 @@ export const RL_SHARD_FILES = [
 //   （在线且本 tick 中心格变化）· onLaneHoldFireTicks（在线且静止且本 tick 开火输出）。
 //   公式侧净价 = `-w*d(onLaneTicks) + w*d(onLaneExemptTicks)`；四个都是累计 tick
 //   计数器（Φ 逐行差分 ⇒ 直接入公式 = 每 tick 罚款且 Φ 无界，须封顶或改深度型势）。
+// idx54–68=「差距四族」15 列（metrics v10，plan/metrics-v10-gap-columns.plan.md §1）：
+//   54 stopTicks（本 tick **无移动输出**的累计；动作头 idx0 = STOP；评估侧同义 `getMoveDirection() === null`）·
+//   55 fireHeldTicks（本 tick **开火输出为真**的累计；= `fireHeld` 的 tick 累计，不是实弹）·
+//   56 idleTicks（累计 `player.moving === false`；想动被挡也计，与 export-eval-game 既有 `idleTicks` 同义）·
+//   57 enemyDist（**每行采样**：最近存活**已激活**敌车中心距（px）；无车/玩家不在场 = 哨兵 -1）·
+//   58 nearEnemy4Ticks（累计最近敌距 ≤ `NEAR_ENEMY_BAND_PX`
+//      （4 格 = 64px，pin 值）的 tick）·
+//   59 damageBursts（相邻两笔扣血间隔 ≤ 120t 的次数；`damageClusterStats`）·
+//   60 maxDamage120（任意以某笔为起点的 120t 滑窗内最大累积承伤；同上，单调）·
+//   61 damageWhileLow（扣血那一刻 `playerHpRatio < 0.4` 的那部分伤害累计；
+//      份额 = 本列 ÷ playerDamageTaken，离线可算）·
+//   62–64 encl1Ticks/encl2Ticks/encl3pTicks（同拍与玩家**同行/同列**的敌车数
+//      = 1 / = 2 / ≥ 3 的 tick 累计；谓词 = `src/nn/danger-metrics.ts::alignedEnemyCount`，
+//      19px 物理带 + 轴无遮挡 + 已激活；互斥划分）·
+//   65 enclMax（本局同拍包围敌数**峰值**；每行同值，单调不减；v10 批次内顺位自 idx68）。
+// v10 批次内整理（未签入，允许）：移除 enclExempt1/2/3pTicks 三列；enclMax 顺位 68→65。
+// idx66–73 ＝ aim-dodge-levers 8 列（plan/aim-dodge-levers.plan.md §4；v10 批次内追加）：
+//   66 aimHits（玩家弹命中，含致死；开火结果族；**回写列**——信用落开火决策步）·
+//   67 aimHitDistSum（Σ 命中距离（格）：开火拍玩家中心格 → 命中拍受害车中心格切比雪夫）·
+//   68 aimBricks（真拆砖/破钢；`terrain_destroyed.bulletId`；一弹多格只落一次）·
+//   69 aimIgnited（弹弹对消，`bullet_cancelled`；只观测）·
+//   70 aimMisses（打钢未破/出界/基地/局末在飞；≡ hit 镜像，勿同腿）·
+//   71 hurtWeight（敌弹火线承伤 Σ(6−x)，x≤5；结算于 player_damage/player_hit；**回写列**）·
+//   72 enclWeightTicks（n≥2 ⇒ Σ max(0,5−d)；**拌入**豁免 A）·
+//   73 cornerWeightTicks（四角锚点 Σ max(0,4−d)；**拌入**豁免 A）。
+//   恒等式：playerShots = aimHits+aimBricks+aimIgnited+aimMisses（局末在飞归 miss）。
+//   量纲：54–56/58/62–64/72–73 是累计 tick 计数器（Φ 逐行差分 ⇒ 直接入公式 = 每 tick
+//   罚款且 Φ 无界）；59/60/65 单调增（差分 ≥ 0）；57 带 -1 哨兵，公式侧必须 `where` 归零；
+//   66–71 是**回写列**（开火拍信用；不得当逐窗口速率用）。
 // **本常量必须与 `buildMetricsRow` 的行宽一致** —— 2026-09-12 的 P0：只改了行、没改
 // 这里，`metrics.set(row, i * METRICS_DIM)` 每局越界抛 RangeError，整条采集腿零产出。
 // 导出仅供测试断言行宽（tests/export-rl-rollout-metrics.test.ts）。
-export const METRICS_DIM = 54
-/** metrics v9：命中方位 5 列 + 穿越税 4 列（idx45–53）。与 Python METRICS_VERSION 同步。 */
-export const METRICS_VERSION = 9
+export const METRICS_DIM = 74
+/** metrics v10：差距四族 15 列 + aim-dodge 批次 8 列（idx54–73）。与 Python METRICS_VERSION 同步。 */
+export const METRICS_VERSION = 10
+/**
+ * 列名（顺序 = `buildMetricsRow` 的实现顺序，SSOT）。Python `reward_library.METRICS`
+ * 必须与本数组**逐位相等**（跨语言列序 oracle，sb P2-D；tests/export-rl-rollout-metrics.test.ts）。
+ * 只做顺序/命名的对账 —— 数值语义仍以 `buildMetricsRow` 为准。
+ */
+/**
+ * ⚠ **raw-only 名单**（plan/aim-dodge-levers.plan.md §3.6，**仅审计，不得定价**）：
+ * `encl1Ticks`/`encl2Ticks`/`encl3pTicks`、`nearEnemy4Ticks`、`onLaneMoveTicks`、
+ * `onLaneHoldFireTicks` —— 它们是未豁免的 raw 累计（含冻/盾拍），与拌入列
+ * （`enclWeightTicks`/`cornerWeightTicks`/`hurtWeight`，豁免 A）**不得直接对照**；
+ * 定价请用拌入列。v9 已签入列的 raw/豁免对（`onLaneTicks`/`onLaneExemptTicks`）不受影响。
+ */
+export const METRICS_COLUMN_NAMES: readonly string[] = [
+  'ticks',
+  'kills',
+  'lives',
+  'playerHits',
+  'playerDamageTaken',
+  'playerShots',
+  'enemyHits',
+  'powerUpsCollected',
+  'powerUpsSpawned',
+  'stuckTicks',
+  'starsCollected',
+  'baseAlive',
+  'baseWallTotal',
+  'baseWallIntact',
+  'basePressureSum',
+  'basePressureSamples',
+  'firstKillTick',
+  'playerDeaths',
+  'cellsVisited',
+  'playerLevel',
+  'enemyTotal',
+  'puSpawnBomb',
+  'puSpawnTank',
+  'puSpawnFreeze',
+  'puSpawnShield',
+  'puGotBomb',
+  'puGotTank',
+  'puGotFreeze',
+  'puGotShield',
+  'puSpawnStar',
+  'clearTick',
+  'killsBasic',
+  'killsFast',
+  'killsPower',
+  'killsArmor',
+  'hitsBasic',
+  'hitsFast',
+  'hitsPower',
+  'hitsArmor',
+  'puGotOther',
+  'pickupDist',
+  'playerHpRatio',
+  'dangerTicks',
+  'threatTicks',
+  'dmgFirst600',
+  'backHits',
+  'sideHits',
+  'frontHitsExempt',
+  'farHits',
+  'geoFallback',
+  'onLaneTicks',
+  'onLaneExemptTicks',
+  'onLaneMoveTicks',
+  'onLaneHoldFireTicks',
+  'stopTicks',
+  'fireHeldTicks',
+  'idleTicks',
+  'enemyDist',
+  'nearEnemy4Ticks',
+  'damageBursts',
+  'maxDamage120',
+  'damageWhileLow',
+  'encl1Ticks',
+  'encl2Ticks',
+  'encl3pTicks',
+  'enclMax',
+  'aimHits',
+  'aimHitDistSum',
+  'aimBricks',
+  'aimIgnited',
+  'aimMisses',
+  'hurtWeight',
+  'enclWeightTicks',
+  'cornerWeightTicks',
+]
 /**
  * pickupDist 哨兵：无存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
  * 的 -1 哨兵同构。真实曼哈顿距离恒 ≥0（同格 = 0），-1 不可能与真实值混淆。
@@ -366,6 +499,44 @@ export interface Telemetry {
   onLaneMoveTicks: number
   /** 在线 ∧ 静止 ∧ 本 tick 开火输出（架枪直读，反证门用）。 */
   onLaneHoldFireTicks: number
+  // ---- metrics v10：差距四族（plan/metrics-v10-gap-columns.plan.md §1）----
+  /** 累计「本 tick 无移动输出」（动作头 idx0 = STOP，held 到下一决策步）。 */
+  stopTicks: number
+  /** 累计「本 tick 开火输出为真」（fire head held；非 `bullet_fired` 实弹）。 */
+  fireHeldTicks: number
+  /** 累计 `player.moving === false`（想动被地形挡也计）。 */
+  idleTicks: number
+  /** 累计「最近敌距 ≤ `NEAR_ENEMY_BAND_PX`」的 tick（玩家存活 ∧ 有已激活敌车）。 */
+  nearEnemy4Ticks: number
+  /** 扣血那一刻 `playerHpRatio < DANGER_HP_THRESHOLD` 的伤害累计（份额分母 = playerDamageTaken）。 */
+  damageWhileLow: number
+  /** 扣血事件 tick（升序，事件属 t-1；`damageClusterStats` 用它算 bursts/max120）。 */
+  damageTicks: number[]
+  /** 扣血事件伤害量（与 `damageTicks` 同长同序）。 */
+  damageAmounts: number[]
+  /** 同拍包围敌车数 = 1 / = 2 / ≥ 3 的 tick 累计（互斥划分）。 */
+  encl1Ticks: number
+  encl2Ticks: number
+  encl3pTicks: number
+  /** 本局同拍包围敌数峰值（每行同值，单调不减；v10 批次内顺位 idx65）。 */
+  enclMax: number
+  // ---- aim-dodge-levers：开火结果族 + 承伤族 + 暴露杠杆（plan/aim-dodge-levers.plan.md §4）----
+  /** 玩家弹命中（含致死）；**回写列**（信用落开火决策步）。恒等式左端 = playerShots。 */
+  aimHits: number
+  /** Σ 命中距离（格；开火拍玩家中心格→命中拍受害车中心格，切比雪夫）。 */
+  aimHitDistSum: number
+  /** 真拆砖/破钢数（`terrain_destroyed.bulletId`；一弹多格只结算一次）。rung 空场恒 0。 */
+  aimBricks: number
+  /** 弹弹对消数（`bullet_cancelled`；只观测）。 */
+  aimIgnited: number
+  /** 未命中且未破坏数（打钢未破/出界/基地/局末在飞；≡ hit 镜像）。 */
+  aimMisses: number
+  /** 敌弹火线承伤 Σ max(0,6−x)（x≤5；结算于击伤拍；**回写列**；A 拌入）。 */
+  hurtWeight: number
+  /** 被包围距离加权 tick 累计（n≥2 ⇒ Σ max(0,5−d)；**拌入**豁免 A）。 */
+  enclWeightTicks: number
+  /** 角落距离加权 tick 累计（Σ max(0,4−d)，d≤3；**拌入**豁免 A）。 */
+  cornerWeightTicks: number
 }
 
 function countBaseWall(world: World): number {
@@ -386,6 +557,46 @@ function countBaseWall(world: World): number {
 function isSolid(world: World, col: number, row: number): boolean {
   const t = world.tileMap.get(col, row)
   return t === 'brick' || t === 'steel'
+}
+
+/** aim-dodge-levers 新列下标（与 `buildMetricsRow` / `METRICS_COLUMN_NAMES` 同序）。 */
+export const AIM_COL = {
+  hits: 66,
+  dist: 67,
+  bricks: 68,
+  ignited: 69,
+  misses: 70,
+  hurt: 71,
+  encl: 72,
+  corner: 73,
+} as const
+
+/** 回写补丁（内部/测试共用形状）：`[from, to)` 行区间内 `rows[i][col] += delta`。 */
+export interface SuffixPatch {
+  col: number
+  from: number
+  to: number
+  delta: number
+}
+
+/**
+ * 回写补丁应用（纯函数；plan/aim-dodge-levers.plan.md §3.4/§7.1）。
+ *
+ * 区间补丁 = 「后缀累加」的等价位实现：`[from, to)` 是结算时**已经推出去**的行
+ * （开火行之后 … 结算行），这些行补 delta；其后的行由 `buildMetricsRow` 读 tel
+ * （结算时已 +delta）自然携带。打包前调用一次 ⇒ 开火行之后的所有行都含该结算，
+ * `r[fireRow] = Φ[fireRow+1] − Φ[fireRow]` 拿到信用（§3.4）。
+ *
+ * `to` 允许超出 `rows.length`（结算晚于终局行边界的历史补丁）⇒ 内部 clamp，不抛不越界。
+ * 纯函数：只改 `rows[i][col]`，不读 world / RNG（回写不进 `tickHash`，§3.4）。
+ */
+export function applySuffixPatches(rows: number[][], patches: ReadonlyArray<SuffixPatch>): void {
+  const n = rows.length
+  for (let pi = 0; pi < patches.length; pi++) {
+    const p = patches[pi]
+    const end = p.to < n ? p.to : n
+    for (let i = p.from; i < end; i++) rows[i][p.col] += p.delta
+  }
 }
 
 /**
@@ -424,6 +635,8 @@ export function nearestPickupDist(world: World): number {
  */
 export function buildMetricsRow(t: number, world: World, tel: Telemetry): number[] {
   tel.baseWallIntact = countBaseWall(world) // 与旧 countersPhi 同侧效应
+  // 伤害成簇（v10）：两类读数都由事件序列一次算出（单调增，零分配；见 danger-metrics）。
+  const rowDamage = damageClusterStats(tel.damageTicks, tel.damageAmounts)
   return [
     t, // 0 ticks
     world.killCount, // 1 kills
@@ -479,6 +692,26 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     tel.onLaneExemptTicks, // 51 onLaneExemptTicks（v9：raw 的冻/盾子集）
     tel.onLaneMoveTicks, // 52 onLaneMoveTicks（v9：在线且中心格变化）
     tel.onLaneHoldFireTicks, // 53 onLaneHoldFireTicks（v9：在线且静止且开火）
+    tel.stopTicks, // 54 stopTicks（v10：本 tick 无移动输出的累计）
+    tel.fireHeldTicks, // 55 fireHeldTicks（v10：本 tick 开火输出为真）
+    tel.idleTicks, // 56 idleTicks（v10：player.moving === false）
+    nearestEnemyDistPx(world), // 57 enemyDist（v10：最近已激活敌车距离 px；哨兵 -1）
+    tel.nearEnemy4Ticks, // 58 nearEnemy4Ticks（v10：最近敌距 ≤ 4 格）
+    rowDamage.bursts, // 59 damageBursts（v10：相邻扣血 ≤120t 的次数）
+    rowDamage.max120, // 60 maxDamage120（v10：120t 滑窗最大承伤）
+    tel.damageWhileLow, // 61 damageWhileLow（v10：低血期承伤；份额分母 = idx4）
+    tel.encl1Ticks, // 62 encl1Ticks（v10：同拍同行/同列敌车 = 1）
+    tel.encl2Ticks, // 63 encl2Ticks（v10：= 2）
+    tel.encl3pTicks, // 64 encl3pTicks（v10：≥ 3）
+    tel.enclMax, // 65 enclMax（v10 批次内顺位自 68）
+    tel.aimHits, // 66 aimHits（aim-dodge：命中，含致死；回写列——补丁见 §3.4）
+    tel.aimHitDistSum, // 67 aimHitDistSum（aim-dodge：Σ 命中距离（格））
+    tel.aimBricks, // 68 aimBricks（aim-dodge：真拆砖/破钢）
+    tel.aimIgnited, // 69 aimIgnited（aim-dodge：对消；只观测）
+    tel.aimMisses, // 70 aimMisses（aim-dodge：未命中一律 miss，含局末在飞）
+    tel.hurtWeight, // 71 hurtWeight（aim-dodge：敌弹火线承伤；回写列）
+    tel.enclWeightTicks, // 72 enclWeightTicks（aim-dodge：n≥2 ⇒ Σ max(0,5−d)；拌入 A）
+    tel.cornerWeightTicks, // 73 cornerWeightTicks（aim-dodge：Σ max(0,4−d)；拌入 A）
   ]
 }
 
@@ -733,6 +966,29 @@ interface RunResult {
   onLaneExemptTicks: number
   onLaneMoveTicks: number
   onLaneHoldFireTicks: number
+  /** metrics v10 差距四族（每局标量读数；逐决策步分布见 metrics 行）。 */
+  stopTicks: number
+  fireHeldTicks: number
+  idleTicks: number
+  /** 终局快照值（与 `playerHpRatio` 同约）：末行采样的最近已激活敌车距（哨兵 -1）。 */
+  enemyDist: number
+  nearEnemy4Ticks: number
+  damageBursts: number
+  maxDamage120: number
+  damageWhileLow: number
+  encl1Ticks: number
+  encl2Ticks: number
+  encl3pTicks: number
+  enclMax: number
+  /** aim-dodge-levers 8 列（每局标量读数；逐决策步分布见 metrics 行）。 */
+  aimHits: number
+  aimHitDistSum: number
+  aimBricks: number
+  aimIgnited: number
+  aimMisses: number
+  hurtWeight: number
+  enclWeightTicks: number
+  cornerWeightTicks: number
   enemyTotal: number
   startLives: number
   puGotTank: number
@@ -880,6 +1136,25 @@ function runOne(
     onLaneExemptTicks: 0,
     onLaneMoveTicks: 0,
     onLaneHoldFireTicks: 0,
+    stopTicks: 0,
+    fireHeldTicks: 0,
+    idleTicks: 0,
+    nearEnemy4Ticks: 0,
+    damageWhileLow: 0,
+    damageTicks: [],
+    damageAmounts: [],
+    encl1Ticks: 0,
+    encl2Ticks: 0,
+    encl3pTicks: 0,
+    enclMax: 0,
+    aimHits: 0,
+    aimHitDistSum: 0,
+    aimBricks: 0,
+    aimIgnited: 0,
+    aimMisses: 0,
+    hurtWeight: 0,
+    enclWeightTicks: 0,
+    cornerWeightTicks: 0,
   }
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
@@ -890,8 +1165,51 @@ function runOne(
    *  `hit-geometry.ts::fireOriginCellKey`），故事件侧登记即真值 —— 不需要
    *  「新生弹首见」那类采样启发式（评审 M3）。上界 = 本局开火数（数百条）。 */
   const fireOriginByBullet = new Map<number, number>()
+  /**
+   * 本批豁免 A：盾道具窗 tracker（每 tick 在 `sim.tick()` 之后喂一拍；§1.2）。
+   * 消费侧（encl/corner/敌弹权重）只经 `exposureExempt` 问它，不直接读分类。
+   */
+  const shieldWin = createShieldWindow()
+  /**
+   * 本批 shot registry（§3.1/§3.2/§3.4）：`bullet_fired` 登记、结算即删（settle-once）。
+   * 实现与评估侧共用（`aim-shot-registry.ts`）；与 `fireOriginByBullet`（v9 的 shooter
+   * 格表）同源不同用：那是「已发生命中」的几何反查。
+   */
+  const shotRegistry: AimShotTable = new Map()
+  /**
+   * 本批回写补丁（§3.4：「后缀累加」的等价位实现）：结算时给**已经推出去**的
+   * `[patchFrom, 当前行数)` 补增量；当前行数之后的行由 `buildMetricsRow` 读 tel
+   * （结算时已 +delta）自然携带。打包前一次应用 ⇒ 开火行之后的所有行都含该结算，
+   * `r[fireRow] = Φ[fireRow+1] − Φ[fireRow]` 拿到信用。
+   */
+  const patches: Array<{ col: number; from: number; to: number; delta: number }> = []
+  const pushPatch = (col: number, from: number, delta: number): void => {
+    patches.push({ col, from, to: shard.metrics.length, delta })
+  }
+  /**
+   * 删除 + 补丁（settle-once 本体）：查不到 / 已结算 / 敌弹 = no-op（返回 null）。
+   * 各列 tel 计数由调用方同步加（显式书写，避免 col→字段的隐式映射）。
+   */
+  const settleAimShot = (id: number, col: number, delta: number): AimShotRec | null => {
+    const rec = takeAimShot(shotRegistry, id, true)
+    if (!rec) return null
+    pushPatch(col, rec.patchFrom, delta)
+    return rec
+  }
+  /** 结算一颗**敌**登记弹的承伤（击伤拍；权重进 hurtWeight —— 只读累计，不写 miss）。 */
+  const settleHurtShot = (id: number): void => {
+    const rec = takeAimShot(shotRegistry, id, false)
+    if (!rec) return
+    if (rec.laneWeight > 0) {
+      tel.hurtWeight += rec.laneWeight
+      pushPatch(AIM_COL.hurt, rec.patchFrom, rec.laneWeight)
+    }
+  }
   /** 本 tick 的开火输出（fire head，held 到下一个决策步；非冷却态）。 */
   let fireHeld = false
+  /** 本 tick 的移动输出是否为 STOP（动作头 idx0；held 到下一个决策步）。
+   *  初始 true = `ScriptedInput.reset()` 后 moveDir 为 null（STOP），与首拍一致。 */
+  let stopHeld = true
   if (init) {
     // 交棒基线（plan §2 M2/M3）：metrics 只描述**交棒之后**的窗口，但不得让场上既有的东西被
     // 当成「刚发生」。seenPuIds 预置 ⇒ `powerUpsSpawned` 不把交棒时已存在的道具算成新 spawn；
@@ -995,6 +1313,8 @@ function runOne(
       // ≡ export-eval-game 的 `ai.isFiring()`（nn 策略下同 ScriptedInput 持有实现，
       // endFrame 无脉冲，两边读的是同一个 held head；god 策略只走 eval 侧，不跨源对账）。
       fireHeld = fr.idx === 1
+      // metrics v10：移动输出为 STOP（`decodeMove(idx <= 0) === null`）⇒ `stopTicks` 计本拍。
+      stopHeld = aMove === 0
     }
     sim.tick()
     scripted.endFrame()
@@ -1004,6 +1324,9 @@ function runOne(
     // `enemiesRemaining <= 0` 短路，配合 `clearTick === undefined` 守卫 ⇒ 一旦记录
     // 就不再调用，每 tick 开销可忽略。
     if (tel.clearTick === undefined && allEnemiesCleared(world)) tel.clearTick = t
+
+    // 本批豁免 A（§1.2）：盾窗 tracker 每 tick 喂一拍（在任何 exposureExempt 消费之前）。
+    shieldWin.update(world)
 
     // ---- telemetry（语义对齐 simulation-runner）----
     let collectedThisTick = 0
@@ -1026,15 +1349,54 @@ function runOne(
         }
       } else if (e.type === 'player_hit') {
         tel.playerHits++
+        // 本批：承伤结算（致死 + 星盾消耗两条路径；P0-A 签名修复后 bulletId 必在）。
+        if (e.bulletId !== undefined) settleHurtShot(e.bulletId)
       } else if (e.type === 'player_damage') {
         tel.playerDamageTaken += e.damage
         // metrics v8：开局窗累计（事件属 tick t-1；tick < 600 即局内前 600 tick）。
         if (t - 1 < DMG_FIRST_WINDOW_TICKS) tel.dmgFirst600 += e.damage
-      } else if (e.type === 'bullet_fired' && (e as any).bullet?.isPlayer) {
-        tel.playerShots++
-        // metrics v9：登记**开火时刻** shooter 中心格（弹的生成位置是真值，
-        // 命中侧以 bulletId 反查；晚一步采样只会更差，见评审 M3）。
-        fireOriginByBullet.set((e as any).bullet.id, fireOriginCellKey((e as any).bullet))
+        // metrics v10：伤害成簇（事件序列）+ 低血期承伤。
+        // 「低血」以**消费时刻**（本 tick 终态）的 hp 比判（与 §71 面板同口径）：
+        // 把「被打到残血的那笔」本身计入，之后残血期的每笔都计入。
+        tel.damageTicks.push(t - 1)
+        tel.damageAmounts.push(e.damage)
+        if (world.player?.alive && playerHpRatio(world) < DANGER_HP_THRESHOLD)
+          tel.damageWhileLow += e.damage
+        // 本批：承伤结算（非致死；权重 Σ(6−x) 由逐 tick 累计而来）。
+        if (e.bulletId !== undefined) settleHurtShot(e.bulletId)
+      } else if (e.type === 'bullet_fired') {
+        const eb = e.bullet
+        if (eb.isPlayer) {
+          tel.playerShots++
+          // metrics v9：登记**开火时刻** shooter 中心格（弹的生成位置是真值，
+          // 命中侧以 bulletId 反查；晚一步采样只会更差，见评审 M3）。
+          const fk = fireOriginCellKey(eb) // = 开火拍**玩家中心格**（弹几何重建；§3.1 端点）
+          fireOriginByBullet.set(eb.id, fk)
+          // 本批：开火结果族登记（patchFrom = 下一 metrics 行下标 ⇒ 信用落开火决策步）。
+          registerPlayerAimShot(
+            shotRegistry,
+            eb.id,
+            keyCol(fk),
+            keyRow(fk),
+            shard.metrics.length,
+            eb,
+          )
+        } else if (eb.allegiance === 'enemy') {
+          // 本批：承伤族登记（玩家侧盟军弹不入表；权重逐 tick 累计见主循环）。
+          registerEnemyAimShot(shotRegistry, eb.id, shard.metrics.length, eb)
+        }
+      } else if (e.type === 'terrain_destroyed') {
+        // 本批：brick 桶（只计真破坏；一弹 2×2 多格可推多条事件 ⇒ settle-once 去重）。
+        if (e.bulletId !== undefined) {
+          const rec = settleAimShot(e.bulletId, AIM_COL.bricks, 1)
+          if (rec) tel.aimBricks++
+        }
+      } else if (e.type === 'bullet_cancelled') {
+        // 本批：对消桶（真事件归因；a/b 至多一边是玩家弹）。
+        const ra = settleAimShot(e.aId, AIM_COL.ignited, 1)
+        if (ra) tel.aimIgnited++
+        const rb = settleAimShot(e.bId, AIM_COL.ignited, 1)
+        if (rb) tel.aimIgnited++
       } else if (e.type === 'powerup_collected') {
         collectedThisTick++
         tel.powerUpsCollected++
@@ -1079,6 +1441,26 @@ function runOne(
         else if (geo === HIT_BACK) tel.backHits++
         else if (geo === HIT_SIDE) tel.sideHits++
         // geo === HIT_FRONT ⇒ 不落桶（frontHits = enemyHits − back − side − exempt − far）
+        // ---- 本批开火结果族：命中结算（含致死；d = 开火拍玩家中心格 → 命中拍受害车中心格）----
+        const rec = settleAimShot(e.bulletId, AIM_COL.hits, 1)
+        if (rec) {
+          tel.aimHits++
+          const vCol = Math.floor((e.targetX + TANK / 2) / CELL)
+          const vRow = Math.floor((e.targetY + TANK / 2) / CELL)
+          const d = Math.max(Math.abs(vCol - rec.fireCol), Math.abs(vRow - rec.fireRow))
+          tel.aimHitDistSum += d
+          pushPatch(AIM_COL.dist, rec.patchFrom, d)
+        }
+      }
+    }
+    // ---- 本批承伤族：已登记敌弹的逐 tick 火线权重（A 拌入；只算登记表内的弹）----
+    if (world.player?.alive) {
+      const bullets = world.bullets
+      for (let bi = 0; bi < bullets.length; bi++) {
+        const b = bullets[bi]
+        if (b.allegiance !== 'enemy') continue
+        const rec = shotRegistry.get(b.id)
+        if (rec && !rec.isPlayer) rec.laneWeight += enemyBulletLaneWeightTick(world, b, shieldWin)
       }
     }
     // power-up census（seen-ids + same-tick pickup 对账，镜像 runner）
@@ -1118,6 +1500,27 @@ function runOne(
     // 终态）。两条都是零分配纯判定（AGENTS §14.1–14.2）；玩家阵亡期间不计
     // （「残血」以活着为前提，死亡帧不算暴露）。
     if (world.player?.alive) {
+      // ---- metrics v10：输入级 3 列 + 距离 2 列 + 被包围族 7 列 ----
+      // 输入级：held head（与决策步同频，不经时钟脉冲）；引擎静止：`player.moving`。
+      if (stopHeld) tel.stopTicks++
+      if (fireHeld) tel.fireHeldTicks++
+      if (!world.player.moving) tel.idleTicks++
+      const enemyDist = nearestEnemyDistPx(world)
+      if (enemyDist >= 0 && enemyDist <= NEAR_ENEMY_BAND_PX) tel.nearEnemy4Ticks++
+      // 被包围：互斥分档（v10 批次内整理：`enclExempt*` 三列已移除，§0.1 #9；
+      // 加权维由本批的 `enclWeightTicks` 承接）。
+      const encl = alignedEnemyCount(world)
+      if (encl > 0) {
+        if (encl >= 3) tel.encl3pTicks++
+        else if (encl === 2) tel.encl2Ticks++
+        else tel.encl1Ticks++
+        if (encl > tel.enclMax) tel.enclMax = encl
+      }
+      // 本批暴露杠杆（A 拌入，§3.6）：非豁免拍才累计（两列分开 gate；冻期/盾道具窗跳过）。
+      if (!exposureExempt(world, shieldWin)) {
+        tel.enclWeightTicks += enclWeightTick(world)
+        tel.cornerWeightTicks += cornerWeightTick(world)
+      }
       if (playerHpRatio(world) < DANGER_HP_THRESHOLD) tel.dangerTicks++
       if (inThreatLane(world)) {
         tel.threatTicks++
@@ -1155,10 +1558,23 @@ function runOne(
   }
 
   // ---- 终局统一处理（stageclear/gameover break 与 timeout 出口共用）----
+  // 本批 settle-once ④：仍未结算的**玩家**登记弹 = 出界 / 打钢未破 / 打基地 / 局末在飞
+  // ⇒ 一律折入 aimMisses（§3.1）；敌弹未结算的权重直接丢弃（不写 miss）。
+  for (const rec of shotRegistry.values()) {
+    if (rec.isPlayer) {
+      tel.aimMisses++
+      pushPatch(AIM_COL.misses, rec.patchFrom, 1)
+    }
+  }
+  shotRegistry.clear()
   // 终局指标快照（与旧 phiEnd 同刻）；flush 最后一个 pending（done=1），
   // 修复 §3.6(b) 样本丢失。reward 本身不再由 TS 结算（Python 公式引擎负责）。
   shard.metrics.push(metricsRow())
   if (pending) flushPending(true)
+  // ---- 本批回写应用（打包前一次；§3.4）----
+  // 区间补丁 = 「后缀」的等价位实现（纯函数，可单测）：[patchFrom, 当前行数) 覆盖已推的行，
+  // 其后由 buildMetricsRow 读 tel（结算时已 +delta）承担。应用后开火行之后的所有行都含该结算。
+  applySuffixPatches(shard.metrics, patches)
 
   // ---- 精确 v7 打分（score/gatedScore 落 manifest，Python 的 reconcile 输入）----
   const scorable = {
@@ -1239,6 +1655,27 @@ function runOne(
     onLaneExemptTicks: tel.onLaneExemptTicks,
     onLaneMoveTicks: tel.onLaneMoveTicks,
     onLaneHoldFireTicks: tel.onLaneHoldFireTicks,
+    stopTicks: tel.stopTicks,
+    fireHeldTicks: tel.fireHeldTicks,
+    idleTicks: tel.idleTicks,
+    enemyDist: nearestEnemyDistPx(world), // 终局快照（同 metrics 行口径；玩家已死 = 哨兵 -1）
+    nearEnemy4Ticks: tel.nearEnemy4Ticks,
+    // 两个成簇读数由事件序列一次算出（与 metrics 行同函数；单调增）。
+    damageBursts: damageClusterStats(tel.damageTicks, tel.damageAmounts).bursts,
+    maxDamage120: damageClusterStats(tel.damageTicks, tel.damageAmounts).max120,
+    damageWhileLow: tel.damageWhileLow,
+    encl1Ticks: tel.encl1Ticks,
+    encl2Ticks: tel.encl2Ticks,
+    encl3pTicks: tel.encl3pTicks,
+    enclMax: tel.enclMax,
+    aimHits: tel.aimHits,
+    aimHitDistSum: tel.aimHitDistSum,
+    aimBricks: tel.aimBricks,
+    aimIgnited: tel.aimIgnited,
+    aimMisses: tel.aimMisses,
+    hurtWeight: tel.hurtWeight,
+    enclWeightTicks: tel.enclWeightTicks,
+    cornerWeightTicks: tel.cornerWeightTicks,
     enemyTotal: tel.enemyTotal,
     startLives: tel.startLives,
     puGotTank: tel.puGotTank,

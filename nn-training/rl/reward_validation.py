@@ -97,6 +97,31 @@ DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     "onLaneExemptTicks": (0.0, 36000.0),  # raw 的子集，同界
     "onLaneMoveTicks": (0.0, 36000.0),
     "onLaneHoldFireTicks": (0.0, 36000.0),
+    # metrics v10 + aim-dodge：差距四族 15 列 + aim/dodge 8 列（plan/metrics-v10-gap-columns §1、
+    # plan/aim-dodge-levers.plan.md §4）。
+    # 加列必须登记域，否则 symbolic_envelope 角点无法求值
+    # （test_all_metrics_have_envelope_range 锁）。
+    "stopTicks": (0.0, 36000.0),  # 累计 tick 的上界 = maxTicks
+    "fireHeldTicks": (0.0, 36000.0),
+    "idleTicks": (0.0, 36000.0),
+    "enemyDist": (-1.0, 600.0),  # 哨兵 -1；真值上界 = 场地对角 √2×416 ≈ 588px
+    "nearEnemy4Ticks": (0.0, 36000.0),
+    "damageBursts": (0.0, 200.0),  # 上界同 playerHits（连击数 ≤ 扣血次数）
+    "maxDamage120": (0.0, 500.0),  # 窗口承伤上界同 playerDamageTaken
+    "damageWhileLow": (0.0, 500.0),  # 子集，同界
+    "encl1Ticks": (0.0, 36000.0),  # 同拍敌车数 1/2/≥3 是互斥划分，各自 ≤ maxTicks
+    "encl2Ticks": (0.0, 36000.0),
+    "encl3pTicks": (0.0, 36000.0),
+    "enclMax": (0.0, 10.0),  # 同拍包围敌数峰值（场上敌车上限 4；10 留余量）
+    # aim-dodge 批次：aim/dodge 8 列（plan/aim-dodge-levers.plan.md §4）。
+    "aimHits": (0.0, 3000.0),  # 上界同 playerShots（命中数 ≤ 开火数）
+    "aimHitDistSum": (0.0, 75000.0),  # 命中 ≤3000 × 格距 ≤25（26×26 切比雪夫）
+    "aimBricks": (0.0, 3000.0),  # 真拆砖/破钢 ≤ 开火数
+    "aimIgnited": (0.0, 3000.0),  # 弹弹对消 ≤ 开火数
+    "aimMisses": (0.0, 3000.0),  # 四桶恒等式 ⇒ 全弹入桶，上界同 playerShots
+    "hurtWeight": (0.0, 216000.0),  # K_HURT=6 × maxTicks（每拍单弹权重 ≤6；探针上界）
+    "enclWeightTicks": (0.0, 720000.0),  # ≤5 × 4 敌 × maxTicks（单关敌上限 4）
+    "cornerWeightTicks": (0.0, 144000.0),  # K_CORNER−1=4 × maxTicks（玩家中心单点最大 4）
 }
 
 #: 单加性项在角点上的绝对上界（超过即判为数值爆炸风险）。

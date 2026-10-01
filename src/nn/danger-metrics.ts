@@ -12,6 +12,14 @@
  *   `inThreatLane(world)`       —— 是否站在敌方弹道/炮口线上（见下）
  *   `threatLaneSources(world)`  —— 同上，返回计数（诊断/测试用）
  *   `threatLaneExempt(world)`   —— 冻/盾豁免（v9 穿越税族的 `*Exempt` 列用它）
+ *   `alignedEnemyCount(world)`  —— 「被包围」计数：同行/同列（19px 带 + 无遮挡）的敌车数
+ *                                  （metrics v10 的 `encl*Ticks` 族用它，见 plan/metrics-v10-gap-columns）
+ *   `nearestEnemyDistPx(world)` —— 最近存活敌车距离（px；哨兵 `ENEMY_DIST_SENTINEL`）
+ *   `damageClusterStats(...)`   —— 伤害成簇：连击数 / 120t 窗内最大承伤
+ *   `exposureExempt(world, shield)` —— 本批豁免机制 A 谓词（冻 ∨ **盾道具窗**；与宽口径 `threatLaneExempt` 不是同一件事）
+ *   `enemyBulletLaneWeightTick(...)` —— 敌弹火线承伤逐摄权重 Σ(6−x)（本批 `hurtWeight`）
+ *   `enclWeightTick(world)`      —— n≥2 时 Σ max(0,K_ENCL−d)（本批 `enclWeightTicks`；与计数共用扫描）
+ *   `cornerWeightTick(world)`    —— 四角锚点 Σ max(0,K_CORNER−d)（本批 `cornerWeightTicks`）
  *   以及 `DANGER_HP_THRESHOLD`  —— 残血阈值 0.4（与 `src/nn/goal-mask.ts:154` 同源）
  *
  * `inThreatLane` 口径（**2026-09-29 metrics v9 改定义**，plan/geo-threat-instrumentation.plan.md
@@ -44,10 +52,12 @@
  *
  * 纯函数、零分配、不读 rng、不写 World（AGENTS §2.3 / §14.1–14.2）。
  */
-import { BULLET, CELL, TANK } from '../constants'
+import { BULLET, CELL, GRID, TANK } from '../constants'
+import type { Bullet } from '../types'
 import type { World } from '../game/World'
 import { TileMap } from '../game/TileMap'
 import { BULLET_LANE_MISS, bulletInFrontDist, bulletLaneDist } from '../utils/helpers'
+import type { ShieldWindow } from './shield-window'
 
 /** 触发半径（格）：**v9 起不再被 `inThreatLane` 使用**；保留给 dodge-l0 镜像与测试。 */
 export const THREAT_RADIUS_CELLS = 6
@@ -63,6 +73,38 @@ export const THREAT_ALIGN_BAND_PX = TANK / 2 + BULLET / 2
 export const DANGER_HP_THRESHOLD = 0.4
 /** 开局承伤窗（tick）：`dmgFirst600` 只累计 `tick < 本值` 的承伤。 */
 export const DMG_FIRST_WINDOW_TICKS = 600
+/**
+ * 近敌带宽（px）：`nearEnemy4Ticks`（metrics v10）累计「最近敌距 ≤ 本值」的 tick。
+ * 4 格 = 64px 是**观测阈值**（pin 值，可调；调则剂量连带重算），语义 = 「敌方已进入近身威胁带」。
+ */
+export const NEAR_ENEMY_BAND_PX = 4 * CELL
+/**
+ * 「连击」窗（tick）：`damageBursts` 统计相邻两次扣血间隔 ≤ 本值的次数（120 tick = 12 决策步）。
+ * `maxDamage120` 的滑窗宽度同源（metrics v10；与 `docs/nn/experiments.md` §71 面板同值）。
+ */
+export const DMG_BURST_TICKS = 120
+/**
+ * `enemyDist`（metrics v10）哨兵：无存活敌车（或玩家不在场/已死）时填此值。
+ * 真实欧氏距离恒 ≥0（同格 ≠ 0 但 ≥0）⇒ -1 不可能与真实值混淆；公式侧 `where` 归零。
+ * 与 `PICKUP_DIST_SENTINEL`（export-rl-rollout.ts）同构，不共用常量只为免跨模块依赖。
+ */
+export const ENEMY_DIST_SENTINEL = -1
+
+/**
+ * 统一权重律 `w(d) = max(0, K − d)`（aim-dodge-levers plan §3.3）的窗口常量：
+ * K = 窗口上界 + 1。**三列 w 不可横比**（窗口不同）。
+ *   · `K_HURT`   = 6：敌弹火线权重，窗口 x ≤ 5（6 格 ≈ 96px ≈ 0.38–0.45s 反应余量）；
+ *   · `K_ENCL`   = 5：被包围距离加权，窗口 d ≤ 4；
+ *   · `K_CORNER` = 4：角落距离加权，窗口 d ≤ 3。
+ */
+export const K_HURT = 6
+export const K_ENCL = 5
+export const K_CORNER = 4
+/**
+ * 角锚点内边距（格）：四角 = `(M,M) / (GRID−4,M) / (GRID−4,GRID−4) / (M,GRID−4)`，M = 本值。
+ * `GRID−4` = 钢边框 2 格 + 坦克占格 2 格（**禁用** `GRID−1−MARGIN` 的写法 —— 差 1 格）。
+ */
+export const CORNER_ANCHOR_MARGIN = 2
 
 /** 玩家 hp/maxHp（clamp01）；玩家不在场/已死 = 0（与 obs s19 同口径）。 */
 export function playerHpRatio(world: World): number {
@@ -94,6 +136,47 @@ export function threatLaneExempt(world: World): boolean {
   if (world.freezeTimer > 0) return true
   const p = world.player
   return !!p && (p.shieldTimer ?? 0) > 0
+}
+
+/**
+ * 本批豁免机制 A 谓词（**窄**，与上面 `threatLaneExempt` 的宽口径**不是同一件事**）：
+ * `freezeTimer > 0` ∨ **盾道具窗**（`src/nn/shield-window.ts` 粘性 tracker：
+ * 只有 `+= POWERUP_DURATION_MS` 量级的拾取算；出生/复活盾与星盾 grace 不计入）。
+ * 逐列适用性见 plan §3.6 豁免矩阵。调用约定：每 tick 先 `shield.update(world)`，
+ * 再问本函数（tracker 需要增量序列，无法从单帧重建）。
+ */
+export function exposureExempt(world: World, shield: ShieldWindow): boolean {
+  return world.freezeTimer > 0 || shield.powerupActive()
+}
+
+/**
+ * 敌弹「火线承伤」逐拍权重（本批 `hurtWeight` 的逐拍项，plan §3.2）：
+ *   x = 玩家中心格到弹中心格的**切比雪夫距**（格）；谓词 = 19px 带 ∧ 玩家在弹前方
+ *   ∧ `x ≤ K_HURT − 1`；权重 = `max(0, K_HURT − x)`（= 6−x）。
+ * **非豁免拍才返回非零**（A 拌入：冻期不新增；盾道具窗内弹会被零事件吞掉、权重永不结算）。
+ * 复用 `bulletLaneDist`（helpers 的唯一 19px 带实现）——**禁第三套 19px**（plan §3.2）。
+ * 纯函数、零分配、不读 rng、不写 World。
+ */
+export function enemyBulletLaneWeightTick(
+  world: World,
+  bullet: Bullet,
+  shield: ShieldWindow,
+): number {
+  const p = world.player
+  if (!p || !p.alive || !bullet.alive) return 0
+  if (exposureExempt(world, shield)) return 0
+  const bcx = bullet.x + bullet.w / 2
+  const bcy = bullet.y + bullet.h / 2
+  const pcx = p.x + p.w / 2
+  const pcy = p.y + p.h / 2
+  if (bulletLaneDist(bullet.dir, bcx, bcy, pcx, pcy, THREAT_ALIGN_BAND_PX) === BULLET_LANE_MISS) {
+    return 0
+  }
+  const x = Math.max(
+    Math.abs(Math.floor(bcx / CELL) - Math.floor(pcx / CELL)),
+    Math.abs(Math.floor(bcy / CELL) - Math.floor(pcy / CELL)),
+  )
+  return x < K_HURT ? K_HURT - x : 0
 }
 
 /**
@@ -209,4 +292,176 @@ export function threatLaneSources(world: World): number {
 /** 是否在敌方弹道/炮口线上（`threatLaneSources > 0`）。 */
 export function inThreatLane(world: World): boolean {
   return threatLaneSources(world) > 0
+}
+
+/**
+ * 「被包围」计数（metrics v10，plan/metrics-v10-gap-columns.plan.md §1）：与玩家
+ * **同行/同列**、且中间无阻弹地形的**敌车**个数。三条件：
+ *   ① `alive ∧ allegiance === 'enemy' ∧ spawnTimer <= 0`（未激活车不算暴露）；
+ *   ② 中心距在垂直方向上 `< THREAT_ALIGN_BAND_PX`（19px = 坦克半宽 16 + 子弹半高 3）；
+ *   ③ 沿源自己的轴无阻弹地形（`laneOccluded`，与 `threatLaneSources` 同一实现）。
+ *
+ * ⚠ 三条都是**物理/几何真值**，不含朝向、不含半径上限（lane 是 lane）——与 §71 ②b 的口径
+ * 逐字一致。**不要**把 ② 写成 naive「中心格同行列」或旧 12px 带（§71 ②b 实测：12px 读数
+ * 腰斩且翻符号，naive 直接归零）——本函数是唯一实现，两个导出器都 import 它。
+ * 本批的 `enclWeightTick` 与它共用同一扫描循环（`alignedEnemyScan`：计数/加权两读数，
+ * 谓词只此一份；加权的 d 取中心格切比雪夫距，K_ENCL = 5）。
+ *
+ * 纯函数、零分配、不读 rng、不写 World（AGENTS §2.3 / §14.1–14.2）。
+ */
+export function alignedEnemyCount(world: World): number {
+  return alignedEnemyScan(world, false)
+}
+
+/**
+ * 本批被包围距离加权（`enclWeightTicks` 的逐 tick 项，plan §3.3）：
+ * `alignedEnemyCount ≥ 2` 时返回 `Σ max(0, K_ENCL − d)`（d = 敌方与玩家中心格的
+ * 切比雪夫距；d ≥ K_ENCL 的敌贡献 0）。**与计数共用同一扫描循环** ⇒ 谓词不会漂移。
+ * 豁免（A 拌入）由**调用方**用 `exposureExempt` gate —— 本函数只做几何。
+ */
+export function enclWeightTick(world: World): number {
+  return alignedEnemyScan(world, true)
+}
+
+/**
+ * 「被包围」共享扫描（不分配对象；一个循环两个读数）：
+ *   · `wantWeight = false` ⇒ 返回对齐敌数（`alignedEnemyCount` 语义，逐位不变）；
+ *   · `wantWeight = true`  ⇒ 返回 Σ max(0,K_ENCL−d)（n ≥ 2 才非零）。
+ * 谓词（19px 带 + 轴向无遮挡 + 已激活 + 存活）本体只此一份。
+ */
+function alignedEnemyScan(world: World, wantWeight: boolean): number {
+  const p = world.player
+  if (!p || !p.alive) return 0
+  const pcx = p.x + p.w / 2
+  const pcy = p.y + p.h / 2
+  const tileMap = world.tileMap
+  // 玩家身体的像素精确格跨度（遮挡判据；与 threatLaneSources 同规）。
+  const pColLow = Math.floor(p.x / CELL)
+  const pColHigh = Math.floor((p.x + p.w - 1) / CELL)
+  const pRowLow = Math.floor(p.y / CELL)
+  const pRowHigh = Math.floor((p.y + p.h - 1) / CELL)
+  let n = 0
+  let w = 0
+  const tanks = world.allTanks
+  for (let i = 0; i < tanks.length; i++) {
+    const t = tanks[i]
+    if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
+    const tx = t.x + t.w / 2
+    const ty = t.y + t.h / 2
+    const sameCol = Math.abs(tx - pcx) < THREAT_ALIGN_BAND_PX
+    const sameRow = Math.abs(ty - pcy) < THREAT_ALIGN_BAND_PX
+    if (!sameCol && !sameRow) continue
+    const occ = sameCol
+      ? laneOccluded(tileMap, Math.floor(tx / CELL), Math.floor(ty / CELL), true, pRowLow, pRowHigh)
+      : laneOccluded(
+          tileMap,
+          Math.floor(tx / CELL),
+          Math.floor(ty / CELL),
+          false,
+          pColLow,
+          pColHigh,
+        )
+    if (occ) continue
+    n++
+    if (wantWeight) {
+      const d = Math.max(
+        Math.abs(Math.floor(tx / CELL) - Math.floor(pcx / CELL)),
+        Math.abs(Math.floor(ty / CELL) - Math.floor(pcy / CELL)),
+      )
+      if (d < K_ENCL) w += K_ENCL - d
+    }
+  }
+  return wantWeight ? (n >= 2 ? w : 0) : n
+}
+
+/**
+ * 四角锚点（格坐标；顺序 左上/右上/右下/左下）——**只从 `GRID` 派生**：
+ * `(M,M)/(GRID−4,M)/(GRID−4,GRID−4)/(M,GRID−4)`，M = `CORNER_ANCHOR_MARGIN`。
+ * 供测试做「锚点 === 关卡四角 spawn」一致性断言（plan §3.3 / sb P1-H）。
+ * 离热路径（导出器只用 `cornerWeightTick`），可以分配。
+ */
+export function cornerAnchors(): Array<{ col: number; row: number }> {
+  const a = CORNER_ANCHOR_MARGIN
+  const b = GRID - 4
+  return [
+    { col: a, row: a },
+    { col: b, row: a },
+    { col: b, row: b },
+    { col: a, row: b },
+  ]
+}
+
+/**
+ * 角落暴露权重（本批 `cornerWeightTicks` 的逐 tick 项，plan §3.3）：
+ * 玩家**中心格**到四角锚点（`cornerAnchors` 同一派生）最小切比雪夫距 d ⇒ `max(0, K_CORNER − d)`（d ≤ 3）。
+ * `enemy_spawns` 不是运行时输入（降为一致性断言）；拌入由调用方 gate（§3.6）。
+ */
+export function cornerWeightTick(world: World): number {
+  const p = world.player
+  if (!p || !p.alive) return 0
+  const col = Math.floor((p.x + p.w / 2) / CELL)
+  const row = Math.floor((p.y + p.h / 2) / CELL)
+  const a = CORNER_ANCHOR_MARGIN
+  const b = GRID - 4
+  let d = Math.max(Math.abs(col - a), Math.abs(row - a))
+  let dd = Math.max(Math.abs(col - b), Math.abs(row - a))
+  if (dd < d) d = dd
+  dd = Math.max(Math.abs(col - b), Math.abs(row - b))
+  if (dd < d) d = dd
+  dd = Math.max(Math.abs(col - a), Math.abs(row - b))
+  if (dd < d) d = dd
+  return d < K_CORNER ? K_CORNER - d : 0
+}
+
+/**
+ * 玩家中心到**最近存活敌车**中心的欧氏距离（px）；无存活敌车/玩家不在场 ⇒ `ENEMY_DIST_SENTINEL`。
+ * metrics v10 的 `enemyDist` 列（每行采样，与 `pickupDist` 同族）。
+ *
+ * 「存活」含未激活车吗？**不含**（`spawnTimer > 0` 不算）：与 `threatLaneSources` /
+ * `alignedEnemyCount` 同规——出生保护期的车还不是暴露源；否则 `nearEnemy4Ticks` 会把
+ * 「刚出生在玩家旁边」算成近敌 tick。
+ *
+ * 纯函数、零分配、不读 rng、不写 World。
+ */
+export function nearestEnemyDistPx(world: World): number {
+  const p = world.player
+  if (!p || !p.alive) return ENEMY_DIST_SENTINEL
+  const pcx = p.x + p.w / 2
+  const pcy = p.y + p.h / 2
+  let best = ENEMY_DIST_SENTINEL
+  const tanks = world.allTanks
+  for (let i = 0; i < tanks.length; i++) {
+    const t = tanks[i]
+    if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
+    const dx = t.x + t.w / 2 - pcx
+    const dy = t.y + t.h / 2 - pcy
+    const d = Math.sqrt(dx * dx + dy * dy)
+    if (best < 0 || d < best) best = d
+  }
+  return best
+}
+
+/**
+ * 「伤害成簇」两个读数（metrics v10 的 `damageBursts` / `maxDamage120`），
+ * 由**扣血事件序列**（tick 升序 + 对应伤害量）一次算出：
+ *   · `bursts` = 相邻两笔间隔 ≤ `DMG_BURST_TICKS` 的次数（首笔不计）；
+ *   · `max120` = 任意以某笔为起点的 `DMG_BURST_TICKS` 滑窗内最大累积承伤（单笔自成窗）。
+ *
+ * 两个都是**单调不减**函数 ⇒ Φ 逐行差分非负（不像 tick 计数器那样「每 tick 罚款」）。
+ * 零分配（不建子数组）、纯函数；两个导出器共用同一实现。
+ */
+export function damageClusterStats(
+  ticks: readonly number[],
+  amounts: readonly number[],
+): { bursts: number; max120: number } {
+  let bursts = 0
+  let max120 = 0
+  for (let i = 0; i < ticks.length; i++) {
+    if (i > 0 && ticks[i] - ticks[i - 1] <= DMG_BURST_TICKS) bursts++
+    let sum = 0
+    for (let j = i; j < ticks.length && ticks[j] - ticks[i] <= DMG_BURST_TICKS; j++)
+      sum += amounts[j]
+    if (sum > max120) max120 = sum
+  }
+  return { bursts, max120 }
 }

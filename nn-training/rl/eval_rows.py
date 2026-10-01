@@ -146,6 +146,52 @@ def eval_v9_fields(manifest: dict | None) -> dict:
     return out
 
 
+#: metrics v10 + aim-dodge 20 列（plan/metrics-v10-gap-columns §1、plan/aim-dodge-levers
+#: §4；`src/nn/danger-metrics.ts` 同名同义）。`export-eval-game.ts` 顶层直出；旧报告/未同步
+#: 节点缺键 = None（与 v8/v9 同约）。下表不含 `idleTicks` ⇒ 19 键。
+#: ⚠ `idleTicks` **不在本表**：它已有自己的通道（`EVAL_NEWERA_KEYS`，与
+#: moveHist/decisions/stopRuns 同行）—— 两表同含一键会在行构造点重复赋值。
+EVAL_V10_KEYS = (
+    "stopTicks",
+    "fireHeldTicks",
+    "enemyDist",
+    "nearEnemy4Ticks",
+    "damageBursts",
+    "maxDamage120",
+    "damageWhileLow",
+    "encl1Ticks",
+    "encl2Ticks",
+    "encl3pTicks",
+    "enclMax",
+    "aimHits",
+    "aimHitDistSum",
+    "aimBricks",
+    "aimIgnited",
+    "aimMisses",
+    "hurtWeight",
+    "enclWeightTicks",
+    "cornerWeightTicks",
+)
+
+
+def eval_v10_fields(manifest: dict | None) -> dict:
+    """从 eval 报告 manifest 抽出 v10 十九列（缺键 = 整键省略，不写 None）。
+
+    与 `eval_v8_fields`/`eval_v9_fields` 逐字同形、同一个理由（0 是合法读数；
+    下游 `eval-course-ckpt` 以键缺席判未知）与同一条纪律：`eval_row`、
+    `rl/batch_eval.py::record`、`rl/batch_runner._UnitLanes` 三处行构造点必须
+    **经本函数**取数（2026-09-24 v8 提交就是 Python 两处全漏 ⇒ 日常 eval 失明）。
+    """
+    out: dict = {}
+    if not isinstance(manifest, dict):
+        return out
+    for k in EVAL_V10_KEYS:
+        v = manifest.get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
 def eval_row(
     manifest: dict,
     *,
@@ -210,6 +256,8 @@ def eval_row(
         **eval_v8_fields(manifest),
         # metrics v9 命中方位 + 穿越税观测族（与 batch_eval.record 同源，见 eval_v9_fields）。
         **eval_v9_fields(manifest),
+        # metrics v10 差距四族（与 batch_runner 同源，见 eval_v10_fields）。
+        **eval_v10_fields(manifest),
         "puSpawnBomb": manifest.get("puSpawnBomb"),
         "puSpawnTank": manifest.get("puSpawnTank"),
         "puSpawnFreeze": manifest.get("puSpawnFreeze"),

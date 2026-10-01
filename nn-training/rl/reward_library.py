@@ -151,16 +151,68 @@ METRICS: tuple[str, ...] = (
     "onLaneHoldFireTicks",  # 53  ← v9：在线 ∧ 静止 ∧ 本 tick 开火输出（架枪直读，反证门专用）。
     #                     上四列均为累计 tick 计数器：Φ 逐行差分 ⇒ 直接入公式 = 每 tick
     #                     罚款且 Φ 无界，入公式请封顶或改深度型势（同 dangerTicks 警告）。
+    #                     ⚠ raw-only 名单（plan/aim-dodge-levers §3.6，**仅审计不得定价**）：
+    #                     `onLaneMoveTicks`/`onLaneHoldFireTicks`、`encl1/2/3pTicks`、
+    #                     `nearEnemy4Ticks` 含冻/盾拍（未豁免 raw）；与拌入列不得直接对照。
+    # ---- metrics v10：差距四族 15 列 + aim-dodge 杠杆 8 列（plan/metrics-v10-gap-columns
+    #      .plan.md §1、plan/aim-dodge-levers.plan.md §4；idx 永久追加在尾部 → 本批 20 列
+    #      idx54–73，0–53 列号不动）----
+    # 来源 = docs/nn/experiments.md §71（人类 62 局 vs x20-steady 62 对，窗口配对）里
+    # 「显著但 v9 无列可测」的四族：停/静止/按住开火（输入级）· 敌距/近敌 · 伤害成簇 -
+    # 被包围率。能由现有列推的（命中率/承伤率/危险 lane/低血/拾取/换格率）**不重复建列**。
+    "stopTicks",  # 54  ← v10：累计「本 tick 无移动输出」（动作头 idx0 = STOP；
+    #                     评估侧同义 `ai.getMoveDirection() === null`）。
+    "fireHeldTicks",  # 55  ← v10：累计「本 tick 开火输出为真」（fire head held；
+    #                     非 `playerShots` 实弹 —— 后者被冷却/弹量上限门掉）。
+    "idleTicks",  # 56  ← v10：累计 `player.moving === false`（想动被地形挡也计）。
+    "enemyDist",  # 57  ← v10：**每行采样**（非累计）：最近存活已激活敌车中心距（px）；
+    #                     无车/玩家不在场 = 哨兵 -1（与 pickupDist(40) 同族，公式侧 where 归零）。
+    "nearEnemy4Ticks",  # 58  ← v10：累计「最近敌距 ≤ 4 格（64px，NEAR_ENEMY_BAND_PX）」的 tick。
+    "damageBursts",  # 59  ← v10：相邻两笔扣血间隔 ≤ 120t（DMG_BURST_TICKS）的次数 - 单调增。
+    "maxDamage120",  # 60  ← v10：任意以某笔为起点的 120t 滑窗内最大累积承伤；单调增。
+    "damageWhileLow",  # 61  ← v10：扣血那一刻 `playerHpRatio < 0.4` 的伤害累计；
+    #                     份额 = 本列 ÷ playerDamageTaken(4)，离线可算。
+    "encl1Ticks",  # 62  ← v10：同拍与玩家**同行/同列**（19px 物理带 + 轴无遮挡 + 已激活）
+    "encl2Ticks",  # 63  ← v10：的敌车数 = 2 的 tick 累计。
+    "encl3pTicks",  # 64  ← v10：≥ 3 的 tick 累计。
+    #                     谓词唯一实现 = src/nn/danger-metrics.ts::alignedEnemyCount
+    #                     ⚠ 不要用旧 12px 带或 naive 中心格口径复现：§71 ②b 实测两者会把
+    #                     结论测成相反（12px 腰斩且翻符号，naive 直接归零）。
+    "enclMax",  # 65  ← v10：本局同拍包围敌数**峰值**（每行同值；单调不减）。
+    #                     （aim-dodge 批次内整理：原 enclExempt1/2/3pTicks 三列移除、
+    #                     顺位自 68；豁免兑现 =「非豁免拍拌入 enclWeightTicks(72)」，
+    #                     见 plan/aim-dodge-levers.plan.md §3.6 决定 A。）
+    # ---- aim-dodge 批次：开火结果/承伤/暴露 8 列（plan/aim-dodge-levers.plan.md §4；
+    #      恒等式 playerShots = aimHits+aimBricks+aimIgnited+aimMisses）----
+    "aimHits",  # 66  ← 玩家弹命中（含致死）；开火结果族；**回写列**——信用落开火决策步。
+    "aimHitDistSum",  # 67  ← 命中拍切比雪夫格距 Σd（aimHits 的附加量；定价配剂量门）。
+    "aimBricks",  # 68  ← 真拆砖/破钢（terrain_destroyed.bulletId）；一弹多格只落一次。
+    "aimIgnited",  # 69  ← 弹弹对消（bullet_cancelled）；**只观测**。
+    "aimMisses",  # 70  ← 打钢未破/出界/基地/局末在飞；≡ hit 镜像（勿同腿定价）。
+    "hurtWeight",  # 71  ← 敌弹火线承伤 Σ max(0,6−x)（x≤5 拍）；结算于 player_damage/player_hit；
+    #                     **回写列**；**拌入**豁免 A（只累计非豁免拍）。与 playerDamageTaken
+    #                     相关性 >0.8 时替换之（plan §5 E2 门）。
+    "enclWeightTicks",  # 72  ← n≥2 ⇒ Σ max(0,5−d)；**拌入**豁免 A（只累计非豁免拍）。
+    "cornerWeightTicks",  # 73  ← 四角锚点最小切比雪夫格距 ⇒ Σ max(0,4−d)；**拌入**豁免 A。
+    #                     54–56/58/62–64/72 都是累计 tick 计数器（同 dangerTicks 警告）；
+    #                     59/60/65 单调增（差分 ≥ 0）；57 带 -1 哨兵；
+    #                     66–71 为局内累计计数/权重（差分 ≥ 0）。
 )
 
 METRIC_INDEX: dict[str, int] = {name: i for i, name in enumerate(METRICS)}
 METRICS_DIM = len(METRICS)
-#: shard manifest 版本：`[N+1,45] f8（idx0–44）` 布局。任何用 `shape[0]` 推 episode 长度的
+#: shard manifest 版本：`[N+1,74] f8（idx0–73）` 布局。任何用 `shape[0]` 推 episode 长度的
 #: 下游在版本不匹配时必须响亮报错，而非静默错读（评审 LC §1.1）。
 #: v8（plan/x20-dodge-avoidance §2）：危险暴露四列。
 #: v9（plan/geo-threat-instrumentation §1.1/§1.3）：命中方位 5 列 + 穿越税 4 列；
 #: **同时** threatTicks 谓词原地改定义（19px 带 / 无半径 / 判遮挡）—— 新旧读数不可比。
-METRICS_VERSION = 9
+#: v10（plan/metrics-v10-gap-columns §1 + plan/aim-dodge-levers §4）：差距四族 15 列
+#: − 3 豁免列 + aim-dodge 8 列 ⇒ 20 列（idx54–73）—— 输入级（stop/fireHeld/idle）·
+#: 距离（enemyDist/nearEnemy4Ticks）· 伤害成簇（damageBursts/maxDamage120/damageWhileLow）·
+#: 被包围率（encl1/2/3p + 峰值）· 开火结果四桶（aimHits/aimBricks/aimIgnited/aimMisses）·
+#: 命中距离和（aimHitDistSum）· 火线承伤（hurtWeight）· 暴露加权（encl/cornerWeightTicks）。
+#: **不加价**：公式一个字不动。
+METRICS_VERSION = 10
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
@@ -888,7 +940,9 @@ def _self_check() -> None:
     assert_no_time_axis_reducers()
     # v8：追加 idx41–44 playerHpRatio/dangerTicks/threatTicks/dmgFirst600
     # v9：追加 idx45–53 命中方位 5 列 + 穿越税 4 列
-    assert len(METRICS) == METRICS_DIM == 54, METRICS_DIM
+    # v10：追加 idx54–68 差距四族 15 列；aim-dodge 批次内整理：移除 enclExempt1/2/3pTicks，
+    #      追加 aim/dodge 8 列（idx66–73），enclMax 顺位 68 → 65 ⇒ 总列数 74。
+    assert len(METRICS) == METRICS_DIM == 74, METRICS_DIM
     assert len(set(METRICS)) == METRICS_DIM
 
 

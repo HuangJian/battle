@@ -2,7 +2,9 @@ import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import {
+  applySuffixPatches,
   buildMetricsRow,
+  METRICS_COLUMN_NAMES,
   METRICS_DIM,
   PICKUP_DIST_SENTINEL,
   resolveLivesFlag,
@@ -68,6 +70,25 @@ function makeTelemetry(over: Partial<Telemetry> = {}): Telemetry {
     onLaneExemptTicks: 0,
     onLaneMoveTicks: 0,
     onLaneHoldFireTicks: 0,
+    stopTicks: 0,
+    fireHeldTicks: 0,
+    idleTicks: 0,
+    nearEnemy4Ticks: 0,
+    damageWhileLow: 0,
+    damageTicks: [],
+    damageAmounts: [],
+    encl1Ticks: 0,
+    encl2Ticks: 0,
+    encl3pTicks: 0,
+    enclMax: 0,
+    aimHits: 0,
+    aimHitDistSum: 0,
+    aimBricks: 0,
+    aimIgnited: 0,
+    aimMisses: 0,
+    hurtWeight: 0,
+    enclWeightTicks: 0,
+    cornerWeightTicks: 0,
     ...over,
   }
 }
@@ -123,8 +144,115 @@ describe('export-rl-rollout metrics 行宽', () => {
     expect(names[51]).toBe('onLaneExemptTicks')
     expect(names[52]).toBe('onLaneMoveTicks')
     expect(names[53]).toBe('onLaneHoldFireTicks')
+    // metrics v10（plan/metrics-v10-gap-columns §1）：差距四族 15 列，同样永久追加在尾部。
+    expect(names[54]).toBe('stopTicks')
+    expect(names[55]).toBe('fireHeldTicks')
+    expect(names[56]).toBe('idleTicks')
+    expect(names[57]).toBe('enemyDist')
+    expect(names[58]).toBe('nearEnemy4Ticks')
+    expect(names[59]).toBe('damageBursts')
+    expect(names[60]).toBe('maxDamage120')
+    expect(names[61]).toBe('damageWhileLow')
+    expect(names[62]).toBe('encl1Ticks')
+    expect(names[63]).toBe('encl2Ticks')
+    expect(names[64]).toBe('encl3pTicks')
+    // v10 批次内整理（aim-dodge-levers）：enclExempt 三列移除，enclMax 顺位 68→65；
+    // aim-dodge 8 列追加 66–73。
+    expect(names[65]).toBe('enclMax')
+    expect(names[66]).toBe('aimHits')
+    expect(names[67]).toBe('aimHitDistSum')
+    expect(names[68]).toBe('aimBricks')
+    expect(names[69]).toBe('aimIgnited')
+    expect(names[70]).toBe('aimMisses')
+    expect(names[71]).toBe('hurtWeight')
+    expect(names[72]).toBe('enclWeightTicks')
+    expect(names[73]).toBe('cornerWeightTicks')
     // 列数变更必须 bump 版本（旧 shard 靠它响亮报错，不静默错读）
-    expect(py).toContain('METRICS_VERSION = 9')
+    expect(py).toContain('METRICS_VERSION = 10')
+  })
+
+  it('差距四族 15 列写入 idx54–68（metrics v10）', () => {
+    const world = seedWorld(1)
+    const row = buildMetricsRow(
+      0,
+      world,
+      makeTelemetry({
+        stopTicks: 1,
+        fireHeldTicks: 2,
+        idleTicks: 3,
+        nearEnemy4Ticks: 5,
+        damageWhileLow: 8,
+        encl1Ticks: 9,
+        encl2Ticks: 10,
+        encl3pTicks: 11,
+        enclMax: 3,
+      }),
+    )
+    expect(row.length).toBe(METRICS_DIM)
+    expect(row[54]).toBe(1) // stopTicks
+    expect(row[55]).toBe(2) // fireHeldTicks
+    expect(row[56]).toBe(3) // idleTicks
+    // idx57 是**每行采样**：最近敌车距或哨兵 -1（不读 telegraph，独立重算）
+    expect([-1, ...Array.from({ length: 600 }, (_, i) => i)]).toContain(row[57])
+    expect(row[58]).toBe(5) // nearEnemy4Ticks
+    // idx59/60 由 tel.damageTicks/damageAmounts 派生（此处空序列 ⇒ 全 0）
+    expect(row[59]).toBe(0)
+    expect(row[60]).toBe(0)
+    expect(row[61]).toBe(8) // damageWhileLow
+    // v10 批次内整理：enclExempt 三列移除；enclMax 顺位 68→65
+    expect(row.slice(62, 66)).toEqual([9, 10, 11, 3])
+  })
+
+  it('aim-dodge 8 列写入 idx66–73（v10 批次内追加）', () => {
+    const row = buildMetricsRow(
+      0,
+      seedWorld(1),
+      makeTelemetry({
+        aimHits: 1,
+        aimHitDistSum: 2,
+        aimBricks: 3,
+        aimIgnited: 4,
+        aimMisses: 5,
+        hurtWeight: 6,
+        enclWeightTicks: 7,
+        cornerWeightTicks: 8,
+      }),
+    )
+    expect(row.length).toBe(METRICS_DIM)
+    expect(row.slice(66, 74)).toEqual([1, 2, 3, 4, 5, 6, 7, 8])
+  })
+
+  it('METRICS_COLUMN_NAMES 与 Python METRICS 逐位相等（跨语言列序 oracle，sb P2-D）', () => {
+    const pyPath = join(import.meta.dir, '..', 'nn-training', 'rl', 'reward_library.py')
+    const py = readFileSync(pyPath, 'utf8')
+    const block = py.match(/METRICS: tuple\[str, \.\.\.\] = \(([\s\S]*?)\n\)/)
+    expect(block).not.toBeNull()
+    const names = [...(block as RegExpMatchArray)[1].matchAll(/"([A-Za-z0-9_]+)"/g)].map(
+      (m) => m[1],
+    )
+    // 逐位（非集合）——顺序错位是最难察觉的静默回归。
+    expect(names).toEqual([...METRICS_COLUMN_NAMES])
+  })
+
+  it('伤害成簇两列按事件序列重算（独立重实现对账）', () => {
+    // 逐笔事件：t=0/60 相连（≤120 ⇒ burst 1）；t=50/300 与 -1 哨兵位无关。
+    // 独立重实现：max120 = 任意起点 120t 窗内最大和。
+    const world = seedWorld(1)
+    const tel = makeTelemetry({ damageTicks: [10, 60, 200, 290], damageAmounts: [5, 7, 9, 11] })
+    const row = buildMetricsRow(0, world, tel)
+    // 连击：10→60 与 200→290 各 1 次（60→200 > 120）
+    expect(row[59]).toBe(2)
+    // 最大 120t 窗：10..60 与 200..290 各 12 / 20 ⇒ 20（不跨 60→200）
+    expect(row[60]).toBe(20)
+  })
+
+  it('v10 批次内整理：enclExempt 三列已移除（列宽 69 → 74 的删/增）', () => {
+    // 这三列是 v10 未签入批次的净价对，被决定 A（豁免拌入、零豁免列）取代；
+    // 本断言防止有人「顺手」把它们加回来（加回 = 列序漂移 + Python 对账红）。
+    const pyNames = METRICS_COLUMN_NAMES as readonly string[]
+    expect(pyNames.includes('enclExempt1Ticks')).toBe(false)
+    expect(pyNames.includes('enclExempt2Ticks')).toBe(false)
+    expect(pyNames.includes('enclExempt3pTicks')).toBe(false)
   })
 
   it('命中方位 5 列 + 穿越税 4 列写入 idx45–53（metrics v9）', () => {
@@ -280,6 +408,54 @@ describe('export-rl-rollout metrics 行宽', () => {
     expect(row[26]).toBe(2) // puGotTank
     expect(row[39]).toBe(3) // puGotOther
     expect(row[10]).toBe(4) // starsCollected
+  })
+})
+
+describe('applySuffixPatches：回写补丁（plan §3.4/§7.1）', () => {
+  it('4 行 × 2 列玩具：开火 i=1、结算 i=2 ⇒ Δr[1]=+1、其余 0', () => {
+    // 区间补丁 [1,2) = 结算时已推出去的「开火行之后」的唯一一行；结算行本身
+    // （i=2）与之后的行由 buildMetricsRow 读 tel 自然携带 ⇒ 打包时只补历史行。
+    const rows = [
+      [0, 0],
+      [0, 0],
+      [0, 0],
+      [0, 0],
+    ]
+    applySuffixPatches(rows, [{ col: 0, from: 1, to: 2, delta: 1 }])
+    expect(rows).toEqual([
+      [0, 0],
+      [1, 0],
+      [0, 0],
+      [0, 0],
+    ])
+  })
+
+  it('结算晚于终局行边界：to > rows.length ⇒ clamp，不抛不越界', () => {
+    const rows = [[0], [0], [0]]
+    applySuffixPatches(rows, [{ col: 0, from: 1, to: 6, delta: 2 }])
+    expect(rows).toEqual([[0], [2], [2]])
+  })
+
+  it('同 tick 开火+命中：from == to ⇒ 无已推行可补（no-op），增量全由后续行承担', () => {
+    const rows = [[0], [0], [5]] // 第 2 行已含 tel 的自然增量
+    applySuffixPatches(rows, [{ col: 0, from: 2, to: 2, delta: 5 }])
+    expect(rows).toEqual([[0], [0], [5]])
+  })
+
+  it('多补丁异列叠加：互不串列；空补丁 = no-op', () => {
+    const rows = [
+      [0, 0],
+      [0, 0],
+    ]
+    applySuffixPatches(rows, [
+      { col: 0, from: 0, to: 1, delta: 1 }, // hit 列补在开火行
+      { col: 1, from: 1, to: 2, delta: 2 }, // miss 列补在另一区间
+      { col: 0, from: 1, to: 1, delta: 9 }, // 空区间
+    ])
+    expect(rows).toEqual([
+      [1, 0],
+      [0, 2],
+    ])
   })
 })
 
