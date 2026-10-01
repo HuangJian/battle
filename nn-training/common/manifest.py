@@ -158,13 +158,13 @@ def role_of(manifest: Mapping[str, object]) -> str:
 MANIFEST_ITER_EXTRA: tuple[str, ...] = ("ts_code_sha256", "rollout")
 # ------------------------------------------------------------------ TS 导出器路径
 # `tools/sim/*.ts` 的真实文件名 —— 这是 **TS↔Python 的产物契约**，故与 wire 协议同住一层：
-# 长驻池按**同质入口**建（`remote/serve_pool.py`）、本机停等 cmd 由此拼（`rl/cmd.py`）、
+# 长驻池按**同质入口**建（`worker/serve_pool.py`）、本机停等 cmd 由此拼（`biz/cmd.py`）、
 # 云机找 TS 根时按它探路（`remote/run_loop.py`）—— 各处抄一份字面量就等着谁先漂。
 #: 逐局 rollout 导出器（kind=iter / kind=run）。
 ROLLOUT_SCRIPT = "tools/sim/export-rl-rollout.ts"
-#: 离线评估导出器（云机评估；`rl/eval_local.py` 建 cmd 时也用它）。
+#: 离线评估导出器（云机评估；`biz/eval_local.py` 建 cmd 时也用它）。
 EVAL_SCRIPT = "tools/sim/export-eval-game.ts"
-#: goal / intent 两个半 MDP 导出器（本机 `rl/cmd.py` 按模式选它们；节点侧 argv 白名单不放行）。
+#: goal / intent 两个半 MDP 导出器（本机 `biz/cmd.py` 按模式选它们；节点侧 argv 白名单不放行）。
 GOAL_SCRIPT = "tools/sim/export-goal-rollout.ts"
 INTENT_SCRIPT = "tools/sim/export-intent-rollout.ts"
 
@@ -180,7 +180,7 @@ SERVE_ANY_SCRIPT = "tools/sim/serve-any.ts"
 #: 导出器 → mode token —— `tools/agent/persist-pool.ts::PERSIST_MODE_BY_ENTRY` 的 Python 镜像。
 #: 值域必须与 `tools/sim/serve-any.ts::SERVE_MODES` 的键集逐字相同（那是**协议面**：改一侧=
 #: 改另一侧）；TS 侧有对拍用例（`tests/serve-any.test.ts`），Python 侧由
-#: `tests/test_remote_serve_pool.py` 钉住本表被真的送进了 worker 的 stdin。
+#: `tests/worker/test_remote_serve_pool.py` 钉住本表被真的送进了 worker 的 stdin。
 SERVE_MODE_BY_SCRIPT: Mapping[str, str] = {
     ROLLOUT_SCRIPT: "rollout",
     EVAL_SCRIPT: "eval",
@@ -416,7 +416,7 @@ def data_fp(shard_dirs: Sequence[str | Path]) -> str:
 # ------------------------------------------------------------------ M3 rollout 规格
 #
 # 为什么 argv 是规格的 SSOT（而不是 stages/seeds/difficulty 一堆字段）：
-# hub 侧本来就有 `rl/cmd.build_rollout_cmd` 拼装本机 rollout 命令（三导出器 + 课程
+# hub 侧本来就有 `biz/cmd.build_rollout_cmd` 拼装本机 rollout 命令（三导出器 + 课程
 # 覆盖 + D14 血缘，单源）。上云时**用同一个函数**、只把路径换成 job 目录内的相对
 # 路径，再把它交给节点执行 ⇒ 「节点跑的采集」与「本机跑的采集」逐字节同命令，
 # 逐位对拍（计划 §5.5①）是构造性质而不是靠人去对对参数。新增一个字段就等于在

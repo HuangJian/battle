@@ -38,14 +38,33 @@ if str(ROOT) not in sys.path:
 
 from tests.helpers import remote_dag as dag
 
-TOP, DEFERRED, UNRESOLVED = dag.graph()
+# 2026-09-29（§48）：**收集期不算整张图**。原来这里是模块级 `dag.graph()`，它用 AST
+# 扫一遍 `remote/` 下 40+ 个模块（实测 0.35s/进程，争夺态 ~0.75s）；而 `-n 12` 下**每个
+# worker 都要收集全部测试模块**，收集相又是满核串行段 ⇒ 这笔钱白堵在开跑前。
+# 改成模块级 autouse fixture 首次加载：用例体读的是模块全局（fixture 先跑 ⇒ 语义不变），
+# 工作落到执行相（机器在那儿只有 ~7.6/16 核忙，能与其他 worker 重叠）。
+# 合成源码用例自己调 `dag.graph()`（monkeypatch 掉 `dag.REMOTE_DIR`），不受这里影响。
+TOP: dict[str, set[str]] = {}
+DEFERRED: dict[str, set[str]] = {}
+UNRESOLVED: dict[str, set[str]] = {}
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _load_graph() -> None:
+    global TOP, DEFERRED, UNRESOLVED
+    TOP, DEFERRED, UNRESOLVED = dag.graph()
 
 
 # ───────────────────────── ① 账本恰好覆盖 ─────────────────────────
 
 
 def test_ledger_covers_exactly_every_remote_module() -> None:
-    """账本与 `remote/` 下的真模块**双向**对账：多一个少一个都红。"""
+    """账本与真模块**双向**对账：多一个少一个都红。
+
+    2026-09-30（刀 3）：覆盖范围是**三个包**（`remote/` + `hub/` + `worker/`）——
+    `remote_modules()` 按 `package_roots()` 枚举，所以新包只要进 `LEDGER_PACKAGES`
+    就自动被这条守住（名字保留没改，避免丢掉文档/日志里的引用）。
+    """
     real = set(dag.remote_modules())
     ledger = set(dag.LAYERS)
     missing = sorted(real - ledger)
@@ -58,7 +77,11 @@ def test_ledger_covers_exactly_every_remote_module() -> None:
 
 
 def test_layer_numbers_are_dense_and_meaningful() -> None:
-    """层号必须从 0 起连续（`max+1 == 层数`）——出现空洞说明有人手改过层号而没重排。"""
+    """层号必须从 0 起连续（`max+1 == 层数`）——出现空洞说明有人手改过层号而没重排。
+
+    跨包共用一套号（`worker.*` 与 `remote.*` 都在其中）：层号是**拓扑秩**，不是每包各排一套 ——
+    否则「谁在谁上面」会变成三份各自会漂的真相。
+    """
     values = sorted(set(dag.LAYERS.values()))
     assert values == list(range(len(values))), (
         f"层号不连续：{values}——请按拓扑秩重排（`uv run python -c` 见本文件头部说明）"
@@ -207,18 +230,39 @@ def test_the_graph_matches_a_second_independent_scan() -> None:
     import ast as _ast
 
     known = set(dag.LAYERS)
-    for module, path in dag.remote_modules().items():
+
+    def depth0_imports(path) -> set[str]:
+        """等价重实现：**顶层深度**上的 import（只 Function/Class 体算延迟）。
+
+        ⚠ 递归的是 `iter_child_nodes`而不是只 `tree.body`（2026-09-30 刀 6 纠正）：
+        `if TYPE_CHECKING:` 块里的 import 在 `_collect` 口径下**算顶层边**（它只按
+        Function/Class 增深度）——本重实现原先只看 `tree.body`，于是
+        `worker.gate_judges` 那条 `if TYPE_CHECKING: from worker.config import …`
+        只有一边看得见（旧家 `biz.config` 在账本外时永远被过滤掉 ⇒ 两边显得一致；
+        刀 6 把 config 搬进账本后当场露头）。
+        """
+        out: set[str] = set()
         tree = _ast.parse(path.read_text(encoding="utf-8"))
-        seen: set[str] = set()
-        for node in tree.body:  # 只看顶层
-            if isinstance(node, _ast.Import):
-                seen |= {a.name for a in node.names if a.name.startswith("remote.")}
-            elif isinstance(node, _ast.ImportFrom) and not node.level and node.module:
-                for a in node.names:
-                    base = "remote" if node.module == "remote" else node.module
-                    seen.add(f"{base}.{a.name}")
-                seen.add(node.module)
-        seen = {s for s in seen if s in known} - {module}
+
+        def walk(node, depth: int) -> None:
+            for child in _ast.iter_child_nodes(node):
+                if isinstance(child, (_ast.FunctionDef, _ast.AsyncFunctionDef, _ast.ClassDef)):
+                    walk(child, depth + 1)
+                    continue
+                if depth:
+                    continue
+                if isinstance(child, _ast.Import):
+                    out.update(a.name for a in child.names)
+                elif isinstance(child, _ast.ImportFrom) and not child.level and child.module:
+                    out.add(child.module)
+                    out.update(f"{child.module}.{a.name}" for a in child.names)
+                walk(child, depth)
+
+        walk(tree, 0)
+        return out
+
+    for module, path in dag.remote_modules().items():
+        seen = {s for s in depth0_imports(path) if s in known} - {module}
         assert seen == TOP[module], f"{module}: 两次扫描不一致 {sorted(seen ^ TOP[module])}"
 
 
@@ -226,12 +270,27 @@ def test_the_graph_matches_a_second_independent_scan() -> None:
 
 
 def _synth(tmp_path: Path, files: dict[str, str], monkeypatch) -> None:
-    """把合成源码铺成 `tmp_path/remote/*.py` 并让账本指向它。"""
+    """把合成源码铺成 `tmp_path/remote/*.py` 并让账本指向它。
+
+    刀 1 后账本跨**两个**包（`remote` + `hub`）⇒ 这里必须把两个目录都指向 tmp
+    （hub 侧空）：只让 `REMOTE_DIR` 走、留着真包的 `HUB_DIR`，合成的「环」会被真 hub 模块
+    的边淹没，本组用例就从「判据自证活性」退化成「判据没在看」。
+
+    2026-09-30（刀 3）：同一理由再扩一次 —— 现在是**三个**包（`remote` + `hub` + `worker`），
+    漏掉 `WORKER_DIR` 的代价更响：真 `worker/*` 会混进合成图，而 `LAYERS` 已被本组用例
+    monkeypatch 成只有合成键 ⇒ 当场 `KeyError: 'worker.iter_rollout'`（不是静默，但同因）。
+    """
     remote = tmp_path / "remote"
     remote.mkdir()
     for name, src in files.items():
         (remote / name).write_text(src, encoding="utf-8")
+    hub = tmp_path / "hub"
+    hub.mkdir()
+    worker = tmp_path / "worker"
+    worker.mkdir()
     monkeypatch.setattr(dag, "REMOTE_DIR", remote)
+    monkeypatch.setattr(dag, "HUB_DIR", hub)
+    monkeypatch.setattr(dag, "WORKER_DIR", worker)
 
 
 def test_detector_catches_a_top_level_cycle(tmp_path: Path, monkeypatch) -> None:
@@ -307,6 +366,9 @@ def test_detector_does_not_see_a_relative_import_as_nothing(tmp_path: Path, monk
     (remote / "pkg" / "a.py").write_text("from . import b\nfrom .b import thing\n", encoding="utf-8")
     (remote / "pkg" / "b.py").write_text("thing = 1\n", encoding="utf-8")
     monkeypatch.setattr(dag, "REMOTE_DIR", remote)
+    # 账本跨两个包（刀 1）⇒ hub 侧也必须指向空目录：否则真 `hub/*.py` 会带着它们的
+    # `common.instance_lock` 等边一起入场，而合成包只声明了 `remote.pkg.*` ⇒ 无端 unresolved。
+    monkeypatch.setattr(dag, "HUB_DIR", tmp_path / "hub")
     monkeypatch.setattr(dag, "LAYERS", {"remote.pkg.a": 1, "remote.pkg.b": 0})
     top, _, unresolved = dag.graph()
     assert top["remote.pkg.a"] == {"remote.pkg.b"}, top

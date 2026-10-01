@@ -6,7 +6,7 @@
  *
  * 两侧各测自己那一半（不叠第二层端到端）：
  *   * python 一侧的三道门（zip-slip / 拿错包 / 轮次发现）由
- *     `nn-training/tests/test_deliver_zip.py` 钉死；
+ *     `nn-training/tests/remote/test_deliver_zip.py` 钉死；
  *   * 这里钉**控制台这一侧**：argv 形状、产出文件信息、拒启理由、上传体的门、
  *     与 python 共享的跨语言常量（直接读 python 源码对账——改一边忘另一边会红）、
  *     以及「导入成功后要不要接着起评估」。
@@ -81,7 +81,7 @@ describe('与 python 共享的跨语言常量', () => {
 describe('任务包导出', () => {
   it('argv 走 trainer 自己的 --export-bundle（不在这侧重造包内容）', () => {
     const args = taskBundleArgs(COURSE)
-    expect(args[0]).toBe('nn-training/run_rl.py')
+    expect(args[0]).toBe('nn-training/trainer/run_rl.py')
     expect(args).toContain(COURSE)
     // 整段剩余：-1（跑到课程末尾）；★ §3 起 argv 不再带 --ppo（单一 PPO 路径）
     expect(args[args.indexOf('--run-iters') + 1]).toBe('-1')

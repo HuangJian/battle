@@ -6,7 +6,7 @@
  *  重建 spec，因此重启永远用最新配置与最新哨兵。
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'fs'
+import { existsSync, readdirSync } from 'fs'
 import path from 'path'
 import { CONFIG_PATH, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../core/paths'
 import { httpOk, pidAlive, portListen } from '../core/net'
@@ -73,18 +73,18 @@ export function selfNodeSpec(cfg: RlConfig): ProcSpec {
 
 // ────────────────────────── hub-server ──────────────────────────
 
-export const HUB_SERVER_ENTRY = 'nn-training/remote/hub_server.py'
+export const HUB_SERVER_ENTRY = 'nn-training/hub/server.py'
 
-/** hub 的**实现文件**（`nn-training/remote/hub/*.py`，仓库相对 posix 路径，排序）。
+/** hub 的**实现文件**（`nn-training/hub/*.py`，仓库相对 posix 路径，排序）。
  *
  *  为什么哨兵必须跟着实现走（2026-09-24 S4 第十六刀）：hub 的代码在三次拆分（路由混入 / 状态类 /
- *  调度面 / HTTP 面 / 引导链）中散到了 `remote/hub/` 下，而哨兵集一直只写入口那一个文件 ⇒
+ *  调度面 / HTTP 面 / 引导链）中散到了 `hub/` 下，而哨兵集一直只写入口那一个文件 ⇒
  *  **改 `hub/http_face.py` 的 handler 不会触发重启**，监督器会让进程继续跑旧代码（而 `hub_server.py`
  *  自己已经只剩 re-export，它的 mtime 不再随实现变）。目录哨兵也不行：`sentinelsChangedSince`
  *  比的是文件 mtime，目录 mtime 只在增删条目时变。所以这里**枚举文件**；`readdirSync` 失败
  *  （部署环境没有源码）就返回空——宁少不炸（本函数只在构造 spec 时调用，不碰网络）。 */
 export function hubImplementationFiles(): string[] {
-  const rel = 'nn-training/remote/hub'
+  const rel = 'nn-training/hub'
   try {
     return readdirSync(path.join(REPO_ROOT, rel))
       .filter((f) => f.endsWith('.py'))
@@ -115,7 +115,7 @@ export function hubServerSpec(cfg: RlConfig): ProcSpec {
       resolveVenvPython().python,
       '-u',
       '-m',
-      'remote.hub_server',
+      'hub.server',
       '--port',
       String(port),
       '--token',
@@ -129,7 +129,7 @@ export function hubServerSpec(cfg: RlConfig): ProcSpec {
       // 默认关：不打开连探活线程都不起，行为与改造前逐字节一致。
       ...(cfg.rl.hub_push ? ['--push', '--push-config', CONFIG_PATH] : []),
     ],
-    // cwd 钉死 REPO_ROOT：入口是包路径（`-m remote.hub_server`）靠 PYTHONPATH，
+    // cwd 钉死 REPO_ROOT：入口是包路径（`-m hub.server`）靠 PYTHONPATH，
     // 而它内部的默认路径/日志相对 cwd；控制台以 dashboard/ 为 cwd 启动时不能漂。
     cwd: REPO_ROOT,
     env: { PYTHONPATH: NN_TRAINING },
@@ -210,7 +210,7 @@ export function resolveRolloutSrc(cfg: RlConfig, course = ''): RolloutSrcMode {
   const raw = cc?.rollout_src ?? cfg.rl.rollout_src
   // `run`（离线训练模式；2026-09-19）也是合法值——漏掉它 = 离线课在 UI 上显示成 `local`，
   // 而那正是「云机在跑」与「本机在跑」看起来一样的那类静默分叉。域与 python
-  // `rl/loop_transport.py::ROLLOUT_SRCS` 同源（有测试对账；S4 首簇前在 `loop_steps.py`）。
+  // `trainer/loop_transport.py::ROLLOUT_SRCS` 同源（有测试对账；S4 首簇前在 `loop_steps.py`）。
   return raw === 'node' || raw === 'run' || raw === 'auto' ? raw : 'local'
 }
 
@@ -261,7 +261,7 @@ export function cloudflaredSpec(cfg: RlConfig, entry?: RegistryEntry): ProcSpec 
 // ────────────────────────── localWorker（本机独立 PPO worker，2026-09-15） ──────────────────────────
 
 /** localWorker 的入口 = 云端 worker 的同一个入口（`python -m remote_worker` 薄包装）。 */
-export const LOCAL_WORKER_ENTRY = 'nn-training/remote_worker.py'
+export const LOCAL_WORKER_ENTRY = 'nn-training/remote/remote_worker.py'
 
 /** 本机 PPO worker（pull 模式）：`remote_worker --poll <共享 hub>`。
  *
@@ -296,7 +296,7 @@ export function localWorkerSpec(
       venv.python,
       '-u',
       '-m',
-      'remote_worker',
+      'remote.remote_worker',
       '--poll',
       hubUrl,
       '--token',
@@ -313,12 +313,14 @@ export function localWorkerSpec(
     // 无 HTTP 端点可探（它是出站轮询者）——存活即健康，与 trainingLoop 同口径。
     // 槽恒 `''`（共享实例不属于任何单门课；归一唯一归宿 = registry.scopeOf）。
     healthy: async () => pidAlive(entryForCourse(loadRegistry(), 'localWorker', '')?.pid),
-    // 入口 + 实际执行链（remote/worker.py 是全部逻辑、protocol.py 是线路格式）：
+    // 入口 + 实际执行链（remote/worker.py 是全部逻辑、common/protocol.py 是线路格式）：
     // 手工哨兵补足 codehash-files.txt 之外的依赖面（漏报 = worker 用旧协议跑新 job）。
+    // ⚠ `protocol.py` 2026-09-23 下沉到 `common/`（S3 断 rl↔remote 循环）——路径跟着走；
+    //   写旧路径不会报错，只会让这条哨兵**永不触发**（`snap()` 对不存在的文件返回 null）。
     sentinels: pySentinels(
       LOCAL_WORKER_ENTRY,
       'nn-training/remote/worker.py',
-      'nn-training/remote/protocol.py',
+      'nn-training/common/protocol.py',
     ),
     // 整树停止：父 supervise_worker + 子 worker_loop（判定唯一来源 core/types.ts，
     // stop / 全部停止 / 监督重启三处共用）
@@ -331,7 +333,7 @@ export function localWorkerSpec(
 
 // ────────────────────────── BcLoop（BC 编排器，2026-09-13） ──────────────────────────
 
-export const BC_LOOP_ENTRY = 'nn-training/run_bc.py'
+export const BC_LOOP_ENTRY = 'nn-training/trainer/run_bc.py'
 
 export interface BcLoopSpecOpts {
   course: string
@@ -376,9 +378,9 @@ export function bcLoopSpec(cfg: RlConfig, s: BcLoopSpecOpts): ProcSpec {
     healthy: async () => pidAlive(entryForCourse(loadRegistry(), 'trainingLoop', s.course)?.pid),
     sentinels: pySentinels(
       BC_LOOP_ENTRY,
-      'nn-training/rl/bc_config.py',
-      'nn-training/rl/bc_dispatch.py',
-      'nn-training/remote/protocol.py',
+      'nn-training/worker/bc_config.py',
+      'nn-training/worker/bc_dispatch.py',
+      'nn-training/common/protocol.py',
       'nn-training/remote/worker.py',
       'nn-training/remote/hub_client.py',
     ),
@@ -387,7 +389,7 @@ export function bcLoopSpec(cfg: RlConfig, s: BcLoopSpecOpts): ProcSpec {
 
 // ────────────────────────── TrainingLoop ──────────────────────────
 
-export const TRAINING_LOOP_ENTRY = 'nn-training/run_rl.py'
+export const TRAINING_LOOP_ENTRY = 'nn-training/trainer/run_rl.py'
 
 export interface TrainingLoopSpecOpts {
   course: string
@@ -398,49 +400,19 @@ export interface TrainingLoopSpecOpts {
   /** pull 目标 hub（local preset 注入本机 hub；其余模式缺省=读 rl-config remote_hubs）。 */
   hubUrl?: string
   venv: { python: string; sitePackages: string }
-  /** 门禁触发时的动作：halt = 下发云端停机达令（默认）；notify = 只提示不停机。 */
-  gateHaltMode?: GateHaltMode
 }
 
-/**
- * 门禁动作模式（2026-09-13）：`halt` = 下发 cloud halt（历史默认）；
- * `notify` = 只记录 gate_verdict + 控制台横幅，**停掉云机这件事不做**。
- *
- * 为什么是文件而不是纯启动参数：G4(plateau) 的 REMEDIATE 每 5 轮就复现一次，
- * 历史上 c6-pickup3 / c6-bonus 就是被它反复杀掉云端 PPO worker（6 次 / 10 次）。
- * 操作员在训练途中改主意必须能热切，不能重启一轮（重启 = 丢进度）。
+/* ★ 2026-10-01（plan/gate-halt-platform-level）：**删掉了三个课程级门禁写/读面**——
+ *   `gateHaltModePath` / `readGateHaltMode` / `writeGateHaltMode`（`<traj>/gate-halt-mode.txt`）
+ *   与 `trainingLoopSpec` 里的 `--gate-halt-mode` argv 注入。原因：门禁停机模式升成**平台级**
+ *   单开关（`tmp/gate-halt.json`，写/读在 `stack/gate-halt.ts`）——课程级三写面会让同一实验的
+ *   两条腿门禁行为不同（配对序列不可比）。旧 txt 训练侧**不读**（只告警一次，可删）。
+ *   留半个写面 = 双事实源，所以三处一起删，不留兼容层。
  */
-export type GateHaltMode = 'halt' | 'notify'
 
-/**
- * 标志文件路径：`<traj>/gate-halt-mode.txt`。
- * Python 侧 `rl/loop_guards.py::_gate_halt_mode` 每轮门判定读它（优先于启动参数）。
- * traj 在课程里恒写作 `tmp/<name>`，故这里按 course 拼即可与 Python 对齐。
- */
-export function gateHaltModePath(course: string): string {
-  return path.join(LOG_DIR, course || 'nocourse', 'gate-halt-mode.txt')
-}
-
-export function readGateHaltMode(course: string): GateHaltMode {
-  try {
-    const v = readFileSync(gateHaltModePath(course), 'utf8').trim().toLowerCase()
-    if (v === 'notify' || v === 'halt') return v
-  } catch {
-    /* 无文件/不可读 = 用默认 */
-  }
-  return 'halt'
-}
-
-export function writeGateHaltMode(course: string, mode: GateHaltMode): GateHaltMode {
-  const p = gateHaltModePath(course)
-  mkdirSync(path.dirname(p), { recursive: true })
-  writeFileSync(p, `${mode}\n`, 'utf8')
-  return mode
-}
-
-/** **共享 trainer**（`run_rl_cluster.py --serve`）——2026-09-19 / R3-5：一个进程服务所有课程。
+/** **共享 trainer**（`trainer/run_rl_cluster.py --serve`）——2026-09-19 / R3-5：一个进程服务所有课程。
  *
- *  为什么不是每课一个 `run_rl.py --course <课>`：用户口径「trainingloop 也只需要开一个进程就能
+ *  为什么不是每课一个 `trainer/run_rl.py --course <课>`：用户口径「trainingloop 也只需要开一个进程就能
  *  支持所有并行课程」，且 R2d 已经造好单进程驱动者（按课锁 / 按课日志镜像 / 引擎池 / 故障隔离 /
  *  暂停恢复），R3-4 又让同一个进程能带 BC 课——而 BC 与 RL **共用 `trainingLoop` 这一个角色键**。
  *
@@ -448,8 +420,9 @@ export function writeGateHaltMode(course: string, mode: GateHaltMode): GateHaltM
  *  系统事实（与 hub 的 `--discover` 同一原则）。控制台先起 trainer、后加课不需要重启，也不会出现
  *  「漏注册 ⇒ 那门课永久饿死而表面一切正常」。一门课都没有也照常运行（队列空着等）。
  *
- *  **不给每課 CLI 旋钮**：单进程没有「这门课的 flag」这一说——它住在机器侧覆盖
- *  `rl-config → courses.<课>.{gate_halt_mode}`（serve 的 `apply_course_machine_overrides`）。
+ *  **不给每課 CLI 旋钮**：单进程没有「这门课的 flag」这一说——机器侧覆盖住
+ *  `rl-config → courses.<课>.*`（serve 的 `apply_course_machine_overrides`；今天白名单为空，
+ *  最后一个成员 `gate_halt_mode` 已于 2026-10-01 升成平台级开关，不再按课）。
  *  ★ 2026-09-21（§3）：backend 不再是旋钮（`--ppo` 已删）——PPO 恒为「发布到 hub 队列 +
  *  等 worker 认领」，故命令行上**一个 PPO 相关的旗标都没有**。
  *
@@ -457,7 +430,7 @@ export function writeGateHaltMode(course: string, mode: GateHaltMode): GateHaltM
  *  路径 = 该课 traj 下的 `training-loop.log`）⇒ 组件卡的「日志增长」就绪判定与 `/log/trainingLoop`
  *  页按课程读，与收敛前同一个文件。
  */
-export const TRAINER_SERVE_ENTRY = 'nn-training/run_rl_cluster.py'
+export const TRAINER_SERVE_ENTRY = 'nn-training/trainer/run_rl_cluster.py'
 
 export function trainerServeSpec(
   cfg: RlConfig,
@@ -521,7 +494,8 @@ export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSp
       // `REMOTE_PUSH_NODE` 定方向。
       ...hubFlags,
       ...(s.smoke ? ['--smoke'] : []),
-      ...(s.gateHaltMode ? ['--gate-halt-mode', s.gateHaltMode] : []),
+      // ★ 2026-10-01：`--gate-halt-mode` 不再注入——门禁停机是**平台级**（每轮读平台文件），
+      //   不是每课旋钮；旧调用的 `gateHaltMode` 选项已删（唯一活调用者本就没传它）。
       // ★ §3：`--remote-degrade-after` 已删除（单一 PPO 路径无「就地降级本机」档）。
     ],
     env: {

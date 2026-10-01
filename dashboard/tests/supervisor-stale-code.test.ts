@@ -142,12 +142,14 @@ describe('接线门禁：启动对账必须接管旧码进程', () => {
     ]) {
       expect(spec.sentinels.length).toBeGreaterThan(0)
     }
-    // 具体锚：hub 的代码身份必须包含它的入口（这次事故的主角）
-    expect(hubServerSpec(cfg).sentinels.some((f) => f.endsWith('hub_server.py'))).toBe(true)
+    // 具体锚：hub 的代码身份必须包含它的入口（这次事故的主角）。
+    // 2026-09-30（刀 1，hub 出包）：入口从 `nn-training/remote/hub_server.py` 搬到
+    // `nn-training/hub/server.py`（同时 `-m` 入口从 `remote.hub_server` 变成 `hub.server`）。
+    expect(hubServerSpec(cfg).sentinels.some((f) => f.endsWith('hub/server.py'))).toBe(true)
   })
 
   it('★ hub 的哨兵跟着**实现**走（入口只剩 re-export ⇒ 看它等于没看）', () => {
-    // 2026-09-24 S4 第十六刀之后 `hub_server.py` 只有 re-export：实现住在 `remote/hub/*.py`
+    // 2026-09-24 S4 第十六刀之后 `hub_server.py` 只有 re-export：实现住在 `hub/*.py`
     // （HTTP 面 / 引导链 / 路由混入 / 状态类）。哨兵集如果只写入口，改 handler **不会**触发重启
     // ——监督器会让进程继续跑旧代码，而这道闸的存在意义正是防这个。
     const cfg = loadConfig()
@@ -157,7 +159,7 @@ describe('接线门禁：启动对账必须接管旧码进程', () => {
     expect(impl.length, 'hub 实现文件一个都没扫到——路径写了？').toBeGreaterThan(5)
     for (const f of impl) expect(sentinels).toContain(f)
     // 两个新家必须在（它们是这一刀新开的口子，且是入口的**唯一**实现来源）。
-    for (const f of ['nn-training/remote/hub/http_face.py', 'nn-training/remote/hub/boot.py']) {
+    for (const f of ['nn-training/hub/http_face.py', 'nn-training/hub/boot.py']) {
       expect(sentinels).toContain(f)
     }
   })

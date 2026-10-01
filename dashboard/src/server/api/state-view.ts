@@ -14,6 +14,7 @@ import { buildLoopQueueView } from './loop-queue'
 import { buildOverview, buildWorkerRegistry, getHubAdmin, sharedTrainerAlive } from './overview'
 import { detectPpoQueueStall } from './ppo-queue'
 import { readTunnelAbRuns } from './tunnel-ab'
+import { buildGateHaltView } from '../../stack/gate-halt'
 import { getSlowSnapshot } from './snapshot-refresher'
 
 export async function buildStateView(courseOverride?: string): Promise<ConsoleStateView> {
@@ -152,6 +153,9 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     tunnelAb: readTunnelAbRuns(),
     phase,
     cloudHalts: state.cloudHalts ?? {},
+    // 门禁停机模式平台开关（2026-10-01）：意图读平台文件、实际读训练侧回执。
+    // 纯读两份小 JSON（毫秒级）；读不了各自降级（观测面坏不得把 /api/state 带崩）。
+    gateHalt: buildGateHaltView(),
     ppoQueueStall,
     loopComplete,
   }

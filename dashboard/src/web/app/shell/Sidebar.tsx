@@ -19,7 +19,14 @@
  */
 
 import type { JSX } from 'preact'
-import { refreshLabel, REFRESH_INTERVALS, type PageKey, type RefreshSec } from '../../view'
+import {
+  GATE_HALT_DURATIONS,
+  gateHaltUntilText,
+  refreshLabel,
+  REFRESH_INTERVALS,
+  type PageKey,
+  type RefreshSec,
+} from '../../view'
 import { NavSidebar } from './NavSidebar'
 
 export interface SidebarProps {
@@ -40,23 +47,41 @@ export interface SidebarProps {
   onNavigate: (page: PageKey, e: JSX.TargetedMouseEvent<HTMLAnchorElement>) => void
   /** 局域网只读（服务端 stamp）：锁徽标常驻。 */
   readOnly: boolean
-  /** 触发门禁（仅在有训练时显示；切换即时对下一轮门判定生效）。 */
+  /** 触发门禁（仅在有训练时显示）。
+   *
+   *  2026-10-01 起是**平台级**开关（`tmp/gate-halt.json`）：一处切、全平台生效，
+   *  不再按查看课程读写（旧实现 UI 摆在平台位置、切换却只改一门课）。
+   */
   gate: {
     visible: boolean
     mode: 'halt' | 'notify'
+    /** 盯盘时长档当前选择（小时；null = 不限时）——只在 notify 时渲染该档位。 */
+    hours: number | null
+    /** 平台意图的到点时间（epoch 秒；null = 不限时/非 notify）——上屏「到点自动回落 halt」。 */
+    until: number | null
+    /** 训练侧回执里本课实际生效的一行（空 = 还没读到过/旧视图——宁可空，不编）。 */
+    applied: string
+    /** 意图文件读不了时的人读原因（空 = 无）。 */
+    hint: string
     /** 只读/非本机时禁用（服务端也会 403 兜底）。 */
     disabled: boolean
     onChange: (m: 'halt' | 'notify') => void
+    onHoursChange: (h: number | null) => void
   }
   refresh: { value: RefreshSec; onChange: (v: RefreshSec) => void }
 }
 
 const GATE_TITLE =
-  '门禁触发时对云端 PPO worker 的动作。\n' +
+  '门禁触发时对云端 PPO worker 的动作——**全平台所有课程**（不再按课）。\n' +
   '· 停机（默认）：下发停机达令，云机释放。\n' +
   '· 提示：只记录 verdict 并显示告警，不停机——平台期（G4）会每 5 轮复现，' +
   '停机等于反复杀掉 PPO worker。\n' +
-  '切换后立即对下一轮门判定生效，无需重启训练。'
+  '提示可带盯盘时长：到点**自动回落停机**（人走了不必记得切回来）。\n' +
+  '切换后立即对下一轮门判定生效，无需重启训练；下面几行分别是意图的到点时间与训练侧的实际。'
+
+const GATE_HOURS_TITLE =
+  '提示模式的盯盘时长：到点自动回落「停机」。\n' +
+  '「不限时」= 一直只提示（记得自己切回停机——无人盯盘时该停就停）。'
 
 const COURSE_TITLE_RO = '局域网只读：切换仅影响当前浏览器的查看课程，不影响训练'
 const COURSE_TITLE_LOCAL = '切换查看课程（含历史课程）。不影响任何在训课程'
@@ -148,6 +173,36 @@ export function Sidebar({
                 </select>
               </label>
             ) : null}
+            {/* 盯盘时长（只对「提示」有意义）：改它 = 重写平台意图，不必先切回停机。 */}
+            {gate.visible && gate.mode === 'notify' ? (
+              <label className="tc-side__row" title={GATE_HOURS_TITLE}>
+                <span className="tc-side__slabel">盯盘</span>
+                <select
+                  id="gateHaltUntilSel"
+                  className="tc-sel"
+                  value={String(gate.hours ?? 'inf')}
+                  disabled={gate.disabled}
+                  aria-label="提示模式的盯盘时长（到点自动回落停机）"
+                  onChange={(e) => {
+                    const v = (e.currentTarget as HTMLSelectElement).value
+                    gate.onHoursChange(v === 'inf' ? null : Number(v))
+                  }}
+                >
+                  {GATE_HALT_DURATIONS.map((d) => (
+                    <option key={d.label} value={String(d.hours ?? 'inf')}>
+                      {d.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+            {gate.visible && gate.mode === 'notify' ? (
+              <div className="tc-side__note">{gateHaltUntilText(gate.until)}</div>
+            ) : null}
+            {gate.visible && gate.applied ? (
+              <div className="tc-side__note">{gate.applied}</div>
+            ) : null}
+            {gate.visible && gate.hint ? <div className="tc-side__note">{gate.hint}</div> : null}
             <label
               className="tc-side__row"
               title="页面数据轮询间隔（后台标签页自动暂停，切回即补拉）"

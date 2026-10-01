@@ -31,7 +31,7 @@
 | `uploader` · `post_result` | `remote.worker` | `uploader` 宿主建制并跨 job 存活；`post_result` 在宿主构造 uploader 时按调用时解析 |
 
 `worker.py` 仍以 `X as X` 显式转发这些名字（tests / e2e 直接 import 门面）——**但 patch 门面无效**，
-请 patch 本模块。这一条由 `tests/test_job_round_split.py` 双向钉住。
+请 patch 本模块。这一条由 `tests/remote/test_job_round_split.py` 双向钉住。
 
 ★ **本模块顶层零 torch**（与 `train_core` 同款纪律）：`run_job_fn` 是注入的，本模块连 `train_core`
   都不 import。

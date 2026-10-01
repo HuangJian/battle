@@ -16,6 +16,8 @@ import { join } from 'node:path'
 
 const root = join(import.meta.dir, '..', '..')
 const read = (p: string): string => readFileSync(join(root, p), 'utf8')
+/** 空白归一：源码哨兵只关心「接了哪根线」，不关心 formatter 怎么折行（合并后文件被重排过）。 */
+const flat = (s: string): string => s.replace(/\s+/g, ' ')
 
 describe('口径源码哨兵：事件扩展（P2）', () => {
   const combat = read('src/game/SimulationCombat.ts')
@@ -25,7 +27,9 @@ describe('口径源码哨兵：事件扩展（P2）', () => {
   })
 
   it('player_damage / player_hit（致死 + 星盾两条）都带 bulletId', () => {
-    expect(combat).toContain("type: 'player_damage', damage: bullet.damage, bulletId: bullet.id")
+    expect(flat(combat)).toContain(
+      "type: 'player_damage', damage: bullet.damage, bulletId: bullet.id",
+    )
     // 两条 player_hit push：致死路径 + spendStarShield 路径
     const hits = combat.match(/type: 'player_hit', bulletId: bullet\.id/g) ?? []
     expect(hits.length).toBe(2)
@@ -84,7 +88,7 @@ describe('口径源码哨兵：训练导出器（P3）', () => {
 
   it('raw-only 名单有「仅审计，不得定价」注记（§3.6）', () => {
     expect(roll).toContain('仅审计，不得定价')
-    expect(read('nn-training/rl/reward_library.py')).toContain('仅审计不得定价')
+    expect(read('nn-training/biz/reward_library.py')).toContain('仅审计不得定价')
   })
 })
 
@@ -104,7 +108,7 @@ describe('口径源码哨兵：豁免 A vs 宽口径（§3.6）', () => {
   })
 
   it('v10 批次整理：Python 侧不再有 enclExempt 三列（决定 A 取代）', () => {
-    const py = read('nn-training/rl/reward_library.py')
+    const py = read('nn-training/biz/reward_library.py')
     expect(py).not.toContain('enclExempt1Ticks')
     expect(py).not.toContain('enclExempt2Ticks')
     expect(py).not.toContain('enclExempt3pTicks')

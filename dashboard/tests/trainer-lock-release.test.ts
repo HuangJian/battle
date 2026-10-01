@@ -7,7 +7,7 @@
  *  `run_bc` 的同一把锁）。
  *
  *  修复 = 停止 trainer 时释放本课两把锁，且**先核验进程身份**（命令行必须命中本课
- *  `run_rl.py` / `run_bc.py`）：锁里的 PID 可能已被系统复用给无辜进程，只看「活着」就杀
+ *  `trainer/run_rl.py` / `trainer/run_bc.py`）：锁里的 PID 可能已被系统复用给无辜进程，只看「活着」就杀
  *  就是误伤。身份不符 → 不杀不删，fail-closed 交人工确认。
  *
  *  纪律（同 training-port-reclaim.test.ts）：单测走可注入依赖，绝不写真实锁文件 / 不碰
@@ -126,18 +126,18 @@ describe('releaseTrainerLock（注入依赖）', () => {
 
   it('身份核验通过 → 停掉本课 trainer 并删锁（脚本按 kind 取）', async () => {
     const { deps, calls, state } = io({
-      cmdlineOf: () => `python -u run_rl.py --course ${COURSE}`,
+      cmdlineOf: () => `python -u trainer/run_rl.py --course ${COURSE}`,
     })
     state.alive.add(4242)
     const note = await releaseTrainerLock('run_rl', COURSE, deps)
-    expect(calls.killed).toEqual([['run_rl.py', COURSE]]) // 只有核验过的那个脚本被停
+    expect(calls.killed).toEqual([['trainer/run_rl.py', COURSE]]) // 只有核验过的那个脚本被停
     expect(calls.removed).toBe(1)
     expect(note).toContain('已释放')
   })
 
   it('核验通过但没停掉（kill 无效）→ 不删锁、如实报告', async () => {
     const { deps, calls, state } = io({
-      cmdlineOf: () => `python -u run_rl.py --course ${COURSE}`,
+      cmdlineOf: () => `python -u trainer/run_rl.py --course ${COURSE}`,
       killTrainer: async () => {
         /* no-op：模拟 kill 之后进程仍活着 */
       },
@@ -150,17 +150,17 @@ describe('releaseTrainerLock（注入依赖）', () => {
 
   it('别课 trainer 的同名锁绝不误杀（身份核验按 course 词边界）', async () => {
     const { deps, calls, state } = io({
-      cmdlineOf: () => 'python -u run_rl.py --course other-course',
+      cmdlineOf: () => 'python -u trainer/run_rl.py --course other-course',
     })
     state.alive.add(4242)
     expect(await releaseTrainerLock('run_rl', COURSE, deps)).toContain('身份未通过核验')
     expect(calls.killed).toEqual([])
   })
 
-  it('两把锁分别按 kind 取脚本：run_bc → run_bc.py', async () => {
+  it('两把锁分别按 kind 取脚本：run_bc → trainer/run_bc.py', async () => {
     const seen: string[][] = []
     const { deps, state } = io({
-      cmdlineOf: () => `python -u run_bc.py --course ${COURSE}`,
+      cmdlineOf: () => `python -u trainer/run_bc.py --course ${COURSE}`,
       killTrainer: async (script, course) => {
         seen.push([script, course])
         state.alive.clear()
@@ -168,8 +168,8 @@ describe('releaseTrainerLock（注入依赖）', () => {
     })
     state.alive.add(4242)
     await releaseTrainerLock('run_bc', COURSE, deps)
-    expect(seen).toEqual([['run_bc.py', COURSE]])
-    expect(TRAINER_SCRIPT.run_bc).toBe('run_bc.py')
+    expect(seen).toEqual([['trainer/run_bc.py', COURSE]])
+    expect(TRAINER_SCRIPT.run_bc).toBe('trainer/run_bc.py')
   })
 
   it('releaseTrainerLocks = run_rl + run_bc 两把（各自的持有者/命令行各自核验）', async () => {
@@ -181,18 +181,18 @@ describe('releaseTrainerLock（注入依赖）', () => {
       holderOf: (p) => (p.includes('run_bc') ? { pid: 5353, exe: '' } : { pid: 4242, exe: '' }),
       cmdlineOf: (pid) =>
         pid === 5353
-          ? `python -u run_bc.py --course ${COURSE}`
-          : `python -u run_rl.py --course ${COURSE}`,
+          ? `python -u trainer/run_bc.py --course ${COURSE}`
+          : `python -u trainer/run_rl.py --course ${COURSE}`,
       killTrainer: async (script) => {
         seen.push(script)
         // 只让本 kind 的持有者退出（另一把锁的持有者是另一个活进程）
-        state.alive.delete(script === 'run_bc.py' ? 5353 : 4242)
+        state.alive.delete(script === 'trainer/run_bc.py' ? 5353 : 4242)
       },
     })
     state.alive.add(4242)
     state.alive.add(5353)
     const notes = await releaseTrainerLocks(COURSE, deps)
-    expect(seen).toEqual(['run_rl.py', 'run_bc.py'])
+    expect(seen).toEqual(['trainer/run_rl.py', 'trainer/run_bc.py'])
     expect(notes).toHaveLength(2)
     expect(notes.every((n) => n.includes('已释放'))).toBe(true)
   })

@@ -22,7 +22,7 @@ import { seedWorld, positionPlayer, makePowerUp } from './helpers'
  *
  * 这里锁两件事：
  *   1. 行宽 == `METRICS_DIM`（加/删列必须同步常量）；
- *   2. `METRICS_DIM` == Python `rl/reward_library.py::METRICS` 的条目数（跨语言 SSOT，
+ *   2. `METRICS_DIM` == Python `biz/reward_library.py::METRICS` 的条目数（跨语言 SSOT，
  *      manifest 的 metrics_version 与之绑定）。
  */
 
@@ -113,7 +113,8 @@ describe('export-rl-rollout metrics 行宽', () => {
   })
 
   it('METRICS_DIM 与 Python METRICS 列数一致（跨语言 SSOT）', () => {
-    const pyPath = join(import.meta.dir, '..', 'nn-training', 'rl', 'reward_library.py')
+    // 2026-09-30（刀 4）：奖励公式引擎是**纯逻辑** ⇒ 随整族从 `nn-training/rl/` 搬进 `biz/`。
+    const pyPath = join(import.meta.dir, '..', 'nn-training', 'biz', 'reward_library.py')
     const py = readFileSync(pyPath, 'utf8')
     const block = py.match(/METRICS: tuple\[str, \.\.\.\] = \(([\s\S]*?)\n\)/)
     expect(block).not.toBeNull()
@@ -223,7 +224,7 @@ describe('export-rl-rollout metrics 行宽', () => {
   })
 
   it('METRICS_COLUMN_NAMES 与 Python METRICS 逐位相等（跨语言列序 oracle，sb P2-D）', () => {
-    const pyPath = join(import.meta.dir, '..', 'nn-training', 'rl', 'reward_library.py')
+    const pyPath = join(import.meta.dir, '..', 'nn-training', 'biz', 'reward_library.py')
     const py = readFileSync(pyPath, 'utf8')
     const block = py.match(/METRICS: tuple\[str, \.\.\.\] = \(([\s\S]*?)\n\)/)
     expect(block).not.toBeNull()

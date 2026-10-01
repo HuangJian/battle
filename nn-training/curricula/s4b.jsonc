@@ -7,7 +7,7 @@
 //
 // 忠实性对账：与 `reward_builtin.v7_phi`（TS `rl-reward.ts::phiNow` 的向量化
 // 移植）在 golden 向量上逐位一致（tolerance ≤1e-9）。
-// 启动：python run_rl.py --course s4b
+// 启动：python trainer/run_rl.py --course s4b
 {
   "version": 5,
   "name": "s4b-v7",

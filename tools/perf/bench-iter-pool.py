@@ -1,6 +1,6 @@
-"""bench-iter-pool.py —— 节点侧长驻池（`nn-training/remote/serve_pool.py`）的 A/B 台架。
+"""bench-iter-pool.py —— 节点侧长驻池（`nn-training/worker/serve_pool.py`）的 A/B 台架。
 
-口径（与 `nn-training/tests/test_remote_iter_real_bun.py` 同源）：**真 bun + 真导出器 + 真权重**，
+口径（与 `nn-training/tests/worker/test_remote_iter_real_bun.py` 同源）：**真 bun + 真导出器 + 真权重**，
 同一份 `build_iter_spec` 出来的 spec，唯一变量 = `NN_SERVE_POOL`（0 = 逐局 spawn，旧行为）。
 每档 **pool / spawn 交替跑两轮**（交错是防频率漂移的既有纪律），并断言两臂 `data_fp` 相同
 （池只许更快、不许改变产物）。
@@ -30,10 +30,10 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parent.parent.parent  # tools/perf/ 往上是仓根
 sys.path.insert(0, str(ROOT / "nn-training"))
 
-import remote.iter_rollout as iter_rollout  # noqa: E402
-import remote.serve_pool as serve_pool  # noqa: E402
+import worker.iter_rollout as iter_rollout  # noqa: E402
+import worker.serve_pool as serve_pool  # noqa: E402
 from common.protocol import data_fp, validate_rollout_spec  # noqa: E402
-from rl.iter_job import build_iter_spec  # noqa: E402
+from biz.iter_job import build_iter_spec  # noqa: E402
 
 
 def _env_int(name: str, default: int) -> int:

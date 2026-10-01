@@ -20,7 +20,7 @@ sha256 + 字节数，导入时**逐件对账**（包要过 Kaggle dataset / Driv
 为什么用「一个 zip + 两条命令」而不是「几条 curl + 一堆环境变量」：Kaggle 官方的任务入口是
 **数据集/notebook 输出**，Colab 官方入口是 **Drive / 文件上传**——都是「搬文件」，不是「配网络」。
 本模块只负责把文件摆成对方能理解的样子，网络那部分（若中途能连上 hub 就自动补传产物）在
-`remote/uploader.py`，与包本身解耦：**包不依赖 hub 的在线状态**（导出时 hub 不可达也能导出）。
+`remote/result_upload.py`，与包本身解耦：**包不依赖 hub 的在线状态**（导出时 hub 不可达也能导出）。
 
 安全：`import_bundle` 的解压**不许越界**（zip-slip：绝对路径 / `..` / 盘符一律拒收）——这个 zip
 的来源是「人手工搬来的文件」，是最典型的不可信输入。
@@ -47,7 +47,7 @@ from common.protocol import (
 )
 
 #: 包索引名（zip 根）。
-BUNDLE_INDEX = "task.json"
+BUNDLE_INDEX = "tools.task.json"
 #: 包身份标记（防「拿错 zip」这类最贵的错误）。
 BUNDLE_MAGIC = "battle2-task-bundle"
 BUNDLE_PROTO = 1
@@ -191,7 +191,7 @@ run_id      : {index['run_id']}    计划区间 : it{index['it']} → it{index['
 
 包里是什么（task.json 逐件记 sha256，导入时对账）
 -------------------------------------------------
-  plan.json         本段要跑的每一轮：对集 + argv 模板 + 终点（`rl/plan.py`）
+  plan.json         本段要跑的每一轮：对集 + argv 模板 + 终点（`worker/plan.py`）
   manifest.json     课程全文 + 超参 + 血缘（D13/D14）
   init_weights.json 起点权重（= it{index['it']} 的输入）
   opt.tar           Adam 动量（**续训必需**；缺失 = 动量静默归零）

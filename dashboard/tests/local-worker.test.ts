@@ -15,7 +15,7 @@
  *  ④ **接线门禁**：启动/停止/重建/冒烟/日志/标签五处都在（缺一处 = UI 无声失败）。
  *
  * 行为层（一个进程领多门课的活）由 python 侧假 hub 用例逐条演示：
- * `nn-training/tests/test_local_worker_multi_course.py`。
+ * `nn-training/tests/remote/test_local_worker_multi_course.py`。
  *
  * 纪律：端口/容量一律从真实 rl-config 推导（不写死数字）；本文件不 spawn 任何进程。
  */
@@ -113,16 +113,18 @@ describe('localWorker 形态（共享进程）', () => {
     // 共享实例不属于任何单门课：course 为空串 = 槽 `''`
     expect(spec.course).toBe('')
     // 入口命令与云端 notebook 那条完全同源（不是另写一份本机 PPO 实现）
-    expect(spec.cmd.slice(0, 4)).toEqual(['python', '-u', '-m', 'remote_worker'])
+    expect(spec.cmd.slice(0, 4)).toEqual(['python', '-u', '-m', 'remote.remote_worker'])
     expect(flag(spec, '--poll')).toBe(sharedHubUrl(cfg))
     expect(flag(spec, '--out')).toBe('tmp/local-worker')
     expect(flag(spec, '--device')).toBe('cpu')
     expect(flag(spec, '--token')).toBe(cfg.rl.remote_token)
-    expect(LOCAL_WORKER_ENTRY).toBe('nn-training/remote_worker.py')
-    // 哨兵 = 入口 + 真正的执行链（remote/worker.py 是全部逻辑、protocol.py 是线路格式）
+    expect(LOCAL_WORKER_ENTRY).toBe('nn-training/remote/remote_worker.py')
+    // 哨兵 = 入口 + 真正的执行链（remote/worker.py 是全部逻辑、common/protocol.py 是线路格式）
     expect(spec.sentinels).toContain(LOCAL_WORKER_ENTRY)
     expect(spec.sentinels.some((s) => s.endsWith('remote/worker.py'))).toBe(true)
-    expect(spec.sentinels.some((s) => s.endsWith('remote/protocol.py'))).toBe(true)
+    // 2026-09-30：`protocol.py` 住在 `common/`（刀 2 下沉）。这里以前断言的是 `remote/` ——
+    // 断言本身没错（它只查后缀），错的是那条**旧路径**：它让哨兵永不触发。
+    expect(spec.sentinels.some((s) => s.endsWith('common/protocol.py'))).toBe(true)
   })
 
   it('spec 与课程数量无关：多课程配置下逐字段相同（没有课程参数可传）', () => {

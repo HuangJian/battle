@@ -9,8 +9,8 @@
 `{offline_boot,tailscale_boot,offline_deliverable}.py` 拉进同一目录（`/tmp/battle-boot`），
 `offline_boot` 到用的时候再 `importlib` 装载本模块（`offline_boot._load_deliverable()`）；
 仓库/包内形态回落到 `remote.offline_deliverable`。所以**本模块与 `offline_boot` 同纪律：
-顶层不得 import `remote.*`**（拿包之前那个包不存在），`common/` / `rl/` 同理
-（`tests/test_common_layer.py` + `tests/helpers/remote_dag.py` 守着）。
+顶层不得 import `remote.*`**（拿包之前那个包不存在），`common/` / `trainer/` 同理
+（`tests/common/test_common_layer.py` + `tests/helpers/remote_dag.py` 守着）。
 
 **产物包名常量是抄的一份**（`ALL_ZIP` / `LATEST_ZIP` / `LATEST_ROW_NAME`）：与
 `remote/artifacts.py::ArtifactStore` 逐字相同（测试守）——搬家不改变这条孪生对账关系。

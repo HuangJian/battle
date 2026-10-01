@@ -174,7 +174,7 @@ class PrefetchStore:
         if not d.exists():
             return
         try:
-            from platform_utils import rmtree_best_effort
+            from common.platform_utils import rmtree_best_effort
 
             rmtree_best_effort(d, ignore_errors=True)
         except BaseException:  # 沙箱删除守卫：留给下次 prune，不打断主循环

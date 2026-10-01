@@ -7,7 +7,7 @@
  *   rollout 子进程仅 ~50% CPU）。v2 把打包下沉到 exporter 子进程（--pack <path>），
  *   与仿真并行执行；同时去掉 base64（线体体积 -25%）与 JSON 内嵌大块二进制。
  *
- * 格式（TS 写 / Python 读，双语契约，Python 端 nn-training/dist_common.unpack_container）：
+ * 格式（TS 写 / Python 读，双语契约，Python 端 nn-training/common/distribution.unpack_container）：
  *
  *   container := gzip(frame)
  *   frame     := magic u32 BE = 0x42435632 ('B''C''V''2')
@@ -34,7 +34,7 @@ export interface PackHeader {
   files: Array<{ name: string; len: number }>
 }
 
-/** 解包 BCV2 容器（m1-eval --dist-nodes 消费端；与 Python dist_common.unpack_container 对等）。 */
+/** 解包 BCV2 容器（m1-eval --dist-nodes 消费端；与 Python common.distribution.unpack_container 对等）。 */
 export function unpackContainer(buf: Buffer): {
   manifest: Record<string, unknown>
   entries: Map<string, Buffer>

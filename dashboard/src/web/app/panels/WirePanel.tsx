@@ -244,7 +244,7 @@ export function WirePanel({ stateView, course }: WirePanelProps) {
           还没有探针结果。跑一次：
           <br />
           <code>
-            bun dashboard/src/launch/cli.ts --script remote/tunnel_ab_probe.py --legs quic,http2
+            bun dashboard/src/launch/cli.ts --script hub/tunnel_ab_probe.py --legs quic,http2
             --rounds 5 --json-out tmp/tunnel-ab-1.json
           </code>
           <br />

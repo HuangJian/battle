@@ -2,7 +2,7 @@
 
  *  形状：`hubserver/trainingloop/selfNode/cloudflared 都只需要开一个进程，就能同时支持所有
  *  并行训练课程`。本文件钉的是这三条共享角色的**槽位/地址/换代**形状——trainer 已在
- *  2026-09-19（R3-5）收敛为 `run_rl_cluster.py --serve` 一个进程（它自己的行为面在
+ *  2026-09-19（R3-5）收敛为 `trainer/run_rl_cluster.py --serve` 一个进程（它自己的行为面在
  *  tests/training-shared-trainer.test.ts）。
  *
  *  四条不变量（每一条都能单独出事，且都只在「多课程同时跑」时才显形）：

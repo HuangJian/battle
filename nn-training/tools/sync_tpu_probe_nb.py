@@ -7,7 +7,7 @@
     python tools/sync_tpu_probe_nb.py            # 同步（写回 notebook）
     python tools/sync_tpu_probe_nb.py --check    # 只检查漂移；漂移 exit 1
 
-drift 由 `tests/test_tpu_probe_notebook.py` 在 python-gate 常驻拦截——改探针
+drift 由 `tests/tools/test_tpu_probe_notebook.py` 在 python-gate 常驻拦截——改探针
 逻辑只改 tools/tpu-probe.py，然后跑一次本工具重新生成 notebook。
 """
 

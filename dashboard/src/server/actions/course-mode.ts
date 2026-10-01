@@ -311,7 +311,7 @@ export interface RestoreResult {
  *
  *  ★ 2026-09-26（用户报障「起 hub 等很久，像是把停掉的历史课都扫了一遍」）：**只回灌已开课的
  *  课程**（判据 = 开课标记，`stack/courses.ts::courseEnabled`）——与 hub 自己的认课判据同源
- *  （`remote/hub/queue_discover.py::_course_dir_live` 与 `_serves_course` 都要求这个标记）。
+ *  （`hub/queue_discover.py::_course_dir_live` 与 `_serves_course` 都要求这个标记）。
  *  意图表是只增的（开课、停课、热切都往里写），停在 `tmp/` 下的历史课会永久留着一份意图，
  *  而 hub 对**没有标记**的课按设计必回 400 ⇒ 每一次回灌都为它们烧掉整段有界重试
  *  （3× 首试 + 2×2s ≈ 4s/门，串行）——真机实测 11 门停掉的课 = 起 hub 白等 ~44s，且摘要里

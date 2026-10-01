@@ -56,6 +56,24 @@ import {
 } from './persist-pool'
 // 工作目录磁盘收敛纯函数（boot 孤儿清理 + 权重文件保留；修正则 2026-09-08，§374）
 import { staleOrphanPlan, sweepWeightFilePlan } from './workdir-cleanup'
+// 单实例互斥纯判定（plan/sampler-single-instance.plan.md，2026-09-29）：Linux 上为重启链开的
+// SO_REUSEPORT 让第二个实例绑同一端口**静默成功** ⇒ EADDRINUSE 护栏失效（一台节点两个代码
+// 版本同时服务）。判定表在 single-instance.ts（纯函数，单测共享）——本文件只做 IO 与接线。
+import {
+  HANDOFF_BOOTID_ENV,
+  HANDOFF_ENV,
+  LOCK_NAME,
+  PROBE_PATH,
+  PROBE_TIMEOUT_MS,
+  REFUSE_EXIT_CODE,
+  decideSingleInstance,
+  emptyProbe,
+  instanceGuardOf,
+  probeFromStatusJson,
+  type InstanceGuard,
+  type LockInfo,
+  type ProbeInfo,
+} from './single-instance'
 // codeHash 文件集展开（F3/F4 抽出，plan/dist-codehash-stale-fix.md）：纯实现 + 诊断
 // 工具与单测共用；本文件重新导出以保持对外 API 稳定（console api.ts / dist-agent.test.ts）。
 import {
@@ -95,7 +113,7 @@ export const SHARD_FILES = [
 
 // ---------------- CLI ----------------
 /** 本机可用核数：`effectiveCores()` 是唯一口径（容器配额/亲和掩码 > 宿主机裸数，
- * 见 tools/lib/cores.ts 与 nn-training/platform_utils.py::effective_cores）。
+ * 见 tools/lib/cores.ts 与 nn-training/common/platform_utils.py::effective_cores）。
  * 用 `os.cpus().length` 会在容器里报宿主机核数（Kaggle 224 vs 配额 96）⇒ 派工与上报的
  * cpus 都跟着虚高 2.3×（2026-09-25 云机 rollout 卡死的那条账）。 */
 const CPUS = effectiveCores()
@@ -111,6 +129,8 @@ let forceBun = false
 let persistEnabled = true
 /** 启动预热 worker 池（2026-09-28 a95 归因）：默认开，`--no-prewarm` 关。 */
 let prewarmEnabled = true
+/** 显式接管既有实例（运维兜底）：唯一不需要交接标记的接管入口（§3.1 判定表行 1）。 */
+let cliTakeover = false
 let persistBreaker: PersistBreaker = newPersistBreaker()
 /** /v1/result 404 调试：轮询高峰可刷屏——30s 窗口只打首条+suppressed 汇总。 */
 let missLogWindowAt = 0
@@ -126,6 +146,7 @@ let missLogSuppressed = 0
     else if (a === '--no-node') forceBun = true
     else if (a === '--no-persist') persistEnabled = false
     else if (a === '--no-prewarm') prewarmEnabled = false
+    else if (a === '--takeover') cliTakeover = true
   }
 }
 
@@ -264,7 +285,7 @@ function serveWithRetry(
   }
 }
 
-// ---------------- codeHash（与 nn-training/dist_common.py 逐字节一致的双语契约） ----------------
+// ---------------- codeHash（与 nn-training/common/distribution.py 逐字节一致的双语契约） ----------------
 // 实现已迁至 ./codehash-files（纯模块，无本文件模块加载副作用）；此处仅 re-export。
 
 /**
@@ -274,7 +295,7 @@ function serveWithRetry(
  *
  * F2（2026-09-19 审计）：POST /v1/update 只 pull、**不重启**，进程里跑的仍是启动时那份
  * 代码 ⇒ 这个 memo 必须继续报「运行中代码」的 hash。旧实现在 pull 成功后把它置空重算 ⇒ 节点会
- * 「报新代码、跑旧代码」，codeHash 门（dist_common.check_code_hash）随即放行它——正是该门
+ * 「报新代码、跑旧代码」，codeHash 门（common.distribution.check_code_hash）随即放行它——正是该门
  * 要拦的东西的反向漏网。要换 hash，只有重启（/v1/restart，可带 pullBranch）。
  */
 export function memoizedCodeHash(): string {
@@ -336,7 +357,7 @@ const gitShortMemo: { value: string | null } = { value: null }
 // ---------------- engine_epoch 已**不再**是节点门字段（2026-09-17） ----------------
 // 用户指令：唯一事实来源 = tools/agent/codehash-files.txt，rollout 与 eval 同源。
 // 故 /v1/ping 只报 codeHash，eval 侧与 rollout 侧比的是**同一个值**；engine_epoch 退为
-// **账本记录值**（= sha256(codeHash)[0:16]，训练机侧算：dist_common.compute_engine_epoch /
+// **账本记录值**（= sha256(codeHash)[0:16]，训练机侧算：common.distribution.compute_engine_epoch /
 // dashboard/src/evalboard/engine.ts）——它不再是节点门判据，也就没有 node↔trainer 的
 // 字段契约，不必出现在 ping 里（旧 agent 的 engineEpoch 字段被忽略即可）。
 
@@ -387,6 +408,12 @@ const inflight = new Map<string, { stage: number; seed: number; startedAt: numbe
 const failedTasks = new Map<string, string>()
 let activeWorkers = 0
 const startedAt = Date.now()
+/** 进程启动随机 8 hex（§3.3）：区分「同 pid 不同代」，并作交接父子核对通道。 */
+const BOOT_ID = randomBytes(4).toString('hex')
+/** 单实例锁（§3.1）：<WORK_DIR>/agent.lock；'wx' 独占创建是唯一互斥原语。 */
+const LOCK_PATH = path.join(WORK_DIR, LOCK_NAME)
+/** 本次起听的判定结论（§3.4：/v1/status 与 /v1/ping 的 instanceGuard）。 */
+let instanceGuard: InstanceGuard = 'fresh'
 
 interface WeightsState {
   sha: string
@@ -757,10 +784,133 @@ function sweepWorkdir(nowMs = Date.now()): void {
   }
 }
 
+// ---------------- 单实例互斥（plan/sampler-single-instance.plan.md，2026-09-29） ----------------
+// 为什么需要它：Linux 上 serveWithRetry 为重启链开了 SO_REUSEPORT（TIME_WAIT 即时重绑），
+// 副作用是第二个实例绑同一端口也**静默成功** ⇒ 一台节点两个代码版本同时服务、codeHash 门
+// 变成抽签（旧版本 shard 进 payload ⇒ 云 worker 一算就炸）。处置：起听前用「HTTP 探活优先 +
+// pid 锁兜底」判定（single-instance.ts 纯函数），锁用 'wx' 独占创建关掉冷启动竞态；
+// 默认拒起（exit 非 0），接管只认 --takeover / 交接标记（§1.4-1/2：不关 reusePort、不自动杀旧）。
+
+/** `process.kill(pid, 0)`：ESRCH = 已死；EPERM = 活着但不属于本进程（也算活着）。 */
+function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0)
+    return true
+  } catch (e) {
+    return (e as { code?: string }).code === 'EPERM'
+  }
+}
+
+/** 读锁（坏 JSON / 缺 pid 一律 null ⇒ 退回探活判据）；pidAlive/isSelf 在此就地推出。 */
+function readInstanceLock(): LockInfo | null {
+  try {
+    const raw = JSON.parse(fs.readFileSync(LOCK_PATH, 'utf8')) as {
+      pid?: unknown
+      bootId?: unknown
+    }
+    if (typeof raw.pid !== 'number' || !Number.isInteger(raw.pid) || raw.pid <= 0) return null
+    return {
+      pid: raw.pid,
+      pidAlive: pidAlive(raw.pid),
+      isSelf: raw.pid === process.pid,
+      ...(typeof raw.bootId === 'string' ? { bootId: raw.bootId } : {}),
+    }
+  } catch {
+    return null
+  }
+}
+
+/** 锁内容（§3.3）：pid + bootId + startedAt + codeHash8——「谁在服务」的最小事实集。 */
+function instanceLockBody(): Record<string, unknown> {
+  return {
+    pid: process.pid,
+    bootId: BOOT_ID,
+    startedAt,
+    codeHash8: memoizedCodeHash().slice(0, 8),
+  }
+}
+
+/** 原子抢占（'wx' 独占创建）。false = 已有锁（另一个实例先到）= 冷启动竞态的输家判决。 */
+function acquireInstanceLock(): boolean {
+  try {
+    fs.writeFileSync(LOCK_PATH, JSON.stringify(instanceLockBody()), { flag: 'wx' })
+    return true
+  } catch {
+    return false
+  }
+}
+
+/** 覆盖写（自己拥有时刷新；交接 child 接管后落自己的事实）。 */
+function writeInstanceLock(): void {
+  try {
+    fs.writeFileSync(LOCK_PATH, JSON.stringify(instanceLockBody()))
+  } catch {
+    /* best effort */
+  }
+}
+
+/** 尽力删锁（退出 / 交接路径；失败无害——陈旧判定会兜）。 */
+function removeInstanceLock(): void {
+  try {
+    fs.rmSync(LOCK_PATH, { force: true })
+  } catch {
+    /* best effort */
+  }
+}
+
+/** 本机探活：`127.0.0.1:<port>/v1/status`（带 AUTH_KEY）。任何失败 = 探不到。 */
+async function probeLocalInstance(): Promise<ProbeInfo> {
+  const ac = new AbortController()
+  const timer = setTimeout(() => ac.abort(), PROBE_TIMEOUT_MS)
+  try {
+    const res = await fetch(`http://127.0.0.1:${port}${PROBE_PATH}`, {
+      headers: { authorization: `Bearer ${AUTH_KEY}` },
+      signal: ac.signal,
+    })
+    if (!res.ok) return emptyProbe()
+    return probeFromStatusJson(await res.json())
+  } catch {
+    return emptyProbe()
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * 起听前的互斥判定（§3.1）：refuse ⇒ 响亮拒起（exit 非 0 + 指路）；否则抢到锁才继续。
+ * 判定与抢锁之间仍有窄窗口（另一个实例同时冷启动）⇒ 'wx' 失败者同样拒起。
+ */
+async function runInstanceGuard(): Promise<void> {
+  const verdict = decideSingleInstance({
+    selfPid: process.pid,
+    lock: readInstanceLock(),
+    probe: await probeLocalInstance(),
+    handoff: process.env[HANDOFF_ENV] === '1',
+    takeover: cliTakeover,
+    handoffParentPid: process.ppid,
+    handoffBootId: process.env[HANDOFF_BOOTID_ENV] ?? null,
+  })
+  if (verdict.action === 'refuse') {
+    console.error(`[sampler-agent] refusing to start: ${verdict.reason}`)
+    process.exit(REFUSE_EXIT_CODE)
+  }
+  instanceGuard = instanceGuardOf(verdict.action)
+  // 接管既有事实（交接 child / 陈旧残留 / 显式 --takeover）：先清旧锁再原子抢占。
+  if (cliTakeover || verdict.action !== 'serve') removeInstanceLock()
+  if (!acquireInstanceLock()) {
+    console.error(
+      `[sampler-agent] refusing to start: another instance won the lock race (${LOCK_PATH})` +
+        ` — 停掉既有实例后重启本进程；确认强接管请用 --takeover`,
+    )
+    process.exit(REFUSE_EXIT_CODE)
+  }
+  console.log(`[sampler-agent] instance guard: ${verdict.action} (${verdict.reason})`)
+}
+
 // ---------------- game execution ----------------
 let gameSeq = 0
 
-/** 结果容器：gzip(JSON {manifest, files:{name:base64}})——TS/Python 双语契约，见 dist_common.py。 */
+/** 结果容器：gzip(JSON {manifest, files:{name:base64}})——TS/Python 双语契约，见 common/distribution.py。 */
 export function packContainer(
   report: Record<string, unknown>,
   files: Record<string, string>,
@@ -1355,7 +1505,7 @@ export function taskKey(
   courseFp = '',
   // R2 事件 rung：决策粒度变了 ⇒ 同一种子也是不同的局。仅激活时进键
   // （无条件进键会让一切既有键漂移，老缓存/老轮询对不上）。
-  // export 供单测钉住键形状（与 dist_common.fetch_task 的透传 + 轮询端配方一致）。
+  // export 供单测钉住键形状（与 common.distribution.fetch_task 的透传 + 轮询端配方一致）。
   de = '',
 ): string {
   let base: string
@@ -1614,12 +1764,16 @@ async function handle(req: Request): Promise<Response> {
         } catch {
           /* best effort */
         }
+        // 单实例锁交还（§3.2）：端口已释放、父进程即将退出——锁必须先删，child 才能 'wx' 抢到；
+        // child 用 SAMPLER_HANDOFF（+父的 bootId）向判定表证明「我是合法接班人」。
+        removeInstanceLock()
         try {
           const child = spawn(process.execPath, [self, ...args], {
             cwd: REPO_ROOT,
             detached: true,
             stdio: 'inherit',
             windowsHide: true,
+            env: { ...process.env, [HANDOFF_ENV]: '1', [HANDOFF_BOOTID_ENV]: BOOT_ID },
           })
           child.unref()
           pendingChildPid = child.pid ?? null
@@ -1640,6 +1794,7 @@ async function handle(req: Request): Promise<Response> {
             `[sampler-agent] restart spawn failed: ${e instanceof Error ? e.message : String(e)}`,
           )
           restartPending = false // 不退出，保持旧实例存活
+          writeInstanceLock() // 父仍在服务 ⇒ 把锁写回（§3.2）
           return
         }
         // 长驻 worker 池是靠 stdin EOF 自灭的（export-rl-rollout.ts: stdin `end` → exit），
@@ -1720,7 +1875,7 @@ async function handle(req: Request): Promise<Response> {
       return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
 
     // key 含 mode+kind：避免同 iterId 下 eval 与 rollout 同 (stage,seed) 撞缓存。
-    // M1d：stageJson 布局指纹进键（python 端算同一 sha256[:16]，见 dist_common）。
+    // M1d：stageJson 布局指纹进键（python 端算同一 sha256[:16]，见 common.distribution）。
     const sjHash = stageJson
       ? createHash('sha256').update(stageJson).digest('hex').slice(0, 16)
       : ''
@@ -1784,7 +1939,7 @@ async function handle(req: Request): Promise<Response> {
     // 保活流式响应：单局可能长达 ~480s，而 Bun.serve idleTimeout 上限仅 255s。若连接全程静默，
     // server 回收连接 → trainer 端报 "Remote end closed"。用合法 chunk 字节(' '空格)每 20s 发一次
     // 保活，防 server 空闲回收；单局完成后追加 gzip payload 并结束。trainer 在 gunzip 前 strip 空格
-    // （见 dist_common.fetch_task）。注意不能用非法 chunk(如 ':\n')——那会让 urllib 丢弃整个 body。
+    // （见 common.distribution.fetch_task）。注意不能用非法 chunk(如 ':\n')——那会让 urllib 丢弃整个 body。
     const enc = new TextEncoder()
     let hb: ReturnType<typeof setInterval> | undefined
     const stream = new ReadableStream<Uint8Array>({
@@ -1920,6 +2075,11 @@ async function handle(req: Request): Promise<Response> {
   if (req.method === 'GET' && url.pathname === '/v1/status') {
     return jsonResponse({
       nodeId: `bun-${process.pid}`,
+      // 单实例观测（§3.4，加法）：pid/bootId 让「同一 node 两个代码版本」一眼可查；
+      // instanceGuard = 本次起听的判定结论（fresh / handoff / took-over-stale）。
+      pid: process.pid,
+      bootId: BOOT_ID,
+      instanceGuard,
       uptimeSec: Math.floor((Date.now() - startedAt) / 1000),
       codeHash: memoizedCodeHash(),
       bunVersion: Bun.version,
@@ -1955,6 +2115,10 @@ async function handle(req: Request): Promise<Response> {
   if (req.method === 'GET' && url.pathname === '/v1/ping') {
     return jsonResponse({
       ok: true,
+      // 单实例观测（§3.4，加法）：pid/bootId/instanceGuard（旧消费方忽略未知字段）。
+      pid: process.pid,
+      bootId: BOOT_ID,
+      instanceGuard,
       codeHash: memoizedCodeHash(),
       bunVersion: Bun.version,
       agentVersion: cachedGitShortHash(),
@@ -1988,17 +2152,20 @@ if (import.meta.main) {
     process.exit(0)
   }
   if (process.argv.includes('--print-code-hash-files')) {
-    // F4：TSV 报告（与 codehash-report.ts / dist_common.code_hash_report() 同格式）。
+    // F4：TSV 报告（与 codehash-report.ts / common.distribution.code_hash_report() 同格式）。
     // console.log 已被时间戳包装覆盖，用 process.stdout.write 保证输出可 diff。
     process.stdout.write(codeHashReport() + '\n')
     process.exit(0)
   }
   if (showHelp) {
     console.log(
-      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--print-code-hash] [--print-code-hash-files] [--no-node] [--no-persist] [--no-prewarm]',
+      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--print-code-hash] [--print-code-hash-files] [--no-node] [--no-persist] [--no-prewarm] [--takeover]',
     )
     process.exit(0)
   }
+  // 单实例互斥（plan/sampler-single-instance.plan.md §3.1）：第二个实例必须响亮拒起。
+  // 必须在预热**之前**——预热可长达 ~80s，若先预热再抢锁，两个冷启动实例会双双通过判定。
+  await runInstanceGuard()
   // §353：先探测 node + 预打包 exporter（日志进启动行之前，便于巡检一眼看到引擎）。
   rolloutRunner()
   // 启动预热：**bind 之前** await（理由见 prewarmPersistPool 头注释——a95/proot 上 fork 阻塞
@@ -2012,12 +2179,13 @@ if (import.meta.main) {
   console.log(
     `[sampler-agent] listening on 0.0.0.0:${port} workers=${workers} cache=${(cacheMaxBytes / (1024 * 1024)).toFixed(0)}MB/${cacheMaxItems} ` +
       `codeHash=${memoizedCodeHash().slice(0, 12)}… agentVersion=${cachedGitShortHash()} cpus=${CPUS} ` +
-      `rolloutEngine=${rolloutRunner().engine}${rolloutRunner().node ? ` (${rolloutRunner().node!.version})` : ''}`,
+      `rolloutEngine=${rolloutRunner().engine}${rolloutRunner().node ? ` (${rolloutRunner().node!.version})` : ''} ` +
+      `guard=${instanceGuard} pid=${process.pid} bootId=${BOOT_ID}`,
   )
   // Bun.serve 的 idleTimeout 上限 255s，而单局最长 ~480s——仅靠它不足以阻止长静默 task 连接被回收。
   // 因此设 idleTimeout=255(允许的最大值) + task 响应流式的"保活 chunk"（每 20s 发一个空格字节），
   // 双重保证等待中的 task 连接不被 server 空闲回收（否则 trainer 端报 Remote end closed）。
-  // trainer 在 gunzip 前 strip 掉这些空格字节（见 dist_common.fetch_task）。
+  // trainer 在 gunzip 前 strip 掉这些空格字节（见 common.distribution.fetch_task）。
   // serveWithRetry：/v1/restart 后新实例可能瞬间撞 EADDRINUSE（旧实例尚在退出），轮询重试。
   // SIGTERM/SIGINT（手动停止）时取消未完成的 restart 交接——避免"手动停了服务，
   // 重启交接的 detached 子进程又把服务拉起来"（2026-08-30 用户报告）。
@@ -2034,6 +2202,7 @@ if (import.meta.main) {
         }
       }
       killPersistPool()
+      removeInstanceLock()
       process.exit(0)
     })
   }
@@ -2043,4 +2212,7 @@ if (import.meta.main) {
       return jsonResponse({ error: 'internal error', detail: lastError }, 500)
     }),
   )
+  // 起听成功：刷新锁（落定 pid/bootId/startedAt/codeHash8 的最终事实；§3.3）。
+  // 早于预热的那次 'wx' 抢占关掉冷启动竞态，这一笔只是把「已在服务」写实。
+  writeInstanceLock()
 }

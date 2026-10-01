@@ -101,7 +101,7 @@ dashboard 必改项、gate 改动、minibatch/PPO 超参联动。
 无人重聚合。配额账本（`settled_stage_totals`）**早已**以盘上 manifest 为真，
 报告必须与它同源。
 
-**解法**：`rl/reports.py::merge_volume_report(wave_combined, disk_manifests)`——
+**解法**：`worker/reports.py::merge_volume_report(wave_combined, disk_manifests)`——
 盘上有局数 ⇒ **以磁盘 combine 为报告体**，wave 只覆盖时间锚点
 （`pure_collect_sec` / `weights_dist_*` / `collect_end_ts`）；接线在
 `loop_core._volume_collect_continuous` 收官处（`resumed_manifests(traj/it{N}, wver,
@@ -120,7 +120,7 @@ dashboard 必改项、gate 改动、minibatch/PPO 超参联动。
 - `volume_waves.py`（新文件，`rl/` 下，禁 torch/numpy 以外重依赖）：
   `initial_games()` / `topup_games()` / `wave_seed_stream()` /
   `terminate()` 四纯函数。
-- 单测（`tests/test_rollout_volume.py`）：配额数学（整除/ceil/封顶/地板）、
+- 单测（`tests/worker/test_rollout_volume.py`）：配额数学（整除/ceil/封顶/地板）、
   跨关独立性（A 加波 B 种子不变）、终止谓词、journal schema round-trip、
   **老行为回归**（无键课程 pairs == 今日 `build_pairs` 输出逐字节）。
 - 门禁：`ruff + mypy + pytest` 该文件全绿。

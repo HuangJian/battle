@@ -58,7 +58,7 @@
 
 - **节点池 8 台**：self(3, 本机 127.0.0.1) / mac(6) / a95(7) / a97(7) / a98(7) /
   lite(2) / a96(失联) / gcs(4)。监控已并入训练控制台 `bun run dashboard` → http://127.0.0.1:8900（节点池卡「统计」视图，独立 /api/pool；远端 /pool 页面已下线，P3.5 后返回 404）。
-- **远控语义**：升级分支 = 训练机当前分支（`dist_common.UPGRADE_BRANCH` 锁存，
+- **远控语义**：升级分支 = 训练机当前分支（`common.distribution.UPGRADE_BRANCH` 锁存，
   启动时 push）；节点 stale → 自动远控 pull+重启；**self/回环节点 = 纯重启**
   （无 pullBranch，零 git 操作——共享工作区禁破坏性 pull）。
 - **codeHash 集内文件**（改动即触发全节点升级）：`src/nn/**`、
@@ -74,7 +74,7 @@
 
 ```bash
 # 启动/续跑（stream 默认开；--kill-previous 杀旧训练进程，在途 bun 局自然结算）
-bun dashboard/src/launch/cli.ts --kill-previous --torch-threads 8 --script run_rl.py \
+bun dashboard/src/launch/cli.ts --kill-previous --torch-threads 8 --script trainer/run_rl.py \
   --bc <warm.json> --out <dir>/weights.json --traj <dir> \
   --iters N --max-hours H --stages <arena-ids> --seed-rotate 50 \
   --max-ticks <per-level> --workers 8 --stream 1 \

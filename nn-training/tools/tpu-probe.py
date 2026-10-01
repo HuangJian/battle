@@ -15,7 +15,7 @@
        D1 = B + ref 每步重算（旧 engine 行为） 双前向税
        D2 = B + ref 预计算缓存（新 engine 行为）ref 成本降到 1/epochs
      D1 vs D2 就是 ppo/engine.py 本次落地的 ref_cache 优化的实测收益
-     （数值逐位不变，见 tests/test_ppo_kickstart_cache.py）。
+     （数值逐位不变，见 tests/worker/test_ppo_kickstart_cache.py）。
 
   ③ **E 段：真实 job 形态复现（2026-09-11）**：Kiwi c6b-margin 首个 TPU job
      （Colab）PPO 单步 45~52 s（eta~5.9h、chunks 142 x 4 ep），而同模型同
@@ -58,7 +58,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ---------------------------------------------------------------- 常量（= schema.py）
+# ---------------------------------------------------------------- 常量（= common/schema.py）
 BOARD = 26
 OBS_CHANNELS = 14
 SCALAR_DIM = 19
@@ -516,7 +516,7 @@ def _engine_mode(bk: Backend, args) -> None:
     if args.tail and args.tail > 0:
         chunks.append(make_chunk(args.tail, rng))
     print("=" * 72)
-    print("[E 段] 真实 job 形态复现（复刻 ppo/engine.py 主循环）")
+    print("[E 段] 真实 job 形态复现（复刻 worker/ppo/engine.py 主循环）")
     print(f"       chunks={args.chunks}"
           + (f"(+尾块 {args.tail})" if args.tail and args.tail > 0 else "（无尾块，固定 shape）")
           + f" x epochs={args.epochs} "
@@ -594,7 +594,7 @@ def _engine_mode(bk: Backend, args) -> None:
             print("  → 复现成功：engine 现役形态显著慢于干净探针。")
             if m0 and m0.get("compile_s", 0) > e0_s * 0.5:
                 print("     CompileTime 占大头 ⇒ 每步 XLA 重编译（图签名漂移）。")
-            print("     E1 vs E0 判断 ref 预计算执行时机是否是修复。（改 ppo/engine.py 对应处验证）")
+            print("     E1 vs E0 判断 ref 预计算执行时机是否是修复。（改 worker/ppo/engine.py 对应处验证）")
     else:
         full1 = _sum(seq1) / max(e2_s * 1000.0, 1e-9)
         print(f"[E 判据] （E0 已跳过）E1/E2 倍率 = {full1:.1f}x" + ("（E1 带每步 mark）" if args.step_mark else ""))

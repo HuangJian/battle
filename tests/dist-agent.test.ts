@@ -18,6 +18,8 @@ import {
   weightsOf,
 } from '../tools/agent/sampler-agent'
 import { WEIGHT_RE } from '../tools/agent/workdir-cleanup'
+// 单实例互斥（plan/sampler-single-instance.plan.md）：源码守卫用的常量
+import { HANDOFF_ENV, REFUSE_EXIT_CODE } from '../tools/agent/single-instance'
 // F3/F4 纯实现（与 sampler-agent 同源，诊断工具/单测共用）
 import {
   codeHashReport,
@@ -423,5 +425,48 @@ describe('F2 codeHash 归属：报的是**运行中代码**，不是盘上代码
     expect(start).toBeGreaterThan(0)
     const branch = SRC.slice(start, SRC.indexOf('process.exit(0)', start))
     expect(branch).toContain('killPersistPool()')
+  })
+})
+
+// 单实例互斥源码守卫（plan/sampler-single-instance.plan.md §3.5-6）：SO_REUSEPORT 下第二个实例
+// 绑同一端口**不会**报错 ⇒ 判定必须在应用层、且必须在 `serveWithRetry` 之前跑；交接标记只准由
+// `/v1/restart` 的 spawn 注入；起听成功后要落锁（否则第一次启动没有「谁在服务」的事实）。
+describe('单实例互斥：起听前的互斥判定 + 锁 + 交接标记（源码守卫）', () => {
+  const SRC = readFileSync(
+    join(import.meta.dir, '..', 'tools', 'agent', 'sampler-agent.ts'),
+    'utf8',
+  )
+
+  it('互斥判定在 serveWithRetry 调用点**之前**（reusePort 下 bind 必成功，不能靠它判）', () => {
+    const bind = SRC.indexOf('activeServer = serveWithRetry(')
+    expect(bind).toBeGreaterThan(0)
+    const before = SRC.slice(0, bind)
+    expect(before).toContain('decideSingleInstance({')
+    expect(before).toContain('await runInstanceGuard()')
+  })
+
+  it('refuse 分支用非 0 退出码（supervisor/运维看得见），且指路日志在', () => {
+    const idx = SRC.indexOf('refusing to start')
+    expect(idx).toBeGreaterThan(0)
+    const branch = SRC.slice(idx, idx + 300)
+    expect(branch).toContain('process.exit(REFUSE_EXIT_CODE)')
+    expect(REFUSE_EXIT_CODE).toBeGreaterThan(0)
+  })
+
+  it(`交接标记 ${HANDOFF_ENV} 只在 /v1/restart 的 spawn 处注入（命令行 flag 会被复制粘贴继承）`, () => {
+    const start = SRC.indexOf("url.pathname === '/v1/restart'")
+    expect(start).toBeGreaterThan(0)
+    const branch = SRC.slice(start, SRC.indexOf('process.exit(0)', start))
+    expect(HANDOFF_ENV).toBe('SAMPLER_HANDOFF') // 源里的 [HANDOFF_ENV] 就是这个契约名
+    expect(branch).toContain("[HANDOFF_ENV]: '1'")
+    // 全文只有这一处置 '1'（读侧是 process.env[HANDOFF_ENV] === '1'，不在此列）
+    expect(SRC.match(/\[HANDOFF_ENV\]: '1'/g)?.length ?? 0).toBe(1)
+  })
+
+  it('起听成功后写锁，且锁的原子性靠 wx 独占创建', () => {
+    const bind = SRC.indexOf('activeServer = serveWithRetry(')
+    expect(bind).toBeGreaterThan(0)
+    expect(SRC.slice(bind)).toContain('writeInstanceLock()')
+    expect(SRC).toContain("{ flag: 'wx' }")
   })
 })

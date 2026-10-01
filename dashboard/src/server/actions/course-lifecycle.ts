@@ -48,6 +48,14 @@ import { ActionError, ActionResult, done, guard, release } from './result'
 import { runRlLockHolder } from './labels'
 import { runBcLockHolder, runClusterLockHolder } from './start'
 
+/** hub 模式推送的有界重试（开课/停课共用）。缺省 3 次 × 2s：hub 的课程表是**扫盘发现**，
+ *  新建的 `remote-jobs/` 要等它扫到才认这门课；测试注入 `delayMs: 0` 避免空等（见
+ *  `tests/course-lifecycle.test.ts` 的「hub 不可达」用例——不注入就是 2×2s 死等）。 */
+export interface HubModeRetry {
+  attempts?: number
+  delayMs?: number
+}
+
 /** 开课参数（全部是**课程级**：绝不写进 `rl.*` 那块所有课程共用的默认面）。 */
 export interface OpenCourseOpts {
   /** 训练模式（缺省在线）：`offline` = 云机接手（写 `rollout_src=run` + `run_iters=-1`，
@@ -59,7 +67,7 @@ export interface OpenCourseOpts {
   rolloutSrc?: RolloutSrcMode
   /** hub 模式推送的有界重试（缺省 3 次 × 2s）。hub 的课程表是**扫盘发现**，新建的
    *  `remote-jobs/` 要等它扫到才认这门课；测试注入 1 次避免空等。 */
-  hubMode?: { attempts?: number; delayMs?: number }
+  hubMode?: HubModeRetry
   /** **起点权重来源**（plan/course-archive.plan.md §3.5 / G4-①）：指向一门**已封存**课的
    *  某个关键轮——开课时把该归档权重播种成 `tmp/<本课>/weights.json`（缺省 = BC 播种，
    *  行为不变）。
@@ -88,7 +96,7 @@ function assertCourseExists(course: string): void {
 
 /** 课程文件声明的 `iters`（终点轮数）；读不到 / 没声明 → null。
  *
- *  与 python 侧导出腿的守卫同口径（`rl/loop_export.py::_export_offline_bundle`：`--export-bundle`
+ *  与 python 侧导出腿的守卫同口径（`trainer/loop_export.py::_export_offline_bundle`：`--export-bundle`
  *  需要课程声明 iters——**任务包里的计划必须有终点**，不能靠云机猜）：离线（云机接手）模式 =
  *  跑到课程末尾，没有有限终点云机会一直跑下去。开课预校验在这里读课程文件，**在 trainer
  *  接触坏配置之前**就把配备错拦下。
@@ -126,9 +134,9 @@ export function declaredCourseIters(course: string): number | null {
  *  三件事各解决一个具体的坑（每一件都是「不做就会静默地不对」的那类）：
  *
  *   ① **权重播种**（RL 才有；BC 无 warm-start）：`tmp/<课>/weights.json` 不在则从 BC 种子复制。
- *      共享 trainer 不接受每课的权重参数，它按 traj 目录自己找（与 `run_rl.py` 同约定）。
+ *      共享 trainer 不接受每课的权重参数，它按 traj 目录自己找（与 `trainer/run_rl.py` 同约定）。
  *   ② **发现事实**：`tmp/<课>/training_log.jsonl` 必须存在。训练侧的课程表**就是**这个文件
- *      （`rl/loop_plan.discover_courses` 与控制台 `discoverCourses` 同一判据），而共享 trainer 是
+ *      （`trainer/loop_plan.discover_courses` 与控制台 `discoverCourses` 同一判据），而共享 trainer 是
  *      「先起进程、后加课」的模型 —— 不建它，这门新课永远不会被发现（症状极难查：进程活着、
  *      队列正常、就是这门课一轮都不跑）。空账本 = 合法状态（第 1 轮从头开始）。
  *   ③ **hub 发现判据**：`tmp/<课>/remote-jobs/` 目录存在且新鲜（`hub_server._course_dir_live`）。
@@ -237,13 +245,13 @@ export async function pushHubMode(
  *
  *  ★ **必须带身份看，不能只看「锁活着」**（2026-09-20 用户报障：「❌ x20-steady 未开课：
  *  run_rl 锁被 PID 18364 持有」）——那个 PID 就是控制台自己起的**共享 trainer**
- *  （`run_rl_cluster.py --serve`）：它服务多课，每开一门课就取该课自己的 per-course 锁
+ *  （`trainer/run_rl_cluster.py --serve`）：它服务多课，每开一门课就取该课自己的 per-course 锁
  *  （单进程多课模型的正常持有）。把这种持有当成冲突 ⇒ **每次开课都被自己人拒**，
  *  而拒的同时盘上已经写过开课标记（见下面 ① 的顺序注释）= 一句假回执。
  *
  *  判据：该课锁的持有人 == **共享 trainer 的进程级锁**（`nn-training/.run_cluster.lock`）
  *  持有人 ⇒ 同一个进程 ⇒ 正常状态，不拦；持有者活着但不是它 ⇒ 真冲突（有人在手工跑
- *  `run_rl.py --course <本课>`，与共享 trainer 抢同一批 traj）⇒ 拦。陈旧锁（持有人已死）
+ *  `trainer/run_rl.py --course <本课>`，与共享 trainer 抢同一批 traj）⇒ 拦。陈旧锁（持有人已死）
  *  在 `runRlLockHolder` / `runBcLockHolder` 里已经归 null ⇒ 不拦。
  */
 export interface CourseRunnerFacts {
@@ -265,7 +273,7 @@ export function courseRunnerFacts(course: string, bc: boolean): CourseRunnerFact
  *
  *  为什么在开课那一刻补（2026-09-24）：离线档 = `rollout_src:'run'`（**本机不跑训练**），
  *  于是 it0 读数两条产路都不通——云机侧 `remote/offline_eval.CloudEvalPlan.due()` 对
- *  `it < 1` 恒 False，而本机主循环的基线派发（`rl/loop_baseline.py::_maybe_dispatch_baseline_eval`）
+ *  `it < 1` 恒 False，而本机主循环的基线派发（`trainer/loop_baseline.py::_maybe_dispatch_baseline_eval`）
  *  压根不在场上。缺了它，控制台的配对基线退化成「第一条 eval 轮」（随 run 起点漂移，
  *  跨腿不可比：`iters.ts` 的 `evalIters.includes(0) ? 0 : evalIters[0]`）。
  *
@@ -460,7 +468,10 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
  *  注：离线课那条腿 2026-09-25 退役后它已无队列项——云机上正在跑的那份只能由操作员在云机侧停。
  *  课程表 / 账本 / 队列一律不动：恢复走「开课」。
  */
-export async function stopCourse(course: string): Promise<ActionResult> {
+export async function stopCourse(
+  course: string,
+  opts: { hubMode?: HubModeRetry } = {},
+): Promise<ActionResult> {
   guard(`course-stop:${course}`)
   try {
     const c = String(course ?? '').trim()
@@ -474,7 +485,7 @@ export async function stopCourse(course: string): Promise<ActionResult> {
     // ② 暂停意图（表内暂停，双保险：万一标记被手工建回来/还在旧进程的内存表里）
     const pause = setCoursePaused(c, true)
     // ③ hub 该课置 offline（远端也不再实时派发）
-    const hub = await pushHubMode(c, 'offline')
+    const hub = await pushHubMode(c, 'offline', opts.hubMode)
     const notes = [
       hadMarker
         ? '已删开课标记 training-enabled.txt（训练侧不再把这门课当在训）'

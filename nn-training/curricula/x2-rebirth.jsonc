@@ -334,15 +334,15 @@
     // ⚠ **kl_cap 两段都显式写 0.2**（2026-09-17 评审订正）。本文件初稿从 a2 抄了
     //   「尾段缺席无害 / 在 serial/remote 路径不接线、恒不生效」——**前半对，后半把话说满了**：
     //   · **对的部分**：per-tick 的 **remote/serial 路径确实不接线** —— `ppo_update` 无形参、
-    //     `remote/worker.py` 只读 `kl_coef`，全仓消费者只有 `rl/stream.py`（+ manifest 打包）
+    //     `remote/worker.py` 只读 `kl_coef`，全仓消费者只有 `trainer/stream.py`（+ manifest 打包）
     //     ⇒ DECISIONS §2026-09-15-goalnn-kl-cap-unwired · 全文 → docs/nn/experiments.md §33 已把口径钉死，并**明令不得**把它写成
     //     生效硬顶/「咬合」。本腿默认就走这条路径：`rl-config.json` 的 `rl.stream = 0` 压过
     //     `cli.py:_d("stream", 1)` 的 argparse 兜底（**已实测 `args.stream = 0`**），
-    //     `--ppo remote` 还会在 `rl/config.py:207` 再强制置 0
+    //     `--ppo remote` 还会在 `biz/config.py:207` 再强制置 0
     //     ⇒ **默认路径下，写不写这个键都不影响训练**。
     //   · **话说满的部分**：「**恒**不生效」漏了 **stream 路径** —— 那里读 `args._kl_cap`，
-    //     而 `args._kl_cap = sch.get("kl_cap")` 是**每轮整个重赋**（`rl/loop_steps.py:771`）
-    //     ⇒ **段内缺席即 None ⇒ 回落 `policy.streamKlCap`**（`rl/stream.py:163-166`）：
+    //     而 `args._kl_cap = sch.get("kl_cap")` 是**每轮整个重赋**（`trainer/loop_steps.py:771`）
+    //     ⇒ **段内缺席即 None ⇒ 回落 `policy.streamKlCap`**（`trainer/stream.py:163-166`）：
     //     **本仓 rl-config.json 给的是 0.18**（0.06 只是代码里键缺失时的字面默认）。
     //     ⇒ 缺席会在 it40 造出一次与 `kl_coef` 放松**方向相反**的不连续（cap 0.2 → 0.18）。
     //   ⇒ 两段都写 0.2：**cap 在默认路径下是惰性护栏，不是调度旋钮**；写显式值只为了消掉
@@ -370,7 +370,7 @@
   "backup_prefix": "x2-rebirth",
 
   // ── 评估 ───────────────────────────────────────────────────────────────
-  // 6 种类型对：ID 2000-2005（ab/ac/ad/bc/bd/cd；`rl/ladder_factory.py:228` 同口径）。
+  // 6 种类型对：ID 2000-2005（ab/ac/ad/bc/bd/cd；`biz/ladder_factory.py:228` 同口径）。
   // 日常 50/关（6×50 = 300 局/次，双轨 A-eval 锚点段 + 轮转段 = 每关 100 局）；
   // 正式门/正式对照才上 200/关。
   "eval_stages": "2000-2005",

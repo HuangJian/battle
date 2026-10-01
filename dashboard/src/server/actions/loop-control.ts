@@ -1,12 +1,12 @@
 /** loop-control.ts — 「暂停/恢复某课」的控制意图文件（R2d 操作面）。
  *
- *  背景：多课程并行后训练收敛为**一个进程**（`nn-training/run_rl_cluster.py --serve`，
+ *  背景：多课程并行后训练收敛为**一个进程**（`nn-training/trainer/run_rl_cluster.py --serve`，
  *  内部一台单线程 supervisor 持有每课一条任务队列）。控制台要能暂停某一课，就必须把指令
  *  送进那个已经跑着的进程 —— 而**不**为此多挂一个 HTTP 服务（多一个端口、多一份鉴权、
  *  多一处故障域，用户 2026-09-18 定案）。
  *
  *  通道 = 两侧本来就共享的工作区里的一份**意图文件**（`tmp/loop-control.json`）：
- *  控制台写、训练进程每拍读一次并施加到调度器（`nn-training/rl/loop_control.py`）。
+ *  控制台写、训练进程每拍读一次并施加到调度器（`nn-training/trainer/loop_control.py`）。
  *  hub 挂了也能用，进程重启后意图仍在（对比 hub 的 course-mode 是 volatile，那里要靠
  *  `restoreCourseModes` 回灌；这里**文件本身就是状态**，不需要回灌）。
  *

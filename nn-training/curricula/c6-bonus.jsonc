@@ -25,7 +25,7 @@
 //     c6-pickup 抬 wPickup 到 3.0 后打平距离翻倍，实测道具/局 0.925→1.045（+13%）、
 //     胜局承伤速率 −20% —— 机制有效但胜率增益 +5pp 不显著（p=0.33，种子依赖强）。
 //
-// ── 改法（纯公式，**零代码改动**；已用 `rl.reward_library.parse_formula` 实测通过）────
+// ── 改法（纯公式，**零代码改动**；已用 `biz.reward_library.parse_formula` 实测通过）────
 //   · 清场补偿：`+ wClear*(1.0 if (is_timeout and clearTick >= 0) else 0.0)`
 //     **`wClear = 4.0`** 恰好补上 `stage_clear(+2.0)` 与 `timeout(−2.0)` 的差
 //     ⇒ **「清场+超时」的有效终局奖励 = −2.0 + 4.0 = +2.0 = 与正常过关等价** ✅

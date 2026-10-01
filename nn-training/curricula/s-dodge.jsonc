@@ -2,7 +2,7 @@
 //
 // 注意 `player.lives: 1`：命数覆盖走配置（plan §6），**导出器里
 // arenaLevelOfId==='S-Dodge' → lives=1 的硬编码已删除**，配置是单一来源。
-// 启动：python run_rl.py --course s-dodge
+// 启动：python trainer/run_rl.py --course s-dodge
 {
   "version": 5,
   "name": "s-dodge-mix",

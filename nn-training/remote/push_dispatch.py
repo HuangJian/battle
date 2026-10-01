@@ -40,6 +40,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
+from common import net_http
 from common.logutil import log_line
 from common.protocol import (
     AUTH_HEADER,
@@ -69,7 +70,6 @@ from common.protocol import (
     rotation_order,
     validate_result,
 )
-from remote import net_http
 
 #: 缺省登记来源：仓库的 `nn-training/rl-config.json`（控制台 worker 登记入口回写的那个文件）。
 DEFAULT_PUSH_CONFIG = Path(__file__).resolve().parents[1] / "rl-config.json"

@@ -38,7 +38,7 @@
 // c4-dodge 先例（600 局×1100+t≈66 万+ **ticks**）——roadmap“600-1000 局”实为 transition
 // parity 要求，直接抄局数是刻舟求剑。以后定量按 transitions 对齐 ~60 万+ 线。
 // ※ P0 量纲勘误（2026-09-15 结课评审复算，同份 training_log 30 轮全量）：账本口径的
-//   transitions = samples（rl/resume.py:96-108，自声明“nSamples 之和”），ticks 只是 clocks。
+//   transitions = samples（biz/resume.py:96-108，自声明“nSamples 之和”），ticks 只是 clocks。
 //   实测 samples/轮均值 **23343**（范围 22398–25166）≈ **2.33 万 transitions/轮**；
 //   ticks/轮均值 231924；samples/ticks = 0.1007 ≈ 1/K（K=10，exporter 降采样）。
 //   上文“23.5 万 transitions/轮”实为 ticks，**10× 误差**；c4-dodge 的“66 万+”同理实为
@@ -115,7 +115,7 @@
 //   （如 60 万 ÷4÷97 ≈ 1546/关 ≈ 6200 局/轮），不许拍脑袋定局数。
 //   ※ 同错蔓延（未顺手改，立缺陷单）：nn-training/curricula/x3-start.jsonc:66、
 //   _example-custom-stage.jsonc:77 同样把 ticks 写成 transitions；
-//   plan/dynamic-rollout-volume.plan.md:26 同错；rl/volume_waves.py 配额数学分子 samples
+//   plan/dynamic-rollout-volume.plan.md:26 同错；biz/volume_waves.py 配额数学分子 samples
 //   配分母 est_ticks_per_game，差 10×（结课评审已用真函数跑出兑现 37% 触顶用例）。
 //
 // 启动：

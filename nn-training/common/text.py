@@ -8,8 +8,8 @@
 截**尾**段而非头段：栈顶几帧是 transport 样板，真正的原因是最后一帧的
 `ProtocolError: bun 未安装 …`。
 
-本函数原有两个副本（`remote/worker.py::_failure_detail` 与 `rl/stream.py::_exc_tail`），
-后者 docstring 写着「与前者同口径…故就地保留同款小助手」——而 `rl/stream.py` 不 import
+本函数原有两个副本（`remote/worker.py::_failure_detail` 与 `trainer/stream.py::_exc_tail`），
+后者 docstring 写着「与前者同口径…故就地保留同款小助手」——而 `trainer/stream.py` 不 import
 `remote.worker` 的理由（别把 torch 拖进采样路径）对本模块**不成立**：
 `common` 只依赖 stdlib，谁都能 import。于是那条「就地保留」的豁免不再需要。
 """

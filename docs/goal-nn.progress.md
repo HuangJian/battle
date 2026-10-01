@@ -21,7 +21,7 @@
 采集**（分钟级）里自己能跑完并自落账（wver 键控、幂等），到边界只需零成本观测/清账；还在跑
 （异常）只打 WARN 并交后台，时间基准用它自己的 `eval_window_sec`。
 
-**验证**：`tests/test_eval_timing.py` 16 例（旋钮/坏值、放行档三分支、epoch 边界、派发即放行与降级收回、
+**验证**：`tests/worker/test_eval_timing.py` 16 例（旋钮/坏值、放行档三分支、epoch 边界、派发即放行与降级收回、
 钩子不放/不放行、缺省零 join + 边界收拢、应急旋钮超预算夹回）；e2e `test_run_rl.py -k "eval_deferred|eval_post_ppo_weights|
 eval_local_gate|tail_join_grace|early_race"` 5 passed；nn python 全量绿 + ruff/mypy 干净。
 详见 `docs/nn/runtime-opt.md` §1、`DECISIONS.md §2026-09-17-goalnn-eval-wallclock`。
@@ -109,7 +109,7 @@ ruff / mypy 干净。**生效方式**：改的是训练机侧 dispatch.py，运�
 collect_wall 不再被单节点开工延迟拖到 200s+。
 
 **v3.14b 同日增补**：①集成层编排化（用户裁定）——去 bun/weights fixture 依赖，
-权重改 tmp 哑文件、`run_local_rollout` 在 rl.dispatch 命名空间打桩，`RUN_RL_ITEST=1`
+权重改 tmp 哑文件、`run_local_rollout` 在 trainer.dispatch 命名空间打桩，`RUN_RL_ITEST=1`
 即跑、零外部准备；②顺手修掉 rescan 线程不感知 halt 的生产缺陷（KL 熔断后主 join
 白等 180s/次）；③I9 判别改用「竞速副本 dispatch 落在慢窗口内」（+0.28s < 1.5s），
 墙钟不作判别（迟到主副本在途等待两代语义等价，无区分度）。全量 13 passed +
@@ -223,8 +223,8 @@ ruff/mypy 干净。
 | `src/nn/rl-reward-toy.ts` | ToyRewardArm 加 `wHit`/`wMiss`/`wStuck`；ToyCounters 加 `hits`/`shots`/`stuckTicks`；toyPotential 加命中率线性化激励 + 停滞惩罚；dodge-mix 臂参数更新：wHit=0.20, wMiss=0.05, wDmg2=0.01, wLoot=0.40, wStuck=0.002；加 `STUCK_THRESHOLD=180` |
 | `tools/sim/export-rl-rollout.ts` | Telemetry 加 `enemyHits`/`stuckTicks`；消费 `enemy_hit` 事件；停滞判定（中心 cell 不变+未命中）；`countersPhi` 传 `hits`/`shots`/`stuckTicks`；RunResult 加 `kills`/`enemyHits`/`powerUpsCollected`；manifest 加 `kills`/`enemyHits`/`hitRate`/`powerUpsCollected`；summary.behavior 加 `playerHitsPerGame`/`enemyHitsPerGame`/`hitRateOverall`/`powerUpsPerGame` |
 | `tools/sim/export-eval-game.ts` | Telemetry 加 `enemyHits`；消费 `enemy_hit` 事件；EvalResult 加 `kills`/`enemyHits`/`playerShots`/`powerUpsCollected`；report 加 `kills`/`enemyHits`/`hitRate`/`powerUpsCollected`；console.log 加 hitRate/pickups |
-| `nn-training/rl/eval_dispatch.py` | eval_log 行加 `kills`/`enemyHits`/`hitRate`/`powerUpsCollected` 透传字段 |
-| `nn-training/dist_common.py` | codeHash 覆盖集加 `src/types.ts` + `src/game/SimulationCombat.ts` |
+| `nn-training/trainer/eval_dispatch.py` | eval_log 行加 `kills`/`enemyHits`/`hitRate`/`powerUpsCollected` 透传字段 |
+| `nn-training/common/distribution.py` | codeHash 覆盖集加 `src/types.ts` + `src/game/SimulationCombat.ts` |
 | `tests/combat-enemy-hit.test.ts` | 新建：enemy_hit 三种情况（非致死/致死/盾弹开） |
 | `tests/nn/rl-reward-toy.test.ts` | 加 wHit+wMiss 测试、wStuck 超阈值/未超阈值测试、全参数组合测试 |
 | `tests/sim/telemetry-parity.test.ts` | recount 加 `enemyHits`；加 enemy_hit 事件存在性断言；远程/本地对账加 enemyHits 一致性验证 |
@@ -354,7 +354,7 @@ max-ticks 定 6000（P95=4577, P90×1.2≈4800, 保守取整）。
    ValueError 崩溃（rc=1），预采从未落盘。改 `f"{RUN_ID}.{it}"`（run_rl.py）。
 2. **本地路径漏 wver**：`run_rollout` 未给 export-rl-rollout.ts 传 `--wver`（队列 local slot
    有传），本地 shard manifest 无 wver → 下一轮 `completed_pairs` 永不命中。已对齐补
-   `--wver`+`--node-label local`（rl/queue.py）。
+   `--wver`+`--node-label local`（trainer/queue.py）。
 
 **端到端证据**（collect_wall 墙钟）：
 - it1（自采+PPO）：`collect_wall=155.2s` → 写回 → **spawn 子进程 pid=15500**（快照=最终权重）
@@ -459,7 +459,7 @@ same-file bug（3ebf8d2）。重启后 it19 `resume: 85/150 + 65 remaining`（�
 
 **根因**（不止一处）：
 1. `export-eval-game.ts` 无 `cleared` 字段（EvalResult 只有 win）
-2. `rl/eval_dispatch.py` record() 只透传 win，eval_log 无 cleared
+2. `trainer/eval_dispatch.py` record() 只透传 win，eval_log 无 cleared
 3. `export-eval-game.ts` **不在 codeHash 集内** ⇒ 节点 agent 不会随 schema 变更升级，节点局
    产出旧版数据（本地 self 用新枚举 `max_ticks`、节点 mac/a96 用旧枚举 `timeout` ——重启后
    实测实时印证）⇒ 本地/节点混合数据不可比
@@ -468,16 +468,16 @@ same-file bug（3ebf8d2）。重启后 it19 `resume: 85/150 + 65 remaining`（�
 **修复**（commit 待定）：
 - `export-eval-game.ts`：EvalResult 加 `cleared`（= `allEnemiesCleared(world)`），透传进
   `_eval_report.json`；头注释更新（本文件 2026-08-31 起入 codeHash，旧"不在哈希集"说明作废）
-- `rl/eval_dispatch.py`：record() 透传 cleared 进 eval_log；summary 加 `clears`/`clearRate`
+- `trainer/eval_dispatch.py`：record() 透传 cleared 进 eval_log；summary 加 `clears`/`clearRate`
   （聚合含 ledger 重放，旧行无 cleared 保守记 0）；done_msg 打印 clearRate 与 winRate 并排
-- `dist_common.py` + `sampler-agent.ts` 双语：`export-eval-game.ts` 入 codeHash（与 rollout
+- `common/distribution.py` + `sampler-agent.ts` 双语：`export-eval-game.ts` 入 codeHash（与 rollout
   同集）⇒ 节点随 schema 同步
 - `tests/sim/telemetry-parity.test.ts`：分发对账加 `remote.cleared === local.cleared` 断言
 - 冒烟：s1020/seed860001 单局 `_eval_report` 产出 `cleared=true`（stage_clear 且全歼）✓
 - typecheck + 15 sim tests + lint 全绿
 
 **操作**：S3 训练器已重启两次（断点续跑无损）——① 加载 cleared 透传的 eval_dispatch；
-② 加载含 export-eval-game 的新 dist_common（节点升级判断）。节点将随下一轮 codeHash 检测
+② 加载含 export-eval-game 的新 common.distribution（节点升级判断）。节点将随下一轮 codeHash 检测
 自动 pull + 重启。**it14 为过渡轮**：本地局已有 cleared、节点局尚无（旧 agent），clearRate
 聚合以节点升级完成后的迭代为准。
 
@@ -798,7 +798,7 @@ A2 只选臂不判门；S1 绝对门（≥90% 通关）由 A4 出口判。
 回到 31 个提交前。我的提交均在 origin（无损），本地 fast-forward 恢复。
 
 修复（commit 7b0beea / ecfb9e8 / 3553b22）：
-1. 升级分支永远 = 训练机当前分支（run_rl 启动锁存 `dist_common.UPGRADE_BRANCH`），
+1. 升级分支永远 = 训练机当前分支（run_rl 启动锁存 `common.distribution.UPGRADE_BRANCH`），
    config 键清空仅作回退；
 2. 节点同步 = fetch → checkout branch → pull --ff-only（禁 hash），分叉且干净才
    硬回齐；**脏工作区拒绝破坏性同步**；
@@ -879,7 +879,7 @@ trunk×0.1 / move+fire 头×0.01 / value×0.1（正齐次性，测一次按比�
 - **配对粒度与 CPU 锚**：已按用户指示落账 plan §4.2（(stage,seed) 2100 对定案）
   与 §4.5（实测单价 0.9 CPU-s/100 tick，S4b 反推历史口径吻合）。
 - 训练链新旗标：`run_rl.py --reward ''|v7|toy:<arm>` 与 `--dodge ''|off|l0|god`
-  经 queue/dist_common/sampler-agent 全链透传（缺省按 stage 解析，真实关行为不变）。
+  经 queue/common.distribution/sampler-agent 全链透传（缺省按 stage 解析，真实关行为不变）。
 
 ---
 
@@ -1030,7 +1030,7 @@ T2 本轨未做 ⇒ 只对新基线判定。
 本就是 3s 短超时（无 60–300s 问题——那是我此前未读代码的错误推断，已在 §4 的
 "遗留提示"语境更正），真正的浪费是**串行**：7 死节点 × 3s = 每轮 ~23s。
 
-**修复**（rl/queue.py ① ping 门）：`ThreadPoolExecutor` 并行 probe 全部启用节点，
+**修复**（trainer/queue.py ① ping 门）：`ThreadPoolExecutor` 并行 probe 全部启用节点，
 判定与日志按配置顺序串行回放（保序、线程安全、upgrade 请求仍在串行段）。
 实测（真实死节点 7 台）：**23.1s → 5.3s/轮**（残差 = 不可达主机 TCP SYN 的固有超时）。
 节点中途上线的接管语义不变：下一轮迭代的 ping 门纳入（与 rollout 既有行为一致）。
@@ -1050,7 +1050,7 @@ m1-eval，适用的提取为公共能力、两边复用。
 
 | 机制 | 适用 | 处置 |
 |---|---|---|
-| 断点续跑（rl/resume.py completed_pairs + wver 过滤） | ✅ 高价值——此前崩一批全丢 | `tools/lib/batch-ledger.ts`：逐局 jsonl 账本，(stage,seed)+wver 记账，后写覆盖先读（错误重跑审计留痕） |
+| 断点续跑（biz/resume.py completed_pairs + wver 过滤） | ✅ 高价值——此前崩一批全丢 | `tools/lib/batch-ledger.ts`：逐局 jsonl 账本，(stage,seed)+wver 记账，后写覆盖先读（错误重跑审计留痕） |
 | 尾部 fan-out 竞速（queue.py v3.7 tail_fanout_n/dup + duplicate-settled suppression） | ✅ 尾部时延从 max 变 min | `tools/lib/hybrid-batch.ts` `TailRaceBatch`：共享游标 + 竞速（每任务副本 ≤ dup、first-settle-wins 幂等）+ 无消费者守护 |
 | 错误局自动重跑（run_rl_intent CLEAN_EVAL_MAX_RETRY） | ✅ 瞬态 503 不再污染整批 | main 重试循环：错误局最多再跑 2 次，账本追加审计行 |
 | 巡航报告（training_log.jsonl + 巡检 HTML） | ✅ 部分提取 | `<out>.partial.json` 25/50/75% 里程碑快照 + 全量 jsonl 账本；终局 HTML 评分卡不变 |

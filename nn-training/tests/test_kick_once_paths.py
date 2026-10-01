@@ -32,5 +32,5 @@ def test_root_points_at_repo_root() -> None:
 
 def test_nn_training_is_importable_from_root() -> None:
     mod = _load_kick_once()
-    assert (mod.ROOT / "nn-training" / "rl" / "batch_eval.py").is_file()
-    assert (mod.ROOT / "nn-training" / "pid_probe.py").is_file()
+    assert (mod.ROOT / "nn-training" / "trainer" / "batch_eval.py").is_file()
+    assert (mod.ROOT / "nn-training" / "common/pid_probe.py").is_file()

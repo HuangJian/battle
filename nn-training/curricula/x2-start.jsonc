@@ -60,7 +60,7 @@
 
   // ── 采集 / 语料 ────────────────────────────────────────────────────────────
   // 每关每轮 rollout 局数（实现语义：每关抽 seed_rotate 个新 seed，
-  // 全轮 = seed_rotate × 关数；见 rl/course.py build_pairs）。
+  // 全轮 = seed_rotate × 关数；见 biz/course.py build_pairs）。
   // arena2 六关 × 40 = 240 局/轮（v2 实测 150~300 局差别不大，先按小批量快迭代；
   // 若 advantage/value 噪声大再往上加）。
   // 注意：单关课 seed_rotate 即总量，多关课必须除以关数——600 在此会采 3600/轮

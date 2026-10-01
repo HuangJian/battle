@@ -300,7 +300,7 @@ describe('tailFailureReason（意外退出原因提取，2026-09-22 事故）', 
       '[run_rl] boot...',
       '[run_rl] === iteration 1 ===',
       'Traceback (most recent call last):',
-      '  File "rl/loop_steps.py", line 1800, in <module>',
+      '  File "trainer/loop_steps.py", line 1800, in <module>',
       'SystemExit: bc 缺',
     ]
     expect(tailFailureReason(tail)).toBe('SystemExit: bc 缺')

@@ -1,7 +1,7 @@
 /**
  * hybrid-batch.ts — 混合跑批调度状态机：共享游标 + 尾部 fan-out 竞速 + 幂等结算。
  *
- * rollout queue v3.7 机制（nn-training/rl/queue.py：tail_fanout_n / tail_fanout_dup /
+ * rollout queue v3.7 机制（nn-training/trainer/queue.py：tail_fanout_n / tail_fanout_dup /
  * duplicate-settled suppression）的 TS 提取。m1-eval 的本地/远端消费循环通过
  * claim()/settle() 消费本状态机；python 侧机制在 queue.py 已完备，trainer 的
  * clean-eval 经 m1-eval --dist-nodes 间接复用同一语义（能力映射表见

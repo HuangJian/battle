@@ -105,7 +105,8 @@ describe('常量锚', () => {
       'ladder-c06',
       'ladder-c07',
     ])
-    // nn-training/rl/eval_local.py: EVAL_SEEDS = tuple(range(860001, 860201))
+    // nn-training/biz/eval_local.py: EVAL_SEEDS = tuple(range(860001, 860201))
+    // （2026-09-30 刀 4：纯逻辑整族从 rl/ 出包到 biz/）
     expect(EVAL_SEED0).toBe(860001)
   })
 })

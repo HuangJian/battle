@@ -185,7 +185,7 @@ describe('metrics v6：rollout 分敌种列 vs 独立重实现 / eval census', (
       // `tank_destroyed` ⇒ 事件流分列之和**恒 ≤** 标量 kills 列
       //（实测 God AI 长局缺 11.6%、NN/ladder-c03 缺 ~1.4%；不守恒局 100% 拾取过 bomb）。
       // 别把这里改成 toBe(killCount)——那是错的；奖励侧由 x3-credit-p6 的残差桶补偿
-      //（见 nn-training/tests/test_reward_golden.py::test_credit_p6_formula_and_course）。
+      //（见 nn-training/tests/biz/test_reward_golden.py::test_credit_p6_formula_and_course）。
       expect(roll.killsByKind.reduce((a, b) => a + b, 0)).toBeLessThanOrEqual(
         local.finalState.killCount,
       )

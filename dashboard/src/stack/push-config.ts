@@ -16,7 +16,7 @@
  *   · `findHealthyGpuPushNode`：复用扫描（「有活的就用」）被「登记即候选」取代，且它按
  *     ping 挑节点会把「该谁跑」变成随时变化的探测结果。
  *
- *  python 侧的对应语义（`rl/loop_transport.py::_gpu_push_nodes`；S4 首簇前在 `loop_steps.py`）：
+ *  python 侧的对应语义（`trainer/loop_transport.py::_gpu_push_nodes`；S4 首簇前在 `loop_steps.py`）：
  *  auto 取**全部** enabled 的 gpu_push 节点；
  *  `rl.hub_push`（缺省开）+ hub_url/token 齐备 ⇒ 发布带 `manifest.dispatch=\"push\"`，由 hub
  *  按队列顺序推给空闲 worker；否则直推节点（按序 failover）；都没有 ⇒ hub pull（worker 来领）。

@@ -10,6 +10,22 @@
 
 ---
 
+## §2 2026-10-01：门禁停机模式平台化 ⇒ `courses.<课>.gate_halt_mode` 与 `rl.gate_halt_mode` 双双成死键
+
+`gate-halt-mode` 升成**平台级单开关**（`tmp/gate-halt.json` 意图 + 回执；全文 →
+`docs/nn/training-stack.md` §27，决策 → `DECISIONS.md` §2026-10-01-goalnn-gate-halt-platform-level）：
+它回答的是「**有没有人在盯盘**」——操作员的此刻状态，**不是**某门课的机器侧属性。
+
+对本文的两处修订（读到 §1 那张表时按本条覆盖）：
+
+* **§1.1 的 D 类行**里的 `gate_halt_mode` **不再属于 D 类**（不是「留活课、删停课」的每课旋钮）——
+  它是**无读者的死键**：`worker/cli.py --gate-halt-mode` 已不再 `_d("gate_halt_mode", …)`，
+  `trainer/loop_serve.py::COURSE_MACHINE_OVERRIDE_KEYS` 已摘除它（白名单今天为**空元组**，结构保留）。
+* **`rl.gate_halt_mode`** 已从 `rl_config.schema.json` 的 `sections.rl` 挪进 `retired`：旧值一律
+  不生效，启动日志会点名（`worker/rl_config_schema.py`）。
+* 残留清理：控制台开课时 `pruneLegacyCourseKnobs` 会把 `courses.<课>.gate_halt_mode` 剃掉
+  （`dashboard/src/stack/course-knobs.ts::LEGACY_COURSE_KEYS`）。
+
 ## §1 2026-09-26 清洗：只留「别处无处安放」
 
 ### 1.1 判据（五类）
@@ -39,7 +55,7 @@
 | 键 | 类 | 理由 |
 |---|---|---|
 | `intent_rl`（整块 29 键） | E | intent/goal 线入口已冻结（单一 PPO 路径，`docs/nn/training-stack.md §23`）+ hub 收敛为单实例；需要时按 x 系列重配 |
-| `policy.upgradeBranch` | E | 2026-08-30 事故载体：非空值会盖掉「训练机当前分支」锁存。**读点也一并删掉**（`rl/dispatch.py`） |
+| `policy.upgradeBranch` | E | 2026-08-30 事故载体：非空值会盖掉「训练机当前分支」锁存。**读点也一并删掉**（`trainer/dispatch.py`） |
 | `policy.minDiskFreeMB` | E | 全域零代码消费者（磁盘余量检查在 TS 侧 `tools/agent/sampler-agent.ts`） |
 | `policy.streamKlCapIntent` | E | intent 流式专属，随 intent 线一起下线 |
 | `policy.streamWaveGamesIntent` | E | 同上 |
@@ -60,10 +76,10 @@ B 类全绿键 → 备份 `nn-training/rl-config.json.bak.20260926-181554`
 用户 2026-09-26 裁决：`intent_rl` 与 `stream / double_buffer / precollect_early` **只删配置，
 代码保留**——需要重启 intent 线时能直接复用，不必从 git 历史重补：
 
-- `rl/modes.py::merged_mode_args` 的 `rl.<mode> → intent_rl(legacy) → rl` 三级回退**仍认得**
-  `intent_rl`；但 intent/goal 的入口目前**冻结**（`rl/config.py::validate_args` 对
+- `biz/modes.py::merged_mode_args` 的 `rl.<mode> → intent_rl(legacy) → rl` 三级回退**仍认得**
+  `intent_rl`；但 intent/goal 的入口目前**冻结**（`biz/config.py::validate_args` 对
   `mode != per-tick` 响亮拒启）⇒ 重启前须先解冻，且新配置按 x 系列写进 `curricula/*.jsonc`。
-- `rl/cli.py` / `rl/rollout_phase.py` 仍认得 `stream`/`double_buffer`/`precollect_early`
+- `biz/cli.py` / `trainer/rollout_phase.py` 仍认得 `stream`/`double_buffer`/`precollect_early`
   （`rollout_phase` 的提前预采只在 `double_buffer` 开时生效）。
 
 ### 1.4b B 类「全绿」判据与本次执行（2026-09-26）
@@ -84,7 +100,7 @@ B 类全绿键 → 备份 `nn-training/rl-config.json.bak.20260926-181554`
 **机器级键永不删**（`tools/rl_config_clean.py::MACHINE_KEYS`）：`local_slots`、`workers`。
 它们在 `--scope all` 下会判「全绿」（108/108 课程都写了 `workers`），但 rl-config 里这条是
 **裸机读数**而不是课程兜底——`dashboard/src/core/slots.ts::bareCapacity` = `max(rl.workers, rl.local_slots)`，
-`rl/config.py::apply_course_machine_overrides` 也把 `rl.{workers,local_slots}` 当本机配额缺省。
+`biz/config.py::apply_course_machine_overrides` 也把 `rl.{workers,local_slots}` 当本机配额缺省。
 删掉 ⇒ `Number(undefined ?? 0)` = 0 ⇒ 容量塌成 0、`checkCapacity` 把每门课都报成超量（假红）。
 
 **保留兜底的（没删）**：`mb` `seed_rotate` `keep_iters` `eval_window_sec` `total_stages`
@@ -101,20 +117,20 @@ bash ../tools/githook/nn-py-safe.sh tools/rl_config_clean.py --drop-b-class --sc
 
 ### 1.5 键白名单（防再长草）
 
-`nn-training/rl_config.schema.json`（数据，单一来源）+ `nn-training/rl_config_schema.py`（校验）。
+`nn-training/rl_config.schema.json`（数据，单一来源）+ `nn-training/worker/rl_config_schema.py`（校验）。
 
-- **只告警不拒**：未知键 / 已退役键在 `run_rl.py` 启动日志里点出来（`[run_rl] rl-config 告警：…`），
+- **只告警不拒**：未知键 / 已退役键在 `trainer/run_rl.py` 启动日志里点出来（`[run_rl] rl-config 告警：…`），
   但**绝不 block 开训**——把「配置里多了一个手写键」变成「训练起不来」代价远大于收益。
 - 三类命中：顶层段不在白名单、`policy.*` / `rl.*` 键不在白名单、命中 `retired`（带原因）。
 - 自由形状段不下钻：`nodes` / `courses` / `rl.remote_hubs` / `rl.intent` / `rl.goal`。
 - **新增一个 rl-config 键时，同步 `rl_config.schema.json`**（否则启动会告警）。
-- **消费面（2026-09-26 评审更正）**：今天**只有** `rl_config_schema.py`（`run_rl.py` 启动时校验）
+- **消费面（2026-09-26 评审更正）**：今天**只有** `worker/rl_config_schema.py`（`trainer/run_rl.py` 启动时校验）
   读这份 JSON——`dashboard/src/stack/smoke.ts::rlConfigSmoke` **尚未接线**。早先的 docstring / schema `_doc` /
-  `run_rl.py` 注释里写的「与控制台冒烟共用一份、一处增删两侧同时生效」**不成立**，已改掉。
+  `trainer/run_rl.py` 注释里写的「与控制台冒烟共用一份、一处增删两侧同时生效」**不成立**，已改掉。
 
 ```bash
 # 自查（纯逻辑，不需要真配置）
-cd nn-training && bash ../tools/githook/nn-py-safe.sh -m pytest tests/test_rl_config_schema.py -q
+cd nn-training && bash ../tools/githook/nn-py-safe.sh -m pytest tests/worker/test_rl_config_schema.py -q
 ```
 
 ### 1.6 清洗命令与回退

@@ -252,7 +252,7 @@
 //   （127–154/400）⇒ power 仍是第一死因；timeout 全程 0.0%（超时熔断从未接近）。
 //
 // 机器：94 轮 / ≈2.26M transitions。**崩 3 次、重启 4 次**（rotateSeed 未变 = 续跑），
-//   根因 `rl/loop_steps.py:853` 的 `report['games']` KeyError —— resume 一条
+//   根因 `trainer/loop_steps.py:853` 的 `report['games']` KeyError —— resume 一条
 //   「样本已采完、PPO 未跑」的迭代时 report 走 batches=0 路径无 'games' 键，重试 5 次
 //   即整进程退出、控制台恢复后再踩，连撞 10 次 ⇒ **it15 整轮丢**（记录 samples=0/ticks=0）。
 //   节点参与：self 2754 / mac 2002 / gcs 1060 / local 1278 / a95 237 / a97 39 / a96 11。

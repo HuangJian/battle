@@ -14,7 +14,7 @@
  *   * Does NOT read the NN `held` slots (nnMoveHeld/...); those live on the
  *     World but are Input-private state (plan §1.3-5, nn2 N4).
  *
- * Keep this file in lock-step with `nn-training/schema.py`. Any channel /
+ * Keep this file in lock-step with `nn-training/common/schema.py`. Any channel /
  * scalar / action change bumps OBS_SCHEMA_MAJOR and forces a full re-export.
  */
 
@@ -43,7 +43,7 @@ import {
 } from '../ai/god/ThreatBudget'
 import { threatOnsetEdge } from './decision-gate'
 
-// ---- Canonical dimensions (mirror nn-training/schema.py) ----
+// ---- Canonical dimensions (mirror nn-training/common/schema.py) ----
 export const OBS_CHANNELS = 16
 export const BOARD = GRID // 26
 export const SCALAR_DIM = 30
@@ -108,12 +108,12 @@ const DIR_INDEX: Record<Direction, number> = { up: 0, down: 1, left: 2, right: 3
 export const SCALAR_X_INDICES = [15, 18, 29]
 
 /**
- * 标量名序列（**逐字镜像** nn-training/schema.py::SCALAR_LAYOUT 的第二元）。
+ * 标量名序列（**逐字镜像** nn-training/common/schema.py::SCALAR_LAYOUT 的第二元）。
  *
  * 进 SCHEMA_FINGERPRINT（hy X4 / obs spec §3.4-7）：只钉 SCALAR_DIM 挡不住「交换
  * 两个标量含义」这种漏同步（维度不变、指纹不变、golden 前向仍绿，但语义错位）。
  * 改任一端 ⇒ 指纹变 ⇒ tests/nn/schema-fingerprint.test.ts 与
- * nn-training/tests/test_schema_fingerprint.py 双端同红。
+ * nn-training/tests/common/test_schema_fingerprint.py 双端同红。
  */
 export const SCALAR_NAMES = [
   'slack',
@@ -655,7 +655,7 @@ export { ticksUntilFire, ticksUntilLegalTurn }
 // 覆盖 = 决定观测字节的全部常量；任何一项变动指纹必变 ⇒ 双端单测红 ⇒ 漏同步
 // 现形，并写进 npy shard manifest（数据自述其 schema）。派生公式的正确性由
 // 单测另锁（见 obs spec §4 测试清单），指纹只钉「常量身份」。
-// 序列化 = 显式字段序 `|`/`,` 连接（语言中立，schema.py 逐字对齐）。
+// 序列化 = 显式字段序 `|`/`,` 连接（语言中立，common/schema.py 逐字对齐）。
 // ================================================================
 
 function fnv1a(str: string): string {
@@ -677,7 +677,7 @@ export const SCHEMA_FINGERPRINT = fnv1a(
     SCALAR_DIM,
     BOARD,
     SCALAR_X_INDICES.join(','),
-    SCALAR_NAMES.join(','), // 标量语义序列（schema.py SCALAR_LAYOUT 第二元同名同序）
+    SCALAR_NAMES.join(','), // 标量语义序列（common/schema.py SCALAR_LAYOUT 第二元同名同序）
     CH.terrainBrick,
     CH.terrainSteel,
     CH.terrainWater,

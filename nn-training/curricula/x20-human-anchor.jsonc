@@ -101,7 +101,7 @@
 //   （--device cuda 若可用；value_coef 缺省 0，沿用 bc-c4 教训；God 不出现在任何位置。）
 //
 // 启动（**用户手工；agent 不得启动训练**）：
-//   bun dashboard/src/launch/cli.ts --script run_rl.py --course x20-human-anchor \
+//   bun dashboard/src/launch/cli.ts --script trainer/run_rl.py --course x20-human-anchor \
 //     --remote-transport pull
 //
 // ── 判据 ─────────────────────────────────────────────────────────────────

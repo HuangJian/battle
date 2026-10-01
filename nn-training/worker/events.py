@@ -1,0 +1,354 @@
+"""events —— training_log.jsonl 事件写入（2026-09-02 从 trainer/loop.py 拆出）。
+
+run_training 主循环里所有 jsonl 事件（run_start / iteration / circuit_break /
+iter_error）统一收敛到这里：字段契约与旧 trainer/loop.py 内联写入逐字节一致，
+单测可直接覆盖事件行 schema。
+"""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+
+
+def write_event(jsonl_path: Path, event: dict) -> dict:
+    """追加一条事件到 jsonl（不吞异常——与旧内联写入同语义，失败向上传播）。
+
+    调用方（loop 的失败重试）负责兜底；观测事件失败不该静默跳过训练主链。
+
+    **返回写入的事件 dict**（R2a，2026-09-18）：调用方把它喂给 `LedgerView.apply_event`
+    做增量维护——视图因此永远与盘上账本一致，且**永不重扫**。旧调用点忽略返回值，
+    行为零变化。
+    """
+    with open(jsonl_path, "a", encoding="utf-8") as f:
+        f.write(json.dumps(event) + "\n")
+    return event
+
+
+def write_stop_loss(jsonl_path: Path, it: int, streak: int, delta: float | None = None) -> dict:
+    """stop_loss 事件：止损连击的**状态转移**落账（R2a，2026-09-18）。
+
+    为什么需要这一行：P1-9 的「Δ≤−2σ 连续 2 轮才停车」在内存里只是个计数器，
+    重启即归零 ⇒ 已经确认过一次的止损可能被重启打断，白跑一整轮。账本里原先
+    **没有任何止损痕迹**（命中只打日志，真停车就直接退出了），所以扫账本也无从重建。
+
+    写入时机 = 状态转移（不是每轮）：命中时写 `streak=N`；从 >0 回落到 0 时写
+    `streak=0`。两者合起来让 `streak` 从账本尾行**精确重建**，且日志噪声有界。
+    新事件名对旧读者透明（`LedgerView` 之外没人读它）。
+    """
+    return write_event(
+        jsonl_path,
+        {
+            "event": "stop_loss",
+            "iter": it,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "streak": streak,
+            "delta": delta,
+        },
+    )
+
+
+def write_paired_kill(
+    jsonl_path: Path,
+    it: int,
+    streak: int,
+    peer: str,
+    delta_pp: float | None = None,
+    own: float | None = None,
+    peer_wr: float | None = None,
+    margin_pp: float = 0.0,
+) -> dict:
+    """paired_kill 事件：配对中点杀臂的**计数与依据**落账（plan/accident.plan.md 附 §5）。
+
+    为什么必须落账：事故里那个条件**只在计划的散文里**（「连续 2 点 <−3pp」），于是它在
+    it25+it30 触发了却没人执行——事后连「当时到底触发没触发」都只能靠人回看计划。落成事件
+    之后：回放能重算同一个 `streak`（`biz/paired_kill.py` 是唯一判据），复盘能直接查账。
+
+    写时机 = 命中或计数变化（每轮都写会把账本淹掉，同 `kickstart_burn`）。
+    """
+    return write_event(
+        jsonl_path,
+        {
+            "event": "paired_kill",
+            "iter": it,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "streak": streak,
+            "peer": peer,
+            "delta_pp": delta_pp,
+            "own": own,
+            "peer_wr": peer_wr,
+            "margin_pp": margin_pp,
+        },
+    )
+
+
+def write_kickstart_burn(
+    jsonl_path: Path,
+    it: int,
+    streak: int,
+    baseline: float | None = None,
+    last: float | None = None,
+    margin_pp: float = 0.0,
+    mode: str = "baseline",
+    delta_pp: float | None = None,
+    peer: float | None = None,
+) -> dict:
+    """kickstart_burn 事件：干烧熔断的**计数与判定依据**落账（§5.2，2026-09-21）。
+
+    为什么必须落账：与 `stop_loss` 同一个道理——「连续 N 点低于基线」若只活在内存里，
+    重启即归零，昨天的干烧今天又从 1 数起（正好是事故里那种一夜两条腿的形态）。
+    带上 `baseline/last/margin_pp` 是为了让账本**自洽可回放**：拿同一批 `eval_summary`
+    行重算，必须得到同一份 `streak`（`biz/kickstart_burn.py` 是唯一判据，这里只搬运数字）。
+
+    写入时机 = 命中或计数变化（每轮都写会把账本淹掉）。
+
+    `mode` / `delta_pp` / `peer` 三个新字段（2026-09-30）只在参照物换成对端臂时才有意义：
+    `baseline`/`last` 两格**语义未变**（本腿 it0 / 本腿尾部），所以控制台按旧口径对账照旧
+    成立；`delta_pp` = 尾部对齐点的 Δ（百分点），`peer` = 对端在那点的读数。
+    """
+    return write_event(
+        jsonl_path,
+        {
+            "event": "kickstart_burn",
+            "iter": it,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "streak": streak,
+            "baseline": baseline,
+            "last": last,
+            "margin_pp": margin_pp,
+            "mode": mode,
+            "delta_pp": delta_pp,
+            "peer": peer,
+        },
+    )
+
+
+def log_iter_error(jsonl_path: Path, it: int, err: str) -> dict | None:
+    """迭代失败落 training_log.jsonl（iter_error 事件）。
+
+    此前失败详情只进易失 stdout——detach 启动下不可见，it2/it3 连续跳轮时
+    无任何可复盘痕迹。观测必须自带牙齿：last_completed_iter 只认 iteration
+    事件，iter_error 不影响断点续跑定位。OSError 静默（失败回放路径不该再炸）。
+
+    R2a：成功写入时**返回事件 dict**（调用方喂 `LedgerView.apply_event`）；
+    OSError 静默路径返回 None——调用方的 `_ledger_apply(None)` 是空操作。
+    """
+    try:
+        return write_event(
+            jsonl_path,
+            {
+                "event": "iter_error",
+                "iter": it,
+                "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+                "error": str(err)[:500],
+            },
+        )
+    except OSError:
+        return None
+
+
+def _json_args(args) -> dict:
+    """argparse Namespace → JSON 可序列化 dict（跳过 CourseConfig 等复杂对象）。
+
+    非课程运行的既有字段全部是 JSON 基本类型——过滤器对旧行为逐字节透明；
+    课程模式把 course_obj 折叠成 course_name（血缘可归因，不落巨型对象）。
+    """
+    out: dict = {}
+    for k, v in vars(args).items():
+        if v is None or isinstance(v, (str, int, float, bool)):
+            out[k] = v
+        elif isinstance(v, (list, tuple)) and all(
+            x is None or isinstance(x, (str, int, float, bool)) for x in v
+        ):
+            out[k] = list(v)
+    course = getattr(args, "course_obj", None)
+    if course is not None:
+        out["course"] = getattr(args, "course_name", "")
+        out["course_formula_hash"] = course.reward_spec().identity()
+    return out
+
+
+def write_run_start(jsonl_path: Path, args, rotate_seed: int) -> dict:
+    """run_start 事件：落盘启动参数与课程 rotateSeed（断点续跑继承来源）。"""
+    return write_event(
+        jsonl_path,
+        {
+            "event": "run_start",
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "args": _json_args(args),
+            "rotateSeed": rotate_seed,
+        },
+    )
+
+
+def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> dict:
+    """iteration 事件（字段契约与旧 trainer/loop.py 内联写入逐字节一致）。
+
+    m: {rollout_sec, ppo_sec, total_steps, chunks_n, agg, kl_cum, halted,
+        dropped_games, waves, load_sec, tail_drain_sec, eval_join_sec}
+    """
+    agg = m["agg"]
+    return write_event(
+        jsonl_path,
+        {
+            "event": "iteration",
+            "iter": it,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "winRate": report.get("winRate", 0.0),
+            "outcomes": report.get("outcomes") or {},
+            "score_mean": report.get("scoreStats", {}).get("mean"),
+            "score_std": report.get("scoreStats", {}).get("std"),
+            "dim_means": report.get("dimMeans", {}),
+            # 意图 RL 字段（per-tick 报告无此行 → None，不破兼容）。
+            "intentCounts": report.get("intentCounts" if args.mode != "goal" else "actionCounts"),
+            "baseIntegrity": report.get("dimMeans", {}).get("baseIntegrity"),
+            "samples": report.get("totalSamples", 0),
+            "ticks": report.get("totalTicks", 0),
+            "rollout_sec": m["rollout_sec"],
+            "ppo_sec": m["ppo_sec"],
+            # 2026-09-11 新增（additive，旧行无此键 → None）：云端/本机 **真训练秒**；
+            # ppo_sec 在远端模式是往返墙钟，不可当作训练量。
+            "ppo_cloud_sec": m.get("ppo_cloud_sec"),
+            # 2026-09-17 M0（additive，旧行无此键 → None）：统一传输计量子字典——
+            # 把「往返墙钟 − 云端真训练秒」的差额拆成字节与秒（up/down/pack）。
+            # 缺键（本机 PPO / 旧路径）= None，不破兼容；供 A/B 按选项分组统计。
+            "wire": m.get("wire"),
+            "steps": m["total_steps"],
+            "chunks": m["chunks_n"],
+            "policy": agg["policy"] if agg else None,
+            "value": agg["value"] if agg else None,
+            "entropy": agg["entropy"] if agg else None,
+            "kl": agg["kl"] if agg else None,
+            "mean_ret": agg["mean_ret"] if agg else None,
+            # R5§363：缰绳遥测（旧 agg 无此键 → None，不破兼容）。
+            "kickstart": (agg.get("kickstart") if agg else None),
+            # demo 混 batch 遥测（同上 additive；旧 agg 无此键 → None）。
+            "demo_bc": (agg.get("demo_bc") if agg else None),
+            "lr": args.lr,
+            # 动态采集（plan/dynamic-rollout-volume §2.4.3）：本轮配额与已结算量；
+            # 未开该模式的课程为 None（additive，旧行无此键）。
+            "transitions_target": m.get("transitions_target"),
+            "transitions_collected": m.get("transitions_collected"),
+            #: 触单关局数硬顶而配额未满（长短局失衡 / est 偏差的指纹）。
+            "transitions_capped": m.get("transitions_capped"),
+            # P1-12：reward/dodge 臂版本落盘（历史实验可归因——
+            # 此前奖励规格无记录，复盘无法区分 v7/toy 臂）
+            "reward": getattr(args, "reward", ""),
+            "dodge": getattr(args, "dodge", ""),
+            "mb": args.mb,
+            "epochs": args.epochs,
+            # 队列模式附加字段（nodes=[] 纯本地模式不含，保字节一致基线）
+            **(
+                {
+                    "missing": report["missing"],
+                    "expectedGames": report["expectedGames"],
+                    "dist": report["dist"],
+                }
+                if "missing" in report
+                else {}
+            ),
+            # rollout 采集（用户口径 2026-09-19）：权重开始分发 → 样本齐可交 PPO。
+            # volume 多波：combine_reports 已聚合 min(dist_start)→max(collect_end)。
+            # 纯本地路径回退 rollout 全长。旧账本无 ts 键时仍读 report.pure_collect_sec。
+            "pure_collect_sec": report.get("pure_collect_sec", round(m["rollout_sec"], 1)),
+            "rollout_collect_aggregated": report.get("rollout_collect_aggregated"),
+            "rollout_collect_waves": report.get("rollout_collect_waves"),
+            # R5 遥测补牙（2026-08-25）：流式的 kl 只是末 wave 单值，对轮内
+            # 累积漂移全盲——补 kl_cum/halted/dropped 与各阶段耗时拆分。
+            # F4 熔断仍读 kl（每梯度步均值，跨模式可比）；轮内漂移由
+            # streamKlCap 治理，kl_cum 供观测与事后分析。
+            "kl_cum": m["kl_cum"],
+            "halted": m["halted"],
+            "dropped_games": m["dropped_games"],
+            "waves": m["waves"],
+            "load_sec": m["load_sec"],
+            "tail_drain_sec": m["tail_drain_sec"],
+            "dist_phase_sec": report.get("dist_phase_sec"),
+            "eval_join_sec": m["eval_join_sec"],
+        },
+    )
+
+
+def write_gate_verdict(
+    jsonl_path: Path,
+    it: int,
+    verdict: str,
+    reason: str,
+    *,
+    route: str | None = None,
+    readings: list[dict] | None = None,
+    override: dict | None = None,
+    seeds: str = "unknown",
+    decider: str = "loop",
+) -> dict:
+    """gate_verdict 事件：课程结束门判决落地（plan §4.3）。
+
+    两条来源（lattice 的 ABORT 项不能只有人工 override 一条路）：
+      1. `loop_guards_gate._gate` 第四守卫——ADVANCE/REMEDIATE/STOP/PAUSE；
+      2. `_breaker` 熔断——ABORT（ds-P1-1：否则执行面在真正的 ABORT 场景读不到判决）。
+    读盘面（notebook/hub 运维）只读末个 gate_verdict，不自己算门。
+    """
+    return write_event(
+        jsonl_path,
+        {
+            "event": "gate_verdict",
+            "iter": it,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "verdict": verdict,
+            "route": route,
+            "reason": reason,
+            "seeds": seeds,
+            "decider": decider,
+            "readings": readings or [],
+            "override": override,
+        },
+    )
+
+
+def write_circuit_break(
+    jsonl_path: Path,
+    it: int,
+    tripped: str,
+    agg: dict,
+    kl_streak: int,
+    ent_streak: int,
+    report: dict,
+    args,
+) -> None:
+    """circuit_break 事件：F4 熔断落地（训练 PAUSED 前的最后观测记录）。"""
+    write_event(
+        jsonl_path,
+        {
+            "event": "circuit_break",
+            "iter": it,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "reason": tripped,
+            "kl": agg["kl"],
+            "kl_streak": kl_streak,
+            "entropy": agg["entropy"],
+            "ent_streak": ent_streak,
+            "winRate": report.get("winRate", 0.0),
+            "weights": args.out,
+        },
+    )
+
+
+def write_run_complete(jsonl_path: Path, it: int, iters: int, reason: str) -> None:
+    """run_complete 事件：主循环正常收官（ALL DONE）→ 停车不断进程前的最后落账。
+
+    2026-09-12 用户定案：跑满后进程不再退出，而是本地停采 + 云停机 + 停车等待
+    重启。本事件是 console「已完成」横幅的派生源（账本尾行即本事件 ⇒ 横幅展示；
+    resume 后新 run_start/iteration 事件自然顶掉它 ⇒ 横幅消失）。读盘面只认已知
+    事件名（iteration/run_start/gate_verdict/…），新事件名对旧读者透明、无影响。
+    """
+    write_event(
+        jsonl_path,
+        {
+            "event": "run_complete",
+            "iter": it,
+            "iters": iters,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "reason": reason,
+        },
+    )

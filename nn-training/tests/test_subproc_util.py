@@ -11,7 +11,7 @@
   ③ 重试上限到顶 ⇒ 响亮失败并指出是并行端口竞争；
   ④ 成功判据是**这个子进程自己**自报监听，不是「端口上有人监听」。
 
-子进程用真 `remote._port_guard.ensure_port_free`（文案不硬编码在测试里），
+子进程用真 `common.port_guard.ensure_port_free`（文案不硬编码在测试里），
 所以守卫文案一改，`PORT_TAKEN_MARKER` 就跟着红 —— 否则换端口重试会静默失效。
 """
 
@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from remote._port_guard import ensure_port_free
+from common.port_guard import ensure_port_free
 from tests.subproc_util import (
     PORT_TAKEN_MARKER,
     SPAWN_PORT_ATTEMPTS,
@@ -41,7 +41,7 @@ from tests.subproc_util import (
 #: 假服务：先过真端口守卫，再 bind/listen 并按 hub-server / worker-serve 的形状自报。
 _CHILD_LISTEN = (
     "import socket, sys, time\n"
-    "from remote._port_guard import ensure_port_free\n"
+    "from common.port_guard import ensure_port_free\n"
     "port = int(sys.argv[1])\n"
     "ensure_port_free('127.0.0.1', port)\n"
     "s = socket.socket()\n"
@@ -98,7 +98,7 @@ def test_marker_matches_the_real_port_guard_message() -> None:
     with _held_port() as taken, pytest.raises(RuntimeError) as e:
         ensure_port_free("127.0.0.1", taken)
     assert PORT_TAKEN_MARKER in str(e.value), (
-        "PORT_TAKEN_MARKER 与 remote/_port_guard.py 的拒绝文案不一致"
+        "PORT_TAKEN_MARKER 与 common/port_guard.py 的拒绝文案不一致"
     )
 
 
@@ -204,9 +204,16 @@ def test_child_output_survives_non_ascii_marker() -> None:
 
 
 #: 凡起真服务进程的测试文件，必须从本模块借端口 —— 自己探端口就会把 TOCTOU 带回来。
-#: 判据用**带引号的 argv 元素**（`"-m", "remote.hub_server"`）：`from remote.worker_server import`
+#: 判据用**带引号的 argv 元素**（`"-m", "hub.server"`）：`from remote.worker_server import`
 #: 是进程内用法（bind 紧跟探测、窗口微秒级），不该被这条守卫扫进来。
-_SERVICE_SPAWN_MARKERS = ('"remote.hub_server"', '"remote_worker_serve"', '"remote.worker_server"')
+#:
+#: 2026-09-30（刀 1，hub 出包）：三个标记都改成**带尾逗号**的 argv 元素形态（`'"hub.server",'`）。
+#: 原因：入口从 `remote.hub_server` 改名成 `hub.server` 之后，这个串不再只出现在 argv 里——
+#: 账本 `tests/helpers/remote_dag.py` 的 `"hub.server": 7` 是字典键，拆分守卫里的
+#: `imp == "hub.server"` 是名字比较；用旧标记（不带逗号）会把 `test_hub_admin_split.py` /
+#: `test_hub_routes_split.py` 这两个**不起任何服务**的守卫误判成 spawner（实测当场红）。
+#: 尾逗号正是「它是一个 argv 列表元素」这件事在源码里的形状。
+_SERVICE_SPAWN_MARKERS = ('"hub.server",', '"remote.remote_worker_serve",', '"remote.worker_server",')
 
 #: 本模块自身与本文（讲原理要引用那个名字）不参与守卫。
 _GUARD_EXEMPT = {"tests/subproc_util.py", "tests/test_subproc_util.py"}
@@ -223,11 +230,11 @@ def _code_of(rel: str) -> str:
 
 
 def _test_files() -> list[str]:
-    """全部测试文件（相对 nn-training/），排除豁免名单。"""
+    """全部测试文件（相对 nn-training/，逐层递归），排除豁免名单。"""
     out: list[str] = []
     for layer in ("tests", "e2e"):
-        for p in sorted((ROOT / layer).glob("*.py")):
-            rel = f"{layer}/{p.name}"
+        for p in sorted((ROOT / layer).rglob("*.py")):
+            rel = p.relative_to(ROOT).as_posix()
             if rel not in _GUARD_EXEMPT:
                 out.append(rel)
     assert len(out) > 50, f"测试文件扫得太少（{len(out)}）——路径写错了？"

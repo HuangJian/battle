@@ -1,6 +1,6 @@
 {
  "metrics_version": 10,
- "generated_by": "scripts/regen_reward_golden.py",
+ "generated_by": "worker/scripts/regen_reward_golden.py",
  "cases": [
   {
    "course": "s1",

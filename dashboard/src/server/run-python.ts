@@ -1,7 +1,7 @@
 /** run-python.ts — 控制台跑 python **一次性脚本**的唯一入口（解释器解析 + 环境 + 两种模式）。
  *
  *  为什么要有这个文件（而不是每个动作各写一遍）：控制台有若干「跑一次就退出」的 python
- *  一侧能力——`evalA`（A 层评估）、任务包导出（`run_rl.py --export-bundle`）、产物导入
+ *  一侧能力——`evalA`（A 层评估）、任务包导出（`trainer/run_rl.py --export-bundle`）、产物导入
  *  （`remote.deliver_zip`）。它们的解释器解析坑**完全相同**且都踩过：
  *
  *  * uv 造的 venv 里 `.venv\Scripts\python.exe` 是 **trampoline**（真身是它另起的基础
@@ -91,7 +91,7 @@ export function runRunPythonAsyncModule(
 
 /** **异步**跑一个 python **脚本文件**（仓库相对或绝对路径；短任务），捕获输出。
  *
- *  与模块变体只差入口形式：只读型脚本（`run_rl_cluster.py --json`）是文件不是包模块，
+ *  与模块变体只差入口形式：只读型脚本（`trainer/run_rl_cluster.py --json`）是文件不是包模块，
  *  而解释器解析 / env / UTF-8 解码这些坑一模一样——故共用同一条实现，不另写一份。
  */
 export function runRunPythonAsyncScript(

@@ -55,6 +55,7 @@ import urllib.request
 from collections.abc import Callable
 from pathlib import Path
 
+from common import net_http
 from common.logutil import log_line
 from common.protocol import (
     AUTH_HEADER,
@@ -67,7 +68,6 @@ from common.protocol import (
     encode_weights_json,
     sanitize_run_id,
 )
-from remote import net_http
 from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes
 
 #: 探活结果的缓存秒数（训练一轮动辄几分钟，没必要每轮都探两次：`sync()` 前探一次即可，

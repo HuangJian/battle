@@ -2563,7 +2563,7 @@ T12 的"byte-identical"验收应在**已能回放的子集**上做，
 
 | 常数 | 值 | 位置 |
 |---|---|---|
-| `OBS_CHANNELS` / `BOARD` / `SCALAR_DIM` | 14 / 26 / 19 | `obs-encoder.ts:42-44`、`schema.py:14-22` |
+| `OBS_CHANNELS` / `BOARD` / `SCALAR_DIM` | 14 / 26 / 19 | `obs-encoder.ts:42-44`、`common/schema.py:14-22` |
 | `OBS_SCHEMA_MAJOR` | 2 | `obs-encoder.ts:45` |
 | `DEFAULT_H` / `DEFAULT_D` / `DEFAULT_HEAD_HIDDEN` | 64 / 8 / 128 | `student_model.py:35-37` |
 | `INTENT_REPLAN_TICKS` | 30 | `tagger.ts:26` |

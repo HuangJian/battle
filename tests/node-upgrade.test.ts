@@ -2,7 +2,7 @@
  * node-upgrade.test.ts ↔ tools/lib/node-upgrade.ts
  *
  * 契约核心：TS **不**自己 ping、**不**自己判 stale —— 它只把 cfg 路径与跨调用 memo
- * 交给 `nn-training/dist_upgrade_cli.py`（扫描模式），探测/判门/护栏全在 dist_common。
+ * 交给 `nn-training/tools/dist_upgrade_cli.py`（扫描模式），探测/判门/护栏全在 dist_common。
  * 因此这里的断言聚焦「发给 Python 的 spec 长什么样」与「memo 往返」。
  */
 import { describe, expect, it } from 'bun:test'
@@ -110,7 +110,7 @@ describe('requestNodeUpgrades（经 nn-py-safe.sh 调 python 扫描）', () => {
       ])
       // 必须经沙箱免疫启动器（严禁裸 python）；cfg 路径透传（探测在 python 侧）。
       expect(seen[0]?.argv.slice(0, 2)).toEqual(['bash', 'tools/githook/nn-py-safe.sh'])
-      expect(seen[0]?.argv[2]).toBe('nn-training/dist_upgrade_cli.py')
+      expect(seen[0]?.argv[2]).toBe('nn-training/tools/dist_upgrade_cli.py')
       const sent = JSON.parse(seen[0]!.spec) as Record<string, unknown>
       expect(sent.cfg_path).toBe(CFG)
       expect(sent.expected_hash).toBe(EXP)
@@ -280,7 +280,7 @@ describe('resolveUpgradeBranch / pythonCandidates', () => {
 describe('真子进程（dry-run：不发 POST，只验证链路与探测可达）', () => {
   const hasVenv = pythonCandidates(REPO).some((p) => existsSync(p))
   it.skipIf(!hasVenv)(
-    '经 nn-py-safe.sh 调 dist_upgrade_cli.py 扫描模式：不存在的节点 → unreachable/stale',
+    '经 nn-py-safe.sh 调 tools/dist_upgrade_cli.py 扫描模式：不存在的节点 → unreachable/stale',
     () => {
       const dir = mkdtempSync(path.join(tmpdir(), 'upg-cfg-'))
       try {

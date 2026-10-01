@@ -37,7 +37,7 @@ NN_ROOT = Path(__file__).resolve().parent.parent
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
 
-from rl.jsonc import load as jsonc_load
+from common.jsonc import load as jsonc_load
 
 
 def _load_tool(name: str) -> Any:

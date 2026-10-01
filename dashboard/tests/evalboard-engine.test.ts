@@ -15,7 +15,7 @@ import {
 } from '../src/evalboard/engine'
 
 describe('engine_epoch (§2.5；2026-09-17 统一到 SSOT 清单)', () => {
-  it('epoch = sha256(codeHash)[0:16]（与 dist_common.compute_engine_epoch 同式）', () => {
+  it('epoch = sha256(codeHash)[0:16]（与 common.distribution.compute_engine_epoch 同式）', () => {
     const ch = computeCodeHash()
     const want = createHash('sha256').update(ch).digest('hex').slice(0, 16)
     expect(engineEpoch(ch)).toBe(want)

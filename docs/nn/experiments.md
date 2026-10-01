@@ -1893,7 +1893,7 @@ venv numpy 实载验证（BC 可直接消费；returns.npy 按 dual-head 可选�
 （§1.3 启动模板、§2.3 课程文件写 V、§2.4 `--rotate-seed` 标调试专用、§2.5 开腿配对核对、
 §4 验收补条、§4.1 控制台冻结面、§5 附 中点杀臂）。两条最值得记的：
 
-**① 中点杀臂从「值班/闹钟」变成守卫**（`rl/paired_kill.py` + `loop_guards._paired_kill`）。
+**① 中点杀臂从「值班/闹钟」变成守卫**（`biz/paired_kill.py` + `loop_guards._paired_kill`）。
 C 事故的中点条件（同 it 配对差连续 2 点 <−3pp）在 it25+it30 **确实触发了**，但它是计划里的一句
 散文、凌晨没人执行——事后连「当时到底触发没触发」都只能靠人回看。落成守卫后：同 it 对齐（各取
 末条，续腿以最新为准）+ 尾部连续（中间反弹一次即清零，与 F4/kickstart-burn 同一连击语义）+ 停腿
@@ -1907,11 +1907,11 @@ C 事故的中点条件（同 it 配对差连续 2 点 <−3pp）在 it25+it30 *
 实际生效 rotateSeed ⇒ **拒启**（唯一无歧义的错配，代价是一条腿按错种子流跑满 80 轮）；跨臂不等
 ⇒ 响亮 WARNING。理由：跨臂只能读对端**账本的末条 run_start**，而账本是历史累积——对端刚开课
 还没写、或对端上一腿用旧 V，都会让「不等」成立而并没出错配。fail-fast 闸门放在**开课那一刻**
-（控制台回执一屏：同 V 课程表 + 各臂账本读数），理由写在 `rl/paired.py` 头注里。
+（控制台回执一屏：同 V 课程表 + 各臂账本读数），理由写在 `biz/paired.py` 头注里。
 
 **其余落地**：毒包熔断的控制台面（`CourseMatrix` 毒包横幅 + 「解冻」按钮 →
 `actions/poison.ts::unfreezeJob` → `POST /admin/unfreeze`；job_id 形状错 = **400** 不是 409，
-判据 `jobIdError` 路由与动作层同源）；`tests/test_remote_failure_policy.py` 补上
+判据 `jobIdError` 路由与动作层同源）；`tests/trainer/test_remote_failure_policy.py` 补上
 「`JobFailedError` 之后不得自动重发同 job_id」的专门回归（发布钩子钉零重发）。
 
 **lesson**：计划里那些「必须有人/闹钟执行」的规则，最后都会退化成「规则不存在」——
@@ -2038,8 +2038,8 @@ it55 差 −0.7pp，|Δ|<2）。
   10 杀 +1 / 9 杀以下 +0 / 通关 +0，残局每杀 3.0→4.0。venv 实测与评审脚本一致。
 - **`--rotate-seed` 配对旗标**（致命伤 2，成立）：全新跑 rotateSeed 带时刻抖动
   （`loop_core` 旧逻辑），同 `--seed` 不同秒起 = 种子流完全不同。新增显式覆盖
-  （`rl/course.py::resolve_rotate_seed` 三级：显式 > 继承 > 抖动）+ CLI 旗标 +
-  `tests/test_rotate_seed_override.py` 6 例。官方门禁 **1903 passed**。
+  （`biz/course.py::resolve_rotate_seed` 三级：显式 > 继承 > 抖动）+ CLI 旗标 +
+  `tests/biz/test_rotate_seed_override.py` 6 例。官方门禁 **1903 passed**。
 - **统计**（成立）：门 = 配对差 ≥+2pp **且 McNemar p<0.05**；|差|<2pp = 无结论；
   配对失败回退非配对 z、门提到 +5pp；中点杀臂改连续 2 点 <−3pp（单点误杀约半）。
 - **半速/无结论风险**（成立）：双臂各半速约 85–90 轮，B 转折在 it90 —— 写进 §6⑤，
@@ -2476,7 +2476,7 @@ x1-rebirth 跑 42 轮后**衰退**（it19 峰值 0.168 → it42 0.063），当�
   学习曲线被采样量本身污染。改为按 **samples** 配额后仍只剩「过冲几个百分点」的抖动
   （采集按整局补波）。**再往下压到严格相等**的收益是：`n` 恒定 ⇒ `n % mb` 恒定
   ⇒ **所有 minibatch 的 shape 恒定**（TPU 侧无 host 抖动）。
-- **实现（新增 `per_stage_quota`）**：`ppo/common.trim_shard_arrays()` +
+- **实现（新增 `per_stage_quota`）**：`worker/ppo/common.trim_shard_arrays()` +
   `load_episodes_common(per_stage_quota=)`。三条不变量：
   1. **截断在 GAE 之前** —— GAE 反向递推，先算完再丢尾部会让保留段的 adv/ret 全错；
   2. **截断处不改 `done`** —— 原为 0 时 `compute_gae` 自然用 value bootstrap
@@ -2484,14 +2484,14 @@ x1-rebirth 跑 42 轮后**衰退**（it19 峰值 0.168 → it42 0.063），当�
   3. **逐关而非全局** —— 全局按序截断会把排在后面的关整关丢掉，破坏
      「短局关淹不了长局关」的分关独立达标不变量。采集侧补波与训练侧截断共用同一个
      `volume_waves.target_per_stage`，两侧不会漂。
-- **全链**：`ppo/engine.py`（`load_shard` 带 stage、`--per-stage-quota`、update 模式）→
-  `rl/loop_steps.py`（`_per_stage_quota()`，**自带 mode 门**使 serial 与 remote 不会一个
+- **全链**：`worker/ppo/engine.py`（`load_shard` 带 stage、`--per-stage-quota`、update 模式）→
+  `trainer/loop_steps.py`（`_per_stage_quota()`，**自带 mode 门**使 serial 与 remote 不会一个
   gate 一个不 gate）→ `remote/{protocol,hub_client,worker}.py`（manifest 字段 + 校验，
   **先挡 bool** 因为 bool 是 int 子类 + worker 接线）。
 - **新增共享解析器** `volume_waves.parse_stages_arg()`：采集侧（`_volume_stages`，失败
   **响亮 SystemExit**）与训练侧（`_per_stage_quota`，失败**静默返 0 = 全收**）策略仍不同
   （有意的），但「什么算可解析」从此同源 —— 消除「采集说合法、训练说非法」的裂缝。
-- **单测** `tests/test_ppo_quota.py`（4）：trim 边界（0 维字段不切 / `keep≥N` 零拷贝 /
+- **单测** `tests/worker/test_ppo_quota.py`（4）：trim 边界（0 维字段不切 / `keep≥N` 零拷贝 /
   `keep≤0` 空）；逐关精确（**GAE 收到截断后的长度** ⇒ 证明截在 GAE 之前）；
   配额满丢整 shard 且不跨关借；`quota=0` 全收且 episode 字段集不含 `stage`。
   ⚠ 测试用**旁路 meta** 记录「episode ↔ stage」而不是 `zip` 位置对齐 —— 丢 shard 时位置会错。
@@ -2503,7 +2503,7 @@ x1-rebirth 跑 42 轮后**衰退**（it19 峰值 0.168 → it42 0.063），当�
   ⇒ **从零是唯一能离开「教师吸引域」的路径**。（另注：goal-nn §5 早就定过同路线，
   `docs/nn/legacy.md` §14 的 S1 过门是唯一先例 —— 但那是 **3 命 1 星**，学到的其实是「莽」，
   到 x10 冲不上去 ⇒ **不可当可行性证据**。）
-- **初始化**：`scripts/init_scratch_weights.py --seed 7`（trunk×0.1 / 头×0.01 / value×0.1）。
+- **初始化**：`worker/scripts/init_scratch_weights.py --seed 7`（trunk×0.1 / 头×0.01 / value×0.1）。
   朴素 kaiming 会让 logits 随机即 ±2000 ⇒ 熵≈0、首个更新自锁（实测 kl=11930 后恒 0）。
 - **`kickstart_ref=false`**：它是相对 **`bc`** 的 KL 锚，而本腿 `bc` 就是随机策略 ——
   开着等于把策略钉在噪声上，且恰在 it1–30 探索窗口最猛。
@@ -2845,14 +2845,14 @@ KL 仍 ~0.002 ⇒ **不得**写成「信用比无效」（后者须 KL≥0.01 �
 「信用比有害」（单腿 −2.9pp 显著仍可来自起点游走 + acd 噪声）。后继 = **metrics v6**
 （分敌种命中列，TS+Python 全链），**不是**继续调 wKill/wHit 剂量。
 
-**量纲勘误（P0，结课评审复算）**：账本口径的 **`transitions = samples`**（`rl/resume.py`
+**量纲勘误（P0，结课评审复算）**：账本口径的 **`transitions = samples`**（`biz/resume.py`
 自声明「nSamples 之和」），ticks 只是 clocks；本腿实测 **samples/轮均值 23343 ≈ 2.33 万
 transitions/轮**（ticks/轮 231924，samples/ticks = 0.1007 ≈ 1/K）。旧文「23.5 万 transitions/轮」
 实为 **ticks —— 10× 误差**；c4-dodge 的「66 万+」同理（≈6.6 万 transitions）。本腿有效性
 不受影响（固定 60 局/关，单位无关），但**一切「X 万 transitions」规划须按 samples 重算**
 （60 万线 ≈ seed_rotate 1546/关 ≈ 6200 局/轮）。同错蔓延三处
 （`curricula/x3-start.jsonc:66`、`_example-custom-stage.jsonc:77`、`plan/dynamic-rollout-volume.plan.md:26`）
-+ `rl/volume_waves.py` 分子 samples 配分母 `est_ticks_per_game` 的 10×（已跑出「兑现 37% 触顶」
++ `biz/volume_waves.py` 分子 samples 配分母 `est_ticks_per_game` 的 10×（已跑出「兑现 37% 触顶」
 用例）⇒ 立缺陷单（T9）。
 
 **事件账一句话**：wall clock 13:31→17:41 = **4h10m，其中训练仅 1h16m**（it2–it30 ≈2.6min/轮；
@@ -2918,8 +2918,8 @@ it30 vs bc，逐局证据 `tmp/c4chip03-it30-probe.jsonl`）：
 
 **EVAL_SEEDS 100→200 修复**（§7 测试先行，nn-python-gate 绿）：
 
-- `rl/eval_local.py`：语料扩至 `range(860001, 860201)`；前 100 seed 逐字节不变 = 旧口径兼容
-  （消费方全部 `[:n_seeds]` 前缀切片，已核验）。`tests/test_rl_remote_fixes.py` 钉新契约
+- `biz/eval_local.py`：语料扩至 `range(860001, 860201)`；前 100 seed 逐字节不变 = 旧口径兼容
+  （消费方全部 `[:n_seeds]` 前缀切片，已核验）。`tests/worker/test_rl_remote_fixes.py` 钉新契约
   （len 200 + 前缀 100 逐字节 + 860101/860200 边界），红→绿。
 
 **c6-chip 主腿已备好**（`nn-training/curricula/c6-chip.jsonc`，启动前预检通过：
@@ -3004,7 +3004,7 @@ it30 vs bc，逐局证据 `tmp/c4chip03-it30-probe.jsonl`）：
   充分论证。评审指认三处事实错误（F1 kickstart 机制、F2 it50 口径、F3 R1 设施状态）、
   三点诊断偏漏、以及"R 清单缺执行顺序"这一最大缺口。
 - **核实方法**：一律回到盘面与代码——`tmp/c6-margin/{training_log,eval_log}.jsonl`、
-  `remote-jobs/*/manifest.json`、`rl/reward_library.reward_from_spec`（真实公式而非笔算）。
+  `remote-jobs/*/manifest.json`、`biz/reward_library.reward_from_spec`（真实公式而非笔算）。
 - **接受（已改文档/配置）**：① D10 单变量失真（c6 注释写"单变量=敌数"，但 bc 同时
   从 c4-it140 换成 c5-it40）；② D11 无梯度假说链（稀疏通关+廉价死亡+时间税 → terminal
   主导 → PPO 只能学"更快结束"）；③ `§12.3.1` Phase 0–4 执行顺序 + R3/R4/R5 互斥；
@@ -3173,12 +3173,12 @@ it30 vs bc，逐局证据 `tmp/c4chip03-it30-probe.jsonl`）：
      「**梯度无方向 / 执行瓶颈**」（指向 metrics v6，分敌种命中列 TS+Python 全链）；
      **禁**写「信用比无效」（须 KL≥0.01 而 Δ≈0 才成立）与「信用比有害」
      （单腿 −2.9pp 可来自起点游走 + 目标关噪声，且四关同降 ≠ 因果）。
-  2. **量纲令：`transitions = samples`**（`rl/resume.py::settled_stage_totals` 自声明「nSamples
+  2. **量纲令：`transitions = samples`**（`biz/resume.py::settled_stage_totals` 自声明「nSamples
      之和」，ticks 只是 clocks，K=10 降采样）。一切「X 万 transitions」规划按 **samples/局 ≈ 97**
      重算（本腿实测 samples/轮均值 23343 ≈ **2.33 万 transitions/轮**）；旧「23.5 万 transitions/轮」
      = ticks，**10×，作废**（c4-dodge 的「66 万+」同理 ≈6.6 万）。同错已蔓延四处
      （`curricula/x3-start.jsonc:66`、`_example-custom-stage.jsonc:77`、
-     `plan/dynamic-rollout-volume.plan.md:26`、`rl/volume_waves.py` 分子 samples 配分母
+     `plan/dynamic-rollout-volume.plan.md:26`、`biz/volume_waves.py` 分子 samples 配分母
      `est_ticks_per_game`）⇒ 单独立项修（缺陷单 T9，钉「600000/4/980 语义」单测）。
   3. **wChip 生存腿程序占位（批准后激活）**：wChip 上 1 命早期关**破** roadmap N3
      （「c01-c03 承伤基数极小不上 wChip」，§5.3 表 c01 行同引 R5）；实测局均 dmg ~97–124
@@ -3205,8 +3205,8 @@ it30 vs bc，逐局证据 `tmp/c4chip03-it30-probe.jsonl`）：
 ### §2026-09-15-goalnn-kl-cap-unwired（2026-09-15，x3-step 评审 P0-1：串行/远端路径 kl_cap 不接线）
 
 - **背景**：`ppo_schedule` 的 `kl_cap` 在 per-tick **remote/serial** 执行路径**不接线**——
-  `ppo/engine.py::ppo_update` 无形参；`remote/worker.py` 只读 `kl_coef`；全仓消费者仅
-  `rl/stream.py`（stream 波次闸）与 manifest 打包。x3 线 `stream=0`（remote 强制）⇒
+  `worker/ppo/engine.py::ppo_update` 无形参；`remote/worker.py` 只读 `kl_coef`；全仓消费者仅
+  `trainer/stream.py`（stream 波次闸）与 manifest 打包。x3 线 `stream=0`（remote 强制）⇒
   字段写了也不生效。`p4-fast.jsonc` 已写对；但 x3-step / x3-power 结算 / `docs/nn/experiments.md` §4、`docs/nn/remote-transport.md` §2.1 仍把「kl_cap 从未咬合 / 回落兜底」当成生效护栏叙事。
 - **备选与否决**：A 继续当护栏写 —— 否，机制假、后腿会按「失去护栏」解释第二段；
   B 引擎接线硬顶 —— 否，属新训练变量/算法变更，须另立项，本条只钉口径；
@@ -3326,12 +3326,12 @@ it30 vs bc，逐局证据 `tmp/c4chip03-it30-probe.jsonl`）：
 - **落地**：`dashboard/src/evalboard/{corpora.json,corpora.ts,verdict-cli.ts}`、
   `{batches,requests}.ts`（`kind/corpus/ckpts` + `verdictQueued/verdictCovered`，键 = 语料 id +
   ckpt **标签序**，顺序敏感）、`kick-once.py`（先 `consume_requests` 再 claim，`units_for_batch`
-  统一展开；同批修其 `ROOT` 少算两层的既有 bug）；`nn-training/rl/batch_eval.py`
+  统一展开；同批修其 `ROOT` 少算两层的既有 bug）；`nn-training/trainer/batch_eval.py`
   （`load_corpora/corpus_doc/plan_verdict_units/units_for_batch` + `consume_requests` 判决分支
   + 单元权重透传）。**同批修两处硬伤**：god 局不 POST 权重且 wver 传 12 位 `key16` ⇒ agent
   `/v1/task` 按全量 sha 查桶必然 409（现 god 也 POST 占位 `{}` 并把其 sha 当 wver；`key16`
   仍是行身份/续跑键）；`kick-once.py` 的 `ROOT` 路径算错（2026-09-15 目录迁移遗留）⇒ 脚本
-  一直 import 不到 nn-training。回归：`nn-training/tests/test_verdict_corpus.py`（10 例）+
+  一直 import 不到 nn-training。回归：`nn-training/tests/trainer/test_verdict_corpus.py`（10 例）+
   `dashboard/tests/evalboard-corpora.test.ts`（17 例）+ `test_batch_eval_wver.py` +
   `test_kick_once_paths.py`。验证：一次真判决批 kick（本机 self）行带齐 Phase-0 七列 +
   真 batch_id；nn-python-gate 1277 绿 · dashboard typecheck + 530 绿 · 根 `bun run check`

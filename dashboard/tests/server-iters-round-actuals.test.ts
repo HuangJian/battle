@@ -6,7 +6,7 @@
  *
  * 为什么必须单独钉住：云机离线腿的**单局 manifest 从不回传**（轮末 prune 只留最近 2 个
  * job 目录，随后销毁），所以那四条腿的表曾经恒空。现在云机随轮账本行多带一份压缩画像
- * （`rl/reports.py::compact_per_game`），由回传/导入落成 `it<N>/per-game.json`——若这条
+ * （`biz/reports.py::compact_per_game`），由回传/导入落成 `it<N>/per-game.json`——若这条
  * 读取路径断掉，症状是「表在、列全空」，与本机腿的 manifest 扫描红法完全不同。
  */
 
@@ -16,7 +16,7 @@ import { describe, expect, it } from 'bun:test'
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
 import { readIterMetrics, readRoundActuals } from '../src/server/iters'
 
-/** 一局压缩画像（字段名与单局 manifest 逐字相同，见 `rl/reports.py::_PER_GAME_FIELDS`）。 */
+/** 一局压缩画像（字段名与单局 manifest 逐字相同，见 `biz/reports.py::_PER_GAME_FIELDS`）。 */
 function game(stage: number, seed: number, over: Record<string, unknown> = {}) {
   return {
     stage,

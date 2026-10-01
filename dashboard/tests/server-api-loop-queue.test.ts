@@ -5,7 +5,7 @@
  *
  * **不跑 python**：`LoopQueueRunner` 是可注入接缝（与 `deliver_zip` 导入同惯例）——
  * python 那一侧的判据（`waiting_state` 的取值域、`build_rows` 的真读盘）由
- * `nn-training/tests/test_loop_plan_waiting.py` 钉死，这边只测控制台这一半：
+ * `nn-training/tests/trainer/test_loop_plan_waiting.py` 钉死，这边只测控制台这一半：
  * argv 形状 / 结果翻译的每条失败分支 / TTL 与单飞 / 与 registry 在训事实的合并。
  */
 
@@ -13,6 +13,7 @@ import { afterEach, describe, expect, it } from 'bun:test'
 import os from 'os'
 import path from 'path'
 import { api, view } from './helpers/console-fixture'
+import { guardMs } from './helpers/probe-stub'
 
 /** 在「本机没有共享 trainer 在跑」的事实下跑一段（把 registry 指向不存在的文件）。
  *
@@ -224,14 +225,9 @@ describe('getLoopQueueView（懒算 + TTL + 单飞）', () => {
     }
     const a = await api.getLoopQueueView(run)
     api.refreshLoopQueue()
-    let guard: ReturnType<typeof setTimeout> | null = null
-    const b = await Promise.race([
-      api.getLoopQueueView(run),
-      new Promise<never>((_, reject) => {
-        guard = setTimeout(() => reject(new Error('动作后仍在等调度器子进程（硬清回归？）')), 1000)
-      }),
-    ])
-    if (guard) clearTimeout(guard)
+    const guard = guardMs('动作后仍在等调度器子进程（硬清回归？）')
+    const b = await Promise.race([api.getLoopQueueView(run), guard.promise])
+    guard.done()
     expect(b).toBe(a) // 先给旧值（同一对象），不是重算出来的等值物
     expect(calls).toBe(2) // 软作废 ≠ 不作废：重算已经在读缓存时起跑
   })
@@ -269,7 +265,7 @@ describe('buildLoopQueueView / buildStateView 注入', () => {
     api.invalidateLoopQueue()
     await api.getLoopQueueView(() => ok(JSON.stringify(JSON_OUT))) // 暖一份旧视图
     api.refreshLoopQueue()
-    let guard: ReturnType<typeof setTimeout> | null = null
+    const guard = guardMs('动作后仍在等调度器子进程（硬清回归？）')
     const v = await Promise.race([
       api.buildLoopQueueView(
         true,
@@ -279,11 +275,9 @@ describe('buildLoopQueueView / buildStateView 注入', () => {
           }),
         { intent: ['c4-dodge', 'c5-tick'], applied: ['c4-dodge'] },
       ),
-      new Promise<never>((_, reject) => {
-        guard = setTimeout(() => reject(new Error('动作后仍在等调度器子进程（硬清回归？）')), 1000)
-      }),
+      guard.promise,
     ])
-    if (guard) clearTimeout(guard)
+    guard.done()
     expect(v.rows.map((r) => [r.course, r.pausedIntent, r.pauseApplied])).toEqual([
       ['c4-dodge', true, true], // 意图 + 已生效
       ['c5-tick', true, false], // 意图写了但训练进程还没施加

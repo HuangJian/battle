@@ -48,7 +48,11 @@ export function evalAArgs(
   iter: number,
   opts: EvalALaunchOpts = {},
 ): string[] {
-  const argv = [path.join(REPO_ROOT, 'nn-training', 'rl', 'eval_a_once.py'), '--course', course]
+  const argv = [
+    path.join(REPO_ROOT, 'nn-training', 'trainer', 'eval_a_once.py'),
+    '--course',
+    course,
+  ]
   if (ckpt) argv.push('--ckpt', ckpt)
   argv.push('--iter', String(iter), '--bun', 'bun')
   if (opts.baseline) argv.push('--baseline')

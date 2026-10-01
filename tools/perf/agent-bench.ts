@@ -5,7 +5,7 @@
  * 这里多走 HTTP + 常驻池（`PERSIST_SERVE_ENTRY` = 同质入口 `tools/sim/serve-any.ts`）+ 并发 worker，
  * 是训练栈的真实形态。
  *
- * 协议（对齐 `nn-training/dist_common.py::fetch_task`）：
+ * 协议（对齐 `nn-training/common/distribution.py::fetch_task`）：
  *   · 鉴权：`Authorization: Bearer <agent.auth 内容>`
  *   · 权重：`POST /v1/weights`（body = **gzip** 的权重 JSON，`x-weights-sha256` = **未压缩**字节的 sha256，
  *     `x-iter-id`），返回 204 kept / 200 purged；`wver` 参数就用这个 sha。

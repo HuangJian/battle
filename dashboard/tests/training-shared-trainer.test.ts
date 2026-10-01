@@ -1,9 +1,9 @@
 /**
- * training-shared-trainer.test.ts — 共享 trainer（`run_rl_cluster.py --serve`，2026-09-19 / R3-5）。
+ * training-shared-trainer.test.ts — 共享 trainer（`trainer/run_rl_cluster.py --serve`，2026-09-19 / R3-5）。
  *
  *  用户口径：「hubserver/trainingloop/selfNode/cloudflared 都只需要开一个进程，就能同时支持
  *  所有并行训练课程」。本文件钉的是**训练侧之外的每一半**（python 那一半由
- *  nn-training/tests/test_serve_course_overrides.py · test_serve_wiring.py 承担）：
+ *  nn-training/tests/worker/test_serve_course_overrides.py · test_serve_wiring.py 承担）：
  *
  *   ① **形状**：共享槽（`scopeOf` 归一为 `''`）+ `restartSpecFor` 重建出来的 argv 必须是
  *      「发现模式」（**不给 `--courses`**、给 `--traj-root`/`--cluster-lock`）——把课程写进
@@ -94,7 +94,7 @@ describe('① 形状：共享 trainer = 一个进程 + 发现模式', () => {
   it('restartSpecFor(trainingLoop, 共享槽) 重建出的 argv 不绑课程表', () => {
     saveAnyComponent('trainingLoop', '', {
       pid: 999999999, // 死 pid：只用于让条目存在，restartSpecFor 不探活
-      entry: 'nn-training/run_rl_cluster.py',
+      entry: 'nn-training/trainer/run_rl_cluster.py',
       course: '',
     })
     const spec = actions.restartSpecFor('trainingLoop', COURSE)
@@ -102,7 +102,9 @@ describe('① 形状：共享 trainer = 一个进程 + 发现模式', () => {
     expect(spec!.key).toBe('trainingLoop')
     expect(spec!.course).toBe('')
     const cmd = spec!.cmd.join(' ')
-    expect(cmd).toContain('run_rl_cluster.py')
+    // argv 里的入口是 `path.join(REPO_ROOT, …)` ⇒ Windows 上是反斜杠；先归一再看子串
+    // （origin 侧这条在 Linux CI 绿、Windows 红，2026-10-02 合并实测）。
+    expect(cmd.split(path.sep).join('/')).toContain('trainer/run_rl_cluster.py')
     expect(cmd).toContain('--serve')
     // 发现模式：不给课程表（课程 = `<traj-root>/<课>/training_log.jsonl` 这个文件系统事实）
     expect(cmd).not.toContain('--courses')
@@ -119,7 +121,7 @@ describe('① 形状：共享 trainer = 一个进程 + 发现模式', () => {
   it('旧形状（每课一条 trainingLoop 记录）→ 拒重建（守「同一批 traj 只有一个跑者」）', () => {
     saveAnyComponent('trainingLoop', COURSE, {
       pid: 999999999,
-      entry: 'nn-training/run_rl.py',
+      entry: 'nn-training/trainer/run_rl.py',
       course: COURSE,
     })
     expect(actions.restartSpecFor('trainingLoop', COURSE)).toBeNull()
@@ -183,6 +185,8 @@ describe('② 开课（course-lifecycle）：账本（发现判据）与机器�
         'push_node_url',
         'hub_push',
         'remote_degrade_after',
+        // 2026-10-01：门禁停机模式升平台级（tmp/gate-halt.json）——课程级那份无读者。
+        'gate_halt_mode',
       ]) {
         expect(knobsOnDisk(COURSE)[key]).toBeUndefined()
       }
@@ -195,13 +199,18 @@ describe('② 开课（course-lifecycle）：账本（发现判据）与机器�
       const cfg = fixture()
       // 类型表里这两个键已删 ⇒ 用旧形状（Record）造历史配置，模拟线上 rl-config.json 的残留值。
       cfg.courses = {
-        [COURSE]: { remote_transport: 'pull', remote_hub_url: 'https://old.example' },
+        [COURSE]: {
+          remote_transport: 'pull',
+          remote_hub_url: 'https://old.example',
+          gate_halt_mode: 'notify', // 2026-10-01 起的残留形态（平台化前的课程级值）
+        },
       } as unknown as RlConfig['courses']
       writeFileSync(tmpConfig, JSON.stringify(cfg, null, 2))
       const r = pruneLegacyCourseKnobs(cfg)
       const onDisk = knobsOnDisk(COURSE)
       expect(onDisk.remote_transport).toBeUndefined()
       expect(onDisk.remote_hub_url).toBeUndefined()
+      expect(onDisk.gate_halt_mode).toBeUndefined()
       expect(r.removed.length).toBeGreaterThan(0)
       writeFileSync(tmpConfig, JSON.stringify(fixture(), null, 2))
     })
@@ -248,7 +257,7 @@ describe('③ 停止：共享槽被清 + 语义说清楚', () => {
   it('停 trainer 报「所有课程的训练随之停止」，并清掉共享槽', async () => {
     saveAnyComponent('trainingLoop', '', {
       pid: 999999999, // 死 pid ⇒ 走「已退出」分支，不 kill 任何真进程
-      entry: 'nn-training/run_rl_cluster.py',
+      entry: 'nn-training/trainer/run_rl_cluster.py',
       course: '',
     })
     const r = await actions.stopComponent('trainingLoop', COURSE)
@@ -264,7 +273,7 @@ describe('④ 冒烟预演：共享 trainer 在跑时响亮拒绝（预演要独
   it('共享 trainer 存活 ⇒ 预演不启动、消息说清原因', async () => {
     saveAnyComponent('trainingLoop', '', {
       pid: process.pid, // 本进程 = 必活
-      entry: 'nn-training/run_rl_cluster.py',
+      entry: 'nn-training/trainer/run_rl_cluster.py',
       course: '',
     })
     const r = await actions.smokeTrain(COURSE)

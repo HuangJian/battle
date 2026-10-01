@@ -1,4 +1,4 @@
-"""test_run_rl.py — run_rl.py 常驻回归测试（无 torch 训练、不碰真实节点）。
+"""test_run_rl.py — trainer/run_rl.py 常驻回归测试（无 torch 训练、不碰真实节点）。
 
 两层：
   快速层（默认）：已迁移到 tests/ 独立文件（test_rl_course / test_rl_reports /
@@ -43,14 +43,16 @@ REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
-import dist_common
-import rl.dispatch as _rdispatch  # monkeypatch 目标：run_local_rollout 的查找命名空间
-import run_rl
-from platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from rl.reward_library import METRICS_DIM  # fake shard 与落盘同维（metric v3）
-from rl.stream import run_rollout_stream as _run_rollout_stream  # B7：run_rl 模块级不再 re-export
-from schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
+import common.distribution
+import trainer.dispatch as _rdispatch  # monkeypatch 目标：run_local_rollout 的查找命名空间
+from biz.reward_library import METRICS_DIM  # fake shard 与落盘同维（metric v3）
+from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from common.schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 from tests.subproc_util import run_utf8
+from trainer import run_rl
+from trainer.stream import (
+    run_rollout_stream as _run_rollout_stream,  # B7：run_rl 模块级不再 re-export
+)
 
 FAILS: list[str] = []
 ITEST = os.environ.get("RUN_RL_ITEST") == "1" or "--itest" in sys.argv
@@ -83,10 +85,10 @@ def _fail_loudly():
 
 def test_mirror_scalar_lockstep() -> None:
     """M2 镜像索引锁步：SCALAR_X_INDICES = [15,18,29]（v2 重编号 [20,23]→[15,18]，
-    之后追加 29=iceVx，见 schema.py:94/127）——mirrorX 前后 (obs, scalars, move) 自洽；
+    之后追加 29=iceVx，见 common/schema.py:94/127）——mirrorX 前后 (obs, scalars, move) 自洽；
     旧索引 [20,23] 必须不再翻转（防回归）。"""
-    from data.mirror import mirror_x
-    from schema import SCALAR_DIM, SCALAR_X_INDICES
+    from common.schema import SCALAR_DIM, SCALAR_X_INDICES
+    from worker.data.mirror import mirror_x
 
     # 2026-09-20：本行原写死 [15,18]，schema 追加 29=iceVx 后已过期 —— 因 check() 只聚合
     # 不抛错，它**静默 FAIL 了很长一段时间**（由模块级 _fail_loudly 揭出）。
@@ -372,7 +374,7 @@ class FakeAgent(BaseHTTPRequestHandler):
                     # 与 dispatch.bun_version(缺失) 的失败回落同 "?" → mm 门恒匹配
                     cache["bun"] = "?"
             if "codeHash" not in cache:
-                cache["codeHash"] = dist_common.compute_code_hash()
+                cache["codeHash"] = common.distribution.compute_code_hash()
             self._json(
                 {
                     "codeHash": cache["codeHash"],
@@ -431,7 +433,7 @@ class FakeAgent(BaseHTTPRequestHandler):
 class _StubPpo:
     """I3/I4 集成桩：mock PPO 更新——编排测试（wave/eval 时机/熔断/停派发）不需要真 torch
     权重。只消费 chunks 数量并回可控 agg（kl 可调），stream 的 steps/chunks/waves 计数仍由
-    其自身维护（rl/stream.py _drain），本桩只决定「每次更新回什么指标」。
+    其自身维护（trainer/stream.py _drain），本桩只决定「每次更新回什么指标」。
 
     backend 依赖接口（run_rollout_stream 的 backend 参数即注入点，默认 ppo_mod）：
       update / _ppo_load / load_episodes / chunk_episodes —— 按需实现。"""
@@ -532,7 +534,7 @@ def _itest_env(
     # （docs/nn/engineering.md §13：门禁里那条随机 flake）。键不同就与线程时序无关。
     weights.write_text(json.dumps({"stub": True, "case": tmp_path.name}))
     # 账本清零保留作双保险（内容唯一已使撞键不可能）：防「手写同内容」的新用例把这个坑带回来。
-    dist_common.weights_push_cache_reset()
+    common.distribution.weights_push_cache_reset()
     monkeypatch.setattr(_rdispatch, "run_local_rollout", _stub_local_rollout)
     srv = FakeServer(("127.0.0.1", 0), FakeAgent)
     threading.Thread(target=srv.serve_forever, daemon=True).start()
@@ -588,7 +590,7 @@ def test_it_queue_normal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         # 竞态（2026-09-20 已在 I3 下标明）。实测：同一份代码连跑 6 次，2 次红（≈1/3 flake，
         # 与任何改动无关）——§97 同族。真正有结构保证、且断言它才有回归价值的是：**节点采样
         # 派发晚于其权重落地**（节点 worker 线程在 POST 成功后才孵化，
-        # `rl/dispatch.py::_push_need_and_spawn`）。
+        # `trainer/dispatch.py::_push_need_and_spawn`）。
         check(
             not node_disp or (bool(wts) and wts[0] < node_disp[0]),
             "I1 node sampling task dispatched only after weights pushed "
@@ -766,10 +768,10 @@ def test_it_stream_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         # 本地槽是**复用**的，2 条本地腿 0.01s/局就能跑完 4 局 ⇒ 队列在后台 `weights-push`
         # 仍**在途**时就清空（实测 push 落后 drain 19ms、`byNode={"local": 4}`）——§97 那句
         # 「local_slots=2 < 4 ⇒ 队列只能靠节点线程清空」被实测推翻。真实契约见
-        # `rl/stream.py` 文档串：清空 = 「任务已交到节点/本地线程」；干净评估另走自己的
-        # kind='eval' 权重握手（`rl/eval_dispatch.py`），不依赖这条 rollout POST 的完成。
+        # `trainer/stream.py` 文档串：清空 = 「任务已交到节点/本地线程」；干净评估另走自己的
+        # kind='eval' 权重握手（`trainer/eval_dispatch.py`），不依赖这条 rollout POST 的完成。
         # 有结构保证的是这一条（断言它才有回归价值）：**节点采样派发**晚于其权重落地
-        # ——节点 worker 线程在 POST 成功后才孵化（`rl/dispatch.py::_push_need_and_spawn`）。
+        # ——节点 worker 线程在 POST 成功后才孵化（`trainer/dispatch.py::_push_need_and_spawn`）。
         check(
             not node_disp or (bool(wts3) and wts3[0] < node_disp[0]),
             "I3 node sampling task dispatched only after weights pushed "
@@ -837,6 +839,15 @@ def test_it_local_suspend(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
         )
         traj = tmp_path / "i5b"
         traj.mkdir()
+        # 2026-09-29（§46 满机 flake 复现）：I5b 断言「本机**拥有**头部任务」，但竞速道
+        # （§2026-09-16 裁定：不判快慢、无 dup 上限、先返回者结算）可以把**任何**
+        # in-flight 任务复制到节点上——包括本机保留段里的头任务（保留段只挡队列出队
+        # `src = head_tasks or pending`，不挡竞速道）。两份都是桩，谁先返回纯看线程调度
+        # ⇒ byNode 是硬币：满机全量（load≈20）实测红过 `{'local': 1, 'fake': 1}`
+        # （本机副本后到 → dup settle 丢弃）。这里给竞速副本一个确定性的劣势（既有夹具
+        # 旋钮，与 test_volume_e2e「副本略慢 ⇒ 主副本赢」同一用法）：主副本（本机）稳赢，
+        # 竞速道照旧被触发（dup 仍会派发，只是不再与断言赛跑）。
+        srv.dup_hang = 0.5
         rep5b = run_rl.run_rollout_queue(
             bun,
             str(WEIGHTS),
@@ -859,7 +870,7 @@ def test_it_longtail_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     """I6：慢任务被空闲槽竞速复制（dispatches≥2），整轮不被慢副本拖死。
 
     2026-09-20：本用例原为**单节点**配置——而 `pick_race_target` 的规则是「nd_id 已
-    持有该任务则不派回（每节点每任务最多 1 份）」（rl/queue_local.py:411）。单节点下
+    持有该任务则不派回（每节点每任务最多 1 份）」（trainer/queue_local.py:411）。单节点下
     两个 worker 的 nd_id 都是 "fake"，慢任务的 inflight_nodes 也只含 "fake" ⇒ 竞速
     条件恒假，**race lane 永不触发**（实测 dispatches 恒=1）。这与 v3.14 竞速测试同源
     （该用例当时靠加第二个节点修好，注释见下）：本用例补同款第二节点。
@@ -903,13 +914,17 @@ def test_it_longtail_race(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
 
 
 def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import rl.eval_dispatch as ed
+    import trainer.eval_dispatch as ed
 
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     try:
         traj = tmp_path / "i7"
         traj.mkdir()
-        srv.eval_delay = 1.0
+        # 「慢 eval」的注入延迟：判据是「采集完成时 eval 还在飞」（`eval_th.is_alive()`），
+        # 而 round 尾巴（本用例最后那次 `join`）完全由它决定——eval 轮 = 3 stage × 2 局，
+        # 每局 delay。原值 1.0s ⇒ 尾已 ~2.2s（本用例总耗时的 ~85%）。0.5s 下 eval 轮
+        # 仍是采集的 4 倍以上（采集实测 ~0.35s），「在飞」前提不变。
+        srv.eval_delay = 0.5
         args_eval = types.SimpleNamespace(
             **{**vars(args), "eval_games_per_stage": 2, "eval_stages": "0-2"}
         )
@@ -959,7 +974,7 @@ def test_it_eval_post_ppo_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     派发，读不可变归档。本用例把活指针与归档写成不同字节：若实现回退到读活
     指针，行 wver 即与归档指纹分叉，测试变红。
     """
-    from rl.loop_steps import TrainingSteps
+    from trainer.loop_steps import TrainingSteps
 
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     try:
@@ -996,8 +1011,8 @@ def test_it_eval_post_ppo_weights(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         check(ts._eval_thread is not None, "I10 delayed eval dispatched for round 6")
         assert ts._eval_thread is not None
         ts._eval_thread.join(timeout=120)
-        fp5 = dist_common.weights_fingerprint(str(arch5))
-        fp6 = dist_common.weights_fingerprint(str(WEIGHTS))
+        fp5 = common.distribution.weights_fingerprint(str(arch5))
+        fp6 = common.distribution.weights_fingerprint(str(WEIGHTS))
         check(fp5 != fp6, "I10 fixture sanity: archive/live bytes differ")
         rows = [
             json.loads(line)
@@ -1064,7 +1079,7 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     # 事件）也可能走 local 通道（不经 HTTP、无事件）——旧判据死锁「≥2 次 fake dispatch +
     # 0.5s 时间窗」，主副本事件缺席/派发滞后时 IndexError 或时间窗误报（实测慢主副本可晚至
     # +3.8s 才派发、整轮 churn 4.2s，时间判据在负载下失效）。新判据**结构性、与通道无关、
-    # 零时间依赖**：monkeypatch rl.dispatch.log 捕获调度器日志，竞速一旦发生必有
+    # 零时间依赖**：monkeypatch trainer.dispatch.log 捕获调度器日志，竞速一旦发生必有
     #   - "tail-race s0/seed111 ... race lane"（空闲槽复制在跑任务）
     #   - 或 "dup settle/fanout copy ... s0/seed111"（副本重复结算）
     # 三类行之一。无竞速（回归）时慢主副本独占结算，上述行不会出现 → 判据失败。
@@ -1092,7 +1107,7 @@ def test_it_early_race_v314(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     # 才睡满；正常路径单轮亚秒级）；本测试关 tailFanoutN（竞速成唯一复制通道）；
     # 断言改双通道 OR——日志行或 FakeAgent 派发计数 ≥2 任一即过（后者对采样免疫；
     # 2026-09-06 的"事件缺席"教训由 OR 化吸收，不再单独硬断言）。
-    import rl.dispatch as _dispatch_mod
+    import trainer.dispatch as _dispatch_mod
 
     srv, WEIGHTS, cfg, args, bun = _itest_env(monkeypatch, tmp_path)
     # 第二个节点：同一 FakeServer、独立 id 与并发（节点线程按 nd["c"] 孵化，
@@ -1202,7 +1217,7 @@ def test_it_tail_join_grace_v317(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 def test_compute_gae() -> None:
     import numpy as np
 
-    import ppo as ppo_mod
+    import worker.ppo as ppo_mod
 
     print("[fast] ppo.compute_gae (手算用例)")
     rewards = np.array([1.0, 0.0])
@@ -1218,7 +1233,7 @@ def test_compute_gae() -> None:
 
 
 def test_chunk_episodes() -> None:
-    import ppo as ppo_mod
+    import worker.ppo as ppo_mod
 
     print("[fast] ppo.chunk_episodes (mb 对齐；无 ragged 末块)")
     # 多 episode 池才走「全局重排」路径——单池分支不重排（对齐单池会丢到"局末"，有偏）。
@@ -1241,8 +1256,8 @@ def test_chunk_episodes() -> None:
 
 
 def test_backup_weights(tmp: Path) -> None:
-    import run_rl
-    from rl import archive as rl_archive
+    from trainer import run_rl
+    from worker import archive as rl_archive
 
     print("[fast] backup_weights (归档；只归档不自动清理——2026-09-02 用户指令)")
     bdir = tmp / "weights-archive"
@@ -1262,7 +1277,7 @@ def test_backup_weights(tmp: Path) -> None:
 
 def test_eval_local_gate(tmp: Path) -> None:
     """R6 补丁：eval 本地参与——gate 放行后本机直跑全部/尾局；gate 不放行则让位。"""
-    import rl.eval_dispatch as ed
+    import trainer.eval_dispatch as ed
 
     work = tmp / "eval-local"
     work.mkdir(parents=True, exist_ok=True)  # 沙箱零删除适配：tmp 唯一目录，无需预清理
@@ -1413,7 +1428,7 @@ def test_eval_local_gate(tmp: Path) -> None:
 
 def test_race_tier_ok() -> None:
     """v3.11 竞速派档：慢节点不浪费竞速名额（用户"副本落到慢节点=白等"）。"""
-    from rl.queue import race_tier_ok
+    from trainer.queue import race_tier_ok
 
     spd = {"a": 5.0, "b": 20.0, "c": 8.0, "d": 60.0, "e": 12.0}
     # 按耗时升序：a(5) < c(8) < e(12) < b(20) < d(60) → top-3 = {a, c, e}
@@ -1433,7 +1448,7 @@ def test_race_tier_ok() -> None:
 def test_register_inflight_v314() -> None:
     """v3.14 主副本派发一律登记（it6 教训 2026-09-03：v3.7 只登记尾部，早派到
     慢节点的任务对 pick_tail_race 不可见，空闲槽无从竞速，整轮空等）。"""
-    from rl.queue import pick_tail_race, register_inflight
+    from trainer.queue import pick_tail_race, register_inflight
 
     inflight: dict[tuple[int, int], int] = {}
     register_inflight(inflight, (2000, 612570782))  # 早派（pending > tailFanoutN）也登记
@@ -1451,7 +1466,7 @@ def test_register_inflight_v314() -> None:
 
 def test_pick_tail_race() -> None:
     """v3.10 长尾竞速选择纯函数（queue.pick_tail_race，用户裁定"有空槽就派发"）。"""
-    from rl.queue import pick_tail_race
+    from trainer.queue import pick_tail_race
 
     check(pick_tail_race({}, 2) is None, "empty inflight -> None")
     check(pick_tail_race({(1, 2): 1}, 2) == (1, 2), "single raceable task picked")
@@ -1475,7 +1490,7 @@ def test_pick_race_target_v316() -> None:
     - 无副本数上限（多副本仍可被其它节点竞速）
     - 字典序最小优先
     """
-    from rl.queue import pick_race_target
+    from trainer.queue import pick_race_target
 
     inflight = {(2000, 1): 1, (2000, 2): 1}
     nodes = {(2000, 1): {"a"}, (2000, 2): {"a"}}
@@ -1557,7 +1572,7 @@ def main() -> None:
 
 def test_scan_shards_mtime_cache(tmp: Path) -> None:
     """P2-2：_scan_shards 目录签名缓存——新 shard 落盘后签名变化 → 重扫；未变 → 复用。"""
-    from rl import resume as rl_resume
+    from worker import resume as rl_resume
 
     print("[fast] _scan_shards mtime cache（热路径零 IO）")
     traj = tmp / "cache-traj"
@@ -1604,7 +1619,7 @@ def test_rl_config_validation() -> None:
 
     from pydantic import ValidationError
 
-    from rl.config import RLConfig, validate_args
+    from worker.config import RLConfig, validate_args
 
     print("[fast] RLConfig 校验（pydantic：互斥/范围构造即抛）")
 

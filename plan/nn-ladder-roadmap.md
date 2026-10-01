@@ -13,7 +13,7 @@
 |---|---|
 | 判断"现在该做哪个 Phase、出口是什么" | 本文件 §6 |
 | 实施某一级课程（出配置、起腿、过门、登记） | 本文件 §7 每级运营手册 + §5 阶梯表 |
-| 实施 obs schema v3（编码器/schema.py/wasm/dataset） | `plan/obs-schema-v3.plan.md` v4.0（byte 级规格，N1 实施者必读） |
+| 实施 obs schema v3（编码器/common/schema.py/wasm/dataset） | `plan/obs-schema-v3.plan.md` v4.0（byte 级规格，N1 实施者必读） |
 | 改 reward / 剂量 | 本文件 §5-N3（语义与定案）+ §7 第 2 步 |
 | 查某个决定能不能违反 | 本文件 §1 决策宪法 |
 | 查某个失败模式有没有防线 | 本文件 §8 |
@@ -39,7 +39,7 @@
 
 ## 2. 已核事实底座（全部带行号，实施者可直接引用勿重查）
 
-**观测现状**：`OBS_CHANNELS=14`、`SCALAR_DIM=19`、`OBS_SCHEMA_MAJOR=2`（`schema.py:14/22/31`，
+**观测现状**：`OBS_CHANNELS=14`、`SCALAR_DIM=19`、`OBS_SCHEMA_MAJOR=2`（`common/schema.py:14/22/31`，
 TS 镜像 `obs-encoder.ts:42-45`）；敌机值 `(tier<<3)|(d+1)` 1-36；子弹 `d+1`/`d+1+4`（**加法**）；
 obs 缓冲是 **`Uint8Array`**（`:120`，赋值截断）；标量缓冲 Float32。**现存缺陷**：waveHeat 硬编码
 3 点而 arena 是 4 点（`obs-encoder.ts:261-267` vs `levels/arena4.jsonc:48-53` 四角）。

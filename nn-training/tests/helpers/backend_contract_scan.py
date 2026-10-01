@@ -2,17 +2,17 @@
 
 ## 为什么
 
-`rl/backend.py` 的 `RolloutBackend` 原本只在**运行期**被判（`importlib.import_module` 三个
+`biz/backend.py` 的 `RolloutBackend` 原本只在**运行期**被判（`importlib.import_module` 三个
 后端 + `isinstance` + `inspect.signature`）。但三个后端模块（`ppo.engine` / `ppo.intent` /
 `ppo.goal`）顶层都 `import torch` ⇒ **无 torch 的机器/镜像上整个文件收集失败**，P0-1 那一类
 契约缺陷在那边一条都守不住。本模块把同一条契约换成**读源码**：
 
     「模块里能解析出这 5 个成员，且 `update` 的参数表能绑定 stream.py 无条件注入的关键字」
 
-## 与运行期判据的等价性（**不能弱化** ⇒ 见 `tests/test_backend_contract_runtime.py` 交叉校验）
+## 与运行期判据的等价性（**不能弱化** ⇒ 见 `tests/worker/test_backend_contract_runtime.py` 交叉校验）
 
 * **成员存在**：`@runtime_checkable` 的 `isinstance(mod, Protocol)` **只检查属性存在、不查签名**
-  （`rl/backend.py` 模块 doc 已写明），故「静态成员表 ⊇ 5 个必需名」与 `isinstance` 同义。
+  （`biz/backend.py` 模块 doc 已写明），故「静态成员表 ⊇ 5 个必需名」与 `isinstance` 同义。
   静态侧**多**一层运行期看不到的：**名字的来路**——`from X import y` 会递归确认 `y` 在 X 里
   仍可解析（被删掉的再导出在运行期要等 import 才炸，静态侧当场红）。
 * **签名绑定**：静态侧把 AST 的 `def update(...)`（含 `update = ppo_update` 这类别名）翻成
@@ -38,7 +38,7 @@ from typing import Any
 
 from tests.helpers import source_scan
 
-#: stream.py 复用后端时要求的 5 个成员（与 `rl/backend.py` 的 Protocol 一致；
+#: stream.py 复用后端时要求的 5 个成员（与 `biz/backend.py` 的 Protocol 一致；
 #: 运行期交叉校验会把两边钉在一起）。
 REQUIRED_MEMBERS: tuple[str, ...] = (
     "load_episode_from_shard",
@@ -227,7 +227,7 @@ def bind_report(sig: inspect.Signature, kwargs: dict[str, Any]) -> str:
 
 
 def stream_bind_kwargs(required_update_kwargs) -> dict[str, Any]:
-    """`rl/stream.py` 那一次调用的形状：5 个定位参数**按名**传 + 无条件注入的关键字。
+    """`trainer/stream.py` 那一次调用的形状：5 个定位参数**按名**传 + 无条件注入的关键字。
 
     静态侧与运行期侧都用这一份 kwargs 去 bind ⇒ 两侧的分歧只可能来自签名本身，
     不会来自「比的是两套不同调用」。

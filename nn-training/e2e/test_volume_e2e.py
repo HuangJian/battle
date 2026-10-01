@@ -1,8 +1,8 @@
 """test_volume_e2e.py — 按样本量动态采集的端到端验证（plan §3-P2）。
 
-与 `tests/test_rollout_volume.py` 的分工：那边用桩 `_dispatch_volume_wave` 验配额逻辑与接线；
+与 `tests/worker/test_rollout_volume.py` 的分工：那边用桩 `_dispatch_volume_wave` 验配额逻辑与接线；
 这里**不桩任何采集侧代码**——真 `dispatch_rollout_phase` → 真 `run_rollout_queue`
-（`rl/dispatch.py` 的完整调度器）→ 假 sim 节点（HTTP）落真 shard（真 manifest schema）→
+（`trainer/dispatch.py` 的完整调度器）→ 假 sim 节点（HTTP）落真 shard（真 manifest schema）→
 真 `settled_stage_totals` 账本 → 真 `_volume_topup` 补波循环。torch 只在 import 层面存在，
 PPO 不参与（本验证只覆盖「采多少」）。
 
@@ -34,6 +34,7 @@ import sys
 import threading
 import time
 import types
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, cast
@@ -46,11 +47,11 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import dist_common
-from platform_utils import rmtree_best_effort
-from rl.loop_core import TrainingLoop
-from rl.reward_library import METRICS_DIM
-from schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
+import common.distribution
+from biz.reward_library import METRICS_DIM
+from common.platform_utils import rmtree_best_effort
+from common.schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
+from trainer.loop_core import TrainingLoop
 
 #: 假节点的 ping 门（与 dispatch.bun_version / compute_code_hash 同源）。
 _BUN = shutil.which("bun")
@@ -86,7 +87,7 @@ def _pack(stage: int, seed: int, wver: str, n: int, schema: str) -> bytes:
     """单局容器（gzip + `0x42435632` 头）——schema 决定落盘 manifest 的字段形态。
 
     schema="nSamples"：TS exporter 的正规单局形（`export-rl-rollout.ts`）；
-    schema="totalSamples"：远端/队列 path 的聚合单局形（`dist_common.write_shard`
+    schema="totalSamples"：远端/队列 path 的聚合单局形（`common.distribution.write_shard`
     原样写 agent 返回的 manifest ⇒ 盘上两种都会出现）。账本必须两种都认。
     """
     if schema == "nSamples":
@@ -219,7 +220,7 @@ class _VolAgent(BaseHTTPRequestHandler):
             c = _VolAgent._cache
             bun = self._bun_version()
             if "codeHash" not in c:
-                c["codeHash"] = dist_common.compute_code_hash()
+                c["codeHash"] = common.distribution.compute_code_hash()
             self._json(
                 {
                     "codeHash": c["codeHash"],
@@ -383,7 +384,7 @@ class _Loop:
 
     def _commit_journal(self) -> Any:
         if self._journal is None:
-            from rl.commit_journal import CommitJournal
+            from worker.commit_journal import CommitJournal
 
             # 与生产同路径（loop_steps._commit_journal = <traj_dir>/commit_journal.jsonl）
             self._journal = CommitJournal(self._traj_dir / "commit_journal.jsonl")
@@ -438,7 +439,7 @@ def _env(
     先结算者赢、后到者**连 shard 目录一起退休**。默认关（配额算术不被竞速时序抖动
     影响），专项竞速用例显式打开。
     """
-    monkeypatch.setattr(dist_common, "load_dist_config", lambda: None)
+    monkeypatch.setattr(common.distribution, "load_dist_config", lambda: None)
     # 预热 bun 版本：避免首 ping 在 xdist 负载下拿到 "?" 而整台节点被排除。
     _VolAgent._bun_version()
     srv = _VolServer(("127.0.0.1", 0), _VolAgent)
@@ -469,9 +470,46 @@ def _env(
 
 def _settled(traj: Path, out: Path) -> dict[int, tuple[int, int]]:
     """盘上账本（与 loop 同口径：真 resume 实现 + 真 wver）。"""
-    from rl.resume import settled_stage_totals
+    from worker.resume import settled_stage_totals
 
-    return settled_stage_totals(traj, dist_common.weights_fingerprint(str(out)))
+    return settled_stage_totals(traj, common.distribution.weights_fingerprint(str(out)))
+
+
+def _assert_accounting_matches_ledger(
+    loop: Any,
+    settled: dict[int, tuple[int, int]],
+    *,
+    dispatched: list[tuple[int, int]],
+    samples_of: Callable[[int], int],
+) -> None:
+    """**竞速场景**下的账务一致性（★ 2026-09-29 改判：等式 → 稳定的三条上界）。
+
+    为什么不再是等式：`_volume_collected` 是本轮 dispatcher 在 **「退休之前」那一刻**对盘上的
+    扫描（`trainer/loop_volume.py` 的 `settled_stage_totals`），而竞速的两份副本落在**不同节点**、
+    各自写一份 shard 目录 ⇒ 盘上会**短暂同时存在两份**；而输家的退休（`rmtree` 那份目录）
+    发生在 `round done` **之后**的异步线程里。于是「记账」与「最终盘上」天然差一份被退休的
+    副本。实测（load≈24，全量第 8 轮）：`238 vs 224` = 恰好 1 局（17 vs 16）——日志里
+    `round done: ok=16/16` 之后才出现 `dup settle … — dropped (+retired …)`。
+
+    换成三条**与交错无关**、且仍然钉死「绝不重复计数」的判据：
+
+      ① 盘上账本 ≤ 采集记账（退休只会让盘上**变少**）——方向反了 = 记账漏了一局；
+      ② 盘上局数 ≤ **去重**派发对数（同一 (stage,seed) 不得算成两局）；
+      ③ 采集记账 ≤ **真派发次数**（含副本）代入的样本数——凭空多出局 = 重复计数。
+    """
+    disk_samples = sum(t for _g, t in settled.values())
+    disk_games = sum(g for g, _t in settled.values())
+    assert disk_samples <= loop._volume_collected, (
+        f"盘上账本比采集记账还多：{settled} vs {loop._volume_collected}"
+    )
+    unique = set(dispatched)
+    assert disk_games <= len(unique), (
+        f"盘上局数 > 去重派发对数（重复计数）：{settled} vs {len(unique)}"
+    )
+    dispatched_samples = sum(samples_of(st) for st, _sd in dispatched)
+    assert loop._volume_collected <= dispatched_samples, (
+        f"采集记账 > 真派发样本数（凭空多出局）：{loop._volume_collected} vs {dispatched_samples}"
+    )
 
 
 # ────────────────────────── ① 定额达成（±1 波） ──────────────────────────
@@ -715,8 +753,12 @@ def test_racing_double_settle_never_inflates_and_quota_stays_sound(
         if not loop._volume_capped and loop._volume_waves < 3:
             assert met, f"波次预算未耗尽却未达标: {settled}"
         assert met or loop._volume_capped or loop._volume_waves >= 3, f"静默短采: {settled}"
-        # iteration 事件的采集量与账本一致（缺口如实上报，不假报达标）
-        assert loop._volume_collected == sum(t for _g, t in settled.values())
+        # iteration 事件的采集量与账本**同口径**（缺口如实上报，不假报达标）。
+        # ★ 2026-09-29：此处原是等式，满机下周期性假红——采集记账是「退休之前那一刻」
+        # 的盘上扫描，输家副本的退休在其后的异步线程里，等式比较的是两个时刻。
+        _assert_accounting_matches_ledger(
+            loop, settled, dispatched=srv.dispatched, samples_of=lambda _st: 14
+        )
         assert loop._commit_journal().pending() == []
         print(
             f"[race] double-settle 边界: dispatched={len(srv.dispatched)} "
@@ -772,9 +814,9 @@ def test_racing_with_tight_budget_stops_loud_not_silent(
 ) -> None:
     """竞速 + 短局关 ⇒ 波次预算耗尽 ⇒ **响亮**停（日志给出未达标清单），不静默短采。"""
     # 补丁打在**实现模块**的命名空间上：`_volume_topup` 的日志（「未达标」/`wave_cap`）
-    # 住在 `rl/loop_volume.py`（S4 第十八刀从 loop_core 搬来）——打 `rl.loop_core.log`
+    # 住在 `trainer/loop_volume.py`（S4 第十八刀从 loop_core 搬来）——打 `trainer.loop_core.log`
     # 是**静默空操作**（同名 seam 在两个命名空间里是两个各自真实的注入点）。
-    import rl.loop_volume as vol_mod
+    import trainer.loop_volume as vol_mod
 
     lines: list[str] = []
     real_log = vol_mod.log

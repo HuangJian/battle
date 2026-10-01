@@ -16,17 +16,17 @@
 | # | 事实 | 出处（2026-09-26 复核） |
 |---|---|---|
 | S1 | `aggregateNodeHistory()` **无参**，候选 meta 按 mtime 降序后 —— **`sources = candidates.length > 0 ? [candidates[0]] : []`**，只聚合"最近活跃"那一门课 | `pool-history.ts:249`（注释动机：避免旧流数千条历史淹没新数据） |
-| S2 | meta **每流一份**：`<traj root>/dist-agent-meta.jsonl`（rollout 记 `mode:"rollout"`、eval 记 `mode:"eval"`，**同册入账**） | `rl/eval_dispatch.py:163`、`rl/dispatch.py:189`、`rl/agent_meta.py`（唯一写面） |
+| S2 | meta **每流一份**：`<traj root>/dist-agent-meta.jsonl`（rollout 记 `mode:"rollout"`、eval 记 `mode:"eval"`，**同册入账**） | `trainer/eval_dispatch.py:163`、`trainer/dispatch.py:189`、`worker/agent_meta.py`（唯一写面） |
 | S3 | **UI 与缓存层早已声明"机器级"**：`api/pool.ts:13-20`；`console-types.ts:45`「课程与 worker 节点正交」 | 两处 |
 | S4 | 现有对齐基准是**课程内序号 `it`**：`globalMaxIt` / `pickBaseIter` / `contribRollout\|contribEval` / `lastIter` | `pool-history.ts:121-175` |
 | S5 | 现有时间维度只有三级：`POOL_EPOCH_MS`（受控清空锚点）、`hourAgoStr`（最近一小时）、滑动窗口 50 局。**没有"天"** | `:37,196-198` |
 | S6 | 健康度"只由最近完成轮的贡献数判定"（`nodeHealth`，2026-09-20 已实现） | `web/view/console-types.ts:93-96` |
 | S7 | 性能护栏：递归只下探两层；探测层冷算 2448–2552ms（历史事故：下探三层 1.39s/次 → 页面 6.7s） | `pool-history.ts:209-244`、`api/pool.ts:8` |
-| S8 | **（评审订正）meta 行的 `ts` 是 Python `time.strftime(...)` 写的、训练机本地时间、无时区后缀** —— 见 §4.2 | `rl/dispatch.py:861,976`、`rl/eval_dispatch.py:304,480,609`、`rl/batch_runner.py:862` |
+| S8 | **（评审订正）meta 行的 `ts` 是 Python `time.strftime(...)` 写的、训练机本地时间、无时区后缀** —— 见 §4.2 | `trainer/dispatch.py:861,976`、`trainer/eval_dispatch.py:304,480,609`、`trainer/batch_runner.py:862` |
 | S9 | `aggregateNodeHistory()` 有**两个**消费者：`api/pool.ts`（`PoolProbes` 探测缓存）与 `snapshot-cache.ts:105-118`（`FleetProbes`：喂 pill 的 `lastContrib` 与 `isSlowNode`） | 两处 |
 | S10 | 池扫描根可被 `BCITY_POOL_DIR` 重定向（单测用），默认 `REPO_ROOT/tmp` | `core/paths.ts:tmpPoolDir` |
-| S11 | 扫描面**不止课程**：独立 eval run 目录 `tmp/<name>.jsonl.run/dist-agent-meta.jsonl` 也会命中，且**无 `training_log.jsonl`** ⇒ 水位退化 | `rl/eval_course_once.py:160-170`、`rl/batch_runner.py:852` |
-| S12 | 长驻本机腿仍逐局写 meta（`node:"local"`、带 `it`/`mode`） | `rl/dispatch.py:849,966` |
+| S11 | 扫描面**不止课程**：独立 eval run 目录 `tmp/<name>.jsonl.run/dist-agent-meta.jsonl` 也会命中，且**无 `training_log.jsonl`** ⇒ 水位退化 | `trainer/eval_course_once.py:160-170`、`trainer/batch_runner.py:852` |
+| S12 | 长驻本机腿仍逐局写 meta（`node:"local"`、带 `it`/`mode`） | `trainer/dispatch.py:849,966` |
 
 ### 1.1 水位 vs 时间窗（2026-09-24 订正，保留）
 
@@ -181,7 +181,7 @@ agg.lastContrib = latest && latest.baseIt >= 0
   （这正是 §1.1 反对"按 it 比大小"的原因——按 it 会把停摆课的高序号误当最新）。所有流的历史局数
   仍按天落桶、不被丢。
 * **完成时刻怎么取**：`training_log.jsonl` 的 `iteration` 事件自带 `time`
-  （`rl/events.py::write_iteration`，Python `strftime("%Y-%m-%d %H:%M:%S")` 本地）—— 比"该轮 meta 最后一行的 ts"
+  （`worker/events.py::write_iteration`，Python `strftime("%Y-%m-%d %H:%M:%S")` 本地）—— 比"该轮 meta 最后一行的 ts"
   准（后者是"最后结算"，与"轮完成"差一个 PPO 的时间）。读不出 `time` → 用该 meta 的 mtime 兜底 + 记一行诊断。
 * **`contrib` 是那一轮的 rollout + eval 成功局数**（`NodeView.lastContrib` 的既有语义，`-1` = 无池数据）。
   分列展示仍按 §3.3（`winRollout`/`winEval` 是**窗口**口径；`lastContrib` 是**最新完成轮**口径）。

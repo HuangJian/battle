@@ -6,7 +6,7 @@ eval」，档位选定「A 层同口径，每 `eval_every` 轮」）：离线整
 A 层语料自己评，读数就能逐轮回到课程账本（板子/门判读到的与 in-loop 完全同一口径）。
 
 **「同口径」是构造性的，不是承诺**：语料（`eval_stages` × `a_eval_seed_list(it, n)`，含双轨
-锚点+轮转）、行 schema（`rl.eval_rows.eval_row`）、summary 结算（`rl.eval_local.settle_eval_summary`）
+锚点+轮转）、行 schema（`biz.eval_rows.eval_row`）、summary 结算（`biz.eval_local.settle_eval_summary`）
 三处都取自 in-loop 的同一份实现；`wver` 也同定义（权重文件字节的 sha256）——于是云机评的
 W(it) 行与本地/节点评的同一 W(it) 行在账本里**可以配对**（同 wver 同 (stage,seed)）。
 
@@ -38,17 +38,17 @@ from typing import Any
 # 单局看门狗口径：**一律通过模块属性读**（`game_watch.X`）——import 会把值抄成第二份绑定，
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
 from common import game_watch
+from common.log import log as _rl_log
+from common.platform_utils import cpu_worker_slots, rmtree_best_effort
 from common.protocol import UnreapableChildError
-from platform_utils import cpu_worker_slots, rmtree_best_effort
-from remote import serve_pool
-from rl.eval_local import (
+from worker import serve_pool
+from worker.eval_local import (
     a_eval_seed_list,
     eval_done_keys,
     run_local_eval_game,
     settle_eval_summary,
 )
-from rl.eval_rows import eval_row
-from rl.log import log as _rl_log
+from worker.eval_rows import eval_row
 
 # 单局评估的硬顶：**与 rollout 共用一份口径**（`common/game_watch.py`）。
 # 旧值 900s（= policy.taskTimeoutSec）：一个卡住的评估局会占着一个 slot 15 分钟，而本轮
@@ -61,7 +61,7 @@ EVAL_HANDOFF_WAIT_SEC = 120.0
 #: 「机器级停滞」的轮内重投上限（实验/排障用）：`0`/未设 = **不限**；正整数 = 重投这么多次就
 #: 放弃（把还没评的局记成本轮 `failed`，交回下一轮/下次导入重评）。
 #:
-#: 为什么缺省不限（与 rollout 腿同一口径，`remote/iter_rollout.ENV_ROUND_RETRY_MAX`）：这一档失败
+#: 为什么缺省不限（与 rollout 腿同一口径，`worker/iter_rollout.ENV_ROUND_RETRY_MAX`）：这一档失败
 #: 是**机器**的病（D 状态 / 挂住的挂载点），现场 890s 之后自己好了；外层没有别的重订机会
 #: （`run_cloud_eval` 永不抛，云机自主段的 3 次重试只盖 rollout 腿），轮内重投就是全部。
 #: 「不限」并不意味着等：每一次都真的在跑活（只补没评的局，已落账的局不重跑）。
@@ -105,7 +105,7 @@ def eval_plan_of(course: Any) -> CloudEvalPlan:
         return CloudEvalPlan((), 0, 1, "hard", 12000, None, None)
     spec = str(getattr(course, "eval_stages", "") or "")
     if spec:
-        from rl.course import parse_range
+        from biz.course import parse_range
 
         stages = tuple(int(s) for s in parse_range(spec))
     else:
@@ -133,7 +133,7 @@ def eval_pairs(plan: CloudEvalPlan, it: int) -> list[tuple[int, int]]:
 
 
 def default_slots() -> int:
-    """并发局数缺省：与 rollout **同一口径**（`platform_utils.cpu_worker_slots`）。
+    """并发局数缺省：与 rollout **同一口径**（`common.platform_utils.cpu_worker_slots`）。
 
     `max(cores − 4, floor(cores × 0.8))`（至少 1）——**不为 rollout 预留**：两者在云机离线段里
     是交替的（rollout → PPO → eval），按对方扣一次等于两笔账扣同一份钱（用户 2026-09-22：
@@ -551,7 +551,7 @@ def run_cloud_eval(
                     key16=key16,
                     task=(int(stage), int(seed)),
                     node=CLOUD_NODE,
-                    # 与 in-loop 腿同字段（`rl/eval_dispatch` 的 wallSec）⇒ 两腿逐字段可比。
+                    # 与 in-loop 腿同字段（`trainer/eval_dispatch` 的 wallSec）⇒ 两腿逐字段可比。
                     wall_sec=round(wall, 3),
                 )
                 with jsonl_lock, open(eval_jsonl, "a", encoding="utf-8") as f:

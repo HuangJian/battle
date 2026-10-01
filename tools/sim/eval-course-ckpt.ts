@@ -4,10 +4,10 @@
  * curriculum course's custom stages (2000+), headless.
  *
  * 架构（2026-09-19 重构；用户裁定「不要在 TS 里重新实现一套节点通信和重试」）：
- *   * **本地与分布式都由 Python 引擎跑**：`nn-training/eval_course_once.py` →
- *     `rl.batch_eval.BatchEvalRunner`。节点门 / ping / 退避重试 / 失败连击停用 /
+ *   * **本地与分布式都由 Python 引擎跑**：`nn-training/trainer/eval_course_once.py` →
+ *     `trainer.batch_eval.BatchEvalRunner`。节点门 / ping / 退避重试 / 失败连击停用 /
  *     权重下发 / wver(409) / 本机份额 / 队列尾竞速，全部是训练栈里长期实战的
- *     那一份（`dist_common.fetch_task`、`post_weights_parallel`、`rl/queue.py`）。
+ *     那一份（`common.distribution.fetch_task`、`post_weights_parallel`、`trainer/queue.py`）。
  *     TS 侧**不再**复制任何节点通信逻辑（旧实现探测/重试/rescan/停用/本机槽位
  *     各写一份，既漂移又漏护栏，已删除）。
  *   * 本文件只做四件事：解析参数 → 写 spec → 经 `nn-py-safe.sh` 调 Python →
@@ -45,7 +45,7 @@ const REPO_ROOT = resolve(import.meta.dir, '..', '..')
 const CURRICULA_DIR = 'nn-training/curricula'
 const DEFAULT_DIST_CFG = 'nn-training/rl-config.json'
 /** 仓根（升级子进程 cwd 与 nn-py-safe.sh 的相对路径解析都用它）。 */
-const PY_ENTRY = 'nn-training/eval_course_once.py'
+const PY_ENTRY = 'nn-training/trainer/eval_course_once.py'
 const PY_SAFE = 'tools/githook/nn-py-safe.sh'
 
 interface CourseJson {
@@ -87,7 +87,7 @@ export function parseWeightSpec(spec: string): { path: string; label: string } {
 
 /**
  * 去尾逗号（`,]` / `,}`，含跨行）：逐字符扫描，字符串内原样保留（转义感知）。
- * 背景：Python 侧 rl/jsonc.py 容忍尾逗号，课程文件（c6-pickup 起）普遍带尾逗号
+ * 背景：Python 侧 common/jsonc.py 容忍尾逗号，课程文件（c6-pickup 起）普遍带尾逗号
  * （oxfmt `trailingComma: all` 还会主动加）；本函数让 TS 侧与 Python 同口径，
  * 否则探针读课程文件直接崩（2026-09-12 实测）。只删 `]`/`}` 前的逗号，中部逗号不动。
  */
@@ -186,7 +186,7 @@ function parseRangeInt(spec: string | undefined, fallback: number): number {
   return Number.isInteger(n) && n > 0 ? n : fallback
 }
 
-/** Python 入口的 spec（写盘交给 `eval_course_once.py --spec`，避免 argv 引号地狱）。 */
+/** Python 入口的 spec（写盘交给 `trainer/eval_course_once.py --spec`，避免 argv 引号地狱）。 */
 export interface CourseOnceSpec {
   course: string
   weights: Array<{ label: string; path: string }>
@@ -502,8 +502,8 @@ function readRows(outPath: string): EvalCourseRow[] {
 
 /**
  * `--upgrade-nodes`：扫描 stale 节点并下发 pull+restart。**探测与判 stale 都不在 TS 里**
- * ——`nn-training/dist_upgrade_cli.py` 直接调训练循环的
- * `dist_common.upgrade_stale_nodes`（ping → codeHash ≠ expected → request_upgrade_guarded），
+ * ——`nn-training/tools/dist_upgrade_cli.py` 直接调训练循环的
+ * `common.distribution.upgrade_stale_nodes`（ping → codeHash ≠ expected → request_upgrade_guarded），
  * TS 只拼 spec、读结果、打日志（升级要 pull+重启，本步会阻塞至多 ~3s/节点，属显式开关）。
  */
 function maybeUpgradeNodes(cfgPath: string): void {

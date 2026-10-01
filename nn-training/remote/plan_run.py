@@ -17,13 +17,13 @@
 代码 + `plan.json`），此后云机自主把计划里的轮次跑完，每轮合成一个与 kind=iter **逐字段同构**的
 job 再喂回 `run_job`——离线轮与 hub 监管轮走的是字面同一条代码路径。
 
-链条的三个衔接点：① 对集 `rl.plan.pairs_for`；② argv `rl.plan.iter_spec`；③ 权重与 opt
+链条的三个衔接点：① 对集 `biz.plan.pairs_for`；② argv `biz.plan.iter_spec`；③ 权重与 opt
 （上一轮结果 → 下一轮 payload/`opt_sha`，Adam 动量不丢）。产物（`remote/artifacts.py`）是**唯一**
 长期记录；补传（`remote/offline_deliver.py`）永远 best-effort、不阻塞、不抛。
 
 ★ 注入点：本模块里读的模块全局（`iter_spec` / `pairs_for` / `time` / `DRAIN_FLUSH_SEC` …）都是
 **本模块命名空间**的——测试要拦它们请 patch `remote.plan_run.*`，patch `remote.run_loop.*` 打不着
-（`run_loop` 只保留门面转发名，见 `tests/test_plan_run_split.py`）。
+（`run_loop` 只保留门面转发名，见 `tests/remote/test_plan_run_split.py`）。
 
 ★ **计划交接面（校验 / 取包播种 / 上下文 / 评估装配）已于 S5 第十三刀逐字节下沉
 `remote/plan_handoff`**：本模块只余驱动引擎 + 18 名 `X as X` 门面；要 patch 交接面的
@@ -38,6 +38,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from common.log_bundle import LogBundle
 from common.protocol import (
     PAYLOAD_NAME,
     ProtocolError,
@@ -55,7 +56,6 @@ from common.protocol import (
 from common.protocol import (
     job_id as make_job_id,
 )
-from log_bundle import LogBundle
 from remote.artifacts import (
     ArtifactStore,
     metrics_row,
@@ -121,7 +121,7 @@ from remote.plan_handoff import (
 from remote.plan_handoff import (
     verify_plan_file as verify_plan_file,
 )
-from rl.plan import iter_spec, pairs_for
+from worker.plan import iter_spec, pairs_for
 
 #: 单轮的瞬时失败重试上限（自主模式没有 hub 兜底：重试够了就干净停下留产物）。
 ITER_RETRIES = 2
@@ -134,7 +134,7 @@ def with_rollout_workers(spec: dict, workers: int) -> dict:
 
     为什么要换：计划里钉着的 `plan.workers` 是**导出那台机器**的规模（常在 8~16 核的本机导出，
     却要在 96 vCPU 的云机上整段跑），而 rollout 与云机 eval 是交替的 ⇒ 两者用同一个
-    `platform_utils.cpu_worker_slots()`（用户 2026-09-22）。
+    `common.platform_utils.cpu_worker_slots()`（用户 2026-09-22）。
 
     安全性：`workers` **不进** `data_fp`（`iter_declared_entries` 只取每条 argv 的 stage/seed），
     所以换并行度不会动摇任何指纹、也不改声明集。
@@ -389,7 +389,7 @@ def run_plan_job(
     worker 接着跑完」那条腿的尾巴——那条腿已退役（`plan/online-offline-role-routing.plan.md`
     §7：hub 侧不再发这种活，`remote/worker.py` 对它响亮拒收；离线课走任务包 + `run_standalone`）。
     保留它的理由只有一个，但很实在：它是把 `_drive` **从首轮结果续下去**的唯一入口，而
-    `tests/test_run_loop.py` 的 4 组段语义回归（整段逐轮同构 / 锚点续跑不重复记账 /
+    `tests/remote/test_run_loop.py` 的 4 组段语义回归（整段逐轮同构 / 锚点续跑不重复记账 /
     `max_iters` 上限 / 轮失败后产物仍可续）全挂在它上面——删它等于把这些回归一起删。
 
     返回**合并结果**（末轮形状 + `iters` 明细 + `it_end` + `artifacts`）。

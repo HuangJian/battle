@@ -32,9 +32,9 @@ if str(ROOT) not in sys.path:
 
 import pytest
 
-from rl.loop_core import TrainingLoop
-from rl.loop_runner import LoopRunner
-from rl.loop_scheduler import Supervisor
+from trainer.loop_core import TrainingLoop
+from trainer.loop_runner import LoopRunner
+from worker.loop_scheduler import Supervisor
 
 TS = "2026-09-18 12:00:00"
 
@@ -150,7 +150,7 @@ def _make_loop(
     # 故意**不**替换 `_remote_ppo_step`（让位点住在它里面，用例的价值就是走真驱动）；
     # 只换三个对外动作。fail_rounds 用 TimeoutError 注入（在可重试集合里 ⇒ 与真链路的
     # 连败计数/原地重试语义一致）。
-    from rl.loop_round import RemotePpoJob
+    from worker.loop_round import RemotePpoJob
 
     def fake_publish(it: int) -> RemotePpoJob:
         if fail_rounds and it in fail_rounds:
@@ -206,7 +206,7 @@ def _install_fake_remote(loop: TrainingLoop, course: str, ready: dict[str, bool]
     走真驱动。假掉的只有三个对外动作：发布（回一个会话）、探一次（说不就绪或给结果）、
     落位（把结算字段填成真引擎会填的样子）。
     """
-    from rl.loop_round import RemotePpoJob
+    from worker.loop_round import RemotePpoJob
 
     def publish(it: int) -> RemotePpoJob:
         return RemotePpoJob(
@@ -242,17 +242,17 @@ def _install_fake_remote(loop: TrainingLoop, course: str, ready: dict[str, bool]
 def _fake_dist(monkeypatch: pytest.MonkeyPatch) -> None:
     """把与本测试无关的 IO/配置读盘钉成常量（不碰真 rl-config、不起子进程）。
 
-    ★ 补丁打在哪：轮内那 13 步的实现住在 `rl.loop_round_steps`（mixin），它们**在自己模块的
-    全局里**查这些平台函数——只补 `rl.loop_core` 那份名字是打不中的（`dist_common` / `time`
+    ★ 补丁打在哪：轮内那 13 步的实现住在 `trainer.loop_round_steps`（mixin），它们**在自己模块的
+    全局里**查这些平台函数——只补 `trainer.loop_core` 那份名字是打不中的（`common.distribution` / `time`
     是模块对象，补在哪个名字空间都算命中，故不在此列）。S4 第十九刀后主循环骨架（含它的
-    `time.sleep`）住 `rl.loop_lifecycle`——`time` 本来就是模块对象，故直接补模块本身。
+    `time.sleep`）住 `trainer.loop_lifecycle`——`time` 本来就是模块对象，故直接补模块本身。
     """
-    import dist_common
-    import rl.loop_round_steps as lrs
+    import common.distribution
+    import trainer.loop_round_steps as lrs
 
-    # S4 第二十刀：`lc.dist_common` 这个中间名字随采集派发簇一起消失了（loop_core 不再 import
-    # dist_common）⇒ 补 `dist_common` **模块对象**本身，不再依赖任何中间命名空间。
-    monkeypatch.setattr(dist_common, "load_dist_config", lambda: {})
+    # S4 第二十刀：`lc.common.distribution` 这个中间名字随采集派发簇一起消失了（loop_core 不再 import
+    # common.distribution）⇒ 补 `common.distribution` **模块对象**本身，不再依赖任何中间命名空间。
+    monkeypatch.setattr(common.distribution, "load_dist_config", lambda: {})
     # S4 第二十刀：不再带 `lc`（loop_core）——它的名字空间里早已没有这些平台函数（那四个名字
     # 随各簇搬进了 `loop_*` 混入）；仍在的只有 `lrs`（轮内步骤读它们的地方）。
     for mod in (lrs,):
@@ -265,8 +265,8 @@ def _fake_dist(monkeypatch: pytest.MonkeyPatch) -> None:
         if hasattr(mod, "spawn_next_collect"):
             monkeypatch.setattr(mod, "spawn_next_collect", lambda *a, **kw: None)
     # 引擎的失败退避（time.sleep(30)）在测试里不真睡——失败语义本身仍然被验证。
-    # S4 第十九刀：不再经 `rl.loop_core.time` 这个中间名字访问——主循环骨架搬去
-    # `rl.loop_lifecycle` 后 loop_core 不再 import time，该属性路径消失（补丁会响亮
+    # S4 第十九刀：不再经 `trainer.loop_core.time` 这个中间名字访问——主循环骨架搬去
+    # `trainer.loop_lifecycle` 后 loop_core 不再 import time，该属性路径消失（补丁会响亮
     # AttributeError，而不是静默打空）。直接补 `time` **模块对象**：与原先等价（那时
     # `lc.time` 本来就是同一个模块对象），且不再依赖任何中间名字空间。
     import time
@@ -297,7 +297,7 @@ def _wrap_steps(
     的步（让位的那一次不算完）——R2c-3 之后「进入」与「走完」不再是同一件事，用例需要
     分别看见它们（让位不是失败、步骤也没丢，只是这一次没做完）。
     """
-    from rl.loop_round import STEP_METHOD, StepResult
+    from worker.loop_round import STEP_METHOD, StepResult
 
     for kind, method in STEP_METHOD.items():
         fn = getattr(loop, method)
@@ -351,7 +351,7 @@ def test_two_courses_advance_in_one_process_without_cross_contamination(tmp_path
         planner=lambda c, it, q: runners[c].planner(c, it, q),
         capacities={"local_ppo": 1, "eval_local": 1, "local_rollout": 2},
     )
-    from rl.loop_plan import plan_course
+    from trainer.loop_plan import plan_course
 
     for c in loops:
         it, _tasks, _facts = plan_course(c, tmp_path / c)
@@ -438,7 +438,7 @@ def test_restart_resumes_from_ledger_and_never_rewrites_rows(tmp_path: Path) -> 
         planner=lambda c, it, q: runner2.planner(c, it, q),
         capacities={},
     )
-    from rl.loop_plan import plan_course
+    from trainer.loop_plan import plan_course
 
     it, _, _ = plan_course("a", tmp_path / "a")
     assert it == 3  # ★ 指针从账本重建
@@ -468,7 +468,7 @@ def test_engine_exception_retries_same_iteration(tmp_path: Path) -> None:
 
 def test_step_mode_walks_all_steps_and_rotates_per_step(tmp_path: Path) -> None:
     """细粒度驱动：每课各自走完全部 13 步，且**步级轮转**（让位点密度 = 每步一个）。"""
-    from rl.loop_tasks import ROUND_TASKS
+    from worker.loop_tasks import ROUND_TASKS
 
     order: list[tuple[str, str]] = []
     clock = {"t": 1000.0}
@@ -503,7 +503,7 @@ def test_step_mode_yields_at_ppo_and_the_other_course_finishes(tmp_path: Path) -
     让位是 `_remote_ppo_step` 在步骤内部产生的，而且它落在「job 已经发布」这个**真状态**
     上——所以用例同时断言「在飞集里有那份 job 的 id」（发布发生过了）。
     """
-    from rl.loop_tasks import ROUND_TASKS
+    from worker.loop_tasks import ROUND_TASKS
 
     order: list[tuple[str, str]] = []
     entered: list[tuple[str, str]] = []
@@ -560,7 +560,7 @@ def test_step_mode_yields_at_precollect_and_the_other_course_finishes(tmp_path: 
     （双缓冲预采的尾段）。旧形态下那一小时里整个进程都在原地等；单进程多课程下
     这一处就是「一个慢子进程拖垮所有课」的入口。
     """
-    from rl.loop_tasks import ROUND_TASKS
+    from worker.loop_tasks import ROUND_TASKS
 
     order: list[tuple[str, str]] = []
     clock = {"t": 1000.0}

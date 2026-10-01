@@ -3,7 +3,7 @@
  *  流程（用户 2026-09-17 需求）：
  *    浏览器上传 zip → 落到 `tmp/<课程>/deliver-uploads/`（留证）→ python
  *    `remote.deliver_zip` 解成产物目录（`tmp/<课程>/deliver/<run_id>/`，三道门在那边）
- *    → **接着起 evalA**（`rl/eval_a_once.py`，与训练每 eval_every 轮同口径的干净评估，
+ *    → **接着起 evalA**（`trainer/eval_a_once.py`，与训练每 eval_every 轮同口径的干净评估，
  *    语料就来自课程配置的 eval_stages/eval_games_per_stage）。
  *
  *  为什么评估复用 evalA 而不是自己拼一套：那条命令的语料口径、双轨种子、账本格式
@@ -112,7 +112,7 @@ export interface DeliverImportResult {
  *  子进程交给 libuv，导入照旧要等（**这次 POST 本来就要等结果**），但控制台其余部分照常服务。
  *
  *  `runner` 是**可注入的接缝**（缺省就是真 python）：导入的判定（三道门 / 轮次发现）
- *  在 python 一侧、由 `nn-training/tests/test_deliver_zip.py` 钉死；这里注入替身是为了
+ *  在 python 一侧、由 `nn-training/tests/remote/test_deliver_zip.py` 钉死；这里注入替身是为了
  *  在不跑 python 的前提下把**控制台这一侧**的契约（argv 形状 / 标记解析 / 失败转述 / 要不要
  *  接着起评估）也测到——两边各测自己那一半，不在中间再叠一层端到端。
  *  执行体可以是同步替身（`await` 一个非 promise 是常量代价），但**生产路径**没有同步实现。

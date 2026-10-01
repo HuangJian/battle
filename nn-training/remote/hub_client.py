@@ -1,7 +1,7 @@
 """remote/hub_client.py — hub 侧远程 PPO 客户端（TrainingLoop 远程分支使用）。
 
 职责（D11/D12）：训练主循环只做「打包 → 发布 → 轮询/等待 → 校验落位」——
-job 队列/租约/鉴权全在旁路 hub-server（remote/hub_server.py）。
+job 队列/租约/鉴权全在旁路 hub-server（hub/server.py）。
 
 **发布 = 磁盘 IPC**（§3.1/附录 C）：训练主循环把 payload.zip + manifest.json
 写入 `job_root/<job_id>/`，并追加 `job_pending` 事件到 jsonl 账本；hub-server
@@ -26,6 +26,7 @@ from pathlib import Path
 
 from common.fs import append_jsonl, extract_tar_bytes
 from common.hashing import sha256_bytes, sha256_file
+from common.platform_utils import rmtree_best_effort
 from common.proc import run_capture
 from common.protocol import (
     BLOB_DEMO,
@@ -56,8 +57,7 @@ from common.protocol import (
 from common.protocol import (
     job_id as make_job_id,
 )
-from platform_utils import rmtree_best_effort
-from rl.resume import shard_state_init_ok, walk_shard_dirs
+from worker.resume import shard_state_init_ok, walk_shard_dirs
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 
@@ -176,7 +176,7 @@ def iter_shard_dirs(
     而 data_fp（按 (stage,seed,wver) 声明）照样匹配（静默换实验那一类）。
 
     ★ metrics 版本过滤（`metrics_version` 非 None 时）：只挑 manifest `metrics_version`
-    与本机 `rl.reward_library.METRICS_VERSION` **相等**的 shard。为什么（2026-09-29 事故）：
+    与本机 `biz.reward_library.METRICS_VERSION` **相等**的 shard。为什么（2026-09-29 事故）：
     产出 shard 的 rollout 代码可能与训练机（乃至同一台机器的**池暖 worker**）不同版本
     ——节点上跑旧导出器写 45 列、训练机/云 worker 已按 54 列读，云端 grad 第 1 秒就
     `ValueError: metrics 形状应为 [N+1,54]，收到 (74,45)`，同一份字节重领必炸 ⇒ hub 侧
@@ -203,7 +203,7 @@ def iter_shard_dirs(
     mver_bad: dict[int | None, int] = {}
     # walk_shard_dirs 而非 rglob：发布与 dup-settle 输家退场（dispatch 结算线程 rmtree）
     # 同轮并发，rglob 会在迭代里抛 FileNotFoundError 把发布打红（2026-09-20 事故：
-    # `stream collector failed` 同源；栈顶 pathlib._select_from）。见 rl/resume.py 的说明。
+    # `stream collector failed` 同源；栈顶 pathlib._select_from）。见 biz/resume.py 的说明。
     for d in walk_shard_dirs(it_dir, with_manifest=True):
         if not ((d / "obs.npy").exists() or (d / "metrics.npy").exists()):
             continue
@@ -277,7 +277,7 @@ def _shard_metrics_version(d: Path) -> int | None:
 def _shard_state_init_ok(d: Path, log=lambda msg: None) -> bool:
     """shard 是否真的从人类中段快照起跑（manifest 带正整数 `initTick`）。
 
-    判据函数与本地对账同源（`rl.resume.shard_state_init_ok`，两处共用一条规则）。
+    判据函数与本地对账同源（`biz.resume.shard_state_init_ok`，两处共用一条规则）。
     读不到 manifest = 不收（宁可少一份也不把标准开局的局当本轮的语料）。
     """
     try:
@@ -403,7 +403,7 @@ def _payload_reader_selfcheck(
 
     试解目录不用 `tempfile.TemporaryDirectory`：它在回收时走 `shutil.rmtree`，而本沙箱的
     删除保护 shim 会让它 `raise SystemExit`（`BaseException`，`ignore_errors` 拦不住，会当场
-    打死调用线程——`platform_utils.rmtree_best_effort` 的注释里就是这条事故）。改用 job 目录
+    打死调用线程——`common.platform_utils.rmtree_best_effort` 的注释里就是这条事故）。改用 job 目录
     下的 `.selfcheck/`（点目录：打包器/扫描器一律跳过）+ `rmtree_best_effort`。
     """
     check_dir = payload.parent / ".selfcheck"
@@ -577,7 +577,7 @@ def pack_code_zip(
 #: `tools/` **整棵**（不是只 `tools/sim`）：2026-09-17 实测 `export-rl-rollout.ts`
 #: 的依赖闭包会跨出 tools/sim——它 import `../eval/godai-score`（v7 评分口径）。
 #: 手写「该包哪几个子目录」就是在猜依赖图；靠
-#: `tests/test_remote_iter_real_bun.py` 真跑一遍才是判据（那条测试就是这个事故的哨兵）。
+#: `tests/worker/test_remote_iter_real_bun.py` 真跑一遍才是判据（那条测试就是这个事故的哨兵）。
 TS_CODE_DIRS: tuple[str, ...] = ("src", "tools")
 #: 允许进 zip 的后缀（.ts 源码 + .jsonc 数据 + .wasm 权重——`src/nn/conv/conv_wasm_adapter.ts`
 #: 经 `import.meta.url` 读 `src/nn/conv/prebuilt/wasm/conv.wasm`，漏了它节点上卷积直接炸）。
@@ -779,10 +779,10 @@ def publish_job(
     rollout_spec: dict | None = None,
     ts_code_sha256: str = "",
     ts_code_zip_path: str | Path | None = None,
-    # 半离线（kind="run"，2026-09-17）：`plan.json` 的**字节**（由 `rl.plan.dump_plan`
+    # 半离线（kind="run"，2026-09-17）：`plan.json` 的**字节**（由 `biz.plan.dump_plan`
     # 规范序列化）。节点靠它自主跑完 it+1..end_it——payload 必须带此文件，manifest 记
     # 它的 sha（`plan_sha256`）。传 bytes 而不是 dict：本模块是 `remote/` 层，不 import
-    # `rl/`（方向单一）；规范化序列化只有 `rl.plan.dump_plan` 一份，调用方自己 dump。
+    # `trainer/`（方向单一）；规范化序列化只有 `biz.plan.dump_plan` 一份，调用方自己 dump。
     plan_bytes: bytes | None = None,
     # 全离线（2026-09-17）：`register=False` = **只建 job 目录、不记账本也不进待领池**。
     # 用途：把这一段任务打成可上传云机的任务包（`remote/bundle.py`）——包里的 manifest
@@ -1249,7 +1249,7 @@ def verify_and_land(
                 log=log,
                 course_fp=str(m.get("course_fp") or ""),
                 corpus_fp=str(m.get("corpus_fp") or ""),
-                # 与发布端（`rl/loop_steps`）同一条过滤：本地重算的集合必须恒等于
+                # 与发布端（`trainer/loop_steps`）同一条过滤：本地重算的集合必须恒等于
                 # 打进 payload 的集合（P3.5），否则三重校验误拒一份正常 job。
                 state_init=state_init,
             )

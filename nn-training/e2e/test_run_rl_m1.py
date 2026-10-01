@@ -1,4 +1,4 @@
-"""test_run_rl_m1.py — run_rl.py 三模式整合 + m1-eval 评估管线回归（RL 入口整合，
+"""test_run_rl_m1.py — trainer/run_rl.py 三模式整合 + m1-eval 评估管线回归（RL 入口整合，
 plan/RL-Entry-Consolidation.md P5；DECISIONS §307）。迁移自 test_run_rl_intent.py
 （parse_m1_eval_report / run_clean_eval_rerun）+ 新增三模式分派矩阵。无真实训练、
 不碰节点。运行：bun dashboard/src/launch/cli.ts --script e2e/test_run_rl_m1.py；退出码 0/1。
@@ -14,8 +14,8 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
-import run_rl
-from rl.eval_m1 import CLEAN_EVAL_MAX_RETRY, parse_m1_eval_report, run_clean_eval
+from trainer import run_rl
+from trainer.eval_m1 import CLEAN_EVAL_MAX_RETRY, parse_m1_eval_report, run_clean_eval
 
 FAILS: list[str] = []
 
@@ -171,7 +171,7 @@ def test_merged_mode_args() -> None:
 
 
 def test_stop_loss_hit() -> None:
-    from rl.stop_loss import stop_loss_hit
+    from worker.stop_loss import stop_loss_hit
 
     print("[fast] stop_loss_hit：止损判门分模式（原 iter15 Δ≤0 泛化 + P1-9 统计化）")
     check(stop_loss_hit("per-tick", 15, 0.0, 20, {"delta": -0.1}) is False, "per-tick 永不触发")
@@ -308,7 +308,7 @@ def test_update_kwargs_kickstart_zerowarmup() -> None:
 
 def test_kickstart_coef_ignores_restart() -> None:
     print("[fast] kickstart_coef：resume 不复位缰绳（c4-margin it31 kk=1.0 事故）")
-    from rl.loop_steps import kickstart_coef
+    from trainer.loop_steps import kickstart_coef
 
     args = types.SimpleNamespace(
         epochs=4, warmup_iters=0, kickstart_kl=1.0, kickstart_decay=0.5, seed=7
@@ -332,7 +332,7 @@ def test_kickstart_startup_check() -> None:
     print("[fast] _kickstart_startup_check：换机器缺 bc 响亮拦截＋kk 落日志")
     import tempfile
 
-    from rl.loop_lifecycle import _kickstart_startup_check
+    from trainer.loop_lifecycle import _kickstart_startup_check
 
     off = types.SimpleNamespace(kickstart_ref=False)
     check(_kickstart_startup_check(off, 31) == 0.0, "未启用 → 0.0 零副作用")
@@ -371,7 +371,7 @@ def test_kickstart_startup_check() -> None:
 
 def test_validate_args_kickstart_gates() -> None:
     print("[fast] validate_args：kickstart 双闸（§363）")
-    from rl.config import validate_args
+    from worker.config import validate_args
 
     ok = types.SimpleNamespace(mode="per-tick", kickstart_ref=True, warmup_iters=0)
     try:

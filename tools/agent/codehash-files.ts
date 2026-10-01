@@ -1,5 +1,5 @@
 /**
- * codehash-files.ts — codeHash 文件集展开（TS 侧；与 nn-training/dist_common.py 逐字节
+ * codehash-files.ts — codeHash 文件集展开（TS 侧；与 nn-training/common/distribution.py 逐字节
  * 一致的双语契约，2026-09-01 事故防线）。
  *
  * 从 sampler-agent.ts 抽出（plan/dist-codehash-stale-fix.md F3/F4）：sampler-agent
@@ -18,13 +18,13 @@ export const CODE_HASH_MANIFEST = path.join(import.meta.dir, 'codehash-files.txt
 
 // ---------------- F3 噪声过滤（契约写死在 codehash-files.txt 头部注释） ----------------
 /** 目录递归时的跳过规则（F3）：任一路径段以 '.' 开头（隐藏项 .git/.DS_Store/.venv）
- * 或名为 __pycache__ / node_modules。与 dist_common._skip_codehash_dir 逐条对齐。 */
+ * 或名为 __pycache__ / node_modules。与 common.distribution._skip_codehash_dir 逐条对齐。 */
 export function isSkippedCodeHashDir(name: string): boolean {
   return name.startsWith('.') || name === '__pycache__' || name === 'node_modules'
 }
 
 /** 文件级跳过规则（F3）：隐藏项（. 开头）+ 编辑器/构建临时后缀。
- * 与 dist_common._skip_codehash_file 逐条对齐。 */
+ * 与 common.distribution._skip_codehash_file 逐条对齐。 */
 export function isSkippedCodeHashFile(name: string): boolean {
   return (
     name.startsWith('.') || /\.(pyc|orig|rej|bak|tmp|log|swp)$/.test(name) || name.endsWith('~')
@@ -45,7 +45,7 @@ export function computeCodeHashFromFiles(entries: { relPath: string; content: Bu
 }
 
 /**
- * 按 SSOT 清单 codehash-files.txt 展开 codeHash 文件集（与 dist_common.py 同源）。
+ * 按 SSOT 清单 codehash-files.txt 展开 codeHash 文件集（与 common/distribution.py 同源）。
  * 清单每行一个条目：'#' 注释 / 空行忽略；以 '/' 结尾 = 目录（递归，受 F3 过滤）；
  * 其余 = 具体文件（相对 repo 根、posix 路径；不存在则跳过，单文件条目不过滤）。
  * manifestPath 可注入（测试用 fixture 清单）。
@@ -94,7 +94,7 @@ export function computeCodeHash(manifestPath?: string): string {
 
 // ---------------- engine_epoch（EvalBench §2.5/§6.6；2026-09-17 统一到本清单） ----------------
 /**
- * engine_epoch = sha256(codeHash)[0:16]（与 dist_common.compute_engine_epoch 同式）。
+ * engine_epoch = sha256(codeHash)[0:16]（与 common.distribution.compute_engine_epoch 同式）。
  *
  * 2026-09-17 用户指令：rollout 与 eval 的「节点是否可用」必须同源 = codehash-files.txt。
  * 旧式 epoch = sha256(git_full_commit + GAMEPLAY_SPECS 指纹)[0:16] 掺了 git commit ⇒
@@ -115,7 +115,7 @@ export function computeEngineEpoch(manifestPath?: string): string {
 }
 
 /** 诊断报告（F4，plan/dist-codehash-stale-fix.md）：`sha8\tsize\trelPath` 按 relPath
- * 排序，末行 `codeHash=<full>`——与 dist_common.code_hash_report() 同格式，双侧 diff
+ * 排序，末行 `codeHash=<full>`——与 common.distribution.code_hash_report() 同格式，双侧 diff
  * 直接看出多/少/改。 */
 export function codeHashReport(manifestPath?: string): string {
   const entries = collectCodeHashEntries(manifestPath)

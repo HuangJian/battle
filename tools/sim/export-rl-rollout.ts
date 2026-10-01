@@ -159,7 +159,7 @@ export const RL_SHARD_FILES = [
   'mask.npy',
 ] as const
 
-// ---- 41 维指标列序（MUST mirror `nn-training/rl/reward_library.py::METRICS`）----
+// ---- 41 维指标列序（MUST mirror `nn-training/biz/reward_library.py::METRICS`）----
 // 改任一侧必须同步另一侧 + manifest metrics_version 不变则任何 shape[0] 下游
 // 会静默错读。idx10=starsCollected 补 plan §4.1 表的空槽（连续编号 0..20）。
 // idx21–28=道具流分类型计数（§9，metric v3：spawn/got × bomb/tank/freeze/shield，
@@ -1779,7 +1779,7 @@ export function runOneBench(
  * 而课程/关卡语义（`CourseConfig.player.lives` ← 关卡 `player.lives` 合并）走的
  * 正是这个 flag —— 裸调 CLI 忘传 = 静默 3 命，烧掉整批 it0 标定语料（x2–x7 全中招，
  * 训练侧因必经课程合并从未中招）。从此缺席/非法 = 响亮失败，不设默认值。
- * 训练调用链（`rl/cmd.py` ← `apply_course` ← 关卡合并）恒传此 flag，不受影响。
+ * 训练调用链（`biz/cmd.py` ← `apply_course` ← 关卡合并）恒传此 flag，不受影响。
  */
 export function resolveLivesFlag(raw: string): number {
   const v = parseInt(raw, 10)
@@ -1899,7 +1899,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
 
   for (const si of stages) {
     // arena 编号命名空间（goal-nn 卡 A1）：si >= 1000 经 ARENA_LADDER 解析为
-    // 玩具场；真实关走 STAGES。同一整数贯穿 course.py → run_rl.py → queue.py →
+    // 玩具场；真实关走 STAGES。同一整数贯穿 course.py → trainer/run_rl.py → queue.py →
     // sampler-agent → 本解析层 → shard 命名，六环节零改动（agent 原样透传）。
     //
     // 守卫①（plan §5.2）：--stage-json 存在时**先**解码自定义关，短路
@@ -2077,7 +2077,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     // 未门控的纯 v7 分：与 God-AI 基线口径可比，用于诊断门控前后的行为分化
     scoreStatsUngated: stat(scoresUngated),
     dimMeans,
-    // 原始值列表：供 run_rl.py 跨 worker 精确重聚合
+    // 原始值列表：供 trainer/run_rl.py 跨 worker 精确重聚合
     scoreList: scores.map((x) => +x.toFixed(5)),
     dimLists: Object.fromEntries(
       Object.entries(dimAcc).map(([k, xs]) => [k, xs.map((x) => +x.toFixed(5))]),

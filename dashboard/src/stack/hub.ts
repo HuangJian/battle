@@ -546,7 +546,7 @@ function tailText(logPath: string, offset: number): string {
 
 // ────────────────────────── BC 冒烟预演（BcLoop --smoke 专属，2026-09-13） ──────────────────────────
 
-/** BC 冒烟预演：真 BC 课程 run_bc.py --smoke（REMOTE_PUSH_NODE=本机伪 GPU 节点）
+/** BC 冒烟预演：真 BC 课程 trainer/run_bc.py --smoke（REMOTE_PUSH_NODE=本机伪 GPU 节点）
  *  走全链 —— 语料采集（1 局 God-AI）→ 发布 kind=bc job → 伪节点**真 BC 训练**
  *  1 epoch → 回传落位 → 落位即作废退出（不覆盖 out、不归档、账本零污染）。
  *  三里程碑：published job → weights landed → BC SMOKE PASS + 进程退出。 */

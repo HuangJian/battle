@@ -187,7 +187,7 @@ sampleCat 导出直测采样多样性；reward 对账界按加权塑形放宽。
 **背景**：§27 记录了 Bug A（stream 半途 halt）的修复——`rl-config.json` policy 加
 `streamKlCapIntent:1.0, streamWaveGamesIntent:200`。本节对「这样改是否合理」做机制级论证。
 
-**机制**（依据 `rl/stream.py`）：
+**机制**（依据 `trainer/stream.py`）：
 - `kl_cap` 是 `cum_kl` 预算上限；`cum_kl` 在 L205 为**每波 KL 累加**（= 整轮策略相对数据生成策略
   W(N) 的总漂移）；L213 `if state["cum_kl"] > kl_cap: halted=True` → 置 `halt_ev` → 队列停派发 →
   后续已结算未训语料记 `dropped`。
@@ -290,7 +290,7 @@ rollout winRate 单调爬升 it1 0.721 → it4 0.764 → it6 **0.776**（M7② �
 （PPO 只训了 14 chunks ≈ 10% 的 rollout 数据）。4 个 LAN agent 其实 codeHash 匹配、可达、
 evalSupport=True，但因派发在单波后停摆，它们几乎没被用上 → 140 局硬扛在 ~13 本地槽 → 30min。
 
-**修复**：`rl/stream.py` 在 `intent_rollout` 时改用意图专属覆盖；`rl-config.json` policy 加
+**修复**：`trainer/stream.py` 在 `intent_rollout` 时改用意图专属覆盖；`rl-config.json` policy 加
 `streamKlCapIntent:1.0, streamWaveGamesIntent:200`。语义改为"单波覆盖整缓冲"——全量 140 局
 合成 1 波（均属 W(N) 同策略、完全 on-policy）训完，cum_kl~0.15 远低于放宽后的 Intent 上限，
 不再半途 halt，LAN agent 正常吃满。

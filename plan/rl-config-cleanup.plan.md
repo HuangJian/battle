@@ -26,10 +26,10 @@
 ### 0.5.1 用户裁决（本次实施）
 
 1. **`intent/goal`：只删配置，不删代码。** 删 rl-config 的 `intent_rl` 整块 + 两个 `policy.*Intent` 键；
-   `ppo/intent.py`、`ppo/goal.py`、`rl/modes.py` 的 legacy 回退分支、`rl/eval_m1.py` 与 m1-eval 派发链
-   **一个字不改**（§3.1 原「顺手去掉 `rl/modes.py` legacy 分支」**作废**，R3 随之作废）。
+   `worker/ppo/intent.py`、`worker/ppo/goal.py`、`worker/modes.py` 的 legacy 回退分支、`trainer/eval_m1.py` 与 m1-eval 派发链
+   **一个字不改**（§3.1 原「顺手去掉 `worker/modes.py` legacy 分支」**作废**，R3 随之作废）。
 2. **`intent_rl` 重启配方（§3.3）不做。** 需要重启 intent 线时照 x 系列重配；且**入口目前是冻结的**
-   （`rl/config.py::validate_args` 对 `mode != per-tick` 响亮拒启，单一 PPO 路径），重启前须先解冻。
+   （`worker/config.py::validate_args` 对 `mode != per-tick` 响亮拒启，单一 PPO 路径），重启前须先解冻。
 3. **`stream` / `double_buffer` / `precollect_early`：只删配置，保留代码。** 它们是 CPU 训练期的小剂量，
    GPU 算力充裕后不用了；从 rl-config 删除即可。
 
@@ -40,7 +40,7 @@
 | §1.1 计数 | `rl` 13 叶 · `nodes` 9 条 · `courses` 13 条 · 总 90 叶 | `rl` **24** 叶（+13 `remote_hubs`）· `nodes` **8** 条 · `courses` **17** 条 |
 | §1.2/§9 坐标 | `dispatch.py:191` · `stream.py:193-194` · `modes.py:83-95` · `load_course:1269` · rl/courses `:1339-1340` | `:184` · `:188-189` · `:80-96` · `:1225` · `:1465-1466` |
 | §1.2/§9 引用 | `plan/accident.plan.md §3` | **该文件已删** ⇒ 单一 PPO 路径的家 = `docs/nn/training-stack.md §23`（`DECISIONS.md:1323` 同指） |
-| §1.4 `upgradeBranch` | 只「删键」 | **同时删读点**：`rl/dispatch.py:184` 的 `policy.get("upgradeBranch")` 去掉（`dist_common.py:499` 注释已声明废弃） |
+| §1.4 `upgradeBranch` | 只「删键」 | **同时删读点**：`trainer/dispatch.py:184` 的 `policy.get("upgradeBranch")` 去掉（`common/distribution.py:499` 注释已声明废弃） |
 | §3.2 `stream`/`double_buffer`/`precollect_early` | 归 B 类「全局缺省」 | 实为**恒不生效**（`validate_args` 强制 `stream=0`/`double_buffer=0`；`precollect_early` 只在 `if double_buffer` 分支里读）⇒ 按死键处理 |
 | §4 S2/S3 | 自造在训判据与停课候选表 | 判据与计数**对齐 `plan/course-archive.plan.md §1.1`**（17 课程目录 / **4 在训**：`x20-dodge-l1d2/l2a/l2b/l3d2` / 13 已停）；且**只能在训练机执行**（本机 `tmp/` 无课程目录） |
 | §3.4 P2 | `--strict-rl-config` 缺省关 | 改为**恒告警、不拒**（E8 的验收要「塞假键 ⇒ 启动日志/冒烟出现告警」，缺省关就达不到）；白名单数据与冒烟共用一份 JSON |
@@ -73,12 +73,12 @@
 
 | 读点 | 位置 | 说明 |
 |---|---|---|
-| 唯一路径来源 | `dist_common.rl_config_path()`（`dist_common.py:59-71`） | env `BCITY_RL_CONFIG` > `nn-training/rl-config.json` |
-| 唯一读入口 | `rl/config.py::read_rl_config_file()`（`:49-52`） | 读不到/形状不对 → 空 dict |
-| **合并优先级** | `rl/config.py::load_course`（`:1269`） | **课程文件 > rl-config > argparse 默认**；`:1339-1340` 读 `cfg["rl"]` 与 `cfg["courses"][课]` |
-| 模式块合并 | `rl/modes.py::merged_mode_args`（`:83-95`） | `rl.<mode>` → **`intent_rl`（legacy）** → `rl`。⚠ **legacy 覆盖 `rl` 同名键** |
-| 课程级机器旋钮 | `rl/loop_serve.py::apply_course_machine_overrides`（`:224-255`） | `courses.<课>` 优先于 serve argv **与**课程文件（per-course 最具体），逐键打印生效值 |
-| 训练期热读 | `rl/loop_steps.py:87/131/171/235` | `cfg["courses"][stem]` 的 `cf_protocol`/`cf_edge_ip`/`rollout_src`/`run_wait_sec` |
+| 唯一路径来源 | `common.distribution.rl_config_path()`（`common/distribution.py:59-71`） | env `BCITY_RL_CONFIG` > `nn-training/rl-config.json` |
+| 唯一读入口 | `worker/config.py::read_rl_config_file()`（`:49-52`） | 读不到/形状不对 → 空 dict |
+| **合并优先级** | `worker/config.py::load_course`（`:1269`） | **课程文件 > rl-config > argparse 默认**；`:1339-1340` 读 `cfg["rl"]` 与 `cfg["courses"][课]` |
+| 模式块合并 | `worker/modes.py::merged_mode_args`（`:83-95`） | `rl.<mode>` → **`intent_rl`（legacy）** → `rl`。⚠ **legacy 覆盖 `rl` 同名键** |
+| 课程级机器旋钮 | `trainer/loop_serve.py::apply_course_machine_overrides`（`:224-255`） | `courses.<课>` 优先于 serve argv **与**课程文件（per-course 最具体），逐键打印生效值 |
+| 训练期热读 | `trainer/loop_steps.py:87/131/171/235` | `cfg["courses"][stem]` 的 `cf_protocol`/`cf_edge_ip`/`rollout_src`/`run_wait_sec` |
 | 控制台 | `dashboard/src/core/config.ts`（load/saveConfig）、`stack/specs.ts`（`trainModeKnobs` 唯一换算）、`stack/smoke.ts:64`（rl-config 契约冒烟） | 启动/开课/登记 worker 会**回写**它 |
 
 ### 1.3 `intent_rl` 块逐键对照（实测值）
@@ -93,9 +93,9 @@
 
 | 键 | 判据 | 结论 |
 |---|---|---|
-| `policy.upgradeBranch` | ⚠ **不是零消费者**：`rl/dispatch.py:191` 仍读它作兜底 `upgrade_branch_or(str(policy.get("upgradeBranch") or ""))`，而 `upgrade_branch_or`（`dist_common.py:522-525`）**显式值优先于锁存**（`if explicit: return explicit`）。**当前值 = `""`** ⇒ 落回 `run_rl.py:309` 锁存的当前分支 ⇒ **删除零行为变化**；但它正是 2026-08-30「残留旧战役分支名把全部节点 reset」的载体（**填任何非空值都会盖掉锁存**） | **删**（铲掉坑，行为等价）+ **去掉 `rl/dispatch.py:184` 的读点**（只删键不删读点，坑还在） |
+| `policy.upgradeBranch` | ⚠ **不是零消费者**：`trainer/dispatch.py:191` 仍读它作兜底 `upgrade_branch_or(str(policy.get("upgradeBranch") or ""))`，而 `upgrade_branch_or`（`common/distribution.py:522-525`）**显式值优先于锁存**（`if explicit: return explicit`）。**当前值 = `""`** ⇒ 落回 `trainer/run_rl.py:309` 锁存的当前分支 ⇒ **删除零行为变化**；但它正是 2026-08-30「残留旧战役分支名把全部节点 reset」的载体（**填任何非空值都会盖掉锁存**） | **删**（铲掉坑，行为等价）+ **去掉 `trainer/dispatch.py:184` 的读点**（只删键不删读点，坑还在） |
 | `policy.minDiskFreeMB` | 全域（nn-training + dashboard + tools + md）= **仅 1 处文档命中**（`tools/agent/agent-setup.md:56`），无任何代码消费者 —— 那句文档说的是 **TS 侧**的 `tools/agent/sampler-agent.ts:689 diskFreeMB()`（函数名，不是 rl-config 键） | **删** + 顺手把 `agent-setup.md:56` 的指向写清（免得下一个人以为配置里有这个键） |
-| `policy.streamKlCapIntent` / `policy.streamWaveGamesIntent` | 各自只有 1 处消费者（`rl/stream.py:193-194`），都是 intent 流式专属 | 与 intent 线同批 ⇒ **删**（重启 intent 时按当时口径重设） |
+| `policy.streamKlCapIntent` / `policy.streamWaveGamesIntent` | 各自只有 1 处消费者（`trainer/stream.py:193-194`），都是 intent 流式专属 | 与 intent 线同批 ⇒ **删**（重启 intent 时按当时口径重设） |
 | `courses.<已停课程>` | §4 S3 判据 | 删条目 |
 
 ### 1.5 红线（实现不得违反）
@@ -119,7 +119,8 @@
 | **A 机器/环境级** | 值描述**这台机器/这条链路**，课程文件天然表达不了 | **留** | `rl.hub_port` `agent_port` `remote_token` `remote_hub_url` `remote_hubs` `cf_protocol` `cf_edge_ip` `slim` `hub_push` `torch_threads` `nodes[]` |
 | **B 全局缺省** | 课程文件 schema **有同名键**；rl-config 里的值只是「课程没写时的兜底」 | **只留必要兜底 + 注释标明**；与在训课程重复的按 §3.2 逐个清 | `rl.mb` `lr`* `epochs`* `gamma`* `lam`* `workers` `keep_iters` `eval_window_sec` `difficulty` `max_ticks` `total_stages` `rotate_stages` `seed_rotate` `stream` `double_buffer` `precollect_early` `local_slots` |
 | **C 调度策略** | 集群调度器的行为阈值，属于「怎么派活」而不是「怎么训」 | **留** | `policy.taskTimeoutSec` `taskFetchTimeoutSec` `queueWindowSec` `statusTimeoutSec` `nodeFailStreak` `streamKlCap` |
-| **D 每课机器侧** | 控制台热切/开课的写面；per-course 最具体 | **留活课，删停课** | `courses.<课>.{rollout_src,run_iters,gate_halt_mode,cf_*}` |
+| **D 每课机器侧** | 控制台热切/开课的写面；per-course 最具体 | **留活课，删停课** | `courses.<课>.{rollout_src,run_iters,cf_*}` ——⚠ **`gate_halt_mode` 已不在本类**（2026-10-01 平台化 ⇒ 无读者，见下行） |
+| **D′ 已平台化** | 曾是每课旋钮，现已升为**平台级单开关**（`tmp/gate-halt.json` + 回执）；课程级那份无读者 | **无条件删**（不看在训与否——它不描述课） | `courses.<课>.gate_halt_mode` · `rl.gate_halt_mode`（本是隐藏第四面） |
 | **E 废弃/死** | 代码注释明写废弃，或全域零消费者 | **删** | `intent_rl.*`（29）· `policy.upgradeBranch` · `policy.minDiskFreeMB` · `policy.streamKlCapIntent` · `policy.streamWaveGamesIntent` |
 
 > ⚠ **B 类的取舍要点**：删除全局缺省**会改变「没写该键的课程」的行为**。所以删之前必须先出
@@ -141,15 +142,15 @@
 - intent_rl{...}                （整块 29 键；**不留空壳**）
 ```
 
-**⚠ 2026-09-26 改（§0.5.1-1）：只删配置，代码保留。** `rl/modes.py` 的 legacy 回退分支
+**⚠ 2026-09-26 改（§0.5.1-1）：只删配置，代码保留。** `worker/modes.py` 的 legacy 回退分支
 （`:80-96`）与 `e2e/test_run_rl_m1.py:156-170` 的断言**都不动**——代码仍认得 `intent_rl`，重启时能直接复用。
 （原「顺手去掉 legacy 分支 + 改 e2e 断言 + §7-R3」作废。）
 
 **行为影响**：`intent_rl` 的 7 个同值键无影响；4 个不同值键在 intent/goal 模式下会改用 `rl` 值——
 **这是有意为之**（新 intent 线按 x 系列口径跑）；18 个独有键按 §3.3 的对照表处置。
-`policy.upgradeBranch` 当前是**空串** ⇒ 删除后仍落回 `run_rl.py:309` 锁存的当前分支，**行为等价**
+`policy.upgradeBranch` 当前是**空串** ⇒ 删除后仍落回 `trainer/run_rl.py:309` 锁存的当前分支，**行为等价**
 （但若哪天有人填了非空值，它会盖掉锁存 ⇒ 本 plan 把它当坑铲掉）。
-**多一个副作用要写进文档**：`rl/modes.py:91-95` 的 legacy 回退消失 ⇒ 不再有「intent_rl 悄悄覆盖 rl」这种隐式行为。
+**多一个副作用要写进文档**：`worker/modes.py:91-95` 的 legacy 回退消失 ⇒ 不再有「intent_rl 悄悄覆盖 rl」这种隐式行为。
 
 ### 3.2 P1 — 清 B 类重复项（需先出覆盖矩阵）
 
@@ -175,11 +176,11 @@
 | `seeds_per_stage` | 课程（若 CourseConfig 缺该字段 ⇒ 列为「重启时先补 schema」的前置） |
 
 > 一句话给未来的自己：**intent 线重启 = 新建一门 `curricula/intent-*.jsonc`，照 x 系列的字段写；
-> `rl-config.json` 只提供机器级那几项。**（`.jsonc` 的字段清单以 `rl/config.py::CourseConfig` 为准。）
+> `rl-config.json` 只提供机器级那几项。**（`.jsonc` 的字段清单以 `worker/config.py::CourseConfig` 为准。）
 
 ### 3.4 P2（**已裁决：做，默认告警不拒**）— 固化 schema，防再长草
 
-新增 `nn-training/rl_config_schema.py`（或并入 `schema.py`）：顶层键白名单 + 每段键白名单；
+新增 `nn-training/worker/rl_config_schema.py`（或并入 `common/schema.py`）：顶层键白名单 + 每段键白名单；
 `read_rl_config_file()` 之后由 `--strict-rl-config` 打开校验（缺省**关**，只显式开启时才检查）；
 控制台 `stack/smoke.ts:64` 的「rl-config 契约」冒烟接上它 ⇒ **未知键在开训前就被点出来**（而不是静默沉睡成 legacy）。
 **分级（已定）**：未知键一律**只告警不拒**（`log` 一行 + 冒烟面板红字提示），**不 block 开训**
@@ -208,11 +209,14 @@
 ### S3 — `courses.*` 条目清理
 
 删「非在训」的课程条目（实测待删候选：`x20-clutch-null`、`x3-power`、`x20-clutch`、`x20-steady`、`x20-demo-mix`、
-`x20-terminal`…以 S2 的矩阵为准）。**注意** `courses.<课>.run_iters` 与 `gate_halt_mode` 都属 D 类，判据同样是「在训」。
+`x20-terminal`…以 S2 的矩阵为准）。**注意** `courses.<课>.run_iters` 属 D 类（判据「在训」）；**`gate_halt_mode` 不在本步范围**——
+它已平台化（`gate-halt-platform-level.plan.md`，2026-10-01）：课程级那份**无条件删**（无读者，
+控制台开课时 `pruneLegacyCourseKnobs` 也在清），与本 plan 的「在训」判据无关；
+`rl.gate_halt_mode` 同理（已从 `rl_config.schema.json` 的 `sections.rl` 挪 `retired`）。
 
 ### S4 — 生效值对照（清洗的验收手段）
 
-清洗**前后**各跑一次启动段，抓 `run_rl.py:87` 的「生效启动配置落地日志」
+清洗**前后**各跑一次启动段，抓 `trainer/run_rl.py:87` 的「生效启动配置落地日志」
 （它逐键标注来源 `rl.<mode>` / `intent_rl(legacy)` / `rl`），做**逐键 diff**：
 - 在训课程（per-tick）的生效值：**必须零变化**（除被删的死键）；
 - 已删的 intent 键：允许变化，但每条要能对上 §3.3 的对照表。
@@ -256,7 +260,7 @@ python 侧 `bash tools/githook/nn-py-safe.sh -m pytest tests/test_rl_config*.py 
 
 ```bash
 cd nn-training
-bash ../tools/githook/nn-py-safe.sh -m pytest tests/test_rl_config_clean.py -q
+bash ../tools/githook/nn-py-safe.sh -m pytest tests/tools/test_rl_config_clean.py -q
 cd dashboard && bun run typecheck && bun run test
 # 全量：bash tools/githook/nn-python-gate.sh（用户跑）
 ```
@@ -269,10 +273,10 @@ cd dashboard && bun run typecheck && bun run test
 
 | 文件 | 动作 | 用例 |
 |---|---|---|
-| `nn-training/tests/test_rl_config_clean.py`（新） | 新增 | dry-run 零写盘（mtime+sha 双验）· 备份先于删除 · **只删白名单键**（未知键不动）· 脱敏（token/authKey 不出现在输出）· `courses` 只删指定条目 · 顶层结构完整性断言 |
+| `nn-training/tests/tools/test_rl_config_clean.py`（新） | 新增 | dry-run 零写盘（mtime+sha 双验）· 备份先于删除 · **只删白名单键**（未知键不动）· 脱敏（token/authKey 不出现在输出）· `courses` 只删指定条目 · 顶层结构完整性断言 |
 | 同上 | 新增 | S2 矩阵纯函数：来源判定（课程 > level 注入 > rl-config > 缺省）与「全绿」判定 |
-| `nn-training/tests/test_rl_config_schema.py`（E8） | 新增 | 未知键**告警**（不是拒）· 已知键不误报 · 白名单与 `read_rl_config_file` 的字段表不漂 |
-| 既有 | 保留 | `rl/config.py::read_rl_config_file` 与 `rl/modes.py::merged_mode_args` 的既有用例（含 `e2e/test_run_rl_m1.py:157-170` 的 legacy 回退断言 —— **删 intent_rl 后这条要按新语义改**，见 §7-R3） |
+| `nn-training/tests/worker/test_rl_config_schema.py`（E8） | 新增 | 未知键**告警**（不是拒）· 已知键不误报 · 白名单与 `read_rl_config_file` 的字段表不漂 |
+| 既有 | 保留 | `worker/config.py::read_rl_config_file` 与 `worker/modes.py::merged_mode_args` 的既有用例（含 `e2e/test_run_rl_m1.py:157-170` 的 legacy 回退断言 —— **删 intent_rl 后这条要按新语义改**，见 §7-R3） |
 
 ### 6.2 DoD
 
@@ -303,7 +307,7 @@ cd dashboard && bun run typecheck && bun run test
    **否决**「全删、零缺省、课程必须显式声明」：会让历史课程无法复现，且新课程漏声明时是**静默**落到 argparse 默认；
    也否决「B 类一律不动」：那等于放弃本 plan 的主要收益（`mb`/`max_ticks`/`seed_rotate` 这类第二事实源继续留着）。
 2. **O2 = `intent_rl` 整块删**（§3.1），**不留空壳**（`intent_rl: {}` 只会让后来者以为它还有语义）。
-   删掉后 `rl/modes.py:83-95` 的 legacy 回退分支成为死代码 ⇒ 一并去掉（§7-R3 的用例同步改）。
+   删掉后 `worker/modes.py:83-95` 的 legacy 回退分支成为死代码 ⇒ 一并去掉（§7-R3 的用例同步改）。
 3. **O3 = schema 固化做，默认只告警不拒**（§3.4、§5 E8）：未知键在启动日志与控制台冒烟里**点出来**，
    但**不 block 开训**；升级为硬拒不在本 plan。
 
@@ -314,21 +318,21 @@ cd dashboard && bun run typecheck && bun run test
 ## 9. 证据与参考（仓内）
 
 - 现状：`nn-training/rl-config.json`（90 叶子；本节所有值均为实测）。
-- 读链：`dist_common.py:59-71`、`rl/config.py:49-52`（读入口）、`:1269`（合并优先级）、`:1339-1340`（`rl`/`courses` 段）、
-  `rl/modes.py:83-95`（`intent_rl` legacy 回退，**cleanup 的主对象**）、`rl/loop_serve.py:224-255`（课程级机器旋钮）、
-  `rl/loop_steps.py:87/131/171/235`（训练期热读）、`rl/kickstart_burn.py:125-128`、`rl/paired_kill.py:128`。
-- 死键证据：`rl/dispatch.py:191`（`upgradeBranch` 的**兜底读点**，配 `dist_common.py:522-525 upgrade_branch_or`：显式值优先于锁存 ⇒ 非空即盖锁存 ⇒ 事故载体；当前空值 ⇒ 删除等价）；
+- 读链：`common/distribution.py:59-71`、`worker/config.py:49-52`（读入口）、`:1269`（合并优先级）、`:1339-1340`（`rl`/`courses` 段）、
+  `worker/modes.py:83-95`（`intent_rl` legacy 回退，**cleanup 的主对象**）、`trainer/loop_serve.py:224-255`（课程级机器旋钮）、
+  `trainer/loop_steps.py:87/131/171/235`（训练期热读）、`worker/kickstart_burn.py:125-128`、`worker/paired_kill.py:128`。
+- 死键证据：`trainer/dispatch.py:191`（`upgradeBranch` 的**兜底读点**，配 `common/distribution.py:522-525 upgrade_branch_or`：显式值优先于锁存 ⇒ 非空即盖锁存 ⇒ 事故载体；当前空值 ⇒ 删除等价）；
   `tools/agent/agent-setup.md:56`（`minDiskFreeMB` 唯一命中，实为 TS 侧 `sampler-agent.ts:689` 的函数名）；
-  `rl/stream.py:193-194`（两个 `*Intent` 的唯一消费者）。
+  `trainer/stream.py:193-194`（两个 `*Intent` 的唯一消费者）。
 - 控制台面：`dashboard/src/core/config.ts`（load/save）、`stack/specs.ts:163`（`trainModeKnobs` 唯一换算）、
   `stack/smoke.ts:64-83`（rl-config 契约冒烟）、`server/actions/preset.ts:49-138`（回写 `rl.cf_*`/`stream`/`double_buffer`/`precollect_early`/`hub_push`）。
-- 生效值日志：`run_rl.py:87`（逐键来源标注 `rl.<mode>` / `intent_rl(legacy)` / `rl`）—— 清洗的验收手段就靠它。
+- 生效值日志：`trainer/run_rl.py:87`（逐键来源标注 `rl.<mode>` / `intent_rl(legacy)` / `rl`）—— 清洗的验收手段就靠它。
 
 ---
 
 ## 10. 一句话给接手 agent
 
 **先备份+出矩阵（E0–E1），再只删白名单里的三批：死键（upgradeBranch/minDiskFreeMB/两个 `*Intent`）、
-`intent_rl` 整块（不留空壳，顺手去掉 `rl/modes.py` 的 legacy 分支）、矩阵全绿的 B 类重复项与停课的 `courses.*` 条目；
-删除前后用 `run_rl.py:87` 的生效值日志逐键 diff，在训课程必须零变化；
+`intent_rl` 整块（不留空壳，顺手去掉 `worker/modes.py` 的 legacy 分支）、矩阵全绿的 B 类重复项与停课的 `courses.*` 条目；
+删除前后用 `trainer/run_rl.py:87` 的生效值日志逐键 diff，在训课程必须零变化；
 然后做 E8（schema 白名单，**只告警不拒**），最后把「新键该写哪」的决策树与 intent 重启配方写进 `docs/nn/rl-config.md`。**

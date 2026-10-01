@@ -64,7 +64,9 @@ describe('WirePanel 口径', () => {
 
   it('缺数据显空态 + 重跑命令，不编造 0', () => {
     // 空态文案里带可复制的重跑命令（操作员不必回来翻文档）
-    expect(panel).toContain('remote/tunnel_ab_probe.py')
+    // 2026-09-30：探针随 hub 出包搬去了 `hub/`（刀 1）——这里以前断言的是旧路径，
+    // 于是「复制这条命令」会失败，而测试还替它绿着。
+    expect(panel).toContain('hub/tunnel_ab_probe.py')
     expect(panel).toMatch(/尚无传输账|还没有探针结果/)
   })
 })

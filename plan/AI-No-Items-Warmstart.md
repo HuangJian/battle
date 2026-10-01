@@ -97,9 +97,9 @@ superItemGuardThreat: 1 → 0
 | # | 改动 | 涉及 |
 |---|---|---|
 | ① | NN 删 item 头（动作空间 10→7，MASK_DIM 10→7） | `student_model.py`（PPOStudent/StudentNet）、`model.py`（NNPolicy）、`infer.ts`、`ppo.py`、`export-rl-rollout.ts`（mask 消费端） |
-| ② | SCALAR_LAYOUT 删 idx 7–11（guardStock/frenzyStock/rewindStock/frenzyActive/frenzyShotsLeft），SCALAR_DIM 24→19；**连锁重编号**：`SCALAR_X_INDICES` [20,23]→[15,18]，全部下游（数据增强、npy manifest、检查断言）锁步改 | `schema.py`、`obs-encoder.ts`（锁步，schema MAJOR 强制）、`dataset.py` |
+| ② | SCALAR_LAYOUT 删 idx 7–11（guardStock/frenzyStock/rewindStock/frenzyActive/frenzyShotsLeft），SCALAR_DIM 24→19；**连锁重编号**：`SCALAR_X_INDICES` [20,23]→[15,18]，全部下游（数据增强、npy manifest、检查断言）锁步改 | `common/schema.py`、`obs-encoder.ts`（锁步，schema MAJOR 强制）、`dataset.py` |
 | ③ | wins-only 语料口径：`export-godai-labels.ts` 增加 wins 过滤 + near-miss 濒危帧分层选项（墙损/基地受击帧超采样开关）；**人像导出过滤含道具动作帧**（`a_item≠none` 帧剔除：实测 104 局仅 36 事件 ≈ 0.07% 决策帧，剔除零损耗，且与新政策一致） | 语料导出管线 |
-| ④ | （M1 判出则加）obs 表达修补：新增/修正通道或标量（如威胁时序） | `schema.py` + `obs-encoder.ts` |
+| ④ | （M1 判出则加）obs 表达修补：新增/修正通道或标量（如威胁时序） | `common/schema.py` + `obs-encoder.ts` |
 | ⑤ | SuperItems 代码删除：**归属 M4 验收后的 cleanup 子任务**（DECISIONS §167 修订时标注）；本纪元仅参数归零 | `src/ai/god/SuperItems.ts` |
 | ⑥ | **reward/return 轨迹导出（P0③，M3 value 头 MC 预置的必要前置，当前导出器均无此字段）**：TS 侧按 RL reward 定义（v7 loss-band dense + 终局项）逐决策帧结算 reward，γ 折扣反向累积成 return 落盘（γ 数值与 PPO 完全一致）；`dataset.py` 增加消费端；人像导出线同样补 return 字段 | `export-godai-labels.ts`、`export-observations.ts`、`dataset.py`、`ppo.py` |
 
@@ -120,7 +120,7 @@ superItemGuardThreat: 1 → 0
 **schema 消费方清单（2026-08-25 grep 生成，M2 执行时重新生成逐项对勾）**：
 - TS 运行时：`src/nn/infer.ts`、`src/nn/obs-encoder.ts`、`src/nn/policy-input.ts`
 - 导出/评估（bun）：`export-dagger-labels.ts`、`export-godai-labels.ts`、`collect-godai.ts`、`export-rl-rollout.ts`、`export-observations.ts`、`export-eval-game.ts`、`nn-trace.ts`、`student-accuracy.ts`、`m1-eval.ts`
-- 训练（python）：`schema.py`、`student_model.py`、`model.py`、`rl_model.py`、`dataset.py`、`ppo.py`、`eval_bridge.py`、`weights_io.py`、`train_bc.py`、`smoke_test.py`、`test_run_rl.py`、`validate_export.py`、`npyio.py`
+- 训练（python）：`common/schema.py`、`student_model.py`、`model.py`、`rl_model.py`、`dataset.py`、`ppo.py`、`eval_bridge.py`、`weights_io.py`、`train_bc.py`、`tools/smoke_test.py`、`test_run_rl.py`、`validate_export.py`、`npyio.py`
 
 ---
 

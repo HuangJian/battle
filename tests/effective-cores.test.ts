@@ -1,7 +1,7 @@
 /**
  * effective-cores.test.ts — 「本机到底有多少核」的 TS 单一口径（`tools/lib/cores.ts`）。
  *
- * 与 `nn-training/tests/test_platform_utils_cores.py` **同题**：python 侧是权威，TS 侧是镜像，
+ * 与 `nn-training/tests/common/test_platform_utils_cores.py` **同题**：python 侧是权威，TS 侧是镜像，
  * 两边都按「容器 cgroup 配额 / 亲和掩码 取小 > 宿主机裸数兜底」。
  * 事故本体（2026-09-25 云机 rollout 卡死）：容器里 `os.cpus().length` 报宿主机 224，
  * cgroup 只给 96 ⇒ 按 224 派 worker = 2.3× 超订 ⇒ 成批踩 5s 硬顶。

@@ -44,6 +44,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from common.log_bundle import LogBundle
 from common.protocol import (
     ROLE_OFFLINE,
     ROLE_ONLINE,
@@ -56,7 +57,7 @@ from common.protocol import (
     validate_result,
 )
 
-# `RetryableError` 是**显式转发**（`as` 自别名）：`tests/test_soft_hold_prefetch.py` 从本模块
+# `RetryableError` 是**显式转发**（`as` 自别名）：`tests/remote/test_soft_hold_prefetch.py` 从本模块
 # 命名空间取它（`W.RetryableError`）来构造瞬时失败。本模块自己已不用它（payload/code 的
 # sha 对账随物料落地搬到 `remote/download.py`）——但名字是契约：它曾是 worker 的公共面。
 from common.protocol import (
@@ -65,7 +66,6 @@ from common.protocol import (
 from common.protocol import (
     d14_corpus_match as protocol_d14_corpus_match,
 )
-from log_bundle import LogBundle
 
 # BC 作业（S4 第六步之二 → `remote/bc_job.py`）：**显式转发**（e2e / tests 直接 import
 # 这些名字，见该模块头部；本组无 monkeypatch 接缝）。
@@ -184,7 +184,6 @@ from remote.http import (
 from remote.http import (
     _warn_non_200 as _warn_non_200,
 )
-from remote.iter_rollout import resolve_bun, run_iter_rollout
 
 # 作业工作区 / 产物落盘 / TAR / git 物化（S4 第六步 → `remote/job_fs.py`）：**显式转发**。
 # 本组无 monkeypatch 接缝（全仓都是直接调用）⇒ 转发即够。
@@ -216,7 +215,7 @@ from remote.job_fs import (
 # `request_priority` / `claim_job` / `_priority_rank`、`start_cancel_watcher` → `job_status`、
 # `report_job_failure` → `worker_tag`）与本簇直调 `_request` / `_wire_add` 的调用点解析在
 # `remote.job_lifecycle` ⇒ 那类测试必须 patch **该模块**（见该模块头部与
-# `tests/test_job_lifecycle_split.py`）。
+# `tests/remote/test_job_lifecycle_split.py`）。
 from remote.job_lifecycle import (
     _failure_detail as _failure_detail,
 )
@@ -275,7 +274,7 @@ from remote.job_lifecycle import (
 # 本簇其余名字（`job_ready` / `abandon_job` / `release_job` / `report_job_failure` /
 # `start_cancel_watcher` / `peek_jobs` / `download_payload` / `PREFETCH_ROUND_SEC`）的解析
 # 已随块搬到 `remote.job_round` ⇒ 拦截它们要 patch **该模块**（见其头部与
-# `tests/test_job_round_split.py`）。
+# `tests/remote/test_job_round_split.py`）。
 from remote.job_round import run_one_round
 from remote.prefetch import (
     PREFETCH_DEPTH_DEFAULT,
@@ -383,6 +382,7 @@ from remote.worker_proc import (
 from remote.worker_proc import (
     supervise_worker as supervise_worker,
 )
+from worker.iter_rollout import resolve_bun, run_iter_rollout
 
 # ------------------------------------------------------------------ PPO 执行
 
@@ -406,9 +406,9 @@ def run_job(
     ts_code_cache_dir: Path | None = None,
     lease_token: str = "",
     # 日志节食（2026-09-24）：本 job 的「入口 + 启动 + 装载」读数攒进这个 bundle。
-    # 调用方（`rl/` 的常驻轮 loop）先往里放它自己那几行（`it<N>: N 局 wver=…`），本函数
+    # 调用方（`trainer/` 的常驻轮 loop）先往里放它自己那几行（`it<N>: N 局 wver=…`），本函数
     # 再把入口/设备读数放进去，训练核把装载读数补上，装载完成时打**一行**
-    # （`nn-training/log_bundle.py`）；不传就自建（只在行数上有差别，信息量不变）。
+    # （`nn-training/common/log_bundle.py`）；不传就自建（只在行数上有差别，信息量不变）。
     prep: Any = None,
     # 注：半离线（kind=run）那条腿的 `artifacts_dir` / `run_max_iters` / `run_budget_sec`
     # 三个入参随 2026-09-25 的退休一起没了（`plan/online-offline-role-routing.plan.md` §7）。
@@ -643,7 +643,7 @@ def run_job(
     # init 权重与指纹原样回传为 job 结果（hub-start --smoke-only 的 Kaggle 交互预演，
     # 用户拍板：真课程 + 作废轮，不建虚拟课程）。三重校验按构造必过
     # （init_weights_fp/data_fp/commit_echo 均为 manifest 回显）；消费方
-    # （rl/loop_steps._remote_ppo）见 result["smoke"] 作废本轮（it 不前进）。
+    # （trainer/loop_steps._remote_ppo）见 result["smoke"] 作废本轮（it 不前进）。
     if echo:
         init_w = job_dir / "init_weights.json"
         if not init_w.exists():
@@ -745,7 +745,7 @@ def _alive_log(log: Any, *, halted: bool, done: int, polls: int, idle_since: flo
     """空闲期打一行存活日志：周期内请求数（验证轮询周期真在生效）+ 连续空闲秒数（判孤儿 job）。
 
     「到点没有」与计数器复位**留给调用方**：那两个变量是宿主的账，本模块不留模块级状态；
-    这里只负责把那一行写对（含 `cloud halted,` 前缀——`tests/test_remote_hotswap.py` 在断言它）。
+    这里只负责把那一行写对（含 `cloud halted,` 前缀——`tests/remote/test_remote_hotswap.py` 在断言它）。
     """
     where = "cloud halted, polling hub" if halted else "polling hub"
     log(f"{where} (no job yet, {done} done, {polls} polls, idle {int(time.time() - idle_since)}s)")

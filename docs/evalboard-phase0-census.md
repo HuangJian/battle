@@ -16,9 +16,9 @@
 
 | 层 | 驱动器 | 语料 | 逐局行产出点 |
 |---|---|---|---|
-| A | `rl/eval_dispatch.py::EvalDispatcher`（`eval_a_once.py` 手动同口径） | 课程 `eval_stages` + `eval_games_per_stage` + `a_eval_seed_list`（双轨锚点 50 + 轮转 50 / `EVAL_SEEDS[:n]`） | `record()`（`eval_dispatch.py:326`）→ `tmp/<course>/eval_log.jsonl` |
-| B/C | `rl/batch_eval.py::BatchEvalRunner` | `dashboard/src/evalboard/ladder.json` rungs + 段 `seg=k%16`（`seed0OfSegment`），100 局/段 | unit 内 row 字典（`batch_eval.py:663`）→ 同 eval_log |
-| m1 | `tools/sim/m1-eval.ts` → `rl/eval_ingest.py::write_m1_game_rows` | godai scorecard | `eval_ingest.m1_game_row`（`:41`） |
+| A | `trainer/eval_dispatch.py::EvalDispatcher`（`eval_a_once.py` 手动同口径） | 课程 `eval_stages` + `eval_games_per_stage` + `a_eval_seed_list`（双轨锚点 50 + 轮转 50 / `EVAL_SEEDS[:n]`） | `record()`（`eval_dispatch.py:326`）→ `tmp/<course>/eval_log.jsonl` |
+| B/C | `trainer/batch_eval.py::BatchEvalRunner` | `dashboard/src/evalboard/ladder.json` rungs + 段 `seg=k%16`（`seed0OfSegment`），100 局/段 | unit 内 row 字典（`batch_eval.py:663`）→ 同 eval_log |
+| m1 | `tools/sim/m1-eval.ts` → `biz/eval_ingest.py::write_m1_game_rows` | godai scorecard | `eval_ingest.m1_game_row`（`:41`） |
 
 入库：`dashboard/src/evalboard/ingest.ts::ingestEvalRow` 把 raw 行映射成
 `store.ts::EvalGameRow`（schema 1）→ `appendRow`。确定性口径由
@@ -27,7 +27,7 @@
 
 关键事实：**报告层已经有这七列** —— `tools/sim/export-eval-game.ts` 顶层自
 2026-09-19 起携带（阶段 0 census），`_eval_report.json` 与节点 pack manifest 同源，
-`rl/eval_local.py::run_local_eval_game` 直接返回该报告 dict ⇒ 节点局与本机局都已具备，
+`biz/eval_local.py::run_local_eval_game` 直接返回该报告 dict ⇒ 节点局与本机局都已具备，
 缺的只是「row 字典 → ingest → schema」这条搬运链。
 
 ## 2. 目标
@@ -74,7 +74,7 @@
   `PHASE0_FIELDS` 豁免清单。证据：真实 `_eval_report.json` 七列齐全可抽；
   `nn-python-gate` 1263 绿 · dashboard typecheck + 513 绿 · 根 `bun run check` 1875 绿。
   口径记录：DECISIONS §2026-09-19-evalboard-phase0-census · 全文 → docs/nn/console.md §11。
-- P1（原计划）：`rl/eval_local.py::eval_census_fields`（单源，仿 `eval_loot_fields`）+ 4 个写点接线；
+- P1（原计划）：`biz/eval_local.py::eval_census_fields`（单源，仿 `eval_loot_fields`）+ 4 个写点接线；
   `ingest.ts` 映射；`store.ts` schema/字段集。验证：`nn-training` pytest（新
   `test_eval_census_fields.py`）+ `dashboard` 套件（新 ingest 映射用例）+ 根 `bun run check`。
 - **P2 已落地（2026-09-19，用户拍板「中方案」：新建语料注册表 + 新增判决批类型）**：
@@ -89,7 +89,7 @@
 |---|---|---|
 | 语料声明 | `dashboard/src/evalboard/corpora.json` + `corpora.ts`（读/校验/身份派生） | `{id, level, seed0, games_per_stage, policy?}`；坏行**响亮失败**（静默跳过 = 判决跑在空语料上而读数看似正常） |
 | 入队 | `verdict-cli.ts` → `requests.jsonl`（`kind='verdict'`，`corpus` + `ckpts[]`） | console/CLI **只写请求**，台账由 runner 单写（§5.3 写者唯一性）；同键（语料 + ckpt **标签序**，顺序敏感）不重复入队 |
-| 物化 + 执行 | `rl/batch_eval.py::{consume_requests, plan_verdict_units, units_for_batch, maybe_dispatch_batch}` · `dashboard/src/evalboard/{batches,requests}.ts` · `kick-once.py` | 批 = `kind='verdict'`，`course/rung_from/ckpt` 空串（**不**用假 course 骗旧读方的键，键空间靠 `kind` 分离）；unit = 一个 (ckpt × 关卡)，**权重在 unit 上**（批次级无权重）；unit 自带 `stageJson`（紧凑 separators，与 `eval-course-ckpt.ts` 同形，否则同关在 agent 侧裂成两个缓存键） |
+| 物化 + 执行 | `trainer/batch_eval.py::{consume_requests, plan_verdict_units, units_for_batch, maybe_dispatch_batch}` · `dashboard/src/evalboard/{batches,requests}.ts` · `kick-once.py` | 批 = `kind='verdict'`，`course/rung_from/ckpt` 空串（**不**用假 course 骗旧读方的键，键空间靠 `kind` 分离）；unit = 一个 (ckpt × 关卡)，**权重在 unit 上**（批次级无权重）；unit 自带 `stageJson`（紧凑 separators，与 `eval-course-ckpt.ts` 同形，否则同关在 agent 侧裂成两个缓存键） |
 
 语料登记：`v-ladder-c03-p400600` = `ladder-c03` × `seed0=400600` × 200 局/关
 = 4 关 × 200 = 800 局（T5 判决池外段；与训练池 860001-860200 及已用池外段
@@ -109,7 +109,7 @@
 unit 展开 → 2 局派给 `self` → 回包 → `tmp/smoke-ladder-c01/eval_log.jsonl` 行带齐
 Phase-0 七列（`exposureByKind [1439,0,0,0]` 等）+ `source=B` + 真 `batch_id`。
 
-**门禁**：nn-python-gate 1277 绿（新增 `tests/test_verdict_corpus.py` 10 例）·
+**门禁**：nn-python-gate 1277 绿（新增 `tests/trainer/test_verdict_corpus.py` 10 例）·
 dashboard typecheck + 530 绿（新增 `tests/evalboard-corpora.test.ts` 17 例）·
 根 `bun run check` 1875 绿。
 

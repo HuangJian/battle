@@ -32,7 +32,7 @@
 | 本簇**直调** `_request` / `_wire_add` / `_BULK` / `_bulk_pace`（`post_result` / `peek_jobs` / `heartbeat` …） | **本模块** | **`job_lifecycle`** |
 
 第三行是本刀最险的一处：`worker.py` 在本刀之后**已无 `_request` 调用点**——`patch
-remote.worker._request` 从此不再影响任何东西（`tests/test_job_lifecycle_split.py` 把这条
+remote.worker._request` 从此不再影响任何东西（`tests/remote/test_job_lifecycle_split.py` 把这条
 钉成警报）。
 """
 
@@ -582,7 +582,7 @@ def _failure_detail(e: BaseException, limit: int = 4000) -> str:
     """异常现场（traceback 尾段）——回报给人看，不参与任何判定。
 
     唯一实现见 `common.text.exc_tail`（截尾不截头、绝不抛的理由都在那里）；本名保留
-    为调用点别名。`rl/stream.py::_exc_tail` 是本函数的同源孪生，两边现已同源。
+    为调用点别名。`trainer/stream.py::_exc_tail` 是本函数的同源孪生，两边现已同源。
     """
     return exc_tail(e, limit)
 

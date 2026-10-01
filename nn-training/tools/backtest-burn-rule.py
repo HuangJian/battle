@@ -4,7 +4,7 @@
 用法（仓库根）：
     bash tools/githook/nn-py-safe.sh nn-training/tools/backtest-burn-rule.py
 
-**为什么落盘成工具**（2026-09-30）：`rl/kickstart_burn.py` 的头注与
+**为什么落盘成工具**（2026-09-30）：`worker/kickstart_burn.py` 的头注与
 `DECISIONS.md §2026-09-30-goalnn-kickstart-burn-paired` 都引用了这里的数字
 （旧规则共享漂移下 FP 49.3% → 新规则 0.47%）。这些数字原先只活在 `tmp/` 一次性脚本里
 ——tmp 一清理，引用就变成无据可查的说法（§58/§60/§64 同款教训：进文档的结论必须可复算）。
@@ -22,8 +22,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent.parent
 sys.path.insert(0, str(ROOT / "nn-training"))
 
-from rl.gate_inputs import read_trend_rows
-from rl.kickstart_burn import (
+from worker.gate_inputs import read_trend_rows
+from worker.kickstart_burn import (
     BURN_MARGIN_PP,
     BURN_POINTS,
     burn_verdict,
@@ -257,7 +257,7 @@ print("=" * 78)
 print("§6 交叉对账")
 print("=" * 78)
 try:
-    from rl.kickstart_burn import burn_verdict as prod_verdict
+    from worker.kickstart_burn import burn_verdict as prod_verdict
 
     ok = True
     for a in ("a1", "a2"):

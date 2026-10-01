@@ -4,7 +4,7 @@
  * RL 课程训练的环境阶梯：S1 开火命中 → S2 闪避走位 → S3 砖墙+道具 → S4a 有基地
  * maze → S4b 真实关卡。本模块是 arena 布局的**唯一权威源**（curriculum.ts re-export
  * 兼容旧消费方），刻意放在 `src/nn/` 下：分布式 rollout 的 codeHash 只覆盖
- * `src/nn/**` + 两个 rollout 导出器（dist_common.py / sampler-agent.ts 双语契约），
+ * `src/nn/**` + 两个 rollout 导出器（common/distribution.py / sampler-agent.ts 双语契约），
  * arena 定义进这个集合才能保证 dist 节点代码同步（plan 卡 A1 步骤 4）。
  *
  * 硬纪律（plan §0.2 / §2.3）：
@@ -13,7 +13,7 @@
  *   * 每级 3 张布局变异（写死 3，不许中途加，§2.3a）——arena 无地图级随机性，
  *     只有 agent 级随机性，背图过门靠这 3 张变异 + P1 探针免疫。
  *   * arena 编号命名空间 1000+n，与真实 stage 下标 0..34 不相交（卡 A1）；
- *     该整数原样流经 course.py → run_rl.py → queue.py → sampler-agent →
+ *     该整数原样流经 course.py → trainer/run_rl.py → queue.py → sampler-agent →
  *     导出器解析层，六环节只在导出器解析层落地。
  */
 

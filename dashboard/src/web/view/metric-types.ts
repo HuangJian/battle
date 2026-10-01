@@ -194,7 +194,7 @@ export interface EvalGamesView extends EvalGamesData {
   available: boolean
 }
 
-/** POST evalReplays 产物清单（python rl/eval_replays_once.py 落盘的 manifest JSON）。 */
+/** POST evalReplays 产物清单（python biz/eval_replays_once.py 落盘的 manifest JSON）。 */
 export interface EvalReplayManifest {
   ok: boolean
   course: string

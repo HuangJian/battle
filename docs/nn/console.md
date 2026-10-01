@@ -7,6 +7,31 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §21 门禁停机开关去课程化：顶部开关写平台文件 + 「意图 / 实际生效」两栏（2026-10-01）
+
+训练侧契约与后果（优先级 / `until` 读时求值 / 离线腿短路）→ `docs/nn/training-stack.md` §27。
+控制台这一半：
+
+* **新增 `stack/gate-halt.ts`**：`readGateHaltIntent` / `writeGateHaltIntent`（**原子写**：`tmp` + `rename`——
+  旧实现是 `writeFileSync` 直写，训练侧可能读到半截）/ `readGateHaltApplied` / `buildGateHaltView`。
+* **删掉课程级三件套**：`specs.ts::gateHaltModePath` / `readGateHaltMode` / `writeGateHaltMode` 与
+  `trainingLoopSpec` 的每课 `--gate-halt-mode` 注入（留半个写面 = 双事实源）。路径住
+  `core/paths.ts::gateHaltPath()/gateHaltAppliedPath()`（`BCITY_GATE_HALT[_APPLIED]`，与 loop-control 同形、惰性取值）。
+* `route.ts`：`setGateHaltMode` 写平台文件（`untilHours` 三态：**缺省 8h** / 显式 `null` = 不限时 / 正数），
+  **忽略 `course`** 并记一行「已废弃」；`getGateHaltMode` 降为只读探针（仍在 `READONLY_ACTIONS` /
+  `VIEW_ONLY_ACTIONS` 里）。
+* `/api/state.gateHalt`：`{intent, applied, error?}` 两栏（组装点 `api/state-view.ts`；类型
+  `web/view/console-types.ts::GateHaltStateView`——字段名沿用 python 回执的 snake_case，
+  同一份 wire 契约不做第二套命名）。
+* `app.tsx`：**删掉** `[viewCourse]` 依赖的拉取 effect 与 `localStorage['tc.gateHaltMode']`
+  （评审 P0-5：拉取失败/过期后旧值会让界面显示 notify 而训练按 halt 跑——**两栏显示**正是为了把
+  这种分歧摆出来）；改读 `stateView.gateHalt`，切 notify 才出时长档（2/4/8h/不限，缺省 8h）。
+* **展示件住 `web/view/gate-halt.ts`**（时长档 + 两栏文案）：web 侧不得 import `stack/gate-halt.ts`
+  （那份 import `fs`，链进客户端 bundle 会在构建期炸）；`tests/architecture-layering.test.ts` 钉分层。
+* 测试：`tests/gate-halt-platform.test.ts`（9 例：写平台文件 / `until` 三态 / 400 不写盘 /
+  course 被忽略 / 原子写无残留 / 两栏 / 坏文件各自降级）· `tests/push-config.test.ts`（防回流：
+  三件套与 argv 不得复活）· `tests/training-shared-trainer.test.ts`（`gate_halt_mode` 进 legacy 清理名单）。
+
 ## §20 指标表「击杀/残血/承伤·杀/道具/耗时」丢了一大半：抄录只发生在「谁在屏幕上」（2026-09-28）
 
 用户报障：「两课并行，`h5a-earlydmg` 能看到所有 it 的数值和趋势图，`h5b-clean` 却丢了一大半」，
@@ -70,7 +95,7 @@ h5a `it1/it26–29`、h5b `it1/it23–26`，`remote-jobs` 也只留最近 3–4 
 ## §19 新增「课程」页（`/courses`）：全部课程一张表 + 封存入口（2026-09-27）
 
 用户报障起头：「课程封存机制开发完了，但 dashboard 上看不到操作入口，该怎么操作？」——查下来
-落点确实只到 **API/CLI**（`POST /api/archiveCourse` 默认 `--dry-run`、`python -m rl.course_archive`），
+落点确实只到 **API/CLI**（`POST /api/archiveCourse` 默认 `--dry-run`、`python -m biz.course_archive`），
 plan §4 S3 只把**读面**进了控制台（`stateView.archived` → 总览底部折叠分组），操作面没有按钮；
 而总览那张课程矩阵**只列在训的几门**，于是「哪些课存在 / 该封存谁 / 下一步做什么」三件事在界面上
 都没有读面（`tmp/` 实测 28 GB 里的 27.3 GB 是 17 门课程目录）。
@@ -166,7 +191,7 @@ memo 只活在**进程内**：改完代码要**重启控制台进程**才生效�
 热切写 ⇒ 停在 `tmp/` 下的历史课**永久**留着一份意图。而 `restoreCourseModes`（R3-2 的起 hub 回灌，
 挂在 `startComponent('hubServer')` 的两个分支上、**同步 await**）逐条把全部意图推给 hub。
 
-hub 的认课判据是**开课标记**（`remote/hub/queue_discover.py::_course_dir_live` 与 `_serves_course`
+hub 的认课判据是**开课标记**（`hub/queue_discover.py::_course_dir_live` 与 `_serves_course`
 都要求 `training-enabled.txt`）：没标记 ⇒ 按设计**必回** 400。于是每一门停掉的课都白烧整段有界重试
 （`pushModeWithRetry`：首试 + 2 次重试 × 2s ≈ **4s/门**，**串行**）——11 门 ≈ **44s** 纯 sleep，
 外加 33 次必然被拒的 POST 和一串看起来像坏了的「失败 x20-…」。
@@ -255,14 +280,14 @@ nodes-decouple-from-course.plan.md）：
 |---|---|---|
 | F1 | 两个「离线」：hub 派发模式（`setCourseMode`：只写意图 + POST hub）与训练模式（`trainModeKnobs` → `courses.<课>.rollout_src=run` + `run_iters=-1`） | `server/actions/course-mode.ts`、`stack/specs.ts::trainModeKnobs` |
 | F2 | 两者**各只有一条入口且不是同一条**：训练模式**只有开课**能写（运行中往 `start` 动作发 `trainMode` 被 400 拒），hub 模式有独立开关 ⇒ 只翻后者必然半状态 | `course-lifecycle.ts`、`api/route.ts` |
-| F3 | job 的 kind 只有一个判定点：有 `plan_bytes` ⇒ `run`；有 `rollout_spec` ⇒ `iter`；都无 ⇒ `ppo` | `rl/loop_steps.py::publish_job` 调用点 |
-| F4 | bun 只在**云机自己跑 rollout** 时需要（`kind in ("iter","run")` ⇒ `run_iter_rollout` ⇒ `resolve_bun`） | `remote/worker.py`、`remote/iter_rollout.py::resolve_bun` |
+| F3 | job 的 kind 只有一个判定点：有 `plan_bytes` ⇒ `run`；有 `rollout_spec` ⇒ `iter`；都无 ⇒ `ppo` | `trainer/loop_steps.py::publish_job` 调用点 |
+| F4 | bun 只在**云机自己跑 rollout** 时需要（`kind in ("iter","run")` ⇒ `run_iter_rollout` ⇒ `resolve_bun`） | `remote/worker.py`、`worker/iter_rollout.py::resolve_bun` |
 
 ### 决定（plan/train-mode-hot-switch.plan.md L1）
 
 **那颗开关 = 唯一的模式开关**：`setCourseMode` ① 先落本机配置（同步写盘，python 每轮读的那份
 rl-config）② 再推 hub 镜像。机制上不需要重开课：`_rollout_source` / `_run_segment_iters` **每轮**
-各读一次 `dist_common.load_dist_config()`（`rl/loop_round_steps.py`），且控制台从不把
+各读一次 `common.distribution.load_dist_config()`（`trainer/loop_round_steps.py`），且控制台从不把
 `--rollout-src` / `--run-iters` 传进 trainer argv（唯一传 `--run-iters` 的是 bundle 导出，只读快照）。
 
 **语义边界（已写进回执文案）**：
@@ -317,7 +342,7 @@ hub 与意图都回到在线，而配置里还是 `run` ⇒ 下一段照样派 `
 * `tests/course-mode.test.ts`：切离线落两键 / 切在线两键都不在 / **node 往返回到 node** / `local` 不留痕 /
 hub 不可达时配置照样落 / 文案含「本机不跑这门课」「不需要 bun」「轮边界生效」；
 * 逆测试：`pushCourseMode` 与 `restoreCourseModes` **一个字都不写** rl-config（防 F9 复发）；
-* 跨语言钉子：`nn-training/tests/test_run_segment.py` 钉「控制台写的两键 ↔ `_rollout_source`/`_run_segment_iters`」；
+* 跨语言钉子：`nn-training/tests/worker/test_run_segment.py` 钉「控制台写的两键 ↔ `_rollout_source`/`_run_segment_iters`」；
 * 既有源码断言跟着写面搬家（`tests/train-mode-offline.test.ts`、`tests/rollout-src-launch-option.test.ts`）。
 
 ---
@@ -344,7 +369,7 @@ hub 不可达时配置照样落 / 文案含「本机不跑这门课」「不需�
 
 ### 修法（四处，两层各治一半）
 
-1. **hub 侧**（`remote/hub_server.py`）：`POST /admin/courses` 在「课不在表里」时**按需真扫一次**
+1. **hub 侧**（`hub/server.py`）：`POST /admin/courses` 在「课不在表里」时**按需真扫一次**
    （`discover(force=True)` 跳 2s 间隔闸）再试；模式非法**不**扫盘（直接 400）。全文 →
    `docs/nn/remote-transport.md §36`。
 2. **控制台回灌**（`server/actions/course-mode.ts`）：`restoreCourseModes` 每课**有界重试**
@@ -423,7 +448,7 @@ hub 不可达时配置照样落 / 文案含「本机不跑这门课」「不需�
 | 指标表 eval 列 / 配对基准 / 衍生列（`avgTicks` 等） | `server/iters.ts::readEvalSummaries` | `event === 'eval_summary'` |
 | eval 逐局弹窗 | `iters.ts::readLatestEvalGames` | 先按 summary 找最大 iter |
 | 开课回执「起点-基线对照」 | `stack/kickstart-receipt.ts` | 同 |
-| 门判据趋势（python 侧） | `rl/gate_check.py::read_trend_rows` | 同 |
+| 门判据趋势（python 侧） | `biz/gate_check.py::read_trend_rows` | 同 |
 
 ⇒ 修在写方（回传/导入合并时把 summary 一并并进去，单调规则），**读方一字未动**。
 
@@ -436,7 +461,7 @@ hub 不可达时配置照样落 / 文案含「本机不跑这门课」「不需�
 
 产物行的 `agg` 里**一直有**这两个键（`remote/worker.py` 的 `result.agg`），只是
 `remote/artifacts.LEDGER_FIELDS` 没收 ⇒ 回传/导入腿的 `iteration` 行永远看不到 demo 与
-缰绳遥测，而本机腿（`rl/events.write_iteration`）逐轮都写。**不是没跑，是记丢了。**
+缰绳遥测，而本机腿（`worker/events.write_iteration`）逐轮都写。**不是没跑，是记丢了。**
 修法一行两键；口径不变：`_dig` 给 None 就不写（旧包无此键 → 留空），真 0 照写。
 
 ### ② 「耗时/击杀/残血/道具」四列的逐局画像取错了源（**四列永远空**的真因）
@@ -490,7 +515,7 @@ find tmp -name per-game.json → 0 个
   （写 0 会被读成「真的零击杀」）。
 * `remote/artifacts.metrics_row` 增补（additive，~17 float/轮）：`report.dimMeans` /
   `report.scoreStats`（kills/accuracy/loot 与 score 列的来源）+ `report.perGame`
-  （`rl/reports.compact_per_game`，~200B/局）。**不落课程账本**（否则每轮 +65KB），
+  （`worker/reports.compact_per_game`，~200B/局）。**不落课程账本**（否则每轮 +65KB），
   由落地方写成 `it<N>/per-game.json`。
 * 落地方两处：`remote/deliver_zip.write_per_game_files`（导入）+ `hub_server::_land_round_metrics`
   （实时回传）。**幂等**：账户行同 `it` 已存在就不写；`duplicate` 投递根本走不到（只在接新时写）
@@ -501,10 +526,10 @@ find tmp -name per-game.json → 0 个
 
 ### 验证
 
-* python：`tests/test_multi_course_hub.py::test_offline_backfeed_moves_the_console_table`
+* python：`tests/hub/test_multi_course_hub.py::test_offline_backfeed_moves_the_console_table`
   （回传一轮 ⇒ `it3/per-game.json` 逐字节等于 `row.perGame`、账本恰一行 `iteration`、
   字段搬运 `winRate/samples/expectedGames/ticks/rollout_sec/ppo_sec/kl/dim_means/score_mean`、
-  重复投递仍是 `duplicate` 且不写第二行）；`tests/test_deliver_zip.py` 同规（来源标记键从
+  重复投递仍是 `duplicate` 且不写第二行）；`tests/remote/test_deliver_zip.py` 同规（来源标记键从
   `import_run_id` 改为共享表的 `run_id`+`source`）。
 * dashboard：`tests/server-iters-round-actuals.test.ts` 5 例（只有 per-game.json 也能算四列 /
   (stage,seed) 取样本多者 / 缺席回落 manifest / 坏 JSON 与非法行跳过 / `readIterMetrics` 行带
@@ -536,7 +561,7 @@ find tmp -name per-game.json → 0 个
 
 **lesson**：
 - **镜像常量必须对着 python 源码核对**（单测在 python 源码树里**搜定义**取字面量——不写死
-  文件路径：S4 第十九刀实测，写死 `loop_core.py` 的那版在常量搬到 `rl/loop_lifecycle.py` 后就静默
+  文件路径：S4 第十九刀实测，写死 `loop_core.py` 的那版在常量搬到 `trainer/loop_lifecycle.py` 后就静默
   空转了）：TS 侧抄一份阈值是不可避免的（控制台不能 import python），但抄完不设闸 = 两处判据
   各自安好、对不上号（与 §2/A 的 course_fp/corpus_fp 同一个病的预防）。
 - **同一份账本两个读法要当面对账**：控制台的 `readEvalSummaries` 全量 parse（视图构建用），
@@ -681,7 +706,7 @@ R3-6 曾把它的收敛列为「节点轴」(否决④) 的延后项。但它的
 ### 未做（明确记录）
 
 账本键的**真正收敛**：`trainingLoop` / `localWorker` 仍是 per-course 键（控制台仍按课起
-`run_rl.py --course`，尽管训练侧已有 `--serve` 单进程服务所有课程），`workerServe` 仍住 per-course 表
+`trainer/run_rl.py --course`，尽管训练侧已有 `--serve` 单进程服务所有课程），`workerServe` 仍住 per-course 表
 （轴却是节点）。那是启动面/监督面的改动（含 `TrainLaunchModal` 精简与旧条目换代接管）；本轮的分族
 正是它的前置——换成共享槽后，进程面全在服务面、课程面只剩数据。
 
@@ -717,14 +742,14 @@ R3-6 曾把它的收敛列为「节点轴」(否决④) 的延后项。但它的
 
 ### 顺手改的展示面
 
-`run_rl_cluster.py` 的人读表加了 `kind` 列；BC 行的 facts 行不再摆 `iterations=/last_verdict=`
+`trainer/run_rl_cluster.py` 的人读表加了 `kind` 列；BC 行的 facts 行不再摆 `iterations=/last_verdict=`
 那一排 RL 的零，改成「bc 课程（轮指针 itN）；指标看账本 bc_epoch / bc_eval 事件」。
 
 ### 回归
 
-`tests/test_loop_plan_bc_rows.py`(9，读面：种类 / 指针跟 `bc_round_completed` / 在飞来自
+`tests/worker/test_loop_plan_bc_rows.py`(9，读面：种类 / 指针跟 `bc_round_completed` / 在飞来自
 `job_pending` / 作废也是终局 / manifest 缺失不丢在飞 / 未知课程默认 `rl` / 两行共存 / 人读表带列)
-· `dashboard/tests/web-app-loopqueue.test.ts`(+3：BC 行与 RL 行并列渲染且只有一行带 BC 徽标 /
+· `dashboard/tests/web-app-loopqueue.test.ts`(+3【今 → `dashboard/tests/web-app-coursematrix.test.ts`——P2a 面板断言汇合处】：BC 行与 RL 行并列渲染且只有一行带 BC 徽标 /
 两边悬停各说各的 / 卡片不再被 `isBc` 门控——用正则断言那个包裹形状不再存在)
 · `dashboard/tests/server-api-loop-queue.test.ts`(+1：`kind` 的保守默认)。
 
@@ -746,12 +771,12 @@ BC 行的**暂停/恢复**能点（控制文件按课程名，与种类无关）
 ## §5 R2c-3 余下：调度器进控制台（单例卡片 + 每课队列视图 + 在等什么）（2026-09-19）
 
 R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`trainingLoop` 收敛为一个进程之后，
-「某门课这一轮为什么还没走完」要翻 N 份日志 + 猜（`run_rl_cluster.py` 原本只给终端看）。
+「某门课这一轮为什么还没走完」要翻 N 份日志 + 猜（`trainer/run_rl_cluster.py` 原本只给终端看）。
 本节把它接进控制台——只读侧，不动训练行为。
 
 ### ① 数据源：走 python 只读入口，**不在 TS 重算判据**
 
-`run_rl_cluster.py --json` 的输出就是控制台卡片的契约面（训练侧只读：不训练、不发布、不等待）。
+`trainer/run_rl_cluster.py --json` 的输出就是控制台卡片的契约面（训练侧只读：不训练、不发布、不等待）。
 判据（指针 → `RoundFacts` → `pending_tasks`）与 CLI 表逐字段同源；若在 TS 里照账本重写一遍，
 就是第二份真相（R2b 否决 `loop-state.json` 的同一条理由）——两边会以不同速度演化。
 
@@ -760,7 +785,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
   journal/shard 目录，亚秒级）。服务器启动时暖一次缓存，避免 SSR 首屏等子进程。
 - `LoopQueueRunner` 是**可注入接缝**（与 `deliver_zip` 导入同惯例）：控制台这一半（argv 形状 /
   结果翻译 / TTL / 单飞 / 与在训事实合并）在 dashboard 用例里全测到，python 那一半由
-  `nn-training/tests/test_loop_plan_waiting.py` 钉死——两边各测自己那一半，中间不再叠一层端到端。
+  `nn-training/tests/trainer/test_loop_plan_waiting.py` 钉死——两边各测自己那一半，中间不再叠一层端到端。
 - 读失败（解释器缺失 / 超时 / 输出不可解析 / 形状不符）**不抛**：视图带 `error` 上屏，UI 显因 + 空态。
   观测面坏掉不该把整页 `/api/state` 带崩（与 hub 总览 / 隧道 A/B 同口径）。
 
@@ -778,7 +803,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
 优先级 inflight > collect > idle > ready：**进程外的等待排第一**（结果在别的进程/机器上，
 运维唯一能干预的那一类）。
 
-★ **`games_planned` 的诚实性**：盘上今天**没有**任何地方记「本轮计划多少局」（只有 `rl/plan.py`
+★ **`games_planned` 的诚实性**：盘上今天**没有**任何地方记「本轮计划多少局」（只有 `biz/plan.py`
 的课程计划知道）⇒ CLI 传 0 = 未知，此时 `collect` 只报已落局数、**不报分数**（绝不出现 `78/0`）。
 真 supervisor 带上课程计划后会走到带分母的文案。这与 `already_done` 同一条规矩：算不出来的事实
 不得当成完成，也不得编出分母。
@@ -799,7 +824,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
 ### 门禁
 
 - nn python gate：**1446 passed / 3 skipped**（ruff + mypy 干净；+14 新例）
-- dashboard：typecheck 绿、**567 passed**（+25：`server-api-loop-queue.test.ts` 13 / `web-app-loopqueue.test.ts` 12）、
+- dashboard：typecheck 绿、**567 passed**（+25：`server-api-loop-queue.test.ts` 13 / `web-app-loopqueue.test.ts` 12【今 → 视图 `dashboard/tests/web-loop-queue.test.ts` + 面板 `dashboard/tests/web-app-coursematrix.test.ts`】）、
   `bun dashboard/src/server/build.ts` 三份 bundle 通过
 - 根 `bun run check` 绿、`bun run build` 绿
 
@@ -877,7 +902,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
   面板「导出任务包」→ POST /api/exportTaskBundle（回环门控之后）
     ├ 门① 训练在跑？（run_rl 锁的 PID 活着）→ 拒启，说明「包里的起点就是当前进度」
     ├ 门② 没有 tmp/<课>/weights.json → 拒启（包必须有起点）
-    └ 起 `run_rl.py --course <课> --ppo remote --run-iters -1 --export-bundle <abs>`
+    └ 起 `trainer/run_rl.py --course <课> --ppo remote --run-iters -1 --export-bundle <abs>`
          （detach，日志 logs/<课>/export-bundle.log；**不注册组件**——它是动作不是组件）
   面板按 2.5s 轮询产出文件 mtime（不猜进程）→ 出现即可「下载」（GET /api/taskBundle 流式）
 
@@ -909,7 +934,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
    拿任何**跑过一轮**的课导包（traj 下有历史残留 shard）都会 `SystemExit`，包产不出来。
    即「控制台上这个按钮对真课全程不可用」。修法：判定抽成纯函数 `_gate_round_shards`，
    `exporting` 时直接返回空集（`register=False` 是同一条思路：导出不参与发布语义），
-   回归 `tests/test_export_shard_gate.py` 同时钉住「关掉 exporting，两条门照旧生效」。
+   回归 `tests/trainer/test_export_shard_gate.py` 同时钉住「关掉 exporting，两条门照旧生效」。
 
 **代理侧踩坑（与功能无关，但会再踩）**：python 一次性进程的 cwd **不是**你 `cd` 的目录
 （trainer 内部会切），**手工验证时必须给绝对路径**；相对路径带 `..` 的写入在沙箱下还可能
@@ -942,13 +967,13 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
 
 **改法（纯增量，训练侧与 console 两侧）**
 
-- **训练侧**（`rl/loop_baseline.py::TrainingBaseline._maybe_dispatch_baseline_eval`；S4 第二十刀前
+- **训练侧**（`trainer/loop_baseline.py::TrainingBaseline._maybe_dispatch_baseline_eval`；S4 第二十刀前
   住 `loop_core.py`）：在本 run **首次 rollout 收官后**（`it == _start_it`；全新腿 = it1）立刻用课程 `args.bc` 派一条 `iter=0` 的干净评估作恒定基线。守卫 `_baseline_eval_weights`：per-tick / 有课程 / `eval_games_per_stage>0` / `eval_every>0` / 有 enabled dist 节点（`nodes=[]` 纯本地路径本就不派 A-eval）/ bc 文件在盘；幂等（在飞跳过 + 跨重启按 `iter==0` 去重）；**失败自吞**（基线是观测设施，不得拖垮主线）。课程默认 `eval_every>1`（c6-bonus=5）⇒ 该轮本无 A-eval，**零重复计算**。
-- **`eval_done_keys` 新增 `iter_filter`**（`rl/eval_local.py`）：it0 的已评估账本按 `iter==0` 隔离。必须如此——bc 与 it1 的 `args.out` 指纹**可能相同**（it1 就是 PPO 前的 bc 初始化权重），只按 wver 去重会让 it1 的 A-eval 把基线局吞成「已评估」，it0 行永远不落盘。`dispatch_eval_round/bg` 与 `EvalDispatcher` 加尾参 `baseline=False`；it0 用独立 `iter_id = {runId}.0`（与 A-eval 的 `{runId}.N` 在 agent 结果缓存里键空间隔离）。
+- **`eval_done_keys` 新增 `iter_filter`**（`biz/eval_local.py`）：it0 的已评估账本按 `iter==0` 隔离。必须如此——bc 与 it1 的 `args.out` 指纹**可能相同**（it1 就是 PPO 前的 bc 初始化权重），只按 wver 去重会让 it1 的 A-eval 把基线局吞成「已评估」，it0 行永远不落盘。`dispatch_eval_round/bg` 与 `EvalDispatcher` 加尾参 `baseline=False`；it0 用独立 `iter_id = {runId}.0`（与 A-eval 的 `{runId}.N` 在 agent 结果缓存里键空间隔离）。
 - **门判据排除 it0**（`gate_check.read_trend_rows`）：`iter <= 0` 的 summary 不进趋势（用户定案：只当监控/配对基线）。否则会虚增 sustain 的「连续通过」计数、把 plateau 的上升趋势起点拉回 PPO 前。缺 `iter` 字段的旧行照旧保留（不过度收口）。
 - **Console**（`console/iters.ts`）：配对基线改为「有 it0 取 0，否则退回首个 eval 轮」（老腿逐字节兼容）；`readIterMetrics` 在有 ≥1 条真实 iteration 行时合成一条 it0 行（只有 `evalData`，rollout 派生字段一律 `NaN` —— 趋势图的缺口约定，写 0 会在图上多画一个假零点）；`MetricsTable.buildRows` 跳过 `iter<=0` 的主行，只出 eval 子行（UI 标「基线」）。
 
-**验证**：`tests/test_baseline_eval.py`（新，6 例：iter 隔离 / 守卫逐条反证 / 只在 `_start_it` 派一次 / 失败不抛 / **端到端** baseline 派发把逐局行与 summary 都写成 `iter=0` 且预置同 wver 的 it1 行不吞它 / 幂等）+ `tests/console-paired.test.ts`（新增 3 例：it0 为开腿基准、无 it0 退回首个 eval 轮、合成行与老腿兼容）+ `test_gate_check.py` 的 `read_trend_rows` 过滤。门禁：nn-python-gate（ruff + mypy 145 文件 + pytest 全量）绿；`bun run check` / `bun run build` 绿。
+**验证**：`tests/worker/test_baseline_eval.py`（新，6 例：iter 隔离 / 守卫逐条反证 / 只在 `_start_it` 派一次 / 失败不抛 / **端到端** baseline 派发把逐局行与 summary 都写成 `iter=0` 且预置同 wver 的 it1 行不吞它 / 幂等）+ `tests/console-paired.test.ts`（新增 3 例：it0 为开腿基准、无 it0 退回首个 eval 轮、合成行与老腿兼容）+ `test_gate_check.py` 的 `read_trend_rows` 过滤。门禁：nn-python-gate（ruff + mypy 145 文件 + pytest 全量）绿；`bun run check` / `bun run build` 绿。
 
 **遗留**：`eval_every == 1` 的课程在 it1 既有 A-eval 又有 it0 基线（测的是同一套 PPO 前权重）⇒ 会多跑一遍语料（账本按 iter 隔离，it0 行仍落盘）；本腿 c6-bonus 为 `eval_every=5`，不受影响。
 
@@ -984,7 +1009,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
 - **决策**：训练控制台首页「最新 6 轮完整指标」行新增「导出 replay」——弹窗列出最新
   in-loop eval（= eval_summary 最大 iter，与指标表 eval 视图同口径）的全部逐局行
   （类型/击杀/承伤/杀/残血/道具/得分/耗时，表头排序 + 行勾选 + 全部/胜利/失败/超时/
-  kills=N 批量选择），导出 = **按需确定性重放**：`rl/eval_replays_once.py` 以课程
+  kills=N 批量选择），导出 = **按需确定性重放**：`biz/eval_replays_once.py` 以课程
   curricula（load_course+apply_course 单一事实来源）重建 difficulty/max_ticks/
   stageJson/lives/level，按 wver（sha256[:16]）解析冻结权重快照（it*/_eval_frozen_weights*
   → 活动权重 → weights/<course> 归档），并行调 `export-eval-game.ts --replay` 重放并录制
@@ -1002,7 +1027,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
   不一致（理论不该发生）在 manifest 里诚实标记，不静默；单次导出上限 400 局；
   replay 文件名 stage 段 = 原始 --stage id（自定义关 2000+ 非映射前 loadIndex）+1
   （buildReplayFilename 1-based 显示口径），python 映射时减回。
-- **教训入册**：nn-training 内脚本目录 rl/ 会遮蔽 stdlib `queue`（rl/queue.py）——
+- **教训入册**：nn-training 内脚本目录 rl/ 会遮蔽 stdlib `queue`（trainer/queue.py）——
   顶层 `from concurrent.futures import ...` 必须在移除 sys.path 脚本目录项之后
   （eval_replays_once.py 头部 scrub，实测循环 import 崩）。
 - **同日注记（用户裁定）**：交付形态改为**逐文件**——不打 tar.gz；完成后每局一个
@@ -1118,7 +1143,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
   （轮询 pid），在请求里删 = 没有锁；② **`--export-bundle` 被轮内 shard 门误杀**——导出
   既不发 job 也不训练，`rollout_spec` 非空 + traj 有历史残留 shard 会命中「M3 上云轮必须
   空 shard」⇒ 任何跑过一轮的课都导不出包（实测 c6-chip）。判定抽成纯函数
-  `_gate_round_shards`，例外**只**覆盖导出（`tests/test_export_shard_gate.py` 同时钉住
+  `_gate_round_shards`，例外**只**覆盖导出（`tests/trainer/test_export_shard_gate.py` 同时钉住
   「关掉 exporting 两条门照旧生效」，防顺手删门）。
 - **边界（未做）**：① 真云端端到端一次（本机无节点）；② 导入是**同步**阻塞（几 MB 秒级，
   几十 MB 会让控制台这段时间不响应轮询——可接受，量大再挪后台+状态位）；③ 导出期间刷新
@@ -1185,7 +1210,7 @@ hub 一重启就**静默**恢复派发。这是「功能存在但不可达 + 重
   - **观测面一律容错**：任何失败（无 hub / 401 / 坏 JSON / 账本不可读）→ null/空态/零值，绝不把 `/api/state` 带崩；总览与登记表共用一次 hub 探测（5s TTL + 单飞）——进程级全局观测不该按查看课程各探一遍。
 - **备选与否决**：把登记做成控制台自己的 worker 表 —— 否（hub 与训练侧都按 rl-config 判定，第二份表 = 三处口径）；登记时 ping 不通即拒 —— 否（见上，堵死正常工序）；把总览塞进慢快照 —— 否（慢快照按课程键控，进程级全局观测会乘上查看课程数）；由 hub 的 course 表推「在训」 —— 否（hub 不知道训练循环是否停在两轮之间）；**组件卡片按「单例角色 / 按课程」拆两种形状** —— **推迟**：卡片的数据源仍是 per-course 账本条目，而 hub/隧道收敛为单例（单隧道那一步）之前拆形状只会做出一个「看着像已经支持多课程」的假象。
 - **违反后果**：面板另存一份登记 ⇒ 三处漂、hub 与训练侧对「哪几台能接活」判断不一致（症状是 job 永远躺在队首）；登记拒掉 ping 不通的机器 ⇒ 正常工序被堵、操作员绕开面板去手改配置；改 url 不收口课程指针 ⇒ 指向死 URL ⇒ python 静默回落 pull（故障被伪装成正常）；用 hub 的 job 历史判「在训」⇒ 训练间歇期课程被从 UI 上抹掉；把 `job_completed.it` 当轮次 ⇒ 总览显示还没跑完的那一轮。
-- **落地**：`dashboard/src/web/view/course-overview.ts`（新：视图类型 + `parseHubQueue` / `latestIterFromLedgerTail` / `overviewCourseNames` / `buildCourseRows` / `validWorkerId`）、`dashboard/src/stack/hub-admin.ts`（新：`hubCandidates` / `liveHub` / `hubPushWorkers` / `hubReloadPushWorkers` / `probePushWorker` / `withWorkerProbes`）、`dashboard/src/server/api/overview.ts`（新：`trainingCourses` / `getHubAdmin` 5s 缓存 + 单飞 / `buildOverview` / `buildWorkerRegistry` / `courseIter`）、`dashboard/src/server/actions/workers.ts`（新：`registerPushWorker` / `removePushWorker` / `reloadPushWorkers`）、`dashboard/src/server/api/route.ts`（三个动作接线）、`dashboard/src/server/server.ts`（动作后与慢快照同一时机置空 hub 观测缓存——一个失效点，不在 route 层重复）、`dashboard/src/server/api/state-view.ts`（注入 `trainingCourses` / `overview` / `workerRegistry`）、`dashboard/src/web/app/panels/CourseOverview.tsx`（新）、`dashboard/src/web/app/panels/WorkerRegistry.tsx`（新，表单独立成 `WorkerForm` 以便 SSR 断言）、`dashboard/src/web/app/app.tsx`（解锁课程 select、在训课程全高亮、挂载两个面板）、`dashboard/src/web/theme.css`（`.tc-cov*` / `.tc-wreg*`）；回归：`dashboard/tests/server-api-overview.test.ts`（12 例）、`dashboard/tests/server-actions-worker-register.test.ts`（16 例）、`dashboard/tests/web-app-course-overview.test.ts`（12 例），并改写 `dashboard/tests/web-ssr-readonly.test.ts` 的课程 select 用例（锁定语义随本轮变更）。
+- **落地**：`dashboard/src/web/view/course-overview.ts`（新：视图类型 + `parseHubQueue` / `latestIterFromLedgerTail` / `overviewCourseNames` / `buildCourseRows` / `validWorkerId`）、`dashboard/src/stack/hub-admin.ts`（新：`hubCandidates` / `liveHub` / `hubPushWorkers` / `hubReloadPushWorkers` / `probePushWorker` / `withWorkerProbes`）、`dashboard/src/server/api/overview.ts`（新：`trainingCourses` / `getHubAdmin` 5s 缓存 + 单飞 / `buildOverview` / `buildWorkerRegistry` / `courseIter`）、`dashboard/src/server/actions/workers.ts`（新：`registerPushWorker` / `removePushWorker` / `reloadPushWorkers`）、`dashboard/src/server/api/route.ts`（三个动作接线）、`dashboard/src/server/server.ts`（动作后与慢快照同一时机置空 hub 观测缓存——一个失效点，不在 route 层重复）、`dashboard/src/server/api/state-view.ts`（注入 `trainingCourses` / `overview` / `workerRegistry`）、`dashboard/src/web/app/panels/CourseOverview.tsx`（新）、`dashboard/src/web/app/panels/WorkerRegistry.tsx`（新，表单独立成 `WorkerForm` 以便 SSR 断言）、`dashboard/src/web/app/app.tsx`（解锁课程 select、在训课程全高亮、挂载两个面板）、`dashboard/src/web/theme.css`（`.tc-cov*` / `.tc-wreg*`）；回归：`dashboard/tests/server-api-overview.test.ts`（12 例）、`dashboard/tests/server-actions-worker-register.test.ts`（16 例）、`dashboard/tests/web-app-course-overview.test.ts`（12 例【今 → `dashboard/tests/web-app-coursematrix.test.ts`——P2a 面板断言汇合处】），并改写 `dashboard/tests/web-ssr-readonly.test.ts` 的课程 select 用例（锁定语义随本轮变更）。
 - **本轮未做（P1 余下）**：① 单隧道——hub / cloudflared / trainingLoop 收敛为单例（现在仍是 per-course 拉起），随之把组件卡片拆成「单例角色」与「按课程」两种形状；② 多课程单 hub 的端到端 e2e（训练侧 hubpush → hub → 真 worker_server + 假 PPO）。
 
 ---
@@ -1203,7 +1228,7 @@ hub 一重启就**静默**恢复派发。这是「功能存在但不可达 + 重
 - **备选与否决**：① 继续排一行、只加徽章——否（这正是问题本身：单例角色与按课对象混在一个序列里）；② 在面板里写两族 key 名单——否（第二份真相，且新增组件会静默落进没人认识的桶）；③ 保留 `shared` 布尔再另加 `scope`——否（两个字段 = 两个真相，必然漂开）；④ 顺手把 trainer/localWorker 的账本键也收敛成共享槽——**本轮不做**（见下）。
 - **违反后果**：任何客户端按 key 自建族别名，都会在 registry 改规则的那天让某个组件**静默消失**；任何把 `shared` 语义空贴给按课程组件的写法，都会把「只停本课」演成「停全局」。
 - **落地**：`core/registry.ts`（`ComponentScope` + `componentScope`）· `server/api/views.ts`（`ComponentView.scope` 取代 `shared`）· `web/view/component-groups.ts`（新：`cardFamilies` / `scopeBadge` / `NODE_FACE_COMPONENTS` / `FAMILY_META`）· `web/app/panels/ComponentCards.tsx`（分组渲染）· `web/app/panels/LogNavCard.tsx`（复用例外常量）· `web/theme.css`（`.tc-comps__group*` / `.tc-cc__scope--*`）。回归：`tests/web-component-groups.test.ts`(11：分族与族内顺序 / 节点面例外是真组件 / **全组件恰好归属一处** / **与 registry 判据对拍** / `scope` 缺省保守 / 未列出的 key 不丢 / 空组不渲染 / 不改动调用方数组 / 徽章三态) · `tests/web-components.test.ts`（分族 SSR：两组标题与 `data-family`、族内顺序、共享×2+单例×1、节点面组件不在卡行）· `tests/single-hub-tunnel.test.ts`（`.shared` → `.scope`）。进度 `docs/nn/console.md` §7。
-- **未做（明确记录，不是漏）**：账本键的真正收敛——`trainingLoop`/`localWorker` 仍是 per-course 键（控制台仍按课起 `run_rl.py --course`，尽管训练侧已有 `--serve` 单进程服务所有课程），`workerServe` 仍住 per-course 表（轴却是节点）。那是**启动面/监督面**的改动（含 `TrainLaunchModal` 的精简与旧条目换代接管），与本轮的「把两族读出来、说清楚」是两件事；本轮的分族恰好是它的前置（换成共享槽后，课程面只剩数据、进程面全在服务面）。
+- **未做（明确记录，不是漏）**：账本键的真正收敛——`trainingLoop`/`localWorker` 仍是 per-course 键（控制台仍按课起 `trainer/run_rl.py --course`，尽管训练侧已有 `--serve` 单进程服务所有课程），`workerServe` 仍住 per-course 表（轴却是节点）。那是**启动面/监督面**的改动（含 `TrainLaunchModal` 的精简与旧条目换代接管），与本轮的「把两族读出来、说清楚」是两件事；本轮的分族恰好是它的前置（换成共享槽后，课程面只剩数据、进程面全在服务面）。
 - **一条构建期坑（值得记）**：客户端代码里写**未加引号的 `node:` 对象键**（`{ node: [] }`）会让三份 bundle 全红——`server/build.ts` 的禁词门禁把 `node:` 当「引入了 node 内置模块」。本文件已在 `ComponentFamilyId` 注释里写明。
 
 ---
@@ -1243,7 +1268,7 @@ hub 一重启就**静默**恢复派发。这是「功能存在但不可达 + 重
   这七列是 4 元数组 + 序列表），且无端改 codehash 集内文件的报告形态；④ 直接进
   `REQUIRED_FIELDS` 不设豁免 —— 否，本批次之前的资产行会全量报缺（P0 覆盖率要求
   100% **或明示豁免**）。
-- **决定**：`rl/eval_local.py::eval_census_fields` 单源（**只认顶层**，缺键 = None
+- **决定**：`biz/eval_local.py::eval_census_fields` 单源（**只认顶层**，缺键 = None
   不伪造），A/B/C/m1 四个写点接线；`ingest.ts` 映射（畸形计数列/非字符串归零或空）；
   `store.ts` 七列进 `EvalGameRow` + `GAMEPLAY_FIELDS` + `REQUIRED_FIELDS`，并新增
   `PHASE0_FIELDS` 作为**旧资产行的明示豁免清单**（豁免由调用方传，不写死在
@@ -1251,9 +1276,9 @@ hub 一重启就**静默**恢复派发。这是「功能存在但不可达 + 重
 - **违反后果**：七列改走 telemetry 回退 ⇒ 同一字段两种形态、旧值真假难辨；缺键填零
   却不进豁免清单 ⇒ 覆盖率报表冤报旧行、真缺失被噪声淹没；把七列排除在
   `GAMEPLAY_FIELDS` 外 ⇒ 双跑不一致无人发现（§3.4 确定性契约失效）。
-- **落地**：`nn-training/rl/eval_local.py`（`EVAL_CENSUS_KEYS` / `eval_census_fields`）、
+- **落地**：`nn-training/biz/eval_local.py`（`EVAL_CENSUS_KEYS` / `eval_census_fields`）、
   `rl/{eval_dispatch,batch_eval,eval_a_once,eval_ingest}.py`；`dashboard/src/evalboard/
-  {ingest,store}.ts`；回归 `nn-training/tests/test_eval_census_fields.py`（5 例）+  
+  {ingest,store}.ts`；回归 `nn-training/tests/worker/test_eval_census_fields.py`（5 例）+  
   `dashboard/tests/evalboard-{ingest,store}.test.ts`（映射/豁免）。验证：真实
   `_eval_report.json` 七列齐全可抽；nn-python-gate 1263 绿 · dashboard 513 绿 +
   typecheck · 根 `bun run check` 1875 绿。
@@ -1605,9 +1630,9 @@ CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路�
 
 **定案**：
 
-1. **开课 = 一个显式标记文件**：`<traj-root>/<课>/training-enabled.txt`（`remote/protocol.py::COURSE_ENABLE_MARKER`，
-   控制台「开课」写 /「停课」删）。训练侧（`rl/loop_plan.enabled_courses` → `loop_serve` 发现模式、
-   `run_rl_cluster.py --json` 只读课程表）与 hub（`_course_dir_live`）的判据统一改成
+1. **开课 = 一个显式标记文件**：`<traj-root>/<课>/training-enabled.txt`（`common/protocol.py::COURSE_ENABLE_MARKER`，
+   控制台「开课」写 /「停课」删）。训练侧（`trainer/loop_plan.enabled_courses` → `loop_serve` 发现模式、
+   `trainer/run_rl_cluster.py --json` 只读课程表）与 hub（`_course_dir_live`）的判据统一改成
    **账本 ∧ 开课标记**；`discover_courses`（盘上跑过哪些课）**保持不变** —— 课程下拉仍要能选历史课。
    照落点选目录内的独立文件（而不是共享 JSON）：一个判据、一处位置，开/停各是一次文件操作
    （无读-改-写竞态），控制台重启不丢「哪几门开着」，且它同时是**证据**（写入了开课时刻）。
@@ -1635,7 +1660,7 @@ CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路�
 - **判据用「有没有账本 mtime 新鲜」**——否：历史课目录随时因为动过账本而变新鲜，正是最贵的那类误派
   （真 GPU worker 白烧租约）；且 freshness 是滑动的，操作员意图（开/停）会被时间悄悄改写。
 - **停课 = 删账本 / 改课程文件**——否（同上一条：阅读面连带消失、历史归零）。
-- **在训 pill 行的数据源用 python 的 `run_rl_cluster.py --json` 一门定生死**——否：它要起子进程（10s TTL），
+- **在训 pill 行的数据源用 python 的 `trainer/run_rl_cluster.py --json` 一门定生死**——否：它要起子进程（10s TTL），
   读失败时 pill 会整行消失——**停课入口不能因观测面坏了就消失**。故 pill 的全集来自服务端 stamp 的
   标记扫描（纯 fs），it/状态来自队列行（读面不可用时它才降级为「视图不可用」，pill 仍在、仍可停）。
 - **pill 上只给状态点不给 it 数**——否：多课程并行时操作员第一眼要看的就是「各自跑到第几轮」
@@ -1649,19 +1674,19 @@ CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路�
 在训名单在 TS 里按进程存活重算 ⇒ 进程一停已开课的课程全从顶部消失（开课与进程是两件事）。
 
 5. **「空课程表」必须回契约形状**：默认表 = 已开课的课，而开课是显式动作 ⇒「一门课都没开」是启动后的
-   **第一种状态**。只读入口 `run_rl_cluster.py --json` 的空表分支原本回一行人话，而控制台是直接
+   **第一种状态**。只读入口 `trainer/run_rl_cluster.py --json` 的空表分支原本回一行人话，而控制台是直接
    `JSON.parse` 这段 stdout（`server/api/loop-queue.ts`）⇒ 在默认状态下常年报「输出不可解析」的红错。
    定案：空表也回 `{"courses": [], "pools": {...}}`（形状在所有分支一致；池容量是进程事实，与有没有课无关）。
 
-**落地**：`nn-training/remote/protocol.py`（`COURSE_ENABLE_MARKER`）· `nn-training/rl/loop_plan.py`
-（`course_enabled` / `enabled_courses`）· `nn-training/rl/loop_serve.py`（发现模式两处扫描）·
-`nn-training/run_rl_cluster.py`（只读课程表）· `nn-training/remote/hub_server.py`（`_course_dir_live`）·
+**落地**：`nn-training/common/protocol.py`（`COURSE_ENABLE_MARKER`）· `nn-training/trainer/loop_plan.py`
+（`course_enabled` / `enabled_courses`）· `nn-training/trainer/loop_serve.py`（发现模式两处扫描）·
+`nn-training/trainer/run_rl_cluster.py`（只读课程表）· `nn-training/hub/server.py`（`_course_dir_live`）·
 `dashboard/src/server/actions/course-lifecycle.ts`（标记写/删）· `dashboard/src/server/api/state-view.ts`
 （`trainingCourses` = 已开课）· `dashboard/src/web/view/loop-queue.ts`（`coursePills` 纯函数）·
 `dashboard/src/web/app/panels/TrainingPills.tsx`（新）· `dashboard/src/web/app/app.tsx`（顶部形状）·
 `dashboard/src/web/theme.css`（`.tc-tpills` / `.tc-tpill`）。
 
-**回归**：`nn-training/tests/test_loop_plan_waiting.py`（+2 例：空课程表的 `--json` 形状 · 默认课程表 = 已开课）·
+**回归**：`nn-training/tests/trainer/test_loop_plan_waiting.py`（+2 例：空课程表的 `--json` 形状 · 默认课程表 = 已开课）·
 `dashboard/tests/training-pills.test.ts`（新，14 例：pill 推导四态 + 确定性事实优先 +
 「待进程」/「视图不可用」不编造 · `trainingCourses` = 标记而非账本 · SSR 上屏/高亮/BC 徽标/停课键/
 空行不渲染/顶栏只有「训练」）· `course-lifecycle.test.ts`（+2 例：开课写标记、停课删标记、可逆）·

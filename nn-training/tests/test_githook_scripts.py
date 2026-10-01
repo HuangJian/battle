@@ -12,7 +12,7 @@
 2. **门禁的 pytest 目标必须同时含两层**（tests/ + e2e/）。e2e 曾在 60e5f69 后掉出所有
    自动化（门禁不跑、CI 那步指向不存在的文件），本断言把「e2e 在门禁里」钉成回归。
 
-3. **pytest 的 `--timeout` 单位是秒，不是毫秒**（2026-09-15 发现）。门禁/task.py 曾
+3. **pytest 的 `--timeout` 单位是秒，不是毫秒**（2026-09-15 发现）。门禁/tools/task.py 曾
    写 `--timeout=50000`——那是从 **bun** 的 `--timeout=50000`（bun 才是毫秒）误搬的，
    等于把上限抬到 13.9 小时并**覆盖掉** pyproject addopts 的 `--timeout=60` ⇒ 所谓
    「>1 分钟即红旗」的护栏名存实亡，hang 又能无限挂。本测试把量级钉死。
@@ -32,6 +32,13 @@
    的 `case "$PY_BIN" in *.exe)`；本文件静态钉住转换的所在分支，并用
    `test_gate_keeps_native_paths_when_wslpath_maps_elsewhere` 真起一次假仓库骨架复现事故。
 
+7. **分发器选择只看「选中的 python 是什么」，不看 uname 存不存在**（2026-09-29，v3.19）。
+   Linux 上 pytest 改走 `--forkdist`（收集一次 + fork，见 tests/tools/test_forkdist.py 与
+   docs/nn/engineering.md §49），Windows/macOS 继续 `-n`。掉进旧陷阱的写法是
+   「问 uname/有没有 os.fork」这种间接判据——本仓已有一次同型事故（第 6 条）。
+   另钉一条：`--forkdist` 与 `-n` 互斥，任何一行命令行不得同时出现（同时给会让两个
+   插件抢 `pytest_runtestloop`）。
+
 5. **门禁的并行旋钮必须「worker 数 × CPU 内线程数」一起调**（2026-09-17 实测）。旧默认
    `-n 4` + torch 默认内线程（= 物理核）⇒ 4 worker × 16 线程抢 16 核，全量 36.3s；
    只加 worker 更慢（-n 12 默认线程 = 44.7s），封到 1 线程后 -n 12 = 24.7s（与 -n 8/16
@@ -46,6 +53,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -54,7 +62,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 NN_ROOT = REPO_ROOT / "nn-training"
 WRAPPER = REPO_ROOT / "tools" / "githook" / "nn-py-safe.sh"
 GATE = REPO_ROOT / "tools" / "githook" / "nn-python-gate.sh"
-TASK_PY = NN_ROOT / "task.py"
+TASK_PY = NN_ROOT / "tools/task.py"
 
 #: `--timeout=<n>` 或 `NN_PYTEST_TIMEOUT_S:-<n>}` 里的数值（只看非注释行）。
 _TIMEOUT_VALUE = re.compile(r"(?:--timeout|NN_PYTEST_TIMEOUT_S[:=])\D*(\d+)")
@@ -185,7 +193,7 @@ def _timeout_values(text: str) -> list[int]:
     return [int(m.group(1)) for m in _TIMEOUT_VALUE.finditer(strip_comments(text))]
 
 
-@pytest.mark.parametrize("script", [GATE, TASK_PY], ids=["nn-python-gate.sh", "task.py"])
+@pytest.mark.parametrize("script", [GATE, TASK_PY], ids=["nn-python-gate.sh", "tools/task.py"])
 def test_pytest_timeout_is_seconds_not_milliseconds(script: Path) -> None:
     """超时必须按**秒**给，且不能是 0/天量值（0 = 关掉护栏）。"""
     values = _timeout_values(script.read_text(encoding="utf-8"))
@@ -332,14 +340,14 @@ def test_gate_worker_count_scales_with_cores() -> None:
     code = _gate_code()
     assert "NN_GATE_NPROC" in code, "缺少 NN_GATE_NPROC 逃生口"
     assert re.search(r"CORES=\$\(.*effective_cores", code), (
-        "worker 数应从核数派生，且核数走 platform_utils.effective_cores（容器 cgroup 配额/亲和"
+        "worker 数应从核数派生，且核数走 common.platform_utils.effective_cores（容器 cgroup 配额/亲和"
         "掩码）—— `os.cpu_count()` 在容器里报的是宿主机核数（Kaggle 224 vs 配额 96，"
         "2026-09-25 云机卡死那笔账）；写死 4 在 16 核上白白浪费并行度（2026-09-17 实测 n=4 "
         "→ n=12 提速 1/3）"
     )
     assert "cpu_count()" not in code, (
         "门禁里不许再拿 os.cpu_count() 定并行度——「本机几核」只允许一个答案，"
-        "就是 platform_utils.effective_cores()（注释里的事故说明不算，_gate_code 已去注释）"
+        "就是 common.platform_utils.effective_cores()（注释里的事故说明不算，_gate_code 已去注释）"
     )
     assert re.search(r"NPROC=\$\{NN_GATE_NPROC:-\$CORES\}", code), (
         "NPROC 默认值应 = min(核数, 上界)，且由 NN_GATE_NPROC 覆盖"
@@ -347,3 +355,105 @@ def test_gate_worker_count_scales_with_cores() -> None:
     cap = re.search(r'NPROC" -gt (\d+)', code)
     assert cap, "NPROC 缺上界——worker 无上限会按核数放大内存（-n 12 峰值 RSS 实测 ≈ 3.9GB）"
     assert int(cap.group(1)) <= 32, f"NPROC 上界 {cap.group(1)} 过大（内存封顶形同虚设）"
+
+
+def test_gate_picks_forkdist_by_python_and_kernel() -> None:
+    """分发器选择（模块 docstring 第 7 条）：Windows python 一律 xdist，Linux 才 forkdist。"""
+    code = _gate_code()
+    assert "NN_GATE_FORKDIST" in code, "缺少强制选择分发器的逃生口（NN_GATE_FORKDIST=0/1）"
+    assert re.search(r"case \"\$NN_PY\" in", code), (
+        "分发器选择应由「选中的 python 是不是 Windows 二进制」判定（case $NN_PY in *.exe），"
+        "不要问 uname/wslpath 存不存在（同 2026-09-20 那次事故的判据）"
+    )
+    assert re.search(r"\*\.exe\) : ;;", code), "少了「Windows python ⇒ 不选 forkdist」的分支"
+    assert re.search(r"uname -s[^\n]*Linux", code), (
+        "非 Linux（macOS）应继续用 xdist：master 在 fork 前已经 import torch，"
+        "libgomp/dyld 与 fork 的组合本仓没验证过"
+    )
+    assert '-n "$NPROC"' in code, "Windows 分支必须保留 xdist 的 -n（那是它的唯一分发器）"
+    assert "-p tools.forkdist" in code, "forkdist 分支没把插件挂上"
+
+
+@no_bash
+@pytest.mark.parametrize(
+    ("py_rel", "expect_forkdist"),
+    [
+        # Windows 二进制 python（MSYS/WSL 两种 bash 都长这样）：唯一没 os.fork 的情形
+        (Path("nn-training/.venv/Scripts/python.exe"), False),
+        # 原生 POSIX python：Linux 上应选 forkdist（macOS 见下方 skip 说明）
+        (Path("nn-training/.venv/bin/python"), True),
+    ],
+    ids=["windows-python", "posix-python"],
+)
+def test_gate_dispatcher_branch_is_pinned_by_python_flavor(
+    tmp_path: Path, py_rel: Path, expect_forkdist: bool
+) -> None:
+    """真跑一次门禁骨架，看它到底给 pytest 发了哪个分发器（模块 docstring 第 7 条）。
+
+    用一个只记 argv 的假 python（同 `test_gate_keeps_native_paths_when_wslpath_maps_elsewhere`
+    的手法）——比 grep 脚本文本强：文本里有分支不等于分支真的走对。
+    macOS（uname=Darwin）上 POSIX python 也**应该**走 xdist（fork 与 libgomp 未验证），
+    故那一半在非 Linux 上跳过。
+    """
+    if expect_forkdist and not sys.platform.startswith("linux"):
+        pytest.skip("非 Linux：POSIX python 也走 xdist（保守选择，见门禁「pytest 分发器」一节）")
+
+    skel = tmp_path / "skel"
+    hook_dir = skel / "tools" / "githook"
+    hook_dir.mkdir(parents=True)
+    shutil.copy(GATE, hook_dir / GATE.name)
+
+    argv_log = tmp_path / "argv.log"
+    fake_py = skel / py_rel
+    fake_py.parent.mkdir(parents=True, exist_ok=True)
+    fake_py.write_text(
+        "#!/bin/sh\nprintf '%s\\n' \"$*\" >> \"$ARGV_LOG\"\nexit 0\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake_py.chmod(0o755)
+
+    wrapper = tmp_path / "run-gate.sh"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f"export ARGV_LOG='{_bash_path(argv_log)}'\n"
+        "export NN_GATE_SKIP=ruff,mypy\n"
+        "export PYTHONUTF8=1\n"
+        f"cd '{_bash_path(skel)}'\n"
+        f"exec bash '{_bash_path(hook_dir / GATE.name)}'\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    wrapper.chmod(0o755)
+
+    proc = subprocess.run(
+        ["bash", _bash_path(wrapper)],
+        cwd=skel,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    assert proc.returncode == 0, f"骨架应跑通（rc=0）\n{proc.stdout}\n{proc.stderr}"
+    calls = argv_log.read_text(encoding="utf-8").splitlines()
+    pytest_call = next((ln for ln in calls if "-m pytest" in ln), "")
+    assert pytest_call, f"没看到 pytest 调用（argv 记录：{calls}）"
+    if expect_forkdist:
+        assert "--forkdist" in pytest_call, f"POSIX python 没走 forkdist：{pytest_call}"
+        assert not re.search(r"\s-n\s", pytest_call), f"forkdist 分支还搭了 -n：{pytest_call}"
+    else:
+        assert "--forkdist" not in pytest_call, (
+            f"Windows python 走了 forkdist（没有 os.fork，必然失败）：{pytest_call}"
+        )
+        assert re.search(r"\s-n\s", pytest_call), f"Windows 分支丢了 xdist 的 -n：{pytest_call}"
+
+
+def test_gate_never_passes_n_and_forkdist_together() -> None:
+    """`-n` 与 `--forkdist` 互斥（模块 docstring 第 7 条）：同一行同时给会抢 runtestloop。"""
+    offenders = [
+        ln.strip()
+        for ln in _gate_code().splitlines()
+        if "-m pytest" in ln and "--forkdist" in ln and re.search(r"\s-n\s", ln)
+    ]
+    assert not offenders, f"同一行既给 -n 又给 --forkdist：{offenders}"

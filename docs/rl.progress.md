@@ -12,18 +12,18 @@
 > 决策全文 → `DECISIONS.md` §2026-09-10-course-exit-gates。
 >
 > **R1 门槛进代码（M0+M1，全绿）**
-> - `rl/config.py`：`GateTeacher` / `GateRule` / `GatesSpec`（解析期强校验 §3.4 全 8 条；
+> - `biz/config.py`：`GateTeacher` / `GateRule` / `GatesSpec`（解析期强校验 §3.4 全 8 条；
 >   `*_frac` ∈[0,1] 与 `*_rel` ≥0 分家——§3.2 示例的 `max_phits_rel: 1.5` 本就是相对倍数）。
-> - **新增 `rl/gate_check.py`**：纯函数求值器 `evaluate(course, trend_rows, health, budget, now=None)`，
+> - **新增 `biz/gate_check.py`**：纯函数求值器 `evaluate(course, trend_rows, health, budget, now=None)`，
 >   9 种 kind + lattice `override>ABORT>PAUSE>STOP>REMEDIATE>ADVANCE>HOLD` + sustain 去重
 >   （按 `(course_fp, wver)`：同 wver 重跑不虚增连击）+ 薄壳 CLI（dry-run / 重放，exit 码 0/10/20/30/40/50）。
->   禁 torch/numpy（单测在子进程断言；`rl.config` 延迟导入以避开 numpy 链）。
+>   禁 torch/numpy（单测在子进程断言；`biz.config` 延迟导入以避开 numpy 链）。
 > - `loop_guards._gate` = 第四守卫（每 eval_every 调一次），判决写 `gate_verdict` 事件；
 >   `_breaker` 熔断**同写 ABORT 行**（此前执行面在真 ABORT 场景读不到判决）＋补 NaN/inf 检测
 >   （NaN 与阈值比较恒 False → 旧代码永不熔断）。
 > - `settle_eval_summary` 顺带落 kills_mean / zero_kill_frac / phits_mean / pickup_mean /
 >   timeout_frac / course_fp（门控技能子指标单源；缺数据一律 None = unknown，不伪装成 0）。
-> - 单测：`tests/test_gate_config.py`（32）+ `tests/test_gate_check.py`（22）。
+> - 单测：`tests/worker/test_gate_config.py`（32）+ `tests/worker/test_gate_check.py`（22）。
 >
 > **R3+R7 重开腿 `curricula/c6b-margin.jsonc`**（fresh out/traj）
 > - `wTick` 0.01 → **0.001**；`terminal.stage_clear` 2.0 → **6.0**（＝2× wKill）。
@@ -42,7 +42,7 @@
 > - `wait_job` 轮询指数退避（5s×2^k，封顶 60s；404 = 正常排队不退避）。
 > - 新增 `--remote-degrade-after N`（默认 3）：连败达阈值 → `args.ppo="local"` + `remote_degrade`
 >   事件 + 本轮继续（训练活着）；`N=0` 连败 3 次 → 写 `gate_verdict: ABORT` 后停腿。
-> - 单测：`tests/test_remote_degrade.py`（6）。
+> - 单测：`tests/test_remote_degrade.py`（6；**今 → `nn-training/tests/trainer/test_remote_failure_policy.py`**——降级退役后的「去降级版」）。
 >
 > **§12 复盘评审的处置（2026-09-11，逐条核过数据，非照单全收）**
 > - **接受**：D10 单变量失真、D11 假说链、Phase 顺序、effect size ≥5pp、有效训练
@@ -727,7 +727,7 @@ p3→p4 门连续 2 eval ≥70）。
 
 ## §3 p4-BC 全程蒸馏评估：45 checkpoints × 100 局（2026-09-04）
 
-> p4-BC（ep60 热启动 + p4 语料，`train/bc.py --arch student --value-coef 0.5`，
+> p4-BC（ep60 热启动 + p4 语料，`worker/train/bc.py --arch student --value-coef 0.5`，
 > seed 1234，Colab T4）的 ep1–45 每轮 ckpt 各跑 100 局 p4-onset（共 4500 局），
 > 回答 §2 留下的问题：蒸馏曲线是"缓慢爬升"还是"平台期"？权重备份见
 > `nn-training/weights/WEIGHTS.md`（`p4-BC-checkpoints-45.zip`）。
@@ -855,7 +855,7 @@ Block 均值（每 block 1500 局）：胜率 8.9 → 10.1 → **13.7**/100；�
 ### 1.1 训练侧（BC 60 epoch 全量，DECISIONS §325）
 
 - 语料：`tmp/p1-godai-v2`（p1-godai 1892 胜局 / 165K 帧，含 returns.npy）。
-- 命令：`train/bc.py --data-dir ... --arch student --value-coef 0.5 --epochs 60
+- 命令：`worker/train/bc.py --data-dir ... --arch student --value-coef 0.5 --epochs 60
   --ckpt-every 1 --batch 256 --lr 0.003 --val-split 0.1 --mirror-p 0.5
   --seed 1234 --device cuda`（Colab T4，~82 s/epoch，总计 4911 s）。
 - 收敛：val_loss 1.108 → **0.5084**（ep60 = best，全程无过拟合平台）；move acc

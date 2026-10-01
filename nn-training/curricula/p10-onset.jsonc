@@ -8,7 +8,7 @@
 // 地图：与 p4 同一 11×11 cells（22×22 tiles）空旷场，无基地，玩家正中
 // （tile 12,12），敌人四角（tile 2,2 / 22,2 / 22,22 / 2,22）。
 // 敌人：10 个，混编。forces 沿用 20 字符 "abcd" 重复（RL 课程加载器要求恰好
-//   20 字符——nn-training/rl/config.py StageSpec 强校验），count=10 取前 10 字符
+//   20 字符——nn-training/biz/config.py StageSpec 强校验），count=10 取前 10 字符
 //   = a/b/c/d/a/b/c/d/a/b，即 basic×3 / fast×3 / power×2 / armor×2。
 // 出生：前 4 号按队列顺序落四角（TL basic / TR fast / BR power / BL armor，与 p4
 //   同）；5-10 号按 spawnPointIndex 轮转取首个空位（src/game/SimulationSpawn.ts）。

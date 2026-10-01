@@ -367,7 +367,7 @@ const REPO_ROOT = join(import.meta.dir, '..')
 /**
  * P1b：**长驻池（`--serve`）与一次性调用逐字节一致** —— 含起始分布注入。
  *
- * 为什么值得（2026-09-25）：本机腿（`rl/queue_local.py`）原先每局 `Popen` 一个 bun，现在默认
+ * 为什么值得（2026-09-25）：本机腿（`trainer/queue_local.py`）原先每局 `Popen` 一个 bun，现在默认
  * 交给 `--serve` 长驻池（节点侧同款池实测 1.59×，见 `docs/nn/runtime-opt.md` §20/§21）。池化的
  * 硬前提是「一个任务一局、每局新建 World」逐字节等价（`tools/sim/serve-loop.ts` 的 docstring），
  * 而起始分布是这条前提上最容易被突破的一处：restore 会把**上一局残留的世界**换成快照，

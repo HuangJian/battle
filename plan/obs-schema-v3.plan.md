@@ -21,8 +21,8 @@
 
 | 项 | 值 | 来源 |
 |---|---|---|
-| OBS_CHANNELS / SCALAR_DIM / MAJOR / BOARD | 14 / 19 / 2 / 26 | `schema.py:14/22/31`、`obs-encoder.ts:42-45` |
-| grid 通道含义 | 0-4 地形 / 5 base / 6 self / 7-10 敌 / 11 bullet / 12 powerup / 13 waveHeat | `schema.py:34-49` |
+| OBS_CHANNELS / SCALAR_DIM / MAJOR / BOARD | 14 / 19 / 2 / 26 | `common/schema.py:14/22/31`、`obs-encoder.ts:42-45` |
+| grid 通道含义 | 0-4 地形 / 5 base / 6 self / 7-10 敌 / 11 bullet / 12 powerup / 13 waveHeat | `common/schema.py:34-49` |
 | 敌机值 / 子弹值 | `(tier<<3)\|(d+1)` 1-36；`d+1`（敌）/`d+1+4`（我，**加法**） | `obs-encoder.ts:221/231` |
 | SCALAR_X_INDICES | [15, 18] | 两端同 |
 | obs 缓冲类型 | **Uint8Array**（赋值 ToUint8 截断）；标量 Float32Array | `obs-encoder.ts:120-121` |
@@ -97,7 +97,7 @@ C7 船（boatTimer）· C8 奖励车 `tank.bonus`（modern `bonusEnemyEveryNSpaw
 | 28 | **vy** | `p ? p.vy / p.speed : 0`（[-1,1] 不 clamp01，同 s15/16 惯例） | 新增 |
 | 29 | **vx** | `p ? p.vx / p.speed : 0` | 新增；**x 分量 ⇒ X_INDICES** |
 
-### 3.4 全局编码规则（写进 schema.py 顶层注释）
+### 3.4 全局编码规则（写进 common/schema.py 顶层注释）
 
 1. **uint8 规则**：所有 grid 通道是 uint8——任何浮点幅值编码必须 `Math.round(255*clamp01(x))`
    （或量化成档）后写入；标量缓冲 Float32 不受此限。
@@ -112,11 +112,11 @@ C7 船（boatTimer）· C8 奖励车 `tank.bonus`（modern `bonusEnemyEveryNSpaw
 6. **生成中敌人不进标量集合**：s0/s1/s7/s9-13/nearest 的 filter 保持排除（grid 可见即可，
    标量语义 =「已激活敌」）——写进 SCALAR_LAYOUT 注释。
 7. **SCHEMA_FINGERPRINT**：对 CH 表 / SCALAR_LAYOUT / 打包值域 / X_INDICES / 常量做稳定哈希，
-   schema.py 与 obs-encoder.ts 双端导出同名常量，单测断言相等并写进 npy shard manifest。
+   common/schema.py 与 obs-encoder.ts 双端导出同名常量，单测断言相等并写进 npy shard manifest。
 
 ### 3.5 同步链（13+ 处，漏一处 = 事故）
 
-1. `schema.py`：三常量 + SCALAR_LAYOUT 加 11 行（含 s2 OOD 注释、生成中敌排除注释）+
+1. `common/schema.py`：三常量 + SCALAR_LAYOUT 加 11 行（含 s2 OOD 注释、生成中敌排除注释）+
    X_INDICES + CH 表 2 行 + ch7-10/11/12 值域注释 + 弹速静态映射（敌 4 档 + 玩家 L0..L3）+
    加法/uint8 全局注释 + FINGERPRINT。
 2. `src/nn/obs-encoder.ts`：30 标量 + 16 通道 + 3 打包位 + waveHeat N 点 + counts 模块级 +
@@ -124,7 +124,7 @@ C7 船（boatTimer）· C8 奖励车 `tank.bonus`（modern `bonusEnemyEveryNSpaw
 3. `src/nn/npy.ts`：`writeShard` 硬编码 `[N,14,26,26]`/`[N,19]`（`:82-83`）→ 参数化 `[N,16,26,26]`/`[N,30]`。
 4. `src/nn/infer.ts`：StudentModel stem 16→18（`in_ch+2`，`student.py:107`）+ coord 偏移 14→16 +
    in16 缓冲与拷贝长度（`:423/553-554`）；BC 参考模型 `NNModel.conv.0` 14→16。
-5. `nn-training/data/dataset.py`：`_flip_direction` bullet 分支换 32 项 LUT（保 speedBucket、
+5. `nn-training/worker/data/dataset.py`：`_flip_direction` bullet 分支换 32 项 LUT（保 speedBucket、
    owner=rest>=5）；敌机分支换显式 LUT（不依赖 hi 位巧合）。
 6. **`src/nn/wasm/conv_feats.c` + 重编**：`#define PAD3 (28*28*16)`（:20）、`pad3(in16,16,…)`（:153）
    → 18；clang 重编提交新 `conv_feats.wasm`；`conv-wasm.ts` 契约校验同步。**漏编后果：run()

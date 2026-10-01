@@ -198,7 +198,8 @@ describe('课程不带传输/节点指针（防回流）', () => {
     // 真正要防的是「有人又去读它」：本模块除删除外不得出现对这些键的取值。
     expect(knobs).toContain('LEGACY_COURSE_KEYS')
     expect(knobs).not.toMatch(/\[('|")remote_transport\1\]/)
-    for (const key of ['push_node_url', 'remote_transport', 'remote_hub_url']) {
+    // `gate_halt_mode`（2026-10-01）：与上面三个同规——只在清理名单里出现，**不当读面**。
+    for (const key of ['push_node_url', 'remote_transport', 'remote_hub_url', 'gate_halt_mode']) {
       const reads = knobs.match(new RegExp(`\\.${key}\\b`, 'g')) ?? []
       expect(reads.length).toBe(0)
     }
@@ -208,6 +209,22 @@ describe('课程不带传输/节点指针（防回流）', () => {
     const specs = code('stack/specs.ts')
     expect(specs).not.toContain('--remote-transport')
     expect(specs).not.toContain('s.ppo')
+  })
+
+  it('specs/类型表不再有门禁停机的课程级写面（2026-10-01：升平台级开关）', () => {
+    // 平台级化之后，课程级三写面（每课 argv / courses.<课>.gate_halt_mode / <traj>/*.txt）
+    // 一个都不许复活：留半个写面 = 双事实源（旧值会在某条腿上偷偷生效）。
+    const specs = code('stack/specs.ts')
+    expect(specs).not.toContain('--gate-halt-mode')
+    for (const gone of [
+      'gateHaltModePath',
+      'readGateHaltMode',
+      'writeGateHaltMode',
+      'gateHaltMode',
+    ]) {
+      expect(`${gone}:${specs.includes(gone)}`).toBe(`${gone}:false`)
+    }
+    expect(code('core/types.ts')).not.toContain('gate_halt_mode')
   })
 })
 
@@ -268,7 +285,7 @@ describe('本机伪节点不在启动面/受管面（防回流）', () => {
     expect(specs).not.toContain('WORKER_SERVE_ENTRY')
     // 预演侧确实自起自停（同一份远端入口）
     const push = code('stack/push.ts')
-    expect(push).toContain("'remote_worker_serve'")
+    expect(push).toContain("'remote.remote_worker_serve'")
     expect(push).toContain('killPid')
   })
 })

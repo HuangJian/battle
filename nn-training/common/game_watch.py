@@ -33,7 +33,7 @@
 为什么重试而不是「竞速副本」（用户 2026-09-22 提的两条路）：argv 不变 ⇒ out 目录不变 ⇒
 声明的 shard 集（`data_fp`）逐字节不变；副本会多产一个同 (stage,seed) 的 shard 目录，直接撞上
 「实产集 == 声明集」那道门。竞速在**多节点**在线路径上成立是因为那里有 hub 侧的候选表
-（`rl/queue_local.py` 的 `pick_race_target` 等）；云机离线只有一个节点，重试是同一效果的最小实现。
+（`trainer/queue_local.py` 的 `pick_race_target` 等）；云机离线只有一个节点，重试是同一效果的最小实现。
 """
 
 from __future__ import annotations
@@ -144,7 +144,7 @@ def stall_line(kind: str, inflight: int, since_sec: float, labels: Sequence[str]
         f"WARN {kind} 整轮停滞：{since_sec:.0f}s 里一局都没结算（还有 {inflight} 局在飞"
         + (f"：{who}" if who else "")
         + "）——单局看门狗只管单局（5s 硬顶），卡住的往往是**子进程回收或挂载点 IO**，"
-        "查那两条（platform_utils.reap_bounded 的那本账）"
+        "查那两条（common.platform_utils.reap_bounded 的那本账）"
     )
 
 

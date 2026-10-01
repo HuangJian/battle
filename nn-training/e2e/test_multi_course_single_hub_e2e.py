@@ -41,8 +41,8 @@ ROOT = Path(__file__).resolve().parent.parent  # nn-training/
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common import net_http
 from common.protocol import COURSE_ENABLE_MARKER
-from remote import net_http
 from remote.hub_client import mark_job_completed, publish_job, wait_job
 from remote.worker_server import WorkerServerState, make_worker_server
 from tests.subproc_util import spawn_bound_port
@@ -101,7 +101,7 @@ def _http(
 
     try:
         # 回环绕开环境代理：本机若有 HTTP_PROXY，裸 urllib 会把 127.0.0.1 也送出去
-        # （`no_proxy` 的 `127.*` 通配 Python 不认，见 remote/net_http.py）。
+        # （`no_proxy` 的 `127.*` 通配 Python 不认，见 common/net_http.py）。
         with net_http.urlopen(req, timeout=timeout) as resp:
             return resp.status, _as_dict(resp.read())
     except urllib.error.HTTPError as e:
@@ -164,7 +164,7 @@ class _LiveWorker:
 
 
 class _Hub:
-    """真 `remote.hub_server` 子进程（控制台实际启动的那条 argv）。"""
+    """真 `hub.server` 子进程（控制台实际启动的那条 argv）。"""
 
     def __init__(self, traj_root: Path, push_config: Path, *, extra: list[str] | None = None) -> None:
         def _argv(port: int) -> list[str]:
@@ -172,7 +172,7 @@ class _Hub:
                 sys.executable,
                 "-u",
                 "-m",
-                "remote.hub_server",
+                "hub.server",
                 "--port",
                 str(port),
                 "--host",
@@ -190,8 +190,12 @@ class _Hub:
                 "--push",
                 "--push-config",
                 str(push_config),
+                # 派发拍是**测试侧配速旋钮**：本文件有两处「等派发器转过 N 拍」的负向断言
+                # （拍数 = 事件，不拿时长猜），拍长直接决定那两处要等多久 —— 0.05s×10 拍
+                # = 0.5s 纯等待。降到 0.01s 后同样的 10 拍只要 0.1s，**断言强度不变**
+                # （拍数、每拍的动作都一模一样）；生产缺省 5s（PUSH_POLL_SEC）不受影响。
                 "--push-poll-sec",
-                "0.05",
+                "0.01",
                 *(extra or []),
             ]
 
@@ -281,7 +285,7 @@ def _make_code_zip(tmp_path: Path, name: str) -> Path:
     p = tmp_path / name
     with zipfile.ZipFile(p, "w") as z:
         z.writestr("remote/__init__.py", "")
-        z.writestr("remote_worker.py", "# fake code snapshot\n")
+        z.writestr("remote/remote_worker.py", "# fake code snapshot\n")
     return p
 
 

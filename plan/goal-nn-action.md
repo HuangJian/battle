@@ -38,7 +38,7 @@
 6. **账本同步**：卡落地即更新 §5 状态 + `docs/goal-nn.progress.md` 置顶条目。规格被推翻时改
    **规格正文**，不是只在日志里追加（手册 §6.1.1 已按此修，commit `b84c012`）。
 7. **预算是硬上限**：人日或 CPU 小时任一超限即停并写归因，禁止"再跑一会"。
-8. **CPU-only**：本机无 PyTorch GPU（`run_rl.py:266 device=cpu`）。任何加速方案先估 CPU 代价。
+8. **CPU-only**：本机无 PyTorch GPU（`trainer/run_rl.py:266 device=cpu`）。任何加速方案先估 CPU 代价。
 
 ### 0.3 卡的标准结构
 
@@ -80,7 +80,7 @@
 | 尝试 | 结果 | 当时同时成立的不利条件 |
 |---|---|---|
 | IL/DAgger（逐 tick 模仿 God-AI 的 move/fire） | 学生 **0% 胜率**（God-AI 75%） | ① 真实关卡、状态分布极宽 ② 教师分布外无标号 ③ 无自身奖励 |
-| RL（`run_rl.py`，68 iters / 38.5h） | it1 即未见收敛 | ① 真实 stage 0–3 / 12000 tick ② 守家向 Φ 奖励 ③ 从那个 0% 胜率的 BC 权重起步 |
+| RL（`trainer/run_rl.py`，68 iters / 38.5h） | it1 即未见收敛 | ① 真实 stage 0–3 / 12000 tick ② 守家向 Φ 奖励 ③ 从那个 0% 胜率的 BC 权重起步 |
 
 **课程学习同时拆掉这三条**：玩具场压窄状态分布（模仿学得动）、击杀/生存奖励稠密
 （不用等 12000 tick）、回合短（同墙钟多跑两个数量级样本）。这不是"再试一次运气"。
@@ -160,7 +160,7 @@ spawn 与 `enemyKinds` 每场固定 ⇒ **有 agent 级随机性、无地图级�
 ② ⚠️ **减半敌人必须分层抽样，不能截断队列前 N 个** —— `ENEMY_FORCES[0] = 'aaaaaaaaaaaaaaaaaabb'`
 （`stageData.ts:535`）的 2 个 `fast` 在**队尾**，截断会把它们切光，S3 反而退化成纯 basic。
 
-**(c) 训练 `--max-ticks` 必须逐级钉死**。`run_rl.py:227` 默认 **12000**、
+**(c) 训练 `--max-ticks` 必须逐级钉死**。`trainer/run_rl.py:227` 默认 **12000**、
 `export-rl-rollout.ts:62` `MAX_TICKS=36000`。若智能体学出"苟活不杀人"（§3.4 明确要防的刷分形态），
 一局就是 12000 tick ⇒ 短回合前提坍缩、shard 体积与 return 折扣时域（γ=0.995 @K=10 ≈ 33s 语义，
 12000 tick ≈ 200s）全部变形。⇒ A1 逐级钉死（初值 S1/S2 = **1200**，S3/S4a 按 A0 的 ticks 分布定）。
@@ -196,13 +196,13 @@ spawn 与 `enemyKinds` 每场固定 ⇒ **有 agent 级随机性、无地图级�
 arena 与真实关卡**必须同构**，否则每级升级都要重训主干、迁移失效。
 
 > ⚠️ **别信注释，信代码**：`export-rl-rollout.ts:32` 的注释写 `scalars (N,24)` / `mask (N,10)`，
-> 都是 v2 删 item 头之前的旧值。真实值见 `schema.py:22`（`SCALAR_DIM=19`）与
-> `schema.py:27`（`MASK_DIM = MOVE_DIM+FIRE_DIM = 7`，导出器 `:607,629`）。
+> 都是 v2 删 item 头之前的旧值。真实值见 `common/schema.py:22`（`SCALAR_DIM=19`）与
+> `common/schema.py:27`（`MASK_DIM = MOVE_DIM+FIRE_DIM = 7`，导出器 `:607,629`）。
 >
 > ⚠️ **mask 是 u1 硬掩码，不是软偏置**：应用处 `mask[i] !== 1 ? -1e9 : logits[i]`
 > （`:296,302`）⇒ 只能"**禁止**"动作，**无法"鼓励"**动作。这决定了 §3.6 方案 1 的边界。
 >
-> ⚠️ **通道已占满**：14 个 obs 通道（`schema.py:34-49`）与 19 个 scalars（`schema.py:57-77`）
+> ⚠️ **通道已占满**：14 个 obs 通道（`common/schema.py:34-49`）与 19 个 scalars（`common/schema.py:57-77`）
 > **均无空位、无保留维** ⇒ 任何"加一路目标输入"都必然改 shape、触发止损线 4。
 
 **幻影基地（必须修）**：`obs-encoder.ts:184` 无条件写鹰 `isBaseDestroyed() ? 0 : 2`，
@@ -315,7 +315,7 @@ A10 必须单独估时。
 ### 3.7 warm start 与 A5 消融
 
 **必须用 arena 口径的 DAgger**（`export-dagger-labels.ts:245` 加 `--arena`）：
-`run_rl.py:194` 的 `--bc` 默认指向 `tmp/student-weights-dagger/` —— 那是**真关卡 dagger 权重
+`trainer/run_rl.py:194` 的 `--bc` 默认指向 `tmp/student-weights-dagger/` —— 那是**真关卡 dagger 权重
 = 那个 0% 胜率的学生**，正是 §1.2 记录的失败条件 ③＋分布不匹配。**不得为省 0.25d 复用它。**
 **回退**：若某场锚被判不可用（§2.4），该级改用纯从零起步，并在 A5 记录该分支。
 
@@ -422,7 +422,7 @@ A10 必须单独估时。
   （同预算门内的资源配置，不是追加），**结转额度在 A7 出口一次性写死**。
 - 每个探针卡都要标"评估 CPU 预算"小条，超了同样停。
 - **初值推导基准（写死，防后人当估算值用）**：§1.2 的 68 iters / 38.5h 墙钟，
-  `--workers` 默认 `min(cpu,12)`（`run_rl.py:228`）⇒ **≈460 CPU-h，真实关 12000 tick 口径**。
+  `--workers` 默认 `min(cpu,12)`（`trainer/run_rl.py:228`）⇒ **≈460 CPU-h，真实关 12000 tick 口径**。
   由此反推单 iter ≈6.8 CPU-h ⇒ **S4b 的 40h 只够 ≈6 个迭代**（这正是止损线 6 的由来）。
 - **A1 出口必须实测单 iter 墙钟并据此按比例缩放四类账本**，缩放依据记录在案。
 - **A1 出口实测锚（2026-08-30 落账，`tmp/cpu-calibration.log` + 实测外推）**：
@@ -542,13 +542,13 @@ S4b 40h ≈ 6–7 iters（止损线 6 的产能核算依据，A7 出口按实测
 - **改动文件**：
   - `tools/sim/export-rl-rollout.ts`（arg 解析 `:646-668`；stage 解析 `:686`；shard 命名 `:700,777`）
   - `tools/sim/export-dagger-labels.ts:245`（`STAGES[si]`）
-  - `nn-training/rl/course.py:31`（`build_pairs` 返回 `list[tuple[int,int]]`）
-  - `nn-training/rl/queue.py:415-431`（派发命令）
-  - `nn-training/run_rl.py`（任务生成）
+  - `nn-training/biz/course.py:31`（`build_pairs` 返回 `list[tuple[int,int]]`）
+  - `nn-training/trainer/queue.py:415-431`（派发命令）
+  - `nn-training/trainer/run_rl.py`（任务生成）
 - **步骤**：
   1. 两个导出器加 `--arena`（解析 arena 编号 → `makeArena` 参数）。
   2. **arena 编号命名空间**：用与真实 stage 下标**不相交的整数段**（如 `1000+n`），
-     贯穿 `course.py → run_rl.py 任务生成 → queue.py:428 透传 → export stage 解析 →
+     贯穿 `course.py → trainer/run_rl.py 任务生成 → queue.py:428 透传 → export stage 解析 →
      shard 命名 `rl_s<id>_seed<s>` → eval dispatch` 六处。
   3. 逐级钉死训练 `--max-ticks`（初值 S1/S2 = 1200，S3/S4a 按 A0 的 ticks 分布定），
      确认 `queue.py:415-431` 透传。
@@ -606,7 +606,7 @@ S4b 40h ≈ 6–7 iters（止损线 6 的产能核算依据，A7 出口按实测
 - **目标**：S1 过门（相对 + 绝对）并登记 provisional 拓扑。
 - **前置**：A2, A3, A8a
 - **步骤**：① **入口**据 A8a 登记 §3.6 的 provisional 拓扑；
-  ② 走 arena-DAgger warm start → `train_bc.py` → `run_rl.py --bc`；
+  ② 走 arena-DAgger warm start → `train_bc.py` → `trainer/run_rl.py --bc`；
   ③ 3 布局变异上训练；④ 过门判定；⑤ 过门权重另存。
 - **验收**：过 §2.1 的 S1 双轨门；产物落 `reports/` 含 commit 与时间戳；
   **过门权重另存为 `reports/<run>-gate-pass-S1.weights.json`**（后续探针/消融都从这份取锚，
@@ -794,14 +794,14 @@ bun tools/sim/paired-gate.ts --help
 
 # 训练（统一入口）
 bun tools/training/train.ts --help
-# 关键参数（run_rl.py）：--bc <权重> --iters --stages --seeds --max-ticks \
+# 关键参数（trainer/run_rl.py）：--bc <权重> --iters --stages --seeds --max-ticks \
 #   --difficulty --workers --epochs --curriculum-stages/-start/-every/-grow
 
 # 可区分性冒烟（纪律 1）
 bun test tests/sim/eval-game-parity.test.ts
 
 # CPU 墙钟校准（A1 出口必做）
-bun tools/training/train.ts --script run_rl.py --iters 3 --stages 0 --seeds 0-3 \
+bun tools/training/train.ts --script trainer/run_rl.py --iters 3 --stages 0 --seeds 0-3 \
   --max-ticks 1200 --out tmp/calib 2>&1 | tee reports/cpu-calibration.log
 ```
 
@@ -899,10 +899,10 @@ A0 与 A1 的布局散列一致性验收。
 | RL 网络 `[move(5), fire(2)]` | `nn-training/rl_model.py`（`MOVE_DIM=5` `:28`、`FIRE_DIM=2` `:29`、logits `(B,7)` `:58`） |
 | 逐决策步采集 + 内联 R3 奖励 | `tools/sim/export-rl-rollout.ts`（`K=10` `:63`、`MAX_TICKS` `:62`、arg `:646-668`、stage 解析 `:686`、shard 命名 `:700,777`、落盘动作 `:449-473`、mask 应用 `:296,302`） |
 | 模仿标号（v2：move+fire） | `tools/sim/export-dagger-labels.ts:245` |
-| 课程配对（只出整数 stage） | `nn-training/rl/course.py:31` |
-| 采集命令构造 | `nn-training/rl/queue.py:415-431` |
-| 训练器参数 | `nn-training/run_rl.py`（`--bc` `:194`、`--max-ticks` 默认 12000 `:227`、`--workers` `:228`、`--curriculum-*` `:214-224`、`device=cpu` `:266`） |
-| schema 真值 | `nn-training/schema.py`（`OBS_CHANNELS=14` `:14`、`SCALAR_DIM=19` `:22`、`MASK_DIM=7` `:27`、通道表 `:34-49`、scalars 表 `:57-77`） |
+| 课程配对（只出整数 stage） | `nn-training/biz/course.py:31` |
+| 采集命令构造 | `nn-training/trainer/queue.py:415-431` |
+| 训练器参数 | `nn-training/trainer/run_rl.py`（`--bc` `:194`、`--max-ticks` 默认 12000 `:227`、`--workers` `:228`、`--curriculum-*` `:214-224`、`device=cpu` `:266`） |
+| schema 真值 | `nn-training/common/schema.py`（`OBS_CHANNELS=14` `:14`、`SCALAR_DIM=19` `:22`、`MASK_DIM=7` `:27`、通道表 `:34-49`、scalars 表 `:57-77`） |
 | obs 编码（幻影基地） | `src/nn/obs-encoder.ts:184-189` |
 | 无基地 guard | `src/game/TileMap.ts:227-230`；God-AI 侧 `hasBase` 保护 `src/ai/GodAIInput.ts:213-217` |
 | 世界态感知基元 | `src/ai/perception.ts:107`（`scanAhead`）、`:178`（`computeOpenDirs`）、`:198`（`perceive`） |

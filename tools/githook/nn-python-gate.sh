@@ -9,7 +9,9 @@
 # 并行架构（v3.15 2026-09-03；v3.16 2026-09-15 起 pytest 目标含 e2e/；
 # v3.17 2026-09-17 起 worker 数 × 线程数按实测重调，见下节；
 # v3.18 2026-09-20 起双向路径改按「python 是不是 Windows 二进制」判定，
-# 不再只看 wslpath 存不存在，见下方「双向路径」一节）：
+# 不再只看 wslpath 存不存在，见下方「双向路径」一节；
+# v3.19 2026-09-29 起 pytest 在 **Linux** 上走 forkdist（收集一次 + fork），Windows/macOS 仍走
+# xdist，见下方「pytest 分发器」一节）：
 #   ruff(~1s) / mypy(~4s 热缓存) / pytest xdist 全量 三路并行。
 #   全量 = tests/（单测层）+ e2e/（集成层）。**两层同一次 xdist 调用**：实测（16 核）
 #   tests/ 22s → tests/+e2e/ 27s，只 +5s（另外单跑一次要重复付 torch import 与
@@ -38,7 +40,7 @@
 #                 -n 12 峰值 pytest 进程树 RSS ≈ 3.9GB，≈ -n 4 的 3 倍）。NN_GATE_NPROC 覆盖。
 #   默认内线程   = 1（OMP/MKL/OPENBLAS，须在 python 启动前 export）。NN_GATE_THREADS 覆盖
 #                 （0 = 不设，退回 torch 自己的默认 = 各 worker 开满物理核）。
-#   注：该 env 随进程树继承到测试 spawn 的子进程（如 train_loop.py 的 os.environ.setdefault）；
+#   注：该 env 随进程树继承到测试 spawn 的子进程（如 trainer/train_loop.py 的 os.environ.setdefault）；
 #   训练入口里的 torch.set_num_threads(--threads) 是进程内显式覆盖，不受此影响。
 #   为何 12 而非 8（2026-09-26 CPU 记账，/usr/bin/time 记 user+sys）：-n8 时 8 物理核
 #   平均只 busy 4.6~5.1 核（每 worker 约 57% 在 CPU 上）—— 本套件大量时间在等子进程/
@@ -53,7 +55,7 @@
 #   的机器/镜像可跑 2620/2980 用例），不作加速。
 #
 # 单测墙钟护栏（2026-09-15）：pytest 加 `--timeout=${NN_PYTEST_TIMEOUT_S:-60}`
-#  ——与 task.py check 同款 60s/用例（本仓最慢单测实测 22s，有 ~2.7× 余量）。
+#  ——与 tools/task.py check 同款 60s/用例（本仓最慢单测实测 22s，有 ~2.7× 余量）。
 #   背景：编码 agent 沙箱里全量曾「~34% 处 hang」（2026-09-15 Mimo；2026-09-14 无按键
 #   KeyboardInterrupt 见 memory 记录）——无超时时门禁永远挂着，agent 反复重试 commit。
 #   现在超时 → 响亮超时报错 + 调用栈，可诊断可重试；被误伤（慢机超 60s）用
@@ -86,12 +88,12 @@
 #        拦截 → safe-delete FAIL_CLOSED 抛 SystemExit → mypy INTERNAL ERROR；
 #     2. 同一 turn 内累积删除数越过阈值（实测 count 56 > threshold 50,
 #        scope=turn）→ 之后所有删除被拒 → 依赖真实删除的用例（如
-#        tests/test_workdir_sweep.py）批量转红。
+#        tests/worker/test_workdir_sweep.py）批量转红。
 #   典型触发场景：一个会话里反复跑全量（跑十几次必然踩满配额）。**单跑该文件
 #   会通过**——这就是判据：单跑绿、全量红，且日志里有 [safe-delete] 行 = 环境。
 #   干净验证方式（临时停用 shim，不改仓库）：
 #     CODEBUDDY_SAFE_DELETE_ENABLED=0 bash tools/githook/nn-python-gate.sh
-#   仓库侧的正交修复（已完成）：nn-training/platform_utils.rmtree_best_effort
+#   仓库侧的正交修复（已完成）：nn-training/common/platform_utils.py::rmtree_best_effort
 #   ——shutil 的 ignore_errors=True 挡不住 SystemExit（BaseException），会把调用
 #   线程打死；所有清理路径一律走该助手。
 set -u
@@ -168,18 +170,42 @@ fi
 
 # ---- worker 数：默认 min(核数, 12)（见文件头实测那一节），NN_GATE_NPROC 覆盖 ----
 # 核数用 venv python 自己问（`-S` 跳过 site：秒级、且唯一跨平台可靠口径）；
-# **口径是 platform_utils.effective_cores()**（容器 cgroup 配额/亲和掩码 > 宿主机裸数）：
+# **口径是 common.platform_utils.effective_cores()**（容器 cgroup 配额/亲和掩码 > 宿主机裸数）：
 # 容器里 `os.cpu_count()` 报的是宿主机的核数（Kaggle 224 vs cgroup 96）—— 门禁虽另有 12 的
 # 上界兜着，但「按哪个数算」只允许有一个答案（见 2026-09-25 云机卡死那笔账）。
-# 求值必须在 nn-training 目录内（`-S` 下 sys.path[0] 是 cwd，platform_utils 在仓库里）。
+# 求值必须在 nn-training 目录内（`-S` 下 sys.path[0] 是 cwd，common.platform_utils 在仓库里）。
 # 结果不是纯数字（python 起不来等）就退回 4（旧默认，安全）。
-CORES=$(cd "$NN_ROOT" && "$NN_PY" -S -c 'from platform_utils import effective_cores; print(effective_cores())' 2>/dev/null || echo "")
+CORES=$(cd "$NN_ROOT" && "$NN_PY" -S -c 'from common.platform_utils import effective_cores; print(effective_cores())' 2>/dev/null || echo "")
 case "$CORES" in
   '' | *[!0-9]*) CORES=4 ;;
 esac
 NPROC=${NN_GATE_NPROC:-$CORES}
 [ "$NPROC" -gt 12 ] && NPROC=12
 [ "$NPROC" -lt 1 ] && NPROC=1
+
+# ---- pytest 分发器：Linux = 「收集一次 + fork」，其余 = xdist -n（v3.19 2026-09-29）----
+# 为什么换：`-n 12` 下**每个 worker 都收集全部 ~275 个测试模块**（12 份里 11 份是冗的），
+# 实测占 worker 自用 CPU 的 35%。`tools/forkdist.py` 让 master 收集一次再 `os.fork()` 出
+# worker（COW 继承 sys.modules 与已收集的 Item），逐条动态派发 + 报告重放，语义与 xdist 的
+# `--dist=load` 对齐。16 核安静窗口实测（各 3 轮轮转取 min）：墙钟 22.69 → **19.81s**，
+# user 191.7 → **115.3s**（内存峰值两者持平，约 4.8GB）。详见 docs/nn/engineering.md §49。
+# 判据（与路径转换同源：看「选中的 python 是什么」，不看 uname/wslpath 存不存在）：
+#   · Windows 二进制 python（`.venv/Scripts/python.exe`，MSYS/WSL 两种 bash 都算）
+#     —— 没有 os.fork，只能在 xdist 上跑；
+#   · macOS —— master 在 fork 之前已经 import torch（收集期），libgomp/dyld 与 fork 的组合
+#     本仓没有验证，保守继续用 xdist（xdist 每次都是新进程，天然没有这个面）。
+# NN_GATE_FORKDIST=0 强制 xdist；=1 强制走 forkdist（非 Linux 上自担风险）。
+FORKDIST=0
+case "$NN_PY" in
+  *.exe) : ;;
+  *)
+    [ "$(uname -s 2>/dev/null)" = "Linux" ] && FORKDIST=1
+    ;;
+esac
+case "${NN_GATE_FORKDIST:-auto}" in
+  0) FORKDIST=0 ;;
+  1) FORKDIST=1 ;;
+esac
 
 SKIP_LIST=${NN_GATE_SKIP:-}
 has_skip() {
@@ -190,7 +216,11 @@ has_skip() {
 }
 
 cd "$NN_ROOT"
-echo "▶ nn-training python gate（ruff + mypy + pytest xdist -n $NPROC，CPU 内线程 $GATE_THREADS，parallel）"
+if [ "$FORKDIST" = "1" ]; then
+  echo "▶ nn-training python gate（ruff + mypy + pytest forkdist --forkdist $NPROC，CPU 内线程 $GATE_THREADS，parallel）"
+else
+  echo "▶ nn-training python gate（ruff + mypy + pytest xdist -n $NPROC，CPU 内线程 $GATE_THREADS，parallel）"
+fi
 # 门禁前清理过期测试临时目录（python -S 绕过沙箱删除保护，仅限 tmp/pytest-tmp
 # 下 KEEP_DAYS 天前的子目录；NN_TMP_KEEP_DAYS 可调，默认 7）。失败静默（清理
 # 是锦上添花，不阻塞门禁）。
@@ -261,9 +291,16 @@ fi
 if has_skip pytest; then
   echo " ▸ pytest skipped（NN_GATE_SKIP=$SKIP_LIST）"
 else
-  # 全量：xdist -n $NPROC，带单测墙钟护栏（--timeout，见文件头）。
+  # 全量：分发器见「pytest 分发器」一节；带单测墙钟护栏（--timeout，见文件头）。
+  # --forkdist 与 -n **互斥**（两者都接管 pytest_runtestloop，同时给会被插件当场拒绝）。
   # shellcheck disable=SC2086
-  run_tool pytest "$NN_PY" -m pytest $PYTEST_TARGETS -n "$NPROC" --timeout="${NN_PYTEST_TIMEOUT_S:-60}"
+  if [ "$FORKDIST" = "1" ]; then
+    run_tool pytest "$NN_PY" -m pytest $PYTEST_TARGETS -p tools.forkdist --forkdist "$NPROC" \
+      --timeout="${NN_PYTEST_TIMEOUT_S:-60}"
+  else
+    run_tool pytest "$NN_PY" -m pytest $PYTEST_TARGETS -n "$NPROC" \
+      --timeout="${NN_PYTEST_TIMEOUT_S:-60}"
+  fi
 fi
 
 RC=0

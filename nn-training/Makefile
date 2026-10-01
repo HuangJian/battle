@@ -3,7 +3,7 @@
 # Usage:
 #   make setup          One-command env bootstrap (GPU detect -> torch variant -> uv sync)
 #   make check          Lint + typecheck + 全量测试（== pre-commit 门禁，同一套）
-#   make test           Full test suite（单测层 + 集成层；NPROC/THREADS 可覆盖）
+#   make test           Full test suite（单测层 + 集成层；NPROC/THREADS/PYTEST_DISPATCH 可覆盖）
 #   make test-fast      Unit layer only（tests/，无 e2e）
 #   make test-e2e       Integration layer only（e2e/）
 #   make smoke          Torch import check + smoke_test
@@ -15,7 +15,7 @@
 #   make weights-prune-apply  Actually prune weights/ keeping latest K per family
 #   make weights-update-md    Regenerate weights/WEIGHTS.md inventory
 #
-# Note: Windows users without `make` can use `python task.py <target>` instead.
+# Note: Windows users without `make` can use `python tools/task.py <target>` instead.
 
 .PHONY: check test test-fast test-e2e smoke clean format lint typecheck setup
 # 层 = 路径（2026-09-15）：tests/ = 单测层、e2e/ = 集成层。旧 `-m "not heavy"` 已删——
@@ -55,7 +55,7 @@ endif
 
 # 一条指令搭环境：探测 GPU → 选 torch 变体 → uv sync → 装后自检
 setup:
-	python bootstrap.py
+	python tools/bootstrap.py
 
 # check 直接委派给门禁脚本——单一实现，杜绝“日常命令”与“提交门禁”漂移。
 check: python-gate
@@ -77,18 +77,31 @@ export OMP_NUM_THREADS = $(THREADS)
 export MKL_NUM_THREADS = $(THREADS)
 export OPENBLAS_NUM_THREADS = $(THREADS)
 
+# ---- 分发器（2026-09-29，docs/nn/engineering.md §50）：Linux = 「收集一次 + fork」----
+# 判据与门禁同一条：① 有没有 `os.fork`（Windows 没有）② 内核是不是 Linux（macOS 上
+# master 在 fork 前已经 import torch，libgomp/dyld 与 fork 的组合本仓未验证）。
+# `--forkdist auto` = 机器核数（platform_utils.effective_cores，cgroup 配额优先），
+# 所以 `NPROC=auto` 与 `NPROC=8` 两种打法都不变；`PYTEST_DISPATCH` 亦可整体覆盖。
+# 16 核实测（tests/+e2e/）：wall 21.99 → 17.57s、user 233.9 → 121.6s。
+UNAME_S := $(shell uname -s 2>/dev/null)
+ifeq ($(UNAME_S),Linux)
+PYTEST_DISPATCH ?= -p tools.forkdist --forkdist $(NPROC)
+else
+PYTEST_DISPATCH ?= -n $(NPROC)
+endif
+
 test:
-	$(PREFIX) $(PYTHON) -m pytest tests/ e2e/ -n $(NPROC) -q
+	$(PREFIX) $(PYTHON) -m pytest tests/ e2e/ $(PYTEST_DISPATCH) -q
 
 test-fast:
-	$(PREFIX) $(PYTHON) -m pytest tests/ -n $(NPROC) -q
+	$(PREFIX) $(PYTHON) -m pytest tests/ $(PYTEST_DISPATCH) -q
 
 test-e2e:
-	$(PREFIX) $(PYTHON) -m pytest e2e/ -n $(NPROC) -q
+	$(PREFIX) $(PYTHON) -m pytest e2e/ $(PYTEST_DISPATCH) -q
 
 smoke:
 	$(PREFIX) $(PYTHON) -c "import torch; print('torch', torch.__version__)"
-	$(PREFIX) $(PYTHON) smoke_test.py
+	$(PREFIX) $(PYTHON) tools/smoke_test.py
 
 format:
 	$(PREFIX) $(PYTHON) -m ruff format .
@@ -107,10 +120,10 @@ clean:
 
 # ---- weights pruning (NEW) ----
 weights-prune:
-	$(PREFIX) $(PYTHON) weights_prune.py --keep $(WEIGHTS_KEEP) --dir weights/ --dry-run
+	$(PREFIX) $(PYTHON) tools/weights_prune.py --keep $(WEIGHTS_KEEP) --dir weights/ --dry-run
 
 weights-prune-apply:
-	$(PREFIX) $(PYTHON) weights_prune.py --keep $(WEIGHTS_KEEP) --dir weights/ --apply
+	$(PREFIX) $(PYTHON) tools/weights_prune.py --keep $(WEIGHTS_KEEP) --dir weights/ --apply
 
 weights-update-md:
-	$(PREFIX) $(PYTHON) weights_prune.py --dir weights/ --update-md
+	$(PREFIX) $(PYTHON) tools/weights_prune.py --dir weights/ --update-md

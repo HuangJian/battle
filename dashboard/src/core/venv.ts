@@ -1,9 +1,9 @@
-/** venv.ts — venv 真实解释器解析 + bootstrap 委派（torch 安装决策只活在 bootstrap.py）。
+/** venv.ts — venv 真实解释器解析 + bootstrap 委派（torch 安装决策只活在 tools/bootstrap.py）。
 
  *  - 解析 uv venv 跳板：.venv\Scripts\python.exe 是 trampoline，真正干活的是它另起的
  *    基础解释器子进程；只杀跳板会留下孤儿继续占端口。读 pyvenv.cfg 的
  *    executable/home 直取真实解释器，第三方包由 PYTHONPATH 挂 venv site-packages。
- *  - venv/torch 未就绪时委派 nn-training/bootstrap.py（探测 GPU → 选 torch 变体 →
+ *  - venv/torch 未就绪时委派 nn-training/tools/bootstrap.py（探测 GPU → 选 torch 变体 →
  *    uv sync → 装后自检）——与原 start-training.sh/.ps1 的行为逐项等价。
  */
 
@@ -76,7 +76,7 @@ function findSystemPython(): string | null {
   return null
 }
 
-/** 确保 venv+torch 就绪；缺了委派 bootstrap.py（GPU 探测/变体选择/uv sync/自检）。
+/** 确保 venv+torch 就绪；缺了委派 tools/bootstrap.py（GPU 探测/变体选择/uv sync/自检）。
  *  返回 false = 引导失败（调用方报错退出，退出码 4 对齐旧启动器约定）。 */
 export function ensureVenv(): boolean {
   if (venvTorchReady()) return true
@@ -85,8 +85,8 @@ export function ensureVenv(): boolean {
     fail('找不到系统 Python。请安装 Python 3.10+，或设 PYTHON 指向有效 python。')
     return false
   }
-  log('venv/torch 未就绪 -> 委派 bootstrap.py（探测 GPU → 选变体 → uv sync → 自检）')
-  const args = sysPy === 'py' ? [sysPy, '-3', 'bootstrap.py'] : [sysPy, 'bootstrap.py']
+  log('venv/torch 未就绪 -> 委派 tools/bootstrap.py（探测 GPU → 选变体 → uv sync → 自检）')
+  const args = sysPy === 'py' ? [sysPy, '-3', 'tools/bootstrap.py'] : [sysPy, 'tools/bootstrap.py']
   // PYTHONUTF8=1：zh-CN Windows 控制台 cp936 会让 bootstrap 的 ⚠/✓ 输出炸
   // UnicodeEncodeError（§17.6）；强制 utf-8 与训练子进程同规。
   const r = Bun.spawnSync(args, {
@@ -96,11 +96,11 @@ export function ensureVenv(): boolean {
     stderr: 'inherit',
   })
   if (r.exitCode !== 0) {
-    fail(`bootstrap.py 失败（退出码 ${r.exitCode}）。看上方输出。`)
+    fail(`tools/bootstrap.py 失败（退出码 ${r.exitCode}）。看上方输出。`)
     return false
   }
   if (!venvTorchReady()) {
-    fail('torch 仍无法导入。查看上方 bootstrap.py 输出。')
+    fail('torch 仍无法导入。查看上方 tools/bootstrap.py 输出。')
     return false
   }
   return true
@@ -109,7 +109,7 @@ export function ensureVenv(): boolean {
 /** torch 线程数决策：--torch-threads 显式 > rl-config rl.torch_threads > CPU 数 clamp 1..12。
  *
  * 核数走 `effectiveCores()`（容器配额/亲和掩码 > 宿主机裸数，与 python 侧
- * `platform_utils.effective_cores` 同口径）：`navigator.hardwareConcurrency` 在容器里报的是
+ * `common.platform_utils.effective_cores` 同口径）：`navigator.hardwareConcurrency` 在容器里报的是
  * **宿主机**核数（Kaggle 224 vs cgroup 配额 96），照它取线程数是 2.3× 超订，PPO 反而更慢。 */
 export function resolveTorchThreads(cliThreads: number, cfgThreads: number | undefined): number {
   if (cliThreads > 0) return cliThreads

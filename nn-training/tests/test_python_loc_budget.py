@@ -2,7 +2,7 @@
 
 **为什么要有它**：S5 那一轮（`plan/nn-training-refactor.md` §5.7）把九个 1000+ 行的「神模块」
 拆成 19 个可独立依赖的模块 —— 但那是一次性的人力侦察，没有任何东西拦着下一个模块长到
-1400 行（`rl/gate_check.py` 从 1412 拆到 622 之前就一直是那个形状）。本测试把
+1400 行（`biz/gate_check.py` 从 1412 拆到 622 之前就一直是那个形状）。本测试把
 「>1000 行 = 设计问题，不是笔误」变成门禁：**每次门禁都在问同一个问题**。
 
 **口径**（用户钦定，与 `tmp/measure_loc_budget.py` 一致）：
@@ -16,7 +16,7 @@
 **豁免**（用户 2026-09-28 裁定）：
 
   · `tests/` 与 `e2e/` 两层**整体**不设限 —— 测试的体量是「覆盖了多少场景」的函数，
-    压它等于少测（同日的实测：`tests/test_remote_iter.py` 1309、`tests/test_remote_ppo.py`
+    压它等于少测（同日的实测：`tests/remote/test_remote_iter.py` 1309、`tests/remote/test_remote_ppo.py`
     1258 在这一口径下超限，但它们的行数来自场景枚举，不是结构冗余）；
   · `remote/offline_boot.py` —— standalone 运输单元（notebook 从 GitHub raw 按名单拉取，
     顶层不得 `import remote.*`），§5.7.3 实测「取包面闭包 47/86 节点、心跳簇 29 节点」
@@ -51,7 +51,7 @@ EXEMPT_DIR_ROOTS = ("nn-training/tests/", "nn-training/e2e/")
 #: 扫描锚：这些**非豁免**文件必须在扫描结果里（防「扫了个寂寞」也算绿）。
 SCAN_ANCHORS = (
     "nn-training/remote/worker.py",
-    "nn-training/rl/dispatch.py",
+    "nn-training/trainer/dispatch.py",
     "nn-training/common/protocol.py",
 )
 

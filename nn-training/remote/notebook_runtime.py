@@ -36,8 +36,8 @@ from pathlib import Path
 from typing import Any, cast
 
 from common.logutil import log_line
+from common.pid_probe import pid_alive
 from common.proc import run_capture
-from pid_probe import pid_alive
 
 # cell 端 /code 引导（fetch+unpack+sys.path）已完成；本模块只管运行时。
 
@@ -45,7 +45,7 @@ from pid_probe import pid_alive
 def _log_default(msg: str) -> None:
     """默认日志（tag=`battle-rl`）——行格式见 `common.logutil`（`clock=time` 保可注入）。
 
-    ⚠ `tests/test_notebook_runtime.py` 用 `monkeypatch.setattr(nbr, "time", clock)`
+    ⚠ `tests/remote/test_notebook_runtime.py` 用 `monkeypatch.setattr(nbr, "time", clock)`
     注入假钟 ⇒ 必须把本模块的 `time` 传进去，不能让 logutil 自己取全局 `time`。
     """
     log_line("battle-rl", msg, clock=time)
@@ -266,7 +266,7 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
 
 
 def _pid_alive(pid: int | None) -> bool:
-    """存活探测（委托唯一实现 `pid_probe.pid_alive`）。
+    """存活探测（委托唯一实现 `common.pid_probe.pid_alive`）。
 
     2026-09-17 收口：此处原是**函数内的嵌套闭包**，且直接 `os.kill(int(pid), 0)` —— 两个问题：
     ① 在 Windows 上 `os.kill(pid, 0)` 是 `TerminateProcess(handle, 0)`，而本函数用来判断
@@ -409,7 +409,7 @@ def run_push_worker(cfg: dict[str, Any], log) -> int:
     serve_env["PYTHONPATH"] = (str(boot_dir) + os.pathsep + serve_env.get("PYTHONPATH", "")).rstrip(os.pathsep)
     with open(serve_log, "w") as log_f:
         serve_proc = subprocess.Popen(
-            [sys.executable, "-u", "-m", "remote_worker_serve",
+            [sys.executable, "-u", "-m", "remote.remote_worker_serve",
              "--port", str(cfg["push_port"]), "--token", str(cfg["push_token"]),
              "--work", str(work_dir), "--device", str(cfg["device_resolved"])],
             stdout=log_f, stderr=subprocess.STDOUT, env=serve_env,

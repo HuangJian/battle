@@ -245,7 +245,7 @@ interface HtmlRow {
   avgKills: number
 }
 
-/** eval_log.jsonl 的 eval_summary 行（干净评估轮汇总，run_rl.py dispatch_eval_round 写出）。 */
+/** eval_log.jsonl 的 eval_summary 行（干净评估轮汇总，trainer/run_rl.py dispatch_eval_round 写出）。 */
 export interface EvalSummary {
   iter: number
   wver: string
@@ -544,7 +544,7 @@ function esc(s: string): string {
 
 /**
  * 读调度器落盘的 dist-agent-meta.jsonl，按节点聚合采样元数据。
- * 记录由 run_rl 的 run_rollout_queue 每交付/失败一局写一行（run_rl.py _record_agent_meta）；
+ * 记录由 run_rl 的 run_rollout_queue 每交付/失败一局写一行（trainer/run_rl.py _record_agent_meta）；
  * 干净评估局也同册入账（eval_dispatch.record，mode:"eval"）——健康表全量计入，
  * 但 okByIt（节点贡献列数据源）排除 eval 行：该列已另行合并 ev.nodes，不排则双算。
  * 行字段：node / [mode] / it / stage / seed / ok / win / elapsedSec(成功) | reason(失败) / ts。

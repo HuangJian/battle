@@ -1,12 +1,22 @@
-"""remote_dag —— `remote/` **内部依赖的单一账本**（2026-09-23 S4 第八刀后补）。
+"""remote_dag —— `remote/` + `hub/` + `worker/` **内部依赖的单一账本**（2026-09-23 S4 第八刀后补）。
+
+> 2026-09-30（刀 1，hub 出包）：账本从「只管 `remote/`」扩到**两个包**。理由不是「顺便」：
+> hub 本来就在这张图里（当时是 `remote/hub/`），拆包之后若把它挪到一份新账本，同一张依赖图
+> 就有了两个各自会漂移的「谁在谁上面」名单 —— 而那正是本模块存在的理由。
+>
+> 2026-09-30（刀 3，`worker/` 出包）：同一理由再扩一次（**三个包**）。`serve_pool` /
+> `iter_rollout` 从 `remote/` 搬到 `worker/`，它们与 `remote.*` 之间**有边**
+> （`remote.worker` → `worker.iter_rollout`、`remote.offline_eval` → `worker.serve_pool`），
+> 所以必须与 `remote.*` 同处**一套层号**里 —— 拆成两份账本就看不到那些边，
+> 「谁在谁上面」立刻变成两份各自会漂的真相。**层号仍是全局秩**：`WORKER_DIR` 只是目录。
 
 ## 为什么要有它
 
 S4 把 `worker.py` 拆成 `wire` / `http` / `job_fs` / `bc_job` / `download` / `job_lifecycle` 之后，
 「新模块不得反向 import `remote.worker`」这句话在**六个**拆分守卫里各写了一遍（其中三个还各带一份
 `ALLOWED_IMPORTS` / `PROJECT_ROOTS` 白名单）。同一件事写六遍的坏处不是啰嗦，而是**漂移**：
-`tests/test_layering.py` 记过一次同类事故——首版判据只给 `remote` 展开子模块、没给 `rl` 展开，
-于是两条断言在反向探针下**静默不动**（测试全绿而守卫是瞎的）。
+`tests/test_layering.py` 记过一次同类事故——首版判据只给 `remote` 展开子模块、没给 `rl`（今
+`trainer`）展开，于是两条断言在反向探针下**静默不动**（测试全绿而守卫是瞎的）。
 
 本模块把这件事收成**一张账本**：
 
@@ -46,16 +56,35 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 REMOTE_DIR = ROOT / "remote"
+#: hub 包目录（刀 1 出包）。
+HUB_DIR = ROOT / "hub"
+#: 节点侧执行体包目录（刀 3 出包；层号在 `remote/` **下面**）。
+WORKER_DIR = ROOT / "worker"
+#: 账本覆盖的**顶层包名**（键前缀即包名：`remote.wire` / `hub.boot` / `worker.serve_pool`）。
+LEDGER_PACKAGES = ("remote", "hub", "worker")
+
+
+def ledger_package(target: str) -> str | None:
+    """点分名所属的**账本顶层包**（不在账本里 → None）。"""
+    head = (target or "").split(".")[0]
+    return head if head in LEDGER_PACKAGES else None
+
+
+def package_roots() -> dict[str, Path]:
+    """包名 → 目录。**函数形式且现读全局**：合成源码的自证用例 monkeypatch 目录后必须生效。"""
+    return {"remote": REMOTE_DIR, "hub": HUB_DIR, "worker": WORKER_DIR}
 
 #: `remote/` 内部的**分层账本**：数字越小越底层，每条边必须从大数指向小数。
 #:
 #: 这份数字不是拍脑袋排的，是**拓扑秩**（从叶子往上的最长路径长度）——所以它读起来就是架构：
 #:
-#: * **L0 原语/叶子**：锁、端口守卫、产物存储、bulk 调度器、bundle、net_http、prefetch、
-#:   结果上传器、serve_pool、三个自包含引导模块、`hub.admin`、`colab_bc`、`hub.store_*` 里
-#:   除 `store_offline` 外的五个状态混入（账本 / 计量 / 调度 / 租约 / 结果：只靠 `common.protocol`）；
+#: * **L0 原语/叶子**：产物存储、bulk 调度器、bundle、prefetch、结果上传器、
+#:   `worker.serve_pool`（节点长驻池：只靠 `common.*`）、三个自包含引导模块、`hub.admin`、
+#:   `colab_bc`、`hub.store_*` 里除 `store_offline` 外的五个状态混入（账本 / 计量 / 调度 / 租约 /
+#:   结果：只靠 `common.protocol`）；
 #: * **L1 单层传输/落盘**：`wire`（传输账）· `job_fs`（作业工作区）· `hub_client` ·
-#:   `offline_deliver` · `offline_eval` · `deliver_zip` · `iter_rollout` ·
+#:   `offline_deliver` · `offline_eval` · `deliver_zip` · `worker.iter_rollout`（靠 L0 的
+#:   `worker.serve_pool`）·
 #:   `hub.store_offline`（离线段产物：要靠 L0 的 `artifacts` + `common.fs`，比同族高一层）·
 #:   `hub.task_pack`（任务包判据叶子：`offline` 与 `queue_offline` 的共同依赖）；
 #: * **L2 传输核心**：`http`（所有业务簇的公共底座）· `push_client` · `plan_handoff`（半离线交接面：
@@ -79,35 +108,41 @@ REMOTE_DIR = ROOT / "remote"
 #: * **L8 站在门面之上的探针**：`smoke_loopback` · `tunnel_ab_probe`（都 import `hub_server`
 #:   起真服务）· `notebook_boot`（最外层，只经延迟 import 碰其它模块）。
 LAYERS: dict[str, int] = {
-    "remote._instance_lock": 0,
-    "remote._port_guard": 0,
+    # ⚠ 2026-09-30（刀 2）：`_instance_lock` / `_port_guard` / `net_http` 三个 L0 原语已从
+    # `remote/` 搬进 `common/` ⇒ **从本账本删掉**（本账本只对账 `remote/` + `hub/`；
+    # 留着它们的 `common.*` 键就是「账本腐烂」——`test_ledger_covers_exactly_every_remote_module`
+    # 会当场报 stale）。它们是 stdlib-only 叶子（L0），搬走不改变任何残留边的方向。
     "remote.artifacts": 0,
     "remote.bulk_sched": 0,
     "remote.worker_proc": 0,
     "remote.bundle": 0,
     "remote.colab_bc": 0,
-    "remote.hub.admin": 0,
+    "hub.admin": 0,
     # 鉴权原语（S4 第十五刀）：`_is_loopback` + `_AuthGuard`（D9 闭锁）从 `hub_server` 下沉到这里。
     # 只靠标准库 ⇒ L0；`hub.store`（组合类）与 `hub.queue_auth`（鉴权域混入）都站在它上面。
-    "remote.hub.auth": 0,
-    "remote.hub.blob": 0,
-    "remote.hub.schedule": 0,
+    "hub.auth": 0,
+    "hub.blob": 0,
+    "hub.schedule": 0,
     # 状态类拆分（S4 第十四刀）：`_JobStore` 的六个域混入。五个只靠协议层；`store_offline`
     # 另需 `remote.artifacts`（L0）⇒ 高一档住 L1。它们彼此**零 import**（跨域调用经 `self`）。
-    "remote.hub.store_ledger": 0,
-    "remote.hub.store_scheduling": 0,
-    "remote.hub.store_leases": 0,
-    "remote.hub.store_results": 0,
-    "remote.hub.store_wire": 0,
-    "remote.net_http": 0,
+    "hub.store_ledger": 0,
+    "hub.store_scheduling": 0,
+    "hub.store_leases": 0,
+    "hub.store_results": 0,
+    "hub.store_wire": 0,
     "remote.prefetch": 0,
     # 任务包新鲜度门 / 缺包自愈门 / 清单读数的**纯判据**（合并 origin 时新拆的叶子）：只靠
     # `common.protocol` + `net_http`(L0) ⇒ **L1**。放在这里（而不是挂在 `hub/http_face`）是因为
     # 它有两个低层读者：`hub.offline`（取包端点）与 `hub.queue_offline`（离线清单）。
-    "remote.hub.task_pack": 1,
+    "hub.task_pack": 0,
 
     "remote.result_upload": 0,
-    "remote.serve_pool": 0,
+    # 2026-09-30（刀 3）：`serve_pool` / `iter_rollout` 出包到 `worker/` ⇒ 键前缀随之改。
+    # ⚠ 它们**不是**「搬走就不必入账」：与 `remote.*` 之间**有边**（`remote.worker` →
+    # `worker.iter_rollout`、`remote.offline_eval` → `worker.serve_pool`），所以仍在**同一套**
+    # 全局层号里（层号 = 拓扑秩，跨包一致）。谁把它们当成「另一个包的账本」挪走，
+    # 那些边就会静默消失 —— `test_layer_numbers_are_dense_and_meaningful` 会当场报空洞。
+    "worker.serve_pool": 0,
     "remote.tailscale_boot": 0,
     # 离线引导的交付面（S5 第十四刀）：从 `offline_boot` 搬出的 standalone 兄弟文件；
     # stdlib-only ⇒ 无仓内依赖 ⇒ **L0**（`offline_boot`(L7) 经 `importlib` 惰性装载——
@@ -118,82 +153,197 @@ LAYERS: dict[str, int] = {
     # （`probe_job_result` / `poll_job` / `wait_job`）+ 停机达令 + `HubClientError`。
     # 依赖面 = `common.protocol` + `net_http`(L0，延迟) ⇒ **L1**；`hub_client` 转而站在它
     # 上面（顶层边）⇒ 从 L1 升到 **L2**。
-    "remote.hub_http": 1,
-    "remote.hub_client": 2,
-    "remote.hub.store_offline": 1,
+    "remote.hub_http": 0,
+    "remote.hub_client": 1,
+    "hub.store_offline": 1,
     # `_JobStore` 组合类（S4 第十五刀）：第十四刀把六个域混入拆到 `hub/store_*.py`，本刀把组合类
     # 本身也从 `hub_server` 搬出来 —— 不是对称好看，而是 `_HubQueue` 的课程表域要**构造** store、
-    # `_store_of` 要**注解**它，而 `remote/hub/*` 不得 import `hub_server`（成环）。
+    # `_store_of` 要**注解**它，而 `hub/*` 不得 import `hub_server`（成环）。
     # 它依赖六个混入（最深 `store_offline` L1）⇒ 拓扑秩 **L2**。
-    "remote.hub.store": 2,
+    "hub.store": 2,
     # `_HubQueue` 的七个域混入（S4 第十五刀）：全部站在 `hub.store`（L2）上 —— 不是「都往
     # 高层次凑」，而是每一簇都要**注解** `_stores` / `_solo` / `_store_of` 的形状，而
     # `from __future__ import annotations` 只推迟求值，mypy 仍要模块级能解析那个名字；
     # 又不能用 `TYPE_CHECKING` 包（`remote_dag._collect` 把 `if` 体当**顶层**边，会造成上向边）。
     # 于是八个都是 **L3**。
-    "remote.hub.queue_auth": 3,
-    "remote.hub.queue_claims": 3,
-    "remote.hub.queue_discover": 3,
-    "remote.hub.queue_observe": 3,
+    "hub.queue_auth": 3,
+    "hub.queue_claims": 3,
+    "hub.queue_discover": 3,
+    "hub.queue_observe": 3,
     # 离线任务清单 + 租约域（合并 origin 时新拆的混入）：要 `hub.store`(L2) 与
     # `hub.task_pack`(L1) ⇒ 与其余七个同秩 **L3**。
-    "remote.hub.queue_offline": 3,
-    "remote.hub.queue_resume": 3,
-    "remote.hub.queue_scope": 3,
-    "remote.hub.queue_store_face": 3,
+    "hub.queue_offline": 3,
+    "hub.queue_resume": 3,
+    "hub.queue_scope": 3,
+    "hub.queue_store_face": 3,
     # 离线段面：并入 origin 的新语义后它要 `hub.store`(L2，注解/构造 `_JobStore`) 与
     # `hub.task_pack`(L1，过期门判据) ⇒ 从 L0 升到 **L3**（仍在 `hub.http_face` L5 之下）。
-    "remote.hub.offline": 3,
-    "remote.iter_rollout": 1,
+    "hub.offline": 3,
+    # 刀 3：靠 L0 的 `worker.serve_pool`（同包）⇒ **L1**；它是 `remote.worker`(L5) 的
+    # 直接依赖，也是本账本里唯一一条 `remote → worker` 的顶层边。
+    "worker.iter_rollout": 1,
     "remote.job_fs": 1,
     "remote.offline_deliver": 1,
-    "remote.offline_eval": 1,
+    "remote.offline_eval": 2,
     "remote.wire": 1,
     "remote.http": 2,
     # 半离线交接面（第十三刀）：校验 / 取包播种 / `RunContext` / 评估装配；依赖最深
     # `offline_deliver`(L1) ⇒ L2。
-    "remote.plan_handoff": 2,
-    "remote.push_client": 2,
-    "remote.bc_job": 3,
+    "remote.plan_handoff": 5,
+    "remote.push_client": 1,
+    "remote.bc_job": 4,
     "remote.download": 3,
     "remote.job_lifecycle": 3,
     # 半离线驱动引擎（第十三刀改判）：交接面下沉后它站 `plan_handoff`(L2) 上 ⇒ 2 → **L3**
     # （1 + max(deps)；仍在 `worker`(L5) / `run_loop`(L6) 之下）。
-    "remote.plan_run": 3,
-    "remote.push_dispatch": 3,
+    "remote.plan_run": 6,
+    "remote.push_dispatch": 2,
     # `QueuePeer`（S4 第十五刀）：七个混入的**共同声明面**（只声明跨域方法的真签名，不带实现）。
     # 它**不能**声明 `_store_of`（那要 import `hub.store` ⇒ 本模块 L3 ⇒ 七个混入 ≥L4 ⇒
     # `hub.queue` L5 ⇒ `hub_server` L6，与 `smoke_loopback`(L6) 同层而后者 import 前者）——
     # 那条名字由调用它的三簇自己声明。所以本模块只靠 `common.protocol` +
     # `store_leases`（`ClaimOutcome`）⇒ **L1**。
-    "remote.hub.queue_peer": 1,
-    "remote.hub.queue": 4,
-    "remote.hub.result": 4,
+    "hub.queue_peer": 1,
+    "hub.queue": 4,
+    "hub.result": 3,
     "remote.job_round": 4,
     "remote.train_core": 4,
     # HTTP 面（S4 第十六刀）：`HubHandler` 本体 + 通用助手 + 来源判定从 `hub_server` 搬到这里。
     # 它组装五组路由混入（最深 `hub.result` L4）⇒ 秩算出来是 **L5**（不是「随便挑一层」，
     # 而是 1 + max(deps)）；`boot` 与 `hub_server` 因此分别在 L6 / L7。
-    "remote.hub.http_face": 5,
+    "hub.http_face": 5,
     "remote.worker": 5,
     # 引导链（S4 第十六刀）：`as_hub` / `make_server` / `main`。它站在 L5 的 `http_face` 上 ⇒ **L6**。
     # 读者是 `hub_server`（L7）—— 方向是「入口 → 引导链 → HTTP 面 → 路由混入」，不反向。
-    "remote.hub.boot": 6,
+    "hub.boot": 6,
     "remote.notebook_runtime": 6,
-    "remote.run_loop": 6,
+    "remote.run_loop": 7,
     "remote.worker_server": 6,
     # hub-server 入口 + 门面（S4 第十六刀收口）：本模块自己**零实现**，只剩 re-export 与
-    # `python -m remote.hub_server` 的分发。依赖最深到 `hub.boot`(L6) ⇒ **L7**。
-    "remote.hub_server": 7,
-    "remote.offline_boot": 7,
+    # `python -m hub.server` 的分发。依赖最深到 `hub.boot`(L6) ⇒ **L7**。
+    "hub.server": 7,
+    "remote.offline_boot": 8,
     "remote.push_bootstrap": 7,
     # 站在门面之上的探针：都 import `hub_server` 起真服务 ⇒ 随它 ****L6 → L8**（第十六刀的级联）。
-    "remote.smoke_loopback": 8,
-    "remote.tunnel_ab_probe": 8,
+    "hub.smoke_loopback": 8,
+    "hub.tunnel_ab_probe": 8,
     "remote.notebook_boot": 8,
     # 一次性修复工具（origin 侧新增）：把**已经落地的回传轮**补做课程侧落位。它 import
-    # `remote.hub_server`（拿 `_JobStore` 起真 store）——与探针同一个位置（L8，站在门面上）。
-    "remote.backfill_offline": 8,
+    # `hub.server`（拿 `_JobStore` 起真 store）——与探针同一个位置（L8，站在门面上）。
+    "hub.backfill_offline": 8,
+
+    # ── 2026-09-30（刀 7：入口脚本归位 —— 三个新模块入账）────────────────────────────
+    # `remote.remote_worker`（云 worker 入口，刀 7 前住 `nn-training/` 顶层）只 import
+    # `remote.worker`(L5) ⇒ 1 + 5 = **L6**；`remote.remote_worker_serve`（push 模式服务端
+    # 入口）只 import `remote.worker_server`(L6) ⇒ **L7**（与 `remote.run_loop` 同层）。
+    # 两者都是「模块名解析壳」（`python -m remote.remote_worker[_serve]`），本身不碰别的。
+    # `worker.rl_config_schema`（rl-config 键白名单：json/functools/pathlib）⇒ **L0**。
+    "worker.rl_config_schema": 0,
+    "remote.remote_worker": 6,
+    "remote.remote_worker_serve": 7,
+
+    # ── 2026-09-30（刀 6：本地 torch 训练全栈搬进 worker/）────────────────────────────
+    # 用户口径：`worker/` = 「所有支持本地 torch 训练的所有代码」，云机 worker = local worker
+    # + remote；`biz/` 只留游戏业务。于是五大算法包（models/ppo/data/train/scripts 39 模块）
+    # 与 52 个训练侧单体从顶层/biz 搬进 worker/ ⇒ **全部入账**（它们与 worker/remote 之间有边，
+    # 不入账那些边会静默消失 —— 刀 3 的同一条理由）。层号仍是**算出来的**拓扑秩：
+    # 搬进来同时抬了 12 条既有条目的秩（`remote.plan_run` 3→6 · `remote.plan_handoff` 2→5 ·
+    # `remote.run_loop` 6→7 · `remote.bc_job` 3→4 · `remote.offline_boot` 7→8 等），
+    # 因为它们的依赖从「账本外的 biz.*」变成了「账本内的 worker.*」。
+    # L0（44 个）
+    "worker.agent_meta": 0,
+    "worker.archive": 0,
+    "worker.backend": 0,
+    "worker.bc_dispatch": 0,
+    "worker.bc_ledger": 0,
+    "worker.breaker": 0,
+    "worker.commit_journal": 0,
+    "worker.config_file": 0,
+    "worker.data.mirror": 0,
+    "worker.data.npyio": 0,
+    "worker.data.shard_split": 0,
+    "worker.data.weights_meta": 0,
+    "worker.engine_pool": 0,
+    "worker.eval_heartbeat": 0,
+    "worker.eval_ingest": 0,
+    "worker.eval_rows": 0,
+    "worker.eval_track": 0,
+    "worker.eval_yield": 0,
+    "worker.events": 0,
+    "worker.forensics": 0,
+    # 2026-10-01（plan/gate-halt-platform-level）：门禁停机模式平台化的契约模块
+    # （意图 + 回执；只 stdlib + common.log ⇒ **L0**，与 `worker.rl_config_schema` 同型）。
+    "worker.gate_halt": 0,
+    "worker.gate_inputs": 0,
+    "worker.kickstart_burn": 1,
+    "worker.loop_tasks": 0,
+    "worker.metrics_stats": 0,
+    "worker.models.core": 0,
+    "worker.models.rl_model": 0,
+    "worker.modes": 0,
+    "worker.node_identity": 0,
+    "worker.paired_kill": 0,
+    "worker.ppo.np_core": 0,
+    "worker.ppo.trainer": 0,
+    "worker.reports": 0,
+    "worker.resume": 0,
+    "worker.schedule": 0,
+    "worker.scripts.validate_export": 0,
+    "worker.stop_loss": 0,
+    "worker.terminal_stats": 0,
+    "worker.train.bc_core": 0,
+    "worker.train.device": 0,
+    "worker.train.loop_util": 0,
+    "worker.volume_quota": 0,
+    "worker.volume_waves": 0,
+    "worker.workdir_sweep": 0,
+    # L1（11 个）
+    "worker.cli": 1,
+    "worker.config": 1,
+    "worker.data.dataset": 1,
+    "worker.data.weights_io": 1,
+    "worker.eval_local": 1,
+    "worker.loop_guards_sweep": 1,
+    "worker.loop_guards_trip": 1,
+    "worker.loop_round": 1,
+    "worker.loop_scheduler": 1,
+    "worker.ppo.common": 1,
+    "worker.train_ledger": 1,
+    # L2（10 个）
+    "worker.bc_config": 2,
+    "worker.bc_eval": 2,
+    "worker.eval_replays_once": 2,
+    "worker.gate_judges": 2,
+    "worker.models.student": 2,
+    "worker.paired": 2,
+    "worker.scripts.eval_bridge": 2,
+    "worker.scripts.regen_reward_golden": 2,
+    "worker.scripts.regen_v7_ts_oracle": 2,
+    "worker.state_init": 2,
+    # L3（6 个）
+    "worker.cmd": 3,
+    "worker.gate_check": 3,
+    "worker.models.goal_net": 3,
+    "worker.models.intent_net": 3,
+    "worker.ppo.engine": 3,
+    "worker.train.bc": 3,
+    # L4（12 个）
+    "worker.iter_job": 4,
+    "worker.loop_guards_gate": 4,
+    "worker.loop_guards_leg": 4,
+    "worker.plan": 4,
+    "worker.ppo.bench": 4,
+    "worker.ppo.goal": 4,
+    "worker.ppo.intent": 4,
+    "worker.scripts.eval_intent_m5": 4,
+    "worker.scripts.gen_self_inj": 4,
+    "worker.scripts.init_scratch_weights": 4,
+    "worker.train.goal_bc": 4,
+    "worker.train.intent_probe": 4,
+    # L5（3 个）
+    "worker.model_build": 5,
+    "worker.ppo.config": 5,
+    "worker.scripts.measure_checkpoint_rss": 5,
 }
 
 #: 允许的环（键 = 参与环的模块集合，值 = 为什么这是对的）。
@@ -223,7 +373,7 @@ STANDALONE_BOOT_MODULES = (
 
 
 def project_roots() -> set[str]:
-    """nn-training 根下的**仓内顶层包/模块名**（`common` / `remote` / `rl` / `dist_common` …）。
+    """nn-training 根下的**仓内顶层包/模块名**（`common` / `remote` / `rl` / `common.distribution` …）。
 
     动态推导（而不是写死一份清单）：新加一个顶层包不会让白名单判据静默失效。
     """
@@ -235,19 +385,22 @@ def project_roots() -> set[str]:
 def remote_modules() -> dict[str, Path]:
     """`remote/` 下的**生产模块**（dotted name → 路径）。
 
-    `__init__.py` 不入账：它是包门面/文档，不是依赖图的节点（`remote/hub/__init__.py` 同理）。
+    `__init__.py` 不入账：它是包门面/文档，不是依赖图的节点（`hub/__init__.py` 同理）。
     """
     out: dict[str, Path] = {}
-    for p in sorted(REMOTE_DIR.rglob("*.py")):
-        if p.name == "__init__.py":
+    for top, base in package_roots().items():
+        if not base.is_dir():
             continue
-        rel = p.relative_to(REMOTE_DIR).with_suffix("").as_posix()
-        out["remote." + rel.replace("/", ".")] = p
+        for p in sorted(base.rglob("*.py")):
+            if p.name == "__init__.py":
+                continue
+            rel = p.relative_to(base).with_suffix("").as_posix()
+            out[f"{top}." + rel.replace("/", ".")] = p
     return out
 
 
 def _package_of(module: str) -> str:
-    """模块所在的包（`remote.hub.admin` → `remote.hub`）。"""
+    """模块所在的包（`hub.admin` → `hub`）。"""
     return module.rsplit(".", 1)[0]
 
 
@@ -276,7 +429,7 @@ def _collect(path: Path, module: str, known: set[str]) -> tuple[set[str], set[st
             prefix = f"{base}.{module_name}" if module_name else base
         else:
             prefix = module_name or ""
-        if not prefix.startswith("remote"):
+        if ledger_package(prefix) is None:
             return
         raw = [prefix] if prefix else []
         raw += [f"{prefix}.{n}" for n in names]
@@ -291,17 +444,25 @@ def _collect(path: Path, module: str, known: set[str]) -> tuple[set[str], set[st
                 continue
             if isinstance(child, ast.Import):
                 for alias in child.names:
-                    if alias.name.startswith("remote"):
+                    if ledger_package(alias.name) is not None:
                         if alias.name in known:
                             add(alias.name, depth)
                         else:
                             unresolved.add(alias.name)
+            # 门禁判据 = 「这个 from 可能落在账本里」，因此必须用 `ledger_package`（覆盖
+            # `remote.*` 与 `hub.*`）—— 刀 1 之前这里写的是 `startswith("remote")`，
+            # hub 出包后 `from hub.http_face import …` 会被整支跳过 ⇒ hub 内部边**静默全丢**
+            # （实测：层号对账当场报 hub.boot 应为 L4，因为 hub 内部边一条都没进来）。
             elif isinstance(child, ast.ImportFrom) and (
-                child.level or (child.module or "").startswith("remote")
+                child.level or ledger_package(child.module or "") is not None
             ):
                 names = [a.name for a in child.names if a.name != "*"]
                 resolve(child.module, child.level, names, depth)
-                if child.level == 0 and child.module not in known and child.module != "remote":
+                if (
+                    child.level == 0
+                    and child.module not in known
+                    and child.module not in LEDGER_PACKAGES
+                ):
                     unresolved.add(str(child.module))
             walk(child, depth)
 
@@ -322,6 +483,32 @@ def graph() -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, set[str
         if u:
             unresolved[module] = u
     return top, deferred, unresolved
+
+
+def reaches_transport(module: str) -> bool:
+    """账本里 `module` 能否**经账本内边**到达 `remote.*`（= 传输面）。
+
+    给「某模块保持纯逻辑（不达远端）」这类守卫用。比「不在 `LAYERS` 里」强：后者在
+    2026-09-30（刀 6，`worker/` 整包入账）之后**恒为假**——写成它的守卫是哑的，
+    测试全绿而判据早已失效（本文件头部记过同型的教训）。
+    """
+    top, deferred, _ = graph()
+    edges = {
+        m: set(top.get(m, ())) | set(deferred.get(m, ())) for m in remote_modules()
+    }
+    seen: set[str] = set()
+    stack = [module]
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        for dep in edges.get(cur, ()):
+            if dep.split(".")[0] == "remote":
+                return True
+            if dep not in seen:
+                stack.append(dep)
+    return False
 
 
 def cycles(edges: dict[str, set[str]]) -> list[list[str]]:
@@ -430,7 +617,7 @@ def module_deps(module: str, known: set[str] | None = None) -> set[str]:
 
 
 def module_project_imports(module: str, *, top_only: bool = True) -> set[str]:
-    """单模块的仓内依赖（含 `common.*` / `rl.*` 等，不只 remote）。
+    """单模块的仓内依赖（含 `common.*` / `biz.*` / `trainer.*` 等，不只 remote）。
 
     `top_only=True`（缺省）只看**模块级** import——白名单这类「这个模块声明依赖谁」的话
     只对顶层有意义；延迟 import 的方向由 `layering_violations` 统一对账。
@@ -451,7 +638,7 @@ def assert_remote_module(
     module: str,
     *,
     allowed_project_imports: set[str] | None = None,
-    allowed_rl: set[str] | None = None,
+    allowed_biz: set[str] | None = None,
 ) -> None:
     """单模块视角的账本对账（**实现只有这一处**，六个拆分守卫都调它）。
 
@@ -460,16 +647,18 @@ def assert_remote_module(
       ② 它的每条**顶层** intra-remote 边都严格向下——原先散在六个守卫里的
          「不得反向 import `remote.worker`」的**一般化**：不再特指 `worker`，而是
          「不许指向任何同层/上层模块」；延迟边的方向由全图对账（`layering_violations`）管；
-      ③ **任何** import（含延迟）都不得碰 `rl`——传输/落盘/作业层保持 L2-pure，
-         编排只许出现在 L4+ 的入口模块（`run_loop` / `smoke_loopback` / `hub_client` /
-         `offline_eval` 这几个已登记在 `test_layering.py` 的口径里）。
-         `allowed_rl` 是**点名豁免**（缺省空）：只有「这个模块必须落盘/归档一份课程侧产物，
-         而那条路径的解析/备份实现住在 `rl/` 里」这种情形才该用，且只准列**纯逻辑**模块
-         （stdlib-only、不达 remote ⇒ 不构成环；判据见 `test_layering.RL_ORCHESTRATION`）；
+      ③ **任何** import（含延迟）都不得碰**编排** `trainer`（2026-09-30 刀 5 前的 `rl`）——
+         传输/落盘/作业层保持 L2-pure，编排只许出现在 L4+ 的入口模块（`run_loop` /
+         `smoke_loopback` / `hub_client` / `offline_eval` 这几个已登记在 `test_layering.py` 的口径里）。
+         **纯逻辑** `biz`（2026-09-30 刀 4 从 `rl/` 出包：课程/奖励/账本那类不达远端的模块）
+         是**合法**的向下边（`biz` 零上层依赖 ⇒ 不构成环），但要**点名登记** ——
+         `allowed_biz` 就是那张表（缺省空）：只有「这个模块必须落盘/归档一份课程侧产物，
+         而那条路径的解析/备份实现住在 `biz/` 里」这种情形才该用
+         （判据见 `test_layering.TRAINER_ORCHESTRATION`：`biz` = 编排树的补集）；
       ④ （传了白名单时）顶层仓内依赖 ⊆ 白名单。
     """
     known = set(remote_modules())
-    assert module in known, f"{module} 不在 remote/ 下（账本对账前先确认模块名）"
+    assert module in known, f"{module} 不在 remote/ 或 hub/ 下（账本对账前先确认模块名）"
     assert module in LAYERS, f"{module} 没在 tests/helpers/remote_dag.py 的 LAYERS 里登记层号"
     mine = LAYERS[module]
     upward = sorted(
@@ -479,10 +668,22 @@ def assert_remote_module(
         f"{module}（L{mine}）反向 import 了同层/上层：{upward}——"
         "remote/ 内部的边必须严格向下（见 tests/test_remote_dag.py 的分层账本）"
     )
-    rl = sorted(m for m in module_project_imports(module, top_only=False) if m.split(".")[0] == "rl")
-    unlisted = sorted(m for m in rl if m not in (allowed_rl or set()))
+    logic = sorted(
+        m
+        for m in module_project_imports(module, top_only=False)
+        if m.split(".")[0] in {"trainer", "worker", "biz"}
+    )
+    orch = [m for m in logic if m.split(".")[0] == "trainer"]
+    assert orch == [], (
+        f"{module} 碰了编排态 `trainer`：{orch}——传输/落盘/作业层保持 L2-pure（延迟 import 也算一条边）；"
+        "编排只许住 L4+ 的入口模块"
+    )
+    unlisted = sorted(
+        m for m in logic if m.split(".")[0] == "biz" and m not in (allowed_biz or set())
+    )
     assert unlisted == [], (
-        f"{module} 碰了未登记的 `rl`：{unlisted}——传输/落盘/作业层保持 L2-pure（延迟 import 也算一条边）"
+        f"{module} 碰了未登记的 `biz`：{unlisted}——纯逻辑是允许的向下边，但要在这里点名登记"
+        "（延迟 import 也算一条边）"
     )
     if allowed_project_imports is None:
         return

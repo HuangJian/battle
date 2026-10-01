@@ -6,7 +6,7 @@ import { join } from 'node:path'
  * CoordConv 坐标通道 golden 双向校验（plan/python-refactor.md P2-5）。
  *
  * golden 单一事实来源：nn-training/models/coord_golden.json（Python 侧
- * tests/test_coord_golden.py 对同一文件断言）。本测试独立用 infer.ts 的公式
+ * tests/worker/test_coord_golden.py 对同一文件断言）。本测试独立用 infer.ts 的公式
  * （Math.round，half-up）重算并与 golden 逐值比对。
  *
  * 背景：Python 用 torch.round（banker's rounding），TS 用 Math.round（half-up）。
@@ -16,7 +16,7 @@ import { join } from 'node:path'
  */
 const GOLDEN = JSON.parse(
   readFileSync(
-    join(import.meta.dir, '..', '..', 'nn-training', 'models', 'coord_golden.json'),
+    join(import.meta.dir, '..', '..', 'nn-training', 'worker', 'models', 'coord_golden.json'),
     'utf8',
   ),
 ) as { board: number; coords: number[] }

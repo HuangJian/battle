@@ -45,21 +45,23 @@ export interface CourseConf {
   //  一个进程服务所有课程 ⇒ 「这门课怎么跑」不能是那个进程的命令行参数（只有一份）。
   //  住这里而**不能**住 `curricula/*.jsonc`：课程文件字节 = course_fp（语料血缘 / 熔断口径
   //  D14）——往里加一个旋钮，熔断会把同一份语料读成新语料。
-  //  读面：python `rl/loop_serve.py::apply_course_machine_overrides`（开课时施加）。
+  //  读面：python `trainer/loop_serve.py::apply_course_machine_overrides`（开课时施加）。
   //  传输/节点指针**不在**这里（课程与 worker 节点正交）。
   //
   //  ★ 2026-09-21 删掉 `remote_degrade_after`（plan/accident.plan.md §3）：单一 PPO 路径下
   //  「就近降级到本机算」这个档位不存在（loop 没有计算能力，无人认领就等着，永不自己算）。
   //  旧 rl-config 里的残留值由 `pruneLegacyCourseKnobs` 清掉。
-  /** 门禁失败语义（halt = 打进停机态）。 */
-  gate_halt_mode?: string
+  //  ★ 2026-10-01 删掉 `gate_halt_mode`（plan/gate-halt-platform-level）：门禁停机模式
+  //  升成**平台级**单开关（`tmp/gate-halt.json` + 控制台顶部开关，缺省 halt、可带 until
+  //  到点自动回落）——它回答的是「有没有人在盯盘」，不是「这门课怎么跑」。旧值无读者，
+  //  由 `pruneLegacyCourseKnobs` 开课时清掉。
   /** kickstart 干烧熔断阈值/参照物覆盖（plan/accident.plan.md §5.2；读面在 python
-   *  `rl/kickstart_burn.py::burn_overrides`（margin/points）与 `::burn_mode`（mode/peer），
+   *  `worker/kickstart_burn.py::burn_overrides`（margin/points）与 `::burn_mode`（mode/peer），
    *  缺席即那边的常量）。
    *
    *  控制台**只读**：开课回执拿 `margin_pp`/`points`/`mode` 说清「连续几点落后参照物多少 pp
    *  停腿、参照物是谁」（`stack/kickstart-receipt.ts`），按需手改 rl-config——不做写面/UI
-   *  （execution-face 旋钮，与 `gate_halt_mode` 的写面同规，但今天没有面板需求）。
+   *  （execution-face 旋钮：按需手改配置，不上面板）。
    *
    *  `mode`：`auto`（缺省；能解析出唯一同 V 对端就走 `paired`，否则 `baseline`）/`baseline`
    *  （参照 = 本腿 it0）/`paired`（参照 = 对端臂同 it 读数）。`peer` = 显式点名对照臂。 */

@@ -39,7 +39,7 @@ from typing import Any
 from common.fs import atomic_write_bytes, atomic_write_json
 from common.hashing import sha256_bytes, sha256_file  # re-export：调用点与测试不变
 
-# 本模块此前自留一份 `sha256_file` / `sha256_bytes`，注释理由是「不依赖 dist_common 的
+# 本模块此前自留一份 `sha256_file` / `sha256_bytes`，注释理由是「不依赖 common.distribution 的
 # 导入，纯 stdlib（云端产物目录也可能被单独搬运）」。诉求成立，落点换成 `common.hashing`
 # ——它同样是纯 stdlib，且全仓只有一份定义（`wver` / init 指纹 / blob 键的「同字节同
 # 哈希」契约不再靠四处字形相同的实现维持）。名字在这里 re-export，历史调用点不动。
@@ -93,7 +93,7 @@ def resolve_artifact_dir(
 
 
 # 原子写 / JSON 原子写 —— 唯一实现见 `common.fs`（re-export；同包调用点与测试不变）。
-# 历史：本模块与 `remote/hub_server._write_bytes` 各有一份字形相同的实现，两份的注释
+# 历史：本模块与 `hub.server._write_bytes` 各有一份字形相同的实现，两份的注释
 # 都在解释同一件事（「半截的记账文件会把续跑判据带偏」）——口径写在注释里不算单实现。
 
 
@@ -171,7 +171,7 @@ class ArtifactStore:
         atomic_write_json(self.root / self.MANIFEST_NAME, manifest)
         # 续跑判据里的计划身份以**磁盘上这份 plan.json** 为准（**写盘之后**再算）：于是
         # 「谁算」都得到同一个数。曾经用调用方传进来的 sha（= hub payload 里那份的字节
-        # 哈希）——它与本目录写盘的格式不同（hub 走 `rl.plan.dump_plan` 的规范形
+        # 哈希）——它与本目录写盘的格式不同（hub 走 `biz.plan.dump_plan` 的规范形
         # `sort_keys=True`），新会话拿着同一个目录再跑时永远算不出相等的值 ⇒ 每次都被
         # 当成**新段**、从 start_it 重跑。半离线最重要的那条路径（关掉会话明天接着跑）
         # 会静默退化成「重跑」，而且只有对着日志才看得出来（DECISIONS
@@ -328,7 +328,7 @@ class ArtifactStore:
                         z.write(f, arcname=name)
                 for name in (self.METRICS_NAME, self.EVAL_LOG_NAME):
                     # eval_log.jsonl 也要进包：云上评的读数只有这一条路回来
-                    # （`rl.eval_rows.merge_eval_rows` 在导入时并进课程账本）——
+                    # （`biz.eval_rows.merge_eval_rows` 在导入时并进课程账本）——
                     # 漏了它就等于「云上白评一轮」。
                     f = self.root / name
                     if f.exists():
@@ -394,10 +394,10 @@ run_id      : {self.run_id}
 
 
 #: 产物账本行 → **课程账本行**（`training_log.jsonl` 的 `iteration` 事件）的字段搬运表。
-#: 左 = 课程账本字段名（`rl/events.py::write_iteration`，也是控制台读的那一份），
+#: 左 = 课程账本字段名（`biz/events.py::write_iteration`，也是控制台读的那一份），
 #: 右 = (来源, 键)：`agg` = 产物行的聚合子字典，`report` = 采集报告子字典，`row` = 行本身；
 #: 键写成元组就是**下探路径**（如 `("scoreStats", "mean")`）——产物行是分层的，而课程账本平铺。
-#: 两个落地方（人工导入 `remote/deliver_zip`、实时补传 `remote/hub_server`）走**同一张表**：
+#: 两个落地方（人工导入 `remote/deliver_zip`、实时补传 `hub.server`）走**同一张表**：
 #: 两份翻译必然漂开，而「两腿同字段」正是这张表存在的意义。
 LEDGER_FIELDS: tuple[tuple[str, str, str | tuple[str, ...]], ...] = (
     ("winRate", "report", "winRate"),
@@ -419,7 +419,7 @@ LEDGER_FIELDS: tuple[tuple[str, str, str | tuple[str, ...]], ...] = (
     ("mean_ret", "agg", "mean_ret"),
     # 缰绳与 demo 遥测（2026-09-23，用户发现「demo_bc 全缺」）：这两个键**产物行里一直有**
     # （`agg.kickstart` / `agg.demo_bc`，见 `remote/worker.py` 的 result.agg），只是这张
-    # 搬运表没收 ⇒ `iteration` 行永远看不到它们——本机腿（`rl/events.write_iteration`）
+    # 搬运表没收 ⇒ `iteration` 行永远看不到它们——本机腿（`biz/events.write_iteration`）
     # 逐轮都写，回传/导入腿却恒空，同一张表两腿不可比。「缺数据」与「真的为 0」也不是
     # 一回事：`_dig` 给 None 就不写（旧包无此键），真 0 照写。
     ("kickstart", "agg", "kickstart"),
@@ -476,7 +476,7 @@ def _dig(box: object, key: str | tuple[str, ...]) -> object:
 
 
 def _ledger_time(ts: object) -> str:
-    """账本 `time` 的格式（与 `rl/events.py` 逐字同规：本地时间 `YYYY-MM-DD HH:mm:ss`）。"""
+    """账本 `time` 的格式（与 `biz/events.py` 逐字同规：本地时间 `YYYY-MM-DD HH:mm:ss`）。"""
     secs = None
     if isinstance(ts, (int, float)) and not isinstance(ts, bool) and ts > 0:
         secs = float(ts)
@@ -518,7 +518,7 @@ def metrics_row(
             "outcomes": dict(report.get("outcomes", {})),
         }
         # 逐维度均值与分数统计（2026-09-22，additive）：本机账本行是带 `dim_means`/`score_mean`
-        # 的（`rl/events.write_iteration` 读 `report.dimMeans`/`report.scoreStats`），而产物行
+        # 的（`biz/events.write_iteration` 读 `report.dimMeans`/`report.scoreStats`），而产物行
         # 此前只留摘要 ⇒ 导入后控制台那张表的 kills/accuracy/loot 与 score 列恒空——同一张
         # 表上「本机腿」与「导入腿」逐列不可比（两腿同字段是硬要求）。
         # 代价：`dimMeans` ~15 个 float + 2 个 float/轮（刻意**不**搬 600 点的 scoreList）。

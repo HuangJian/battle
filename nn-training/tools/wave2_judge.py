@@ -35,7 +35,7 @@ NN_ROOT = Path(__file__).resolve().parent.parent
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
 
-from rl.kickstart_burn import BURN_MARGIN_PP
+from worker.kickstart_burn import BURN_MARGIN_PP
 
 
 def _load_shared() -> Any:

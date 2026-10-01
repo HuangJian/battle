@@ -36,6 +36,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from common.instance_lock import (
+    acquire_instance_lock,
+    default_instance_lock_path,
+    release_instance_lock,
+)
+from common.port_guard import ensure_port_free
 from common.protocol import (
     BLOB_INIT,
     WIRE_JOB_MAGIC,
@@ -45,12 +51,6 @@ from common.protocol import (
     normalize_manifest,
     unpack_job_v2,
 )
-from remote._instance_lock import (
-    acquire_instance_lock,
-    default_instance_lock_path,
-    release_instance_lock,
-)
-from remote._port_guard import ensure_port_free
 from remote.worker import _wire_flush as worker_wire_flush
 from remote.worker import _wire_start as worker_wire_start
 from remote.worker import run_job
@@ -510,7 +510,7 @@ def serve_forever(
     # 指纹给多个：本服务既有 `-m remote_worker_serve` 入口，也可能被以模块名拉起。
     lock_path = lock_file or default_instance_lock_path("worker_server", port)
     if not acquire_instance_lock(
-        lock_path, marker=("remote_worker_serve", "worker_server"), tag="worker-serve"
+        lock_path, marker=("remote.remote_worker_serve", "worker_server"), tag="worker-serve"
     ):
         raise SystemExit(f"[worker-serve] ERROR: 已有实例在运行（锁 {lock_path}）——拒绝启动")
     atexit.register(release_instance_lock, lock_path)

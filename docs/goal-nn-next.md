@@ -95,7 +95,7 @@ BONUS 窗口截断的伪负局，不再作为过门依据。DECISIONS §299 已�
   # 臂 W（warm start，已有：tmp/bc-arena/weights.json）
   # 臂 F（纯从零）—— 必须用近均匀 init，不能用默认 kaiming
   python nn-training/init_scratch_weights.py --out tmp/scratch-init/weights.json
-  bun dashboard/src/launch/cli.ts --script run_rl.py \
+  bun dashboard/src/launch/cli.ts --script trainer/run_rl.py \
     --bc tmp/scratch-init/weights.json --out tmp/a5-scratch2/weights.json \
     --traj tmp/a5-scratch2 --stages 1000-1002 --seed-rotate 50 --max-ticks 1200 \
     --workers 8 --stream 1 --dodge off --reward toy:kill2 \

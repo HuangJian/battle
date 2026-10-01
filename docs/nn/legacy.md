@@ -33,7 +33,7 @@
 ## §21 tail fan-out 反向竞速修复 + 三节点就绪验证（2026-08-27）
 
 ### 21.1 背景
-rollout 尾部分发（`nn-training/rl/queue.py` v3.7 tail fan-out）在末段把尾部任务重复派发
+rollout 尾部分发（`nn-training/trainer/queue.py` v3.7 tail fan-out）在末段把尾部任务重复派发
 竞速取先返回。此前只修了「fan-out 副本迟到被 duplicate 拒收后误回队」的一面（主副本
 已 settled → inflight key 被删 → 副本落入正常失败分支 → 无限循环）。单节点 20 局测试
 暴露**反向竞速**：fan-out 副本抢先结算、**主副本**（`fanout_copy=False`）迟到被判
@@ -93,7 +93,7 @@ PASS gate）。**ε=0.3 过猛**——自喂注入把重防御类（RETURN_DEFEN
 回 ~68-70%），或仅对非 HUNT 类做 SS 注入。
 
 ### 21.6 v3.9 动态节点发现（用户需求 2026-08-27）
-跑批中途上线的 agent 也能贡献算力：rollout（`rl/queue.py`）与 m1-eval
+跑批中途上线的 agent 也能贡献算力：rollout（`trainer/queue.py`）与 m1-eval
 （`tools/sim/m1-eval.ts` runHybrid）都加了周期 agent 发现。
 
 - **rollout**：rescan 线程周期（policy `agentRescanSec`，默认 120s）ping 配置里未在跑的
@@ -168,7 +168,7 @@ wins 底料 fire 高度饱和）。
 ### 19.1 打包改动（一次 MAJOR，全部落地并提交 f4afb43）
 - **① item 头删除**：动作空间 10→7（MASK_DIM 7）；actions→(N,2) [move,fire]、masks→(N,7)。
   TS（infer/policy-input/npy/observations）与 Python（schema/model/student_model/ppo/
-  train_bc/dataset/npyio/validate_export/eval_bridge/dist_common/rl-model/rl·stream）锁步。
+  train_bc/dataset/npyio/validate_export/eval_bridge/common.distribution/rl-model/rl·stream）锁步。
 - **② SCALAR_DIM 24→19**（删 guard/frenzy/rewind stock + frenzyActive/frenzyShotsLeft）；
   **SCALAR_X_INDICES [20,23]→[15,18]**（mirrorX 索引锁步 + 反例测试 test_mirror_scalar_lockstep）。
 - **③ wins-only 口径**（export-godai-labels 默认 --wins 1）；near-miss 守家帧超采样默认 3×
@@ -239,7 +239,7 @@ wins 底料 fire 高度饱和）。
 > 用户指出的容量缺口：eval 只派 HTTP 节点，PPO/采集收尾后训练机 idle 无贡献；
 > 极端情形（无可用节点）整轮评估直接 skip。
 
-- **实现**（rl/eval_dispatch.py + run_rl.py）：① 派发时刻把 rl_path 复制为
+- **实现**（trainer/eval_dispatch.py + trainer/run_rl.py）：① 派发时刻把 rl_path 复制为
   traj_dir/_eval_frozen_weights.json 冻结快照（主循环 PPO 写回会原地覆盖
   rl_path，本地局读错版本=对账灾难）；② `run_local_eval_game` 本机直跑
   export-eval-game.ts，补 wver/mode 戳后走同一 validate_eval_result 与台账聚合，
@@ -283,7 +283,7 @@ wins 底料 fire 高度饱和）。
 - **两个潜伏 bug 修复**（评审独立复核属实）：① tempo 曾除以 `w.tempo(=0.026)`
   → 恒饱和无梯度；② accuracy 因旧 DEFAULT_LOSS_WEIGHTS 无键恒 null。现统一用
   `DEFAULT_STAGE_REFS`（kpmRef=8 / accuracyRef=0.3）。
-- **课程化**（rl/course.py + run_rl.py）：`--curriculum-stages/start/every/grow`，
+- **课程化**（biz/course.py + trainer/run_rl.py）：`--curriculum-stages/start/every/grow`，
   纯函数 `(order_len,it)` 确定性扩展，种子流 `[rotateSeed,0xC0E,it]` 键控，
   断点续跑安全；排序取自逐关干净评估胜率（与数据重算一致，差异在平局噪声内）。
 - **PPO**：GAMMA 0.99→0.995（K=10 决策间隔下信用时域 16.7s→33s，守家是长时域
@@ -406,11 +406,11 @@ checkpoint 归档（当前权重只进不退无法回滚峰值）。沿现奖励
 ## §13 Python 侧工程化重组 + 常驻单元测试（2026-08-25）
 
 ### 13.1 结构（nn-training/rl/ 新包）
-run_rl.py 从 ~1700 行瘦身为 ~500 行入口（CLI + 迭代主循环 + 权重归档/巡检），
+trainer/run_rl.py 从 ~1700 行瘦身为 ~500 行入口（CLI + 迭代主循环 + 权重归档/巡检），
 编排逻辑抽取至 `rl/`：course（课程纯函数）/ queue（中央队列+本地回退）/
 stream（流式波次）/ eval_dispatch（干净评估）/ resume（断点对账）/
 reports（聚合）/ breaker（F4 纯逻辑）/ log。入口必须留在顶层——启动器只接受
-裸 .py 文件名；`rl/queue.py` 自算 REPO_ROOT（parents[2]）。run_rl 保留全部
+裸 .py 文件名；`trainer/queue.py` 自算 REPO_ROOT（parents[2]）。run_rl 保留全部
 re-export，旧引用路径不破。
 
 ### 13.2 可测试性抽取与潜在缺陷修复
@@ -442,7 +442,7 @@ SearchReplace 且改后必 py_compile。
 > 95%），max 0.129–0.155。遥测盲区让最常触发的路径无人察觉；且熔断后已结算语料
 > 整批丢弃、远端仍在采无人消费的局（it53 实测 53/140 局白采）。
 
-### 12.1 落地（run_rl.py / ppo.py / rl-hourly-inspect.ts）
+### 12.1 落地（trainer/run_rl.py / ppo.py / rl-hourly-inspect.ts）
 - **KL 记录**：jsonl 新增 `kl_cum`（流式=Σ各 wave，串行=单次更新均值）、
   `halted`、`dropped_games`、`waves`；HTML 巡检「KL 累计」列优先显示 kl_cum，
   ⛔N 角标标注熔断丢局数（旧日志行无 kl_cum 时回退显示单值 kl）。
@@ -510,8 +510,8 @@ SearchReplace 且改后必 py_compile。
 - `sampler-agent.ts`：`mode=eval` 任务路由 + ping/status `evalSupport` 能力声明 +
   manifest 回显 mode；权重切换删除改尽力而为 + retention 清扫（修在飞评估局
   Windows EBUSY 竞态——此前切换只在 140/140 全结算后发生故未暴露）。
-- `dist_common.py`：`fetch_task(mode=)` + `validate_eval_result()`。
-- `run_rl.py`：rollout 返回后 spawn 守护线程；语料 `EVAL_SEEDS=(860001,860002)` ×35 关；
+- `common/distribution.py`：`fetch_task(mode=)` + `validate_eval_result()`。
+- `trainer/run_rl.py`：rollout 返回后 spawn 守护线程；语料 `EVAL_SEEDS=(860001,860002)` ×35 关；
   收账 `tmp/rl-traj/eval_log.jsonl`（逐局行 + eval_summary 行，按 wver16 去重断点不重评）。
 
 ### 11.2 关键设计判断
@@ -566,7 +566,7 @@ SearchReplace 且改后必 py_compile。
 - **ppo.py**：① 分片加载进度（每 128 局一行）；② 更新心跳（≥60s 一行：epoch/chunk/
   step/elapsed/**eta** + 最近 32 chunk 滚动 kl/entropy/policy/value/gnorm）；③ 每 epoch
   汇总（含 ckpt 落盘确认）；`gnorm` 入 stats（clip_grad_norm_ 返回值顺手捕获）。
-- **run_rl.py**：本地 rollout 每 10 局结算一行（as_completed 重排，结果按原索引回填）；
+- **trainer/run_rl.py**：本地 rollout 每 10 局结算一行（as_completed 重排，结果按原索引回填）；
   队列模式逐局 settle 行（node/stage/seed/elapsed）；missing 行附结算进度。
 - **生产验证（it3）**：rollout 140 局逐局可见；PPO 心跳实时读数 kl≈0.014–0.018、
   entropy 1.33 稳定、gnorm 1.3–1.6、ETA ~2000s——观测黑洞消灭。
@@ -625,7 +625,7 @@ SearchReplace 且改后必 py_compile。
   同一策略版本，on-policy 比率数学不受到达顺序影响；GAE 用采样时存储的 value，
   与装载时机无关。②"省 7 分钟不值"是误判——35min/轮 × 几百轮的持续复利，
   改造成本是一次性的。
-- **实现**（run_rl.py `--stream 1`，默认关闭；串行路径零改动保字节基线）：
+- **实现**（trainer/run_rl.py `--stream 1`，默认关闭；串行路径零改动保字节基线）：
   collector 线程跑 run_rollout_queue（新增 `on_result` 回调 + `local_slots_max`
   参数），本机槽压到 max(2, workers//4) 给 torch 让核；主线程每当积压 ≥12 局
   （policy.streamWaveGames）装载这批 shard（load_shard+compute_gae+wave 内 adv
@@ -688,7 +688,7 @@ SearchReplace 且改后必 py_compile。
 - **处置**：丢弃错配的 it5 语料（280 局，含两套不相交签）→ 带修复重启 →
   it5 干净跑满 140 局（winRate 10%，missing=0/retried=0）→ PPO 146 chunks×4 正常。
 - **教训**：①"继承种子"≠"可复现课程"——随机消费必须键控到迭代号而非调用序；
-  ②对同一文件的并行编辑会相互覆盖（本次 run_rl.py 两处编辑丢过一次，串行重做）；
+  ②对同一文件的并行编辑会相互覆盖（本次 trainer/run_rl.py 两处编辑丢过一次，串行重做）；
   ③新节点接入首日隧道偶发 10054 属预期，回队机制兜住（本轮 missing=0）。
 
 ---
@@ -710,7 +710,7 @@ SearchReplace 且改后必 py_compile。
   it1 事件 winRate/samples/outcomes 全空（指标盲区另一症状）。
 - detach 启动无 stdout 落盘 → 失败栈零痕迹，只能靠数据考古。
 
-### 9.2 修复（run_rl.py ×3 + 启动器 ×1 + 巡检工具 ×1）
+### 9.2 修复（trainer/run_rl.py ×3 + 启动器 ×1 + 巡检工具 ×1）
 1. `resumed_manifests(..., exclude=seen)`：排除本轮已采；双 schema 归一（本地单局式
    转换 / 远端聚合式透传）。真实事故数据验证：修复前 KeyError，修复后 games=140、
    outcomes 全归类（111 bd + 20 le + **7 stage_clear** + 2 timeout）。
@@ -871,7 +871,7 @@ it8 全部 50 shards 恒等成立（2.2e-07）。分数随行为合理分化（1
 近消失、出门交战捡道具；但 score 平坦 0.10–0.12、击杀未涨。KL 0.036–0.064 偏高
 但未触警；entropy 震荡无坍缩。判定：激励结构生效、梯度尚未爬上——待 14h 长跑。
 
-**长跑基建（run_rl.py）**：`--iters 0` 无限 + `--max-hours` 墙钟预算；
+**长跑基建（trainer/run_rl.py）**：`--iters 0` 无限 + `--max-hours` 墙钟预算；
 `--keep-iters 3` 轨迹磁盘上限（~170MB/iter，不清盘 14h 写满磁盘）；连续失败
 5 次重试（30s 退隔）防瞬时故障中止。rotate 模式改**随机分批**（每 epoch 全
 35 关随机置换切 7 批）——修固定窗口在续训迭代号归零导致的 stages 0-4 过采样；
@@ -915,7 +915,7 @@ lives_exhausted 局有区分度；baseSafety 的冻结伪影被 F3 门控中和�
 无被动通路）。godai-score.ts 评估口径不动（God-AI 基线可比性），RL 专用
 RL_SCORE_CONFIG 分流。
 
-**F4 KL/熵双判据熔断**（run_rl.py）：KL_BREAK=0.15 连续 3 轮（暴力漂移）或
+**F4 KL/熵双判据熔断**（trainer/run_rl.py）：KL_BREAK=0.15 连续 3 轮（暴力漂移）或
 ENT_BREAK=0.60 连续 8 轮且 winRate<0.5（退化确定性；纯 KL 判据抓不住本次
 失败——it65/73/79 尖峰均为单轮，从不连续；熵地板按日志本应 it63 即触发）。
 触发后写 circuit_break jsonl 事件 + exit code 3。实现坑：主循环 except 会吞
@@ -964,7 +964,7 @@ resume 会滑回同一盆地）。经启动器跑：`nn-training/start-training.
   progress 0.09→0.17 缓爬、mobility 0.46–0.61 远离 0。无新 hack 模式，
   不触发奖励公式修改。
 - **修复**：清残留 python → 启动器 detach 重启（同 R4 参数）。权重安全：
-  `tmp/rl-weights/weights.json` 停于 it18（11:32:43），run_rl.py
+  `tmp/rl-weights/weights.json` 停于 it18（11:32:43），trainer/run_rl.py
   `build_model()` 自动 resume（run_start 在 build_model 之后写盘，
   12:06:48 run_start = resume 成功）；残缺 it19 目录由每轮开头
   `shutil.rmtree` 自清理，无 off-policy 样本污染。
@@ -1017,10 +1017,10 @@ resume 会滑回同一盆地）。经启动器跑：`nn-training/start-training.
 - **Q1 死代码**：删除 `rl_env.py`（np.random mock 桩）/ `rl_ppo.py`（未接线的 PPO 类）/
   `train_rl.py`（无入口调用）；`rl_model.py` 保留加 STATUS 注释（P1 教师模型参考）；
   `eval_bridge.py` 经核实**非死代码**（BC 管线工具，AGENTS/README/启动器引用），保留。
-- **Q4 监控**：`run_rl.py` 每轮追加 `training_log.jsonl`（run_start 元行 + per-iter
+- **Q4 监控**：`trainer/run_rl.py` 每轮追加 `training_log.jsonl`（run_start 元行 + per-iter
   winRate/outcomes/samples/policy/value/entropy/kl/lr/mb/epochs）+ KL 预警（阈值 0.08，
   按实测稳态 0.045–0.054 校准；评审建议的 0.02 会永久误报）+ entropy 单轮骤降 >0.1 预警。
-- **时间戳**：run_rl.py / ppo.py 全部日志行加 `[HH:MM:SS]` 前缀（此前无法事后分析节奏）。
+- **时间戳**：trainer/run_rl.py / ppo.py 全部日志行加 `[HH:MM:SS]` 前缀（此前无法事后分析节奏）。
 - **计划偏差回填**：`plan/RL-Bun-Bridge.md` 顶部加状态横幅指向实际 npy shard 架构。
 
 **证伪的评审主张**（留档防复发）：Q5 参数数字全过期且 epochs=8 与 KL 实测矛盾；

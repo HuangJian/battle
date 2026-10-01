@@ -74,7 +74,7 @@ def find_python(nn: Path) -> str:
     except Exception:
         pass
     log("bootstrap …")
-    sh([sys_py, str(nn / "bootstrap.py")], cwd=str(nn))
+    sh([sys_py, str(nn / "tools" / "tools.bootstrap.py")], cwd=str(nn))
     return str(venv_py)
 
 
@@ -217,7 +217,7 @@ def run_training(
         f.unlink()
 
     args = [
-        py, "-u", "train/bc.py",
+        py, "-u", "worker/train/bc.py",
         "--data-dir", str(corpus),
         "--out", str(run_dir / "weights.json"),
         "--arch", "student", "--value-coef", "0.5",
@@ -299,7 +299,7 @@ def main(argv: list[str] | None = None) -> int:
     state_f = drive_dir / "run_state.json"
 
     # 依赖检查
-    need = [nn / "train" / "bc.py", nn / "curricula" / f"{args.course}.jsonc"]
+    need = [nn / "worker" / "train" / "bc.py", nn / "curricula" / f"{args.course}.jsonc"]
     missing = [str(x) for x in need if not x.exists()]
     if missing:
         log(f"FATAL: 缺少 {missing} —— 先推送到仓库")

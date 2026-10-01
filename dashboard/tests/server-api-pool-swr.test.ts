@@ -37,7 +37,9 @@ function patchConfig(enabled: boolean, localSlots?: number): string {
   return cfg.nodes[0]!.id
 }
 
-const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms))
+/** 让出事件循环一拍（`setTimeout 0`）：给后台重算的 I/O 回调一次推进机会。这**不是**「等墙钟」
+ *  ——循环的退出判据仍是可观测的 `cachedAt` 推进（落地即退），只是不拿定值步长去猜它要多久。 */
+const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 0))
 
 describe('console/api /api/pool（结构现算 ⊕ 探测 SWR）', () => {
   it('节点编辑第一帧就上屏（结构现算、不等探测），探测列才落后台重算', async () => {
@@ -74,10 +76,11 @@ describe('console/api /api/pool（结构现算 ⊕ 探测 SWR）', () => {
       // 放闸 → 后台重算落地（NodeStats 的有界再校验就是按同一条判据轮询；这里同样有界，
       // 不做定值 sleep）
       probe.release()
-      const deadline = Date.now() + 3000
       let fresh = first
-      while (fresh.cachedAt === warmAt && Date.now() < deadline) {
-        await sleep(20)
+      // 按**拍**有界（200 拍 ≫ 重算的 await 跳数）：条件是可观测的，落地即退——
+      // 换成 20ms 定值步长则是每轮白等半拍，而定步长本身也不能证明「到了」
+      for (let i = 0; i < 200 && fresh.cachedAt === warmAt; i++) {
+        await tick()
         fresh = await api.buildPoolView(false)
       }
       expect(fresh.cachedAt).not.toBe(warmAt)
@@ -101,7 +104,17 @@ describe('console/api /api/pool（结构现算 ⊕ 探测 SWR）', () => {
       void pending.then(() => {
         resolved = true
       })
-      await sleep(400)
+      // ★ 屏障 = 等**重算自己的探测**注册（事件驱动，不定值 sleep）：
+      //   · 硬清 ⇒ 重算在做探测 → 探测先到；
+      //   · 软作废回归 ⇒ 立刻兑现旧值 → `pending` 先到，「第一拍就红」（不用等墙钟）。
+      const guard = guardMs('硬清读没有起重算（软作废回归？）')
+      const first = await Promise.race([
+        probe.nextProbe().then(() => 'probe' as const),
+        pending.then(() => 'resolved' as const),
+        guard.promise,
+      ])
+      guard.done()
+      expect(first).toBe('probe')
       expect(resolved).toBe(false) // 硬清：还在等那一次重算（软作废才会先给旧值）
       probe.release()
       const fresh = await pending

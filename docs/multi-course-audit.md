@@ -50,7 +50,7 @@
 | spec 重建逐字段一致（Q4 快照） | 同上（W4） | 占位 | P1b |
 | 门禁① `hub_port` 唯一归宿 | 同上（W5①） | 红（skip） | P1a |
 | 门禁② `Object.keys(reg)` 唯一归宿 | 同上（W5②） | 红（skip） | P1b |
-| 锁原语：双课双持 / 同课拒绝 / `--force` 不跨课 | `nn-training/tests/test_multi_course_locks.py` | **已绿** | — |
+| 锁原语：双课双持 / 同课拒绝 / `--force` 不跨课 | `nn-training/tests/trainer/test_multi_course_locks.py` | **已绿** | — |
 
 红态证据（P0 落盘时实测）：
 - bun 侧 `7 fail / 2 pass`（去 skip 跑：端口与日志全同、slots.ts 未落盘、两门禁红）；

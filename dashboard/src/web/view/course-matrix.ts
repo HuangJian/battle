@@ -102,7 +102,7 @@ export const HUB_DOWN_TITLE =
 
 /** 表头 hover：训练侧只读视图缺失。 */
 export const QUEUE_DOWN_TITLE =
-  '训练侧只读视图 run_rl_cluster.py --json 不可用——指针与「在等什么」不可知（不是「无待办」）'
+  '训练侧只读视图 trainer/run_rl_cluster.py --json 不可用——指针与「在等什么」不可知（不是「无待办」）'
 
 /** 单侧缺失时单元格里的占位符。**不是 0**：0 是「确定没有」，`—` 是「不知道」。 */
 export const CELL_UNKNOWN = '—'
@@ -532,7 +532,7 @@ export function matrixFoot(input: {
     return `${blocked.course} 正在等 ${job.phase}@${job.round}${who} 回传；其余课照常推进（等外部不占执行权）。`
   }
   if (!lq) return `口径：训练侧只读视图不可用；本表只有 hub 侧事实（${input.rows.length} 课）。`
-  return `口径：训练侧只读视图 run_rl_cluster.py --json（${input.rows.length} 课）+ registry 在训事实；${lq.trainingCount}/${lq.rows.length} 课有存活进程。`
+  return `口径：训练侧只读视图 trainer/run_rl_cluster.py --json（${input.rows.length} 课）+ registry 在训事实；${lq.trainingCount}/${lq.rows.length} 课有存活进程。`
 }
 
 /** 「在等什么」单元格的修饰类（供面板上色）。 */

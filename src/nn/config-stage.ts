@@ -27,7 +27,7 @@
 import { decodeForceString, decodeLevel } from '../config/stages'
 import type { StageData, TankKind } from '../types'
 
-//: 自定义关（配置内 grid）起始 ID —— 与 `nn-training/rl/config.py::CUSTOM_STAGE_BASE`
+//: 自定义关（配置内 grid）起始 ID —— 与 `nn-training/biz/config.py::CUSTOM_STAGE_BASE`
 //: 逐值一致（跨语言常量，改任一侧必须同步另一侧）。
 export const CUSTOM_STAGE_BASE = 2000
 

@@ -36,7 +36,7 @@
 //   12 杀与 19 杀惜败拿同样的钱、残局段零梯度 —— 打不到靶子。斜坡版把梯度铺到残局：
 //   10 杀之后每多杀一份，19 杀惜败拿 10 倍于 10 杀惜败。）
 //
-// · **机制现成**：outcome 虚拟符号（`rl/reward_library.py:134`，`is_lives_exhausted`
+// · **机制现成**：outcome 虚拟符号（`biz/reward_library.py:134`，`is_lives_exhausted`
 //   0/1 逐局注入）+ `where`/`>=`/`*` 全在公式白名单。训练结局只有
 //   lives_exhausted/stage_clear（it175 实测 196+35，无其他）⇒ 该项覆盖**全部**败局。
 // · **行为实测**（venv 实跑合成数据，文件内公式原样）：19 杀敗局 +10.0（10 步各 +1.0，
@@ -122,8 +122,8 @@
 // 5. **半速风险**（2026-09-20 评审）：B 的转折在 it90（累计 4.3M）；双臂各半速 12h 约
 //    85–90 轮 ⇒ 很可能跑完两条都没信号，得到「无结论」而不是证伪。接受（差值 verdict 比
 //    绝对门需要的数据少，部分对冲；中点规则防误杀，不防无结论 —— 无结论也是答案）。
-// 6. **配对是代码保证的**：`--rotate-seed` 同值 → `rl/course.py::resolve_rotate_seed` 三级
-//    优先级（显式 > 继承 > 抖动），单测 `tests/test_rotate_seed_override.py`。
+// 6. **配对是代码保证的**：`--rotate-seed` 同值 → `biz/course.py::resolve_rotate_seed` 三级
+//    优先级（显式 > 继承 > 抖动），单测 `tests/biz/test_rotate_seed_override.py`。
 // 7. **2026-09-25 redesign 记录**：基座 B→noexplore（wExplore 无罪但机制阴性；C-0 从
 //    "B 续命"改"noexplore 续跑"）· 起点 B-it175→noex-it105（门控 35.5→33.0；回应 09-21
 //    kk=1 洗起点事故）· 缰绳 true→false（L1 验证过的安全组合）· 采样 48000→49152

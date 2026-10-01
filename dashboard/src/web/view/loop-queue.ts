@@ -4,7 +4,7 @@
  *  它内部一台单线程调度器持有**每课一条任务队列**。于是控制台需要回答一个今天只能靠翻
  *  N 份日志回答的问题：**「这门课在等什么」**。
  *
- *  数据源 = 训练侧只读入口 `nn-training/run_rl_cluster.py --json`（同一个 `rl/loop_plan.py`，
+ *  数据源 = 训练侧只读入口 `nn-training/trainer/run_rl_cluster.py --json`（同一个 `trainer/loop_plan.py`，
  *  与 CLI 表逐字段同源）。**判据不在本层重算**：`waiting` 的文案由 python 侧
  *  `loop_plan.waiting_state` 单点给出——TS 里从 facts 再推一遍就是把同一条语义写第二遍，
  *  两边迟早各说各话（这正是 R2b 否决 `loop-state.json` 的同一条理由）。
@@ -152,7 +152,7 @@ export function coursePills(input: {
         status: '视图不可用',
         tone: 'gray' as CoursePillTone,
         title:
-          '调度器读面不可用（run_rl_cluster.py --json 读失败 / 超时）：这门课的进度未知。' +
+          '调度器读面不可用（trainer/run_rl_cluster.py --json 读失败 / 超时）：这门课的进度未知。' +
           '停课不受它影响（停课只写暂停意图 + 删开课标记）。',
       }
     }
@@ -305,7 +305,7 @@ function strList(v: unknown): string[] {
   return Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []
 }
 
-/** 解析 `run_rl_cluster.py --json` 的 stdout → 视图。
+/** 解析 `trainer/run_rl_cluster.py --json` 的 stdout → 视图。
  *
  *  返回 null = **形状不符**（不是「没有课程」）：null 时 UI 显空态，且 `error` 由调用方给。
  *  逐字段容错是刻意的：python 侧新增字段不该让控制台炸，缺字段退化成 0/空也不该。

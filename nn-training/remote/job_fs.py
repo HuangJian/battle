@@ -86,12 +86,12 @@ def prune_job_dirs(
     if len(dirs) <= keep:
         return 0
     dirs.sort(key=lambda d: d.stat().st_mtime, reverse=True)
-    from platform_utils import rmtree_best_effort
+    from common.platform_utils import rmtree_best_effort
 
     removed = 0
     for d in dirs[keep:]:
         try:
-            # 计数必须挂在返回值上（与 rl/workdir_sweep 同策略）：沙箱删除保护拦截
+            # 计数必须挂在返回值上（与 biz/workdir_sweep 同策略）：沙箱删除保护拦截
             # 时 rmtree_best_effort 返回 False，无条件 +1 会把没删掉的也算进 n。
             if rmtree_best_effort(d, ignore_errors=True):
                 removed += 1

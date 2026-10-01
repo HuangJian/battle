@@ -8,7 +8,7 @@
 ## 0. 架构与数据流（谁连谁）
 
 ```
-协调器（Windows, run_rl.py 常驻）
+协调器（Windows, trainer/run_rl.py 常驻）
   │  每轮迭代开始时：读 rl-config.json → GET /v1/ping 各节点
   │  → POST /v1/weights 下发权重 → 中央队列派局
   ▼
@@ -211,7 +211,7 @@ gcloud auth login                # 浏览器完成 OAuth
 # 首次 gcloud cloud-shell ssh 会生成 SSH 密钥对并请求会话授权，按提示确认即可
 ```
 
-保活循环（随训练窗口启停；断线自动重连，可并进 run_rl.py 的启动脚本）：
+保活循环（随训练窗口启停；断线自动重连，可并进 trainer/run_rl.py 的启动脚本）：
 
 ```powershell
 while ($true) {
@@ -285,7 +285,7 @@ while ($true) {
 
 ```bash
 # ① 训练机（协调器工作区）：
-python -c "import sys,dist_common;sys.stdout.reconfigure(newline='\n');print(dist_common.code_hash_report())" > local.tsv
+python -c "import sys,common.distribution;sys.stdout.reconfigure(newline='\n');print(common.distribution.code_hash_report())" > local.tsv
 # ② 节点：
 bun tools/agent/codehash-report.ts > mac.tsv
 # ③ 对比：
@@ -294,7 +294,7 @@ diff local.tsv mac.tsv
 
 > Windows 上的 Python stdout 会把 `\n` 翻译成 `\r\n`（bun 侧恒为 `\n`）——不加
 > `sys.stdout.reconfigure(newline='\n')` 会让 diff 每行都报差异（内容其实一致）。
-> Unix 训练机可直接用 `python -c "import dist_common;print(dist_common.code_hash_report())"`。
+> Unix 训练机可直接用 `python -c "import common.distribution;print(common.distribution.code_hash_report())"`。
 
 报告每行 `sha8\tsize\trelPath`（按路径排序），末行 `codeHash=<full>`——多文件 / 少文件 /
 内容不同一目了然。节点侧也可用 `bun tools/agent/sampler-agent.ts --print-code-hash-files`
@@ -308,7 +308,7 @@ diff local.tsv mac.tsv
 | `src/nn/conv/prebuilt/wasm/conv.wasm`（或 `prebuilt/<平台>/conv_native.*`）字节不同 | 从训练机复制覆盖，勿在节点本地重编（`bun tools/agent/native-build.ts --cross` 一次重出 6 native + wasm） |
 | 分支/目录不对 | 确认 agent 的 `REPO_ROOT` 与分支 = 训练机 `UPGRADE_BRANCH` |
 
-> 训练机侧自身先自查：`dist_common.dirty_hash_files()` 非空（集内有未提交改动）时，远端
+> 训练机侧自身先自查：`common.distribution.dirty_hash_files()` 非空（集内有未提交改动）时，远端
 > pull 永远无法收敛到期望 hash——先 commit+push 再谈节点。
 
 ## 8. 确定性说明（为什么跨架构安全）

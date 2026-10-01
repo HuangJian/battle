@@ -34,13 +34,13 @@ def idempotency_key(manifest: dict) -> tuple:
 
     ★ `course_fp` 是 2026-09-24 加的（plan/job-identity-collision.plan.md）：原来的四个
     分量在**单进程多课程**（`--serve` 共享 trainer）下会**跨课程全同** —— runId 是进程级
-    （`rl/queue.py::RUN_ID`）、`init_weights_fp` 同 warm-start、`data_fp` 只哈希
+    （`trainer/queue.py::RUN_ID`）、`init_weights_fp` 同 warm-start、`data_fp` 只哈希
     (shard 目录名, wver, stage, seed) 而 per-stage seed 与课程无关、`it` 同轮 ⇒ 两门课
     发布出**同一个 job_id**，hub 的 per-job 路由取「第一个匹配」⇒ 两个 trainer 读到同一份
     结果，各自落进自己的 `args.out`（静默污染，且让下一轮 `init_weights_fp` 继续相同 ⇒ 自持）。
 
     为什么用 `course_fp` 而不是课程名：它是 manifest 必填字段、语义就是「课程身份」，
-    且在**同一进程内恒定**（课程字节装载时冻结：`rl/config.py::course_from_args` 落
+    且在**同一进程内恒定**（课程字节装载时冻结：`biz/config.py::course_from_args` 落
     `args.course_frozen_bytes`）⇒ mid-run 热加载编辑不会换 job id、不产生孤儿。
     ⚠ 它是**文件血缘**哈希，不是语料身份（那是 `corpus_fp`），也不等于 hub 的课程键
     （`<discover-root>/<目录名>`，= 课程文件 stem）——本键只用来分开身份，不用来路由。

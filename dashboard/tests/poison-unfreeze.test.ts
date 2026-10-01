@@ -44,12 +44,12 @@ describe('镜像常量（权威在 python）', () => {
   it('面板说的阈值 = python 里 `FREEZE_AFTER_RECLAIMS` 的定义值', () => {
     // 源码级核对：不 import python，只读文本（同 `kickstart-receipt.test.ts` 的做法）。
     //
-    // ⚠ 这里曾写死 `remote/hub_server.py`：S4 第十四刀把常量随租约簇搬到 `hub/store_leases.py`
+    // ⚠ 这里曾写死 `hub/server.py`：S4 第十四刀把常量随租约簇搬到 `hub/store_leases.py`
     //   （hub_server 只留同名 re-export），于是本用例静默变成「找不到常量」——**跨项目布局耦合
     //   的守卫没有任何门禁能自动发现**（nn 侧的门禁不会跑 dashboard 的测试）。现改成**在
     //   python 源码树里搜定义**：搬家不会让它变红，只有常量真的消失才会（而且会响亮地报出
     //   它找了哪些文件）。
-    const dirs = ['nn-training/remote', 'nn-training/remote/hub', 'nn-training/common']
+    const dirs = ['nn-training/remote', 'nn-training/hub', 'nn-training/common']
     const hits: { file: string; value: number }[] = []
     for (const rel of dirs) {
       for (const f of readdirSync(path.join(REPO_ROOT, rel))) {

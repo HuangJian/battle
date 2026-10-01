@@ -1,0 +1,131 @@
+"""
+End-to-end smoke test for the NN training engineering.
+
+Generates small SYNTHETIC shards (random but structurally valid), then runs the
+real BC trainer (`train_bc.train`) on them and asserts:
+  * training completes and produces a weights JSON,
+  * validation loss improved vs the first epoch (the pipeline learns *something*),
+  * exported weights reload and the architecture matches.
+
+This verifies the Python side of the engineering (npy IO, dataset, augmentation,
+model, masked-CE training, weight export) WITHOUT needing the game-side exporter
+or a GPU. Run:  python nn-training/tools/smoke_test.py
+"""
+
+from __future__ import annotations
+
+import os
+import sys
+import tempfile
+
+import numpy as np
+
+# 2026-09-30（刀 7）：本脚本从 nn-training/ 顶层搬进 tools/ —— 它 `import common.*` ⇒
+# 前置的必须是 **nn-training 根**（上溯 2 层），不是脚本目录。tools/ 里没有与 stdlib
+# 同名的模块（无 queue.py），所以不需要摘目录项。
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common.schema import (
+    BOARD,
+    FIRE_DIM,
+    MASK_DIM,
+    MOVE_DIM,
+    OBS_CHANNELS,
+    OBS_SCHEMA_MAJOR,
+    SCALAR_DIM,
+)
+from worker.data.npyio import save_shard, scan_shards
+from worker.data.weights_io import load_state_into, load_weights_json
+from worker.models.core import NNPolicy
+from worker.train.bc import train
+
+
+def _make_synthetic_shard(n: int, seed: int) -> dict:
+    rng = np.random.default_rng(seed)
+    obs = rng.integers(0, 4, size=(n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8)
+    scalars = rng.random((n, SCALAR_DIM)).astype(np.float32)
+    actions = np.stack(
+        [
+            rng.integers(0, MOVE_DIM, n).astype(np.uint8),
+            rng.integers(0, FIRE_DIM, n).astype(np.uint8),
+        ],
+        axis=1,
+    )
+    masks = np.ones((n, MASK_DIM), dtype=np.uint8)
+    # occasionally drop a class to exercise the mask machinery
+    drop = rng.random(n) < 0.1
+    masks[drop, :MOVE_DIM] = rng.integers(0, 2, (drop.sum(), MOVE_DIM)).astype(np.uint8)
+    conditions = rng.integers(0, 4, n).astype(np.uint8)
+    returns = (rng.random(n) * 2).astype(np.float32)  # v2: returns 可选字段
+    return {
+        "obs": obs,
+        "scalars": scalars,
+        "actions": actions,
+        "masks": masks,
+        "conditions": conditions,
+        "returns": returns,
+    }
+
+
+def main():
+    tmp = tempfile.mkdtemp(prefix="nn_smoke_")
+    data_dir = os.path.join(tmp, "synthetic")
+    for i in range(4):
+        sd = os.path.join(data_dir, f"shard_{i:03d}")
+        save_shard(sd, _make_synthetic_shard(n=200, seed=i), {"schema_major": OBS_SCHEMA_MAJOR})
+
+    print(f"[smoke] synthetic shards: {len(scan_shards(data_dir))} @ {data_dir}")
+
+    out = os.path.join(tmp, "hard-v0", "weights.json")
+    res = train(__arg_proxy(data_dir, out))
+
+    # Assertions
+    assert os.path.exists(out), "weights JSON not written"
+    meta, params = load_weights_json(out)
+    assert meta["schema_major"] == OBS_SCHEMA_MAJOR
+    assert len(params) > 0
+
+    # reload into a fresh model and confirm it runs a forward pass
+    m = NNPolicy()
+    load_state_into(m, out)
+    import torch
+
+    dummy = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
+    mv, fr = m(dummy, torch.zeros(2, SCALAR_DIM))
+    assert tuple(mv.shape) == (2, MOVE_DIM)
+
+    hl = res["history"]["val_loss"]
+    improved = hl[-1] < hl[0]
+    print(f"[smoke] val_loss {hl[0]} -> {hl[-1]}  improved={improved}  params={res['params']}")
+
+    # Strict pass: with 200*4=800 random samples the model should overfit a bit
+    # (val loss < first epoch). If it can't, the pipeline is broken.
+    if not improved:
+        print("[smoke] FAIL: validation loss did not improve")
+        sys.exit(1)
+    print(
+        "[smoke] PASS: end-to-end pipeline works (npy IO -> dataset -> train -> export -> reload)"
+    )
+
+
+def __arg_proxy(data_dir: str, out: str):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        data_dir=data_dir,
+        out=out,
+        checkpoint=None,
+        arch="bc",
+        epochs=12,
+        batch=128,
+        lr=3e-3,
+        val_split=0.15,
+        mirror_p=0.5,
+        seed=7,
+        num_workers=0,
+        notes="smoke",
+        resume=None,
+    )
+
+
+if __name__ == "__main__":
+    main()

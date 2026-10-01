@@ -2,7 +2,7 @@
  *  勾选 / 批量选择 + 确定性重放导出（POST evalReplays → 轮询 job → tar.gz 下载）。
  *
  *  数据源 = GET /api/evalGames（同一 (iter, wver) 的全部 event=eval 行，与指标表
- *  eval 视图同口径）；导出后端 = rl/eval_replays_once.py（冻结权重重放，逐局对账）。
+ *  eval 视图同口径）；导出后端 = biz/eval_replays_once.py（冻结权重重放，逐局对账）。
  *  Esc / 遮罩关闭；勾选态本地持有，不持久化。 */
 
 import { useEffect, useMemo, useRef, useState } from 'preact/hooks'

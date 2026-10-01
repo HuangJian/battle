@@ -9,7 +9,7 @@
     "launch": "bun src/launch/cli.ts",
     "build:ui": "bun src/server/build.ts",
     "typecheck": "tsc --noEmit",
-    "test": "bun test --parallel --timeout=50000 tests",
+    "test": "bun test --parallel --timeout=50000 --preload ./tests/helpers/no-proxy.ts tests",
     "lint": "oxlint",
     "format": "oxfmt"
   },

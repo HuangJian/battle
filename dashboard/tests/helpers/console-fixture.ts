@@ -65,7 +65,10 @@ const SEED_CONFIG = {
     // 线上形态：gpu_push 节点不参与并发配额，故没有 concurrency 字段
     {
       id: 'gpu1',
-      url: 'https://push.fixture.invalid',
+      // 死回环端口（**不用 `*.fixture.invalid`**）：不存在的域名要靠 DNS 解析失败来"不通"，
+      // 那是一段依机器/解析器而变的墙钟（本仓实测注释曾记 1500ms/用例，还有 0.1–0.8s 的抖动），
+      // 而「端口 1 没人听」是即时 ECONNREFUSED——同样的「走不通」，确定性且零等待。
+      url: 'https://127.0.0.1:1',
       authKey: 'fixture-push-key',
       gpu_push: true,
       enabled: true,

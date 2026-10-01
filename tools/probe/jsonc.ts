@@ -8,7 +8,7 @@
  * Why a local copy: the game bundle may not import `dashboard/` (AGENTS §3 —
  * the cross-project import edge is one-way), and `tools/sim/eval-course-ckpt.ts`
  * is a full CLI module. The authoritative reader is python
- * `nn-training/rl/jsonc.py` (the training stack reads the same level files);
+ * `nn-training/common/jsonc.py` (the training stack reads the same level files);
  * this keeps the probe generator byte-compatible with it.
  */
 

@@ -38,9 +38,9 @@
 | `reward_formula` / `formula_hash` / `course_name` / `course` | … | …（均不同） |
 | **`runId` / `it` / `init_weights_fp` / `data_fp`** | `923c663c35dc3e19` / `2` / `a11a96231269` / `41f7d73f5d14` | **逐字相同** |
 
-⇒ `job_id = sha256(runId, it, init_weights_fp, data_fp)[:16]`（`remote/protocol.py::idempotency_key`）
+⇒ `job_id = sha256(runId, it, init_weights_fp, data_fp)[:16]`（`common/protocol.py::idempotency_key`）
 在这四个分量上完全碰撞。四个分量为什么全同：
-- `runId`：`rl/queue.py:11` 是**进程级** `RUN_ID`，单进程多课程（`--serve` 共享 trainer）⇒ 两门课同源；
+- `runId`：`trainer/queue.py:11` 是**进程级** `RUN_ID`，单进程多课程（`--serve` 共享 trainer）⇒ 两门课同源；
 - `init_weights_fp`：两门课同一份 warm-start；
 - `data_fp`：`protocol.data_fp_entries` 只哈希 `(shard 目录名, wver, stage, seed)`，**不含课程/语料身份**，
   而 per-stage seed 与课程无关；
@@ -86,10 +86,10 @@ it3/ppo_ckpt_remote.tar  l1=60F416489E710602  l3=60F416489E710602
 
 | 环节 | 现状 | 位置 |
 |------|------|------|
-| 幂等键 / job id | `(runId, it, init_weights_fp, data_fp)` → `sha256[:16]` | `remote/protocol.py::idempotency_key` / `::job_id` |
+| 幂等键 / job id | `(runId, it, init_weights_fp, data_fp)` → `sha256[:16]` | `common/protocol.py::idempotency_key` / `::job_id` |
 | 发布端生成 id | `m["job_id"] = make_job_id(m)`（`course_fp` 已在 `m` 里，**在 id 之前注入**） | `remote/hub_client.py::publish_job` |
 | 离线合成 job | 同一条 `make_job_id`（`m` 由 hub 的 manifest 派生 ⇒ 自动继承新键） | `remote/run_loop.py::_build_iter_manifest`（`:655`） |
-| 归属解析 | `course_of(jid)`：**第一个** `job_root/<jid>` 存在的课程（带 `_locate_cache` 记忆化） | `remote/hub_server.py::course_of`（`:1816`） |
+| 归属解析 | `course_of(jid)`：**第一个** `job_root/<jid>` 存在的课程（带 `_locate_cache` 记忆化） | `hub/server.py::course_of`（`:1816`） |
 | store / 目录解析 | `_store_of(jid)` = `course_of` → store；`_job_dir(jid)` 同源（找不到落 `_MISSING_ROOT` 哨兵） | 同上（`:1842` / `:2145`） |
 | claim 拒绝 | `frozen` / `held` / `demoted` / `stale_holder` / `unknown` → 409（除 `demoted` 回 200） | `hub_server.py::_claim_locked`（`:615`）/ `::_post_claim`（`:2914`） |
 | **委派层（全部走 `_store_of` 首匹配）** | `heartbeat` / `release` / `result_token_ok` / `store_result` / `store_job_failure` / `job_failure` / `get_result` / `mark_completed` / `append_ledger` / `lease_expires_in` / `last_heartbeat_ago` / `epoch_of` | `hub_server.py::_HubQueue`（`:2425-2506` 一带） |
@@ -142,7 +142,7 @@ it3/ppo_ckpt_remote.tar  l1=60F416489E710602  l3=60F416489E710602
   L1 分开 **job 身份**已足够。
 - **不改 `job_seed`**（§8-2）：现在两门课同 seed ⇒ 同一 minibatch 顺序。不构成 bug（数据不同），
   但改它 = 换数值 ⇒ 与"修复"分开裁。
-- **不改 `runId` 的进程级语义**（`rl/queue.py`）：课程维度已由 `course_fp` 表达，不靠拆进程。
+- **不改 `runId` 的进程级语义**（`trainer/queue.py`）：课程维度已由 `course_fp` 表达，不靠拆进程。
 - 不做「同 `job_id` 跨课程副本自动合并/去重」这类聪明机制（那正是把两个真相焊在一起）。
 - 不恢复多 hub 设计（单 hub 是唯一形态）。
 - 不动 `verify_and_land` 的三重校验口径（D12 契约；补比 `payload_sha256` 属 §8-3，单列）。
@@ -157,11 +157,11 @@ it3/ppo_ckpt_remote.tar  l1=60F416489E710602  l3=60F416489E710602
 - **`job_id`** 仍是 16 hex、仍是幂等键的 `sha256[:16]`，只是键的构成多一个 `course_fp`。
 - **`course_fp` 是什么**：课程 jsonc 的 `sha256(字节)`，manifest 必填字段（旧 job 就有）。
   ⚠ 它不是「语料身份」（那是 `corpus_fp`），也不等于 hub 的**课程键**（`<discover-root>/<目录名>`，
-  = 课程文件 stem；jsonc 内部的 `name` 只是归属标注，不进命名空间 —— `train/loop_util.py::course_key_from_path`）。
+  = 课程文件 stem；jsonc 内部的 `name` 只是归属标注，不进命名空间 —— `worker/train/loop_util.py::course_key_from_path`）。
   本 plan 只用它做「课程身份」的**键分量**，不把它当路由键，也不对外暴露成 `course`。
 - **稳定性依据（这是选它成立的关键前提，一稿漏了）**：课程字节在**装载时冻结**
-  （`rl/config.py:1264 args.course_frozen_bytes = p.read_bytes()`），发布腿用的正是冻结字节
-  （`rl/loop_steps.py:1189-1192`、`rl/cmd.py:120-138`）⇒ **同一进程内 `course_fp` 恒定**，
+  （`worker/config.py:1264 args.course_frozen_bytes = p.read_bytes()`），发布腿用的正是冻结字节
+  （`trainer/loop_steps.py:1189-1192`、`worker/cmd.py:120-138`）⇒ **同一进程内 `course_fp` 恒定**，
   mid-run 热加载编辑（哪怕只改注释）**不换 job id**、不产生孤儿。
   只有在 `course_frozen_bytes` 缺席的旁路调用方（非训练主循环）才会漂。
 - **为什么不是 `course_name`**：它是 jsonc 内部的 `name`，与 hub 课程键**不是一回事**
@@ -213,7 +213,7 @@ publish_job(...)：
   （`course_of` 的归属证据用的同一条不变量）⇒ 先按目录名筛，只有同名目录才读 manifest。
   没有它，每次发布要把兄弟课程的全部 manifest 都 `json.loads` 一遍：真语料 82 份实测
   **399ms/次**；加闸后 **14ms/次**（一次 glob + 至多 1 次读取）。
-- **纯函数** `collision_rows(job_root: Path, manifest: dict) -> list[dict]` 住 `remote/protocol.py`
+- **纯函数** `collision_rows(job_root: Path, manifest: dict) -> list[dict]` 住 `common/protocol.py`
   （与 `d14_corpus_match` 同规：判据只有一份实现，`publish_job` 只负责调它并抛）。
   兄弟课程目录名从 `job_root.parent.name` 取（本课）；扫描根 `job_root.parent.parent`。
 - **容忍旧 manifest**：命中的 manifest 缺 `course_fp` 等键时（手写/更旧）跳过该行，
@@ -273,14 +273,14 @@ publish_job(...)：
 
 | 文件 | 改动 |
 |------|------|
-| `remote/protocol.py` | `idempotency_key` 加 `course_fp`（§3.1）；新增纯函数 `collision_rows(job_root, manifest)`（§3.3 判据唯一实现）。`job_id`/`job_seed`/`data_fp_entries` 其余不动 |
+| `common/protocol.py` | `idempotency_key` 加 `course_fp`（§3.1）；新增纯函数 `collision_rows(job_root, manifest)`（§3.3 判据唯一实现）。`job_id`/`job_seed`/`data_fp_entries` 其余不动 |
 | `remote/hub_client.py::publish_job` | 计算 jid 后、**写盘前**调 `collision_rows`，命中 ⇒ `HubClientError`（§3.3）；`tmp_extra_dir.mkdir()` 后移到守卫之后 |
 | `remote/run_loop.py::_build_iter_manifest` | **无需改**：`m` 由 hub 的 manifest 派生、`make_job_id` 同实现 ⇒ 自动继承新键。它是节点侧（无兄弟课程目录），守卫在此无意义 |
-| `remote/hub_server.py::course_of` | 唯一化（§3.2）：≥2 命中 ⇒ `None` + 一行歧义日志；`_locate_cache` 只缓存唯一命中 |
-| `remote/hub_server.py::_HubQueue.__init__` | 新增歧义日志去重集（jid → 已报过） |
-| `remote/hub_server.py::queue_state` | 新增 `ambiguous_jids`（§3.4） |
-| `remote/hub_server.py::_HubQueue` docstring | 改掉「runId ⇒ 跨课程天然不撞」的陈旧前提（§1.2 末行） |
-| `remote/hub_server.py::_post_claim` / `::_post_result` | 4xx 路径打一行拒绝日志（§3.4 hub 侧） |
+| `hub/server.py::course_of` | 唯一化（§3.2）：≥2 命中 ⇒ `None` + 一行歧义日志；`_locate_cache` 只缓存唯一命中 |
+| `hub/server.py::_HubQueue.__init__` | 新增歧义日志去重集（jid → 已报过） |
+| `hub/server.py::queue_state` | 新增 `ambiguous_jids`（§3.4） |
+| `hub/server.py::_HubQueue` docstring | 改掉「runId ⇒ 跨课程天然不撞」的陈旧前提（§1.2 末行） |
+| `hub/server.py::_post_claim` / `::_post_result` | 4xx 路径打一行拒绝日志（§3.4 hub 侧） |
 | `remote/worker.py::_warn_non_200` | 签名加 `body`/`jid`，按 §3.4 文案表分派（**409 ≠ hub 异常**）；三个调用点传体与 jid |
 | 控制台（dashboard） | 二期：`/admin/queue` 的 `ambiguous_jids` 非空 ⇒ 红标。本 plan 只保证字段在 hub 侧产出 |
 | **不改** | `remote/worker.py` 的请求形状、`remote/push_client.py`、`remote/push_dispatch.py`、`rl/**`（§2.2） |
@@ -302,7 +302,7 @@ publish_job(...)：
 - 测试：worker 侧「409 时日志含 reason 与 jid」；hub 侧拒绝行断言。
 
 ### E2 — L1 幂等键加 `course_fp`（含失败测试先行，AGENTS §7）
-- 先在 `tests/test_job_identity_collision.py` 写**红**用例：两个 manifest 只差 `course`/`course_fp`
+- 先在 `tests/remote/test_job_identity_collision.py` 写**红**用例：两个 manifest 只差 `course`/`course_fp`
   ⇒ 现在断言 id 相同（复现事故），改后断言不同；同时保留既有「同键同 id」幂等用例。
 - 改 `protocol.idempotency_key`；跑全量红→绿。
 - **迁移**：事故课程按 §3.5-A 换 runId 重跑。
@@ -337,7 +337,7 @@ publish_job(...)：
 
 | 位置 | 用例 | 压哪条不变式 |
 |------|------|--------------|
-| 新增 `tests/test_job_identity_collision.py` | `test_job_id_differs_across_courses_same_key_components`：两 manifest 只差 `course`/`course_fp` ⇒ id 不同 | §3.6-1 |
+| 新增 `tests/remote/test_job_identity_collision.py` | `test_job_id_differs_across_courses_same_key_components`：两 manifest 只差 `course`/`course_fp` ⇒ id 不同 | §3.6-1 |
 | 同上 | `test_old_key_formula_still_collides`：测试内**重实现旧公式**（4 分量）⇒ 断言旧公式下确实撞——把 bug 焊成回归锚 | §3.6-1 + 事故锚 |
 | 同上 | `test_collision_rows_flags_only_other_store`：同完整键异 store ⇒ 命中且消息含双方 course；同 store ⇒ 不命中；不同 it/course_fp ⇒ 不命中 | §3.3 |
 | 同上 | `test_publish_refuses_cross_store_identity`：同完整键、两个 job_root ⇒ 第二次抛 `HubClientError`，且**无 job 目录、无 job_pending 账本行** | §3.6-8 |
@@ -346,7 +346,7 @@ publish_job(...)：
 | 同上（`test_job_identity_collision.py`，实施时归到这里 —— 与 L1/L3 同文件便于对读；hub 侧用例的夹具与 `test_multi_course_hub.py` 同构） | `test_ambiguous_job_id_is_refused_not_guessed`：两课各放同 jid 目录 ⇒ `course_of` 为 None、job 作用域请求 404、`_locate_cache` 未写入 | §3.6-3 |
 | 同上 | `test_queue_state_reports_ambiguous_jids`：`queue_state()["ambiguous_jids"]` 列出该 jid 与两门课 | §3.4 |
 | 同上 | `test_single_course_legacy_semantics_unchanged`：单课程（空串课程名）下 `course_of` 仍返回 `""`、`ambiguous_jids == {}` | §3.6-7 |
-| `tests/test_remote_ppo.py` / `test_bc_protocol.py` | 既有「同键同 id」幂等用例保持绿 | §3.6-2 |
+| `tests/remote/test_remote_ppo.py` / `test_bc_protocol.py` | 既有「同键同 id」幂等用例保持绿 | §3.6-2 |
 | `e2e/test_multi_course_single_hub_e2e.py` | E5 改造（刻意同四分量 + 异 course_fp） | §3.6-1/4/5 |
 
 ### 6.2 DoD（全过才收）
@@ -398,16 +398,16 @@ publish_job(...)：
 ## 9. 证据与参考
 
 - 事故取证与机理链：`.workbuddy/memory/2026-09-24.md`（job-id 碰撞段）；现场快照 `tmp/hub_queue.json`。
-- 幂等键与键分量：`remote/protocol.py::idempotency_key` / `::job_id` / `::data_fp_entries`。
-- 课程字节冻结（选 `course_fp` 的依据）：`rl/config.py:1264`、`rl/cmd.py:120-138`、`rl/loop_steps.py:1189-1192`。
-- 课程键 ≠ course_name：`train/loop_util.py::course_key_from_path`、`remote/worker.py:2833-2836`。
-- 路由与拒绝面：`remote/hub_server.py::course_of` / `::_store_of` / `::_job_dir` / `::_claim_locked`
+- 幂等键与键分量：`common/protocol.py::idempotency_key` / `::job_id` / `::data_fp_entries`。
+- 课程字节冻结（选 `course_fp` 的依据）：`worker/config.py:1264`、`worker/cmd.py:120-138`、`trainer/loop_steps.py:1189-1192`。
+- 课程键 ≠ course_name：`worker/train/loop_util.py::course_key_from_path`、`remote/worker.py:2833-2836`。
+- 路由与拒绝面：`hub/server.py::course_of` / `::_store_of` / `::_job_dir` / `::_claim_locked`
   （`held` 在 `:655-661`）/ `::_post_claim`（409 出口 `:2979`）/ `::_post_result` / `::_facts_locked(exclude_worker=…)`。
 - 发布端：`remote/hub_client.py::publish_job`（`course_fp` 在 `make_job_id` 之前注入）；离线腿
-  `remote/run_loop.py::_build_iter_manifest`；会话载体 `rl/loop_steps.py::_remote_ppo_round`。
-- 进程级 runId：`rl/queue.py:11`。
+  `remote/run_loop.py::_build_iter_manifest`；会话载体 `trainer/loop_steps.py::_remote_ppo_round`。
+- 进程级 runId：`trainer/queue.py:11`。
 - 既有意图未被压过的证据：`e2e/test_multi_course_single_hub_e2e.py::test_single_hub_dispatches_two_courses_to_one_worker`。
-- 多课程测试基座：`tests/test_multi_course_hub.py`（`_HubFixture`、两课 store、`course_of` 语义用例）。
+- 多课程测试基座：`tests/hub/test_multi_course_hub.py`（`_HubFixture`、两课 store、`course_of` 语义用例）。
 - 相关 plan：`plan/opt-blob-diet.plan.md`（共享 remote-transport 章节编号预算）。
 
 ---

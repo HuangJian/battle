@@ -6,7 +6,7 @@ tmp 落盘，不需要 bun / 真节点 / weights fixture），所以能进门禁
 只跑这一层：
 
     bash tools/githook/nn-py-safe.sh -m pytest e2e/ -n 4 -q
-    # 或：make test-e2e / python task.py test-e2e
+    # 或：make test-e2e / python tools/task.py test-e2e
 
 （勿用裸 `python -m pytest`——AGENTS §5：沙箱删除守卫下会静默挂死。）
 夹具与 tests/conftest.py 共用（tmp_path 覆盖、通过即清、失败保留）。
@@ -26,7 +26,7 @@ if str(ROOT) not in sys.path:
 
 @pytest.fixture(autouse=True)
 def _no_serve_pool(monkeypatch: pytest.MonkeyPatch) -> None:
-    """e2e 层不开本机长驻池（`--serve` 会起**真 bun** 常驻 worker，见 `remote/serve_pool.py`）。
+    """e2e 层不开本机长驻池（`--serve` 会起**真 bun** 常驻 worker，见 `worker/serve_pool.py`）。
 
     本层是 hermetic 的（FakeServer + tmp 落盘，不需要 bun；各用例把 `run_local_rollout`
     打成桩），所以 `make_local_pool` 直接返回 None、本机腿回到逐局 spawn（正是打桩的那条路）。
@@ -34,8 +34,8 @@ def _no_serve_pool(monkeypatch: pytest.MonkeyPatch) -> None:
     ⚠ 必须挂在**夹具**上，不能在 conftest 模块级写 `os.environ`：门禁跑的是
     `pytest tests/ e2e/` **一次进程**，模块级 setenv 会把 `tests/` 里的池用例一并关掉
     （实测：三个真 bun 池用例全红，报「长驻 worker 池」不在日志里）。
-    池的真东西由与真 bun 的用例钉：`tests/test_local_rollout_pool.py`（本机腿）、
-    `tests/test_remote_iter_real_bun.py` / `test_remote_serve_pool.py`（节点腿）、
+    池的真东西由与真 bun 的用例钉：`tests/worker/test_local_rollout_pool.py`（本机腿）、
+    `tests/worker/test_remote_iter_real_bun.py` / `test_remote_serve_pool.py`（节点腿）、
     `tests/state-init.test.ts`（serve ≡ 一次性，含起始分布）。显式 `NN_SERVE_POOL=1` 仍可覆盖。
     """
     monkeypatch.setenv("NN_SERVE_POOL", "0")

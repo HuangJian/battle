@@ -323,7 +323,7 @@ export interface RawEntry {
 
 /**
  * 把一份「单局行」翻成 RawEntry（字段名与本机 manifest 一致；云机侧
- * `rl/reports.py::game_records` 逐字用的就是同一套名字，所以这里不需要翻译表）。
+ * `biz/reports.py::game_records` 逐字用的就是同一套名字，所以这里不需要翻译表）。
  * stage/seed 缺失或非数 ⇒ null（跳过该行）。
  */
 function entryFromManifest(

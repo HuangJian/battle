@@ -79,6 +79,26 @@ _MARK = re.compile(r"sleep-ok:\s*(?P<why>[^\r\n]*)")
 #: 允许的理由族（前缀匹配）——理由落不进这两族 = 它在拿时长当同步。
 FAMILIES = ("轮询步长", "夹具模拟")
 
+# ---- 文本预筛（先看字串，再决定要不要 `ast.parse` + walk）----
+# 这两条守卫各自扫 286 个文件（tests/ + e2e/），而**解析 + walk 才是成本**（实测单次
+# 全量：parse 0.54s + walk 1.34s）。判据本身都是语法量，所以先拿**字串超集**过一遍不会
+# 丢判据（关键词/名字在源码里就是字面量）；2026-09-29 加，见 docs/nn/engineering.md §43。
+#: 规则 1：`Attribute(attr="sleep")` ⇒ 源码里必有 `.sleep`（`.` 与属性名间可插空白）。
+_DOT_SLEEP_RE = re.compile(r"\.\s*sleep\b")
+#: 规则 2 的墙钟调用面：`time.time()` / `monotonic()` / `perf_counter()` 形。
+_TIME_CALL_RE = re.compile(r"\.(?:time|monotonic|perf_counter|monotonic_ns|perf_counter_ns)\b")
+#: 规则 2 在**源码文本**上的预筛面：`_DURATION_NAME` 的标识符边界版。
+#:
+#: 2026-09-29（§43）：原先是裸词根 `elapsed|wall|took|duration|sec|dt`，而 `sec`/`dt`
+#: 在 NumPy 测试里到处都是（`dtype`、`section`、`seeds`）⇒ 两条守卫扫的 286 个文件
+#: 几乎全部进 parse，预筛形同虚设（实测本用例 2.5s）。带边界后与 `_DURATION_NAME`
+#: **同判**：`_` 仍算词分隔（`_dt` / `_segment_seconds` / `seconds_ago` 命中），
+#: `dtype` / `width` / `section` 不命中。超集仍然是充分的：AST 认得的名字一定是
+#: 源码里的标识符，而以标识符形式出现就必然被这条表达式认出。
+_DURATION_WORD_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:elapsed|wall|dt|took|duration|sec|secs|seconds)(?![A-Za-z0-9])"
+)
+
 #: 上界墙钟断言的标注关键字 + 理由族（同 `sleep` 的设计：理由必须是闭集里的一族）。
 _TIMING_MARK = re.compile(r"timing-ok:\s*(?P<why>[^\r\n]*)")
 TIMING_FAMILIES = ("上界兜底", "契约上界", "夹具模拟", "相对判据")
@@ -108,6 +128,8 @@ def _named_duration(node: ast.AST) -> bool:
 
 def _sleep_calls(src: str) -> list[tuple[int, str]]:
     """所有 `.sleep(...)` 调用点 → (行号, 该行源码)。字符串里的同名字样不算。"""
+    if not _DOT_SLEEP_RE.search(src):  # 预筛：本文件的 sleep 只会出现在桩子源码字符串里
+        return []
     tree = ast.parse(src)
     lines = src.splitlines()
     out: list[tuple[int, str]] = []
@@ -252,6 +274,9 @@ def _upper_bounded(node: ast.Compare) -> ast.AST | None:
 
 def _timing_asserts(src: str) -> list[tuple[int, str]]:
     """文件里每一处**上界型墙钟断言** → (行号, 该行源码)。字符串里的同名字样不算（AST）。"""
+    # 预筛（超集）：要命中就得有一个 `assert` 语句，且它的比较式里带墙钟名/调用。
+    if "assert" not in src or not (_TIME_CALL_RE.search(src) or _DURATION_WORD_RE.search(src)):
+        return []
     tree = ast.parse(src)
     lines = src.splitlines()
     out: list[tuple[int, str]] = []

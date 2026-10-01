@@ -31,13 +31,13 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-import dist_common
+import common.distribution
 from common.protocol import AUTH_HEADER, decode_weights_json, encode_weights_json
+from hub.server import _JobStore, make_server
 from remote import worker as worker_mod
-from remote.hub_server import _JobStore, make_server
-from rl import bc_loop
-from rl.bc_config import BcEvalBlock, load_bc_course
 from tests.helpers.hub_poll import hub_poll
+from trainer import bc_loop
+from worker.bc_config import BcEvalBlock, load_bc_course
 
 TOKEN = "test-token"
 COURSE_FP = "course-fp-e2e"
@@ -192,7 +192,7 @@ class _FakeEvalNodeHandler(BaseHTTPRequestHandler):
             self._send_json(
                 {
                     "evalSupport": True,
-                    "codeHash": dist_common.compute_code_hash(),
+                    "codeHash": common.distribution.compute_code_hash(),
                     "concurrency": 2,
                 }
             )
@@ -322,7 +322,7 @@ def test_e2e_bc_interrupt_resume_continue_and_zeroretrain(
                 "params": 6,
             }
 
-        monkeypatch.setattr("train.bc.train", fake_train)
+        monkeypatch.setattr("worker.train.bc.train", fake_train)
         manifest = json.loads((jd / "manifest.json").read_text(encoding="utf-8"))
         result = worker_mod._run_bc_job(
             jid=jid,
@@ -356,7 +356,7 @@ def test_e2e_bc_interrupt_resume_continue_and_zeroretrain(
         def boom(ns: Any) -> dict[str, Any]:  # pragma: no cover — 必须不被调用
             raise AssertionError("resume 已达总 epoch，不得重训")
 
-        monkeypatch.setattr("train.bc.train", boom)
+        monkeypatch.setattr("worker.train.bc.train", boom)
         # 期望终态 = hub resume 现有字节（B 的 on_epoch 最后一次上传的权重文件）
         _, resume_body = _http_json(base, f"/jobs/{jid}/resume")
         expected_final = decode_weights_json(str(resume_body["weights"]))

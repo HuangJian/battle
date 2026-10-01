@@ -78,7 +78,7 @@ export function isCourseComponent(key: Component): key is CourseComponent {
 
 /** **单实例（共享）组件**：`hubServer`/`cloudflared`（2026-09-18）+ `trainingLoop`（2026-09-19）
  *  + `localWorker`（2026-09-19）不再是「每课一份」——一个 hub 进程服务所有并行课程、一条隧道
- *  指向它，一个 trainer 进程（`run_rl_cluster.py --serve`）服务所有课程的训练循环，
+ *  指向它，一个 trainer 进程（`trainer/run_rl_cluster.py --serve`）服务所有课程的训练循环，
  *  一个本机 PPO worker 领任何课程的 job。
  *
  *  ★ `localWorker` 为什么也进来（用户口径：「localWorker 也不应绑定课程，它和云端 worker 一样，
@@ -93,7 +93,7 @@ export function isCourseComponent(key: Component): key is CourseComponent {
  *
  *  ★ `trainingLoop` 为什么也进来（用户口径：「hubserver/trainingloop/selfNode/cloudflared
  *  都只需要开一个进程，就能同时支持所有并行训练课程」）：R2d 已经造好了单进程驱动者
- *  （`rl/loop_serve.py`：按课锁/按课日志镜像/引擎池/故障隔离），且 R3-4 让同一个进程也能
+ *  （`trainer/loop_serve.py`：按课锁/按课日志镜像/引擎池/故障隔离），且 R3-4 让同一个进程也能
  *  带 BC 课——而 BC 与 RL **共用 `trainingLoop` 这一个角色键**，按课键控意味着
  *  「BC 课 A + RL 课 B」只能靠两个进程并存。收敛后一个进程两种课都跑。
  *

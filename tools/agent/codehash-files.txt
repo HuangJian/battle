@@ -1,9 +1,9 @@
 # codeHash 文件集 SSOT（单一事实来源）
 #
-# python（nn-training/dist_common.py）与 typescript（tools/agent/sampler-agent.ts）
+# python（nn-training/common/distribution.py）与 typescript（tools/agent/sampler-agent.ts）
 # 都读本文件，按同一规则展开为 (posix 相对路径, 内容) 列表后计算 codeHash。
 # 两侧哈希必须逐字节一致——任一侧漏同步都会让节点被永久误判 stale、反复重启
-#（2026-09-01 事故：dist_common.py 加了 3 个文件、sampler-agent.ts 漏同步）。
+#（2026-09-01 事故：common/distribution.py 加了 3 个文件、sampler-agent.ts 漏同步）。
 #
 # 规则：
 #   '#' 开头 = 注释；空行忽略；
@@ -18,7 +18,7 @@
 #   3) 文件后缀 .pyc .orig .rej .bak .tmp .log .swp 或以 '~' 结尾。
 # 保留：*.ts / *.c / *.wasm（src/nn/conv/ 下的 conv.c / conv_*.h / prebuilt/** 都是受跟踪的
 # 内核源码与构建产物——prebuilt/wasm/conv.wasm 与 6 个平台的 conv_native.* 同属分发物）。
-# 实现：dist_common._skip_codehash_dir/_skip_codehash_file ↔
+# 实现：common.distribution._skip_codehash_dir/_skip_codehash_file ↔
 #   tools/agent/codehash-files.ts isSkippedCodeHashDir/isSkippedCodeHashFile。
 #
 # 纳入原则（2026-09-17 起 = 节点可用性的唯一事实来源）：影响节点采样/评估语义或
@@ -43,6 +43,10 @@
 # GAMEPLAY_SPECS 双份清单已并入本文件。
 src/nn/
 tools/agent/sampler-agent.ts
+# 单实例互斥判定（起听前 lock + HTTP 探活；plan/sampler-single-instance.plan.md §4-S1）：
+# 它是「一个 node = 一个监听实例」的判据源，改它 = 改节点监听行为 ⇒ 必须入集
+#（漏登记 = 改它不触发升级波，正是 :30 那条 `tools/agent/*.ts` 注释要防的漏网）。
+tools/agent/single-instance.ts
 tools/agent/restart-guard.ts
 tools/agent/codehash-files.ts
 tools/sim/export-rl-rollout.ts

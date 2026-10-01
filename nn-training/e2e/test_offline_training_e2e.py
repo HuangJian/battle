@@ -48,27 +48,28 @@ import zipfile
 
 import pytest
 
+from common import net_http
 from common.protocol import (
     COURSE_ENABLE_MARKER,
     INIT_WEIGHTS_NAME,
     TS_CODE_NAME,
     encode_weights_json,
 )
-from remote import net_http, offline_boot
+from remote import offline_boot
 from remote.artifacts import ArtifactStore
 from remote.hub_client import publish_job
 from remote.offline_deliver import OfflineDeliverer
-from rl.iter_job import build_iter_spec
-from rl.plan import build_plan, dump_plan
 from tests.helpers.hub_poll import hub_poll
 from tests.subproc_util import spawn_bound_port
+from worker.iter_job import build_iter_spec
+from worker.plan import build_plan, dump_plan
 
 
 @pytest.fixture(autouse=True)
 def _isolate_weights_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """把**权重归档根**指到 tmp（2026-09-23）。
 
-    本文件拉的是**真 hub 子进程**（`remote.hub_server`），子进程继承本测试的环境 ⇒ 用 env
+    本文件拉的是**真 hub 子进程**（`hub.server`），子进程继承本测试的环境 ⇒ 用 env
     而不是 patch 模块常量。不隔离的话回传轮会往真 `nn-training/weights/` 写归档，而控制台
     的 evalA 权重选择器会把它们当成真训练轮次列出来。
     """
@@ -146,7 +147,7 @@ def _course_dirs(traj_root: Path, course: str) -> tuple[Path, Path]:
 
 
 def _plan_args() -> SimpleNamespace:
-    """`build_plan` / `build_iter_spec` 需要的最小 args（与 tests/test_plan.py 同源）。"""
+    """`build_plan` / `build_iter_spec` 需要的最小 args（与 tests/worker/test_plan.py 同源）。"""
     return SimpleNamespace(
         curriculum_stages="",
         curriculum_start=4,
@@ -255,7 +256,7 @@ def _publish_plain_job(course: str, job_root: Path, jsonl: Path, tmp_path: Path)
 
 
 class _Hub:
-    """真 `remote.hub_server` 子进程（控制台实际启动的那条 argv：`--traj-root --discover`）。"""
+    """真 `hub.server` 子进程（控制台实际启动的那条 argv：`--traj-root --discover`）。"""
 
     def __init__(self, traj_root: Path) -> None:
         def _argv(port: int) -> list[str]:
@@ -263,7 +264,7 @@ class _Hub:
                 sys.executable,
                 "-u",
                 "-m",
-                "remote.hub_server",
+                "hub.server",
                 "--port",
                 str(port),
                 "--host",
@@ -292,6 +293,24 @@ class _Hub:
 
     def output(self) -> str:
         return "\n".join(self.lines)[-1200:]
+
+    def wait_line(self, *needles: str, timeout: float = 10.0) -> bool:
+        """等日志里出现**同时含**这些片段的一行（`timeout` 只是挂起兜底，不是同步手段）。
+
+        为什么不能「请求 200 了 ⇒ 日志已到」：`self.lines` 是子进程 stdout 由 **drain 线程
+        异步**追加的（`tests/subproc_util.spawn_bound_port`）。满载时那个线程可能还没被调度到，
+        于是「hub 已经服务完这个请求」与「那一行已经在列表里」之间有个真实窗口。
+        2026-09-29 全量实测：`test_offline_segment_is_claimable_only_by_a_marked_worker`
+        在 load≈4 时就这么红过一次（失败输里能看到 hub 其实已经服务了）。
+        判据是**日志行**本身（谓词）；等到它出现才继续，就不看机器脸色。
+        """
+        end = time.time() + timeout
+        while time.time() < end:
+            if any(all(n in ln for n in needles) for ln in self.lines):
+                return True
+            # sleep-ok: 轮询步长（等的是「日志里出现这一行」这个谓词，超时只当挂起兜底）
+            time.sleep(0.02)
+        return False
 
     def ready(self, *, expect: list[str], timeout: float = 40.0) -> None:
         """`/admin/queue` 能答 **且**课程表已就位（课程表是后台扫描登记进来的）。"""
@@ -336,7 +355,7 @@ def test_offline_segment_is_claimable_only_by_a_marked_worker(tmp_path: Path) ->
 
     2026-09-25：头的语义从「能力」升为**归属**（一个盘一种任务）——旧口径「带标仍可领
     在线课」已作废，对应的断言不再存在（归属闸会当场拒，见
-    `tests/test_role_routing.py`）。本文件保留的是跨进程那条真链路。
+    `tests/hub/test_role_routing.py`）。本文件保留的是跨进程那条真链路。
     """
     traj = tmp_path / "traj"
     off_job_root, off_jsonl = _course_dirs(traj, C_OFF)
@@ -369,7 +388,7 @@ def test_offline_segment_is_claimable_only_by_a_marked_worker(tmp_path: Path) ->
         # 观测：hub 日志里有一行「整段交领」（现场排障的第一只手电）。
         # 文案 2026-09-25 改过：判据从「课程当前 mode」换成 **job 自己的 role**，
         # 所以行里报的是「请求方自称的角色」而不是「这是离线课」。
-        assert any("整段交领" in ln and "marked-1" in ln for ln in hub.lines), hub.output()
+        assert hub.wait_line("整段交领", "marked-1"), hub.output()
     finally:
         hub.close()
 
@@ -455,7 +474,7 @@ def _real_pack(
     """用**真导出器**写一个任务包（控制台 `--export-bundle` 走的就是它）。
 
     `normalize_manifest` 被替换成恒等（最小 manifest 缺时间戳/字段时会拒），与
-    `tests/test_offline_task_pack.py::_export_real_pack` 同一口径。
+    `tests/hub/test_offline_task_pack.py::_export_real_pack` 同一口径。
     """
     from remote import bundle as bundle_mod
 

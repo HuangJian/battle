@@ -2665,6 +2665,15 @@ a.tc-btn {
   font-size: var(--fs-sm);
   color: var(--muted);
 }
+/* 门禁平台开关的两行小字（2026-10-01）：意图的到点时间 + 训练侧回执的「实际生效」。
+   两栏刻意分开写：**意图 ≠ 事实**，不一致时正是最该被看见的时刻。 */
+.tc-side__note {
+  font-size: var(--fs-xs);
+  line-height: 1.4;
+  color: var(--muted);
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 
 /* ── 顶栏 ─────────────────────────────────────────────── */
 .tc-top {

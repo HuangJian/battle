@@ -23,7 +23,7 @@ offline 盘的取包端点补 mode 闸。** ⇒ 无论模式切换多少次、�
 
 | # | 事实 | 出处 |
 |---|---|---|
-| F1 | job 形状**发布时**定死：有 `plan_bytes`⇒`run`，有 `rollout_spec`⇒`iter`，都没有⇒`ppo` | `rl/loop_steps.py`（`publish_job(...)` 调用点） |
+| F1 | job 形状**发布时**定死：有 `plan_bytes`⇒`run`，有 `rollout_spec`⇒`iter`，都没有⇒`ppo` | `trainer/loop_steps.py`（`publish_job(...)` 调用点） |
 | F2 | **没有"job 归属"字段**（manifest 有形状、有 `dispatch` 传输意图，没有"该谁来执行"） | 字段遍历 |
 | F3 | `claim_next` 用**课程当前 mode** 判归属 | `hub_server.py claim_next` |
 | F4 | `peek_jobs` 同样用 mode | `hub_server.py peek_jobs` |
@@ -49,9 +49,9 @@ offline 盘的取包端点补 mode 闸。** ⇒ 无论模式切换多少次、�
   | `run` | `offline` | 整段自主（计划随 job 走、节点自己跑 rollout + PPO）⇒ 离线盘 |
   | `iter` | `online` | 一整轮上云，仍是"在线盘的活" |
   | `ppo` | `online` | 逐轮 |
-  | `bc` | `online` | BC job 由云机跑 `train/bc.py`（不是"整段自主"） |
+  | `bc` | `online` | BC job 由云机跑 `worker/train/bc.py`（不是"整段自主"） |
 
-  `MANIFEST_KINDS` 与 `KIND_ROLES` 共用一份 kind 全集；`tests/test_role_routing.py::test_kind_role_map_covers_every_manifest_kind`
+  `MANIFEST_KINDS` 与 `KIND_ROLES` 共用一份 kind 全集；`tests/hub/test_role_routing.py::test_kind_role_map_covers_every_manifest_kind`
   穷举钉住 —— 加第 5 个 kind 而忘了给归属 ⇒ 当场红（否则它会静默回落 online，
   表现只是"这份活一直在队列里等人"）。
 - **为什么不用"课程当前 mode"**：mode 是易变的（hub 内存表、控制台可热切）
@@ -86,7 +86,7 @@ offline 盘的取包端点补 mode 闸。** ⇒ 无论模式切换多少次、�
 - **请求方 role**：来自请求头（见 2.3）。缺头 ⇒ `online`（旧 worker 行为逐字不变）。
   **跨角色领不到**；旧口径"带标 worker 仍可领在线课"**已作废**（一个盘一种任务，用户 2026-09-25 裁决）
   —— 这是**行为变更**，见 `DECISIONS.md §2026-09-25-goalnn-role-routing`。
-- **枚举式回归防线**：`tests/test_role_routing.py::test_claim_paths_are_enumerated_and_all_carry_role`
+- **枚举式回归防线**：`tests/hub/test_role_routing.py::test_claim_paths_are_enumerated_and_all_carry_role`
   把生产代码里所有进 `_JobStore` 的认领调用点（4 处）与"每处都传 `role=`"钉成表
   ⇒ 出现第 5 条绕过路径（新腿、新调用点）当场红。
 - **观测面**：`/admin/queue` 每行加 `roles: {jid: role}`（"谁在等谁"可见）。
@@ -107,12 +107,12 @@ CFG["offline_worker"] → supervisor argv `--offline` → worker_loop(role=…) 
 - **头名与取值零改动**（`X-Battle-Offline: 1`）：混合部署里旧 hub/旧 worker 用同一份字面量，
   改名只会让带标 worker 在旧 hub 上**静默掉线**；而"归属判断是否正确"与名字无关。
   语义从**能力**（"我能自己跑完整段"）升级为**归属**（"本会话属于哪块盘"），
-  名字保持 —— 这条由 `tests/test_offline_task_pack.py::test_role_header_name_is_shared_with_workers` 守住（防顺手改名）。
+  名字保持 —— 这条由 `tests/hub/test_offline_task_pack.py::test_role_header_name_is_shared_with_workers` 守住（防顺手改名）。
 - **CLI 名不变**（`--offline`）：`notebook_runtime.restart_argv` / `offline_boot` 的既有链路照旧，
   只把解析结果从 `offline_ok=True` 换成 `role="offline"`。
 - **claim 也必须带头**（F6 的真正修法）：`worker._sched_headers` 现在同时服务 peek 与 claim。
   闸下沉之后，"只在 peek 上带头"= 带标 worker **自锁**（peek 绿、claim 红）——
-  `tests/test_worker_offline_cap.py::test_claim_sends_role_header_too` 守着这一跳，
+  `tests/remote/test_worker_offline_cap.py::test_claim_sends_role_header_too` 守着这一跳，
   `acquire_job` 内部两跳（peek → claim）都透传 `role`。
 - **能力闸 → 归属闸**的依据：`kind=run` 整段**确实**由 tailscale 盘跑得动（审计 §3：它有能力）——
   事故正是"有能力的盘接走了不属于它的整段 job"。能力拦不住"接错盘"，
@@ -128,17 +128,17 @@ CFG["offline_worker"] → supervisor argv `--offline` → worker_loop(role=…) 
 - **只在"表里有它且明确 online"时拦**：冷课/未扫到的课必须照旧放行 —— 课程表是"1 小时新鲜度
   扫描"的产物，而离线课本机不训练 ⇒ 从表里掉出去是常态，拿"不在表里"当 online 会把正常取包锁死
   （与 `_task_pack_miss_candidate` ① 同一条规则）。
-- 用例：`tests/test_offline_task_pack.py::test_task_pack_online_course_is_409_even_when_the_pack_lives_on_disk`
+- 用例：`tests/hub/test_offline_task_pack.py::test_task_pack_online_course_is_409_even_when_the_pack_lives_on_disk`
   + `test_task_pack_cold_course_still_served`；跨进程那条在 `e2e/test_offline_training_e2e.py`。
 
 ### 2.5 配置短路修复（I3）—— ✅ 已实施
 
-- `rl/cli.py`：`--rollout-src` 的默认从 `_d("rollout_src", "auto")` 改为**字面量 `"auto"`**。
+- `worker/cli.py`：`--rollout-src` 的默认从 `_d("rollout_src", "auto")` 改为**字面量 `"auto"`**。
   旧写法把 rl-config 顶层的 `rl.rollout_src` 读成 argparse 默认值 ⇒ `_rollout_source` 第一行
   "非 auto 就早返回"直接命中 ⇒ **课程级 `courses.<课>.rollout_src` 被整个忽略**
   （控制台写着 run、实际跑 local，而两者的日志形状一样）。
 - 顶层 `rl.rollout_src` **仍在** `_rollout_source` 的兜底链里（课程级为空 ⇒ 照旧生效）
-  ⇒ 顶层配置语义一字未变。用例：`tests/test_run_segment.py::test_cli_default_rollout_src_never_shadows_the_course_level_key`。
+  ⇒ 顶层配置语义一字未变。用例：`tests/worker/test_run_segment.py::test_cli_default_rollout_src_never_shadows_the_course_level_key`。
 
 ---
 
@@ -148,9 +148,9 @@ CFG["offline_worker"] → supervisor argv `--offline` → worker_loop(role=…) 
 |---|---|---|---|
 | **P1（核心）** | §2.1 role 进 manifest + §2.2 咽喉点两道闸 + §2.3 角色上报（复用载体） | `protocol.py` / `hub_client.py` / `hub_server.py` / `worker.py` / `push_dispatch.py` / `notebook_runtime.py` | ✅ 已实施 |
 | **P2** | §2.4 取包端点补 mode 闸 | `hub_server.py` | ✅ 已实施 |
-| **P3** | §2.5 配置短路 | `rl/cli.py` | ✅ 已实施 |
-| **P4** | I6 第三块盘：`battle.cloudflared.ipynb` —— **不退役**（cloudflared 公网隧道 / tailscale 盘 = 两条不同接入方式）；两块在线盘**都不跑 rollout** ⇒ 去掉它们的 **bun 依赖**（见 §9） | `remote/tailscale_boot.py` / `remote/iter_rollout.py` / 两个守卫用例 | ✅ 已实施（2026-09-25，含误判撤回） |
-| **P5** | **§7 的收尾**：`kind=run` 的队列项退役（砍在发布点）+ 无消费者时的响亮拒 + 离线盘报名与读数 | `rl/loop_steps.py` / `rl/loop_round_steps.py` / `rl/loop_round.py` / `rl/loop_core.py` / `rl/loop_runner.py` / `rl/cli.py` / `remote/worker.py` / `remote/run_loop.py` / `remote/offline_boot.py` / `remote/hub_server.py` | ✅ 已实施 |
+| **P3** | §2.5 配置短路 | `worker/cli.py` | ✅ 已实施 |
+| **P4** | I6 第三块盘：`battle.cloudflared.ipynb` —— **不退役**（cloudflared 公网隧道 / tailscale 盘 = 两条不同接入方式）；两块在线盘**都不跑 rollout** ⇒ 去掉它们的 **bun 依赖**（见 §9） | `remote/tailscale_boot.py` / `worker/iter_rollout.py` / 两个守卫用例 | ✅ 已实施（2026-09-25，含误判撤回） |
+| **P5** | **§7 的收尾**：`kind=run` 的队列项退役（砍在发布点）+ 无消费者时的响亮拒 + 离线盘报名与读数 | `trainer/loop_steps.py` / `trainer/loop_round_steps.py` / `worker/loop_round.py` / `trainer/loop_core.py` / `trainer/loop_runner.py` / `worker/cli.py` / `remote/worker.py` / `remote/run_loop.py` / `remote/offline_boot.py` / `hub/server.py` | ✅ 已实施 |
 
 **实施顺序（已按此落）**：`protocol.py` 常量+映射 → `hub_client.py` 写字段 → `hub_server.py`
 闸下沉 + 三个面透传 role → `worker.py` 两跳带头 → push 腿同源 → notebook 文案同步。
@@ -163,9 +163,9 @@ CFG["offline_worker"] → supervisor argv `--offline` → worker_loop(role=…) 
 
 | 装置 | 位置 | 用途 |
 |---|---|---|
-| `_Hub` / `_HubQueue` + `make_server` | `e2e/test_offline_training_e2e.py` / `remote/hub_server.py` | 真 hub 进程（`--discover`）+ `ready()/set_mode()/lines/close()` |
+| `_Hub` / `_HubQueue` + `make_server` | `e2e/test_offline_training_e2e.py` / `hub/server.py` | 真 hub 进程（`--discover`）+ `ready()/set_mode()/lines/close()` |
 | `hub_poll` | `tests/helpers/hub_poll.py` | 旧 `/jobs/next` 同形替代（peek + claim，**peek 与 claim 都带角色头**） |
-| `_hub` / `_publish` / `_workers_with` / `_pump` | `tests/test_hub_push_dispatch.py` | push 腿派发装置 |
+| `_hub` / `_publish` / `_workers_with` / `_pump` | `tests/remote/test_hub_push_dispatch.py` | push 腿派发装置 |
 | `spawn_bound_port` | `tests/subproc_util.py` | 起进程 + 等端口（端口竞态由它消化） |
 
 **纪律（抄同文件头部声明）**：不 spawn bun/node、不加载 torch、HTTP 全在本机临时端口。
@@ -174,15 +174,15 @@ CFG["offline_worker"] → supervisor argv `--offline` → worker_loop(role=…) 
 
 | 原计划用例 | 落点（实施后） |
 |---|---|
-| T1 `role=offline` 的 job 在线盘领不到 | `e2e/test_offline_training_e2e.py::test_offline_segment_is_claimable_only_by_a_marked_worker`（跨进程）+ `tests/test_role_routing.py`（进程内 HTTP/直调） |
-| T2 归属在 N 次模式切换后**逐次**不变 | `tests/test_multi_course_hub.py`（5 次切换逐次断言 `job_role` 恒为 offline、在线盘逐次领不到） |
-| T3 按 id 直领也受闸（钉 F5） | `tests/test_priority_schedule.py::test_peek_carries_halt_and_role_gate` + `tests/test_role_routing.py::test_store_gate_rejects_role_mismatch_without_touching_the_lease` |
-| T4 旧 job（无 role）不孤儿 | `tests/test_role_routing.py::test_role_of_reads_field_then_kind` + `test_claim_next_partitions_courses_by_job_role` |
-| T5 在线 job 离线盘领不到（★行为变更） | `tests/test_role_routing.py`（`role_blocked` 两个方向）+ `test_priority_schedule` 的归属闸断言 |
-| T6 取包端点的 mode 闸 409→200 | `tests/test_offline_task_pack.py`（进程内）+ `e2e/test_offline_training_e2e.py`（跨进程） |
+| T1 `role=offline` 的 job 在线盘领不到 | `e2e/test_offline_training_e2e.py::test_offline_segment_is_claimable_only_by_a_marked_worker`（跨进程）+ `tests/hub/test_role_routing.py`（进程内 HTTP/直调） |
+| T2 归属在 N 次模式切换后**逐次**不变 | `tests/hub/test_multi_course_hub.py`（5 次切换逐次断言 `job_role` 恒为 offline、在线盘逐次领不到） |
+| T3 按 id 直领也受闸（钉 F5） | `tests/hub/test_priority_schedule.py::test_peek_carries_halt_and_role_gate` + `tests/hub/test_role_routing.py::test_store_gate_rejects_role_mismatch_without_touching_the_lease` |
+| T4 旧 job（无 role）不孤儿 | `tests/hub/test_role_routing.py::test_role_of_reads_field_then_kind` + `test_claim_next_partitions_courses_by_job_role` |
+| T5 在线 job 离线盘领不到（★行为变更） | `tests/hub/test_role_routing.py`（`role_blocked` 两个方向）+ `test_priority_schedule` 的归属闸断言 |
+| T6 取包端点的 mode 闸 409→200 | `tests/hub/test_offline_task_pack.py`（进程内）+ `e2e/test_offline_training_e2e.py`（跨进程） |
 | **pull 腿**（§4.4 必查项） | 既有 pull 腿 e2e 全绿（`e2e/test_multi_course_single_hub_e2e.py` / `test_offline_training_e2e.py` 都是真 worker 拉活形态）+ 新增 `test_push_leg_never_pushes_an_offline_role_job`（push 腿对照组同用例内） |
 
-**新增的枚举式防线**（评审 A 要求）：`tests/test_role_routing.py::test_claim_paths_are_enumerated_and_all_carry_role`
+**新增的枚举式防线**（评审 A 要求）：`tests/hub/test_role_routing.py::test_claim_paths_are_enumerated_and_all_carry_role`
 —— 认领路径**只有** 4 条（`claim_next` / `Hub.claim` / `Hub.claim_job` / push `hub.claim`），
 且每条都把 `role` 送进临界区。
 
@@ -250,14 +250,14 @@ CFG["offline_worker"] → supervisor argv `--offline` → worker_loop(role=…) 
    **不许**做成「每门课一个开关」，也不许因此要求 ipynb 填课程名。
 
 起因：P1 之后 `role=offline` 的 job 只给 `role=offline` 的 worker，若没有任何 worker 声明离线角色，
-这类 job 无人接，本机训练侧白等（`rl/loop_steps.py RUN_WAIT_DEFAULT_SEC=8h`）。
+这类 job 无人接，本机训练侧白等（`trainer/loop_steps.py RUN_WAIT_DEFAULT_SEC=8h`）。
 
 ### 7.1 依据（R1–R4 均已在代码里核实）
 
 | # | 事实 | 出处 |
 |---|---|---|
-| R1 | 队列里的 `kind=run`（残留路径）**只有一个生产发布者**：离线档本机循环的那次派发（`register=True`，本机随后等 8h） | `rl/loop_steps.py _remote_run_segment` → `_remote_ppo(plan_bytes=…, register=export_path is None)` |
-| R2 | `--export-bundle`（取包链的入口；控制台「切离线」自动跑的就是它）**也**造 `kind=run` 的 manifest，但 `register=False`（只建 job 目录当打包源，**不进待领池**、不记账本） | `rl/loop_steps.py`（`register=export_path is None` + 导出分支）· `dashboard/src/server/bundles/export.ts taskBundleArgs` |
+| R1 | 队列里的 `kind=run`（残留路径）**只有一个生产发布者**：离线档本机循环的那次派发（`register=True`，本机随后等 8h） | `trainer/loop_steps.py _remote_run_segment` → `_remote_ppo(plan_bytes=…, register=export_path is None)` |
+| R2 | `--export-bundle`（取包链的入口；控制台「切离线」自动跑的就是它）**也**造 `kind=run` 的 manifest，但 `register=False`（只建 job 目录当打包源，**不进待领池**、不记账本） | `trainer/loop_steps.py`（`register=export_path is None` + 导出分支）· `dashboard/src/server/bundles/export.ts taskBundleArgs` |
 | R3 | **没有任何盘是离线角色**：`CFG["offline_worker"]` 全仓只有测试设过；`offline_boot`（取包链）全文碰不到 `/jobs`，它自报身份只有 `Authorization` | 审计 §4-L3 · `remote/offline_boot.py` |
 | R4 | 因此 P1 之后 `role=offline` 的**队列项无人能领**（旧 job 按 `kind` 兜底也是 offline），本机在每个段上白等 8h | `protocol.KIND_ROLES`（`run ⇒ offline`）· `hub_server._JobStore.role_blocked` |
 
@@ -295,7 +295,7 @@ it0 基线 + 本机产物优先；四份 plan 在建/已实施）⇒ 保留它 =
 ### 7.4 DoD（P5 落地时逐条判）
 
 - [x] `/admin/queue` 上不再出现 offline-role 的**待领**项 —— 生产端不再发它
-      （枚举式：`tests/test_offline_leg_retired.py::test_run_manifest_is_published_from_exactly_one_place_with_export_path`；
+      （枚举式：`tests/trainer/test_offline_leg_retired.py::test_run_manifest_is_published_from_exactly_one_place_with_export_path`；
       残留项另有 `offline_disk.stale_jobs` 点名）。
 - [x] 离线课本机循环：一行指路 + 不采样 + 不派发 + 不进账本 + 不等待
       （`test_offline_course_stops_the_round_cleanly_with_a_pointing_line` × 3 档 `run_iters`
@@ -329,10 +329,10 @@ it0 基线 + 本机产物优先；四份 plan 在建/已实施）⇒ 保留它 =
 
 | 位置 | 现在的假设 | 归属 |
 |---|---|---|
-| `rl/loop_steps.py _remote_run_segment` | 本机发布一份 `kind=run` 队列项，随后等 `run_wait_sec` | **退役**（改为不派发 / 不采样 / 不进账本 / 不等） |
-| `rl/loop_round_steps.py` 的 `COLLECT_SEGMENT` 分支 | 采集模式分流里有一条「整段」腿 | **退役**；同文件的 `--export-bundle` 早退**保留**（取包链入口） |
-| `rl/loop_round.py resolve_collect_mode` / `COLLECT_SEGMENT` / `ctx.seg` | 段长决定「本机不采样」 | **半退役**：字段留（`--export-bundle` 的到哪停），`COLLECT_SEGMENT` 分支退役 |
-| `rl/loop_steps.py RUN_WAIT_DEFAULT_SEC` / `_run_wait_sec` / `--run-wait-sec` / `rl.run_wait_sec` | 等一个没人领的 job，硬顶 8h | **退役**（尾巴改成有界 + 响亮拒跑） |
+| `trainer/loop_steps.py _remote_run_segment` | 本机发布一份 `kind=run` 队列项，随后等 `run_wait_sec` | **退役**（改为不派发 / 不采样 / 不进账本 / 不等） |
+| `trainer/loop_round_steps.py` 的 `COLLECT_SEGMENT` 分支 | 采集模式分流里有一条「整段」腿 | **退役**；同文件的 `--export-bundle` 早退**保留**（取包链入口） |
+| `worker/loop_round.py resolve_collect_mode` / `COLLECT_SEGMENT` / `ctx.seg` | 段长决定「本机不采样」 | **半退役**：字段留（`--export-bundle` 的到哪停），`COLLECT_SEGMENT` 分支退役 |
+| `trainer/loop_steps.py RUN_WAIT_DEFAULT_SEC` / `_run_wait_sec` / `--run-wait-sec` / `rl.run_wait_sec` | 等一个没人领的 job，硬顶 8h | **退役**（尾巴改成有界 + 响亮拒跑） |
 | `remote/worker.py`「半离线尾巴」（`kind == "run"` → `run_plan_job`） | worker 领到 run job 后把剩余轮次自己跑完 | **退役**（队列腿的消费端；取包链走 `run_loop.main --bundle`，与它无关） |
 | `remote/run_loop.py run_plan_job` | 同上 | **退役**（随发布端一起） |
 | `remote/hub_client.py publish_job` 的 `kind='run'` 必填校验 | `kind=run` 必须带 `plan_bytes` + `rollout_spec` | **保留**（`--export-bundle` 仍造这种 manifest），但注释要写明「它的消费者是取包链，不是队列」 |
@@ -357,8 +357,8 @@ it0 基线 + 本机产物优先；四份 plan 在建/已实施）⇒ 保留它 =
 | 位置 | 归属 |
 |---|---|
 | `docs/nn/remote-transport.md` / `console.md` / `training-stack.md` / `runtime-opt.md` 的「半离线/整段」段 | 改词：离线 = 取包接手；队列 run 项退役（P5 落一条进度记录） |
-| `tests/test_run_segment.py`（8 处）/ `tests/test_loop_round.py` / `tests/test_serve_wiring.py` | 跟 P5 一起改：整段腿的主用例退役或改成「不派发」的断言 |
-| `tests/test_role_routing.py`（`run ⇒ offline` 映射） | **保留**（形状仍在；旧 job 兜底仍需要） |
+| `tests/worker/test_run_segment.py`（8 处）/ `tests/worker/test_loop_round.py` / `tests/trainer/test_serve_wiring.py` | 跟 P5 一起改：整段腿的主用例退役或改成「不派发」的断言 |
+| `tests/hub/test_role_routing.py`（`run ⇒ offline` 映射） | **保留**（形状仍在；旧 job 兜底仍需要） |
 | `e2e/test_offline_training_e2e.py`（取包链）/ `e2e/test_loop_supervisor_integration.py` | 前者**保留**（要加一条：本机对离线课不发队列项）；后者按 P5 调整 |
 | `dashboard/tests/{train-mode-offline,course-mode,course-lifecycle,exit-watchdog,server-api-state-view}.test.ts` | 按上表逐条改断言/文案 |
 
@@ -381,7 +381,7 @@ it0 基线 + 本机产物优先；四份 plan 在建/已实施）⇒ 保留它 =
 | K | 回退开关 `NN_ROLE_ROUTING=0` | **否决**（理由见 §6 末条 + DECISIONS）；回滚面 = 笔记本开关 + 本提交（hub/worker 同批） |
 
 **附带发现并修掉的问题**（与主设计同源）：
-- `docs/tpu-perf` 无关；`rl/cli.py` 的 `--rollout-src` 短路（§2.5）属于 I3；
+- `docs/tpu-perf` 无关；`worker/cli.py` 的 `--rollout-src` 短路（§2.5）属于 I3；
 - `hub_server.py` 的"离线课整段交领"日志判据原读 `mode_of(course)` ⇒ 热切后会撒谎，改为读 `job_role(jid)`；
 - `active_courses()` 的 `mode_of` 读法保留，但补写"它只是活跃度近似、不参与派发判断"的口径注释。
 
@@ -431,9 +431,9 @@ it0 基线 + 本机产物优先；四份 plan 在建/已实施）⇒ 保留它 =
 | 位置 | 改什么 |
 |---|---|
 | `remote/tailscale_boot.py` | `ensure()` **不再**调 `ensure_bun`；`BUN_INSTALL_URL` / `bun_path()` / `ensure_bun()` 三处**一并退役**（无消费者）—— 原位留一段注记说清「本模块不管 bun」与谁才需要 bun |
-| `remote/iter_rollout.py` | `resolve_bun` 的拒单消息改口：不是「盘坏了」，而是「这份活派错了盘」+ 指路（`battle.offline.ipynb` / `rollout.cloudflared.ipynb` / `rollout_src=local`） |
-| `tests/test_tailscale_boot_bun.py` | 重写为三条边界的守卫：在线盘的四份源码 + 两个 ipynb **无任何 bun 安装**；退役符号**不许回来**；跑 rollout 的两块盘**必顶还有 bun 安装** |
-| `tests/test_ts_offline_install.py` | 删掉为短接旧 bun 分支而打的桩（`ensure()` 里已无 bun 分支），保留「真实子进程一律响亮失败」以防再入网络分支 |
+| `worker/iter_rollout.py` | `resolve_bun` 的拒单消息改口：不是「盘坏了」，而是「这份活派错了盘」+ 指路（`battle.offline.ipynb` / `rollout.cloudflared.ipynb` / `rollout_src=local`） |
+| `tests/remote/test_tailscale_boot_bun.py` | 重写为三条边界的守卫：在线盘的四份源码 + 两个 ipynb **无任何 bun 安装**；退役符号**不许回来**；跑 rollout 的两块盘**必顶还有 bun 安装** |
+| `tests/remote/test_ts_offline_install.py` | 删掉为短接旧 bun 分支而打的桩（`ensure()` 里已无 bun 分支），保留「真实子进程一律响亮失败」以防再入网络分支 |
 
 **若有课程选 `rollout_src=node`（整轮上云）**：在线 worker 盘会被能力自检**响亮拒单**（
 `REJECTED: 节点上找不到 'bun'`）—— 这是**预期**的，要跑 rollout 就用带 bun 的盘。
@@ -477,7 +477,7 @@ it0 基线 + 本机产物优先；四份 plan 在建/已实施）⇒ 保留它 =
 | 云机自主跑整课（离线） | `battle.offline.ipynb`（取任务包；**不经 hub 队列**，P5 之后） |
 | BC 蒸馏 | `battle-bc.ipynb` |
 
-4. **守卫用例**（`nn-training/tests/test_notebook_retired.py`）：该 ipynb 里不得再出现任何 worker 引导标识
+4. **守卫用例**（`nn-training/tests/test_notebook_retired.py`——**今不存在**：退役本身被 `ad465f3` 撤回（误判），守卫随文件一并删除、**无继任**）：该 ipynb 里不得再出现任何 worker 引导标识
    （`notebook_runtime` / `push_bootstrap` / `worker_loop` / `run_pull_worker` / `run_push_worker` /
    cloudflared 二进制安装），且必须含 `SystemExit` 与三份指路 —— 防止有人「顺手把它改回可用」而没读这段裁决。
 

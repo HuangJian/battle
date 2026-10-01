@@ -30,6 +30,7 @@ standalone 脚本迁来的用例用 `FAILS: list[str]` + `check()` 累积失败�
 from __future__ import annotations
 
 import os
+import socketserver as _socketserver
 
 import pytest
 
@@ -99,6 +100,28 @@ def pytest_runtest_makereport(item, call):
             f"{item.nodeid} 耗时 {secs:.2f}s 超过警告阈值 {warn:g}s",
             stacklevel=1,
         )
+
+
+# ── 全局：HTTP 测试服务的「关服」延迟（2026-09-29，§43；与 §14 同族）────────────────
+# `BaseServer.serve_forever()` 的 `poll_interval` 缺省 **0.5s**，而 `shutdown()` 会
+# **无条件等** `__is_shut_down`（没有超时）⇒ 「关服」最坏要等一整个轮询周期。仓库里约
+# 40 处 `threading.Thread(target=srv.serve_forever, daemon=True)` 因此每条用例白付
+# 0~0.5s：实测 `test_hub_push_dispatch::test_push_workers_admin_endpoint` 的 1.09s 里
+# **1.005s 全在两次 `socketserver.shutdown()`**（`--durations` 只让人以为「这个用例很慢」）。
+# 把默认轮询周期收到 10ms：只改「服务循环多久醒一次」，测试的判据全都挂在请求/事件上，
+# 没人依赖 0.5s 的粒度；关服延迟从 ~0.25s 降到 ~5ms。显式传 `poll_interval=` 的调用点
+# 不受影响（只换默认值，不改签名语义）。
+_FAST_POLL_SEC = 0.01
+_orig_serve_forever = _socketserver.BaseServer.serve_forever
+
+
+def _serve_forever_fast_poll(self, poll_interval: float = _FAST_POLL_SEC) -> None:
+    _orig_serve_forever(self, poll_interval)
+
+
+# mypy 的 method-assign 是针对「改标准库方法」的通用警告：这里改的是**测试进程内**的默认
+# 轮询粒度，包装器签名与语义同原函数（仍然转发 `poll_interval`），故收敛到这一行。
+_socketserver.BaseServer.serve_forever = _serve_forever_fast_poll  # type: ignore[method-assign]
 
 
 @pytest.fixture(autouse=True)

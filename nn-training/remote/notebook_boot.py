@@ -83,7 +83,7 @@ def _build_opener() -> urllib.request.OpenerDirector:
 def _pull(cfg: dict, log, keepalive_stop, hub: str, hub_tok: str, push_tok: str) -> int:
     """取 hub 下发的 code.zip（★ 不再在这里读凭据：此时进程已在 tailnet 代理后面）。
 
-    hub 的 code.zip 是 **TrainingLoop 启动时** 一次性打包的（rl/loop_steps.py
+    hub 的 code.zip 是 **TrainingLoop 启动时** 一次性打包的（trainer/loop_steps.py
     pack_code_zip）——改了 remote/ 必须先重启 loop，否则云机拉到的是旧运行时；
     日志里的 sha12 就是用来跟 loop 侧对账的。
     """

@@ -17,7 +17,7 @@ import { readFileSync } from 'fs'
 import path from 'path'
 import { DASHBOARD_ROOT } from '../src/core/paths'
 import { portOwnedBy, portOwnerPids } from '../src/core/proc'
-import { killPid, pidAlive, portListen, waitUntil } from '../src/core/net'
+import { killPid, pidAlive, portListen } from '../src/core/net'
 import { reclaimPort } from '../src/stack/hub'
 import { cloudflaredSpec, hubServerSpec } from '../src/stack/specs'
 import { sharedHubPort } from '../src/core/slots'
@@ -96,16 +96,34 @@ async function freePort(): Promise<number> {
   throw new Error('找不到空闲测试端口')
 }
 
-/** 起一个真实监听 127.0.0.1:port 的子进程（= 幸存 hub-server 的最小替身）。 */
-function spawnListener(port: number) {
-  return Bun.spawn(
+/** 起一个真实监听 127.0.0.1:port 的子进程（= 幸存 hub-server 的最小替身）。
+ *
+ *  `ready` 由**子进程自己打印的那一行**触发（命令输出优先于轮询：起监听即打印）：轮询端口
+ *  的写法要按步长等（100ms ⇒ 每次多等半拍），而 stdout 一到就是真就绪。监听失败
+ *  （端口被占/解释器出错）时子进程退出、流结束 ⇒ `false`，断言当场红而不是等到 8s 超时。 */
+function spawnListener(port: number): { pid: number; ready: Promise<boolean> } {
+  const child = Bun.spawn(
     [
       process.execPath,
       '-e',
-      `Bun.serve({ port: ${port}, hostname: '127.0.0.1', fetch() { return new Response('ok') } })`,
+      `Bun.serve({ port: ${port}, hostname: '127.0.0.1', fetch() { return new Response('ok') } })\nconsole.log('READY')`,
     ],
-    { stdout: 'ignore', stderr: 'ignore' },
+    { stdout: 'pipe', stderr: 'ignore' },
   )
+  const ready = (async (): Promise<boolean> => {
+    const decoder = new TextDecoder()
+    let seen = ''
+    try {
+      for await (const chunk of child.stdout as ReadableStream<Uint8Array>) {
+        seen += decoder.decode(chunk, { stream: true })
+        if (seen.includes('READY')) return true
+      }
+    } catch {
+      /* 流读失败按未就绪 */
+    }
+    return false
+  })()
+  return { pid: child.pid, ready }
 }
 
 describe('reclaimPort（真实监听进程）', () => {
@@ -124,8 +142,7 @@ describe('reclaimPort（真实监听进程）', () => {
     const port = await freePort()
     const child = spawnListener(port)
     started.push(child.pid)
-    const up = await waitUntil(() => portListen(port), 8000, 100)
-    expect(up).toBe(true) // 幸存者确实在监听（否则本用例无意义）
+    expect(await child.ready).toBe(true) // 幸存者确实在监听（否则本用例无意义）
     // 端口确实可归属（OS 进程表能列出占用者）——列不出说明平台探测不可信，跳过判定。
     if (portOwnerPids(port).length === 0) return
 
@@ -266,7 +283,7 @@ describe('portOwnedBy（真实监听进程）', () => {
     const port = await freePort()
     const child = spawnListener(port)
     started.push(child.pid)
-    expect(await waitUntil(() => portListen(port), 8000, 100)).toBe(true)
+    expect(await child.ready).toBe(true)
     if (portOwnerPids(port).length === 0) return // 平台探测不可信 → 跳过判定
 
     expect(await portOwnedBy(child.pid, port)).toBe(true)
@@ -278,7 +295,7 @@ describe('portOwnedBy（真实监听进程）', () => {
     const port = await freePort()
     const child = spawnListener(port)
     started.push(child.pid)
-    expect(await waitUntil(() => portListen(port), 8000, 100)).toBe(true)
+    expect(await child.ready).toBe(true)
     if (portOwnerPids(port).length === 0) return
 
     const cfg = cfgFixture(port)

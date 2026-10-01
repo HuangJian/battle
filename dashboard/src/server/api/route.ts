@@ -232,7 +232,7 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         if (trainMode && !['online', 'offline'].includes(trainMode)) {
           return errResp(`未知训练模式: ${trainMode}（只接受 online|offline）`, 400)
         }
-        // rollout 位置：与 python `rl/loop_transport.py::ROLLOUT_SRCS` 同字面量域。
+        // rollout 位置：与 python `trainer/loop_transport.py::ROLLOUT_SRCS` 同字面量域。
         const rolloutSrc = bodyStr(body, 'rolloutSrc')
         if (rolloutSrc && !['auto', 'local', 'node', 'run'].includes(rolloutSrc)) {
           return errResp(`未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node|run）`, 400)
@@ -266,26 +266,54 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         return okResp(await setMode(key, value))
       }
       case 'getGateHaltMode': {
-        // 门禁动作模式（2026-09-13）：halt = 触发门禁时下发云端停机达令（默认）；
+        // 门禁动作模式（2026-10-01 起**平台级**）：halt = 触发门禁时下发云端停机达令（缺省）；
         // notify = 只记录 verdict + 横幅提示，绝不停云机。
-        const { readGateHaltMode } = await import('../../stack/specs')
+        //
+        // 这是**只读探针**（脚本/curl 用）：模式的权威读面是 `/api/state.gateHalt`（意图 +
+        // 回执两栏）——控制台 UI 不再走这个动作，也不再跟 course 走。
+        const { readGateHaltIntent } = await import('../../stack/gate-halt')
         // okResp 的载荷是 ActionResult（ok/message/detail）——模式值走 message 回传，
         // 客户端据此校准开关（不为此扩 ActionResult 类型，避免污染所有动作返回值）。
-        return okResp({ ok: true, message: readGateHaltMode(ctx.course) })
+        return okResp({ ok: true, message: readGateHaltIntent().intent?.mode ?? 'halt' })
       }
       case 'setGateHaltMode': {
-        // 写 `<traj>/gate-halt-mode.txt`；Python 侧每轮门判定读它（优先于启动参数）
-        // ⇒ 训练途中切换**立即生效**，无需重启。
+        // 写平台意图 `tmp/gate-halt.json`；Python 侧每轮门判定读它 ⇒ 训练途中切换**立即生效**。
+        // ★ 全平台生效（所有课程），`course` 参数已无意义——旧客户端还会带它，故只记一行，不拒。
         const mode = bodyStr(body, 'mode')
         if (mode !== 'halt' && mode !== 'notify') {
           return errResp(`未知门禁模式: ${mode}（只接受 halt|notify）`, 400)
         }
-        if (!ctx.course) return errResp('未指定课程（无法定位 traj 目录）', 400)
-        const { writeGateHaltMode } = await import('../../stack/specs')
-        const written = writeGateHaltMode(ctx.course, mode)
+        if (ctx.course)
+          log(`[gate-halt] setGateHaltMode 带 course=${ctx.course}：已废弃——门禁停机是平台级`)
+        const { DEFAULT_GATE_HALT_HOURS, writeGateHaltIntent } =
+          await import('../../stack/gate-halt')
+        // 时长三态：缺省（未给）⇒ 8h；显式 null ⇒ 不限时；正数 ⇒ 那么多小时。
+        // 「盯盘到什么时候」比「不限时」安全——忘了切回的时候，8h 自己回 halt。
+        const rawHours = body.untilHours
+        let hours: number | null
+        if (rawHours === undefined) hours = DEFAULT_GATE_HALT_HOURS
+        else if (rawHours === null) hours = null
+        else {
+          hours = Number(rawHours)
+          if (!Number.isFinite(hours) || hours <= 0) {
+            return errResp(`untilHours 需为正数或 null（不限时）: ${String(rawHours)}`, 400)
+          }
+        }
+        // halt 恒不带 until（过期语义只对 notify 有意义）；notify + 不限时 ⇒ null。
+        const until =
+          mode === 'notify' && hours !== null ? Math.floor(Date.now() / 1000) + hours * 3600 : null
+        const err = writeGateHaltIntent(mode, until, 'console')
+        if (err) return errResp(`写平台开关失败：${err}`, 500)
         return okResp({
           ok: true,
-          message: written === 'notify' ? 'notify（只提示，不下发停机令）' : 'halt（下发停机令）',
+          message:
+            mode === 'notify'
+              ? `notify（只提示，不下发停机令；${
+                  until === null
+                    ? '不限时'
+                    : '到 ' + new Date(until * 1000).toLocaleString() + ' 自动回落 halt'
+                }）——全平台所有课程`
+              : 'halt（下发停机令）——全平台所有课程',
         })
       }
       case 'setCourse': {
@@ -449,7 +477,7 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
       }
       case 'archiveCourse': {
         // 课程封存（plan/course-archive.plan.md）：把**已停**课程从 `tmp/<课>/` 搬成只读档案
-        // （`rl/course_archive.py`）。顺序契约在 python 侧（建→校验→删），这里只是入口。
+        // （`biz/course_archive.py`）。顺序契约在 python 侧（建→校验→删），这里只是入口。
         //
         // ★ **默认只跑 `--dry-run`**：`apply` 必须显式给——最贵的错误是「删了才发现没搬成」，
         //   所以先看清单与字节账。★ 硬闸全在 python 侧（`marker + 新鲜` ⇒ 拒；**无 marker 但
@@ -461,7 +489,7 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         const args = ['--course', ctx.course, '--json']
         if (apply) args.push('--apply')
         if (force) args.push('--force')
-        const r = await runRunPythonAsyncModule('rl.course_archive', args, { timeoutMs: 600_000 })
+        const r = await runRunPythonAsyncModule('biz.course_archive', args, { timeoutMs: 600_000 })
         if (r.timeout) {
           return errResp('封存超时（进程已被杀）——先看 tmp/ 里目录有没有被动过', 504)
         }
@@ -503,7 +531,7 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         })
       }
       case 'evalReplays': {
-        // 导出 replay：确定性重放所选 eval 局 → .replay（rl/eval_replays_once.py；
+        // 导出 replay：确定性重放所选 eval 局 → .replay（biz/eval_replays_once.py；
         // 同 evalA 的 spawn-detached + 日志 + busy 互斥模式，弹窗轮询 /api/evalReplayJob）。
         if (!ctx.course) return errResp('缺少 course', 400)
         const iterRaw = Number(body.iter)
@@ -534,7 +562,9 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
             : path.join(NN_TRAINING, '.venv', 'bin', 'python3')
         const pyBin = existsSync(venvEntry) ? venvEntry : resolved.python
         const sitePackages = resolved.sitePackages
-        const script = path.join(NN_TRAINING, 'rl', 'eval_replays_once.py')
+        // 2026-09-30（刀 6）：`eval_replays_once` 是**纯逻辑/训练栈**（`worker/`；刀 4 时在 `biz/`）——
+        // 这是一条真 spawn 的路径，写错就是「导出 replay」静默找不到脚本。
+        const script = path.join(NN_TRAINING, 'worker', 'eval_replays_once.py')
         const p = replayExportPaths(ctx.course)
         try {
           mkdirSync(path.dirname(p.gamesFile), { recursive: true })
@@ -663,7 +693,7 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
 // ================================================================
 // curriculumLadderView —— I5（roadmap v2.0 §4-I5）：阶梯统一 identity 台账的
 // 控制台 LAN 只读渲染。读 nn-training/ladder/LEDGER.jsonc（I4 gate runner 与
-// rl/ladder_ledger.py 双写方，字段级 merge），返回 20 级 + 经典的 status /
+// biz/ladder_ledger.py 双写方，字段级 merge），返回 20 级 + 经典的 status /
 // lastGate / hypothesis / teacherWR 摘要。与 God-AI evalboard 的 ladder.json
 // （LadderRung）完全无关——命名特意区分。
 // ================================================================

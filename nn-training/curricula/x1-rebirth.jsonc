@@ -203,10 +203,10 @@
   //     从零起点同值会更大 ⇒ **取 0.05**（松 4 倍，留安全余量）。
   //   ⚠ `kl_cap` 保持 0.2 —— 它在 **remote/serial 路径未接线**（DECISIONS
   //     §2026-09-15-goalnn-kl-cap-unwired：`ppo_update` 无形参、`worker.py` 只读 `kl_coef`，
-  //     消费者只有 `rl/stream.py`），**那是对的**；真正有效的旋钮只有 `kl_coef` / `lr` / KL_BREAK。
+  //     消费者只有 `trainer/stream.py`），**那是对的**；真正有效的旋钮只有 `kl_coef` / `lr` / KL_BREAK。
   //     【2026-09-17 订正】原文补的那句「**恒**不生效」把话说满了：**stream 路径会读它** ——
-  //     `args._kl_cap = sch.get("kl_cap")` 每轮**整个重赋**（`rl/loop_steps.py:771`）
-  //     ⇒ **段内缺席即 None ⇒ 回落 `policy.streamKlCap`**（`rl/stream.py:163-166`），
+  //     `args._kl_cap = sch.get("kl_cap")` 每轮**整个重赋**（`trainer/loop_steps.py:771`）
+  //     ⇒ **段内缺席即 None ⇒ 回落 `policy.streamKlCap`**（`trainer/stream.py:163-166`），
   //     本仓 rl-config 给的是 **0.18**（0.06 只是键缺失时的字面默认）。
   //     默认为什么碰不到：`rl-config.json` 的 `rl.stream = 0` 压过 `cli.py` 的 argparse 兜底
   //     （已实测 `args.stream = 0`）⇒ 本路径不生效。
@@ -267,7 +267,7 @@
 // ② 关卡 `ladder-c01`（4 关：a=basic / b=fast / c=power / d=armor，各 1 敌轮换、
 //    队列 20、max_ticks 1500、lives 1、hard）。
 // ③ transport：显式 `--remote-transport pull`；hub 可达、eval 节点 epoch 对齐。
-// ④ 动态采集的两条硬约束（`rl/loop_core.py:_volume_stages`）：
+// ④ 动态采集的两条硬约束（`trainer/loop_core.py:_volume_stages`）：
 //    · 与 `--curriculum-stages` / `--rotate-stages` 不兼容（会 SystemExit）；
 //    · **必须能拿到显式 --stages**（launch 期由课程 stages 派生），否则 SystemExit。
 // ⑤ 期望起点极低（4%）⇒ **前几轮 rollout wr 难看是正常的**；看斜率不是绝对值。
