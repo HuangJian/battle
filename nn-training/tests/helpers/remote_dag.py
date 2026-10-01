@@ -250,7 +250,7 @@ LAYERS: dict[str, int] = {
     # 搬进来同时抬了 12 条既有条目的秩（`remote.plan_run` 3→6 · `remote.plan_handoff` 2→5 ·
     # `remote.run_loop` 6→7 · `remote.bc_job` 3→4 · `remote.offline_boot` 7→8 等），
     # 因为它们的依赖从「账本外的 biz.*」变成了「账本内的 worker.*」。
-    # L0（43 个）
+    # L0（44 个）
     "worker.agent_meta": 0,
     "worker.archive": 0,
     "worker.backend": 0,
@@ -271,6 +271,9 @@ LAYERS: dict[str, int] = {
     "worker.eval_yield": 0,
     "worker.events": 0,
     "worker.forensics": 0,
+    # 2026-10-01（plan/gate-halt-platform-level）：门禁停机模式平台化的契约模块
+    # （意图 + 回执；只 stdlib + common.log ⇒ **L0**，与 `worker.rl_config_schema` 同型）。
+    "worker.gate_halt": 0,
     "worker.gate_inputs": 0,
     "worker.kickstart_burn": 0,
     "worker.loop_tasks": 0,

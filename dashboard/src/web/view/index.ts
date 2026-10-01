@@ -23,10 +23,12 @@
  *    course-admin   课程管理页（`/courses`）：全部课程 + 封存区 + 每行的下一步动作
  *    alerts         告警坞条目（严重度排序 + 折叠 + ack 可见性，问题 C4）
  *    routes         控制台路由（路径 ↔ 页面键、导航项、激活判定）
+ *    gate-halt      门禁停机平台开关的展示件（时长档 + 两栏文案；契约在 stack/gate-halt.ts）
  */
 
 // ── 内部模块（唯一对外出口；调用方一律 import 本目录，不直连内部文件）──
 export * from './console-types'
+export * from './gate-halt'
 export * from './component-groups'
 export * from './component-roles'
 export * from './bc-types'

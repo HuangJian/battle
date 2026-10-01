@@ -5,6 +5,11 @@
 `--gate-halt-mode`）。收敛成**一个进程服务所有课程**之后，命令行只有一份 —— 那些旋钮
 必须换成**按课程的机器侧配置**（`rl-config.json → courses.<课>.*`）。两件事在这里钉住：
 
+> 2026-10-01（plan/gate-halt-platform-level）：`COURSE_MACHINE_OVERRIDE_KEYS` **今天已空**——
+> 两个成员先后退役（`remote_degrade_after` 2026-09-21；`gate_halt_mode` 2026-10-01 升平台级）。
+> 白名单**机制**仍在（下一条按课旋钮直接往里加），所以机制类用例改用**探针白名单**
+> （`monkeypatch.setattr` 临时装一个键）而不是被数据掏空的空断言。
+
 1. **课程机器侧覆盖**（`apply_course_machine_overrides`）：白名单、值域校验、缺字段跳过、
    非白名单键一个字不碰；且**读取点单一**（`_read_rl_config` 是本模块唯一的 rl-config 读）。
 2. **进程级单实例锁**（`acquire_cluster_lock` / `release_cluster_lock`）：一个进程服务所有课程
@@ -31,7 +36,9 @@ def _args(**kw: Any) -> Namespace:
     base: dict[str, Any] = {
         "remote_transport": "auto",
         "remote_hub_url": "",
-        "gate_halt_mode": "halt",
+        # 2026-10-01：`--gate-halt-mode` 的 argparse 缺省是 **None**（不再读 rl-config；
+        # 缺省跟随平台文件）——这里跟着真解析器的形状走。
+        "gate_halt_mode": None,
         "push_node_url": "",
         "workers": 8,
     }
@@ -46,34 +53,40 @@ COUPLING_KEYS = ("remote_transport", "remote_hub_url", "push_node_url", "hub_pus
 # ---------------------------------------------------------------- 机器侧覆盖
 
 
-def test_overlay_applies_only_the_whitelisted_keys() -> None:
-    """白名单键（只有两个训练策略旋钮）生效；其余键（含传输耦合）一个字不碰。"""
+def test_overlay_applies_only_the_whitelisted_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """白名单里的键生效；其余键（含传输耦合与**已平台化的 gate_halt_mode**）一个字不碰。
+
+    今天真白名单是空的（两人都退役）⇒ 装一个**探针键**（`workers`）来钉机制本身：
+    「只有白名单里的键会被 setattr」这条契约不因为数据空了就失去守卫。
+    """
+    monkeypatch.setattr(loop_serve, "COURSE_MACHINE_OVERRIDE_KEYS", ("workers",))
     lines: list[str] = []
     args = _args()
     cfg = {
         "courses": {
             "c5-tick": {
+                "workers": 4,
+                # ↓ 2026-10-01：已平台化（tmp/gate-halt.json）——留着不报错也不生效
                 "gate_halt_mode": "skip",
                 # ↓ 2026-09-19 起**已不是**被读的键（课程与节点正交）；留着不报错也不生效
                 "remote_transport": "pull",
                 "remote_hub_url": "http://127.0.0.1:8789",
                 "push_node_url": "https://gpu.example",
                 "hub_push": True,
-                "workers": 4,
             }
         }
     }
     applied = loop_serve.apply_course_machine_overrides(args, "c5-tick", cfg, log_fn=lines.append)
-    assert applied == ["gate_halt_mode"]
-    assert args.gate_halt_mode == "skip"
+    assert applied == ["workers"]
+    assert args.workers == 4
     # 非白名单键：**没有**被 setattr（它们属于别的读者，或者已无读者）
+    assert args.gate_halt_mode is None
     assert args.remote_transport == "auto"
     assert args.remote_hub_url == ""
     assert args.push_node_url == ""
-    assert args.workers == 8
     assert not hasattr(args, "hub_push")
     # 生效值必须上屏（静默改写执行面 = 「看起来正常」那类事故）
-    assert any("c5-tick" in ln and "gate_halt_mode='skip'" in ln for ln in lines)
+    assert any("c5-tick" in ln and "workers=4" in ln for ln in lines)
 
 
 def test_overlay_is_inert_without_the_course_block() -> None:
@@ -105,8 +118,14 @@ def test_transport_coupling_keys_are_not_read_anymore() -> None:
     assert args.remote_transport == "auto"
 
 
-def test_overlay_skips_keys_the_args_namespace_does_not_have() -> None:
-    """BC 解析器比 RL 少几个键 ⇒ **响亮跳过**，不 setattr 造字段（造出来的字段没有读者）。"""
+def test_overlay_skips_keys_the_args_namespace_does_not_have(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """BC 解析器比 RL 少几个键 ⇒ **响亮跳过**，不 setattr 造字段（造出来的字段没有读者）。
+
+    同样用探针白名单（今天真白名单是空的）——跳过分支是**下一条键**的护栏。
+    """
+    monkeypatch.setattr(loop_serve, "COURSE_MACHINE_OVERRIDE_KEYS", ("gate_halt_mode",))
     lines: list[str] = []
     args = Namespace()  # 白名单键一个都没有（BC 解析器就是这个形状）
     applied = loop_serve.apply_course_machine_overrides(
@@ -122,16 +141,37 @@ def test_overlay_skips_keys_the_args_namespace_does_not_have() -> None:
 
 def test_overlay_reads_rl_config_through_one_seam(monkeypatch: pytest.MonkeyPatch) -> None:
     """不传 cfg 时走 `_read_rl_config`（**唯一**读取点，也是用例的注入点）。"""
+    monkeypatch.setattr(loop_serve, "COURSE_MACHINE_OVERRIDE_KEYS", ("workers",))
     monkeypatch.setattr(
         loop_serve,
         "_read_rl_config",
-        lambda: {"courses": {"c5-tick": {"gate_halt_mode": "notify"}}},
+        lambda: {"courses": {"c5-tick": {"workers": 7}}},
     )
     args = _args()
     assert loop_serve.apply_course_machine_overrides(args, "c5-tick", None, log_fn=lambda _l: None) == [
-        "gate_halt_mode"
+        "workers"
     ]
-    assert args.gate_halt_mode == "notify"
+    assert args.workers == 7
+
+
+def test_gate_halt_mode_is_no_longer_a_course_machine_override() -> None:
+    """★ 门禁停机模式已**平台级化**（2026-10-01 / plan/gate-halt-platform-level）：
+
+    课程级写面整体摘除：白名单里没有它、课程块里的旧值一个字不生效（读者只认
+    `tmp/gate-halt.json`）。旧值不进报错——白名单本来就是「谁还会被读」的答案。
+    """
+    assert "gate_halt_mode" not in loop_serve.COURSE_MACHINE_OVERRIDE_KEYS
+    lines: list[str] = []
+    args = _args()
+    applied = loop_serve.apply_course_machine_overrides(
+        args,
+        "c5-tick",
+        {"courses": {"c5-tick": {"gate_halt_mode": "notify"}}},
+        log_fn=lines.append,
+    )
+    assert applied == []
+    assert args.gate_halt_mode is None  # 未被课程块改写（缺省 = 读平台文件）
+    assert not any("机器侧覆盖" in ln for ln in lines)
 
 
 def test_rl_config_path_is_env_overridable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,10 +187,10 @@ def test_rl_config_path_is_env_overridable(tmp_path: Path, monkeypatch: pytest.M
     from worker.config import read_rl_config_file, rl_config_path
 
     fixture = tmp_path / "rl-config.fixture.json"
-    fixture.write_text(_json.dumps({"courses": {"c5-tick": {"gate_halt_mode": "notify"}}}), "utf-8")
+    fixture.write_text(_json.dumps({"courses": {"c5-tick": {"workers": 4}}}), "utf-8")
     monkeypatch.setenv("BCITY_RL_CONFIG", str(fixture))
     assert rl_config_path() == fixture and Path(dist_path()) == fixture
-    assert read_rl_config_file()["courses"]["c5-tick"]["gate_halt_mode"] == "notify"
+    assert read_rl_config_file()["courses"]["c5-tick"]["workers"] == 4
     # 相对路径按 nn-training/ 下解析（与默认值同一约定）；未设 env ⇒ 仓里那份
     monkeypatch.setenv("BCITY_RL_CONFIG", "rl-config.fixture.json")
     assert rl_config_path() == Path(dist_path())
@@ -186,7 +226,9 @@ def test_course_args_with_a_fixture_keeps_fields_unchanged(
     monkeypatch.setenv("BCITY_RL_CONFIG", str(fixture))
     args = loop_serve.course_args("c4-dodge")
     assert args.remote_transport == "auto"  # 夹具未配 ⇒ argparse 默认
-    assert args.gate_halt_mode == "halt"
+    # 2026-10-01：门禁停机模式不再读 rl-config（缺省 None ⇒ 由 loop_guards 读平台文件，
+    # 再缺省 halt）——argparse 层**不能**预先定成 "halt"，否则「谁给的」就分不出来了。
+    assert args.gate_halt_mode is None
     # ★ §3：`--remote-degrade-after` 已删除 ⇒ 该字段不该再存在于 args
     assert not hasattr(args, "remote_degrade_after")
 

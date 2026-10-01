@@ -441,14 +441,18 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         help="冒烟预演：收到冒烟回显结果（remote_worker --echo）后"
         "作废本轮并干净退出；it 不前进、不写 iteration 事件",
     )
+    # ★ 2026-10-01（plan/gate-halt-platform-level）：门禁停机模式是**平台级**的
+    #（`tmp/gate-halt.json`，控制台写、训练侧每轮判定读）。这里只留「临时覆盖」参数，
+    # 且 default=None —— **绝不能**在 argparse 层读平台文件：那样每进程只读一次，
+    # 控制台热切就失效了（热切的关键就在于读点每轮都在 `loop_guards` 里现读）。
     ap.add_argument(
         "--gate-halt-mode",
-        default=_d("gate_halt_mode", "halt"),
+        default=None,
         choices=("halt", "notify"),
-        help="门禁触发时对云端 PPO worker 的动作："
-        "halt = 下发停机达令（默认，历史行为）；"
-        "notify = 只记录 gate_verdict + 控制台横幅提示，**不停机**。"
-        "运行时可由控制台顶部开关热切（写 <traj>/gate-halt-mode.txt，每轮判定读一次）",
+        help="门禁停机模式的**临时覆盖**（单机调试；平台文件在时它说了算）："
+        "halt = 下发停机达令（历史行为、缺省）；notify = 只记录 gate_verdict + 提示，**不停机**。"
+        "不给 = 读平台开关 tmp/gate-halt.json（控制台热切，每轮判定读一次），"
+        "文件不存在时才用本参数，再缺省 halt",
     )
     ap.add_argument(
         "--remote-hub-url",

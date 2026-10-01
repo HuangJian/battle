@@ -6,7 +6,7 @@
  *  重建 spec，因此重启永远用最新配置与最新哨兵。
  */
 
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'fs'
+import { existsSync, readdirSync } from 'fs'
 import path from 'path'
 import { CONFIG_PATH, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../core/paths'
 import { httpOk, pidAlive, portListen } from '../core/net'
@@ -400,45 +400,15 @@ export interface TrainingLoopSpecOpts {
   /** pull 目标 hub（local preset 注入本机 hub；其余模式缺省=读 rl-config remote_hubs）。 */
   hubUrl?: string
   venv: { python: string; sitePackages: string }
-  /** 门禁触发时的动作：halt = 下发云端停机达令（默认）；notify = 只提示不停机。 */
-  gateHaltMode?: GateHaltMode
 }
 
-/**
- * 门禁动作模式（2026-09-13）：`halt` = 下发 cloud halt（历史默认）；
- * `notify` = 只记录 gate_verdict + 控制台横幅，**停掉云机这件事不做**。
- *
- * 为什么是文件而不是纯启动参数：G4(plateau) 的 REMEDIATE 每 5 轮就复现一次，
- * 历史上 c6-pickup3 / c6-bonus 就是被它反复杀掉云端 PPO worker（6 次 / 10 次）。
- * 操作员在训练途中改主意必须能热切，不能重启一轮（重启 = 丢进度）。
+/* ★ 2026-10-01（plan/gate-halt-platform-level）：**删掉了三个课程级门禁写/读面**——
+ *   `gateHaltModePath` / `readGateHaltMode` / `writeGateHaltMode`（`<traj>/gate-halt-mode.txt`）
+ *   与 `trainingLoopSpec` 里的 `--gate-halt-mode` argv 注入。原因：门禁停机模式升成**平台级**
+ *   单开关（`tmp/gate-halt.json`，写/读在 `stack/gate-halt.ts`）——课程级三写面会让同一实验的
+ *   两条腿门禁行为不同（配对序列不可比）。旧 txt 训练侧**不读**（只告警一次，可删）。
+ *   留半个写面 = 双事实源，所以三处一起删，不留兼容层。
  */
-export type GateHaltMode = 'halt' | 'notify'
-
-/**
- * 标志文件路径：`<traj>/gate-halt-mode.txt`。
- * Python 侧 `trainer/loop_guards.py::_gate_halt_mode` 每轮门判定读它（优先于启动参数）。
- * traj 在课程里恒写作 `tmp/<name>`，故这里按 course 拼即可与 Python 对齐。
- */
-export function gateHaltModePath(course: string): string {
-  return path.join(LOG_DIR, course || 'nocourse', 'gate-halt-mode.txt')
-}
-
-export function readGateHaltMode(course: string): GateHaltMode {
-  try {
-    const v = readFileSync(gateHaltModePath(course), 'utf8').trim().toLowerCase()
-    if (v === 'notify' || v === 'halt') return v
-  } catch {
-    /* 无文件/不可读 = 用默认 */
-  }
-  return 'halt'
-}
-
-export function writeGateHaltMode(course: string, mode: GateHaltMode): GateHaltMode {
-  const p = gateHaltModePath(course)
-  mkdirSync(path.dirname(p), { recursive: true })
-  writeFileSync(p, `${mode}\n`, 'utf8')
-  return mode
-}
 
 /** **共享 trainer**（`trainer/run_rl_cluster.py --serve`）——2026-09-19 / R3-5：一个进程服务所有课程。
  *
@@ -450,8 +420,9 @@ export function writeGateHaltMode(course: string, mode: GateHaltMode): GateHaltM
  *  系统事实（与 hub 的 `--discover` 同一原则）。控制台先起 trainer、后加课不需要重启，也不会出现
  *  「漏注册 ⇒ 那门课永久饿死而表面一切正常」。一门课都没有也照常运行（队列空着等）。
  *
- *  **不给每課 CLI 旋钮**：单进程没有「这门课的 flag」这一说——它住在机器侧覆盖
- *  `rl-config → courses.<课>.{gate_halt_mode}`（serve 的 `apply_course_machine_overrides`）。
+ *  **不给每課 CLI 旋钮**：单进程没有「这门课的 flag」这一说——机器侧覆盖住
+ *  `rl-config → courses.<课>.*`（serve 的 `apply_course_machine_overrides`；今天白名单为空，
+ *  最后一个成员 `gate_halt_mode` 已于 2026-10-01 升成平台级开关，不再按课）。
  *  ★ 2026-09-21（§3）：backend 不再是旋钮（`--ppo` 已删）——PPO 恒为「发布到 hub 队列 +
  *  等 worker 认领」，故命令行上**一个 PPO 相关的旗标都没有**。
  *
@@ -523,7 +494,8 @@ export function trainingLoopSpec(cfg: RlConfig, s: TrainingLoopSpecOpts): ProcSp
       // `REMOTE_PUSH_NODE` 定方向。
       ...hubFlags,
       ...(s.smoke ? ['--smoke'] : []),
-      ...(s.gateHaltMode ? ['--gate-halt-mode', s.gateHaltMode] : []),
+      // ★ 2026-10-01：`--gate-halt-mode` 不再注入——门禁停机是**平台级**（每轮读平台文件），
+      //   不是每课旋钮；旧调用的 `gateHaltMode` 选项已删（唯一活调用者本就没传它）。
       // ★ §3：`--remote-degrade-after` 已删除（单一 PPO 路径无「就地降级本机」档）。
     ],
     env: {

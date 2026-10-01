@@ -66,6 +66,8 @@ nn-training/
 │                            #     云机 worker = **本地 worker + remote/**（remote → worker 是向下边）
 │   ├── serve_pool.py        #    节点长驻 worker 池（`--serve` 协议；同质入口 serve-any）
 │   ├── iter_rollout.py      #    节点侧「本轮 rollout」执行器（看门狗 / 补局 / 聚合 / 收尾）
+│   ├── gate_halt.py         #    门禁停机模式**平台级**开关的契约（意图 + 回执；2026-10-01 平台化，
+│   │                        #      纯 stdlib + common.log ⇒ 账本 L0；读点住 trainer/loop_guards.py）
 │   ├── models/              #    【模型包】core（NNPolicy，BC 基座）· student（PPOStudent，P1.5 蒸馏）
 │   │                        #      · rl_model（ResNet-11 教师网；**死文件**）· intent_net · goal_net
 │   ├── ppo/                 #    【PPO 包】engine（ppo_update / build_ppo）· common（GAE / masked_logsoftmax）

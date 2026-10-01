@@ -87,6 +87,24 @@ export function loopAppliedPath(): string {
   return process.env.BCITY_LOOP_APPLIED ?? path.join(LOG_DIR, 'loop-control.applied.json')
 }
 
+/** 训练侧门禁停机模式的**平台意图**（`tmp/gate-halt.json`）—— 控制台**写**、训练侧每轮判定**读**。
+ *
+ *  2026-10-01 起取代课程级三写面（每课 argv / `courses.<课>.gate_halt_mode` /
+ *  `<traj>/gate-halt-mode.txt`）：它回答的是「有没有人在盯盘」，不是「这门课怎么跑」。
+ *  契约与 python 侧 `nn-training/worker/gate_halt.py::intent_path()` **必须同路径**
+ *  （那边 `NN_GATE_HALT` 可覆盖，本侧 `BCITY_GATE_HALT`；与 loop-control 同一对偶）。 */
+export function gateHaltPath(): string {
+  return process.env.BCITY_GATE_HALT ?? path.join(LOG_DIR, 'gate-halt.json')
+}
+
+/** 训练侧门禁停机模式的**回执**（`tmp/gate-halt.applied.json`）—— 训练进程写、控制台读。
+ *
+ *  逐课记「实际生效的 `effective_mode` + 来源」（意图文件回答不了「训练真读到了吗」）。
+ *  对应 `nn-training/worker/gate_halt.py::applied_path()`（`NN_GATE_HALT_APPLIED`）。 */
+export function gateHaltAppliedPath(): string {
+  return process.env.BCITY_GATE_HALT_APPLIED ?? path.join(LOG_DIR, 'gate-halt.applied.json')
+}
+
 /** 课程**封存区**（仓根 `archive/courses/`——plan/course-archive.plan.md §3.1）。
  *
  *  每门封存课一个目录，内含 `archive-manifest.json`（控制台**只读它**：不扫盘、不递归、

@@ -10,6 +10,22 @@
 
 ---
 
+## §2 2026-10-01：门禁停机模式平台化 ⇒ `courses.<课>.gate_halt_mode` 与 `rl.gate_halt_mode` 双双成死键
+
+`gate-halt-mode` 升成**平台级单开关**（`tmp/gate-halt.json` 意图 + 回执；全文 →
+`docs/nn/training-stack.md` §27，决策 → `DECISIONS.md` §2026-10-01-goalnn-gate-halt-platform-level）：
+它回答的是「**有没有人在盯盘**」——操作员的此刻状态，**不是**某门课的机器侧属性。
+
+对本文的两处修订（读到 §1 那张表时按本条覆盖）：
+
+* **§1.1 的 D 类行**里的 `gate_halt_mode` **不再属于 D 类**（不是「留活课、删停课」的每课旋钮）——
+  它是**无读者的死键**：`worker/cli.py --gate-halt-mode` 已不再 `_d("gate_halt_mode", …)`，
+  `trainer/loop_serve.py::COURSE_MACHINE_OVERRIDE_KEYS` 已摘除它（白名单今天为**空元组**，结构保留）。
+* **`rl.gate_halt_mode`** 已从 `rl_config.schema.json` 的 `sections.rl` 挪进 `retired`：旧值一律
+  不生效，启动日志会点名（`worker/rl_config_schema.py`）。
+* 残留清理：控制台开课时 `pruneLegacyCourseKnobs` 会把 `courses.<课>.gate_halt_mode` 剃掉
+  （`dashboard/src/stack/course-knobs.ts::LEGACY_COURSE_KEYS`）。
+
 ## §1 2026-09-26 清洗：只留「别处无处安放」
 
 ### 1.1 判据（五类）

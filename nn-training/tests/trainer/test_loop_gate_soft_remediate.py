@@ -15,6 +15,8 @@ REMEDIATE 语义只是"**边际收益枯竭**"，平台期每 5 轮必然复现 
 
 from __future__ import annotations
 
+import json
+import os
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -74,6 +76,17 @@ def halt_calls(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
     return calls
 
 
+@pytest.fixture(autouse=True)
+def _gate_halt_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """门禁停机模式 2026-10-01 起是**平台文件**：本文件一律把它重定向进 tmp_path。
+
+    不重定向就会写仓根 `tmp/`（那是本机的真工作区）——观测面的回执也该按夹具走。
+    """
+    monkeypatch.setenv("NN_GATE_HALT", str(tmp_path / "gate-halt.json"))
+    monkeypatch.setenv("NN_GATE_HALT_APPLIED", str(tmp_path / "gate-halt.applied.json"))
+    monkeypatch.setenv("NN_GATE_HALT_LEG", "local")
+
+
 def test_plateau_only_remediate_does_not_halt_cloud(
     tmp_path: Path, halt_calls: list[bool]
 ) -> None:
@@ -125,40 +138,72 @@ def test_empty_readings_keeps_legacy_halt_behaviour(
 def test_notify_mode_never_halts_even_for_hard_gate(
     tmp_path: Path, halt_calls: list[bool]
 ) -> None:
-    """★ notify 模式（控制台开关）：连 G7 这类硬门也只提示、不停机。"""
+    """★ notify 模式（平台开关）：连 G7 这类硬门也只提示、不停机。
+
+    平台文件不存在 ⇒ CLI 启动参数兜底（`source=cli`）；这是「文件缺失」唯一允许的兜底。
+    """
     fake = _fake(jsonl=tmp_path / "tl.jsonl")
     fake.args.gate_halt_mode = "notify"
-    fake._traj_root = Path(tmp_path)  # 无标志文件 ⇒ 回退启动参数
     readings = (_reading("G7", "course_valid", released=True),)
     assert TrainingGuards._apply_verdict(fake, 7, _res("REMEDIATE", readings)) is False
     assert halt_calls == []
     assert fake._cloud_halted is False
 
 
-def test_flag_file_overrides_startup_arg(tmp_path: Path, halt_calls: list[bool]) -> None:
-    """标志文件优先于启动参数 ⇒ 训练途中切换**立即生效**（不必重启）。"""
+def _intent_file() -> Path:
+    """本用例被重定向后的平台意图文件（`_gate_halt_files` 夹具设的 env）。"""
+    return Path(os.environ["NN_GATE_HALT"])
+
+
+def test_platform_file_beats_startup_arg_and_hot_switches(
+    tmp_path: Path, halt_calls: list[bool]
+) -> None:
+    """★ 平台文件优先于启动参数，且训练途中改文件**立即生效**（不必重启）。
+
+    同时钉住退役面：课程级 `<traj>/gate-halt-mode.txt` 盘上留着也**不生效**（旧值不许复活）。
+    """
     fake = _fake(jsonl=tmp_path / "tl.jsonl")
     fake.args.gate_halt_mode = "halt"
-    fake._traj_root = Path(tmp_path)
+    fake._traj_root = tmp_path
     (tmp_path / "gate-halt-mode.txt").write_text("notify\n", encoding="utf-8")
+    _intent_file().write_text(json.dumps({"mode": "notify", "until": None}), encoding="utf-8")
     assert TrainingGuards._gate_halt_mode(fake) == "notify"
     readings = (_reading("G7", "course_valid", released=True),)
     TrainingGuards._apply_verdict(fake, 7, _res("REMEDIATE", readings))
     assert halt_calls == []
-    # 切回 halt 立即恢复停机
-    (tmp_path / "gate-halt-mode.txt").write_text("halt\n", encoding="utf-8")
+    # 平台文件切回 halt ⇒ 立即恢复停机（旧 txt 仍写着 notify，但不生效）
+    _intent_file().write_text(json.dumps({"mode": "halt"}), encoding="utf-8")
     assert TrainingGuards._gate_halt_mode(fake) == "halt"
 
 
-def test_bad_flag_file_falls_back_to_arg(tmp_path: Path) -> None:
-    """标志文件内容非法 / 不可读 ⇒ 回退启动参数，再回退 halt（保守，绝不误判不停机）。"""
+def test_bad_platform_file_falls_back_to_halt(tmp_path: Path) -> None:
+    """平台文件坏 ⇒ halt（**不回落到 notify**）；缺失 ⇒ CLI 兜底；都没有 ⇒ 缺省 halt。"""
     fake = _fake(jsonl=tmp_path / "tl.jsonl")
     fake.args.gate_halt_mode = "notify"
-    fake._traj_root = Path(tmp_path)
-    (tmp_path / "gate-halt-mode.txt").write_text("garbage\n", encoding="utf-8")
-    assert TrainingGuards._gate_halt_mode(fake) == "notify"  # 非法 → 启动参数
+    _intent_file().write_text("garbage", encoding="utf-8")
+    assert TrainingGuards._gate_halt_mode(fake) == "halt"  # 坏文件 ⇒ halt（红线 2）
+    _intent_file().unlink()
+    assert TrainingGuards._gate_halt_mode(fake) == "notify"  # 缺失 ⇒ CLI 兜底
     fake.args.gate_halt_mode = "whatever"
-    assert TrainingGuards._gate_halt_mode(fake) == "halt"  # 都非法 → 默认 halt
+    assert TrainingGuards._gate_halt_mode(fake) == "halt"  # 都非法 ⇒ 缺省 halt
+
+
+def test_legacy_txt_is_ignored_and_receipt_records_the_truth(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """旧 txt 不生效但**要告警**；同时回执要把「实际生效」写出去（控制台第二栏的数据源）。"""
+    monkeypatch.setenv("RL_COURSE_NAME", "c5-tick")  # 回执按课程分键（进程级课程身份）
+    fake = _fake(jsonl=tmp_path / "tl.jsonl")
+    fake._traj_root = tmp_path
+    (tmp_path / "gate-halt-mode.txt").write_text("notify\n", encoding="utf-8")
+    _intent_file().write_text(json.dumps({"mode": "notify", "until": None}), encoding="utf-8")
+    assert TrainingGuards._gate_halt_mode(fake) == "notify"
+    out = capsys.readouterr().out
+    assert "忽略课程级 gate-halt-mode.txt" in out
+    assert "gate_mode=notify source=platform" in out
+    applied = json.loads(Path(os.environ["NN_GATE_HALT_APPLIED"]).read_text(encoding="utf-8"))
+    ent = applied["courses"]["c5-tick"]
+    assert (ent["effective_mode"], ent["source"]) == ("notify", "platform")
 
 
 def test_pause_and_abort_not_affected_by_soft_logic(

@@ -178,6 +178,9 @@ TOP_IMPORTS: dict[str, frozenset[str]] = {
             "common.distribution",
             "remote.hub_client",
             "common.log",
+            # 2026-10-01（plan/gate-halt-platform-level）：停机模式平台化——词表/裁决/回执
+            # 全住 worker/gate_halt.py（`GATE_HALT_MODES` 现在引用它的 MODES，不留第二份字面量）。
+            "worker.gate_halt",
             "worker.loop_guards_gate",
             "worker.loop_guards_leg",
             "worker.loop_guards_sweep",

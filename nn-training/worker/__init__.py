@@ -11,6 +11,8 @@ worker/
                                                forensics / 结束门一族 / 训练侧账本 …）
   serve_pool.py · iter_rollout.py              节点侧执行体（刀 3 从 remote/ 并入）
   rl_config_schema.py                          rl-config 键白名单（刀 7 从 nn-training/ 顶层并入）
+  gate_halt.py                                 门禁停机模式平台开关契约（意图 + 回执；
+                                               2026-10-01 平台化 ⇒ L0，pure stdlib + common.log）
 ```
 
 **分层位置**（`tests/test_layering.py` + `tests/helpers/remote_dag.py` 守着）：

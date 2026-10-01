@@ -6246,3 +6246,51 @@ dashboard **1235 / 0** + typecheck · 根 `bun run check` **2277 / 0** · `bun r
 `Path(__file__)` 上溯层数）· AGENTS §5（提交只动已跟踪文件 + 人点名的那份）。**对照指针**：`docs/nn/engineering.md` §56（全文与三条真机前提）·
 `plan/nn-training-module-reorg.plan.md`（六包目标）· `nn-training/README.md`（目录树已同步）· `tmp/nn_tests_migrate.py` / `tmp/nn_tests_verify.py`
 （映射与纯搬对账脚本）· `tmp/nn_prose_refs.py`（散文轮脚本 + 三道自检）。
+
+---
+
+## §2026-10-01-goalnn-gate-halt-platform-level（2026-10-01，门禁停机模式升为平台级单开关：`tmp/gate-halt.json` 意图 + 回执；课程级三写面退役）
+
+**决策**（用户 2026-09-25 口径：「`gate-halt-mode` 应是平台级而非课程级，有人盯盘时切为提示，离开时切停机」）：
+「门禁触发时停不停」从课程级散装旋钮升成**平台级单开关**——`tmp/gate-halt.json`（控制台写、
+supervisor 每轮判定读）+ `tmp/gate-halt.applied.json` 回执（逐课 `effective_mode` / `source`）；
+`notify` 可带 `until`（2/4/8h/不限，缺省 8h），**到点由读时求值自动回落 halt**（不需要任何进程定时翻牌）。
+
+**为什么**：它回答的是「**有没有人在盯盘**」——操作员此刻的状态，不是某门课的属性。课程级三写面
+（每课 argv `--gate-halt-mode` / `courses.<课>.gate_halt_mode` / `<traj>/gate-halt-mode.txt`）外加隐藏第四面
+（`rl.gate_halt_mode`）造成两类事故：① **配对腿漂**（2026-09-25 现场 `x20-dodge-l3` 写了 `notify` 而 `l1` 没有
+⇒ 同一实验一腿停、一腿只提示，序列可比性受损）；② UI 摆在平台位置、语义却是课程级。
+
+**两个裁决点**（评审发现初稿自相矛盾 / 落点被分层守卫拦）：
+
+* **O4 优先级 = 平台文件 > CLI `--gate-halt-mode` > 缺省 `halt`**；CLI 只兜底「文件不存在」。
+  备选「CLI 优先（单课例外临时用 CLI）」被否决：那会让控制台写出的意图被历史命令行静默盖掉，
+  「一处切、全局生效」当场失效。
+* **O5 模块落点 = `nn-training/worker/gate_halt.py`**（L0：只 stdlib + `common.log`）。备选
+  `biz/gate_halt.py` 被否决：刀 6 后 `biz/` 的定位是「只留游戏业务」（12 模块），训练控制面住进去是
+  类别错误；`trainer/` 则会被 `tests/test_layering.py` 的 `TRAINER_ORCHESTRATION` 快照拦下
+  （每模块必须可达 `remote|worker`）。代价是显式的：`tests/helpers/remote_dag.py::LAYERS` 登记一行
+  （ownership，不是罚款）。
+
+**保守方向（不可回退）**：任何「读不到」都回落 `halt`，**绝不回落到 notify**；文件**存在但坏**
+（非法 JSON / 非法 mode / `until` 非数字）⇒ `halt` + 告警，且**不许被旧 CLI 值接管**。
+
+**被否决的备选（逐处）**：① 残留 `<traj>/gate-halt-mode.txt` 首次迁移成平台值——会把**一门课**的值
+升格成全平台，违背「平台级是人显式切的」⇒ 取「忽略 + 首次告警 + 控制台提示可删」。② 把开关做成
+rl-config 键——它每进程启动才读一次，而平台开关要**每轮热读**（且 rl-config 承载密钥、写面重）。
+③ 离线腿「也能 notify」——今天云机侧没有读点（读点只在 supervisor），不为此改 hub 下发链路；
+取 `NN_GATE_HALT_LEG=offline` 短路 + `source=default` 日志兜底。④ 顺手重构 `trainer/loop_control.py`
+（同构范式）——不动：它有自己的契约与用例，同构不等于同体。
+
+**为什么值得记**（AGENTS §6.3）：① 有被否决备选（上面四条）；② **未来会重犯**——「把操作员的
+此刻状态写成课程属性」是同族错误的温床（下一处可能是：谁在盯盘 / 这条腿要不要停 / 是否在维护窗口），
+判据是「这个值描述的是**课**，还是人/机群？」；③ 不能就近表达：契约、优先级、读时求值、两侧原子写、
+离线腿口径跨 python/TS 两棵树。
+
+**指针**：全文 `docs/nn/training-stack.md` §27（训练侧）+ `docs/nn/console.md` §21（控制台侧）·
+计划 `gate-halt-platform-level.plan.md`（**未跟踪**，不入库）· 实现 `nn-training/worker/gate_halt.py` ·
+`trainer/loop_guards.py::_gate_halt_mode`（唯一读点，移 hub 短路之前）· `worker/cli.py`（`default=None`）·
+`trainer/loop_serve.py`（白名单摘除）· `rl_config.schema.json`（`rl.gate_halt_mode` 挪 retired）·
+`dashboard/src/stack/gate-halt.ts` · `core/paths.ts` · `server/api/route.ts` · `web/view/gate-halt.ts` ·
+测试 `nn-training/tests/worker/test_gate_halt.py` · `dashboard/tests/gate-halt-platform.test.ts`。
+落账门禁：nn 子集绿（gate_halt 19 例 + 守卫族：意图 / 分层 / 护栏）· dashboard 1245/0 + typecheck · 三份 bundle 过。

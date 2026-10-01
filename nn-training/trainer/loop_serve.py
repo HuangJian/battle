@@ -153,12 +153,13 @@ def prepare_process(argv: list[str] | None = None) -> str:
 #: （语料血缘 / 熔断口径，D14）——往课程文件里加一个旋钮，熔断会把同一份语料读成新语料。
 #: 机器侧旋钮**永不进 curricula**。
 #:
-#: 为什么现在需要它们：单进程服务器（`--serve`）**无法**用进程级 CLI 表达「这门课怎么跑」
+#: 为什么它今天**是空的**：单进程服务器（`--serve`）**无法**用进程级 CLI 表达「这门课怎么跑」
 #: ——一个进程服务 N 门课，命令行只有一份。控制台过去往**每门课**的 trainer 命令行里塞
-#: `--remote-degrade-after` / `--gate-halt-mode`，收敛成一个共享 trainer 后那些旋钮搬到这个块
-#: （per-course，且随盘持久——比一次性的 flag 耐久）。「塞进 argv」那种旋钮**现在一个都没有**：
-#: 2026-09-21（§3）`--ppo` 与 `--remote-degrade-after` 双删后，trainer 命令行上没有任何
-#: 与「PPO 跑在哪 / 怎么降级」相关的可调参数。
+#: 那些旋钮，收敛成一个共享 trainer 后曾搬到这里（per-course，且随盘持久）。但两个成员先后
+#: 退役：「PPO 跑在哪 / 怎么降级」2026-09-21 随单一 PPO 路径删除（§3），`gate_halt_mode`
+#: 2026-10-01 随门禁停机**平台级化**摘除（`tmp/gate-halt.json` + 控制台开关，不再按课程）。
+#: 结构保留（不是删掉这段）：下一条「单进程表达不了、又确实按课不同」的旋钮还往这里加，
+#: 判据仍是「课程的机器侧配置，且不进 `curricula/*.jsonc`」。
 #:
 #: ★ **2026-09-19 删掉了两个键**（用户口径「课程任务与 worker 节点互相正交」）：
 #: `remote_transport` 与 `remote_hub_url`。它们是「把**这门课**钉到某条传输路 / 某个 hub」的
@@ -167,7 +168,9 @@ def prepare_process(argv: list[str] | None = None) -> str:
 #: 静默失效）；控制台启动时会把它们连同 `push_node_url` / `hub_push` 一并清理（见
 #: `dashboard/src/stack/course-knobs.ts::pruneLegacyCourseKnobs`）。
 COURSE_MACHINE_OVERRIDE_KEYS: tuple[str, ...] = (
-    "gate_halt_mode",  # 门禁失败语义（halt/skip…）
+    # ★ 2026-10-01 删掉 `gate_halt_mode`（plan/gate-halt-platform-level）：门禁停机模式升成
+    #   **平台级**（`tmp/gate-halt.json`，控制台一处切、全局生效、到点回落 halt）⇒ 不再按课程
+    #   下发；旧配置里若还留着该键，**不再被读**（不报错，控制台开课时顺手清）。
     # ★ 2026-09-21 删掉 `remote_degrade_after`（plan/accident.plan.md §3）：单一 PPO 路径下
     #   没有"就地下沉到本机算"这回事；旧配置里若还留着该键，**不再被读**（不报错）。
 )

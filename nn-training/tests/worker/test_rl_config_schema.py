@@ -56,7 +56,7 @@ def test_retired_keys_are_flagged_with_a_reason() -> None:
             "streamKlCapIntent": 0.5,
             "streamWaveGamesIntent": 200,
         },
-        "rl": {"stream": 0, "double_buffer": 0, "precollect_early": 0},
+        "rl": {"stream": 0, "double_buffer": 0, "precollect_early": 0, "gate_halt_mode": "notify"},
     }
     out = " | ".join(S.check_rl_config(cfg))
     for dotted in (
@@ -68,6 +68,8 @@ def test_retired_keys_are_flagged_with_a_reason() -> None:
         "rl.stream",
         "rl.double_buffer",
         "rl.precollect_early",
+        # 2026-10-01：门禁停机模式升平台级（tmp/gate-halt.json）——课程级/rl 键都不再被读。
+        "rl.gate_halt_mode",
     ):
         assert dotted in out, f"{dotted} 未被点出"
     assert out.count("已退役") == len(S.retired_keys())

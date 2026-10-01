@@ -61,7 +61,6 @@
       "eval_seeds",
       "eval_stages",
       "eval_games_per_stage",
-      "gate_halt_mode",
       "gate_remediate_stop_after",
       "heartbeat",
       "kickstart_decay",
@@ -102,6 +101,7 @@
     "policy.streamWaveGamesIntent": "intent 流式专属，已随 intent 线一起下线。",
     "rl.stream": "单一 PPO 路径下恒置 0（validate_args 强制），填了也不生效。",
     "rl.double_buffer": "单一 PPO 路径下恒置 0，填了也不生效。",
-    "rl.precollect_early": "只在 double_buffer 开时被读取；恒 0 ⇒ 不生效。"
+    "rl.precollect_early": "只在 double_buffer 开时被读取；恒 0 ⇒ 不生效。",
+    "rl.gate_halt_mode": "已平台化（2026-10-01 / plan/gate-halt-platform-level）：门禁停机模式升为平台级开关（tmp/gate-halt.json + 控制台顶部开关，缺省 halt、可带 until 到点回落），填了不生效（读点只认平台文件）；残留值由控制台开课时清理。"
   }
 }

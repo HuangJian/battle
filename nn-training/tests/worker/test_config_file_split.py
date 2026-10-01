@@ -111,8 +111,8 @@ def test_read_rl_config_file_degrades_to_empty_dict_on_bad_inputs(
 
 def test_read_rl_config_file_returns_dict_verbatim(tmp_path, monkeypatch) -> None:
     p = tmp_path / "rl-config.json"
-    p.write_text('{"courses": {"c5-tick": {"gate_halt_mode": "notify"}}}', encoding="utf-8")
+    p.write_text('{"courses": {"c5-tick": {"workers": 4}}}', encoding="utf-8")
     monkeypatch.setenv(file_mod.RL_CONFIG_ENV, str(p))
     assert file_mod.read_rl_config_file() == {
-        "courses": {"c5-tick": {"gate_halt_mode": "notify"}}
+        "courses": {"c5-tick": {"workers": 4}}
     }

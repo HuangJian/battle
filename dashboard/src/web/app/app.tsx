@@ -21,6 +21,7 @@
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import type { RolloutSrcMode, TrainMode } from '../../core/types'
+import { DEFAULT_GATE_HALT_HOURS, gateHaltAppliedText } from '../view'
 import { AlertDock } from '../components/AlertDock'
 import { Flash, type FlashState } from '../components/Flash'
 import { PanelErrorBoundary } from '../components/PanelErrorBoundary'
@@ -166,9 +167,6 @@ export function App({ initial }: AppProps) {
   const [viewCourse, setViewCourse] = useState<string>(initial.course)
   const viewCourseRef = useRef(viewCourse)
   viewCourseRef.current = viewCourse
-  // ── 门禁动作模式：halt = 触发门禁就下发 cloud halt（默认）；notify = 只告警不停机。
-  //    hydrate 安全：初始值恒为 'halt'，挂载后由服务端标志文件 + localStorage 校准。
-  const [gateHaltMode, setGateHaltMode] = useState<'halt' | 'notify'>('halt')
   // 阶段耗时段 10s 客户端自走（sinceMs 是服务器锚点；两次轮询之间显示不冻结）。
   const [now, setNow] = useState(() => Date.now())
 
@@ -307,40 +305,47 @@ export function App({ initial }: AppProps) {
     [readOnly, refreshState],
   )
 
-  // 首次进入/切课程时，用**服务端标志文件**校准本地开关（文件是真相，localStorage 只是记忆）。
+  // ── 门禁停机模式（2026-10-01 **平台级**）：顶部开关写平台文件 `tmp/gate-halt.json`，
+  //   一处切、全平台生效；`notify` 可带盯盘时长，训练侧**读时求值**、到点自动回落 halt。
+  //   两栏数据都来自 `/api/state`（意图 = 平台文件；实际 = 训练侧回执）——
+  //   ① 不再跟 `viewCourse` 走（旧实现按课读写，UI 摆在平台位置却只改一门课）；
+  //   ② 不再往 localStorage 记模式（拉取失败/过期后旧值会与训练各说各话）。
+  const gateHalt = stateView?.gateHalt ?? null
+  const gateIntent = gateHalt?.intent ?? null
+  const gateMode: 'halt' | 'notify' = gateIntent?.mode === 'notify' ? 'notify' : 'halt'
+  const [gateHours, setGateHours] = useState<number | null>(DEFAULT_GATE_HALT_HOURS)
+  // 乐观 pending：点完立即上屏，服务端回读到同值即归位（POST 失败也归位，不留假状态）。
+  const [gatePending, setGatePending] = useState<'halt' | 'notify' | null>(null)
   useEffect(() => {
-    void (async () => {
-      let v: 'halt' | 'notify' | null = null
-      try {
-        const r = await postAction('getGateHaltMode', {})
-        if (r.ok && (r.message === 'halt' || r.message === 'notify')) v = r.message
-      } catch {
-        /* 拉取失败 → 退到 localStorage */
-      }
-      if (!v) {
-        try {
-          if (localStorage.getItem('tc.gateHaltMode') === 'notify') v = 'notify'
-        } catch {
-          /* 隐私模式下读不了 */
-        }
-      }
-      if (v) setGateHaltMode(v)
-    })()
-  }, [viewCourse])
-
-  const onGateHaltModeChange = useCallback(
-    (v: 'halt' | 'notify'): void => {
-      setGateHaltMode(v)
-      try {
-        localStorage.setItem('tc.gateHaltMode', v)
-      } catch {
-        /* 隐私模式下写不了就算了 */
-      }
-      // 写 <traj>/gate-halt-mode.txt ⇒ Python 下一轮门判定即生效，无需重启训练。
-      void doAction('setGateHaltMode', { mode: v })
+    if (gatePending !== null && gatePending === gateMode) setGatePending(null)
+  }, [gatePending, gateMode])
+  const writeGateHalt = useCallback(
+    (m: 'halt' | 'notify', hours: number | null): void => {
+      setGatePending(m)
+      // `untilHours`：null = 不限时（服务端对 notify 的缺省是 8h，故这里总是显式给）。
+      void doAction('setGateHaltMode', { mode: m, untilHours: m === 'notify' ? hours : null }).then(
+        (r) => {
+          if (!r.ok) setGatePending(null)
+        },
+      )
     },
     [doAction],
   )
+  const onGateHaltModeChange = useCallback(
+    (m: 'halt' | 'notify'): void => writeGateHalt(m, gateHours),
+    [writeGateHalt, gateHours],
+  )
+  const onGateHaltHoursChange = useCallback(
+    (h: number | null): void => {
+      setGateHours(h)
+      writeGateHalt('notify', h) // 改时长 = 重写意图（不必先切回 halt）
+    },
+    [writeGateHalt],
+  )
+  // 「实际生效」栏：回执里本课的 `effective_mode` + 来源。没有回执 = 训练侧还没读到过
+  // （或旧视图）——宁可显示空，不编一个「应该生效了」。
+  const gateAppliedLine = gateHaltAppliedText(gateHalt?.applied?.[stateView?.course ?? ''] ?? null)
+  const gateHint = gateHalt?.error ? `意图文件读不了（训练按缺省 halt）：${gateHalt.error}` : ''
 
   const onRefreshIntervalChange = useCallback((v: RefreshSec): void => {
     setRefreshInterval(v)
@@ -460,9 +465,14 @@ export function App({ initial }: AppProps) {
             readOnly={readOnly}
             gate={{
               visible: trainingCourses.length > 0,
-              mode: gateHaltMode,
+              mode: gatePending ?? gateMode,
+              hours: gateHours,
+              until: gateIntent?.mode === 'notify' ? gateIntent.until : null,
+              applied: gateAppliedLine,
+              hint: gateHint,
               disabled: !isLocal || readOnly,
               onChange: onGateHaltModeChange,
+              onHoursChange: onGateHaltHoursChange,
             }}
             refresh={{ value: refreshInterval, onChange: onRefreshIntervalChange }}
           />

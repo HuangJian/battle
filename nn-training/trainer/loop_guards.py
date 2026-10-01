@@ -25,10 +25,10 @@ S4 第二十三刀把 13 个成员按**判据同源**切成四簇（trip / leg /
 
 from __future__ import annotations
 
-from pathlib import Path
 from typing import Any
 
 import common.distribution
+import worker.gate_halt as gate_halt
 from common.log import log
 from remote.hub_client import set_cloud_halt
 from worker.loop_guards_gate import TrainingGuardsGate
@@ -97,9 +97,11 @@ class TrainingGuards(
     #: ⇒ plateau 只记录 verdict，不下达停机令；真需要停的场景由 G7/G13/PAUSE/ABORT 覆盖。
     NO_CLOUD_HALT_KINDS = frozenset({"plateau"})
 
-    #: 门禁触发的动作模式（控制台顶部「触发门禁：停机/提示」开关，2026-09-13）。
+    #: 门禁停机模式词表（控制台顶部「触发门禁：停机/提示」开关，2026-09-13）。
     #: halt = 下发 cloud halt（默认，历史行为）；notify = 只提示不停机。
-    GATE_HALT_MODES = ("halt", "notify")
+    #: 2026-10-01 起是**平台级**开关：唯一的契约/判定在 `worker/gate_halt.py`（这里引用它，
+    #: 不留第二份字面量）。
+    GATE_HALT_MODES = gate_halt.MODES
 
     def _is_soft_verdict(self, verdict: str, readings: Any) -> bool:
         """REMEDIATE 是否**只**由提示类门（plateau）触发 ⇒ 不该下发 cloud halt。
@@ -115,25 +117,24 @@ class TrainingGuards(
         return all(getattr(r, "kind", "") in self.NO_CLOUD_HALT_KINDS for r in released)
 
     def _gate_halt_mode(self) -> str:
-        """门禁动作模式：**标志文件 > 启动参数 > 默认 halt**。
+        """门禁停机模式：**平台文件 > CLI > 缺省 halt**（每次判定都读 ⇒ 控制台热切即生效）。
 
-        标志文件 = `<traj>/gate-halt-mode.txt`（内容 halt|notify），由控制台顶部开关写。
-        放在文件里是为了**运行时可热切**：训练中改主意不必重启（每轮门判定只读一次，
-        一轮 ~100s，开销可忽略）。读不到/内容非法一律回退启动参数，再回退 halt（保守）。
+        平台文件 = `tmp/gate-halt.json`（2026-10-01 起在线腿唯一事实源；契约与容错全在
+        `worker/gate_halt.py`：`until` 过期**读时**回落 halt、坏文件一律 halt、离线腿短路）。
+        课程级 `<traj>/gate-halt-mode.txt` 已退役：**不读**，盘上还留着就首次告警一次。
+
+        顺带把「本课实际生效了什么」写回执（`tmp/gate-halt.applied.json`，仅变化时写）——
+        控制台的「实际生效」栏只能靠它：意图文件回答不了「训练真读到了吗」。
         """
-        try:
-            root = self._traj_root
-            if root is not None:
-                p = Path(root) / "gate-halt-mode.txt"
-                v = p.read_text(encoding="utf-8").strip().lower()
-                if v in self.GATE_HALT_MODES:
-                    return v
-        except OSError:
-            pass
-        except Exception:  # 任何意外（属性缺失/权限）都退化到启动参数，绝不影响训练
-            pass
-        v = str(getattr(self.args, "gate_halt_mode", "") or "halt").strip().lower()
-        return v if v in self.GATE_HALT_MODES else "halt"
+        warn = gate_halt.warn_once_on_legacy_txt(getattr(self, "_traj_root", None))
+        if warn:
+            log(warn)
+        r = gate_halt.resolve(getattr(self.args, "gate_halt_mode", None))
+        gate_halt.log_resolved(r)
+        err = gate_halt.write_applied_if_changed(common.distribution.course_name_of(), r)
+        if err:
+            log(f"[gate] WARN 回执写入失败（不影响训练）：{err}")
+        return r.mode
 
     def _sync_cloud_halt(self, it: int, verdict: str, readings: Any = None) -> None:
         """§386 联动：门判决只作用于远端云机，TrainingLoop 永不停车。
@@ -145,7 +146,11 @@ class TrainingGuards(
 
         2026-09-13 修正：`REMEDIATE` 若**只**由提示类门（G4 plateau）触发则**跳过**停机
         （见 `NO_CLOUD_HALT_KINDS`）——否则平台期每 5 轮杀一次云 worker。
+        2026-10-01：停机模式改成**平台级**（`tmp/gate-halt.json`）——本方法每次判定读一次
+        并写回执，故放在 hub 短路**之前**（本机/离线腿也要有 gate_mode 日志与回执）。
         """
+        # 平台级停机模式：每次判定都读（可热切）；读点必须在 hub 短路**之前**。
+        mode = self._gate_halt_mode()
         args = self.args
         hub_url = str(getattr(args, "remote_hub_url", "") or "")
         token = str(getattr(args, "remote_token", "") or "")
@@ -166,19 +171,13 @@ class TrainingGuards(
             )
             # 提示类判决不改变停机态：既不下达，也不主动 resume。
             return
-        if want_halt and self._gate_halt_mode() == "notify":
-            # 操作员把顶部开关拨到「提示」：只记录 verdict（上面已落账），不停云机。
+        if want_halt and mode == "notify":
+            # 平台开关拨到「提示」：只记录 verdict（上面已落账），不停云机。
             log(
-                f"[run_rl] gate it{it}: {verdict} —— 门禁动作为 notify（控制台开关）"
+                f"[run_rl] gate it{it}: {verdict} —— 门禁动作为 notify（平台开关）"
                 f"→ 只提示，不下发 cloud halt"
             )
             return
-        args = self.args
-        hub_url = str(getattr(args, "remote_hub_url", "") or "")
-        token = str(getattr(args, "remote_token", "") or "")
-        if not hub_url or not token:
-            return
-        want_halt = verdict in self.CLOUD_HALT_VERDICTS
         halted = bool(getattr(self, "_cloud_halted", False))
         if want_halt == halted:
             return  # 状态已一致（停机持续期/已恢复），幂等

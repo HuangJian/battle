@@ -7,6 +7,65 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §27 门禁停机模式升为平台级单开关：`tmp/gate-halt.json` 意图 + 回执，课程级三写面退役（2026-10-01）
+
+用户口径（2026-09-25）：「`gate-halt-mode` 应是**平台级**而非课程级，有人盯盘时切为提示，离开时切停机。」
+本刀把「门禁触发时停不停」从一个课程级散装旋钮升成平台级单开关，并给「离开」配上机制（到点自动回落）。
+（计划全文与两个裁决点 → `gate-halt-platform-level.plan.md`；控制台那一半 → `docs/nn/console.md` §21。）
+
+### 27.1 为什么原来的形状是错的
+
+「停不停」问的是**有没有人在盯盘**——操作员此刻的状态，不是某门课的属性。课程级三写面
+（每课 argv `--gate-halt-mode` / `rl-config courses.<课>.gate_halt_mode` / `<traj>/gate-halt-mode.txt`）
+外加一个隐藏第四面（`rl.gate_halt_mode`）造成两类事故：
+
+1. **配对腿漂**（2026-09-25 现场：`tmp/x20-dodge-l3/gate-halt-mode.txt = notify` 而 `l1` 无此文件
+   ⇒ 同一实验两条臂门禁行为不同，序列可比性受损）。该现场已随 `tmp/` 清理消失，**不再作为 DoD 输入**——
+   等价的可复现形式 = 「同一份平台文件 ⇒ 两次判定 `(mode, source)` 相同」。
+2. **UI 位于平台位置、实现却是课程级**（顶部开关初值跟当前查看课程变）⇒「看起来是平台开关，
+   点了只影响一门课」。
+
+### 27.2 契约（单一事实源 + 回执）
+
+* `tmp/gate-halt.json`（`worker/gate_halt.py`：只 stdlib + `common.log` ⇒ **L0**；已入
+  `tests/helpers/remote_dag.py` 的 `LAYERS` 账本）：
+  `{"version":1,"mode":"halt|notify","until":<epoch 秒|null>,"by":"console","at":…}`；
+  env `NN_GATE_HALT` / `NN_GATE_HALT_APPLIED` 可重定向（控制台侧对偶 `BCITY_GATE_HALT[_APPLIED]`）。
+* **优先级**：平台文件 > CLI `--gate-halt-mode` > 缺省 `halt`。CLI 只兜底「文件不存在」——
+  若它能在文件存在时压过平台值，控制台写出的意图会被历史命令行静默盖掉（「一处切、全局生效」的反面）。
+* **保守方向**：文件缺失 ⇒ CLI ⇒ `halt`；文件**存在但坏**（非法 JSON / 非法 mode / `until` 非数字）
+  ⇒ **`halt` + 告警**（读到了坏东西时，最不该发生的事就是被旧 CLI 值接管成 notify）。
+* **`until` 读时求值**：`notify` + 未到 ⇒ notify；到点 ⇒ halt；缺失与 `null` 同义 = 不过期。
+  ⇒「离开自动停」不需要任何进程去定时翻牌（`effective_mode(mode, until, now)` 是纯函数）。
+* **回执** `tmp/gate-halt.applied.json`：逐课 `{effective_mode, source∈{platform,cli,default}, until, at}`；
+  **只在结果变化时写**、按课合并、原子替换（`tmp` + `os.replace`）——控制台「实际生效」栏的数据源
+  （意图文件回答不了「训练真读到了吗」）。
+* **离线腿**：云机侧今天**没有**该读点（读点只在 supervisor 判门路径）⇒ 结构上不可能误读；机制上留
+  `NN_GATE_HALT_LEG=offline` 短路（**根本不读**文件，缺省 halt / `source=default`），
+  给「整仓目录挂到云机」与将来「随 job 下发」兜底。
+
+### 27.3 落点与退役面
+
+* 唯一读点 `trainer/loop_guards.py::_gate_halt_mode` 改写：删课程级 txt 分支（盘上留着 ⇒ 首次告警
+  一次、**不读**），读平台文件 + 写回执 + 打 `gate_mode=… source=…` 一行；读点移到 hub 短路**之前**
+  （本机/离线腿也要有日志与回执）。组合根不许新增方法（`test_loop_guards_split.py::test_root_calls_nobody`），
+  所以解析/裁决/写回执全住 `worker/gate_halt.py` 的模块级函数。
+* `worker/cli.py --gate-halt-mode`：`default=None`（不再 `_d("gate_halt_mode","halt")`）——
+  argparse 层**不得**预读平台文件（每进程只读一次 ⇒ 热切失效；热切的关键就是读点每轮现读）。
+* `trainer/loop_serve.py::COURSE_MACHINE_OVERRIDE_KEYS` 摘除 `gate_halt_mode` ⇒ 白名单今天**空**
+  （结构保留：下一条「单进程表达不了、又确实按课不同」的旋钮还往这里加）。
+* `rl_config.schema.json`：`rl.gate_halt_mode` 从 `sections.rl` 挪 `retired`（旧值一律不生效，
+  `worker/rl_config_schema.py` 启动时会点名）。
+
+### 27.4 判据 / 测试
+
+`nn-training/tests/worker/test_gate_halt.py`（19 例：缺省/坏文件/`until` 三态/leg 短路/原子写/
+回执只变化时写/按课合并/告警去重）· `tests/trainer/test_loop_gate_soft_remediate.py`（夹具换成平台文件 +
+旧 txt 不生效）· `tests/worker/test_serve_course_overrides.py`（白名单摘除；机制用例改**探针白名单**，
+不因数据空了失去守卫）· `tests/worker/test_rl_config_schema.py`（退役键点名）·
+`tests/trainer/test_loop_guards_split.py`（顶层 import 面 +1）。决策 →
+`DECISIONS.md` §2026-10-01-goalnn-gate-halt-platform-level。
+
 ## §26 节点门多一道「本轮 bootId 一致」：训练侧用 ping 的 pid/bootId 判 stale 并排除（2026-09-29）
 
 > 用户裁定（plan/sampler-single-instance.plan.md §8-Q2）：**采纳备选**——让训练侧把「同 node 的

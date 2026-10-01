@@ -183,6 +183,8 @@ describe('② 开课（course-lifecycle）：账本（发现判据）与机器�
         'push_node_url',
         'hub_push',
         'remote_degrade_after',
+        // 2026-10-01：门禁停机模式升平台级（tmp/gate-halt.json）——课程级那份无读者。
+        'gate_halt_mode',
       ]) {
         expect(knobsOnDisk(COURSE)[key]).toBeUndefined()
       }
@@ -195,13 +197,18 @@ describe('② 开课（course-lifecycle）：账本（发现判据）与机器�
       const cfg = fixture()
       // 类型表里这两个键已删 ⇒ 用旧形状（Record）造历史配置，模拟线上 rl-config.json 的残留值。
       cfg.courses = {
-        [COURSE]: { remote_transport: 'pull', remote_hub_url: 'https://old.example' },
+        [COURSE]: {
+          remote_transport: 'pull',
+          remote_hub_url: 'https://old.example',
+          gate_halt_mode: 'notify', // 2026-10-01 起的残留形态（平台化前的课程级值）
+        },
       } as unknown as RlConfig['courses']
       writeFileSync(tmpConfig, JSON.stringify(cfg, null, 2))
       const r = pruneLegacyCourseKnobs(cfg)
       const onDisk = knobsOnDisk(COURSE)
       expect(onDisk.remote_transport).toBeUndefined()
       expect(onDisk.remote_hub_url).toBeUndefined()
+      expect(onDisk.gate_halt_mode).toBeUndefined()
       expect(r.removed.length).toBeGreaterThan(0)
       writeFileSync(tmpConfig, JSON.stringify(fixture(), null, 2))
     })

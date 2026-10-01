@@ -119,7 +119,8 @@
 | **A 机器/环境级** | 值描述**这台机器/这条链路**，课程文件天然表达不了 | **留** | `rl.hub_port` `agent_port` `remote_token` `remote_hub_url` `remote_hubs` `cf_protocol` `cf_edge_ip` `slim` `hub_push` `torch_threads` `nodes[]` |
 | **B 全局缺省** | 课程文件 schema **有同名键**；rl-config 里的值只是「课程没写时的兜底」 | **只留必要兜底 + 注释标明**；与在训课程重复的按 §3.2 逐个清 | `rl.mb` `lr`* `epochs`* `gamma`* `lam`* `workers` `keep_iters` `eval_window_sec` `difficulty` `max_ticks` `total_stages` `rotate_stages` `seed_rotate` `stream` `double_buffer` `precollect_early` `local_slots` |
 | **C 调度策略** | 集群调度器的行为阈值，属于「怎么派活」而不是「怎么训」 | **留** | `policy.taskTimeoutSec` `taskFetchTimeoutSec` `queueWindowSec` `statusTimeoutSec` `nodeFailStreak` `streamKlCap` |
-| **D 每课机器侧** | 控制台热切/开课的写面；per-course 最具体 | **留活课，删停课** | `courses.<课>.{rollout_src,run_iters,gate_halt_mode,cf_*}` |
+| **D 每课机器侧** | 控制台热切/开课的写面；per-course 最具体 | **留活课，删停课** | `courses.<课>.{rollout_src,run_iters,cf_*}` ——⚠ **`gate_halt_mode` 已不在本类**（2026-10-01 平台化 ⇒ 无读者，见下行） |
+| **D′ 已平台化** | 曾是每课旋钮，现已升为**平台级单开关**（`tmp/gate-halt.json` + 回执）；课程级那份无读者 | **无条件删**（不看在训与否——它不描述课） | `courses.<课>.gate_halt_mode` · `rl.gate_halt_mode`（本是隐藏第四面） |
 | **E 废弃/死** | 代码注释明写废弃，或全域零消费者 | **删** | `intent_rl.*`（29）· `policy.upgradeBranch` · `policy.minDiskFreeMB` · `policy.streamKlCapIntent` · `policy.streamWaveGamesIntent` |
 
 > ⚠ **B 类的取舍要点**：删除全局缺省**会改变「没写该键的课程」的行为**。所以删之前必须先出
@@ -208,7 +209,10 @@
 ### S3 — `courses.*` 条目清理
 
 删「非在训」的课程条目（实测待删候选：`x20-clutch-null`、`x3-power`、`x20-clutch`、`x20-steady`、`x20-demo-mix`、
-`x20-terminal`…以 S2 的矩阵为准）。**注意** `courses.<课>.run_iters` 与 `gate_halt_mode` 都属 D 类，判据同样是「在训」。
+`x20-terminal`…以 S2 的矩阵为准）。**注意** `courses.<课>.run_iters` 属 D 类（判据「在训」）；**`gate_halt_mode` 不在本步范围**——
+它已平台化（`gate-halt-platform-level.plan.md`，2026-10-01）：课程级那份**无条件删**（无读者，
+控制台开课时 `pruneLegacyCourseKnobs` 也在清），与本 plan 的「在训」判据无关；
+`rl.gate_halt_mode` 同理（已从 `rl_config.schema.json` 的 `sections.rl` 挪 `retired`）。
 
 ### S4 — 生效值对照（清洗的验收手段）
 

@@ -172,6 +172,22 @@ export interface CloudHaltView {
   clearReason?: string
 }
 
+/** 门禁停机平台开关的回执里**一门课**的一行（字段名 = python 写出的 wire 形状，
+ *  不做第二套命名；契约/解析在 `stack/gate-halt.ts`）。 */
+export interface GateHaltAppliedView {
+  effective_mode: string
+  source: string
+  until: number | null
+  at: number | null
+}
+
+/** 平台开关两栏（意图 + 回执）——服务端组装点在 `api/state-view.ts`。 */
+export interface GateHaltStateView {
+  intent: { mode: 'halt' | 'notify'; until: number | null; by: string; at: number | null } | null
+  applied: Record<string, GateHaltAppliedView>
+  error?: string
+}
+
 /** 已封存课程的一条（plan/course-archive.plan.md §3.4）。
  *
  *  数据源**只有一个**：`archive/courses/<课>/archive-manifest.json`——控制台只读它，
@@ -285,6 +301,12 @@ export interface ConsoleStateView {
   phase: PhaseInfo
   /** 每课云端停机记录（§386 + S17：键 = 课程名；halted=红横幅，recovered=灰横幅历史）。 */
   cloudHalts?: Record<string, CloudHaltView>
+  /** 门禁停机模式平台开关的两栏（2026-10-01 / plan/gate-halt-platform-level）。
+   *
+   *  `intent` = 平台意图文件（`tmp/gate-halt.json`，控制台写、训练侧每轮读）；
+   *  `applied` = 训练侧回执（逐课 `effective_mode` + `source`）——“意图 ≠ 事实”那一栏。
+   *  缺省/null = 旧视图（UI 不画该栏，不编状态）。 */
+  gateHalt?: GateHaltStateView | null
   /** PPO 任务排队超时（>5min 无 worker 领取）：warning 横幅——云端 worker 可能断连。 */
   ppoQueueStall?: {
     jobId: string

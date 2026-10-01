@@ -51,14 +51,16 @@ export interface CourseConf {
   //  ★ 2026-09-21 删掉 `remote_degrade_after`（plan/accident.plan.md §3）：单一 PPO 路径下
   //  「就近降级到本机算」这个档位不存在（loop 没有计算能力，无人认领就等着，永不自己算）。
   //  旧 rl-config 里的残留值由 `pruneLegacyCourseKnobs` 清掉。
-  /** 门禁失败语义（halt = 打进停机态）。 */
-  gate_halt_mode?: string
+  //  ★ 2026-10-01 删掉 `gate_halt_mode`（plan/gate-halt-platform-level）：门禁停机模式
+  //  升成**平台级**单开关（`tmp/gate-halt.json` + 控制台顶部开关，缺省 halt、可带 until
+  //  到点自动回落）——它回答的是「有没有人在盯盘」，不是「这门课怎么跑」。旧值无读者，
+  //  由 `pruneLegacyCourseKnobs` 开课时清掉。
   /** kickstart 干烧熔断阈值覆盖（plan/accident.plan.md §5.2；读面在 python
    *  `biz/kickstart_burn.py::burn_overrides`，缺席即那边的常量）。
    *
    *  控制台**只读**：开课回执拿 `margin_pp`/`points` 说清「连续几点低于基线多少 pp 停腿」
    *  （`stack/kickstart-receipt.ts`），按需手改 rl-config——不做写面/UI（execution-face
-   *  旋钮，与 `gate_halt_mode` 的写面同规，但今天没有面板需求）。 */
+   *  旋钮：按需手改配置，不上面板）。 */
   kickstart_burn?: { margin_pp?: number; points?: number }
 }
 

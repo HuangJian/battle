@@ -7,6 +7,31 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §21 门禁停机开关去课程化：顶部开关写平台文件 + 「意图 / 实际生效」两栏（2026-10-01）
+
+训练侧契约与后果（优先级 / `until` 读时求值 / 离线腿短路）→ `docs/nn/training-stack.md` §27。
+控制台这一半：
+
+* **新增 `stack/gate-halt.ts`**：`readGateHaltIntent` / `writeGateHaltIntent`（**原子写**：`tmp` + `rename`——
+  旧实现是 `writeFileSync` 直写，训练侧可能读到半截）/ `readGateHaltApplied` / `buildGateHaltView`。
+* **删掉课程级三件套**：`specs.ts::gateHaltModePath` / `readGateHaltMode` / `writeGateHaltMode` 与
+  `trainingLoopSpec` 的每课 `--gate-halt-mode` 注入（留半个写面 = 双事实源）。路径住
+  `core/paths.ts::gateHaltPath()/gateHaltAppliedPath()`（`BCITY_GATE_HALT[_APPLIED]`，与 loop-control 同形、惰性取值）。
+* `route.ts`：`setGateHaltMode` 写平台文件（`untilHours` 三态：**缺省 8h** / 显式 `null` = 不限时 / 正数），
+  **忽略 `course`** 并记一行「已废弃」；`getGateHaltMode` 降为只读探针（仍在 `READONLY_ACTIONS` /
+  `VIEW_ONLY_ACTIONS` 里）。
+* `/api/state.gateHalt`：`{intent, applied, error?}` 两栏（组装点 `api/state-view.ts`；类型
+  `web/view/console-types.ts::GateHaltStateView`——字段名沿用 python 回执的 snake_case，
+  同一份 wire 契约不做第二套命名）。
+* `app.tsx`：**删掉** `[viewCourse]` 依赖的拉取 effect 与 `localStorage['tc.gateHaltMode']`
+  （评审 P0-5：拉取失败/过期后旧值会让界面显示 notify 而训练按 halt 跑——**两栏显示**正是为了把
+  这种分歧摆出来）；改读 `stateView.gateHalt`，切 notify 才出时长档（2/4/8h/不限，缺省 8h）。
+* **展示件住 `web/view/gate-halt.ts`**（时长档 + 两栏文案）：web 侧不得 import `stack/gate-halt.ts`
+  （那份 import `fs`，链进客户端 bundle 会在构建期炸）；`tests/architecture-layering.test.ts` 钉分层。
+* 测试：`tests/gate-halt-platform.test.ts`（9 例：写平台文件 / `until` 三态 / 400 不写盘 /
+  course 被忽略 / 原子写无残留 / 两栏 / 坏文件各自降级）· `tests/push-config.test.ts`（防回流：
+  三件套与 argv 不得复活）· `tests/training-shared-trainer.test.ts`（`gate_halt_mode` 进 legacy 清理名单）。
+
 ## §20 指标表「击杀/残血/承伤·杀/道具/耗时」丢了一大半：抄录只发生在「谁在屏幕上」（2026-09-28）
 
 用户报障：「两课并行，`h5a-earlydmg` 能看到所有 it 的数值和趋势图，`h5b-clean` 却丢了一大半」，

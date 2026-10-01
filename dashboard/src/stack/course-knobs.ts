@@ -6,11 +6,17 @@
  *  `course_fp` 语料血缘 / 熔断口径，D14；往里加一个旋钮，熔断会把同一份语料读成新语料）。
  *
  *  读面在 python：`trainer/loop_serve.py::apply_course_machine_overrides` 在开课时施加（白名单 +
- *  逐键打印生效值）；本模块是**写面**（控制台唯一写法）。
+ *  逐键打印生效值）；本模块曾是**写面**（控制台唯一写法）。
  *
- *  | 键 | 谁关心 | 为什么需要 |
- *  |---|---|---|
- *  | `gate_halt_mode` | RL 门禁 | 门禁失败语义（halt = 打进停机态） |
+ *  ★ **2026-10-01：最后一个旋钮也退场了**（plan/gate-halt-platform-level）——`gate_halt_mode`
+ *  升成平台级单开关（`tmp/gate-halt.json` + 控制台顶部开关，缺省 halt、可带 until 到点回落）。
+ *  于是本模块的写面整体退场（`CourseMachineKnobs` / `courseMachineKnobs` /
+ *  `writeCourseMachineKnobs` / `applyCourseMachineKnobs` 一并删——它们自 2026-09-21 起就
+ *  **零调用者**：控制台早不走它）；留下的是它一直在负责的另一半：**旧键的清理面**
+ *  （“不再被读”的键必须从盘上剃掉，否则操作员以为“我配过”）。
+ *
+ *  白名单机制仍在 python 侧（`COURSE_MACHINE_OVERRIDE_KEYS`，今天为空元组）——下一个
+ *  「单进程表达不了、又确实按课不同」的旋钮回那里加，写面也回这里。
  *
  *  ★ **2026-09-21：删掉了 `remote_degrade_after`**（plan/accident.plan.md §3「无 fallback」）。
  *  单一 PPO 路径下「远端连败就降级到本机算」这个档位不存在：loop 自己没有计算能力，
@@ -24,54 +30,9 @@
  *  训练时由 `pruneLegacyCourseKnobs` 清掉。
  */
 
-import { loadConfig, saveConfig } from '../core/config'
+import { saveConfig } from '../core/config'
 import { log } from '../core/log'
 import type { CourseConf, RlConfig } from '../core/types'
-
-/** 控制台会写的旋钮（未给的键**不动**——不写 = 沿用现有值，绝不「顺手清空」）。 */
-export interface CourseMachineKnobs {
-  /** 门禁失败语义。 */
-  gateHaltMode?: string
-}
-
-/** 本课的机器侧旋钮**当前值**（未配 = 字段缺席——「没配」与「配成空串」是两件事，读面不猜）。 */
-export function courseMachineKnobs(cfg: RlConfig, course: string): CourseMachineKnobs {
-  const b = cfg.courses?.[course]
-  if (!b) return {}
-  const out: CourseMachineKnobs = {}
-  if (b.gate_halt_mode !== undefined) out.gateHaltMode = b.gate_halt_mode
-  return out
-}
-
-/** 写本课的机器侧旋钮 → 落盘 rl-config，返回是否**真的改了**。
- *
- *  幂等是刻意的：控制台每次「启动」都会调它，无变化时不该重写配置文件——rl-config 的 mtime
- *  是 hub 热重载（`--push-config`）的依据之一。
- */
-export function writeCourseMachineKnobs(
-  cfg: RlConfig,
-  course: string,
-  knobs: CourseMachineKnobs,
-): { cfg: RlConfig; changed: boolean } {
-  const courses = { ...cfg.courses }
-  const cur: CourseConf = { ...courses[course] }
-  const snap = (c: CourseConf): string => JSON.stringify([c.gate_halt_mode ?? null])
-  const before = snap(cur)
-  if (knobs.gateHaltMode !== undefined) cur.gate_halt_mode = knobs.gateHaltMode
-  if (snap(cur) === before) return { cfg, changed: false }
-  courses[course] = cur
-  const next: RlConfig = { ...cfg, courses }
-  saveConfig(next)
-  return { cfg: next, changed: true }
-}
-
-/** 便捷写法：读 → 合并旋钮 → 落盘（返回落盘后的 config 与是否变更）。 */
-export function applyCourseMachineKnobs(
-  course: string,
-  knobs: CourseMachineKnobs,
-): { cfg: RlConfig; changed: boolean } {
-  return writeCourseMachineKnobs(loadConfig(), course, knobs)
-}
 
 // ────────────────────────── legacy 清理（2026-09-19） ──────────────────────────
 
@@ -79,13 +40,17 @@ export function applyCourseMachineKnobs(
  *
  *  `remote_degrade_after`（2026-09-21 / §3）：单一 PPO 路径下没有「降级本机」这个档位，
  *  python 侧已从 `COURSE_MACHINE_OVERRIDE_KEYS` 白名单移除 ⇒ 它**已无读者**，留着只会
- *  让操作员以为「我配过降级」。 */
+ *  让操作员以为「我配过降级」。
+ *
+ *  `gate_halt_mode`（2026-10-01 / plan/gate-halt-platform-level）：门禁停机模式升平台级
+ *  （`tmp/gate-halt.json`）⇒ 课程级那份无读者；留着会让操作员以为「这门课还能单独切提示」。 */
 const LEGACY_COURSE_KEYS = [
   'push_node_url',
   'remote_transport',
   'remote_hub_url',
   'hub_push',
   'remote_degrade_after',
+  'gate_halt_mode',
 ] as const
 
 /** 已废的**本机伪节点**标记（R3-7：伪节点退出控制台，那条「一键本机 push」也删了）。
