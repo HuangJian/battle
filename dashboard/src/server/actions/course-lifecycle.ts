@@ -48,6 +48,14 @@ import { ActionError, ActionResult, done, guard, release } from './result'
 import { runRlLockHolder } from './labels'
 import { runBcLockHolder, runClusterLockHolder } from './start'
 
+/** hub 模式推送的有界重试（开课/停课共用）。缺省 3 次 × 2s：hub 的课程表是**扫盘发现**，
+ *  新建的 `remote-jobs/` 要等它扫到才认这门课；测试注入 `delayMs: 0` 避免空等（见
+ *  `tests/course-lifecycle.test.ts` 的「hub 不可达」用例——不注入就是 2×2s 死等）。 */
+export interface HubModeRetry {
+  attempts?: number
+  delayMs?: number
+}
+
 /** 开课参数（全部是**课程级**：绝不写进 `rl.*` 那块所有课程共用的默认面）。 */
 export interface OpenCourseOpts {
   /** 训练模式（缺省在线）：`offline` = 云机接手（写 `rollout_src=run` + `run_iters=-1`，
@@ -59,7 +67,7 @@ export interface OpenCourseOpts {
   rolloutSrc?: RolloutSrcMode
   /** hub 模式推送的有界重试（缺省 3 次 × 2s）。hub 的课程表是**扫盘发现**，新建的
    *  `remote-jobs/` 要等它扫到才认这门课；测试注入 1 次避免空等。 */
-  hubMode?: { attempts?: number; delayMs?: number }
+  hubMode?: HubModeRetry
   /** **起点权重来源**（plan/course-archive.plan.md §3.5 / G4-①）：指向一门**已封存**课的
    *  某个关键轮——开课时把该归档权重播种成 `tmp/<本课>/weights.json`（缺省 = BC 播种，
    *  行为不变）。
@@ -460,7 +468,10 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
  *  注：离线课那条腿 2026-09-25 退役后它已无队列项——云机上正在跑的那份只能由操作员在云机侧停。
  *  课程表 / 账本 / 队列一律不动：恢复走「开课」。
  */
-export async function stopCourse(course: string): Promise<ActionResult> {
+export async function stopCourse(
+  course: string,
+  opts: { hubMode?: HubModeRetry } = {},
+): Promise<ActionResult> {
   guard(`course-stop:${course}`)
   try {
     const c = String(course ?? '').trim()
@@ -474,7 +485,7 @@ export async function stopCourse(course: string): Promise<ActionResult> {
     // ② 暂停意图（表内暂停，双保险：万一标记被手工建回来/还在旧进程的内存表里）
     const pause = setCoursePaused(c, true)
     // ③ hub 该课置 offline（远端也不再实时派发）
-    const hub = await pushHubMode(c, 'offline')
+    const hub = await pushHubMode(c, 'offline', opts.hubMode)
     const notes = [
       hadMarker
         ? '已删开课标记 training-enabled.txt（训练侧不再把这门课当在训）'

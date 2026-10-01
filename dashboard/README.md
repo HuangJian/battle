@@ -50,7 +50,8 @@ bun run start        # 启动控制台（:8900；--port N 可改）
 bun run launch       # python 无头启动器：bun run launch --script trainer/run_rl.py --check
 bun run build:ui     # 手动重建客户端 bundle（--analyze 看模块体积 top10）
 bun run typecheck    # tsc --noEmit（独立于仓库根）
-bun run test         # bun test --parallel --timeout=50000 tests
+bun run test         # bun test --parallel --timeout=50000 --preload ./tests/helpers/no-proxy.ts tests
+                     #   预载 = 测试进程出网直连（代理环境下「hub 不可达」类用例从 ~3s 掉回 ~0.01s，见该文件头注）
 bun run lint         # oxlint
 bun run format       # oxfmt
 ```
@@ -160,3 +161,9 @@ describe / 6 个用例，靠 `it(` 标题逐项 diff 找回）。
 - **只读消费游戏契约**：`src/`（stages / arena-ladder / config-stage / difficulty /
   combat）与 `tools/agent/codehash-files` 是权威唯一源，用相对路径只读引用；反向依赖
   永远禁止。
+- **测试出网直连**：门禁脚本预载 `tests/helpers/no-proxy.ts`（代理机上「连不上」的用例会白等
+  1.5–4s：Bun 只认 NO_PROXY 的精确主机，不认 `127.*`）。新用例别假设「连不上 = 立刻」；
+  这个预载只在 `bun run test` 里挂，裸 `bun test <file>` 不复现门禁读数。
+- **测试不写墙钟等待**：等待一律由**可观测事件**触发（探测注册 `probeStub.nextProbe()` / 回调计数 /
+  子进程打 `READY`），不拿定值 `sleep` 猜「该到了」；夹具主机用死回环端口（`http://127.0.0.1:1`）
+  而不是 `*.invalid`——后者的「不通」要靠 DNS 失败，那段墙钟依机器而变（实测 1500ms/用例）。

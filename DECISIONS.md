@@ -6117,3 +6117,70 @@ spawn 路径 · `dashboard/src/evalboard/kick-once.py` 的 `from biz.log` → `c
 **判据 / 先例**：AGENTS §6.3（就近表达）· 本文件头部「永不删除、永不重排」· `docs/nn/engineering.md` §55
 keep 表（追加型日志整文件不动；改字面量 = 篡改记录）。**对照指针**：`nn-training/README.md` 模块图 ·
 `docs/nn/engineering.md` §51–§55。
+
+## §2026-10-01-goalnn-dashboard-gate-net-direct（2026-10-01，dashboard 门禁：测试进程出网直连 + 停课重试可注入 —— 全目录墙钟 11.4s → 1.8s，用例与断言逐条不变）
+
+**症状**：dashboard `bun run test` 墙钟 11.4s（119 文件 / 1232 用例），而 per-file 时长总和 67.5s。
+JUnit 逐用例（`--reporter=junit`）一看：几乎每个文件只有 1–3 个用例慢（1.5–4.0s），其余全在 0.01s
+量级——慢的全是「hub 不可达 / buildStateView 探测」这类**注定连不上**的出网点。
+
+**根因（探针实测）**：dev 机有 HTTP(S)_PROXY，而 Bun 只认 NO_PROXY 里的**精确主机**，不认 `127.*`
+这类通配写法：`NO_PROXY='127.*'` 下 `fetch('http://127.0.0.1:1/…')` 仍走代理（2.9s）；
+把 `127.0.0.1` 写成精确条目 → 1ms ECONNREFUSED。于是「连不上」从 ~0.01s 涨到 1.5–4s，且每个 worker
+进程都要重付一次（同时证明了 bun 是**逐请求**读 env，而两个拼写都在时读**小写**那个）。
+
+**决策**：门禁脚本挂一个测试预载 `tests/helpers/no-proxy.ts`（`bun test --preload ./…`，注意 bun 要
+`./` 前缀，否则 preload not found）：把 `NO_PROXY` / `no_proxy` 两个拼写都置 `*`，再调生产的
+`core/net.shapeLoopbackNoProxy()` 追加精确回环做兜底。只改测试进程 env，不碰被测代码 / 断言 / 产物；
+无代理环境（CI）逐字节不变。另修 `course-lifecycle` 里残留的 4.0s：停课走 `pushHubMode` 的缺省 3×2s
+重试（= 2×2s 死等），给 `stopCourse` 补上 `openCourse` 早就有的 `hubMode` 注入位（缺省行为不变），
+用例注入 `delayMs: 0`（3 次照跑，只去空等）。
+
+**读数**：单品 `cloud-halt.test.ts` 12.0s → 0.06s；逐用例时长总和 61.9s → 15.3s（JUnit 口径；per-file
+口径 67.5s）；最慢单用例 4.00s → 0.66s；全目录墙钟 11.4s →
+1.6–2.2s（4 次）。**等价性**：改动前后 JUnit 的 1232 个 `(file|name|assertions)` 集合零差异（5726 次
+`expect()` 不变），用 README 的「用例与断言逐一不变」判据履行。**反向读数**（为什么两条 flag 都不能删）：
+去掉 `--parallel` ⇒ 文件同进程共享 global，58 个用例红（不是慢，是错）；`--parallel=1` 66.5s vs `=8` 12.5s。
+
+**被否决的备选**：① 每个受影响文件 import 一个 helper——现在就要改 ~20 个文件，将来每个新文件还得记得，
+而预载把「新文件自动覆盖」买到手；② `dashboard/bunfig.toml` 的 `[test] preload`（实测可行，但门禁命令
+组成会分裂到脚本 + 配置两处，且 bunfig 同时作用于 install/build）；③ 改生产默认重试时长——缺省 3×2s 是
+为 hub 扫盘竞态留的，不该为测试改。**守卫**：`tests/gate-composition.test.ts` 钉住 `--parallel`、预载 flag
+与本进程 env 被改写——删任一条测试就红（否则只是静默慢 6×）。
+
+**判据 / 先例**：同规则的生产先例 = §2026-09-18-goalnn-loopback-http-no-proxy（`shapeLoopbackNoProxy`）·
+AGENTS §6.3（就近表达：把「为什么」写进预载文件头）· §9（门禁即 DoD；pre-commit 与
+`.github/workflows/dashboard.yml` 都调 `bun run test`，所以单一挂载点在脚本）· `tests/ci-scope.test.ts`
+（同一体裁的守卫：让门禁组成不能静默腐烂）。**对照指针**：`dashboard/tests/helpers/no-proxy.ts` 头注 ·
+`dashboard/README.md`（命令表 + 纪律「测试出网直连」）· `dashboard/tests/gate-composition.test.ts`。
+
+## §2026-10-01-goalnn-dashboard-tests-no-wallclock（2026-10-01，dashboard 测试不许有墙钟等待：等待由可观测事件触发，夹具主机不用 DNS）
+
+**症状**：上一条（代理预载）修完后，逐用例时长里仍剩一批 1.5–4.0s 与大幅抖动——同一个
+`buildStateView` 注入用例在 0.14–0.79s 之间来回跳。
+
+**三处根因，共性是「等待靠墙钟猜」**：
+
+1. `server-api-pool-swr` 的「`?fresh=1` 硬清」用例用 `await sleep(400)` 猜「这么久还没回来 ⇒ 它确实在等
+   探测」。改成**等重算自己的探测注册**（`probeStub.nextProbe()`，计数口径 = 自 `hold()` 起，故同步派发的
+   探测也兑现）；软作废回归会先兑现读请求 ⇒ **第一拍就红**（还多了一条更强的因果断言）。顺带把另一条
+   有界再校验的 `sleep(20)` 定值步长换成按拍让路（`setTimeout 0`；退出判据仍是可观测的 `cachedAt` 推进）。
+2. `training-port-reclaim` 的三处 `waitUntil(() => portListen(port), 8000, 100)`：监听就绪改为**子进程自己打印
+   `READY`**（命令输出触发）——轮询的 100ms 步长是每次白等半拍，而子进程没起来时还要等满 8s 才报红。
+3. `console-fixture` 的 gpu_push 节点 `https://push.fixture.invalid`：**不存在的域名靠 DNS 失败来「不通」**，
+   那段墙钟依机器/解析器而变（本仓 `server-api-overview.test.ts` 自己的注释就记了「1500ms/用例，纯等 DNS」）。
+   换成死回环端口 `https://127.0.0.1:1`（即时 ECONNREFUSED，同 `cloud-halt.test.ts` 的「port 1」惯例）——
+   这条影响面最大：十几个探测/SSR 用例各掉 0.2–0.5s。
+
+**读数**（JUnit 逐用例口径）：pool-swr 文件 0.58s → 0.19s（最慢条 0.47s → 0.14s）；port-reclaim 0.99s → 0.87s；
+全目录逐用例时长总和 61.9s → **15.1s**；全目录墙钟 11.4s → **1.5–1.8s**（5 次里 4 次；一次 3.7s 是机器噪声）。
+**等价性**：1235 个用例零丢失、零改名；断言数只动了 1 条（就是新加的那条屏障断言，3 → 4）。
+
+**被否决的备选**：① 把 `sleep(400)` 缩短成 `sleep(50)`——仍是墙钟猜，回归时更难看清；② 给 SWR 缓存加
+`settle()` 之类的测试专用 API——「等下一次重算落地」本身就带竞态，语义不稳；③ 只把 `waitUntil` 的步长
+调小（100 → 20ms）——省的只是过冲，没去根；④ 保留 `*.invalid` 靠 DNS「立即可靠失败」——实测就是不可靠。
+
+**判据 / 先例**：`core/net.ts` 头注「一切等待以命令输出/健康探测触发，无硬编码 sleep」· `stack/local-worker.ts`
+的 `/ready` 探活（同一条原则在产线代码里的形态）· README 纪律新增「测试不写墙钟等待」。**对照指针**：
+`dashboard/tests/helpers/probe-stub.ts`（`nextProbe` / `guardMs(msg)`）· `dashboard/tests/helpers/console-fixture.ts`
+（gpu1 死回环端口 + 理由）· §2026-10-01-goalnn-dashboard-gate-net-direct（上一轮）。

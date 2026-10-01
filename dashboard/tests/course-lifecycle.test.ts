@@ -431,7 +431,8 @@ describe('stopCourse：非破坏停课（暂停意图 + hub 置离线）', () =>
 
   it('hub 不可达：意图照记 + 如实报告（停课本身仍成立）', async () => {
     hub = 'throw'
-    const r = await stopCourse(COURSE)
+    // 3 次照跑（覆盖 prod 重试路径），只是不空等——缺省 delayMs=2000 ⇒ 本用例白等 2×2s。
+    const r = await stopCourse(COURSE, { hubMode: { attempts: 3, delayMs: 0 } })
     expect(r.ok).toBe(true)
     expect(readLoopControl().paused).toContain(COURSE)
     expect(r.detail!.join('\n')).toContain('意图已记录')

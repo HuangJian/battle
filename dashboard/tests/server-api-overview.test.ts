@@ -17,8 +17,9 @@ import { api, loadConfig, scratchConfig, view } from './helpers/console-fixture'
 
 /** 夹具配置 → 被测函数要的 rl-config 形状（只读消费，不写盘）。
  *
- *  `workerUrl` 把 gpu_push 那台指到**假 hub**：夹具的 `push.fixture.invalid` 会一路挂到
- *  直探超时（1500ms/用例，纯等 DNS），而假 hub 的 404 是「探过、不通」的即时确定结论。 */
+ *  `workerUrl` 把 gpu_push 那台指到**假 hub**：本文件的用例要看的是「探过、有结论」（200 /
+ *  404 / 无应答三条不同的观测面），而夹具缺省的 `https://127.0.0.1:1` 是死回环端口——只给
+ *  「连不上」一个结论（速率上它反而最快：即时 ECONNREFUSED，不欠 DNS 的墙钟）。 */
 function cfg(workerUrl?: string): RlConfig {
   const c = loadConfig() as unknown as RlConfig
   if (workerUrl) {
