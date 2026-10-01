@@ -119,6 +119,9 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "claim",
             "claim_outcome",
             "_claim_locked",
+            # §52（2026-10-01）：租约死活判据（过期 ∨ 孤儿）——池过滤 / 认领闸 / 观测三面共用。
+            "_lease_state",
+            "_lease_held",
             "abandon_job",
             "_collect_expired_locked",
             "reclaims",
@@ -295,11 +298,12 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
         for m in defined & set(MIXIN_METHODS):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(MIXIN_METHODS) == 49, len(MIXIN_METHODS)
-    assert len(seen) == 49, len(seen)
+    assert len(MIXIN_METHODS) == 51, len(MIXIN_METHODS)
+    assert len(seen) == 51, len(seen)
     # 49 = 拆分前 `_JobStore` 的 49 个方法；2026-09-25 并入 origin 的课程侧落位后又多了 2 条
-    # （`_course_backup_target` / `_land_offline_round_extras`）⇒ 现在 49 + 2。
-    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 49 + 2, "_JobStore 的方法总数变了"
+    # （`_course_backup_target` / `_land_offline_round_extras`）；2026-10-01 §52 加 2 条
+    # （`_lease_state` 判据 + `_lease_held` 布尔视图）⇒ 现在 51 + 2。
+    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 51 + 2, "_JobStore 的方法总数变了"
 
 
 def test_the_mixins_do_not_share_any_defined_name() -> None:

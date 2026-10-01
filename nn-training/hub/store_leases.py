@@ -3,7 +3,10 @@
 `_JobStore` 的六个域混入之一（S4 第十四刀），也是最大的一簇。它守着两条互相咬合的规则：
 
 1. **租约**（H2）：认领即下发 `lease_token`，心跳/结果回传必须携带——杜绝「任何持 token
-   者都能续租/抢租约」的多 worker 竞态。`_collect_expired_locked` 是唯一的过期回收点。
+   者都能续租/抢租约」的多 worker 竞态。`_collect_expired_locked` 是唯一的回收点：
+   它收**过期**租约，也收**孤儿**租约（2026-10-01 §52：claim POST 到达即设租约、token 随
+   响应一起丢 ⇒ 「hub 有主、世上无人持有 token」，peek 里隐身整整一个 TTL）。判据 =
+   `_lease_state` 一把尺子（四态：无租约 / 活 / 过期 / 孤儿），push 腿豁免（见那里）。
 2. **毒包熔断**（§4.1）：同一 job「认领后**零回传**」满 `FREEZE_AFTER_RECLAIMS` 次 ⇒
    冻结 + 响亮告警。判据是「零回传」而不是「失败」——报得上来的失败早有确定性通道
    （`POST /jobs/{id}/fail`），这里兑的是**未知崩溃类型**（进程被杀 / OOM 硬死）。
@@ -50,6 +53,7 @@ from common.protocol import (
     CLAIM_TTL_SEC,
     FAIL_NAME,
     PRIORITY_HIGHEST,
+    PUSH_WORKER_PREFIX,
     ROLE_OFFLINE,
     ROLE_ONLINE,
     role_of,
@@ -70,6 +74,25 @@ ClaimOutcome = namedtuple("ClaimOutcome", "ok token status reason")
 #: 「换台机器 / 重启 worker」的自然愈合机会（认领 TTL 300s ⇒ 最多烧 ~15 分钟），又不至于
 #: 把 3.5 小时的静默空转让它过去。
 FREEZE_AFTER_RECLAIMS = 3
+
+#: 孤儿租约宽限（秒，2026-10-01 §52）：**自 claim 起一次成功心跳都没有**且已静默超过它
+#: ⇒ 判为孤儿，提前回池（不等 `CLAIM_TTL_SEC=300`）。为什么是 180 = `HEARTBEAT_SEC=60` × 3：
+#: pull 腿的心跳线程在**下载之前**就起（`remote/job_round.run_round`），活 worker 到 180s
+#: 至少心跳过 2 次，再留一拍余量。定值不做旋钮（与 `CLAIM_TTL_SEC` 同款）。
+#:
+#: 为什么住本模块而不是 `common/protocol.py`：这是**纯 hub 侧**的调度语义，两端共享的
+#: 协议面一个字不改（云机旧码照跑）。
+ORPHAN_GRACE_SEC = 180
+
+#: 租约状态（`_lease_state` 的四态，§52）：池过滤 / 认领闸 / 观测三面共用同一把尺子。
+#: `LEASE_NONE` = 无租约（池内、可领）；`LEASE_ALIVE` = 活租约（池外、闸内，可心跳/回传）；
+#: 后两态 = **死租约**（回池，回收入口仍是 `_collect_expired_locked`）。
+LEASE_NONE = ""
+LEASE_ALIVE = "alive"
+LEASE_EXPIRED = "expired"
+LEASE_ORPHAN = "orphan"
+#: 死租约两态（认领闸/观测面同源判定；回收时只有 `LEASE_ORPHAN` 多写一条账本事件）。
+LEASE_DEAD = (LEASE_EXPIRED, LEASE_ORPHAN)
 
 
 class LeaseMixin:
@@ -243,6 +266,49 @@ class LeaseMixin:
             return ClaimOutcome(True, token, status, why)
         return ClaimOutcome(False, "", why, why)
 
+    def _lease_state(self, job_id: str, now: float) -> str:
+        """租约状态的**唯一判据**（池过滤 / 认领闸 / 观测三面共用同一把尺子，§52）。
+
+        返回 `LEASE_NONE` / `LEASE_ALIVE` / `LEASE_EXPIRED` / `LEASE_ORPHAN` 四态之一。
+
+        孤儿 = 自 claim 起**一次成功心跳都没有**（`_last_heartbeat` 不晚于 claim 时刻）
+        且已静默超过 `ORPHAN_GRACE_SEC`。为什么只认心跳这一个信号：store 里唯一会写租约
+        活动的就是 `heartbeat()`（`/start` 只打 `computing_at`、`/ready` 只 `set_ready`、
+        `/result` 只做 token 校验，hub **看不到**下载进度）——把判据挂在别处，就得给四个
+        端点各加一个写点（新面、必漂）。
+
+        **push 腿豁免**：持有人身份带 `PUSH_WORKER_PREFIX` 的租约是 hub 进程内的派发器
+        代持的，它只在 `_await_result` 里续租（上传段零心跳）⇒ 判它孤儿会误杀正在收包的
+        推送（症状 = 同一份活两处跑 + 回传 403 丢结果）。它的治理交回 `--push-timeout-sec`。
+        留空 worker_id 的**手工认领不豁免**：它同样不可能有心跳。
+
+        纯读、无副作用、不加锁（与 `claimable_job_ids` 的既有读法一致）：调它的四处（池
+        过滤 / 认领闸 / `lease_worker` / `inflight`）本就允许「谁先看谁回收」。
+        """
+        exp = self._leases.get(job_id)
+        if exp is None:
+            return LEASE_NONE  # 无租约（含 backup 副本：它只写 _last_heartbeat，从不写 _leases）
+        if exp <= now:
+            return LEASE_EXPIRED
+        if self._lease_workers.get(job_id, "").startswith(PUSH_WORKER_PREFIX):
+            return LEASE_ALIVE  # push 派发器代持：豁免（见 docstring）
+        at = (self._claimed.get(job_id) or {}).get("at")
+        if at is None:
+            return LEASE_ALIVE  # 判据不全（不该发生）⇒ 保守：不当孤儿
+        at = float(at)
+        if at >= now - ORPHAN_GRACE_SEC:
+            return LEASE_ALIVE  # 宽限内
+        return LEASE_ALIVE if float(self._last_heartbeat.get(job_id, 0.0)) > at else LEASE_ORPHAN
+
+    def _lease_held(self, job_id: str, now: float) -> bool:
+        """`_lease_state` 的布尔视图：这份 job 现在被**活租约**挡着吗（池的判据）。
+
+        单独给一个布尔入口的理由是 **混入之间不许互相 import**：`store_ledger` 的池过滤
+        需要这个答案，却拿不到 `LEASE_ALIVE` 常量（它只 import `common.protocol`）——
+        比字面量更稳：判据还是 `_lease_state` 一处。
+        """
+        return self._lease_state(job_id, now) == LEASE_ALIVE
+
     def _claim_locked(
         self,
         job_id: str,
@@ -284,12 +350,13 @@ class LeaseMixin:
                 self._backup_authorized.add(job_id)
                 self._last_heartbeat[job_id] = now  # 仅供观测（谁在跑）
                 return True, "", "backup"
-            lease = self._leases.get(job_id)
-            recovering = lease is not None and lease <= now
+            state = self._lease_state(job_id, now)
+            recovering = state in LEASE_DEAD
             if recovering:
-                # 过期租约：回收并记下「谁跑死的」——下一个 worker 该顶上（而不是让它
-                # 自领自己跑死的活，那只是把同一个故障重演一遍）。
-                self._collect_expired_locked(job_id)
+                # 过期 ∨ 孤儿（§52）：回收并记下「谁跑死的」——下一个 worker 该顶上（而不是
+                # 让它自领自己跑死的活，那只是把同一个故障重演一遍）。判据与池过滤同源：
+                # 少了这一处，孤儿就是「池里看得见、claim 说 held」（比隐身更难查）。
+                self._collect_expired_locked(job_id, orphan=state == LEASE_ORPHAN)
                 if self._frozen.get(job_id):
                     return False, "", "frozen"  # ★ 刚达阈（或已冻结）
             if not recovering and job_id in self._claimed:
@@ -341,17 +408,25 @@ class LeaseMixin:
             self._drop_commitment_locked(job_id)
             return True
 
-    def _collect_expired_locked(self, job_id: str) -> str:
-        """回收过期租约（调用方**必须持锁**）：转 stale 记录 + **毒包计数 +1**。
+    def _collect_expired_locked(self, job_id: str, *, orphan: bool = False) -> str:
+        """回收死租约（调用方**必须持锁**）：转 stale 记录 + **毒包计数 +1**。
 
-        为什么计数住这里而不是 `claim()` 里贴一段：过期这件事有三个观测入口
-        （`claim` / `lease_worker` / `claimable_job_ids` 的资格判定），谁先看到谁就回收。
-        早先只在 `claim` 里贴的写法会被 `/admin/queue` 的轮询（`lease_worker`，控制台
-        每秒都在调）抢在前面——计数恒为 0，熔断永远不触发（这就是「判据要有唯一入口」
-        在本仓的第三次同一教训）。
+        `orphan=True`（§52）= 判据来自 `_lease_state` 的 `LEASE_ORPHAN`：回收动作与过期
+        **完全同路**（同一个 stale 记录 + 同一份毒包计数），只多写一条账本事件
+        `lease-orphan-reaped`——它是「队列诚实」这句话的凭据（控制台读账本尾窗口即见）。
+
+        为什么计数住这里而不是 `claim()` 里贴一段：**回收入口只有两处**（`_claim_locked`
+        的 `recovering` 分支 / 观测面的 `lease_worker`），谁先看到谁就回收；而判据
+        （`_lease_state`）是纯读、四个读面共用。早先只在 `claim` 里贴的写法会被
+        `/admin/queue` 的轮询（`lease_worker`，控制台每秒都在调）抢在前面——计数恒为 0，
+        熔断永远不触发（这就是「判据要有唯一入口」在本仓的第三次同一教训）。
 
         「零回传」只在**结果未落盘且失败标记不在**时计数——已结算的 job 不算毒包。
         """
+        now = self._now()
+        # 静默读数（**先读后清**：`_drop_commitment_locked` 会把 `_claimed` 一起撕掉）
+        at = (self._claimed.get(job_id) or {}).get("at")
+        silent_sec = round(now - float(at)) if at is not None else 0
         dead = self._lease_workers.get(job_id, "")
         self._leases.pop(job_id, None)
         self._lease_owners.pop(job_id, None)
@@ -373,6 +448,17 @@ class LeaseMixin:
                     "ts": self._now(),
                     "announced": False,
                 }
+        if orphan:
+            self._append_ledger(
+                {
+                    "event": "lease-orphan-reaped",
+                    "job_id": job_id,
+                    "worker": dead,
+                    "silent_sec": silent_sec,
+                    "reclaims": int(self._reclaims.get(job_id, 0)),
+                    "ts": now,
+                }
+            )
         return dead
 
     def reclaims(self, job_id: str) -> int:
@@ -421,23 +507,27 @@ class LeaseMixin:
             return self._stale_holders.get(job_id, "")
 
     def lease_worker(self, job_id: str) -> str:
-        """当前租约持有人身份（无 → 空串）；同时在租约已过期时走**同一个**回收入口
-        （`_collect_expired_locked`：stale 记录 + 毒包计数）——本函数是 `/admin/queue`
+        """当前租约持有人身份（无 → 空串）；同时在租约为死（过期 ∨ 孤儿）时走**同一个**
+        回收入口（`_collect_expired_locked`：stale 记录 + 毒包计数）——本函数是 `/admin/queue`
         每秒都在调的观测面，若绕开回收，计数会被它抢在前面吞掉。"""
         with self._lock:
-            lease = self._leases.get(job_id)
-            if lease is None:
+            if self._leases.get(job_id) is None:
                 return ""
-            if lease <= self._now():
-                self._collect_expired_locked(job_id)
+            state = self._lease_state(job_id, self._now())
+            if state in LEASE_DEAD:
+                self._collect_expired_locked(job_id, orphan=state == LEASE_ORPHAN)
                 return ""
             return self._lease_workers.get(job_id, "")
 
     def inflight(self) -> list[str]:
-        """持有**未过期**租约的 job_id（在飞）。观测面与「在派发课程数」共用一份口径。"""
+        """持有**活**租约的 job_id（在飞）。观测面与「在派发课程数」共用一份口径。
+
+        死租约（过期 ∨ 孤儿，§52）不算在飞——否则孤儿会以「在飞」的形状骗过总览：
+        池里已经回它了，UI 却还在说这台机器在跑。
+        """
         now = self._now()
         with self._lock:
-            return [jid for jid, exp in self._leases.items() if exp > now]
+            return [jid for jid in self._leases if self._lease_held(jid, now)]
 
     def heartbeat(self, job_id: str, lease_token: str) -> bool:
         """心跳续租（60s 节奏；H2：非原租者拒续）。

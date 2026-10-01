@@ -693,3 +693,16 @@ dashboard typecheck 绿 + **1225 pass / 0 fail**（另加新增的 4 例 spawn �
 
 决策 → `DECISIONS.md` §2026-09-30-goalnn-nn-training-biz-package；
 契约与模块表 → `nn-training/biz/__init__.py`（64 模块按域分组）· `nn-training/trainer/__init__.py`（编排 37）。
+
+## 2026-10-01 · 孤儿租约早收（claim 后零心跳超宽限即回池）
+
+事故形状：claim POST 到达即设租约、`lease_token` 随响应一起丢（客户端读超时）⇒「hub 有主、世上无人
+持有 token」，job 在 peek 里隐身满一个 `CLAIM_TTL_SEC=300`（bc-human-retrial `460b637b`，V100 烧 5 分钟）。
+新规则：**自 claim 起一次成功心跳都没有**且静默超 `ORPHAN_GRACE_SEC=180` ⇒ 判孤儿，走同一条
+`_collect_expired_locked` 回池 + 账本事件 `lease-orphan-reaped`；push 腿（`push:` 前缀持有人）豁免、
+离线腿不适用、手工认领适用。判据只认「心跳」这一个既有信号（`/start`/`/ready`/`/result` 都不碰租约，
+hub 也看不到下载进度）；判据唯一（`_lease_state` 四态 + `_lease_held` 布尔），池过滤 / 认领闸 /
+`lease_worker` / `inflight` 四处同源——只在池过滤加判据会做出「池里看得见、claim 说 held」。
+
+决策 → `DECISIONS.md` §2026-10-01-goalnn-lease-orphan-reap；
+全文 → `docs/nn/remote-transport.md` §52；计划 → `plan/lease-orphan-reap.plan.md`（2026-10-01 评审修订版）。

@@ -45,6 +45,11 @@ class LedgerMixin:
     #: 兄弟簇 `store_leases` 拥有的状态（本簇的 `claimable_job_ids` 要用它判「别处在做」）
     _leases: dict[str, float]
     _frozen: dict[str, dict]
+    #: 兄弟簇 `store_leases` 的**唯一**死活判据的布尔视图（过期 ∨ 孤儿，§52）——池过滤与
+    #: 认领闸必须共用同一把尺子：只在过滤里加判据会做出「池里看得见、claim 说 held」
+    #: 那种更难查的形状。取布尔而不是状态字符串，是因为本簇拿不到那边的常量
+    #: （混入之间不许 import）。
+    _lease_held: Any
     #: 归属缓存与它自己的锁（同住 `store_leases`）：`publish` 要随 manifest 一起失效它。
     #: 用独立锁的理由见那里（`job_role` 会被持 `_lock` 的临界区调到，共锁会自锁）。
     _roles: dict[str, str]
@@ -93,9 +98,10 @@ class LedgerMixin:
     def claimable_job_ids(self) -> list[str]:
         """job_pending 且未 job_completed 且 payload 在盘且**结果未落盘**的 job_id，按发布序。
 
-        P3b 独占加超时（supersede §343）：持有**未过期租约**的 job 不在池中——
-        worker 领到 PPO 任务后超时前不被别 worker 重领。过期租约自动回池
-        （死 worker 回收只管这一条，不管调大 TTL——it24 倒车禁令）。
+        P3b 独占加超时（supersede §343）：持有**活租约**的 job 不在池中——
+        worker 领到 PPO 任务后超时前不被别 worker 重领。判据是 `_lease_held`
+        （活租约 = 未过期 ∧ 非孤儿，§52）而不是「未过期」：孤儿（claim 后零心跳、
+        超过宽限）也回池（死 worker 回收只管这一条，不管调大 TTL——it24 倒车禁令）。
         已有结果未验收的 job 从池中剔除——首写锁定兜底（hub 重启丢租约时用）。
         """
         pending: dict[str, dict] = {}
@@ -128,7 +134,7 @@ class LedgerMixin:
                 continue
             eligible.append((jid, float(e.get("ts", 0.0) or 0.0)))
         eligible.sort(key=lambda kv: kv[1])  # 发布序（同 P3b 的池排序）
-        return [jid for jid, _ts in eligible if not (self._leases.get(jid, 0) > now)]
+        return [jid for jid, _ts in eligible if not self._lease_held(jid, now)]
 
     # ---- 发布（训练主循环调用：写磁盘 + 账本） ----
     def publish(self, job_id: str, manifest: dict, payload_zip: bytes) -> None:

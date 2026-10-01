@@ -6294,3 +6294,62 @@ rl-config 键——它每进程启动才读一次，而平台开关要**每轮�
 `dashboard/src/stack/gate-halt.ts` · `core/paths.ts` · `server/api/route.ts` · `web/view/gate-halt.ts` ·
 测试 `nn-training/tests/worker/test_gate_halt.py` · `dashboard/tests/gate-halt-platform.test.ts`。
 落账门禁：nn 子集绿（gate_halt 19 例 + 守卫族：意图 / 分层 / 护栏）· dashboard 1245/0 + typecheck · 三份 bundle 过。
+
+---
+
+## §2026-10-01-goalnn-lease-orphan-reap（2026-10-01，孤儿租约早收：claim 后**零心跳**超 `ORPHAN_GRACE_SEC=180` 即回池；hub-only，协议面零改动）
+
+**决策**：租约若**自 claim 起一次成功心跳都没有**且 `now - claimed_at > ORPHAN_GRACE_SEC` ⇒ 判为孤儿，
+走**同一条** `_collect_expired_locked` 回收路径提前回池（不等满 `CLAIM_TTL_SEC=300`），并记账本事件
+`lease-orphan-reaped {job_id, worker, silent_sec, reclaims, ts}`。实现只在 hub 侧：
+`hub/store_leases.py` 新增 `ORPHAN_GRACE_SEC` + 唯一判据 `_lease_state`（四态
+`LEASE_NONE/ALIVE/EXPIRED/ORPHAN`）+ `_lease_held`（布尔视图，供拿不到常量的兄弟混入）。
+
+**为什么**：认领是**单程**——hub 在 claim POST 到达时即设 owner+expiry+`last_heartbeat`，而
+`lease_token` 装在响应 body 里；客户端读超时（`remote/job_lifecycle.claim_job`，`timeout=30s`）⇒
+「hub 有主、世上无人持有 token」。还租与心跳都要 token ⇒ 这份 job 在 peek 里**隐身整整一个 TTL**
+（2026-09-28 bc-human-retrial job `460b637b`：16:09:39 → 16:14:12，V100 干烧 5 分钟）。
+立项理由不是省机时（触发苛刻、一年几次），是**队列诚实**：peek 看不见的 job 不该存在。
+
+**判据只能长在既有事实上**：store 里唯一会写租约活动的信号是 `heartbeat()`——`/start` 只打
+`computing_at`、`/ready` 只 `set_ready`、`/result` 只做 token 校验，hub **看不到**下载进度
+（blob GET 不记任何租约活动，POST 面就是那 10 个）。把「零 /start / 零下载进度」写进判据会逼实现者
+给四个端点各加一个写点；改成「零心跳」后**零新状态**（`_last_heartbeat` 不晚于 `_claimed[jid]["at"]`，
+正是控制台 `last_heartbeat_ago` 读的字段）。
+
+**三条边界**：① **push 腿豁免**——`PushDispatcher` 住 hub 进程内、只在 `_await_result` 里续租，
+**上传段零心跳是它的正常形状**（判它孤儿 = 同一份活两处跑 + 回传 403 丢结果）；判别据 = 协议层已有的
+`PUSH_WORKER_PREFIX` + `push_worker_id_of`。② **离线腿不适用**（`/offline/lease` 是小时级另一套，
+不经 `_JobStore._leases`）。③ **手工认领（无 worker_id）适用**——它同样不可能有心跳。
+
+**实现形状（★ 判据唯一，否则做出更坏的形状）**：池过滤 / `_claim_locked` 的 `recovering` /
+`lease_worker` / `inflight` **四处同源**调 `_lease_state`。只在 `claimable_job_ids` 的过滤里加判据
+是不够的——`_claim_locked` 会因 `job_id in self._claimed` 回 `held` ⇒ **池里看得见、谁都领不到**。
+回收点仍只有 `_collect_expired_locked`（stale + 毒包计数 + `_drop_commitment_locked`），
+**不许**用 `release()`：它不动 `_claimed`，那份 job 会被 highest 唯一性闸永久挡在门外。
+无后台 tick：沿用「谁先看谁回收」⇒ 事件时刻 = 第一次有人看的时刻，`silent_sec` 是被看见时的静默秒数。
+
+**代价（写下来才算诚实账）**：误杀 = 一次 reclaim（`_reclaims+1`，三度达 `FREEZE_AFTER_RECLAIMS=3`
+冻成毒包）+ 进 `_stale_holders`（避让链在 ≥2 活跃 worker 时拒它重领）+ 结果回传 403 被丢
+（`remote/result_upload._call` 吞成一行 ★ 日志）+ 同一份活两处跑。窄判据下只剩一种窗口：
+**已收到 token 却在心跳线程起来之前死掉/卡住**（`remote/job_round.run_round` 在下载之前就起心跳）。
+
+**被否决的备选**：① 认领下载两阶段（意向锁短 TTL + 就绪转正）——两端都动，云机旧码不认新语义就要
+全网升级一次，不值得为一年几次的事故付升级税；② blind-abandon（凭 worker_id 放宽 H2）——开放 hub 上
+等于允许别人 abandon 你的 job（可 DoS）；③ 过期回池后优先重领——治发现延迟，不治隐身本身；
+④ 「静默 180s（从最后一次活动起算）」而非「自 claim 起零心跳」——会把「心跳过两次后死掉」的租约
+提前判死（误杀率上升），而事故形状（零心跳）不需要它；⑤ 取 `CLAIM_TTL_SEC` 的一半当阈值——与
+`HEARTBEAT_SEC` 脱钩且对「心跳过但慢」的活 worker 同样误杀。
+
+**为什么值得记**（AGENTS §6.3）：① 有被否决备选（上面五条）；② **未来会重犯**——「给观测面加一条
+写点就能让判据更准」是同族诱惑（本次拒绝了给 `/start`/`/ready`/`/result` 加写点），判据是
+「这个信号在**今天的 store 里**有没有」；③ 不能就近表达——判据唯一性、push 豁免的理由、
+误杀的具体代价跨 `store_leases`/`store_ledger`/`push_dispatch` 三处。
+
+**指针**：全文 `docs/nn/remote-transport.md` §52 · 计划 `plan/lease-orphan-reap.plan.md`（2026-10-01
+评审修订版，§7 记 O1–O6）· 实现 `nn-training/hub/store_leases.py`（`ORPHAN_GRACE_SEC` / `_lease_state` /
+`_lease_held` / `_collect_expired_locked(orphan=)`）· `hub/store_ledger.py::claimable_job_ids` ·
+回归 `nn-training/tests/hub/test_hub_leases.py`（4 例新用例 + 既有 TTL 边界用例补一次心跳）·
+`tests/hub/test_hub_job_store_split.py`（方法计数 49 → 51）。
+落账门禁：`tests/hub` 294/0 + push 腿族（`tests/remote/test_hub_push_dispatch.py` 等）绿 ·
+ruff + mypy 全量绿。
