@@ -5693,7 +5693,7 @@ oracle phi 逐位不变、旧 54 列 1944 行逐位不变），**零训练腿**�
 **被否决**：① 把新列直接入公式（累计 tick 计数器 ⇒ Φ 逐行差分 = 每 tick 罚款且 Φ 无界，须封顶或改深度型势）·
 ② 只记 raw 不记豁免（人类被算高）· ③ 用 12px 旧带或 naive 同行列（§71 ②b 已实测不可用）·
 ④ 重复建「本来就能由 v8/v9 列推」的列（命中率/承伤率/危险 lane/低血/拾取/换格率）。
-—— 全文（规格 15 列 / lockstep / 对账 / 偏差 / 门禁读数）→ `docs/nn/engineering.md` §43 ·
+—— 全文（规格 15 列 / lockstep / 对账 / 偏差 / 门禁读数）→ `docs/nn/engineering.md` §57 ·
 触发证据 → `docs/nn/experiments.md` §71 · 落地记录 → 同文件 §72 · 实施记录 → `plan/metrics-v10-gap-columns.plan.md` §5
 
 ## §2026-09-30-goalnn-damage-form-retired（2026-09-30，伤害「时间形态」E0 判红 ⇒ 家族退场；plan/damage-time-form.plan.md）
@@ -5764,7 +5764,7 @@ oracle phi 逐位不变、旧 54 列 1944 行逐位不变），**零训练腿**�
   双端对账（训练侧恒等式 + 评估侧 God 同局事件流独立重算）与回写 oracle（Python 合成 4 行）落测；
   **E2 前置 Pearson（b0 探针 160 局）= 0.533 < 0.8 ⇒ 不替换 b0 包 `wDmg` 项**；hurtW/hurtN ≈ 28.97 / CV 0.474
   ⇒ E2 按「命中数重定价」剂量纪律记档，不得宣称弹道机制。
-- **落点**：`plan/aim-dodge-levers.plan.md` §11（实施记录）· `docs/nn/engineering.md` §44 ·
+- **落点**：`plan/aim-dodge-levers.plan.md` §11（实施记录）· `docs/nn/engineering.md` §58 ·
   `docs/nn/threat-lane-reward.md` §12 · `docs/nn.progress.md` §3.5 索引 · `nn-training/rl/eval_ingest.py`
   （m1 通道**显式不接**本批列）· `tools/sim/aim-shot-registry.ts`（双端共用 settle-once）。
 - **欠账**：§5.4 rate 表待 b0 ≥200 局实测；c04 复测门（encl/corner 信号）；E1 形式（计数 vs 比值）列落地前可改；

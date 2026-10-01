@@ -14,12 +14,14 @@
 > 断开 `rl`↔`remote` 包循环 / 神模块拆分 S4）改号为 §26–§28，全文与 `DECISIONS.md`、
 > `docs/nn.progress.md`、`plan/nn-training-refactor.md` 里的引用同步跟改。
 >
-> **2026-10-02 合并说明**：本地 aim-dodge 节原编 §44，与 origin 侧 §44–§56 撞号 ⇒
-> 本地节改号 **§57**（先例同 2026-09-25：origin 保号、本地改号），引用已跟改。
+> **2026-10-02 合并说明**：origin 侧新增的 §43–§56 按先例**保号**；本地同号的两节（metrics v10
+> 原编 §43 / aim-dodge 原编 §44）改号为 **§57**（v10）/**§58**（aim-dodge），全文与 `DECISIONS.md`、
+> `docs/nn.progress.md`、`plan/`、`docs/nn/threat-lane-reward.md` 里的引用同步跟改（首轮合并漏带
+> v10 节，同日补回）。
 
 ---
 
-## §57 aim-dodge 杠杆 8 列落地（idx66–73；dim 69→74）+ 事件扩展 + 回写机制（2026-10-01，plan/aim-dodge-levers.plan.md）
+## §58 aim-dodge 杠杆 8 列落地（idx66–73；dim 69→74）+ 事件扩展 + 回写机制（2026-10-01，plan/aim-dodge-levers.plan.md）
 
 ### 一句话
 
@@ -73,6 +75,83 @@ v10 批次内**整理 + 追加**：移除未签入的 `enclExempt1/2/3pTicks`（
 - 欠账：§5.4 b0 rate 表待 ≥200 局实测；c04 复测门（encl/corner 信号幅值）；E1 形式
   （计数 vs 比值）列落地前可改；`eval_ingest.m1_game_row` 通道**显式不接**本批列
   （0 是合法读数 ⇒ 防静默错读）；本批新增列上的定价腿（E1–E4）全部留给控制台开课（人）。
+
+---
+
+## §57 metrics v10：差距四族 15 列（idx54–68）+ lockstep 八处**又一次**全链对账（2026-09-30，plan/metrics-v10-gap-columns.plan.md）
+
+### 一句话
+
+把 §71 人类 vs NN 面板里「显著但 v9 无列可测」的四族（输入级 / 距离 / 伤害时间形态 /
+被包围率）补成 **15 列观测**：`METRICS_DIM 54→69`、`METRICS_VERSION 9→10`；**公式一个字不动**
+（reward golden 逐位不变即证），**零训练腿**（`bun run check` 绿即交付）。
+
+### 为什么又是「加列」而不是「改公式」
+
+§71 判出四族全程分不开（停 326→7.9/千 alive tick、≤4 格近敌 153→449、承伤 27.6→236、
+低血 1.4→37.9…… 4 窗同号），但**四族在 v9 里没有列** ⇒ 想定价就得先有列。
+这是 v5/v6/v8/v9 的同一套路（观测列先行、价后议），不是新范式。
+
+### 口径冻结（改动 = 改实验）
+
+- **被包围**（`alignedEnemyCount`）：与玩家中心垂直偏移 `< THREAT_ALIGN_BAND_PX`（19px =
+  坦克半宽 16 + 子弹半高 3）∧ 沿**源自己的轴**无阻弹地形（`laneOccluded`，与
+  `threatLaneSources` **同一实现**）∧ `alive ∧ enemy ∧ spawnTimer <= 0` 的**敌车**数。
+  **不带朝向、不带半径上限**。⚠ 19px 不是调参：§71 ②b 的三档敏感性实测——19px 判遮挡
+  513/531（cliff −0.173 n.s.）、19px 不判遮挡 514/531、**旧 12px 268/251（腰斩且翻符号）**、
+  naive 中心格同行列 200/200（cliff 0.05，测不出）。改回 12px 或改 naive = 改口径，须另立决策。
+- **豁免（`enclExempt*`）**：`threatLaneExempt`（`freezeTimer > 0 ∨ shieldTimer > 0`）作为
+  **加法列**另记，raw 永不重定义；交集在共位处一次算好（逐行 flag 相乘会在翻转拍打幻影尖峰，
+  同 v9 §1.3 机制注）。理由：人类侧被包围 tick 里冰/盾占 **26%** vs NN **13%**（中位 0.270 vs 0.019）
+  ⇒ 不成对建列，任何包围定价都会把人类算高。
+- **输入级**：`stopTicks`/`fireHeldTicks` 读的是**动作头**（训练侧 `a_move`/`a_fire`，评估侧
+  `getMoveDirection() === null` / `isFiring()`），**不读 `bullet_fired`**（实弹会被冷却/弹量上限门掉，
+  与 §71 面板的「开火输出」口径必须同义）。`idleTicks` = `player.moving === false`（想动被挡也计）。
+- **距离**：`enemyDist` = 玩家中心到最近**已激活**存活敌车的欧氏 px，缺者哨兵 `-1`
+  （与 `pickupDist` 同族；公式侧 `where` 归零）。「已激活」是必须的：否则出生保护期的车会被算成近敌。
+- **伤害时间形态**：`damageBursts`（相邻扣血 ≤ `DMG_BURST_TICKS`(120) 的次数）·
+  `maxDamage120`（任意起点的 120t 滑窗内最大累积承伤）· `damageWhileLow`（扣血那刻
+  `hpRatio < 0.4` 的份额；分母 = `playerDamageTaken`）。三者都由 `player_damage` 事件序列驱动
+  （本就不含致死一击）。
+
+### lockstep 八处（§24 扩的清单，本次一条不漏）
+
+① `tools/sim/export-rl-rollout.ts`（`METRICS_DIM`/`METRICS_VERSION`/`Telemetry` +15 字段/
+`buildMetricsRow` 尾 15 列/逐 tick 累加块/事件登记）· ② `export-eval-game.ts`（Phase 2 探针链，
+`ai.getMoveDirection()`/`isFiring()` 侧）· ③ `eval-course-ckpt(.ts/-worker.ts)` 逐局行透传 +
+汇总新列 · ④ `reward_library.py`（`METRICS` + 版本 + `_self_check == 69`）·
+⑤ `reward_validation.DEFAULT_RANGES` 15 项（`test_all_metrics_have_envelope_range` 锁）·
+⑥ golden 重生成两件（reward / v7 oracle）· ⑦ 测试（行宽/跨语言列名/独立重实现/确定性与
+布局锁登记）· ⑧ **Python 两处 `eval_log` 行构造点**（`eval_rows.eval_row` + `batch_runner`）
+经**同一个** `eval_v10_fields()` helper 展开。
+
+> ⚠ 本次实测又踩到**同键双通道**：`idleTicks` 在 `eval_log` 行里早有通道（`EVAL_NEWERA_KEYS` 族，
+> 与 `moveHist`/`decisions`/`stopRuns` 同行）⇒ `EVAL_V10_KEYS` **刻意只放 14 键**（不含它）。
+> 两表同含一键 = 行构造点重复赋值。已加注释 + 测试 `test_v10_helper_omits_idle_ticks` 钉住；
+> TS 侧 `export-eval-game` 同样处理。**这是 §24「行里有没有这个键」的第二次现身**：行宽对账全绿也
+> 抓不到，只能靠 helper 单一出口。
+
+### 验证（实测读数）
+
+- `reward_golden.json` 64 case **reward 逐位 0 差异**；旧 54 列 1944 行**逐位 0 差异**；
+  `v7_phi_ts_oracle.json` 256 行 `max|Δ| = 0`；唯一变化 = 行宽 `54→69` + `metrics_version 9→10`。
+- `freeze:check` **绿**（`c2c25cdb…` 未变 ⇒ 事件/指标加字段不进 `tickHash`/det 签名）。
+- 根 `bun run check` **2267 pass / 3 skip / 0 fail**；nn py 门禁（ruff+mypy+pytest）**3407 passed / 1 skipped**（✓ 53s log clean）；`build` ✓。
+- 新测试：`tests/sim/metrics-v10-exposure.test.ts`（15 例：19px 带宽真值表 16px 在带内 / 32px 出带 /
+  对角 / 墙后反例 / 水不阻弹 / 未激活 / 友军 / 玩家阵亡 · 哨兵与取最近者 · 连击边界 ≤120 含边界 /
+  121 不连击 / 滑窗起点在中间 / 单调不减 / 零分配）、`tests/export-rl-rollout-metrics.test.ts` +4 例、
+  `nn-training/tests/test_eval_row_v10.py`（5 例）。
+
+### 后果与欠账
+
+- 旧 v9 与更早 shard **不兼容**（加载期按行宽/版本响亮报错）；`engine_epoch` 会因本刀改
+  `src/nn/**` + `tools/sim/**` 而变（节点全判 stale 重启）—— 预期内的纪元机制，别读成「det 签名没动
+  ⇒ 什么都没动」。
+- **`corpus_fp` 不含 metrics 列**（`config.py` 的 payload 只含 obs schema/课程/reward）⇒ 同血缘、
+  D14 不拒收。本刀零训练腿；将来拿新列开腿必须新 `--out`/`--traj`（§15.5），
+  且「伤害时间形态」立项须先说清与已死三笔（`wDmg`/h5a/h5b）的形态差异（§70 排序①）。
+- **欠账（显式）**：§3 预注册的 held-head **行为级**测试未起 sim 集成（累加块在 `runOne` tick 循环内、
+  无独立入口），暂以源码哨兵 + 行级用例覆盖；出现真实事故再补夹具。
 
 ---
 

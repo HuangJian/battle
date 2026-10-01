@@ -125,7 +125,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
   `docs/nn/experiments.md` §70 · 决策 `DECISIONS.md` §2026-09-30-goalnn-lever-scan
 - **metrics v10 已落地**（差距四族 15 列，`idx54–68`；只加观测、零公式、零训练腿）——「伤害时间形态」
   定价所需的列已备好（`damageBursts`/`maxDamage120`/`damageWhileLow`）—— `docs/nn/experiments.md` §72 ·
-  工程侧 `docs/nn/engineering.md` §43 · 决策 `DECISIONS.md` §2026-09-30-goalnn-metrics-v10
+  工程侧 `docs/nn/engineering.md` §57 · 决策 `DECISIONS.md` §2026-09-30-goalnn-metrics-v10
 - **伤害「时间形态」立项后 E0 判红 ⇒ 家族退场**（不再有「唯一新价候选」）：三形状全不过预注册 K 表；
   机制 = 低血段承伤天花板是剩余 hp（105）+ 致死一击不在 `player_damage` 口径 ⇒ 该列量的是「**跨线**」
   而非「跨线后继续挨打」（中位 0 决策步、π_new 0.10）⇒ 语义退化为总量税的尾部加权。
@@ -136,11 +136,11 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
   `docs/nn/experiments.md` §69 ⑧
 - **aim-dodge 杠杆 8 列已落地**（`idx66–73`，dim 74；v10 批次内移除 `enclExempt*` 三列；事件扩展 +
   settle-once registry + 回写机制；零训练腿）⇒ E1–E4 仍待在控制台开课 —— 工程侧
-  `docs/nn/engineering.md` §44 · 自标定接口 `docs/nn/threat-lane-reward.md` §12 ·
+  `docs/nn/engineering.md` §58 · 自标定接口 `docs/nn/threat-lane-reward.md` §12 ·
   决策 `DECISIONS.md` §2026-10-01-goalnn-aim-dodge-metrics · 规格 `plan/aim-dodge-levers.plan.md` §11
 - **E2 前置门已跑**（离线 Pearson，b0 探针 160 局）：r(hurtWeight, playerDamageTaken) = 0.533 < 0.8
   ⇒ 不替换 `wDmg`；hurtW/hurtN ≈ 常数（28.97 / CV 0.474）⇒ E2 记档按剂量而非机制 ——
-  `docs/nn/engineering.md` §44 验证节
+  `docs/nn/engineering.md` §58 验证节
 
 ### 3.6 架构重构（`nn-training` 模块重组）
 

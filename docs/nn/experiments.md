@@ -102,7 +102,7 @@ per-seed 的 damage / ticks / outcome **200/200 相等**。
   「伤害时间形态」——立项时必须先与已死三笔（`wDmg` 常驻 / h5a 开局窗 / h5b 零伤清关奖）说清
   **形态差异**；新列 `damageBursts`/`maxDamage120`/`damageWhileLow` 已为其备好（临近致死/连击/低血期）。
 - 全文（规格 15 列 / lockstep 七处＋⑧ / 对账 / 偏差 / 门禁读数）→ `plan/metrics-v10-gap-columns.plan.md`；
-  规则 → `DECISIONS.md` §2026-09-30-goalnn-metrics-v10；工程侧清单 → `docs/nn/engineering.md` §43。
+  规则 → `DECISIONS.md` §2026-09-30-goalnn-metrics-v10；工程侧清单 → `docs/nn/engineering.md` §57。
 
 ---
 
