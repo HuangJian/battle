@@ -1,0 +1,103 @@
+// 课程 h4-lane-b0 —— **Wave 2 · 对照臂 B0：v4 奖励逐字（无 lane 项）**
+//
+// 状态：**草稿（2026-09-30 冻结；未开课）**。开课 = **人在控制台点**（agent 不开训）。
+//   立项 → `DECISIONS.md` §2026-09-30-goalnn-wave2-dose-ladder；判据/阈值/止损的完整冻结文本
+//   在 **h4-lane-b1.jsonc 头注**（b0/b1/b2 三课逐字同）。本文件只写「这一臂为什么必须在」。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 对照臂的职责（Wave 1 的教训：漂移只能靠同时训练的零臂消）
+// ══════════════════════════════════════════════════════════════════════════
+// · 主终点是**配对差**（B 臂 − 本臂，同 seed 同 stage）⇒ 本臂必须与 b1/b2 **同时训练、同起点、
+//   同种子流**；不能用历史臂或冻结 bc 当对照（唯一不漂的锚会训练与税混在一起）。
+// · 本臂**自己的漂移是必报诊断量**，不是判据：Wave 1 实测 a0 尾巴 3 点自漂 **+15.0%**（与绿线 16%
+//   同量级）——这正是「未配对比较答不了问题」的量化版本；配对差把漂移的**均值**消掉（§66 ⑤/§67）。
+// · 本臂的终点读数同时是「训练本身把 rA2 推高多少」的量尺（Wave 2 结算必填）。
+//
+// ── 判据（与 b1/b2 逐字同；完整冻结文本见 b1 头注）────────────────────────────
+// ① 主终点 rA2 = E[onLaneTicks/(ticks+1)]；配对差 = 处理臂 − 本臂，同 seed 同 stage。
+// ② 判据段：训练后对 **it30/it35/it40** 冻结权重各跑 **300 局**，seed0 = **862001**
+//    （池外段；与日常段 860001–860200、与 Wave 1 补评估段 861011–861310 均不相交）。
+//    跑法 = `bun tools/sim/eval-course-ckpt.ts --course nn-training/levels/ladder-c04.jsonc
+//    --weights b0=… --weights b1=… --games 300 --seed0 862001 --no-dist`（§67 已验管线）。
+// ③ 判据量 = 尾巴 3 点配对 Δrel 均值；前置检查 Q ≤ χ²(0.95, df=2) = 5.99。
+// ④ 绿线 = Δrel ≤ −16% ∧ 单侧 p₁ < 0.05；「不到绿线已证实」= CI 下沿 > −16%。
+//
+// ── 阈值表（= 工具 §11 @ 尾巴 3 点 × 300 局/点；本臂是配对基准，不单独判）────────
+//   主终点 −16% rel（12.7% 分辨率）· A1 rA1 同（11.6%）· 静止∧在线 不升过 +0.0079 abs ·
+//   holdFire −30% rel（13.8%）· pass −3pp abs（不可判，降诊断）· 零伤局 −15.4% ·
+//   dmg −10.0% · kills −3.0% · shots −3.9% · cellsVisited −10%（3.8%）· stuckTicks +10%（14.3%）·
+//   ticks 信息性 · timeout 只报频次。
+//
+// ── 止损 ───────────────────────────────────────────────────────────────────
+//   `kickstart_burn` **paired** 模式；本臂是对端，不因自己的绝对值被 ABORT（Wave 1 的假阳性根因）。
+{
+  "version": 5,
+  "name": "h4-lane-b0",
+  "mode": "per-tick",
+  // 环境：ladder-c04（单关 4 敌、max_ticks 3300、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c04",
+
+  // ── 奖励：v4 包**逐字**（无 lane 项）= h4-lane-a0 同一份配方 ──────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wWin": 2.0,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.2
+    },
+    "terminal": {
+      "lives_exhausted": -5.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：h4 冠军 warm start（三臂同一起点，平行臂）────────────────────────
+  "bc": "nn-training/weights/h4-stop-best/h4-stop.it60.best.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 预算：诊断腿 40 轮（判据点 = it30/35/40 尾巴三点）──────────────────────
+  "iters": 40,
+  "max_hours": 4,
+  "workers": 8,
+
+  // ── 位移包：x4-rebirth 原样（b0/b1/b2 逐字同）──────────────────────────────
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
+    { "kl_coef": 0.01, "lr": 0.00025 }
+  ],
+
+  // ── 采集：mb 对齐（48 × mb(512)）；b0/b1/b2 逐字相同 ───────────────────────
+  "target_transitions": 24576,
+  "est_samples_per_game": 180,
+  "seed_rotate": 600,
+  // 三臂必须同值（同种子流是配对前提）。Wave 2 新开。
+  "paired_rotate_seed": 20261001,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/h4-lane-b0/weights.json",
+  "traj": "tmp/h4-lane-b0",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/h4-lane-b0",
+  "backup_prefix": "h4-lane-b0",
+
+  // ── 评估：日常段 200 局/点（池只有 860001–860200；判据段另跑，见头注 ②）────
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 200,
+  "eval_every": 5
+}

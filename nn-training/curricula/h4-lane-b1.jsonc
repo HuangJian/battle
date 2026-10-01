@@ -1,0 +1,138 @@
+// 课程 h4-lane-b1 —— **Wave 2 · 臂 B1：c04 穿越税「只罚移动」，f = 7.5% killEV ⇒ wLane 265（2.08×）**
+//
+// 状态：**草稿（2026-09-30 冻结；未开课）**。开课 = **人在控制台点**（agent 不开训）。
+//   立项/剂量依据 → `DECISIONS.md` §2026-09-30-goalnn-wave2-dose-ladder；
+//   Wave 1 收官 + 补评估 → `docs/nn/experiments.md` §65 / §66 ⑤ / §67；
+//   工具（功效、判据表、合并口径）→ `nn-training/tools/paired_power.py` §9/§10/§11。
+// 与 h4-lane-a1 的唯一差异：① 剂量 127 → **265**；② 判据段从「日常段顺带」改成**训练后
+//   对 it30/35/40 冻结权重、池外 seed0 = 862001 各 300 局**（Wave 1 的预注册偏离 ① 不再重犯）；
+//   ③ 守卫表每条线给了数字（§11）。任务侧（关卡/命数/敌数/终局）一个字不动。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 判据（**训练前冻结，中途不得改**；b0/b1/b2 三课逐字同）
+// ══════════════════════════════════════════════════════════════════════════
+// ① 主终点 rA2 = E[onLaneTicks/(ticks+1)]；配对差 = B 臂 − b0（**零奖励对照臂**），同 seed 同 stage。
+// ② **判据段与日常段解耦**：训练结束后对 **it30/it35/it40** 三个冻结 checkpoint 各跑 **300 局**，
+//    seed0 = **862001**（862001–862300；池外段，与日常段 860001–860200、与 Wave 1 补评估段
+//    861011–861310 **均不相交**，§15.1）。跑法（§67 已验管线，逐位可复现）：
+//      bun tools/sim/eval-course-ckpt.ts --course nn-training/levels/ladder-c04.jsonc \
+//        --weights b0=nn-training/weights/h4-lane-b0/h4-lane-b0.it30.<ts>.json \
+//        --weights b1=nn-training/weights/h4-lane-b1/h4-lane-b1.it30.<ts>.json \
+//        --games 300 --seed0 862001 --no-dist --out tmp/h4-lane-b1/judge_it30.jsonl
+//    （**权威账本** = `<out>.run/eval_log.jsonl`，74 列含 v9 lane 列 —— 本批
+//     aim-dodge 批次把行宽从 69 改到 74（只加观测列，v9 lane 列不动）；工具层 28 列那份
+//     没有 onLane* 列，不得拿来算 rA2。）
+// ③ 判据量 = 尾巴 3 点配对 Δrel 的**均值**。**前置检查** = 跨点同质性 Q ≤ χ²(0.95, df=2) = 5.99
+//    （Q 超限 ⇒ 判「尾部不稳」、只逐点报告，**不得**改用单点过关 —— 防挑点）。
+// ④ 绿线 = Δrel ≤ **−16%** ∧ 单侧 p₁ < 0.05；「**不到绿线已证实**」= Δrel 的 95% CI 下沿 > −16%。
+// ⑤ 每局方差极大（Wave 1 实测单点 SE ≈ 9.4%/200 局）⇒ **加局比加训练便宜**：判据段不足时可
+//    就地扩 seed 块（同 checkpoint、同跑法，pooled 口径见工具 §10），扩块必须在看结果**之前**
+//    预注册（§67 就是这么做的）。
+//
+// ── 阈值表（= 工具 §11 @ 尾巴 3 点 × 300 局/点；每条线**自己的**分辨力）────────────
+//   主终点 rA2      绿线 −16% rel（本设计能分辨 12.7% rel）        ← 主判据
+//   A1 终点 rA1     同 −16% rel（指示）                            ← 11.6% rel
+//   洞守卫 静止∧在线  **不升过 +0.0079 abs**（Wave 1 写「不升」= margin 0 ⇒ 需无限局）
+//   holdFire 守卫   不塌 −30% rel（13.8% rel 分辨率）
+//   pass          非劣 −3pp abs（本设计只能分辨 5.7% rel / 4.6pp ⇒ 结构性不可判，降级为诊断项）
+//   零伤局          **非劣 −15.4% rel**（Wave 1 没给数字）
+//   dmg/局         **非劣 −10.0% rel**（Wave 1 没给数字）
+//   kills/局       **非劣 −3.0% rel**（Wave 1 没给数字）
+//   shots/局       **非劣 −3.9% rel**（Wave 1 没给数字）
+//   cellsVisited   不塌 −10% rel（3.8% rel 分辨率）
+//   stuckTicks     +10%（口径模糊；14.3% rel 分辨率）
+//   ticks/局        信息性，不设阈值
+//   timeout        只报频次（全库 1/3400 ⇒ sd = 0，功效不适用）
+//
+// ── 止损（与 Wave 1 同源，参照物 = 同网格配对差）──────────────────────────────
+//   `kickstart_burn` 走 **paired** 模式（§2026-09-30-goalnn-kickstart-burn-paired）：
+//   Δ = 本臂 − **对端同 it** 读数，尾部连续 3 点 Δ < −5.0pp ⇒ ABORT（旧 baseline 模式已证假阳性）。
+//
+// ── 剂量锚（只换 f，其余锚法一个字不动）──────────────────────────────────────
+//   rate_A1 = 0.003142（h4-stop.it60 @ ladder-c04，860001 段 200 局实测）
+//   killEV = wKill × E[kills] = 3.0 × 3.695 = 11.085
+//   wLane = f·killEV/rate_A1 = 0.075 × 11.085 / 0.003142 = **265**（取整）
+//   税 EV = 0.075 × 11.085 = **0.83/局**（wDmg 罚 2.68/局 的 31%；Wave 1 的 127 档为 0.40/局）
+//   依据：f = 3.6% 档实测尾巴 −8.52%（95% CI [−14.84%, −2.21%]）⇒ 到绿线需 ≈1.88× ⇒ 本档 2.08×。
+//   ⚠ 一阶外推；若剂量-效应次线性，7.5% 可能到不了绿线 ⇒ 同批开 **b2（f = 15%，wLane 529）** 兜底。
+//   禁教师反推（AGENTS §0.2）；括号外档位 = 新决策（已记，见上）。
+//   ⚠ preflight 会报 1 条 **warn**（不是 error）：`validate_reward` 的数值包络在域角
+//   `ticks=0, onLaneMoveTicks=36000` 处把 `wLane*onLaneMoveTicks/(ticks+1)` 算到 9.5e6 > 1e6。
+//   **h4-lane-a1（已跑完的 Wave 1 腿）同款、同因**（127 档 = 4.6e6）⇒ 该域角在实战不可达
+//   （onLaneMoveTicks ≤ ticks），warn 与剂量成正比不是红旗；b2（529）同理为 1.9e7。
+{
+  "version": 5,
+  "name": "h4-lane-b1",
+  "mode": "per-tick",
+  // 环境：ladder-c04（单关 4 敌、max_ticks 3300、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c04",
+
+  // ── 奖励：v4 包逐字 ＋ 穿越税（唯一变量 = wLane）──────────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited - wLane*onLaneMoveTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wWin": 2.0,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.2,
+      "wLane": 265.0
+    },
+    "terminal": {
+      "lives_exhausted": -5.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：h4 冠军 warm start（三臂同一起点，平行臂）────────────────────────
+  "bc": "nn-training/weights/h4-stop-best/h4-stop.it60.best.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 预算：诊断腿 40 轮（判据点在 it30/35/40 尾巴三点；3 臂并行）────────────
+  "iters": 40,
+  "max_hours": 4,
+  "workers": 8,
+
+  // ── 位移包：x4-rebirth 原样（b0/b1/b2 逐字同）──────────────────────────────
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
+    { "kl_coef": 0.01, "lr": 0.00025 }
+  ],
+
+  // ── 采集：mb 对齐（48 × mb(512)）；b0/b1/b2 逐字相同 ───────────────────────
+  "target_transitions": 24576,
+  "est_samples_per_game": 180,
+  "seed_rotate": 600,
+  // 三臂必须同值（同种子流是配对前提）。Wave 2 新开，与历史 1789876303 /
+  // 1790491796 / 20260921 / 20260930 均不同（§15.1 语料轮换）。
+  "paired_rotate_seed": 20261001,
+
+  // 决策门：均匀 K=10（事件门在 c04 上结构性无效）。
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/h4-lane-b1/weights.json",
+  "traj": "tmp/h4-lane-b1",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/h4-lane-b1",
+  "backup_prefix": "h4-lane-b1",
+
+  // ── 评估：日常段 = 监控 + 配对止损语料（判据段另跑，见头注 ②）──────────────
+  // 日常段仍 200 局/点：`EVAL_SEEDS` 池只有 860001–860200，写 300 会被前缀切片**静默**
+  // 截回 200（§32 同型坑）⇒ 要更多局就按头注 ② 的判据段跑，不动池子。
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 200,
+  "eval_every": 5
+}

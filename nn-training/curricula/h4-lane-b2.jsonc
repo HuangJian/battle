@@ -1,0 +1,112 @@
+// 课程 h4-lane-b2 —— **Wave 2 · 臂 B2：c04 穿越税「只罚移动」，f = 15% killEV ⇒ wLane 529（4.17×）**
+//
+// 状态：**草稿（2026-09-30 冻结；未开课）**。开课 = **人在控制台点**（agent 不开训）。
+//   剂量依据 → `DECISIONS.md` §2026-09-30-goalnn-wave2-dose-ladder；判据/阈值/止损的完整冻结文本
+//   在 **h4-lane-b1.jsonc 头注**（b0/b1/b2 三课逐字同），本文件只重复剂量与差异。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 这一臂为什么存在（**括号外档位**，已记决策）
+// ══════════════════════════════════════════════════════════════════════════
+// f = 3.6% 档实测尾巴 Δrel = −8.52%（95% CI [−14.84%, −2.21%]）⇒ 到绿线 16% 需 ≈1.88×。
+// b1（7.5% = 2.08×）是一阶外推下的答案；**一阶外推不可信**（惩罚项会被策略适应吸收）：
+//    若效应按 √剂量 走 ⇒ 7.5% 只到 ~12%（仍不够绿），到绿线需 ≈3.5× ⇒ f ≈ 12.7%。
+// 故 {b1 7.5%, b2 15%} 同时对冲「线性」（7.5% 就该 ~18% 过线）与「次线性」（15% 到 ~17%）两种响应。
+// **预登记**：15% 档若把守卫打崩（holdFire / cellsVisited / 零伤局）而主终点没改善 ⇒ 那是
+//   **剂量上限**的结论、属信息不属失败，不得据此回改判据。
+//
+// ── 判据（与 b0/b1 逐字同；完整冻结文本见 b1 头注）────────────────────────────
+// ① 主终点 rA2，配对差 = 本臂 − b0（零奖励对照），同 seed 同 stage。
+// ② 判据段：训练后对 **it30/it35/it40** 冻结权重各跑 **300 局**，seed0 = **862001**
+//    （池外段；与日常段 860001–860200、与 Wave 1 补评估段 861011–861310 均不相交）；
+//    跑法 = `bun tools/sim/eval-course-ckpt.ts --course nn-training/levels/ladder-c04.jsonc
+//    --weights b0=… --weights b2=… --games 300 --seed0 862001 --no-dist`（§67 已验管线）。
+// ③ 判据量 = 尾巴 3 点配对 Δrel 均值；前置检查 Q ≤ χ²(0.95, df=2) = 5.99（超限 ⇒ 判尾不稳）。
+// ④ 绿线 = Δrel ≤ −16% ∧ 单侧 p₁ < 0.05；「不到绿线已证实」= CI 下沿 > −16%。
+//
+// ── 阈值表（= 工具 §11 @ 尾巴 3 点 × 300 局/点）────────────────────────────────
+//   主终点 rA2 −16% rel（12.7% rel 分辨率）· A1 rA1 同（11.6%）·
+//   静止∧在线 **不升过 +0.0079 abs** · holdFire −30% rel（13.8%）· pass −3pp abs（**不可判**，降诊断）·
+//   零伤局 **−15.4% rel** · dmg **−10.0%** · kills **−3.0%** · shots **−3.9%** ·
+//   cellsVisited −10%（3.8%）· stuckTicks +10%（14.3%）· ticks 信息性 · timeout 只报频次。
+//
+// ── 止损 ───────────────────────────────────────────────────────────────────
+//   `kickstart_burn` **paired** 模式（Δ = 本臂 − 对端同 it，尾部连续 3 点 Δ < −5.0pp ⇒ ABORT）。
+//
+// ── 剂量锚 ─────────────────────────────────────────────────────────────────
+//   wLane = f·killEV/rate_A1 = 0.15 × 11.085 / 0.003142 = **529**（取整；b1 的 265 为 0.075 档）
+//   税 EV = 0.15 × 11.085 = **1.66/局**（wDmg 罚 2.68/局 的 62%；总正回报 ≈28/局 ⇒ 约 6%）
+//   ⚠ preflight：validate_reward 在域角 `ticks=0, onLaneMoveTicks=36000` 处报 1 条包络 **warn**
+//   （|wLane·onLaneMoveTicks/(ticks+1)| = 1.9e7 > 1e6）。与 h4-lane-a1（4.6e6）/ b1（9.5e6）同款同因
+//   ⇒ 域角不可达、warn 随剂量线性缩放，不是红旗；errors 必须保持 0。
+{
+  "version": 5,
+  "name": "h4-lane-b2",
+  "mode": "per-tick",
+  // 环境：ladder-c04（单关 4 敌、max_ticks 3300、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c04",
+
+  // ── 奖励：v4 包逐字 ＋ 穿越税（唯一变量 = wLane，本臂 529）──────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited - wLane*onLaneMoveTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wWin": 2.0,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.2,
+      "wLane": 529.0
+    },
+    "terminal": {
+      "lives_exhausted": -5.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：h4 冠军 warm start（三臂同一起点，平行臂）────────────────────────
+  "bc": "nn-training/weights/h4-stop-best/h4-stop.it60.best.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 预算：诊断腿 40 轮（判据点 = it30/35/40 尾巴三点）──────────────────────
+  "iters": 40,
+  "max_hours": 4,
+  "workers": 8,
+
+  // ── 位移包：x4-rebirth 原样（b0/b1/b2 逐字同）──────────────────────────────
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
+    { "kl_coef": 0.01, "lr": 0.00025 }
+  ],
+
+  // ── 采集：mb 对齐（48 × mb(512)）；b0/b1/b2 逐字相同 ───────────────────────
+  "target_transitions": 24576,
+  "est_samples_per_game": 180,
+  "seed_rotate": 600,
+  // 三臂必须同值；Wave 2 新开（与 1789876303 / 1790491796 / 20260921 / 20260930 均不同）。
+  "paired_rotate_seed": 20261001,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/h4-lane-b2/weights.json",
+  "traj": "tmp/h4-lane-b2",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/h4-lane-b2",
+  "backup_prefix": "h4-lane-b2",
+
+  // ── 评估：日常段 200 局/点（池只有 860001–860200；判据段另跑，见头注 ②）────
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 200,
+  "eval_every": 5
+}
