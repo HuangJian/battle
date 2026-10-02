@@ -1,0 +1,137 @@
+// 课程 x20-advanced —— **x20 kitchen-sink 腿：B 底包 + 新 5 项（human-gap 定价 f=7.5%/项），从 it175 起跑**
+//
+// 状态：**草稿（2026-10-02 冻结；未开课）**。开课 = **人在控制台点**（agent 不开训）。
+//   立项 → 用户 2026-10-02 直接指定：基于 x20 最佳权重，新 5 项全上，大样本、多 epoch、
+//   无 it 限制；只比最终杀敌数与过关率，不与历史课程做单变量控制对比。
+//   底包 → `nn-training/curricula/x20-steady-cont.jsonc`（B = x20-steady 奖励逐字；dense-only）。
+//   起点 → B 终点 `x20-steady.it175.20260920-215502.json`（§47/§56 对照物；cont 同起点，kk≈0 教训）。
+//   列语义 → `docs/nn/engineering.md` §58（8 列；回写列消费警告同 §3.4）。
+//
+// ══════════════════════════════════════════════════════════════════
+// 校准（human 160 局 vs it175 160 局，同关 ladder-c20-lives1 同 seed 配对，2026-09-30 探针）
+// ══════════════════════════════════════════════════════════════════
+//   源 = `tmp/gap2-panel-v5-human.jsonl` + `tmp/gap2-panel-v5-nn-x20steady.jsonl`
+//   （脚本 `tmp/x20adv-calib.py`；口径映射：hitFires≡aimHits、hitWLinear≡aimHitDistSum、
+//   hurtW≡hurtWeight、enclWD≡enclWeightTicks、cornerW4≡cornerWeightTicks——定义逐字同，
+//   唯一差是新列多了豁免拌入 A：人类豁免份额（26%，宽口径）> NN（13%）⇒ 拌入后人类侧降得更多 ⇒
+//   用 raw 数定价是**保守方向**（gap 只会被低估），已如实记档，不另修正。
+//   · kills/局：human **17.494** vs it175 **6.162**；outcome 通关：human **160/160** vs it175 **15/160**。
+//     （探针 `win` 字段 ≠ 通关，终判用 outcome 通关率 + kills/局，别读错列。）
+//   · 命中率 hitFires/shots：0.7874 vs 0.5812（Δ=+0.2062；与 plan §1.4 的 78.7%/58.1% 互验）。
+//   · 均命中距 hitWLinear/hitFires：4.3934 vs 2.5140 格（Δ=+1.8794；§1.4 的 4.39 互验）。
+//   · hurtW/(ticks+1)：0.00735 vs 0.06213（Δ=−0.05478）；enclWD/(ticks+1)：0.13274 vs 0.41874
+//     （Δ=−0.28600）；cornerW4/(ticks+1)：0.05833 vs 0.20107（Δ=−0.14274）。
+//   · killEV = wKill × E[kills_it175] = 3.0 × 6.162 = **18.487**（§5.4 口径，基线取起点自身）。
+//
+// ══════════════════════════════════════════════════════════════════
+// 形式偏离备忘（用户原话是 5 个计数项；此处改成比值/速率形，理由如下）
+// ══════════════════════════════════════════════════════════════════
+// · x20 的 horizon 可变（max_ticks 12900；human 均 4973t vs it175 均 1805t，差 2.8×）⇒
+//   计数形正价（+aimHits、+aimHitDistSum）会给「苟活」发钱（局越长自然命中越多），与杀敌目标正交。
+//   故正价两项改比值形（既有先例：`kills/playerShots`；E1b 备选比值形）：
+//     命中奖 → **命中率形** `aimHits/(playerShots+1)`（human–NN 差 20.6pp，纯技术信号）；
+//     远程奖 → **均距形** `aimHitDistSum/(aimHits+1)`（= E[d|hit]，E1 主读数；零命中局 = 0）。
+// · 三项税改速率形（÷(ticks+1)，v8 起注释纪律 + E3a 先例）：暴露量与存活时长解耦。
+// · 命中数 double-count 备忘：`aimHits ≡ enemyHits − 交棒弹`（sb P2-A）⇒ 本腿的命中奖与底包
+//   `wHit·enemyHits` 是**同一批命中事件的两遍定价**，不是两个信号。用户坚持全上，故保留，
+//   但 wAcc 只按 gap 定价（见下），不许解读为“发现新信号”。
+//
+// ══════════════════════════════════════════════════════════════════
+// 剂量（uniform gap pricing：走完 human 全程 gap 值 f=7.5% killEV/项，Wave2/E2 默认梯）
+// ══════════════════════════════════════════════════════════════════
+//   0.075 × killEV = 0.075 × 18.487 = 1.3865；w = 1.3865/|Δ|。
+//     wAcc    = 6.72   （1.3865/0.2062；gap 值 7.5%）
+//     wDist   = 0.738  （1.3865/1.8794；gap 值 7.5%）
+//     wHurt   = 25.3   （1.3865/0.05478；gap 值 7.5%）
+//     wEncl   = 4.85   （1.3865/0.28600；gap 值 7.5%）
+//     wCorner = 9.71   （1.3865/0.14274；gap 值 7.5%）
+//   五项走完总值 37.5% killEV（5×7.5%）。
+//   起点平衡性（好兆头，非判据）：it175 水平上新项净流入 = +5.761（正价）−5.555（三税）
+//   = **+0.21/局（1.1% killEV）** ⇒ 起跑无梯度冲击，是纯边际转向；human 水平净 +7.14/局。
+//   量级对照：wDmg 税 EV（x20 dmg/局约 90–110 ⇒ ~3/局）与三税同量级（hurt 1.57 / encl 2.03 /
+//   corner 1.95，均按 it175 水平），不淹没既有项。
+//
+// ══════════════════════════════════════════════════════════════════
+// 判据（只看终点；无对照臂、无配对、无中途 ABORT/横盘停）
+// ══════════════════════════════════════════════════════════════════
+//   终判双指标（用户原话）：**kills/局 + outcome 通关率**，对照 = it175 同段基线：
+//     日常段（860001–860200，200 局/点）终点趋势 + **414000 段 800 局**（B 门：low 35.5% /
+//     mean 7.84 / p10≥2；回测 415000 vs B-it0 42.0/6.34——段口径沿用 B，不移动球门）。
+//   熔断只留一条（B 原样，训练侧通用）：kl 连续 3 轮 ≥ 0.075 ⇒ 只记录 + 人工盯盘，不自动停。
+//   其余 Wave 2/E 系列判据（MDE/Q/kill-switch/paired burn）**本腿一律不适用**——
+//   单腿 kitchen-sink，无对照、无配对，判据只有终点双指标。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；起点 it175 是 warm start 不是续跑，opt fresh 是唯一选项，cont 同规）。
+{
+  "version": 5,
+  "name": "x20-advanced",
+  "mode": "per-tick",
+  // 环境：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：B 底包逐字 ＋ 新 5 项（比值/速率形；w 按 human-gap f=7.5%/项冻结）───
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.2,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 6.72,
+      "wDist": 0.738,
+      "wHurt": 25.3,
+      "wEncl": 4.85,
+      "wCorner": 9.71
+    },
+    // dense-only（与 B 一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：B 终点 it175，纯 warm start（C 腿教训 kk≈0；opt fresh 是唯一选项）────
+  "bc": "nn-training/weights/x20-steady/x20-steady.it175.20260920-215502.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // ── 预算：长腿（B 实测 3.6min/轮；400 轮 ≈ 24h，48h 是 backstop）────────────
+  //   「无 it 限制」= 判据只看终点、无中途停腿；iters/max_hours 只是控制台必填的机械上限。
+  "iters": 400,
+  "max_hours": 48,
+  "workers": 8,
+
+  // ── 位移包：B 逐字（lr/kl schedule 与 B 同；epochs 按用户要求加大）────────────
+  "lr": 0.0003,
+  "epochs": 8,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：加大样本（48 × mb(1024) = 49152，ragged=0，TPU mb 对齐；B 是 48000）──
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/x20-advanced/weights.json",
+  "traj": "tmp/x20-advanced",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-advanced",
+  "backup_prefix": "x20-advanced",
+
+  // ── 评估：与 B 同（4 关 × 50 局/点；终判另跑 414000 段，见头注）────────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

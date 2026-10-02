@@ -1,0 +1,101 @@
+// 课程 h4-aim-k25 —— **E1 · 处理臂 K25：`+ wAim·aimHitDistSum`，κ=0.25 ⇒ wAim=0.0512**
+//
+// 状态：**草稿（2026-10-02 冻结；未开课）**。开课 = **人在控制台点**（agent 不开训）。
+//   立项/规格/判据全文 → `nn-training/curricula/h4-aim-c0.jsonc` 头注（三臂逐字同的冻结契约）；
+//   剂量依据 → `DECISIONS.md` §2026-10-01-goalnn-aim-dodge-metrics + 2026-10-02 开腿记录。
+//
+// ── 本臂唯一变量 ─────────────────────────────────────────────────────────
+//   与对照臂 h4-aim-c0 的唯一差异 = 奖励公式末尾 `+ wAim*aimHitDistSum`（wAim=0.0512）。
+//   κ = wAim·E[d|hit]/wHit = 0.0512 × 2.9284 / 0.6 = **0.250**（预注册区间 [0.10,0.25] 上档）。
+//   税 EV = 0.0512 × 28.473 = **1.458/局**（killEV 10.810 的 **13.5%**）。
+//   校准源：`tmp/aim-calib/c04-calib-863001.jsonl`（b0 it30/35/40 × 200 局，seed 863001–863200）。
+//
+// ── 判据（与 c0/k10 逐字同；全文见 h4-aim-c0 头注）────────────────────────────
+//   ① 机制主读数 `E[d|hit]`（配对差，同 seed 同 stage）：**MDE80 = 0.079 格（2.7% rel）**，
+//      **kill 线 = MDE/2 = 0.039 格（1.3% rel）**；低于 kill 线 ⇒ 判无效，不得记剂量结论。
+//   ② 防刷量 `playerShots/(ticks+1)`：预注册上升阈值 = MDE80（2.0% rel）；显著上升而
+//      E[d|hit] 不动 ⇒ 判无效。
+//   ③ 主分不劣（−3pp abs 诊断）；守卫表非劣（含 `stopTicks/(ticks+1)`、
+//      `onLaneHoldFireTicks/(ticks+1)`）。
+//   ④ 判据段：**it30/it35/it40** 各 **300 局**，seed0 = **864001**（864001–864300 = 段A；
+//      池外，与日常段/校准段均不相交）。
+//   ⑤ 前置 Q ≤ χ²(0.95, df=2) = 5.99；⑥ 止损 = `paired` kickstart burn，
+//      显式 peer = `h4-aim-c0`（rl-config `courses.h4-aim-k25.kickstart_burn`），
+//      尾连续 3 点 Δ < −5.0pp ⇒ ABORT。
+//   ⑦ 预注册监控量 p·wAim·E[d|hit] ≈ 0.070 > wShot 0.05（**本档进入刷量区，预期内**；
+//      真正防线 = 判据②：shots 率显著上升而 E[d|hit] 不动 ⇒ 判无效）。
+//
+// ── §15.5 ────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj/paired V=20261002）；语义变更不得跨腿续跑。
+{
+  "version": 5,
+  "name": "h4-aim-k25",
+  "mode": "per-tick",
+  // 环境：ladder-c04（单关 4 敌、max_ticks 3300、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c04",
+
+  // ── 奖励：v4 包逐字 ＋ 距离加权命中项（唯一变量 = wAim，本臂 κ=0.25）──────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wAim*aimHitDistSum",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wWin": 2.0,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.2,
+      "wAim": 0.0512
+    },
+    "terminal": {
+      "lives_exhausted": -5.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：h4 冠军 warm start（三臂同一起点，平行臂）────────────────────────
+  "bc": "nn-training/weights/h4-stop-best/h4-stop.it60.best.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 预算：诊断腿 40 轮（判据点 = it30/35/40 尾巴三点）──────────────────────
+  "iters": 40,
+  "max_hours": 4,
+  "workers": 8,
+
+  // ── 位移包：x4-rebirth 原样（c0/k10/k25 逐字同）────────────────────────────
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
+    { "kl_coef": 0.01, "lr": 0.00025 }
+  ],
+
+  // ── 采集：mb 对齐（48 × mb(512)）；三臂逐字相同 ───────────────────────────
+  "target_transitions": 24576,
+  "est_samples_per_game": 180,
+  "seed_rotate": 600,
+  // 三臂必须同值（同种子流是配对前提）。E1 新开（§15.1 语料轮换）。
+  "paired_rotate_seed": 20261002,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/h4-aim-k25/weights.json",
+  "traj": "tmp/h4-aim-k25",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/h4-aim-k25",
+  "backup_prefix": "h4-aim-k25",
+
+  // ── 评估：日常段 200 局/点（池只有 860001–860200；判据段另跑）──────────────
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 200,
+  "eval_every": 5
+}

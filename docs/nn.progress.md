@@ -138,9 +138,25 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
   settle-once registry + 回写机制；零训练腿）⇒ E1–E4 仍待在控制台开课 —— 工程侧
   `docs/nn/engineering.md` §58 · 自标定接口 `docs/nn/threat-lane-reward.md` §12 ·
   决策 `DECISIONS.md` §2026-10-01-goalnn-aim-dodge-metrics · 规格 `plan/aim-dodge-levers.plan.md` §11
+- **E1（aim 距离加权）三臂已开课（2026-10-02）**：`h4-aim-c0`（对照）+ `h4-aim-k10` / `h4-aim-k25`
+  （κ=0.10 / 0.25 ⇒ wAim=0.0205 / 0.0512，开腿前校准冻结）；判据段 = 段A（seed0 864001–864300，
+  it30/35/40 × 300 局）；paired 止损**显式 peer**=c0（修掉 Wave 2 的静默 baseline 回退）——
+  `docs/nn/experiments.md` §74 · 决策 `DECISIONS.md` §2026-10-02-goalnn-e1-aim-open
 - **E2 前置门已跑**（离线 Pearson，b0 探针 160 局）：r(hurtWeight, playerDamageTaken) = 0.533 < 0.8
   ⇒ 不替换 `wDmg`；hurtW/hurtN ≈ 常数（28.97 / CV 0.474）⇒ E2 记档按剂量而非机制 ——
-  `docs/nn/engineering.md` §58 验证节
+  `docs/nn/engineering.md` §58 验证节；**开腿前现役复算（2026-10-02，b0 600 局，拌入列）**：
+  r_within=0.796（95% CI [0.767,0.824]）⇒ 点估计 ≤0.8 仍不替换（CI 跨线已记档）—— `docs/nn/experiments.md` §74
+- **E1 段A收官判机制无效 + E2/E3a 设计冻结（2026-10-02）**：段A pooled dE[d|hit] k10 −0.037
+  （反号）/ k25 +0.029（< kill 线 0.039），Q 过 ⇒ 无效（不得记剂量结论）；E2（hurt 叠加）
+  `h4-hurt-{c0,f75,f150}`（wHurt=0.0205/0.0411，段B 865001，seed 20261003）+ E3a（encl 速率形）
+  `h4-encl-{c0,f75,f150}`（wEncl=3.87/7.74，段C 866001，seed 20261004），MDE/kill 线实测冻结
+  （5.84/2.92 局；0.0214/0.0107），paired 止损显式 peer —— `docs/nn/experiments.md` §74 ·
+  决策 `DECISIONS.md` §2026-10-02-goalnn-e2-e3a-design；**E2 先、E3a 后，人在控制台按序开课**
+- **x20-advanced 开腿设计冻结（2026-10-02）**：B 底包 + 新 5 项（比值/速率形，human-gap
+  f=7.5%/项：wAcc=6.72 / wDist=0.738 / wHurt=25.3 / wEncl=4.85 / wCorner=9.71），起点 it175，
+  target 49152 / epochs 8 / iters 400；终判 kills/局 + 通关率（414000 段 800 局 vs it175），
+  无对照无配对 —— `docs/nn/experiments.md` §75 ·
+  决策 `DECISIONS.md` §2026-10-02-goalnn-x20-advanced-design；人在控制台开课
 
 ### 3.6 架构重构（`nn-training` 模块重组）
 

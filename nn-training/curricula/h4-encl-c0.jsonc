@@ -1,0 +1,150 @@
+// 课程 h4-encl-c0 —— **E3a · 对照臂 C0：v4 逐字（无 encl 项）**（aim-dodge 批次第三波）
+//
+// 状态：**收官（2026-10-02；it40 完赛，判决见本文件尾 verdict）**。
+//   立项 → `plan/aim-dodge-levers.plan.md` §5.3（E3a 单变量拆腿）/§5.4（剂量锚与判据模板）/§5.5（分波；E2 之后开）；
+//   前置门 → **E3a 复测门已过**：4 敌 rung 上 encl 有信号且跨臂可辨（b0 0.238 vs b1 0.307，+29.0%，
+//   t=3.31，196/200 局非零），见 `DECISIONS.md` §2026-10-02-goalnn-e1-aim-open（E3 复测门；E3b 不自动放行）；
+//   背景 → E1 段A收官判机制无效（段A 864001 配对实测，待 `docs/nn/experiments.md` §74 落笔）。
+//   列语义 → `docs/nn/engineering.md` §58（`enclWeightTicks`：n≥2 ⇒ Σmax(0,5−d)，豁免拌入 A）。
+//
+// ══════════════════════════════════════════════════════════════════
+// 对照臂的职责（Wave 2 的教训：漂移只能靠同时训练的零臂消）
+// ══════════════════════════════════════════════════════════════════
+// · 主终点 = **配对差**（处理臂 − 本臂，同 seed 同 stage）⇒ 本臂必须与 f75/f150 **同时训练、
+//   同起点、同种子流**；不能用历史臂（h4-aim-* / h4-hurt-* / b0/b1）或冻结 bc 当对照。
+// · 本臂是 f75/f150 的 paired kickstart-burn 对端（显式 `peer`，见 rl-config
+//   `courses.h4-encl-f75|f150.kickstart_burn = {mode:'paired', peer:'h4-encl-c0'}`）——
+//   多臂共享 V 时自动解析必回退 baseline（Wave 2 实测教训），故显式指定。
+// · 本臂配方 = Wave 2 对照臂 b0 逐字（v4 包），唯一的作用是把「训练本身把读数推到哪」量出来。
+//
+// ══════════════════════════════════════════════════════════════════
+// 判据（**训练前冻结，中途不得改**；三臂逐字同）
+// ══════════════════════════════════════════════════════════════════
+// ① **机制主读数** = `enclWeightTicks/(ticks+1)`（逐局率、按同 seed 配对；负向为好：处理臂 − 本臂 < 0 才算方向对）。
+//    配对差 = 处理臂 − 本臂。
+//    预注册 MDE（开腿前由校准语料实测配对 sd 复算，`tmp/aim-calib/c04-calib-863001.jsonl.run/eval_log.jsonl`，
+//    b0it30-vs-b0it35 同 seed 200 配对，E1/E2 同法 MDE=2.8016×sd/30）：
+//      · enclWeightTicks/(ticks+1)：配对 sd=0.22923 ⇒ 900 配对（3 点 × 300 局）下
+//        **MDE80 = 0.0214（~10% rel）**；**kill 线 = MDE/2 = 0.0107**。
+//      · 若观测下降 < kill 线 ⇒ 判「机制无效」，**不得**改记「剂量结论」。
+// ② **共线名单（同腿禁上）**：`encl2Ticks`/`encl3pTicks`（同一 `alignedEnemyCount` 谓词：计数 vs 加权）
+//    及 `nearEnemy4Ticks`（v10 raw-only 列）**皆不同时入公式**（§5.3；相关矩阵列落地后离线实测补）。
+// ③ **主分不劣**：主终点分数（score / pass）配对差不劣于 −3pp abs（诊断项，口径见 Wave 2）。
+// ④ 判据段：训练后对 **it30/it35/it40** 三个冻结点各跑 **300 局**，seed0 = **866001**
+//    （866001–866300 = **段C**；与日常段 860001–860200、Wave 1 补评估 861011–861310、
+//    Wave 2 判据段 862001–862300、开腿前校准段 863001–863200、E1 段A 864001–864300、
+//    E2 段B 865001–865300 **均不相交**，§15.1）。
+//    跑法 = `bun tools/sim/eval-course-ckpt.ts --course nn-training/levels/ladder-c04.jsonc
+//      --weights c0=… --weights f75=… --weights f150=… --games 300 --seed0 866001 --no-dist`。
+// ⑤ 前置检查 Q ≤ χ²(0.95, df=2) = 5.99（尾部不稳 ⇒ 只逐点报告，不得挑单点）。
+// ⑥ 守卫表（每臂带数字；口径 = Wave 2 `nn-training/tools/paired_power.py` §11 同尺）：
+//    pass / 零伤局 / dmg / kills / shots / cellsVisited / stuckTicks 非劣；
+//    **`stopTicks/(ticks+1)`、`onLaneHoldFireTicks/(ticks+1)` 非劣**（§10.4 架枪教训：encl 罚的是危险状态量，
+//    不是姿态，故不分移动/静止，以守卫兜底，§3.3）。
+//
+// ── 止损（与 Wave 2 同源，参照物 = 同网格配对差）─────────────────────────────
+//   `kickstart_burn` 走 **paired** 模式（显式 peer 点名本臂）：
+//   Δ = 处理臂 − 本臂同 it 读数，尾部连续 3 点 Δ < −5.0pp ⇒ ABORT。
+//
+// ── 剂量锚（开腿前实测冻结；源 = `tmp/aim-calib/c04-calib-863001.jsonl.run/eval_log.jsonl`，
+//      b0it30/35/40 × 200 局 pooled n=600；脚本 `tmp/aim-e2e3a-anchor.py`）────────
+//   b0 pooled：E[enclWeightTicks/(ticks+1)] = 0.209396 · E[kills/局] = 3.6033
+//   ⇒ killEV = wKill × E[kills] = 3.0 × 3.6033 = 10.810（与 E1/E2 同数复现）。
+//   f 口径（§5.4 默认梯）：wEncl = f·killEV/rate。
+//     f75：wEncl = 3.87（f=7.5%，税 EV 0.810/局，killEV 占比 7.5%）
+//     f150：wEncl = 7.74（f=15%，税 EV 1.621/局，killEV 占比 15.0%）
+//   本臂无 encl 项；f75/f150 唯一差 = `- wEncl*enclWeightTicks/(ticks+1)`（速率形：时长型量不直接入公式，v8 起注释纪律）。
+//   量级对照（防淹没既有项）：wDmg 税 EV = 0.03 × 99.07 = 2.972/局 ⇒ encl 税（0.81/1.62）同量级偏小；
+//   wEncl 数值大于 wKill（3.87/7.74 vs 3.0）是速率口径所致（乘 ~0.21 的率），税 EV 才是可比量。
+//   ⚠ 负价格无刷量线（与 E1 对比备忘）：负价激励是少暴露而非多开火，无“刷量套利”方向；
+//   退化形态（架枪/蹲坑/贴角）由守卫⑥（stop/hold/kills/cells）捕捉，不另设开火量阈值。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj/paired V=20261004；与 E1/E2/既往 seed 均不同）；语义变更不得跨腿续跑。
+{
+  "version": 5,
+  "name": "h4-encl-c0",
+  "mode": "per-tick",
+  // 环境：ladder-c04（单关 4 敌、max_ticks 3300、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c04",
+
+  // ── 奖励：v4 包**逐字**（= Wave 2 对照臂 b0 同一份配方；无 encl 项）─────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wWin": 2.0,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.2
+    },
+    "terminal": {
+      "lives_exhausted": -5.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：h4 冠军 warm start（三臂同一起点，平行臂）────────────────────────
+  "bc": "nn-training/weights/h4-stop-best/h4-stop.it60.best.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 预算：诊断腿 40 轮（判据点 = it30/35/40 尾巴三点）──────────────────────
+  "iters": 40,
+  "max_hours": 4,
+  "workers": 8,
+
+  // ── 位移包：x4-rebirth 原样（三臂逐字同）──────────────────────────────────
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
+    { "kl_coef": 0.01, "lr": 0.00025 }
+  ],
+
+  // ── 采集：mb 对齐（48 × mb(512)）；三臂逐字相同 ───────────────────────────
+  "target_transitions": 24576,
+  "est_samples_per_game": 180,
+  "seed_rotate": 600,
+  // 三臂必须同值（同种子流是配对前提）。E3a 新开（与历史 1789876303 / 1790491796 /
+  // 20260921 / 20260930 / 20261001 / 20261002 / 20261003 均不同，§15.1 语料轮换）。
+  "paired_rotate_seed": 20261004,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/h4-encl-c0/weights.json",
+  "traj": "tmp/h4-encl-c0",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/h4-encl-c0",
+  "backup_prefix": "h4-encl-c0",
+
+  // ── 评估：日常段 200 局/点（池只有 860001–860200；判据段另跑，见头注 ④）────
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 200,
+  "eval_every": 5
+}
+
+// ── verdict（2026-10-02 收官；段C 866001–866300 @it30/35/40 × 300 局，同 seed 配对；
+//      f75 只有 it30（it31 ABORT）；证据 `tmp/e3a-frozen/segC-it{30,35,40}.jsonl(.run/)` +
+//      `tmp/segBC-judge.py` / `tmp/segBC-guard.py`）──
+//   c0/f150 it40 完赛；f75 在 it31 被 paired 止损 ABORT（streak 1→2→3，Δ −11.9/−9.0/−14.5pp；
+//   显式 peer 机制首杀，按设计工作）。
+//   ① 主读数 enclRate 配对差（负向好；MDE80=0.0214，kill 线=0.0107）：
+//      f150：it30 −0.0756（p≈0）/ it35 −0.0535（p=0.001）/ it40 −0.0694（p≈0）；
+//        Q=1.06 ⇒ pooled **−0.066 ≈ 6×kill 线** ⇒ 机制成立。
+//      f75：仅 it30 −0.0249（p=0.11，不过单点 MDE≈0.037），方向对不显著；臂已 ABORT ⇒ 无机制结论。
+//   ②/③ 代价（f150）：dmg 配对差 +10.9/+30.2/+10.4（pooled +17.2/局）；dWin −0.097/−0.123/−0.013
+//      （pooled −0.078，−7.8pp，大破 −3pp 线）；dKills −0.24/−0.27/+0.00。
+//      暴露降 + 承伤升 + 击杀掉并存 ⇒ 躲避行为退化（让出走位/击杀→敌活更久→挨更多打）。
+//   ⑥ 守卫 stop/hold/cells/stuck 无系统性劣化（非蹲坑架枪式退化）。
+//   **判决：f150 机制成立但主分劣，不采用，不进 E4；f75 提前终止，无结论。**
