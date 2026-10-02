@@ -7,6 +7,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -20,6 +22,17 @@ from trainer.batch_eval import (
     read_batches,
     write_batches,
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_evalboard(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """EvalBoard 数据根是**控制台与本机共享的活状态**：一律重定向进 tmp_path。
+
+    `BatchEvalRunner` 的心跳（`runner_state.json`）与台账（`batches.jsonl`）都落在
+    `dashboard/data/evalboard/`——不重定向就会把测试批次与心跳写进操作员的活数据
+    （2026-10-02 实测：真 `runner_state.json` 被写进 `batch_id="bch"` 的测试状态）。
+    """
+    monkeypatch.setenv("EVALBOARD_DATA", str(tmp_path))
 
 
 def test_plan_units_mirrors_runner_ts() -> None:

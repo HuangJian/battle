@@ -229,6 +229,19 @@ def _write_eval_rows(tmp_path: Path, rows: list[dict]) -> None:
     p.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
 
 
+@pytest.fixture(autouse=True)
+def _gate_halt_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """门禁停机模式 2026-10-01 起是**平台文件**：本文件一律把它重定向进 tmp_path。
+
+    不重定向就会读仓根 `tmp/gate-halt.json`（那是控制台的活状态：拨到 notify 时
+    `test_guard_also_halts_the_cloud_on_the_same_course` 等停机断言会变红），停止腿的回执
+    也会写进本机工作区。
+    """
+    monkeypatch.setenv("NN_GATE_HALT", str(tmp_path / "gate-halt.json"))
+    monkeypatch.setenv("NN_GATE_HALT_APPLIED", str(tmp_path / "gate-halt.applied.json"))
+    monkeypatch.setenv("NN_GATE_HALT_LEG", "local")
+
+
 def test_guard_stops_the_leg_and_writes_a_replayable_ledger_event(tmp_path: Path) -> None:
     """执行面接线：命中 ⇒ 停腿（True）+ 账本可回放；缰绳关着 ⇒ 零行为。"""
     _write_eval_rows(tmp_path, _rows(0.35, 0.29, 0.28, 0.27))

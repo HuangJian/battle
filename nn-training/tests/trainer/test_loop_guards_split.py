@@ -48,6 +48,20 @@ NN_ROOT = Path(__file__).resolve().parents[2]
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
 
+
+@pytest.fixture(autouse=True)
+def _gate_halt_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """门禁停机模式 2026-10-01 起是**平台文件**：本文件一律把它重定向进 tmp_path。
+
+    不重定向就会读仓根 `tmp/gate-halt.json`（那是控制台的活状态：拨到 notify 时
+    `test_patch_anchor_really_intercepts_the_cloud_halt` 等停机断言会变红），回执也会写进
+    本机工作区。
+    """
+    monkeypatch.setenv("NN_GATE_HALT", str(tmp_path / "gate-halt.json"))
+    monkeypatch.setenv("NN_GATE_HALT_APPLIED", str(tmp_path / "gate-halt.applied.json"))
+    monkeypatch.setenv("NN_GATE_HALT_LEG", "local")
+
+
 RL = NN_ROOT / "trainer"
 
 

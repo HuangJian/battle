@@ -31,6 +31,19 @@ from trainer.loop_control import (
     write_applied,
 )
 
+
+@pytest.fixture(autouse=True)
+def _loop_control_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """控制面（暂停意图 + 回执）是**控制台与本机共享的活状态**：一律重定向进 tmp_path。
+
+    不重定向就会读/写仓根 `tmp/loop-control*.json`（操作员此刻的暂停列表会参与判定，
+    回执也会把测试进程的 pid 写进活状态）——2026-10-02 实测：全量测试把 `["c5"]`
+    写进过真回执。
+    """
+    monkeypatch.setenv("NN_LOOP_CONTROL", str(tmp_path / "loop-control.json"))
+    monkeypatch.setenv("NN_LOOP_CONTROL_APPLIED", str(tmp_path / "loop-control.applied.json"))
+
+
 # --------------------------------------------------------------- 解析
 
 
@@ -104,6 +117,7 @@ def test_read_ignores_extra_keys(tmp_path: Path) -> None:
 
 
 def test_control_path_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("NN_LOOP_CONTROL")  # 夹具已重定向；本用例专测**缺省**路径
     assert control_path().endswith(str(Path("tmp") / "loop-control.json"))
     monkeypatch.setenv("NN_LOOP_CONTROL", str(tmp_path / "x.json"))
     assert control_path() == str(tmp_path / "x.json")
@@ -227,6 +241,7 @@ def test_applier_does_not_rewrite_the_receipt_when_nothing_changed(tmp_path: Pat
 
 
 def test_applied_path_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("NN_LOOP_CONTROL_APPLIED")  # 夹具已重定向；本用例专测**缺省**路径
     assert applied_path().endswith(str(Path("tmp") / "loop-control.applied.json"))
     monkeypatch.setenv("NN_LOOP_CONTROL_APPLIED", str(tmp_path / "a.json"))
     assert applied_path() == str(tmp_path / "a.json")

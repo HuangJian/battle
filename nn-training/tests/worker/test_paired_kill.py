@@ -162,6 +162,19 @@ def _ledger_events(tmp: Path) -> list[dict]:
     return [json.loads(x) for x in p.read_text(encoding="utf-8").strip().splitlines() if x.strip()]
 
 
+@pytest.fixture(autouse=True)
+def _gate_halt_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """门禁停机模式 2026-10-01 起是**平台文件**：本文件一律把它重定向进 tmp_path。
+
+    不重定向就会读仓根 `tmp/gate-halt.json`（那是控制台的活状态：拨到 notify 时
+    `test_guard_stops_the_leg_and_writes_a_replayable_event` 的停机断言会变红），杀臂的回执
+    也会写进本机工作区。
+    """
+    monkeypatch.setenv("NN_GATE_HALT", str(tmp_path / "gate-halt.json"))
+    monkeypatch.setenv("NN_GATE_HALT_APPLIED", str(tmp_path / "gate-halt.applied.json"))
+    monkeypatch.setenv("NN_GATE_HALT_LEG", "local")
+
+
 def test_single_leg_is_inert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """未声明 `paired_rotate_seed` ⇒ 没有「对端」这回事（零行为，不落账）。"""
     monkeypatch.setattr(paired_mod, "CURRICULA_DIR", _write_curricula(tmp_path, V), raising=True)
