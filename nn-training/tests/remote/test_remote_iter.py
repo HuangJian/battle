@@ -1460,15 +1460,17 @@ def test_a_child_that_cannot_be_reaped_is_retried_in_round_never_failing(
     # 留 2 次好让「万一走了单局重跑」在日志里看得出来（默认 3 次会把重跑藏进正常重试里）
     monkeypatch.setattr(game_watch, "GAME_MAX_ATTEMPTS", 2)
     # ⚠ 硬顶值 = 本用例的固有开销：**第一次（替身）必须把硬顶跑满**才能走到「杀不掉」
-    # 那条路。但它只该裁**首次尝试（替身）**；重投那次是**真跑**（真 python 启动），再
-    # 拿 0.5s 去裁就是在测机器负载——负载下它超顶会打出一行**合法**的「单局重试 2/2」
-    # （重投后这一局自己超时重跑），撞上本用例「全局不存在单局重试」的断言（2026-10-02
-    # 全量 -n 12 + 外部负载实测；单跑恒绿）。判据分档：首次 0.5s，重试给 20s —— 真跑只
-    # 要没死就成功，pytest 的 60s/用例外墙先兜底。
-    def _cap_first_attempt_only(base: float, attempt: int, explicit: bool = False) -> float:
-        return float(base) if attempt <= 1 else 20.0
+    # 那条路。判据分档：**只裁替身那一次**（`_FlakyPopen.made < fail_first` = 替身还没
+    # 被 spawn 过）—— 之后（整轮重投的真跑）给 20s。只按 `attempt <= 1` 分档不够：重投的
+    # 真跑是它自己那局的**第 1 次尝试**，负载下再拿 0.5s 裁就是在测机器负载（真 python
+    # 启动超顶 ⇒ 打出一行**合法**的「单局重试 2/2」，撞断言②；2026-10-02 全量 -n 12 实测、
+    # 单跑恒绿）。真跑只要没死就成功，pytest 的 60s/用例外墙先兜底。
+    def _cap_substitute_attempt_only(base: float, attempt: int, explicit: bool = False) -> float:
+        if attempt <= 1 and _FlakyPopen.made < _FlakyPopen.fail_first:
+            return float(base)
+        return 20.0
 
-    monkeypatch.setattr(game_watch, "attempt_timeout_sec", _cap_first_attempt_only)
+    monkeypatch.setattr(game_watch, "attempt_timeout_sec", _cap_substitute_attempt_only)
     script = tmp_path / "ok.py"
     script.write_text(_STUB_SLOW.replace("@SECS@", "0"), encoding="utf-8")
     _flaky_popen(monkeypatch, script, fail_first=1)
