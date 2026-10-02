@@ -115,6 +115,29 @@ def _http(
 # ---------------------------------------------------------------- 结果入账（两条腿共用）
 
 
+def _append_attribution(hub: Any, jid: str, event: str, worker: str, reason: str) -> None:
+    """承接归属事件的唯一写点（两条腿共用）：身份 = 显式传入 ∪ 当前租约持有人。
+
+    读侧（dashboard `server/contribution.ts`）按 `job_completed` 的 job_id join
+    `job_result_accepted` 取 worker；`job_rejected` 就是「晚到·白算」的唯一数据源。
+    hub 的 `_JobStore.jsonl_path` 就是 `tmp/<课>/training_log.jsonl` ⇒ 事件与
+    训练侧 `job_completed` **同一份账本**，不新建账本（plan W2 / N4）。
+    """
+    w = str(worker or "").strip()
+    if not w:
+        # 旧 worker 不带 `X-Worker-Id`：回退到当前租约持有人。⚠ `lease_worker` 住在每课
+        # `_JobStore`（`_HubQueue` 没有）⇒ 必须经 `_store_of` 解析归属课程——直接
+        # `hub.lease_worker` 会 AttributeError（结果面 500），2026-10-03 全量门禁抓到。
+        store_of = getattr(hub, "_store_of", None)
+        st = store_of(jid) if callable(store_of) else None
+        if st is not None:
+            w = str(st.lease_worker(jid) or "")
+    body: dict[str, Any] = {"event": event, "job_id": jid, "worker": w, "ts": hub._now()}
+    if reason:
+        body["reason"] = reason
+    hub.append_ledger(jid, body)
+
+
 def accept_result(
     hub: Any,
     jid: str,
@@ -122,6 +145,7 @@ def accept_result(
     lease_token: str,
     *,
     log: Any = None,
+    worker: str = "",
 ) -> tuple[int, str]:
     """把一份 worker 回传结果校验并入账；返回 `(HTTP 状态, 说明)`。
 
@@ -130,6 +154,10 @@ def accept_result(
     对账，错的权重会被静默落盘成一轮「看起来正常」的训练。
 
     `log` 只在 400 时用（拒收原因必须留痕：云端结果对不上账是事故级信号）。
+
+    `worker`（plan/worker-contribution-view W2）：本份结果的**归属身份**——直连腿传结果 POST
+    的 `X-Worker-Id`；push 腿传 `push:<id>`（与认领时租约持有人同字）。承接成功写
+    `job_result_accepted`；409 写 `job_rejected`（「白算」的账）。
     """
     jd = hub._job_dir(jid)
     if not (jd / "manifest.json").exists():
@@ -145,7 +173,9 @@ def accept_result(
     if not hub.result_token_ok(jid, lease_token):
         return 403, "lease mismatch — 非本 job 租约持有人"
     if not hub.store_result(jid, result):
+        _append_attribution(hub, jid, "job_rejected", worker, "result already stored (duplicate write-back)")
         return 409, "result already stored (duplicate write-back)"
+    _append_attribution(hub, jid, "job_result_accepted", worker, "")
     return 200, "accepted"
 
 
@@ -726,7 +756,9 @@ class PushDispatcher:
                 if not isinstance(result, dict):
                     self._requeue(jid, lease, wid, "结果不是对象", avoid_worker=True)
                     return
-                code_, why = accept_result(self.hub, jid, result, lease, log=self._log)
+                code_, why = accept_result(
+                    self.hub, jid, result, lease, log=self._log, worker=push_worker_id_of(wid)
+                )
                 if code_ == 200:
                     self._log(f"{jid} <- {wid} 结果已回灌（{self._now() - t0:.0f}s）")
                     # landed ⇒ 给同 job 的其它在途副本推取消帧（§2.4/§2.9）。

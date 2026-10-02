@@ -76,7 +76,30 @@ class ResultRoutes:
         # 赢家可能持旧 token、输家根本没 token）。必须在租约校验**之前**：否则输了竞速
         # 的副本会因「非持有人」拿 403，而 worker 把 4xx 当确定性拒绝 → 报 job 失败。
         if (jd / "result").exists():
-            self._json({"error": "result already stored (race loser / duplicate)"}, 409)
+            # ★ 归属补记（plan/worker-contribution-view W2，O2 白算）：这条早退**不经过**
+            # `accept_result`（它只看已写路径），若不在这里落 `job_rejected`，晚到者的 GPU
+            # 时间在 hub 侧就一个字都没有。worker 取结果 POST 的 `X-Worker-Id`（新 worker
+            # 必带；旧 worker 空串 = 匿名，不编身份）。
+            reason = "result already stored (race loser / duplicate)"
+            self.hub.append_ledger(
+                jid,
+                {
+                    "event": "job_rejected",
+                    "job_id": jid,
+                    "worker": self._worker_id(),
+                    "reason": reason,
+                    "ts": self.hub._now(),
+                },
+            )
+            self._log_reject(
+                "result",
+                jid,
+                "409",
+                course=self.hub.course_of(jid) or "",
+                worker=self._worker_id(),
+                reason=reason,
+            )
+            self._json({"error": reason}, 409)
             return
         try:
             # 方案B（2026-09-10）：v2 体（gzip 裸二进制段）**按魔数自动识别** —— 不依赖
@@ -95,7 +118,12 @@ class ResultRoutes:
         # 那正是「一份对不上账的结果被静默落盘成一轮看起来正常的训练」的入口。
         lease_token = self._lease_token()
         code, why = accept_result(
-            self.hub, jid, result, lease_token, log=lambda m: self.log_message("%s", m)
+            self.hub,
+            jid,
+            result,
+            lease_token,
+            log=lambda m: self.log_message("%s", m),
+            worker=self._worker_id(),
         )
         if code != 200:
             # 与 claim 侧同规（2026-09-24 事故）：拒收必须在 hub 日志里留下

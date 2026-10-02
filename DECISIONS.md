@@ -6758,3 +6758,36 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
   `docs/nn/console.md` §22；计划 → `course-pill-precision.plan.md`（评审 P1–P4 已并入）；回归 →
   `tests/hub/test_queue_observe_pill.py` · `tests/worker/test_loop_tasks.py` ·
   `tests/trainer/test_loop_plan_waiting.py` · `dashboard/tests/training-pills.test.ts`。
+
+## §2026-10-02-goalnn-worker-contribution（2026-10-02，并行 worker 贡献度：承接面归属 + 两个单位组永不合并 + 课程只作 breakdowns 轴）
+
+- **背景**：7 门课并行、2 个云端 worker 领活的场景下，「谁干得多」在数据面上不成立：采样侧只有绝对
+  局数（无份额/无课程维度/无盯盘窗）；PPO 侧**归属在结算那一刻被丢掉**——`job_completed` 由训练侧写
+  （`remote/hub_client.py::mark_job_completed`）且无 worker，身份只在 hub 承接结果那一刻可得。评审另纠
+  两处：`hub/store_leases.py::mark_completed` 是生产零调用者的死代码（改它没有数据）；`DayBucket` 无
+  per-event 时间戳（滚动窗不能从日桶投影，须有界子日事件环）。
+- **备选与否决**：① 做一个综合贡献分（局 + job + 秒加权）——否：口径混算（与「成功率/产能分列分名」
+  同款裁决相悖），且会把 7 门课之间的差异抹平；② 把课程维度接回「按课缓存」——否：2026-09-26 解耦
+  裁决不动，课程只作 breakdowns 轴（按课名、不用 `it`）；③ 让云端 PPO worker 的采样局也计进 PPO 组
+  （或反向合并）——否：两组分母/单位/失败语义都不同，用户裁决**角色隔离**（归属由来源决定），同名不合并；
+  ④ 滚动窗从日桶投影——否：日桶只有日级计数、无子日时间戳，会做出看着对实际错的窗。
+- **决定**：① hub 承接面新增归属事件（**扩事件不新建账本**）：`accept_result` 成功写
+  `job_result_accepted`（worker = 显式传入 ∪ 当前租约持有人，push 腿 `push:` 前缀），三条 409 路径
+  （`_post_result` 早退 / `store_result` 失败 / push 输家）写 `job_rejected`；结果 POST 补 `X-Worker-Id`
+  （`post_result`，与 claim 同一身份）。事件与训练侧 `job_completed` 同册（`tmp/<课>/training_log.jsonl`），
+  读侧按 `job_id` join。⚠ 身份缺失（旧 worker 无头）⇒ 回退当前租约持有人，但 `lease_worker` 住在每课
+  `_JobStore`（`_HubQueue` 没有）⇒ 必须经 `_store_of` 解析，结果面不得 500。② 面板两组**永不合并**
+  （采样=局 / PPO=job），份额分母组内自洽，缺数据「—」；课程维度只作 breakdowns（机器×课矩阵 + 单点依赖
+  标记）；新增 `近 30 分钟/近 2 小时`滚动窗（既有 4 档一字不动），滚动窗吃**有界子日事件环**（2h+10min 保、
+  每节点 20000 条、触顶 `rollingTruncated` 出脚注）。③ 落位：节点页主体（份额列表 ⇄ 矩阵）+ 首页一行
+  缩略（同一份聚合的 `compactSummary` 裁剪，防两份真相）。
+- **违反后果**：把两组分母互加/做综合分 ⇒ 产出既非局数也非 job 数的假数；按名字归并同名身份 ⇒ 把采样机
+  与云机 worker 当同一台机器；用 `mark_completed` 或训练侧 `job_completed` 补归属 ⇒ 永远空手（写手无
+  身份）；从日桶投影滚动窗 ⇒ 窗内数字静默失真；缩略行另起一份计算 ⇒ 首页与节点页对不上；`_append_attribution`
+  直接调 `hub.lease_worker` ⇒ 旧 worker 的结果面 500（全量门禁抓到，回归用例已钉）。
+- **指针**：全文 → `docs/nn/console.md` §23 · `docs/nn/remote-transport.md` §55；计划 →
+  `plan/worker-contribution-view.plan.md`（2026-10-02 评审修订版）；回归 → `dashboard/tests/worker-contribution.test.ts`
+  （12 例）· `nn-training/tests/hub/test_worker_attribution.py`（6 例）；实现 → `dashboard/src/server/contribution.ts` ·
+  `dashboard/src/web/view/contribution.ts` · `dashboard/src/server/pool-history.ts`（滚动环/byCourse）·
+  `nn-training/remote/push_dispatch.py`（`_append_attribution`）· `nn-training/remote/job_lifecycle.py` ·
+  `nn-training/hub/result.py`。

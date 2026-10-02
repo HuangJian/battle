@@ -52,6 +52,7 @@ from common.protocol import (
     PRIORITY_ORDER,
     ROLE_ONLINE,
     WIRE_V2_CONTENT_TYPE,
+    WORKER_ID_HEADER,
     ProtocolError,
     RetryableError,
     pack_result_v2,
@@ -496,6 +497,9 @@ def post_result(
                             "Content-Type": ctype,
                             # H2：结果回传须携带领取时下发的 lease_token（hub 校验后收）
                             **({"X-Lease-Token": lease_token} if lease_token else {}),
+                            # 承接归属（plan/worker-contribution-view W2）：身份与 claim 同源。
+                            # 缺它 ⇒ hub 的 job_result_accepted / job_rejected 归不到人。
+                            WORKER_ID_HEADER: worker_tag(),
                         },
                         pace=_bulk_pace(_tok, BULK_P1_CRITICAL),
                     )

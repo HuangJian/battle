@@ -31,6 +31,7 @@ import { loadRegistry } from '../../core/registry'
 import type { RlConfig } from '../../core/types'
 import { type NodeHistoryRow, type PoolView, type SelfStatus, stripIsoPrefix } from '../../web/view'
 import { loadConsoleState } from '../actions'
+import { buildContributionView, inflightByWorkerFromQueue } from '../contribution'
 import {
   type HistoryAggregate,
   type NodeHistory,
@@ -44,6 +45,7 @@ import {
 } from '../pool-history'
 import { createSwrCache } from '../../core/swr-cache'
 import { discoverCourses, effectiveCourse } from './courses'
+import { getHubAdmin } from './overview'
 
 // ────────────────────────── /api/pool（§3.3 数据端点：结构现算 ⊕ 机器级探测 SWR） ──────────────────────────
 
@@ -59,6 +61,8 @@ interface PoolProbes {
   pingById: Map<string, { ping: Record<string, unknown> | null; ms: number | null }>
   hash: string
   selfStatus: SelfStatus | null
+  /** PPO 在飞：hub `/admin/queue` 的 inflightDetail → worker 计数（5s SWR，与总览/pill 同源）。 */
+  inflightByWorker: Map<string, number>
 }
 
 const poolProbeCache = createSwrCache<PoolProbes>(POOL_TTL_MS)
@@ -225,6 +229,8 @@ function assemblePoolView(cfg: RlConfig, course: string, p: PoolProbes, days: st
   // ★ 切天零重算：`p.agg` 是**全量**（与窗口无关，探测层缓存），这里只做纯投影。
   const w = resolveWindow(days, Date.now(), p.agg.epochMs)
   const proj: WindowAggregate = projectWindow(p.agg, w)
+  // 贡献度（plan/worker-contribution-view）：同一份 agg/窗口的纯投影 + PPO 账本事件（memo）。
+  const contribution = buildContributionView(p.agg, w, p.inflightByWorker)
   const nodes: NodeHistoryRow[] = cfg.nodes.map((n) => {
     const h = proj.hist.get(n.id) ?? emptyHistory()
     const probe = p.pingById.get(n.id)
@@ -268,6 +274,7 @@ function assemblePoolView(cfg: RlConfig, course: string, p: PoolProbes, days: st
     local,
     selfStatus: p.selfStatus,
     localHash: p.hash,
+    contribution,
   }
 }
 
@@ -275,6 +282,8 @@ function assemblePoolView(cfg: RlConfig, course: string, p: PoolProbes, days: st
 async function computePoolProbes(cfg: RlConfig): Promise<PoolProbes> {
   const hash = await localCodeHash()
   const agg = aggregateNodeHistory()
+  // hub 观测面（与逐节点 ping 并行起跑；5s SWR 已由快照刷新器预热，稳态零额外代价）。
+  const hubAdminPromise = getHubAdmin(cfg, '').catch(() => null)
   const probes = await Promise.all(
     cfg.nodes.map(async (n) => {
       if (!n.enabled)
@@ -293,11 +302,13 @@ async function computePoolProbes(cfg: RlConfig): Promise<PoolProbes> {
     }),
   )
 
+  const hubAdmin = await hubAdminPromise
   return {
     at: Date.now(),
     agg,
     pingById: new Map(probes.map(({ n, ping, ms }) => [n.id, { ping, ms }])),
     hash,
     selfStatus: await fetchSelfStatus(cfg),
+    inflightByWorker: inflightByWorkerFromQueue(hubAdmin?.queue ?? null),
   }
 }

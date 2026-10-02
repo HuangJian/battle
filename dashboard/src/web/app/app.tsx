@@ -569,6 +569,7 @@ export function App({ initial }: AppProps) {
               <NodePills
                 nodes={nodes}
                 local={localNode}
+                brief={stateView?.contributionBrief ?? null}
                 onAction={doAction}
                 onMore={() => navigate('nodes')}
                 readOnly={readOnly}

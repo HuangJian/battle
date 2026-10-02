@@ -22,6 +22,7 @@ import { DataTable, type Col } from '../../components/DataTable'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { usePolling } from '../lib/usePolling'
 import { fetchPool } from '../lib/api-client'
+import { WorkerContribution } from './WorkerContribution'
 
 export interface NodeStatsProps {
   /** 抽屉开着才轮询（DS-U5 语义；展开补拉一次）。 */
@@ -336,6 +337,11 @@ export function NodeStats({ enabled, poolFreshNonce }: NodeStatsProps) {
           <span>仅看异常</span>
         </label>
       </div>
+      <WorkerContribution
+        variant="full"
+        contribution={pool.contribution}
+        windowLabel={pool.window.label}
+      />
       <DataTable<NodeHistoryRow>
         rows={filtered}
         rowKey={(r) => r.id}

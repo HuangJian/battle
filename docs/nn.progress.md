@@ -107,6 +107,8 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | # | 事项 | 出处 | 关闭判据 |
 |---|---|---|---|
 | 9 | 真机「一个 serve 进程同时带 BC + RL」的实跑 | `docs/nn/console.md` §6 | 一次真跑（与 R2e 同口径） |
+| 18 | **归属事件体量/保留期未定**：`job_result_accepted`/`job_rejected` 进课程账本（`tmp/<课>/training_log.jsonl`）后随作业数增长；读侧只读尾部 4000 行 | `docs/nn/console.md` §23 · `docs/nn/remote-transport.md` §55 | 真机跑一段后量账本增速与 `job_rejected` 占比 ⇒ 定保留策略（轮转/裁剪）或写明「不裁剪 + 理由」 |
+| 19 | **贡献度「按机时加权」仍开放**（当前只计件：局/job；一局 eval 与一局 rollout 机时不同） | `docs/nn/console.md` §23 | 真机对比读数：计件份额与机时加权份额的 worker 排序是否分叉 ⇒ 分叉才做 |
 
 ### 3.5 课程侧待办（可能已被后续条目取代）
 
@@ -803,3 +805,40 @@ h4-aim-k10/k25 跑满 40 轮仍显示「推进中」——只读读面（`run_rl
 0 fail**（typecheck + 三 bundle ok）· 根 `bun run check` **2345 pass / 12 skip / 0 fail** ·
 `bun run build` 过。决策 → `DECISIONS.md` §2026-10-02-goalnn-course-pill-precision；计划 →
 `course-pill-precision.plan.md`（2026-10-02 评审修订版：P1–P4 已并入并实施）。
+
+## 2026-10-02 · worker-contribution-view：并行 worker 贡献度面板（承接面归属 + 两组不合并 + 课程矩阵）
+
+触发（用户 2026-10-02）：「七门课程并行训练，两个云端 worker 一起领任务……想要在 dashboard 上一个
+直观的方式查看多个并行 worker 的贡献度」。评审先纠两处结构性错误：W2 的旧锚点
+`hub/store_leases.py::mark_completed` 是**生产零调用者的死代码**（真实 `job_completed` 写手 = 训练侧
+`remote/hub_client.py::mark_job_completed`，且无 worker 身份），身份只在 hub **承接结果那一刻**可得；
+`DayBucket` 无 per-event 时间戳 ⇒ 滚动窗不能从日桶投影，须有界子日事件环。plan →
+`plan/worker-contribution-view.plan.md`（2026-10-02 评审修订版）。
+
+落地（W0–W4）：
+
+- **W2 hub 承接归属**（唯一 trainer/hub 侧改动；扩事件不新建账本）：`job_lifecycle.post_result` 结果 POST
+  补 `X-Worker-Id`；`push_dispatch.accept_result` 成功写 `job_result_accepted`（worker = 显式传入 ∪ 当前
+  租约持有人，push 腿 `push:` 前缀）；**三条 409 路径**（`hub/result.py` 早退 / `store_result` 首写锁定
+  失败 / push 腿输家）写 `job_rejected`；事件与训练侧 `job_completed` 同册（`tmp/<课>/training_log.jsonl`），
+  读侧按 `job_id` join。→ `docs/nn/remote-transport.md` §55；
+- **W1 纯函数 + 滚动窗**：`web/view/contribution.ts`（份额分母组内自洽 / 单点标记 / 缩略 / `fmtShare`
+  缺数据「—」）；`pool-types` 新增 `30m`/`2h` 滚动窗（既有 4 档一字不动）；`pool-history` 新收**有界子日
+  事件环**（`ROLLING_KEEP_MS`=2h+10min、每节点 `ROLLING_CAP=20000`、触顶 `rollingTruncated`）+ `byCourse`
+  课维度 + `projectCourseBreakdown`（按课名，不用 `it`）；
+- **W3 装配 + UI**：`server/contribution.ts`（fs 唯一实现：采样聚合 ⊕ PPO 账本尾部 join ⊕ 在飞；memo 仿
+  `aggMemo`，不新增缓存层）+ `WorkerContribution.tsx`（full：份额列表 ⇄ 课程矩阵 + 脚注；compact：首页
+  一行）+ 接入 `NodeStats`/`NodePills`/`app.tsx` + `theme.css`（份额条纯 CSS `data-w`，无内联 style）。
+  → `docs/nn/console.md` §23；
+- **W4 文档**：console §23 · remote-transport §55 · 本条 · DECISIONS。
+
+**★ 全量门禁抓到一条定向没覆盖的真回归**：`_append_attribution` 的无身份回退曾直接调 `hub.lease_worker`
+——而它住在每课 `_JobStore`（`_HubQueue` 没有）⇒ 旧 worker（结果 POST 不带头）的结果面直接 **500**。
+修法：经 `_store_of` 解析归属课程再取租约持有人；`test_remote_ppo.py` 两条既有用例 + 新回归用例
+（`test_missing_worker_identity_falls_back_to_lease_holder`）钉住。
+
+读数：dashboard typecheck 绿 + **1277 pass / 0 fail**（新 12 例）+ 三 bundle ok · nn 全量门禁
+**3511 passed / 9 skipped**（ruff + mypy 571 文件全量；新 6 例 = 归属 5 + 回退回归 1）· 根 `bun run check`
+**2345 pass / 12 skip / 0 fail**（122509 expect；check-decisions ok 584 ids）· `bun run build` 过。
+决策 → `DECISIONS.md` §2026-10-02-goalnn-worker-contribution；全文 → `docs/nn/console.md` §23 ·
+`docs/nn/remote-transport.md` §55；计划 → `plan/worker-contribution-view.plan.md`（评审修订版 W0–W4）。

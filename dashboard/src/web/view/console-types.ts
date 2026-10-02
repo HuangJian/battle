@@ -1,5 +1,6 @@
 /** console-types.ts — 控制台整页视图类型（组件 / 节点 / 模式 / 指标 / 整页快照）与展示辅助。 */
 import { ParallelOverviewView, PushWorkerRegistryView } from './course-overview'
+import { ContributionBrief } from './contribution'
 import { LoopQueueView } from './loop-queue'
 import { IterRow, PairedReferee } from './metric-types'
 import { PhaseInfo } from './phase'
@@ -316,6 +317,9 @@ export interface ConsoleStateView {
   /** 训练正常完成且进程停车等待重启（账本尾行 run_complete + 进程仍存活时派生）：
    *  info 横幅——本地已停采、云机已停机；resume（新 run_start/iteration）后自动消失。 */
   loopComplete?: LoopComplete | null
+  /** 并行 worker 贡献度缩略（plan/worker-contribution-view W3b；首页 NodePills 下方一行）。
+   *  缺省/null = 旧视图或计算失败（UI 不画该行）。 */
+  contributionBrief?: ContributionBrief | null
   /** 课程热加载最新判决（§2026-09-13-hot-reload；账本最近一条 course_edit 事件）。
    *  rejected = 语料身份编辑被拒 → 错误横幅；restored/applied 不上横幅。 */
   courseEdit?: CourseEdit | null

@@ -25,16 +25,19 @@
  */
 
 import { useState } from 'preact/hooks'
-import { nodeHealth, type NodeLocalView, type NodeView } from '../../view'
+import { type ContributionBrief, nodeHealth, type NodeLocalView, type NodeView } from '../../view'
 import { Switch } from '../../components/Switch'
 import { SectionHeader } from '../../components/SectionHeader'
 import { StatusRow } from '../../components/StatusRow'
 import type { StatusTone } from '../../components/StatusDot'
+import { WorkerContribution } from './WorkerContribution'
 
 export interface NodePillsProps {
   nodes: NodeView[]
   /** 本机直跑节点（§361⑤：只读展示；无池数据/无槽位时缺省）。 */
   local?: NodeLocalView | null
+  /** 并行 worker 贡献度缩略（plan/worker-contribution-view W3b；缺省不画该行）。 */
+  brief?: ContributionBrief | null
   onAction: (act: string, body: Record<string, unknown>) => void
   onMore: () => void
   /** 局域网只读视图：行无点击语义（编辑/启用/冒烟仅本机），悬停提示说明。 */
@@ -241,7 +244,7 @@ export function LocalRow({ local, off }: { local: NodeLocalView; off?: boolean }
   )
 }
 
-export function NodePills({ nodes, local, onAction, onMore, readOnly }: NodePillsProps) {
+export function NodePills({ nodes, local, brief, onAction, onMore, readOnly }: NodePillsProps) {
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [showDisabled, setShowDisabled] = useState(false)
@@ -326,6 +329,7 @@ export function NodePills({ nodes, local, onAction, onMore, readOnly }: NodePill
           {disabled.map((n) => row(n))}
         </>
       ) : null}
+      <WorkerContribution variant="compact" brief={brief ?? null} onMore={onMore} />
       <button type="button" className="tc-btn tc-btn--sm" onClick={onMore}>
         节点统计 ›
       </button>

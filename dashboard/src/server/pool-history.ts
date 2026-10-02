@@ -21,7 +21,12 @@
 import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
 import { dirname, join } from 'path'
 import { tmpPoolDir } from '../core/paths'
-import { fmtFullTs, latestIterationFromLedgerTail, stripIsoPrefix } from '../web/view'
+import {
+  type ContributionSplit,
+  fmtFullTs,
+  latestIterationFromLedgerTail,
+  stripIsoPrefix,
+} from '../web/view'
 // 直连 api/logs 的文件而非 `../api` 桶：桶经 snapshot-cache 反向 import 本模块（成环）。
 import { readLedgerTail } from './api/logs'
 
@@ -56,6 +61,30 @@ function poolEpochMs(): number {
 /** 大文件阈值：超过它只读尾部（`readLedgerTail`，诚实截断由 `ActiveFlow.truncated` 上屏）。 */
 const LARGE_META_BYTES = 2 * 1024 * 1024
 const LARGE_META_TAIL_LINES = 20_000
+
+/** 滚动窗口（`近 30 分钟`/`近 2 小时`）的事件环保留时长：2h + 10min 余量。
+ *
+ *  ⚠ 为什么滚动窗**不能**吃日桶：`DayBucket` 只有日级计数，`results` 是 `boolean[]`
+ *  （无时间戳）——`now - T` 的窗口从日桶里根本投不出来。环里的事件全部带 ms，
+ *  由 `projectRollingWindow` 过滤重建 `NodeHistory`。 */
+export const ROLLING_KEEP_MS = 2 * 60 * 60_000 + 10 * 60_000
+/** 每节点事件环硬上限：命中即丢最旧一半并置截断标记（有界内存；极端忙节点才可能触发）。 */
+export const ROLLING_CAP = 20_000
+
+/** 子日事件环的一行（滚动窗的唯一数据源）。 */
+export interface RollingEvent {
+  ms: number
+  /** 是否属于已完成轮（与 DayBucket 同一数据卫生口径；投影层按它过滤计数）。 */
+  counted: boolean
+  ok: boolean
+  mode: 'rollout' | 'eval'
+  elapsedSec: number | null
+  wallSec: number | null
+  /** 失败原因（已剥 ISO 前缀、截 120；成功行空串）。 */
+  reason: string
+  /** 课名（流目录首段；矩阵的课维度）。 */
+  course: string
+}
 
 /** 进程内聚合 memo 的最短复用窗口（毫秒）。
  *
@@ -248,6 +277,12 @@ export interface LatestRound {
 export interface HistoryAggregate {
   /** 本地日（'YYYY-MM-DD'）→ 节点 → 日桶。 */
   byDay: Map<string, Map<string, DayBucket>>
+  /** 日 → 节点 → 课 → 计数（课程矩阵的采样维度；只收已完成轮，与日桶同一过滤）。 */
+  byCourse: Map<string, Map<string, Map<string, ContributionSplit>>>
+  /** 子日有界事件环（滚动窗唯一数据源）：节点 → 按时间升序事件。 */
+  rolling: Map<string, RollingEvent[]>
+  /** 事件环触顶被截断的节点（滚动窗数字偏低时 UI 诚实标注）。 */
+  rollingTruncated: Set<string>
   /** 本次合并的训练流（诊断：节点页脚注「数据来自 N 个流」）。 */
   sources: ActiveFlow[]
   /** 历史锚点毫秒（渲染层展示用）。 */
@@ -284,24 +319,48 @@ function dayStart(ms: number, deltaDays = 0): number {
   return d.getTime()
 }
 
-/** 窗口描述：按**本地日 key** 过滤（含首含尾）+ 展示用起止毫秒。 */
+/** 窗口描述：日窗按**本地日 key** 过滤（含首含尾）；滚动窗按 `now - T` 毫秒过滤。 */
 export interface NodeWindow {
+  /** 窗口种类：'day' = 本地日窗（切换只投影）；'rolling' = `now - T` 滚动窗（吃事件环）。 */
+  kind: 'day' | 'rolling'
   key: string
   label: string
-  /** 含首的本地日 key。 */
+  /** 含首的本地日 key（rolling 窗为覆盖范围的展示值）。 */
   fromDay: string
   /** 含尾的本地日 key。 */
   toDay: string
   /** 展示用窗口起点毫秒（与 epoch 取较大者）。 */
   startMs: number
   endMs: number
+  /** rolling 窗的时长（毫秒）；day 窗为 null。 */
+  durationMs: number | null
 }
 
 /** `?days=` 规格 → 窗口。接受 `today` / `yesterday` / `all` / `7` / `d7` / 任意 `N`（N≥1 = 最近 N 天含今天）；
  *  缺省/非法 = 今天。 */
+/** 滚动窗档位（与 UI `WINDOW_OPTIONS` 同键）。 */
+const ROLLING_SPECS: Record<string, { ms: number; label: string }> = {
+  '30m': { ms: 30 * 60_000, label: '近 30 分钟' },
+  '2h': { ms: 2 * 60 * 60_000, label: '近 2 小时' },
+}
+
 export function resolveWindow(spec: string, nowMs: number, epochMs: number): NodeWindow {
   const s = (spec ?? '').trim().toLowerCase()
   const todayStart = dayStart(nowMs)
+  const roll = ROLLING_SPECS[s]
+  if (roll) {
+    const startMs = Math.max(nowMs - roll.ms, epochMs)
+    return {
+      kind: 'rolling',
+      key: s,
+      label: roll.label,
+      fromDay: localDayKey(startMs),
+      toDay: localDayKey(nowMs),
+      startMs,
+      endMs: nowMs,
+      durationMs: roll.ms,
+    }
+  }
   let fromDayMs: number
   let toDayMs = todayStart
   let key: string
@@ -324,12 +383,14 @@ export function resolveWindow(spec: string, nowMs: number, epochMs: number): Nod
     fromDayMs = dayStart(todayStart, -(days - 1))
   }
   return {
+    kind: 'day',
     key,
     label,
     fromDay: localDayKey(fromDayMs),
     toDay: localDayKey(toDayMs),
     startMs: Math.max(fromDayMs, epochMs),
     endMs: nowMs,
+    durationMs: null,
   }
 }
 
@@ -337,6 +398,7 @@ export function resolveWindow(spec: string, nowMs: number, epochMs: number): Nod
  *
  *  所有展示字段都是窗口口径（唯一例外：`lastContrib` 是「最新完成轮」、与窗口无关）。 */
 export function projectWindow(agg: HistoryAggregate, w: NodeWindow): WindowAggregate {
+  if (w.kind === 'rolling') return projectRollingWindow(agg, w)
   const hist = new Map<string, NodeHistory>()
   const nodes = new Set<string>()
   const days: Array<[string, Map<string, DayBucket>]> = []
@@ -400,6 +462,131 @@ export function projectWindow(agg: HistoryAggregate, w: NodeWindow): WindowAggre
     window: w,
     latestRound: agg.latestRound,
   }
+}
+
+/** 滚动窗投影（纯函数）：从子日事件环过滤 `[startMs, endMs]` 重建 NodeHistory。
+ *
+ *  计数/样本/完成率只收 `counted`（进行中那一轮不算，与日桶同规）；时间戳/错误列收全部行
+ *  （可达性口径与日窗一致）。`lastContrib` 与窗口无关，仍取聚合层的值。 */
+function projectRollingWindow(agg: HistoryAggregate, w: NodeWindow): WindowAggregate {
+  const hist = new Map<string, NodeHistory>()
+  for (const [node, ring] of agg.rolling) {
+    const h = emptyHistory()
+    h.lastContrib = agg.lastContrib.get(node) ?? -1
+    let lastOkTs = ''
+    let lastFailTs = ''
+    let lastTs = ''
+    let lastError = ''
+    let lastOkTsMs: number | null = null
+    let lastOkElapsedSec: number | null = null
+    let lastFailTsMs: number | null = null
+    let lastErrorTsMs: number | null = null
+    for (const e of ring) {
+      if (e.ms < w.startMs || e.ms > w.endMs) continue
+      const ts = fmtFullTs(e.ms)
+      if (ts > lastTs) lastTs = ts
+      if (e.ok) {
+        if (ts > lastOkTs) lastOkTs = ts
+        if (lastOkTsMs == null || e.ms >= lastOkTsMs) {
+          lastOkTsMs = e.ms
+          lastOkElapsedSec = e.elapsedSec
+        }
+      } else {
+        if (ts > lastFailTs) lastFailTs = ts
+        if (lastFailTsMs == null || e.ms > lastFailTsMs) lastFailTsMs = e.ms
+        if (e.reason && (lastErrorTsMs == null || e.ms >= lastErrorTsMs)) {
+          lastError = e.reason
+          lastErrorTsMs = e.ms
+        }
+      }
+      if (!e.counted) continue
+      h.recent.push(e.ok)
+      if (h.recent.length > 10) h.recent.shift()
+      if (e.ok) {
+        h.ok++
+        if (e.mode === 'eval') h.winEval++
+        else h.winRollout++
+        pushWindowSample(h.elapsedRecent, e.elapsedSec)
+        pushWindowSample(h.wallRecent, e.wallSec)
+      } else {
+        h.fail++
+      }
+    }
+    // 「最近错误/失败」与日窗同规：只在近一小时上屏。
+    h.lastError = lastError && w.endMs - (lastErrorTsMs ?? 0) <= 3_600_000 ? lastError : ''
+    h.lastFailTs = lastFailTs && w.endMs - (lastFailTsMs ?? 0) <= 3_600_000 ? lastFailTs : '-'
+    h.lastOkTs = lastOkTs || '-'
+    h.lastTs = lastTs || '-'
+    h.lastOkTsMs = lastOkTsMs
+    h.lastOkElapsedSec = lastOkElapsedSec
+    h.avgElapsedSec = windowMeanSec(h.elapsedRecent)
+    h.avgWallSec = windowMeanSec(h.wallRecent)
+    hist.set(node, h)
+  }
+  return {
+    hist,
+    sources: agg.sources,
+    epochMs: agg.epochMs,
+    window: w,
+    latestRound: agg.latestRound,
+  }
+}
+
+/** 课维度投影（纯函数，矩阵的采样半边）：day 窗按日过滤合并；rolling 窗从事件环过滤。
+ *  只收已完成轮；返回 `节点 → 课 → 计数`。 */
+export function projectCourseBreakdown(
+  agg: HistoryAggregate,
+  w: NodeWindow,
+): Map<string, Map<string, ContributionSplit>> {
+  const out = new Map<string, Map<string, ContributionSplit>>()
+  const add = (node: string, course: string, ok: boolean, mode: 'rollout' | 'eval'): void => {
+    let byCourse = out.get(node)
+    if (!byCourse) {
+      byCourse = new Map()
+      out.set(node, byCourse)
+    }
+    let s = byCourse.get(course)
+    if (!s) {
+      s = { rollout: 0, eval: 0, fail: 0 }
+      byCourse.set(course, s)
+    }
+    if (ok) {
+      if (mode === 'eval') s.eval++
+      else s.rollout++
+    } else {
+      s.fail++
+    }
+  }
+  if (w.kind === 'rolling') {
+    for (const [node, ring] of agg.rolling) {
+      for (const e of ring) {
+        if (!e.counted || e.ms < w.startMs || e.ms > w.endMs) continue
+        add(node, e.course, e.ok, e.mode)
+      }
+    }
+    return out
+  }
+  for (const [day, byNode] of agg.byCourse) {
+    if (day < w.fromDay || day > w.toDay) continue
+    for (const [node, byCourse] of byNode) {
+      for (const [course, s] of byCourse) {
+        let t = out.get(node)?.get(course)
+        if (!t) {
+          t = { rollout: 0, eval: 0, fail: 0 }
+          let m = out.get(node)
+          if (!m) {
+            m = new Map()
+            out.set(node, m)
+          }
+          m.set(course, t)
+        }
+        t.rollout += s.rollout
+        t.eval += s.eval
+        t.fail += s.fail
+      }
+    }
+  }
+  return out
 }
 
 /**
@@ -483,6 +670,8 @@ interface ParsedRow {
 interface RowEntry {
   r: ParsedRow
   counted: boolean
+  /** 流目录首段 = 课名（`tmp/<课>` 与 `tmp/<课>/traj` 同归一；**不用 it**）。 */
+  course: string
 }
 
 function parseMetaRow(line: string, epochStr: string): ParsedRow | null {
@@ -521,10 +710,20 @@ function parseMetaRow(line: string, epochStr: string): ParsedRow | null {
   }
 }
 
+/** 落桶上下文：日桶 / 课维度 / 滚动环共用同一遍行序（时间升序）。 */
+interface BucketCtx {
+  nowMs: number
+  course: string
+  byCourse: Map<string, Map<string, Map<string, ContributionSplit>>>
+  rolling: Map<string, RollingEvent[]>
+  rollingTruncated: Set<string>
+}
+
 function bucketRow(
   byDay: Map<string, Map<string, DayBucket>>,
   r: ParsedRow,
   counted: boolean,
+  ctx: BucketCtx,
 ): void {
   const key = localDayKey(r.tsMs)
   let byNode = byDay.get(key)
@@ -554,7 +753,30 @@ function bucketRow(
     }
   }
   if (r.ts > b.lastTs) b.lastTs = r.ts
-  // ② 计数 / 样本 / 完成率：**只认已完成轮**（数据卫生：进行中那一轮的半截计数不作数）。
+  // ② 子日事件环（滚动窗）：**全部行都进**（时间戳/错误列是可达性口径），计数由投影层
+  //    按 `counted` 过滤。环只保留 `ROLLING_KEEP_MS` 内的事件（有界），触顶丢最旧一半。
+  if (r.tsMs >= ctx.nowMs - ROLLING_KEEP_MS) {
+    let ring = ctx.rolling.get(r.node)
+    if (!ring) {
+      ring = []
+      ctx.rolling.set(r.node, ring)
+    }
+    if (ring.length >= ROLLING_CAP) {
+      ring.splice(0, Math.floor(ROLLING_CAP / 2))
+      ctx.rollingTruncated.add(r.node)
+    }
+    ring.push({
+      ms: r.tsMs,
+      counted,
+      ok: r.ok,
+      mode: r.mode,
+      elapsedSec: typeof r.elapsedSec === 'number' && r.elapsedSec > 0 ? r.elapsedSec : null,
+      wallSec: typeof r.wallSec === 'number' && r.wallSec > 0 ? r.wallSec : null,
+      reason: r.ok ? '' : stripIsoPrefix(r.reason).slice(0, 120),
+      course: ctx.course,
+    })
+  }
+  // ③ 计数 / 样本 / 完成率：**只认已完成轮**（数据卫生：进行中那一轮的半截计数不作数）。
   if (!counted) return
   b.results.push(r.ok)
   if (b.results.length > 10) b.results.shift()
@@ -566,6 +788,28 @@ function bucketRow(
     pushWindowSample(b.wall, r.wallSec)
   } else {
     b.fail++
+  }
+  // ④ 课维度（矩阵的采样半边）：与日桶同过滤、同分母（只收已完成轮）。
+  let bn = ctx.byCourse.get(key)
+  if (!bn) {
+    bn = new Map()
+    ctx.byCourse.set(key, bn)
+  }
+  let bc = bn.get(r.node)
+  if (!bc) {
+    bc = new Map()
+    bn.set(r.node, bc)
+  }
+  let cs = bc.get(ctx.course)
+  if (!cs) {
+    cs = { rollout: 0, eval: 0, fail: 0 }
+    bc.set(ctx.course, cs)
+  }
+  if (r.ok) {
+    if (r.mode === 'eval') cs.eval++
+    else cs.rollout++
+  } else {
+    cs.fail++
   }
 }
 
@@ -595,6 +839,9 @@ export function pruneByEpoch<T extends { mtimeMs: number }>(cands: T[], epochMs:
  *  测试注入可控时钟，才好验「稳态每 5s 调用也必须 ≤30s 重扫一次」这条不变量）。 */
 export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggregate {
   const byDay = new Map<string, Map<string, DayBucket>>()
+  const byCourse = new Map<string, Map<string, Map<string, ContributionSplit>>>()
+  const rolling = new Map<string, RollingEvent[]>()
+  const rollingTruncated = new Set<string>()
   const tmpDir = tmpPoolDir()
   const epochMs = poolEpochMs()
   const epochStr = fmtFullTs(epochMs)
@@ -719,9 +966,11 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
 
     // ③ **全部行都进全量行集**（时间戳/错误列是可达性口径，见 DayBucket）；`counted` 标记
     //    「这行的计数算不算」——已完成轮 = it <= baseIt_flow（无 it 的行照算已完成）。
+    //    课名 = 流目录首段（`tmp/<课>` 与 `tmp/<课>/traj` 同归一；**不用 it**，§4.3）。
+    const courseName = flow.dir.split('/')[0] ?? flow.dir
     for (const r of rows) {
       const counted = !(baseIt >= 0 && r.it >= 0 && r.it > baseIt)
-      allRows.push({ r, counted })
+      allRows.push({ r, counted, course: courseName })
     }
 
     flows.push({ src: flow, itByNode, baseIt, completedAtMs, contribAtBase })
@@ -729,7 +978,11 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
 
   // ④ 时间升序后落桶（跨流合并后仍按时间有序 ⇒ results 时间升序、lastXxx 取最大才对）。
   allRows.sort((a, b) => a.r.tsMs - b.r.tsMs)
-  for (const e of allRows) bucketRow(byDay, e.r, e.counted)
+  const ctx: BucketCtx = { nowMs, course: '', byCourse, rolling, rollingTruncated }
+  for (const e of allRows) {
+    ctx.course = e.course
+    bucketRow(byDay, e.r, e.counted, ctx)
+  }
 
   // ⑤ 最新完成轮：**跨课按完成时刻取最新**（不是比 it 大小——it 是课程内序号，§1.1）。
   //    停摆课因完成时刻旧而自然落选，不必额外过滤。
@@ -747,7 +1000,16 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
     ? { dir: winner.src.dir, it: winner.baseIt, completedAtMs: winner.completedAtMs }
     : null
 
-  const out: HistoryAggregate = { byDay, sources, epochMs, lastContrib, latestRound }
+  const out: HistoryAggregate = {
+    byDay,
+    byCourse,
+    rolling,
+    rollingTruncated,
+    sources,
+    epochMs,
+    lastContrib,
+    latestRound,
+  }
   // ★ 时刻只在**计算**这一遍落，命中路径一个字都不改（见 `aggMemoReusable`）。
   aggMemo = { root: tmpDir, epochMs, fp, computedAt: nowMs, val: out }
   return out

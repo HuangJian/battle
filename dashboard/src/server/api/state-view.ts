@@ -2,7 +2,9 @@
 import { existsSync } from 'fs'
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
-import type { ConsoleStateView, MetricsView } from '../../web/view'
+import { type ConsoleStateView, type MetricsView, compactSummary } from '../../web/view'
+import { buildContributionView, inflightByWorkerFromQueue } from '../contribution'
+import { aggregateNodeHistory, resolveWindow } from '../pool-history'
 import { courseEnableMarkerPath, isBcCourse } from '../../stack/courses'
 import { loadConsoleState, readCourseModes } from '../actions'
 import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/specs'
@@ -96,6 +98,19 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     buildOverview(cfg, courses, course, training).catch(() => null),
     buildWorkerRegistry(cfg, course).catch(() => null),
   ])
+  // 首页缩略（plan/worker-contribution-view W3b）：与 /api/pool **同一模块**的 compactSummary
+  // 输出（同一份聚合的裁剪，不是第二份计算）；观测面坏掉不得把 /api/state 带崩 ⇒ 整段 try。
+  let contributionBrief: ConsoleStateView['contributionBrief'] = null
+  try {
+    const admin = await hubProbe
+    const agg = aggregateNodeHistory()
+    const w = resolveWindow('today', Date.now(), agg.epochMs)
+    contributionBrief = compactSummary(
+      buildContributionView(agg, w, inflightByWorkerFromQueue(admin.queue)),
+    )
+  } catch {
+    contributionBrief = null
+  }
   return {
     time: new Date().toISOString(),
     course,
@@ -158,5 +173,6 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     gateHalt: buildGateHaltView(),
     ppoQueueStall,
     loopComplete,
+    contributionBrief,
   }
 }

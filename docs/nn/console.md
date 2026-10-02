@@ -7,6 +7,66 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §23 并行 worker 贡献度面板：承接面归属 + 两组不合并 + 机器×课程矩阵（plan/worker-contribution-view，2026-10-02）
+
+**触发**（用户 2026-10-02）：「现在有七门课程并行训练，两个云端 worker 一起领任务。在这种场景下，
+我想要在 dashboard 上有一个直观的方式查看多个并行 worker 的贡献度。」
+
+**旧盲区**（两条数据链各缺一半，plan §1–§2）：
+
+* **采样侧**（`dist-agent-meta.jsonl` → `aggregateNodeHistory`）只有绝对局数（`winRollout`/`winEval`），
+  没有份额、没有课程维度、没有盯盘窗口；
+* **PPO 侧**「哪个云端 worker 完成了几个 job」在任何账本里都不存在——`job_completed` 由**训练侧**写
+  （`remote/hub_client.py::mark_job_completed`，字段只有 `{event, job_id, ts}`），身份只在 **hub 承接结果
+  那一刻**可得 ⇒ W2 把归属定格进账本（契约见 `docs/nn/remote-transport.md` §55）。
+
+**语义裁决**（用户 2026-10-02 已裁决；口径先定死）：
+
+| 裁决 | 内容 |
+|---|---|
+| **两组永不合并** | 采样（单位：局）与 PPO（单位：job）各自成表、**各用各组的分母**；不做综合贡献分（机时不同、用途不同） |
+| **角色隔离**（G9） | 归属**由来源决定，不由名字决定**：采样身份 = meta 的 `node`/`local`；PPO 身份 = 承接那一刻的 worker（`worker_tag()`；push 腿带 `push:` 前缀）。**同名不合并**——同一台机器既采样又做 PPO ⇒ 两条独立记录，分组渲染、绝不互相补数 |
+| **课程维度只作 breakdowns 轴** | 不回到「按课缓存」模型（2026-09-26 解耦裁决不动）；按课聚合用**课名**（流目录首段 / 账本文件），**不用 `it`** |
+| **缺数据「—」** | 分母 0 / 无数据 ⇒ 份额 `null` ⇒ 渲染 `—`（不是 0%）；`truncated` 必出脚注 |
+
+**落位**（同一份聚合，两种形态；组件 `WorkerContribution.tsx`）：
+
+* **节点页主体**（`NodeStats` 抽屉「节点统计」tab，`variant="full"`）：**份额列表 ⇄ 课程矩阵**同页切换 + 口径脚注；
+* **首页节点区缩略**（`NodePills` 下方**另起一行**，`variant="compact"`）：两组 top-N + 组总量，点击跳节点页。
+  缩略 = **同一份聚合的裁剪**（`compactSummary`），不是第二份计算 ⇒ 首页与节点页不可能对不上。
+
+**列口径**：
+
+* 采样组：`节点 · 份额 · rollout · eval · 失败`（份额 = 组内成功局占比；成功局 = rollout + eval，失败单列）；
+* PPO 组：`worker · 份额 · 完成 · 晚到·白算 · 在飞`（份额 = 组内完成 job 占比；**实际投入 = 完成 + 晚到**）。
+
+**数据来源**（`server/contribution.ts` = fs 层唯一实现；纯函数在 `web/view/contribution.ts`）：
+
+* 采样：既有 `aggregateNodeHistory`（memo）⊕ `projectWindow` / 新增 `projectCourseBreakdown`；滚动窗从
+  **有界子日事件环**重建（`DayBucket` 只有日级计数、无 per-event 时间戳，无法从日桶投影）；
+* PPO：逐课 `tmp/<课>/training_log.jsonl` **只读尾部**（4000 行，有界内存），`job_completed` 按 `job_id`
+  join `job_result_accepted` 取 worker；`job_rejected` = 「晚到·白算」；进程内 memo（文件指纹 + 30s 下限，
+  仿 `aggMemo`）——**不新增第二个缓存层**；
+* 在飞：hub `/admin/queue`（既有 5s SWR，`inflightDetail[].worker`）。
+
+**窗口**：既有 4 档（今天/昨天/7 天/全部）一字不改；新增 `近 30 分钟` / `近 2 小时` 两档**滚动窗**
+（`NodeWindow.kind: 'day'|'rolling'`；环保留 `ROLLING_KEEP_MS` = 2h + 10min 余量，每节点硬上限
+`ROLLING_CAP=20000` 条，触顶置 `rollingTruncated` 并在脚注显式标注）。
+
+**脚注三行**：① 训练流数 + 课程账本数；② 任一 `truncated`（只读尾部）或 `rollingTruncated`（事件环触顶）
+⇒ 显式警告；③ 时间 = 训练机本地时（`ts` 无时区）。
+
+**单点依赖**：某课只有一个身份有贡献 ⇒ 矩阵列头显式 ◆（`soloSamplingCourses` / `soloPpoCourses` 两组分开算）
+——并行训练里最贵的风险是「某门课只靠一个人」。
+
+**历史不可补**：`job_result_accepted` / `job_rejected` **自本版起算**；此前的课程账本没有这两个事件，
+读侧把无承接记录的 `job_completed` 保留成 `(空 worker)` 行（诚实呈现，不猜身份）。
+
+**回归**：`dashboard/tests/worker-contribution.test.ts`（份额分母组内自洽 / 缺数据「—」/ 单点标记 /
+角色隔离同名不合并 / 缩略一致性 / 滚动窗 / 课维度 / PPO join / SSR full+compact / NodePills 接入，12 例）；
+`nn-training/tests/hub/test_worker_attribution.py`（见 `remote-transport.md` §55，5 例）。
+
+---
 ## §22 顶部课程 pill 精确化：hub 派发四态 + 龄 + 未登记持有者点名（plan/course-pill-precision，2026-10-02）
 
 **触发**（用户 2026-10-02）：「优化 dashboard 顶部课程 pill 的显示状态，需要结合多课程 prefetch

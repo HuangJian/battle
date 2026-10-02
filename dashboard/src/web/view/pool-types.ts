@@ -5,6 +5,8 @@
  *   · 课程内序号 `it` **不再出现在任何展示字段**（只作服务端内部过滤器）；
  *   · 「上轮贡献」→ **窗口内局数**（`winRollout` / `winEval` 两列），「状态」列改名「成功率」。
  */
+import type { ContributionView } from './contribution'
+
 // ────────────────────────── /api/pool 视图类型 ──────────────────────────
 
 export type NodePoolStatus = 'healthy' | 'warn' | 'bad' | 'noping' | 'nodata' | 'disabled'
@@ -66,6 +68,9 @@ export const WINDOW_OPTIONS = [
   { key: 'yesterday', label: '昨天' },
   { key: '7', label: '7 天' },
   { key: 'all', label: '全部' },
+  // 滚动窗（plan/worker-contribution-view §4.4）：吃子日有界事件环，与本地日窗并存但分开实现。
+  { key: '30m', label: '近 30 分钟' },
+  { key: '2h', label: '近 2 小时' },
 ] as const
 
 export type PoolWindowKey = (typeof WINDOW_OPTIONS)[number]['key']
@@ -98,4 +103,7 @@ export interface PoolView {
   local: NodeHistoryRow | null
   selfStatus: SelfStatus | null
   localHash: string
+  /** 并行 worker 贡献度（plan/worker-contribution-view）：节点页主体面板的数据源。
+   *  缺省/null = 旧视图（UI 不画该区）。 */
+  contribution?: ContributionView | null
 }

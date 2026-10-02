@@ -6,6 +6,40 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §55 承接面归属事件：`job_result_accepted` / `job_rejected` + 结果 POST 带 `X-Worker-Id`（plan/worker-contribution-view W2，2026-10-02）
+
+**触发**：贡献度面板要回答「哪个云端 worker 完成/白算了几个 PPO job」，而今天这个数字在任何账本里
+都不存在：`job_completed` 由**训练侧**写（`remote/hub_client.py::mark_job_completed`，字段只有
+`{event, job_id, ts}`），身份只存在于 **hub 承接结果那一刻**。⚠ `hub/store_leases.py::mark_completed`
+是**生产路径零调用者**的死代码——它不是 `job_completed` 的写手，不能改它。
+
+**契约（扩事件、不新建账本）**：`remote/push_dispatch.py::accept_result`（云机直连 POST 与 hub 代发取回
+**两条腿共用**）在承接成功/409 时落一条归属事件，写点唯一 `_append_attribution`：
+
+| 时机 | 事件 | 字段 |
+|---|---|---|
+| `store_result` 成功（200） | `job_result_accepted` | `{event, job_id, worker, ts}` |
+| `store_result` 失败（409，含 push 腿输家） | `job_rejected` | `+ reason="result already stored (duplicate write-back)"` |
+| `hub/result.py::_post_result` 早退（结果已存在，不经过 `accept_result`） | `job_rejected` | `+ reason="result already stored (race loser / duplicate)"` |
+
+* **身份** = 显式传入 ∪ `hub.lease_worker(jid)`（push 腿自然落 `push:<id>`，与认领/租约同字）；
+  旧 worker 不带身份 ⇒ `worker=""`（匿名），**不编身份**。
+* **落点**：`hub.append_ledger(jid, body)` ⇒ hub `_JobStore.jsonl_path` = `tmp/<课>/training_log.jsonl`
+  ——与训练侧 `job_completed` **同一份课程账本**、按 `job_id` join，不新建账本（plan N4）。
+* **三条 409 路径全部接账**（计划 E1）：① `_post_result` 早退；② `accept_result` 首写锁定失败；
+  ③ push 腿输家（走 ② 覆盖）。面板「晚到·白算」= `job_rejected` 计数（机时已花、无产出）。
+
+**身份通道**：`remote/job_lifecycle.py::post_result` 的结果 POST 补 `X-Worker-Id: worker_tag()`
+（`WORKER_ID_HEADER`，`common/protocol.py:290`）——与 claim/peek 同一身份，零签名变更。没有它，
+晚到者的 409 永远归不到人。
+
+**读侧**（dashboard `server/contribution.ts`）：逐课账本**只读尾部** 4000 行；`job_completed` 按 `job_id`
+join `job_result_accepted` 取 worker；`job_rejected` 单列。**不裁剪账本**（保留期 = plan §9-P3 开放问题）。
+
+**回归**：`nn-training/tests/hub/test_worker_attribution.py` 5 例（承接带「那一刻」身份 / 早退 409 带身份 /
+`store_result` 失败带身份 / push 腿 `push:` 前缀 / `post_result` 请求头），走真 HTTP hub 面；
+定向扩跑 hub 目录 + 6 个 remote 文件 **207 pass**。
+
 ## §54 hub 观测面补龄与预取窗口：inflight 行的 `claimed_ago` / `computing_ago` + 顶层 `peeked_courses`（plan/course-pill-precision §4.1，2026-10-02）
 
 **触发**：h4-aim-c0 的首个 job 被一个误启的持有者「有心跳地」按住 **27 分钟**（it1 的
