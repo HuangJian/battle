@@ -33,6 +33,8 @@ from pathlib import Path
 from typing import Any
 
 #: 预取深度（缺省 3，§2.6）。`0` = 关预取（回退路径：只调度不预取）。
+#: ⚠ 有效窗口 = `min(depth, 开课数)`（peek 每课程至多一个候选 + 游标只读，见
+#: `hub/queue_claims.peek_jobs` 的注释；「靠多轮 peek 加深」不成立，2026-10-02）。
 PREFETCH_DEPTH_DEFAULT = 3
 #: 暂存区总字节上限（硬预算，§2.6：**必须写死一个数**）。缺省 64 MB —— 单 job payload 量级
 #: 是 3–10 MB（`docs/nn/remote-transport.md` 的 wire 账），深度 3 的均值约 10–30 MB，留一倍余量。

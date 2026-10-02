@@ -70,7 +70,7 @@ from remote.job_lifecycle import (
 )
 from remote.prefetch import PREFETCH_DEPTH_DEFAULT, PrefetchStore, pick_candidates
 from remote.result_upload import Outcome, ResultUploader, UploadTask
-from remote.wire import _wire_flush, _wire_start
+from remote.wire import _wire_flush, _wire_hit, _wire_start, _wire_totals
 from remote.worker_proc import _request_reload
 
 
@@ -96,6 +96,27 @@ class RoundOutcome:
 PREFETCH_WIRE_ID = "prefetch"
 #: 预取填充的轮询间隔（秒）：一轮填满后等这么久再问下一次 peek。
 PREFETCH_ROUND_SEC = 5.0
+
+
+def _flush_prefetch_round(store: PrefetchStore, log: Any, totals: list[int]) -> None:
+    """预取每轮收账（S3f/G6）：命中率摘要行 + wire 传输行。
+
+    字节读 wire 桶的**同一份账**（`_wire_totals` 只读不 pop），会话累计按轮累加；命中率来自
+    `store.stats()`——它是 `PrefetchStore.stats()` 的**生产读者**（2026-10-02 前全仓零调用）。
+    没有活动的轮不刷屏（无下载、无命中/未命中）——减去噪声，读数仍在。
+    """
+    round_bytes, round_wasted = _wire_totals(PREFETCH_WIRE_ID)
+    totals[0] += round_bytes
+    totals[1] += round_wasted
+    st = store.stats()
+    if round_bytes or st["hits"] or st["misses"]:
+        mb = 1024.0 * 1024.0
+        log(
+            f"prefetch: held={st['held']} hits={st['hits']} misses={st['misses']} "
+            f"本轮下载={round_bytes / mb:.2f}MB 会话累计={totals[0] / mb:.2f}MB"
+            + (f"（其中挤走作废 {totals[1] / mb:.2f}MB）" if totals[1] else "")
+        )
+    _wire_flush(PREFETCH_WIRE_ID, log)
 
 
 def _prefetch_fill(
@@ -124,6 +145,8 @@ def _prefetch_fill(
     """
     skip = skip or set()
     log = log or (lambda _m: None)
+    #: 会话累计 `[成功下载字节, 被挤走作废字节]`——从 wire 桶逐轮累加（S3f，不新增 stats 字段）。
+    totals = [0, 0]
     while not stop.is_set():
         try:
             peeked = peek_jobs(
@@ -164,9 +187,9 @@ def _prefetch_fill(
                 continue
             if store.store(jid, payload, cand):
                 log(f"prefetch {jid[:8]}: 已预取 {len(payload)} bytes（软持有，无租约）")
-        _wire_flush(PREFETCH_WIRE_ID, log)  # 每轮一行预取传输账
+        _flush_prefetch_round(store, log, totals)
         stop.wait(PREFETCH_ROUND_SEC)
-    _wire_flush(PREFETCH_WIRE_ID, log)  # 收尾：最后一次没有等满一轮的也上账
+    _flush_prefetch_round(store, log, totals)  # 收尾：最后一次没有等满一轮的也上账
 
 
 def settle_result(
@@ -262,6 +285,9 @@ def run_one_round(
         want_sha = str((job.get("manifest") or {}).get("payload_sha256") or "")
         if got is not None and (not want_sha or str(got.get("blob_sha")) == want_sha):
             preloaded = {"payload_zip": got["payload_zip"]}
+            # S3e：命中在这一刻才算数（零下载开算）——**不能在 `_ensure_payload` 的 preloaded
+            # 分支打点：那条分支同样服务 push 腿，会把 push 标成预取命中。
+            _wire_hit(jid, "payload", "prefetch")
         elif got is not None:
             # 暂存副本与 claim 到的这份不是同一字节（hub 换过 job）：丢弃，走关键下载。
             log(f"job {jid}: 预取副本 sha 与 claim manifest 不符——丢弃走关键下载")

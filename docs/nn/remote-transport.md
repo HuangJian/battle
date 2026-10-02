@@ -6,6 +6,80 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §53 传输残余税清算：条件让路 + 按传输累计上限 + 观测补面（plan/transfer-residual，2026-10-02）
+
+**触发**（用户 2026-10-02）：「检查云机 worker prefetch job 机制，在多课程单 worker 并行训练的场景下，
+寻找能进一步压缩传输时间或将其隐藏到 ppo 墙钟后的可能。」查证结论分两层：**「隐藏」已经做到**——稳态
+（热缓存）`wall ≈ 58s` 里 `ppo=51.2s`、`in ≈ 2.7s`（4.7%）、`out` 全 overlap，算术余量
+`(2×payload + result)/线速 ≈ 5.5s < ppo` ⇒ **≈9×**，不新增任何隐藏机制；**残余在别处**——控制面
+**让路税**（主项）+ 预取在多 worker 抢同一 hub 下 ROI≈0 + 六个观测缺口。
+
+### 现场账（L2，真机双 worker 抢活；job A `fbe5cd1c66ed340f`）
+
+```
+wire payload=1.62MB/2.6s(635KB/s) blob:opt=0.57MB/4.3s(136KB/s) blob:ref=0.36MB/4.2s(89KB/s)
+     result=0.64MB/2.7s(240KB/s) code=cache-hit blob:init=cache-hit
+     wait=4.0s/yield=14/p0_p95=1019ms ppo=51.2s 合计=3.19MB/13.8s(237KB/s)
+     phases in=11.0s out=2.7s ppo=51.2s other=11.0s wall=73.2s overlap=2.7s
+```
+
+| 段 | 秒 | 其中让路 | 占比 |
+|---|---|---|---|
+| `payload`（P1 关键） | 2.6 | 1.0 | 38% |
+| `blob:opt`（P1 关键） | 4.3 | 2.0 | 47% |
+| `blob:ref`（P1 关键） | 4.2 | 2.5 | 60% |
+| 预取（P2） | 4.5 | 1.5 | 33% |
+| **总账** | **18.3** | **7.0** | **38%**（关键路径 **5.5s** = wall 的 7.5%） |
+
+**两本账互证**：`yield=14` × `BULK_YIELD_STEP_SEC=0.5` = 7.0s = 五条「让路合计」行之和
+（1.0+2.0+0.5+1.0+2.5）——不是估计。
+
+**机制链**：`_request` 以 `with _BULK.control(label=path)` 包住**整个**控制请求（含读响应体）；
+`_read_body` 每 256KB 分片调 `pace()` → `pause_if_needed()` ⇒ 控制面在途时**每分片都停**；
+旧上界只是**单次调用** `PAUSE_BUDGET_SEC=5s`，**一条传输没有累计上界**。触发源 = 取消环每
+`JOB_CANCEL_POLL_SEC=1.5s` 一个 status（在途 ~1.0s ⇒ 占空比 ~67%）+ 预取 peek，合计 ~80%。
+
+### 落地（W0–W3）
+
+| 件 | 语义 | 锚 |
+|---|---|---|
+| S1 条件让路 | 只有「**最老的在途控制请求**已等 ≥ `YIELD_AFTER_SEC_DEFAULT=1.0s`」才让；年轻请求不让（大概率 T 内自完成） | `bulk_sched.py::oldest_control_age` / `pause_if_needed` 开头 |
+| S2 按传输上限 | 一条传输（一个 `slot()`）累计让路 ≤ `yield_total_budget_sec`（auto=5.0）；与单次预算取较小者 | `pause_if_needed` 的 `room`（用 `_yield_cur` 本 slot 账） |
+| S5 装配/逃生口 | `--bulk-yield {auto,always,never}`（缺省 auto）：auto=(1.0, 5.0)、always=(0.0, None) **逐字回旧语义**、never=(inf, None)；启动打一行 `bulk 让路策略：mode=… after=…s total<=…s` | `worker.py::main` / `worker_loop` |
+| S3a label | 排队/让路行带优先级：`bulk payload/P1: 排队 …`（P1 关键 vs P2 预取**文本可判**） | `http.py::_get_with_retry` 的 `label` |
+| S3b `p0_p50` | wire 行补 `p0_p50=`（`stats()` 早有字段）——**S1 阈值 T 的定标输入** | `wire.py::_wire_flush` |
+| S3c 快照 | `_wire_start(jid)` 重取 `sched0`（只治「同 jid 重领」的陈旧快照；预取 `wait=0` 的真正修复是 S3d） | `wire.py::_wire_start` |
+| S3d 归属 | `slot()` 把本次排队挂 token（`take_wait`），`_get_with_retry` 与 `post_result` **两处**各自 `_wire_note_wait(jid,…)`；`wait=` 改读归属和；`stats()["queue_wait_sec"]` 保留对账 | `bulk_sched.py` / `http.py` / `job_lifecycle.py` |
+| S3e 命中入账 | payload 预取命中在 `run_one_round` 的 `pf_store.take(jid)` 命中处 `_wire_hit(jid,"payload","prefetch")`（**不是** `_ensure_payload`——push 腿共用会误标） | `job_round.py` |
+| S3f 命中率 | 每轮一行 `prefetch: held=… hits=… misses=… 本轮下载=…MB 会话累计=…MB`；字节读 wire 桶同一账（`_wire_totals`，不建第二份） | `job_round.py::_flush_prefetch_round` |
+| W0 读方 | `tools/wire_report.py` 新增 `DISPATCH_RE` + 聚合（wait p50/p90/max、yield 合计、`p0_p50`/`p0_p95` max；`p0_p50` 可选，**旧日志照样聚合**） | `tools/wire_report.py` |
+| G8 注释 | `hub/queue_claims.py` 的「深度 3 靠多轮 peek 填满」改为「每课程至多一个候选（`ids[0]`）+ 游标只读 ⇒ 有效窗口 = `min(depth, 开课数)`」 | `hub/queue_claims.py` |
+
+★ **库层缺省必须保持老语义**：新策略一律由 worker 显式装配，`configure_yield()` **返回旧策略**，
+`worker_loop` 在 `finally` 还原。`_BULK` 是进程单例（`remote/wire.py`）——不还原时，同一 pytest 进程里
+后续用例（`test_control_plane_bypass.py` 的 bulk 只传 ~0.1s，age 到不了 1.0s）会**确定性变红**；
+这是装配的硬要求，不是卫生。
+
+**预取重定位（W3，只登记判据不改默认）**：L2 曾 3.22MB 白传 / 0 命中（`peek` 只看每课队首、租约随时被
+别家 claim、每轮 payload 新打包 ⇒ 跨轮无复用面）。判据从此可读：每轮摘要 + 命中入账。**预注册门槛**：
+① 单会话 `hits/misses < 1:3` 且白传 ≥3MB ⇒ 默认 `--prefetch-depth 0`（保留机制）；② `--bulk-yield never`
+臂下 `p0_p95`/`p0_max` 劣化 <2× ⇒ 把 auto 的 total 收到 0（等价 never）。其余候选（blob 预取 / Range
+续传 / payload 缓存 / peek 窗口 / idle 期预取）门槛见 `plan/transfer-residual.plan.md` §8。
+
+**不做**（防走错方向）：下调重抽阈值（`_reroll_decision` 已用**净值** `墙钟 − Σ让路` 正确归因）；
+下调取消环频率（用户口径，被用例钉 `<=2.0`）；第二 bulk 通道（硬不变量）；Range 续传
+（L2 无 `preempt=` 行，门槛未触发）。
+
+**回归**（新 19 例 + 1 例加断言）：`test_bulk_sched.py`（`test_oldest_control_age_tracks_the_oldest_inflight` /
+`test_no_yield_while_control_is_young` / `test_yield_once_control_has_waited_past_the_threshold` /
+`test_always_mode_keeps_the_old_semantics` / `test_never_mode_never_yields` /
+`test_auto_mode_mapping_matches_the_plan` / `test_yield_total_is_capped_per_transfer` /
+`test_queue_wait_is_attached_to_its_own_token`；`test_wire_line_reports_scheduler_accounting` 加 `p0_p50=` 断言）·
+`test_control_plane_bypass.py::test_control_plane_stays_fast_under_conditional_yield`（真 HTTP 正护栏）·
+`test_wire_report.py`（dispatch 解析 / 旧日志 / 预取行 / `p0_p50` 可选四例）· `test_wire_reroll.py`
+（`test_queue_log_label_carries_the_priority` / `test_queue_wait_is_attributed_by_jid`）·
+`test_soft_hold_prefetch.py`（还原 / 每轮摘要 / stats 生产读者 / `payload=prefetch-hit`）。
+
 ---
 
 ## §52 孤儿租约早收：claim 后零心跳超宽限即回池（2026-10-01，DECISIONS §2026-10-01-goalnn-lease-orphan-reap）

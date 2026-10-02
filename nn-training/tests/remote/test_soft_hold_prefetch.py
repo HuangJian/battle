@@ -410,3 +410,140 @@ def test_prefetch_survives_the_cancel_watcher_control_ring(tmp_path: Path, monke
     assert st["preempted"] == 0, f"控制面仍在抢占 P2：{st}"
     assert st["inflight_bulk"] == 0
     assert not any("preempt=" in ln for ln in logs), f"wire 行里出现了抢占作废：{logs}"
+
+
+# ────────────── ⑥ 传输/观测补面（2026-10-02，plan/transfer-residual W1/W2） ──────────────
+
+
+def test_worker_loop_restores_the_library_yield_defaults(tmp_path: Path, monkeypatch) -> None:
+    """W1/§3.5 ★：`worker_loop` 退出必须还原让路策略（`_BULK` 是进程单例）。
+
+    不还原的后果是**跨用例泄漏**：同进程后续用例（`test_control_plane_bypass.py` 等）
+    继承 `auto`，它依赖的「无条件让路」断言会确定性变红。
+    """
+    monkeypatch.setattr(W, "acquire_job", lambda *a, **k: None)
+    monkeypatch.setattr(W, "_release_cloud_machine", lambda *a, **k: None)
+    before = W._BULK.configure_yield(after_sec=0.5, total_budget_sec=1.0)
+    try:
+        n = W.worker_loop(
+            "http://hub",
+            "tok",
+            work_dir=tmp_path,
+            poll_sec=0.0,
+            once=True,
+            bulk_yield="never",
+            log=lambda _m: None,
+        )
+        assert n == 0
+        # `configure_yield` 返回**旧值** ⇒ 拿它当读数：loop 后应当仍是进 loop 前的策略。
+        current = W._BULK.configure_yield(after_sec=0.5, total_budget_sec=1.0)
+        assert current == (0.5, 1.0), f"worker_loop 没有还原进 loop 前的策略：{current}"
+    finally:
+        W._BULK.configure_yield(after_sec=before[0], total_budget_sec=before[1])
+
+
+def test_prefetch_round_summary_is_logged(tmp_path: Path, monkeypatch) -> None:
+    """S3f/G6：有活动的轮打一行 `prefetch: held=… hits=… misses=… 本轮下载=…MB`。"""
+    W._WIRE.clear()
+    W._BULK.reset()
+    store = PrefetchStore(tmp_path)
+    p = _payload(2048)
+    monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: ([_summary(p)], False))
+    monkeypatch.setattr(JR, "PREFETCH_ROUND_SEC", 0.01)
+
+    def _dl(*a, **k):
+        W._wire_add(JR.PREFETCH_WIRE_ID, "payload", len(p), 0.01)  # 真下载才有的 wire 账
+        return p
+
+    monkeypatch.setattr(JR, "download_payload", _dl)
+    logs: list[str] = []
+    stop = threading.Event()
+    t = threading.Thread(
+        target=lambda: JR._prefetch_fill(
+            "http://hub", "tok", store, stop, depth=1, log=logs.append
+        ),
+        daemon=True,
+    )
+    t.start()
+    deadline = time.time() + 5
+    while not store.has(JID) and time.time() < deadline:
+        # sleep-ok: 轮询步长（等的是「预取入库」这个状态，5s 只当挂起兜底）
+        time.sleep(0.01)
+    stop.set()
+    t.join(5)
+    assert store.has(JID), f"预取没入库：{logs}"
+    summary = [ln for ln in logs if ln.startswith("prefetch: held=")]
+    assert summary, f"没有每轮摘要行：{logs}"
+    assert "hits=0" in summary[-1] and "本轮下载=" in summary[-1], summary[-1]
+
+
+def test_prefetch_stats_have_a_production_reader() -> None:
+    """S3f：`PrefetchStore.stats()` 必须有**生产**读者（2026-10-02 前全仓零调用）。
+
+    源码级断言（防「又变成死代码」）：删掉 `remote/job_round.py` 里的 `store.stats()` ⇒ 本用例红。
+    """
+    src = (ROOT / "remote" / "job_round.py").read_text(encoding="utf-8")
+    assert "store.stats()" in src, "PrefetchStore.stats() 又变成死代码了"
+
+
+def test_prefetch_hit_is_visible_in_the_wire_line(tmp_path: Path, monkeypatch) -> None:
+    """S3e/G6：命中的 payload 要在 wire 行里可见（`payload=prefetch-hit`），下载轮不得误标。
+
+    打点在 `run_one_round` 的 take 命中处（**不是** `_ensure_payload` 的 preloaded 分支——
+    那条分支同样服务 push 腿，会把 push 标成预取命中）。
+    """
+    j1, j2 = "1" * 16, "2" * 16
+    payloads = {j1: _payload(128, b"1"), j2: _payload(128, b"2")}
+    manifests = {
+        jid: {
+            "job_id": jid,
+            "payload_sha256": hashlib.sha256(p).hexdigest(),
+            "course_fp": "f" * 64,
+        }
+        for jid, p in payloads.items()
+    }
+    calls = {"n": 0}
+
+    def _acquire(base_url, token, **kw):
+        calls["n"] += 1
+        if calls["n"] > 2:  # 两个 job 都跑完：让循环靠 max_idle_sec 自己收尾
+            return None
+        jid = j1 if calls["n"] == 1 else j2
+        return {"job_id": jid, "manifest": manifests[jid], "status": "ok", "lease_token": ""}
+
+    def _run_job(base_url, token, job, **kw):
+        if job["job_id"] == j1:  # 第一个 job 跑的时候，第二个 job 已被预取进来
+            store.store(j2, payloads[j2], _summary(payloads[j2], j2))
+        return {"job_id": job["job_id"]}
+
+    monkeypatch.setattr(W, "acquire_job", _acquire)
+    monkeypatch.setattr(W, "run_job", _run_job)
+    monkeypatch.setattr(W, "post_result", lambda *a, **k: 200)
+    monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: ([], False))
+    monkeypatch.setattr(JR, "start_cancel_watcher", lambda *a, **k: None)
+    monkeypatch.setattr(JR, "job_ready", lambda *a, **k: None)
+    monkeypatch.setattr(W, "_release_cloud_machine", lambda *a, **k: None)
+    store = PrefetchStore(tmp_path)
+    real_init = PrefetchStore.__init__
+
+    def _init(self, work_dir, **kw):
+        real_init(self, work_dir, **kw)
+        self._items = store._items  # 让 worker_loop 造的那个 store 用我们的账本
+        self.root = store.root
+
+    monkeypatch.setattr(PrefetchStore, "__init__", _init)
+    logs: list[str] = []
+    n = W.worker_loop(
+        "http://hub",
+        "tok",
+        work_dir=tmp_path,
+        poll_sec=0.05,
+        max_idle_sec=0.3,
+        log=logs.append,
+    )
+    assert n == 2, f"应当跑完两个 job：n={n} {logs}"
+    hit_lines = [ln for ln in logs if j2 in ln and "payload=prefetch-hit" in ln]
+    assert hit_lines, f"命中轮没有 payload=prefetch-hit：{logs}"
+    assert not any(j1 in ln and "payload=prefetch-hit" in ln for ln in logs), (
+        "j1 是下载轮，不该有命中标记"
+    )

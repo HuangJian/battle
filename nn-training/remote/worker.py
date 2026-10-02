@@ -97,6 +97,15 @@ from remote.bc_job import (
     resolve_bc_seed as resolve_bc_seed,
 )
 
+# bulk 让路策略的库层常量（plan/transfer-residual W1/S5）：装配在 `worker_loop` 里做，
+# 库层缺省保持老语义（见 `remote/bulk_sched.py` 头部）。
+from remote.bulk_sched import (
+    PAUSE_BUDGET_SEC as PAUSE_BUDGET_SEC,
+)
+from remote.bulk_sched import (
+    YIELD_AFTER_SEC_DEFAULT as YIELD_AFTER_SEC_DEFAULT,
+)
+
 # 下载簇（S4 第七刀）+ 物料落地（S4 第十二刀）：**显式转发**。
 # 注入点分档（第十二刀后重划）：
 #   * `run_job` **自己读**的只有 `_ensure_payload` / `_ensure_code` / `_ensure_ts_code`
@@ -362,10 +371,16 @@ from remote.wire import (
     _wire_note_reroll as _wire_note_reroll,
 )
 from remote.wire import (
+    _wire_note_wait as _wire_note_wait,
+)
+from remote.wire import (
     _wire_start as _wire_start,
 )
 from remote.wire import (
     _wire_time as _wire_time,
+)
+from remote.wire import (
+    _wire_totals as _wire_totals,
 )
 from remote.wire import (
     set_bulk_log as set_bulk_log,
@@ -741,6 +756,24 @@ _ACTIVE_CODE_SHA: str | None = None
 ALIVE_LOG_SEC = 60.0
 
 
+#: bulk 让路策略档位（plan/transfer-residual W1/S5）：`--bulk-yield` 的 choices。
+BULK_YIELD_MODES = ("auto", "always", "never")
+
+
+def _bulk_yield_params(mode: str) -> tuple[float, float | None]:
+    """CLI 档位 → `(after_sec, total_budget_sec)`（判据看函数名，不看 argparse）。
+
+    * `auto`（缺省）= 条件让路：控制面在途 ≥ `YIELD_AFTER_SEC_DEFAULT` 才让，单条传输累计 ≤5s；
+    * `always` = **逐字旧语义**（控制面一在途就让，无累计上限）——现场逃生口 / A/B 基线；
+    * `never` = 永不让路（`after=inf`）——量「让路到底买到了什么」的极端臂。
+    """
+    if mode == "always":
+        return 0.0, None
+    if mode == "never":
+        return float("inf"), None
+    return YIELD_AFTER_SEC_DEFAULT, PAUSE_BUDGET_SEC
+
+
 def _alive_log(log: Any, *, halted: bool, done: int, polls: int, idle_since: float) -> None:
     """空闲期打一行存活日志：周期内请求数（验证轮询周期真在生效）+ 连续空闲秒数（判孤儿 job）。
 
@@ -770,6 +803,8 @@ def worker_loop(
     role: str = ROLE_ONLINE,
     # 软持有预取深度（P2，2026-09-22）：0 = 关预取（只调度不预取，§7 的回退档）
     prefetch_depth: int = PREFETCH_DEPTH_DEFAULT,
+    # bulk 让路策略（plan/transfer-residual W1）：auto（缺省）/ always（旧语义逃生口）/ never。
+    bulk_yield: str = "auto",
     # 结果回传模式（P2.5，2026-09-22）：async = 回传**不占关键路径**（缺省）；sync = 旧行为
     result_upload: str = RESULT_UPLOAD_MODE_DEFAULT,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
@@ -789,6 +824,14 @@ def worker_loop(
     """
     done = 0
     set_bulk_log(log)  # 调度器的排队/让路/抢占日志与 worker 同一条流
+    # bulk 让路策略（W1）：装配 + 启动行（可见即判据）。`configure_yield` 返回旧策略，
+    # **退出时必须还原**：`_BULK` 是进程单例，不还原会把 auto 泄漏给同进程后续使用者
+    # （测试套件里多处在同一进程调 `worker_loop`，plan/transfer-residual §3.5 ★）。
+    _yield_after, _yield_total = _bulk_yield_params(bulk_yield)
+    _prev_yield = _BULK.configure_yield(after_sec=_yield_after, total_budget_sec=_yield_total)
+    _after_s = "∞" if _yield_after == float("inf") else f"{_yield_after:.1f}"
+    _total_s = "∞" if _yield_total is None else f"{_yield_total:.0f}"
+    log(f"bulk 让路策略：mode={bulk_yield} after={_after_s}s total<={_total_s}s")
     # 身份只算一次（旧路径每个轮询都调 worker_tag()：hostname 系统调用不贵但没必要
     # 每秒一次；而 hub 的登记表靠这个值去重，值必须稳定）。
     worker_id = worker_tag()
@@ -931,6 +974,10 @@ def worker_loop(
             hi = (hi + 1) % len(hubs)  # 跑完一个换下一 hub（round-robin 公平）
         return done
     finally:
+        # 让路策略还原（W1/§3.5 ★）：库层缺省必须回到老语义，否则同进程后续使用者
+        # （测试 / 多会话）继承 auto——`test_control_plane_bypass.py` 那类「要求无条件让路」
+        # 的既有用例会确定性变红。
+        _BULK.configure_yield(after_sec=_prev_yield[0], total_budget_sec=_prev_yield[1])
         # P2.5（2026-09-22）：**每条**退出路径都要过这里——`break`（空闲/停机）、
         # `--once` 的 return、热替换的 SystemExit(86)、以及任何异常。队列里可能还有
         # 没送出去的结果；不等它落定就退出 = 静默丢掉最贵的产物（训练侧要等租约
@@ -987,6 +1034,15 @@ def main() -> None:
         default=PREFETCH_DEPTH_DEFAULT,
         help=f"软持有预取深度（0=关；缺省 {PREFETCH_DEPTH_DEFAULT}）",
     )
+    # bulk 让路策略（plan/transfer-residual W1）：auto=条件让路（缺省）；always=旧语义（逃生口）；
+    # never=永不让路（极端臂，量「让路到底买到了什么」）。
+    ap.add_argument(
+        "--bulk-yield",
+        choices=BULK_YIELD_MODES,
+        default="auto",
+        help="bulk 让路策略：auto=条件让路（在途 ≥1s 才让；单条传输累计 ≤5s，缺省）"
+        " / always=旧语义（无条件让路，逃生口） / never=永不让路（极端臂）",
+    )
     # ---- 离线训练模式 / 归属（2026-09-19 落地，2026-09-25 语义升级）----
     # **语义**：本会话属于**离线盘**（`role=offline`）——只能领归属为 offline 的 job，且**不再**
     # 兼领在线盘的活（一个盘一种任务，
@@ -1042,6 +1098,7 @@ def main() -> None:
             hub_urls=hub_urls,
             role=ROLE_OFFLINE if args.offline else ROLE_ONLINE,
             prefetch_depth=args.prefetch_depth,
+            bulk_yield=args.bulk_yield,
             result_upload=args.result_upload,
         )
         print(f"[{time.strftime('%H:%M:%S')}] [worker] done: {n} job(s) processed", flush=True)

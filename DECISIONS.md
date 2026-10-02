@@ -6685,3 +6685,27 @@ rl-config 键——它每进程启动才读一次，而平台开关要**每轮�
 `tests/hub/test_hub_job_store_split.py`（方法计数 49 → 51）。
 落账门禁：`tests/hub` 294/0 + push 腿族（`tests/remote/test_hub_push_dispatch.py` 等）绿 ·
 ruff + mypy 全量绿。
+
+## §2026-10-02-goalnn-transfer-residual-yield（2026-10-02，让路税清算：条件让路 + 按传输累计上限 + 观测补面）
+
+**背景**：L2 真机实测一条 wire 传输让路 **7.0s（= 传输时间的 38%）**，其中 **5.5s 压在关键路径**
+（`payload` 1.0 + `blob:opt` 2.0 + `blob:ref` 2.5）。机制：控制请求整体在途期间 `_read_body` 每
+256KB 分片都无条件让路，而旧预算只有「**单次调用** ≤5s」、**一条传输无累计上界**。
+
+**备选与否决**：① 保持「无条件让路」（2026-09-25 §50 现状语义）—— 否：`p0_p95=1.02s` 远低于既有
+`≤6s` 门槛（余量 ≈6×），让路买到的保护用不完，而税随取消环 1.5s 周期结构性复发；② 直接默认删让路
+（`never`）—— 否：没有真机 `p0_*` 对照前不拍死，留 `always`/`never` 逃生口，按预注册门槛现场裁。
+
+**决定**：让路条件化（**最老在途**控制请求 ≥ `YIELD_AFTER_SEC_DEFAULT=1.0s` 才让）+ 按传输累计 ≤5s；
+库层缺省保持老语义（0.0 / None），由 worker 显式装配 `--bulk-yield {auto,always,never}` 且 `worker_loop`
+**finally 还原**；观测补面（label 带优先级 / `p0_p50` / 排队按 jid 归属 / 预取命中入账 + 每轮摘要 /
+`wire_report.py` 调度账）。两条预注册门槛（不改默认）：预取 `hits/misses < 1:3` 且白传 ≥3MB ⇒ 默认关；
+`never` 臂下 `p0_p95`/`p0_max` 劣化 <2× ⇒ auto total 收到 0。
+
+**违反后果**：装配不还原 ⇒ 同进程后续测试确定性变红（`test_control_plane_bypass.py` 的 bulk ~0.1s、
+age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层缺省语义并丢掉 45s/60s 的上界推导；
+`_wire_hit` 落 `_ensure_payload` ⇒ 把 push 腿误标为预取命中。
+
+**指针**：全文 `docs/nn/remote-transport.md` §53 · 现场账 `docs/nn.progress.md` 2026-10-02 节 ·
+计划 `plan/transfer-residual.plan.md` · 回归 5 文件新 19 例 + 1 例加断言 · 门禁 nn **3483 passed /
+9 skipped** · 根 `bun run check` **2345 pass / 0 fail**。

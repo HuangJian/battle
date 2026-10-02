@@ -20,10 +20,14 @@
 而「每 1.5s 一个取消环小包必然触发一次抢占」会让多 MB 预取**数学上永远传不完**
 （现场：预取零命中而每个 job 都 `reroll=1(wasted 0.25MB)`）。
 
-让路预算（硬约束，写死并有用例钉住）：单次让路总预算 ≤ `PAUSE_BUDGET_SEC = 5s`，
-上界取两侧较小者 —— worker 侧 `BODY_IDLE_TIMEOUT_SEC = 45s`（`_read_body` 的空闲超时：停久了
-会被判「body 停滞」而重试）与 hub 侧 `SEND_TIMEOUT_SEC = 60s`（分片写超时）。**两个都要看**，
-只看 45s 是最容易犯的错。
+让路预算（硬约束，写死并有用例钉住）：**单次调用** ≤ `PAUSE_BUDGET_SEC = 5s`；**一条传输**
+（一个 `slot()`）的累计由 `yield_total_budget_sec` 封顶（worker 装配为 5s）。上界取两侧较小者 ——
+worker 侧 `BODY_IDLE_TIMEOUT_SEC = 45s`（`_read_body` 的空闲超时：停久了会被判「body 停滞」而重试）
+与 hub 侧 `SEND_TIMEOUT_SEC = 60s`（分片写超时）。**两个都要看**，只看 45s 是最容易犯的错。
+
+让路**条件化**（2026-10-02，plan/transfer-residual W1）：库层缺省仍是「控制面在途即让」
+（`yield_after_sec=0.0`、`yield_total_budget_sec=None`，逐字保持老语义）；worker 显式装配 `auto`
+（在途 ≥ `YIELD_AFTER_SEC_DEFAULT=1.0s` 才让 + 单条传输累计 ≤5s），`--bulk-yield always` 是逃生口。
 
 为什么不复用 `threading.Lock`：并发申请下要区分**优先级**（P1 可以把 P2 挤走）与**可打断**
 （P2 在分片间隙自行退出），而锁没有优先级也没有「持有者轮次」的概念——用它就只剩「先来先等」，
@@ -46,6 +50,9 @@ BULK_P2_PREFETCH = "P2"
 PAUSE_BUDGET_SEC = 5.0
 #: 让路的单步暂停（秒）：每步复查「控制面是否还需要带宽」，避免一口气停满预算。
 BULK_YIELD_STEP_SEC = 0.5
+#: 条件让路的缺省阈值（秒，2026-10-02）：控制面在途 ≥ 它才让路。库层缺省 `0.0` = 老语义
+#: （无条件让）；由 worker 显式装配（plan/transfer-residual W1）。
+YIELD_AFTER_SEC_DEFAULT = 1.0
 #: 槽位等待的轮询步长（秒）：`Event.wait` 兜底用（真释放会立刻唤醒）。
 BULK_WAIT_STEP_SEC = 0.05
 
@@ -84,12 +91,20 @@ class BulkScheduler:
         wait_step_sec: float = BULK_WAIT_STEP_SEC,
         yield_budget_sec: float = PAUSE_BUDGET_SEC,
         yield_step_sec: float = BULK_YIELD_STEP_SEC,
+        yield_after_sec: float = 0.0,
+        yield_total_budget_sec: float | None = None,
     ) -> None:
         self._clock = clock
         self._log = log
         self._wait_step = float(wait_step_sec)
         self._yield_budget = float(yield_budget_sec)
         self._yield_step = float(yield_step_sec)
+        #: 条件让路的阈值（S1）：在途控制请求 < 它 ⇒ 不让。0.0 = 老语义（无条件让）。
+        self._yield_after = max(0.0, float(yield_after_sec))
+        #: 一条传输（slot）的让路累计上限（S2/W1b）；None = 不设上限（老语义）。
+        self._yield_total_budget = (
+            None if yield_total_budget_sec is None else float(yield_total_budget_sec)
+        )
         # 槽位状态
         self._lock = threading.Lock()
         self._released = threading.Event()
@@ -101,6 +116,9 @@ class BulkScheduler:
         self._holding = 0  # 当前持有者的 token
         # 控制面状态
         self._control = 0
+        #: 在途控制请求的起始时刻（与 `_control` 同进同出）：条件让路的输入（age ≥ T 才让）。
+        #: 在途数天然有界（取消环 / 心跳 / peek 各一条），出栈即删。
+        self._control_starts: list[float] = []
         #: 与 `_control` 同行 ±1（⇒ 恒等）：它在 `slot()` 里是 P2 的开工否决位之一。
         #: 名字留「waiting」是历史原因——P0 从不排队（独立 socket），所以在途 ≡ 在等。
         self._control_waiting = 0
@@ -119,6 +137,9 @@ class BulkScheduler:
         #: 反复发生的（现场一次 payload 下载能让路 6 次），逐次打点会把日志刷爆 ⇒ 先记在这里，
         #: 由 `slot()` 退出时**合并成一行**（见 `slot` 的 finally）。
         self._yield_cur: dict[str, Any] | None = None
+        #: 排队归属（S3d）：token -> 本次 slot 的排队秒数，由调用方 `take_wait()` 取走。
+        #: 单通道 ⇒ 同时在册的只有当前 token；前进式修剪兜底（见 `slot`）。
+        self._waits: dict[int, float] = {}
 
     # ------------------------------------------------------------------ 槽位
 
@@ -184,6 +205,12 @@ class BulkScheduler:
                 self._queue_wait_total += dt
                 self._queue_waits += 1
                 self._queue_wait_max = max(self._queue_wait_max, dt)
+                # S3d：排队按 token 归属，由调用方 `take_wait()` 取回自己的账。
+                self._waits[token] = dt
+                if len(self._waits) > 32:  # 前进式修剪：只有更新的 token 还可能被取
+                    for k in sorted(self._waits):
+                        if k <= token - 32:
+                            del self._waits[k]
             if self._log is not None and dt > 1.0:
                 self._log(f"bulk {label or prio}: 排队 {dt:.1f}s 才拿到单通道（§2.2：同一时刻仅 1 条）")
         try:
@@ -252,7 +279,8 @@ class BulkScheduler:
         with self._lock:
             self._control += 1
             self._control_waiting += 1
-        t0 = self._clock()
+            t0 = self._clock()
+            self._control_starts.append(t0)
         try:
             yield
         finally:
@@ -260,6 +288,10 @@ class BulkScheduler:
             with self._lock:
                 self._control -= 1
                 self._control_waiting -= 1
+                try:
+                    self._control_starts.remove(t0)  # 同刻重复时间戳删哪个都等价
+                except ValueError:
+                    pass
                 self._p0_ms.append(ms)
                 if len(self._p0_ms) > 512:  # 有界：只留最近一段（P0 延迟的 p95 判据）
                     del self._p0_ms[: len(self._p0_ms) - 512]
@@ -268,21 +300,76 @@ class BulkScheduler:
         with self._lock:
             return self._control > 0
 
+    def oldest_control_age(self) -> float | None:
+        """在途控制请求中**最老那个**已等了多久（秒）；没有在途 ⇒ `None`。
+
+        条件让路的判据（S1/W1）：age < `yield_after_sec` 的控制请求**不让路**—— 它们大概率
+        在 T 内自己就完成了，为它们停 bulk 是纯税（现场 L2：让路 7.0s = wire 传输时间的 38%）。
+        """
+        with self._lock:
+            if not self._control_starts:
+                return None
+            oldest = min(self._control_starts)
+        return float(self._clock()) - oldest
+
+    def configure_yield(
+        self, *, after_sec: float, total_budget_sec: float | None
+    ) -> tuple[float, float | None]:
+        """装配让路策略，**返回旧策略**（供 `worker_loop` 退出时还原）。
+
+        库层缺省 = 老语义（`0.0` / `None`）；新增策略一律由 worker 显式装配。但 `_BULK` 是
+        进程单例（`remote/wire.py`）——装配是全局动作 ⇒ 调用方**必须还原**，否则同进程后续
+        使用者（测试/多会话）继承新语义（plan/transfer-residual §3.5 ★）。
+        """
+        with self._lock:
+            prev = (self._yield_after, self._yield_total_budget)
+            self._yield_after = max(0.0, float(after_sec))
+            self._yield_total_budget = (
+                None if total_budget_sec is None else float(total_budget_sec)
+            )
+        return prev
+
+    def take_wait(self, token: int) -> float:
+        """取走并清掉某次传输的排队秒数（S3d：`wait=` 按 jid 归属，不再从会话级计数器取差）。"""
+        with self._lock:
+            return float(self._waits.pop(token, 0.0))
+
     def pause_if_needed(self, token: int) -> float:
         """bulk 分片间隙的让路点：控制面在途时暂停（预算内、逐步复查）。
 
-        返回本次实际暂停秒数（0.0 = 没有让路）。预算 = `PAUSE_BUDGET_SEC`（单次动作），
-        写死且有用例钉住 —— 停久了会被 worker 自己的 `BODY_IDLE_TIMEOUT_SEC=45s` 判成
-        「body 停滞」而整份重试，也会撞上 hub 的 `SEND_TIMEOUT_SEC=60s`。
+        返回本次实际暂停秒数（0.0 = 没有让路）。两层预算（2026-10-02，S1/S2）：**单次调用**
+        ≤ `yield_budget_sec`（缺省 5s），**一条传输** ≤ `yield_total_budget_sec`（缺省 None）；
+        条件由 `yield_after_sec` 控制（缺省 0.0 = 控制面一在途就让，逐字老语义）。预算写死且有
+        用例钉住 —— 停久了会被 worker 自己的 `BODY_IDLE_TIMEOUT_SEC=45s` 判成「body 停滞」而
+        整份重试，也会撞上 hub 的 `SEND_TIMEOUT_SEC=60s`。
 
         本函数**只在 `slot()` 内**被调用（worker 的 `pace` 回调就是这么接的）：让路账记在
         所属 slot 上，由 `slot()` 退出时合并成**一行**（一次传输一条 log，见 `slot`）。
         """
         if not self.control_active():
             return 0.0
+        if self._yield_after > 0.0:
+            # 条件让路（S1）：控制请求还「年轻」就不让——它大概率在 T 内自己就完成了。
+            age = self.oldest_control_age()
+            if age is None or age < self._yield_after:
+                return 0.0
+        budget = self._yield_budget
+        if self._yield_total_budget is not None:
+            # 按传输累计上限（S2）：`_yield_cur` 是本 slot 的账（token 不匹配 ⇒ 不在传输内 ⇒ 0）。
+            with self._lock:
+                cur0 = self._yield_cur
+                spent_prev = (
+                    float(cur0["sec"])
+                    if cur0 is not None and cur0["token"] == token
+                    else 0.0
+                )
+            room = self._yield_total_budget - spent_prev
+            if room <= 0:
+                return 0.0
+            budget = min(budget, room)
         spent = 0.0
-        while spent < self._yield_budget and self.control_active():
-            step = min(self._yield_step, self._yield_budget - spent)
+        while spent < budget and self.control_active():
+            step = min(self._yield_step, budget - spent)
             time.sleep(step)
             spent += step
             with self._lock:

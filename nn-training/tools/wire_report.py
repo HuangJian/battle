@@ -59,6 +59,12 @@ PHASE_RE = re.compile(
     r"phases in=([\d.]+)s out=([\d.]+)s ppo=([\d.]+)s other=([\d.]+)s wall=([\d.]+)s"
     r"(?: overlap=([\d.]+)s)?"
 )
+#: 调度账（2026-10-02，plan/transfer-residual W0）：`wait=…s/yield=…/p0_p95=…ms[/p0_p50=…ms]`。
+#: 行尾的 `p0_p50=` **可选**（2026-10-02 之前写的日志没有它）——缺省当缺席，不丢行。
+#: `wait` 自 S3d 起按 jid 归属（本 job 自己的排队）；`p0_*` 是会话级滚动读数（每行重复）。
+DISPATCH_RE = re.compile(
+    r"wait=([\d.]+)s/yield=(\d+)/p0_p95=(\d+)ms(?:/p0_p50=(\d+)ms)?"
+)
 #: worker 摘要尾部那个「合计」（是各段之和，不是一段）——不进分段表。
 TOTAL_SEG = "合计"
 #: 判据阈值（与 `remote/worker.py::WIRE_MIN_RATE` 同值）：低于它算一次**坏签**。
@@ -185,6 +191,84 @@ def parse_phases(lines: list[str]) -> PhaseSums:
         if m:
             sums.add(*(float(g) if g is not None else 0.0 for g in m.groups()))
     return sums
+
+
+@dataclass
+class DispatchSums:
+    """调度账（W0）的累加：每 job 的排队/让路 + 会话级 `p0_rt_ms` 读数。
+
+    `p0_p50`/`p0_p95` 是**会话级滚动读数**（每行重复同一份）⇒ 不能当样本做分位数，
+    取**观测最大值** = 最坏一次（判据口径同 §50 的 `p0_p95 ≤6s`）。
+    """
+
+    jobs: int = 0
+    waits: list[float] = field(default_factory=list)
+    yields: int = 0
+    p0_p95_max: float = 0.0
+    p0_p50_max: float = 0.0
+    with_p50: int = 0
+
+
+def parse_dispatch(lines: list[str]) -> DispatchSums:
+    """从每 job 摘要行里抽出调度账（`wait=` / `yield=` / `p0_p95[=p0_p50]`）——纯函数。
+
+    只认 worker 的 job 行（`JOB_RE`）：引导期/hub 行没有调度账；旧日志无 `p0_p50` 照样进表。
+    """
+    sums = DispatchSums()
+    for line in lines:
+        if not JOB_RE.search(line):
+            continue
+        m = DISPATCH_RE.search(line)
+        if not m:
+            continue
+        sums.jobs += 1
+        sums.waits.append(float(m.group(1)))
+        sums.yields += int(m.group(2))
+        sums.p0_p95_max = max(sums.p0_p95_max, float(m.group(3)))
+        if m.group(4) is not None:
+            sums.with_p50 += 1
+            sums.p0_p50_max = max(sums.p0_p50_max, float(m.group(4)))
+    return sums
+
+
+def summarize_dispatch(sums: DispatchSums) -> dict:
+    """调度账读数：排队 p50/p90/max + 让路步数合计 + `p0_*` 最坏观测（无样本 → `None`）。"""
+
+    def _num(v: float, digits: int) -> float | None:
+        return None if math.isnan(v) else round(v, digits)
+
+    return {
+        "jobs": sums.jobs,
+        "wait_total_sec": round(sum(sums.waits), 1),
+        "wait_p50_sec": _num(percentile(sums.waits, 0.5), 1),
+        "wait_p90_sec": _num(percentile(sums.waits, 0.9), 1),
+        "wait_max_sec": _num(max(sums.waits) if sums.waits else float("nan"), 1),
+        "yield_total": sums.yields,
+        "p0_p95_max_ms": round(sums.p0_p95_max, 0) if sums.jobs else None,
+        "p0_p50_max_ms": round(sums.p0_p50_max, 0) if sums.with_p50 else None,
+        "p0_p50_lines": sums.with_p50,
+    }
+
+
+def render_dispatch(row: dict) -> str:
+    """人读调度账：一屏回答「排队/让路各多少钱、控制面 p50/p95 多快」（W0 的 T 定值依据）。"""
+    if not row.get("jobs"):
+        return "调度账：无（旧 worker 的 wire 行不带 wait=/yield=/p0_*）"
+
+    def _f(v: object) -> str:
+        return "—" if v is None else f"{v}"
+
+    return "\n".join(
+        [
+            f"调度账（W0）: {row['jobs']} job，排队合计={row['wait_total_sec']}s，"
+            f"让路合计={row['yield_total']} 次×step",
+            f"  wait（按 jid 归属）: p50={_f(row['wait_p50_sec'])}s p90={_f(row['wait_p90_sec'])}s"
+            f" max={_f(row['wait_max_sec'])}s",
+            f"  p0 往返（会话级，取最坏观测）: p95 max={_f(row['p0_p95_max_ms'])}ms"
+            f" p50 max={_f(row['p0_p50_max_ms'])}ms（{row['p0_p50_lines']} 行带 p50）",
+            "  （wait 自 S3d 起按 jid 归属；p0_* 每行重复同一会话读数 ⇒ 不报分位数，报最坏）",
+        ]
+    )
 
 
 def summarize_phases(sums: PhaseSums) -> dict:
@@ -363,10 +447,16 @@ def main(argv: list[str] | None = None) -> int:
     rows = summarize(stats)
     phases = summarize_phases(parse_phases(lines))
     phases.pop("_per_job", None)  # 逐 job 明细不进 JSON：那是给绘图 / 深挖用的内部量
+    dispatch = summarize_dispatch(parse_dispatch(lines))
     if args.json:
         print(
             json.dumps(
-                {"files": [str(f) for f in files], "rows": rows, "phases": phases},
+                {
+                    "files": [str(f) for f in files],
+                    "rows": rows,
+                    "phases": phases,
+                    "dispatch": dispatch,
+                },
                 ensure_ascii=False,
                 indent=2,
             )
@@ -378,6 +468,8 @@ def main(argv: list[str] | None = None) -> int:
         print(render(rows))
         print()
         print(render_phases(phases))
+        print()
+        print(render_dispatch(dispatch))
     return 0
 
 

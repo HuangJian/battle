@@ -599,6 +599,63 @@ def test_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
     assert worker_mod._BULK.stats()["queue_waits"] >= 1, "调度器没记到这次排队"
 
 
+def test_queue_log_label_carries_the_priority(monkeypatch) -> None:
+    """S3a/W0：排队行的 label 带优先级（`bulk payload/P2: 排队 …`）——现场才分得清谁被卡。
+
+    修前是 `bulk payload: 排队 …`，关键下载与预取撞同一个名字（§1.6-①）。
+    """
+    worker_mod._WIRE.clear()
+    worker_mod._BULK.reset()
+    th = _hold_slot_for(1.05)  # >1.0s 才触发 `slot()` 的「排队」日志（既有阈值）
+    monkeypatch.setattr(http_mod, "_request", lambda *a, **kw: (200, b"p" * 16))
+    logs: list[str] = []
+    prev_log = worker_mod._BULK._log
+    worker_mod.set_bulk_log(logs.append)
+    try:
+        worker_mod._get_with_retry(
+            "http://hub",
+            "t",
+            "/jobs/jp/payload",
+            timeout=60.0,
+            attempts=1,
+            log=lambda _m: None,
+            wire_jid="prefetch",
+            wire_seg="payload",
+            bulk_prio=BULK_P2_PREFETCH,
+        )
+    finally:
+        worker_mod.set_bulk_log(prev_log)
+    th.join(5)
+    assert any("bulk payload/P2: 排队" in m for m in logs), f"label 没带优先级：{logs}"
+
+
+def test_queue_wait_is_attributed_by_jid(monkeypatch) -> None:
+    """S3d/G5：排队按 jid 归属——预取（合成 id）的排队只进预取的账，job 的 `wait=` 不带它。"""
+    worker_mod._WIRE.clear()
+    worker_mod._BULK.reset()
+    th = _hold_slot_for(0.05)
+    monkeypatch.setattr(http_mod, "_request", lambda *a, **kw: (200, b"p" * 16))
+    worker_mod._get_with_retry(
+        "http://hub",
+        "t",
+        "/jobs/jp/payload",
+        timeout=60.0,
+        attempts=1,
+        log=lambda _m: None,
+        wire_jid="prefetch",
+        wire_seg="payload",
+    )
+    th.join(5)
+    lines: list[str] = []
+    worker_mod._wire_flush("prefetch", lines.append)
+    assert len(lines) == 1 and "wait=" in lines[0], lines
+    wait = float(lines[0].split("wait=", 1)[1].split("s", 1)[0])
+    assert wait > 0.0, f"预取的排队没有归到自己账上：{lines[0]}"
+    job_lines: list[str] = []
+    worker_mod._wire_flush("j" * 16, job_lines.append)
+    assert job_lines == [], "job 没有这笔排队 ⇒ 不该有它的账"
+
+
 def test_result_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
     """回传段同理（现场 `result=0.63MB/18-19s` 的主角）。"""
     th = _hold_slot_for(0.3)

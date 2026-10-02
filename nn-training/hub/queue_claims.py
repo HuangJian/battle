@@ -191,8 +191,11 @@ class QueueClaimsMixin(QueuePeer):
         （R2-C2）——游标由真正 claim 成功的那一方推进（`claim_job`）。若在这里推进，
         「看一眼」就会移走别人的轮次；而若完全不推，轮转又会钉死在序首（一门课饿死）。
 
-        每课程**至多给一个**候选：候选是「这轮可以干哪几门课」，不是「把队首扫空」
-        （深度 3 的预取靠多轮 peek 填满，而不是靠一次拿 16 个）。
+        每课程**至多给一个**候选（`ids[0]`）：候选是「这轮可以干哪几门课」，不是「把队首扫空」。
+        ⚠ 游标**只读不写**（由 claim 成功推进）⇒ 同一 worker 无 claim 时连续 peek 返回**同一批
+        head** ⇒ 预取的**有效窗口 = min(depth, 开课数)**；想靠「多轮 peek 填满 depth」是不成立的
+        （原注释口径已修正：2026-10-02 `plan/transfer-residual.plan.md` §1.5 / W3；得到了
+        prefetch 深度的现场账：多 worker 抢同一 hub 时浅窗口 + 每轮新打包 ⇒ 命中率≈0）。
         """
         self.discover()
         # R2-2：登记表（避让链的唯一输入）改由 peek/priority 喂——缺它

@@ -67,6 +67,7 @@ from remote.wire import (
     _BULK,
     _bulk_pace,
     _wire_add,
+    _wire_note_wait,
 )
 
 __all__ = [
@@ -483,20 +484,24 @@ def post_result(
             # 占槽范围 = 单次尝试；退避睡眠在槽外（绝不抱着通道睡 16s）。
             with _BULK.slot(BULK_P1_CRITICAL, label="result") as _tok:
                 t_xfer = time.time()  # ★ 排队结束、开传那一刻
-                status, body = _request(
-                    base_url,
-                    token,
-                    f"/jobs/{jid}/result",
-                    timeout=timeout,
-                    data=req_body,
-                    method="POST",
-                    headers={
-                        "Content-Type": ctype,
-                        # H2：结果回传须携带领取时下发的 lease_token（hub 校验后收）
-                        **({"X-Lease-Token": lease_token} if lease_token else {}),
-                    },
-                    pace=_bulk_pace(_tok, BULK_P1_CRITICAL),
-                )
+                try:
+                    status, body = _request(
+                        base_url,
+                        token,
+                        f"/jobs/{jid}/result",
+                        timeout=timeout,
+                        data=req_body,
+                        method="POST",
+                        headers={
+                            "Content-Type": ctype,
+                            # H2：结果回传须携带领取时下发的 lease_token（hub 校验后收）
+                            **({"X-Lease-Token": lease_token} if lease_token else {}),
+                        },
+                        pace=_bulk_pace(_tok, BULK_P1_CRITICAL),
+                    )
+                finally:
+                    # S3d：回传段的排队也归本 jid 的账（不接就把 §51 那半「排队 17.6s」丢掉）。
+                    _wire_note_wait(jid, "result", _BULK.take_wait(_tok))
         except Exception as e:
             status, body = None, repr(e).encode()
         if status in (200, 201):

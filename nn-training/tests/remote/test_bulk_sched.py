@@ -424,6 +424,134 @@ def test_no_yield_when_no_control():
     assert time.time() - t0 < 0.05
 
 
+# ─────────── 3b. 条件让路 / 按传输累计上限（2026-10-02，plan/transfer-residual W1/W1b） ───────────
+
+
+class _FakeClock:
+    """可推的注入时钟（`BulkScheduler.clock` 的形状）：让 age 判据确定、不赌调度。"""
+
+    def __init__(self) -> None:
+        self.t = 0.0
+
+    def __call__(self) -> float:
+        return self.t
+
+
+def test_oldest_control_age_tracks_the_oldest_inflight():
+    """`oldest_control_age()`：没有在途 ⇒ None；多个 ⇒ 取**最老**那个的 age（S1 的输入）。"""
+    clk = _FakeClock()
+    s = _sched(clock=clk)
+    assert s.oldest_control_age() is None
+    with s.control(label="a"):
+        clk.t = 0.4
+        with s.control(label="b"):
+            clk.t = 0.8
+            assert s.oldest_control_age() == pytest.approx(0.8)
+        clk.t = 1.1
+        assert s.oldest_control_age() == pytest.approx(1.1)
+
+
+def test_no_yield_while_control_is_young():
+    """S1：控制请求在途但 age < T ⇒ 不让路、不记账（为「大概率自己会完成」的请求停 bulk 是纯税）。"""
+    clk = _FakeClock()
+    s = _sched(yield_after_sec=1.0, clock=clk)
+    with s.slot(BULK_P1_CRITICAL, label="payload") as tok, s.control(label="/jobs/x/status"):
+        clk.t += 0.3
+        assert s.pause_if_needed(tok) == 0.0
+        assert s.stats()["yield_count"] == 0
+
+
+def test_yield_once_control_has_waited_past_the_threshold():
+    """S1：同一个控制请求 age ≥ T ⇒ 让路（阈值只改「谁值得等」，不改让路机制本身）。"""
+    clk = _FakeClock()
+    s = _sched(yield_after_sec=1.0, yield_budget_sec=0.03, yield_step_sec=0.01, clock=clk)
+    with s.slot(BULK_P1_CRITICAL, label="payload") as tok, s.control(label="/jobs/x/status"):
+        clk.t += 1.2
+        assert s.pause_if_needed(tok) == pytest.approx(0.03)
+        assert s.stats()["yield_count"] == 3
+
+
+def test_always_mode_keeps_the_old_semantics():
+    """`always` 档（after=0.0）逐字回旧语义：控制面一在途就让；映射在 `worker._bulk_yield_params`。"""
+    assert W._bulk_yield_params("always") == (0.0, None)
+    clk = _FakeClock()
+    s = _sched(yield_budget_sec=0.02, yield_step_sec=0.01, clock=clk)
+    with s.slot(BULK_P1_CRITICAL, label="payload") as tok, s.control(label="/jobs/x/status"):
+        assert s.pause_if_needed(tok) == pytest.approx(0.02)
+
+
+def test_never_mode_never_yields():
+    """`never` 档（after=inf）：控制面在途一辈子也不让路——量「让路买到什么」的极端臂。"""
+    after, total = W._bulk_yield_params("never")
+    assert after == float("inf") and total is None
+    clk = _FakeClock()
+    s = _sched(
+        yield_after_sec=after,
+        yield_total_budget_sec=total,
+        yield_budget_sec=0.02,
+        yield_step_sec=0.01,
+        clock=clk,
+    )
+    with s.slot(BULK_P1_CRITICAL, label="payload") as tok, s.control(label="/jobs/x/status"):
+        clk.t += 999.0
+        assert s.pause_if_needed(tok) == 0.0
+        assert s.stats()["yield_count"] == 0
+
+
+def test_auto_mode_mapping_matches_the_plan():
+    """`auto` = 条件让路 + 单条传输累计 5s（W1/W1b 的目标态）。"""
+    assert W._bulk_yield_params("auto") == (1.0, 5.0)
+
+
+def test_yield_total_is_capped_per_transfer():
+    """S2/W1b：同一条传输内多次让路的**累计**封顶——控制面一直在途也拿不走更多。"""
+    clk = _FakeClock()
+    s = _sched(
+        yield_after_sec=0.0,  # 老条件（在途即让）：把变量单独留给 total
+        yield_total_budget_sec=0.03,
+        yield_budget_sec=1.0,  # 单次预算故意放大：封顶只能来自 total
+        yield_step_sec=0.01,
+        clock=clk,
+    )
+    with s.slot(BULK_P1_CRITICAL, label="payload") as tok, s.control(label="/jobs/x/status"):
+        total = 0.0
+        for _ in range(20):
+            total += s.pause_if_needed(tok)
+        cur = s._yield_cur or {}
+        cur_sec = float(cur.get("sec", 0.0))
+    assert total == pytest.approx(0.03), f"累计让路没有封顶：{total}"
+    assert cur_sec == pytest.approx(0.03), f"本传输的账不封顶：{cur_sec}"
+    assert s.stats()["yield_sec"] == pytest.approx(0.03)
+
+
+def test_queue_wait_is_attached_to_its_own_token():
+    """S3d：排队秒数按 token 挂账、取后即删（不重复计数）；会话级对账面仍在。"""
+    s = _sched(wait_step_sec=0.005)
+    holding = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with s.slot(BULK_P1_CRITICAL, label="holder"):
+            holding.set()
+            release.wait(5)
+
+    def _free_soon() -> None:
+        # sleep-ok: 夹具模拟的工作量：占住通道一段时间（不是同步手段）
+        time.sleep(0.05)
+        release.set()
+
+    t = threading.Thread(target=holder, daemon=True)
+    t.start()
+    assert holding.wait(5), "占位线程没进通道"
+    threading.Thread(target=_free_soon, daemon=True).start()
+    with s.slot(BULK_P1_CRITICAL, label="queued") as tok:
+        wait = s.take_wait(tok)
+    t.join(5)
+    assert wait > 0.0, "排队秒数没有挂到 token 上"
+    assert s.take_wait(tok) == 0.0, "take_wait 取后即删（不能重复计数）"
+    assert s.stats()["queue_wait_sec"] > 0.0, "会话级对账面被误删"
+
+
 def test_yield_log_is_one_line_per_transfer():
     """让路账**一次传输一行**（2026-09-24 现场：一次 payload 下载让路 6 次 = 原来刷 6 行）。
 
@@ -495,6 +623,7 @@ def test_wire_line_reports_scheduler_accounting():
     assert len(lines) == 1
     assert "payload=" in lines[0]
     assert "wait=" in lines[0] and "yield=" in lines[0] and "p0_p95=" in lines[0]
+    assert "p0_p50=" in lines[0], "W0：条件让路的定 T 依据（p50）没上日志"
 
 
 def test_stats_has_dod_fields():

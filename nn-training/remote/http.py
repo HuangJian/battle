@@ -63,6 +63,7 @@ from remote.wire import (
     _wire_add,
     _wire_note_preempt,
     _wire_note_reroll,
+    _wire_note_wait,
 )
 
 __all__ = [
@@ -385,19 +386,26 @@ def _get_with_retry(
         t_req = time.time()  # 本次尝试的**墙钟**（含排队）：只喂 `_note_rate`（保守侧）
         t_xfer = t_req  # 进槽后重取：段账只算**真实传输**（排队归调度账 `wait=`）
         try:
-            with _BULK.slot(bulk_prio, label=wire_seg or path) as _tok:
+            # label 带优先级（S3a/W0）：现场日志里 `bulk payload/P1` 与 `bulk payload/P2` 一眼可分
+            #（否则「排队 3.9s」到底压在关键下载还是无害预取上，结构上判不出来）。
+            with _BULK.slot(bulk_prio, label=f"{wire_seg or path}/{bulk_prio}") as _tok:
                 t_xfer = time.time()  # ★ 排队结束、开传那一刻
-                status, body = _request(
-                    base_url,
-                    token,
-                    path,
-                    timeout=timeout,
-                    progress=progress,
-                    idle_timeout=idle_timeout,
-                    total_timeout=total_timeout,
-                    allow_reroll=allow_reroll,
-                    pace=_bulk_pace(_tok, bulk_prio),
-                )
+                status, body = None, b""
+                try:
+                    status, body = _request(
+                        base_url,
+                        token,
+                        path,
+                        timeout=timeout,
+                        progress=progress,
+                        idle_timeout=idle_timeout,
+                        total_timeout=total_timeout,
+                        allow_reroll=allow_reroll,
+                        pace=_bulk_pace(_tok, bulk_prio),
+                    )
+                finally:
+                    # S3d：本次排队归到**本 jid** 的账（失败/被挤走的排队也要记——那是真花掉的时间）。
+                    _wire_note_wait(wire_jid, wire_seg, _BULK.take_wait(_tok))
         except BulkPreemptError as e:
             _wire_note_preempt(wire_jid, int(getattr(e, "bytes_read", 0) or 0))
             preempts += 1

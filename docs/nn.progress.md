@@ -732,3 +732,28 @@ hub 也看不到下载进度）；判据唯一（`_lease_state` 四态 + `_lease
 
 决策 → `DECISIONS.md` §2026-10-01-goalnn-lease-orphan-reap；
 全文 → `docs/nn/remote-transport.md` §52；计划 → `plan/lease-orphan-reap.plan.md`（2026-10-01 评审修订版）。
+
+## 2026-10-02 · transfer-residual：让路税清算（条件让路 + 按传输累计上限 + 观测补面）
+
+触发：查「预取 / 多课程单 worker 下还能否再压缩或隐藏传输」⇒ **隐藏已到位**（稳态 `in` 4.7%、`out` 全
+overlap、余量 ≈9×），残余是**控制面让路税**：L2 真机实测一条 wire 传输总让路 **7.0s（38%）**，其中
+**5.5s 压在关键路径**（`payload` 1.0 + `blob:opt` 2.0 + `blob:ref` 2.5）；两本账互证（`yield=14` × 0.5s
+步长 = 五条「让路合计」行之和）。机制：`_request` 包住整段控制请求、`_read_body` 每 256KB 分片都
+`pace`，取消环（1.5s 一个、在途 ~1.0s）+ 预取 peek 让占空比 ~80%，而旧预算只是**单次调用** 5s、
+**一条传输无累计上界**。
+
+落地（W0–W3）：S1 条件让路（最老在途 ≥ `YIELD_AFTER_SEC_DEFAULT=1.0s` 才让）+ S2 按传输累计 ≤5s；
+库层缺省保持老语义（0.0/None），worker 显式装配 `--bulk-yield {auto,always,never}`、`worker_loop`
+**finally 还原**（`_BULK` 是进程单例——不还原会让同 pytest 进程的 `test_control_plane_bypass.py`
+确定性变红）。观测：label 带优先级（`bulk payload/P1`）/ `p0_p50` 上 wire 行 / 排队按 jid 归属
+（`take_wait`，`_get_with_retry` + `post_result` 两处）/ payload 预取命中入账（在 `run_one_round`
+take 命中处，避开 push 腿共用的 `_ensure_payload`）/ 每轮 prefetch 摘要（`stats()` 首个生产读者）/
+`wire_report.py` 新增调度账聚合（旧日志无 `p0_p50` 兼容）。注释：`hub/queue_claims.py`「深度」段改为
+「有效窗口 = `min(depth, 开课数)`」。**预注册门槛（不改默认）**：预取单会话 `hits/misses < 1:3` 且
+白传 ≥3MB ⇒ 默认 `--prefetch-depth 0`；`--bulk-yield never` 臂下 `p0_p95`/`p0_max` 劣化 <2× ⇒ auto 的
+total 收到 0。
+
+读数：定向 remote 5 文件 **92 passed**（新 19 例 + 1 例加断言，既有断言零改动）· nn 门禁
+**3483 passed / 9 skipped**（ruff + mypy 全量）· 根 `bun run check` **2345 pass / 0 fail**。
+决策 → `DECISIONS.md` §2026-10-02-goalnn-transfer-residual-yield；全文 → `docs/nn/remote-transport.md`
+§53；计划 → `plan/transfer-residual.plan.md`（2026-10-02 评审修订版，P0-1..P0-5 已修）。

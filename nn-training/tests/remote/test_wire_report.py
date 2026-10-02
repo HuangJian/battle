@@ -344,3 +344,71 @@ def test_old_logs_without_overlap_still_aggregate() -> None:
     row2 = wr.summarize_phases(wr.parse_phases([newer]))
     assert row2["out_overlap_sec"] == pytest.approx(3.7)
     assert "不占关键路径" in wr.render_phases(row2)
+
+
+# ─────────── 调度账（W0，2026-10-02，plan/transfer-residual）：wait / yield / p0_p50 ───────────
+
+#: W0 新格式：`p0_p50=` 在行尾（2026-10-02 起）。
+LIVE_DISPATCH = (
+    "[09:17:05] [worker] job fbe5cd1c66ed340f: wire payload=1.62MB/2.6s(635KB/s) "
+    "wait=4.0s/yield=14/p0_p95=1019ms/p0_p50=812ms 合计=3.19MB/13.8s(237KB/s)"
+)
+#: 旧格式（2026-10-02 之前：无 `p0_p50=`）——必须照样进表。
+LIVE_DISPATCH_OLD = (
+    "[09:17:06] [worker] job 416b8e12c3e0097d: wire payload=1.61MB/2.7s(597KB/s) "
+    "wait=0.0s/yield=0/p0_p95=740ms 合计=1.61MB/2.7s(597KB/s)"
+)
+#: 预取行（合成 jid，每轮一条）——也是一份调度账与一段字节账。
+LIVE_PREFETCH = (
+    "[09:14:24] [worker] job prefetch: wire payload=1.61MB/2.0s(819KB/s) "
+    "wait=0.0s/yield=0/p0_p95=812ms/p0_p50=640ms 合计=1.61MB/2.0s(819KB/s)"
+)
+
+
+def test_dispatch_accounting_is_parsed_with_and_without_p0_p50() -> None:
+    """W0：`wait=` / `yield=` / `p0_p95[=p0_p50]` 都进表；无 `p0_p50` 的旧行不丢。"""
+    sums = wr.parse_dispatch([LIVE_DISPATCH, LIVE_DISPATCH_OLD])
+    assert sums.jobs == 2
+    assert sums.waits == [4.0, 0.0]
+    assert sums.yields == 14
+    assert sums.p0_p95_max == 1019.0
+    assert sums.with_p50 == 1 and sums.p0_p50_max == 812.0
+    row = wr.summarize_dispatch(sums)
+    assert row["wait_max_sec"] == 4.0
+    assert row["wait_total_sec"] == 4.0
+    assert row["yield_total"] == 14
+    assert row["p0_p50_max_ms"] == 812.0
+    assert "wait" in wr.render_dispatch(row)
+
+
+def test_old_logs_without_dispatch_accounting_still_render() -> None:
+    """旧日志（没有 wait=/yield=/p0_*）不得报错，只报「无调度账」。"""
+    row = wr.summarize_dispatch(wr.parse_dispatch([LIVE_SLOW]))
+    assert row["jobs"] == 0
+    assert row["p0_p50_max_ms"] is None
+    assert "调度账：无" in wr.render_dispatch(row)
+
+
+def test_prefetch_wire_row_is_aggregated() -> None:
+    """预取（合成 jid）的 wire 行也是一段账：段表与调度账都能读到它。"""
+    rows = _rows([LIVE_PREFETCH])
+    assert rows["job:payload"]["jobs"] == 1
+    assert rows["job:payload"]["mb"] == pytest.approx(1.61, abs=0.01)
+    assert wr.parse_dispatch([LIVE_PREFETCH]).jobs == 1
+
+
+def test_p0_p50_is_optional_in_the_writer_format() -> None:
+    """写方（`remote/wire.py`）现在写 `p0_p50=`；读方正则对它可选（旧/新两种行都能解析）。"""
+    import remote.worker as W
+
+    lines: list[str] = []
+    W._WIRE.clear()
+    W._BULK.reset()
+    W._wire_start("d" * 16)
+    W._wire_add("d" * 16, "payload", MB, 1.0)
+    W._wire_flush("d" * 16, lines.append)
+    W._WIRE.clear()
+    assert len(lines) == 1
+    assert "p0_p50=" in lines[0], lines[0]
+    assert wr.parse_dispatch(lines).jobs == 1
+    assert wr.parse_dispatch(lines).with_p50 == 1

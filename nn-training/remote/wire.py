@@ -54,8 +54,10 @@ __all__ = [
     "_wire_hit",
     "_wire_note_preempt",
     "_wire_note_reroll",
+    "_wire_note_wait",
     "_wire_start",
     "_wire_time",
+    "_wire_totals",
     "set_bulk_log",
 ]
 
@@ -212,6 +214,8 @@ def _wire_bucket(jid: str) -> dict:
             # 被 P1 挤走作废的字节（挤走不占 `wasted`：那是重抽的账，两者口径不同）。
             "preempt_wasted": 0,
             "preempts": 0,
+            #: 按本 jid 归属的排队秒数（S3d，`_wire_note_wait` 累加）——job 行的 `wait=` 读它。
+            "waits": 0.0,
             "sched0": _BULK.stats(),  # 本 job 起点的调度器快照（flush 时算增量）
             "t0": time.time(),  # 建账时刻（claim 时会被 `_wire_start` 重写）
         }
@@ -226,7 +230,11 @@ def _wire_start(jid: str) -> None:
     """
     if not jid:
         return
-    _wire_bucket(jid)["t0"] = time.time()
+    b = _wire_bucket(jid)
+    b["t0"] = time.time()
+    # `sched0` 在 claim 这一刻**重取**（W0/S3c）：建账可能早于 claim（同 jid 重领场景下会把
+    # 上一轮的排队/让路算进本轮增量）；调度账的增量必须从「这一轮真正开始」起算。
+    b["sched0"] = _BULK.stats()
 
 
 def _wire_add(jid: str, seg: str, nbytes: int, sec: float) -> None:
@@ -260,6 +268,29 @@ def _wire_note_reroll(jid: str, wasted: int) -> None:
     w = _wire_bucket(jid)
     w["rerolls"] += 1
     w["wasted"] += int(wasted)
+
+
+def _wire_note_wait(jid: str, seg: str, sec: float) -> None:
+    """记一段**排队**（按 jid 归属，S3d）。
+
+    不再用会话级 `queue_wait_sec` 取差：那会把**别的传输**（尤其是预取）在窗口里的排队算进
+    本 job 的账，也会让预取自己的 `wait=` 恒为 0（bucket 是传输成功之后才建的，排队早已发生）。
+    """
+    if not jid or sec <= 0:
+        return
+    w = _wire_bucket(jid)
+    w["waits"] = float(w.get("waits", 0.0)) + float(sec)
+
+
+def _wire_totals(jid: str) -> tuple[int, int]:
+    """未 flush 的传输桶里已记的 `(成功字节, 被挤走作废字节)`（只读快照，不 pop）。
+
+    预取摘要行取「本轮下载/作废」用它——仍是**同一份 wire 账**，不另起计数器。
+    """
+    w = _WIRE.get(jid) or {}
+    segs = w.get("segs") or {}
+    total = sum(int(n) for n, _sec in segs.values())
+    return total, int(w.get("preempt_wasted", 0))
 
 
 def _wire_note_preempt(jid: str, wasted: int) -> None:
@@ -308,10 +339,14 @@ def _wire_flush(jid: str, log, *, wall_end: float | None = None) -> None:
     # `p0_rt_ms_p95` 是**会话级**读数（分位数不能做增量），其余按 job 起点快照取差。
     s0 = w.get("sched0") or {}
     s1 = _BULK.stats()
-    wait = float(s1.get("queue_wait_sec", 0.0)) - float(s0.get("queue_wait_sec", 0.0))
+    # S3d：`wait=` 改读**按本 jid 归属**的排队和（`_wire_note_wait` 记的）；会话级增量
+    # （`s1-s0`）会把别的传输（尤其预取）的排队算进来，故不再进 job 行（`stats()` 保留对账面）。
+    wait = float(w.get("waits", 0.0))
     yields = int(s1.get("yield_count", 0)) - int(s0.get("yield_count", 0))
+    # W0（S3b）：`p0_p50` 上日志——它是条件让路阈值 T 的定值依据（`p95` 单独不够）。
     parts.append(
         f"wait={wait:.1f}s/yield={yields}/p0_p95={float(s1.get('p0_rt_ms_p95', 0.0)):.0f}ms"
+        f"/p0_p50={float(s1.get('p0_rt_ms_p50', 0.0)):.0f}ms"
     )
     # 阶段占比（P0.5 基线）：T_in = 一切下载（payload/code/blob/预取），T_out = 结果回传，
     # T_ppo = 计算，other = 其余（排队/装载/解包/落盘）——「GPU 空转」主要就落在这里。

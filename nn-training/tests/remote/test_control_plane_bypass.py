@@ -209,6 +209,63 @@ def test_control_round_trip_stays_fast_while_bulk_in_flight(hub: str):
     assert W._BULK.stats()["yield_count"] >= 1, "bulk 没有为控制面让路"
 
 
+def test_control_plane_stays_fast_under_conditional_yield(hub: str):
+    """W1 正护栏：`auto`（条件让路）下控制面中位仍 ≤1s，且 bulk 完成。
+
+    与上一条的分工：上一条钉**库层缺省**（无条件让路）的旧语义，本一条钉**worker 缺省**
+    （auto）——控制请求 age < T 时不让路，而旁路靠独立连接**不靠让路**。
+    用完**必须还原**：`_BULK` 是进程单例（plan/transfer-residual §3.5 ★）。
+    """
+    lat: list[float] = []
+    errs: list[BaseException] = []
+    bulk_done = threading.Event()
+    control_window = threading.Event()
+    prev = W._BULK.configure_yield(after_sec=0.2, total_budget_sec=5.0)
+    try:
+
+        def bulk() -> None:
+            control_window.wait(15.0)
+            try:
+                W.download_payload(
+                    hub, TOKEN, JID, bulk_prio=BULK_P1_CRITICAL, log=lambda _m: None
+                )
+            except BaseException as e:  # 测试线程：原样留给主线程断言
+                errs.append(e)
+            finally:
+                bulk_done.set()
+
+        tb = threading.Thread(target=bulk, daemon=True)
+        tb.start()
+
+        def control() -> None:
+            with W._BULK.control(label="/jobs/status"):
+                control_window.set()
+                while not bulk_done.is_set():
+                    t0 = time.time()
+                    try:
+                        W.peek_jobs(hub, TOKEN, worker_id="w1", n=2)
+                    except BaseException as e:
+                        errs.append(e)
+                        return
+                    lat.append(time.time() - t0)
+                    # sleep-ok: 轮询步长（采样节奏，不是同步手段）
+                    time.sleep(0.01)
+
+        tc = threading.Thread(target=control, daemon=True)
+        tc.start()
+        tb.join(15)
+        tc.join(15)
+    finally:
+        W._BULK.configure_yield(after_sec=prev[0], total_budget_sec=prev[1])
+    assert not errs, f"传输出错：{errs!r}"
+    assert bulk_done.is_set(), "bulk 下载没在条件让路窗口内结束"
+    assert len(lat) >= 3, f"控制面问询次数太少，测不出结论：{len(lat)}"
+    med = _median(lat)
+    assert med < 1.0, f"条件让路下控制面往返中位 {med * 1000:.0f}ms > 1s（旁路失效）"
+    # timing-ok: 上界兜底（单样本只挡挂起/整体拖死，一次离群不算旁路失效）
+    assert max(lat) < 5.0, f"控制面往返出现 {max(lat) * 1000:.0f}ms 的离群（疑似挂起）"
+
+
 def test_result_upload_holds_single_channel(hub: str):
     """结果回传占住唯一通道 ⇒ 预取（P2）排队等它；控制面照样秒回。"""
     p2_waiting = threading.Event()
