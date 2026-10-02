@@ -18,7 +18,7 @@
 //      `onLaneHoldFireTicks/(ticks+1)`）。
 //   ④ 判据段：**it30/it35/it40** 各 **300 局**，seed0 = **866001**（866001–866300 = 段C；池外）。
 //   ⑤ 前置 Q ≤ χ²(0.95, df=2) = 5.99；⑥ 止损 = `paired` kickstart burn，
-//      显式 peer = `h4-encl-c0`（rl-config `courses.h4-encl-f150.kickstart_burn`），
+//      显式 peer = `h4-encl-c0`（**本文件** `kickstart_burn` 块；2026-10-02 起随腿入库），
 //      尾连续 3 点 Δ < −5.0pp ⇒ ABORT。
 //
 // ── §15.5 ─────────────────────────────────────────────────────────────────
@@ -55,6 +55,10 @@
   "kickstart_ref": true,
   "kickstart_init": 0.1,
   "warmup_iters": 0,
+
+  // ── 止损（2026-10-02 起随腿入库，本块 = 唯一权威；判据本体在 nn-training/worker/{kickstart_burn,paired_kill}.py）──
+  //   参照物 = 对端臂 h4-encl-c0（同 it 配对差），尾连续 3 点 Δ < −5.0pp ⇒ ABORT。
+  "kickstart_burn": { "mode": "paired", "peer": "h4-encl-c0" },
 
   // ── 预算：诊断腿 40 轮（判据点 = it30/35/40 尾巴三点）──────────────────────
   "iters": 40,

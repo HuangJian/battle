@@ -633,9 +633,10 @@ class KickstartBurnBlock(BaseModel):
 
     2026-10-02 从 rl-config 的 `courses.<课>.kickstart_burn` 迁入课程文件（DECISIONS
     §2026-10-02-goalnn-burn-rule-in-course-file）：止损是**实验设计**（预注册的一部分），
-    跟课程文件一起入库；rl-config 那份只在**兼容期**作回落（`legacy_*` 读函数，第二刀 P1 后删）。
-    字段名与旧读函数逐字同名；全字段可选，`None` = 未指定 → worker 侧模块常量（biz 不复制数值）。
-    解析期强校验（坏值拒课，不静默拿坏配置去停腿）；块**不进** `corpus_identity_fp`（语料身份 ≠ 判据规则）。
+    跟课程文件一起入库；rl-config 那份的兼容回落读面（`legacy_*`）已随第二刀（2026-10-02）
+    删除——本块是唯一来源。字段名与旧读函数逐字同名；全字段可选，`None` = 未指定 → worker 侧
+    模块常量（biz 不复制数值）。解析期强校验（坏值拒课，不静默拿坏配置去停腿）；
+    块**不进** `corpus_identity_fp`（语料身份 ≠ 判据规则）。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -815,10 +816,10 @@ class CourseConfig(BaseModel):
     #: 全体课程指纹漂移）——见 `tests/worker/test_kickstart_plan.py` 的断言。
     kickstart_init: float | None = None
     # ---- 结果面止损块（2026-10-02 从 rl-config 迁入课程文件；DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file）----
-    #: 干烧熔断（参照物/阈值）。缺席 = 兼容期回落 rl-config → worker 模块常量；**不进** corpus_identity_fp。
+    #: 干烧熔断（参照物/阈值）。缺席 = worker 模块常量（第二刀后 rl-config 回落已删）；**不进** corpus_identity_fp。
     #: restart-only（判据规则 mid-run 改 = 判读窗口中途换口径；读面消费 args 上的启动物化快照）。
     kickstart_burn: KickstartBurnBlock | None = None
-    #: 配对中点杀臂。缺席 = 兼容期回落 rl-config → 默认关（显式 opt-in 才判）。
+    #: 配对中点杀臂。缺席 = 默认关（显式 opt-in 才判；第二刀后 rl-config 回落已删）。
     paired_kill: PairedKillBlock | None = None
     #: demo 混 batch（x20 后续）：demo bank npz 路径（仓库相对，如
     #: `nn-training/data/human-x20-corpus/demo_bank.npz`）；"" = 关闭，老行为逐字节不变。

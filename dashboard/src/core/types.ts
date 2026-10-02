@@ -40,11 +40,11 @@ export interface CourseConf {
   /** 半离线段长覆盖（本课跑几轮一次上交；`-1` = 直到课程末尾，`0` = 关）。
    *  与 `rollout_src:'run'` 是**一对**：离线训练模式（2026-09-19）同时写这两个键，
    *  只给 `run` 不给段长在训练侧是配置错误（`_run_segment_iters` 回 0 ⇒ 响亮拒跑）。 */
-  run_iters?: number
-  // ── 共享 trainer 的**机器侧旋钮**（2026-09-19 / R3-5）──────────────────────────
+  run_iters?: number //  ── 共享 trainer 的**机器侧旋钮**（2026-09-19 / R3-5）──────────────────────────
   //  一个进程服务所有课程 ⇒ 「这门课怎么跑」不能是那个进程的命令行参数（只有一份）。
-  //  住这里而**不能**住 `curricula/*.jsonc`：课程文件字节 = course_fp（语料血缘 / 熔断口径
-  //  D14）——往里加一个旋钮，熔断会把同一份语料读成新语料。
+  //  住这里而**不能**住 `curricula/*.jsonc`：这些是**机器侧**旋钮（描述「这台机器怎么跑」）；
+  //  实验设计（如止损 `kickstart_burn`/`paired_kill`、门 `gates`）住课程文件、随腿入库
+  //  （D14 混训拒收判 `corpus_fp`，不判课程文件字节；义理修订 2026-10-02）。
   //  读面：python `trainer/loop_serve.py::apply_course_machine_overrides`（开课时施加）。
   //  传输/节点指针**不在**这里（课程与 worker 节点正交）。
   //
@@ -55,18 +55,10 @@ export interface CourseConf {
   //  升成**平台级**单开关（`tmp/gate-halt.json` + 控制台顶部开关，缺省 halt、可带 until
   //  到点自动回落）——它回答的是「有没有人在盯盘」，不是「这门课怎么跑」。旧值无读者，
   //  由 `pruneLegacyCourseKnobs` 开课时清掉。
-  /** kickstart 干烧熔断阈值/参照物覆盖（plan/accident.plan.md §5.2）。
-   *
-   *  2026-10-02 起**权威读面是课程文件**的 `kickstart_burn` 块（python 读面
-   *  `worker/kickstart_burn.py::burn_overrides`/`::burn_mode` 消费；块存在即权威）。
-   *  本键只在块缺席时作**兼容期回落**（第二刀 P1 后删，plan/burn-rule-in-course-file §9）。
-   *
-   *  控制台**只读**：开课回执拿 `margin_pp`/`points`/`mode` 说清「连续几点落后参照物多少 pp
-   *  停腿、参照物是谁」（`stack/kickstart-receipt.ts`），不做写面/UI。
-   *
-   *  `mode`：`auto`（缺省；能解析出唯一同 V 对端就走 `paired`，否则 `baseline`）/`baseline`
-   *  （参照 = 本腿 it0）/`paired`（参照 = 对端臂同 it 读数）。`peer` = 显式点名对照臂。 */
-  kickstart_burn?: { margin_pp?: number; points?: number; mode?: string; peer?: string }
+  //  ★ 2026-10-02 删掉 `kickstart_burn` / `paired_kill`（止损块，plan/burn-rule-in-course-file
+  //  第二刀 P1）：它们描述「这条腿的判据」= 实验设计，已随腿进 `curricula/*.jsonc`
+  //  （解析期强校验 + restart-only），rl-config 这份无读者——旧值由
+  //  `pruneLegacyCourseKnobs` / `pruneNoiseCourses` 清掉。
 }
 
 /** cloudflared 隧道协议（M1，plan/remote-wire-remediation §3）：

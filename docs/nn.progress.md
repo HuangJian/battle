@@ -134,11 +134,13 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 - **`kickstart_burn` 的 `paired` 口径在同网格多臂课上会静默回退 `baseline`**（三臂共享 `paired_rotate_seed`
   ⇒ 对端不唯一）⇒ 需要「显式指定对端」的机制，否则新止损在 Wave 2/b 腿这类课上**形同未装** ——
   `docs/nn/experiments.md` §69 ⑧
-- **止损块已随腿入库（2026-10-02 迁移）**：`kickstart_burn` / `paired_kill` 从 `rl-config.json`
-  （机器本地、不入库）迁进 `curricula/*.jsonc`（课程块权威；块缺席才回落旧键，兼容期）——
+- **止损块已随腿入库（2026-10-02 迁移；同日第二刀删净回落读面）**：`kickstart_burn` / `paired_kill`
+  从 `rl-config.json`（机器本地、不入库）迁进 `curricula/*.jsonc`（课程块 = 唯一来源）——
   上一条「显式 peer」的机制现在随课程文件走，换机器/新克隆不再静默降级 `baseline`
-  （回测假阳性 49.3% → paired 0.47%）—— 工程侧 `docs/nn/engineering.md` §59 · 决策
-  `DECISIONS.md` §2026-10-02-goalnn-burn-rule-in-course-file
+  （回测假阳性 49.3% → paired 0.47%）；第二刀又删 `legacy_*` 回落读面、迁 h4-hurt/h4-encl 四臂 +
+  x20-clutch 两门、清 rl-config 存量 92 项（48 → 4 门，只剩显式 `run` 档）—— 工程侧
+  `docs/nn/engineering.md` §59/§60 · 决策 `DECISIONS.md` §2026-10-02-goalnn-burn-rule-in-course-file ·
+  §2026-10-02-goalnn-burn-rule-cut2
 - **aim-dodge 杠杆 8 列已落地**（`idx66–73`，dim 74；v10 批次内移除 `enclExempt*` 三列；事件扩展 +
   settle-once registry + 回写机制；零训练腿）⇒ E1–E4 仍待在控制台开课 —— 工程侧
   `docs/nn/engineering.md` §58 · 自标定接口 `docs/nn/threat-lane-reward.md` §12 ·

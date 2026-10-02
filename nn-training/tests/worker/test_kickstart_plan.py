@@ -42,8 +42,6 @@ from worker.kickstart_burn import (
     burn_mode,
     burn_overrides,
     burn_verdict,
-    legacy_burn_mode,
-    legacy_burn_overrides,
 )
 
 
@@ -260,40 +258,27 @@ def test_missing_readings_neither_count_nor_reset() -> None:
     assert v2.tripped is False and v2.baseline is None
 
 
-def test_overrides_come_from_rl_config_legacy() -> None:
-    """兼容回落读（rl-config 的 `courses.<课>.kickstart_burn`），缺席 = 常量；脏值回常量。"""
-    assert legacy_burn_overrides(None, "t5-kk") == (BURN_MARGIN_PP, BURN_POINTS)
-    cfg = {"courses": {"t5-kk": {"kickstart_burn": {"margin_pp": 12, "points": 2}}}}
-    assert legacy_burn_overrides(cfg, "t5-kk") == (12.0, 2)
-    # 类型不对/非法值 → 回常量（不拿坏配置去停腿）
-    bad = {"courses": {"t5-kk": {"kickstart_burn": {"margin_pp": "x", "points": 0}}}}
-    assert legacy_burn_overrides(bad, "t5-kk") == (BURN_MARGIN_PP, BURN_POINTS)
+def test_overrides_come_from_the_module_constants_when_block_absent() -> None:
+    """块缺席 = 模块常量（第二刀起 rl-config 回落已删；止损唯一来源 = 课程文件块）。"""
+    assert burn_overrides(None) == (BURN_MARGIN_PP, BURN_POINTS)
+    assert burn_mode(None) == (MODE_AUTO, "")
 
 
-def test_course_block_wins_over_rl_config() -> None:
-    """课程文件块存在即权威（半块 ⇒ 模块缺省，**不**逐字段回落旧值）；块缺席才回落。"""
-    legacy = {
-        "courses": {
-            "t5-kk": {
-                "kickstart_burn": {
-                    "margin_pp": 99,
-                    "points": 9,
-                    "mode": MODE_BASELINE,
-                    "peer": "old",
-                }
-            }
-        }
-    }
+def test_course_block_is_authoritative() -> None:
+    """课程文件块存在即权威（半块 ⇒ 模块缺省，无第三态）；块缺席 ⇒ 模块缺省。
+
+    反转优先级 / 复活 rl-config 回落都必须在 CI 红（第二刀 P1 后 `legacy_*` 已删）。
+    """
     block = {"margin_pp": 12, "points": 2, "mode": MODE_PAIRED, "peer": "a0"}
-    assert burn_overrides(block, fallback=legacy_burn_overrides(legacy, "t5-kk")) == (12.0, 2)
-    assert burn_mode(block, fallback=legacy_burn_mode(legacy, "t5-kk")) == (MODE_PAIRED, "a0")
-    # 半块：缺 margin/points ⇒ 常量；缺 mode ⇒ auto（都不回落旧值）
+    assert burn_overrides(block) == (12.0, 2)
+    assert burn_mode(block) == (MODE_PAIRED, "a0")
+    # 半块：缺 margin/points ⇒ 常量；缺 mode ⇒ auto（不逐字段回落）
     half = {"peer": "a0"}
-    assert burn_overrides(half, fallback=(99.0, 9)) == (BURN_MARGIN_PP, BURN_POINTS)
-    assert burn_mode(half, fallback=(MODE_BASELINE, "old")) == (MODE_AUTO, "a0")
-    # 块缺席 ⇒ 回落旧值（迁移期行为逐字不变）
-    assert burn_overrides(None, fallback=(99.0, 9)) == (99.0, 9)
-    assert burn_mode(None, fallback=(MODE_BASELINE, "old")) == (MODE_BASELINE, "old")
+    assert burn_overrides(half) == (BURN_MARGIN_PP, BURN_POINTS)
+    assert burn_mode(half) == (MODE_AUTO, "a0")
+    # 块缺席 ⇒ 模块缺省
+    assert burn_overrides(None) == (BURN_MARGIN_PP, BURN_POINTS)
+    assert burn_mode(None) == (MODE_AUTO, "")
     # pydantic 块对象也认（读面物化前 / 单测直喂）
     from biz.course_spec import KickstartBurnBlock
 
@@ -340,7 +325,7 @@ def test_guard_stops_the_leg_and_writes_a_replayable_ledger_event(tmp_path: Path
     """执行面接线：命中 ⇒ 停腿（True）+ 账本可回放；缰绳关着 ⇒ 零行为。"""
     _write_eval_rows(tmp_path, _rows(0.35, 0.29, 0.28, 0.27))
     g = _guards(tmp_path)
-    assert g._kickstart_burn(3, None) is True, "连续三点低于基线就该停腿"
+    assert g._kickstart_burn(3) is True, "连续三点低于基线就该停腿"
 
     ledger = (tmp_path / "training_log.jsonl").read_text(encoding="utf-8").strip().splitlines()
     events = [json.loads(x) for x in ledger]
@@ -355,10 +340,10 @@ def test_guard_is_inert_without_kickstart_or_baseline(tmp_path: Path) -> None:
     _write_eval_rows(tmp_path, _rows(0.35, 0.10, 0.10, 0.10))
     g = _guards(tmp_path)
     g.args.kickstart_ref = False
-    assert g._kickstart_burn(3, None) is False, "没开缰绳就没有「回锚」这回事"
+    assert g._kickstart_burn(3) is False, "没开缰绳就没有「回锚」这回事"
     g.args.kickstart_ref = True
     _write_eval_rows(tmp_path, _rows(None, 0.10, 0.10, 0.10))
-    assert g._kickstart_burn(3, None) is False, "读不到基线（无 it0 行）不许停腿"
+    assert g._kickstart_burn(3) is False, "读不到基线（无 it0 行）不许停腿"
 
 
 def test_guard_also_halts_the_cloud_on_the_same_course(
@@ -377,7 +362,7 @@ def test_guard_also_halts_the_cloud_on_the_same_course(
     g = _guards(tmp_path, remote_hub_url="http://hub", remote_token="tok")
     g._cloud_halted = False
 
-    assert g._kickstart_burn(3, None) is True
+    assert g._kickstart_burn(3) is True
     assert calls == [(True, "t5-kk")], "停腿必须同时按课程下发云端停机达令"
 
 
@@ -385,12 +370,12 @@ def test_guard_counts_down_loudly_before_tripping(tmp_path: Path, capsys=None) -
     """未命中但有计数 ⇒ 落一行账（状态转移才写，不是每轮都写）。"""
     _write_eval_rows(tmp_path, _rows(0.35, 0.29, 0.28))
     g = _guards(tmp_path)
-    assert g._kickstart_burn(2, None) is False
+    assert g._kickstart_burn(2) is False
     lines = (tmp_path / "training_log.jsonl").read_text(encoding="utf-8").strip().splitlines()
     burn = [json.loads(x) for x in lines if json.loads(x)["event"] == "kickstart_burn"]
     assert len(burn) == 1 and burn[0]["streak"] == 2
     # 同值再判一次不再重复写（否则账本被淹）
-    assert g._kickstart_burn(2, None) is False
+    assert g._kickstart_burn(2) is False
     lines2 = (tmp_path / "training_log.jsonl").read_text(encoding="utf-8").strip().splitlines()
     assert len(lines2) == len(lines)
 
@@ -403,14 +388,12 @@ def test_guard_counts_down_loudly_before_tripping(tmp_path: Path, capsys=None) -
 # 零假设 MC 下旧规则从 0.005% 跳到 49.3%，**假阳性来自「自己的起点」这个参照物会飘**。
 
 
-def test_burn_mode_comes_from_rl_config_legacy() -> None:
-    """兼容回落读：`courses.<课>.kickstart_burn.{mode,peer}`；缺席/脏值 → auto + 空 peer。"""
-    assert legacy_burn_mode(None, "t5-kk") == (MODE_AUTO, "")
-    cfg = {"courses": {"t5-kk": {"kickstart_burn": {"mode": MODE_PAIRED, "peer": " a0 "}}}}
-    assert legacy_burn_mode(cfg, "t5-kk") == (MODE_PAIRED, "a0")
-    # 类型不对/非法值 → 回 auto（不拿坏配置去停腿）
-    bad = {"courses": {"t5-kk": {"kickstart_burn": {"mode": "whatever", "peer": 7}}}}
-    assert legacy_burn_mode(bad, "t5-kk") == (MODE_AUTO, "")
+def test_burn_mode_reads_the_course_block_only() -> None:
+    """`{mode,peer}` 只在课程块里读；缺席 → auto + 空 peer；脏值 → 回 auto（不拿坏配置停腿）。"""
+    assert burn_mode(None) == (MODE_AUTO, "")
+    assert burn_mode({"mode": MODE_PAIRED, "peer": " a0 "}) == (MODE_PAIRED, "a0")
+    # 类型不对/非法值 → 回 auto（块已过解析期强校验，这里是兜底纪律）
+    assert burn_mode({"mode": "whatever", "peer": 7}) == (MODE_AUTO, "")
 
 
 def test_paired_mode_ignores_drift_the_control_also_has() -> None:
@@ -473,14 +456,20 @@ def _burn_curricula(tmp: Path, *, peer_v: int) -> Path:
     return d
 
 
-def _burn_guard(tmp_path: Path, *, declared: int | None = BURN_V) -> TrainingGuards:
-    """本臂 traj = `<tmp>/own`，对端 = `<tmp>/t-peer`（与生产同构）。"""
+def _burn_guard(
+    tmp_path: Path, *, declared: int | None = BURN_V, burn: dict | None = None
+) -> TrainingGuards:
+    """本臂 traj = `<tmp>/own`，对端 = `<tmp>/t-peer`（与生产同构）。
+
+    `burn` = args 上的**启动物化快照**（课程文件块；None = 无块 ⇒ 模块缺省）。
+    """
     obj = _guards(tmp_path, course_path="curricula/t-own.jsonc")
     raw: dict[str, object] = {"name": "t-own", "mode": "per-tick"}
     if declared is not None:
         raw["paired_rotate_seed"] = declared
     obj.args.course_obj = CourseConfig.model_validate(raw)
     obj.args.course = "t-own"
+    obj.args.kickstart_burn = burn
     obj._traj_root = tmp_path / "own"
     return obj
 
@@ -519,12 +508,12 @@ def test_paired_wiring_uses_the_peer_and_survives_shared_drift(
     _burn_write(tmp_path / "own", _rows(0.86, 0.79, 0.78, 0.77))
     _burn_write(tmp_path / "t-peer", _rows(0.86, 0.79, 0.78, 0.77))
     _burn_peer_run_start(tmp_path, BURN_V)
-    base = {"courses": {"t-own": {"kickstart_burn": {"mode": MODE_BASELINE}}}}
-
-    assert _burn_guard(tmp_path)._kickstart_burn(3, base) is True, "显式 baseline ⇒ 按自己的起点停腿"
-    assert _burn_guard(tmp_path)._kickstart_burn(3, None) is False, "auto 解析出同 V 对端 ⇒ 改走配对读"
-    g = _burn_guard(tmp_path)
-    assert g._kickstart_burn(3, {"courses": {"t-own": {"kickstart_burn": {"mode": MODE_PAIRED}}}}) is False
+    assert (
+        _burn_guard(tmp_path, burn={"mode": MODE_BASELINE})._kickstart_burn(3) is True
+    ), "显式 baseline ⇒ 按自己的起点停腿"
+    assert _burn_guard(tmp_path)._kickstart_burn(3) is False, "auto 解析出同 V 对端 ⇒ 改走配对读"
+    g = _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})
+    assert g._kickstart_burn(3) is False
     assert _burn_events(tmp_path)[-1]["event"] == "gate_verdict"
 
 
@@ -536,9 +525,8 @@ def test_paired_wiring_stops_and_records_the_delta(
     _burn_write(tmp_path / "own", _rows(0.86, 0.77, 0.77, 0.77))
     _burn_write(tmp_path / "t-peer", _rows(0.86, 0.86, 0.86, 0.86))
     _burn_peer_run_start(tmp_path, BURN_V)
-    cfg = {"courses": {"t-own": {"kickstart_burn": {"mode": MODE_PAIRED}}}}
 
-    assert _burn_guard(tmp_path)._kickstart_burn(3, cfg) is True
+    assert _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})._kickstart_burn(3) is True
     events = _burn_events(tmp_path)
     burn = [e for e in events if e["event"] == "kickstart_burn"][-1]
     assert burn["mode"] == MODE_PAIRED and burn["streak"] == BURN_POINTS
@@ -556,9 +544,10 @@ def test_paired_wiring_refuses_a_mispaired_peer(tmp_path: Path, monkeypatch: pyt
     _burn_write(tmp_path / "own", _rows(0.86, 0.79, 0.78, 0.77))
     _burn_write(tmp_path / "t-peer", _rows(0.86, 0.86, 0.86, 0.86))
     _burn_peer_run_start(tmp_path, BURN_V + 82)
-    cfg = {"courses": {"t-own": {"kickstart_burn": {"mode": MODE_PAIRED}}}}
 
-    assert _burn_guard(tmp_path)._kickstart_burn(3, cfg) is True, "退回 baseline ⇒ 按本腿起点停腿"
+    assert _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})._kickstart_burn(3) is True, (
+        "退回 baseline ⇒ 按本腿起点停腿"
+    )
     burn = [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"][-1]
     assert burn["mode"] == MODE_BASELINE
 
@@ -578,9 +567,8 @@ def test_ambiguous_peer_falls_back_to_baseline(tmp_path: Path, monkeypatch: pyte
             json.dumps({"event": "run_start", "iter": 0, "rotateSeed": BURN_V}) + "\n",
             "utf-8",
         )
-    cfg = {"courses": {"t-own": {"kickstart_burn": {"mode": MODE_PAIRED}}}}
 
-    assert _burn_guard(tmp_path)._kickstart_burn(3, cfg) is True
+    assert _burn_guard(tmp_path, burn={"mode": MODE_PAIRED})._kickstart_burn(3) is True
     burn = [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"][-1]
     assert burn["mode"] == MODE_BASELINE, "对端不唯一 ⇒ 不猜，退回本腿起点"
 
@@ -592,19 +580,18 @@ def test_single_leg_keeps_the_baseline_rule(tmp_path: Path, monkeypatch: pytest.
     _burn_write(tmp_path / "t-peer", _rows(0.86, 0.86, 0.86, 0.86))
     _burn_peer_run_start(tmp_path, BURN_V)
 
-    assert _burn_guard(tmp_path, declared=None)._kickstart_burn(3, None) is True
+    assert _burn_guard(tmp_path, declared=None)._kickstart_burn(3) is True
     burn = [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"][-1]
     assert burn["mode"] == MODE_BASELINE
 
 
-def test_guard_prefers_the_course_block_over_rl_config(tmp_path: Path) -> None:
-    """执行面接线：args 上有课程块（物化快照）⇒ 块即权威；无块才回落 rl-config。"""
+def test_guard_uses_the_course_block_and_module_defaults(tmp_path: Path) -> None:
+    """执行面接线：args 上有课程块（物化快照）⇒ 块即权威；无块 ⇒ 模块常量（回落读面已删）。"""
     _write_eval_rows(tmp_path, _rows(0.35, 0.29, 0.28, 0.27))
-    cfg = {"courses": {"t5-kk": {"kickstart_burn": {"margin_pp": 1.0}}}}
 
     g = _guards(tmp_path)
     g.args.kickstart_burn = {"margin_pp": 100.0, "points": 3, "mode": MODE_BASELINE}
-    assert g._kickstart_burn(3, cfg) is False, "课程块把噪声带放大到 100pp ⇒ 不停腿"
+    assert g._kickstart_burn(3) is False, "课程块把噪声带放大到 100pp ⇒ 不停腿"
 
     g2 = _guards(tmp_path)
-    assert g2._kickstart_burn(3, cfg) is True, "无块 ⇒ 回落 rl-config（margin 1pp ⇒ 三点全命中）"
+    assert g2._kickstart_burn(3) is True, "无块 ⇒ 模块常量（margin 5pp ⇒ 三点全命中）"

@@ -175,6 +175,12 @@
   "paired_rotate_seed": 20260921,
   "warmup_iters": 0,
 
+  // ── 止损：中点配对杀臂显式开火（2026-10-02 起随腿入库，本块 = 唯一权威；判据本体在
+  //    nn-training/worker/paired_kill.py）────────────────────────────────────
+  //   C-w 显式 opt-in（DECISIONS §2026-09-26-paired-kill-opt-in）：同 it 配对差尾连续
+  //   2 点 < −3pp ⇒ 杀本臂；判据照算、streak 照落账。
+  "paired_kill": { "enabled": true },
+
   // ── 预算（两臂共享集群，各约半速）────────────────────────────────────────
   "iters": 0,
   "max_hours": 12,

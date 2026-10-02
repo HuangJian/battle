@@ -166,8 +166,9 @@ state-init 共存 = 方案 i（切点规则不变 + 交棒后首段禁事件）�
 
 **② 干烧熔断落执行面**（新模块 `biz/kickstart_burn.py`，纯函数）：基线**不靠人填** =
 `eval_log.jsonl` 的 **it0 行**（课程 bc 权重的干净评估 = 缰绳锚定的同一份权重）；连续
-`points`（3）个评估点低于基线 `margin_pp`（5pp）⇒ 停腿告警「疑似回锚/塌陷」。阈值走执行面
-`courses.<课>.kickstart_burn`（课程 gates 块仍为空——阶梯课程不配 gates 是 I2 铁律）。
+`points`（3）个评估点低于基线 `margin_pp`（5pp）⇒ 停腿告警「疑似回锚/塌陷」。阈值走**课程文件**的
+`kickstart_burn` 块（2026-10-02 起随腿入库；rl-config 回落当天第二刀已删——课程 gates 块仍为空，
+阶梯课程不配 gates 是 I2 铁律）。
 
 - **判据同源**：给 `gate_check.read_trend_rows` 加 `include_baseline`（it0 默认仍被滤），
   与 `_gate` 共用同一读者/同一文件；干烧计数落 `kickstart_burn` 事件 ⇒ 重启可回放。

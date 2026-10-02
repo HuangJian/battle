@@ -17,7 +17,6 @@ from pathlib import Path
 from typing import Any
 
 from common.log import log
-from worker.config import course_key_of
 from worker.events import write_gate_verdict, write_kickstart_burn, write_paired_kill
 from worker.gate_check import read_trend_rows
 from worker.kickstart_burn import (
@@ -26,14 +25,9 @@ from worker.kickstart_burn import (
     burn_mode,
     burn_overrides,
     burn_verdict,
-    legacy_burn_mode,
-    legacy_burn_overrides,
 )
 from worker.paired import declared_paired_seed, latest_run_start_seed, scan_paired_courses
 from worker.paired_kill import (
-    legacy_paired_kill_enabled,
-    legacy_paired_kill_overrides,
-    legacy_paired_kill_self_kill,
     paired_kill_enabled,
     paired_kill_overrides,
     paired_kill_self_kill,
@@ -88,7 +82,7 @@ class TrainingGuardsLeg:
             return None
         return resolved[0]
 
-    def _kickstart_burn(self, it: int, dist_cfg: dict | None) -> bool:
+    def _kickstart_burn(self, it: int) -> bool:
         """§5 干烧熔断（结果面，plan/accident.plan.md §5.2）：返 True = 停腿告警。
 
         只在缰绳开着（`kickstart_ref`）时守——干烧是「锚主导更新把起点洗回去」的形态，
@@ -97,9 +91,9 @@ class TrainingGuardsLeg:
 
         与 F4 过程熔断的分工：那个看更新健康度（kl/ent），这个看**结果有没有退回去**。
         停腿而不只是告警：C 事故那里两臂 × 12h 全是白烧，读数是 `it1` 就低的；单点低是
-        噪声，连着三个点低是趋势（阈值走执行面 `courses.<课>.kickstart_burn`，缺席用常量）。
+        噪声，连着三个点低是趋势（阈值走课程文件的 `kickstart_burn` 块，缺席用模块常量）。
 
-        **参照物两档**（`courses.<课>.kickstart_burn.mode`，2026-09-30）：`baseline`（默认）比
+        **参照物两档**（课程文件 `kickstart_burn.mode`，2026-09-30）：`baseline`（默认）比
         **本腿自己的 it0**；`paired` 比**对端臂的同 it 读数**（同网格配对差）。`auto`（缺省值）
         = 能解析出唯一同 V 对端就走 `paired`，否则回 `baseline`。选 `paired` 的实测理由：
         h4-lane 三腿回测里零奖励的对照臂自己也飘到 streak 2、有可归因效应的那条反而挨杀，
@@ -123,12 +117,11 @@ class TrainingGuardsLeg:
             log(f"[run_rl] WARN kickstart-burn 读账本失败（{type(e).__name__}: {e}）——本轮不判")
             return False
         # 止损一族 2026-10-02 起住课程文件（DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file）：
-        # 块存在即权威（args 上的启动物化快照，restart-only）；缺席才回落 rl-config 旧值
-        # （legacy_*，兼容期；第二刀见 plan/burn-rule-in-course-file §9 P1）。
-        key = course_key_of(args)
+        # 块存在即权威（args 上的启动物化快照，restart-only）；块缺席 = 模块缺省
+        # （第二刀已删 rl-config 回落读面）。
         block = getattr(args, "kickstart_burn", None)
-        margin_pp, points = burn_overrides(block, fallback=legacy_burn_overrides(dist_cfg, key))
-        mode, peer_name = burn_mode(block, fallback=legacy_burn_mode(dist_cfg, key))
+        margin_pp, points = burn_overrides(block)
+        mode, peer_name = burn_mode(block)
         peer_rows: tuple | None = None
         peer = ""
         if mode != MODE_BASELINE:
@@ -212,12 +205,12 @@ class TrainingGuardsLeg:
         )
         return True
 
-    def _paired_kill(self, it: int, dist_cfg: dict | None) -> bool:
+    def _paired_kill(self, it: int) -> bool:
         """配对**中点杀臂**（结果面，plan/accident.plan.md 附 §5）：返 True = 停腿告警。
 
         事故：中点条件（同 it 配对差连续 2 点 <−3pp）在 it25+it30 触发，**凌晨没人执行**。
         计划原文的教训是「规则 Trustee 缺席 = 规则不存在」——这个守卫就是那个不用醒着的人：
-        判据在 `biz/paired_kill.py`（纯函数），这里只做「读 → 判 → 落账/停腿」。
+        判据在 `worker/paired_kill.py`（纯函数），这里只做「读 → 判 → 落账/停腿」。
 
         与 `_kickstart_burn` 的分工：那个比的是**本腿 vs 自己的起点**（回锚/塌陷），
         这个比的是**本臂 vs 对端**（同 V 的另一条腿）——一个问「我退了吗」，一个问
@@ -230,9 +223,8 @@ class TrainingGuardsLeg:
         declared = declared_paired_seed(getattr(self.args, "course_obj", None))
         if declared is None:
             return False  # 单腿口径：没有「对端」这回事
-        key = course_key_of(self.args)
         block = getattr(self.args, "paired_kill", None)
-        if not paired_kill_enabled(block, fallback=legacy_paired_kill_enabled(dist_cfg, key)):
+        if not paired_kill_enabled(block):
             # 默认关火（2026-09-26）：配对杀臂是实验设计，必须按课显式 opt-in；
             # 同 V 只是门派同源，不是配对实验——不对未开火的课读账本、落账、判杀。
             return False
@@ -240,9 +232,7 @@ class TrainingGuardsLeg:
         siblings = scan_paired_courses(declared, self_name=self_name)
         if not siblings:
             return False  # 无对端：启动自检已响亮告警过（§2.5），这里无可比
-        margin_pp, points = paired_kill_overrides(
-            block, fallback=legacy_paired_kill_overrides(dist_cfg, key)
-        )
+        margin_pp, points = paired_kill_overrides(block)
         traj_root = Path(str(getattr(self, "_traj_root", Path(str(self._jsonl_path)).parent)))
         try:
             own_rows = read_trend_rows(traj_root / "eval_log.jsonl")
@@ -299,7 +289,7 @@ class TrainingGuardsLeg:
         if not best.tripped:
             return False
         reason = f"同 it 配对差连续 {streak} 个点 < −{margin_pp:.1f}pp（对端 {best_peer}）"
-        if not paired_kill_self_kill(block, fallback=legacy_paired_kill_self_kill(dist_cfg, key)):
+        if not paired_kill_self_kill(block):
             # 对照臂永不自杀（2026-09-25 C-0 事故）：判据已落账，上面的 streak 事件就是
             # 记录；停车会撕毁终点 verdict（配对检验需要两条臂都活着），故只记录不停车。
             log(f"[run_rl] paired-kill it{it}: {reason} ——本臂被配置为永不自杀，只记录不停车")

@@ -30,9 +30,6 @@ from worker.config import CourseConfig
 from worker.paired_kill import (
     PAIRED_KILL_MARGIN_PP,
     PAIRED_KILL_POINTS,
-    legacy_paired_kill_enabled,
-    legacy_paired_kill_overrides,
-    legacy_paired_kill_self_kill,
     paired_kill_enabled,
     paired_kill_overrides,
     paired_kill_self_kill,
@@ -94,21 +91,15 @@ def test_boundary_and_baseline_row() -> None:
     assert v.tripped is True and v.it == 2, "it0 是共同起点，不参与中点判据"
 
 
-def test_overrides_and_switches_prefer_the_course_block() -> None:
-    """课程块存在即权威（含半块 ⇒ 模块缺省）；块缺席才回落 rl-config 旧值（兼容期）。"""
-    # 兼容回落（原「执行面配置」读法，2026-10-02 起只是回落路径）
-    assert legacy_paired_kill_overrides(None, "t-own") == (PAIRED_KILL_MARGIN_PP, PAIRED_KILL_POINTS)
-    cfg = {"courses": {"t-own": {"paired_kill": {"margin_pp": 8, "points": 3}}}}
-    assert legacy_paired_kill_overrides(cfg, "t-own") == (8.0, 3)
-    bad = {"courses": {"t-own": {"paired_kill": {"margin_pp": "x", "points": 0}}}}
-    assert legacy_paired_kill_overrides(bad, "t-own") == (PAIRED_KILL_MARGIN_PP, PAIRED_KILL_POINTS)
-    # 块优先（fallback 被忽略）；半块 ⇒ 模块缺省（不逐字段回落）
-    assert paired_kill_overrides({"margin_pp": 5.0}, fallback=(8.0, 3)) == (5.0, PAIRED_KILL_POINTS)
-    assert paired_kill_overrides(None, fallback=(8.0, 3)) == (8.0, 3)
+def test_overrides_and_switches_come_from_the_course_block() -> None:
+    """课程块存在即权威（含半块 ⇒ 模块缺省）；块缺席 ⇒ 模块缺省（第二刀：回落读面已删）。"""
+    assert paired_kill_overrides(None) == (PAIRED_KILL_MARGIN_PP, PAIRED_KILL_POINTS)
+    assert paired_kill_overrides({"margin_pp": 5.0}) == (5.0, PAIRED_KILL_POINTS)
+    assert paired_kill_overrides({"margin_pp": 8, "points": 3}) == (8.0, 3)
     from biz.course_spec import PairedKillBlock
 
-    assert paired_kill_enabled(PairedKillBlock(enabled=True), fallback=False) is True
-    assert paired_kill_self_kill(PairedKillBlock(self_kill=False), fallback=True) is False
+    assert paired_kill_enabled(PairedKillBlock(enabled=True)) is True
+    assert paired_kill_self_kill(PairedKillBlock(self_kill=False)) is False
 
 
 # ────────────────────────── ③ 执行面接线 ──────────────────────────
@@ -191,7 +182,7 @@ def test_single_leg_is_inert(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setattr(paired_mod, "CURRICULA_DIR", _write_curricula(tmp_path, V), raising=True)
     _write_eval(tmp_path / "own", _own(0.40, 0.10, 0.10))
     g = _guards(tmp_path, declared=None)
-    assert g._paired_kill(3, None) is False
+    assert g._paired_kill(3) is False
     assert _ledger_events(tmp_path) == []
 
 
@@ -205,7 +196,8 @@ def test_mispaired_peer_is_not_compared(tmp_path: Path, monkeypatch: pytest.Monk
     _write_eval(tmp_path / "t-peer", _own(0.40, 0.40, 0.40))
     _write_peer_run_start(tmp_path, V + 82)  # 事故现场：差 82 秒的抖动量级
     g = _guards(tmp_path)
-    assert g._paired_kill(3, None) is False
+    g.args.paired_kill = {"enabled": True}  # 开火才走得到前提闸（否则默认关火直接退）
+    assert g._paired_kill(3) is False
     assert _ledger_events(tmp_path) == []
 
 
@@ -227,9 +219,9 @@ def test_guard_stops_the_leg_and_writes_a_replayable_event(
     _write_peer_run_start(tmp_path, V)
     g = _guards(tmp_path, remote_hub_url="http://hub", remote_token="tok")
     g._cloud_halted = False
-    cfg = {"courses": {"t-own": {"paired_kill": {"enabled": True}}}}
+    g.args.paired_kill = {"enabled": True}  # args 物化快照 = 课程文件块
 
-    assert g._paired_kill(3, cfg) is True, "连续两点落后 ⇒ 该杀臂"
+    assert g._paired_kill(3) is True, "连续两点落后 ⇒ 该杀臂"
     events = _ledger_events(tmp_path)
     kill = [e for e in events if e["event"] == "paired_kill"][-1]
     assert kill["streak"] == PAIRED_KILL_POINTS and kill["peer"] == "t-peer"
@@ -240,7 +232,7 @@ def test_guard_stops_the_leg_and_writes_a_replayable_event(
     assert paired_kill_verdict(_own(0.40, 0.35, 0.32), _own(0.40, 0.40, 0.40)).streak == kill["streak"]
     # 状态转移才落账：同值再判一次不重复写**计数事件**（gate_verdict 会再写一条——
     # 生产侧命中即整腿终点（`step_gate` 当轮 finish），这里连调两次是为了钉住计数口径）。
-    assert g._paired_kill(3, cfg) is True
+    assert g._paired_kill(3) is True
     again = _ledger_events(tmp_path)
     assert len([e for e in again if e["event"] == "paired_kill"]) == 1
     assert len(again) == len(events) + 1
@@ -252,19 +244,12 @@ def test_guard_stops_the_leg_and_writes_a_replayable_event(
 def test_self_kill_switch_defaults_to_on() -> None:
     """`paired_kill.self_kill` 缺席/写坏 ⇒ True（现状对称自杀，不动老行为）；只有显式 false 才关。
 
-    回落路径（rl-config）与课程块两条都要守这条：对照卷的命不能靠"没写配置"来保。
+    课程块是唯一来源：对照卷的命不能靠"没写配置"来保。
     """
-    assert legacy_paired_kill_self_kill(None, "t-own") is True
-    assert legacy_paired_kill_self_kill({}, "t-own") is True
-    assert legacy_paired_kill_self_kill({"courses": {"t-own": {"paired_kill": {}}}}, "t-own") is True
-    bad = {"courses": {"t-own": {"paired_kill": {"self_kill": "no"}}}}
-    assert legacy_paired_kill_self_kill(bad, "t-own") is True, "非 bool 不当 False"
-    off = {"courses": {"t-own": {"paired_kill": {"self_kill": False}}}}
-    assert legacy_paired_kill_self_kill(off, "t-own") is False
-    # 课程块路径：块缺席 ⇒ fallback；块存在未写 ⇒ True；显式 false ⇒ False
-    assert paired_kill_self_kill(None, fallback=True) is True
-    assert paired_kill_self_kill({}, fallback=True) is True
-    assert paired_kill_self_kill({"self_kill": False}, fallback=True) is False
+    assert paired_kill_self_kill(None) is True
+    assert paired_kill_self_kill({}) is True
+    assert paired_kill_self_kill({"self_kill": "no"}) is True, "非 bool 不当 False（解析期已拒课）"
+    assert paired_kill_self_kill({"self_kill": False}) is False
 
 
 def test_control_leg_trips_but_does_not_stop(
@@ -287,11 +272,11 @@ def test_control_leg_trips_but_does_not_stop(
     _write_eval(tmp_path / "own", _own(0.40, 0.35, 0.32))
     _write_eval(tmp_path / "t-peer", _own(0.40, 0.40, 0.40))
     _write_peer_run_start(tmp_path, V)
-    cfg = {"courses": {"t-own": {"paired_kill": {"enabled": True, "self_kill": False}}}}
     g = _guards(tmp_path, remote_hub_url="http://hub", remote_token="tok")
     g._cloud_halted = False
+    g.args.paired_kill = {"enabled": True, "self_kill": False}
 
-    assert g._paired_kill(3, cfg) is False, "对照臂命中也不停车"
+    assert g._paired_kill(3) is False, "对照臂命中也不停车"
     events = _ledger_events(tmp_path)
     assert any(e["event"] == "paired_kill" and e["streak"] == 2 for e in events), "计数不断线"
     assert not any(
@@ -308,19 +293,12 @@ def test_kill_is_opt_in_not_default() -> None:
     1789876303 是全屋种子流，不是配对实验），it5/it10 连跪两点 −4pp 当场被杀。
 
     配对杀臂是实验设计特性（配对 race + 杀规则），必须按课显式 `enabled: true` 才判；
-    缺席/写坏 ⇒ 关（连 streak 落账都不写——没开火的枪不记弹道）。回落与课程块两条路径同规。
+    缺席/写坏 ⇒ 关（连 streak 落账都不写——没开火的枪不记弹道）。课程块是唯一来源。
     """
-    assert legacy_paired_kill_enabled(None, "t-own") is False
-    assert legacy_paired_kill_enabled({}, "t-own") is False
-    assert legacy_paired_kill_enabled({"courses": {"t-own": {"paired_kill": {}}}}, "t-own") is False
-    bad = {"courses": {"t-own": {"paired_kill": {"enabled": "yes"}}}}
-    assert legacy_paired_kill_enabled(bad, "t-own") is False, "非 bool 不当 True"
-    on = {"courses": {"t-own": {"paired_kill": {"enabled": True}}}}
-    assert legacy_paired_kill_enabled(on, "t-own") is True
-    # 课程块路径
-    assert paired_kill_enabled(None, fallback=False) is False
-    assert paired_kill_enabled({}, fallback=False) is False
-    assert paired_kill_enabled({"enabled": True}, fallback=False) is True
+    assert paired_kill_enabled(None) is False
+    assert paired_kill_enabled({}) is False
+    assert paired_kill_enabled({"enabled": "yes"}) is False, "非 bool 不当 True（解析期已拒课）"
+    assert paired_kill_enabled({"enabled": True}) is True
 
 
 def test_disabled_guard_writes_nothing(
@@ -333,5 +311,5 @@ def test_disabled_guard_writes_nothing(
     _write_peer_run_start(tmp_path, V)
     g = _guards(tmp_path)
 
-    assert g._paired_kill(3, None) is False
+    assert g._paired_kill(3) is False
     assert _ledger_events(tmp_path) == []

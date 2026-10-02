@@ -21,6 +21,73 @@
 
 ---
 
+## §60 止损块第二刀：删 rl-config 回落读面 + 四臂两门迁移 + rl-config 存量清理（2026-10-02，plan/burn-rule-in-course-file.plan.md §9 P1）
+
+### 一句话
+
+`legacy_burn_*` / `legacy_paired_kill_*` 兼容回落读面**整体删除**（`burn_mode` / `burn_overrides` /
+`paired_kill_{enabled,overrides,self_kill}` 只认课程文件块，块缺席 = 模块常量）；h4-hurt/h4-encl
+四臂与 x20-clutch 两门的止损块**随腿入库**；rl-config 存量噪声（纯 `rollout_src:'local'`、
+`{}` 空壳、止损死键）一次性清 92 项（48 → 4 门课程节点，只剩显式 `run` 档）。
+
+### 为什么
+
+- §59 的第一刀留了双读兜底（块优先 + rl-config 回落），受益人（E2/E3a 四臂、C 腿两门）已完成
+  收官（h4-hurt 三臂 it40 完赛 / h4-encl c0+f150 it40、f75 it31 被 paired 止损 ABORT /
+  x20-clutch 两臂 2026-09-26 收官），六个使用者全部有课程块 ⇒ 回落读面已无活用户。
+- 回落读面的存在本身就是「换机器能换掉止损规则」的残留通道：机器本地 rl-config 只要还有作者，
+  预注册的止损就还可能被本地值盖掉（虽然块优先，但旧值的漂移会误导下一个读者与工具）。
+- 存量噪声（开课弹窗历史口径直写的 `rollout_src:'local'` 与空壳）描述的是缺省行为，留着只会让
+  读面（和人）以为「这课配过什么」。
+
+### 决定
+
+- **读面单源**：`worker/kickstart_burn.py` / `worker/paired_kill.py` 删 `legacy_*` 六个函数；
+  `burn_mode(block)` / `burn_overrides(block)` / `paired_kill_*` 五函数去 `fallback` 参数，
+  块缺席 = 模块缺省；`loop_guards_leg.py` 两个守卫去 `dist_cfg` 参数（`course_key_of` 唯一
+  用处消失，import 一并删）。判据本体 `burn_verdict` / `paired_kill_verdict` 仍**逐字不动**。
+- **四臂两门迁移**（块复制 rl-config 原值，字段不动）：
+  `h4-hurt-{f75,f150}` → `kickstart_burn:{mode:paired,peer:h4-hurt-c0}` ·
+  `h4-encl-{f75,f150}` → `{mode:paired,peer:h4-encl-c0}` ·
+  `x20-clutch` → `paired_kill:{enabled:true}` · `x20-clutch-null` → `paired_kill:{self_kill:false}`；
+  六处头注的「见 rl-config」改指本文件块。h4-aim-k10/k25 的注释同步去「兼容期回落」。
+- **控制台同源**：`burnThresholds(course)` 去 `cfg` 参数（rl-config 回落删净）；`CourseConf` 删
+  `kickstart_burn` 字段；两键进 `LEGACY_COURSE_KEYS`（`pruneLegacyCourseKnobs` 开课时清）。
+- **存量清理**：`course-knobs.ts` 新增 `pruneNoiseCourses()`（停课清理同一条分档应用到全库：纯 local
+  删 / 空壳整条删 / legacy 键删；显式 `node`/`auto`/`run` 与其它键一个字不动；幂等、无变化不写盘），
+  2026-10-02 对本机 rl-config 实跑一次（备份 `rl-config.json.bak.20261002-224412`，92 项，
+  非课程段逐字段不变）。
+
+### P1 门槛③（如实记录）
+
+plan §9 P1 的三条件：① 课程块已入库 ✅；② 使用者清点归零 ✅（六处全部迁移）；
+③ ≥1 次会话在无 rl-config 键的环境跑满并确认止损生效 —— **未即时满足**（六个使用者都已收官，
+当前无在跑的处理臂；x20-advanced/-h2 不带止损块）。处置：删除的安全性由「无生产读者 + 课程块
+齐全 + 块缺席回模块常量与旧回落同值」承担；**③ 降级为后续第一条带止损的新腿自然验证**
+（开腿后确认 `kickstart_burn`/`paired_kill` 事件来自课程块，而非回落值）。
+
+### 被否决备选
+
+- **保留 `fallback` 参数只删 `legacy_*`**——留一把空 fallback 口 = 下次有人再塞第二事实源；
+  且 `dist_cfg` 参数在两个守卫里已无用途（死参数）。
+- **先不迁 x20-clutch 两门（已收官）**——paired_kill 两键是 P1 清点的一部分；块进课程文件是
+  归档/复现的预注册，不是「只为在跑的腿」。
+
+### 验证
+
+- `tests/biz/test_burn_blocks_in_courses.py`（**新建**，3/3：四臂块冻结 + 两对照臂头注 + 两门块冻结）·
+  `tests/worker/test_kickstart_plan.py`（29/29：块权威 / 块缺席 = 常量 / 无 `legacy_*`）·
+  `tests/worker/test_paired_kill.py`（opt-in / self_kill / 接线走 args 物化块）·
+  `tests/trainer/test_loop_guards_split.py`（去 `worker.config` import 边）·
+  `dashboard/tests/kickstart-receipt.test.ts`（块 = 唯一来源 + e2e 旧值不看）·
+  `dashboard/tests/course-lifecycle.test.ts`（`pruneNoiseCourses` 幂等/分档）。
+- 「改坏必红」：删块 / 改 peer ⇒ 契约测试红；把回落后读面接回来 ⇒ 块优先用例红。
+
+**指针**：plan `plan/burn-rule-in-course-file.plan.md` §9 P1 · 决策
+`DECISIONS.md §2026-10-02-goalnn-burn-rule-cut2` · 前刀 `docs/nn/engineering.md` §59。
+
+---
+
 ## §59 止损块进课程文件：`kickstart_burn` / `paired_kill` 的课程化迁移（2026-10-02，plan/burn-rule-in-course-file.plan.md）
 
 ### 一句话
@@ -72,6 +139,8 @@
 
 **指针**：plan `plan/burn-rule-in-course-file.plan.md`（含评审 `-review-bf.md`）· 决策
 `DECISIONS.md §2026-10-02-goalnn-burn-rule-in-course-file` · 回测 `nn-training/tools/backtest-burn-rule.py`。
+
+> 后续（第二刀，2026-10-02）：回落读面已删、四臂两门已迁、rl-config 存量已清 → 本文件 §60。
 
 ---
 

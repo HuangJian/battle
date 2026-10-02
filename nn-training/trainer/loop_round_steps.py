@@ -442,9 +442,9 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
             return finish(ROUND_STOP)
         if self._stop_loss(it, ctx.eval_rec):
             return finish(ROUND_STOP)
-        if self._kickstart_burn(it, ctx.dist_cfg):
+        if self._kickstart_burn(it):
             return finish(ROUND_STOP)
-        if self._paired_kill(it, ctx.dist_cfg):
+        if self._paired_kill(it):
             return finish(ROUND_STOP)
         if self._gate(it):
             return finish(ROUND_STOP)

@@ -12,8 +12,8 @@
 // ══════════════════════════════════════════════════════════════════
 // · 主终点 = **配对差**（处理臂 − 本臂，同 seed 同 stage）⇒ 本臂必须与 f75/f150 **同时训练、
 //   同起点、同种子流**；不能用历史臂（h4-aim-* / h4-hurt-* / b0/b1）或冻结 bc 当对照。
-// · 本臂是 f75/f150 的 paired kickstart-burn 对端（显式 `peer`，见 rl-config
-//   `courses.h4-encl-f75|f150.kickstart_burn = {mode:'paired', peer:'h4-encl-c0'}`）——
+// · 本臂是 f75/f150 的 paired kickstart-burn 对端（显式 `peer`，见 f75/f150 课程文件的
+//   `kickstart_burn` 块 = {mode:'paired', peer:'h4-encl-c0'}；2026-10-02 起随腿入库）——
 //   多臂共享 V 时自动解析必回退 baseline（Wave 2 实测教训），故显式指定。
 // · 本臂配方 = Wave 2 对照臂 b0 逐字（v4 包），唯一的作用是把「训练本身把读数推到哪」量出来。
 //

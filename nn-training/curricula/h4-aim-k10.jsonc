@@ -59,9 +59,8 @@
   "kickstart_init": 0.1,
   "warmup_iters": 0,
 
-  // ── 止损（2026-10-02 起随腿入库；判据本体在 nn-training/worker/{kickstart_burn,paired_kill}.py）──
+  // ── 止损（2026-10-02 起随腿入库，本块 = 唯一权威；判据本体在 nn-training/worker/{kickstart_burn,paired_kill}.py）──
   //   参照物 = 对端臂 h4-aim-c0（同 it 配对差），尾连续 3 点 Δ < −5.0pp ⇒ ABORT。
-  //   块缺席时回落 rl-config 旧值（兼容期）；本块 = 权威。
   "kickstart_burn": { "mode": "paired", "peer": "h4-aim-c0" },
 
   // ── 预算：诊断腿 40 轮（判据点 = it30/35/40 尾巴三点）──────────────────────

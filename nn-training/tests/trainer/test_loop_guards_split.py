@@ -204,7 +204,6 @@ TOP_IMPORTS: dict[str, frozenset[str]] = {
     "loop_guards_trip.py": frozenset({"worker.breaker", "worker.events", "common.log", "worker.stop_loss"}),
     "loop_guards_leg.py": frozenset(
         {
-            "worker.config",
             "worker.events",
             "worker.gate_check",
             "worker.kickstart_burn",
@@ -711,7 +710,7 @@ def test_leg_kickstart_burn_really_stops_the_leg(tmp_path: Path) -> None:
         _burn_streak=0,
         _ledger=None,
     )
-    assert TrainingGuardsLeg._kickstart_burn(obj, 3, None) is True  # type: ignore[arg-type]
+    assert TrainingGuardsLeg._kickstart_burn(obj, 3) is True  # type: ignore[arg-type]
     assert obj._burn_streak == 3  # type: ignore[attr-defined]
     events = [json.loads(x) for x in jsonl.read_text(encoding="utf-8").strip().splitlines()]
     burn = [e for e in events if e["event"] == "kickstart_burn"][-1]
@@ -730,7 +729,7 @@ def test_leg_paired_kill_is_inert_without_a_paired_course(tmp_path: Path) -> Non
         _pair_kill_streak=0,
         _ledger=None,
     )
-    assert TrainingGuardsLeg._paired_kill(obj, 5, None) is False  # type: ignore[arg-type]
+    assert TrainingGuardsLeg._paired_kill(obj, 5) is False  # type: ignore[arg-type]
 
 
 def test_gate_budget_hard_cut_really_stops(tmp_path: Path) -> None:

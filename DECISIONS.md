@@ -6882,3 +6882,32 @@ ruff + mypy 全量绿。
 
 **指针**：全文 `docs/nn/engineering.md` §59 · plan `plan/burn-rule-in-course-file.plan.md`
 （含评审 `-review-bf.md`）· 回测 `nn-training/tools/backtest-burn-rule.py`。
+
+## §2026-10-02-goalnn-burn-rule-cut2（2026-10-02，止损块第二刀：删 rl-config 回落读面 + 六处迁移 + 存量清理）
+
+- **背景**：`§2026-10-02-goalnn-burn-rule-in-course-file` 第一刀留了双读兜底（课程块优先 + `legacy_*`
+  回落 rl-config）。六个使用者（h4-hurt×2 + h4-encl×2 + x20-clutch 两门；h4-aim×2 已于第一刀迁）
+  现已全部收官且都有课程块 ⇒ 回落读面已无活用户；留一把「机器本地还能改止损」的回落口 = 预注册
+  的止损仍可能被本地值盖掉（块优先也挡不住旧值漂移误导读面）。
+- **决定**：① 删 `legacy_burn_mode/overrides`、`legacy_paired_kill_overrides/self_kill/enabled`
+  六个回落读函数；`burn_mode/burn_overrides`/`paired_kill_*` 五函数去 `fallback` 参数（块缺席 =
+  模块常量）；`loop_guards_leg` 两个守卫去 `dist_cfg` 参数（`course_key_of` 唯一用处消失）。
+  判据本体 `burn_verdict`/`paired_kill_verdict` 逐字不动。② 迁移六处块（值逐字复制）：h4-hurt-{f75,f150}
+  → `{mode:paired,peer:h4-hurt-c0}`、h4-encl-{f75,f150} → `{mode:paired,peer:h4-encl-c0}`、
+  x20-clutch → `paired_kill:{enabled:true}`、x20-clutch-null → `paired_kill:{self_kill:false}`；
+  六处头注「见 rl-config」改指本文件块。③ 控制台 `burnThresholds(course)` 去 `cfg`、`CourseConf`
+  删字段；两键进 `LEGACY_COURSE_KEYS`。④ 存量清理：新 `pruneNoiseCourses()`（停课清理同一条分档
+  扫全库：纯 `rollout_src:'local'` 删 / 空壳整条删 / 无读者旧键删；显式 node/auto/run 不动；幂等
+  无变化不写盘），2026-10-02 实跑 92 项（48 → 4 门，只剩显式 run 档；备份
+  `rl-config.json.bak.20261002-224412`）。
+- **门槛③如实记录**：plan §9 P1 的「≥1 次会话在无 rl-config 键的环境跑满并确认止损生效」**未即时
+  满足**——六个使用者已全部收官、当前无在跑的处理臂；删除安全性由「无生产读者 + 课程块齐全 +
+  块缺席回模块常量（与旧回落同值）」承担，③降级为后续第一条带止损的新腿自然验证。
+- **被否决**：① 保留 `fallback` 参数只删 `legacy_*`（留一把空口子 = 第二事实源迟早回来）；② 先不迁
+  x20-clutch 两门（已收官；块进课程文件是归档/复现的预注册，不是只为在跑的腿）。
+- **落点**：`nn-training/worker/{kickstart_burn,paired_kill,loop_guards_leg}.py` ·
+  `trainer/loop_round_steps.py` · `curricula/h4-hurt-*`/`h4-encl-*`/`x20-clutch*` ·
+  `dashboard/src/stack/{course-knobs,kickstart-receipt}.ts` · `dashboard/src/core/types.ts` ·
+  测试 `tests/biz/test_burn_blocks_in_courses.py`（新建）等。
+
+**指针**：全文 `docs/nn/engineering.md` §60（前刀 §59）· plan `plan/burn-rule-in-course-file.plan.md` §9 P1。

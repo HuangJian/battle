@@ -556,8 +556,8 @@ find tmp -name per-game.json → 0 个
 **落地**（控制台侧，`dashboard/`）：新模块 `stack/kickstart-receipt.ts`（纯函数组装 + 轻量账本
 读）→ `server/actions/course-lifecycle.ts::openCourse` 的 `detail`。读数与阈值全与执行面同源：
 基线 = `tmp/<课>/eval_log.jsonl` 文件序末条 it0 行的 winRate（同 `kickstart_burn.baseline_reading`），
-起点 = 末条 it>0 行；噪声带/点数走 `courses.<课>.kickstart_burn.{margin_pp,points}`（同
-`kickstart_burn.burn_overrides`）。★ 两支：起点低于基线 > 噪声带（熔断从第一个点起算）/
+起点 = 末条 it>0 行；噪声带/点数走**课程文件**的 `kickstart_burn` 块（同
+`kickstart_burn.burn_overrides`；rl-config 回落 2026-10-02 第二刀已删）。★ 两支：起点低于基线 > 噪声带（熔断从第一个点起算）/
 起点在噪声带内且 kk ≥ 0.5（满额锚先把它拉回去，C 事故的那种配置）。
 
 **lesson**：
@@ -1654,7 +1654,9 @@ CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路�
    下一拍又会把这门课拉起来。
    ★ 2026-10-02（用户口径）：停课顺手**清残留**——`courses.<课>.rollout_src='local'`（缺省档；
    开课弹窗默认档会原值直写）删掉，清空的课程节点整条删（`stack/course-knobs.ts::pruneStoppedCourseConfig`）；
-   显式 `node`/`auto`/`run` 与任何训练语义键一个字不动。
+   显式 `node`/`auto`/`run` 与任何训练语义键一个字不动。存量（不只停课那一门）的同一条分档由
+   `pruneNoiseCourses` 一次性扫全库（同日第二刀实跑 92 项；含无读者旧键 `kickstart_burn`/`paired_kill`，
+   见 `docs/nn/engineering.md` §60）。
 
 **备选与否决**：
 
