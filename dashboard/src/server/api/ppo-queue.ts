@@ -5,7 +5,12 @@ import path from 'path'
 // ────────────────────────── PPO 队列排队超时（无 worker 领取 >5min → warning） ──────────────────────────
 
 /** 排队超时阈值：job 发布后若无任何 worker 领取（无 claimed 标记）
- *  超过该时长，控制台提示云端 worker 可能断连。 */
+ *  超过该时长，控制台提示云端 worker 可能断连。
+ *
+ *  ★ 口径（2026-10-02，plan/course-pill-precision §6）：这一类在 UI 里叫「排队·无人取」
+ *  （pill 与告警坞**共用一个词**：`dashboard/src/web/view/loop-queue.ts::NO_TAKER_LABEL`）。
+ *  本检测只看**无人认领**：有 `claimed` 标记的卡死（pill 的「卡住」/ `STUCK_LABEL`）
+ *  结构上不在此列——它不是同一个信号，不要在这里补检测（那是另一个决策，见 plan O1）。 */
 export const PPO_QUEUE_STALL_MS = 5 * 60_000
 
 export interface PpoQueueStall {

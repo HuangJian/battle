@@ -23,7 +23,9 @@ import {
   alertDockSplit,
   alertDockSummary,
   buildAlerts,
+  NO_TAKER_LABEL,
   sortAlerts,
+  STUCK_LABEL,
   type AlertInput,
   type AlertItem,
 } from '../src/web/view'
@@ -132,7 +134,7 @@ describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
     expect(items).toEqual([])
   })
 
-  it('PPO 排队超时 → err，且写明等了多久 + job 身份', () => {
+  it('PPO 排队·无人取超时 → err；与 pill 同词，且与「卡住」划清界限（2026-10-02 口径对齐）', () => {
     const items = buildAlerts({
       ...clean,
       ppoQueueStall: { jobId: 'abcdef1234567890', waitedSec: 305, it: 37 },
@@ -140,6 +142,13 @@ describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
     expect(items[0]!.severity).toBe('err')
     expect(items[0]!.title).toContain('5 分5 秒')
     expect(items[0]!.detail).toContain('it37')
+    // ★ 跨面同词：dock 的说法与 pill 对同一局面给出的状态字**同一个常量**——两处不得
+    //   各起一个名字（「同一句话不说两遍」的落点；旧词「排队超时」不得回流）。
+    expect(items[0]!.title).toContain(`PPO ${NO_TAKER_LABEL}`)
+    expect(items[0]!.title).not.toContain('排队超时')
+    // ★ 反向：dock 结构上不覆盖有持有者的卡死（不是同一个信号）——detail 必须点名 pill 的
+    //   「卡住」是另一类，防两类被读成一类。
+    expect(items[0]!.detail).toContain(STUCK_LABEL)
     // 没有 it 时回退 jobId 前缀（不能显示空身份）
     const noIter = buildAlerts({
       ...clean,

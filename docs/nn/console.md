@@ -50,6 +50,14 @@ wall 58–73s 差 ≥4×）；`PEEKED_WINDOW_SEC=60` 由 hub 侧给（§54）。
 `stateView.workerRegistry.workers[].id`，评审订正：**不是** hub 探活 `pushMap`）· 队列深度 + 队首
 jid · 预取窗口（在/不在/不可知）· 训练侧 waiting 原文 · 停课说明。
 
+**口径对齐（`detectPpoQueueStall`，plan §6）**：告警坞的 PPO 红条与 pill 的「排队·无人取」说的是
+**同一件事**（有活、没人认领）——词在 `loop-queue.ts` 定义一次（`NO_TAKER_LABEL`），两个面引用
+同一常量（`alerts.ts` title = `PPO ${NO_TAKER_LABEL}：…`）；分工是「pill 说状态（立即）· 告警坞说
+升级（≥5min，`PPO_QUEUE_STALL_MS`）」。`STUCK_LABEL`（「卡住」）是**另一类**（有持有者但无进度，
+告警坞结构上看不见——盘上有 `claimed` 即跳过），红条 detail 主动点名它与本条的区分，防两类被读成
+一类；两处实现**不合并**（判据源不同：hub 观测 vs 盘上 job 目录 + 账本）。回归：
+`web-alert-dock.test.ts`（同词 + 划界 + 旧词不回流）· `training-pills.test.ts`（常量面锁死）。
+
 **数据面**：`parseHubQueue`（`course-overview.ts`）补 `halt` / `inflightDetail`{jobId, worker,
 claimedAgo, computingAgo, heartbeatAgo} / `nextJob` / `peekedCourses`；`CourseOverviewRow` 增
 `stuckSec: number | null` 与 `peeked: boolean | null`（**三态**，评审 P1：布尔无法区分「旧 hub

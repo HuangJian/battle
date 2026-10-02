@@ -119,6 +119,16 @@ export interface CoursePillView {
  *  与稳态 wall（58–73s）差 ≥4×。**纯展示层常量**——不得被 hub / 训练侧 import。 */
 export const PILL_STUCK_SEC = 300
 
+/** 「有活、**没人在飞**」这一类的**唯一词**（pill 与告警坞共用；2026-10-02 口径对齐，plan §6）：
+ *  盘上的 `detectPpoQueueStall`（≥5min 无认领的红条）说的就是**同一件事**——两处不得各起
+ *  一个名字。分工是「pill 说状态（立即）、告警坞说升级（超时）」，词只能一份。 */
+export const NO_TAKER_LABEL = '排队·无人取'
+
+/** 「有在飞、但龄超阈」这一类。pill 专属：告警坞结构上只看得见**无人认领**的 job
+ *  （盘上有 `claimed` 标记即跳过，见 `ppo-queue.ts` 头注）——告警坞的区分句引用这个词，
+ *  防两类被读成一类（有持有者卡死 ≠ 没人要跑：处置方向相反）。 */
+export const STUCK_LABEL = '卡住'
+
 /** 龄 → 展示串：`<60s` 不显示（`''`）；`<60m` 用 `Nm`；否则 `Nh`（plan §3.2）。 */
 export function fmtAge(sec: number | null): string {
   if (sec === null || !Number.isFinite(sec) || sec < 60) return ''
@@ -368,7 +378,7 @@ export function coursePills(input: {
             course,
             kind,
             it,
-            status: '卡住',
+            status: STUCK_LABEL,
             age: fmtAge(age),
             tone: 'r' as CoursePillTone,
             title: hubDispatchTitle(hub, wait, input.registeredWorkers),
@@ -417,13 +427,11 @@ export function coursePills(input: {
         course,
         kind,
         it,
-        status: '排队·无人取',
+        status: NO_TAKER_LABEL,
         tone: 'y' as CoursePillTone,
-        title: `hub 有活、没有在飞、也不在预取窗口——没人要跑。${hubDispatchTitle(
-          hub,
-          wait,
-          input.registeredWorkers,
-        )}`,
+        title:
+          `hub 有活、没有在飞、也不在预取窗口——没人要跑（与告警坞的 PPO 红条同一件事：` +
+          `pill 说状态、告警坞在超时后升级）。${hubDispatchTitle(hub, wait, input.registeredWorkers)}`,
       }
     }
     switch (r.waiting.kind) {

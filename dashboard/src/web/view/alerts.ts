@@ -27,6 +27,10 @@
 import type { CloudHaltView, LoopComplete } from './console-types'
 import { fmtTs } from './format'
 import { cloudHaltAckKey, visibleCloudHalts } from './interaction'
+// 与 pill **同一个词**（2026-10-02 口径对齐，plan/course-pill-precision §6）：告警坞的 PPO 红条
+// 与 pill 的「排队·无人取」说的是同一件事（有活、没人认领）；「卡住」是另一类（有持有者但
+// 无进度）。两处各起一个名字 = 迟早漂开，所以词只在 `loop-queue.ts` 定义一次。
+import { NO_TAKER_LABEL, STUCK_LABEL } from './loop-queue'
 
 /** 告警严重度（排序即这个顺序；`history` = 已恢复/已完成这类留痕）。 */
 export type AlertSeverity = 'err' | 'warn' | 'info' | 'history'
@@ -188,7 +192,12 @@ function loopCompleteAlerts(input: AlertInput): AlertItem[] {
   ]
 }
 
-/** PPO 任务排队超时（红条）：>5min 无 worker 领取 ⇒ 云端 worker 可能断连。 */
+/** PPO 排队·无人取超时（红条）：盘上 `claimed` 不存在且目录龄 >5min ⇒ 云端 worker 可能断连。
+ *
+ *  ★ 词与 pill 同源（`NO_TAKER_LABEL`）：两处说的是**同一件事**（有活、没人认领）——
+ *  pill 立即说状态、本坞在超时后升级，**词只能一个**。detail 里主动点名 pill 的
+ *  「卡住」（`STUCK_LABEL`）是**另一类**（有持有者但无进度，处置方向相反）——它们不是一个
+ *  信号，不能被读成同一个词的两遍。 */
 function ppoStallAlerts(input: AlertInput): AlertItem[] {
   const stall = input.ppoQueueStall
   if (!stall) return []
@@ -198,10 +207,11 @@ function ppoStallAlerts(input: AlertInput): AlertItem[] {
       id: 'ppo-queue-stall',
       severity: 'err',
       icon: '⚠',
-      title: `PPO 任务排队超时：已等待 ${waited} 仍无 worker 领取`,
+      title: `PPO ${NO_TAKER_LABEL}：已等待 ${waited} 仍无 worker 领取`,
       detail:
         `job ${stall.it != null ? `it${stall.it}` : stall.jobId.slice(0, 12)}` +
-        '——云端 worker 可能断连或未在轮询 hub。检查 Colab/Kaggle worker 日志与 hub 是否在线。',
+        '——云端 worker 可能断连或未在轮询 hub。检查 Colab/Kaggle worker 日志与 hub 是否在线。' +
+        `（「${STUCK_LABEL}」是另一类：**有持有者**但无进度，本条不覆盖——看顶部 pill 的悬停全因。）`,
       role: 'alert',
       actions: [],
     },

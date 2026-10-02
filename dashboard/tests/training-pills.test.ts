@@ -417,6 +417,28 @@ describe('★2026-10-02 coursePills：hub 派发态（等回传/卡住/排队·�
     })!
     expect(ok.title).not.toContain('不在 worker 登记表里')
   })
+
+  it('★2026-10-02：状态字与告警坞共用同一批常量（两处各起名字 = 迟早漂开）', () => {
+    // `detectPpoQueueStall` 的 PPO 红条与 pill 的「排队·无人取」说的是同一件事（有活、
+    // 没人认领）；「卡住」是另一类（有持有者但无进度）。词在 `loop-queue.ts` 定义一次，
+    // 告警坞（alerts.ts）与这里引用同一个常量——本用例把词面锁死（改词 = 两个面一起改）。
+    expect(view.NO_TAKER_LABEL).toBe('排队·无人取')
+    expect(view.STUCK_LABEL).toBe('卡住')
+    const [unclaimed] = view.coursePills({
+      courses: ['c'],
+      rows: [row({ course: 'c' })],
+      trainerRunning: true,
+      overview: ov(hubRow('c', { queuePending: 3, inflight: 0, peeked: false })),
+    })!
+    expect(unclaimed.status).toBe(view.NO_TAKER_LABEL)
+    const [stuck] = view.coursePills({
+      courses: ['c'],
+      rows: [row({ course: 'c' })],
+      trainerRunning: true,
+      overview: ov(hubRow('c', { inflight: 1, inflightDetail: [fl(1620)], stuckSec: 1620 })),
+    })!
+    expect(stuck.status).toBe(view.STUCK_LABEL)
+  })
 })
 
 // ────────────────────────── 服务端 stamp：在训判据 = 开课标记 ──────────────────────────
