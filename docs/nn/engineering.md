@@ -21,6 +21,60 @@
 
 ---
 
+## §59 止损块进课程文件：`kickstart_burn` / `paired_kill` 的课程化迁移（2026-10-02，plan/burn-rule-in-course-file.plan.md）
+
+### 一句话
+
+结果面止损（干烧熔断 / 配对中点杀臂）的**参照物与阈值**从 `nn-training/rl-config.json`（机器本地、
+不进 git）迁进 `curricula/*.jsonc`（**随腿入库**）：5 个读函数改「课程块优先 + `legacy_*` 兼容回落」，
+判据本体 `burn_verdict` / `paired_kill_verdict` **逐字不动**；块进 `RESTART_ONLY_FIELDS`（不进 `HOT_FIELDS`），
+且**不进** `corpus_identity_fp`（D14 混训拒收判 `corpus_fp`，不判 `course_fp`）。
+
+### 为什么
+
+- 止损档随机器走：换机器 / 新克隆时 rl-config 是空的 ⇒ 静默回落 `baseline`。回测
+  `nn-training/tools/backtest-burn-rule.py`：同一批历史腿 baseline 假阳性 **49.3%** vs paired **0.47%**
+  （低 ~105×）——「机器一换，止损规则静默换了一层含义」。
+- E1（h4-aim 三臂）2026-10-02 已开课并收官，走的就是 rl-config 里的 `{mode:paired, peer:h4-aim-c0}`；
+  本条受益人是**后续腿**（E2/E3a 及 h4-hurt/h4-encl 四臂、x20-clutch 两门）。
+- kickstart 家族被劈成两半：`kickstart_ref`/`kickstart_init` 在课程文件，`kickstart_burn` 在 rl-config。
+- 旧注释（`worker/kickstart_burn.py` 曾写「不放课程文件：课程文件参与 course_fp 血缘」）**把
+  `course_fp` 当成了 `corpus_fp`**：D14 判的是 `corpus_fp`，且 `corpus_fp` 只摘训练语义键
+  （reward/level/…），止损是**判据**不是语料 ⇒ 该理由作废。
+
+### 决定
+
+- **块即权威**：`CourseConfig` 顶层加 `kickstart_burn` / `paired_kill`（`biz/course_spec.py`，
+  解析期强校验：坏 `mode` / 空 `peer` / `points=0` / `margin_pp=NaN` / `enabled="yes"` 全部拒课）。
+  块存在但半块缺字段 ⇒ worker 模块常量（**不**逐字段回落旧值）；块缺席才回落 rl-config
+  （`legacy_burn_*` / `legacy_paired_kill_*`，兼容期，第二刀 P1 后删）。
+- **冻结面**：块经 `flat_overrides` 以 `model_dump()` 物化进 args（restart-only ⇒ 重启才生效）；
+  `apply_hot_fields` 比较前对 pydantic 块先 `model_dump()`（否则恒假报变更）。
+- **控制台同源**：开课回执 `dashboard/src/stack/kickstart-receipt.ts::burnThresholds` 先读课程文件块，
+  块缺席回落 rl-config；`core/types.ts` 注释同步（「课程文件权威，rl-config 兼容回落」）。
+- **落地范围**：h4-aim-{k10,k25} 写 `kickstart_burn:{mode:paired,peer:h4-aim-c0}`；h4-aim-c0 写
+  `paired_kill:{enabled:false}`（对照臂不自杀）；h4-hurt/h4-encl 四臂与 x20-clutch 两门的旧 rl-config 值
+  暂留兼容回落（第二刀再迁）。
+
+### 被否决备选
+
+- **直接删 rl-config 读面**——迁移期会把现有两条腿的止损弄丢（必须双读兜底）。
+- **让止损块进 `HOT_FIELDS`**——判读窗口中途换口径（= 换实验）。
+
+### 验证
+
+- `tests/biz/test_h4_aim_courses.py`（**新建**，5/5：加载·剂量·三臂逐字同·头注 + 止损块冻结）·
+  `tests/worker/test_kickstart_plan.py`（块优先 / 兼容回落 / 脏值 / 不进 `corpus_fp` / restart-only / 接线）·
+  `tests/worker/test_paired_kill.py`（13/13）· `tests/biz/test_course_spec_split.py`（MOVED_NAMES 闭集 +5）·
+  `dashboard/tests/kickstart-receipt.test.ts`（块 > rl-config > 常量三档 + e2e 参照物）。
+- 「改坏必红」（运行时猴补丁版）：块删 / 改 peer ⇒ 契约测试红；反转优先级 ⇒ 块优先用例红。
+- **红线**：`burn_verdict` / `paired_kill_verdict` 函数体零 diff（只动取数段）；训练侧数值零改动。
+
+**指针**：plan `plan/burn-rule-in-course-file.plan.md`（含评审 `-review-bf.md`）· 决策
+`DECISIONS.md §2026-10-02-goalnn-burn-rule-in-course-file` · 回测 `nn-training/tools/backtest-burn-rule.py`。
+
+---
+
 ## §58 aim-dodge 杠杆 8 列落地（idx66–73；dim 69→74）+ 事件扩展 + 回写机制（2026-10-01，plan/aim-dodge-levers.plan.md）
 
 ### 一句话

@@ -10,6 +10,8 @@
  *      （后者 S4 第十九刀前住 `loop_core`）
  *      （it0 = 基线；文件序末条 it>0 = 起点），并与控制台既有的 `readEvalSummaries` 对账；
  *   ② **镜像常量不许漂**：噪声带 / 点数 / 响亮阈值对着 python 源码核对（改了 python 就红）；
+ *      来源优先级（2026-10-02 迁移）：课程文件 `kickstart_burn` 块 > rl-config 旧键回落 > 常量镜像
+ *      （DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file）；
  *   ③ **判据的分支全在纯函数里**：低于基线 / 噪声带内 / 高于噪声带 / 缰绳关 / 缺读数；
  *   ④ **观测永不阻断开课**：账本缺失/坏行只是少一行字，不抛。
  *
@@ -242,22 +244,45 @@ describe('kickstartKnobs：初值来源必须说清（C 事故的病灶）', () 
   })
 })
 
-describe('burnThresholds：阈值走 rl-config `courses.<课>.kickstart_burn`（与 python 同键）', () => {
-  const cfg = {
-    version: 1,
-    nodes: [],
-    rl: { hub_port: 1, agent_port: 2, remote_token: 't' },
-    courses: { 'kk-thr': { kickstart_burn: { margin_pp: 8, points: 2 } } },
-  } as RlConfig
+describe('burnThresholds：课程文件 `kickstart_burn` 块权威（块缺席回落 rl-config；2026-10-02 迁移）', () => {
+  it('课程文件有块 ⇒ 块权威（rl-config 里留着的旧值不看，与执行面 python 同口径）', () => {
+    writeCourse('kk-file', {
+      kickstart_burn: { margin_pp: 12, points: 4, mode: BURN_MODE_PAIRED, peer: 'kk-thr' },
+    })
+    const old = {
+      version: 1,
+      nodes: [],
+      rl: { hub_port: 1, agent_port: 2, remote_token: 't' },
+      courses: { 'kk-file': { kickstart_burn: { margin_pp: 99, points: 9 } } },
+    } as RlConfig
+    expect(burnThresholds('kk-file', old)).toEqual({
+      marginPp: 12,
+      points: 4,
+      mode: BURN_MODE_PAIRED,
+    })
+  })
 
-  it('有覆盖用覆盖，缺席用 python 常量镜像', () => {
-    expect(burnThresholds('kk-thr', cfg)).toEqual({ marginPp: 8, points: 2, mode: BURN_MODE_AUTO })
-    expect(burnThresholds('kk-none', cfg)).toEqual({
+  it('块缺席（文件在但没这个键）⇒ 回落 rl-config 旧值；两处都无 ⇒ 常量镜像', () => {
+    writeCourse('kk-noblock', { kickstart_ref: true })
+    const old = {
+      version: 1,
+      nodes: [],
+      rl: { hub_port: 1, agent_port: 2, remote_token: 't' },
+      courses: { 'kk-noblock': { kickstart_burn: { margin_pp: 8, points: 2 } } },
+    } as RlConfig
+    expect(burnThresholds('kk-noblock', old)).toEqual({
+      marginPp: 8,
+      points: 2,
+      mode: BURN_MODE_AUTO,
+    })
+    expect(burnThresholds('kk-none', old)).toEqual({
       marginPp: BURN_MARGIN_PP,
       points: BURN_POINTS,
       mode: BURN_MODE_AUTO,
     })
-    // 非法模式 → 回 auto（不拿坏配置去描述规则）
+  })
+
+  it('脏值一律回 auto/常量（不拿坏配置去描述规则）——rl-config 与课程文件同一纪律', () => {
     const weird = {
       version: 1,
       nodes: [],
@@ -272,6 +297,13 @@ describe('burnThresholds：阈值走 rl-config `courses.<课>.kickstart_burn`（
       courses: { 'kk-pair': { kickstart_burn: { mode: BURN_MODE_PAIRED } } },
     } as RlConfig
     expect(burnThresholds('kk-pair', paired).mode).toBe(BURN_MODE_PAIRED)
+    // 文件里的脏块同样只回常量/auto（块存在即权威——不回落到 rl-config 旧值）
+    writeCourse('kk-badfile', { kickstart_burn: { mode: 'whatever', margin_pp: 'x' } })
+    expect(burnThresholds('kk-badfile', null)).toEqual({
+      marginPp: BURN_MARGIN_PP,
+      points: BURN_POINTS,
+      mode: BURN_MODE_AUTO,
+    })
   })
 })
 
@@ -429,17 +461,21 @@ describe('kickstartReceipt：真账本 + 真课程文件（开课回执用它）
     expect(text).toContain('★ 起点与基线只差 0.3pp')
   })
 
-  it('阈值覆盖随 rl-config 生效（margin 放大到 8pp ⇒ 差 6pp 也在带内）', () => {
-    writeCourse('kk-e2e2', { kickstart_ref: true })
+  it('阈值覆盖随课程文件块生效（margin 8pp + paired ⇒ 差 6pp 在带内、参照物=对端臂）', () => {
+    writeCourse('kk-e2e2', {
+      kickstart_ref: true,
+      kickstart_burn: { margin_pp: 8, points: 2, mode: BURN_MODE_PAIRED, peer: 'kk-thr' },
+    })
     writeLedger('kk-e2e2', [summary(0, 0.35), summary(9, 0.29)])
+    // 故意再塞一份旧 rl-config 值：块权威，回执必须用文件里的 8pp（不是 99）
     const cfg = {
       version: 1,
       nodes: [],
       rl: { hub_port: 1, agent_port: 2, remote_token: 't' },
-      courses: { 'kk-e2e2': { kickstart_burn: { margin_pp: 8, points: 2 } } },
+      courses: { 'kk-e2e2': { kickstart_burn: { margin_pp: 99, points: 9 } } },
     } as RlConfig
     const text = kickstartReceipt('kk-e2e2', cfg).join('\n')
-    expect(text).toContain('连续 2 个评估点落后参照物 >8pp')
+    expect(text).toContain('连续 2 个评估点落后**对端臂**（同 it 配对差） >8pp')
     expect(text).toContain('★ 起点与基线只差 6.0pp')
   })
 

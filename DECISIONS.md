@@ -6862,3 +6862,23 @@ ruff + mypy 全量绿。
 **指针**：事故现场 `tmp/h4-hurt-f75/`（含其崩溃循环的真因）· 训练侧修复
 `DECISIONS.md §2026-10-02-goalnn-engine-pool-midround-pin` · 课程 pill 的状态精确化
 `plan/course-pill-precision.plan.md`（不同面：那个是**课程** pill）。
+
+## §2026-10-02-goalnn-burn-rule-in-course-file（2026-10-02，止损块进课程文件：`kickstart_burn`/`paired_kill` 从 rl-config 迁入 `curricula/*.jsonc`，块不进 `corpus_fp`）
+
+- **背景**：结果面止损（干烧熔断 / 配对中点杀臂）的参照物与阈值住 `rl-config.json`（机器本地、
+  不进 git）——换机器/新克隆静默回落 `baseline`（回测假阳性 49.3% vs paired 0.47%，~105×）；
+  kickstart 家族被劈成两半（ref/init 在课程、burn 在 rl-config）。旧注释的否决理由「课程文件
+  参与 course_fp 血缘（D14）」**把 `course_fp` 当成了 `corpus_fp`**：D14 判 `corpus_fp`，止损是判据不是语料。
+- **决定**：`biz/course_spec.py` 加 `KickstartBurnBlock`/`PairedKillBlock`（解析期强校验，脏值拒课）；
+  5 个读函数改「课程块优先 + `legacy_*` 兼容回落」；`RESTART_ONLY_FIELDS` 加两键（不进 `HOT_FIELDS`）；
+  `corpus_identity_fp` payload 不加两键；判据本体 `burn_verdict`/`paired_kill_verdict` **逐字不动**；
+  控制台 `burnThresholds` 同源（课程块 > rl-config > 常量）。h4-aim-{k10,k25} 落块、h4-aim-c0 写
+  `paired_kill:{enabled:false}`；h4-hurt/h4-encl 四臂与 x20-clutch 两门暂留 rl-config 兼容回落（第二刀迁）。
+- **被否决**：① 直接删 rl-config 读面（迁移期弄丢现有两条腿的止损，必须双读兜底）；
+  ② 块进 `HOT_FIELDS`（判读窗口中途换口径 = 换实验）。
+- **落点**：`nn-training/biz/{course_spec,hot_reload,corpus_fp}.py` ·
+  `worker/{kickstart_burn,paired_kill,loop_guards_leg}.py` · `curricula/h4-aim-{c0,k10,k25}.jsonc` ·
+  `dashboard/src/stack/kickstart-receipt.ts` · 测试 `tests/biz/test_h4_aim_courses.py`（新建）等。
+
+**指针**：全文 `docs/nn/engineering.md` §59 · plan `plan/burn-rule-in-course-file.plan.md`
+（含评审 `-review-bf.md`）· 回测 `nn-training/tools/backtest-burn-rule.py`。

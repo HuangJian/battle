@@ -55,13 +55,14 @@ export interface CourseConf {
   //  升成**平台级**单开关（`tmp/gate-halt.json` + 控制台顶部开关，缺省 halt、可带 until
   //  到点自动回落）——它回答的是「有没有人在盯盘」，不是「这门课怎么跑」。旧值无读者，
   //  由 `pruneLegacyCourseKnobs` 开课时清掉。
-  /** kickstart 干烧熔断阈值/参照物覆盖（plan/accident.plan.md §5.2；读面在 python
-   *  `worker/kickstart_burn.py::burn_overrides`（margin/points）与 `::burn_mode`（mode/peer），
-   *  缺席即那边的常量）。
+  /** kickstart 干烧熔断阈值/参照物覆盖（plan/accident.plan.md §5.2）。
+   *
+   *  2026-10-02 起**权威读面是课程文件**的 `kickstart_burn` 块（python 读面
+   *  `worker/kickstart_burn.py::burn_overrides`/`::burn_mode` 消费；块存在即权威）。
+   *  本键只在块缺席时作**兼容期回落**（第二刀 P1 后删，plan/burn-rule-in-course-file §9）。
    *
    *  控制台**只读**：开课回执拿 `margin_pp`/`points`/`mode` 说清「连续几点落后参照物多少 pp
-   *  停腿、参照物是谁」（`stack/kickstart-receipt.ts`），按需手改 rl-config——不做写面/UI
-   *  （execution-face 旋钮：按需手改配置，不上面板）。
+   *  停腿、参照物是谁」（`stack/kickstart-receipt.ts`），不做写面/UI。
    *
    *  `mode`：`auto`（缺省；能解析出唯一同 V 对端就走 `paired`，否则 `baseline`）/`baseline`
    *  （参照 = 本腿 it0）/`paired`（参照 = 对端臂同 it 读数）。`peer` = 显式点名对照臂。 */

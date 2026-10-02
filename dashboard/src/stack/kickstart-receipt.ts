@@ -16,9 +16,10 @@
  *       - 起点 = 文件里**最后一条 it>0 行**的 `winRate`（= 本腿恢复用的权重在前一腿的末次读数）
  *     与 python `kickstart_burn.baseline_reading` 同义，取法也同（文件序末条，不是 max iter：
  *     续腿重评同一 iter 时那一条落在更后面 = 更新的事实）。
- *   · 阈值只有一套：噪声带/点数 = `courses.<课>.kickstart_burn.{margin_pp,points}`
- *     （python 读面 `kickstart_burn.burn_overrides`；缺席即本文件的镜像常量）。镜像常量由
- *     `tests/kickstart-receipt.test.ts` 对着 python 源码核对——漂了即红。
+ *   · 阈值只有一套：**课程文件**的 `kickstart_burn` 块（python 读面
+ *     `worker/kickstart_burn.py::burn_overrides`；块缺席回落 rl-config 旧值，兼容期——2026-10-02
+ *     迁移，DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file）。两处都没有 ⇒ 本文件的镜像
+ *     常量。镜像常量由 `tests/kickstart-receipt.test.ts` 对着 python 源码核对——漂了即红。
  *
  *  **观测永不阻断开课**（训练侧那条对照行同一纪律）：任何读取失败 → 一行说明，不抛。
  *  读面在**开课**这一下（弹窗动作，非轮询路径）：18MB 的账本走子串预滤（逐局行占体积 99%），
@@ -33,9 +34,9 @@ import type { RlConfig } from '../core/types'
 
 // ────────────────────────── 镜像常量（权威在 python，测试核对） ──────────────────────────
 
-/** 干烧熔断的噪声带（pp）。权威：`nn-training/biz/kickstart_burn.py::BURN_MARGIN_PP`。 */
+/** 干烧熔断的噪声带（pp）。权威：`nn-training/worker/kickstart_burn.py::BURN_MARGIN_PP`。 */
 export const BURN_MARGIN_PP = 5.0
-/** 干烧熔断的连续点数。权威：`nn-training/biz/kickstart_burn.py::BURN_POINTS`。 */
+/** 干烧熔断的连续点数。权威：`nn-training/worker/kickstart_burn.py::BURN_POINTS`。 */
 export const BURN_POINTS = 3
 /** 参照物 = 本腿自己的 it0。权威：`nn-training/worker/kickstart_burn.py::MODE_BASELINE`。 */
 export const BURN_MODE_BASELINE = 'baseline'
@@ -148,12 +149,23 @@ export function kickstartKnobs(course: string, cfg: RlConfig | null): KickstartK
   }
 }
 
-/** 本课的干烧熔断阈值与参照物（`courses.<课>.kickstart_burn.*`；缺席 = python 常量）。 */
+/** 本课的干烧熔断阈值与参照物（**课程文件** `kickstart_burn.*` 优先；块缺席回落 rl-config；再缺席 = python 常量）。 */
 export function burnThresholds(
   course: string,
   cfg: RlConfig | null,
 ): { marginPp: number; points: number; mode: string } {
-  const kb = cfg?.courses?.[course]?.kickstart_burn
+  // 2026-10-02 迁移：止损是实验设计、跟课程文件入库（DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file）。
+  // 块存在即权威（与执行面 python 同口径）；课程文件缺失/解析失败 ⇒ 回落 rl-config（兼容期旧值）。
+  let file: Record<string, unknown> = {}
+  try {
+    file = readJsoncFile(path.join(curriculaDir(), `${course}.jsonc`)) as Record<string, unknown>
+  } catch {
+    /* 课程文件缺失/解析失败：回落 rl-config（真正的拒收判据在 python 侧） */
+  }
+  const raw = file.kickstart_burn
+  const kb = (
+    typeof raw === 'object' && raw !== null ? raw : cfg?.courses?.[course]?.kickstart_burn
+  ) as { margin_pp?: unknown; points?: unknown; mode?: unknown } | undefined
   const m = kb?.margin_pp
   const p = kb?.points
   const mode = kb?.mode

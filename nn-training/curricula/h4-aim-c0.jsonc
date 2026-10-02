@@ -9,9 +9,10 @@
 // ══════════════════════════════════════════════════════════════════════════
 // · 主终点 = **配对差**（处理臂 − 本臂，同 seed 同 stage）⇒ 本臂必须与 k10/k25 **同时训练、
 //   同起点、同种子流**；不能用历史臂（b0/b1）或冻结 bc 当对照。
-// · 本臂是 k10/k25 的 paired kickstart-burn 对端（显式 `peer`，见 rl-config
-//   `courses.h4-aim-k10|k25.kickstart_burn = {mode:'paired', peer:'h4-aim-c0'}`）——
+// · 本臂是 k10/k25 的 paired kickstart-burn 对端（显式 `peer`，见 k10/k25 课程文件的
+//   `kickstart_burn` 块 = {mode:'paired', peer:'h4-aim-c0'}；2026-10-02 起随腿入库）——
 //   多臂共享 V 时自动解析必回退 baseline（Wave 2 实测教训），故显式指定。
+// · 本臂自身不设止损：`paired_kill.enabled = false`（对照臂不自杀；判据/记录仍可另行观测）。
 // · 本臂配方 = Wave 2 对照臂 b0 逐字（v4 包），唯一的作用是把「训练本身把读数推到哪」量出来。
 //
 // ══════════════════════════════════════════════════════════════════════════
@@ -85,6 +86,9 @@
   "kickstart_ref": true,
   "kickstart_init": 0.1,
   "warmup_iters": 0,
+
+  // ── 止损：对照臂不自比（2026-10-02 起随腿入库；判据本体在 worker/paired_kill.py）────
+  "paired_kill": { "enabled": false },
 
   // ── 预算：诊断腿 40 轮（判据点 = it30/35/40 尾巴三点）──────────────────────
   "iters": 40,

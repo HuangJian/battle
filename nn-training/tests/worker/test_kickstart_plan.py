@@ -42,6 +42,8 @@ from worker.kickstart_burn import (
     burn_mode,
     burn_overrides,
     burn_verdict,
+    legacy_burn_mode,
+    legacy_burn_overrides,
 )
 
 
@@ -146,6 +148,68 @@ def test_cli_conflict_detector_still_sees_the_mapped_dest() -> None:
     assert bad and "kickstart_kl" in bad[0]
 
 
+# ──────────────── ①.5 止损块迁进课程文件（2026-10-02，plan/burn-rule-in-course-file） ────────────────
+# 块由 `biz.course_spec` 解析期强校验；不进 `corpus_fp`；hot-reload 归 restart-only（读 args 快照）。
+
+
+def test_course_block_validates_dirty_values() -> None:
+    """解析期强校验：坏值拒课（不静默拿坏配置去停腿）——与 rl-config 容忍档刻意不同。"""
+    from pydantic import ValidationError
+
+    from biz.course_spec import KICKSTART_BURN_MODES, KickstartBurnBlock, PairedKillBlock
+
+    def _bad(**kw: object) -> None:
+        with pytest.raises(ValidationError):
+            CourseConfig.model_validate({"name": "t5-kk", "mode": "per-tick", "kickstart_burn": kw})
+
+    assert tuple(KICKSTART_BURN_MODES) == (MODE_AUTO, MODE_BASELINE, MODE_PAIRED), "与 worker MODES 对账"
+    _bad(mode="whatever")
+    _bad(peer="")
+    _bad(margin_pp=0)
+    _bad(margin_pp=float("nan"))
+    _bad(points=0)
+    _bad(points=1.5)
+    with pytest.raises(ValidationError):
+        PairedKillBlock.model_validate({"enabled": "yes"})
+    with pytest.raises(ValidationError):
+        PairedKillBlock.model_validate({"self_kill": 1})
+    ok = KickstartBurnBlock.model_validate({"mode": "paired", "peer": "h4-aim-c0"})
+    assert ok.margin_pp is None and ok.points is None, "未指定 = None → worker 模块常量"
+
+
+def test_burn_block_does_not_enter_corpus_identity() -> None:
+    """块不进 corpus_identity_fp（D14 判语料身份，不判止损规则）——可执行的事实。"""
+    from biz.course_spec import KickstartBurnBlock, PairedKillBlock
+
+    a = _course(kickstart_ref=True)
+    b = _course(kickstart_ref=True, kickstart_burn=KickstartBurnBlock(mode="paired", peer="a0"))
+    c = _course(kickstart_ref=True, paired_kill=PairedKillBlock(enabled=True))
+    assert corpus_identity_fp(a) == corpus_identity_fp(b) == corpus_identity_fp(c)
+
+
+def test_burn_block_is_restart_only_and_reported_truthfully() -> None:
+    """restart-only 冻结面：块物化进 args（读面快照）、热加载不写回、同值不假报变更。"""
+    from biz.course_spec import KickstartBurnBlock
+
+    old = _course(kickstart_ref=True, kickstart_burn=KickstartBurnBlock(mode="paired", peer="a0"))
+    new = _course(
+        kickstart_ref=True,
+        kickstart_burn=KickstartBurnBlock(mode="paired", peer="a0", margin_pp=8.0),
+    )
+    verdict, hot, restart = plan_reload(old, new)
+    assert verdict == "apply", "止损块不是语料身份——不得整单拒绝"
+    assert "kickstart_burn" not in hot and "kickstart_burn" in restart
+
+    args = _args()
+    apply_course(args, old)
+    old_block = old.kickstart_burn
+    assert old_block is not None
+    assert args.kickstart_burn == old_block.model_dump(), "块必须物化进 args（冻结面）"
+    assert "kickstart_burn*" not in apply_hot_fields(args, old), "同值不得报变更（假变更行）"
+    assert "kickstart_burn*" in apply_hot_fields(args, new)
+    assert args.kickstart_burn == old_block.model_dump(), "restart-only：热加载不写回"
+
+
 # ────────────────────────── ④ 干烧熔断 ──────────────────────────
 
 
@@ -196,14 +260,44 @@ def test_missing_readings_neither_count_nor_reset() -> None:
     assert v2.tripped is False and v2.baseline is None
 
 
-def test_overrides_come_from_execution_side_config() -> None:
-    """阈值走执行面（rl-config 的 `courses.<课>.kickstart_burn`），缺席 = 常量。"""
-    assert burn_overrides(None, "t5-kk") == (BURN_MARGIN_PP, BURN_POINTS)
+def test_overrides_come_from_rl_config_legacy() -> None:
+    """兼容回落读（rl-config 的 `courses.<课>.kickstart_burn`），缺席 = 常量；脏值回常量。"""
+    assert legacy_burn_overrides(None, "t5-kk") == (BURN_MARGIN_PP, BURN_POINTS)
     cfg = {"courses": {"t5-kk": {"kickstart_burn": {"margin_pp": 12, "points": 2}}}}
-    assert burn_overrides(cfg, "t5-kk") == (12.0, 2)
+    assert legacy_burn_overrides(cfg, "t5-kk") == (12.0, 2)
     # 类型不对/非法值 → 回常量（不拿坏配置去停腿）
     bad = {"courses": {"t5-kk": {"kickstart_burn": {"margin_pp": "x", "points": 0}}}}
-    assert burn_overrides(bad, "t5-kk") == (BURN_MARGIN_PP, BURN_POINTS)
+    assert legacy_burn_overrides(bad, "t5-kk") == (BURN_MARGIN_PP, BURN_POINTS)
+
+
+def test_course_block_wins_over_rl_config() -> None:
+    """课程文件块存在即权威（半块 ⇒ 模块缺省，**不**逐字段回落旧值）；块缺席才回落。"""
+    legacy = {
+        "courses": {
+            "t5-kk": {
+                "kickstart_burn": {
+                    "margin_pp": 99,
+                    "points": 9,
+                    "mode": MODE_BASELINE,
+                    "peer": "old",
+                }
+            }
+        }
+    }
+    block = {"margin_pp": 12, "points": 2, "mode": MODE_PAIRED, "peer": "a0"}
+    assert burn_overrides(block, fallback=legacy_burn_overrides(legacy, "t5-kk")) == (12.0, 2)
+    assert burn_mode(block, fallback=legacy_burn_mode(legacy, "t5-kk")) == (MODE_PAIRED, "a0")
+    # 半块：缺 margin/points ⇒ 常量；缺 mode ⇒ auto（都不回落旧值）
+    half = {"peer": "a0"}
+    assert burn_overrides(half, fallback=(99.0, 9)) == (BURN_MARGIN_PP, BURN_POINTS)
+    assert burn_mode(half, fallback=(MODE_BASELINE, "old")) == (MODE_AUTO, "a0")
+    # 块缺席 ⇒ 回落旧值（迁移期行为逐字不变）
+    assert burn_overrides(None, fallback=(99.0, 9)) == (99.0, 9)
+    assert burn_mode(None, fallback=(MODE_BASELINE, "old")) == (MODE_BASELINE, "old")
+    # pydantic 块对象也认（读面物化前 / 单测直喂）
+    from biz.course_spec import KickstartBurnBlock
+
+    assert burn_mode(KickstartBurnBlock(mode="paired", peer="a0")) == (MODE_PAIRED, "a0")
 
 
 def _guards(tmp_path: Path, **kw) -> TrainingGuards:
@@ -309,14 +403,14 @@ def test_guard_counts_down_loudly_before_tripping(tmp_path: Path, capsys=None) -
 # 零假设 MC 下旧规则从 0.005% 跳到 49.3%，**假阳性来自「自己的起点」这个参照物会飘**。
 
 
-def test_burn_mode_comes_from_execution_side_config() -> None:
-    """`courses.<课>.kickstart_burn.{mode,peer}`；缺席/脏值 → auto + 空 peer。"""
-    assert burn_mode(None, "t5-kk") == (MODE_AUTO, "")
+def test_burn_mode_comes_from_rl_config_legacy() -> None:
+    """兼容回落读：`courses.<课>.kickstart_burn.{mode,peer}`；缺席/脏值 → auto + 空 peer。"""
+    assert legacy_burn_mode(None, "t5-kk") == (MODE_AUTO, "")
     cfg = {"courses": {"t5-kk": {"kickstart_burn": {"mode": MODE_PAIRED, "peer": " a0 "}}}}
-    assert burn_mode(cfg, "t5-kk") == (MODE_PAIRED, "a0")
+    assert legacy_burn_mode(cfg, "t5-kk") == (MODE_PAIRED, "a0")
     # 类型不对/非法值 → 回 auto（不拿坏配置去停腿）
     bad = {"courses": {"t5-kk": {"kickstart_burn": {"mode": "whatever", "peer": 7}}}}
-    assert burn_mode(bad, "t5-kk") == (MODE_AUTO, "")
+    assert legacy_burn_mode(bad, "t5-kk") == (MODE_AUTO, "")
 
 
 def test_paired_mode_ignores_drift_the_control_also_has() -> None:
@@ -501,3 +595,16 @@ def test_single_leg_keeps_the_baseline_rule(tmp_path: Path, monkeypatch: pytest.
     assert _burn_guard(tmp_path, declared=None)._kickstart_burn(3, None) is True
     burn = [e for e in _burn_events(tmp_path) if e["event"] == "kickstart_burn"][-1]
     assert burn["mode"] == MODE_BASELINE
+
+
+def test_guard_prefers_the_course_block_over_rl_config(tmp_path: Path) -> None:
+    """执行面接线：args 上有课程块（物化快照）⇒ 块即权威；无块才回落 rl-config。"""
+    _write_eval_rows(tmp_path, _rows(0.35, 0.29, 0.28, 0.27))
+    cfg = {"courses": {"t5-kk": {"kickstart_burn": {"margin_pp": 1.0}}}}
+
+    g = _guards(tmp_path)
+    g.args.kickstart_burn = {"margin_pp": 100.0, "points": 3, "mode": MODE_BASELINE}
+    assert g._kickstart_burn(3, cfg) is False, "课程块把噪声带放大到 100pp ⇒ 不停腿"
+
+    g2 = _guards(tmp_path)
+    assert g2._kickstart_burn(3, cfg) is True, "无块 ⇒ 回落 rl-config（margin 1pp ⇒ 三点全命中）"

@@ -20,7 +20,7 @@
 //   ④ 判据段：**it30/it35/it40** 各 **300 局**，seed0 = **864001**（864001–864300 = 段A；
 //      池外，与日常段/校准段均不相交）。
 //   ⑤ 前置 Q ≤ χ²(0.95, df=2) = 5.99；⑥ 止损 = `paired` kickstart burn，
-//      显式 peer = `h4-aim-c0`（rl-config `courses.h4-aim-k25.kickstart_burn`），
+//      显式 peer = `h4-aim-c0`（**本文件** `kickstart_burn` 块；2026-10-02 起随腿入库），
 //      尾连续 3 点 Δ < −5.0pp ⇒ ABORT。
 //   ⑦ 预注册监控量 p·wAim·E[d|hit] ≈ 0.070 > wShot 0.05（**本档进入刷量区，预期内**；
 //      真正防线 = 判据②：shots 率显著上升而 E[d|hit] 不动 ⇒ 判无效）。
@@ -59,6 +59,11 @@
   "kickstart_ref": true,
   "kickstart_init": 0.1,
   "warmup_iters": 0,
+
+  // ── 止损（2026-10-02 起随腿入库；判据本体在 nn-training/worker/{kickstart_burn,paired_kill}.py）──
+  //   参照物 = 对端臂 h4-aim-c0（同 it 配对差），尾连续 3 点 Δ < −5.0pp ⇒ ABORT。
+  //   块缺席时回落 rl-config 旧值（兼容期）；本块 = 权威。
+  "kickstart_burn": { "mode": "paired", "peer": "h4-aim-c0" },
 
   // ── 预算：诊断腿 40 轮（判据点 = it30/35/40 尾巴三点）──────────────────────
   "iters": 40,

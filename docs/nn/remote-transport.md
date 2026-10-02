@@ -1284,6 +1284,8 @@ race 判定 / `poll_job` + 控制台同批改造 + push 腿 R1-7）。**本批�
 **门禁口径**：nn 侧 `bash tools/githook/nn-py-safe.sh -m pytest -q tests/ e2e/` —— 全绿，唯一红是
 `tests/trainer/test_serve_wiring.py::test_course_args_match_run_rl_echo_config`（**既有环境失败**：本机
 `nn-training/rl-config.json` 是未入库的机器本地配置，`course_args` 吃到机器侧覆盖而 oracle 不会；
+⚠ 2026-10-02：止损块 `kickstart_burn`/`paired_kill` 已搬进 `curricula/*.jsonc` 随腿入库
+（rl-config 那份只剩兼容回落；DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file）；
 已用「把三个文件还原成 HEAD 版本」在同一工作树上复现同一红，证明与本批无关）。
 
 ---

@@ -30,6 +30,9 @@ from worker.config import CourseConfig
 from worker.paired_kill import (
     PAIRED_KILL_MARGIN_PP,
     PAIRED_KILL_POINTS,
+    legacy_paired_kill_enabled,
+    legacy_paired_kill_overrides,
+    legacy_paired_kill_self_kill,
     paired_kill_enabled,
     paired_kill_overrides,
     paired_kill_self_kill,
@@ -91,13 +94,21 @@ def test_boundary_and_baseline_row() -> None:
     assert v.tripped is True and v.it == 2, "it0 是共同起点，不参与中点判据"
 
 
-def test_overrides_come_from_execution_side_config() -> None:
-    """阈值走执行面（rl-config 的 `courses.<课>.paired_kill`），缺席 = 常量。"""
-    assert paired_kill_overrides(None, "t-own") == (PAIRED_KILL_MARGIN_PP, PAIRED_KILL_POINTS)
+def test_overrides_and_switches_prefer_the_course_block() -> None:
+    """课程块存在即权威（含半块 ⇒ 模块缺省）；块缺席才回落 rl-config 旧值（兼容期）。"""
+    # 兼容回落（原「执行面配置」读法，2026-10-02 起只是回落路径）
+    assert legacy_paired_kill_overrides(None, "t-own") == (PAIRED_KILL_MARGIN_PP, PAIRED_KILL_POINTS)
     cfg = {"courses": {"t-own": {"paired_kill": {"margin_pp": 8, "points": 3}}}}
-    assert paired_kill_overrides(cfg, "t-own") == (8.0, 3)
+    assert legacy_paired_kill_overrides(cfg, "t-own") == (8.0, 3)
     bad = {"courses": {"t-own": {"paired_kill": {"margin_pp": "x", "points": 0}}}}
-    assert paired_kill_overrides(bad, "t-own") == (PAIRED_KILL_MARGIN_PP, PAIRED_KILL_POINTS)
+    assert legacy_paired_kill_overrides(bad, "t-own") == (PAIRED_KILL_MARGIN_PP, PAIRED_KILL_POINTS)
+    # 块优先（fallback 被忽略）；半块 ⇒ 模块缺省（不逐字段回落）
+    assert paired_kill_overrides({"margin_pp": 5.0}, fallback=(8.0, 3)) == (5.0, PAIRED_KILL_POINTS)
+    assert paired_kill_overrides(None, fallback=(8.0, 3)) == (8.0, 3)
+    from biz.course_spec import PairedKillBlock
+
+    assert paired_kill_enabled(PairedKillBlock(enabled=True), fallback=False) is True
+    assert paired_kill_self_kill(PairedKillBlock(self_kill=False), fallback=True) is False
 
 
 # ────────────────────────── ③ 执行面接线 ──────────────────────────
@@ -239,17 +250,21 @@ def test_guard_stops_the_leg_and_writes_a_replayable_event(
 
 
 def test_self_kill_switch_defaults_to_on() -> None:
-    """`courses.<课>.paired_kill.self_kill` 缺席/写坏 ⇒ True（现状对称自杀，不动老行为）。
+    """`paired_kill.self_kill` 缺席/写坏 ⇒ True（现状对称自杀，不动老行为）；只有显式 false 才关。
 
-    只有显式 `false` 才关——对照卷的命不能靠"没写配置"来保，也不能被手滑关掉。
+    回落路径（rl-config）与课程块两条都要守这条：对照卷的命不能靠"没写配置"来保。
     """
-    assert paired_kill_self_kill(None, "t-own") is True
-    assert paired_kill_self_kill({}, "t-own") is True
-    assert paired_kill_self_kill({"courses": {"t-own": {"paired_kill": {}}}}, "t-own") is True
+    assert legacy_paired_kill_self_kill(None, "t-own") is True
+    assert legacy_paired_kill_self_kill({}, "t-own") is True
+    assert legacy_paired_kill_self_kill({"courses": {"t-own": {"paired_kill": {}}}}, "t-own") is True
     bad = {"courses": {"t-own": {"paired_kill": {"self_kill": "no"}}}}
-    assert paired_kill_self_kill(bad, "t-own") is True, "非 bool 不当 False"
+    assert legacy_paired_kill_self_kill(bad, "t-own") is True, "非 bool 不当 False"
     off = {"courses": {"t-own": {"paired_kill": {"self_kill": False}}}}
-    assert paired_kill_self_kill(off, "t-own") is False
+    assert legacy_paired_kill_self_kill(off, "t-own") is False
+    # 课程块路径：块缺席 ⇒ fallback；块存在未写 ⇒ True；显式 false ⇒ False
+    assert paired_kill_self_kill(None, fallback=True) is True
+    assert paired_kill_self_kill({}, fallback=True) is True
+    assert paired_kill_self_kill({"self_kill": False}, fallback=True) is False
 
 
 def test_control_leg_trips_but_does_not_stop(
@@ -293,15 +308,19 @@ def test_kill_is_opt_in_not_default() -> None:
     1789876303 是全屋种子流，不是配对实验），it5/it10 连跪两点 −4pp 当场被杀。
 
     配对杀臂是实验设计特性（配对 race + 杀规则），必须按课显式 `enabled: true` 才判；
-    缺席/写坏 ⇒ 关（连 streak 落账都不写——没开火的枪不记弹道）。
+    缺席/写坏 ⇒ 关（连 streak 落账都不写——没开火的枪不记弹道）。回落与课程块两条路径同规。
     """
-    assert paired_kill_enabled(None, "t-own") is False
-    assert paired_kill_enabled({}, "t-own") is False
-    assert paired_kill_enabled({"courses": {"t-own": {"paired_kill": {}}}}, "t-own") is False
+    assert legacy_paired_kill_enabled(None, "t-own") is False
+    assert legacy_paired_kill_enabled({}, "t-own") is False
+    assert legacy_paired_kill_enabled({"courses": {"t-own": {"paired_kill": {}}}}, "t-own") is False
     bad = {"courses": {"t-own": {"paired_kill": {"enabled": "yes"}}}}
-    assert paired_kill_enabled(bad, "t-own") is False, "非 bool 不当 True"
+    assert legacy_paired_kill_enabled(bad, "t-own") is False, "非 bool 不当 True"
     on = {"courses": {"t-own": {"paired_kill": {"enabled": True}}}}
-    assert paired_kill_enabled(on, "t-own") is True
+    assert legacy_paired_kill_enabled(on, "t-own") is True
+    # 课程块路径
+    assert paired_kill_enabled(None, fallback=False) is False
+    assert paired_kill_enabled({}, fallback=False) is False
+    assert paired_kill_enabled({"enabled": True}, fallback=False) is True
 
 
 def test_disabled_guard_writes_nothing(

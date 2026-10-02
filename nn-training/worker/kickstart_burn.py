@@ -12,7 +12,9 @@
   同口径 ⇒ 「比基线还低」= 训练把它拉回去了，正是要治的那件事。
 - **落执行面，不进课程 gates 块**：阶梯课程一律不配 gates（`ladder_factory` 的 I2：
   G4 cloud halt 自杀教训）；课程侧只在注释里写基线读数，机器读的是**实测**行。
-  阈值（margin/points）走 rl-config 的 `courses.<课>.kickstart_burn`，缺席即下面的常量。
+  阈值（margin/points）2026-10-02 起走**课程文件**的 `kickstart_burn` 块（字段缺失 = 下面的常量）；
+  块缺席才回落 rl-config 旧值（`legacy_burn_*`，兼容期）——止损是实验设计，跟腿入库
+  （DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file）。
 - **纯函数 + 行驱动**：`burn_verdict(rows)` 只看账本行 ⇒ 可回放、可单测、可在控制台
   用同一函数复算（不许在别处写第二份判据）。
 
@@ -51,7 +53,8 @@ from typing import Any, NamedTuple
 
 from worker.paired_kill import paired_kill_verdict
 
-#: 连续多少个评估点仍低于基线才停腿（执行面常量；rl-config 可覆盖）。
+#: 连续多少个评估点仍低于基线才停腿（执行面常量；课程文件 `kickstart_burn.points` 优先，
+#: rl-config 旧值仅兼容回落——2026-10-02 迁移，见模块头）。
 #: 3 而不是 1：单点有噪声（评估分母 50–200 局，±5pp 属正常抖动），三点连着低才是趋势——
 #: 与事故的读数节奏对得上（it1 就低，it25/it30 已肉眼可见，本可在 it5 前后停）。
 BURN_POINTS = 3
@@ -194,13 +197,27 @@ def burn_verdict(
     return BurnVerdict(False, streak, base, last, "")
 
 
-def burn_mode(dist_cfg: dict | None, course_key: str) -> tuple[str, str]:
-    """执行面模式：`courses.<课>.kickstart_burn.{mode,peer}`；缺席/脏值 → `(MODE_AUTO, "")`。
+def _block_dict(block: Any) -> dict | None:
+    """课程止损块 → 普通 dict；None/坏值 → None。
 
-    与 `burn_overrides` 同规（放 rl-config 不放课程文件）；**与它分开成两个函数**是为了
-    「加一档参照物」不动既有的 `(margin_pp, points)` 调用面与它的测试。
+    读面消费 `args` 上的**启动物化快照**（`flat_overrides` 以 `model_dump()` 落成 dict =
+    restart-only 的冻结面）；这里认 dict 与 pydantic 块两种形态——单测可直接喂模型。
+    """
+    if isinstance(block, dict):
+        return block
+    dump = getattr(block, "model_dump", None)
+    if callable(dump):
+        dumped = dump()
+        return dumped if isinstance(dumped, dict) else None
+    return None
 
-    `peer` = 显式指定对照臂的课程名（多臂家族里机器不替人挑「谁是控」）。
+
+def legacy_burn_mode(dist_cfg: dict | None, course_key: str) -> tuple[str, str]:
+    """**兼容回落**读（rl-config `courses.<课>.kickstart_burn.{mode,peer}`）；缺席/脏值 → `(MODE_AUTO, "")`。
+
+    2026-10-02 起课程文件的 `kickstart_burn` 块优先（`burn_mode`），本函数只在块缺席时生效；
+    第二刀（plan/burn-rule-in-course-file §9 P1）删。历史理由「放 rl-config 不放课程文件」
+    已随 D14 语义化（混训拒收判 `corpus_fp`）作废——止损是实验设计，跟课程文件一起入库。
     """
     block = (((dist_cfg or {}).get("courses") or {}).get(course_key) or {}) if course_key else {}
     kb = block.get("kickstart_burn") if isinstance(block, dict) else None
@@ -213,11 +230,27 @@ def burn_mode(dist_cfg: dict | None, course_key: str) -> tuple[str, str]:
     return (mode, peer)
 
 
-def burn_overrides(dist_cfg: dict | None, course_key: str) -> tuple[float, int]:
-    """执行面阈值覆盖：`courses.<课>.kickstart_burn.{margin_pp,points}`；缺席 → 常量。
+def burn_mode(block: Any, *, fallback: tuple[str, str] | None = None) -> tuple[str, str]:
+    """执行面模式：课程文件 `kickstart_burn.{mode,peer}`——**块存在即权威**；块缺席 → `fallback` → 缺省。
 
-    放在 rl-config 而**不**放课程文件：课程文件参与 course_fp 血缘（D14），且 §5.2 的
-    裁决是「执行面配置、课程只写注释」。与 `resolve_course_quota` 的机器配额同规。
+    块由 `biz.course_spec.KickstartBurnBlock` 解析期强校验（脏值拒课）；这里仍按「未知/缺省 →
+    模块缺省」读。块存在但字段没写 ⇒ 用模块缺省（**不**逐字段回落旧值——避免「半块 + 半旧值」的第三态）。
+    `peer` = 显式指定对照臂的课程名（多臂家族里机器不替人挑「谁是控」）。
+    """
+    d = _block_dict(block)
+    if d is None:
+        return fallback if fallback is not None else (MODE_AUTO, "")
+    m = d.get("mode")
+    mode = m if isinstance(m, str) and m in MODES else MODE_AUTO
+    p = d.get("peer")
+    peer = p.strip() if isinstance(p, str) and p.strip() else ""
+    return (mode, peer)
+
+
+def legacy_burn_overrides(dist_cfg: dict | None, course_key: str) -> tuple[float, int]:
+    """**兼容回落**读（rl-config `courses.<课>.kickstart_burn.{margin_pp,points}`）；缺席 → 常量。
+
+    同 `legacy_burn_mode`：课程文件块优先；本函数是迁移期旧值读，第二刀 P1 后删。
     """
     block = (((dist_cfg or {}).get("courses") or {}).get(course_key) or {}) if course_key else {}
     kb = block.get("kickstart_burn") if isinstance(block, dict) else None
@@ -225,6 +258,22 @@ def burn_overrides(dist_cfg: dict | None, course_key: str) -> tuple[float, int]:
         return (BURN_MARGIN_PP, BURN_POINTS)
     m = kb.get("margin_pp")
     p = kb.get("points")
+    margin = float(m) if isinstance(m, (int, float)) and not isinstance(m, bool) else BURN_MARGIN_PP
+    pts = int(p) if isinstance(p, int) and not isinstance(p, bool) and p > 0 else BURN_POINTS
+    return (margin, pts)
+
+
+def burn_overrides(block: Any, *, fallback: tuple[float, int] | None = None) -> tuple[float, int]:
+    """执行面阈值：课程文件 `kickstart_burn.{margin_pp,points}`——**块存在即权威**；块缺席 → `fallback` → 常量。
+
+    块存在但字段没写 ⇒ 模块缺省（不逐字段回落旧值）；脏值已在解析期拒课，这里仍保留
+    「未知 → 缺省」的兜底纪律（不拿坏配置停腿）。
+    """
+    d = _block_dict(block)
+    if d is None:
+        return fallback if fallback is not None else (BURN_MARGIN_PP, BURN_POINTS)
+    m = d.get("margin_pp")
+    p = d.get("points")
     margin = float(m) if isinstance(m, (int, float)) and not isinstance(m, bool) else BURN_MARGIN_PP
     pts = int(p) if isinstance(p, int) and not isinstance(p, bool) and p > 0 else BURN_POINTS
     return (margin, pts)

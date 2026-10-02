@@ -1,12 +1,13 @@
 """拆分的**契约守卫**：课程配置类面永住 `biz/course_spec.py`（S5 第十刀，2026-09-27）。
 
-`biz/config.py` **1566 → 598 行**（本刀三面合计）；类面搬走 25 名（`CourseConfig` ·
+`biz/config.py` **1566 → 598 行**（本刀三面合计）；类面搬走 30 名（`CourseConfig` ·
 `GatesSpec` · `StageSpec` · `RewardBlock` · `PpoScheduleEntry` · gates 常量族 ·
-`_default_lives` · `STAGE_JSON_MAX_BYTES`/`CUSTOM_STAGE_BASE` 等，逐字节不动）。
+`_default_lives` · `STAGE_JSON_MAX_BYTES`/`CUSTOM_STAGE_BASE` 等，逐字节不动；
+2026-10-02 增 5：`kickstart_burn`/`paired_kill` 块模型与校验器，随止损块迁移入课程文件）。
 
 本文件钉五件事：
 
-1. **定义唯一**——25 名不许在 `config.py` 里再实现一遍；
+1. **定义唯一**——30 名不许在 `config.py` 里再实现一遍；
 2. **依赖面闭集**——stdlib + `pydantic` + `biz.reward_library`；唯一向上的引用是
    `GatesSpec` 跨课门校验对 `biz.course_resolve` 的**函数内**延迟导入（顶层禁止，防成环）；
 3. **无反向门面依赖**——顶层不得 import `biz.config` / `biz.course_resolve`；
@@ -36,6 +37,7 @@ NEW_FILE = ROOT / "biz" / "course_spec.py"
 MOVED_NAMES = {
     "STAGE_JSON_MAX_BYTES",
     "CUSTOM_STAGE_BASE",
+    "KICKSTART_BURN_MODES",
     "Spawn",
     "SpawnVariant",
     "StageSpec",
@@ -58,7 +60,11 @@ MOVED_NAMES = {
     "PlayerBlock",
     "StateInitBlock",
     "CourseConfig",
+    "KickstartBurnBlock",
+    "PairedKillBlock",
     "_default_lives",
+    "_margin_pp_or_raise",
+    "_points_or_raise",
 }
 
 ALLOWED_IMPORTS = {

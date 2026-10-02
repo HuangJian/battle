@@ -77,6 +77,9 @@ from biz.course_spec import (
     GATE_VERDICTS as GATE_VERDICTS,
 )
 from biz.course_spec import (
+    KICKSTART_BURN_MODES as KICKSTART_BURN_MODES,
+)
+from biz.course_spec import (
     STAGE_JSON_MAX_BYTES as STAGE_JSON_MAX_BYTES,
 )
 from biz.course_spec import (
@@ -90,6 +93,12 @@ from biz.course_spec import (
 )
 from biz.course_spec import (
     GateTeacher as GateTeacher,
+)
+from biz.course_spec import (
+    KickstartBurnBlock as KickstartBurnBlock,
+)
+from biz.course_spec import (
+    PairedKillBlock as PairedKillBlock,
 )
 from biz.course_spec import (
     ParamSchedule as ParamSchedule,
@@ -120,6 +129,12 @@ from biz.course_spec import (
 )
 from biz.course_spec import (
     _gate_ratio as _gate_ratio,
+)
+from biz.course_spec import (
+    _margin_pp_or_raise as _margin_pp_or_raise,
+)
+from biz.course_spec import (
+    _points_or_raise as _points_or_raise,
 )
 
 # ------------------------------------------------------------------ 下沉（S5 第十刀，2026-09-27）
@@ -395,8 +410,10 @@ def apply_course(args, course: CourseConfig) -> None:
 
 
 # ────────────── 多课程本机并发配额（plan multi-course-parallel-training §3.4 / P4-W1） ──
-# 机器配额只住 rl-config 的 `courses.<课>` 块，**永不写进 curricula/*.jsonc**：课程文件
-# 参与 course_fp 血缘（D14），改一下配额就让熔断把同一份语料误判成新语料。课程文件里
+# 机器配额只住 rl-config 的 `courses.<课>` 块，**永不写进 curricula/*.jsonc**：这是**机器侧**
+# 旋钮（D14 混训拒收判 `corpus_fp`；`course_fp` 是 D13/幂等/门过滤的文件血缘——机器配额不是实验设计）。
+# 实验设计块（如止损 `kickstart_burn`/`paired_kill`）进课程文件，见
+# DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file。课程文件里
 # 的 `workers` 是「课程声明」，`courses.<课>.workers` 是「本机实际切分」；两者分叉时
 # 必须打响亮行（C1），不能静默顶替。后来者：不要把覆盖逻辑"顺手"搬进 apply_course——
 # 那会让课程覆盖与机器配额重新纠缠（plan C1 ③）。

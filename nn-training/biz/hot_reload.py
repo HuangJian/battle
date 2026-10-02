@@ -47,6 +47,11 @@ RESTART_ONLY_FIELDS: tuple[str, ...] = (
     # 缰绳初值（§5.1）：kk 调度的初值在启动自检/args 合并时读一次，热改它不会让已经
     # 排好的衰减曲线回头——与 kickstart_ref 同类，记 restart-only（响亮提示），不静默吞。
     "kickstart_init",
+    # 结果面止损一族（2026-10-02 从 rl-config 迁入课程文件）：判据规则 mid-run 改 = 判读窗口
+    # 中途换口径（与 kickstart_init 同类）⇒ restart-only。读面消费 args 上的启动物化快照
+    # （`flat_overrides` 以 dict 物化），热加载**不写回**这两键 ⇒「停止→启动后生效」名副其实。
+    "kickstart_burn",
+    "paired_kill",
     "normalize_ret",
     "out",
     "traj",
@@ -100,7 +105,12 @@ def apply_hot_fields(args: Any, new_course: Any) -> list[str]:
             changed.append(f)
     for f in RESTART_ONLY_FIELDS:
         av = getattr(args, RESTART_ONLY_ALIASES.get(f, f), None)
-        if getattr(new_course, f, None) != av:
+        nv = getattr(new_course, f, None)
+        # 嵌套块（kickstart_burn/paired_kill）在 args 里是 flat_overrides 物化的 dict，而课程对象
+        # 上是 pydantic 模型——不归一就「模型 ≠ dict」恒不等 = 每次热加载假报变更（日志在骗人）。
+        if nv is not None and hasattr(nv, "model_dump"):
+            nv = nv.model_dump()
+        if nv != av:
             changed.append(f + "*")  # `*` = restart-only，日志口径
     args.course_obj = new_course
     return changed

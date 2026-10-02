@@ -26,9 +26,14 @@ from worker.kickstart_burn import (
     burn_mode,
     burn_overrides,
     burn_verdict,
+    legacy_burn_mode,
+    legacy_burn_overrides,
 )
 from worker.paired import declared_paired_seed, latest_run_start_seed, scan_paired_courses
 from worker.paired_kill import (
+    legacy_paired_kill_enabled,
+    legacy_paired_kill_overrides,
+    legacy_paired_kill_self_kill,
     paired_kill_enabled,
     paired_kill_overrides,
     paired_kill_self_kill,
@@ -117,8 +122,13 @@ class TrainingGuardsLeg:
         except Exception as e:  # 读账本失败不得阻断训练（同 _gate 的兜底风格）
             log(f"[run_rl] WARN kickstart-burn 读账本失败（{type(e).__name__}: {e}）——本轮不判")
             return False
-        margin_pp, points = burn_overrides(dist_cfg, course_key_of(args))
-        mode, peer_name = burn_mode(dist_cfg, course_key_of(args))
+        # 止损一族 2026-10-02 起住课程文件（DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file）：
+        # 块存在即权威（args 上的启动物化快照，restart-only）；缺席才回落 rl-config 旧值
+        # （legacy_*，兼容期；第二刀见 plan/burn-rule-in-course-file §9 P1）。
+        key = course_key_of(args)
+        block = getattr(args, "kickstart_burn", None)
+        margin_pp, points = burn_overrides(block, fallback=legacy_burn_overrides(dist_cfg, key))
+        mode, peer_name = burn_mode(block, fallback=legacy_burn_mode(dist_cfg, key))
         peer_rows: tuple | None = None
         peer = ""
         if mode != MODE_BASELINE:
@@ -220,7 +230,9 @@ class TrainingGuardsLeg:
         declared = declared_paired_seed(getattr(self.args, "course_obj", None))
         if declared is None:
             return False  # 单腿口径：没有「对端」这回事
-        if not paired_kill_enabled(dist_cfg, course_key_of(self.args)):
+        key = course_key_of(self.args)
+        block = getattr(self.args, "paired_kill", None)
+        if not paired_kill_enabled(block, fallback=legacy_paired_kill_enabled(dist_cfg, key)):
             # 默认关火（2026-09-26）：配对杀臂是实验设计，必须按课显式 opt-in；
             # 同 V 只是门派同源，不是配对实验——不对未开火的课读账本、落账、判杀。
             return False
@@ -228,7 +240,9 @@ class TrainingGuardsLeg:
         siblings = scan_paired_courses(declared, self_name=self_name)
         if not siblings:
             return False  # 无对端：启动自检已响亮告警过（§2.5），这里无可比
-        margin_pp, points = paired_kill_overrides(dist_cfg, course_key_of(self.args))
+        margin_pp, points = paired_kill_overrides(
+            block, fallback=legacy_paired_kill_overrides(dist_cfg, key)
+        )
         traj_root = Path(str(getattr(self, "_traj_root", Path(str(self._jsonl_path)).parent)))
         try:
             own_rows = read_trend_rows(traj_root / "eval_log.jsonl")
@@ -285,7 +299,7 @@ class TrainingGuardsLeg:
         if not best.tripped:
             return False
         reason = f"同 it 配对差连续 {streak} 个点 < −{margin_pp:.1f}pp（对端 {best_peer}）"
-        if not paired_kill_self_kill(dist_cfg, course_key_of(self.args)):
+        if not paired_kill_self_kill(block, fallback=legacy_paired_kill_self_kill(dist_cfg, key)):
             # 对照臂永不自杀（2026-09-25 C-0 事故）：判据已落账，上面的 streak 事件就是
             # 记录；停车会撕毁终点 verdict（配对检验需要两条臂都活着），故只记录不停车。
             log(f"[run_rl] paired-kill it{it}: {reason} ——本臂被配置为永不自杀，只记录不停车")
