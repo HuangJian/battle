@@ -777,3 +777,29 @@ it25 缺 2 局且原因不进账本（`[eval] drain:` 日志零命中）。三�
 （`test_finish_course_drains_eval.py` 5 · resilience 3 · eval_timing 2（多轮 + G8）· gate_inputs
 兼容 1）。决策 → `DECISIONS.md` §2026-10-02-goalnn-eval-final-round-and-dropped；全文 →
 `docs/nn/engineering.md` §59；计划 → `plan/eval-final-round-and-dropped.plan.md`。
+
+## 2026-10-02 · course-pill-precision：pill 精确化（hub 派发面 + 龄 + 预取窗口）与只读读面收官判据
+
+触发（用户当日两条）：① 顶部课程 pill 的在线课只说本地进度词（本地「在等什么」五态）
+——h4-aim-c0 的现场（首个 job 被一个误启持有者**有心跳地**按住 27 分钟：真 GRAD 33.7s，对照
+h4-aim-k10/k25 同配置 2.7/3.3 分钟）在 pill 上只会说「等回传」，与正常回传无法区分；②
+h4-aim-k10/k25 跑满 40 轮仍显示「推进中」——只读读面（`run_rl_cluster --json`）按盘重建计划
+却拿不到 `iters` 预算 ⇒ `state='done'` 这条分支在 RL 课上从未点亮。
+
+落地三条链：
+
+- **hub 观测面**（纯加法）：inflight 行补 `claimed_ago`/`computing_ago`（缺失 → null 不编 0）、
+  顶层补 `peeked_courses`（窗口 60s；只在 `peek_jobs` 返回候选时记，`claim_next` 不记）→
+  `docs/nn/remote-transport.md` §54；
+- **训练侧只读面**：收官判据单点 `worker/loop_tasks.budget_exhausted(it, iters)`，
+  `LoopRunner.planner` 行为逐字节不变，`plan_course(iters=)` 跑满 ⇒ 空任务表 ⇒ `QUEUE_DONE`，
+  `waiting_state(finished=)` ⇒ `WAIT_IDLE` + 诚实文案；读不到 iters ⇒ 0（保持今天行为）→
+  `docs/nn/training-stack.md` §28；
+- **控制台 pill**：新四态（卡住 Nm r / 等回传 Nm y / 排队·无人取 y / 预取中 g）+ 龄 + jid 连接
+  （本机/远端一分为二）+ 未登记持有者点名 + 三态 `peeked` 退化（旧 hub ⇒ 「排队中」，不编
+  「无人取」）；控制台不新增判据（收官走 python 的 `state='done'`）→ `docs/nn/console.md` §22。
+
+读数：nn python 门禁 **3505 passed / 9 skipped**（ruff + mypy 全量）· dashboard **1264 pass /
+0 fail**（typecheck + 三 bundle ok）· 根 `bun run check` **2345 pass / 12 skip / 0 fail** ·
+`bun run build` 过。决策 → `DECISIONS.md` §2026-10-02-goalnn-course-pill-precision；计划 →
+`course-pill-precision.plan.md`（2026-10-02 评审修订版：P1–P4 已并入并实施）。

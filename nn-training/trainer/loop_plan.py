@@ -21,7 +21,7 @@ from pathlib import Path
 from common.protocol import COURSE_ENABLE_MARKER
 from worker.bc_ledger import inflight_jobs
 from worker.commit_journal import CommitJournal
-from worker.loop_tasks import RoundFacts, Task, pending_tasks, round_tasks
+from worker.loop_tasks import RoundFacts, Task, budget_exhausted, pending_tasks, round_tasks
 from worker.train_ledger import LedgerSpec, LedgerView, load_ledger
 
 
@@ -208,6 +208,7 @@ def plan_course(
     spec: LedgerSpec | None = None,
     games_planned: int = 0,
     weights_landed: bool = False,
+    iters: int = 0,
 ) -> tuple[int, list[Task], dict]:
     """课程当前的（指针, 待办任务表, 事实）——调度器 `planner` 的生产实现。
 
@@ -217,18 +218,27 @@ def plan_course(
 
     粒度与指针都按课程种类走（BC ⇒ 单个轮任务 + `bc_round_completed` 指针），见
     `round_tasks_for` / `course_facts`。
+
+    `iters`（**RL 课**的预算，0 = 不限）：跑满 ⇒ 空任务表 ⇒ `Supervisor.add_course`
+    自然置 `QUEUE_DONE`（读面「已收官」，§1.5）。判据与真 trainer **同一处**
+    （`budget_exhausted`），不在本模块重写一遍；BC 的预算已由 `bc_progress(iters)` 表达
+    （指针跳过已完成轮），故这里只对 RL 加这道闸。读不到 iters ⇒ 0 ⇒ 行为与今天相同。
     """
     traj = Path(traj)
     facts, v = course_facts(
         traj,
         course=course,
+        iters=iters,
         view=view,
         spec=spec,
         games_planned=games_planned,
         weights_landed=weights_landed,
     )
     it = int(facts.it)
-    tasks = pending_tasks(round_tasks_for(course, it), facts)
+    if course_kind(course) == "rl" and budget_exhausted(it, iters):
+        tasks: list[Task] = []
+    else:
+        tasks = pending_tasks(round_tasks_for(course, it), facts)
     facts_dump = {
         "it": it,
         "iteration_recorded": facts.iteration_recorded,
@@ -258,6 +268,9 @@ def waiting_state(
     games_planned: int,
     pending: int,
     current: str,
+    finished: bool = False,
+    it: int = 0,
+    iters: int = 0,
 ) -> tuple[str, str]:
     """按**盘上事实**回答「这门课在等什么」→ `(kind, 文案)`。
 
@@ -274,7 +287,13 @@ def waiting_state(
     知道，在 `biz/plan.py` 里）。CLI 因此传 0 = 未知，此时 `collect` 只报已落局数、不报分数；
     真 supervisor 带上课程计划后会走到带分母的那条文案。这与 `already_done` 同一条规矩：
     算不出来的事实**不得当成完成**，也不得编出分母。
+
+    `finished=True`（调用方用 `budget_exhausted(it, iters)` 算好，与真 trainer 同源）⇒
+    返回 `WAIT_IDLE` + 说清是**哪种** idle 的文案（不新增 `WAIT_*` kind：收官在语义上就是
+    "没有待办"，缺的只是文案；pill 的「已收官」走 `state='done'`，不吃这一列）。
     """
+    if finished:
+        return WAIT_IDLE, f"已跑满 it{it - 1}/{iters}（改大 iters 后 停→开 可续跑）"
     if inflight:
         what = "、".join(f"{r.get('phase', '?')}@{r.get('round', '?')}" for r in inflight[:3])
         if len(inflight) > 1:

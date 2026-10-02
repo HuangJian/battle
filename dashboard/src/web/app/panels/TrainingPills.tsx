@@ -49,6 +49,9 @@ export interface TrainingPillsProps {
   overview?: ParallelOverviewView | null
   /** 控制台记录的每课 hub 派发意图（与 hub 事实不一致 = 「意图未生效」）。 */
   modeIntents?: Record<string, 'online' | 'offline'> | null
+  /** 登记在册的 push worker id（rl-config `nodes[].gpu_push`）：holder 不在表里 ⇒ 悬停点名。
+   *  `null`/缺省 = 名单不可知（不点名）——与「未登记」是两件事。 */
+  registeredWorkers?: string[] | null
   /** 当前查看课程（高亮 + 「正在看」提示）。 */
   viewCourse: string
   onSelect: (course: string) => void
@@ -73,12 +76,20 @@ export function TrainingPills({
   trainerRunning,
   overview,
   modeIntents,
+  registeredWorkers,
   viewCourse,
   onSelect,
   onStop,
   readOnly,
 }: TrainingPillsProps) {
-  const pills = coursePills({ courses, rows, trainerRunning, overview, modeIntents })
+  const pills = coursePills({
+    courses,
+    rows,
+    trainerRunning,
+    overview,
+    modeIntents,
+    registeredWorkers,
+  })
   // 一门课都没开 ⇒ 整个组件不渲染（顶部保持干净：空块/空行会被读成「有东西没加载出来」）。
   if (pills.length === 0) return null
   // 组前的文字标签「在训」已删（2026-09-20 用户指令）——`aria-label` 保留：屏幕阅读器
@@ -94,7 +105,7 @@ export function TrainingPills({
             role="button"
             tabIndex={0}
             aria-label={
-              `${p.course}，${p.status}，it${p.it ?? '—'}` +
+              `${p.course}，${p.status}${p.age ? ` ${p.age}` : ''}，it${p.it ?? '—'}` +
               (active ? '（正在查看）' : '，点击查看其趋势与指标')
             }
             title={
@@ -113,7 +124,10 @@ export function TrainingPills({
             {p.kind === 'bc' ? <span className="tc-tpill__kind">BC</span> : null}
             <b>{p.course}</b>
             <span className="v">it{p.it ?? '—'}</span>
-            <span className="tc-tpill__state">{p.status}</span>
+            <span className="tc-tpill__state">
+              {p.status}
+              {p.age ? ` ${p.age}` : ''}
+            </span>
             <button
               type="button"
               className="tc-tpill__stop"

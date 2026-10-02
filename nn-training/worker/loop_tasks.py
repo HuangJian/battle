@@ -205,6 +205,17 @@ def already_done(kind: str, facts: RoundFacts) -> bool:
     return False
 
 
+def budget_exhausted(it: int, iters: int) -> bool:
+    """这一门课是否**已跑满预算**（`iters <= 0` = 不限 ⇒ 恒 False）。
+
+    与 `already_done` 同家：都是「这一轮还要不要做」的纯判据。`it` 是**下一轮**指针
+    （账本 `next_it`）：`it > iters` 表示 iters 轮都已结算。**唯一判据**——读面
+    （`loop_plan.plan_course`）与真 trainer（`LoopRunner.planner`）共用同一处，
+    不写第二份（两处各写一遍必然分叉，症状是 pill 与实际是否续跑各说各话）。
+    """
+    return iters > 0 and it > iters
+
+
 def pending_tasks(tasks: list[Task], facts: RoundFacts) -> list[Task]:
     """本轮**尚未完成**的任务（R2c 的队列内容；顺序保持）。
 

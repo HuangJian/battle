@@ -26,6 +26,7 @@ import path from 'path'
 import type {
   ConsoleStateView,
   CourseOverviewRow,
+  HubInflightView,
   LoopQueueRow,
   ParallelOverviewView,
 } from '../src/web/view'
@@ -73,6 +74,11 @@ function ovRow(course: string, over: Partial<CourseOverviewRow> = {}): CourseOve
     offlineLastIter: null,
     offlineLastMtime: 0,
     frozen: [],
+    halt: false,
+    inflightDetail: [],
+    stuckSec: null,
+    peeked: null,
+    nextJob: null,
     ...over,
   }
 }
@@ -228,6 +234,191 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
   })
 })
 
+// ──────────────── ★2026-10-02：hub 派发态（结合多课程预取窗口） ────────────────
+
+/** 在线课的 hub 行（本组用例的默认：在线、hub 认得、无离线维度）。 */
+function hubRow(course: string, over: Partial<CourseOverviewRow> = {}): CourseOverviewRow {
+  return ovRow(course, { offline: false, ...over })
+}
+
+/** 一条在飞明细（默认认领 40s / 心跳 4s）。 */
+function fl(claimedAgo: number | null, over: Partial<HubInflightView> = {}): HubInflightView {
+  return {
+    jobId: 'j9',
+    worker: 'gpu-7',
+    heartbeatAgo: 4,
+    claimedAgo,
+    computingAgo: null,
+    ...over,
+  }
+}
+
+describe('★2026-10-02 coursePills：hub 派发态（等回传/卡住/排队·无人取/预取中）', () => {
+  it('① 最老认领 1620s ⇒ 「卡住 27m」红点（连一个租约周期都走完了还没回传）', () => {
+    const [p] = view.coursePills({
+      courses: ['c'],
+      rows: [row({ course: 'c', waiting: { kind: 'collect', text: '采集中：已落 12 局' } })],
+      trainerRunning: true,
+      overview: ov(hubRow('c', { inflight: 1, inflightDetail: [fl(1620)], stuckSec: 1620 })),
+    })!
+    expect(p).toMatchObject({ status: '卡住', age: '27m', tone: 'r' })
+    // 悬停全因：持有者 / 认领龄 / 队列 / 预取窗口 / 训练侧原文（§3.3 顺序）
+    expect(p.title).toContain('持有者 gpu-7')
+    expect(p.title).toContain('认领 27m 前')
+    expect(p.title).toContain('队列 0 待领')
+    expect(p.title).toContain('预取窗口不可知')
+    expect(p.title).toContain('采集中：已落 12 局')
+  })
+
+  it('② 认领 40s ⇒ 「等回传」黄点、不带龄（<60s 不显示）', () => {
+    const [p] = view.coursePills({
+      courses: ['c'],
+      rows: [row({ course: 'c' })],
+      trainerRunning: true,
+      overview: ov(hubRow('c', { inflight: 1, inflightDetail: [fl(40)], stuckSec: 40 })),
+    })!
+    expect(p).toMatchObject({ status: '等回传', age: null, tone: 'y' })
+  })
+
+  it('③ 有活、没在飞、不在预取窗口 ⇒ 「排队·无人取」（不再显示「采集中」假装在动）', () => {
+    const [p] = view.coursePills({
+      courses: ['c'],
+      rows: [row({ course: 'c', waiting: { kind: 'ready', text: '无外部等待，下一步 ppo' } })],
+      trainerRunning: true,
+      overview: ov(hubRow('c', { queuePending: 3, inflight: 0, peeked: false, nextJob: 'j3' })),
+    })!
+    expect(p).toMatchObject({ status: '排队·无人取', tone: 'y' })
+    expect(p.title).toContain('不在预取窗口')
+    expect(p.title).toContain('队首 j3')
+  })
+
+  it('④ 同前但在预取窗口内 ⇒ 「预取中」绿点（有人要跑）', () => {
+    const [p] = view.coursePills({
+      courses: ['c'],
+      rows: [row({ course: 'c' })],
+      trainerRunning: true,
+      overview: ov(hubRow('c', { queuePending: 3, inflight: 0, peeked: true, nextJob: 'j3' })),
+    })!
+    expect(p).toMatchObject({ status: '预取中', tone: 'g' })
+    expect(p.title).toContain('在预取窗口内')
+  })
+
+  it('⑤ 旧 hub 没有 claimed_ago ⇒ 回落「等回传」不带龄（**不**升级为卡住，不编龄）', () => {
+    const [p] = view.coursePills({
+      courses: ['c'],
+      rows: [row({ course: 'c' })],
+      trainerRunning: true,
+      overview: ov(hubRow('c', { inflight: 1, inflightDetail: [fl(null)], stuckSec: null })),
+    })!
+    expect(p).toMatchObject({ status: '等回传', age: null, tone: 'y' })
+    expect(p.title).toContain('心跳 4s 前')
+  })
+
+  it('⑥ 训练侧 inflight 但 hub 无对应 jid ⇒ 「等回传（本机）」（jid 连接一分为二）', () => {
+    const [p] = view.coursePills({
+      courses: ['c'],
+      rows: [
+        row({
+          course: 'c',
+          waiting: { kind: 'inflight', text: '等远端回传：ppo_remote@37（jid=local12345678）' },
+          inflight: [
+            {
+              phase: 'ppo_remote',
+              round: '37',
+              jid: 'local12345678',
+              dispatch: 'push',
+              dir: 'it37',
+            },
+          ],
+        }),
+      ],
+      trainerRunning: true,
+      overview: ov(hubRow('c', { queuePending: 1, inflight: 0, peeked: false, nextJob: 'j1' })),
+    })!
+    expect(p).toMatchObject({ status: '等回传（本机）', tone: 'y' })
+    expect(p.title).toContain('非远端')
+    expect(p.title).toContain('等远端回传：ppo_remote@37')
+  })
+
+  it('⑦ 跑满的课（state=done + idle 文案）⇒ 「已收官」且 title 带 it40/40（§1.5 回归钉子）', () => {
+    const [p] = view.coursePills({
+      courses: ['c'],
+      rows: [
+        row({
+          course: 'c',
+          it: 41,
+          state: 'done',
+          waiting: { kind: 'idle', text: '已跑满 it40/40（改大 iters 后 停→开 可续跑）' },
+        }),
+      ],
+      trainerRunning: true,
+      // 即使 hub 有活，确定性事实（已收官）仍压过一切
+      overview: ov(hubRow('c', { queuePending: 3, inflight: 0, peeked: false })),
+    })!
+    expect(p).toMatchObject({ status: '已收官', tone: 'gray' })
+    expect(p.title).toContain('it40/40')
+  })
+
+  it('⑧ 旧 hub 无预取窗口 ⇒ 「排队中」（不可知 ≠ 无人取；评审 P1）', () => {
+    const [p] = view.coursePills({
+      courses: ['c'],
+      rows: [row({ course: 'c' })],
+      trainerRunning: true,
+      overview: ov(hubRow('c', { queuePending: 2, inflight: 0, peeked: null })),
+    })!
+    expect(p).toMatchObject({ status: '排队中', tone: 'y' })
+    expect(p.title).toContain('预取窗口不可知')
+  })
+
+  it('⑨ 本机 inflight ∧ 远端队列有活 ⇒ 本机优先，**不得**说成「排队·无人取」（评审 P2）', () => {
+    const [p] = view.coursePills({
+      courses: ['c'],
+      rows: [
+        row({
+          course: 'c',
+          waiting: { kind: 'inflight', text: '等远端回传：ppo_remote@37' },
+          inflight: [
+            { phase: 'ppo_remote', round: '37', jid: 'local12345678', dispatch: null, dir: null },
+          ],
+        }),
+      ],
+      trainerRunning: true,
+      overview: ov(hubRow('c', { queuePending: 2, inflight: 0, peeked: true })),
+    })!
+    expect(p.status).toBe('等回传（本机）')
+  })
+
+  it('⑩ jid 对上 ⇒ 走远端「等回传」；未登记持有者被点名', () => {
+    const [p] = view.coursePills({
+      courses: ['c'],
+      rows: [
+        row({
+          course: 'c',
+          waiting: { kind: 'inflight', text: '等远端回传：ppo_remote@37（jid=j9）' },
+          inflight: [
+            { phase: 'ppo_remote', round: '37', jid: 'j9', dispatch: 'push', dir: 'it37' },
+          ],
+        }),
+      ],
+      trainerRunning: true,
+      registeredWorkers: ['gpu-1'],
+      overview: ov(hubRow('c', { inflight: 1, inflightDetail: [fl(90)], stuckSec: 90 })),
+    })!
+    expect(p).toMatchObject({ status: '等回传', age: '1m', tone: 'y' })
+    expect(p.title).toContain('持有者 gpu-7')
+    expect(p.title).toContain('不在 worker 登记表里')
+    // 登记在册的持有者不点名
+    const [ok] = view.coursePills({
+      courses: ['c'],
+      rows: [row({ course: 'c' })],
+      trainerRunning: true,
+      registeredWorkers: ['gpu-7'],
+      overview: ov(hubRow('c', { inflight: 1, inflightDetail: [fl(90)], stuckSec: 90 })),
+    })!
+    expect(ok.title).not.toContain('不在 worker 登记表里')
+  })
+})
+
 // ────────────────────────── 服务端 stamp：在训判据 = 开课标记 ──────────────────────────
 
 // 预热调度器读面缓存：`buildStateView` 默认走**真**执行体（起 python 子进程）——本文件只关心
@@ -282,6 +473,54 @@ describe('buildStateView：trainingCourses = 已开课（开课标记），不�
     const s = await api.buildStateView()
     expect(s.trainingCourses).toEqual([])
     expect(s.courseLifecycle?.enabled ?? false).toBe(false)
+  })
+
+  it('★2026-10-02：收官课留在 pill 名单（开课标记是事实），但不在「在训」队列计数里', async () => {
+    // §1.5 的两个 half 各归各的事实源，不许互相拖：
+    //  ① RL 收官**不清开课标记**（改大 iters 后「停→开」是续跑入口）⇒ 收官课照旧在
+    //     `trainingCourses` 里（pill 改词不消失）；
+    //  ② 训练侧队列的「在训」列把 `state=done` 的行移出 ⇒ `trainingCount` 减 1。
+    // 造一份「共享 trainer 在跑」的假账本（本进程 pid 冒充存活进程），否则 schedulerAlive
+    // 为假，②会被「调度器没跑 ⇒ 全不在训」这条更宽的事实盖掉、钉不住。
+    course('x-done', true)
+    const regFile = path.join(DIR, 'registry-live-trainer.json')
+    writeFileSync(
+      regFile,
+      JSON.stringify({ trainingLoops: { '': { pid: process.pid, course: '', slot: 0 } } }),
+    )
+    const prevReg = process.env.BCITY_REGISTRY_FILE
+    process.env.BCITY_REGISTRY_FILE = regFile
+    try {
+      api.invalidateLoopQueue()
+      await api.getLoopQueueView(() => ({
+        code: 0,
+        stdout: JSON.stringify({
+          courses: [
+            {
+              course: 'x-done',
+              it: 41,
+              state: 'done',
+              current: '',
+              pending: [],
+              inflight: [],
+              facts: { iterations: 40, last_verdict: 'OK', train_sec_total: 10, games_settled: 0 },
+              waiting: { kind: 'idle', text: '已跑满 it40/40（改大 iters 后 停→开 可续跑）' },
+            },
+          ],
+          pools: {},
+        }),
+        stderr: '',
+        timeout: false,
+      }))
+      const s = await api.buildStateView('x-done')
+      expect(s.trainingCourses).toEqual(['x-done'])
+      expect(s.loopQueue!.rows[0]!.training).toBe(false)
+      expect(s.loopQueue!.trainingCount).toBe(0)
+    } finally {
+      if (prevReg === undefined) delete process.env.BCITY_REGISTRY_FILE
+      else process.env.BCITY_REGISTRY_FILE = prevReg
+      api.invalidateLoopQueue() // 暖过的注入队列不得喂给后续用例
+    }
   })
 })
 
@@ -410,5 +649,48 @@ describe('顶部在训课程 pill 行（SSR）', () => {
     const html = render.renderConsolePage({ ...(await viewWithPills()), readOnly: true })
     expect(html).toContain('class="tc-tpills"')
     expect(html).not.toMatch(/<button[^>]*disabled/)
+  })
+
+  it('★2026-10-02：pill 带龄上屏；未登记持有者在悬停里被点名（registeredWorkers 接线）', async () => {
+    const base = await viewWithPills()
+    const html = render.renderConsolePage({
+      ...base,
+      // 让共享 trainer「在跑」（进程事实）：`待进程` 是确定性事实、优先级在 hub 派发态之前，
+      // 夹具默认 trainingLoop 是 exited ⇒ pill 会说「待进程」，hub 事实根本不上屏。
+      components: (base.components ?? []).map((c) =>
+        c.key === 'trainingLoop' ? { ...c, status: 'running' as const } : c,
+      ),
+      trainingCourses: ['a'],
+      loopQueue: {
+        ...base.loopQueue!,
+        rows: [row({ course: 'a', waiting: { kind: 'collect', text: '采集中：已落 12 局' } })],
+      },
+      overview: ov(hubRow('a', { inflight: 1, inflightDetail: [fl(1620)], stuckSec: 1620 })),
+      workerRegistry: {
+        hubUrl: null,
+        mounted: false,
+        hubPush: true,
+        workers: [
+          {
+            id: 'gpu-1',
+            url: '',
+            enabled: true,
+            concurrency: 1,
+            online: null,
+            busy: null,
+            hubOnline: null,
+          },
+        ],
+      },
+    })
+    // 断言**限定在 pill 区段**：课程矩阵里也有「N 课等回传」这类 chip，全局 toContain 会被
+    // 它满足（既有「每门在训课一个 pill」用例的 `等回传` 断言实际匹配的就是该 chip）。
+    const pillStart = html.indexOf('aria-label="在训课程"')
+    const pillSeg = html.slice(pillStart, html.indexOf('tc-top__right', pillStart))
+    expect(pillStart).toBeGreaterThan(-1)
+    expect(pillSeg).toContain('卡住')
+    expect(pillSeg).toContain('27m')
+    expect(pillSeg).toContain('持有者 gpu-7')
+    expect(pillSeg).toContain('不在 worker 登记表里')
   })
 })

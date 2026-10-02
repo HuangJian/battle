@@ -6731,3 +6731,30 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
 - **指针**：计划 `plan/eval-final-round-and-dropped.plan.md` · 全文 → `docs/nn/engineering.md` §59 ·
   回归 `tests/trainer/test_finish_course_drains_eval.py` · `tests/trainer/test_eval_dispatch_resilience.py`
   （2026-10-02 节）。
+
+## §2026-10-02-goalnn-course-pill-precision（2026-10-02，pill 精确化：hub 派发面接进 pill + 只读读面拿 iters 判收官）
+
+- **背景**：两起独立缺陷。① pill 的在线课五态全是**本地进度词**；h4-aim-c0 的首个 job 被一个误启
+  持有者「有心跳地」按住 27 分钟（真 GRAD 33.7s，对照 k10/k25 同配置 2.7/3.3 分钟），三道既有
+  防线结构上判不出（孤儿要零心跳 / 熔断要租约过期 / 队列停滞检测看 pending→completed 缺口），
+  而 pill 只会说「等回传」。② h4-aim-k10/k25 跑满 40 轮仍显示「推进中」——只读读面按盘重建计划
+  却拿不到 `iters` 预算，`state='done'` 从未点亮。
+- **备选与否决**：① 对「有心跳但慢」加自动处置（回收/降优先级）——否：先要读数面跑一段再定阈值
+  与动作（plan O1），且不动调度是本刀的边界；② 用账本 `run_complete` 当收官判据——否：它是上一次
+  run 的陈述（改大 iters 续跑后陈旧），收官 SSOT 是预算，第二份判据必然分叉；③ pill 布尔
+  `peeked`——否：无法区分「旧 hub 没字段」与「确实不在窗口」；④ 控制台自己判收官——否：显示层
+  不新增判据；⑤ 本机 inflight 与「排队·无人取」并置——否：对不上 hub jid = 本机在算，必须压过排队态。
+- **决定**：hub 观测面纯加法（inflight 行 `claimed_ago`/`computing_ago`；顶层 `peeked_courses`
+  = 60s 内被 `peek_jobs` 返回过候选的课程集；只被 `/admin/queue` 读，调度判据零引用）· 收官判据
+  单点 `worker/loop_tasks.budget_exhausted(it, iters)`（`iters<=0` ⇒ False；`LoopRunner.planner`
+  行为逐字节不变），读面 `plan_course(iters=)` 跑满 ⇒ 空任务表 ⇒ `QUEUE_DONE`，
+  `waiting_state(finished=)` ⇒ `WAIT_IDLE` + 诚实文案（不新增 WAIT kind）；预算 = 课程声明
+  `curricula/<课>.jsonc`（读不到 ⇒ 0 = 不限，保持今天行为）· pill 四态（卡住/等回传/排队·无人取/
+  预取中）+ 龄 + jid 连接（本机/远端）+ 未登记持有者点名；`PILL_STUCK_SEC=300` 是**展示层常量**，
+  不得被 hub/训练侧 import。
+- **违反后果**：展示字段接进 `_claim_locked`/优先级 ⇒ 展示需求烧进调度语义；读面写第二份收官判据
+  ⇒ pill 与实际续跑各说各话；缺龄编 0 ⇒ 卡死 27 分钟显示成「刚认领」。
+- **指针**：全文 → `docs/nn/remote-transport.md` §54 · `docs/nn/training-stack.md` §28 ·
+  `docs/nn/console.md` §22；计划 → `course-pill-precision.plan.md`（评审 P1–P4 已并入）；回归 →
+  `tests/hub/test_queue_observe_pill.py` · `tests/worker/test_loop_tasks.py` ·
+  `tests/trainer/test_loop_plan_waiting.py` · `dashboard/tests/training-pills.test.ts`。

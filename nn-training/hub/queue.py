@@ -150,6 +150,10 @@ class _HubQueue(
         self._cursor: str | None = None
         #: job_id -> course（归属解析缓存；job_id 不可复用，故不会失效）
         self._locate_cache: dict[str, str] = {}
+        #: 课程 -> 最近被 `peek_jobs` 返回候选的时刻（秒）。多课程预取窗口的**观测面**状态
+        #: （2026-10-02，plan/course-pill-precision §4.1）：只被 `/admin/queue` 读，不参与
+        #: 任何派发判据；重启即清（窗口本来就是过程量，与租约同口径）。
+        self._peeked: dict[str, float] = {}
         #: jid -> 同时持有它的课程（≥2 = 身份歧义）。两个用途：`course_of` 的**去重打点**
         #: （每个 job 作用域请求都会跑它，逐次打点会把日志刷爆），以及拒答时把
         #: 「谁和谁撞了」带进 reason。观测面的**全量**清单另有 `ambiguous_jids()`（扫盘）。

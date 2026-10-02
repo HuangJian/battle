@@ -7,6 +7,62 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §22 顶部课程 pill 精确化：hub 派发四态 + 龄 + 未登记持有者点名（plan/course-pill-precision，2026-10-02）
+
+**触发**（用户 2026-10-02）：「优化 dashboard 顶部课程 pill 的显示状态，需要结合多课程 prefetch
+机制，精确显示课程状态」；同日追加：「h4-aim-k10/k25 已经训练完成，但是 pill 仍显示『推进中』」。
+两条独立链：
+
+1. **盲区**：pill 的在线课五态（等回传 / 采集中 / 推进中 / 空闲 / …）全是**本地进度词**——回答
+   「训练循环在等什么」，不回答「hub 上这份活归谁、多久了、有没有人要」。h4-aim-c0 的现场
+   （持有者有心跳地按住首个 job 27 分钟）在 pill 上只会说「等回传」，与正常回传无法区分。
+   hub 侧补的两个事实（in-flight 龄 + 预取窗口）见 `docs/nn/remote-transport.md` §54。
+2. **收官误报**：「跑满」在只读读面拿不到 `iters`（修正见 `docs/nn/training-stack.md` §28）⇒
+   `state='done'` 分支在 RL 课上从未点亮。控制台**不新增判据**：python 给 `state='done'` 后
+   pill 既有的「已收官」（gray）自动点亮；只把该分支 title 从「重新开课」改成「**停→开**」
+   （与 RL 收官不清开课标记的续跑入口一致——不能把收官课从 pill 去掉）。
+
+**状态机**（`view/loop-queue.ts::coursePills`）：1–7（视图不可用 / 已暂停 / 已收官 / 已中止 /
+待进程 / 意图未生效 / 离线两态）一字不动；当且仅当「在线 ∧ hub 可达 ∧ `hubSeen` ∧（在飞 ∨
+排队）」时，原 8–11 改由 **hub 派发事实**说：
+
+| 状态字 | tone | 判据 |
+|---|---|---|
+| **卡住 Nm** | r | 有在飞 ∧ 最老 `claimedAgo > PILL_STUCK_SEC` |
+| **等回传 Nm** | y | 有在飞 ∧ 龄 ≤ 阈值（`<60s` 不显示龄） |
+| **排队·无人取** | y | `inflight=0 ∧ queuePending>0` ∧ 该课**不在**预取窗口 |
+| **预取中** | g | 同前但在窗口内 |
+| （旧 hub 无 `peeked`）**排队中** | y | 窗口不可知——退化为「排队中」，**不**说「无人取」 |
+
+两条连接：① **jid 连接**：训练侧 `inflight[].jid` ↔ hub `inflight[].job_id`——对上 = 远端；
+对不上 = **本机 PPO**（显示「等回传（本机）」并**压过** 10′/11′：本机在算 + 远端队列有活时
+不得误读成「没人取」，评审 P2）；旧训练侧 WAL 无 jid ⇒ 不做连接、不判本机。② **预取窗口**代理
+「有效窗口 = `min(prefetch_depth, 开课数)`」（plan/transfer-residual §1.5）。`pickOldestInflight`
+按认领龄取最老一条；全缺 `claimed_ago` 不升级为「卡住」（不编龄）。
+
+**展示常量**：`PILL_STUCK_SEC=300`（= `CLAIM_TTL_SEC`：连一个租约周期都走完还没回传，与稳态
+wall 58–73s 差 ≥4×）；`PEEKED_WINDOW_SEC=60` 由 hub 侧给（§54）。`PILL_STUCK_SEC` 是**展示层
+常量**——不得被 hub / 训练侧 import。龄写法统一走 `fmtAge()`（`<60s` 省略、`<60m` 用 `Nm`、
+其余 `Nh`），状态字与龄分开两个 span（`tc-tpill__state` 单行不换行）。
+
+**title（悬停全因）**按 §3.3 顺序拼：派发事实（holder / 认领龄 / 开算龄 / 心跳龄）· 是否
+**未登记持有者**（holder 不在 rl-config `nodes[].gpu_push` 的 id 集里——输入 =
+`stateView.workerRegistry.workers[].id`，评审订正：**不是** hub 探活 `pushMap`）· 队列深度 + 队首
+jid · 预取窗口（在/不在/不可知）· 训练侧 waiting 原文 · 停课说明。
+
+**数据面**：`parseHubQueue`（`course-overview.ts`）补 `halt` / `inflightDetail`{jobId, worker,
+claimedAgo, computingAgo, heartbeatAgo} / `nextJob` / `peekedCourses`；`CourseOverviewRow` 增
+`stuckSec: number | null` 与 `peeked: boolean | null`（**三态**，评审 P1：布尔无法区分「旧 hub
+没字段」与「确实不在窗口」）。旧形状缺字段 ⇒ `null`/`false` 不炸。上屏：`TrainingPills.tsx`
+pill 内加 `{p.age}`（可空）+ `aria-label` 带龄；`app.tsx` 传 `registeredWorkers`。
+
+**门禁**：`dashboard` typecheck + 全量 `bun run test` **1264 pass / 0 fail**；`bun dashboard/src/server/build.ts`
+三 bundle ok。新增/扩：`training-pills`（四态 + 龄 + 三态 `peeked` + 本机优先 + jid 连接 +
+未登记点名 + SSR 带龄上屏 + **收官课留在 pill 名单但出「在训」计数**（S6，假 registry 造活
+scheduler）+ buildStateView 收官口径）· `server-api-overview`（新字段解析容错）。既有 pill 用例
+断言零修改（只新增）。
+
+---
 ## §21 门禁停机开关去课程化：顶部开关写平台文件 + 「意图 / 实际生效」两栏（2026-10-01）
 
 训练侧契约与后果（优先级 / `until` 读时求值 / 离线腿短路）→ `docs/nn/training-stack.md` §27。

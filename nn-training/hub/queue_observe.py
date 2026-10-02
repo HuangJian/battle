@@ -42,6 +42,24 @@ from hub.task_pack import OFFLINE_DISK_WINDOW_SEC, OFFLINE_LEG_HINT
 #: 而 handler 侧的 `(... / "manifest.json").exists()` 仍是 False ⇒ 行为与「没这个 job」同。
 _MISSING_ROOT = Path(tempfile.gettempdir()) / "hub-queue-missing"
 
+#: 多课程预取窗口（秒，2026-10-02，plan/course-pill-precision §4.1）：最近这么久内被
+#: `peek_jobs` **返回过候选**的课程才算「在预取窗口里」。60 = worker 预取节拍
+#: `PREFETCH_ROUND_SEC=5s` 的 12 拍——窗口外说明同一批 worker 的轮转扫不到它（结构性饿死），
+#: pill 据此区分「预取中」与「排队·无人取」。**只被观测面读**（`/admin/queue`），不参与派发。
+PEEKED_WINDOW_SEC = 60.0
+
+
+def _age_of(now: float, rec: dict | None) -> float | None:
+    """一条 store 记录（`_claimed` / `_computing`）的「多久前」（秒，一位小数）。
+
+    缺失/坏值 ⇒ `None`（**不编 0**）：旧 hub、手工认领等场景没有这两条，读侧据此退化成
+    「无龄」，而不是把它当成「刚认领」——编 0 会把卡死 27 分钟的现场显示成刚刚开始。
+    """
+    at = (rec or {}).get("at")
+    if not isinstance(at, (int, float)):
+        return None
+    return round(now - float(at), 1)
+
 
 class QueueObserveMixin(QueuePeer):
     """域混入：见模块头部。"""
@@ -53,6 +71,8 @@ class QueueObserveMixin(QueuePeer):
     _now: Any
     _offline_disks: dict[str, float]
     _order: list[str]
+    #: 课程 -> 最近一次被 `peek_jobs` 返回候选的时刻（秒；组合类 `__init__` 建）。
+    _peeked: dict[str, float]
     _stores: dict[str, _JobStore]
 
     # 本簇要调、而不在共同声明面 `QueuePeer` 里的那一个（理由见 `queue_peer.py` 头部）
@@ -72,11 +92,18 @@ class QueueObserveMixin(QueuePeer):
             inflight: list[dict] = []
             for jid in st.inflight():
                 holder = st.lease_worker(jid) or "?"
+                # 认领龄 / 开算龄（2026-10-02，pill 精确化）：同一把 `_lock` 下的一致读，
+                # **零新状态**（`_claimed` / `_computing` 早就有）。缺失 → None（见 `_age_of`）。
+                with st._lock:
+                    claimed = dict(st._claimed.get(jid) or {})
+                    computing = dict(st._computing.get(jid) or {})
                 inflight.append(
                     {
                         "job_id": jid,
                         "worker": holder,
                         "heartbeat_ago": round(now - st._last_heartbeat.get(jid, now), 1),
+                        "claimed_ago": _age_of(now, claimed),
+                        "computing_ago": _age_of(now, computing),
                     }
                 )
             courses[course] = {
@@ -102,6 +129,11 @@ class QueueObserveMixin(QueuePeer):
             "courses": courses,
             "order": self._order,
             "cursor": self._cursor,
+            # 预取窗口（2026-10-02）：最近 `PEEKED_WINDOW_SEC` 内被 peek 扫到过的课程集。
+            # **只读观测**；旧 hub 没这个键 ⇒ 客户端退化成「排队中」（不可知 ≠ 不在窗口）。
+            "peeked_courses": sorted(
+                c for c, seen in self._peeked.items() if now - seen <= PEEKED_WINDOW_SEC
+            ),
             "offline": self.offline_courses(),
             "active_courses": self.active_courses(),
             "active_workers": self.active_worker_count(),

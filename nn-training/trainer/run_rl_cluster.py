@@ -52,7 +52,23 @@ from trainer.loop_plan import (
     waiting_state,
 )
 from worker.loop_scheduler import CourseQueue, Supervisor
-from worker.loop_tasks import Task, TaskResult
+from worker.loop_tasks import Task, TaskResult, budget_exhausted
+
+
+def _course_iters(course: str) -> int:
+    """课程声明里的预算 `iters`（0 = 不限）；读不到/不可解析 ⇒ 0（保持今天的行为，不猜）。
+
+    只读 `curricula/<课>.jsonc`（`biz/course_archive.read_course_keys`）。★ 真 trainer 的预算
+    走 `course_args` 解析链（serve 级 `--iters` > rl-config 机器覆盖 > 课程文件）；本读面
+    **只认课程文件**，覆盖场景以训练侧为准（plan §4.0 的 P4 注）。读盘失败不得让整页 500。
+    """
+    try:
+        from biz.course_archive import read_course_keys
+
+        n = int(read_course_keys(course).get("iters") or 0)
+    except Exception:
+        return 0
+    return n if n > 0 else 0
 
 
 def _never(task: Task, queue: CourseQueue) -> TaskResult:
@@ -75,7 +91,8 @@ def build_rows(courses: list[str], traj_root: str, sup: Supervisor) -> list[dict
     for course in courses:
         traj = course_traj(traj_root, course)
         kind = course_kind(course)
-        it, tasks, facts = plan_course(course, traj)
+        iters = _course_iters(course)
+        it, tasks, facts = plan_course(course, traj, iters=iters)
         inflight = inflight_facts(course, traj)
         current = tasks[0].kind if tasks else ""
         # ★ 别把 wait kind 写进 `kind`（课程种类）：两个局部名重叠过一次，症状是控制台把
@@ -86,6 +103,9 @@ def build_rows(courses: list[str], traj_root: str, sup: Supervisor) -> list[dict
             games_planned=int(facts["games_planned"]),
             pending=len(tasks),
             current=current,
+            finished=budget_exhausted(it, iters),
+            it=it,
+            iters=iters,
         )
         # 队列状态取自调度器本身（`add_course` 的 ready/done 判定），不在这里再写一遍
         # 「有任务 = ready」——两处各写一遍就是第一个分叉点。

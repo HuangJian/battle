@@ -55,7 +55,11 @@ class QueueClaimsMixin(QueuePeer):
     _ambiguous: dict[str, list[str]]
     _cursor: str | None
     _lock: Lock
+    #: 时钟（组合类给；`peek_jobs` 的预取窗口记账用——观测面读，见 `queue_observe`）。
+    _now: Callable[[], float]
     _order: list[str]
+    #: 课程 -> 最近被 `peek_jobs` 返回候选的时刻（秒；观测面读，见 `queue_observe`）。
+    _peeked: dict[str, float]
     _stores: dict[str, _JobStore]
 
     # 本簇要调、而不在共同声明面 `QueuePeer` 里的那一个（理由见 `queue_peer.py` 头部）
@@ -224,6 +228,9 @@ class QueueClaimsMixin(QueuePeer):
                     "it": man.get("it"),
                 }
             )
+            # 预取窗口记账（2026-10-02，pill 精确化）：只在**返回候选**时写——没候选的课不在
+            # 窗口里，这正是「有活、没人取」要区分的。旧路径 `claim_next` 不写（不是预取）。
+            self._peeked[course] = self._now()
         return out
 
     def _manifest_summary(self, job_id: str) -> dict:

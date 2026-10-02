@@ -14,7 +14,7 @@
  *  （与 hub 队列/隧道 A/B 的只读面容错口径一致）。
  */
 
-import type { ParallelOverviewView } from './course-overview'
+import type { CourseOverviewRow, HubInflightView, ParallelOverviewView } from './course-overview'
 
 /** 「在等什么」的取值域（与 python `loop_plan.WAIT_*` 逐字对应）。 */
 export type LoopWaitKind = 'inflight' | 'collect' | 'idle' | 'ready'
@@ -108,9 +108,70 @@ export interface CoursePillView {
   it: number | null
   /** 短状态（2-4 字；悬停有整句）——顶部一行里放不下整句，但也不能只给个圆点。 */
   status: string
+  /** 展示用的**龄**（`fmtAge`；`<60s` 为空 ⇒ 省略）。与 `status` 分开是为了布局单行。 */
+  age?: string | null
   tone: CoursePillTone
   /** 悬停整句：调度器「在等什么」的原文 + 进程/意图事实（诊断入口，不重写语义）。 */
   title: string
+}
+
+/** 「卡住」的展示阈值（秒）。= hub `CLAIM_TTL_SEC`：连一个租约周期都走完了还没回传，
+ *  与稳态 wall（58–73s）差 ≥4×。**纯展示层常量**——不得被 hub / 训练侧 import。 */
+export const PILL_STUCK_SEC = 300
+
+/** 龄 → 展示串：`<60s` 不显示（`''`）；`<60m` 用 `Nm`；否则 `Nh`（plan §3.2）。 */
+export function fmtAge(sec: number | null): string {
+  if (sec === null || !Number.isFinite(sec) || sec < 60) return ''
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`
+  return `${Math.floor(sec / 3600)}h`
+}
+
+/** 最老的那条在飞（按认领龄；全缺 `claimed_ago` ⇒ null——不编龄）。 */
+export function pickOldestInflight(row: {
+  inflightDetail: HubInflightView[]
+}): HubInflightView | null {
+  let best: HubInflightView | null = null
+  for (const d of row.inflightDetail) {
+    if (d.claimedAgo === null) continue
+    if (best === null || d.claimedAgo > (best.claimedAgo ?? 0)) best = d
+  }
+  return best
+}
+
+/** 龄的悬停写法：`<60s` 也给秒（悬停是全因，不是缩略）。 */
+function ageLabel(sec: number): string {
+  return fmtAge(sec) || `${Math.round(sec)}s`
+}
+
+/** 一条在飞 holder 的悬停事实（含「未登记持有者」点名，plan §3.3）。 */
+function holderFacts(d: HubInflightView, registered?: string[] | null): string {
+  const bits = [`持有者 ${d.worker || '未知'}`]
+  if (d.claimedAgo !== null) bits.push(`认领 ${ageLabel(d.claimedAgo)} 前`)
+  if (d.computingAgo !== null) bits.push(`开算 ${ageLabel(d.computingAgo)} 前`)
+  if (d.heartbeatAgo !== null) bits.push(`心跳 ${ageLabel(d.heartbeatAgo)} 前`)
+  if (registered && d.worker && !registered.includes(d.worker)) {
+    bits.push('不在 worker 登记表里')
+  }
+  return bits.join('，')
+}
+
+/** hub 派发态的悬停全因（§3.3 的顺序：派发事实 → 队列深度 → 预取窗口 → 训练侧原文）。 */
+function hubDispatchTitle(
+  hub: CourseOverviewRow,
+  wait: string,
+  registered?: string[] | null,
+): string {
+  const facts = hub.inflightDetail.length
+    ? `hub 派发：${hub.inflightDetail.map((d) => holderFacts(d, registered)).join('；')}`
+    : 'hub 派发：无在飞明细'
+  const queue = `队列 ${hub.queuePending} 待领${hub.nextJob ? `（队首 ${hub.nextJob}）` : ''}`
+  const win =
+    hub.peeked === null
+      ? '预取窗口不可知（旧版 hub）'
+      : hub.peeked
+        ? '在预取窗口内'
+        : '不在预取窗口'
+  return `${facts} · ${queue} · ${win} · ${wait}`
 }
 
 /** 从「已开课课程表 + 队列行 + 进程存活」推出 pill 行（纯函数，可单测）。
@@ -121,6 +182,8 @@ export interface CoursePillView {
  *
  *  状态优先级：暂停意图 > 收官 > 中止 > 进程未运行 > 「在等什么」。前四者都是**确定性事实**，
  *  只有最后一条来自 python 的 waiting 判据——一件事只有一个主人（不在 TS 里重算）。
+ *  在线课若 hub 有派发事实（在飞 / 排队没人取），改由 **hub 观测面**说
+ *  （等回传 / 卡住 / 排队·无人取 / 预取中）——见 plan/course-pill-precision §3.1。
  */
 export function coursePills(input: {
   courses: string[]
@@ -139,6 +202,9 @@ export function coursePills(input: {
    *  = 「意图未生效」（2026-09-23 实测的那种静默失配）——pill 上照实点名，而不是替 hub
    *  那份 volatile 的表说话。`null`/缺省 = 无意图（不画漂移，不编状态）。 */
   modeIntents?: Record<string, 'online' | 'offline'> | null
+  /** 登记在册的 push worker id（rl-config `nodes[].gpu_push` 的 id 集）：holder 不在表里
+   *  ⇒ 悬停点名「不在 worker 登记表里」。`null`/缺省 = 名单不可知（不点名）。 */
+  registeredWorkers?: string[] | null
 }): CoursePillView[] {
   const byCourse = new Map(input.rows.map((r) => [r.course, r]))
   const hubByCourse = new Map((input.overview?.rows ?? []).map((r) => [r.course, r]))
@@ -250,6 +316,114 @@ export function coursePills(input: {
           'hub 离线（只收回传）：本段交给云机整段执行，但**还没有任何段内产物回传**——' +
           '云机可能还没取走任务包、或还在跑第一轮（本地 hub 只收回传、不实时派发）。' +
           `进度与「最近多久没动」见课程矩阵的「段内」列 · ${wait}`,
+      }
+    }
+    // ── hub 派发态（plan §3.1，2026-10-02 pill 精确化） ────────────────────────
+    // 门条件：课程在线 ∧ hub 可达 ∧ `hubSeen` ∧（有在飞 ∨ 有排队）。否则回落训练侧词——
+    // 旧 hub / hub 不可达时**逐字段退化为今天的行为**（不编状态）。
+    const hubLive = !!hub && hub.hubSeen && (hub.inflight > 0 || hub.queuePending > 0)
+    if (hubLive && hub) {
+      const trainingJids = r.inflight.map((x) => x.jid).filter((x): x is string => !!x)
+      const hubJids = new Set(hub.inflightDetail.map((d) => d.jobId).filter(Boolean))
+      const matched = trainingJids.some((j) => hubJids.has(j))
+      // 本机 inflight（评审 P2）：训练侧在飞但 hub 无对应 job ⇒ 本机 PPO。**压过 10′/11′**
+      // ——否则本机在算的同时远端队列有活，会被误读成「没人取」。
+      if (
+        r.waiting.kind === 'inflight' &&
+        trainingJids.length > 0 &&
+        !matched &&
+        hub.inflight === 0
+      ) {
+        return {
+          course,
+          kind,
+          it,
+          status: '等回传（本机）',
+          tone: 'y' as CoursePillTone,
+          title:
+            '本机在算（训练侧 inflight，但 hub 没有这门课的在飞 job）——非远端。' +
+            hubDispatchTitle(hub, wait, input.registeredWorkers),
+        }
+      }
+      if (r.waiting.kind === 'inflight' && trainingJids.length === 0 && hub.inflight === 0) {
+        // 旧训练侧 WAL 没 jid（§3.4）：不做连接、不判本机，也不把「训练侧在等」说成
+        // 「没人取」——保持原「等回传」词，悬停注明无法对号。
+        return {
+          course,
+          kind,
+          it,
+          status: '等回传',
+          tone: 'y' as CoursePillTone,
+          title: `训练侧在飞但没有 jid（旧训练侧）——无法与 hub 在飞对号。${hubDispatchTitle(
+            hub,
+            wait,
+            input.registeredWorkers,
+          )}`,
+        }
+      }
+      if (hub.inflight > 0) {
+        const age = pickOldestInflight(hub)?.claimedAgo ?? null
+        if (age !== null && age > PILL_STUCK_SEC) {
+          return {
+            course,
+            kind,
+            it,
+            status: '卡住',
+            age: fmtAge(age),
+            tone: 'r' as CoursePillTone,
+            title: hubDispatchTitle(hub, wait, input.registeredWorkers),
+          }
+        }
+        return {
+          course,
+          kind,
+          it,
+          status: '等回传',
+          age: fmtAge(age) || null,
+          tone: 'y' as CoursePillTone,
+          title: hubDispatchTitle(hub, wait, input.registeredWorkers),
+        }
+      }
+      // 到这里只可能是 `inflight == 0 ∧ queuePending > 0`（门条件）。
+      if (hub.peeked === null) {
+        return {
+          course,
+          kind,
+          it,
+          status: '排队中',
+          tone: 'y' as CoursePillTone,
+          title: `hub 预取窗口不可知（旧版 hub）——无法区分「没人要跑」与「预取中」。${hubDispatchTitle(
+            hub,
+            wait,
+            input.registeredWorkers,
+          )}`,
+        }
+      }
+      if (hub.peeked) {
+        return {
+          course,
+          kind,
+          it,
+          status: '预取中',
+          tone: 'g' as CoursePillTone,
+          title: `hub 有活且刚被 worker 预取扫到（在预取窗口内）。${hubDispatchTitle(
+            hub,
+            wait,
+            input.registeredWorkers,
+          )}`,
+        }
+      }
+      return {
+        course,
+        kind,
+        it,
+        status: '排队·无人取',
+        tone: 'y' as CoursePillTone,
+        title: `hub 有活、没有在飞、也不在预取窗口——没人要跑。${hubDispatchTitle(
+          hub,
+          wait,
+          input.registeredWorkers,
+        )}`,
       }
     }
     switch (r.waiting.kind) {

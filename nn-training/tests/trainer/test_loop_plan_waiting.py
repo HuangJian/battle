@@ -31,8 +31,10 @@ from trainer.loop_plan import (
     WAIT_INFLIGHT,
     WAIT_READY,
     enabled_courses,
+    plan_course,
     waiting_state,
 )
+from trainer.loop_runner import LoopRunner
 from trainer.run_rl_cluster import build_rows, main
 from worker.commit_journal import CommitJournal
 from worker.loop_scheduler import CourseQueue, Supervisor
@@ -122,6 +124,76 @@ def test_empty_queue_is_idle() -> None:
 def test_ready_names_the_next_step() -> None:
     kind, text = _state(current="prepare_iter")
     assert kind == WAIT_READY and "prepare_iter" in text
+
+
+# ────────────────────────────── 跑满预算（§1.5） ──────────────────────────────
+
+def test_finished_is_idle_with_honest_text() -> None:
+    """跑满的课在「在等什么」列必须是 idle + 说清 it40/40（不是泛泛的「无待办」）。"""
+    kind, text = _state(finished=True, it=41, iters=40)
+    assert kind == WAIT_IDLE and "40/40" in text and "停→开" in text
+
+
+def test_finished_outranks_stale_inflight() -> None:
+    """收官后若有残留 inflight 条目，仍报 idle（「没有待办」才是事实）。"""
+    kind, _ = _state(finished=True, it=41, iters=40, inflight=[{"phase": "ppo", "round": 40}])
+    assert kind == WAIT_IDLE
+
+
+class _LedgerLoop:
+    """假引擎：只实现 `ledger_next_it` 钩子（`LoopRunner` 判预算只需它）。"""
+
+    def __init__(self, next_it: int) -> None:
+        self._next_it = next_it
+
+    def ledger_next_it(self, fallback: int = 1) -> int:
+        return self._next_it
+
+
+def test_plan_course_budget_gate_matches_loop_runner(tmp_path: Path) -> None:
+    """★ 对账：同一 `(it, iters)` 下读面与真 trainer 的收官结论逐条一致。
+
+    合成现场：账本已结算 it1..40 ⇒ 指针 41；课程预算 iters=40 ⇒ 两边都应判「无待办」。
+    """
+    traj = _make_course(tmp_path, "c4-budget", it=41)
+    _, tasks, _ = plan_course("c4-budget", traj, iters=40)
+    assert tasks == []
+    runner = LoopRunner(loop=_LedgerLoop(41), course="c4-budget", iters=40)
+    assert runner.planner("c4-budget", 1, None) == []  # type: ignore[arg-type]
+    # 预算还没跑满（iters=41）⇒ 两边都还有待办
+    _, tasks_next, _ = plan_course("c4-budget", traj, iters=41)
+    assert tasks_next
+    assert LoopRunner(loop=_LedgerLoop(41), course="c4-budget", iters=41).planner(
+        "c4-budget", 1, None  # type: ignore[arg-type]
+    )
+
+
+def test_plan_course_without_iters_stays_unlimited(tmp_path: Path) -> None:
+    """读不到 iters（缺省 0 = 不限）⇒ 与改造前逐字节相同（不得误判收官）。"""
+    traj = _make_course(tmp_path, "c4-open", it=41)
+    _, tasks, _ = plan_course("c4-open", traj)
+    assert tasks
+
+
+def test_build_rows_budget_exhausted_reports_done(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """跑满的 RL 课 → `state='done'` + waiting 文案含 it40/40（pill「已收官」的派生源）。"""
+    import trainer.run_rl_cluster as cluster
+
+    _make_course(tmp_path, "c4-budget", it=41)
+    monkeypatch.setattr(cluster, "_course_iters", lambda _c: 40)
+    (r,) = build_rows(["c4-budget"], str(tmp_path), _supervisor())
+    assert r["state"] == "done"
+    assert r["waiting"]["kind"] == WAIT_IDLE and "40/40" in r["waiting"]["text"]
+
+
+def test_build_rows_unreadable_iters_keeps_today_behavior(tmp_path: Path) -> None:
+    """`iters` 读不到 ⇒ 0 = 不限 ⇒ 与今天一致（`state=ready`，绝不误判收官）。"""
+    _make_course(tmp_path, "c4-nofile", it=41)
+    (r,) = build_rows(["c4-nofile"], str(tmp_path), _supervisor())
+    assert r["state"] == "ready"
+    assert r["waiting"]["kind"] == WAIT_READY
 
 
 # ────────────────────────────── CLI 行组装（真读盘） ──────────────────────────────

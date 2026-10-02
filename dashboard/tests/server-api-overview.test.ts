@@ -73,11 +73,44 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
       inflight: 0,
       nextJob: null,
       holders: [],
+      halt: false,
+      inflightDetail: [],
       frozen: [],
     })
     expect(q.order).toEqual([])
     expect(q.activeCourses).toBe(0)
     expect(q.halt).toBe(false)
+    // 旧 hub 没有 peeked_courses ⇒ null（不可知，不是「不在窗口」）
+    expect(q.peekedCourses).toBeNull()
+  })
+
+  it('★2026-10-02 pill 精确化：inflight 明细（认领/开算/心跳龄）与 peeked_courses', () => {
+    const q = view.parseHubQueue({
+      courses: {
+        a: {
+          mode: 'online',
+          pending_n: 2,
+          inflight: [
+            {
+              job_id: 'j9',
+              worker: 'gpu-7',
+              heartbeat_ago: 4,
+              claimed_ago: 1620,
+              computing_ago: null,
+            },
+          ],
+          next_job: 'j8',
+          halt: true,
+        },
+      },
+      peeked_courses: ['a', 'other'],
+    })!
+    expect(q.courses.a!.halt).toBe(true)
+    expect(q.courses.a!.nextJob).toBe('j8')
+    expect(q.courses.a!.inflightDetail).toEqual([
+      { jobId: 'j9', worker: 'gpu-7', heartbeatAgo: 4, claimedAgo: 1620, computingAgo: null },
+    ])
+    expect(q.peekedCourses).toEqual(['a', 'other'])
   })
 })
 
@@ -155,6 +188,39 @@ describe('overviewCourseNames / buildCourseRows', () => {
     // ghost 在训但 hub 不认识它 —— UI 用这一行提示「以 --course 重启 hub」
     expect(byName.ghost).toMatchObject({ training: true, hubSeen: false, queuePending: 0 })
     expect(byName.idle).toMatchObject({ training: false, hubSeen: true, iter: null })
+  })
+
+  it('★2026-10-02：stuckSec / peeked / nextJob / inflightDetail 从 hub 视图落到课程行', () => {
+    const queue = view.parseHubQueue({
+      courses: {
+        a: {
+          mode: 'online',
+          pending_n: 1,
+          inflight: [{ job_id: 'j1', worker: 'w1', heartbeat_ago: 5, claimed_ago: 900 }],
+          next_job: 'j2',
+        },
+      },
+      peeked_courses: ['a'],
+    })!
+    const [row] = view.buildCourseRows({ courses: ['a'], training: [], queue, iters: {} })
+    expect(row).toMatchObject({ stuckSec: 900, peeked: true, nextJob: 'j2', halt: false })
+    expect(row!.inflightDetail[0]).toMatchObject({ jobId: 'j1', worker: 'w1', claimedAgo: 900 })
+
+    // 旧 hub：无 peeked_courses ⇒ peeked=null（不可知）；无 claimed_ago ⇒ stuckSec=null（不编龄）
+    const oldQueue = view.parseHubQueue({
+      courses: { a: { mode: 'online', pending_n: 0, inflight: [{ job_id: 'j1', worker: 'w1' }] } },
+    })!
+    const [oldRow] = view.buildCourseRows({
+      courses: ['a'],
+      training: [],
+      queue: oldQueue,
+      iters: {},
+    })
+    expect(oldRow!.peeked).toBeNull()
+    expect(oldRow!.stuckSec).toBeNull()
+    // hub 不可达（queue=null）⇒ 同样不可知，不编状态
+    const [noHub] = view.buildCourseRows({ courses: ['a'], training: [], queue: null, iters: {} })
+    expect(noHub!.peeked).toBeNull()
   })
 })
 

@@ -61,6 +61,11 @@ function ovRow(patch: Partial<CourseOverviewRow> & { course: string }): CourseOv
     offlineLastIter: null,
     offlineLastMtime: 0,
     frozen: [],
+    halt: false,
+    inflightDetail: [],
+    stuckSec: null,
+    peeked: null,
+    nextJob: null,
     ...patch,
   }
 }

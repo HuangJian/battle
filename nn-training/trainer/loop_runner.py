@@ -63,6 +63,7 @@ from worker.loop_tasks import (
     Task,
     TaskResult,
     abort,
+    budget_exhausted,
     done,
     pending_tasks,
     retry,
@@ -124,7 +125,7 @@ class LoopRunner:
         if self.finished:
             return []
         want = self._ledger_next_it(it)
-        if self.iters and want > self.iters:
+        if budget_exhausted(want, self.iters):
             self.finished = True
             self.finish_reason = f"iters={self.iters} 跑满"
             return []

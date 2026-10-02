@@ -6,6 +6,40 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §54 hub 观测面补龄与预取窗口：inflight 行的 `claimed_ago` / `computing_ago` + 顶层 `peeked_courses`（plan/course-pill-precision §4.1，2026-10-02）
+
+**触发**：h4-aim-c0 的首个 job 被一个误启的持有者「有心跳地」按住 **27 分钟**（it1 的
+`job_pending → job_completed` = 1623s，而真 GRAD 只有 33.7s；对照同配置的 h4-aim-k10/k25 是
+2.7/3.3 分钟）。三道既有防线**结构上**都判不出这一类：孤儿早收要「零心跳」（§52）、毒包熔断要
+「租约过期」（有心跳就一直续租）、`detectPpoQueueStall` 看 `job_pending → job_completed` 的缺口
+（有 `claimed` 标记 + 活租约 = 被当成「已在跑」）。根因不在调度而在**观测面没有「多久了」**：
+`/admin/queue` 的在飞行此前只有 `job_id` / `worker` / `heartbeat_ago`。
+
+**改动（全部是观测面加法；不参与任何派发判据）**
+
+* `hub/queue_observe.py::queue_state` 的每条 inflight 行新增 `claimed_ago` / `computing_ago`
+  （`now - _claimed[jid]["at"]` / `now - _computing[jid]["at"]`，同一把 `st._lock` 下的一致读，
+  **零新状态**——两个 dict 早就有）；缺失/坏值 ⇒ `None`（**不编 0**：编 0 会把按住 27 分钟的
+  现场显示成「刚刚认领」）。
+* `queue_state` 顶层新增 `peeked_courses`：最近 `PEEKED_WINDOW_SEC=60s` 内被 `peek_jobs`
+  **返回过候选**的课程集。写入点唯独 `queue_claims.py::peek_jobs`（`self._peeked[course]=now`）；
+  旧路径 `claim_next` **不写**（它不是预取，写了「排队·无人取」就永远点不亮）。窗口 60s 取
+  worker 预取节拍 `PREFETCH_ROUND_SEC=5s` 的 12 拍：窗口外 = 同一批 worker 的轮转扫不到它
+  （结构性饿死，有效窗口 = `min(prefetch_depth, 开课数)`，见 plan/transfer-residual §1.5）。
+  `_peeked` 与 `active_worker_count()` 同一生命周期（volatile：窗口本来就是过程量，重启即清）。
+* 每课块的 `halt` 本就已序列化（`halt_of(course)`）——本刀只是让控制台读侧把它接上
+  （消费面见 `docs/nn/console.md` §22），wire 形状未动。
+
+**红线**：新字段只能被 `/admin/queue` 读；**不得**被 `_claim_locked` / `claimable_job_ids` /
+`_job_priority_locked` 引用（否则就是把展示需求烧进调度语义）。`remote/prefetch.py` 的
+「软持有 = 无租约、无副作用」不变量一字未动。
+
+**兼容**：旧 hub 缺三字段 ⇒ 控制台逐字段退化（无龄不升级、窗口不可知显示「排队中」），不编状态。
+
+**回归**：`tests/hub/test_queue_observe_pill.py`（假钟：`claimed_ago`/`computing_ago` 各自为政 +
+缺 `POST /start` ⇒ `None`；窗口内/外自动滚动；`claim_next` 不算预取）+ `tests/hub/test_hub_queue_split.py`
+（既有形状断言补字段）。mypy 抓过一次真错（`QueueClaimsMixin` 未声明 `_now`，已补声明）。
+
 ## §53 传输残余税清算：条件让路 + 按传输累计上限 + 观测补面（plan/transfer-residual，2026-10-02）
 
 **触发**（用户 2026-10-02）：「检查云机 worker prefetch job 机制，在多课程单 worker 并行训练的场景下，

@@ -30,6 +30,7 @@ from worker.loop_tasks import (
     TaskResult,
     abort,
     already_done,
+    budget_exhausted,
     done,
     pending_tasks,
     resolve_failure,
@@ -114,6 +115,28 @@ def test_pending_tasks_keeps_order_and_drops_finished_steps() -> None:
     assert kinds == sorted(kinds, key=list(ROUND_TASKS).index)  # 顺序保持
     # 采集未完成 ⇒ rollout/volume_topup 必须留在队列里
     assert "rollout" in kinds and "volume_topup" in kinds
+
+
+# ------------------------------------------------------------- 预算（§1.5）
+
+def test_budget_exhausted_truth_table() -> None:
+    """跑满判据：`iters<=0` = 不限 ⇒ 恒 False；`it > iters` 才算跑满（指针是下一轮）。"""
+    assert not budget_exhausted(41, 0)
+    assert not budget_exhausted(41, -3)
+    assert not budget_exhausted(40, 40)  # 第 40 轮还没做
+    assert budget_exhausted(41, 40)  # it1..40 都已结算
+    assert budget_exhausted(100, 40)
+
+
+def test_budget_exhausted_is_the_same_predicate_as_the_runner() -> None:
+    """读面与真 trainer 共用这一处（`LoopRunner.planner` 的内联式与它逐值等价）。
+
+    历史内联式 = `self.iters and want > self.iters`；在**合法预算域**（`iters >= 0`，负值不是
+    有效预算，`iters <= 0` 统一读作「不限」）逐值对账，防两边各改一半。
+    """
+    for it, iters in ((41, 40), (40, 40), (41, 0), (0, 0), (1, 1), (2, 1), (5, 10)):
+        assert budget_exhausted(it, iters) == bool(iters and it > iters), (it, iters)
+    assert not budget_exhausted(41, -1)  # 负值 = 不限（不是「已跑满」）
 
 
 # ------------------------------------------------------------- 失败语义

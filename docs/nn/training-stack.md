@@ -7,6 +7,46 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §28 只读读面的收官判据 = `iters` 预算（`budget_exhausted` 单点共用，2026-10-02）
+
+**现场**（h4-aim-k10/k25）：两课均已跑满 40 轮并落 `run_complete`，控制台 pill 仍报「推进中」。
+根因不在显示层，在**只读读面拿不到预算**：真 trainer 的收官判据是 `want > self.iters` ⇒ 返回空
+任务表 ⇒ `QUEUE_DONE`；而控制台读的是另一个进程的 `run_rl_cluster --json`，它按盘重建计划
+（`plan_course`），`course_facts` 的 RL 分支此前**完全不接受 `iters`** ⇒ 指针 = 账本 `next_it` = 41
+⇒ 13 步表非空 ⇒ `state=READY` ⇒ `waiting_state(pending>0)` ⇒ `WAIT_READY` ⇒ pill「推进中」。
+`state='done'` 这条分支在 RL 课上**从未被点亮**。
+
+**决定（判据只一处）**
+
+* 新纯函数 `worker/loop_tasks.py::budget_exhausted(it, iters)`：`iters <= 0`（0 = 不限）⇒ 恒 False；
+  `it` 是**下一轮**指针（账本 `next_it`），`it > iters` 即 iters 轮都已结算。与 `already_done`
+  同家——都是「这一轮还要不要做」的纯判据。
+* `trainer/loop_runner.py::planner` 的内联 `want > self.iters` 改调它——**行为逐字节不变**
+  （serve 路径零变化，只是把判据挪到共用函数）。
+* `trainer/loop_plan.py::plan_course(..., iters=0)`：RL 分支判预算 ⇒ `tasks=[]` ⇒
+  `Supervisor.add_course` 自然置 `QUEUE_DONE`（`loop_scheduler`）。BC 分支不动（它的预算已由
+  `bc_progress(iters)` 的指针语义表达）；`course_facts` 的 RL 分支仍未用 `iters`。
+* `waiting_state(..., finished=False)`：`finished=True` ⇒ `WAIT_IDLE` + 诚实文案
+  「已跑满 itN/iters（改大 iters 后 停→开 可续跑）」。刻意**不新增 `WAIT_*` kind**：收官在语义上
+  就是「没有待办」，缺的只是文案；且 `kind` 是 TS 侧联合类型，加一类要动控制台类型与既有用例。
+* 读面预算来源：`run_rl_cluster.py::_course_iters` 读 `curricula/<课>.jsonc`（`read_course_keys`）；
+  读不到/不可解析 ⇒ `0`（保持今天行为，不猜）。★ 真 trainer 的预算走 `course_args` 解析链
+  （serve 级 `--iters` > rl-config 机器覆盖 > 课程文件），本读面**只认课程文件**——覆盖场景以
+  训练侧为准（刻意接受的口径缝：读面只解释「课程声明」那一段，不去猜进程 argv）。
+
+**否决方案 B（读 `run_complete` 事件当判据）**：① 它是**上一次 run** 的陈述，改大 iters 续跑后陈旧，
+要额外定义 `run_start`/`run_complete` 的先后才能自纠；② 收官判据的 SSOT 是预算
+（`LoopRunner.planner` 就靠它），第二份判据必然分叉。
+
+**指针同源核对**：`LoopRunner.planner` 用 `self._ledger_next_it(it)`，读面用 `load_ledger(...).next_it`
+——同一份账本口径（`iteration` 行数），对账用例钉住「同一 `(it, iters)` 下两处结论一致」。
+
+**回归**：`tests/worker/test_loop_tasks.py`（`budget_exhausted` 真值表）·
+`tests/trainer/test_loop_plan_waiting.py`（`finished` 文案 / `plan_course(iters=40)` 在指针 41 ⇒ 空表、
+40 ⇒ 非空 / 与 `LoopRunner.planner` 对账 / 读不到 iters ⇒ 0 ⇒ 行为不变）。
+消费面（pill 的「已收官」与读面包容）→ `docs/nn/console.md` §22。
+
+---
 ## §27 门禁停机模式升为平台级单开关：`tmp/gate-halt.json` 意图 + 回执，课程级三写面退役（2026-10-01）
 
 用户口径（2026-09-25）：「`gate-halt-mode` 应是**平台级**而非课程级，有人盯盘时切为提示，离开时切停机。」

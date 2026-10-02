@@ -493,6 +493,9 @@ export function App({ initial }: AppProps) {
                 trainerRunning={trainerRunning}
                 overview={stateView?.overview ?? null}
                 modeIntents={stateView?.courseModeIntents ?? null}
+                // 「不在 worker 登记表里」的判据输入 = rl-config 的 push worker id 集
+                // （`workerRegistry.workers` 的 id；不是 hub 探活 `pushMap`）。
+                registeredWorkers={stateView?.workerRegistry?.workers.map((w) => w.id) ?? null}
                 viewCourse={viewCourse}
                 onSelect={selectCourse}
                 onStop={(c) => void handleStopCourse(c)}

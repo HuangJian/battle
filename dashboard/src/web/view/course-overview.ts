@@ -33,6 +33,23 @@ export interface FrozenJobView {
   ts: number
 }
 
+/** 一条在飞 job 的观测明细（hub `queue_state` 的 inflight 行，2026-10-02 pill 精确化）。
+ *
+ *  `claimed_ago` / `computing_ago` 是 hub 新增的观测字段（旧 hub 没有 ⇒ `null`）——
+ *  **null 不是 0**：「没有这条记录」与「刚刚认领」是两件事，编 0 会把卡死读成刚刚开始。 */
+export interface HubInflightView {
+  /** hub 侧 job_id（与训练侧 `LoopInflightView.jid` 对号用）。 */
+  jobId: string
+  /** 持有人（worker 身份）；空串 = 无身份（旧 worker / 手写 curl）。 */
+  worker: string
+  /** 心跳龄（秒）；null = 缺失（旧 hub）——不编 0。 */
+  heartbeatAgo: number | null
+  /** 认领龄（秒）；null = 旧 hub 没这一条 ⇒ 不升级「卡住」（不编龄）。 */
+  claimedAgo: number | null
+  /** 开算龄（秒，`POST /jobs/{id}/start` 起算）；null = 未开算 / 旧 hub。 */
+  computingAgo: number | null
+}
+
 /** 单课程队列行（hub `queue_state()` 的一行）。 */
 export interface HubQueueCourseView {
   /** `online` = 参与实时派发；`offline` = 只收回传，不派活。 */
@@ -45,6 +62,10 @@ export interface HubQueueCourseView {
   nextJob: string | null
   /** 在飞持有人（worker 身份）；空串 = 无身份（旧 worker / 手写 curl）。 */
   holders: string[]
+  /** 该课停机达令（按课程；旧 hub 无此字段 ⇒ false）。 */
+  halt: boolean
+  /** 在飞明细（holder / 认领龄 / 心跳龄 / job_id）——jid 连接与悬停全因靠它。 */
+  inflightDetail: HubInflightView[]
   /** 毒包熔断冻结的 job（§4.1）；空数组 = 没有冻的（不是「不可知」）。 */
   frozen: FrozenJobView[]
 }
@@ -64,10 +85,18 @@ export interface HubQueueView {
   activeWorkers: number
   /** 云端停机达令（随任务同发；不停任务）。 */
   halt: boolean
+  /** 近期（`PEEKED_WINDOW_SEC`）被 worker `peek` 扫到过的课程集；
+   *  **null = hub 未上报（旧版 hub）** ⇒ 不区分「排队·无人取」与「预取中」。 */
+  peekedCourses: string[] | null
 }
 
 function num(v: unknown): number {
   return typeof v === 'number' && Number.isFinite(v) ? v : 0
+}
+
+/** 可空数字（观测面的「缺失」必须是 null，不是 0——见 `HubInflightView`）。 */
+function numOrNull(v: unknown): number | null {
+  return typeof v === 'number' && Number.isFinite(v) ? v : null
 }
 
 /** 解析 `/admin/queue` 每课的 `frozen` 块（`{job_id: {reclaims, worker, ts}}`）→ 列表。
@@ -104,10 +133,19 @@ export function parseHubQueue(body: unknown): HubQueueView | null {
     const c = v as Record<string, unknown>
     const inflightRaw = Array.isArray(c.inflight) ? (c.inflight as unknown[]) : []
     const holders: string[] = []
+    const inflightDetail: HubInflightView[] = []
     for (const it of inflightRaw) {
       if (it && typeof it === 'object') {
-        const w = (it as Record<string, unknown>).worker
+        const i = it as Record<string, unknown>
+        const w = i.worker
         holders.push(typeof w === 'string' ? w : '')
+        inflightDetail.push({
+          jobId: typeof i.job_id === 'string' ? i.job_id : '',
+          worker: typeof w === 'string' ? w : '',
+          heartbeatAgo: numOrNull(i.heartbeat_ago),
+          claimedAgo: numOrNull(i.claimed_ago),
+          computingAgo: numOrNull(i.computing_ago),
+        })
       }
     }
     courses[name] = {
@@ -116,6 +154,8 @@ export function parseHubQueue(body: unknown): HubQueueView | null {
       inflight: inflightRaw.length,
       nextJob: typeof c.next_job === 'string' ? c.next_job : null,
       holders,
+      halt: c.halt === true,
+      inflightDetail,
       frozen: parseFrozenBlock(c.frozen),
     }
   }
@@ -131,6 +171,10 @@ export function parseHubQueue(body: unknown): HubQueueView | null {
     activeCourses: num(raw.active_courses),
     activeWorkers: num(raw.active_workers),
     halt: raw.halt === true,
+    // null = 旧版 hub 没上报（不可知 ≠ 不在窗口——前者退化成「排队中」）。
+    peekedCourses: Array.isArray(raw.peeked_courses)
+      ? (raw.peeked_courses as unknown[]).filter((x): x is string => typeof x === 'string')
+      : null,
   }
 }
 
@@ -224,6 +268,16 @@ export interface CourseOverviewRow {
   offlineLastMtime: number
   /** 该课被毒包熔断冻结的 job（§4.1）；空 = 没有（hub 无应答时也是空——见 `hubOnline`）。 */
   frozen: FrozenJobView[]
+  /** 该课 hub 停机达令（按课程；hub 不可达时恒 false）。 */
+  halt: boolean
+  /** 在飞明细（hub 观测；空 = 没有在飞 / 旧 hub 无明细）——pill 的 jid 连接与 title 靠它。 */
+  inflightDetail: HubInflightView[]
+  /** 最老在飞的认领龄（秒）；null = 没有在飞 / 旧 hub 缺 `claimed_ago`（⇒ 不升级「卡住」）。 */
+  stuckSec: number | null
+  /** 该课是否在近期预取窗口内；null = hub 未上报（旧 hub）⇒ 退化为「排队中」。 */
+  peeked: boolean | null
+  /** 待领队首 job_id（hub 观测；null = 没有待领 / hub 不可达）——悬停「队首 jid」。 */
+  nextJob: string | null
 }
 
 /** 恒等在训课程 ∩ hub 课程表 ∩ 查看课程的课程清单（保持入参顺序 = 服务端的新→旧）。 */
@@ -256,6 +310,9 @@ export function buildCourseRows(input: {
   return input.courses.map((course) => {
     const q = input.queue?.courses[course]
     const seg = offlineSummary(input.offline?.[course])
+    const inflightDetail = q?.inflightDetail ?? []
+    // 最老那份的认领龄（「卡住」的判据输入）；全缺 `claimed_ago` ⇒ null（不编龄）。
+    const claimed = inflightDetail.map((d) => d.claimedAgo).filter((x): x is number => x !== null)
     return {
       course,
       training: training.has(course),
@@ -268,6 +325,14 @@ export function buildCourseRows(input: {
       offlineLastIter: seg.lastIter,
       offlineLastMtime: seg.lastMtime,
       frozen: q?.frozen ?? [],
+      halt: q?.halt ?? false,
+      inflightDetail,
+      nextJob: q?.nextJob ?? null,
+      stuckSec: claimed.length ? Math.max(...claimed) : null,
+      peeked:
+        input.queue && input.queue.peekedCourses !== null
+          ? input.queue.peekedCourses.includes(course)
+          : null,
     }
   })
 }

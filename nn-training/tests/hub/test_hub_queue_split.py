@@ -48,7 +48,7 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 2. **接线正确**：`_HubQueue.X is Mixin.X`（同一函数对象）+ MRO 逐项 + 类常量经 MRO 可达；
 3. **★ 门面契约**（`queue_store_face` 那一簇的**存在理由**）：与 `_JobStore` 同名的方法
    **逐参数对账**——30 个完全一致 + 3 个只多一个前置 `course`（课程寻址），且这份名单是**闭集**；
-4. **状态归属唯一**：21 个字段的**写者集合**逐字段对账（含下标/原地变更三种写法）；
+4. **状态归属唯一**：22 个字段的**写者集合**逐字段对账（含下标/原地变更三种写法）；
 5. **带值声明只有一处**（组合类 `__init__`）+ `QueuePeer` 是**纯声明**（方法体全是 `...`）且
    与真实现逐参数一致；
 6. **依赖方向**：八个混入彼此**零 import**、账本层号关系、`queue_resume` 的 `rl` 引用是**延迟**的；
@@ -300,6 +300,8 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     "_now": frozenset({"__init__"}),
     "_offline_disks": frozenset({"__init__", "note_offline_disk"}),
     "_order": frozenset({"__init__", "add_course"}),
+    #: 多课程预取窗口（2026-10-02，plan/course-pill-precision §4.1）：写点只有启动与 peek。
+    "_peeked": frozenset({"__init__", "peek_jobs"}),
     "_solo": frozenset({"__init__", "_adopt_solo"}),
     "_stores": frozenset({"__init__", "add_course"}),
     "_workers": frozenset({"__init__", "_adopt_solo"}),
@@ -706,7 +708,7 @@ def test_the_missing_store_default_is_the_declared_one_per_method(tmp_path: Path
 
 
 def test_the_state_writer_table_matches_reality() -> None:
-    """★ 21 个字段的**写者集合**逐字段对账（含下标赋值与 `self.X.append(...)` 三种写法）。
+    """★ 22 个字段的**写者集合**逐字段对账（含下标赋值与 `self.X.append(...)` 三种写法）。
 
     为什么需要它：状态声明分散到八个文件之后，「谁动它」是最容易漂的事。而**只数
     `self.X = …` 会瞎掉一半**——`_locate_cache` / `_halts` / `_modes` / `_order` /
@@ -765,7 +767,7 @@ def test_only_the_composed_init_declares_state_with_values() -> None:
         elif isinstance(n, ast.Assign):
             declared |= {t.attr for t in n.targets if isinstance(t, ast.Attribute)}
     # 两个鉴权字段的声明点在 `hub/auth.py::_AuthGuard.__init__`（组合类在末尾调它）——
-    # 所以本类体里该少这两个，其余 19 个必须逐条在。
+    # 所以本类体里该少这两个，其余 20 个必须逐条在。
     want = set(STATE_WRITERS) - AUTH_GUARD_FIELDS
     assert declared == want, (
         f"`__init__` 申报的字段与状态表对不上：多 {sorted(declared - want)}，"
