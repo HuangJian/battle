@@ -50,6 +50,12 @@ export interface NodeGateEntry {
   pingHash: string
 }
 
+/** ping 的 fetch 形状（默认全局 `fetch`；测试注入它构造确定性的超时/慢/非 200）。 */
+export type PingFetch = (
+  url: string,
+  init: { headers: Record<string, string>; signal: AbortSignal },
+) => Promise<Response>
+
 export interface PingOpts {
   /** 单次 ping 超时（默认 10s）。节点被别的作业占满时 /v1/ping 会很慢（用户 2026-09-19：
    *  「所有 enabled 节点都在线，只是可能 ping 得慢」）——超时太短会把健康节点判成不可达。 */
@@ -58,6 +64,11 @@ export interface PingOpts {
   attempts?: number
   /** 重试间隔（默认 500ms）。 */
   gapMs?: number
+  /** 注入 fetch（默认全局 `fetch`）。存在的理由：探测测试要与**真实墙钟**竞速才能模拟
+   *  「慢响应 vs 超时」，而全量并行的 CPU 饥饿下计时器不再有序（2026-10-03 复现：
+   *  50ms 超时晚于 300ms 慢响应生效 ⇒ 「重试用尽 ⇒ null」拿到 200 转红）。注入后
+   *  第几次失败/成功/非 200 全部确定，零墙钟、零端口。 */
+  fetchImpl?: PingFetch
 }
 
 /**
@@ -75,9 +86,10 @@ export async function pingNode(
   const timeoutMs = opts.timeoutMs ?? 10_000
   const attempts = Math.max(1, opts.attempts ?? 2)
   const gapMs = opts.gapMs ?? 500
+  const doFetch: PingFetch = opts.fetchImpl ?? fetch
   for (let a = 0; a < attempts; a++) {
     try {
-      const r = await fetch(`${url.replace(/\/$/, '')}/v1/ping`, {
+      const r = await doFetch(`${url.replace(/\/$/, '')}/v1/ping`, {
         headers: { Authorization: `Bearer ${authKey}` },
         signal: AbortSignal.timeout(timeoutMs),
       })

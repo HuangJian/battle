@@ -184,42 +184,59 @@ describe('provenanceNote（谁跑的必须说出来）', () => {
 })
 
 describe('pingNode（探测不能是「一次定生死」）', () => {
-  const serve = (
-    handler: (req: Request, state: { hits: number }) => Response | Promise<Response>,
-  ): { server: ReturnType<typeof Bun.serve>; state: { hits: number }; url: string } => {
-    const state = { hits: 0 }
-    const server = Bun.serve({ port: 0, fetch: (req) => handler(req, state) })
-    return { server, state, url: `http://127.0.0.1:${server.port}` }
-  }
+  // 2026-10-03：原版用真 `Bun.serve` + 墙钟竞速（300ms 慢响应 vs 50/100ms 超时）——全量
+  // 并行的 CPU 饥饿下超时可能晚于慢响应生效（复现：50ms 超时拿到 200），两条用例随机
+  // 转红。改为注入 fetch：第几次失败/成功/非 200 全部确定，零墙钟、零端口。
+  const okPing = (): Response =>
+    Response.json({ ok: true, evalSupport: true, stageJsonSupport: true, codeHash: 'x' })
 
   it('单次慢响应不判死：第一次超时、第二次成功 ⇒ 仍拿到 ping', async () => {
-    const { server, state, url } = serve(async (_req, st) => {
-      st.hits++
-      if (st.hits === 1) await new Promise((r) => setTimeout(r, 300))
-      return Response.json({ ok: true, evalSupport: true, stageJsonSupport: true, codeHash: 'x' })
+    const calls: Array<{ url: string; auth: string | undefined; hasSignal: boolean }> = []
+    const ping = await pingNode('http://node.test/', 'k', {
+      attempts: 2,
+      gapMs: 0,
+      fetchImpl: (url, init) => {
+        calls.push({
+          url,
+          auth: init.headers.Authorization,
+          hasSignal: init.signal instanceof AbortSignal,
+        })
+        if (calls.length === 1) return Promise.reject(new Error('timeout'))
+        return Promise.resolve(okPing())
+      },
     })
-    const ping = await pingNode(url, '', { timeoutMs: 100, attempts: 2, gapMs: 10 })
     expect(ping?.codeHash).toBe('x')
-    expect(state.hits).toBe(2)
-    server.stop(true)
+    // 重试确实发生、URL 去掉尾斜杠、身份与超时预算都传给了 fetch
+    expect(calls).toHaveLength(2)
+    expect(calls[0]!.url).toBe('http://node.test/v1/ping')
+    expect(calls[0]!.auth).toBe('Bearer k')
+    expect(calls[0]!.hasSignal).toBe(true)
   })
 
   it('每次都慢/非 200 ⇒ null（重试用尽才算不可达）', async () => {
-    const slow = serve(async (_req, st) => {
-      st.hits++
-      await new Promise((r) => setTimeout(r, 300))
-      return Response.json({ ok: true })
+    let timeouts = 0
+    const slow = await pingNode('http://node.test', '', {
+      attempts: 3,
+      gapMs: 0,
+      fetchImpl: () => {
+        timeouts++
+        return Promise.reject(new Error('timeout'))
+      },
     })
-    expect(await pingNode(slow.url, '', { timeoutMs: 50, attempts: 2, gapMs: 10 })).toBeNull()
-    expect(slow.state.hits).toBe(2)
-    slow.server.stop(true)
-    const busy = serve((_req, st) => {
-      st.hits++
-      return new Response('busy', { status: 503 })
+    expect(slow).toBeNull()
+    expect(timeouts).toBe(3)
+
+    let busy = 0
+    const notOk = await pingNode('http://node.test', '', {
+      attempts: 2,
+      gapMs: 0,
+      fetchImpl: () => {
+        busy++
+        return Promise.resolve(new Response('busy', { status: 503 }))
+      },
     })
-    expect(await pingNode(busy.url, '', { timeoutMs: 200, attempts: 2, gapMs: 10 })).toBeNull()
-    expect(busy.state.hits).toBe(2)
-    busy.server.stop(true)
+    expect(notOk).toBeNull()
+    expect(busy).toBe(2)
   })
 
   it('连不上的主机 ⇒ null（不死循环）', async () => {
