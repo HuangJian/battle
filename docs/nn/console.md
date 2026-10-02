@@ -298,13 +298,14 @@ rl-config）② 再推 hub 镜像。机制上不需要重开课：`_rollout_sour
 | 在线（缺省） | 两键**都不在**（缺席 = local） | `ppo`（本机采样，云机只算 PPO） | 不要 |
 | 在线 + 显式 `node` | `rollout_src=node` | `iter`（整轮上云） | 要（显式选择的代价） |
 
-### 写面收口（**边界就是三个函数**）
+### 写面收口（**边界就是这几个函数**）
 
 | 函数 | 干什么 | 写 `courses.<课>` 吗 |
 |---|---|---|
 | `pushCourseMode` | 只推 hub + 落意图（开课 / 停课 / 回灌共用） | **绝不** |
 | `setCourseMode` | 那颗开关 = `applyTrainModeToConfig` + `pushCourseMode` | 写 |
 | `applyTrainModeToConfig`（`actions/train-mode.ts`） | 唯一写面：域换算仍走 `trainModeKnobs` | 写 |
+| `pruneStoppedCourseConfig`（`stack/course-knobs.ts`，停课清理） | 只删：`rollout_src='local'` 缺省档 + 空节点整条删（2026-10-02 用户口径） | **只删不写** |
 | `restoreCourseModes`（起 hub 回灌） | 只推 hub —— 回灌不是用户动作 | **绝不** |
 
 为什么必须拆：`pushHubMode`（开课/停课的 hub 推送，带 3×2s 重试）**就是循环调 `setCourseMode` 的**
@@ -1651,6 +1652,9 @@ CSS 里的空断言）· `web-wire-panel-wiring.test.ts`（抽屉接线 → 路�
 4. **停课 = 删除开课标记** + 暂停意图 + 该课 hub 置 offline（仍是**非破坏**：队列/账本/课程表不动，
    恢复走开课）。这是上一条停课语义的**必需补充**：只写暂停意图而不删标记，发现式的训练进程
    下一拍又会把这门课拉起来。
+   ★ 2026-10-02（用户口径）：停课顺手**清残留**——`courses.<课>.rollout_src='local'`（缺省档；
+   开课弹窗默认档会原值直写）删掉，清空的课程节点整条删（`stack/course-knobs.ts::pruneStoppedCourseConfig`）；
+   显式 `node`/`auto`/`run` 与任何训练语义键一个字不动。
 
 **备选与否决**：
 

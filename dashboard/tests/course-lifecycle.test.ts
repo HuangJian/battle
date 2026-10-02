@@ -414,9 +414,48 @@ describe('stopCourse：非破坏停课（暂停意图 + hub 置离线）', () =>
     expect(readFileSync(path.join(TRAJ, COURSE, 'training_log.jsonl'), 'utf-8')).toBe(before)
     expect(r.detail!.join('\n')).toContain('队列与账本一个字不动')
     // ★ 2026-09-24（plan §2.2 F9）：停课**不是**「云机接手」——它的 hub 推送走 `pushCourseMode`
-    //（只推 hub + 落意图），绝不动 `courses.<课>`。误译成写 run/run_iters 会让「停课」把本机
-    // 采样也关掉（而停课的定义是非破坏：随时开课接着跑）。
+    //（只推 hub + 落意图），绝不把停课误译成写 run/run_iters（那会让「停课」把本机采样也关掉，
+    // 而停课的定义是非破坏：随时开课接着跑）。
+    // ★ 2026-10-02（用户口径）：停课会**清残留**（`rollout_src='local'` 缺省档 + 空节点整条删）
+    // ——只剃无信息量的键；run/run_iters 那对与 node/auto 是显式语义，一个字不动（见下两条）。
     expect(courseKeys(COURSE)).toEqual({})
+  })
+
+  it('★ 2026-10-02 用户口径：停课带走 `rollout_src="local"`（缺省档不留痕）；空节点整条删', async () => {
+    seedCourseKnobs({ rollout_src: 'local' })
+    const r = await stopCourse(COURSE)
+    expect(r.ok).toBe(true)
+    const raw = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
+      courses?: Record<string, unknown>
+    }
+    expect(raw.courses?.[COURSE]).toBeUndefined() // 不是 {}——剃空后节点整条删
+    expect(r.detail!.join('\n')).toContain('rl-config 清理')
+  })
+
+  it('停课清理：本就空的 `{}` 节点也整条删（幻影行直接消失）', async () => {
+    seedCourseKnobs({})
+    await stopCourse(COURSE)
+    const raw = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
+      courses?: Record<string, unknown>
+    }
+    expect(raw.courses?.[COURSE]).toBeUndefined()
+  })
+
+  it('停课清理只剃缺省档：node/auto/run 与共存的其它键原样保留', async () => {
+    seedCourseKnobs({ rollout_src: 'node' })
+    await stopCourse(COURSE)
+    expect(courseKeys().rollout_src).toBe('node')
+    seedCourseKnobs({ rollout_src: 'auto' })
+    await stopCourse(COURSE)
+    expect(courseKeys().rollout_src).toBe('auto')
+    seedCourseKnobs({ rollout_src: 'run', run_iters: -1 })
+    await stopCourse(COURSE)
+    expect(courseKeys()).toMatchObject({ rollout_src: 'run', run_iters: -1 })
+    // local + 别的键 ⇒ 只剃 local，节点保留
+    seedCourseKnobs({ rollout_src: 'local', slot: 2 })
+    await stopCourse(COURSE)
+    expect('rollout_src' in courseKeys()).toBe(false)
+    expect(courseKeys().slot).toBe(2)
   })
 
   it('可逆：停课 → 开课把暂停意图清掉（否则「开了课但不推进」）', async () => {
