@@ -1459,10 +1459,16 @@ def test_a_child_that_cannot_be_reaped_is_retried_in_round_never_failing(
     _fast_watchdog(monkeypatch)
     # 留 2 次好让「万一走了单局重跑」在日志里看得出来（默认 3 次会把重跑藏进正常重试里）
     monkeypatch.setattr(game_watch, "GAME_MAX_ATTEMPTS", 2)
-    # ⚠ 硬顶必须比**真 python 启动开销**大（替身只占第一次；重投那次是真跑桩脚本）；
-    # 而**第一次（替身）必须把硬顶跑满**才能走到「杀不掉」那条路 ⇒ 硬顶值 = 本用例的固有开销。
-    # 原值 2.0s（本用例 ~2.05s，是本文件最慢的一条）。2026-09-29 实测「12 个 CPU 烧满时
-    # 真 python 启动」：10 连跑 0.69s 合计（均 69ms）⇒ 0.5s 仍有 7× 余量，而开销降到 ~0.53s。
+    # ⚠ 硬顶值 = 本用例的固有开销：**第一次（替身）必须把硬顶跑满**才能走到「杀不掉」
+    # 那条路。但它只该裁**首次尝试（替身）**；重投那次是**真跑**（真 python 启动），再
+    # 拿 0.5s 去裁就是在测机器负载——负载下它超顶会打出一行**合法**的「单局重试 2/2」
+    # （重投后这一局自己超时重跑），撞上本用例「全局不存在单局重试」的断言（2026-10-02
+    # 全量 -n 12 + 外部负载实测；单跑恒绿）。判据分档：首次 0.5s，重试给 20s —— 真跑只
+    # 要没死就成功，pytest 的 60s/用例外墙先兜底。
+    def _cap_first_attempt_only(base: float, attempt: int, explicit: bool = False) -> float:
+        return float(base) if attempt <= 1 else 20.0
+
+    monkeypatch.setattr(game_watch, "attempt_timeout_sec", _cap_first_attempt_only)
     script = tmp_path / "ok.py"
     script.write_text(_STUB_SLOW.replace("@SECS@", "0"), encoding="utf-8")
     _flaky_popen(monkeypatch, script, fail_first=1)
