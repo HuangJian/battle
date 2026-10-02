@@ -14,7 +14,8 @@
 - 因此容量默认 = 并行课程上限（`DEFAULT_CACHE_COURSES`），正常路线上永不驱逐；
   `DEFAULT_CACHE_MB = 256MB` ≈ 130 课只是**第二道保险**；
 - 一旦越界就记一行「驱逐了谁 + 重建代价」，**绝不静默滑过去**，且**绝不驱逐正在用的引擎**
-  （任务中途把栈抽走会让 `_serial_ppo` 撞 `None.load_episodes`）。
+  （任务中途把栈抽走会让 `_serial_ppo` 撞 `None.load_episodes`）。「正在用」= `keep`（本次被取的
+  那一门）∪ `pinned`（调用方注入的判据，serve 传「队列还有待办步骤」= 轮内的课，2026-10-02 补）。
 
 纯逻辑（无 torch / 无 IO）：`factory` 与 `release` 都是注入的接缝 ⇒ 可单测。
 """
@@ -54,9 +55,20 @@ class EnginePool:
     size_mb: float = MEASURED_COURSE_STACK_MB
     release: Callable[[str, Any], None] | None = None
     logger: Callable[[str], None] = log
+    #: 「这门课此刻**不能**被驱逐」的判据（由调用方注入；缺席 = 无此约束）。
+    #
+    # 2026-10-02 事故：`keep` 只护住「本次 `get` 的那一门」，**不护**其它**轮内**的课。
+    # 被驱逐课的引擎被重建 ⇒ 轮内属性（`_node_rollout` 等）回到初值，而调度器的
+    # `CourseQueue.tasks` 仍停在该轮之后的步骤 ⇒ `step_ppo` AttributeError ⇒ 该课
+    # 每秒重启一次、一轮都跑不完（h4-hurt-f75/f150：1076 run_start / 0 iteration）。
+    # 本类 docstring 一直写着「绝不驱逐正在用的引擎」——`pinned` 就是把这句话补全：
+    # 候选 = 全部在跑的课，而不只是「刚被取的那一门」。
+    pinned: Callable[[str], bool] | None = None
     _items: dict[str, Any] = field(default_factory=dict)
     #: LRU 顺序：末尾 = 最近用过（`get` 命中/新建都移到末尾）。
     _lru: list[str] = field(default_factory=list)
+    #: 「无人可逐」那行的去重戳：`_evict` 每拍 `get` 都会走到它，逐次打会把日志刷爆。
+    _pin_log: str = ""
     stats: dict[str, int] = field(
         default_factory=lambda: {
             "hits": 0,
@@ -151,15 +163,48 @@ class EnginePool:
             return f"课程数超上限（{len(self._items)}>{self.courses}）"
         return f"字节超预算（{self.used_mb():.1f}MB>{self.mb}MB）"
 
+    def _is_pinned(self, course: str) -> bool:
+        """该课此刻是否被调用方钉住（`pinned` 缺席 ⇒ 恒 False）。
+
+        判据抛错 ⇒ **当作钉住**：抽走别人正在跑的栈会崩（代价不对称），留着只是内存。
+        同一句话只喊一次（`_log_pin_once`），否则每拍 `get` 都会刷一遍。
+        """
+        fn = self.pinned
+        if fn is None:
+            return False
+        try:
+            return bool(fn(course))
+        except Exception as e:
+            self._log_once(
+                f"pin-exc:{course}:{type(e).__name__}",
+                f"[enginepool] pinned 判据异常（{course} 按「已钉住」保守处理，不驱逐）："
+                f"{type(e).__name__}: {e}",
+            )
+            return True
+
+    def _log_once(self, key: str, line: str) -> None:
+        """同一**状态**只喊一次：`_evict` 在每次 miss（建栈）上都会走到「无人可逐」，
+        不按状态去重就会按建栈次数刷屏。`_pin_log` 只存上一次的 key。"""
+        if key == self._pin_log:
+            return
+        self._pin_log = key
+        self.logger(line)
+
     def _evict(self, keep: str) -> None:
-        """驱逐到不越界；`keep`（正在用的那门）永不驱逐；仍有越界则响亮记录。"""
+        """驱逐到不越界；`keep`（正在用的那门）与**被 pinned 的课**永不驱逐。
+
+        候选为空（全员在跑）⇒ 响亮记一次、**不驱逐**——宁可超预算，也不把别人正在跑的
+        栈中途抽走（2026-10-02 事故：抽走 = 该课一步一崩）。
+        """
         while self._over_budget():
-            victim = next((c for c in self._lru if c != keep), None)
+            victim = next((c for c in self._lru if c != keep and not self._is_pinned(c)), None)
             if victim is None:
                 self.stats["over_budget"] += 1
-                self.logger(
-                    f"[enginepool] 超预算仍保留：{keep}（{self._why_over()}）——"
-                    "上限配置过小或单课超预算；缓存不再增长，但**不驱逐在用引擎**"
+                why = self._why_over()
+                self._log_once(
+                    why,
+                    f"[enginepool] 超预算仍保留：{keep}（{why}）——"
+                    "上限配置过小或单课超预算；缓存不再增长，但**不驱逐在用引擎**",
                 )
                 return
             self.drop(victim, reason=self._why_over())

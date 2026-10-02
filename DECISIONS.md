@@ -6685,3 +6685,180 @@ rl-config 键——它每进程启动才读一次，而平台开关要**每轮�
 `tests/hub/test_hub_job_store_split.py`（方法计数 49 → 51）。
 落账门禁：`tests/hub` 294/0 + push 腿族（`tests/remote/test_hub_push_dispatch.py` 等）绿 ·
 ruff + mypy 全量绿。
+
+## §2026-10-02-goalnn-e1-aim-open（2026-10-02，E1（aim 距离加权）开腿：剂量 κ 冻结 + 判据段 864001 + paired 止损显式对端；E2 终门现役复算 0.796；E3 复测门读数）
+
+- **背景**：aim-dodge 8 列（dim 74）已落地（§2026-10-01-goalnn-aim-dodge-metrics）；E1–E4 的
+  「开腿前必办」四项欠账在 2026-10-02 开课前补办。编排由用户拍板「**顺序波次、E1 先开三臂**」
+  （每波自带对照臂、沿用 §5.5 的 3 臂预算）；E1 判读后按序开 E2/E3a/E3b；**E4 定义上依赖前三波
+  最优子集**，不在首批。
+- **决定（E1 开腿）**：三臂 = 对照 `h4-aim-c0`（v4 逐字，无 aim 项）+ `h4-aim-k10` / `h4-aim-k25`
+  （唯一差 = `+ wAim*aimHitDistSum`）；同起点（h4-stop.it60）同包、同 `paired_rotate_seed=20261002`
+  （新开，§15.1）、新 out/traj（§15.5）；控制台 openCourse（在线档）开课。判据段 = **段A
+  （seed0 864001–864300，300 局/点 @ it30/35/40）**，与日常段 860001–860200、Wave 1 补评估
+  861011–861310、Wave 2 判据段 862001–862300、开腿前校准段 863001–863200 均不相交。
+- **决定（剂量冻结）**：校准语料 `tmp/aim-calib/c04-calib-863001.jsonl`（b0 it30/35/40 + b1it40 +
+  h4stop60，各 200 局；b0 合并 n=600）：E[d|hit]=2.9284 格 · E[aimHitDistSum/局]=28.473 ·
+  E[kills/局]=3.603 ⇒ killEV=10.810。κ = wAim·E[d|hit]/wHit ⇒ **wAim = 0.0205（κ=0.10）/
+  0.0512（κ=0.25）**（税 EV 0.583 / 1.458 每局；killEV 占比 5.4% / 13.5%，落在 3–20% 记账区）。
+  预注册 MDE（900 配对）：E[d|hit] MDE80=0.079 格（2.7% rel）、kill 线=MDE/2=0.039 格；
+  `playerShots/(ticks+1)` MDE80=2.0% rel（防刷量读数）。
+- **决定（止损对端）**：`kickstart_burn` 走 paired + **显式 peer**
+  （`courses.h4-aim-k10|k25.kickstart_burn = {mode:'paired', peer:'h4-aim-c0'}`）；用户批准手写
+  rl-config 两块（控制台无此写面）——不开显式 peer 会重演 Wave 2 的静默 baseline 回退
+  （§2026-09-30-goalnn-kickstart-burn-paired / experiments §69 ⑧）。
+- **决定（E2 终门复算）**：现役拌入列、b0 n=600 ⇒ r_within=**0.796**（95% CI [0.767,0.824]；
+  逐点 0.812/0.812/0.763）⇒ 按预注册点估计 ≤0.8 **不替换 `wDmg`**（E2 保持叠加单变量设计）；
+  CI 上沿过 0.8 已记档（复核线索：it40 是唯一 <0.8 的点）。
+- **决定（E3 复测门；E3a 过 / E3b 待定）**：4 敌 rung 上 encl 有信号且跨臂可辨（b0 0.238 vs b1 0.307，
+  +29.0%，t=3.31，196/200 局非零）⇒ E3a 前置过；corner 信号在（165/200 非零，b0 0.272）但
+  b0↔b1 跨臂不显著（+8.3%，t=0.84）⇒ **E3b 不做自动放行**，开前由用户定夺（加对照/加局数）。
+- **被否决**：① 「r 点估计 0.796 贴线 ⇒ 直接按替换设计 E2」（违反预注册判据 + 改变单变量语义）；
+  ② E1 不设对照臂（拿 b0 历史臂后验配对——丢训练期配对止损，且违反「不得用历史臂当对照」）；
+  ③ 开 E1b（比值形）——plan 默认计数形，未开（如需另起一腿）；
+  ④ 对 69 列产物的额外清理动作——新腿新目录天然干净（在跑 shard 已核全部 (version 10, width 74)，
+  self/mac/a95 三节点一致；旧课历史产物只在本课目录内、不被新腿消费）。
+- **落点**：课程 `nn-training/curricula/h4-aim-{c0,k10,k25}.jsonc`（头注 = 冻结契约）·
+  契约测试 `nn-training/tests/biz/test_h4_aim_courses.py`（4 例）· 配置 `nn-training/rl-config.json`
+  （两块 kickstart_burn）· 校准语料 `tmp/aim-calib/` · 实验档 `docs/nn/experiments.md` §74 ·
+  索引 `docs/nn.progress.md` §3.5。
+
+## §2026-10-02-goalnn-e2-e3a-design（2026-10-02，E2/E3a 开腿设计冻结：f=7.5%/15% 两档 + MDE 实测 + 段B/C + 新 seed；E1 段A输入判无效）
+
+- **背景**：E1 段A收官（864001 配对 900 局/臂，判据见 `h4-aim-c0.jsonc` 头注）：pooled dE[d|hit]
+  k10 −0.037（反号）/ k25 +0.029（< kill 线 0.039）⇒ **机制无效**；Q 过（0.25/4.14 ≤ 5.99）；
+  it40 k25 单点 +0.114 未过单点 MDE 且同点主分破线 ⇒ 不得挑点。用户指令按顺序波次开 E2/E3a
+ （E4 依赖前三波最优子集，不在首批；E3b 前置未过，不自动放行）。
+- **决定（E2 · 承伤 hurt-only，叠加）**：三臂 `h4-hurt-c0`（v4 逐字）+ `h4-hurt-f75`/`h4-hurt-f150`
+  （唯一差 = `- wHurt·hurtWeight`，wDmg 保留——Pearson 前置门 r_within=0.796 ≤ 0.8，
+  pooled 复核 r=0.798，同结论）；同起点 h4-stop.it60、同包、新 out/traj。
+  剂量锚（b0it30/35/40 pooled n=600，`tmp/aim-calib/...run/eval_log.jsonl`，脚本
+  `tmp/aim-e2e3a-anchor.py`）：E[hurtW/局]=39.4767，killEV=10.810 ⇒ **wHurt=0.0205（f=7.5%）/
+  0.0411（f=15%）**（税 EV 0.809/1.622，记账区；wDmg 税 EV 2.972，不淹没）。
+  判据段 = **段B（seed0 865001–865300）** @ it30/35/40 × 300 局；主读数 hurtW/局配对差
+  （负向好），MDE80_900=**5.84/局**、kill 线=**2.92/局**（b0it30-vs-b0it35 同 seed 200 配对
+  sd=62.54，E1 同法 2.8016×sd/30）；`playerDamageTaken` 非增 + 主分 −3pp + 守卫表
+  （stop/hold 非劣）；paired 止损显式 peer=`h4-hurt-c0`；`paired_rotate_seed=20261003`。
+- **决定（E3a · 被包围 encl，速率形）**：三臂 `h4-encl-c0` + `h4-encl-f75`/`h4-encl-f150`
+  （唯一差 = `- wEncl·enclWeightTicks/(ticks+1)`，速率形；共线名单 encl2/3pTicks、
+  nearEnemy4Ticks 同腿禁上）；复测门已过（4 敌 rung b0 0.238 vs b1 0.307，+29%，t=3.31）。
+  剂量锚（同源 n=600）：E[rate]=0.209396 ⇒ **wEncl=3.87（f=7.5%）/ 7.74（f=15%）**
+  （税 EV 0.810/1.621；数值 > wKill 是速率口径所致，可比量是税 EV）。
+  判据段 = **段C（seed0 866001–866300）**；主读数 enclRate 配对差，MDE80_900=**0.0214**、
+  kill 线=**0.0107**（配对 sd=0.22923，同法）；peer=`h4-encl-c0`；`paired_rotate_seed=20261004`。
+- **被否决**：① E2 替换 wDmg（门未触发 + 改单变量语义）；② 加 f=3% 档凑三剂量
+  （3 臂预算 = 对照 + 两剂量，E1/Wave2 先例；且 hurtW 读数 rel-MDE ~13%，低剂量必欠功效）；
+  ③ E3a 用计数形 encl2/3pTicks 定价（raw-only + 同谓词共线，§5.3）；④ 复用 h4-aim-c0
+  当对照（跨实验续跑 + 漂移不对齐，§15.5）；⑤ E3b 同批开（corner 跨臂不显著，待用户定夺）；
+  ⑥ 给负价腿设开火量刷量线（负价无刷量方向；退化由 stop/hold/kills 守卫捕，E1 对比备忘）。
+- **落点**：课程 `nn-training/curricula/h4-hurt-{c0,f75,f150}.jsonc` +
+  `h4-encl-{c0,f75,f150}.jsonc`（头注 = 冻结契约）· 契约测试
+  `nn-training/tests/biz/test_h4_{hurt,encl}_courses.py`（各 4 例）· 配置
+  `nn-training/rl-config.json`（四块 kickstart_burn，显式 peer；本机未入库文件，控制台开课时读它）·
+  锚脚本 `tmp/aim-e2e3a-anchor.py` + 段A证据 `tmp/e1-frozen/` · 实验档 `docs/nn/experiments.md` §74 ·
+  索引 `docs/nn.progress.md` §3.5。
+
+**指针**：全文 `docs/nn/experiments.md` §74 · 计划 `plan/aim-dodge-levers.plan.md` §5.2–§5.5 ·
+实现 `nn-training/curricula/h4-{hurt,encl}-*.jsonc` · 回归 `nn-training/tests/biz/test_h4_{hurt,encl}_courses.py`。
+落账门禁：新契约 8/8（+aim 4 例同跑 12/12）· kickstart 23/23（除 1 例控制台开关耦合，见下）·
+`bun run check`（进行中，`tmp/logs/check-e2e3a.log`）。
+注：`test_guard_also_halts_the_cloud_on_the_same_course` 在控制台「触发门禁：提示」档下红——
+平台文件 `tmp/gate-halt.json`（`by: console`，mode=notify）活状态所致；干净 worktree 无此文件即绿、
+复制该文件即红（同 HEAD 对照），与本次课程文件无关；开关拨回「停机」即复绿，不改代码。
+
+## §2026-10-02-goalnn-x20-advanced-design（2026-10-02，x20 kitchen-sink 腿：B 底包 + 新 5 项 human-gap 定价，单腿无对照）
+
+- **背景**：用户直接指定（非 plan 推导）：基于 x20 最佳权重（it175），新 5 项全上，大样本、
+  多 epoch、无 it 限制；只比最终杀敌数与过关率，不与历史课程单变量对比。底包 = B
+  （x20-steady）奖励逐字；起点 = it175（cont 同规，kickstart_ref=false，opt fresh）。
+- **决定（校准）**：human 160 局 vs it175 160 局（同关 c20 同 seed，v5 探针，
+  `tmp/gap2-panel-v5-{human,nn-x20steady}.jsonl`，脚本 `tmp/x20adv-calib.py`）：
+  kills 17.494 vs 6.162、通关 160/160 vs 15/160；Δacc=+0.2062、ΔE[d|hit]=+1.8794 格、
+  ΔhurtRate=−0.05478、ΔenclRate=−0.28600、ΔcornerRate=−0.14274（全部与 plan §1.4 互验；
+  新列差豁免拌入 A 一项，人类豁免多 ⇒ raw 定价是保守方向，已记档）。
+  killEV = 3.0×6.162 = 18.487。
+- **决定（形式）**：用户原话 5 个计数项 → 改比值/速率形（x20 horizon 可变 4973t vs 1805t，
+  计数形正价给苟活发钱）：命中率形 `aimHits/(playerShots+1)`、均距形 `aimHitDistSum/(aimHits+1)`、
+  三税 ÷(ticks+1)（E3a 先例）。命中数 double-count（≡enemyHits−交棒弹）已向用户明示并保留。
+- **决定（剂量）**：uniform gap pricing f=7.5% killEV/项（Wave2/E2 默认梯）⇒ **wAcc=6.72 /
+  wDist=0.738 / wHurt=25.3 / wEncl=4.85 / wCorner=9.71**（五项走完 37.5% killEV；
+  起点净流入 +0.21/局，无梯度冲击；三税与 wDmg 同量级）。
+- **决定（预算/判据）**：target 49152（48×1024，ragged=0；B 48000 非 1024 倍数）、epochs 8
+  （B 4）、iters 400 / max_hours 48（机械上限；判据只看终点，无中途停）；
+  终判 = kills/局 + 通关率 @日常终点 + 414000 段 800 局 vs it175（B 门口径，不移门）；
+  熔断只留 kl 连续 3 轮 ≥0.075 记录+人工盯盘；MDE/Q/paired burn 本腿不适用。
+- **被否决**：① 计数形照字面上（苟活套利，horizon 差 2.8×）；② 设对照臂/配对（用户明确不要；
+  且 kitchen-sink 本来就不是单变量可归因设计）；③ 中途横盘停（用户要无 it 限制，判据只看终点）。
+- **落点**：课程 `nn-training/curricula/x20-advanced.jsonc`（头注 = 冻结契约）· 契约测试
+  `nn-training/tests/biz/test_x20_advanced.py`（5 例）· 配置 `nn-training/rl-config.json`
+  （`x20-advanced: {rollout_src: local}`，B/cont 同形）· 校准脚本 `tmp/x20adv-calib.py` ·
+  实验档 `docs/nn/experiments.md` §75 · 索引 `docs/nn.progress.md` §3.5。
+
+**指针**：全文 `docs/nn/experiments.md` §75 · 实现 `nn-training/curricula/x20-advanced.jsonc` ·
+回归 `nn-training/tests/biz/test_x20_advanced.py`。落账门禁：新契约 5/5 · `bun run check` 待补。
+
+## §2026-10-02-goalnn-engine-pool-midround-pin（2026-10-02，引擎缓存上限不再钉死 5 + 轮内不许抽引擎 + `_node_rollout` 初值）
+
+- **背景（事故）**：7 门课同时开课（h4-hurt-{c0,f75,f150} · h4-encl-{c0,f75,f150} · x20-advanced），
+  而 `EnginePool` 数量上限是死值 `DEFAULT_CACHE_COURSES = 5` ⇒ 按 LRU 互逐。被逐的课下一拍
+  `EnginePool.get()` **重建一个全新 `TrainingLoop`**，而 supervisor 的 `CourseQueue.tasks` 已走到
+  `ppo`/`cleanup` ⇒ 重建引擎缺轮内属性 `_node_rollout`（它只在 `step_course_iter` 里赋值，
+  `__init__` 从未初值）⇒ `AttributeError` ⇒ 该课每秒重启一次、一轮都跑不完。
+  实测 `tmp/h4-hurt-f75/training_log.jsonl` = **1076 条 `run_start` / 1073 条 `iter_error` / 0 条
+  `iteration`**（h4-hurt-f150 同形）。
+- **决定（P0，止血）**：`loop_core.TrainingLoop.__init__` 补 `self._node_rollout: bool = False`；
+  `loop_round_steps` 的两处裸读（`step_ppo` / `step_cleanup`）改 `getattr(..., False)` 兜底。
+  初值 `False` = 本地轮：即便读到早值也只是把采集判成本地，不改变采集行为。
+  **不变量**：引擎被重建后必须能安全续跑（与上限怎么调无关）。
+- **决定（P1，驱逐语义）**：`EnginePool.pinned`（新，注入式判据，保持本类纯逻辑）；候选为空的
+  ⇒ 不驱逐 + 响亮记一行（宁可超预算也不中途抽栈）。判据 = `CourseQueue.mid_round`（新字段，
+  本轮已动过手）—— **不能**用 `tasks` 非空：`_finish_round` 会立刻为下一轮重新规划，两者形状相同，
+  用它等于永久禁止驱逐。这补的是本类 docstring 早就写着的那句「绝不驱逐正在用的引擎」
+  （此前 `keep` 只护住「本次被取的那一门」）。
+  连带：`test_serve_bc.test_bc_round_is_not_republished_when_the_engine_is_evicted` 的**触发方式**
+  改为显式关钉住（该用例验的是「重建后认领而非重发」，与「何时驱逐」正交）。
+- **决定（P2，上限从哪来）**：`serve(cache_courses=0)` = **自动** `max(DEFAULT_CACHE_COURSES, 开课数)`；
+  显式正值原样尊重（e2e/单测要靠它构造驱逐）但越界时响亮告警；自动抬升也打一行。
+  理由：真约束是**字节顶**（每课栈 MB 级，256MB ≈ 130 课，`scripts/measure_checkpoint_rss.py`），
+  数量顶在这里没有保护价值；而「开课数」是人手点的操作面事实。
+- **被否决**（都记录备选）：① 只把 5 改大 —— 不修 P1，下次字节顶触发照样崩，且「文档说可配、
+  代码不认」继续存在；② 上限设无限 —— 丢掉「越界要可见」这个信号（RSS 实测表就是为它做的）；
+  ③ 重建时保留旧引擎的轮内状态 —— 等于持久化 E 类轮内瞬态，本文件已明确否决过。
+- **文档口径更正**：`rl.checkpointCacheCourses` / `checkpointCacheMb` **从未被任何生产代码读取**
+  （唯一调用点 `run_rl_cluster --serve` 不传参，也无对应 CLI flag）⇒ 本文件 §2026-09-18-goalnn-r2-loop-task-queue
+  第四问与 `docs/nn/training-stack.md` 里「可配」的说法作废，改以本条为准（自动 = 开课数；
+  要显式上限只能改调用方传参）。**接线该配置键**留作后续（需跨 rl-config schema + launch 透传）。
+- **落点**：`trainer/loop_core.py`（初值）· `trainer/loop_round_steps.py`（两处 getattr）·
+  `worker/engine_pool.py`（`pinned` / `_is_pinned` / `_log_once` / `_evict`）·
+  `worker/loop_scheduler.py`（`CourseQueue.mid_round` + 三处置位、两处清零）·
+  `trainer/loop_serve.py`（`_pinned_mid_round` + P2 自动上限）· 回归
+  `tests/worker/test_engine_pool.py`（3 例）· `tests/trainer/test_loop_park.py`（P0 1 例）·
+  `tests/trainer/test_serve_wiring.py`（P1 1 例 + P2 1 例）· 调整 `tests/trainer/test_serve_bc.py`（1 例触发方式）。
+
+**指针**：实况账本 `tmp/h4-hurt-f75/training_log.jsonl` · 相关 plan `plan/course-pill-precision.plan.md`
+（同源事故的展示面：pill 的 `已收官` 与节点「贡献 0」另有独立缺陷，另行处理）。
+
+## §2026-10-02-nodes-lastcontrib-winner-must-have-completed-round（2026-10-02，节点「贡献 0 / 离线」误报的根治）
+
+- **症状**：控制台节点 pill 把 `self` 显示成「贡献 0 / 离线」，而它是当天贡献最高的节点
+  （窗口内 rollout 9644 + eval 1950 局）；表格展开行的「最近完成轮贡献」也是 0。
+- **根因**：`lastContrib` 取自跨流的「最新完成轮」winner，而 winner 的完成时刻写作
+  `completed?.atMs ?? src.mtimeMs`（`dashboard/src/server/pool-history.ts`）——**一轮都没跑完**
+  的流（没有 `iteration` 事件）也会带着 meta 文件的 mtime 进场，而它常常是最新写入的那个 ⇒
+  抢走 winner ⇒ `contribAtBase` 落在它那条**没跑完**的轮上 ⇒ 没参与那轮的节点全被算成 0 局。
+  数字对得上：线上 `mac=130 / a95=38` 正是崩溃循环流 `h4-hurt-f75` 那条 it1 的逐节点计数。
+  0 局 → `nodeHealth(0, 并发)` = `offline` → pill 报「离线」。
+- **决定**：winner **只在真跑完过至少一轮的流**（`completedIt !== null`）里选；全部流都没跑完
+  ⇒ `latestRound = null` + `lastContrib` 空表（消费方得 -1 = 「无池数据」），**不挑一个充数**。
+  实现形状：`FlowState` 增 `completedIt`（该流账本最后一个 `iteration` 的 it），判据只用它。
+- **被否决**：改 `nodeHealth`（不再用「最近完成轮贡献」判离线）—— `console-types.ts` 记着
+  2026-09-20 **用户指令**「健康度只由最近完成轮的贡献数判定，与 ping 探测无关」⇒ 那是刻意的
+  语义，不是洞。故「该轮确实交了 0 局 ⇒ 仍判离线」这条**不动**（它现在是诚实的 0，而不是被
+  别的流污染的 0）；若将来要改成窗口口径，属新指令。
+- **落点**：`dashboard/src/server/pool-history.ts`（`FlowState.completedIt` + winner 资格）
+  · 类型文档 `web/view/{console-types,pool-types}.ts` · 回归
+  `dashboard/tests/server-pool-history.test.ts`（+2 例：崩溃流不得抢 winner /全员未完成 ⇒ 无完成轮）。
+
+**指针**：事故现场 `tmp/h4-hurt-f75/`（含其崩溃循环的真因）· 训练侧修复
+`DECISIONS.md §2026-10-02-goalnn-engine-pool-midround-pin` · 课程 pill 的状态精确化
+`plan/course-pill-precision.plan.md`（不同面：那个是**课程** pill）。

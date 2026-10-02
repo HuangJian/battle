@@ -157,6 +157,17 @@ def _reset() -> Any:
     loop_serve.close_course_sinks()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_loop_control(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """控制面（暂停/恢复意图 + 回执）是**控制台与本机共享的活状态**：一律重定向进 tmp_path。
+
+    真 `serve()` 每拍读 `tmp/loop-control.json`、首拍写 `tmp/loop-control.applied.json`：
+    不重定向就会（a）让操作员此刻的暂停列表影响用例走向；（b）把回执写进活状态。
+    """
+    monkeypatch.setenv("NN_LOOP_CONTROL", str(tmp_path / "loop-control.json"))
+    monkeypatch.setenv("NN_LOOP_CONTROL_APPLIED", str(tmp_path / "loop-control.applied.json"))
+
+
 @pytest.fixture
 def env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
     """假课程 + 假账本 + 假引擎：serve 的真接线、零真运算。"""
@@ -339,6 +350,51 @@ def test_step_level_system_exit_takes_down_only_that_course(
     assert rep.failures["bad"] == "[run_rl] --run-iters<0 需要课程声明 iters——没有终点就不叫整段"
     # a 全程没被 bad 拖住：跑完它的轮
     assert rep.courses["a"]["rounds_done"] == 1 and rep.courses["a"]["state"] == "done"
+
+
+# ------------------------------------------- 引擎缓存上限（2026-10-02 事故：P1 + P2）
+
+
+def test_mid_round_courses_are_never_evicted(
+    env: SimpleNamespace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P1：**轮内**的课即使超过 `cache_courses` 也不被驱逐（cap=1 + 两门课）。
+
+    现场（h4-hurt-f75/f150）：cap=5 而 7 门课在跑 ⇒ 轮内的课被抽走引擎，重建出的新引擎没有
+    轮内属性（`_node_rollout` 等），而调度器队列已走到 `ppo` ⇒ 一步一崩、每秒重启、0 条
+    `iteration`。细粒度（13 步）下一门课大部分时间都在轮内，故这里必须**零「驱逐→重建」**。
+
+    判据用日志与 `builds` 而不是 `evictions`：进程退出时的 `close()` 也计 evictions（历史口径），
+    那两条与「轮内被抽走」无关 —— 真正要看的是**有没有 LRU 驱逐**。
+    """
+    rep = serve(["a", "b"], prepare=False, bun="bun", iters=1, step_mode=True, cache_courses=1)
+    out = capsys.readouterr().out
+
+    assert rep.stop_reason == "all_settled"
+    assert rep.engines["builds"] == 2  # 每课只建一次 ⇒ 没有被「驱逐→重建」
+    assert len(FakeLoop.instances) == 2
+    assert "驱逐课程" not in out  # 零 LRU 驱逐（轮内不许抽栈）
+    assert "超预算仍保留" in out  # 而是响亮记了一行
+    assert all(rep.courses[c]["rounds_done"] == 1 for c in ("a", "b"))
+
+
+def test_default_cache_cap_follows_open_courses(
+    env: SimpleNamespace, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """P2：上限默认**自动 = 开课数**（≥ `DEFAULT_CACHE_COURSES`），不再钉死 5。
+
+    真约束是**字节顶**（每课栈 MB 级），数量顶在这里没有保护价值；而「开课数」是人手点的
+    操作面事实，越过死值就必然互逐。
+    """
+    names = [f"c{i}" for i in range(1, 8)]  # 7 门 > 旧死值 5
+    rep = serve(names, prepare=False, bun="bun", iters=1, step_mode=False)
+    out = capsys.readouterr().out
+
+    assert rep.stop_reason == "all_settled"
+    assert rep.engines["cap_courses"] == len(names)
+    assert "驱逐课程" not in out  # 装得下 ⇒ 一次都不驱逐
+    assert "上限自动抬到 7" in out  # 越界被响亮说明
+    assert all(rep.courses[n]["rounds_done"] == 1 for n in names)
 
 
 # --------------------------------------------------------------- 发现模式（进程不绑课程）

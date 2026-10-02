@@ -576,6 +576,10 @@ interface FlowState {
   baseIt: number
   completedAtMs: number
   contribAtBase: Map<string, number>
+  /** 该流入账的**完成水位**（`training_log.jsonl` 最后一个 `iteration` 的 it）；null = 一轮都没跑完。
+   *
+   *  ★ 2026-10-02：它是「有没有资格当**最新完成轮**」的**唯一判据**（见做 winner 选择处）。 */
+  completedIt: number | null
 }
 
 interface MetaCandidate {
@@ -724,7 +728,14 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
       allRows.push({ r, counted })
     }
 
-    flows.push({ src: flow, itByNode, baseIt, completedAtMs, contribAtBase })
+    flows.push({
+      src: flow,
+      itByNode,
+      baseIt,
+      completedAtMs,
+      contribAtBase,
+      completedIt: completed?.it ?? null,
+    })
   }
 
   // ④ 时间升序后落桶（跨流合并后仍按时间有序 ⇒ results 时间升序、lastXxx 取最大才对）。
@@ -733,8 +744,17 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
 
   // ⑤ 最新完成轮：**跨课按完成时刻取最新**（不是比 it 大小——it 是课程内序号，§1.1）。
   //    停摆课因完成时刻旧而自然落选，不必额外过滤。
+  //
+  // ★ 2026-10-02：**只有真跑完过至少一轮的流才有资格**。没跑完的流本无完成时刻，
+  //   `completedAtMs` 退化成 meta 文件的 mtime，而它常常是最新写入的那个 ⇒ 它抢走 winner，
+  //   `contribAtBase` 就落在它那条**没跑完**的轮上，没参与那轮的节点全被算成 0 局：
+  //   数据源 = 「最新完成轮」（`lastContrib`）→ `nodeHealth(0, 并发)` 直接判 `offline` ⇒
+  //   pill 显示「贡献 0 / 离线」。现场：`h4-hurt-f75` 崩溃循环（0 条 iteration）压过所有
+  //   正常流，`self` 全场贡献最高（9644 局）却显示「贡献 0 / 离线」（mac=130/a95=38 正是
+  //   那条 it1 的数字，逐位吻合）。
   let winner: FlowState | null = null
   for (const f of flows) {
+    if (f.completedIt === null) continue // 一轮都没跑完 ⇒ 不是「完成轮」的候选
     if (winner === null || f.completedAtMs > winner.completedAtMs) winner = f
   }
   const allNodes = new Set<string>()

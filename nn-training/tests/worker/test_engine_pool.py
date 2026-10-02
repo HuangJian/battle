@@ -127,6 +127,66 @@ def test_snapshot_reports_the_measured_stack_size() -> None:
     assert snap["cap_courses"] == 5 and snap["builds"] == 1 and snap["misses"] == 1
 
 
+# ─────────────────── pinned：轮内的课不许被抽走（2026-10-02 事故）───────────────────
+
+
+def test_pinned_course_survives_even_when_it_is_the_lru_oldest() -> None:
+    """被 `pinned` 的课（serve 传「本轮已动手」）不会被挤掉 —— 哪怕它是最久没用的那个。
+
+    事故：`keep` 只护住「本次被取的那一门」，其余轮内的课照被抽走 ⇒ 重建的引擎没有轮内属性
+    （`_node_rollout` 等），而调度器队列已走到 `ppo` ⇒ 该课一步一崩、每秒重启。
+    """
+    pool, _built, _ = _pool(courses=2, pinned=lambda c: c == "b")
+    pool.get("a")
+    pool.get("b")  # b 变最近用过
+    pool.get("a")  # a 变最近用过 ⇒ b = 最久没用的（旧口径下先走 b）
+    pool.get("c")  # 越界：跳过被钉住的 b，改逐没钉住的 a
+    assert pool.loaded() == ["b", "c"]
+    assert pool.stats["evictions"] == 1
+    assert pool.stats["over_budget"] == 0
+
+
+def test_all_candidates_pinned_keeps_everything_and_is_loud() -> None:
+    """候选全被钉住 ⇒ **不驱逐**、缓存不再增长，但响亮记一行（宁可超预算也不中途抽栈）。"""
+    pool, _built, lines = _pool(courses=1, pinned=lambda _c: True)
+    pool.get("a")
+    pool.get("b")  # 越界，但唯一候选 a 被钉住
+    assert pool.loaded() == ["a", "b"]
+    assert pool.stats["evictions"] == 0
+    assert pool.stats["over_budget"] >= 1
+    assert any("超预算仍保留" in ln and "不驱逐在用引擎" in ln for ln in lines)
+    # 解除钉住（这一轮跑完了）⇒ 驱逐照旧
+    pool.pinned = lambda _c: False
+    pool.get("c")
+    assert pool.stats["evictions"] >= 1
+    assert "a" not in pool.loaded()  # 最久没用的先走
+
+
+def test_pinned_predicate_failure_treats_course_as_pinned() -> None:
+    """判据抛错 ⇒ 当作「已钉住」：抽走别人正在跑的栈会崩，留着只是内存（代价不对称）。"""
+
+    def boom(_course: str) -> bool:
+        raise RuntimeError("bad predicate")
+
+    pool, _built, lines = _pool(courses=1, pinned=boom)
+    pool.get("a")
+    pool.get("b")
+    assert pool.loaded() == ["a", "b"]
+    assert pool.stats["evictions"] == 0
+    assert any("pinned 判据异常" in ln for ln in lines)
+
+
+def test_pin_log_is_deduped_per_state() -> None:
+    """「超预算仍保留」按**状态**去重：稳态下反复取同一门（命中）不再重复喊。"""
+    pool, _built, lines = _pool(courses=1, pinned=lambda _c: True)
+    pool.get("a")
+    pool.get("b")
+    assert len([ln for ln in lines if "超预算仍保留" in ln]) == 1
+    for _ in range(5):
+        pool.get("b")  # 命中：不建栈、不驱逐、也不再喊
+    assert len([ln for ln in lines if "超预算仍保留" in ln]) == 1
+
+
 def test_release_failure_is_swallowed() -> None:
     """释放钩子抛错不得让池崩（缓存条目已移除，GC 仍会收对象）。"""
     lines: list[str] = []

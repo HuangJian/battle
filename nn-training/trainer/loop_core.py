@@ -170,6 +170,12 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         # M3（rollout 上云）：本轮节点侧采集墙钟；None = 本轮不在节点采集（本地轮）。
         # 每轮开头复位——_write_iter_stats / _log_report 靠它区分两种口径。
         self._node_rollout_sec: float | None = None
+        # 本轮是否在节点采集：**必须在 `__init__` 初值**（2026-10-02 事故）。
+        # 它此前只在 `step_course_iter` 里赋值，于是「引擎被 EnginePool 驱逐后重建、
+        # 而调度器队列已走到 ppo/cleanup」时，`step_ppo` 裸读它会 AttributeError
+        # ⇒ 该课每秒重启一次、一轮都跑不完（h4-hurt-f75/f150 实测）。
+        # 初值 False = 本地轮：即便真读到了早值，也只是把采集判成本地，不改变采集行为。
+        self._node_rollout: bool = False
         self._ppo_sec = 0.0
         # M0 统一计量（iteration 事件的 wire 子字典）：由 TrainingSteps._remote_ppo 赋值，
         # 本地/旧路径从不赋值——读取一律走 getattr(self, "_wire", None)。

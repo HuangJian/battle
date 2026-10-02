@@ -125,6 +125,17 @@ def _reset() -> Any:
     loop_serve.close_course_sinks()
 
 
+@pytest.fixture(autouse=True)
+def _isolate_loop_control(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """控制面（暂停/恢复意图 + 回执）是**控制台与本机共享的活状态**：一律重定向进 tmp_path。
+
+    真 `serve()` 每拍读 `tmp/loop-control.json`、首拍写 `tmp/loop-control.applied.json`：
+    不重定向就会（a）让操作员此刻的暂停列表影响用例走向；（b）把回执写进活状态。
+    """
+    monkeypatch.setenv("NN_LOOP_CONTROL", str(tmp_path / "loop-control.json"))
+    monkeypatch.setenv("NN_LOOP_CONTROL_APPLIED", str(tmp_path / "loop-control.applied.json"))
+
+
 @pytest.fixture
 def bc_course(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> str:
     """在**临时 curricula 目录**里造一门真 BC 课程（真配置解析，不碰仓根课程与 tmp/）。
@@ -328,12 +339,20 @@ def test_bc_course_uses_round_granularity_even_in_step_mode(world: SimpleNamespa
     assert world.published == [1, 2]
 
 
-def test_bc_round_is_not_republished_when_the_engine_is_evicted(world: SimpleNamespace) -> None:
+def test_bc_round_is_not_republished_when_the_engine_is_evicted(
+    world: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """★ 引擎被池驱逐 = 等同一次重启：新引擎必须**从盘上认领**已发布的 job，不得重发。
 
-    重发 = 新 jid = `bc-resume` 失效 = 从头训（一轮 GPU 时间白烧）；容量 1 时 BC 与 RL
-    必然互相驱逐，所以这条路径在真机上是常态而不是边角。
+    重发 = 新 jid = `bc-resume` 失效 = 从头训（一轮 GPU 时间白烧）。
+
+    ★ 2026-10-02：驱逐不再靠「容量 1 ⇒ BC/RL 互相驱逐」**自然发生**——`EnginePool.pinned`
+    起，**轮内**的课一律不驱逐（轮内重建会让重建引擎在队列已走到 `ppo` 时撞未初始化的
+    `_node_rollout`，见 `test_serve_wiring.test_mid_round_courses_are_never_evicted`）。
+    本用例验的是**重建后的语义**（认领而非重发），与「何时驱逐」正交 ⇒ 这里显式关掉钉住，
+    让驱逐重新成为确定事件；真机上的驱逐发生在**轮间**（那时 `mid_round=False`）。
     """
+    monkeypatch.setattr(loop_serve, "_pinned_mid_round", lambda _sup: (lambda _course: False))
     clock = FakeClock()
     rep = serve(
         [world.bc, "rl-a"],

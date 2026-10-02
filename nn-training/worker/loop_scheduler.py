@@ -107,6 +107,11 @@ class CourseQueue:
     completed: list[str] = field(default_factory=list)
     attempts: dict[str, int] = field(default_factory=dict)
     rounds_done: int = 0
+    #: **本轮已经动过手**（第一个步返回后置 True，`_finish_round`/`_abort` 清 False）。
+    #  为什么不能拿 `tasks` 非空当判据：`_finish_round` 会**立刻**为下一轮重新规划
+    #  （tasks 又非空），于是「还没开跑的下一轮」与「跑了一半的本轮」形状相同。
+    #  消费者 = `EnginePool.pinned`（serve 传「轮内不许抽走引擎」，2026-10-02 事故）。
+    mid_round: bool = False
 
     @property
     def current(self) -> Task | None:
@@ -250,6 +255,7 @@ class Supervisor:
             self.blocked_courses.clear()
 
         if result.status == DONE:
+            q.mid_round = True  # 本轮已动手（若这是最后一步，_finish_round 立刻清 False）
             q.tasks.pop(0)
             q.inflight.pop(task.task_id, None)
             q.completed.append(task.task_id)
@@ -271,6 +277,7 @@ class Supervisor:
             # ★ 让位：不占执行权、不占资源票（票已在 finally 归还）；带上在飞事实。
             # `reason` 落在队列上（读面「在等什么」= 状态 + 原因 + 在飞 job_id，三者一起才
             # 够定位）；`_finish_round` / 恢复推进时清掉，避免读到一个过期的原因。
+            q.mid_round = True  # 本轮已动手（等外部 = 轮内在飞）
             q.state = WAITING
             q.reason = result.reason
             q.resume_at = result.resume_at
@@ -297,6 +304,7 @@ class Supervisor:
             if decided.status == ABORT_STATUS:
                 q.tasks.pop(0)
                 return self._abort(q, task, decided.reason)
+            q.mid_round = True  # 本轮已动手（退避重试中，仍属轮内）
             q.tasks[0] = task.next_attempt()
             q.state = WAITING
             # 退避：下一轮不问它（与主循环 time.sleep(30) 同值；now 可注入 ⇒ 测试不真睡）。
@@ -317,6 +325,7 @@ class Supervisor:
     def _abort(self, q: CourseQueue, task: Task, reason: str) -> StepTrace:
         q.state = ABORTED
         q.reason = reason
+        q.mid_round = False  # 停腿：不再有「轮内在用」的引擎需要护住
         return StepTrace(
             course=q.course,
             action="aborted",
@@ -331,6 +340,7 @@ class Supervisor:
         q.rounds_done += 1
         q.next_it += 1
         q.reason = ""
+        q.mid_round = False  # 本轮已收尾；下一轮尚未动手 ⇒ 引擎此刻可安全驱逐
         q.tasks = list(self.planner(q.course, q.next_it, q))
         q.state = QUEUE_DONE if not q.tasks else READY
         return StepTrace(

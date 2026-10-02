@@ -370,7 +370,9 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
                 "[run_rl] stream 路径已随单一 PPO 路径退役（plan/accident.plan.md §3）："
                 "PPO 恒在 hub 队列上由 worker 认领，本机不再算 PPO"
             )
-        if not self._node_rollout:
+        # getattr 兜底（2026-10-02 事故）：引擎被驱逐重建后可能尚未走过 `step_course_iter`。
+        # 属性已在 `loop_core.__init__` 初值，这里只是不让一条早读把整门课打成重启循环。
+        if not getattr(self, "_node_rollout", False):
             res = self._remote_ppo_step(ctx)
             if res is not None:
                 return res  # 让位（或停车）
@@ -462,7 +464,7 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         self._rotate_cleanup(it)
         self._collect_child = (
             None
-            if self._node_rollout
+            if getattr(self, "_node_rollout", False)  # getattr 兜底：同 step_ppo（2026-10-02）
             else spawn_next_collect(args, it, self._stream_meta, self._spawned_early)
         )
         self._consec_fail = 0

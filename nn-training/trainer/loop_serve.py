@@ -549,6 +549,26 @@ def build_executor(
     return execute
 
 
+def _pinned_mid_round(sup: Supervisor) -> Callable[[str], bool]:
+    """「这门课**本轮还没跑完**」——`EnginePool.pinned` 的 serve 侧判据（2026-10-02 事故）。
+
+    判据 = `CourseQueue.mid_round`（本轮已经动过手）——**不能**用 `tasks` 非空：`_finish_round`
+    会立刻为下一轮重新规划（tasks 又非空），于是「还没开跑的下一轮」与「跑了一半的本轮」形状相同，
+    拿它当判据等于永久禁止驱逐。
+
+    轮内抽走引擎的后果：重建出来的新引擎没有轮内属性（`_node_rollout` 等），而队列下一步就是
+    `ppo`/`cleanup` ⇒ 该课一步一崩（h4-hurt-f75/f150：1076 次 run_start / 0 条 iteration）。
+    轮间（`mid_round=False`）驱逐的代价才是 docstring 承诺的那一档（权重可从 `args.out` 重建、
+    Adam 动量重置）。**全部课程都在轮内 ⇒ 池不再驱逐**（响亮记一行，宁可超预算也不中途抽栈）。
+    """
+
+    def pinned(course: str) -> bool:
+        q = sup.courses.get(course)
+        return bool(q is not None and q.mid_round and q.state != ABORTED)
+
+    return pinned
+
+
 def _all_settled(sup: Supervisor) -> bool:
     """全部课程**已收官 / 停腿**。
 
@@ -672,7 +692,7 @@ def serve(
     iters: int = 0,
     poll_sec: float = DEFAULT_POLL_SEC,
     capacities: dict[str, int] | None = None,
-    cache_courses: int = DEFAULT_CACHE_COURSES,
+    cache_courses: int = 0,
     cache_mb: float = DEFAULT_CACHE_MB,
     step_mode: bool = True,
     max_seconds: float = 0.0,
@@ -733,6 +753,26 @@ def serve(
         log("[serve] 显式课程表里没有能开的课——退出")
         return report
 
+    # ★ P2（2026-10-02 事故）：上限默认**自动 = 并行课程上限**，不是死值 5。
+    # 「5」是 R2c 定案时的并行课程上限估计，而开课是人手点的操作面事实 —— 一旦开课数越过它，
+    # 引擎按 LRU 互逐。真实约束是**字节顶**（每课栈 MB 级；256MB ≈ 130 课，
+    # 见 `scripts/measure_checkpoint_rss.py`），数量顶在这里没有保护价值。
+    # 显式传正值 ⇒ 原样尊重（e2e/单测用它构造驱逐），但越界时响亮告警。
+    if cache_courses <= 0:
+        cache_courses = max(DEFAULT_CACHE_COURSES, len(runtimes))
+        if len(runtimes) > DEFAULT_CACHE_COURSES:
+            log(
+                f"[serve] 开课 {len(runtimes)} 门 > 引擎缓存默认上限 {DEFAULT_CACHE_COURSES}"
+                f"——上限自动抬到 {cache_courses}（真约束是字节顶 {cache_mb:.0f}MB，"
+                "每课栈 MB 级：worker/scripts/measure_checkpoint_rss.py）"
+            )
+    elif len(runtimes) > cache_courses:
+        log(
+            f"[serve] ⚠ 显式 cache_courses={cache_courses} < 开课 {len(runtimes)} 门："
+            "轮间会被驱逐（权重可重建，但 **Adam 动量重置**）；"
+            "**轮内**（队列还有待办步骤）的课不驱逐"
+        )
+
     own_pool = pool is None
     pool = pool or EnginePool(
         factory=build_factory(runtimes, bun=bun, iters=iters, step_mode=step_mode, now=now),
@@ -745,6 +785,12 @@ def serve(
         capacities=dict(capacities or DEFAULT_CAPACITIES),
         now=now,
     )
+    # ★ P1（2026-10-02 事故）：把 `EnginePool` docstring 那句「绝不驱逐正在用的引擎」补全 ——
+    # 此前 `keep` 只护住「本次 `get` 的那一门」，其余**轮内**的课照样被抽走引擎：重建后的
+    # 引擎没有轮内属性（`_node_rollout` 等），而调度器队列仍停在该轮之后的步骤 ⇒ 一步一崩
+    # （h4-hurt-f75/f150：1076 次 run_start / 0 条 iteration）。判据挂在**队列**上：
+    # `tasks` 非空 = 这一轮还没走完（含 WAIT 等外部）⇒ 此刻不许抽栈。
+    pool.pinned = _pinned_mid_round(sup)
 
     # 初始队列内容用**盘上事实**算（不构建引擎：扫到但没在训的课不该拉起 torch）。
     _enqueue_opened(sup, runtimes, report, list(runtimes), step_mode=step_mode)
