@@ -355,14 +355,22 @@ class TrainingLifecycle:
                 it -= 1
                 time.sleep(WAIT_RETRY_SEC)
 
-        # P0 收官 drain（用户指令：最终轮立即 eval）：循环结束（跑满/break/预算）
-        # 后，为最新已完成且无完整 summary 的评估轮权重派发并等收官。smoke 轮跳过。
-        if not smoke_void:
-            self._drain_pending_eval()
+        # 收官 eval 的调用矩阵（plan/eval-final-round-and-dropped §4.1）：
+        #   · 停车路径（默认）：经 `_park_after_completion` → `finish_course`（drain 与
+        #     run_complete 同一处，先派发后横幅）；
+        #   · exit-on-done / 熔断（`_tripped`）：不写 run_complete 的终止路径，各自显式
+        #     drain（进程即将退出，必须跑完才返回）；
+        #   · smoke：作废干净退出，不做任何收官副作用（旧行为）。
+        if not smoke_void and self._tripped is not None:
+            self._drain_pending_eval(block=True)
         if self._tripped is not None:
             sys.exit(CIRCUIT_EXIT_CODE)
         print(f"[{time.strftime('%H:%M:%S')}] [run_rl] ALL DONE -> {args.out}")
         if not should_park_on_done(args, smoke_void):
+            if not smoke_void:
+                # `--exit-on-done`：进程即将退出，收官 drain 在 return 前跑完（旧行为：
+                # drain → return；本路径不写 run_complete/PAUSE）。
+                self._drain_pending_eval(block=True)
             return
         self._park_after_completion(it)
 
@@ -409,12 +417,13 @@ class TrainingLifecycle:
             # （调度器的退避是 `TaskResult.retry` 的 resume_at，不在任务体里睡 30s）。
             return self.round_failure(e, ctx.it, backoff=True)
 
-    def finish_course(self, it: int) -> None:
-        """**本课程**收官（一轮跑满）的三件事，不含停车循环（R2d 拆分）。
+    def finish_course(self, it: int, *, drain: bool = True, block: bool = True) -> None:
+        """**本课程**收官（一轮跑满）的四件事，不含停车循环（R2d 拆分）。
 
         ① 本地停止采集（收敛在飞预采子进程，不留孤儿空烧）；② 向云机下发停机指示
-        （PAUSE，能自停的释配额）；③ 账本落 `run_complete` 事件（console「已完成」横幅
-        派生源）。
+        （PAUSE，能自停的释配额）；③ 收官 eval drain（`drain=True` 时；**先派发、后写
+        `run_complete`**——横幅只保证 drain 已派发，不保证已结算，plan/eval-final-round-
+        and-dropped §4.1）；④ 账本落 `run_complete` 事件（console「已完成」横幅派生源）。
 
         **为什么从 `_park_after_completion` 里拆出来**：停车（死循环等重启）的语义前提是
         「这个进程就是这门课」。单进程多课程（`trainer/loop_serve.py`）下停车会**冻住所有课**，
@@ -436,6 +445,11 @@ class TrainingLifecycle:
                 log(f"[run_rl] 停车：预采子进程收敛失败（{type(e).__name__}: {e}）")
             self._collect_child = None
         self._sync_cloud_halt(it, "PAUSE")
+        # ③ 收官 eval drain（G1）：最后一轮权重在任何部署形态下都有 eval 路径。多课程
+        #    serve 传 block=False（派发即返回，不冻其它课，G2/N4）；单课程停车用默认
+        #    block=True（等结算再进停车循环）。
+        if drain:
+            self._drain_pending_eval(block=block)
         reason = f"正常收官（it{it}/{total}），本地停采、云机已停机"
         try:
             write_run_complete(self._jsonl_path, it, int(args.iters or 0), reason)

@@ -54,6 +54,10 @@ DUAL_TRACK_ROTOR = 50
 OVERFIT_GAP_PP = 5.0
 OVERFIT_PERSIST_ROUNDS = 3
 
+#: 缺口原因清单（G6）：summary `missing` 字段的上限——缺口可能上百（节点全挂），
+#: 账上只留前 20 条（按 seed 升序）；完整缺口看 `dropped` 计数与收工「三本账」行。
+MISSING_MAX = 20
+
 # 段成员集（预计算；P2-7：用**下标集合**判定归属，不用数值区间猜）。
 # 池子必须连续且严格递增——不满足就在这里响亮炸掉，而不是让门/台账静默算错段。
 if tuple(sorted(set(EVAL_SEEDS))) != EVAL_SEEDS:
@@ -241,13 +245,48 @@ def _maybe_warn_overfit(
     )
 
 
+def _missing_reasons(meta_path: Path, it: int) -> dict[tuple[int, int], str]:
+    """缺口局的原因分类（G6）：扫 `dist-agent-meta.jsonl` 里同 it 的失败行。
+
+    ① 有 `ok=False` 行 ⇒ reason 以 `record-failed` 开头记 `record-failed`，否则
+    `node-failed`（attempt 打光/bootId 更换等派发面失败）；② 无失败行 ⇒ `undispatched`
+    （从未派出，或成功 meta 却没落盘行的罕见怪态——保守归此）。只在缺口非空时调用
+    （常态零开销）。
+    """
+    out: dict[tuple[int, int], str] = {}
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            for ln in f:
+                if '"eval"' not in ln:
+                    continue
+                try:
+                    r = json.loads(ln)
+                except json.JSONDecodeError:
+                    continue
+                if r.get("mode") != "eval" or r.get("it") != it or r.get("ok") is not False:
+                    continue
+                st = r.get("stage")
+                sd = r.get("seed")
+                if not isinstance(st, int) or not isinstance(sd, int):
+                    continue
+                reason = str(r.get("reason") or "")
+                if out.get((st, sd)) == "record-failed":
+                    continue  # 已有更具体的原因
+                out[(st, sd)] = (
+                    "record-failed" if reason.startswith("record-failed") else "node-failed"
+                )
+    except OSError:
+        pass
+    return out
+
+
 def settle_eval_summary(
     eval_jsonl: Path,
     key16: str,
     it: int,
     pairs: list[tuple[int, int]],
     total: int,
-    seen: set[tuple[int, int]],
+    landed: set[tuple[int, int]],
     wins: list[int],
     cleared_total: list[int],
     outcomes: dict[str, int],
@@ -273,8 +312,15 @@ def settle_eval_summary(
     另加 anchor_wr / rotor_wr / overfit_gap_pp（按 seed 落段拆分本 iter 台账行；
     非双轨轮 rotor 无局 → rotor_wr/gap 为 None）。过拟合报警看近 3 轮均值差，
     单轮 gap 只落账不报警。
+
+    `landed` 是**落盘集**（2026-10-02，plan/eval-final-round-and-dropped S2/S3）：只有
+    eval 行 append 成功才计入——本参数曾名 `seen`（认领集），改名正是为了让下一个调用方
+    不再喂认领集（`dropped` 公式一字未动，φ 语义从「结算」变「落盘」）。缺口原因清单
+    同时进 summary 的 `missing` 字段（G6）。
     """
-    dropped = total - len(seen)
+    dropped = total - len(landed)
+    #: 账本里已有的 (stage, seed)（与 n 同口径的行）——`missing` 的判据（G6）。
+    led_keys: set[tuple[int, int]] = set()
     led_wins = 0
     led_clears = 0
     led_outcomes: dict[str, int] = {}
@@ -329,6 +375,10 @@ def settle_eval_summary(
                     sd = int(r.get("seed"))
                 except (TypeError, ValueError):
                     continue
+                try:
+                    led_keys.add((int(r.get("stage") or 0), sd))
+                except (TypeError, ValueError):
+                    pass
                 w = 1 if r.get("win") else 0
                 if is_anchor_seed(sd):
                     led_anchor_n += 1
@@ -345,10 +395,19 @@ def settle_eval_summary(
         outcomes = led_outcomes
         node_games = led_nodes
     else:
-        n = len(seen)
+        n = len(landed)
         wins_v = wins[0]
         clears_v = cleared_total[0]
     dropped = max(dropped, len(pairs) - n)
+    # 缺口原因（G6）：只在真有缺口时扫 meta；有界 MISSING_MAX、按 seed 升序。
+    missing: list[dict[str, object]] = []
+    if dropped > 0:
+        reasons = _missing_reasons(eval_jsonl.parent / "dist-agent-meta.jsonl", it)
+        gap_pairs = sorted((p for p in pairs if p not in led_keys), key=lambda p: (p[1], p[0]))
+        missing = [
+            {"stage": s, "seed": sd, "reason": reasons.get((s, sd), "undispatched")}
+            for (s, sd) in gap_pairs[:MISSING_MAX]
+        ]
     clean_wr = (wins_v / n) if n else None
     clear_rate = (clears_v / n) if n else None
     # 双轨读数：无台账行时退回现场计数不可拆段 → 保持 None（调用方不写台账路径下
@@ -370,6 +429,8 @@ def settle_eval_summary(
         "clearRate": round(clear_rate, 4) if clear_rate is not None else None,
         "outcomes": outcomes,
         "dropped": dropped,
+        # 缺口局 + 原因（G6；上限 MISSING_MAX）。旧行缺本字段 = unknown（不是 0）。
+        "missing": missing,
         "rolloutWinRate": report_winrate_safe(rollout_winrate),
         # 每节点实际结算的评估局数（勿与并发槽位混淆——首版曾误写 nd["c"]）
         "nodes": dict(sorted(node_games.items())),

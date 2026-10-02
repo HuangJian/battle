@@ -757,3 +757,23 @@ total 收到 0。
 **3483 passed / 9 skipped**（ruff + mypy 全量）· 根 `bun run check` **2345 pass / 0 fail**。
 决策 → `DECISIONS.md` §2026-10-02-goalnn-transfer-residual-yield；全文 → `docs/nn/remote-transport.md`
 §53；计划 → `plan/transfer-residual.plan.md`（2026-10-02 评审修订版，P0-1..P0-5 已修）。
+
+## 2026-10-02 · eval-final-round-and-dropped：收官轮 eval 缺失 + dropped 局静默丢失
+
+触发：h4-aim-k25 真机产物——it40（收官轮）训练期间 eval **零局**（手点 evalA 才有）、it0 缺 8 局、
+it25 缺 2 局且原因不进账本（`[eval] drain:` 日志零命中）。三条根因：① 收官 drain 只接在单课程
+前台入口（`run()` 尾部），多课程 serve 的 `finish_course` 没有 drain，而延迟派发只到 it-1 ⇒
+最后一轮权重没有 eval 路径；② `seen`（认领）在 `record()` 落盘前计数且异常逃逸（**不能下移**
+——tail-race 副本可在原件 record 进行中结算，下移就双计）；③ 缺口既不补派也不带原因。
+
+落地（W0–W5）：`finish_course(it, *, drain=True, block=True)` 收编收官 drain（serve RL 传
+`block=False`、BC 按 kind 分派**不带 kwargs**；`run_complete` 只保证已派发）；claim/landed 拆分
+（`_settle_complete` 与 `settle_eval_summary` 只认落盘，参数 `seen`→`landed`、`dropped` 公式
+一字不动）；`record()` 失败本线程重试 + `record-failed` meta + WARN；summary 新增 `missing`
+（有界 20 + 原因 record-failed/node-failed/undispatched）；收官 drain 按归档权重**逐轮升序**补
+（不再 `cand[-1]`），每条早退一行日志（G8）。
+
+读数：nn 门禁 **3494 passed / 9 skipped**（ruff + mypy 全量）· 新增/改写用例 10 例
+（`test_finish_course_drains_eval.py` 5 · resilience 3 · eval_timing 2（多轮 + G8）· gate_inputs
+兼容 1）。决策 → `DECISIONS.md` §2026-10-02-goalnn-eval-final-round-and-dropped；全文 →
+`docs/nn/engineering.md` §59；计划 → `plan/eval-final-round-and-dropped.plan.md`。

@@ -148,6 +148,10 @@ EVAL_ITER_SUFFIX = "ev"  # eval iterId = {runId}.{it}ev → 与采集任务在 a
 # 基线按 iter==0（且排除 B/C source 行）去重，A-eval 按 min_iter=1 去重。
 BASELINE_EVAL_ITER = 0
 EVAL_TASK_ATTEMPTS = 2  # 单局重试上限；超限放弃并计数（权重切换后未完成局自然作废）
+#: eval 行**落盘**失败的原地重试次数（plan/eval-final-round-and-dropped S2，2026-10-02）：
+#: 失败边界是「eval 行 append 成功」——行没落盘就不算结算；本机落盘问题不重跑整局，
+#: 原地重试后仍失败则记 `record-failed` meta + 计入 summary.missing（不再静默消失）。
+EVAL_RECORD_RETRY_MAX = 2
 
 
 # 逐局 eval 行 schema + 账本 I/O 已下沉 `biz/eval_rows.py`（S5 第一刀，2026-09-27）

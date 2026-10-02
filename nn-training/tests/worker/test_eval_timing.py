@@ -371,7 +371,7 @@ class _DummyThread:
 
 
 def test_drain_pending_eval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """drain：只收尾最新未覆盖评估轮；全覆盖/无归档则静默跳过。"""
+    """drain：未覆盖评估轮**逐轮升序**按各自归档权重派发 + 各自 join（P0-4）；全覆盖/无归档跳过。"""
     import trainer.eval_dispatch as ed
 
     calls: list[dict] = []
@@ -386,17 +386,51 @@ def test_drain_pending_eval(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     elog = Path(str(ts._traj_dir).replace("it6", "")) / "eval_log.jsonl"
     _archive(ts, 5, "{}")
     a10 = _archive(ts, 10, "{}")
-    _summary(elog, 5, 0)  # it5 完整
+    a15 = _archive(ts, 15, "{}")
+    _summary(elog, 5, 0)  # it5 完整⇒不派；it10/15 未覆盖⇒升序逐轮
     ts._drain_pending_eval()
-    assert len(calls) == 1 and calls[0] == {"rl_path": str(a10), "it": 10}
-    assert len(joins) == 1  # 等收官了
+    assert calls == [
+        {"rl_path": str(a10), "it": 10},
+        {"rl_path": str(a15), "it": 15},
+    ], calls
+    assert len(joins) == 2, "每轮派发各自等收官（预算各算）"
 
     calls.clear()
+    joins.clear()
     _summary(elog, 10, 0)
+    _summary(elog, 15, 0)
     ts._drain_pending_eval()
-    assert calls == []  # 全覆盖 → 跳过
+    assert calls == [] and joins == []  # 全覆盖 → 跳过
 
     ts2 = _steps(tmp_path)  # 无归档 → 跳过（elog 同文件已有完整 summary）
     ts2._traj_dir = ts._traj_dir
     ts2._drain_pending_eval()
     assert calls == []
+
+
+def test_drain_early_exits_are_logged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """G8：drain 的每条早退各打一行（现场 grep 零命中曾无法区分「没跑」与「跑了没做事」）。"""
+    logs: list[str] = []
+    monkeypatch.setattr("trainer.loop_eval.log", logs.append)
+
+    ts = _steps(tmp_path, _tag="mode", mode="intent")
+    ts._drain_pending_eval()
+    assert any("非 per-tick" in s for s in logs), logs
+
+    logs.clear()
+    ts = _steps(tmp_path, _tag="smoke", smoke=True)
+    ts._drain_pending_eval()
+    assert any("smoke" in s for s in logs), logs
+
+    logs.clear()
+    ts = _steps(tmp_path, _tag="noarch")
+    ts._drain_pending_eval()
+    assert any("无归档权重" in s for s in logs), logs
+
+    logs.clear()
+    ts = _steps(tmp_path, _tag="cov")
+    _archive(ts, 5, "{}")
+    elog = Path(str(ts._traj_dir).replace("it6", "")) / "eval_log.jsonl"
+    _summary(elog, 5, 0)
+    ts._drain_pending_eval()
+    assert any("均已完整 summary" in s for s in logs), logs

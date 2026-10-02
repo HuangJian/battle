@@ -877,9 +877,11 @@ def _settle_rounds(
 ) -> str:
     """给**刚**收官的课程做收官副作用（每课一次），返回本轮的整体结论。
 
-    跑满的课：`TrainingLoop.finish_course()`（收敛预采 / 云机 PAUSE / `run_complete` 落账，
-    与单课程入口共用同一份实现）——**只做这三件事，不停车**（停车会冻住其余课，见模块
-    docstring）。停腿（ABORTED）的课不做收官副作用（它不是正常跑满）。
+    跑满的课：`TrainingLoop.finish_course()`（收敛预采 / 云机 PAUSE / 收官 eval drain /
+    `run_complete` 落账，与单课程入口共用同一份实现）——**不停车**（停车会冻住其余课，见
+    模块 docstring）。RL 的 drain 传 `block=False`（派发即返回，G2）；BC 是另一份实现
+    （`BcLoop.finish_course(self, it)`），按 kind 分派、**不带 kwargs**（P0-2）。停腿
+    （ABORTED）的课不做收官副作用（它不是正常跑满）。
     """
     for course, q in sup.courses.items():
         if q.state != QUEUE_DONE or course in done_hooked:
@@ -889,7 +891,15 @@ def _settle_rounds(
         if rt is None or rt.engine is None:
             continue  # 一步都没跑过：没有预采子进程/云机态可收
         with prefix_scope(course):
-            rt.engine.finish_course(max(int(q.next_it) - 1, 0))
+            # kind 分派（评审 P0-2）：BC 的 `finish_course(self, it)` 是另一份实现
+            # （trainer/bc_loop.py），**传 kwargs 会 TypeError 带崩 serve**；RL 传
+            # drain=True, block=False——派发即返回，不冻其它课（G2/N4）。
+            if str(getattr(rt, "kind", "") or "") == "bc":
+                rt.engine.finish_course(max(int(q.next_it) - 1, 0))
+            else:
+                rt.engine.finish_course(
+                    max(int(q.next_it) - 1, 0), drain=True, block=False
+                )
         log(
             f"[serve] 课程 {course} 已收官（{q.rounds_done} 轮，指针 it{q.next_it}）——"
             "控制台停→开后自动重新入队（开课标记 mtime 更新即重开信号）"

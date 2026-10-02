@@ -89,6 +89,8 @@ class TrainingEval:
     _eval_tail_start: float | None = None
     #: 本轮主链为 eval 站在外面等的秒数（缺省 0 = 不站等）；类级默认同上。
     _eval_join_sec: float = 0.0
+    #: `block=False` 收官 drain 的后台线程（serve 用；观测句柄，daemon 随进程退出）。
+    _eval_drain_thread: threading.Thread | None = None
 
     #: 本轮是否评估轮——真实现在 `trainer/loop_dispatch.py::TrainingDispatch`（S4 第二十刀，
     #: 前住 loop_core 的组合根本体），MRO 胜过此处占位。body 用 raise 而不用 `...`：
@@ -292,11 +294,15 @@ class TrainingEval:
             return False
         return any(r.get("dropped") == 0 for r in rows)
 
-    def _drain_pending_eval(self) -> None:
-        """收官 drain（用户指令：最终轮立即 eval）：为最新已完成且无完整 summary
-        的评估轮权重派发并等收官。串行执行（无 PPO 空窗可藏），等收官预算
-        min(eval_window_sec + 60, 600)s，全程 best-effort 只记日志。
-        smoke 轮 / 非 per-tick 直接跳过。
+    def _drain_pending_eval(self, *, block: bool = True) -> None:
+        """收官 drain（用户指令：最终轮立即 eval）：为**所有**未覆盖评估轮按归档权重
+        **逐轮**派发并等收官（P0-4：wver 每轮变，「同 wver 续跑」补不出旧轮——旧实现只
+        收尾 `cand[-1]`，更早的缺口永远无路可补）。
+
+        串行执行（无 PPO 空窗可藏），每轮等收官预算 min(eval_window_sec + 60, 600)s，
+        全程 best-effort 只记日志；每条早退各打一行（G8）。smoke 轮 / 非 per-tick 跳过。
+        `block=False`（serve 收官，G2/N4）：整串逐轮派发放进一个后台 daemon 线程，
+        本方法立即返回——run_complete 只保证 drain **已派发**，不保证已结算。
         """
         from trainer.eval_dispatch import dispatch_eval_bg
         from trainer.queue import RUN_ID
@@ -305,7 +311,14 @@ class TrainingEval:
         # 收官前先把在飞尾巴清账（同理：只观测/清账，不站等）。
         self._sweep_eval_tail()
         try:
-            if getattr(args, "mode", "per-tick") != "per-tick" or getattr(args, "smoke", False):
+            if getattr(args, "mode", "per-tick") != "per-tick":
+                log(
+                    f"[eval] drain: 非 per-tick 模式（{getattr(args, 'mode', '?')}）"
+                    "——跳过收官 eval（intent/goal 走各自派发流）"
+                )
+                return
+            if getattr(args, "smoke", False):
+                log("[eval] drain: smoke 轮——跳过收官 eval")
                 return
             eval_log = Path(self._traj_dir).parent / "eval_log.jsonl"
             summaries: dict[int, list[dict]] = {}
@@ -355,27 +368,49 @@ class TrainingEval:
             if not cand:
                 log("[eval] drain: 评估轮权重均已完整 summary——无需收尾 eval")
                 return
-            if len(cand) > 1:
-                log(f"[eval] drain: 旧缺口 {cand[:-1]} 留档（只收尾最新 it{cand[-1]}）")
-            m = cand[-1]
-            self._eval_gate = threading.Event()
-            # 收官 drain 没有并发训练：立刻开闸，否则 local_worker 会等 gate 到 deadline
-            # （2026-09-15 x3-power it30：远端 engine_epoch 全 mismatch + gate 未开 → 600s 零局）。
-            self._eval_gate.set()
-            self._eval_thread = dispatch_eval_bg(
-                self.bun,
-                arch_m[m],
-                self._traj_dir,
-                args,
-                getattr(self, "_last_dist_cfg", None) or {},
-                f"{RUN_ID}.{m}",
-                m,
-                None,
-                local_gate=self._eval_gate,
-            )
-            budget = min(float(getattr(args, "eval_window_sec", 1800) or 1800) + 60.0, 600.0)
-            log(f"[eval] drain: it{m} 收尾派发（archive），等收官 ≤{budget:.0f}s")
-            self._eval_thread.join(timeout=budget)
-            log(f"[eval] drain: it{m} 收尾结束（alive={self._eval_thread.is_alive()}）")
+            log(f"[eval] drain: 逐轮收尾 {cand}（升序，各自归档权重；block={block}）")
+
+            def _drain_rounds() -> None:
+                for m in cand:
+                    try:
+                        self._eval_gate = threading.Event()
+                        # 收官 drain 没有并发训练：立刻开闸，否则 local_worker 会等 gate 到
+                        # deadline（2026-09-15 x3-power it30：远端全 mismatch + gate 未开 →
+                        # 600s 零局）。每轮新 gate：各自派发、各自放行本地份额。
+                        self._eval_gate.set()
+                        self._eval_thread = dispatch_eval_bg(
+                            self.bun,
+                            arch_m[m],
+                            self._traj_dir,
+                            args,
+                            getattr(self, "_last_dist_cfg", None) or {},
+                            f"{RUN_ID}.{m}",
+                            m,
+                            None,
+                            local_gate=self._eval_gate,
+                        )
+                        budget = min(
+                            float(getattr(args, "eval_window_sec", 1800) or 1800) + 60.0,
+                            600.0,
+                        )
+                        log(f"[eval] drain: it{m} 收尾派发（archive），等收官 ≤{budget:.0f}s")
+                        self._eval_thread.join(timeout=budget)
+                        log(
+                            f"[eval] drain: it{m} 收尾结束"
+                            f"（alive={self._eval_thread.is_alive()}）"
+                        )
+                    except Exception as e:
+                        log(
+                            f"[eval] drain: it{m} 收尾失败（{type(e).__name__}: {e}）"
+                            "——继续下一轮"
+                        )
+
+            if block:
+                _drain_rounds()
+            else:
+                self._eval_drain_thread = threading.Thread(
+                    target=_drain_rounds, daemon=True, name="eval-drain"
+                )
+                self._eval_drain_thread.start()
         except Exception as e:
             log(f"[eval] drain: 收尾 eval 失败（{type(e).__name__}: {e}）——不阻断收官")

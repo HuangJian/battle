@@ -27,6 +27,7 @@ from worker import node_identity
 from worker.eval_local import (
     BASELINE_EVAL_ITER,
     EVAL_ITER_SUFFIX,
+    EVAL_RECORD_RETRY_MAX,
     EVAL_TASK_ATTEMPTS,
     a_eval_seed_list,
     eval_done_keys,
@@ -234,7 +235,14 @@ class EvalDispatcher:
             )
             pending: deque[tuple[int, int]] = deque(todo)
             lock = threading.Lock()
+            #: **认领集**：只防重复结算（tail-race 副本 `if task in seen` 的判据）——
+            #: 位置不动（record() 之前）！下移会让 record 进行中的副本看不到认领 ⇒ 双计
+            #: （2026-10-02 评审 P0-3；tests/test_eval_dispatch_resilience.py 的 fanout 用例钉住）。
             seen: set[tuple[int, int]] = set()
+            #: **落盘集**：eval 行 append 成功才算（成功边界，plan/eval-final-round-and-dropped
+            #: S2）。收工触发（`_settle_complete`）与 summary 口径都看它——「settled 满」不再
+            #: 可能出现在行未落盘时（h4-aim-k25 it0 的「settled 满 200/200 + 落盘 192」矛盾）。
+            landed: set[tuple[int, int]] = set()
             attempts: dict[tuple[int, int], int] = {}
             # 按需建键（节点集在本块之后才定向——并行 ping 的门在闭包之后，见下）；
             # 读取一律 .get(nid, 0)，写入才建键。
@@ -265,7 +273,11 @@ class EvalDispatcher:
             live_workers = [0]
 
             def _settle_complete() -> None:
-                """settled 满：置收工位 + 断连（调用方持 lock；实现非阻塞）。"""
+                """**落盘**满：置收工位 + 断连（调用方持 lock；实现非阻塞）。
+
+                由 `landed` 触发（plan/eval-final-round-and-dropped S2/G3）：认领满不算收工——
+                有一局行没落盘就不算结算。
+                """
                 all_done.set()
                 common.distribution.abort_active_requests(req_scope)
 
@@ -298,28 +310,94 @@ class EvalDispatcher:
                 with jsonl_lock:
                     with open(eval_jsonl, "a", encoding="utf-8") as jf:
                         jf.write(json.dumps(row) + "\n")
-                    # 采样机健康账本同册入账（mode:"eval"）——成功局才记，与 rollout 口径一致
-                    _record_agent_meta(
-                        meta_path,
-                        {
-                            "node": nd_id,
-                            "mode": "eval",
-                            "it": it,
-                            "stage": task[0],
-                            "seed": task[1],
-                            "ok": True,
-                            "win": win,
-                            "elapsedSec": manifest.get("elapsedSec"),
-                            "wallSec": wall_sec,
-                            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-                        },
-                    )
+                    # 采样机健康账本同册入账（mode:"eval"）——成功局才记，与 rollout 口径一致。
+                    # meta 是观测面：它**抛错不得让调用方重派**（成功边界 = 上面的 eval 行
+                    # append，评审 P1-3）——否则同 (stage,seed) 会写第二行。
+                    try:
+                        _record_agent_meta(
+                            meta_path,
+                            {
+                                "node": nd_id,
+                                "mode": "eval",
+                                "it": it,
+                                "stage": task[0],
+                                "seed": task[1],
+                                "ok": True,
+                                "win": win,
+                                "elapsedSec": manifest.get("elapsedSec"),
+                                "wallSec": wall_sec,
+                                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            },
+                        )
+                    except Exception as e:
+                        log(
+                            f"[eval] WARN record meta 写入失败（忽略）"
+                            f": {type(e).__name__}: {str(e)[:160]}"
+                        )
                 with lock:
                     wins[0] += win
                     cleared_total[0] += cleared
                     node_games[nd_id] = node_games.get(nd_id, 0) + 1
                     oc = str(manifest.get("outcome"))
                     outcomes[oc] = outcomes.get(oc, 0) + 1
+
+            def _record_with_retry(
+                manifest: dict, nd_id: str, task: tuple[int, int], wall_sec: float | None
+            ) -> bool:
+                """落盘重试（G4）：成功边界 = eval 行 append 成功。
+
+                本线程原地重试（总尝试 = 1 + EVAL_RECORD_RETRY_MAX）——**不回 pending**
+                （回队会撞上 all_done/worker 已退的竞态，且重跑整局代价大）。仍失败 ⇒
+                `record-failed` meta + WARN，本局不进 `landed`（计入缺口），由收官 drain
+                按归档权重补（plan/eval-final-round-and-dropped S2）。
+                """
+                last_err: Exception | None = None
+                for attempt in range(1, 2 + EVAL_RECORD_RETRY_MAX):
+                    try:
+                        record(manifest, nd_id, task, wall_sec)
+                        break
+                    except Exception as e:  # eval_row 缺键 / 写盘失败（行未落盘）
+                        last_err = e
+                        log(
+                            f"[eval] s{task[0]}/seed{task[1]} 落盘失败"
+                            f"（attempt {attempt}/{1 + EVAL_RECORD_RETRY_MAX}）"
+                            f": {type(e).__name__}: {str(e)[:160]}"
+                        )
+                else:
+                    err_txt = (
+                        f"{type(last_err).__name__}: {str(last_err)[:160]}"
+                        if last_err is not None
+                        else "unknown"
+                    )
+                    try:
+                        _record_agent_meta(
+                            meta_path,
+                            {
+                                "node": nd_id,
+                                "mode": "eval",
+                                "it": it,
+                                "stage": task[0],
+                                "seed": task[1],
+                                "ok": False,
+                                "reason": f"record-failed: {err_txt}",
+                                "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+                            },
+                        )
+                    except Exception as e2:
+                        log(
+                            f"[eval] WARN record-failed meta 写入失败（忽略）"
+                            f": {type(e2).__name__}: {str(e2)[:160]}"
+                        )
+                    log(
+                        f"[eval] s{task[0]}/seed{task[1]} 落盘失败 ×{1 + EVAL_RECORD_RETRY_MAX}"
+                        f" —— dropped（本局计入缺口，收官 drain 可补）"
+                    )
+                    return False
+                with lock:
+                    landed.add(task)
+                    if len(landed) >= total:
+                        _settle_complete()
+                return True
 
             def worker(nd: dict) -> None:
                 # 线程本地标签（不继承主线程）：收工断连的作用域键。
@@ -449,8 +527,8 @@ class EvalDispatcher:
                             _clear_inflight(task)
                             streaks[nd["id"]] = 0
                             soft_streaks[nd["id"]] = 0
-                            if len(seen) >= total:
-                                _settle_complete()
+                            # 收工触发**不在这里**：认领≠落盘；`_settle_complete` 由 landed 在
+                            # record 成功后触发（G3，评审 P0-3）。
                         elif fanout_copy:
                             _pop_inflight(task, nd["id"])
                         else:
@@ -502,14 +580,17 @@ class EvalDispatcher:
                             if t_task_start is not None
                             else None
                         )
+                        record_ok = False
                         try:
-                            record(manifest, nd["id"], task, wall_sec)
+                            record_ok = _record_with_retry(manifest, nd["id"], task, wall_sec)
                         finally:
                             with lock:
                                 writers[0] = max(0, writers[0] - 1)
+                        if not record_ok:
+                            continue  # 失败已 WARN + record-failed meta；本局计入缺口
                         el = manifest.get("elapsedSec")
                         log(
-                            f"[eval] {len(seen)}/{total} s{task[0]}/seed{task[1]} "
+                            f"[eval] {len(landed)}/{total} s{task[0]}/seed{task[1]} "
                             f"node={nd['id']} outcome={manifest.get('outcome')} "
                             f"ticks={manifest.get('ticks')} "
                             f"elapsed={str(el) + 's' if el is not None else '-'}"
@@ -600,8 +681,7 @@ class EvalDispatcher:
                             seen.add(task)
                             writers[0] += 1  # 收工前必须等它落盘
                             _clear_inflight(task)
-                            if len(seen) >= total:
-                                _settle_complete()
+                            # 收工触发**不在这里**：认领≠落盘；见 `_record_with_retry`。
                         elif fanout_copy:
                             _pop_inflight(task, "local")
                         elif attempt < EVAL_TASK_ATTEMPTS and task not in seen:
@@ -632,14 +712,17 @@ class EvalDispatcher:
                             if t_task_start is not None
                             else None
                         )
+                        record_ok = False
                         try:
-                            record(manifest, "local", task, wall_sec)
+                            record_ok = _record_with_retry(manifest, "local", task, wall_sec)
                         finally:
                             with lock:
                                 writers[0] = max(0, writers[0] - 1)
+                        if not record_ok:
+                            continue  # 失败已 WARN + record-failed meta；本局计入缺口
                         el = manifest.get("elapsedSec")
                         log(
-                            f"[eval] {len(seen)}/{total} s{task[0]}/seed{task[1]} "
+                            f"[eval] {len(landed)}/{total} s{task[0]}/seed{task[1]} "
                             f"node=local outcome={manifest.get('outcome')} "
                             f"ticks={manifest.get('ticks')} "
                             f"elapsed={str(el) + 's' if el is not None else '-'}"
@@ -820,12 +903,12 @@ class EvalDispatcher:
             closing = common.distribution.abort_active_requests(req_scope)
             if all_done.is_set():
                 log(
-                    f"[eval] it{it}: settled 满（{len(seen)}/{total}）— 断连 {closing} 条"
+                    f"[eval] it{it}: settled 满（{len(landed)}/{total}）— 断连 {closing} 条"
                     f"在飞连接 + 拒发新请求，立即收工（慢节点/竞速副本不再等）"
                 )
             else:
                 log(
-                    f"[eval] it{it}: 收工（未全结算 {len(seen)}/{total}）— 断连 {closing} 条"
+                    f"[eval] it{it}: 收工（未全落盘 {len(landed)}/{total}）— 断连 {closing} 条"
                     f"在飞连接（在途局丢弃，下次续跑）"
                     + ("【消费线程已全退】" if no_consumers else "")
                 )
@@ -848,6 +931,22 @@ class EvalDispatcher:
             for t_ in threads:
                 t_.join(timeout=max(0.01, join_deadline - time.monotonic()))
 
+            # —— 三本账收工行（G5，评审 P0-5）：认领/落盘两个口径必须可比 ——
+            with lock:
+                claimed_n = len(seen)
+                landed_n = len(landed)
+                gap_preview = [f"s{s}/seed{sd}" for (s, sd) in todo if (s, sd) not in landed][:8]
+            log(
+                f"[eval] it{it}: 派出={total} 认领={claimed_n} 落盘={landed_n} "
+                f"缺口={total - landed_n}"
+                + (f"（{'、'.join(gap_preview)}…）" if gap_preview else "")
+            )
+            if claimed_n != landed_n:
+                log(
+                    f"[eval] it{it}: WARN 认领≠落盘（{claimed_n} vs {landed_n}）"
+                    f"— 未落盘局带 missing 原因进 summary，收官 drain 可补"
+                )
+
             # 课程血缘进 summary 行（门控趋势过滤；延迟导入避免 biz.cmd ↔ 本模块环）。
             from worker.cmd import course_fp_for_args
 
@@ -857,7 +956,7 @@ class EvalDispatcher:
                 it=it,
                 pairs=pairs,
                 total=total,
-                seen=seen,
+                landed=landed,
                 wins=wins,
                 cleared_total=cleared_total,
                 outcomes=outcomes,

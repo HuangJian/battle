@@ -257,6 +257,51 @@ def test_load_override_loud_errors(tmp_path: Path) -> None:
     assert gate_inputs_mod.load_override(ok) == {"verdict": "HOLD"}
 
 
+def test_new_missing_field_rows_read_same_as_old_rows() -> None:
+    """兼容（P1-4，2026-10-02）：带 `missing` 的新 summary 行与旧行产出**同一** EvalRow。
+
+    `missing` 是新增观测字段（缺口 seed + 原因），读方 `_row_from_summary` 不消费它——
+    旧行缺字段 = unknown，不得让门行为分叉（plan/eval-final-round-and-dropped §4.3）。
+    """
+    base = {
+        "event": "eval_summary",
+        "iter": 20,
+        "wver": "w2",
+        "games": 200,
+        "wins": 120,
+        "winRate": 0.6,
+        "anchor_wr": 0.7,
+        "kills_mean": 1.5,
+        "timeout_frac": 0.1,
+        "course_fp": "fp1",
+    }
+    old = gate_inputs_mod._row_from_summary(dict(base))
+    new = gate_inputs_mod._row_from_summary(
+        {
+            **base,
+            "dropped": 2,
+            "missing": [
+                {"stage": 2000, "seed": 860040, "reason": "node-failed"},
+                {"stage": 2000, "seed": 860069, "reason": "record-failed"},
+            ],
+        }
+    )
+    assert old is not None and new is not None
+    assert old == new == gate_inputs_mod.EvalRow(
+        iter=20,
+        wver="w2",
+        games=200,
+        wins=120,
+        win_rate=0.7,
+        kills_mean=1.5,
+        zero_kill_frac=None,
+        phits_mean=None,
+        pickup_mean=None,
+        timeout_frac=0.1,
+        seed_fp=None,
+    )
+
+
 def test_event_scanners_basics(tmp_path: Path) -> None:
     """账本扫描：iteration 计数 / 样本通过量 / 训练秒 / run_start 与首迭代时刻；缺文件回落。"""
     p = tmp_path / "training_log.jsonl"

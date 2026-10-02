@@ -629,3 +629,180 @@ def test_eval_dispatch_kind_is_single_sourced() -> None:
     src = Path(ed.__file__).read_text(encoding="utf-8")
     assert 'kind="rollout"' not in src
     assert src.count("EVAL_WEIGHTS_KIND") >= 4  # 定义 1 + 三处使用（POST/请求/重发）
+
+
+# ---------------------------------------------------------------------------
+# 2026-10-02：收官轮 eval 缺失 + dropped 局静默丢失（plan/eval-final-round-and-dropped）。
+#   ① record 失败 = 「认领已计、行未落盘」（h4-aim-k25 it0 的 8 局）——成功边界必须是
+#      **eval 行落盘**；失败要有 record-failed meta + WARN + summary missing 原因。
+#   ② tail-race 副本可在原件 record() 进行中结算 —— 认领集（seen）不许下移，
+#      否则同 (stage,seed) 记两行（W1 的「改坏必红」构造性证明）。
+# ---------------------------------------------------------------------------
+
+
+def test_record_failure_keeps_game_out_of_landed(tmp_path, monkeypatch) -> None:
+    """record 失败（eval_row 抛错）⇒ 本局不算落盘：meta 记 record-failed、summary 缺口带原因。
+
+    现状（W1 之前）红：异常逃出 worker（无 try/重试）、meta 无痕、summary 无 missing。
+    """
+    h = _Harness(tmp_path, monkeypatch, games=2)
+    bad: list[dict] = []
+
+    def fetch(*_a, **kw):
+        m = h.manifest(kw["stage"], kw["seed"])
+        if not bad:
+            bad.append(m)  # 第一局模拟「行落盘失败」
+        return m, {}
+
+    orig_eval_row = ed.eval_row
+
+    def flaky_eval_row(manifest, **kw):
+        if bad and manifest is bad[0]:
+            raise KeyError("kills")  # eval_row 缺键 = 行未落盘的现实形态
+        return orig_eval_row(manifest, **kw)
+
+    monkeypatch.setattr(ed, "eval_row", flaky_eval_row)
+    rows = h.run(fetch)
+    bad_seed = int(bad[0]["seed"])
+    played = [r for r in rows if r.get("event") == "eval"]
+    summ = [r for r in rows if r.get("event") == "eval_summary"]
+    assert len(played) == 1, f"失败局不得有行（成功边界=行落盘）: {played}"
+    assert summ and summ[-1]["games"] == 1 and summ[-1]["dropped"] == 1, summ
+    assert summ[-1].get("missing") == [
+        {"stage": 2000, "seed": bad_seed, "reason": "record-failed"}
+    ], summ[-1].get("missing")
+    meta = [
+        json.loads(line)
+        for line in (h.work / "dist-agent-meta.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    failed = [r for r in meta if r.get("mode") == "eval" and r.get("ok") is False]
+    assert len(failed) == 1, f"落盘失败必须留 meta 痕（h4-aim-k25 it0 的 8 局就是无痕）: {meta}"
+    assert str(failed[0].get("reason") or "").startswith("record-failed"), failed[0]
+    assert "落盘失败" in "\n".join(h.logs)
+
+
+def test_record_transient_failure_retries_then_lands(tmp_path, monkeypatch) -> None:
+    """G4 可恢复面：首次落盘失败 ⇒ 本线程重试后成功落盘，缺口为 0、无 record-failed meta。
+
+    成功边界 = eval 行 append 成功；重试次数 = 1 + EVAL_RECORD_RETRY_MAX（与 EVAL_TASK_ATTEMPTS
+    同家，worker/eval_local.py）。
+    """
+    h = _Harness(tmp_path, monkeypatch, games=1)
+    calls = {"n": 0}
+    orig_eval_row = ed.eval_row
+
+    def flaky_eval_row(manifest, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise OSError("disk hiccup")  # 首次失败，重试应恢复
+        return orig_eval_row(manifest, **kw)
+
+    monkeypatch.setattr(ed, "eval_row", flaky_eval_row)
+    rows = h.run(lambda *_a, **kw: (h.manifest(kw["stage"], kw["seed"]), {}))
+    played = [r for r in rows if r.get("event") == "eval"]
+    summ = [r for r in rows if r.get("event") == "eval_summary"]
+    assert len(played) == 1 and calls["n"] == 2, (played, calls)
+    assert summ and summ[-1]["games"] == 1 and summ[-1]["dropped"] == 0, summ
+    assert summ[-1].get("missing") == [], summ[-1].get("missing")
+    meta_path = h.work / "dist-agent-meta.jsonl"
+    meta = [
+        json.loads(line)
+        for line in meta_path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert [r for r in meta if r.get("ok") is False] == [], meta
+    assert "落盘失败" in "\n".join(h.logs), h.logs
+
+
+def test_fanout_copy_during_record_is_deduped(tmp_path, monkeypatch) -> None:
+    """record 进行中副本结算 ⇒ 必须按 dup 丢弃，不得双计（认领集不许下移）。
+
+    构造：3 节点 2 局——两个主副本各占一局（其中一条卡在 record() 里），第三个节点
+    尾段竞速一局；副本腿等 record 开始后才返回 ⇒ 它结算时目标任务**已在 record 中**。
+    正确实现（claim 先行）：副本命中 `seen` → `dup settle … — dropped`，账本 1 行。
+    错误实现（seen.add 下移到 record 之后）：副本看不到认领 ⇒ 自己记一行 ⇒ 双计。
+    """
+    nodes = [
+        {"id": "a97", "url": "http://a97.local", "concurrency": 1},
+        {"id": "a98", "url": "http://a98.local", "concurrency": 1},
+        {"id": "a99", "url": "http://a99.local", "concurrency": 1},
+    ]
+    h = _LaneHarness(tmp_path, monkeypatch, games=2, nodes=nodes, local_slots=0)
+    rec_started = threading.Event()
+    release_rec = threading.Event()
+    calls_lock = threading.Lock()
+    calls = [0]
+    all_fetching = threading.Event()
+    orig_eval_row = ed.eval_row
+
+    def slow_eval_row(manifest, **kw):
+        rec_started.set()
+        assert release_rec.wait(timeout=30.0), "record 未被放行（用例内部死锁）"
+        return orig_eval_row(manifest, **kw)
+
+    def fetch(*_a, **kw):
+        # 构造（2026-10-02 修满载 flake）：3 条腿（2 主副本 + 1 竞速副本）必须在**同一次
+        # 在飞窗口**内齐到再放行——否则满载时竞速腿可能晚到、看到 inflight 已清而径直返回
+        # （「没有副本」不是实现错，是构造没锁住）。两条主副本在 fetch 里等齐 ⇒ 竞速腿必然
+        # 在 pick_race_target 时看到在飞任务。
+        with calls_lock:
+            calls[0] += 1
+            if calls[0] >= len(nodes):
+                all_fetching.set()
+        assert all_fetching.wait(timeout=20.0), "3 条腿未能在飞窗口内齐到（用例前提失效）"
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    monkeypatch.setattr(ed, "eval_row", slow_eval_row)
+    box: dict = {}
+
+    def _run() -> None:
+        box["rows"], _elapsed = h.play(fetch)
+
+    t = threading.Thread(target=_run, daemon=True, name="fanout-race-test")
+    t.start()
+    try:
+        assert _wait_until(lambda: any("dup settle" in line for line in h.logs), timeout=20.0), (
+            "副本没被认领集去重 —— seen 被下移了？（同 (stage,seed) 双计温床）"
+        )
+        assert rec_started.is_set(), "胜者必须有一局正在 record（用例前提失效）"
+    finally:
+        release_rec.set()
+    t.join(timeout=20.0)
+    assert not t.is_alive(), "派发轮未在放行 record 后返回"
+    rows = box["rows"]
+    played = [r for r in rows if r.get("event") == "eval"]
+    assert len(played) == 2, f"每局只许一行（fanout 双计）: {played}"
+    summ = [r for r in rows if r.get("event") == "eval_summary"]
+    assert summ and summ[-1]["games"] == 2 and summ[-1]["dropped"] == 0, summ
+
+
+def test_settled_full_requires_landed_not_claimed(tmp_path, monkeypatch) -> None:
+    """`settled 满` 只在**落盘满**时出现（认领满但有一局行未落 ⇒ 不进该分支）。
+
+    现状（W1 之前）红：`_settle_complete` 由认领触发 ⇒ 落盘 1/2 也打「settled 满（2/2）」。
+    """
+    h = _Harness(tmp_path, monkeypatch, games=2)
+    bad: list[dict] = []
+
+    def fetch(*_a, **kw):
+        m = h.manifest(kw["stage"], kw["seed"])
+        if not bad:
+            bad.append(m)
+        return m, {}
+
+    orig_eval_row = ed.eval_row
+
+    def flaky_eval_row(manifest, **kw):
+        if bad and manifest is bad[0]:
+            raise KeyError("kills")
+        return orig_eval_row(manifest, **kw)
+
+    monkeypatch.setattr(ed, "eval_row", flaky_eval_row)
+    rows = h.run(fetch)
+    joined = "\n".join(h.logs)
+    assert "settled 满（2/2）" not in joined, (
+        "认领满但落盘 1/2 时不得打「settled 满」：" + joined
+    )
+    played = [r for r in rows if r.get("event") == "eval"]
+    assert len(played) == 1

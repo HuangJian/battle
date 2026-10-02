@@ -21,6 +21,70 @@
 
 ---
 
+## §59 收官轮 eval 缺失 + dropped 局静默丢失：drain 收进 `finish_course` + claim/landed 拆分（2026-10-02，plan/eval-final-round-and-dropped.plan.md）
+
+### 一句话
+
+评估的账有三处漏：① 收官 drain 只接在单课程前台入口（多课程 serve 的 `finish_course` 没有
+drain，而延迟派发只到 it-1 ⇒ **最后一轮权重永远没有 eval**）；② `seen`（认领）在 `record()`
+落盘前计数且异常逃逸 ⇒ 缺口可静默蒸发（it0 的「settled 满 200/200」与「收工 192/200」并存）；
+③ 缺口既不补派也不带原因（失败局只进 `dist-agent-meta`）。三条都在「评估的账」上，训练侧零改动。
+
+### 现场账（h4-aim-k25，2026-10-02）
+
+| 点 | 账本 games | dropped | 性质 |
+|---|---|---|---|
+| it0 | 192/200 | 8 | `seen` 已计、行未落盘（meta 零 `ok=False`） |
+| it25 | 198/200 | 2 | 节点失败（meta `ok=False`，原因不进账本） |
+| it40 | 0（训练期间） | — | serve 收官路径无 drain；09:57 手点 evalA 补出 198 局 |
+
+`[eval] drain:` 整份日志零命中——不是「跑了没做事」，而是早退分支不打日志，grep 无法区分。
+最终 summary 的 `dropped` 一直诚实（公式自带账本兜底，自 2026-08-25 `ce7d850c`）；
+要修的是**过程可判与可补**。
+
+### 三条根因
+
+- **R1 收官 drain 缺位**：`TrainingLoop.run()` 尾部有 drain，而 serve 收官共用的
+  `finish_course` 没有；延迟派发 `select_delayed_eval_it` 只到 it-1 ⇒ 最后一轮权重无 eval 路径。
+- **R2 认领≠落盘**：`seen.add` 在 `record()` 之前、`record()` 抛错无重试无 meta ⇒ 完全无痕。
+  **不能把 `seen.add` 下移**：tail-race 副本可在原件 `record()` 进行中结算（去重全看 `seen`），
+  下移 ⇒ 同 (stage,seed) 记两行、wins/n 双计——`tests/trainer/test_eval_dispatch_resilience.py`
+  的 fanout 用例（3 腿同期在飞）是构造性证明。
+- **R3 缺口无痕**：失败/未落盘局不带原因；下一轮 `todo` 又只服务本轮 wver（`wver=sha256(权重字节)`
+  每轮变，「同 wver 旧轮并入 pending」结构性无效）。
+
+### 收官调用矩阵（G1/G2）
+
+| 终止路径 | drain | block | 备注 |
+|---|---|---|---|
+| 单课程停车（默认，`_park_after_completion`→`finish_course`） | ✅ | True | drain 在 `write_run_complete` 之前 |
+| `--exit-on-done` / 熔断 `_tripped`（`run()` 显式） | ✅ | True | 不写 run_complete 的终止路径 |
+| `--smoke` | ❌ | — | 作废干净退出（旧行为） |
+| 多课程 serve·RL（`_settle_rounds` 按 kind 分派） | ✅ | **False** | 派发即返回，不冻其它课 |
+| 多课程 serve·BC（`BcLoop.finish_course(self, it)` 另一份实现） | ❌ | — | **不带 kwargs**（传了 TypeError 带崩 serve） |
+
+`run_complete` 只保证 drain **已派发**（block=False 时后台线程跑），不保证已结算——
+控制台「已完成」横幅不等 eval 尾巴（口径写死，不新增「收尾中」态）。
+
+### 口径：结算语义 → 落盘语义
+
+`settle_eval_summary` 的参数 `seen` → `landed`（**公式一字不动**）；`_settle_complete` 由 `landed`
+触发；`record()` 失败本线程重试 `EVAL_RECORD_RETRY_MAX=2`（成功边界 = eval 行 append 成功，
+meta 抛错不得触发重派）+ `record-failed` meta + WARN，仍失败计入缺口；summary 新增 `missing`
+（有界 20，按 seed 升序，reason ∈ `record-failed`/`node-failed`/`undispatched`）；收官 drain
+按归档权重**逐轮升序**补（不再 `cand[-1]`），每条早退一行日志（G8）。
+
+### 验证
+
+nn 门禁 **3494 passed / 9 skipped**（ruff + mypy 全量）。新增/改写用例：
+`tests/trainer/test_finish_course_drains_eval.py`（5，调用矩阵）·
+`tests/trainer/test_eval_dispatch_resilience.py` 2026-10-02 三条（record 失败 / fanout 去重 /
+settled 满看落盘）· `tests/worker/test_eval_timing.py`（多轮 drain 升序 + G8 早退日志）·
+`tests/worker/test_gate_inputs_split.py`（`missing` 新字段与旧行同一 `EvalRow`）。
+决策 → `DECISIONS.md` §2026-10-02-goalnn-eval-final-round-and-dropped。
+
+---
+
 ## §58 aim-dodge 杠杆 8 列落地（idx66–73；dim 69→74）+ 事件扩展 + 回写机制（2026-10-01，plan/aim-dodge-levers.plan.md）
 
 ### 一句话

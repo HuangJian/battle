@@ -6709,3 +6709,25 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
 **指针**：全文 `docs/nn/remote-transport.md` §53 · 现场账 `docs/nn.progress.md` 2026-10-02 节 ·
 计划 `plan/transfer-residual.plan.md` · 回归 5 文件新 19 例 + 1 例加断言 · 门禁 nn **3483 passed /
 9 skipped** · 根 `bun run check` **2345 pass / 0 fail**。
+
+## §2026-10-02-goalnn-eval-final-round-and-dropped（2026-10-02，收官轮 eval 缺失 + dropped 局静默丢失）
+
+- **背景**：h4-aim-k25 真机产物显示 ① it40（收官轮）训练期间 eval 零局——多课程 serve 的收官
+  `finish_course` 没有 drain，而延迟派发只到 it-1 ⇒ 最后一轮权重永远没有 eval 路径；② it0 缺 8 局、
+  it25 缺 2 局——`seen`（认领）在 `record()` 落盘之前计数且异常逃逸，缺口既不补派也不带原因
+  （plan/eval-final-round-and-dropped §1–§2）。
+- **备选与否决**：把 `seen.add` 直接下移到 `record()` 之后 —— 否：tail-race 副本可在原件 record
+  进行中结算（去重全看 `seen`），下移后同 (stage,seed) 记两行、wins/n 双计（W0 fanout 用例可证）；
+  「同 wver 旧轮并入本轮 pending」补旧轮 —— 否：`wver = sha256(权重字节)` 每轮变，结构性无效；
+  「dropped 口径留给读方兜」—— 否：口径必须单一（谁喂公式只有一处）。
+- **决定**：`finish_course(it, *, drain=True, block=True)` 收编收官 eval drain（serve 的 RL 传
+  `block=False` 不冻其它课；BC 另一份实现按 kind 分派、不带 kwargs）；claim 集（`seen`，位置不动）
+  与 landed 集拆分——`_settle_complete` 与 `settle_eval_summary` 只认**落盘**（参数 `seen`→`landed`，
+  `dropped` 公式一字未动，语义=结算→落盘）；`record()` 失败本线程重试 `EVAL_RECORD_RETRY_MAX` +
+  `record-failed` meta + WARN，仍失败计入缺口；summary 新增 `missing`（有界 20，原因
+  record-failed/node-failed/undispatched）；收官 drain 按归档权重**逐轮**补（不再只 cand[-1]）。
+- **违反后果**：把 `seen` 下移 ⇒ fanout 双计（账本行与胜率分母漂移）；给 BC 的 `finish_course`
+  传 kwargs ⇒ TypeError 带崩 serve；serve 用 `block=True` ⇒ 冻住其它课（plan N4）。
+- **指针**：计划 `plan/eval-final-round-and-dropped.plan.md` · 全文 → `docs/nn/engineering.md` §59 ·
+  回归 `tests/trainer/test_finish_course_drains_eval.py` · `tests/trainer/test_eval_dispatch_resilience.py`
+  （2026-10-02 节）。

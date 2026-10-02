@@ -87,7 +87,9 @@ INBOUND_CALLS = {
 OUTBOUND_HANDS = {
     "run": {"_drain_pending_eval"},
     "run_one_round": {"round_failure", "round_steps"},
-    "finish_course": {"_sync_cloud_halt"},
+    # finish_course 也 drain（2026-10-02 收官矩阵：停车路径经它派发；run() 自己的
+    # `_drain_pending_eval` 只服务 exit-on-done/熔断两条不写 run_complete 的终止路径）。
+    "finish_course": {"_sync_cloud_halt", "_drain_pending_eval"},
 }
 
 #: 出边手的**归属类**（★ 功能性断言用：必须解析到这些类，不是同名副本）。

@@ -111,7 +111,10 @@ class FakeLoop:
     def release_torch(self) -> None:
         self.released += 1
 
-    def finish_course(self, it: int) -> None:
+    def finish_course(self, it: int, *, drain: bool = True, block: bool = True) -> None:
+        # 收官矩阵守卫（plan/eval-final-round-and-dropped §4.1/P0-2）：serve 的 RL 收官
+        # 必须显式传 drain=True, block=False（派发即返回，不冻其它课）。
+        assert drain is True and block is False, f"serve RL 收官 kwargs 漂移: {drain=} {block=}"
         self.finished.append(int(it))
 
     # ---- 执行面 ----
