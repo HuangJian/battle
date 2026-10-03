@@ -2403,6 +2403,13 @@ a.tc-btn {
   gap: var(--sp-1);
   flex: 0 0 auto;
 }
+/* 复制键与动作区分区（2026-10-03 plan/dashboard-banner-global §4.4）：复制是工具、动作是决策；
+   图标键贴动作区**左侧**，不参与主按钮位竞争。 */
+.tc-dock__copy {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
 .tc-dock__more {
   align-self: flex-start;
   padding: 2px 10px;

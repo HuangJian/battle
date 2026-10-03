@@ -35,7 +35,7 @@ const clean: AlertInput = {
   cloudHalts: undefined,
   viewing: 'c1',
   acks: [],
-  loopComplete: null,
+  loopCompletes: null,
   ppoQueueStall: null,
   courseEdit: null,
   readOnly: false,
@@ -43,6 +43,7 @@ const clean: AlertInput = {
   now: 1_700_000_000_000,
 }
 
+/** 条目夹具（补 `copyText`：`AlertItem` 必填，2026-10-03 G4）。 */
 const item = (id: string, severity: AlertItem['severity']): AlertItem => ({
   id,
   severity,
@@ -51,6 +52,7 @@ const item = (id: string, severity: AlertItem['severity']): AlertItem => ({
   detail: '',
   role: 'status',
   actions: [],
+  copyText: id,
 })
 
 describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
@@ -177,16 +179,27 @@ describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
     expect(buildAlerts({ ...clean, readOnly: true, roDismissed: true })).toEqual([])
   })
 
-  it('训练完成停车 → history（是设计内停车，不是故障）', () => {
-    // 传入的就是快照里的 `LoopComplete` 原形（at/reason/iters）——`AlertInput` 收的
-    // 就是它，不在视图层再把类型窄化一遍。
+  it('训练完成停车 → history（设计内停车）；按课成列、标题带课名、可关闭可复制', () => {
+    // 传入的就是快照里的 `LoopComplete` 原形（at/reason/iters）——`AlertInput` 收的就是它。
     const items = buildAlerts({
       ...clean,
-      loopComplete: { at: '2026-09-20T10:00:00Z', reason: 'iters 跑满', iters: 40 },
+      // 故意乱序传入：输出必须按课程名排序（确定性，不依赖对象键序）。
+      loopCompletes: {
+        b: { at: '2026-09-20T11:00:00Z', reason: 'iters 跑满', iters: 40 },
+        a: { at: '2026-09-20T10:00:00Z', reason: 'iters 跑满', iters: 40 },
+      },
     })
-    expect(items[0]!.severity).toBe('history')
-    expect(items[0]!.title).toContain('iters 跑满')
-    expect(items[0]!.actions).toEqual([])
+    expect(items.map((x) => x.id)).toEqual(['loop-complete:a', 'loop-complete:b'])
+    expect(items.map((x) => x.title)).toEqual([
+      '课程 a 训练已完成（iters 跑满）',
+      '课程 b 训练已完成（iters 跑满）',
+    ])
+    const a = items[0]!
+    expect(a.severity).toBe('history')
+    expect(a.actions.map((x) => x.kind)).toEqual(['ack'])
+    expect(a.actions[0]!.ackKey).toBe('loop-complete|a|2026-09-20T10:00:00Z')
+    expect(a.copyText).toContain('课程 a')
+    expect(a.copyText).toContain(a.title)
   })
 
   // ────────────────────────── T8：离线静默停摆（plan/auto-offline-handoff §3.9） ──────────────────────────
@@ -215,11 +228,12 @@ describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
     expect(a.detail).toContain('TPU 重连')
     expect(a.detail).toContain('手工导入结果包')
     expect(a.detail).toContain('交还自动池')
-    // 自带动作 = 第三条出路（resume 语义：真调 API）
-    expect(a.actions.map((x) => x.kind)).toEqual(['resume'])
+    // 自带动作 = 第三条出路（resume 语义：真调 API）+ 「知道了」（ack 只写本地）
+    expect(a.actions.map((x) => x.kind)).toEqual(['resume', 'ack'])
     expect(a.actions[0]!.act).toBe('unsetCourseMode')
     expect(a.actions[0]!.body).toEqual({ course: 'c5-gae' })
     expect(a.actions[0]!.primary).toBe(true)
+    expect(a.actions[1]!.ackKey).toBe(`offline-stall|c5-gae|100`)
   })
 
   it('running-stale（有租约但无进度）→ warn 条，标题带上持有人', () => {
@@ -247,7 +261,7 @@ describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
     expect(buildAlerts({ ...clean, offlineStalls: [] })).toEqual([])
   })
 
-  it('六类全开 → 六条（收敛前是 6 个平级堆叠的横幅）', () => {
+  it('七类全开 → 各自成条（含多课收官与离线停摆；收敛前是 6 个平级堆叠的横幅）', () => {
     const items = buildAlerts({
       ...clean,
       cloudHalts: {
@@ -255,20 +269,32 @@ describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
         // 别课的停机不进坞（只取当前课）——它由课程矩阵的徽标承载
         c2: { at: 'T2', reason: 'r', status: 'halted' },
       },
-      loopComplete: { at: 'T', reason: 'r', iters: 1 },
+      loopCompletes: { 'c5-gae': { at: 'T', reason: 'r', iters: 1 } },
       ppoQueueStall: { jobId: 'j', waitedSec: 601, it: 1 },
+      offlineStalls: [
+        {
+          course: 'c5-gae',
+          why: 'pending-export',
+          holder: '',
+          lastMtime: 0,
+          flippedAt: 100,
+          ageSec: 3600,
+        },
+      ],
       courseEdit: { verdict: 'rejected', fields: [] },
       readOnly: true,
     })
     expect(items.map((a) => a.id)).toEqual([
       'halt-c1',
-      'loop-complete',
+      'loop-complete:c5-gae',
       'ppo-queue-stall',
+      'offline-stall-c5-gae',
       'course-edit-rejected',
       'read-only',
     ])
-    // 严重度分布：3 err（停机 / 排队超时 / 编辑被拒）→ 1 info（只读）→ 1 history（训练完成）
+    // 严重度分布：4 err（停机 / 排队超时 / 停摆 / 编辑被拒）→ 1 info（只读）→ 1 history（训练完成）
     expect(sortAlerts(items).map((a) => a.severity)).toEqual([
+      'err',
       'err',
       'err',
       'err',
@@ -280,6 +306,152 @@ describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
   it('只读提示的字段缺失文案：未识别字段（不显示空括号）', () => {
     const items = buildAlerts({ ...clean, courseEdit: { verdict: 'rejected', fields: [] } })
     expect(items[0]!.title).toContain('未识别字段')
+  })
+})
+
+describe('全局收官 + 全条目可关闭可复制（2026-10-03 plan/dashboard-banner-global G1–G5）', () => {
+  /** 全类目开满：每类至少一个条目（G3/G4 的穷举驱动集）。 */
+  const allOn = (): AlertInput => ({
+    ...clean,
+    cloudHalts: {
+      c1: { at: 'T1', reason: 'r', status: 'halted' },
+      c9: { at: 'T3', reason: 'r', status: 'recovered', clearedAt: 'T4' },
+      c2: { at: 'T2', reason: 'r', status: 'halted' }, // 别课停机：不进坞（N1）
+    },
+    loopCompletes: {
+      b: { at: '2026-09-20T11:00:00Z', reason: 'iters 跑满', iters: 40 },
+      a: { at: '2026-09-20T10:00:00Z', reason: 'iters 跑满', iters: 40 },
+    },
+    ppoQueueStall: { jobId: 'j1', waitedSec: 601, it: 7 },
+    offlineStalls: [
+      {
+        course: 'c5-gae',
+        why: 'pending-export',
+        holder: '',
+        lastMtime: 0,
+        flippedAt: 100,
+        ageSec: 3600,
+      },
+      {
+        course: 'c6-chip',
+        why: 'running-stale',
+        holder: 'kaggle-tpu-7',
+        lastMtime: 42,
+        flippedAt: 0,
+        ageSec: 2400,
+      },
+    ],
+    courseEdit: { verdict: 'rejected', fields: ['reward'], at: '2026-10-03 10:00:00' },
+    readOnly: true,
+  })
+
+  // 停机「已恢复」与「停机中」互斥（同一课同一时刻只有一态），不能塞进同一份输入；
+  // 其余每类都已在 allOn 里。两份输入拼起来 = 七类 / 九条全覆。
+  const recovered = (): AlertInput => ({
+    ...clean,
+    cloudHalts: {
+      c1: { at: 'T1', reason: 'r', status: 'recovered', clearedAt: 'T2', clearReason: '恢复训练' },
+    },
+  })
+  const allItems = (): AlertItem[] => [allOn(), recovered()].flatMap((i) => buildAlerts(i))
+
+  it('G1：视图课程 A、B 收官 ⇒ 不切课也能看到 B（且可分辨）', () => {
+    const items = buildAlerts({
+      ...clean,
+      viewing: 'A',
+      loopCompletes: { B: { at: 'T', reason: 'iters 跑满', iters: 3 } },
+    })
+    expect(items.map((a) => a.id)).toEqual(['loop-complete:B'])
+    expect(items[0]!.title).toContain('课程 B')
+  })
+
+  it('G3：全部条目都有 kind=ack（穷举 buildAlerts 产出集，不手写类目清单）', () => {
+    const items = allItems()
+    expect(items.length).toBeGreaterThanOrEqual(9) // 守卫：穷举集非空（防空跑）
+    for (const a of items) {
+      const acks = a.actions.filter((x) => x.kind === 'ack')
+      expect(acks.length).toBeGreaterThanOrEqual(1)
+      expect(acks[0]!.ackKey).toBeTruthy()
+    }
+  })
+
+  it('G4：全部条目都有三行 copyText（title/detail/元信息），且含条目 id', () => {
+    for (const a of allItems()) {
+      const lines = a.copyText.split('\n')
+      expect(lines.length).toBe(3)
+      expect(lines[0]).toBe(a.title)
+      expect(lines[1]).toBe(a.detail)
+      const meta = lines[2]!
+      expect(meta.startsWith('（')).toBe(true)
+      expect(meta.endsWith('）')).toBe(true)
+      expect(meta).toContain(`条目 ${a.id}`)
+      expect(meta).toContain(`严重度 ${a.severity}`)
+    }
+  })
+
+  it('G5：同课两次收官（at 不同）⇒ 两个键；ack 第一次后第二次仍在', () => {
+    const done = (at: string): AlertInput => ({
+      ...clean,
+      loopCompletes: { a: { at, reason: 'r', iters: 1 } },
+    })
+    const first = buildAlerts(done('T1'))
+    const key1 = first[0]!.actions[0]!.ackKey!
+    expect(buildAlerts({ ...done('T1'), acks: [key1] })).toEqual([])
+    const again = buildAlerts({ ...done('T2'), acks: [key1] })
+    expect(again.length).toBe(1)
+    expect(again[0]!.actions[0]!.ackKey).not.toBe(key1)
+  })
+
+  it('G3/G5：「知道了」后条目真的消失（逐类各验一条；只读提示走 roDismissed 除外）', () => {
+    const cases: AlertInput[] = [
+      { ...clean, cloudHalts: { c1: { at: 'T1', reason: 'r', status: 'halted' } } },
+      {
+        ...clean,
+        cloudHalts: { c1: { at: 'T1', reason: 'r', status: 'recovered', clearedAt: 'T2' } },
+      },
+      { ...clean, loopCompletes: { a: { at: 'T', reason: 'r', iters: 1 } } },
+      { ...clean, ppoQueueStall: { jobId: 'j1', waitedSec: 601, it: 7 } },
+      {
+        ...clean,
+        offlineStalls: [
+          {
+            course: 'c5-gae',
+            why: 'pending-export',
+            holder: '',
+            lastMtime: 0,
+            flippedAt: 100,
+            ageSec: 3600,
+          },
+        ],
+      },
+      { ...clean, courseEdit: { verdict: 'rejected', fields: ['reward'], at: 'T' } },
+    ]
+    for (const inp of cases) {
+      const items = buildAlerts(inp)
+      expect(items.length).toBe(1) // 守卫：每类单独成条（防空跑）
+      const key = items[0]!.actions.find((x) => x.kind === 'ack')!.ackKey!
+      expect(buildAlerts({ ...inp, acks: [key] })).toEqual([])
+    }
+  })
+
+  it('G5：停机 ack 键逐字节不变（升级不重弹；单表冻结值）', () => {
+    const items = buildAlerts({
+      ...clean,
+      cloudHalts: { c1: { at: 'T1', reason: 'r', status: 'halted' } },
+    })
+    // 旧格式键（cloudHaltAckKey = alertAckKey 委托；kind 不得改名）
+    expect(items[0]!.actions[1]!.ackKey).toBe('halted|c1|T1')
+  })
+
+  it('G6：关闭只在本地（ack 是唯一新增出口；没有一个条目新增 act）', () => {
+    for (const a of allItems()) {
+      for (const act of a.actions) {
+        if (act.kind === 'ack') continue
+        // 既有 resume 动作的 act 名只允许是既有 2 个（不新增服务端消警路径）
+        expect(act.act).toBeTruthy()
+        expect(['cloud-resume', 'unsetCourseMode']).toContain(act.act!)
+      }
+    }
   })
 })
 
@@ -360,6 +532,7 @@ describe('AlertDock SSR 结构', () => {
         detail: '依据与指引',
         role: 'alert',
         actions: [],
+        copyText: '一句话结论\n依据与指引\n（条目 x · 严重度 err）',
       },
     ])
     expect(html).toContain('class="tc-dock"')
@@ -393,6 +566,7 @@ describe('AlertDock SSR 结构', () => {
         title: 't',
         detail: 'd',
         role: 'alert',
+        copyText: 't\nd\n（条目 x · 严重度 err）',
         actions: [
           {
             kind: 'resume',
@@ -408,6 +582,28 @@ describe('AlertDock SSR 结构', () => {
     expect(html).toContain('tc-btn tc-btn--sm tc-btn--primary')
     expect(html).toContain('>立即恢复</button>')
     expect(html).toContain('>知道了</button>')
+  })
+
+  it('复制键：每条都有（icon 模式 / aria-label），且位于动作区**之前**（不抢主按钮位）', () => {
+    const html = renderDock([
+      {
+        id: 'x',
+        severity: 'err',
+        icon: '⚠',
+        title: 't',
+        detail: 'd',
+        role: 'alert',
+        copyText: 't\nd\n（条目 x · 严重度 err）',
+        actions: [{ kind: 'ack', label: '知道了', ackKey: 'k' }],
+      },
+    ])
+    expect(html).toContain('aria-label="复制告警"')
+    expect(html).toContain('tc-copy--icon')
+    const copyIdx = html.indexOf('tc-dock__copy')
+    const actsIdx = html.indexOf('tc-dock__acts')
+    expect(copyIdx).toBeGreaterThan(-1)
+    expect(actsIdx).toBeGreaterThan(-1)
+    expect(copyIdx).toBeLessThan(actsIdx)
   })
 })
 

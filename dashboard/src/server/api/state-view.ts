@@ -1,11 +1,13 @@
 /** state-view.ts — /api/state 主视图组装。 */
 import { existsSync } from 'fs'
 import path from 'path'
+import { pidAlive } from '../../core/net'
 import { REPO_ROOT } from '../../core/paths'
+import { entryForCourse, loadRegistry } from '../../core/registry'
 import { type ConsoleStateView, type MetricsView, compactSummary } from '../../web/view'
 import { buildContributionView, inflightByWorkerFromQueue } from '../contribution'
 import { aggregateNodeHistory, resolveWindow } from '../pool-history'
-import { courseEnableMarkerPath, isBcCourse } from '../../stack/courses'
+import { courseEnableMarkerPath, courseEnabled, isBcCourse } from '../../stack/courses'
 import { loadConsoleState, readCourseModes } from '../actions'
 import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/specs'
 import { readIterMetrics, readPairedReferee } from '../iters'
@@ -17,6 +19,8 @@ import { buildOverview, buildWorkerRegistry, getHubAdmin, sharedTrainerAlive } f
 import { detectPpoQueueStall } from './ppo-queue'
 import { readTunnelAbRuns } from './tunnel-ab'
 import { buildGateHaltView } from '../../stack/gate-halt'
+import { collectLoopCompletes } from './loop-complete'
+import { readLogTail } from './logs'
 import { getSlowSnapshot } from './snapshot-refresher'
 
 export async function buildStateView(courseOverride?: string): Promise<ConsoleStateView> {
@@ -27,16 +31,25 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   const archivedList = readArchived()
   const courses = discoverCourses(500, new Set(archivedList.map((a) => a.course)))
   const course = courseOverride || effectiveCourse(state, courses)
+  // 收官横幅（2026-10-03，plan/dashboard-banner-global §4.1）：共享 trainer 在跑时，逐课读账本尾
+  // 派生「训练已完成」——**全局按课成列**（收官是终态、无动作、不会自愈；只弹当前课 = 不切课看不到）。
+  //  · 判活是**全局一个事实**（`trainingLoop` 是共享组件，`scopeOf` 恒 `''`），不逐课探组件；
+  //  · 课程清单 = 已开课 ∪ 查看课程（同 `harvestTrainingCourseActuals` 的成本闸：tmp 下几十门
+  //    历史课的账本都在盘上，逐拍全扫是浪费）；查看课无条件并入 ⇒ 「切到那门课就能看到」零回归。
+  const trainerEntry = entryForCourse(loadRegistry(), 'trainingLoop', '')
+  const loopAlive = !!trainerEntry && pidAlive(trainerEntry.pid)
+  const loopCompletes = collectLoopCompletes(
+    [...courses.filter((c) => courseEnabled(c)), course],
+    loopAlive,
+    (c) => readLogTail(path.join(REPO_ROOT, 'tmp', c, 'training_log.jsonl'), 1000).lines,
+  )
   // 机群级两笔冷探测互不依赖，**并行起跑**：慢快照里的节点 ping（~1.5s）与 hub 观测面
   // （`buildOverview`/`buildWorkerRegistry` 里的 ~1.2s）。串行时它们是相加的——冷启动/
   // 动作后的第一帧实测 2.8s → 并行后 ~1.5s（2026-09-22）。下面三处 await 同一个
   // 单飞 promise（缓存键同为全局），不会多探一次。
   const hubProbe = getHubAdmin(cfg, course)
   void hubProbe.catch(() => undefined) // 真 await 在下面；这里只防「无人接手」的 rejection
-  const { components, nodes, localNode, phase, loopComplete, pushFleet } = await getSlowSnapshot(
-    cfg,
-    course,
-  )
+  const { components, nodes, localNode, phase, pushFleet } = await getSlowSnapshot(cfg, course)
   let metrics: MetricsView = { available: false, iters: [] }
   if (course && existsSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'))) {
     try {
@@ -172,7 +185,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     // 纯读两份小 JSON（毫秒级）；读不了各自降级（观测面坏不得把 /api/state 带崩）。
     gateHalt: buildGateHaltView(),
     ppoQueueStall,
-    loopComplete,
+    loopCompletes,
     contributionBrief,
   }
 }

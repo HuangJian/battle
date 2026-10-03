@@ -15,7 +15,7 @@
 import { describe, expect, it } from 'bun:test'
 import {
   cloudHaltAckKey,
-  parseCloudHaltAcks,
+  parseAlertAcks,
   visibleCloudHalts,
   type CloudHaltView,
 } from '../src/web/view'
@@ -69,18 +69,18 @@ describe('cloudHaltAckKey：按事件身份 ack（新事件重新弹）', () => 
   })
 })
 
-describe('parseCloudHaltAcks：localStorage 格式兼容', () => {
+describe('parseAlertAcks：localStorage 格式兼容（表名改了，格式与值未变）', () => {
   it('新格式（JSON 数组）', () => {
-    expect(parseCloudHaltAcks('["halted|c|T1"]')).toEqual(['halted|c|T1'])
+    expect(parseAlertAcks('["halted|c|T1"]')).toEqual(['halted|c|T1'])
   })
 
   it('旧格式（单值字符串）→ 视为单元素，不丢已读', () => {
-    expect(parseCloudHaltAcks('c6-chip|T2')).toEqual(['c6-chip|T2'])
+    expect(parseAlertAcks('c6-chip|T2')).toEqual(['c6-chip|T2'])
   })
 
   it('空 / 非法 → 空数组', () => {
-    expect(parseCloudHaltAcks(null)).toEqual([])
-    expect(parseCloudHaltAcks('')).toEqual([])
-    expect(parseCloudHaltAcks('not json')).toEqual(['not json']) // 无法解析即按旧格式处理
+    expect(parseAlertAcks(null)).toEqual([])
+    expect(parseAlertAcks('')).toEqual([])
+    expect(parseAlertAcks('not json')).toEqual(['not json']) // 无法解析即按旧格式处理
   })
 })

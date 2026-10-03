@@ -7,6 +7,41 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §24 告警坞全局化：收官横幅按课成列 + 七类条目全部可关闭可复制（plan/dashboard-banner-global，2026-10-03）
+
+**触发**（用户 2026-10-02）：「一个课程训练收官的横幅信息，现在只在切换到该课程时才能看到，
+应改为全局可见」；「dashboard 所有横幅信息，都应该可关闭可复制」。
+
+**改前现状**（7 类 / 8 条目）：收官横幅的读面是**单课单值**——`computeSlowSnapshot(cfg, course, …)`
+只读请求课程那一份账本（`server/api/snapshot-cache.ts`）、`StateView.loopComplete` 是单值、
+`loopCompleteAlerts` 只产 1 条；「可关闭」缺 4 类（收官 / PPO 排队超时 / 离线静默停摆 / 编辑被拒——
+`actions: []` 或只有 resume），「可复制」**0/7 全缺**。
+
+**语义裁决**：
+
+| 裁决 | 内容 |
+|---|---|
+| **收官全局成列** | 收官是终态、没有动作、不会自愈（尾行不被顶掉就一直显示）⇒ 用「只弹当前课」等于让「它已经跑完了」在多课场景**不可达**。停机横幅的「只弹本课」（2026-09-14 定案）不动——它可恢复、且恢复动作只作用于本课。规则一句：**有恢复动作的瞬时态按课过滤；无动作的终态全局成列** |
+| **聚合落层** | 放 `state-view.ts`（请求路径上的便宜结构），**不进**按课程键控的慢快照（否则全课聚合被按「请求课程」各缓存一份，切课即重算）；判活用**共享** `trainingLoop` 的全局事实（`scopeOf` 恒 `''`，一个进程服务所有课）；课程清单 = **已开课 ∪ 查看课**（同 `harvestTrainingCourseActuals` 的成本闸：几十门历史课账本在盘上，逐拍全扫是浪费），逐课复用 `loopCompleteFromLedgerTail` |
+| **单值字段替换** | `loopComplete` → `loopCompletes: Record<course, LoopComplete>`（不保留双字段 = 不造第二份真相；server/web 同一批构建，无版本错位）；条目 `id: loop-complete:<课>`、标题带课名、按课名确定性排序 |
+| **ack 一张表零回归** | 新 `alertAckKey(kind, subject, eventId)`；`cloudHaltAckKey` 改为**委托**它 ⇒ 停机键串逐字节不变（升级不重弹）；存储仍用**同一张表**（常量改名 `TC_ALERT_ACKS`、**值冻结** `tc.cloudHalt.ack`）——不新开第二张表、不写迁移。只读提示保留会话级字面键 `ro-banner-dismissed` |
+| **复制纯文本** | `AlertItem.copyText` 必填，由 `withCopy()` 统一派生 = `title` + `detail` + `（课程 X · 条目 <id> · 严重度 <sev>）` 三行；`AlertDock` 每条渲染现成的 `CopyButton`（icon），与动作区**分区**（不抢主按钮位） |
+
+**被否决**（评审两轮处置见 plan §11）：换停机 ack 键（= 让人重关一次红条，净回归）；新开第二张 ack 表 +
+一次性迁移；把聚合塞进按课程键控的慢快照；保留 `loopComplete` 单值兼容（第二份真相）；给收官条造
+「立即恢复」（第二份真相）；提高 `ALERT_DOCK_DEFAULT_VISIBLE`。
+
+**落点**：`dashboard/src/server/api/{loop-complete,state-view,snapshot-cache}.ts` ·
+`dashboard/src/web/view/{alerts,interaction,legacy-keys,console-types}.ts` ·
+`dashboard/src/web/components/AlertDock.tsx` · `dashboard/src/web/app/app.tsx` · `dashboard/src/web/theme.css` ·
+测试 `dashboard/tests/{web-alert-dock,server-api-loop-complete,cloud-halt-banner,web-ssr-readonly}.test.ts`。
+
+**门槛**：`cd dashboard && bun run typecheck && bun run test` 绿（1317 pass / 0 fail）· `bun run build:ui` 三份 bundle ✓ ·
+根 `bun run check` 2345 pass / 0 fail · `bun run build` ✓。
+
+**指针**：plan `plan/dashboard-banner-global.plan.md`（评审修订版）·
+DECISIONS `§2026-10-03-goalnn-dashboard-alert-dock-global`。
+
 ## §23 并行 worker 贡献度面板：承接面归属 + 两组不合并 + 机器×课程矩阵（plan/worker-contribution-view，2026-10-02）
 
 **触发**（用户 2026-10-02）：「现在有七门课程并行训练，两个云端 worker 一起领任务。在这种场景下，

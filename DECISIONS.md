@@ -7270,3 +7270,21 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
   云机前先在控制台**重导任务包**（job 目录 `blob.ref` 还在，重导即自动带上）。
 - **门槛**：nn python gate 绿（**3592 pass/7 skip，54s**，含 e2e；对照上一条 3586 → +6 = 本次新增用例）。
 - **指针**：全文 `docs/nn/remote-transport.md` §58。
+## §2026-10-03-goalnn-dashboard-alert-dock-global（2026-10-03，告警坞全局化：收官横幅按课成列 + 七类条目全可关可复制）
+
+- **背景**：用户 2026-10-02 两条指令（收官横幅要全局可见 / 所有横幅可关闭可复制）。改前收官横幅读面是
+  单课单值（`StateView.loopComplete` + 按课程键控的 `computeSlowSnapshot`）⇒ 不切课看不到「已经跑完了」；
+  七类条目里 4 类没有 ack、7 类全没有复制。
+- **备选与否决**：① 停机 ack 换到新键空间（新 kind + 新表）——否：无收益的净回归（升级后重弹红条），
+  且要双表并读 + 迁移；② 保留 `loopComplete` 单值做兼容——否：第二份真相（server/web 同批构建无版本错位）；
+  ③ 聚合塞进按课程键控的慢快照——否：全课聚合会被按「请求课程」各缓存一份，切课即重算、并发各算一遍；
+  ④ 聚合遍历全部已知课程（含历史课）——否：几十门历史课账本在盘上，逐拍全扫是浪费（同 harvest 闸）；
+  ⑤ 给收官条造「立即恢复」——否：第二份真相（N6）。
+- **决定**：收官横幅读面扩为 `loopCompletes: Record<course, LoopComplete>`，聚合落 `state-view.ts`，判活用
+  共享 `trainingLoop` 的全局存活事实，课程清单 = 已开课 ∪ 查看课，条目按课成列、标题带课名、按课名排序；
+  新 `alertAckKey(kind, subject, eventId)` 统一事件身份键（`cloudHaltAckKey` 委托它 ⇒ 停机键逐字节不变），
+  存储仍用同一张表（常量改名 `TC_ALERT_ACKS`、值冻结 `tc.cloudHalt.ack`）；`AlertItem.copyText` 由
+  `withCopy()` 统一派生（三行纯文本），`AlertDock` 用现成 `CopyButton`（icon）与动作区分区。
+- **违反后果**：改 `visibleCloudHalts` 的「只弹本课」= 重演 2026-09-14 事故；换停机键 kind = 用户重关一次红条；
+  开第二张 ack 表 = 双读双写 + 迁移；给 `alerts.ts` 引进 IO/localStorage = SSR/水合红线（它必须仍是纯函数）。
+- **指针**：全文 `docs/nn/console.md` §24 · plan `plan/dashboard-banner-global.plan.md`（评审修订版，§11 处置表）。

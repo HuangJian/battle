@@ -6,7 +6,6 @@ import { assemblePushFleet, probePushFleetHealth } from '../../stack/push-config
 import {
   type ComponentView,
   type CourseEdit,
-  type LoopComplete,
   type NodeLocalView,
   type NodeView,
   type PhaseInfo,
@@ -22,7 +21,6 @@ import {
 } from '../pool-history'
 import { courseEditFromLedgerTail } from './ledger'
 import { readLogTail } from './logs'
-import { loopCompleteFromLedgerTail } from './loop-complete'
 import {
   type NodeProbeResult,
   componentViews,
@@ -73,9 +71,6 @@ export interface SlowSnapshot {
   nodes: NodeView[]
   localNode: NodeLocalView | null
   phase: PhaseInfo
-  /** 训练正常完成停车态（账本尾行 run_complete + trainingLoop 存活时派生；
-   *  resume 后新事件自然顶掉 → null）。 */
-  loopComplete: LoopComplete | null
   /** 课程热加载最新判决（§2026-09-13-hot-reload；账本最近一条 course_edit 事件。
    *  rejected = 语料身份编辑被拒 → 错误横幅；restored/applied 不上横幅）。 */
   courseEdit: CourseEdit | null
@@ -156,10 +151,10 @@ export async function computeSlowSnapshot(
   // 当前训练阶段（训练循环日志尾解析）。
   const logTail = components.find((c) => c.key === 'trainingLoop')?.logTail ?? []
   const phase = parsePhaseFromLog(logTail)
-  // 正常完成停车态（2026-09-12）：账本尾行是 run_complete 且进程仍存活（停车
-  // 等待重启）→ 横幅派生源；进程已死走 exit-watchdog 路径；resume 后新事件
-  // 顶掉 → 自动消失。账本小文件 + 尾部窗口读，5s 快照周期内可忽略。
-  let loopComplete: LoopComplete | null = null
+  // 课程热加载判决（§2026-09-13-hot-reload）：账本尾行派生；账本小文件 + 尾部窗口读。
+  // ★ 2026-10-03：单课单值的 `loopComplete` 已移出本快照——收官横幅改为 `state-view.ts` 的
+  //   多课聚合 `loopCompletes`（plan/dashboard-banner-global §4.1：本快照按课程键控，全课聚合
+  //   放进来会被按「请求课程」各缓存一份，切课即重算、并发各算一遍）。这里只留 courseEdit。
   let courseEdit: CourseEdit | null = null
   const loopAlive = components.some((c) => c.key === 'trainingLoop' && c.status === 'running')
   if (course && loopAlive) {
@@ -168,10 +163,8 @@ export async function computeSlowSnapshot(
         path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'),
         1000,
       ).lines
-      loopComplete = loopCompleteFromLedgerTail(ledgerTail)
       courseEdit = courseEditFromLedgerTail(ledgerTail)
     } catch {
-      loopComplete = null
       courseEdit = null
     }
   }
@@ -189,7 +182,6 @@ export async function computeSlowSnapshot(
     nodes,
     localNode,
     phase,
-    loopComplete,
     courseEdit,
     pushFleet: assemblePushFleet(cfg, probes.pushProbes),
   }

@@ -8,8 +8,10 @@ export const TC_GLOBAL_INTERVAL = `${TC_KEY_PREFIX}globalInterval`
 export const TC_METRICS_FILTER = `${TC_KEY_PREFIX}metrics.filter`
 /** 局域网只读横幅关闭键（用户关闭后不再显示；tc. 前缀保证不被 cleanupNonTcKeys 误删）。 */
 export const TC_RO_BANNER_DISMISSED = `${TC_KEY_PREFIX}ro.bannerDismissed`
-/** 云端停机灰横幅已读键（§386：值=clearedAt，同一恢复事件只提示一次）。 */
-export const TC_CLOUDHALT_ACK = `${TC_KEY_PREFIX}cloudHalt.ack`
+/** 告警坞已读集合（JSON 数组；键 = `alertAckKey(kind, subject, eventId)` 事件身份，2026-10-03）。
+ *  **值冻结**为 `tc.cloudHalt.ack`：该表在 2026-10-03 前只存停机 ack，改名不改值 ⇒ 升级不丢已读
+ *  （plan/dashboard-banner-global §4.3；论证见 DECISIONS §2026-10-03-goalnn-dashboard-alert-dock-global）。 */
+export const TC_ALERT_ACKS = `${TC_KEY_PREFIX}cloudHalt.ack`
 /** hero 最新 6 轮区块视图（'main' 主行 / 'eval' 干净评估）。 */
 export const TC_HERO_ITER_VIEW = `${TC_KEY_PREFIX}hero.iters`
 /** hero 最新 6 轮区块折叠态（'1' = 折叠只留标题行）。 */
