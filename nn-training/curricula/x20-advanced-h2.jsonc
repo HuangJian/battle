@@ -1,0 +1,102 @@
+// 课程 x20-advanced-h2 —— **hurt 重剂量对照臂：f=15% ⇒ wHurt=50.6（x20-advanced 的 wHurt×2）**
+//
+// 状态：**收官（2026-10-03；it330 停腿，判决见本文件尾 verdict）**。
+//   立项 → 用户 2026-10-02 直接指定：it80 vs 人类复核发现被击中税反向（hurtR 0.0693 vs
+//   起点 0.0621，不降反升），加一档 hurt 重剂量做对照。
+//   基准腿 → `nn-training/curricula/x20-advanced.jsonc`（头注 = 全量契约）；本臂与其
+//   同包同预算、起点为主腿最优 it80，唯一差 = wHurt 25.3 → 50.6。
+//
+// ── 剂量 ─────────────────────────────────────────────────────────────────
+//   沿用 x20-advanced 的 uniform gap pricing，f=7.5% → **f=15%**：
+//   wHurt = 0.15 × killEV/gap = 0.15 × 18.487/0.05478 = **50.6**
+//   （f=15.0% ✓；it80 水平税 EV = 50.6×0.06934 = 3.51/局 ≈ 19% killEV，记账区上限内）。
+//   校准源同基准腿（human160 vs it175-160，`tmp/x20adv-calib.py`；killEV=18.487）。
+//
+// ── 判据（只看终点；对照物 = x20-advanced 主腿终点 + it175 基线）────────────
+//   终判三指标 @414000 段 800 局（`--seed0 414000`，与主腿选点同口径）：
+//     ① hurtR（hurtWeight/(ticks+1)）配对比较（同 seed，臂 − 主腿）：显著下降才算税起效；
+//     ② kills/局 + ③ outcome 通关率：不劣于主腿终点（±3pp 诊断口径；劣 ⇒ 重税买方向丢主分，不采用）。
+//   无配对训练、无中途 ABORT；熔断只留 kl 连续 3 轮 ≥0.075 记录+人工盯盘（主腿同规）。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；起点 it80 warm start，opt fresh，主腿同规）。
+{
+  "version": 5,
+  "name": "x20-advanced-h2",
+  "mode": "per-tick",
+  // 环境：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：x20-advanced 逐字，唯一差 = wHurt 25.3 → 50.6 ────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.2,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 6.72,
+      "wDist": 0.738,
+      "wHurt": 50.6,
+      "wEncl": 4.85,
+      "wCorner": 9.71
+    },
+    // dense-only（与 B 一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：主腿最优 it80（414000 段 800 局选点：过关 17.8% + 杀敌 8.37，双项第一）──
+  "bc": "nn-training/weights/x20-advanced/x20-advanced.it80.20261002-192906.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // ── 预算：与主腿逐字同 ────────────────────────────────────────────────────
+  "iters": 0,
+  "max_hours": 48,
+  "workers": 8,
+
+  // ── 位移包：与主腿逐字同 ──────────────────────────────────────────────────
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：与主腿逐字同 ────────────────────────────────────────────────────
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/x20-advanced-h2/weights.json",
+  "traj": "tmp/x20-advanced-h2",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-advanced-h2",
+  "backup_prefix": "x20-advanced-h2",
+
+  // ── 评估：与主腿逐字同 ────────────────────────────────────────────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── verdict（2026-10-03 收官；it330 停腿；414000 段 800 局补验 h285/h300；
+//      证据 `tmp/x20adv-414k-h2fin.jsonl(.run/)` + best2 的 h280）──
+//   诊断使命（hurt f=15% 是否起效）：hurtR 0.086（it0）→ 0.061（it280），−29% ✓；
+//   主腿同期横盘 ⇒ 加压有效，plus 的 77.5 有依据。
+//   终点：h280 24.12%/9.856，**h285 25.00%/9.963（本腿最优）**，h300 24.12%/9.569；
+//   全低于主腿/plus 加冕线（28~29%/10.5+）。
+//   **判决：诊断成功，终点落后 → 归档，不加冕。**（使命完成：hurt 加压证据已并入 plus。）
+//   注：工作区实测 iters=0/epochs=4（与冻结头注 400/8 不一致，跑中被改过，确切时间未知）。

@@ -6902,6 +6902,94 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
 **指针**：全文 `docs/nn/experiments.md` §75 · 实现 `nn-training/curricula/x20-advanced.jsonc` ·
 回归 `nn-training/tests/biz/test_x20_advanced.py`。落账门禁：新契约 5/5 · `bun run check` 待补。
 
+## §2026-10-02-goalnn-x20adv-h2-design（2026-10-02，x20-advanced hurt 重剂量对照臂：同起点 it175，wHurt 25.3→50.6）
+
+- **背景**：it80 vs 人类复核 hurtR 反向（0.0693 vs 起点 0.0621）；用户指定加一档 hurt 重剂量对照。
+- **决定**：新课 `x20-advanced-h2`，与主腿同包同预算、起点为主腿最优 it80（用户改起点；
+  wHurt=**50.6**（f=15%，uniform gap pricing；it80 水平税 EV 3.51/局 ≈ 19% killEV，记账区上限内）。
+  终判 @414000 段 800 局：hurtR 配对比较 + kills/通关率不劣于主腿终点（±3pp 诊断）。
+- **落点**：`nn-training/curricula/x20-advanced-h2.jsonc`（validate_reward 零错误）·
+  `nn-training/rl-config.json`（`x20-advanced-h2: {rollout_src: local}`）。
+
+## §2026-10-03-goalnn-x20adv-plus-design（2026-10-03，二轮定价：新基线 a355，acc/hurt 加压，dist 维持，底包全留）
+
+- **背景**：用户指定按出/被背刺两轮人类复核给全部 12 参数重新定价；基础权重用主腿最优 a355
+  （414000 段 800 局 24.25%/9.666）。新基线（a355 同 160 对）：acc 0.5656（gap 0.2249，
+  比 it175 时还宽——dist 抢戏）· Edhit 3.6756（gap 0.7239，61% 走完）· hurtR 0.06560 ·
+  enclR 0.29846 · cornerR 0.09678 · kills 10.181 ⇒ killEV=30.543。
+- **决定**：税用 §5.4 基线形、比值奖用 gap-value：**wAcc=13.6**（f=10%，acc 退化加压 rebalance）/
+  **wDist=0.738 HOLD**（61% 走完，按 gap 重定价会给最后 0.7 格 3× 边际价，方向反，故维持 ~9% 份额）/
+  **wHurt=70**（f=15%，9× gap + h2 的 50.6 已证不够；税 EV 15%）/ **wEncl=7.67** /
+  **wCorner=23.7**（f=7.5%，税 EV 各 2.29/局；数值大是率小所致）。底包 7 个全留
+  （wPickup 已占 34%、wDmg 由 hurt 专项覆盖、wHit 加量买量、余无信号）。
+  起点净流入 +1.23/局（4%），小幅正压，无冲击。
+- **被否决**：① dist 按 gap 重定价到 ~3.2（1 格均距 ≈ 1 kill，边际失衡）；② 加 dmgFirst600 税
+  （7× gap 很诱人，但 h5a 开局窗已判死，不挖坟）；③ 被背刺率单独立列（走位税已有 encl/corner
+  承担；只观测不定价，用户确认方向）；④ 动 wKill/wPickup（numeraire/已占 34%，动即换实验）。
+- **落点**：`nn-training/curricula/x20-advanced-plus.jsonc`（validate_reward 零错误）·
+  `nn-training/rl-config.json`（`x20-advanced-plus: {rollout_src: local}`）· 实验档 §76。
+
+## §2026-10-03-goalnn-x20adv-plus-rebase（2026-10-03，plus 换基 it415：锚重算，w 全跟进）
+
+- **背景**：it415 日常新高经 414000 段 800 局兑现（28.25%/10.465 vs a355 24.25%/9.666）；
+  用户指定 plus 起点换 it415。新基线（it415 同 160 对）：acc 0.5711（gap 0.2194）·
+  Edhit 3.7384（gap 0.6611）· hurtR 0.06489 · enclR 0.29256 · cornerR 0.10063 ·
+  kills 11.181 ⇒ killEV=33.544。
+- **决定**：同算法重算 ⇒ **wAcc=15.3 / wDist=0.738 HOLD / wHurt=77.5 / wEncl=8.60 /
+  wCorner=25.0**（税 EV 15%/7.5%/7.5%；起点净 +1.44/局）；bc 指 it415 文件；
+  终判对照换 it415（28.25%/10.465）。旧参数复核结论（wShot 0.06 唯一动作）不变。
+- **落点**：课程头注已同步；实验档 §76 已同步。
+
+## §2026-10-03-goalnn-x20legs-verdict（2026-10-03，三停腿收官：主腿/plus 成功加冕，h2 诊断成功归档）
+
+- **背景**：三腿停腿（主腿 it592 / plus it167 / h2 it330）。414000 段 800 局终筛：
+  主腿 it570/580 + plus it90/95/135/140 + h2 h285/h300（同 seed 可比；既有数复用 it500/p100/a355）。
+- **决定（终判）**：① x20-advanced **成功**，加冕 **a580**（28.75%/10.723；亚军 it500）：
+  it175（13.50%/7.619）→ 过关翻倍、杀敌 +41%；Edhit 走完 ~50%、encl/corner −37%/−30~45%、
+  acc/hurtR 平；停腿时仍在高原爬升，无 plateau 证据。② x20-advanced-plus **成功**，
+  加冕 **q90**（29.25%/10.887；q95 28.25%/10.569）：相对高起点 it415 只 +1pp/+0.42，
+  相对 it175 翻倍/+43%；hurt 税停在 it167 未成熟（h2 形态：200 轮后才低头）。
+  ③ x20-advanced-h2 **诊断成功、终点落后**，归档不加冕：hurtR 0.086→0.061（−29%）
+  证明加压有效（plus 的 77.5 即据此定）；终点最优 h285（25.00%/9.963）低于两加冕线。
+- **落点**：三课程文件尾 verdict（状态同步收官）· 实验档 `docs/nn/experiments.md` §78 ·
+  索引 `docs/nn.progress.md` §3.5。
+
+**指针**：全文 `docs/nn/experiments.md` §78 · 证据 `tmp/x20adv-414k-{best2,best3,best4,final,h2fin}.jsonl(.run/)`。
+
+## §2026-10-03-goalnn-x20adv-3legs-design（2026-10-03，三加压腿 same-start q90 比收敛速度）
+
+- **背景**：plus 停腿（it167）；用户指定以 q90 为共同起点开 2–3 条加压腿比收敛速度；
+  被背刺率用户裁决用被包围税近似，不加观测列。基线（q90 同 160 对）：acc 0.5895（gap 0.201）·
+  Edhit 3.7044（gap 0.695）· hurtR 0.06062 · enclR 0.25551 · cornerR 0.08616 · kills 11.169 ⇒
+  killEV=33.51。
+- **决定**：三腿与 plus 逐字同（起点 q90 + kickstart 锚 ref/init=0.1，预算 250 轮），各加压一轴：
+  **acc 腿 wAcc 15.3→23.0**（×1.5；inflow 偏大已记档 level-vs-边际）/
+  **hurt 腿 wHurt 77.5→110**（1.5× 破 20% 上限 ⇒ 按上限封顶 f=20%，税 EV 19.9%）/
+  **encl 腿 wEncl 8.6→13.0**（×1.5，税 EV 9.9%）；dist/corner/wShot/底包全 hold。
+  yardstick（三腿共用预注册）：机制首达线（acc≥0.69 / hurtR≤0.034 / enclR≤0.194，
+  gap 对半）首达 it + 终判 kills/pass @414000 vs q90（29.25%/10.887）+ 必报另两轴。
+- **被否决**：① corner 加压（gap 仅 1.5×，为收尾付高价，dist HOLD 同理）；
+  ② 被背刺单独立列（已有 encl 承担；只观测不定价方向已确认，本次连观测列都不加）。
+- **落点**：`nn-training/curricula/x20-adv-{acc,hurt,encl}.jsonc`（validate 零错误）·
+  `nn-training/rl-config.json`（三项 rollout_src local）· 实验档 §77。
+
+**指针**：全文 `docs/nn/experiments.md` §77。
+
+**指针**：全文 `docs/nn/experiments.md` §76。
+
+## §2026-10-03-goalnn-x20adv-plus-oldparams（2026-10-03，plus 旧参数复核：按 tick 率剥离 horizon，只动 wShot）
+
+- **背景**：用户要求旧参数差距大的一起调。按千 tick 率重算（a355 同 160 对）：
+  kills 3.52 vs 3.92（NN 反快 11%）· shots 12.38 vs 16.84（NN 多开 36%）·
+  hits 9.75 vs 9.53（逐字相等）· dmg 22.5 vs 100.5（4.5×，真 gap）·
+  pickups 1.41 vs 1.28（持平）⇒ **杀敌/拾取/命中 gap 全是“活得短”，只有承伤率和开火浪费是真信号**。
+- **决定**：只动 **wShot 0.05→0.06**（NN 火多中少，加罚“少而准”，EV 动 0.44/局）；
+  其余 6 个全留（wKill numeraire；wHit 加量只买量；wDmg×2 有 −2.8pp 实付代价且 hurt-70
+  已覆盖；wPickup 已占三成；wExplore/wApproach 无信号）。明确拒绝：dmgFirst600
+  （h5a 死）、max120/damageWhileLow（damage-form 死）、threatTicks（Wave 2 死）、
+  首杀奖（方向反）、停/静止（H 死）。
+- **落点**：`nn-training/curricula/x20-advanced-plus.jsonc`（头注旧参数复核节）。
+
 ## §2026-10-02-goalnn-engine-pool-midround-pin（2026-10-02，引擎缓存上限不再钉死 5 + 轮内不许抽引擎 + `_node_rollout` 初值）
 
 - **背景（事故）**：7 门课同时开课（h4-hurt-{c0,f75,f150} · h4-encl-{c0,f75,f150} · x20-advanced），

@@ -166,6 +166,21 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
   target 49152 / epochs 8 / iters 400；终判 kills/局 + 通关率（414000 段 800 局 vs it175），
   无对照无配对 —— `docs/nn/experiments.md` §75 ·
   决策 `DECISIONS.md` §2026-10-02-goalnn-x20-advanced-design；人在控制台开课
+- **x20-advanced-plus 设计冻结 + 旧参数复核（2026-10-03）**：新基线 it415（killEV=33.54；
+  由 a355 换基：it415 日常新高经 414000 兑现 28.25%/10.465），
+  wAcc=15.3 / wDist=0.738 HOLD / wHurt=77.5 / wEncl=8.60 / wCorner=25.0；旧参数按千 tick 率
+  复核只动 wShot 0.05→0.06（NN 多开 36% 火；hits/kills/拾取 gap 全是活得短，wDmg×2 有实付代价）——
+  `docs/nn/experiments.md` §76 · 决策 `DECISIONS.md` §2026-10-03-goalnn-x20adv-plus-design /
+  §2026-10-03-goalnn-x20adv-plus-oldparams / §2026-10-03-goalnn-x20adv-plus-rebase；人在控制台开课
+- **三加压腿设计冻结（2026-10-03）**：same-start q90 + kickstart 锚，预算 250 轮，acc/hurt/encl
+  各加压一轴（wAcc 15.3→23.0 / wHurt 77.5→110（20% 封顶）/ wEncl 8.6→13.0），yardstick =
+  首达线（acc≥0.69 / hurtR≤0.034 / enclR≤0.194）+ 终判 @414000 vs q90 ——
+  `docs/nn/experiments.md` §77 ·
+  决策 `DECISIONS.md` §2026-10-03-goalnn-x20adv-3legs-design；人在控制台开课
+- **三停腿收官（2026-10-03）**：主腿 it592 停，加冕 **a580**（28.75%/10.723；it175 13.50%/7.619
+  → 过关翻倍杀敌 +41%）；plus it167 停，加冕 **q90**（29.25%/10.887）；h2 it330 停，
+  诊断成功（hurtR −29%）终点落后归档（最优 h285 25.00%/9.963）——
+  `docs/nn/experiments.md` §78 · 决策 `DECISIONS.md` §2026-10-03-goalnn-x20legs-verdict
 
 ### 3.6 架构重构（`nn-training` 模块重组）
 

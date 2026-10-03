@@ -7,6 +7,52 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 ---
 
+## §78 三停腿收官：主腿/plus 成功加冕（a580/q90），h2 诊断成功归档（2026-10-03）
+
+> 决策 `DECISIONS.md` §2026-10-03-goalnn-x20legs-verdict · 三课程文件尾 verdict。
+
+- **主腿**（it592停）：it175（13.50%/7.619）→ **a580（28.75%/10.723）**；Edhit ~50% gap、
+  encl/corner −37%/−30~45%、acc/hurtR 平；停腿时仍在爬升。**成功，加冕 a580**。
+- **plus**（it167停）：it415（28.25%/10.465）→ **q90（29.25%/10.887）**；相对高起点 +1pp/+0.42，
+  相对 it175 翻倍/+43%；hurt 税未成熟即停。**成功，加冕 q90**。
+- **h2**（it330停）：hurtR 0.086→0.061（−29%），加压有效实锤；终点 h285（25.00%/9.963）
+  低于两加冕线。**诊断成功，归档**。
+
+---
+
+## §77 三加压腿 same-start q90 比收敛速度（acc/hurt/encl 各 ×1.5 档）（2026-10-03）
+
+> 决策 `DECISIONS.md` §2026-10-03-goalnn-x20adv-3legs-design · 课程
+> `nn-training/curricula/x20-adv-{acc,hurt,encl}.jsonc`（头注 = 冻结契约）。
+
+- **基线**：q90 同 160 对：acc 0.5895（gap 0.201）· Edhit 3.7044（gap 0.695）· hurtR 0.06062 ·
+  enclR 0.25551 · cornerR 0.08616 · kills 11.169 ⇒ killEV=33.51。
+- **三腿**（起点 q90 + kickstart 锚，预算 250 轮；其余与 plus 逐字同）：
+  acc 腿 wAcc 15.3→23.0 / hurt 腿 wHurt 77.5→110（20% 上限封顶）/ encl 腿 wEncl 8.6→13.0；
+  dist/corner/wShot/底包 hold。
+- yardstick：首达线（acc≥0.69 / hurtR≤0.034 / enclR≤0.194，gap 对半）+ 终判 kills/pass
+  @414000 vs q90（29.25%/10.887）+ 必报另两轴；被背刺用包围税近似，不加列。
+
+---
+
+## §76 x20-advanced-plus 开腿设计冻结（二轮定价 + 旧参数按 tick 复核）（2026-10-03）
+
+> 决策 `DECISIONS.md` §2026-10-03-goalnn-x20adv-plus-design /
+> §2026-10-03-goalnn-x20adv-plus-oldparams · 课程
+> `nn-training/curricula/x20-advanced-plus.jsonc`（头注 = 冻结契约）。
+
+- **新基线**：it415 同 160 对（414000 段；2026-10-03 由 a355 换基）：acc 0.5711（gap 0.2194）·
+  Edhit 3.7384（gap 0.6611，65% 走完）· hurtR 0.06489 · enclR 0.29256 · cornerR 0.10063 ·
+  kills 11.181 ⇒ killEV=33.544；起点 it415（414000 选点 28.25%/10.465）。
+- **新 5 项**：wAcc=15.3（f=10%）/ wDist=0.738 HOLD / wHurt=77.5（f=15%，税 EV 15%）/
+  wEncl=8.60 / wCorner=25.0（f=7.5%）；起点净 +1.44/局（4.3%）。
+- **旧 7 项**：按千 tick 率重算只动 wShot 0.05→0.06（NN 多开 36% 火且命中率低，加罚少而准）；
+  其余全留（hits 按 tick 逐字相等；kills/拾取 gap 全是活得短；wDmg×2 有 −2.8pp 实付代价）。
+  明确拒绝：dmgFirst600 / max120 / threatTicks / 首杀奖 / 停（各有已判死的坟）。
+-   终判 kills/局 + 通关率 @414000 段 800 局 vs it415；target 49152 / epochs 8 / iters 400。
+
+---
+
 ## §75 x20-advanced 开腿设计冻结（B 底包 + 新 5 项 human-gap 定价，单腿无对照）（2026-10-02）
 
 > 决策 `DECISIONS.md` §2026-10-02-goalnn-x20-advanced-design · 课程
