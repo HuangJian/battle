@@ -25,6 +25,7 @@
  */
 
 import type { CloudHaltView, LoopComplete } from './console-types'
+import type { OfflineStalledView } from './course-overview'
 import { fmtTs } from './format'
 import { cloudHaltAckKey, visibleCloudHalts } from './interaction'
 // 与 pill **同一个词**（2026-10-02 口径对齐，plan/course-pill-precision §6）：告警坞的 PPO 红条
@@ -106,6 +107,11 @@ export interface AlertInput {
   /** 训练正常完成停车（`ConsoleStateView.loopComplete` 原样传入）。 */
   loopComplete?: LoopComplete | null
   ppoQueueStall?: { jobId: string; waitedSec: number; it: number | null } | null
+  /** 离线课程停滞（`/admin/offline.stalled`；T8）：自动交接把本机停采后的**静默停摆**。
+   *
+   *  这是自动化的固有代价，必须显式付——`null`/缺省 = hub 不可达或旧版（**不可知 ≠ 没停**，
+   *  什么都不画；hub 的可用性由课程矩阵表头的「hub 无应答」单独占位）。 */
+  offlineStalls?: OfflineStalledView[] | null
   courseEdit?: { verdict: string; fields: string[] } | null
   readOnly: boolean
   /** 只读提示是否已被关掉（写盘的状态由调用方给）。 */
@@ -120,6 +126,7 @@ export function buildAlerts(input: AlertInput): AlertItem[] {
     ...cloudHaltAlerts(input),
     ...loopCompleteAlerts(input),
     ...ppoStallAlerts(input),
+    ...offlineStallAlerts(input),
     ...courseEditAlerts(input),
     ...readOnlyAlerts(input),
   ]
@@ -216,6 +223,51 @@ function ppoStallAlerts(input: AlertInput): AlertItem[] {
       actions: [],
     },
   ]
+}
+
+/** 离线课程静默停摆（橙/红条；T8，plan/auto-offline-handoff §3.9）。
+ *
+ *  为什么必须显式付：自动 claim 翻 offline 后本机**立刻停止采样**，而云机可能在
+ *  领到租约前/中死掉、或控制台导包失败 ⇒「本机不采样 + 云机没跑」的静默停摆。
+ *  U3 明令不许自动回退，所以唯一的出口是人——本条把三条出路逐条点名，不再靠「人总会看到」。
+ *
+ *  判据全部来自已有事实（hub 侧 `stall_verdict`）：`pending-export` = 已翻 offline、无人跑、
+ *  超阈值（最典型的静默停摆，红）；`running-stale` = 有租约但进度超阈值（可能只是长轮，橙）。
+ *  告警**自带「交还自动池」动作**——它就是 U3 的第三条出路，让人在最需要它的位置直接按。 */
+function offlineStallAlerts(input: AlertInput): AlertItem[] {
+  const out: AlertItem[] = []
+  for (const s of input.offlineStalls ?? []) {
+    const silent = s.why === 'pending-export'
+    const mins = Math.max(0, Math.round(s.ageSec / 60))
+    const ageText = mins >= 60 ? `${Math.floor(mins / 60)} 小时 ${mins % 60} 分` : `${mins} 分钟`
+    const who = s.holder ? `${s.holder} ` : ''
+    out.push({
+      id: `offline-stall-${s.course}`,
+      severity: silent ? 'err' : 'warn',
+      icon: '⚠',
+      title: silent
+        ? `${s.course} 已切离线 ${ageText}：既没有租约也没有新进度——云机没接手`
+        : `${s.course} 离线段卡住：${who}持有租约但 ${ageText} 没有新进度`,
+      detail:
+        '三条出路：① TPU 重连继续（它一上线就会在 /offline/tasks 再看到这门课）' +
+        '；② 手工导入结果包（课程矩阵行内的「导入训练结果」——导入后会自动评估）' +
+        '；③ 手工切回在线（矩阵行内「交还自动池」——本机在下一轮边界恢复采样）。' +
+        `判据只用已有事实：${silent ? '翻 mode 时刻' : '最近补传产物 mtime'} 超阈值；` +
+        '修好后（重连 / 导入 / 交还）告警自动消失。',
+      role: 'alert',
+      actions: [
+        {
+          kind: 'resume',
+          label: '交还自动池',
+          act: 'unsetCourseMode',
+          body: { course: s.course },
+          title: '清 pin + 清 claim 记账，该课重回自动交接池（本机下一轮恢复采样）',
+          primary: true,
+        },
+      ],
+    })
+  }
+  return out
 }
 
 /** 课程热加载被拒（红条）：语料身份改动不得 mid-run 破坏血缘。 */

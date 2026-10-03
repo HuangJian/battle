@@ -189,6 +189,64 @@ describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
     expect(items[0]!.actions).toEqual([])
   })
 
+  // ────────────────────────── T8：离线静默停摆（plan/auto-offline-handoff §3.9） ──────────────────────────
+
+  it('离线静默停摆（pending-export）→ err 条：点名三条出路 + 自带「交还自动池」动作', () => {
+    const items = buildAlerts({
+      ...clean,
+      offlineStalls: [
+        {
+          course: 'c5-gae',
+          why: 'pending-export',
+          holder: '',
+          lastMtime: 0,
+          flippedAt: 100,
+          ageSec: 3600,
+        },
+      ],
+    })
+    expect(items.length).toBe(1)
+    const a = items[0]!
+    expect(a.severity).toBe('err') // 最典型的静默停摆：本机不采样 + 云机没跑 ⇒ 红
+    expect(a.title).toContain('c5-gae')
+    expect(a.title).toContain('云机没接手')
+    expect(a.title).toContain('1 小时')
+    // 三条出路逐条点名（U3 的出口就在这条告警里）
+    expect(a.detail).toContain('TPU 重连')
+    expect(a.detail).toContain('手工导入结果包')
+    expect(a.detail).toContain('交还自动池')
+    // 自带动作 = 第三条出路（resume 语义：真调 API）
+    expect(a.actions.map((x) => x.kind)).toEqual(['resume'])
+    expect(a.actions[0]!.act).toBe('unsetCourseMode')
+    expect(a.actions[0]!.body).toEqual({ course: 'c5-gae' })
+    expect(a.actions[0]!.primary).toBe(true)
+  })
+
+  it('running-stale（有租约但无进度）→ warn 条，标题带上持有人', () => {
+    const items = buildAlerts({
+      ...clean,
+      offlineStalls: [
+        {
+          course: 'c5-gae',
+          why: 'running-stale',
+          holder: 'kaggle-tpu-7',
+          lastMtime: 0,
+          flippedAt: 0,
+          ageSec: 2400,
+        },
+      ],
+    })
+    const a = items[0]!
+    expect(a.severity).toBe('warn') // 可能只是长轮，橙
+    expect(a.title).toContain('kaggle-tpu-7')
+    expect(a.title).toContain('40 分钟')
+  })
+
+  it('hub 不可达/旧版（null/缺省）⇒ 一条都不画（不可知 ≠ 没停）', () => {
+    expect(buildAlerts({ ...clean, offlineStalls: null })).toEqual([])
+    expect(buildAlerts({ ...clean, offlineStalls: [] })).toEqual([])
+  })
+
   it('六类全开 → 六条（收敛前是 6 个平级堆叠的横幅）', () => {
     const items = buildAlerts({
       ...clean,

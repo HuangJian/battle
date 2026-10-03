@@ -243,14 +243,27 @@ class RunContext:
             return
         self.deliverer.submit_round(it)
 
-    def deliver_final(self, *, it_end: int, state: str, summary: dict | None = None) -> None:
+    def deliver_final(
+        self,
+        *,
+        it_end: int,
+        state: str,
+        summary: dict | None = None,
+        end_it_reached: bool = False,
+    ) -> None:
         """段末：补完积压 + 推一份摘要（跑到哪 / 什么状态 / 为什么停）。
 
         后台模式下同样只是入队，由 `close_delivery()` 做**有界** flush。
+        `end_it_reached`（T6）：本段是否跑到计划终点（判据在驱动侧 `plan_run._end_it_reached`）。
         """
         if self.deliverer is None:
             return
-        self.deliverer.submit_final(it_end=int(it_end), state=str(state), summary=summary)
+        self.deliverer.submit_final(
+            it_end=int(it_end),
+            state=str(state),
+            summary=summary,
+            end_it_reached=end_it_reached,
+        )
 
     def close_delivery(self, timeout: float = DRAIN_FLUSH_SEC) -> None:
         """段末收线：给后台补传线程有界时间把积压推完（同步/未启用时是空操作）。

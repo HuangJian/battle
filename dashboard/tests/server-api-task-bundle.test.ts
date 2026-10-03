@@ -30,8 +30,11 @@ import {
   parseDeliverImportJson,
   handleDeliverUpload,
   validateDeliverUpload,
+  endItReachedForRun,
+  writeRunCompleteWithPython,
   type DeliverImportPayload,
   type DeliverUploadDeps,
+  type DeliverZipRunner,
 } from '../src/server/bundles'
 import {
   exportGuardReason,
@@ -290,6 +293,9 @@ describe('产物导入', () => {
       launched.push({ course, ckpt, iter })
       return { ok: true, message: `evalA 已启动 it${iter}` }
     },
+    // T6 默认：hub 不可达（不转交）——需要转交的用例自己注入摘要与替身。
+    offlineResults: async () => null,
+    writeRunComplete: async () => ({ ok: true, message: '已完成（run_complete 已落账）' }),
     ...over,
   })
   const launched: Array<{ course: string; ckpt: string; iter: number }> = []
@@ -377,5 +383,134 @@ describe('产物导入', () => {
     )
     expect(r.ok).toBe(false)
     expect(r.message).toContain('不在盘上')
+  })
+
+  // ────────────────────────── T6：跑满 ⇒ run_complete（灰横幅）转交 ──────────────────────────
+
+  it('hub 自报跑满且 run_id/末轮号一致 ⇒ 让 python 落 run_complete', async () => {
+    const calls: Array<{ course: string; runId: string }> = []
+    const r = await upload(
+      `deliver-${COURSE}.zip`,
+      'x',
+      deps({
+        offlineResults: async () => ({
+          r1: { itEnd: 4, state: 'complete', endItReached: true, receivedAt: 1 },
+        }),
+        writeRunComplete: async (course: string, runId: string) => {
+          calls.push({ course, runId })
+          return { ok: true, message: '已完成（run_complete 已落账）' }
+        },
+      }),
+    )
+    const body = (await r.json()) as Record<string, unknown>
+    expect(r.status).toBe(200)
+    expect(body.endItReached).toBe(true)
+    expect(body.runComplete).toBe(true)
+    expect(calls).toEqual([{ course: COURSE, runId: 'r1' }])
+    expect(String(body.message)).toContain('run_complete')
+  })
+
+  it('半段 / 未跑满 / run_id 不匹配 ⇒ 不转交（不调第二趟 python，横幅不亮）', async () => {
+    const shapes: Array<
+      Record<string, { itEnd: number; state: string; endItReached: boolean; receivedAt: number }>
+    > = [
+      { r1: { itEnd: 4, state: 'budget', endItReached: false, receivedAt: 1 } }, // 云机没跑满
+      { r1: { itEnd: 2, state: 'complete', endItReached: true, receivedAt: 1 } }, // 半段导入（末轮号对不上）
+      { other: { itEnd: 4, state: 'complete', endItReached: true, receivedAt: 1 } }, // run_id 不匹配
+    ]
+    let calls = 0
+    for (const hub of shapes) {
+      const r = await upload(
+        `deliver-${COURSE}.zip`,
+        'x',
+        deps({
+          offlineResults: async () => hub,
+          writeRunComplete: async () => {
+            calls += 1
+            return { ok: true, message: '不该被调用' }
+          },
+        }),
+      )
+      expect(((await r.json()) as Record<string, unknown>).endItReached).toBe(false)
+    }
+    expect(calls).toBe(0)
+  })
+
+  it('hub 不可达 ⇒ 无从判决，不转交（不可知 ≠ 没跑满）', async () => {
+    let calls = 0
+    const r = await upload(
+      `deliver-${COURSE}.zip`,
+      'x',
+      deps({
+        offlineResults: async () => null,
+        writeRunComplete: async () => {
+          calls += 1
+          return { ok: true, message: '不该被调用' }
+        },
+      }),
+    )
+    expect(((await r.json()) as Record<string, unknown>).endItReached).toBe(false)
+    expect(calls).toBe(0)
+  })
+
+  it('转交失败不改导入 ok（权重已落地可评估；少的只是横幅）', async () => {
+    const r = await upload(
+      `deliver-${COURSE}.zip`,
+      'x',
+      deps({
+        offlineResults: async () => ({
+          r1: { itEnd: 4, state: 'complete', endItReached: true, receivedAt: 1 },
+        }),
+        writeRunComplete: async () => ({ ok: false, message: '完成横幅未落账（boom）' }),
+      }),
+    )
+    const body = (await r.json()) as Record<string, unknown>
+    expect(r.status).toBe(200)
+    expect(body.ok).toBe(true)
+    expect(body.runComplete).toBe(false)
+    expect(String(body.message)).toContain('未落账')
+  })
+
+  it('判据是纯函数：三个条件缺一不可（单测钉住，不靠 HTTP 链路）', () => {
+    const payload = { run_id: 'r1', last_it: 4 }
+    const ok = { r1: { itEnd: 4, state: 'complete', endItReached: true, receivedAt: 0 } }
+    expect(endItReachedForRun(payload, ok)).toBe(true)
+    expect(endItReachedForRun(payload, null)).toBe(false)
+    expect(endItReachedForRun(payload, { r1: { ...ok.r1, endItReached: false } })).toBe(false)
+    expect(endItReachedForRun(payload, { r1: { ...ok.r1, itEnd: 3 } })).toBe(false)
+    expect(endItReachedForRun(payload, { other: ok.r1 })).toBe(false)
+  })
+
+  it('writeRunCompleteWithPython：第二趟 argv 形状（不重新解包 zip）', async () => {
+    const seen: string[][] = []
+    const runner = ((_m: string, args: string[]) => {
+      seen.push(args)
+      return { code: 0, stdout: '', stderr: '', timeout: false }
+    }) as unknown as DeliverZipRunner
+    const r = await writeRunCompleteWithPython(
+      COURSE,
+      'r1',
+      { destRoot: '/tmp/dest', logFile: '/tmp/import.log' },
+      runner,
+    )
+    expect(r.ok).toBe(true)
+    expect(seen[0]).toEqual([
+      '--end-it-reached',
+      '--run-id',
+      'r1',
+      '--dest',
+      '/tmp/dest',
+      '--course',
+      COURSE,
+    ])
+  })
+
+  it('TS 侧不碰账本（T6）：转交只经 python 的 --end-it-reached', () => {
+    const src = readFileSync(path.join(REPO_ROOT, 'dashboard/src/server/bundles/import.ts'), 'utf8')
+    // 转交 = 把判决当参数交给 python（账本唯一写者），不在 TS 里落任何事件。
+    expect(src).toContain("'--end-it-reached'")
+    expect(src).not.toContain('write_run_complete(')
+    // TS 侧没有任何「追加到课程账本」的写法（出现即说明有人在这儿复刻了第二个写者）
+    expect(src).not.toContain('appendFileSync')
   })
 })

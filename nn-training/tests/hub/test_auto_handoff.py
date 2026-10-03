@@ -34,6 +34,7 @@ from common.protocol import (
     COURSE_ENABLE_MARKER,
     OFFLINE_CLAIM_PATH,
     OFFLINE_RELEASE_PATH,
+    OFFLINE_RESULT_PATH,
     OFFLINE_TASKS_PATH,
 )
 from hub import offline as offline_mod
@@ -438,6 +439,71 @@ def test_stalled_alert_covers_pending_export_window(tmp_path: Path, monkeypatch)
     assert stalled[0]["why"] == "pending-export"
     st, raw = _req(base, "/admin/offline")
     assert st == 200 and _json(raw)["stalled"][0]["course"] == "c5-gae"
+
+
+def _post_json(base: str, path: str, body: dict) -> tuple[int, bytes]:
+    req = urllib.request.Request(
+        base + path,
+        data=json.dumps(body).encode("utf-8"),
+        headers={AUTH_HEADER: f"Bearer {TOKEN}", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return resp.status, resp.read()
+    except urllib.error.HTTPError as e:
+        return e.code, e.read()
+
+
+def test_result_end_it_reached_marks_completed_and_is_served(tmp_path: Path) -> None:
+    """T6：段末摘要自报跑满 ⇒ `/admin/offline.results` 按 run_id 带出 ∧ 该包记 completed。
+
+    三件事一起钉（缺任何一件 T6 的链就断在这）：
+      ① `end_it_reached` 进白名单（rec + 应答）；② 真的联动 `note_offline_completed`
+      （此前它只有测试直接调 = 死代码）；③ 读面能按 run_id 被控制台取走。
+    """
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae", b"PK-done")
+    st, raw = _post_json(
+        base,
+        OFFLINE_RESULT_PATH,
+        {
+            "course": "c5-gae",
+            "run_id": "seg-1",
+            "it_end": 110,
+            "state": "complete",
+            "end_it_reached": True,
+        },
+    )
+    assert st == 200 and _json(raw)["end_it_reached"] is True, raw[:200]
+    st2, raw2 = _req(base, "/admin/offline")
+    rec = _json(raw2)["results"]["c5-gae"]["seg-1"]
+    assert rec["end_it_reached"] is True and rec["it_end"] == 110 and rec["state"] == "complete"
+    # 生产链：completed ⇒ 不可再领（U6；claim 409 + completed 标记）
+    from hub.task_pack import _file_sha256
+
+    sha = _file_sha256(tmp_path / "c5-gae" / "task-c5-gae.zip")
+    assert hub.completion_blocked("c5-gae", sha) is True
+    st3, raw3 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    assert st3 == 409 and _json(raw3)["completed"] is True, raw3[:200]
+
+
+def test_result_without_end_flag_does_not_mark_completed(tmp_path: Path) -> None:
+    """半段摘要（没有 `end_it_reached`）不得把包封成 completed（T6 负向）。"""
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae", b"PK-mid")
+    st, raw = _post_json(
+        base,
+        OFFLINE_RESULT_PATH,
+        {"course": "c5-gae", "run_id": "seg-mid", "it_end": 40, "state": "budget"},
+    )
+    assert st == 200 and _json(raw)["end_it_reached"] is False, raw[:200]
+    st2, raw2 = _req(base, "/admin/offline")
+    assert _json(raw2)["results"]["c5-gae"]["seg-mid"]["end_it_reached"] is False
+    # 未跑满 ⇒ 照旧可领（回归锚：别把每一次段末摘要都封包）
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")[0] == 200
 
 
 def test_admin_courses_get_reports_pin_and_claim_state(tmp_path: Path) -> None:

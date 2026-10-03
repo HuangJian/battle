@@ -7044,3 +7044,29 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
 - **门槛如实**：T0（`switch-mode-drops-jobs` 撤单）/ T6（跑满灰横幅走导入链）/ T3 的面板接线（「交还
   自动」按钮）/ T8 的控制台告警渲染 **未落地**；plan 文档（未跟踪）已按 2026-10-03 实况标注。
 - **指针**：全文 `docs/nn/remote-transport.md` §56 · plan `plan/auto-offline-handoff.plan.md`（§7a 评审处置）。
+
+## §2026-10-03-goalnn-auto-offline-handoff-t6（2026-10-03，T6 完成态链 + T3 面板钮 + T8 告警渲染落地）
+
+- **背景**：`§2026-10-03-goalnn-auto-offline-handoff` 门槛如实记了四处未落地；本轮除 T0 外全部落地。
+- **决定**：
+  ① **T6 判决在控制台、落账在 python**：`end_it_reached` 由云机自报（`plan_run._end_it_reached`：
+     `complete`/`noop` ∧ `it_end >= plan.end_it`；`max_iters` 截断不算）；hub 字段白名单 + 联动
+     `note_offline_completed`（该包 completed ⇒ 不可再领，重导 sha 变自动解封——此前它是死代码）；
+     `/admin/offline.results[课][run_id]` 按 run 带出；控制台在导入那一步按「run_id 对齐 ∧
+     `end_it_reached` ∧ **末轮号一致**」转交 python **第二趟** `deliver_zip --end-it-reached --run-id …`
+     （不重新解包）落 `run_complete` ⇒ 现成灰横幅读面直接亮。**半段导入不亮横幅**；TS 侧无账本写入。
+  ② **T3 面板**：矩阵 / 课程管理离线行加「交还自动池」钮（`unsetCourseMode`），与「切换成在线」
+     （`pin=1` 永久固定）**文案分开**。
+  ③ **T8 控制台**：告警坞渲染 `/admin/offline.stalled`（`pending-export` 红 / `running-stale` 橙），
+     文案点名三条出路并自带「交还自动池」动作；hub 不可达/旧版 = `null`（不可知 ≠ 没停）。
+- **被否决**：① 一趟导入里转交（run_id 在解包前不可知 ⇒ 只能两趟）；② TS 直接写 `run_complete`
+  账本（python 是唯一写者；`server-api-task-bundle` 源码守卫钉住）；③ 转交只对 run_id + 跑满、
+  不校末轮号（同一 run 的旧半包会被误亮横幅）；④ stalled 自动切回在线（U3 明令不许自动回退，
+  只出告警 + 人来按）。
+- **落点**：`nn-training/{hub/{store_offline,queue_resume,offline,admin}.py, remote/{deliver_zip,offline_deliver,plan_handoff,plan_run}.py}` ·
+  `dashboard/src/{server/{api/overview,bundles/import},stack/hub-admin,web/{view/{course-overview,alerts},app/{app.tsx,panels/{CourseMatrix,CourseAdmin}}.tsx}}` ·
+  回归 `nn-training/tests/{hub/test_auto_handoff.py（24 例）,remote/{test_deliver_zip,test_offline_deliver,test_offline_deliver_async}.py}` ·
+  `dashboard/tests/{server-api-task-bundle,web-alert-dock,web-app-coursematrix,train-mode-offline}.test.ts`。
+- **门槛**：`bun run check` 绿（2357 pass/3 skip）· nn python gate 绿（ruff+mypy+pytest 3568 pass/7 skip）·
+  dashboard 全量 1303 pass。**仍未落地：T0**（`switch-mode-drops-jobs` 撤单；T0a 落点重定位已确认）。
+- **指针**：全文 `docs/nn/remote-transport.md` §56（2026-10-03 补段）· plan `plan/auto-offline-handoff.plan.md`。

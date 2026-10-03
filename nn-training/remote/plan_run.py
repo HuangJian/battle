@@ -442,6 +442,23 @@ def run_plan_job(
     return _drive(ctx, session=session, start_from=start_from)
 
 
+def _end_it_reached(plan: dict, *, state: str, it_end: int) -> bool:
+    """本段是否跑到了**计划终点**（T6 的唯一判据；纯函数，`plan/auto-offline-handoff §3.6`）。
+
+    为什么判据在云机这一侧：完成态的生产者是**跑过这段的那一侧**——它同时知道
+    `state`（怎么停的）与计划终点（`plan["end_it"]`）。控制台/hub 只能转交，不能猜。
+
+    刻意苛刻的两条：
+      * 只有 `complete`（跑空 todo）与 `noop`（接续点已在终点之后）算；
+        `budget`/`failed` 都不是跑满 —— 半段自报会把这门课提前封成 completed（U6 反例）；
+      * `it_end >= end_it`：`max_iters` 截断后的区间跑完也**不算**跑满（计划终点没到）。
+    """
+    end_it = int(plan.get("end_it", 0) or 0)
+    if end_it <= 0 or state not in ("complete", "noop"):
+        return False
+    return int(it_end) >= end_it
+
+
 def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
     """从 `start_from` 之后跑到计划末尾（受预算/上限约束），返回合并结果。"""
     todo = [it for it in ctx.planned_range() if it > start_from]
@@ -458,7 +475,14 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
             ctx.log("计划内的轮次都已在产物里——无事可做")
         ctx.store.finalize(state="complete", summary={"last_it": start_from, "rows": len(ctx.store.rows)})
         # 无事可做也可能**有东西要补传**：上次会话断网、这次连上了，积压全在这一步补完。
-        ctx.deliver_final(it_end=start_from, state="noop", summary={"rows": len(ctx.store.rows)})
+        # `end_it_reached` 用同一判据重算：接续点已在终点之后 ⇒ 重报一次「跑满」（幂等；
+        # 上一个会话跑满但没送达的摘要，由这一拍补上）。
+        ctx.deliver_final(
+            it_end=start_from,
+            state="noop",
+            summary={"rows": len(ctx.store.rows)},
+            end_it_reached=_end_it_reached(ctx.plan, state="noop", it_end=start_from),
+        )
         ctx.close_delivery()
         _close_eval(ctx)
         return _combined(ctx, last_it=start_from, session=session, state="noop")
@@ -503,7 +527,13 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
     _close_eval(ctx)
     summary = {"last_it": prev, "rows": len(ctx.store.rows), "session": len(session)}
     ctx.store.finalize(state="complete" if stopped == "complete" else stopped, summary=summary)
-    ctx.deliver_final(it_end=prev, state=stopped, summary=summary)
+    # T6：跑满计划区间才自报 `end_it_reached`（预算/失败停下的段不算——它们还要人接管）。
+    ctx.deliver_final(
+        it_end=prev,
+        state=stopped,
+        summary=summary,
+        end_it_reached=_end_it_reached(ctx.plan, state=stopped, it_end=prev),
+    )
     ctx.close_delivery()
     return _combined(ctx, last_it=prev, session=session, state=stopped)
 

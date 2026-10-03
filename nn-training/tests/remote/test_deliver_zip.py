@@ -32,6 +32,7 @@ from remote.deliver_zip import (
     course_from_filename,
     import_deliver_zip,
     main,
+    write_run_complete_for_run,
 )
 
 
@@ -130,6 +131,54 @@ def test_imported_rounds_land_in_the_course_ledger(tmp_path: Path) -> None:
     got2 = import_deliver_zip(z, dest, course="demo", log=log.append)
     assert got2["metric_rows"] == 0
     assert len(ledger.read_text(encoding="utf-8").strip().splitlines()) == 2
+
+
+# ────────────────── T6：end_it_reached 转交（run_complete 只由 python 写） ──────────────────
+
+
+def test_import_alone_never_writes_run_complete(tmp_path: Path) -> None:
+    """半段导入不得亮横幅（T6 负向）：导入器自己**永远**不落 `run_complete`。
+
+    转交必须由控制台在「`run_id` 与 hub 段末摘要匹配 ∧ `end_it_reached`」之后显式发起
+    （第二趟 `--end-it-reached`）——python 在没有那次显式授权时一行都不写。
+    """
+    z = _make_artifact_zip(tmp_path, iters=(1, 2), run_id="r-half")
+    dest = tmp_path / "demo" / "deliver"
+    import_deliver_zip(z, dest, course="demo", log=lambda _m: None)
+    ledger = dest.parent / "training_log.jsonl"
+    rows = [json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert rows and all(r["event"] == "iteration" for r in rows)
+
+
+def test_transfer_writes_run_complete_from_product_facts(tmp_path: Path) -> None:
+    """转交落 `run_complete`：`it` = 产物末轮、`iters` = 计划终点（两者都只从盘上事实取）。"""
+    z = _make_artifact_zip(tmp_path, iters=(1, 2, 3), run_id="r-done")
+    dest = tmp_path / "demo" / "deliver"
+    import_deliver_zip(z, dest, course="demo", log=lambda _m: None)
+    got = write_run_complete_for_run(dest, "r-done", log=lambda _m: None)
+    assert got == {"run_id": "r-done", "it": 3, "iters": 3, "written": True}
+    ledger = dest.parent / "training_log.jsonl"
+    rows = [json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    tail = rows[-1]
+    assert tail["event"] == "run_complete" and tail["iter"] == 3 and tail["iters"] == 3
+    assert "跑满" in tail["reason"] and len(tail["time"]) == 19
+    # 幂等：重导/重转交不叠行（账本是多写者文件，重复行会让横幅读面之外的地方惊讶）
+    again = write_run_complete_for_run(dest, "r-done", log=lambda _m: None)
+    assert again["written"] is False
+    rows2 = [json.loads(ln) for ln in ledger.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    assert len(rows2) == len(rows)
+
+
+def test_transfer_rejects_unknown_run_and_writes_nothing(tmp_path: Path) -> None:
+    """`run_id` 不匹配（没有对应产物目录）⇒ 响亮拒绝，账本里不出现 `run_complete`。"""
+    z = _make_artifact_zip(tmp_path, iters=(1, 2), run_id="r-x")
+    dest = tmp_path / "demo" / "deliver"
+    import_deliver_zip(z, dest, course="demo", log=lambda _m: None)
+    with pytest.raises(ProtocolError) as ei:
+        write_run_complete_for_run(dest, "no-such-run", log=lambda _m: None)
+    assert "no-such-run" in str(ei.value)
+    ledger = dest.parent / "training_log.jsonl"
+    assert "run_complete" not in ledger.read_text(encoding="utf-8")
 
 
 def test_imported_cloud_eval_summary_reaches_the_course_ledger(tmp_path: Path) -> None:
@@ -360,3 +409,34 @@ def test_cli_returns_nonzero_on_bad_zip(tmp_path: Path, capsys: pytest.CaptureFi
     rc = main(["--zip", str(bad), "--dest", str(tmp_path / "deliver")])
     assert rc == 2
     assert "导入失败" in capsys.readouterr().err
+
+
+def test_cli_transfer_flag_writes_run_complete(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """控制台的第二趟调用形状：`--end-it-reached --run-id … --dest …`（不再传 zip）。"""
+    z = _make_artifact_zip(tmp_path, iters=(1, 2, 3))
+    dest = tmp_path / "demo" / "deliver"
+    assert main(["--zip", str(z), "--dest", str(dest), "--course", "demo", "--json-only"]) == 0
+    capsys.readouterr()
+    rc = main([
+        "--end-it-reached",
+        "--run-id",
+        "x1-demo",
+        "--dest",
+        str(dest),
+        "--course",
+        "demo",
+        "--json-only",
+    ])
+    assert rc == 0
+    out = capsys.readouterr().out.strip().splitlines()[-1]
+    payload = json.loads(out[len(IMPORT_JSON_MARK) :])
+    assert payload["written"] is True and payload["it"] == 3 and payload["iters"] == 3
+
+
+def test_cli_transfer_without_run_id_is_rejected(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    rc = main(["--end-it-reached", "--dest", str(tmp_path / "deliver")])
+    assert rc == 2 and "--run-id" in capsys.readouterr().err

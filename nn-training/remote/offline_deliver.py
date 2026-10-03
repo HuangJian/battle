@@ -174,7 +174,9 @@ class OfflineDeliverer:
         self._want_sync = False
         #: 要**重投**的已投递轮次（云机评估落账后补读数；见 `submit_eval_round`）。
         self._repost: set[int] = set()
-        self._final: tuple[int, str, dict] | None = None
+        #: 段末三元组 + `end_it_reached`（T6：本段是否跑到计划终点；控制台据此转交
+        #: `run_complete`——hub 只转交不判决，判决在云机这一侧）。
+        self._final: tuple[int, str, dict, bool] | None = None
         self._stopping = False
         self._drain_until = 0.0
         self._thread: threading.Thread | None = None
@@ -214,16 +216,28 @@ class OfflineDeliverer:
             self._want_sync = True
             self._cv.notify_all()
 
-    def submit_final(self, *, it_end: int, state: str, summary: dict | None = None) -> None:
+    def submit_final(
+        self,
+        *,
+        it_end: int,
+        state: str,
+        summary: dict | None = None,
+        end_it_reached: bool = False,
+    ) -> None:
         """段末：先推积压，再推段末摘要（非阻塞；段末摘要不可变不了，只能最新有效）。"""
         if not self.background:
             self.sync()
-            self.deliver_result(it_end=int(it_end), state=str(state), summary=summary)
+            self.deliver_result(
+                it_end=int(it_end),
+                state=str(state),
+                summary=summary,
+                end_it_reached=end_it_reached,
+            )
             return
         if self._thread is None:
             return
         with self._cv:
-            self._final = (int(it_end), str(state), dict(summary or {}))
+            self._final = (int(it_end), str(state), dict(summary or {}), bool(end_it_reached))
             self._cv.notify_all()
 
     def close(self, timeout: float = DRAIN_FLUSH_SEC) -> None:
@@ -267,8 +281,14 @@ class OfflineDeliverer:
                 # 收线时强制探一次（绕过负结果 TTL）——否则整段最后一次 flush 会被上一次失败静默吞掉
                 self._guard(self._push_backlog, deadline, stopping)
             if final is not None:
-                it_end, state, summary = final
-                self._guard(self.deliver_result, it_end=it_end, state=state, summary=summary)
+                it_end, state, summary, end_it_reached = final
+                self._guard(
+                    self.deliver_result,
+                    it_end=it_end,
+                    state=state,
+                    summary=summary,
+                    end_it_reached=end_it_reached,
+                )
             elif stopping:
                 # 收线：本次 flush 已按预算跑完（推不完也走——产物在本地目录里）。
                 return
@@ -656,11 +676,21 @@ class OfflineDeliverer:
             rows = rows[: self.EVAL_ROWS_CAP]
         return rows + summary
 
-    def deliver_result(self, *, it_end: int, state: str, summary: dict | None = None) -> bool:
+    def deliver_result(
+        self,
+        *,
+        it_end: int,
+        state: str,
+        summary: dict | None = None,
+        end_it_reached: bool = False,
+    ) -> bool:
         """段末摘要（跑到哪、什么状态、失败原因）。best-effort；**永不抛**。
 
         与逐轮产物的差别：摘要是**会变的**（同一 run 续跑后 `it_end` 更大），hub 侧覆盖写
         ——它不是不可变快照，而「这条腿现在到哪了」的最新答案。
+
+        `end_it_reached`（T6）：本段是否跑到计划终点（由调用方 `plan_run._drive` 用
+        `_end_it_reached` 判定，只有 `complete`/`noop` 且 `it_end >= plan.end_it` 才是）。
         """
         try:
             if not self.enabled or self.disabled_reason:
@@ -672,6 +702,7 @@ class OfflineDeliverer:
                 "run_id": self.run_id,
                 "it_end": int(it_end),
                 "state": str(state),
+                "end_it_reached": bool(end_it_reached),
                 "delivered": len(self._delivered),
                 "summary": dict(summary or {}),
                 "plan_sha256": str(m.get("plan_sha256", "") or ""),

@@ -521,6 +521,8 @@ export function App({ initial }: AppProps) {
             acks: cloudHaltAcks,
             loopComplete: stateView?.loopComplete,
             ppoQueueStall: stateView?.ppoQueueStall,
+            // 离线课程停滞（T8）：hub 的 `/admin/offline.stalled` 经 overview 透到这里。
+            offlineStalls: stateView?.overview?.offlineStalled ?? null,
             courseEdit: stateView?.courseEdit,
             readOnly,
             roDismissed: roBannerDismissed,

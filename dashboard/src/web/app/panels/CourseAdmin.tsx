@@ -450,6 +450,23 @@ function RowOps({
           {r.ov?.offline ? '切换成在线' : '切离线'}
         </button>
       ) : null}
+      {/* 交还自动池（U3 第三条出路；plan §3.2a 动作表）：`unsetCourseMode` = 本机配置回在线档
+          + hub `mode=online&pin=0` + 删意图——该课重回自动交接池（与「切换成在线」的 pin=1
+          永久固定在线是**两件事**，文案分开）。 */}
+      {r.canToggleMode && r.ov?.offline ? (
+        <button
+          type="button"
+          className="tc-btn tc-btn--sm"
+          aria-label={`自动：交还自动池 ${r.course}`}
+          title={
+            '交还自动交接池：hub 清 pin + 清 claim 记账，本机在下一轮边界恢复采样；' +
+            'TPU 一上线就能领走它。若云机还在跑就会双跑——那是人的决定（U3 第三条出路）。'
+          }
+          onClick={() => void onAction('unsetCourseMode', { course: r.course })}
+        >
+          交还自动池
+        </button>
+      ) : null}
       {arch ? (
         <button
           type="button"

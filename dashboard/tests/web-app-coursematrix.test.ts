@@ -614,6 +614,18 @@ describe('「意图未生效」徽标：两个源不一致时上屏', () => {
     expect(html).toContain('>切换成在线<')
     expect(html).toContain('aria-label="hub：切换成在线 c5"')
   })
+
+  it('★2026-10-03 交还自动池：离线行给第三颗钮，与「切换成在线」分开表述', async () => {
+    // T3 的 UI 面（plan §3.2a 动作表）：`unsetCourseMode` = `pin=0` + 删意图 ⇒ 重回自动池；
+    // 「切换成在线」= `pin=1` 永久退出自动逻辑。两颗钮都在，且文案彼此分开。
+    const html = await render({ onAction: () => {} })
+    expect(html).toMatch(
+      /<button[\s\S]*?aria-label="自动：交还自动池 c5"[\s\S]*?>交还自动池<\/button>/,
+    )
+    expect(html).toContain('U3 第三条出路')
+    // 在线行（c4）不给这颗钮——它只在「课归自动池/离线」时才有意义
+    expect(html).not.toContain('aria-label="自动：交还自动池 c4"')
+  })
 })
 
 // ────────────────────────── §4.1 毒包熔断上屏 ──────────────────────────
@@ -722,8 +734,11 @@ describe('接线：面板挂载、跨区分流与动作路由同源', () => {
     const server = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'server', 'server.ts'), 'utf-8')
     expect(panel).toContain("'setCourseMode'")
     expect(panel).toContain("'setCoursePaused'")
+    // ★ T3（2026-10-03）：交还自动池也走 route 表（面板 → onAction → route case）
+    expect(panel).toContain("'unsetCourseMode'")
     expect(route).toContain("case 'setCourseMode'")
     expect(route).toContain("case 'setCoursePaused'")
+    expect(route).toContain("case 'unsetCourseMode'")
     expect(app).toContain('onAction={doAction}')
     // 动作后走**单一处置入口**（2026-09-22）：课程级硬清 + 机群级/调度器软作废都收在它里面——
     // server.ts 不再逐个缓存手写作废（漏一个就退化成「动作后第一帧卡几秒」）。

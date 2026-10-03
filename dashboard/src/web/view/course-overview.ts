@@ -228,6 +228,116 @@ export function parseOfflineProgress(
   return out
 }
 
+/** 一次离线段（run）在 hub 侧的**段末摘要**（`/admin/offline.results[课][run_id]`）。
+ *
+ *  它是 T6 转交的判决输入：控制台在导入后按 `runId` 对齐它，只有在「自报跑满 ∧ 末轮号
+ *  也一致」时才让 python 落 `run_complete`（半段导入不得亮横幅）。 */
+export interface OfflineResultView {
+  /** 云机自报的末轮号。 */
+  itEnd: number
+  /** 云机自报的停止态（complete/budget/failed/noop/…）。 */
+  state: string
+  /** 云机自报**跑满计划区间**（`end_it_reached`；只有它才是「已完成」）。 */
+  endItReached: boolean
+  /** hub 收到这份摘要的时刻（epoch 秒；0 = 旧 hub 不带）。 */
+  receivedAt: number
+}
+
+/** 一门课的停滞告警（`/admin/offline.stalled`；T8）。
+ *
+ *  判据全部来自已有事实（租约龄 / 补传进度 mtime / 翻 mode 时刻）——自动交接把本机停采后，
+ *  这是「云机根本没跑」与「一切正常」的唯一分界线。 */
+export interface OfflineStalledView {
+  course: string
+  /** `running-stale`（有租约但进度超阈值）· `pending-export`（已翻 offline 无人跑超阈值）。 */
+  why: 'running-stale' | 'pending-export' | ''
+  /** 当前持有人 worker_id（没有 = 空串）。 */
+  holder: string
+  /** 最近一件补传产物的 mtime（epoch 秒；0 = 没读到）。 */
+  lastMtime: number
+  /** hub 把该课翻成 offline 的时刻（epoch 秒；0 = 无记录）。 */
+  flippedAt: number
+  /** 距最近一件事（进度 mtime 或翻 mode 时刻）的秒数。 */
+  ageSec: number
+}
+
+/** `/admin/offline` 的完整观测面（进度 + 段末摘要 + 停滞告警）。 */
+export interface OfflineAdminView {
+  progress: Record<string, Record<string, OfflineRunView>>
+  results: Record<string, Record<string, OfflineResultView>>
+  stalled: OfflineStalledView[]
+}
+
+/** 解析 hub `/admin/offline` 的 `results`（段末摘要）；缺/坏形状 → null（旧版 hub）。 */
+export function parseOfflineResults(
+  body: unknown,
+): Record<string, Record<string, OfflineResultView>> | null {
+  if (!body || typeof body !== 'object') return null
+  const raw = (body as Record<string, unknown>).results
+  if (!raw || typeof raw !== 'object') return null
+  const out: Record<string, Record<string, OfflineResultView>> = {}
+  for (const [course, runsRaw] of Object.entries(raw as Record<string, unknown>)) {
+    if (!course || !runsRaw || typeof runsRaw !== 'object') continue
+    const runs: Record<string, OfflineResultView> = {}
+    for (const [runId, v] of Object.entries(runsRaw as Record<string, unknown>)) {
+      if (!runId || !v || typeof v !== 'object') continue
+      const r = v as Record<string, unknown>
+      runs[runId] = {
+        itEnd: typeof r.it_end === 'number' && Number.isFinite(r.it_end) ? r.it_end : 0,
+        state: typeof r.state === 'string' ? r.state : '',
+        endItReached: r.end_it_reached === true,
+        receivedAt: num(r.received_at),
+      }
+    }
+    if (Object.keys(runs).length) out[course] = runs
+  }
+  return out
+}
+
+/** 解析 hub `/admin/offline` 的 `stalled`（停滞告警）；缺/坏形状 → null（旧版 hub）。
+ *
+ *  宽容解析（与 `parseHubQueue` 同规）：hub 可能比控制台新/旧一个版本；**坏条目跳过**
+ *  而不是让整页 /api/state 500。 */
+export function parseOfflineStalled(body: unknown): OfflineStalledView[] | null {
+  if (!body || typeof body !== 'object') return null
+  const raw = (body as Record<string, unknown>).stalled
+  if (!Array.isArray(raw)) return null
+  const out: OfflineStalledView[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue
+    const r = item as Record<string, unknown>
+    const course = typeof r.course === 'string' ? r.course : ''
+    if (!course) continue
+    const holderRaw = r.holder
+    const holder =
+      holderRaw &&
+      typeof holderRaw === 'object' &&
+      typeof (holderRaw as Record<string, unknown>).worker_id === 'string'
+        ? String((holderRaw as Record<string, unknown>).worker_id ?? '')
+        : ''
+    out.push({
+      course,
+      why: r.why === 'running-stale' || r.why === 'pending-export' ? r.why : '',
+      holder,
+      lastMtime: num(r.last_progress_mtime),
+      flippedAt: num(r.flipped_at),
+      ageSec: num(r.age_sec),
+    })
+  }
+  return out
+}
+
+/** 完整读面（progress + results + stalled）；`progress` 缺失 → null（不是 hub 的应答）。 */
+export function parseOfflineAdmin(body: unknown): OfflineAdminView | null {
+  const progress = parseOfflineProgress(body)
+  if (progress === null) return null
+  return {
+    progress,
+    results: parseOfflineResults(body) ?? {},
+    stalled: parseOfflineStalled(body) ?? [],
+  }
+}
+
 /** 一门课的全部离线段：已收到的总轮数 + 最后一轮号 + 最近时间戳（跨 run 取最大）。 */
 export function offlineSummary(runs: Record<string, OfflineRunView> | undefined): {
   rounds: number
@@ -368,6 +478,11 @@ export interface ParallelOverviewView {
   rows: CourseOverviewRow[]
   /** 逐课程的离线段进度（原始形状，UI 需要按 run 展开时用；缺 = 没读到）。 */
   offlineProgress: Record<string, Record<string, OfflineRunView>> | null
+  /** 停滞告警（`/admin/offline.stalled`；T8）：`running` 无进度 / 已翻 offline 无人跑。
+   *
+   *  `null` = hub 不可达或旧版 hub（**不可知 ≠ 没停**——告警坞对 null 什么都不画，
+   *  但课程矩阵的「hub 无应答」自会占位）。 */
+  offlineStalled?: OfflineStalledView[] | null
 }
 
 /** 账本尾行里最后一个 `iteration` 事件的轮次（纯函数，可单测）。

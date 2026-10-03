@@ -318,12 +318,18 @@ class OfflineRoutes:
                     f"本 hub 的课程：{self.hub.courses()}"
                 )
             res = self.hub.store_offline_result(course, body)
+            # T6（plan/auto-offline-handoff §3.6）：跑满自报 = 把当前包记为 completed
+            # ⇒ 该课**不可再领**（U6），直到人重导包（新 sha）自动解封。这是 T6 的
+            # hub 侧生产链接线——此前 `note_offline_completed` 只有测试直接调（死代码）。
+            if res.get("end_it_reached"):
+                self.hub.note_offline_completed(course)
         except (ProtocolError, ValueError, UnicodeDecodeError) as e:
             self._json({"error": f"补传被拒: {e}"}, 400)
             return
         print(
             f"[{time.strftime('%H:%M:%S')}] [hub-server] OFFLINE course={course or '-'} "
-            f"result run={res['run_id']} it{res['it_end']}",
+            f"result run={res['run_id']} it{res['it_end']}"
+            + ("（跑满）" if res.get("end_it_reached") else ""),
             flush=True,
         )
         self._json(res)

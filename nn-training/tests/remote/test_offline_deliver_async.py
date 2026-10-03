@@ -52,9 +52,12 @@ class _Recorder:
         self.fail_first = int(fail_first)
         self.calls: list[tuple[str, int]] = []
         self.started = time.time()
+        #: 原始体（按 URL 留存；T6 的断言要看 `offline/result` 体的 `end_it_reached`）。
+        self.bodies: list[tuple[str, bytes]] = []
 
     def __call__(self, url: str, data: bytes, headers: dict, timeout: float) -> tuple[int, bytes]:
         self.calls.append((url, len(data or b"")))
+        self.bodies.append((url, data or b""))
         if self.fail_first > 0:
             self.fail_first -= 1
             raise OSError("boom（假传输异常）")
@@ -65,6 +68,17 @@ class _Recorder:
 
     def posts(self, path: str) -> int:
         return sum(1 for u, _ in self.calls if u.endswith(path))
+
+    def body_for(self, path: str) -> dict:
+        for u, raw in self.bodies:
+            if not u.endswith(path):
+                continue
+            try:
+                got = json.loads(raw.decode("utf-8"))
+            except ValueError:
+                return {}
+            return got if isinstance(got, dict) else {}
+        return {}
 
 
 def _deliverer(root: Path, rec: _Recorder, **kw) -> OfflineDeliverer:
@@ -155,10 +169,12 @@ def test_submit_final_posts_the_segment_result(tmp_path: Path) -> None:
     rec = _Recorder()
     d = _deliverer(root, rec)
     d.start()
-    d.submit_final(it_end=2, state="complete", summary={"last_it": 2})
+    d.submit_final(it_end=2, state="complete", summary={"last_it": 2}, end_it_reached=True)
     d.close(timeout=10.0)
     assert rec.posts(OFFLINE_RESULT_PATH) == 1
     assert d.status()["result_done"] is True
+    # T6：`end_it_reached` 必须穿过后台队列（tuple 解包漏一格就会静默丢标志）
+    assert rec.body_for(OFFLINE_RESULT_PATH)["end_it_reached"] is True
 
 
 def test_sync_mode_is_still_synchronous(tmp_path: Path) -> None:

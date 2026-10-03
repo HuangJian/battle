@@ -232,9 +232,12 @@ describe('parseOfflineProgress：hub 侧段内进度 → 视图', () => {
 
   it('overview 把 /admin/offline 接进视图（不然 UI 永远拿到 null）', () => {
     const src = readSrc('src/server/api/overview.ts')
-    expect(src).toContain('hubOfflineProgress(live.url, token)')
+    // ★ 2026-10-03（T6/T8）：从 hubOfflineProgress 扩成 hubOfflineAdmin——同一个端点的
+    //   progress + results + stalled 三段一次取回（分两次取 = 面板与导入看到不同的 hub）。
+    expect(src).toContain('hubOfflineAdmin(live.url, token)')
     expect(src).toContain('offlineProgress: admin.offline')
     expect(src).toContain('offline: admin.offline,')
+    expect(src).toContain('offlineStalled: admin.offlineStalled')
     // 客户端侧确实打的是 /admin/offline
     expect(readSrc('src/stack/hub-admin.ts')).toContain('/admin/offline')
   })

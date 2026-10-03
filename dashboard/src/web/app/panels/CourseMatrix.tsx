@@ -483,6 +483,28 @@ function MatrixTr({
               ) : null}
             </span>
           ) : null}
+          {/* 交还自动池（U3 第三条出路；plan/auto-offline-handoff §3.2a 动作表）：与「切换成在线」
+              **分开表述**——后者是人的决定（`pin=1`，永久退出自动交接），本钮是把课**放回自动池**
+              （`pin=0` + 删意图）：本机下一轮恢复采样，TPU 一上线就能再领走它。 */}
+          {r.canToggleMode && r.ov?.offline ? (
+            <>
+              <span className="tc-mx__opsep" aria-hidden="true" />
+              <span className="tc-mx__opgroup" role="group" aria-label="自动：交还自动池">
+                <button
+                  type="button"
+                  className="tc-btn tc-btn--sm"
+                  aria-label={`自动：交还自动池 ${r.course}`}
+                  title={
+                    '交还自动交接池：hub 清 pin + 清 claim 记账，本机在下一轮边界恢复采样；' +
+                    'TPU 一上线就能领走它。若云机还在跑就会双跑——那是人的决定（U3 第三条出路）。'
+                  }
+                  onClick={() => void onAction('unsetCourseMode', { course: r.course })}
+                >
+                  交还自动池
+                </button>
+              </span>
+            </>
+          ) : null}
           {pause ? (
             <>
               <span className="tc-mx__opsep" aria-hidden="true" />

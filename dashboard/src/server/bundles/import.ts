@@ -16,7 +16,10 @@
 import { existsSync, mkdirSync, writeFileSync } from 'fs'
 import { writeFile } from 'fs/promises'
 import path from 'path'
+import { loadConfig } from '../../core/config'
 import { REPO_ROOT } from '../../core/paths'
+import { hubOfflineAdmin, liveHub } from '../../stack/hub-admin'
+import type { OfflineResultView } from '../../web/view'
 import { launchEvalA } from '../eval-a-run'
 import { type RunPythonResult, runRunPythonAsyncModule } from '../run-python'
 import { deliverImportJsonMark, deliverFileNamePrefix } from './marks'
@@ -95,6 +98,79 @@ export function parseDeliverImportJson(stdout: string): DeliverImportPayload | n
 /** python 导入器日志（stdout/stderr 都进这里，失败时人能看到三道门里是哪一道）。 */
 export function deliverImportLogPath(course: string): string {
   return path.join(REPO_ROOT, 'tmp', course, 'deliver-import.log')
+}
+
+// ────────────────────────── T6：跑满 ⇒ run_complete（灰横幅）转交 ──────────────────────────
+
+/** hub 侧该课各 run 的**段末摘要**（`/admin/offline.results[课]`）；hub 不可达/旧版 → null。
+ *
+ *  为什么必须问 hub：云机跑完的那一刻控制台不在场（账本的唯一合法写者是 python，
+ *  而 python 只在导入路径上跑）。hub 的段末摘要就是「这一段跑满了吗」的**唯一**外部证据；
+ *  拿不到就不转交（`null` = 不可知，而不是「没跑满」）。 */
+export async function fetchHubOfflineResults(
+  course: string,
+): Promise<Record<string, OfflineResultView> | null> {
+  try {
+    const cfg = loadConfig()
+    const live = await liveHub(cfg, course)
+    if (!live) return null
+    const admin = await hubOfflineAdmin(live.url, String(cfg.rl?.remote_token ?? ''))
+    return admin?.results?.[course] ?? null
+  } catch {
+    return null // 观测面坏了不该把导入带崩（下一拍快照会再探）
+  }
+}
+
+/** T6 转交判据（**纯函数**，可单测）：
+ *
+ *  ① hub 段末摘要的 `run_id` 与本次导入的 `run_id` **匹配**（谁是谁的段必须对上）；
+ *  ② 该摘要自报 `end_it_reached`（云机说跑满了）；
+ *  ③ 摘要的末轮号与导入产物末轮号**一致**——半段导入（同一 run 的旧包/ LATEST.zip）
+ *     即使 hub 说跑满也不得亮横幅（否则「导入 50 轮却宣布整段完成」）。
+ */
+export function endItReachedForRun(
+  payload: Pick<DeliverImportPayload, 'run_id' | 'last_it'>,
+  hubResults: Record<string, OfflineResultView> | null | undefined,
+): boolean {
+  const rec = hubResults?.[payload.run_id]
+  return rec?.endItReached === true && rec.itEnd === payload.last_it
+}
+
+/** 第二趟 python：为已导入的 run 落 `run_complete`（**不**重新解包 zip）。
+ *
+ *  账本的唯一写者是 python（`worker/events.py::write_run_complete`）；控制台只把判决
+ *  传进去（`--end-it-reached --run-id …`），不自己碰账本。失败返回 `{ok:false}` 且
+ *  **不改导入的 ok**——权重已经落地可评估（这一半的全部价值），少的只是完成横幅。 */
+export async function writeRunCompleteWithPython(
+  course: string,
+  runId: string,
+  opts: { destRoot?: string; logFile?: string } = {},
+  runner: DeliverZipRunner = runRunPythonAsyncModule,
+): Promise<{ ok: boolean; message: string }> {
+  const root = opts.destRoot ?? deliverImportRoot(course)
+  const r = await runner('remote.deliver_zip', [
+    '--end-it-reached',
+    '--run-id',
+    runId,
+    '--dest',
+    root,
+    '--course',
+    course,
+  ])
+  try {
+    writeFileSync(
+      opts.logFile ?? deliverImportLogPath(course),
+      `$ python -m remote.deliver_zip --end-it-reached --run-id ${runId} --dest ${root} --course ${course}\n` +
+        `[exit ${r.code}${r.timeout ? ' TIMEOUT' : ''}]\n${r.stdout}\n${r.stderr}`,
+      { encoding: 'utf-8', flag: 'a' },
+    )
+  } catch {
+    /* 留档失败不影响转交结果 */
+  }
+  if (r.timeout) return { ok: false, message: '完成横幅未落账（python 超时）' }
+  if (r.code === 0) return { ok: true, message: '已完成（run_complete 已落账，灰横幅下一拍上屏）' }
+  const line = lastLine(r.stderr) || lastLine(r.stdout) || `exit ${r.code}`
+  return { ok: false, message: `完成横幅未落账（${line}）——产物已导入，可在矩阵上手动确认` }
 }
 
 export interface DeliverImportResult {
@@ -236,12 +312,18 @@ export interface DeliverUploadDeps {
   importZip: typeof importDeliverZip
   /** 导入后自动评估（测试注入替身 → 不真起 evalA：那会真跑几十局）。 */
   launchEval: typeof launchEvalA
+  /** T6：hub 侧段末摘要（判决输入；测试注入替身 → 不碰真 hub）。 */
+  offlineResults: typeof fetchHubOfflineResults
+  /** T6：第二趟 python 落 run_complete（测试注入替身 → 不跑 python）。 */
+  writeRunComplete: typeof writeRunCompleteWithPython
 }
 
 const realDeps: DeliverUploadDeps = {
   save: saveDeliverUpload,
   importZip: importDeliverZip,
   launchEval: launchEvalA,
+  offlineResults: fetchHubOfflineResults,
+  writeRunComplete: writeRunCompleteWithPython,
 }
 
 export async function handleDeliverUpload(
@@ -271,16 +353,33 @@ export async function handleDeliverUpload(
     if (!imported.ok || !imported.payload)
       return jsonResp({ ok: false, message: imported.message, detail: imported.detail }, 400)
     const payload = imported.payload
+    // ★ T6（plan/auto-offline-handoff §3.6）：完成态转交。判决在这里（run_id 对齐 ∧ 自报
+    //   跑满 ∧ 末轮号一致——半段导入不亮横幅），落账在 python（账本唯一写者）。
+    let endItReached = false
+    let bannerNote = ''
+    let runCompleteOk = false
+    try {
+      endItReached = endItReachedForRun(payload, await deps.offlineResults(course))
+    } catch {
+      endItReached = false // hub 观测面坏了 = 无从判决 ⇒ 不转交（不是「没跑满」）
+    }
+    if (endItReached) {
+      const wr = await deps.writeRunComplete(course, payload.run_id)
+      runCompleteOk = wr.ok
+      bannerNote = wr.message
+    }
     const ev = launchPostImportEval(course, payload, deps)
     return jsonResp(
       {
         ok: true,
-        message: imported.message + '；' + ev.message,
+        message: [imported.message, bannerNote, ev.message].filter(Boolean).join('；'),
         detail: [
           `产物目录：${path.relative(REPO_ROOT, payload.dir).replace(/\\/g, '/')}`,
           `末轮权重：it${payload.last_it}`,
         ],
         import: payload,
+        endItReached,
+        runComplete: runCompleteOk,
         evalStarted: ev.ok,
       },
       200,

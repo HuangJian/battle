@@ -36,12 +36,25 @@ TPU 一次只 drain 一门，其余照常在线推进；掉线就一直等待；
 **T8 停摆告警面**：`/admin/offline` 增 `stalled`（`running` 无进度 / 已翻 offline 无人跑），文案点名
 三条出路（TPU 重连 / 手工导入结果包 / 手工切回在线）——自动化的固有代价必须显式付。
 
-**回归**：`nn-training/tests/hub/test_auto_handoff.py` 22 例（纯判据 / 清单 / claim 各态 / 重启恢复 /
-pin / busy 闸 / waiting / completed / 排序 / stalled）+ `tests/common/test_offline_task_queue.py` 云机侧
-新用例 + `dashboard/tests/course-mode.test.ts` 三态与 pin/unset/auto 分工。
+**回归**：`nn-training/tests/hub/test_auto_handoff.py` 24 例（纯判据 / 清单 / claim 各态 / 重启恢复 /
+pin / busy 闸 / waiting / completed / 排序 / stalled / T6 段末摘要链）+ `tests/common/test_offline_task_queue.py`
+云机侧新用例 + `dashboard/tests/course-mode.test.ts` 三态与 pin/unset/auto 分工。
 
-**未落地（如实记）**：T0（`switch-mode-drops-jobs` 撤单）· T6（跑满灰横幅走导入链）· T3 的 UI 面
-（「交还自动」后端动作已就绪，面板未接线）· T8 的控制台告警渲染。
+**T6 完成态链（2026-10-03 补落地）**：`end_it_reached` 由云机在 `POST /offline/result` 自报
+（`plan_run._end_it_reached`：只有 `complete`/`noop` ∧ `it_end >= plan.end_it`；`max_iters` 截断不算）→
+hub 字段白名单 + 联动 `note_offline_completed`（该包记 `completed` ⇒ 不可再领，重导包 sha 变自动解封）→
+`/admin/offline.results[课][run_id]` 按 run 带出 → 控制台在**导入那一步**按「run_id 对齐 ∧
+`end_it_reached` ∧ 末轮号一致」转交 python **第二趟** `deliver_zip --end-it-reached --run-id …`
+（不重新解包）→ `worker.events.write_run_complete` 落账 → 现有灰横幅读面直接亮。**半段导入不亮横幅**
+（末轮号对不上就不转交）；`run_complete` 的写者仍是 python（TS 只传判决，`server-api-task-bundle` 有守卫）。
+已知时序代价（如实记）：横幅出现在「产物被导入」那一刻，不是「云机跑完」那一刻。
+
+**T3/T8 的面板面（2026-10-03 补落地）**：课程矩阵 / 课程管理离线行给「交还自动池」钮
+（`unsetCourseMode` = `pin=0` + 删意图，与「切换成在线」的 `pin=1` 永久固定**分开表述**）；告警坞渲染
+`/admin/offline.stalled`（`pending-export` 红 / `running-stale` 橙，文案点名三条出路并自带「交还自动池」
+动作）——hub 不可达/旧版时 `null`（不可知 ≠ 没停，一条都不画）。
+
+**仍未落地（如实记）**：T0（`switch-mode-drops-jobs` 撤单）。
 
 ## §55 承接面归属事件：`job_result_accepted` / `job_rejected` + 结果 POST 带 `X-Worker-Id`（plan/worker-contribution-view W2，2026-10-02）
 

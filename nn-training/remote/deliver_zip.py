@@ -48,6 +48,8 @@ from remote.bundle import BUNDLE_INDEX, safe_extract_zip
 
 #: 机器可读结果的标记（控制台按它切 stdout 的末行；前面的人读日志随便打）。
 IMPORT_JSON_MARK = "DELIVER_IMPORT_JSON="
+#: `run_complete` 的 reason（控制台灰横幅第一行显示它；与本地停车那条同形）。
+RUN_COMPLETE_REASON = "离线段跑满（云机自报 end_it_reached + 导入转交）"
 #: 产物 zip 的习惯文件名（`deliver-<课程>.zip`）。
 DELIVER_PREFIX = "deliver-"
 #: 单个 zip 的大小上限（产物 zip 含逐轮权重：几轮到几十轮 = 几 MB 到几十 MB；
@@ -361,20 +363,101 @@ def write_per_game_files(traj: Path, rows: list[dict]) -> int:
     return n
 
 
+def _ledger_tail_is_run_complete(ledger: Path, it: int) -> bool:
+    """账本尾行是否已是同一轮的 `run_complete`（幂等：重导/重转交不叠行）。"""
+    try:
+        lines = ledger.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    for line in reversed(lines):
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            return False
+        if not isinstance(row, dict) or row.get("event") != "run_complete":
+            return False
+        return row.get("iter") == int(it)
+    return False
+
+
+def write_run_complete_for_run(
+    dest_root: str | Path,
+    run_id: str,
+    *,
+    log=lambda msg: print(msg, flush=True),
+) -> dict:
+    """为**已导入**的 run 落 `run_complete`（T6，`plan/auto-offline-handoff §3.6`）。
+
+    为什么这是**第二趟调用**而不是导入里顺手写：判决在控制台（导入 payload 的 `run_id`
+    必须与 hub 段末摘要的 `run_id` 匹配 ∧ 摘要自报 `end_it_reached`——半段导入不得亮横幅），
+    而落账在 python（`run_complete` 的唯一写者是 `worker/events.py`，TS 复刻 = 第二个实现源）。
+
+    `it`/`iters` 只用产物目录里的事实：`last_it` = 最大 `it-NNN`；`iters` = `plan.json`
+    的计划终点（旧包没有 plan.json ⇒ 退到 `last_it`，横幅照旧能显示，不编造更大数字）。
+    幂等：账本尾行已是同轮的 `run_complete` 就不叠行（重导/重转交是常态）。
+    """
+    root = Path(dest_root)
+    safe = re.sub(r"[^A-Za-z0-9._-]", "_", str(run_id))[:64]
+    run_dir = root / safe
+    if not safe or not run_dir.is_dir():
+        raise ProtocolError(f"产物目录不存在: {run_dir}（先导入再转交 run_complete）")
+    iters = _scan_iters(run_dir)
+    if not iters:
+        raise ProtocolError(f"产物目录里没有 it-NNN/weights.json: {run_dir}")
+    last_it = max(iters)
+    plan = _read_json(run_dir / "plan.json")
+    raw_end = plan.get("end_it")
+    end_it = int(raw_end) if isinstance(raw_end, int) and not isinstance(raw_end, bool) else 0
+    planned = end_it if end_it > 0 else last_it
+    # 课程账本与 `_merge_carried_metric_rows` 同一位（导入根的同级）；不在那里就建同级。
+    ledger = root.parent / "training_log.jsonl"
+    if _ledger_tail_is_run_complete(ledger, last_it):
+        log(f"[deliver] 账本尾行已是 it{last_it} 的 run_complete——不重复写（幂等）")
+        return {"run_id": safe, "it": last_it, "iters": planned, "written": False}
+    # 延迟 import：与 `_merge_carried_eval_rows` 同源纪律（截断快照里 rl 包可能不在）。
+    from worker.events import write_run_complete
+
+    write_run_complete(ledger, last_it, planned, RUN_COMPLETE_REASON)
+    log(
+        f"[deliver] run_complete 已落账：it{last_it}/{planned} → {ledger}"
+        "（控制台矩阵的「已完成」灰横幅下一拍上屏）"
+    )
+    return {"run_id": safe, "it": last_it, "iters": planned, "written": True}
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="导入训练产物 zip（deliver-<课程>.zip）")
-    ap.add_argument("--zip", required=True, help="产物 zip 路径")
+    ap.add_argument("--zip", help="产物 zip 路径（不跑 `--end-it-reached` 时必填）")
     ap.add_argument("--dest", required=True, help="落地根目录（每个 run 一个子目录）")
     ap.add_argument("--course", default="", help="控制台当前课程（对账文件名；可空）")
     ap.add_argument("--json-only", action="store_true", help="只打机器可读那一行")
+    # T6 转交（控制台第二趟调用）：为**已导入**的 run 落 run_complete，不重新解包。
+    ap.add_argument(
+        "--end-it-reached",
+        action="store_true",
+        help="（T6）为已导入的 run 落 run_complete（需 --run-id；不重新解包）",
+    )
+    ap.add_argument("--run-id", default="", help="配合 --end-it-reached：已导入的 run_id")
     args = ap.parse_args(argv)
+    log = (lambda _m: None) if args.json_only else (lambda m: print(m, flush=True))
+    if args.end_it_reached:
+        if not args.run_id:
+            print("[deliver] --end-it-reached 需要 --run-id", file=sys.stderr, flush=True)
+            return 2
+        try:
+            got = write_run_complete_for_run(args.dest, args.run_id, log=log)
+        except ProtocolError as e:
+            print(f"[deliver] run_complete 未落账：{e}", file=sys.stderr, flush=True)
+            return 2
+        print(IMPORT_JSON_MARK + json.dumps(got, ensure_ascii=False), flush=True)
+        return 0
+    if not args.zip:
+        ap.error("--zip 必填（除非 --end-it-reached）")
+        return 2
     try:
-        got = import_deliver_zip(
-            args.zip,
-            args.dest,
-            course=args.course,
-            log=(lambda _m: None) if args.json_only else (lambda m: print(m, flush=True)),
-        )
+        got = import_deliver_zip(args.zip, args.dest, course=args.course, log=log)
     except ProtocolError as e:
         print(f"[deliver] 导入失败：{e}", file=sys.stderr, flush=True)
         return 2

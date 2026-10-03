@@ -22,16 +22,12 @@ import { pidAlive } from '../../core/net'
 import { createSwrCache } from '../../core/swr-cache'
 import { entryForCourse, loadRegistry, scopeOf } from '../../core/registry'
 import type { RlConfig } from '../../core/types'
-import {
-  hubOfflineProgress,
-  hubPushWorkers,
-  liveHub,
-  withWorkerProbes,
-} from '../../stack/hub-admin'
+import { hubOfflineAdmin, hubPushWorkers, liveHub, withWorkerProbes } from '../../stack/hub-admin'
 import { hubPushEnabled } from '../../stack/push-config'
 import {
   type HubQueueView,
   type OfflineRunView,
+  type OfflineStalledView,
   type ParallelOverviewView,
   type PushWorkerView,
   type PushWorkerRegistryView,
@@ -73,6 +69,8 @@ interface HubAdmin {
   pushMap: Map<string, boolean> | null
   /** 逐课程离线段进度（`/admin/offline`）；null = hub 不可达 / 端点不存在（旧版 hub）。 */
   offline: Record<string, Record<string, OfflineRunView>> | null
+  /** 停滞告警（`/admin/offline.stalled`；T8）；null = hub 不可达 / 旧版 hub。 */
+  offlineStalled: OfflineStalledView[] | null
   /** worker 行 = **当下 cfg** ⊕ 探活列（探活取自下面的探测缓存）。 */
   workers: PushWorkerView[]
 }
@@ -84,6 +82,7 @@ interface HubProbe {
   queue: HubQueueView | null
   pushMap: Map<string, boolean> | null
   offline: Record<string, Record<string, OfflineRunView>> | null
+  offlineStalled: OfflineStalledView[] | null
   /** worker 直探（id → online/busy；停用/无 key = 缺席）。 */
   workerPing: Map<string, { online: boolean | null; busy: boolean | null }>
 }
@@ -116,6 +115,7 @@ export async function getHubAdmin(cfg: RlConfig, course: string): Promise<HubAdm
     queue: p.queue,
     pushMap: p.pushMap,
     offline: p.offline,
+    offlineStalled: p.offlineStalled,
     workers: workerRows(cfg).map((w) => ({
       ...w,
       online: p.workerPing.get(w.id)?.online ?? null,
@@ -135,14 +135,15 @@ async function probeHubAdmin(cfg: RlConfig, course: string): Promise<HubProbe> {
   ])
   // 两个 hub 端点**并行**探（登记表 + 离线进度）：串行会把冷算再拉一个超时窗口，
   // 而它们互不依赖（同一个 hub 基址，各自独立问答）。
-  const [pushMap, offline] = live
-    ? await Promise.all([hubPushWorkers(live.url, token), hubOfflineProgress(live.url, token)])
+  const [pushMap, offlineAdmin] = live
+    ? await Promise.all([hubPushWorkers(live.url, token), hubOfflineAdmin(live.url, token)])
     : [null, null]
   return {
     url: live?.url ?? null,
     queue: live?.queue ?? null,
     pushMap,
-    offline,
+    offline: offlineAdmin?.progress ?? null,
+    offlineStalled: offlineAdmin?.stalled ?? null,
     workerPing: new Map(probed.map((w) => [w.id, { online: w.online, busy: w.busy }])),
   }
 }
@@ -207,6 +208,7 @@ export async function buildOverview(
     recentDispatch: admin.queue?.cursor ?? null,
     offline: admin.queue?.offline ?? [],
     offlineProgress: admin.offline,
+    offlineStalled: admin.offlineStalled,
     rows: buildCourseRows({
       courses: names,
       training,

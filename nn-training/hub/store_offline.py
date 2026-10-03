@@ -443,16 +443,23 @@ class OfflineRoundsMixin:
             )
 
     def store_offline_result(self, body: dict) -> dict:
-        """落段末摘要（**覆盖写**：它是「这条腿现在到哪了」的最新答案，不是不可变快照）。"""
+        """落段末摘要（**覆盖写**：它是「这条腿现在到哪了」的最新答案，不是不可变快照）。
+
+        `end_it_reached` = 云机自报「本段跑满计划区间」（T6，`plan/auto-offline-handoff §3.6`）：
+        它是**唯一**让控制台在导入那一步转交 `run_complete` 的判据（由调用方
+        `hub/offline.py::_post_offline_result` 联动 `note_offline_completed`）。
+        """
         run_id = sanitize_run_id(body.get("run_id"))
         it_end = body.get("it_end")
         if not isinstance(it_end, int) or isinstance(it_end, bool) or it_end < 0:
             raise ProtocolError(f"补传 it_end 非法（要求非负整数）: {it_end!r}")
         state = str(body.get("state", "") or "")[:40]
+        end_it_reached = body.get("end_it_reached") is True
         rec: dict = {
             "run_id": run_id,
             "it_end": int(it_end),
             "state": state,
+            "end_it_reached": end_it_reached,
             "delivered": (body.get("delivered") if isinstance(body.get("delivered"), int) else 0),
             "summary": body.get("summary") if isinstance(body.get("summary"), dict) else {},
             "plan_sha256": str(body.get("plan_sha256", "") or ""),
@@ -474,7 +481,13 @@ class OfflineRoundsMixin:
                     "run_id": run_id,
                     "it_end": int(it_end),
                     "state": state,
+                    "end_it_reached": end_it_reached,
                     "ts": self._now(),
                 }
             )
-        return {"status": "accepted", "run_id": run_id, "it_end": int(it_end)}
+        return {
+            "status": "accepted",
+            "run_id": run_id,
+            "it_end": int(it_end),
+            "end_it_reached": end_it_reached,
+        }

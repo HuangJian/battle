@@ -146,6 +146,9 @@ class AdminRoutes:
             {
                 "progress": self.hub.offline_progress(),
                 "leases": self.hub.offline_leases(),
+                # 段末摘要（T6 / §3.6）：控制台按 `run_id` 对齐导入产物，把 `end_it_reached`
+                # 转交给 python 导入器落 `run_complete`（灰横幅）——半段导入不得亮横幅。
+                "results": self.hub.offline_results(),
                 # 停滞告警面（§3.9 / T8）：`running` 无进度、或已翻 offline 无人跑。
                 # 自动交接的固有代价 —— 必须显式付（不靠「人总会看到」）。
                 "stalled": self.hub.offline_stalled(),

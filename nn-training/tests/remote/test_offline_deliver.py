@@ -172,9 +172,15 @@ def test_hub_unreachable_is_free_and_backlog_delivers_on_reconnect(tmp_path: Pat
     try:
         up = _deliverer(base, root)
         assert up.sync() == 3  # 积压补齐
-        assert up.deliver_result(it_end=3, state="complete", summary={"rows": 3}) is True
+        assert (
+            up.deliver_result(
+                it_end=3, state="complete", summary={"rows": 3}, end_it_reached=True
+            )
+            is True
+        )
         rec = json.loads((store.offline_run_dir(RUN) / "result.json").read_text(encoding="utf-8"))
         assert rec["it_end"] == 3 and rec["state"] == "complete"
+        assert rec["end_it_reached"] is True
     finally:
         srv.shutdown()
         th.join(timeout=5)
@@ -541,6 +547,42 @@ def test_run_plan_job_delivers_each_round_while_the_segment_runs(tmp_path: Path)
         assert delivered == [1, 2, 3, 4]  # 锚点轮 + 逐轮都到了
         rec = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
         assert rec["it_end"] == result["it_end"] == 4 and rec["state"] == "complete"
+        # T6：跑到计划终点 ⇒ 段末摘要自报 `end_it_reached`（控制台导入后据此转交 run_complete）
+        assert rec["end_it_reached"] is True
+    finally:
+        srv.shutdown()
+        th.join(timeout=5)
+
+
+def test_max_iters_capped_segment_does_not_claim_end_it_reached(tmp_path: Path) -> None:
+    """T6 负向：`max_iters` 截断的段跑完也**不算**跑满（计划终点没到）。
+
+    这是最容易做错的一格：`stopped=="complete"` 只说明「这拍没活了」，而老实报
+    `end_it_reached` 的是「计划终点已到」——两者在截断/预算场景下并不等价。
+    """
+    plan, m, job_dir, first = _prepare(tmp_path, iters=4, start_it=1)
+    base, store, srv, th = _boot_server(tmp_path)
+    try:
+        result = run_plan_job(
+            job_id=m["job_id"],
+            manifest=m,
+            job_dir=job_dir,
+            work_dir=tmp_path / "work",
+            plan=plan,
+            plan_sha256=m["plan_sha256"],
+            first_result=first,
+            artifacts_dir=tmp_path / "art",
+            max_iters=2,
+            hub_url=base,
+            hub_token="sekret",
+            run_job_fn=_FakeRunJob(tmp_path),
+            log=_quiet,
+        )
+        assert result["it_end"] == 3 and result["run_state"] == "complete"
+        rec = json.loads(
+            (store.offline_run_dir("run-runloop") / "result.json").read_text(encoding="utf-8")
+        )
+        assert rec["it_end"] == 3 and rec["end_it_reached"] is False
     finally:
         srv.shutdown()
         th.join(timeout=5)

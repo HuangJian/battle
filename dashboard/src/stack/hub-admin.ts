@@ -20,10 +20,11 @@ import { sharedHubUrl } from '../core/slots'
 import type { RlConfig } from '../core/types'
 import {
   type HubQueueView,
+  type OfflineAdminView,
   type PushWorkerView,
   type OfflineRunView,
   parseHubQueue,
-  parseOfflineProgress,
+  parseOfflineAdmin,
 } from '../web/view'
 
 /** GET 一个 hub 管理端点 → 解析后的 JSON；网络失败/非 2xx/坏 JSON → null。 */
@@ -83,12 +84,21 @@ export async function liveHub(
   return null
 }
 
-/** `/admin/offline` 的逐课程离线段进度；hub 不可达 / 该端点不存在（旧版本）→ null。 */
+/** `/admin/offline` 的完整观测面（逐课进度 + 段末摘要 + 停滞告警）；hub 不可达 / 旧版本 → null。
+ *
+ *  ★ 2026-10-03（plan/auto-offline-handoff T6/T8）：从「只取 progress」扩成三段。段末摘要
+ *  是导入转交的判决输入（`run_id` + `end_it_reached`），停滞告警是自动交接固有代价的
+ *  显式出口——三块同一个端点、同一次探测，分两次取只会让「面板与导入看到不同的 hub」。 */
+export async function hubOfflineAdmin(url: string, token: string): Promise<OfflineAdminView | null> {
+  return parseOfflineAdmin(await hubGet(`${url}/admin/offline`, token, HUB_PROBE_TIMEOUT_MS))
+}
+
+/** 只取逐课进度的薄壳（旧读面：overview / 课程行；hub 不可达 → null）。 */
 export async function hubOfflineProgress(
   url: string,
   token: string,
 ): Promise<Record<string, Record<string, OfflineRunView>> | null> {
-  return parseOfflineProgress(await hubGet(`${url}/admin/offline`, token, HUB_PROBE_TIMEOUT_MS))
+  return (await hubOfflineAdmin(url, token))?.progress ?? null
 }
 
 /** `/admin/push-workers` 的登记表归一化：id → hub 侧探活结论。

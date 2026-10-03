@@ -229,6 +229,46 @@ class QueueResumeMixin(QueuePeer):
                 out[course] = runs
         return out
 
+    def offline_results(self) -> dict[str, dict]:
+        """每课程各 run 的**段末摘要**：`{课: {run_id: {it_end, state, end_it_reached, received_at}}}`。
+
+        为什么单开一个读面（T6，plan/auto-offline-handoff §3.6）：控制台在「导入产物」那一步
+        要按 `run_id` 对齐这份摘要才能把 `end_it_reached` 转交给 python 导入器落 `run_complete`
+        ——而它此前只能看到 `progress`（轮次/mtime），看不到「这段到底跑没跑满」。
+
+        容忍坏文件（跳过）：这是观测面，一个写半行的 result.json 不该让 `/admin/offline` 500。
+        只带控制台需要的四个键（不把整份摘要里的 course_fp/commit 泄给面板）。
+        """
+        out: dict[str, dict] = {}
+        for course in self._order:
+            runs: dict[str, dict] = {}
+            base = self._stores[course].job_root / _JobStore.OFFLINE_DIR
+            try:
+                run_dirs = sorted(p for p in base.iterdir() if p.is_dir())
+            except OSError:
+                run_dirs = []
+            for run_dir in run_dirs:
+                try:
+                    rec = json.loads(
+                        (run_dir / _JobStore.OFFLINE_RESULT_NAME).read_text(encoding="utf-8")
+                    )
+                except (OSError, ValueError):
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                raw_it = rec.get("it_end")
+                it_end = int(raw_it) if isinstance(raw_it, int) and not isinstance(raw_it, bool) else 0
+                raw_at = rec.get("received_at")
+                runs[run_dir.name] = {
+                    "it_end": it_end,
+                    "state": str(rec.get("state", "") or ""),
+                    "end_it_reached": rec.get("end_it_reached") is True,
+                    "received_at": float(raw_at) if isinstance(raw_at, (int, float)) else 0.0,
+                }
+            if runs:
+                out[course] = runs
+        return out
+
     # ---- 离线产物补传（路由：显式 course > 已有 offline 目录 > 400） ----
     def locate_offline_course(self, body: dict, query_course: str = "") -> str | None:
         """定一段补传产物归哪门课程；**归不到返回 None**（不是空串）。
