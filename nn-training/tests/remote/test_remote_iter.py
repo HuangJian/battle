@@ -1035,17 +1035,17 @@ def test_workers_cap_falls_back_to_cores_on_garbage_env(monkeypatch: pytest.Monk
 
 
 def test_workers_cap_reads_the_container_quota_not_the_host(monkeypatch: pytest.MonkeyPatch) -> None:
-    """云机现场：`os.cpu_count()` 报 **224**（宿主机）而 cgroup 只给 **96** ⇒ 上限 **92**。
+    """云机现场：`os.cpu_count()` 报 **224**（宿主机）而 cgroup 只给 **96** ⇒ 上限 **94**。
 
     这就是「不要把 96 核读成 240/224 核」那颗钉子：核数走 `common.platform_utils.effective_cores()`
     （配额/亲和掩码取小），于是日志里那个 `workers=220`（按 224 核算出来的）在云机上会被夹到
-    92 —— 2.3× 超订就地消失，而不是等它把单局墙钟推过 5s 硬顶。
+    94 —— 2.3× 超订就地消失，而不是等它把单局墙钟推过 5s 硬顶。
     """
     monkeypatch.delenv(iter_rollout.ENV_WORKERS_CAP, raising=False)
     monkeypatch.setattr(pu, "cgroup_cpu_quota", lambda: 96)  # 容器配额（物理数目）
     monkeypatch.setattr(pu, "affinity_cores", lambda: 224)  # 宿主机读数 / cpuset 放宽
     assert pu.effective_cores() == 96
-    assert iter_rollout.workers_cap() == 92
+    assert iter_rollout.workers_cap() == 94
 
 
 def test_run_iter_rollout_rejects_undeclared_shard(tmp_path: Path, monkeypatch) -> None:

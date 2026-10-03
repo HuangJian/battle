@@ -200,7 +200,7 @@ def test_markdown_documents_cloud_eval_and_resume() -> None:
     assert "续跑" in md and "同轮齐全" in md
     # 并发口径：rollout 与 eval **同一个公式**（交替跑才互不预留）——说明书与代码里必须一致
     assert "rollout_workers" in md, "rollout 并发旋钮要在说明书里（它覆盖计划里的导出机规模）"
-    assert "max(CPU−4, CPU×0.8)" in md, "并发口径要写出公式（老口径「扣掉 rollout 再卡 64」已废）"
+    assert "max(CPU−2, CPU×0.8)" in md, "并发口径要写出公式（预留 4→2 后为 max(CPU−2, CPU×0.8)；更老口径「扣掉 rollout 再卡 64」已废）"
 
 
 def test_markdown_names_the_secrets_and_both_bootstrap_paths() -> None:

@@ -1510,6 +1510,12 @@ argv 不变 ⇒ out 目录不变 ⇒ 声明的 shard 集（`data_fp`）逐字节
 
 ## §7 并发口径统一：rollout 与 eval 共用 `max(cores−4, cores×0.8)`（2026-09-22）
 
+> ★ **2026-10-03 更新（预留 4 → 2：公式改 `max(cores−2, cores×0.8)`）**：用户校准 + Colab TPU
+> 现场取证（cgroup 配额 4 核 vs 宿主/亲和 24 的误读现场）见 `docs/nn/remote-transport.md` §60 ·
+> `DECISIONS.md §2026-10-03-goalnn-cpu-slots-reserve2`。本节其余内容（交替语义 / 两条腿同口径 /
+> `--rollout-workers` 覆盖链）逐字仍有效；下方示例数字按新口径：96 核 → 94、40 → 38、16 → 14、
+> 8 → 6、Colab TPU（配额 4）→ 3。
+
 用户口径：**「rollout 和 eval 是交替进行的，所以不应该为 eval 保留 CPU 核数，两者都使用
 `max(cores − 4, cores × 0.8)`；只要留两三个核给数据回传任务就够了。」**
 

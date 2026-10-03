@@ -142,7 +142,8 @@ def test_default_slots_does_not_reserve_for_the_planned_rollout_workers(
 ) -> None:
     """计划里的 rollout 并行度**不进**缺省公式：两者交替跑，按对方扣一次等于两笔账扣同一份钱
 
-    用户 2026-09-22：「不应该为 eval 保留 CPU 核数，两者都使用 max(cores − 4, cores × 0.8)」。
+    用户 2026-09-22 立口径（2026-10-03 校准预留 4 → 2）：「不应该为 eval 保留 CPU 核数，两者都
+    使用同一口径 max(cores − 2, cores × 0.8)」。
     其中 cores 走 `common.platform_utils.effective_cores`（容器配额/亲和掩码，**不是**宿主机的
     `os.cpu_count()`——见它那节的 224/96 事故）⇒ 用例 patch 的也是那个单一来源。
     """
@@ -154,7 +155,7 @@ def test_default_slots_does_not_reserve_for_the_planned_rollout_workers(
         tmp_path, eval_on_cloud=True, course=_course(), plan_workers=8
     )
     _setup_cloud_eval(ctx)
-    assert ctx.eval_slots == cpu_worker_slots(40) == 36, "40 核 → 36（与 rollout 同一口径）"
+    assert ctx.eval_slots == cpu_worker_slots(40) == 38, "40 核 → 38（与 rollout 同一口径）"
     # rollout 的并行度仍然报出来（只是不再从公式里扣）：日志是排障时的第一手读数
     assert any(f"rollout 并行 {ctx.rollout_workers}" in m for m in logs)
     _close_eval(ctx)
@@ -168,14 +169,14 @@ def test_default_slots_does_not_reserve_for_the_planned_rollout_workers(
 def test_rollout_workers_default_is_the_same_formula_as_eval(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """rollout 并行度缺省 = `max(cores − 4, cores × 0.8)`（与云机 eval **同一口径**）。
+    """rollout 并行度缺省 = `max(cores − 2, cores × 0.8)`（与云机 eval **同一口径**）。
 
     为什么不能沿用计划里钉着的 `plan.workers`：那是**导出机**的规模（常在 8~16 核的本机导出），
-    而整段是在云机（Kaggle TPU 会话 ~96 vCPU）上跑的；两侧还交替跑，没理由互相预留。
+    而整段是在云机（Kaggle TPU 会话 = 96 核配额）上跑的；两侧还交替跑，没理由互相预留。
     """
     monkeypatch.setattr(pu, "effective_cores", lambda: 96)
     ctx, _ = _run_ctx(tmp_path / "auto", plan_workers=8)
-    assert ctx.rollout_workers == cpu_worker_slots(96) == 92, "计划里的 8 不参与缺省"
+    assert ctx.rollout_workers == cpu_worker_slots(96) == 94, "计划里的 8 不参与缺省"
     # 显式给数就完全按它（不夹取、不重算）
     ctx2, _ = _run_ctx(tmp_path / "explicit", plan_workers=8, rollout_workers=7)
     assert ctx2.rollout_workers == 7

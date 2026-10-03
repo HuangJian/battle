@@ -135,9 +135,9 @@ def eval_pairs(plan: CloudEvalPlan, it: int) -> list[tuple[int, int]]:
 def default_slots() -> int:
     """并发局数缺省：与 rollout **同一口径**（`common.platform_utils.cpu_worker_slots`）。
 
-    `max(cores − 4, floor(cores × 0.8))`（至少 1）——**不为 rollout 预留**：两者在云机离线段里
-    是交替的（rollout → PPO → eval），按对方扣一次等于两笔账扣同一份钱（用户 2026-09-22：
-    「不应该为 eval 保留 CPU 核数，两者都使用 max(cores − 4, cores × 0.8)」）。留出的那几核是给
+    `max(cores − 2, floor(cores × 0.8))`（至少 1）——**不为 rollout 预留**：两者在云机离线段里
+    是交替的（rollout → PPO → eval），按对方扣一次等于两笔账扣同一份钱（用户 2026-09-22 立口径，
+    2026-10-03 校准预留 4 → 2：「不应该为 eval 保留 CPU 核数，两者都使用同一口径」）。留出的那几核是给
     补传/日志/守护线程的，不随谁在跑变化。
 
     ⚠ **那条前提必须先是真的**（2026-09-25 云机卡死）：旧版提交点恰好落在下一轮 rollout 的
@@ -146,7 +146,8 @@ def default_slots() -> int:
     等本轮评估收线）——同一份公式只在那个前提下成立，不再靠注释假设。
 
     ⚠ **核数也按物理数目**（同上）：缺省走 `effective_cores()`（容器配额/亲和掩码），所以
-    96 核的 Kaggle 会话给 92，而不是把宿主机报的 224 核当配额算出 220。
+    96 核配额（宿主 224 核）的 Kaggle 会话给 **94**，而不是把宿主机报的 224 核当配额；Colab TPU
+    的 cgroup 配额是 **4**（宿主/亲和 24）⇒ 给 3。日志里 `cores_note()` 会把三个来源原样报出。
 
     老口径（先扣 `plan.workers` 再卡 64）在 96 vCPU 的 Kaggle TPU 会话上给到 64，比本口径少三成。
     `--eval-slots` / `CFG.eval_slots` 给了正数就完全按它（不做任何夹取）。

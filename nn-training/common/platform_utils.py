@@ -20,6 +20,8 @@ trainer/queue.py 各自维护了一份逐字节相同的 `_POPEN_NO_WINDOW`（Wi
     （与 effective_cores 的分工见 docstring）。
   cpu_worker_slots(cores=None) —— 本机 CPU 并行槽的**唯一口径**（见 docstring）：
     rollout 与 eval 都用它，谁都不为对方预留核数。
+  cores_note() —— 「可用核数」的**出处一行**（日志/诊断用）：cpu_count / 亲和 / cgroup
+    配额三源原样报出 + 取小结果（压「可用核 4 被读成机器只有 4 核」那类误读）。
   popen_own_group(**extra) —— **自带进程组**的子进程 kwargs（POSIX 的 start_new_session）。
   kill_process_tree(proc) —— SIGKILL 掉整个进程组（连孤儿一起）；**不等回收**。
   reap_bounded(proc, timeout) —— 有界回收（waitpid）；超时返回 False，**绝不无限等**。
@@ -126,8 +128,9 @@ def sandbox_delete_blocked(anchor: Any) -> bool:
 
 
 #: CPU 并行槽的预留核数（给补传/日志/守护线程这类零碎常驻任务）。
-#: 大机器上真正生效的是下面 20% 那一支——留 4 核就够这些线程跑。
-CPU_RESERVE = 4
+#: ★ 2026-10-03 用户校准：预留 4 → **2**（逐字：「现在统一改为 max(cores−2, cores×0.8)」）。
+#: 大机器上真正生效的是下面 20% 那一支；小核数（配额 4）上两条支都只让出 1~2 个槽位。
+CPU_RESERVE = 2
 
 #: 容器 CPU 配额的 cgroup 文件（v2 优先；v1 兜底）。换算成核数见 `cgroup_cpu_quota`。
 _CGROUP_V2_CPU_MAX = "/sys/fs/cgroup/cpu.max"
@@ -334,13 +337,14 @@ def physical_cores() -> int:
 
 
 def cpu_worker_slots(cores: int | None = None) -> int:
-    """本机该开几个 CPU 并行槽：``max(cores − 4, floor(cores × 0.8))``（至少 1）。
+    """本机该开几个 CPU 并行槽：``max(cores − 2, floor(cores × 0.8))``（至少 1）。
 
     `cores` 缺省走 `effective_cores()`（容器配额/亲和掩码 > `os.cpu_count()`）——**按物理数目**
     算，不按宿主机报出来的大数字算（详见 `cgroup_cpu_quota` 的 224/96 事故）。
 
-    **唯一口径**（用户 2026-09-22）：「rollout 和 eval 是交替进行的，所以不应该为 eval 保留
-    CPU 核数——两者都使用 max(cores − 4, cores × 0.8)，只要留两三个核给数据回传任务就够」。
+    **唯一口径**（用户 2026-09-22 立；**2026-10-03 用户校准**：预留 4 → **2**，逐字「现在统一
+    改为 max(cores−2, cores×0.8)」）：「rollout 和 eval 是交替进行的，所以不应该为 eval 保留
+    CPU 核数——两者都使用同一口径，只要留两三个核给数据回传任务就够」。
 
     为什么不再「按对方留位」：云机离线段里 rollout 与 eval（以及 PPO）**本该是交替的**，
     给 eval 扣掉 rollout 的并行度等于两次扣同一份钱——两边都按本函数满配，谁在跑谁就用满。
@@ -354,12 +358,28 @@ def cpu_worker_slots(cores: int | None = None) -> int:
     提交后**有界等**本轮评估收线），核数也走容器口径（`effective_cores`），而不是靠注释假设；
     同一份公式只在那个前提下才对。
 
-    参照：96 vCPU 的 Kaggle TPU 会话 ⇒ 92（旧口径：先扣 rollout 再卡 64 = 白扔三成）；
-    16 核 ⇒ 12（留 4）；8 核 ⇒ 6（留 2）。显式传 ``--eval-slots`` / ``--rollout-workers``
-    仍然完全照用户给的数走（本函数只管缺省）。
+    参照（2026-10-03 新口径）：96 核配额的 Kaggle TPU 会话 ⇒ 94；24 核 ⇒ 22；16 核 ⇒ 14；
+    8 核 ⇒ 6（0.8 那一支生效）；Colab TPU（配额 4 核）⇒ 3。显式传 ``--eval-slots`` /
+    ``--rollout-workers`` 仍然完全照用户给的数走（本函数只管缺省）。
     """
     n = max(1, int(cores if cores is not None else effective_cores()))
     return max(1, min(n, max(n - CPU_RESERVE, int(n * 0.8))))
+
+
+def cores_note() -> str:
+    """「本机可用核数」的**出处一行**（日志/诊断专用）：三源原始事实 + 取小结果。
+
+    为什么要有它（2026-10-03 Colab 误读现场）：`effective_cores()` 只报最终数字 ——
+    Colab TPU 上它 = 4（cgroup v2 配额 `400000 100000`），而宿主 `cpu_count` 与亲和掩码
+    都是 24 ⇒ 日志里一个光秃秃的「可用核 4」被读成「这台机器只有 4 核」，进而怀疑
+    workers=3 是假的。三源一起打出来，这类误读当场消失（Kaggle 的 96 同口径：宿主 224 /
+    配额 96——2026-09-25 的 2.3× 超订事故正是把宿主数当配额）。
+    """
+    cc = int(os.cpu_count() or 0)
+    aff = affinity_cores()
+    quota = cgroup_cpu_quota()
+    src = f"cpu_count {cc or '?'} / 亲和 {aff if aff else 'n/a'} / cgroup 配额 {quota or '不限'}"
+    return f"{src} ⇒ 可用 {effective_cores()}"
 
 
 def popen_kwargs(**extra: Any) -> dict[str, Any]:

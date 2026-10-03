@@ -92,15 +92,15 @@ def _course(**over: object) -> SimpleNamespace:
 
 
 def test_default_slots_is_the_same_formula_as_rollout(monkeypatch: pytest.MonkeyPatch) -> None:
-    """缺省并发就是 rollout 的口径 `max(cores − 4, cores × 0.8)`——**不为 rollout 预留**。
+    """缺省并发就是 rollout 的口径 `max(cores − 2, cores × 0.8)`——**不为 rollout 预留**。
 
-    用户 2026-09-22：「rollout 和 eval 是交替进行的，所以不应该为 eval 保留 CPU 核数，
-    两者都使用 max(cores − 4, cores × 0.8)；只要留两三个核给数据回传任务就够了」。
+    用户 2026-09-22 立口径（2026-10-03 校准预留 4 → 2）：「rollout 和 eval 是交替进行的，
+    所以不应该为 eval 保留 CPU 核数，两者都使用同一口径；只要留两三个核给数据回传任务就够了」。
     老口径（先扣 `plan.workers` 再卡 64）在 96 核云机上只给 64 = 白扔三成。
     """
     # 核数的单一来源是 `common.platform_utils.effective_cores`（容器配额/亲和掩码 > os.cpu_count，
     # 见它那节的 224/96 事故）——所以这里 patch 它，而不是 `os.cpu_count`。
-    for cores, want in ((96, 92), (40, 36), (16, 12), (8, 6), (4, 3), (1, 1)):
+    for cores, want in ((96, 94), (40, 38), (24, 22), (16, 14), (8, 6), (4, 3), (1, 1)):
         monkeypatch.setattr(pu, "effective_cores", lambda c=cores: c)
         assert offline_eval.default_slots() == want, f"{cores} 核 → {want}"
         assert offline_eval.default_slots() == cpu_worker_slots(cores), "与 rollout 同一口径"

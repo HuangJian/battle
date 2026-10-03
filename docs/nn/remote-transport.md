@@ -6,6 +6,43 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §60 「Colab TPU 只有 4 核算力」与并发口径校准：预留 4→2 + log 报核数出处（2026-10-03）
+
+**触发（误读现场）**：Colab TPU 离线跑 x20-adv-acc，log 里 `kind=iter rollout done in 34.909s｜
+games=176｜workers=3`，而用户按「实例 24 核」推断 3 workers 不可能跑完 176 局。同一台机器上取证：
+
+| 探针 | 读数 |
+|---|---|
+| `/proc/cpuinfo` | 24 个 processor（12 核 × 2 线程；AMD EPYC 7B13） |
+| `os.cpu_count()` / `sched_getaffinity(0)` | 24 / 24 |
+| `cgroup v2 cpu.max` | **`400000 100000` ⇒ 4 核**（`cpuset.cpus.effective=0-23` 全放开） |
+
+⇒ `effective_cores() = min(配额 4, 亲和 24) = 4` 是**设计正确**：cgroup 配额才是「这台机器能给出
+多少 CPU 时间」的硬口径（Kaggle 同款：宿主 224 / 配额 96——2026-09-25 的 2.3× 超订事故正是拿宿主
+数当配额）。`cpu_worker_slots(4) = max(4−4, 0.8×4) = 3` 与 log 逐字一致；且 176 局（p50 0.52s）
+÷ 3 ≈ 30s ≈ 实测 34.9s，池行 `spawned=3 / served=176 / fallback=0` 也证明全程只有 3 个 bun 进程
+⇒ **workers=3 是真的**，不是日志假数。
+
+**修法（用户校准 + 可读性）**：
+
+- **预留 4 → 2**（用户逐字：「现在统一改为 max(cores−2, cores×0.8)」）：`CPU_RESERVE = 2` ⇒
+  Kaggle 96→94、Colab 4→3、24→22、16→14、8→6；`rollout.cloudflared.ipynb` 的内联回退同步。
+- **「修 log」= 报出处**：新增 `common.platform_utils.cores_note()` →
+  `cpu_count 24 / 亲和 24 / cgroup 配额 4 ⇒ 可用 4`，挂进 `plan_run`「rollout 并发局数」行与
+  `iter_rollout`「并发夹取」行。「可用核 4」过去会被读成「这台机器只有 4 核」——出处一起报出，
+  这类误读当场消失。
+
+**不做（被否决）**：忽略配额按 24 核开 ~22 workers —— 需求 22 核 vs 配额 4 ⇒ 单局墙钟 ≈5×
+（p50 0.52→2.6s、p99 1.2→6s 越过 5s 硬顶）⇒ 成批超时 + 池回退放大（2026-09-25 的停摆形态）。
+Colab 上加压的唯一正当旋钮是 `CFG.rollout_workers`（或 `NN_ROLLOUT_WORKERS_MAX=0` 关夹取），
+判读看 p50 与总时长——配额饱和时加压只涨单局墙钟。
+
+**回归**：`tests/common/test_platform_utils_cores.py`（新增 `cores_note` 三源出处用例）·
+`tests/remote/{test_offline_eval_wiring,test_offline_eval_cloud,test_remote_iter,test_offline_notebook}.py`
+（口径表 96→94 / 40→38 / 16→14 / 4→3；ipynb 公式文案）。
+
+**门槛**：nn python gate 3600 pass/7 skip（ruff+mypy 干净）。
+
 ## §59 离线盘接活改「离线优先 + 抢占第一个在训在线课」：pin 不再拦（用户裁决，2026-10-03）
 
 **触发（用户报障）**：x20-adv 三腿被手动设成 online（pin=1）后，Colab 离线云机

@@ -7307,3 +7307,32 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
   `typecheck` + 全量 **1312 pass/0 fail** + 三份 bundle `all bundles ok`。
 - **指针**：全文 `docs/nn/remote-transport.md` §59 · plan `plan/auto-offline-handoff.plan.md`
   （未跟踪；§3.2 pin 语义已按其顶部裁决注作废）。
+
+## §2026-10-03-goalnn-cpu-slots-reserve2（2026-10-03，TPU 核数口径：Colab 配额=4 核不是 24；预留 4→2 统一；log 报三源出处）
+
+- **背景（误读现场）**：Colab TPU 上 `kind=iter rollout done in 34.909s｜games=176｜workers=3`，
+  用户据「实例有 24 个 cpu 核」怀疑 3 workers 不可能跑完 176 局。现场诊断（同一台）：宿主
+  `/proc/cpuinfo` 24 个 processor（12 核×2 线程）、`os.cpu_count()/亲和` 都是 24，而
+  **cgroup v2 `cpu.max=400000 100000` ⇒ 可用算力 4 核**——内核配额才是「这台机器能给多少」的
+  硬口径（Kaggle 同款：宿主 224 / 配额 96，2026-09-25 的 2.3× 超订事故就是拿宿主数当配额）。
+  `cpu_worker_slots(4)=max(4−4, 0.8×4)=3` 与 log 逐字一致；且 176 局（p50 0.52s）÷3 ≈ 30s ≈
+  实测 34.9s，池行 `spawned=3 / served=176 / fallback=0` 证明全程只有 3 个 bun 进程
+  ⇒ **workers=3 是真的**，不是日志假数。
+- **决定**：① **用户校准：预留 4 → 2**，统一改 `max(cores−2, cores×0.8)`（`CPU_RESERVE=2`；
+  Kaggle 96→94、Colab 4→3、16→14、8→6；`rollout.cloudflared.ipynb` 的内联回退同步）；
+  ② **「修 log」= 报出处**：新增 `common.platform_utils.cores_note()` →
+  `cpu_count 24 / 亲和 24 / cgroup 配额 4 ⇒ 可用 4`，挂进 `plan_run`「rollout 并发局数」行与
+  `iter_rollout`「并发夹取」行——「可用核 4」不会再被读成「这台机器只有 4 核」。
+- **被否决**：把核数检测改成忽略 cgroup 配额（Colab 上会拿 ~22 workers 去挤 4 核算力 ⇒ 需求
+  22 核 vs 配额 4，单局墙钟 ~5×、p99 越过 5s 硬顶 ⇒ 成批超时 + 池回退放大 = 2026-09-25 停摆
+  形态）。Colab 上加压的唯一正当旋钮 = `CFG.rollout_workers` / `NN_ROLLOUT_WORKERS_MAX=0`
+  （实验用；判读看 p50 与总时长——配额饱和时只涨单局墙钟）。
+- **落点**：`nn-training/common/platform_utils.py`（CPU_RESERVE + cores_note）·
+  `nn-training/remote/{plan_run,plan_handoff,offline_eval,offline_boot}.py` ·
+  `nn-training/worker/iter_rollout.py` · `nn-training/ipynb/{battle.offline,rollout.cloudflared}.ipynb` ·
+  回归 `nn-training/tests/{common/test_platform_utils_cores.py,remote/{test_offline_eval_wiring,
+  test_offline_eval_cloud,test_remote_iter,test_offline_notebook}.py}`（含新增
+  `test_cores_note_reports_all_three_sources`）。
+- **门槛**：nn python gate 绿（**3600 pass/7 skip**，ruff+mypy 干净）。
+- **指针**：全文 `docs/nn/remote-transport.md` §60（含完整诊断读数）；旧口径档案
+  `docs/nn/runtime-opt.md` §7 顶部已加「2026-10-03 更新」行。

@@ -45,8 +45,8 @@ from common import game_watch
 from common.log_bundle import LogBundle
 from common.platform_utils import (
     KILL_REAP_SEC,
+    cores_note,
     cpu_worker_slots,
-    effective_cores,
     keep_unreaped,
     kill_process_tree,
     popen_own_group,
@@ -617,10 +617,12 @@ def run_iter_rollout(
         # 只在**本机上限**真的掐住了才报（「游戏数比并发数少」是常事，不是夹取）。
         # 「本机」= 跑这一轮的节点/云机（`effective_cores()`），带上核数以免被误读成 hub/导出机。
         # 核数与槽位要分开报：核数是**事实**（容器配额），槽位才是夹取用的口径
-        # （`cpu_worker_slots` = max(cores−4, 0.8·cores)），两个数混在一个标签里就是下一次误读。
+        # （`cpu_worker_slots` = max(cores−2, 0.8·cores)），两个数混在一个标签里就是下一次误读。
+        # ★ 2026-10-03（Colab 误读现场）：光一个「可用核 4」会被读成「这台机器只有 4 核」——
+        # 现在整行报**出处**（cpu_count / 亲和 / cgroup 配额三源 + 取小），见 `cores_note()`。
         rb.add(
             "并发夹取",
-            f"{requested_workers}→{workers}（跑这一轮的机器可用核 {effective_cores()}，"
+            f"{requested_workers}→{workers}（跑这一轮的机器核数：{cores_note()}，"
             f"并行槽上限 {cap}｜{ENV_WORKERS_CAP}=0 可关）",
         )
     rb.add("bun", f"{bun} ({ver or '?'})")

@@ -6,8 +6,9 @@
 硬顶 ⇒ 成批超时 + 池回退放大 ⇒ 整轮停摆。物理数目只能按「配额 / 亲和掩码」取小来定，
 `os.cpu_count()` 只配当最后的兜底。
 
-本文件只钉三件事：① cgroup v2/v1 的配额怎么换算成核数（含 `max`/`-1` = 不限）；② 三个来源
-的优先级（取小）+ 都缺失时回落 `os.cpu_count()`；③ `cpu_worker_slots` 真的走这条口径。
+本文件只钉四件事：① cgroup v2/v1 的配额怎么换算成核数（含 `max`/`-1` = 不限）；② 三个来源
+的优先级（取小）+ 都缺失时回落 `os.cpu_count()`；③ `cpu_worker_slots` 真的走这条口径；
+④ `cores_note()` 把三源原样报出（2026-10-03 Colab 误读现场：可用核 4 被读成「机器只有 4 核」）。
 """
 
 from __future__ import annotations
@@ -105,13 +106,30 @@ def test_affinity_cores_is_none_when_the_platform_lacks_it(
 
 
 def test_cpu_worker_slots_uses_the_effective_cores(monkeypatch: pytest.MonkeyPatch) -> None:
-    """缺省走 `effective_cores()`：96 核配额 ⇒ 92（**不是**按宿主机的 224 算成 220）。"""
+    """缺省走 `effective_cores()`：96 核配额 ⇒ 94（**不是**按宿主机的 224 算成 222）。"""
     monkeypatch.setattr(pu, "effective_cores", lambda: 96)
-    assert pu.cpu_worker_slots() == 92
+    assert pu.cpu_worker_slots() == 94
 
     # 显式给数仍然完全按它走（本函数只管缺省）
     monkeypatch.setattr(pu, "effective_cores", lambda: 96)
-    assert pu.cpu_worker_slots(40) == 36
+    assert pu.cpu_worker_slots(40) == 38
+
+
+def test_cores_note_reports_all_three_sources(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Colab 误读现场（2026-10-03）的回归锚：「可用核 4」必须连同三源出处一起报出来
+    （宿主/亲和 24、cgroup 配额 4）——不然「4」会被读成「这台机器只有 4 核」。"""
+    monkeypatch.setattr(pu.os, "cpu_count", lambda: 24)
+    monkeypatch.setattr(pu, "affinity_cores", lambda: 24)
+    monkeypatch.setattr(pu, "cgroup_cpu_quota", lambda: 4)
+    note = pu.cores_note()
+    assert "cpu_count 24" in note and "亲和 24" in note and "cgroup 配额 4" in note
+    assert note.endswith("⇒ 可用 4"), note
+    # 读不到的两源如实报占位（不猜、也不当作 1）
+    monkeypatch.setattr(pu, "affinity_cores", lambda: None)
+    monkeypatch.setattr(pu, "cgroup_cpu_quota", lambda: None)
+    note2 = pu.cores_note()
+    assert "亲和 n/a" in note2 and "cgroup 配额 不限" in note2
+    assert note2.endswith("⇒ 可用 24"), note2
 
 
 # ─────────── physical_cores：门禁 / 本地 worker 池的口径（2026-10-03） ───────────
