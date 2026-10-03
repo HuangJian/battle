@@ -38,8 +38,9 @@ job 执行器（那正是反向 import 的成因）。守卫钉的就是这条�
 `tests/remote/test_run_loop.py` 里那条 `monkeypatch.setattr(run_loop_mod, "iter_spec", spy)` 已随本刀迁到
 `plan_run`（`run_loop` **不再转发** `iter_spec` ⇒ patch 它是 AttributeError，**响亮**而不是静默）。
 
-★ 2026-09-27（S5 第十三刀）：**交接面 18 名下沉 `remote/plan_handoff`**（校验 / 取包播种 /
-`RunContext` / 评估装配）——`plan_run` 只余驱动引擎 + 18 名 `X as X` 门面；`HANDOFF_NAMES`
+★ 2026-09-27（S5 第十三刀）：**交接面 18→19 名下沉 `remote/plan_handoff`**（校验 / 取包播种 /
+`RunContext` / 评估装配；19 = 2026-10-03 加 `_seed_ref_blob_cache`）——`plan_run` 只余驱动引擎 +
+19 名 `X as X` 门面；`HANDOFF_NAMES`
 与交接面守卫见 `tests/remote/test_plan_handoff_split.py`。
 """
 
@@ -81,7 +82,7 @@ ENGINE_NAMES = {
     "with_rollout_workers",
 }
 
-#: 第十三刀搬去 `remote/plan_handoff.py` 的**交接面**名字（18）：校验 / 取包播种 / 上下文 / 评估装配。
+#: 第十三刀搬去 `remote/plan_handoff.py` 的**交接面**名字（19）：校验 / 取包播种 / 上下文 / 评估装配。
 #: `plan_run` 只留 `X as X` 门面 ⇒ 历史 import 与 monkeypatch 面一行不改（「名字是契约，位置不是」）。
 HANDOFF_NAMES = {
     "EVAL_ALTERNATE_WAIT_SEC",
@@ -96,6 +97,7 @@ HANDOFF_NAMES = {
     "_opt_bytes_from_manifest",
     "_read_opt_file",
     "_seed_demo_blob_cache",
+    "_seed_ref_blob_cache",
     "_seed_start_checkpoint",
     "_setup_cloud_eval",
     "_stored_opt_sha",
@@ -157,7 +159,7 @@ def test_engine_names_live_in_plan_run_and_not_redefined_in_run_loop() -> None:
 
 
 def test_handoff_names_live_in_plan_handoff_only() -> None:
-    """第十三刀：交接面 18 名只在 `plan_handoff.py` 里实现；`plan_run` 不得再实现（只留门面）。"""
+    """第十三刀：交接面 19 名只在 `plan_handoff.py` 里实现；`plan_run` 不得再实现（只留门面）。"""
     assert _defined(HANDOFF_FILE) >= HANDOFF_NAMES, sorted(HANDOFF_NAMES - _defined(HANDOFF_FILE))
     moved_back = HANDOFF_NAMES & _defined(ENGINE_FILE)
     assert moved_back == set(), f"交接面名字又在 plan_run 里实现（应只做门面转发）：{sorted(moved_back)}"
@@ -299,7 +301,7 @@ def _top_level_imports(path: Path) -> set[str]:
 def test_run_loop_facade_forwards_the_same_objects() -> None:
     """门面是 `X as X` 转发 ⇒ 与实现模块里是**同一个对象**（不是副本）。
 
-    覆盖两段门面：引擎自有名（`plan_run` 直通）与交接面 18 名（`plan_run → plan_handoff` 两跳；
+    覆盖两段门面：引擎自有名（`plan_run` 直通）与交接面 19 名（`plan_run → plan_handoff` 两跳；
     `run_loop` 读到的仍是同一对象）。
     """
     for name in sorted(ENGINE_NAMES | HANDOFF_NAMES):

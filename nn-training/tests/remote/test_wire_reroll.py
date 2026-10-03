@@ -381,7 +381,7 @@ def test_reroll_probe_uses_the_net_elapsed(monkeypatch) -> None:
         time.sleep(0.3)
         return 0.3
 
-    resp = _FakeResp([b"x" * (256 * 1024)], total=8 * MB)
+    resp = _FakeResp([b"x" * (256 * 1024)], total=256 * 1024)  # 声明=实收（本用例只测净值判据）
     t0 = time.time()
     out = worker_mod._read_body(
         resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True, pace=pace

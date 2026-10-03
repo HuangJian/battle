@@ -39,6 +39,7 @@ from pathlib import Path
 from common.protocol import (
     BLOB_DEMO,
     BLOB_OPT,
+    BLOB_REF,
     PLAN_NAME,
     ProtocolError,
     blob_path,
@@ -59,7 +60,7 @@ README_NAME = "README.md"
 
 #: 包内「数据件」（其余是索引/说明）：逐件都要 sha 对账。
 DATA_PARTS = (PLAN_NAME, "manifest.json", "init_weights.json", COURSE_NAME, CODE_NAME)
-OPTIONAL_PARTS = ("opt.tar", "ts_code.zip", "demo.npz")
+OPTIONAL_PARTS = ("opt.tar", "ts_code.zip", "demo.npz", "ref_weights.json")
 
 
 # 文件/字节 sha256 —— 唯一实现见 `common.hashing`（本处 re-export：同包调用点与测试不变）。
@@ -137,6 +138,17 @@ def export_bundle(
         raise ProtocolError(
             "job 目录的 demo blob 与 manifest.demo_sha 不符——包与 job 不是同一份计划"
         )
+    # ref 权重（§363 kickstart BC 锚，x20-adv 系）：与 opt/demo 同规随包走——离线段逐轮
+    # manifest 由节点本地合成（hub 上没有这份 job，ref 没有可用的下载通道）⇒ 不带字节 =
+    # 云端 it1 才炸（2026-10-03 现场：向空 base_url 发 GET ⇒ unknown url type 重试耗尽）。
+    # 缺席 = 非 kickstart 腿，包里无此件（OPTIONAL_PARTS，导入侧不强制）。
+    ref_raw = b""
+    if jd is not None and blob_path(jd, BLOB_REF).exists():
+        ref_raw = blob_path(jd, BLOB_REF).read_bytes()
+    if ref_raw and sha256_bytes(ref_raw) != str(m.get("ref_sha", "") or ""):
+        raise ProtocolError(
+            "job 目录的 ref blob 与 manifest.ref_sha 不符——包与 job 不是同一份计划"
+        )
 
     parts: dict[str, bytes] = {
         PLAN_NAME: plan_raw,
@@ -152,6 +164,8 @@ def export_bundle(
         parts["opt.tar"] = opt_raw
     if demo_raw:
         parts["demo.npz"] = demo_raw
+    if ref_raw:
+        parts["ref_weights.json"] = ref_raw
 
     index = {
         "magic": BUNDLE_MAGIC,
@@ -196,6 +210,7 @@ run_id      : {index['run_id']}    计划区间 : it{index['it']} → it{index['
   init_weights.json 起点权重（= it{index['it']} 的输入）
   opt.tar           Adam 动量（**续训必需**；缺失 = 动量静默归零）
   demo.npz          demo bank（仅 demo 腿有；缺失而 manifest 要 demo = 导入后启动期拒收）
+  ref_weights.json  kickstart ref 权重（仅 kickstart 腿有；缺失而 manifest 要 ref = 导入后启动期拒收）
   code.zip          同 commit 的 python + TS 源码（云机不必有仓、不必联网）
   ts_code.zip       rollout 导出器的 TS 运行时树
   course.jsonc      课程文件快照（审计 / 热加载）

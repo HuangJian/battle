@@ -164,6 +164,45 @@ def test_read_body_returns_the_whole_body_and_reports_progress() -> None:
     assert len(body) == 5120
 
 
+def test_truncated_body_is_a_failure_not_a_success() -> None:
+    """★ 2026-10-03 现场（离线任务包）：Content-Length=4.12MB，隧道在 3.50MB（14×256KB）处
+    **干净 FIN**——旧行为把干净 EOF 一律当「读完了」返回半截（wire 账还是 attempts=1
+    rerolls=0），半截 zip 落盘后整场多课程会话在 BadZipFile 上陪葬。
+
+    机制：`http.client` 对 `read(amt)` 的提前 EOF **故意不抛** IncompleteRead（兼容），
+    所以「收满 Content-Length」这道校验只能由护栏自己做。
+    """
+    resp = _FakeResp([b"x" * (256 * 1024)] * 14, total=4322911)  # 现场数字：14 块后被截
+    with pytest.raises(ts.BootBodyError) as ei:
+        ts._read_body(resp, idle_timeout=45.0, total_timeout=None)
+    msg = str(ei.value)
+    assert "提前结束" in msg and "3670016" in msg and "4322911" in msg
+
+
+def test_truncated_draw_is_retried_in_the_same_fetch(monkeypatch) -> None:
+    """截断 = 坏签：同一次 fetch 内换连接重取，第二次传全即成功（attempts=2 进账）。
+
+    与「停滞重试」同一条内层重试路径——这正是现场「重跑一次 cell 就能读取了」的自动化。
+    """
+    monkeypatch.setattr(ts.time, "sleep", lambda _s: None)
+    full = b"z" * (512 * 1024)
+    bad = _FakeResp([b"x" * (256 * 1024)], total=len(full))  # 声明 512KB，只给 256KB 就 FIN
+    good = _FakeResp([full], total=len(full))
+    opener = _FakeOpener([bad, good])
+    lines: list[str] = []
+    body = ts.fetch_guarded(
+        "http://hub/offline/task-pack",
+        log=lines.append,
+        label="task-pack",
+        opener=opener,
+        attempts=2,
+    )
+    assert body == full
+    assert any("提前结束" in ln for ln in lines)
+    done = [ln for ln in lines if ln.startswith("wire: task-pack ")][-1]
+    assert "attempts=2" in done
+
+
 # ────────────────────── ③ 有界重抽：换连接、不重复整传 ──────────────────────
 #
 # 判据挂**墙钟**（实测速率 = 已收字节 / 耗时），所以测试不能靠「投喂很多块」模拟慢签
@@ -277,7 +316,8 @@ def test_exhausted_attempts_raise_the_informative_error(monkeypatch: pytest.Monk
 
 def test_reroll_can_be_disabled() -> None:
     """`reroll=False` ⇒ 一次都不重抽（旧调用面/非幂等场景的退路）。"""
-    slow = _FakeResp([b"x" * (128 * 1024), b"y" * 128], total=4 * MB)
+    # 声明长度 = 实收（否则会先撞上「提前 EOF」判据——本用例只测「不重抽」这一件事）。
+    slow = _FakeResp([b"x" * (128 * 1024), b"y" * 128], total=128 * 1024 + 128)
     opener = _FakeOpener([slow])
     body = ts.fetch_guarded(
         "http://hub/code", log=lambda _m: None, label="x", opener=opener, attempts=1, reroll=False

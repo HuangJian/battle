@@ -172,6 +172,14 @@ def _read_body(
                 + "）——隧道或代理侧的问题，重试"
             ) from e
         if not block:
+            if total and len(buf) < total:
+                # ★ 2026-10-03（与引导期护栏同一处缺陷的孪生修复）：`http.client` 对
+                #   `read(amt)` 的提前 EOF **故意不抛** IncompleteRead（兼容）⇒ 旧行为把半截
+                #   body 当成功返回。收满声明长度才算成功；否则当瞬时失败（上层退避重取）。
+                raise TimeoutError(
+                    f"body 提前结束（连接被截断）：已收 {len(buf)} bytes / 共 {total}"
+                    "——隧道或代理侧的问题，重试"
+                )
             return bytes(buf)
         buf += block
         now = time.time()

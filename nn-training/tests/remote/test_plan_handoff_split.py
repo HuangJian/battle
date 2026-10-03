@@ -34,7 +34,7 @@ HANDOFF_FILE = ROOT / "remote" / "plan_handoff.py"
 ENGINE_FILE = ROOT / "remote" / "plan_run.py"
 ENTRY_FILE = ROOT / "remote" / "run_loop.py"
 
-#: 交接面的 18 名（与 `tests/remote/test_plan_run_split.py::HANDOFF_NAMES` 是同一份事实的两个方向：
+#: 交接面的 19 名（与 `tests/remote/test_plan_run_split.py::HANDOFF_NAMES` 是同一份事实的两个方向：
 #: 那边从「引擎划走」看，这里从「新家收下」看；改名/加名时必须一起改）。
 HANDOFF_NAMES = {
     "EVAL_ALTERNATE_WAIT_SEC",
@@ -49,6 +49,7 @@ HANDOFF_NAMES = {
     "_opt_bytes_from_manifest",
     "_read_opt_file",
     "_seed_demo_blob_cache",
+    "_seed_ref_blob_cache",
     "_seed_start_checkpoint",
     "_setup_cloud_eval",
     "_stored_opt_sha",

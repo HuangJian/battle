@@ -5,7 +5,7 @@
 `RunContext`；引擎（`remote.plan_run`，留守）拿到 ctx 之后只管「怎么跑」。
 
 * **计划校验** —— `verify_plan_file`（sha / 形状 / pairs_fp 三道门；worker 在 kind=run 的尾巴上调用）。
-* **取包播种** —— `open_run_context` + 8 个助手（demo blob / opt 字节 / TS 运行时树 / 起始 checkpoint）。
+* **取包播种** —— `open_run_context` + 9 个助手（demo/ref blob / opt 字节 / TS 运行时树 / 起始 checkpoint）。
 * **上下文** —— `RunContext`（交接面与引擎之间的**唯一接口**；含 `deliver_*` 三薄委托）。
 * **评估装配** —— `_setup_cloud_eval` / `_eval_job_builder` / `_eval_round_done`：后台评估腿的**起始
   半边**；驱动/收线半边（`_maybe_cloud_eval` / `_close_eval`）留守引擎——两半只通过 `ctx.eval_*` 槽位耦合。
@@ -45,6 +45,7 @@ from common.logutil import log_line
 from common.platform_utils import cpu_worker_slots
 from common.protocol import (
     BLOB_DEMO,
+    BLOB_REF,
     EVAL_SCRIPT,
     PLAN_NAME,
     ProtocolError,
@@ -385,6 +386,13 @@ def open_run_context(
         artifacts_root=store.root,
         log=log,
     )
+    _seed_ref_blob_cache(
+        manifest=manifest,
+        job_dir=Path(job_dir),
+        work_dir=Path(work_dir),
+        artifacts_root=store.root,
+        log=log,
+    )
     _seed_start_checkpoint(ctx, job_dir=Path(job_dir), start_it=int(plan["start_it"]), last_it=last)
     _carry_ts_tree(ctx, ts_code_cache_dir=ts_code_cache_dir, ts_tree=ts_tree)
     return ctx
@@ -443,6 +451,66 @@ def _seed_demo_blob_cache(
         f"manifest 要 demo bank（sha={sha[:12]}…）但节点侧无字节：产物目录缺 demo.npz、"
         "job 目录缺 blob.demo、blob_cache 未命中——修法：用带 demo 的任务包重导"
         "（export_bundle 有课程 demo_bank 即自动打包），或把 demo.npz 放进产物目录"
+    )
+
+
+def _seed_ref_blob_cache(
+    *,
+    manifest: dict,
+    job_dir: str | Path,
+    work_dir: str | Path,
+    artifacts_root: str | Path | None,
+    log: Callable[[str], None] = _log_default,
+) -> None:
+    """run 启动期 ref 权重种子（§363 kickstart BC 锚）：与 `_seed_demo_blob_cache` 同规——
+    manifest.ref_sha 非空时，把 ref 原始字节落进 `work_dir/blob_cache/<sha>`（内容寻址键 =
+    sha256(raw) = ref_weights_fp），此后逐轮缓存命中、零传输。
+
+    字节来源（按序）：产物目录 `ref_weights.json`（bundle 导入布局）→ job 目录 `blob.ref`。
+    任一命中但 sha 不符 = 跳过找下一个；全无 ⇒ 启动期**响亮拒绝**（不等跑到 it1 的 PPO
+    装载才炸）。run 模式没有可用的 hub blob 通道（逐轮 manifest 是节点本地合成的，hub 上
+    无此 job），所以这里**不**尝试联网下载——离线腿走 bundle（自动带包），手工递送请预置
+    文件或缓存。
+
+    ★ 2026-10-03 现场（x20-adv-hurt 首跑）：bundle 带了 code/ts/init 却没带 ref ⇒ 云端
+    `plan_run._run_iteration` 用 `run_job("", "", …)` 合成轮次，`_resolve_blob` 未命中后向
+    **空 base_url** 发 GET：`ValueError: unknown url type` ×3 重试耗尽，it1 处整段失败。
+    """
+    sha = str(manifest.get("ref_sha", "") or "")
+    if not sha:
+        return
+    cache = Path(work_dir) / "blob_cache"
+    dst = cache / sha
+    if dst.is_file():
+        try:
+            if sha256_file(dst) == sha:
+                log(f"ref 权重缓存命中（{sha[:12]}…）——零传输")
+                return
+            log("ref 权重缓存损坏（sha 不符）——重新种子")
+        except OSError:
+            pass
+    cands: list[Path] = []
+    if artifacts_root is not None:
+        cands.append(Path(artifacts_root) / "ref_weights.json")
+    cands.append(blob_path(job_dir, BLOB_REF))
+    for c in cands:
+        try:
+            raw = c.read_bytes()
+        except OSError:
+            continue
+        if sha256_bytes(raw) != sha:
+            log(f"ref 候选 {c} sha 不符——跳过")
+            continue
+        cache.mkdir(parents=True, exist_ok=True)
+        tmp = dst.with_name(dst.name + ".tmp")
+        tmp.write_bytes(raw)
+        tmp.replace(dst)
+        log(f"ref 权重已种子进 blob_cache（{len(raw) / 1e6:.1f}MB，{sha[:12]}…）")
+        return
+    raise ProtocolError(
+        f"manifest 要 kickstart ref（sha={sha[:12]}…）但节点侧无字节：产物目录缺 "
+        "ref_weights.json、job 目录缺 blob.ref、blob_cache 未命中——修法：用带 ref 的任务包"
+        "重导（export_bundle 见 job 目录 blob.ref 即自动打包），或把 ref_weights.json 放进产物目录"
     )
 
 

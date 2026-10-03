@@ -6,6 +6,49 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §58 离线任务包两个现场：半截 zip 被当成功 + 缺 kickstart ref 字节（2026-10-03，用户报障两连）
+
+**触发**：Kaggle 上跑 x20-adv-hurt（自动派单）连续两次报障——① 任务包「就位」后炸
+`BadZipFile`，重跑一次 cell 就好；② 修好后跑到 it1 的 PPO 装载失败（`blob?name=ref` 重试
+耗尽）、产物收尾 failed。两个根因都在「离线任务包」这条链上，各自独立。
+
+### ① 半截 zip 被当成功（引导期传输护栏的 EOF 长度盲区）
+
+现场账（`wire:` 行）：声明 `Content-Length=4322911`（4.12 MiB），实际收 3670016 = **14×256KB**
+处隧道干净 FIN，而护栏记的是 `attempts=1 rerolls=0`（= 成功）⇒ 半截 zip 落盘，直到
+`offline_boot.read_pack_index` 才炸 `BadZipFile: File is not a zip file`（EOCD 随尾部被切走），
+且它是**未捕获** ValueError ⇒ 整场多课程会话陪葬（后两门课未跑）。
+
+机制：**`http.client` 对 `read(amt)` 的提前 EOF 故意不抛 IncompleteRead**（源码注释：为兼容）
+⇒ 旧 `_read_body` 的 `if not block: return bytes(buf)` 只看 EOF、不看已收是否等于声明长度。
+
+修法：两处孪生 `_read_body`（引导期 `remote/tailscale_boot.py`、worker `remote/http.py`）在
+EOF 处比对「已收 vs Content-Length」，不够就按传输失败抛（引导期 `BootBodyError` → 同一次
+fetch 内换连接重试；worker 侧 `TimeoutError`（带正文）→ `_get_with_retry` 退避重试）。
+现场「重跑 cell 就好」从此被自动化成同一次 fetch 内的重试。
+
+### ② 缺 kickstart ref 字节（离线任务包不带 ref 权重）
+
+现场：发布 slim 把 ref 摘成内容寻址（manifest 只剩 `ref_sha`、`ref_weights_b64` 清空；实测
+`ref_sha=33e6e518bb27…`，`blob.ref` 379114 B 就在 job 目录、sha 逐字相符），而
+`export_bundle` 带 code/ts/init/opt/demo **唯独不带 ref**；离线段逐轮 manifest 由节点本地
+合成（`plan_run._run_iteration` 的 `run_job("", "", …)`；hub 上没有这份 job）⇒ it1 的
+`_resolve_blob` 未命中后向**空 base_url** 发 GET：`ValueError: unknown url type` ×3 重试耗尽。
+
+修法与 demo 同规：`export_bundle` 带 `ref_weights.json`（进 `OPTIONAL_PARTS` + README +
+`blob.ref` sha 对账），新增 `plan_handoff._seed_ref_blob_cache`——启动期把字节种子进
+`blob_cache/<ref_sha>`（候选：产物目录 `ref_weights.json` → job 目录 `blob.ref`），缺件
+**启动期响亮拒绝**且一轮都不跑（修法写进错误正文）；`plan_run` / `run_loop` 门面与分片表同步。
+
+**运维口径**：已导出的旧包（如 `task-x20-adv-hurt.zip`）没有 ref 件 ⇒ 收紧后的启动期门会
+**直接拒收**；x20-adv 三腿要上云机先在控制台**重新导出任务包**（job 目录的 `blob.ref` 还在，
+重导即自动带上）。
+
+**守卫**：`tests/remote/test_boot_wire_guard.py`（截断=失败 + 同 fetch 重试）·
+`tests/remote/test_body_transfer_guard.py`（worker 侧孪生）· `tests/remote/test_bundle.py`
+（export/import 带 ref + 启动期种子 + 缺件拒收「一轮都不跑」）· 分片表 18→19
+（`_seed_ref_blob_cache`，`test_plan_run_split.py` / `test_plan_handoff_split.py`）。
+
 ## §57 切模式撤单：复用 `job_cancelled` 账本事件，只撤**没被领的**那批（plan/switch-mode-drops-jobs 的 T0，2026-10-03）
 
 **触发**：`plan/auto-offline-handoff` 的 T0（唯一未落地项）。原始动机是 2026-09-25 用户报障

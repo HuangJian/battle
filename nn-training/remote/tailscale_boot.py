@@ -625,6 +625,15 @@ def _read_body(
                 time.time() - t0,
             ) from e
         if not block:
+            if total and len(buf) < total:
+                # ★ 2026-10-03 现场（离线任务包 4.12MB 在 3.50MB＝14×256KB 处被隧道干净
+                #   FIN）：`http.client` 对 `read(amt)` 的提前 EOF **故意不抛**
+                #   IncompleteRead（兼容）⇒ 旧行为把半截 body 当「读完了」返回（wire 账还是
+                #   attempts=1 rerolls=0），半截 zip 落盘后才在 BadZipFile 炸掉、多课程会话
+                #   陪葬。收满声明长度才算成功，否则按传输失败走内层重试（换连接重取）。
+                raise BootBodyError(
+                    "body 提前结束（连接被截断）", len(buf), total, time.time() - t0
+                )
             return bytes(buf)
         buf += block
         now = time.time()

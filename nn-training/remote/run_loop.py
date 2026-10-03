@@ -63,6 +63,9 @@ from remote.plan_run import (
     _seed_demo_blob_cache as _seed_demo_blob_cache,
 )
 from remote.plan_run import (
+    _seed_ref_blob_cache as _seed_ref_blob_cache,
+)
+from remote.plan_run import (
     _setup_cloud_eval as _setup_cloud_eval,
 )
 from remote.plan_run import (

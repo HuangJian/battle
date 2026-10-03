@@ -7241,3 +7241,32 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
   机器上已不成立——那份实测是 700 局 classic 单模块场景，整门 2100 局下 8 更快）。**未测（如实记）**：
   `defaultWorkerCount` 15→7 之后 sim 批处理工具（`m1-eval`/`export-*`）的吞吐——本工作区 `nn-training/weights` 为空，跑不起来。
 - **指针**：全文 `docs/nn/runtime-opt.md` §23.6 · 计划 `.trae/documents/gate-parallelism-physical-cores.md`。
+
+## §2026-10-03-offline-pack-truncation-and-ref-blob（2026-10-03，用户报障×2：半截任务包被当成功 / 离线包缺 kickstart ref 字节）
+
+- **背景（事故一）**：Kaggle 取包 `task-pack` 声明 `Content-Length=4322911`，隧道在 3670016
+  （**14×256KB**）处干净 FIN，而引导期护栏记 `attempts=1 rerolls=0`（= 成功）⇒ 半截 zip 落盘
+  → `read_pack_index` 才炸 `BadZipFile: File is not a zip file`（未捕获 ValueError ⇒ 整场多课程
+  会话陪葬、后两门课未跑；重跑一次 cell 就好）。机制：**`http.client` 对 `read(amt)` 的提前 EOF
+  故意不抛 IncompleteRead**（兼容）⇒ 旧 `_read_body` 只看 EOF、不看「已收 == 声明长度」。
+- **背景（事故二）**：x20-adv-hurt（`kickstart_ref: true`，kk=0.1）云机 it1 的 PPO 装载失败：
+  `/jobs/…/blob?name=ref` 重试 3 次仍 `ValueError: unknown url type`（相对路径 ⇒ 空 base_url）。
+  发布 slim 后 manifest 只剩 `ref_sha`（`blob.ref` 379114B 就在 job 目录，sha 逐字相符），而
+  `export_bundle` 带 code/ts/init/opt/demo **唯独不带 ref**；离线段逐轮 job 由
+  `plan_run._run_iteration` 本地合成（`run_job("", "", …)`；hub 上没有这份 job）⇒ 内容寻址
+  未命中 = 向空 base_url 发 GET，重试只是在刷同一条必然失败。
+- **决定**：① 两处孪生 `_read_body`（`remote/tailscale_boot.py`、`remote/http.py`）在 EOF 处
+  比对「已收 vs Content-Length」，不足即按传输失败抛（引导期 `BootBodyError` 进同一次 fetch 的
+  内层换连接重试；worker 侧带正文 `TimeoutError` 进退避重试）。② ref 与 demo 同规进离线链：
+  `export_bundle` 带 `ref_weights.json`（`OPTIONAL_PARTS` + README + `blob.ref` sha 对账），
+  新增 `plan_handoff._seed_ref_blob_cache`（启动期种子进 `blob_cache/<ref_sha>`，候选 = 产物目录
+  `ref_weights.json` → job 目录 `blob.ref`；缺件**启动期响亮拒收**、一轮都不跑），`plan_run` /
+  `run_loop` 门面与分片表 18→19 同步。
+- **被否决**：① 离线段给 `run_job` 传 hub_url 让 ref 联网下载——run 模式 hub 上没有这份合成
+  job（下载通道不存在），且违反「全离线不依赖网络」；② 只在 `read_pack_index` 前加 zip 校验
+  兜住——语义上「传了半截」是传输失败，该在传输层重试，且 worker 侧下载的 payload/code/blob
+  同病（孪生）；③ 给 export 改回 `slim=False` 内联 ref——放弃 opt-blob-diet 的内容寻址账且包更大。
+- **运维口径**：已导出的旧包（没有 ref 件）会被收紧后的启动期门**直接拒收**；x20-adv 三腿上
+  云机前先在控制台**重导任务包**（job 目录 `blob.ref` 还在，重导即自动带上）。
+- **门槛**：nn python gate 绿（**3592 pass/7 skip，54s**，含 e2e；对照上一条 3586 → +6 = 本次新增用例）。
+- **指针**：全文 `docs/nn/remote-transport.md` §58。

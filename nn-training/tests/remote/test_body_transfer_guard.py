@@ -65,6 +65,21 @@ def test_body_stall_raises_named_timeout_with_byte_count() -> None:
     assert "停滞" in msg and "1000 bytes" in msg and "9999" in msg
 
 
+def test_truncated_body_raises_named_timeout_with_byte_count() -> None:
+    """★ 2026-10-03（与引导期护栏同一处缺陷，孪生实现）：声明 4.12MB 却在 14×256KB 处
+    干净 FIN——旧行为把半截当成功返回（下载方拿到不完整 zip/body）；现在必须有正文地
+    抛，让 `_get_with_retry` 当瞬时失败退避重取。
+
+    机制：`http.client` 对 `read(amt)` 的提前 EOF **故意不抛** IncompleteRead（兼容），
+    所以「收满 Content-Length」这道校验只能由护栏自己做。
+    """
+    resp = _FakeResp([b"x" * (256 * 1024)] * 14, headers={"Content-Length": "4322911"})
+    with pytest.raises(TimeoutError) as ei:
+        worker_mod._read_body(resp, idle_timeout=45.0, total_timeout=None)
+    msg = str(ei.value)
+    assert "提前结束" in msg and "3670016" in msg and "4322911" in msg
+
+
 def test_body_progress_is_reported_and_budget_enforced(monkeypatch) -> None:
     """每片都报进度（节流值置 0）；总预算到点即抛（治「永远在滴水」）。"""
     # 注入点 = `remote.http`：`_read_body` 已搬进 http（S4 第五步），它读的是本模块的全局。

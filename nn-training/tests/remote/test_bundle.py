@@ -423,3 +423,120 @@ def test_seed_demo_blob_cache_from_artifacts(tmp_path: Path) -> None:
         log=_quiet,
     )
     assert not (tmp_path / "work3" / "blob_cache").exists()
+
+
+# ────────────────────────── kickstart ref 离线件（§363） ──────────────────────────
+#
+# 2026-10-03 现场（x20-adv-hurt 首跑）：发布 slim 把 ref 摘成内容寻址（manifest 只留
+# ref_sha），而 export_bundle 只带 code/ts/init —— 云端跑到 it1 的 PPO 装载才炸：离线段
+# 逐轮 manifest 是节点本地合成的（hub 上没有这份 job），`_resolve_blob` 未命中后向空
+# base_url 发 GET ⇒ `ValueError: unknown url type` 重试耗尽、整段失败。
+# 修法与 demo 同规：job 目录 blob.ref → 包件 ref_weights.json → 启动期种子 blob_cache。
+
+REF_RAW = b'{"format":"nn-weights-json","params":{"w":1}}' + b"r" * 64
+
+
+def _export_ref_pack(tmp_path: Path, *, with_blob: bool) -> tuple[Path, dict, dict]:
+    """造一个 kickstart 腿任务包（ref_sha 钉住）；`with_blob=False` = job 目录**缺** blob.ref。"""
+    from common.protocol import blob_path
+
+    plan = build_plan(
+        _args(), it=2, iters_total=4, rotate_seed=5, max_iters=3, log=_quiet
+    )
+    m = _manifest(plan, it=3, code_sha=sha256_bytes(CODE_ZIP))
+    m["ref_sha"] = sha256_bytes(REF_RAW)
+    m["ref_weights_fp"] = m["ref_sha"]
+    m["kickstart_kl"] = 0.1
+    m = normalize_manifest(m)
+    src = tmp_path / "srcr"
+    src.mkdir(parents=True, exist_ok=True)
+    (src / "init_weights.json").write_bytes(INIT_W)
+    (src / "code.zip").write_bytes(CODE_ZIP)
+    with zipfile.ZipFile(src / "ts_code.zip", "w") as z:
+        z.writestr("tools/sim/export-rl-rollout.ts", "// ts\n")
+    jd = tmp_path / "jobr"
+    jd.mkdir(parents=True, exist_ok=True)
+    if with_blob:
+        blob_path(jd, "ref").write_bytes(REF_RAW)
+    out = tmp_path / f"task-ref-{int(with_blob)}.zip"
+    index = export_bundle(
+        out,
+        manifest=m,
+        plan_bytes=dump_plan(plan),
+        init_weights_path=src / "init_weights.json",
+        code_zip_path=src / "code.zip",
+        ts_code_zip_path=src / "ts_code.zip",
+        job_dir=jd,
+        hub_url="https://hub.example",
+        note="test ref export",
+    )
+    return out, index, m
+
+
+def test_export_import_carries_ref_blob(tmp_path: Path) -> None:
+    """kickstart 腿任务包自动带 ref_weights.json：job 目录 blob.ref → 包件 → 导入落盘（sha 对账）
+
+    → `run_standalone` 启动期种子进 blob_cache（此后逐轮命中、零传输）。
+    """
+    out, index, m = _export_ref_pack(tmp_path, with_blob=True)
+    assert "ref_weights.json" in index["parts"], index["parts"].keys()
+    assert index["parts"]["ref_weights.json"]["sha256"] == m["ref_sha"]
+    dest = tmp_path / "artr"
+    import_bundle(out, dest)
+    assert (dest / "ref_weights.json").read_bytes() == REF_RAW
+    fake = _FakeRunJob()
+    run_standalone(artifacts_dir=dest, run_job_fn=fake, code_cache_dir=tmp_path / "ccr", log=_quiet)
+    assert fake.calls, "全离线段没跑起来"
+    # 种子在**启动期**完成（open_run_context 里），不是等到 it1 的 PPO 装载
+    assert (dest / "work" / "blob_cache" / m["ref_sha"]).read_bytes() == REF_RAW
+
+
+def test_missing_ref_bytes_refuse_at_startup_not_it1(tmp_path: Path) -> None:
+    """★ 2026-10-03 现场回归：包里缺 ref 字节时**启动期**响亮拒绝、一轮都不跑——
+    旧行为是跑到 it1 的 PPO 装载才向空 base_url 发 GET（unknown url type ×3 重试耗尽）。"""
+    out, _index, _m = _export_ref_pack(tmp_path, with_blob=False)
+    dest = tmp_path / "artr2"
+    import_bundle(out, dest)
+    fake = _FakeRunJob()
+    with pytest.raises(ProtocolError, match="kickstart ref"):
+        run_standalone(
+            artifacts_dir=dest, run_job_fn=fake, code_cache_dir=tmp_path / "ccr2", log=_quiet
+        )
+    assert fake.calls == [], "缺 ref 字节时一轮都不该跑（必须在启动期拒绝）"
+
+
+def test_seed_ref_blob_cache_from_artifacts(tmp_path: Path) -> None:
+    """启动期种子：产物目录 ref_weights.json → blob_cache/<sha>；二次调用命中；缺件响亮拒绝。"""
+    from remote.run_loop import _seed_ref_blob_cache
+
+    raw = b'{"format":"nn-weights-json","params":{"w":2}}' + b"k" * 32
+    sha = sha256_bytes(raw)
+    art = tmp_path / "artr2"
+    art.mkdir(parents=True, exist_ok=True)
+    (art / "ref_weights.json").write_bytes(raw)
+    work = tmp_path / "workr"
+    m = {"ref_sha": sha}
+    _seed_ref_blob_cache(
+        manifest=m, job_dir=tmp_path / "jdr", work_dir=work, artifacts_root=art, log=_quiet
+    )
+    assert (work / "blob_cache" / sha).read_bytes() == raw
+    # 二次调用走缓存命中（删源文件仍能过）
+    (art / "ref_weights.json").unlink()
+    _seed_ref_blob_cache(
+        manifest=m, job_dir=tmp_path / "jdr", work_dir=work, artifacts_root=art, log=_quiet
+    )
+    # 缺件：响亮拒绝（不等 it1 的 PPO 装载才炸——旧现场就是那里报 unknown url type）
+    with pytest.raises(ProtocolError, match="kickstart ref"):
+        _seed_ref_blob_cache(
+            manifest=m,
+            job_dir=tmp_path / "jdr2",
+            work_dir=tmp_path / "workr2",
+            artifacts_root=tmp_path / "emptyr",
+            log=_quiet,
+        )
+    # 未开 kickstart（无 ref_sha）：静默 no-op
+    _seed_ref_blob_cache(
+        manifest={}, job_dir=tmp_path, work_dir=tmp_path / "workr3", artifacts_root=None,
+        log=_quiet,
+    )
+    assert not (tmp_path / "workr3" / "blob_cache").exists()
