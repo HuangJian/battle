@@ -11,7 +11,8 @@ hub 问询，逐个下载离线任务包并完成训练任务」。
     等于废掉整个会话）、`release` **不覆盖**别人的租约；
   * **云机侧**（`fetch_task_list` / `resolve_courses` / `_run_auto` / `worker_id_of` / 心跳）：
     老 hub 只探测一次就降级、`CFG.course` 非空时**一次都不问清单**、清单空 = 正常收工（rc=0）、
-    `served[包 sha]` 防自激、租约的任何失败**不影响**训练。
+    `served[包 sha]` 防自激、租约的任何失败**不影响**训练；`resolve_courses` 两层选择
+    （★ 2026-10-03 用户裁决）：离线可领整批优先，没有就抢 `seize` 行里 `open_time` 最小的一门。
 """
 
 from __future__ import annotations
@@ -156,15 +157,14 @@ def test_tasks_is_readonly_and_stable(tmp_path: Path) -> None:
     assert dict(hub_server._TASK_PACK_TRIGGERS) == before, "清单不得写触发账本"
 
 
-def test_tasks_shows_unpinned_online_course_but_hides_pinned_one(tmp_path: Path) -> None:
-    """★ 默认清单的候选面（2026-10-03，plan/auto-offline-handoff U1）：
+def test_tasks_marks_in_training_online_course_as_seize(tmp_path: Path) -> None:
+    """★ 默认清单的在线在训课（2026-10-03 用户裁决）：
 
-    · **未 pin 的在训课**会出现（允许无包；claim 即触发导包 —— 这是自动交接的唯一入口）；
-    · **人显式管住（pin online）的课**从云机视野里消失；`?include=all`（控制台排障）才给
-      `not_offline`，且 `claimable=false`。
-
-    旧契约是「默认只报离线课」—— 那会恰好把 U1 要的入口藏起来（自动课**本来就没有包**，
-    见 P0-1）。
+    · 在训的在线课会出现（允许无包；claim 即触发导包 —— 自动交接的唯一入口）且带
+      `seize=True`（离线盘可抢）与 `open_time`（抢的顺序键）；
+    · **pin online 不再藏它**（用户口径：「不管什么时候上线接活……没有离线就抢第一个在训
+      在线课」）——同一个 `seize` 标注；
+    · 停课（删开课标记）= 唯一 opt-out：默认面不列，`?include=all` 给 `not_offline`。
     """
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path)
@@ -174,12 +174,19 @@ def test_tasks_shows_unpinned_online_course_but_hides_pinned_one(tmp_path: Path)
     rows = _json(_req(base, OFFLINE_TASKS_PATH)[1])["tasks"]
     assert [r["course"] for r in rows] == ["c5-gae"]
     assert rows[0]["auto_handoff"] is True and rows[0]["claimable"] is True
+    assert rows[0]["seize"] is True and rows[0]["open_time"] < 1e18
 
+    # pin online：旧口径下它从云机视野消失；用户裁决后照样可见、照样可抢。
     assert hub.set_mode_pinned("c5-gae", "online", True)[0] is True
+    rows2 = _json(_req(base, OFFLINE_TASKS_PATH)[1])["tasks"]
+    assert [r["course"] for r in rows2] == ["c5-gae"] and rows2[0]["seize"] is True
+
+    # 停课：唯一 opt-out（默认面消失；排障面 not_offline）
+    os.remove(tmp_path / "c5-gae" / COURSE_ENABLE_MARKER)
     assert _json(_req(base, OFFLINE_TASKS_PATH)[1])["tasks"] == []
     rows_all = _json(_req(base, OFFLINE_TASKS_PATH + "?include=all")[1])["tasks"]
     assert [r["state"] for r in rows_all] == ["not_offline"]
-    assert rows_all[0]["claimable"] is False
+    assert rows_all[0]["claimable"] is False and rows_all[0]["seize"] is False
 
 
 def test_tasks_candidate_face_is_disk_fact_not_the_course_table(tmp_path: Path) -> None:
@@ -282,9 +289,9 @@ def test_claim_needs_a_worker_and_an_existing_pack(
 ) -> None:
     """空 worker = 400（两台会互相顶租约）；缺包分两种（2026-10-03，plan/auto-offline-handoff）：
 
-    · **自动候选**（未 pin 的在训课）⇒ 409 + 翻 mode + 触发导包（P0-1：旧的 404 会让
-      「自动课普遍无包」变成死锁，整条自动交接链永不启动）；
-    · **人管课**（pin / 停课残留）⇒ 旧 404（与 task-pack 同口径，带课程表）——不替人决定。
+    · **自动候选**（在训课 —— pin 不再拦，用户 2026-10-03 裁决）⇒ 409 + 翻 mode + 触发导包
+      （P0-1：旧的 404 会让「自动课普遍无包」变成死锁，整条自动交接链永不启动）；
+    · **停课残留**（开课标记已删）⇒ 旧 404（与 task-pack 同口径，带课程表）——不替人决定。
     """
     from hub import offline as offline_mod
 
@@ -298,7 +305,7 @@ def test_claim_needs_a_worker_and_an_existing_pack(
     assert st == 409 and doc["auto_handoff"] is True and doc["pending_export"] is True
     assert hub.mode_of("c5-gae") == "offline"
 
-    hub.set_mode_pinned("c5-gae", "offline", True)
+    os.remove(tmp_path / "c5-gae" / COURSE_ENABLE_MARKER)  # 停课 ⇒ 退出自动候选
     st, doc = _claim(base, worker="w1")
     assert st == 404 and doc["known_courses"] == ["c5-gae"]
 
@@ -461,6 +468,51 @@ def test_resolve_courses_skips_given_up_courses(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
     got = offline_boot.resolve_courses({}, {}, lambda _m: None, skip={"a"})
     assert [t["course"] for t in got] == ["b"]
+
+
+def test_resolve_courses_prefers_offline_over_seize(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ 用户裁决的优先级：有就绪的离线课 ⇒ 只取它，在训在线课（seize）这次不碰；
+    离线课那份已跑过（served 同 sha）⇒ 顺延去抢。"""
+    tasks = [
+        {"course": "off", "claimable": True, "seize": False, "pack": {"sha256": "aa" * 32}},
+        {"course": "on", "claimable": True, "seize": True, "pack": {"sha256": "bb" * 32}},
+    ]
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
+    got = offline_boot.resolve_courses({}, {}, lambda _m: None)
+    assert [t["course"] for t in got] == ["off"]
+    got2 = offline_boot.resolve_courses({}, {}, lambda _m: None, served={"off": "aa" * 32})
+    assert [t["course"] for t in got2] == ["on"]
+
+
+def test_resolve_courses_seizes_the_first_in_training_online_course(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没有就绪的离线课 ⇒ 按 `open_time` 升序抢**一门**（tie 用课名）；缺 `open_time`
+    （老 hub / 磁盘读不到）排最后；busy 的行照收（claim 会回 409 busy，调用方等下一拍
+    而不是烧 idle 预算）。"""
+    tasks = [
+        {"course": "b-late", "claimable": False, "seize": True, "open_time": 200.0, "pack": None},
+        {"course": "c-tie", "claimable": False, "seize": True, "open_time": 100.0, "pack": None},
+        {
+            "course": "a-tie",
+            "claimable": False,
+            "seize": True,
+            "open_time": 100.0,
+            "pack": {"sha256": "aa" * 32},
+        },
+        {"course": "d-nokey", "claimable": False, "seize": True, "pack": None},
+    ]
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
+    lines: list[str] = []
+    got = offline_boot.resolve_courses({}, {}, lines.append)
+    assert [t["course"] for t in got] == ["a-tie"]
+    assert any("抢占第一个在训在线课" in ln for ln in lines), lines
+
+    # 已跑过 a-tie 的这份包 ⇒ 顺延到下一门（c-tie）：过滤与离线路同一套。
+    got2 = offline_boot.resolve_courses({}, {}, lambda _m: None, served={"a-tie": "aa" * 32})
+    assert [t["course"] for t in got2] == ["c-tie"]
 
 
 def test_run_batch_does_not_run_while_the_handoff_is_pending(

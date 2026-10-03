@@ -163,7 +163,8 @@ export async function hubSetCourseMode(
   pin?: boolean | null,
   dropJobs?: boolean,
 ): Promise<string | null> {
-  // `pin`（2026-10-03，plan/auto-offline-handoff §3.2）：人的决定把课「锒住」（离线盘永不自取）；
+  // `pin`（2026-10-03，plan/auto-offline-handoff §3.2）：标记「人的决定」并落盘、重启不丢
+  // （★ 同日用户裁决后 pin **不再拦离线盘**——在训课照样可被抢，唯一 opt-out = 停课）；
   // `pin=0` = 交还自动（清锒 + 清 claim 记账）。不传 = legacy（hub 拒绝覆盖 claim 翻的 offline）。
   const pinQs = pin === undefined || pin === null ? '' : `&pin=${pin ? 1 : 0}`
   // `drop_jobs=1`（2026-10-03，plan/switch-mode-drops-jobs T0）：切模式顺手作废该课**未认领**

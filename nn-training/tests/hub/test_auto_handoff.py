@@ -8,7 +8,10 @@
     请控制台导包 + 409 指路（不是 404）。
   * **P0-2 一拖一**：U2「TPU 一次只 drain 一门」必须是 **hub 侧不变量**（云机不可信），
     闸在 claim 的临界区；release 后自动解除。
-  * **P0-3 / P1-3 pin**：`pinned` 是人的决定，落盘、重启不丢；pin online 的课离线盘永不自取。
+  * **P0-3 / P1-3 pin（2026-10-03 被用户裁决取代）**：`pinned` 仍是人的决定（落盘、重启不丢），
+    但**不再拦离线盘** —— 用户口径：「不管什么时候上线接活，优先取当时就绪的离线课程；
+    没有离线就抢第一个在训在线课」。唯一 opt-out = 停课（删 `training-enabled.txt`）；
+    清单行新增 `seize`（在线在训、可被抢）/`open_time`（抢的顺序键）。
   * **§3.8 数据损坏防线**：claim 翻的 offline 落 `offline-dispatch.json`，hub 重启后仍在。
   * **U3 waiting**：租约过期 ⇒ 该课停在 offline（不清零、不回 online）。
   * **U6 completed**：段末摘要报到跑满 ⇒ 不可再领；重导包（sha 变）自动解封。
@@ -185,7 +188,7 @@ def test_stall_verdict_covers_both_legs() -> None:
 
 
 def test_unpinned_online_course_without_pack_is_claimable(tmp_path: Path) -> None:
-    """P0-1 的回归锚：无包的在线课（不过是自动候选）在清单里可领。"""
+    """P0-1 的回归锚：无包的在线课（自动候选）在清单里可领、可被抢。"""
     hub = _HubQueue({}, discover_root=tmp_path)
     _course(tmp_path, hub, "c5-gae")
     rows = hub.offline_tasks()
@@ -193,20 +196,41 @@ def test_unpinned_online_course_without_pack_is_claimable(tmp_path: Path) -> Non
     assert row["state"] == "no_pack"
     assert row["claimable"] is True
     assert row["auto_handoff"] is True
+    assert row["seize"] is True
     assert row["pack"] is None
 
 
-def test_pin_online_hides_course_from_the_offline_disk(tmp_path: Path) -> None:
+def test_pin_online_course_is_seizable_not_hidden(tmp_path: Path) -> None:
+    """★ 2026-10-03 用户裁决：pin online 不再把课藏起来 —— 在训课照样出现在云机清单里，
+    带 `seize=True`（在线在训、可被抢）与 `open_time`（抢的顺序键）。"""
     hub = _HubQueue({}, discover_root=tmp_path)
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
     assert hub.set_mode_pinned("c5-gae", "online", True)[0] is True
     assert hub.pinned_of("c5-gae") is True
-    rows = {r["course"]: r for r in hub.offline_tasks()}
-    assert "c5-gae" not in rows  # 默认清单（云机口径）根本不列它
+    row = next(r for r in hub.offline_tasks() if r["course"] == "c5-gae")
+    assert row["seize"] is True
+    assert row["claimable"] is True and row["auto_handoff"] is True
+    assert row["open_time"] == hub.open_time_of("c5-gae")
+    assert row["open_time"] < 1e18  # 开课标记在 ⇒ 真实 mtime（不是 +inf 哨兵）
+
+
+def test_stopped_online_course_is_hidden_from_the_offline_disk(tmp_path: Path) -> None:
+    """唯一 opt-out = 停课（删 `training-enabled.txt`）：默认清单不列，`?include=all` 给
+    `not_offline`，claim 409 `not_offline`。"""
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
+    os.remove(tmp_path / "c5-gae" / COURSE_ENABLE_MARKER)
+    assert {r["course"] for r in hub.offline_tasks()} == set()
     rows_all = {r["course"]: r for r in hub.offline_tasks(include_all=True)}
     assert rows_all["c5-gae"]["state"] == "not_offline"
     assert rows_all["c5-gae"]["claimable"] is False
+    assert rows_all["c5-gae"]["seize"] is False
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    body = _json(raw)
+    assert st == 409 and body["not_offline"] is True, body
+    assert "不在训练中" in body["error"], body
 
 
 def test_auto_course_without_pack_sorts_last_not_first(tmp_path: Path) -> None:
@@ -251,6 +275,24 @@ def test_missing_open_marker_sorts_with_infinity(tmp_path: Path) -> None:
     assert hub.open_time_of("residue") > 1e18
 
 
+def test_seize_flag_matrix(tmp_path: Path) -> None:
+    """`seize` 的边界：在线在训 ⇒ True；跑满的在线课 ⇒ False（completed 不可抢，二轮 P1-1
+    的同一理由）；已离线 ⇒ False（`seize` 只标「在线在训」）。"""
+    hub = _HubQueue({}, discover_root=tmp_path)
+    _course(tmp_path, hub, "online-live")
+    _course(tmp_path, hub, "online-done")
+    _course(tmp_path, hub, "offline-live")
+    _pack(tmp_path, "online-done", b"PK-done")
+    _pack(tmp_path, "offline-live")
+    hub.note_offline_completed("online-done")
+    hub.set_mode_pinned("offline-live", "offline", True)
+    rows = {r["course"]: r for r in hub.offline_tasks()}
+    assert rows["online-live"]["seize"] is True
+    assert rows["online-done"]["state"] == "completed"
+    assert rows["online-done"]["seize"] is False
+    assert rows["offline-live"]["seize"] is False
+
+
 # ------------------------------------------------------------------ claim 面
 
 
@@ -290,25 +332,32 @@ def test_claim_without_pack_degrades_when_console_unreachable(
     # 半状态可见：已翻 offline（本机停采）但没人跑 ⇒ 由 stalled 告警兜（另一条用例）
 
 
-def test_claim_missing_pack_for_non_auto_course_keeps_404(tmp_path: Path) -> None:
-    """人管（pin）的课缺包仍是旧 404：不替人决定导包。"""
+def test_claim_missing_pack_for_stopped_course_keeps_404(tmp_path: Path) -> None:
+    """停课（非自动候选）的课缺包仍是旧 404：不替人决定导包。
+
+    pin 曾是「非自动」的代表（人管课）；2026-10-03 用户裁决后 pin 不再拦，代表换成停课残留。
+    """
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path, hub, "c5-gae")
     hub.set_mode_pinned("c5-gae", "offline", True)
+    os.remove(tmp_path / "c5-gae" / COURSE_ENABLE_MARKER)
     st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
     body = _json(raw)
     assert st == 404, body
     assert body["known_courses"] == ["c5-gae"]
 
 
-def test_pin_online_course_is_rejected_by_claim_even_with_pack(tmp_path: Path) -> None:
+def test_pin_online_course_is_seized_by_claim_and_flipped(tmp_path: Path) -> None:
+    """★ 用户裁决的题眼：pin online 的在训课 + 有包 ⇒ claim **200**，hub 当场把它翻成 offline。"""
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
     hub.set_mode_pinned("c5-gae", "online", True)
     st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
     body = _json(raw)
-    assert st == 409 and body["not_offline"] is True, body
+    assert st == 200 and body.get("lease"), body
+    assert hub.mode_of("c5-gae") == "offline"
+    assert hub.dispatch_record("c5-gae")["claimed_offline"] is True
 
 
 def test_claim_with_pack_flips_mode_and_persists(tmp_path: Path) -> None:
@@ -611,6 +660,25 @@ def test_auto_claim_offline_drops_unclaimed_jobs(tmp_path: Path) -> None:
         assert why == "" and grant, why
         assert hub.mode_of("c5-gae") == "offline"
         assert _cancelled_ids(hub, "c5-gae") == {"stale-1"}
+        assert hub._stores["c5-gae"].claimable_job_ids() == []
+    finally:
+        srv.shutdown()
+
+
+def test_seize_claim_flips_pinned_online_and_drops_unclaimed_jobs(tmp_path: Path) -> None:
+    """★ 抢占即接管（2026-10-03 用户裁决 + T0 同链）：pin online 的课被 claim 翻成 offline，
+    并撤掉它未认领的在线 job；`pinned` 记账不动（抢的是模式，不是人的决定）。"""
+    base, hub, srv = _boot(tmp_path)
+    try:
+        _course(tmp_path, hub, "c5-gae")
+        _publish_job(hub, "c5-gae", "stale-pinned")
+        _pack(tmp_path, "c5-gae")
+        hub.set_mode_pinned("c5-gae", "online", True)
+        st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=tpu-1", method="POST")
+        assert st == 200, raw[:200]
+        assert hub.mode_of("c5-gae") == "offline"
+        assert hub.pinned_of("c5-gae") is True
+        assert _cancelled_ids(hub, "c5-gae") == {"stale-pinned"}
         assert hub._stores["c5-gae"].claimable_job_ids() == []
     finally:
         srv.shutdown()

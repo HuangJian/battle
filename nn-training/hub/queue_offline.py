@@ -136,7 +136,7 @@ def auto_claimable(
     """清单的 claimable 判据（**纯函数**；清单与 claim 面同源）。
 
     · auto 课允许**无包**（领它触发导包 —— P0-1 的唯一入口）；
-    · pinned/普通离线课仍是「有包才能领」；
+    · 非自动课（停课残留 / 不在课程表）仍是「有包才能领」；
     · 完成态（当前包已跑满）不可再领（二轮 P1-1）；busy 闸对 auto 课生效（§3.3a）。
     """
     if holder_present or completed or busy:
@@ -226,7 +226,8 @@ class QueueOfflineMixin(QueuePeer):
         """`GET /offline/tasks` 的内容——**零副作用**（不触发重导、不写账本、不动游标）。
 
         每行字段定死在 §3.1：`course/state/claimable/pack/run_id/it/end_it/stale_reason/
-        holder/progress`。读不到就如实给空值（一个坏包不该把整张清单变成 500）。
+        holder/progress`；`seize`/`open_time` 是 2026-10-03 用户裁决加的两个（见行内注释）。
+        读不到就如实给空值（一个坏包不该把整张清单变成 500）。
         """
         progress = self.offline_progress()
         courses = self.offline_task_courses()
@@ -266,11 +267,16 @@ class QueueOfflineMixin(QueuePeer):
                         ),
                     )
             holder = self.holder_info(course)
-            # 自动交接（T2）：未 pin ∧ 在训（开课标记在）⇒ 可见且可领（允许无包）
+            # 自动交接（T2）：在训（开课标记在）⇒ 可见且可领（允许无包）。
+            # ★ 2026-10-03 用户裁决：pin 不再拦（唯一 opt-out = 停课）；在线在训 ⇒ 可被抢占。
             auto = self.auto_eligible(course)
             pack_sha = str((pack or {}).get("sha256") or "")
             completed = self.completion_blocked(course, pack_sha)
             busy = self.busy_reason(course) if auto else ""
+            #: 可被**抢占**（用户 2026-10-03 裁决「没有离线课程就抢第一个在训在线课」）：
+            #: 表内在训 ∧ 现在还是在线 ∧ 未跑满（跑满的不能再抢——二轮 P1-1 的同一理由；
+            #: busy/无主不在这里滤——云机抢到 busy 会走 409 `busy` 等下一拍，不吃 idle 预算）。
+            seize = real and not offline and auto and not completed
             treat_offline = offline or auto
             if completed:
                 state = TASK_STATE_COMPLETED
@@ -309,6 +315,11 @@ class QueueOfflineMixin(QueuePeer):
                     "reason": reason,
                     #: 领它会触发「自动交接」（写 rl-config + 导包；不写意图、不 pin）
                     "auto_handoff": auto,
+                    #: 在线在训 ⇒ 离线盘可**抢占**它（hub 的 claim 会翻离线；用户 2026-10-03 裁决）。
+                    #: 云机选抢的顺序 = `open_time` 升序（tie 用课名）取最小的一门。
+                    "seize": bool(seize),
+                    #: 开课时间（`training-enabled.txt` mtime，T4 的 SSOT）；读不到 ⇒ +inf 排最后。
+                    "open_time": self.open_time_of(course),
                     "pack": pack,
                     "run_id": meta["run_id"],
                     "it": meta["it"],
@@ -503,12 +514,15 @@ class QueueOfflineMixin(QueuePeer):
         return bool(self.dispatch_record(course).get("pinned"))
 
     def auto_eligible(self, course: str) -> bool:
-        """自动交接候选：在课程表里 ∧ 未被 pin ∧ **开课标记在**（在训）。
+        """自动交接候选：在课程表里 ∧ **开课标记在**（在训）。★ 2026-10-03 用户裁决：pin 不再参与。
 
-        为什么还要看标记：停掉的课会删标记（F17/F18），而它的 dispatch 记录还留在盘上 ——
-        只看 pin 会让停掉的课继续被离线盘领走。
+        用户口径（逐字）：「offline 云机，不管什么时候上线接活，优先取当时就绪的离线课程；
+        如果没有离线课程但是有在线课程在训练，则抢占第一个在线课程，hub 将其改为离线」。
+        ⇒ 唯一的 opt-out = **停课**（删 `training-enabled.txt`）：停掉的课会删标记（F17/F18），
+        而它的 dispatch 记录还留在盘上 —— 看标记才能让停掉的课不再被离线盘领走；
+        pin 曾是第二条否决线（P0-3），现已被上口径取代（「人 pin 成在线」的在训课照样可被抢）。
         """
-        if course not in self._stores or self.pinned_of(course):
+        if course not in self._stores:
             return False
         try:
             return (self.course_dir(course) / COURSE_ENABLE_MARKER).exists()
@@ -589,13 +603,13 @@ class QueueOfflineMixin(QueuePeer):
     def begin_auto_handoff(self, course: str) -> tuple[str, str]:
         """claim 无包分支的临界区（§3.1a-b + §3.3a）：过 busy 闸 → 翻 mode（落盘）。
 
-        返回 verdict：`flipped`（可触发控制台）/ `busy`（别的课在跑）/ `not_auto`（人管或未知）。
+        返回 verdict：`flipped`（可触发控制台）/ `busy`（别的课在跑）/ `not_auto`（未在训或未知）。
         **不建租约**（包还没出现，领租约还早）；触发控制台是调用方（HTTP 层）的事——网络调用不持锁。
         """
         if course not in self._stores:
             return "not_auto", "未知课程"
         if not self.auto_eligible(course):
-            return "not_auto", "该课由人管（pin）/未开课——缺包请走控制台「导出任务包」"
+            return "not_auto", "该课未在训练（开课标记已删）"
         with self._lease_lock:
             busy = self._busy_locked(course)
             if busy:

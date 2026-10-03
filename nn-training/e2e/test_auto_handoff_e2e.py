@@ -23,6 +23,11 @@
      不带 `drop_jobs` 的切模式**一个 job 都不动**（停课「队列一字不动」契约）。
   ⑤ **T2 云机腿**：`offline_boot.claim_course` 对中间态返回 `reason` 码而非裸 token ——
      调用方据此**本拍不跑**（旧口径「一律照旧跑」会无租约干等 30 分钟再 SystemExit）。
+  ⑥ **离线优先**（2026-10-03 用户裁决）：就绪离线课 + pin online 的在训课 ⇒ 真
+     `resolve_courses` 只回离线那门（在线那门带 `seize=True`，可抢但不抢）。
+  ⑦ **抢占全循环**（用户裁决「领到的课训练完成后再次开启接活循环」）：没有离线课 ⇒ 真
+     `_run_auto` 循环按 `open_time` 逐门抢占在训在线课（hub 逐门翻 offline；假训练报
+     `end_it_reached` ⇒ 换下一门），全部跑完才收工。
 
 纪律：不 spawn bun/node、不加载 torch；HTTP 全在本机临时端口；hub 子进程的 env 显式隔离
 （权重归档根 + 假控制台 URL + 停摆阈值）。
@@ -530,6 +535,117 @@ def test_cloud_claim_course_middle_states_do_not_run(tmp_path: Path) -> None:
     finally:
         hub.close()
         console.close()
+
+
+# ─────────── ⑥ 离线优先：有就绪的离线课就不抢在训在线课（2026-10-03 用户裁决） ───────────
+
+
+def test_resolve_prefers_offline_course_over_seizing_a_live_online_course(tmp_path: Path) -> None:
+    """用户口径：「优先取当时就绪的离线课程；没有离线才抢第一个在训在线课」——真 HTTP 上验。"""
+    traj = tmp_path / "traj"
+    _course_dirs(traj, "e2e-off-ready")
+    _course_dirs(traj, "e2e-on-live")
+    _write_pack(traj, "e2e-off-ready", b"PK\x03\x04off")
+    _write_pack(traj, "e2e-on-live", b"PK\x03\x04on")
+    hub = _Hub(traj)
+    try:
+        hub.ready(expect=["e2e-off-ready", "e2e-on-live"])
+        st, body = _http(
+            hub.base, "/admin/courses?course=e2e-off-ready&mode=offline&pin=1", method="POST"
+        )
+        assert st == 200, body
+        st, body = _http(
+            hub.base, "/admin/courses?course=e2e-on-live&mode=online&pin=1", method="POST"
+        )
+        assert st == 200, body
+
+        st, tasks = _http(hub.base, OFFLINE_TASKS_PATH)
+        assert st == 200, tasks
+        row_off = _task_row(tasks, "e2e-off-ready")
+        row_on = _task_row(tasks, "e2e-on-live")
+        assert row_off["seize"] is False and row_off["claimable"] is True, row_off
+        # 旧口径里 pin online 的课根本不在清单/领不到；现在它带 seize=True（可抢，但本拍不抢）
+        assert row_on["seize"] is True and row_on["claimable"] is True, row_on
+
+        from remote.offline_boot import resolve_courses
+
+        got = resolve_courses({"hub_url": hub.base}, {"HUB_TOKEN": TOKEN}, lambda _m: None)
+        assert [t["course"] for t in got] == ["e2e-off-ready"], got
+    finally:
+        hub.close()
+
+
+# ─────────── ⑦ 抢占全循环：没有离线课 ⇒ 逐门抢在训在线课（open_time 升序） ───────────
+
+
+def test_auto_loop_seizes_in_training_courses_in_open_time_order(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """用户口径的全链：领到的课跑完后**再次开启接活循环**。
+
+    就绪离线课（C_OFF）先跑；跑完没有离线课 ⇒ 按 `open_time` 抢 C_ON1 → C_ON2，
+    hub 每抢一门就把它翻成 offline；全部跑完循环才收工。真 hub 子进程 + 真 HTTP +
+    真 `_run_auto`/`resolve_courses`/`claim_course`，只把真训练换成假跑。
+    """
+    traj = tmp_path / "traj"
+    _course_dirs(traj, "e2e-off-first")
+    for name, when in (("e2e-on-1", 1000.0), ("e2e-on-2", 2000.0)):
+        _course_dirs(traj, name)
+        os.utime(traj / name / COURSE_ENABLE_MARKER, (when, when))  # 开课时间顺序（SSOT）
+    for name in ("e2e-off-first", "e2e-on-1", "e2e-on-2"):
+        _write_pack(traj, name, f"PK\x03\x04{name}".encode())
+    hub = _Hub(traj)
+    try:
+        hub.ready(expect=["e2e-off-first", "e2e-on-1", "e2e-on-2"])
+        st, body = _http(
+            hub.base, "/admin/courses?course=e2e-off-first&mode=offline&pin=1", method="POST"
+        )
+        assert st == 200, body
+
+        from remote import offline_boot
+
+        seen: list[str] = []
+
+        def fake_run(cfg, creds, log, stop, *, course, multi=False, **kw):
+            """假训练：记一笔 + 报段末摘要（`end_it_reached` ⇒ hub 记 completed，循环换下一门）。"""
+            seen.append(course)
+            st, res = _http(
+                cfg["hub_url"],
+                OFFLINE_RESULT_PATH,
+                method="POST",
+                body={
+                    "course": course,
+                    "run_id": f"seg-{course}",
+                    "it_end": 8,
+                    "state": "complete",
+                    "end_it_reached": True,
+                },
+            )
+            assert st == 200 and res.get("end_it_reached") is True, res
+            return 0
+
+        monkeypatch.setattr(offline_boot, "run_one_course", fake_run)
+        lines: list[str] = []
+        rc = offline_boot._run_auto(
+            {
+                "hub_url": hub.base,
+                "work_dir": str(tmp_path / "work"),
+                "queue_mode": "drain",
+                "idle_wait_sec": 1.0,
+                "queue_poll_sec": 0.2,
+            },
+            {"HUB_TOKEN": TOKEN},
+            lines.append,
+            None,
+        )
+        assert rc == 0
+        assert seen == ["e2e-off-first", "e2e-on-1", "e2e-on-2"], (seen, lines[-20:])
+        assert any("抢占第一个在训在线课" in ln for ln in lines), lines
+        # hub 把两门在训在线课都翻成了 offline（用户口径「hub 将其改为离线」）
+        assert _mode_of(hub, "e2e-on-1") == "offline"
+        assert _mode_of(hub, "e2e-on-2") == "offline"
+    finally:
+        hub.close()
 
 
 if __name__ == "__main__":  # 手工跑单条：python -m pytest e2e/test_auto_handoff_e2e.py -q

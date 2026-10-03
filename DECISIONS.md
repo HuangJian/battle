@@ -7270,3 +7270,40 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
   云机前先在控制台**重导任务包**（job 目录 `blob.ref` 还在，重导即自动带上）。
 - **门槛**：nn python gate 绿（**3592 pass/7 skip，54s**，含 e2e；对照上一条 3586 → +6 = 本次新增用例）。
 - **指针**：全文 `docs/nn/remote-transport.md` §58。
+
+## §2026-10-03-goalnn-offline-seize（2026-10-03，用户裁决：pin 不再拦离线盘——离线优先、没有就抢第一个在训在线课）
+
+- **背景（报障）**：用户把三门在训课（x20-adv-{encl,hurt,acc}）手动设成 online（pin=1）后，
+  Colab 离线云机 `GET /offline/tasks` 持续 0 条（`plan/auto-offline-handoff` 的 P0-3 判据：
+  pin online ⇒ 不进候选面）。用户裁决（逐字）：「offline 云机，不管什么时候上线接活，优先取
+  当时就绪的离线课程；如果没有离线课程但是有在线课程在训练，则抢占第一个在线课程，hub 将其改为
+  离线；领到的课程训练完成后，再次开启接活循环！」。并明令：不要人操作课程模式，改代码 + e2e。
+- **决定**：
+  ① **pin 语义坍缩**：`auto_eligible` 去掉 pin 项（在表 ∧ 开课标记在）——pin 仍落盘/重启不丢，
+     但**不再拦离线盘**；唯一 opt-out = **停课**（删 `training-enabled.txt`）。副产物：pin 的
+     课缺包不再 404，改走 `_claim_without_pack`→`begin_auto_handoff`（翻模式 + 触发控制台导包）。
+  ② **清单行新增两字段**（零副作用读面不变）：`seize` = 表内在训 ∧ 在线 ∧ 未跑满（completed 不
+     进 seize —— 二轮 P1-1 的同一理由；busy/无主**不**滤：云机抢到 busy 行会拿 409 `busy` 等
+     下一拍，比「空队列」更准确、不烧 `idle_wait_sec`，plan §9 P2-4 的多盘轮流 drain 顺带解决）
+     + `open_time`（开课时间 = T4 的排序 SSOT，读不到 ⇒ `+inf` 排最后）。
+  ③ **云机两层选择**（`resolve_courses`）：`claimable ∧ ¬seize` 整批优先（离线就绪）；没有 ⇒ 从
+     `seize` 行取 `open_time` 最小的一门（tie 用课名）**只抢一个**；两路共用 `skip`/`served` 过滤。
+     老 hub（无 `seize` 字段）⇒ 全行按离线算，退回旧口径逐字不变。
+  ④ **循环复用既有 drain**：claim 翻模式（`note_claim`/`begin_auto_handoff` 已接好）→ 跑完 →
+     回 `_run_auto` 顶端再 resolve ⇒「跑完再次开启接活循环」零新代码；blockers 不占 idle 预算的
+     既有语义不动。
+- **被否决**：① 云机按清单顺序取「第一门」（hub 排序含状态名次，`no_pack` 自动课会顶到 `ready`
+  前）；② completed 留在 seize 里让云机自己跳过（要解析 `state`/`reason` 文案 = 第二事实源）；
+  ③ busy 行滤出 seize（会把「别的盘在跑」误判成空队列、烧 idle 预算）；④ 由 hub 端定期翻模式
+  （翻模式必须发生在真的有盘领走它的那一刻——claim 是唯一触发点）。
+- **落点**：`nn-training/{hub/{queue_offline,offline}.py, remote/offline_boot.py}` ·
+  `dashboard/src/{stack/hub-admin.ts,server/actions/course-mode.ts,web/app/panels/CourseAdmin.tsx}`
+  （三处「离线盘永不自取」注释更正）· 回归 `nn-training/tests/{hub/test_auto_handoff.py,
+  common/test_offline_task_queue.py}` · **端到端** `nn-training/e2e/test_auto_handoff_e2e.py`
+  （+2 例：离线优先 / 抢占全循环 seen==[离线课, 在线1, 在线2] 且逐门翻 offline）。
+- **门槛**：nn python gate 绿（**3599 pass/7 skip**，ruff+mypy 干净）· `bun run check` 绿
+  （**2365 pass/0 fail**；本机沙箱 shell 的裸 `bash` 解析到 WSL shim ⇒ `node-upgrade` 真子进程
+  用例假红，PATH 前置 `C:\Program Files\Git\bin` 后全绿——环境假红，非回归）· dashboard
+  `typecheck` + 全量 **1312 pass/0 fail** + 三份 bundle `all bundles ok`。
+- **指针**：全文 `docs/nn/remote-transport.md` §59 · plan `plan/auto-offline-handoff.plan.md`
+  （未跟踪；§3.2 pin 语义已按其顶部裁决注作废）。

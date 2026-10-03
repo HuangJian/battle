@@ -54,6 +54,7 @@ import hashlib
 import importlib
 import io
 import json
+import math
 import os
 import re
 import sys
@@ -1308,7 +1309,7 @@ def claim_course(
         过一会儿再问；
       · `busy`：另一门课正在跑（U2 一拖一，闸在 hub 侧）⇒ 本拍**不跑**，等它 release；
       · `completed`：当前包已跑满（U6）⇒ 本拍**不跑**（重导包后 sha 变会自动解封）；
-      · `not_offline`：人把课 pin 成在线 ⇒ 本拍**不跑**；
+      · `not_offline`：这门课不在训练中（停课）⇒ 本拍**不跑**；
       · `give_up`：hub 触发导包已到上界 ⇒ **本会话放弃这门课**（三条出路留给人：TPU 重连 /
         手工导入结果包 / 手工切回在线）；
       · `held`：被别人持有 —— **照旧跑**（历史口径：租约是排他与观测，不是训练前置；
@@ -1342,7 +1343,7 @@ def claim_course(
             log("这门课的当前任务包已跑满（等人停课 / 重导包）——本拍不跑")
             return "", "completed"
         if doc.get("not_offline"):
-            log("这门课在 hub 里不是离线（可能被人 pin 成在线）——本拍不跑")
+            log("这门课不在训练中（停课 ⇒ 不是自动候选）——本拍不跑")
             return "", "not_offline"
         holder = doc.get("holder") or {}
         left = float(holder.get("expires_in") or 0.0)
@@ -1424,11 +1425,19 @@ def resolve_courses(
     """本次要跑的课 → `[{"course", "pack_sha256"}]`；**空列表 = 队列为空**（正常的没事干）。
 
     `CFG.course` 非空 ⇒ 老行为（顺序/校验一字不改），`pack_sha256` 空。
-    空 ⇒ 向 hub 问清单，过滤 `claimable` 且未被 `served[course]` 挡掉（防自激：同一份包
-    跑两次 = `run_id` 相同 ⇒ 回传全判 duplicate ⇒ 看起来在跑、实际零产出）。
+    空 ⇒ 向 hub 问清单，**两层选择**（★ 2026-10-03 用户裁决，逐字：「不管什么时候上线接活，
+    优先取当时就绪的离线课程；如果没有离线课程但是有在线课程在训练，则抢占第一个在线课程，
+    hub 将其改为离线」）：
+
+      ① **离线可领优先**（`claimable` ∧ ¬`seize`）⇒ 整批取（保持既有口径，含无包自动课）；
+      ② 没有就绪的离线课 ⇒ 从 `seize` 行（在线在训）里取 `open_time` 最小的**一门**抢占
+         （tie 用课名；hub 的 claim 会把它翻成离线）。
+
+    两路共用同一套过滤：本会话已跑过的包（防自激：同一份包跑两次 = `run_id` 相同 ⇒ 回传全判
+    duplicate ⇒ 看起来在跑、实际零产出）与 `skip`（本会话已放弃的课）。
     `probe` 是调用方持有的小字典（`{"unsupported": True}`）：老 hub 只探测**一次**，
-    之后不再每轮刷一个必然失败的端点。
-    `skip` = **本会话已放弃**的课（hub 说触发导包已到上界）：别再每轮领一次。
+    之后不再每轮刷一个必然失败的端点。**老 hub 降级**：清单没有 `seize` 字段 ⇒ 行票全按
+    「离线」算，退回旧口径（与升级前逐字相同）。
     """
     explicit = _load_deliverable().requested_courses(cfg)
     if explicit:
@@ -1443,23 +1452,51 @@ def resolve_courses(
         if probe is not None:
             probe["unsupported"] = True
         raise SystemExit(_no_courses_msg("hub 不支持任务清单（或本机连不上它）"))
-    picked: list[dict] = []
-    for t in tasks:
+
+    def _eligible(t: dict) -> bool:
+        """两路共用的过滤：`skip` / 本会话已跑过的包（同 sha）。"""
         course = str(t.get("course") or "")
-        if not course or not t.get("claimable"):
-            continue
+        if not course:
+            return False
         if skip and course in skip:
             log(f"跳过 {course}：本会话已放弃它（hub 触发导包到上界；人处理后才再领）")
-            continue
+            return False
         pack_doc = t.get("pack")
         sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
         if sha and served is not None and served.get(course) == sha:
             log(f"跳过 {course}：本会话已跑过这份包（sha12={sha[:12]}）——包换了新段才会再领")
-            continue
-        picked.append({"course": course, "pack_sha256": sha})
+            return False
+        return True
+
+    def _as_pick(t: dict) -> dict:
+        pack_doc = t.get("pack")
+        sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
+        return {"course": str(t.get("course") or ""), "pack_sha256": sha}
+
+    picked = [
+        _as_pick(t) for t in tasks if t.get("claimable") and not t.get("seize") and _eligible(t)
+    ]
     if picked:
         log("清单里可领：" + "、".join(f"{p['course']}" for p in picked))
-    return picked
+        return picked
+    # 没有就绪的离线课 ⇒ 抢占第一个在训在线课。busy 的行**照收**：claim 会回 409 `busy`，
+    # 调用方按「中间态不占 idle 预算」等到别的课跑完（比「空队列」更准确）。
+    seized = [t for t in tasks if t.get("seize") and _eligible(t)]
+    if not seized:
+        return []
+
+    def _open_key(t: dict) -> tuple[float, str]:
+        raw = t.get("open_time")
+        # 缺字段（老 hub）/ 形状不对 ⇒ +inf 排最后，不猜（hub 的哨兵方向同义）。
+        when = float(raw) if isinstance(raw, (int, float)) else math.inf
+        return (when, str(t.get("course") or ""))
+
+    first = min(seized, key=_open_key)
+    log(
+        f"没有就绪的离线课 ⇒ 抢占第一个在训在线课：{first['course']}"
+        "（hub 将把它翻成离线）"
+    )
+    return [_as_pick(first)]
 
 
 def _no_courses_msg(why: str) -> str:

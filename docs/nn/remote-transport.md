@@ -6,6 +6,48 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §59 离线盘接活改「离线优先 + 抢占第一个在训在线课」：pin 不再拦（用户裁决，2026-10-03）
+
+**触发（用户报障）**：x20-adv 三腿被手动设成 online（pin=1）后，Colab 离线云机
+`GET /offline/tasks` 持续 `0 条`（`plan/auto-offline-handoff` 的 P0-3 判据：pin online ⇒
+不进候选面 ⇒ 领不到）。用户裁决（逐字）：「offline 云机，不管什么时候上线接活，优先取当时
+就绪的离线课程；如果没有离线课程但是有在线课程在训练，则抢占第一个在线课程，hub 将其改为
+离线；领到的课程训练完成后，再次开启接活循环！」。
+
+**修法**（hub 是判据唯一实现，云机只消费）：
+
+- **pin 语义坍缩**（`hub/queue_offline.py::auto_eligible`）：候选 = 在课程表 ∧ 开课标记在，
+  **不再看 pin**——pin 仍落盘/重启不丢，但不再拦离线盘；唯一 opt-out = 停课（删
+  `training-enabled.txt`）。副产物：pin 的课缺包不再 404，改走
+  `_claim_without_pack` → `begin_auto_handoff`（翻模式 + 触发控制台导包，与普通自动课同一条腿）。
+- **清单行加两字段**（读面仍零副作用）：`seize` = 表内在训 ∧ 在线 ∧ 未跑满（completed 不进
+  seize —— 二轮 P1-1 同理由；busy/无主**不**滤：云机抢 busy 行会拿 409 `busy`，比「空队列」
+  更准）；`open_time` = 开课时间（T4 的 `training-enabled.txt` mtime SSOT，读不到 ⇒ `+inf`）。
+- **云机两层选择**（`remote/offline_boot.py::resolve_courses`）：`claimable ∧ ¬seize` 整批优先
+  （离线就绪，含无包自动课）；没有 ⇒ 从 `seize` 行按 `open_time` 升序（tie 课名）取**一门**。
+  两路共用 `skip` / `served[sha]` 过滤。老 hub（无 `seize` 字段）⇒ 全行按离线算，退回旧口径
+  逐字不变。
+- **循环零新码**：claim 翻模式（`note_claim` / `begin_auto_handoff`）+ `_run_auto` 的 drain
+  循环本就在 ⇒「跑完再次开启接活循环」= 顶端再 resolve；`_run_batch` 的中间态 blockers
+  （busy/pending_export/completed/not_offline）不占 idle 预算的语义不动——顺带补上 plan §9
+  P2-4（第二块盘拿到 busy 会等而不是按 idle 收工）。
+
+**被否决**：① 云机按清单顺序取「第一门」（hub 排序带状态名次，`no_pack` 会顶到 `ready` 前）；
+② completed 留给云机自己跳过（判据要解析 `state`/`reason` 文案 = 第二事实源）；③ busy 行滤出
+seize（会把「别的盘在跑」误判成空队列、烧 idle 预算）；④ 由 hub 端定期翻模式（翻模式必须发生在
+真的有盘领走它的那一刻——claim 是唯一触发点）。
+
+**回归**：`tests/hub/test_auto_handoff.py`（pin 三例改写为 seize 语义：可见/可抢/claim 200 翻
+offline 撤单 + `seize` 矩阵 + 停课=唯一 opt-out + 停课缺包仍 404）· `tests/common/
+test_offline_task_queue.py`（清单 seize 标注 + 两层选择优先级/排序/served 顺延）· **端到端**
+`e2e/test_auto_handoff_e2e.py` +2 例（离线优先只回离线课；全循环 seen == [离线, 在线1, 在线2]
+且两门在线课被逐门翻 offline）。
+
+**门槛**：nn python gate 3599 pass/7 skip（ruff+mypy 干净）· `bun run check` 2365 pass/0 fail
+（注：本机编码 agent 的 shell 里裸 `bash` 会解析到 WSL shim ⇒ `node-upgrade` 真子进程用例假红，
+PATH 前置 `C:\Program Files\Git\bin` 后全绿——环境假红，非回归）· dashboard typecheck + 1312
+pass/0 fail + 三份 bundle `all bundles ok`。
+
 ## §58 离线任务包两个现场：半截 zip 被当成功 + 缺 kickstart ref 字节（2026-10-03，用户报障两连）
 
 **触发**：Kaggle 上跑 x20-adv-hurt（自动派单）连续两次报障——① 任务包「就位」后炸

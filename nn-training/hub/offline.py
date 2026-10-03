@@ -398,13 +398,14 @@ class OfflineRoutes:
                 and self.hub.mode_of(course) != COURSE_MODE_OFFLINE
                 and not self.hub.auto_eligible(course)
             ):
-                # 归属门（与取包端点的 mode 门同口径）：人 pin 成在线的课，包在也不发。
-                # 自动候选（未 pin ∧ 开课标记在）放行——它的包由下面的自动交接现场生成。
+                # 归属门（与取包端点的 mode 门同口径）：表里明确 online 且**未在训**（停课）⇒ 拒。
+                # 在训课一律放行 —— ★ 2026-10-03 用户裁决：pin 不再拦（在训在线课照样可被离线盘
+                # 抢占），它的包由下面的自动交接现场生成。
                 self._json(
                     {
                         "error": (
-                            "这门课在 hub 里不是离线（可能是人 pin 成在线）："
-                            "到控制台切离线；若是旧的自动交接残留，用 pin=0 清掉"
+                            "这门课不在训练中（开课标记已删）⇒ 不在自动候选："
+                            "重新开课后云机会自动接走；要现在离线跑请到控制台切离线"
                         ),
                         "course": course,
                         "not_offline": True,

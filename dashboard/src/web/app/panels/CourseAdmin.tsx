@@ -452,7 +452,7 @@ function RowOps({
       ) : null}
       {/* 交还自动池（U3 第三条出路；plan §3.2a 动作表）：`unsetCourseMode` = 本机配置回在线档
           + hub `mode=online&pin=0` + 删意图——该课重回自动交接池（与「切换成在线」的 pin=1
-          永久固定在线是**两件事**，文案分开）。 */}
+          是**两件事**：后者还留一条人的意图，文案分开）。 */}
       {r.canToggleMode && r.ov?.offline ? (
         <button
           type="button"

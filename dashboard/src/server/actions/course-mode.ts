@@ -367,8 +367,9 @@ export async function restoreCourseModesNote(
 /** **交还自动**（三态的第三态 `unset`）：把一门课重新放回自动交接池。
  *
  *  ★ 2026-10-03（plan/auto-offline-handoff §3.2a，二轮 P1-4/P0-2）：「人工切回在线」
- *  **不等于**「pin online」——后者 = 永久退出自动逻辑（离线盘永不自取），与 U1
- *  「TPU 一上线就能接续在训课程」直接冲突。本函数做三件事（顺序同 `setCourseMode`）：
+ *  **不等于**「pin online」。pin online 原义「永久退出自动逻辑（离线盘永不自取）」已被
+ *  同日用户裁决取代 —— 在训课照样可被离线盘抢；pin 如今只标记「人管过」并落盘。
+ *  本函数做三件事（顺序同 `setCourseMode`）：
  *
  *    ① 本机配置：抄在线档（撑离线标记 `run/run_iters`，恢复被 offline 覆写前的源）；
  *    ② hub：`mode=online&pin=0` —— 清 pin + 清 claim 记账（该课重新可被自动接管）；
