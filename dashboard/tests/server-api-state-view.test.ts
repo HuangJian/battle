@@ -9,9 +9,12 @@
 
 import { api, readConfigText, scratchConfig } from './helpers/console-fixture'
 import { describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
+import { DASHBOARD_ROOT } from '../src/core/paths'
+import * as pool from '../src/server/pool-history'
+import * as poolView from '../src/web/view'
 
 describe('console/api.buildStateView', () => {
   it('快照包含五个受管组件（含 2026-09-15 独立出来的 localWorker）、节点表与模式区块', async () => {
@@ -156,5 +159,80 @@ describe('console/api.buildStateView', () => {
     expect(bc.isBc).toBe(true)
     const rl = await api.buildStateView('p4-fast')
     expect(rl.isBc).toBe(false)
+  })
+})
+
+// ────────────────────────── R1：请求路径零聚合（plan/dashboard-reload-perf W1） ──────────────────────────
+// 病根：`state-view.ts` 曾在每次 `/api/state` 里**裸调** `aggregateNodeHistory()` +
+// `buildContributionView()`（每请求 walk 37ms + PPO 8.8–100ms，每 30s 一次 1s 级同步冷算）。
+// 修法：贡献度缩略挂 `getFleetProbes` 的 SWR 值（`computeFleetProbes` 在后台顺手产出），
+// 请求路径只读缓存。下面用**逐调用计数器**做结构性断言（不靠墙钟）。
+
+describe('console/api.buildStateView · 请求路径零聚合（reload-perf W1）', () => {
+  it('G1：暖缓存后 `buildStateView` 一次聚合调用都没有（调用计数 = 0）', async () => {
+    // 先暖：冷启动首调**允许**经 SWR 触发一次聚合（那是设计行为，不是回归）。
+    await api.buildStateView()
+    pool.resetPoolHistoryCounters()
+    await api.buildStateView()
+    const c = pool.poolHistoryCounters()
+    expect(c.calls).toBe(0)
+    expect(c.computes).toBe(0)
+    expect(c.bytesRead).toBe(0)
+  })
+
+  it('G1 反向守卫：`state-view.ts` 源码不得再出现裸调（结构断言，防回退）', () => {
+    const raw = readFileSync(
+      path.join(DASHBOARD_ROOT, 'src', 'server', 'api', 'state-view.ts'),
+      'utf-8',
+    )
+    // 只看**代码行**（注释里会提到旧实现的名字来解释为什么删——那不是回退）。
+    const code = raw
+      .split('\n')
+      .filter(
+        (l) =>
+          !l.trim().startsWith('//') && !l.trim().startsWith('*') && !l.trim().startsWith('/*'),
+      )
+      .join('\n')
+    expect(code).not.toContain('aggregateNodeHistory')
+    expect(code).not.toContain('buildContributionView')
+    expect(code).not.toContain('inflightByWorkerFromQueue')
+    expect(code).toContain('getFleetProbes(cfg)')
+  })
+
+  it('缩略与面板同源：brief 是 `/api/pool` 同一份聚合的裁剪（逐字相等）', async () => {
+    // 同一个窗口（today）下，两个端点必须给出同一份数字——防「两份真相」。
+    api.invalidateSlowSnapshot()
+    pool.invalidateNodeHistoryMemo()
+    const s = await api.buildStateView()
+    const view = await api.buildPoolView(false, 'today')
+    expect(view.contribution).toBeTruthy()
+    expect(s.contributionBrief).toEqual(poolView.compactSummary(view.contribution!))
+  })
+
+  it('W4：冷启动保证在 `await reconcileWatch()` 链（先于 Bun.serve），不是刷新器首拍', () => {
+    const src = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'server', 'server.ts'), 'utf-8')
+    const lines = src.split('\n')
+    const reconcileAt = lines.findIndex((l) => l.includes('await reconcileWatch()'))
+    const serveAt = lines.findIndex((l) => l.includes('Bun.serve('))
+    expect(reconcileAt).toBeGreaterThan(0)
+    expect(serveAt).toBeGreaterThan(0)
+    // 冷启动首帧不撞冷算的**唯一保证**：await 链先于监听端口。
+    expect(reconcileAt).toBeLessThan(serveAt)
+    // 刷新器首拍是 fire-and-forget（`void run()`），不得被当保证——注释里点明这条分工。
+    expect(src).toContain('唯一保证')
+  })
+
+  it('A6 护栏：brief 产出路径不得 await hub 探测（用 peekHubAdmin，源码断言）', () => {
+    const src = readFileSync(
+      path.join(DASHBOARD_ROOT, 'src', 'server', 'api', 'snapshot-cache.ts'),
+      'utf-8',
+    )
+    expect(src).toContain('peekHubAdmin(')
+    expect(src).not.toContain('await getHubAdmin(')
+    const ov = readFileSync(
+      path.join(DASHBOARD_ROOT, 'src', 'server', 'api', 'overview.ts'),
+      'utf-8',
+    )
+    expect(ov).toContain('export function peekHubAdmin()')
   })
 })

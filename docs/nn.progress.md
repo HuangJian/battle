@@ -880,3 +880,22 @@ h4-aim-k10/k25 跑满 40 轮仍显示「推进中」——只读读面（`run_rl
 **2345 pass / 12 skip / 0 fail**（122509 expect；check-decisions ok 584 ids）· `bun run build` 过。
 决策 → `DECISIONS.md` §2026-10-02-goalnn-worker-contribution；全文 → `docs/nn/console.md` §23 ·
 `docs/nn/remote-transport.md` §55；计划 → `plan/worker-contribution-view.plan.md`（评审修订版 W0–W4）。
+
+## §25 控制台请求路径「零聚合」+ 聚合增量入账（plan/dashboard-reload-perf，2026-10-03）
+
+用户报「dashboard 重载 ~10s + 进程常驻 1GB」。三条根因：① 贡献度缩略在 `/api/state` 里**裸调**
+`aggregateNodeHistory()` + `buildContributionView()`（违反 WC-plan §1.3「挂既有 SWR」）；② 聚合
+`walk()` 在 memo 判断之前（命中 memo 也付 37ms），`≤2MB` meta 走 `readFileSync(...).split('\n')`
+（27MB 文本 → 13 万行数组，峰值 +116MB）；③ PPO 侧 `listCourseLedgers()` 无 memo 且判定在读取后。
+
+修法（三件一起做）：R1 缩略挂 `FleetProbes.contributionBrief`（后台顺手产出，`inflight` 走
+`peekHubAdmin()` 上一拍值）；R2 聚合改「扫描 memo + 每流增量入账（未变零读 / 变大读分块游标增量 /
+回退与水位后退全量重建）+ 可合并桶归并（尾窗口引理，流序 = 目录名 canonical）+ 水位 pending 翻转」，
+truncated 流保持尾部重建；R3 `scanPoolStreams()` 一次 walk 两组候选，PPO 与采样共用。
+
+读数：dashboard typecheck 绿 + **1333 pass / 0 fail**（新 16 例：G1 零聚合 3 + G2/G3/G4/A2/扫描 memo/
+尾窗口/sources 展示序/结构守卫 8 + W3 三条 + W4 一条 + 同源一致性 1）· `bun run build:ui` 三份 bundle ok · 根
+`bun run check` **2345 pass / 12 skip / 0 fail** · `bun run build` 过。验收工具 `dashboard/tools/perf-probe.ts`
+（人跑；基线数字落 plan §1/PR —— 本检出 tmp 为空，真机复测交用户终端）。
+决策 → `DECISIONS.md` §2026-10-03-goalnn-request-path-zero-aggregate；全文 → `docs/nn/console.md` §25；
+计划 → `plan/dashboard-reload-perf.plan.md`（评审修订版 A1–A6）。

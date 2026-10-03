@@ -12,9 +12,7 @@
  *  账本只读**尾部**（`readLedgerTail`，有界内存）；不裁剪账本（保留期 = plan §9-P3 开放问题）。
  */
 
-import { existsSync, readdirSync, statSync } from 'fs'
-import { join } from 'path'
-import { tmpPoolDir } from '../core/paths'
+import { statSync } from 'fs'
 import {
   type ContributionSplit,
   type ContributionView,
@@ -30,6 +28,7 @@ import {
   aggMemoReusable,
   projectCourseBreakdown,
   projectWindow,
+  scanPoolStreams,
 } from './pool-history'
 
 /** PPO 事件读的 memo 时间下限（与 `AGG_MEMO_MIN_MS` 同节奏）。 */
@@ -58,34 +57,28 @@ interface PpoMemo {
 }
 let ppoMemo: PpoMemo | null = null
 
-/** 课程账本清单：`tmp/<课>/training_log.jsonl`（或 `<课>/traj/` 布局，二选一不双计）。 */
+/** 课程账本清单：`tmp/<课>/training_log.jsonl`（或 `<课>/traj/` 布局，二选一不双计）。
+ *
+ *  ★ 2026-10-03（plan/dashboard-reload-perf R3/A5）：不再自己 `readdirSync` —— 消费
+ *  `scanPoolStreams()`（`pool-history.ts` 持有 fs 层唯一扫描实现）的账本候选，逐条
+ *  `statSync` 取当下指纹。两个消费者（PPO 与采样聚合）共用**同一份扫描结果**；
+ *  各扫一遍正是 R1 的病根同构（同一事实两份真相）。
+ *
+ *  签名与返回形状保持不变（调用方零改动）；`<课>` 优先于 `<课>/traj/` 的语义在
+ *  扫描器里（深度 1 优先），这里不重复判定。 */
 export function listCourseLedgers(): Array<{
   course: string
   path: string
   mtimeMs: number
   size: number
 }> {
-  const root = tmpPoolDir()
   const out: Array<{ course: string; path: string; mtimeMs: number; size: number }> = []
-  let names: string[] = []
-  try {
-    names = readdirSync(root, { withFileTypes: true })
-      .filter((d) => d.isDirectory())
-      .map((d) => d.name)
-  } catch {
-    return out
-  }
-  for (const name of names) {
-    for (const rel of [name, `${name}/traj`]) {
-      const p = join(root, rel, 'training_log.jsonl')
-      try {
-        if (!existsSync(p)) continue
-        const st = statSync(p)
-        out.push({ course: name, path: p, mtimeMs: st.mtimeMs, size: st.size })
-        break
-      } catch {
-        /* 单课程 IO 错误不拖垮整表 */
-      }
+  for (const c of scanPoolStreams().ledgers) {
+    try {
+      const st = statSync(c.path)
+      out.push({ course: c.course, path: c.path, mtimeMs: st.mtimeMs, size: st.size })
+    } catch {
+      /* 单课程 IO 错误不拖垮整表 */
     }
   }
   return out
@@ -95,7 +88,12 @@ function eventMs(ts: unknown): number | null {
   return typeof ts === 'number' && Number.isFinite(ts) ? ts * 1000 : null
 }
 
-/** 读 PPO 归属事件（memo：指纹相同复用；指纹变了距上次计算不足 `minMs` 也复用）。 */
+/** 读 PPO 归属事件（memo：指纹相同复用；指纹变了距上次计算不足 `minMs` 也复用）。
+ *
+ *  ★ 2026-10-03（plan/dashboard-reload-perf R3）：**memo 判定在读取之前** —— 旧实现先
+ *  `listCourseLedgers()`（readdir + 逐课 stat）再算指纹再查 memo，于是热路径也要付
+ *  9.9ms/次；现在候选清单本身已被 `scanPoolStreams()` 的 30s memo 摊薄（窗口内不 walk），
+ *  逐条 stat 是亚毫秒，指纹相同就**一字节账本都不读**。 */
 export function readPpoAttribution(nowMs: number = Date.now(), minMs = PPO_MEMO_MIN_MS): PpoAgg {
   const files = listCourseLedgers()
   const fp = files.map((f) => `${f.path}|${f.mtimeMs}|${f.size}`).join('\n')

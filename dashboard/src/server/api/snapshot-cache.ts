@@ -5,13 +5,16 @@ import type { Component, RlConfig } from '../../core/types'
 import { assemblePushFleet, probePushFleetHealth } from '../../stack/push-config'
 import {
   type ComponentView,
+  type ContributionBrief,
   type CourseEdit,
   type NodeLocalView,
   type NodeView,
   type PhaseInfo,
   type PushFleetProbe,
+  compactSummary,
   parsePhaseFromLog,
 } from '../../web/view'
+import { buildContributionView, inflightByWorkerFromQueue } from '../contribution'
 import {
   type HistoryAggregate,
   aggregateNodeHistory,
@@ -21,6 +24,7 @@ import {
 } from '../pool-history'
 import { courseEditFromLedgerTail } from './ledger'
 import { readLogTail } from './logs'
+import { peekHubAdmin } from './overview'
 import {
   type NodeProbeResult,
   componentViews,
@@ -64,6 +68,11 @@ export interface FleetProbes {
   pushProbes: Map<string, boolean | null>
   /** 共享/单例组件健康（hub / 隧道 / 采集 agent）；缺席 = 探不了/没在跑。 */
   componentHealth: Map<Component, boolean | null>
+  /** 首页贡献度缩略（plan/dashboard-reload-perf R1）：**同一份 `agg` 的裁剪**，
+   *  在后台顺手产出 —— 请求路径（`state-view.ts`）只读它，**永不**裸调聚合。
+   *  窗口固定 `'today'`（WC-plan §9-O4）；窗口档进缓存值不进缓存键（§4 解耦裁决）。
+   *  聚合不可用（读盘失败）→ null（缩略不渲染，不伪造 0）。 */
+  contributionBrief: ContributionBrief | null
 }
 
 export interface SlowSnapshot {
@@ -119,6 +128,10 @@ export async function computeFleetProbes(cfg: RlConfig): Promise<FleetProbes> {
   const slowById = new Map<string, boolean>()
   const contribById = new Map<string, number>()
   let localContrib = -1
+  // 首页贡献度缩略（R1）：**顺手**算（同一份 agg，边际成本 ≈ buildContributionView 的 10ms，
+  // 且发生在后台刷新器里）；`inflight` 取 `hubCache.peek()` 的**上一拍**值——**不** await
+  // 一次 1.2–1.5s 的 hub 探测（A6 裁决；刷新器每拍本来就把 getHubAdmin 暖在同一缓存里）。
+  let contributionBrief: ContributionBrief | null = null
   if (agg) {
     const all = projectWindow(agg, resolveWindow('all', Date.now(), agg.epochMs))
     // 输入是窗口投影，但其中的时刻/耗时字段取**全部行**（含进行中那一轮）——「还在结算吗」
@@ -128,13 +141,29 @@ export async function computeFleetProbes(cfg: RlConfig): Promise<FleetProbes> {
       for (const [id, v] of agg.lastContrib) contribById.set(id, v)
       localContrib = contribById.get('local') ?? 0
     }
+    try {
+      const w = resolveWindow('today', Date.now(), agg.epochMs)
+      contributionBrief = compactSummary(
+        buildContributionView(agg, w, inflightByWorkerFromQueue(peekHubAdmin()?.queue ?? null)),
+      )
+    } catch {
+      contributionBrief = null
+    }
   }
   const [nodes, pushProbes, componentHealth] = await Promise.all([
     nodeProbeResults(cfg),
     probePushFleetHealth(cfg),
     computeComponentHealth(cfg),
   ])
-  return { nodes, slowById, contribById, localContrib, pushProbes, componentHealth }
+  return {
+    nodes,
+    slowById,
+    contribById,
+    localContrib,
+    pushProbes,
+    componentHealth,
+    contributionBrief,
+  }
 }
 
 /** 重算指定课程的慢部件快照（不落缓存；落缓存由 getSlowSnapshot 负责）。

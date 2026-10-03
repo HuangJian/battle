@@ -246,6 +246,12 @@ async function main(): Promise<void> {
       log(`[supervisor] 监督 ${c.key}${course ? `[${course}]` : ''} (PID ${pid})`)
     }
   }
+  // ★ 2026-10-03（plan/dashboard-reload-perf W4/A4）：这条 **await** 链是「冷启动首帧不撞
+  //   冷算」的**唯一保证** —— `reconcileWatch` → `buildStateView` → `getSlowSnapshot` →
+  //   `getFleetProbes` → `computeFleetProbes`（池历史聚合 + 贡献度缩略）在此**同步完成**，
+  //   早于下面 `Bun.serve`（:283）接收任何请求。
+  //   下面 `startSnapshotRefresher()` 的首拍是 `void run()`（fire-and-forget），**不得**把
+  //   它当冷启动保证（它只负责后续每拍续命）；两者分工见 W4 的用例断言。
   await reconcileWatch()
   const reconcileTimer = setInterval(() => void reconcileWatch(), 15000)
   reconcileTimer.unref?.()

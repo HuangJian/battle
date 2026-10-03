@@ -7288,3 +7288,30 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
 - **违反后果**：改 `visibleCloudHalts` 的「只弹本课」= 重演 2026-09-14 事故；换停机键 kind = 用户重关一次红条；
   开第二张 ack 表 = 双读双写 + 迁移；给 `alerts.ts` 引进 IO/localStorage = SSR/水合红线（它必须仍是纯函数）。
 - **指针**：全文 `docs/nn/console.md` §24 · plan `plan/dashboard-banner-global.plan.md`（评审修订版，§11 处置表）。
+
+## §2026-10-03-goalnn-request-path-zero-aggregate（2026-10-03，控制台重载 ~10s + 常驻 1GB：请求路径零聚合 + 聚合增量入账）
+
+- **背景**：用户 2026-10-03 报「dashboard 重载 ~10s + 进程占 1GB」。实测：`/api/state` 40 连击
+  17/40 落 0.3–2.7s、WS 涨到 1.38GB、空载 CPU ~30% 单核；`aggregateNodeHistory()` 冷算 1057ms /
+  +116MB、命中 memo 仍 37ms（walk 在 memo 前）、`listCourseLedgers()` 9.9ms/次无 memo。
+- **备选与否决**：① 只降 `LARGE_META_BYTES`（少读几份大文件）——否：**丢历史窗口**（把内存换成错数，
+  与「全部根治」口径冲突；本 plan 用增量而非截断换性能）；② 新增一个 `createSwrCache<ContributionView>`——
+  否：WC-plan §1.3 明禁的**第二个缓存层**，且会与 `fleetProbeCache` 各算一份 `agg`；③ 后台刷新器为缩略
+  的 inflight 多 await 一次 hub 探测（1.2s）——否：为不显示的数字付超时预算、拖慢整拍；④ 给 G7 开
+  「纯在飞 worker 可缺失」的例外——否：那是把不一致写成规格；⑤ 跨流同毫秒平局沿用 mtime 序——否：
+  增量下不可复现（旧流 mtime 会被新写入推走），canonical 目录名升序才是「增量/全量相等」的必要条件；
+  ⑥ truncated 流也做增量累计——否：与「只读尾部」两条口径打架，28.1/15.6MB 两条流数字必变。
+- **决定**：三条一起做（缺一条只是把症状搬位置）——
+  **R1** 贡献度缩略挂 `FleetProbes.contributionBrief`（`computeFleetProbes` 后台顺手产出；
+  `inflight` 走 `peekHubAdmin()` 的上一拍值），`state-view.ts` 只读缓存（请求路径零聚合）；
+  **R2** `aggregateNodeHistory` 改「扫描 memo（同 `AGG_MEMO_MIN_MS`）+ 每流增量入账（`size:mtime`
+  指纹；未变零读、变大读 `[offset,size)` 分块游标、回退/重写/水位后退全量重建）+ 可合并桶归并
+  （每流尾窗口截尾 + `(ts, seq)` 归并再截尾；`>=` 决胜同规）+ 水位 `pending` 翻转」；
+  **R3** `listCourseLedgers` 消费 `scanPoolStreams()`（一次 walk 两组候选），PPO memo 判定前置。
+- **违反后果**：把聚合放回请求路径 = 每请求 47ms 同步扫描 + 每 30s 1s 级全停（本事故重演）；用
+  `split` 全文读 = 13 万行数组 + 116MB 峰值（JSC 堆高水位不归还）；反向扣减水位 = 双计/漏计；
+  两个消费者各扫一遍 = R1 的病根同构；truncated 流做增量 = 贡献度数字与面板不一致。
+- **落点**：`dashboard/src/server/{pool-history,contribution}.ts` ·
+  `dashboard/src/server/api/{snapshot-cache,state-view,overview}.ts` · `dashboard/src/server/server.ts`（注释）·
+  `dashboard/tools/perf-probe.ts`（新）· 回归 `dashboard/tests/{server-pool-history,server-api-state-view,worker-contribution}.test.ts`。
+- **指针**：全文 `docs/nn/console.md` §25 · plan `plan/dashboard-reload-perf.plan.md`（评审修订版 A1–A6）。

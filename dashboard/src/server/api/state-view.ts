@@ -4,9 +4,7 @@ import path from 'path'
 import { pidAlive } from '../../core/net'
 import { REPO_ROOT } from '../../core/paths'
 import { entryForCourse, loadRegistry } from '../../core/registry'
-import { type ConsoleStateView, type MetricsView, compactSummary } from '../../web/view'
-import { buildContributionView, inflightByWorkerFromQueue } from '../contribution'
-import { aggregateNodeHistory, resolveWindow } from '../pool-history'
+import { type ConsoleStateView, type MetricsView } from '../../web/view'
 import { courseEnableMarkerPath, courseEnabled, isBcCourse } from '../../stack/courses'
 import { loadConsoleState, readCourseModes } from '../actions'
 import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/specs'
@@ -21,7 +19,7 @@ import { readTunnelAbRuns } from './tunnel-ab'
 import { buildGateHaltView } from '../../stack/gate-halt'
 import { collectLoopCompletes } from './loop-complete'
 import { readLogTail } from './logs'
-import { getSlowSnapshot } from './snapshot-refresher'
+import { getFleetProbes, getSlowSnapshot } from './snapshot-refresher'
 
 export async function buildStateView(courseOverride?: string): Promise<ConsoleStateView> {
   const cfg = loadConfigSafe()
@@ -47,6 +45,10 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   // （`buildOverview`/`buildWorkerRegistry` 里的 ~1.2s）。串行时它们是相加的——冷启动/
   // 动作后的第一帧实测 2.8s → 并行后 ~1.5s（2026-09-22）。下面三处 await 同一个
   // 单飞 promise（缓存键同为全局），不会多探一次。
+  //
+  // ★ 2026-10-03（plan/dashboard-reload-perf R1）：贡献度缩略**不再**在这里算（它挂在
+  //   `getFleetProbes` 的 SWR 值里，`computeFleetProbes` 顺手产出）；但 hub 探测的**提前起跑**
+  //   保留——下面 `buildOverview`/`buildWorkerRegistry` 仍要它，去掉就丢掉这半秒重叠。
   const hubProbe = getHubAdmin(cfg, course)
   void hubProbe.catch(() => undefined) // 真 await 在下面；这里只防「无人接手」的 rejection
   const { components, nodes, localNode, phase, pushFleet } = await getSlowSnapshot(cfg, course)
@@ -111,16 +113,19 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     buildOverview(cfg, courses, course, training).catch(() => null),
     buildWorkerRegistry(cfg, course).catch(() => null),
   ])
-  // 首页缩略（plan/worker-contribution-view W3b）：与 /api/pool **同一模块**的 compactSummary
-  // 输出（同一份聚合的裁剪，不是第二份计算）；观测面坏掉不得把 /api/state 带崩 ⇒ 整段 try。
+  // 首页缩略（plan/worker-contribution-view W3b → plan/dashboard-reload-perf R1）：与
+  // `/api/pool` **同一模块**的 compactSummary 输出（同一份聚合的裁剪，不是第二份计算）——
+  // 但**产地在后台**：`computeFleetProbes` 顺手算好挂在 SWR 缓存值里，这里只读。
+  //
+  // ★ 2026-10-03（本 plan 的 R1）：此前这里**裸调** `aggregateNodeHistory()` + `buildContributionView()`，
+  //  每请求付 walk 37ms + PPO 8.8–100ms，每 30s 一次 1s 级同步冷算（冷算重建 116MB ⇒
+  //  JSC 堆高水位 ⇒ 周期 GC 全停）——页面重载 ~10s 的直接来源。裸调还违反了 WC-plan §1.3
+  //  「新聚合挂既有 SWR，不新增第二个缓存层」；`fleetProbeCache` 单条目（机群级、course 不是键）
+  //  就是那个「既有 SWR」，`getSlowSnapshot` 内部同款。
+  //  观测面坏掉不得把 /api/state 带崩 ⇒ 整段 try（与旧行为一致）。
   let contributionBrief: ConsoleStateView['contributionBrief'] = null
   try {
-    const admin = await hubProbe
-    const agg = aggregateNodeHistory()
-    const w = resolveWindow('today', Date.now(), agg.epochMs)
-    contributionBrief = compactSummary(
-      buildContributionView(agg, w, inflightByWorkerFromQueue(admin.queue)),
-    )
+    contributionBrief = (await getFleetProbes(cfg)).contributionBrief
   } catch {
     contributionBrief = null
   }

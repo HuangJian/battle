@@ -9,14 +9,25 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { appendFileSync, mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs'
+import {
+  appendFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { DASHBOARD_ROOT } from '../src/core/paths'
 import {
   aggMemoReusable,
   aggregateNodeHistory,
   emptyHistory,
   invalidateNodeHistoryMemo,
+  poolHistoryCounters,
+  resetPoolHistoryCounters,
   isSlowNode,
   isSlowNodeRows,
   lastCompletedIter,
@@ -697,5 +708,302 @@ describe('pool-history wallSec 双口径（elapsedSec 节点服务时长 · wall
     expect(secCell(null)).toBe('-')
     expect(secCell(Number.NaN)).toBe('-')
     expect(secCell(5.4)).toBe('5.4s')
+  })
+})
+
+// ────────────────────────── 增量入账 / 扫描 memo / 可合并桶（plan/dashboard-reload-perf W2） ──────────────────────────
+// 结构性断言（不靠墙钟）：用 `poolHistoryCounters()` 的逐调用账回答「这次到底读了多少盘」——
+// G2 零读 / G3 只读增量 / G4 回退全量 / A2 水位翻转 / 扫描 memo 不 walk / 尾窗口归并等价。
+
+describe('pool-history · 增量入账与扫描 memo（reload-perf W2）', () => {
+  /** 稳定序列化：只取对外契约的字段（与全量重算对账用；Map/Set 转数组）。 */
+  const stable = (agg: import('../src/server/pool-history').HistoryAggregate): string =>
+    JSON.stringify({
+      byDay: [...agg.byDay].map(([d, m]) => [
+        d,
+        [...m].map(([n, b]) => [
+          n,
+          {
+            ok: b.ok,
+            fail: b.fail,
+            rollout: b.rollout,
+            eval: b.eval,
+            results: b.results,
+            elapsed: b.elapsed,
+            wall: b.wall,
+            lastOkTs: b.lastOkTs,
+            lastFailTs: b.lastFailTs,
+            lastError: b.lastError,
+            lastTs: b.lastTs,
+            lastOkTsMs: b.lastOkTsMs,
+            lastOkElapsedSec: b.lastOkElapsedSec,
+          },
+        ]),
+      ]),
+      byCourse: [...agg.byCourse].map(([d, m]) => [
+        d,
+        [...m].map(([n, c]) => [n, [...c].map(([k, v]) => [k, v])]),
+      ]),
+      rolling: [...agg.rolling].map(([n, ring]) => [n, ring]),
+      rollingTruncated: [...agg.rollingTruncated],
+      sources: agg.sources.map((x) => ({ dir: x.dir, truncated: x.truncated === true })),
+      lastContrib: [...agg.lastContrib],
+      latestRound: agg.latestRound,
+    })
+
+  const now = Date.now()
+  const tsAt = (dayOffset: number, hhmmss = '12:00:00'): string => {
+    const d = new Date(now)
+    d.setDate(d.getDate() + dayOffset)
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day} ${hhmmss}`
+  }
+  const row = (node: string, it: number, ts: string, ok = true, mode = 'rollout') =>
+    JSON.stringify({ node, mode, it, ok, elapsedSec: 1.2, ts })
+  const iterEvent = (it: number, time = tsAt(0)) =>
+    JSON.stringify({ event: 'iteration', iter: it, time })
+
+  const withRoot = (
+    flow:
+      | { name: string; meta: string[]; ledger?: string[] | null }
+      | Array<{ name: string; meta: string[]; ledger?: string[] | null }>,
+    fn: (root: string) => void,
+  ): void => {
+    const root = mkdtempSync(join(tmpdir(), 'bcity-pool-inc-'))
+    const prev = process.env.BCITY_POOL_DIR
+    process.env.BCITY_POOL_DIR = root
+    invalidateNodeHistoryMemo()
+    resetPoolHistoryCounters()
+    try {
+      const list = Array.isArray(flow) ? flow : [flow]
+      for (const f of list) {
+        const dir = join(root, f.name)
+        mkdirSync(dir, { recursive: true })
+        writeFileSync(join(dir, 'dist-agent-meta.jsonl'), `${f.meta.join('\n')}\n`, 'utf8')
+        if (f.ledger) {
+          writeFileSync(join(dir, 'training_log.jsonl'), `${f.ledger.join('\n')}\n`, 'utf8')
+        }
+      }
+      fn(root)
+    } finally {
+      if (prev === undefined) delete process.env.BCITY_POOL_DIR
+      else process.env.BCITY_POOL_DIR = prev
+      invalidateNodeHistoryMemo()
+      resetPoolHistoryCounters()
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  it('G2：指纹未变 ⇒ 第二次调用**零读盘**（bytesRead = 0），且结果逐字段相等', () => {
+    withRoot(
+      {
+        name: 'c1',
+        meta: [row('a1', 1, tsAt(0, '08:00:00')), row('a2', 1, tsAt(0, '09:00:00'))],
+        ledger: [iterEvent(1)],
+      },
+      () => {
+        const first = aggregateNodeHistory()
+        resetPoolHistoryCounters()
+        const second = aggregateNodeHistory()
+        const c = poolHistoryCounters()
+        expect(c.calls).toBe(1)
+        // 第二次连**聚合都没重算**（指纹没变 ⇒ aggMemo 命中）；退一步说，就算重算也零读盘。
+        expect(c.computes).toBe(0)
+        expect(c.bytesRead).toBe(0)
+        expect(stable(second)).toBe(stable(first))
+      },
+    )
+  })
+
+  it('G3：append K 行 ⇒ 只读增量字节，且与全量重算**逐字段相等**', () => {
+    withRoot(
+      {
+        name: 'c1',
+        meta: [row('a1', 1, tsAt(0, '08:00:00'))],
+        ledger: [iterEvent(1)],
+      },
+      (root) => {
+        const first = aggregateNodeHistory()
+        const meta = join(root, 'c1', 'dist-agent-meta.jsonl')
+        const added = [
+          row('a2', 1, tsAt(0, '09:00:00')),
+          row('a1', 1, tsAt(0, '09:10:00')),
+          row('a1', 1, tsAt(0, '09:20:00'), false),
+        ]
+        appendFileSync(meta, `${added.join('\n')}\n`, 'utf8')
+        const addedBytes = Buffer.byteLength(`${added.join('\n')}\n`, 'utf8')
+
+        // 跨过 memo 时间下限（否则指纹变了也先复用旧值——那是设计行为）
+        resetPoolHistoryCounters()
+        const incremental = aggregateNodeHistory(Date.now() + 31_000)
+        const c = poolHistoryCounters()
+        expect(c.incremental).toBe(1)
+        expect(c.fullRescans).toBe(0)
+        // ±1 行：增量读的字节数 = 新增行字节（容差 = 上一拍未闭合残片）
+        expect(c.bytesRead).toBeGreaterThanOrEqual(addedBytes - 4096)
+        expect(c.bytesRead).toBeLessThanOrEqual(addedBytes + 1)
+        expect(incremental.sources.length).toBe(1)
+
+        // 与全量重算逐字段相等（清 memo + 清流态 ⇒ 从头全量）
+        const full = (() => {
+          invalidateNodeHistoryMemo()
+          resetPoolHistoryCounters()
+          return aggregateNodeHistory()
+        })()
+        expect(poolHistoryCounters().fullRescans).toBe(1)
+        expect(stable(incremental)).toBe(stable(full))
+        expect(stable(first)).not.toBe(stable(incremental)) // 确实吃到了新行
+      },
+    )
+  })
+
+  it('G4：size 回退（截断/重写）⇒ fullRescans ≥ 1，计数不重复（与全量重算相等）', () => {
+    withRoot(
+      {
+        name: 'c1',
+        meta: [
+          row('a1', 1, tsAt(0, '08:00:00')),
+          row('a1', 1, tsAt(0, '08:10:00')),
+          row('a2', 1, tsAt(0, '08:20:00')),
+        ],
+        ledger: [iterEvent(1)],
+      },
+      (root) => {
+        aggregateNodeHistory()
+        // 截断重写：只剩一行（size 回退）
+        const meta = join(root, 'c1', 'dist-agent-meta.jsonl')
+        writeFileSync(meta, `${row('a1', 1, tsAt(0, '10:00:00'))}\n`, 'utf8')
+        resetPoolHistoryCounters()
+        const after = aggregateNodeHistory(Date.now() + 31_000)
+        expect(poolHistoryCounters().fullRescans).toBeGreaterThanOrEqual(1)
+        const win = projectWindow(after, resolveWindow('all', now, after.epochMs))
+        expect(win.hist.get('a1')!.ok).toBe(1) // 不双计：只剩重写后的那一行
+        expect(win.hist.has('a2')).toBe(false)
+
+        invalidateNodeHistoryMemo()
+        expect(stable(aggregateNodeHistory())).toBe(stable(after))
+      },
+    )
+  })
+
+  it('A2：水位前进（账本推进）⇒ 已读的未结轮行翻成计数；与全量重算逐字段相等', () => {
+    // 相对时刻（不用固定钟点）：滚动环保留窗 2h10m 是相对「当下」判定的，
+    // 固定钟点会让本用例在一天中的某些时刻静默掉出环（评审 W2 的假绿陷阱）。
+    const tsOf = (msAgo: number): string => {
+      const d = new Date(now - msAgo)
+      const p = (n: number): string => String(n).padStart(2, '0')
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(
+        d.getMinutes(),
+      )}:${p(d.getSeconds())}`
+    }
+    withRoot(
+      {
+        name: 'c1',
+        // it1 已完成（水位 1）；it2 在跑，先写 2 行
+        meta: [row('a1', 1, tsOf(40 * 60_000)), row('a2', 2, tsOf(30 * 60_000))],
+        ledger: [iterEvent(1, tsOf(35 * 60_000))],
+      },
+      (root) => {
+        const before = aggregateNodeHistory()
+        const win1 = projectWindow(before, resolveWindow('all', now, before.epochMs))
+        expect(win1.hist.get('a2')?.ok ?? 0).toBe(0) // it2 未结：计数不算（可达性字段照记）
+
+        // 轮末：it2 完成（账本推进）+ meta 再补一行 it2
+        appendFileSync(
+          join(root, 'c1', 'training_log.jsonl'),
+          `${iterEvent(2, tsOf(10 * 60_000))}\n`,
+          'utf8',
+        )
+        appendFileSync(
+          join(root, 'c1', 'dist-agent-meta.jsonl'),
+          `${row('a1', 2, tsOf(20 * 60_000))}\n`,
+          'utf8',
+        )
+        resetPoolHistoryCounters()
+        // +60s 跨过 AGG_MEMO_MIN_MS（30s）；不用固定钟点 —— 墙钟与 memo 的「上次计算」比较
+        // 会被负差绕过（评审 W2 的假绿陷阱）。
+        const after = aggregateNodeHistory(Date.now() + 60_000)
+        const win2 = projectWindow(after, resolveWindow('all', now, after.epochMs))
+        expect(win2.hist.get('a2')!.ok).toBe(1) // 翻转生效
+        expect(win2.hist.get('a1')!.ok).toBe(2) // it1 一行 + it2 新行一行
+        // 环内 counted 也翻了（滚动窗计数同口径）：直接查事件标记，不投影（免墙钟依赖）
+        const ring = after.rolling.get('a2')!
+        expect(ring.length).toBe(1)
+        expect(ring[0]!.counted).toBe(true)
+
+        invalidateNodeHistoryMemo()
+        expect(stable(aggregateNodeHistory())).toBe(stable(after))
+      },
+    )
+  })
+
+  it('扫描 memo：窗口内不 walk（scans 不增）；跨过下限后新流被发现', () => {
+    withRoot({ name: 'c1', meta: [row('a1', 1, tsAt(0, '08:00:00'))] }, (root) => {
+      aggregateNodeHistory()
+      resetPoolHistoryCounters()
+      // 同一窗口内再调（指纹没变 ⇒ memo 命中，连聚合都不重算）
+      aggregateNodeHistory()
+      expect(poolHistoryCounters().scans).toBe(0)
+      // 新流出现：跨过 30s 下限 ⇒ 必须被看见（防「memo 冻结」——2026-09-27 实障同款）
+      mkdirSync(join(root, 'newflow'), { recursive: true })
+      writeFileSync(
+        join(root, 'newflow', 'dist-agent-meta.jsonl'),
+        `${row('a9', 1, tsAt(0, '11:00:00'))}\n`,
+        'utf8',
+      )
+      resetPoolHistoryCounters()
+      const t = Date.now() + 31_000
+      const after = aggregateNodeHistory(t)
+      expect(poolHistoryCounters().scans).toBeGreaterThanOrEqual(1)
+      expect(after.sources.map((s) => s.dir)).toContain('newflow')
+    })
+  })
+
+  it('可合并桶：跨流同毫秒平局按目录名升序决胜（canonical，增量/全量都成立）', () => {
+    // 两流各写一行，同一时刻、同一节点：尾窗口（results 最后 ≤10）内容必须一致且顺序确定。
+    const ts = tsAt(0, '12:00:00')
+    withRoot(
+      [
+        { name: 'aaa', meta: [row('n1', 1, ts, true)], ledger: [iterEvent(1)] },
+        { name: 'zzz', meta: [row('n1', 1, ts, false)], ledger: [iterEvent(1)] },
+      ],
+      () => {
+        const agg = aggregateNodeHistory()
+        const h = projectWindow(agg, resolveWindow('all', now, agg.epochMs)).hist.get('n1')!
+        expect(h.ok).toBe(1)
+        expect(h.fail).toBe(1)
+        expect(h.recent).toEqual([true, false]) // aaa（目录名升序在前）
+        // 全量重算同序（canonical 与流发现顺序无关）
+        invalidateNodeHistoryMemo()
+        const full = aggregateNodeHistory()
+        const hf = projectWindow(full, resolveWindow('all', now, full.epochMs)).hist.get('n1')!
+        expect(hf.recent).toEqual([true, false])
+      },
+    )
+  })
+
+  it('sources 展示序 = mtime 降序（`NodeStats` 的「最新」读 sources[0]；归并决胜另用 canonical seq）', () => {
+    withRoot(
+      [
+        { name: 'zzz', meta: [row('n1', 1, tsAt(0, '08:00:00'))], ledger: [iterEvent(1)] },
+        { name: 'aaa', meta: [row('n1', 1, tsAt(0, '09:00:00'))], ledger: [iterEvent(1)] },
+      ],
+      (root) => {
+        // 让 aaa 的文件 mtime 明确更新（zzz 写在前、aaa 写在后）
+        const t = new Date(Date.now() + 60_000)
+        utimesSync(join(root, 'aaa', 'dist-agent-meta.jsonl'), t, t)
+        const agg = aggregateNodeHistory()
+        expect(agg.sources[0]!.dir).toBe('aaa') // 最新在前（展示契约）
+      },
+    )
+  })
+
+  it('结构守卫：聚合路径不得回退到 readFileSync/split（评审 W2-④ 升级为源码断言）', () => {
+    const src = readFileSync(join(DASHBOARD_ROOT, 'src', 'server', 'pool-history.ts'), 'utf-8')
+    // 游标读是唯一入口：整文件读 + split 会重建 116MB 峰值
+    expect(src).not.toContain("readFileSync(src.path, 'utf8').split")
+    expect(src).toContain('readChunkLines(')
   })
 })

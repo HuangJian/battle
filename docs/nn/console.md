@@ -7,6 +7,50 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §25 控制台请求路径「零聚合」+ 聚合增量入账（plan/dashboard-reload-perf，2026-10-03）
+
+**触发**（用户 2026-10-03）：「dashboard 现在重载缓慢，大概要 ~10s……我怀疑是新加的云机 worker
+贡献度引入的」+「dashboard 进程还占用大量内存，一起排查」。
+
+**三条根因**（逐条带代码位置）：
+
+| # | 根因 | 位置 |
+|---|---|---|
+| **R1** | 贡献度聚合被放进**请求路径**裸调，绕开 WC-plan §1.3 已裁决的「挂既有 SWR」 | `server/api/state-view.ts` 的 `contributionBrief` 段（每请求 walk 37ms + PPO 8.8–100ms） |
+| **R2** | 聚合是「全量重算 + 全文读」：`walk()` 在 memo 判断**之前**（命中 memo 也付 37ms）；`≤2MB` 的 meta 走 `readFileSync(...).split('\n')`（27MB 文本 → 13 万行数组 ⇒ 峰值 +116MB） | `server/pool-history.ts::aggregateNodeHistory` |
+| **R3** | PPO 侧 `listCourseLedgers()` 无 memo，且 memo 判定在读取**之后** | `server/contribution.ts` |
+
+**纪律两条**（本节的规范部分）：
+
+1. **控制台请求路径不得做聚合**。聚合 = 读盘 + 全池合并，是**机群级探测**，必须挂在既有 SWR
+   （`fleetProbeCache` 单条目）的后台刷新器里；请求路径只读缓存值。贡献度缩略的落点是
+   `FleetProbes.contributionBrief`（`computeFleetProbes` 顺手产出）；`inflight` 用
+   `peekHubAdmin()`（`hubCache.peek()`，**不** await 探测）取上一拍值。
+   - 守卫用例：`tests/server-api-state-view.test.ts` 的「G1：暖缓存后调用计数 = 0」+
+     「G1 反向守卫（源码级禁裸调）」+「A6 护栏（不得 await getHubAdmin）」。
+2. **聚合必须增量 + 有界读 + 可合并桶**。指纹未变零读；变大只读 `[offset, size)`（分块游标，
+   禁 `split`）；回退/重写/水位后退 ⇒ 该流全量重建（**禁反向扣减**）。落桶结构是顺序敏感的
+   （尾窗口 ≤10/≤50、`>=` 决胜、环 push/shift）⇒ 增量入账必须走**可合并桶**（每流局部截尾 +
+   归并再截尾，引理：全局尾 K ⊆ 各流尾 K），且流序 = 目录名升序（canonical，不用 mtime 序）。
+   - 守卫用例：`tests/server-pool-history.test.ts` 的 G2 零读 / G3 增量与全量逐字段相等 /
+     G4 回退不双计 / A2 水位翻转 / 扫描 memo / 尾窗口 canonical / 源码结构守卫。
+   - **水位会翻转**：`counted = !(it > baseIt)`，而 `baseIt` 来自轮末账本 ⇒ 未结轮的行要挂
+     `pending`，水位前进时翻成计数行（环内 `counted` 同翻）；水位后退 ⇒ 全量重建。
+   - **truncated 流（>2MB）不做增量累计**：保持「每次重读尾部」，否则「只读尾部」与「累计全史」
+     两条口径打架、28.1/15.6MB 两条流的数字必变。
+3. **两个消费者共用一份扫描**：`scanPoolStreams()`（`pool-history.ts` 持有 fs 层唯一实现）
+   一次 walk 产出 meta + 课程账本两组候选；PPO 与采样聚合各扫一遍 = 同一事实两份真相。
+   - 守卫用例：`tests/worker-contribution.test.ts` 的「W3-① 源码结构断言」+「W3-③ scans 只增 1」。
+
+**冷启动保证**：`server.ts` 的 `await reconcileWatch()` 链（→ `getSlowSnapshot` →
+`getFleetProbes` → `computeFleetProbes`）**先于 `Bun.serve`**；刷新器首拍是 `void run()`
+（fire-and-forget），**不是**保证。
+
+**验收工具**：`dashboard/tools/perf-probe.ts`（人跑，不进 CI；基线数字落 plan §1/PR）。
+
+**指针**：plan `plan/dashboard-reload-perf.plan.md`（评审修订版，A1–A6 处置）·
+DECISIONS `§2026-10-03-goalnn-request-path-zero-aggregate`。
+
 ## §24 告警坞全局化：收官横幅按课成列 + 七类条目全部可关闭可复制（plan/dashboard-banner-global，2026-10-03）
 
 **触发**（用户 2026-10-02）：「一个课程训练收官的横幅信息，现在只在切换到该课程时才能看到，
