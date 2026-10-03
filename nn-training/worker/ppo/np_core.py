@@ -116,12 +116,44 @@ def tpu_backend_missing_reason(fp: dict) -> str:
 # 为什么搬：这一簇本就是「判据 + 诊断」（读设备属性 / 打一行自检日志），却与 torch 张量
 # 助手同住 ppo/common.py ⇒ 想测它们的用例只能连坐 torch（tests/worker/test_tpu_backend_guard.py）。
 
+def _ensure_sympy_printing() -> None:
+    """`import torch_xla` 之前的**环境守卫**：把 `sympy.printing` 子模块绑定补上（**绝不抛**）。
+
+    为什么（2026-10-03 Colab TPU 真机事故）：`import torch_xla` 抛
+    `AttributeError: module 'sympy' has no attribute 'printing'`，而**同一台机器上独立进程里
+    `import sympy` 与 `import torch_xla` 都正常**（用户实测 sympy 1.14.0、hasattr(sympy,
+    'printing')=True、`import sympy.printing; import torch_xla` 返回 0）。差别只在本进程
+    之前已被 torch 的导入链引入了 `sympy`（顶层）——而 torch_xla 的导入链**假定
+    `sympy.printing` 已随包初始化绑定好**。一旦 `sys.modules['sympy']` 处于「已 import、
+    子模块未绑」的形态，那条链就踩 AttributeError（`sympy/__init__.py` 正常路径确实会
+    import `.printing`，所以只有「先被别人引入 + 绑定丢失」这种进程内形态才会命中）。
+
+    这里只补绑定，不碰 sympy 的任何行为；**幂等**（已绑定立即返回），sympy 不存在
+    （CPU/CUDA 机、精简镜像）静默放过——后续 `import torch_xla` 该报什么错还报什么错，
+    本守卫不替它决定。必须跑在**本进程第一次** `import torch_xla` 之前。
+    """
+    try:
+        import sympy
+    except Exception:
+        return
+    if hasattr(sympy, "printing"):
+        return
+    try:
+        import importlib
+
+        # 直接赋值（不是 setattr）：子模块已在 `sys.modules` 时 `import` 不会替你补父包属性，
+        # 而 torch_xla 读的正是 `sympy.printing` 这个属性。
+        sympy.printing = importlib.import_module("sympy.printing")
+    except Exception:
+        return
+
 def xla_device():
     """取 XLA 设备句柄。优先 `torch_xla.device()`（2.5+ 推荐），旧版回退 `xm.xla_device()`。
 
     2026-09-10 实测：Kaggle TPU 镜像的 torch_xla 会给 `xm.xla_device()` 发
     DeprecationWarning（"Use torch_xla.device instead"）。两条都保留是为了跨版本可用。
     """
+    _ensure_sympy_printing()  # ★ 必须在 import torch_xla 之前（见 _ensure_sympy_printing）
     import torch_xla
     import torch_xla.core.xla_model as xm
 
@@ -336,10 +368,14 @@ def xla_enable_compile_cache(path: object, *, enabled: bool | None = None) -> st
     prev = _XLA_CACHE_STATE.get("dir")
     if prev is not None:
         return f"已开启（幂等：本进程已在用 {prev}）"
+    # ★ 2026-10-03：训练路径上 torch_xla 的**第一次** import 往往就是这里（train_core 先开
+    #   编译缓存、再取设备）——早于 xla_device 踩同一个 sympy.printing 缺绑定 ⇒ 先补再 import，
+    #   否则本函数会把真因吞成「无 torch_xla」（错误文案见下）。
+    _ensure_sympy_printing()
     try:
         import torch_xla.runtime as xr
-    except Exception as err:  # 未装 torch_xla（CPU/CUDA 机器）：与接线前一致
-        return f"不可用（{type(err).__name__}: 无 torch_xla）"
+    except Exception as err:  # 未装 torch_xla（CPU/CUDA 机器）/ 导入失败：与接线前一致，绝不抛
+        return f"不可用（{type(err).__name__}: {err}）"
     fn = getattr(xr, "initialize_cache", None)
     if not callable(fn):
         return "不可用（本版 torch_xla 无 runtime.initialize_cache）"

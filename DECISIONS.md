@@ -7336,3 +7336,32 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
 - **门槛**：nn python gate 绿（**3600 pass/7 skip**，ruff+mypy 干净）。
 - **指针**：全文 `docs/nn/remote-transport.md` §60（含完整诊断读数）；旧口径档案
   `docs/nn/runtime-opt.md` §7 顶部已加「2026-10-03 更新」行。
+
+## §2026-10-04-goalnn-sympy-printing-guard（2026-10-04，Colab TPU：`import torch_xla` 抛
+`sympy.printing` 缺绑定 ⇒ 导入前补绑守卫）
+
+- **背景（真机事故）**：Colab TPU 离线课程，rollout 正常跑完 176 局后，PPO 起步时
+  `remote/train_core.run_training_core` → `xla_device()` → `import torch_xla` 抛
+  `AttributeError: module 'sympy' has no attribute 'printing'`，整段挂掉。
+  **同一台机器上独立进程全部正常**（用户实测：sympy 1.14.0、`hasattr(sympy,'printing')=True`、
+  `import torch_xla` 成功、`import sympy.printing; import torch_xla` rc=0）⇒ 不是镜像坏、不是
+  sympy 坏，是**进程内形态**：本进程已被 torch 的导入链引入 `sympy`（顶层），而 torch_xla 的
+  导入链**假定 `sympy.printing` 已随包初始化绑定好**；绑定一旦缺失（子模块在 `sys.modules`
+  里但父包属性没设），那条链就踩 AttributeError。
+- **夹带病理**：`xla_enable_compile_cache()`（train_core 在取设备**之前**调）用
+  `except Exception` 吞掉第一次同类失败并报成「不可用（…: 无 torch_xla）」——把「装了但导入
+  炸了」指成「没装」，真因被藏到第二次 import 的裸 traceback 里。
+- **决定**：`worker/ppo/np_core.py` 新增 `_ensure_sympy_printing()`——**只在缺失时**补绑
+  `sympy.printing`（幂等；sympy 不存在静默放过；绝不抛），并在**本进程第一次** `import
+  torch_xla` 之前调它（`xla_device()` 与 `xla_enable_compile_cache()` 两个入口，后者是训练
+  路径上的首个 torch_xla 触点）。同时把上面那句误导文案改为带上真实异常
+  （`不可用（{type}: {err}）`）。
+- **被否决**：(a) 只在 notebook/镜像里预装或 `import sympy.printing` 一次——修的是「这一次会话」，
+  换镜像/换会话即复发，且与「云机自主跑」相悖；(b) 在 `train_core` 里 try/except 把 TPU 降级成
+  CPU——那正是 §2026-09-22 花力气拒掉的**静默降级**（CPU 上跑整段「看着正常、慢两个数量级」）。
+- **落点**：`nn-training/worker/ppo/np_core.py`（守卫 + 两处接线 + 文案）·
+  `nn-training/pyproject.toml`（mypy 第三方豁免加 `sympy.*`——它无 py.typed，与 torch/numpy 同册）·
+  回归 `nn-training/tests/worker/test_tpu_backend_guard.py`（新增 `TestSympyPrintingGuard` 三例：
+  缺绑补回 / 已绑幂等 / sympy 不存在静默）。
+- **门槛**：nn python gate 绿（见下）；ruff + mypy 干净。
+- **指针**：全文 `docs/nn/remote-transport.md` §61。

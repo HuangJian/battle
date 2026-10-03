@@ -253,7 +253,10 @@ exclude = ["\\.venv/", "weights/", "tmp/"]
 
 # Third-party stubs (progressive enablement)
 [[tool.mypy.overrides]]
-module = ["torch.*", "numpy.*", "torch_xla.*"]
+# 2026-10-03：加 `sympy.*` —— `worker/ppo/np_core._ensure_sympy_printing` 需要在 import
+# torch_xla 前探一次 sympy（它无 py.typed，静态 import 会报 import-untyped）。与 torch/numpy
+# 同册：第三方无 stubs 的包一律走这条豁免，而不是在调用点撒 type: ignore。
+module = ["torch.*", "numpy.*", "torch_xla.*", "sympy.*"]
 ignore_missing_imports = true
 
 # ---------------------------------------------------------------------------

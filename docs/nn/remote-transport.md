@@ -6,6 +6,58 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §61 `import torch_xla` 抛 `sympy.printing` 缺绑定：导入前补绑守卫（Colab TPU 真机，2026-10-04）
+
+**症状**：Colab TPU 离线课程，rollout 正常跑完 176 局，PPO 起步即挂：
+
+```
+[offline] 未捕获异常 AttributeError: module 'sympy' has no attribute 'printing'
+Traceback (most recent call last):
+  ...
+  File "/tmp/worker-code/remote/train_core.py", line 181, in run_training_core
+    device_t = xla_device()
+  File "/tmp/worker-code/worker/ppo/np_core.py", line 125, in xla_device
+    import torch_xla
+```
+
+**为什么不是环境坏**（用户在同一台机器上实测）：
+
+| 探针 | 读数 |
+|---|---|
+| `sympy.__version__` / `hasattr(sympy,'printing')` | 1.14.0 / **True** |
+| `import torch_xla`（独立进程） | OK，2.9.0 |
+| `import sympy.printing; import torch_xla`（独立进程） | **rc=0，OK** |
+
+⇒ sympy 与 torch_xla 各自都正常；差别只在**失败进程内的形态**。
+
+**根因**：失败进程里 `sys.modules['sympy']` 处于「已被 torch 的导入链引入（顶层）、但
+`sympy.printing` 子模块**未绑定到父包属性**」的状态，而 torch_xla 的导入链假定
+`sympy.printing` 已随包初始化绑定好（`import sympy` 时若子模块已在 `sys.modules`，
+import 机制**不会**替你补父包属性）——于是踩 `AttributeError`。
+（torch_xla 包内本身零 `sympy` 引用——已核 v2.9.0 源码；触发方在 torch 内部导入链，
+版本 2.9 + Python 3.13 组合。）
+
+**夹带病理（为什么难查）**：`remote/train_core.py` 在取设备**之前**先调
+`xla_enable_compile_cache()`，它 `import torch_xla.runtime` 时踩的是**同一个** AttributeError，
+却被 `except Exception` 吞掉、报成「不可用（…: 无 torch_xla）」——把「装了但导入炸了」
+指成「没装」；真因只在第二次（`xla_device()` 的裸 `import torch_xla`）以裸 traceback 露面。
+
+**修法**：`worker/ppo/np_core.py` 新增 `_ensure_sympy_printing()`——只在 `sympy.printing`
+缺失时用 `importlib` 取回并显式赋给父包属性（幂等、绝不抛、sympy 不存在静默放过），
+在**本进程第一次** `import torch_xla` 之前调用：
+
+- `xla_device()`（原报错点）
+- `xla_enable_compile_cache()`（训练路径上首个 torch_xla 触点，也是被吞的那次）
+
+并把误导文案改为 `不可用（{type(err).__name__}: {err}）`（带真实异常，不再冒充「无 torch_xla」）。
+`pyproject.toml` 的 mypy 第三方豁免补 `sympy.*`（它无 `py.typed`，与 torch/numpy 同册）。
+
+**被否决**：① notebook/镜像里预导入一次——只修当前会话，换会话即复发；② 把 TPU 失败降级成
+CPU 继续跑——正是 §2026-09-22「非 TPU 后端必须拒跑」所防的静默降级。
+
+**回归**：`tests/worker/test_tpu_backend_guard.py::TestSympyPrintingGuard`（缺绑补回 / 已绑幂等 /
+sympy 不存在静默三例）；ruff + mypy 干净；nn python gate 全绿。
+
 ## §60 「Colab TPU 只有 4 核算力」与并发口径校准：预留 4→2 + log 报核数出处（2026-10-03）
 
 **触发（误读现场）**：Colab TPU 离线跑 x20-adv-acc，log 里 `kind=iter rollout done in 34.909s｜

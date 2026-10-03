@@ -28,6 +28,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -35,6 +37,7 @@ if str(ROOT) not in sys.path:
 from worker.ppo.np_core import (
     _SPEED_PROBE,
     TPU_ATTR_KEYS,
+    _ensure_sympy_printing,
     tpu_backend_missing_reason,
     xla_device_speed_probe,
     xla_fingerprint,
@@ -151,3 +154,44 @@ class TestWorkerWiring:
         i_cache = self.src.index("xla_enable_compile_cache(work_dir")
         i_dev = self.src.index("device_t = xla_device()", i_cache - 400)
         assert i_cache < i_dev, "缓存初始化必须先于第一次碰设备"
+
+
+class TestSympyPrintingGuard:
+    """`import torch_xla` 之前的 `sympy.printing` 补绑守卫（2026-10-03 Colab TPU 真机事故）。
+
+    真机：`import torch_xla` 抛 `AttributeError: module 'sympy' has no attribute 'printing'`，
+    而独立进程里 sympy/torch_xla 都正常（差别在「本进程已被 torch 的导入链引入 sympy 顶层、
+    子模块未绑」）。守卫只补绑定、幂等、且 sympy 不存在时静默放过。
+    """
+
+    def test_rebinds_a_missing_printing_submodule(self) -> None:
+        import sympy
+
+        had = hasattr(sympy, "printing")
+        saved = getattr(sympy, "printing", None)
+        try:
+            if had:
+                del sympy.printing
+            assert not hasattr(sympy, "printing")
+            _ensure_sympy_printing()
+            assert hasattr(sympy, "printing"), "缺失的 sympy.printing 必须被补绑（真机报错的正是它）"
+        finally:
+            # 还原：sympy 是进程级单例，用例不得给其它测试留下被改过的包对象
+            if had and saved is not None:
+                sympy.printing = saved
+            elif not had and hasattr(sympy, "printing"):
+                del sympy.printing
+
+    def test_is_idempotent_when_already_bound(self) -> None:
+        """已绑定 ⇒ 立即返回，不重建模块对象（幂等；每轮都会调它）。"""
+        import sympy
+
+        assert hasattr(sympy, "printing")
+        first = sympy.printing
+        _ensure_sympy_printing()
+        assert sympy.printing is first
+
+    def test_is_silent_when_sympy_is_absent(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """sympy 不存在（精简镜像）⇒ `import sympy` 抛，守卫静默放过，**不抛**。"""
+        monkeypatch.setitem(sys.modules, "sympy", None)  # None ⇒ import sympy 抛 ImportError
+        _ensure_sympy_printing()  # 走到这里没抛即通过
