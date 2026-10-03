@@ -89,7 +89,10 @@ export async function liveHub(
  *  ★ 2026-10-03（plan/auto-offline-handoff T6/T8）：从「只取 progress」扩成三段。段末摘要
  *  是导入转交的判决输入（`run_id` + `end_it_reached`），停滞告警是自动交接固有代价的
  *  显式出口——三块同一个端点、同一次探测，分两次取只会让「面板与导入看到不同的 hub」。 */
-export async function hubOfflineAdmin(url: string, token: string): Promise<OfflineAdminView | null> {
+export async function hubOfflineAdmin(
+  url: string,
+  token: string,
+): Promise<OfflineAdminView | null> {
   return parseOfflineAdmin(await hubGet(`${url}/admin/offline`, token, HUB_PROBE_TIMEOUT_MS))
 }
 
@@ -158,11 +161,16 @@ export async function hubSetCourseMode(
   course: string,
   mode: 'online' | 'offline',
   pin?: boolean | null,
+  dropJobs?: boolean,
 ): Promise<string | null> {
   // `pin`（2026-10-03，plan/auto-offline-handoff §3.2）：人的决定把课「锒住」（离线盘永不自取）；
-  // `pin=0` = 交还自动（清锒 + 清 claim 记账）。不传 = legacy（hub 拒结覆盖 claim 翻的 offline）。
+  // `pin=0` = 交还自动（清锒 + 清 claim 记账）。不传 = legacy（hub 拒绝覆盖 claim 翻的 offline）。
   const pinQs = pin === undefined || pin === null ? '' : `&pin=${pin ? 1 : 0}`
-  const qs = `course=${encodeURIComponent(course)}&mode=${encodeURIComponent(mode)}${pinQs}`
+  // `drop_jobs=1`（2026-10-03，plan/switch-mode-drops-jobs T0）：切模式顺手作废该课**未认领**
+  // 的未结算 job（「切模式 = 上一段整体作废」）。只有那颗开关（人的动作）带它；开课/停课/回灌
+  // 不带 ⇒ 「停课队列一字不动」的既有契约逐字不变。
+  const dropQs = dropJobs ? '&drop_jobs=1' : ''
+  const qs = `course=${encodeURIComponent(course)}&mode=${encodeURIComponent(mode)}${pinQs}${dropQs}`
   try {
     const resp = await fetch(`${url.replace(/\/+$/, '')}/admin/courses?${qs}`, {
       method: 'POST',

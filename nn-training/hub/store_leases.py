@@ -113,6 +113,8 @@ class LeaseMixin:
     _job_dir: Any
     _append_ledger: Any
     _read_ledger: Any
+    #: 兄弟簇 `store_ledger` 的撤单即时闸（`cancel_unsettled_jobs` 填；见 `_claim_locked`）。
+    _cancelled: set[str]
 
     def _init_leases(self) -> None:
         #: job_id -> lease 到期时间戳（monotonic 无关；用墙钟，重启即空）
@@ -336,6 +338,12 @@ class LeaseMixin:
             if job_id in self._frozen:
                 # ★ 熔断（§4.1）：任何入口都不再下发（含备份副本）。
                 return False, "", "frozen"
+            if job_id in self._cancelled:
+                # ★ 撤单（plan/switch-mode-drops-jobs）：切模式时被作废的 job——**进程内即时闸**，
+                # 挡「worker 拿着作废前 peek 到的 jid 来 claim」这个秒级窗口。真闸在账本
+                # （`claimable_job_ids` 把 job_cancelled 排除），所以重启后本 set 为空也不漏：
+                # 那时池子里已经没有这份 job，peek 拿不到 ⇒ 走不到这里。
+                return False, "", "cancelled"
             blocked = self.role_blocked(job_id, role)
             if blocked:
                 # ★ 归属/停摆闸（2026-09-25，plan/online-offline-role-routing §2.2）：租约

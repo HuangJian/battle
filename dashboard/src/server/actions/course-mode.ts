@@ -63,12 +63,13 @@ async function pushMode(
   mode: CourseMode,
   only?: string,
   pin?: boolean | null,
+  dropJobs?: boolean,
 ): Promise<string | null> {
   const token = String(cfg.rl?.remote_token ?? '')
   const candidates = only ? [only] : hubCandidates(cfg, course)
   let last: string | null = '没有可试的 hub 地址'
   for (const base of candidates) {
-    last = await hubSetCourseMode(base, token, course, mode, pin)
+    last = await hubSetCourseMode(base, token, course, mode, pin, dropJobs)
     if (last === null) return null
   }
   return last
@@ -94,11 +95,15 @@ const UNKNOWN_COURSE_RE = /需要合法 course|未知课程|unknown course/i
  *  里加写配置」会让**开课重复写盘 1–3 次**，并把「停课」误翻译成「云机接手」。故拆开：
  *  写配置是**用户动作**的事（只有那颗开关与开课弹窗有），推 hub 是**基建**的事。
  *
- *  校验与旧行为逐字一致（非法模式/空课程：一次都不打 hub，也不落意图）。 */
+ *  校验与旧行为逐字一致（非法模式/空课程：一次都不打 hub，也不落意图）。
+ *
+ *  ★ 2026-10-03（plan/switch-mode-drops-jobs T0）：`dropJobs` 只在**那颗开关**那条路上为真
+ *  —— 切模式顺手作废该课未认领的未结算 job。开课/停课/回灌**一律不带**（停课的「队列与
+ *  账本一个字不动」契约见 `course-lifecycle.ts`）。 */
 export async function pushCourseMode(
   course: string,
   mode: string,
-  opts: { pin?: boolean | null } = {},
+  opts: { pin?: boolean | null; dropJobs?: boolean } = {},
 ): Promise<{ ok: boolean; message: string }> {
   const c = String(course ?? '').trim()
   const m = String(mode ?? '').trim() as CourseMode
@@ -108,7 +113,7 @@ export async function pushCourseMode(
   }
   const cfg = loadConfig()
   const prev = readCourseModes()[c]
-  const err = await pushMode(cfg, c, m, undefined, opts.pin)
+  const err = await pushMode(cfg, c, m, undefined, opts.pin, opts.dropJobs)
   saveConsoleState({ courseModes: { ...readCourseModes(), [c]: m } })
   if (err) {
     return {
@@ -224,7 +229,10 @@ export async function setCourseMode(
   }
   // ② hub 镜像。★ 2026-10-03（plan/auto-offline-handoff §3.2）：人的一次开关 = **pin**
   //    （该课此后归人管，自动交接不再插手）；「交还自动」是另一颗钮（`unsetCourseMode`）。
-  const res = await pushCourseMode(c, m, { pin: true })
+  //    ★ 同时带 `dropJobs`（plan/switch-mode-drops-jobs T0）：切模式 = 上一段整体作废 ——
+  //    作废该课留在队列里、**还没人领**的 job，免得切回在线时被云机补做（切模式后「旧 job
+  //    被推走」正是 e2e 钉住的既有行为，本 plan 把「不该推的那部分」撤掉）。在飞的不动。
+  const res = await pushCourseMode(c, m, { pin: true, dropJobs: true })
   // 文案按**合并后**的语义写（不再复用 `pushCourseMode` 那句「只接收 it 权重/指标回传」——
   // 那是旧的半语义：那颗开关现在同时把本机置成「这门课不归本机」，两句话并排会自相矛盾）。
   const head = res.message.includes('已经是')

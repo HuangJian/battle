@@ -197,16 +197,21 @@ class AdminRoutes:
             pin = True
         elif raw_pin in ("0", "false", "no", "off"):
             pin = False
+        # `drop_jobs=1`（plan/switch-mode-drops-jobs §3 改点 1）= 顺手作废该课**未认领**的
+        # 未结算 job（切模式 = 上一段整体作废）。只有**人的动作**带它（控制台那颗开关）；
+        # 开课/停课/回灌走的 `pushCourseMode` 不带 —— 「停课队列一字不动」的既有契约逐字不变。
+        raw_drop = (qs.get("drop_jobs") or [""])[0].strip().lower()
+        drop_jobs = raw_drop in ("1", "true", "yes", "on")
         # 课程未知 ⇒ **按需真扫一次再试**（2026-09-23）：`set_mode` 只认已登记的课程，
         # 而登记依赖顺带扫描（`claim_next`/`queue_state` 触发、有 2s 间隔闸）。于是
         # 「刚开课 / hub 刚重启」那一刻打来的 mode POST 必然 400——控制台那侧的重试窗口
         # 一旦整段落在发现之前，意图就静默失配（课留在 online，面板显示「在训/切离线」，
         # 用户实测：三个离线课里恰有一个如此）。指名一门课的写动作有资格要求一次真扫。
         # 只在「课不在表里」时扫（模式非法就不必扫盘了，直接落到下面 400）。
-        ok, why = self.hub.set_mode_pinned(course, mode, pin)
+        ok, why = self.hub.set_mode_pinned(course, mode, pin, drop_jobs=drop_jobs)
         if not ok and course and course not in self.hub.courses():
             self.hub.discover(force=True)
-            ok, why = self.hub.set_mode_pinned(course, mode, pin)
+            ok, why = self.hub.set_mode_pinned(course, mode, pin, drop_jobs=drop_jobs)
         if not ok:
             self._json(
                 {

@@ -7070,3 +7070,42 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
 - **门槛**：`bun run check` 绿（2357 pass/3 skip）· nn python gate 绿（ruff+mypy+pytest 3568 pass/7 skip）·
   dashboard 全量 1303 pass。**仍未落地：T0**（`switch-mode-drops-jobs` 撤单；T0a 落点重定位已确认）。
 - **指针**：全文 `docs/nn/remote-transport.md` §56（2026-10-03 补段）· plan `plan/auto-offline-handoff.plan.md`。
+
+## §2026-10-03-goalnn-switch-mode-drops-jobs（2026-10-03，切模式撤单落地：复用 `job_cancelled` 账本事件 + 只撤没被领的）
+
+- **背景**：`plan/auto-offline-handoff` 的 T0（唯一未落地项）= 落地 `plan/switch-mode-drops-jobs`：
+  切「在线/离线」= 上一个模式留在队列里的 job 该作废。原始触发是 2026-09-25 报障「x20-dodge-l1 离线
+  跑到 it43，切成在线后云机仍在节点跑 rollout」（离线时期发布的整段 job 躺队列里被补做）。
+- **决定**：
+  ① **落点重定位（T0a 的实质结论）**：原 plan §3 改点 2 钉 `remote/plan_run.py::run_plan_job`，但它
+     **今天零生产调用者**——`kind=run`（整段 job）2026-09-25 双端退役（发布端 `loop_remote_job.py`
+     当场 `SystemExit` / worker 端 `worker.py` 响亮 `ProtocolError`），`tests/remote/test_plan_run_split.py`
+     有机器断言「worker 里不得再出现这个名字」。⇒ 按原文落点做 = 给死代码加功能，改走**既有**
+     `job_cancelled` 账本事件（读面 `claimable_job_ids` 早已把它当终态剔除；写面此前只有训练侧的
+     `remote/hub_client.py::cancel_stale_jobs`，按 `it <= 当前` 清自己的滞后项，管不到模式翻转）。
+  ② **只管没领的**（用户 2026-10-03 裁决，逐字：「不管在算的，只管没领的」）：
+     `_JobStore.cancel_unsettled_jobs()` 只对 `claimable_job_ids()` 里**未被认领**的 job 写
+     `job_cancelled` + `_drop_commitment_locked`（撕承诺 + bump epoch ⇒ 拿作废前 epoch 来的认领被
+     判 `demoted`）+ 进程内 `_cancelled` set（挡「拿作废前 peek 到的 jid 硬领」的秒级窗口）；
+     有活租约 / 在 `_computing` 的**不撤**——撤销在飞 job 属于轮边界强杀，本 plan 不做。
+  ③ **claim 自动翻模式也撤**（裁决 Q2）：`begin_auto_handoff`（无包腿）/ `note_claim`（有包腿）与人的
+     开关共用同一条切模式链，不只挂在 `&drop_jobs=1` 上（`auto-offline-handoff` §4 的口径）。
+  ④ **只有人的动作带参数**：`POST /admin/courses?...&pin=1&drop_jobs=1`；控制台只有那颗开关带它
+     （`setCourseMode` → `pushCourseMode(..., { dropJobs: true })`）。**开课/停课/回灌一律不带** ⇒
+     「停课队列与账本一个字不动」的既有契约（`course-lifecycle.ts`）逐字不变。
+  ⑤ 撤单失败**不回滚** mode（那会做成「切了但没切」），只响亮记一笔；残留由可领池按账本重算兜。
+- **被否决**：① 按原 plan 在 `run_plan_job` 里加 `/jobs/state` 查询（死代码，加了不生效）；
+  ② 新建内存 `_dropped` 表（原 plan 裁决 4 的口径）——账本 `job_cancelled` 读面已存在且落盘持久，
+  新建表 = 第二个事实源；③ 撤销在飞 job（轮边界强杀，本轮不做）；④ `GET /jobs/{id}/status` 加
+  `dropped` 位 + 云机取消监视器（= 「在飞也撤」方案的一半，随 ③ 一并搁置；既有 cancel 通道
+  `remote/job_lifecycle.py::start_cancel_watcher` 只认 `landed`，未动）。
+- **落点**：`nn-training/hub/{store_ledger,store_leases,queue_offline,queue_peer,admin}.py` ·
+  `dashboard/src/{stack/hub-admin.ts,server/actions/course-mode.ts}` ·
+  回归 `nn-training/tests/hub/test_auto_handoff.py`（+4 例：撤未认领 / 在飞不撤 / 不带参数则队列不动 /
+  claim 自动翻模式也撤 / 作废两道闸）· `dashboard/tests/course-mode.test.ts`（+1 例）·
+  **端到端** `nn-training/e2e/test_auto_handoff_e2e.py`（新，5 例：全链 / U2 一拖一 / T8 stalled /
+  T0 撤单 / 云机腿中间态；真 hub 子进程 + 真 HTTP + 假控制台）。
+- **门槛**：`bash tools/githook/nn-python-gate.sh` 绿 + `cd dashboard && bun run typecheck && bun run test` 绿
+  （按本仓纪律由用户终端复跑）。
+- **指针**：全文 `docs/nn/remote-transport.md` §57 · plan `plan/switch-mode-drops-jobs.plan.md`（未跟踪）
+  · `plan/auto-offline-handoff.plan.md` §4 T0。

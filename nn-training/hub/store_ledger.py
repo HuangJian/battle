@@ -45,6 +45,11 @@ class LedgerMixin:
     #: 兄弟簇 `store_leases` 拥有的状态（本簇的 `claimable_job_ids` 要用它判「别处在做」）
     _leases: dict[str, float]
     _frozen: dict[str, dict]
+    #: 兄弟簇 `store_scheduling` 的「有人承诺在跑」痕迹：撤单（`cancel_unsettled_jobs`）
+    #: 要跳过它们（在飞的不撤），并顺手撕掉以让拿旧 epoch 来的认领被 `demoted` 拒。
+    _claimed: dict[str, dict]
+    _computing: dict[str, dict]
+    _drop_commitment_locked: Any
     #: 兄弟簇 `store_leases` 的**唯一**死活判据的布尔视图（过期 ∨ 孤儿，§52）——池过滤与
     #: 认领闸必须共用同一把尺子：只在过滤里加判据会做出「池里看得见、claim 说 held」
     #: 那种更难查的形状。取布尔而不是状态字符串，是因为本簇拿不到那边的常量
@@ -58,6 +63,11 @@ class LedgerMixin:
     def _init_ledger(self) -> None:
         #: 账本增量读缓存（H6）：文件 size -> 已解析事件列表
         self._ledger_cache: tuple[int, list[dict]] = (0, [])
+        #: 本进程内已作废的 job（`cancel_unsettled_jobs` 填）。**只是认领闸的即时缓存，
+        #: 不是事实源**——事实源是账本里的 `job_cancelled`（`claimable_job_ids` 从它重算）。
+        #: 有它才挡得住「worker 拿着作废前 peek 到的 jid 来 claim」这个秒级窗口；
+        #: 重启后它为空，但那时池子也已按账本排除了那些 job（peek 拿不到 ⇒ 走不到 claim）。
+        self._cancelled: set[str] = set()
 
     def _job_dir(self, job_id: str) -> Path:
         return self.job_root / job_id
@@ -135,6 +145,38 @@ class LedgerMixin:
             eligible.append((jid, float(e.get("ts", 0.0) or 0.0)))
         eligible.sort(key=lambda kv: kv[1])  # 发布序（同 P3b 的池排序）
         return [jid for jid, _ts in eligible if not self._lease_held(jid, now)]
+
+    # ---- 撤单：切模式 = 上一段整体作废（plan/switch-mode-drops-jobs §0） ----
+    def cancel_unsettled_jobs(self, *, reason: str = "mode-switch") -> list[str]:
+        """把**未被认领**的可领取 job 作废（写 `job_cancelled` 账本事件）。返回被撤的 jid。
+
+        治什么：切「在线/离线」后，上一个模式发布的 pending job 既领不到（停摆/归属两道闸，
+        见 `role_blocked`）又一直躺在池里，直到人工清理——`claim_next` 的 `role_blocked`
+        分支自己就点名「跳过后一直无人领」的收尾归撤单腿（`hub/queue_claims.py:100`）。
+        训练侧的 `cancel_stale_jobs`（`remote/hub_client.py`）只按 `it <= 当前` 作废**本机
+        自己**发布的滞后项，管不到「模式翻转」这一类。
+
+        **在飞的不撤**（2026-10-03 用户裁决：「不管在算的，只管没领的」）——撤销在飞 job 属于
+        轮边界强杀，本 plan 不做（plan §4 T0 / §7）。
+
+        幂等：判据是 `claimable_job_ids()`（它已排除 job_completed / job_cancelled / 结果
+        已落盘 / 已报失败 / 已冻结），重复调用返回空表。**落盘**（账本 jsonl）⇒ 重启后仍然
+        作废：读面从账本重算，比「内存 volatile 标记」硬（plan 裁决 4 的原口径是内存，这里
+        升级为账本——`job_cancelled` 的读面本来就这么设计的，见 `_read_ledger`）。
+        """
+        with self._lock:
+            claimed = set(self._claimed) | set(self._computing)
+            drop = [jid for jid in self.claimable_job_ids() if jid not in claimed]
+            now = self._now()
+            for jid in drop:
+                self._append_ledger(
+                    {"event": "job_cancelled", "job_id": jid, "reason": reason, "ts": now}
+                )
+                # 撕掉残留承诺并 bump epoch：拿着作废前 epoch 来的认领会被 `_claim_locked`
+                # 判 `demoted` 拒掉，不必等它自己发现池子空了。
+                self._drop_commitment_locked(jid)
+                self._cancelled.add(jid)
+            return drop
 
     # ---- 发布（训练主循环调用：写磁盘 + 账本） ----
     def publish(self, job_id: str, manifest: dict, payload_zip: bytes) -> None:

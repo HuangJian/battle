@@ -6,6 +6,42 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §57 切模式撤单：复用 `job_cancelled` 账本事件，只撤**没被领的**那批（plan/switch-mode-drops-jobs 的 T0，2026-10-03）
+
+**触发**：`plan/auto-offline-handoff` 的 T0（唯一未落地项）。原始动机是 2026-09-25 用户报障
+「x20-dodge-l1 离线跑到 it43，切成在线后云机仍在节点跑 rollout」——离线时期发布的整段 job 躺在
+队列里被补做。价值口径（`switch-mode-drops-jobs` §4）：role/parked 两道闸已防住双跑，本项治的是
+**别留垃圾**——切模式后那份 job 既领不到又一直躺着到人工清理。
+
+**落点重定位（T0a 的实质结论）**：原 plan §3 改点 2 钉在 `remote/plan_run.py::run_plan_job`，但它
+**今天零生产调用者**——`kind=run`（整段 job）2026-09-25 已双端退役（发布端
+`trainer/loop_remote_job.py` 当场 `SystemExit`，worker 端 `remote/worker.py` 响亮 `ProtocolError`），
+`tests/remote/test_plan_run_split.py` 有机器断言「worker 里不得再出现这个名字」。⇒ 「离线时期发布的
+整段 job」这个场景今天不可能发生；**按原文落点做等于给死代码加功能**。
+
+**修法：不新建机制，复用既有的 `job_cancelled` 账本事件。** 它的读面早就在
+（`hub/store_ledger.py::claimable_job_ids` 把 `job_cancelled` 当终态剔除，写面此前只有训练侧的
+`remote/hub_client.py::cancel_stale_jobs` 按 `it <= 当前` 清自己的滞后项）。新增
+`_JobStore.cancel_unsettled_jobs()`：对 `claimable_job_ids()` 里**未被认领**的 job 追加
+`job_cancelled` + `_drop_commitment_locked`（撕承诺 + bump epoch ⇒ 拿着作废前 epoch 来的认领被判
+`demoted`）+ 进程内 `_cancelled` set（挡「拿作废前 peek 到的 jid 硬领」的秒级窗口）。**幂等**每
+（判据就是可领池），**落盘**（重启后仍作废——读面从账本重算）。
+
+**用户裁决（2026-10-03）**：① **「不管在算的，只管没领的」**——有活租约/在 `_computing` 的 job 不撤
+（撤销在飞 job 属于轮边界强杀，本 plan 不做）；② **claim 自动翻 mode 也撤**（`begin_auto_handoff`
+无包腿 / `note_claim` 有包腿），不只挂在人的开关上——与 `auto-offline-handoff` §4「与 T2 共用同一条
+切模式链」对齐。
+
+**接线与边界**：人的动作 = `POST /admin/courses?...&pin=1&drop_jobs=1`（`_admin_courses` 解析后透传
+`set_mode_pinned(..., drop_jobs=True)`）；控制台只有那颗开关带它（`setCourseMode` →
+`pushCourseMode(..., { dropJobs: true })`）。**开课 / 停课 / 回灌走的 `pushCourseMode` 一律不带** ⇒
+「停课队列与账本一个字不动」的既有契约（`course-lifecycle.ts`）逐字不变。撤单失败不回滚 mode（那会做成
+「切了但没切」），只响亮记一笔，残留由可领池按账本重算兜。
+
+**回归**：`nn-training/tests/hub/test_auto_handoff.py` +4 例（撤未认领 / 在飞不撤 / 不带参数则队列不动 /
+claim 自动翻模式也撤 / 作废两道闸）+ `dashboard/tests/course-mode.test.ts` +1 例（开关带 `drop_jobs=1`、
+`pushCourseMode` 不带）。
+
 ## §56 自动离线交接：claim 即接管 · 一拖一闸 · 派发状态落盘（plan/auto-offline-handoff，2026-10-03）
 
 **触发**：Kaggle TPU 排队数小时，开课时无法预判「该不该离线」。用户口径（U1-U6）：开课不再指定
@@ -54,7 +90,16 @@ hub 字段白名单 + 联动 `note_offline_completed`（该包记 `completed` �
 `/admin/offline.stalled`（`pending-export` 红 / `running-stale` 橙，文案点名三条出路并自带「交还自动池」
 动作）——hub 不可达/旧版时 `null`（不可知 ≠ 没停，一条都不画）。
 
-**仍未落地（如实记）**：T0（`switch-mode-drops-jobs` 撤单）。
+**T0 落地（2026-10-03 补）**：撤单 → **§57**（复用 `job_cancelled` 账本事件；原落点 `run_plan_job`
+经 T0a 核验已无生产调用者 ⇒ 落点重定位，非按原文实现）。
+
+**端到端 e2e（2026-10-03 补）**：`nn-training/e2e/test_auto_handoff_e2e.py` 5 例 —— 真 hub 子进程 +
+真 HTTP + 真云机 `claim_course` + **假控制台**（只记 `POST /api/autoOfflineHandoff`，不起 TS）：
+① 全链（在训在线**无包**课 → 清单 `auto_handoff` → claim 409 `pending_export` + 真触发控制台 +
+mode 翻 + `offline-dispatch.json` 落盘 → 放包 → claim 200 → 段末摘要跑满 → `/admin/offline.results`
+按 run_id 带出 + 清单 `completed` 不可再领 → 重导包 sha 变解封）；② U2 一拖一（第二门 409 `busy`
+且 **mode 仍 online**）；③ T8 `stalled`（阈值经 env 调到秒级）；④ T0 撤单（`&drop_jobs=1` 清零
+`pending_n`；不带则队列一字不动）；⑤ 云机腿 `claim_course` 中间态回 reason 码（调用方据此本拍不跑）。
 
 ## §55 承接面归属事件：`job_result_accepted` / `job_rejected` + 结果 POST 带 `X-Worker-Id`（plan/worker-contribution-view W2，2026-10-02）
 

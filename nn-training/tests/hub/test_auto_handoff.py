@@ -528,3 +528,111 @@ def test_admin_courses_get_reports_pin_and_claim_state(tmp_path: Path) -> None:
     assert hub.dispatch_record("c5-gae")["claimed_offline"] is True
     st3, raw3 = _req(base, "/admin/courses?course=c5-gae&mode=online", method="POST")
     assert st3 == 400 and "pin" in _json(raw3)["why"]
+
+
+# ------------------------------------------------------------------ T0 撤单（plan/switch-mode-drops-jobs）
+
+
+def _publish_job(hub: _HubQueue, course: str, jid: str, *, it: int = 3) -> None:
+    """往某课 store 发一份未结算 job（payload 落盘即进可领池）。role 显式给 online。"""
+    hub._stores[course].publish(
+        jid, {"job_id": jid, "it": it, "role": "online"}, b"PK\x03\x04fake"
+    )
+
+
+def _cancelled_ids(hub: _HubQueue, course: str) -> set[str]:
+    return {
+        str(e.get("job_id"))
+        for e in hub._stores[course]._read_ledger()
+        if e.get("event") == "job_cancelled"
+    }
+
+
+def test_drop_jobs_cancels_unclaimed_and_keeps_inflight(tmp_path: Path) -> None:
+    """T0：`&drop_jobs=1` 作废**未认领**的 job；在飞的（有活租约）不动。
+
+    用户 2026-10-03 裁决：「不管在算的，只管没领的」——撤销在飞 job 属于轮边界强杀，不做。
+    """
+    base, hub, srv = _boot(tmp_path)
+    try:
+        _course(tmp_path, hub, "c5-gae")
+        _publish_job(hub, "c5-gae", "free-1")
+        _publish_job(hub, "c5-gae", "free-2")
+        _publish_job(hub, "c5-gae", "inflight")
+        st = hub._stores["c5-gae"]
+        assert st.claim("inflight", worker_id="w1") is not None  # 在飞：有人承诺在跑
+        assert set(st.claimable_job_ids()) == {"free-1", "free-2"}
+
+        code, raw = _req(
+            base, "/admin/courses?course=c5-gae&mode=offline&pin=1&drop_jobs=1", method="POST"
+        )
+        assert code == 200, raw[:200]
+        assert hub.mode_of("c5-gae") == "offline"
+        assert _cancelled_ids(hub, "c5-gae") == {"free-1", "free-2"}
+        assert st.claimable_job_ids() == []
+        # 在飞的仍持有租约（撤单只管没领的）——这是本用例的**反面断言**。
+        # 注：`lease_expires_in` 住 `_HubQueue`（经 `_store_of` 委派），**不是** `_JobStore`
+        # 的方法；这里直读 `_leases`（本仓测试读 store 私有属性的既有先例，见 `hub/store.py` 头部）。
+        assert "inflight" in st._leases
+
+        # 幂等：再撤一次不重复写账本
+        assert (
+            _req(
+                base, "/admin/courses?course=c5-gae&mode=offline&pin=1&drop_jobs=1", method="POST"
+            )[0]
+            == 200
+        )
+        assert _cancelled_ids(hub, "c5-gae") == {"free-1", "free-2"}
+    finally:
+        srv.shutdown()
+
+
+def test_mode_switch_without_drop_jobs_leaves_queue_intact(tmp_path: Path) -> None:
+    """开课/停课/回灌走的 `pushCourseMode` 不带 `drop_jobs` ⇒ 队列一字不动（既有契约）。"""
+    base, hub, srv = _boot(tmp_path)
+    try:
+        _course(tmp_path, hub, "c5-gae")
+        _publish_job(hub, "c5-gae", "keep-1")
+        code, raw = _req(base, "/admin/courses?course=c5-gae&mode=offline&pin=1", method="POST")
+        assert code == 200, raw[:200]
+        assert _cancelled_ids(hub, "c5-gae") == set()
+        assert hub._stores["c5-gae"].claimable_job_ids() == ["keep-1"]
+    finally:
+        srv.shutdown()
+
+
+def test_auto_claim_offline_drops_unclaimed_jobs(tmp_path: Path) -> None:
+    """claim 自动翻 offline 也撤（裁决 Q2：与人的开关共用同一条切模式链，不靠人记得带参数）。"""
+    base, hub, srv = _boot(tmp_path)
+    try:
+        _course(tmp_path, hub, "c5-gae")
+        _publish_job(hub, "c5-gae", "stale-1")
+        grant, why = hub.claim_offline("c5-gae", "tpu-1")
+        assert why == "" and grant, why
+        assert hub.mode_of("c5-gae") == "offline"
+        assert _cancelled_ids(hub, "c5-gae") == {"stale-1"}
+        assert hub._stores["c5-gae"].claimable_job_ids() == []
+    finally:
+        srv.shutdown()
+
+
+def test_cancelled_job_is_rejected_even_with_stale_peek(tmp_path: Path) -> None:
+    """作废有两道：账本（真闸，重启后仍作废）+ 进程内 set（挡「拿作废前 peek 的 jid 硬领」）。"""
+    base, hub, srv = _boot(tmp_path)
+    try:
+        _course(tmp_path, hub, "c5-gae")
+        _publish_job(hub, "c5-gae", "gone-1")
+        assert (
+            _req(
+                base, "/admin/courses?course=c5-gae&mode=offline&pin=1&drop_jobs=1", method="POST"
+            )[0]
+            == 200
+        )
+        # 切回在线（parked 解除）——证明下面拒的是「作废」这条闸，不是停摆/归属闸
+        assert hub.set_mode_pinned("c5-gae", "online", True)[0] is True
+        st = hub._stores["c5-gae"]
+        assert st.claimable_job_ids() == []  # 账本真闸：池子里没有它了
+        assert st.claim("gone-1", worker_id="w1") is None  # 即时闸：硬领也被拒
+        assert "gone-1" not in st._leases, "被拒的认领不该留下租约"
+    finally:
+        srv.shutdown()

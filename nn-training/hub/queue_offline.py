@@ -515,11 +515,21 @@ class QueueOfflineMixin(QueuePeer):
         except (OSError, ProtocolError):
             return False
 
-    def set_mode_pinned(self, course: str, mode: str, pin: bool | None) -> tuple[bool, str]:
+    def set_mode_pinned(
+        self,
+        course: str,
+        mode: str,
+        pin: bool | None,
+        *,
+        drop_jobs: bool = False,
+    ) -> tuple[bool, str]:
         """模式写入的**人类入口**（`/admin/courses?...&pin=1|0` 走这里；二轮 P0-2）。
 
         `pin is None` = 非人（legacy 调用）：**拒绝覆盖「由 claim 产生的 offline」**；
         人（显式 pin 字段，1 或 0）可覆盖任何 claim 状态。落地 = `_modes` + 记录（原子写盘）。
+        `drop_jobs=True`（`&drop_jobs=1`，**只有人的动作会带**）⇒ 顺手作废该课未认领的
+        未结算 job（plan/switch-mode-drops-jobs §4 T0「别留垃圾」）；开课/停课/回灌走的
+        `pushCourseMode` 不带它，「队列一字不动」的既有契约（`course-lifecycle.ts`）逐字不变。
         返回 `(ok, why)`。
         """
         if course not in self._stores:
@@ -540,7 +550,41 @@ class QueueOfflineMixin(QueuePeer):
         self._dispatch_update(course, **fields)
         self._modes[course] = m
         self._sync_parked(course)
+        if drop_jobs:
+            # 人的动作带了 `&drop_jobs=1` ⇒ 把上一个模式留在队列里、还没人领的 job 作废
+            # （plan §4 T0「别留垃圾」）。自动路径（claim 翻 offline）在下面两处**无条件**撤。
+            self._drop_unsettled(course, reason="mode-switch")
         return True, ""
+
+    def _drop_unsettled(self, course: str, *, reason: str) -> list[str]:
+        """作废该课**未被认领**的未结算 job（`_JobStore.cancel_unsettled_jobs`；T0）。
+
+        为什么住本簇：撤单是「派发状态」这个域的收尾动作——三条翻 offline 的路径
+        （人的 `set_mode_pinned` / claim 无包的 `begin_auto_handoff` / claim 有包的
+        `note_claim`）都住本簇；落在别处会做成三份各自判断的第二事实源。
+
+        失败语义：`mode` 已经翻过来了，撤单失败**不回滚**（回滚会做成「切了但没切」）。
+        只响亮记一笔——池子里的残留由 `claimable_job_ids` 按账本重算兜（它才是真判据）。
+        """
+        st = self._stores.get(course)
+        if st is None:
+            return []
+        try:
+            dropped = st.cancel_unsettled_jobs(reason=reason)
+        except OSError as e:
+            print(
+                f"[hub-server] ⚠ 撤单失败 course={course} reason={reason}: {e}"
+                "（mode 已翻，不回滚；残留由可领池按账本重算兜）",
+                flush=True,
+            )
+            return []
+        if dropped:
+            print(
+                f"[hub-server] 撤单 course={course} reason={reason} n={len(dropped)}"
+                "（未认领的 job 已作废，在飞的不动）",
+                flush=True,
+            )
+        return dropped
 
     def begin_auto_handoff(self, course: str) -> tuple[str, str]:
         """claim 无包分支的临界区（§3.1a-b + §3.3a）：过 busy 闸 → 翻 mode（落盘）。
@@ -568,18 +612,26 @@ class QueueOfflineMixin(QueuePeer):
         if not (rec0.get("claimed_offline") and str(rec0.get("mode")) == COURSE_MODE_OFFLINE):
             fields["flipped_at"] = float(self._now())
         self._dispatch_update(course, **fields)
+        # 翻 offline ⇒ 该课在线的未认领 job 即刻作废（用户 2026-10-03 裁决：claim 自动翻模式
+        # 也要撤）。**在飞的不动**（裁决：不管在算的）——见 `cancel_unsettled_jobs`。
+        self._drop_unsettled(course, reason="auto-handoff")
         return "flipped", ""
 
     def note_claim(self, course: str, worker_id: str) -> None:
         """claim 成功后的派发记账（claimed_by/at + 自动课翻 offline——T2 的同步小事之一）。"""
         fields: dict[str, Any] = {"claimed_by": worker_id, "claimed_at": float(self._now())}
+        flipped = False
         if self.auto_eligible(course) and self.mode_of(course) != COURSE_MODE_OFFLINE:
             self._modes[course] = COURSE_MODE_OFFLINE
             self._sync_parked(course)
             fields["mode"] = COURSE_MODE_OFFLINE
             fields["claimed_offline"] = True
             fields["flipped_at"] = float(self._now())
+            flipped = True
         self._dispatch_update(course, **fields)
+        if flipped:
+            # claim 成功即翻 offline（有包那条腿）——同样撤掉本课未认领的在线 job（裁决同上）。
+            self._drop_unsettled(course, reason="auto-handoff")
 
     def note_release(self, course: str) -> None:
         """release 后的派发记账：持有者清空；mode 保持 offline（U3 的 waiting）。"""

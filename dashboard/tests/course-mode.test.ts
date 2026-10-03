@@ -425,6 +425,17 @@ describe('★2026-10-03 自动离线交接：pin 与 unset 的分工', () => {
     expect(calls[0]!.url).toContain('pin=1')
   })
 
+  it('★ T0：人的切模式带 drop_jobs=1（作废未认领的 job）；pushCourseMode 不带', async () => {
+    // plan/switch-mode-drops-jobs：切模式 = 上一段整体作废 —— 但**只有人的开关**带这个参数。
+    // 开课/停课/回灌都走 pushCourseMode，「队列与账本一个字不动」的契约不许被动到。
+    const r = await setCourseMode('c5', 'offline')
+    expect(r.ok).toBe(true)
+    expect(calls[0]!.url).toContain('drop_jobs=1')
+    calls = []
+    await pushCourseMode('c5', 'offline')
+    expect(calls[0]!.url).not.toContain('drop_jobs')
+  })
+
   it('unsetCourseMode：撤离线标记 + hub 带 pin=0 + 删意图（重回自动池）', async () => {
     writeRlConfig({ c5: { rollout_src: 'run', run_iters: -1 } })
     saveConsoleState({ courseModes: { c5: 'offline' } })

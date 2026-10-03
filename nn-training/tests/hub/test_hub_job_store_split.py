@@ -90,8 +90,9 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "publish",
             "job_failure",
             "get_result",
+            "cancel_unsettled_jobs",
         ),
-        ("_ledger_cache",),
+        ("_ledger_cache", "_cancelled"),
     ),
     "store_wire": (
         wire_mod.WireMeterMixin,
@@ -298,12 +299,13 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
         for m in defined & set(MIXIN_METHODS):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(MIXIN_METHODS) == 51, len(MIXIN_METHODS)
-    assert len(seen) == 51, len(seen)
+    assert len(MIXIN_METHODS) == 52, len(MIXIN_METHODS)
+    assert len(seen) == 52, len(seen)
     # 49 = 拆分前 `_JobStore` 的 49 个方法；2026-09-25 并入 origin 的课程侧落位后又多了 2 条
     # （`_course_backup_target` / `_land_offline_round_extras`）；2026-10-01 §52 加 2 条
-    # （`_lease_state` 判据 + `_lease_held` 布尔视图）⇒ 现在 51 + 2。
-    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 51 + 2, "_JobStore 的方法总数变了"
+    # （`_lease_state` 判据 + `_lease_held` 布尔视图）；2026-10-03 T0 加 1 条
+    # （`cancel_unsettled_jobs` 撤单）⇒ 现在 52 + 2。
+    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 52 + 2, "_JobStore 的方法总数变了"
 
 
 def test_the_mixins_do_not_share_any_defined_name() -> None:
@@ -366,7 +368,7 @@ def test_the_moved_class_constants_stay_reachable_through_the_mro() -> None:
 
 
 def test_the_private_state_still_lives_on_one_object(tmp_path: Path) -> None:
-    """★ 直读测试的前提：19 个私有状态全在**同一个** `_JobStore` 实例上（协作对象会拆散它）。"""
+    """★ 直读测试的前提：20 个私有状态全在**同一个** `_JobStore` 实例上（协作对象会拆散它）。"""
     store = hs._JobStore(tmp_path / "jobs", tmp_path / "log.jsonl")
     for domain, (_, _, state) in DOMAINS.items():
         for name in state:

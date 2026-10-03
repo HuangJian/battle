@@ -30,6 +30,9 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 >
 > ★ 2026-10-03（plan/auto-offline-handoff T6）：`queue_resume` 涨 **1** 个成员
 > （`offline_results`，段末摘要按 run_id 读面）⇒ 域成员 **109**、实现名 **111**。
+>
+> ★ 2026-10-03（plan/switch-mode-drops-jobs T0）：`queue_offline` 再涨 **1** 个成员
+> （`_drop_unsettled`，切模式撤单的收尾）⇒ 域成员 **110**、实现名 **112**。
 
 同一刀还把**两个组合类搬出自己的家**（这是本刀能成立的**使能缝**，不是顺手清洁）：第十四刀只搬了
 `_JobStore` 的六个混入，组合类还在 `hub_server` 里；而 `queue_scope.add_course` 要**构造** store、
@@ -50,7 +53,7 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 
 ## 本文件钉住的东西
 
-1. **定义唯一**：109 个域成员各住一家，`_HubQueue` 不得再定义任何一个（组合类只组合）；
+1. **定义唯一**：110 个域成员各住一家，`_HubQueue` 不得再定义任何一个（组合类只组合）；
 2. **接线正确**：`_HubQueue.X is Mixin.X`（同一函数对象）+ MRO 逐项 + 类常量经 MRO 可达；
 3. **★ 门面契约**（`queue_store_face` 那一簇的**存在理由**）：与 `_JobStore` 同名的方法
    **逐参数对账**——30 个完全一致 + 3 个只多一个前置 `course`（课程寻址），且这份名单是**闭集**；
@@ -205,6 +208,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "pinned_of",
             "auto_eligible",
             "set_mode_pinned",
+            # 切模式撤单（2026-10-03，plan/switch-mode-drops-jobs T0）：三条翻模式路径共用的收尾。
+            "_drop_unsettled",
             "begin_auto_handoff",
             "note_claim",
             "note_release",
@@ -439,9 +444,9 @@ def _writers(path: Path, cls_name: str) -> dict[str, set[str]]:
 
 
 def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
-    """109 个域成员各住一家；`_HubQueue` 不得再定义任何一个（组合类只组合）。"""
-    # 109 个**不重名**的域成员（`halt_workers` 是属性对，一个名字两个 FunctionDef）。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 109, len(DOMAIN_METHODS)
+    """110 个域成员各住一家；`_HubQueue` 不得再定义任何一个（组合类只组合）。"""
+    # 110 个**不重名**的域成员（`halt_workers` 是属性对，一个名字两个 FunctionDef）。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 110, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -451,7 +456,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 109, len(seen)
+    assert len(seen) == 110, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -475,9 +480,9 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
         for name in realized:
             assert seen.get(name, domain) == domain, f"{name} 同时住 {seen[name]} 与 {domain}"
             seen[name] = domain
-    # 109 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
+    # 110 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
     expect = set(DOMAIN_METHODS) | {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"}
-    assert len(seen) == 111 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
+    assert len(seen) == 112 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
 
 
 # ───────────────────── ② 接线正确 ─────────────────────
