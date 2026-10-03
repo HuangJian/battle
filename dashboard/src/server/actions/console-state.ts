@@ -54,8 +54,13 @@ export interface ConsoleState {
    *
    *  为什么要在控制台落一份：hub 的 `mode` 是 **volatile**（重启回启动参数给的模式）
    *  ——「这门课先别派活」是运维的决定，不该随 hub 的重启蒸发。所以控制台记住意图，
-   *  并在每次起 hub 时回灌（见 `actions/course-mode.ts::restoreCourseModes`）。 */
-  courseModes?: Record<string, 'online' | 'offline'>
+   *  并在每次起 hub 时回灌（见 `actions/course-mode.ts::restoreCourseModes`）。
+   *
+   *  ★ 2026-10-03（plan/auto-offline-handoff §3.2a，二轮 P0-3）：**三态**——`unset`（或键不存在）
+   *  = 人没管过（自动交接池：离线盘 claim 即接管）；`online`/`offline` = 人的决定（带 pin，
+   *  自动逻辑不再插手）。**开课未显式选模式、自动交接写入都不落这张表**——否则回灌会把
+   *  每一门开过的课都钉成 `online`，自动交接永不发生。 */
+  courseModes?: Record<string, 'online' | 'offline' | 'unset'>
   /** 每课「切离线前生效的那个非 run rollout 源」（2026-09-24，additive）。
    *
    *  「离线」会把 `courses.<课>.rollout_src` **覆写**成 `run`，于是显式选过 `node` 的课一下离线

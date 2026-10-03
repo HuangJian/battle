@@ -147,8 +147,12 @@ export async function hubSetCourseMode(
   token: string,
   course: string,
   mode: 'online' | 'offline',
+  pin?: boolean | null,
 ): Promise<string | null> {
-  const qs = `course=${encodeURIComponent(course)}&mode=${encodeURIComponent(mode)}`
+  // `pin`（2026-10-03，plan/auto-offline-handoff §3.2）：人的决定把课「锒住」（离线盘永不自取）；
+  // `pin=0` = 交还自动（清锒 + 清 claim 记账）。不传 = legacy（hub 拒结覆盖 claim 翻的 offline）。
+  const pinQs = pin === undefined || pin === null ? '' : `&pin=${pin ? 1 : 0}`
+  const qs = `course=${encodeURIComponent(course)}&mode=${encodeURIComponent(mode)}${pinQs}`
   try {
     const resp = await fetch(`${url.replace(/\/+$/, '')}/admin/courses?${qs}`, {
       method: 'POST',

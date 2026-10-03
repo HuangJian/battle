@@ -6,6 +6,43 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §56 自动离线交接：claim 即接管 · 一拖一闸 · 派发状态落盘（plan/auto-offline-handoff，2026-10-03）
+
+**触发**：Kaggle TPU 排队数小时，开课时无法预判「该不该离线」。用户口径（U1-U6）：开课不再指定
+离线/在线；**当且仅当**一块离线盘真的领走某门课时，hub 才把那门课切成离线并停止向在线云机派发；
+TPU 一次只 drain 一门，其余照常在线推进；掉线就一直等待；notebook 不再填课程名（按开课时间派）；
+`eval_on_cloud` 默认 true；跑完停在最新 it、等人手工停课。
+
+**触发点是 claim，不是「盘上线」**：`/offline/task-pack` 有 mode 闸（`hub/offline.py`）—— hub 翻 mode
+之前云机连包都拿不到；而判据不能用 `recent_n`（跑长段期间不再报名，900s 后归零），只能用**这门课有
+没有活的租约** ⇒ 翻转与租约写在同一个临界区（`claim_offline` / `begin_auto_handoff`）。
+
+**P0-1 无包死锁**：自动课的候选是**正在在线跑的课** ⇒ 它没有包（包是切离线那一刻才导的），而旧 claim
+先查包（404）⇒ 没人 claim ⇒ 触发链永不启动。修法：① 清单对未 pin 的在训课允许无包（`claimable`
++ `auto_handoff`）；② claim 遇缺包 = 翻 mode + 请控制台导包（`trigger_auto_handoff` →
+`POST /api/autoOfflineHandoff`）+ 409 指路（`pending_export`，带节流/上界/`give_up`）；③ 云机侧
+`claim_course` 返回值升级为 `(token, reason)`，中间态（`busy`/`pending_export`/`completed`/
+`not_offline`）**本拍不跑**、**不消耗 idle 预算**、到上界就本会话放弃该课。
+
+**P0-2 一拖一**（U2 必须是 hub 侧不变量，云机不可信）：`_busy_locked` 两条腿 —— 别的课有活租约；
+或别的课在交接窗口（已翻 offline、包未出现、窗内）。`release` 后闸自动解除。
+
+**P0-3 三态意图表**：控制台 `courseModes` 加 `unset`（键不存在等价）；开课未显式选模式**不推、不落
+意图**（否则回灌会把自动翻的离线推回 online）；人的一次开关 = `pin=1`（该课归人管，离线盘永不自取）；
+「交还自动」= `unsetCourseMode`（`mode=online&pin=0` + 删意图）；hub 启动按盘上
+`offline-dispatch.json` 恢复 mode/pin（**§3.8 数据损坏防线**：重启回启动参数会把正在 TPU 上跑的课
+解封队列，在线云机把它的 job 领走 = 同一份活两处跑）。
+
+**T8 停摆告警面**：`/admin/offline` 增 `stalled`（`running` 无进度 / 已翻 offline 无人跑），文案点名
+三条出路（TPU 重连 / 手工导入结果包 / 手工切回在线）——自动化的固有代价必须显式付。
+
+**回归**：`nn-training/tests/hub/test_auto_handoff.py` 22 例（纯判据 / 清单 / claim 各态 / 重启恢复 /
+pin / busy 闸 / waiting / completed / 排序 / stalled）+ `tests/common/test_offline_task_queue.py` 云机侧
+新用例 + `dashboard/tests/course-mode.test.ts` 三态与 pin/unset/auto 分工。
+
+**未落地（如实记）**：T0（`switch-mode-drops-jobs` 撤单）· T6（跑满灰横幅走导入链）· T3 的 UI 面
+（「交还自动」后端动作已就绪，面板未接线）· T8 的控制台告警渲染。
+
 ## §55 承接面归属事件：`job_result_accepted` / `job_rejected` + 结果 POST 带 `X-Worker-Id`（plan/worker-contribution-view W2，2026-10-02）
 
 **触发**：贡献度面板要回答「哪个云端 worker 完成/白算了几个 PPO job」，而今天这个数字在任何账本里

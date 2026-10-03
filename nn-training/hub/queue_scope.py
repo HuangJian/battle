@@ -114,7 +114,13 @@ class QueueScopeMixin(QueuePeer):
         )
         self._order.append(c)
         m = (mode or "").strip().lower()
-        self._modes[c] = m if m in COURSE_MODES else COURSE_MODE_ONLINE
+        if m not in COURSE_MODES:
+            m = COURSE_MODE_ONLINE
+        # 盘上的派发记录优先（claim 翻的 offline / 人的 pin 重启不丢 —— §3.8 数据损坏防线）。
+        # 先落 `_modes[c] = m`：它是 `_dispatch_load` 的缺省回退值（不先落会拿 ONLINE 当回退，
+        # 把 `add_course(name, "offline")` 的显式模式吞掉），再让记录覆盖它。
+        self._modes[c] = m
+        self._modes[c] = self.dispatch_effective_mode(c, m)
         return True
 
     def _adopt_solo(self) -> None:
@@ -210,16 +216,12 @@ class QueueScopeMixin(QueuePeer):
     def set_mode(self, course: str, mode: str) -> bool:
         """热切一门课的模式（在线/离线）。非法课程/模式 → False。
 
-        volatile（与 halt 同性质）：重启回启动参数给定的模式。
+        legacy 入口（既有测试/调用方）：等价于「非人写入」——不落 pin、且**拒结覆盖**由
+        claim 翻出的 offline（要切回请用 `/admin/courses?...&pin=0`，即 `set_mode_pinned`）。
+        模式落盘（`dispatch.json`）——重启不再回启动参数（plan/auto-offline-handoff §3.2b）。
         """
-        if course not in self._stores:
-            return False
-        m = (mode or "").strip().lower()
-        if m not in COURSE_MODES:
-            return False
-        self._modes[course] = m
-        self._sync_parked(course)
-        return True
+        ok, _why = self.set_mode_pinned(course, mode, None)
+        return ok
 
     def active_courses(self) -> int:
         """**在实时派发**的课程数（竞速判据的分母）：非离线，且有待领或未过期在飞 job。

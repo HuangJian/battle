@@ -24,6 +24,9 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 > `_HubQueue` 的一个新域 ⇒ 本仓按同一刀法再切出**第八个混入** `queue_offline`
 > （`QueueOfflineMixin`）。于是域成员从 75 涨到 91、同名门面从 31 涨到 33
 > （`job_role` / `role_blocked` 是 store 上已有的两条，队列侧按同一「认领 → 转发」形状补上）。
+>
+> ★ 2026-10-03（plan/auto-offline-handoff）：`queue_offline` 再涨 **17** 个成员（派发状态
+> 落盘 / pin / busy 闸 / 停摆告警）⇒ 域成员 91 → **108**、实现名 93 → **110**。
 
 同一刀还把**两个组合类搬出自己的家**（这是本刀能成立的**使能缝**，不是顺手清洁）：第十四刀只搬了
 `_JobStore` 的六个混入，组合类还在 `hub_server` 里；而 `queue_scope.add_course` 要**构造** store、
@@ -44,7 +47,7 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 
 ## 本文件钉住的东西
 
-1. **定义唯一**：91 个域成员各住一家，`_HubQueue` 不得再定义任何一个（组合类只组合）；
+1. **定义唯一**：108 个域成员各住一家，`_HubQueue` 不得再定义任何一个（组合类只组合）；
 2. **接线正确**：`_HubQueue.X is Mixin.X`（同一函数对象）+ MRO 逐项 + 类常量经 MRO 可达；
 3. **★ 门面契约**（`queue_store_face` 那一簇的**存在理由**）：与 `_JobStore` 同名的方法
    **逐参数对账**——30 个完全一致 + 3 个只多一个前置 `course`（课程寻址），且这份名单是**闭集**；
@@ -189,6 +192,24 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "heartbeat_offline",
             "release_offline",
             "offline_leases",
+            # 自动离线交接（2026-10-03，plan/auto-offline-handoff）
+            "_dispatch_path",
+            "dispatch_record",
+            "_dispatch_load",
+            "_dispatch_update",
+            "dispatch_effective_mode",
+            "pinned_of",
+            "auto_eligible",
+            "set_mode_pinned",
+            "begin_auto_handoff",
+            "note_claim",
+            "note_release",
+            "note_offline_completed",
+            "completion_blocked",
+            "_busy_locked",
+            "busy_reason",
+            "open_time_of",
+            "offline_stalled",
         ),
     ),
     "queue_store_face": (
@@ -289,7 +310,14 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     "_halt_default": frozenset({"__init__", "_adopt_solo", "set_halt"}),
     "_halts": frozenset({"__init__", "set_halt"}),
     "_locate_cache": frozenset({"__init__", "course_of"}),
-    "_modes": frozenset({"__init__", "add_course", "set_mode"}),
+    #: 模式写点（2026-10-03，plan/auto-offline-handoff）：`set_mode` 已改为委派
+    #: `set_mode_pinned`（写点收敛到一处），另两个是自动交接的两腿（翻 mode / claim 记账）。
+    "_modes": frozenset(
+        {"__init__", "add_course", "begin_auto_handoff", "note_claim", "set_mode_pinned"}
+    ),
+    #: 派发状态（课程 → 记录）：`dispatch_record` 首次载入时就地缓存（写），`_dispatch_update` 改。
+    "_dispatch": frozenset({"__init__", "dispatch_record", "_dispatch_update"}),
+    "_dispatch_lock": frozenset({"__init__"}),
     "_no_marker_warned": frozenset({"__init__", "_serves_course"}),
     "_ambiguous": frozenset({"__init__", "_note_ambiguous"}),
     "_disk_lock": frozenset({"__init__"}),
@@ -407,9 +435,9 @@ def _writers(path: Path, cls_name: str) -> dict[str, set[str]]:
 
 
 def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
-    """91 个域成员各住一家；`_HubQueue` 不得再定义任何一个（组合类只组合）。"""
-    # 91 个**不重名**的域成员（`halt_workers` 是属性对，一个名字两个 FunctionDef）。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 91, len(DOMAIN_METHODS)
+    """108 个域成员各住一家；`_HubQueue` 不得再定义任何一个（组合类只组合）。"""
+    # 108 个**不重名**的域成员（`halt_workers` 是属性对，一个名字两个 FunctionDef）。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 108, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -419,7 +447,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 91, len(seen)
+    assert len(seen) == 108, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -443,9 +471,9 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
         for name in realized:
             assert seen.get(name, domain) == domain, f"{name} 同时住 {seen[name]} 与 {domain}"
             seen[name] = domain
-    # 91 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
+    # 108 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
     expect = set(DOMAIN_METHODS) | {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"}
-    assert len(seen) == 93 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
+    assert len(seen) == 110 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
 
 
 # ───────────────────── ② 接线正确 ─────────────────────
@@ -708,7 +736,7 @@ def test_the_missing_store_default_is_the_declared_one_per_method(tmp_path: Path
 
 
 def test_the_state_writer_table_matches_reality() -> None:
-    """★ 22 个字段的**写者集合**逐字段对账（含下标赋值与 `self.X.append(...)` 三种写法）。
+    """★ 24 个字段的**写者集合**逐字段对账（含下标赋值与 `self.X.append(...)` 三种写法）。
 
     为什么需要它：状态声明分散到八个文件之后，「谁动它」是最容易漂的事。而**只数
     `self.X = …` 会瞎掉一半**——`_locate_cache` / `_halts` / `_modes` / `_order` /
@@ -782,7 +810,8 @@ def test_queue_peer_is_declarations_only() -> None:
     """★ `QueuePeer` 是**纯声明**：每个方法体只有 `...`，无一个实现（否则就是第二份实现）。"""
     body = _cls(_tree(HUB_DIR / "queue_peer.py"), "QueuePeer").body
     funcs = [n for n in body if isinstance(n, ast.FunctionDef)]
-    assert len(funcs) == 75, len(funcs)  # 77 个成员 - `__init__` - `_store_of`（见下一条）
+    # 80 个成员 - `__init__` - `_store_of`（见下一条）；2026-10-03 自动交接 +3（见下）。
+    assert len(funcs) == 78, len(funcs)
     for n in funcs:
         # 只滤掉文档字符串：`...` 也是 `Expr(Constant)`，滤它就把声明本身滤没了（本守卫
         # 第一版就是这么错的 —— `halt_of` 带 docstring 才暴露出来）。

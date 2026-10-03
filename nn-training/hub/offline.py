@@ -41,16 +41,21 @@ from hub.task_pack import (
     _TASK_PACK_LOCK,
     _TASK_PACK_MISS_TRIGGERS,
     _TASK_PACK_TRIGGERS,
+    TASK_AUTO_HANDOFF_RETRY_SEC,
     TASK_PACK_MISS_TRIGGER_LIMIT,
     TASK_PACK_STALE_THROTTLE_SEC,
     TASK_PACK_STALE_TRIGGER_LIMIT,
     _file_sha256,
     _hub_log,
+    auto_handoff_decision,
     decide_task_pack,
+    note_auto_handoff_trigger,
     pack_index_part_sha,
+    reset_auto_handoff_triggers,
     reset_task_pack_miss_triggers,
     reset_task_pack_triggers,
     task_pack_stale_reason,
+    trigger_auto_handoff,
     trigger_task_bundle_export,
 )
 
@@ -382,20 +387,60 @@ class OfflineRoutes:
                     400,
                 )
                 return
-            if not pack.is_file():
-                # 404 与 `/offline/task-pack` 同口径（带已知课程表）：包都没导出来，谈领租约就早了一步。
+            if (
+                course in self.hub.courses()
+                and self.hub.mode_of(course) != COURSE_MODE_OFFLINE
+                and not self.hub.auto_eligible(course)
+            ):
+                # 归属门（与取包端点的 mode 门同口径）：人 pin 成在线的课，包在也不发。
+                # 自动候选（未 pin ∧ 开课标记在）放行——它的包由下面的自动交接现场生成。
                 self._json(
                     {
-                        "error": f"没有任务包 {pack.name}——先在控制台「导出任务包」",
+                        "error": (
+                            "这门课在 hub 里不是离线（可能是人 pin 成在线）："
+                            "到控制台切离线；若是旧的自动交接残留，用 pin=0 清掉"
+                        ),
                         "course": course,
-                        "known_courses": self.hub.courses(),
+                        "not_offline": True,
                     },
-                    404,
+                    409,
+                )
+                return
+            if not pack.is_file():
+                # P0-1（plan/auto-offline-handoff §3.1a）：自动课**本来就没有包**——claim 不能 404，
+                # 而是「翻 mode + 请控制台导包 + 409 指路」；其余课仍是旧 404。
+                self._claim_without_pack(course, pack)
+                return
+            sha = _file_sha256(pack)
+            if self.hub.completion_blocked(course, sha):
+                # 段末摘要报到跑满 ⇒ 不可再领（二轮 P1-1）；重导包 sha 变 = 自动解封。
+                self._json(
+                    {
+                        "error": (
+                            "这门课当前任务包已跑满（不自动重跑）——"
+                            "等人停课，或到控制台重导任务包（新包 sha 不同即自动解封）"
+                        ),
+                        "course": course,
+                        "completed": True,
+                    },
+                    409,
                 )
                 return
             takeover = _q("takeover").lower() in ("1", "true", "yes")
-            lease, _why = self.hub.claim_offline(course, worker, takeover=takeover)
+            lease, why = self.hub.claim_offline(course, worker, takeover=takeover)
             if not lease:
+                if why == "busy":
+                    self._json(
+                        {
+                            "error": self.hub.busy_reason(course)
+                            or "别的课正在跑（一拖一：一次只 drain 一门）",
+                            "course": course,
+                            "busy": True,
+                            "retry_after": TASK_AUTO_HANDOFF_RETRY_SEC,
+                        },
+                        409,
+                    )
+                    return
                 holder = self.hub.holder_info(course)
                 who = holder["worker_id"] if holder else "?"
                 left = float(holder["expires_in"]) if holder else 0.0
@@ -412,6 +457,8 @@ class OfflineRoutes:
                     409,
                 )
                 return
+            # 包真的在手里的这一刻，把「缺包重试」账本清掉（下次再缺从零计数）。
+            reset_auto_handoff_triggers(course)
             print(
                 f"[{time.strftime('%H:%M:%S')}] [hub-server] offline-claim {course} "
                 f"worker={lease['worker_id']} takeover={int(takeover)}",
@@ -453,6 +500,64 @@ class OfflineRoutes:
             )
             return
         self._json({"released": True, "course": course}, 200)
+
+    def _claim_without_pack(self, course: str, pack: Path) -> None:
+        """claim 遇缺包：自动课 ⇒ 翻 mode + 请控制台导包（409 指路）；其余 ⇒ 旧 404。
+
+        为什么不能让云机先等着：包的出现路径是「有人导出」——而自动模式下**没有人**会替它导
+        （导包由 claim 触发）。所以这个分支是整个自动交接的**入口**（plan §3.1a），
+        它必须在「包里没有包」时也能推进状态，而不是让云机在 30 分钟超时后 SystemExit。
+        """
+        verdict, why = self.hub.begin_auto_handoff(course)
+        if verdict == "busy":
+            self._json(
+                {
+                    "error": why,
+                    "course": course,
+                    "busy": True,
+                    "retry_after": TASK_AUTO_HANDOFF_RETRY_SEC,
+                },
+                409,
+            )
+            return
+        if verdict != "flipped":
+            # 404 与 `/offline/task-pack` 同口径（带已知课程表）：这门课不是自动候选，
+            # 缺包只能人工导（不替人决定）。
+            self._json(
+                {
+                    "error": f"没有任务包 {pack.name}——先在控制台「导出任务包」（{why}）",
+                    "course": course,
+                    "known_courses": self.hub.courses(),
+                },
+                404,
+            )
+            return
+        decision = auto_handoff_decision(course)
+        if decision == "trigger":
+            note_auto_handoff_trigger(course)
+            ok, why2 = trigger_auto_handoff(course)
+            note = (
+                "已请控制台写配置并导包（导出约需数分钟）"
+                if ok
+                else f"想替这门课导包，但控制台不可达/不接受（{why2}）——请到控制台点一次「导出任务包」"
+            )
+        elif decision == "throttled":
+            note = "已经在导包了（节流窗内不重复触发）"
+        else:
+            note = "连续触发导包仍没有包——请到控制台检查这门课的自动交接（导出失败？）"
+        self._json(
+            {
+                "error": f"这门课已翻成离线，任务包正在生成：{note}",
+                "course": course,
+                "auto_handoff": True,
+                "pending_export": True,
+                "triggered": decision == "trigger",
+                "give_up": decision == "give_up",
+                "retry_after": TASK_AUTO_HANDOFF_RETRY_SEC,
+                "trigger_note": note,
+            },
+            409,
+        )
 
     def _task_pack_miss_candidate(self, course: str) -> tuple[bool, str]:
         """「这门课该不该替它造一份包」——**盘上的事实优先于「hub 扫到了没有」**（评审 S-1）。

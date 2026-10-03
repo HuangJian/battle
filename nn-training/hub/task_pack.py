@@ -65,14 +65,19 @@ TASK_PACK_STALE_TRIGGER_LIMIT = 2
 #: 「**缺包**」的上界（比过期那条宽一档）：缺包是**确定要造一份**，多试两次值；
 #: 到顶仍没包 ⇒ 不再触发，只在 404 正文里指路手动（plan/offline-switch-auto-bundle §3.4）。
 TASK_PACK_MISS_TRIGGER_LIMIT = 3
-#: 离线任务的四种状态（清单面，`plan/offline-task-discovery.plan.md` §3.1）：
+#: 控制台「自动交接」动作路径（hub → 控制台：写 rl-config + 导任务包；不写意图、不 pin）。
+AUTO_HANDOFF_CONSOLE_PATH = "/api/autoOfflineHandoff"
+#: 离线任务的六种状态（清单面，`plan/offline-task-discovery.plan.md` §3.1）：
 #: `ready`（有新鲜包可领）/ `stale`（包在但起点已旧，领了要从旧起点跑）/ `no_pack`（还没导）/ `claimed`（有人持租）。
 #: 第五种 `not_offline` 只在 `?include=all`（控制台排障）时出现——云机永远用默认清单。
+#: 第六种 `completed`（2026-10-03，plan/auto-offline-handoff §3.6）：段末摘要报到跑满
+#: ⇒ **不可再领**（二轮 P1-1），等人停课 / 重导包（包 sha 变 = 解封）。
 TASK_STATE_READY = "ready"
 TASK_STATE_STALE = "stale"
 TASK_STATE_NO_PACK = "no_pack"
 TASK_STATE_CLAIMED = "claimed"
 TASK_STATE_NOT_OFFLINE = "not_offline"
+TASK_STATE_COMPLETED = "completed"
 #: 「离线盘在线」的窗口（秒）：与离线租约 TTL 同档 —— 取包腿的报到节奏就是这个量级。
 OFFLINE_DISK_WINDOW_SEC = 900.0
 #: 离线腿的指路（2026-09-25 退役「发一份 kind=run 队列项」之后，离线课的唯一载体是任务包）。
@@ -81,7 +86,8 @@ OFFLINE_LEG_HINT = (
     "（/offline/tasks → /offline/task-pack → 跑完回传）"
 )
 
-#: 清单排序名次：`ready` 最前、`not_offline` 最后；同级按包的 mtime **升序**（最老的先跑）。
+#: 清单排序名次：`ready` 最前、`completed`/`not_offline` 最后；同级按**开课时间**升序
+#: （`training-enabled.txt` 的 mtime，读不到 ⇒ `+inf` 排最后；租约见 `queue_offline`）。
 #: 为什么 `claimed` 排在 `no_pack` 之前：前者是「有人在跑」、后者是「没人能跑」——
 #: 一眼看出「活儿在动」比看出「缺东西」更接近清单的用途（下一批还有人问）。
 TASK_STATE_RANK = {
@@ -90,12 +96,23 @@ TASK_STATE_RANK = {
     TASK_STATE_CLAIMED: 2,
     TASK_STATE_NO_PACK: 3,
     TASK_STATE_NOT_OFFLINE: 4,
+    TASK_STATE_COMPLETED: 5,
 }
 #: 同课程的触发账本（进程内；hub 重启即清——与租约同风格，重启后重触发一次无害）。
 _TASK_PACK_TRIGGERS: dict[str, dict[str, float]] = {}
 #: **缺包**用另一本账（与过期那条腿分开）：两本账在同一个重导窗口里各自记账，
 #: 所以同一门课在窗口内最多被推 2 次（过期 1 + 缺包 1）——这是刻意的，不是 bug。
 _TASK_PACK_MISS_TRIGGERS: dict[str, dict[str, float]] = {}
+#: **自动交接**（claim 无包 ⇒ 翻 mode + 请控制台写 rl-config + 导包）用第三本账
+#: （2026-10-03，plan/auto-offline-handoff §3.1a/§3.1c）：云机的每次 claim 重试都会再问一次
+#: ⇒ 用节流 + 上界给云机一个明确的 `give_up`，避免「导出失败 → 无限 15s 轮询」。
+_TASK_AUTO_HANDOFF_TRIGGERS: dict[str, dict[str, float]] = {}
+#: 两次自动交接触发的最小间隔（秒）。
+TASK_AUTO_HANDOFF_THROTTLE_SEC = 600.0
+#: 自动课 claim 遇缺包时、云机下一次重试的建议间隔（秒）——导出是分钟级，60s 量级查一次即可。
+TASK_AUTO_HANDOFF_RETRY_SEC = 60.0
+#: 连续触发上界：到顶仍无包 ⇒ 409 带 `give_up=true`（云机放弃该课，继续下一门）。
+TASK_AUTO_HANDOFF_TRIGGER_LIMIT = 3
 _TASK_PACK_LOCK = Lock()
 
 
@@ -281,4 +298,73 @@ def trigger_task_bundle_export(course: str, log=_hub_log) -> tuple[bool, str]:
         log(f"task-pack {course}: 控制台不可达（{type(e).__name__}: {e}）——降级为手动导出")
         return False, f"{type(e).__name__}"
     log(f"task-pack {course}: 已触发控制台重导（旧包已作废，窗口期本端点会 404）")
+    return True, "ok"
+
+
+def auto_handoff_decision(course: str, *, now: float | None = None) -> str:
+    """自动交接该不该再触发控制台（**纯函数**）：`trigger` / `throttled` / `give_up`。"""
+    now = time.time() if now is None else float(now)
+    with _TASK_PACK_LOCK:
+        st = _TASK_AUTO_HANDOFF_TRIGGERS.get(course)
+        count = int(float(st.get("count", 0.0))) if st else 0
+        last = float(st.get("last", 0.0)) if st else 0.0
+    if count >= TASK_AUTO_HANDOFF_TRIGGER_LIMIT:
+        return "give_up"
+    if last and now - last < TASK_AUTO_HANDOFF_THROTTLE_SEC:
+        return "throttled"
+    return "trigger"
+
+
+def note_auto_handoff_trigger(course: str, *, now: float | None = None) -> None:
+    """记一次自动交接触发（进程内；hub 重启即清——与缺包账本同风格）。"""
+    now = time.time() if now is None else float(now)
+    with _TASK_PACK_LOCK:
+        st = _TASK_AUTO_HANDOFF_TRIGGERS.setdefault(course, {"count": 0.0, "last": 0.0})
+        st["count"] = float(st.get("count", 0.0)) + 1.0
+        st["last"] = now
+
+
+def reset_auto_handoff_triggers(course: str = "") -> None:
+    """清自动交接账本（包出现 / 领取成功时调）。"""
+    with _TASK_PACK_LOCK:
+        if course:
+            _TASK_AUTO_HANDOFF_TRIGGERS.pop(course, None)
+        else:
+            _TASK_AUTO_HANDOFF_TRIGGERS.clear()
+
+
+def trigger_auto_handoff(course: str, log=_hub_log) -> tuple[bool, str]:
+    """触发控制台的**自动交接**动作（写 rl-config + 导包；**不写意图、不 pin**）。
+
+    与 `trigger_task_bundle_export` 的分工：那个是「缺包自愈」（取包路径的附带动作）；
+    这个是「hub 已把课翻成 offline，请控制台把本机停采并出包」——多出来的唯一一步是
+    rl-config（控制台的唯一写面，§3.4）。控制台不可达 ⇒ 降级为手动，半状态由 stalled 兜住。
+    """
+    base = os.environ.get(CONSOLE_URL_ENV, "").strip() or DEFAULT_CONSOLE_URL
+    body = json.dumps({"course": course}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        base.rstrip("/") + AUTO_HANDOFF_CONSOLE_PATH,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with _net_urlopen(req, timeout=TASK_PACK_TRIGGER_TIMEOUT_SEC) as resp:
+            resp.read()
+    except urllib.error.HTTPError as e:
+        if e.code == 409:
+            log(f"auto-handoff {course}: 控制台说上一次导出还在跑（HTTP 409）——视为已触发")
+            return True, "busy"
+        if e.code == 404:
+            log(f"auto-handoff {course}: 控制台没有自动交接端点（旧版本）——降级为手动导出")
+            return False, "http 404"
+        if e.code in (401, 403):
+            log(f"auto-handoff {course}: 控制台拒绝触发（HTTP {e.code}，只读门控？）——降级为手动")
+            return False, f"http {e.code}"
+        log(f"auto-handoff {course}: 控制台触发失败 HTTP {e.code}——降级为手动")
+        return False, f"http {e.code}"
+    except Exception as e:
+        log(f"auto-handoff {course}: 控制台不可达（{type(e).__name__}: {e}）——降级为手动")
+        return False, f"{type(e).__name__}"
+    log(f"auto-handoff {course}: 已触发控制台（写 rl-config + 导包；完成前云机会等新包）")
     return True, "ok"

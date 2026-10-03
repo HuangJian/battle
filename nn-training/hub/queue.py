@@ -171,6 +171,17 @@ class _HubQueue(
         #: 最坏情形由回传侧 `(run_id, it)` 首写幂等兜底（plan §3.2）。
         self._leases: dict[str, dict] = {}
         self._lease_lock = Lock()
+        #: **派发状态**（课程 → 记录；plan/auto-offline-handoff §3.2/§3.8，2026-10-03）：
+        #: `pinned` / claim 翻的 offline / 完成锚（包 sha）。与 `_leases` 相反——**落盘**
+        #: （`<课>/offline-dispatch.json`）：hub 重启回启动参数会把正在 TPU 上跑的课解封队列
+        #: （在线云机把它的 job 领走 = 同一份活两处跑，数据损坏级）。读写见 `queue_offline`。
+        self._dispatch: dict[str, dict] = {}
+        self._dispatch_lock = Lock()
+        # 盘上的派发记录**优先于启动参数**（§3.8）：正在 TPU 上跑的课、人的 pin 重启不丢。
+        # 放这里（而不是上面 `_modes` 第一次赋值处）：读盘需要 `_dispatch_lock`，它在这几行才建。
+        for _c in self._order:
+            self._modes[_c] = self.dispatch_effective_mode(_c, self._modes[_c])
+            self._sync_parked(_c)
         #: 离线**盘**报名表：disk_id -> last_seen（秒）。★ 为什么单独一张表：跑
         #: `battle.offline.ipynb` 的机器**不碰队列**（取包链全在 `/offline/*` 上），它的身份
         #: 只能在那一面被看到；而「本环境有没有离线盘」这个读数此前恒为空（审计 §4-L3：

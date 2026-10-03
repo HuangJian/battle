@@ -41,11 +41,13 @@ afterAll(() => {
 
 import { loadConsoleState, saveConsoleState } from '../src/server/actions/console-state'
 import {
+  autoOfflineHandoff,
   pushCourseMode,
   readCourseModes,
   restoreCourseModes,
   restoreCourseModesNote,
   setCourseMode,
+  unsetCourseMode,
 } from '../src/server/actions/course-mode'
 
 /** 重写临时 rl-config（用例的起点状态：`courses.<课>` 已经有什么）。 */
@@ -400,5 +402,66 @@ describe('console-state 的 courseModes（additive）', () => {
       courseModes: { good: 'offline', bad: 'paused', '': 'online' } as never,
     })
     expect(readCourseModes()).toEqual({ good: 'offline' })
+  })
+
+  it('三态的 `unset` 等价于「键不存在」（归一化后不进意图表）', () => {
+    saveConsoleState({ courseModes: { a: 'unset', b: 'online' } as never })
+    expect(readCourseModes()).toEqual({ b: 'online' })
+  })
+})
+
+/** ★ 2026-10-03（plan/auto-offline-handoff §3.2/§3.2a，二轮 P0-3/P1-4）：三态的分工。
+ *
+ *  · 人的一次开关 = **pin**（该课此后归人管；离线盘永不自取）；
+ *  · 「交还自动」= 写 `online&pin=0` + 删意图（重回自动池）——不是 pin online；
+ *  · 自动交接（hub 反向调用）= 写配置 + 导包，**不写意图、不 pin**（写意图会被回灌把
+ *    自动翻的离线推回 online，功能整个关掉）。
+ */
+describe('★2026-10-03 自动离线交接：pin 与 unset 的分工', () => {
+  it('setCourseMode（人的开关）带 pin=1 —— 该课此后归人管', async () => {
+    const r = await setCourseMode('c5', 'offline')
+    expect(r.ok).toBe(true)
+    expect(calls[0]!.url).toContain('mode=offline')
+    expect(calls[0]!.url).toContain('pin=1')
+  })
+
+  it('unsetCourseMode：撤离线标记 + hub 带 pin=0 + 删意图（重回自动池）', async () => {
+    writeRlConfig({ c5: { rollout_src: 'run', run_iters: -1 } })
+    saveConsoleState({ courseModes: { c5: 'offline' } })
+    const r = await unsetCourseMode('c5')
+    expect(r.ok).toBe(true)
+    expect(calls).toHaveLength(1)
+    expect(calls[0]!.url).toContain('mode=online')
+    expect(calls[0]!.url).toContain('pin=0')
+    expect(courseRow('c5').rollout_src).toBeUndefined()
+    expect(courseRow('c5').run_iters).toBeUndefined()
+    expect(readCourseModes()).toEqual({})
+    expect(loadConsoleState().courseModes).toEqual({})
+  })
+
+  it('unsetCourseMode：hub 不可达 ⇒ 如实报告，但意图照删（unset 本来就不回灌）', async () => {
+    mode = 'throw'
+    saveConsoleState({ courseModes: { c5: 'offline' } })
+    const r = await unsetCourseMode('c5')
+    expect(r.ok).toBe(false)
+    expect(r.message).toContain('hub 未接受')
+    expect(readCourseModes()).toEqual({})
+  })
+
+  it('autoOfflineHandoff：写 rollout_src=run（本机停采），**不写意图、不打 hub 课程表**', async () => {
+    enable('c5')
+    const r = await autoOfflineHandoff('c5')
+    expect(r.ok).toBe(true)
+    expect(courseRow('c5')).toMatchObject({ rollout_src: 'run', run_iters: -1 })
+    // P0-3 的回归锚：自动交接**不能**落意图（否则回灌会把自动翻的离线推回 online）
+    expect(readCourseModes()).toEqual({})
+    expect(calls.filter((c) => c.url.includes('/admin/courses')).length).toBe(0)
+  })
+
+  it('autoOfflineHandoff：未开课的课拒绝（自动交接只接在训课）', async () => {
+    const r = await autoOfflineHandoff('c5')
+    expect(r.ok).toBe(false)
+    expect(r.message).toContain('未开课')
+    expect(courseRow('c5').rollout_src).toBeUndefined()
   })
 })

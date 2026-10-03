@@ -100,6 +100,18 @@ def test_live_backfeed_defaults_to_on(cell: str) -> None:
     )
 
 
+def test_eval_on_cloud_defaults_to_on_in_both_places(cell: str) -> None:
+    """T7（plan/auto-offline-handoff U5）：默认 **true**，且 ipynb 与 runtime 兜底**同值**。
+
+    只改一处会让「非 notebook 调用方」与 notebook 行为分叉—— 这类不一致最难查
+    （改动前两处都是 false）。
+    """
+    assert '"eval_on_cloud": True' in cell
+    src = Path(offline_boot.__file__).read_text(encoding="utf-8")
+    assert 'cfg.get("eval_on_cloud", True)' in src
+    assert 'cfg.get("eval_on_cloud", False)' not in src
+
+
 def test_cell_knows_the_code_zip_name(cell: str) -> None:
     """离线引导要从包里取代码：这个名字在 cell 里硬编码了一份，改名必须两边一起改。"""
     assert f'"{offline_boot.CODE_NAME}"' in cell, (

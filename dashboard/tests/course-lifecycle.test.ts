@@ -361,7 +361,10 @@ describe('openCourse：课程级旋钮只落 courses.<课>', () => {
 describe('openCourse：置 hub 模式在发现事实**之后**（事故回归）', () => {
   it('hub 还没扫到这门课：有界重试后仍拒 ⇒ 报「意图已记录」而不是失败', async () => {
     hub = 'unknown'
-    const r = await openCourse(COURSE, { hubMode: { attempts: 2, delayMs: 0 } })
+    const r = await openCourse(COURSE, {
+      trainMode: 'online', // ★ 显式模式才推 hub（未指定 = 留自动池，见下一条）
+      hubMode: { attempts: 2, delayMs: 0 },
+    })
     // 课程**已开**（账本/目录都在）——hub 那一半是异步收敛的，不能因此把开课判成失败
     expect(r.ok).toBe(true)
     expect(existsSync(path.join(TRAJ, COURSE, 'training_log.jsonl'))).toBe(true)
@@ -371,7 +374,10 @@ describe('openCourse：置 hub 模式在发现事实**之后**（事故回归）
 
   it('hub 从「不认识的课程」变成接受（扫到了）⇒ 重试生效，摘要不再带未接受提示', async () => {
     unknownFirst = 1 // 第一次 400，之后 200
-    const r = await openCourse(COURSE, { hubMode: { attempts: 3, delayMs: 0 } })
+    const r = await openCourse(COURSE, {
+      trainMode: 'online',
+      hubMode: { attempts: 3, delayMs: 0 },
+    })
     expect(r.ok).toBe(true)
     expect(calls.filter((c) => c.url.includes('/admin/courses')).length).toBe(2)
     expect(r.detail!.join('\n')).toContain('hub 该课模式 = online')
@@ -379,7 +385,7 @@ describe('openCourse：置 hub 模式在发现事实**之后**（事故回归）
 
   it('落盘顺序：先建 `remote-jobs/`，再打 hub（否则置模式必然被拒）', async () => {
     unknownFirst = 1
-    await openCourse(COURSE, { hubMode: { attempts: 2, delayMs: 0 } })
+    await openCourse(COURSE, { trainMode: 'online', hubMode: { attempts: 2, delayMs: 0 } })
     // 断言的是**事实**：在 hub 收到请求之前，目录已经在了（逐字节顺序的另一半见源码）
     expect(calls.length).toBeGreaterThan(0)
     expect(existsSync(path.join(TRAJ, COURSE, 'remote-jobs'))).toBe(true)
@@ -387,10 +393,25 @@ describe('openCourse：置 hub 模式在发现事实**之后**（事故回归）
 
   it('hub 完全不可达：意图照样落盘（起 hub 时回灌），开课仍成立', async () => {
     hub = 'throw'
-    const r = await openCourse(COURSE, { hubMode: { attempts: 1, delayMs: 0 } })
+    const r = await openCourse(COURSE, {
+      trainMode: 'online',
+      hubMode: { attempts: 1, delayMs: 0 },
+    })
     expect(r.ok).toBe(true)
     const modes = actions.readCourseModes()
     expect(modes[COURSE]).toBe('online')
+  })
+
+  it('★ 未指定训练模式 ⇒ 不推 hub、不写意图（该课留在自动交接池：TPU 一上线就能接管）', async () => {
+    // 2026-10-03（plan/auto-offline-handoff §3.2a，二轮 P0-3）：旧行为无条件推 online + 写
+    // `courseModes[课]='online'` ⇒ 把每一门开过的课记成「人的决定」，自动交接被回灌静默关掉。
+    // 本套件不做全库清理（console-state 是共用临时文件）——本用例自己从空意图表起步。
+    actions.saveConsoleState({ courseModes: {} })
+    const r = await openCourse(COURSE, {})
+    expect(r.ok).toBe(true)
+    expect(calls.filter((c) => c.url.includes('/admin/courses')).length).toBe(0)
+    expect(actions.readCourseModes()[COURSE]).toBeUndefined()
+    expect(r.detail!.join('\n')).toContain('自动交接池')
   })
 
   it('离线开课 ⇒ 推的是 offline（该课停车：不再实时派发）', async () => {

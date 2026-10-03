@@ -391,12 +391,21 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
         : []),
     ]
     // hub 模式：离线档 = 该课停车（不再实时派发）；在线 = 恢复实时派发。
+    // ★ 2026-10-03（plan/auto-offline-handoff §3.2a，二轮 P0-3）：**没显式选模式就不推、不落意图**。
+    //   旧行为「无条件推 online + 写 `courseModes[课]='online'`」= 把每一门开过的课都记成
+    //   「人的决定」⇒ 自动交接（U1：TPU 一上线就能接续在训课程）在回灌/下一次点击后被静默关掉。
+    //   未指定 = 该课留在自动池（意图表保持 `unset`）；显式选择照旧推（**不带 pin** —— pin 是
+    //   运行中那颗开关与「交还自动」的语义，开课弹窗只是一次意图选择）。
     const trainMode = opts.trainMode === 'offline' ? 'offline' : 'online'
-    const hub = await pushHubMode(c, trainMode, opts.hubMode)
+    const hub = opts.trainMode
+      ? await pushHubMode(c, trainMode, opts.hubMode)
+      : { ok: true, message: '未指定训练模式：hub 模式与意图都保持原状' }
     const face = remoteExecutionFace(loadConfig())
-    const hubNote = hub.ok
-      ? `hub 该课模式 = ${trainMode}`
-      : `hub 尚未认下这门课（${hub.message}）——意图已记录，起 hub 时会按意图回灌`
+    const hubNote = !opts.trainMode
+      ? '未指定训练模式：该课留在自动交接池（离线盘一上线 claim 即接管）'
+      : hub.ok
+        ? `hub 该课模式 = ${trainMode}`
+        : `hub 尚未认下这门课（${hub.message}）——意图已记录，起 hub 时会按意图回灌`
     // ★ 2026-09-22：离线开课 = **自动生成任务包**（随时可导：导出是只读快照、不与训练抢
     // per-course 锁）。任务包不手工搬运——hub 的 `GET /offline/task-pack` 直接按课上架
     // 这份 zip，Kaggle/Colab 离线 worker 探到 hub 即可拉取（离线课状态列据此显示）。

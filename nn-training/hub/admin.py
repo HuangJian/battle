@@ -143,14 +143,23 @@ class AdminRoutes:
         if not self._auth_ok():
             return
         self._json(
-            {"progress": self.hub.offline_progress(), "leases": self.hub.offline_leases()}, 200
+            {
+                "progress": self.hub.offline_progress(),
+                "leases": self.hub.offline_leases(),
+                # 停滞告警面（§3.9 / T8）：`running` 无进度、或已翻 offline 无人跑。
+                # 自动交接的固有代价 —— 必须显式付（不靠「人总会看到」）。
+                "stalled": self.hub.offline_stalled(),
+            },
+            200,
         )
 
     def _admin_courses(self, set_mode: bool = False) -> None:
-        """`GET /admin/courses` 看课程表；`POST ?course=X&mode=online|offline` 热切。
+        """`GET /admin/courses` 看课程表；`POST ?course=X&mode=online|offline[&pin=1|0]` 热切。
 
-        volatile（与 halt 同性质，重启回启动参数）——运维需要一个能当场把一门课
-        改派为离线的闸（例如某课的云机报销了，先不派活只收回传）。
+        ★ 2026-10-03（plan/auto-offline-handoff §3.2b）：模式**已落盘**（`dispatch.json`），
+        重启不再回启动参数——自动 claim 翻的 offline / 人的 pin 都必须活过重启（§3.8）。
+        `pin=1` 才是**人的决定**（可覆盖自动 claim 翻的 offline；此后离线盘永不自取）；
+        不带 pin = legacy 调用方（回灌/旧版控制台），遇 claim 翻的 offline 会被拒。
         """
         if not self._auth_ok():
             return
@@ -158,7 +167,17 @@ class AdminRoutes:
             self._json(
                 {
                     "courses": [
-                        {"course": c, "mode": self.hub.mode_of(c)} for c in self.hub.courses()
+                        {
+                            "course": c,
+                            "mode": self.hub.mode_of(c),
+                            # `pinned` = 人的决定（自动交接永不碰它）；`claimed_offline` = 由
+                            # 离线盘 claim 自动翻的（重启后仍生效 —— §3.8 的落盘事实）。
+                            "pinned": self.hub.pinned_of(c),
+                            "claimed_offline": bool(
+                                self.hub.dispatch_record(c).get("claimed_offline")
+                            ),
+                        }
+                        for c in self.hub.courses()
                     ]
                 },
                 200,
@@ -167,30 +186,51 @@ class AdminRoutes:
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         course = (qs.get("course") or [""])[0]
         mode = (qs.get("mode") or [""])[0]
+        # `pin` = 人的决定（二轮 P0-2/P0-3）：带它才能覆盖「由 claim 翻的 offline」。
+        # 不带 = legacy 调用方（回灌/旧版控制台）：只改没被 claim 翻过的课。
+        raw_pin = (qs.get("pin") or [""])[0].strip().lower()
+        pin: bool | None = None
+        if raw_pin in ("1", "true", "yes", "on"):
+            pin = True
+        elif raw_pin in ("0", "false", "no", "off"):
+            pin = False
         # 课程未知 ⇒ **按需真扫一次再试**（2026-09-23）：`set_mode` 只认已登记的课程，
         # 而登记依赖顺带扫描（`claim_next`/`queue_state` 触发、有 2s 间隔闸）。于是
         # 「刚开课 / hub 刚重启」那一刻打来的 mode POST 必然 400——控制台那侧的重试窗口
         # 一旦整段落在发现之前，意图就静默失配（课留在 online，面板显示「在训/切离线」，
         # 用户实测：三个离线课里恰有一个如此）。指名一门课的写动作有资格要求一次真扫。
         # 只在「课不在表里」时扫（模式非法就不必扫盘了，直接落到下面 400）。
-        if not self.hub.set_mode(course, mode) and course and course not in self.hub.courses():
+        ok, why = self.hub.set_mode_pinned(course, mode, pin)
+        if not ok and course and course not in self.hub.courses():
             self.hub.discover(force=True)
-            self.hub.set_mode(course, mode)
-        if not self.hub.set_mode(course, mode):
+            ok, why = self.hub.set_mode_pinned(course, mode, pin)
+        if not ok:
             self._json(
                 {
-                    "error": f"需要合法 course（{self.hub.courses()}）与 mode（{list(COURSE_MODES)}）",
+                    "error": (
+                        f"需要合法 course（{self.hub.courses()}）与 mode（{list(COURSE_MODES)}）"
+                        + (f"；本次未接受：{why}" if why else "")
+                    ),
                     "course": course,
                     "mode": mode,
+                    "why": why,
                 },
                 400,
             )
             return
         print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] course={course or '-'} mode -> {mode}",
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] course={course or '-'} mode -> {mode} "
+            f"pin={raw_pin or '-'}",
             flush=True,
         )
-        self._json({"course": course, "mode": self.hub.mode_of(course)}, 200)
+        self._json(
+            {
+                "course": course,
+                "mode": self.hub.mode_of(course),
+                "pinned": self.hub.pinned_of(course),
+            },
+            200,
+        )
 
     def _admin_unfreeze(self) -> None:
         """`POST /admin/unfreeze?job_id=<jid>`：人工解冻一个被熔断（§4.1）的 job。

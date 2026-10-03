@@ -1021,7 +1021,9 @@ def build_run_argv(
         argv += ["--rollout-workers", str(int(cfg["rollout_workers"]))]
     # 云机 A 层评估（`eval_on_cloud`）：语料/口径全部由课程（随包的 course.jsonc）决定，
     # 这里只传两个执行面旋钮（并发/单局超时）——不在 notebook 里重复一遍语料定义。
-    if bool(cfg.get("eval_on_cloud", False)):
+    # ★ 2026-10-03（plan/auto-offline-handoff U5）：缺省改 **True**，与 notebook 的 CFG 同值
+    # （此前两处不一致：notebook 默认 True、这里写死 False ⇒ 非 notebook 调用方静默少跑评估）。
+    if bool(cfg.get("eval_on_cloud", True)):
         argv += ["--eval-on-cloud"]
         if int(cfg.get("eval_slots") or 0):
             argv += ["--eval-slots", str(int(cfg["eval_slots"]))]
@@ -1294,12 +1296,25 @@ def claim_course(
     *,
     takeover: bool = False,
     timeout: float = PING_TIMEOUT,
-) -> str:
-    """领一门课的离线租约 → `lease` token（`""` = 没领到，**照旧跑**）。
+) -> tuple[str, str]:
+    """领一门课的离线租约 → `(lease_token, "")`；没领到 → `("", reason)`。
 
-    为什么领不到也照跑：租约是**排他与观测**，不是训练的前置——一台云机被拒不该让这门课的
-    产物消失（plan §1.4-4「训练永不因网络停摆」）。重复劳动的代价由回传侧 `(run_id, it)`
-    首写幂等兜底（第二份判 `duplicate` 丢弃）。
+    ★ 2026-10-03（plan/auto-offline-handoff §3.1a / 二轮评审 P0）：返回值从裸 token 升级为
+    `(token, reason)` —— 自动交接下这几类拒绝**必须区别对待**（旧口径「一律照旧跑」会把
+    无包 claim 的 409 当成「被别人持有」，于是没有租约就进入 run、干等 30 分钟再整会话
+    `SystemExit`，busy 闸/stalled 告警全被绕开）：
+
+      · `pending_export`：hub 已把课翻成离线、正在等控制台导包（分钟级）⇒ 本拍**不跑**，
+        过一会儿再问；
+      · `busy`：另一门课正在跑（U2 一拖一，闸在 hub 侧）⇒ 本拍**不跑**，等它 release；
+      · `completed`：当前包已跑满（U6）⇒ 本拍**不跑**（重导包后 sha 变会自动解封）；
+      · `not_offline`：人把课 pin 成在线 ⇒ 本拍**不跑**；
+      · `give_up`：hub 触发导包已到上界 ⇒ **本会话放弃这门课**（三条出路留给人：TPU 重连 /
+        手工导入结果包 / 手工切回在线）；
+      · `held`：被别人持有 —— **照旧跑**（历史口径：租约是排他与观测，不是训练前置；
+        重复的那份由回传首写幂等丢弃）；
+      · `no_pack`（404，人管课缺包）/ `net`（连不上）：照旧跑（训练永不因网络停摆；
+        缺包由 `PackUnavailableError` 响亮收场）。
     """
     url = (
         f"{hub.rstrip('/')}{OFFLINE_CLAIM_PATH}?course={urllib.parse.quote(course)}"
@@ -1309,17 +1324,37 @@ def claim_course(
     lease = doc.get("lease")
     if code == 200 and isinstance(lease, dict):
         log(f"领到租约（{lease.get('ttl_sec')}s，worker={worker}）")
-        return str(lease.get("token") or "")
+        return str(lease.get("token") or ""), ""
     if code == 409:
+        if doc.get("pending_export"):
+            if doc.get("give_up"):
+                log(
+                    "hub 触发导包已到上界 —— 本会话放弃这门课（三条出路：TPU 重连 / "
+                    "手工导入结果包 / 手工切回在线）"
+                )
+                return "", "give_up"
+            log("这门课已翻成离线、任务包正在生成（导包约需数分钟）——本拍不跑，稍后再问")
+            return "", "pending_export"
+        if doc.get("busy"):
+            log(f"别的课正在跑（一拖一）：{doc.get('error') or 'busy'}——本拍不跑，稍后再问")
+            return "", "busy"
+        if doc.get("completed"):
+            log("这门课的当前任务包已跑满（等人停课 / 重导包）——本拍不跑")
+            return "", "completed"
+        if doc.get("not_offline"):
+            log("这门课在 hub 里不是离线（可能被人 pin 成在线）——本拍不跑")
+            return "", "not_offline"
         holder = doc.get("holder") or {}
         left = float(holder.get("expires_in") or 0.0)
         log(
             f"这门课已被 {holder.get('worker_id') or '?'} 持有（{left:.0f}s 后过期）"
             "——本机照旧跑：产物照落，重复的那份回传会被判 duplicate 丢弃"
         )
-    elif code == 404:
-        log("hub 说这门课还没有任务包（先到控制台「导出任务包」）")
-    return ""
+        return "", "held"
+    if code == 404:
+        log("hub 说这门课还没有任务包（人管课：先到控制台「导出任务包」）")
+        return "", "no_pack"
+    return "", "net"
 
 
 def heartbeat_loop(
@@ -1384,6 +1419,7 @@ def resolve_courses(
     *,
     served: dict[str, str] | None = None,
     probe: dict | None = None,
+    skip: set[str] | None = None,
 ) -> list[dict]:
     """本次要跑的课 → `[{"course", "pack_sha256"}]`；**空列表 = 队列为空**（正常的没事干）。
 
@@ -1392,6 +1428,7 @@ def resolve_courses(
     跑两次 = `run_id` 相同 ⇒ 回传全判 duplicate ⇒ 看起来在跑、实际零产出）。
     `probe` 是调用方持有的小字典（`{"unsupported": True}`）：老 hub 只探测**一次**，
     之后不再每轮刷一个必然失败的端点。
+    `skip` = **本会话已放弃**的课（hub 说触发导包已到上界）：别再每轮领一次。
     """
     explicit = _load_deliverable().requested_courses(cfg)
     if explicit:
@@ -1410,6 +1447,9 @@ def resolve_courses(
     for t in tasks:
         course = str(t.get("course") or "")
         if not course or not t.get("claimable"):
+            continue
+        if skip and course in skip:
+            log(f"跳过 {course}：本会话已放弃它（hub 触发导包到上界；人处理后才再领）")
             continue
         pack_doc = t.get("pack")
         sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
@@ -1453,6 +1493,10 @@ def _run_batch(
     """
     rc = 0
     skipped: list[str] = []
+    # 自动交接的两个「不跑」名单（§3.1a/§3.3a）：中间态（等下一拍）与会话放弃。
+    blockers: dict[str, str] = {}
+    gave_up: list[str] = []
+    ran = 0
     for i, course in enumerate(courses):
         rest = courses[i + 1 :]
         log(f"===== [{i + 1}/{len(courses)}] 课程 {course} =====")
@@ -1462,7 +1506,20 @@ def _run_batch(
         lease = ""
         beat: threading.Event | None = None
         if ctx:
-            lease = claim_course(ctx["hub"], ctx["token"], course, ctx["worker"], log)
+            lease, why = claim_course(ctx["hub"], ctx["token"], course, ctx["worker"], log)
+            if why in ("busy", "pending_export", "completed", "not_offline"):
+                # 自动交接的中间态：**本拍不跑**（不是「取不到包」的错误，也不进 skipped ——
+                # 它会在 caller 的下一拍重问；旧口径「一律照旧跑」会在这里白跑一场）。
+                blockers[course] = why
+                log(
+                    f"课程 {course} 本拍不跑（{why}）"
+                    + (f"——继续看下一门：{rest[0]}" if rest else "——等下一拍")
+                )
+                continue
+            if why == "give_up":
+                gave_up.append(course)
+                log(f"课程 {course} 本会话放弃（hub 触发导包到上界）——等下一门/等处理")
+                continue
             if lease:
                 beat = heartbeat_loop(ctx["hub"], ctx["token"], course, lease, log)
         try:
@@ -1493,6 +1550,7 @@ def _run_batch(
                 + (f"剩余 {len(rest)} 门课未执行：{', '.join(rest)}" if rest else "它已是最后一门课")
             )
             return rc
+        ran += 1
         if ctx and shas:
             sha = str(shas.get(course) or "")
             if sha:
@@ -1516,7 +1574,19 @@ def _run_batch(
                 "CFG['task_zip']）→ 重跑本 cell。"
             )
         return rc if rc else 1
-    log(f"全部课程完成（{len(courses)} 门）：{', '.join(courses)}")
+    if leases is not None:
+        # 回填给 `_run_auto`：它据此决定「这拍到底跑了没有」与「下拍跳过谁」。
+        leases["blockers"] = blockers
+        leases["gave_up"] = gave_up
+        leases["ran"] = ran
+    if blockers or gave_up:
+        log(
+            f"本拍结束：跑了 {ran} 门；{len(blockers)} 门等下一拍"
+            f"（{', '.join(f'{c}:{w}' for c, w in blockers.items()) or '无'}）；"
+            f"{len(gave_up)} 门本会话放弃（{', '.join(gave_up) or '无'}）"
+        )
+    else:
+        log(f"全部课程完成（{len(courses)} 门）：{', '.join(courses)}")
     return rc
 
 
@@ -1531,6 +1601,8 @@ def _run_auto(
     """
     served: dict[str, str] = {}
     probe: dict = {}
+    #: 本会话已放弃的课（hub 触发导包到上界）：别再每轮领一次（`resolve_courses(skip=…)`）。
+    gave_up: set[str] = set()
     rc = 0
     mode = str(cfg.get("queue_mode") or "drain").strip().lower()
 
@@ -1550,11 +1622,17 @@ def _run_auto(
     start = time.monotonic()
     idle_since = start
     while True:
-        tasks = resolve_courses(cfg, creds, log, served=served, probe=probe)
+        tasks = resolve_courses(cfg, creds, log, served=served, probe=probe, skip=gave_up)
         if tasks:
             idle_since = time.monotonic()
             hubs = hub_candidates(cfg, creds)
             worker = worker_id_of(_queue_work_dir(cfg), log)
+            leases = {
+                "hub": hubs[0] if hubs else "",
+                "token": str(creds.get("HUB_TOKEN") or ""),
+                "worker": worker,
+                "served": served,
+            }
             batch_rc = _run_batch(
                 cfg,
                 creds,
@@ -1562,15 +1640,22 @@ def _run_auto(
                 keepalive_stop,
                 [str(t["course"]) for t in tasks],
                 multi=len(tasks) > 1,
-                leases={
-                    "hub": hubs[0] if hubs else "",
-                    "token": str(creds.get("HUB_TOKEN") or ""),
-                    "worker": worker,
-                    "served": served,
-                },
+                leases=leases,
                 shas={str(t["course"]): str(t.get("pack_sha256") or "") for t in tasks},
             )
             rc = batch_rc or rc
+            gave_up.update(leases.get("gave_up") or [])
+            raw_blockers = leases.get("blockers")
+            blockers: dict[str, str] = raw_blockers if isinstance(raw_blockers, dict) else {}
+            if not leases.get("ran") and (blockers or leases.get("gave_up")):
+                # 全是自动交接的中间态（导包是分钟级 / 别的课在跑）：**不消耗 idle_wait_sec
+                # 预算**（否则排导包的这几分钟会被当成空转、会话提前收工），但要给自己一个
+                # backoff，别 tight loop 打爆 hub。
+                log(
+                    f"本拍没有可跑的课（{', '.join(sorted(blockers)) or '交接中'}）"
+                    f"—— {poll:.0f}s 后再问（不占 idle 预算）"
+                )
+                time.sleep(poll)
             continue
         if mode != "drain":
             log("队列为空（queue_mode=once）⇒ 收工（rc=0：没活干不是失败）")

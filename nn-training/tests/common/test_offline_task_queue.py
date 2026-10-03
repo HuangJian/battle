@@ -156,17 +156,30 @@ def test_tasks_is_readonly_and_stable(tmp_path: Path) -> None:
     assert dict(hub_server._TASK_PACK_TRIGGERS) == before, "清单不得写触发账本"
 
 
-def test_tasks_hides_online_courses_unless_include_all(tmp_path: Path) -> None:
-    """默认只报离线课；`?include=all`（控制台排障）才给 `not_offline`，且 `claimable=false`。"""
+def test_tasks_shows_unpinned_online_course_but_hides_pinned_one(tmp_path: Path) -> None:
+    """★ 默认清单的候选面（2026-10-03，plan/auto-offline-handoff U1）：
+
+    · **未 pin 的在训课**会出现（允许无包；claim 即触发导包 —— 这是自动交接的唯一入口）；
+    · **人显式管住（pin online）的课**从云机视野里消失；`?include=all`（控制台排障）才给
+      `not_offline`，且 `claimable=false`。
+
+    旧契约是「默认只报离线课」—— 那会恰好把 U1 要的入口藏起来（自动课**本来就没有包**，
+    见 P0-1）。
+    """
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path)
     hub.discover(force=True)
     assert hub.mode_of("c5-gae") == "online"
 
+    rows = _json(_req(base, OFFLINE_TASKS_PATH)[1])["tasks"]
+    assert [r["course"] for r in rows] == ["c5-gae"]
+    assert rows[0]["auto_handoff"] is True and rows[0]["claimable"] is True
+
+    assert hub.set_mode_pinned("c5-gae", "online", True)[0] is True
     assert _json(_req(base, OFFLINE_TASKS_PATH)[1])["tasks"] == []
-    rows = _json(_req(base, OFFLINE_TASKS_PATH + "?include=all")[1])["tasks"]
-    assert [r["state"] for r in rows] == ["not_offline"]
-    assert rows[0]["claimable"] is False
+    rows_all = _json(_req(base, OFFLINE_TASKS_PATH + "?include=all")[1])["tasks"]
+    assert [r["state"] for r in rows_all] == ["not_offline"]
+    assert rows_all[0]["claimable"] is False
 
 
 def test_tasks_candidate_face_is_disk_fact_not_the_course_table(tmp_path: Path) -> None:
@@ -264,11 +277,28 @@ def test_claim_takeover_overrides_a_foreign_lease(tmp_path: Path) -> None:
     assert st == 200 and doc["lease"]["worker_id"] == "w2"
 
 
-def test_claim_needs_a_worker_and_an_existing_pack(tmp_path: Path) -> None:
-    """空 worker = 400（两台会互相顶租约）；没包 = 404（与 task-pack 同口径，带课程表）。"""
-    base, _hub, _srv = _offline_hub(tmp_path)
+def test_claim_needs_a_worker_and_an_existing_pack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """空 worker = 400（两台会互相顶租约）；缺包分两种（2026-10-03，plan/auto-offline-handoff）：
+
+    · **自动候选**（未 pin 的在训课）⇒ 409 + 翻 mode + 触发导包（P0-1：旧的 404 会让
+      「自动课普遍无包」变成死锁，整条自动交接链永不启动）；
+    · **人管课**（pin / 停课残留）⇒ 旧 404（与 task-pack 同口径，带课程表）——不替人决定。
+    """
+    from hub import offline as offline_mod
+
+    monkeypatch.setattr(
+        offline_mod, "trigger_auto_handoff", lambda course, log=None: (True, "ok")
+    )
+    base, hub, _srv = _offline_hub(tmp_path)
     st, doc = _claim(base, worker="")
     assert st == 400 and "worker" in doc["error"]
+    st, doc = _claim(base, worker="w1")
+    assert st == 409 and doc["auto_handoff"] is True and doc["pending_export"] is True
+    assert hub.mode_of("c5-gae") == "offline"
+
+    hub.set_mode_pinned("c5-gae", "offline", True)
     st, doc = _claim(base, worker="w1")
     assert st == 404 and doc["known_courses"] == ["c5-gae"]
 
@@ -421,6 +451,71 @@ def test_resolve_courses_probes_an_old_hub_only_once(monkeypatch: pytest.MonkeyP
     assert probe.get("unsupported") is True
 
 
+def test_resolve_courses_skips_given_up_courses(monkeypatch: pytest.MonkeyPatch) -> None:
+    """本会话放弃的课（hub 触发导包到上界）不再每轮领一次。"""
+    tasks = [
+        {"course": "a", "claimable": True, "pack": {"sha256": "aa" * 32}},
+        {"course": "b", "claimable": True, "pack": {"sha256": "bb" * 32}},
+    ]
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
+    got = offline_boot.resolve_courses({}, {}, lambda _m: None, skip={"a"})
+    assert [t["course"] for t in got] == ["b"]
+
+
+def test_run_batch_does_not_run_while_the_handoff_is_pending(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """自动交接中间态 ⇒ 不建租约、不进 run、不计入失败；只回填给调用方（等下一拍）。"""
+    ran: list[str] = []
+
+    def fake_run(*a: Any, **k: Any) -> int:
+        ran.append("x")
+        return 0
+
+    monkeypatch.setattr(offline_boot, "claim_course", lambda *a, **k: ("", "pending_export"))
+    monkeypatch.setattr(offline_boot, "run_one_course", fake_run)
+    leases = {"hub": "http://hub", "token": "tok", "worker": "w1", "served": {}}
+    rc = offline_boot._run_batch(
+        {}, {}, lambda _m: None, None, ["c5-gae"], multi=False, leases=leases, shas={}
+    )
+    assert rc == 0 and ran == []
+    assert leases["blockers"] == {"c5-gae": "pending_export"}
+    assert leases["ran"] == 0 and leases["gave_up"] == []
+
+
+def test_run_auto_waits_for_the_export_without_burning_idle_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """导包窗口（分钟级）不能被当成空转：全会话不因它提前收工（U2/P0-1）。"""
+    state = {"n": 0}
+
+    def fake_resolve(cfg: dict, creds: dict, log: Any, *, served=None, probe=None, skip=None):
+        state["n"] += 1
+        if state["n"] == 1:
+            return [{"course": "c5-gae", "pack_sha256": ""}]
+        return []
+
+    def fake_batch(cfg, creds, log, stop, courses, *, multi, leases, shas):
+        leases["blockers"] = {"c5-gae": "pending_export"}
+        leases["ran"] = 0
+        leases["gave_up"] = []
+        return 0
+
+    monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
+    monkeypatch.setattr(offline_boot, "_run_batch", fake_batch)
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    lines: list[str] = []
+    rc = offline_boot._run_auto(
+        {"work_dir": str(tmp_path), "queue_mode": "once", "queue_poll_sec": 0},
+        {"HUB_TOKEN": "tok"},
+        lines.append,
+        None,
+    )
+    assert rc == 0
+    assert any("不占 idle 预算" in ln for ln in lines), lines
+
+
 def test_run_refuses_when_course_is_empty_and_auto_discover_is_off(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -554,13 +649,16 @@ def test_claim_and_release_never_raise_on_a_dead_hub(monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(urllib.request, "urlopen", dead)
     lines: list[str] = []
-    assert offline_boot.claim_course("http://hub", "tok", "c5-gae", "w1", lines.append) == ""
+    assert offline_boot.claim_course("http://hub", "tok", "c5-gae", "w1", lines.append) == (
+        "",
+        "net",
+    )
     offline_boot.release_course("http://hub", "tok", "c5-gae", "lease1", lines.append)
     assert any("连不上" in ln for ln in lines), lines
 
 
 def test_claim_course_reports_a_foreign_holder(monkeypatch: pytest.MonkeyPatch) -> None:
-    """409 ⇒ 返回 `""`（照旧跑）+ 一行「已被谁持有、多久后过期」。"""
+    """409「被持有」⇒ `("", "held")`（照旧跑）+ 一行「已被谁持有、多久后过期」。"""
     monkeypatch.setattr(
         offline_boot,
         "_post_json",
@@ -570,5 +668,31 @@ def test_claim_course_reports_a_foreign_holder(monkeypatch: pytest.MonkeyPatch) 
         ),
     )
     lines: list[str] = []
-    assert offline_boot.claim_course("http://hub", "tok", "c5-gae", "w1", lines.append) == ""
+    assert offline_boot.claim_course("http://hub", "tok", "c5-gae", "w1", lines.append) == (
+        "",
+        "held",
+    )
     assert any("w9" in ln and "120" in ln for ln in lines), lines
+
+
+def test_claim_course_maps_auto_handoff_states(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ 二轮评审 P0：409 的每种中间态各成一码（旧口径一律当「被持有」⇒ 无租约进入 run）。
+
+    对码不对文案：`_run_batch`/`_run_auto` 的分流全靠这几个词。
+    """
+    cases: list[tuple[dict, str]] = [
+        ({"busy": True, "error": "busy: c-a 正在 w9 上跑"}, "busy"),
+        ({"pending_export": True}, "pending_export"),
+        ({"pending_export": True, "give_up": True}, "give_up"),
+        ({"completed": True}, "completed"),
+        ({"not_offline": True}, "not_offline"),
+        ({"holder": {"worker_id": "w9"}}, "held"),
+    ]
+    for doc, want in cases:
+        monkeypatch.setattr(
+            offline_boot,
+            "_post_json",
+            lambda url, token, log, *, timeout=0.0, _doc=doc: (409, _doc),
+        )
+        got = offline_boot.claim_course("http://hub", "tok", "c5-gae", "w1", lambda _m: None)
+        assert got == ("", want), (doc, got)

@@ -15,6 +15,7 @@ import type {
 import {
   ActionError,
   type ActionResult,
+  autoOfflineHandoff,
   busy,
   jobIdError,
   markCloudHaltRecovered,
@@ -36,6 +37,7 @@ import {
   stopCourse,
   triggerCloudHalt,
   unfreezeJob,
+  unsetCourseMode,
 } from '../actions'
 import {
   abortEvalBatch,
@@ -363,8 +365,18 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         )
       }
       // ---- 每课 hub 派发模式（R3-2）：热切 + 落意图（起 hub 时回灌）----
+      // ★ 2026-10-03（plan/auto-offline-handoff §3.2）：人的一次开关 = **pin**（该课此后归
+      //   人管，自动交接不再插手）。
       case 'setCourseMode':
         return okResp(await setCourseMode(bodyStr(body, 'course'), bodyStr(body, 'mode')))
+      // ---- 交还自动（三态的 `unset`）：清 pin + 删意图，让该课重回自动交接池 ----
+      case 'unsetCourseMode':
+        return okResp(await unsetCourseMode(bodyStr(body, 'course')))
+      // ---- 自动离线交接（hub 反向调用：离线盘领走无包的在训课之后）----
+      // 这不是控制台客户端的动作：hub（python）POST `/api/autoOfflineHandoff`。
+      // 不写意图、不 pin（二轮 P0-3）——控制台只写它唯一能写的那个键（rollout_src=run）并导包。
+      case 'autoOfflineHandoff':
+        return okResp(await autoOfflineHandoff(bodyStr(body, 'course')))
       // ---- 每课「暂停/恢复」意图（R2d 操作面）：写 tmp/loop-control.json，训练进程每拍读 ----
       // 缺 `paused` 字段 = 暂停（前端只传方向时不必再编一个布尔约定）。
       case 'setCoursePaused':

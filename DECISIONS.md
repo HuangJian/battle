@@ -7016,3 +7016,31 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
   测试 `tests/biz/test_burn_blocks_in_courses.py`（新建）等。
 
 **指针**：全文 `docs/nn/engineering.md` §60（前刀 §59）· plan `plan/burn-rule-in-course-file.plan.md` §9 P1。
+
+## §2026-10-03-goalnn-auto-offline-handoff（2026-10-03，离线盘 claim 即接管：一拖一闸 + 派发状态落盘 + 三态意图表）
+
+- **背景**：Kaggle TPU 排队数小时，开课时无法预判「该不该离线」；「开课时指定离线/在线」只能事后手切，
+  而离线课程在 TPU 上优势极大。用户 2026-10-02 口径 U1-U6（plan/auto-offline-handoff，评审两轮 bf/hy）。
+- **决定**：① 触发点在 **claim**（不是「盘上线」）：清单一律对未 pin 的在训课开放且**允许无包**；
+  claim 无包 = 翻 mode + 控制台反向调用（`/api/autoOfflineHandoff`）导包 + 409；云机侧
+  `claim_course` 返回值升级为 `(token, reason)`，中间态（`busy`/`pending_export`/`completed`/
+  `not_offline`）本拍不跑、不耗 idle 预算，到上界就本会话放弃。② U2「一拖一」做成 **hub 侧不变量**
+  （活租约 ∪ 交接窗口都占闸；release 后自动解除）。③ 派发状态（mode/pin/claim 记账/完成锚）落
+  `<课>/offline-dispatch.json`，重启**优先于启动参数**（数据损坏防线）。④ 控制台意图表**三态**
+  （unset/online/offline）：开课未选模式不推不落意图；人的开关 = `pin=1`；新增「交还自动」
+  （`mode=online&pin=0` + 删意图）。⑤ `eval_on_cloud` 默认 true（ipynb + runtime 两处同值）。
+  ⑥ 完成态锚在**包 sha**（重导即自动解封，不新增状态机）。
+- **被否决**：控制台每轮常驻导包（包体积大 + `plan_sha` 每轮变 = 每次都在制造 404 窗口）；TS 侧写
+  `run_complete`（python 是账本唯一写者，TS 复刻 = 第二个实现源）；「人工切回在线 = pin online」
+  （等于该课永久退出自动逻辑，与 U1「TPU 一上线就能接续」冲突）；检测到盘上线即全切（会收走全部本机
+  采样，且 `recent_n` 在长段期间衰减 ⇒ 双跑）；把自动逻辑放进 hub 调度（`offline_tasks` 仍是零副作用读面）。
+- **落点**：`nn-training/hub/{queue,queue_scope,queue_offline,queue_peer,offline,admin,task_pack}.py` ·
+  `nn-training/remote/offline_boot.py` · `nn-training/ipynb/battle.offline.ipynb` ·
+  `dashboard/src/server/actions/{course-mode,console-state,course-lifecycle}.ts` ·
+  `dashboard/src/server/api/route.ts` · `dashboard/src/stack/hub-admin.ts` · 测试
+  `nn-training/tests/hub/test_auto_handoff.py`（新建，22 例）· `tests/common/test_offline_task_queue.py` ·
+  `tests/remote/test_offline_notebook.py` · `tests/remote/test_offline_eval_wiring.py` ·
+  `dashboard/tests/{course-mode,course-lifecycle}.test.ts`。
+- **门槛如实**：T0（`switch-mode-drops-jobs` 撤单）/ T6（跑满灰横幅走导入链）/ T3 的面板接线（「交还
+  自动」按钮）/ T8 的控制台告警渲染 **未落地**；plan 文档（未跟踪）已按 2026-10-03 实况标注。
+- **指针**：全文 `docs/nn/remote-transport.md` §56 · plan `plan/auto-offline-handoff.plan.md`（§7a 评审处置）。

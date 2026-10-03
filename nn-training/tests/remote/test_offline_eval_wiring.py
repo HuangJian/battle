@@ -320,8 +320,11 @@ def test_argv_carries_cloud_eval_switches(tmp_path: Path) -> None:
     assert "--eval-on-cloud" in argv
     assert argv[argv.index("--eval-slots") + 1] == "6"
     assert argv[argv.index("--eval-game-timeout-sec") + 1] == "120.0"
-    # 关着就不带（缺省 = 不评：不能悄悄替用户打开一个要花算力的开关）
-    off = _argv({"course": COURSE}, tmp_path)
+    # ★ 2026-10-03（plan/auto-offline-handoff U5/T7）：缺省**开**（与 notebook 的 CFG 同值）——
+    #   缺键也要带 `--eval-on-cloud`；显式 `False` 才不带（不能把「设了 False」当成缺省）。
+    on_by_default = _argv({"course": COURSE}, tmp_path)
+    assert "--eval-on-cloud" in on_by_default
+    off = _argv({"course": COURSE, "eval_on_cloud": False}, tmp_path)
     assert "--eval-on-cloud" not in off and "--eval-slots" not in off
 
 

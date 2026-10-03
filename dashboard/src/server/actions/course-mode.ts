@@ -38,7 +38,7 @@ import {
   type TaskBundleInfo,
 } from '../bundles'
 import { loadConsoleState, saveConsoleState } from './console-state'
-import { busy } from './result'
+import { busy, type ActionResult } from './result'
 import { applyTrainModeToConfig } from './train-mode'
 
 export type CourseMode = 'online' | 'offline'
@@ -62,12 +62,13 @@ async function pushMode(
   course: string,
   mode: CourseMode,
   only?: string,
+  pin?: boolean | null,
 ): Promise<string | null> {
   const token = String(cfg.rl?.remote_token ?? '')
   const candidates = only ? [only] : hubCandidates(cfg, course)
   let last: string | null = '没有可试的 hub 地址'
   for (const base of candidates) {
-    last = await hubSetCourseMode(base, token, course, mode)
+    last = await hubSetCourseMode(base, token, course, mode, pin)
     if (last === null) return null
   }
   return last
@@ -97,6 +98,7 @@ const UNKNOWN_COURSE_RE = /需要合法 course|未知课程|unknown course/i
 export async function pushCourseMode(
   course: string,
   mode: string,
+  opts: { pin?: boolean | null } = {},
 ): Promise<{ ok: boolean; message: string }> {
   const c = String(course ?? '').trim()
   const m = String(mode ?? '').trim() as CourseMode
@@ -106,7 +108,7 @@ export async function pushCourseMode(
   }
   const cfg = loadConfig()
   const prev = readCourseModes()[c]
-  const err = await pushMode(cfg, c, m)
+  const err = await pushMode(cfg, c, m, undefined, opts.pin)
   saveConsoleState({ courseModes: { ...readCourseModes(), [c]: m } })
   if (err) {
     return {
@@ -220,8 +222,9 @@ export async function setCourseMode(
       message: `${c} → ${m} 未生效：本机配置写不进去（${e instanceof Error ? e.message : String(e)}）——hub 未动（不留半状态）`,
     }
   }
-  // ② hub 镜像
-  const res = await pushCourseMode(c, m)
+  // ② hub 镜像。★ 2026-10-03（plan/auto-offline-handoff §3.2）：人的一次开关 = **pin**
+  //    （该课此后归人管，自动交接不再插手）；「交还自动」是另一颗钮（`unsetCourseMode`）。
+  const res = await pushCourseMode(c, m, { pin: true })
   // 文案按**合并后**的语义写（不再复用 `pushCourseMode` 那句「只接收 it 权重/指标回传」——
   // 那是旧的半语义：那颗开关现在同时把本机置成「这门课不归本机」，两句话并排会自相矛盾）。
   const head = res.message.includes('已经是')
@@ -351,4 +354,110 @@ export async function restoreCourseModesNote(
   // 不说清会让操作员以为回灌漏了课。
   const skip = skipped.length ? `跳过 ${skipped.length} 门未开课（意图保留，开课即下发）` : ''
   return [head, skip, failed.length ? `失败 ${failed.join('、')}` : ''].filter(Boolean).join('；')
+}
+
+/** **交还自动**（三态的第三态 `unset`）：把一门课重新放回自动交接池。
+ *
+ *  ★ 2026-10-03（plan/auto-offline-handoff §3.2a，二轮 P1-4/P0-2）：「人工切回在线」
+ *  **不等于**「pin online」——后者 = 永久退出自动逻辑（离线盘永不自取），与 U1
+ *  「TPU 一上线就能接续在训课程」直接冲突。本函数做三件事（顺序同 `setCourseMode`）：
+ *
+ *    ① 本机配置：抄在线档（撑离线标记 `run/run_iters`，恢复被 offline 覆写前的源）；
+ *    ② hub：`mode=online&pin=0` —— 清 pin + 清 claim 记账（该课重新可被自动接管）；
+ *    ③ 意图表：**删掉这条**（= `unset`；下次起 hub 不再回灌它）。
+ *
+ *  失败语义：配置写不进去 ⇒ 不推 hub（不留半状态）；hub 没接受 ⇒ 如实报告，但意图照删
+ *  （`unset` 本来就不是要回灌的东西）。
+ */
+export async function unsetCourseMode(course: string): Promise<ActionResult> {
+  const c = String(course ?? '').trim()
+  if (!c) return { ok: false, message: '需要课程（hub 的模式是按课程记的）' }
+  let notes: string[] = []
+  try {
+    notes = applyTrainModeToConfig(c, 'online', { remember: true }).notes
+  } catch (e: unknown) {
+    return {
+      ok: false,
+      message: `${c} 交还自动未生效：本机配置写不进去（${e instanceof Error ? e.message : String(e)}）——hub 未动（不留半状态）`,
+    }
+  }
+  const err = await pushMode(loadConfig(), c, 'online', undefined, false)
+  const table = { ...readCourseModes() }
+  delete table[c]
+  saveConsoleState({ courseModes: table })
+  const head = `${c} 已交还自动交接：离线盘一上线就能领走它（不再是人的决定）`
+  const timing = '★ 轮边界生效：本机在下一个轮边界恢复采样（若它之前在离线档）'
+  const hubNote = err
+    ? `hub 未接受：${err}（起 hub 时不再回灌这门课）`
+    : 'hub 已清 pin + 清 claim 记账'
+  return { ok: !err, message: [head, ...notes, timing, hubNote].filter(Boolean).join('；') }
+}
+
+/** **自动离线交接**：hub → 控制台的反向调用（2026-10-03，plan/auto-offline-handoff §3.4/T3）。
+ *
+ *  触发者不是人：离线盘在 hub 上 claim 了一门**无包**的在训课，hub 翻完 mode 后调这里。
+ *  控制台只做它唯一能写的那一件事——`courses.<课>.rollout_src=run`（本机停采）——并导包。
+ *
+ *  与 `setCourseMode` 的三点差异（刻意，逐条对应 plan 的二轮 P0）：
+ *    ① **不写意图、不 pin**（二轮 P0-3）：这不是人的决定 —— `courseModes` 保持 `unset`，
+ *       否则「起 hub 回灌」会把自动翻的离线又推回 online，把功能整个关掉；
+ *    ② **不自动停课、不推 hub**（hub 已经在临界区里翻完了）；
+ *    ③ 导包走同一张规则表 `autoBundleDecision`（已有包不重导、缺起点权重不导），
+ *       但 `hubAccepted` 恒 true（hub 就是调用方）。
+ *
+ *  返回体就是 hub 日志里那一行 `trigger_note`；配置写不进去 ⇒ `ok:false`（响亮）——
+ *  那半状态（hub 已翻离线、本机仍在采样）由 hub 的 `stalled` 告警面兜住（§3.9）。
+ */
+export async function autoOfflineHandoff(course: string): Promise<ActionResult> {
+  const c = String(course ?? '').trim()
+  if (!c) return { ok: false, message: '需要 course（hub 的自动交接是按课触发的）' }
+  if (!courseEnabled(c)) {
+    return {
+      ok: false,
+      message: `${c} 未开课（停课删了开课标记）——自动交接只接在训的课；hub 侧该课应停在 waiting 等人处理`,
+    }
+  }
+  let notes: string[] = []
+  try {
+    notes = applyTrainModeToConfig(c, 'offline', { remember: true }).notes
+  } catch (e: unknown) {
+    return {
+      ok: false,
+      message: `${c} 自动交接失败：本机配置写不进去（${e instanceof Error ? e.message : String(e)}）——本机仍会采样，与云机双跑的风险由 hub 的停摆告警兜`,
+    }
+  }
+  const valve = Boolean(process.env.BCITY_NO_AUTO_TASK_BUNDLE)
+  const guardReason = exportGuard(c)
+  let bundle = autoBundleDecision({
+    mode: 'offline',
+    hubAccepted: true, // hub 已在临界区翻完 mode 才来这
+    valve,
+    busy: busy.has(TASK_BUNDLE_BUSY_KEY),
+    guardReason,
+    pack: taskBundleInfo(c),
+  })
+  const head = `${c} 已自动切离线（rollout_src=run：本机不跑这门课）`
+  if (bundle.started) {
+    const launched = launchTaskBundleExport(c)
+    if (!launched.ok) {
+      return {
+        ok: false,
+        message: [
+          head,
+          ...notes,
+          `任务包导出未能启动（${launched.message}）——云机会等新包直到停滞告警`,
+          '三条出路：TPU 重连 / 手工导入结果包 / 手工切回在线',
+        ]
+          .filter(Boolean)
+          .join('；'),
+      }
+    }
+    return { ok: true, message: [head, ...notes, launched.message].filter(Boolean).join('；') }
+  }
+  // 没导：规则表说不用导（已有包 / 上一次导出还在跑 / 逃生阀）——都是正常结局；
+  // `guardReason` 非空则是「导不了」（缺起点权重）：那半状态靠 hub 的 stalled 告警兜。
+  return {
+    ok: valve || guardReason === null,
+    message: [head, ...notes, bundle.note].filter(Boolean).join('；'),
+  }
 }
