@@ -51,6 +51,18 @@ def _loop(tmp_path: Path, **kw) -> TrainingLoop:
     return loop
 
 
+@pytest.fixture(autouse=True)
+def _gate_halt_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """门禁停机模式 2026-10-01 起是**平台文件**：本文件一律把它重定向进 tmp_path。
+
+    不重定向就会读仓根 `tmp/gate-halt.json`（那是控制台的活状态：拨到 notify 时本文件的
+    停机断言会变红），回执也会写进本机工作区。
+    """
+    monkeypatch.setenv("NN_GATE_HALT", str(tmp_path / "gate-halt.json"))
+    monkeypatch.setenv("NN_GATE_HALT_APPLIED", str(tmp_path / "gate-halt.applied.json"))
+    monkeypatch.setenv("NN_GATE_HALT_LEG", "local")
+
+
 def test_write_run_complete_schema(tmp_path: Path) -> None:
     p = tmp_path / "training_log.jsonl"
     write_run_complete(p, 80, 80, "正常收官")
@@ -178,3 +190,16 @@ def test_park_claim_failure_never_breaks_parking(
         if line.strip()
     ]
     assert rows and rows[-1]["event"] == "run_complete"
+
+
+def test_node_rollout_is_initialized_at_construction(tmp_path: Path) -> None:
+    """P0（2026-10-02 事故）：`_node_rollout` 必须在 `__init__` 就有初值。
+
+    它此前只在 `step_course_iter` 里赋值 ⇒ `EnginePool` 驱逐后重建的引擎、而调度器队列已走到
+    `ppo`/`cleanup` 时，裸读它 AttributeError ⇒ 该课每秒重启一次、一轮都跑不完
+    （`h4-hurt-f75`/`h4-hurt-f150` 实测：1076 次 `run_start` / **0** 条 `iteration`）。
+
+    初值必须是 `False`（= 本地轮）：即便真读到了早值，也只是把采集判成本地，不改变采集行为。
+    """
+    loop = _loop(tmp_path)
+    assert loop._node_rollout is False  # 既不是 AttributeError，也不是 True

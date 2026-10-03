@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 import sys
 import types
 from collections.abc import Iterator
@@ -116,6 +117,9 @@ def tmp_path(request) -> Path:
     root = Path(__file__).resolve().parents[2] / "tmp" / "pytest-tmp"  # 仓库根 tmp/
     root.mkdir(parents=True, exist_ok=True)
     safe = request.node.nodeid.replace("/", "__").replace("::", "__")
+    # Windows 文件名净化（2026-10-02）：参数化 id 可以合法含 `:`（如 `[c5:]`、`[a:b]`）——
+    # 直接用 nodeid 当目录名会 NotADirectoryError（WinError 267）。全部非法字符换成 `_`。
+    safe = re.sub(r'[<>:"|?*\\]', "_", safe)
     # pid + 毫秒时间戳 + id 三重唯一（2026-09-02）：
     #   * pid：分片并行（nn-gate-shards.py 多进程）时各进程 id 序列相同，无 pid 撞目录；
     #   * 时间戳：Windows PID 循环复用，连续运行可能拿到同 pid → 无时间戳时复用旧目录

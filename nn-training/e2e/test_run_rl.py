@@ -312,6 +312,9 @@ class FakeServer(ThreadingHTTPServer):
         self.slow_first: set[tuple[int, int]] = set()
         self._slowed_once: set[tuple[int, int]] = set()
         self.eval_delay: float = 0.0
+        #: I7 同步物（§46.4）：非 None 时 eval 局的 handler 被按在它上面，直到用例放行
+        #: ——「采集回来时 eval 还在飞」由它**结构性**成立，不再与采集墙钟竞速。
+        self.eval_gate: threading.Event | None = None
         self.eval_dispatched: threading.Event = threading.Event()
         # v3.17 收尾兜底回归：重复派发的副本（竞速输家）在此挂住 dup_hang 秒——
         # 模拟「输家副本落在慢节点且走同步 200 分支」：abandon_event 覆盖不到，
@@ -411,10 +414,17 @@ class FakeAgent(BaseHTTPRequestHandler):
                         break
                     # sleep-ok: 轮询步长（等的是「第二份 fetch 已发生」这个状态）
                     time.sleep(0.05)
-            if q.get("mode") == "eval" and self._srv.eval_delay > 0:
+            gate = self._srv.eval_gate
+            if q.get("mode") == "eval" and (gate is not None or self._srv.eval_delay > 0):
                 self._srv.eval_dispatched.set()  # I7 栅栏：eval 已派发（首局即置位）
-                # sleep-ok: 夹具模拟的工作量：I7 慢 eval（后台消化模拟）
-                time.sleep(self._srv.eval_delay)
+                if gate is not None:
+                    # I7：把「eval 还在飞」变成**同步物**——handler 压在 gate 上不返回，
+                    # 用例先断言「采集已回、eval 还活着」再放行（§46.4）。120s 只是用例
+                    # 崩掉时的防御上界（正常路径由用例在断言后立即 set）。
+                    gate.wait(timeout=120.0)
+                if self._srv.eval_delay > 0:
+                    # sleep-ok: 夹具模拟的工作量：I7 慢 eval（后台消化模拟）
+                    time.sleep(self._srv.eval_delay)
             self.send_response(200)
             self.send_header("Content-Type", "application/octet-stream")
             body = _pack_container(*key, q["wver"], mode=q.get("mode"))
@@ -920,11 +930,11 @@ def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     try:
         traj = tmp_path / "i7"
         traj.mkdir()
-        # 「慢 eval」的注入延迟：判据是「采集完成时 eval 还在飞」（`eval_th.is_alive()`），
-        # 而 round 尾巴（本用例最后那次 `join`）完全由它决定——eval 轮 = 3 stage × 2 局，
-        # 每局 delay。原值 1.0s ⇒ 尾已 ~2.2s（本用例总耗时的 ~85%）。0.5s 下 eval 轮
-        # 仍是采集的 4 倍以上（采集实测 ~0.35s），「在飞」前提不变。
-        srv.eval_delay = 0.5
+        # 「eval 还在飞」用**同步物**保证（§46.4）：FakeServer 把 eval 局的 handler 按在
+        # `eval_gate` 上不返回，用例等采集跑完并断言后再放行。旧版靠 `eval_delay` 与
+        # 采集墙钟竞速——负载下采集被拉长到 eval 轮之后 ⇒ `is_alive()` 假红（2026-10-02
+        # 全量 -n 12 + 外部负载实测；单跑恒绿）。
+        srv.eval_gate = threading.Event()
         args_eval = types.SimpleNamespace(
             **{**vars(args), "eval_games_per_stage": 2, "eval_stages": "0-2"}
         )
@@ -961,9 +971,11 @@ def test_it_eval_deferred(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
             f"I7 collection completes while slow eval in flight ({t_collect}s)",
         )
         check(eval_th.is_alive(), "I7 slow eval still running afterwards (deferred to background)")
+        srv.eval_gate.set()  # 放行：eval 局现在结算；join 证明它在后台真的收了尾
         eval_th.join(timeout=45)
     finally:
-        srv.eval_delay = 0.0
+        if srv.eval_gate is not None:
+            srv.eval_gate.set()  # 断言失败也别把 handler 按满 120s
         srv.shutdown()
 
 

@@ -315,6 +315,53 @@ describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计
     )
   })
 
+  it('★2026-10-02：**一轮都没跑完**的流不得抢走「最新完成轮」（否则节点被误判离线）', () => {
+    // 现场：`h4-hurt-f75` 崩溃循环（1076 次 run_start / **0** 条 iteration），而它的
+    // dist-agent-meta 恰恰是**最新写入**的那个 ⇒ `completedAtMs` 退化成 meta mtime、抢走
+    // winner ⇒ `contribAtBase` 落在它那条**没跑完**的 it1 上 ⇒ 没参与那轮的节点（`self`
+    // 到 it2 才加入）被算成 0 局 ⇒ `nodeHealth(0, 并发)` = `offline` ⇒ pill 显示
+    // 「贡献 0 / 离线」——而它当时是全场贡献最高的节点（9644 局）。
+    // 判据：winner 必须来自**真有完成轮**的流；数字按那轮的逐节点贡献算。
+    withPoolRoot(
+      [
+        {
+          name: 'course-healthy',
+          meta: [metaRow('a1', 2), metaRow('a2', 2), metaRow('a2', 2)],
+          ledger: [iterEvent(2, tsAt(0, '09:00:00'))],
+        },
+        {
+          name: 'course-crash-loop',
+          // 只开跑过 it1 的一点点就崩，账本里**没有** iteration（写文件顺序 = 它 mtime 最新）
+          meta: [metaRowAt('a1', 1, tsAt(0, '10:00:00'))],
+          ledger: [JSON.stringify({ event: 'run_start', time: tsAt(0, '10:00:00') })],
+        },
+      ],
+      () => {
+        const agg = aggregateNodeHistory()
+        expect(agg.latestRound?.dir).toBe('course-healthy') // 有完成轮的胜出（不是 mtime 最新的那个）
+        expect(agg.latestRound?.it).toBe(2)
+        expect(agg.lastContrib.get('a2')).toBe(2) // 真实贡献，而不是被算成 0
+        expect(agg.lastContrib.get('a1')).toBe(1)
+      },
+    )
+  })
+
+  it('★2026-10-02：所有流都没跑完 ⇒ 没有「最新完成轮」（不随便挑一个来充数）', () => {
+    // 消费方拿到空表 ⇒ `lastContrib = -1` = 「无池数据（还没结算过这一轮）」，
+    // 而不是一个**伪 0**（0 会被读成「这台机器一局都没交」，方向正好反了）。
+    withPoolRoot(
+      {
+        meta: [metaRow('a1', 1)],
+        ledger: [JSON.stringify({ event: 'run_start', time: tsAt(0) })],
+      },
+      () => {
+        const agg = aggregateNodeHistory()
+        expect(agg.latestRound).toBeNull()
+        expect(agg.lastContrib.size).toBe(0)
+      },
+    )
+  })
+
   // ── 多流合并 + 逐流 it 不串味（同一 it 在两门课里是两回事） ──
   it('两课的行合并到同一节点；同一 it 各自成桶（逐流水位，不串味）', () => {
     withPoolRoot(

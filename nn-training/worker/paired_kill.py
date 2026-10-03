@@ -9,8 +9,9 @@
 - **同 it 对齐**：只比两臂**都**有读数的 it（每个 it 取**末条**——续腿/重开以最新为准），
   因为配对差 Δ 只有在 `(rotateSeed, it)` 一致时才有意义（§2.5 的配对前提）。
 - **Δ = 本臂 − 对端**（百分点）；负 = 本臂更差。
-- **尾部连续 2 个点 Δ < −3pp** ⇒ 响亮 + 停腿 + 落 `paired_kill` 事件（阈值走执行面
-  `courses.<课>.paired_kill`，缺席用模块常量——与 `kickstart_burn` 同规）。
+- **尾部连续 2 个点 Δ < −3pp** ⇒ 响亮 + 停腿 + 落 `paired_kill` 事件（阈值 2026-10-02 起走
+  **课程文件**的 `paired_kill` 块；块缺席 = 模块缺省——第二刀已删 rl-config 回落读面，
+  与 `kickstart_burn` 同规）。
 
 为什么是「尾部连续」而不是「历史上出现过」：一旦本臂追上，计数必须归零（与
 `biz/breaker.py` 的 KL/熵连击、`biz/kickstart_burn.py` 的低点连击同一语义：中途反弹一次
@@ -26,7 +27,8 @@ from __future__ import annotations
 
 from typing import Any, NamedTuple
 
-#: 连续多少个**对齐**评估点 Δ 都低于阈值才杀臂（执行面常量；rl-config 可覆盖）。
+#: 连续多少个**对齐**评估点 Δ 都低于阈值才杀臂（执行面常量；课程文件 `paired_kill.points` 优先，
+#: 块缺席 = 本常量——2026-10-02 迁移 + 第二刀，见模块头）。
 PAIRED_KILL_POINTS = 2
 
 #: Δ 的阈值（百分点，本臂 − 对端）。3pp 是噪声带之外、又远小于 C 事故里两臂的真实分岔。
@@ -120,18 +122,32 @@ def paired_kill_verdict(
     return PairedKillVerdict(False, streak, delta_pp, it, o, p, True, "")
 
 
-def paired_kill_overrides(dist_cfg: dict | None, course_key: str) -> tuple[float, int]:
-    """执行面阈值覆盖：`courses.<课>.paired_kill.{margin_pp,points}`；缺席 → 常量。
+def _block_dict(block: Any) -> dict | None:
+    """课程止损块 → 普通 dict；None/坏值 → None（认 dict 与 pydantic 块两种形态）。
 
-    与 `kickstart_burn.burn_overrides` 同规：**放 rl-config 不放课程文件**——课程文件参与
-    `course_fp` 血缘（D14），而这是执行面策略（哪条腿该在什么分岔下被杀是运行决策）。
+    读面消费 `args` 上的**启动物化快照**（`flat_overrides` 以 `model_dump()` 落成 dict =
+    restart-only 的冻结面）。
     """
-    block = (((dist_cfg or {}).get("courses") or {}).get(course_key) or {}) if course_key else {}
-    pk = block.get("paired_kill") if isinstance(block, dict) else None
-    if not isinstance(pk, dict):
+    if isinstance(block, dict):
+        return block
+    dump = getattr(block, "model_dump", None)
+    if callable(dump):
+        dumped = dump()
+        return dumped if isinstance(dumped, dict) else None
+    return None
+
+
+def paired_kill_overrides(block: Any) -> tuple[float, int]:
+    """执行面阈值：课程文件 `paired_kill.{margin_pp,points}`——**块存在即权威**；块缺席 → 常量。
+
+    块由 `biz.course_spec.PairedKillBlock` 解析期强校验（脏值拒课）；块存在但字段没写 ⇒
+    模块缺省（第二刀起 rl-config 回落已删，避免「半块 + 半旧值」的第三态）。
+    """
+    d = _block_dict(block)
+    if d is None:
         return (PAIRED_KILL_MARGIN_PP, PAIRED_KILL_POINTS)
-    m = pk.get("margin_pp")
-    p = pk.get("points")
+    m = d.get("margin_pp")
+    p = d.get("points")
     margin = (
         float(m) if isinstance(m, (int, float)) and not isinstance(m, bool) else PAIRED_KILL_MARGIN_PP
     )
@@ -139,34 +155,29 @@ def paired_kill_overrides(dist_cfg: dict | None, course_key: str) -> tuple[float
     return (margin, pts)
 
 
-def paired_kill_self_kill(dist_cfg: dict | None, course_key: str) -> bool:
-    """本臂命中时是否真停（`courses.<课>.paired_kill.self_kill`；缺席/写坏 → True）。
+def paired_kill_self_kill(block: Any) -> bool:
+    """本臂命中时是否真停（课程文件 `paired_kill.self_kill`）；块缺席 → True。
 
     2026-09-25 C-0 事故：对称自杀把**对照臂**杀了（对照落后 = 加权臂领先，正是加权要证明的；
     而终点配对 verdict 需要两条臂都活着）。对照臂设 `self_kill: false`：判据照算、streak
     照落账，只是不停车——"输了"照样记录，"死了"不行。
 
-    只有显式 `False` 才关（缺席保持现状对称行为：已有课程零变化；非 bool 不当 False，
-    与上面 margin/points 的脏值纪律同源）。
+    非 bool 已在解析期拒课（「没写」与「写错」不同形）；块存在但未写 ⇒ True（现状对称行为）；
+    只有显式 `False` 才关。
     """
-    block = (((dist_cfg or {}).get("courses") or {}).get(course_key) or {}) if course_key else {}
-    pk = block.get("paired_kill") if isinstance(block, dict) else None
-    if not isinstance(pk, dict):
+    d = _block_dict(block)
+    if d is None:
         return True
-    v = pk.get("self_kill")
-    return v is not False
+    return d.get("self_kill") is not False
 
 
-def paired_kill_enabled(dist_cfg: dict | None, course_key: str) -> bool:
-    """本课是否开了配对杀臂（`courses.<课>.paired_kill.enabled`；缺席/写坏 → False）。
+def paired_kill_enabled(block: Any) -> bool:
+    """本课是否开了配对杀臂（课程文件 `paired_kill.enabled`）；块缺席 → False。
 
-    2026-09-26 state-init 事故：默认开火把"同 V"当成"配对实验"——1789876303 只是全屋
-    种子流（L1/L3/state-init/未来一切新腿共用），刚出生的腿会被拿去跟已归档的老腿比，
-    连跪即杀。配对杀臂是实验设计（配对 race + 杀规则），必须按课显式 opt-in；
-    关了的守卫连 streak 落账都不写（没开火的枪不记弹道）。
+    opt-in 纪律（state-init 事故）：同 V 只是门派同源，不是配对实验；没开火的枪不记弹道
+    （2026-09-26 state-init 默认开火事故：刚出生的腿被拿去跟已归档的老腿比，连跪即杀）。
     """
-    block = (((dist_cfg or {}).get("courses") or {}).get(course_key) or {}) if course_key else {}
-    pk = block.get("paired_kill") if isinstance(block, dict) else None
-    if not isinstance(pk, dict):
+    d = _block_dict(block)
+    if d is None:
         return False
-    return pk.get("enabled") is True
+    return d.get("enabled") is True

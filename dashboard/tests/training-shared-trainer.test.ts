@@ -203,6 +203,9 @@ describe('② 开课（course-lifecycle）：账本（发现判据）与机器�
           remote_transport: 'pull',
           remote_hub_url: 'https://old.example',
           gate_halt_mode: 'notify', // 2026-10-01 起的残留形态（平台化前的课程级值）
+          // 2026-10-02 第二刀：止损块随腿入库 ⇒ 这两键无读者（课程文件块是唯一来源）
+          kickstart_burn: { mode: 'paired', peer: 'old-peer' },
+          paired_kill: { enabled: true },
         },
       } as unknown as RlConfig['courses']
       writeFileSync(tmpConfig, JSON.stringify(cfg, null, 2))
@@ -211,6 +214,8 @@ describe('② 开课（course-lifecycle）：账本（发现判据）与机器�
       expect(onDisk.remote_transport).toBeUndefined()
       expect(onDisk.remote_hub_url).toBeUndefined()
       expect(onDisk.gate_halt_mode).toBeUndefined()
+      expect(onDisk.kickstart_burn).toBeUndefined()
+      expect(onDisk.paired_kill).toBeUndefined()
       expect(r.removed.length).toBeGreaterThan(0)
       writeFileSync(tmpConfig, JSON.stringify(fixture(), null, 2))
     })

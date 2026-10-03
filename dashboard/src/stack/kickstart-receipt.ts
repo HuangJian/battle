@@ -16,8 +16,9 @@
  *       - 起点 = 文件里**最后一条 it>0 行**的 `winRate`（= 本腿恢复用的权重在前一腿的末次读数）
  *     与 python `kickstart_burn.baseline_reading` 同义，取法也同（文件序末条，不是 max iter：
  *     续腿重评同一 iter 时那一条落在更后面 = 更新的事实）。
- *   · 阈值只有一套：噪声带/点数 = `courses.<课>.kickstart_burn.{margin_pp,points}`
- *     （python 读面 `kickstart_burn.burn_overrides`；缺席即本文件的镜像常量）。镜像常量由
+ *   · 阈值只有一套：**课程文件**的 `kickstart_burn` 块（python 读面
+ *     `worker/kickstart_burn.py::burn_overrides`；块缺席 = python 模块常量镜像——rl-config 回落
+ *     2026-10-02 第二刀已删，DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file）。镜像常量由
  *     `tests/kickstart-receipt.test.ts` 对着 python 源码核对——漂了即红。
  *
  *  **观测永不阻断开课**（训练侧那条对照行同一纪律）：任何读取失败 → 一行说明，不抛。
@@ -33,9 +34,9 @@ import type { RlConfig } from '../core/types'
 
 // ────────────────────────── 镜像常量（权威在 python，测试核对） ──────────────────────────
 
-/** 干烧熔断的噪声带（pp）。权威：`nn-training/biz/kickstart_burn.py::BURN_MARGIN_PP`。 */
+/** 干烧熔断的噪声带（pp）。权威：`nn-training/worker/kickstart_burn.py::BURN_MARGIN_PP`。 */
 export const BURN_MARGIN_PP = 5.0
-/** 干烧熔断的连续点数。权威：`nn-training/biz/kickstart_burn.py::BURN_POINTS`。 */
+/** 干烧熔断的连续点数。权威：`nn-training/worker/kickstart_burn.py::BURN_POINTS`。 */
 export const BURN_POINTS = 3
 /** 参照物 = 本腿自己的 it0。权威：`nn-training/worker/kickstart_burn.py::MODE_BASELINE`。 */
 export const BURN_MODE_BASELINE = 'baseline'
@@ -148,12 +149,20 @@ export function kickstartKnobs(course: string, cfg: RlConfig | null): KickstartK
   }
 }
 
-/** 本课的干烧熔断阈值与参照物（`courses.<课>.kickstart_burn.*`；缺席 = python 常量）。 */
-export function burnThresholds(
-  course: string,
-  cfg: RlConfig | null,
-): { marginPp: number; points: number; mode: string } {
-  const kb = cfg?.courses?.[course]?.kickstart_burn
+/** 本课的干烧熔断阈值与参照物（**课程文件** `kickstart_burn.*`；块缺席 = python 模块常量镜像）。 */
+export function burnThresholds(course: string): { marginPp: number; points: number; mode: string } {
+  // 2026-10-02 迁移 + 第二刀：止损是实验设计、跟课程文件入库（DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file）。
+  // 课程文件块 = **唯一**来源（与执行面 python 同口径）；rl-config 回落读面已删，缺失/解析失败 ⇒ 常量镜像。
+  let file: Record<string, unknown> = {}
+  try {
+    file = readJsoncFile(path.join(curriculaDir(), `${course}.jsonc`)) as Record<string, unknown>
+  } catch {
+    /* 课程文件缺失/解析失败：回常量镜像（真正的拒收判据在 python 侧） */
+  }
+  const raw = file.kickstart_burn
+  const kb = (typeof raw === 'object' && raw !== null ? raw : undefined) as
+    | { margin_pp?: unknown; points?: unknown; mode?: unknown }
+    | undefined
   const m = kb?.margin_pp
   const p = kb?.points
   const mode = kb?.mode
@@ -266,7 +275,7 @@ export function kickstartReceipt(course: string, cfg: RlConfig | null): string[]
     return composeBaselineLines({
       knobs: kickstartKnobs(course, cfg),
       readings: readLedger(logPath),
-      burn: burnThresholds(course, cfg),
+      burn: burnThresholds(course),
       logPath,
     })
   } catch (e) {

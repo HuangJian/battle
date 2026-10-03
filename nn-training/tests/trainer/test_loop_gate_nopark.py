@@ -58,6 +58,18 @@ def halt_calls(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
     return calls
 
 
+@pytest.fixture(autouse=True)
+def _gate_halt_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """门禁停机模式 2026-10-01 起是**平台文件**：本文件一律把它重定向进 tmp_path。
+
+    不重定向就会读仓根 `tmp/gate-halt.json`（那是控制台的活状态：拨到 notify 时本文件的
+    停机断言会集体变红），回执也会写进本机工作区——观测面同样该按夹具走。
+    """
+    monkeypatch.setenv("NN_GATE_HALT", str(tmp_path / "gate-halt.json"))
+    monkeypatch.setenv("NN_GATE_HALT_APPLIED", str(tmp_path / "gate-halt.applied.json"))
+    monkeypatch.setenv("NN_GATE_HALT_LEG", "local")
+
+
 def test_remediate_never_parks_and_halts_cloud(
     tmp_path: Path, halt_calls: list[bool]
 ) -> None:

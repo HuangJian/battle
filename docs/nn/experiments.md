@@ -7,6 +7,84 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 ---
 
+## §75 x20-advanced 开腿设计冻结（B 底包 + 新 5 项 human-gap 定价，单腿无对照）（2026-10-02）
+
+> 决策 `DECISIONS.md` §2026-10-02-goalnn-x20-advanced-design · 课程
+> `nn-training/curricula/x20-advanced.jsonc`（头注 = 冻结契约）· 契约测试
+> `nn-training/tests/biz/test_x20_advanced.py` · 校准脚本 `tmp/x20adv-calib.py`。
+> 用户原话：基于最佳权重、5 项全上、大样本多 epoch 无 it 限制、只比杀敌数与过关率、不做单变量对比。
+
+- **校准**：human 160 vs it175 160（c20 同 seed）：kills 17.494 vs 6.162、通关 160/160 vs
+  15/160；Δacc +0.2062、ΔE[d|hit] +1.8794、ΔhurtRate −0.05478、ΔenclRate −0.28600、
+  ΔcornerRate −0.14274；killEV=18.487（全与 plan §1.4 互验；新列豁免拌入差异按保守方向记档）。
+- **形式偏离**：计数项 → 比值/速率形（x20 horizon 可变，计数形正价给苟活发钱）；命中数
+  double-count（≡enemyHits）已明示并保留。
+- **剂量**：f=7.5% killEV/项 ⇒ wAcc=6.72 / wDist=0.738 / wHurt=25.3 / wEncl=4.85 /
+  wCorner=9.71（五项 37.5%；起点净 +0.21/局，无冲击）。
+- **预算/判据**：target 49152（ragged=0）、epochs 8、iters 400/max_hours 48（机械上限）；
+  终判 kills/局 + 通关率 @日常终点 + 414000 段 800 局 vs it175；熔断只留 kl≥0.075×3 轮记录；
+  MDE/Q/paired burn 不适用（单腿）。
+- 起点 it175（kickstart_ref=false，opt fresh）；level ladder-c20-lives1；dense-only terminal {}。
+
+---
+
+## §74 E1 段A收官（机制无效）+ E2/E3a 开腿设计冻结（f=7.5%/15%、MDE 实测、段B/C）（2026-10-02）
+
+> 决策 `DECISIONS.md` §2026-10-02-goalnn-e2-e3a-design · 课程
+> `nn-training/curricula/h4-{hurt,encl}-{c0,f75,f150}.jsonc`（头注 = 冻结契约）· 契约测试
+> `nn-training/tests/biz/test_h4_{hurt,encl}_courses.py` · 锚脚本 `tmp/aim-e2e3a-anchor.py` ·
+> E1 段A证据 `tmp/e1-frozen/segA-it{30,35,40}.jsonl(.run/)` + 判决脚本 `tmp/aim-segA-judge.py` /
+> `tmp/aim-segA-guard.py`。**口径纪律**：剂量/MDE 数字全部由校准语料实测复算（E1 同法），不许拍脑袋。
+
+### ① E1 收官输入（本节设计的依据；段A 864001、三臂同 seed 配对、900 局/臂）
+
+- pooled dE[d|hit]：k10−c0 = **−0.037（反号）**、k25−c0 = **+0.029（< kill 线 0.039）** ⇒ **机制无效**
+  （且不得改记剂量结论）；Q = 0.25 / 4.14 ≤ 5.99 ⇒ pooled 报告成立；pooled 主分不劣
+  （dWin +0.002/+0.008）；开火量两臂 it40 反降 3–4% ⇒ 无刷量污染。
+- 记档不进判决：it40 k25 单点 +0.114（未过单点 MDE≈0.137、6 比较未校正、同点主分 dWin−0.043/
+  dScore−0.032 破 −3pp 线）⇒ 噪声点，不得挑点；k25 `kickstart_burn` streak 1（it31）→ it36
+  反弹清零（c0 滞后期错位比较，不作数），从未 ABORT。
+- E1 开腿记录本身（2026-10-02 三臂开课）见 `DECISIONS.md` §2026-10-02-goalnn-e1-aim-open；
+  本节此前在 `docs/nn.progress.md` §3.5 索引中占位（§74）——现以本节兑现（含收官 + 新腿设计）。
+
+### ② 剂量锚（b0it30/35/40 pooled n=600，同源 `tmp/aim-calib/...run/eval_log.jsonl`）
+
+| 量 | 实测 | 用途 |
+|---|---|---|
+| E[hurtWeight/局] | 39.4767 | E2 rate |
+| E[enclWeightTicks/(ticks+1)] | 0.209396 | E3a rate |
+| E[kills/局] / killEV | 3.6033 / 10.810 | 两腿共用（与 E1 同数复现，交叉验证） |
+| E[d\|hit] / shotsRate / dmg/局 | 2.9284 / 0.015238 / 99.07 | 复现 E1 锚（2.9284/28.473/10.810），锚链未漂 |
+
+- E2：wHurt = f·killEV/rate ⇒ **0.0205（f=7.5%，税 EV 0.809）/ 0.0411（f=15%，税 EV 1.622）**；
+  wDmg 税 EV 2.972/局作量级对照（不淹没）；前置门 r_within=0.796（pooled 复核 0.798）⇒ **叠加**。
+- E3a：wEncl = f·killEV/rate ⇒ **3.87（f=7.5%，税 EV 0.810）/ 7.74（f=15%，税 EV 1.621）**
+  （数值 > wKill 是速率口径所致，可比量是税 EV）；复测门已过（§5.5），E3b 不自动放行。
+
+### ③ MDE（b0it30-vs-b0it35 同 seed 200 配对 sd，MDE80_900 = 2.8016×sd/30，E1 同法）
+
+| 主读数 | 配对 sd | MDE80_900 | kill 线 |
+|---|---|---|---|
+| hurtWeight/局（E2） | 62.54 | **5.84/局（~13% rel）** | **2.92/局** |
+| enclWeightTicks/(ticks+1)（E3a） | 0.22923 | **0.0214（~10% rel）** | **0.0107** |
+| shotsRate（方法复核） | 0.00339 | 0.00032（2.03% rel，与 E1 的 0.0003/2.0% 互验） | — |
+
+- 低于 kill 线 ⇒ 判无效，不得记剂量结论（E1 同纪律）。
+- 负价腿无刷量线（备忘）：负价激励是少暴露而非多开火，无刷量方向；退化由 stop/hold/kills 守卫捕。
+
+### ④ 腿表（开课顺序：E2 先、E3a 后；人在控制台点；每波自带对照臂）
+
+| 波 | 三臂 | 判据段 | seed | peer / 配对 seed |
+|---|---|---|---|---|
+| E2 | h4-hurt-c0 / f75 / f150 | 段B 865001–865300 @it30/35/40×300 局 | 20261003 | h4-hurt-c0（rl-config 显式） |
+| E3a | h4-encl-c0 / f75 / f150 | 段C 866001–866300 @it30/35/40×300 局 | 20261004 | h4-encl-c0（rl-config 显式） |
+
+- 段B/C 与日常段/校准段/Wave 段/E1 段A 均不相交（§15.1）；起点 h4-stop.it60、预算 40 轮/workers 8、
+  ppo/schedule 与 E1 逐字同；新 out/traj（§15.5）。
+- E4 依赖 E1–E3 最优子集（E1 为空，不产生输入）；E3b 待用户定夺（加对照/加局数）后另起。
+
+---
+
 ## §73 伤害「时间形态」E0 判红 ⇒ **本族退场**（低血段承伤 87% 发生在「跨线那一击」；K 表三形状全不过）（2026-09-30）
 
 > 立项预注册 = `plan/damage-time-form.plan.md`（§5.1 读数 / §5.2 判决 / §5.3 偏差）· 决策

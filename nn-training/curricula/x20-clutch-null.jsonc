@@ -64,6 +64,12 @@
   "paired_rotate_seed": 20260921,
   "warmup_iters": 0,
 
+  // ── 止损：对照臂永不自杀（2026-10-02 起随腿入库，本块 = 唯一权威；判据本体在
+  //    nn-training/worker/paired_kill.py）────────────────────────────────────
+  //   `self_kill: false`（DECISIONS §2026-09-25-clutch-null-kill，it46 误杀事故）：
+  //   若本课将来显式开火，命中也只记录不停车——杀对照臂会撕毁终点配对 verdict。
+  "paired_kill": { "self_kill": false },
+
   // ── 预算（两臂共享集群，各约半速）────────────────────────────────────────
   "iters": 0,
   "max_hours": 12,

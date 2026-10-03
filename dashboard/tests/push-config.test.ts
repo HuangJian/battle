@@ -198,8 +198,16 @@ describe('课程不带传输/节点指针（防回流）', () => {
     // 真正要防的是「有人又去读它」：本模块除删除外不得出现对这些键的取值。
     expect(knobs).toContain('LEGACY_COURSE_KEYS')
     expect(knobs).not.toMatch(/\[('|")remote_transport\1\]/)
-    // `gate_halt_mode`（2026-10-01）：与上面三个同规——只在清理名单里出现，**不当读面**。
-    for (const key of ['push_node_url', 'remote_transport', 'remote_hub_url', 'gate_halt_mode']) {
+    // `gate_halt_mode`（2026-10-01）与止损两键（`kickstart_burn`/`paired_kill`，2026-10-02 第二刀）
+    // 同规——只在清理名单里出现，**不当读面**（止损的唯一读面 = 课程文件块）。
+    for (const key of [
+      'push_node_url',
+      'remote_transport',
+      'remote_hub_url',
+      'gate_halt_mode',
+      'kickstart_burn',
+      'paired_kill',
+    ]) {
       const reads = knobs.match(new RegExp(`\\.${key}\\b`, 'g')) ?? []
       expect(reads.length).toBe(0)
     }

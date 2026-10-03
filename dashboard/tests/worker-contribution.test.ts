@@ -169,9 +169,15 @@ function withPoolRoot(
 const metaRow = (node: string, ms: number, mode = 'rollout', ok = true, it = 1): string =>
   JSON.stringify({ node, mode, ok, it, elapsedSec: 1.2, ts: tsFromMs(ms) })
 
+/** 固定时钟（与 server-pool-history.test.ts 同规）：bun test 的 TZ 是 UTC，墙钟 `now - 45min`
+ *  在 UTC 午夜后 45 分钟内落到**昨天** ⇒ 「日窗应含 45 分钟前的局」两条用例假红
+ *  （2026-10-03 08:0x HKT 实测；此前绿只是恰好跑在 UTC 日内）。取固定正午：任何 TZ 下
+ *  ±45 分钟都不跨天，且不锚墙钟。 */
+const FIXED_NOW = Date.parse('2026-09-15T12:00:00')
+
 describe('pool-history 滚动窗与课维度（plan §4.4 / §4.3）', () => {
   it('滚动窗只计窗内事件：45 分钟前的局进日窗但不进「近 30 分钟」', () => {
-    const now = Date.now()
+    const now = FIXED_NOW
     withPoolRoot(
       [
         {
@@ -201,7 +207,7 @@ describe('pool-history 滚动窗与课维度（plan §4.4 / §4.3）', () => {
   })
 
   it('课维度：day/rolling 两种窗口都按课名（流目录首段）切，不用 it', () => {
-    const now = Date.now()
+    const now = FIXED_NOW
     withPoolRoot(
       [
         {

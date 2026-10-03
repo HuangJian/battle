@@ -61,6 +61,7 @@ import {
   stopCourse,
 } from '../src/server/actions/course-lifecycle'
 import { COURSE_ENABLE_MARKER } from '../src/stack/courses'
+import { pruneNoiseCourses } from '../src/stack/course-knobs'
 import { readLoopControl, setCoursePaused } from '../src/server/actions/loop-control'
 import * as actions from '../src/server/actions'
 
@@ -414,9 +415,48 @@ describe('stopCourse：非破坏停课（暂停意图 + hub 置离线）', () =>
     expect(readFileSync(path.join(TRAJ, COURSE, 'training_log.jsonl'), 'utf-8')).toBe(before)
     expect(r.detail!.join('\n')).toContain('队列与账本一个字不动')
     // ★ 2026-09-24（plan §2.2 F9）：停课**不是**「云机接手」——它的 hub 推送走 `pushCourseMode`
-    //（只推 hub + 落意图），绝不动 `courses.<课>`。误译成写 run/run_iters 会让「停课」把本机
-    // 采样也关掉（而停课的定义是非破坏：随时开课接着跑）。
+    //（只推 hub + 落意图），绝不把停课误译成写 run/run_iters（那会让「停课」把本机采样也关掉，
+    // 而停课的定义是非破坏：随时开课接着跑）。
+    // ★ 2026-10-02（用户口径）：停课会**清残留**（`rollout_src='local'` 缺省档 + 空节点整条删）
+    // ——只剃无信息量的键；run/run_iters 那对与 node/auto 是显式语义，一个字不动（见下两条）。
     expect(courseKeys(COURSE)).toEqual({})
+  })
+
+  it('★ 2026-10-02 用户口径：停课带走 `rollout_src="local"`（缺省档不留痕）；空节点整条删', async () => {
+    seedCourseKnobs({ rollout_src: 'local' })
+    const r = await stopCourse(COURSE)
+    expect(r.ok).toBe(true)
+    const raw = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
+      courses?: Record<string, unknown>
+    }
+    expect(raw.courses?.[COURSE]).toBeUndefined() // 不是 {}——剃空后节点整条删
+    expect(r.detail!.join('\n')).toContain('rl-config 清理')
+  })
+
+  it('停课清理：本就空的 `{}` 节点也整条删（幻影行直接消失）', async () => {
+    seedCourseKnobs({})
+    await stopCourse(COURSE)
+    const raw = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
+      courses?: Record<string, unknown>
+    }
+    expect(raw.courses?.[COURSE]).toBeUndefined()
+  })
+
+  it('停课清理只剃缺省档：node/auto/run 与共存的其它键原样保留', async () => {
+    seedCourseKnobs({ rollout_src: 'node' })
+    await stopCourse(COURSE)
+    expect(courseKeys().rollout_src).toBe('node')
+    seedCourseKnobs({ rollout_src: 'auto' })
+    await stopCourse(COURSE)
+    expect(courseKeys().rollout_src).toBe('auto')
+    seedCourseKnobs({ rollout_src: 'run', run_iters: -1 })
+    await stopCourse(COURSE)
+    expect(courseKeys()).toMatchObject({ rollout_src: 'run', run_iters: -1 })
+    // local + 别的键 ⇒ 只剃 local，节点保留
+    seedCourseKnobs({ rollout_src: 'local', slot: 2 })
+    await stopCourse(COURSE)
+    expect('rollout_src' in courseKeys()).toBe(false)
+    expect(courseKeys().slot).toBe(2)
   })
 
   it('可逆：停课 → 开课把暂停意图清掉（否则「开了课但不推进」）', async () => {
@@ -440,6 +480,44 @@ describe('stopCourse：非破坏停课（暂停意图 + hub 置离线）', () =>
 
   it('空课程 ⇒ 拒绝（停课是按课程记的）', async () => {
     await expect(stopCourse('')).rejects.toThrow(/需要课程/)
+  })
+})
+
+// ────────────────────────── ③′ 存量噪声一次性清理（2026-10-02 第二刀 P1） ──────────────────────────
+//
+// 停课清理只治「停」那一刻的课；存量盘上积着一批开课弹窗历史口径直写的纯 `rollout_src:'local'`
+// 与早期空壳（`{}`）——它们描述的是缺省行为，留着只会让读面（和人）以为「这课配过什么」。
+
+describe('pruneNoiseCourses：存量噪声清理（纯 local / 空壳 / 无读者旧键）', () => {
+  it('剃纯 local + 空壳 + 无读者旧键；显式 node/auto/run 与其它键一个字不动；幂等', () => {
+    const seeded = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
+      courses?: Record<string, Record<string, unknown>>
+    }
+    seeded.courses = {
+      'noise-local': { rollout_src: 'local' },
+      'noise-empty': {},
+      'noise-legacy': { rollout_src: 'local', kickstart_burn: { mode: 'paired' } },
+      'keep-run': { rollout_src: 'run', run_iters: -1 },
+      'keep-node': { rollout_src: 'node', slot: 2 },
+      'keep-mixed': { rollout_src: 'local', slot: 3 },
+    }
+    writeFileSync(process.env.BCITY_RL_CONFIG!, JSON.stringify(seeded, null, 2))
+
+    const removed = pruneNoiseCourses()
+    expect(removed.join('\n')).toContain('courses.noise-local')
+    const cfg = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
+      courses?: Record<string, Record<string, unknown>>
+    }
+    // 纯噪声：整条删（legacy 剃完为空 ⇒ 同样整条删）
+    expect(cfg.courses?.['noise-local']).toBeUndefined()
+    expect(cfg.courses?.['noise-empty']).toBeUndefined()
+    expect(cfg.courses?.['noise-legacy']).toBeUndefined()
+    // 显式语义与其它键原样保留
+    expect(cfg.courses?.['keep-run']).toEqual({ rollout_src: 'run', run_iters: -1 })
+    expect(cfg.courses?.['keep-node']).toEqual({ rollout_src: 'node', slot: 2 })
+    expect(cfg.courses?.['keep-mixed']).toEqual({ slot: 3 })
+    // 幂等：再跑一次一字未动（返回空清单）
+    expect(pruneNoiseCourses()).toEqual([])
   })
 })
 

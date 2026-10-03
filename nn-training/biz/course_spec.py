@@ -602,6 +602,106 @@ class StateInitBlock(BaseModel):
         return self
 
 
+#: `kickstart_burn.mode` 的合法值域（与 `worker/kickstart_burn.py::MODES` 同源）。
+#: biz 不能 import worker（向上边）⇒ 字面量在这边冻结，由 `tests/worker/test_kickstart_plan.py` 对账。
+KICKSTART_BURN_MODES: tuple[str, ...] = ("auto", "baseline", "paired")
+
+
+def _margin_pp_or_raise(v: Any) -> float | None:
+    """止损块共有字段 `margin_pp`：None = 未指定；否则必须**有限且 > 0** 的数字（脏值拒课）。"""
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise ValueError(f"margin_pp={v!r} 必须是数字")
+    f = float(v)
+    if not math.isfinite(f) or f <= 0:
+        raise ValueError(f"margin_pp={v!r} 必须有限且 > 0（百分点，5.0 = 5pp）")
+    return f
+
+
+def _points_or_raise(v: Any) -> int | None:
+    """止损块共有字段 `points`：None = 未指定；否则必须**正整数**（脏值拒课）。"""
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+        raise ValueError(f"points={v!r} 必须是正整数（连续多少个评估点）")
+    return v
+
+
+class KickstartBurnBlock(BaseModel):
+    """课程 `kickstart_burn` 块（**结果面**干烧熔断的参照物/阈值；判据本体在 `worker/kickstart_burn.py`）。
+
+    2026-10-02 从 rl-config 的 `courses.<课>.kickstart_burn` 迁入课程文件（DECISIONS
+    §2026-10-02-goalnn-burn-rule-in-course-file）：止损是**实验设计**（预注册的一部分），
+    跟课程文件一起入库；rl-config 那份的兼容回落读面（`legacy_*`）已随第二刀（2026-10-02）
+    删除——本块是唯一来源。字段名与旧读函数逐字同名；全字段可选，`None` = 未指定 → worker 侧
+    模块常量（biz 不复制数值）。解析期强校验（坏值拒课，不静默拿坏配置去停腿）；
+    块**不进** `corpus_identity_fp`（语料身份 ≠ 判据规则）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    #: 参照物档：auto（能解析出唯一同 V 对端 → paired，否则 baseline）/ baseline（本腿 it0）/ paired（对端同 it）。
+    mode: Literal["auto", "baseline", "paired"] | None = None
+    #: 显式对端课程名（多臂家族里「谁是控」是实验设计，机器不替人挑）。
+    peer: str | None = None
+    #: 「低于参照物多少 pp」才算（worker 模块常量 BURN_MARGIN_PP）。
+    margin_pp: float | None = None
+    #: 连续多少个评估点仍低才停腿（worker 模块常量 BURN_POINTS）。
+    points: int | None = None
+
+    @field_validator("peer")
+    @classmethod
+    def _peer_nonempty(cls, v: str | None) -> str | None:
+        if v is not None and not v.strip():
+            raise ValueError("kickstart_burn.peer 不得为空串（要么写对端课名，要么删键）")
+        return v
+
+    @field_validator("margin_pp", mode="before")
+    @classmethod
+    def _margin(cls, v: Any) -> Any:
+        return _margin_pp_or_raise(v)
+
+    @field_validator("points", mode="before")
+    @classmethod
+    def _points(cls, v: Any) -> Any:
+        return _points_or_raise(v)
+
+
+class PairedKillBlock(BaseModel):
+    """课程 `paired_kill` 块（配对**中点杀臂**；判据本体在 `worker/paired_kill.py`）。
+
+    与 `KickstartBurnBlock` 同规（2026-10-02 迁移；两个独立判据，不合成一块）。
+    `enabled` 缺席 = **关**（opt-in 纪律：同 V 只是门派同源，配对实验必须按课显式声明）；
+    `self_kill` 缺席 = True（与现状对称行为一致；对照臂显式 false = 永不自杀）。
+    非 bool 一律拒课——「没写」与「写错」必须长得不一样（不静默翻成 True/False）。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    self_kill: bool | None = None
+    margin_pp: float | None = None
+    points: int | None = None
+
+    @field_validator("enabled", "self_kill", mode="before")
+    @classmethod
+    def _bool_only(cls, v: Any) -> Any:
+        if v is not None and not isinstance(v, bool):
+            raise ValueError(f"paired_kill 布尔字段收到 {v!r}（只认 true/false）")
+        return v
+
+    @field_validator("margin_pp", mode="before")
+    @classmethod
+    def _margin(cls, v: Any) -> Any:
+        return _margin_pp_or_raise(v)
+
+    @field_validator("points", mode="before")
+    @classmethod
+    def _points(cls, v: Any) -> Any:
+        return _points_or_raise(v)
+
+
 class CourseConfig(BaseModel):
     """课程配置文件（`nn-training/curricula/*.jsonc`）。
 
@@ -715,6 +815,12 @@ class CourseConfig(BaseModel):
     #: 它**不进** `corpus_identity_fp`（ref/优化器语义 ≠ 「一个样本是什么」，进去会让
     #: 全体课程指纹漂移）——见 `tests/worker/test_kickstart_plan.py` 的断言。
     kickstart_init: float | None = None
+    # ---- 结果面止损块（2026-10-02 从 rl-config 迁入课程文件；DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file）----
+    #: 干烧熔断（参照物/阈值）。缺席 = worker 模块常量（第二刀后 rl-config 回落已删）；**不进** corpus_identity_fp。
+    #: restart-only（判据规则 mid-run 改 = 判读窗口中途换口径；读面消费 args 上的启动物化快照）。
+    kickstart_burn: KickstartBurnBlock | None = None
+    #: 配对中点杀臂。缺席 = 默认关（显式 opt-in 才判；第二刀后 rl-config 回落已删）。
+    paired_kill: PairedKillBlock | None = None
     #: demo 混 batch（x20 后续）：demo bank npz 路径（仓库相对，如
     #: `nn-training/data/human-x20-corpus/demo_bank.npz`）；"" = 关闭，老行为逐字节不变。
     #: 与 kickstart_init 同待遇：**不进** `corpus_identity_fp`（loss 侧数据 ≠ 「rollout
@@ -949,6 +1055,12 @@ class CourseConfig(BaseModel):
             # （P3 的 `biz/cmd.build_rollout_cmd`）只要 JSON 可序列化的数据——`echo_config`
             # 也会 json.dumps 它，pydantic 模型对象在那里直接炸。
             out["state_init"] = self.state_init.model_dump()
+        if "kickstart_burn" in explicit and self.kickstart_burn is not None:
+            # 止损块 → args（dict）：这是 **restart-only 的冻结面**——读面消费 args 的启动快照，
+            # 热加载不写回它（`biz/hot_reload.RESTART_ONLY_FIELDS`），mid-run 编辑只记「停止→启动后生效」。
+            out["kickstart_burn"] = self.kickstart_burn.model_dump()
+        if "paired_kill" in explicit and self.paired_kill is not None:
+            out["paired_kill"] = self.paired_kill.model_dump()
         return out
 
 

@@ -31,7 +31,8 @@ def corpus_identity_fp(course: CourseConfig) -> str:
     dodge / reward(formula+params+terminal+scheme)，以及**激活时**的
     `paired_rotate_seed`（配对 rotateSeed，2026-09-21 §2）与 `target_transitions`。
     **刻意排除** iters/max_hours/eval_*/out/traj/bc/optimizer/schedule 等预算、测量、
-    路径与优化器键——这些改动不构成语料混入，mid-run 编辑课程不得触发 D14 拒收
+    路径与优化器键、以及 2026-10-02 迁入的 `kickstart_burn`/`paired_kill` 止损块——那些是
+    **判据/预算**，不决定「一个样本是什么」；这些改动不构成语料混入，mid-run 编辑课程不得触发 D14 拒收
     （DECISIONS §2026-09-13-level-extraction · 全文 → docs/nn/training-stack.md §25 的配置修改分类学）。哈希**解析后**的值：
     内联 stages 与 level 引用同形同指纹；关卡文件内的注释/格式变动不影响身份。
 

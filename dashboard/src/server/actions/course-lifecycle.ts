@@ -18,6 +18,9 @@
  *    · 停课 = **非破坏**：写暂停意图（`tmp/loop-control.json`）+ 该课 hub 置 offline。
  *      队列与账本一个字不动，随时「开课」恢复（用户 2026-09-20 定案；不做「下架账本」
  *      ——那会让 iter/队列/账本等阅读面一起消失）。
+ *      ★ 2026-10-02（用户口径）：顺手清理本课已无信息量的 rl-config 残留
+ *      （`rollout_src='local'` 缺省档 + 空节点整条删；`pruneStoppedCourseConfig`），
+ *      显式 `node`/`auto`/`run` 一个字不动。
  */
 
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'fs'
@@ -34,7 +37,7 @@ import {
   resolveArchivedSeedPath,
   seedWeightsFromBc,
 } from '../../stack/courses'
-import { pruneLegacyCourseKnobs } from '../../stack/course-knobs'
+import { pruneLegacyCourseKnobs, pruneStoppedCourseConfig } from '../../stack/course-knobs'
 import { kickstartReceipt } from '../../stack/kickstart-receipt'
 import { pairedSeedReceipt } from '../../stack/paired-seed-receipt'
 import { remoteExecutionFace } from '../../stack/push-config'
@@ -467,6 +470,10 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
  *  远端派发也一起收（否则云机仍会领走队列里已入队的 iter/ppo job，而操作员以为停了）。
  *  注：离线课那条腿 2026-09-25 退役后它已无队列项——云机上正在跑的那份只能由操作员在云机侧停。
  *  课程表 / 账本 / 队列一律不动：恢复走「开课」。
+ *
+ *  ★ 2026-10-02（用户口径）：停课顺手**清残留**——`courses.<课>.rollout_src='local'`
+ *  （缺省档不留痕）与清空的课程节点整条删（`course-knobs.ts::pruneStoppedCourseConfig`）。
+ *  显式 `node`/`auto`/`run` 与任何训练语义键不动——这是停课唯一的配置写面。
  */
 export async function stopCourse(
   course: string,
@@ -477,6 +484,10 @@ export async function stopCourse(
     const c = String(course ?? '').trim()
     if (!c) throw new ActionError('需要课程（停课是按课程记的，见顶部课程选择）')
     validateCourseName(c)
+    // ⓪ **先清残留**（2026-10-02 用户口径）：`rollout_src='local'` 缺省档 + 空节点整条删。
+    //    排在最前：这是唯一可能抛的一步（`saveConfig` 容量/槽位守卫）——写不进去就整体中止，
+    //    零副作用（标记/暂停/hub 都还没动）。
+    const pruned = pruneStoppedCourseConfig(c)
     // ① **删开课标记**（训练侧/hub 靠它认「在训」）：不删它，调度器下一拍又把这门课拉起来
     //    （发现式进程只认盘上事实，控制台说什么都没用）。
     const marker = courseEnableMarkerPath(c)
@@ -487,6 +498,7 @@ export async function stopCourse(
     // ③ hub 该课置 offline（远端也不再实时派发）
     const hub = await pushHubMode(c, 'offline', opts.hubMode)
     const notes = [
+      ...(pruned.length > 0 ? [`rl-config 清理：${pruned.join('；')}`] : []),
       hadMarker
         ? '已删开课标记 training-enabled.txt（训练侧不再把这门课当在训）'
         : '本课本就没有开课标记',

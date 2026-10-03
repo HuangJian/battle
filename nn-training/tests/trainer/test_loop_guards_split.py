@@ -48,6 +48,20 @@ NN_ROOT = Path(__file__).resolve().parents[2]
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
 
+
+@pytest.fixture(autouse=True)
+def _gate_halt_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """门禁停机模式 2026-10-01 起是**平台文件**：本文件一律把它重定向进 tmp_path。
+
+    不重定向就会读仓根 `tmp/gate-halt.json`（那是控制台的活状态：拨到 notify 时
+    `test_patch_anchor_really_intercepts_the_cloud_halt` 等停机断言会变红），回执也会写进
+    本机工作区。
+    """
+    monkeypatch.setenv("NN_GATE_HALT", str(tmp_path / "gate-halt.json"))
+    monkeypatch.setenv("NN_GATE_HALT_APPLIED", str(tmp_path / "gate-halt.applied.json"))
+    monkeypatch.setenv("NN_GATE_HALT_LEG", "local")
+
+
 RL = NN_ROOT / "trainer"
 
 
@@ -190,7 +204,6 @@ TOP_IMPORTS: dict[str, frozenset[str]] = {
     "loop_guards_trip.py": frozenset({"worker.breaker", "worker.events", "common.log", "worker.stop_loss"}),
     "loop_guards_leg.py": frozenset(
         {
-            "worker.config",
             "worker.events",
             "worker.gate_check",
             "worker.kickstart_burn",
@@ -697,7 +710,7 @@ def test_leg_kickstart_burn_really_stops_the_leg(tmp_path: Path) -> None:
         _burn_streak=0,
         _ledger=None,
     )
-    assert TrainingGuardsLeg._kickstart_burn(obj, 3, None) is True  # type: ignore[arg-type]
+    assert TrainingGuardsLeg._kickstart_burn(obj, 3) is True  # type: ignore[arg-type]
     assert obj._burn_streak == 3  # type: ignore[attr-defined]
     events = [json.loads(x) for x in jsonl.read_text(encoding="utf-8").strip().splitlines()]
     burn = [e for e in events if e["event"] == "kickstart_burn"][-1]
@@ -716,7 +729,7 @@ def test_leg_paired_kill_is_inert_without_a_paired_course(tmp_path: Path) -> Non
         _pair_kill_streak=0,
         _ledger=None,
     )
-    assert TrainingGuardsLeg._paired_kill(obj, 5, None) is False  # type: ignore[arg-type]
+    assert TrainingGuardsLeg._paired_kill(obj, 5) is False  # type: ignore[arg-type]
 
 
 def test_gate_budget_hard_cut_really_stops(tmp_path: Path) -> None:

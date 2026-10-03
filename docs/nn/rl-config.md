@@ -10,6 +10,21 @@
 
 ---
 
+## §3 2026-10-02：止损两键成死键（第二刀）+ 存量噪声一次性清理
+
+`kickstart_burn` / `paired_kill` 2026-10-02 第一条已搬进 `curricula/*.jsonc`（随腿入库、课程块权威），
+当天第二刀把 rl-config 侧的兼容回落读面**整体删除**（`legacy_*`；全文 → `docs/nn/engineering.md` §60，
+决策 → `DECISIONS.md §2026-10-02-goalnn-burn-rule-cut2`）⇒ 本文件里这两键**无读者**。处置：加进
+`pruneLegacyCourseKnobs` 的清理名单（开课时清），并由**一次性存量清理** `pruneNoiseCourses`
+（`dashboard/src/stack/course-knobs.ts`）扫全库：纯 `rollout_src:'local'`（缺省档不留痕）、空壳条目、
+无读者旧键一并剃掉——2026-10-02 实跑 92 项（48 → 4 门，只剩显式 `run` 档）；显式
+`node`/`auto`/`run` 与其它键一个字不动，幂等、无变化不写盘。
+
+* **§1.1 的 D 类行**里的 `paired_kill` **不再属于 D 类**（它描述「这条腿的判据」= 实验设计，
+  已随腿进课程文件）——D 类今天只剩 `courses.<课>.{rollout_src,run_iters}`（及 slot/workers 等配额键）。
+* 清理入口：停课清理 `pruneStoppedCourseConfig`（单课）· 开课清理 `pruneLegacyCourseKnobs`（全库死键）·
+  存量一次性 `pruneNoiseCourses`（全库三分档）。
+
 ## §2 2026-10-01：门禁停机模式平台化 ⇒ `courses.<课>.gate_halt_mode` 与 `rl.gate_halt_mode` 双双成死键
 
 `gate-halt-mode` 升成**平台级单开关**（`tmp/gate-halt.json` 意图 + 回执；全文 →
@@ -35,7 +50,7 @@
 | **A 机器/环境级** | 值描述**这台机器/这条链路**，课程文件天然表达不了 | 留 | `rl.hub_port` `agent_port` `remote_token` `remote_hub_url` `remote_hubs` `cf_protocol` `cf_edge_ip` `slim` `torch_threads` `nodes[]` · **`rl.local_slots` / `rl.workers`**（本机并发配额，见 §1.4b） |
 | **B 全局缺省** | 课程文件 schema **有同名键**，这里只是「课程没写时的兜底」 | 只留必要兜底；**范围内全绿的删掉**（判据与执行见 §1.4b） | `rl.mb` `seed_rotate` `keep_iters` `eval_window_sec` |
 | **C 调度策略** | 「怎么派活」而非「怎么训」的阈值 | 留 | `policy.taskTimeoutSec` `taskFetchTimeoutSec` `queueWindowSec` `statusTimeoutSec` `nodeFailStreak` `streamKlCap` |
-| **D 每课机器侧** | 控制台开课/热切的写面；per-course 最具体 | 留活课、删停课 | `courses.<课>.{rollout_src,run_iters,paired_kill,gate_halt_mode}` |
+| **D 每课机器侧** | 控制台开课/热切的写面；per-course 最具体 | 留活课、删停课 | `courses.<课>.{rollout_src,run_iters}`（2026-10-02 第二刀后：止损两键已随腿入库、不属 D 类，见 §3） |
 | **E 废弃/死** | 代码注释明写废弃，或全域零消费者 | 删 | `intent_rl.*` · `policy.upgradeBranch` · `policy.minDiskFreeMB` · `policy.streamKlCapIntent` · `policy.streamWaveGamesIntent` |
 
 ### 1.2 新键该写哪（决策树）

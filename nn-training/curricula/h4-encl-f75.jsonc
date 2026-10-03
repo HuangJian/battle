@@ -1,0 +1,108 @@
+// 课程 h4-encl-f75 —— **E3a · 处理臂 F75：`- wEncl·enclWeightTicks/(ticks+1)`，f=7.5% ⇒ wEncl=3.87**
+//
+// 状态：**收官（2026-10-02；it31 被 paired 止损 ABORT，判决见本文件尾 verdict）**。
+//   立项/规格/判据全文 → `nn-training/curricula/h4-encl-c0.jsonc` 头注（三臂逐字同的冻结契约）；
+//   剂量依据 → `DECISIONS.md` §2026-10-02-goalnn-e2-e3a-design + E3a 复测门（已过）。
+//
+// ── 本臂唯一变量 ─────────────────────────────────────────────────────────
+//   与对照臂 h4-encl-c0 的唯一差异 = 奖励公式末尾 `- wEncl*enclWeightTicks/(ticks+1)`（wEncl=3.87）。
+//   f = wEncl·E[rate]/killEV = 3.87 × 0.209396 / 10.810 = **0.075**（§5.4 默认梯下档）。
+//   税 EV = 3.87 × 0.209396 = **0.810/局**（killEV 10.810 的 **7.5%**，落在 3–20% 记账区）。
+//   校准源：`tmp/aim-calib/c04-calib-863001.jsonl.run/eval_log.jsonl`（b0it30/35/40 pooled n=600）。
+//
+// ── 判据（与 c0/f150 逐字同；全文见 h4-encl-c0 头注）────────────────────────
+//   ① 机制主读数 `enclWeightTicks/(ticks+1)`（配对差，负向为好）：**MDE80 = 0.0214**，
+//      **kill 线 = MDE/2 = 0.0107**；下降 < kill 线 ⇒ 判无效，不得记剂量结论。
+//   ② 共线名单同腿禁上（`encl2Ticks`/`encl3pTicks`/`nearEnemy4Ticks` 皆 raw-only，不得定价）。
+//   ③ 主分不劣（−3pp abs 诊断）；守卫表非劣（含 `stopTicks/(ticks+1)`、
+//      `onLaneHoldFireTicks/(ticks+1)`）。
+//   ④ 判据段：**it30/it35/it40** 各 **300 局**，seed0 = **866001**（866001–866300 = 段C；池外）。
+//   ⑤ 前置 Q ≤ χ²(0.95, df=2) = 5.99；⑥ 止损 = `paired` kickstart burn，
+//      显式 peer = `h4-encl-c0`（**本文件** `kickstart_burn` 块；2026-10-02 起随腿入库），
+//      尾连续 3 点 Δ < −5.0pp ⇒ ABORT。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj/paired V=20261004）；语义变更不得跨腿续跑。
+{
+  "version": 5,
+  "name": "h4-encl-f75",
+  "mode": "per-tick",
+  // 环境：ladder-c04（单关 4 敌、max_ticks 3300、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c04",
+
+  // ── 奖励：v4 包逐字 ＋ 被包围负价项（唯一变量 = wEncl，本臂 f=7.5%）───────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited - wEncl*enclWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wWin": 2.0,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.2,
+      "wEncl": 3.87
+    },
+    "terminal": {
+      "lives_exhausted": -5.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：h4 冠军 warm start（三臂同一起点，平行臂）────────────────────────
+  "bc": "nn-training/weights/h4-stop-best/h4-stop.it60.best.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 止损（2026-10-02 起随腿入库，本块 = 唯一权威；判据本体在 nn-training/worker/{kickstart_burn,paired_kill}.py）──
+  //   参照物 = 对端臂 h4-encl-c0（同 it 配对差），尾连续 3 点 Δ < −5.0pp ⇒ ABORT。
+  "kickstart_burn": { "mode": "paired", "peer": "h4-encl-c0" },
+
+  // ── 预算：诊断腿 40 轮（判据点 = it30/35/40 尾巴三点）──────────────────────
+  "iters": 40,
+  "max_hours": 4,
+  "workers": 8,
+
+  // ── 位移包：x4-rebirth 原样（三臂逐字同）──────────────────────────────────
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
+    { "kl_coef": 0.01, "lr": 0.00025 }
+  ],
+
+  // ── 采集：mb 对齐（48 × mb(512)）；三臂逐字相同 ───────────────────────────
+  "target_transitions": 24576,
+  "est_samples_per_game": 180,
+  "seed_rotate": 600,
+  // 三臂必须同值（同种子流是配对前提）。E3a 新开（§15.1 语料轮换）。
+  "paired_rotate_seed": 20261004,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/h4-encl-f75/weights.json",
+  "traj": "tmp/h4-encl-f75",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/h4-encl-f75",
+  "backup_prefix": "h4-encl-f75",
+
+  // ── 评估：日常段 200 局/点（池只有 860001–860200；判据段另跑，见头注 ④）────
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 200,
+  "eval_every": 5
+}
+
+// ── verdict（2026-10-02 收官；本臂 it31 被 paired 止损 ABORT，全表见 h4-encl-c0 尾）──
+//   burn streak：it22 Δ−11.9pp（streak 1）→ it27 Δ−9.0pp（streak 2）→ it31 Δ−14.5pp
+//   （streak 3 ⇒ ABORT；`gate_verdict` + `run_complete` 确认，无 it32+ 权重）。
+//   唯一冻结读数 it30（段C 300 局）：enclRate 配对差 −0.0249（p=0.11，方向对但不过单点 MDE）；
+//   dWin −0.027、dScore −0.025、dDmg +10.75、dKills −0.083。
+//   **判决：提前终止，无机制结论（E3a 家族 verdict 见 h4-encl-c0），不进 E4。**

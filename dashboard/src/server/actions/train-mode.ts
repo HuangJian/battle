@@ -8,10 +8,12 @@
  *    · `course-lifecycle.ts::writeCourseConfigForOpen`（**开课**：弹窗里选的模式）；
  *    · `course-mode.ts::setCourseMode`（**那颗「切离线/切换成在线」开关**，运行中热切）。
  *
- *  ★ 评审结论（plan/train-mode-hot-switch.plan.md §2.2 F9）：**只有这两条用户动作路径写配置**。
- *  hub 推送的内部复用路径（`pushCourseMode`：开课的 hub 推送、停课置离线、起 hub 回灌）**一个字
- *  都不写** —— 否则开课会重复写盘 1–3 次（`pushHubMode` 带 3×2s 重试），而「停课」还会被误翻译成
- *  「云机接手」。
+ *  ★ 评审结论（plan/train-mode-hot-switch.plan.md §2.2 F9）：**只有这两条用户动作路径写训练语义
+ *  配置**（开课 / 那颗开关）。hub 推送的内部复用路径（`pushCourseMode`：开课的 hub 推送、
+ *  停课置离线、起 hub 回灌）**一个字都不写** —— 否则开课会重复写盘 1–3 次（`pushHubMode` 带
+ *  3×2s 重试），而「停课」还会被误翻译成「云机接手」。
+ *  停课另有一条**只删不写**的清理路径（`course-knobs.ts::pruneStoppedCourseConfig`：
+ *  `rollout_src='local'` 缺省档 + 空节点整条删，2026-10-02 用户口径）——不写任何语义键。
  *
  *  ★ node 往返（plan §2.6）：`offline` 会把 `courses.<课>.rollout_src` **覆写**成 `run`。若就此
  *  不管，显式选过 `node`（整轮上云）的课一下离线再切回在线时，`node` 那格已经没了 ⇒ 静默降级成

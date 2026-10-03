@@ -1,0 +1,132 @@
+// 课程 h4-aim-c0 —— **E1 · 对照臂 C0：v4 逐字（无 aim 项）**（aim-dodge 批次第一波）
+//
+// 状态：**草稿（2026-10-02 冻结；未开课）**。开课 = **人在控制台点**（agent 不开训）。
+//   立项 → `DECISIONS.md` §2026-10-01-goalnn-aim-dodge-metrics（8 列落地）+ 2026-10-02 开腿记录；
+//   规格 → `plan/aim-dodge-levers.plan.md` §5.1/§5.4/§5.5（E1）；列语义 → `docs/nn/engineering.md` §58。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 对照臂的职责（Wave 2 的教训：漂移只能靠同时训练的零臂消）
+// ══════════════════════════════════════════════════════════════════════════
+// · 主终点 = **配对差**（处理臂 − 本臂，同 seed 同 stage）⇒ 本臂必须与 k10/k25 **同时训练、
+//   同起点、同种子流**；不能用历史臂（b0/b1）或冻结 bc 当对照。
+// · 本臂是 k10/k25 的 paired kickstart-burn 对端（显式 `peer`，见 k10/k25 课程文件的
+//   `kickstart_burn` 块 = {mode:'paired', peer:'h4-aim-c0'}；2026-10-02 起随腿入库）——
+//   多臂共享 V 时自动解析必回退 baseline（Wave 2 实测教训），故显式指定。
+// · 本臂自身不设止损：`paired_kill.enabled = false`（对照臂不自杀；判据/记录仍可另行观测）。
+// · 本臂配方 = Wave 2 对照臂 b0 逐字（v4 包），唯一的作用是把「训练本身把读数推到哪」量出来。
+//
+// ══════════════════════════════════════════════════════════════════════════
+// 判据（**训练前冻结，中途不得改**；三臂逐字同）
+// ══════════════════════════════════════════════════════════════════════════
+// ① **机制主读数** = `E[d|hit] = aimHitDistSum/aimHits`（逐局、按同 seed 配对；
+//    域 = 有命中的局）。配对差 = 处理臂 − 本臂。
+//    预注册 MDE（开腿前由校准语料实测 sd 复算，`tmp/aim-calib/`）：
+//      · E[d|hit]：新臂 sd=0.669 格（b0 600 局）⇒ 900 配对（3 点 × 300 局）下
+//        **MDE80 = 0.079 格（2.7% rel）**；**kill 线 = MDE/2 = 0.039 格（1.3% rel）**。
+//      · 若观测提升 < kill 线 ⇒ 判「机制无效（被开火量放大或剂量未兑现）」，
+//        **不得**改记「剂量结论」。
+// ② **防刷量读数** = `playerShots/(ticks+1)`（逐局配对）：预注册阈值 = 上升 < MDE80
+//    （0.0003 abs / 2.0% rel）；**显著上升（单侧 p<0.05 且 ≥ MDE）而 E[d|hit] 不动 ⇒ 判无效**。
+// ③ **主分不劣**：主终点分数（score / pass）配对差不劣于 −3pp abs（诊断项，口径见 Wave 2）。
+// ④ 判据段：训练后对 **it30/it35/it40** 三个冻结点各跑 **300 局**，seed0 = **864001**
+//    （864001–864300 = **段A**；与日常段 860001–860200、Wave 1 补评估 861011–861310、
+//    Wave 2 判据段 862001–862300、开腿前校准段 863001–863200 **均不相交**，§15.1）。
+//    跑法 = `bun tools/sim/eval-course-ckpt.ts --course nn-training/levels/ladder-c04.jsonc
+//      --weights c0=… --weights k10=… --weights k25=… --games 300 --seed0 864001 --no-dist`。
+// ⑤ 前置检查 Q ≤ χ²(0.95, df=2) = 5.99（尾部不稳 ⇒ 只逐点报告，不得挑单点）。
+// ⑥ 守卫表（每臂带数字；口径 = Wave 2 `nn-training/tools/paired_power.py` §11 同尺）：
+//    pass / 零伤局 / dmg / kills / shots / cellsVisited / stuckTicks 非劣；
+//    **`stopTicks/(ticks+1)`、`onLaneHoldFireTicks/(ticks+1)` 非劣**（§10.4 架枪教训）。
+//
+// ── 止损（与 Wave 2 同源，参照物 = 同网格配对差）─────────────────────────────
+//   `kickstart_burn` 走 **paired** 模式（显式 peer 点名本臂；DECISIONS
+//   §2026-09-30-goalnn-kickstart-burn-paired 的教训：对端不唯一必须显式指定）：
+//   Δ = 处理臂 − 本臂同 it 读数，尾部连续 3 点 Δ < −5.0pp ⇒ ABORT。
+//
+// ── 剂量锚（开腿前实测冻结；源 = `tmp/aim-calib/c04-calib-863001.jsonl`）──────────
+//   b0 合并（it30/35/40 × 200 局）：E[d|hit] = 2.9284 格 · E[kills/局] = 3.603
+//   ⇒ killEV = wKill × E[kills] = 3.0 × 3.603 = 10.810。
+//   κ 口径（§5.1）：κ = wAim·E[d|hit]/wHit ∈ {0.10, 0.25} ⇒ wAim = κ·wHit/E[d|hit]。
+//     k10：wAim = 0.0205（κ=0.100，税 EV 0.584/局，killEV 占比 5.4%）
+//     k25：wAim = 0.0512（κ=0.250，税 EV 1.458/局，killEV 占比 13.5%）
+//   本臂无 aim 项；k10/k25 唯一差 = `+ wAim*aimHitDistSum`。
+//   ⚠ 预注册监控量：p·wAim·E[d|hit] vs wShot（p≈0.470）⇒ k25 档 ≈0.070 > 0.05 进入刷量区
+//   （预期内，真正防线 = 判据②）；k10 档 ≈0.028 < 0.05。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj/paired V=20261002）；语义变更不得跨腿续跑。
+{
+  "version": 5,
+  "name": "h4-aim-c0",
+  "mode": "per-tick",
+  // 环境：ladder-c04（单关 4 敌、max_ticks 3300、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c04",
+
+  // ── 奖励：v4 包**逐字**（= Wave 2 对照臂 b0 同一份配方；无 aim 项）──────────
+  "reward": {
+    "formula": "wKill*kills + wHit*enemyHits + wWin*where(clearTick>=0, 1, 0) - wDmg*playerDamageTaken - wShot*playerShots + wExplore*cellsVisited",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wWin": 2.0,
+      "wDmg": 0.03,
+      "wShot": 0.05,
+      "wExplore": 0.2
+    },
+    "terminal": {
+      "lives_exhausted": -5.0,
+      "timeout": -2.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：h4 冠军 warm start（三臂同一起点，平行臂）────────────────────────
+  "bc": "nn-training/weights/h4-stop-best/h4-stop.it60.best.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 止损：对照臂不自比（2026-10-02 起随腿入库；判据本体在 worker/paired_kill.py）────
+  "paired_kill": { "enabled": false },
+
+  // ── 预算：诊断腿 40 轮（判据点 = it30/35/40 尾巴三点）──────────────────────
+  "iters": 40,
+  "max_hours": 4,
+  "workers": 8,
+
+  // ── 位移包：x4-rebirth 原样（c0/k10/k25 逐字同）────────────────────────────
+  "lr": 0.0005,
+  "epochs": 6,
+  "mb": 512,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 25, "kl_coef": 0.02, "lr": 0.0005, "kl_cap": 0.2 },
+    { "kl_coef": 0.01, "lr": 0.00025 }
+  ],
+
+  // ── 采集：mb 对齐（48 × mb(512)）；三臂逐字相同 ───────────────────────────
+  "target_transitions": 24576,
+  "est_samples_per_game": 180,
+  "seed_rotate": 600,
+  // 三臂必须同值（同种子流是配对前提）。E1 新开（与历史 1789876303 / 1790491796 /
+  // 20260921 / 20260930 / 20261001 均不同，§15.1 语料轮换）。
+  "paired_rotate_seed": 20261002,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/h4-aim-c0/weights.json",
+  "traj": "tmp/h4-aim-c0",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/h4-aim-c0",
+  "backup_prefix": "h4-aim-c0",
+
+  // ── 评估：日常段 200 局/点（池只有 860001–860200；判据段另跑，见头注 ④）────
+  "eval_stages": "2000-2000",
+  "eval_games_per_stage": 200,
+  "eval_every": 5
+}

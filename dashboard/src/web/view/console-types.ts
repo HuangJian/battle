@@ -81,7 +81,11 @@ export interface NodeView {
    *  （否则先交活的节点看着健康、还没轮到的看着掉线）。
    *  ★ 2026-09-26（plan/nodes-decouple-from-course.plan.md）：跨**所有训练流**合并后，
    *  「最近完成轮」按**完成时刻**选（不是比 `it` 大小——`it` 是课程内序号、不可比）。
-   *  与 `/api/pool` 的窗口内局数（`winRollout/winEval`）**同源同一份 `aggregateNodeHistory`**。 */
+   *  与 `/api/pool` 的窗口内局数（`winRollout/winEval`）**同源同一份 `aggregateNodeHistory`**。
+   *  ★ 2026-10-02：**一轮都没跑完的流不是候选**（它的完成时刻只会退化成 meta 文件 mtime，
+   *  而它常常是最新写入的那个 ⇒ 抢走 winner ⇒ 没参与那轮的节点全被算成 0 局 ⇒
+   *  `nodeHealth(0, 并发)` 判「离线」。现场：崩溃循环的 `h4-hurt-f75` 压过所有正常流，
+   *  全场贡献最高的 `self`（9644 局）显示「贡献 0 / 离线」）。 */
   lastContrib: number
 }
 

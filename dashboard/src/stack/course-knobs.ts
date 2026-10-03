@@ -3,7 +3,10 @@
  *  为什么需要这一层：trainer 收敛成**一个进程服务所有课程**（`trainer/run_rl_cluster.py --serve`）之后，
  *  「这门课怎么跑」不能再是那个进程的命令行参数（一个进程服务 N 门课，命令行只有一份）。
  *  它搬到这里 —— 机器侧旋钮住 rl-config，**永不进 `curricula/*.jsonc`**（课程文件字节 =
- *  `course_fp` 语料血缘 / 熔断口径，D14；往里加一个旋钮，熔断会把同一份语料读成新语料）。
+ *  `course_fp` 文件血缘；D14 混训拒收按 `corpus_fp`）。
+ *  ⚠ 义理修订（2026-10-02）：本条约束的是**机器侧**旋钮（描述「这台机器怎么跑」）；
+ *  **实验设计**块（如止损 `kickstart_burn`/`paired_kill`——描述「这条腿的判据」）进课程文件、
+ *  跟腿入库，见 DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file。
  *
  *  读面在 python：`trainer/loop_serve.py::apply_course_machine_overrides` 在开课时施加（白名单 +
  *  逐键打印生效值）；本模块曾是**写面**（控制台唯一写法）。
@@ -14,6 +17,15 @@
  *  `writeCourseMachineKnobs` / `applyCourseMachineKnobs` 一并删——它们自 2026-09-21 起就
  *  **零调用者**：控制台早不走它）；留下的是它一直在负责的另一半：**旧键的清理面**
  *  （“不再被读”的键必须从盘上剃掉，否则操作员以为“我配过”）。
+ *
+ *  ★ **2026-10-02（用户口径）：停课也清一次盘**——`courses.<课>.rollout_src='local'`
+ *  （缺省档不留痕）与清空的课程节点整条删，见 `pruneStoppedCourseConfig`；显式
+ *  `node`/`auto`/`run` 一个字不动。
+ *
+ *  ★ **2026-10-02（第二刀 P1）**：止损块（`kickstart_burn`/`paired_kill`）随腿入库后，rl-config
+ *  这两键**再无读者**（`worker/{kickstart_burn,paired_kill}.py` 只认课程文件块）⇒ 进
+ *  `LEGACY_COURSE_KEYS`；存量噪声（纯 `rollout_src:'local'` / 空壳）由 `pruneNoiseCourses`
+ *  一次清（plan/burn-rule-in-course-file §9 P1）。
  *
  *  白名单机制仍在 python 侧（`COURSE_MACHINE_OVERRIDE_KEYS`，今天为空元组）——下一个
  *  「单进程表达不了、又确实按课不同」的旋钮回那里加，写面也回这里。
@@ -30,7 +42,7 @@
  *  训练时由 `pruneLegacyCourseKnobs` 清掉。
  */
 
-import { saveConfig } from '../core/config'
+import { loadConfig, saveConfig } from '../core/config'
 import { log } from '../core/log'
 import type { CourseConf, RlConfig } from '../core/types'
 
@@ -51,6 +63,10 @@ const LEGACY_COURSE_KEYS = [
   'hub_push',
   'remote_degrade_after',
   'gate_halt_mode',
+  // 2026-10-02 第二刀（plan/burn-rule-in-course-file §9 P1）：止损块已随腿进课程文件，
+  // rl-config 这两键无读者（`worker/{kickstart_burn,paired_kill}.py` 只读课程块）。
+  'kickstart_burn',
+  'paired_kill',
 ] as const
 
 /** 已废的**本机伪节点**标记（R3-7：伪节点退出控制台，那条「一键本机 push」也删了）。
@@ -100,4 +116,94 @@ export function pruneLegacyCourseKnobs(cfg: RlConfig): { cfg: RlConfig; removed:
       `${removed.length > 6 ? '…' : ''}）——课程与 worker 节点正交，传输裁决住 rl.hub_push + 登记节点`,
   )
   return { cfg: next, removed }
+}
+
+// ────────────────────────── 停课清理（2026-10-02 用户口径） ──────────────────────────
+
+/** 课程级 `rollout_src` 的**缺省档**：`resolveRolloutSrc` 对缺键就返回它（`stack/specs.ts`）。
+ *  开课弹窗的默认档会把它原值直写（`train-mode.ts` 的历史口径）⇒ 盘上出现纯噪声。 */
+const DEFAULT_ROLLOUT_SRC = 'local'
+
+/** **停课清理**：剃掉本课在 rl-config 里已无信息量的残留（幂等；返回人读清单，空 = 一字未动）。
+ *
+ *  用户口径（2026-10-02）：「dashboard 上停课时，应该把 `rollout_src:'local'` 去掉，
+ *  空的课程节点直接删除」。两条规则：
+ *    ① `courses.<课>.rollout_src === 'local'` ⇒ 删——缺省档不留痕（与热切的
+ *       `isWorthRemembering` 只记 node/auto 同一口径）；`node`/`auto`/`run`（离线声明）
+ *       是显式语义，一个字不动。
+ *    ② 剃完**为空**（`{}`）的课程节点整条删——留空壳只是「这门课配过什么」读面上的
+ *       幻影行（本就空的节点也照删，规则一样）。
+ *
+ *  没删东西就**不写盘**：rl-config 的 mtime 是 hub 热重载的输入之一，无变化不重写。
+ *  时机 = `course-lifecycle.ts::stopCourse`（用户动作）；停课仍是非破坏——这里只清残留，
+ *  不碰 run/run_iters 等训练语义键（路径与写入两件事分开，见 stopCourse 注释）。
+ */
+export function pruneStoppedCourseConfig(course: string): string[] {
+  const cfg = loadConfig()
+  const row = cfg.courses?.[course] as Record<string, unknown> | undefined
+  if (!row || typeof row !== 'object') return []
+  const removed: string[] = []
+  const next: Record<string, unknown> = { ...row }
+  if (next.rollout_src === DEFAULT_ROLLOUT_SRC) {
+    delete next.rollout_src
+    removed.push(`courses.${course}.rollout_src='local'（缺省档不留痕）`)
+  }
+  if (Object.keys(next).length === 0) {
+    const courses = { ...cfg.courses }
+    delete courses[course]
+    saveConfig({ ...cfg, courses })
+    removed.push(`courses.${course}（空节点，整条删）`)
+    return removed
+  }
+  if (removed.length === 0) return []
+  saveConfig({ ...cfg, courses: { ...cfg.courses, [course]: next as CourseConf } })
+  return removed
+}
+
+// ────────────────────────── 存量噪声一次性清理（2026-10-02，第二刀 P1） ──────────────────────────
+
+/** **全库存量噪声清理**（一次性 / 可重入）：把停课清理的同一条分档规则应用到**所有**课程节点：
+ *
+ *   ① 无读者的 legacy 键（`LEGACY_COURSE_KEYS`——第二刀起含 `kickstart_burn`/`paired_kill`）；
+ *   ② `rollout_src === 'local'` ⇒ 删（缺省档不留痕，与 `pruneStoppedCourseConfig` 同规）；
+ *   ③ 剃完为空的课程节点整条删（本就是空壳的也删，规则一样）。
+ *
+ *  为什么需要它：停课清理只治「停”那一刻的课，存量盘上积着一批开课弹窗历史口径直写的
+ *  `rollout_src:'local'` 与早期空壳（`{}`）——它们描述的是缺省行为，留着只会让读面（和人）
+ *  以为「这课配过什么」。显式 `node`/`auto`/`run`（离线声明）与任何训练语义键一个字不动。
+ *
+ *  幂等 + 无变化不写盘（rl-config 的 mtime 是 hub 热重载的输入之一）：返回人读清单，空 = 一字未动。
+ */
+export function pruneNoiseCourses(): string[] {
+  const cfg = loadConfig()
+  const courses = { ...cfg.courses }
+  const removed: string[] = []
+  for (const [course, raw] of Object.entries(cfg.courses ?? {})) {
+    const block: Record<string, unknown> = { ...(raw as Record<string, unknown>) }
+    const nodeRemoved: string[] = []
+    for (const key of LEGACY_COURSE_KEYS) {
+      if (key in block) {
+        delete block[key]
+        nodeRemoved.push(`courses.${course}.${key}`)
+      }
+    }
+    if (block.rollout_src === DEFAULT_ROLLOUT_SRC) {
+      delete block.rollout_src
+      nodeRemoved.push(`courses.${course}.rollout_src='local'（缺省档不留痕）`)
+    }
+    if (Object.keys(block).length === 0) {
+      delete courses[course]
+      removed.push(...nodeRemoved, `courses.${course}（空节点，整条删）`)
+      continue
+    }
+    if (nodeRemoved.length > 0) courses[course] = block as CourseConf
+    removed.push(...nodeRemoved)
+  }
+  if (removed.length === 0) return []
+  saveConfig({ ...cfg, courses })
+  log(
+    `[knobs] 存量噪声清理：${removed.length} 项（${removed.slice(0, 6).join('、')}` +
+      `${removed.length > 6 ? '…' : ''}）——纯 local / 空壳 / 无读者旧键不留痕`,
+  )
+  return removed
 }

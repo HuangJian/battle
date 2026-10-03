@@ -33,7 +33,8 @@ export interface NodeHistoryRow {
   winRollout: number
   /** ★窗口内成功局数（eval）。 */
   winEval: number
-  /** 最近**完成**轮（跨课按完成时刻选）该节点成功局数（rollout + eval）；-1 = 无池数据。 */
+  /** 最近**完成**轮（跨课按完成时刻选，**且只有真跑完过一轮的流才有资格**）该节点成功局数
+   *  （rollout + eval）；-1 = 无池数据（含「所有流都还没跑完一轮」）。 */
   lastContrib: number
   avgElapsedSec: number | null
   /** 训练机派发→结算墙钟滑动均值（含网络/轮询）；null = 窗口内无 wallSec。 */

@@ -17,6 +17,8 @@ import sys
 import types
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -117,6 +119,18 @@ def _ledger(traj: Path) -> Path:
     p = traj / "training_log.jsonl"
     p.write_text("".join(json.dumps(r) + "\n" for r in rows), encoding="utf-8")
     return p
+
+
+@pytest.fixture(autouse=True)
+def _gate_halt_files(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """门禁停机模式 2026-10-01 起是**平台文件**：本文件一律把它重定向进 tmp_path。
+
+    停腿路径（`_apply_verdict` → `_sync_cloud_halt` → `_gate_halt_mode`）读平台文件、写回执：
+    不重定向就会读仓根 `tmp/gate-halt.json`（控制台的活状态）并把回执写进本机工作区。
+    """
+    monkeypatch.setenv("NN_GATE_HALT", str(tmp_path / "gate-halt.json"))
+    monkeypatch.setenv("NN_GATE_HALT_APPLIED", str(tmp_path / "gate-halt.applied.json"))
+    monkeypatch.setenv("NN_GATE_HALT_LEG", "local")
 
 
 def test_setup_common_inherits_ledger_state(tmp_path: Path) -> None:
