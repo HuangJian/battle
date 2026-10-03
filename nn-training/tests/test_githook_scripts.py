@@ -336,25 +336,30 @@ def test_gate_keeps_native_paths_when_wslpath_maps_elsewhere(tmp_path: Path) -> 
 
 
 def test_gate_worker_count_scales_with_cores() -> None:
-    """worker 数默认派生自核数（不再写死 4），且必须有上界（内存封顶）。"""
+    """worker 数默认派生自**物理核数**（不再写死 4），且必须有上界（内存封顶）。"""
     code = _gate_code()
     assert "NN_GATE_NPROC" in code, "缺少 NN_GATE_NPROC 逃生口"
-    assert re.search(r"CORES=\$\(.*effective_cores", code), (
-        "worker 数应从核数派生，且核数走 common.platform_utils.effective_cores（容器 cgroup 配额/亲和"
-        "掩码）—— `os.cpu_count()` 在容器里报的是宿主机核数（Kaggle 224 vs 配额 96，"
-        "2026-09-25 云机卡死那笔账）；写死 4 在 16 核上白白浪费并行度（2026-09-17 实测 n=4 "
-        "→ n=12 提速 1/3）"
+    assert re.search(r"CORES=\$\(.*physical_cores", code), (
+        "worker 数应从核数派生，且核数走 common.platform_utils.physical_cores（真物理核 ∧ "
+        "cgroup 配额 ∧ 亲和掩码取小）—— 2026-10-03 决议：门禁按**物理核**（超线程 worker "
+        "不涨吞吐只涨内存，16 worker 的 bun test 把 Windows 提交上限顶穿 ⇒ 一片假红）；"
+        "`os.cpu_count()` 在容器里报的是宿主机核数（Kaggle 224 vs 配额 96，2026-09-25 云机"
+        "卡死那笔账），故配额/掩码仍是硬信号；写死 4 在 16 核上白白浪费并行度（2026-09-17 "
+        "实测 n=4 → n=12 提速 1/3）"
     )
     assert "cpu_count()" not in code, (
         "门禁里不许再拿 os.cpu_count() 定并行度——「本机几核」只允许一个答案，"
-        "就是 common.platform_utils.effective_cores()（注释里的事故说明不算，_gate_code 已去注释）"
+        "就是 common.platform_utils.physical_cores()（注释里的事故说明不算，_gate_code 已去注释）"
     )
     assert re.search(r"NPROC=\$\{NN_GATE_NPROC:-\$CORES\}", code), (
-        "NPROC 默认值应 = min(核数, 上界)，且由 NN_GATE_NPROC 覆盖"
+        "NPROC 默认值应 = min(物理核数, 上界)，且由 NN_GATE_NPROC 覆盖"
     )
     cap = re.search(r'NPROC" -gt (\d+)', code)
     assert cap, "NPROC 缺上界——worker 无上限会按核数放大内存（-n 12 峰值 RSS 实测 ≈ 3.9GB）"
-    assert int(cap.group(1)) <= 32, f"NPROC 上界 {cap.group(1)} 过大（内存封顶形同虚设）"
+    assert int(cap.group(1)) == 32, (
+        f"NPROC 上界应 = 32（2026-10-03 决议：从 12 提到 32，只给大机器兜内存；实得 "
+        f"{cap.group(1)}）"
+    )
 
 
 def test_gate_picks_forkdist_by_python_and_kernel() -> None:

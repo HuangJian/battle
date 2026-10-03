@@ -11,9 +11,12 @@ import { describe, expect, it } from 'bun:test'
 import {
   effectiveCores,
   hostLogicalCores,
+  hostPhysicalCores,
   parseCgroupV1Quota,
   parseCgroupV2CpuMax,
   parseCpusAllowedList,
+  parseProcCpuinfoPhysicalCores,
+  physicalCores,
   resolveEffective,
 } from '../tools/lib/cores'
 
@@ -92,5 +95,58 @@ describe('本机不变量（在开发机/CI 上也必须成立）', () => {
     // 真机读数（不是 mock）：容器里两个信号中可能只有亲和掩码可读，取小值即口径。
     const signals = [parseCgroupV2CpuMax(null), parseCpusAllowedList(null)]
     expect(resolveEffective(signals, hostLogicalCores())).toBe(hostLogicalCores())
+  })
+})
+
+describe('physicalCores：门禁 / 本地 worker 池的口径（2026-10-03）', () => {
+  it('parseProcCpuinfoPhysicalCores：同一物理核的 HT sibling 共享 (physical id, core id)', () => {
+    const sibling = [
+      'processor\t: 0',
+      'physical id\t: 0',
+      'core id\t\t: 1',
+      '',
+      'processor\t: 1',
+      'physical id\t: 0',
+      'core id\t\t: 1', // sibling：同一物理核
+      '',
+      'processor\t: 2',
+      'physical id\t: 0',
+      'core id\t\t: 2',
+      '',
+    ].join('\n')
+    expect(parseProcCpuinfoPhysicalCores(sibling)).toBe(2)
+
+    // 跨 socket：physical id 不同、core id 相同 ⇒ 仍是两个物理核（键是「对」不是单个 id）
+    const twoSockets = [
+      'processor\t: 0',
+      'physical id\t: 0',
+      'core id\t\t: 0',
+      '',
+      'processor\t: 1',
+      'physical id\t: 1',
+      'core id\t\t: 0',
+      '',
+    ].join('\n')
+    expect(parseProcCpuinfoPhysicalCores(twoSockets)).toBe(2)
+
+    // 缺 physical id / core id（部分 ARM 镜像）⇒ null（拿不到事实，不是 1、不是 0）
+    expect(parseProcCpuinfoPhysicalCores('processor\t: 0\nmodel name\t: ARMv8\n')).toBeNull()
+    expect(parseProcCpuinfoPhysicalCores('')).toBeNull()
+  })
+
+  it('不变量：1 ≤ physicalCores() ≤ effectiveCores() ≤ hostLogicalCores()', () => {
+    // 物理核数被配额/掩码夹着（容器里两者读的是同一批信号），又永不为 0
+    // —— 门禁的 worker 不会比运行时槽位口径还宽。
+    const p = physicalCores()
+    expect(Number.isInteger(p)).toBe(true)
+    expect(p).toBeGreaterThanOrEqual(1)
+    expect(p).toBeLessThanOrEqual(effectiveCores())
+    expect(effectiveCores()).toBeLessThanOrEqual(hostLogicalCores())
+  })
+
+  it('宿主机物理核探测是「有就是正数、没有就是 null」两态（都不许为 0）', () => {
+    const host = hostPhysicalCores()
+    if (host !== null) expect(host).toBeGreaterThanOrEqual(1)
+    expect(physicalCores()).toBeGreaterThanOrEqual(1)
   })
 })

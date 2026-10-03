@@ -28,10 +28,11 @@ xdist（见 tools/githook/nn-python-gate.sh 的分支）。判据是「有没有
 **用法**（显式开启，缺省不生效）：
 
     python -m pytest tests/ e2e/ -p tools.forkdist --forkdist 12 --timeout=60
-    python -m pytest tests/ e2e/ -p tools.forkdist --forkdist auto --timeout=60   # = 机器核数
+    python -m pytest tests/ e2e/ -p tools.forkdist --forkdist auto --timeout=60   # = 物理核数
 
-`auto` = `common.platform_utils.effective_cores()`（cgroup 配额/亲和掩码优先，与门禁的 `NPROC` 同源）；
-`Makefile` 的 `NPROC ?= auto` 与 `tools/task.py` 的 `-n auto` 就是靠它原样搬过来的。
+`auto` = `common.platform_utils.physical_cores()`（2026-10-03 起门禁口径 = **物理核数**，超线程
+不计入；cgroup 配额/亲和掩码仍是硬信号）。`Makefile` 的 `NPROC` 与 `tools/task.py` 直接传
+同一个口径算出的**数字**（不依赖这里的 `auto`），`auto` 只是给手工命令行留的同义入口。
 """
 
 from __future__ import annotations
@@ -94,23 +95,24 @@ def _worker_count_option(value: str) -> int:
 
 
 def _resolve_workers(raw: int) -> int:
-    """把 `auto` 解析成核数。**只看 `common.platform_utils.effective_cores()`**。
+    """把 `auto` 解析成核数。**只看 `common.platform_utils.physical_cores()`**。
 
-    为什么不 `os.cpu_count()`：容器里它报的是**宿主机**核数（本仓 2026-09-25 云机卡死那笔账
-    ——Kaggle 224 vs cgroup 配额 96），而「本机几核」在本仓只允许一个答案，就是
-    `effective_cores()`（cgroup 配额/亲和掩码优先）；门禁的 `NPROC` 也是问的它。
-    拿不到就不猜（拒绝而非静默退回一个错数）。
+    为什么是 physical_cores（2026-10-03 决议）：门禁/本地 worker 池的口径统一按**物理核数**
+    —— 它们开的是「每核一个重型进程」，超线程 sibling 共享执行单元与 L1/L2，加 worker 只涨
+    内存与切换（实测 16 worker 把 Windows 提交上限顶穿 ⇒ 假红）。且**不能**用 `os.cpu_count()`：
+    容器里它报的是**宿主机**核数（2026-09-25 云机卡死那笔账 —— Kaggle 224 vs cgroup 配额 96），
+    而 `physical_cores()` 内部把 cgroup 配额/亲和掩码也取小。拿不到就不猜（拒绝而非静默退回错数）。
     """
     if raw != _AUTO:
         return raw
     try:
-        from common.platform_utils import effective_cores
+        from common.platform_utils import physical_cores
     except ImportError as e:  # 插件被脱离仓库使用（cwd 不在 nn-training）
         raise pytest.UsageError(
-            "--forkdist auto 需要 nn-training/common/platform_utils.py::effective_cores()"
+            "--forkdist auto 需要 nn-training/common/platform_utils.py::physical_cores()"
             "（请从 nn-training 目录运行 pytest，或直接给一个明确的正整数）"
         ) from e
-    return int(effective_cores())
+    return int(physical_cores())
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:

@@ -36,17 +36,20 @@
 #     -n 4  线程=1   → 39.7s（封线程不救小并发）  -n 12 线程=1   → 28/25/21s（24.7）
 #     -n 8  线程=1 → 24/27s   -n 16 线程=1 → 25/22s   -n auto 线程=1 → 21/27s
 #   ⇒ 只加 worker 更慢、只封线程无收益，**两者同时**才把门禁从 ~36s 压到 ~23s（-36%）。
-#   默认 worker  = min(核数, 12)（8~16 实测同一水平，取 12 同时给内存封顶：
-#                 -n 12 峰值 pytest 进程树 RSS ≈ 3.9GB，≈ -n 4 的 3 倍）。NN_GATE_NPROC 覆盖。
+#   默认 worker  = min(**物理核数**, 32)（2026-10-03 起口径 = 物理核，超线程不计入）：
+#                 核数走 platform_utils.physical_cores()；上界 32 只作内存兜底
+#                 （-n 12 峰值 pytest 进程树 RSS ≈ 3.9GB）。NN_GATE_NPROC 覆盖。
 #   默认内线程   = 1（OMP/MKL/OPENBLAS，须在 python 启动前 export）。NN_GATE_THREADS 覆盖
 #                 （0 = 不设，退回 torch 自己的默认 = 各 worker 开满物理核）。
 #   注：该 env 随进程树继承到测试 spawn 的子进程（如 trainer/train_loop.py 的 os.environ.setdefault）；
 #   训练入口里的 torch.set_num_threads(--threads) 是进程内显式覆盖，不受此影响。
-#   为何 12 而非 8（2026-09-26 CPU 记账，/usr/bin/time 记 user+sys）：-n8 时 8 物理核
-#   平均只 busy 4.6~5.1 核（每 worker 约 57% 在 CPU 上）—— 本套件大量时间在等子进程/
-#   socket/sleep/torch 首次 import，**不是 CPU-bound** ⇒ 超订把空闲核填满（-n12 busy
-#   6.8~7.4）；再往上（-n16）只增加每个 worker 的冗余启动 CPU（实测 user+sys 262s→507s）
-#   而墙钟不再降。即「-n12 比 -n8 快」不是噪声、也不是靠 SMT 变戏法，是负载本就没吃满 8 核。
+#   为何按物理核而非「把超线程也填满」（2026-10-03 决议）：上面 2026-09-26 的 CPU 记账仍
+#   成立（-n8 平均只 busy 4.6~5.1 核；-n12 busy 6.8~7.4）—— 但那说明的是「-n12 在这台
+#   8c/16t 上与 -n8 同水平（21~28s vs 24~27s，差在噪声内）」，**不是**超线程带来了吞吐；
+#   而超线程 worker 的**内存**代价是真的：16 worker 的 `bun test` 实测把 Windows 提交上限
+#   顶穿（`RegisterWaitForSingleObject 1455 paging file is too small`）⇒ worker 崩溃 +
+#   兄弟 worker 连环 abort 出一片假红。故门禁统一取**物理核数**；上界 32 只防大机器 OOM。
+#   再往上（-n16）只增加每个 worker 的冗余启动 CPU（实测 user+sys 262s→507s）而墙钟不再降。
 #   不做「torch 池 ‖ 免 torch 池」拆分（2026-09-26 实测）：两池并行一律 ≥ 单次 -n12
 #   （33s → 40/41s，torch 段单核串行更是 37s，直接变成关键路径）。套件墙钟本就由免
 #   torch 的重用例决定（移走那 360 个 torch 用例后 -n12 仍 ~31s），torch 用例在单次
@@ -168,19 +171,19 @@ else
   exit 1
 fi
 
-# ---- worker 数：默认 min(核数, 12)（见文件头实测那一节），NN_GATE_NPROC 覆盖 ----
+# ---- worker 数：默认 min(**物理核数**, 32)（见文件头那一节），NN_GATE_NPROC 覆盖 ----
 # 核数用 venv python 自己问（`-S` 跳过 site：秒级、且唯一跨平台可靠口径）；
-# **口径是 common.platform_utils.effective_cores()**（容器 cgroup 配额/亲和掩码 > 宿主机裸数）：
-# 容器里 `os.cpu_count()` 报的是宿主机的核数（Kaggle 224 vs cgroup 96）—— 门禁虽另有 12 的
-# 上界兜着，但「按哪个数算」只允许有一个答案（见 2026-09-25 云机卡死那笔账）。
+# **口径是 common.platform_utils.physical_cores()**（真物理核 ∧ cgroup 配额 ∧ 亲和掩码取小；
+# 2026-10-03 起门禁按**物理核** —— 超线程 worker 不涨吞吐只涨内存，见文件头）。容器里
+# `os.cpu_count()` 报的是宿主机的核数（Kaggle 224 vs cgroup 96），故配额/掩码仍是硬信号。
 # 求值必须在 nn-training 目录内（`-S` 下 sys.path[0] 是 cwd，common.platform_utils 在仓库里）。
 # 结果不是纯数字（python 起不来等）就退回 4（旧默认，安全）。
-CORES=$(cd "$NN_ROOT" && "$NN_PY" -S -c 'from common.platform_utils import effective_cores; print(effective_cores())' 2>/dev/null || echo "")
+CORES=$(cd "$NN_ROOT" && "$NN_PY" -S -c 'from common.platform_utils import physical_cores; print(physical_cores())' 2>/dev/null || echo "")
 case "$CORES" in
   '' | *[!0-9]*) CORES=4 ;;
 esac
 NPROC=${NN_GATE_NPROC:-$CORES}
-[ "$NPROC" -gt 12 ] && NPROC=12
+[ "$NPROC" -gt 32 ] && NPROC=32
 [ "$NPROC" -lt 1 ] && NPROC=1
 
 # ---- pytest 分发器：Linux = 「收集一次 + fork」，其余 = xdist -n（v3.19 2026-09-29）----

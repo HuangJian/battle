@@ -17,32 +17,11 @@
  * function of its payload (fresh World, own seeded RNG, zero shared state —
  * AGENTS §2.2/§2.3). Which thread runs it cannot change its outcome.
  */
-import { cpus } from 'node:os'
-import { execSync } from 'node:child_process'
+import { physicalCores } from './cores'
 
-import { effectiveCores } from './cores'
-
-/**
- * Physical core count. Hyper-thread "cores" share execution units and L1/L2;
- * measured on a 4c/8t i7-4770HQ, >physical−1 workers actively *hurt* (7w
- * 1.70x vs 3w 2.40x) because sibling threads evict each other's caches.
- *
- * 结果**再按 `effectiveCores()` 夹一次**（2026-09-25 云机卡死）：容器里 `os.cpus().length`
- * 报的是宿主机逻辑核（Kaggle 排 224、cgroup 只给 96），照它派 worker 就是 2.3× 超订。
- * 夹取只降不升 ⇒ 裸机/dev 机（无 cgroup）读数与旧行为逐位相同。
- */
-export function physicalCores(): number {
-  const usable = effectiveCores()
-  if (process.platform === 'darwin') {
-    try {
-      const n = parseInt(execSync('sysctl -n hw.physicalcpu', { encoding: 'utf8' }).trim(), 10)
-      if (Number.isInteger(n) && n >= 1) return Math.min(n, usable)
-    } catch {
-      // fall through to logical count
-    }
-  }
-  return Math.min(cpus().length, usable)
-}
+// 物理核口径的**唯一实现**在 `./cores`（2026-10-03 合并：此处曾有一份同名副本，名叫物理核却
+// 返回逻辑核）。re-export 让既有消费方（`sim-pool.ts` 等）的 import 路径逐字不变。
+export { physicalCores }
 
 /**
  * Default worker count: physical cores minus one — leave one full core for
@@ -57,15 +36,15 @@ export function defaultWorkerCount(): number {
 /**
  * Gate-harness worker count (tests/score-gate-core.ts — the single shared
  * copy; the retired gate-core twin was deleted). Override: GATE_CORES.
- * Default tuned for THIS host: `navigator.hardwareConcurrency` reports 16
- * logical CPUs, but the gate pool is FASTEST at ~4 workers — beyond that,
- * extra workers contend and slow down (measured: 1→10.5s, 4→6.1s, 8→7.5s,
- * 16→10.3s for 700 classic sims; full 2100-sim gate: 4→27.9s vs 16→36s).
+ *
+ * 2026-10-03：默认从写死的 4 改成 `physicalCores()`（本机 8）—— 门禁口径统一按物理核
+ * （plan `gate-parallelism-physical-cores`）。下面 2026-09 的实测（4 最优）是在旧口径下
+ * 量的，改后墙钟需重测；真嫌慢就用 `GATE_CORES=4` 退回（那是本函数的逃生口）。
  */
 export function gateCoreCount(): number {
   const env = Number(process.env.GATE_CORES)
   if (Number.isFinite(env) && env > 0) return Math.floor(env)
-  return 4
+  return physicalCores()
 }
 
 /**

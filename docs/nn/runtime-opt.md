@@ -750,6 +750,48 @@ sampler-agent 上报的 `cpus` 从 224 变 96。
 **用例**：`tests/effective-cores.test.ts`（10 条：v2/v1 配额解析、`Cpus_allowed_list` 区间/逗号/
 垃圾格式、取小优先级、永不为 0、本机不变量 `1 ≤ effectiveCores() ≤ hostLogicalCores()`）。
 
+> ⚠ **2026-10-03 起本表里「门禁 / worker 池」那几行改按物理核**（`physicalCores`、
+> `nn-python-gate.sh` 的 `-n`、`perf-cmp-rollout` 的探测）—— 见 §23.6。
+
+### 23.6 门禁 / 本地 worker 池改按**物理核数**：新增 `physical_cores()` 第二口径（2026-10-03）
+
+> 触发：`bun test` 裸 `--parallel` 的缺省 = **逻辑核**（本机 8c/16t ⇒ 16 worker），实测把
+> Windows 的提交上限顶穿（`RegisterWaitForSingleObject 1455 paging file is too small`）⇒
+> worker `0x80000003` 崩 + 兄弟 worker 连环 abort，出一片**假红**（一次提交里 32 个"失败"）。
+> 用户裁决：**所有门禁的并发数 = 所在机器的物理核数**。
+
+**两类口径，按消费域分**（不再是"只有一个答案"，但每一域仍只有一个答案）：
+
+| 口径 | 值 | 消费域 |
+|---|---|---|
+| `effective_cores()` / `effectiveCores()` | min(cgroup 配额, 亲和掩码) 否则 `os.cpu_count()`（**逻辑核**） | **训练运行时**：`cpu_worker_slots()`（rollout/eval 槽位）、`biz/cli.py --workers`、notebook、`sampler-agent` 的 `CPUS`、`dashboard/src/core/venv.ts` 的 torch 线程数 |
+| **`physical_cores()` / `physicalCores()`**（新） | **min(真物理核, cgroup 配额, 亲和掩码)**，都读不到才回落 `os.cpu_count()` | **门禁与本地 worker 池**：`nn-python-gate.sh` 的 `NPROC`、`tools/task.py` / `Makefile` / CI 的 `-n`、`bun test --parallel=N`（根 + dashboard）、`forkdist --forkdist auto`、`worker-pool::defaultWorkerCount` / `gateCoreCount`、`perf-cmp-rollout` |
+
+- **为什么物理核**：门禁开的是「每核一个重型进程」，HT sibling 共享执行单元与 L1/L2 ——
+  加 worker 只涨内存与切换（`-n12` 在这台 8c/16t 上 ≈ `-n8`：21~28s vs 24~27s，本就在噪声内），
+  而 16 worker 的内存代价是**真的**（见上）。
+- **探测实现**（零新依赖；venv 里没有 psutil）：Windows ctypes `GetLogicalProcessorInformationEx
+  (RelationProcessorCore)`（本机实测 = 8，比 spawn 快一个数量级）/ macOS `sysctl hw.physicalcpu` /
+  Linux（其余）`/proc/cpuinfo` 的 `(physical id, core id)` **唯一对**。TS 侧镜像同一套（Windows 走
+  `pwsh` CIM，实测 ~1.5s ⇒ **进程内记忆化**；顺带修掉了 `perf-cmp-rollout` 内联副本里的裸 `powershell`）。
+- **已知灰区**（两边 docstring 都写明）：cpuset 恰好只给 HT sibling 时会**高估**；要精确需把
+  affinity 的 cpu id 与 `/sys/.../topology/{core_id,physical_package_id}` 求交，本版不做。
+- **落点**：`common/platform_utils.py::{parse_cpuinfo_physical_cores,host_physical_cores,physical_cores}` ·
+  `tools/lib/cores.ts::{parseProcCpuinfoPhysicalCores,hostPhysicalCores,physicalCores}`（**合并**了
+  `worker-pool.ts` 里那份「名叫物理核、返回逻辑核」的副本，re-export 保值）· 两个 launcher
+  `tools/run-root-tests.ts` / `dashboard/scripts/run-tests.ts`（JSON 脚本串做不了算术）·
+  `nn-training/tools/nproc.py`（CI 现探核数的**真文件**入口 —— `uv run python -c` 会被 CI 路径门禁
+  当成名叫 `-c` 的路径）· `gateCoreCount` 默认 4 → 物理核（`GATE_CORES` 仍是逃生口）。
+- **上界**：`nn-python-gate.sh` 的 `min(核数, 12)` → `min(核数, **32**)`（只给大机器兜内存）。
+- **实测（本机 8c/16t，2026-10-03）**：nn python gate 8 worker **3586 pass / 7 skip / 52s**
+  （旧 12 worker ≈61s）· 根套件 `bun run check` **2365 pass / 0 fail / 62.6s**（banner `8x PARALLEL`）·
+  dashboard **1305 pass / 0 fail / 19.5s**（对照：`--parallel=4` 31.8s）· **sim 打分门禁**
+  8 worker **min 23.1s** vs 4 worker min 27.9s（旧注释里「4 最优」在这台机器上已不成立 ——
+  那份实测是 700 局 classic 的单模块场景，整门 2100 局下 8 更快）。
+- **未测（如实记）**：`defaultWorkerCount` 15→7 之后 sim 批处理工具（`m1-eval` / `export-*`）的吞吐
+  —— 本工作区 `nn-training/weights` 为空，跑不起来。复核命令：
+  `bun tools/sim/m1-eval.ts --stages 1-4 --seeds 1-3 --policy nn --workers 8`（对照 `--workers 4`）。
+
 ---
 ## §22 A 方案落地：节点侧 rollout **与**云机离线 eval 接入长驻池（`worker/serve_pool.py`）—— 1.45–1.47× / 1.19–1.39×，产物逐位不变（2026-09-23）
 

@@ -13,7 +13,12 @@
  *
  * 消费方：`tools/lib/worker-pool.ts`（physicalCores）、`tools/agent/sampler-agent.ts`
  * （CPUS）、`tools/sim/perf-cmp-rollout.ts`、`dashboard/src/core/venv.ts`（torch 线程数）。
+ *
+ * 2026-10-03 起本文件还提供**第二个**口径 `physicalCores()`（门禁 / 本地 worker 池用；
+ * 组合规则与 `effectiveCores` 同构，但基准是**真物理核**而不是逻辑核）。两者的分工见
+ * `physicalCores` 的 docstring 与 python 侧 `common.platform_utils.physical_cores`。
  */
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import * as os from 'node:os'
 
@@ -125,4 +130,107 @@ export function resolveEffective(signals: Array<number | null>, host: number): n
  */
 export function effectiveCores(): number {
   return resolveEffective([cgroupCpuQuota(), affinityCores()], hostLogicalCores())
+}
+
+/**
+ * `/proc/cpuinfo` 文本 → **物理核数**（`(physical id, core id)` 的**唯一对**数）。
+ *
+ * 超线程的 sibling 各占一段 `processor : N`，同一物理核的几段共享同一个对；故唯一对数 =
+ * 物理核数。ARM 等平台可能缺这两行 ⇒ null（拿不到事实，不是 0、也不假装 1）。
+ * 与 python 侧 `common.platform_utils.parse_cpuinfo_physical_cores` 逐字同源。
+ */
+export function parseProcCpuinfoPhysicalCores(text: string): number | null {
+  const pairs = new Set<string>()
+  let phys: string | null = null
+  let core: string | null = null
+  const afterColon = (line: string): string => {
+    const i = line.indexOf(':')
+    return i < 0 ? '' : line.slice(i + 1).trim()
+  }
+  const flush = (): void => {
+    if (phys !== null && core !== null) pairs.add(`${phys}/${core}`)
+    phys = null
+    core = null
+  }
+  for (const raw of text.split(/\r?\n/)) {
+    const line = raw.trim()
+    if (line.startsWith('processor')) flush()
+    else if (line.startsWith('physical id')) phys = afterColon(line) || null
+    else if (line.startsWith('core id')) core = afterColon(line) || null
+  }
+  flush()
+  return pairs.size > 0 ? pairs.size : null
+}
+
+/** 物理核数的进程内缓存（`undefined` = 还没探测过；`null` = 探测失败）。 */
+let hostPhysicalCache: number | null | undefined
+
+function detectHostPhysicalCores(): number | null {
+  const num = (out: string | undefined): number | null => {
+    const n = Number.parseInt((out ?? '').trim().split(/\s+/)[0] ?? '', 10)
+    return Number.isFinite(n) && n > 0 ? n : null
+  }
+  try {
+    if (process.platform === 'darwin') {
+      return num(
+        spawnSync('sysctl', ['-n', 'hw.physicalcpu'], { encoding: 'utf8', timeout: 5_000 }).stdout,
+      )
+    }
+    if (process.platform === 'win32') {
+      // 仓库内 PowerShell 调用一律 pwsh（AGENTS §17.7 / DECISIONS §323；裸 powershell = 5.1）。
+      // 本机实测（2026-10-03）：`-NoProfile -NonInteractive` + CIM ≈ 1.5s（wmic 已从新 Windows
+      // 移除、pwsh 的 WmiObject 更慢 3.8s）—— 故结果必须记忆化（见下）。
+      const r = spawnSync(
+        'pwsh',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          '(Get-CimInstance Win32_Processor).NumberOfCores',
+        ],
+        { encoding: 'utf8', windowsHide: true, timeout: 15_000 },
+      )
+      return num(r.stdout)
+    }
+    if (process.platform === 'linux') {
+      return parseProcCpuinfoPhysicalCores(readFileSync('/proc/cpuinfo', 'utf8'))
+    }
+  } catch {
+    /* 回落逻辑核 */
+  }
+  return null
+}
+
+/**
+ * 本机**物理核数**（排除超线程，只看硬件事实）；探测不到 ⇒ null。
+ *
+ * 结果**记忆化**：Windows 上要 spawn `pwsh`（~0.3-0.6s 启动），每进程只该付一次
+ * （失败也缓存 —— 一台机器上「探测不到」不会因为再问一次而变化）。
+ */
+export function hostPhysicalCores(): number | null {
+  if (hostPhysicalCache === undefined) hostPhysicalCache = detectHostPhysicalCores()
+  return hostPhysicalCache
+}
+
+/**
+ * **门禁 / 本地 worker 池**的并行度口径：本机可用的**物理核数**。
+ *
+ * 与 `effectiveCores()` 的分工（2026-10-03 决议，plan `gate-parallelism-physical-cores`）：
+ * · `effectiveCores()` 给**训练运行时**的 rollout/eval 槽位 —— 那里超线程也能吃进吞吐，
+ *   且容器配额是硬约束；
+ * · 本函数给**门禁与本地 worker 池** —— 它们开的是「每核一个重型进程」，HT sibling 共享
+ *   执行单元与 L1/L2，加 worker 只涨内存与切换（本机 8c/16t 实测：`bun test` 按 16 开
+ *   worker 把 Windows 提交上限顶穿 ⇒ worker 崩 + 连环 abort 一片假红，8 全绿）。
+ *
+ * 组合规则与 `effectiveCores()` 同构：真物理核、cgroup 配额、亲和掩码取**小值**；三者都
+ * 读不到才回落宿主机逻辑核数（本文件内的 `hostLogicalCores()`）。
+ *
+ * **已知灰区**：cpuset 恰好只给超线程 sibling 时会**高估**（精确做法要把 affinity 的 cpu id
+ * 与 `/sys/.../topology/{core_id,physical_package_id}` 求交）—— 门禁场景收益极小，本版不做。
+ */
+export function physicalCores(): number {
+  return resolveEffective(
+    [hostPhysicalCores(), cgroupCpuQuota(), affinityCores()],
+    hostLogicalCores(),
+  )
 }

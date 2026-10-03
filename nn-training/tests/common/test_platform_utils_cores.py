@@ -112,3 +112,82 @@ def test_cpu_worker_slots_uses_the_effective_cores(monkeypatch: pytest.MonkeyPat
     # 显式给数仍然完全按它走（本函数只管缺省）
     monkeypatch.setattr(pu, "effective_cores", lambda: 96)
     assert pu.cpu_worker_slots(40) == 36
+
+
+# ─────────── physical_cores：门禁 / 本地 worker 池的口径（2026-10-03） ───────────
+
+
+def test_parse_cpuinfo_physical_cores_counts_unique_pairs() -> None:
+    """同一物理核的 HT sibling 共享 `(physical id, core id)` ⇒ **唯一对**数才是物理核数。"""
+    text = (
+        "processor\t: 0\nphysical id\t: 0\ncore id\t\t: 1\n\n"
+        "processor\t: 1\nphysical id\t: 0\ncore id\t\t: 1\n\n"  # sibling：同核
+        "processor\t: 2\nphysical id\t: 0\ncore id\t\t: 2\n"
+    )
+    assert pu.parse_cpuinfo_physical_cores(text) == 2
+
+    # 跨 socket：physical id 不同、core id 相同 ⇒ 仍是两个物理核（键是「对」不是单个 id）
+    two_sockets = (
+        "processor\t: 0\nphysical id\t: 0\ncore id\t\t: 0\n\n"
+        "processor\t: 1\nphysical id\t: 1\ncore id\t\t: 0\n"
+    )
+    assert pu.parse_cpuinfo_physical_cores(two_sockets) == 2
+
+    # 缺 physical id / core id（部分 ARM 镜像）⇒ None（拿不到事实，不是 1、不是 0）
+    assert pu.parse_cpuinfo_physical_cores("processor\t: 0\nmodel name\t: ARMv8\n") is None
+    assert pu.parse_cpuinfo_physical_cores("") is None
+
+
+def test_host_physical_cores_parses_cpuinfo_on_linux(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Linux 分支 = 读 `/proc/cpuinfo` 的唯一对数；读不到 ⇒ None（不假装 1）。"""
+    monkeypatch.setattr(pu.sys, "platform", "linux")
+    _fake_fs(
+        {pu._PROC_CPUINFO: "processor : 0\nphysical id : 0\ncore id : 3\n"},
+        monkeypatch,
+    )
+    assert pu.host_physical_cores() == 1
+    _fake_fs({}, monkeypatch)
+    assert pu.host_physical_cores() is None
+
+
+def test_physical_cores_takes_the_smallest_of_physical_quota_affinity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """三来源取**小值**：容器里配额/掩码是硬约束，物理核探测也要被它们夹住。"""
+    monkeypatch.setattr(pu, "host_physical_cores", lambda: 8)
+    monkeypatch.setattr(pu, "cgroup_cpu_quota", lambda: 4)
+    monkeypatch.setattr(pu, "affinity_cores", lambda: 12)
+    assert pu.physical_cores() == 4
+
+    # 裸机（无 cgroup / 无亲和掩码）⇒ 就是物理核数（本机 8，**不是**逻辑核 16）
+    monkeypatch.setattr(pu, "cgroup_cpu_quota", lambda: None)
+    monkeypatch.setattr(pu, "affinity_cores", lambda: None)
+    assert pu.physical_cores() == 8
+
+
+def test_physical_cores_falls_back_to_logical_when_detection_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """物理探测失败 ∧ 无 cgroup ∧ 无亲和掩码 ⇒ 回落 `os.cpu_count()`（最后一档兜底）。"""
+    monkeypatch.setattr(pu, "host_physical_cores", lambda: None)
+    monkeypatch.setattr(pu, "cgroup_cpu_quota", lambda: None)
+    monkeypatch.setattr(pu, "affinity_cores", lambda: None)
+    monkeypatch.setattr(pu.os, "cpu_count", lambda: 16)
+    assert pu.physical_cores() == 16
+
+
+def test_physical_cores_never_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """坏读数不得算出 0（零并发会当场卡死）。"""
+    monkeypatch.setattr(pu, "host_physical_cores", lambda: 0)
+    monkeypatch.setattr(pu, "cgroup_cpu_quota", lambda: None)
+    monkeypatch.setattr(pu, "affinity_cores", lambda: None)
+    monkeypatch.setattr(pu.os, "cpu_count", lambda: None)
+    assert pu.physical_cores() == 1
+
+
+def test_physical_cores_is_at_most_effective_cores() -> None:
+    """不变量：物理核数 ≤ 逻辑核数 —— 门禁的 worker 不会比运行时槽位口径还宽。
+
+    真实机上逻辑核数（含 HT）≥ 物理核数，两边又都受配额/掩码夹取 ⇒ 成立。
+    """
+    assert 1 <= pu.physical_cores() <= pu.effective_cores()

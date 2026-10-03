@@ -79,7 +79,7 @@ cd dashboard && bun install && bun run typecheck && bun run test   |   bun run d
 ```
 
 - `bun run test` 何时跑/跳、`HEAVY_TESTS` 名单的判据与复测法 → details §5.3。
-- `bun test` 必带 `--parallel --timeout=50000`；位置参数是子串过滤，排除目录只能用 `--path-ignore-patterns`。
+- `bun test` 必带 `--parallel=<物理核数> --timeout=50000`（门禁的 worker 数一律 = 物理核；两个包的 launcher 已代劳）；位置参数是子串过滤，排除目录只能用 `--path-ignore-patterns`。
 
 ### Style & placement
 

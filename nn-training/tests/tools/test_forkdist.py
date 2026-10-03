@@ -141,18 +141,18 @@ def test_worker_count_option_accepts_ints_and_auto() -> None:
         assert "forkdist" in str(e.value), f"{bad!r} 的报错必须点名 --forkdist"
 
 
-def test_configure_resolves_auto_from_platform_utils(
+def test_configure_resolves_auto_from_physical_cores(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`auto` 必须解析成 `common.platform_utils.effective_cores()`（容器里比 `os.cpu_count()` 准）。"""
+    """`auto` 必须解析成 `common.platform_utils.physical_cores()`（2026-10-03 起的门禁口径）。"""
     if not hasattr(os, "fork"):
         pytest.skip("Windows")
     fc = _plugin()
-    monkeypatch.setattr(common.platform_utils, "effective_cores", lambda: 7)
+    monkeypatch.setattr(common.platform_utils, "physical_cores", lambda: 7)
     cfg = _StubConfig(fc._AUTO)
     fc.pytest_configure(cfg)
     assert cfg.forkdist_workers == 7, (
-        "auto 走了别的核数来源——本仓「本机几核」只允许一个答案（effective_cores）"
+        "auto 走了别的核数来源——本仓门禁/worker 池的并行度只允许一个答案（physical_cores）"
     )
 
 
@@ -186,20 +186,23 @@ def test_task_py_dispatches_per_platform() -> None:
     """`python tools/task.py <target>` 在 Linux 上走 forkdist，在其它平台保留 xdist。
 
     真 import 一次 tools/task.py（它模块级没有副作用）并看它拼出来的 argv —— 比 grep 文本强。
+    worker 数是**显式数字**（`physical_cores()`，2026-10-03）：Windows 分支若写 `-n auto`，
+    那是由 xdist 自己按逻辑核解析的，我们看不见（口径会漂）。
     """
     sys.path.insert(0, str(NN_ROOT))
     try:
         from tools import task
 
         got = task.pytest_dispatch()
+        n = str(task.physical_cores())
     finally:
         sys.path.pop(0)
     src = TASK_PY.read_text(encoding="utf-8")
     assert 'hasattr(os, "fork")' in src, "tools/task.py 的分发判据里丢了「有没有 os.fork」"
     if sys.platform.startswith("linux"):
-        assert got == ["-p", "tools.forkdist", "--forkdist", "auto"], got
+        assert got == ["-p", "tools.forkdist", "--forkdist", n], got
     else:
-        assert got == ["-n", "auto"], got
+        assert got == ["-n", n], got
 
 
 def test_makefile_dispatches_per_kernel() -> None:
@@ -234,10 +237,12 @@ def test_makefile_dispatches_per_kernel() -> None:
         assert len(recipes) == 3, recipes
         for line in recipes:
             if sys.platform.startswith("linux"):
-                assert "--forkdist auto" in line, f"{line}"
+                # 2026-10-03 起 NPROC = 物理核数（显式数字，由 Makefile 里的 venv python 现算）
+                assert re.search(r"--forkdist \d+", line), f"{line}"
                 assert not re.search(r"\s-n\s", line), f"forkdist 分支还搭了 -n：{line}"
             else:
                 assert "--forkdist" not in line, f"{line}"
+                assert re.search(r"-n \d+", line), f"{line}"
     else:
         assert "-n $(NPROC)" in src, "非 Linux 分支丢了 xdist"
 
@@ -257,7 +262,27 @@ def test_ci_keeps_xdist_with_the_measured_reason_in_the_file() -> None:
     layers = [ln for ln in src.splitlines() if "uv run pytest" in ln]
     assert len(layers) == 2, layers
     for line in layers:
-        assert "-n 2" in line, f"CI 两层应继续用 xdist -n 2：{line}"
+        assert "${{ steps.cores.outputs.n }}" in line, (
+            f"CI 两层的 worker 数应来自现探的物理核数（steps.cores.outputs.n）：{line}"
+        )
+
+
+def test_ci_worker_count_is_derived_from_physical_cores() -> None:
+    """CI 的 `-n` 现探物理核数（2026-10-03），且探测走**真文件** `tools/nproc.py`。
+
+    为什么必须是真文件：`tests/test_ci_workflow_paths.py` 的 `_UV_RUN_PY` 把
+    `uv run python <path>` 的 `<path>` 当路径校验存在性 —— `-c '...'` 会被当成名叫 `-c`
+    的路径而红。这条用例同时钉住「不再出现写死的 `-n 2`」（写死就是回到按 runner 规模估）。
+    """
+    src = CI.read_text(encoding="utf-8")
+    assert "uv run python tools/nproc.py" in src, "CI 没有现探核数的步骤"
+    assert (NN_ROOT / "tools" / "nproc.py").is_file(), "被 workflow 点名的 nproc.py 不存在"
+    assert re.search(r'id:\s*cores', src), "探测步缺 id ⇒ 下面没法引用它的输出"
+    # 只查**调用行**：注释里保留的 `-n 2` 是「为何不换 forkdist」那条实测依据（合法历史记录）。
+    invocations = [ln for ln in src.splitlines() if "uv run pytest" in ln]
+    assert len(invocations) == 2, invocations
+    for line in invocations:
+        assert not re.search(r"-n\s+2\b", line), f"CI 里还留着写死的 `-n 2`：{line}"
 
 
 def test_reap_closes_command_pipes_before_waiting() -> None:

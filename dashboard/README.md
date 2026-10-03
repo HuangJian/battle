@@ -50,7 +50,9 @@ bun run start        # 启动控制台（:8900；--port N 可改）
 bun run launch       # python 无头启动器：bun run launch --script trainer/run_rl.py --check
 bun run build:ui     # 手动重建客户端 bundle（--analyze 看模块体积 top10）
 bun run typecheck    # tsc --noEmit（独立于仓库根）
-bun run test         # bun test --parallel --timeout=50000 --preload ./tests/helpers/no-proxy.ts tests
+bun run test         # bun scripts/run-tests.ts → 组成见该文件：--parallel=<物理核数> --timeout=50000
+                     #   + --preload ./tests/helpers/no-proxy.ts tests（顶层脚本串做不了算术，
+                     #   故 worker 数由 launcher 现算；裸 --parallel 的缺省是逻辑核 16 ⇒ 假红）
                      #   预载 = 测试进程出网直连（代理环境下「hub 不可达」类用例从 ~3s 掉回 ~0.01s，见该文件头注）
 bun run lint         # oxlint
 bun run format       # oxfmt

@@ -16,6 +16,8 @@ trainer/queue.py 各自维护了一份逐字节相同的 `_POPEN_NO_WINDOW`（Wi
   force_utf8_stdio() —— CLI 入口调用：把本进程 stdout/stderr 运行时钉成 UTF-8
     （压过 PYTHONIOENCODING / PYTHONUTF8 / 控制台代码页；详见 docstring）。
   effective_cores() —— 本进程**真正能用**的核数（容器配额/亲和掩码 > os.cpu_count()）。
+  physical_cores() —— 本机可用的**物理核数**（排除超线程）：门禁 / 本地 worker 池的口径
+    （与 effective_cores 的分工见 docstring）。
   cpu_worker_slots(cores=None) —— 本机 CPU 并行槽的**唯一口径**（见 docstring）：
     rollout 与 eval 都用它，谁都不为对方预留核数。
   popen_own_group(**extra) —— **自带进程组**的子进程 kwargs（POSIX 的 start_new_session）。
@@ -197,6 +199,135 @@ def effective_cores() -> int:
     （Windows、裸机、无 cgroup 的容器）。
     """
     candidates = [c for c in (cgroup_cpu_quota(), affinity_cores()) if c]
+    if candidates:
+        return max(1, min(candidates))
+    return max(1, int(os.cpu_count() or 1))
+
+
+#: Linux `/proc/cpuinfo` 的位置（物理核解析用；读不到 ⇒ 回落）。
+_PROC_CPUINFO = "/proc/cpuinfo"
+
+
+def parse_cpuinfo_physical_cores(text: str) -> int | None:
+    """`/proc/cpuinfo` 文本 → **物理核数**（`(physical id, core id)` 的**唯一对**数）。
+
+    超线程的 sibling 在 cpuinfo 里各占一段 `processor : N`，同一物理核的几段共享同一个
+    `(physical id, core id)`；故唯一对数 = 物理核数。ARM 等平台可能缺这两行（或只有
+    `core id`）⇒ None —— 那是「拿不到事实」，不是 0，也不是假装 1。
+    """
+    pairs: set[tuple[str, str]] = set()
+    cur_phys: str | None = None
+    cur_core: str | None = None
+    for raw in text.splitlines():
+        line = raw.strip()
+        if line.startswith("processor"):
+            if cur_phys is not None and cur_core is not None:
+                pairs.add((cur_phys, cur_core))
+            cur_phys = cur_core = None
+        elif line.startswith("physical id"):
+            cur_phys = line.split(":", 1)[-1].strip() or None
+        elif line.startswith("core id"):
+            cur_core = line.split(":", 1)[-1].strip() or None
+    if cur_phys is not None and cur_core is not None:
+        pairs.add((cur_phys, cur_core))
+    return len(pairs) or None
+
+
+def _win_physical_cores() -> int | None:
+    """Windows：`GetLogicalProcessorInformationEx(RelationProcessorCore)` 的条目数。
+
+    本机实测（2026-10-03，Ryzen 7 5800H）返回 8 —— 与 `Get-CimInstance Win32_Processor`
+    的 `NumberOfCores` 同值，但**不 spawn 子进程**（快一个数量级，且不取决于 pwsh 装没装）。
+    老系统/接口缺失/任何异常 ⇒ None（不抛）。
+    """
+    try:
+        import ctypes
+
+        windll = getattr(ctypes, "windll", None)
+        if windll is None:  # 非 Windows 解释器（理论上不会走到这里）
+            return None
+        from ctypes import wintypes
+
+        kernel32 = windll.kernel32
+        #: `PROCESSOR_RELATIONSHIP.RelationProcessorCore`（winnt.h，= 0）。
+        relation_processor_core = 0
+        length = wintypes.DWORD(0)
+        # 第一次调用只为拿所需长度：返回 0 是预期的（ERROR_INSUFFICIENT_BUFFER）。
+        kernel32.GetLogicalProcessorInformationEx(0, None, ctypes.byref(length))
+        if length.value <= 0:
+            return None
+        buf = ctypes.create_string_buffer(length.value)
+        if not kernel32.GetLogicalProcessorInformationEx(0, buf, ctypes.byref(length)):
+            return None
+        n = 0
+        off = 0
+        # 逐条走：头 8 字节 = {Relationship(DWORD), Size(DWORD)}，Size 含头。
+        while off + 8 <= length.value:
+            rel = ctypes.c_uint32.from_buffer(buf, off).value
+            size = ctypes.c_uint32.from_buffer(buf, off + 4).value
+            if size <= 0:
+                break
+            if rel == relation_processor_core:
+                n += 1
+            off += size
+        return n or None
+    except Exception:
+        # 探测失败只能是「拿不到事实」，绝不打断调用方（不猜、不抛）。
+        return None
+
+
+def _macos_physical_cores() -> int | None:
+    """macOS：`sysctl -n hw.physicalcpu`（失败 ⇒ None）。"""
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "hw.physicalcpu"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=5,
+            **POPEN_NO_WINDOW,
+        )
+        n = int(out.stdout.strip().split()[0])
+        return n if n > 0 else None
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return None
+
+
+def host_physical_cores() -> int | None:
+    """本机**物理核数**（排除超线程，且**只看硬件事实**，不夹容器配额）；探测不到 ⇒ None。
+
+    零新依赖（venv 里没有 psutil，2026-10-03 实测）：Windows = ctypes
+    `GetLogicalProcessorInformationEx`、macOS = `sysctl hw.physicalcpu`、
+    Linux（其余）= `/proc/cpuinfo` 的唯一 `(physical id, core id)` 对。
+    """
+    if sys.platform == "win32":
+        return _win_physical_cores()
+    if sys.platform == "darwin":
+        return _macos_physical_cores()
+    return parse_cpuinfo_physical_cores(_read_text(_PROC_CPUINFO) or "")
+
+
+def physical_cores() -> int:
+    """**门禁 / 本地 worker 池**的并行度口径：本机可用的**物理核数**。
+
+    与 `effective_cores()` 的分工（2026-10-03 决议，plan `gate-parallelism-physical-cores`）：
+    两者都保留，因为消费域不同 ——
+    · `effective_cores()`：**训练运行时**的 rollout/eval 槽位（`cpu_worker_slots`）。那里
+      超线程也能吃进吞吐，且容器配额是硬约束。
+    · `physical_cores()`：**门禁与本地 worker 池**。它们开的是「每核一个重型进程」，
+      HT sibling 共享执行单元与 L1/L2，加 worker 只涨内存与切换。本机实测（8 物理 /
+      16 逻辑）：`bun test` 按 16 开 worker 把 Windows 提交上限顶穿（`RegisterWaitForSingleObject
+      1455 paging file is too small`）⇒ worker 崩 + 兄弟 worker 连环 abort，全绿只需 8。
+
+    组合规则与 `effective_cores()` 同构：真物理核、cgroup 配额、亲和掩码取**小值**（容器里
+    物理核探测未必读得到，而配额/掩码是硬事实）；三者都读不到才回落 `os.cpu_count()`。
+
+    **已知灰区**：cpuset 恰好只给超线程 sibling 时，取 min 会**高估**物理核数（精确做法要把
+    affinity 的 cpu id 与 `/sys/devices/system/cpu/cpuN/topology/{core_id,physical_package_id}`
+    求交）。门禁场景收益极小，本版不做（写在这里免得下一个人误以为它是精确值）。
+    """
+    candidates = [c for c in (host_physical_cores(), cgroup_cpu_quota(), affinity_cores()) if c]
     if candidates:
         return max(1, min(candidates))
     return max(1, int(os.cpu_count() or 1))

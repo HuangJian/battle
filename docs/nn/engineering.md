@@ -1157,7 +1157,7 @@ Windows/macOS 继续 xdist（判据见 49.5）。§48.5 记的那个「唯一剩
   这三笔 CPU 在 xdist 里是**并行重叠**的（所以以前没怎么伤墙钟），fork 后索性整笔消失。
 * **内存没省**（4.77 → 4.81GB）：COW 只在页**没被写过**时共享，而子进程很快就写脏了 torch/numpy
   的分配面。所以「fork 省内存」在本套件上**不成立**——别拿它当理由（`-n 12` 的 3.9GB 量级封顶
-  依旧要守，`NPROC` 上界照旧 ≤12）。
+  依旧要守，`NPROC` 上界 2026-10-03 起改为 **≤32**，且核数口径改为**物理核**——见 runtime-opt §23.6）。
 
 ### 49.3 设计要点（每一条都对应一个踩过的语义坑）
 
@@ -6228,7 +6228,8 @@ auto=16 反更慢」正是这个假象的读数（worker 越多越慢本身就�
 
 **改动**：① 门禁 export `OMP/MKL/OPENBLAS_NUM_THREADS`（`NN_GATE_THREADS`，默认 1，0 = 不设）
 + worker = `min(核数, 12)`（`NN_GATE_NPROC`；取 12 同时给内存封顶：峰值 pytest 进程树
-RSS ≈ 3.9GB ≈ `-n 4` 的 3 倍）；② 三路工具启动去重成 `run_tool`（原先 LIVE/detach 二选一
+RSS ≈ 3.9GB ≈ `-n 4` 的 3 倍）——**2026-10-03 起改为 `min(物理核数, 32)`**（口径改物理核，
+上界提到 32；见 runtime-opt §23.6）；② 三路工具启动去重成 `run_tool`（原先 LIVE/detach 二选一
 复制了三遍，加一个工具就要再抄一遍，漏掉 detach 分支会让 Windows commit 卡死）；③ 去掉 pytest 的
 重复 `-q`（addopts 已有 `-q` ⇒ 原本是 `-qq`，把结尾的「N passed in Xs」吞了，hook 日志里看不到
 用例数与耗时）——现在日志里是 `1010 passed in 21.2s`；④ `t0` 提到启动工具之前，报告的秒数 = 门禁

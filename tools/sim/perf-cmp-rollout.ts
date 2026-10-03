@@ -14,7 +14,7 @@
  *     --stage N / --seed N / --ticks N 可覆盖。网格按 --parallel 分片、多进程并行跑
  *     （exporter 单进程内 stage×seed 是串行的——仓库注释里的既定事实，并行由本脚本做）。
  *   - --reps N：整个（并行）网格重复跑 N 次做性能统计（min/median），压机器噪声；默认 1。
- *   - --parallel P：每组合并行子进程数；默认=机器可用核（os.availableParallelism）。
+ *   - --parallel P：每组合并行子进程数；默认=**物理核数**（`tools/lib/cores.ts::physicalCores`）。
  *
  * 依赖：bun（打包 exporter；脚本本身用 bun 跑）、node ≥22（node 组；缺失自动跳过）。
  * 不改任何仓库文件：产物全在 tmp/perf-cmp.<pid>/，内核通过「打包产物同级 wasm/ 目录」
@@ -40,10 +40,9 @@ import {
   statSync,
 } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import os from 'node:os'
 import path from 'node:path'
 
-import { effectiveCores } from '../lib/cores'
+import { physicalCores } from '../lib/cores'
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..')
 process.chdir(ROOT) // 所有相对路径以仓库根为准
@@ -61,65 +60,9 @@ let STAGE_SPEC = '0-34' // 缺省：经典 35 关全跑（性能网格）
 let SEED_SPEC = '1-2' // 缺省：每关 2 个 seed
 let TICKS = 1200
 let REPS = 1
-/** 物理核探测（win=CIM / darwin=sysctl / linux+android proot=/proc/cpuinfo 的 physical×core 唯一对；失败回落逻辑核）。
- *
- * 逻辑核数再按 `effectiveCores()` 夹一次：容器里 `os.cpus().length` / `availableParallelism()`
- * 会报**宿主机**核数（Kaggle 224 vs cgroup 配额 96），照它开并行 = 2.3× 超订
- * （见 tools/lib/cores.ts 的 2026-09-25 事故）。裸机无 cgroup ⇒ 夹取是恒等操作。 */
-function detectPhysicalCores(): number {
-  const logical = Math.min(
-    (os as unknown as { availableParallelism?: () => number }).availableParallelism?.() ??
-      os.cpus().length,
-    effectiveCores(),
-  )
-  const num = (out: string | undefined): number => {
-    const n = parseInt((out ?? '').trim().split(/\s+/)[0] ?? '', 10)
-    return Number.isFinite(n) && n > 0 ? n : 0
-  }
-  try {
-    if (process.platform === 'darwin') {
-      const n = num(spawnSync('sysctl', ['-n', 'hw.physicalcpu'], { encoding: 'utf8' }).stdout)
-      if (n) return n
-    } else if (process.platform === 'linux') {
-      const txt = readFileSync('/proc/cpuinfo', 'utf8')
-      const pairs = new Set<string>()
-      let curPhys = ''
-      let curCore = ''
-      let sawIds = false
-      for (const line of txt.split(/\r?\n/)) {
-        const m = /^([a-z_ ]+)\s*:\s*(.+)$/.exec(line.trim())
-        if (!m) continue
-        const key = m[1]!.trim()
-        const val = m[2]!.trim()
-        if (key === 'processor') {
-          if (sawIds) pairs.add(`${curPhys}/${curCore}`)
-          curPhys = ''
-          curCore = ''
-          sawIds = false
-        } else if (key === 'physical id') {
-          curPhys = val
-          sawIds = true
-        } else if (key === 'core id') {
-          curCore = val
-        }
-      }
-      if (sawIds) pairs.add(`${curPhys}/${curCore}`)
-      if (pairs.size > 0) return pairs.size
-    } else if (process.platform === 'win32') {
-      const r = spawnSync(
-        'powershell',
-        ['-NoProfile', '-Command', '(Get-CimInstance Win32_Processor).NumberOfCores'],
-        { encoding: 'utf8', windowsHide: true, timeout: 15_000 },
-      )
-      const n = num(r.stdout)
-      if (n) return n
-    }
-  } catch {
-    /* 回落逻辑核 */
-  }
-  return logical
-}
-const PHYS_CORES = detectPhysicalCores()
+/** 物理核探测：**唯一实现已下沉** `tools/lib/cores.ts::physicalCores`（2026-10-03 合并，
+ * 此前这里有一份内联副本；那份在 Windows 上还用的是裸 `powershell`，违反 AGENTS §17.7）。 */
+const PHYS_CORES = physicalCores()
 let PARALLEL = PHYS_CORES
 let KEEP = false
 let NO_OLD = false

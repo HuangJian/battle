@@ -77,8 +77,8 @@ bun install        # 装依赖
 bun run dev        # 起开发服（默认 :8956），浏览器打开即玩
 bun run build      # 构建产出（oxlint && tsc && vite build）
 bun run test       # 跑测试（scoped runner：只跑与本地改动相关的用例，静默通过）
-bun run check      # 全量门禁：tsc --noEmit + bun test --parallel --timeout=50000
-bun test --parallel --timeout=50000   # 全量测试（127 个文件、~1400 个用例）
+bun run check      # 全量门禁：tsc --noEmit + 全量 bun test（worker = 物理核数，见 tools/run-root-tests.ts）
+bun test --parallel=8 --timeout=50000   # 全量测试（127 个文件、~1400 个用例）；`--parallel` 的值请给**物理核数**
 ```
 
 > 要求 **Bun** 运行时。没有 npm 那套分裂的体验。

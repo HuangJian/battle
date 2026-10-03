@@ -7109,3 +7109,47 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
   （按本仓纪律由用户终端复跑）。
 - **指针**：全文 `docs/nn/remote-transport.md` §57 · plan `plan/switch-mode-drops-jobs.plan.md`（未跟踪）
   · `plan/auto-offline-handoff.plan.md` §4 T0。
+
+## §2026-10-03-goalnn-gate-parallelism-physical-cores（2026-10-03，门禁/本地 worker 池并行度改按**物理核数**：新增 `physical_cores()` 第二口径）
+
+- **背景（事故）**：`bun test` 裸 `--parallel` 的缺省 = **逻辑核**（本机 8c/16t ⇒ 16 worker），
+  实测把 Windows 的提交上限顶穿（物理 28.9G + 固定分页 14G = 42.9G，空闲提交仅 5.3G）⇒
+  `RegisterWaitForSingleObject 1455 paging file is too small` ⇒ worker `0x80000003` 崩 + 兄弟
+  worker 连环 abort ⇒ 一次提交里 32 个"失败"**全是崩出来的假红**（同套用例 4 worker 全绿）。
+  用户裁决：**所有门禁的并发数 = 所在机器的物理核数**。
+- **决定**：
+  ① **两个口径按消费域分工**（每一域仍只有一个答案）：`effective_cores()` 留作**训练运行时**
+     （rollout/eval 槽位、`biz/cli.py`、notebook、`sampler-agent`、torch 线程数）；**新增**
+     `physical_cores()` = **min(真物理核, cgroup 配额, 亲和掩码)**，都读不到才回落 `os.cpu_count()`
+     —— 给**门禁与本地 worker 池**。
+  ② **落点铺满所有门禁入口**：`nn-python-gate.sh`（`NPROC`）· `tools/task.py::pytest_dispatch()` /
+     `Makefile`（**传显式数字**，不再 `auto` —— Windows 的 `-n auto` 是 xdist 自己按逻辑核解析的，
+     我们看不见）· `forkdist --forkdist auto` · 根 `bun run check` / `bun run test`（新增 launcher
+     `tools/run-root-tests.ts`，JSON 脚本串做不了算术；`test-silent.ts` 显式传数）· dashboard
+     （新增 `dashboard/scripts/run-tests.ts`）· **CI**（新增 `nn-training/tools/nproc.py` 现探，
+     替掉写死的 `-n 2`）· `worker-pool::defaultWorkerCount` / `gateCoreCount`。
+  ③ **探测零新依赖**（venv 无 psutil）：Windows ctypes `GetLogicalProcessorInformationEx
+     (RelationProcessorCore)`（本机实测 8，比 spawn 快一个数量级）/ macOS `sysctl hw.physicalcpu` /
+     Linux `/proc/cpuinfo` 的 `(physical id, core id)` 唯一对；TS 侧镜像（Windows 走 **pwsh** CIM，
+     实测 ~1.5s ⇒ 进程内记忆化）。
+  ④ **上界 `min(核数, 12)` → `min(核数, 32)`**（只给大机器兜内存）。
+  ⑤ **顺手修** `worker-pool::physicalCores` —— 它名叫物理核、实际返回**逻辑核**（`min(cpus().length,
+     effectiveCores())`，本机 16）；合并进 `cores.ts` 唯一实现，`perf-cmp-rollout` 的内联副本一并下沉
+     （顺带修掉那份里的裸 `powershell`，AGENTS §17.7），`worker-pool` 只 re-export 保下游 import 不变。
+- **被否决**：① 保持逻辑核/`auto`（事故已证明会假红）；② 把 `effective_cores()` 直接改物理核
+  （会连**训练运行时**的 rollout/eval 槽位一起改——那是另一个消费域，不在本次范围）；③ 猜
+  `逻辑核 ÷ 2` 当物理核（无 HT 的机器上直接错一半）；④ `wmic`（新 Windows 已移除，实测 `not
+  recognized`）；⑤ 去掉 `NPROC` 上界（大机器按核数放大内存有 OOM 风险）。
+- **已知灰区（写进两边 docstring，不修）**：cpuset 恰好只给 HT sibling 时 `min` 会高估物理数；
+  精确做法要把 affinity 的 cpu id 与 `/sys/.../topology/{core_id,physical_package_id}` 求交。
+- **落点**：`nn-training/common/platform_utils.py` · `nn-training/tools/{forkdist,task,nproc}.py` · `nn-training/Makefile` ·
+  `tools/{lib/cores.ts,lib/worker-pool.ts,test-silent.ts,run-root-tests.ts,sim/perf-cmp-rollout.ts,githook/nn-python-gate.sh}` ·
+  `dashboard/{scripts/run-tests.ts,package.json,tsconfig.json,tests/gate-composition.test.ts}` · `tests/{effective-cores,worker-pool-defaults}.test.ts` ·
+  `nn-training/tests/{common/test_platform_utils_cores.py,tools/{test_forkdist,test_nproc}.py,test_githook_scripts.py}` ·
+  `.github/workflows/nn-training.yml` · `package.json` · 文档 `docs/nn/runtime-opt.md` §23.6。
+- **门槛**：nn python gate 绿（**3586 pass/7 skip，8 worker，52s**）· 根套件 `bun run check` 绿
+  （**2365 pass/0 fail，banner `8x PARALLEL`**，62.6s，含 sim 打分门禁）· dashboard 绿（**1305 pass/0 fail，19.5s**）。
+- **实测（本机 8c/16t）**：**sim 打分门禁** 8 worker **min 23.1s** vs 4 worker min 27.9s（旧注释里「4 最优」在这台
+  机器上已不成立——那份实测是 700 局 classic 单模块场景，整门 2100 局下 8 更快）。**未测（如实记）**：
+  `defaultWorkerCount` 15→7 之后 sim 批处理工具（`m1-eval`/`export-*`）的吞吐——本工作区 `nn-training/weights` 为空，跑不起来。
+- **指针**：全文 `docs/nn/runtime-opt.md` §23.6 · 计划 `.trae/documents/gate-parallelism-physical-cores.md`。

@@ -67,11 +67,11 @@ check: python-gate
 python-gate:
 	bash ../tools/githook/nn-python-gate.sh
 
-# ---- 分层调试入口的并行旋钮：worker = auto（= 核数），CPU 内线程 = 1 ----
+# ---- 分层调试入口的并行旋钮：worker = **物理核数**（2026-10-03 起），CPU 内线程 = 1 ----
 # 两者**必须一起**（2026-09-17 实测，16 核）：写死 `-n 4` + 默认线程 = 4×16 超订 ⇒
 # 全量 36.3s；只加 worker 更慢（n=12 默认线程 44.7s）；封到 1 线程后 n=12/auto ≈ 23s。
 # 完整数据与推理在门禁脚本头注；覆盖：`make test NPROC=8` / `make test THREADS=0`。
-NPROC   ?= auto
+NPROC   ?= $(if $(PHYSICAL_CORES),$(PHYSICAL_CORES),auto)
 THREADS ?= 1
 export OMP_NUM_THREADS = $(THREADS)
 export MKL_NUM_THREADS = $(THREADS)
@@ -80,10 +80,14 @@ export OPENBLAS_NUM_THREADS = $(THREADS)
 # ---- 分发器（2026-09-29，docs/nn/engineering.md §50）：Linux = 「收集一次 + fork」----
 # 判据与门禁同一条：① 有没有 `os.fork`（Windows 没有）② 内核是不是 Linux（macOS 上
 # master 在 fork 前已经 import torch，libgomp/dyld 与 fork 的组合本仓未验证）。
-# `--forkdist auto` = 机器核数（platform_utils.effective_cores，cgroup 配额优先），
-# 所以 `NPROC=auto` 与 `NPROC=8` 两种打法都不变；`PYTEST_DISPATCH` 亦可整体覆盖。
+# `NPROC` 缺省 = `platform_utils.physical_cores()`（物理核数，超线程不计入；cgroup 配额/
+# 亲和掩码取小）——与门禁脚本 / tools/task.py / CI 同一口径；`NPROC=8` 仍然照给，
+# `PYTEST_DISPATCH` 亦可整体覆盖（`NPROC=auto` 也留着：那是 forkdist 里现成的同义入口）。
 # 16 核实测（tests/+e2e/）：wall 21.99 → 17.57s、user 233.9 → 121.6s。
 UNAME_S := $(shell uname -s 2>/dev/null)
+# 求值用 venv python（`-c` 下 sys.path[0] = cwd = nn-training ⇒ `common` 可 import）；
+# 探测失败 ⇒ 空 ⇒ NPROC 回落 `auto`（forkdist 那边会响亮报错，不静默给错数）。
+PHYSICAL_CORES := $(shell $(PYTHON) -c "from common.platform_utils import physical_cores as p; print(p())" 2>/dev/null)
 ifeq ($(UNAME_S),Linux)
 PYTEST_DISPATCH ?= -p tools.forkdist --forkdist $(NPROC)
 else

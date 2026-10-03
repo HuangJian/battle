@@ -31,7 +31,7 @@ from pathlib import Path
 # /`-m pytest` 以 nn-training 为根 ⇒ 先把 nn-training 根放回 sys.path。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.platform_utils import rmtree_best_effort
+from common.platform_utils import physical_cores, rmtree_best_effort
 
 #: `HERE` 的语义不变（nn-training 根：pyproject.toml / .venv / 子脚本都相对它）⇒ 上溯 +1。
 HERE = Path(__file__).resolve().parents[1]
@@ -137,16 +137,18 @@ def pytest_dispatch() -> list[str]:
     继承 `sys.modules` 与已收集的 Item，避掉 xdist「每个 worker 各收全部 ~275 个模块」那份冗工。
     16 核实测（tests/ + e2e/）：wall 21.99 → 17.57s、user 233.9 → 121.6s（轮数越多越赚）。
 
-    `-n auto` 的**语义不变**（`--forkdist auto` 同样解析成机器核数，走
-    `common.platform_utils.effective_cores()`——容器里比 `os.cpu_count()` 更准），所以
-    `tools/task.py check` / `task test` 的 worker 打法与以前一致。
+    worker 数**显式传数字**（2026-10-03 起 = `physical_cores()`，物理核数）：不再写 `auto`
+    —— 那在 forkdist 里会解析成核数，但在 **Windows/macOS 的 xdist 分支里 `-n auto` 是
+    xdist 自己解析的**（它看逻辑核/亲和掩码，看不见我们的口径）。显式数字让三个入口
+    （本脚本 / Makefile / CI / 门禁脚本）共用同一个物理核口径。
 
     为何只在 Linux：Windows 没有 `os.fork`（插件会当场拒绝）；macOS 上 master 在 fork 前
     已经 import torch，libgomp/dyld 与 fork 的组合本仓没有验证过。两者继续 xdist。
     """
+    n = str(physical_cores())
     if sys.platform.startswith("linux") and hasattr(os, "fork"):
-        return ["-p", "tools.forkdist", "--forkdist", "auto"]
-    return ["-n", "auto"]
+        return ["-p", "tools.forkdist", "--forkdist", n]
+    return ["-n", n]
 
 
 def target_check() -> int:

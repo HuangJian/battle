@@ -315,15 +315,21 @@ dev server + build (target `es2020`). oxlint + oxfmt only — do not introduce E
 bun run dev          # vite dev server on :8956
 bun run build        # oxlint && tsc && vite build  (the gate before merge)
 bun run test         # SCOPED: only tests tied to local git changes, prints only failures
-bun test --parallel --timeout=50000   # full suite — ALWAYS with both flags
+bun test --parallel --timeout=50000   # full suite — ALWAYS with both flags (*1)
 bun run typecheck    # tsc --noEmit --incremental
 bun run lint         # oxlint
 bun run format       # oxfmt
-bun run check        # full gate: tsc --noEmit --incremental && bun test --parallel --timeout=50000
+bun run check        # full gate: tsc --noEmit --incremental && bun test（组成见 tools/run-root-tests.ts）
 bun run setup        # git config core.hooksPath tools/githook  (enables pre-commit hook)
 bun run freeze:check # det 21-combo signature vs tools/det-golden.v1.sha256 (~4s) — red ⇒ new-era triple
 bun run freeze:l2    # archived-candidate reachability audit over the same corpus (~1s)
 ```
+
+(*1) **`--parallel` 的值 = 所在机器的物理核数**（2026-10-03）：裸 `--parallel` 的缺省是**逻辑核**
+（含超线程，本机 16），16 worker 把 Windows 的提交上限顶穿 ⇒ worker 崩 + 连环 abort 的**假红**。
+所以根套件的组成搬进了 launcher `tools/run-root-tests.ts`（`--parallel=<物理核数> --timeout=50000`
++ 排除 `dashboard/**`），`bun run check` 调它；`tools/test-silent.ts` 也显式传同一个数。
+手工敲 `bun test` 时请给数（`bun test --parallel=8 --timeout=50000`）。口径与落点 → runtime-opt §23.6。
 
 **Freeze-gate cost, measured 2026-09-15** (21-combo full grid, 16-core Linux): `freeze:check` **3.6–5.0s**,
 `freeze:l2` **1.1–1.2s**. Both were documented as `~100s` and that figure drove real decisions (the

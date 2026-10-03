@@ -36,6 +36,7 @@
 import { execFileSync } from 'node:child_process'
 import { existsSync, readdirSync } from 'node:fs'
 import { relative, resolve } from 'node:path'
+import { physicalCores } from './lib/cores'
 import { CWD, gitChangedFiles, spawnCapture } from './runner'
 
 export interface TestResult {
@@ -331,12 +332,14 @@ export async function runSilentTest(
     return { ok: true, summary: 'no tests to run', detail: `${label}: no test files resolved\n` }
   }
 
-  // 2. Run the selected tests once. `--parallel --timeout=50000` are mandatory
+  // 2. Run the selected tests once. `--parallel=<物理核数> --timeout=50000` are mandatory
   // (AGENTS §5): without `--parallel` all files share one process and
   // cross-file module state leaks surface as order-dependent failures.
+  // worker 数显式给物理核数（2026-10-03）：裸 `--parallel` 的缺省 = 逻辑核（含超线程），
+  // 16 worker 会把 Windows 提交上限顶穿 ⇒ worker 崩 + 连环 abort 的假红（见 tools/lib/cores.ts）。
   const first = await spawnCapture(
     'bun',
-    ['test', '--parallel', '--timeout=50000', ...files],
+    ['test', `--parallel=${physicalCores()}`, '--timeout=50000', ...files],
     cwd,
     timeoutMs,
   )
