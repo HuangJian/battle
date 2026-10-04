@@ -7704,3 +7704,25 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   `alerts.ts` / `interaction.ts` / `theme.css` · 计划 `plan/course-startup-recover.plan.md`。
 - **指针**：全文 `docs/nn/training-stack.md` §29（训练侧）· `docs/nn/console.md` §30（控制台读面）·
   计划 `plan/course-startup-recover.plan.md`。
+## §2026-10-05-goalnn-gate-fail-fast（2026-10-05，nn 门禁 fail-fast：任一腿先红即停其余腿）
+
+- **背景**：2026-10-05 一次 `bun run pygate`：ruff 约 1s 就红（`test_wire_reroll.py` 的
+  import 排序），门禁仍陪跑完 23s 的 pytest 才报错——失败路径的「等」是提交循环里最贵
+  的一段。且 `tools/task.py check` 自 2026-09-15 起把自己的语义写成「与 nn-python-gate.sh
+  并行语义同构」，而门禁一直只并行、没 fail-fast（两家口径漂着）。
+- **决定**：门禁 v3.20 起按启动顺序（ruff → mypy → pytest）收账，任一腿非零即 `stop_tool`
+  掉还没收账的腿再 wait 回收；启动仍三路并行（happy path 墙钟不变）。杀法按「选中的
+  python 是不是 Windows 二进制」判：Windows 走 `taskkill //F //T` 连树（hook 模式内层
+  pytest 与 xdist worker 是 detach-run 的后代，只杀壳 = 孤儿）；POSIX 走 `kill -KILL`，
+  且 `detach-run.py` 同日改为 **POSIX exec 目标**（hook 模式下 `$!` 自始至终就是工具
+  本体），forkdist worker 由 PDEATHSIG 兜底。
+- **被否决**：① pytest 推迟到 ruff/mypy 通过后再启动（happy path 多付 ~4s，换掉的只是
+  一个 kill 面）；② POSIX setsid + 进程组杀（macOS 无 `setsid(1)`，多一套平台分支；
+  exec 已让 pid 直达本体）；③ 只杀 detach-run 壳、让 pytest 自然跑完（等于没 fail-fast，
+  CPU 白烧）。
+- **违反后果**：把收账写回「等全部跑完」⇒ 失败路径退回 ~27s；Windows 改单进程 kill ⇒
+  内层 pytest 变孤儿继续烧 CPU；POSIX 撤掉 detach-run 的 exec ⇒ 杀到的只是壳，同款孤儿。
+- **落点**：`tools/githook/nn-python-gate.sh`（v3.20 头注 + `JOBS`/`stop_tool`/收账循环）·
+  `tools/githook/detach-run.py`（POSIX exec）· `nn-training/tests/test_githook_scripts.py`
+  （红腿行为档 ×2 + Windows taskkill 静态钉子）。
+- **指针**：全文 `docs/nn/engineering.md` §63。

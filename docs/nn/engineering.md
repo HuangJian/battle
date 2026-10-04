@@ -25,6 +25,95 @@
 
 ---
 
+## §63 门禁 fail-fast：任一腿先红即停其余腿 + detach-run 在 POSIX 改 exec（2026-10-05）
+
+### 一句话
+
+`nn-python-gate.sh` v3.20 起按启动顺序（ruff → mypy → pytest）收账，任一腿非零立即
+`stop_tool` 掉还没收账的腿再 wait 回收——ruff 1s 红时不再陪跑完 23s 的 pytest；
+启动仍三路并行（happy path 墙钟不变）。为了让 hook 模式的「杀」够得着真进程，
+`detach-run.py` 在 POSIX 上改为 **exec 目标**（`$!` 自始至终就是工具本体；Windows 侧
+由 `taskkill /F /T` 连树）。
+
+### 现场
+
+2026-10-05 一次 `bun run pygate`：ruff 约 1s 就红（`tests/remote/test_wire_reroll.py`
+的 import 排序，I001），pytest 3640 passed 跑满 23.2s，门禁 27s 才报错。失败路径的
+「等」是提交循环里最贵的一段；而 `tools/task.py check` 自 2026-09-15 起就把自己的语义
+写成「与 nn-python-gate.sh 并行语义同构」——门禁一直只并行、没 fail-fast，两家口径
+其实是漂的。
+
+### 决定
+
+- 收账循环 = `for __job in $JOBS`（`JOBS` 项为 `name:pid`，顺序 = 启动顺序）；`RC != 0`
+  时后续每腿先 `stop_tool` 再 `wait`（已自然结束的腿信号打在僵尸上无害——未 wait 的
+  pid 不可能被复用）。
+- 杀法按「选中的 python 是不是 Windows 二进制」判（与全脚本同源，不看 uname）：
+  Windows `.exe` → `taskkill //F //T //PID`（hook 模式内层 pytest 与 xdist worker 是
+  detach-run 的后代，只杀壳 = 孤儿）；POSIX → `kill -KILL`，hook 模式下 detach-run
+  已 exec 目标 ⇒ pid 直达本体；forkdist worker 由 PDEATHSIG 兜底
+  （`tools/forkdist.py::_die_with_parent`）。
+- 失败时打一行 `▸ fail-fast：<腿> 已失败 ⇒ 后续腿已停（不再等待）`，再照旧倾倒日志。
+
+### 被否决
+
+- **pytest 推迟到 ruff/mypy 通过后再启动**：happy path 多付 ~4s（mypy 热缓存时间），
+  换掉的只是一个 kill 面——不值（门禁提速是既有决议，见 §49/§50 与头注实测）。
+- **POSIX 用 setsid + 进程组杀**：macOS 没有 `setsid(1)`，且会引入第三套平台分支；
+  exec 让 `$!` 直达工具本体，不需要组语义（Windows 仍用 taskkill /T）。
+- **只杀 detach-run 壳**：等于没 fail-fast——pytest 继续烧 CPU（正是 flake 系「孤儿」
+  的来源，见 §21）。
+
+### 验证
+
+行为档 `tests/test_githook_scripts.py::test_gate_fails_fast_when_a_static_tool_is_red`
+（ruff/mypy 两参数）真跑一次门禁骨架：假 pytest 写 pid 后睡 20s，红腿一响断言 ① 门禁
+rc≠0 ② 墙钟 <10s ③ pytest 起过 ④ 没跑完 ⑤ **进程真的死了**（hook 模式 detach-run
+不 exec 时，杀到的只是壳 ⇒ 这条必红）。Windows 连树杀由静态钉子
+`test_gate_stops_other_legs_for_windows_python_with_taskkill` 看住。红检：临时换回改动前
+的 gate + detach-run ⇒ 断言 ② 以「门禁却等了 20.1s」当场红。全量门禁 3643 passed。
+
+决策 → `DECISIONS.md` §2026-10-05-goalnn-gate-fail-fast。
+
+---
+
+## §62 门禁 flake 根因：排队账 `wait=0.0`——占位线程改事件驱动（2026-10-05）
+
+### 一句话
+
+`tests/remote/test_wire_reroll.py::test_queue_wait_is_attributed_by_jid` 的间歇红
+（`assert wait > 0.0` 看到 `wait=0.0s/yield=0`）不是账本错，是**夹具在按墙钟放手**：
+旧 `_hold_slot_for(seconds)` 从函数返回就开始 `sleep(seconds)`，满载/调度延迟下主线程
+还没进 `slot()`，持有者已经释放 ⇒ 调用方 `waited=False`、`_queue_waits` / `_waits[token]`
+未记。修法：持有者等**可观测的排队信号**（有线程真卡在 `_released` 上）再开始计时——
+复用 `tests.remote.test_bulk_sched._CountingEvent` 换掉 `_BULK._released`。
+
+### 证据链
+
+- 8 轮 forkdist 全量轰炸（每次带 8 个 burner 制造 9.7–20.6 负载）：只有第 1 轮红
+  （load_before 0.18，`tmp/dur/fd-flake/r1.log`），后 7 轮全绿 ⇒ 竞态型，不是纯负载型。
+  失败行：`job prefetch: wire payload=0.00MB/0.0s(286KB/s) wait=0.0s/...`。
+- 同族判据（`stats()["queue_waits"] >= 1`、「排队」日志）被同一根因一起吃掉。
+
+### 决定
+
+- `_hold_slot_for(seconds, monkeypatch)`：`monkeypatch.setattr(_BULK, "_released", waiting)`，
+  holder 进槽后 `waiting.wait_until(1, timeout=10.0)`（等真有人卡住）再睡 `seconds`
+  （0.3 / 1.05 / 0.2 / 0.3；`1.05` 那处还要过 `slot()` 的 1s「排队」日志阈值）。
+- 4 个调用点改传 `monkeypatch`；`test_queue_wait_is_attributed_by_jid` 加确定性回归探针
+  `_slow_slot`（先 `sleep(0.4)` 再进 `slot()`，模拟调度延迟），占位时长 0.05 → 0.2。
+- 跨测试模块 import 的先例：`test_role_routing → test_run_segment._publish`。
+
+### 红检与教训
+
+- 删掉 `wait_until(1, ...)` 行（探针 0.4s > 占位 0.2s）⇒ 必红（与线上同款消息）；恢复后
+  `sha256sum -c tmp/wire_reroll2.sha` 通过、4 个定向用例绿。
+- **0.15s 探针不够红**（延迟 < 占位，回归路径仍能自愈）——探针要 **> 被测量**，否则
+  「红检」是假动作。`sleep` 标注（`# sleep-ok: 夹具模拟的工作量`）由静态守卫
+  `tests/test_no_sleep_as_sync.py` 逐条核对。
+
+---
+
 ## §61 收官轮 eval 缺失 + dropped 局静默丢失：drain 收进 `finish_course` + claim/landed 拆分（2026-10-02，plan/eval-final-round-and-dropped.plan.md）
 
 ### 一句话

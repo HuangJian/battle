@@ -45,6 +45,13 @@
    同水平）⇒ 全量 ~36s → ~23s。**静默退化风险**：谁把 OMP/MKL 的封顶 export 删掉，
    门禁立刻退回 ~36s，而所有用例仍然全绿——只有人肉计时才发现。故本文件把两个旋钮
    都钉成静态回归（见 test_gate_caps_intraop_threads / test_gate_worker_count_scales_with_cores）。
+
+8. **门禁任一腿先红就必须停掉其余腿**（fail-fast，2026-10-05，v3.20）。现场：ruff 1s 就红
+   （一次 import 排序），门禁却陪跑完 23s 的 pytest 才报错；而 `tools/task.py check` 自
+   2026-09-15 起就写着「与 nn-python-gate.sh 并行语义同构」——门禁一直只并行、没 fail-fast。
+   行为档 = `test_gate_fails_fast_when_a_static_tool_is_red`（真跑门禁：假 pytest 睡 20s，
+   红腿一响它必须被停、**进程真的死**——hook 模式下 detach-run 若还是 Popen 壳，杀到的
+   只是壳，真 pytest 会变孤儿继续烧 CPU）；Windows 连树杀（taskkill /T）由静态钉子看住。
 """
 
 from __future__ import annotations
@@ -54,6 +61,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -462,3 +470,135 @@ def test_gate_never_passes_n_and_forkdist_together() -> None:
         if "-m pytest" in ln and "--forkdist" in ln and re.search(r"\s-n\s", ln)
     ]
     assert not offenders, f"同一行既给 -n 又给 --forkdist：{offenders}"
+
+
+def _pid_alive(pid: int) -> bool:
+    """pid 是否还在（同 pid 未被回收时 kill 0 无副作用）。"""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    return True
+
+
+@no_bash
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="假 python 是 POSIX sh 脚本；Windows 的 taskkill 连树无法用它复现，"
+    "改由 test_gate_stops_other_legs_for_windows_python_with_taskkill 静态钉住",
+)
+@pytest.mark.parametrize("red", ["ruff", "mypy"])
+def test_gate_fails_fast_when_a_static_tool_is_red(tmp_path: Path, red: str) -> None:
+    """任一腿先红 ⇒ 停掉其余腿、不等 pytest 跑完（模块 docstring 第 8 条）。
+
+    真跑一次门禁（不是 grep 文本）：假 python 记账 argv；`red` 腿睡 1s 再非零退出（给
+    pytest 足够启动窗口 ⇒ 无竞态）；pytest 腿写 pid 后睡 20s，睡够才写完成标记。断言：
+    ① 门禁 rc≠0；② 墙钟 <10s（诚实 fail-fast ≈1s；没停腿会陪跑 ~21s）；③ pytest 起过；
+    ④ 没跑完（完成标记缺席）；⑤ **pytest 进程真的死了**——hook 模式下 detach-run 若不 exec
+    目标，杀到的只是壳，真 pytest 会变孤儿继续烧 CPU（这正是要抓的回归）。
+    """
+    skel = tmp_path / "skel"
+    hook_dir = skel / "tools" / "githook"
+    hook_dir.mkdir(parents=True)
+    shutil.copy(GATE, hook_dir / GATE.name)
+    # detach-run.py 必须真在场：假 python 对它的调用是 exec 真解释器（见下），跑不到文件
+    # 的话三道腿会以「can't open file」秒红——"fail-fast 生效"的假绿。
+    shutil.copy(
+        REPO_ROOT / "tools" / "githook" / "detach-run.py", hook_dir / "detach-run.py"
+    )
+
+    argv_log = tmp_path / "argv.log"
+    pid_log = tmp_path / "pytest.pid"
+    done_log = tmp_path / "pytest.done"
+    real_py = _bash_path(Path(sys.executable))
+    fake_py = skel / "nn-training" / ".venv" / "bin" / "python"
+    fake_py.parent.mkdir(parents=True)
+    # 假 python 三分支：① 记账；② 被 detach-run 调用 ⇒ **exec 真解释器**跑 detach-run.py
+    # （不真跑它就测不到「pid 是否贯穿到工具本体」，见断言 ⑤）；③ 各工具腿的行为。
+    fake_py.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' \"$*\" >> \"$ARGV_LOG\"\n"
+        "case \"$1\" in\n"
+        f"  *detach-run.py) exec '{real_py}' \"$@\" ;;\n"
+        "esac\n"
+        "case \"$*\" in\n"
+        f"  *\"-m {red}\"*) sleep 1; exit 7 ;;\n"
+        "  *\"-m pytest\"*)\n"
+        "    printf '%s' \"$$\" > \"$PID_LOG\"\n"
+        "    sleep 20\n"
+        "    : > \"$DONE_LOG\" ;;\n"
+        "esac\n"
+        "exit 0\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    fake_py.chmod(0o755)
+
+    wrapper = tmp_path / "run-gate.sh"
+    wrapper.write_text(
+        "#!/bin/sh\n"
+        f"export ARGV_LOG='{_bash_path(argv_log)}'\n"
+        f"export PID_LOG='{_bash_path(pid_log)}'\n"
+        f"export DONE_LOG='{_bash_path(done_log)}'\n"
+        "export PYTHONUTF8=1\n"
+        # 清空继承旋钮（用例必须让指定的静态腿真跑）：pre-commit 钩子会给门禁灌
+        # NN_GATE_SKIP=ruff（它自己先跑 staged ruff）——不清零时 ruff 腿被跳过，
+        # 「ruff 红 ⇒ 停其余腿」这条断言就永远不成立（2026-10-05 首次提交现场）。
+        "export NN_GATE_SKIP=''\n"
+        f"cd '{_bash_path(skel)}'\n"
+        f"exec bash '{_bash_path(hook_dir / GATE.name)}'\n",
+        encoding="utf-8",
+        newline="\n",
+    )
+    wrapper.chmod(0o755)
+
+    t0 = time.monotonic()
+    proc = subprocess.run(
+        ["bash", _bash_path(wrapper)],
+        cwd=skel,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=60,
+    )
+    elapsed = time.monotonic() - t0
+    assert proc.returncode != 0, (
+        f"{red} 应让门禁红（rc={proc.returncode}）\n{proc.stdout}\n{proc.stderr}"
+    )
+    # timing-ok: 相对判据（阈值 = 假 pytest 腿 20s 的一半；真 fail-fast ≈1s，陪跑才会 ~21s）
+    assert elapsed < 10.0, (
+        f"{red} 已红，门禁却等了 {elapsed:.1f}s——fail-fast 没发生（假 pytest 要睡 20s）\n"
+        f"{proc.stdout}\n{proc.stderr}"
+    )
+    calls = argv_log.read_text(encoding="utf-8").splitlines()
+    assert any("-m pytest" in ln for ln in calls), f"pytest 没被启动（argv：{calls}）"
+    assert not done_log.exists(), "pytest 跑完了——它没有被中止？"
+    # ⑤ 收尸窗口 ≤5s（kill 是异步的）；还活着就先清理再判红，别把孤儿留在测试机上。
+    pid = int(pid_log.read_text(encoding="utf-8"))
+    for _ in range(50):
+        if not _pid_alive(pid):
+            break
+        # sleep-ok: 轮询步长（等的是「进程已死」这个谓词，超时只当挂起兜底）
+        time.sleep(0.1)
+    else:
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+        pytest.fail(
+            f"pytest（pid {pid}）还活着——fail-fast 杀到的只是 detach-run 壳，真 pytest 成了孤儿"
+        )
+
+
+def test_gate_stops_other_legs_for_windows_python_with_taskkill() -> None:
+    """fail-fast 的 Windows 路径：`.exe` python 必须 taskkill /T 连树停腿（docstring 第 8 条）。
+
+    Windows 上 detach-run 是 Popen+wait 的壳（DETACHED_PROCESS 靠壳成立），kill 壳会把内层
+    pytest 与它的 xdist worker 留成孤儿 ⇒ 停腿必须连树杀。判据同全脚本其它平台分支：看选中的
+    python 是不是 .exe，不看 uname（POSIX 侧由上面那条真跑门禁的行为档验证）。
+    """
+    code = _gate_code()
+    assert re.search(r"\*\.exe\)\s*taskkill[^\n]*//F //T //PID", code), (
+        "缺少「Windows python ⇒ taskkill //F //T //PID」的 fail-fast 停腿路径"
+    )

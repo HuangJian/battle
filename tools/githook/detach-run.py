@@ -14,12 +14,17 @@ Fixes two git-hook failure modes on Windows (2026-09-15, commit hang after
 Usage:
   detach-run.py --stdout OUT --stderr ERR -- cmd [args...]
 
-On non-Windows this is a thin Popen+wait with the same stdio redirection.
+On POSIX this dup2's the log files onto stdio and **execs** the command: the pid the
+caller holds IS the command, so a simple `kill $pid` reaches the real process (see the
+in-code rationale: nn-python-gate.sh fail-fast, 2026-10-05). On Windows it stays a
+Popen+wait wrapper (DETACHED_PROCESS/console semantics live on the wrapper side) and
+callers must kill the tree with `taskkill /T`.
 """
 
 from __future__ import annotations
 
 import argparse
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -59,6 +64,23 @@ def main() -> int:
     out_path.parent.mkdir(parents=True, exist_ok=True)
     err_path.parent.mkdir(parents=True, exist_ok=True)
     with out_path.open("wb") as out, err_path.open("wb") as err:
+        if sys.platform != "win32":
+            # POSIX：exec 目标本体，让调用方的 $! **就是**工具进程（2026-10-05）。
+            #
+            # 为什么（门禁 fail-fast）：nn-python-gate.sh 在 ruff/mypy 先红时要停掉
+            # 其余腿——旧的「Popen+wait」壳让调用方的 $! 是**本脚本**，kill 掉只杀壳、
+            # 内层 pytest 变孤儿继续烧 CPU。exec 后 pid 不变、退出码照传（wait $! 的
+            # 语义与旧壳的 `return proc.wait()` 完全一致），stdio 照旧落日志。
+            # Windows 侧不能这么干（DETACHED_PROCESS 是壳的职责）⇒ 那条路径由调用方
+            # 走 taskkill /T 连树。
+            # 原 out/err（及 devnull）都是 Python 默认的 CLOEXEC fd（PEP 446）——
+            # exec 成功时由内核关掉，不需要（也不该）手动 os.close：exec 若失败，
+            # `with` 会正常关闭它们，手动 close 反而会在异常退出路径上抛 EBADF 遮蔽真因。
+            devnull = os.open(os.devnull, os.O_RDONLY)
+            os.dup2(devnull, 0)
+            os.dup2(out.fileno(), 1)
+            os.dup2(err.fileno(), 2)
+            os.execvp(cmd[0], cmd)  # 不返回；失败则原样抛出（命令不存在等）
         proc = subprocess.Popen(
             cmd,
             stdout=out,

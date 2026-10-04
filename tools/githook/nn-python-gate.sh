@@ -11,7 +11,9 @@
 # v3.18 2026-09-20 起双向路径改按「python 是不是 Windows 二进制」判定，
 # 不再只看 wslpath 存不存在，见下方「双向路径」一节；
 # v3.19 2026-09-29 起 pytest 在 **Linux** 上走 forkdist（收集一次 + fork），Windows/macOS 仍走
-# xdist，见下方「pytest 分发器」一节）：
+# xdist，见下方「pytest 分发器」一节；
+# v3.20 2026-10-05 起 **fail-fast**：按 ruff → mypy → pytest 收账，任一先红立即停掉
+# 其余还在跑的腿（不再陪跑完 pytest 才报错），见下方「fail-fast」一节）：
 #   ruff(~1s) / mypy(~4s 热缓存) / pytest xdist 全量 三路并行。
 #   全量 = tests/（单测层）+ e2e/（集成层）。**两层同一次 xdist 调用**：实测（16 核）
 #   tests/ 22s → tests/+e2e/ 27s，只 +5s（另外单跑一次要重复付 torch import 与
@@ -70,6 +72,20 @@
 #   （pytest 自身不再加 `-q`：addopts 已有 `-q`，重复会变成 `-qq` 把结尾的
 #    「N passed in Xs」吞掉——hook 日志里看不到用例数与耗时（2026-09-17 修）。）
 #
+# ---- fail-fast：任一腿先红就不再等其余腿（2026-10-05）----
+# 现场：ruff 约 1s 就红（一次 import 排序），门禁却把 23s 的 pytest 陪跑完才报错——
+# 提交循环里最贵的不是「失败」，是「失败之后还得等」。语义 = `tools/task.py check` 的
+# run_parallel 同款（那份注释自 2026-09-15 就写着「与 nn-python-gate.sh 并行语义同构」，
+# 而门禁一直只并行、没 fail-fast；本版补齐）：按启动顺序（ruff → mypy → pytest）收账，
+# 某腿非零 ⇒ 立即 stop_tool 掉还没收账的腿再 wait 回收。**启动仍三路并行**，happy path
+# 墙钟不变（备选「pytest 等 ruff/mypy 过了再启动」要多付 ~4s，被否决）。
+# 杀法按「选中的 python 是不是 Windows 二进制」判（与全脚本同源）：
+#   · Windows python：`taskkill //F //T //PID` 连子树——hook 模式内层 pytest 是
+#     detach-run 的子进程（xdist worker 也是），只杀壳会把整棵树留成孤儿；
+#   · POSIX：`kill -KILL $!`。hook 模式下 detach-run.py 已**直接 exec 目标**
+#     （2026-10-05 同批改，见其 docstring）⇒ $! 自始至终就是工具本体；forkdist 的
+#     worker 另有 PDEATHSIG 兜底（tools/forkdist.py::_die_with_parent，master 死即死）。
+#
 # 跳过单个工具（逗号分隔）：
 #   NN_GATE_SKIP=ruff,mypy bash tools/githook/nn-python-gate.sh
 # 只退 e2e 集成层（保留单测层）——负载型 flake 时的定向出口：
@@ -79,7 +95,9 @@
 # Windows 子进程继承存在兼容问题（实测间歇性失败）。输出直通。
 #
 # Hook 模式（stdout 非 tty，2026-09-15）：后台 ruff/mypy/pytest 经 detach-run.py
-# 启动——stdio 进独立日志 + DETACHED_PROCESS（无控制台）。否则 Windows git 会
+# 启动——stdio 进独立日志 + DETACHED_PROCESS（无控制台）。POSIX 上 detach-run 直接
+# exec 目标本体（2026-10-05）⇒ 收账/停腿拿到的 pid 就是工具本身；Windows 侧由
+# taskkill /T 连树。否则 Windows git 会
 # 等 hook stdout pipe 的 EOF（门禁全绿后 commit 仍卡死），且共享控制台会吃到
 # 幽灵 CTRL_C_EVENT（git.exe 中途退出、MSYS hook 继续跑）。交互模式（tty）仍
 # 实时输出，不脱管。
@@ -252,8 +270,7 @@ fi
 # 再复制一遍，容易漏掉 detach 分支而让 Windows commit 卡死。
 # exe 参数语义（2026-09-18 WSL 双向路径）：bash 直连执行用 POSIX（`"$NN_PY"`），
 # detach 内层 CreateProcess 的 argv[0] 用 Win32（`"$NN_PY_WIN"`）——WSL 下二者必须分开。
-PIDS=""
-RAN=""
+JOBS=""  # 每项 "name:pid"；顺序 = 启动顺序（ruff → mypy → pytest），fail-fast 也按此序收账
 run_tool() {
   __name=$1
   shift
@@ -265,8 +282,17 @@ run_tool() {
     "$NN_PY" "$DETACH" --stdout "$GATE_TMP_WIN/$__name.log" --stderr "$GATE_TMP_WIN/$__name.err" \
       -- "$NN_PY_WIN" "$@" &
   fi
-  PIDS="$PIDS $!"
-  RAN="$RAN $__name"
+  JOBS="$JOBS $__name:$!"
+}
+
+# stop_tool <pid>：fail-fast 时停掉一路还没收账的工具（尽力而为，失败不阻塞门禁）。
+# 杀法见文件头「fail-fast」一节；判据同全脚本（看选中的 python 是不是 .exe，不看 uname）。
+# 对已经自然结束的腿，信号打在僵尸上无害——它们还没被 wait，pid 不可能被复用。
+stop_tool() {
+  case "$NN_PY" in
+    *.exe) taskkill //F //T //PID "$1" >/dev/null 2>&1 && return 0 ;;
+  esac
+  kill -KILL "$1" 2>/dev/null || true
 }
 
 # pytest 目标（层 = 路径；不加引号是有意的：需要词分割成两个参数）。
@@ -306,15 +332,31 @@ else
   fi
 fi
 
+# fail-fast 收账（见文件头）：第一腿非零 ⇒ 后头的腿 stop_tool 掉再收尸（不等它们跑完）。
 RC=0
-for p in $PIDS; do
-  wait "$p" || RC=1
+FAILED=""
+for __job in $JOBS; do
+  __name=${__job%%:*}
+  __pid=${__job#*:}
+  if [ "$RC" != 0 ]; then
+    stop_tool "$__pid"
+  fi
+  if ! wait "$__pid"; then
+    RC=1
+    if [ -z "$FAILED" ]; then
+      FAILED=$__name
+    fi
+  fi
 done
 t1=$(date +%s)
+if [ "$RC" != 0 ] && [ "$FAILED" != pytest ]; then
+  echo " ▸ fail-fast：$FAILED 已失败 ⇒ 后续腿已停（不再等待）"
+fi
 if [ "$LIVE" = "0" ]; then
-  for name in $RAN; do
-    [ -f "$GATE_TMP/$name.log" ] && cat "$GATE_TMP/$name.log"
-    [ -f "$GATE_TMP/$name.err" ] && cat "$GATE_TMP/$name.err" >&2
+  for __job in $JOBS; do
+    __name=${__job%%:*}
+    [ -f "$GATE_TMP/$__name.log" ] && cat "$GATE_TMP/$__name.log"
+    [ -f "$GATE_TMP/$__name.err" ] && cat "$GATE_TMP/$__name.err" >&2
   done
 fi
 if [ "$RC" -eq 0 ]; then

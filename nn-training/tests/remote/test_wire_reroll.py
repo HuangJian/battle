@@ -41,6 +41,10 @@ from remote import wire as wire_mod
 from remote import worker as worker_mod
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError
 
+# 跨测试模块复用可观测等待原语（先例：`test_role_routing` → `test_run_segment._publish`）。
+# 同款夹具在 `test_bulk_sched` 已用于「单通道并发排队」。
+from tests.remote.test_bulk_sched import _CountingEvent
+
 MB = 1024 * 1024
 
 
@@ -541,25 +545,32 @@ def test_real_failures_still_consume_attempts_after_preempts(monkeypatch) -> Non
 # 根本不可比（`tools/wire_report.py` 文档里「与 hub 侧同段对账即可本地化慢腿」的前提被破坏）。
 
 
-def _hold_slot_for(seconds: float) -> threading.Thread:
-    """占住唯一 bulk 通道 `seconds` 秒（夹具：让被测调用**真的排上队**）。"""
-    release = threading.Event()
+def _hold_slot_for(seconds: float, monkeypatch) -> threading.Thread:
+    """占住唯一 bulk 通道：**等被测调用真的排上队**，再模拟它还传 `seconds` 秒（事件驱动）。
+
+    为什么不能让持有者按墙钟放手（2026-10-04 门禁 flake 修）：旧版从本函数返回就开始
+    `sleep(seconds)`——满载时主线程还没被调度进 `slot()`，持有者已经放手 ⇒ 调用方
+    `waited=False`、排队账恒 0（`wait=0.0` 假红；`queue_waits>=1`、「排队」日志同族判据
+    被一起吃）。而 `slot()` 的等待者自己不发出任何信号，只能从等待原语上观测 ⇒ 换成
+    可观测 Event（`_CountingEvent`），等到有线程真卡在 `_released` 上才开始计时：
+    「排上队」是构造性的，与调度无关。10s 只是挂起兜底：等不到就照旧放手，由用例断言
+    响亮失败（不再静默偶发）。
+    """
     holding = threading.Event()
+    waiting = _CountingEvent()
+    # 只换等待原语（仍是 Event，`slot()` 的等/唤醒语义不变）；monkeypatch 用例结束还原。
+    monkeypatch.setattr(worker_mod._BULK, "_released", waiting)
 
     def holder() -> None:
         with worker_mod._BULK.slot(BULK_P1_CRITICAL, label="holder"):
             holding.set()
-            release.wait(10)
-
-    def _free_soon() -> None:
-        # sleep-ok: 夹具模拟的工作量：持有者占住通道一段时间（不是同步手段）
-        time.sleep(seconds)
-        release.set()
+            waiting.wait_until(1, timeout=10.0)
+            # sleep-ok: 夹具模拟的工作量：从「排上队」起算的占位时长（不是同步手段）
+            time.sleep(seconds)
 
     th = threading.Thread(target=holder, daemon=True)
     th.start()
     assert holding.wait(5), "占位线程没进通道"
-    threading.Thread(target=_free_soon, daemon=True).start()
     return th
 
 
@@ -571,7 +582,7 @@ def _segment_seconds(line: str, seg: str) -> float:
 
 def test_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
     """下载段账 = **纯传输**（排队归调度账 `wait=` / `排队 … 才拿到单通道`）。"""
-    th = _hold_slot_for(0.3)
+    th = _hold_slot_for(0.3, monkeypatch)
     monkeypatch.setattr(http_mod, "_request", lambda *a, **kw: (200, b"p" * 128))
     t0 = time.time()
     out = worker_mod._get_with_retry(
@@ -586,10 +597,8 @@ def test_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
     )
     wall = time.time() - t0
     th.join(5)
-    # 下界留 100ms 余量：占位时长从 `_free_soon` 起算，而 `t0` 在 `_hold_slot_for` 返回后
-    # （中间隔着起线程 + 返回）——满载时这点间隙会把实测墙钟压到 0.3s **以下**（实测 0.2996
-    # ⇒ `>= 0.3` 假红，2026-09-26 burner 扫尾）。“真的排上队”的结构性证据是下面的
-    # `queue_waits >= 1`（调度器自己的账），不靠这个下界；0.2 仍能区分 0.0（没排队）。
+    # 占位从「排上队」起算（事件驱动，见 `_hold_slot_for`）⇒ 墙钟下界是结构性的；
+    # 0.2 只是本就不该失败的旧余量。
     assert out and wall >= 0.2, f"夹具没让这次调用真的排上队：{wall:.2f}s"
 
     lines: list[str] = []
@@ -606,7 +615,7 @@ def test_queue_log_label_carries_the_priority(monkeypatch) -> None:
     """
     worker_mod._WIRE.clear()
     worker_mod._BULK.reset()
-    th = _hold_slot_for(1.05)  # >1.0s 才触发 `slot()` 的「排队」日志（既有阈值）
+    th = _hold_slot_for(1.05, monkeypatch)  # >1.0s 才触发 `slot()` 的「排队」日志（既有阈值）
     monkeypatch.setattr(http_mod, "_request", lambda *a, **kw: (200, b"p" * 16))
     logs: list[str] = []
     prev_log = worker_mod._BULK._log
@@ -633,7 +642,18 @@ def test_queue_wait_is_attributed_by_jid(monkeypatch) -> None:
     """S3d/G5：排队按 jid 归属——预取（合成 id）的排队只进预取的账，job 的 `wait=` 不带它。"""
     worker_mod._WIRE.clear()
     worker_mod._BULK.reset()
-    th = _hold_slot_for(0.05)
+    th = _hold_slot_for(0.2, monkeypatch)
+    # 确定性复现 2026-10-04 门禁 flake：模拟「主线程在到达 slot() 前被调度延迟」——
+    # 修复前持有者按墙钟早就放手，调用方 waited=False、wait=0.0（必红）；事件驱动后
+    # 持有者等排队观测再计时，延迟多久都归账（必绿）。这不是睡眠同步，是回归探针。
+    real_slot = worker_mod._BULK.slot
+
+    def _slow_slot(*a, **kw):
+        # sleep-ok: 夹具模拟的工作量：调用方被调度延迟后才进 slot()（回归探针）
+        time.sleep(0.4)
+        return real_slot(*a, **kw)
+
+    monkeypatch.setattr(worker_mod._BULK, "slot", _slow_slot)
     monkeypatch.setattr(http_mod, "_request", lambda *a, **kw: (200, b"p" * 16))
     worker_mod._get_with_retry(
         "http://hub",
@@ -658,7 +678,7 @@ def test_queue_wait_is_attributed_by_jid(monkeypatch) -> None:
 
 def test_result_segment_seconds_exclude_the_queue_wait(monkeypatch) -> None:
     """回传段同理（现场 `result=0.63MB/18-19s` 的主角）。"""
-    th = _hold_slot_for(0.3)
+    th = _hold_slot_for(0.3, monkeypatch)
     monkeypatch.setattr(JL, "_request", lambda *a, **kw: (200, b'{"ok":1}'))
     status = worker_mod.post_result("http://hub", "t", "jr", {"a": 1}, log=lambda _m: None)
     th.join(5)
