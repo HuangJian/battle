@@ -84,6 +84,7 @@ import { runningStaleCode } from '../core/reload'
 import { handleDeliverUpload, taskBundleDownloadResponse, taskBundleInfo } from './bundles'
 import { runExitCheck } from './exit-watchdog'
 import { ensureBundle, type BundleTarget } from './build'
+import { livePageCss } from './theme-css'
 import { renderConsolePage, renderEvalPage, renderLogPage } from '../web/render'
 import { pageForPath } from '../web/view'
 import type { Component, ProcSpec, RegistryEntry } from '../core/types'
@@ -321,7 +322,8 @@ async function main(): Promise<void> {
         const consolePage = req.method === 'GET' ? pageForPath(url.pathname) : null
         if (consolePage) {
           const state = stampState(await buildStateView(viewCourse || undefined))
-          return new Response(renderConsolePage(state, { page: consolePage }), {
+          // `css` = 现读的 theme.css（改样式不必重启；见 theme-css.ts）。
+          return new Response(renderConsolePage(state, { page: consolePage, css: livePageCss() }), {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
           })
         }
@@ -385,7 +387,7 @@ async function main(): Promise<void> {
             views,
             options: { courses: eff, allCourses: all, readOnly: !loopback },
           }
-          return new Response(renderEvalPage(payload), {
+          return new Response(renderEvalPage(payload, { css: livePageCss() }), {
             headers: { 'Content-Type': 'text/html; charset=utf-8' },
           })
         }
@@ -403,16 +405,20 @@ async function main(): Promise<void> {
           const state = await buildStateView(viewCourse || undefined)
           const follow = url.searchParams.get('follow') !== '0'
           return new Response(
-            renderLogPage(payload, {
-              components: state.components.map((c) => ({
-                key: c.key,
-                label: c.label,
-                status: c.status,
-              })),
-              follow,
-              lines,
-              course: viewCourse || undefined,
-            }),
+            renderLogPage(
+              payload,
+              {
+                components: state.components.map((c) => ({
+                  key: c.key,
+                  label: c.label,
+                  status: c.status,
+                })),
+                follow,
+                lines,
+                course: viewCourse || undefined,
+              },
+              { css: livePageCss() },
+            ),
             { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
           )
         }

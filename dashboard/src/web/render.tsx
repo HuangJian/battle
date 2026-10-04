@@ -43,7 +43,13 @@ export const LANTERN_FAVICON =
 </svg>`,
   )
 
-function shell(title: string, bodyHtml: string, initialJson: string, scriptSrc: string): string {
+function shell(
+  title: string,
+  bodyHtml: string,
+  initialJson: string,
+  scriptSrc: string,
+  css: string = pageCss(),
+): string {
   return `<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -51,7 +57,7 @@ function shell(title: string, bodyHtml: string, initialJson: string, scriptSrc: 
 <meta name="viewport" content="width=device-width, initial-scale=1"/>
 <link rel="icon" href="${LANTERN_FAVICON}"/>
 <title>${title}</title>
-<style>${pageCss()}</style>
+<style>${css}</style>
 </head>
 <body>
 <div id="root">${bodyHtml}</div>
@@ -66,6 +72,16 @@ export interface ConsolePageOpts {
    *  并随引导载荷下发给客户端，使 hydrate 与首帧一致（用户看不到「先画总览再跳指标」的闪跳）。 */
   page?: PageKey
   scriptSrc?: string
+  /** SSR 内联样式（服务端传**现读**的 theme.css——改样式不必重启；见 server/theme-css.ts）。
+   *  缺省 = 构建期文本导入 `pageCss()`（测试与旧调用方行为逐字不变）。 */
+  css?: string
+}
+
+/** 页面外壳的注入项（评估页/日志页没有各自 options 对象位，CSS/脚本源放这里）。 */
+export interface PageShellOpts {
+  scriptSrc?: string
+  /** 同 `ConsolePageOpts.css`：服务端现读的 theme.css；缺省 = 构建期内联。 */
+  css?: string
 }
 
 /** 控制台首屏（只含 /api/state；pool 卡 skeleton + 客户端异步拉，E8/R7）。
@@ -74,13 +90,19 @@ export interface ConsolePageOpts {
 export function renderConsolePage(state: ConsoleStateView, opts: ConsolePageOpts = {}): string {
   const bootstrap: ConsoleBootstrap = { ...state, page: opts.page ?? 'overview' }
   const html = renderToString(<App initial={bootstrap} />)
-  return shell('炼丹炉', html, JSON.stringify(bootstrap), opts.scriptSrc ?? '/app.js')
+  return shell('炼丹炉', html, JSON.stringify(bootstrap), opts.scriptSrc ?? '/app.js', opts.css)
 }
 
 /** 评估页（/eval，独立成页 R8）：SSR 首帧 + hydrate，bundle = /eval.js。 */
-export function renderEvalPage(payload: EvalPagePayload, scriptSrc = '/eval.js'): string {
+export function renderEvalPage(payload: EvalPagePayload, opts: PageShellOpts = {}): string {
   const html = renderToString(<EvalApp initial={payload} options={payload.options} />)
-  return shell('评估页 — EvalBoard', html, JSON.stringify(payload), scriptSrc)
+  return shell(
+    '评估页 — EvalBoard',
+    html,
+    JSON.stringify(payload),
+    opts.scriptSrc ?? '/eval.js',
+    opts.css,
+  )
 }
 
 /** 日志页（/log/<key>，SSR 首帧 + hydrate）。bundle 与 /app.js 同目录：/log.js（§371：旧默认
@@ -88,13 +110,14 @@ export function renderEvalPage(payload: EvalPagePayload, scriptSrc = '/eval.js')
 export function renderLogPage(
   payload: LogPayload,
   opts: LogPageOptions,
-  scriptSrc = '/log.js',
+  shellOpts: PageShellOpts = {},
 ): string {
   const html = renderToString(<LogApp initial={payload} options={opts} />)
   return shell(
     `组件日志 — ${payload.label}`,
     html,
     JSON.stringify({ payload, options: opts }),
-    scriptSrc,
+    shellOpts.scriptSrc ?? '/log.js',
+    shellOpts.css,
   )
 }

@@ -7,6 +7,37 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §26 theme.css 热加载：改样式不必重启控制台（2026-10-04）
+
+**触发**（用户 2026-10-04）：`theme.css` 走 Bun 文本 import（模块级、由 SSR 内联）——
+「服务端进程不重启就不重读。能否改为支持修改后热加载？」
+
+**病根**：`web/theme.ts` 的 `import css from './theme.css' with { type: 'text' }` 在
+**模块加载时**读一次并进 Bun 模块图缓存；SSR 只消费这份常量 ⇒ 改样式必须重启进程
+（刷新多少次页面都是旧样式）。
+
+**修法（现读 + 注入，两层）**：
+
+| 层 | 落点 | 职责 |
+|---|---|---|
+| 读 | `server/theme-css.ts`（新） | `makeCssHotReader(cssPath, deps)`：每请求 1 次 `statSync`（微秒级），`mtimeMs` **或** `size` 变了才重读，没变零读盘；读不了 ⇒ 上次好值优先，从未读到 ⇒ 构建期 `pageCss()` 兜底。判据与 `serveBundle` 的 `bundleMemory` 同款。 |
+| 注 | `web/render.tsx` | `shell(...)` 多一个 `css` 参数；`renderConsolePage` 经 `ConsolePageOpts.css`、`renderEvalPage`/`renderLogPage` 经 `PageShellOpts.css` 注入；缺省仍是 `pageCss()`（测试/旧调用方逐字不变）。`server.ts` 三处页面渲染口全部传 `livePageCss()`。 |
+
+**边界说明**：
+- **分层**：读盘只能住服务端（`web/**` 禁 `fs`/`node:`，`architecture-layering.test.ts` 扫描）；
+  客户端 bundle 不消费 `theme.ts` ⇒ 本来就没有第二条 CSS 通道。
+- **粒度**：已打开的标签页要**刷新**才换样式（CSS 只随 SSR 首帧下发）；「无刷新热替换」需要
+  另开通道，现阶段不做。
+- **预算**：每请求 1 次 stat，不碰聚合/不读大文件（reload-perf 的请求路径纪律不破；G1 计数为 0 照旧）。
+
+**守卫用例**（`tests/server-theme-hot-css.test.ts`，8 例）：mtime 前进重读 / 未变零重读
+（读计数不增）/ ★ size 第二判据 / 读不了退化 / 生产单例指向真文件 / 注入替换构建期内联 /
+不注入行为不变 / 接线闸（server.ts 全部渲染口都注入 `livePageCss()`，新增页忘注入 ⇒ 红）。
+
+**落点**：`dashboard/src/server/theme-css.ts`（新）· `web/render.tsx` · `web/theme.ts`（头注）·
+`server/server.ts`（三处渲染口）。**门槛**：dashboard typecheck + 全量 **1354 pass / 0 fail** ·
+`build:ui` 三份 bundle ok。
+
 ## §25 控制台请求路径「零聚合」+ 聚合增量入账（plan/dashboard-reload-perf，2026-10-03）
 
 **触发**（用户 2026-10-03）：「dashboard 现在重载缓慢，大概要 ~10s……我怀疑是新加的云机 worker

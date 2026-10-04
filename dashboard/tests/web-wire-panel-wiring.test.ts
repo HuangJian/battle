@@ -50,7 +50,9 @@ describe('「传输」页接线（/wire）', () => {
     // 服务端必须通过 pageForPath 判定页面——自己再写一张 pathname 表就会漂移，
     // 症状是「新增页只加了客户端」→ 直接输 URL / 刷新 404。
     expect(server).toContain('pageForPath(url.pathname)')
-    expect(server).toContain('renderConsolePage(state, { page: consolePage })')
+    // `page` 从共享路由表来、经 renderConsolePage 下发即算数——选项对象允许长出新键
+    // （写死整个字面量会替新功能背锅；本测试首版就是被这个坑过一次，见上条注释）。
+    expect(server).toMatch(/renderConsolePage\(state, \{ page: consolePage[,}]/)
   })
 })
 
