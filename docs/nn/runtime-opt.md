@@ -8,6 +8,37 @@
 
 ---
 
+## §31 sampler 内存盘点 + 核数口径/空闲回收/超时定时器（2026-10-04）
+
+> 触发：用户「检查 sampler 的内存占用，找出优化空间」；落地指令四连：「`--workers` 缺省改为物理核」→
+> 「上报 cpus 也改为物理核」→「做空闲回收（floor + 长阈值）」→「修 clearTimeout」。
+> 决策 → DECISIONS §2026-10-04-goalnn-sampler-workers-physical-cores ·
+> §2026-10-04-goalnn-sampler-idle-reap-and-task-timeout-fix。
+
+**live 盘点**（本机 self 节点，uptime 26.5h / 13.6 万局，2026-10-04）：
+
+| 组件 | RSS | 说明 |
+|---|---|---|
+| sampler-agent 主进程 | **~54MB**（稳定） | 内部状态全部有界：resultCache 32 项 ≈ 38KB–1.5MB（cap 32 项 / 2048MB，实测远未触顶）；权重桶只存文件路径（不打字节）；inflight / failedTasks 随任务增删 |
+| 长驻池 worker ×4 | **~304MB**（74–77MB/个，观测区间 74–100） | `serve-any.ts --serve`：bun 运行时 + 全图 TS transpile + JIT + **native 卷积库**（bun:ffi + prebuilt；wasm 仅作首用 attestation 参考与 native 失效回退）/权重装载 —— **单进程地板**，瘦身空间 <10% |
+| **合计** | **≈358MB** | 池规模 = 在飞并发（当前 self concurrency=4） |
+
+**上限**：池最大涨到 `--workers`（旧缺省 = `effectiveCores()` 逻辑核，本机 8c/16t ⇒ 16，且只涨不回缩）
+⇒ 最坏常驻 **~1.2GB**。同日两道指令收口：① `--workers` 缺省与 `/v1/ping` 上报的 `cpus`
+**统一为 `physicalCores()`**（单一 `CPUS`，派工回落与实际接单能力同口径；本机封顶 ~600MB）；
+② **空闲回收**——`--pool-idle-ms`（缺省 30min，`0` 关）× `--pool-floor`（缺省 4，被 `workers` 夹取）
+把长闲时超出 floor 的 worker 收回（纯计划 `reapPlan`，只收空闲、绝不碰在飞；60s 节拍）。
+floor 保底让常见波次（并发 4–6）零冷启，只有**多余**容量被收；要更大并发仍可显式 `--workers N`。
+
+**预期下界**：`≈54MB + 并发数 × ~75MB`（持续负载下本机即当前值——单 worker 无进一步压缩空间）；
+空闲/低谷时经空闲回收收敛到 `≈54MB + min(poolFloor, workers) × ~75MB`（本机 floor=4）。
+
+**超时定时器修复（同日）**：`runViaPersistWorker` 的 600s 定时器旧实现任务完成后**不 clearTimeout**
+——旧定时器撞上新任务时按「此刻有没有 `pending`」判超时 ⇒ 健康 worker 被误杀（live 指纹：每 ~10 分钟一批
+`persist worker closed ... SIGTERM (was busy=true)` + 秒速重生，在飞局弃去走冷启动兜底、并误触
+「连败 3 次 → 停补位」）。修法 = `persist-pool.armTaskTimeout`（可撤销句柄）+ 三态结算后 `cancel()`；
+回归钉子 `tests/agent/persist-pool.test.ts`。
+
 ## §30 并发口径小机器校准：CPU ≤ 4 核全给（2026-10-04，用户口径）
 
 **用户口径**（逐字）：「rollout worker 现在为 max(cores−2, cores×0.8)，我希望改成如果 cpu
@@ -754,7 +785,7 @@ D 状态），`waitpid` 要等那个系统调用返回才收得到尸。后果�
 |---|---|---|
 | **新增 `tools/lib/cores.ts`** | — | TS 侧镜像：`cgroupCpuQuota()`（v2 `cpu.max` / v1 cfs_quota÷period）+ `affinityCores()`（`/proc/self/status` 的 `Cpus_allowed_list`，Node/Bun 没有 `sched_getaffinity`）+ `hostLogicalCores()` 兜底；三个解析器都是纯函数，`resolveEffective()` 钉优先级 |
 | `tools/lib/worker-pool.ts::physicalCores` | `os.cpus().length`（Linux）/ `sysctl hw.physicalcpu`（darwin） | 再 `min(…, effectiveCores())` —— ⇒ `defaultWorkerCount` 的下游（`eval-course-ckpt` / `export-*` / `sim-pool` / `m1-eval` / `base-loss-forensics`）在容器里不再按宿主机排 worker |
-| `tools/agent/sampler-agent.ts::CPUS` | `os.cpus().length` | `effectiveCores()` —— 它同时是**默认 `workers`** 和心跳/hello 上报的 `cpus`（控制台那行「N 核」） |
+| `tools/agent/sampler-agent.ts::CPUS` | `os.cpus().length` | `effectiveCores()`（2026-09-25 当日）；**2026-10-04 起 `CPUS`（上报）/ `--workers`（并发门）统一为 `physicalCores()`**（见 §31） |
 | `tools/sim/perf-cmp-rollout.ts::detectPhysicalCores` | `availableParallelism() ?? os.cpus().length` | 再 `min(…, effectiveCores())` |
 | `dashboard/src/core/venv.ts::resolveTorchThreads` | `navigator.hardwareConcurrency` | `effectiveCores()`（仍 clamp 1..12） |
 | `nn-training/biz/cli.py --workers` | `min(os.cpu_count() or 4, 12)` | `min(effective_cores(), 12)` |
@@ -773,7 +804,8 @@ sampler-agent 上报的 `cpus` 从 224 变 96。
 垃圾格式、取小优先级、永不为 0、本机不变量 `1 ≤ effectiveCores() ≤ hostLogicalCores()`）。
 
 > ⚠ **2026-10-03 起本表里「门禁 / worker 池」那几行改按物理核**（`physicalCores`、
-> `nn-python-gate.sh` 的 `-n`、`perf-cmp-rollout` 的探测）—— 见 §23.6。
+> `nn-python-gate.sh` 的 `-n`、`perf-cmp-rollout` 的探测）—— 见 §23.6；**2026-10-04 起
+> `sampler-agent` 的 `CPUS`/`--workers` 也改物理核**（§31）。
 
 ### 23.6 门禁 / 本地 worker 池改按**物理核数**：新增 `physical_cores()` 第二口径（2026-10-03）
 
@@ -786,8 +818,8 @@ sampler-agent 上报的 `cpus` 从 224 变 96。
 
 | 口径 | 值 | 消费域 |
 |---|---|---|
-| `effective_cores()` / `effectiveCores()` | min(cgroup 配额, 亲和掩码) 否则 `os.cpu_count()`（**逻辑核**） | **训练运行时**：`cpu_worker_slots()`（rollout/eval 槽位）、`biz/cli.py --workers`、notebook、`sampler-agent` 的 `CPUS`、`dashboard/src/core/venv.ts` 的 torch 线程数 |
-| **`physical_cores()` / `physicalCores()`**（新） | **min(真物理核, cgroup 配额, 亲和掩码)**，都读不到才回落 `os.cpu_count()` | **门禁与本地 worker 池**：`nn-python-gate.sh` 的 `NPROC`、`tools/task.py` / `Makefile` / CI 的 `-n`、`bun test --parallel=N`（根 + dashboard）、`forkdist --forkdist auto`、`worker-pool::defaultWorkerCount` / `gateCoreCount`、`perf-cmp-rollout` |
+| `effective_cores()` / `effectiveCores()` | min(cgroup 配额, 亲和掩码) 否则 `os.cpu_count()`（**逻辑核**） | **训练运行时**：`cpu_worker_slots()`（rollout/eval 槽位）、`biz/cli.py --workers`、notebook、`dashboard/src/core/venv.ts` 的 torch 线程数 |
+| **`physical_cores()` / `physicalCores()`**（新） | **min(真物理核, cgroup 配额, 亲和掩码)**，都读不到才回落 `os.cpu_count()` | **门禁与本地 worker 池**：`nn-python-gate.sh` 的 `NPROC`、`tools/task.py` / `Makefile` / CI 的 `-n`、`bun test --parallel=N`（根 + dashboard）、`forkdist --forkdist auto`、`worker-pool::defaultWorkerCount` / `gateCoreCount`、`perf-cmp-rollout`、**`sampler-agent` 的 `CPUS`/`--workers`**（2026-10-04，§31） |
 
 - **为什么物理核**：门禁开的是「每核一个重型进程」，HT sibling 共享执行单元与 L1/L2 ——
   加 worker 只涨内存与切换（`-n12` 在这台 8c/16t 上 ≈ `-n8`：21~28s vs 24~27s，本就在噪声内），

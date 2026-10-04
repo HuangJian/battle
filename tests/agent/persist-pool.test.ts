@@ -7,10 +7,12 @@ import {
   PERSIST_MODE_BY_ENTRY,
   PERSIST_REARM_MS,
   PERSIST_SERVE_ENTRY,
+  armTaskTimeout,
   newPersistBreaker,
   notePersistAttempt,
   persistModeFor,
   persistSpawningAllowed,
+  reapPlan,
   type PersistBreaker,
 } from '../../tools/agent/persist-pool'
 
@@ -109,6 +111,55 @@ describe('同质入口（mode token 取代「腿」）', () => {
   })
 })
 
+describe('空闲回收（floor + 长阈值，2026-10-04）', () => {
+  const now = 10_000_000
+
+  it('只收「闲够久」的；在飞（null）与未到期的一律不收', () => {
+    expect(
+      reapPlan(
+        [{ idleSinceMs: now - 40_000 }, { idleSinceMs: null }, { idleSinceMs: now - 5_000 }],
+        { floor: 1, idleMs: 30_000, nowMs: now },
+      ),
+    ).toEqual([0])
+  })
+
+  it('回收后不小于 floor，且先收最久空闲的', () => {
+    const cs = Array.from({ length: 6 }, (_, i) => ({ idleSinceMs: now - 100_000 - i }))
+    const plan = reapPlan(cs, { floor: 4, idleMs: 30_000, nowMs: now })
+    // 6 个全到期、预算 2（6-4）⇒ 收最久的两个：i=5（now-100005）先于 i=4
+    expect([...plan].sort((a, b) => a - b)).toEqual([4, 5])
+  })
+
+  it('池不超 floor / 阈值关闭（idleMs<=0）⇒ 不收', () => {
+    const cs = [{ idleSinceMs: now - 10 * 60_000 }]
+    expect(reapPlan(cs, { floor: 4, idleMs: 30_000, nowMs: now })).toEqual([])
+    expect(reapPlan(cs, { floor: 1, idleMs: 0, nowMs: now })).toEqual([])
+  })
+
+  it('floor ≤ 0 也至少留 1（把池收空 = 下一局无条件冷启）', () => {
+    const cs = [{ idleSinceMs: now - 60_000 }, { idleSinceMs: now - 60_000 }]
+    expect(reapPlan(cs, { floor: 0, idleMs: 30_000, nowMs: now })).toEqual([0])
+  })
+})
+
+describe('单任务超时控制器（settle 后必须 cancel —— 2026-10-04 误杀回归）', () => {
+  it('cancel 后不再触发；不 cancel 会在超时后触发', async () => {
+    let fired = 0
+    const t = armTaskTimeout(25, () => {
+      fired++
+    })
+    t.cancel()
+    await Bun.sleep(70)
+    expect(fired).toBe(0)
+    // 正控：同一实现、同一时间预算，不 cancel 就会触发
+    armTaskTimeout(25, () => {
+      fired++
+    })
+    await Bun.sleep(70)
+    expect(fired).toBe(1)
+  })
+})
+
 describe('sampler-agent 接线（源级钉子）', () => {
   const src = readFileSync(join(REPO_ROOT, 'tools', 'agent', 'sampler-agent.ts'), 'utf8')
 
@@ -157,6 +208,36 @@ describe('sampler-agent 接线（源级钉子）', () => {
   it('池满 / 停补位冷却走 busy（不计失败），新建前查 persistSpawningAllowed', () => {
     expect(src.includes("if (persistPool.length >= workers) return { outcome: 'busy'")).toBe(true)
     expect(src.includes('persistSpawningAllowed(persistBreaker')).toBe(true)
+  })
+
+  it('--workers 缺省与上报 cpus 都 = 物理核（单一口径 CPUS；池上限 = 内存纪律）', () => {
+    // 2026-10-04 用户指令（同日两次）：① 缺省 workers 按物理核；② 上报 cpus 也收成物理核。
+    // 池里每个 worker 是 ~75–100MB 的重型常驻进程（native 卷积库 + 权重装载；wasm 仅
+    // attestation 参考/回退），按 HT 逻辑核预铺/放行只是把常驻内存翻倍（教义 runtime-opt §23.6/§31）。
+    expect(src.includes('const CPUS = physicalCores()')).toBe(true)
+    expect(src.includes('let workers = CPUS')).toBe(true)
+    expect(src.includes("import { physicalCores } from '../lib/cores'")).toBe(true)
+    // 两处口径已统一为物理核：effectiveCores 不再出现在 agent 里
+    expect(src.includes('effectiveCores')).toBe(false)
+  })
+
+  it('空闲回收接线：CLI 开关 + 节拍 + 状态字段', () => {
+    expect(src.includes("a === '--pool-idle-ms'")).toBe(true)
+    expect(src.includes("a === '--pool-floor'")).toBe(true)
+    expect(src.includes('startReapTicker()')).toBe(true)
+    expect(src.includes('reapIdleWorkers()')).toBe(true)
+    expect(src.includes('persistFloor: Math.min(poolFloor, workers)')).toBe(true)
+  })
+
+  it('任务超时定时器在结算后撤销（旧定时器误杀忙 worker 的回归）', () => {
+    // 旧实现：executor 里裸 setTimeout + 只 unref，任务完成后不 clearTimeout ⇒ 600s 后旧定时器
+    // 撞上新任务时把健康 worker 回收（live 日志每 ~10min 一批 closed SIGTERM busy=true）。
+    const awaitAt = src.indexOf('const settled = await result')
+    const cancelAt = src.indexOf('taskTimer.cancel()', awaitAt)
+    expect(awaitAt).toBeGreaterThan(0)
+    expect(cancelAt).toBeGreaterThan(awaitAt)
+    expect(src.includes('armTaskTimeout(PERSIST_TASK_TIMEOUT_MS')).toBe(true)
+    expect(src.includes(';(timer as ReturnType<typeof setTimeout>).unref?.()')).toBe(false)
   })
 
   it('__SERVE_ERR__ 只算「这一局错」，不当场杀 worker', () => {

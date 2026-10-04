@@ -1,5 +1,6 @@
 /**
- * persist-pool.ts — 长驻 worker 池的**纯策略**（同质入口的 mode 表 + 熔断状态机）
+ * persist-pool.ts — 长驻 worker 池的**纯策略**（同质入口的 mode 表 + 熔断状态机 + 空闲回收计划
+ * + 任务超时控制器）
  *
  * 与 sampler-agent 分离（同 restart-guard.ts / workdir-cleanup.ts 先例）：纯函数、无 IO、无进程，
  * 单测共享。池本身（spawn / stdin / 探活）仍在 sampler-agent.ts。
@@ -112,4 +113,66 @@ export function notePersistAttempt(
 export function persistSpawningAllowed(b: PersistBreaker, nowMs: number): boolean {
   if (!b.stopped) return true
   return nowMs - b.stoppedAtMs >= PERSIST_REARM_MS
+}
+
+/**
+ * 单任务超时控制器（纯接线，单测共享）：返回的 `cancel()` 必须在任务**结算后立刻**调用。
+ *
+ * 回归背景（2026-10-04 采样内存/吞吐盘点）：旧实现在 `runViaPersistWorker` 里裸 `setTimeout`，
+ * 任务完成后**不 clearTimeout**。600s 后旧定时器触发时只看「worker 此刻有没有 `pending`」
+ * ——于是把**新任务**误判成超时 ⇒ 健康 worker 被回收（live 日志每 ~10min 一批
+ * `closed SIGTERM (was busy=true)` + 秒速重生；在飞局弃去走冷启动兜底，还会误触「连败 3 次
+ * → 停补位」）。修法 = 定时器句柄可撤销 + 结算路径显式 cancel。
+ */
+export function armTaskTimeout(ms: number, onTimeout: () => void): { cancel: () => void } {
+  const t = setTimeout(onTimeout, ms) as ReturnType<typeof setTimeout> & { unref?: () => void }
+  t.unref?.()
+  return { cancel: () => clearTimeout(t) }
+}
+
+/**
+ * 空闲回收的默认阈值（30min，用户 2026-10-04 指令「长阈值」）：池是按需长起来的
+ * （只在「无空闲 worker 且未到 workers 上限」时新建），但旧行为**只涨不回缩**；
+ * 空闲超过它之后把超出 floor 的 worker 回收，换回 ~75–100MB/个的常驻内存。
+ * `--pool-idle-ms 0` = 关回收。
+ */
+export const PERSIST_IDLE_MS = 30 * 60_000
+/**
+ * 空闲回收的保底 worker 数（`--pool-floor`；实际会再被 `--workers` 夹取）。
+ * 为什么保底：热路径的首批局不该为「刚才闲过」付冷启——典型节点并发 4–6，
+ * floor 取 4 让常见波次零冷启，只有超出 floor 的**多余**容量会被收。
+ */
+export const PERSIST_POOL_FLOOR = 4
+
+/** 空闲回收计划的一个候选：`idleSinceMs = null` = 在飞（绝不回收）。 */
+export interface ReapCandidate {
+  idleSinceMs: number | null
+}
+
+/**
+ * 空闲回收计划（纯）：返回应回收的候选**下标**。
+ *
+ * 纪律（2026-10-04 用户指令「floor + 长阈值」）：
+ *   · 只收**空闲**且空闲时长 ≥ `idleMs` 的（在飞 `null` 永不收）；
+ *   · 收完池不小于 `floor`（至少留 1：floor ≤ 0 也按 1 处理——把池收空 = 下一局无条件冷启）；
+ *   · 候选多于预算时先收**最久空闲**的（最暖的留在池里）；
+ *   · `idleMs <= 0` = 关回收（返回空）。
+ */
+export function reapPlan(
+  candidates: readonly ReapCandidate[],
+  opts: { floor: number; idleMs: number; nowMs: number },
+): number[] {
+  if (opts.idleMs <= 0) return []
+  const keep = Math.max(1, Math.floor(opts.floor))
+  const budget = candidates.length - keep
+  if (budget <= 0) return []
+  const due: { i: number; since: number }[] = []
+  for (let i = 0; i < candidates.length; i++) {
+    const since = candidates[i].idleSinceMs
+    if (since === null) continue
+    if (opts.nowMs - since >= opts.idleMs) due.push({ i, since })
+  }
+  if (due.length <= budget) return due.map((d) => d.i)
+  due.sort((a, b) => a.since - b.since)
+  return due.slice(0, budget).map((d) => d.i)
 }

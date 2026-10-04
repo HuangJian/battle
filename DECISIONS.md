@@ -7589,3 +7589,50 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 - **违反后果**：去掉宽限 ⇒ 云机 eval 在途时重复评估；绕过账本去重 ⇒ 双写 eval_log / 读数竞争；
   另造评估链 ⇒ 语料与去重口径出现第二事实源。
 - **指针**：全文 `docs/nn/console.md` §28 · plan `plan/offline-eval-backfill.plan.md`。
+
+## §2026-10-04-goalnn-sampler-workers-physical-cores（2026-10-04，sampler `--workers` 缺省改**物理核**：池常驻内存封顶减半）
+
+- **背景（内存盘点，本机 live）**：sampler-agent 主进程 ~54MB（26.5h / 13.6 万局稳定，内部状态全部有界）；
+  长驻池 worker **74–100MB/个**（bun + 全图 + native 卷积库/权重装载；wasm 仅 attestation 参考/回退）。
+  池上限 = `--workers`，旧缺省 =
+  `effectiveCores()` **逻辑核**（本机 8c/16t ⇒ 16，且只涨不回缩）⇒ 最坏常驻 ~1.2GB。
+  用户 2026-10-04 指令：「`--workers` 缺省改为物理核」。
+- **决定**：`physicalCores()`（`tools/lib/cores.ts`：min(真物理核, cgroup 配额, 亲和掩码)，Windows 走
+  pwsh CIM 记忆化——与 §2026-10-03 门禁/本地池口径同源）为 `sampler-agent` 的**唯一核数口径**：
+  `const CPUS = physicalCores()`，`workers` 缺省 = `CPUS`；`/v1/ping`/`/v1/status` 上报的 `cpus` 同值
+  （**同日追加指令**：上报也改物理核——无 `concurrency` 配置的节点按 cpus 派工回落，与并发门同口径）。
+  **并发门与池上限只有 `workers` 一个**，需要更高/更低并发时显式 `--workers N`。
+- **被否决/同日修订**：① 改 `effectiveCores()` 本身（会连训练运行时的 rollout/eval 槽位一起改——
+  另一消费域，沿用 §2026-10-03 否决 ②，仍否）；② **原「上报 cpus 保持逻辑核」被同日用户指令推翻**
+  ——改为 `cpus` 也按物理核（否则无 `concurrency` 配置的节点派工 2× 超订 + 503 重试）。
+- **违反后果**：按逻辑核预铺/放行池 ⇒ 常驻内存翻倍（HT 不承担额外的重型进程）；把上报 cpus 与并发门
+  混成一个口径 ⇒ 节点派工与实际接单能力出现静默差（503 busy 重试）。
+- **落点**：`tools/agent/sampler-agent.ts`（import / 缺省 / help 与注释）· 源级钉子
+  `tests/agent/persist-pool.test.ts` · 手册 `tools/agent/agent-setup.md` §2；盘点与口径
+  `docs/nn/runtime-opt.md` §31（§23.5/§23.6 同日注记）。
+- **指针**：全文 `docs/nn/runtime-opt.md` §31；同批机制的回收/定时器条目见下。
+
+## §2026-10-04-goalnn-sampler-idle-reap-and-task-timeout-fix（2026-10-04，sampler 池：空闲回收 + 600s 超时定时器误杀修复）
+
+- **背景（同日内存盘点续）**：池「只涨不回缩」——按需长到 `workers` 上限后即使负载回落也不释放；
+  且 live 日志每 ~10 分钟一批 `persist worker closed ... SIGTERM (was busy=true)` + 秒速重生。代码追证：
+  `runViaPersistWorker` 的 600s 定时器任务完成后**不 clearTimeout**，旧定时器撞上新任务时按「此刻有没有
+  `pending`」判超时 ⇒ 误杀健康 worker（在飞局弃去走冷启动兜底、内存 churn、误触「连败 3 次 → 停补位」）。
+  用户同日指令：「做空闲回收（floor + 长阈值）」+「修 clearTimeout」。
+- **决定**：
+  ① **空闲回收**：`PERSIST_IDLE_MS = 30min`（长阈值；`--pool-idle-ms 0` 关）× `PERSIST_POOL_FLOOR = 4`
+     （`--pool-floor`；被 `workers` 夹取）。纯计划 `reapPlan`（只收空闲 ≥ 阈值、绝不碰在飞、先收最久空闲、
+     收后不小于 floor）住 `persist-pool.ts`；agent 60s 节拍接线（`unref`）。回收 = SIGTERM + 摘池，
+     下次缺位按需再 spawn——用一次冷启换长闲时 ~75–100MB/个常驻；floor 保常见波次零冷启。
+  ② **超时定时器**：`persist-pool.armTaskTimeout`（可撤销句柄 + `unref`），`runViaPersistWorker` 在
+     三态结算（ok/taskErr/dead）与两个早退（stdin 缺失 / 写失败）后一律 `cancel()`；早退同时清 `pending`。
+- **被否决**：① 回收也收忙 worker（在飞局作废——绝不允许）；② floor=0 允许收空（下一局无条件冷启）；
+  ③ 阈值收短到分钟级（热路径首批被无谓冷启动拖慢；长阈值 + floor 才能「只在长闲时省内存」）；
+  ④ 只把 600s 调大不修 clearTimeout（误杀窗口只是推迟，语义仍是「旧定时器管新任务」）。
+- **违反后果**：收忙 worker ⇒ 局作废 + 池熔断误触；收过 floor / 阈值太短 ⇒ 热路径成批冷启（正是
+  §27 冷池 31.6s/局 的机制）；定时器不再可撤销 ⇒ 每 ~10min 一次全池误杀回来。
+- **落点**：`tools/agent/persist-pool.ts`（reapPlan / armTaskTimeout / 常量）· `tools/agent/sampler-agent.ts`
+  （CLI `--pool-idle-ms`/`--pool-floor`、`reapIdleWorkers` + 节拍、任务定时器接线、/v1/status 增
+  `persistFloor`/`persistIdleMs`）· 用例 `tests/agent/persist-pool.test.ts`（reapPlan 4 例 + 定时器 1 例 +
+  源级钉子 2 例）· 手册 `tools/agent/agent-setup.md`；盘点与口径 `docs/nn/runtime-opt.md` §31。
+- **指针**：全文 `docs/nn/runtime-opt.md` §31。

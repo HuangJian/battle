@@ -46,6 +46,8 @@ git checkout <协调器当前的完整 commit hash>
 git status                    # 必须干净
 
 # ③ 启动 agent（首启生成 tools/agent/agent.auth 并打印 authKey）
+#    --workers 缺省 = **物理核数**（2026-10-04）；池里每个 worker 常驻 ~75–100MB，
+#    按 HT 逻辑核预铺/放行只是把常驻内存翻倍 —— 显式传 N 才能覆盖。
 bun tools/agent/sampler-agent.ts --port 8443 --workers <N>
 #    日志应出现: [sampler-agent] listening on 0.0.0.0:8443 workers=<N> ...
 
@@ -159,7 +161,10 @@ bun tools/agent/sampler-agent.ts --port 8443 --workers <N>
 按 §2 启动 agent 后，平板在局域网内即天然可达——协调器直接填
 `http://<平板IP>:8443`（`ip addr | grep inet` 查 IP）。无隧道环节。
 
-`--workers` 建议：8 核平板先 **4**，稳定后升 6。一局一个单线程进程。
+`--workers` 建议：8 核平板先 **4**，稳定后升 6（缺省 = 物理核数，8 核机 = 8；传值即覆盖）。
+一局一个单线程进程。
+空闲回收默认开：池空闲 ≥30min 时收回到 floor=min(4, workers)（`--pool-floor` 调保底、
+`--pool-idle-ms 0` 关）——池「只涨不回缩」的最大项由它兜住，热路径常见波次仍零冷启。
 全程插电；热节流导致后期变慢是物理现象，不是故障。
 
 ## 4. Google Cloud Shell（cloudflared 出站隧道）

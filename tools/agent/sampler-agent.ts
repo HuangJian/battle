@@ -29,7 +29,7 @@ import { gunzipSync, gzipSync } from 'node:zlib'
 import fs from 'node:fs'
 import path from 'node:path'
 // /v1/restart 防循环 grace 护栏（独立纯函数文件，与单测共享——2026-09-01 重启循环修复）
-import { effectiveCores } from '../lib/cores'
+import { physicalCores } from '../lib/cores'
 import { RESTART_GRACE_MS, shouldAcceptRestart } from './restart-guard'
 // BCV2 结果容器读写（服务耗时打点改口径用——unpack → 改 manifest → repack）。
 // 本文件另有 v1 遗留 packContainer/unpackContainer（下方导出，兼容旧消费方），
@@ -45,12 +45,16 @@ import { bucketKey, findSha, latestOfKind } from './weight-buckets'
 // 长驻池纯策略（预热槽位分配 + 熔断状态机；单测共享，见 persist-pool.ts）
 import {
   PERSIST_DISABLE_STREAK,
+  PERSIST_IDLE_MS,
+  PERSIST_POOL_FLOOR,
   PERSIST_REARM_MS,
   PERSIST_SERVE_ENTRY,
+  armTaskTimeout,
   newPersistBreaker,
   notePersistAttempt,
   persistModeFor,
   persistSpawningAllowed,
+  reapPlan,
   type PersistAttempt,
   type PersistBreaker,
 } from './persist-pool'
@@ -112,13 +116,22 @@ export const SHARD_FILES = [
 ] as const
 
 // ---------------- CLI ----------------
-/** 本机可用核数：`effectiveCores()` 是唯一口径（容器配额/亲和掩码 > 宿主机裸数，
- * 见 tools/lib/cores.ts 与 nn-training/common/platform_utils.py::effective_cores）。
- * 用 `os.cpus().length` 会在容器里报宿主机核数（Kaggle 224 vs 配额 96）⇒ 派工与上报的
- * cpus 都跟着虚高 2.3×（2026-09-25 云机 rollout 卡死的那条账）。 */
-const CPUS = effectiveCores()
+/** 本机核数（**唯一口径**）：`physicalCores()` = min(真物理核, cgroup 配额, 亲和掩码)，见
+ * tools/lib/cores.ts。同一个值同时用于：① 缺省并发门 `workers`（= 长驻池上限）；
+ * ② `/v1/ping`/`/v1/status` 上报的 `cpus`（无 concurrency 配置的节点拿它做派工回落）。
+ * 2026-10-04 用户指令：两处都用**物理核**——池 worker 是 ~75–100MB 的重型常驻进程
+ * （native 卷积库 + 权重装载；wasm 仅作 attestation 参考/回退），HT sibling 只共享执行单元与
+ * L1/L2，按逻辑核预铺/放行只是把常驻内存翻倍（教义见 docs/nn/runtime-opt.md §23.6/§31）。
+ * 为什么不读 `os.cpus().length`：容器里报宿主机核数（Kaggle 224 vs 配额 96）⇒ 派工与上报
+ * 都虚高 2.3×（2026-09-25 云机 rollout 卡死的那条账）。 */
+const CPUS = physicalCores()
 let port = 8443
 let workers = CPUS
+/** 空闲回收（2026-10-04 用户指令「floor + 长阈值」）：池按需长起来，空闲超过阈值后把
+ * 超出 floor 的收掉（旧行为只涨不回缩，最坏 = `workers` × ~75–100MB 常驻）。
+ * `--pool-idle-ms 0` 关回收；floor 被 `workers` 夹取，保底热路径常见波次零冷启。 */
+let poolIdleMs = PERSIST_IDLE_MS
+let poolFloor = PERSIST_POOL_FLOOR
 let cacheMaxBytes = 2048 * 1024 * 1024
 let cacheMaxItems = 32
 /** --no-node：强制 rollout 子进程走 bun（A/B 对照与回滚开关；见 rollout-runner.ts）。 */
@@ -146,15 +159,18 @@ let missLogSuppressed = 0
     else if (a === '--no-node') forceBun = true
     else if (a === '--no-persist') persistEnabled = false
     else if (a === '--no-prewarm') prewarmEnabled = false
+    else if (a === '--pool-idle-ms') poolIdleMs = Math.max(0, parseInt(argv[++i], 10))
+    else if (a === '--pool-floor') poolFloor = Math.max(1, parseInt(argv[++i], 10))
     else if (a === '--takeover') cliTakeover = true
   }
 }
 
 // ---------------- rollout 子进程运行时（node/V8 vs bun/JSC，§353） ----------------
-// 推理同一个 wasm 内核（现址 src/nn/conv/prebuilt/wasm/conv.wasm）：node(V8) 4.62ms
-// vs bun(JSC) 7.55ms（本机实测 ×1.63）。
+// 推理同一个卷积内核（src/nn/conv）：**bun 臂走 native prebuilt（bun:ffi；首用 attest 3/3 vs
+// wasm）**，node 臂没有 bun:ffi 才走 wasm32（prebuilt/wasm/conv.wasm）；native 失效时逐级回退。
+// 引擎按启动微基准选（本机 2026-10 实测：bun 1.81ms[native] vs node 3.33ms[wasm] → bun）。
 // agent 自身仍在 bun（Bun.serve / bunVersion 版本门 / codeHash 口径不变），只把
-// 采样子进程交给 node：预打包 exporter（--target=node）+ 产物同级放 prebuilt/wasm/conv.wasm。
+// 采样子进程按 runner 交给选定引擎：node 臂 = 预打包 exporter（--target=node）+ 同级 prebuilt。
 let _runner: RolloutRunner | null = null
 /** 子进程失败摘要（2026-09-14 mac 节点 BC 语料事故）。
  *
@@ -947,6 +963,8 @@ interface PoolWorker {
   readyWait: ((ok: boolean) => void) | null
   buf: string
   pending: ((outcome: WorkerSettle, msg: string) => void) | null
+  /** 空闲起点（ms）：在飞时置 null，settle 回池时刷新。空闲回收（reapPlan）的判据。 */
+  idleSinceMs: number | null
 }
 
 /**
@@ -974,6 +992,7 @@ function persistSpawn(plan: LaunchPlan): PoolWorker | null {
       readyWait: null,
       buf: '',
       pending: null,
+      idleSinceMs: Date.now(),
     }
     const settle = (outcome: WorkerSettle, msg: string): void => {
       const pend = w.pending
@@ -981,6 +1000,7 @@ function persistSpawn(plan: LaunchPlan): PoolWorker | null {
         w.pending = null
         // taskErr 也一样：serve-loop 已回到「等下一行」，这个 worker 的下一个任务可以马上发
         w.busy = false
+        w.idleSinceMs = Date.now()
         pend(outcome, msg)
       }
     }
@@ -1064,6 +1084,45 @@ function killPersistPool(): void {
     }
   }
   persistPool.length = 0
+}
+
+/** 空闲回收节拍：60s 扫一次（阈值 30min 级，不需要更细）。 */
+const REAP_SWEEP_MS = 60_000
+
+/**
+ * 空闲回收（2026-10-04，用户指令「floor + 长阈值」）：把**空闲 ≥ poolIdleMs** 的 worker
+ * 回收到 `min(poolFloor, workers)`（纯计划 reapPlan；只收空闲、绝不碰在飞）。
+ * 回收 = SIGTERM + 摘池：下次缺位时按需再 spawn（冷启 ~几秒）——这是「用一次冷启换长闲时的
+ * ~75–100MB/个常驻」的取舍；floor 保底把常见波次挡在冷启之外（默认 4，典型并发 4–6）。
+ */
+function reapIdleWorkers(nowMs = Date.now()): number {
+  const floor = Math.min(poolFloor, workers)
+  const idx = reapPlan(
+    persistPool.map((w) => ({ idleSinceMs: w.busy || w.pending ? null : w.idleSinceMs })),
+    { floor, idleMs: poolIdleMs, nowMs },
+  )
+  // 先取对象再收：recycle 会 splice 池，按下标边收边查会错位。
+  const targets = idx.map((i) => persistPool[i]).filter((w): w is PoolWorker => w !== undefined)
+  for (const w of targets) recyclePersistWorker(w)
+  if (targets.length > 0)
+    console.log(
+      `[sampler-agent] persist worker reaped ×${targets.length} ` +
+        `(idle≥${Math.round(poolIdleMs / 1000)}s, floor=${floor}, pool=${persistPool.length})`,
+    )
+  return targets.length
+}
+
+/** 起回收节拍（`--pool-idle-ms 0` / `--no-persist` 时不起）。 */
+function startReapTicker(): void {
+  if (!persistEnabled || poolIdleMs <= 0) return
+  const t = setInterval(() => {
+    try {
+      reapIdleWorkers()
+    } catch {
+      /* best effort：回收失败不影响服务 */
+    }
+  }, REAP_SWEEP_MS) as ReturnType<typeof setInterval> & { unref?: () => void }
+  t.unref?.()
 }
 
 /**
@@ -1179,21 +1238,27 @@ async function runViaPersistWorker(
   }
   if (!w) return { outcome: 'failed', worker: null }
   w.busy = true
+  w.idleSinceMs = null
+  // 超时句柄必须**可撤销**（2026-10-04 回归）：旧实现任务完成后不 clearTimeout，600s 后旧定时器
+  // 撞上新任务时按「此刻有没有 pending」判超时 ⇒ 健康 worker 被误杀 + 在飞局弃去走冷启动兜底。
+  // 先建 promise（executor 同步把 pending 装上），再单独立句柄 —— 避开 TS 对闭包内赋值的流分析。
   const result = new Promise<WorkerSettle>((resolve) => {
     w!.pending = (outcome) => resolve(outcome)
-    const timer = setTimeout(() => {
-      const pend = w!.pending
-      if (pend) {
-        w!.pending = null
-        // 超时 = 这一局卡在 worker 里 ⇒ worker 可疑，回收（与 dead 同路）
-        recyclePersistWorker(w!)
-        pend('dead', 'timeout')
-      }
-    }, PERSIST_TASK_TIMEOUT_MS)
-    ;(timer as ReturnType<typeof setTimeout>).unref?.()
+  })
+  const taskTimer = armTaskTimeout(PERSIST_TASK_TIMEOUT_MS, () => {
+    const pend = w!.pending
+    if (pend) {
+      w!.pending = null
+      // 超时 = 这一局卡在 worker 里 ⇒ worker 可疑，回收（与 dead 同路）
+      recyclePersistWorker(w!)
+      pend('dead', 'timeout')
+    }
   })
   if (!w.child.stdin) {
     w.busy = false
+    w.idleSinceMs = Date.now()
+    w.pending = null
+    taskTimer.cancel()
     return { outcome: 'failed', worker: null }
   }
   try {
@@ -1201,9 +1266,14 @@ async function runViaPersistWorker(
     w.child.stdin.write(JSON.stringify([mode, ...args.slice(1)]) + '\n')
   } catch {
     w.busy = false
+    w.idleSinceMs = Date.now()
+    w.pending = null
+    taskTimer.cancel()
     return { outcome: 'failed', worker: null }
   }
   const settled = await result
+  // 结算（ok/taskErr/dead 三态）后立刻撤销：定时器只属于**这一个**任务（回归见上）。
+  taskTimer.cancel()
   if (settled === 'ok') {
     if (fs.existsSync(path.join(gameDir, '_result.pack'))) return { outcome: 'ok', worker: null }
     // 报 OK 却没产物 ⇒ 这个 worker 不可信，回收
@@ -2094,6 +2164,9 @@ async function handle(req: Request): Promise<Response> {
       persistReady: persistPool.filter((w) => w.ready).length,
       persistFailStreak: persistBreaker.streak,
       persistStopped: persistBreaker.stopped,
+      // 空闲回收（2026-10-04）：floor 是夹取后的实际保底，idleMs=0 表示关闭
+      persistFloor: Math.min(poolFloor, workers),
+      persistIdleMs: poolIdleMs,
       workers,
       gamesDoneTotal,
       gamesDoneByIter: Object.fromEntries(gamesDoneByIter),
@@ -2159,7 +2232,8 @@ if (import.meta.main) {
   }
   if (showHelp) {
     console.log(
-      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--print-code-hash] [--print-code-hash-files] [--no-node] [--no-persist] [--no-prewarm] [--takeover]',
+      'usage: bun tools/dist/sampler-agent.ts --port 8443 [--workers N] [--cache-mb 2048] [--max-cache-items 32] [--pool-idle-ms 1800000] [--pool-floor 4] [--print-code-hash] [--print-code-hash-files] [--no-node] [--no-persist] [--no-prewarm] [--takeover]\n' +
+        '       --workers/cpus default = physical cores；idle reap: idle≥--pool-idle-ms down to --pool-floor (0 = off)',
     )
     process.exit(0)
   }
@@ -2215,4 +2289,6 @@ if (import.meta.main) {
   // 起听成功：刷新锁（落定 pid/bootId/startedAt/codeHash8 的最终事实；§3.3）。
   // 早于预热的那次 'wx' 抢占关掉冷启动竞态，这一笔只是把「已在服务」写实。
   writeInstanceLock()
+  // 空闲回收节拍（默认开：floor=min(4, workers)、阈值 30min；`--pool-idle-ms 0` 关）。
+  startReapTicker()
 }
