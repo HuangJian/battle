@@ -21,13 +21,33 @@ export function visibleCloudHalts(
   return legacy ? [['', legacy]] : []
 }
 
-/** 横幅已读键：事件身份（课程 + 触发/恢复时刻）——同一事件只提示一次，新事件重新弹。 */
-export function cloudHaltAckKey(kind: 'halted' | 'recovered', course: string, at: string): string {
-  return `${kind}|${course}|${at}`
+/** 告警坞事件身份 ack 键：`<事件类>|<主体>|<事件 id>`（2026-10-02，plan/dashboard-banner-global §4.3）。
+ *
+ *  同一事件只提示一次、新事件重新弹。为什么事件类不能用固定键：只读提示那种**会话级属性**关一次
+ *  就不再出现是对的，但**事件**（收官/停机/编辑被拒/停摆）用固定键会把第二次同因事件吃掉。
+ *
+ *  `halted`/`recovered` 的键串与旧的 `cloudHaltAckKey` 输出**逐字节一致**——2026-10-03 前存下的
+ *  停机 ack 继续命中（换 kind 名 = 让人重关一次红条，净回归）；`cloudHaltAckKey` 因此改为委托。 */
+export type AlertAckKind =
+  | 'halted'
+  | 'recovered'
+  | 'loop-complete'
+  | 'ppo-stall'
+  | 'offline-stall'
+  | 'course-edit'
+
+export function alertAckKey(kind: AlertAckKind, subject: string, eventId: string): string {
+  return `${kind}|${subject}|${eventId}`
 }
 
-/** 解析 localStorage 里的已读集合：新格式是 JSON 数组；旧格式是单个字符串（兼容）。 */
-export function parseCloudHaltAcks(raw: string | null): string[] {
+/** 横幅已读键：事件身份（课程 + 触发/恢复时刻）——同一事件只提示一次，新事件重新弹。 */
+export function cloudHaltAckKey(kind: 'halted' | 'recovered', course: string, at: string): string {
+  return alertAckKey(kind, course, at)
+}
+
+/** 解析 localStorage 里的已读集合：新格式是 JSON 数组；旧格式是单个字符串（兼容）。
+ *  （2026-10-03 改名 `parseAlertAcks`——表里现在不只有停机键；**格式与值都未变**。） */
+export function parseAlertAcks(raw: string | null): string[] {
   if (!raw) return []
   try {
     const v: unknown = JSON.parse(raw)

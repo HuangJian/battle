@@ -18,7 +18,7 @@
  *  历史锚点 tmp/dist-agent/pool-epoch.txt（受控清空）保留原语义。
  */
 
-import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
+import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'fs'
 import { dirname, join } from 'path'
 import { tmpPoolDir } from '../core/paths'
 import {
@@ -130,9 +130,65 @@ export function aggMemoReusable(
 }
 
 /** 硬清聚合 memo。生产路径只有 `?fresh=1`（手动刷新：操作员明确要「现在就给我新的」）调；
- *  其余时候无需调用——指纹/时间下限自会失效。单测夹具也用它隔离。 */
+ *  其余时候无需调用——指纹/时间下限自会失效。单测夹具也用它隔离。
+ *
+ *  ★ 2026-10-03（plan/dashboard-reload-perf R2）：同时清**扫描 memo 与全部流增量态**——
+ *  它们与 aggMemo 是同一份「进程内缓存」的三个面，只清一个会留下「旧扫描 + 新 agg」的半态。 */
 export function invalidateNodeHistoryMemo(): void {
   aggMemo = null
+  scanMemo = null
+  streams.clear()
+}
+
+// ────────────────────────── 逐调用计数器（plan/dashboard-reload-perf：结构性断言的唯一数据面） ──────────────────────────
+//
+// 为什么要有它（评审 A 系列）：本 plan 的验收大量依赖「这次调用到底读了多少盘」——
+// `stats` 只能回答「这一次计算」的账，回答不了「一个请求路径里到底发生了几次聚合」
+// （R1 的病根正是「请求里偷偷算了一遍」，那一次会被 `stats` 记成一次合法的计算）。
+// 故这里维护**跨调用**的进程内计数器：测试在请求前后取差值断言 0 调用。
+// 生产零成本（整数自增），只给测试与探针用；**不进任何 UI 契约**。
+
+interface PoolHistoryCounters {
+  /** `aggregateNodeHistory()` 被调用的次数（含命中 memo 的）。 */
+  calls: number
+  /** 其中**真算了**的次数（冷算 / 增量 / 回退全量）。 */
+  computes: number
+  /** 目录 walk 次数（`scanPoolStreams` 真扫）；命中扫描 memo 不增。 */
+  scans: number
+  /** `readdirSync` 次数（每次真扫 1；**别处**的 readdir 不在账）。 */
+  readdirs: number
+  /** 真读进的字节数（只计 meta 增量/全量读；账本尾读不在账——它是既有的有界读）。 */
+  bytesRead: number
+  /** 走增量路径的流次（一次调用里每流最多 1）。 */
+  incremental: number
+  /** 全量重建的流次（首见 / 回退 / truncated 流重读）。 */
+  fullRescans: number
+}
+
+const counters: PoolHistoryCounters = {
+  calls: 0,
+  computes: 0,
+  scans: 0,
+  readdirs: 0,
+  bytesRead: 0,
+  incremental: 0,
+  fullRescans: 0,
+}
+
+/** 取计数器快照（浅拷贝——调用方拿到的是那一刻的数字）。 */
+export function poolHistoryCounters(): PoolHistoryCounters {
+  return { ...counters }
+}
+
+/** 归零计数器（测试夹具；生产路径不调）。 */
+export function resetPoolHistoryCounters(): void {
+  counters.calls = 0
+  counters.computes = 0
+  counters.scans = 0
+  counters.readdirs = 0
+  counters.bytesRead = 0
+  counters.incremental = 0
+  counters.fullRescans = 0
 }
 
 /** dist-agent-meta 的 ts 分布带 T（ISO）与空格两种写法；统一为空格格式后再比。 */
@@ -673,15 +729,6 @@ interface ParsedRow {
   reason: string
 }
 
-/** 进落桶队列的一行 + 「它的计数算不算」标记：
- *  `counted=false` = 属于该流的**进行中那一轮**（时间戳照记、计数不算，见 DayBucket）。 */
-interface RowEntry {
-  r: ParsedRow
-  counted: boolean
-  /** 流目录首段 = 课名（`tmp/<课>` 与 `tmp/<课>/traj` 同归一；**不用 it**）。 */
-  course: string
-}
-
 function parseMetaRow(line: string, epochStr: string): ParsedRow | null {
   try {
     const r = JSON.parse(line) as {
@@ -718,33 +765,353 @@ function parseMetaRow(line: string, epochStr: string): ParsedRow | null {
   }
 }
 
-/** 落桶上下文：日桶 / 课维度 / 滚动环共用同一遍行序（时间升序）。 */
-interface BucketCtx {
-  nowMs: number
+/** 流候选（meta 与课程账本共用形状；`dir` 为相对池根的目录路径）。 */
+interface MetaCandidate {
+  path: string
+  dir: string
+  mtimeMs: number
+  size: number
+}
+
+/** 课程账本候选（`tmp/<课>/training_log.jsonl`；`<课>` 优先于 `<课>/traj/`）。 */
+interface LedgerCandidate {
   course: string
-  byCourse: Map<string, Map<string, Map<string, ContributionSplit>>>
-  rolling: Map<string, RollingEvent[]>
+  path: string
+  mtimeMs: number
+  size: number
+}
+
+/** 扫描结果（plan/dashboard-reload-perf R2① / A5）：**一次 walk 产出两组候选** ——
+ *  meta（每流一份、可嵌套）与课程账本（每课一份）。PPO 侧（`contribution.ts`）与采样侧
+ *  （本模块）**共用同一份扫描结果**（`scanPoolStreams()`）—— 两个消费者各 readdir 一遍
+ *  正是 R1 的病根同构。 */
+export interface PoolStreamsScan {
+  root: string
+  at: number
+  metas: MetaCandidate[]
+  ledgers: LedgerCandidate[]
+  /** 本次是否真跑了 walk（false = 命中扫描 memo）。 */
+  scanned: boolean
+}
+
+let scanMemo: PoolStreamsScan | null = null
+
+/** 扫描 memo 的复用判定（与 `aggMemoReusable` 同规的增量版）。 */
+function scanReusable(m: PoolStreamsScan, root: string, nowMs: number): boolean {
+  return m.root === root && nowMs - m.at < AGG_MEMO_MIN_MS
+}
+
+/** 扫描池根下的两组候选（**fs 层的唯一扫描实现**）：
+ *
+ *  · meta：递归 tmp/X（一层）或 tmp/X/traj（两层）下的 `dist-agent-meta.jsonl`
+ *    （与 §366 的跳子树规则一致：`itN` 迭代目录不下探）；
+ *  · 账本：`tmp/<课>/training_log.jsonl`，`<课>` 优先于 `<课>/traj/`（与旧
+ *    `listCourseLedgers` 的 break 语义相同，不双计）。
+ *
+ *  命中 memo（同根且窗口内）⇒ 不 walk、不 readdir（`scanned: false`），但**候选的 stat
+ *  每次照做** —— 指纹/增量判定必须看到当下 size/mtime。新开的训练流最长 1 个 memo 周期
+ *  （30s）后被看见，与既有 fp 语义同节奏。
+ */
+export function scanPoolStreams(nowMs: number = Date.now()): PoolStreamsScan {
+  const root = tmpPoolDir()
+  if (scanMemo && scanReusable(scanMemo, root, nowMs)) {
+    return { ...restat(scanMemo), scanned: false }
+  }
+  counters.scans++
+  counters.readdirs++
+  const metas: MetaCandidate[] = []
+  const ledgers: LedgerCandidate[] = []
+  const walk = (rel: string, depth: number): void => {
+    let entries: Array<{ name: string; isDirectory(): boolean; isFile(): boolean }>
+    try {
+      entries = readdirSync(join(root, rel), { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const d of entries) {
+      const childRel = rel ? `${rel}/${d.name}` : d.name
+      if (d.isDirectory()) {
+        if (depth < 1) walk(childRel, depth + 1)
+        else if (depth === 1 && d.name === 'traj') walk(childRel, depth + 1)
+        continue
+      }
+      const p = join(root, childRel)
+      if (d.name === 'dist-agent-meta.jsonl') {
+        try {
+          const st = statSync(p)
+          metas.push({
+            path: p,
+            dir: childRel.slice(0, -'/dist-agent-meta.jsonl'.length),
+            mtimeMs: st.mtimeMs,
+            size: st.size,
+          })
+        } catch {
+          /* stat failed */
+        }
+      } else if (d.name === 'training_log.jsonl' && depth === 1) {
+        const course = childRel.slice(0, -'/training_log.jsonl'.length)
+        try {
+          const st = statSync(p)
+          ledgers.push({ course, path: p, mtimeMs: st.mtimeMs, size: st.size })
+        } catch {
+          /* stat failed */
+        }
+      }
+    }
+  }
+  try {
+    walk('', 0)
+  } catch {
+    /* tmp missing */
+  }
+  // 指纹要稳定：readdir 顺序不作保证，先按路径名排（与旧实现同规）。
+  metas.sort((a, b) => (a.dir < b.dir ? -1 : 1))
+  ledgers.sort((a, b) => (a.course < b.course ? -1 : 1))
+  scanMemo = { root, at: nowMs, metas, ledgers, scanned: true }
+  return scanMemo
+}
+
+/** 对 memo 的候选集重新 stat（命中路径：不 walk，但候选的 size/mtime 必须是当下的）。
+ *  一个候选 stat 失败（文件被删）⇒ 保留旧值（增量判定看到「没动」，下一拍 walk 才收尸）。 */
+function restat(m: PoolStreamsScan): PoolStreamsScan {
+  const metas = m.metas.map((c) => {
+    try {
+      const st = statSync(c.path)
+      return { ...c, mtimeMs: st.mtimeMs, size: st.size }
+    } catch {
+      return c
+    }
+  })
+  const ledgers = m.ledgers.map((c) => {
+    try {
+      const st = statSync(c.path)
+      return { ...c, mtimeMs: st.mtimeMs, size: st.size }
+    } catch {
+      return c
+    }
+  })
+  return { ...m, metas, ledgers }
+}
+
+// ────────────────────────── 可合并桶（plan A1：增量入账的兼容层） ──────────────────────────
+//
+// 旧实现的落桶是**顺序敏感**的（`DayBucket.results` 最后 ≤10、`elapsed/wall` 最后 ≤50、
+// `lastOk*` 的 `>=` 决胜、滚动环 push/shift）——直接「追加新行」会给出与全量重算不同的
+// 数字。故把聚合拆成两层：`StreamAggregate`（每流局部、**可合并**）→ `mergeStreams()`
+// （纯函数归并）→ `HistoryAggregate`（对外契约不变）。
+//
+// **尾窗口引理**：全局按 `(ts, 流序)` 排序后尾 K 的每一行，必在其**本流**排序后尾 K 内
+// —— 若某行不是本流尾 K，则本流至少有 K 行比它新，它们在全局里也都比它新，矛盾。
+// 故「每流截尾 K、归并再截尾 K」= 全局尾 K（数字逐字段相等，W2 的增量/全量对照用例钉死）。
+
+/** 局部日桶（每流一份；**可合并**）：计数相加、尾窗口带 ts、时间戳字段取 max。 */
+interface LocalDayBucket {
+  ok: number
+  fail: number
+  rollout: number
+  eval: number
+  /** 带时刻的结算结果（每流截尾 10 —— 全局尾 10 引理）。 */
+  results: Array<{ ts: number; ok: boolean }>
+  /** 带时刻的成功局样本（每流截尾 50）。 */
+  elapsed: Array<{ ts: number; v: number | null }>
+  wall: Array<{ ts: number; v: number | null }>
+  /** 时间戳字段的 max（字符串比较；空串 = 该流无此字段）。 */
+  lastOkTs: string
+  lastFailTs: string
+  lastTs: string
+  /** 与 `lastOkTs` **同一决胜行**的值（`lastOkTsMs` null 时它也 null）。 */
+  lastOkTsMs: number | null
+  lastOkElapsedSec: number | null
+  /** 失败/错误的同决胜值（投影层按「近一小时」判是否上屏）。 */
+  lastFailTsMs: number | null
+  lastError: string
+  lastErrorTsMs: number | null
+}
+
+function emptyLocalDay(): LocalDayBucket {
+  return {
+    ok: 0,
+    fail: 0,
+    rollout: 0,
+    eval: 0,
+    results: [],
+    elapsed: [],
+    wall: [],
+    lastOkTs: '',
+    lastFailTs: '',
+    lastTs: '',
+    lastOkTsMs: null,
+    lastOkElapsedSec: null,
+    lastFailTsMs: null,
+    lastError: '',
+    lastErrorTsMs: null,
+  }
+}
+
+/** 局部课计数（可合并：相加）。 */
+type LocalCourseMap = Map<string, Map<string, Map<string, ContributionSplit>>>
+
+/** 局部滚动环事件：与 `RollingEvent` 同字段，另带归并决胜/翻转所需。 */
+interface LocalRingEvent extends RollingEvent {
+  /** 该事件的节点（环按节点分桶存，归并时要带回来）。 */
+  node: string
+  /** 流序（目录名升序的下标；归并决胜用）。 */
+  seq: number
+  /** 行在流内的序号（同流内保序）。 */
+  ord: number
+  /** 该行的 it（-1 = 无 it）。水位翻转用它判「哪些行要翻」。 */
+  it: number
+}
+
+/** 逐流局部聚合（**可合并**）。 */
+interface StreamAggregate {
+  byDay: Map<string, Map<string, LocalDayBucket>>
+  byCourse: LocalCourseMap
+  rolling: Map<string, LocalRingEvent[]>
   rollingTruncated: Set<string>
 }
 
-function bucketRow(
-  byDay: Map<string, Map<string, DayBucket>>,
-  r: ParsedRow,
-  counted: boolean,
-  ctx: BucketCtx,
-): void {
-  const key = localDayKey(r.tsMs)
-  let byNode = byDay.get(key)
+function emptyStreamAggregate(): StreamAggregate {
+  return {
+    byDay: new Map(),
+    byCourse: new Map(),
+    rolling: new Map(),
+    rollingTruncated: new Set(),
+  }
+}
+
+/** 未结轮的行（`it > baseIt`）—— 水位翻转的输入（plan A2）。
+ *
+ *  它们已经进了日桶的**可达性字段**（时间戳/错误）与滚动环（`counted=false`），
+ *  但**没进计数**；水位前进时把其中 `it <= 新水位` 的行「翻」成计数行。 */
+interface PendingRow {
+  it: number
+  day: string
+  node: string
+  ok: boolean
+  mode: 'rollout' | 'eval'
+  tsMs: number
+  elapsedSec: number | null
+  wallSec: number | null
+  /** 已入环的事件引用（翻转 `counted` 用；未入环（窗口外）为 null）。 */
+  ring: LocalRingEvent | null
+}
+
+/** 逐流增量态（进程内；重启退化为一次冷全量，plan G8）。 */
+interface StreamState {
+  path: string
+  dir: string
+  size: number
+  mtimeMs: number
+  /** 已消费字节偏移（按最后一个换行对齐）。 */
+  offset: number
+  /** 未闭合的尾行残片。 */
+  carry: string
+  flow: ActiveFlow
+  agg: StreamAggregate
+  /** 逐流 it 分布（水位/贡献/翻转的唯一数据面）。 */
+  itByNode: Map<string, Map<number, { rollout: number; eval: number; fail: number }>>
+  maxIt: number
+  baseIt: number
+  completedIt: number | null
+  completedAtMs: number
+  contribAtBase: Map<string, number>
+  /** 未结轮行（水位翻转用）。 */
+  pending: PendingRow[]
+  /** 本遍入账的行（水位结算后分流到计数 / pending；每次重算开始清空）。 */
+  pass: PendingRow[]
+  /** 流目录首段 = 课名（`tmp/<课>` 与 `tmp/<课>/traj` 同归一）。 */
+  course: string
+  /** 归并决胜用的流序（目录名升序）。 */
+  seq: number
+  /** 该流已见的下一行序号（同流保序）。 */
+  nextOrd: number
+}
+
+let streams = new Map<string, StreamState>()
+
+/** 游标读：从 `offset` 起**只读增量字节**（分块 `readSync` + 按换行切行，**不 `split`**）。
+ *
+ *  plan/dashboard-reload-perf R2②：旧实现 `readFileSync(...).split('\n')` 把 27MB 文本裂成
+ *  13 万行字符串数组（峰值 +116MB）⇒ JSC 堆高水位 ⇒ 周期 GC 全停。分块 1MiB + 逐字节找换行，
+ *  峰值 = 单块 + 残片；`onLine` 回调 parse 完即弃。
+ *
+ *  @returns 新偏移（= 文件末尾）/ 残片 / 实读字节数。
+ */
+function readChunkLines(
+  path: string,
+  offset: number,
+  carry: string,
+  onLine: (line: string) => void,
+): { offset: number; carry: string; bytesRead: number } {
+  const CHUNK = 1024 * 1024
+  const buf = Buffer.alloc(CHUNK)
+  let pos = offset
+  let tail = carry
+  let bytesRead = 0
+  try {
+    const fh = openSync(path, 'r')
+    try {
+      for (;;) {
+        const n = readSync(fh, buf, 0, CHUNK, pos)
+        if (n <= 0) break
+        bytesRead += n
+        pos += n
+        tail += buf.toString('utf8', 0, n)
+        let idx = tail.indexOf('\n')
+        while (idx !== -1) {
+          onLine(tail.slice(0, idx))
+          tail = tail.slice(idx + 1)
+          idx = tail.indexOf('\n')
+        }
+        // 安全阀：单行异常长（坏文件）时丢弃残片，防无换行的文件把内存拉爆。
+        if (tail.length > 8 * 1024 * 1024) tail = ''
+      }
+    } finally {
+      closeSync(fh)
+    }
+  } catch {
+    /* 读失败：保留已消费位置（下一拍重试） */
+  }
+  return { offset: pos, carry: tail, bytesRead }
+}
+
+/** 把一行 meta 计入该流的局部聚合（全量/增量**共用同一条路径** —— 两路径逐字段相等的根据）。
+ *
+ *  `nowMs` 只用于滚动环的保留窗判定（与旧实现同一个 `ROLLING_KEEP_MS` 窗口）。 */
+function ingestLine(st: StreamState, line: string, epochStr: string, nowMs: number): void {
+  if (!line.trim()) return
+  const r = parseMetaRow(line, epochStr)
+  if (!r) return
+  st.flow.lines++
+  const ord = st.nextOrd++
+
+  // ① 逐流 it 分布（水位/贡献/翻转的唯一数据面）。
+  if (r.ok && r.it >= 0) {
+    let m = st.itByNode.get(r.node)
+    if (!m) {
+      m = new Map()
+      st.itByNode.set(r.node, m)
+    }
+    const c = m.get(r.it) ?? { rollout: 0, eval: 0, fail: 0 }
+    if (r.mode === 'eval') c.eval++
+    else c.rollout++
+    m.set(r.it, c)
+    if (r.it > st.maxIt) st.maxIt = r.it
+  }
+
+  // ② 日桶（可达性字段 + 可合并的尾窗口/计数）。
+  const day = localDayKey(r.tsMs)
+  let byNode = st.agg.byDay.get(day)
   if (!byNode) {
     byNode = new Map()
-    byDay.set(key, byNode)
+    st.agg.byDay.set(day, byNode)
   }
   let b = byNode.get(r.node)
   if (!b) {
-    b = emptyDayBucket()
+    b = emptyLocalDay()
     byNode.set(r.node, b)
   }
-  // ① 时间戳 / 错误列：**可达性口径**——进行中那一轮的行也照记（见 aggregateNodeHistory）。
   if (r.ok) {
     if (r.ts > b.lastOkTs) b.lastOkTs = r.ts
     if (b.lastOkTsMs == null || r.tsMs >= b.lastOkTsMs) {
@@ -761,84 +1128,172 @@ function bucketRow(
     }
   }
   if (r.ts > b.lastTs) b.lastTs = r.ts
-  // ② 子日事件环（滚动窗）：**全部行都进**（时间戳/错误列是可达性口径），计数由投影层
-  //    按 `counted` 过滤。环只保留 `ROLLING_KEEP_MS` 内的事件（有界），触顶丢最旧一半。
-  if (r.tsMs >= ctx.nowMs - ROLLING_KEEP_MS) {
-    let ring = ctx.rolling.get(r.node)
+
+  // ③ 滚动环：**全部行都进**（可达性口径），`counted` 在水位分流时落定。
+  let ringEv: LocalRingEvent | null = null
+  if (r.tsMs >= nowMs - ROLLING_KEEP_MS) {
+    let ring = st.agg.rolling.get(r.node)
     if (!ring) {
       ring = []
-      ctx.rolling.set(r.node, ring)
+      st.agg.rolling.set(r.node, ring)
     }
     if (ring.length >= ROLLING_CAP) {
       ring.splice(0, Math.floor(ROLLING_CAP / 2))
-      ctx.rollingTruncated.add(r.node)
+      st.agg.rollingTruncated.add(r.node)
     }
-    ring.push({
+    ringEv = {
       ms: r.tsMs,
-      counted,
+      counted: false, // 水位分流时落定（见 aggregateNodeHistory ③）
       ok: r.ok,
       mode: r.mode,
       elapsedSec: typeof r.elapsedSec === 'number' && r.elapsedSec > 0 ? r.elapsedSec : null,
       wallSec: typeof r.wallSec === 'number' && r.wallSec > 0 ? r.wallSec : null,
       reason: r.ok ? '' : stripIsoPrefix(r.reason).slice(0, 120),
-      course: ctx.course,
-    })
+      course: st.course,
+      node: r.node,
+      seq: st.seq,
+      ord,
+      it: r.it,
+    }
+    ring.push(ringEv)
   }
-  // ③ 计数 / 样本 / 完成率：**只认已完成轮**（数据卫生：进行中那一轮的半截计数不作数）。
-  if (!counted) return
-  b.results.push(r.ok)
+
+  // ④ 计数 / 样本 / 课维度：**只认已完成轮**（数据卫生）；但水位要到本遍末尾才结算
+  //    （新流首读时 baseIt 未知）⇒ 先把行挂进**本遍待定表**，之后由调用方分流。
+  st.pass.push({
+    it: r.it,
+    day,
+    node: r.node,
+    ok: r.ok,
+    mode: r.mode,
+    tsMs: r.tsMs,
+    elapsedSec: typeof r.elapsedSec === 'number' && r.elapsedSec > 0 ? r.elapsedSec : null,
+    wallSec: typeof r.wallSec === 'number' && r.wallSec > 0 ? r.wallSec : null,
+    ring: ringEv,
+  })
+}
+
+/** 局部聚合里落**计数**（含课维度）——`counted` 行与「水位翻转后的 pending 行」共用。
+ *
+ *  这是「增量/全量逐字段相等」的根据：两条路径都经这一个函数落账，不存在第二份落账逻辑。 */
+function addCounted(st: StreamState, p: PendingRow): void {
+  const b = st.agg.byDay.get(p.day)?.get(p.node)
+  if (!b) return
+  b.results.push({ ts: p.tsMs, ok: p.ok })
   if (b.results.length > 10) b.results.shift()
-  if (r.ok) {
+  if (p.ok) {
     b.ok++
-    if (r.mode === 'eval') b.eval++
+    if (p.mode === 'eval') b.eval++
     else b.rollout++
-    pushWindowSample(b.elapsed, r.elapsedSec)
-    pushWindowSample(b.wall, r.wallSec)
+    b.elapsed.push({ ts: p.tsMs, v: p.elapsedSec })
+    if (b.elapsed.length > ELAPSED_WINDOW) b.elapsed.shift()
+    b.wall.push({ ts: p.tsMs, v: p.wallSec })
+    if (b.wall.length > ELAPSED_WINDOW) b.wall.shift()
   } else {
     b.fail++
   }
-  // ④ 课维度（矩阵的采样半边）：与日桶同过滤、同分母（只收已完成轮）。
-  let bn = ctx.byCourse.get(key)
+  let bn = st.agg.byCourse.get(p.day)
   if (!bn) {
     bn = new Map()
-    ctx.byCourse.set(key, bn)
+    st.agg.byCourse.set(p.day, bn)
   }
-  let bc = bn.get(r.node)
+  let bc = bn.get(p.node)
   if (!bc) {
     bc = new Map()
-    bn.set(r.node, bc)
+    bn.set(p.node, bc)
   }
-  let cs = bc.get(ctx.course)
+  let cs = bc.get(st.course)
   if (!cs) {
     cs = { rollout: 0, eval: 0, fail: 0 }
-    bc.set(ctx.course, cs)
+    bc.set(st.course, cs)
   }
-  if (r.ok) {
-    if (r.mode === 'eval') cs.eval++
+  if (p.ok) {
+    if (p.mode === 'eval') cs.eval++
     else cs.rollout++
   } else {
     cs.fail++
   }
 }
 
-/** 逐流状态（**每个源各自一份 it 分布**，绝不合并成一张全局图——同一 it 在两门课里是两回事）。 */
-interface FlowState {
-  src: ActiveFlow
-  itByNode: Map<string, Map<number, { rollout: number; eval: number }>>
-  baseIt: number
-  completedAtMs: number
-  contribAtBase: Map<string, number>
-  /** 该流入账的**完成水位**（`training_log.jsonl` 最后一个 `iteration` 的 it）；null = 一轮都没跑完。
-   *
-   *  ★ 2026-10-02：它是「有没有资格当**最新完成轮**」的**唯一判据**（见做 winner 选择处）。 */
-  completedIt: number | null
+/** 水位结算（每流每次重算末尾调）：
+ *
+ *  · 从 `itByNode` 重算 `maxIt` / `baseIt`（`pickBaseIter` 同规）；
+ *  · `pending` 中 `it <= baseIt` 的行 ⇒ **翻成计数行**（补 `results/samples/课维度`、
+ *    环内 `counted` 置真），并从 pending 移除；
+ *  · 水位**后退**（新 baseIt < 旧 baseIt）⇒ 返回 `false`（调用方把该流全量重建 ——
+ *    反向扣减是双计/漏计的高发区，plan A2 明禁）；
+ *  · `contribAtBase` 从 `itByNode` 重算。
+ */
+function settleWaterLevel(
+  st: StreamState,
+  completed: { it: number; atMs: number | null } | null,
+): boolean {
+  const prevBase = st.baseIt
+  st.baseIt = pickBaseIter(completed?.it ?? null, st.maxIt, (it) => {
+    for (const m of st.itByNode.values()) if (m.has(it)) return true
+    return false
+  })
+  st.completedIt = completed?.it ?? null
+  if (st.baseIt < prevBase) return false // 水位后退 ⇒ 调用方全量重建
+  // 翻转：已结轮的行从 pending 里「毕业」（落账路径与新行共用 `addCounted`）
+  const keep: PendingRow[] = []
+  for (const p of st.pending) {
+    if (st.baseIt >= 0 && p.it >= 0 && p.it <= st.baseIt) {
+      addCounted(st, p)
+      if (p.ring) p.ring.counted = true
+    } else {
+      keep.push(p)
+    }
+  }
+  st.pending = keep
+  // 贡献数（该轮 rollout + eval）从 itByNode 重算
+  st.contribAtBase = new Map()
+  if (st.baseIt >= 0) {
+    for (const [node, m] of st.itByNode) {
+      const c = m.get(st.baseIt)
+      st.contribAtBase.set(node, c ? c.rollout + c.eval : 0)
+    }
+  }
+  return true
 }
 
-interface MetaCandidate {
-  path: string
-  dir: string
-  mtimeMs: number
-  size: number
+/** 把该流的全部状态归零（首见 / 回退 / 原地重写 / 水位后退 —— 全量重建的公共前置）。 */
+function resetStream(st: StreamState): void {
+  st.agg = emptyStreamAggregate()
+  st.itByNode = new Map()
+  st.maxIt = -1
+  st.offset = 0
+  st.carry = ''
+  st.flow.lines = 0
+  st.pending = []
+  st.pass = []
+  st.nextOrd = 0
+  st.baseIt = -1
+  st.completedIt = null
+  st.contribAtBase = new Map()
+}
+
+/** 全量重建该流（分块游标读全文；truncated 流走尾部窗口读 —— plan A3）。 */
+function rebuildStream(st: StreamState, src: MetaCandidate, epochStr: string, nowMs: number): void {
+  resetStream(st)
+  if (src.size > LARGE_META_BYTES) {
+    // 尾部窗口读（诚实截断：UI 标注「该流只统计最近 N 行」）；行序 = 窗口内顺序。
+    st.flow.truncated = true
+    let lines: string[] = []
+    try {
+      lines = readLedgerTail(src.path, LARGE_META_TAIL_LINES)
+    } catch {
+      /* 不可读 → 保持空流 */
+    }
+    for (const line of lines) ingestLine(st, line, epochStr, nowMs)
+    st.flow.lines = lines.filter((l) => l.trim()).length
+  } else {
+    delete st.flow.truncated
+    const res = readChunkLines(src.path, 0, '', (line) => ingestLine(st, line, epochStr, nowMs))
+    st.offset = res.offset
+    st.carry = res.carry
+    counters.bytesRead += res.bytesRead
+  }
 }
 
 /** 预筛（纯函数，可单测）：整份文件 mtime 早于 epoch ⇒ 全部行都在 epoch 前，跳过。
@@ -847,61 +1302,31 @@ export function pruneByEpoch<T extends { mtimeMs: number }>(cands: T[], epochMs:
   return cands.filter((c) => c.mtimeMs >= epochMs)
 }
 
-/** 全量聚合。`nowMs` 只喂 memo 的时间下限（生产调用方一律用缺省 `Date.now()`；
- *  测试注入可控时钟，才好验「稳态每 5s 调用也必须 ≤30s 重扫一次」这条不变量）。 */
+/** 全量聚合（对外契约不变；内部已改为「扫描 memo + 每流增量入账 + 可合并桶归并」）。
+ *
+ *  `nowMs` 既喂 memo 的时间下限、也喂滚动环的保留窗（生产调用方一律用缺省 `Date.now()`；
+ *  测试注入可控时钟，才好验「稳态每 5s 调用也必须 ≤30s 重扫一次」这条不变量）。
+ *
+ *  三条读面纪律（plan/dashboard-reload-perf §5 R2）：
+ *   · 指纹未变 ⇒ **零读**（流态直接复用）；
+ *   · 变大 ⇒ 只读 `[offset, size)` 增量（分块游标，不 `split`）；
+ *   · 回退/重写/水位后退 ⇒ 该流**全量重建**（绝不做反向扣减）。
+ */
 export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggregate {
-  const byDay = new Map<string, Map<string, DayBucket>>()
-  const byCourse = new Map<string, Map<string, Map<string, ContributionSplit>>>()
-  const rolling = new Map<string, RollingEvent[]>()
-  const rollingTruncated = new Set<string>()
+  counters.calls++
   const tmpDir = tmpPoolDir()
   const epochMs = poolEpochMs()
   const epochStr = fmtFullTs(epochMs)
 
-  // 收集所有候选 meta 文件（递归扫描 tmp/ 下所有 dist-agent-meta.jsonl）。
-  // 训练流的 traj_root 可以是 tmp/X（一层）或 tmp/X/traj（两层），必须递归搜索。
-  const candidates: MetaCandidate[] = []
-  const walk = (base: string, rel: string): void => {
-    try {
-      for (const d of readdirSync(join(base, rel), { withFileTypes: true })) {
-        const childRel = rel ? `${rel}/${d.name}` : d.name
-        if (d.isDirectory()) {
-          // §366：meta 只存在于文档声明的布局——tmp/X（一层）或 tmp/X/traj（两层）。
-          // 训练迭代目录（itN，p1-godai-v2 有 1893 个）不可能放 meta，跳过其子树：
-          // 此前下探 3 层把整个 it 目录树扫一遍，实测 1.39s/次 → 页面 6.7s 的隐藏大头。
-          const depth = childRel.split('/').length
-          if (depth < 2 || (depth === 2 && d.name === 'traj')) walk(base, childRel)
-        } else if (d.name === 'dist-agent-meta.jsonl') {
-          const p = join(base, childRel)
-          try {
-            const st = statSync(p)
-            candidates.push({
-              path: p,
-              dir: childRel.replace(/\/dist-agent-meta\.jsonl$/, ''),
-              mtimeMs: st.mtimeMs,
-              size: st.size,
-            })
-          } catch {
-            /* stat failed */
-          }
-        }
-      }
-    } catch {
-      /* unreadable */
-    }
-  }
-  try {
-    walk(tmpDir, '')
-  } catch {
-    /* tmp missing */
-  }
-  // 指纹要稳定：readdir 顺序不作保证，先按目录名排（对结果无影响——下面还会按 mtime 排）。
-  candidates.sort((a, b) => (a.dir < b.dir ? -1 : 1))
+  const scan = scanPoolStreams(nowMs)
+  // 预筛：整份文件 mtime 早于 epoch ⇒ 全部行都在 epoch 前，跳过。
+  // **钉在 epoch（与「看哪天」无关）**：预筛若随窗口变，"切天零重算"就不成立（§4.3）。
+  const srcs = pruneByEpoch(scan.metas, epochMs)
 
   // ── 进程内 memo（二轮评审）──
   // 两个消费者（`api/pool` 探测层 + `snapshot-cache` 机群探测）用同一份聚合；
   // 空闲时靠指纹零重扫，训练中靠 AGG_MEMO_MIN_MS 把重扫节奏封顶。
-  const fp = candidates.map((c) => `${c.dir}|${c.mtimeMs}|${c.size}`).join('\n')
+  const fp = srcs.map((c) => `${c.dir}|${c.mtimeMs}|${c.size}`).join('\n')
   if (
     aggMemo &&
     aggMemo.root === tmpDir &&
@@ -910,100 +1335,244 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
   ) {
     return aggMemo.val
   }
+  counters.computes++
 
-  // 预筛：整份文件 mtime 早于 epoch ⇒ 全部行都在 epoch 前，跳过。
-  // **钉在 epoch（与「看哪天」无关）**：预筛若随窗口变，"切天零重算"就不成立（§4.3）。
-  const srcs = pruneByEpoch(candidates, epochMs)
-  srcs.sort((a, b) => b.mtimeMs - a.mtimeMs)
-  const sources: ActiveFlow[] = srcs.map((c) => ({ dir: c.dir, mtimeMs: c.mtimeMs, lines: 0 }))
+  // 流序（归并决胜的 canonical order）：目录名升序 —— 增量下**不能**用 mtime 序
+  // （旧流的 mtime 会被新写入推走，增量/全量就不可复现；见 plan O6）。
+  const seqByDir = new Map<string, number>()
+  srcs.forEach((c, i) => seqByDir.set(c.dir, i))
 
-  const flows: FlowState[] = []
-  const allRows: RowEntry[] = []
-  for (let i = 0; i < srcs.length; i++) {
-    const src = srcs[i]!
-    const flow = sources[i]!
-    let lines: string[]
-    try {
-      if (!existsSync(src.path)) continue
-      // 大文件只读尾部（诚实截断：UI 标注「该流只统计最近 N 行」）。
-      if (src.size > LARGE_META_BYTES) {
-        lines = readLedgerTail(src.path, LARGE_META_TAIL_LINES)
-        flow.truncated = true
-      } else {
-        lines = readFileSync(src.path, 'utf8').split(String.fromCharCode(10))
+  // ① 逐流：增量入账（新建 / 读增量 / 回退全量）。
+  const alive = new Set<string>()
+  for (const src of srcs) {
+    alive.add(src.path)
+    const course = src.dir.split('/')[0] ?? src.dir
+    const seq = seqByDir.get(src.dir) ?? 0
+    let st = streams.get(src.path)
+    if (!st || st.dir !== src.dir) {
+      st = {
+        path: src.path,
+        dir: src.dir,
+        size: 0,
+        mtimeMs: 0,
+        offset: 0,
+        carry: '',
+        flow: { dir: src.dir, mtimeMs: src.mtimeMs, lines: 0 },
+        agg: emptyStreamAggregate(),
+        itByNode: new Map(),
+        maxIt: -1,
+        baseIt: -1,
+        completedIt: null,
+        completedAtMs: src.mtimeMs,
+        contribAtBase: new Map(),
+        pending: [],
+        pass: [],
+        course,
+        seq,
+        nextOrd: 0,
       }
-    } catch {
-      continue
+      streams.set(src.path, st)
     }
-    flow.lines = lines.filter((l) => l.trim()).length
+    st.seq = seq
+    st.course = course
+    st.flow.mtimeMs = src.mtimeMs
+    st.pass = []
 
-    // ① 解析 + 逐流 it 分布（用于水位）。
-    const rows: ParsedRow[] = []
-    const itByNode = new Map<string, Map<number, { rollout: number; eval: number }>>()
-    let maxIt = -1
-    for (const line of lines) {
-      if (!line.trim()) continue
-      const r = parseMetaRow(line, epochStr)
-      if (!r) continue
-      rows.push(r)
-      if (r.ok && r.it >= 0) {
-        let m = itByNode.get(r.node)
-        if (!m) {
-          m = new Map()
-          itByNode.set(r.node, m)
-        }
-        const c = m.get(r.it) ?? { rollout: 0, eval: 0 }
-        if (r.mode === 'eval') c.eval++
-        else c.rollout++
-        m.set(r.it, c)
-        if (r.it > maxIt) maxIt = r.it
-      }
+    // 读面判定（plan A3 / G2–G4）：truncated 流**不走增量**（每次重读尾部整替 ——
+    // 否则「只读尾部」与「累计全史」两条口径会打架、28.1/15.6MB 两条流的数字必变）；
+    // size 回退 或 同 size 但 mtime 变了（原地重写）⇒ 全量重建。
+    const rewritten = src.size < st.size || (src.size === st.size && src.mtimeMs !== st.mtimeMs)
+    if (st.size === 0 || src.size > LARGE_META_BYTES || rewritten) {
+      counters.fullRescans++
+      rebuildStream(st, src, epochStr, nowMs)
+    } else if (src.size > st.size) {
+      counters.incremental++
+      const res = readChunkLines(src.path, st.offset, st.carry, (line) =>
+        ingestLine(st, line, epochStr, nowMs),
+      )
+      st.offset = res.offset
+      st.carry = res.carry
+      counters.bytesRead += res.bytesRead
     }
+    // else：size/mtime 未变 ⇒ 零读（G2）。
+    st.size = src.size
+    st.mtimeMs = src.mtimeMs
 
-    // ② 逐流水位：只用于过滤「进行中那一轮」的行（数据卫生，不是展示口径）。
+    // ② 水位结算（读账本尾 600 行；轮末才追加 ⇒ 每拍一次有界读，plan A2 的可接受成本）。
     const completed = lastCompletedIterInfo(src.path)
-    const baseIt = pickBaseIter(completed?.it ?? null, maxIt, (it) => {
-      for (const m of itByNode.values()) if (m.has(it)) return true
-      return false
-    })
-    // 完成时刻：优先账本 iteration.time；读不出 → 该 meta 的 mtime（兜底 + 仍参与「最新完成轮」比较）。
-    const completedAtMs = completed?.atMs ?? src.mtimeMs
-    const contribAtBase = new Map<string, number>()
-    if (baseIt >= 0) {
-      for (const [node, m] of itByNode) {
-        const c = m.get(baseIt)
-        contribAtBase.set(node, c ? c.rollout + c.eval : 0)
+    if (!settleWaterLevel(st, completed)) {
+      // 水位后退（账本被重写 / 判据失效）⇒ 全量重建（绝不做反向扣减）。
+      counters.fullRescans++
+      rebuildStream(st, src, epochStr, nowMs)
+      settleWaterLevel(st, lastCompletedIterInfo(src.path))
+      st.size = src.size
+      st.mtimeMs = src.mtimeMs
+    }
+    st.completedAtMs = completed?.atMs ?? src.mtimeMs
+
+    // ③ 本遍新入账的行分流：已结轮 ⇒ 计数；未结轮 ⇒ pending（水位翻转的输入，plan A2）。
+    for (const p of st.pass) {
+      if (st.baseIt >= 0 && p.it >= 0 && p.it > st.baseIt) {
+        if (p.ring) p.ring.counted = false
+        st.pending.push(p)
+      } else {
+        addCounted(st, p)
+        if (p.ring) p.ring.counted = true
       }
     }
+    st.pass = []
+  }
+  // ④ 收尸：本拍没出现的流（被删/被移走）丢弃其增量态（先收集再删——边遍历边删要拷贝）。
+  const dead: string[] = []
+  for (const p of streams.keys()) if (!alive.has(p)) dead.push(p)
+  for (const p of dead) streams.delete(p)
 
-    // ③ **全部行都进全量行集**（时间戳/错误列是可达性口径，见 DayBucket）；`counted` 标记
-    //    「这行的计数算不算」——已完成轮 = it <= baseIt_flow（无 it 的行照算已完成）。
-    //    课名 = 流目录首段（`tmp/<课>` 与 `tmp/<课>/traj` 同归一；**不用 it**，§4.3）。
-    const courseName = flow.dir.split('/')[0] ?? flow.dir
-    for (const r of rows) {
-      const counted = !(baseIt >= 0 && r.it >= 0 && r.it > baseIt)
-      allRows.push({ r, counted, course: courseName })
+  // ⑤ 归并：各流局部聚合 → 全局（纯函数，顺序无关；尾窗口按 (ts, seq, ord) 引理）。
+  const byDay = new Map<string, Map<string, DayBucket>>()
+  const byCourse = new Map<string, Map<string, Map<string, ContributionSplit>>>()
+  const rolling = new Map<string, RollingEvent[]>()
+  const rollingTruncated = new Set<string>()
+  const sources: ActiveFlow[] = []
+  const flows: StreamState[] = []
+  for (const st of streams.values()) {
+    sources.push(st.flow)
+    flows.push(st)
+  }
+  // 展示序 = mtime 降序（旧行为，**零变化**）：`NodeStats` 的「最新 <ts>」读 `sources[0]`；
+  // 归并决胜**不看这个数组**（各 merge 数组显式按 `(ts, seq)` 排，`seq` 是目录名升序的
+  // canonical 流序——见 plan O6）。两个顺序各司其职，别混用。
+  sources.sort((a, b) => b.mtimeMs - a.mtimeMs)
+
+  // 尾窗口归并收集（results / elapsed / wall）：按 (ts, seq) 升序 → 截尾。
+  const resultsMerge: Array<{ day: string; node: string; ts: number; seq: number; ok: boolean }> =
+    []
+  const elapsedMerge: Array<{ day: string; node: string; ts: number; seq: number; v: number }> = []
+  const wallMerge: Array<{ day: string; node: string; ts: number; seq: number; v: number }> = []
+  for (const st of flows) {
+    for (const [day, byNode] of st.agg.byDay) {
+      let outByNode = byDay.get(day)
+      if (!outByNode) {
+        outByNode = new Map()
+        byDay.set(day, outByNode)
+      }
+      for (const [node, lb] of byNode) {
+        let b = outByNode.get(node)
+        if (!b) {
+          b = emptyDayBucket()
+          outByNode.set(node, b)
+        }
+        b.ok += lb.ok
+        b.fail += lb.fail
+        b.rollout += lb.rollout
+        b.eval += lb.eval
+        for (const x of lb.results)
+          resultsMerge.push({ day, node, ts: x.ts, seq: st.seq, ok: x.ok })
+        if (lb.lastOkTs > b.lastOkTs) b.lastOkTs = lb.lastOkTs
+        if (lb.lastFailTs > b.lastFailTs) b.lastFailTs = lb.lastFailTs
+        if (lb.lastTs > b.lastTs) b.lastTs = lb.lastTs
+        if (lb.lastOkTsMs != null && (b.lastOkTsMs == null || lb.lastOkTsMs >= b.lastOkTsMs)) {
+          b.lastOkTsMs = lb.lastOkTsMs
+          b.lastOkElapsedSec = lb.lastOkElapsedSec
+        }
+        if (
+          lb.lastFailTsMs != null &&
+          (b.lastFailTsMs == null || lb.lastFailTsMs > b.lastFailTsMs)
+        ) {
+          b.lastFailTsMs = lb.lastFailTsMs
+        }
+        if (
+          lb.lastErrorTsMs != null &&
+          (b.lastErrorTsMs == null || lb.lastErrorTsMs >= b.lastErrorTsMs)
+        ) {
+          b.lastError = lb.lastError
+          b.lastErrorTsMs = lb.lastErrorTsMs
+        }
+        for (const x of lb.elapsed)
+          if (x.v != null) elapsedMerge.push({ day, node, ts: x.ts, seq: st.seq, v: x.v })
+        for (const x of lb.wall)
+          if (x.v != null) wallMerge.push({ day, node, ts: x.ts, seq: st.seq, v: x.v })
+      }
     }
+    // 课维度：计数相加（纯计数，顺序无关）。
+    for (const [day, byNode] of st.agg.byCourse) {
+      let outByNode = byCourse.get(day)
+      if (!outByNode) {
+        outByNode = new Map()
+        byCourse.set(day, outByNode)
+      }
+      for (const [node, byCourseNode] of byNode) {
+        let outByCourse = outByNode.get(node)
+        if (!outByCourse) {
+          outByCourse = new Map()
+          outByNode.set(node, outByCourse)
+        }
+        for (const [course, s] of byCourseNode) {
+          let t = outByCourse.get(course)
+          if (!t) {
+            t = { rollout: 0, eval: 0, fail: 0 }
+            outByCourse.set(course, t)
+          }
+          t.rollout += s.rollout
+          t.eval += s.eval
+          t.fail += s.fail
+        }
+      }
+    }
+  }
+  // 尾窗口截尾（引理：每流已截尾 K，归并再截尾 K = 全局尾 K；决胜 (ts, seq) 升序）。
+  const byDayCell = (day: string, node: string): DayBucket | undefined => byDay.get(day)?.get(node)
+  resultsMerge.sort((a, b) => a.ts - b.ts || a.seq - b.seq)
+  for (const x of resultsMerge) {
+    const b = byDayCell(x.day, x.node)
+    if (!b) continue
+    b.results.push(x.ok)
+    if (b.results.length > 10) b.results.shift()
+  }
+  elapsedMerge.sort((a, b) => a.ts - b.ts || a.seq - b.seq)
+  for (const x of elapsedMerge) {
+    const b = byDayCell(x.day, x.node)
+    if (!b) continue
+    b.elapsed.push(x.v)
+    if (b.elapsed.length > ELAPSED_WINDOW) b.elapsed.shift()
+  }
+  wallMerge.sort((a, b) => a.ts - b.ts || a.seq - b.seq)
+  for (const x of wallMerge) {
+    const b = byDayCell(x.day, x.node)
+    if (!b) continue
+    b.wall.push(x.v)
+    if (b.wall.length > ELAPSED_WINDOW) b.wall.shift()
+  }
 
-    flows.push({
-      src: flow,
-      itByNode,
-      baseIt,
-      completedAtMs,
-      contribAtBase,
-      completedIt: completed?.it ?? null,
+  // 滚动环归并（全部行都进环；按 (ms, seq, ord) 升序；触顶丢最旧一半）。
+  const ringMerge: LocalRingEvent[] = []
+  for (const st of flows) {
+    for (const ring of st.agg.rolling.values()) for (const e of ring) ringMerge.push(e)
+    for (const n of st.agg.rollingTruncated) rollingTruncated.add(n)
+  }
+  ringMerge.sort((a, b) => a.ms - b.ms || a.seq - b.seq || a.ord - b.ord)
+  for (const e of ringMerge) {
+    let out = rolling.get(e.node)
+    if (!out) {
+      out = []
+      rolling.set(e.node, out)
+    }
+    if (out.length >= ROLLING_CAP) {
+      out.splice(0, Math.floor(ROLLING_CAP / 2))
+      rollingTruncated.add(e.node)
+    }
+    out.push({
+      ms: e.ms,
+      counted: e.counted,
+      ok: e.ok,
+      mode: e.mode,
+      elapsedSec: e.elapsedSec,
+      wallSec: e.wallSec,
+      reason: e.reason,
+      course: e.course,
     })
   }
 
-  // ④ 时间升序后落桶（跨流合并后仍按时间有序 ⇒ results 时间升序、lastXxx 取最大才对）。
-  allRows.sort((a, b) => a.r.tsMs - b.r.tsMs)
-  const ctx: BucketCtx = { nowMs, course: '', byCourse, rolling, rollingTruncated }
-  for (const e of allRows) {
-    ctx.course = e.course
-    bucketRow(byDay, e.r, e.counted, ctx)
-  }
-
-  // ⑤ 最新完成轮：**跨课按完成时刻取最新**（不是比 it 大小——it 是课程内序号，§1.1）。
+  // ⑥ 最新完成轮：**跨课按完成时刻取最新**（不是比 it 大小——it 是课程内序号，§1.1）。
   //    停摆课因完成时刻旧而自然落选，不必额外过滤。
   //
   // ★ 2026-10-02：**只有真跑完过至少一轮的流才有资格**。没跑完的流本无完成时刻，
@@ -1013,7 +1582,7 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
   //   pill 显示「贡献 0 / 离线」。现场：`h4-hurt-f75` 崩溃循环（0 条 iteration）压过所有
   //   正常流，`self` 全场贡献最高（9644 局）却显示「贡献 0 / 离线」（mac=130/a95=38 正是
   //   那条 it1 的数字，逐位吻合）。
-  let winner: FlowState | null = null
+  let winner: StreamState | null = null
   for (const f of flows) {
     if (f.completedIt === null) continue // 一轮都没跑完 ⇒ 不是「完成轮」的候选
     if (winner === null || f.completedAtMs > winner.completedAtMs) winner = f
@@ -1025,7 +1594,7 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
       ? new Map([...allNodes].map((n) => [n, winner.contribAtBase.get(n) ?? 0]))
       : new Map<string, number>()
   const latestRound: LatestRound | null = winner
-    ? { dir: winner.src.dir, it: winner.baseIt, completedAtMs: winner.completedAtMs }
+    ? { dir: winner.dir, it: winner.baseIt, completedAtMs: winner.completedAtMs }
     : null
 
   const out: HistoryAggregate = {

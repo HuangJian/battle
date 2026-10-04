@@ -53,10 +53,10 @@ import {
   latestRow,
   pageForPath,
   REFRESH_INTERVALS,
-  TC_CLOUDHALT_ACK,
+  TC_ALERT_ACKS,
   TC_GLOBAL_INTERVAL,
   TC_RO_BANNER_DISMISSED,
-  parseCloudHaltAcks,
+  parseAlertAcks,
   isStaleStateResponse,
   withCourse,
   type ConsoleBootstrap,
@@ -147,16 +147,16 @@ export function App({ initial }: AppProps) {
   useEffect(() => {
     if (readLocal(TC_RO_BANNER_DISMISSED) === '1') setRoBannerDismissed(true)
   }, [])
-  // 云端停机横幅已读（按「事件身份」记：课程+时刻），同一事件只提示一次。
-  const [cloudHaltAcks, setCloudHaltAcks] = useState<string[]>([])
+  // 告警坞已读（按「事件身份」记：类+主体+事件 id），同一事件只提示一次（只读提示是会话级，另键）。
+  const [alertAcks, setAlertAcks] = useState<string[]>([])
   useEffect(() => {
-    setCloudHaltAcks(parseCloudHaltAcks(readLocal(TC_CLOUDHALT_ACK)))
+    setAlertAcks(parseAlertAcks(readLocal(TC_ALERT_ACKS)))
   }, [])
-  /** 记住「知道了」：写入 localStorage（数组格式，旧单值格式兼容）。 */
-  const ackCloudHalt = useCallback((key: string): void => {
-    setCloudHaltAcks((prev) => {
+  /** 记住「知道了」：写入 localStorage（数组格式，旧单值格式兼容；表名变了，值冻结未变）。 */
+  const ackAlert = useCallback((key: string): void => {
+    setAlertAcks((prev) => {
       const next = prev.includes(key) ? prev : [...prev, key]
-      writeLocal(TC_CLOUDHALT_ACK, JSON.stringify(next))
+      writeLocal(TC_ALERT_ACKS, JSON.stringify(next))
       return next
     })
   }, [])
@@ -518,8 +518,8 @@ export function App({ initial }: AppProps) {
           items={buildAlerts({
             cloudHalts: stateView?.cloudHalts,
             viewing: viewCourse,
-            acks: cloudHaltAcks,
-            loopComplete: stateView?.loopComplete,
+            acks: alertAcks,
+            loopCompletes: stateView?.loopCompletes,
             ppoQueueStall: stateView?.ppoQueueStall,
             // 离线课程停滞（T8）：hub 的 `/admin/offline.stalled` 经 overview 透到这里。
             offlineStalls: stateView?.overview?.offlineStalled ?? null,
@@ -530,13 +530,13 @@ export function App({ initial }: AppProps) {
           })}
           onAct={(act, body) => doAction(act, body)}
           onAck={(key) => {
-            // 会话级一次性已读（只读提示）走自己的键；其余按事件身份记进停机 ack 表。
+            // 会话级一次性已读（只读提示）走自己的键；其余按事件身份记进告警坞 ack 表。
             if (key === 'ro-banner-dismissed') {
               writeLocal(TC_RO_BANNER_DISMISSED, '1')
               setRoBannerDismissed(true)
               return
             }
-            ackCloudHalt(key)
+            ackAlert(key)
           }}
         />
 

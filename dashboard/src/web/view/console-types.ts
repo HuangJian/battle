@@ -318,9 +318,13 @@ export interface ConsoleStateView {
     waitedSec: number
     it: number | null
   } | null
-  /** 训练正常完成且进程停车等待重启（账本尾行 run_complete + 进程仍存活时派生）：
-   *  info 横幅——本地已停采、云机已停机；resume（新 run_start/iteration）后自动消失。 */
-  loopComplete?: LoopComplete | null
+  /** 逐课训练正常完成且进程停车等待重启（账本尾行 run_complete + **共享 trainer 存活**时派生；
+   *  2026-10-03 由单值 `loopComplete` 扩为按课表——收官是终态、无动作、不会自愈，只弹当前课
+   *  等于让「它已经跑完了」在多课场景**不可达**）。
+   *
+   *  只对「已开课课 ∪ 查看课程」读账本尾（几十门历史课的账本都在盘上，逐拍全扫是浪费）；
+   *  resume（新 run_start/iteration）后该课条目自动消失。缺省/null = 旧视图。 */
+  loopCompletes?: Record<string, LoopComplete> | null
   /** 并行 worker 贡献度缩略（plan/worker-contribution-view W3b；首页 NodePills 下方一行）。
    *  缺省/null = 旧视图或计算失败（UI 不画该行）。 */
   contributionBrief?: ContributionBrief | null

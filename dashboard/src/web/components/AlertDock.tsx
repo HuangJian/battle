@@ -12,6 +12,7 @@
 
 import { useState } from 'preact/hooks'
 import { ALERT_DOCK_DEFAULT_VISIBLE, alertDockSplit, type AlertItem } from '../view'
+import { CopyButton } from './CopyButton'
 
 export interface AlertDockProps {
   items: AlertItem[]
@@ -48,6 +49,11 @@ export function AlertDock({
             <div className="tc-dock__title">{a.title}</div>
             <div className="tc-dock__detail">{a.detail}</div>
           </div>
+          {/* 复制键与动作区**分区**（2026-10-03 G4）：复制是工具、动作是决策——图标键不占宽，
+              也不抢主按钮位（err 档尤其；`.tc-dock__copy` 在 `.tc-dock__acts` 左侧）。 */}
+          <span className="tc-dock__copy">
+            <CopyButton text={a.copyText} label="告警" icon />
+          </span>
           {a.actions.length > 0 ? (
             <span className="tc-dock__acts">
               {a.actions.map((act) => (

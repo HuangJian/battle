@@ -7,6 +7,85 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §25 控制台请求路径「零聚合」+ 聚合增量入账（plan/dashboard-reload-perf，2026-10-03）
+
+**触发**（用户 2026-10-03）：「dashboard 现在重载缓慢，大概要 ~10s……我怀疑是新加的云机 worker
+贡献度引入的」+「dashboard 进程还占用大量内存，一起排查」。
+
+**三条根因**（逐条带代码位置）：
+
+| # | 根因 | 位置 |
+|---|---|---|
+| **R1** | 贡献度聚合被放进**请求路径**裸调，绕开 WC-plan §1.3 已裁决的「挂既有 SWR」 | `server/api/state-view.ts` 的 `contributionBrief` 段（每请求 walk 37ms + PPO 8.8–100ms） |
+| **R2** | 聚合是「全量重算 + 全文读」：`walk()` 在 memo 判断**之前**（命中 memo 也付 37ms）；`≤2MB` 的 meta 走 `readFileSync(...).split('\n')`（27MB 文本 → 13 万行数组 ⇒ 峰值 +116MB） | `server/pool-history.ts::aggregateNodeHistory` |
+| **R3** | PPO 侧 `listCourseLedgers()` 无 memo，且 memo 判定在读取**之后** | `server/contribution.ts` |
+
+**纪律两条**（本节的规范部分）：
+
+1. **控制台请求路径不得做聚合**。聚合 = 读盘 + 全池合并，是**机群级探测**，必须挂在既有 SWR
+   （`fleetProbeCache` 单条目）的后台刷新器里；请求路径只读缓存值。贡献度缩略的落点是
+   `FleetProbes.contributionBrief`（`computeFleetProbes` 顺手产出）；`inflight` 用
+   `peekHubAdmin()`（`hubCache.peek()`，**不** await 探测）取上一拍值。
+   - 守卫用例：`tests/server-api-state-view.test.ts` 的「G1：暖缓存后调用计数 = 0」+
+     「G1 反向守卫（源码级禁裸调）」+「A6 护栏（不得 await getHubAdmin）」。
+2. **聚合必须增量 + 有界读 + 可合并桶**。指纹未变零读；变大只读 `[offset, size)`（分块游标，
+   禁 `split`）；回退/重写/水位后退 ⇒ 该流全量重建（**禁反向扣减**）。落桶结构是顺序敏感的
+   （尾窗口 ≤10/≤50、`>=` 决胜、环 push/shift）⇒ 增量入账必须走**可合并桶**（每流局部截尾 +
+   归并再截尾，引理：全局尾 K ⊆ 各流尾 K），且流序 = 目录名升序（canonical，不用 mtime 序）。
+   - 守卫用例：`tests/server-pool-history.test.ts` 的 G2 零读 / G3 增量与全量逐字段相等 /
+     G4 回退不双计 / A2 水位翻转 / 扫描 memo / 尾窗口 canonical / 源码结构守卫。
+   - **水位会翻转**：`counted = !(it > baseIt)`，而 `baseIt` 来自轮末账本 ⇒ 未结轮的行要挂
+     `pending`，水位前进时翻成计数行（环内 `counted` 同翻）；水位后退 ⇒ 全量重建。
+   - **truncated 流（>2MB）不做增量累计**：保持「每次重读尾部」，否则「只读尾部」与「累计全史」
+     两条口径打架、28.1/15.6MB 两条流的数字必变。
+3. **两个消费者共用一份扫描**：`scanPoolStreams()`（`pool-history.ts` 持有 fs 层唯一实现）
+   一次 walk 产出 meta + 课程账本两组候选；PPO 与采样聚合各扫一遍 = 同一事实两份真相。
+   - 守卫用例：`tests/worker-contribution.test.ts` 的「W3-① 源码结构断言」+「W3-③ scans 只增 1」。
+
+**冷启动保证**：`server.ts` 的 `await reconcileWatch()` 链（→ `getSlowSnapshot` →
+`getFleetProbes` → `computeFleetProbes`）**先于 `Bun.serve`**；刷新器首拍是 `void run()`
+（fire-and-forget），**不是**保证。
+
+**验收工具**：`dashboard/tools/perf-probe.ts`（人跑，不进 CI；基线数字落 plan §1/PR）。
+
+**指针**：plan `plan/dashboard-reload-perf.plan.md`（评审修订版，A1–A6 处置）·
+DECISIONS `§2026-10-03-goalnn-request-path-zero-aggregate`。
+
+## §24 告警坞全局化：收官横幅按课成列 + 七类条目全部可关闭可复制（plan/dashboard-banner-global，2026-10-03）
+
+**触发**（用户 2026-10-02）：「一个课程训练收官的横幅信息，现在只在切换到该课程时才能看到，
+应改为全局可见」；「dashboard 所有横幅信息，都应该可关闭可复制」。
+
+**改前现状**（7 类 / 8 条目）：收官横幅的读面是**单课单值**——`computeSlowSnapshot(cfg, course, …)`
+只读请求课程那一份账本（`server/api/snapshot-cache.ts`）、`StateView.loopComplete` 是单值、
+`loopCompleteAlerts` 只产 1 条；「可关闭」缺 4 类（收官 / PPO 排队超时 / 离线静默停摆 / 编辑被拒——
+`actions: []` 或只有 resume），「可复制」**0/7 全缺**。
+
+**语义裁决**：
+
+| 裁决 | 内容 |
+|---|---|
+| **收官全局成列** | 收官是终态、没有动作、不会自愈（尾行不被顶掉就一直显示）⇒ 用「只弹当前课」等于让「它已经跑完了」在多课场景**不可达**。停机横幅的「只弹本课」（2026-09-14 定案）不动——它可恢复、且恢复动作只作用于本课。规则一句：**有恢复动作的瞬时态按课过滤；无动作的终态全局成列** |
+| **聚合落层** | 放 `state-view.ts`（请求路径上的便宜结构），**不进**按课程键控的慢快照（否则全课聚合被按「请求课程」各缓存一份，切课即重算）；判活用**共享** `trainingLoop` 的全局事实（`scopeOf` 恒 `''`，一个进程服务所有课）；课程清单 = **已开课 ∪ 查看课**（同 `harvestTrainingCourseActuals` 的成本闸：几十门历史课账本在盘上，逐拍全扫是浪费），逐课复用 `loopCompleteFromLedgerTail` |
+| **单值字段替换** | `loopComplete` → `loopCompletes: Record<course, LoopComplete>`（不保留双字段 = 不造第二份真相；server/web 同一批构建，无版本错位）；条目 `id: loop-complete:<课>`、标题带课名、按课名确定性排序 |
+| **ack 一张表零回归** | 新 `alertAckKey(kind, subject, eventId)`；`cloudHaltAckKey` 改为**委托**它 ⇒ 停机键串逐字节不变（升级不重弹）；存储仍用**同一张表**（常量改名 `TC_ALERT_ACKS`、**值冻结** `tc.cloudHalt.ack`）——不新开第二张表、不写迁移。只读提示保留会话级字面键 `ro-banner-dismissed` |
+| **复制纯文本** | `AlertItem.copyText` 必填，由 `withCopy()` 统一派生 = `title` + `detail` + `（课程 X · 条目 <id> · 严重度 <sev>）` 三行；`AlertDock` 每条渲染现成的 `CopyButton`（icon），与动作区**分区**（不抢主按钮位） |
+
+**被否决**（评审两轮处置见 plan §11）：换停机 ack 键（= 让人重关一次红条，净回归）；新开第二张 ack 表 +
+一次性迁移；把聚合塞进按课程键控的慢快照；保留 `loopComplete` 单值兼容（第二份真相）；给收官条造
+「立即恢复」（第二份真相）；提高 `ALERT_DOCK_DEFAULT_VISIBLE`。
+
+**落点**：`dashboard/src/server/api/{loop-complete,state-view,snapshot-cache}.ts` ·
+`dashboard/src/web/view/{alerts,interaction,legacy-keys,console-types}.ts` ·
+`dashboard/src/web/components/AlertDock.tsx` · `dashboard/src/web/app/app.tsx` · `dashboard/src/web/theme.css` ·
+测试 `dashboard/tests/{web-alert-dock,server-api-loop-complete,cloud-halt-banner,web-ssr-readonly}.test.ts`。
+
+**门槛**：`cd dashboard && bun run typecheck && bun run test` 绿（1317 pass / 0 fail）· `bun run build:ui` 三份 bundle ✓ ·
+根 `bun run check` 2345 pass / 0 fail · `bun run build` ✓。
+
+**指针**：plan `plan/dashboard-banner-global.plan.md`（评审修订版）·
+DECISIONS `§2026-10-03-goalnn-dashboard-alert-dock-global`。
+
 ## §23 并行 worker 贡献度面板：承接面归属 + 两组不合并 + 机器×课程矩阵（plan/worker-contribution-view，2026-10-02）
 
 **触发**（用户 2026-10-02）：「现在有七门课程并行训练，两个云端 worker 一起领任务。在这种场景下，

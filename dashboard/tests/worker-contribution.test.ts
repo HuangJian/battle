@@ -11,9 +11,11 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { DASHBOARD_ROOT } from '../src/core/paths'
+import { poolHistoryCounters, resetPoolHistoryCounters } from '../src/server/pool-history'
 import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
 import { NodePills } from '../src/web/app/panels/NodePills'
@@ -466,5 +468,74 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
     expect(html).toContain('tc-contrib-ppobrief')
     expect(html).toContain('PPO 合计')
     expect(html.split('节点统计 ›').length - 1).toBe(1)
+  })
+})
+
+// ────────────────────────── R3：PPO 侧统一扫描 + memo 前置（reload-perf W3） ──────────────────────────
+
+describe('server/contribution · 统一扫描与 memo 前置（reload-perf W3）', () => {
+  it('W3-①：账本清单消费同一份扫描（不再独立 readdir）——源码结构断言', () => {
+    const raw = readFileSync(join(DASHBOARD_ROOT, 'src', 'server', 'contribution.ts'), 'utf-8')
+    // 只看代码行（注释里解释「不再自己 readdirSync」——那不是回退）。
+    const code = raw
+      .split('\n')
+      .filter(
+        (l) =>
+          !l.trim().startsWith('//') && !l.trim().startsWith('*') && !l.trim().startsWith('/*'),
+      )
+      .join('\n')
+    expect(code).toContain('scanPoolStreams(')
+    expect(code).not.toContain('readdirSync')
+    expect(code).not.toContain('existsSync')
+  })
+
+  it('W3-②：memo 判定在读取之前——窗口内第二次调用**零读盘**', () => {
+    const now = Date.now()
+    const ts = (now - 60_000) / 1000
+    withPoolRoot([], (root) => {
+      mkdirSync(join(root, 'k25'), { recursive: true })
+      writeFileSync(
+        join(root, 'k25', 'training_log.jsonl'),
+        `${JSON.stringify({ event: 'job_completed', job_id: 'j1', ts })}\n`,
+        'utf8',
+      )
+      invalidatePpoAttributionMemo()
+      const first = readPpoAttribution(now, 30_000)
+      expect(first.ledgers).toBe(1)
+      // 同一窗口内再调（指纹相同 ⇒ 一字节账本都不读）
+      const second = readPpoAttribution(now + 1000, 30_000)
+      expect(second).toBe(first) // 同一对象（memo 命中）
+      // 跨过窗口 ⇒ 重读（拿到新事件）
+      writeFileSync(
+        join(root, 'k25', 'training_log.jsonl'),
+        [
+          JSON.stringify({ event: 'job_completed', job_id: 'j1', ts }),
+          JSON.stringify({ event: 'job_result_accepted', job_id: 'j2', worker: 'w1', ts: ts + 1 }),
+          JSON.stringify({ event: 'job_completed', job_id: 'j2', ts: ts + 2 }),
+        ].join('\n') + '\n',
+        'utf8',
+      )
+      const third = readPpoAttribution(now + 60_000, 30_000)
+      expect(third.events.length).toBeGreaterThan(first.events.length)
+    })
+  })
+
+  it('W3-③：同一拍内采样聚合与 PPO 只 walk 一次（scans 计数只增 1）', () => {
+    const now = Date.now()
+    withPoolRoot([{ name: 'k25', meta: [metaRow('a1', now - 5 * 60_000)] }], (root) => {
+      mkdirSync(join(root, 'k25'), { recursive: true })
+      writeFileSync(
+        join(root, 'k25', 'training_log.jsonl'),
+        `${JSON.stringify({ event: 'job_completed', job_id: 'j1', ts: (now - 60_000) / 1000 })}\n`,
+        'utf8',
+      )
+      invalidateNodeHistoryMemo()
+      invalidatePpoAttributionMemo()
+      resetPoolHistoryCounters()
+      aggregateNodeHistory(now)
+      readPpoAttribution(now, 0)
+      // 第一次调用 walk 了一次；第二次调用（PPO）命中扫描 memo ⇒ scans 仍是 1。
+      expect(poolHistoryCounters().scans).toBe(1)
+    })
   })
 })

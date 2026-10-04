@@ -1,11 +1,11 @@
 /** state-view.ts — /api/state 主视图组装。 */
 import { existsSync } from 'fs'
 import path from 'path'
+import { pidAlive } from '../../core/net'
 import { REPO_ROOT } from '../../core/paths'
-import { BRIEF_ALL, type ConsoleStateView, type MetricsView, compactSummary } from '../../web/view'
-import { buildContributionView, inflightByWorkerFromQueue } from '../contribution'
-import { aggregateNodeHistory, resolveWindow } from '../pool-history'
-import { courseEnableMarkerPath, isBcCourse } from '../../stack/courses'
+import { entryForCourse, loadRegistry } from '../../core/registry'
+import { type ConsoleStateView, type MetricsView } from '../../web/view'
+import { courseEnableMarkerPath, courseEnabled, isBcCourse } from '../../stack/courses'
 import { loadConsoleState, readCourseModes } from '../actions'
 import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/specs'
 import { readIterMetrics, readPairedReferee } from '../iters'
@@ -17,7 +17,9 @@ import { buildOverview, buildWorkerRegistry, getHubAdmin, sharedTrainerAlive } f
 import { detectPpoQueueStall } from './ppo-queue'
 import { readTunnelAbRuns } from './tunnel-ab'
 import { buildGateHaltView } from '../../stack/gate-halt'
-import { getSlowSnapshot } from './snapshot-refresher'
+import { collectLoopCompletes } from './loop-complete'
+import { readLogTail } from './logs'
+import { getFleetProbes, getSlowSnapshot } from './snapshot-refresher'
 
 export async function buildStateView(courseOverride?: string): Promise<ConsoleStateView> {
   const cfg = loadConfigSafe()
@@ -27,16 +29,29 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   const archivedList = readArchived()
   const courses = discoverCourses(500, new Set(archivedList.map((a) => a.course)))
   const course = courseOverride || effectiveCourse(state, courses)
+  // 收官横幅（2026-10-03，plan/dashboard-banner-global §4.1）：共享 trainer 在跑时，逐课读账本尾
+  // 派生「训练已完成」——**全局按课成列**（收官是终态、无动作、不会自愈；只弹当前课 = 不切课看不到）。
+  //  · 判活是**全局一个事实**（`trainingLoop` 是共享组件，`scopeOf` 恒 `''`），不逐课探组件；
+  //  · 课程清单 = 已开课 ∪ 查看课程（同 `harvestTrainingCourseActuals` 的成本闸：tmp 下几十门
+  //    历史课的账本都在盘上，逐拍全扫是浪费）；查看课无条件并入 ⇒ 「切到那门课就能看到」零回归。
+  const trainerEntry = entryForCourse(loadRegistry(), 'trainingLoop', '')
+  const loopAlive = !!trainerEntry && pidAlive(trainerEntry.pid)
+  const loopCompletes = collectLoopCompletes(
+    [...courses.filter((c) => courseEnabled(c)), course],
+    loopAlive,
+    (c) => readLogTail(path.join(REPO_ROOT, 'tmp', c, 'training_log.jsonl'), 1000).lines,
+  )
   // 机群级两笔冷探测互不依赖，**并行起跑**：慢快照里的节点 ping（~1.5s）与 hub 观测面
   // （`buildOverview`/`buildWorkerRegistry` 里的 ~1.2s）。串行时它们是相加的——冷启动/
   // 动作后的第一帧实测 2.8s → 并行后 ~1.5s（2026-09-22）。下面三处 await 同一个
   // 单飞 promise（缓存键同为全局），不会多探一次。
+  //
+  // ★ 2026-10-03（plan/dashboard-reload-perf R1）：贡献度缩略**不再**在这里算（它挂在
+  //   `getFleetProbes` 的 SWR 值里，`computeFleetProbes` 顺手产出）；但 hub 探测的**提前起跑**
+  //   保留——下面 `buildOverview`/`buildWorkerRegistry` 仍要它，去掉就丢掉这半秒重叠。
   const hubProbe = getHubAdmin(cfg, course)
   void hubProbe.catch(() => undefined) // 真 await 在下面；这里只防「无人接手」的 rejection
-  const { components, nodes, localNode, phase, loopComplete, pushFleet } = await getSlowSnapshot(
-    cfg,
-    course,
-  )
+  const { components, nodes, localNode, phase, pushFleet } = await getSlowSnapshot(cfg, course)
   let metrics: MetricsView = { available: false, iters: [] }
   if (course && existsSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'))) {
     try {
@@ -98,24 +113,21 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     buildOverview(cfg, courses, course, training).catch(() => null),
     buildWorkerRegistry(cfg, course).catch(() => null),
   ])
-  // 首页缩略（plan/worker-contribution-view W3b）：与 /api/pool **同一模块**的 compactSummary
-  // 输出（同一份聚合的裁剪，不是第二份计算）；观测面坏掉不得把 /api/state 带崩 ⇒ 整段 try。
+  // 首页缩略（plan/worker-contribution-view W3b → plan/dashboard-reload-perf R1）：与
+  // `/api/pool` **同一模块**的 compactSummary 输出（同一份聚合的裁剪，不是第二份计算）——
+  // 但**产地在后台**：`computeFleetProbes` 顺手算好挂在 SWR 缓存值里，这里只读。
+  //
+  // ★ 2026-10-03（本 plan 的 R1）：此前这里**裸调** `aggregateNodeHistory()` + `buildContributionView()`，
+  //  每请求付 walk 37ms + PPO 8.8–100ms，每 30s 一次 1s 级同步冷算（冷算重建 116MB ⇒
+  //  JSC 堆高水位 ⇒ 周期 GC 全停）——页面重载 ~10s 的直接来源。裸调还违反了 WC-plan §1.3
+  //  「新聚合挂既有 SWR，不新增第二个缓存层」；`fleetProbeCache` 单条目（机群级、course 不是键）
+  //  就是那个「既有 SWR」，`getSlowSnapshot` 内部同款。
+  //  观测面坏掉不得把 /api/state 带崩 ⇒ 整段 try（与旧行为一致）。
   let contributionBrief: ConsoleStateView['contributionBrief'] = null
   try {
-    const admin = await hubProbe
-    const agg = aggregateNodeHistory()
-    // 窗口 = **近 24 小时滚动档**（用户 2026-10-03：首页要「最近 24 小时的贡献度」）。
-    // 不用 `today`（自然日）：它凌晨归零，而 24h 档跨日不回零（与 30m/2h 同族的滚动窗）。
-    // ⚠ 该档吃子日事件环，环的保留时长（`ROLLING_KEEP_MS`）必须 ≥ 24h，否则数字静默偏低。
-    const w = resolveWindow('24h', Date.now(), agg.epochMs)
-    // 采样侧 top-3 够用（首页采样节点行已逐个列出身份，份额那行只是收尾合计）；
-    // PPO 侧**全列**（用户 2026-10-03：云机就那几台，「哪几台在干活、各占多少」比只看前三名有用）。
-    // 两侧 N 分开给——两组是两个不相交的人群、两种单位（WC-plan §4.1b），不该被同一个 N 绑住。
-    contributionBrief = compactSummary(
-      buildContributionView(agg, w, inflightByWorkerFromQueue(admin.queue)),
-      3,
-      BRIEF_ALL,
-    )
+    // 缩略口径住在产物处 `computeFleetProbes`（snapshot-cache.ts）：24h 滚动窗（用户 2026-10-03）
+    // + 采样 top-3 / PPO 全列（两侧 N 分开给）——这里只读缓存值，不裸调聚合（R1 结构闸）。
+    contributionBrief = (await getFleetProbes(cfg)).contributionBrief
   } catch {
     contributionBrief = null
   }
@@ -180,7 +192,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     // 纯读两份小 JSON（毫秒级）；读不了各自降级（观测面坏不得把 /api/state 带崩）。
     gateHalt: buildGateHaltView(),
     ppoQueueStall,
-    loopComplete,
+    loopCompletes,
     contributionBrief,
   }
 }

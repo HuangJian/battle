@@ -32,14 +32,14 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     const base = await api.buildStateView()
     // 组件 busy 置空：pending/busy 锁与只读无关，避免 base 状态干扰禁用断言。
     // ★ 坞的输入全部**显式清零**（2026-09-20 修）：本用例断言的是「空坞不渲染」这件事
-    //   本身，而坞的条目来自活状态（cloudHalts / loopComplete / ppoQueueStall / courseEdit）——
+    //   本身，而坞的条目来自活状态（cloudHalts / loopCompletes / ppoQueueStall / courseEdit）——
     //   挂在活状态上 = 训练一收官或云机一停机，这条用例就变红，而它与只读视图毫无关系
     //   （当天实测：21:55 一次「正常收官」把它打红）。夹具必须自己把「无告警」造成事实。
     const clean = {
       ...base,
       components: base.components.map((c) => ({ ...c, busy: false })),
       cloudHalts: {},
-      loopComplete: null,
+      loopCompletes: {},
       ppoQueueStall: null,
       courseEdit: null,
     }

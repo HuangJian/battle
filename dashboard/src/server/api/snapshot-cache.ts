@@ -4,15 +4,18 @@ import { REPO_ROOT } from '../../core/paths'
 import type { Component, RlConfig } from '../../core/types'
 import { assemblePushFleet, probePushFleetHealth } from '../../stack/push-config'
 import {
+  BRIEF_ALL,
   type ComponentView,
+  type ContributionBrief,
   type CourseEdit,
-  type LoopComplete,
   type NodeLocalView,
   type NodeView,
   type PhaseInfo,
   type PushFleetProbe,
+  compactSummary,
   parsePhaseFromLog,
 } from '../../web/view'
+import { buildContributionView, inflightByWorkerFromQueue } from '../contribution'
 import {
   type HistoryAggregate,
   aggregateNodeHistory,
@@ -22,7 +25,7 @@ import {
 } from '../pool-history'
 import { courseEditFromLedgerTail } from './ledger'
 import { readLogTail } from './logs'
-import { loopCompleteFromLedgerTail } from './loop-complete'
+import { peekHubAdmin } from './overview'
 import {
   type NodeProbeResult,
   componentViews,
@@ -66,6 +69,12 @@ export interface FleetProbes {
   pushProbes: Map<string, boolean | null>
   /** 共享/单例组件健康（hub / 隧道 / 采集 agent）；缺席 = 探不了/没在跑。 */
   componentHealth: Map<Component, boolean | null>
+  /** 首页贡献度缩略（plan/dashboard-reload-perf R1）：**同一份 `agg` 的裁剪**，
+   *  在后台顺手产出 —— 请求路径（`state-view.ts`）只读它，**永不**裸调聚合。
+   *  窗口 = `'24h'` 滚动档（2026-10-03 用户口径，取代 `'today'`——自然日凌晨归零且跨日回退）；
+   *  两侧 N 分开给（采样 3 / PPO 全列 `BRIEF_ALL`）。窗口档进缓存值不进缓存键（§4 解耦裁决）。
+   *  聚合不可用（读盘失败）→ null（缩略不渲染，不伪造 0）。 */
+  contributionBrief: ContributionBrief | null
 }
 
 export interface SlowSnapshot {
@@ -73,9 +82,6 @@ export interface SlowSnapshot {
   nodes: NodeView[]
   localNode: NodeLocalView | null
   phase: PhaseInfo
-  /** 训练正常完成停车态（账本尾行 run_complete + trainingLoop 存活时派生；
-   *  resume 后新事件自然顶掉 → null）。 */
-  loopComplete: LoopComplete | null
   /** 课程热加载最新判决（§2026-09-13-hot-reload；账本最近一条 course_edit 事件。
    *  rejected = 语料身份编辑被拒 → 错误横幅；restored/applied 不上横幅）。 */
   courseEdit: CourseEdit | null
@@ -124,6 +130,10 @@ export async function computeFleetProbes(cfg: RlConfig): Promise<FleetProbes> {
   const slowById = new Map<string, boolean>()
   const contribById = new Map<string, number>()
   let localContrib = -1
+  // 首页贡献度缩略（R1）：**顺手**算（同一份 agg，边际成本 ≈ buildContributionView 的 10ms，
+  // 且发生在后台刷新器里）；`inflight` 取 `hubCache.peek()` 的**上一拍**值——**不** await
+  // 一次 1.2–1.5s 的 hub 探测（A6 裁决；刷新器每拍本来就把 getHubAdmin 暖在同一缓存里）。
+  let contributionBrief: ContributionBrief | null = null
   if (agg) {
     const all = projectWindow(agg, resolveWindow('all', Date.now(), agg.epochMs))
     // 输入是窗口投影，但其中的时刻/耗时字段取**全部行**（含进行中那一轮）——「还在结算吗」
@@ -133,13 +143,35 @@ export async function computeFleetProbes(cfg: RlConfig): Promise<FleetProbes> {
       for (const [id, v] of agg.lastContrib) contribById.set(id, v)
       localContrib = contribById.get('local') ?? 0
     }
+    try {
+      // 窗口 = **近 24 小时滚动档**（用户 2026-10-03：首页要「最近 24 小时的贡献度」）。
+      // ⚠ 该档吃子日事件环，环的保留时长（`ROLLING_KEEP_MS`）必须 ≥ 24h，否则数字静默偏低。
+      const w = resolveWindow('24h', Date.now(), agg.epochMs)
+      // 两侧 N 分开给：采样 top-3（节点行已逐个列身份）；PPO **全列**（用户口径：云机就那几台，
+      // 「哪几台在干活、各占多少」比只看前三名有用）——两种人群、两种单位（WC-plan §4.1b）。
+      contributionBrief = compactSummary(
+        buildContributionView(agg, w, inflightByWorkerFromQueue(peekHubAdmin()?.queue ?? null)),
+        3,
+        BRIEF_ALL,
+      )
+    } catch {
+      contributionBrief = null
+    }
   }
   const [nodes, pushProbes, componentHealth] = await Promise.all([
     nodeProbeResults(cfg),
     probePushFleetHealth(cfg),
     computeComponentHealth(cfg),
   ])
-  return { nodes, slowById, contribById, localContrib, pushProbes, componentHealth }
+  return {
+    nodes,
+    slowById,
+    contribById,
+    localContrib,
+    pushProbes,
+    componentHealth,
+    contributionBrief,
+  }
 }
 
 /** 重算指定课程的慢部件快照（不落缓存；落缓存由 getSlowSnapshot 负责）。
@@ -156,10 +188,10 @@ export async function computeSlowSnapshot(
   // 当前训练阶段（训练循环日志尾解析）。
   const logTail = components.find((c) => c.key === 'trainingLoop')?.logTail ?? []
   const phase = parsePhaseFromLog(logTail)
-  // 正常完成停车态（2026-09-12）：账本尾行是 run_complete 且进程仍存活（停车
-  // 等待重启）→ 横幅派生源；进程已死走 exit-watchdog 路径；resume 后新事件
-  // 顶掉 → 自动消失。账本小文件 + 尾部窗口读，5s 快照周期内可忽略。
-  let loopComplete: LoopComplete | null = null
+  // 课程热加载判决（§2026-09-13-hot-reload）：账本尾行派生；账本小文件 + 尾部窗口读。
+  // ★ 2026-10-03：单课单值的 `loopComplete` 已移出本快照——收官横幅改为 `state-view.ts` 的
+  //   多课聚合 `loopCompletes`（plan/dashboard-banner-global §4.1：本快照按课程键控，全课聚合
+  //   放进来会被按「请求课程」各缓存一份，切课即重算、并发各算一遍）。这里只留 courseEdit。
   let courseEdit: CourseEdit | null = null
   const loopAlive = components.some((c) => c.key === 'trainingLoop' && c.status === 'running')
   if (course && loopAlive) {
@@ -168,10 +200,8 @@ export async function computeSlowSnapshot(
         path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'),
         1000,
       ).lines
-      loopComplete = loopCompleteFromLedgerTail(ledgerTail)
       courseEdit = courseEditFromLedgerTail(ledgerTail)
     } catch {
-      loopComplete = null
       courseEdit = null
     }
   }
@@ -189,7 +219,6 @@ export async function computeSlowSnapshot(
     nodes,
     localNode,
     phase,
-    loopComplete,
     courseEdit,
     pushFleet: assemblePushFleet(cfg, probes.pushProbes),
   }

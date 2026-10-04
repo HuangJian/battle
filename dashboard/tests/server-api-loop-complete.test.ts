@@ -44,3 +44,41 @@ describe('console/api.loopCompleteFromLedgerTail（正常完成停车横幅派�
     expect(api.loopCompleteFromLedgerTail(['[run_rl] boot...'])).toBeNull()
   })
 })
+
+describe('console/api.collectLoopCompletes（多课收官聚合；2026-10-03 plan/dashboard-banner-global §4.1）', () => {
+  const tail = (at: string): string[] => [
+    JSON.stringify({ event: 'run_complete', iter: 40, iters: 40, time: at, reason: 'iters 跑满' }),
+  ]
+
+  it('共享 trainer 不在跑 ⇒ 空表（没有「停车等待重启」这回事）', () => {
+    expect(api.collectLoopCompletes(['b', 'a'], false, (c) => tail(`T-${c}`))).toEqual({})
+  })
+
+  it('在跑 ⇒ 逐课产出；课程名确定性排序（不依赖输入/对象键序）', () => {
+    const tails: Record<string, string[]> = { b: tail('T2'), a: tail('T1') }
+    const got = api.collectLoopCompletes(['b', 'a'], true, (c) => tails[c] ?? [])
+    expect(Object.keys(got)).toEqual(['a', 'b'])
+    expect(got.a!.at).toBe('T1')
+    expect(got.b!.at).toBe('T2')
+  })
+
+  it('去重 + 空课程名跳过（查看课程可能是空串）', () => {
+    const got = api.collectLoopCompletes(['a', 'a', ''], true, (c) => tail(`T-${c}`))
+    expect(Object.keys(got)).toEqual(['a'])
+  })
+
+  it('单课读失败只少一门，不吞其它课（下一拍重试）', () => {
+    const got = api.collectLoopCompletes(['bad', 'good'], true, (c) => {
+      if (c === 'bad') throw new Error('IO')
+      return tail('T')
+    })
+    expect(Object.keys(got)).toEqual(['good'])
+  })
+
+  it('尾行不是 run_complete ⇒ 该课不产条目（resume 后自动消失）', () => {
+    const got = api.collectLoopCompletes(['a', 'b'], true, (c) =>
+      c === 'a' ? tail('T1') : [JSON.stringify({ event: 'iteration', iter: 1 })],
+    )
+    expect(Object.keys(got)).toEqual(['a'])
+  })
+})

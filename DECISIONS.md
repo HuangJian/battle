@@ -7433,3 +7433,48 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 - **门槛**：nn python gate 绿（**3608 pass/7 skip**）；dashboard `typecheck` +
   **1317 pass/0 fail**。
 - **指针**：全文 `docs/nn/remote-transport.md` §63。
+## §2026-10-03-goalnn-dashboard-alert-dock-global（2026-10-03，告警坞全局化：收官横幅按课成列 + 七类条目全可关可复制）
+
+- **背景**：用户 2026-10-02 两条指令（收官横幅要全局可见 / 所有横幅可关闭可复制）。改前收官横幅读面是
+  单课单值（`StateView.loopComplete` + 按课程键控的 `computeSlowSnapshot`）⇒ 不切课看不到「已经跑完了」；
+  七类条目里 4 类没有 ack、7 类全没有复制。
+- **备选与否决**：① 停机 ack 换到新键空间（新 kind + 新表）——否：无收益的净回归（升级后重弹红条），
+  且要双表并读 + 迁移；② 保留 `loopComplete` 单值做兼容——否：第二份真相（server/web 同批构建无版本错位）；
+  ③ 聚合塞进按课程键控的慢快照——否：全课聚合会被按「请求课程」各缓存一份，切课即重算、并发各算一遍；
+  ④ 聚合遍历全部已知课程（含历史课）——否：几十门历史课账本在盘上，逐拍全扫是浪费（同 harvest 闸）；
+  ⑤ 给收官条造「立即恢复」——否：第二份真相（N6）。
+- **决定**：收官横幅读面扩为 `loopCompletes: Record<course, LoopComplete>`，聚合落 `state-view.ts`，判活用
+  共享 `trainingLoop` 的全局存活事实，课程清单 = 已开课 ∪ 查看课，条目按课成列、标题带课名、按课名排序；
+  新 `alertAckKey(kind, subject, eventId)` 统一事件身份键（`cloudHaltAckKey` 委托它 ⇒ 停机键逐字节不变），
+  存储仍用同一张表（常量改名 `TC_ALERT_ACKS`、值冻结 `tc.cloudHalt.ack`）；`AlertItem.copyText` 由
+  `withCopy()` 统一派生（三行纯文本），`AlertDock` 用现成 `CopyButton`（icon）与动作区分区。
+- **违反后果**：改 `visibleCloudHalts` 的「只弹本课」= 重演 2026-09-14 事故；换停机键 kind = 用户重关一次红条；
+  开第二张 ack 表 = 双读双写 + 迁移；给 `alerts.ts` 引进 IO/localStorage = SSR/水合红线（它必须仍是纯函数）。
+- **指针**：全文 `docs/nn/console.md` §24 · plan `plan/dashboard-banner-global.plan.md`（评审修订版，§11 处置表）。
+
+## §2026-10-03-goalnn-request-path-zero-aggregate（2026-10-03，控制台重载 ~10s + 常驻 1GB：请求路径零聚合 + 聚合增量入账）
+
+- **背景**：用户 2026-10-03 报「dashboard 重载 ~10s + 进程占 1GB」。实测：`/api/state` 40 连击
+  17/40 落 0.3–2.7s、WS 涨到 1.38GB、空载 CPU ~30% 单核；`aggregateNodeHistory()` 冷算 1057ms /
+  +116MB、命中 memo 仍 37ms（walk 在 memo 前）、`listCourseLedgers()` 9.9ms/次无 memo。
+- **备选与否决**：① 只降 `LARGE_META_BYTES`（少读几份大文件）——否：**丢历史窗口**（把内存换成错数，
+  与「全部根治」口径冲突；本 plan 用增量而非截断换性能）；② 新增一个 `createSwrCache<ContributionView>`——
+  否：WC-plan §1.3 明禁的**第二个缓存层**，且会与 `fleetProbeCache` 各算一份 `agg`；③ 后台刷新器为缩略
+  的 inflight 多 await 一次 hub 探测（1.2s）——否：为不显示的数字付超时预算、拖慢整拍；④ 给 G7 开
+  「纯在飞 worker 可缺失」的例外——否：那是把不一致写成规格；⑤ 跨流同毫秒平局沿用 mtime 序——否：
+  增量下不可复现（旧流 mtime 会被新写入推走），canonical 目录名升序才是「增量/全量相等」的必要条件；
+  ⑥ truncated 流也做增量累计——否：与「只读尾部」两条口径打架，28.1/15.6MB 两条流数字必变。
+- **决定**：三条一起做（缺一条只是把症状搬位置）——
+  **R1** 贡献度缩略挂 `FleetProbes.contributionBrief`（`computeFleetProbes` 后台顺手产出；
+  `inflight` 走 `peekHubAdmin()` 的上一拍值），`state-view.ts` 只读缓存（请求路径零聚合）；
+  **R2** `aggregateNodeHistory` 改「扫描 memo（同 `AGG_MEMO_MIN_MS`）+ 每流增量入账（`size:mtime`
+  指纹；未变零读、变大读 `[offset,size)` 分块游标、回退/重写/水位后退全量重建）+ 可合并桶归并
+  （每流尾窗口截尾 + `(ts, seq)` 归并再截尾；`>=` 决胜同规）+ 水位 `pending` 翻转」；
+  **R3** `listCourseLedgers` 消费 `scanPoolStreams()`（一次 walk 两组候选），PPO memo 判定前置。
+- **违反后果**：把聚合放回请求路径 = 每请求 47ms 同步扫描 + 每 30s 1s 级全停（本事故重演）；用
+  `split` 全文读 = 13 万行数组 + 116MB 峰值（JSC 堆高水位不归还）；反向扣减水位 = 双计/漏计；
+  两个消费者各扫一遍 = R1 的病根同构；truncated 流做增量 = 贡献度数字与面板不一致。
+- **落点**：`dashboard/src/server/{pool-history,contribution}.ts` ·
+  `dashboard/src/server/api/{snapshot-cache,state-view,overview}.ts` · `dashboard/src/server/server.ts`（注释）·
+  `dashboard/tools/perf-probe.ts`（新）· 回归 `dashboard/tests/{server-pool-history,server-api-state-view,worker-contribution}.test.ts`。
+- **指针**：全文 `docs/nn/console.md` §25 · plan `plan/dashboard-reload-perf.plan.md`（评审修订版 A1–A6）。

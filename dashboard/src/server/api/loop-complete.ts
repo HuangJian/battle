@@ -28,4 +28,32 @@ export function loopCompleteFromLedgerTail(lines: string[]): LoopComplete | null
   return null
 }
 
+/** 多课收官聚合（纯函数，可单测；plan/dashboard-banner-global §4.1）：逐课调用
+ *  `loopCompleteFromLedgerTail`（不变 ⇒ 单课口径零漂移）。
+ *
+ *  - `loopAlive` = **共享** trainer 进程在跑（`trainingLoop` 是共享组件，`scopeOf` 恒 `''`，
+ *    一个进程服务所有并行课程）——进程不在跑就没有「停车等待重启」这回事；在跑时收官课的
+ *    条目留着（与旧单课行为一致）。
+ *  - 课程名**显式排序**（禁止把对象键序当契约）；课程清单由调用方限定（只读已开课 ∪ 查看课，
+ *    同 `harvestTrainingCourseActuals` 的成本闸）；单课读失败只少一门（下一拍重试）。 */
+export function collectLoopCompletes(
+  courses: readonly string[],
+  loopAlive: boolean,
+  readTail: (course: string) => string[],
+): Record<string, LoopComplete> {
+  if (!loopAlive) return {}
+  const names = [...new Set(courses)].filter(Boolean).sort()
+  if (names.length === 0) return {}
+  const out: Record<string, LoopComplete> = {}
+  for (const course of names) {
+    try {
+      const done = loopCompleteFromLedgerTail(readTail(course))
+      if (done) out[course] = done
+    } catch {
+      /* 单课读失败只少一门 */
+    }
+  }
+  return out
+}
+
 /** 取指定课程的快照：5s 内新鲜命中缓存；否则按课程单飞重算（并发共享同一次计算）。 */

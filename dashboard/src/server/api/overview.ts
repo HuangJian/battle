@@ -164,6 +164,18 @@ export function invalidateHubAdmin(): void {
   hubCache.clear()
 }
 
+/** **只读窥视**（`hubCache.peek()` 包装，**不触发探测**）——给「顺手要用上一拍的 hub 观测、
+ *  但**不许**为它 await 一次 1.2–1.5s 探测」的调用方（plan/dashboard-reload-perf R1/A6：
+ *  贡献度缩略的 inflight 来源）。
+ *
+ *  新鲜度 = 后台刷新器每拍暖一次的上一拍值（≤1 个刷新周期）；这与「inflight 本来就是 5s 陈旧的
+ *  观测」口径一致。冷启动首拍（缓存空）返回 null —— 缩略里暂时没有「只在飞」的 worker，
+ *  第二拍起一致（守卫用例钉死这条）。 */
+export function peekHubAdmin(): { queue: HubQueueView | null } | null {
+  const p = hubCache.peek()
+  return p ? { queue: p.queue } : null
+}
+
 // ────────────────────────── 组装 ──────────────────────────
 
 /** 该课账本尾行的最新轮次（**只认 iteration 事件**；多写者账本见 `latestIterFromLedgerTail`）。

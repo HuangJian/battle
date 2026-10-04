@@ -22,12 +22,18 @@
  *  `title` 是**只读第一行就能决策**的结论；`detail` 保留原来那句话的全部信息（指标、时刻、
  *  该怎么处理）—— 收窄的不是信息量，是**排版层级**。原有的长句一字未删，只是从「整条横幅」
  *  降为「第二条弱化行」。
+ *
+ *  ## 可见范围（2026-10-03，plan/dashboard-banner-global §4.2）
+ *
+ *  **有恢复动作的瞬时态按课过滤；无动作的终态全局成列。** 停机横幅可「立即恢复」（只作用于本课）
+ *  且会自愈 ⇒ 只弹当前课自洽；收官横幅没有动作、不会自愈（尾行不被顶掉就一直显示）⇒ 必须全局
+ *  按课成列，否则「它已经跑完了」在多课场景**不可达**（2026-10-02：k25/k10 相继收官，不切课看不到）。
  */
 
 import type { CloudHaltView, LoopComplete } from './console-types'
 import type { OfflineStalledView } from './course-overview'
 import { fmtTs } from './format'
-import { cloudHaltAckKey, visibleCloudHalts } from './interaction'
+import { alertAckKey, cloudHaltAckKey, visibleCloudHalts } from './interaction'
 // 与 pill **同一个词**（2026-10-02 口径对齐，plan/course-pill-precision §6）：告警坞的 PPO 红条
 // 与 pill 的「排队·无人取」说的是同一件事（有活、没人认领）；「卡住」是另一类（有持有者但
 // 无进度）。两处各起一个名字 = 迟早漂开，所以词只在 `loop-queue.ts` 定义一次。
@@ -55,7 +61,7 @@ export interface AlertAction {
   /** `kind='resume'`：API 动作名 + body。 */
   act?: string
   body?: Record<string, unknown>
-  /** `kind='ack'`：已读键（按事件身份，新事件是新键——见 `cloudHaltAckKey`）。 */
+  /** `kind='ack'`：已读键（按**事件身份**，新事件是新键——见 `alertAckKey`；只读提示是会话级字面键）。 */
   ackKey?: string
   title?: string
   /** 主按钮（每条最多一个；「知道了」永远是次按钮）。 */
@@ -74,6 +80,19 @@ export interface AlertItem {
   /** 无障碍角色：需要打断的用 `alert`，其余 `status`（读屏器不打断）。 */
   role: 'alert' | 'status'
   actions: AlertAction[]
+  /** 一键复制全文（三行纯文本，2026-10-03 G4）：由 `withCopy` 统一派生，组件不许自己再拼一遍。 */
+  copyText: string
+}
+
+/** 给条目补上复制文本（G4）：`title` + `detail` + 一行元信息（课名/条目 id/严重度）。
+ *
+ *  纯文本三行、无 Markdown——「能直接贴进日志或报告的一段话」就是它的验收口径。
+ *  `id` 进 meta 是有意的（排障时能把这段文字定位回 `alerts.ts` 的哪一条）。 */
+function withCopy(a: Omit<AlertItem, 'copyText'>, course: string): AlertItem {
+  const meta = [course ? `课程 ${course}` : '', `条目 ${a.id}`, `严重度 ${a.severity}`]
+    .filter(Boolean)
+    .join(' · ')
+  return { ...a, copyText: `${a.title}\n${a.detail}\n（${meta}）` }
 }
 
 /** 严重度序（稳定：同级保持输入顺序）。 */
@@ -104,15 +123,16 @@ export interface AlertInput {
   viewing: string
   /** 已读键（由调用方从 localStorage 读出）。 */
   acks: string[]
-  /** 训练正常完成停车（`ConsoleStateView.loopComplete` 原样传入）。 */
-  loopComplete?: LoopComplete | null
+  /** 训练正常完成停车（`ConsoleStateView.loopCompletes` 原样传入；按课成列，S1）。 */
+  loopCompletes?: Record<string, LoopComplete> | null
   ppoQueueStall?: { jobId: string; waitedSec: number; it: number | null } | null
   /** 离线课程停滞（`/admin/offline.stalled`；T8）：自动交接把本机停采后的**静默停摆**。
    *
    *  这是自动化的固有代价，必须显式付——`null`/缺省 = hub 不可达或旧版（**不可知 ≠ 没停**，
    *  什么都不画；hub 的可用性由课程矩阵表头的「hub 无应答」单独占位）。 */
   offlineStalls?: OfflineStalledView[] | null
-  courseEdit?: { verdict: string; fields: string[] } | null
+  /** `at` = 事件时刻（账本 `time`）：ack 事件身份用它；缺省回退字段签名（旧夹具）。 */
+  courseEdit?: { verdict: string; fields: string[]; at?: string } | null
   readOnly: boolean
   /** 只读提示是否已被关掉（写盘的状态由调用方给）。 */
   roDismissed: boolean
@@ -141,62 +161,86 @@ function cloudHaltAlerts(input: AlertInput): AlertItem[] {
     if (h.status === 'halted') {
       const ackKey = cloudHaltAckKey('halted', courseName, h.at)
       if (input.acks.includes(ackKey)) continue
-      out.push({
-        id: `halt-${courseName}`,
-        severity: 'err',
-        icon: '⚠',
-        title: `${who}停机中（${h.reason}）`,
-        // 原文一字未删：停不掉就照常执行这句是**操作员决定要不要干预**的依据。
-        detail:
-          '已向云机下发停机命令——云机先尝试停机；停不掉则照常执行任务（不闲置空烧）。' +
-          '本地 hub/console 均正常。本课恢复训练会自动解除；其它课的停机状态见课程矩阵的徽标。',
-        role: 'alert',
-        actions: [
+      out.push(
+        withCopy(
           {
-            kind: 'resume',
-            label: '立即恢复',
-            act: 'cloud-resume',
-            body: { course: courseName },
-            primary: true,
+            id: `halt-${courseName}`,
+            severity: 'err',
+            icon: '⚠',
+            title: `${who}停机中（${h.reason}）`,
+            // 原文一字未删：停不掉就照常执行这句是**操作员决定要不要干预**的依据。
+            detail:
+              '已向云机下发停机命令——云机先尝试停机；停不掉则照常执行任务（不闲置空烧）。' +
+              '本地 hub/console 均正常。本课恢复训练会自动解除；其它课的停机状态见课程矩阵的徽标。',
+            role: 'alert',
+            actions: [
+              {
+                kind: 'resume',
+                label: '立即恢复',
+                act: 'cloud-resume',
+                body: { course: courseName },
+                primary: true,
+              },
+              { kind: 'ack', label: '知道了', ackKey },
+            ],
           },
-          { kind: 'ack', label: '知道了', ackKey },
-        ],
-      })
+          courseName,
+        ),
+      )
       continue
     }
     // recovered：灰条留痕（历史）
     const ackKey = cloudHaltAckKey('recovered', courseName, h.clearedAt ?? '')
     if (input.acks.includes(ackKey)) continue
-    out.push({
-      id: `rec-${courseName}`,
-      severity: 'history',
-      icon: '✓',
-      title: `${who}曾停机（${h.reason}）· 已恢复`,
-      detail:
-        `已恢复（${h.clearReason ?? '手动恢复'}，${fmtTs(new Date(h.clearedAt ?? '').getTime(), input.now)}）；` +
-        '停机期间停不掉的云机继续工作，未闲置浪费。',
-      role: 'status',
-      actions: [{ kind: 'ack', label: '知道了', ackKey }],
-    })
+    out.push(
+      withCopy(
+        {
+          id: `rec-${courseName}`,
+          severity: 'history',
+          icon: '✓',
+          title: `${who}曾停机（${h.reason}）· 已恢复`,
+          detail:
+            `已恢复（${h.clearReason ?? '手动恢复'}，${fmtTs(new Date(h.clearedAt ?? '').getTime(), input.now)}）；` +
+            '停机期间停不掉的云机继续工作，未闲置浪费。',
+          role: 'status',
+          actions: [{ kind: 'ack', label: '知道了', ackKey }],
+        },
+        courseName,
+      ),
+    )
   }
   return out
 }
 
-/** 训练正常完成并停车等重启（灰条留痕——它不是故障，是设计内停车）。 */
+/** 训练正常完成并停车等重启（灰条留痕——它不是故障，是设计内停车）。
+ *
+ *  **全局按课成列**（2026-10-03 S1）：收官是终态、没有动作、不会自愈 ⇒ 只弹当前课等于让
+ *  「它已经跑完了」在多课场景不可达。标题带课名（多课收官不加课名就是 N 条一模一样的
+ *  「训练已完成」，比不可见更难排查）；顺序按**课程名**（确定性，与对象键序解耦）。 */
 function loopCompleteAlerts(input: AlertInput): AlertItem[] {
-  if (!input.loopComplete) return []
-  return [
-    {
-      id: 'loop-complete',
-      severity: 'history',
-      icon: '✅',
-      title: `训练已完成（${input.loopComplete.reason}）`,
-      detail:
-        '本地已停止采集，云机已停机省配额，进程停车等待重启。改大 iters 后经「停止→启动」继续。',
-      role: 'status',
-      actions: [],
-    },
-  ]
+  return Object.entries(input.loopCompletes ?? {})
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([course, done]) => ({
+      course,
+      done,
+      ackKey: alertAckKey('loop-complete', course, done.at),
+    }))
+    .filter(({ ackKey }) => !input.acks.includes(ackKey))
+    .map(({ course, done, ackKey }) =>
+      withCopy(
+        {
+          id: `loop-complete:${course}`,
+          severity: 'history',
+          icon: '✅',
+          title: `${course ? `课程 ${course} ` : ''}训练已完成（${done.reason}）`,
+          detail:
+            '本地已停止采集，云机已停机省配额，进程停车等待重启。改大 iters 后经「停止→启动」继续。',
+          role: 'status',
+          actions: [{ kind: 'ack', label: '知道了', ackKey }],
+        },
+        course,
+      ),
+    )
 }
 
 /** PPO 排队·无人取超时（红条）：盘上 `claimed` 不存在且目录龄 >5min ⇒ 云端 worker 可能断连。
@@ -208,20 +252,26 @@ function loopCompleteAlerts(input: AlertInput): AlertItem[] {
 function ppoStallAlerts(input: AlertInput): AlertItem[] {
   const stall = input.ppoQueueStall
   if (!stall) return []
+  // 事件身份 = 这个 job 的这一轮（同一 job 被重新领取后再次超时是新 jobId）。
+  const ackKey = alertAckKey('ppo-stall', stall.jobId, stall.it == null ? '' : String(stall.it))
+  if (input.acks.includes(ackKey)) return []
   const waited = `${Math.floor(stall.waitedSec / 60)} 分${stall.waitedSec % 60} 秒`
   return [
-    {
-      id: 'ppo-queue-stall',
-      severity: 'err',
-      icon: '⚠',
-      title: `PPO ${NO_TAKER_LABEL}：已等待 ${waited} 仍无 worker 领取`,
-      detail:
-        `job ${stall.it != null ? `it${stall.it}` : stall.jobId.slice(0, 12)}` +
-        '——云端 worker 可能断连或未在轮询 hub。检查 Colab/Kaggle worker 日志与 hub 是否在线。' +
-        `（「${STUCK_LABEL}」是另一类：**有持有者**但无进度，本条不覆盖——看顶部 pill 的悬停全因。）`,
-      role: 'alert',
-      actions: [],
-    },
+    withCopy(
+      {
+        id: 'ppo-queue-stall',
+        severity: 'err',
+        icon: '⚠',
+        title: `PPO ${NO_TAKER_LABEL}：已等待 ${waited} 仍无 worker 领取`,
+        detail:
+          `job ${stall.it != null ? `it${stall.it}` : stall.jobId.slice(0, 12)}` +
+          '——云端 worker 可能断连或未在轮询 hub。检查 Colab/Kaggle worker 日志与 hub 是否在线。' +
+          `（「${STUCK_LABEL}」是另一类：**有持有者**但无进度，本条不覆盖——看顶部 pill 的悬停全因。）`,
+        role: 'alert',
+        actions: [{ kind: 'ack', label: '知道了', ackKey }],
+      },
+      '',
+    ),
   ]
 }
 
@@ -237,35 +287,48 @@ function ppoStallAlerts(input: AlertInput): AlertItem[] {
 function offlineStallAlerts(input: AlertInput): AlertItem[] {
   const out: AlertItem[] = []
   for (const s of input.offlineStalls ?? []) {
+    // 事件身份：翻 mode 时刻（静默停摆）/ 最近补传产物 mtime（有租约但无进度）。
+    const ackKey = alertAckKey(
+      'offline-stall',
+      s.course,
+      String(s.why === 'pending-export' ? s.flippedAt : s.lastMtime),
+    )
+    if (input.acks.includes(ackKey)) continue
     const silent = s.why === 'pending-export'
     const mins = Math.max(0, Math.round(s.ageSec / 60))
     const ageText = mins >= 60 ? `${Math.floor(mins / 60)} 小时 ${mins % 60} 分` : `${mins} 分钟`
     const who = s.holder ? `${s.holder} ` : ''
-    out.push({
-      id: `offline-stall-${s.course}`,
-      severity: silent ? 'err' : 'warn',
-      icon: '⚠',
-      title: silent
-        ? `${s.course} 已切离线 ${ageText}：既没有租约也没有新进度——云机没接手`
-        : `${s.course} 离线段卡住：${who}持有租约但 ${ageText} 没有新进度`,
-      detail:
-        '三条出路：① TPU 重连继续（它一上线就会在 /offline/tasks 再看到这门课）' +
-        '；② 手工导入结果包（课程矩阵行内的「导入训练结果」——导入后会自动评估）' +
-        '；③ 手工切回在线（矩阵行内「交还自动池」——本机在下一轮边界恢复采样）。' +
-        `判据只用已有事实：${silent ? '翻 mode 时刻' : '最近补传产物 mtime'} 超阈值；` +
-        '修好后（重连 / 导入 / 交还）告警自动消失。',
-      role: 'alert',
-      actions: [
+    out.push(
+      withCopy(
         {
-          kind: 'resume',
-          label: '交还自动池',
-          act: 'unsetCourseMode',
-          body: { course: s.course },
-          title: '清 pin + 清 claim 记账，该课重回自动交接池（本机下一轮恢复采样）',
-          primary: true,
+          id: `offline-stall-${s.course}`,
+          severity: silent ? 'err' : 'warn',
+          icon: '⚠',
+          title: silent
+            ? `${s.course} 已切离线 ${ageText}：既没有租约也没有新进度——云机没接手`
+            : `${s.course} 离线段卡住：${who}持有租约但 ${ageText} 没有新进度`,
+          detail:
+            '三条出路：① TPU 重连继续（它一上线就会在 /offline/tasks 再看到这门课）' +
+            '；② 手工导入结果包（课程矩阵行内的「导入训练结果」——导入后会自动评估）' +
+            '；③ 手工切回在线（矩阵行内「交还自动池」——本机在下一轮边界恢复采样）。' +
+            `判据只用已有事实：${silent ? '翻 mode 时刻' : '最近补传产物 mtime'} 超阈值；` +
+            '修好后（重连 / 导入 / 交还）告警自动消失。',
+          role: 'alert',
+          actions: [
+            {
+              kind: 'resume',
+              label: '交还自动池',
+              act: 'unsetCourseMode',
+              body: { course: s.course },
+              title: '清 pin + 清 claim 记账，该课重回自动交接池（本机下一轮恢复采样）',
+              primary: true,
+            },
+            { kind: 'ack', label: '知道了', ackKey },
+          ],
         },
-      ],
-    })
+        s.course,
+      ),
+    )
   }
   return out
 }
@@ -274,18 +337,24 @@ function offlineStallAlerts(input: AlertInput): AlertItem[] {
 function courseEditAlerts(input: AlertInput): AlertItem[] {
   const edit = input.courseEdit
   if (!edit || edit.verdict !== 'rejected') return []
+  // 事件身份 = 这条 course_edit 的时刻（同一字段集再次被拒是新事件，`at` 变）。
+  const ackKey = alertAckKey('course-edit', input.viewing, edit.at || edit.fields.join(','))
+  if (input.acks.includes(ackKey)) return []
   return [
-    {
-      id: 'course-edit-rejected',
-      severity: 'err',
-      icon: '⚠',
-      title: `课程文件含语料身份改动（${edit.fields.join('、') || '未识别字段'}）——热加载已拒绝`,
-      detail:
-        '沿用启动配置继续训练，编辑内容不进云端 payload。要应用请派生新关卡/新课程' +
-        '（D14 语料血缘不可 mid-run 破坏）；改回原文件后自动解除。',
-      role: 'alert',
-      actions: [],
-    },
+    withCopy(
+      {
+        id: 'course-edit-rejected',
+        severity: 'err',
+        icon: '⚠',
+        title: `课程文件含语料身份改动（${edit.fields.join('、') || '未识别字段'}）——热加载已拒绝`,
+        detail:
+          '沿用启动配置继续训练，编辑内容不进云端 payload。要应用请派生新关卡/新课程' +
+          '（D14 语料血缘不可 mid-run 破坏）；改回原文件后自动解除。',
+        role: 'alert',
+        actions: [{ kind: 'ack', label: '知道了', ackKey }],
+      },
+      input.viewing,
+    ),
   ]
 }
 
@@ -296,26 +365,29 @@ function courseEditAlerts(input: AlertInput): AlertItem[] {
 function readOnlyAlerts(input: AlertInput): AlertItem[] {
   if (!input.readOnly || input.roDismissed) return []
   return [
-    {
-      id: 'read-only',
-      severity: 'info',
-      icon: '🔒',
-      title: '只读模式：启停组件、冒烟、模式开关与节点编辑仅在本机 localhost 打开控制台时可用',
-      detail:
-        '可查看任意课程/日志/节点统计。动作按钮仍可点击，执行时会被服务端拒绝并提示' +
-        '（只读是动作边界，不是把按钮涂灰）。',
-      role: 'status',
-      actions: [
-        {
-          kind: 'ack',
-          label: '关闭只读提示',
-          // 不走 `cloudHaltAckKey`：它不是事件身份，是**会话级**的一次性已读（原来写的是
-          // `TC_RO_BANNER_DISMISSED` 这个固定键）。
-          ackKey: 'ro-banner-dismissed',
-          title: '关闭后不再显示（侧栏常驻 🔒 徽标不受影响）',
-        },
-      ],
-    },
+    withCopy(
+      {
+        id: 'read-only',
+        severity: 'info',
+        icon: '🔒',
+        title: '只读模式：启停组件、冒烟、模式开关与节点编辑仅在本机 localhost 打开控制台时可用',
+        detail:
+          '可查看任意课程/日志/节点统计。动作按钮仍可点击，执行时会被服务端拒绝并提示' +
+          '（只读是动作边界，不是把按钮涂灰）。',
+        role: 'status',
+        actions: [
+          {
+            kind: 'ack',
+            label: '关闭只读提示',
+            // **会话级，保留原固定键**（不是事件身份）：它关的是「这段会话的提示」，不是某个事件。
+            // 事件类键走 `alertAckKey`；这张表由 app 的 `onAck` 分派（见 plan §4.3）。
+            ackKey: 'ro-banner-dismissed',
+            title: '关闭后不再显示（侧栏常驻 🔒 徽标不受影响）',
+          },
+        ],
+      },
+      '',
+    ),
   ]
 }
 
