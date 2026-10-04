@@ -116,9 +116,17 @@ def _stub_auto_handoff(monkeypatch, result: tuple[bool, str] = (True, "ok")) -> 
 
 
 @pytest.fixture(autouse=True)
-def _clean_trigger_books():
+def _clean_trigger_books(monkeypatch):
+    """每个用例都从「控制台可达 + 触发账本干净」起步。
+
+    ★ 2026-10-04：**默认把控制台触发打桩**——有包那条腿（claim 成功）现在也会请控制台核对
+    包的新鲜度（`hub/offline._ask_console_freshness`），真发 HTTP 会打到开发机上正在跑的
+    控制台（:8900，会给这里的假课程写真配置）。需要自定义结果的用例自己再调
+    `_stub_auto_handoff(monkeypatch, ...)`——后打的桩生效（同一个 MonkeyPatch 实例）。
+    """
     from hub.task_pack import reset_auto_handoff_triggers
 
+    _stub_auto_handoff(monkeypatch)
     reset_auto_handoff_triggers()
     yield
     reset_auto_handoff_triggers()
@@ -373,6 +381,44 @@ def test_claim_with_pack_flips_mode_and_persists(tmp_path: Path) -> None:
     )
     assert disk["mode"] == "offline" and disk["claimed_offline"] is True
     assert disk["claimed_by"] == "w1"
+
+
+def test_claim_with_pack_asks_console_for_freshness(tmp_path: Path, monkeypatch) -> None:
+    """★ 2026-10-04 用户报障的回归锚（抢占在训在线课 ⇒ 在线权重/动量白丢？）。
+
+    有包那条腿（`note_claim` 翻模式）过去**不问控制台** ⇒ 盘上的旧包被直接取走；而离线腿的
+    续跑锚点只认回传/导入的轮次（`queue_resume.resume_sources`），**看不见本机在线轮**。
+    现在 claim 成功也要请控制台按「包比权重/源码新?」判一次（旧包由控制台**同步**作废 +
+    重导 ⇒ 云机随后取包拿到的一定是新包）。
+    """
+    calls = _stub_auto_handoff(monkeypatch)
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    assert st == 200, raw[:200]
+    body = _json(raw)
+    assert calls == ["c5-gae"], "有包的抢占也要问一次控制台（不然旧包直接开跑）"
+    assert "新鲜度" in body.get("handoff", ""), body
+    # 非自动课（停课）：不替人决定，不问控制台
+    calls.clear()
+    _course(tmp_path, hub, "c-stopped", marker=False)
+    _pack(tmp_path, "c-stopped")
+    hub.set_mode_pinned("c-stopped", "offline", True)
+    st2, _raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-stopped&worker=w1", method="POST")
+    assert st2 == 200, "pinned 离线课有包可领"
+    assert calls == [], "非自动课不问控制台新鲜度"
+
+
+def test_claim_with_pack_degrades_when_console_unreachable(tmp_path: Path, monkeypatch) -> None:
+    """控制台不可达：claim 照常成功，只在回执里说清（不制造新的失败态）。"""
+    _stub_auto_handoff(monkeypatch, (False, "OSError"))
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    assert st == 200, raw[:200]
+    assert "控制台不可达" in _json(raw).get("handoff", ""), raw[:300]
 
 
 def test_restart_restores_dispatch_state(tmp_path: Path) -> None:

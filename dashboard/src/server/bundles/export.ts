@@ -207,6 +207,75 @@ export function exportGuard(course: string): string | null {
   })
 }
 
+/** 活动权重（`tmp/<课程>/weights.json`）的 mtime（ms）；读不到 → 0。
+ *
+ *  为什么需要它（2026-10-04）：任务包 = **导出那一刻**的（代码 + 起点权重 + 动量）快照，
+ *  而在线训练的权重每轮都在变（`run_rl` 每轮落 `args.out` = 这个文件）。所以「包比活动
+ *  权重新」= 包仍代表当前起点（可复用）；包更旧 = **训练已推进**，旧包会把云机拖回旧起点
+ *  （离线腿的续跑锚点只认回传/导入的轮次，看不见本机在线轮）——必须重导。
+ */
+export function weightsMtimeMs(course: string): number {
+  try {
+    return statSync(path.join(REPO_ROOT, 'tmp', course, 'weights.json')).mtimeMs
+  } catch {
+    return 0
+  }
+}
+
+/** `pack_code_zip` 会打进 `code.zip` 的源文件（相对 `nn-training/`）：`.py` + `.jsonc`。 */
+const CODE_EXTS = ['.py', '.jsonc'] as const
+
+/** 打包器排除的非点目录（★ 与 `remote/hub_client.py::pack_code_zip` 的 `_exclude_dirs`
+ *  同表——`server-api-task-bundle` 套件读 python 源逐名对账，防两边漂开）。 */
+export const CODE_EXCLUDE_DIRS = ['tmp', 'weights', '__pycache__', 'tests'] as const
+
+/** 打包器排除的单件（同上对账）。 */
+export const CODE_EXCLUDE_FILES = ['rl-config.json'] as const
+
+/** 源码树里**最新**的一份 `code.zip` 源文件（`.py`/`.jsonc`）的 mtime（ms）；无文件 → 0。
+ *
+ *  为什么需要它（2026-10-04 用户口径）：「开课导出包之后，代码可能被改过、hub/trainer
+ *  也可能带着新代码重启过」——包里的 `code.zip` 是**导出那一刻**的代码快照，拿旧包去跑
+ *  云端就是跑旧代码。判据用「有没有源文件比包新」而不是比对 commit：`pack_code_zip`
+ *  明说「含**未提交修改**」，HEAD 相同不代表字节相同，而 mtime 对改一行也敏感。
+ *
+ *  扫描范围/排除项与 `pack_code_zip` 同步（见上面两个常量）：排除项故意只做**等价**不做
+ *  更严——多扫进来的文件只会造成「假过期 ⇒ 白重导一次」，漏扫才会造成「拿旧代码跑」（真正的
+ *  事故），所以宁可放过列表（点目录一律排除：`.venv*` / 各种缓存 / `.git`）。
+ */
+export function newestCodeMtimeMs(root: string = REPO_ROOT): number {
+  const base = path.join(root, 'nn-training')
+  let newest = 0
+  const walk = (dir: string): void => {
+    let entries
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+    for (const e of entries) {
+      const name = e.name
+      if (e.isDirectory()) {
+        if (name.startsWith('.') || (CODE_EXCLUDE_DIRS as readonly string[]).includes(name))
+          continue
+        walk(path.join(dir, name))
+        continue
+      }
+      if (!e.isFile()) continue
+      if ((CODE_EXCLUDE_FILES as readonly string[]).includes(name)) continue
+      if (!CODE_EXTS.some((x) => name.endsWith(x))) continue
+      try {
+        const mt = statSync(path.join(dir, name)).mtimeMs
+        if (mt > newest) newest = mt
+      } catch {
+        /* 读不到就跳过（下一轮还有机会；不阻断判定） */
+      }
+    }
+  }
+  walk(base)
+  return newest
+}
+
 /** 导出一次性进程的 argv（纯函数，便于测试）。 */
 export function taskBundleArgs(course: string): string[] {
   return [

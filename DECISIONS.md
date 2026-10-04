@@ -7399,3 +7399,37 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 - **门槛**：nn python gate 绿（**3606 pass/7 skip**；ruff+mypy 干净）。
 - **指针**：全文 `docs/nn/remote-transport.md` §62；同族前两次 §59（seize）/ §61（sympy）
   与 2026-10-03 的 ref 版（bundle 带 ref + 启动期种子）。
+
+## §2026-10-04-goalnn-pack-freshness-on-handoff（2026-10-04，抢占在训在线课必须重导包：
+权重/动量维度 + **代码**维度；hub 有包那条腿也要问控制台）
+
+- **背景（用户报障）**：「如果只在开课时生成离线包，然后手工转为在线模式，那么训练中途被
+  离线 worker 抢占后，这个课程在线训练的权重和 opt 不就全丢了吗？」——属实，两个放行口叠加：
+  ① 自动导包的规则表第 ⑥ 条「已有包 ⇒ 不导也不作废」（热切语义），② **有包**那条 claim 腿
+  （`note_claim` 翻 mode）**从不问控制台**。而离线腿的续跑锚点只认「回传 / 人工导入」的轮次
+  （`queue_resume.resume_sources`），**看不见本机在线轮** ⇒ 云机拿旧包 = 回到旧起点重跑，
+  在线训练的权重与动量白丢；包里的 `code.zip` 也是导出那一刻的快照 ⇒ 连代码都是旧的。
+- **决定**（判据 = 「包是否仍代表当前起点与当前代码」，全在控制台侧判）：
+  ① 规则表 ⑥ 拆成 ⑥/⑥'：包的 mtime **不早于**「活动权重（`tmp/<课>/weights.json`）mtime」
+  且**不早于**「`code.zip` 源文件最大 mtime」⇒ 复用（不导不废）；任一更旧 ⇒ **作废 + 重导**
+  （⑥'，与 2026-09-22「重启离线课要重打包」同一条）。
+  ② 代码新鲜度判据：`newestCodeMtimeMs()` 扫 `nn-training` 的 `.py`/`.jsonc`，排除
+  `tmp/weights/__pycache__/tests/` 与一切点目录（**与 `pack_code_zip` 同表**，跨语言逐名
+  对账用例钉住）；**不比对 commit**——`pack_code_zip` 明说「含未提交修改」，HEAD 相同不等于
+  字节相同。
+  ③ hub：**有包**的自动课 claim 成功也要请控制台核对新鲜度（`hub/offline._ask_console_freshness`，
+  与缺包触发共用同一套节流/上界账本）。控制台在**本次 HTTP 响应内**同步作废旧包 ⇒ 云机随后
+  取包 404、等新包（竞态在响应返回前关闭，不需要另设「翻牌时间闸」）。
+- **被否决**：(a) 扩展 `resume_anchor` 去扫本机在线轮——本机增量只有「活动权重 + 每轮
+  `ppo_ckpt_remote`」，没有 `row.json`（「同轮齐全」语义会被破坏），且**代码维度它救不了**：
+  包是唯一携带代码的通道；(b) 改 `import_bundle` 的起点落位（同 §62 的否决）；(c) 只在
+  「开课/重开课」重导（现状）——正是本 bug。
+- **落点**：`dashboard/src/server/bundles/export.ts`（`weightsMtimeMs` / `newestCodeMtimeMs`
+  + 排除表常量）· `dashboard/src/server/actions/course-mode.ts`（规则表 ⑥/⑥' + 两个调用点）·
+  `nn-training/hub/offline.py`（`_ask_console_freshness` + claim 成功回执 `handoff` 字段）·
+  回归：`dashboard/tests/course-mode-bundle.test.ts`（纯表 3 例 + 扫描/对账 2 例）·
+  `nn-training/tests/hub/test_auto_handoff.py`（有包 claim 问控制台 / 不可达降级；autouse 桩
+  防真打控制台）。
+- **门槛**：nn python gate 绿（**3608 pass/7 skip**）；dashboard `typecheck` +
+  **1317 pass/0 fail**。
+- **指针**：全文 `docs/nn/remote-transport.md` §63。

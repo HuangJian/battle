@@ -6,6 +6,45 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §63 抢占在训在线课必须重导包：判「包是否还代表当前起点与代码」（2026-10-04）
+
+**用户报障**：「如果只在开课时生成离线包，然后手工转为在线模式，那么训练中途被离线 worker
+抢占后，这个课程在线训练的权重和 opt 不就全丢了吗？」——**属实**，两个放行口叠加：
+
+① 自动导包的规则表第 ⑥ 条是「已有包 ⇒ 不导也不作废」（为「热切不是重开课」写的）；
+② **有包**那条 claim 腿（`note_claim` 翻 mode）**从不问控制台**——只有**缺包**那条腿
+（`_claim_without_pack`）才触发导包。
+
+而离线腿的续跑锚点只认「云机回传 / 人工导入」的轮次（`queue_resume.resume_sources`），
+**看不见本机在线轮** ⇒ 云机拿到旧包 = 回到**旧起点**重跑（在线的权重与 Adam 动量白丢），
+包里的 `code.zip` 还是**导出那一刻的代码**（开课后改过代码 / hub 带新代码重启过 ⇒ 云端跑旧代码）。
+
+**修法**（判据全在控制台：包是否仍代表当前起点与当前代码）：
+
+- **规则表 ⑥/⑥'**（`dashboard/src/server/actions/course-mode.ts`）：包的 mtime **不早于**
+  「活动权重 `tmp/<课>/weights.json` 的 mtime」**且不早于**「`code.zip` 源文件最大 mtime」
+  ⇒ 复用；任一更旧 ⇒ **作废 + 重导**（回执点名是哪个维度旧了）。
+- **代码新鲜度**（`bundles/export.ts::newestCodeMtimeMs`）：扫 `nn-training` 的 `.py`/`.jsonc`，
+  排除 `tmp/weights/__pycache__/tests/` 与一切点目录 —— **与 `remote/hub_client.py::pack_code_zip`
+  同表**（跨语言逐名对账用例钉住）。**不比对 commit**：打包器明说「含未提交修改」，HEAD 相同
+  不代表字节相同；mtime 对「改一行」也敏感。多扫只白重导一次，漏扫才会拿旧代码跑——所以
+  排除表故意只做等价、不更严。
+- **hub**（`hub/offline.py::_ask_console_freshness`）：**有包**的自动课 claim 成功也要请控制台
+  核对新鲜度（与缺包触发共用同一套节流/上界账本，claim 成功已把账本清零 ⇒ 每次新抢占问一次）。
+  控制台的作废是**同步**的（`renameSync` 在本次 HTTP 响应内完成）⇒ 云机随后取包 404、按设计
+  等新包——**竞态在响应返回前关闭**，不需要另设「翻牌时间闸」。
+
+**被否决**：(a) 让 `resume_anchor` 去扫本机在线轮——本机增量只有「活动权重 + 每轮
+`ppo_ckpt_remote`」，没有 `row.json`（会破坏「同轮齐全」语义），且**代码维度它救不了**：
+任务包是唯一携带代码的通道；(b) 改 `import_bundle` 起点落位（同 §62 否决）；(c) 维持「只在
+开课/重开课重导」——正是本 bug。
+
+**回归**：`dashboard/tests/course-mode-bundle.test.ts`（纯表 3 例：权重旧 / 代码旧 / 两个都旧；
+扫描与 python 打包器对账 2 例）· `tests/hub/test_auto_handoff.py`（有包 claim 问控制台 +
+不可达降级 + 非自动课不问；autouse 桩防测试真打开发机的控制台）。
+
+**门槛**：nn python gate 3608 pass/7 skip · dashboard `typecheck` + 1317 pass/0 fail。
+
 ## §62 自主段起点动量必须种子进 blob_cache：`opt` 离线件与「只声明可兑现的 sha」（2026-10-04）
 
 **症状**（Colab TPU，离线盘抢占在线课 x20-adv-acc，计划 it195→it250）：rollout 每轮正常

@@ -34,7 +34,9 @@ import {
   TASK_BUNDLE_BUSY_KEY,
   exportGuard,
   launchTaskBundleExport,
+  newestCodeMtimeMs,
   taskBundleInfo,
+  weightsMtimeMs,
   type TaskBundleInfo,
 } from '../bundles'
 import { loadConsoleState, saveConsoleState } from './console-state'
@@ -159,6 +161,10 @@ export interface AutoBundleFacts {
   guardReason: string | null
   /** 盘上已有包的形状（`taskBundleInfo`）。 */
   pack: TaskBundleInfo
+  /** 活动权重（`tmp/<课程>/weights.json`）的 mtime（ms，0 = 读不到）。 */
+  weightsMtimeMs: number
+  /** `code.zip` 源文件的最新 mtime（ms；`newestCodeMtimeMs()`，0 = 读不到）。 */
+  codeMtimeMs: number
 }
 
 /** 自动导出的结果：`started` 给人/测试断言，`note` 是人读一行（空串 = 没什么可说）。 */
@@ -176,9 +182,14 @@ export interface AutoBundleResult {
  *    ③ 逃生阀 ⇒ 不导；
  *    ④ 导出忙 ⇒ 不导（已有一次在跑，成果一样会被取到）；
  *    ⑤ 缺起点权重（`exportGuard`）⇒ 不导，**原样转述原因** + 指路；
- *    ⑥ 盘上已有包 ⇒ **不导也不作废**（热切不是重开课；包作废是 `launchTaskBundleExport`
- *       的内建行为（`export.ts` 的 `invalidateTaskBundle`），一旦调用就把旧包挪进
- *       `stale-packs/` ⇒ 云机在导出窗口里探到 404）；
+ *    ⑥ 盘上已有包 **且不比权重/源码旧** ⇒ **不导也不作废**（热切不是重开课；包作废是
+ *       `launchTaskBundleExport` 的内建行为（`export.ts` 的 `invalidateTaskBundle`），一旦
+ *       调用就把旧包挪进 `stale-packs/` ⇒ 云机在导出窗口里探到 404）；
+ *    ⑥' 盘上已有包**但比活动权重或源码旧** ⇒ **作废 + 重导**（2026-10-04 补，两个维度）：
+ *       · 权重更新（训练已推进）——离线腿的续跑锚点只认回传/导入的轮次、看不见本机在线轮
+ *         ⇒ 拿旧包会把云机拖回旧起点（在线训练的权重与动量白丢）；
+ *       · 代码更新（开课导出包之后改过代码 / 带新代码重启过 hub）——包里是**导出那一刻的
+ *         代码快照**（`code.zip`），旧包 = 云端跑旧代码；
  *    ⑦ 其余（缺包且可导）⇒ 导。
  *
  *  失败语义：**任何**结局都不改 `setCourseMode` 的 `ok`（模式切换本身已经成功了）。
@@ -194,11 +205,25 @@ export function autoBundleDecision(f: AutoBundleFacts): AutoBundleResult {
   if (f.guardReason) {
     return skip(`${f.guardReason} —— 未自动导出；先跑至少一轮（或导入一份权重）再切离线/重导`)
   }
-  if (f.pack.exists) {
+  if (f.pack.exists && f.pack.mtimeMs >= Math.max(f.weightsMtimeMs, f.codeMtimeMs)) {
     return skip(
-      `已有任务包 ${f.pack.path}（${f.pack.bytes} bytes）—— 云机可直接取；` +
-        '要重打请点「导出任务包」（那会先把旧包作废）',
+      `已有任务包 ${f.pack.path}（${f.pack.bytes} bytes，不早于当前权重与源码）——` +
+        '云机可直接取；要重打请点「导出任务包」（那会先把旧包作废）',
     )
+  }
+  if (f.pack.exists) {
+    const sides = [
+      f.weightsMtimeMs > f.pack.mtimeMs ? '训练已推进（权重/动量比包新）' : '',
+      f.codeMtimeMs > f.pack.mtimeMs ? '代码在导出之后改过（包里的 code.zip 是旧的）' : '',
+    ]
+      .filter(Boolean)
+      .join('；')
+    return {
+      started: true,
+      note:
+        `盘上任务包已过期（${sides}）—— 旧包已作废、重导中：` +
+        `云机在导出窗口会看到 404 并等新包（取到的一定是当前进度 + 最新代码）`,
+    }
   }
   return {
     started: true,
@@ -255,6 +280,9 @@ export async function setCourseMode(
     busy: busy.has(TASK_BUNDLE_BUSY_KEY),
     guardReason: exportGuard(c),
     pack: taskBundleInfo(c),
+    // 包比活动权重/源码新 = 仍代表当前起点与当前代码；任一更旧 ⇒ 规则表 ⑥' 会作废重导。
+    weightsMtimeMs: weightsMtimeMs(c),
+    codeMtimeMs: newestCodeMtimeMs(),
   })
   if (bundle.started) {
     const launched = launchTaskBundleExport(c)
@@ -404,7 +432,8 @@ export async function unsetCourseMode(course: string): Promise<ActionResult> {
 
 /** **自动离线交接**：hub → 控制台的反向调用（2026-10-03，plan/auto-offline-handoff §3.4/T3）。
  *
- *  触发者不是人：离线盘在 hub 上 claim 了一门**无包**的在训课，hub 翻完 mode 后调这里。
+ *  触发者不是人：离线盘在 hub 上 claim 了一门在训课（**无包** ⇒ hub 翻完 mode 调这里；
+ *  2026-10-04 起 **有包但过期**也会被 hub 请过来判一次——见规则表 ⑥'）。
  *  控制台只做它唯一能写的那一件事——`courses.<课>.rollout_src=run`（本机停采）——并导包。
  *
  *  与 `setCourseMode` 的三点差异（刻意，逐条对应 plan 的二轮 P0）：
@@ -444,6 +473,11 @@ export async function autoOfflineHandoff(course: string): Promise<ActionResult> 
     busy: busy.has(TASK_BUNDLE_BUSY_KEY),
     guardReason,
     pack: taskBundleInfo(c),
+    // ★ 2026-10-04：这条路的课**正在（或刚在）训练**——盘上的旧包会把云机拖回旧起点
+    //   （离线腿的续跑锚点看不见本机在线轮）；代码也可能在导出之后改过 ⇒ 规则表 ⑥'
+    //   按「权重/源码谁比包新」判重导。
+    weightsMtimeMs: weightsMtimeMs(c),
+    codeMtimeMs: newestCodeMtimeMs(),
   })
   const head = `${c} 已自动切离线（rollout_src=run：本机不跑这门课）`
   if (bundle.started) {

@@ -466,12 +466,23 @@ class OfflineRoutes:
                 return
             # 包真的在手里的这一刻，把「缺包重试」账本清掉（下次再缺从零计数）。
             reset_auto_handoff_triggers(course)
+            # ★ 2026-10-04（用户报障「抢占在训在线课之后，在线训练的权重和 opt 全丢了？」）：
+            #   **有包**的自动课在 claim 成功时也要请控制台判一次新鲜度 —— 包是「导出那一刻的
+            #   起点（代码+权重+动量）」的快照，而在训课的权重**每轮都在动**；离线腿的续跑
+            #   锚点只认回传/导入的轮次（`queue_resume.resume_sources`），**看不见本机在线轮**
+            #   ⇒ 拿旧包 = 把云机拖回旧起点（白丢在线进度）。控制台按「包比活动权重新?」决定
+            #   跳过还是作废+重导（规则表 ⑥'），且作废是**同步**的（renameSync 在本次 HTTP
+            #   响应内完成）⇒ 云机随后取包时旧包已不在（404 等新包）——竞态在响应返回前关闭。
+            handoff_note = self._ask_console_freshness(course)
             print(
                 f"[{time.strftime('%H:%M:%S')}] [hub-server] offline-claim {course} "
                 f"worker={lease['worker_id']} takeover={int(takeover)}",
                 flush=True,
             )
-            self._json({"lease": lease}, 200)
+            payload: dict = {"lease": lease}
+            if handoff_note:
+                payload["handoff"] = handoff_note
+            self._json(payload, 200)
             return
         token = _q("lease")
         if action == "heartbeat":
@@ -507,6 +518,33 @@ class OfflineRoutes:
             )
             return
         self._json({"released": True, "course": course}, 200)
+
+    def _ask_console_freshness(self, course: str) -> str:
+        """自动课 claim 成功后：请控制台核对任务包新鲜度；返回一行回执（空 = 不该问/没问到）。
+
+        与 `_claim_without_pack` 共用同一套触发账本（`auto_handoff_decision` 的节流 + 上界）：
+        调用点刚 `reset_auto_handoff_triggers`（claim 成功清零）⇒ 每次新 claim 从零计数，
+        云机在导包窗口里的轮询不会把控制台打爆。控制台不可达/不接受 ⇒ 只在回执里说清，
+        半状态（包偏旧）由停滞告警与人工导出兜住。
+        """
+        if not self.hub.auto_eligible(course):
+            return ""
+        decision = auto_handoff_decision(course)
+        if decision == "throttled":
+            return "控制台核对任务包新鲜度：本窗口已触发过（节流中，完成后云机会取到新包）"
+        if decision != "trigger":
+            return ""
+        note_auto_handoff_trigger(course)
+        ok, why2 = trigger_auto_handoff(course)
+        if ok:
+            return (
+                "已请控制台核对任务包新鲜度（包比权重或源码旧会自动作废重导；"
+                "作废在本次响应返回前已完成 —— 随后取包拿到的一定是当前进度 + 最新代码）"
+            )
+        return (
+            f"想请控制台核对任务包新鲜度，但控制台不可达/不接受（{why2}）——"
+            "盘上的包可能偏旧，请到控制台点一次「导出任务包」"
+        )
 
     def _claim_without_pack(self, course: str, pack: Path) -> None:
         """claim 遇缺包：自动课 ⇒ 翻 mode + 请控制台导包（409 指路）；其余 ⇒ 旧 404。

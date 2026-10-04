@@ -15,7 +15,15 @@
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from 'fs'
 import os from 'os'
 import path from 'path'
 import { REPO_ROOT } from '../src/core/paths'
@@ -33,6 +41,9 @@ writeFileSync(
 import { saveConsoleState } from '../src/server/actions/console-state'
 import { autoBundleDecision, setCourseMode } from '../src/server/actions/course-mode'
 import {
+  CODE_EXCLUDE_DIRS,
+  CODE_EXCLUDE_FILES,
+  newestCodeMtimeMs,
   stalePackDir,
   taskBundleFileName,
   taskBundleInfo,
@@ -43,6 +54,10 @@ import {
 const WITH_PACK = '__cmode-with-pack__'
 const NO_WEIGHTS = '__cmode-no-weights__'
 const FAKE_COURSES = [WITH_PACK, NO_WEIGHTS]
+
+/** 包 mtime 的两个人造档位（**秒**，`utimesSync` 的单位）：未来 = 刚导出；过去 = 过期。 */
+const future = (Date.now() + 60_000) / 1000
+const past = (Date.now() - 3_600_000) / 1000
 
 const livePack = (course: string): string => taskBundlePath(course)
 const tmpCourseDir = (course: string): string => path.join(REPO_ROOT, 'tmp', course)
@@ -76,13 +91,26 @@ beforeEach(() => {
   for (const c of FAKE_COURSES) rmSync(tmpCourseDir(c), { recursive: true, force: true })
 })
 
-/** 造一门「盘上已经有包」的课（顺带给出起点权重，让 `exportGuard` 也通过）。 */
+/** 造一门「盘上已经有包」的课（顺带给出起点权重，让 `exportGuard` 也通过）。
+ *
+ *  ★ 2026-10-04 起包要**不早于权重与源码**才算「可复用」——测试机上的源码刚被动过
+ *  （mtime 必新于这里现造的临时文件），所以把包的 mtime 显式拨到「60s 之后」= 刚导出完
+ *  的形态；要测「过期」请用 `seedStalePack`。
+ */
 function seedPack(course: string, opts: { weights?: boolean } = {}): string {
   const dir = tmpCourseDir(course)
   mkdirSync(dir, { recursive: true })
   if (opts.weights !== false) writeFileSync(path.join(dir, 'weights.json'), '{}', 'utf-8')
   const p = livePack(course)
   writeFileSync(p, 'FAKE-PACK-BYTES', 'utf-8')
+  utimesSync(p, future, future)
+  return p
+}
+
+/** 把包拨回「过去」= **过期包**（权重/源码都比它新）。 */
+function seedStalePack(course: string): string {
+  const p = seedPack(course)
+  utimesSync(p, past, past)
   return p
 }
 
@@ -93,6 +121,8 @@ const facts = (over: Partial<Parameters<typeof autoBundleDecision>[0]> = {}) => 
   busy: false,
   guardReason: null,
   pack: taskBundleInfo('__cmode-never-exported__'),
+  weightsMtimeMs: 0,
+  codeMtimeMs: 0,
   ...over,
 })
 
@@ -126,7 +156,7 @@ describe('autoBundleDecision（纯函数：规则表逐条）', () => {
     expect(r.note).toContain('先跑至少一轮')
   })
 
-  it('盘上已有包 ⇒ 不导也不作废（热切不是重开课），回执给路径与「要重打」的指路', () => {
+  it('盘上已有包（不早于权重与源码）⇒ 不导也不作废（热切不是重开课），回执给路径与「要重打」的指路', () => {
     const p = seedPack(WITH_PACK)
     try {
       const r = autoBundleDecision(facts({ pack: taskBundleInfo(WITH_PACK) }))
@@ -134,6 +164,58 @@ describe('autoBundleDecision（纯函数：规则表逐条）', () => {
       expect(r.note).toContain('已有任务包')
       expect(r.note).toContain(p)
       expect(r.note).toContain('导出任务包')
+    } finally {
+      rmSync(tmpCourseDir(WITH_PACK), { recursive: true, force: true })
+    }
+  })
+
+  it('包比权重旧（训练已推进）⇒ 作废 + 重导（★ 2026-10-04 用户口径）', () => {
+    const p = seedStalePack(WITH_PACK)
+    try {
+      const info = taskBundleInfo(WITH_PACK)
+      const r = autoBundleDecision(
+        facts({ pack: info, weightsMtimeMs: info.mtimeMs + 1000, codeMtimeMs: 0 }),
+      )
+      expect(r.started).toBe(true)
+      expect(r.note).toContain('已过期')
+      expect(r.note).toContain('训练已推进')
+      expect(r.note).toContain('404')
+      expect(existsSync(p)).toBe(true) // 纯函数只做决定；作废是 launchTaskBundleExport 的事
+    } finally {
+      rmSync(tmpCourseDir(WITH_PACK), { recursive: true, force: true })
+    }
+  })
+
+  it('包比源码旧（导出后改过代码 / hub 带新代码重启过）⇒ 作废 + 重导', () => {
+    const p = seedStalePack(WITH_PACK)
+    try {
+      const info = taskBundleInfo(WITH_PACK)
+      const r = autoBundleDecision(
+        facts({ pack: info, weightsMtimeMs: 0, codeMtimeMs: info.mtimeMs + 1000 }),
+      )
+      expect(r.started).toBe(true)
+      expect(r.note).toContain('代码在导出之后改过')
+      expect(r.note).toContain('code.zip')
+      expect(existsSync(p)).toBe(true)
+    } finally {
+      rmSync(tmpCourseDir(WITH_PACK), { recursive: true, force: true })
+    }
+  })
+
+  it('两个维度都旧 ⇒ 一行里两条都点名（排障时知道等的是什么）', () => {
+    seedStalePack(WITH_PACK)
+    try {
+      const info = taskBundleInfo(WITH_PACK)
+      const r = autoBundleDecision(
+        facts({
+          pack: info,
+          weightsMtimeMs: info.mtimeMs + 1000,
+          codeMtimeMs: info.mtimeMs + 2000,
+        }),
+      )
+      expect(r.started).toBe(true)
+      expect(r.note).toContain('训练已推进')
+      expect(r.note).toContain('代码在导出之后改过')
     } finally {
       rmSync(tmpCourseDir(WITH_PACK), { recursive: true, force: true })
     }
@@ -218,5 +300,24 @@ describe('假盘用的路径约定（防止约定漂移把上面几条悄悄变�
   it('包名 = task-<课>.zip，落点在 tmp/<课>/ 之下', () => {
     expect(taskBundleFileName(WITH_PACK)).toBe(`task-${WITH_PACK}.zip`)
     expect(livePack(WITH_PACK).endsWith(path.join(WITH_PACK, `task-${WITH_PACK}.zip`))).toBe(true)
+  })
+})
+
+/** ★ 2026-10-04：包是否过期要看**代码**——判据与 `pack_code_zip` 的打包范围同口径。 */
+describe('代码新鲜度扫描（与 python 打包器逐名对账）', () => {
+  it('newestCodeMtimeMs() 在真仓里读得到一个正数（扫描没有空转）', () => {
+    expect(newestCodeMtimeMs()).toBeGreaterThan(0)
+  })
+
+  it('排除表/后缀与 `pack_code_zip` 同步（读 python 源逐名对账，防两边漂开）', () => {
+    const py = readFileSync(path.join(REPO_ROOT, 'nn-training/remote/hub_client.py'), 'utf-8')
+    const i = py.indexOf('def pack_code_zip')
+    expect(i).toBeGreaterThan(0)
+    const body = py.slice(i, i + 3000) // 打包器的规则区（含「包含/排除」注释与名单）
+    for (const name of [...CODE_EXCLUDE_DIRS, ...CODE_EXCLUDE_FILES]) {
+      expect(body).toContain(`"${name}"`)
+    }
+    expect(body).toContain('.py')
+    expect(body).toContain('.jsonc')
   })
 })
