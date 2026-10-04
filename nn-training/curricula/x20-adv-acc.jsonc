@@ -1,0 +1,129 @@
+// 课程 x20-adv-acc —— **加压腿：wAcc 15.3→23.0（+50%），起点 q90，同起点三腿比收敛速度**
+//
+// 状态：**收官（2026-10-04；it250 跑满，判决见本文件尾 verdict）**。
+//   立项 → 用户 2026-10-03 直接指定：plus 停腿（it167），以 q90 为共同起点开三条加压腿
+//   （acc/hurt/encl 各一轴），比不同权重下的收敛速度。本腿负责 acc 轴。
+//   基准 → `nn-training/curricula/x20-advanced-plus.jsonc`（plus 价格体系；本腿 11 参数中
+//   10 个逐字同，唯一差 wAcc，另有三处三腿共用改动见 §奖励结构）。
+//   基线 → q90 同 160 对（414000 段）：kills 11.169 · acc 0.5895（人类 0.7905，gap 0.201）·
+//   Edhit 3.7044（人类 4.3995，gap 0.695）· hurtR 0.06062 · enclR 0.25551 ·
+//   cornerR 0.08616 ⇒ killEV = 3.0×11.169 = **33.51**。
+//
+// ── 奖励结构（11 参数；三腿共用口径，本腿数字见 §唯一变量）────────────────────
+//   终点组：wKill 3.0（numeraire；EV 33.51）· wPickup 3.0（EV +11.16；拾取 gap 2× 的价值洼地）。
+//   开火组（经历两次整形）：wHit*aimHits（原 enemyHits；wHit=0.6 不变；标准 rung 无交棒弹
+//     逐局相等——等 EV 平替，差信用时点命中拍→开火拍，回写老本行）· wMiss*aimMisses
+//     （原 wShot*playerShots；wMiss=0.158，等 EV 平替 0.06×45.69/17.36；只罚脱靶不罚命中；
+//     与 E1“miss 不入公式”不冲突——E1 禁三遍定价，此处 miss 系替换非并列）·
+//     wAcc*aimHits/(playerShots+1)（命中率形）· wDist*aimHitDistSum/(aimHits+1)（均距形）。
+//     q90 边际：命中 +0.81 / 脱靶 −0.45（61% 命中率下开火 +EV，无 gun-shy；开局盯 shots+kills）。
+//   承伤组：wDmg 0.03（总量 severity 保留：hurt≈命中数×30 无轻重概念；wDmg×2 有 −2.8pp 实付
+//     代价，不动）· wHurt*hurtWeight/(ticks+1)（本腿 77.5，hold）。
+//   暴露组（速率形）：wEncl（本腿 8.6，hold）· wCorner 25.0（hold；gap 仅 1.5× 不加价）。
+//   已删：wShot（被 wMiss 替换）· wExplore（逛街奖删除：x4/x5 带路使命完成，拾取已有 wPickup；
+//     与蹲角税单向冲突 100/tick vs 0.2/格；EV≈20/局全堆开局；跑中的腿一律不动 §15.5；
+//     拾取哨兵：新腿拾取/局掉超 20% 即复核）。
+//   q90 局均 Φ = 57.24，其中新 6 项净 +5.17（+15% killEV，正压追 acc，无冲击）。
+//
+// ── 本腿唯一变量 ─────────────────────────────────────────────────────────
+//   wAcc = **23.0**（plus 的 15.3 ×1.5；gap-value f≈13.8%；acc gap 最宽且训练中退化过）。
+//   （被背刺率用户已裁决用被包围税近似，不加观测列；corner/dist 本腿不碰。）
+//
+// ── 收敛速度 yardstick（三腿共用，预注册）───────────────────────────────────
+//   机制首达线（日常段 eval）：本腿 **acc ≥ 0.69**（human–q90 gap 对半）首达的 it；
+//   另两腿同式：hurt 腿 hurtR ≤ 0.034，encl 腿 enclR ≤ 0.194。
+//   终判（三腿共用）：kills/局 + outcome 通关率 @414000 段 800 局 vs q90（29.25%/10.887）。
+//   每腿必报另两轴读数（防按下葫芦浮起瓢；跨轴退化 >20% 即记，不进判据）。
+//   无配对训练、无中途 ABORT；熔断只留 kl 连续 3 轮 ≥0.075 记录+人工盯盘。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 q90 warm start + kickstart 锚（ref=true, init=0.1），E 系列分支同规；
+//   预算 250 轮；起始 rollout 种子流三腿相同：paired_rotate_seed=20261005（E1/E2 同法；
+//   与 trunk 系缺席此键不同）；开课时三腿须用同一个 runSeed（控制台侧保证）。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh）。
+{
+  "version": 5,
+  "name": "x20-adv-acc",
+  "mode": "per-tick",
+  // 环境：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：plus 逐字，唯一差 = wAcc 15.3 → 23.0；另删逛街奖（见下）──────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 23.0,
+      "wDist": 0.738,
+      "wHurt": 77.5,
+      "wEncl": 8.6,
+      "wCorner": 25.0
+    },
+    // dense-only（与 B 一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：plus 最优 q90（414000 段 800 局：过关 29.25% + 杀敌 10.887）─────────
+  "bc": "nn-training/weights/x20-advanced-plus/x20-advanced-plus.it90.20261003-121636.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 预算：250 轮（q90+250；收敛速度比较不需要 400 轮）───────────────────────
+  "iters": 250,
+  "max_hours": 24,
+  "workers": 8,
+
+  // ── 位移包：除 epochs 外与 plus 逐字同（epochs 8→4，用户指定；与跑中三腿 4 一致）──
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：与 plus 逐字同 ───────────────────────────────────────────────────
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 三腿同一起始 rollout 种子流：paired_rotate_seed 三腿同值（与 trunk/plus/h2 缺席此键不同；
+  // E1/E2 同法，同种子流是公平比收敛速度的前提）。值 20261005 与既往全历史不同。
+  // 开课时三腿须用同一个 runSeed（控制台侧保证，否则种子流仍不同）。
+  "paired_rotate_seed": 20261005,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/x20-adv-acc/weights.json",
+  "traj": "tmp/x20-adv-acc",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-adv-acc",
+  "backup_prefix": "x20-adv-acc",
+
+  // ── 评估：与 plus 逐字同（首达线看日常点；终判另跑 414000，见头注）───────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── verdict（2026-10-04 收官；it250 跑满，无 halt；414000 段 800 局：acc80/150/250；
+//      证据 `tmp/adv3-414k-acc.jsonl(.run/)` + `tmp/adv3-414k-acc250.jsonl(.run/)`）──
+//   终判（vs q90 29.25%/10.887）：acc80 **30.38%/11.104（本腿最优）**、acc150 27.50%/10.408、
+//   acc250 20.87%/9.373（末段崩盘，−8pp vs q90）。
+//   机制：414000 上 acc 0.648（it150）/0.672（it250），q90 基线 ~0.59 → 方向对但未达首达线
+//   0.69（线定得过高：日常段读数天然比 414000 高 ~0.04，属 yardstick 设计失误，记档不重判）。
+//   跨轴：hurtR/enclR 无 >20% 退化。
+//   **判决：成功（峰值超 q90），但 250 轮过长——峰在 it80，早停应在 it100 附近。加冕 acc80。**

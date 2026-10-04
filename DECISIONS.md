@@ -6975,6 +6975,50 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
 
 **指针**：全文 `docs/nn/experiments.md` §77。
 
+## §2026-10-04-goalnn-x20adv2-design（2026-10-04，下一阶段三腿：merge-max/dist-lastmile/acc-push，从 hu150 同起跑）
+
+- **背景**：三最优（acc80/hu150/en225）vs 人类同 160 对全指标对照。剩余 gap：
+  kills 17.5 vs ~11.5 · pass 100% vs ~30% · acc 0.79 vs 0.62–0.65 · Edhit 4.40 vs
+  3.66–3.85 · hurtW 3× · enclR ~2× · cornerR ~1（en225 已追平）· dmgFirst600 4–5× ·
+  pickup 1.8×。无信号项（对消/brick/enclMax/≥1敌/停轴）与禁区项（h5a/max120/lane/首杀/停）
+  维持不动。
+- **决定**：三腿同起点 hu150（32.50%/11.370，全场冠军）+ kickstart 锚 + paired 20261006 +
+  预算 150 轮 + 早停：① **merge-max**（wAcc 23 + wHurt 110 + wEncl 25，三 escalations
+  并存；三税合计 ~31% killEV，配胜率熔断连续 2 点 < hu150−3pp 即人工停）；② **dist**
+  （wDist 0.738→1.5，f≈3%，测 last-mile）；③ **acc-push**（wAcc 15.3→30.0，f≈14%，
+  inflow 52% 已记档 level-vs-边际）。其余项三腿全 hold（wCorner 25 / wMiss 0.158 /
+  wHit*aimHits / 底包 6 项）。
+- **被否决**：① corner 再加压（已追平，为收尾付高价）；② dmgFirst600/max120/threat/首杀/
+  停（各有坟）；③ 绝对机制首达线（前轮教训：改终判 + 方向诊断 + ~it100 早停）。
+- **落点**：`nn-training/curricula/x20-adv2-{max,dist,acc}.jsonc`（validate 零错误）·
+  `nn-training/rl-config.json`（三项 rollout_src local）· 实验档 §80。
+
+**指针**：全文 `docs/nn/experiments.md` §80。
+
+## §2026-10-04-goalnn-x20adv-3legs-verdict（2026-10-04，三加压腿收官：峰全超 q90，250 轮过长，首达线设计失误）
+
+- **背景**：三腿 it250 跑满（PPO 健康，无 halt）。414000 段 800 局终判（同 seed vs q90
+  29.25%/10.887）：acc80 30.38/11.104、hu150 32.50/11.370、en225 30.88/11.248；
+  末段 acc250 20.87/9.373、hu250 25.50/10.592、en250 23.50/10.021（全 decay）。
+- **决定（终判）**：三腿成功，加冕 **acc80 / hu150（全场最优） / en225**。
+  收敛速度排名：acc 最快（it80见顶）> hurt 最高（it150）> encl 最慢（it225）。
+  250 轮过长——峰全在 it80–225，尾巴 25–100 轮白烧（acc250 甚至崩盘 −8pp）。
+- **yardstick 自罚**：三条首达线（acc≥0.69 / hurtR≤0.034 / enclR≤0.194）414000 上一条没到——
+  线按 414000 gap 对半定得过高，且日常读数天然比 414000 高（acc +0.04），属设计失误；
+  记档，不重判（机制方向全对：acc 0.648、hurtR −11%、enclR −12%）。
+- **落点**：三课程文件尾 verdict · 实验档 `docs/nn/experiments.md` §79。
+
+**指针**：全文 `docs/nn/experiments.md` §79 · 证据 `tmp/adv3-414k-{acc,acc250,hurt,encl}.jsonl(.run/)`。
+
+## §2026-10-03-goalnn-x20adv-encl-maxtax（2026-10-03，encl 腿顶格 25 + 胜率熔断）
+
+- **背景**：人类语料检验显示 encl 加压轴只出 1/6 的力（绝对 EV 太小，梯度无感）；
+  用户拍板顶格干（“躲着慢慢杀，总比赶着送死好”）。
+- **决定**：`x20-adv-encl` wEncl 13.0 → **25.0**（f≈19%，税 EV 6.39/局，踩 20% 上限线；
+  人类−q90 税差 ≈ 4.8/局）。配套硬熔断：日常胜率相对 q90 基线连续 2 点 < −3pp 即
+  人工停腿（E3a 曾打出 −7.8pp，本腿税更重只紧不松；控制台人工执行）。
+- **落点**：课程头注已同步（validate 零错误）。
+
 **指针**：全文 `docs/nn/experiments.md` §76。
 
 ## §2026-10-03-goalnn-x20adv-plus-oldparams（2026-10-03，plus 旧参数复核：按 tick 率剥离 horizon，只动 wShot）

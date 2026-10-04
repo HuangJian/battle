@@ -1,0 +1,113 @@
+// 课程 x20-adv2-acc —— **命中率再加压腿：wAcc 15.3→30.0，其余 plus-final 价，起点 hu150**
+//
+// 状态：**草稿（2026-10-04 冻结；未开课）**。开课 = **人在控制台点**（agent 不开训）。
+//   立项 → 用户 2026-10-04 直接指定：三最优 vs 人类全指标对照后，设计下一阶段并行课程。
+//   本腿测命中率硬骨头：acc gap 还剩 0.17（0.79 vs 0.62），acc 腿只推到 0.65 就停了，
+//   且训练中 acc 曾被 dist 抢戏倒退——单轴再加压，看 acc 天花板在哪。
+//   基准 → plus-final 价格（wHurt 77.5 / wEncl 8.6 / wDist 0.738 / 其余见 §奖励结构）；
+//   本腿 11 参数中 10 个逐字同，唯一差 wAcc。
+//   基线 → hu150 同 160 对：acc 0.6179（人类 0.7905，gap 0.1695）· kills 11.869 ⇒
+//   killEV = 3.0×11.869 = **35.607**。
+//
+// ── 奖励结构（11 参数；f 以 killEV=35.607 计）─────────────────────────────────
+//   终点组：wKill 3.0（numeraire；EV 35.61）· wPickup 3.0（EV +11.16）。
+//   开火组：wHit*aimHits（wHit=0.6；等 EV，差信用时点）· wMiss*aimMisses（wMiss=0.158；
+//     只罚脱靶）· wAcc*aimHits/(playerShots+1)（本腿 **30.0**：plus-final 15.3 的 ~2×；
+//     f = 30×0.1695/35.607 = 14.3%；inflow 30×0.618 = 18.5/局 = 52%，偏大已记档——
+//     level 进 Φ 被 normalize_ret 吸收，起作用的是边际：1pp acc ≈ 0.3 vs kill 3.0，
+//     即 10pp accuracy ≈ 1 kill，边际 sane）· wDist*aimHitDistSum/(aimHits+1)（0.738，hold）。
+//     q90 系边际参考：命中 +0.7 / 脱靶 −0.3（开火 +EV，无 gun-shy；本腿命中边际更高）。
+//   承伤组：wDmg 0.03（hold）· wHurt 77.5（hold；本腿不测 hurt）。
+//   暴露组：wEncl 8.6（hold）· wCorner 25.0（hold；已追平人类，不加价）。
+//   已删：wShot（被 wMiss 替换）· wExplore（逛街奖删除；跑中的腿一律不动 §15.5；拾取哨兵 20%）。
+//
+// ── 本腿唯一变量 ─────────────────────────────────────────────────────────
+//   wAcc = **30.0**（acc 腿 23.0 的 ~1.3×，plus-final 15.3 的 ~2×；测 acc 天花板。
+//   若 acc 继续收敛 ⇒ 命中率还有油；若 acc 不动而 kills/pass 动 ⇒ acc 项到顶，维持）。
+//
+// ── yardstick（吸取首达线教训：无绝对机制线，只终判+方向诊断+人工盯盘）────────────
+//   终判：kills/局 + outcome 通关率 @414000 段 800 局 vs hu150（32.50%/11.370）。
+//   方向诊断：acc/Edhit/hurtR/enclR @终判 vs hu150 同段；另必报开局诊断：
+//   dmgFirst600 + firstKillTick（只观测不定价：h5a 开局窗坟不挖；若开局仍冒进，下一轮再议专项）。
+//   人工盯盘（用户指定不要早停）：日常 + 414000 由人看，不设自动 spot 规则。
+//   无配对训练；熔断只留 kl≥0.075×3 轮记录。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 hu150 warm start + kickstart 锚（ref=true, init=0.1），E 系列分支同规；
+//   预算 250 轮（用户撤回短腿）；起始 rollout 种子流三腿相同：paired_rotate_seed=20261006（与既往全历史不同）；
+//   开课时三腿须用同一个 runSeed（控制台侧保证）。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh）。
+{
+  "version": 5,
+  "name": "x20-adv2-acc",
+  "mode": "per-tick",
+  // 环境：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：plus-final 价，唯一差 = wAcc 15.3 → 30.0 ────────────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 30.0,
+      "wDist": 0.738,
+      "wHurt": 77.5,
+      "wEncl": 8.6,
+      "wCorner": 25.0
+    },
+    // dense-only（与 B 一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：hurt 腿最优 hu150（414000 段 800 局：过关 32.50% + 杀敌 11.370，全场冠军）──
+  "bc": "nn-training/weights/x20-adv-hurt/x20-adv-hurt.it150.20261004-060616.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 预算：250 轮（用户指定：短腿 doctrine 撤回）────────────────────────────────────────────────
+  "iters": 250,
+  "max_hours": 16,
+  "workers": 8,
+
+  // ── 位移包：与 plus 系逐字同（epochs 4）───────────────────────────────────────
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：mb 对齐（48 × mb(1024)）；三腿逐字相同 ───────────────────────────
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  "paired_rotate_seed": 20261006,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/x20-adv2-acc/weights.json",
+  "traj": "tmp/x20-adv2-acc",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-adv2-acc",
+  "backup_prefix": "x20-adv2-acc",
+
+  // ── 评估：日常 200 局/点；终判另跑 414000，见 yardstick ────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
