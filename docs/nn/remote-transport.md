@@ -6,6 +6,36 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §64 云机续领「自己的租约」：清单 claimable 不认自己，把自己锁到 900s TTL（2026-10-04）
+
+**用户追问**（Kaggle 现场）：云机反复「清单 3 条 ⇒ 队列为空」取不到 job，重跑 cell 才取到；
+「colab 我已停机，也做过离线切在线、停课重开等操作，为什么还持有租约？？？ 还有另外两个
+在线课程，都没有离线 worker 抢占过，为什么也拿不到？」——两个机制 + 一个真缺陷：
+
+- **租约的生命周期**：`_leases` 是 hub 内存态（`queue_offline.py`），只在 ①显式 `release`、
+  ②**900s TTL 惰性过期**、③hub 重启 时消失。**切模式、停课都不动它**——Colab「停机」
+  若没走正常退出（最后一段没跑到 release），租约就挂到 TTL；01:05 落在窗口内、01:13 过期
+  即恢复，与现场时间线吻合。
+- **一拖一 busy 闸的连坐**：`_busy_locked(course)` 看「**别的**课有没有活租约（或导包窗口）」
+  ⇒ 只要 x20-adv-acc 的 Colab 租约还活着，另两门 auto 课（encl/hurt）的 `claimable`
+  一律 False（拒因文案 `busy: x20-adv-acc 正在 <worker> 上跑`）——这就是「没人抢过也拿不到」。
+- **真缺陷（本次修）**：hub 早就为「同一 worker_id 回来」备了 `lease_verdict == "mine"`
+  续领档（评审 G1 的原始动机：Kaggle 十几分钟的会话白等 900s 等于整段废掉），云机侧也有
+  持久化 `.worker-id`——但**清单行的 `claimable` 把任何持有者（包括自己）一律排除**
+  （`auto_claimable` 的 `holder_present` 判据），客户端从不去试 ⇒ 自己把自己锁到 TTL。
+
+**修法**（`remote/offline_boot.py`）：
+
+- `resolve_courses(..., worker="")`：没有可领的课、而某几行 `holder.worker_id == worker`
+  （且非 seize、过得掉 served/skip 过滤）⇒ 照领（hub 判 `mine` 直接续上）；
+- `_blocked_note` 追加剩余 TTL：`持有 <worker>（Ns 后过期）`——「还要等多久」直接在云机日志里；
+- `_run_auto` 把 `worker_id_of()` **hoist 到取清单之前**（认自己租约的前提）。
+
+**回归**：`tests/common/test_offline_task_queue.py::test_resolve_courses_renews_my_own_stale_lease`
+（老调用形态 ⇒ 空队列 + 逐行原因含剩余 TTL；带 `worker` ⇒ 只续自己那句、别人的仍不动）。
+
+**门槛**：nn python gate 3610 pass/7 skip（ruff+mypy 干净）。
+
 ## §63 抢占在训在线课必须重导包：判「包是否还代表当前起点与代码」（2026-10-04）
 
 **用户报障**：「如果只在开课时生成离线包，然后手工转为在线模式，那么训练中途被离线 worker

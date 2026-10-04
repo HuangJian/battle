@@ -1421,6 +1421,7 @@ def resolve_courses(
     served: dict[str, str] | None = None,
     probe: dict | None = None,
     skip: set[str] | None = None,
+    worker: str = "",
 ) -> list[dict]:
     """本次要跑的课 → `[{"course", "pack_sha256"}]`；**空列表 = 队列为空**（正常的没事干）。
 
@@ -1479,6 +1480,24 @@ def resolve_courses(
     if picked:
         log("清单里可领：" + "、".join(f"{p['course']}" for p in picked))
         return picked
+    # ★ 2026-10-04 现场（Kaggle「清单 3 条 ⇒ 队列为空」，用户：「colab 已停机、也切过模式，
+    #   为什么还持有租约？」）：租约只有在**显式 release / 900s TTL 到期 / hub 重启**时才消失，
+    #   切模式与停课都不动它。而 hub 早就为此分了一档 `lease_verdict == "mine"`（同一 worker_id
+    #   重领直接续上，评审 G1）——但**清单行的 `claimable` 把任何持有者（包括自己）一律排除**，
+    #   这一档到不了现场 ⇒ 自己把自己锁到 TTL 过期（Kaggle 十几分钟的会话就废在这一等上）。
+    #   这里补上：没有可领的课、而某几行是**我自己**的租约 ⇒ 照领（claim 会续上）。
+    mine = [
+        t
+        for t in tasks
+        if worker and _holder_id(t) == worker and not t.get("seize") and _eligible(t)
+    ]
+    if mine:
+        log(
+            "续领自己未交还的租约："
+            + "、".join(str(t.get("course") or "") for t in mine)
+            + "（hub 判 mine ⇒ claim 直接续上，不必等 900s 过期）"
+        )
+        return [_as_pick(t) for t in mine]
     # 没有就绪的离线课 ⇒ 抢占第一个在训在线课。busy 的行**照收**：claim 会回 409 `busy`，
     # 调用方按「中间态不占 idle 预算」等到别的课跑完（比「空队列」更准确）。
     seized = [t for t in tasks if t.get("seize") and _eligible(t)]
@@ -1506,17 +1525,30 @@ def resolve_courses(
     return [_as_pick(first)]
 
 
+def _holder_id(t: dict) -> str:
+    """这行被**谁**持有（`holder` 形状不对/无主 ⇒ 空串）：判「自己的租约」与打日志用。"""
+    holder = t.get("holder")
+    return str(holder.get("worker_id") or "") if isinstance(holder, dict) else ""
+
+
 def _blocked_note(t: dict) -> str:
     """一行说清「这行课为什么不可领/不可抢」（纯函数；日志用）：`课[state；reason；…]`。
 
     为什么单独成函数：空队列的排查线索全在这里——`state`（hub 的读面判据）与 `reason`
     （not_offline / held:<worker> / completed / busy）是 hub 侧的直接事实，缺包/过期包是
     盘上事实；把这些丢掉，云机日志就只剩一句「队列为空」（2026-10-04 Kaggle 现场）。
+    ★ 被持有的行还报**剩余 TTL**（`holder.expires_in`）：用户 2026-10-04 的追问正是
+    「为什么还持有租约、还要等多久」——这个数字就是答案（切模式/停课都不会清租约）。
     """
     bits = [str(t.get("state") or "?")]
     reason = str(t.get("reason") or "")
     if reason:
         bits.append(reason)
+    holder = t.get("holder")
+    if isinstance(holder, dict):
+        left = holder.get("expires_in")
+        if isinstance(left, (int, float)):
+            bits.append(f"持有 {_holder_id(t) or '?'}（{float(left):.0f}s 后过期）")
     if not t.get("pack"):
         bits.append("无任务包（等控制台导出）")
     stale = str(t.get("stale_reason") or "")
@@ -1685,11 +1717,16 @@ def _run_auto(
     start = time.monotonic()
     idle_since = start
     while True:
-        tasks = resolve_courses(cfg, creds, log, served=served, probe=probe, skip=gave_up)
+        # 本机 worker id 在**取清单之前**备好：`resolve_courses` 要拿它认「自己的租约」
+        # （hub 判 `mine` 直接续上——否则 cell 中断重跑会白等 900s TTL，G1 的原始动机）。
+        # 它持久化在 `<work>/.worker-id`，重复调用只读文件（不打日志）。
+        worker = worker_id_of(_queue_work_dir(cfg), log)
+        tasks = resolve_courses(
+            cfg, creds, log, served=served, probe=probe, skip=gave_up, worker=worker
+        )
         if tasks:
             idle_since = time.monotonic()
             hubs = hub_candidates(cfg, creds)
-            worker = worker_id_of(_queue_work_dir(cfg), log)
             leases = {
                 "hub": hubs[0] if hubs else "",
                 "token": str(creds.get("HUB_TOKEN") or ""),

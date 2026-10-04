@@ -470,6 +470,51 @@ def test_resolve_courses_skips_given_up_courses(monkeypatch: pytest.MonkeyPatch)
     assert [t["course"] for t in got] == ["b"]
 
 
+def test_resolve_courses_renews_my_own_stale_lease(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ 2026-10-04 用户追问「colab 已停机、也切过模式，为什么还持有租约？」的回归锚。
+
+    租约只在 **显式 release / 900s TTL 到期 / hub 重启**时消失——切模式与停课都不动它。
+    而 hub 的 `lease_verdict` 早就分出一档 `mine`（同一 worker_id 重领直接续上，评审 G1：
+    「Kaggle 十几分钟的会话预算，白等 900s 等于整个会话废掉」）——但**清单行的 `claimable`
+    把任何持有者（包括自己）一律排除**，客户端从不去试 ⇒ 自己把自己锁到 TTL。
+    这里钉住：没有可领的课、而某行是**我自己**的租约 ⇒ 照领（claim 会续上）。
+    """
+    tasks = [
+        {
+            "course": "mine",
+            "claimable": False,
+            "seize": False,
+            "state": "claimed",
+            "reason": "held: w-me",
+            "holder": {"worker_id": "w-me", "expires_in": 812.0},
+            "pack": {"sha256": "aa" * 32},
+        },
+        {
+            "course": "other",
+            "claimable": False,
+            "seize": False,
+            "state": "claimed",
+            "reason": "held: w-other",
+            "holder": {"worker_id": "w-other", "expires_in": 500.0},
+            "pack": {"sha256": "bb" * 32},
+        },
+    ]
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
+    # 老调用形态（不传 worker）⇒ 谁也不认：空队列 + 逐行原因（被持有的那行带上剩余 TTL）
+    lines: list[str] = []
+    assert offline_boot.resolve_courses({}, {}, lines.append) == []
+    note = "\n".join(lines)
+    assert "mine[claimed；held: w-me；持有 w-me（812s 后过期）]" in note, lines
+    # 带上自己的 worker id ⇒ 续领那一门（别人的租约仍不动）
+    lines2: list[str] = []
+    got = offline_boot.resolve_courses({}, {}, lines2.append, worker="w-me")
+    assert [t["course"] for t in got] == ["mine"]
+    assert any("续领自己未交还的租约：mine" in ln for ln in lines2), lines2
+
+
 def test_resolve_courses_logs_why_a_row_is_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
     """★ 2026-10-04 现场（Kaggle：清单 3 条 ⇒ 队列为空，看不出为什么）：空队列必须**自解释**。
 
@@ -587,7 +632,7 @@ def test_run_auto_waits_for_the_export_without_burning_idle_budget(
     """导包窗口（分钟级）不能被当成空转：全会话不因它提前收工（U2/P0-1）。"""
     state = {"n": 0}
 
-    def fake_resolve(cfg: dict, creds: dict, log: Any, *, served=None, probe=None, skip=None):
+    def fake_resolve(cfg: dict, creds: dict, log: Any, **kw: Any) -> list[dict]:
         state["n"] += 1
         if state["n"] == 1:
             return [{"course": "c5-gae", "pack_sha256": ""}]
