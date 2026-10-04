@@ -178,8 +178,9 @@ class RunContext:
         #: rollout 的并行局数（`--rollout-workers`）。**它覆盖计划里钉着的 `plan.workers`**：
         #: 后者是**导出那台机器**的规模（常在 8~16 核的本机导出，却要在 96 vCPU 的云机上跑），
         #: 而 rollout 与 eval 是（**且必须**）交替跑的 ⇒ 两者共用同一口径
-        #: `common.platform_utils.cpu_worker_slots()`（用户 2026-09-22 立口径；2026-10-03 用户校准
-        #: 预留 4 → 2：「两者都使用 max(cores−2, cores×0.8)」）。「交替」由
+        #: `common.platform_utils.cpu_worker_slots()`（用户 2026-09-22 立口径；2026-10-03 校准
+        #: 预留 4 → 2；2026-10-04 校准 ≤4 核全给：「如果 cpu 少于等于 4 核，则使用全部 cores」）。
+        #: 「交替」由
         #: `EVAL_ALTERNATE_WAIT_SEC` 那条有界等保证（见它）。
         #: 0 = 按本机核数自动。
         rollout_workers: int = 0,

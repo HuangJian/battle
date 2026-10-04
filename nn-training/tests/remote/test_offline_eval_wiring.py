@@ -142,8 +142,8 @@ def test_default_slots_does_not_reserve_for_the_planned_rollout_workers(
 ) -> None:
     """计划里的 rollout 并行度**不进**缺省公式：两者交替跑，按对方扣一次等于两笔账扣同一份钱
 
-    用户 2026-09-22 立口径（2026-10-03 校准预留 4 → 2）：「不应该为 eval 保留 CPU 核数，两者都
-    使用同一口径 max(cores − 2, cores × 0.8)」。
+    用户 2026-09-22 立口径（2026-10-03 校准预留 4 → 2；2026-10-04 校准 ≤4 核全给）：「不应该为
+    eval 保留 CPU 核数，两者都使用同一口径 max(cores − 2, cores × 0.8)（≤4 核全给）」。
     其中 cores 走 `common.platform_utils.effective_cores`（容器配额/亲和掩码，**不是**宿主机的
     `os.cpu_count()`——见它那节的 224/96 事故）⇒ 用例 patch 的也是那个单一来源。
     """

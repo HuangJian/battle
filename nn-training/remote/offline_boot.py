@@ -1033,7 +1033,8 @@ def build_run_argv(
         argv += ["--max-iters", str(int(cfg["max_iters"]))]
     if float(cfg.get("budget_sec") or 0):
         argv += ["--budget-sec", str(float(cfg["budget_sec"]))]
-    # rollout 并行局数：缺省（不传）= 按云机核数 `max(cores−2, cores×0.8)`，与云机 eval 同一口径。
+    # rollout 并行局数：缺省（不传）= 按云机核数 `cpu_worker_slots`（≤4 核全给，否则
+    # max(cores−2, cores×0.8)），与云机 eval 同一口径。
     # 传了就完全按它——两边都不为对方预留，因为两者**真交替**（`run_loop._maybe_cloud_eval`
     # 提交后有界等本轮评估收线，见那里的 EVAL_ALTERNATE_WAIT_SEC：两条腿同时开满会把单局
     # 墙钟推过 5s 硬顶，2026-09-25 云机卡死就是这么来的）。

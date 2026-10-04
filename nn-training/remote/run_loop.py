@@ -419,14 +419,15 @@ def main(argv: list[str] | None = None) -> int:
         "--eval-slots",
         type=int,
         default=0,
-        help="云机评估的并发局数（0 = max(CPU−4, CPU×0.8)，与 rollout 同一口径）",
+        help="云机评估的并发局数（0 = cpu_worker_slots：≤4 核全给，否则 max(CPU−2, CPU×0.8)，与 rollout 同一口径）",
     )
     ap.add_argument(
         "--rollout-workers",
         type=int,
         default=0,
         help=(
-            "rollout 的并发局数（0 = max(CPU−4, CPU×0.8)，与云机评估同一口径）。"
+            "rollout 的并发局数（0 = cpu_worker_slots：≤4 核全给，否则 max(CPU−2, CPU×0.8)，"
+            "与云机评估同一口径）。"
             "非 0 时覆盖计划里钉着的 workers（那是**导出机**的规模）"
         ),
     )

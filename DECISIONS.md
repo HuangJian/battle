@@ -7478,3 +7478,24 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   `dashboard/src/server/api/{snapshot-cache,state-view,overview}.ts` · `dashboard/src/server/server.ts`（注释）·
   `dashboard/tools/perf-probe.ts`（新）· 回归 `dashboard/tests/{server-pool-history,server-api-state-view,worker-contribution}.test.ts`。
 - **指针**：全文 `docs/nn/console.md` §25 · plan `plan/dashboard-reload-perf.plan.md`（评审修订版 A1–A6）。
+
+## §2026-10-04-goalnn-cpu-slots-small-full（2026-10-04，并发口径小机器校准：CPU ≤ 4 核全给）
+
+- **口径（用户逐字）**：「rollout worker 现在为 max(cores−2, cores×0.8)，我希望改成如果 cpu
+  少于等于 4 核，则使用全部 cores」。
+- **决定**：`common/platform_utils.cpu_worker_slots()`（rollout 与 eval 的**唯一口径**）新增
+  `CPU_ALL_SLOTS_CORES = 4`：`n ≤ 4 ⇒ n`（全给）；否则照旧 `max(n − CPU_RESERVE, floor(n×0.8))`。
+  效果：Colab TPU（cgroup 配额 4）⇒ **4**（不再是 3）；3/2/1 核 ⇒ 各自全给；5 ⇒ 4；
+  8 ⇒ 6、16 ⇒ 14、24 ⇒ 22、96 ⇒ 94 不变。
+- **被否决**：① 只改 rollout 不改 eval——否：唯一口径（交替语义，2026-09-22 立）必须同源，
+  两处各写一份就是下一次误读；② 给小机器另立一套公式——否：同一个函数里一个阈值即可，
+  多一条公式多一个分歧面。
+- **落点**：`nn-training/common/platform_utils.py`（常量 + 公式 + docstring）· 口径文案同步
+  `remote/plan_run` / `remote/run_loop`（help 原文还停在预留 4 的旧公式，一并修正）/
+  `worker/iter_rollout` / `remote/offline_boot` / `remote/plan_handoff` ·
+  `ipynb/rollout.cloudflared.ipynb`（内联回退）· `ipynb/battle.offline.ipynb`（配置表两行 + CFG 注释）。
+- **回归**：`tests/common/test_platform_utils_cores.py::test_cpu_worker_slots_gives_all_cores_on_small_machines`
+  （1/2/3/4 ⇒ 全给；5 ⇒ 4；8 ⇒ 6；96 ⇒ 94）· `tests/remote/test_offline_eval_cloud.py`
+  口径表 `(4, 3)` → `(4, 4)`，另加 `(5, 4)`。
+- **指针**：全文 `docs/nn/runtime-opt.md` §30（更新旗标挂在同文件 §7）·
+  `docs/nn/remote-transport.md` §60 旗标。

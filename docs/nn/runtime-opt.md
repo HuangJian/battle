@@ -7,6 +7,28 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+
+## §30 并发口径小机器校准：CPU ≤ 4 核全给（2026-10-04，用户口径）
+
+**用户口径**（逐字）：「rollout worker 现在为 max(cores−2, cores×0.8)，我希望改成如果 cpu
+少于等于 4 核，则使用全部 cores」。
+
+**改动**：`common.platform_utils.cpu_worker_slots`（rollout 与 eval 的**唯一口径**）新增
+`CPU_ALL_SLOTS_CORES = 4`：`n ≤ 4 ⇒ n`（全给）；否则照旧 `max(n − CPU_RESERVE, floor(n×0.8))`。
+效果：Colab TPU（cgroup 配额 4）⇒ **4**（不再是 3）；3/2/1 核 ⇒ 各自全给；5 核 ⇒ 4；
+8 ⇒ 6、16 ⇒ 14、24 ⇒ 22、96 ⇒ 94 不变。理由：核数本来就少，再让 1 个就是 25% 的产能；
+大机器上真正生效的 20% 那支不受影响。
+
+**同步**：`plan_run` 日志行 / `run_loop` 两个 argparse help（原文还停在预留 4 的旧公式，
+一并修正）· `iter_rollout` 夹取注释 · `offline_boot` / `plan_handoff` 注释 ·
+`rollout.cloudflared.ipynb`（内联回退 + 注释）· `battle.offline.ipynb`（配置表两行 + CFG 注释）。
+
+**回归**：`tests/common/test_platform_utils_cores.py::test_cpu_worker_slots_gives_all_cores_on_small_machines`
+（1/2/3/4 ⇒ 全给；5 ⇒ 4；8 ⇒ 6；96 ⇒ 94）· `tests/remote/test_offline_eval_cloud.py`
+口径表 `(4, 3)` → `(4, 4)`，另加 `(5, 4)`。
+
+**门槛**：nn python gate 3612 pass/7 skip（ruff+mypy 干净）。
+
 ## §29 一个 node id 只准有一个 agent 在听：`SO_REUSEPORT` 把 EADDRINUSE 护栏关掉了（2026-09-29）
 
 > 落地 = `plan/sampler-single-instance.plan.md`；决策 = DECISIONS §2026-09-29-goalnn-single-instance-lock。
@@ -1515,6 +1537,10 @@ argv 不变 ⇒ out 目录不变 ⇒ 声明的 shard 集（`data_fp`）逐字节
 > `DECISIONS.md §2026-10-03-goalnn-cpu-slots-reserve2`。本节其余内容（交替语义 / 两条腿同口径 /
 > `--rollout-workers` 覆盖链）逐字仍有效；下方示例数字按新口径：96 核 → 94、40 → 38、16 → 14、
 > 8 → 6、Colab TPU（配额 4）→ 3。
+>
+> ★★ **2026-10-04 更新（≤4 核全给）**：用户校准「如果 cpu 少于等于 4 核，则使用全部 cores」
+> ⇒ `cpu_worker_slots(4) = 4`（上文与 §23 的「Colab ⇒ 3」已过期，以此为准）；5 核起仍是
+> `max(cores−2, cores×0.8)`。全文见本文件 §30 · `DECISIONS.md §2026-10-04-goalnn-cpu-slots-small-full`。
 
 用户口径：**「rollout 和 eval 是交替进行的，所以不应该为 eval 保留 CPU 核数，两者都使用
 `max(cores − 4, cores × 0.8)`；只要留两三个核给数据回传任务就够了。」**

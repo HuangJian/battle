@@ -19,7 +19,7 @@ trainer/queue.py 各自维护了一份逐字节相同的 `_POPEN_NO_WINDOW`（Wi
   physical_cores() —— 本机可用的**物理核数**（排除超线程）：门禁 / 本地 worker 池的口径
     （与 effective_cores 的分工见 docstring）。
   cpu_worker_slots(cores=None) —— 本机 CPU 并行槽的**唯一口径**（见 docstring）：
-    rollout 与 eval 都用它，谁都不为对方预留核数。
+    rollout 与 eval 都用它，谁都不为对方预留核数；≤4 核全给，5 核起 max(cores−2, 0.8×cores)。
   cores_note() —— 「可用核数」的**出处一行**（日志/诊断用）：cpu_count / 亲和 / cgroup
     配额三源原样报出 + 取小结果（压「可用核 4 被读成机器只有 4 核」那类误读）。
   popen_own_group(**extra) —— **自带进程组**的子进程 kwargs（POSIX 的 start_new_session）。
@@ -131,6 +131,11 @@ def sandbox_delete_blocked(anchor: Any) -> bool:
 #: ★ 2026-10-03 用户校准：预留 4 → **2**（逐字：「现在统一改为 max(cores−2, cores×0.8)」）。
 #: 大机器上真正生效的是下面 20% 那一支；小核数（配额 4）上两条支都只让出 1~2 个槽位。
 CPU_RESERVE = 2
+
+#: ★ 2026-10-04 用户校准（逐字：「如果 cpu 少于等于 4 核，则使用全部 cores」）：小机器不再
+#: 预留——4 核及以下（Colab TPU 配额 4 是唯一在档的实例）把核数**全给**并行槽；5 核起才按
+#: CPU_RESERVE / 20% 两支夹取。理由：核数本来就少，再让出 1 个就是 25% 的产能。
+CPU_ALL_SLOTS_CORES = 4
 
 #: 容器 CPU 配额的 cgroup 文件（v2 优先；v1 兜底）。换算成核数见 `cgroup_cpu_quota`。
 _CGROUP_V2_CPU_MAX = "/sys/fs/cgroup/cpu.max"
@@ -337,14 +342,16 @@ def physical_cores() -> int:
 
 
 def cpu_worker_slots(cores: int | None = None) -> int:
-    """本机该开几个 CPU 并行槽：``max(cores − 2, floor(cores × 0.8))``（至少 1）。
+    """本机该开几个 CPU 并行槽：**`cores ≤ 4` ⇒ 全给（`cores`）**；否则
+    ``max(cores − 2, floor(cores × 0.8))``（至少 1）。
 
     `cores` 缺省走 `effective_cores()`（容器配额/亲和掩码 > `os.cpu_count()`）——**按物理数目**
     算，不按宿主机报出来的大数字算（详见 `cgroup_cpu_quota` 的 224/96 事故）。
 
-    **唯一口径**（用户 2026-09-22 立；**2026-10-03 用户校准**：预留 4 → **2**，逐字「现在统一
-    改为 max(cores−2, cores×0.8)」）：「rollout 和 eval 是交替进行的，所以不应该为 eval 保留
-    CPU 核数——两者都使用同一口径，只要留两三个核给数据回传任务就够」。
+    **唯一口径**（用户 2026-09-22 立；2026-10-03 校准预留 4 → 2；**2026-10-04 校准小机器全给**，
+    逐字「如果 cpu 少于等于 4 核，则使用全部 cores」）：「rollout 和 eval 是交替进行的，所以
+    不应该为 eval 保留 CPU 核数——两者都使用同一口径，只要留两三个核给数据回传任务就够」；
+    小机器例外：4 核及以下本来就少，再让 1 个就是 25% 的产能（`CPU_ALL_SLOTS_CORES`）。
 
     为什么不再「按对方留位」：云机离线段里 rollout 与 eval（以及 PPO）**本该是交替的**，
     给 eval 扣掉 rollout 的并行度等于两次扣同一份钱——两边都按本函数满配，谁在跑谁就用满。
@@ -358,11 +365,13 @@ def cpu_worker_slots(cores: int | None = None) -> int:
     提交后**有界等**本轮评估收线），核数也走容器口径（`effective_cores`），而不是靠注释假设；
     同一份公式只在那个前提下才对。
 
-    参照（2026-10-03 新口径）：96 核配额的 Kaggle TPU 会话 ⇒ 94；24 核 ⇒ 22；16 核 ⇒ 14；
-    8 核 ⇒ 6（0.8 那一支生效）；Colab TPU（配额 4 核）⇒ 3。显式传 ``--eval-slots`` /
-    ``--rollout-workers`` 仍然完全照用户给的数走（本函数只管缺省）。
+    参照（2026-10-04 新口径）：96 核配额的 Kaggle TPU 会话 ⇒ 94；24 核 ⇒ 22；16 核 ⇒ 14；
+    8 核 ⇒ 6（0.8 那一支生效）；5 核 ⇒ 4；**Colab TPU（配额 4 核）⇒ 4（全给，不再是 3）**。
+    显式传 ``--eval-slots`` / ``--rollout-workers`` 仍然完全照用户给的数走（本函数只管缺省）。
     """
     n = max(1, int(cores if cores is not None else effective_cores()))
+    if n <= CPU_ALL_SLOTS_CORES:
+        return n
     return max(1, min(n, max(n - CPU_RESERVE, int(n * 0.8))))
 
 

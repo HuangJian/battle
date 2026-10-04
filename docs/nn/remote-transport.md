@@ -195,6 +195,11 @@ sympy 不存在静默三例）；ruff + mypy 干净；nn python gate 全绿。
 
 ## §60 「Colab TPU 只有 4 核算力」与并发口径校准：预留 4→2 + log 报核数出处（2026-10-03）
 
+> ★ **2026-10-04 更新（小机器全给）**：用户校准「如果 cpu 少于等于 4 核，则使用全部 cores」
+> ⇒ `cpu_worker_slots(4) = 4`（不再是 3）；5 核起才按 max(cores−2, 0.8×cores)。见
+> `docs/nn/runtime-opt.md` §30 · `DECISIONS.md §2026-10-04-goalnn-cpu-slots-small-full`。
+> 本节其余（配额是真口径 / 报出处 / 否决「按 24 核开 22 workers」）逐字仍有效。
+
 **触发（误读现场）**：Colab TPU 离线跑 x20-adv-acc，log 里 `kind=iter rollout done in 34.909s｜
 games=176｜workers=3`，而用户按「实例 24 核」推断 3 workers 不可能跑完 176 局。同一台机器上取证：
 

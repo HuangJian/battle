@@ -115,6 +115,19 @@ def test_cpu_worker_slots_uses_the_effective_cores(monkeypatch: pytest.MonkeyPat
     assert pu.cpu_worker_slots(40) == 38
 
 
+def test_cpu_worker_slots_gives_all_cores_on_small_machines() -> None:
+    """★ 2026-10-04 用户校准：「如果 cpu 少于等于 4 核，则使用全部 cores」。
+
+    4 核及以下不预留（Colab TPU 配额 4 ⇒ **4**，不再是 3）；5 核起才按
+    `max(cores−2, floor(cores×0.8))` 夹取（5 ⇒ 4、8 ⇒ 6、96 ⇒ 94）。
+    """
+    for n in (1, 2, 3, 4):
+        assert pu.cpu_worker_slots(n) == n, f"{n} 核应全给"
+    assert pu.cpu_worker_slots(5) == 4
+    assert pu.cpu_worker_slots(8) == 6
+    assert pu.cpu_worker_slots(96) == 94
+
+
 def test_cores_note_reports_all_three_sources(monkeypatch: pytest.MonkeyPatch) -> None:
     """Colab 误读现场（2026-10-03）的回归锚：「可用核 4」必须连同三源出处一起报出来
     （宿主/亲和 24、cgroup 配额 4）——不然「4」会被读成「这台机器只有 4 核」。"""

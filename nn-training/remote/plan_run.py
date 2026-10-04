@@ -505,7 +505,8 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
     ctx.log(
         f"rollout 并发局数：{ctx.rollout_workers} 局"
         + (f"（计划里钉着 {pinned}——那是导出机的规模，已按本机核数覆盖）" if pinned and pinned != ctx.rollout_workers else "")
-        + f"；与云机评估同一口径 max(cores−2, cores×0.8)；本机核数出处：{cores_note()}"
+        + f"；与云机评估同一口径 cpu_worker_slots（≤4 核全给，否则 max(cores−2, cores×0.8)）；"
+        f"本机核数出处：{cores_note()}"
     )
     prev = start_from
     stopped = "complete"
