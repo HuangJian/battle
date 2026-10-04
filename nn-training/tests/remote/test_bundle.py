@@ -540,3 +540,101 @@ def test_seed_ref_blob_cache_from_artifacts(tmp_path: Path) -> None:
         log=_quiet,
     )
     assert not (tmp_path / "workr3" / "blob_cache").exists()
+
+
+# ────────────────────────── 起点动量（opt）离线件 ──────────────────────────
+
+
+def test_offline_start_opt_reaches_blob_cache(tmp_path: Path) -> None:
+    """★ 2026-10-04 现场回归（x20-adv-acc）：起点动量必须**在启动期**种进 blob_cache。
+
+    旧行为：`opt.tar` 字节只在产物目录 / 包根，而合成轮（`plan_run` 用 `run_job("", "")`
+    跑）解析 opt 时 `_resolve_blob` 只认 `blob_cache/<sha>`（cache / preloaded / download）
+    ⇒ it196 处 miss ⇒ 向空 base_url 发 GET：`unknown url type: '/jobs/…/blob?name=opt'`
+    ×3 重试耗尽，整段停在 PPO 之前（rollout 每次重试白跑 33s）。
+    """
+    from common.protocol import BLOB_OPT
+    from remote.download import _resolve_blob
+
+    zip_path, index, _plan = _export(tmp_path, it=3, n=2)
+    assert "opt.tar" in index["parts"], "前置：这个包带了起点动量"
+    opt_raw = (tmp_path / "src" / "opt.tar").read_bytes()
+    opt_sha = sha256_bytes(opt_raw)
+    dest = tmp_path / "artopt"
+    import_bundle(zip_path, dest)
+    fake = _FakeRunJob()
+    run_standalone(artifacts_dir=dest, run_job_fn=fake, log=_quiet)
+    assert fake.calls, "全离线段没跑起来"
+    cache = dest / "work" / "blob_cache" / opt_sha
+    assert cache.read_bytes() == opt_raw, "起点动量必须在启动期进 blob_cache（合成轮只认它）"
+    # 与合成轮**同一次调用形态**：空 base_url + 缓存命中 ⇒ 零网络
+    # （旧代码走到 download_blob ⇒ unknown url type ⇒ 整段失败）
+    got, hit, src = _resolve_blob(
+        blob_root=dest / "work" / "blob_cache",
+        name=BLOB_OPT,
+        sha=opt_sha,
+        inline_b64="",
+        jid="j",
+        base_url="",
+        token="t",
+        preloaded=None,
+        log=_quiet,
+    )
+    assert (got, hit, src) == (opt_raw, True, "cache")
+
+
+def test_seed_opt_blob_cache_sources_and_honest_sha(tmp_path: Path) -> None:
+    """`_seed_opt_blob_cache`：三个字节来源（产物 → 包根 → job 目录）+ 无字节 ⇒ 空串。
+
+    「空串」是**诚实语义**：合成的下一轮只声明能兑现的 sha —— manifest.opt_sha 是 hub 侧
+    地址，自主段没有下载通道，它绝不能当声明往下传（幽灵 sha = 下一轮必失败）。
+    """
+    from common.protocol import blob_path
+    from remote.run_loop import _seed_opt_blob_cache
+
+    raw = b"opt-tar" + b"o" * 48
+    sha = sha256_bytes(raw)
+    work = tmp_path / "worko"
+    # ① 产物里的 it-N/opt.tar（bundle 导入 / 续跑锚点布局）
+    store_opt = tmp_path / "arto" / "it-007" / "opt.tar"
+    store_opt.parent.mkdir(parents=True, exist_ok=True)
+    store_opt.write_bytes(raw)
+    got = _seed_opt_blob_cache(
+        manifest={"opt_sha": sha},
+        store_opt=store_opt,
+        job_dir=tmp_path / "jdo",
+        work_dir=work,
+        log=_quiet,
+    )
+    assert got == sha and (work / "blob_cache" / sha).read_bytes() == raw
+    # ② 包根 opt.tar（job_dir 那份）
+    work2 = tmp_path / "worko2"
+    jd2 = tmp_path / "packrooto"
+    jd2.mkdir(parents=True, exist_ok=True)
+    (jd2 / "opt.tar").write_bytes(raw)
+    got2 = _seed_opt_blob_cache(
+        manifest={}, store_opt=tmp_path / "nope" / "opt.tar",
+        job_dir=jd2, work_dir=work2, log=_quiet,
+    )
+    assert got2 == sha and (work2 / "blob_cache" / sha).read_bytes() == raw
+    # ③ job 目录 blob.opt（在线腿 job 目录形态）
+    work3 = tmp_path / "worko3"
+    jd3 = tmp_path / "job3o"
+    jd3.mkdir(parents=True, exist_ok=True)
+    blob_path(jd3, "opt").write_bytes(raw)
+    got3 = _seed_opt_blob_cache(
+        manifest={}, store_opt=tmp_path / "nope2" / "opt.tar",
+        job_dir=jd3, work_dir=work3, log=_quiet,
+    )
+    assert got3 == sha and (work3 / "blob_cache" / sha).read_bytes() == raw
+    # ④ 全无本地字节：即便 manifest 声称有 opt_sha，也**只返回空串**（绝不幽灵声明）
+    work4 = tmp_path / "worko4"
+    got4 = _seed_opt_blob_cache(
+        manifest={"opt_sha": "b" * 64},
+        store_opt=tmp_path / "nope3" / "opt.tar",
+        job_dir=tmp_path / "emptyjdo",
+        work_dir=work4,
+        log=_quiet,
+    )
+    assert got4 == "", "没有本地字节就不许声明 sha（合成轮无从兑现）"
+    assert not (work4 / "blob_cache").exists()

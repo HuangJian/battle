@@ -107,6 +107,9 @@ from remote.plan_handoff import (
     _seed_demo_blob_cache as _seed_demo_blob_cache,
 )
 from remote.plan_handoff import (
+    _seed_opt_blob_cache as _seed_opt_blob_cache,
+)
+from remote.plan_handoff import (
     _seed_ref_blob_cache as _seed_ref_blob_cache,
 )
 from remote.plan_handoff import (
@@ -438,11 +441,14 @@ def run_plan_job(
     stored = ctx.store.weights_path(anchor_it)
     if start_from > anchor_it:
         ctx.log(f"产物已跑到 it{start_from}——从产物接上（锚点 it{anchor_it} 不重复记账）")
-        ctx.last_opt_sha = _stored_opt_sha(ctx, start_from) or str(ctx.manifest.get("opt_sha", "") or "")
+        # ★ 2026-10-04：原来这里会 `or manifest.opt_sha` —— 那是在**声明一个拿不到（或更糟：
+        #   属于旧轮次）的动量 sha**。自主段的合成轮用 run_job("", "") 没有下载通道，声明的
+        #   sha 必须在本地可兑现（blob_cache / 产物），否则 it 处在 PPO 之前失败。
+        ctx.last_opt_sha = _stored_opt_sha(ctx, start_from)
     elif stored.exists() and sha256_file(stored) == sha256_bytes(_weight_bytes(first_result)):
         # 锚点轮产物与本次结果一致——沿用，不重复记账
         ctx.log(f"锚点 it{anchor_it} 已在产物里且与本次结果一致——沿用（不重复记账）")
-        ctx.last_opt_sha = _stored_opt_sha(ctx, anchor_it) or str(ctx.manifest.get("opt_sha", "") or "")
+        ctx.last_opt_sha = _stored_opt_sha(ctx, anchor_it)
     else:
         session.append(_checkpoint(ctx, anchor_it, first_result, wall_sec=0.0, phase="anchor"))
     return _drive(ctx, session=session, start_from=start_from)

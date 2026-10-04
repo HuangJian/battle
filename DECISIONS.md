@@ -7365,3 +7365,37 @@ age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层�
   缺绑补回 / 已绑幂等 / sympy 不存在静默）。
 - **门槛**：nn python gate 绿（见下）；ruff + mypy 干净。
 - **指针**：全文 `docs/nn/remote-transport.md` §61。
+
+## §2026-10-04-goalnn-opt-blob-must-ride-the-pack（2026-10-04，自主段起点动量必须种子进
+blob_cache；合成轮只声明「本地可兑现」的 opt sha）
+
+- **背景（真机事故）**：Colab TPU 离线盘抢占到在线课 x20-adv-acc（计划 it195→it250），
+  rollout 每轮正常跑完 184 局，紧接着 **PPO 起步前**失败：
+  `/jobs/1f05d5db170855c3/blob?name=opt` 3 次重试后 `unknown url type`——
+  整段停在 it196（每重试白跑 33s rollout）。
+- **根因（两条，都在「自主段没有下载通道」这条前提下）**：
+  ① `plan_run._run_iteration` 用 `run_job("", "")` 合成轮次 ⇒ `_resolve_blob` 只有
+     `blob_cache/<sha>` / preloaded 两个本地源；而起点 `opt.tar` 字节（包根 / 产物目录
+     `it-N/opt.tar` / job 目录 `blob.opt`）**从不进 blob_cache** ⇒ 每轮 miss ⇒ 向空 base_url
+     发 GET（`_get_with_retry` 还把它当瞬时抖动退避重试 3 次）。
+  ② `_seed_start_checkpoint` / `plan_run` 三处在**没有本地字节**时退回 `manifest.opt_sha`
+     ——那是 hub 侧字节的地址，自主段无从兑现 ⇒ 幽灵声明（必失败；且旧轮次的 sha 还会把
+     错动量接上来）。
+- **决定**：① 新增 `plan_handoff._seed_opt_blob_cache`（与 `_seed_ref_blob_cache` 同规）：
+  按 产物 `it-N/opt.tar` → 包根 `opt.tar` → job `blob.opt` 找字节，种进 `blob_cache/<sha>`，
+  **返回本地字节的 sha**；`_seed_start_checkpoint` 与 `run_loop.apply_resume_overlay`
+  （续跑锚点）都改用它赋 `last_opt_sha`（进 plan_run/run_loop 门面 + 交接面 20 名）。
+  ② `last_opt_sha` 一律**只声明本地可兑现的 sha**（`_stored_opt_sha` 兜底；无字节 → 空 +
+  响亮 WARN 说明「按 Adam 从头跑 + 重导带 opt 的包」）。③ `_get_with_retry` 开头拒空
+  `base_url`（确定性 `ProtocolError`，不再 3 次退避 + `unknown url type` 误导文案）。
+- **被否决**：把 `import_bundle` 的起点落位从 `it-{idx.it}` 改成 `it-{idx.it-1}`——
+  语义上更「教科书」（包件 = W(it-1)），但它被既有用例明钉（`it-003/weights.json`），而
+  消费者读的是包根 `init_weights.json` + 三个 seed 链 ⇒ 改它只是无谓的爆炸半径。
+  真正的缺陷在**消费侧不看手边的字节**，种子链覆盖了两种落位。
+- **落点**：`nn-training/remote/{plan_handoff,plan_run,run_loop,http}.py` ·
+  回归 `nn-training/tests/remote/{test_bundle,test_download_split,test_plan_run_split,
+  test_plan_handoff_split}.py`（新增 3 例：起点动量进 blob_cache 且空 base_url 可解析；
+  种子三来源 + 无字节返回空串；空 base_url 不重试）。
+- **门槛**：nn python gate 绿（**3606 pass/7 skip**；ruff+mypy 干净）。
+- **指针**：全文 `docs/nn/remote-transport.md` §62；同族前两次 §59（seize）/ §61（sympy）
+  与 2026-10-03 的 ref 版（bundle 带 ref + 启动期种子）。

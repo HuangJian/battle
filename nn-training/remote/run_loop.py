@@ -63,6 +63,9 @@ from remote.plan_run import (
     _seed_demo_blob_cache as _seed_demo_blob_cache,
 )
 from remote.plan_run import (
+    _seed_opt_blob_cache as _seed_opt_blob_cache,
+)
+from remote.plan_run import (
     _seed_ref_blob_cache as _seed_ref_blob_cache,
 )
 from remote.plan_run import (
@@ -296,7 +299,17 @@ def apply_resume_overlay(ctx: RunContext, resume_dir: str | Path | None) -> int:
     if not opt_raw:
         ctx.log(f"WARN: 续跑锚点 it{it} 没有 opt.tar——Adam 动量从头（其余照常）")
     ctx.store.checkpoint(it, weights_json=src_w.read_bytes(), opt_tar=opt_raw, row=row)
-    ctx.last_opt_sha = sha256_bytes(opt_raw) if opt_raw else ""
+    # ★ 2026-10-04：锚点的 opt 字节只落进产物目录还不算数——合成轮（`plan_run._run_iteration`
+    #   的 `run_job("", "")`）解析 opt 时只认 `blob_cache/<sha>`（cache / preloaded / download），
+    #   留在 `it-{n}/opt.tar` 就是每轮 miss ⇒ 向空 base_url 发 GET（unknown url type，整段失败）。
+    #   同一个种子函数返回**可兑现的** sha（没有本地字节则空串 → 本段 Adam 从头，绝不幽灵声明）。
+    ctx.last_opt_sha = _seed_opt_blob_cache(
+        manifest=ctx.manifest,
+        store_opt=ctx.store.opt_path(it),
+        job_dir=ctx.store.root,
+        work_dir=Path(ctx.work_dir),
+        log=ctx.log,
+    )
     ctx.log(
         f"续跑锚点已采纳：it{it}（{meta.get('source', '?')}，权重 {got_fp[:12]}…，"
         f"opt {len(opt_raw)} 字节）——本段从 it{it} 之后继续"

@@ -45,6 +45,7 @@ from common.logutil import log_line
 from common.platform_utils import cpu_worker_slots
 from common.protocol import (
     BLOB_DEMO,
+    BLOB_OPT,
     BLOB_REF,
     EVAL_SCRIPT,
     PLAN_NAME,
@@ -543,23 +544,118 @@ def _ts_tree_root(cache_dir: Path | None, manifest: dict) -> Path | None:
 
 
 def _seed_start_checkpoint(ctx: RunContext, *, job_dir: Path, start_it: int, last_it: int) -> None:
-    """把起点（`it-{start_it}`）补进产物目录（已有则不动）。"""
+    """把起点（`it-{start_it}`）补进产物目录（已有则不动），并把**起点动量**种子进 blob_cache。
+
+    ★ 2026-10-04 现场（x20-adv-acc，离线盘占在线课程）：起点有 `opt.tar` 字节、`last_opt_sha`
+    也照它算了，但**没人把它写进 `blob_cache`** —— 而自主段用 `run_job("", "")` 合成轮次、
+    `_resolve_blob` 只认 `blob_cache/<sha>`（cache / preloaded / download 三源）⇒ it196 解析
+    opt 时 miss，向空 base_url 发 GET：`unknown url type: '/jobs/…/blob?name=opt'` ×3 重试耗尽，
+    整段停在 PPO 之前（rollout 每重试一次白跑 33s）。
+
+    失败链的两处（本次都堵掉）：
+      ① 字节在**手边**（产物目录 `it-{n}/opt.tar` / 包根 `opt.tar` / job 目录 `blob.opt`）却
+         从不进 blob_cache ⇒ `_seed_opt_blob_cache`（与 `_seed_ref_blob_cache` 同规）；
+      ② `last_opt_sha` 原来会**退回 manifest.opt_sha** —— 那是 hub 侧字节的地址，自主段没有
+         下载通道 ⇒ 声明一个拿不到的 sha = 必失败。没有本地字节就如实置空（本段 Adam 从头，
+         日志响亮说明），**绝不**幽灵声明。
+    """
     if last_it > start_it or ctx.store.weights_path(start_it).exists():
-        ctx.last_opt_sha = str(_stored_opt_sha(ctx, start_it) or "")
-        return
-    src = job_dir / "init_weights.json"
-    if not src.exists():
-        raise ProtocolError(
-            f"缺起点权重 init_weights.json（自主段的起点无从落盘，拒收）：{src}"
+        # 起点已在产物里（bundle 导入 / 续跑锚点 / 上一会话的尾巴）：只补 cache 与 sha。
+        ctx.last_opt_sha = _seed_opt_blob_cache(
+            manifest=ctx.manifest,
+            store_opt=ctx.store.opt_path(start_it),
+            job_dir=job_dir,
+            work_dir=ctx.work_dir,
+            log=ctx.log,
+        ) or str(_stored_opt_sha(ctx, start_it) or "")
+    else:
+        src = job_dir / "init_weights.json"
+        if not src.exists():
+            raise ProtocolError(
+                f"缺起点权重 init_weights.json（自主段的起点无从落盘，拒收）：{src}"
+            )
+        opt = _opt_bytes_from_manifest(ctx)
+        # 不记账本（row=None）：起点不是一轮训练。写进去会多出一条无 agg/report 的行，
+        # 而「账本一行 = 一轮」是它给人看曲线的唯一契约（详见 ArtifactStore.checkpoint）。
+        ctx.store.checkpoint(start_it, weights_json=src.read_bytes(), opt_tar=opt)
+        ctx.log(
+            f"起点已落盘：it{start_it}（{src.name}{' + opt' if opt else '，无 opt（Adam 从头）'}）"
         )
-    opt = _opt_bytes_from_manifest(ctx)
-    # 不记账本（row=None）：起点不是一轮训练。写进去会多出一条无 agg/report 的行，
-    # 而「账本一行 = 一轮」是它给人看曲线的唯一契约（详见 ArtifactStore.checkpoint）。
-    ctx.store.checkpoint(start_it, weights_json=src.read_bytes(), opt_tar=opt)
-    ctx.last_opt_sha = sha256_bytes(opt) if opt else str(ctx.manifest.get("opt_sha", "") or "")
-    ctx.log(
-        f"起点已落盘：it{start_it}（{src.name}{' + opt' if opt else '，无 opt（Adam 从头）'}）"
+        ctx.last_opt_sha = _seed_opt_blob_cache(
+            manifest=ctx.manifest,
+            store_opt=ctx.store.opt_path(start_it),
+            job_dir=job_dir,
+            work_dir=ctx.work_dir,
+            log=ctx.log,
+        ) or str(_stored_opt_sha(ctx, start_it) or "")
+    if not ctx.last_opt_sha and str(ctx.manifest.get("opt_sha", "") or ""):
+        # 字节不在手边而 hub 侧有：说清后果与修法，别让「动量悄悄归零」成为静默行为（D5）。
+        ctx.log(
+            "WARN: manifest 声明了 opt_sha（hub 侧有动量）但节点侧无字节——自主段没有下载"
+            "通道，本段按 Adam 从头跑；要带走动量请重导任务包（导出机 job 目录需有 blob.opt）"
+            "或换带 opt.tar 的包"
+        )
+
+
+def _seed_opt_blob_cache(
+    *,
+    manifest: dict,
+    store_opt: Path,
+    job_dir: Path,
+    work_dir: Path,
+    log: Callable[[str], None] = _log_default,
+) -> str:
+    """把起点动量种子进 `blob_cache/<sha>`，返回**可兑现的** sha（无本地字节 ⇒ 空串）。
+
+    为什么必须进 blob_cache：自主段的合成轮用 `run_job("", "")`，`_resolve_blob` 只认
+    `blob_cache/<sha>`（cache / preloaded / download 三源）⇒ 字节留在产物目录 = 每轮 miss。
+    为什么不用 `manifest.opt_sha` 当声明：那是 hub 侧字节的地址，自主段没有下载通道；本地
+    这份字节的 sha 才是能兑现的（不符时记一行——包与 job 不同源的体检）。
+    字节来源（按序）：产物里的 `it-{n}/opt.tar`（bundle 导入 / 续跑锚点布局）→ 包根
+    `opt.tar` → job 目录 `opt.tar` / `blob.opt`。全无 ⇒ 空串 + 静默（起点无动量是合法
+    形态：全新 run / 首轮）。
+    """
+    got_sha = ""
+    raw = b""
+    src_used: Path | None = None
+    cands = (
+        Path(store_opt),
+        Path(job_dir) / "opt.tar",
+        Path(job_dir).parent / "opt.tar",
+        blob_path(job_dir, BLOB_OPT),
     )
+    for c in cands:
+        try:
+            b = c.read_bytes()
+        except OSError:
+            continue
+        if b:
+            raw, src_used, got_sha = b, c, sha256_bytes(b)
+            break
+    if not raw:
+        return ""
+    want = str(manifest.get("opt_sha", "") or "")
+    if want and got_sha != want:
+        log(
+            f"WARN: 起点 opt 字节 sha={got_sha[:12]}… 与 manifest.opt_sha={want[:12]}… 不符"
+            "——按本地字节走（合成轮声明本地这份）"
+        )
+    cache = Path(work_dir) / "blob_cache"
+    dst = cache / got_sha
+    if not dst.is_file():
+        try:
+            cache.mkdir(parents=True, exist_ok=True)
+            tmp = dst.with_name(dst.name + ".tmp")
+            tmp.write_bytes(raw)
+            tmp.replace(dst)
+        except OSError as e:  # 写缓存失败不拦段：解析处会按「字节不可得」响亮失败
+            log(f"WARN: 起点 opt 种子写缓存失败（{type(e).__name__}: {e}）")
+            return ""
+    log(
+        f"起点动量已种子进 blob_cache（{len(raw) / 1e6:.1f}MB，{got_sha[:12]}…，源={src_used}）"
+        "——逐轮缓存命中、零传输"
+    )
+    return got_sha
 
 
 def _stored_opt_sha(ctx: RunContext, it: int) -> str:

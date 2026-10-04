@@ -49,6 +49,7 @@ HANDOFF_NAMES = {
     "_opt_bytes_from_manifest",
     "_read_opt_file",
     "_seed_demo_blob_cache",
+    "_seed_opt_blob_cache",
     "_seed_ref_blob_cache",
     "_seed_start_checkpoint",
     "_setup_cloud_eval",

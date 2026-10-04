@@ -43,7 +43,7 @@ if str(ROOT) not in sys.path:
 
 import remote.download as download_mod
 import remote.worker as worker_mod
-from common.protocol import BLOB_OPT, RetryableError
+from common.protocol import BLOB_OPT, ProtocolError, RetryableError
 from tests.helpers import remote_dag as dag
 from tests.helpers import source_scan
 
@@ -155,6 +155,27 @@ def test_intra_module_seam_is_the_download_module(monkeypatch, tmp_path: Path) -
         log=lambda _m: None,
     )
     assert got == raw and hit is False and src == "download"
+
+
+def test_empty_base_url_is_deterministic_and_never_retried() -> None:
+    """★ 2026-10-04 现场回归（x20-adv-acc）：base_url 为空 = 确定性配置错误，一次都别重试。
+
+    旧行为：urllib 抛 `ValueError: unknown url type: '/jobs/…/blob?name=opt'`，被当瞬时抖动
+    退避重试 3 次（白等 6s+、日志引导不到根因），整段在 PPO 之前失败。现在当场 ProtocolError
+    且正文点名最常见的两条修法（包/锚点没带 blob 字节 / 在线腿没给 --hub-url）。
+    """
+    from remote.download import download_blob
+
+    calls: list[str] = []
+    with pytest.raises(ProtocolError, match="没有 hub 地址"):
+        download_blob(
+            "",
+            "tok",
+            "j" * 16,
+            BLOB_OPT,
+            log=calls.append,
+        )
+    assert calls == [], "确定性失败不该留下「2s 后重试」这类日志（一次都不重试）"
 
 
 def _bare_loads(path: Path, names: set[str]) -> dict[str, set[str]]:

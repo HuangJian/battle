@@ -6,6 +6,54 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §62 自主段起点动量必须种子进 blob_cache：`opt` 离线件与「只声明可兑现的 sha」（2026-10-04）
+
+**症状**（Colab TPU，离线盘抢占在线课 x20-adv-acc，计划 it195→it250）：rollout 每轮正常
+跑完 184 局（33s），紧接着 **PPO 起步前**失败——
+
+```
+[run] /jobs/1f05d5db170855c3/blob?name=opt: 瞬时失败('ValueError("unknown url type:
+      \'/jobs/1f05d5db170855c3/blob?name=opt\'")') — 2s 后第 2/3 次重试
+...
+[run] it196 第 3 次失败（瞬时）：… 重试 3 次仍失败 …  ——自主段在 it196 处失败
+```
+
+**根因（两条，都在「自主段没有下载通道」这条既定前提下）**：
+
+① **字节没有进 blob_cache**。合成轮由 `plan_run._run_iteration` 用 `run_job("", "")` 驱动
+（`base_url` 恒空 = 无下载通道），`_resolve_blob` 的本地源只有 `blob_cache/<sha>` 与
+`preloaded`。而起点 `opt.tar` 的字节无论躺在哪（包根 `opt.tar`、产物 `it-N/opt.tar`、
+job 目录 `blob.opt`），**消费者从不把它写进 blob_cache** ⇒ 第一轮解析 opt 就 miss ⇒
+`download_blob` 拿到空 base_url ⇒ urllib `ValueError: unknown url type`（还被
+`_get_with_retry` 当瞬时抖动退避重试 3 次，白等 6s+、文案完全误导）。
+
+② **幽灵声明**。`_seed_start_checkpoint` / `plan_run`（两处接续分支）在没有本地字节时
+`or manifest.opt_sha`——那是 **hub 侧字节的地址**，自主段无从兑现；更糟的是它属于
+**旧轮次**（导出机的那个 it），接上来就是把错动量灌进训练。
+
+**修法**（与 2026-10-03 的 ref 版同族、「字节随包 + 启动期种子」的第三条腿）：
+
+- 新增 `plan_handoff._seed_opt_blob_cache`（与 `_seed_ref_blob_cache` 同规）：字节来源按序
+  产物 `it-N/opt.tar` → 包根 `opt.tar` → job `opt.tar` / `blob.opt`；种进
+  `blob_cache/<sha>`，**返回本地字节的 sha**（无字节 ⇒ 空串，绝不回退到 manifest）。
+- 三个调用点：`_seed_start_checkpoint`（两条分支）、`run_loop.apply_resume_overlay`
+  （hub 续跑锚点的 opt 也只落产物、不进 cache —— 同一族的潜伏缺口，一并堵）。
+- `last_opt_sha` 语义收紧：**只声明本地可兑现的 sha**；没有就空串 + WARN（「本段按 Adam
+  从头跑；要带走动量请重导任务包」）——与「绝不静默 warm-start」（D5）同一条纪律。
+- `_get_with_retry` 开头拒空 `base_url`：确定性 `ProtocolError`（一次都不重试），
+  正文点名两条最常见修法（包/锚点没带 blob 字节 / 在线腿没给 `--hub-url`）。
+
+**被否决**：改 `import_bundle` 的起点落位 `it-{idx.it}` → `it-{idx.it-1}`。语义上更自洽
+（包件 = W(it-1)），但既有用例明钉该落位，而消费者读的是包根 `init_weights.json` +
+种子链 ⇒ 改它只增加爆炸半径；真正的缺陷是消费侧不看手边的字节。
+
+**回归**（`tests/remote/`）：`test_offline_start_opt_reaches_blob_cache`（整段跑完 + 起点
+动量在 cache + 以空 `base_url` 复现合成轮调用形态得 cache 命中）·
+`test_seed_opt_blob_cache_sources_and_honest_sha`（三来源 + 无字节返回空串）·
+`test_empty_base_url_is_deterministic_and_never_retried`（不重试、无「2s 后重试」日志）。
+
+**门槛**：nn python gate **3606 pass/7 skip**（ruff+mypy 干净）。
+
 ## §61 `import torch_xla` 抛 `sympy.printing` 缺绑定：导入前补绑守卫（Colab TPU 真机，2026-10-04）
 
 **症状**：Colab TPU 离线课程，rollout 正常跑完 176 局，PPO 起步即挂：

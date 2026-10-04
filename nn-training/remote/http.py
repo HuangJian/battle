@@ -387,6 +387,19 @@ def _get_with_retry(
     rerolls = 0
     preempts = 0  # 被 P1 挤走的次数（P2 专属）：独立预算，不消耗 attempts
     attempt = 1
+    # ★ 2026-10-04（x20-adv-acc 现场）：base_url 为空 = **确定性配置错误**，重试不会变好 ——
+    #   旧行为是 urllib 抛 `ValueError: unknown url type: '/jobs/…/blob?name=opt'`，被当成
+    #   瞬时抖动退避重试 3 次（白等 6s+，日志还引导不到根因）。最常见来源：自主段/离线段的
+    #   合成轮用 `run_job("", "")` 跑——blob 必须随包或锚点带到节点并种子进 blob_cache
+    #   （见 `plan_handoff._seed_opt_blob_cache` / `_seed_ref_blob_cache`，以及 `import_bundle`
+    #   对 `opt.tar` 的落位）；在线腿则是 --hub-url/hub_ip 没给。别抱着唯一通道睡觉之前
+    #   先把这条判掉：下面进来就会占一个 bulk 槽位。
+    if not str(base_url or "").strip():
+        raise ProtocolError(
+            f"没有 hub 地址（base_url 为空）却要下载 {path} —— 确定性配置错误，重试不会变好："
+            "blob/载荷必须已在节点本地（自主段没有下载通道），检查任务包/锚点是否带全"
+            "（opt/ref/demo 的种子链）或在线腿的 --hub-url/hub_ip"
+        )
     while attempt <= attempts:  # 用 while 而非 for：挤走时要**原地**重排，不推进 attempt
         # 重抽只在前几次尝试上开放：**最后一次必然老老实实传完**（否则慢链路就变成
         # 「永远下不完」——6 KB/s 的坏签确实存在，重抽是赌，不能把赌注全压在赌上）。
