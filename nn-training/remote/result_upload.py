@@ -62,6 +62,9 @@ class UploadTask:
     result: dict
     lease_token: str = ""
     claim_mode: str = "ok"
+    #: worker 身份（plan/worker-name-readable）：worker_loop 启动时算一次后随任务下传；
+    #: 空串 ⇒ `post_result` 回退 `worker_tag()`（旧调用方/测试兼容）。
+    worker_id: str = ""
     #: 落定回调（`(jid, outcome) -> None`）——生产侧用它把本 job 的传输账**收在落定那一刻**
     #: （async 下 `out` 的账要到那时才记完，过早 flush 会把回传读成 0s）。
     on_settled: Callable[[str, Outcome], None] | None = None
@@ -217,6 +220,7 @@ class ResultUploader:
                 task.result,
                 lease_token=task.lease_token,
                 mode=task.claim_mode,
+                worker_id=task.worker_id,
             )
         except BaseException as e:  # 重试耗尽 / 确定性拒绝 / 传输崩：一律算失败
             err = f"{type(e).__name__}: {e}"

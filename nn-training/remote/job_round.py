@@ -362,6 +362,7 @@ def run_one_round(
                 result=result,
                 lease_token=lease_token,
                 claim_mode=claim_mode,
+                worker_id=worker_id,
                 on_settled=_on_settled,
             )
         )
@@ -427,6 +428,7 @@ def run_one_round(
             kind=type(e).__name__,
             detail=_failure_detail(e),
             lease_token=lease_token,
+            worker_id=worker_id,
             log=log,
         )
     except Exception as e:

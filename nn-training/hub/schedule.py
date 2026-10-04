@@ -68,6 +68,7 @@ class ScheduleRoutes:
     _query_int: Any
     _read_json_body: Any
     _worker_id: Any
+    _watch_worker_source: Any
 
 
     def _get_peek(self) -> None:
@@ -83,6 +84,8 @@ class ScheduleRoutes:
         n = max(1, min(int(self._query_int("n", 3)), PEEK_MAX))
         # 请求方归属（缺头/旧 worker ⇒ online；见 `role_from_header`）。
         role = role_from_header(self.headers.get(ROLE_HEADER, ""))
+        # G7 观测（plan/worker-name-readable）：同名换来源 ⇒ 一行告警；只观测、不入账。
+        self._watch_worker_source(self._worker_id())
         jobs = self.hub.peek_jobs(
             worker_id=self._worker_id(),
             role=role,
@@ -134,6 +137,7 @@ class ScheduleRoutes:
             self._json({"error": "expected_epoch 非法"}, 400)
             return
         worker_id = str(body.get("worker_id") or self._worker_id())
+        self._watch_worker_source(worker_id)
         role = role_from_header(self.headers.get(ROLE_HEADER, ""))
         out = self.hub.claim_job(
             jid, mode=mode, worker_id=worker_id, expected_epoch=want_epoch, role=role

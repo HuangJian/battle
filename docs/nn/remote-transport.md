@@ -6,6 +6,53 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §66 云端 worker 身份命名：`kaggle-c` / `colab-t` / `aistudio-o`（本机 `local`）（plan/worker-name-readable，2026-10-04）
+
+**触发**（用户 2026-10-03）：dashboard PPO 贡献度里的 worker id 是 `hostname:pid`——Kaggle/Colab
+容器的 hostname 是平台随机串（`2f3dd8b0e0e2:4128`），既不表环境也不表连接方式。用户裁决六条：
+格式 `{env}-{link}`；历史 id 原样不映射；纯自动名（不加 `--worker-name`）；环境判据 = **尝试读平台
+secret**（不是看目录）；同一环境不会同时有多台云机 ⇒ 不做重名消解；`local` 不带 link 段。
+
+**判据（唯一实现 `nn-training/common/env_probe.py`，纯函数）**：
+
+* env 按 `kaggle → colab → aistudio → local` 顺序，先命中先算：`import kaggle_secrets` /
+  `import google.colab.userdata` **能导入即命中**（与 key 有没有配无关）；AI Studio 无 secret
+  机制 ⇒ `/home/aistudio` 存在；都不中 ⇒ `local`。
+* **只 import、不调用 getter**（`get_secret` / `userdata.get` 一次都不碰）；任何 import 异常
+  （含非 ImportError 的坏包）一律否定且**绝不抛**。因此**不需要** notebook 的
+  `_platform_net_env` 绕代理上下文（那是为**取值**的请求存在的；import 不发网络）。
+* link：`o` = `offline=True`（worker 的 `role=ROLE_OFFLINE`，由 `CFG["offline_worker"]` ⇒
+  `--offline` 追加；当前无 notebook 设置该键）；`t` = hub URL host ∈ `100.64.0.0/10` 或
+  `.ts.net` 域名；其余（含空/垃圾 URL）⇒ `c`。
+
+**身份链与零状态**：`remote/job_lifecycle.py::worker_tag(offline, hub_url)` 是唯一产生点；
+`worker_loop` 启动时**算一次**，随后**显式下传**——`post_result(worker_id=)` 进 `X-Worker-Id` 头、
+`UploadTask.worker_id`、`report_job_failure(worker_id=)` 进 body；缺参调用点回退 `worker_tag()`
+（旧调用方/测试逐字兼容）。**没有模块级 memo**：`common/` 层契约禁模块级可变状态，
+`job_lifecycle` 拆分守卫禁顶层状态与 `global`（`tests/remote/test_job_lifecycle_split.py`）。
+名字就是账本里的一个字符串 ⇒ hub 记账与 dashboard **零改动**（贡献度 PPO 组既有 `machineOf`
+剥 `:pid` 的按机器归并：新名不含冒号 ⇒ 恒等退化）。
+
+**同名观测守卫**（前提「同环境单台」的痕迹）：`hub/http_face.py::HubHandler._watch_worker_source`
+——worker 名 → `(来源, 末次秒)`；同名在 `WORKER_SEEN_WINDOW_SEC`（180s）内换了来源（既有
+`attributed_source`：回环对端 + `CF-Connecting-IP`）⇒ 一行告警，`WORKER_SOURCE_WARN_THROTTLE_SEC`
+（60s）节流。**只观测**：不改名、不入账、不分配后缀。挂在 `hub/schedule.py::_get_peek` /
+`_post_claim`。**已知盲区**：两台**本机** worker 同名（`local`）且同源（127.0.0.1）⇒ 静默；
+且 `_workers` 合并后 `active_worker_count()` 读 1 ⇒ 避让链闸（`may_avoid_stale_holder` 需 ≥2）
+行为变化（plan O4 记档）。
+
+**push 腿不受影响**：`battle.cloudflared.ipynb` 走 push（`push_port: 8790` + `push_bootstrap`），
+身份 = `push:<rl-config 节点 id>`（人起的名，如 `kaggle-gpu`），不经 `worker_tag()`。故当前
+部署里本命名的实际输出集中在 **`-t`**（`battle.tailscale.ipynb` 的 pull worker）与 **`local`**；
+`-c` / `-o` 是判据表保留的未来档。
+
+**字段验证（人在真机）**：worker 启动日志里的名字应与其环境/链路一致（本仓不能替真机签名）。
+
+**回归**：`tests/common/test_env_probe.py`（20）· `tests/remote/test_worker_name.py`（6）·
+`tests/hub/test_worker_name_guard.py`（3）· `e2e/test_worker_name_ledger_e2e.py`（1）。
+**指针**：plan `plan/worker-name-readable.plan.md` · 决策 `DECISIONS.md`
+§2026-10-04-goalnn-worker-readable-name · 控制台侧 `docs/nn/console.md` §27。
+
 ## §65 上传框必须排在 hub 重试之后：`files.upload()` 阻塞，抢在前头等于废掉自动取包（2026-10-04）
 
 **用户报障**（Colab 现场日志）：第一次 hub 取包失败（hub 正在导包，回执「已替你触发一次重导，

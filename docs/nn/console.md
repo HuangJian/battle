@@ -7,6 +7,13 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §27 worker 身份命名来源（指针，2026-10-04）
+
+控制台贡献度 PPO 组的身份列（`kaggle-t` / `colab-t` / `aistudio-o` / `local` …）由 worker 侧自动
+命名，判据、守卫与盲区全文见 `docs/nn/remote-transport.md` §66。**面板零改动**：新名不含 `:`，
+2026-10-03 落地的 `machineOf`（按机器归并、剥 `:pid`）对它是恒等；旧 `hostname:pid` 行不映射、
+不隐藏（用户裁决 ②）。
+
 ## §26 theme.css 热加载：改样式不必重启控制台（2026-10-04）
 
 **触发**（用户 2026-10-04）：`theme.css` 走 Bun 文本 import（模块级、由 SSR 内联）——

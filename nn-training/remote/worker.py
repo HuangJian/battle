@@ -833,8 +833,10 @@ def worker_loop(
     _total_s = "∞" if _yield_total is None else f"{_yield_total:.0f}"
     log(f"bulk 让路策略：mode={bulk_yield} after={_after_s}s total<={_total_s}s")
     # 身份只算一次（旧路径每个轮询都调 worker_tag()：hostname 系统调用不贵但没必要
-    # 每秒一次；而 hub 的登记表靠这个值去重，值必须稳定）。
-    worker_id = worker_tag()
+    # 每秒一次；而 hub 的登记表靠这个值去重，值必须稳定）。plan/worker-name-readable：
+    # 这里用完整上下文（离线归属 + hub URL）算出 `<env>-<link>`，随后**显式下传**给
+    # post_result / report_job_failure / UploadTask——纯函数、零模块级状态。
+    worker_id = worker_tag(offline=(role == ROLE_OFFLINE), hub_url=base_url)
     idle_since = time.time()
     _last_alive_log = time.time()
     _polls_since_log = 0

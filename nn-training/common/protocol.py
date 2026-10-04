@@ -285,8 +285,10 @@ CLAIM_TTL_SEC = 300
 HEARTBEAT_SEC = 60  # （兼容）旧心跳周期；仅旧租约模式 hub 的 worker 心跳线程使用
 AUTH_HEADER = "Authorization"  # Bearer <token>（D9；token 永不落盘/落日志）
 
-#: worker → hub：worker 身份（hostname:pid）——hub 靠它数「有几个**不同**的 worker」
-#: （隧道回源把全流量归成 127.0.0.1，源 IP 在此不可用）。
+#: worker → hub：worker 身份（`<env>-<link>`，如 `kaggle-t`；本机 = `local`）——hub 靠它数
+#: 「有几个**不同**的 worker」（隧道回源把全流量归成 127.0.0.1，源 IP 在此不可用）。
+#: 名字由 `common/env_probe.py` 的判据在 worker 侧算一次并显式下传（plan/worker-name-readable）；
+#: 旧 worker 仍报 `hostname:pid`，照旧入账（历史 id 不映射，用户裁决 ②）。
 WORKER_ID_HEADER = "X-Worker-Id"
 #: 「还在轮询」的判定窗口（秒）：超过它没再出现过就当该 worker 已离场，不参与判定。
 #: （2026-09-22 P3 竞速退役：本窗口现在**只**服务 `active_worker_count()` 的避让链。）

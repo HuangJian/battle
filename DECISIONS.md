@@ -7543,3 +7543,32 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   口径表 `(4, 3)` → `(4, 4)`，另加 `(5, 4)`。
 - **指针**：全文 `docs/nn/runtime-opt.md` §30（更新旗标挂在同文件 §7）·
   `docs/nn/remote-transport.md` §60 旗标。
+
+## §2026-10-04-goalnn-worker-readable-name（2026-10-04，worker 身份 = 环境+连接方式；环境判据 = 平台包可导入性；不做重名消解但留观测守卫）
+
+- **背景**：dashboard PPO 贡献度的 worker id 是 `hostname:pid`——Kaggle/Colab 容器的 hostname 是平台
+  随机串（`2f3dd8b0e0e2:4128`），既不表环境也不表连接方式。用户裁决六条：格式 `{env}-{link}`；历史 id
+  原样不映射；纯自动名（不加 `--worker-name`）；环境判据 = 尝试读平台 secret；同一环境不会同时有
+  多台云机 ⇒ 不做重名消解；`local` 不带 link 段。
+- **备选与否决**：① 目录判据（`/kaggle/working`、`/content`）——否：用户裁决 ④ 点名用 secret 客户端
+  （且 AI Studio 镜像也可能有 `/content`，目录判据会被 colab 吞掉）；② 真读 secret 值判定——否：
+  判据与「key 有没有配」无关（`ImportError` 才是否定），纯 import 不发网络、不需要绕代理，顺带消掉
+  第三份 `_platform_net_env`；③ hub 分配后缀 / 本地 hash 后缀——否：裁决 ⑤ 同环境单台，少一个协议
+  字段就少一类兼容问题；④ 模块级 memo 缓存身份——否：`common/__init__.py` 层契约「无模块级可变状态」
+  + `job_lifecycle` 拆分守卫「顶层零状态/禁 `global`」⇒ 改为 worker_loop 单次计算 + 显式下传
+  （零隐藏状态）；⑤ 把旧 id 映射成可读名——否：裁决 ②（映射是猜的，会编身份）。
+- **决定**：① 判据唯一实现 `common/env_probe.py`（纯函数）：env = `kaggle_secrets` /
+  `google.colab.userdata` 可导入性（顺序 kaggle→colab→aistudio→local）或 `/home/aistudio`；
+  link = offline ⇒ `o`、host ∈ `100.64/10` 或 `.ts.net` ⇒ `t`、其余 ⇒ `c`；`local` 无 link 段。
+  ② `worker_tag(offline, hub_url)` 纯函数；生产三处调用点单次计算后显式下传（`post_result(worker_id=)`
+  / `UploadTask.worker_id` / `report_job_failure(worker_id=)`），缺参回退。③ 零协议改动：hub 入账与
+  dashboard 零改动（既有 `machineOf` 对新名恒等）；旧 worker `hostname:pid` 照旧入账、不映射。
+  ④ 观测守卫：`hub/http_face.py::_watch_worker_source`——同名 + 异来源（既有 `attributed_source`）
+  在 180s 窗口内 ⇒ 一行告警（60s 节流）；只观测，不改名/不入账。⑤ push 腿身份 `push:<id>` 不动。
+- **违反后果**：重名消解会引入协议字段与升级顺序负担（裁决 ⑤ 明确不需要）；探测去调 getter ⇒
+  绕代理/secret 副作用回来（且判据仍与 key 配置无关）；加 memo/模块状态 ⇒ 撞 `common` 层契约与拆分
+  守卫；把 `local` 拼上 link ⇒ 违反裁决 ⑥；守卫改名/写账 ⇒ 观测面污染账本。
+- **指针**：全文 `docs/nn/remote-transport.md` §66 · `docs/nn/console.md` §27 · plan
+  `plan/worker-name-readable.plan.md`；回归 `tests/common/test_env_probe.py` ·
+  `tests/remote/test_worker_name.py` · `tests/hub/test_worker_name_guard.py` ·
+  `e2e/test_worker_name_ledger_e2e.py`。

@@ -39,11 +39,11 @@ remote.worker._request` 从此不再影响任何东西（`tests/remote/test_job_
 from __future__ import annotations
 
 import json
-import os
 import threading
 import time
 from typing import Any
 
+import common.env_probe as env_probe
 from common.protocol import (
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
@@ -456,6 +456,7 @@ def post_result(
     timeout: float = 120.0,
     attempts: int = 5,
     mode: str = "ok",
+    worker_id: str = "",
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> int:
     """POST 结果：瞬时失败（网络/5xx）指数退避重试（最贵产物不允许最后一米丢失）；
@@ -499,7 +500,9 @@ def post_result(
                             **({"X-Lease-Token": lease_token} if lease_token else {}),
                             # 承接归属（plan/worker-contribution-view W2）：身份与 claim 同源。
                             # 缺它 ⇒ hub 的 job_result_accepted / job_rejected 归不到人。
-                            WORKER_ID_HEADER: worker_tag(),
+                            # 身份由 worker_loop 单次计算后经 `worker_id=` 下传（plan/worker-name-
+                            # readable）；缺参调用点回退 `worker_tag()`（旧调用方逐字兼容）。
+                            WORKER_ID_HEADER: worker_id or worker_tag(),
                         },
                         pace=_bulk_pace(_tok, BULK_P1_CRITICAL),
                     )
@@ -573,18 +576,21 @@ def release_job(
         pass  # release 不可达：租约过期兜底（30min），与旧行为一致
 
 
-def worker_tag() -> str:
-    """本 worker 的可读身份（失败回报的 `worker` 字段）。
+def worker_tag(offline: bool = False, hub_url: str = "") -> str:
+    """本 worker 的可读身份：`<env>-<link>`（本机 = `local`；plan/worker-name-readable）。
 
     多机共用一个 hub 时，「是哪台机器说 bun 缺失」是定位现场的**唯一**线索
-    （全部节点共用同一份 token，日志里分不出来）。
-    """
-    try:
-        import socket
+    （全部节点共用同一份 token，日志里分不出来）。环境 = 平台包可导入性、link = o/t/c，
+    判据都在 `common/env_probe.py`（纯 import、不碰 secret；本机不带 link 段）。
 
-        return f"{socket.gethostname()}:{os.getpid()}"
-    except Exception:  # 主机名不可得（容器/受限沙箱）——pid 也够用
-        return f"pid{os.getpid()}"
+    纯函数（同参同值、零模块级状态）：生产路径在 `worker_loop` 启动时**算一次**，经
+    `post_result(worker_id=)` / `report_job_failure(worker_id=)` / `UploadTask.worker_id`
+    显式下传；缺参调用点回退本函数（旧调用方/测试逐字兼容）。
+    """
+    return env_probe.worker_name(
+        env_probe.probe_cloud_env(),
+        env_probe.resolve_link_kind(offline=offline, hub_url=hub_url),
+    )
 
 
 def _failure_detail(e: BaseException, limit: int = 4000) -> str:
@@ -641,6 +647,7 @@ def report_job_failure(
     kind: str = "",
     detail: str = "",
     lease_token: str = "",
+    worker_id: str = "",
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> bool:
     """回报**确定性**失败原因（`POST /jobs/{id}/fail`）。
@@ -659,7 +666,7 @@ def report_job_failure(
             "reason": str(reason)[:2000],
             "kind": str(kind)[:200],
             "detail": str(detail)[:4000],
-            "worker": worker_tag(),
+            "worker": worker_id or worker_tag(),
         },
         ensure_ascii=False,
     ).encode("utf-8")

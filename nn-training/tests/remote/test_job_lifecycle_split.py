@@ -64,6 +64,9 @@ MOVED_NAMES = {
     "worker_tag",
 }
 ALLOWED_IMPORTS = {
+    # `common.env_probe`（plan/worker-name-readable）：worker_tag 的环境/link 判据——
+    # 纯函数（同参同值、零状态），符合本簇「纯函数面」的定位。
+    "common.env_probe",
     "common.protocol",
     "common.text",
     "remote.bulk_sched",

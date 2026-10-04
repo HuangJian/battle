@@ -83,6 +83,7 @@ from common.protocol import (
     ROLE_HEADER,
     ROLE_OFFLINE,
     WORKER_ID_HEADER,
+    WORKER_SEEN_WINDOW_SEC,
     ProtocolError,
     role_from_header,
 )
@@ -115,6 +116,10 @@ from remote.push_dispatch import PushDispatcher
 #: 实测方法：向隧道发带伪造值的无效鉴权，看本文件的 AUTH FAIL 审计行 src= 显示哪个）。
 #: 只认它，不认 `X-Forwarded-For`：后者是**可追加的逗号列表**，取哪一段都是语义游戏。
 CF_SOURCE_HEADER = "CF-Connecting-IP"
+
+#: 同名 worker「异来源」告警的节流（秒）——两台机器交替轮询时避免每请求一行
+#: （plan/worker-name-readable G7；先例 = 本模块 `_blocked_logged` 的每分钟一条）。
+WORKER_SOURCE_WARN_THROTTLE_SEC = 60.0
 
 #: 单次**响应发送**的超时（秒）：对端半开（隧道/代理侧掉了，本机 TCP 还挂着）时
 #: `wfile.write()` 会**永久**阻塞，那个 handler 线程就永久卡在写里。
@@ -191,6 +196,14 @@ class HubHandler(
 
     #: ip -> 上次打印「封禁拒绝」的墙钟（节流：被封客户端高频轮询时每 ip 每分钟一条）
     _blocked_logged: dict[str, float] = {}
+
+    #: ★ 同名 worker 来源观测（plan/worker-name-readable G7）：worker 名 -> (来源, 末次见到秒)。
+    #: 只观测——同名在 `WORKER_SEEN_WINDOW_SEC` 内换了来源 ⇒ 一行告警；**不改名、不入账、
+    #: 不分配后缀**。两个 dict 都是进程级（与 `_blocked_logged` 同规：ThreadingHTTPServer
+    #: 每请求新建实例，类属性才是共享面）。
+    _seen_worker_sources: dict[str, tuple[str, float]] = {}
+    #: 上述告警的节流表：worker 名 -> 上次告警墙钟。
+    _worker_source_warned: dict[str, float] = {}
 
     # ---- 基础 ----
     def log_message(self, fmt: str, *args: object) -> None:  # 只打非常规事件
@@ -542,6 +555,40 @@ class HubHandler(
 
     def _worker_id(self) -> str:
         return self.headers.get(WORKER_ID_HEADER, "")
+
+    def _watch_worker_source(self, worker_id: str) -> None:
+        """★ 观测守卫（plan/worker-name-readable G7）：同名 + 异来源 ⇒ 一行告警（节流）。
+
+        前提（用户裁决 ⑤）= 同一环境不会同时有两台云机 ⇒ `{env}-{link}` 天然唯一。前提一旦
+        被打破，hub 的 `_workers` 会把两台互相覆盖（避让链/贡献度面板合并成一行 = 假数）而
+        **没有任何痕迹**——本函数就是那一条痕迹。**只观测**：不改名、不入账、不分配后缀。
+
+        来源 = 既有归因 `attributed_source`（回环对端 + `CF-Connecting-IP`；直连只认 TCP
+        对端）。已知盲区：两台**本机** worker（`local`）来源都是 127.0.0.1 ⇒ 静默
+        （记档在 plan O4；`_workers` 合并还会让 `active_worker_count()` 读 1）。
+        """
+        wid = (worker_id or "").strip()
+        if not wid:
+            return
+        hdrs = self.headers
+        src, _via = attributed_source(
+            self.client_address[0], hdrs.get(CF_SOURCE_HEADER, "") if hdrs else ""
+        )
+        now = time.time()
+        prev = self._seen_worker_sources.get(wid)
+        self._seen_worker_sources[wid] = (src, now)
+        if not prev or prev[0] == src or now - prev[1] > WORKER_SEEN_WINDOW_SEC:
+            return
+        last = self._worker_source_warned.get(wid, 0.0)
+        if now - last < WORKER_SOURCE_WARN_THROTTLE_SEC:
+            return
+        self._worker_source_warned[wid] = now
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] ⚠ worker 名 {wid} 在 "
+            f"{WORKER_SEEN_WINDOW_SEC:.0f}s 窗口内换了来源（{prev[0]} → {src}）——"
+            "「同环境单台」前提可能被打破（只观测，不改名/不入账）",
+            flush=True,
+        )
 
     def _log_claim(self, jid: str, course: str, worker_id: str, mode: str, token: str) -> None:
         """★ 认领可观测（§4.3）：**每次** claim 一行（job/课程/worker/模式/租约/次数）。
