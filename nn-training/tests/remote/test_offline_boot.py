@@ -522,6 +522,45 @@ def test_hub_fetch_gives_up_after_the_cap_and_switches_to_upload(
     )
 
 
+def test_upload_prompt_comes_only_after_the_hub_tries_are_exhausted(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 2026-10-04 Colab 现场：第一次取包失败就弹上传框 —— **重试机制被破坏**。
+
+    弹框（`files.upload()`）会**阻塞**在交互上：抢在 hub 重试前面弹，等于把「hub 正在
+    导包、稍后自动取到」这条路一刀切断（现场：hub 刚说「已替你触发一次重导，稍后重试」，
+    下一行就是上传框）。用户口径：**先让 hub 试满 `hub_tries` 轮**（转「等上传」模式）
+    **才**弹一次框。这里钉调用顺序：N 次 hub 重试全部发生在第一次弹框之前。
+    """
+    up = tmp_path / "up"
+    up.mkdir()
+    monkeypatch.setattr(offline_boot, "UPLOAD_GLOBS", (str(up),))
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub.invalid"])
+    monkeypatch.setattr(offline_boot, "probe_hub", lambda *a, **k: True)
+    events: list[str] = []
+
+    def fetch(hub, token, course, dest_dir, log, timeout=0.0):
+        events.append("hub")
+        return None
+
+    def prompt(log):
+        events.append("prompt")
+        return fake_pack(up, course="c5-gae")  # 用户传上来了 ⇒ 循环退出
+
+    monkeypatch.setattr(offline_boot, "fetch_task_pack", fetch)
+    monkeypatch.setattr(offline_boot, "prompt_upload", prompt)
+    got = offline_boot.obtain_pack(
+        {"course": "c5-gae", "wait_pack_sec": 30, "poll_sec": 0.05, "hub_tries": 3},
+        {"HUB_TOKEN": "t"},
+        quiet,
+        tmp_path / "w",
+    )
+    assert got is not None and got.name == "task-c5-gae.zip"
+    assert events[:3] == ["hub", "hub", "hub"], f"hub 试满 3 轮之前不许弹框：{events}"
+    assert events[3] == "prompt", f"试满后立刻弹一次框：{events}"
+    assert events.count("prompt") == 1, f"框只弹一次：{events}"
+
+
 def test_hub_tries_zero_means_no_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`hub_tries=0` = 不限轮数（旧行为留一个把手：hub 稍后才会导出时用它）。
 

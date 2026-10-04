@@ -6,6 +6,24 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §65 上传框必须排在 hub 重试之后：`files.upload()` 阻塞，抢在前头等于废掉自动取包（2026-10-04）
+
+**用户报障**（Colab 现场日志）：第一次 hub 取包失败（hub 正在导包，回执「已替你触发一次重导，
+稍后重试」）就**弹出上传框**——「破坏了多次重试取包机制。应改为多次重试失败后才要求手动上传」。
+
+**根因**：`obtain_pack` 等待循环里弹框的门只有 `not prompted ∧ wait_s > 0` —— 第一拍 hub 试
+一次失败后立刻为真。而 `files.upload()` 会**阻塞**在交互上（等人选文件/取消）⇒ 循环停在框上，
+后面 `hub_tries` 轮重试（现场 hub 正要导包）全被切断；hub 稍后导出也取不到了。
+
+**修法**（`remote/offline_boot.py`）：弹框门加 `hub_parked or not hubs` —— 先让 hub 试满
+`hub_tries` 轮（转「等上传」模式）**才**弹一次；没配 hub 时无重试可破坏，照旧立刻弹。等框
+期间每轮照样扫落点（`find_uploaded_pack`），用户随时手动传的包不会漏。
+
+**回归**：`tests/remote/test_offline_boot.py::test_upload_prompt_comes_only_after_the_hub_tries_are_exhausted`
+（调用顺序：3 轮 hub 全部先于唯一一次 prompt）。notebook 说明书两处文案同步。
+
+**门槛**：nn python gate 3611 pass/7 skip（ruff+mypy 干净）。
+
 ## §64 云机续领「自己的租约」：清单 claimable 不认自己，把自己锁到 900s TTL（2026-10-04）
 
 **用户追问**（Kaggle 现场）：云机反复「清单 3 条 ⇒ 队列为空」取不到 job，重跑 cell 才取到；

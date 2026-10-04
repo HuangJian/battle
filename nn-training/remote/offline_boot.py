@@ -29,6 +29,10 @@
 还没拿到包（hub 没导出 / 抖动 / 鉴权错都算），**不再碰 hub**，转入「等上传」模式并响亮说明
 ——否则云机只会把整个 `wait_pack_sec`（缺省 30 分钟）耗在轮询上，而会话时间是花钱买的。
 注意「取包」与「起隧道」是两回事：上限只管前者，后者按下面的规则单独判。
+**上传框排在上限之后**（用户口径 2026-10-04）：Colab 的上传框（`files.upload()`）会**阻塞**
+在交互上——第一次取包失败就弹，等于把「hub 正在导包、稍后自动取到」这条路一刀切断（现场：
+hub 刚说「已替你触发一次重导，稍后重试」，下一行就是框）。所以只有 hub 试满上限（或根本没
+配 hub）才弹一次；等它期间照样每轮扫落点，用户随时手动传上来的包都不会漏。
 
 **Kaggle 上不使用 tailscale**（用户口径 2026-09-23）：平台容器既不给 NET_ADMIN 也换不得
 网络命名空间，而 userspace 引导会把进程代理改写成只转发 Tailscale IP 的代理——2026-09-17
@@ -321,6 +325,9 @@ def prompt_upload(log: Callable[[str], None]) -> Path | None:
 
     只在 Colab 且 `prompt_upload` 开着时可用；任何失败都**不致命**——叫不动就退回轮询
     （Kaggle 没有上传框，只能靠 Add Data 挂数据集；那里轮询才是正路）。
+
+    **调用点约束**（2026-10-04）：只许在 hub 重试到上界（`hub_parked`）或没配 hub 之后调
+    ——`files.upload()` 会**阻塞**在交互上，抢在重试前面弹就等于关掉了自动取包这条路。
     """
     try:
         from google.colab import files  # type: ignore[import-not-found]
@@ -692,6 +699,8 @@ def obtain_pack(
 
     **两条源在同一个循环里轮询**（每轮先看落点、再试 hub）：用户随时可能上传，hub 也随时
     可能被点上「导出」——把它们排成先后两步，会让「上传之后又等满 hub 的超时」这种事发生。
+    **上传框只在 hub 试满上限之后弹一次**（2026-10-04：`files.upload()` 阻塞在交互上，
+    抢在重试前面弹 = 重试机制失效）；没配 hub 时立刻弹（那已是唯一的路）。
 
     **hub 只试 `CFG["hub_tries"]` 轮**（缺省 `DEFAULT_HUB_TRIES` = 10，0 = 不限）：连试这么多
     轮还没拿到就不再碰 hub，**转入「等上传」模式**并响亮说明（用户口径 2026-09-23）。原来
@@ -765,7 +774,17 @@ def obtain_pack(
                     "notebook（Colab 上传框 / Kaggle Add Data），或写进 CFG['task_zip']；"
                     "若你刚导出、想让它自己取，**重跑本 cell** 即可"
                 )
-        if not prompted and cfg.get("prompt_upload", True) and wait_s > 0:
+        # ★ 2026-10-04 Colab 现场：弹框（`files.upload()`）会**阻塞**在交互上——抢在 hub
+        #   重试前面弹，等于把「hub 正在导包、稍后自动取到」这条路一刀切断（现场日志：
+        #   hub 刚说「已替你触发一次重导，稍后重试」，下一行就是上传框 ⇒ 重试机制失效）。
+        #   用户口径：先让 hub 试满 `hub_tries` 轮（转「等上传」模式）**才**弹。没配 hub
+        #   时无重试可破坏，照旧立刻弹（那是唯一的路）。
+        if (
+            not prompted
+            and (hub_parked or not hubs)
+            and cfg.get("prompt_upload", True)
+            and wait_s > 0
+        ):
             prompted = True
             got = prompt_upload(log)
             if got is not None:
