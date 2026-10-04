@@ -7,6 +7,50 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §28 离线课补评：云机没回传 eval 时，hub 端用 LAN 集群补（plan/offline-eval-backfill，2026-10-04）
+
+**触发**（用户 2026-10-04）：「离线课程，如果云机未回传 eval 结果（云机可能未启用 eval 以节省
+CPU/墙钟），则在 +3 it 的权重回传后在 hub 端使用 LAN 集群跑 eval。注意课程完成指定轮数收官时，
+如果最后一轮需要 eval，也要执行。」
+
+**病根**：云机 A 层 eval 是**可选项**（`remote/offline_boot.eval_on_cloud`，notebook 可关）；
+关掉 = 整段期间**零读数**，而「谁来点这一枪」在云机不开 eval 时不存在——in-loop 评估在云机自己
+的进程里，本机主循环又不在场（离线课本机不跑训练）。日常评估点与收官轮就此留下读数缺口。
+
+**语义（两条已裁决口径）**：
+
+| 场景 | 判据 | 动作 |
+|---|---|---|
+| +3 宽限 | 评估点 `N` 的权重回传后，该 run 已回传 `max(its) >= N + 3` 仍无 `(N, W16)` 的 `eval_summary` | 补评 `N`（给云机自己的 eval 留 3 轮赶回时间；已回来 ⇒ 跳过） |
+| 收官 | `end_it_reached` 时最后一个评估点（`floor(it_end / eval_every) * eval_every`，且已在 `its` 里）缺读数 | **不等宽限立即补评**（后面没有轮次可以等）；非评估点收官轮不评 |
+
+`W16` = 回传轮 `row.json.weights_fp` 前 16 位（缺则按权重文件 sha256 现算）；权重取回传树
+`remote-jobs/offline/<run>/it-NNN/weights.json`（首选）或交付镜像 `deliver/<run>/it-NNN/`。
+动作 = `launchEvalA`（与按钮 / 开课基线 / 导入后评估**同一条**链：LAN 节点直派 + 本机份额、
+同语料、同账本、同去重）；进程内 evalA 单槽 ⇒ 每拍至多启动一个（候选按 `(N, run)` 升序）；
+补评后由账本 summary 自然去重；失败按 `(课, run, N, W16)` 指数退避（10min 起、2h 封顶）。
+
+**为什么住控制台 TS（而不是 hub/python）**：启动 evalA 的唯一入口（spawn + `eval:A` 互斥 +
+日志）住在 `server/eval-a-run.ts`；hub 是独立 python 进程、同层不得 import `trainer`，也没有
+spawn/互斥/日志持有者（plan §2.3-N4）。
+
+**落点**：`server/offline-eval-backfill.ts`（新：纯选择 `selectOfflineEvalRounds` + 增量账本
+索引 `EvalLedgerIndex` + 编排 `createOfflineEvalBackfill` + 生产单例）· `api/overview.ts`
+（`HubProbe`/`HubAdmin` 增 `offlineResults`——同一次 `/admin/offline` 探测里已有 results，
+零新增网络）· `server.ts`（60s ticker + 启动先跑一拍，`unref`）· 逃生阀
+`BCITY_NO_OFFLINE_EVAL_BACKFILL`。
+
+**守卫用例**（`dashboard/tests/offline-eval-backfill.test.ts`，21 例）：宽限边界 / 非评估点跳过 /
+收官（含 `it_end` 非倍数）/ 每 run 独立宽限 · 账本增量索引（截断重建 / 半行竞态）· 课程配置
+（缺省与拒收同 `CloudEvalPlan` 口径）· 权重发现（回传树优先 / `row.json` 指纹优先 / 现算）·
+编排（宽限启动 / 别的 wver 仍补 / 收官立即 / 镜像兜底 / 权重缺席跳过 / busy 不记退避 / 失败
+指数退避 / 逃生阀 / hub 不可达 / 无语料整门跳过）· 接线闸（server.ts）+ 默认 hub 链路端到端
+（假 hub 的 `/admin/offline.results` 经 `getHubAdmin` 直达收官补评）。**必红自查**两条：删宽限
+判据 / 删收官分支 ⇒ 对应用例红。
+
+**门槛**：dashboard typecheck 绿 + **1375 pass / 0 fail**（新 21 例）· 根 `bun run check`
+**2353 pass / 12 skip / 0 fail** · `bun run build` 过；训练侧零 diff（本批不碰 `nn-training/**`）。
+
 ## §27 worker 身份命名来源（指针，2026-10-04）
 
 控制台贡献度 PPO 组的身份列（`kaggle-t` / `colab-t` / `aistudio-o` / `local` …）由 worker 侧自动

@@ -7572,3 +7572,20 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   `plan/worker-name-readable.plan.md`；回归 `tests/common/test_env_probe.py` ·
   `tests/remote/test_worker_name.py` · `tests/hub/test_worker_name_guard.py` ·
   `e2e/test_worker_name_ledger_e2e.py`。
+
+## §2026-10-04-goalnn-offline-eval-backfill（2026-10-04，离线课：云机没回传 eval 时 hub 端用 LAN 集群补评）
+
+- **背景**：云机 A 层 eval 可关（`eval_on_cloud`）⇒ 整段回传期间零读数，日常评估点与收官轮没人评。
+  用户口径：评估点 N 的权重回传后等 +3 轮仍无读数 ⇒ hub 补评；课程收官轮若需评估也执行。
+- **备选与否决**：① hub/python 直接触发 —— 否，hub 是 L4 对端（同层禁 import trainer），也没有
+  spawn/互斥/日志持有者；② 无宽限立即评 —— 否，云机自己的 eval 可能还在路上，重复烧 LAN 算力；
+  ③ 在 TS 重算训练侧评估判据 —— 否，只读课程配置 / 回传产物 / eval 账本三个事实源，不发明第二条口径。
+- **决定**：新 `dashboard/src/server/offline-eval-backfill.ts`（纯选择 + 增量账本索引 + 编排）；
+  +3 宽限 = 该 run `max(its) >= N+3`；收官 = `end_it_reached` 时最后一个评估点
+  （`floor(it_end/eval_every)*eval_every`）缺读数立即补；动作复用唯一启动点 `launchEvalA`
+  （LAN 节点 + 本机份额）；`(iter, wver16)` summary 幂等 + 失败指数退避（10min→2h）+ 单槽串行；
+  `server.ts` 60s ticker（`unref`）+ 启动一拍；`api/overview.ts` 的 `/admin/offline` 探测补
+  `offlineResults`（同一次应答，零新增网络）；逃生阀 `BCITY_NO_OFFLINE_EVAL_BACKFILL`。
+- **违反后果**：去掉宽限 ⇒ 云机 eval 在途时重复评估；绕过账本去重 ⇒ 双写 eval_log / 读数竞争；
+  另造评估链 ⇒ 语料与去重口径出现第二事实源。
+- **指针**：全文 `docs/nn/console.md` §28 · plan `plan/offline-eval-backfill.plan.md`。
