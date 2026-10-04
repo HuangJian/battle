@@ -470,6 +470,51 @@ def test_resolve_courses_skips_given_up_courses(monkeypatch: pytest.MonkeyPatch)
     assert [t["course"] for t in got] == ["b"]
 
 
+def test_resolve_courses_logs_why_a_row_is_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ 2026-10-04 现场（Kaggle：清单 3 条 ⇒ 队列为空，看不出为什么）：空队列必须**自解释**。
+
+    不可领的原因全在 hub 行的 `state`/`reason`（not_offline=停课 / held=<worker> / completed /
+    busy）与盘上事实（无包 / 包过期）里——丢掉它们，云机日志就只剩一句「队列为空」，
+    排查只能靠人工 curl `/offline/tasks`（这正是当时卡住的那一步）。
+    """
+    tasks = [
+        {
+            "course": "stopped",
+            "claimable": False,
+            "seize": False,
+            "state": "not_offline",
+            "reason": "not_offline",
+            "pack": {"sha256": "aa" * 32},
+        },
+        {
+            "course": "held",
+            "claimable": False,
+            "seize": False,
+            "state": "ready",
+            "reason": "held: tpu-1",
+            "pack": {"sha256": "bb" * 32},
+        },
+        {
+            "course": "nopack",
+            "claimable": False,
+            "seize": False,
+            "state": "empty",
+            "reason": "",
+            "pack": None,
+            "stale_reason": "",
+        },
+    ]
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
+    lines: list[str] = []
+    assert offline_boot.resolve_courses({}, {}, lines.append) == []
+    note = "\n".join(lines)
+    assert "不可领/不可抢" in note, lines
+    assert "stopped[not_offline；not_offline]" in note, lines
+    assert "held[ready；held: tpu-1]" in note, lines
+    assert "nopack[empty；无任务包（等控制台导出）]" in note, lines
+
+
 def test_resolve_courses_prefers_offline_over_seize(monkeypatch: pytest.MonkeyPatch) -> None:
     """★ 用户裁决的优先级：有就绪的离线课 ⇒ 只取它，在训在线课（seize）这次不碰；
     离线课那份已跑过（served 同 sha）⇒ 顺延去抢。"""

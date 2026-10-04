@@ -1483,6 +1483,13 @@ def resolve_courses(
     # 调用方按「中间态不占 idle 预算」等到别的课跑完（比「空队列」更准确）。
     seized = [t for t in tasks if t.get("seize") and _eligible(t)]
     if not seized:
+        # ★ 2026-10-04 现场（Kaggle：「hub 清单：3 条」接着「队列为空」，看不出为什么）：
+        #   不可领的原因**就在 hub 行的 `state`/`reason`/`holder` 里**（not_offline=停课 /
+        #   held=有主 / completed=本段跑满 / busy / 无任务包 / 包过期），不打印就等于把排查
+        #   推给人工去 curl `/offline/tasks`。这里逐行报出——空队列从此自解释。
+        blocked = [t for t in tasks if not t.get("claimable") and not t.get("seize")]
+        if blocked:
+            log("不可领/不可抢：" + "、".join(f"{_blocked_note(t)}" for t in blocked))
         return []
 
     def _open_key(t: dict) -> tuple[float, str]:
@@ -1497,6 +1504,25 @@ def resolve_courses(
         "（hub 将把它翻成离线）"
     )
     return [_as_pick(first)]
+
+
+def _blocked_note(t: dict) -> str:
+    """一行说清「这行课为什么不可领/不可抢」（纯函数；日志用）：`课[state；reason；…]`。
+
+    为什么单独成函数：空队列的排查线索全在这里——`state`（hub 的读面判据）与 `reason`
+    （not_offline / held:<worker> / completed / busy）是 hub 侧的直接事实，缺包/过期包是
+    盘上事实；把这些丢掉，云机日志就只剩一句「队列为空」（2026-10-04 Kaggle 现场）。
+    """
+    bits = [str(t.get("state") or "?")]
+    reason = str(t.get("reason") or "")
+    if reason:
+        bits.append(reason)
+    if not t.get("pack"):
+        bits.append("无任务包（等控制台导出）")
+    stale = str(t.get("stale_reason") or "")
+    if stale:
+        bits.append(f"包过期:{stale}")
+    return f"{t.get('course')}[{'；'.join(bits)}]"
 
 
 def _no_courses_msg(why: str) -> str:
