@@ -837,6 +837,9 @@ def worker_loop(
     # 这里用完整上下文（离线归属 + hub URL）算出 `<env>-<link>`，随后**显式下传**给
     # post_result / report_job_failure / UploadTask——纯函数、零模块级状态。
     worker_id = worker_tag(offline=(role == ROLE_OFFLINE), hub_url=base_url)
+    # 启动行播报身份（plan/worker-name-readable §8 字段验证）：人在真机上核一次
+    # 「名字与所在平台/链路一致」——hub 侧 claim 日志也有，但这一行不需要 hub 就能看。
+    log(f"worker 身份：{worker_id}")
     idle_since = time.time()
     _last_alive_log = time.time()
     _polls_since_log = 0
