@@ -83,6 +83,7 @@ import { restartSpecFor } from './actions'
 import { runningStaleCode } from '../core/reload'
 import { handleDeliverUpload, taskBundleDownloadResponse, taskBundleInfo } from './bundles'
 import { runExitCheck } from './exit-watchdog'
+import { OFFLINE_EVAL_BACKFILL_INTERVAL_MS, runOfflineEvalBackfill } from './offline-eval-backfill'
 import { ensureBundle, type BundleTarget } from './build'
 import { livePageCss } from './theme-css'
 import { renderConsolePage, renderEvalPage, renderLogPage } from '../web/render'
@@ -283,6 +284,15 @@ async function main(): Promise<void> {
     void runExitCheck() // async：内部已兜底（返回 -1），失败不炸循环
   }, 4000)
   exitWatchdog.unref?.()
+  // 离线课补评（plan/offline-eval-backfill）：云机没开/没回传 eval 时，评估点 N 等该 run
+  // 回传推进到 +3 轮仍无读数（收官轮立即）⇒ 用现成 evalA 链（LAN 节点 + 本机份额）补评；
+  // 每拍至多一个（evalA 单槽互斥），启动先跑一拍。内部绝不抛，unref 不挡进程退出。
+  const offlineBackfillTimer = setInterval(
+    () => void runOfflineEvalBackfill(),
+    OFFLINE_EVAL_BACKFILL_INTERVAL_MS,
+  )
+  offlineBackfillTimer.unref?.()
+  void runOfflineEvalBackfill()
 
   const { BUNDLES } = await import('./build')
   const bundlesByPath = new Map(BUNDLES.map((b) => [`/${b.key}.js`, b]))

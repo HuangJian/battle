@@ -899,3 +899,24 @@ truncated 流保持尾部重建；R3 `scanPoolStreams()` 一次 walk 两组候�
 （人跑；基线数字落 plan §1/PR —— 本检出 tmp 为空，真机复测交用户终端）。
 决策 → `DECISIONS.md` §2026-10-03-goalnn-request-path-zero-aggregate；全文 → `docs/nn/console.md` §25；
 计划 → `plan/dashboard-reload-perf.plan.md`（评审修订版 A1–A6）。
+
+## 2026-10-04 · offline-eval-backfill：云机没回传 eval 时 hub 端用 LAN 集群补评（+3 宽限 / 收官立即）
+
+触发（用户 2026-10-04 逐字）：「离线课程，如果云机未回传 eval 结果（云机可能未启用 eval 以节省
+CPU/墙钟），则在 +3 it 的权重回传后在 hub 端使用 LAN 集群跑 eval。注意课程完成指定轮数收官时，
+如果最后一轮需要 eval，也要执行。」
+
+语义：评估点 `N`（`N>=1 ∧ N%eval_every==0`）在「该 run 已回传 `max(its) >= N+3` 仍无
+`(N, W16)` 的 `eval_summary`」时补评（宽限）；`end_it_reached` 时最后一个评估点
+（`floor(it_end/eval_every)*eval_every`）缺读数 ⇒ 立即（收官，不等 +3）。`W16` = 回传轮
+`row.json.weights_fp` 前 16 位（缺则按权重文件 sha256 现算）；权重取回传树
+`remote-jobs/offline/<run>/it-NNN/`（首选）或交付镜像 `deliver/<run>/it-NNN/`。动作 = 复用
+`launchEvalA`（唯一启动点：LAN 节点 + 本机份额、同语料/账本/去重），每拍至多一个（单槽互斥）、
+账本幂等、失败 10min→2h 指数退避。落点：`dashboard/src/server/offline-eval-backfill.ts`（新）·
+`api/overview.ts` 增 `offlineResults`（同一次 `/admin/offline` 探测，零新增网络）· `server.ts`
+60s ticker + 启动先跑一拍。逃生阀 `BCITY_NO_OFFLINE_EVAL_BACKFILL`。
+
+读数：dashboard typecheck 绿 + **1375 pass / 0 fail**（新 21 例）· 根 `bun run check`
+**2353 pass / 12 skip / 0 fail** · `bun run build` 过 · 必红自查两条（删宽限判据 / 删收官分支）
+均验证会红。决策 → `DECISIONS.md` §2026-10-04-goalnn-offline-eval-backfill；全文 →
+`docs/nn/console.md` §27；计划 → `plan/offline-eval-backfill.plan.md`。

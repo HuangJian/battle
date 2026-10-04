@@ -26,6 +26,7 @@ import { hubOfflineAdmin, hubPushWorkers, liveHub, withWorkerProbes } from '../.
 import { hubPushEnabled } from '../../stack/push-config'
 import {
   type HubQueueView,
+  type OfflineResultView,
   type OfflineRunView,
   type OfflineStalledView,
   type ParallelOverviewView,
@@ -69,6 +70,9 @@ interface HubAdmin {
   pushMap: Map<string, boolean> | null
   /** 逐课程离线段进度（`/admin/offline`）；null = hub 不可达 / 端点不存在（旧版 hub）。 */
   offline: Record<string, Record<string, OfflineRunView>> | null
+  /** 逐课程各 run 的**段末摘要**（`/admin/offline.results`）——离线补评的收官判据
+   *  （plan/offline-eval-backfill）；null = hub 不可达 / 旧版 hub。 */
+  offlineResults: Record<string, Record<string, OfflineResultView>> | null
   /** 停滞告警（`/admin/offline.stalled`；T8）；null = hub 不可达 / 旧版 hub。 */
   offlineStalled: OfflineStalledView[] | null
   /** worker 行 = **当下 cfg** ⊕ 探活列（探活取自下面的探测缓存）。 */
@@ -82,6 +86,7 @@ interface HubProbe {
   queue: HubQueueView | null
   pushMap: Map<string, boolean> | null
   offline: Record<string, Record<string, OfflineRunView>> | null
+  offlineResults: Record<string, Record<string, OfflineResultView>> | null
   offlineStalled: OfflineStalledView[] | null
   /** worker 直探（id → online/busy；停用/无 key = 缺席）。 */
   workerPing: Map<string, { online: boolean | null; busy: boolean | null }>
@@ -115,6 +120,7 @@ export async function getHubAdmin(cfg: RlConfig, course: string): Promise<HubAdm
     queue: p.queue,
     pushMap: p.pushMap,
     offline: p.offline,
+    offlineResults: p.offlineResults,
     offlineStalled: p.offlineStalled,
     workers: workerRows(cfg).map((w) => ({
       ...w,
@@ -143,6 +149,9 @@ async function probeHubAdmin(cfg: RlConfig, course: string): Promise<HubProbe> {
     queue: live?.queue ?? null,
     pushMap,
     offline: offlineAdmin?.progress ?? null,
+    // 同一次 `/admin/offline` 应答里已有 results（`parseOfflineAdmin` 三段同源）——补评
+    // 的收官判据零新增网络、零新增探测；旧 hub 无 results 时 `parseOfflineAdmin` 已兜成 {}。
+    offlineResults: offlineAdmin?.results ?? null,
     offlineStalled: offlineAdmin?.stalled ?? null,
     workerPing: new Map(probed.map((w) => [w.id, { online: w.online, busy: w.busy }])),
   }
