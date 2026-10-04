@@ -1,7 +1,10 @@
 /** WorkerContribution.tsx — 并行 worker 贡献度（plan/worker-contribution-view）。
  *
  *  · `variant="full"`：节点页（NodeStats 抽屉）主体——份额条列表 ⇄ 机器×课程矩阵 + 口径脚注；
- *  · `variant="compact"`：首页节点区**另起一行**缩略（两组 top-N + 组总量，点击跳节点页）。
+ *  · `SamplingBrief` + `PpoBrief`：首页节点区的**两条对称缩略行**（2026-10-03 用户报障
+ *    「rollout 节点与 ppo 节点混在一起，数据混乱」→ 2026-10-04「像采样合计一样缩略显示即可」）
+ *    ——采样行在上、PPO 行在下（实线分隔），各带自己的标签与单位。两者挤在同一个按钮里、
+ *    或把 PPO 铺成逐行带进度条的列表，都被用户否过。
  *
  *  硬口径（用户 2026-10-02 裁决 / plan §4）：
  *    · 两组**永不合并**（采样=局 / PPO=job）；样本名不合并——归属由来源决定，不由名字决定；
@@ -15,15 +18,12 @@ import { SegmentedControl } from '../../components/SegmentedControl'
 import { type ContributionBrief, type ContributionView, fmtCount, fmtShare } from '../../view'
 
 export interface WorkerContributionProps {
-  variant: 'full' | 'compact'
+  /** 节点页主体（两组并排的表 + 脚注）。首页的两条缩略行见 `SamplingBrief` / `PpoBrief`。 */
+  variant: 'full'
   /** full 变体数据源（`/api/pool` 的 `contribution`）。 */
   contribution?: ContributionView | null
-  /** compact 变体数据源（`/api/state` 的 `contributionBrief`，同一份聚合的裁剪）。 */
-  brief?: ContributionBrief | null
   /** 面板标题里的窗口标签（full）。 */
   windowLabel?: string
-  /** 点击缩略行 → 打开节点页（compact）。 */
-  onMore?: () => void
 }
 
 /** 份额条（纯 CSS：宽度按 5% 一档走 `data-w`，不写内联 style——视觉纪律闸）。 */
@@ -226,46 +226,62 @@ function MatrixTable({ view }: { view: ContributionView }) {
   )
 }
 
-export function WorkerContribution({
-  variant,
-  contribution,
-  brief,
-  windowLabel,
-  onMore,
-}: WorkerContributionProps) {
-  const [mode, setMode] = useState<'list' | 'matrix'>('list')
+/** 采样块的**收尾行**（首页）：采样份额合计 + top-N 节点份额。
+ *
+ *  为什么独立成行、且**只带采样一侧**（2026-10-03 用户报障：「rollout 节点 和 ppo 节点混在一起，
+ *  数据混乱，难以区分」）：此前 PPO 与采样两组挤在**同一个按钮**里，两种单位、两种分母并排 ⇒
+ *  身份与口径都分不开。现在份额归**采样块的末尾**（全部采样节点行都在它上面，它只是收尾合计），
+ *  PPO 在自己那一行（`PpoBrief`）。两组仍**永不合并**（WC-plan §4.1b）——这里只是把「不合并」
+ *  落到版式上：采样份额绝不与 PPO job 数出现在同一行。
+ *
+ *  这是**纯读数**（不可点）：唯一的深链入口在 PPO 子块的行尾，避免同一区出现两个「节点统计 ›」。 */
+export function SamplingBrief({ brief }: { brief: ContributionBrief | null }) {
+  if (!brief) return null
+  const total = brief.sampling.total
+  const parts = brief.sampling.top.map((s) => `${s.id} ${fmtShare(s.share)}`)
+  return (
+    <p
+      className="tc-contrib-samplingbrief"
+      title="采样份额 = 窗口内成功局（rollout + eval）占采样组内的比例；与 PPO job 数不同单位、分母各自独立（两组永不合并）"
+    >
+      <span className="tc-contrib-brieflabel">采样合计</span>
+      <b>{total > 0 ? `${fmtCount(total)} 局` : '—'}</b>
+      {parts.length > 0 ? <span className="tc-muted">{parts.join(' · ')}</span> : null}
+    </p>
+  )
+}
 
-  if (variant === 'compact') {
-    if (!brief) return null
-    const ppoTop = brief.ppo.top
-      .map((w) => `${w.worker || '(未登记)'} ${fmtShare(w.share)}`)
-      .join(' · ')
-    const smpTop = brief.sampling.top.map((s) => `${s.id} ${fmtShare(s.share)}`).join(' · ')
-    return (
-      <button
-        type="button"
-        className="tc-contrib-compact"
-        onClick={onMore}
-        title="并行 worker 贡献度（点击打开节点统计看明细；采样=局、PPO=job，两组分列）"
-        aria-label="worker 贡献度缩略，点击打开节点统计"
-      >
-        <span className="tc-contrib-compact__label">贡献</span>
-        <span className="tc-contrib-compact__cell">
-          PPO{' '}
-          {brief.ppo.totalDone > 0
-            ? `${fmtCount(brief.ppo.totalDone)} job${ppoTop ? ` · ${ppoTop}` : ''}`
-            : '—'}
-        </span>
-        <span className="tc-contrib-compact__cell">
-          采样{' '}
-          {brief.sampling.total > 0
-            ? `${fmtCount(brief.sampling.total)} 局${smpTop ? ` · ${smpTop}` : ''}`
-            : '—'}
-        </span>
-        <span className="tc-contrib-compact__more">节点统计 ›</span>
-      </button>
-    )
-  }
+/** PPO 缩略行（首页）：与 `SamplingBrief` **完全对称的一行**读数——`PPO 合计 858 job · 名字 份额 · …`。
+ *
+ *  用户 2026-10-04：「不需要百分比 progress bar，像「采样合计」一样缩略显示即可」⇒
+ *  去掉**份额条**与**逐行列表**（那是节点页 `variant="full"` 的形态），首页只留合计 + 各台份额。
+ *
+ *  两类身份仍不混行：采样行在本行**上方**，各有自己的标签与单位（局 / job）；
+ *  角色隔离（两组永不合并，WC-plan §4.1b）在这条版式上照旧成立——这里只是把 PPO 也压成一行，
+ *  不是把它并进采样那一行。
+ *
+ *  份额仍**全列**（用户 2026-10-03「全部活跃 worker 都列」）；身份已按机器归并（`machineOf`）
+ *  ⇒ 行数 = 机器数（单位数级），太长时由 `flex-wrap` 折行，不会撑破也不会挤掉数值。 */
+export function PpoBrief({ brief }: { brief: ContributionBrief | null }) {
+  if (!brief) return null
+  const { ppo } = brief
+  const parts = ppo.top.map((w) => `${w.worker || '(未登记)'} ${fmtShare(w.share)}`)
+  return (
+    <p
+      className="tc-contrib-ppobrief"
+      title="云端 worker 完成的 PPO job（单位：job；与采样局数不同单位、永不合并）；份额分母 = 本组内全体；身份按机器归并（剥 `:pid`）"
+    >
+      <span className="tc-contrib-brieflabel">PPO 合计</span>
+      <b>{ppo.totalDone > 0 ? `${fmtCount(ppo.totalDone)} job` : '—'}</b>
+      {parts.length > 0 ? <span className="tc-muted">{parts.join(' · ')}</span> : null}
+    </p>
+  )
+}
+
+/** 节点页主体（`variant="full"`）：两组并排的表 + 口径脚注。
+ *  `variant` 只作 API 标记（首页的两个紧凑形态是独立组件），故不解构。 */
+export function WorkerContribution({ contribution, windowLabel }: WorkerContributionProps) {
+  const [mode, setMode] = useState<'list' | 'matrix'>('list')
 
   if (!contribution) return null
   return (

@@ -30,13 +30,18 @@ import { Switch } from '../../components/Switch'
 import { SectionHeader } from '../../components/SectionHeader'
 import { StatusRow } from '../../components/StatusRow'
 import type { StatusTone } from '../../components/StatusDot'
-import { WorkerContribution } from './WorkerContribution'
+import { PpoBrief, SamplingBrief } from './WorkerContribution'
 
 export interface NodePillsProps {
   nodes: NodeView[]
   /** 本机直跑节点（§361⑤：只读展示；无池数据/无槽位时缺省）。 */
   local?: NodeLocalView | null
-  /** 并行 worker 贡献度缩略（plan/worker-contribution-view W3b；缺省不画该行）。 */
+  /** 并行 worker 贡献度缩略（plan/worker-contribution-view W3b；缺省不画）。
+   *
+   *  ★ 2026-10-03（用户报障「rollout 节点与 ppo 节点混在一起，数据混乱」）：它现在供**两处**
+   *  使用——**两条对称的缩略行**：采样行（`SamplingBrief`）+ PPO 行（`PpoBrief`），各占整行、
+   *  各带标签与单位，永不并排（2026-10-04 起 PPO 也压成一行，不再铺逐行列表）。
+   *  此前一个按钮里同时塞两组（两种单位、两种分母并排）就是「混在一起」的来源。 */
   brief?: ContributionBrief | null
   onAction: (act: string, body: Record<string, unknown>) => void
   onMore: () => void
@@ -303,8 +308,10 @@ export function NodePills({ nodes, local, brief, onAction, onMore, readOnly }: N
     <div className="tc-nodes" aria-label="节点">
       <SectionHeader
         title="节点"
-        hint="算力供给：本机直跑槽位 + 各登记节点。健康度 = 最近完成轮贡献 vs 并发数（0 → 离线 / 不足 → 缓慢 / ≥ 并发 → 健康）；缓慢与离线不折叠，仅停用可折叠"
+        hint="采样算力供给：本机直跑槽位 + 各登记节点（做 rollout / eval，单位 = 局）。健康度 = 最近完成轮贡献 vs 并发数（0 → 离线 / 不足 → 缓慢 / ≥ 并发 → 健康）；缓慢与离线不折叠，仅停用可折叠。下方「PPO worker（云端）」是另一类身份（单位 = job）"
       />
+      {/* 分区纪律（2026-10-03）：本节 = 采样块（行 + 末尾份额），PPO 在自己的子块里。
+          两类的身份、单位、口径都不同，绝不落在同一行。 */}
       {localLive ? <LocalRow local={localLive} /> : null}
       {healthy.map((n) => row(n))}
       {/* 缓慢/离线始终展开（用户指令：不要自动折叠）；仅停用可折叠。 */}
@@ -329,7 +336,11 @@ export function NodePills({ nodes, local, brief, onAction, onMore, readOnly }: N
           {disabled.map((n) => row(n))}
         </>
       ) : null}
-      <WorkerContribution variant="compact" brief={brief ?? null} onMore={onMore} />
+      {/* 两条**对称的缩略行**：采样在上（虚线收尾，与上方节点行同组）、PPO 在下（实线分隔）。
+          两类身份各自成行、各有标签与单位，永不并排（2026-10-03 + 2026-10-04 两轮口径）。 */}
+      <SamplingBrief brief={brief ?? null} />
+      <PpoBrief brief={brief ?? null} />
+      {/* 深链：全页唯一入口（两行缩略都是纯读数，不各自带按钮） */}
       <button type="button" className="tc-btn tc-btn--sm" onClick={onMore}>
         节点统计 ›
       </button>

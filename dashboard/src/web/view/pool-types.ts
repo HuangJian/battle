@@ -72,6 +72,9 @@ export const WINDOW_OPTIONS = [
   // 滚动窗（plan/worker-contribution-view §4.4）：吃子日有界事件环，与本地日窗并存但分开实现。
   { key: '30m', label: '近 30 分钟' },
   { key: '2h', label: '近 2 小时' },
+  // 24h（2026-10-03 用户）：首页贡献度缩略的默认窗口；跨日不回零。
+  // ⚠ 服务端 `ROLLING_SPECS` / `ROLLING_KEEP_MS` 必须同步（环的保留时长 ≥ 最长档）。
+  { key: '24h', label: '近 24 小时' },
 ] as const
 
 export type PoolWindowKey = (typeof WINDOW_OPTIONS)[number]['key']

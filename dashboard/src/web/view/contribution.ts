@@ -124,22 +124,50 @@ export function buildSamplingContribution(
   return { rows, total }
 }
 
-/** PPO 组：份额 = 组内完成 job 占比；「实际投入 = 完成 + 晚到」由两列并看。 */
+/** PPO 身份 → **机器名**：剥掉 `:pid` 后缀（无冒号则原样返回）。
+ *
+ *  为什么（2026-10-03 实景）：旧身份是 `hostname:pid`（`remote/job_lifecycle.py::worker_tag`），
+ *  而**每个 job 都可能是一个新 pid** ⇒ 一天攒出 **332 个「身份」各 1 job**，面板被碎片淹没
+ *  （截图：`113ffa2bffc6:24134 / 24931 / 25341 …` 一路排下去）。同一台机器反复重启**就是同一台机器**，
+ *  「谁在干活」的单位天然是机器。
+ *
+ *  ⚠ 这不是「跨组归并」：`machineOf` 只在 **PPO 组内部**使用，采样身份（`node.id`，人起的名）
+ *  一个字节都不碰 ⇒ WC-plan §4.1b 的角色隔离仍然成立（两组仍是两个不相交人群）。
+ *  ⚠ 与 `plan/worker-name-readable.plan.md` 同向：新命名（`kaggle-c`）**不含冒号** ⇒ 本函数对它恒等，
+ *  届时无需改一行（归并自动退化为恒等）。 */
+export function machineOf(worker: string): string {
+  const i = worker.indexOf(':')
+  return i > 0 ? worker.slice(0, i) : worker
+}
+
+/** PPO 组：份额 = 组内完成 job 占比；「实际投入 = 完成 + 晚到」由两列并看。
+ *
+ *  **先按机器归并，再算份额/排序**（见 `machineOf`）：输入是身份级（账本里落的就是身份），
+ *  输出是**机器级**——`totalDone` / `totalRejected` 是组内总量，归并不改它们（同一批数相加）。 */
 export function buildPpoContribution(
   inputs: Array<{ worker: string; done: number; rejected: number; inflight?: number }>,
 ): PpoContribution {
+  const byMachine = new Map<string, { done: number; rejected: number; inflight: number }>()
+  for (const i of inputs) {
+    const m = machineOf(i.worker)
+    const v = byMachine.get(m) ?? { done: 0, rejected: 0, inflight: 0 }
+    v.done += i.done
+    v.rejected += i.rejected
+    v.inflight += i.inflight ?? 0
+    byMachine.set(m, v)
+  }
   let totalDone = 0
   let totalRejected = 0
-  for (const i of inputs) {
-    totalDone += i.done
-    totalRejected += i.rejected
+  for (const v of byMachine.values()) {
+    totalDone += v.done
+    totalRejected += v.rejected
   }
-  const rows = inputs.map((i) => ({
-    worker: i.worker,
-    done: i.done,
-    rejected: i.rejected,
-    inflight: i.inflight ?? 0,
-    share: totalDone > 0 ? i.done / totalDone : null,
+  const rows = [...byMachine.entries()].map(([worker, v]) => ({
+    worker,
+    done: v.done,
+    rejected: v.rejected,
+    inflight: v.inflight,
+    share: totalDone > 0 ? v.done / totalDone : null,
   }))
   rows.sort((a, b) => b.done + b.rejected - (a.done + a.rejected) || (a.worker < b.worker ? -1 : 1))
   return { rows, totalDone, totalRejected }
@@ -215,12 +243,27 @@ export function buildContributionMatrix(
   }
 }
 
-/** 首页缩略投影：**同一份聚合的裁剪**（不是第二份计算）——top-N + 组总量。 */
-export function compactSummary(view: ContributionView, topN = 3): ContributionBrief {
+/** 「不截断」的 top-N 取值（`Array.prototype.slice(0, Infinity)` === 取全部）。
+ *
+ *  为什么需要它（2026-10-03 用户口径）：首页要**列出全部活跃 PPO worker**（云机数就那几台，
+ *  看「哪台在干活」比看「前三名」有用），而采样侧仍只要 top-3（节点行已逐个列出身份，
+ *  份额那行只是收尾合计）⇒ 两侧的 N 必须**分开给**。 */
+export const BRIEF_ALL = Number.POSITIVE_INFINITY
+
+/** 首页缩略投影：**同一份聚合的裁剪**（不是第二份计算）——top-N + 组总量。
+ *
+ *  两侧 N 分开（`samplingTop` / `ppoTop`）：两组是**两个不相交的人群、两种单位**（WC-plan §4.1b），
+ *  首页对它们的展现需求也不同（采样 3 条够用；PPO 要全列）⇒ 不该被同一个 N 绑在一起。
+ *  `ppoTop` 缺省跟随 `samplingTop`（保持旧调用点的行为逐字不变）。 */
+export function compactSummary(
+  view: ContributionView,
+  samplingTop = 3,
+  ppoTop: number = samplingTop,
+): ContributionBrief {
   return {
     sampling: {
       total: splitTotal(view.sampling.total),
-      top: view.sampling.rows.slice(0, topN).map((r) => ({
+      top: view.sampling.rows.slice(0, samplingTop).map((r) => ({
         id: r.id,
         share: r.share,
         total: splitTotal(r.split),
@@ -228,7 +271,7 @@ export function compactSummary(view: ContributionView, topN = 3): ContributionBr
     },
     ppo: {
       totalDone: view.ppo.totalDone,
-      top: view.ppo.rows.slice(0, topN).map((r) => ({
+      top: view.ppo.rows.slice(0, ppoTop).map((r) => ({
         worker: r.worker,
         share: r.share,
         done: r.done,

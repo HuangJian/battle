@@ -62,12 +62,17 @@ function poolEpochMs(): number {
 const LARGE_META_BYTES = 2 * 1024 * 1024
 const LARGE_META_TAIL_LINES = 20_000
 
-/** 滚动窗口（`近 30 分钟`/`近 2 小时`）的事件环保留时长：2h + 10min 余量。
+/** 滚动窗口（`近 30 分钟`/`近 2 小时`/`近 24 小时`）的事件环保留时长：**最长的滚动档 + 10min 余量**。
  *
  *  ⚠ 为什么滚动窗**不能**吃日桶：`DayBucket` 只有日级计数，`results` 是 `boolean[]`
  *  （无时间戳）——`now - T` 的窗口从日桶里根本投不出来。环里的事件全部带 ms，
- *  由 `projectRollingWindow` 过滤重建 `NodeHistory`。 */
-export const ROLLING_KEEP_MS = 2 * 60 * 60_000 + 10 * 60_000
+ *  由 `projectRollingWindow` 过滤重建 `NodeHistory`。
+ *
+ *  ★ 这个常量必须 **≥ 最长滚动档**（2026-10-03）：加 `24h` 档时若不同步抬高，24h 窗口只会
+ *  看到环里残留的 2h（数字偏低 ~12 倍，且**不会有任何标记**）—— 这类「窗口比数据源长」的
+ *  错配是静默错数，比崩溃贵。代价只有内存：环有 `ROLLING_CAP` 封顶（有界），
+ *  触顶由 `rollingTruncated` 诚实标注（UI 脚注）。 */
+export const ROLLING_KEEP_MS = 24 * 60 * 60_000 + 10 * 60_000
 /** 每节点事件环硬上限：命中即丢最旧一半并置截断标记（有界内存；极端忙节点才可能触发）。 */
 export const ROLLING_CAP = 20_000
 
@@ -342,6 +347,9 @@ export interface NodeWindow {
 const ROLLING_SPECS: Record<string, { ms: number; label: string }> = {
   '30m': { ms: 30 * 60_000, label: '近 30 分钟' },
   '2h': { ms: 2 * 60 * 60_000, label: '近 2 小时' },
+  // 24h（2026-10-03 用户）：首页贡献度缩略的默认窗口 —— 与自然日「今天」不同，
+  // 跨日不回零（凌晨时段照样是完整的 24 小时）。⚠ 必须与 ROLLING_KEEP_MS 同步。
+  '24h': { ms: 24 * 60 * 60_000, label: '近 24 小时' },
 }
 
 export function resolveWindow(spec: string, nowMs: number, epochMs: number): NodeWindow {

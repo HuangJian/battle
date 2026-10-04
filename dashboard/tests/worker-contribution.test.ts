@@ -17,18 +17,26 @@ import { join } from 'path'
 import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
 import { NodePills } from '../src/web/app/panels/NodePills'
-import { WorkerContribution } from '../src/web/app/panels/WorkerContribution'
 import {
+  PpoBrief,
+  SamplingBrief,
+  WorkerContribution,
+} from '../src/web/app/panels/WorkerContribution'
+import {
+  BRIEF_ALL,
   buildContributionMatrix,
   buildPpoContribution,
   buildSamplingContribution,
   compactSummary,
   fmtCount,
   fmtShare,
+  machineOf,
+  WINDOW_OPTIONS,
   type ContributionView,
 } from '../src/web/view'
 import {
   type HistoryAggregate,
+  ROLLING_KEEP_MS,
   aggregateNodeHistory,
   invalidateNodeHistoryMemo,
   projectCourseBreakdown,
@@ -130,6 +138,67 @@ describe('contribution 纯函数（份额 / 缺数据 / 矩阵 / 缩略）', () 
     expect(brief.sampling.top.map((t) => t.id)).toEqual(
       view.sampling.rows.slice(0, 3).map((r) => r.id),
     )
+  })
+
+  // ★ 2026-10-03（用户报障「首页显示了 332 ppo worker」）：旧身份 `hostname:pid` 里
+  // **每个 job 一个 pid** ⇒ 一天攒出 332 个「身份」各 1 job。归并到机器级是这条病的根治。
+  it('machineOf：剥掉 `:pid`；新命名（不含冒号）恒等；空机器名不吞', () => {
+    expect(machineOf('113ffa2bffc6:24134')).toBe('113ffa2bffc6')
+    expect(machineOf('kaggle-c')).toBe('kaggle-c') // worker-name plan 落地后走这条
+    expect(machineOf('')).toBe('')
+    expect(machineOf(':999')).toBe(':999') // 机器名为空 ⇒ 原样（不吞成一个空串身份）
+  })
+
+  it('PPO 按机器归并：332 个 pid → 2 行；总量与份额口径不变', () => {
+    const host = '113ffa2bffc6'
+    const inputs = Array.from({ length: 332 }, (_, i) => ({
+      worker: i === 0 ? '' : `${host}:${24134 + i * 100}`, // 第 0 条 = 匿名（无 X-Worker-Id）
+      done: 1,
+      rejected: 0,
+    }))
+    const ppo = buildPpoContribution(inputs)
+    expect(ppo.rows).toHaveLength(2)
+    expect(ppo.rows.map((r) => r.worker).sort()).toEqual(['', host])
+    expect(ppo.rows.find((r) => r.worker === host)!.done).toBe(331)
+    // 归并**不改变**组内总量（同一批数相加）与份额分母
+    expect(ppo.totalDone).toBe(332)
+    expect(ppo.rows.reduce((a, r) => a + (r.share ?? 0), 0)).toBeCloseTo(1, 10)
+  })
+
+  it('归并后的份额按机器算：同机 pid 各 1 job ⇒ 合并成一台的份额是它们之和', () => {
+    const ppo = buildPpoContribution([
+      { worker: 'h:1', done: 1, rejected: 0 },
+      { worker: 'h:2', done: 1, rejected: 0 },
+      { worker: 'other:9', done: 2, rejected: 0 },
+    ])
+    const h = ppo.rows.find((r) => r.worker === 'h')!
+    expect(h.done).toBe(2)
+    expect(h.share).toBeCloseTo(0.5, 10)
+  })
+})
+
+// ────────────────────────── ①b 窗口档：24h 滚动（2026-10-03 用户） ──────────────────────────
+
+describe('滚动窗口档 24h', () => {
+  it('24h：kind=rolling、时长 24h、起点 = now−24h（跨日不回零，与「今天」不同）', () => {
+    const now = 1_700_000_000_000
+    const w = resolveWindow('24h', now, 0)
+    expect(w.kind).toBe('rolling')
+    expect(w.key).toBe('24h')
+    expect(w.label).toBe('近 24 小时')
+    expect(w.durationMs).toBe(24 * 60 * 60_000)
+    expect(w.startMs).toBe(now - 24 * 60 * 60_000)
+    expect(w.endMs).toBe(now)
+  })
+
+  it('★ 数据源必须 ≥ 最长滚动档：环保留 < 24h ⇒ 24h 窗口静默偏低（错配比崩溃贵）', () => {
+    // 这条断言的意义：`ROLLING_KEEP_MS` 是滚动窗的**唯一**数据源，环短于窗口时
+    // 数字会少算且**没有任何标记** —— 所以「加档」与「抬环」必须绑在一起测。
+    expect(ROLLING_KEEP_MS).toBeGreaterThanOrEqual(24 * 60 * 60_000)
+  })
+
+  it('窗口选项表含 24h（UI Segmented 与服务端 `?days=` 同键）', () => {
+    expect(WINDOW_OPTIONS.map((o) => o.key)).toContain('24h')
   })
 })
 
@@ -337,32 +406,65 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
     expect(zeroHtml).not.toContain('0.0%')
   })
 
-  it('compact：一行（两组 top + 组总量），不铺开矩阵/表格', () => {
-    const html = renderToString(
-      h(WorkerContribution, { variant: 'compact', brief: compactSummary(sampleView()) }),
-    )
-    expect(html).toContain('tc-contrib-compact')
-    expect(html).toContain('PPO')
-    expect(html).toContain('采样')
-    expect(html).toContain('cloudA')
-    expect(html).not.toContain('tc-contrib-matrixwrap')
-    expect(html).not.toContain('tc-contrib-table')
+  // ★ 2026-10-03（用户报障「rollout 节点与 ppo 节点混在一起，数据混乱」）：旧的
+  // `variant="compact"`（两组挤一个按钮）已拆成两个独立形态——采样份额归采样块末尾，
+  // PPO worker 另起子块。下面三条钉住「分区」这件事本身，不只是钉住渲染。
+  it('首页分区：采样份额行只带采样一侧；PPO 子块只带 PPO 一侧（两类不混行）', () => {
+    const view = sampleView()
+    const brief = compactSummary(view, 3, BRIEF_ALL)
+
+    const smpHtml = renderToString(h(SamplingBrief, { brief }))
+    expect(smpHtml).toContain('tc-contrib-samplingbrief')
+    expect(smpHtml).toContain('采样合计')
+    expect(smpHtml).toContain('self')
+    // 采样份额行里**不得**出现 PPO 的身份与口径（这就是「混在一起」的反面）
+    expect(smpHtml).not.toContain('cloudA')
+    expect(smpHtml).not.toContain('合计 6 job')
+
+    const ppoHtml = renderToString(h(PpoBrief, { brief }))
+    expect(ppoHtml).toContain('tc-contrib-ppobrief')
+    expect(ppoHtml).toContain('PPO 合计')
+    expect(ppoHtml).toContain('6 job')
+    expect(ppoHtml).toContain('cloudA')
+    expect(ppoHtml).toContain('cloudB')
+    // ★ 用户 2026-10-04：「不需要百分比 progress bar，像采样合计一样缩略显示即可」——
+    //   进度条与逐行列表（`<li>`）都不得出现（那是节点页 full 变体的形态）。
+    expect(ppoHtml).not.toContain('tc-contrib-bar')
+    expect(ppoHtml).not.toContain('<li')
+    expect(ppoHtml).not.toContain('tc-contrib-table')
+    // PPO 行里不得出现采样节点的身份
+    expect(ppoHtml).not.toContain('self')
+    expect(ppoHtml).not.toContain('采样合计')
   })
 
-  it('compact 缺数据 ⇒ 不渲染（空行会被读成「有东西没加载出来」）', () => {
-    expect(renderToString(h(WorkerContribution, { variant: 'compact', brief: null }))).toBe('')
+  it('缺数据 ⇒ 两条缩略行都不渲染（空行会被读成「有东西没加载出来」）', () => {
+    expect(renderToString(h(SamplingBrief, { brief: null }))).toBe('')
+    expect(renderToString(h(PpoBrief, { brief: null }))).toBe('')
   })
 
-  it('NodePills 接入：缩略行在节点区里（点击走既有 onMore）', () => {
+  it('PPO **全列**（BRIEF_ALL）；采样侧仍按 top-N 收口——两侧 N 分开给', () => {
+    const view = sampleView()
+    const five = ['cloudA', 'cloudB', 'cloudC', 'cloudD', 'cloudE']
+    view.ppo = buildPpoContribution(five.map((worker, i) => ({ worker, done: 5 - i, rejected: 0 })))
+    const brief = compactSummary(view, 3, BRIEF_ALL)
+    expect(brief.ppo.top.map((t) => t.worker)).toEqual(five)
+    expect(brief.sampling.top.length).toBeLessThanOrEqual(3)
+    const html = renderToString(h(PpoBrief, { brief }))
+    for (const w of five) expect(html).toContain(w)
+  })
+
+  it('NodePills 接入：节点区里两处分区在场，深链**只有一个**（旧的按钮内 + 区尾两个入口已收成一个）', () => {
     const html = renderToString(
       h(NodePills, {
         nodes: [],
-        brief: compactSummary(sampleView()),
+        brief: compactSummary(sampleView(), 3, BRIEF_ALL),
         onAction: () => {},
         onMore: () => {},
       }),
     )
-    expect(html).toContain('tc-contrib-compact')
-    expect(html).toContain('节点统计 ›')
+    expect(html).toContain('tc-contrib-samplingbrief')
+    expect(html).toContain('tc-contrib-ppobrief')
+    expect(html).toContain('PPO 合计')
+    expect(html.split('节点统计 ›').length - 1).toBe(1)
   })
 })

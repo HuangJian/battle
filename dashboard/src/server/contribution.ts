@@ -22,6 +22,7 @@ import {
   buildContributionMatrix,
   buildPpoContribution,
   buildSamplingContribution,
+  machineOf,
 } from '../web/view'
 import { readLedgerTail } from './api/logs'
 import {
@@ -156,7 +157,10 @@ export function invalidatePpoAttributionMemo(): void {
   ppoMemo = null
 }
 
-/** hub `/admin/queue` 观测面 → 每 worker 的在飞数（空 worker 记 `(未登记)`，不编身份）。 */
+/** hub `/admin/queue` 观测面 → 每 worker 的在飞数（空 worker 记 `(未登记)`，不编身份）。
+ *
+ *  键按 `machineOf` 归并（与 `buildPpoContribution` 同一口径）：否则同一台机器的
+ *  `hostname:pid` 在飞项会各自成为一行，和已归并的完成数对不上号。 */
 export function inflightByWorkerFromQueue(
   queue: HubQueueView | null | undefined,
 ): Map<string, number> {
@@ -165,7 +169,7 @@ export function inflightByWorkerFromQueue(
   for (const c of Object.values(queue.courses)) {
     const detail = Array.isArray(c.inflightDetail) ? c.inflightDetail : []
     for (const row of detail) {
-      const w = row.worker || '(未登记)'
+      const w = machineOf(row.worker || '(未登记)')
       out.set(w, (out.get(w) ?? 0) + 1)
     }
   }
@@ -201,12 +205,16 @@ export function buildContributionView(
     }
     return v
   }
+  // ★ 行身份一律走 `machineOf`（剥 `:pid`）：账本里落的是身份，展示的单位是**机器**
+  //   （2026-10-03 实景：每 job 一个新 pid ⇒ 一天 332 个「身份」各 1 job）。矩阵的行键
+  //   必须与 `buildPpoContribution` 的归并口径**同一个**，否则面板两组行对不上。
   const ppoByCourse: Record<string, Record<string, { done: number; rejected: number }>> = {}
   for (const e of inWin) {
-    const v = touch(e.worker)
+    const m = machineOf(e.worker)
+    const v = touch(m)
     if (e.kind === 'done') v.done++
     else v.rejected++
-    const bc = (ppoByCourse[e.worker] ??= {})
+    const bc = (ppoByCourse[m] ??= {})
     const cell = (bc[e.course] ??= { done: 0, rejected: 0 })
     if (e.kind === 'done') cell.done++
     else cell.rejected++

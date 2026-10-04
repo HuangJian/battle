@@ -3399,29 +3399,38 @@ a.tc-btn {
   color: var(--muted);
   font-size: var(--fs-xs);
 }
-.tc-contrib-compact {
+/* ── 首页两类身份的分区（2026-10-03 用户报障：rollout 节点与 ppo 节点混在一起）──
+   采样块 = 上方全部节点行 + **末尾一行份额**；PPO 在自己的子块里（子标题 + 上分隔线）。
+
+   ★ 这两个块**必须 flex-basis:100%**：`.tc-nodes` 是 `display:flex; flex-wrap:wrap` 的
+   **pill 行**（`.tc-row` 是 inline-flex 圆角小胶囊），不加这条它们会被当成 pill 挤到行尾、
+   在右侧堆成一列（2026-10-03 实景：PPO 三行挤在右上角一小块，左边还留着大片空白）。
+   它们语义上是**块**（占满整行），不是 pill。 */
+.tc-contrib-samplingbrief,
+.tc-contrib-ppobrief {
+  flex: 0 0 100%;
+  width: 100%;
   display: flex;
   align-items: baseline;
+  flex-wrap: wrap;
   gap: var(--sp-2);
-  width: 100%;
-  margin-top: var(--sp-1);
-  padding: 5px var(--sp-2);
-  border: 1px dashed var(--line);
-  border-radius: var(--r-1);
-  background: none;
-  color: inherit;
-  cursor: pointer;
-  text-align: left;
   font-size: var(--fs-sm);
 }
-.tc-contrib-compact:hover {
-  border-color: var(--accent);
-  background: var(--row-hover);
+/* 采样行的收尾（虚线：与上方节点行同属一组）。 */
+.tc-contrib-samplingbrief {
+  margin: var(--sp-2) 0 0;
+  padding-top: var(--sp-2);
+  border-top: 1px dashed var(--line);
 }
-.tc-contrib-compact__label {
+/* PPO 行（实线：两类身份的界 —— 采样在上、PPO 在下，各自成行、永不并排）。 */
+.tc-contrib-ppobrief {
+  margin-top: var(--sp-3);
+  padding-top: var(--sp-3);
+  border-top: 1px solid var(--line);
+}
+.tc-contrib-brieflabel {
   color: var(--muted);
 }
-.tc-contrib-compact__more {
-  margin-left: auto;
-  color: var(--muted);
-}
+/* 2026-10-04：PPO 的**逐行列表 + 份额条**（`.tc-contrib-ppolist/-pporow/-ppofoot`）已删 ——
+   用户口径「不需要百分比 progress bar，像采样合计一样缩略显示即可」。份额仍在（缩略行的
+   价值就是「谁占多少」），去掉的只是进度条与逐行列式排版；两者现在是对称的两行。 */

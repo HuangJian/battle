@@ -2,7 +2,7 @@
 import { existsSync } from 'fs'
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
-import { type ConsoleStateView, type MetricsView, compactSummary } from '../../web/view'
+import { BRIEF_ALL, type ConsoleStateView, type MetricsView, compactSummary } from '../../web/view'
 import { buildContributionView, inflightByWorkerFromQueue } from '../contribution'
 import { aggregateNodeHistory, resolveWindow } from '../pool-history'
 import { courseEnableMarkerPath, isBcCourse } from '../../stack/courses'
@@ -104,9 +104,17 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   try {
     const admin = await hubProbe
     const agg = aggregateNodeHistory()
-    const w = resolveWindow('today', Date.now(), agg.epochMs)
+    // 窗口 = **近 24 小时滚动档**（用户 2026-10-03：首页要「最近 24 小时的贡献度」）。
+    // 不用 `today`（自然日）：它凌晨归零，而 24h 档跨日不回零（与 30m/2h 同族的滚动窗）。
+    // ⚠ 该档吃子日事件环，环的保留时长（`ROLLING_KEEP_MS`）必须 ≥ 24h，否则数字静默偏低。
+    const w = resolveWindow('24h', Date.now(), agg.epochMs)
+    // 采样侧 top-3 够用（首页采样节点行已逐个列出身份，份额那行只是收尾合计）；
+    // PPO 侧**全列**（用户 2026-10-03：云机就那几台，「哪几台在干活、各占多少」比只看前三名有用）。
+    // 两侧 N 分开给——两组是两个不相交的人群、两种单位（WC-plan §4.1b），不该被同一个 N 绑住。
     contributionBrief = compactSummary(
       buildContributionView(agg, w, inflightByWorkerFromQueue(admin.queue)),
+      3,
+      BRIEF_ALL,
     )
   } catch {
     contributionBrief = null
