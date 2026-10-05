@@ -1,0 +1,88 @@
+// 课程 x21-psh-a —— policy-spatial-head 腿 A：obs 流加 POLICY_EXTRA(9)（头 137 输入）。
+//
+// 立项 → plan/policy-spatial-head.plan.md（v6）§4 Step 4：**唯一改动 = obs 流加 9 维方向直方图**；
+//   主干 / fc / value 全部加载 hu150（起点文件 = `init_spatial_leg.py` 产物 `spatial-legA.it0.json`，
+//   40/42 键装载、新头同分布初始化），走位/开火头重新初始化。不冻结主干，全量重训。
+// 对照臂 = `x21-psh-a0`（同起点/同预算/同配对随机流，唯一差别 = 有没有这 9 维）。
+// 机制前置 → S0′ 六探针：旧输入（pooled+scalars）线性可达性 ≥ bufA 平坦探针 ⇒ 本腿按 plan §7
+//   登记「冗余表达、降预期」（不撤销纪元；S0′-2 塔侧全向 ≥ 平坦探针）。
+// 判决 → plan §5：N=1600 两段式（415000+417000）；主判 = 杀敌 CI 下限 > 0；安全门 = 通关率
+//   CI 下限 > −5pp；直关 = 杀敌 CI 上限 < 0；it100 只读哨兵（800 局 @415000，子集，不改判决）。
+// 预算 150 iter（见顶轮次 acc it80 > hurt it150 > encl it225，80 iter 判 = 假阴性；150 = 判决点）。
+// 配对随机流：`paired_rotate_seed = 20261011`（**与 a0 同值**；全新流，不与既往任何腿重复 → §15.1）。
+//
+// ── 训练设置：与 hu150 母课 x20-adv-hurt 逐字同（唯一变量 = 模型输入）──────────────
+//   奖励 11 参数 / lr / epochs / mb / gamma / lam / ppo_schedule / 采集配额 / eval 块全同；
+//   iters 250→150（本计划预算），paired_rotate_seed 换新流。
+{
+  "version": 5,
+  "name": "x21-psh-a",
+  "mode": "per-tick",
+  // 环境：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：x20-adv-hurt 逐字（本计划不碰奖励，见 plan §3.1「不动项」）────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0
+    },
+    // dense-only（与 B 一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：hu150 迁移档（v4 权重文件；主干/fc/value = hu150，新头 137 随机初始化）──────
+  "bc": "nn-training/weights/spatial-legA/spatial-legA.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 预算：150 轮（plan 判决点 it150；母课 250 轮，本计划按见顶轮次收窄）─────────────
+  "iters": 150,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：与母课逐字同 ────────────────────────────────────────────────────
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // a/a0 同值（公平比"有没有 9 维"的前提；不同值 = 两条不同语料流，裁决作废）。
+  "paired_rotate_seed": 20261011,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5；新实验 = 新 out/traj）────────────────────────
+  "out": "tmp/x21-psh-a/weights.json",
+  "traj": "tmp/x21-psh-a",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x21-psh-a",
+  "backup_prefix": "x21-psh-a",
+
+  // ── 评估：与母课逐字同（首达看日常点；终判另跑 415000/417000，见 plan §5.1）─────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

@@ -1,0 +1,83 @@
+// 课程 x21-psh-a0 —— policy-spatial-head 腿 A 的**对照臂**：旧架构全量 hu150（无 9 维）。
+//
+// 立项 → plan/policy-spatial-head.plan.md（v6）§4 Step 4：A0 = 同起点（hu150）+ kickstart、
+//   同预算 150、同配对随机流，**唯一差别 = 有没有这 9 维**。
+// 起点文件 = `init_spatial_leg.py --legacy-arch` 的**全量迁移**产物（hu150 是 v3 权重，v4 loader
+//   全链严格拒收；迁移只换元数据、warmstart_missing=[]，见同提交的 A0 起点通道）。
+//
+// ⚠ 结论边界（与 plan §5.5 配套，先写在开课头上防误读）：
+//   · A 与 A0 的 policy 头起点**不同态**：A 的头是 137 输入且**重新初始化**（20% 预算冷启动），
+//     A0 的头是 hu150 训过的（有头飞轮）。这个不对称**对新输入不利（偏保守）**。
+//   · 因此：A > A0 ⇒ 结论强；A ≤ A0 时按 §5.5 走（含"看见了但没转化"的二级归因），
+//     禁止把 A ≤ A0 直接读成"9 维没用"。
+// kickstart 锚：两臂都锚在各自 bc（A 锚 = hu150 主干 + 新头，A0 锚 = hu150 全量）——
+//   plan §4 Step 4 明写"同起点（hu150 + kickstart）"，此处与之一致；锚衰减（0.1 几何）下
+//   早期牵引有差异，属计划已声明的对照口径。
+//
+// 其余设置（奖励 11 参数 / lr / epochs / mb / gamma / lam / ppo_schedule / 采集配额 / eval 块 /
+//   iters 150 / paired_rotate_seed 20261011）与 x21-psh-a **逐字同**——唯一变量 = 模型输入。
+{
+  "version": 5,
+  "name": "x21-psh-a0",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：hu150 旧架构全量迁移档（v4 元数据，头 128 保持 hu150 训练态）──────────────
+  "bc": "nn-training/weights/spatial-legA0/spatial-legA0.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  "iters": 150,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 与 x21-psh-a 同值（配对裁决前提）。
+  "paired_rotate_seed": 20261011,
+
+  "decision_events": false,
+
+  "out": "tmp/x21-psh-a0/weights.json",
+  "traj": "tmp/x21-psh-a0",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x21-psh-a0",
+  "backup_prefix": "x21-psh-a0",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
