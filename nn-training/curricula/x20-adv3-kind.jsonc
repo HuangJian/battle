@@ -1,0 +1,138 @@
+// 课程 x20-adv3-kind —— **分敌种探针：hu150 价 + 单变量 +wPow*killsPower（wPow=1.0），起点 hu150**
+//
+// 状态：**草稿（2026-10-04 冻结；未开课）**。开课 = **人在控制台点**（agent 不开训）。
+//   立项 → 用户 2026-10-04 直接指定（加一条分敌种探针腿；adv3-open 保留）。
+//   假设（单变量，只测一件事）：开局敌种决定生死（s2002 power 打头通关 28.0% vs s2000
+//   basic 打头 39.0%，同图同出生点，唯一差敌序）+ power 是头号杀手（早夭 61 + 后期 131，
+//   basic 56+127 第二）⇒ 给 power 击杀单定价，看政策是否转火、s2002 是否动。
+//   若 power 击杀不动 / s2002 不动 / 通关掉 ⇒ 分敌种定价买不到生存技能（先有鸡还是先有蛋
+//   成立），该杠杆退场（§73 damage-form 先例）。
+//   基线 → hu150（414000 800 局：过关 32.50% + 杀敌 11.370；power 击杀均值 2.652/局 ·
+//   s2002 通关 28.0% · P(kills≥4) 79.6% ⇒ killEV = 3.0×11.370 = **34.11**）。
+//   起点唯一变量 wPow；其余 11 参数 = hu150 自身训练价（与 adv3-open 同 base，两腿
+//   同起点可互比，见 §与 adv3-open 的关系）。
+//
+// ── 被否决的备选（三问：armor 为何不一起定价）────────────────────────────────
+//   armor 也是开局杀手（s2003 armor 打头暴毙最多，≤2 杀 34 局；killer 第三 28+101）。
+//   但单变量纪律一次只测一个：power 是 killer 第一 + 最差关的打头敌种，信号最尖。
+//   若本腿 power 有效而 armor 相关读数（armor 击杀/2003 关）不动 ⇒ 下一腿再议 armor；
+//   若本腿全平 ⇒ 分敌种整族退场，不逐个试（§73 家族纪律）。
+//
+// ── 奖励结构（12 参数；f 以 killEV=34.11 计）─────────────────────────────────
+//   11 项 = hu150 价逐字（终点 wKill 3.0 / wPickup 3.0 · 开火 wHit 0.6 / wMiss 0.158 /
+//   wAcc 15.3 / wDist 0.738 · 承伤 wDmg 0.03 / wHurt 110.0 · 暴露 wEncl 8.6 / wCorner 25.0）。
+//   唯一变量：`+ wPow*killsPower`（wPow=**1.0**：killsPower 累计量，np.diff 后每局
+//   实付 wPow×终值；inflow 1.0×2.652 = 2.65/局 ≈ **7.8% killEV**，7.5% doctrine 内；
+//   power 击杀 ≈ 890 事件/轮，不稀疏）。
+//   边际语义：一个 power 人头 = 3.0（wKill）+ 1.0（本项）+ 0.6（wHit，开火拍）≈ 4.6，
+//   即 power 溢价约 +1/3 kill。丑话（K3 未做，先写下来）：杀 power 的前提是活过 power，
+//   本项可能诱使接敌 ⇒ 反证②兜底。
+//   已删：wShot（被 wMiss 替换）· wExplore（逛街奖删除；拾取哨兵 20%）。
+//
+// ── 与 adv3-open 的关系 ────────────────────────────────────────────────────
+//   同起点（hu150）· 同 base（11 项）· 同种子流（20261007/08 不同值但同代，见下）·
+//   各带一个单变量（wOpen / wPow）⇒ 两腿终判可互比"罚开局脏 vs 奖 power 头"。
+//   若两腿终判双平 ⇒ c20 塑形在 hu150 起点上无油水，下一阶段必须换起点或换任务侧思路
+//   （任务侧 frozen，实际意思是：停手，守 hu150）。
+//
+// ── yardstick（探针口径：终判 + 三个点名读数 + 反证，50 轮判死）────────────────
+//   终判：kills/局 + outcome 通关率 @414000 段 800 局 vs hu150（32.50%/11.370）。
+//   主读数（@终判）：power 击杀均值（2.652 ⇒ **≥3.0**，转火证据）+ s2002 通关
+//   （28.0% ⇒ **≥33%**，开局证据）+ P(kills≥4)（79.6% ⇒ **≥84%**，跨坎证据）。
+//   方向诊断：acc/Edhit/hurtR/enclR/cornerR（hurtR pooled 口径）；另报 armor 击杀均值
+//   （2.330）+ s2003 通关（33.5%）+ ≤2 杀暴毙占比（hu150 87/800=10.9%），看 armor 轴
+//   是否值得下一腿。
+//   反证（任一成立即停）：① 通关掉 >5pp / timeout >5%；② hurtR/enclR 上扬 >15%
+//   （接敌溢价变送头）；③ 通关局 ticks 恶化 >10%（更慢）；④ kickstart-burn baseline
+//   −5pp×3（paired 回退未修，明文用 baseline 判）；⑤ it50 主读数三项全平 ⇒ 分敌种
+//   无效，整族退场（不再试 armor）。
+//   判决点 it50（10 个日常点）；预算 80（探针短腿）；无配对训练。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 hu150 warm start + kickstart 锚（ref=true, init=0.1），adv2 同规；
+//   起始 rollout 种子流：paired_rotate_seed=20261008（与既往全历史不同；adv3-open 用
+//   20261007，两腿同代不同值 —— 单腿各判，无 peer 比较，种子只保证不重磨旧语料）。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh）。
+// ── 结算（2026-10-05 回填：it1–36，ABORT@it36/80）────────────────────────────
+// ① 日常：it0 34.50%/11.350 → it5 30.50 → it10 25.25 → it15 28.75 → it20 29.75
+// （反弹清 streak，腿内最高）→ it25 23.50 → it30 28.75 → it35 28.50；burn streak
+// 1-2-0-1-2-2-3，36 轮没站上过基线−5pp（29.5%）。
+// ② 主读数生前无方向（见 r2-it55 终判：power 反降，s2002 逐字同）。
+// ③ 实际 it1–36（~1.5h；预算 80）。
+// 判语：无效，ABORT（耗尽式：震荡 36 轮，两次摸 29 未果）。转 r2 复活赛
+// （`x20-adv3-kind-r2.jsonc`）。数据：`tmp/x20-adv3-kind/`。
+{
+  "version": 5,
+  "name": "x20-adv3-kind",
+  "mode": "per-tick",
+  // 环境：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：hu150 价 11 项逐字 + 唯一变量 +wPow*killsPower ───────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) + wPow*killsPower",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0,
+      "wPow": 1.0
+    },
+    // dense-only（与 B 一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：hurt 腿 hu150（全场冠军；终判 32.50%/11.370；power 击杀 2.652/局）──
+  "bc": "nn-training/weights/x20-adv-hurt/x20-adv-hurt.it150.20261004-060616.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 预算：80 轮（探针短腿；判决点 it50，见 yardstick 反证⑤）────────────────
+  "iters": 80,
+  "max_hours": 16,
+  "workers": 8,
+
+  // ── 位移包：与 adv2 三腿逐字同（epochs 4）─────────────────────────────────
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：mb 对齐（48 × mb(1024)）──────────────────────────────────────
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  "paired_rotate_seed": 20261008,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/x20-adv3-kind/weights.json",
+  "traj": "tmp/x20-adv3-kind",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-adv3-kind",
+  "backup_prefix": "x20-adv3-kind",
+
+  // ── 评估：日常 200 局/点；终判另跑 414000，见 yardstick ────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

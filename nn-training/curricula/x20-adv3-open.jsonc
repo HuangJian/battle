@@ -1,0 +1,162 @@
+// 课程 x20-adv3-open —— **开局窗腿：hu150 价 + 单变量 -wOpen*dmgFirst600（wOpen=0.06），起点 hu150**
+//
+// 状态：**草稿（2026-10-04 冻结；未开课）**。开课 = **人在控制台点**（agent 不开训）。
+//   立项 → 用户 2026-10-04 直接指定（开局窗值得一试；算法侧冻结；NN 身份=玩家，目标=追人类 gap）。
+//   本腿是 x20 系列第一条开局腿，但**不是新机制**：h5a（窗税，c05）与 h5b（clean 奖，c05）
+//   2026-09-28 双双判无效（житија见下）⇒ 本腿 = rung-transfer（c05→c20）+ 走税侧（h5a 力学，
+//   已验证可编译），不是挖坟：差异见 §与 h5a/h5b 的关系。
+//   基线 → hu150（hurt 腿 it150；414000 800 局：过关 32.50% + 杀敌 11.370；开局零伤率 70.0% ·
+//   脏开局 dmgFirst600 中位 128（半管血）· kills 11.370 ⇒ killEV = 3.0×11.370 = **34.11**）。
+//   起点唯一变量 wOpen；其余 11 参数 = hu150 自身训练价（hurt 腿价：wHurt 110 保持，不退回
+//   plus-final 77.5 —— 单变量纪律相对起点 weights 的真实分量，见 §奖励结构）。
+//
+// ── E0 开局探针（本腿预注册证据，2026-10-04，现跑，n=1600 = it110+hu150 @414000 全量报告）
+//   K1 预测力（过）：干净开局通关 38.3% vs 脏开局 19.8%（Δ18.6pp）；总量高桶（dmg>140）内仍
+//   32.8% vs 18.3%（Δ14.5pp，控制总量后仍分得开）。
+//   K2 规模（过）：脏开局 30.1%，中位 128 / p25 86 / p75 172 —— 半管血，不是擦伤。
+//   K3 运气/行动（半过，诚实记录）：corr(dmgFirst600, 后程承伤) = −0.475（脏开局死得早，
+//   当局结算，无"开局脏但后程好"的补偿形态 ⇒ 开局税不錯杀后程）；但反面 = 脏开局≈死局，
+//   税它近似给死局加刑 —— 塑形价值全押在"开局内行动"上，而 E0 无法证明开局内有可行动窗
+//   （要 tick 级反事实）。本腿用 h5a 同款反证（更慢/保守/两极化）兜底，证伪即停。
+//   firstKillTick（判死）：通关率 0.300（≤300）vs 0.300（>600），零信号 ⇒ yardstick 只报
+//   dmgFirst600（与 adv2 三腿"必报两项"偏离，依据即本条）。
+//   人类对照（§71 + h5a 基线）：人类开局中位 0（均值 16.6），NN 中位 ~128 —— gap 确认。
+//
+// ── c05 迁移探针（2026-10-04，用户指令"用 hu150 打 h5 关"；E0 的反面证据，如实记录）
+//   hu150 @ladder-c05（200 局，seed 860001 起）：通关 81.5% · 开局零伤 **71.0%** ·
+//   ≥200 伤 5.5% · 中位 0；it110 同口径：82.5% / 68.0% / 5.0%（两者一致）。
+//   对照 h5a 起点（h4-stop 时代）：通关 64.5% / 零伤 51% / ≥200 占 14.5%。
+//   读法（对本腿不利，如实记）：强权重**不靠任何开局定价**就拿到 71% 干净开局（h5a 的
+//   目标才 75%）⇒ "开局干净"更像是变强后的**伴随结果**，不是罚出来的；h5a 的"无效"
+//   verdict 可能掺了弱起点的锅，但本腿的预期收益也被压缩到 71%→80% 的 ~9pp。
+//   本腿定位因此下调为**证伪优先**：50 轮判死，赢了是惊喜，输了是给家族盖棺（§K3）。
+//   数据：`tmp/c05-probe.jsonl`（本机直跑全量报告在 `tmp/c05-probe.jsonl.run/`）。
+//
+// ── 与 h5a/h5b 的关系（三问：有被否决备选 · 未来会重犯 · 不能就近表达）─────────────
+//   h5a（`-wEarlyDmg*dmgFirst600`，w=0.06，c05，it1–37）：无效停 —— 买到开局谨慎
+//   （零伤 51%→69%）没买到转化（零伤通关 16.5%→18.5% 平）+ 反证"更慢"（ticks +12~16%）。
+//   h5b（`+wClean*clean-clear`，c05，it1–36）：无效停 —— 连方向都没有 + ticks 反证三连。
+//   本腿与 h5a 的三处差异（c20 transfer 的全部理由）：① rung：c20（20 敌/12900 tick/威胁
+//   密度高）vs c05（5 敌/3900 tick）—— h5a 的"无转化"发生在低威胁密度 rung；② 起点：
+//   hu150 成熟策略 vs h4-stop.it60；③ c20 开局问题更重（30% 脏/中位半管血 vs c05 的
+//   14.5%≥200）。与 h5b 的差异：走税侧（h5a 力学）不走奖侧（h5b 连方向都没有 + 终局奖
+//   per-tick 语义脆）。若本腿复现 h5a 死法（谨慎无转化 + 更慢）⇒ 开局窗在 c20 同判无效，
+//   家族退场（§73 damage-form 先例），不再换 rung/换侧重开。
+//
+// ── 奖励结构（12 参数；f 以 killEV=34.11 计）─────────────────────────────────
+//   11 项 = hu150 价逐字（终点 wKill 3.0 / wPickup 3.0 · 开火 wHit 0.6 / wMiss 0.158 /
+//   wAcc 15.3 / wDist 0.738 · 承伤 wDmg 0.03 / wHurt 110.0 · 暴露 wEncl 8.6 / wCorner 25.0）。
+//   唯一变量：`- wOpen*dmgFirst600`（wOpen=**0.06**：h5a 同锚"一枪 100 伤 = 6.0 = 2 kills"；
+//   inflow 0.06×40.3 = 2.42/局 ≈ **7.1% killEV**，7.5% doctrine 内；只咬脏开局 30%，
+//   其余 70% 零影响 ⇒ 起点净 impact 中性偏负，无 E3a 式开局冲击）。
+//   q90 系边际参考：开局一枪 ≈ −6.0（−2 kills）；干净开局相对脏开局（中位 128 伤≈7.7）
+//   差 ≈ +7.7/局。h5a 力学：dmgFirst600 是累计量，np.diff 后每 tick 只对当步伤害收费，
+//   600 tick 后该项恒 0 ⇒ 后期完全不收紧（h5a 价格表已验证本性质）。
+//   已删：wShot（被 wMiss 替换）· wExplore（逛街奖删除；拾取哨兵 20%）。
+//
+// ── yardstick（§79 教训：无绝对机制线，只终判+方向诊断+预注册反证+人工盯盘）──────
+//   终判：kills/局 + outcome 通关率 @414000 段 800 局 vs hu150（32.50%/11.370）。
+//   主读数（@终判）：开局零伤率（hu150 70.0% ⇒ **≥80%**，人类等价 85.5%）+ 脏开局中位
+//   （128 ⇒ **≤80**）+ **P(kills≥4)（hu150 79.6% ⇒ ≥84%，跨过首道具坎的证据；
+//   2026-10-04 杀敌分布实测：4 杀前死 163/800 通关 0，跨过 41% —— 本项是开局腿真正的
+//   转化读数，零伤率只是伴随量）**。
+//   分关点名（敌序轮转是开局压力的唯一变量）：s2002 通关（28.0%）+ s2003 ≤2 杀暴毙占比
+//   （87/800=10.9%），只观测不定线 —— 全关平均里 s2000 的 39% 一直在注水。
+//   方向诊断：acc/Edhit/hurtR/enclR/cornerR（hurtR 用 pooled 口径
+//   ΣhurtWeight/Σ(ticks+1)，与 max 终判对过 0.0335≈0.0342）；开局只报 dmgFirst600
+//   （firstKillTick 已判死，不报）。wPickup 不动（=3.0 已在价里；拿不到是活不到，
+//   不是价不够 —— 2026-10-04 实测：早夭局 56 局摸到道具照样死）。
+//   反证（任一成立即停，h5a/h5b 套餐照搬）：① 通关局 ticks 恶化 >10%（更慢）；
+//   ② pass 掉 >5pp / timeout >5%；③ cellsVisited 塌（保守陷阱）；④ kickstart-burn
+//   baseline −5pp×3（注：paired 回退问题未修，本腿明文用 baseline 判）；
+//   ⑤ it50 时主读数双平 ⇒ 窗税在 c20 无效，与 h5a 合并判家族退场。
+//   判决点 it50（10 个日常点）；预算 100 封顶（短腿 doctrine）；无配对训练。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 hu150 warm start + kickstart 锚（ref=true, init=0.1），adv2 同规；
+//   起始 rollout 种子流：paired_rotate_seed=20261007（与既往全历史不同；20261002/3/4/5/6
+//   均已用）。单腿（无 peer，burn 走 baseline，见上）。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh）。
+// ── 结算（2026-10-05 回填：it1–16，ABORT@it16/100）────────────────────────────
+// ① 日常（2000-2003/860段）：it0 34.50%/11.350 → it5 27.25%/10.300 → it10 26.25%/
+// 10.040 → it15 25.00%/9.758，单边 −9.5pp，一次反弹都没有；burn baseline−5pp×3。
+// ② 主读数生前无改善（见 r2-it80 终判对照：开局五项与 hu150 逐字同）。
+// ③ 实际 it1–16（~1h；预算 100）；kl/ent 全程健康（过程熔断未触发）。
+// 判语：无效，ABORT。开局窗税在 c20 首试即死 —— h5a c05 的"谨慎无转化"都谈不上，
+// c20 上连谨慎都没买到。转 r2 复活赛（`x20-adv3-open-r2.jsonc`）。
+// 数据：`tmp/x20-adv3-open/{training_log,eval_log}.jsonl`。
+{
+  "version": 5,
+  "name": "x20-adv3-open",
+  "mode": "per-tick",
+  // 环境：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：hu150 价 11 项逐字 + 唯一变量 -wOpen*dmgFirst600 ──────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wOpen*dmgFirst600",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0,
+      "wOpen": 0.06
+    },
+    // dense-only（与 B 一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：hurt 腿 hu150（全场冠军；终判 32.50%/11.370；开局零伤 70.0%）──
+  "bc": "nn-training/weights/x20-adv-hurt/x20-adv-hurt.it150.20261004-060616.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "warmup_iters": 0,
+
+  // ── 预算：100 轮封顶（短腿 doctrine；判决点 it50，见 yardstick 反证⑤）──────
+  "iters": 100,
+  "max_hours": 16,
+  "workers": 8,
+
+  // ── 位移包：与 adv2 三腿逐字同（epochs 4）─────────────────────────────────
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：mb 对齐（48 × mb(1024)）──────────────────────────────────────
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  "paired_rotate_seed": 20261007,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/x20-adv3-open/weights.json",
+  "traj": "tmp/x20-adv3-open",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-adv3-open",
+  "backup_prefix": "x20-adv3-open",
+
+  // ── 评估：日常 200 局/点；终判另跑 414000，见 yardstick ────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

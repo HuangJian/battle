@@ -1,0 +1,143 @@
+// 课程 x20-adv3-open-r2 —— **开局腿复活赛：从熔断点 it16 原地爬回测试（无锚）**
+//
+// 状态：**草稿（2026-10-04 冻结；未开课）**。开课 = **人在控制台点**（agent 不开训）。
+//   立项 → 用户 2026-10-04 直接指定（open 腿 it16 熔断后，想看它能不能爬回来）。
+//   open 腿死法：it0 34.5% → it5 27.25% → it10 26.25% → it15 25.0%，单边 −9.5pp，
+//   kickstart-burn −5pp×3 @it16 ABORT（`tmp/x20-adv3-open/`）。开局即崩，一次反弹都没有。
+//   本腿回答：从崩盘点原地起跑（同奖励、新种子流、无锚），15 轮内能不能爬回基线−5pp。
+//   这是全仓第一次测"烧穿后爬回"（此前 4 次 burn：adv-acc@31 / adv-dist@57 /
+//   adv-max@131 / adv-open@16，全部直接判死，无复活数据）—— 判死也是新知识
+//  （burn=terminal 纪律的实证依据），预期先写下来：≈0。
+//
+// ── 关键设置：kickstart_ref = false（本腿唯一与 open 不同的训练侧开关）──────────
+//   机制（`trainer/loop_lifecycle.py`）：kickstart 锚 = bc 文件本身（ref={bc_path}）。
+//   若 bc=it16 崩盘权重 + kickstart_ref=true ⇒ 锚把策略钉在崩盘点附近，复活测试还没
+//   开始就先被锚处决 —— 必关。无锚纯 PPO 从崩盘点起跑，爬不爬得动只看奖励与梯度。
+//   代价：无锚 = 无缰绳，漂移风险由同样的 burn 门覆盖（起点 −9.5pp，3 个评估点内
+//   回不到 −5pp 以内即二判死，见 yardstick）。
+//
+// ── 被否决的备选（三问）────────────────────────────────────────────────────
+//   ① 放宽 burn 门（−5pp→−8pp / streak 3→5）：open 是单边 −9.5pp 无反弹，放宽门只推迟
+//   verdict，不产生爬升 —— 门不是死因，不动门。
+//   ② 从 hu150 重开同奖励新种子：测的是"运气"，不是"爬回"（起点好+锚好，大概率活下来，
+//   但回答不了用户的问题）。若本腿判死后仍想测运气，再另立一腿。
+//   ③ 从 it5（27.25%，相对高点）起跑：挑点起跑 = 美化起点；"爬回"测试必须从坑底
+//   （it16，25.0%）开始，否则结论注水。
+//
+// ── 奖励：与 open 逐字同（wOpen=0.06，不动 —— 动奖励 = 换实验，爬回测试要求奖励恒定）
+//   12 参数：wKill 3.0 / wHit 0.6 / wDmg 0.03 / wMiss 0.158 / wPickup 3.0 /
+//   wApproach 0.008 / wAcc 15.3 / wDist 0.738 / wHurt 110.0 / wEncl 8.6 / wCorner 25.0 /
+//   wOpen 0.06；公式尾 `- wOpen*dmgFirst600` 不变。
+//
+// ── yardstick ─────────────────────────────────────────────────────────────
+//   爬回线：3 个日常评估点内（it15 前）回到 **≥29.5%（基线 34.5% −5pp）** ⇒ 爬回成立，
+//   继续跑到预算 80，之后按 open 同 yardstick（终判 vs hu150 + 开局零伤≥80% +
+//   P(kills≥4)≥84% + 反证套餐）结算。
+//   二判死（**人工执行**，见下）：it15 前没站上 29.5% ⇒ 烧穿不可逆，开局窗税在 c20
+//   判死（与 h5a 合并，家族退场，不再重开任何开局窗腿）。
+//   基线：34.5%（hu150 it0 日常，与 open 同口径，爬回定义不变）。
+//   无配对训练。
+//   胜率熔断已关（用户指令人工盯盘）：`kickstart_ref=false` ⇒ `_kickstart_burn`
+//   按源码（`worker/loop_guards_leg.py:107`）只在缰绳开着时守，本腿天然不触发；
+//   `paired_kill` 未声明 = 关（opt-in 纪律）；`gates` 未声明 = 恒 False；
+//   `stop_loss` 缺省 0 = 关。爬回线与反证①–③改人工执行（控制台看日常点）。
+//   过程熔断保留（非胜率口径，不动）：kl≥0.075×3 轮记录 / ent 跌破 0.25 break /
+//   预算 80 轮硬兜底。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 it16 崩盘权重 warm start（`x20-adv3-open.it16.20261005-073231.json`）；
+//   kickstart_ref=false（见上）；warmup_iters=0；
+//   种子流全新：paired_rotate_seed=20261009（与既往全历史不同；§15.1 每轮换语料）。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh；奖励虽同但种子流/起点/锚开关全变 = 新实验）。
+// ── 结算（2026-10-05 回填：it1–80 跑满，免熔断人工盯盘）────────────────────────
+// ① 日常：it0 26.0%（坑底 it16 25% 起）→ it7 30.0 → it15 31.25%（站上爬回线 29.5%，
+// 爬回成立，转常规 yardstick）→ 通道 26–31% 震荡 → it80 35.50%/11.367（单点脉冲，
+// 前点 it75 28.0%，+7.5pp 起跳，预算用完死无对证）。
+// ② 终判 @414000 800 局（集群）：it80 28.50%/10.803 vs hu150 32.50%/11.370
+// （−4pp/−0.57）。日常脉冲池外现形（kind-r2 it55 同款）。
+// ③ 开局五项（it80 全量报告 vs hu150 同体）：干净率 69.75/70.0 · 脏中位 128/128
+// （逐字同）· 均伤 39.3/40.3 · P(kills≥4) 80.5/79.6 —— wOpen 税 80 轮，开局行为逐字未动。
+// ④ 实际 it1–80 跑满（胜率熔断关，人工盯盘；kl/ent 健康）。
+// 判语：腿判负（爬回部分成立：出坑未达线；终判 −4pp）。开局窗税在 c20 无效，
+// 与 h5a 合并，家族退场，不再重开任何开局窗腿。
+// 数据：`tmp/x20-adv3-open-r2/` + 终判 `tmp/x20-adv3-open-r2-414k-dist.jsonl`。
+{
+  "version": 5,
+  "name": "x20-adv3-open-r2",
+  "mode": "per-tick",
+  // 环境：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：与 open 逐字同（唯一变量仍是 wOpen，相对 hu150 价）────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wOpen*dmgFirst600",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0,
+      "wOpen": 0.06
+    },
+    // dense-only（与 B 一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：open 腿熔断点 it16（坑底，25.0%；挑点起跑注水，见被否决③）──
+  //   ⚠ `kickstart_init` **整键删掉**（不是写 0）：缰绳关着时初值没有消费方，
+  //   声明它 = 配置自相矛盾 ⇒ 启动期响亮拒启（`worker/config.py:364`，
+  //   "kickstart_init=0.1 但 kickstart_ref 未开"），这门课会被 trainer **整条跳过**、
+  //   账本零行、控制台看着像"卡住不动"。测试背书：
+  //   `tests/worker/test_kickstart_plan.py::test_kickstart_init_without_ref_is_refused_loudly`。
+  //   缺席 = 沿用 rl-config/argparse 的 `kickstart_kl` 缺省，且缰绳本身关着 ⇒ 不消费。
+  "bc": "nn-training/weights/x20-adv3-open/x20-adv3-open.it16.20261005-073231.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // ── 预算：80 轮（爬回测试 15 轮内见分晓；爬回成立才用得上后 65 轮）──────────
+  "iters": 80,
+  "max_hours": 16,
+  "workers": 8,
+
+  // ── 位移包：与 open 逐字同（epochs 4）───────────────────────────────────
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：mb 对齐（48 × mb(1024)）──────────────────────────────────────
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  "paired_rotate_seed": 20261009,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/x20-adv3-open-r2/weights.json",
+  "traj": "tmp/x20-adv3-open-r2",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-adv3-open-r2",
+  "backup_prefix": "x20-adv3-open-r2",
+
+  // ── 评估：日常 200 局/点；爬回线见 yardstick ──────────────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

@@ -1,0 +1,130 @@
+// 课程 x20-adv3-kind-r2 —— **分敌种探针复活赛：从熔断点 it36 原地爬回测试（无锚）**
+//
+// 状态：**草稿（2026-10-04 冻结；未开课）**。开课 = **人在控制台点**（agent 不开训）。
+//   立项 → 用户 2026-10-04 直接指定（kind 腿熔断后，同 open-r2 一样免熔断重开，看爬回）。
+//   kind 腿死法（与 open 的单边下坠不同，是耗尽式）：it0 34.5% → it5 30.5 → it10 25.25 →
+//   it15 28.75 → it20 29.75（反弹清 streak）→ it25 23.5 → it30 28.75 → it35 28.5 →
+//   it36 ABORT（streak 1-2-0-1-2-2-3，从没站上过基线−5pp=29.5%，两次反弹到 ~29 后掉回）。
+//   如实记录对复活有利的一面：kind 两次摸到 29.75/28.75（距爬回线只差 0.5~1pp），
+//   open 一次都没摸到过 —— kind 的复活先验略高于 open，但同样 ≈0。
+//   本腿回答：从 it36（28.5%）原地起跑（同奖励、新种子流、无锚），3 个评估点内能不能
+//   站上 29.5%。open-r2 的姊妹实验：两腿复活结果互比"窗税 vs 敌种"谁的坑更浅。
+//
+// ── 关键设置：kickstart_ref = false（与 open-r2 同理）─────────────────────────
+//   kickstart 锚 = bc 文件本身；bc=it36 崩盘权重 + 锚开 = 钉死在坑底，必关。
+//   无锚纯 PPO 爬不爬得动只看奖励与梯度。
+//   胜率熔断已关（用户指令人工盯盘）：`kickstart_ref=false` ⇒ `_kickstart_burn`
+//   按源码只在缰绳开时守，本腿天然不触发；`paired_kill` 未声明 = 关；`gates`
+//   未声明 = 恒 False；`stop_loss` 缺省 0 = 关。爬回线与反证改人工执行。
+//   过程熔断保留：kl≥0.075×3 记录 / ent 跌破 0.25 break / 预算 80 硬兜底。
+//
+// ── 被否决的备选（三问；与 open-r2 同构）────────────────────────────────────
+//   ① 放宽 burn 门：死因是 36 轮没站上过线，不是门太严，不动门。
+//   ② 从 hu150 重开：测运气不测爬回，另立腿（本腿判死后若还想测）。
+//   ③ 从 it20（29.75%，腿内最高）起跑：挑点美化，结论注水；必须从坑底 it36 开始。
+//
+// ── 奖励：与 kind 逐字同（wPow=1.0，不动 —— 动奖励 = 换实验）──────────────────
+//   12 参数：wKill 3.0 / wHit 0.6 / wDmg 0.03 / wMiss 0.158 / wPickup 3.0 /
+//   wApproach 0.008 / wAcc 15.3 / wDist 0.738 / wHurt 110.0 / wEncl 8.6 / wCorner 25.0 /
+//   wPow 1.0；公式尾 `+ wPow*killsPower` 不变。
+//
+// ── yardstick ─────────────────────────────────────────────────────────────
+//   爬回线（**人工执行**）：3 个日常评估点内（it15 前）站上 **≥29.5%**
+//   （基线 34.5% −5pp，与 kind 同口径）⇒ 爬回成立，继续跑到预算 80，之后按 kind
+//   同 yardstick（终判 vs hu150 + power≥3.0 / s2002≥33% / P(kills≥4)≥84% + 反证套餐）。
+//   二判死（人工执行）：it15 前没站上 29.5% ⇒ 烧穿不可逆，分敌种整族退场
+//   （不再试 armor；与 kind  verdict 合并）。
+//   基线 34.5%（hu150 it0 日常）。无配对训练。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 it36 崩盘权重 warm start（`x20-adv3-kind.it36.20261005-081818.json`）；
+//   kickstart_ref=false；warmup_iters=0；
+//   种子流全新：paired_rotate_seed=20261010（与既往全历史不同）。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh；奖励虽同但种子流/起点/锚开关全变 = 新实验）。
+// ── 结算（2026-10-05 回填：it1–80 跑满，免熔断人工盯盘）────────────────────────
+// ① 日常：it0 24.5%（坑底 it36 28.5% 起，反低开）→ it10 28.75（最接近爬回线）→
+// it15 24.5（没站上 29.5%，按预注册二判死成立，人工盯盘继续跑完）→ 通道
+// 23.5–31.75%（均值 ~27.3%）→ it55 31.75%/11.22（单点脉冲，前后 27.25/26.25）→
+// it80 28.50%/10.90。80 轮零趋势。
+// ② 终判 @414000 800 局（集群）：it55 28.66%/10.787（n=792，缺 8 局，verdict 不变）
+// + it35 23.50%/9.909 vs hu150 32.50%/11.370。日常脉冲池外现形。
+// ③ 分敌种读数（it55 全量报告 vs hu150 同体）：power 2.526/2.652（反向，溢价反而少杀）·
+// armor 2.141/2.330（反向）· s2002 通关 28.0/28.0（逐字同）· s2003 暴毙 13.5/17.0
+// （唯一正向，不带 verdict）。
+// ④ 实际 it1–80 跑满。
+// 判语：判死（爬回未成立 + 终判 −4pp）。分敌种整族退场（不再试 armor）。
+// 数据：`tmp/x20-adv3-kind-r2/` + 终判 `tmp/x20-adv3-kind-r2-414k-dist.jsonl`。
+{
+  "version": 5,
+  "name": "x20-adv3-kind-r2",
+  "mode": "per-tick",
+  // 环境：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：与 kind 逐字同（唯一变量仍是 wPow，相对 hu150 价）─────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) + wPow*killsPower",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0,
+      "wPow": 1.0
+    },
+    // dense-only（与 B 一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：kind 腿熔断点 it36（坑底，28.5%；挑点起跑注水，见被否决③）──
+  "bc": "nn-training/weights/x20-adv3-kind/x20-adv3-kind.it36.20261005-081818.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // ── 预算：80 轮（爬回测试 15 轮内见分晓；爬回成立才用得上后 65 轮）──────────
+  "iters": 80,
+  "max_hours": 16,
+  "workers": 8,
+
+  // ── 位移包：与 kind 逐字同（epochs 4）──────────────────────────────────
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：mb 对齐（48 × mb(1024)）──────────────────────────────────────
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  "paired_rotate_seed": 20261010,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5）──────────────────────────────────────────
+  "out": "tmp/x20-adv3-kind-r2/weights.json",
+  "traj": "tmp/x20-adv3-kind-r2",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x20-adv3-kind-r2",
+  "backup_prefix": "x20-adv3-kind-r2",
+
+  // ── 评估：日常 200 局/点；爬回线见 yardstick（人工执行）────────────
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
