@@ -742,8 +742,27 @@ def test_racing_double_settle_never_inflates_and_quota_stays_sound(
         loop.run_iteration(cfg)
 
         assert srv.dup_copies() > 0, "in-flight race 未触发——本用例什么也没验到"
-        settled = _settled(loop._traj_dir, Path(loop.args.out))
-        unique = set(srv.dispatched)
+        # 输家副本的退休（`dup settle … — dropped (+retired …)`）是**异步**的：晚到的
+        # 竞争副本在 round done 之后才 settle + rmtree。账本扫描若抢在退休落定前，会
+        # 短暂看到同一 (stage,seed) 的两份目录（满机实测 9 vs 8）——这里给一个**有界**
+        # 等待窗（≤5s，50ms 步进）等「账本局数 ≤ 去重派发对数」成立；真·重复计数 bug
+        # 会在窗口耗尽后仍然违反 ⇒ 下面的断言照样抓（与 2026-09-29 的采集记账同族：
+        # 比较的是两个时刻，先等异步退休落定再比）。
+        deadline = time.time() + 5.0
+        while True:
+            settled = _settled(loop._traj_dir, Path(loop.args.out))
+            unique = set(srv.dispatched)
+            if all(
+                settled.get(st, (0, 0))[0] <= len([p for p in unique if p[0] == st])
+                for st in (0, 1)
+            ):
+                break
+            if time.time() >= deadline:
+                break
+            # 等的是谓词「账本局数 ≤ 去重派发对数」成立（输家副本异步退休落定），
+            # 不是等某个进程先跑。
+            # sleep-ok: 轮询步长（≤5s 有界，50ms 步进），等上述谓词成立
+            time.sleep(0.05)
         for stage in (0, 1):
             games, transitions = settled[stage]
             dispatched = len([p for p in unique if p[0] == stage])
