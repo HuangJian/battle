@@ -47,6 +47,7 @@ from trainer.loop_plan import (
     COURSE_ENABLE_MARKER,
     course_enabled,
     course_facts,
+    course_is_offline,
     course_kind,
     course_traj,
     enabled_courses,
@@ -977,6 +978,13 @@ def maybe_auto_stop_course(*, kind: str, auto_stop: bool, traj: str | Path) -> b
     return True
 
 
+def _offline_waiting(rt: CourseRuntime | None) -> bool:
+    """这门课现在是不是「离线等云机」（★P1-3，plan §3.5）—— 判据住 `loop_plan.course_is_offline`
+    （与 `step_course_iter` 同一处裁决；这里只做 `rt` → `args` 的适配）。"""
+    args = getattr(rt, "args", None)
+    return False if args is None else course_is_offline(args)
+
+
 def _settle_rounds(
     sup: Supervisor, runtimes: dict[str, CourseRuntime], done_hooked: set[str]
 ) -> str:
@@ -991,10 +999,15 @@ def _settle_rounds(
     for course, q in sup.courses.items():
         if q.state != QUEUE_DONE or course in done_hooked:
             continue
-        done_hooked.add(course)
         rt = runtimes.get(course)
         if rt is None or rt.engine is None:
             continue  # 一步都没跑过：没有预采子进程/云机态可收
+        # ★P1-3：「离线 = 等待，不是收官」。P1-1 已把离线轮映射成 WAIT（队列因此不会走到
+        # QUEUE_DONE）；这里是第二道闸：哪怕它真因预算/硬边界走到 DONE，也**不得**在这条
+        # 腿上写 `run_complete` / 发云机 PAUSE——云机那边还在跑（R1-e）。
+        if _offline_waiting(rt):
+            continue
+        done_hooked.add(course)
         with prefix_scope(course):
             # kind 分派（评审 P0-2）：BC 的 `finish_course(self, it)` 是另一份实现
             # （trainer/bc_loop.py），**传 kwargs 会 TypeError 带崩 serve**；RL 传

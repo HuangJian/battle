@@ -145,8 +145,13 @@ class OfflineRoundsMixin:
         """补传落位目录。`run_id` 来自远端 ⇒ 必须先过 `sanitize_run_id`（它会是目录名）。"""
         return self.job_root / self.OFFLINE_DIR / sanitize_run_id(run_id)
 
-    def store_offline_artifact(self, body: dict) -> dict:
+    def store_offline_artifact(self, body: dict, *, advance_active: bool = True) -> dict:
         """落一轮补传产物，返回 {"status": "accepted"|"duplicate", "it": n, "run_id": r}。
+
+        `advance_active=False`（★P1-7 / R3-f）= 调用方已知该课现在归 `pinned_online`
+        （人切了固定在线）⇒ 这轮回传**不得推进活动权重**（`weights.json`）：旧云机跑完的轮
+        不是「当前进度」，把人切在线后的起点拉回旧轮是报障一的另一半。镜像/归档照落
+        （它们是「算过什么」的证据，不是「现在在哪」的声明）。
 
         校验（任一不过抛 ProtocolError → 400，且**不落盘任何东西**）：
           * `run_id` 合法（目录名的唯一防护面）；
@@ -255,7 +260,12 @@ class OfflineRoundsMixin:
             )
             self._land_round_metrics(row, run_id=run_id, it=int(it))
             self._land_offline_round_extras(
-                it=int(it), run_id=run_id, weights_json=wj, opt=opt, row=row
+                it=int(it),
+                run_id=run_id,
+                weights_json=wj,
+                opt=opt,
+                row=row,
+                advance_active=advance_active,
             )
         return {"status": "accepted", "run_id": run_id, "it": int(it)}
 
@@ -372,7 +382,14 @@ class OfflineRoundsMixin:
         return course, str(_weights_archive_root() / course)
 
     def _land_offline_round_extras(
-        self, *, it: int, run_id: str, weights_json: bytes, opt: bytes, row: object
+        self,
+        *,
+        it: int,
+        run_id: str,
+        weights_json: bytes,
+        opt: bytes,
+        row: object,
+        advance_active: bool = True,
     ) -> None:
         """回传轮在**课程侧**的三处落位（2026-09-23 用户口径；全部 best-effort）。
 
@@ -406,7 +423,13 @@ class OfflineRoundsMixin:
         except OSError as e:
             print(f"[hub-server] 补传 it{it} 交付镜像失败（忽略）：{e}", flush=True)
         # ② 活动权重推进（只在没有更新的轮次时；判据是账本，两腿共用）
-        if not self._ledger_has_newer_iter(int(it)):
+        # ★P1-7：`advance_active=False`（人已切固定在线）⇒ 不推进；镜像/归档照落。
+        if not advance_active:
+            print(
+                f"[hub-server] 补传 it{it} 不推进活动权重（课程已固定在线；旧会话的回传只归档）",
+                flush=True,
+            )
+        elif not self._ledger_has_newer_iter(int(it)):
             try:
                 _write_bytes(traj / self.ACTIVE_WEIGHTS_NAME, weights_json)
                 fp12 = hashlib.sha256(weights_json).hexdigest()[:12]

@@ -108,6 +108,10 @@ class QueueObserveMixin(QueuePeer):
                 )
             courses[course] = {
                 "mode": self.mode_of(course),
+                #: 权威三态（★ 2026-10-05，plan/offline-online-status-switch §3.1）：dashboard 的
+                #: `courseStatus` 从本行读它（不猜）。`pinned` 同批暴露（人固定与否）。
+                "authority": self.authority_of(course),
+                "pinned": self.pinned_of(course),
                 # 停机达令是**每课程**的（一门课的门禁 ABORT 只停那门课的云机）
                 "halt": self.halt_of(course),
                 "pending": pending,

@@ -30,7 +30,9 @@ from trainer.loop_plan import (
     WAIT_COLLECT,
     WAIT_IDLE,
     WAIT_INFLIGHT,
+    WAIT_OFFLINE,
     WAIT_READY,
+    course_is_offline,
     enabled_courses,
     plan_course,
     waiting_state,
@@ -57,6 +59,32 @@ def _state(**kw: object) -> tuple[str, str]:
 
 
 # ────────────────────────────── 在飞（进程外等待） ──────────────────────────────
+
+
+def test_offline_course_says_cloud_takes_over_not_a_finished_state() -> None:
+    """★P1-3（plan §3.5）：离线课 = **在等云机**，不是「已收官」（R1-e 的读面症状）。
+
+    旧写法由离线早退 `done(final=True)` 驱动 ⇒ 这一列掉到 `idle`（「本轮无待办」），
+    控制台看起来像跑完。离线档排在 `inflight` 之前：不先说清原因，那一行无法解释。
+    """
+    kind, text = _state(offline=True)
+    assert kind == WAIT_OFFLINE, (kind, text)
+    assert "云机" in text and "切回在线" in text, text
+    # 真跑满（finished）优先：那是最强的事实，不得被离线档遮住
+    kind2, _ = _state(offline=True, finished=True, it=9, iters=9)
+    assert kind2 == WAIT_IDLE, kind2
+
+
+def test_course_is_offline_reads_the_same_source() -> None:
+    """`course_is_offline` 与 `step_course_iter` 同源：`rollout_src=run` ∧（run_iters 或 rl-config）。"""
+    from types import SimpleNamespace
+
+    off = SimpleNamespace(rollout_src="run", run_iters=-1, course_path="curricula/c5-gae.jsonc")
+    assert course_is_offline(off) is True
+    local = SimpleNamespace(rollout_src="local", run_iters=0, course_path="curricula/c5-gae.jsonc")
+    assert course_is_offline(local) is False
+    # 读不到（args 缺项）⇒ False（不吃旧行为，也不炸读面）
+    assert course_is_offline(SimpleNamespace()) is False
 
 
 def test_inflight_wins_and_carries_job_identity() -> None:

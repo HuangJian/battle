@@ -121,6 +121,10 @@ class QueueScopeMixin(QueuePeer):
         # 把 `add_course(name, "offline")` 的显式模式吞掉），再让记录覆盖它。
         self._modes[c] = m
         self._modes[c] = self.dispatch_effective_mode(c, m)
+        # ★六轮 R3-a（P0-8）：发现/重启路径与构造路径同口径——不调 `_sync_parked` 的话，
+        # 盘上 `mode=offline` 只在**读面**（清单/取包）生效、`st.parked` 仍是 False ⇒
+        # 重启后残留的在线 job 可被在线盘领走（模式权威与停摆闸分叉）。
+        self._sync_parked(c)
         return True
 
     def _adopt_solo(self) -> None:

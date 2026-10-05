@@ -7726,3 +7726,40 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   `tools/githook/detach-run.py`（POSIX exec）· `nn-training/tests/test_githook_scripts.py`
   （红腿行为档 ×2 + Windows taskkill 静态钉子）。
 - **指针**：全文 `docs/nn/engineering.md` §63。
+
+## §2026-10-05-goalnn-offline-online-status-switch（2026-10-05，用户报障×2：手动切在线不稳定 / 云机掉线后课程永久停摆）
+
+- **背景**：报障一「切成在线不稳定」= pin 语义在 §2026-10-03-goalnn-offline-seize 坍缩后「我要在线」没有表达（切了被抢回）+ 撤单即时闸不认账本复活 + 本机腿把离线等待当收官；
+  报障二「课程永久停摆」= 死租约冻结全池 / 无包腿烧满 `give_up` 后被新盘 skip / 导包窗口无主也不释放。
+  计划全文 `plan/offline-online-status-switch.plan.md`（六轮评审修订版）。
+- **决定（行为变更 21 条，摘要）**：① `pinned ∧ mode=online` 重新获得阻止力（离线盘不可 claim/seize/翻模式 = `pinned_online`）；
+  ② 切在线/交还自动撤销离线租约（墓碑 + 心跳 409 `revoked`）；③ 离线租约失联早收（静默 180s 自动可接管）与 busy 活性口径
+  （stale/revoked/expired 不算忙；窗口锚 `claimed_at`，停滞告警仍锚 `flipped_at`）；④ 切在线不撤单 + `_cancelled` 按**账本净态**
+  对账（生产写者 = `remote/hub_client.publish_job`）；⑤ 训练侧离线 = 等待（不写假 `run_complete`），复原前提 `--rollout-src auto`
+  ∧ 删 `run_iters`，显式 run/node 声明不支持复原；⑥ 发现/开课同步 `parked`；⑦ 再发布 = 复活按净态落账本；
+  ⑧ 冷课读盘派生 authority（读失败退缺省不 500）；⑨ `pinned_online` 回传不推进活动权重 ∧ 段末盖章要求包身份相符；
+  ⑩ 意图表 v2 `{mode,pinned}` + 回灌带 pin（旧裸串按 `pinned:false` 归一）；⑪ 停滞告警只静音 `pinned_online`；
+  ⑫ 首页课态单一派生 `courseStatus`（pill/矩阵同源）；⑬ 读面失败保上一拍值 + `stale` 标注（窗口 = 1 TTL，超窗显示未知）；
+  ⑭ 词切换滞回（只随派生值变化）；⑮ `lease_verdict` 的 `revoked` 不看身份（顺序 expired→revoked→mine→stale→foreign）；
+  ⑯ authority 进 `/admin/queue` 每课行（读面不猜）；⑰ pinned 存量课先盘点（见下）；⑱ `auto_claimable` 加 stale/墓碑可领；
+  ⑲ 导包触发账本换主/超窗即重置；⑳ `auto` 档额外要求 `course in _stores`（冷课无记录 = `pinned_offline`）；
+  ㉑ `bc_ledger.inflight_jobs` 改净态折叠（复活 jid 不再被旧 `job_cancelled` 判「已收口」）。完整语义/状态转换表 → `docs/nn/remote-transport.md` §67。
+- **§4.2 回摆理由（不是翻烧饼）**：2026-10-03 §59 坍缩 pin 的背景是「当时云机上线后任务清单持续 0 条，pin online 是唯一让课继续训的表达」；
+  今天已有三态意图表 + 「交还自动」按钮，而用户报障正是「手动切在线不稳定」⇒ pin online 必须再成硬意图。
+  回摆是**精准的一半**：pin offline 与 auto 抢占语义不动（开课未选模式 = 自动池，离线盘照抢）。
+- **备选与否决**：① 只修租约失联不动 pin（报障一原样）；② 切在线时把课从 seize 候选临时摘 N 分钟（第三个事实源、问题延后）；
+  ③ hub 后台 tick 扫死租约（本仓形状是「谁先看谁回收」）；④ `held` ⇒ 新 worker 自动 `takeover=1`（无活性依据的盲接管）；
+  ⑤ 硬杀云机会话（无反向通道）；⑥ 离线租约照抄 job 侧「零心跳才早收」（云机心跳整段在跑、慢网误杀代价高）；
+  ⑦ 竞态收尾改回 409（要撤回 `note_claim` 已写的字段 = 新增回滚路径，两种到达顺序终态等价）；
+  ⑧ `lease_verdict` 加 token 按身份判 `revoked`（新主永远命中不了）；⑨ 冷课一律 `pinned_offline`（徽标打给从没人管的课）；
+  ⑩ 再发布只清 `_cancelled` 内存 set（账本仍撤单，撒谎形状）。全表 → plan §8。
+- **存量盘点（P1-7）**：2026-10-05 全仓 `offline-dispatch.json` 仅命中 pytest 临时目录（6 份 `pinned=true` 为测试瞬态物）；
+  真课程目录零记录 ⇒ **无存量 pinned 课**，上线当天无课被 pin 回摆影响。
+- **违反后果**：pin 再坍缩 ⇒「切成在线」语义不存在（切了随时被抢回）；stale/墓碑算忙 ⇒ 死盘冻结全池（报障二）；
+  恢复按裸 `pinned` 判 ⇒ `pinned_offline` 告警被误静音或 busy 漏判；读面猜 authority / 失败清空 ⇒ 同屏两个 widget 各说一套或读面抖动换词。
+- **落点**：`hub/{task_pack,queue_offline,offline,store_ledger,store_leases,store_offline,queue_scope,queue_peer,queue_observe}.py` ·
+  `remote/offline_boot.py` · `trainer/{loop_runner,loop_lifecycle,loop_serve,loop_plan,loop_round_steps,loop_core,loop_transport}.py` ·
+  `dashboard/src/server/actions/{course-mode,console-state}.ts` · `dashboard/src/server/api/{loop-queue,overview}.ts` ·
+  `dashboard/src/web/view/{course-status.ts（新）,course-overview,loop-queue,course-matrix,alerts}.ts` · `dashboard/src/web/app/{app.tsx,panels/CourseMatrix.tsx}`。
+- **指针**：全文（状态转换表 / 六态表 / F1–F6 / 兼容矩阵）→ `docs/nn/remote-transport.md` §67 · 控制台侧 → `docs/nn/console.md` §31 ·
+  计划 → `plan/offline-online-status-switch.plan.md`。

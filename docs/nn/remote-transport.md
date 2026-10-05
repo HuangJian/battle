@@ -6,6 +6,125 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §67 在线/离线状态切换闭环：pin 重新成为硬意图 + 离线 = 等待（plan/offline-online-status-switch，2026-10-05）
+
+**触发**（用户 2026-10-04 报障两条）：
+
+- ①「手动切成在线不稳定」——切了在线仍被离线盘抢回去（2026-10-03 §59 把 pin 的阻止力坍缩了）、
+  进离线时撤掉的在线 job 回来不复活（`_cancelled` 即时闸按内存 set 判）、本机腿又把离线等待
+  当收官写假 `run_complete`（`runtime ... 100%`）。
+- ②「云机掉线后课程永久停摆」——死租约冻结全池（`_busy_locked` 把 stale/expired 也当忙）、
+  无包腿烧满导包触发后新盘拿到 `give_up` 并把它加进 skip（本会话永久放弃）、导包窗口没有
+  主人也不释放（窗口锚 `flipped_at` 且无超时活性口径）。
+
+**五档权威（`authority_of`，唯一派生函数；读盘上派发记录 + 开课标记，不新增事实源）**：
+
+| 值 | 条件 | 含义 |
+|---|---|---|
+| `pinned_online` | 标记在 ∧ `pinned ∧ mode=online` | 人固定在线：离线盘不可 claim/seize/翻模式 |
+| `pinned_offline` | 标记在 ∧ `pinned ∧ mode=offline`，**或冷课无记录** | 人指定离线 / 历史冷课按离线 |
+| `auto` | 标记在 ∧ 在表 ∧ `!pinned`（★P1-C 五轮：额外要求 `course in _stores`） | 自动池：claim 可翻模式、可抢在训在线课 |
+| `not_offline` | 标记在 ∧ 冷课 `{online, !pin}` 记录 | 不在离线池（不开导包能力） |
+| `stopped` | 开课标记不在（优先级最高） | 唯一 opt-out：claim 拒、默认清单不列 |
+
+冷课派生**读盘**（R3-c：在线/pin 意图在冷课面也生效）；读盘失败退回缺省（无记录 ⇒ `pinned_offline`），
+不把 500 带进清单。两个消费函数：`auto_handoff_allowed` = `authority == auto`（清单 `auto_handoff`/`seize`/
+翻模式/无包入口）；`is_runnable_offline` = `authority ∈ {pinned_offline, auto}`（**claim 门 + busy 闸**——
+★F2：busy 两处必须用它，只按 `auto_handoff_allowed` 会把 pinned_offline 静默漏掉「一拖一」）。
+`auto_eligible` 降级为兼容别名（机械守卫钉「唯一读者」，新代码别用）。
+
+**状态转换表（事件 → 动作【P0/P1 实现】）**：
+
+| 事件 | 权威变化 | hub 动作 | 训练侧动作 |
+|---|---|---|---|
+| 开课（未选模式） | `auto, mode=online` | 无（就绪） | 正常入队 |
+| 自动 claim（有包） | `auto → auto(offline)` | 建租约；翻 mode；撤未认领 job；记 `claimed_offline/by/at` | 下一轮边界见 `run` ⇒ 等待（§3.5） |
+| 自动 claim（无包） | 同上 | 翻 mode + 触发控制台导包（409 `pending_export`）；**刷新 `claimed_at` 且写 `claimed_by`**；**新一轮交接 ⇒ 重置触发账本** | 同上 |
+| 人切离线（pin=1） | `pinned_offline` | `mode=offline`；`claimed_offline=false`；`drop_jobs` 生效；**不撤租约** | 同上 |
+| 人切在线（pin=1） | `pinned_online` | `mode=online`；**撤销租约**（墓碑）；清 `claimed_offline/by/at/flipped_at`；**不撤单** | 等待中的课自动续跑（§3.5） |
+| 交还自动（pin=0） | `auto` | `mode=online`；同撤销与清理；不撤单 | 同上 |
+| 停课（删标记） | `stopped` | 不新发租约（claim 409 `not_offline`；★F3 行为变更——此前 `mode=offline` 的停课残留仍可被领走）；在跑租约**不杀** | 该课在下次空闲拍退出队列 |
+| 租约失联（> `OFFLINE_LEASE_STALE_SEC`） | 不变 | 清单标 stale + `claimable=true`；claim 自动接管（日志 `offline-lease-reclaim`）；busy 不再算它 | —（新盘照常 claim） |
+| 租约过期（TTL） | 不变（mode 留 offline = U3 waiting） | 惰性清；可再领 | — |
+| 段末跑满（`end_it_reached`） | 不变 | `completed_pack_sha` 落盘；不可再领（重导包 sha 变解封；★P1-7：盖章前校验 body 的 run_id/plan_sha256 与当前包相符） | — |
+| 心跳收到 `revoked` | 不变 | — | **停止再 claim；当前段在下一个轮边界收尾**（旧 worker 照旧跑完，兼容降级） |
+
+**离线租约围栏（六态 `lease_verdict`，签名不变 `(now, rec, worker_id)`）**：
+
+| 顺序 | 条件 | verdict | claim | heartbeat | release |
+|---|---|---|---|---|---|
+| 1 | 无记录 / `expires_at<=now` | `expired` | 允许 | 409 `expired` | 幂等成功 |
+| 2 | `rec["revoked"]` 为真（**不看身份**） | `revoked` | 允许（新主） | 409 `revoked` | 200（清墓碑；**仍需 token**） |
+| 3 | `worker_id` 相同 | `mine` | 续上 | 200 | 200 |
+| 4 | `now - beat_at > 180s` | `stale` | **自动接管**（不需 `takeover=1`） | 409 `taken` | 409 foreign |
+| 5 | 其余 | `foreign` | 409 `held` | 200 | 409 |
+
+顺序理由（写死在代码注释）：`revoked` 排在 `mine` **之前**（老主心跳拿 409，不是续上）；`mine` 排在
+`stale` **之前**（同一 worker 静默后回来续自己的租约判 `mine`，cell 中断重跑不被自己的墓碑/静默挡在门外）。
+`beat_at` = 最近一次心跳（**心跳必须同时刷 `beat_at` 与 `expires_at`**，否则持续心跳的活主会被判 stale）；
+旧记录无 `beat_at` ⇒ 用 `at`。常量 `OFFLINE_LEASE_STALE_SEC = 180.0`（= 3×心跳 60s，与 job 侧
+`ORPHAN_GRACE_SEC` **同值不同义**：job 侧 = claim 后**零心跳**；离线段 = **连续静默**——别照抄 job 侧
+`_lease_state`），env `BCITY_OFFLINE_LEASE_STALE_SEC` 覆盖；住 `task_pack.py`（叶子判据自己用，不向上 import）。
+墓碑（`revoked=True`）**只对新 worker 有效**：`remote/` 全目录零 `revoked` 匹配、旧 `_beat` 只按 `expired`
+二分 ⇒ 旧云机不会因它停算力；保留记录的理由 = 新 worker 下次心跳收 409 `revoked` 并在轮边界收尾。
+
+**六轮评审定案（本节实现契约）**：
+
+- **F1 再发布 = 复活按账本净态**：生产写者是 `remote/hub_client.publish_job`（磁盘 IPC，无条件追加
+  `job_pending`；`store_ledger.publish` 生产零调用）。`_claim_locked` 命中 `_cancelled` 时**折叠该 jid 最后事件**：
+  `job_pending` ⇒ `discard` + 放行；`job_cancelled`/`job_completed` ⇒ 照旧拒。用例必须用生产写者构造。
+- **F2 busy 闸活性口径**：两处消费点都改 `is_runnable_offline`。两条腿只算有活性的东西：别的课租约
+  仅当 verdict ∈ `{mine, foreign}`（未过期 ∧ 未 stale ∧ 未 revoked）才算忙；别的课交接窗口锚
+  **`claimed_at`**（每次 pending_export claim 刷新）且窗口 ≤ `AUTO_HANDOFF_PENDING_SEC`(900s)。
+  ★锚点分叉是有意的：busy 用 `claimed_at`（可刷新），`stall_verdict` 的 `pending-export` 仍锚 `flipped_at`
+  （活跃重试不触发停滞告警，但也不该把死盘一直算作忙）。`pinned_online` 课**不占别人的闸**（限制只作用于**被检查方**）。
+- **F3 停课/冷课 claim 409 `not_offline`**（行为变更）；但 `/offline/tasks` 的**取包端点不拦 `stopped`**
+  （正在跑的会话停课后仍要能重取包；冷课无标记存量路径照发，`test_task_pack_cold_course_still_served`）。
+- **F4 新一轮交接 ⇒ 重置导包触发账本**：「新一轮」= 换 `worker_id` **∨** 距上次 claim 超
+  `AUTO_HANDOFF_PENDING_SEC`（`.worker-id` 持久在 `<work>/.worker-id`，同机重开会话沿用同一 id ⇒
+  只判换主会漏「同主回来」，照吃前任烧满的 `give_up`）。
+- **F5 墓碑 holder 形状定死**：`holder_info` **返回**墓碑（`revoked=true` + `silent_sec`/`stale` 全字段，
+  清单渲染 `held-revoked`）；`offline_leases()` 面向 `/admin/offline` **保留** revoked 条目（不静默删）。
+  `reason` 文案新增 `pinned: ...`、`held-stale: <id>（静默 Ns，可直接接管）`、`held-revoked: <id>（已被撤销，可直接接管）`。
+  pinned_online 行**照发**默认清单（`claimable=false`、`seize=false`、`reason=pinned:`）。
+- **F6 authority 全组合**：见上表；`add_course`/发现路径同步 `parked`（R3-a 纯 bugfix）；
+  `stall_verdict` 吃 authority，静音**只给 `pinned_online`**（R3-e）。
+
+**P1-7 撤销后回传的处置（R3-f）**：`pinned_online` 期间到达 `/offline/artifact` 只落 `offline/<run_id>/`
+与离线账（供导入参考），**不推进活动权重**（`store_offline_artifact(..., advance_active=False)`；镜像/归档照落）；
+`/offline/result` 的 `end_it_reached` 必须用 body 已带的 `run_id`/`plan_sha256` 与**当前包**（索引同字段）
+比对相符才置 `completed_pack_sha`——否则只记「旧包段末到岸（不盖章）」，应答加 `completed_sealed`。
+包读不到/缺项 ⇒ 不判、照旧盖章。`pack_index_meta` 生产导出器写 snake_case（历史夹具 camelCase ⇒ 两套都读）。
+
+**P1-9 清单 held 行进 blocker 预算（R3-g）**：`resolve_courses` 签名改为
+**返回 `(picks, blocked)` 元组**；`blocked` = 被**非自己**有效租约持有的行 `{course, holder, expires_in}`；
+`_run_auto` 在 `if tasks:` **之外**新增分支「tasks 空但 blocked 非空 ⇒ 退避再问、重置 `idle_since`、
+不占 idle 预算」（仍查停机信号/会话预算）。与既有 `_run_batch` 的 `leases["blockers"]`（tasks 非空时的
+交接中间态）**同名不同物**，别接错。
+
+**训练侧：离线 = 等待（不是收官）**：`ROUND_OFFLINE_EXIT` → `waiting(...)`（`loop_plan.WAIT_OFFLINE`，
+排在 finished 之后、inflight 之前）；`loop_serve._settle_rounds` 跳过离线课（不写 `run_complete`/PAUSE）；
+`loop_lifecycle.run` 离线 ⇒ `it -= 1; sleep(WAIT_RETRY_SEC)` 退避重问（不 return，否则写假 `run_complete`）；
+日志去重（`_offline_note`），每模式状态只喊一次。复原前提 = trainer 以 `--rollout-src auto` 启动
+（显式 `run`/`node` 由 `loop_transport._warn_explicit_source_blocks_restore` 声明「自动复原不支持」，去重）∧
+`courses.<课>.run_iters` 被删。回灌后引擎热复用，无需停开课。
+
+**兼容**：旧 hub × 新 worker（新 reason 缺席 ⇒ 旧映射）；旧 worker × 新 hub（心跳 409 `revoked` 不改旧码，
+照旧跑完；首写幂等丢弃重复回传）；旧 `dispatch.json`（v1）零迁移（authority 从既有 `pinned`+`mode` 派生）。
+
+**存量盘点（P1-7）**：2026-10-05 全仓 `find -name offline-dispatch.json` = 只命中 pytest 临时目录
+（6 份 `pinned=true` 均为测试瞬态物）；真课程目录零记录，`nn-training/battle-offline/` 只有 `.worker-id`
+⇒ 上线当天**无存量 pinned 课**、无课被 pin 回摆影响。
+
+**读数（2026-10-05）**：nn python gate **3672 passed / 9 skipped**（ruff + mypy 过）· e2e
+`test_auto_handoff_e2e.py` 112 passed（T1–T8，含六轮 F1 生产写者反探针）· dashboard **1400 pass / 0 fail** +
+typecheck + 三份 bundle。用例：`tests/hub/test_auto_handoff.py`（42）+ `tests/hub/test_offline_backfeed.py`（新 3）+
+`tests/common/test_offline_task_queue.py` + `tests/trainer/test_offline_leg_retired.py` /
+`test_loop_plan_waiting.py` + `dashboard/tests/{web-course-status,state-read-freshness}.test.ts`（新）。
+
+**指针**：决策 `DECISIONS.md` §2026-10-05-goalnn-offline-online-status-switch；控制台侧 → `docs/nn/console.md` §31；
+计划 `plan/offline-online-status-switch.plan.md`（六轮评审修订版 F1–F6）。
+
 ## §66 云端 worker 身份命名：`kaggle-c` / `colab-t` / `aistudio-o`（本机 `local`）（plan/worker-name-readable，2026-10-04）
 
 **触发**（用户 2026-10-03）：dashboard PPO 贡献度里的 worker id 是 `hostname:pid`——Kaggle/Colab

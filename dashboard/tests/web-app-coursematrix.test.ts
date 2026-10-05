@@ -410,9 +410,19 @@ describe('课程矩阵：表头两半的机群级读数与空态', () => {
     const empty = await render({ overview: null, loopQueue: failed })
     expect(empty).toContain('只读视图不可用')
     expect(empty).toContain('ModuleNotFoundError')
-    const stale = await render({ loopQueue: { ...queueView([lqRaw()], ['c4']), error: '超时' } })
+    // ★P1-11：`stale` 在场 = 读失败但**旧行还在**（last-known-good）⇒ 说「上一拍读失败（显示缓存）」；
+    // 无 `stale`（冷启动失败/超窗）⇒ 说「未知」，不拿空表冒充缓存。
+    const stale = await render({
+      loopQueue: {
+        ...queueView([lqRaw()], ['c4']),
+        error: '超时',
+        stale: { since: Date.now(), reason: '超时' },
+      },
+    })
     expect(stale).toContain('上一拍读失败')
     expect(stale).toContain('超时')
+    const noKeep = await render({ loopQueue: { ...queueView([lqRaw()], ['c4']), error: '超时' } })
+    expect(noKeep).toContain('调度器视图未知')
   })
 
   it('两侧都没东西可说 → 不渲染（没东西可说时不留空壳）', async () => {

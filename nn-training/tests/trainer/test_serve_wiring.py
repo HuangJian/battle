@@ -224,6 +224,38 @@ def test_two_courses_alternate_and_both_finish(env: SimpleNamespace) -> None:
     assert rep.engines["loaded"] == []
 
 
+def test_offline_course_reaching_done_is_not_settled(
+    env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★P1-3 第二道闸：离线课即使走到 `QUEUE_DONE`（预算/硬边界），serve 腿也**不得**收官
+    （`finish_course` = 落 `run_complete` + 发云机 PAUSE）——云机那边还在跑（R1-e）。
+
+    第一道闸（P1-1 的 WAIT 映射）让离线轮不再进 DONE；这一道是即使它进来了也不许写假收官。
+    对照组 = 既有 `test_two_courses_alternate_and_both_finish`（非离线课照常收官）。
+    """
+
+    def fake_open_course(course: str, **kw: Any) -> CourseRuntime:
+        args = SimpleNamespace(
+            mode="per-tick",
+            traj=str(env.tmp / course),
+            iters=2,
+            out_log="",
+            remote_hub_url="",
+            remote_token="",
+            force=False,
+            rollout_src="run",  # 显式离线声明（course_is_offline 的判据同源）
+            run_iters=-1,
+        )
+        return CourseRuntime(course=course, args=args)
+
+    monkeypatch.setattr(loop_serve, "open_course", fake_open_course)
+    rep = serve(["a"], prepare=False, bun="bun", iters=2, step_mode=False)
+    assert rep.courses["a"]["state"] == "done"
+    loop = FakeLoop.instances[0]
+    assert loop.finished == []  # 没有假收官（不写 run_complete / 不发云机 PAUSE）
+    assert loop.released == 1  # 退出时照常释放 torch 栈
+
+
 def test_step_mode_runs_the_full_13_step_table(env: SimpleNamespace) -> None:
     rep = serve(["a"], prepare=False, bun="bun", iters=1, step_mode=True)
 

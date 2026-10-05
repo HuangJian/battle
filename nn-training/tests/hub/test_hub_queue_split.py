@@ -206,7 +206,14 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "_dispatch_update",
             "dispatch_effective_mode",
             "pinned_of",
+            # 权威三态 + 租约围栏（2026-10-05，plan/offline-online-status-switch）
+            "authority_of",
+            "auto_handoff_allowed",
+            "is_runnable_offline",
             "auto_eligible",
+            "_marker_exists",
+            "_dispatch_disk_record",
+            "revoke_offline_lease",
             "set_mode_pinned",
             # 切模式撤单（2026-10-03，plan/switch-mode-drops-jobs T0）：三条翻模式路径共用的收尾。
             "_drop_unsettled",
@@ -332,7 +339,14 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     "_disk_lock": frozenset({"__init__"}),
     "_lease_lock": frozenset({"__init__"}),
     "_leases": frozenset(
-        {"__init__", "_lease_rec", "claim_offline", "heartbeat_offline", "release_offline"}
+        {
+            "__init__",
+            "_lease_rec",
+            "claim_offline",
+            "heartbeat_offline",
+            "release_offline",
+            "revoke_offline_lease",
+        }
     ),
     "_now": frozenset({"__init__"}),
     "_offline_disks": frozenset({"__init__", "note_offline_disk"}),
@@ -444,9 +458,9 @@ def _writers(path: Path, cls_name: str) -> dict[str, set[str]]:
 
 
 def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
-    """110 个域成员各住一家；`_HubQueue` 不得再定义任何一个（组合类只组合）。"""
-    # 110 个**不重名**的域成员（`halt_workers` 是属性对，一个名字两个 FunctionDef）。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 110, len(DOMAIN_METHODS)
+    """116 个域成员各住一家；`_HubQueue` 不得再定义任何一个（组合类只组合）。"""
+    # 116 个**不重名**的域成员（`halt_workers` 是属性对，一个名字两个 FunctionDef）。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 116, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -456,7 +470,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 110, len(seen)
+    assert len(seen) == 116, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -480,9 +494,9 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
         for name in realized:
             assert seen.get(name, domain) == domain, f"{name} 同时住 {seen[name]} 与 {domain}"
             seen[name] = domain
-    # 110 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
+    # 116 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
     expect = set(DOMAIN_METHODS) | {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"}
-    assert len(seen) == 112 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
+    assert len(seen) == 118 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
 
 
 # ───────────────────── ② 接线正确 ─────────────────────
@@ -819,8 +833,9 @@ def test_queue_peer_is_declarations_only() -> None:
     """★ `QueuePeer` 是**纯声明**：每个方法体只有 `...`，无一个实现（否则就是第二份实现）。"""
     body = _cls(_tree(HUB_DIR / "queue_peer.py"), "QueuePeer").body
     funcs = [n for n in body if isinstance(n, ast.FunctionDef)]
-    # 80 个成员 - `__init__` - `_store_of`（见下一条）；2026-10-03 自动交接 +3（见下）。
-    assert len(funcs) == 78, len(funcs)
+    # 80 个成员 - `__init__` - `_store_of`（见下一条）；2026-10-03 自动交接 +3；
+    # 2026-10-05 权威派生 +2（authority_of / pinned_of）。
+    assert len(funcs) == 80, len(funcs)
     for n in funcs:
         # 只滤掉文档字符串：`...` 也是 `Expr(Constant)`，滤它就把声明本身滤没了（本守卫
         # 第一版就是这么错的 —— `halt_of` 带 docstring 才暴露出来）。

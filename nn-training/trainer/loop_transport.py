@@ -111,6 +111,10 @@ def _rollout_source(args: Any) -> str:
             raise SystemExit(
                 f"[run_rl] 未知 --rollout-src {mode!r}（只接受 {'|'.join(ROLLOUT_SRCS)}）"
             )
+        # ★P1-1（plan §3.5）：**显式非 auto 会短路 rl-config** ⇒「切回在线自动续跑」这条
+        # 契约不成立（控制台把 `rollout_src`/`run_iters` 写回也不会被读到）。这是隐式依赖，
+        # 必须**明说**而不是静默失败（课程会永远等下去，而日志里一个字都没有）。
+        _warn_explicit_source_blocks_restore(args, mode)
         return mode
     try:
         from worker.train.loop_util import course_key_from_path
@@ -130,6 +134,37 @@ def _rollout_source(args: Any) -> str:
     if val not in ROLLOUT_SRCS or val == "auto":
         return "local"
     return val
+
+
+#: 「离线自动复原」在显式 `--rollout-src` 下**不成立**——已喊过的（课, 实测值）去重：
+#: `_rollout_source` 每轮都会被问一次，不去重就是每轮刷一行。
+_RESTORE_UNSUPPORTED_NOTED: set[tuple[str, str]] = set()
+
+
+def _warn_explicit_source_blocks_restore(args: Any, mode: str) -> None:
+    """声明「离线复原不支持」（§3.5 守卫，落判据自己身边）：只对离线相关档喊。
+
+    为什么只喊 `run`/`node`：`local` 是本机采样，不存在「等云机接手」这回事。
+    """
+    if mode not in ("run", "node"):
+        return
+    try:
+        from worker.train.loop_util import course_key_from_path
+
+        stem = course_key_from_path(str(getattr(args, "course_path", "") or ""))
+    except Exception:
+        stem = ""
+    key = (stem or "?", mode)
+    if key in _RESTORE_UNSUPPORTED_NOTED:
+        return
+    _RESTORE_UNSUPPORTED_NOTED.add(key)
+    from common.log import log
+
+    log(
+        f"[run_rl] ⚠ {stem or '?'}: --rollout-src={mode} 是**显式**值（实测 {mode}）——"
+        "它会短路 rl-config ⇒ 「控制台切回在线后自动续跑」**不支持**（写回不会被读到）。"
+        "要保留自动复原请用 --rollout-src auto（缺省）并在 rl-config 里写 rollout_src/run_iters"
+    )
 
 
 def _run_segment_iters(args: Any) -> int:

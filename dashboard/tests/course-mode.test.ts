@@ -43,6 +43,7 @@ import { loadConsoleState, saveConsoleState } from '../src/server/actions/consol
 import {
   autoOfflineHandoff,
   pushCourseMode,
+  readCourseModeIntents,
   readCourseModes,
   restoreCourseModes,
   restoreCourseModesNote,
@@ -474,5 +475,50 @@ describe('★2026-10-03 自动离线交接：pin 与 unset 的分工', () => {
     expect(r.ok).toBe(false)
     expect(r.message).toContain('未开课')
     expect(courseRow('c5').rollout_src).toBeUndefined()
+  })
+})
+
+/** ★P1-8（2026-10-05，plan/offline-online-status-switch §3.9）：意图表 v2 `{mode, pinned}`。
+ *
+ *  · 那颗开关写 `{mode, pinned:true}`（= 人固定；回灌**带 pin**——R3-d 的修法：不带 pin
+ *    推不动被 claim 翻过的 online 意图，控制台与 hub 永久分叉）；
+ *  · 开课弹窗/停课的一次性选择写 `{mode, pinned:false}`（回灌走 legacy，不关自动交接）；
+ *  · 旧裸串读时归一为 `{mode, pinned:false}`（**不静默升级**成人的决定）。 */
+describe('★P1-8 意图表 v2（{mode,pinned} + 回灌带 pin）', () => {
+  it('那颗开关写 {mode,pinned:true}；pushCourseMode（开课/停课路径）写 pinned:false 且不带 pin 参数', async () => {
+    await setCourseMode('c5', 'offline')
+    expect(loadConsoleState().courseModes).toEqual({ c5: { mode: 'offline', pinned: true } })
+    saveConsoleState({ courseModes: {} })
+    calls = []
+    await pushCourseMode('c6', 'online')
+    expect(loadConsoleState().courseModes).toEqual({ c6: { mode: 'online', pinned: false } })
+    expect(calls[0]!.url).not.toContain('pin=')
+  })
+
+  it('旧裸串按 {mode,pinned:false} 归一（不静默升级）', () => {
+    saveConsoleState({ courseModes: { c5: 'online', c6: 'offline' } as never })
+    expect(readCourseModeIntents()).toEqual({
+      c5: { mode: 'online', pinned: false },
+      c6: { mode: 'offline', pinned: false },
+    })
+    // 兼容读面（模式投影）仍只给模式
+    expect(readCourseModes()).toEqual({ c5: 'online', c6: 'offline' })
+  })
+
+  it('restoreCourseModes：pinned 条目带 pin=1（R3-d）；legacy 条目不带 pin', async () => {
+    enable('c5')
+    enable('c6')
+    saveConsoleState({
+      courseModes: { c5: { mode: 'online', pinned: true }, c6: 'offline' },
+    })
+    const r = await restoreCourseModes(
+      { version: 1, nodes: [], rl: { hub_port: 18787, remote_token: 'tok' } } as never,
+      undefined,
+      { attempts: 1, delayMs: 0 },
+    )
+    expect(r).toEqual({ restored: 2, failed: [], skipped: [] })
+    const byCourse = new Map(calls.map((c) => [new URL(c.url).searchParams.get('course'), c.url]))
+    expect(byCourse.get('c5')).toContain('pin=1')
+    expect(byCourse.get('c6')).not.toContain('pin=')
   })
 })

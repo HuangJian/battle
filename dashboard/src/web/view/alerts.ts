@@ -31,13 +31,14 @@
  */
 
 import type { CloudHaltView, LoopComplete } from './console-types'
-import type { OfflineStalledView } from './course-overview'
+import type { OfflineLeaseView, OfflineStalledView } from './course-overview'
 import { fmtTs } from './format'
 import { alertAckKey, cloudHaltAckKey, visibleCloudHalts } from './interaction'
 // 与 pill **同一个词**（2026-10-02 口径对齐，plan/course-pill-precision §6）：告警坞的 PPO 红条
 // 与 pill 的「排队·无人取」说的是同一件事（有活、没人认领）；「卡住」是另一类（有持有者但
-// 无进度）。两处各起一个名字 = 迟早漂开，所以词只在 `loop-queue.ts` 定义一次。
-import { type LoopQueueRow, NO_TAKER_LABEL, STUCK_LABEL } from './loop-queue'
+// 无进度）。两处各起一个名字 = 迟早漂开，所以词只在 `course-status.ts` 定义一次。
+import type { LoopQueueRow } from './loop-queue'
+import { NO_TAKER_LABEL, STUCK_LABEL } from './course-status'
 
 /** 告警严重度（排序即这个顺序；`history` = 已恢复/已完成这类留痕）。 */
 export type AlertSeverity = 'err' | 'warn' | 'info' | 'history'
@@ -131,6 +132,10 @@ export interface AlertInput {
    *  这是自动化的固有代价，必须显式付——`null`/缺省 = hub 不可达或旧版（**不可知 ≠ 没停**，
    *  什么都不画；hub 的可用性由课程矩阵表头的「hub 无应答」单独占位）。 */
   offlineStalls?: OfflineStalledView[] | null
+  /** 逐课程离线租约（`/admin/offline.leases`；P2-1）：告警文案补 `stale-holder`（可接管）/
+   *  `revoked`（已撤租）两态——两态都不是「云机死透」：前者 hub 会自动回收、后者新盘直接覆盖。
+   *  `null`/缺省 = 旧 hub 没上报 ⇒ 文案保持原样（不编租约事实）。 */
+  offlineLeases?: Record<string, OfflineLeaseView> | null
   /** `at` = 事件时刻（账本 `time`）：ack 事件身份用它；缺省回退字段签名（旧夹具）。 */
   courseEdit?: { verdict: string; fields: string[]; at?: string } | null
   /** 调度器每课队列行（`stateView.loopQueue.rows`）——第 8 类「课程配置不可开课」的取数面
@@ -303,6 +308,18 @@ function offlineStallAlerts(input: AlertInput): AlertItem[] {
     const mins = Math.max(0, Math.round(s.ageSec / 60))
     const ageText = mins >= 60 ? `${Math.floor(mins / 60)} 小时 ${mins % 60} 分` : `${mins} 分钟`
     const who = s.holder ? `${s.holder} ` : ''
+    // ★P2-1：租约两态的文案（stale-holder = 新盘可直接接管；revoked = 已撤租墓碑）。
+    //   两态都**不是**「云机死透」——不点名会把可自愈的局面写成需要人处理的故障。
+    const lease = input.offlineLeases?.[s.course]
+    const leaseNote = !lease
+      ? ''
+      : lease.revoked
+        ? `租约状态：已撤租（墓碑）——旧持有者「${lease.workerId || '?'}」下次心跳会收 409 revoked；` +
+          '新盘 claim 可直接覆盖墓碑，不需要人工清理。'
+        : lease.stale
+          ? `租约状态：持有者已静默 ${Math.round(lease.silentSec)}s 超阈（可接管）——` +
+            'hub 在新盘 claim 时会自动回收，通常在下一拍自愈（无需人工干预）。'
+          : ''
     out.push(
       withCopy(
         {
@@ -317,6 +334,7 @@ function offlineStallAlerts(input: AlertInput): AlertItem[] {
             '；② 手工导入结果包（课程矩阵行内的「导入训练结果」——导入后会自动评估）' +
             '；③ 手工切回在线（矩阵行内「交还自动池」——本机在下一轮边界恢复采样）。' +
             `判据只用已有事实：${silent ? '翻 mode 时刻' : '最近补传产物 mtime'} 超阈值；` +
+            (leaseNote ? ` ${leaseNote} ` : ' ') +
             '修好后（重连 / 导入 / 交还）告警自动消失。',
           role: 'alert',
           actions: [

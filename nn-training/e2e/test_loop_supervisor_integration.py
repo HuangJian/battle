@@ -416,6 +416,78 @@ def test_wait_for_remote_ppo_yields_to_the_other_course(tmp_path: Path) -> None:
     assert events.index(("b", 2)) < events.index(("a", 2))
 
 
+# --------------------------------- 2b) ★T6：离线课 = 等待（不是假收官），写回即续跑
+
+
+def test_offline_course_waits_and_resumes_without_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★T6（plan/offline-online-status-switch §6.2，报障一）：本机腿离线 ⇒ **等待**不是收官。
+
+    旧行为（R1-e）：离线早退当 `done(final=True)` —— 控制台显示「已收官」并写假
+    `run_complete`（云机那边还在跑），队列里的这一轮也消失 ⇒ 写回在线后不会自动续跑。
+    本用例一次钉住三件：①无 iteration、无 `run_complete`、队列留 `waiting`；
+    ②控制台写回在线后**同一引擎实例**下一拍继续推进（热复用，无停开课）；③`hold=False`
+    （票已还，见下例）——与 `_map_outcome` 单测（`test_offline_leg_retired`）同层互证。
+    """
+    import trainer.loop_round_steps as lrs
+
+    monkeypatch.setattr(lrs, "_rollout_source", lambda _args: "run")
+    clock = {"t": 1000.0}
+    a = _make_loop(tmp_path, "a", iters=2)
+    runner = LoopRunner(loop=a, course="a", iters=2, now=lambda: clock["t"])
+    sup = Supervisor(
+        executor=lambda task, q: runner.run_round(task, q),
+        planner=lambda c, it, q: runner.planner(c, it, q),
+        capacities={},
+        now=lambda: clock["t"],
+    )
+    sup.add_course("a", 1)
+    _drive(sup)
+    # ① 离线轮：不写账本、不写收官；队列停在等待态（不是 done）
+    assert _ledger_iters(tmp_path / "a") == []
+    assert ("run_complete", None) not in _ledger_shape(tmp_path / "a")
+    assert sup.courses["a"].state == "waiting", sup.snapshot()
+    assert runner.finished is False and runner.finish_reason == ""
+
+    # ② 控制台写回在线（`rollout_src` 不再解析成 run）⇒ 下一拍同一引擎实例续跑
+    monkeypatch.setattr(lrs, "_rollout_source", lambda _args: "local")
+    clock["t"] += 16.0  # 越过 WAIT 的 resume_at（poll_interval=15s）
+    _drive(sup)
+    assert _ledger_iters(tmp_path / "a") == [1, 2]
+    assert sup.courses["a"].state == "done"
+
+
+def test_offline_wait_does_not_block_other_courses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★T6 附带（§6.4 的 `hold=False` 调度面）：a 离线等待期间 b 照常跑完两轮。"""
+    import trainer.loop_round_steps as lrs
+
+    def _src(args: object) -> str:
+        return "run" if str(getattr(args, "traj", "")).endswith("a") else "local"
+
+    monkeypatch.setattr(lrs, "_rollout_source", _src)
+    clock = {"t": 1000.0}
+    loops = {"a": _make_loop(tmp_path, "a", iters=1), "b": _make_loop(tmp_path, "b", iters=2)}
+    runners = {
+        "a": LoopRunner(loop=loops["a"], course="a", iters=1, now=lambda: clock["t"]),
+        "b": LoopRunner(loop=loops["b"], course="b", iters=2, now=lambda: clock["t"]),
+    }
+    sup = Supervisor(
+        executor=lambda task, q: runners[q.course].run_round(task, q),
+        planner=lambda c, it, q: runners[c].planner(c, it, q),
+        capacities={},
+        now=lambda: clock["t"],
+    )
+    sup.add_course("a", 1)
+    sup.add_course("b", 1)
+    _drive(sup)
+    # a 停在等待（没有假收官）；b 不受拖累，两轮跑完
+    assert _ledger_iters(tmp_path / "a") == [] and sup.courses["a"].state == "waiting"
+    assert _ledger_iters(tmp_path / "b") == [1, 2] and sup.courses["b"].state == "done"
+
+
 # --------------------------------------------- 3) 账本是 SSOT（重开续跑）
 
 def test_restart_resumes_from_ledger_and_never_rewrites_rows(tmp_path: Path) -> None:

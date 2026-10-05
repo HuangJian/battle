@@ -113,6 +113,8 @@ class LeaseMixin:
     _job_dir: Any
     _append_ledger: Any
     _read_ledger: Any
+    #: 该 jid 的账本净态（`store_ledger._ledger_net_state`；六轮 F1 的即时闸对账用）。
+    _ledger_net_state: Any
     #: 兄弟簇 `store_ledger` 的撤单即时闸（`cancel_unsettled_jobs` 填；见 `_claim_locked`）。
     _cancelled: set[str]
 
@@ -341,9 +343,14 @@ class LeaseMixin:
             if job_id in self._cancelled:
                 # ★ 撤单（plan/switch-mode-drops-jobs）：切模式时被作废的 job——**进程内即时闸**，
                 # 挡「worker 拿着作废前 peek 到的 jid 来 claim」这个秒级窗口。真闸在账本
-                # （`claimable_job_ids` 把 job_cancelled 排除），所以重启后本 set 为空也不漏：
-                # 那时池子里已经没有这份 job，peek 拿不到 ⇒ 走不到这里。
-                return False, "", "cancelled"
+                # （`claimable_job_ids` 把 job_cancelled 排除）。
+                # ★ 2026-10-05（六轮 F1）：即时闸必须**按账本净态对账**——生产 republish 走
+                # 磁盘 IPC（`remote.hub_client.publish_job` 无条件追加 `job_pending`），hub
+                # 收不到「复活」信号；只靠本 set 会得到「账本 pending（peek 可见）∧ claim 永远
+                # cancelled」的撒谎形状。净态为 pending ⇒ discard 放行；completed/cancelled ⇒ 照旧拒。
+                if self._ledger_net_state(job_id) != "job_pending":
+                    return False, "", "cancelled"
+                self._cancelled.discard(job_id)
             blocked = self.role_blocked(job_id, role)
             if blocked:
                 # ★ 归属/停摆闸（2026-09-25，plan/online-offline-role-routing §2.2）：租约

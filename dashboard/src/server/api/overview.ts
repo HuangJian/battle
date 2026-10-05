@@ -26,12 +26,14 @@ import { hubOfflineAdmin, hubPushWorkers, liveHub, withWorkerProbes } from '../.
 import { hubPushEnabled } from '../../stack/push-config'
 import {
   type HubQueueView,
+  type OfflineLeaseView,
   type OfflineResultView,
   type OfflineRunView,
   type OfflineStalledView,
   type ParallelOverviewView,
   type PushWorkerView,
   type PushWorkerRegistryView,
+  type ReadStaleView,
   buildCourseRows,
   latestIterFromLedgerTail,
   overviewCourseNames,
@@ -70,11 +72,16 @@ interface HubAdmin {
   pushMap: Map<string, boolean> | null
   /** 逐课程离线段进度（`/admin/offline`）；null = hub 不可达 / 端点不存在（旧版 hub）。 */
   offline: Record<string, Record<string, OfflineRunView>> | null
+  /** 逐课程离线租约（`/admin/offline.leases`；stale/墓碑徽标用）；null = hub 不可达 / 旧版 hub。 */
+  leases: Record<string, OfflineLeaseView> | null
   /** 逐课程各 run 的**段末摘要**（`/admin/offline.results`）——离线补评的收官判据
    *  （plan/offline-eval-backfill）；null = hub 不可达 / 旧版 hub。 */
   offlineResults: Record<string, Record<string, OfflineResultView>> | null
   /** 停滞告警（`/admin/offline.stalled`；T8）；null = hub 不可达 / 旧版 hub。 */
   offlineStalled: OfflineStalledView[] | null
+  /** 读面新鲜度（P1-11）：非 null = 这是**上一拍**的 hub 事实（探测失败但还在保值窗口内）。
+   *  `null` = 本拍探测成功，或已经超窗退化（那时 `url === null`，显式未知）。 */
+  stale: ReadStaleView | null
   /** worker 行 = **当下 cfg** ⊕ 探活列（探活取自下面的探测缓存）。 */
   workers: PushWorkerView[]
 }
@@ -86,6 +93,7 @@ interface HubProbe {
   queue: HubQueueView | null
   pushMap: Map<string, boolean> | null
   offline: Record<string, Record<string, OfflineRunView>> | null
+  leases: Record<string, OfflineLeaseView> | null
   offlineResults: Record<string, Record<string, OfflineResultView>> | null
   offlineStalled: OfflineStalledView[] | null
   /** worker 直探（id → online/busy；停用/无 key = 缺席）。 */
@@ -108,20 +116,86 @@ function workerRows(cfg: RlConfig): Array<Omit<PushWorkerView, 'online' | 'busy'
 /** hub 探测的全局缓存（单条目：共享单 hub ⇒ 结果与课程无关）。 */
 const hubCache = createSwrCache<HubProbe>(OVERVIEW_TTL_MS)
 
+/** **last-known-good**（P1-11）：最近一次成功的完整探测（失败时回它，不把读数清空）。 */
+let hubLastGood: HubProbe | null = null
+/** 连续失败的起点（epoch ms；0 = 当前没有在失败）。 */
+let hubFailSince = 0
+/** 最近一次失败原因（诊断用；成功即清）。 */
+let hubLastError = ''
+
+/** 陈旧保值窗口（P1-11）：连续失败超它就不再保旧值。取一个刷新周期（TTL）。 */
+export const HUB_KEEP_MS = OVERVIEW_TTL_MS
+
+/** 保值窗口判定（P1-11 的纯决策；导出让用例不必等 5s）：超窗 ⇒ 不再保旧值，显示「未知」。 */
+export function hubKeepWithin(failSince: number, now: number = Date.now()): boolean {
+  return failSince > 0 && now - failSince <= HUB_KEEP_MS
+}
+
+/** 探测失败的空形状（超窗后用它：`url=null` ⇒ 面板显示「未知」，不把旧值无限当真）。 */
+function emptyProbe(): HubProbe {
+  return {
+    url: null,
+    queue: null,
+    pushMap: null,
+    offline: null,
+    leases: null,
+    offlineResults: null,
+    offlineStalled: null,
+    workerPing: new Map(),
+  }
+}
+
+/** 带 last-known-good 的探测：失败时**不抛**（除非连旧值都没有）——缓存里也放旧值，
+ *  这样其它读路径（`peekHubAdmin`、总览）看到的都是同一份“上一拍的真实”。 */
+async function probeWithKeep(cfg: RlConfig, course: string): Promise<HubProbe> {
+  try {
+    const p = await probeHubAdmin(cfg, course)
+    // 「一个候选都没应答」= 失败（部分端点失败不算：offline=null 是旧 hub 的合法缺省）。
+    if (p.url === null) throw new Error('没有 hub 在应答 /admin/queue（候选全试完）')
+    hubLastGood = p
+    hubFailSince = 0
+    hubLastError = ''
+    return p
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e)
+    if (!hubFailSince) hubFailSince = Date.now()
+    hubLastError = msg
+    // 有旧值回旧值；连旧值都没有 → 回空形状（**而不是抛**）：空结果也进缓存，
+    // 否则「没有 hub」这种稳态会变成每请求重探一遍（旧行为是缓存 5s），
+    // 而重探代价 = 候选数 × 1.2s（切课程同步等探测就是从这里来的）。
+    return hubLastGood ?? emptyProbe()
+  }
+}
+
 /** hub 观测面 = **结构**（cfg 的 worker 行，现算）⊕ 探测（队列/登记表/逐 worker 探活，缓存）。
  *
  *  `course` 只作为**探测入口**的参数（`liveHub` 的候选清单来自账本，与课程无关）——
  *  它**不是**缓存键：共享单 hub 下按课程各探一遍纯浪费，且切课会撞上 1.2s 探测超时。
- *  结构现算的理由：刚登记/停用的 worker（与 `rl.hub_push` 开关）必须在**第一帧**就上屏。 */
+ *  结构现算的理由：刚登记/停用的 worker（与 `rl.hub_push` 开关）必须在**第一帧**就上屏。
+ *
+ *  ★P1-11（2026-10-05，R4-b/g）：探测失败**不立刻清空读数**——失败在保值窗口内 ⇒ 返回上一拍
+ *  完整探测 + `stale` 标注（词不变，只降级标注：探针抖一下不再把离线课跌回训练侧词）；
+ *  超窗 ⇒ 退化成空探测（`url=null`，显示「未知」，不无限保旧）。 */
 export async function getHubAdmin(cfg: RlConfig, course: string): Promise<HubAdmin> {
-  const p = await hubCache.get(() => probeHubAdmin(cfg, course))
+  let p: HubProbe
+  try {
+    p = await hubCache.get(() => probeWithKeep(cfg, course))
+  } catch {
+    p = emptyProbe()
+  }
+  const failed = hubFailSince > 0
+  const withinWindow = hubKeepWithin(hubFailSince)
+  if (failed && !withinWindow) p = emptyProbe()
+  const stale: ReadStaleView | null = failed ? { since: hubFailSince, reason: hubLastError } : null
   return {
     url: p.url,
     queue: p.queue,
     pushMap: p.pushMap,
     offline: p.offline,
+    leases: p.leases,
     offlineResults: p.offlineResults,
     offlineStalled: p.offlineStalled,
+    stale,
     workers: workerRows(cfg).map((w) => ({
       ...w,
       online: p.workerPing.get(w.id)?.online ?? null,
@@ -149,6 +223,9 @@ async function probeHubAdmin(cfg: RlConfig, course: string): Promise<HubProbe> {
     queue: live?.queue ?? null,
     pushMap,
     offline: offlineAdmin?.progress ?? null,
+    // ★ 2026-10-05（P0-11）：租约一览（beat_at/stale/revoked）与进度同一次 `/admin/offline`
+    // 应答；旧 hub 无 leases 键 ⇒ null（parseOfflineLeases 兜底）。
+    leases: offlineAdmin?.leases ?? null,
     // 同一次 `/admin/offline` 应答里已有 results（`parseOfflineAdmin` 三段同源）——补评
     // 的收官判据零新增网络、零新增探测；旧 hub 无 results 时 `parseOfflineAdmin` 已兜成 {}。
     offlineResults: offlineAdmin?.results ?? null,
@@ -168,9 +245,15 @@ export function refreshHubAdmin(): void {
 }
 
 /** **硬作废**（下一次读**必须**重探）：改了输入（rl-config / 账本 / registry）或要隔离测试
- *  夹具时用。与 `refreshHubAdmin()` 的分工即 swr-cache 文件头的 ③/④。 */
+ *  夹具时用。与 `refreshHubAdmin()` 的分工即 swr-cache 文件头的 ③/④。
+ *
+ *  ★P1-11：last-known-good 的模块态一并清——测试夹具隔离时上一个用例的旧探测不得被
+ *  下一个用例的失败当缓存供出来（与 `invalidateLoopQueue` 同规）。 */
 export function invalidateHubAdmin(): void {
   hubCache.clear()
+  hubLastGood = null
+  hubFailSince = 0
+  hubLastError = ''
 }
 
 /** **只读窥视**（`hubCache.peek()` 包装，**不触发探测**）——给「顺手要用上一拍的 hub 观测、
@@ -230,12 +313,16 @@ export async function buildOverview(
     offline: admin.queue?.offline ?? [],
     offlineProgress: admin.offline,
     offlineStalled: admin.offlineStalled,
+    // P2-1：租约一览透到读面（告警坞文案补 revoked/stale-holder 两态用；矩阵徽标也读它）。
+    offlineLeases: admin.leases,
+    stale: admin.stale,
     rows: buildCourseRows({
       courses: names,
       training,
       queue: admin.queue,
       iters,
       offline: admin.offline,
+      leases: admin.leases,
     }),
   }
 }

@@ -257,6 +257,84 @@ describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
     expect(a.title).toContain('40 分钟')
   })
 
+  // ── P2-1：租约两态文案（stale-holder = 可接管；revoked = 已撤租墓碑） ──
+
+  it('stale-holder：租约静默超阈 ⇒ 文案点名「可接管」（自愈路径，不写成云机死透）', () => {
+    const items = buildAlerts({
+      ...clean,
+      offlineStalls: [
+        {
+          course: 'c5-gae',
+          why: 'running-stale',
+          holder: 'kaggle-tpu-7',
+          lastMtime: 0,
+          flippedAt: 0,
+          ageSec: 2400,
+        },
+      ],
+      offlineLeases: {
+        'c5-gae': {
+          workerId: 'kaggle-tpu-7',
+          silentSec: 812,
+          stale: true,
+          revoked: false,
+          expiresIn: 0,
+        },
+      },
+    })
+    const a = items[0]!
+    expect(a.detail).toContain('租约状态：持有者已静默 812s 超阈（可接管）')
+    expect(a.detail).toContain('自动回收')
+    expect(a.detail).toContain('下一拍自愈')
+  })
+
+  it('revoked：墓碑 ⇒ 文案点名「已撤租」+ 新盘可直接覆盖（不需要人工清理）', () => {
+    const items = buildAlerts({
+      ...clean,
+      offlineStalls: [
+        {
+          course: 'c5-gae',
+          why: 'running-stale',
+          holder: 'kaggle-tpu-7',
+          lastMtime: 0,
+          flippedAt: 0,
+          ageSec: 2400,
+        },
+      ],
+      offlineLeases: {
+        'c5-gae': {
+          workerId: 'kaggle-tpu-7',
+          silentSec: 0,
+          stale: false,
+          revoked: true,
+          expiresIn: 0,
+        },
+      },
+    })
+    const a = items[0]!
+    expect(a.detail).toContain('租约状态：已撤租（墓碑）')
+    expect(a.detail).toContain('409 revoked')
+    expect(a.detail).toContain('新盘 claim 可直接覆盖墓碑')
+  })
+
+  it('租约表缺失（旧 hub）⇒ 文案不编租约事实（原文照旧）', () => {
+    const items = buildAlerts({
+      ...clean,
+      offlineStalls: [
+        {
+          course: 'c5-gae',
+          why: 'running-stale',
+          holder: 'kaggle-tpu-7',
+          lastMtime: 0,
+          flippedAt: 0,
+          ageSec: 2400,
+        },
+      ],
+    })
+    const a = items[0]!
+    expect(a.detail).not.toContain('租约状态')
+  })
+
   it('hub 不可达/旧版（null/缺省）⇒ 一条都不画（不可知 ≠ 没停）', () => {
     expect(buildAlerts({ ...clean, offlineStalls: null })).toEqual([])
     expect(buildAlerts({ ...clean, offlineStalls: [] })).toEqual([])

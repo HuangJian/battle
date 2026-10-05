@@ -307,10 +307,20 @@ class LoopRunner:
             self.finish_reason = "全离线任务包已导出"
             return done(it=out.it, final=True)
         if out.status == ROUND_OFFLINE_EXIT:
-            # 离线课：本机不跑（云机取任务包接手）。正常收官，**不是**调度层失败。
-            self.finished = True
-            self.finish_reason = "离线课由云机取任务包接手（本机不跑）"
-            return done(it=out.it, final=True)
+            # ★P1-1（plan §3.5）：离线课 = **等待**，不是收官——本机不跑这门课（云机取任务包
+            # 接手），但队列里的这一轮**保留**：控制台把 rl-config 写回在线（`train-mode.ts`
+            # 删 `run_iters` + 写 `rollout_src`）后，下一拍 `resolve_collect_mode` 重算即离开
+            # `COLLECT_OFFLINE` ⇒ 自动续跑（15s 量级，无需停开课）。旧写法 `done(final=True)`
+            # 会让控制台显示「已收官」并写假 `run_complete`，而云机那边还在跑（R1-e）。
+            # `hold=False`：本机没在替这一步干活（票还掉，别的课照常跑）。
+            jid = getattr(self.loop, "inflight_job_id", lambda _it: None)(out.it)
+            return waiting(
+                self.now() + self.poll_interval,
+                out.detail or "离线课由云机取任务包接手（切回在线自动恢复；本机不跑）",
+                hold=False,
+                jid=jid,
+                round=str(out.it),
+            )
         if out.status == ROUND_STOP:
             # 硬边界（门 / 熔断 / 止损 / 预算 / 停腿）：整条腿正常收工，**不是**调度层失败。
             self.finished = True

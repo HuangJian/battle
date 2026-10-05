@@ -523,6 +523,8 @@ export function App({ initial }: AppProps) {
             ppoQueueStall: stateView?.ppoQueueStall,
             // 离线课程停滞（T8）：hub 的 `/admin/offline.stalled` 经 overview 透到这里。
             offlineStalls: stateView?.overview?.offlineStalled ?? null,
+            // 租约两态文案（P2-1）：stale-holder（可接管）/ revoked（已撤租）——与矩阵徽标同源。
+            offlineLeases: stateView?.overview?.offlineLeases ?? null,
             courseEdit: stateView?.courseEdit,
             // 第 8 类「课程配置不可开课」的取数面（2026-10-05）：同一份调度器视图已在手
             // （pill 行也用它）——不新增服务端契约，纯读面派生。

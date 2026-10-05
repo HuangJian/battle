@@ -1365,6 +1365,11 @@ def claim_course(
         if doc.get("not_offline"):
             log("这门课不在训练中（停课 ⇒ 不是自动候选）——本拍不跑")
             return "", "not_offline"
+        if doc.get("pinned_online"):
+            # ★P1-4 / 六轮 F6：人把课固定在在线（§4.2 半回摆）——离线盘不抢；
+            # 到控制台点「交还自动」后它会回到 seize 候选。
+            log("这门课由人固定在在线（离线盘不抢）——本拍不跑；到控制台点「交还自动」后才可领")
+            return "", "pinned_online"
         holder = doc.get("holder") or {}
         left = float(holder.get("expires_in") or 0.0)
         log(
@@ -1405,6 +1410,17 @@ def heartbeat_loop(
             if code == 200:
                 continue
             if code == 409:
+                if doc.get("revoked"):
+                    # ★P1-4（plan §3.3）：人把课切回在线/交还自动了——**停止再领**，当前段在
+                    # 下一个轮边界收尾并打包（旧 worker 照旧跑完，兼容降级）。
+                    # 为什么在此处置事件：心跳线程是唯一知道「课被切回在线」的地方，而
+                    # `run_loop` 的轮边界读的就是这个停止信号（不能杀正在算的那一轮）。
+                    log(
+                        "⚠ 租约已被撤销（人把课切回在线/交还自动）——停止再领本课；"
+                        "当前段在下一个轮边界收尾并打包（回传可能被判 duplicate 丢弃）"
+                    )
+                    done.set()
+                    return
                 log(
                     f"⚠ 租约失效（{'已过期' if doc.get('expired') else '已被接管'}）"
                     "——继续跑完并打包（回传可能被判 duplicate 丢弃）"
@@ -1442,8 +1458,15 @@ def resolve_courses(
     probe: dict | None = None,
     skip: set[str] | None = None,
     worker: str = "",
-) -> list[dict]:
-    """本次要跑的课 → `[{"course", "pack_sha256"}]`；**空列表 = 队列为空**（正常的没事干）。
+) -> tuple[list[dict], list[dict]]:
+    """本次要跑的课 → `([{"course", "pack_sha256"}], blocked)`。
+
+    `picks` = 要跑的课（同旧形状）；**空 + `blocked` 也空 = 队列真的空**（正常的没事干）。
+    ★P1-9（R3-g，五轮 P1-E）：`blocked` = 「**有活、但被非自己的有效租约持有**」的行
+    （`{course, holder, expires_in}`）——「空队列」与「还得等一会儿」从此在**预算**上分开：
+    调用方对 `blocked` 退避再问且**不占 `idle_wait_sec`**（否则排 TTL 的十几分钟会被当成空转、
+    会话提前收工）。与 `_run_batch` 的 `leases["blockers"]`（`tasks` 非空时的交接中间态）
+    **同名不同物**，别接错线。`picks` 非空时它恒为空表。
 
     `CFG.course` 非空 ⇒ 老行为（顺序/校验一字不改），`pack_sha256` 空。
     空 ⇒ 向 hub 问清单，**两层选择**（★ 2026-10-03 用户裁决，逐字：「不管什么时候上线接活，
@@ -1462,7 +1485,7 @@ def resolve_courses(
     """
     explicit = _load_deliverable().requested_courses(cfg)
     if explicit:
-        return [{"course": c, "pack_sha256": ""} for c in explicit]
+        return [{"course": c, "pack_sha256": ""} for c in explicit], []
     if probe is not None and probe.get("unsupported"):
         raise SystemExit(_no_courses_msg("hub 没有 /offline/tasks（本会话已探过）"))
     hubs = hub_candidates(cfg, creds)
@@ -1499,7 +1522,7 @@ def resolve_courses(
     ]
     if picked:
         log("清单里可领：" + "、".join(f"{p['course']}" for p in picked))
-        return picked
+        return picked, []
     # ★ 2026-10-04 现场（Kaggle「清单 3 条 ⇒ 队列为空」，用户：「colab 已停机、也切过模式，
     #   为什么还持有租约？」）：租约只有在**显式 release / 900s TTL 到期 / hub 重启**时才消失，
     #   切模式与停课都不动它。而 hub 早就为此分了一档 `lease_verdict == "mine"`（同一 worker_id
@@ -1517,19 +1540,32 @@ def resolve_courses(
             + "、".join(str(t.get("course") or "") for t in mine)
             + "（hub 判 mine ⇒ claim 直接续上，不必等 900s 过期）"
         )
-        return [_as_pick(t) for t in mine]
+        return [_as_pick(t) for t in mine], []
     # 没有就绪的离线课 ⇒ 抢占第一个在训在线课。busy 的行**照收**：claim 会回 409 `busy`，
     # 调用方按「中间态不占 idle 预算」等到别的课跑完（比「空队列」更准确）。
+    # ★P1-9（R3-g）：被**别人**的有效租约持有的行——带回给调用方（退避再问、不占 idle 预算）。
+    blocked = [
+        {
+            "course": str(t.get("course") or ""),
+            "holder": _holder_id(t),
+            "expires_in": _holder_left(t),
+        }
+        for t in tasks
+        if _holder_id(t)
+        and _holder_id(t) != worker
+        and not t.get("seize")
+        and _eligible(t)
+    ]
     seized = [t for t in tasks if t.get("seize") and _eligible(t)]
     if not seized:
         # ★ 2026-10-04 现场（Kaggle：「hub 清单：3 条」接着「队列为空」，看不出为什么）：
         #   不可领的原因**就在 hub 行的 `state`/`reason`/`holder` 里**（not_offline=停课 /
         #   held=有主 / completed=本段跑满 / busy / 无任务包 / 包过期），不打印就等于把排查
         #   推给人工去 curl `/offline/tasks`。这里逐行报出——空队列从此自解释。
-        blocked = [t for t in tasks if not t.get("claimable") and not t.get("seize")]
-        if blocked:
-            log("不可领/不可抢：" + "、".join(f"{_blocked_note(t)}" for t in blocked))
-        return []
+        wait_rows = [t for t in tasks if not t.get("claimable") and not t.get("seize")]
+        if wait_rows:
+            log("不可领/不可抢：" + "、".join(f"{_blocked_note(t)}" for t in wait_rows))
+        return [], blocked
 
     def _open_key(t: dict) -> tuple[float, str]:
         raw = t.get("open_time")
@@ -1542,13 +1578,20 @@ def resolve_courses(
         f"没有就绪的离线课 ⇒ 抢占第一个在训在线课：{first['course']}"
         "（hub 将把它翻成离线）"
     )
-    return [_as_pick(first)]
+    return [_as_pick(first)], []
 
 
 def _holder_id(t: dict) -> str:
     """这行被**谁**持有（`holder` 形状不对/无主 ⇒ 空串）：判「自己的租约」与打日志用。"""
     holder = t.get("holder")
     return str(holder.get("worker_id") or "") if isinstance(holder, dict) else ""
+
+
+def _holder_left(t: dict) -> float:
+    """这行持有者的剩余租约秒数（无 holder / 形状不对 ⇒ 0.0）——P1-9 的 `blocked` 带它。"""
+    holder = t.get("holder")
+    left = holder.get("expires_in") if isinstance(holder, dict) else None
+    return float(left) if isinstance(left, (int, float)) else 0.0
 
 
 def _blocked_note(t: dict) -> str:
@@ -1561,6 +1604,9 @@ def _blocked_note(t: dict) -> str:
     「为什么还持有租约、还要等多久」——这个数字就是答案（切模式/停课都不会清租约）。
     """
     bits = [str(t.get("state") or "?")]
+    authority = str(t.get("authority") or "")
+    if authority:
+        bits.append(f"authority={authority}")
     reason = str(t.get("reason") or "")
     if reason:
         bits.append(reason)
@@ -1569,6 +1615,9 @@ def _blocked_note(t: dict) -> str:
         left = holder.get("expires_in")
         if isinstance(left, (int, float)):
             bits.append(f"持有 {_holder_id(t) or '?'}（{float(left):.0f}s 后过期）")
+        if holder.get("stale") is True:
+            # ★P1-4：死盘（静默超阈）可直接接管——这句必须在日志里，否则人以为要等 TTL。
+            bits.append(f"持有者已静默 {float(holder.get('silent_sec') or 0.0):.0f}s（可直接接管）")
     if not t.get("pack"):
         bits.append("无任务包（等控制台导出）")
     stale = str(t.get("stale_reason") or "")
@@ -1741,7 +1790,7 @@ def _run_auto(
         # （hub 判 `mine` 直接续上——否则 cell 中断重跑会白等 900s TTL，G1 的原始动机）。
         # 它持久化在 `<work>/.worker-id`，重复调用只读文件（不打日志）。
         worker = worker_id_of(_queue_work_dir(cfg), log)
-        tasks = resolve_courses(
+        tasks, blocked_rows = resolve_courses(
             cfg, creds, log, served=served, probe=probe, skip=gave_up, worker=worker
         )
         if tasks:
@@ -1776,6 +1825,28 @@ def _run_auto(
                     f"—— {poll:.0f}s 后再问（不占 idle 预算）"
                 )
                 time.sleep(poll)
+            continue
+        # ★P1-9（R3-g）：`tasks` 空但 `blocked` 非空 = 「还得等一会儿」（别人的有效租约，
+        # 通常等 release / TTL / 接管），与「空队列」是两件事：退避再问、**不消耗**
+        # `idle_wait_sec`（重置 idle 锚点），只受会话预算与停机信号约束。
+        # ⚠ 与上面 `leases["blockers"]`（tasks 非空时的交接中间态）同名不同物。
+        if blocked_rows:
+            log(
+                "清单里有活但都被别人持有："
+                + "、".join(
+                    f"{b['course']}@{b['holder'] or '?'}（{float(b['expires_in']):.0f}s 后过期）"
+                    for b in blocked_rows
+                )
+                + f"—— {poll:.0f}s 后再问（不占 idle 预算）"
+            )
+            if keepalive_stop is not None and keepalive_stop.is_set():
+                log("收到停机信号 ⇒ 收工")
+                return rc
+            if budget > 0 and time.monotonic() - start >= budget:
+                log(f"会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 收工")
+                return rc
+            idle_since = time.monotonic()
+            time.sleep(poll)
             continue
         if mode != "drain":
             log("队列为空（queue_mode=once）⇒ 收工（rc=0：没活干不是失败）")

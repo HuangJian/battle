@@ -186,6 +186,10 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         self._extra_wver: str | None = None
         self._report: dict = {}
         self._stream_meta: dict | None = None
+        #: 离线等待的**去重文案**（★P1-1，plan §3.5）：离线课 = 等待不是收官 ⇒ 每拍重问同
+        #: 一轮，那行四句日志会每 `poll_interval` 重放一遍（比今天更吵）。记下上一条，
+        #: **同一模式状态只喊一次**。
+        self._offline_note: str = ""
         self._eval_thread: threading.Thread | None = None
         self._eval_gate: threading.Event | None = None
         # 2026-09-17：未收官的 eval 尾巴 (thread, 派发时刻)——由下一轮 rollout 收官时

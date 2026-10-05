@@ -16,6 +16,7 @@
  *    pool-types     节点池视图      |  eval-types / eval-export  评估板
  *    log-view       日志页          |  cards  卡片注册表
  *    loop-queue     调度器每课队列视图（单例卡片的读面）
+ *    course-status  课程状态**单一派生**（pill 与矩阵同源；P1-10）
  *    format / spark / series / phase / rows / interaction  纯函数工具
  *    legacy-keys    浏览器本地键迁移
  *    course-overview 多课程并行总览（hub 侧）/ push worker 登记
@@ -48,6 +49,7 @@ export * from './cards'
 export * from './course-overview'
 export * from './contribution'
 export * from './loop-queue'
+export * from './course-status'
 export * from './course-matrix'
 export * from './course-admin'
 export * from './alerts'

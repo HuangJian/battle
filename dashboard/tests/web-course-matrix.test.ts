@@ -373,9 +373,16 @@ describe('表头元信息与页脚：两侧各自缺什么都要说出来', () =
       ['a'],
       { local_ppo: { held: 1, capacity: 1 } },
     )
+    // ★P1-11（R4-e）：读失败**保旧行**（`stale` 在场）时才说「显示缓存」——旧行确实还在；
+    // 无旧值可保（冷启动失败/超窗）时说的是「未知」，不拿空表冒充缓存。
     const meta = matrixMeta({
       overview: null,
-      queue: { ...base, blockedCourses: ['b'], error: 'boom' },
+      queue: {
+        ...base,
+        blockedCourses: ['b'],
+        error: 'boom',
+        stale: { since: 1_700_000_000_000, reason: 'boom' },
+      },
     })
     const texts = meta.map((m) => m.text)
     expect(texts).toContain('在训 1/2')
@@ -383,7 +390,10 @@ describe('表头元信息与页脚：两侧各自缺什么都要说出来', () =
     expect(texts).toContain('排队等资源：b')
     expect(texts).toContain('local_ppo 1/1')
     expect(texts).toContain('上一拍读失败（显示缓存）')
-    expect(meta.find((m) => m.text === '上一拍读失败（显示缓存）')!.title).toBe('boom')
+    expect(meta.find((m) => m.text === '上一拍读失败（显示缓存）')!.title).toContain('boom')
+    // 无 `stale`（没有旧行可保）⇒ 明说「未知」，不冒充缓存
+    const unknown = matrixMeta({ overview: null, queue: { ...base, error: 'boom' } })
+    expect(unknown.map((m) => m.text)).toContain('调度器视图未知（读面失败）')
   })
 
   it('页脚：有课在等外部时点名它；排队时说明容量 1 的语义；训练侧缺席时说明只有 hub 侧事实', () => {

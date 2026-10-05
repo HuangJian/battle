@@ -14,15 +14,19 @@
  *  （与 hub 队列/隧道 A/B 的只读面容错口径一致）。
  */
 
-import type { CourseOverviewRow, HubInflightView, ParallelOverviewView } from './course-overview'
+import type { ParallelOverviewView, ReadStaleView } from './course-overview'
+import { courseStatus } from './course-status'
 
 /** 「在等什么」的取值域（与 python `loop_plan.WAIT_*` 逐字对应）。
  *
- *  ★ 2026-10-05（plan/course-startup-recover §3.2）：新增 `blocked` —— 课程配置**不可开课**
+ *  ★ 2026-10-05（plan/course-startup-recover §3.2）：`blocked` —— 课程配置**不可开课**
  *  （整课起不来）。它不是「第五种等待」：`idle` 说的是「本轮无待办」这种**正常空转稳态**，
  *  把「配置不可运行」塞进 `idle` 会让停机中的课和起不来的课长得一样（本次事故「分不清」的
- *  翻版）⇒ 新增一格。取值域是契约面：python `run_rl_cluster.py` 文件头点名了这条纪律。 */
-export type LoopWaitKind = 'inflight' | 'collect' | 'idle' | 'ready' | 'blocked'
+ *  翻版）⇒ 新增一格。取值域是契约面：python `run_rl_cluster.py` 文件头点名了这条纪律。
+ *  ★P1-3（2026-10-05，plan/offline-online-status-switch）：`offline`——离线课在训练侧的
+ *  等待词是「离线课由云机取任务包接手（切回在线自动恢复）」，**不是**收官（假收官是报障一的
+ *  一半：`_map_outcome` 把 `ROUND_OFFLINE_EXIT` 当终局）。 */
+export type LoopWaitKind = 'inflight' | 'collect' | 'idle' | 'ready' | 'blocked' | 'offline'
 
 /** 该课队列状态（python `loop_scheduler`：ready / running / waiting / paused / aborted / done）。 */
 export type LoopCourseState = 'ready' | 'running' | 'waiting' | 'paused' | 'aborted' | 'done'
@@ -125,91 +129,23 @@ export interface CoursePillView {
   title: string
 }
 
-/** 「卡住」的展示阈值（秒）。= hub `CLAIM_TTL_SEC`：连一个租约周期都走完了还没回传，
- *  与稳态 wall（58–73s）差 ≥4×。**纯展示层常量**——不得被 hub / 训练侧 import。 */
-export const PILL_STUCK_SEC = 300
-
-/** 「有活、**没人在飞**」这一类的**唯一词**（pill 与告警坞共用；2026-10-02 口径对齐，plan §6）：
- *  盘上的 `detectPpoQueueStall`（≥5min 无认领的红条）说的就是**同一件事**——两处不得各起
- *  一个名字。分工是「pill 说状态（立即）、告警坞说升级（超时）」，词只能一份。 */
-export const NO_TAKER_LABEL = '排队·无人取'
-
-/** 「有在飞、但龄超阈」这一类。pill 专属：告警坞结构上只看得见**无人认领**的 job
- *  （盘上有 `claimed` 标记即跳过，见 `ppo-queue.ts` 头注）——告警坞的区分句引用这个词，
- *  防两类被读成一类（有持有者卡死 ≠ 没人要跑：处置方向相反）。 */
-export const STUCK_LABEL = '卡住'
-
-/** 龄 → 展示串：`<60s` 不显示（`''`）；`<60m` 用 `Nm`；否则 `Nh`（plan §3.2）。 */
-export function fmtAge(sec: number | null): string {
-  if (sec === null || !Number.isFinite(sec) || sec < 60) return ''
-  if (sec < 3600) return `${Math.floor(sec / 60)}m`
-  return `${Math.floor(sec / 3600)}h`
-}
-
-/** 最老的那条在飞（按认领龄；全缺 `claimed_ago` ⇒ null——不编龄）。 */
-export function pickOldestInflight(row: {
-  inflightDetail: HubInflightView[]
-}): HubInflightView | null {
-  let best: HubInflightView | null = null
-  for (const d of row.inflightDetail) {
-    if (d.claimedAgo === null) continue
-    if (best === null || d.claimedAgo > (best.claimedAgo ?? 0)) best = d
-  }
-  return best
-}
-
-/** 龄的悬停写法：`<60s` 也给秒（悬停是全因，不是缩略）。 */
-function ageLabel(sec: number): string {
-  return fmtAge(sec) || `${Math.round(sec)}s`
-}
-
-/** 一条在飞 holder 的悬停事实（含「未登记持有者」点名，plan §3.3）。 */
-function holderFacts(d: HubInflightView, registered?: string[] | null): string {
-  const bits = [`持有者 ${d.worker || '未知'}`]
-  if (d.claimedAgo !== null) bits.push(`认领 ${ageLabel(d.claimedAgo)} 前`)
-  if (d.computingAgo !== null) bits.push(`开算 ${ageLabel(d.computingAgo)} 前`)
-  if (d.heartbeatAgo !== null) bits.push(`心跳 ${ageLabel(d.heartbeatAgo)} 前`)
-  if (registered && d.worker && !registered.includes(d.worker)) {
-    bits.push('不在 worker 登记表里')
-  }
-  return bits.join('，')
-}
-
-/** hub 派发态的悬停全因（§3.3 的顺序：派发事实 → 队列深度 → 预取窗口 → 训练侧原文）。 */
-function hubDispatchTitle(
-  hub: CourseOverviewRow,
-  wait: string,
-  registered?: string[] | null,
-): string {
-  const facts = hub.inflightDetail.length
-    ? `hub 派发：${hub.inflightDetail.map((d) => holderFacts(d, registered)).join('；')}`
-    : 'hub 派发：无在飞明细'
-  const queue = `队列 ${hub.queuePending} 待领${hub.nextJob ? `（队首 ${hub.nextJob}）` : ''}`
-  const win =
-    hub.peeked === null
-      ? '预取窗口不可知（旧版 hub）'
-      : hub.peeked
-        ? '在预取窗口内'
-        : '不在预取窗口'
-  return `${facts} · ${queue} · ${win} · ${wait}`
-}
-
 /** 从「已开课课程表 + 队列行 + 进程存活」推出 pill 行（纯函数，可单测）。
  *
  *  **入参就是 pill 的全集**：`courses` 是服务端 stamp 的已开课课程（开课标记为事实源），
  *  逐课去 `rows` 里找它的队列行——找不到时**不编一个假状态**（读面不可用是事实，
  *  显示「视图不可用」而不是「空闲」：后者会让操作员去查一个不存在的卡顿）。
  *
- *  状态优先级：暂停意图 > 收官 > 中止 > 进程未运行 > 「在等什么」。前四者都是**确定性事实**，
- *  只有最后一条来自 python 的 waiting 判据——一件事只有一个主人（不在 TS 里重算）。
- *  在线课若 hub 有派发事实（在飞 / 排队没人取），改由 **hub 观测面**说
- *  （等回传 / 卡住 / 排队·无人取 / 预取中）——见 plan/course-pill-precision §3.1。
+ *  ★P1-10（2026-10-05，plan §3.10）：状态词**不再在这里拼**——唯一派生是 `courseStatus`
+ *  （`course-status.ts`），pill 只是它的渲染器之一（另一个是课程矩阵状态列）。本函数只负责
+ *  「行缺失」这一档与字段搬运（it/kind/age），判据一个字不另写。
  */
 export function coursePills(input: {
   courses: string[]
   rows: LoopQueueRow[]
   /** 共享 trainer 是否在跑（进程事实，与「已开课」正交：开了课但进程没跑是合法稳态）。 */
   trainerRunning: boolean
+  /** ★P1-11：训练侧读面新鲜度（`LoopQueueView.stale`）——读失败保旧值时改标注不改词。 */
+  queueStale?: ReadStaleView | null
   /** hub 侧事实（`stateView.overview`）：离线标记、**段内已回传轮数**、hub 是否认得这门课。
    *
    *  ★2026-09-23：由「离线课名集」升级为整个总览视图——旧形状只能回答「hub 说不说它离线」，
@@ -231,6 +167,7 @@ export function coursePills(input: {
   return input.courses.map((course) => {
     const r = byCourse.get(course)
     if (!r) {
+      // 训练侧行缺失 = 「不知道」（不是「空闲 / 未在训」）——唯一派生也表达不了它。
       return {
         course,
         kind: 'rl' as LoopCourseKind,
@@ -242,241 +179,25 @@ export function coursePills(input: {
           '停课不受它影响（停课只写暂停意图 + 删开课标记）。',
       }
     }
-    const it = r.it
-    const wait = r.waiting.text
-    const kind = r.kind
-    if (r.pausedIntent) {
-      return {
-        course,
-        kind,
-        it,
-        status: '已暂停',
-        tone: 'y' as CoursePillTone,
-        title:
-          `暂停意图已写（${r.pauseApplied ? '训练进程已停住这门课' : '训练进程还没读到它'}）。` +
-          `恢复走「开课」· ${wait}`,
-      }
-    }
-    if (r.state === 'done') {
-      return {
-        course,
-        kind,
-        it,
-        status: '已收官',
-        tone: 'gray' as CoursePillTone,
-        title: `本轮课程已收官（${wait}）——要接着跑就改大 iters 后重新开课。`,
-      }
-    }
-    if (r.state === 'aborted') {
-      return {
-        course,
-        kind,
-        it,
-        status: '已中止',
-        tone: 'r' as CoursePillTone,
-        title: `训练进程已把该课标为「已中止」：${wait}`,
-      }
-    }
-    // ★ 2026-10-05（plan/course-startup-recover §3.3 / §8.2）：配置**不可开课** ⇒ 红。
-    // 「起不来」不是「待进程」——进程起来也会被同一道校验拒启。文案不写死 serve 侧事实
-    // （评审 F4）：这是**配置面判据**，正在跑的课不受影响；人唯一的动作是修课程文件。
-    if (!r.openable.ok || r.waiting.kind === 'blocked') {
-      const why = r.openable.reason || wait || '读不到原因'
-      return {
-        course,
-        kind,
-        it,
-        status: '起不来',
-        tone: 'r' as CoursePillTone,
-        title:
-          `课程配置不可开课：${why}。这是课程文件配置问题（trainer 在跑时会整课跳过；` +
-          '正在跑的课不受影响）——改好课程文件后会自动重试开跑，不需要重启 trainer。',
-      }
-    }
-    if (!input.trainerRunning) {
-      return {
-        course,
-        kind,
-        it,
-        status: '待进程',
-        tone: 'gray' as CoursePillTone,
-        title:
-          '已开课（在调度课程表里），但共享 trainer 没在跑——启动「服务进程」后下一拍就会入队。' +
-          `· ${wait}`,
-      }
-    }
-    // ★2026-09-23：离线课不再一刀切「回传中」——那是**进度断言**，只有真收到过产物才配说。
-    // 三个离线课都还没被云机取走时，旧口径会出现「回传中 ×2 + 等回传 ×1」（那个「等回传」
-    // 是 hub 侧还留在 online 的漂移课，走的本地 waiting 词）。现在：
-    //   意图 ≠ hub 事实 ⇒ 「意图未生效」（点名，操作员才知道该再推一次）
-    //   hub 离线 ∧ 已回传 > 0 ⇒ 「回传中」（绿点）
-    //   hub 离线 ∧ 0 回传 ⇒ 「等云机」（⚠ 还没取走包 —— 此前被说成「回传中」，读着像在跑）
-    // 位置仍在确定性事实（暂停/收官/中止/待进程）之后，它们的优先级不被动摇。
-    const hub = hubByCourse.get(course)
-    const intent = input.modeIntents?.[course]
-    if (intent && hub?.hubSeen && hub.offline !== (intent === 'offline')) {
-      return {
-        course,
-        kind,
-        it,
-        status: '意图未生效',
-        tone: 'y' as CoursePillTone,
-        title:
-          `控制台意图是「${intent === 'offline' ? '离线' : '在线'}」，而 hub 现在把 ${course} 当「${
-            hub.offline ? '离线' : '在线'
-          }」——意图没落地（常见成因：hub 刚重启，回灌跑在它发现这门课之前）。` +
-          '在课程矩阵里点该课「切离线/切换成在线」再推一次（幂等），或点「hubServer」回灌全部意图。' +
-          ` · ${wait}`,
-      }
-    }
-    if (hub?.offline) {
-      if (hub.offlineRounds > 0) {
-        return {
-          course,
-          kind,
-          it,
-          status: '回传中',
-          tone: 'g' as CoursePillTone,
-          title:
-            `hub 离线（只收回传）：本段由云机整段执行，已回传 ${hub.offlineRounds} 轮` +
-            `${hub.offlineLastIter == null ? '' : `（最新 it${hub.offlineLastIter}）`} · ${wait}`,
-        }
-      }
-      return {
-        course,
-        kind,
-        it,
-        status: '等云机',
-        tone: 'y' as CoursePillTone,
-        title:
-          'hub 离线（只收回传）：本段交给云机整段执行，但**还没有任何段内产物回传**——' +
-          '云机可能还没取走任务包、或还在跑第一轮（本地 hub 只收回传、不实时派发）。' +
-          `进度与「最近多久没动」见课程矩阵的「段内」列 · ${wait}`,
-      }
-    }
-    // ── hub 派发态（plan §3.1，2026-10-02 pill 精确化） ────────────────────────
-    // 门条件：课程在线 ∧ hub 可达 ∧ `hubSeen` ∧（有在飞 ∨ 有排队）。否则回落训练侧词——
-    // 旧 hub / hub 不可达时**逐字段退化为今天的行为**（不编状态）。
-    const hubLive = !!hub && hub.hubSeen && (hub.inflight > 0 || hub.queuePending > 0)
-    if (hubLive && hub) {
-      const trainingJids = r.inflight.map((x) => x.jid).filter((x): x is string => !!x)
-      const hubJids = new Set(hub.inflightDetail.map((d) => d.jobId).filter(Boolean))
-      const matched = trainingJids.some((j) => hubJids.has(j))
-      // 本机 inflight（评审 P2）：训练侧在飞但 hub 无对应 job ⇒ 本机 PPO。**压过 10′/11′**
-      // ——否则本机在算的同时远端队列有活，会被误读成「没人取」。
-      if (
-        r.waiting.kind === 'inflight' &&
-        trainingJids.length > 0 &&
-        !matched &&
-        hub.inflight === 0
-      ) {
-        return {
-          course,
-          kind,
-          it,
-          status: '等回传（本机）',
-          tone: 'y' as CoursePillTone,
-          title:
-            '本机在算（训练侧 inflight，但 hub 没有这门课的在飞 job）——非远端。' +
-            hubDispatchTitle(hub, wait, input.registeredWorkers),
-        }
-      }
-      if (r.waiting.kind === 'inflight' && trainingJids.length === 0 && hub.inflight === 0) {
-        // 旧训练侧 WAL 没 jid（§3.4）：不做连接、不判本机，也不把「训练侧在等」说成
-        // 「没人取」——保持原「等回传」词，悬停注明无法对号。
-        return {
-          course,
-          kind,
-          it,
-          status: '等回传',
-          tone: 'y' as CoursePillTone,
-          title: `训练侧在飞但没有 jid（旧训练侧）——无法与 hub 在飞对号。${hubDispatchTitle(
-            hub,
-            wait,
-            input.registeredWorkers,
-          )}`,
-        }
-      }
-      if (hub.inflight > 0) {
-        const age = pickOldestInflight(hub)?.claimedAgo ?? null
-        if (age !== null && age > PILL_STUCK_SEC) {
-          return {
-            course,
-            kind,
-            it,
-            status: STUCK_LABEL,
-            age: fmtAge(age),
-            tone: 'r' as CoursePillTone,
-            title: hubDispatchTitle(hub, wait, input.registeredWorkers),
-          }
-        }
-        return {
-          course,
-          kind,
-          it,
-          status: '等回传',
-          age: fmtAge(age) || null,
-          tone: 'y' as CoursePillTone,
-          title: hubDispatchTitle(hub, wait, input.registeredWorkers),
-        }
-      }
-      // 到这里只可能是 `inflight == 0 ∧ queuePending > 0`（门条件）。
-      if (hub.peeked === null) {
-        return {
-          course,
-          kind,
-          it,
-          status: '排队中',
-          tone: 'y' as CoursePillTone,
-          title: `hub 预取窗口不可知（旧版 hub）——无法区分「没人要跑」与「预取中」。${hubDispatchTitle(
-            hub,
-            wait,
-            input.registeredWorkers,
-          )}`,
-        }
-      }
-      if (hub.peeked) {
-        return {
-          course,
-          kind,
-          it,
-          status: '预取中',
-          tone: 'g' as CoursePillTone,
-          title: `hub 有活且刚被 worker 预取扫到（在预取窗口内）。${hubDispatchTitle(
-            hub,
-            wait,
-            input.registeredWorkers,
-          )}`,
-        }
-      }
-      return {
-        course,
-        kind,
-        it,
-        status: NO_TAKER_LABEL,
-        tone: 'y' as CoursePillTone,
-        title:
-          `hub 有活、没有在飞、也不在预取窗口——没人要跑（与告警坞的 PPO 红条同一件事：` +
-          `pill 说状态、告警坞在超时后升级）。${hubDispatchTitle(hub, wait, input.registeredWorkers)}`,
-      }
-    }
-    switch (r.waiting.kind) {
-      case 'inflight':
-        return {
-          course,
-          kind,
-          it,
-          status: '等回传',
-          tone: 'y' as CoursePillTone,
-          title: wait,
-        }
-      case 'collect':
-        return { course, kind, it, status: '采集中', tone: 'g' as CoursePillTone, title: wait }
-      case 'ready':
-        return { course, kind, it, status: '推进中', tone: 'g' as CoursePillTone, title: wait }
-      default:
-        // `idle`：本轮无待办（账本已结算 / 刚开课还没起第一轮）——不是故障，也不活跃。
-        return { course, kind, it, status: '空闲', tone: 'gray' as CoursePillTone, title: wait }
+    const st = courseStatus({
+      course,
+      lq: r,
+      ov: hubByCourse.get(course) ?? null,
+      hubOnline: input.overview?.hubOnline ?? false,
+      trainerRunning: input.trainerRunning,
+      modeIntents: input.modeIntents,
+      registeredWorkers: input.registeredWorkers,
+      overviewStale: input.overview?.stale ?? null,
+      queueStale: input.queueStale ?? null,
+    })
+    return {
+      course,
+      kind: r.kind,
+      it: r.it,
+      status: st.text,
+      age: st.age,
+      tone: st.tone,
+      title: st.title,
     }
   })
 }
@@ -494,11 +215,16 @@ export interface LoopQueueView {
   rows: LoopQueueRow[]
   /** 行里在训课程数（trainingLoop 进程存活）——卡片表头「在训 N/M」的来源。 */
   trainingCount: number
-  /** 读取失败原因（python 侧异常 / 解释器缺失 / 输出不可解析）；UI 显空态 + 原因，不静默。 */
+  /** 读取失败原因（python 侧异常 / 解释器缺失 / 输出不可解析）；UI 显空态 + 原因，不静默。
+   *
+   *  ★P1-11：读失败且还在保旧值时，`error` 与 `stale` 同时在场——行**不被清空**（last-known-good），
+   *  超窗才退化到「未知」。`error` 永远是**最近一次失败原因**（诊断入口）。 */
   error?: string
+  /** 读面新鲜度（P1-11）：非 null = 这批行是**上一拍**的值（读失败保旧值）；`null`/缺省 = 本拍读成功。 */
+  stale?: ReadStaleView | null
 }
 
-const WAIT_KINDS: LoopWaitKind[] = ['inflight', 'collect', 'idle', 'ready', 'blocked']
+const WAIT_KINDS: LoopWaitKind[] = ['inflight', 'collect', 'idle', 'ready', 'blocked', 'offline']
 const STATES: LoopCourseState[] = ['ready', 'running', 'waiting', 'paused', 'aborted', 'done']
 
 function str(v: unknown): string {
@@ -750,6 +476,9 @@ export function waitCls(kind: LoopWaitKind): string {
     // 在飞 = 结果在别的进程/机器上，运维唯一能干预的一类 → 最醒目
     case 'inflight':
       return 'tc-mx__wait--inflight'
+    case 'offline':
+      // 离线等待 = 本机停机、云机接手（不是卡顿也不是故障）——与「等外部」同族但语义独立。
+      return 'tc-mx__wait--offline'
     case 'collect':
       return 'tc-mx__wait--collect'
     case 'idle':
@@ -768,6 +497,7 @@ export function waitCls(kind: LoopWaitKind): string {
  *  （判据在哪算的），两处引用同一个常量以防漂移。 */
 export const WAIT_TITLES: Record<LoopWaitKind, string> = {
   inflight: '已发布的 job 还没回传——结果在 GPU worker / 云机上；换节点或检查 worker 日志',
+  offline: '离线课由云机取任务包接手——本机不跑这门课；切回在线会自动恢复（无需停开课）',
   collect: '本轮采集还在落盘（局数来自 it<N>/ 下的 manifest，配额只有课程计划知道）',
   idle: '本轮没有待办：账本已结算这一轮，或这门课还没开训',
   ready: '盘上事实看不出外部等待——没有在飞 job，采集也没在跑',

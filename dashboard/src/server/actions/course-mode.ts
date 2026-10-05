@@ -48,13 +48,43 @@ export type CourseMode = 'online' | 'offline'
 /** 合法模式表（与 hub 侧 `COURSE_MODES` 同名同值；两边不一致时 hub 会 400 响亮）。 */
 const MODES: readonly CourseMode[] = ['online', 'offline'] as const
 
-/** 记录在案的意图（归一化：丢掉形状不对的键；空表 = 无意图）。 */
-export function readCourseModes(): Record<string, CourseMode> {
+/** 意图表 v2 的一条（P1-8，plan §3.9）：`pinned:true` = 那颗开关（人固定）；
+ * `pinned:false` = 开课弹窗/停课的一次性选择（回灌时走 legacy 推送，不关自动交接）。 */
+export interface CourseModeIntent {
+  mode: CourseMode
+  pinned: boolean
+}
+
+/** 读意图表（归一化：丢掉形状不对的键；**旧裸串按 `{mode, pinned:false}` 归一**）。
+ *
+ *  ★P1-8（2026-10-05）：旧条目**不会被静默升级**——F9 之前「每门开过的课都被写过
+ *  online」，一次性把噪声 pin 上会关掉整套自动交接；要固定请再点一次那颗开关（回执里写明）。
+ *  `pinned:false` 的回灌走 legacy 推送（不带 pin 参数），与升级前逐字同行为。 */
+export function readCourseModeIntents(): Record<string, CourseModeIntent> {
   const raw = loadConsoleState().courseModes ?? {}
-  const out: Record<string, CourseMode> = {}
-  for (const [course, mode] of Object.entries(raw)) {
-    if (course && (mode === 'online' || mode === 'offline')) out[course] = mode
+  const out: Record<string, CourseModeIntent> = {}
+  for (const [course, v] of Object.entries(raw)) {
+    if (!course) continue
+    if (v === 'online' || v === 'offline') {
+      out[course] = { mode: v, pinned: false }
+      continue
+    }
+    if (v && typeof v === 'object') {
+      const mode = (v as { mode?: unknown }).mode
+      if (mode === 'online' || mode === 'offline') {
+        out[course] = { mode, pinned: (v as { pinned?: unknown }).pinned === true }
+      }
+    }
+    // `unset` / 非法形状 → 丢（= 人没管过）
   }
+  return out
+}
+
+/** 记录在案的意图**模式投影**（旧读面：`stateView.courseModeIntents` / 漂移徽标）。
+ *  只保留模式——想连 `pinned` 一起读的调用方用 `readCourseModeIntents()`（v2 的唯一入口）。 */
+export function readCourseModes(): Record<string, CourseMode> {
+  const out: Record<string, CourseMode> = {}
+  for (const [course, intent] of Object.entries(readCourseModeIntents())) out[course] = intent.mode
   return out
 }
 
@@ -116,7 +146,10 @@ export async function pushCourseMode(
   const cfg = loadConfig()
   const prev = readCourseModes()[c]
   const err = await pushMode(cfg, c, m, undefined, opts.pin, opts.dropJobs)
-  saveConsoleState({ courseModes: { ...readCourseModes(), [c]: m } })
+  // 意图表 **v2**（P1-8）：`pinned` = 那颗开关/交还自动的语义；开课弹窗/停课的一次性选择写 false。
+  saveConsoleState({
+    courseModes: { ...readCourseModeIntents(), [c]: { mode: m, pinned: opts.pin === true } },
+  })
   if (err) {
     return {
       ok: false,
@@ -254,17 +287,23 @@ export async function setCourseMode(
   }
   // ② hub 镜像。★ 2026-10-03（plan/auto-offline-handoff §3.2）：人的一次开关 = **pin**
   //    （该课此后归人管，自动交接不再插手）；「交还自动」是另一颗钮（`unsetCourseMode`）。
+  //    ★ 2026-10-05（plan/offline-online-status-switch §4.2，**半球回摆**）：pin online 重新
+  //    获得阻止力——`pinned_online` 的课离线盘不可 claim / seize / 翻模式（§3.1 权威三态）；
+  //    pin offline 与「自动池可抢」的语义不变。回摆理由与被否决备选见 DECISIONS 新条。
   //    ★ 同时带 `dropJobs`（plan/switch-mode-drops-jobs T0）：切模式 = 上一段整体作废 ——
   //    作废该课留在队列里、**还没人领**的 job，免得切回在线时被云机补做（切模式后「旧 job
   //    被推走」正是 e2e 钉住的既有行为，本 plan 把「不该推的那部分」撤掉）。在飞的不动。
   const res = await pushCourseMode(c, m, { pin: true, dropJobs: true })
   // 文案按**合并后**的语义写（不再复用 `pushCourseMode` 那句「只接收 it 权重/指标回传」——
   // 那是旧的半语义：那颗开关现在同时把本机置成「这门课不归本机」，两句话并排会自相矛盾）。
+  // ★P1-5：切在线 = **固定在线**（pin）——回执必须说清它不再被离线盘抢（R3-d / §4.2）；
+  // 要回自动池是另一颗钮（「交还自动」），不把两件事混成一句话。
   const head = res.message.includes('已经是')
     ? `${c} 已经是 ${m}（幂等：hub 已重新下发 + 本机配置已重写）`
     : m === 'offline'
       ? `${c} 已切离线：本机不跑这门课（云机取任务包接手——battle.offline.ipynb 跑 rollout+PPO）`
-      : `${c} 已切在线：本机采样 + 云机只算 PPO（不需要 bun）`
+      : `${c} 已切在线并固定（pin）：本机采样 + 云机只算 PPO（不需要 bun）；` +
+        '**离线盘不再自动抢它**——要放回自动交接池请点「交还自动」（交出后离线盘一上线就能领走）'
   const timing =
     '★ 轮边界生效：本机在下一个轮边界干净收官（不再有「段等待」）；云机那份在它自己的会话里跑（要立刻断开请用停课/暂停）'
   // 配置侧的实情也回执（write 的 notes）：尤其「rollout 位置恢复为 node」这种——
@@ -320,13 +359,15 @@ async function pushModeWithRetry(
   mode: CourseMode,
   only?: string,
   retry: ModeRetry = {},
+  /** ★P1-8：带 pin 回灌（意图表 v2 里 `pinned:true` 的条目）——不带 = legacy。 */
+  pin?: boolean | null,
 ): Promise<string | null> {
   const attempts = Math.max(1, retry.attempts ?? 3)
   const delayMs = Math.max(0, retry.delayMs ?? 2000)
-  let last = await pushMode(cfg, course, mode, only)
+  let last = await pushMode(cfg, course, mode, only, pin)
   for (let i = 1; i < attempts && last !== null && UNKNOWN_COURSE_RE.test(last); i++) {
     if (delayMs > 0) await Bun.sleep(delayMs)
-    last = await pushMode(cfg, course, mode, only)
+    last = await pushMode(cfg, course, mode, only, pin)
   }
   return last
 }
@@ -361,7 +402,7 @@ export async function restoreCourseModes(
   only?: string,
   retry: ModeRetry = {},
 ): Promise<RestoreResult> {
-  const modes = readCourseModes()
+  const modes = readCourseModeIntents()
   const failed: string[] = []
   const skipped: string[] = []
   let restored = 0
@@ -370,7 +411,17 @@ export async function restoreCourseModes(
       skipped.push(course)
       continue
     }
-    const err = await pushModeWithRetry(cfg, course, modes[course], only, retry)
+    // ★P1-8（R3-d）：`pinned:true` 的条目**带 pin 回灌**——不带的话 hub 对「被 claim 翻过
+    // offline」的课拒覆盖（400），意图与 hub 永久分叉且每次起 hub 都刷失败（legacy 路）。
+    // `pinned:false`（旧条目/开课弹窗）保持 legacy 推送：不替人做决定。
+    const err = await pushModeWithRetry(
+      cfg,
+      course,
+      modes[course]!.mode,
+      only,
+      retry,
+      modes[course]!.pinned ? true : null,
+    )
     if (err) failed.push(`${course}: ${err}`)
     else restored += 1
   }
@@ -395,8 +446,9 @@ export async function restoreCourseModesNote(
 /** **交还自动**（三态的第三态 `unset`）：把一门课重新放回自动交接池。
  *
  *  ★ 2026-10-03（plan/auto-offline-handoff §3.2a，二轮 P1-4/P0-2）：「人工切回在线」
- *  **不等于**「pin online」。pin online 原义「永久退出自动逻辑（离线盘永不自取）」已被
- *  同日用户裁决取代 —— 在训课照样可被离线盘抢；pin 如今只标记「人管过」并落盘。
+ *  **不等于**「交还自动」——一个是固定在线（pin），一个是把课放回自动池。
+ *  ★ 2026-10-05（plan/offline-online-status-switch §4.2）：pin online 重新成为硬意图
+ *  （`pinned_online` 拦离线盘的 claim/seize/翻模式）；本函数就是它的唯一解除口。
  *  本函数做三件事（顺序同 `setCourseMode`）：
  *
  *    ① 本机配置：抄在线档（撑离线标记 `run/run_iters`，恢复被 offline 覆写前的源）；
@@ -419,7 +471,9 @@ export async function unsetCourseMode(course: string): Promise<ActionResult> {
     }
   }
   const err = await pushMode(loadConfig(), c, 'online', undefined, false)
-  const table = { ...readCourseModes() }
+  // 意图表 v2：**删掉这条**（= `unset`）——删除优先于写 `{online,pinned:false}`：
+  // 表里没有键才是「人没管过」（自动池），留下键会被下次回灌重新推成人的决定。
+  const table = { ...readCourseModeIntents() }
   delete table[c]
   saveConsoleState({ courseModes: table })
   const head = `${c} 已交还自动交接：离线盘一上线就能领走它（不再是人的决定）`

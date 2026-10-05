@@ -292,7 +292,7 @@ export function CourseMatrix({
               ? `只读视图不可用：${loopQueue.error}`
               : !loopQueue
                 ? '训练侧只读视图不可用——哪几门课在训**不可知**（不是「没有课在训」）'
-                : '当前没有在训课程：本表只列在训的课（已开课但 trainer 没跑、或 hub 单侧登记的课不在此表）'
+                : '当前没有在训课程：本表只列在训的课（开课标记或进程任一在训就上屏；已收官/未开课的见上方 chip 悬停）'
           }
         >
           {loopQueue && !loopQueue.error ? (
@@ -377,6 +377,18 @@ function MatrixTr({
         {kind ? (
           <span className={`tc-badge tc-badge--${kind.tone}`} title={kind.title}>
             {kind.text}
+          </span>
+        ) : null}
+        {/* ★P1-6：权威三态徽标（固定在线 / 固定离线 / 自动）——`null` = 旧 hub 未上报，不猜。 */}
+        {r.pinBadge ? (
+          <span className={`tc-badge tc-badge--${r.pinBadge.tone}`} title={r.pinBadge.title}>
+            {r.pinBadge.text}
+          </span>
+        ) : null}
+        {/* ★P1-6：租约徽标（可接管 = 静默超阈；已撤租 = 墓碑）——只给需处置的两档。 */}
+        {r.leaseBadge ? (
+          <span className={`tc-badge tc-badge--${r.leaseBadge.tone}`} title={r.leaseBadge.title}>
+            {r.leaseBadge.text}
           </span>
         ) : null}
       </th>

@@ -271,16 +271,23 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
             self._export_offline_bundle(it, ctx.pairs, ctx.seg)
         if ctx.collect_mode == COLLECT_OFFLINE:
             # 不是失败：不落 iter_error、不计连击（在 `round_failure` 里另行开路）。
-            log(
+            # ★P1-1（plan §3.5，五轮 P1-D）：离线 = **等待**不是收官 ⇒ 本轮留队、
+            # 每 `poll_interval` 重问一次，而这段四句日志就在重问路径上 ⇒ **同一模式状态
+            # 只喊一次**（`_offline_note` 去重）；否则比今天更吵。
+            note = (
                 f"[run_rl] it{it}: 本课 rollout_src=run —— **离线课不由本机跑**"
-                "（不采样、不发队列项、不等待）。执行者=云机取包链："
+                "（等待控制台写回在线；云机取包链："
                 f"{OFFLINE_LEG_HINT}；产物回传后在控制台「导入产物」即推进本机账本"
                 + (
                     ""
                     if ctx.seg
-                    else "（本课没写 run_iters——导出包请用控制台的「导出任务包」，它自带 -1）"
+                    else "；本课没写 run_iters——导出包请用控制台的「导出任务包」，它自带 -1"
                 )
+                + "）"
             )
+            if note != getattr(self, "_offline_note", ""):
+                log(note)
+                self._offline_note = note
             return finish(ROUND_OFFLINE_EXIT, "离线课由云机取任务包接手（本机不跑）")
         return None
 

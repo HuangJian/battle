@@ -80,28 +80,88 @@ export function viewFromRunResult(r: RunPythonResult): LoopQueueView {
   return view
 }
 
-const cache = createSwrCache<LoopQueueView>(LOOP_QUEUE_TTL_MS)
+/** 一次读的产物：成功 = `view` 非空；失败 = `error` 非空（**不抛**，观测面坏了不该把页面带崩）。 */
+interface LoopQueueRead {
+  view: LoopQueueView | null
+  error: string | null
+}
+
+const cache = createSwrCache<LoopQueueRead>(LOOP_QUEUE_TTL_MS)
+
+/** **last-known-good**（P1-11）：最近一次成功的完整视图（读失败时保它上屏）。 */
+let lastGood: LoopQueueView | null = null
+/** 连续失败的起点（epoch ms；0 = 当前没有在失败）。 */
+let failSince = 0
+/** 最近一次失败原因（诊断用；成功即清）。 */
+let lastError = ''
+
+/** 陈旧保值窗口（P1-11）：连续失败超它就不再保旧值——整块显示「未知」而不是无限假绿。
+ *  取一个刷新周期（TTL）：下下拍还失败就一定超窗（读路径最晚每 TTL 重算一次）。 */
+export const LOOP_QUEUE_KEEP_MS = LOOP_QUEUE_TTL_MS
+
+/** 保值窗口判定（P1-11 的纯决策；导出让用例不必等 10s）：超窗 ⇒ 不再保旧值，显示「未知」。 */
+export function loopQueueKeepWithin(failSince: number, now: number = Date.now()): boolean {
+  return failSince > 0 && now - failSince <= LOOP_QUEUE_KEEP_MS
+}
+
+async function readLoopQueue(run: LoopQueueRunner): Promise<LoopQueueRead> {
+  try {
+    const v = viewFromRunResult(await run())
+    if (v.error) {
+      // ⚠ 失败状态在**这一支**也要记：子进程退出码/超时/JSON 不可解析都是「读失败」
+      // （这一支过去漏记 ⇒ last-known-good 形同虚设）；执行体抛异常走下面的 catch。
+      if (!failSince) failSince = Date.now()
+      lastError = v.error
+      return { view: null, error: v.error }
+    }
+    failSince = 0
+    lastError = ''
+    lastGood = v
+    return { view: v, error: null }
+  } catch (e) {
+    const msg = `调度器视图读取失败：${e instanceof Error ? e.message : String(e)}`
+    if (!failSince) failSince = Date.now()
+    lastError = msg
+    return { view: null, error: msg }
+  }
+}
 
 /** 调度器视图（懒算 + TTL + 单飞 + SWR）：并发请求共享同一次子进程。
  *
- *  读失败（含执行体抛异常）**不抛**：翻成带 `error` 的空视图（`viewFromRunResult` 的每一
- *  条失败分支 + 起不了子进程）——`/api/state` 不该被一个观测面带崩。 */
+ *  ★P1-11（2026-10-05，plan/offline-online-status-switch §3.10-3 / R4-e）：读失败**不替换旧值**
+ *  ——还在保值窗口内 ⇒ 旧行照旧上屏 + `stale` 标注（R4-b/g 的词跳变因此消失：来源可用性
+ *  只降级标注、不换词）；超窗 ⇒ 退化到带 `error` 的空视图（显示「未知」，不无限保旧）。
+ *  失败详情仍然永远在 `error` 里（诊断入口），旧值是额外送的一拍，不是掩盖。 */
 export async function getLoopQueueView(
   run: LoopQueueRunner = defaultLoopQueueRunner,
 ): Promise<LoopQueueView> {
-  return cache.get(async (): Promise<LoopQueueView> => {
-    try {
-      return viewFromRunResult(await run())
-    } catch (e) {
-      return {
-        blockedCourses: [],
-        pools: {},
-        rows: [],
-        trainingCount: 0,
-        error: `调度器视图读取失败：${e instanceof Error ? e.message : String(e)}`,
-      }
+  const read = await cache.get(() => readLoopQueue(run))
+  // 读面正在失败（含后台重算失败——缓存里可能还坐着上一次成功的读）：
+  //  • 保值窗口内 + 有旧行 ⇒ 旧行 + `stale`（词不变，只降级标注）；
+  //  • 超窗 / 从没成功过 ⇒ 空视图 + `error`（显示「未知」，不无限保旧）。
+  if (failSince > 0) {
+    const withinWindow = loopQueueKeepWithin(failSince)
+    const reason = lastError || read.error || '读面失败'
+    if (withinWindow && lastGood) {
+      return { ...lastGood, error: reason, stale: { since: failSince, reason } }
     }
-  })
+    return {
+      blockedCourses: [],
+      pools: {},
+      rows: [],
+      trainingCount: 0,
+      error: reason,
+    }
+  }
+  return (
+    read.view ?? {
+      blockedCourses: [],
+      pools: {},
+      rows: [],
+      trainingCount: 0,
+      error: read.error ?? '读面失败',
+    }
+  )
 }
 
 /** **动作后的软作废**（`snapshot-refresher.invalidateAfterAction` 调用）：保留当前视图
@@ -115,9 +175,13 @@ export function refreshLoopQueue(): void {
 
 /** **硬作废**（下一次读**必须**等新重算）：改了输入（课程/账本）或要隔离测试夹具时用。
  *  生产路径已无调用点（动作走 `refreshLoopQueue`）——留在导出面上是**给门禁**用的：
- *  用例靠它把模块级缓存归零，避免一个用例暖的假视图喂给下一个。 */
+ *  用例靠它把模块级缓存归零，避免一个用例暖的假视图喂给下一个（last-known-good 的模块态
+ *  一并清——否则上一个用例的旧行会被下一个用例的失败读当缓存供出来）。 */
 export function invalidateLoopQueue(): void {
   cache.clear()
+  lastGood = null
+  failSince = 0
+  lastError = ''
 }
 
 /** 组装：调度器视图 + **在训事实**（registry）+ **暂停意图/生效回执**（控制文件），逐行合并。

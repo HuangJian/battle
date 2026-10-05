@@ -30,6 +30,7 @@ from common.protocol import (
     OFFLINE_QUEUE_VERSION,
     OFFLINE_RESULT_BODY_MAX,
     OFFLINE_RESUME_BLOB_NAMES,
+    PLAN_NAME,
     ProtocolError,
 )
 
@@ -41,6 +42,9 @@ from hub.task_pack import (
     _TASK_PACK_LOCK,
     _TASK_PACK_MISS_TRIGGERS,
     _TASK_PACK_TRIGGERS,
+    AUTHORITY_NOT_OFFLINE,
+    AUTHORITY_PINNED_ONLINE,
+    AUTHORITY_STOPPED,
     TASK_AUTO_HANDOFF_RETRY_SEC,
     TASK_PACK_MISS_TRIGGER_LIMIT,
     TASK_PACK_STALE_THROTTLE_SEC,
@@ -50,6 +54,7 @@ from hub.task_pack import (
     auto_handoff_decision,
     decide_task_pack,
     note_auto_handoff_trigger,
+    pack_index_meta,
     pack_index_part_sha,
     reset_auto_handoff_triggers,
     reset_task_pack_miss_triggers,
@@ -127,6 +132,39 @@ class OfflineRoutes:
         # ⚠ 只在「**表里有它且明确 online**」时拦：冷课/未扫到的课必须照旧放行
         # （与 `_task_pack_miss_candidate` ① 同一条规则——离线课本来就不常训练，从表里
         # 掉出去是常态，拿“不在表里”当 online 会把正常取包锁死）。
+        authority = self.hub.authority_of(course)
+        if authority == AUTHORITY_PINNED_ONLINE:
+            self._json(
+                {
+                    "error": (
+                        "该课由人固定在在线（离线盘不抢）——到控制台点「交还自动」后才可领；"
+                        "要现在离线跑请先交还自动再 claim"
+                    ),
+                    "course": course,
+                    "authority": authority,
+                },
+                409,
+            )
+            return
+        # ★六轮 F3 定死：**停课（`stopped`）不在这条腿上拦**——F3 的 409 `not_offline` 只落在
+        # claim 门与 `claimable`/`offline_task_courses`（入口已堵）；本端点只是「把同一个文件按
+        # HTTP 递出去」，且正在跑的会话被停课后仍要能重取包（§3.2「在跑租约**不杀**」；冷课
+        # 无标记的存量路径也靠它照发，见 `test_task_pack_cold_course_still_served`）。
+        if authority == AUTHORITY_NOT_OFFLINE:
+            self._json(
+                {
+                    "error": (
+                        "这门课当前不在离线池（盘上的派发记录是 online）——"
+                        "要离线跑请到控制台切离线"
+                    ),
+                    "course": course,
+                    "not_offline": True,
+                },
+                409,
+            )
+            return
+        # 旧 mode 门（判据保持）：表内 auto 但 mode 还是 online ⇒ 先 claim（claim 会翻 mode）；
+        # 这里只拦「取包不取包」的其他情形（表内 online 且停课已在上面的 STOPPED 分支拦掉）。
         if course in self.hub.courses() and self.hub.mode_of(course) != COURSE_MODE_OFFLINE:
             self._json(
                 {
@@ -269,7 +307,13 @@ class OfflineRoutes:
                     "补传无法归属课程：体里带 course（或 course_name），或加 ?course=；"
                     f"本 hub 的课程：{self.hub.courses()}"
                 )
-            res = self.hub.store_offline_artifact(course, body)
+            # ★P1-7 / R3-f：人切了「固定在线」之后，旧会话的回传**不得推进活动权重**
+            # （`advance_active=False`）——镜像/归档照落（算过什么的证据），但当前起点不听旧轮。
+            res = self.hub.store_offline_artifact(
+                course,
+                body,
+                advance_active=self.hub.authority_of(course) != AUTHORITY_PINNED_ONLINE,
+            )
             # 本轮随体重一并到达的云机评估行 → 课程账本（去重；失败只记一笔，
             # **不影响**补传本身的成功与否：权重才是这一趟的硬要求）。
             try:
@@ -321,8 +365,19 @@ class OfflineRoutes:
             # T6（plan/auto-offline-handoff §3.6）：跑满自报 = 把当前包记为 completed
             # ⇒ 该课**不可再领**（U6），直到人重导包（新 sha）自动解封。这是 T6 的
             # hub 侧生产链接线——此前 `note_offline_completed` 只有测试直接调（死代码）。
+            # ★P1-7 / R3-f：盖章前校验「这份自报就是**当前包**的段末」（run_id / plan_sha256）：
+            # 旧包/旧会话的 `end_it_reached` 不得封住新包（否则重导后依旧不可领）。
             if res.get("end_it_reached"):
-                self.hub.note_offline_completed(course)
+                sealed, why = self._end_seal_ok(course, body)
+                res["completed_sealed"] = sealed
+                if sealed:
+                    self.hub.note_offline_completed(course)
+                elif why:
+                    print(
+                        f"[{time.strftime('%H:%M:%S')}] [hub-server] 段末自报不盖章"
+                        f"（course={course} run={res['run_id']}）：{why}",
+                        flush=True,
+                    )
         except (ProtocolError, ValueError, UnicodeDecodeError) as e:
             self._json({"error": f"补传被拒: {e}"}, 400)
             return
@@ -333,6 +388,33 @@ class OfflineRoutes:
             flush=True,
         )
         self._json(res)
+
+    def _end_seal_ok(self, course: str, body: dict) -> tuple[bool, str]:
+        """段末自报能不能给「当前包」盖 completed 章（★P1-7 / R3-f）。只拦**有反证**的情形：
+
+        判据 = 当前任务包的身份（`run_id` / `plan_sha256`，都是包里已有的字段）与自报逐项
+        对照。包读不到 / 自报缺该项 ⇒ **不判**（照旧盖章——不制造新的失败态，旧形状的用例
+        与旧 worker 不受影响）；只有「两侧都有值且不等」才拒章，那正是要拦的：旧包/旧会话的
+        `end_it_reached` 把**新包**封成 completed（重导后依旧不可领，U6 反着生效）。
+        """
+        try:
+            pack = self.hub.task_pack_path(course)
+        except ProtocolError:
+            return True, ""
+        if not pack.is_file():
+            return True, ""
+        meta = pack_index_meta(pack)
+        pack_run = str(meta.get("run_id") or "")
+        pack_plan = pack_index_part_sha(pack, PLAN_NAME)
+        got_run = str(body.get("run_id", "") or "")
+        got_plan = str(body.get("plan_sha256", "") or "")
+        if pack_run and got_run and pack_run != got_run:
+            return False, f"自报 run_id={got_run} ≠ 当前包 run_id={pack_run}"
+        if pack_plan and got_plan and pack_plan != got_plan:
+            return False, (
+                f"自报 plan_sha256={got_plan[:12]}… ≠ 当前包 {pack_plan[:12]}…"
+            )
+        return True, ""
 
     def _get_offline_tasks(self) -> None:
         """`GET /offline/tasks`（2026-09-25，`plan/offline-task-discovery.plan.md` §3.1）：可领任务清单。
@@ -393,14 +475,25 @@ class OfflineRoutes:
                     400,
                 )
                 return
-            if (
-                course in self.hub.courses()
-                and self.hub.mode_of(course) != COURSE_MODE_OFFLINE
-                and not self.hub.auto_eligible(course)
-            ):
-                # 归属门（与取包端点的 mode 门同口径）：表里明确 online 且**未在训**（停课）⇒ 拒。
-                # 在训课一律放行 —— ★ 2026-10-03 用户裁决：pin 不再拦（在训在线课照样可被离线盘
-                # 抢占），它的包由下面的自动交接现场生成。
+            # 归属/权威门（★ 2026-10-05 六轮 F3/F6）：判据 = `authority_of`（不再只看
+            # 「在不在表 + mode」）：人固定在线 ⇒ `pinned_online`；停课（标记不在）与冷课
+            # online 记录 ⇒ `not_offline`。在训的 auto 课一律放行（它的包由下面的自动交接
+            # 现场生成）；pinned_offline 照旧可领（有包）。
+            authority = self.hub.authority_of(course)
+            if authority == AUTHORITY_PINNED_ONLINE:
+                self._json(
+                    {
+                        "error": (
+                            "这门课由人固定在在线（离线盘不抢）——"
+                            "到控制台点「交还自动」后才可领"
+                        ),
+                        "course": course,
+                        "pinned_online": True,
+                    },
+                    409,
+                )
+                return
+            if authority in (AUTHORITY_STOPPED, AUTHORITY_NOT_OFFLINE):
                 self._json(
                     {
                         "error": (
@@ -416,7 +509,8 @@ class OfflineRoutes:
             if not pack.is_file():
                 # P0-1（plan/auto-offline-handoff §3.1a）：自动课**本来就没有包**——claim 不能 404，
                 # 而是「翻 mode + 请控制台导包 + 409 指路」；其余课仍是旧 404。
-                self._claim_without_pack(course, pack)
+                # ★六轮 F4：带上 worker（`begin_auto_handoff` 的「换主/超窗 ⇒ 重置触发账本」要用它）。
+                self._claim_without_pack(course, pack, worker)
                 return
             sha = _file_sha256(pack)
             if self.hub.completion_blocked(course, sha):
@@ -490,15 +584,21 @@ class OfflineRoutes:
             if not res:
                 holder = self.hub.holder_info(course)
                 who = holder["worker_id"] if holder else "?"
+                if why == "revoked":
+                    error = (
+                        "租约已被撤销（人把课切回在线/交还自动）——本会话继续跑完并打包；"
+                        "下一会话不要再领它"
+                    )
+                elif why == "expired":
+                    error = "租约已过期（本会话产物照旧落盘 + 打包；回传可能被判 duplicate 丢弃）"
+                else:
+                    error = f"租约已被 {who} 接管——本会话继续跑完并打包"
                 self._json(
                     {
-                        "error": (
-                            "租约已过期（本会话产物照旧落盘 + 打包；回传可能被判 duplicate 丢弃）"
-                            if why == "expired"
-                            else f"租约已被 {who} 接管——本会话继续跑完并打包"
-                        ),
+                        "error": error,
                         "course": course,
                         "expired": why == "expired",
+                        "revoked": why == "revoked",
                         "holder": holder,
                     },
                     409,
@@ -527,7 +627,7 @@ class OfflineRoutes:
         云机在导包窗口里的轮询不会把控制台打爆。控制台不可达/不接受 ⇒ 只在回执里说清，
         半状态（包偏旧）由停滞告警与人工导出兜住。
         """
-        if not self.hub.auto_eligible(course):
+        if not self.hub.auto_handoff_allowed(course):
             return ""
         decision = auto_handoff_decision(course)
         if decision == "throttled":
@@ -546,14 +646,14 @@ class OfflineRoutes:
             "盘上的包可能偏旧，请到控制台点一次「导出任务包」"
         )
 
-    def _claim_without_pack(self, course: str, pack: Path) -> None:
+    def _claim_without_pack(self, course: str, pack: Path, worker_id: str = "") -> None:
         """claim 遇缺包：自动课 ⇒ 翻 mode + 请控制台导包（409 指路）；其余 ⇒ 旧 404。
 
         为什么不能让云机先等着：包的出现路径是「有人导出」——而自动模式下**没有人**会替它导
         （导包由 claim 触发）。所以这个分支是整个自动交接的**入口**（plan §3.1a），
         它必须在「包里没有包」时也能推进状态，而不是让云机在 30 分钟超时后 SystemExit。
         """
-        verdict, why = self.hub.begin_auto_handoff(course)
+        verdict, why = self.hub.begin_auto_handoff(course, worker_id)
         if verdict == "busy":
             self._json(
                 {

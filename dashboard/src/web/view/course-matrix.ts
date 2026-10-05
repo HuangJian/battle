@@ -34,7 +34,8 @@
  *  3. **冲突上状态列**（多对一映射见 `matrixStatus`），不吞不藏。
  */
 
-import type { CourseOverviewRow, ParallelOverviewView } from './course-overview'
+import type { CourseOverviewRow, ParallelOverviewView, ReadStaleView } from './course-overview'
+import { courseStatus, type CourseStatus } from './course-status'
 import { fmtRel } from './format'
 import {
   type LoopQueueRow,
@@ -107,13 +108,24 @@ export const QUEUE_DOWN_TITLE =
 /** 单侧缺失时单元格里的占位符。**不是 0**：0 是「确定没有」，`—` 是「不知道」。 */
 export const CELL_UNKNOWN = '—'
 
-/** **「在训」判据**（本模块唯一出处）：两侧同源（都出自「调度器存活 ∧ 该课未收官」），
- *  任一侧给了就用——不存在两说。
+/** **「上屏」判据**（本模块唯一出处）：**任一侧说在训就算**（`lq.training ∨ ov.training`）
  *
- *  `ov` 先于 `lq` 取：hub 侧的 `training` 是会话级快照（`stateView.trainingCourses` 推导），
- *  训练侧的是每拍队列读数；两者应当一致，不一致时以 hub 侧为准（合并前两张表就是这么读的）。 */
+ *  ★P1-10（2026-10-05）：两个事实**定义不同**——`ov.training` 是开课标记（会话级快照），
+ *  `lq.training` 是进程事实（调度器存活 ∧ 该课未收官）。它们不一致的时刻（已收官、调度器
+ *  没跑、hub 单侧注册）恰恰是合并前最容易漏掉的信号 ⇒ 上屏用 **OR**：任一侧在训的行都
+ *  不隐藏（冲突行正是这张表要盯的）。
+ *
+ *  ⚠ 它只是**上屏筛**，不是状态词的判据：词由 `courseStatus` 单点派生（同样的两半，
+ *  按语义优先级给一个答案）——比如「hub 说在训、训练侧没进程」的行上屏但状态词是
+ *  `hub 已注册 · 无进程`（warn），不会跟着 `ov.training` 谎报「在训」。 */
 export function rowTraining(ov: CourseOverviewRow | null, lq: LoopQueueRow | null): boolean {
-  return ov?.training ?? lq?.training ?? false
+  return (lq?.training ?? false) || (ov?.training ?? false)
+}
+
+/** **状态词的进程事实**：有训练侧行就信它（`lq.training`）；行缺失才退 hub 的开课标记。
+ *  与 `rowTraining`（上屏 OR）刻意分开——上屏要「两边任一」，词要「一个答案」。 */
+export function rowProcessTraining(ov: CourseOverviewRow | null, lq: LoopQueueRow | null): boolean {
+  return lq ? lq.training : (ov?.training ?? false)
 }
 
 /** 行级包装：面板按它筛「哪些行上屏」（课程区只列在训课程）。
@@ -124,16 +136,18 @@ export function isTrainingRow(r: CourseMatrixRow): boolean {
 }
 
 /**
- * 一行 → 状态。优先级即「哪条信息最该先说」，与合并前两张表各自的顺序保持一致
- * （唯一的**新增**是第 4 档：hub 已注册但没进程——从前它落在「停」里，看不出区别）。
+ * 一行 → 状态。**判据不再在这里拼**（P1-10）：交给唯一派生 `courseStatus`（`course-status.ts`），
+ * 本函数只把它说的语义**说成矩阵的词**（pill 说成自己的细词）——两边同源，不可能互相矛盾。
  *
+ * 矩阵词的顺序即「哪条信息最该先说」：
  * 1. 在训但 hub 没注册（warn）——算力在烧，job 永远不派发。
- * 2. hub 标了离线（info）——**这不是故障**，是 hub 的一种合法模式（只收回传），故不高亮成黄/红。
- * 3. 在训（ok）。
- * 4. hub 在线且注册了它，却没有进程（warn）——job 会堆起来。
- * 5. 其余：未在训（off）。
+ * 2. 确定性状态（暂停/收官/中止）——此前矩阵看不见它们，与 pill 矛盾（R4-a）。
+ * 3. hub 标了离线（info）——**这不是故障**，是 hub 的一种合法模式（只收回传）。
+ * 4. 在训（ok）。
+ * 5. hub 在线且注册了它，却没有进程（warn）——job 会堆起来。
+ * 6. 其余：未在训（off）。
  *
- * ⚠ 第 1、4 档**必须**以 `hubOnline` 为前提：hub 无应答时 `hubSeen` 恒为 false（队列整个读不到），
+ * ⚠ 第 1、5 档**必须**以 `hubOnline` 为前提：hub 无应答时 `hubSeen` 恒为 false（队列整个读不到），
  * 拿它当「hub 不认这门课」是**假诊断**——面板表头明明写着「hub 无应答」，行里却叫人去用
  * `--course` 重启 hub。合并前的总览卡就犯了这个错。
  */
@@ -143,13 +157,34 @@ export function matrixStatus(
   /** hub 此刻在不在应答——**每行事实之外的机群级事实**，故由调用方显式给：
    *  `hubSeen === false` 只有在 hub 在线时才读作「hub 不认这门课」，否则是「不知道」。 */
   hubOnline: boolean,
+  /** ★P1-11：读面新鲜度标注（读失败保旧值时不改词）；缺省 = 本拍读成功。 */
+  opts?: {
+    overviewStale?: ReadStaleView | null
+    queueStale?: ReadStaleView | null
+    modeIntents?: Record<string, 'online' | 'offline'> | null
+    registeredWorkers?: string[] | null
+  },
 ): MatrixStatus {
-  // 「在训」的判据两侧同源（都出自调度器存活 ∧ 该课未收官），任一侧给了就用——不存在两说。
-  const training = rowTraining(ov, lq)
-  const hubKnown = ov !== null && hubOnline
-  const hubSeen = hubKnown && ov.hubSeen
+  const st = courseStatus({
+    course: '',
+    lq,
+    ov,
+    hubOnline,
+    // 有队列行就信它自己的进程事实（`lq.training` = 调度器存活 ∧ 未收官）；
+    // 没有行时退 hub 的粗档（见 `rowProcessTraining`）。
+    trainerRunning: rowProcessTraining(ov, lq),
+    modeIntents: opts?.modeIntents,
+    registeredWorkers: opts?.registeredWorkers,
+    overviewStale: opts?.overviewStale ?? null,
+    queueStale: opts?.queueStale ?? null,
+  })
+  return matrixWord(st)
+}
 
-  if (training && hubKnown && !ov.hubSeen) {
+/** 语义（`courseStatus` 的输出）→ 矩阵词表（渲染器只决定词怎么说）。 */
+function matrixWord(st: CourseStatus): MatrixStatus {
+  // ① hub 冲突档前置：算力在烧而 job 永不派发 / job 没人消费——矩阵独有的升级信号。
+  if (st.conflict === 'hub-unregistered') {
     return {
       text: '在训 · hub 未注册',
       tone: 'warn',
@@ -158,50 +193,53 @@ export function matrixStatus(
         '以 `--course <课>` 重启 hub，或把 hub 的课程表补上这门课',
     }
   }
-  if (ov?.offline) {
-    return {
-      text: '离线（只收回传）',
-      tone: 'info',
-      title: 'hub 把这门课标为离线：不实时派发 PPO，只接收 it 权重/指标回传（本机训练与账本不动）',
-    }
+  // ② 确定性状态：与 pill 同词（同屏两侧不得互相矛盾，R4-a）。
+  if (st.kind === 'paused') return { text: '已暂停', tone: 'info', title: st.title }
+  if (st.kind === 'done') return { text: '已收官', tone: 'off', title: st.title }
+  if (st.kind === 'aborted') return { text: '已中止', tone: 'err', title: st.title }
+  // ★ 2026-10-05（plan/course-startup-recover §3.3）：配置不可开课 ⇒ 红（与 pill 同词）。
+  if (st.kind === 'blocked') return { text: '起不来', tone: 'err', title: st.title }
+  // ③ hub 离线（只收回传）：合法模式，不涂黄/红。
+  if (st.kind === 'offline-running' || st.kind === 'offline-waiting') {
+    return { text: '离线（只收回传）', tone: 'info', title: st.title }
   }
-  if (training) {
-    return {
-      text: '在训',
-      tone: 'ok',
-      title:
-        '共享 trainer 在跑，且这门课未收官（进程存活 = registry，还算不算活 = python 队列状态）',
-    }
-  }
-  if (hubSeen && !ov!.offline) {
+  if (st.kind === 'offline-wait') return { text: '离线（云机接手）', tone: 'info', title: st.title }
+  // ④ hub 注册了它却没进程：job 会堆起来（warn）。
+  if (st.conflict === 'hub-no-process' || st.kind === 'hub-no-process') {
     return {
       text: 'hub 已注册 · 无进程',
       tone: 'warn',
-      title:
-        'hub 的课程表里有这门课且在线，但没有任何训练进程推进它——派给它的 job 没有人消费，' +
-        '会一直堆在队列里（这份信号在分开的两张表上各自都是「正常」的）',
+      title: st.title,
     }
+  }
+  // ⑤ 在训：pill 的细词（采集中/等回传/卡住/…）在矩阵合并成粗词，但**语义同源**。
+  if (st.kind !== 'not-training' && st.kind !== 'waiting-process' && st.kind !== 'unknown') {
+    return { text: '在训', tone: 'ok', title: st.title }
   }
   return {
     text: '未在训',
     tone: 'off',
-    title: lq
-      ? STOPPED_TITLE
-      : '没有存活的共享 trainer 进程，且训练侧只读视图不可用——这一行只有 hub 侧事实',
+    title: st.kind === 'waiting-process' || st.kind === 'not-training' ? st.title : STOPPED_TITLE,
   }
 }
 
-/** 冲突归类（供筛选/计数用；文案已在状态列里）。 */
+/** 冲突归类（供筛选/计数用；文案已在状态列里）。
+ *
+ *  ★P1-10：与状态列**同一个出处**（`courseStatus` 的 `conflict` 档）——从前这里是
+ *  `matrixStatus` 旁边的一份平行实现，两个判据只要漂开就会「状态列说已注册无进程、
+ *  冲突列说 hub 未注册」这种同屏自相矛盾。 */
 export function matrixConflict(
   ov: CourseOverviewRow | null,
   lq: LoopQueueRow | null,
   hubOnline: boolean,
 ): MatrixConflict {
-  const training = rowTraining(ov, lq)
-  const hubKnown = ov !== null && hubOnline
-  if (training && hubKnown && !ov.hubSeen) return 'hub-unregistered'
-  if (!training && hubKnown && ov.hubSeen && !ov.offline) return 'hub-no-process'
-  return null
+  return courseStatus({
+    course: '',
+    lq,
+    ov,
+    hubOnline,
+    trainerRunning: rowProcessTraining(ov, lq),
+  }).conflict
 }
 
 // ────────────────────────── 单元格 ──────────────────────────
@@ -330,6 +368,77 @@ export interface CourseMatrixRow {
   segment: MatrixCell | null
   /** 这一点位是否有 BC/RL 种类徽标（BC 行形状与 RL 不同，不标会被读错）。 */
   kind: 'rl' | 'bc'
+  /** **权威徽标**（P1-6）：固定在线 / 固定离线 / 自动（hub 每课行的 `authority`）。
+   *  `null` = 旧 hub 没上报 / hub 不可达——「未知」不画徽标（不猜）。 */
+  pinBadge: MatrixBadge | null
+  /** **离线租约徽标**（P1-6）：`stale`（静默超阈、新盘可直接接管）/ `revoked`（已撤租墓碑）。
+   *  `null` = 没有租约 / 旧 hub。 */
+  leaseBadge: MatrixBadge | null
+}
+
+/** 行级徽标（词 + 语义档 + 悬停全因）。 */
+export interface MatrixBadge {
+  text: string
+  tone: NonNullable<RowBadge['tone']>
+  title: string
+}
+
+/** 权威三态 → 徽标（P1-6）。`auto` 也上屏（三态之一）：它是「离线盘可自取」的诚实标签
+ * ——不画它，操作员分不清「没人管（自动池）」与「旧 hub 没上报」。 */
+export function pinBadgeOf(ov: CourseOverviewRow | null): MatrixBadge | null {
+  const auth = ov?.authority ?? null
+  switch (auth) {
+    case 'pinned_online':
+      return {
+        text: '固定在线',
+        tone: 'a',
+        title:
+          '人固定在线（pin）：离线盘不可 claim / seize / 翻模式（plan §3.1 的 pinned_online）。' +
+          '唯一解锁 = 「交还自动」（unset）——在那之前它不会被自动交接抢走',
+      }
+    case 'pinned_offline':
+      return {
+        text: '固定离线',
+        tone: 'a',
+        title:
+          '人固定离线（pin）：该课交给云机，只收回传；离线盘可领（有包），但不会自动翻它的模式',
+      }
+    case 'auto':
+      return {
+        text: '自动',
+        tone: 'gray',
+        title: '自动池：没被人固定——离线盘一上线就能 claim 接管（开课未选模式 = 这一档）',
+      }
+    default:
+      // stopped / not_offline 是两个正交维（停课 / 冷课带在线记录）：状态列与队列格已说清，
+      // 不另外造徽标（三态徽标只覆盖三态）。
+      return null
+  }
+}
+
+/** 离线租约 → 徽标（P1-6）：只给两个需要处置的档（stale/revoked）；新鲜租约不画（队列格已说）。 */
+export function leaseBadgeOf(ov: CourseOverviewRow | null): MatrixBadge | null {
+  const lease = ov?.lease ?? null
+  if (!lease) return null
+  if (lease.revoked) {
+    return {
+      text: '已撤租',
+      tone: 'y',
+      title:
+        `租约已立墓碑（切在线 / 交还自动的吊销）：旧 worker「${lease.workerId || '?'}」` +
+        '下次心跳会收 409 revoked、新 claim 可直接覆盖它；本条目保留只为排障',
+    }
+  }
+  if (lease.stale) {
+    return {
+      text: '可接管',
+      tone: 'y',
+      title:
+        `持有人「${lease.workerId || '?'}」已连续静默 ${Math.round(lease.silentSec)}s（超阈值）` +
+        '——新盘**不必等 TTL**可直接 claim 接管（自动回收，不是故障）',
+    }
+  }
+  return null
 }
 
 export interface CourseMatrixInput {
@@ -426,6 +535,8 @@ export function mergeCourseRows(input: CourseMatrixInput): CourseMatrixRow[] {
       canToggleMode: hubOnline && (ov?.hubSeen ?? false),
       modeDrift: modeDriftOf(course, ov, hubOnline, input.modeIntents, input.courseRolloutSrc),
       bundleOps: (ov?.offline ?? false) || input.modeIntents?.[course] === 'offline',
+      pinBadge: pinBadgeOf(ov),
+      leaseBadge: leaseBadgeOf(ov),
       queue: queueCell(ov, hubOnline),
       waiting: ov?.offline ? offlineWaitCell(ov) : waitingCell(lq),
       segment: segmentCell(ov, input.nowSec),
@@ -453,7 +564,12 @@ export function matrixMeta(input: {
   if (!ov) {
     out.push({ text: 'hub 视图未读', title: HUB_DOWN_TITLE, tone: 'warn' })
   } else if (!ov.hubOnline) {
-    out.push({ text: 'hub 无应答', title: HUB_DOWN_TITLE, tone: 'warn' })
+    out.push({
+      text: 'hub 无应答',
+      // 读面在这里**没有旧值可显示**（url=null）——但如果是连续失败超窗，把原因带上。
+      title: ov.stale ? `${HUB_DOWN_TITLE}。最近一次失败：${ov.stale.reason}` : HUB_DOWN_TITLE,
+      tone: 'warn',
+    })
   } else {
     out.push({
       text: `hub ${ov.hubUrl ? shortHost(ov.hubUrl) : ''}`.trim(),
@@ -504,7 +620,28 @@ export function matrixMeta(input: {
         text: pools.map((n) => `${n} ${lq.pools[n]!.held}/${lq.pools[n]!.capacity}`).join(' · '),
         title: '本机重资源池占用/容量（任一时刻可持有票数）',
       })
-    if (lq.error) out.push({ text: '上一拍读失败（显示缓存）', title: lq.error, tone: 'warn' })
+    // ★P1-11（R4-e）：读失败**不再清空旧行**（last-known-good）——所以「显示缓存」现在是真的；
+    //   无旧值可保（冷启动失败 / 超窗）时改说「未知」，不拿一个空表冒充缓存。
+    if (lq.error) {
+      out.push(
+        lq.stale
+          ? {
+              text: '上一拍读失败（显示缓存）',
+              title: `${lq.error}（连续失败自 ${new Date(lq.stale.since).toLocaleTimeString()} 起）`,
+              tone: 'warn',
+            }
+          : { text: '调度器视图未知（读面失败）', title: lq.error, tone: 'warn' },
+      )
+    }
+  }
+  // hub 读面新鲜度（P1-11）：探针失败但**还在显示旧值**时点名——不要把它当成「hub 不在应答」
+  // （那是维护旧值的同一条事实，只是旧了一拍）；`hubOnline=false` 时上面那句已说清。
+  if (ov?.stale && ov.hubOnline) {
+    out.push({
+      text: 'hub 上一拍读失败（显示缓存）',
+      title: `${ov.stale.reason}（连续失败自 ${new Date(ov.stale.since).toLocaleTimeString()} 起）`,
+      tone: 'warn',
+    })
   }
   return out
 }

@@ -6,6 +6,7 @@
 > P4 的误判与撤回见 §9.0。
 > **背景**：`reports/online-offline-hot-switch-audit-2026-09-25.md`（六条不足 L1–L6 / 六条不变式 I1–I6）。
 > **姊妹 plan**：`plan/switch-mode-drops-jobs.plan.md`（管"切换即撤单"）。本 plan 管"归属"。
+> **后续 plan**：`plan/offline-online-status-switch.plan.md`（管 pin 回摆 +「离线=等待」；吸收 `plan/off.review-bf.md` 六轮评审）。
 > **两者关系**：必须同批或紧接落地 —— 只做归属会出现"旧 job 一直不可领"，只做撤单会出现"撤了单但仍派给错盘"。
 > **阅读顺序**：§1 事实链 → §2 设计 → §3 分阶段 → §4 e2e → §5 DoD → §6 边界 → §7 裁决（`kind=run` 归谁）→ §8 实施修订 → §9 P4 重裁（两块盘都留、只去 bun 依赖；含误判留档）。
 > **行号只作定位加速，判据看函数名。**

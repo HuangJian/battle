@@ -36,6 +36,7 @@ from common.protocol import (
     AUTH_HEADER,
     COURSE_ENABLE_MARKER,
     OFFLINE_CLAIM_PATH,
+    OFFLINE_HEARTBEAT_PATH,
     OFFLINE_RELEASE_PATH,
     OFFLINE_RESULT_PATH,
     OFFLINE_TASKS_PATH,
@@ -49,6 +50,14 @@ from hub.queue_offline import (
     stall_verdict,
 )
 from hub.server import _HubQueue, make_server
+from hub.task_pack import (
+    AUTHORITY_AUTO,
+    AUTHORITY_NOT_OFFLINE,
+    AUTHORITY_PINNED_OFFLINE,
+    AUTHORITY_PINNED_ONLINE,
+    AUTHORITY_STOPPED,
+    lease_verdict,
+)
 
 TOKEN = "sekret"
 
@@ -171,10 +180,11 @@ def test_stall_verdict_covers_both_legs() -> None:
         now: float,
         last_progress: float = 0.0,
         treat_offline: bool = True,
+        authority: str = AUTHORITY_AUTO,
     ) -> str:
         return stall_verdict(
             treat_offline=treat_offline,
-            pinned=False,
+            authority=authority,
             completed=False,
             holder_present=holder,
             last_progress_mtime=last_progress,
@@ -190,6 +200,17 @@ def test_stall_verdict_covers_both_legs() -> None:
     # 从未交接过的课（没有 flip 锚点、也没有进度）不算停滞：不能平白报警
     assert verdict(holder=False, flipped_at=0.0, now=1e9) == ""
     assert verdict(holder=True, flipped_at=0.0, now=1000.0, treat_offline=False) == ""
+    # ★六轮 P0-10（R3-e）：静音只给 pinned_online（人固定在线，不是离线候选）；
+    # pinned_offline 的云机停机照常告警（报障二里最该响的那一声）。
+    assert verdict(
+        holder=True, flipped_at=0.0, now=1000.0, authority=AUTHORITY_PINNED_ONLINE
+    ) == ""
+    assert verdict(
+        holder=True, flipped_at=0.0, now=1000.0, authority=AUTHORITY_PINNED_OFFLINE
+    ) == "running-stale"
+    assert verdict(
+        holder=False, flipped_at=500.0, now=1000.0, authority=AUTHORITY_PINNED_OFFLINE
+    ) == "pending-export"
 
 
 # ------------------------------------------------------------------ 清单面
@@ -208,19 +229,32 @@ def test_unpinned_online_course_without_pack_is_claimable(tmp_path: Path) -> Non
     assert row["pack"] is None
 
 
-def test_pin_online_course_is_seizable_not_hidden(tmp_path: Path) -> None:
-    """★ 2026-10-03 用户裁决：pin online 不再把课藏起来 —— 在训课照样出现在云机清单里，
-    带 `seize=True`（在线在训、可被抢）与 `open_time`（抢的顺序键）。"""
-    hub = _HubQueue({}, discover_root=tmp_path)
+def test_pin_online_course_is_listed_but_locked(tmp_path: Path) -> None:
+    """★ 2026-10-05（六轮 F6 / §4.2 半回摆）：pin online 的课**行照发**（云机空队列自解释），
+    但 `seize=false ∧ claimable=false ∧ auto_handoff=false`；claim 走 409 `pinned_online`。
+    交还自动（pin=0）后同一门课回到 auto 池（seize 恢复）。"""
+    base, hub, _srv = _boot(tmp_path)
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
     assert hub.set_mode_pinned("c5-gae", "online", True)[0] is True
     assert hub.pinned_of("c5-gae") is True
     row = next(r for r in hub.offline_tasks() if r["course"] == "c5-gae")
-    assert row["seize"] is True
-    assert row["claimable"] is True and row["auto_handoff"] is True
+    assert row["authority"] == AUTHORITY_PINNED_ONLINE
+    assert row["seize"] is False
+    assert row["claimable"] is False and row["auto_handoff"] is False
+    assert str(row["reason"]).startswith("pinned:")
     assert row["open_time"] == hub.open_time_of("c5-gae")
     assert row["open_time"] < 1e18  # 开课标记在 ⇒ 真实 mtime（不是 +inf 哨兵）
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    body = _json(raw)
+    assert st == 409 and body["pinned_online"] is True, body
+    assert hub.mode_of("c5-gae") == "online"
+    # 交还自动（pin=0）⇒ 回 auto 池
+    assert hub.set_mode_pinned("c5-gae", "online", False)[0] is True
+    assert hub.pinned_of("c5-gae") is False
+    row2 = next(r for r in hub.offline_tasks() if r["course"] == "c5-gae")
+    assert row2["authority"] == AUTHORITY_AUTO
+    assert row2["seize"] is True and row2["claimable"] is True and row2["auto_handoff"] is True
 
 
 def test_stopped_online_course_is_hidden_from_the_offline_disk(tmp_path: Path) -> None:
@@ -267,8 +301,9 @@ def test_sort_key_is_open_time_not_pack_mtime(tmp_path: Path) -> None:
     assert rows == ["old-course", "new-course"]
 
 
-def test_missing_open_marker_sorts_with_infinity(tmp_path: Path) -> None:
-    """停课残留（offline 模式、标记已删）不该顶掉有开课时间的课。"""
+def test_stopped_residue_is_excluded_from_default_list(tmp_path: Path) -> None:
+    """★六轮 F3（行为变更）：停课残留（盘上还有 `mode=offline` 记录、标记已删）默认清单
+    **不列**——「唯一 opt-out = 停课」不再被 `mode=offline` 记录绕过；`?include=all` 里可见。"""
     hub = _HubQueue({}, discover_root=tmp_path)
     _course(tmp_path, hub, "residue")
     _course(tmp_path, hub, "live")
@@ -279,8 +314,12 @@ def test_missing_open_marker_sorts_with_infinity(tmp_path: Path) -> None:
     os.remove(tmp_path / "residue" / COURSE_ENABLE_MARKER)
     os.utime(tmp_path / "live" / COURSE_ENABLE_MARKER, (100.0, 100.0))
     rows = [r["course"] for r in hub.offline_tasks()]
-    assert rows == ["live", "residue"]
+    assert rows == ["live"]
     assert hub.open_time_of("residue") > 1e18
+    all_rows = {r["course"]: r for r in hub.offline_tasks(include_all=True)}
+    assert all_rows["residue"]["state"] == "not_offline"
+    assert all_rows["residue"]["claimable"] is False
+    assert all_rows["residue"]["authority"] == AUTHORITY_STOPPED
 
 
 def test_seize_flag_matrix(tmp_path: Path) -> None:
@@ -340,30 +379,42 @@ def test_claim_without_pack_degrades_when_console_unreachable(
     # 半状态可见：已翻 offline（本机停采）但没人跑 ⇒ 由 stalled 告警兜（另一条用例）
 
 
-def test_claim_missing_pack_for_stopped_course_keeps_404(tmp_path: Path) -> None:
-    """停课（非自动候选）的课缺包仍是旧 404：不替人决定导包。
-
-    pin 曾是「非自动」的代表（人管课）；2026-10-03 用户裁决后 pin 不再拦，代表换成停课残留。
-    """
+def test_stopped_course_with_offline_record_and_pack_is_rejected(tmp_path: Path) -> None:
+    """★六轮 F3（行为变更，修洞）：停课后 `mode=offline`（生产 `stopCourse` 推的形状）
+    **有包**也不再可领——旧判据（`mode != offline` 才拒）对它无效，云机今天能领走并整段跑。
+    缺包同样是 409 `not_offline`（不是旧 404：停课不是「等人导包」）。"""
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
     hub.set_mode_pinned("c5-gae", "offline", True)
     os.remove(tmp_path / "c5-gae" / COURSE_ENABLE_MARKER)
+    assert [r["course"] for r in hub.offline_tasks()] == []
     st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
     body = _json(raw)
-    assert st == 404, body
-    assert body["known_courses"] == ["c5-gae"]
+    assert st == 409 and body["not_offline"] is True, body
+    # 缺包也走同一条 409：不替停掉的课触发导包
+    os.remove(tmp_path / "c5-gae" / "task-c5-gae.zip")
+    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    body2 = _json(raw2)
+    assert st2 == 409 and body2["not_offline"] is True, body2
 
 
-def test_pin_online_course_is_seized_by_claim_and_flipped(tmp_path: Path) -> None:
-    """★ 用户裁决的题眼：pin online 的在训课 + 有包 ⇒ claim **200**，hub 当场把它翻成 offline。"""
+def test_pin_online_course_claim_is_rejected_then_unset_reopens(tmp_path: Path) -> None:
+    """★ 2026-10-05（六轮 F6 / §4.2 半回摆）：pin online 的课 claim 一律 409 `pinned_online`
+    （旧题眼是「照样被抢并翻 offline」——本条推翻它）；点「交还自动」后同一张包立刻可领。"""
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
     hub.set_mode_pinned("c5-gae", "online", True)
     st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
     body = _json(raw)
-    assert st == 200 and body.get("lease"), body
+    assert st == 409 and body["pinned_online"] is True, body
+    assert hub.mode_of("c5-gae") == "online"
+    assert hub.dispatch_record("c5-gae")["claimed_offline"] is False
+    # 交还自动（pin=0）⇒ 同一份包可领，且 hub 当场翻 offline（T2 的正例）
+    assert hub.set_mode_pinned("c5-gae", "online", False)[0] is True
+    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    assert st2 == 200 and _json(raw2).get("lease"), raw2[:200]
     assert hub.mode_of("c5-gae") == "offline"
     assert hub.dispatch_record("c5-gae")["claimed_offline"] is True
 
@@ -400,12 +451,16 @@ def test_claim_with_pack_asks_console_for_freshness(tmp_path: Path, monkeypatch)
     body = _json(raw)
     assert calls == ["c5-gae"], "有包的抢占也要问一次控制台（不然旧包直接开跑）"
     assert "新鲜度" in body.get("handoff", ""), body
-    # 非自动课（停课）：不替人决定，不问控制台
+    # 非自动课（pinned_offline）：不替人决定，不问控制台
     calls.clear()
-    _course(tmp_path, hub, "c-stopped", marker=False)
-    _pack(tmp_path, "c-stopped")
-    hub.set_mode_pinned("c-stopped", "offline", True)
-    st2, _raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-stopped&worker=w1", method="POST")
+    # 先交还 c5-gae（一拖一：全局至多一门在跑，busy 闸对 pinned_offline 同样生效）
+    token = body["lease"]["token"]
+    rel = _req(base, f"{OFFLINE_RELEASE_PATH}?course=c5-gae&lease={token}", method="POST")
+    assert rel[0] == 200, rel[1][:200]
+    _course(tmp_path, hub, "c-pinned")
+    _pack(tmp_path, "c-pinned")
+    hub.set_mode_pinned("c-pinned", "offline", True)
+    st2, _raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-pinned&worker=w1", method="POST")
     assert st2 == 200, "pinned 离线课有包可领"
     assert calls == [], "非自动课不问控制台新鲜度"
 
@@ -711,21 +766,28 @@ def test_auto_claim_offline_drops_unclaimed_jobs(tmp_path: Path) -> None:
         srv.shutdown()
 
 
-def test_seize_claim_flips_pinned_online_and_drops_unclaimed_jobs(tmp_path: Path) -> None:
-    """★ 抢占即接管（2026-10-03 用户裁决 + T0 同链）：pin online 的课被 claim 翻成 offline，
-    并撤掉它未认领的在线 job；`pinned` 记账不动（抢的是模式，不是人的决定）。"""
+def test_seize_claim_flips_auto_course_and_drops_unclaimed_jobs(tmp_path: Path) -> None:
+    """T0 同链：**auto**（pin=0）的在训在线课被 claim 翻成 offline，并撤掉未认领的在线 job；
+    ★六轮 §4.2 半回摆：pin online 的课不再走这条腿（claim 409 `pinned_online`，队列一字不动）。"""
     base, hub, srv = _boot(tmp_path)
     try:
         _course(tmp_path, hub, "c5-gae")
-        _publish_job(hub, "c5-gae", "stale-pinned")
+        _publish_job(hub, "c5-gae", "stale-auto")
         _pack(tmp_path, "c5-gae")
-        hub.set_mode_pinned("c5-gae", "online", True)
         st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=tpu-1", method="POST")
         assert st == 200, raw[:200]
         assert hub.mode_of("c5-gae") == "offline"
-        assert hub.pinned_of("c5-gae") is True
-        assert _cancelled_ids(hub, "c5-gae") == {"stale-pinned"}
+        assert _cancelled_ids(hub, "c5-gae") == {"stale-auto"}
         assert hub._stores["c5-gae"].claimable_job_ids() == []
+        # pin online 的另一门课：claim 被拒，**不撤单**
+        _course(tmp_path, hub, "c-hidden")
+        _publish_job(hub, "c-hidden", "still-here")
+        _pack(tmp_path, "c-hidden")
+        hub.set_mode_pinned("c-hidden", "online", True)
+        st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-hidden&worker=tpu-1", method="POST")
+        assert st2 == 409, raw2[:200]
+        assert _cancelled_ids(hub, "c-hidden") == set()
+        assert hub._stores["c-hidden"].claimable_job_ids() == ["still-here"]
     finally:
         srv.shutdown()
 
@@ -750,3 +812,366 @@ def test_cancelled_job_is_rejected_even_with_stale_peek(tmp_path: Path) -> None:
         assert "gone-1" not in st._leases, "被拒的认领不该留下租约"
     finally:
         srv.shutdown()
+
+
+# ------------------------------------------------------------------ 六轮评审（2026-10-05）
+
+
+def test_lease_verdict_six_states() -> None:
+    """P0-1 表驱动：expired→revoked→mine→stale→foreign（顺序即语义）。"""
+    now = 1000.0
+    live = {
+        "worker_id": "w1",
+        "at": now - 10.0,
+        "expires_at": now + 500.0,
+        "beat_at": now - 10.0,
+        "revoked": False,
+    }
+    assert lease_verdict(now, None, "w1") == "free"
+    assert lease_verdict(now, dict(live), "w1") == "mine"
+    assert lease_verdict(now, dict(live), "w2") == "foreign"
+    assert lease_verdict(now, {"worker_id": "w1", "expires_at": now - 1.0}, "w1") == "expired"
+    tomb = dict(live, revoked=True)
+    # 墓碑是全局否决、不看身份：老主与新主都判 revoked（且排在 mine 之前）
+    assert lease_verdict(now, tomb, "w1") == "revoked"
+    assert lease_verdict(now, dict(tomb), "w2") == "revoked"
+    silent = dict(live, worker_id="w1", at=now - 900.0, beat_at=now - 181.0)
+    assert lease_verdict(now, silent, "w2") == "stale"
+    # 自己静默后回来判 mine（不被自己 409）——顺序里 mine 在 stale 之前
+    assert lease_verdict(now, silent, "w1") == "mine"
+    # 旧记录无 beat_at ⇒ 用 at（语义不变）
+    old = {"worker_id": "w1", "at": now - 900.0, "expires_at": now + 500.0}
+    assert lease_verdict(now, old, "w2") == "stale"
+
+
+def test_auto_claimable_stale_and_revoked_are_claimable() -> None:
+    """P0-A：主失联（stale）或已成墓碑（revoked）⇒ 不算挡领；旧调用（不带新形参）逐字不变。"""
+    base = {"auto": True, "offline": False, "pack_exists": True, "holder_present": True}
+    assert auto_claimable(**base, completed=False, busy=False) is False
+    assert auto_claimable(**base, completed=False, busy=False, holder_stale=True) is True
+    assert auto_claimable(**base, completed=False, busy=False, holder_revoked=True) is True
+    assert (
+        auto_claimable(
+            auto=True, offline=False, pack_exists=False, holder_present=False,
+            completed=False, busy=False,
+        )
+        is True
+    )
+
+
+def test_queue_state_and_admin_offline_expose_authority(tmp_path: Path) -> None:
+    """P0-11：`/admin/queue` 每课行带 authority+pinned；`/admin/offline` 租约带
+    stale/revoked；墓碑保留在 holders（F5）且交还自动后清单行可渲染 held-revoked。"""
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")[0] == 200
+    q = _json(_req(base, "/admin/queue")[1])
+    row = q["courses"]["c5-gae"]
+    assert row["authority"] == AUTHORITY_AUTO and row["pinned"] is False
+    leases = _json(_req(base, "/admin/offline")[1])["leases"]
+    assert leases["c5-gae"]["worker_id"] == "w1"
+    assert leases["c5-gae"]["revoked"] is False and leases["c5-gae"]["silent_sec"] == 0.0
+    # 人切固定在线：authority 立刻变；清单行 pinned 且不可领
+    assert hub.set_mode_pinned("c5-gae", "online", True)[0] is True
+    q2 = _json(_req(base, "/admin/queue")[1])
+    assert q2["courses"]["c5-gae"]["authority"] == AUTHORITY_PINNED_ONLINE
+    assert q2["courses"]["c5-gae"]["pinned"] is True
+    row_pin = next(r for r in hub.offline_tasks() if r["course"] == "c5-gae")
+    assert row_pin["claimable"] is False and str(row_pin["reason"]).startswith("pinned:")
+    # 墓碑保留在 /admin/offline（不静默删）——带 revoked=true 与字段
+    leases2 = _json(_req(base, "/admin/offline")[1])["leases"]
+    assert leases2["c5-gae"]["revoked"] is True
+    # 交还自动（pin=0）：authority 回 auto；清单行可渲染 held-revoked ∧ 新主可直接接管
+    assert hub.set_mode_pinned("c5-gae", "online", False)[0] is True
+    row2 = next(r for r in hub.offline_tasks() if r["course"] == "c5-gae")
+    assert row2["holder"] is not None and row2["holder"]["revoked"] is True
+    assert str(row2["reason"]).startswith("held-revoked")
+    assert row2["claimable"] is True
+
+
+def test_switching_online_clears_all_four_handoff_fields(tmp_path: Path) -> None:
+    """P1-F：切在线/交还自动后 `claimed_offline/by/at/flipped_at` 全归零，租约成墓碑；
+    不再产生 `pending-export` 假停滞。"""
+    clock = [1000.0]
+    base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")[0] == 200
+    rec = hub.dispatch_record("c5-gae")
+    assert rec["claimed_offline"] is True and rec["claimed_by"] == "w1"
+    assert rec["claimed_at"] > 0 and rec["flipped_at"] > 0
+    assert hub.set_mode_pinned("c5-gae", "online", True)[0] is True
+    rec2 = hub.dispatch_record("c5-gae")
+    assert rec2["claimed_offline"] is False
+    assert rec2["claimed_by"] == "" and rec2["claimed_at"] == 0.0 and rec2["flipped_at"] == 0.0
+    lease = hub.offline_lease("c5-gae")
+    assert lease is not None and lease["revoked"] is True
+    clock[0] += 10_000.0  # 旧 flipped_at 若还在，这里会假报 pending-export
+    assert hub.offline_stalled() == []
+
+
+def test_stale_lease_is_reclaimed_by_new_worker(tmp_path: Path) -> None:
+    """T3（hub 侧）：静默超阈 ⇒ 清单 stale+claimable、新主 claim 200（带 reclaimed）、
+    旧主心跳 409 `taken`；同一 worker 回来仍判 mine。"""
+    clock = [1000.0]
+    base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    assert st == 200, raw[:200]
+    tok1 = _json(raw)["lease"]["token"]
+    clock[0] += 200.0  # 静默超阈（180s）但未过 TTL
+    row = next(r for r in hub.offline_tasks() if r["course"] == "c5-gae")
+    assert row["claimable"] is True and row["holder"]["stale"] is True
+    assert str(row["reason"]).startswith("held-stale")
+    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w2", method="POST")
+    body2 = _json(raw2)
+    assert st2 == 200 and body2["lease"].get("reclaimed") is True, body2
+    assert body2["lease"]["reclaimed_from"] == "w1"
+    assert body2["lease"]["worker_id"] == "w2"
+    # 旧主心跳：409 taken（token 不符）
+    st3, raw3 = _req(base, f"{OFFLINE_HEARTBEAT_PATH}?course=c5-gae&lease={tok1}", method="POST")
+    assert st3 == 409, raw3[:200]
+    # 新主自己再来（同 id）⇒ mine 续上，不被自己的静默 409（顺序：mine 在 stale 之前）
+    clock[0] += 200.0
+    st4, raw4 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w2", method="POST")
+    assert st4 == 200 and _json(raw4)["lease"].get("reclaimed") is not True, raw4[:200]
+
+
+def test_busy_gate_blocks_pinned_offline_claim(tmp_path: Path) -> None:
+    """★六轮 F2：A 在跑 X 时，B 领 **pinned_offline** 的 Y 也要吃 409 `busy`
+    （旧写法 `if auto:` 会对着 pin 离线课静默放行）。"""
+    base, hub, srv = _boot(tmp_path)
+    try:
+        for c in ("c-a", "c-y"):
+            _course(tmp_path, hub, c)
+            _pack(tmp_path, c)
+        hub.set_mode_pinned("c-y", "offline", True)
+        st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")
+        assert st == 200, raw[:200]
+        rows = {r["course"]: r for r in hub.offline_tasks()}
+        assert rows["c-y"]["claimable"] is False
+        assert str(rows["c-y"]["reason"]).startswith("busy:")
+        st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-y&worker=w2", method="POST")
+        assert st2 == 409 and _json(raw2)["busy"] is True, raw2[:300]
+        token = _json(raw)["lease"]["token"]
+        assert _req(base, f"{OFFLINE_RELEASE_PATH}?course=c-a&lease={token}", method="POST")[0] == 200
+        st3, raw3 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-y&worker=w2", method="POST")
+        assert st3 == 200, raw3[:200]
+    finally:
+        srv.shutdown()
+
+
+def test_busy_gate_ignores_stale_lease(tmp_path: Path) -> None:
+    """§3.4：死盘（静默超阈）不占「一拖一」闸——新盘能领别的课。"""
+    clock = [1000.0]
+    base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
+    for c in ("c-a", "c-b"):
+        _course(tmp_path, hub, c)
+        _pack(tmp_path, c)
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 200
+    clock[0] += 200.0  # c-a 静默超阈
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w2", method="POST")
+    assert st == 200, raw[:200]
+
+
+def test_handoff_trigger_budget_resets_on_new_round(tmp_path: Path, monkeypatch) -> None:
+    """P0-B + F4：导包触发账本烧满 3 次后——换主 ⇒ 重置；**同主重开会话（超窗）** 也重置
+    （`.worker-id` 持久，同机重开沿用同一 id，只判换主会漏这一档）。"""
+    from hub import task_pack as tp
+
+    _stub_auto_handoff(monkeypatch)
+    clock = [1000.0]
+    base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
+    _course(tmp_path, hub, "c5-gae")
+    hub.begin_auto_handoff("c5-gae", "w1")
+    for _ in range(3):
+        tp.note_auto_handoff_trigger("c5-gae", now=clock[0])
+        clock[0] += 700.0
+    assert tp.auto_handoff_decision("c5-gae", now=clock[0]) == "give_up"
+    hub.begin_auto_handoff("c5-gae", "w2")  # 换主 ⇒ 重置
+    assert tp.auto_handoff_decision("c5-gae", now=clock[0]) == "trigger"
+    for _ in range(3):
+        tp.note_auto_handoff_trigger("c5-gae", now=clock[0])
+        clock[0] += 700.0
+    assert tp.auto_handoff_decision("c5-gae", now=clock[0]) == "give_up"
+    clock[0] += 1000.0  # 距上次 claim 超 AUTO_HANDOFF_PENDING_SEC=900
+    hub.begin_auto_handoff("c5-gae", "w2")  # 同主、超窗 ⇒ 仍是「新一轮」
+    assert tp.auto_handoff_decision("c5-gae", now=clock[0]) == "trigger"
+
+
+def test_handoff_window_anchor_is_claimed_at(tmp_path: Path, monkeypatch) -> None:
+    """§3.4/§2.4 R2-d：busy 窗口锚 `claimed_at`（每次 pending_export claim 刷新）；
+    无人重试超窗后不再占闸（`flipped_at` 继续服务停滞告警——两个锚点分道）。"""
+    _stub_auto_handoff(monkeypatch)
+    clock = [1000.0]
+    base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
+    _course(tmp_path, hub, "c-a")
+    _course(tmp_path, hub, "c-b")
+    _pack(tmp_path, "c-b")
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 409
+    clock[0] += 2000.0  # 超过窗口（900s）；新主重试刷新窗口
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w2", method="POST")[0] == 409
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w2", method="POST")
+    assert st == 409 and _json(raw)["busy"] is True, raw[:300]
+    clock[0] += 1000.0  # 再超窗、无人重试 ⇒ 不占闸
+    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w2", method="POST")
+    assert st2 == 200, raw2[:200]
+
+
+def test_republish_after_cancel_revives_job(tmp_path: Path) -> None:
+    """六轮 F1：生产 republish = 磁盘 IPC 写一条**晚于** `job_cancelled` 的 `job_pending`
+    （`remote/hub_client.publish_job` 无条件追加，`hub_client.py:1058-1075`）。hub 的即时闸
+    （`_cancelled`）必须按账本净态对账放行——否则「peek 可见 ∧ claim 永远 cancelled」。"""
+    base, hub, srv = _boot(tmp_path)
+    try:
+        _course(tmp_path, hub, "c5-gae")
+        _publish_job(hub, "c5-gae", "rev-1")
+        st = hub._stores["c5-gae"]
+        assert st.cancel_unsettled_jobs(reason="test") == ["rev-1"]
+        assert st.claim("rev-1", worker_id="w1") is None  # 未复活：净态仍是撤单
+        # 逐字复刻生产写者的那一行（同一 jsonl、同一事件形状）
+        with open(st.jsonl_path, "a", encoding="utf-8") as f:
+            f.write(
+                json.dumps(
+                    {"event": "job_pending", "job_id": "rev-1", "runId": "r1", "it": 3, "ts": 1.0}
+                )
+                + "\n"
+            )
+        assert "rev-1" in st.claimable_job_ids()  # 池可见
+        token = st.claim("rev-1", worker_id="w1")  # 即时闸对账 ⇒ 放行
+        assert token is not None
+        assert "rev-1" not in st._cancelled
+    finally:
+        srv.shutdown()
+
+
+def test_switch_to_online_does_not_drop_unclaimed_jobs(tmp_path: Path) -> None:
+    """P0-6②：`drop_jobs` 仅 `m == offline` 生效——切回在线时撤单反成 bug
+    （停在队首的活正是回来要领的；§4.3 半球修正）。"""
+    base, hub, srv = _boot(tmp_path)
+    try:
+        _course(tmp_path, hub, "c5-gae")
+        _publish_job(hub, "c5-gae", "keep-1")
+        assert (
+            _req(base, "/admin/courses?course=c5-gae&mode=offline&pin=1&drop_jobs=1", method="POST")[0]
+            == 200
+        )
+        _publish_job(hub, "c5-gae", "keep-2")
+        assert (
+            _req(base, "/admin/courses?course=c5-gae&mode=online&pin=1&drop_jobs=1", method="POST")[0]
+            == 200
+        )
+        assert hub.mode_of("c5-gae") == "online"
+        assert _cancelled_ids(hub, "c5-gae") == {"keep-1"}  # keep-2 未被撤
+        assert hub._stores["c5-gae"].claimable_job_ids() == ["keep-2"]
+    finally:
+        srv.shutdown()
+
+
+def test_discovered_course_inherits_parked_from_dispatch_record(tmp_path: Path) -> None:
+    """P0-8（R3-a）：hub 以 discover 起、盘上已有 offline 记录 ⇒ `st.parked` 立刻为真
+    （否则离线课重启后被解封队列，在线盘能领走残留 job）。"""
+    d = tmp_path / "c5-gae"
+    (d / "remote-jobs").mkdir(parents=True)
+    (d / "training_log.jsonl").touch()
+    (d / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
+    rec = dispatch_record_default("online")
+    rec["mode"] = "offline"
+    (d / "offline-dispatch.json").write_text(json.dumps(rec), encoding="utf-8")
+    hub = _HubQueue({}, discover_root=tmp_path)
+    hub.discover(force=True)
+    assert "c5-gae" in hub.courses()
+    assert hub.mode_of("c5-gae") == "offline"
+    assert hub._stores["c5-gae"].parked is True
+
+
+def test_cold_course_authority_follows_dispatch_record(tmp_path: Path) -> None:
+    """R3-c/F6：不在表的冷课，authority 从盘上记录派生（无记录 ⇒ pinned_offline；
+    {online,!pin} ⇒ not_offline；{online,pin} ⇒ pinned_online；{offline} ⇒ pinned_offline）。"""
+    hub = _HubQueue({}, discover_root=tmp_path)
+    d = tmp_path / "cold"
+    (d / "remote-jobs").mkdir(parents=True)
+    (d / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
+    _pack(tmp_path, "cold")
+    assert hub.authority_of("cold") == AUTHORITY_PINNED_OFFLINE
+    assert hub.is_runnable_offline("cold") is True
+    row = next(r for r in hub.offline_tasks() if r["course"] == "cold")
+    assert row["claimable"] is True and row["auto_handoff"] is False
+    rec = dispatch_record_default("online")  # {online, pin:false}
+    (d / "offline-dispatch.json").write_text(json.dumps(rec), encoding="utf-8")
+    assert hub.authority_of("cold") == AUTHORITY_NOT_OFFLINE
+    row2 = next(r for r in hub.offline_tasks() if r["course"] == "cold")
+    assert row2["claimable"] is False and row2["reason"] == "not_offline"
+    rec["pinned"] = True
+    (d / "offline-dispatch.json").write_text(json.dumps(rec), encoding="utf-8")
+    assert hub.authority_of("cold") == AUTHORITY_PINNED_ONLINE
+    rec2 = dispatch_record_default("online")
+    rec2["mode"] = "offline"
+    (d / "offline-dispatch.json").write_text(json.dumps(rec2), encoding="utf-8")
+    assert hub.authority_of("cold") == AUTHORITY_PINNED_OFFLINE
+
+
+def test_authority_combination_matrix(tmp_path: Path) -> None:
+    """F6 全组合表（在表部分）：无记录 ⇒ auto；{online,pin} ⇒ pinned_online；
+    {offline,pin} ⇒ pinned_offline；{online,!pin}/{offline,!pin} ⇒ auto；标记删 ⇒ stopped。"""
+    hub = _HubQueue({}, discover_root=tmp_path)
+    _course(tmp_path, hub, "tbl")
+    _pack(tmp_path, "tbl")
+    assert hub.authority_of("tbl") == AUTHORITY_AUTO
+    assert hub.auto_handoff_allowed("tbl") is True
+    assert hub.set_mode_pinned("tbl", "online", True)[0] is True
+    assert hub.authority_of("tbl") == AUTHORITY_PINNED_ONLINE
+    assert hub.is_runnable_offline("tbl") is False
+    assert hub.set_mode_pinned("tbl", "offline", True)[0] is True
+    assert hub.authority_of("tbl") == AUTHORITY_PINNED_OFFLINE
+    assert hub.auto_handoff_allowed("tbl") is False
+    assert hub.set_mode_pinned("tbl", "online", False)[0] is True
+    assert hub.authority_of("tbl") == AUTHORITY_AUTO  # 交还自动
+    assert hub.set_mode_pinned("tbl", "offline", False)[0] is True
+    assert hub.authority_of("tbl") == AUTHORITY_AUTO  # claim 翻的 offline（未 pin）
+    assert hub.auto_handoff_allowed("tbl") is True
+    os.remove(tmp_path / "tbl" / COURSE_ENABLE_MARKER)
+    assert hub.authority_of("tbl") == AUTHORITY_STOPPED
+    assert hub.is_runnable_offline("tbl") is False
+    assert hub.auto_handoff_allowed("tbl") is False
+
+
+def test_busy_gate_ignores_revoked_lease(tmp_path: Path) -> None:
+    """§3.4/六轮：墓碑（revoked）不算「在跑」——「交还自动」留下的墓碑不该冻结全池。
+
+    对账：同形状但租约仍活（`test_busy_gate_blocks_second_auto_claim_and_releases`）⇒ 409。
+    """
+    base, hub, _srv = _boot(tmp_path)
+    for c in ("c-a", "c-b"):
+        _course(tmp_path, hub, c)
+        _pack(tmp_path, c)
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 200
+    # 交还自动（pin=0）⇒ 在线分支给租约立墓碑；authority 回 auto（不是 pinned_online，
+    # 所以本用例真的走的是「墓碑不算忙」那条腿，而不是「pin 在线不占闸」）。
+    assert hub.set_mode_pinned("c-a", "online", False)[0] is True
+    assert hub.authority_of("c-a") == AUTHORITY_AUTO
+    lease = hub.offline_lease("c-a")
+    assert lease is not None and lease["revoked"] is True
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w2", method="POST")
+    assert st == 200, raw[:200]
+
+
+def test_auto_eligible_alias_has_no_production_readers() -> None:
+    """★评审 P2-4（机械守卫）：`auto_eligible` 拆成 `auto_handoff_allowed` / `is_runnable_offline`
+    后，生产代码**不得**再直读这个糊在一起的名字（两个问题必须被显式选择）。
+
+    白名单 = 空（只剩 `queue_offline.py` 的定义本身）。新读者 ⇒ 本用例红。
+    """
+    from hub import queue_offline as qo_mod
+
+    hub_dir = Path(qo_mod.__file__).parent
+    offenders: list[str] = []
+    for py in sorted(hub_dir.glob("*.py")):
+        text = py.read_text(encoding="utf-8")
+        for ln in text.splitlines():
+            if "auto_eligible(" in ln and "def auto_eligible" not in ln:
+                offenders.append(f"{py.name}: {ln.strip()}")
+    assert offenders == [], offenders
+    assert "def auto_eligible(" in (hub_dir / "queue_offline.py").read_text(encoding="utf-8")

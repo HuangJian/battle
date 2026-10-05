@@ -22,7 +22,7 @@
 
 **`--json` 是控制台「调度器」卡片的契约面**（dashboard `server/api/loop-queue.ts` 消费，
 TTL 缓存）：改 `--json` 的字段名/语义 = 改控制台，两边必须在同一次改动里对齐（`waiting`
-那一列就是「每课在等什么」（取值域：inflight/collect/idle/ready/**blocked**），`openable`
+那一列就是「每课在等什么」（取值域：inflight/collect/idle/ready/**blocked**/**offline**），`openable`
 是「这门课能不能被打开」（2026-10-05 事故：整课被跳过却报 ready；
 `tests/trainer/test_loop_plan_waiting.py` 盯住两者）。
 """
@@ -33,6 +33,7 @@ import argparse
 import json
 import os
 import sys
+from types import SimpleNamespace
 
 # 2026-09-30（刀 7）：本入口从 nn-training/ 顶层搬进 trainer/ —— 脚本目录不再是
 # nn-training。脚本目录 trainer/ 会被自动插到 sys.path[0]，而它有自己的 queue.py，会遮蔽
@@ -46,6 +47,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 from trainer.loop_plan import (
+    course_is_offline,
     course_kind,
     course_openable,
     course_traj,
@@ -114,6 +116,12 @@ def build_rows(courses: list[str], traj_root: str, sup: Supervisor) -> list[dict
             it=it,
             iters=iters,
             blocked="" if ok else reason,
+            # ★P1-3：离线课在「等云机」，不是收官——判据 与训练侧同一处（`course_is_offline`）。
+            # 只读面没有 `args`，用合成三件（`rollout_src=""` ⇒ 走 rl-config 的
+            # `courses.<课>.rollout_src`；`course_path=<课>` ⇒ stem 就是课名）。
+            offline=course_is_offline(
+                SimpleNamespace(rollout_src="", run_iters=0, course_path=course)
+            ),
         )
         # 队列状态取自调度器本身（`add_course` 的 ready/done 判定），不在这里再写一遍
         # 「有任务 = ready」——两处各写一遍就是第一个分叉点。

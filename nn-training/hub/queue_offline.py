@@ -47,11 +47,17 @@ from common.protocol import (
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
 from hub.task_pack import (
+    AUTHORITY_AUTO,
+    AUTHORITY_NOT_OFFLINE,
+    AUTHORITY_PINNED_OFFLINE,
+    AUTHORITY_PINNED_ONLINE,
+    AUTHORITY_STOPPED,
     TASK_STATE_COMPLETED,
     TASK_STATE_NOT_OFFLINE,
     TASK_STATE_RANK,
     _file_sha256,
     lease_verdict,
+    offline_lease_stale_sec,
     pack_index_meta,
     pack_index_part_sha,
     reset_auto_handoff_triggers,
@@ -70,9 +76,10 @@ DISPATCH_NAME = "offline-dispatch.json"
 DISPATCH_VERSION = 1
 #: 默认停滞阈值（秒；压「已翻 offline、没人跑」的窗口，§3.9）。env 可覆盖（测试用）。
 OFFLINE_STALL_SEC = 1800.0
-#: 交接窗口（秒）：claim 已翻 offline、包还没出现 —— 这段时间内别的自动课也算「机器忙」
+#: 交接窗口（秒）：claim 已翻 offline、包还没出现 —— 这段时间内别的课也算「机器忙」
 #: （§3.3a 一拖一）。超窗 = 交接失败，交给 `offline_stalled` 告警，**不再占闸**
 #: （否则一次导出失败会把整条自动链冻死）。
+#: ★ 它同时是「新一轮交接」的判据之一（★六轮 F4：换主 ∨ 距上次 claim 超窗 ⇒ 重置触发账本）。
 AUTO_HANDOFF_PENDING_SEC = 900.0
 
 
@@ -132,14 +139,19 @@ def auto_claimable(
     holder_present: bool,
     completed: bool,
     busy: bool,
+    holder_stale: bool = False,
+    holder_revoked: bool = False,
 ) -> bool:
     """清单的 claimable 判据（**纯函数**；清单与 claim 面同源）。
 
     · auto 课允许**无包**（领它触发导包 —— P0-1 的唯一入口）；
-    · 非自动课（停课残留 / 不在课程表）仍是「有包才能领」；
-    · 完成态（当前包已跑满）不可再领（二轮 P1-1）；busy 闸对 auto 课生效（§3.3a）。
+    · 非自动课（pinned_offline / 冷课）仍是「有包才能领」；
+    · 完成态（当前包已跑满）不可再领（二轮 P1-1）；busy 闸对可领课生效（§3.3a；
+      ★六轮 F2：消费点 = `is_runnable_offline`，不是 `auto_handoff_allowed`）。
+    · ★五轮 P0-A：持有者**失联（stale）或已成墓碑（revoked）**时不算挡领——否则
+      「死盘可接管」在清单层就被 `holder_present` 掉死（新形参带默认值，旧调用不受影响）。
     """
-    if holder_present or completed or busy:
+    if (holder_present and not (holder_stale or holder_revoked)) or completed or busy:
         return False
     if pack_exists and (offline or auto):
         return True
@@ -149,7 +161,7 @@ def auto_claimable(
 def stall_verdict(
     *,
     treat_offline: bool,
-    pinned: bool,
+    authority: str,
     completed: bool,
     holder_present: bool,
     last_progress_mtime: float,
@@ -161,8 +173,12 @@ def stall_verdict(
 
     覆盖两段（二轮 P1-3）：① running（活租约）但进度超阈值；② 已翻 offline、无活租约、
     未完成（导包窗口 / 导出失败）且翻 mode 时刻超阈值。只用已有事实，不引入新状态。
+
+    ★六轮 P0-10（R3-e）：静音**只给 `pinned_online`**（人固定在在线，它不是离线候选）；
+    `pinned_offline` 与 auto 的离线课照常告警（报障二里最该响的那一声就是云机停机的
+    pinned_offline）。判据吃 `authority` 字符串，不再吃裸 `pinned` 布尔。
     """
-    if not treat_offline or pinned or completed:
+    if not treat_offline or authority == AUTHORITY_PINNED_ONLINE or completed:
         return ""
     progress_age = now - last_progress_mtime if last_progress_mtime > 0 else math.inf
     if holder_present:
@@ -194,17 +210,18 @@ class QueueOfflineMixin(QueuePeer):
 
 
     def offline_task_courses(self) -> list[str]:
-        """清单的**候选面**（评审 S-1）：课程表里 `mode=offline` 的 ∪ 盘上有开课标记的。
+        """清单的**候选面**（评审 S-1）：课程表里**开课标记在**的 ∪ 盘上有开课标记的冷课。
 
         为什么不只认课程表：课程表是「1 小时新鲜度扫描」的产物，而**离线课本机不训练**
         ⇒ 课冷掉 / hub 重启之后它从表里消失，而包还在盘上——只认表会让云机问清单时得到
         「没有任务」（明明有一份包在等它领）。判据与 404 自愈门同源（`_task_pack_miss_candidate`）。
+
+        ★六轮 F3（行为变更）：**停课（标记不在）不再列**——包括盘上还留着 `mode=offline`
+        记录的停课残留（此前 `mode_of==offline` 就会列，而生产 `stopCourse` 推的正是
+        `mode=offline` ⇒「唯一 opt-out = 停课」在最常见路径上破防）。`pinned_online` 行
+        **照发**（claimable=false / reason=pinned，云机「空队列自解释」不该少这一档）。
         """
-        out = [
-            c
-            for c in self._order
-            if self.mode_of(c) == COURSE_MODE_OFFLINE or self.auto_eligible(c)
-        ]
+        out = [c for c in self._order if self._marker_exists(c)]
         root = self._discover_root
         if root is None:
             return out
@@ -242,8 +259,16 @@ class QueueOfflineMixin(QueuePeer):
             except ProtocolError:
                 continue  # 目录名不合规（历史残留）⇒ 清单里跳过，不当 500 报
             real = course in self._stores
-            # 不在表里、只在盘上有开课标记 ⇒ 按离线意图算（评审 S-1）。
-            offline = self.mode_of(course) == COURSE_MODE_OFFLINE if real else True
+            authority = self.authority_of(course)
+            runnable = authority in (AUTHORITY_PINNED_OFFLINE, AUTHORITY_AUTO)
+            # 在表：`offline` = 当前 mode 是离线（U3 waiting / pinned_offline / claim 翻的）；
+            # 冷课（评审 S-1 + ★六轮 F6）：无记录 / pinned_offline ⇒ 按离线算；带 online
+            # 记录的 ⇒ 不可领（`not_offline`）。
+            offline = (
+                self.mode_of(course) == COURSE_MODE_OFFLINE
+                if real
+                else authority == AUTHORITY_PINNED_OFFLINE
+            )
             pack: dict | None = None
             meta = {"run_id": "", "it": 0, "end_it": 0, "commit": "", "created_at": 0.0}
             stale_reason = ""
@@ -267,17 +292,21 @@ class QueueOfflineMixin(QueuePeer):
                         ),
                     )
             holder = self.holder_info(course)
-            # 自动交接（T2）：在训（开课标记在）⇒ 可见且可领（允许无包）。
-            # ★ 2026-10-03 用户裁决：pin 不再拦（唯一 opt-out = 停课）；在线在训 ⇒ 可被抢占。
-            auto = self.auto_eligible(course)
+            # ★六轮 F2 映射表：清单 `auto_handoff` = 自动导包能力（= `auto_handoff_allowed`）；
+            # `busy`/`claimable`/`seize` 用「可领」闸（= `is_runnable_offline`）——pinned_offline
+            # 照样吃「一拖一」（只按 auto 门控会静默漏掉它）。★ 2026-10-03 用户裁决后 pin 在线
+            # 不再可被抢（§4.2 半回摆：pin online 重新获得阻止力）；在线在训的 auto 课仍可被抢占。
+            auto = authority == AUTHORITY_AUTO
             pack_sha = str((pack or {}).get("sha256") or "")
             completed = self.completion_blocked(course, pack_sha)
-            busy = self.busy_reason(course) if auto else ""
+            busy = self.busy_reason(course) if runnable else ""
+            holder_stale = bool(holder and holder.get("stale"))
+            holder_revoked = bool(holder and holder.get("revoked"))
             #: 可被**抢占**（用户 2026-10-03 裁决「没有离线课程就抢第一个在训在线课」）：
-            #: 表内在训 ∧ 现在还是在线 ∧ 未跑满（跑满的不能再抢——二轮 P1-1 的同一理由；
+            #: 表内在训的 auto 课 ∧ 现在还是在线 ∧ 未跑满（跑满的不能再抢——二轮 P1-1 的同一理由；
             #: busy/无主不在这里滤——云机抢到 busy 会走 409 `busy` 等下一拍，不吃 idle 预算）。
-            seize = real and not offline and auto and not completed
-            treat_offline = offline or auto
+            seize = real and runnable and not offline and auto and not completed
+            treat_offline = runnable
             if completed:
                 state = TASK_STATE_COMPLETED
             elif treat_offline:
@@ -287,12 +316,27 @@ class QueueOfflineMixin(QueuePeer):
             else:
                 state = TASK_STATE_NOT_OFFLINE
             reason = ""
-            if not treat_offline:
+            if authority == AUTHORITY_PINNED_ONLINE:
+                reason = "pinned: 人固定在在线（交还自动后可领）"
+            elif authority == AUTHORITY_STOPPED:
+                reason = "not_offline: 这门课不在训练中（开课标记已删）"
+            elif not runnable:
                 reason = "not_offline"
             elif completed:
                 reason = "completed: 本段已跑满（等人停课 / 重导包）"
+            elif holder_revoked:
+                reason = (
+                    f"held-revoked: {(holder or {}).get('worker_id') or '?'}"
+                    "（已被撤销，可直接接管）"
+                )
             elif holder is not None:
-                reason = f"held: {holder.get('worker_id') or '?'}"
+                if holder_stale:
+                    reason = (
+                        f"held-stale: {holder.get('worker_id') or '?'}"
+                        f"（静默 {float(holder.get('silent_sec') or 0.0):.0f}s，可直接接管）"
+                    )
+                else:
+                    reason = f"held: {holder.get('worker_id') or '?'}"
             elif busy:
                 reason = busy
             runs = progress.get(course) or {}
@@ -301,16 +345,23 @@ class QueueOfflineMixin(QueuePeer):
                 {
                     "course": course,
                     "state": state,
-                    # 可领（判据唯一实现 `auto_claimable`）：离线/自动 ∧ 无主 ∧ 未完成 ∧ 不忙；
-                    # **自动课允许无包**（领它触发导包 —— P0-1 的唯一入口）。过期包也可领：
-                    # 包旧只意味着起点旧，而「领不领」是云机的判断（它还要比 `served` 的 sha）。
-                    "claimable": auto_claimable(
+                    #: 权威三态（§3.1；控制台与云机都可据它排障）——`pinned_online` 行照样
+                    #: 列出，只是 claimable=false（★六轮小项 5）。
+                    "authority": authority,
+                    # 可领（判据唯一实现 `auto_claimable`）：可领闸 ∧ 无主（或主已失联/撤销）
+                    # ∧ 未完成 ∧ 不忙；**自动课允许无包**（领它触发导包 —— P0-1 的唯一入口）。
+                    # 过期包也可领：包旧只意味着起点旧，而「领不领」是云机的判断（它还要比
+                    # `served` 的 sha）。★六轮：停课 / pinned_online / 冷课 {online,!pin} 一律 false。
+                    "claimable": bool(runnable)
+                    and auto_claimable(
                         auto=auto,
                         offline=offline,
                         pack_exists=pack is not None,
                         holder_present=holder is not None,
                         completed=completed,
                         busy=bool(busy),
+                        holder_stale=holder_stale,
+                        holder_revoked=holder_revoked,
                     ),
                     "reason": reason,
                     #: 领它会触发「自动交接」（写 rl-config + 导包；不写意图、不 pin）
@@ -342,7 +393,10 @@ class QueueOfflineMixin(QueuePeer):
         return rows
 
     def _lease_rec(self, course: str) -> dict | None:
-        """有效租约（**惰性过期**：读时就地清掉 ⇒ 读面与领取面同一条判据）。"""
+        """有效租约（**惰性过期**：读时就地清掉 ⇒ 读面与领取面同一条判据）。
+
+        墓碑（`revoked=True`）**照返**（不是过期）：它的消费面见 `holder_info`（★六轮 F5）。
+        """
         now = float(self._now())
         with self._lease_lock:
             rec = self._leases.get(course)
@@ -356,46 +410,85 @@ class QueueOfflineMixin(QueuePeer):
         return self._lease_rec(course)
 
     def holder_info(self, course: str) -> dict | None:
-        """持有人那三行（`worker_id` / `age_sec` / `expires_in`）——清单与拒因共用一份。"""
+        """持有人信息（`worker_id` / 龄 / 到期 / 静默 / stale / revoked）——清单与拒因共用一份。
+
+        ★六轮 F5（墓碑 holder 形状定死）：**墓碑也返回**（`revoked=True` + 字段齐全）——
+        清单才能渲染 `held-revoked`、`auto_claimable` 的 `holder_revoked` 才是真消费；
+        `/admin/offline` 的 `offline_leases()` 同样保留 revoked 条目（不静默删，便于排障）。
+        """
         rec = self._lease_rec(course)
         if not rec:
             return None
         now = float(self._now())
+        beat = rec.get("beat_at")
+        try:
+            beat_at = float(beat) if beat is not None else float(rec.get("at") or 0.0)
+        except (TypeError, ValueError):
+            beat_at = 0.0
+        silent = max(0.0, now - beat_at) if beat_at > 0 else 0.0
         return {
             "worker_id": str(rec.get("worker_id") or ""),
             "age_sec": round(max(0.0, now - float(rec.get("at") or now)), 1),
             "expires_in": round(max(0.0, float(rec.get("expires_at") or now) - now), 1),
+            "beat_at": round(beat_at, 1),
+            "silent_sec": round(silent, 1),
+            "stale": bool(beat_at > 0 and silent > offline_lease_stale_sec()),
+            "revoked": bool(rec.get("revoked")),
         }
 
     def claim_offline(
         self, course: str, worker_id: str, *, takeover: bool = False
     ) -> tuple[dict, str]:
-        """领一门课的离线租约 → `(租约, "")`；领不到 → `({}, "foreign"|"bad")`。
+        """领一门课的离线租约 → `(租约, "")`；领不到 → `({}, 拒因)`。
 
-        `mine`（同一个 `worker_id` 回来）与 `expired` 直接续上：cell 中断后重跑不该被
-        **自己留下**的租约挡住（评审 G1）。`takeover=True` 是显式接管（控制台/人工搬机）。
+        拒因分流（HTTP 层映射成 409）：`pinned_online` / `not_offline`（停课、冷课 online 记录）/
+        `busy` / `foreign` / `bad`。
+
+        · `mine`（同一个 `worker_id` 回来）与 `expired` 直接续上：cell 中断后重跑不该被
+          **自己留下**的租约挡住（评审 G1）；`revoked`（墓碑）＝新主直接覆盖；
+        · `stale`（别人静默超阈）⇒ **自动接管**，不再需要 `takeover=1`（plan §3.3）；
+        · `takeover=True` 保留为人工兜底（控制台/搬机）。
         """
         wid = str(worker_id or "").strip()
         if not wid:
             return {}, "bad"
+        authority = self.authority_of(course)
+        if authority == AUTHORITY_PINNED_ONLINE:
+            return {}, AUTHORITY_PINNED_ONLINE
+        if authority in (AUTHORITY_STOPPED, AUTHORITY_NOT_OFFLINE):
+            return {}, AUTHORITY_NOT_OFFLINE
         now = float(self._now())
-        auto = self.auto_eligible(course)
+        reclaimed_from = ""
         with self._lease_lock:
             verdict = lease_verdict(now, self._leases.get(course), wid)
             if verdict == "foreign" and not takeover:
                 return {}, "foreign"
-            if auto:
-                busy = self._busy_locked(course)
-                if busy:
-                    return {}, "busy"
+            # ★六轮 F2：busy 门用「可领」覆盖面（到这里 authority 已是 pinned_offline 或
+            # auto）；旧写法 `if auto:` 会让 pinned_offline 静默跳过「一拖一」。
+            busy = self._busy_locked(course)
+            if busy:
+                return {}, "busy"
+            if verdict == "stale":
+                reclaimed_from = str((self._leases.get(course) or {}).get("worker_id") or "")
             lease = {
                 "token": secrets.token_hex(8),
                 "worker_id": wid,
                 "at": now,
                 "expires_at": now + OFFLINE_LEASE_TTL_SEC,
+                "beat_at": now,
+                "revoked": False,
             }
             self._leases[course] = lease
             pub = self._lease_pub(course, lease)
+            if reclaimed_from:
+                pub["reclaimed"] = True
+                pub["reclaimed_from"] = reclaimed_from
+        if reclaimed_from:
+            print(
+                f"[hub-server] offline-lease-reclaim {course}: {reclaimed_from} 静默超阈，"
+                f"{wid} 自动接管（旧主心跳将拿 409 taken）",
+                flush=True,
+            )
         # 临界区外落账（盘 IO 不阻塞租约判定）：claimed_by/at + 自动课翻 offline（T2）
         self.note_claim(course, wid)
         reset_auto_handoff_triggers(course)
@@ -413,16 +506,25 @@ class QueueOfflineMixin(QueuePeer):
         }
 
     def heartbeat_offline(self, course: str, lease_token: str) -> tuple[dict, str]:
-        """续租 → `({"ttl_sec","expires_at"}, "")`；已过期 → `"expired"`；被接管 → `"taken"`。"""
+        """续租 → `({"ttl_sec","expires_at"}, "")`；已过期 → `"expired"`；被撤销 → `"revoked"`；被接管 → `"taken"`。
+
+        顺序（plan §3.3 表）：过期 → `revoked`（**不分 token/身份**：老主拿 409 并在轮边界
+        收尾）→ token 比对（不符 ⇒ `taken`）→ 续租。
+        ★六轮小项 4：续租**同时刷新 `beat_at`**（stale 判据读它；只续 `expires_at` 会把持续
+        心跳的活主判成 stale 而被别人接管）。
+        """
         now = float(self._now())
         with self._lease_lock:
             rec = self._leases.get(course)
             if rec is None or float(rec.get("expires_at", 0.0)) <= now:
                 self._leases.pop(course, None)
                 return {}, "expired"
+            if rec.get("revoked") is True:
+                return {}, "revoked"
             if str(rec.get("token") or "") != str(lease_token or ""):
                 return {}, "taken"
             rec["expires_at"] = now + OFFLINE_LEASE_TTL_SEC
+            rec["beat_at"] = now
             return {"ttl_sec": OFFLINE_LEASE_TTL_SEC, "expires_at": rec["expires_at"]}, ""
 
     def release_offline(self, course: str, lease_token: str) -> tuple[bool, str]:
@@ -440,8 +542,38 @@ class QueueOfflineMixin(QueuePeer):
         self.note_release(course)
         return True, ""
 
+    def revoke_offline_lease(self, course: str, reason: str = "") -> bool:
+        """给离线租约立墓碑（`revoked=True`，保留 token/beat_at）：下一次成功 claim 覆盖它。
+
+        唯一调用点 = `set_mode_pinned` 的在线分支（人切在线/交还自动，§3.2）与 `note_claim`
+        的竞态收尾（§3.3）——两者都不持 `_lease_lock`（锁序：`_lease_lock → _dispatch_lock`
+        是既有嵌套方向，本函数不许在持 `_dispatch_lock` 时调）。写 `_leases` ⇒ 已录进
+        `STATE_WRITERS['_leases']`（守卫）。
+        """
+        with self._lease_lock:
+            rec = self._leases.get(course)
+            if rec is None:
+                return False
+            if rec.get("revoked") is True:
+                return True
+            rec["revoked"] = True
+            rec["revoked_reason"] = str(reason or "")
+            # 显式回写：状态写者表（守卫）的 AST 扫描只认 `self.X[...] =` / `.pop` / `.del`
+            # 三类写法，就地改引用不会被计入——回写一份才让「谁写 _leases」这张表不漏人。
+            self._leases[course] = rec
+            token = str(rec.get("token") or "")
+        print(
+            f"[hub-server] offline-revoke {course} lease={token[:8]}… reason={reason or '-'}",
+            flush=True,
+        )
+        return True
+
     def offline_leases(self) -> dict[str, dict]:
-        """有效租约一览（`/admin/offline` 的 `leases` 字段：控制台回答「谁在跑哪门课」）。"""
+        """租约一览（`/admin/offline` 的 `leases` 字段：控制台回答「谁在跑哪门课」）。
+
+        ★六轮 F5：**保留 revoked 墓碑条目**（带 `revoked/beat_at/silent_sec/stale` 全字段，
+        便于排障）；不做静默删除。
+        """
         out: dict[str, dict] = {}
         for course in list(self._leases):
             info = self.holder_info(course)
@@ -513,21 +645,103 @@ class QueueOfflineMixin(QueuePeer):
         """这门课是否由人显式管住（pin 落盘，重启不丢；二轮 P1-3）。"""
         return bool(self.dispatch_record(course).get("pinned"))
 
-    def auto_eligible(self, course: str) -> bool:
-        """自动交接候选：在课程表里 ∧ **开课标记在**（在训）。★ 2026-10-03 用户裁决：pin 不再参与。
+    def authority_of(self, course: str) -> str:
+        """**唯一派生函数**（plan §3.1）：这门课现在归谁。写死，不猜。
 
-        用户口径（逐字）：「offline 云机，不管什么时候上线接活，优先取当时就绪的离线课程；
-        如果没有离线课程但是有在线课程在训练，则抢占第一个在线课程，hub 将其改为离线」。
-        ⇒ 唯一的 opt-out = **停课**（删 `training-enabled.txt`）：停掉的课会删标记（F17/F18），
-        而它的 dispatch 记录还留在盘上 —— 看标记才能让停掉的课不再被离线盘领走；
-        pin 曾是第二条否决线（P0-3），现已被上口径取代（「人 pin 成在线」的在训课照样可被抢）。
+        | 值 | 条件 | 含义 |
+        |---|---|---|
+        | `pinned_online` | 标记在 ∧ `pinned ∧ mode=online`（含冷课同形状记录） | 人固定在线：离线盘不可 claim/seize/翻模式 |
+        | `pinned_offline` | 标记在 ∧ `pinned ∧ mode=offline`，**或冷课无记录** | 人指定离线 / 历史冷课按离线 |
+        | `auto` | 标记在 ∧ 在表 ∧ `!pinned` | 自动池：claim 可翻模式；开课未选模式 = 这一档 |
+        | `not_offline` | 标记在 ∧ 冷课 `{online, !pin}` 记录 | 不在离线池（按记录 mode 派生，不开导包能力） |
+        | `stopped` | 开课标记不在（正交维，优先级最高） | 唯一 opt-out：claim 拒、默认清单不列 |
+
+        派生自既有事实（`dispatch_record.pinned` + `mode_of` + 开课标记），不新增字段；
+        冷课读盘失败（单课程 `--job-root` 无 traj_root ⇒ ProtocolError）⇒ 退回缺省
+        （无记录 ⇒ `pinned_offline`），不把 500 带进清单（★六轮小项 7）。
         """
-        if course not in self._stores:
-            return False
+        if not self._marker_exists(course):
+            return AUTHORITY_STOPPED
+        if course in self._stores:
+            rec = self.dispatch_record(course)
+            if rec.get("pinned"):
+                return (
+                    AUTHORITY_PINNED_ONLINE
+                    if str(rec.get("mode")) == COURSE_MODE_ONLINE
+                    else AUTHORITY_PINNED_OFFLINE
+                )
+            return AUTHORITY_AUTO
+        # 冷课（∉ `_stores`）：盘上记录优先；读不到 ⇒ `pinned_offline`（历史兼容）。
+        disk_rec = self._dispatch_disk_record(course)
+        if disk_rec is None:
+            return AUTHORITY_PINNED_OFFLINE
+        pinned = bool(disk_rec.get("pinned"))
+        mode = str(disk_rec.get("mode") or "")
+        if pinned and mode == COURSE_MODE_ONLINE:
+            return AUTHORITY_PINNED_ONLINE
+        if pinned and mode == COURSE_MODE_OFFLINE:
+            return AUTHORITY_PINNED_OFFLINE
+        return (
+            AUTHORITY_PINNED_OFFLINE
+            if mode == COURSE_MODE_OFFLINE
+            else AUTHORITY_NOT_OFFLINE
+        )
+
+    def auto_handoff_allowed(self, course: str) -> bool:
+        """能不能由离线盘**入口自动交接**（翻 mode + 触发导包）—— `auto` 档专属。
+
+        这是老 `auto_eligible` 的语义收窄：加了 `!pinned` 与「在表」两条硬条件。
+        **消费点**（§3.1 映射表，别随手换成别的）：清单 `auto_handoff` 字段 / `seize` /
+        `note_claim` 翻模式 / `begin_auto_handoff` / `_claim_without_pack` 入口 /
+        `_ask_console_freshness`。
+        """
+        return self.authority_of(course) == AUTHORITY_AUTO
+
+    def is_runnable_offline(self, course: str) -> bool:
+        """离线盘现在允许领它吗（claim 门 / 清单 `busy` / `claimable` 的上位闸）。
+
+        值域 = `{pinned_offline, auto}`：停课不领、`pinned_online` 不领、冷课 `{online,!pin}`
+        不领。★六轮 F2：busy 闸的两处消费点必须用它（不是 `auto_handoff_allowed`），
+        否则 pinned_offline 的 claim 会静默跳过「一拖一」。
+        """
+        return self.authority_of(course) in (AUTHORITY_PINNED_OFFLINE, AUTHORITY_AUTO)
+
+    def auto_eligible(self, course: str) -> bool:
+        """兼容别名 = `auto_handoff_allowed`（守卫钉「唯一读者」；新代码别再用它）。
+
+        历史：2026-10-03 的口径是「pin 不再参与，唯一 opt-out = 停课」——本 plan §4.2
+        半回摆（pin online 重新获得阻止力），语义收窄进上面两个新函数。
+        """
+        return self.auto_handoff_allowed(course)
+
+    def _marker_exists(self, course: str) -> bool:
+        """开课标记在不在（停课 = 删它；`stopped` 维的唯一判据）。
+
+        在表：读课程目录（读不到 ⇒ False——这正是旧 `auto_eligible` 的容错方向）；
+        冷课：读 `_discover_root`；读不到目录（单课程裸 job_root）⇒ True，**未知不误杀**
+        （不能把读不到标记当成停课的证据）。
+        """
+        if course in self._stores:
+            try:
+                return (self.course_dir(course) / COURSE_ENABLE_MARKER).exists()
+            except (OSError, ProtocolError):
+                return False
+        root = self._discover_root
+        if root is None:
+            return True
         try:
-            return (self.course_dir(course) / COURSE_ENABLE_MARKER).exists()
-        except (OSError, ProtocolError):
+            return bool((root / course / COURSE_ENABLE_MARKER).exists())
+        except OSError:
             return False
+
+    def _dispatch_disk_record(self, course: str) -> dict | None:
+        """盘上的派发记录（**不缓存**；读不到 ⇒ None）。冷课 `authority_of` 缺省短路用。"""
+        try:
+            raw = json.loads(self._dispatch_path(course).read_text(encoding="utf-8"))
+        except (OSError, ValueError, ProtocolError):
+            return None
+        fallback = self.mode_of(course) if course in self._stores else COURSE_MODE_ONLINE
+        return dispatch_record_merge(raw, fallback)
 
     def set_mode_pinned(
         self,
@@ -541,9 +755,14 @@ class QueueOfflineMixin(QueuePeer):
 
         `pin is None` = 非人（legacy 调用）：**拒绝覆盖「由 claim 产生的 offline」**；
         人（显式 pin 字段，1 或 0）可覆盖任何 claim 状态。落地 = `_modes` + 记录（原子写盘）。
-        `drop_jobs=True`（`&drop_jobs=1`，**只有人的动作会带**）⇒ 顺手作废该课未认领的
-        未结算 job（plan/switch-mode-drops-jobs §4 T0「别留垃圾」）；开课/停课/回灌走的
-        `pushCourseMode` 不带它，「队列一字不动」的既有契约（`course-lifecycle.ts`）逐字不变。
+
+        ★ 切在线/交还自动（`m == online`，pin=1 或 0）：**撤销离线租约**（立墓碑，§3.2/§3.3）
+        并清 `claimed_offline/by/at/flipped_at` 四键（五轮 P1-F：`flipped_at` 此前无清理
+        入口 ⇒ 交还自动后 `stall_verdict` 拿旧锚点立刻判 `pending-export` 假停滞）。
+        `drop_jobs=True`（`&drop_jobs=1`，**只有人的动作会带**）：★六轮 P0-6 ② **仅
+        `m == offline` 才生效**——切回在线时撤单反成 bug（停在队首的活正是回来要领的；
+        §4.3 半球修正）。开课/停课/回灌走的 `pushCourseMode` 不带它，「队列一字不动」的
+        既有契约（`course-lifecycle.ts`）逐字不变。
         返回 `(ok, why)`。
         """
         if course not in self._stores:
@@ -557,14 +776,25 @@ class QueueOfflineMixin(QueuePeer):
         fields: dict[str, Any] = {"mode": m}
         if pin is not None:
             fields["pinned"] = bool(pin)
-        if pin is not None or m != COURSE_MODE_OFFLINE:
-            # 只有「人写入」或「真正离开 offline」才清 claim 记账：legacy 的 offline 重写
-            # 不该顺手把一个正在进行的自动交接“洗白”。
+        if m == COURSE_MODE_ONLINE:
+            # 人切在线 / 交还自动：四键归零（申请 §3.2 的行语义）。
+            fields.update(
+                {
+                    "claimed_offline": False,
+                    "claimed_by": "",
+                    "claimed_at": 0.0,
+                    "flipped_at": 0.0,
+                }
+            )
+        elif pin is not None:
+            # legacy 的 offline 重写不该顺手把一个正在进行的自动交接「洗白」。
             fields["claimed_offline"] = False
         self._dispatch_update(course, **fields)
         self._modes[course] = m
         self._sync_parked(course)
-        if drop_jobs:
+        if m == COURSE_MODE_ONLINE:
+            self.revoke_offline_lease(course, reason="switch-online")
+        if drop_jobs and m == COURSE_MODE_OFFLINE:
             # 人的动作带了 `&drop_jobs=1` ⇒ 把上一个模式留在队列里、还没人领的 job 作废
             # （plan §4 T0「别留垃圾」）。自动路径（claim 翻 offline）在下面两处**无条件**撤。
             self._drop_unsettled(course, reason="mode-switch")
@@ -600,52 +830,85 @@ class QueueOfflineMixin(QueuePeer):
             )
         return dropped
 
-    def begin_auto_handoff(self, course: str) -> tuple[str, str]:
+    def begin_auto_handoff(self, course: str, worker_id: str = "") -> tuple[str, str]:
         """claim 无包分支的临界区（§3.1a-b + §3.3a）：过 busy 闸 → 翻 mode（落盘）。
 
-        返回 verdict：`flipped`（可触发控制台）/ `busy`（别的课在跑）/ `not_auto`（未在训或未知）。
+        返回 verdict：`flipped`（可触发控制台）/ `busy`（别的课在跑）/ `not_auto`（未在自动池或未知）。
         **不建租约**（包还没出现，领租约还早）；触发控制台是调用方（HTTP 层）的事——网络调用不持锁。
+
+        ★五轮 P0-B + ★六轮 F4：**新一轮交接 ⇒ 重置导包触发账本**——「新一轮」= 新 `worker_id`
+        ≠ 记录的 `claimed_by`（换主）**∨** 距上次 claim 超 `AUTO_HANDOFF_PENDING_SEC`
+        （`.worker-id` 持久，同机重开会话沿用同一 id，只判换主会漏「同主回来」）。同时
+        **刷新 `claimed_at` 且写 `claimed_by`**（R2-d；busy 窗口的新锚点，也是下一次交接的
+        「上次 claim」）；`flipped_at` 仍只在首翻时写（停滞告警的锚点，重复重试不刷新）。
         """
         if course not in self._stores:
             return "not_auto", "未知课程"
-        if not self.auto_eligible(course):
-            return "not_auto", "该课未在训练（开课标记已删）"
+        if not self.auto_handoff_allowed(course):
+            return "not_auto", "该课未在自动池（开课标记已删或人固定其模式）"
         with self._lease_lock:
             busy = self._busy_locked(course)
             if busy:
                 return "busy", busy
-        self._modes[course] = COURSE_MODE_OFFLINE
-        self._sync_parked(course)
+        now = float(self._now())
+        new_owner = str(worker_id or "").strip()
         rec0 = self.dispatch_record(course)
+        prev_owner = str(rec0.get("claimed_by") or "")
+        prev_at = float(rec0.get("claimed_at") or 0.0)
+        #: 换主 ∨ 超窗（同主重开会话也命中）⇒ 导包触发账本清零（前任烧满的 give_up 不继承）。
+        new_round = bool(prev_owner and new_owner and new_owner != prev_owner) or (
+            prev_at > 0 and now - prev_at > AUTO_HANDOFF_PENDING_SEC
+        )
         fields: dict[str, Any] = {
             "mode": COURSE_MODE_OFFLINE,
             "claimed_offline": True,
+            "claimed_by": new_owner or prev_owner,
+            "claimed_at": now,
         }
-        # 重复 claim（云机在导包窗口里轮询）不刷新 `flipped_at`：它是停滞告警与 busy 窗口的
-        # 锚点，被每次重试推到「刚刚」会让这两条判据永远不触发。
+        # 重复 claim（云机在导包窗口里轮询）不刷新 `flipped_at`：它是**停滞告警**的锚点，
+        # 被每次重试推到「刚刚」会让它永远不触发。（`claimed_at` 服务 busy 窗口——两个锚点
+        # 时间轴**刻意分叉**，别对调；见 `_busy_locked`。）
         if not (rec0.get("claimed_offline") and str(rec0.get("mode")) == COURSE_MODE_OFFLINE):
-            fields["flipped_at"] = float(self._now())
+            fields["flipped_at"] = now
         self._dispatch_update(course, **fields)
+        self._modes[course] = COURSE_MODE_OFFLINE
+        self._sync_parked(course)
+        if new_round:
+            reset_auto_handoff_triggers(course)
+            print(
+                f"[hub-server] auto-handoff {course}: 新一轮交接（"
+                f"{prev_owner or '-'} → {new_owner or '-'}）⇒ 导包触发账本清零",
+                flush=True,
+            )
         # 翻 offline ⇒ 该课在线的未认领 job 即刻作废（用户 2026-10-03 裁决：claim 自动翻模式
         # 也要撤）。**在飞的不动**（裁决：不管在算的）——见 `cancel_unsettled_jobs`。
         self._drop_unsettled(course, reason="auto-handoff")
         return "flipped", ""
 
     def note_claim(self, course: str, worker_id: str) -> None:
-        """claim 成功后的派发记账（claimed_by/at + 自动课翻 offline——T2 的同步小事之一）。"""
-        fields: dict[str, Any] = {"claimed_by": worker_id, "claimed_at": float(self._now())}
+        """claim 成功后的派发记账（claimed_by/at + 自动课翻 offline——T2 的同步小事之一）。
+
+        ★六轮（§3.3 竞态收尾）：claim 在「读 authority 之后、切换之前」赢锁（人同时切了
+        `pinned_online`）⇒ **不翻模式**并立刻 `revoke_offline_lease`（把刚建的租约标成墓碑）。
+        两种到达顺序的终态一致 = `mode=online ∧ pinned ∧ 租约成墓碑`（契约见 §3.3）。
+        """
+        now = float(self._now())
+        fields: dict[str, Any] = {"claimed_by": worker_id, "claimed_at": now}
         flipped = False
-        if self.auto_eligible(course) and self.mode_of(course) != COURSE_MODE_OFFLINE:
+        if self.auto_handoff_allowed(course) and self.mode_of(course) != COURSE_MODE_OFFLINE:
             self._modes[course] = COURSE_MODE_OFFLINE
             self._sync_parked(course)
             fields["mode"] = COURSE_MODE_OFFLINE
             fields["claimed_offline"] = True
-            fields["flipped_at"] = float(self._now())
+            fields["flipped_at"] = now
             flipped = True
         self._dispatch_update(course, **fields)
         if flipped:
             # claim 成功即翻 offline（有包那条腿）——同样撤掉本课未认领的在线 job（裁决同上）。
             self._drop_unsettled(course, reason="auto-handoff")
+        elif self.authority_of(course) == AUTHORITY_PINNED_ONLINE:
+            # 竞态：人已切固定在线 ⇒ 立即把刚领的租约标成墓碑（worker 下一次心跳 409 revoked）。
+            self.revoke_offline_lease(course, reason="race-pinned-online")
 
     def note_release(self, course: str) -> None:
         """release 后的派发记账：持有者清空；mode 保持 offline（U3 的 waiting）。"""
@@ -673,29 +936,41 @@ class QueueOfflineMixin(QueuePeer):
     def _busy_locked(self, course: str) -> str:
         """busy 闸（调用方持 `_lease_lock`）：别的课在跑 / 正在交接 ⇒ 拒因文案（§3.3a 一拖一）。
 
-        两条腿：① 别的课有**活租约**；② 别的课**正在交接**（已翻 offline、包还没出现、
-        窗内）——只算租约的话，两台云机会在导包窗口里同时翻开两门课。
-        租约过期的课不算（U3 的 waiting 不占闸，否则一台死掉的 TPU 会把所有课冻在离线）。
+        两条腿都只算**有活性**的东西（§3.4）：
+        ① 别的课有活租约（`lease_verdict` 用哨兵空 id 问「是否有人持有」= `foreign`；
+        过期/静默超阈/墓碑一律不算——死盘不再冻结全池，R2-b）；
+        ② 别的课正在交接（已翻 offline、包还没出现、`claimed_at` 窗内且有主）——锚点从
+        `flipped_at` 换成 **`claimed_at`**（每次 pending_export claim 由 `begin_auto_handoff`
+        刷新，R2-d；`flipped_at` 继续服务停滞告警——两个锚点时间轴**刻意分叉**）。
+        两条腿都对被检查方（`other`）先判 `authority != pinned_online`（pinned-online 不占闸；
+        限制只作用于被检查方，发起方不受限——§3.4-4）。
         """
         now = float(self._now())
         for other, rec in self._leases.items():
             if other == course:
                 continue
-            if float(rec.get("expires_at", 0.0)) <= now:
-                continue  # 惰性过期：过期的租约不算「在跑」
-            who = str(rec.get("worker_id") or "?")
-            return f"busy: {other} 正在 {who} 上跑（一拖一：它 release 后自动解除）"
+            if self.authority_of(other) == AUTHORITY_PINNED_ONLINE:
+                continue  # 人固定在线：它的记录不占别人的闸（§3.4-3）
+            holder = str(rec.get("worker_id") or "")
+            # 用哨兵空 id 问「除我自己外是否有人持有」：只有 `foreign` 才算在跑
+            if lease_verdict(now, rec, "") != "foreign":
+                continue  # 过期 / 静默超阈 / 墓碑：不算「在跑」
+            return f"busy: {other} 正在 {holder or '?'} 上跑（一拖一：它 release 后自动解除）"
         for other in self._order:
             if other == course:
                 continue
+            if self.authority_of(other) == AUTHORITY_PINNED_ONLINE:
+                continue
             live = self._leases.get(other)
-            if live is not None and float(live.get("expires_at", 0.0)) > now:
+            if live is not None and lease_verdict(now, live, "") == "foreign":
                 continue  # 活租约已在上面处理
             rec = self.dispatch_record(other)
             if not rec.get("claimed_offline"):
                 continue
-            flipped = float(rec.get("flipped_at") or 0.0)
-            if flipped <= 0 or now - flipped > AUTO_HANDOFF_PENDING_SEC:
+            if not str(rec.get("claimed_by") or ""):
+                continue  # 没有主 = 不是交接中（新锚点必须有主，R2-d）
+            anchor = float(rec.get("claimed_at") or 0.0)
+            if anchor <= 0 or now - anchor > AUTO_HANDOFF_PENDING_SEC:
                 continue  # 超窗 = 交接失败（告警面兜），不占闸
             try:
                 if self.task_pack_path(other).is_file():
@@ -726,7 +1001,8 @@ class QueueOfflineMixin(QueuePeer):
         out: list[dict] = []
         for course in self.courses():
             rec = self.dispatch_record(course)
-            treat_offline = self.mode_of(course) == COURSE_MODE_OFFLINE or self.auto_eligible(course)
+            authority = self.authority_of(course)
+            treat_offline = self.is_runnable_offline(course)
             if not treat_offline:
                 continue
             pack_sha = ""
@@ -743,7 +1019,7 @@ class QueueOfflineMixin(QueuePeer):
             last = max((float(r.get("last_mtime") or 0.0) for r in runs.values()), default=0.0)
             why = stall_verdict(
                 treat_offline=treat_offline,
-                pinned=self.pinned_of(course),
+                authority=authority,
                 completed=False,
                 holder_present=holder is not None,
                 last_progress_mtime=last,

@@ -86,6 +86,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "_job_dir",
             "_read_ledger",
             "_append_ledger",
+            #: 六轮 F1（2026-10-05）：净态折叠——`_claim_locked` 的即时闸对账 + `publish` 去重。
+            "_ledger_net_state",
             "claimable_job_ids",
             "publish",
             "job_failure",
@@ -299,13 +301,14 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
         for m in defined & set(MIXIN_METHODS):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(MIXIN_METHODS) == 52, len(MIXIN_METHODS)
-    assert len(seen) == 52, len(seen)
+    assert len(MIXIN_METHODS) == 53, len(MIXIN_METHODS)
+    assert len(seen) == 53, len(seen)
     # 49 = 拆分前 `_JobStore` 的 49 个方法；2026-09-25 并入 origin 的课程侧落位后又多了 2 条
     # （`_course_backup_target` / `_land_offline_round_extras`）；2026-10-01 §52 加 2 条
     # （`_lease_state` 判据 + `_lease_held` 布尔视图）；2026-10-03 T0 加 1 条
-    # （`cancel_unsettled_jobs` 撤单）⇒ 现在 52 + 2。
-    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 52 + 2, "_JobStore 的方法总数变了"
+    # （`cancel_unsettled_jobs` 撤单）；2026-10-05 六轮 F1 加 1 条（`_ledger_net_state` 净态折叠）
+    # ⇒ 现在 53 + 2。
+    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 53 + 2, "_JobStore 的方法总数变了"
 
 
 def test_the_mixins_do_not_share_any_defined_name() -> None:

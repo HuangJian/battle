@@ -298,8 +298,10 @@ class QueueResumeMixin(QueuePeer):
                     continue
         return None
 
-    def store_offline_artifact(self, course: str, body: dict) -> dict:
-        return self._stores[course].store_offline_artifact(body)
+    def store_offline_artifact(
+        self, course: str, body: dict, *, advance_active: bool = True
+    ) -> dict:
+        return self._stores[course].store_offline_artifact(body, advance_active=advance_active)
 
     def store_offline_result(self, course: str, body: dict) -> dict:
         return self._stores[course].store_offline_result(body)

@@ -951,3 +951,25 @@ mtime / 按课程锁签名 / 账本 mtime，**按跳过来源取事实**（confi
 import 链 0 torch · `bun run check` 2373/0 · dashboard typecheck + 1398/0 + 三份 bundle · `bun run build` 过。
 决策 → `DECISIONS.md` §2026-10-05-course-startup-recover；全文 → `docs/nn/training-stack.md` §29 /
 `docs/nn/console.md` §30；计划 → `plan/course-startup-recover.plan.md`。
+## 2026-10-05 · offline-online-status-switch：pin 重新成为硬意图 + 离线 = 等待（两条报障闭环）
+
+触发（用户 2026-10-04 报障×2）：①「手动切成在线不稳定」——切了被离线盘抢回（pin 坍缩）、
+进离线撤掉的在线 job 回来不复活、本机腿把离线等待当收官写假 `run_complete`；②「云机掉线后
+课程永久停摆」——死租约冻结全池、无包腿烧满导包触发后新盘拿到 `give_up` 并被 skip（本会话
+永久放弃）、导包窗口无主也不释放（`runtime ... 100%` 假信号）。
+
+语义（六轮评审修订版，行为变更 21 条）：五档权威 `authority_of`（pinned_online 重新拦
+claim/seize/翻模式；冷课读盘派生；读失败退缺省）；租约六态 `lease_verdict`（revoked 不看
+身份、顺序 expired→revoked→mine→stale→foreign；静默 180s 自动接管；心跳刷 `beat_at`；墓碑
+形状定死）；busy 活性口径（stale/revoked/expired 不算忙，窗口锚 `claimed_at`）；`_cancelled`
+按账本净态对账（生产写者 = `remote/hub_client.publish_job`）；停课/冷课 claim 409 `not_offline`；
+新一轮交接（换主 ∨ 超 900s）重置导包触发；`pinned_online` 回传不推权重 + 段末包身份盖章；
+`resolve_courses` 返回 `(picks, blocked)` + blocked 不占 idle 预算；训练侧离线 = 等待（不写假
+`run_complete`，回灌带 pin、复原前提 `--rollout-src auto`）；控制台单一派生 `courseStatus` +
+意图表 v2 + last-known-good（失败保旧值带 stale 标注）。存量盘点：全仓零真课程派发记录 ⇒ 无
+存量 pinned 课。
+
+读数：nn python gate **3672 passed / 9 skipped**（ruff+mypy 过）· e2e **112 passed**（T1–T8）·
+dashboard typecheck 绿 + **1400 pass / 0 fail** + 三份 bundle ok · 根 `bun run check`
+**2361 pass / 12 skip / 0 fail**。决策 → `DECISIONS.md` §2026-10-05-goalnn-offline-online-status-switch；
+全文 → `docs/nn/remote-transport.md` §67 / `docs/nn/console.md` §31；计划 → `plan/offline-online-status-switch.plan.md`。

@@ -50,10 +50,44 @@ export interface HubInflightView {
   computingAgo: number | null
 }
 
+/** 权威三态 + 两个正交维（hub `queue_state` 每课的 `authority`；plan §3.1）。
+ *
+ *  dashboard 的 `courseStatus` **从这里读**，不自己派生第二份（P0-2/P1-10 的接线契约）：
+ *  派生实现在 hub（`queue_offline.authority_of`），控制台只是把答案摆上屏。
+ *  `null` = 旧 hub 没上报 ⇒ 读面标注「未知」，退化成 hub authority 之前的行为（不编）。 */
+export type CourseAuthority =
+  | 'auto'
+  | 'pinned_online'
+  | 'pinned_offline'
+  | 'stopped'
+  | 'not_offline'
+
+/** 合法 authority 值（解析用；与 python `AUTHORITY_*` 常量逐字同域）。 */
+const AUTHORITIES: readonly CourseAuthority[] = [
+  'auto',
+  'pinned_online',
+  'pinned_offline',
+  'stopped',
+  'not_offline',
+]
+
+/** 读面新鲜度标注（P1-11）：读失败时保留上一拍值并带它上屏；`null` = 本拍读成功。
+ *
+ *  `since` = **连续失败的起点**（epoch ms）。超窗（一个刷新周期）后不再保旧值，整块显示
+ *  「未知（读面失败 Ns）」——保旧值有限度，不无限保（plan §3.10-3 / R4-e）。 */
+export interface ReadStaleView {
+  since: number
+  reason: string
+}
+
 /** 单课程队列行（hub `queue_state()` 的一行）。 */
 export interface HubQueueCourseView {
   /** `online` = 参与实时派发；`offline` = 只收回传，不派活。 */
   mode: 'online' | 'offline'
+  /** 权威三态（hub `authority_of`；`null` = 旧 hub 没上报 ⇒ 未知，不猜）。 */
+  authority: CourseAuthority | null
+  /** 「人固定过」（hub 派发记录的 `pinned`；`null` = 旧 hub）。 */
+  pinned: boolean | null
   /** 可领取 job 数（= 队列深度）。 */
   pending: number
   /** 在飞（租约未过期）条数。 */
@@ -148,8 +182,13 @@ export function parseHubQueue(body: unknown): HubQueueView | null {
         })
       }
     }
+    const authority = AUTHORITIES.includes(c.authority as CourseAuthority)
+      ? (c.authority as CourseAuthority)
+      : null
     courses[name] = {
       mode: c.mode === 'offline' ? 'offline' : 'online',
+      authority,
+      pinned: typeof c.pinned === 'boolean' ? c.pinned : null,
       pending: num(c.pending_n),
       inflight: inflightRaw.length,
       nextJob: typeof c.next_job === 'string' ? c.next_job : null,
@@ -261,9 +300,49 @@ export interface OfflineStalledView {
   ageSec: number
 }
 
-/** `/admin/offline` 的完整观测面（进度 + 段末摘要 + 停滞告警）。 */
+/** `/admin/offline.leases[课]`：该课离线租约的持有人事实（P0-11 / P1-6）。
+ *
+ *  `stale` = 连续静默超阈（新盘可直接接管，hub 自动回收——**不是故障**）；`revoked` = 墓碑
+ *  （切在线/交还自动时撤销，旧 worker 心跳收 409 revoked）。两块徽标的唯一事实源。 */
+export interface OfflineLeaseView {
+  workerId: string
+  /** 连续静默秒数（心跳停多久了）。 */
+  silentSec: number
+  /** 静默超阈 ⇒ 新盘可直接接管（hub 自动回收；不是故障）。 */
+  stale: boolean
+  /** 墓碑（撤销后保留条目便于排障；旧 worker 心跳收 409 revoked）。 */
+  revoked: boolean
+  /** 距到期（秒）。 */
+  expiresIn: number
+}
+
+/** 解析 `/admin/offline` 的 `leases`；整块缺 → null（旧 hub / 端点不存在）。
+ *
+ *  与其余观测面同规的宽容解析：坏条目跳过，不让整页 /api/state 500。 */
+export function parseOfflineLeases(body: unknown): Record<string, OfflineLeaseView> | null {
+  if (!body || typeof body !== 'object') return null
+  const raw = (body as Record<string, unknown>).leases
+  if (!raw || typeof raw !== 'object') return null
+  const out: Record<string, OfflineLeaseView> = {}
+  for (const [course, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!course || !v || typeof v !== 'object') continue
+    const r = v as Record<string, unknown>
+    out[course] = {
+      workerId: typeof r.worker_id === 'string' ? r.worker_id : '',
+      silentSec: num(r.silent_sec),
+      stale: r.stale === true,
+      revoked: r.revoked === true,
+      expiresIn: num(r.expires_in),
+    }
+  }
+  return out
+}
+
+/** `/admin/offline` 的完整观测面（进度 + 租约 + 段末摘要 + 停滞告警）。 */
 export interface OfflineAdminView {
   progress: Record<string, Record<string, OfflineRunView>>
+  /** 离线租约一览（`/admin/offline.leases`；`null`/缺省 = 旧 hub 没上报）。 */
+  leases?: Record<string, OfflineLeaseView> | null
   results: Record<string, Record<string, OfflineResultView>>
   stalled: OfflineStalledView[]
 }
@@ -333,6 +412,7 @@ export function parseOfflineAdmin(body: unknown): OfflineAdminView | null {
   if (progress === null) return null
   return {
     progress,
+    leases: parseOfflineLeases(body),
     results: parseOfflineResults(body) ?? {},
     stalled: parseOfflineStalled(body) ?? [],
   }
@@ -388,6 +468,12 @@ export interface CourseOverviewRow {
   peeked: boolean | null
   /** 待领队首 job_id（hub 观测；null = 没有待领 / hub 不可达）——悬停「队首 jid」。 */
   nextJob: string | null
+  /** 权威三态（hub `/admin/queue` 每课行；`null`/缺省 = 旧 hub / hub 不可达 ⇒ 未知，不猜）。 */
+  authority?: CourseAuthority | null
+  /** 「人固定过」（hub 派发记录；`null`/缺省 = 未知）。 */
+  pinned?: boolean | null
+  /** 离线租约（`/admin/offline.leases`；`null`/缺省 = 没有租约 / 旧 hub）——stale/墓碑徽标用。 */
+  lease?: OfflineLeaseView | null
 }
 
 /** 恒等在训课程 ∩ hub 课程表 ∩ 查看课程的课程清单（保持入参顺序 = 服务端的新→旧）。 */
@@ -415,6 +501,8 @@ export function buildCourseRows(input: {
   iters: Record<string, number | null>
   /** 逐课程的离线段进度（`parseOfflineProgress` 的产物；缺 = 没读到）。 */
   offline?: Record<string, Record<string, OfflineRunView>> | null
+  /** 逐课程的离线租约（`parseOfflineLeases` 的产物；缺 = 没读到 / 旧 hub）。 */
+  leases?: Record<string, OfflineLeaseView> | null
 }): CourseOverviewRow[] {
   const training = new Set(input.training)
   return input.courses.map((course) => {
@@ -438,6 +526,9 @@ export function buildCourseRows(input: {
       halt: q?.halt ?? false,
       inflightDetail,
       nextJob: q?.nextJob ?? null,
+      authority: q?.authority ?? null,
+      pinned: q?.pinned ?? null,
+      lease: input.leases?.[course] ?? null,
       stuckSec: claimed.length ? Math.max(...claimed) : null,
       peeked:
         input.queue && input.queue.peekedCourses !== null
@@ -483,6 +574,11 @@ export interface ParallelOverviewView {
    *  `null` = hub 不可达或旧版 hub（**不可知 ≠ 没停**——告警坞对 null 什么都不画，
    *  但课程矩阵的「hub 无应答」自会占位）。 */
   offlineStalled?: OfflineStalledView[] | null
+  /** 逐课程离线租约（`/admin/offline.leases`；P2-1：告警坞文案补 `revoked`/`stale-holder`
+   *  两态用——stale = 可接管、revoked = 已撤租。`null`/缺省 = 旧 hub 没上报，不猜。 */
+  offlineLeases?: Record<string, OfflineLeaseView> | null
+  /** 读面新鲜度（P1-11）：hub 探测失败但还在保旧值 ⇒ 带它；`null`/缺省 = 本拍读成功。 */
+  stale?: ReadStaleView | null
 }
 
 /** 账本尾行里最后一个 `iteration` 事件的轮次（纯函数，可单测）。

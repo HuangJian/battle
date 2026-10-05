@@ -78,8 +78,35 @@ TASK_STATE_NO_PACK = "no_pack"
 TASK_STATE_CLAIMED = "claimed"
 TASK_STATE_NOT_OFFLINE = "not_offline"
 TASK_STATE_COMPLETED = "completed"
+#: 权威三态 + 两个正交维（plan/offline-online-status-switch §3.1 `authority_of` 的值域）：
+#: `pinned_online` / `pinned_offline` / `auto` 是三态；`stopped`（开课标记不在）与
+#: `not_offline`（冷课带 online 记录）是两个正交维。常量住叶子：离线路由面（`hub/offline.py`）
+#: 与队列面（`queue_offline.py`）都要读它们。派生实现在 `queue_offline.authority_of`。
+AUTHORITY_PINNED_ONLINE = "pinned_online"
+AUTHORITY_PINNED_OFFLINE = "pinned_offline"
+AUTHORITY_AUTO = "auto"
+AUTHORITY_STOPPED = "stopped"
+AUTHORITY_NOT_OFFLINE = "not_offline"
+#: 离线租约「连续静默」阈值（秒，2026-10-05，plan/offline-online-status-switch §3.3）：
+#: 租约持有人超过它没有一点心跳 ⇒ 判 `stale`，允许新盘**自动接管**（不必 `takeover=1`）。
+#: 为什么住本模块（叶子）而不是 `queue_offline`：判据 `lease_verdict` 就在本模块，常量跟着判据走；
+#: 这是**纯 hub 侧**语义（不进 `common/protocol.py`，两端共享协议面一字不改）。env 覆盖
+#: `BCITY_OFFLINE_LEASE_STALE_SEC`（e2e/单测调秒级）。
+#: ★ 与 job 侧 `ORPHAN_GRACE_SEC` 同值**不同义**：job 侧 = claim 后**零心跳**；离线段 = **连续静默**
+#: （心跳线程整段在跑，慢网/挂起的人为短静默不该误杀）——别照抄 store_leases._lease_state。
+OFFLINE_LEASE_STALE_SEC = 180.0
 #: 「离线盘在线」的窗口（秒）：与离线租约 TTL 同档 —— 取包腿的报到节奏就是这个量级。
 OFFLINE_DISK_WINDOW_SEC = 900.0
+
+
+def offline_lease_stale_sec() -> float:
+    """生效的离线租约静默阈值（env 覆盖；非法/非正数 ⇒ 缺省）。**调用时读 env**（可 monkeypatch）。"""
+    raw = os.environ.get("BCITY_OFFLINE_LEASE_STALE_SEC", "").strip()
+    try:
+        v = float(raw)
+    except ValueError:
+        return OFFLINE_LEASE_STALE_SEC
+    return v if v > 0 else OFFLINE_LEASE_STALE_SEC
 #: 离线腿的指路（2026-09-25 退役「发一份 kind=run 队列项」之后，离线课的唯一载体是任务包）。
 OFFLINE_LEG_HINT = (
     "离线课不再经 hub 队列执行：云机用 battle.offline.ipynb 取任务包接手"
@@ -209,12 +236,21 @@ def pack_index_meta(pack_path: Path) -> dict:
         except (TypeError, ValueError):
             return 0
 
+    def _float(v: object) -> float:
+        try:
+            return float(str(v))
+        except (TypeError, ValueError):
+            return 0.0
+
+    # 索引键名两套都认（★ 2026-10-05）：生产导出器（`remote/bundle.export_bundle`）写的是
+    # **snake_case**（`run_id` / `created_at`），而历史测试夹具写的是 camelCase（`runId`）。
+    # 只认 camelCase 会让**真包**的 `run_id` 永远是空串（清单读面/段末盖章判据都读到假缺失）。
     return {
-        "run_id": str(idx.get("runId") or ""),
+        "run_id": str(idx.get("runId") or idx.get("run_id") or ""),
         "it": _int(idx.get("it") or plan.get("start_it")),
         "end_it": _int(plan.get("end_it")),
         "commit": str(idx.get("commit") or ""),
-        "created_at": float(idx.get("createdAt") or 0.0),
+        "created_at": _float(idx.get("createdAt") or idx.get("created_at") or 0.0),
     }
 
 
@@ -232,17 +268,40 @@ def task_state(*, pack_exists: bool, stale: bool, held: bool) -> str:
 
 
 def lease_verdict(now: float, rec: dict | None, worker_id: str) -> str:
-    """租约判据（纯函数）：`free` / `mine` / `foreign` / `expired`。
+    """租约判据（纯函数）：`free` / `expired` / `revoked` / `mine` / `stale` / `foreign`。
 
     **惰性过期**（读时判，不养清理线程）。`mine` 是特意分出来的一档：同一个 `worker_id`
     再来领（cell 中断后重跑、心跳超时后补领）应当直接续上，而不是被自己挡在门外
     （评审 G1：Kaggle 上十几分钟的会话预算，白等 900s 等于整个会话废掉）。
+
+    顺序**必须**是 expired → revoked → mine → stale → foreign（2026-10-05，plan
+    §3.3 定案，顺序理由写在这里，别对调）：
+
+    * `revoked` 排在 `mine` **之前** ⇒ 老主心跳拿 `revoked`（而不是续上）——墓碑是
+      **全局否决、不看任何身份**（`rec["revoked"]` 为真即命中，新主也照样命中）；
+    * `mine` 排在 `stale` **之前** ⇒ 同一个 worker 回来续领自己（可能静默过）的租约时
+      判 `mine` 续上，不被判成 stale 而被自己 409（cell 中断重跑要用）。
+
+    `stale` = 身份不同 ∧ 连续静默超 `offline_lease_stale_sec()`；`beat_at` 缺失（旧记录）
+    ⇒ 用 `at`（语义不变）。token 不在这里判——那是 claim/heartbeat 内部的分流（它们本来
+    就有 token）。
     """
     if not rec:
         return "free"
     if float(rec.get("expires_at", 0.0)) <= float(now):
         return "expired"
-    return "mine" if str(rec.get("worker_id", "")) == worker_id else "foreign"
+    if rec.get("revoked") is True:
+        return "revoked"
+    if str(rec.get("worker_id", "")) == worker_id:
+        return "mine"
+    beat = rec.get("beat_at")
+    try:
+        beat_at = float(beat) if beat is not None else float(rec.get("at", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        beat_at = 0.0
+    if beat_at > 0 and float(now) - beat_at > offline_lease_stale_sec():
+        return "stale"
+    return "foreign"
 
 
 def reset_task_pack_triggers(course: str = "") -> None:

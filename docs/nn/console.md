@@ -7,6 +7,64 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §31 课程状态读面：单一派生 `courseStatus` + 意图表 v2 + last-known-good（plan/offline-online-status-switch，2026-10-05）
+
+**触发**（用户 2026-10-04 报障「手动切成在线不稳定」的控制台侧）：同一门课的状态词此前由 pill
+（`loop-queue.ts::coursePills`）与矩阵状态列（`course-matrix.ts::matrixStatus`）**各拼一份**——两条优先级表不同，
+同屏两个 widget 可以互相矛盾（离线接管的课 pill「已收官」而矩阵「在训」）。根因是同一`{mode}`被拆读。
+
+**意图表 v2 `{mode, pinned}`**（P1-8；`console-state.courseModes`）：
+
+- 值升级为 `{mode: 'online'|'offline', pinned: bool}`；`pinned:true` = 那颗开关（人固定）、
+  `pinned:false` = 开课弹窗/停课的**一次性选择**。**旧裸串读时归一为 `{mode, pinned:false}`**，写入一律 v2
+  ——不把 F9 之前的存量噪声（每门开过的课都被写过 online）一次性 pin 上，否则整套自动交接被关掉；
+  要固定请再点一次那颗开关。
+- `setCourseMode`（那颗开关）= `pin=true` + `drop_jobs`；`unsetCourseMode`（交还自动）= 唯一解除口；
+  `pushCourseMode` 的其它调用方（开课弹窗/停课）写 `pinned:false`。
+- 回灌（`restoreCourseModes`）**带 pin**（R3-d）：`pinned:true` 条目按 pin 推送——不带的话 hub 对「被 claim
+  翻过 offline」的课拒覆盖（400），意图与 hub 永久分叉且每次起 hub 都刷失败。`pinned:false` 保持 legacy 推送。
+- **P1-5 文案**：切在线 =「已切在线并固定（pin）……**离线盘不再自动抢它**——要放回自动交接池请点「交还自动」」；
+  交还 =「已交还自动：离线盘可再次接管」。两颗钮两个语义，不合并成一句话。
+
+**单一派生 `courseStatus`**（P1-10，`web/view/course-status.ts`）：
+
+- 一个纯函数把「这门课现在是什么状态」算成 `CourseStatus{kind, text, tone, title, source, stale, age, conflict}`；
+  **pill 与矩阵读同一份**（渲染器只决定「词怎么说」，不决定「是什么」）。`NO_TAKER_LABEL`/`STUCK_LABEL`
+  两个词也只在这里定义一次（告警坞同源 import）。
+- 优先级：调度器行缺失 ⇒ `unknown`（读面不可用，**不是「空闲」**）→ 暂停/收官/中止 → 意图漂移 →
+  hub 离线（回传维度，排在「进程没跑」之前——离线是 hub 的模式，与本地进程死活正交）→ 待进程 →
+  hub 派发态（在飞/卡住/排队·无人取/预取中）→ 训练侧等待四态 + `offline-wait`（**离线 = 等待**，P1-3）。
+  冲突档（`hub-unregistered`/`hub-no-process`）与主词正交，矩阵前置成警告词，pill 只写悬停。
+- **authority 不在这里猜**（P0-2）：从 hub `/admin/queue` 每课行的 `authority` 读（hub `authority_of` 是
+  唯一派生实现）；`null` = 旧 hub 没上报 ⇒「未知」。
+- **未知 ≠ 否定**（R4-g）：hub 探针失败/训练侧空行都按「不知道」标注，不得渲染成「未在训 / hub 不认」——
+  这是读面自己的缺陷，不是课程的事实。
+
+**读面纪律（§3.10 / R4，P1-11）**：
+
+- **last-known-good**：`server/api/overview.ts` 探测失败**不替换旧值**——失败在保值窗口（= 一个刷新周期
+  TTL）内回上一拍完整探测 + `stale:{since, reason}` 标注；超窗退化成空探测（`url=null`，显示未知），
+  **不无限保旧值**。`loop-queue.ts` 同规。`invalidateHubAdmin` 一并清 lkg 模块态（测试夹具隔离）。
+- **滞回**（R4-b/d）：词只随**派生值变化**；来源可用性变化（读面失败/恢复）只改 `stale` 标注、不改词。
+  风险上限 = 一个刷新周期且带 `stale.since` 标注。
+- **矩阵 meta 的「显示缓存」文案与行为一致**（R4-e）。
+
+**徽标与文案（P1-6 / P2-1）**：
+
+- 矩阵行：**权威三态徽标**（`固定在线`/`固定离线`/`自动`；`stopped`/`not_offline` 是正交维不另造，
+  `null` = 旧 hub 不猜不画）+ **租约徽标**（`可接管` = 静默超阈、新盘不必等 TTL；`已撤租` = 墓碑、
+  新 claim 可直接覆盖）——两枚都带悬停全因。
+- 告警坞（P2-1）：离线停滞条的 `detail` 在租约表可读时补两态——`stale-holder`「持有者已静默 Ns 超阈（可接管）……
+  自动回收，下一拍自愈」；`revoked`「已撤租（墓碑）……新盘 claim 可直接覆盖，不需要人工清理」；
+  租约表缺失（旧 hub）⇒ 不编租约事实。
+
+**读数（2026-10-05）**：dashboard typecheck 绿 + **1400 pass / 0 fail** · 三份 bundle
+（`bun dashboard/src/server/build.ts` app/log/eval）ok。用例：`tests/{web-course-status,state-read-freshness}.test.ts`（新）+
+`web-course-matrix`/`web-app-coursematrix`/`web-alert-dock`/`course-mode`/`server-api-overview` 改写。
+
+**指针**：决策 `DECISIONS.md` §2026-10-05-goalnn-offline-online-status-switch；hub/训练侧全文 →
+`docs/nn/remote-transport.md` §67；计划 `plan/offline-online-status-switch.plan.md`。
+
 ## §30 课程配置不可开课：`blocked` 取值域 + pill 红 + 告警坞第 8 类（plan/course-startup-recover，2026-10-05）
 
 **事故形状**：`x20-adv3-open-r2` 课程文件自相矛盾 ⇒ trainer 整课跳过，而控制台报「无外部等待，

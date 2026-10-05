@@ -65,8 +65,10 @@ class LedgerMixin:
         self._ledger_cache: tuple[int, list[dict]] = (0, [])
         #: 本进程内已作废的 job（`cancel_unsettled_jobs` 填）。**只是认领闸的即时缓存，
         #: 不是事实源**——事实源是账本里的 `job_cancelled`（`claimable_job_ids` 从它重算）。
-        #: 有它才挡得住「worker 拿着作废前 peek 到的 jid 来 claim」这个秒级窗口；
-        #: 重启后它为空，但那时池子也已按账本排除了那些 job（peek 拿不到 ⇒ 走不到 claim）。
+        #: 有它才挡得住「worker 拿着作废前 peek 到的 jid 来 claim」这个秒级窗口。
+        #: ★ 2026-10-05（六轮 F1）：它**不是「一旦进入就永久否决」**——生产 republish 走磁盘
+        #: IPC（hub 收不到复活信号），所以 `_claim_locked` 命中时按账本**净态**对账
+        #: （`_ledger_net_state` 为 pending ⇒ discard 放行）；`publish` 的复活分支同样 discard。
         self._cancelled: set[str] = set()
 
     def _job_dir(self, job_id: str) -> Path:
@@ -103,6 +105,24 @@ class LedgerMixin:
         self.jsonl_path.parent.mkdir(parents=True, exist_ok=True)
         with open(self.jsonl_path, "a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    def _ledger_net_state(self, job_id: str) -> str:
+        """该 jid 的**净态**：文件序里最后一条 `job_pending|job_completed|job_cancelled` 的事件名。
+
+        折叠口径与 `claimable_job_ids` 同源（它才是判据的唯一实现）；`""` = 账本里没有它。
+        ★ 2026-10-05（六轮 F1）：生产 republish 走磁盘 IPC（`remote.hub_client.publish_job`
+        **无条件追加** `job_pending`）——「撤单后同 jid 复活」在账本里就是「`job_pending` 晚于
+        `job_cancelled`」，而 hub 内存的 `_cancelled` 即时闸收不到那个信号 ⇒ 认领闸必须拿本
+        函数对账（`_claim_locked`），`publish` 的去重也按它（不能按「历史任一条 pending」）。
+        """
+        net = ""
+        for e in self._read_ledger():
+            if e.get("job_id") != job_id:
+                continue
+            ev = e.get("event")
+            if ev in ("job_pending", "job_completed", "job_cancelled"):
+                net = str(ev)
+        return net
 
     # ---- 可领取池（jsonl + 结果落盘重算，D8） ----
     def claimable_job_ids(self) -> list[str]:
@@ -197,13 +217,11 @@ class LedgerMixin:
             (jd / "manifest.json").write_text(
                 json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
             )
-            pending_ids = {
-                e.get("job_id") for e in self._read_ledger() if e.get("event") == "job_pending"
-            }
-            completed_ids = {
-                e.get("job_id") for e in self._read_ledger() if e.get("event") == "job_completed"
-            }
-            if job_id not in pending_ids and job_id not in completed_ids:
+            # ★六轮 F1/R3-b：按**净态**去重（旧实现按「历史任一条 job_pending」判：撤单后
+            # 旧 pending 行还在 ⇒ `job_id in pending_ids` 永远为真 ⇒ 复活行永远不追加）。
+            # 净态为 cancelled/缺失 ⇒ 追加一条新的 `job_pending`（复活事件）并清即时闸。
+            net = self._ledger_net_state(job_id)
+            if net not in ("job_pending", "job_completed"):
                 self._append_ledger(
                     {
                         "event": "job_pending",
@@ -213,6 +231,7 @@ class LedgerMixin:
                         "ts": self._now(),
                     }
                 )
+                self._cancelled.discard(job_id)
 
     def job_failure(self, job_id: str) -> dict | None:
         """该 job 的失败记录（无 = None）。损坏/半截文件按「无」处理（不毒死端点）。"""

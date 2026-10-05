@@ -293,6 +293,58 @@ def test_offline_course_never_reaches_the_collect_step() -> None:
         steps.step_rollout(ctx)
 
 
+def test_offline_round_maps_to_waiting_not_a_false_finish() -> None:
+    """★P1-1（plan §3.5）：调度层把 `ROUND_OFFLINE_EXIT` 映射成 **WAIT**，不是 DONE。
+
+    旧写法 `done(final=True)` 把离线课当「已收官」：控制台显示完结、写假 `run_complete`
+    （而云机那边还在跑，R1-e），且本轮从队列里消失 ⇒ 控制台写回在线也不会自动续跑。
+    WAIT + `hold=False` 才是对的：本机没在替这一步干活，这一轮留着、下一拍重问。
+    """
+    from trainer.loop_runner import LoopRunner
+    from worker.loop_round import RoundOutcome
+    from worker.loop_tasks import WAIT
+
+    runner = LoopRunner(
+        loop=SimpleNamespace(inflight_job_id=lambda _it: None), course="c5-gae"
+    )
+    res = runner._map_outcome(RoundOutcome(ROUND_OFFLINE_EXIT, 4))
+    assert res.status == WAIT, res
+    assert res.hold is False, "离线不是「后台还在干活」，票要还掉"
+    assert res.payload.get("round") == "4", res.payload
+    assert "离线" in res.reason, res.reason
+    assert runner.finished is False and runner.finish_reason == ""
+
+
+def test_explicit_rollout_src_declares_restore_unsupported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★P1-1（plan §3.5）：显式 `--rollout-src run/node` 会短路 rl-config ⇒ 「控制台切回
+    在线后自动续跑」**不支持**——必须明说（隐式依赖不得静默失败；否则课程永远等下去）。
+
+    只为离线相关档喊（`local` 与本契约无关，不喊）；同一（课, 实测值）去重——
+    `_rollout_source` 每轮都会被问一次。
+    """
+    from common import log as common_log
+    from trainer import loop_transport as lt
+
+    lines: list[str] = []
+    monkeypatch.setattr(lt, "_RESTORE_UNSUPPORTED_NOTED", set())
+    monkeypatch.setattr(common_log, "log", lines.append)
+
+    args = SimpleNamespace(rollout_src="run", run_iters=-1, course_path="curricula/c5-gae.jsonc")
+    assert lt._rollout_source(args) == "run"
+    assert any("不支持" in ln for ln in lines), lines
+    n = len(lines)
+    assert lt._rollout_source(args) == "run"  # 去重：不再刷第二行
+    assert len(lines) == n
+    # `local` 与这条契约无关：不喊
+    assert (
+        lt._rollout_source(SimpleNamespace(rollout_src="local", run_iters=0, course_path=""))
+        == "local"
+    )
+    assert len(lines) == n
+
+
 # ═══════════════════════ ⑤ 读数：离线盘报名 + 「没人能领的离线项」 ═══════════════════════
 
 
