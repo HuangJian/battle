@@ -147,6 +147,9 @@ export const MASK_DIM = MOVE_DIM + FIRE_DIM // 7 (v2: item head removed)
 export const RL_SHARD_FILES = [
   'obs.npy',
   'scalars.npy',
+  // v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) f4——独立张量，
+  // 与 scalars 同族；旧节点/旧加载器按严格集合校验拒收（MAJOR 4 快拒门）。
+  'extra.npy',
   'a_move.npy',
   'a_fire.npy',
   'lp_move.npy',
@@ -413,7 +416,7 @@ class ScriptedInput {
 }
 
 interface RolloutModel {
-  forward(obs: Uint8Array, scalars: Float32Array): void
+  forward(obs: Uint8Array, scalars: Float32Array, extra?: Float32Array): void
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
   readonly valueOut: Float32Array
@@ -791,6 +794,8 @@ function logProbAt(logits: Float32Array, mask: number[] | null, idx: number): nu
 export interface ShardData {
   obs: Uint8Array[]
   scalars: Float32Array[]
+  /** v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) float32（与 scalars 同族）。 */
+  extra: Float32Array[]
   aMove: number[]
   aFire: number[]
   lpMove: number[]
@@ -807,6 +812,7 @@ function newShard(): ShardData {
   return {
     obs: [],
     scalars: [],
+    extra: [],
     aMove: [],
     aFire: [],
     lpMove: [],
@@ -1224,6 +1230,7 @@ function runOne(
   let pending: {
     obs: Uint8Array
     sc: Float32Array
+    ex: Float32Array
     aMove: number
     aFire: number
     lpMove: number
@@ -1244,6 +1251,7 @@ function runOne(
     if (!pending) return
     shard.obs.push(pending.obs)
     shard.scalars.push(pending.sc)
+    shard.extra.push(pending.ex)
     shard.aMove.push(pending.aMove)
     shard.aFire.push(pending.aFire)
     shard.lpMove.push(pending.lpMove)
@@ -1260,7 +1268,7 @@ function runOne(
       // §368 提速③：obs 只在决策 tick 编码（原本每 tick 都编码，占整局 1.8–2.3%；
       // 非决策 tick 的编码结果无人消费——obs 只在下面 forward 与 pending 快照里用）。
       encoder.encode(world)
-      model.forward(encoder.obs, encoder.scalars)
+      model.forward(encoder.obs, encoder.scalars, encoder.extra)
       const masks = computeMasks(world)
       const mv = sampleCat(model.moveLogits, masks.move, rng)
       const fr = sampleCat(model.fireLogits, masks.fire, rng)
@@ -1300,6 +1308,7 @@ function runOne(
       pending = {
         obs: encoder.obs.slice(),
         sc: encoder.scalars.slice(),
+        ex: encoder.extra.slice(),
         aMove,
         aFire: fr.idx,
         lpMove,
@@ -1704,6 +1713,7 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
   }
   const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
   const scalars = new Float32Array(N * SCALAR_DIM)
+  const extra = new Float32Array(N * 9)
   const aMove = new Uint8Array(N)
   const aFire = new Uint8Array(N)
   const lpMove = new Float32Array(N)
@@ -1715,6 +1725,7 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
   for (let i = 0; i < N; i++) {
     obs.set(d.obs[i], i * OBS_CHANNELS * BOARD * BOARD)
     scalars.set(d.scalars[i], i * SCALAR_DIM)
+    extra.set(d.extra[i], i * 9)
     aMove[i] = d.aMove[i]
     aFire[i] = d.aFire[i]
     lpMove[i] = d.lpMove[i]
@@ -1729,6 +1740,7 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
   return [
     { name: 'obs.npy', data: npyBytes(obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1') },
     { name: 'scalars.npy', data: npyBytes(scalars, [N, SCALAR_DIM], 'f4') },
+    { name: 'extra.npy', data: npyBytes(extra, [N, 9], 'f4') },
     { name: 'a_move.npy', data: npyBytes(aMove, [N], 'u1') },
     { name: 'a_fire.npy', data: npyBytes(aFire, [N], 'u1') },
     { name: 'lp_move.npy', data: npyBytes(lpMove, [N], 'f4') },

@@ -18,6 +18,9 @@ import os
 SHARD_FILES = (
     "obs.npy",
     "scalars.npy",
+    # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) f4。
+    # 严格集合校验 ⇒ 旧节点（无该文件）被**拒收**（MAJOR 4 的云端快拒门）。
+    "extra.npy",
     "a_move.npy",
     "a_fire.npy",
     "lp_move.npy",

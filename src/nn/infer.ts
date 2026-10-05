@@ -18,6 +18,13 @@
 import { OBS_CHANNELS, BOARD, SCALAR_DIM } from './obs-encoder'
 import { noteFeaturesTs, runStudentFeatures } from './conv/conv'
 import { runStudentConvTs, type ConvTsView } from './conv/conv_ts'
+import {
+  SPATIAL_TOWER_C,
+  SPATIAL_TOWER_FC_OUT,
+  SPATIAL_TOWER_FEAT,
+  assertSpatialTowerShapes,
+  spatialTowerForward,
+} from './spatial-tower'
 
 // MOVE_DIM now lives in action-space.ts (single source: index 0 = STOP, 1..4 =
 // directions). Re-exported here so `infer`'s public surface is unchanged.
@@ -31,7 +38,7 @@ export const HEAD_HIDDEN = 64
 
 /** Common forward surface shared by the BC model and the distilled student. */
 export interface ModelLike {
-  forward(obs: Uint8Array, scalars: Float32Array): void
+  forward(obs: Uint8Array, scalars: Float32Array, extra?: Float32Array): void
   readonly inCh: number
   readonly board: number
   readonly scalarDim: number
@@ -53,6 +60,9 @@ interface WeightsJson {
     kind?: string
     h?: number
     d?: number
+    /** v4（plan/policy-spatial-head.plan.md）：腿 A（头 137）/ 腿 B（塔 + 头 151）档。 */
+    policyExtra?: boolean
+    spatialTower?: boolean
   }
   params: Record<string, Param>
 }
@@ -282,6 +292,9 @@ export class StudentModel implements ModelLike {
   readonly h: number
   readonly d: number
   readonly headHidden: number
+  /** v4：腿 A（走位/开火头吃 extra 9）/ 腿 B（空间塔；头吃 tower+scalars+extra）。 */
+  readonly policyExtra: boolean
+  readonly spatialTower: boolean
 
   private stemW: Float32Array // [h, inCh+2, 3, 3]
   private stemB: Float32Array // [h]
@@ -317,6 +330,11 @@ export class StudentModel implements ModelLike {
   private goalConvB: Float32Array | null // [1]
   private engageW: Float32Array | null // [2, 137]
   private engageB: Float32Array | null // [2]
+  // v4 spatial tower (leg B): required when arch.spatialTower (strict — missing ⇒ throw).
+  private spatialProjW: Float32Array | null // [C, h, 1, 1]
+  private spatialProjB: Float32Array | null // [C]
+  private spatialFcW: Float32Array | null // [112, 128]
+  private spatialFcB: Float32Array | null // [112]
 
   // ---- reusable buffers (no per-tick allocation) ----
   private in16: Float32Array // [(inCh+2) * board * board] (obs 全通道 + 2 coords)
@@ -328,6 +346,11 @@ export class StudentModel implements ModelLike {
   private hidden: Float32Array // [headHidden]
   /** inject concat buffer (M4): hidden(128) + inject(9) -> [137]. */
   private hiddenInject: Float32Array
+  /** v4 头输入复用缓冲（128/137/151；零分配）。 */
+  private headIn: Float32Array
+  private spatialZ: Float32Array // [C*sp] 塔中间缓冲
+  private spatialVec: Float32Array // [128] 分区均值
+  private spatialOut: Float32Array // [112] 塔 FC 输出
   /** TS 卷积兜底（conv/conv_ts.ts）的 buffer 视图：构造期建一次 ⇒ 每 tick 零分配。
    *  它同时是「这些字段确实被用到」的显式声明：加速后端经 `this as never` 取字段，
    *  TS 侧则走这份类型化视图。 */
@@ -343,7 +366,7 @@ export class StudentModel implements ModelLike {
 
   constructor(
     params: Record<string, Float32Array>,
-    arch: { h?: number; d?: number },
+    arch: { h?: number; d?: number; policyExtra?: boolean; spatialTower?: boolean },
     intentHeads?: boolean,
   ) {
     const p = (name: string): Float32Array => {
@@ -354,6 +377,11 @@ export class StudentModel implements ModelLike {
     this.h = arch.h ?? 64
     this.d = arch.d ?? 8
     this.headHidden = 128
+    this.policyExtra = arch.policyExtra === true
+    this.spatialTower = arch.spatialTower === true
+    if (this.spatialTower && !this.policyExtra) {
+      throw new Error('StudentModel: spatialTower 需要 policyExtra（头输入 151 含 extra 9）')
+    }
     const h = this.h
     const sp = BOARD * BOARD
 
@@ -428,6 +456,25 @@ export class StudentModel implements ModelLike {
       this.engageB = null
     }
 
+    // v4 spatial tower（腿 B）：arch 开启时权重**必须存在**（缺 ⇒ 响亮拒绝，S0-c strict 态）。
+    if (this.spatialTower) {
+      this.spatialProjW = p('spatial_proj.weight')
+      this.spatialProjB = p('spatial_proj.bias')
+      this.spatialFcW = p('spatial_fc.weight')
+      this.spatialFcB = p('spatial_fc.bias')
+      assertSpatialTowerShapes(
+        this.spatialProjW,
+        this.spatialProjB,
+        this.spatialFcW,
+        this.spatialFcB,
+      )
+    } else {
+      this.spatialProjW = null
+      this.spatialProjB = null
+      this.spatialFcW = null
+      this.spatialFcB = null
+    }
+
     // v3：in_ch = OBS_CHANNELS(16) + 2 coord 通道（原名 in16 保留——缓冲语义是
     // 「obs 全通道 + 2 coord」，尺寸随 schema 常量走，勿写死）。
     this.in16 = new Float32Array((OBS_CHANNELS + 2) * sp)
@@ -446,6 +493,16 @@ export class StudentModel implements ModelLike {
     this.pooled = new Float32Array(h)
     this.hidden = new Float32Array(this.headHidden)
     this.hiddenInject = new Float32Array(this.headHidden + 9)
+    // v4：头输入宽度 —— legacy 128 / 腿 A 137 / 腿 B 151（复用缓冲，零分配）。
+    const headInLen = this.spatialTower
+      ? SPATIAL_TOWER_FC_OUT + SCALAR_DIM + 9
+      : this.policyExtra
+        ? this.headHidden + 9
+        : this.headHidden
+    this.headIn = new Float32Array(headInLen)
+    this.spatialZ = new Float32Array(SPATIAL_TOWER_C * sp)
+    this.spatialVec = new Float32Array(SPATIAL_TOWER_FEAT)
+    this.spatialOut = new Float32Array(SPATIAL_TOWER_FC_OUT)
     this.moveLogits = new Float32Array(MOVE_DIM)
     this.fireLogits = new Float32Array(FIRE_DIM)
     this.valueOut = new Float32Array(1)
@@ -474,11 +531,39 @@ export class StudentModel implements ModelLike {
     }
   }
 
-  forward(obs: Uint8Array, scalars: Float32Array): void {
+  forward(obs: Uint8Array, scalars: Float32Array, extra?: Float32Array): void {
     this.features(obs, scalars)
 
-    this.linear(this.hidden, this.moveW, this.moveB, this.moveLogits, MOVE_DIM, this.headHidden)
-    this.linear(this.hidden, this.fireW, this.fireB, this.fireLogits, FIRE_DIM, this.headHidden)
+    // v4：头输入装配（legacy 128 直用 hidden；腿 A hidden+extra=137；腿 B tower+scalars+extra=151）。
+    let pf: Float32Array = this.hidden
+    if (this.spatialTower) {
+      spatialTowerForward(
+        this.bufA,
+        this.spatialProjW as Float32Array,
+        this.spatialProjB as Float32Array,
+        this.spatialFcW as Float32Array,
+        this.spatialFcB as Float32Array,
+        this.spatialZ,
+        this.spatialVec,
+        this.spatialOut,
+      )
+      if (!extra) throw new Error('StudentModel: spatialTower 模型必须喂 extra(9)')
+      let o = 0
+      this.headIn.set(this.spatialOut, o)
+      o += SPATIAL_TOWER_FC_OUT
+      this.headIn.set(scalars, o)
+      o += this.scalarDim
+      this.headIn.set(extra, o)
+      pf = this.headIn
+    } else if (this.policyExtra) {
+      if (!extra) throw new Error('StudentModel: policyExtra 模型必须喂 extra(9)')
+      this.headIn.set(this.hidden)
+      this.headIn.set(extra, this.headHidden)
+      pf = this.headIn
+    }
+
+    this.linear(pf, this.moveW, this.moveB, this.moveLogits, MOVE_DIM, pf.length)
+    this.linear(pf, this.fireW, this.fireB, this.fireLogits, FIRE_DIM, pf.length)
     if (this.valueW.length === this.headHidden) {
       this.linear(this.hidden, this.valueW, this.valueB, this.valueOut, 1, this.headHidden)
     } else {

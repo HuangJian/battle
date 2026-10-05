@@ -95,13 +95,14 @@ describe('dist sampler-agent helpers (plan/distributed-rollout.md v3.3)', () => 
     expect(d).not.toBe(a) // 路径变化也要改变 hash
   })
 
-  it('shard file set matches ppo.py load_shard expectation (10 npy)', () => {
-    // v2 schema (AI-No-Items-Warmstart M2) deleted the item head → the shard
-    // dropped a_item/lp_item (12 → 10 npy). ppo.py load_shard loads exactly
-    // these 10 keys — mirror them here (independent re-statement).
+  it('shard file set matches ppo.py load_shard expectation (11 npy)', () => {
+    // v2 schema (AI-No-Items-Warmstart M2) deleted the item head → 12 → 10 npy；
+    // v4（plan/policy-spatial-head.plan.md S0-b）加 POLICY_EXTRA(9) → 11 npy。
+    // ppo.py load_shard 精确消费这套文件名——镜像在此（独立重述）。
     const expected = [
       'obs.npy',
       'scalars.npy',
+      'extra.npy',
       'a_move.npy',
       'a_fire.npy',
       'lp_move.npy',

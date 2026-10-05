@@ -39,7 +39,11 @@ MOVE_LABEL_SEMANTICS = "stop0"
 
 # Schema major version. Written into every npy shard manifest and into the
 # exported weights file. Bump +1 on ANY channel/scalar/action layout change.
-OBS_SCHEMA_MAJOR = 3
+#
+# v4 (plan/policy-spatial-head.plan.md §4 Step 2 S0-b, 2026-10-05)：新增
+# POLICY_EXTRA(9) 张量（观测流新增一张量 ⇒ 旧代码读不了 ⇒ MAJOR 是云端快拒门；
+# 指纹只防语义错位、MAJOR 防版本混跑，两道门管不同的事）。
+OBS_SCHEMA_MAJOR = 4
 
 # ---- Channel index map (plan §1.1 + v3: 14/15) ----
 # 全局规则（hy E1 / dsf A2，实施者必读）：
@@ -102,6 +106,32 @@ DIR_FROM_INDEX = ["up", "down", "left", "right"]
 # Indices that flip sign under mirrorX (relative-direction x-components).
 # v3：15/18 保留，29 = vx 冰面横向速度（s28 vy 不翻）。
 SCALAR_X_INDICES = [15, 18, 29]
+
+# ---- POLICY_EXTRA 布局（v4，plan/policy-spatial-head.plan.md §3.2 冻结）----
+# 9 维方向直方图（**独立张量**，不进 scalars；去给走位/开火头，critic 输入集不动）：
+#   0..3 前/后/左/右 威胁计数（19px 命中带 + 遮挡），min(n,4)/4；
+#   4..7 前/后/左/右 命中距离 clamp01(px/416)，打不到 ⇒ 1.5 哨兵；
+#   8    包夹度 min(左,右,4)/4。
+# 方位 = 玩家相对（前 = 炮口朝向）。dtype = float32（与 scalars 同族，不是 obs 的 u1 打包）。
+POLICY_EXTRA_DIM = 9
+POLICY_EXTRA_LAYOUT = [
+    (0, "threatFront"),
+    (1, "threatBack"),
+    (2, "threatLeft"),
+    (3, "threatRight"),
+    (4, "hitDistFront"),
+    (5, "hitDistBack"),
+    (6, "hitDistLeft"),
+    (7, "hitDistRight"),
+    (8, "pincer"),
+]
+assert len(POLICY_EXTRA_LAYOUT) == POLICY_EXTRA_DIM
+assert sorted(i for i, _ in POLICY_EXTRA_LAYOUT) == list(range(POLICY_EXTRA_DIM))
+
+# mirrorX：左右语义维**互换**（计数/距离的镜像不是取负）。
+# ⚠ 命名：plan §4-S0b 所称 `EXTRA_X_INDICES` 即本表——因这些维语义是「左右互换」而非
+# 标量族的「x 分量取负」，实现为 swap 对。TS 侧 POLICY_EXTRA_MIRROR_SWAPS 逐字同表。
+EXTRA_MIRROR_SWAPS = [(2, 3), (6, 7)]
 
 SCALAR_LAYOUT = [
     (0, "slack"),  # min enemy killSlack, normalized 0..1
@@ -176,7 +206,7 @@ def _fnv1a(s: str) -> str:
 # 同一 payload（字段序/连接符一致）；任何常量变动指纹必变 ⇒ 双端单测红 +
 # 写进 npy shard manifest。派生公式的正确性由单测另锁，指纹只钉「常量身份」。
 _FINGERPRINT_PARTS = [
-    "v3",
+    f"v{OBS_SCHEMA_MAJOR}",
     str(OBS_SCHEMA_MAJOR),
     str(OBS_CHANNELS),
     str(SCALAR_DIM),
@@ -190,5 +220,14 @@ _FINGERPRINT_PARTS = [
     ",".join(str(b) for b in BULLET_SPEED_BUCKETS_PX),
     str(SPAWN_COUNTDOWN_MS),
     str(600),  # WAVE_HEAT_TICKS（TS const，plan §1.1 ch13）
+    # POLICY_EXTRA 身份（v4，一项）：维度 + 语义名序 + 镜像互换对。
+    # TS 侧同串：`[String(POLICY_EXTRA_DIM), POLICY_EXTRA_NAMES.join(","), SWAPS.map([a,b]=>"a:b").join(",")].join("|")`。
+    "|".join(
+        [
+            str(POLICY_EXTRA_DIM),
+            ",".join(name for _, name in POLICY_EXTRA_LAYOUT),
+            ",".join(f"{a}:{b}" for a, b in EXTRA_MIRROR_SWAPS),
+        ]
+    ),
 ]
 SCHEMA_FINGERPRINT = _fnv1a("|".join(_FINGERPRINT_PARTS))

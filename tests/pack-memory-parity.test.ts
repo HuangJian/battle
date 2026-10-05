@@ -58,6 +58,7 @@ function makeShard(n = 5): ShardData {
   return {
     obs,
     scalars,
+    extra: Array.from({ length: n }, () => new Float32Array(9)), // v4: POLICY_EXTRA(9)
     aMove: Array.from({ length: n }, () => 1),
     aFire: Array.from({ length: n }, (_, i) => i % 2),
     lpMove: Array.from({ length: n }, () => -0.5),

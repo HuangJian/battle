@@ -71,6 +71,9 @@ class NNDataset(Dataset):
     ):
         self.obs = data["obs"].astype(np.uint8)
         self.scalars = data["scalars"].astype(np.float32)
+        # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) 随样本走；
+        # 旧 shard（无该键）在 verify_shard_schema/调用方处已拦——这里缺失即 KeyError（响亮）。
+        self.extra = data["extra"].astype(np.float32)  # (N,9)
         self.actions = data["actions"].astype(np.int64)  # (N,2) move,fire
         self.masks = data["masks"].astype(np.float32)  # (N,7)
         self.conditions = data["conditions"].astype(np.int64)
@@ -91,16 +94,19 @@ class NNDataset(Dataset):
     def __getitem__(self, idx: int):
         obs = self.obs[idx]
         sc = self.scalars[idx]
+        ex = self.extra[idx]
         mv = int(self.actions[idx, 0])
         fr = int(self.actions[idx, 1])
         mask = self.masks[idx]
         ret = self.returns[idx]
         if self.augment and self.rng.random() < self.mirror_p:
-            obs, sc, mv = mirror_x(obs, sc, mv)
+            # extra 与 obs/scalars 同一抽签、同一次镜像（自洽不可分家）。
+            obs, sc, mv, ex = mirror_x(obs, sc, mv, ex)
         # Torch expects (C,H,W); obs is (C,H,W) already.
         return (
             obs,
             sc,
+            ex,
             mv,
             fr,
             mask[:MOVE_DIM],

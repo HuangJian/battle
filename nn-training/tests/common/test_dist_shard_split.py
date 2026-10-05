@@ -114,6 +114,8 @@ def test_dist_common_forwards_every_moved_name() -> None:
 PETICK = (
     "obs.npy",
     "scalars.npy",
+    # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9)。
+    "extra.npy",
     "a_move.npy",
     "a_fire.npy",
     "lp_move.npy",

@@ -168,7 +168,7 @@ class ScriptedInput {
 }
 
 interface RolloutModel {
-  forward(obs: Uint8Array, scalars: Float32Array): void
+  forward(obs: Uint8Array, scalars: Float32Array, extra?: Float32Array): void
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
   readonly valueOut: Float32Array
@@ -691,7 +691,7 @@ export function runEvalOne(
         // 的真 A/B：outcome/ticks/win/score/kills/hitRate/pickups 全同）。
         // 这条会随内核优化变得更值钱：浪费占比 ≈ 9 × 编码µs / featuresµs。
         encoder.encode(world)
-        model!.forward(encoder.obs, encoder.scalars)
+        model!.forward(encoder.obs, encoder.scalars, encoder.extra)
         if (t === 0 && process.env.EVAL_DEBUG) {
           console.error(
             `[dbg] weightsSha=${createHash('sha256').update(weightsText).digest('hex').slice(0, 12)} move=[${Array.from(model!.moveLogits).map((x) => x.toFixed(2))}] fire=[${Array.from(model!.fireLogits).map((x) => x.toFixed(2))}]`,

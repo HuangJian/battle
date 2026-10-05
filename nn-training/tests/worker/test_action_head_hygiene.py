@@ -57,6 +57,11 @@ def test_live_pipeline_never_imports_the_dead_teacher_model() -> None:
 
 
 def test_live_head_is_built_from_schema_move_dim() -> None:
-    """move 头必须取 common.schema.MOVE_DIM——字面量会让 dims 变更漏改而静默错配。"""
+    """move/fire 头必须取 common.schema.MOVE_DIM / FIRE_DIM——字面量会让 dims 变更漏改而静默错配。
+
+    v4（plan/policy-spatial-head.plan.md）：头输入宽度改为按档计算的 `head_in`
+    （legacy 128 / 腿 A 137 / 腿 B 151），但**输出维仍必须来自 schema 常量**（本测试的本义）。
+    """
     src = (ROOT / "worker" / "models" / "student.py").read_text(encoding="utf-8")
-    assert "nn.Linear(head_hidden, MOVE_DIM" in src
+    assert "nn.Linear(head_in, MOVE_DIM" in src
+    assert "nn.Linear(head_in, FIRE_DIM" in src

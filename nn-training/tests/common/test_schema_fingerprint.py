@@ -17,8 +17,11 @@ import numpy as np
 
 from common.schema import (
     BOARD,
+    EXTRA_MIRROR_SWAPS,
     OBS_CHANNELS,
     OBS_SCHEMA_MAJOR,
+    POLICY_EXTRA_DIM,
+    POLICY_EXTRA_LAYOUT,
     SCALAR_DIM,
     SCALAR_LAYOUT,
     SCALAR_X_INDICES,
@@ -30,7 +33,7 @@ from common.schema import (
 BOARD_ANCHOR = 26
 
 # 必须与 src/nn/obs-encoder.ts::SCHEMA_FINGERPRINT 逐字相同（两边单测共锚）。
-FINGERPRINT = "06142cb1"
+FINGERPRINT = "9bd651e3"
 
 # 必须与 src/nn/obs-encoder.ts::SCALAR_NAMES 逐字同序（双端共锚）。只钉维度挡不住
 # 「交换两个标量含义」——语义序列进指纹后这类漏同步才现形。
@@ -73,11 +76,31 @@ def test_fingerprint_matches_ts_anchor() -> None:
 
 
 def test_fingerprint_companion_constants() -> None:
-    """配套常量与指纹同版（v3：16ch / 30sc / X=[15,18,29]）。"""
-    assert OBS_SCHEMA_MAJOR == 3
+    """配套常量与指纹同版（v4：16ch / 30sc / X=[15,18,29] / extra 9）。"""
+    assert OBS_SCHEMA_MAJOR == 4
     assert OBS_CHANNELS == 16
     assert SCALAR_DIM == 30
     assert list(SCALAR_X_INDICES) == [15, 18, 29]
+    assert POLICY_EXTRA_DIM == 9
+
+
+def test_policy_extra_layout_names_match_ts_anchor() -> None:
+    """POLICY_EXTRA 语义序列与镜像互换对与 TS 侧逐字同表（指纹已含）。
+
+    TS 侧：`src/nn/policy-extra.ts::POLICY_EXTRA_NAMES / POLICY_EXTRA_MIRROR_SWAPS`。
+    """
+    assert [name for _, name in POLICY_EXTRA_LAYOUT] == [
+        "threatFront",
+        "threatBack",
+        "threatLeft",
+        "threatRight",
+        "hitDistFront",
+        "hitDistBack",
+        "hitDistLeft",
+        "hitDistRight",
+        "pincer",
+    ]
+    assert [tuple(p) for p in EXTRA_MIRROR_SWAPS] == [(2, 3), (6, 7)]
 
 
 def test_scalar_layout_names_match_ts_anchor() -> None:

@@ -92,6 +92,7 @@ def _write_synthetic_shard(
     rng = np.random.default_rng(seed * 131 + 7)
     np.save(d / "obs.npy", rng.integers(0, 256, (n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8))
     np.save(d / "scalars.npy", rng.random((n, SCALAR_DIM), dtype=np.float32))
+    np.save(d / "extra.npy", rng.random((n, 9), dtype=np.float32))  # v4：POLICY_EXTRA(9)
     np.save(d / "a_move.npy", rng.integers(0, 5, n).astype(np.int64))
     np.save(d / "a_fire.npy", rng.integers(0, 2, n).astype(np.int64))
     np.save(d / "lp_move.npy", (rng.random(n) - 2).astype(np.float32))

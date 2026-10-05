@@ -329,6 +329,9 @@ LAYERS: dict[str, int] = {
     "worker.models.goal_net": 3,
     "worker.models.intent_net": 3,
     "worker.ppo.engine": 3,
+    # v4（plan/policy-spatial-head.plan.md S0-c）：腿 A/B 起点权重转换（一次性 CLI；
+    # 函数内 import worker.models.student（L2）⇒ 拓扑秩 = L3）。
+    "worker.scripts.init_spatial_leg": 3,
     "worker.train.bc": 3,
     # L4（12 个）
     "worker.iter_job": 4,

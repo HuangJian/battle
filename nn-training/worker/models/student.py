@@ -51,11 +51,17 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from common.schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
+from common.schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
 
 DEFAULT_H = 64
 DEFAULT_D = 8
 DEFAULT_HEAD_HIDDEN = 128
+
+# 空间塔冻结值（plan/policy-spatial-head.plan.md §3.3；TS 孪生 src/nn/spatial-tower.ts）。
+SPATIAL_TOWER_C = 8
+SPATIAL_TOWER_POOL = 4
+SPATIAL_TOWER_FC_OUT = 112
+SPATIAL_TOWER_FEAT = SPATIAL_TOWER_C * SPATIAL_TOWER_POOL * SPATIAL_TOWER_POOL  # 128
 
 
 class ConvMixerBlock(nn.Module):
@@ -87,7 +93,15 @@ class StudentNet(nn.Module):
     Input:
       obs:     (B, 16, 26, 26) uint8 — encoder output (v3: 16 channels)
       scalars: (B, 30) float32  (v3: 30 scalars)
+      extra:   (B, 9) float32   — POLICY_EXTRA（v4；仅 policy_extra=True 时消费）
     Output: (move_logits, fire_logits)（v2：双头，item 头已删除）.
+
+    v4（plan/policy-spatial-head.plan.md §3）两档新架构（默认关 = 逐字节旧行为）：
+      · policy_extra=True（腿 A）：走位/开火头输入 = hidden(128) + extra(9) = 137；
+        fc/value 一字不动（critic 输入集不变）。
+      · spatial_tower=True（腿 B）：bufA → 1×1 64→8 + ReLU + 4×4 分区均值(128) →
+        FC(128→112)；头输入 = tower(112) + scalars(30) + extra(9) = 151。fc/value 仍
+        消费 pooled+scalars（不动）。
     """
 
     def __init__(
@@ -98,6 +112,8 @@ class StudentNet(nn.Module):
         h: int = DEFAULT_H,
         d: int = DEFAULT_D,
         head_hidden: int = DEFAULT_HEAD_HIDDEN,
+        policy_extra: bool = False,
+        spatial_tower: bool = False,
     ):
         super().__init__()
         self.in_ch = in_ch
@@ -106,12 +122,25 @@ class StudentNet(nn.Module):
         self.h = h
         self.d = d
         self.head_hidden = head_hidden
+        self.policy_extra = bool(policy_extra)
+        self.spatial_tower = bool(spatial_tower)
+        if self.spatial_tower and not self.policy_extra:
+            # 腿 B 的 151 = tower(112)+scalars(30)+extra(9)；extra 是规格的一部分。
+            raise ValueError("spatial_tower 需要 policy_extra=True（头输入 151 含 extra 9）")
 
         self.stem = nn.Conv2d(in_ch + 2, h, 3, padding=1, bias=True)  # +2 coord channels
         self.blocks = nn.ModuleList([ConvMixerBlock(h) for _ in range(d)])
         self.fc = nn.Linear(h + scalar_dim, head_hidden, bias=True)
-        self.move_head = nn.Linear(head_hidden, MOVE_DIM, bias=True)
-        self.fire_head = nn.Linear(head_hidden, FIRE_DIM, bias=True)
+        if self.spatial_tower:
+            self.spatial_proj = nn.Conv2d(h, SPATIAL_TOWER_C, 1, bias=True)
+            self.spatial_fc = nn.Linear(SPATIAL_TOWER_FEAT, SPATIAL_TOWER_FC_OUT, bias=True)
+            head_in = SPATIAL_TOWER_FC_OUT + scalar_dim + POLICY_EXTRA_DIM
+        elif self.policy_extra:
+            head_in = head_hidden + POLICY_EXTRA_DIM
+        else:
+            head_in = head_hidden
+        self.move_head = nn.Linear(head_in, MOVE_DIM, bias=True)
+        self.fire_head = nn.Linear(head_in, FIRE_DIM, bias=True)
 
         self._init_weights()
         # P1-10（2026-09-02）：输入归一化**折进首层权重**。obs 与 coord 通道同为
@@ -125,16 +154,13 @@ class StudentNet(nn.Module):
 
     def _init_weights(self) -> None:
         for m in self.modules():
-            if isinstance(m, nn.Conv2d):
+            if isinstance(m, (nn.Conv2d, nn.Linear)):
                 nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
                 if m.bias is not None:
                     nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Linear):
-                nn.init.kaiming_uniform_(m.weight, nonlinearity="relu")
-                nn.init.zeros_(m.bias)
 
     def arch(self) -> dict:
-        return {
+        d = {
             "kind": "student",
             "in_ch": self.in_ch,
             "board": self.board,
@@ -143,30 +169,78 @@ class StudentNet(nn.Module):
             "d": self.d,
             "head_hidden": self.head_hidden,
         }
+        # v4：只在开启时写入（旧 arch 字典逐字节不变 ⇒ 旧权重/旧消费方零影响）。
+        if self.policy_extra:
+            d["policyExtra"] = True
+        if self.spatial_tower:
+            d["spatialTower"] = True
+        return d
 
-    def features(self, obs: torch.Tensor, scalars: torch.Tensor) -> torch.Tensor:
-        """Shared trunk → hidden (B, head_hidden). Reused by PPO value head."""
+    def _spatial(self, obs: torch.Tensor) -> torch.Tensor:
+        """obs → bufA (B,h,26,26)（GAP 前的空间特征；tower 与 pooled 共用一次前向）。"""
         coords = coord_channels(self.board, obs.device).float().unsqueeze(0)
-        x = torch.cat(
-            [obs.float(), coords.expand(obs.shape[0], -1, -1, -1)], dim=1
-        )  # (B, 16, 26, 26)
+        x = torch.cat([obs.float(), coords.expand(obs.shape[0], -1, -1, -1)], dim=1)
         x = F.relu(self.stem(x))
         for b in self.blocks:
             x = b(x)
+        return x
+
+    def features(
+        self, obs: torch.Tensor, scalars: torch.Tensor, buf: torch.Tensor | None = None
+    ) -> torch.Tensor:
+        """Shared trunk → hidden (B, head_hidden). Reused by PPO value head.
+
+        v4：`buf` 可传入已算好的 bufA（tower 路径避免同批两次主干前向）。
+        """
+        x = buf if buf is not None else self._spatial(obs)
         x = x.mean(dim=(2, 3))  # GAP → (B, h)
-        x = torch.cat([x, scalars], dim=1)  # (B, h + 19)
+        x = torch.cat([x, scalars], dim=1)  # (B, h + scalar_dim)
         return F.relu(self.fc(x))
 
+    def _require_extra(self, extra: torch.Tensor | None) -> torch.Tensor:
+        if extra is None:
+            raise ValueError(
+                "student: policy_extra=True 的模型必须喂 POLICY_EXTRA(9)（extra=None 会静默用 0）"
+            )
+        return extra.float()
+
+    def policy_features(
+        self,
+        obs: torch.Tensor,
+        scalars: torch.Tensor,
+        extra: torch.Tensor | None,
+        hidden: torch.Tensor | None = None,
+        buf: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """走位/开火头的输入（legacy=hidden；腿 A=hidden+extra；腿 B=tower+scalars+extra）。"""
+        if self.spatial_tower:
+            b = buf if buf is not None else self._spatial(obs)
+            z = F.relu(self.spatial_proj(b))
+            p = F.adaptive_avg_pool2d(z, SPATIAL_TOWER_POOL).flatten(1)  # (B,128)
+            p = self.spatial_fc(p)  # (B,112)（FC 128→112 是塔的一部分，plan §3.3）
+            return torch.cat([p, scalars, self._require_extra(extra)], dim=1)
+        h = hidden if hidden is not None else self.features(obs, scalars, buf)
+        if self.policy_extra:
+            return torch.cat([h, self._require_extra(extra)], dim=1)
+        return h
+
     def forward(
-        self, obs: torch.Tensor, scalars: torch.Tensor
+        self, obs: torch.Tensor, scalars: torch.Tensor, extra: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, ...]:
-        """obs: (B,14,26,26) u1; scalars: (B,19) f4 → (move_logits, fire_logits).
+        """obs: (B,16,26,26) u1; scalars: (B,30) f4; extra: (B,9) f4（policy_extra 时必给）
+        → (move_logits, fire_logits)。
 
         返回类型刻意写成变长 tuple：子类（PPOStudent / IntentNet / GoalNet）会在
         尾部追加 value 等头，固定 2 元组会让每处 override 都违反 LSP。运行时不变。
         """
-        h = self.features(obs, scalars)
-        return self.move_head(h), self.fire_head(h)
+        if self.spatial_tower:
+            buf = self._spatial(obs)
+            h = self.features(obs, scalars, buf)
+            pf = self.policy_features(obs, scalars, extra, hidden=h, buf=buf)
+        else:
+            h = self.features(obs, scalars)
+            pf = self.policy_features(obs, scalars, extra, hidden=h)
+        return self.move_head(pf), self.fire_head(pf)
 
 
 class PPOStudent(StudentNet):
@@ -183,18 +257,29 @@ class PPOStudent(StudentNet):
         self.value_head = nn.Linear(self.head_hidden, 1)
 
     def forward(
-        self, obs: torch.Tensor, scalars: torch.Tensor
+        self, obs: torch.Tensor, scalars: torch.Tensor, extra: torch.Tensor | None = None
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        h = self.features(obs, scalars)
-        return self.move_head(h), self.fire_head(h), self.value_head(h)
+        if self.spatial_tower:
+            buf = self._spatial(obs)
+            h = self.features(obs, scalars, buf)
+            pf = self.policy_features(obs, scalars, extra, hidden=h, buf=buf)
+        else:
+            h = self.features(obs, scalars)
+            pf = self.policy_features(obs, scalars, extra, hidden=h)
+        return self.move_head(pf), self.fire_head(pf), self.value_head(h)
 
     @torch.no_grad()
-    def predict(self, obs: torch.Tensor, scalars: torch.Tensor | None = None):
+    def predict(
+        self,
+        obs: torch.Tensor,
+        scalars: torch.Tensor | None = None,
+        extra: torch.Tensor | None = None,
+    ):
         """Inference helper: returns softmax-prob dicts (mirrors TS infer)."""
         self.eval()
         if scalars is None:
             scalars = torch.zeros(obs.shape[0], self.scalar_dim)
-        m, f, _v = self.forward(obs, scalars)
+        m, f, _v = self.forward(obs, scalars, extra)
         return (
             torch.softmax(m, dim=-1),
             torch.softmax(f, dim=-1),
@@ -205,26 +290,40 @@ def param_count(model: nn.Module) -> int:
     return sum(int(p.numel()) for p in model.parameters())
 
 
-def export_student_golden(path: str, h: int = DEFAULT_H, d: int = DEFAULT_D, seed: int = 20260903) -> None:
+def export_student_golden(
+    path: str,
+    h: int = DEFAULT_H,
+    d: int = DEFAULT_D,
+    seed: int = 20260903,
+    policy_extra: bool = False,
+    spatial_tower: bool = False,
+) -> None:
     """轴 2 parity golden（PPOStudent 生产路径，kind='student'）。
 
     输出 JSON：{ format:"student-golden", version, h, d, head_hidden, seed,
-                 obs, scalars, moveLogits:[5], fireLogits:[2], valueLogits:[1],
-                 params（stem/blocks/fc/move_head/fire_head/value_head）}
-    TS 端 buildModelFromText(arch.kind='student', h, d) → forward() 对比三头。
+                 obs, scalars, [extra,] moveLogits:[5], fireLogits:[2], valueLogits:[1],
+                 [policyExtra, spatialTower,] params（stem/blocks/fc/move_head/fire_head/value_head
+                 [+spatial_proj/spatial_fc]）}
+    TS 端 buildModelFromText(arch.kind='student', h, d[, policyExtra/spatialTower]) →
+    forward() 对比三头。
 
     为什么需要（2026-09-03 审计）：goal/intent golden 只覆盖 StudentNet 主干+专用头，
     从不触碰 **per-tick 策略头（move_head/fire_head + 128 宽 value_head）**——而这是
-    export-rl-rollout.ts / s5-open20 活路径。任一侧改这些头或主干都会在此变红。"""
+    export-rl-rollout.ts / s5-open20 活路径。任一侧改这些头或主干都会在此变红。
+
+    v4（plan/policy-spatial-head.plan.md）：policy_extra/spatial_tower 两档新架构各自的
+    golden 由本函数导出（同一 seed 族）；旧调用（不带 flag）输出逐字节不变。
+    """
     torch.manual_seed(seed)
     rng = torch.Generator().manual_seed(seed)
     obs = torch.randint(0, 256, (1, OBS_CHANNELS, BOARD, BOARD), generator=rng, dtype=torch.uint8)
     sc = (torch.rand(1, SCALAR_DIM, generator=rng) - 0.5) * 4
+    ex = (torch.rand(1, POLICY_EXTRA_DIM, generator=rng) - 0.25) * 1.5  # 覆盖哨兵 1.5 附近
 
     torch.manual_seed(seed + 1)
-    m = PPOStudent(h=h, d=d).eval()
+    m = PPOStudent(h=h, d=d, policy_extra=policy_extra, spatial_tower=spatial_tower).eval()
     with torch.no_grad():
-        mv, fr, v = m(obs, sc)  # PPOStudent: (move, fire, value)
+        mv, fr, v = m(obs, sc, ex if policy_extra else None)  # PPOStudent: (move, fire, value)
 
     from worker.data.weights_io import tensor_to_b64
 
@@ -245,10 +344,18 @@ def export_student_golden(path: str, h: int = DEFAULT_H, d: int = DEFAULT_D, see
         "valueLogits": [float(v) for v in v.flatten().tolist()],
         "params": params,
     }
+    if policy_extra:
+        golden["policyExtra"] = True
+        golden["extra"] = [float(v) for v in ex.flatten().tolist()]
+    if spatial_tower:
+        golden["spatialTower"] = True
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w", encoding="utf-8") as f:
         json.dump(golden, f)
-    print(f"student golden written: {path} (h={h} d={d} head_hidden={m.head_hidden} params={len(params)})")
+    print(
+        f"student golden written: {path} (h={h} d={d} head_hidden={m.head_hidden} "
+        f"policyExtra={policy_extra} spatialTower={spatial_tower} params={len(params)})"
+    )
 
 
 if __name__ == "__main__":
@@ -261,17 +368,29 @@ if __name__ == "__main__":
     ap.add_argument("--h", type=int, default=DEFAULT_H)
     ap.add_argument("--d", type=int, default=DEFAULT_D)
     ap.add_argument("--golden-seed", type=int, default=20260903)
+    ap.add_argument("--policy-extra", action="store_true", help="v4 腿 A 档（头 137）golden")
+    ap.add_argument("--spatial-tower", action="store_true", help="v4 腿 B 档（塔 + 头 151）golden")
     args = ap.parse_args()
 
     if args.golden:
-        export_student_golden(args.golden, args.h, args.d, args.golden_seed)
+        export_student_golden(
+            args.golden,
+            args.h,
+            args.d,
+            args.golden_seed,
+            policy_extra=args.policy_extra,
+            spatial_tower=args.spatial_tower,
+        )
         raise SystemExit(0)
 
-    m = StudentNet()
+    m = StudentNet(
+        policy_extra=args.policy_extra, spatial_tower=args.spatial_tower
+    )
     n = param_count(m)
     print(f"StudentNet params: {n} (~{n / 1000:.1f}K)  budget<=200K: {n <= 200_000}")
     dummy_obs = torch.zeros(2, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
     dummy_sc = torch.zeros(2, SCALAR_DIM)
-    mv, fr = m(dummy_obs, dummy_sc)
+    dummy_ex = torch.zeros(2, POLICY_EXTRA_DIM) if args.policy_extra else None
+    mv, fr = m(dummy_obs, dummy_sc, dummy_ex)
     print("move", tuple(mv.shape), "fire", tuple(fr.shape))
     print("arch:", m.arch())

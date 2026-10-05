@@ -189,8 +189,11 @@ export function enemyBulletLaneWeightTick(
  * ⚠ 玩家身体的格跨度按**像素**算（`floor(x/CELL)` … `floor((x+w-1)/CELL)`），不是
  * 「中心格 ±1」：32px 的身体骑线时可以跨 3 格（骑线位置由 scrum margin 吸收的是
  * **分类**，不是遮挡 — 遮挡问的是「这一发物理上能不能到我」，按像素算才是真值）。
+ *
+ * 2026-10-05 导出（plan/policy-spatial-head.plan.md §3.2：POLICY_EXTRA 的「能打中」
+ * 射线与威胁计数必须复用同族口径；评审给的两个选项「导出或搬迁」取导出，零行为改动）。
  */
-function laneOccluded(
+export function laneOccluded(
   tileMap: TileMap,
   srcCol: number,
   srcRow: number,

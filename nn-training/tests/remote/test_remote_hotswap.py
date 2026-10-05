@@ -65,7 +65,18 @@ def test_request_reload_requires_supervisor(monkeypatch: pytest.MonkeyPatch) -> 
     assert ei.value.code == W.HOT_RELOAD_EXIT == 86
 
 
-def test_worker_loop_hotswap_exits_for_supervisor_respawn(monkeypatch: pytest.MonkeyPatch) -> None:
+def _wd(tmp_path: Path) -> Path:
+    """per-test 唯一工作目录（2026-10-05：共用 `/tmp/x` 在 xdist 下与 work_dir
+    sweep 互踩 ⇒ PermissionError；路径语义不变，只是不再共享）。
+    """
+    d = tmp_path / "x"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def test_worker_loop_hotswap_exits_for_supervisor_respawn(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """有监督器（restart_argv 传入）→ release 租约 + 以 HOT_RELOAD_EXIT 退出交监督器。
 
     注：取活已换面（2026-09-22：轮询面 → `acquire_job` = peek+priority+claim），
@@ -88,7 +99,7 @@ def test_worker_loop_hotswap_exits_for_supervisor_respawn(monkeypatch: pytest.Mo
         W.worker_loop(
             "http://hub",
             "tok",
-            work_dir=Path("/tmp/x"),
+            work_dir=_wd(tmp_path),
             poll_sec=0.0,
             once=True,
             restart_argv=["--poll", "http://hub", "--token", "tok"],
@@ -101,7 +112,9 @@ def test_worker_loop_hotswap_exits_for_supervisor_respawn(monkeypatch: pytest.Mo
     assert "REJECTED" not in joined  # 关键：没落进 ProtocolError 的 skip 分支
 
 
-def test_worker_loop_hotswap_no_supervisor_returns(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_worker_loop_hotswap_no_supervisor_returns(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """无监督器（restart_argv=None 的裸直调）→ 降级为提示人工重启并返回，不退出进程。"""
     polls: list[dict | None] = [{"job_id": "j-hot", "manifest": {"job_id": "j-hot"}}, None]
     monkeypatch.setattr(W, "acquire_job", lambda *a, **k: polls.pop(0), raising=True)
@@ -119,7 +132,7 @@ def test_worker_loop_hotswap_no_supervisor_returns(monkeypatch: pytest.MonkeyPat
     n = W.worker_loop(
         "http://hub",
         "tok",
-        work_dir=Path("/tmp/x"),
+        work_dir=_wd(tmp_path),
         poll_sec=0.0,
         once=True,
         restart_argv=None,
@@ -210,7 +223,9 @@ def test_main_child_mode_forwards_restart_argv(monkeypatch: pytest.MonkeyPatch) 
     assert seen["restart_argv"] == ["--poll", "http://x", "--token", "t"]  # 非空=有监督器
 
 
-def test_worker_halt_attempts_stop_then_keeps_working(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_worker_halt_attempts_stop_then_keeps_working(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """§386：停机达令先试停机，停不掉（非 Colab）→ 照常执行同批任务，绝不退出。"""
     polls: list[dict | None] = [
         {"halt": True, "job_id": None},  # 停机达令（无任务）
@@ -229,7 +244,7 @@ def test_worker_halt_attempts_stop_then_keeps_working(monkeypatch: pytest.Monkey
     monkeypatch.setattr(W, "post_result", lambda *a, **k: None, raising=True)
     logs: list[str] = []
     n = W.worker_loop(
-        "http://hub", "tok", work_dir=Path("/tmp/x"), poll_sec=0.0, once=True, log=logs.append
+        "http://hub", "tok", work_dir=_wd(tmp_path), poll_sec=0.0, once=True, log=logs.append
     )
     assert ran == ["PRE"]  # 停不掉 → 任务照常执行（云机不闲置）
     assert n == 1
@@ -239,7 +254,7 @@ def test_worker_halt_attempts_stop_then_keeps_working(monkeypatch: pytest.Monkey
 
 
 def test_worker_halt_attempt_once_then_reset_on_clear(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """§386：停机期间只尝试停机一次；停机条件消失（hub resume）后复位，可再次尝试。"""
     calls = {"n": 0}
@@ -264,7 +279,7 @@ def test_worker_halt_attempt_once_then_reset_on_clear(
     W.worker_loop(
         "http://hub",
         "tok",
-        work_dir=Path("/tmp/x"),
+        work_dir=_wd(tmp_path),
         poll_sec=5.0,
         max_idle_sec=1.0,
         log=lambda m: None,
@@ -272,7 +287,9 @@ def test_worker_halt_attempt_once_then_reset_on_clear(
     assert calls["n"] == 2  # 段 1 一次 + 段 2 一次；停机持续期不重复
 
 
-def test_worker_halt_branch_still_logs_alive(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_worker_halt_branch_still_logs_alive(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """§386 修复：纯停机达令期间存活日志不被吞（否则停机期日志静默=误读罢工）。"""
     t = {"v": 0.0}
     monkeypatch.setattr(W.time, "time", lambda: t["v"], raising=True)
@@ -283,7 +300,7 @@ def test_worker_halt_branch_still_logs_alive(monkeypatch: pytest.MonkeyPatch) ->
     )
     logs: list[str] = []
     W.worker_loop(
-        "http://hub", "tok", work_dir=Path("/tmp/x"), poll_sec=10.0, once=True, log=logs.append
+        "http://hub", "tok", work_dir=_wd(tmp_path), poll_sec=10.0, once=True, log=logs.append
     )
     joined = "\n".join(logs)
     assert "云端停机达令已送达" in joined

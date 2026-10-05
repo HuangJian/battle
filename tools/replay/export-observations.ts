@@ -86,6 +86,8 @@ const RL_SCORE_CONFIG = {
 export interface Accumulator {
   obs: Uint8Array[]
   scalars: Float32Array[]
+  /** v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9)。 */
+  extra: Float32Array[]
   actions: number[] // [move, fire] pairs, flattened
   masks: number[]
   conditions: number[]
@@ -103,6 +105,7 @@ function newAcc(): Accumulator {
   return {
     obs: [],
     scalars: [],
+    extra: [],
     actions: [],
     masks: [],
     conditions: [],
@@ -260,6 +263,7 @@ export function exportReplay(text: string, fileLabel: string, skipVerify: boolea
         const masks = computeMasks(world)
         acc.obs.push(encoder.obs.slice())
         acc.scalars.push(encoder.scalars.slice())
+        acc.extra.push(encoder.extra.slice())
         acc.actions.push(label.move, label.fire)
         acc.masks.push(...masks.move, ...masks.fire)
         acc.conditions.push(condition)
@@ -405,6 +409,7 @@ export function flushShard(
   // 字面量 14，编码器升 v3 后每局 obs.set 越界；scalars 早已是 SCALAR_DIM）。
   const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
   const scalars = new Float32Array(N * SCALAR_DIM)
+  const extra = new Float32Array(N * 9)
   const actions = new Uint8Array(N * 2)
   const masks = new Uint8Array(N * MASK_DIM)
   const conditions = new Uint8Array(N)
@@ -413,6 +418,7 @@ export function flushShard(
   for (let i = 0; i < N; i++) {
     obs.set(acc.obs[i], i * OBS_CHANNELS * BOARD * BOARD)
     scalars.set(acc.scalars[i], i * SCALAR_DIM)
+    extra.set(acc.extra[i], i * 9)
     actions[i * 2] = acc.actions[i * 2]
     actions[i * 2 + 1] = acc.actions[i * 2 + 1]
     for (let j = 0; j < MASK_DIM; j++) masks[i * MASK_DIM + j] = acc.masks[i * MASK_DIM + j]
@@ -431,6 +437,7 @@ export function flushShard(
   mkdirSync(dir, { recursive: true })
   writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
   writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
+  writeNpy(`${dir}/extra.npy`, extra, [N, 9], 'f4')
   writeNpy(`${dir}/actions.npy`, actions, [N, 2], 'u1')
   writeNpy(`${dir}/masks.npy`, masks, [N, MASK_DIM], 'u1')
   writeNpy(`${dir}/conditions.npy`, conditions, [N], 'u1')

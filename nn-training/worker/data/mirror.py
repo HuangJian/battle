@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from common.schema import CH, DIRECTION_CHANNELS, SCALAR_X_INDICES
+from common.schema import CH, DIRECTION_CHANNELS, EXTRA_MIRROR_SWAPS, SCALAR_X_INDICES
 
 _MOVE_FLIP = np.array([0, 1, 2, 4, 3], dtype=np.int64)  # none,up,down,left<->right
 
@@ -93,8 +93,19 @@ def _flip_direction(channel: np.ndarray, is_bullet: bool) -> np.ndarray:
     return np.asarray(lut[channel], dtype=np.uint8)
 
 
-def mirror_x(obs: np.ndarray, scalars: np.ndarray, move_label: int):
-    """Return (obs', scalars', move_label') for a left-right reflection."""
+def mirror_x(
+    obs: np.ndarray,
+    scalars: np.ndarray,
+    move_label: int,
+    extra: np.ndarray | None = None,
+):
+    """Return (obs', scalars', move_label', extra') for a left-right reflection.
+
+    v4（plan/policy-spatial-head.plan.md §4-S0b）：`extra`（POLICY_EXTRA(9)）一并镜像——
+    **左右两对语义维互换**（前/后与包夹度不变）：威胁计数 [2]↔[3]、命中距离 [6]↔[7]。
+    计数/距离的镜像是互换而非取负（与 SCALAR_X_INDICES 的符号取反不同族）。
+    `extra=None`（旧调用/无 extra 语料）⇒ 第 4 返回值同为 None。
+    """
     obs = obs.copy()
     obs = obs[:, :, ::-1].copy()  # flip width (copy -> positive strides for torch collate)
     for ch in DIRECTION_CHANNELS:
@@ -102,4 +113,9 @@ def mirror_x(obs: np.ndarray, scalars: np.ndarray, move_label: int):
     scalars = scalars.copy()
     for i in SCALAR_X_INDICES:
         scalars[i] = -scalars[i]
-    return obs, scalars, int(_MOVE_FLIP[move_label])
+    extra_out = None
+    if extra is not None:
+        extra_out = np.array(extra, copy=True)
+        for a, b in EXTRA_MIRROR_SWAPS:
+            extra_out[a], extra_out[b] = extra[b], extra[a]
+    return obs, scalars, int(_MOVE_FLIP[move_label]), extra_out

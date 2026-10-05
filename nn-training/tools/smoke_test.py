@@ -31,6 +31,7 @@ from common.schema import (
     MOVE_DIM,
     OBS_CHANNELS,
     OBS_SCHEMA_MAJOR,
+    POLICY_EXTRA_DIM,
     SCALAR_DIM,
 )
 from worker.data.npyio import save_shard, scan_shards
@@ -43,6 +44,8 @@ def _make_synthetic_shard(n: int, seed: int) -> dict:
     rng = np.random.default_rng(seed)
     obs = rng.integers(0, 4, size=(n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8)
     scalars = rng.random((n, SCALAR_DIM)).astype(np.float32)
+    # v4：POLICY_EXTRA(9) 合成样本（含 1.5 哨兵域，走一遍 dtype/形状门）。
+    extra = (rng.random((n, POLICY_EXTRA_DIM)).astype(np.float32) * 2) - 0.25
     actions = np.stack(
         [
             rng.integers(0, MOVE_DIM, n).astype(np.uint8),
@@ -59,6 +62,7 @@ def _make_synthetic_shard(n: int, seed: int) -> dict:
     return {
         "obs": obs,
         "scalars": scalars,
+        "extra": extra,
         "actions": actions,
         "masks": masks,
         "conditions": conditions,

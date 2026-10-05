@@ -618,6 +618,8 @@ LAM = 0.95
 _RL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
     "obs": ("obs.npy", np.uint8),
     "scalars": ("scalars.npy", np.float32),
+    # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) f4。
+    "extra": ("extra.npy", np.float32),
     "a_move": ("a_move.npy", np.int64),
     "a_fire": ("a_fire.npy", np.int64),
     "lp_move": ("lp_move.npy", np.float32),

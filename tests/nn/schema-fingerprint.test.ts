@@ -15,9 +15,14 @@ import {
   SCALAR_X_INDICES,
   SCALAR_NAMES,
 } from '../../src/nn/obs-encoder'
+import {
+  POLICY_EXTRA_DIM,
+  POLICY_EXTRA_MIRROR_SWAPS,
+  POLICY_EXTRA_NAMES,
+} from '../../src/nn/policy-extra'
 
 // 必须与 nn-training/schema.py::SCHEMA_FINGERPRINT 逐字相同（两边单测共锚）。
-const FINGERPRINT = '06142cb1'
+const FINGERPRINT = '9bd651e3'
 
 // 必须与 nn-training/schema.py::SCALAR_LAYOUT 的第二元逐字同序（双端共锚）。
 // 只钉维度挡不住「交换两个标量含义」——语义序列进指纹后这种漏同步才现形。
@@ -54,20 +59,39 @@ const SCALAR_LAYOUT_NAMES: (typeof SCALAR_NAMES)[number][] = [
   'iceVx',
 ]
 
-describe('SCHEMA_FINGERPRINT (obs v3 双端锚)', () => {
+describe('SCHEMA_FINGERPRINT (obs v4 双端锚)', () => {
   it('TS 指纹 == Python schema.SCHEMA_FINGERPRINT（共享字面锚）', () => {
     expect(SCHEMA_FINGERPRINT).toBe(FINGERPRINT)
   })
 
-  it('配套常量与指纹同版（v3：16ch / 30sc / X=[15,18,29]）', () => {
-    expect(OBS_SCHEMA_MAJOR).toBe(3)
+  it('配套常量与指纹同版（v4：16ch / 30sc / X=[15,18,29] / extra 9）', () => {
+    expect(OBS_SCHEMA_MAJOR).toBe(4)
     expect(OBS_CHANNELS).toBe(16)
     expect(SCALAR_DIM).toBe(30)
     expect(SCALAR_X_INDICES).toEqual([15, 18, 29])
+    expect(POLICY_EXTRA_DIM).toBe(9)
   })
 
   it('标量语义序列与 schema.py SCALAR_LAYOUT 逐字同序（指纹已含）', () => {
     expect(SCALAR_NAMES.length).toBe(SCALAR_DIM)
     expect([...SCALAR_NAMES]).toEqual(SCALAR_LAYOUT_NAMES)
+  })
+
+  it('POLICY_EXTRA 语义序列与镜像互换对与 schema.py 逐字同表（指纹已含）', () => {
+    expect([...POLICY_EXTRA_NAMES]).toEqual([
+      'threatFront',
+      'threatBack',
+      'threatLeft',
+      'threatRight',
+      'hitDistFront',
+      'hitDistBack',
+      'hitDistLeft',
+      'hitDistRight',
+      'pincer',
+    ])
+    expect([...POLICY_EXTRA_MIRROR_SWAPS].map((p) => [...p])).toEqual([
+      [2, 3],
+      [6, 7],
+    ])
   })
 })

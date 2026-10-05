@@ -85,6 +85,9 @@ function mkWorld(over: Record<string, unknown> = {}): World {
     }),
     tanks: [],
     bullets: [],
+    // v4：POLICY_EXTRA 计算走 world.allTanks（与 danger-metrics 同源 getter）——
+    // 最小 fixture 需显式提供（真 World 上是 getter；fixture 是裸对象 cast）。
+    allTanks: [],
     powerUps: [],
     spawnQueue: [],
     enemyCount: 0,
@@ -105,14 +108,15 @@ function mkWorld(over: Record<string, unknown> = {}): World {
 }
 
 describe('obs-encoder dimensions', () => {
-  it('exposes the canonical 16×26×26 obs and 30-dim scalar (v3: +hitToKill/+spawning/+11 scalars)', () => {
+  it('exposes the canonical 16×26×26 obs and 30-dim scalar (v4: +POLICY_EXTRA 9)', () => {
     expect(OBS_CHANNELS).toBe(16)
     expect(BOARD).toBe(26)
     expect(SCALAR_DIM).toBe(30)
-    expect(OBS_SCHEMA_MAJOR).toBe(3)
+    expect(OBS_SCHEMA_MAJOR).toBe(4)
     const enc = new ObsEncoder()
     expect(enc.obs.length).toBe(16 * 26 * 26)
     expect(enc.scalars.length).toBe(30)
+    expect(enc.extra.length).toBe(9)
   })
 })
 

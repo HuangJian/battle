@@ -36,7 +36,7 @@ COVERAGE_RAISE = 0.5
 COVERAGE_WARN = 0.95
 
 
-def validate_weights_meta(meta: Any, path: str) -> None:
+def validate_weights_meta(meta: Any, path: str, allow_legacy_schema: bool = False) -> None:
     """读入端强校验（plan/python-refactor.md P0-4，2026-09-02）：坏文件必须响亮拒绝。
 
       * 文件必须有非空 params；format 若存在必须为 "nn-weights-json"；
@@ -44,6 +44,11 @@ def validate_weights_meta(meta: Any, path: str) -> None:
         scalar/action 布局已变（common/schema.py 红线：MAJOR bump 必须全量重导），旧文件
         静默加载只会把 24 维 scalar 的旧权重灌进 19 维模型，逐字段错位。
     不匹配直接 raise（fail fast）：训练前的崩溃永远比训练后的错误结论便宜。
+
+    v4（plan/policy-spatial-head.plan.md §4-S0c 三态）：`allow_legacy_schema=True`
+    = **warm-start 态**——legs A/B 的起点是 v3 的 hu150（形状相容的骨干/fc/value），
+    缺失/换形张量按同分布随机初始化（`load_state_into` 的覆盖率门禁 + 调用方
+    `--allow-partial-init` 显式开关）。默认（strict/部署态）仍拒绝旧 schema。
     """
     if (
         not isinstance(meta, dict)
@@ -56,9 +61,14 @@ def validate_weights_meta(meta: Any, path: str) -> None:
         raise ValueError(f"[weights] {path}: 未知 format {fmt!r}")
     sm = meta.get("schema_major")
     if sm is not None and int(sm) != OBS_SCHEMA_MAJOR:
-        raise ValueError(
-            f"[weights] {path}: schema_major={sm} ≠ 当前 {OBS_SCHEMA_MAJOR} —— "
-            f"obs/scalar/action 布局已变更（common/schema.py 红线），该权重必须全量重导后使用"
+        if not allow_legacy_schema:
+            raise ValueError(
+                f"[weights] {path}: schema_major={sm} ≠ 当前 {OBS_SCHEMA_MAJOR} —— "
+                f"obs/scalar/action 布局已变更（common/schema.py 红线），该权重必须全量重导后使用"
+            )
+        print(
+            f"[weights] WARN warm-start 态：{path} schema_major={sm} < 当前 {OBS_SCHEMA_MAJOR}"
+            f"——按部分装载处理（缺失/换形张量随机初始化，须显式 --allow-partial-init 开启）"
         )
 
 

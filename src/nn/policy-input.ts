@@ -206,7 +206,8 @@ export class NNInput implements InputLike {
 
     // Encode current world state and run the forward pass.
     this.encoder.encode(w)
-    this.model.forward(this.encoder.obs, this.encoder.scalars)
+    // v4：extra 一并喂（旧布局模型忽略第三参；新架构必须）。
+    this.model.forward(this.encoder.obs, this.encoder.scalars, this.encoder.extra)
 
     const masks = computeMasks(w)
 

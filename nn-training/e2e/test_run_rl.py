@@ -108,8 +108,9 @@ def test_mirror_scalar_lockstep() -> None:
     sc[29] = 0.3  # iceVx（x 分量）→ 翻转
     sc[20] = 0.7  # 旧索引必须已是死位（不再参与翻转）
     sc[23] = 0.7
-    obs2, sc2, mv2 = mirror_x(obs, sc, 3)  # left (3) → right (4)
+    obs2, sc2, mv2, ex2 = mirror_x(obs, sc, 3)  # left (3) → right (4)
     check(mv2 == 4, "move left<->right flip")
+    check(ex2 is None, "mirror_x(extra=None) -> None (旧调用零破坏)")
     check(abs(sc2[15] - (-0.5)) < 1e-6, "scalar[15] flips sign under mirrorX")
     check(abs(sc2[18] - 0.25) < 1e-6, "scalar[18] flips sign under mirrorX")
     check(abs(sc2[29] - (-0.3)) < 1e-6, "scalar[29] (iceVx) flips sign under mirrorX")
@@ -243,6 +244,8 @@ def _synth_payload(n: int = 30) -> dict[str, np.ndarray]:
     return {
         "obs": rng.integers(0, 256, (n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8),
         "scalars": f32((n, SCALAR_DIM)),
+        # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9)。
+        "extra": f32((n, 9)),
         "a_move": i64(MOVE_DIM),
         "a_fire": i64(FIRE_DIM),
         "lp_move": -np.abs(f32(n)) - 0.05,
@@ -498,6 +501,7 @@ def _stub_local_rollout(
     # 写最小 obs.npy（30 steps × 14 channels × 26×26 零数组）和 manifest.json
     np.save(str(out_dir / "obs.npy"), np.zeros((30, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8))
     np.save(str(out_dir / "scalars.npy"), np.zeros((30, SCALAR_DIM), dtype=np.float32))
+    np.save(str(out_dir / "extra.npy"), np.zeros((30, 9), dtype=np.float32))  # v4
     for arr_name in ("a_move", "a_fire", "lp_move", "lp_fire", "value", "done", "mask"):
         arr = _synth_payload(30).get(arr_name)
         if arr is not None:

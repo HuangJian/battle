@@ -50,6 +50,7 @@ function makeShard(n: number): ShardData {
   return {
     obs,
     scalars,
+    extra: Array.from({ length: n }, () => new Float32Array(9)), // v4: POLICY_EXTRA(9)
     aMove: Array.from({ length: n }, () => 1),
     aFire: Array.from({ length: n }, () => 0),
     lpMove: Array.from({ length: n }, () => -0.5),
@@ -70,6 +71,7 @@ describe('export-rl-rollout obs/scalars 行宽', () => {
     for (const f of [
       'obs.npy',
       'scalars.npy',
+      'extra.npy',
       'a_move.npy',
       'a_fire.npy',
       'lp_move.npy',

@@ -66,6 +66,8 @@ def _synth_payload(n: int) -> dict[str, np.ndarray]:
     return {
         "obs": rng.integers(0, 256, (n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8),
         "scalars": rng.standard_normal((n, SCALAR_DIM)).astype(np.float32),
+        # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) 随样本走。
+        "extra": rng.random((n, 9)).astype(np.float32),
         "a_move": rng.integers(0, MOVE_DIM, n).astype(np.int64),
         "a_fire": rng.integers(0, FIRE_DIM, n).astype(np.int64),
         "lp_move": -np.abs(rng.standard_normal(n)).astype(np.float32) - 0.05,

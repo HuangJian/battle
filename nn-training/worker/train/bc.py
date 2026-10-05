@@ -211,7 +211,7 @@ def _class_counts(dl) -> dict:
     c_m: Counter[int] = Counter()
     c_f: Counter[int] = Counter()
     for batch in dl:
-        obs, sc, mv, fr, mm, mf, ret = [b for b in batch]
+        obs, sc, _ex, mv, fr, mm, mf, ret = [b for b in batch]
         for t, c in ((mv, c_m), (fr, c_f)):
             for v in t.tolist():
                 c[v] += 1
@@ -327,10 +327,10 @@ def train(args) -> dict:
         model.train()
         run = {"loss": 0.0, "n": 0, "vloss": 0.0, "vn": 0}
         for batch in train_dl:
-            obs, sc, mv, fr, mm, mf, ret = [b.to(dev) for b in batch]
+            obs, sc, ex, mv, fr, mm, mf, ret = [b.to(dev) for b in batch]
             opt.zero_grad()
             if use_value:
-                lm, lf, vpred = model(obs, sc)
+                lm, lf, vpred = model(obs, sc, ex)
                 loss = _masked_ce(lm, mv, mm) + _masked_ce(
                     lf, fr, mf, class_weight=fire_class_weight
                 )
@@ -341,7 +341,7 @@ def train(args) -> dict:
                     run["vloss"] += float(vloss.item()) * int(valid.sum())
                     run["vn"] += int(valid.sum())
             else:
-                lm, lf = model(obs, sc)
+                lm, lf = model(obs, sc, ex)
                 loss = _masked_ce(lm, mv, mm) + _masked_ce(
                     lf, fr, mf, class_weight=fire_class_weight
                 )
@@ -360,11 +360,11 @@ def train(args) -> dict:
         v = {"loss": 0.0, "n": 0, "ma": 0.0, "fa": 0.0, "vloss": 0.0, "vn": 0}
         with torch.no_grad():
             for batch in val_dl:
-                obs, sc, mv, fr, mm, mf, ret = [b.to(dev) for b in batch]
+                obs, sc, ex, mv, fr, mm, mf, ret = [b.to(dev) for b in batch]
                 if use_value:
-                    lm, lf, vpred = model(obs, sc)
+                    lm, lf, vpred = model(obs, sc, ex)
                 else:
-                    lm, lf = model(obs, sc)
+                    lm, lf = model(obs, sc, ex)
                 loss = _masked_ce(lm, mv, mm) + _masked_ce(lf, fr, mf)
                 # val 刻意**不计** fire 正例权重：val_loss 是"真实分布下的 CE"，
                 # 要能与 `_majority_baseline`（未加权）同尺度比较；加权只作用于优化目标。

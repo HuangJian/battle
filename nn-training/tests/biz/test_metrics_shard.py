@@ -35,6 +35,7 @@ def _write_shard(root: Path, name: str, n: int, metrics: np.ndarray, manifest: d
     rng = np.random.default_rng(n * 31 + 7)
     np.save(d / "obs.npy", rng.integers(0, 256, (n, OBS_CHANNELS, 26, 26), dtype=np.uint8))
     np.save(d / "scalars.npy", rng.random((n, SCALAR_DIM), dtype=np.float32))
+    np.save(d / "extra.npy", rng.random((n, 9), dtype=np.float32))  # v4：POLICY_EXTRA(9)
     np.save(d / "a_move.npy", rng.integers(0, 5, n))
     np.save(d / "a_fire.npy", rng.integers(0, 2, n))
     np.save(d / "lp_move.npy", rng.random(n).astype(np.float32) - 2)

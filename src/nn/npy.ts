@@ -20,6 +20,7 @@
 import { writeFileSync, mkdirSync } from 'fs'
 import { dirname } from 'path'
 import { OBS_CHANNELS, BOARD, SCALAR_DIM, SCHEMA_FINGERPRINT } from './obs-encoder'
+import { POLICY_EXTRA_DIM } from './policy-extra'
 
 export type NpyDtype = 'u1' | 'u2' | 'i1' | 'f4' | 'f8'
 
@@ -78,6 +79,8 @@ export function writeNpy(
 export interface ShardArrays {
   obs: Uint8Array // N * OBS_CHANNELS * 26 * 26
   scalars: Float32Array // N * SCALAR_DIM
+  /** v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) float32（独立张量）。 */
+  extra: Float32Array // N * 9
   actions: Uint8Array // N * 2   [move, fire]  (v2: item head removed)
   masks: Uint8Array // N * 7  [move5, fire2], 1 = valid
   conditions: Uint8Array // N * 1 (uint8 category)
@@ -92,6 +95,8 @@ export function writeShard(dir: string, a: ShardArrays, manifest: unknown): void
   // ——major bump 曾三次漏改这里（14/19 硬编码）。
   writeNpy(`${dir}/obs.npy`, a.obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
   writeNpy(`${dir}/scalars.npy`, a.scalars, [N, SCALAR_DIM], 'f4')
+  // v4：POLICY_EXTRA(9)。
+  writeNpy(`${dir}/extra.npy`, a.extra, [N, POLICY_EXTRA_DIM], 'f4')
   writeNpy(`${dir}/actions.npy`, a.actions, [N, 2], 'u1')
   writeNpy(`${dir}/masks.npy`, a.masks, [N, 7], 'u1')
   writeNpy(`${dir}/conditions.npy`, a.conditions, [N], 'u1')

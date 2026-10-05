@@ -39,9 +39,9 @@ class _CountingRef(torch.nn.Module):
         self.inner = inner
         self.calls = 0
 
-    def forward(self, obs, scalars):
+    def forward(self, obs, scalars, extra=None):
         self.calls += 1
-        return self.inner(obs, scalars)
+        return self.inner(obs, scalars, extra)
 
 
 def _chunks(n_chunks: int = 3, b: int = 8, seed: int = 0) -> list[dict]:

@@ -411,7 +411,7 @@ def run_training_core(
             raise
         except Exception as e:
             raise job_body_error("restore（demo bank 装载）", e) from e
-        need = {"obs", "scalars", "actions", "masks"}
+        need = {"obs", "scalars", "extra", "actions", "masks"}
         if not need.issubset(demo_bank.keys()):
             raise ProtocolError(
                 f"job {jid}: demo bank 缺字段 {sorted(need - set(demo_bank.keys()))}——拒收"

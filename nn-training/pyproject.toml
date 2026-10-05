@@ -218,9 +218,13 @@ unfixable = ["F401"] # don't auto-remove unused imports (may be intentional re-e
 # 与本次改动无关）——「狼来了」久了就没人看门禁了。改名 `tpu_probe.py` 是另一条路，
 # 但要动 docs / 命令行引用，不值当。
 "tools/tpu-probe.py" = ["N999"]
-# 2026-10-02：`tools/backtest-burn-rule.py` 同款（干烧熔断回测的一次性 CLI，全仓无人
-# `import`）——它自 fa843e8f 起就在让全量 ruff 多一条 N999，本次合并按同一先例登记豁免。
-"tools/backtest-burn-rule.py" = ["N999"]
+  # 2026-10-02：`tools/backtest-burn-rule.py` 同款（干烧熔断回测的一次性 CLI，全仓无人
+  # `import`）——它自 fa843e8f 起就在让全量 ruff 多一条 N999，本次合并按同一先例登记豁免。
+  "tools/backtest-burn-rule.py" = ["N999"]
+  # 2026-10-05（plan/policy-spatial-head.plan.md S0′）：三份一次性 CLI 探针同款豁免。
+  "tools/spatial-probe.py" = ["N999"]
+  "tools/spatial-probe-flatcv.py" = ["N999"]
+  "tools/spatial-tower-parity.py" = ["N999"]
 
 [tool.ruff.lint.pydocstyle]
 convention = "google"

@@ -42,12 +42,20 @@ import {
   enemyDeadline,
 } from '../ai/god/ThreatBudget'
 import { threatOnsetEdge } from './decision-gate'
+import {
+  POLICY_EXTRA_DIM,
+  POLICY_EXTRA_NAMES,
+  POLICY_EXTRA_MIRROR_SWAPS,
+  computePolicyExtra,
+} from './policy-extra'
 
 // ---- Canonical dimensions (mirror nn-training/common/schema.py) ----
 export const OBS_CHANNELS = 16
 export const BOARD = GRID // 26
 export const SCALAR_DIM = 30
-export const OBS_SCHEMA_MAJOR = 3
+// v4（plan/policy-spatial-head.plan.md §4-S0b，2026-10-05）：新增 POLICY_EXTRA(9) 张量
+// （观测流新增一张量 ⇒ 旧代码读不了）。指纹防语义错位、MAJOR 防版本混跑。
+export const OBS_SCHEMA_MAJOR = 4
 
 // ---- Channel index map (plan §1.1 + obs-schema-v3.plan.md v4.0 §3.2) ----
 export const CH = {
@@ -183,10 +191,14 @@ function clamp01(x: number): number {
  * Observation encoder. Reuses its internal obs (Uint8 16*26*26) and scalar
  * (Float32 30) buffers across calls — the caller must COPY out what it needs
  * (the exporter does, into the npy shard).
+ *
+ * v4：`extra`（Float32 9）与 obs/scalars 同生命周期同契约——`encode()` 一并填好，
+ * 消费方（导出器 / 模型）拷走；旧布局权重不读它（纯增量、零破坏）。
  */
 export class ObsEncoder {
   readonly obs: Uint8Array = new Uint8Array(OBS_CHANNELS * BOARD * BOARD)
   readonly scalars: Float32Array = new Float32Array(SCALAR_DIM)
+  readonly extra: Float32Array = new Float32Array(POLICY_EXTRA_DIM)
 
   encode(world: World): void {
     this.obs.fill(0)
@@ -200,6 +212,7 @@ export class ObsEncoder {
     this.encodePowerups(world)
     this.encodeWaveHeat(world)
     this.encodeScalars(world, hasBase)
+    computePolicyExtra(world, this.extra)
   }
 
   // ---- spatial channels ----
@@ -698,5 +711,12 @@ export const SCHEMA_FINGERPRINT = fnv1a(
     BULLET_SPEED_BUCKETS_PX.join(','),
     SPAWN_COUNTDOWN_MS,
     WAVE_HEAT_TICKS,
+    // POLICY_EXTRA 身份（v4，一项）：维度 + 语义名序 + 镜像互换对。
+    // 与 common/schema.py `_FINGERPRINT_PARTS` 末项逐字同串（双端指纹测试共锚）。
+    [
+      String(POLICY_EXTRA_DIM),
+      POLICY_EXTRA_NAMES.join(','),
+      POLICY_EXTRA_MIRROR_SWAPS.map(([a, b]) => `${a}:${b}`).join(','),
+    ].join('|'),
   ].join('|'),
 )

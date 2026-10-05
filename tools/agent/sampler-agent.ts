@@ -103,6 +103,8 @@ const WORK_DIR = path.join(REPO_ROOT, 'tmp', 'dist-agent')
 export const SHARD_FILES = [
   'obs.npy',
   'scalars.npy',
+  // v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) f4。
+  'extra.npy',
   'a_move.npy',
   'a_fire.npy',
   'lp_move.npy',

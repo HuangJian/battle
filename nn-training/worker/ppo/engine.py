@@ -127,14 +127,28 @@ HB_SEC = 60.0  # PPO update heartbeat interval
 
 
 def build_ppo(weights_path: str | None) -> PPOStudent:
+    """按权重文件的 arch 元数据构建模型（v4：含 policyExtra/spatialTower 两档新架构）。
+
+    ⚠ arch 从 weights 文件读（remote/worker.py §3.2 的同一契约）：新腿的起点权重必须
+    先由 `worker/scripts/init_spatial_leg.py` 转出（带 arch 标志），否则静默退回旧架构。
+    """
     h = d = head_hidden = None
+    policy_extra = spatial_tower = False
     if weights_path and os.path.exists(weights_path):
         meta, _ = load_weights_json(weights_path)
         a = meta.get("arch", {})
         h = a.get("h", 64)
         d = a.get("d", 8)
         head_hidden = a.get("head_hidden", 128)
-    return PPOStudent(h=h or 64, d=d or 8, head_hidden=head_hidden or 128)
+        policy_extra = bool(a.get("policyExtra", False))
+        spatial_tower = bool(a.get("spatialTower", False))
+    return PPOStudent(
+        h=h or 64,
+        d=d or 8,
+        head_hidden=head_hidden or 128,
+        policy_extra=policy_extra,
+        spatial_tower=spatial_tower,
+    )
 
 
 # 2026-09-26：trajectory 装载（shard 发现 / metrics→reward / GAE / 配额；**免 torch**）
@@ -337,7 +351,7 @@ def ppo_update(
         _t_ref = time.time()
         with torch.no_grad():
             for _i, _e in enumerate(tensored):
-                _rm, _rf, _ = ref_model(_e["obs"], _e["scalars"])
+                _rm, _rf, _ = ref_model(_e["obs"], _e["scalars"], _e.get("extra"))
                 _m = _e["mask"]
                 ref_cache[_i] = (
                     masked_logsoftmax(_rm, _m[:, :MOVE_DIM]),
@@ -386,7 +400,7 @@ def ppo_update(
             ret = e["ret"]
             mask = e["mask"]  # (T, 7)
 
-            mv, fr, val = model(obs, sc)
+            mv, fr, val = model(obs, sc, e.get("extra"))
             move_logp = masked_logsoftmax(mv, mask[:, :MOVE_DIM])
             fire_logp = masked_logsoftmax(fr, mask[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
 
@@ -422,7 +436,11 @@ def ppo_update(
                 # 索引必须先落到**复用的设备张量**上再索引（否则每步一张新图 ⇒ 每步重编译，
                 # 见 ppo/common.demo_index）；抽样本的数与序完全不变。
                 _didx_t = demo_index(demo_idx_dev, _didx)
-                _dm, _df, _ = model(demo_t["obs"][_didx_t], demo_t["scalars"][_didx_t])
+                _dm, _df, _ = model(
+                    demo_t["obs"][_didx_t],
+                    demo_t["scalars"][_didx_t],
+                    demo_t["extra"][_didx_t] if "extra" in demo_t else None,
+                )
                 _dmm = demo_t["masks"][_didx_t]
                 _dact = demo_t["actions"][_didx_t]
                 demo_bc_mean = _demo_masked_ce(

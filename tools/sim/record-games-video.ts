@@ -75,7 +75,7 @@ class ScriptedInput {
 }
 
 interface RolloutModel {
-  forward(obs: Uint8Array, scalars: Float32Array): void
+  forward(obs: Uint8Array, scalars: Float32Array, extra?: Float32Array): void
   readonly moveLogits: Float32Array
   readonly fireLogits: Float32Array
 }
@@ -204,7 +204,7 @@ function recordOne(
   while (t < maxTicks) {
     if (decisionDue(t, world, gate, gateCfg)) {
       encoder.encode(world)
-      model.forward(encoder.obs, encoder.scalars)
+      model.forward(encoder.obs, encoder.scalars, encoder.extra)
       const masks = computeMasks(world)
       let aMove: number
       let aFire: number

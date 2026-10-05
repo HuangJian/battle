@@ -113,22 +113,29 @@ def save_weights_json(
     os.replace(tmp_path, abs_path)
 
 
-def load_weights_json(path: str) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
+def load_weights_json(
+    path: str, allow_legacy_schema: bool = False
+) -> tuple[dict[str, Any], dict[str, torch.Tensor]]:
     """Load a JSON+base64 weights file -> (meta, {name: tensor}).
 
     读入端强校验在 `data.weights_meta.validate_weights_meta`（免 torch，2026-09-26
     抽出的那一半）：非空 params / 未知 format / schema_major ≠ 当前 OBS_SCHEMA_MAJOR
     一律 raise（fail fast：训练前的崩溃永远比训练后的错误结论便宜）。本函数只负责
     「校验通过后的 base64 → 张量」这一步。
+
+    `allow_legacy_schema=True` = warm-start 态（v4 S0-c；旧 schema 起点权重按部分
+    装载，配合调用方 `--allow-partial-init` 显式开关）。
     """
     with open(path, encoding="utf-8") as f:
         meta = json.load(f)
-    validate_weights_meta(meta, path)
+    validate_weights_meta(meta, path, allow_legacy_schema=allow_legacy_schema)
     params = {k: _b64_to_tensor(v["data"], v["shape"]) for k, v in meta["params"].items()}
     return meta, params
 
 
-def load_state_into(model: torch.nn.Module, path: str) -> None:
+def load_state_into(
+    model: torch.nn.Module, path: str, allow_legacy_schema: bool = False
+) -> list[str]:
     """Load exported weights into a matching NNPolicy instance.
 
     Tolerates architecture changes (e.g. FC layer shape mismatch): when
@@ -139,8 +146,12 @@ def load_state_into(model: torch.nn.Module, path: str) -> None:
 
     P0-4（2026-09-02）：加载前先算**参数名覆盖率**（匹配键数 / 模型期望键数）——
     低于 COVERAGE_RAISE 直接 raise，杜绝"错误权重族被静默加载成随机初始化"。
+
+    v4（plan/policy-spatial-head.plan.md S0-c）：返回**未装载（缺失/换形）的模型键列表**
+    ——warm-start 态把它写进 run manifest 的 `warmstart_missing`（S0-c 硬要求②）。
+    `allow_legacy_schema=True` 转发给 load_weights_json（只影响 schema_major 门）。
     """
-    meta, params = load_weights_json(path)
+    meta, params = load_weights_json(path, allow_legacy_schema=allow_legacy_schema)
     expected = set(model.state_dict().keys())
     provided = set(params.keys())
     matched = expected & provided
@@ -151,12 +162,14 @@ def load_state_into(model: torch.nn.Module, path: str) -> None:
             f"—— 权重与模型族严重不匹配（arch={meta.get('arch')}），拒绝静默随机初始化。"
             f"请确认 --init-from/--resume 指向正确模型族的权重。"
         )
+    not_loaded: list[str] = []
+    state = model.state_dict()
     try:
         missing, unexpected = model.load_state_dict(params, strict=False)
+        not_loaded = sorted(missing)
     except RuntimeError:
         # Shape mismatch (e.g. FC layer changed): filter out mismatched keys
         # and load everything else.
-        state = model.state_dict()
         compatible = {}
         skipped = []
         for k, v in params.items():
@@ -167,6 +180,9 @@ def load_state_into(model: torch.nn.Module, path: str) -> None:
         if skipped:
             print(f"[weights] load_state_into: skipped (shape mismatch) {skipped}")
         model.load_state_dict(compatible, strict=False)
+        # warm-start 记账：换形（未装载）键 ∪ 模型侧缺失键（v4 S0-c 硬要求②）。
+        loaded = set(compatible.keys())
+        not_loaded = sorted(k for k in expected if k not in loaded)
         print(
             f"[weights] load_state_into: loaded {len(compatible)}/{len(params)} params from {path}"
         )
@@ -178,4 +194,5 @@ def load_state_into(model: torch.nn.Module, path: str) -> None:
                 f"missing={sorted(missing)} unexpected={sorted(unexpected)[:8]}"
             )
     model.eval()
+    return not_loaded
 

@@ -59,6 +59,8 @@ const K = 10
 interface Sample {
   obs: Uint8Array
   scalars: Float32Array
+  /** v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9)。 */
+  extra: Float32Array
   move: number
   fire: number
   masks: number[]
@@ -194,6 +196,7 @@ function convertOne(
       samples.push({
         obs: encoder.obs.slice(),
         scalars: encoder.scalars.slice(),
+        extra: encoder.extra.slice(),
         move: label.move,
         fire: label.fire,
         masks: [...masks.move, ...masks.fire],
@@ -281,12 +284,14 @@ function main(): void {
     const N = r.samples.length
     const obs = new Uint8Array(N * OBS_N)
     const scalars = new Float32Array(N * SCALAR_DIM)
+    const extra = new Float32Array(N * 9)
     const actions = new Uint8Array(N * 2)
     const masks = new Uint8Array(N * MASK_DIM)
     const conditions = new Uint8Array(N)
     r.samples.forEach((s, i) => {
       obs.set(s.obs, i * OBS_N)
       scalars.set(s.scalars, i * SCALAR_DIM)
+      extra.set(s.extra, i * 9)
       actions[i * 2] = s.move
       actions[i * 2 + 1] = s.fire
       for (let j = 0; j < MASK_DIM; j++) masks[i * MASK_DIM + j] = s.masks[j]
@@ -294,6 +299,7 @@ function main(): void {
     })
     writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
     writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
+    writeNpy(`${dir}/extra.npy`, extra, [N, 9], 'f4')
     writeNpy(`${dir}/actions.npy`, actions, [N, 2], 'u1')
     writeNpy(`${dir}/masks.npy`, masks, [N, MASK_DIM], 'u1')
     writeNpy(`${dir}/conditions.npy`, conditions, [N], 'u1')

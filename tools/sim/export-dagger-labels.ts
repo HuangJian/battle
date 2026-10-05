@@ -68,6 +68,8 @@ const K = 10
 interface Acc {
   obs: Uint8Array[]
   scalars: Float32Array[]
+  /** v4：POLICY_EXTRA(9)。 */
+  extra: Float32Array[]
   actions: number[]
   masks: number[]
   conditions: number[]
@@ -75,7 +77,7 @@ interface Acc {
 }
 
 function newAcc(): Acc {
-  return { obs: [], scalars: [], actions: [], masks: [], conditions: [], n: 0 }
+  return { obs: [], scalars: [], extra: [], actions: [], masks: [], conditions: [], n: 0 }
 }
 
 type Outcome = 'stage_clear' | 'base_destroyed' | 'lives_exhausted' | 'timeout'
@@ -168,6 +170,7 @@ function runOne(
       const masks = computeMasks(world)
       acc.obs.push(encoder.obs.slice())
       acc.scalars.push(encoder.scalars.slice())
+      acc.extra.push(encoder.extra.slice())
       acc.actions.push(label.move, label.fire)
       acc.masks.push(...masks.move, ...masks.fire)
       acc.conditions.push(condition)
@@ -208,18 +211,20 @@ function flushShard(acc: Acc, dir: string, manifest: unknown): void {
   const OBS_N = OBS_CHANNELS * BOARD * BOARD
   const obs = new Uint8Array(N * OBS_N)
   const scalars = new Float32Array(N * SCALAR_DIM)
+  const extra = new Float32Array(N * 9)
   const actions = new Uint8Array(N * 2)
   const masks = new Uint8Array(N * 7)
   const conditions = new Uint8Array(N)
   for (let i = 0; i < N; i++) {
     obs.set(acc.obs[i], i * OBS_N)
     scalars.set(acc.scalars[i], i * SCALAR_DIM)
+    extra.set(acc.extra[i], i * 9)
     actions[i * 2] = acc.actions[i * 2]
     actions[i * 2 + 1] = acc.actions[i * 2 + 1]
     for (let j = 0; j < 7; j++) masks[i * 7 + j] = acc.masks[i * 7 + j]
     conditions[i] = acc.conditions[i]
   }
-  writeShard(dir, { obs, scalars, actions, masks, conditions }, manifest)
+  writeShard(dir, { obs, scalars, extra, actions, masks, conditions }, manifest)
 }
 
 function parseRange(s: string): number[] {

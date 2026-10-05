@@ -125,7 +125,7 @@ function runOne(
   while (t < maxTicks) {
     if (decisionDue(t, world, gate, gateCfg)) {
       encoder.encode(world)
-      model.forward(encoder.obs, encoder.scalars)
+      model.forward(encoder.obs, encoder.scalars, encoder.extra)
       const masks = computeMasks(world)
       const mv = argmaxCat(model.moveLogits, masks.move)
       const fr = argmaxCat(model.fireLogits, masks.fire)

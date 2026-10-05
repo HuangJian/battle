@@ -98,7 +98,18 @@ def test_claim_sends_role_header_too(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ROLE_HEADER not in seen[0]["headers"]
 
 
-def test_worker_loop_forwards_role(monkeypatch: pytest.MonkeyPatch) -> None:
+def _wd(tmp_path: Path) -> Path:
+    """per-test 唯一工作目录（2026-10-05：共用 `/tmp/x` 在 xdist 下与 work_dir
+    sweep 互踩 ⇒ PermissionError；路径语义不变，只是不再共享）。
+    """
+    d = tmp_path / "x"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def test_worker_loop_forwards_role(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """接线断言：主循环把 `role` 透传给取活面（漏了它 = 功能静默失效）。
 
     2026-09-22 换面后取活 = `acquire_job`（peek → priority → claim）；它把 `role` 继续
@@ -112,7 +123,7 @@ def test_worker_loop_forwards_role(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(W, "acquire_job", _fake_poll, raising=True)
     n = W.worker_loop(
-        "http://hub", "tok", work_dir=Path("/tmp/x"), poll_sec=0.0, once=True, role=ROLE_OFFLINE
+        "http://hub", "tok", work_dir=_wd(tmp_path), poll_sec=0.0, once=True, role=ROLE_OFFLINE
     )
     assert n == 0
     assert seen[0]["role"] == ROLE_OFFLINE
@@ -125,7 +136,7 @@ def test_worker_loop_forwards_role(monkeypatch: pytest.MonkeyPatch) -> None:
     assert '"role": role,' in src, "预取线程的 kwargs 没带 role"
 
     seen.clear()
-    W.worker_loop("http://hub", "tok", work_dir=Path("/tmp/x"), poll_sec=0.0, once=True)
+    W.worker_loop("http://hub", "tok", work_dir=_wd(tmp_path), poll_sec=0.0, once=True)
     assert seen[0]["role"] == ROLE_ONLINE, "缺省必须是在线盘（保守方向）"
 
 
@@ -156,7 +167,9 @@ def test_main_offline_flag_reaches_worker_loop(
     assert seen["role"] == ROLE_OFFLINE
 
 
-def test_notebook_pull_worker_adds_offline_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_notebook_pull_worker_adds_offline_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
     """notebook 的 pull 分支：`CFG["offline_worker"]` ⇒ 监督器 argv 带 `--offline`。"""
     import remote.notebook_runtime as nbr
 
@@ -180,7 +193,7 @@ def test_notebook_pull_worker_adds_offline_flag(monkeypatch: pytest.MonkeyPatch)
     cfg = {
         "hub_url": "http://hub",
         "hub_token": TOKEN,
-        "work_dir": "/tmp/x",
+        "work_dir": str(_wd(tmp_path)),
         "device_resolved": "cpu",
         "idle_floor_sec": 60,
         "max_session_hours": 2,

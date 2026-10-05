@@ -7763,3 +7763,37 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   `dashboard/src/web/view/{course-status.ts（新）,course-overview,loop-queue,course-matrix,alerts}.ts` · `dashboard/src/web/app/{app.tsx,panels/CourseMatrix.tsx}`。
 - **指针**：全文（状态转换表 / 六态表 / F1–F6 / 兼容矩阵）→ `docs/nn/remote-transport.md` §67 · 控制台侧 → `docs/nn/console.md` §31 ·
   计划 → `plan/offline-online-status-switch.plan.md`。
+## §2026-10-05-policy-spatial-head-s0（2026-10-05，POLICY_EXTRA 9 维 + C=8 空间塔：schema v4 落地与 S0′ 探针判决）
+
+- **背景**：plan `plan/policy-spatial-head.plan.md`（v6 冻结）要求给走位/开火头加"看得见位置"的输入：
+  腿 A = 独立 9 维方向直方图（`POLICY_EXTRA`），腿 B = C=8 空间塔（1×1 64→8 + ReLU + 4×4 分区均值 + FC 128→112）。
+  本次实施 = Step 0 三项确认 + Step 1 S0′ 六探针 + Step 2 S0 工程改造（S0-a…S0-e）；**训练未启动**。
+- **决定（工程侧，全部落盘）**：
+  ① **schema v4**：`OBS_SCHEMA_MAJOR` 3→4（观测流新增独立张量 ⇒ 旧代码读不了，MAJOR 是云端快拒门）；
+     `POLICY_EXTRA(9)` dtype=float32（与 scalars 同族）；指纹新项双端共锚 **9bd651e3**（`common/schema.py` ↔ `src/nn/obs-encoder.ts`）。
+  ② **语义**：dims 0–3 前/后/左/右威胁计数 `min(n,4)/4`（19px 命中带 + 遮挡，谓词复用 danger-metrics/helpers）；dims 4–7 前/后/左/右
+     命中距离 `clamp01(px/416)`、打不到 ⇒ **1.5 哨兵**；dim 8 包夹度 `min(左,右,4)/4`。方位 = **玩家相对**（前=炮口朝向）。
+     mirrorX = 左右两对语义维**互换**（[2]↔[3]、[6]↔[7]；前/后/包夹度不变）——plan 所称 `EXTRA_X_INDICES` 实现为 swap 对（计数/距离的镜像不是取负）。
+  ③ **塔**：C=8 冻结；ReLU 必须存在（`mean(W·x)=W·mean(x)`，去掉退化为线性等价档）；分区边界 `[floor(i×26/4), ceil((i+1)×26/4))` =
+     [0,7)/[6,13)/[13,20)/[19,26)（只有 index 6/19 双计）；torch↔TS maxΔ 8.9e-8；TS 侧 p 循环 4 路展开（345→262µs），
+     生产档吞吐 −16.8%（< 20% 动作线）。
+  ④ **架构身份 = 权重文件**（既有契约）：`arch.policyExtra` / `arch.spatialTower`；`build_ppo`/`StudentModel` 按标志构建；
+     TS strict（缺 `spatial_proj.*` 抛错）。起点权重由 `worker/scripts/init_spatial_leg.py` 造（hu150 40/42 键装载、新头/塔同分布初始化、
+     `warmstart_missing` 入 meta）。**loader 三态**：strict（部署，拒绝旧 schema）/ warm-start（`--allow-partial-init` + `allow_legacy_schema`，缺失张量随机初始化）
+     / 默认（拒绝）。
+  ⑤ 参数实测：旧 70,216（含 value）/ 腿 A 70,279 / 腿 B **85,345**（= plan 85,216 BC 口径 + 129 value）；全链（RL shard / BC 语料 / demo bank /
+     e2e 容器）以 `extra.npy` 严格集合校验贯通。
+- **S0′ 探针读数（plan §7）与判决**：bufA 平坦线性探针 5 折 pooled AUC .560–.728；**旧输入（pooled+scalars）.649–.845（全向 ≥ 平坦探针
+  ⇒ 腿 A 登记"冗余表达、降预期"）**；C=8 塔 .693–.958、ReLU 非零率 .495–.803（**否决权未行使**）；S0′-1&S0′-2 双低撤销条件未触发。
+  S0-a：414000 段 400 局 = **34.75%/11.708**（vs 封存 32.50/11.370，Δ 在 MDE@400 内）；旧权重三后端 golden：native↔wasm 逐字节、
+  TS↔wasm 相对 ≤2.1e-6。
+- **备选与否决**：改 `SCALAR_DIM`（30→32）方向（会连带 fc/value，否决：违反 critic 输入集不动）；塔不加 ReLU 的"线性等价档"（B 档默认否决，
+  但 S0′-2c 否决时回退）；扩 `SCALAR_X_INDICES` 索引 extra（会越界，否决：新建 swap 表）；训练与 schema 同批上线（否决：先探针后工程，
+  任何人不开训前都能否决）。
+- **后果**：旧 v3 shard/权重在 strict 路径被**响亮拒绝**（要重导/走 warm-start）；`extra.npy` 成为 RL shard 第 11 件，
+  旧节点（无该件）在远端集合校验被拒（上线前须重启节点）；腿 A/B 若启动：起点用 `init_spatial_leg.py` 产物、课程 `bc=` 指过去。
+- **落点**：`src/nn/{policy-extra,spatial-tower,obs-encoder,infer,npy,policy-input}.ts` · `tools/sim/{spatial-probe-dump,spatial-probe-bench,spatial-s0a-golden,export-rl-rollout,export-eval-game,export-nn-replays,record-games-video}.ts` ·
+  `tools/replay/export-observations.ts` · `nn-training/common/schema.py` · `worker/data/{mirror,dataset,npyio,weights_io,weights_meta}.py` ·
+  `worker/{ppo/engine,ppo/np_core,ppo/trainer,models/student,scripts/init_spatial_leg,train/bc}.py` · 测试：`tests/nn/{policy-extra,spatial-tower,spatial-head-nonconstant}.test.ts` ·
+  `nn-training/tests/{worker/test_dataset_mirror,worker/test_spatial_leg_smoke,common/test_schema_fingerprint}.py` · 探针：`nn-training/tools/spatial-probe*.py`。
+- **指针**：计划与读数表 → `plan/policy-spatial-head.plan.md` §7；探针 dump → `tmp/spatial-probe/hu150/`；S0-a → `tmp/spatial-s0a/`。
