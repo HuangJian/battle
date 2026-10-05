@@ -54,6 +54,8 @@ function row(over: Partial<LoopQueueRow> & { course: string }): LoopQueueRow {
       gamesPlanned: 0,
     },
     waiting: { kind: 'collect', text: '采集中：已落 12 局' },
+    // 开课判据缺省「可开课」（真实行也总是带这个字段；用例只在专测时覆写）
+    openable: { ok: true, reason: '' },
     pausedIntent: false,
     pauseApplied: false,
     ...over,

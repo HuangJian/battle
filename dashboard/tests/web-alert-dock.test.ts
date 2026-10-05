@@ -24,6 +24,7 @@ import {
   alertDockSummary,
   buildAlerts,
   NO_TAKER_LABEL,
+  parseLoopQueue,
   sortAlerts,
   STUCK_LABEL,
   type AlertInput,
@@ -604,6 +605,74 @@ describe('AlertDock SSR 结构', () => {
     expect(copyIdx).toBeGreaterThan(-1)
     expect(actsIdx).toBeGreaterThan(-1)
     expect(copyIdx).toBeLessThan(actsIdx)
+  })
+})
+
+describe('第 8 类：课程配置不可开课（2026-10-05，plan/course-startup-recover §3.3）', () => {
+  /** 走真实解析路径造队列行（与 /api/state 同一份数据）——不手拼 LoopQueueRow。 */
+  const rowsFor = (reason: string, ok = false): AlertInput['loopQueueRows'] =>
+    parseLoopQueue({
+      courses: [
+        {
+          course: 'c1',
+          openable: { ok, reason: ok ? '' : reason },
+          waiting: {
+            kind: ok ? 'ready' : 'blocked',
+            text: ok ? '无外部等待' : `课程起不来：${reason}`,
+          },
+        },
+      ],
+    })!.rows
+
+  it('起不来的课 ⇒ 恰好一条 err：结论先行 + 文件指针 + 生效路径；只给「知道了」（无一键恢复）', () => {
+    const items = buildAlerts({
+      ...clean,
+      loopQueueRows: rowsFor('SystemExit: kickstart_ref 没开'),
+    })
+    expect(items.length).toBe(1)
+    const a = items[0]!
+    expect(a.severity).toBe('err')
+    expect(a.title).toContain('c1')
+    expect(a.title).toContain('kickstart_ref 没开')
+    expect(a.detail).toContain('nn-training/curricula/c1.jsonc')
+    expect(a.detail).toContain('不需要重启 trainer')
+    expect(a.detail).toContain('正在跑的课不受影响')
+    // 恢复动作是「改课程文件」（代码编辑）——控制台没有、也不该有那个按钮（§2.2）。
+    expect(a.actions.map((x) => x.kind)).toEqual(['ack'])
+  })
+
+  it('ok=true ⇒ 零条；读面不在手（旧控制台 / python 读失败）⇒ 零条（不编「起不来」）', () => {
+    expect(buildAlerts({ ...clean, loopQueueRows: rowsFor('', true) })).toEqual([])
+    expect(buildAlerts({ ...clean, loopQueueRows: null })).toEqual([])
+    expect(buildAlerts(clean)).toEqual([])
+  })
+
+  it('ack 后消失；**reason 变了** ⇒ 新事件重新弹（改了但没修好必须再看见一次）', () => {
+    const first = buildAlerts({ ...clean, loopQueueRows: rowsFor('旧原因') })
+    const ackKey = first[0]!.actions[0]!.ackKey!
+    expect(buildAlerts({ ...clean, loopQueueRows: rowsFor('旧原因'), acks: [ackKey] })).toEqual([])
+    const second = buildAlerts({ ...clean, loopQueueRows: rowsFor('新原因：还是不行') })
+    expect(second.length).toBe(1)
+    expect(second[0]!.actions[0]!.ackKey).not.toBe(ackKey)
+  })
+
+  it('可见范围按课过滤：切到别的课不弹（它有恢复动作且会被自己修好的配置解除，与停机同族）', () => {
+    const items = buildAlerts({
+      ...clean,
+      viewing: 'c2',
+      loopQueueRows: rowsFor('boom'),
+    })
+    expect(items).toEqual([])
+  })
+
+  it('条目真的进坞（SSR：结论 + 依据两行都在 DOM 里）', () => {
+    const items = buildAlerts({ ...clean, loopQueueRows: rowsFor('boom') })
+    const html = renderToString(
+      h(AlertDock, { items, onAct: () => undefined, onAck: () => undefined }),
+    )
+    expect(html).toContain('课程配置不可开课')
+    expect(html).toContain('boom')
+    expect(html).toContain('>知道了</button>')
   })
 })
 

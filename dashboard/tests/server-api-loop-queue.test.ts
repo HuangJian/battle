@@ -112,6 +112,23 @@ describe('parseLoopQueue（--json 的宽容解析）', () => {
     expect(v.rows[0]!.waiting.text).toBe('新等待：…')
   })
 
+  it('openable：ok=false 原文透传；缺字段（旧 python）⇒ ok=true 不误报', () => {
+    const old = view.parseLoopQueue({ courses: [{ course: 'x' }] })!.rows[0]!
+    expect(old.openable).toEqual({ ok: true, reason: '' })
+    const bad = view.parseLoopQueue({
+      courses: [
+        {
+          course: 'x',
+          openable: { ok: false, reason: 'SystemExit: kickstart_ref 没开' },
+          waiting: { kind: 'blocked', text: '课程起不来：SystemExit: kickstart_ref 没开' },
+        },
+      ],
+    })!.rows[0]!
+    expect(bad.openable).toEqual({ ok: false, reason: 'SystemExit: kickstart_ref 没开' })
+    // blocked 是取值域一员（不退化）——2026-10-05 事故的「分不清」源头就在这里
+    expect(bad.waiting.kind).toBe('blocked')
+  })
+
   it('课程种类 kind：缺省/未知一律按 rl 渲染（python 比控制台旧时不得凭空空贴 BC 标签）', () => {
     // 保守方向是**单侧**的：误判成 RL 只是少一个徽标；误判成 BC 会给一门真 RL 课贴上 BC 标签，
     // 并对外宣称「一轮 = 一个任务」（而它其实有 13 步）——假承诺比缺标签贵。

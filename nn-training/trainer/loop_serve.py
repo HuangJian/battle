@@ -38,12 +38,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from biz.course_resolve import CURRICULA_DIR
 from common.log import close_course_sinks, log, open_course_sink, prefix_scope
 from common.platform_utils import force_utf8_stdio
 from common.proc import run_capture
 from trainer.loop_control import ControlApplier, read_control
 from trainer.loop_plan import (
     COURSE_ENABLE_MARKER,
+    course_enabled,
     course_facts,
     course_kind,
     course_traj,
@@ -52,10 +54,19 @@ from trainer.loop_plan import (
 )
 from trainer.loop_runner import ROUND_KIND, LoopRunner
 from trainer.queue import REPO_ROOT
+from worker.course_args import (
+    COURSE_MACHINE_OVERRIDE_KEYS as COURSE_MACHINE_OVERRIDE_KEYS,
+)
+from worker.course_args import (
+    _read_rl_config as _read_rl_config,
+)
+from worker.course_args import (
+    apply_course_machine_overrides,
+    course_args,
+)
 from worker.engine_pool import DEFAULT_CACHE_COURSES, DEFAULT_CACHE_MB, EnginePool
 from worker.loop_scheduler import ABORTED, QUEUE_DONE, Supervisor
 from worker.loop_tasks import RoundFacts, Task, abort, pending_tasks
-from worker.modes import apply_mode_flags, merged_mode_args, resolve_mode
 from worker.train.loop_util import acquire_lock, cleanup_lock, course_lock_path
 
 #: nn-training 目录（锁文件/课程文件都相对它——与 `trainer/run_rl.py` 的 `Path(__file__).parent` 同一个）。
@@ -93,6 +104,10 @@ class ServeReport:
 
     courses: dict[str, dict[str, Any]] = field(default_factory=dict)
     skipped: dict[str, str] = field(default_factory=dict)
+    #: 被跳过课的**判据指纹**（course → {"kind": 跳过来源, "fp": 判据快照}）。
+    #: "跳过"不是终身黑名单：判据（课程文件/开课标记/锁/账本）变了就自动重试开课
+    #: （2026-10-05 事故治本，plan/course-startup-recover §3.4）。
+    skipped_at: dict[str, dict[str, Any]] = field(default_factory=dict)
     #: 一步级 SystemExit 按课下线的原因（2026-09-22 事故：一门课的配置错误曾弄崩整个共享
     #: trainer）——与 `skipped`（开课/入队阶段）分开，读面能区分「哪一步、为什么」。
     failures: dict[str, str] = field(default_factory=dict)
@@ -147,33 +162,11 @@ def prepare_process(argv: list[str] | None = None) -> str:
     return bun
 
 
-#: 课程**机器侧覆盖**的键白名单（rl-config `courses.<课>.<key>`，2026-09-19 / R3-5）。
-#:
-#: 为什么这些键住 rl-config 而**不能**住 `curricula/<课>.jsonc`：课程文件字节 = `course_fp`
-#: （语料血缘 / 熔断口径，D14）——往课程文件里加一个旋钮，熔断会把同一份语料读成新语料。
-#: 机器侧旋钮**永不进 curricula**。
-#:
-#: 为什么它今天**是空的**：单进程服务器（`--serve`）**无法**用进程级 CLI 表达「这门课怎么跑」
-#: ——一个进程服务 N 门课，命令行只有一份。控制台过去往**每门课**的 trainer 命令行里塞
-#: 那些旋钮，收敛成一个共享 trainer 后曾搬到这里（per-course，且随盘持久）。但两个成员先后
-#: 退役：「PPO 跑在哪 / 怎么降级」2026-09-21 随单一 PPO 路径删除（§3），`gate_halt_mode`
-#: 2026-10-01 随门禁停机**平台级化**摘除（`tmp/gate-halt.json` + 控制台开关，不再按课程）。
-#: 结构保留（不是删掉这段）：下一条「单进程表达不了、又确实按课不同」的旋钮还往这里加，
-#: 判据仍是「课程的机器侧配置，且不进 `curricula/*.jsonc`」。
-#:
-#: ★ **2026-09-19 删掉了两个键**（用户口径「课程任务与 worker 节点互相正交」）：
-#: `remote_transport` 与 `remote_hub_url`。它们是「把**这门课**钉到某条传输路 / 某个 hub」的
-#: 耦合旋钮：课程定义任务，worker 节点提供算力，谁接到活由**部署**（`rl.hub_push` + 登记节点）
-#: 与 hub 的队列决定，不该由科目名决定。旧配置里若还留着这两个键，**不再被读**（不报错，
-#: 静默失效）；控制台启动时会把它们连同 `push_node_url` / `hub_push` 一并清理（见
-#: `dashboard/src/stack/course-knobs.ts::pruneLegacyCourseKnobs`）。
-COURSE_MACHINE_OVERRIDE_KEYS: tuple[str, ...] = (
-    # ★ 2026-10-01 删掉 `gate_halt_mode`（plan/gate-halt-platform-level）：门禁停机模式升成
-    #   **平台级**（`tmp/gate-halt.json`，控制台一处切、全局生效、到点回落 halt）⇒ 不再按课程
-    #   下发；旧配置里若还留着该键，**不再被读**（不报错，控制台开课时顺手清）。
-    # ★ 2026-09-21 删掉 `remote_degrade_after`（plan/accident.plan.md §3）：单一 PPO 路径下
-    #   没有"就地下沉到本机算"这回事；旧配置里若还留着该键，**不再被读**（不报错）。
-)
+#: 课程解析/校验链（白名单 + `_read_rl_config` + `apply_course_machine_overrides` +
+#: `course_args`）2026-10-05 整块搬去 `worker/course_args.py`（训练栈家——`trainer/` 只许
+#: 编排，见 `tests/test_layering.py::test_trainer_holds_only_orchestration_modules`）：serve 与只读视图
+#: （`course_openable`）**同源复用**同一条链（plan/course-startup-recover §4.1）；
+#: 本模块 import 后按旧名重导出，既有调用点/用例零改动。
 
 
 def cluster_lock_path() -> str:
@@ -200,121 +193,6 @@ def release_cluster_lock(lock_path: str) -> None:
     from trainer.run_rl import _cleanup_run_rl_lock
 
     _cleanup_run_rl_lock(str(lock_path))
-
-
-#: 课程文件里课程名 → 路径约定下的 stem（读 courses.<课> 块用）。
-
-def _read_rl_config() -> dict:
-    """读 rl-config.json（读不到 / 形状不对 → 空 dict）。
-
-    **读面只读一处**：路径走 `biz.config.rl_config_path()`（env `BCITY_RL_CONFIG` 可重定向，
-    与 `trainer/run_rl.py` 完全同源）——否则「用例自带夹具」在 serve 侧做不到，读的还是本机那份
-    未入库的配置。本函数仍是测试注入点（用例可以直接换掉它）。
-    """
-    from worker.config import read_rl_config_file
-
-    return read_rl_config_file()
-
-
-def apply_course_machine_overrides(
-    args: Any, course: str, cfg: dict | None = None, *, log_fn: Callable[[str], None] | None = None
-) -> list[str]:
-    """把 rl-config `courses.<课>` 里的机器侧旋钮施加到 args；返回**已施加**的键（供测试/日志）。
-
-    契约（两条都与既有写法同源，不发明新语义）：
-      · 只认白名单 `COURSE_MACHINE_OVERRIDE_KEYS`——别的键（配额 / 隧道选项）各自有既有的
-        读取点，本函数一个字都不碰；
-      · 目标 args 没有这个字段（BC 解析器比 RL 少几个键）⇒ **响亮跳过**并记一行，不 setattr 造字段
-        （造出来的字段没有任何读者，只会让人以为生效了）。
-
-    施加时机 = `course_args`/`_open_bc_course` 的**课程覆盖之后、`validate_args` 之前**。
-    优先顺序（高→低）：本覆盖（rl-config `courses.<课>`，**per-course 最具体**）→ serve 级 argv
-    → 课程文件 → rl-config 默认。「谁赢」本身不是重点，重点是**逐键打印生效值**：静默改写
-    执行面（该走 pull 却走 push）正是「看起来正常」那类事故的温床。
-    """
-    log_fn = log_fn or log
-    if cfg is None:
-        cfg = _read_rl_config()
-    block = ((cfg.get("courses") or {}).get(course) or {}) if isinstance(cfg, dict) else {}
-    if not isinstance(block, dict):
-        return []
-    applied: list[str] = []
-    for key in COURSE_MACHINE_OVERRIDE_KEYS:
-        if key not in block:
-            continue
-        val = block[key]
-        if not hasattr(args, key):
-            log_fn(f"[serve] 课程 {course} 的 courses.{course}.{key} 本课程种类没有该参数 ⇒ 跳过")
-            continue
-        setattr(args, key, val)
-        applied.append(key)
-    if applied:
-        log_fn(
-            f"[serve] 课程 {course} 机器侧覆盖（rl-config courses.{course}）: "
-            + ", ".join(f"{k}={getattr(args, k)!r}" for k in applied)
-        )
-    return applied
-
-
-# ---------------------------------------------------------------- 课程级一次
-
-
-def course_args(course: str, argv: list[str] | None = None) -> Any:
-    """课程 stem → 生效 args（**与 `trainer/run_rl.py --course <stem>` 逐字段一致**）。
-
-    解析链一字不差地复刻 `trainer/run_rl.py::main` 的启动段（rl-config.json 默认 → argparse →
-    `apply_course` 课程覆盖 → 冲突检测 → 显式 stream 标记 → `validate_args`）。**不作弊**：
-    参数语义没有第二份实现，`tests/trainer/test_serve_wiring.py::test_course_args_match_run_rl_echo_config`
-    用 `trainer/run_rl.py --course X --echo-config` 对拍本函数的每一字段（漂移即红）。
-
-    `argv` = serve 级附加参数（如 `--mode goal`）；课程由**课程列表**给出，故这里拒绝
-    `--course`（避免「列表里的课」与「argv 里的课」两个来源）。
-    """
-    extra = list(argv or [])
-    if any(a == "--course" or a.startswith("--course=") for a in extra):
-        raise SystemExit("[serve] 课程由课程列表给出，不要在附加参数里再传 --course/--course-file")
-
-    mode = resolve_mode(extra)
-    cfg = _read_rl_config()  # 与 trainer/run_rl.py 同源（`BCITY_RL_CONFIG` 可重定向）
-    rl_args, _src = merged_mode_args(cfg, mode)
-
-    from worker.cli import build_argparser
-
-    ap = build_argparser(mode, rl_args)
-    args = ap.parse_args([*extra, "--course", course])
-    apply_mode_flags(args)
-
-    from worker.config import apply_course, course_cli_conflicts, course_from_args, validate_args
-
-    # 课程配置化（plan/rl-training-config.md §3）：优先级 课程 > rl-config.json > argparse 默认。
-    # `resolve_course` 找不到 `<stem>.jsonc` 时抛 FileNotFoundError（含可用课程列表）——
-    # 由调用方按「故障域 = 单课」处理（响亮跳过这门课，不影响别的课）。
-    co = course_from_args(args)
-    if co is not None:
-        cli_before = {k: v for k, v in vars(args).items()}
-        defaults_ns = ap.parse_args([])
-        apply_course(args, co)
-        conflicts = course_cli_conflicts(cli_before, vars(defaults_ns), co)
-        if conflicts:
-            raise SystemExit(
-                "[serve] 附加参数与课程配置冲突（课程是单一事实来源，无 CLI 逐参覆盖——"
-                "plan §3）：\n  " + "\n  ".join(conflicts)
-            )
-
-    # 课程**机器侧覆盖**（rl-config `courses.<课>`）：优先级「argv > 机器侧覆盖 > 课程文件 >
-    # rl-config 默认」（课程文件不该管机器侧；argv 是当前进程的明确意图）。放在
-    # `validate_args` 之前——覆盖后的值同样要过一次启动期校验（P1-3 的口径）。
-    apply_course_machine_overrides(args, course, cfg)
-
-    defaults_ns2 = ap.parse_args([])
-    args._explicit_stream = int(getattr(args, "stream", 0) or 0) != int(
-        getattr(defaults_ns2, "stream", 0) or 0
-    )
-    args._explicit_double_buffer = int(getattr(args, "double_buffer", 0) or 0) != int(
-        getattr(defaults_ns2, "double_buffer", 0) or 0
-    )
-    validate_args(args)
-    return args
 
 
 def open_course(
@@ -512,6 +390,8 @@ def build_executor(
     pool: EnginePool,
     runtimes: dict[str, CourseRuntime],
     report: ServeReport | None = None,
+    *,
+    traj_root: str | Path = "tmp",
 ) -> Callable[[Any, Any], Any]:
     """调度器执行体：取引擎（可能刚重建）→ 补齐栈 → 交给该课的 `LoopRunner.executor`。
 
@@ -539,10 +419,11 @@ def build_executor(
                 detail = (code or str(e)).strip() or f"SystemExit({e.code!r})"
                 log(
                     f"[serve] 课程 {task.course} 一步级 SystemExit——该课下线，其余课照跑："
-                    f"{task.kind}@{task.task_id}：{detail}（重启 trainer 后如课程文件已修好会自动重开）"
+                    f"{task.kind}@{task.task_id}：{detail}"
+                    "（改好课程文件后会自动重试开跑，不需要重启 trainer）"
                 )
                 if report is not None:
-                    report.skipped[task.course] = detail
+                    _record_skip(report, task.course, SKIP_KIND_STEP, detail, traj_root)
                     report.failures[task.course] = detail
                 return abort(detail)
 
@@ -590,6 +471,104 @@ def _marker_mtime_ns(traj_root: str | Path, course: str) -> int | None:
         return None
 
 
+#: 跳过来源——决定「复活判据」看哪些盘上事实（plan §3.4 的分类表）。
+SKIP_KIND_CONFIG = "config"  #: 开课校验失败（课程文件/环境配置）：判据 = 课程文件 + 开课标记
+SKIP_KIND_LOCK = "lock"  #: 按课程锁被占：判据 = 锁签名（释放 / 换主 / 持有者死）
+SKIP_KIND_ENQUEUE = "enqueue"  #: 入队失败（读盘）：判据 = 账本 + 课程文件 + 开课标记
+SKIP_KIND_STEP = "step"  #: 一步级 SystemExit 下线：课仍在 runtimes ⇒ 走「重置队列」通道
+
+
+def _course_file_identity(course: str) -> tuple[int, int] | None:
+    """课程文件身份（`mtime_ns` + `size`；RL/BC 两个候选；缺失/不可读 ⇒ None）。
+
+    与 `_marker_mtime_ns` 同款形状：只做「人动过这个文件没有」的第二事实。**不算 sha**
+    （每拍算哈希太贵；mtime+size 足够判「文件变了」）。
+    """
+    for cand in (CURRICULA_DIR / f"{course}.jsonc", CURRICULA_DIR / f"{course}.bc.jsonc"):
+        try:
+            st = cand.stat()
+        except OSError:
+            continue
+        return (int(st.st_mtime_ns), int(st.st_size))
+    return None
+
+
+def _ledger_mtime_ns(traj_root: str | Path, course: str) -> int | None:
+    """该课账本的 mtime（ns；缺失/不可读 ⇒ None）——「入队失败」一类的复活判据。"""
+    try:
+        return int((Path(traj_root) / course / "training_log.jsonl").stat().st_mtime_ns)
+    except OSError:
+        return None
+
+
+def _lock_signature(course: str) -> tuple[Any, ...]:
+    """按课程锁的身份（缺失 ⇒ `(False,)`；在 ⇒ `(True, mtime_ns, holder, holder_alive)`）。
+
+    持有者活着时签名稳定（不重试、不刷日志）；锁释放 / 换主 / 持有者死 ⇒ 签名变化 ⇒ 重试
+    （死锁由 `_acquire_run_rl_lock` 的自动收回接手，不需要重启整个 trainer）。
+    """
+    from common.pid_probe import pid_alive
+    from worker.train.loop_util import course_lock_path
+
+    kind = "bc" if course_kind(course) == "bc" else "rl"
+    lock = Path(course_lock_path(str(NN_DIR), course, "run_bc" if kind == "bc" else "run_rl"))
+    try:
+        st = lock.stat()
+    except OSError:
+        return (False,)
+    holder: int | None = None
+    try:
+        holder = int(lock.read_text(encoding="utf-8").split("|", 1)[0])
+    except (OSError, ValueError):
+        holder = None
+    return (True, int(st.st_mtime_ns), holder, pid_alive(holder))
+
+
+def _skip_fingerprint(course: str, kind: str, traj_root: str | Path) -> dict[str, Any]:
+    """跳过时 / 重试前**同一取法**的判据快照（按来源取事实；全是 O(1) stat）。"""
+    fp: dict[str, Any] = {
+        "file": _course_file_identity(course),
+        "marker": _marker_mtime_ns(traj_root, course),
+    }
+    if kind == SKIP_KIND_LOCK:
+        fp["lock"] = _lock_signature(course)
+    elif kind == SKIP_KIND_ENQUEUE:
+        fp["ledger"] = _ledger_mtime_ns(traj_root, course)
+    return fp
+
+
+def _skip_kind_of(detail: str) -> str:
+    """按失败原文归类跳过来源（锁被占是开课期唯一需要与「配置错」分开的族）。"""
+    if "拒绝双开" in detail:
+        return SKIP_KIND_LOCK
+    return SKIP_KIND_CONFIG
+
+
+def _record_skip(
+    report: ServeReport, course: str, kind: str, detail: str, traj_root: str | Path
+) -> None:
+    """记一次跳过（原因 + 当时判据）。复活 = 判据变了；没变 ⇒ 不重试、不刷日志。"""
+    report.skipped[course] = detail
+    report.skipped_at[course] = {"kind": kind, "fp": _skip_fingerprint(course, kind, traj_root)}
+
+
+def reopenable_skipped(
+    skipped_at: dict[str, dict[str, Any]], traj_root: str | Path
+) -> list[str]:
+    """被跳过的课里，**判据已变**、值得重试的课（2026-10-05 事故治本）。
+
+    只读 stat（课程文件 / 开课标记 / 锁 / 账本），不建 runtime、不写任何状态——与
+    `reopened_parked` 同款纯函数（可单测）。判据没变 ⇒ 返回空（`:851` 注释的原意：不刷日志）；
+    变了（含「文件从缺到有」「停→开后标记 mtime 更新」「锁释放/持有者死」「账本更新」）⇒ 返回。
+    """
+    out: list[str] = []
+    for course, rec in skipped_at.items():
+        kind = str(rec.get("kind") or SKIP_KIND_CONFIG)
+        if _skip_fingerprint(course, kind, traj_root) != rec.get("fp"):
+            out.append(course)
+    return out
+
+
 def reopened_parked(
     states: dict[str, str],
     done: set[str],
@@ -635,8 +614,10 @@ def _open_courses(
             runtimes[course] = open_course(course, argv=argv, traj_root=traj_root)
             opened.append(course)
         except BaseException as e:  # 单课故障隔离：不因一门课配错/被占就停掉别的课
-            report.skipped[course] = f"{type(e).__name__}: {e}"
-            log(f"[serve] 跳过课程 {course}：{type(e).__name__}: {e}")
+            detail = f"{type(e).__name__}: {e}"
+            # ★ 跳过不是终身黑名单（2026-10-05 事故）：记下判据指纹，变了就自动重试。
+            _record_skip(report, course, _skip_kind_of(detail), detail, traj_root)
+            log(f"[serve] 跳过课程 {course}：{detail}")
     return opened
 
 
@@ -668,6 +649,7 @@ def _enqueue_opened(
     names: list[str],
     *,
     step_mode: bool,
+    traj_root: str = "tmp",
 ) -> None:
     """给**刚开的**课挂队列——单课失败隔离（一门课读盘/算判据失败不该带走整个进程）。
 
@@ -677,10 +659,64 @@ def _enqueue_opened(
     for course in names:
         try:
             _enqueue(sup, runtimes, course, step_mode=step_mode)
+            # 成功入队 = 这门课回到正常服务面：清掉历史跳过记账（复活路径的收尾）。
+            report.skipped.pop(course, None)
+            report.skipped_at.pop(course, None)
         except BaseException as e:
-            report.skipped[course] = f"入队失败 {type(e).__name__}: {e}"
+            detail = f"入队失败 {type(e).__name__}: {e}"
+            _record_skip(report, course, SKIP_KIND_ENQUEUE, detail, traj_root)
             runtimes.pop(course, None)
-            log(f"[serve] 课程 {course} 入队失败，本次不服务：{type(e).__name__}: {e}")
+            log(f"[serve] 课程 {course} 入队失败，本次不服务：{detail}")
+
+
+def _revive_skipped(
+    sup: Supervisor,
+    runtimes: dict[str, CourseRuntime],
+    report: ServeReport,
+    course: str,
+    *,
+    argv: list[str] | None,
+    traj_root: str,
+    step_mode: bool,
+) -> list[str]:
+    """判据已变的「开课阶段跳过」课：撤销记账 → 重走开课 + 入队（失败则按新判据重记 skip）。"""
+    report.skipped.pop(course, None)
+    report.skipped_at.pop(course, None)
+    log(f"[serve] 课程 {course} 跳过判据已变化——重新尝试开课")
+    opened = _open_courses([course], runtimes, report, argv=argv, traj_root=traj_root)
+    _enqueue_opened(sup, runtimes, report, opened, step_mode=step_mode, traj_root=traj_root)
+    return opened
+
+
+def _revive_aborted(
+    sup: Supervisor,
+    runtimes: dict[str, CourseRuntime],
+    report: ServeReport,
+    course: str,
+    *,
+    step_mode: bool,
+    traj_root: str,
+) -> bool:
+    """判据已变的「一步级失败」课：重置队列、**复用原 runtime 与热引擎**重新入队。
+
+    C-0 前科（DECISIONS §2026-09-25-clutch-null-kill）：重走 `_open_courses` 会建一个
+    `runner=None` 的新 runtime，而池里还是旧引擎 ⇒ `ensure_ready` 对不上 ⇒ 每轮断言失败进
+    无限 RETRY。故这里只重置队列（`_enqueue`），runtime/引擎原样复用。
+    """
+    try:
+        old_rounds = int(sup.courses[course].rounds_done) if course in sup.courses else 0
+        _enqueue(sup, runtimes, course, step_mode=step_mode)
+        sup.courses[course].rounds_done += old_rounds
+    except BaseException as e:  # 复活失败：刷新判据（下次只在**再变**时重试，不刷日志）
+        detail = f"复活入队失败 {type(e).__name__}: {e}"
+        _record_skip(report, course, SKIP_KIND_STEP, detail, traj_root)
+        log(f"[serve] 课程 {course} 复活入队失败，本次仍停车：{detail}")
+        return False
+    report.skipped.pop(course, None)
+    report.skipped_at.pop(course, None)
+    report.failures.pop(course, None)
+    log(f"[serve] 课程 {course} 一步级失败后判据已变化——重置队列，复用原 runtime/引擎重新入队")
+    return True
 
 
 def serve(
@@ -780,7 +816,7 @@ def serve(
         mb=cache_mb,
     )
     sup = supervisor or Supervisor(
-        executor=build_executor(pool, runtimes, report),
+        executor=build_executor(pool, runtimes, report, traj_root=traj_root),
         planner=_planner(runtimes),
         capacities=dict(capacities or DEFAULT_CAPACITIES),
         now=now,
@@ -793,7 +829,7 @@ def serve(
     pool.pinned = _pinned_mid_round(sup)
 
     # 初始队列内容用**盘上事实**算（不构建引擎：扫到但没在训的课不该拉起 torch）。
-    _enqueue_opened(sup, runtimes, report, list(runtimes), step_mode=step_mode)
+    _enqueue_opened(sup, runtimes, report, list(runtimes), step_mode=step_mode, traj_root=traj_root)
 
     log(
         f"[serve] 单进程 supervisor 启动：{len(runtimes)} 课（{'发现模式：不绑课程' if discover else '显式课程表'}）/ 池容量 "
@@ -847,8 +883,29 @@ def serve(
                     if _m is not None:
                         seen_marker[_c] = _m
                     log(f"[serve] 课程 {_c} 收官后被重开——重新入队，指针续跑（引擎热复用）")
+                # ★ 被跳过的课**不是终身黑名单**（2026-10-05 事故，plan §3.4）：判据
+                # （课程文件/开课标记/锁/账本）变了 ⇒ 重试；没变 ⇒ 不重试、不刷日志。
+                for _c in reopenable_skipped(report.skipped_at, traj_root):
+                    if not course_enabled(course_traj(traj_root, _c)):
+                        continue  # 用户已停课：不重开（再开课时标记变 ⇒ 下一拍自然复活）
+                    if _c in runtimes:
+                        _revive_aborted(
+                            sup, runtimes, report, _c, step_mode=step_mode, traj_root=traj_root
+                        )
+                    else:
+                        _revive_skipped(
+                            sup,
+                            runtimes,
+                            report,
+                            _c,
+                            argv=argv,
+                            traj_root=traj_root,
+                            step_mode=step_mode,
+                        )
+                    _m = _marker_mtime_ns(traj_root, _c)
+                    if _m is not None:
+                        seen_marker[_c] = _m
                 fresh = [c for c in enabled_courses(traj_root) if c not in runtimes]
-                # 被跳过过的课不再重试（课程文件缺失 = 这一轮修不好；避免每秒刷日志）
                 fresh = [c for c in fresh if c not in report.skipped]
                 if fresh:
                     log(f"[serve] 发现新课程：{', '.join(fresh)}")
@@ -859,7 +916,9 @@ def serve(
                         _m = _marker_mtime_ns(traj_root, _c)
                         if _m is not None:
                             seen_marker[_c] = _m
-                    _enqueue_opened(sup, runtimes, report, _newly, step_mode=step_mode)
+                    _enqueue_opened(
+                        sup, runtimes, report, _newly, step_mode=step_mode, traj_root=traj_root
+                    )
             if max_seconds and (now() - t0) >= max_seconds:
                 report.stop_reason = "max_seconds"
                 break

@@ -259,6 +259,9 @@ WAIT_INFLIGHT = "inflight"
 WAIT_COLLECT = "collect"
 WAIT_IDLE = "idle"
 WAIT_READY = "ready"
+#: ★ 2026-10-05（plan/course-startup-recover §3.2）：课程配置**不可开课**（整课会被 trainer
+#: 跳过）——不是「在等什么」的第五种等待，而是「这一轮根本起不来」；此前被误报成 `ready`。
+WAIT_BLOCKED = "blocked"
 
 
 def waiting_state(
@@ -271,6 +274,7 @@ def waiting_state(
     finished: bool = False,
     it: int = 0,
     iters: int = 0,
+    blocked: str = "",
 ) -> tuple[str, str]:
     """按**盘上事实**回答「这门课在等什么」→ `(kind, 文案)`。
 
@@ -281,6 +285,9 @@ def waiting_state(
       也是运维唯一能干预的那一类；phase@round/jid 由 `commit_journal.inflight()` 给出）；
     · `collect`  —— 本轮已在盘上落了一部分局、但配额未满（或配额未知）：卡在采集上；
     · `idle`     —— 本轮没有待办（账本已结算 / 未开训）；
+    · `blocked`  —— 课程配置**不可开课**（`course_openable` 判失败；2026-10-05 事故：整课被
+      trainer 跳过、只读视图却报 ready）——优先级在 collect 之后、ready 之前，且只在
+      `pending>0` 时报（无待办的课没有「起不来」的待办语义）；
     · `ready`    —— 没有外部等待，下一步可直接推进。
 
     ★ **`games_planned` 判据诚实性**：今天盘上没有任何地方记「本轮计划多少局」（只有课程计划
@@ -311,7 +318,25 @@ def waiting_state(
         return WAIT_COLLECT, f"采集中：已落 {games_settled} 局"
     if pending <= 0:
         return WAIT_IDLE, "本轮无待办（账本已结算 / 未开训）"
+    if blocked:
+        return WAIT_BLOCKED, f"课程起不来：{blocked}"
     return WAIT_READY, f"无外部等待，下一步 {current or '?'}"
+
+
+def course_openable(course: str) -> tuple[bool, str]:
+    """只读判据：这门课能不能被 `open_course` 打开（**复用同一条校验链**，零副作用）。
+
+    实现单点 = `worker.course_args.course_openable`（RL 链：与 `open_course` 第一段逐字段
+    同源；只读视图不另写一份 `if _ki > 0 and not ref: raise`）。本函数只加**覆盖边界**：
+    BC 课走 `_open_bc_course` 另一条链（含传输解析），**不覆盖** ⇒ 一律 `(True, "")`
+    （BC 的起不来由 P0 复活通道兜底；不在这里把「没判过」写成「坏」）；serve 级 `--mode`
+    只读端拿不到 ⇒ 判据对应「无 serve 级 argv」的校验结果（plan/course-startup-recover §4.1）。
+    """
+    if course_kind(course) == "bc":
+        return True, ""
+    from worker.course_args import course_openable as _openable  # 延迟导入：不为模块加载付代价
+
+    return _openable(course)
 
 
 def course_enabled(traj: str | Path) -> bool:

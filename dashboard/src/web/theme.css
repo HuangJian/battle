@@ -2314,6 +2314,11 @@ a.tc-btn {
 .tc-mx__wait--idle {
   color: var(--muted);
 }
+/* 起不来（配置不可开课）：人去修文件前它不会动——比「在等外部」更该被一眼看见。 */
+.tc-mx__wait--blocked {
+  color: var(--red);
+  font-weight: 700;
+}
 
 /* 段内：离线课唯一的「死」信号（超时未动）。 */
 .tc-mx__seg {

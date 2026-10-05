@@ -7,6 +7,39 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §30 课程配置不可开课：`blocked` 取值域 + pill 红 + 告警坞第 8 类（plan/course-startup-recover，2026-10-05）
+
+**事故形状**：`x20-adv3-open-r2` 课程文件自相矛盾 ⇒ trainer 整课跳过，而控制台报「无外部等待，
+下一步 precollect_join」——人对着不动的界面干等（事故全文与时间线 → plan §1/§6.3）。训练侧判据
+（`openable` / `waiting.kind='blocked'` / 跳过课自动复活）→ `docs/nn/training-stack.md` §29。
+
+### 30.1 取值域（契约面，三处必须同一次改）
+
+`LoopWaitKind` 加 `'blocked'`（`loop-queue.ts`）——与 python `WAIT_BLOCKED`、
+`tests/trainer/test_loop_plan_waiting.py` 逐字对应；漏一处 = 契约分叉（`run_rl_cluster.py` 文件头点名的纪律）。
+
+| 面 | 落点 |
+|---|---|
+| 解析 | `parseLoopQueue` 加 `openable {ok, reason}`（**旧 python 缺字段 ⇒ ok=true**，宁可漏报不误报；`ok` 只认字面 `false`）· `WAIT_KINDS` 加 `'blocked'` |
+| 上色 | `waitCls('blocked') → 'tc-mx__wait--blocked'`（红，`theme.css`）· `WAIT_TITLES.blocked` 文案 |
+| pill | 起不来 = **红** `'起不来'`（优先级：暂停意图 > 收官 > 中止 > **配置不可开课** > 待进程 > hub 态 > 在等什么）——它不是「待进程」：进程起来也会被同一道校验拒启 |
+| 告警坞 | 第 8 类 `courseStartupAlerts`（`alerts.ts`）：`err`；取数 = `stateView.loopQueue.rows`（app.tsx 一行接线，不新增服务端契约）；**按课过滤**（只看当前课，与停机横幅同族） |
+
+### 30.2 告警文案与 ack 身份（评审 F4 口径）
+
+* **不写死 serve 侧事实**：判据是「**配置不可开课**」，不是「serve 已跳过」——在跑的课被改坏也会红
+  （restart-only 改动 mid-run 不生效）、trainer 没起也会红。detail 明说「正在跑的课不受影响」。
+* **不提供一键恢复**：恢复动作是「改课程文件」（代码编辑）——控制台没有、也不该有那个按钮（§2.2）；
+  但必须写清「改好会自动重试开跑，**不需要重启 trainer**」，否则人改完发现课不动会以为红条在说谎。
+* **ack 身份 = reason 原文**（`alertAckKey('course-startup', course, reason)`）：改了但没修好 ⇒ reason 变
+  ⇒ 新事件 ⇒ **重新弹**（不得用 mtime 或纯课名）；自动消失靠 P0 复活后的 `ok=true`（不靠人点「知道了」）。
+
+**回归**：`dashboard/tests/web-loop-queue.test.ts`（blocked 不退化 / 旧 python 缺字段 / pill 红与悬停 /
+上色）· `dashboard/tests/web-alert-dock.test.ts`（恰好一条 err / ok=true 零条 / ack 后消失 / reason 变
+再弹 / 按课过滤 / SSR 真的进坞）· `dashboard/tests/server-api-loop-queue.test.ts`（解析透传）。控制台侧
+取值域与旧的七类告警（宕机/收官/PPO 停摆/离线段/编辑被拒/只读）关系：第 8 类，与它们同级排序。
+
+---
 ## §29 evalBoard 停用：缺省关 + 账本冻结（plan/dashboard-memory-evalboard-off，2026-10-05）
 
 **触发**（用户 2026-10-04）：首页 EvalBoard 摘要、`/eval` 页、每 30s 的 auto-ladder 是控制台请求路径

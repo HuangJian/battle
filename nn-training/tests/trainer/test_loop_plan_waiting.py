@@ -26,6 +26,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from trainer.loop_plan import (
+    WAIT_BLOCKED,
     WAIT_COLLECT,
     WAIT_IDLE,
     WAIT_INFLIGHT,
@@ -49,6 +50,7 @@ def _state(**kw: object) -> tuple[str, str]:
         "games_planned": 0,
         "pending": 13,
         "current": "rollout",
+        "blocked": "",
     }
     base.update(kw)
     return waiting_state(**base)  # type: ignore[arg-type]
@@ -126,6 +128,27 @@ def test_ready_names_the_next_step() -> None:
     assert kind == WAIT_READY and "prepare_iter" in text
 
 
+# ────────────────────────────── 配置不可开课（2026-10-05 事故） ──────────────────────────────
+
+
+def test_blocked_reports_reason_not_ready() -> None:
+    """★ 事故回归：整课会被跳过的课**不得**被报成 `ready`——报 blocked + 原文原因。"""
+    kind, text = _state(blocked="SystemExit: kickstart_init=0.1 但 kickstart_ref 未开")
+    assert kind == WAIT_BLOCKED and "起不来" in text and "kickstart_ref" in text
+
+
+def test_blocked_outranked_by_real_waiting_facts() -> None:
+    """跑满 / 在飞 / 采集 / 无待办都轮不到 blocked——它只说「配置不可开课」这一件事。"""
+    assert _state(finished=True, it=41, iters=40, blocked="x")[0] == WAIT_IDLE
+    assert _state(inflight=[{"phase": "ppo", "round": 1}], blocked="x")[0] == WAIT_INFLIGHT
+    assert _state(games_settled=3, blocked="x")[0] == WAIT_COLLECT
+    assert _state(pending=0, current="", blocked="x")[0] == WAIT_IDLE
+
+
+def test_no_blocked_reason_keeps_ready() -> None:
+    assert _state()[0] == WAIT_READY
+
+
 # ────────────────────────────── 跑满预算（§1.5） ──────────────────────────────
 
 def test_finished_is_idle_with_honest_text() -> None:
@@ -188,9 +211,15 @@ def test_build_rows_budget_exhausted_reports_done(
     assert r["waiting"]["kind"] == WAIT_IDLE and "40/40" in r["waiting"]["text"]
 
 
-def test_build_rows_unreadable_iters_keeps_today_behavior(tmp_path: Path) -> None:
+def test_build_rows_unreadable_iters_keeps_today_behavior(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """`iters` 读不到 ⇒ 0 = 不限 ⇒ 与今天一致（`state=ready`，绝不误判收官）。"""
+    import trainer.run_rl_cluster as cluster
+
     _make_course(tmp_path, "c4-nofile", it=41)
+    # 本用例只测 iters 读数；tmp 课没有 curricula 文件，开课判据另有专测，这里隔离掉
+    monkeypatch.setattr(cluster, "course_openable", lambda _c: (True, ""))
     (r,) = build_rows(["c4-nofile"], str(tmp_path), _supervisor())
     assert r["state"] == "ready"
     assert r["waiting"]["kind"] == WAIT_READY
@@ -261,9 +290,15 @@ def test_build_rows_state_comes_from_the_scheduler(tmp_path: Path) -> None:
     assert rows[0]["current"] == rows[0]["pending"][0]
 
 
-def test_build_rows_handles_course_without_any_disk_state(tmp_path: Path) -> None:
+def test_build_rows_handles_course_without_any_disk_state(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """未开训 / 目录被清场的课程不得让整个读面炸（空账本 + 无目录）。"""
+    import trainer.run_rl_cluster as cluster
+
     (tmp_path / "empty").mkdir()
+    # 同上：隔离开课判据（"empty" 没有 curricula 文件不等于本用例要测的东西）
+    monkeypatch.setattr(cluster, "course_openable", lambda _c: (True, ""))
     (r,) = build_rows(["empty"], str(tmp_path), _supervisor())
     # 空账本 ⇒ 指针从 1 起（LedgerView.next_it 的默认值就是「第一轮」）
     assert r["it"] == 1 and r["inflight"] == []

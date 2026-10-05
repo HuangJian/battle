@@ -22,7 +22,9 @@
 
 **`--json` 是控制台「调度器」卡片的契约面**（dashboard `server/api/loop-queue.ts` 消费，
 TTL 缓存）：改 `--json` 的字段名/语义 = 改控制台，两边必须在同一次改动里对齐（`waiting`
-那一列就是「每课在等什么」，`tests/trainer/test_loop_plan_waiting.py` 盯住它的取值域）。
+那一列就是「每课在等什么」（取值域：inflight/collect/idle/ready/**blocked**），`openable`
+是「这门课能不能被打开」（2026-10-05 事故：整课被跳过却报 ready；
+`tests/trainer/test_loop_plan_waiting.py` 盯住两者）。
 """
 
 from __future__ import annotations
@@ -45,6 +47,7 @@ if HERE not in sys.path:
 
 from trainer.loop_plan import (
     course_kind,
+    course_openable,
     course_traj,
     enabled_courses,
     inflight_facts,
@@ -97,6 +100,10 @@ def build_rows(courses: list[str], traj_root: str, sup: Supervisor) -> list[dict
         current = tasks[0].kind if tasks else ""
         # ★ 别把 wait kind 写进 `kind`（课程种类）：两个局部名重叠过一次，症状是控制台把
         # BC 课标成 “ready”——行里的 `kind` 只许是课程种类。
+        # ★ 2026-10-05（plan/course-startup-recover §3.1/§4.1）：只读判据「这门课能不能被
+        # 打开」与 `waiting_state` 合流——配置不可运行的课**不得**被报成 `ready`。
+        # 零副作用：不建锁/不写账本/不碰 runtimes（实现 = `worker.course_args.course_openable`）。
+        ok, reason = course_openable(course)
         wait_kind, text = waiting_state(
             inflight=inflight,
             games_settled=int(facts["games_settled"]),
@@ -106,6 +113,7 @@ def build_rows(courses: list[str], traj_root: str, sup: Supervisor) -> list[dict
             finished=budget_exhausted(it, iters),
             it=it,
             iters=iters,
+            blocked="" if ok else reason,
         )
         # 队列状态取自调度器本身（`add_course` 的 ready/done 判定），不在这里再写一遍
         # 「有任务 = ready」——两处各写一遍就是第一个分叉点。
@@ -122,6 +130,9 @@ def build_rows(courses: list[str], traj_root: str, sup: Supervisor) -> list[dict
                 "pending": [t.kind for t in tasks],
                 "inflight": inflight,
                 "facts": facts,
+                #: 只读可开课判据（控制台红条 / `blocked` 的来源；旧 python 缺字段时
+                #: 控制台退化成 ok=true，不误报）。
+                "openable": {"ok": ok, "reason": reason},
                 "waiting": {"kind": wait_kind, "text": text},
             }
         )

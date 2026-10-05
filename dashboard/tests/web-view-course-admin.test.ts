@@ -45,6 +45,7 @@ function queueRow(course: string, over: Partial<LoopQueueRow> = {}): LoopQueueRo
       gamesPlanned: 0,
     },
     waiting: { kind: 'idle', text: '' },
+    openable: { ok: true, reason: '' },
     pausedIntent: false,
     pauseApplied: false,
     ...over,

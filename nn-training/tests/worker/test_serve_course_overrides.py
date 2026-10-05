@@ -11,7 +11,9 @@
 > （`monkeypatch.setattr` 临时装一个键）而不是被数据掏空的空断言。
 
 1. **课程机器侧覆盖**（`apply_course_machine_overrides`）：白名单、值域校验、缺字段跳过、
-   非白名单键一个字不碰；且**读取点单一**（`_read_rl_config` 是本模块唯一的 rl-config 读）。
+   非白名单键一个字不碰；且**读取点单一**（`_read_rl_config` 是 `worker/course_args.py` 侧唯一的
+   rl-config 读——2026-10-05 该链整块搬去 `worker/course_args.py`，`loop_serve` 经旧名重导出；
+   注入点随之搬到 course_args）。
 2. **进程级单实例锁**（`acquire_cluster_lock` / `release_cluster_lock`）：一个进程服务所有课程
    ⇒ 双开 = 两套调度器抢同一批 traj（按课锁拦不住这一类）。
 
@@ -29,6 +31,7 @@ from typing import Any
 import pytest
 
 from trainer import loop_serve
+from worker import course_args
 
 
 def _args(**kw: Any) -> Namespace:
@@ -59,7 +62,7 @@ def test_overlay_applies_only_the_whitelisted_keys(monkeypatch: pytest.MonkeyPat
     今天真白名单是空的（两人都退役）⇒ 装一个**探针键**（`workers`）来钉机制本身：
     「只有白名单里的键会被 setattr」这条契约不因为数据空了就失去守卫。
     """
-    monkeypatch.setattr(loop_serve, "COURSE_MACHINE_OVERRIDE_KEYS", ("workers",))
+    monkeypatch.setattr(course_args, "COURSE_MACHINE_OVERRIDE_KEYS", ("workers",))
     lines: list[str] = []
     args = _args()
     cfg = {
@@ -125,7 +128,7 @@ def test_overlay_skips_keys_the_args_namespace_does_not_have(
 
     同样用探针白名单（今天真白名单是空的）——跳过分支是**下一条键**的护栏。
     """
-    monkeypatch.setattr(loop_serve, "COURSE_MACHINE_OVERRIDE_KEYS", ("gate_halt_mode",))
+    monkeypatch.setattr(course_args, "COURSE_MACHINE_OVERRIDE_KEYS", ("gate_halt_mode",))
     lines: list[str] = []
     args = Namespace()  # 白名单键一个都没有（BC 解析器就是这个形状）
     applied = loop_serve.apply_course_machine_overrides(
@@ -141,9 +144,9 @@ def test_overlay_skips_keys_the_args_namespace_does_not_have(
 
 def test_overlay_reads_rl_config_through_one_seam(monkeypatch: pytest.MonkeyPatch) -> None:
     """不传 cfg 时走 `_read_rl_config`（**唯一**读取点，也是用例的注入点）。"""
-    monkeypatch.setattr(loop_serve, "COURSE_MACHINE_OVERRIDE_KEYS", ("workers",))
+    monkeypatch.setattr(course_args, "COURSE_MACHINE_OVERRIDE_KEYS", ("workers",))
     monkeypatch.setattr(
-        loop_serve,
+        course_args,
         "_read_rl_config",
         lambda: {"courses": {"c5-tick": {"workers": 7}}},
     )

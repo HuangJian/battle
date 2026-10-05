@@ -7664,3 +7664,41 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 - **违反后果**：客户端读 env ⇒ 首页白屏（ReferenceError）；门控落进视图内部 ⇒ `/api/evalboard`
   仍冷算 + 台账仍被 ingest（假停用）；说明页复活 `/eval.js` ⇒ `eval-app` 周期拉 API（等于没关）。
 - **指针**：全文 `docs/nn/console.md` §29 · plan `plan/dashboard-memory-evalboard-off.plan.md`。
+
+## §2026-10-05-course-startup-recover（2026-10-05，课程配置错被整课跳过：判据变即自动重试 + 只读 `blocked` 判据）
+
+- **背景（用户报障）**：`x20-adv3-open-r2` 的课程文件自相矛盾（`kickstart_init>0` ∧ `kickstart_ref=false`）
+  ⇒ 启动期 SystemExit、整课被共享 trainer 跳过；人改好文件 + 控制台「停→开」后日志零变化——唯一出路
+  是重启 trainer（会打断所有并行课程）。实证：07:47 跳过 → 07:51 重启仍跳过 → 改文件无变化 →
+  08:06 停→开无变化 → 08:10 重启 serve 后才开课（`tmp/trainer-cluster.log`）。
+- **决定（P0 复活通道）**：「跳过」从**终身黑名单**改成**带判据指纹的待重试表**：
+  `ServeReport.skipped_at[course] = {kind: 来源分类, fp: 判据快照}`；每拍（既有 discovery 空转拍，
+  不新增节拍）由纯函数 `reopenable_skipped` 比对——课程文件身份（mtime_ns+size）/ 开课标记 mtime /
+  按课程锁签名（释放/换主/持有者死）/ 账本 mtime，**按跳过来源取事实**（config / lock / enqueue）。
+  判据变了 ⇒ 撤销记账 + 重走开课入队；一步级 SystemExit 那族走**第二条通道**（重置队列 + `_enqueue`，
+  **保留 runtime/引擎**——重建 runtime = C-0 无限 RETRY 前科）。判据没变 ⇒ 不重试、不刷日志（`:851`
+  注释的原意保住）。用户「停→开」（标记 mtime 变新）也是复活信号。**不动** `kickstart_init` 的
+  restart-only 分类（那是给**已在跑**的课的规矩；本条治的是「压根没开成的课」——正交）。
+- **决定（P1 只读判据）**：`openable {ok, reason}`（`worker/course_args.py::course_openable`——与
+  `open_course` **同一条校验链**、零副作用）+ `waiting.kind='blocked'`（新增一格；优先级
+  finished > inflight > collect > blocked > idle > ready，仅 `pending>0` 时报）⇒ 控制台不再把起不来的课
+  报成「无外部等待，下一步 …」。控制台：`WAIT_KINDS`/`WAIT_TITLES`/pill（红）/告警坞第 8 类
+  （err；按课过滤；ack 身份 = reason 原文 ⇒ 改了但没修好会再弹；**不提供**恢复按钮——恢复是改文件）。
+- **边界（明说）**：判据是「**配置不可开课**」不是「serve 此刻跳过了它」（在跑的课被改坏也会红、
+  trainer 没起也会红）；serve 级 `--mode` 与 BC 链不在覆盖面；rl-config/env/权重类不过指纹
+  （改课程文件不会触发复活）；复活发生在**全局空转拍**，不承诺零延迟。
+- **被否决**：① 恢复需人重启（用户裁决不可接受——会打断并行课程）；② 定时无条件重试（每秒 pydantic
+  校验 + 可能建 runtime，只为等一个可能不来的修改）；③ 复活走重建 runtime（C-0 前科）；
+  ④ 把 `kickstart_init` 变成 hot 字段（把「没开成的课的重试」与「已在跑的课的 restart-only 口径」
+  混为一谈——两者正交，改错会破坏实验口径）。
+- **违反后果**：用 `course_fp`（sha）当指纹 ⇒ 每拍哈希；对已在跑的课重建 runtime ⇒ 无限 RETRY；
+  文案写死「serve 已跳过」⇒ 在跑/停机场景说谎；`blocked` 复用 `idle` ⇒ 停机中的课与起不来的课又
+  长得一模一样（本次事故「分不清」的翻版）。
+- **落点**：`nn-training/trainer/loop_serve.py`（`skipped_at` / `_skip_fingerprint` / `reopenable_skipped` /
+  `_revive_skipped` / `_revive_aborted`）· `worker/course_args.py`（新，校验链抽中立模块，serve 与只读视图
+  同源 import）· `trainer/loop_plan.py`（`WAIT_BLOCKED` / `course_openable`）· `trainer/run_rl_cluster.py`
+  （每行 `openable`）· 用例 `tests/trainer/test_serve_skipped_retry.py`（9：判据三类 + 三条回归防线 +
+  双课对照）· `tests/trainer/test_course_openable.py`（6）· 控制台 `dashboard/src/web/view/loop-queue.ts` /
+  `alerts.ts` / `interaction.ts` / `theme.css` · 计划 `plan/course-startup-recover.plan.md`。
+- **指针**：全文 `docs/nn/training-stack.md` §29（训练侧）· `docs/nn/console.md` §30（控制台读面）·
+  计划 `plan/course-startup-recover.plan.md`。

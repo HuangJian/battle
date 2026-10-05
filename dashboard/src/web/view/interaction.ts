@@ -35,6 +35,9 @@ export type AlertAckKind =
   | 'ppo-stall'
   | 'offline-stall'
   | 'course-edit'
+  // 课程配置不可开课（2026-10-05，plan/course-startup-recover §3.3）：事件身份 = reason 原文
+  // 而非课名——改了但没修好 ⇒ reason 变 ⇒ 新事件 ⇒ 会重新弹（这是我们要的）。
+  | 'course-startup'
 
 export function alertAckKey(kind: AlertAckKind, subject: string, eventId: string): string {
   return `${kind}|${subject}|${eventId}`

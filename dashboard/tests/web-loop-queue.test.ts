@@ -13,6 +13,7 @@
 
 import { describe, expect, it } from 'bun:test'
 import {
+  coursePills,
   type LoopQueueView,
   parseLoopQueue,
   pauseBadge,
@@ -20,6 +21,8 @@ import {
   pauseState,
   pauseTitle,
   trainingFromQueue,
+  WAIT_TITLES,
+  waitCls,
   withPausedFacts,
   withTraining,
 } from '../src/web/view'
@@ -152,5 +155,40 @@ describe('容错解析：python 侧比控制台新/旧一个版本都不能炸',
   it('未知课程种类 → 当 RL（保守方向：误判成 BC 会给真 RL 课贴错标签）', () => {
     expect(parseLoopQueue({ courses: [row({ kind: 'weird' })] })!.rows[0]!.kind).toBe('rl')
     expect(parseLoopQueue({ courses: [row({ kind: 'bc' })] })!.rows[0]!.kind).toBe('bc')
+  })
+})
+
+describe('可开课判据：起不来的课不得被读成「在等外部」（2026-10-05 事故）', () => {
+  const blocked = (reason = 'SystemExit: kickstart_ref=false 但 kickstart_init>0') =>
+    row({
+      openable: { ok: false, reason },
+      waiting: { kind: 'blocked', text: `课程起不来：${reason}` },
+    })
+
+  it('blocked 是取值域一员（不退化）：kind 与文案逐字保留', () => {
+    const v = queue([blocked()], true)
+    expect(v.rows[0]!.waiting.kind).toBe('blocked')
+    expect(v.rows[0]!.waiting.text).toContain('课程起不来')
+  })
+
+  it('旧 python 缺 openable ⇒ ok=true（宁可漏报，不可把旧版本读成「每门课都坏」）', () => {
+    expect(parseLoopQueue({ courses: [row()] })!.rows[0]!.openable).toEqual({
+      ok: true,
+      reason: '',
+    })
+  })
+
+  it('pill：起不来 = 红（不是「待进程」/「空闲」），悬停带 reason 与生效路径', () => {
+    const v = queue([blocked('SystemExit: kickstart_ref 没开')], true)
+    const [p] = coursePills({ courses: ['c4-dodge'], rows: v.rows, trainerRunning: true })
+    expect(p!.status).toBe('起不来')
+    expect(p!.tone).toBe('r')
+    expect(p!.title).toContain('SystemExit: kickstart_ref 没开')
+    expect(p!.title).toContain('不需要重启 trainer')
+  })
+
+  it('上色与悬停：blocked 有专属类（与 ready 的「不上色」分开）', () => {
+    expect(waitCls('blocked')).toBe('tc-mx__wait--blocked')
+    expect(WAIT_TITLES.blocked).toContain('课程配置不可开课')
   })
 })

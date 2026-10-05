@@ -931,3 +931,23 @@ CPU/墙钟），则在 +3 it 的权重回传后在 hub 端使用 LAN 集群跑 e
 **2353 pass / 12 skip / 0 fail** · `bun run build` 过 · 必红自查两条（删宽限判据 / 删收官分支）
 均验证会红。决策 → `DECISIONS.md` §2026-10-04-goalnn-offline-eval-backfill；全文 →
 `docs/nn/console.md` §28；计划 → `plan/offline-eval-backfill.plan.md`。
+
+## 2026-10-05 · course-startup-recover：课程起不来要能看见，且改好就能自动生效
+
+用户报障（全文与时间线 → plan §1/§6.3）：`x20-adv3-open-r2` 因课程文件自相矛盾被共享 trainer 整课
+跳过；人改好文件 + 控制台停→开都无效，唯一出路是重启 trainer（会打断所有并行课程）。
+
+**P0**：跳过从**终身黑名单**改成**带判据指纹的待重试表**——课程文件身份（mtime_ns+size）/ 开课标记
+mtime / 按课程锁签名 / 账本 mtime，**按跳过来源取事实**（config / lock / enqueue）；一步级 SystemExit
+那族走**第二条通道**（重置队列 + 保留 runtime/引擎，不重建——C-0 无限 RETRY 前科）。不刷日志：
+判据没变不重试；「停→开」（标记 mtime 变新）也是复活信号。**P1**：只读判据 `openable`（校验链抽中立
+模块 `worker/course_args.py`（分层法定的训练栈家——`trainer/` 只许编排，且不得与 `biz/course_spec.py` 撞名），serve 与只读视图同源；解 F3 依赖倒挂）+ `waiting.kind='blocked'`
+（不再把起不来的课报成「无外部等待，下一步 …」）+ 控制台 pill 红 / 告警坞第 8 类（按课过滤；ack 身份
+= reason ⇒ 改了但没修好会再弹；不给一键恢复——恢复是改文件）。边界明说：判据是「配置不可开课」不是
+「serve 已跳过」；rl-config/env/权重类不覆盖；复活发生在全局空转拍。
+
+读数：nn py-safe 相关全绿（P0 9 新 + openable 6 新 + waiting/override/wiring 回归）· 先红后绿与两条
+反向探针均已跑（判据 stub ⇒ P0 失效；openable ok=true ⇒ 告警消失）· 只读 `--json` 冷算 1.16s、
+import 链 0 torch · `bun run check` 2373/0 · dashboard typecheck + 1398/0 + 三份 bundle · `bun run build` 过。
+决策 → `DECISIONS.md` §2026-10-05-course-startup-recover；全文 → `docs/nn/training-stack.md` §29 /
+`docs/nn/console.md` §30；计划 → `plan/course-startup-recover.plan.md`。

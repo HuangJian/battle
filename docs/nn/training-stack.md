@@ -7,6 +7,56 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §29 跳过课的复活通道 + 只读 `openable`/`blocked` 判据（2026-10-05，plan/course-startup-recover）
+
+**事故**：`x20-adv3-open-r2` 课程文件自相矛盾（`kickstart_init>0` ∧ `kickstart_ref=false`）⇒ 启动期
+SystemExit、整课被共享 trainer 跳过（`report.skipped`）；人改好文件 + 停→开都无效（`fresh` 过滤把
+`skipped` 当**终身黑名单**），唯一出路是重启 trainer——而那会打断所有并行课程（事故实证 → plan §6.3）。
+
+### 29.1 P0：跳过 = 待重试表（判据指纹，按来源取事实）
+
+`ServeReport.skipped_at[course] = {kind, fp}`；每拍（既有 discovery 空转拍，**不新增节拍**）纯函数
+`reopenable_skipped(skipped_at, traj_root)` 比对当时/此刻的判据：
+
+| 跳过来源 | `kind` | 判据快照 |
+|---|---|---|
+| `_open_courses` 配置错（课程文件） | `config` | 课程文件身份（`mtime_ns`+`size`）+ 开课标记 mtime |
+| 按课程锁被占（`拒绝双开`） | `lock` | 同上 + 锁签名（释放 / 换主 / 持有者死）——失败快、自愈类 |
+| `_enqueue_opened` 入队失败 | `enqueue` | 同上 + 账本 mtime（修复对象是账本/轨迹盘） |
+| 一步级 SystemExit（`build_executor`） | `step` | 同上；**通道不同**（课仍在 `runtimes`、队列 ABORTED） |
+
+复活动作：`config/lock/enqueue` 类撤销记账后重走 `_open_courses` + `_enqueue_opened`；`step` 类走
+**第二条通道** `_revive_aborted`——重置队列（`_enqueue` + 把旧 `rounds_done` 带回）+ **保留
+runtime/引擎**。不得重建 runtime：C-0 前科（新 runtime `runner=None` + 池里旧引擎 ⇒ `ensure_ready`
+对不上 ⇒ 无限 RETRY）。判据没变 ⇒ 不重试、不刷日志（`:851` 注释原意）；文件从缺到有（`None → 有值`）
+也算变；用户「停→开」（标记 mtime 变新）是同一机制里的合法复活信号。
+
+**与 restart-only 正交**：`kickstart_init`/`kickstart_ref` 在 `RESTART_ONLY_FIELDS` 的规矩是给
+**已在跑**的课的（衰减曲线一旦排好不得中途换口径）；本条治的是**压根没开成的课**——P0 **不动**
+`RESTART_ONLY_FIELDS`，也不动 `plan_reload` 分类学。
+
+### 29.2 P1：只读判据（控制台「起不来」不再读成「无外部等待」）
+
+* 校验链抽中立模块 `worker/course_args.py`（`_read_rl_config` / `apply_course_machine_overrides` /
+  `course_args`；`loop_serve` 按旧名重导出 ⇒ 既有调用点/对拍用例零改动）。住 `worker/`（训练栈家）
+  而非 `trainer/` 是分层法定的：`trainer/` 只许编排（`tests/test_layering.py::
+  test_trainer_holds_only_orchestration_modules`）——**依赖方向**同时解掉：`loop_plan` 不得反向
+  import `loop_serve`（循环 + 只读 `--json` 每轮拉起 serve 的导入代价）。
+* `course_args.course_openable(course) -> (ok, reason)`：跑 `course_args`、零副作用（不建锁/不写账本/
+  不碰 runtimes）；失败原文透传（含「读不到课程文件」——不得因为读不到就假定没事）。
+* `loop_plan.course_openable` 只加**覆盖边界**：BC 课走 `_open_bc_course` 另一条链 ⇒ 一律 `(True, "")`
+  （不把「没判过」写成「坏」）；serve 级 `--mode` 只读端拿不到 ⇒ 判据对应「无 serve 级 argv」。
+* `waiting_state(..., blocked=reason)` 新增 `WAIT_BLOCKED`：优先级 `finished > inflight > collect >
+  blocked > idle > ready`，仅 `pending>0` 时报。（§28 的「刻意不新增 `WAIT_*`」只针对收官文案，不矛盾。）
+* `run_rl_cluster.build_rows` 每行加 `openable {ok, reason}`（`--json` 契约面；顶层不加 `skipped`）。
+
+**回归**：`tests/trainer/test_serve_skipped_retry.py`（9）· `tests/trainer/test_course_openable.py`（6，
+含真夹具复制 + 改一字对照）· `tests/trainer/test_loop_plan_waiting.py`（`blocked` 优先级/文案）·
+`tests/worker/test_serve_course_overrides.py`（模块搬家后调用点不变）。反向探针（已跑）：文件身份判据
+stub 成恒等 ⇒ P0 失效；恢复真判据 ⇒ 同一改动被看见。只读路径守卫（已跑）：`--json` 冷算 1.16s、
+import 链 0 行 torch（10s TTL 预算内）。控制台读面 → `docs/nn/console.md` §30。
+
+---
 ## §28 只读读面的收官判据 = `iters` 预算（`budget_exhausted` 单点共用，2026-10-02）
 
 **现场**（h4-aim-k10/k25）：两课均已跑满 40 轮并落 `run_complete`，控制台 pill 仍报「推进中」。

@@ -16,8 +16,13 @@
 
 import type { CourseOverviewRow, HubInflightView, ParallelOverviewView } from './course-overview'
 
-/** 「在等什么」的取值域（与 python `loop_plan.WAIT_*` 逐字对应）。 */
-export type LoopWaitKind = 'inflight' | 'collect' | 'idle' | 'ready'
+/** 「在等什么」的取值域（与 python `loop_plan.WAIT_*` 逐字对应）。
+ *
+ *  ★ 2026-10-05（plan/course-startup-recover §3.2）：新增 `blocked` —— 课程配置**不可开课**
+ *  （整课起不来）。它不是「第五种等待」：`idle` 说的是「本轮无待办」这种**正常空转稳态**，
+ *  把「配置不可运行」塞进 `idle` 会让停机中的课和起不来的课长得一样（本次事故「分不清」的
+ *  翻版）⇒ 新增一格。取值域是契约面：python `run_rl_cluster.py` 文件头点名了这条纪律。 */
+export type LoopWaitKind = 'inflight' | 'collect' | 'idle' | 'ready' | 'blocked'
 
 /** 该课队列状态（python `loop_scheduler`：ready / running / waiting / paused / aborted / done）。 */
 export type LoopCourseState = 'ready' | 'running' | 'waiting' | 'paused' | 'aborted' | 'done'
@@ -79,6 +84,11 @@ export interface LoopQueueRow {
   facts: LoopCourseFactsView
   /** **「在等什么」**：python 侧算好的结论 + 取值域（UI 按 kind 上色/排序）。 */
   waiting: { kind: LoopWaitKind; text: string }
+  /** **只读可开课判据**（python `trainer/course_spec.py::course_openable`）：`ok=false` =
+   *  课程配置不可开课（判据 = 开课同一条校验链；整课起不来）。`waiting.kind=blocked` 与
+   *  告警坞红条都从它派生。**旧 python 没这个字段 ⇒ 退化成 `{ok:true,''}`**（宁可漏报，
+   *  不可把旧版本读成「每门课都坏」）。 */
+  openable: { ok: boolean; reason: string }
   /** **控制台写下的暂停意图**（`tmp/loop-control.json`，按钮动作就改它）。 */
   pausedIntent: boolean
   /** **训练进程回执：它实际把这门课停着**（`loop-control.applied.json`，已按进程存活过滤）。
@@ -265,6 +275,22 @@ export function coursePills(input: {
         status: '已中止',
         tone: 'r' as CoursePillTone,
         title: `训练进程已把该课标为「已中止」：${wait}`,
+      }
+    }
+    // ★ 2026-10-05（plan/course-startup-recover §3.3 / §8.2）：配置**不可开课** ⇒ 红。
+    // 「起不来」不是「待进程」——进程起来也会被同一道校验拒启。文案不写死 serve 侧事实
+    // （评审 F4）：这是**配置面判据**，正在跑的课不受影响；人唯一的动作是修课程文件。
+    if (!r.openable.ok || r.waiting.kind === 'blocked') {
+      const why = r.openable.reason || wait || '读不到原因'
+      return {
+        course,
+        kind,
+        it,
+        status: '起不来',
+        tone: 'r' as CoursePillTone,
+        title:
+          `课程配置不可开课：${why}。这是课程文件配置问题（trainer 在跑时会整课跳过；` +
+          '正在跑的课不受影响）——改好课程文件后会自动重试开跑，不需要重启 trainer。',
       }
     }
     if (!input.trainerRunning) {
@@ -472,7 +498,7 @@ export interface LoopQueueView {
   error?: string
 }
 
-const WAIT_KINDS: LoopWaitKind[] = ['inflight', 'collect', 'idle', 'ready']
+const WAIT_KINDS: LoopWaitKind[] = ['inflight', 'collect', 'idle', 'ready', 'blocked']
 const STATES: LoopCourseState[] = ['ready', 'running', 'waiting', 'paused', 'aborted', 'done']
 
 function str(v: unknown): string {
@@ -523,6 +549,9 @@ export function parseLoopQueue(raw: unknown): LoopQueueView | null {
     const state = str(r.state) as LoopCourseState
     // 未知/缺失 kind ⇒ `rl`（保守方向，见 `LoopCourseKind` 注释）
     const kind = str(r.kind) === 'bc' ? 'bc' : 'rl'
+    // 旧 python 缺 `openable`（比控制台旧一个版本）⇒ ok=true（不误报）；`ok` 只认字面 false。
+    const opRaw = (r.openable ?? {}) as Record<string, unknown>
+    const openable = { ok: opRaw.ok !== false, reason: str(opRaw.reason) }
     rows.push({
       course,
       kind,
@@ -550,6 +579,7 @@ export function parseLoopQueue(raw: unknown): LoopQueueView | null {
         kind: WAIT_KINDS.includes(waitKind) ? waitKind : 'ready',
         text: str(wRaw.text),
       },
+      openable,
     })
   }
   const pools: Record<string, LoopPoolView> = {}
@@ -724,6 +754,9 @@ export function waitCls(kind: LoopWaitKind): string {
       return 'tc-mx__wait--collect'
     case 'idle':
       return 'tc-mx__wait--idle'
+    // 起不来 = 人去修课程文件（唯一动作），比「在等外部」更该被一眼看见 ⇒ 红。
+    case 'blocked':
+      return 'tc-mx__wait--blocked'
     default:
       return ''
   }
@@ -738,6 +771,9 @@ export const WAIT_TITLES: Record<LoopWaitKind, string> = {
   collect: '本轮采集还在落盘（局数来自 it<N>/ 下的 manifest，配额只有课程计划知道）',
   idle: '本轮没有待办：账本已结算这一轮，或这门课还没开训',
   ready: '盘上事实看不出外部等待——没有在飞 job，采集也没在跑',
+  blocked:
+    '课程配置不可开课——整课起不来（不是「在等外部」）。判据 = 开课同一条校验链；' +
+    '改好课程文件后会自动重试开跑，不需要重启 trainer',
 }
 
 /** 「在等什么」的悬停全文（按 kind 取）。 */

@@ -309,8 +309,11 @@ LAYERS: dict[str, int] = {
     "worker.loop_scheduler": 1,
     "worker.ppo.common": 1,
     "worker.train_ledger": 1,
-    # L2（10 个）
+    # L2（11 个）
     "worker.bc_config": 2,
+    # ★ 2026-10-05（plan/course-startup-recover）：课程解析/校验链从 loop_serve 抽出——顶层只
+    # 用 `worker.modes`(L0) 与 `common.*`，函数内延迟用 `worker.cli`/`worker.config`(L1) ⇒ 秩 2。
+    "worker.course_args": 2,
     "worker.bc_eval": 2,
     "worker.eval_replays_once": 2,
     "worker.gate_judges": 2,

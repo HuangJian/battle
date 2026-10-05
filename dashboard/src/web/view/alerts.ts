@@ -37,7 +37,7 @@ import { alertAckKey, cloudHaltAckKey, visibleCloudHalts } from './interaction'
 // 与 pill **同一个词**（2026-10-02 口径对齐，plan/course-pill-precision §6）：告警坞的 PPO 红条
 // 与 pill 的「排队·无人取」说的是同一件事（有活、没人认领）；「卡住」是另一类（有持有者但
 // 无进度）。两处各起一个名字 = 迟早漂开，所以词只在 `loop-queue.ts` 定义一次。
-import { NO_TAKER_LABEL, STUCK_LABEL } from './loop-queue'
+import { type LoopQueueRow, NO_TAKER_LABEL, STUCK_LABEL } from './loop-queue'
 
 /** 告警严重度（排序即这个顺序；`history` = 已恢复/已完成这类留痕）。 */
 export type AlertSeverity = 'err' | 'warn' | 'info' | 'history'
@@ -133,6 +133,10 @@ export interface AlertInput {
   offlineStalls?: OfflineStalledView[] | null
   /** `at` = 事件时刻（账本 `time`）：ack 事件身份用它；缺省回退字段签名（旧夹具）。 */
   courseEdit?: { verdict: string; fields: string[]; at?: string } | null
+  /** 调度器每课队列行（`stateView.loopQueue.rows`）——第 8 类「课程配置不可开课」的取数面
+   *  （2026-10-05，plan/course-startup-recover §3.3/§4.3）。`null`/缺省 = 读面不可用
+   *  （旧控制台 / python 读失败）：什么都不画，**不编**「起不来」。 */
+  loopQueueRows?: LoopQueueRow[] | null
   readOnly: boolean
   /** 只读提示是否已被关掉（写盘的状态由调用方给）。 */
   roDismissed: boolean
@@ -148,6 +152,7 @@ export function buildAlerts(input: AlertInput): AlertItem[] {
     ...ppoStallAlerts(input),
     ...offlineStallAlerts(input),
     ...courseEditAlerts(input),
+    ...courseStartupAlerts(input),
     ...readOnlyAlerts(input),
   ]
 }
@@ -354,6 +359,45 @@ function courseEditAlerts(input: AlertInput): AlertItem[] {
         actions: [{ kind: 'ack', label: '知道了', ackKey }],
       },
       input.viewing,
+    ),
+  ]
+}
+
+/** 课程配置**不可开课**（红条，第 8 类；2026-10-05 事故，plan/course-startup-recover §3.3）。
+ *
+ *  事故形状：一门课因课程文件自相矛盾（`kickstart_init>0` ∧ `kickstart_ref=false`）被 trainer
+ *  整课跳过，而只读视图报「无外部等待，下一步 precollect_join」——人对着不动的界面干等。
+ *  本条的措辞只说我**判据面**的事实（「课程配置不可开课」），**不**写死 serve 侧动作
+ *  （评审 F4：在跑的课被改了文件也会红，trainer 没起时也会红——那是判据，不是「已跳过」）。
+ *
+ *  可见范围 = **当前课**（有恢复动作且会被自己修好的配置解除，与停机横幅同族；切课不弹）。
+ *  ack 身份 = reason 原文（不是 mtime）：改了但没修好 ⇒ 新事件 ⇒ 再弹一次（§3.3）。
+ *  恢复动作不提供：那是「改课程文件」（代码编辑），控制台没有也不该有那个按钮（§2.2）——
+ *  但必须给出「改完怎么生效」（改好会自动重试开跑，不需重启 trainer），否则人会以为红条在说谎。 */
+function courseStartupAlerts(input: AlertInput): AlertItem[] {
+  if (!input.viewing) return []
+  const row = (input.loopQueueRows ?? []).find((r) => r.course === input.viewing)
+  if (!row || row.openable.ok) return []
+  const reason = row.openable.reason.trim() || row.waiting.text.trim()
+  const ackKey = alertAckKey('course-startup', row.course, reason)
+  if (input.acks.includes(ackKey)) return []
+  const firstLine = reason.split('\n')[0]?.trim() || '原因不可得（读面缺 reason）'
+  return [
+    withCopy(
+      {
+        id: `course-startup-${row.course}`,
+        severity: 'err',
+        icon: '⚠',
+        title: `${row.course} 课程配置不可开课：${firstLine}`,
+        detail:
+          `${reason}\n` +
+          `课程文件：nn-training/curricula/${row.course}.jsonc（不带行号——行号会随编辑漂移）。` +
+          '这是课程文件配置问题——配置不可开课（trainer 在跑时会整课跳过；正在跑的课不受影响）。' +
+          '改好课程文件后会自动重试开跑，不需要重启 trainer。',
+        role: 'alert',
+        actions: [{ kind: 'ack', label: '知道了', ackKey }],
+      },
+      row.course,
     ),
   ]
 }
