@@ -427,7 +427,7 @@ P0 落地后，这一切的代价归零——**改一行课程文件即可，不
 **反向探针（已跑）**：
 1. P0：把 `_course_file_identity` 换成恒等 ⇒ `reopenable_skipped` 看不见同一份改动（P0 失效）；恢复真判据 ⇒ 同一改动被看见（同一条命令里两边都断言）。
 2. P1：`openable.ok=true` ⇒ 告警零条（用例钉住）；`reason` 变化 ⇒ 新 ack 键 ⇒ 重新弹。
-3. 只读路径：`run_rl_cluster.py --json` 冷算 **1.16s**、import 链 **0 行 torch**（10s TTL 预算内；F3 的验收）。
+3. 只读路径：`run_rl_cluster.py --json` 冷算 **1.2–2.4s**（两次实测）、import 链 **0 行 torch**（10s TTL 预算内；F3 的验收；改动后复测过）。
 
 **诚实账（已知边界，与 §6.5 一致）**：
 - 判据是「配置不可开课」不是「serve 此刻跳过了它」；在跑课被改坏、trainer 没起都会红（文案已按 F4 写）。

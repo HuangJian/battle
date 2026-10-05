@@ -53,8 +53,8 @@ runtime/引擎**。不得重建 runtime：C-0 前科（新 runtime `runner=None`
 **回归**：`tests/trainer/test_serve_skipped_retry.py`（9）· `tests/trainer/test_course_openable.py`（6，
 含真夹具复制 + 改一字对照）· `tests/trainer/test_loop_plan_waiting.py`（`blocked` 优先级/文案）·
 `tests/worker/test_serve_course_overrides.py`（模块搬家后调用点不变）。反向探针（已跑）：文件身份判据
-stub 成恒等 ⇒ P0 失效；恢复真判据 ⇒ 同一改动被看见。只读路径守卫（已跑）：`--json` 冷算 1.16s、
-import 链 0 行 torch（10s TTL 预算内）。控制台读面 → `docs/nn/console.md` §30。
+stub 成恒等 ⇒ P0 失效；恢复真判据 ⇒ 同一改动被看见。只读路径守卫（已跑）：`--json` 冷算
+1.2–2.4s（两次实测）、import 链 0 行 torch（10s TTL 预算内）。控制台读面 → `docs/nn/console.md` §30。
 
 ---
 ## §28 只读读面的收官判据 = `iters` 预算（`budget_exhausted` 单点共用，2026-10-02）

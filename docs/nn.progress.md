@@ -947,7 +947,7 @@ mtime / 按课程锁签名 / 账本 mtime，**按跳过来源取事实**（confi
 「serve 已跳过」；rl-config/env/权重类不覆盖；复活发生在全局空转拍。
 
 读数：nn py-safe 相关全绿（P0 9 新 + openable 6 新 + waiting/override/wiring 回归）· 先红后绿与两条
-反向探针均已跑（判据 stub ⇒ P0 失效；openable ok=true ⇒ 告警消失）· 只读 `--json` 冷算 1.16s、
+反向探针均已跑（判据 stub ⇒ P0 失效；openable ok=true ⇒ 告警消失）· 只读 `--json` 冷算 1.2–2.4s、
 import 链 0 torch · `bun run check` 2373/0 · dashboard typecheck + 1398/0 + 三份 bundle · `bun run build` 过。
 决策 → `DECISIONS.md` §2026-10-05-course-startup-recover；全文 → `docs/nn/training-stack.md` §29 /
 `docs/nn/console.md` §30；计划 → `plan/course-startup-recover.plan.md`。
