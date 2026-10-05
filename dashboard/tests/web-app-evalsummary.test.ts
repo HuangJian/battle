@@ -45,12 +45,21 @@ describe('首页 EvalSummary（阶梯 God vs 学生 B 层）', () => {
   it('SSR 首屏含摘要壳与抽屉入口（数据客户端拉，首帧 loading）', async () => {
     // 2026-09-14 首页 BC/RL 区互斥：EvalBoard 摘要只属 RL 区，必须用 RL 课渲染
     //（默认 effectiveCourse 是 bc-c4-v3 = BC 课 → EvalSummary 正确不渲染）。
-    const { buildStateView } = await import('../src/server/api')
-    const html = renderConsolePage(await buildStateView('p4-fast'))
-    expect(html).toContain('tc-eval-summary')
-    expect(html).toContain('EvalBoard 摘要')
-    expect(html).toContain('完整评估看板')
-    expect(html).toContain('加载评估摘要')
+    // 2026-10-05（plan/dashboard-memory-evalboard-off R4）：evalBoard **缺省停用** ⇒
+    // 本用例显式开开关（缺省关方向由 tests/evalboard-disabled.test.ts 反向断言）。
+    const prev = process.env.BCITY_EVALBOARD
+    process.env.BCITY_EVALBOARD = '1'
+    try {
+      const { buildStateView } = await import('../src/server/api')
+      const html = renderConsolePage(await buildStateView('p4-fast'))
+      expect(html).toContain('tc-eval-summary')
+      expect(html).toContain('EvalBoard 摘要')
+      expect(html).toContain('完整评估看板')
+      expect(html).toContain('加载评估摘要')
+    } finally {
+      if (prev === undefined) delete process.env.BCITY_EVALBOARD
+      else process.env.BCITY_EVALBOARD = prev
+    }
   })
 
   const mockIter = (

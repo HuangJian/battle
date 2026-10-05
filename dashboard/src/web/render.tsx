@@ -47,7 +47,7 @@ function shell(
   title: string,
   bodyHtml: string,
   initialJson: string,
-  scriptSrc: string,
+  scriptSrc = '',
   css: string = pageCss(),
 ): string {
   return `<!doctype html>
@@ -62,7 +62,7 @@ function shell(
 <body>
 <div id="root">${bodyHtml}</div>
 <script>window.__INITIAL__=${escapeJson(initialJson)}</script>
-<script src="${scriptSrc}"></script>
+${scriptSrc ? `<script src="${scriptSrc}"></script>` : ''}
 </body>
 </html>`
 }
@@ -103,6 +103,25 @@ export function renderEvalPage(payload: EvalPagePayload, opts: PageShellOpts = {
     opts.scriptSrc ?? '/eval.js',
     opts.css,
   )
+}
+
+/** `/eval` **停用说明页**（R4：evalBoard 缺省关；plan/dashboard-memory-evalboard-off W2′）。
+ *
+ * **不注入任何客户端 bundle**（`scriptSrc = ''`）：`eval-app.tsx` 自己会周期打
+ * `/api/evalboard`（`:217` mount + `:235` 300s 轮询）——挂了 bundle 就等于没关。
+ * 文案与 API 的 `{ disabled }` 同源（`server/eval-board/routes.ts::evalboardPageNotice`）。
+ */
+export function renderEvalNoticePage(message: string, opts: PageShellOpts = {}): string {
+  const esc = (s: string): string =>
+    s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+  // 布局样式住 theme.css（`.tc-eval-off*`）—— tsx 里不许写内联 style 属性
+  // （tests/web-style-discipline.test.ts：P4 之后只剩 TrendChart 的 3 处计算值豁免）。
+  const body =
+    '<div class="tc-eval-off">' +
+    '<h1 class="tc-eval-off__title">评估页已停用</h1>' +
+    `<p>${esc(message)}</p>` +
+    '</div>'
+  return shell('评估页 — 已停用', body, JSON.stringify({ disabled: true, message }), '', opts.css)
 }
 
 /** 日志页（/log/<key>，SSR 首帧 + hydrate）。bundle 与 /app.js 同目录：/log.js（§371：旧默认

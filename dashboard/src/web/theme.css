@@ -653,6 +653,24 @@ a.tc-btn {
   color: #59606f;
 }
 
+/* ── /eval 停用说明页（R4：evalBoard 缺省关；该页不注入任何客户端 bundle） ──────── */
+.tc-eval-off {
+  max-width: 560px;
+  margin: 12vh auto;
+  padding: 0 var(--sp-4);
+  text-align: center;
+  line-height: 1.9;
+  color: var(--muted);
+}
+.tc-eval-off__title {
+  margin: 0 0 8px;
+  font-size: var(--fs-lg);
+  color: var(--fg);
+}
+.tc-eval-off p {
+  margin: 0;
+}
+
 /* ── 首页节点行下方 EvalBoard 摘要（列 = 阶梯 8 级） ──────── */
 .tc-eval-summary {
   margin-top: 8px;

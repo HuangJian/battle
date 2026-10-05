@@ -7636,3 +7636,31 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   `persistFloor`/`persistIdleMs`）· 用例 `tests/agent/persist-pool.test.ts`（reapPlan 4 例 + 定时器 1 例 +
   源级钉子 2 例）· 手册 `tools/agent/agent-setup.md`；盘点与口径 `docs/nn/runtime-opt.md` §31。
 - **指针**：全文 `docs/nn/runtime-opt.md` §31。
+
+## §2026-10-05-evalboard-off（2026-10-05，evalBoard 缺省停用：四处接线一门开关 + 账本冻结）
+
+- **背景（内存盘点 R4）**：首页 EvalBoard 摘要 + `/eval` 页 + 每 30s auto-ladder 是控制台请求
+  路径上最后一块常驻聚合面；用户 2026-10-04 指令「先关掉 evalBoard」——**不删代码、不删数据**。
+- **决定**：功能开关 `BCITY_EVALBOARD`（`src/core/feature-flags.ts::evalboardEnabled`，**缺省 `0`**，
+  `=1` 开）一处控四处接线（首页面板 / `/api/evalboard` / 30s ladder ticker / `/eval` 页）；
+  决策与计数器集中 `server/eval-board/routes.ts`，`server.ts` 零 `buildEvalBoardView(` 直调；
+  `/eval` 停用时出说明页且**不注入任何 bundle**（`eval-app.tsx` 自己会轮询 API）；开关信号随
+  `/api/state` 的 `evalboardEnabled` stamp 下发（同 `isBc` 机制），**`src/web/**` 零 `process.env`**。
+  账本数据（`dashboard/data/evalboard/**`，`EVALBOARD_DATA` 可改根）**原样保留**。
+- **冻结语义（2026-10-05 二轮评审R2-2 连带决定）**：`composeEvalBoardView` 是
+  `ingestCourseEvalLog` 的唯一生产调用者（视图路径）⇒ **停用 = 入账停**；停机期间的新 games 行
+  不进增量索引。**本阶段接受冻结**（R4 目标是内存）；持续入账（先 ingest 后归档）归阶段二
+  账本归档 CLI（plan W7′–W9′）。训练侧 in-loop eval / `evalA` / §28 补评**不受影响**，只是新读数
+  在停用期间不入控制台账本。
+- **被否决**：① 删代码 + 删数据（用户明令不删；且阶段二归档还要用）；② 给 `loadRowsCached` 加
+  LRU 上限（只改内存曲线，不停三处常驻；复杂度和风险都更高）；③ 只删数据留代码（数据是各轮
+  评估的唯一读数，删了不可再生）；④ 只关首页面板（`/eval` 页 + ticker 仍常驻，内存收益不全）；
+  ⑤ 开关读 env 进客户端 bundle（本轮 `Bun.build` 实证：`define` 只带 `process.env.NODE_ENV`
+  ⇒ 产物里留裸 `process.env` ⇒ 浏览器 ReferenceError）；⑥ 门控点放进 `buildEvalBoardView` 内部
+  （视图层还持有缓存/账本句柄，门要住在**调用面**才真停；且源码守卫无处可钉）。
+- **未来会重犯**：「未使用的功能留在请求路径上」——本轮配机械守卫：
+  `tests/evalboard-disabled.test.ts` 三类断言（缺省零 compose / ticker 源码门控 / `src/web` 零 env）+
+  `evalboardComposeCalls()` / `evalboardRouteCounters` 逐调用计数。
+- **违反后果**：客户端读 env ⇒ 首页白屏（ReferenceError）；门控落进视图内部 ⇒ `/api/evalboard`
+  仍冷算 + 台账仍被 ingest（假停用）；说明页复活 `/eval.js` ⇒ `eval-app` 周期拉 API（等于没关）。
+- **指针**：全文 `docs/nn/console.md` §29 · plan `plan/dashboard-memory-evalboard-off.plan.md`。

@@ -18,6 +18,9 @@ function mkView(isBc: boolean): ConsoleStateView {
     course: isBc ? 'bc-x' : 'rl-x',
     courses: [isBc ? 'bc-x' : 'rl-x'],
     isBc,
+    // 2026-10-05（plan/dashboard-memory-evalboard-off R4）：EvalBoard 摘要还要过
+    // 「功能开关」一刀；本用例只测 BC/RL 分流，显式开开关。
+    evalboardEnabled: true,
     components: [],
     nodes: [],
     modes: { stream: 0, doubleBuffer: 0, precollectEarly: 0 },

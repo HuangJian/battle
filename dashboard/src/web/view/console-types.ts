@@ -338,6 +338,12 @@ export interface ConsoleStateView {
    *  首页只出 BC Epoch 区）；缺省/false = RL 课程（首页只出 RL 区：Hero + EvalBoard 摘要）。
    *  服务端按查看课程 stamp（buildStateView），与 readOnly 同机制——测试直构缺省按 RL。 */
   isBc?: boolean
+  /** evalBoard（评估板）功能开关（2026-10-05，plan/dashboard-memory-evalboard-off R4）：
+   *  服务端按 `BCITY_EVALBOARD` stamp；false/缺省 = **停用**（首页不出 EvalBoard 摘要、
+   *  `/eval` 出说明页、`/api/evalboard` 返回 disabled 形状）。
+   *  客户端只认本字段 —— 不得读环境变量（`process` 在浏览器里不存在，会直接崩；铁律见
+   *  `src/core/feature-flags.ts` 头注与 G12 源码守卫）。 */
+  evalboardEnabled?: boolean
   /** M1 隧道 A/B 探针结果（`tmp/tunnel-ab-*.json`，新→旧）。
    *  缺省（无探针文件/测试直构）= UI 显空态 + 重跑命令提示。 */
   tunnelAb?: TunnelAbView | null

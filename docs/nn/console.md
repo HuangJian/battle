@@ -7,6 +7,49 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §29 evalBoard 停用：缺省关 + 账本冻结（plan/dashboard-memory-evalboard-off，2026-10-05）
+
+**触发**（用户 2026-10-04）：首页 EvalBoard 摘要、`/eval` 页、每 30s 的 auto-ladder 是控制台请求路径
+上最后一块「常驻聚合」；用户决定**停用**——先关，**不删代码、不删数据**（R4）。
+
+**开关**：`BCITY_EVALBOARD`（`src/core/feature-flags.ts::evalboardEnabled`，**缺省 `0` = 关**，
+`=1` 打开全部四处）。开关**只在服务端读**：`src/web/**` 不得出现 `process.env`（`Bun.build` 的
+`define` 不带它 ⇒ 进了客户端 bundle 就是浏览器 ReferenceError）；开关信号随 `/api/state` 的
+`evalboardEnabled` stamp 下发（与 `isBc` 同机制）。惰性读、不热更 ⇒ **改 env 要重启控制台**。
+
+**四处接线**（决策全在 `server/eval-board/routes.ts`；`server.ts` 零 `buildEvalBoardView(` 直调）：
+
+| 位置 | 关（缺省） | 开（`BCITY_EVALBOARD=1`） |
+|---|---|---|
+| 首页摘要 `EvalSummary` | `app.tsx` 不挂载（服务端 stamp=false ⇒ 挂载点不进 SSR） | 原样 |
+| `GET /api/evalboard` | `{ disabled: true, message, flag }`（**零 compose**） | 原样取数 |
+| 30s auto-ladder ticker | 不起（`shouldStartLadderTicker()`，计数 `ladderStarted`） | 起 |
+| `GET /eval` | 说明页（**不注入任何 bundle**；`eval-app.tsx` 自己会轮询 API） | 原样（`/eval.js`） |
+
+**数据在哪 / 保全**：账本 = `dashboard/data/evalboard/**`（`games/*.jsonl`、`eval_log.jsonl`、
+`runner_state.json` 等；`EVALBOARD_DATA` 可改根）。停用**只关读面，不删不改任何数据**。
+
+**账本冻结（已裁决语义，评审 R2-2）**：`composeEvalBoardView`（`view.ts`）是
+`ingestCourseEvalLog` 的**唯一生产调用者**（`view.ts:146`），而它只在视图路径上 ⇒ **停用 = 入账停**：
+停机期间新写入的 games 行**不会**被 ingest 进增量索引（`tmp-clean.py` 的 14 天回收针对 tmp，
+不含账本）。**本阶段接受冻结**（R4 的目标是内存，不是「轻量常驻」）；「先 ingest 再归档」的
+持续入账归**阶段二**账本归档 CLI（plan W7′–W9′）。术语：**账本归档**（本 plan，gzip 分片）
+≠ **课程封存**（`archive/courses/`，另一套机制，见 `DECISIONS §2026-09-26-course-archive-compress`）。
+
+**与 in-loop eval 的边界**：停用只影响**控制台读面**（面板 / API / 说明页 / ticker）。训练侧
+in-loop eval（云机 eval、`evalA`、§28 的 offline-eval-backfill 补评）**完全不受影响**——它们不
+经过 evalBoard 视图路径；只是其新读数在停用期间**不进控制台账本**（上一条冻结）。
+
+**怎么开**：启动控制台前设 `BCITY_EVALBOARD=1`（如 `BCITY_EVALBOARD=1 bun run dashboard`），
+重启后四处一起回来，账本从当前偏移继续入账。
+
+**落点**：`src/core/feature-flags.ts`（新）· `server/eval-board/routes.ts`（新：决策 + 计数器 +
+文案单一来源）· `server.ts`（三处接线）· `web/app/app.tsx`（挂载点门控）· `web/render.tsx`
+（`renderEvalNoticePage` + shell 条件 `scriptSrc`）· `web/view/console-types.ts` +
+`server/api/state-view.ts`（stamp）· `src/web/theme.css`（`.tc-eval-off*`）· 回归
+`tests/evalboard-disabled.test.ts`（13 用例）。
+
+---
 ## §28 离线课补评：云机没回传 eval 时，hub 端用 LAN 集群补（plan/offline-eval-backfill，2026-10-04）
 
 **触发**（用户 2026-10-04）：「离线课程，如果云机未回传 eval 结果（云机可能未启用 eval 以节省

@@ -595,8 +595,10 @@ export function App({ initial }: AppProps) {
             </PanelErrorBoundary>
             {/* ★2026-09-22 改版（用户指令）：首页不再有独立「任务包」区域——离线课程的
                 导出（点一下即取回）/ 导入训练结果下沉到课程矩阵每行「操作」列（BundleRowActions）。 */}
-            {/* EvalBoard 摘要（RL 区）：完整看板独立成页 /eval */}
-            {stateView?.isBc ? null : (
+            {/* EvalBoard 摘要（RL 区）：完整看板独立成页 /eval。2026-10-05（R4）：开关缺省关
+                （plan/dashboard-memory-evalboard-off）⇒ 不渲染 —— 首页也就不再发 /api/evalboard；
+                开关值走服务端 state 下发，客户端**不读** env（会进 bundle ⇒ ReferenceError）。 */}
+            {stateView?.isBc || !stateView?.evalboardEnabled ? null : (
               <PanelErrorBoundary>
                 <EvalSummary
                   course={viewCourse}

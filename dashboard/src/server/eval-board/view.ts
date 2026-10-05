@@ -56,6 +56,19 @@ export const viewCache = createFingerprintCache<EvalBoardView>({
   signature: (course) => viewInputSignature(course),
 })
 
+// ────────────────────────── compose 计数（测试/验收用） ──────────────────────────
+// R4 G2（plan/dashboard-memory-evalboard-off W1′）：「开关关时 composeEvalBoardView 调用次数 = 0」
+// 的判据 —— routes 侧计数不覆盖 compose（缓存命中不 compose），所以计数器落在本体处。
+let composeCalls = 0
+/** `composeEvalBoardView` 会话内累计调用次数。 */
+export function evalboardComposeCalls(): number {
+  return composeCalls
+}
+/** 归零（测试夹具；生产路径不调）。 */
+export function resetEvalboardComposeCalls(): void {
+  composeCalls = 0
+}
+
 /** 视图输入文件清单（**唯一一份**：改了 `buildEvalBoardView` 的读取就必须改这里）。 */
 export function viewInputFiles(course: string, root = evalDataRoot()): Array<[string, string]> {
   const files: Array<[string, string]> = [
@@ -128,6 +141,7 @@ export function buildEvalBoardView(course = '', fresh = false): EvalBoardView {
 
 /** 视图合成本体（唯一调用方 = `buildEvalBoardView` 的缓存未命中路径）。 */
 function composeEvalBoardView(course: string): EvalBoardView {
+  composeCalls += 1
   const root = evalDataRoot()
   const ingested = ingestCourseEvalLog(course)
   // 增量读（`loadRowsCached`）：未命中的那一帧只付聚合成本，整本账不重解析（见 rows.ts）。

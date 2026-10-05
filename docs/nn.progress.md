@@ -109,6 +109,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 9 | 真机「一个 serve 进程同时带 BC + RL」的实跑 | `docs/nn/console.md` §6 | 一次真跑（与 R2e 同口径） |
 | 18 | **归属事件体量/保留期未定**：`job_result_accepted`/`job_rejected` 进课程账本（`tmp/<课>/training_log.jsonl`）后随作业数增长；读侧只读尾部 4000 行 | `docs/nn/console.md` §23 · `docs/nn/remote-transport.md` §55 | 真机跑一段后量账本增速与 `job_rejected` 占比 ⇒ 定保留策略（轮转/裁剪）或写明「不裁剪 + 理由」 |
 | 19 | **贡献度「按机时加权」仍开放**（当前只计件：局/job；一局 eval 与一局 rollout 机时不同） | `docs/nn/console.md` §23 | 真机对比读数：计件份额与机时加权份额的 worker 排序是否分叉 ⇒ 分叉才做 |
+| 20 | **evalBoard 停用期间账本冻结**（缺省 `BCITY_EVALBOARD=0` ⇒ 控制台不读也不入账；唯一入账调用者在视图路径）；持续入账 / 阶段二归档未做 | `docs/nn/console.md` §29 · plan `plan/dashboard-memory-evalboard-off.plan.md` W7′–W9′ | 阶段二落地：归档器 + 回填 CLI（先 ingest 后归档）后，账本行数与 `evalboardComposeCalls()` 对账；开一次 `BCITY_EVALBOARD=1` 验四处复活 |
 
 ### 3.5 课程侧待办（可能已被后续条目取代）
 

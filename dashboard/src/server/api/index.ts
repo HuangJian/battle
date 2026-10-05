@@ -22,6 +22,15 @@
 
 // ── facade 再导出（原模块对外转发，保持调用方零改动）──
 export { buildEvalBoardView, buildEvalCkptsView, ladderTickAll } from '../eval-board'
+// R4 门控决策（plan/dashboard-memory-evalboard-off W1′；server.ts 只走这三处接线，见 routes.ts）。
+export {
+  evalboardApiPayload,
+  evalboardPageDecision,
+  evalboardPageNotice,
+  evalboardRouteCounters,
+  resetEvalboardRouteCounters,
+  shouldStartLadderTicker,
+} from '../eval-board'
 
 // ── 内部模块（唯一对外出口；调用方一律 import 本目录，不直连内部文件）──
 export * from './view-types'

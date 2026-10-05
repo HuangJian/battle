@@ -6,6 +6,7 @@ import { REPO_ROOT } from '../../core/paths'
 import { entryForCourse, loadRegistry } from '../../core/registry'
 import { type ConsoleStateView, type MetricsView } from '../../web/view'
 import { courseEnableMarkerPath, courseEnabled, isBcCourse } from '../../stack/courses'
+import { evalboardEnabled } from '../../core/feature-flags'
 import { loadConsoleState, readCourseModes } from '../actions'
 import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/specs'
 import { readIterMetrics, readPairedReferee } from '../iters'
@@ -136,6 +137,9 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     course,
     // 首页 BC/RL 区互斥分流（2026-09-14）：isBc = 查看课程是否 *.bc.jsonc 课程。
     isBc: isBcCourse(course),
+    // evalBoard 功能开关（2026-10-05，R4；plan/dashboard-memory-evalboard-off）：与 isBc 同机制
+    // 服务端 stamp —— 客户端据它决定是否挂载 EvalSummary（`src/web/**` 不得 import 开关模块）。
+    evalboardEnabled: evalboardEnabled(),
     activeCourse: state.activeCourse || state.course || course,
     courses,
     // 逐课盘上事实（课程管理页 /courses）：活体 / 开课标记 / 课程文件 / 最后写入。

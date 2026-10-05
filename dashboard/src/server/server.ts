@@ -61,7 +61,6 @@ import { error, info, initConsoleLog, log, warn } from '../core/log'
 import { monitorTouch } from '../core/reload-touch'
 import {
   buildBcEpochsView,
-  buildEvalBoardView,
   buildEvalCkptsView,
   buildEvalGamesView,
   buildEvalReplayJobView,
@@ -70,6 +69,9 @@ import {
   componentLogPayload,
   curriculumLadderView,
   discoverCourses,
+  evalboardApiPayload,
+  evalboardPageDecision,
+  evalboardRouteCounters,
   evalReplayFileResponse,
   getLoopQueueView,
   invalidatesSnapshot,
@@ -77,6 +79,7 @@ import {
   ladderTickAll,
   routeAction,
   sanitizeViewCourse,
+  shouldStartLadderTicker,
   startSnapshotRefresher,
 } from './api'
 import { restartSpecFor } from './actions'
@@ -86,7 +89,12 @@ import { runExitCheck } from './exit-watchdog'
 import { OFFLINE_EVAL_BACKFILL_INTERVAL_MS, runOfflineEvalBackfill } from './offline-eval-backfill'
 import { ensureBundle, type BundleTarget } from './build'
 import { livePageCss } from './theme-css'
-import { renderConsolePage, renderEvalPage, renderLogPage } from '../web/render'
+import {
+  renderConsolePage,
+  renderEvalNoticePage,
+  renderEvalPage,
+  renderLogPage,
+} from '../web/render'
 import { pageForPath } from '../web/view'
 import type { Component, ProcSpec, RegistryEntry } from '../core/types'
 
@@ -259,16 +267,21 @@ async function main(): Promise<void> {
   reconcileTimer.unref?.()
   // R4 自动爬梯 ticker（A3：console 服务端常驻；无状态推导，重启不丢进度；
   // 无 ladder 请求时 ladderTickAll 直接返回，零重扫描）。
-  const ladderTimer = setInterval(() => {
-    try {
-      const r = ladderTickAll(discoverCourses())
-      if (r.enqueued.length > 0)
-        log(`[ladder] tick tasks=${r.tasks} enqueued=${r.enqueued.join(',')}`)
-    } catch {
-      /* ticker 永不炸循环 */
-    }
-  }, 30000)
-  ladderTimer.unref?.()
+  // ★ 2026-10-05（plan/dashboard-memory-evalboard-off R4/接线 c）：evalBoard 缺省停用 ⇒
+  //   **不起 ticker** —— 否则只要有一门课挂过 ladder_start，它每 30s 就把整本账拉进内存。
+  if (shouldStartLadderTicker()) {
+    evalboardRouteCounters.ladderStarted += 1
+    const ladderTimer = setInterval(() => {
+      try {
+        const r = ladderTickAll(discoverCourses())
+        if (r.enqueued.length > 0)
+          log(`[ladder] tick tasks=${r.tasks} enqueued=${r.enqueued.join(',')}`)
+      } catch {
+        /* ticker 永不炸循环 */
+      }
+    }, 30000)
+    ladderTimer.unref?.()
+  }
   // 慢部件快照后台刷新（§366：节点 ping/组件探测/池历史移出请求路径，页面加载 <1s）。
   // reconcileWatch 已冷算一次暖缓存；此后每 5s 后台重算，请求只读缓存。
   startSnapshotRefresher()
@@ -353,7 +366,8 @@ async function main(): Promise<void> {
         }
         if (req.method === 'GET' && url.pathname === '/api/evalboard') {
           const fresh = url.searchParams.get('fresh') === '1'
-          return json(await buildEvalBoardView(viewCourse || undefined, fresh))
+          // R4（接线 b）：开关关 ⇒ routes 直接给 disabled 形状，不调 buildEvalBoardView。
+          return json(evalboardApiPayload(viewCourse || undefined, fresh))
         }
         // BC epoch 指标 / 多地图 eval（2026-09-13；bcRowsFromLedgerTail 解析，只读）。
         if (req.method === 'GET' && url.pathname === '/api/bcEpochs') {
@@ -392,9 +406,16 @@ async function main(): Promise<void> {
             .map((s) => s.trim())
             .filter((c) => c && all.includes(c))
           const eff = selected.length > 0 ? selected : viewCourse ? [viewCourse] : all.slice(0, 1)
-          const views = eff.map((c) => buildEvalBoardView(c, false))
+          // R4（接线 b/d + W2′）：开关关 ⇒ 说明页（**不注入 /eval.js**，客户端不再打
+          // /api/evalboard）；文案与 API 的 { disabled } 同源。
+          const decision = evalboardPageDecision(eff)
+          if (decision.kind === 'notice') {
+            return new Response(renderEvalNoticePage(decision.message, { css: livePageCss() }), {
+              headers: { 'Content-Type': 'text/html; charset=utf-8' },
+            })
+          }
           const payload = {
-            views,
+            views: decision.views,
             options: { courses: eff, allCourses: all, readOnly: !loopback },
           }
           return new Response(renderEvalPage(payload, { css: livePageCss() }), {
