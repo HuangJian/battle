@@ -7993,3 +7993,26 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
 `nn-training/tests/test_production_isolation.py`（8 例；改前收集期 ImportError 红）· 原
 `tests/test_console_isolation.py` 删除（内容并入）。
 **指针**：`docs/nn/engineering.md` §65（现场 / 扫描口径 / 修法表 / 证据 / 残余）· §64（控制台同族）。
+
+## §2026-10-06-goalnn-replay-export-eval-round-picker（2026-10-06，用户令「导出 replay 支持任意 eval 轮」）
+
+- **背景**：「导出 replay」只能导最新权重的轮。后端早就收 `iter` + `wver`（`POST evalReplays` →
+  `worker/eval_replays_once.py`），卡点只在前端：弹窗以「此刻滤出视图」为数据源，导完的产物也按
+  「最近一次 manifest」归因（`manifest.iter === 所选轮` 挡不住「同一轮的上一次成功导出」）。
+- **备选与否决**：① 前端从滤出视图推轮 —— 否，「哪一轮评过」不在选择器视野里，失败轮也会进可勾选集；
+  ② 保留 `evalReplayJob` 的「最近一次 manifest」语义、只在弹窗多加一层 iter 比对 —— 否，SIGKILL/OOM/
+  子进程没起来时 python 写不到失败 manifest，同轮的旧产物就会被当成本次结果（假「导出完成」+ 重复交付）；
+  ③ 只让 python 侧清旧 manifest —— 否，脚本可能根本没起来，清账必须在**控制台受理那一刻**；
+  ④ 每轮一个 manifest 文件（`replay-export-<iter>.json`）—— 否，`replayExportPaths` 是既有的单路径契约，
+  多文件会把「哪个是本次」变成扫描问题；⑤ 新增 api-client 的 POST helper —— 否，既有
+  `postAction('evalReplays', …)` 已是唯一动作入口，加第二个 = 第二份真相。
+- **决定**：① 选择器数据源 = 轮级账本（`iters.ts::readEvalRoundOptions`，summary-only 单趟，
+  谓词与 `readEvalGames` 同源，`reusedWver` 单独标注）；② **归因不变量：`POST evalReplays` 受理即
+  `rmSync` 旧 manifest**（抛则整次 POST 500，不吞、不「删不掉也照常起 python」）⇒「盘上有 manifest」
+  此后只可能是本次写的；③ 归因判据只看 `manifest.iter === 所选轮`，失败 manifest 透传 `failReason`
+  且其文件**不可下载**；④ 失败留痕是 python 的 `write_fail_manifest`（三处提前 return + 兜底 `except`
+  rc=4，与成功 manifest 同 schema——控制台是白名单式重建，缺键 = 等于没写）。
+- **违反后果**：拿掉受理时的清理 ⇒ 同轮的旧产物冒充本次结果，用户拿到「已完成」却点出 404；
+  把失败 manifest 的 schema 改窄 ⇒ 控制台侧静默看不到原因（缺键不报错，只显示「无产物」）。
+- **指针**：全文（现状 / 语义规格 / 落点 / 用例 / 二轮评审 F1–F10 处置）→ `plan/replay-export-eval-round-picker.plan.md`；
+  控制台侧全文 → `docs/nn/console.md` §32；二轮评审 → `plan/replay-export-eval-round-picker.review-bf.md`。

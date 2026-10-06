@@ -120,19 +120,58 @@ def _manifest_for(
     return files, errors
 
 
-def main() -> int:
-    ap = argparse.ArgumentParser(description="Export deterministic sim replays for in-loop eval games")
-    ap.add_argument("--course", required=True)
-    ap.add_argument("--iter", type=int, required=True)
-    ap.add_argument("--wver", required=True, help="eval 账本 key16（sha256 权重指纹前 16 位）")
-    ap.add_argument("--games", required=True, help="JSON 文件：[{'stage': int, 'seed': int}, ...]")
-    ap.add_argument("--out-dir", required=True, help=".replay 产物目录")
-    ap.add_argument("--manifest", required=True, help="manifest JSON 输出路径（traj 直下）")
-    ap.add_argument("--bun", default="bun")
-    ap.add_argument("--workers", type=int, default=4, help="并行重放进程数")
-    ap.add_argument("--timeout", type=float, default=600.0, help="单局超时（秒）")
-    args = ap.parse_args()
+def write_fail_manifest(
+    manifest_path: Path,
+    *,
+    course: str,
+    it: int,
+    wver: str,
+    reason: str,
+    requested: int = 0,
+) -> None:
+    """提前失败也要留痕：与成功 manifest 同 schema（控制台是白名单式重建，缺键 = 等于没写）。
 
+    为什么必须写：控制台的「导出任务态」只按 manifest 归因（`manifest.iter === 所选轮`）。
+    失败不写盘 ⇒ 盘上只剩上一次成功导出的 manifest，恰好同一轮时弹窗会把旧产物当本次结果
+    （假「导出完成」+ 重复交付）。因此三条提前 return 与兜底 except 都必须过这里。
+
+    写盘失败不得成为新的失败点：只告警（best-effort）——返回码语义不动。
+    """
+    payload = {
+        "ok": False,
+        "course": course,
+        "iter": it,
+        "wver": wver,
+        "weightsPath": "",
+        "difficulty": "",
+        "maxTicks": 0,
+        "generatedAt": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "sec": 0,
+        "requested": requested,
+        "files": [],
+        "errors": [],
+        "mismatches": [],
+        "failReason": reason,
+    }
+    try:
+        manifest_path.parent.mkdir(parents=True, exist_ok=True)
+        manifest_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8"
+        )
+    except OSError as e:
+        # 告警不得成为新的失败点：logger 不可用就退到 stderr，绝不上抛。
+        try:
+            from common.log import log
+
+            log(f"[replay-exp] WARN: 失败 manifest 写盘失败（{manifest_path}）: {e}")
+        except Exception:
+            print(
+                f"[replay-exp] WARN: 失败 manifest 写盘失败（{manifest_path}）: {e}",
+                file=sys.stderr,
+            )
+
+
+def _export(args: argparse.Namespace, manifest_path: Path) -> int:
     from common.platform_utils import force_utf8_stdio
 
     force_utf8_stdio()
@@ -142,9 +181,6 @@ def main() -> int:
     from worker.eval_local import run_local_eval_game
 
     t0 = time.time()
-    manifest_path = Path(args.manifest)
-    if not manifest_path.is_absolute():
-        manifest_path = REPO / manifest_path
     out_dir = Path(args.out_dir)
     if not out_dir.is_absolute():
         out_dir = REPO / out_dir
@@ -157,6 +193,13 @@ def main() -> int:
         games_raw = json.loads(games_path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as e:
         log(f"[replay-exp] games 文件不可读: {e}")
+        write_fail_manifest(
+            manifest_path,
+            course=args.course,
+            it=args.iter,
+            wver=args.wver,
+            reason=f"games 文件不可读: {e}",
+        )
         return 2
     games = [
         {"stage": int(g["stage"]), "seed": int(g["seed"])}
@@ -165,6 +208,13 @@ def main() -> int:
     ]
     if not games:
         log("[replay-exp] games 列表为空")
+        write_fail_manifest(
+            manifest_path,
+            course=args.course,
+            it=args.iter,
+            wver=args.wver,
+            reason="games 列表为空（无可重放的 (stage, seed)）",
+        )
         return 2
 
     course_path = REPO / "nn-training" / "curricula" / f"{args.course}.jsonc"
@@ -184,6 +234,17 @@ def main() -> int:
             f"[replay-exp] FAIL: 未找到 wver={args.wver} 的权重文件"
             f"（快照/活动/weights/{args.course} 全不匹配）——归档已清理或权重已更新，无法确定性重放"
         )
+        write_fail_manifest(
+            manifest_path,
+            course=args.course,
+            it=args.iter,
+            wver=args.wver,
+            reason=(
+                f"未找到 wver={args.wver} 的权重文件（临时快照/活动权重/weights 归档全不匹配）"
+                "——归档已清理或权重已更新，无法确定性重放"
+            ),
+            requested=len(games),
+        )
         return 3
     log(f"[replay-exp] it{args.iter} course={course.name} weights={weights.name}")
 
@@ -193,6 +254,8 @@ def main() -> int:
     level = getattr(ns, "player_level", None)
 
     # 上一轮产物清场（同课程重导出不残留旧文件；manifest 在 traj 直下不受影响）。
+    # F4（串话归因）：POST 受理时控制台已清旧 manifest，此处再清 out_dir 里的旧 .replay——
+    # 否则硬杀（SIGKILL/OOM，走不到 write_fail_manifest）时盘上留着上次的局文件。
     out_dir.mkdir(parents=True, exist_ok=True)
     for old in out_dir.glob("*.replay"):
         try:
@@ -294,6 +357,41 @@ def main() -> int:
     log(f"[replay-exp] DONE files={len(files)} fail={len(errors)} mismatch={len(mismatch)} "
         f"sec={payload['sec']}")
     return 0 if files else 1
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description="Export deterministic sim replays for in-loop eval games")
+    ap.add_argument("--course", required=True)
+    ap.add_argument("--iter", type=int, required=True)
+    ap.add_argument("--wver", required=True, help="eval 账本 key16（sha256 权重指纹前 16 位）")
+    ap.add_argument("--games", required=True, help="JSON 文件：[{'stage': int, 'seed': int}, ...]")
+    ap.add_argument("--out-dir", required=True, help=".replay 产物目录")
+    ap.add_argument("--manifest", required=True, help="manifest JSON 输出路径（traj 直下）")
+    ap.add_argument("--bun", default="bun")
+    ap.add_argument("--workers", type=int, default=4, help="并行重放进程数")
+    ap.add_argument("--timeout", type=float, default=600.0, help="单局超时（秒）")
+    args = ap.parse_args()
+
+    manifest_path = Path(args.manifest)
+    if not manifest_path.is_absolute():
+        manifest_path = REPO / manifest_path
+    try:
+        return _export(args, manifest_path)
+    except Exception as e:  # 未捕获异常也必须留痕（rc=4）：控制台只按 manifest 归因
+        from common.platform_utils import force_utf8_stdio
+
+        force_utf8_stdio()
+        from common.log import log
+
+        write_fail_manifest(
+            manifest_path,
+            course=args.course,
+            it=args.iter,
+            wver=args.wver,
+            reason=f"crash: {type(e).__name__}: {e}",
+        )
+        log(f"[replay-exp] CRASH rc=4: {type(e).__name__}: {e}")
+        return 4
 
 
 if __name__ == "__main__":

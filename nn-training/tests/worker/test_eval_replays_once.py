@@ -4,9 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
-from worker.eval_replays_once import _FILENAME_RE, _manifest_for, _sha16, resolve_weights
+import pytest
+
+from worker.eval_replays_once import (
+    _FILENAME_RE,
+    _manifest_for,
+    _sha16,
+    main,
+    resolve_weights,
+    write_fail_manifest,
+)
 
 
 def _write_weights(path: Path, payload: bytes) -> str:
@@ -93,3 +103,170 @@ def test_manifest_json_roundtrip(tmp_path: Path) -> None:
     data = {"ok": True, "files": [{"stage": 1, "seed": 2, "file": "x.replay"}], "sec": 1.5}
     (tmp_path / "m.json").write_text(json.dumps(data, ensure_ascii=False, indent=1))
     assert json.loads((tmp_path / "m.json").read_text(encoding="utf-8")) == data
+
+
+def test_write_fail_manifest_schema_matches_success_payload(tmp_path: Path) -> None:
+    """失败 manifest 与成功 manifest 同 schema（控制台是白名单式重建，缺键 = 等于没写）。"""
+    p = tmp_path / "replay-export.json"
+    write_fail_manifest(p, course="c1", it=7, wver="a" * 16, reason="权重未找到", requested=3)
+    m = json.loads(p.read_text(encoding="utf-8"))
+    assert m["ok"] is False
+    assert (m["course"], m["iter"], m["wver"]) == ("c1", 7, "a" * 16)
+    assert m["failReason"] == "权重未找到"
+    assert m["requested"] == 3
+    for k in ("files", "errors", "mismatches"):
+        assert m[k] == []
+    for k in ("weightsPath", "difficulty", "generatedAt"):
+        assert isinstance(m[k], str)
+    assert isinstance(m["maxTicks"], int) and not isinstance(m["maxTicks"], bool)
+    assert isinstance(m["sec"], (int, float))
+
+
+def test_write_fail_manifest_creates_missing_parent_dirs(tmp_path: Path) -> None:
+    """traj 直下的 manifest：父目录不在也要建（控制台读的是同一个路径）。"""
+    p = tmp_path / "tmp" / "course" / "replay-export.json"
+    write_fail_manifest(p, course="c1", it=0, wver="c" * 16, reason="基线轮权重未找到")
+    assert json.loads(p.read_text(encoding="utf-8"))["iter"] == 0
+
+
+def test_write_fail_manifest_never_raises_on_unwritable_path(tmp_path: Path) -> None:
+    """写盘失败只告警（best-effort）：父路径是文件也不抛 —— 返回码语义不得被它改掉。"""
+    blocker = tmp_path / "blocker"
+    blocker.write_text("x", encoding="utf-8")
+    write_fail_manifest(blocker / "m.json", course="c1", it=1, wver="b" * 16, reason="x")
+
+
+def test_write_fail_manifest_sets_fail_reason_and_clears_data_fields(tmp_path: Path) -> None:
+    """F1 闭合：失败 manifest 的入参 `reason` 落于 `failReason`，
+    data 字段（files/errors/mismatches）为空 —— 控制台将其视为“该轮无可导出行”。"""
+    p = tmp_path / "replay-export.json"
+    write_fail_manifest(
+        p,
+        course="c6",
+        it=12,
+        wver="1" * 16,
+        reason="games 文件不可读: 找不到",
+        requested=2,
+    )
+    m = json.loads(p.read_text(encoding="utf-8"))
+    assert m["ok"] is False
+    assert (m["course"], m["iter"], m["wver"]) == ("c6", 12, "1" * 16)
+    assert m["failReason"] == "games 文件不可读: 找不到"
+    assert m["requested"] == 2
+    assert m["files"] == []
+    assert m["errors"] == []
+    assert m["mismatches"] == []
+
+
+def test_write_fail_manifest_does_not_mutate_existing_ok_manifest(tmp_path: Path) -> None:
+    """F1 闭合：同一路径上已有 ok manifest 时，write_fail_manifest 换写失败版——
+    控制台读此路径时不再把前一轮的成功数据当成本轮可导出（归因按落盘的 manifest）。"""
+    p = tmp_path / "replay-export.json"
+    p.write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "course": "old",
+                "iter": 3,
+                "wver": "a" * 16,
+                "files": [{"stage": 1, "seed": 1, "file": "x.replay"}],
+            },
+            ensure_ascii=False,
+            indent=1,
+        ),
+        encoding="utf-8",
+    )
+    write_fail_manifest(p, course="new", it=9, wver="b" * 16, reason="被轮改掉")
+    m = json.loads(p.read_text(encoding="utf-8"))
+    assert m["ok"] is False
+    assert (m["course"], m["iter"], m["wver"]) == ("new", 9, "b" * 16)
+    assert m["failReason"] == "被轮改掉"
+    assert m["files"] == []
+
+
+def _run_main(monkeypatch: pytest.MonkeyPatch, argv: list[str]) -> int:
+    """以给定 argv 调 `main()`（真解析器 + 真失败路径），返回退出码。"""
+    monkeypatch.setattr(sys, "argv", ["eval_replays_once.py", *argv])
+    return main()
+
+
+def test_main_games_unreadable_writes_fail_manifest_and_returns_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """F1 闭合（接线闸）：失败路径真的调了 `write_fail_manifest` ——
+    只测写盘工具不够；这里驱动真 `main()`，验「games 不可读 ⇒ rc=2 + 盘上留失败 manifest」。"""
+    manifest = tmp_path / "replay-export.json"
+    rc = _run_main(
+        monkeypatch,
+        [
+            "--course", "c6-chip",
+            "--iter", "12",
+            "--wver", "a" * 16,
+            "--games", str(tmp_path / "缺失的-games.json"),
+            "--out-dir", str(tmp_path / "out"),
+            "--manifest", str(manifest),
+        ],
+    )
+    assert rc == 2
+    m = json.loads(manifest.read_text(encoding="utf-8"))
+    assert m["ok"] is False
+    assert (m["course"], m["iter"], m["wver"]) == ("c6-chip", 12, "a" * 16)
+    assert "games 文件不可读" in m["failReason"]
+    assert m["files"] == []
+
+
+def test_main_empty_games_writes_fail_manifest_and_returns_2(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """空勾选（合法 JSON、空数组）也走失败 manifest（rc=2）——不静默产出空清单。"""
+    games = tmp_path / "games.json"
+    games.write_text("[]", encoding="utf-8")
+    manifest = tmp_path / "replay-export.json"
+    rc = _run_main(
+        monkeypatch,
+        [
+            "--course", "c6-chip",
+            "--iter", "7",
+            "--wver", "b" * 16,
+            "--games", str(games),
+            "--out-dir", str(tmp_path / "out"),
+            "--manifest", str(manifest),
+        ],
+    )
+    assert rc == 2
+    m = json.loads(manifest.read_text(encoding="utf-8"))
+    assert m["ok"] is False and m["iter"] == 7
+    assert "games 列表为空" in m["failReason"]
+
+
+def test_main_crash_writes_fail_manifest_with_reason_prefix_and_returns_4(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """未捕获异常也必须留痕（rc=4）：控制台只按 manifest 归因——不写就是「假导出完成」。"""
+    import worker.eval_replays_once as mod
+
+    def boom(_args: object, _manifest: Path) -> int:
+        raise RuntimeError("权重文件坏了")
+
+    monkeypatch.setattr(mod, "_export", boom)
+    games = tmp_path / "games.json"
+    games.write_text(json.dumps([{"stage": 1, "seed": 2}]), encoding="utf-8")
+    manifest = tmp_path / "replay-export.json"
+    rc = _run_main(
+        monkeypatch,
+        [
+            "--course", "c6-chip",
+            "--iter", "3",
+            "--wver", "c" * 16,
+            "--games", str(games),
+            "--out-dir", str(tmp_path / "out"),
+            "--manifest", str(manifest),
+        ],
+    )
+    assert rc == 4
+    m = json.loads(manifest.read_text(encoding="utf-8"))
+    assert m["ok"] is False
+    assert (m["course"], m["iter"], m["wver"]) == ("c6-chip", 3, "c" * 16)
+    assert m["failReason"].startswith("crash: RuntimeError: 权重文件坏了")
+
+

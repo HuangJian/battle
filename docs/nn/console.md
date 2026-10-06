@@ -7,6 +7,72 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §32 回放导出选择器：按评估轮选，而不是按「浏览器此时拿到的滤出视图」选（plan/replay-export-eval-round-picker，2026-10-06）
+
+**触发**（用户）：首页「导出 replay」只能导出**最新**权重的 replay，要改成支持用**任意 eval 轮**的权重导出。
+
+**关键发现**：后端早就收 `iter` + `wver`（`api/route.ts` 的 `POST evalReplays` → `worker/eval_replays_once.py
+--iter N --wver <16hex>`，按 wver 在四类候选里找权重）。卡点只在**前端**——弹窗的数据源是「此刻滤出视图」，
+与「哪一轮」不是一回事。
+
+**换轮架构（三句话）**：
+
+1. **选择器数据源 = 轮级账本**（`eval_log.jsonl` 的 `eval_summary` 行），不是浏览器侧的过滤快照。
+2. **受理 = 落 manifest**：`POST evalReplays` 受理即 `rmSync` 旧 manifest ⇒ 此后「盘上有 manifest」
+   只可能是**本次**导出写的。
+3. **归因判据只看 `manifest.iter === 所选轮`**（`jobOutcome()`）：不等 ⇒ 当上一次产物，不自动交付。
+
+### 32.1 落点
+
+| 面 | 落点 | 说明 |
+|---|---|---|
+| 数据 | `iters.ts::readEvalGames(trajDir, iter?)` | 由 `readLatestEvalGames` 泛化：`iter` 缺省 = 最大 iter（今天的行为逐字不变）；**给了但该轮无 summary ⇒ null（绝不回落**——回落 = 拿别的轮的读数冒充） |
+| 数据 | `iters.ts::readEvalRoundOptions(trajDir)`（新） | **summary-only 单趟扫描**：逐局行占体积 99%，本函数一列不读（成本纪律先例：`eval-board/ckpts.ts` 只 stat / `stack/kickstart-receipt.ts` 不调 `readEvalSummaries`）；按 iter 降序；谓词 `Number.isInteger(iter) && iter>=0 && wver` 与 `readEvalGames` **同源**（否则漏出「列表里有、点开零行」的形状）；`reusedWver` 标出「回填读数」（本轮的逐局行归属原 iter，选开是空表） |
+| API | `api/eval-games.ts::parseEvalIterParam`（新） | 缺省/空串 ⇒ `undefined`（最新轮）；**非整数 ⇒ `null` ⇒ 400**（「非法」与「没选」是两件事，不静默当缺省） |
+| API | `api/eval-games.ts::buildEvalRoundsView`（新）+ `server.ts` `GET /api/evalRounds` | 轮列表（`{course, rounds[]}`）；无 eval_log ⇒ 空列表 |
+| API | `api/eval-games.ts::readReplayManifest` | 转出（export = 单测可直调）+ **白名单式重建显式透传 `failReason`**（不 spread raw：新字段不在这里透传，视图永远看不到它） |
+| API | `api/eval-games.ts::evalReplayFileResponse` | 下载白名单加 `manifest.ok` 一档：失败 manifest 的文件**不可下载** |
+| 受理 | `api/route.ts` `POST evalReplays` | 受理即 `rmSync(manifest, {force:true})`——**归因不变量**：不删的话，上次成功导出恰好同轮 + 本次硬杀（SIGKILL/OOM，走不到 python 的 fail-manifest 写入点）⇒ 弹窗按 iter 判据把旧产物当本次结果（假「导出完成」+ 重复交付）。`rmSync` 抛 ⇒ 整次 POST 500，**不吞** |
+| 视图 | `metric-types.ts` | `EvalRoundOption` / `EvalRoundsView` / `EvalReplayManifest.failReason?` |
+| 客户端 | `api-client.ts` | `fetchEvalGames(course, iter?)` / `fetchEvalRounds(course)`；**POST 不新增 helper**——仍走既有 `postAction('evalReplays', …)` |
+| 弹窗 | `ReplayExportModal.tsx` | 头部 `<select className="tc-sel" aria-label="选择评估轮">`（**不是 segmented**：既有组件路由）；打开先拉 `evalRounds` ⇒ `selectedIter = rounds[0].iter`（降序首项 = 最新）⇒ 再按它拉 `evalGames`；切轮复位勾选/状态/phase/目录句柄；**导出中禁用选择器**（busy 是全局单键，切轮只会吃 409） |
+| 文案 | `Hero.tsx` | 「导出 replay」→「从任意评估轮导出回放」+ title 改写 |
+
+### 32.2 失败留痕（python 侧）
+
+`worker/eval_replays_once.py` 抽出 `write_fail_manifest(manifest_path, *, course, it, wver, reason, requested=0)`：
+与成功 manifest **同 schema**（控制台是白名单式重建，缺键 = 等于没写）。三处提前 return 前调用
+（games 不可读 rc=2 / games 列表为空 rc=2 / 权重未找到 rc=3），`main()` 抽出 `_export()` 后再加**兜底 except**
+（未捕获异常 ⇒ `failReason = "crash: <类型>: <消息>"`，rc=4）。写盘失败只告警（best-effort）——返回码语义不动。
+
+### 32.3 用例与门槛
+
+* `dashboard/tests/console-eval-games.test.ts`（改写）：`readEvalGames(trajDir, iter)` 指定轮 / 缺省最新 /
+  **该轮不存在 ⇒ null（不回落）** / 同 iter 两套 wver 不混 / 坏行与 `source` 行排除。* `dashboard/tests/console-eval-rounds-api.test.ts`（新，8 例）：`parseEvalIterParam` 三态（缺省/空串 ⇒
+  undefined；整数 ⇒ 数字；`2.5`/`abc` ⇒ null ⇒ 400）/ 轮列表降序 + it0 在场 / `reusedWver` 标注 /
+  回填轮打开是一张空表（`view.games = 0`，不拿 summary 的 200 冒充）/ 不存在的轮 ⇒ `available:false`
+  **不回落** / **结构守卫**：`rmSync` 旧 manifest 必须落在 `busy.add` 之后、`spawn` 之前（F4 的
+  「受理即作废」不变量——行为档做不到，真正的验收是真机导出中强杀 python）。
+* `dashboard/tests/console-replay-manifest.test.ts`（新，4 例）：`readReplayManifest` 逐字段透传 /
+  `failReason` 透传与缺失/非字符串/空串降级（不把噪声渲染成原因）/ 缺 `ok` 与坏 JSON ⇒ null。
+* `dashboard/tests/web-app-replay-modal.test.ts`（新）：`roundLabel` 文案（it0 = 基线、缺失显式占位）/
+  选择器禁用判据 / 「该轮无评估记录」与「暂无评估记录」分开 / `jobOutcome` 四档（no-manifest / other-round /
+  done / 同轮失败上屏 failReason）。
+* `nn-training/tests/worker/test_eval_replays_once.py`（新增 7 例）：失败 manifest schema 与成功同形 /
+  父目录自建 / 写盘失败不抛 / `failReason` + data 字段清空 / 换写已有 ok manifest / **接线闸**：
+  真跑 `main()` 验 rc=2 与 rc=4 都会把失败 manifest 写盘（删掉调用即红，已实测）。
+
+**门槛（2026-10-06）**：dashboard `typecheck` 绿 + **1452 pass / 0 fail**（本次动过的 4 个文件共 34 例：
+`console-eval-games` 13 / `console-eval-rounds-api` 8 / `console-replay-manifest` 4 / `web-app-replay-modal` 9）·
+`bun dashboard/src/server/build.ts` 三份 bundle ok（app 390986B / log 60844B / eval 82065B）·
+`nn-training/tests/worker/test_eval_replays_once.py` **15 pass** · 根 `bun run check` **2399 pass / 12 skip / 0 fail** ·
+`bun run build` 过。
+
+**指针**：计划 `plan/replay-export-eval-round-picker.plan.md` · 二轮评审
+`plan/replay-export-eval-round-picker.review-bf.md` · 决策 `DECISIONS.md` §2026-10-06-goalnn-replay-export-eval-round-picker。
+
+---
+
 ## §31 课程状态读面：单一派生 `courseStatus` + 意图表 v2 + last-known-good（plan/offline-online-status-switch，2026-10-05）
 
 **触发**（用户 2026-10-04 报障「手动切成在线不稳定」的控制台侧）：同一门课的状态词此前由 pill

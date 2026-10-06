@@ -9,6 +9,7 @@ import type {
   EvalCkptsView,
   EvalGamesView,
   EvalReplayJobView,
+  EvalRoundsView,
   LogPayload,
   PoolView,
 } from '../../view'
@@ -110,12 +111,24 @@ export async function fetchEvalCkpts(course = '', leg = ''): Promise<EvalCkptsVi
   return (await r.json()) as EvalCkptsView
 }
 
-/** 导出 replay：最新 in-loop eval 逐局视图（弹窗打开时拉取）。 */
-export async function fetchEvalGames(course = ''): Promise<EvalGamesView> {
-  const q = course ? `?course=${encodeURIComponent(course)}` : ''
-  const r = await fetch(`/api/evalGames${q}`)
+/** 导出 replay：一轮 in-loop eval 逐局视图（弹窗打开时 + 切轮时拉取）。
+ *  `iter` 缺省 = 最新轮（服务端口径）；给了但该轮不存在 ⇒ 返回 `available:false`。 */
+export async function fetchEvalGames(course = '', iter?: number): Promise<EvalGamesView> {
+  const params = new URLSearchParams()
+  if (course) params.set('course', course)
+  if (iter != null) params.set('iter', String(iter))
+  const q = params.toString()
+  const r = await fetch(`/api/evalGames${q ? `?${q}` : ''}`)
   if (!r.ok) throw new Error(`/api/evalGames HTTP ${r.status}`)
   return (await r.json()) as EvalGamesView
+}
+
+/** 导出 replay：该课程的全部可导出 eval 轮（轮次选择器数据源；summary-only 扫描）。 */
+export async function fetchEvalRounds(course = ''): Promise<EvalRoundsView> {
+  const q = course ? `?course=${encodeURIComponent(course)}` : ''
+  const r = await fetch(`/api/evalRounds${q}`)
+  if (!r.ok) throw new Error(`/api/evalRounds HTTP ${r.status}`)
+  return (await r.json()) as EvalRoundsView
 }
 
 /** 导出 replay：任务态轮询（running / manifest / 日志尾）。 */

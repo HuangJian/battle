@@ -627,10 +627,10 @@ function LastIters({
           <button
             type="button"
             className="tc-btn tc-btn--sm"
-            title="从训练的最新 in-loop eval 导出仿真 replay（勾选局 → 确定性重放 → .replay 下载）"
+            title="从训练的任意 in-loop eval 轮导出仿真 replay（弹窗里按评估轮选，默认最新轮；勾选局 → 确定性重放 → .replay 下载）"
             onClick={() => setReplayOpen(true)}
           >
-            导出 replay
+            从任意评估轮导出回放
           </button>
           <button type="button" className="tc-link" onClick={onMore}>
             完整指标表 ›
