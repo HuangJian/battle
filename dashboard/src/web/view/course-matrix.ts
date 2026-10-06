@@ -34,6 +34,7 @@
  *  3. **冲突上状态列**（多对一映射见 `matrixStatus`），不吞不藏。
  */
 
+import type { LoopComplete } from './console-types'
 import type { CourseOverviewRow, ParallelOverviewView, ReadStaleView } from './course-overview'
 import { courseStatus, type CourseStatus } from './course-status'
 import { fmtRel } from './format'
@@ -163,6 +164,9 @@ export function matrixStatus(
     queueStale?: ReadStaleView | null
     modeIntents?: Record<string, 'online' | 'offline'> | null
     registeredWorkers?: string[] | null
+    /** ★2026-10-06：账本尾行 `run_complete` 的停车态（`stateView.loopCompletes[课]`）——
+     *  终态词与 pill 同源（同屏两侧不得再互相矛盾）。 */
+    loopComplete?: LoopComplete | null
   },
 ): MatrixStatus {
   const st = courseStatus({
@@ -177,6 +181,7 @@ export function matrixStatus(
     registeredWorkers: opts?.registeredWorkers,
     overviewStale: opts?.overviewStale ?? null,
     queueStale: opts?.queueStale ?? null,
+    loopComplete: opts?.loopComplete ?? null,
   })
   return matrixWord(st)
 }
@@ -232,6 +237,8 @@ export function matrixConflict(
   ov: CourseOverviewRow | null,
   lq: LoopQueueRow | null,
   hubOnline: boolean,
+  /** ★2026-10-06：停车态（同 `matrixStatus`）——终态不得被 hub 冲突档升成「在训 · hub 未注册」。 */
+  loopComplete: LoopComplete | null = null,
 ): MatrixConflict {
   return courseStatus({
     course: '',
@@ -239,6 +246,7 @@ export function matrixConflict(
     ov,
     hubOnline,
     trainerRunning: rowProcessTraining(ov, lq),
+    loopComplete,
   }).conflict
 }
 
@@ -458,6 +466,9 @@ export interface CourseMatrixInput {
    *  `run`（本课仍归云机）⇒ 本机在下一轮仍然收工、不采样（训练就此停住，而面板看着「在训」）。
    *  配置侧那一格只有逐课下发才算得出来（`modes.rolloutSrc` 只有查看课程一个）。 */
   courseRolloutSrc?: Record<string, string> | null
+  /** ★2026-10-06：逐课停车态（`stateView.loopCompletes`）——收官终态进状态列，
+   *  与 pill 同一派生（缺省 = 旧视图/没有停车态，行为与从前逐字节相同）。 */
+  loopCompletes?: Record<string, LoopComplete> | null
   viewing: string
   /** 判定「段内多久没动」的当下时刻（epoch 秒）——调用方给，便于单测。 */
   nowSec: number
@@ -510,6 +521,7 @@ export function mergeCourseRows(input: CourseMatrixInput): CourseMatrixRow[] {
   return order.map((course) => {
     const ov = ovByCourse.get(course) ?? null
     const lq = lqByCourse.get(course) ?? null
+    const loopComplete = input.loopCompletes?.[course] ?? null
     const fromQueue = lq ? lq.it : null
     const fromLedger = ov ? ov.iter : null
     // ★ 2026-09-22（离线课列修正）：离线课走「任务包+回传」维度——iter 列读**云机回传的最新
@@ -519,8 +531,8 @@ export function mergeCourseRows(input: CourseMatrixInput): CourseMatrixRow[] {
     return {
       course,
       viewing: course === input.viewing,
-      status: matrixStatus(ov, lq, hubOnline),
-      conflict: matrixConflict(ov, lq, hubOnline),
+      status: matrixStatus(ov, lq, hubOnline, { loopComplete }),
+      conflict: matrixConflict(ov, lq, hubOnline, loopComplete),
       iter,
       iterSource:
         offlineIt !== null

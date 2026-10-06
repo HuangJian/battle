@@ -29,6 +29,7 @@
 import {
   coursePills,
   type CoursePillTone,
+  type LoopComplete,
   type LoopQueueRow,
   type ParallelOverviewView,
 } from '../../view'
@@ -52,6 +53,9 @@ export interface TrainingPillsProps {
   /** 登记在册的 push worker id（rl-config `nodes[].gpu_push`）：holder 不在表里 ⇒ 悬停点名。
    *  `null`/缺省 = 名单不可知（不点名）——与「未登记」是两件事。 */
   registeredWorkers?: string[] | null
+  /** ★2026-10-06：逐课停车态（`stateView.loopCompletes`，账本尾行 `run_complete`）——
+   *  已收官的课不得再报「推进中」（resume 后服务端条目自动消失）。 */
+  loopCompletes?: Record<string, LoopComplete> | null
   /** 当前查看课程（高亮 + 「正在看」提示）。 */
   viewCourse: string
   onSelect: (course: string) => void
@@ -77,6 +81,7 @@ export function TrainingPills({
   overview,
   modeIntents,
   registeredWorkers,
+  loopCompletes,
   viewCourse,
   onSelect,
   onStop,
@@ -89,6 +94,7 @@ export function TrainingPills({
     overview,
     modeIntents,
     registeredWorkers,
+    loopCompletes,
   })
   // 一门课都没开 ⇒ 整个组件不渲染（顶部保持干净：空块/空行会被读成「有东西没加载出来」）。
   if (pills.length === 0) return null

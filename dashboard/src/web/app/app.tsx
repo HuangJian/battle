@@ -492,6 +492,9 @@ export function App({ initial }: AppProps) {
                 rows={stateView?.loopQueue?.rows ?? []}
                 trainerRunning={trainerRunning}
                 overview={stateView?.overview ?? null}
+                // 收官停车态（账本尾行 run_complete）：已收官的课不得再报「推进中」
+                //（与告警坞的「✅ 训练已完成」同一份事实，resume 后服务端条目自动消失）。
+                loopCompletes={stateView?.loopCompletes ?? null}
                 modeIntents={stateView?.courseModeIntents ?? null}
                 // 「不在 worker 登记表里」的判据输入 = rl-config 的 push worker id 集
                 // （`workerRegistry.workers` 的 id；不是 hub 探活 `pushMap`）。
@@ -592,6 +595,7 @@ export function App({ initial }: AppProps) {
                 loopQueue={stateView?.loopQueue ?? null}
                 modeIntents={stateView?.courseModeIntents ?? null}
                 courseRolloutSrc={stateView?.courseRolloutSrc ?? null}
+                loopCompletes={stateView?.loopCompletes ?? null}
                 course={viewCourse}
                 onSelectCourse={selectCourse}
                 onAction={doAction}

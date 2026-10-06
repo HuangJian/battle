@@ -133,6 +133,28 @@ describe('courseStatus：pill 与矩阵状态列同源（R4-a）', () => {
     expect(st.kind).toBe('offline-waiting')
   })
 
+  it('★2026-10-06：账本尾行 run_complete ⇒ pill 与矩阵都「已收官」（读面 ready / hub 不认都不动终态）', () => {
+    // 事故：收官停车态只进了告警坞（「✅ 训练已完成」），pill/矩阵仍按只读读面说「推进中」——
+    // 同一屏两个 widget 互相矛盾。终态事实单点进 `courseStatus`，两个渲染器同时对齐。
+    const lq = lqRow({ course: 'p2', state: 'ready' })
+    // hub 不认这门课（hubSeen=false）：停车态不得被冲突档升成「在训 · hub 未注册」。
+    const ov = ovRow({ course: 'p2', training: true, hubSeen: false })
+    const done = {
+      at: '2026-10-06 10:39:48',
+      reason: '正常收官（it16/150），本地停采、云机已停机',
+      iters: 150,
+    }
+    const pill = coursePills({
+      courses: ['p2'],
+      rows: [lq],
+      trainerRunning: true,
+      overview: ovView([ov]),
+      loopCompletes: { p2: done },
+    })[0]!
+    expect(pill.status).toBe('已收官')
+    expect(matrixStatus(ov, lq, true, { loopComplete: done }).text).toBe('已收官')
+  })
+
   it('★ 暂停：pill 与矩阵同词「已暂停」（此前矩阵状态列仍说「在训」）', () => {
     const lq = lqRow({ course: 'p', pausedIntent: true, pauseApplied: true })
     const ov = ovRow({ course: 'p', training: true })
