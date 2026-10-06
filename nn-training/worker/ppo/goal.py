@@ -271,12 +271,8 @@ def ppo_update_goal(
     clip = CLIP_EPS
     stats: list[dict[str, float]] = []
     tensored = tensored_chunks(chunks, device)
-    total_steps = len(tensored) * epochs
-    log(
-        f"[ppo_goal] update start: {len(tensored)} chunks x {epochs} epochs "
-        f"(~{total_steps} grad steps) value_warmup={value_warmup_epochs} "
-        f"kickstart_kl_coef={kl_coef}"
-    )
+    # `[ppo_goal] update start: …` 行已退役（2026-10-06，用户指令「删除云机 worker 刷屏 log」；
+    # 与 engine/intent 同族，一次删干净）：chunk/epoch 数与配置同源，每 job 复述一次。
     t0 = time.time()
     last_hb = t0
     start_epoch = 0

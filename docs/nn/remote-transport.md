@@ -749,7 +749,7 @@ wire payload=1.62MB/2.6s(635KB/s) blob:opt=0.57MB/4.3s(136KB/s) blob:ref=0.36MB/
 | S3c 快照 | `_wire_start(jid)` 重取 `sched0`（只治「同 jid 重领」的陈旧快照；预取 `wait=0` 的真正修复是 S3d） | `wire.py::_wire_start` |
 | S3d 归属 | `slot()` 把本次排队挂 token（`take_wait`），`_get_with_retry` 与 `post_result` **两处**各自 `_wire_note_wait(jid,…)`；`wait=` 改读归属和；`stats()["queue_wait_sec"]` 保留对账 | `bulk_sched.py` / `http.py` / `job_lifecycle.py` |
 | S3e 命中入账 | payload 预取命中在 `run_one_round` 的 `pf_store.take(jid)` 命中处 `_wire_hit(jid,"payload","prefetch")`（**不是** `_ensure_payload`——push 腿共用会误标） | `job_round.py` |
-| S3f 命中率 | 每轮一行 `prefetch: held=… hits=… misses=… 本轮下载=…MB 会话累计=…MB`；字节读 wire 桶同一账（`_wire_totals`，不建第二份） | `job_round.py::_flush_prefetch_round` |
+| ~~S3f 命中率~~ | **已退役（2026-10-06，用户指令「删除云机 worker 刷屏 log」）**：`prefetch: held=… hits=… misses=…` 摘要行删除——预取常态是 0 命中 / 0 下载（现场 `held=0 hits=0 misses=61 本轮下载=0.00MB`）⇒ 每轮一行零信息增量。命中账改由 **S3e** 的 `payload=prefetch-hit` 落在该 job 的 wire 行；字节账仍由预取的 wire 传输行覆盖 | `job_round.py::_flush_prefetch_round`（只剩 wire 传输行） |
 | W0 读方 | `tools/wire_report.py` 新增 `DISPATCH_RE` + 聚合（wait p50/p90/max、yield 合计、`p0_p50`/`p0_p95` max；`p0_p50` 可选，**旧日志照样聚合**） | `tools/wire_report.py` |
 | G8 注释 | `hub/queue_claims.py` 的「深度 3 靠多轮 peek 填满」改为「每课程至多一个候选（`ids[0]`）+ 游标只读 ⇒ 有效窗口 = `min(depth, 开课数)`」 | `hub/queue_claims.py` |
 
@@ -1477,6 +1477,13 @@ kind=iter 发布端守卫 / opt-only tar 落位）· `hub/smoke_loopback.py`（�
 
 ---
 ## §39 bulk 让路账「一次传输一行」：逐次打点 = 刷屏（2026-09-24）
+
+> ★ **2026-10-06 续（用户指令「删除云机 worker 刷屏 log」）**：本节落地的「让路合计」行**已退役**——
+> 它虽已是「一次传输一行」，仍是**每 job 必然多出来**的一行（云机 cell 输出就是被这类行占满的）。
+> `slot()` 不再打它；`_yield_cur` **保留**（S2 累计上限 `yield_total_budget_sec` 的输入，
+> `test_yield_total_is_capped_per_transfer` 仍在钉）；每 job 的 `yield=` 读数在 wire 行。
+> 原判据用例 `test_yield_log_is_one_line_per_transfer` 随行删除（文件里留退役注记）。
+> 决策 → `DECISIONS.md` §2026-10-06-goalnn-cloud-worker-log-diet。
 
 现场（用户贴的 worker 日志）：一次 payload 下载里
 `bulk 让路 X.Xs（控制面在途；单次预算 ≤ 5s）` 连打 **6 行**（4.0/1.5/1.0/1.5/1.0/0.5s），

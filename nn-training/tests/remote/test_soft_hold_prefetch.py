@@ -442,48 +442,12 @@ def test_worker_loop_restores_the_library_yield_defaults(tmp_path: Path, monkeyp
         W._BULK.configure_yield(after_sec=before[0], total_budget_sec=before[1])
 
 
-def test_prefetch_round_summary_is_logged(tmp_path: Path, monkeypatch) -> None:
-    """S3f/G6：有活动的轮打一行 `prefetch: held=… hits=… misses=… 本轮下载=…MB`。"""
-    W._WIRE.clear()
-    W._BULK.reset()
-    store = PrefetchStore(tmp_path)
-    p = _payload(2048)
-    monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: ([_summary(p)], False))
-    monkeypatch.setattr(JR, "PREFETCH_ROUND_SEC", 0.01)
-
-    def _dl(*a, **k):
-        W._wire_add(JR.PREFETCH_WIRE_ID, "payload", len(p), 0.01)  # 真下载才有的 wire 账
-        return p
-
-    monkeypatch.setattr(JR, "download_payload", _dl)
-    logs: list[str] = []
-    stop = threading.Event()
-    t = threading.Thread(
-        target=lambda: JR._prefetch_fill(
-            "http://hub", "tok", store, stop, depth=1, log=logs.append
-        ),
-        daemon=True,
-    )
-    t.start()
-    deadline = time.time() + 5
-    while not store.has(JID) and time.time() < deadline:
-        # sleep-ok: 轮询步长（等的是「预取入库」这个状态，5s 只当挂起兜底）
-        time.sleep(0.01)
-    stop.set()
-    t.join(5)
-    assert store.has(JID), f"预取没入库：{logs}"
-    summary = [ln for ln in logs if ln.startswith("prefetch: held=")]
-    assert summary, f"没有每轮摘要行：{logs}"
-    assert "hits=0" in summary[-1] and "本轮下载=" in summary[-1], summary[-1]
-
-
-def test_prefetch_stats_have_a_production_reader() -> None:
-    """S3f：`PrefetchStore.stats()` 必须有**生产**读者（2026-10-02 前全仓零调用）。
-
-    源码级断言（防「又变成死代码」）：删掉 `remote/job_round.py` 里的 `store.stats()` ⇒ 本用例红。
-    """
-    src = (ROOT / "remote" / "job_round.py").read_text(encoding="utf-8")
-    assert "store.stats()" in src, "PrefetchStore.stats() 又变成死代码了"
+# 已退役（2026-10-06，用户指令「删除云机 worker 刷屏 log」）：原
+# `test_prefetch_round_summary_is_logged`（S3f/G6 每轮摘要行）与
+# `test_prefetch_stats_have_a_production_reader`（那条行的「不许变死代码」守卫）一并删除——
+# 摘要行按轮打，而预取常态是 0 命中 / 0 下载（现场 `held=0 hits=0 misses=61 本轮下载=0.00MB`）
+# ⇒ 每轮一行零信息增量。读数没丢：命中账由 **S3e** 的 `payload=prefetch-hit` 落在该 job 的
+# wire 行（`test_prefetch_hit_is_visible_in_the_wire_line` 在），字节账由预取的 wire 传输行覆盖。
 
 
 def test_prefetch_hit_is_visible_in_the_wire_line(tmp_path: Path, monkeypatch) -> None:

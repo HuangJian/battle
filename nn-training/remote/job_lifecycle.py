@@ -486,7 +486,6 @@ def post_result(
     req_body = pack_result_v2(result)
     ctype = WIRE_V2_CONTENT_TYPE
     req_body_json = json.dumps(result, ensure_ascii=False).encode("utf-8")
-    t0 = time.time()
     for attempt in range(1, attempts + 1):
         # 段账口径（2026-09-25）：只算**进槽之后**的真实上传 —— 进槽前的排队归调度账
         # （`wait=` / `排队 … 才拿到单通道`）。现场 `result=0.63MB/18-19s` 与同一段日志里的
@@ -523,16 +522,10 @@ def post_result(
         except Exception as e:
             status, body = None, repr(e).encode()
         if status in (200, 201):
+            # `result POST ok: … bytes in …s (attempt k) [JSON 体为 …]` 行已退役（2026-10-06，
+            # 用户指令「删除云机 worker 刷屏 log」）：同一笔账已在每 job 的 wire 行里
+            # （`result=…MB/…s(…KB/s)`），而 v2-vs-JSON 体积早已一次性验证完毕。
             _wire_add(jid, "result", len(req_body), time.time() - t_xfer)
-            log(
-                f"result POST ok: {len(req_body)} bytes ({ctype.rsplit('/', 1)[-1]})"
-                f" in {time.time() - t0:.1f}s (attempt {attempt})"
-                + (
-                    f"  [同内容 JSON 体为 {len(req_body_json)} bytes]"
-                    if ctype != "application/json"
-                    else ""
-                )
-            )
             return status
         if status == 409:
             # 竞速广播下这是**输家的正常结局**：同 job 已被别人先回传，本份结果丢弃。

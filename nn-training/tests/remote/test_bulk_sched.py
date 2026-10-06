@@ -552,40 +552,11 @@ def test_queue_wait_is_attached_to_its_own_token():
     assert s.stats()["queue_wait_sec"] > 0.0, "会话级对账面被误删"
 
 
-def test_yield_log_is_one_line_per_transfer():
-    """让路账**一次传输一行**（2026-09-24 现场：一次 payload 下载让路 6 次 = 原来刷 6 行）。
-
-    判据：① 同一 slot 内多次让路 ⇒ **只出一条**「让路合计」行，秒数与次数都是合计；
-    ② 没有让路的传输 ⇒ 一行都不出；③ 下一次传输另起一行（账不跨传输累计）。
-    """
-    budget, step = 0.06, 0.01
-    lines: list[str] = []
-    s = _sched(yield_budget_sec=budget, yield_step_sec=step, log=lines.append)
-    stop = threading.Event()
-    entered = threading.Event()
-
-    def p0() -> None:
-        with s.control(label="/jobs/x/status"):
-            entered.set()
-            stop.wait(5)
-
-    t = threading.Thread(target=p0, daemon=True)
-    t.start()
-    # 事件驱动：`control()` 先计数再 yield ⇒「entered 已置位」⇔ 控制面确实在途。
-    assert entered.wait(5), "控制面没能进入在途状态"
-    with s.slot(BULK_P1_CRITICAL, label="payload") as tok:
-        for _ in range(3):
-            s.pause_if_needed(tok)
-    assert len(lines) == 1, f"一次传输只该有一行让路账，实得 {lines}"
-    assert lines[0].startswith("bulk payload: 让路合计 "), lines[0]
-    assert "3 次" in lines[0] and "单次预算" in lines[0], lines[0]
-    stop.set()
-    t.join(5)
-
-    lines.clear()
-    with s.slot(BULK_P1_CRITICAL, label="result") as tok2:
-        s.pause_if_needed(tok2)  # 控制面已走 ⇒ 没让路
-    assert lines == [], f"没让路就不该有账：{lines}"
+# 已退役（2026-10-06，用户指令「删除云机 worker 刷屏 log」）：原
+# `test_yield_log_is_one_line_per_transfer` 钉的是「让路合计」行——那行已从 `slot()` 里删除
+# （它虽已是「一次传输一行」，仍是每 job 必然多出来的一行）。判据没丢：让路计数/秒数仍由上面
+# 的 S2 封顶用例（`_yield_cur` 是累计上限的输入）与 `stats()["yield_sec"]` 钉住；每 job 的
+# 调度读数仍在 wire 行的 `wait=…/yield=…` 里。
 
 
 # --------------------------------------------------------------- 4. 路径分流

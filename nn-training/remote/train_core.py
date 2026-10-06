@@ -305,14 +305,11 @@ def run_training_core(
     raw_model = model
     if dev_str in ("cuda-dp", "dp"):
         if use_dp:
-            _n = torch.cuda.device_count()
-            _mb = int(manifest.get("mb", 0) or 0)
+            # `job …: DataParallel 生效（… 卡 …）` 行已退役（2026-10-06，用户指令「删除云机 worker
+            # 刷屏 log」）：同一进程里 device 不变 ⇒ 它是**每 job 重复**的静态事实，而开机横幅已印
+            # `device=cuda-dp`、rl-config 也记着；「DP 数值不可与单卡逐位比」的警告就在上面。
+            # 退化告警（下面的 else）**保留**：那是真异常路径，不是复述。
             model = torch.nn.DataParallel(model)
-            log(
-                f"job {jid}: DataParallel 生效（{_n} 卡"
-                + (f"，mb={_mb} -> 每卡 {_mb // _n}" if _mb else "")
-                + "）——梯度归约顺序变化，与单卡 run 数值不可逐位比"
-            )
         else:
             log(
                 f"job {jid}: 请求了 cuda-dp 但只可见 {torch.cuda.device_count()} 张卡"

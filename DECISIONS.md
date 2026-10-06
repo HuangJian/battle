@@ -7854,6 +7854,7 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 - **落点**：`nn-training/common/game_watch.py` · `nn-training/worker/iter_rollout.py` ·
   测试：`nn-training/tests/{common/test_game_watch,remote/test_remote_iter}.py`。
 - **指针**：`docs/nn/runtime-opt.md` §32.5（含「先红」取证：A/B 工作树上旧形态被 60s 外墙钟 kill）。
+
 ## §2026-10-06-goalnn-pull-replica-any-unfinished（2026-10-06，用户报障：新 worker 上线「领不到」，要重启 trainer 才领得到；用户口径：只要没回传结果都算没完成，都能发出去竞速）
 
 **背景**：Kaggle 新 worker 起来后 `no job yet` 刷了一两分钟，重启 trainer 才领到活。机制链：空闲 worker 的
@@ -7883,3 +7884,38 @@ claim 说不能」）；把 backup 的回传当 403 确定性失败上报 ⇒ �
 **落点**：`nn-training/hub/{store_ledger,queue_claims}.py` · `nn-training/remote/{job_lifecycle,job_round}.py` ·
 测试 `nn-training/tests/hub/test_priority_schedule.py`（七条新用例，旧形状全红）。
 **指针**：`docs/nn/remote-transport.md` §68（机制链 / 落地表 / 边界 / 真机判据）。
+## §2026-10-06-goalnn-cloud-worker-log-diet（2026-10-06，用户指令「删除云机 worker 刷屏 log」）
+
+**背景**：用户贴出云机（Kaggle）worker cell 输出里的六行，要求删掉：`job …: DataParallel 生效（…）`、
+`[ppo] update start: … chunks x … epochs`、`bulk payload/P1: 让路合计 …`、
+`prefetch: held=… hits=… misses=… 本轮下载=…MB 会话累计=…MB`、
+`result POST ok: … bytes … (attempt k) [同内容 JSON 体为 …]`、`job … done — result accepted [回传 …]`。
+共同形状：**每 job / 每轮必然一行**，而信息要么是静态事实的复述，要么已在别处（wire 行 / hub 侧 / 异常行）。
+
+**决定**：这六行**删除**（不降频、不加开关），每 job 的观测出口收敛到既有的一行 wire 账
+（`wait=…/yield=…` 调度账 + 各段字节/秒 + `phases in/out/ppo/other`）；**异常与真异常路径各自仍然响亮**
+（`result POST 409`（竞速输家）/ `403`（backup 丢弃）、`cuda-dp 但只可见 N 张卡` 的退化告警、
+`排队 … 才拿到单通道`（>1s）、wire 的重抽/抢占/坏签行、状态码节流告警）。逐行落点：
+- `DataParallel 生效`：PPO（`remote/train_core.py`）与 BC（`worker/train/bc.py`）两处都删；「与单卡数值
+  不可逐位比」的警告留在原地注释里，运行事实由开机横幅 `device=cuda-dp` 与 rl-config 承担。
+- `update start`：三个 PPO 变体（`worker/ppo/{engine,goal,intent}.py`）一起删——同族同命，只删一个等于
+  换条课程又出现。
+- `让路合计`：`remote/bulk_sched.py::slot()` 的出口删除；`_yield_cur` **保留**——它同时是 S2「一条传输累计
+  让路 ≤ `yield_total_budget_sec`」的输入，不是纯日志账。
+- `prefetch` 摘要行：`remote/job_round.py::_flush_prefetch_round` 只剩 wire 传输行（真搬了字节才打）。
+- `result POST ok` 与 `done — result accepted`：同一笔账已在 wire 行（`result=` 段 / `out=` 阶段）里。
+
+**否决与否决理由**：① 「有活动才打」的降频（对 prefetch 零活动确实够，但另外五行是每次运行都有的，
+没解决「云机日志全是它们」）；② 加 `--quiet`/env 开关——被抱怨的**就是默认路径**，且新开关 = 新漂移点；
+③ 把被删的读数搬进 wire 行——那行会长到读不动（减噪的反面）；④ 只删 `[worker]` 前缀的、留 `[ppo]` 的那行——
+用户贴的就是它。
+
+**违反后果**：把「让路合计」当纯日志顺手连 `_yield_cur` 一起删 ⇒ 静默取消 S2 的累计封顶（每分片都停满单次
+预算，把让路税加倍）；删行时顺手碰掉 backup 的 409/403「按成功丢弃」语义 ⇒ 一个赢家把输家炸成训练停腿；
+再用「日志里有 DataParallel 生效」判「这轮是不是 DP」——该判据已退役，看横幅 / rl-config。
+
+**落点**：`nn-training/remote/{train_core,bulk_sched,job_round,job_lifecycle}.py` ·
+`nn-training/worker/ppo/{engine,goal,intent}.py` · `nn-training/worker/train/bc.py` · 测试：删掉三条只钉
+退役行的用例（`tests/remote/test_bulk_sched.py` 的让路合计行、`tests/remote/test_soft_hold_prefetch.py`
+的摘要行与它的「生产读者」守卫），两处留退役注记。
+**指针**：`docs/nn/remote-transport.md` §53（S3f 行标退役 / 让路策略表）· §39（让路账，2026-10-06 续）。
