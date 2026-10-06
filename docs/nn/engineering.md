@@ -6250,6 +6250,30 @@ argv 元素**判定，避免把 `from remote.worker_server import` 这种进程�
 **证据**：`tests/test_subproc_util.py` **9 例**；全量 gate `1582 passed / 4 skipped`（+3）；根 `bun run check`
 1868 绿。记录：`DECISIONS.md` §2026-09-19-goalnn-test-port-convergence。
 
+### 续（2026-10-06）：撞端口的**第二张脸**——裸 `EADDRINUSE` 不再被读成「非端口冲突」
+
+**现场**：`bun run check` 与 `nn-python-gate.sh` 并发跑，gate 红在
+`tests/common/test_instance_lock.py::test_real_second_instance_refused_by_lock`，报错文本是 helper 自己的
+`服务进程启动即退出（非端口冲突，不该重试）；输出：[… 'OSError: [Errno 98] Address already in use']`；
+单独复跑即绿（纯端口竞争，与被测行为无关）。
+
+**根因**：撞端口有两张脸，而判据只认了一张。① 守卫 probe 时已被占 ⇒ 子进程带 `PORT_TAKEN_MARKER`
+干净拒启（旧版只认这张）；② 守卫 probe **之后**才被抢走 ⇒ bind 在 `socketserver.server_bind` 里抛
+**裸** `OSError: [Errno 98] Address already in use`（Windows = `[WinError 10048]`），输出里**没有**守卫
+文案 ⇒ 旧版落进「非端口冲突」分支当场硬失败。两张脸是同一个事实（端口被人抢了），处置都该是
+**换端口重试**（实测概率与 §11 同量级：并发跑才出、单跑就绿）。
+
+**修法**：单一判据 `tests/subproc_util.py::port_race_seen(lines)`（`PORT_RACE_PATTERNS` = 守卫文案 +
+`Address already in use` / `EADDRINUSE` / `[Errno 98]` / `WinError 10048` / `WSAEADDRINUSE`），
+`spawn_bound_port()` 与两处「三启 ⇒ 恰好一个」的场景（`test_instance_lock` / `test_worker_server_lock`）
+共用它——多进程场景的输家同样可能死于裸冲突，旧判据会把它读成「三启全灭——锁/守卫把唯一实例也拒了」
+的假红。非端口死法照旧**不重试**（`test_non_port_death_fails_loudly_without_retry` 钉住）。
+
+**证据**：`tests/test_subproc_util.py` **11 例**（+2：真子进程驱动「裸冲突 ⇒ 换端口重试」、判据函数
+两脸全覆盖且不吞真死法）；**A/B**：把 `PORT_RACE_PATTERNS` 临时收窄成只认守卫文案 ⇒ 新用例当场
+复现上面那条原文红，放开即绿（判据是活的、非空）。全量 gate `3727 passed / 9 skipped`；
+根 `bun run check` 2399 pass / 0 fail。
+
 ---
 
 ## §10 节点门统一：rollout 与 eval 同用 codehash-files.txt（eval 门改比 codeHash，ping 不再报 engineEpoch）（2026-09-17）

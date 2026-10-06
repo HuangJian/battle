@@ -13,6 +13,12 @@
 
 子进程用真 `common.port_guard.ensure_port_free`（文案不硬编码在测试里），
 所以守卫文案一改，`PORT_TAKEN_MARKER` 就跟着红 —— 否则换端口重试会静默失效。
+
+★ 撞端口有**两张脸**（2026-10-06 实测）：
+  ① 守卫 probe 时已被占 ⇒ 子进程带 `PORT_TAKEN_MARKER`（干净拒启）；
+  ② 守卫 probe **之后**才被人抢走 ⇒ bind 抛**裸** `OSError: [Errno 98] Address already in use`
+     （Windows = `[WinError 10048]`）⇒ 旧版只认 ①，把 ② 读成「非端口冲突」当场红
+     （实测：`bun run check` 与 gate 并发时 gate 被这条假红拦下）。两张脸都要认。
 """
 
 from __future__ import annotations
@@ -35,6 +41,7 @@ from common.port_guard import ensure_port_free
 from tests.subproc_util import (
     PORT_TAKEN_MARKER,
     SPAWN_PORT_ATTEMPTS,
+    port_race_seen,
     spawn_bound_port,
 )
 
@@ -58,6 +65,20 @@ _CHILD_QUIET = "import time\nprint('quiet-marker', flush=True)\nwhile True:\n   
 
 #: 非端口原因的死法（钉「不重试，立刻抛」）。
 _CHILD_DEAD = "import sys; sys.stderr.write('boom\\n'); sys.exit(3)\n"
+
+#: **裸**端口冲突：不过守卫，直接 bind 别人占着的端口 ⇒ 真 `OSError: [Errno 98] Address already
+#: in use`（Windows = `WinError 10048`）。复刻「守卫 probe 通过之后才被抢走」的第二种脸。
+#: 刻意**不设** `SO_REUSEADDR`：那正是裸 bind 会当场报错、而不是静默双绑的前提。
+_CHILD_RAW_CONFLICT = (
+    "import socket, sys, time\n"
+    "port = int(sys.argv[1])\n"
+    "s = socket.socket()\n"
+    "s.bind(('127.0.0.1', port))\n"
+    "s.listen(8)\n"
+    "print(f'listening on 127.0.0.1:{port}', flush=True)\n"
+    "while True:\n"
+    "    time.sleep(0.2)\n"
+)
 
 
 def _spawn(make_argv, **kw):
@@ -121,6 +142,40 @@ def test_retries_with_a_new_port_when_the_first_is_taken() -> None:
             assert any("listening on" in ln for ln in srv.lines), srv.lines
         finally:
             _reap(srv.proc)
+
+
+def test_raw_bind_conflict_retries_with_a_new_port() -> None:
+    """裸 bind 冲突（守卫 probe 之后被抢）也必须**换端口重试**，不得读成「非端口冲突」。
+
+    2026-10-06 实测：gate 与 `bun run check` 并发时，某个 worker 的子进程死于
+    `socketserver.server_bind` 里的裸 `OSError: [Errno 98] Address already in use`——
+    输出里没有守卫文案 ⇒ 旧版直接抛 AssertionError（与本用例毫无关系的假红）。
+    """
+    with _held_port() as taken:
+        calls: list[int] = []
+
+        def argv(port: int) -> list[str]:
+            calls.append(port)
+            target = taken if len(calls) == 1 else port
+            return [sys.executable, "-u", "-c", _CHILD_RAW_CONFLICT, str(target)]
+
+        srv = _spawn(argv)
+        try:
+            assert len(calls) == 2, f"裸端口冲突必须换端口重试（实际尝试 {len(calls)} 次）"
+            assert srv.port == calls[1] and srv.port != taken
+            assert _connectable(srv.port), "返回的端口必须真的在监听"
+        finally:
+            _reap(srv.proc)
+
+
+def test_port_race_seen_covers_both_faces_and_spares_real_deaths() -> None:
+    """判据函数本身：守卫文案 + 裸 errno 两种脸都认，别的死法一律不认。"""
+    assert port_race_seen([f"端口 127.0.0.1:1 {PORT_TAKEN_MARKER}（禁止双监听）"])
+    assert port_race_seen(["OSError: [Errno 98] Address already in use"])
+    assert port_race_seen(["OSError: [WinError 10048] 通常每个套接字地址只允许使用一次。"])
+    assert port_race_seen(["socket.error: EADDRINUSE"])
+    assert not port_race_seen(["boom"]), "非端口原因的死法绝不能被读成端口竞争"
+    assert not port_race_seen([]), "空输出同理"
 
 
 def test_non_port_death_fails_loudly_without_retry() -> None:

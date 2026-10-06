@@ -30,6 +30,33 @@ from typing import Any, TypeVar
 #: 不硬编码在调用点：`tests/test_subproc_util.py` 拿真守卫把它钉死。
 PORT_TAKEN_MARKER = "已被占用——拒绝启动"
 
+#: 端口被抢的**两张脸**（判据函数 `port_race_seen()` 的唯一事实源）：
+#:   ① 守卫 probe 时已被占 ⇒ 子进程带 `PORT_TAKEN_MARKER` 干净拒启；
+#:   ② 守卫 probe **之后**才被抢 ⇒ bind 抛**裸** `OSError: [Errno 98] Address already in use`
+#:      （2026-10-06 实测：`socketserver.server_bind` 里冒出来，输出**不含**守卫文案 ⇒ 只认 ①
+#:      的旧版把它读成「非端口冲突」当场硬失败；Linux = errno 98 / EADDRINUSE，
+#:      Windows = WinError 10048 / WSAEADDRINUSE）。
+#: 两种都是「换端口重试」的理由；非端口死法（真 bug）不许落进来。
+PORT_RACE_PATTERNS = (
+    PORT_TAKEN_MARKER,
+    "Address already in use",
+    "EADDRINUSE",
+    "[Errno 98]",
+    "WinError 10048",
+    "WSAEADDRINUSE",
+)
+
+
+def port_race_seen(lines: list[str]) -> bool:
+    """这些输出行是不是「端口被人抢了」的痕迹？（守卫拒启文案 **或** 裸 bind 冲突）
+
+    抽成函数而不是让两个调用点各写一遍 `any(...)`：判据只该有一处（§3.1 单份性），
+    而 `spawn_bound_port()`（单进程）与 `retry_on_port_stolen()` 的场景（多进程抢同一端口）
+    必须给同一个答案。
+    """
+    return any(p in ln for p in PORT_RACE_PATTERNS for ln in lines)
+
+
 #: 撞端口后换端口重试的上限（xdist 并行下实测 1 次就够，余量留 5 次）。
 SPAWN_PORT_ATTEMPTS = 5
 
@@ -95,8 +122,9 @@ def retry_on_port_stolen(
 
     给「**多个**进程抢同一个端口」这类无法用 `spawn_bound_port()` 表达的场景（典型：三启
     同时启动、期望恰好一个成为实例）：这类用例必须自己选端口并交给 N 个子进程，选端口的
-    TOCTOU 窗口照样存在。判据由场景自己给：全灭**且**输出里出现 `PORT_TAKEN_MARKER`
-    ⇒ 抛 `PortStolenError`（端口被外人抢走，不是被测行为不对）；其它失败照旧红。
+    TOCTOU 窗口照样存在。判据由场景自己给：全灭**且**输出里出现过端口竞争痕迹
+    （`port_race_seen()`——守卫文案或裸 `EADDRINUSE`，两张脸都算）⇒ 抛 `PortStolenError`
+    （端口被外人抢走，不是被测行为不对）；其它失败照旧红。
 
     调用方仍需自己收尸：`scenario` 里已死的进程重跑时会再被 `_kill` 一次（无害）。
     """
@@ -151,7 +179,8 @@ def spawn_bound_port(
 
     成功判据不是「端口有人监听」（那可能是**别人**的服务，甚至会让我们对着陌生 hub
     跑完整用例），而是**这个**子进程自报了 `listening on <host>:<port>`；撞端口的
-    子进程会带着 `PORT_TAKEN_MARKER` 退出，被识别出来换端口重试。
+    子进程会带着 `PORT_TAKEN_MARKER` **或裸 bind 冲突**（`port_race_seen()`：守卫 probe
+    与真正的 bind 之间被人抢走时子进程死的就是第二种脸）退出，被识别出来换端口重试。
 
     `listen_timeout` 内既没自报也没退出 ⇒ 当作成功（日志文案变了不该变成硬失败），
     就绪等待交给调用方。返回的 `BoundServer.proc` 已在跑，收尸由调用方负责。
@@ -177,12 +206,13 @@ def spawn_bound_port(
         drain.start()
         if _await_listening(proc, lines, drain, port, listen_timeout):
             return BoundServer(port=port, proc=proc, lines=lines)
-        if not any(PORT_TAKEN_MARKER in ln for ln in lines):
+        if not port_race_seen(lines):
             raise AssertionError(
                 f"服务进程启动即退出（非端口冲突，不该重试）；输出：{lines[-8:]}"
             )
         print(
-            f"[subproc_util] 端口 {port} 在探测后被别的进程抢走——换端口重试"
+            f"[subproc_util] 端口 {port} 在探测后被别的进程抢走"
+            f"（守卫拒启 / 裸 EADDRINUSE 两种脸都算）——换端口重试"
             f"（xdist 并行竞争；第 {attempt}/{attempts} 次）",
             flush=True,
         )

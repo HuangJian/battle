@@ -27,8 +27,8 @@ sys.path.insert(0, str(NN_TRAINING))
 
 from common import instance_lock as il
 from tests.subproc_util import (
-    PORT_TAKEN_MARKER,
     PortStolenError,
+    port_race_seen,
     retry_on_port_stolen,
     spawn_bound_port,
 )
@@ -215,8 +215,9 @@ def test_simultaneous_starts_leave_exactly_one_instance(tmp_path: Path) -> None:
     锁把它关掉：任一道闸拦下都是响亮拒启，不会有静默共存者。
 
     三个进程必须抢**同一个**端口，所以用不了 `spawn_bound_port`（它只起一个）；端口若在
-    探测后被外人抢走，三个都会死在端口守卫上（输出带 `PORT_TAKEN_MARKER`）——那不是被测
-    行为不对，而是场景作废 ⇒ 抛 `PortStolenError` 让 `retry_on_port_stolen` 换端口重跑。
+    探测后被外人抢走，三个都会死在端口守卫上或裸 `EADDRINUSE` 上（`port_race_seen()` 两种
+    脸都认）——那不是被测行为不对，而是场景作废 ⇒ 抛 `PortStolenError` 让
+    `retry_on_port_stolen` 换端口重跑。
     """
     lock = tmp_path / ".hub_server.lock"
 
@@ -239,7 +240,7 @@ def test_simultaneous_starts_leave_exactly_one_instance(tmp_path: Path) -> None:
             time.sleep(0.3)
         if alive == 0:
             outs = "; ".join(_tail(lg) for _, lg in procs)
-            if PORT_TAKEN_MARKER in outs:  # 端口被外人抢走 ⇒ 场景作废，换个端口重跑
+            if port_race_seen([outs]):  # 端口被外人抢走（守卫拒启/裸 EADDRINUSE）⇒ 场景作废，换端口重跑
                 raise PortStolenError(outs)
             raise AssertionError(f"三启全灭——锁/端口守卫把唯一实例也拒了: {outs}")
         return port, alive, procs
