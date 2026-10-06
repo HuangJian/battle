@@ -95,6 +95,98 @@ AUTHORITY_NOT_OFFLINE = "not_offline"
 #: ★ 与 job 侧 `ORPHAN_GRACE_SEC` 同值**不同义**：job 侧 = claim 后**零心跳**；离线段 = **连续静默**
 #: （心跳线程整段在跑，慢网/挂起的人为短静默不该误杀）——别照抄 store_leases._lease_state。
 OFFLINE_LEASE_STALE_SEC = 180.0
+# ── 接管（hold）的进度活性（plan/worker-type-dispatch-model §1.2/§1.5.2，2026-10-07）──
+#
+# 新派发模型把三件事拆正交：**谁在跑**（worker 类型）/ **归谁独占**（hold）/ **还活着吗**（进度）。
+# 本块只做第三件：**活性只认进度信号**，心跳（60s）只续租约 TTL —— 2026-10-05/06 的
+# 「假活」（心跳活、进度死）正是把心跳当活性算出来的（docs/nn/remote-transport.md §68）。
+#
+# 为什么与 `AUTO_HANDOFF_PENDING_SEC` 分开写：两者都是 900s 是**巧合**（一个是导包窗口、
+# 一个是接管活性），调一个会误伤另一个 —— plan §1.5.2-P0-1 明令**禁止合并常量**。
+#: 接管后连续静默（无任何进度信号）超过它 ⇒ 判「掉线」（惰性判据：谁读谁算，不养清理线程）。
+#: env 覆盖 `BCITY_HOLD_PROGRESS_STALE_SEC`（e2e/单测调秒级）——与 `offline_lease_stale_sec()`
+#: 同款「调用时读 env」。
+HOLD_PROGRESS_STALE_SEC = 900.0
+#: hub 重启给**盘上恢复的 hold** 的宽限（秒）：把 `last_progress_at`/`touch_at` 抬到 `now - 它`。
+#: 为什么需要：重启时盘上的时间是旧的，而 worker 大概率还活着（它不知道自己「被重启」了）——
+#: 不抬就会把活着的盘判掉线，协作派发与本机 held 会一起解开（plan §1.5.4-P2-2）。
+HOLD_RESTORE_GRACE_SEC = 300.0
+
+
+def hold_progress_stale_sec() -> float:
+    """生效的接管静默阈值（env 覆盖；非法 / 非正数 ⇒ 缺省）。**调用时读 env**（可 monkeypatch）。"""
+    raw = os.environ.get("BCITY_HOLD_PROGRESS_STALE_SEC", "").strip()
+    try:
+        v = float(raw)
+    except ValueError:
+        return HOLD_PROGRESS_STALE_SEC
+    return v if v > 0 else HOLD_PROGRESS_STALE_SEC
+
+
+def hold_progress_at(hold: object) -> float:
+    """hold 记录里的**进度时刻**（0.0 = 没有记录 / 值不合法）。纯函数。"""
+    if not isinstance(hold, dict):
+        return 0.0
+    try:
+        return max(0.0, float(hold.get("last_progress_at") or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def hold_touch_at(hold: object) -> float:
+    """hold 记录里的**最近一次合法接触**（心跳 ∨ 进度）：`touch_at`，缺则退回 `at`（接管时刻）。
+
+    为什么单独一个字段：TTL 余量要从**接触**起算（心跳刷它），而活性只看进度 —— 两者分开，
+    「心跳活、进度死」的假活才既不掉线也不被当成新鲜（plan §1.5.4-P2-1 的四象限）。
+    """
+    if not isinstance(hold, dict):
+        return 0.0
+    for key in ("touch_at", "at"):
+        try:
+            v = max(0.0, float(hold.get(key) or 0.0))
+        except (TypeError, ValueError):
+            v = 0.0
+        if v > 0:
+            return v
+    return 0.0
+
+
+def hold_state(now: float, hold: object) -> str:
+    """hold 的活性（纯函数）：`""` = 没有 hold · `live` · `stale`。
+
+    判据只有一条：**进度**（`last_progress_at`）。没有任何进度信号的 hold 一律 `stale` ——
+    「刚接管、还没打点」的那几秒由**恢复宽限**与「claim 本身记第一个进度锚」兜住，
+    而不是靠把「零进度」当活。
+    """
+    if not isinstance(hold, dict) or not hold:
+        return ""
+    p = hold_progress_at(hold)
+    if p <= 0.0:
+        return "stale"
+    return "stale" if float(now) - p > hold_progress_stale_sec() else "live"
+
+
+def hold_restore_grace(now: float, stored: float) -> float:
+    """恢复宽限（纯函数）：盘上的接触时刻 `stored` ⇒ 抬到 `max(stored, now - 宽限)`。**只抬不压**。"""
+    return max(float(stored or 0.0), float(now) - HOLD_RESTORE_GRACE_SEC)
+
+
+def hold_expires_in(now: float, hold: object, *, ttl_sec: float, stale_sec: float) -> float:
+    """hold 的「距判掉线的剩余秒」= **min(进度余量, TTL 余量)**（纯函数）。
+
+    读面（`holder_info` / `/offline/hold`）给的就是这一个数（P2-3：形状不变），语义从
+    「TTL 余量」改成「还要多久会被判掉线」——旧读方显示「N 秒后过期」照样说得通。
+    """
+    if not isinstance(hold, dict) or not hold:
+        return 0.0
+    n = float(now)
+    progress = hold_progress_at(hold)
+    touch = hold_touch_at(hold)
+    left_progress = (progress + float(stale_sec)) - n if progress > 0.0 else 0.0
+    left_ttl = (touch + float(ttl_sec)) - n if touch > 0.0 else 0.0
+    return max(0.0, min(left_progress, left_ttl))
+
+
 #: 「离线盘在线」的窗口（秒）：与离线租约 TTL 同档 —— 取包腿的报到节奏就是这个量级。
 OFFLINE_DISK_WINDOW_SEC = 900.0
 

@@ -56,6 +56,12 @@ from hub.task_pack import (
     TASK_STATE_NOT_OFFLINE,
     TASK_STATE_RANK,
     _file_sha256,
+    hold_expires_in,
+    hold_progress_at,
+    hold_progress_stale_sec,
+    hold_restore_grace,
+    hold_state,
+    hold_touch_at,
     lease_verdict,
     offline_lease_stale_sec,
     pack_index_meta,
@@ -73,7 +79,14 @@ from hub.task_pack import (
 #: 派发状态文件名（落 `<traj>/<课>/`，与 hub 自己的账本/manifest 同域）。
 DISPATCH_NAME = "offline-dispatch.json"
 #: 文件 schema 版本（将来加字段时给人一个判据，不猜）。
-DISPATCH_VERSION = 1
+#: ★ v2（2026-10-07，plan/worker-type-dispatch-model §3-M1a）：另加 `hold`（接管）与
+#: `pending_export`（导包软态），**与 v1 的 mode/pinned/claimed_* 字段并存**（双写）——
+#: 读侧继续收 v1 形状（`dispatch_record_merge` 宽容），旧读方零变化。
+DISPATCH_VERSION = 2
+#: 进度打点的**落盘节流**（秒，plan §1.5.2-P0-1）：距上次落盘小于它就只改内存。
+#: 打点频率是「轮内每 ≤300s」量级，逐次落盘会把盘 IO 变成热路径；丢掉的那点龄
+#: （≤60s）正好被 `HOLD_RESTORE_GRACE_SEC=300` 的恢复宽限吸收。
+HOLD_PROGRESS_PERSIST_SEC = 60.0
 #: 默认停滞阈值（秒；压「已翻 offline、没人跑」的窗口，§3.9）。env 可覆盖（测试用）。
 OFFLINE_STALL_SEC = 1800.0
 #: 交接窗口（秒）：claim 已翻 offline、包还没出现 —— 这段时间内别的课也算「机器忙」
@@ -94,8 +107,54 @@ def dispatch_record_default(fallback_mode: str) -> dict:
         "claimed_at": 0.0,
         "flipped_at": 0.0,
         "completed_pack_sha": "",
+        # ★ v2 两键（M1a 双写）：接管与导包软态。
+        "hold": {},
+        "pending_export": {},
         "updated_at": 0.0,
     }
+
+
+def _pos_float(v: object) -> float:
+    """宽容的「非负浮点」（**纯函数**）：None / 坏值 ⇒ 0.0。
+
+    状态文件是「重启后能不能继续跑」的唯一依据，一个写错的字段不该让 hub 起不来
+    （与 `dispatch_record_merge` 同一条纪律）；先 `str()` 再 `float()` 是为了让 mypy
+    看到一个合法形参，而不是在调用点撒 `type: ignore`。
+    """
+    try:
+        return max(0.0, float(str(v)))
+    except ValueError:
+        return 0.0
+
+
+def hold_record_merge(raw: object) -> dict:
+    """盘上的 `hold` 归一（**纯函数**）：不是 dict / 全空 ⇒ `{}`（= 没有 hold）。
+
+    为什么「全空 ⇒ 没有」：一个坏 dict 若被当成「有人持有」，就是幽灵接管 —— 派发闸与
+    本机 held 派生会一起停摆，而这种停摆没有第二个读者会喊。
+    """
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    out = {
+        "worker_id": str(raw.get("worker_id") or ""),
+        "token": str(raw.get("token") or ""),
+        "at": _pos_float(raw.get("at")),
+        "last_progress_at": _pos_float(raw.get("last_progress_at")),
+        "touch_at": _pos_float(raw.get("touch_at")),
+    }
+    if not (out["worker_id"] or out["at"] or out["last_progress_at"] or out["touch_at"]):
+        return {}
+    return out
+
+
+def pending_export_record_merge(raw: object) -> dict:
+    """盘上的 `pending_export` 归一（**纯函数**）：不是 dict / 全空 ⇒ `{}`。"""
+    if not isinstance(raw, dict) or not raw:
+        return {}
+    out = {"by": str(raw.get("by") or ""), "at": _pos_float(raw.get("at"))}
+    if not out["by"] and not out["at"]:
+        return {}
+    return out
 
 
 def dispatch_record_merge(raw: object, fallback_mode: str) -> dict:
@@ -119,6 +178,9 @@ def dispatch_record_merge(raw: object, fallback_mode: str) -> dict:
         except (TypeError, ValueError):
             rec[key] = 0.0
     rec["completed_pack_sha"] = str(raw.get("completed_pack_sha") or "")
+    # ★ v2 两键（M1a 双写）：v1 文件里没有它们 ⇒ `{}`（旧形状照读，不制造幽灵接管）。
+    rec["hold"] = hold_record_merge(raw.get("hold"))
+    rec["pending_export"] = pending_export_record_merge(raw.get("pending_export"))
     return rec
 
 
@@ -603,20 +665,58 @@ class QueueOfflineMixin(QueuePeer):
             return dict(rec)
 
     def _dispatch_load(self, course: str) -> dict:
-        """从盘上载入（**不抛**：坏文件只是退回缺省——状态文件不该让 hub 起不来）。"""
+        """从盘上载入（**不抛**：坏文件只是退回缺省——状态文件不该让 hub 起不来）。
+
+        ★ 2026-10-07（M1a / plan §1.5.4-P2-2）：盘上的 hold 过一道**恢复宽限** ——
+        `last_progress_at` / `touch_at` 抬到 `now - HOLD_RESTORE_GRACE_SEC`，并打一行
+        `hold-restored`。理由：hub 重启时盘上的时间是旧的，而 worker 大概率还在跑
+        （它不知道自己「被重启」了）—— 不抬就会把活着的盘当场判掉线，协作派发与本机
+        held 会一起解开。
+        """
         fallback = self.mode_of(course) if course in self._stores else COURSE_MODE_ONLINE
         try:
             raw = json.loads(self._dispatch_path(course).read_text(encoding="utf-8"))
         except (OSError, ValueError, ProtocolError):
             raw = None
-        return dispatch_record_merge(raw, fallback)
+        rec = dispatch_record_merge(raw, fallback)
+        hold = rec.get("hold") or {}
+        if not hold:
+            return rec
+        now = float(self._now())
+        raw_progress = hold_progress_at(hold)
+        raw_touch = hold_touch_at(hold)
+        progress = hold_restore_grace(now, raw_progress)
+        touch = hold_restore_grace(now, raw_touch)
+        if progress > raw_progress or touch > raw_touch:
+            hold = dict(hold)
+            hold["last_progress_at"] = progress
+            hold["touch_at"] = touch
+            rec["hold"] = hold
+        print(
+            f"[hub-server] hold-restored {course}: worker={hold.get('worker_id') or '?'} "
+            f"progress={max(0.0, now - progress):.0f}s 前",
+            flush=True,
+        )
+        return rec
 
-    def _dispatch_update(self, course: str, **fields: Any) -> dict:
-        """改一条记录并**原子落盘**（写 `.tmp` 再 `os.replace`；盘 IO 不持任何业务锁）。"""
+    def _dispatch_update(
+        self, course: str, *, guard_hold_token: str = "", **fields: Any
+    ) -> dict:
+        """改一条记录并**原子落盘**（写 `.tmp` 再 `os.replace`；盘 IO 不持任何业务锁）。
+
+        `guard_hold_token`：只在「盘上那份 hold 的 token 仍是它」时才写。
+        为什么要有这道门：打点与换主会并发（旧主还在 ping，新主刚 claim 完）——
+        不带门的写会把**旧主的 hold 复活**（新主的独占被一道过期的 ping 解除，而没有任何
+        读者会喊）。旧主的 ping 本就不该续新主的命。
+        """
         with self._dispatch_lock:
             rec = self._dispatch.get(course)
             if rec is None:
                 rec = self._dispatch_load(course)
+            if guard_hold_token:
+                cur = rec.get("hold") or {}
+                if str(cur.get("token") or "") != str(guard_hold_token):
+                    return dict(rec)  # 换主了：本次写整笔作废（不复活旧 hold）
             rec.update(fields)
             rec["v"] = DISPATCH_VERSION
             rec["updated_at"] = float(self._now())
@@ -630,6 +730,100 @@ class QueueOfflineMixin(QueuePeer):
             except OSError as e:
                 print(f"[hub-server] 派发状态落盘失败 {course}: {e}", flush=True)
             return dict(rec)
+
+    # ── 接管（hold）写入面与读数（★ M1a 双写，2026-10-07；plan §3-M1a）─────────
+    #
+    # M1a 只**加**：判据在 `hub/task_pack.py`（叶子），落盘在 `offline-dispatch.json` v2，
+    # 消费点切换在 M1b —— 所以这一刀不改任何既有派发行为。
+
+    def note_hold(self, course: str, *, worker_id: str, token: str) -> dict:
+        """建立 / 覆盖接管（hold）。**M1a 只落新键**：旧 mode/pinned/claimed_* 一字不动。
+
+        `last_progress_at` / `touch_at` 都以「接管时刻」打底（claim 本身就是第一个合法接触）
+        —— 否则一个刚建立的 hold 会因为「零进度」立刻被判 stale。hold 建立 = 包到手（Q1），
+        所以顺手清掉 `pending_export` 那个导包软态。
+        """
+        now = float(self._now())
+        hold = {
+            "worker_id": str(worker_id),
+            "token": str(token),
+            "at": now,
+            "last_progress_at": now,
+            "touch_at": now,
+        }
+        return self._dispatch_update(course, hold=hold, pending_export={})
+
+    def note_progress(self, course: str, *, token: str = "") -> bool:
+        """进度打点（轮内完成事件 → 这里）：**内存每拍更新，落盘节流 ≥60s**。
+
+        返回「本次打点是否生效」（落盘 且**令牌仍是当前主**）。三条纪律：
+
+        * 没有 hold 的课 ⇒ 无操作（False）—— **打点不建 hold**（hold 只由 claim 建，Q1）；
+        * 给了 `token` 而它不对 ⇒ 无操作（旧主的 ping 不续新主的命；换主的竞态见
+          `_dispatch_update(guard_hold_token=…)`）；
+        * 节流基准只认**盘上那份**的 `updated_at` —— 在内存里把它刷成现在会把自己永远按住。
+        """
+        now = float(self._now())
+        with self._dispatch_lock:
+            rec = self._dispatch.get(course)
+            if rec is None:
+                rec = self._dispatch_load(course)
+            hold = rec.get("hold") or {}
+            if not hold:
+                return False
+            token_now = str(hold.get("token") or "")
+            if token and token_now != str(token):
+                return False  # 换主了：这一拍属于旧主
+            persisted = float(rec.get("updated_at") or 0.0)
+            hold = dict(hold)
+            hold["last_progress_at"] = now
+            hold["touch_at"] = now
+            rec["hold"] = hold
+            rec["v"] = DISPATCH_VERSION
+            self._dispatch[course] = rec
+            throttled = persisted > 0.0 and (now - persisted) < HOLD_PROGRESS_PERSIST_SEC
+        if throttled:
+            return False
+        wrote = self._dispatch_update(course, guard_hold_token=token_now, hold=hold)
+        return str((wrote.get("hold") or {}).get("token") or "") == token_now
+
+    def note_pending_export(self, course: str, *, by: str) -> dict:
+        """导包软态（Q1）：**不建 hold、不占任何闸、不停本机** —— 只是「有人在导包」的提示。"""
+        return self._dispatch_update(
+            course, pending_export={"by": str(by), "at": float(self._now())}
+        )
+
+    def hold_of(self, course: str) -> dict:
+        """接管读数（`{}` = 没有 hold）。清单 / 派发闸 / 本机 held 派生**同源**读它。
+
+        形状（P2-3）：`worker_id/token/at/last_progress_at/touch_at` + `state`（live/stale）
+        + `expires_in`（距判掉线的剩余秒 = min(进度余量, TTL 余量)）。
+        """
+        now = float(self._now())
+        hold = self.dispatch_record(course).get("hold") or {}
+        if not hold:
+            return {}
+        out = dict(hold)
+        out["state"] = hold_state(now, hold)
+        out["expires_in"] = hold_expires_in(
+            now, hold, ttl_sec=OFFLINE_LEASE_TTL_SEC, stale_sec=hold_progress_stale_sec()
+        )
+        return out
+
+    def pending_export_of(self, course: str) -> dict:
+        """导包软态的读数：**超窗即视为没有**（惰性过期、不写盘清理）。
+
+        ★ 评审 F8：崩溃 / 换机的导包者会留下一条永久记录 —— 读面不设窗的话就是永久
+        「有人在导包」，而 `offline_stalled` 会对着一个早已不存在的导包报「停滞」。
+        窗 = `AUTO_HANDOFF_PENDING_SEC`（导包窗口，与接管活性那个 900 是**两个**常量）。
+        """
+        rec = self.dispatch_record(course).get("pending_export") or {}
+        if not rec:
+            return {}
+        at = float(rec.get("at") or 0.0)
+        if at <= 0.0 or float(self._now()) - at > AUTO_HANDOFF_PENDING_SEC:
+            return {}
+        return dict(rec)
 
     def dispatch_effective_mode(self, course: str, default: str) -> str:
         """登记课程时的生效模式：**盘上的记录优先**（T1 数据损坏防线）。
