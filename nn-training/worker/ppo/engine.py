@@ -317,10 +317,9 @@ def ppo_update(
                 )
         except (KeyError, ValueError, TypeError) as err:
             raise ValueError(f"[ppo] demo_bank 字段缺失/形状非法——拒收（{err}）") from err
-    log(
-        f"[ppo] update start: {len(tensored)} chunks x {epochs} epochs (~{total_steps} grad steps)"
-        + (f" + demo_bc(coef={float(demo_bc_coef):g}, per_mb={int(demo_per_mb)}, N={demo_n})" if demo_on else "")
-    )
+    # `[ppo] update start: … chunks x … epochs` 行已退役（2026-10-06，用户指令「删除云机 worker
+    # 刷屏 log」）：chunk/epoch 数与课程配置同源、每 job 复述一次。`total_steps` 仍在用（步进
+    # 进度 / XLA 诊断 / ETA），不随这行一起删；`demo_on` 等状态同上。
     t0 = time.time()
     last_hb = t0
     # ---- kickstart ref 前向预计算（2026-09-10，纯吞吐、数值逐位不变） ----

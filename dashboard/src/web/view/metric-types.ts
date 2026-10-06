@@ -152,7 +152,7 @@ export const EVAL_GAME_CLASS_LABEL: Record<EvalGameClass, string> = {
   timeout: '超时',
 }
 
-/** 单局 eval 行（最新 in-loop eval 逐局视图；iters.readLatestEvalGames 产出）。 */
+/** 单局 eval 行（最新 in-loop eval 逐局视图；iters.readEvalGames 产出）。 */
 export interface EvalGameRow {
   stage: number
   seed: number
@@ -194,6 +194,25 @@ export interface EvalGamesView extends EvalGamesData {
   available: boolean
 }
 
+/** GET /api/evalRounds 的单行：该课程的一个可导出 eval 轮（summary-only 扫描，iter 降序）。 */
+export interface EvalRoundOption {
+  iter: number
+  wver: string
+  time: string
+  games: number | null
+  wins: number | null
+  /** 展示口径；summary 缺 winRate 时由 wins/games 推；两者都缺 = null（不伪造 0）。 */
+  winRate: number | null
+  /** true = 该 iter 的 summary 是「同 wver 已在别轮评完」的回填（eval_a_once）：
+   *  逐局行归属原 iter，本轮**没有自己的逐局行**（选开是一张空表）。 */
+  reusedWver: boolean
+}
+
+export interface EvalRoundsView {
+  course: string
+  rounds: EvalRoundOption[]
+}
+
 /** POST evalReplays 产物清单（python biz/eval_replays_once.py 落盘的 manifest JSON）。 */
 export interface EvalReplayManifest {
   ok: boolean
@@ -210,9 +229,14 @@ export interface EvalReplayManifest {
   errors: Array<{ stage: number; seed: number; error: string }>
   /** 重放局 vs eval_log 账本逐字段对账（outcome/ticks/kills）——确定性契约的对账项。 */
   mismatches: Array<{ stage: number; seed: number; field: string; ledger: unknown; resim: unknown }>
+  /** 提前失败（`ok:false`）时的原因；成功 manifest 不写。缺失/非字符串 = 不知道（降级「看日志尾」）。 */
+  failReason?: string
 }
 
-/** GET /api/evalReplayJob 载荷：导出任务态（running = busy 互斥；manifest = 落盘产物）。 */
+/** GET /api/evalReplayJob 载荷：导出任务态（running = busy 互斥；manifest = 本次受理后落盘的 manifest）。
+ *  2026-10-06 换轮架构后，此接口的 manifest 语义 = POST /api/replayExport 受理成功后落盘的 manifest，
+ *  而不再是「最近一次导出的 manifest」。旧弹窗用法（此接口做轮选择）已废除——轮选择走 GET /api/evalRounds。
+ */
 export interface EvalReplayJobView {
   course: string
   running: boolean

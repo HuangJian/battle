@@ -47,6 +47,7 @@ import common.env_probe as env_probe
 from common.protocol import (
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
+    CLAIM_MODES,
     JOB_CANCEL_POLL_SEC,
     PRIORITY_NONE,
     PRIORITY_ORDER,
@@ -381,6 +382,11 @@ def acquire_job(
     同一档内按 peek 给的顺序（= hub 的跨课程轮转序）取第一份。claim 回 `demoted` 时
     继续试下一份（§2.3 ④）——「还有别的活就换，只剩它就算备份」的对称面是：
     demoted 的那一份**不**回头当备份（备份要有明确收益，交给预取/掉队救援去触发）。
+
+    ★ **认领模式由候选自己带**（2026-10-06，`peek` 的 `mode` 字段）：`exclusive` = 这份活
+    没人拿着租约（池里那半）；`backup` = **有人正在跑、但还没回传结果**（在飞集那半）——
+    用户口径「只要没有回传结果都是没完成，都能发给 worker 竞速」，备份副本无租约、
+    先回传者胜、输家 409 丢弃（R1-1/R2-3）。旧 hub 不发这个字段 ⇒ 按 `exclusive`（默认零变化）。
     """
     peeked = peek_jobs(
         base_url,
@@ -425,11 +431,16 @@ def acquire_job(
     ranked = sorted(alive, key=lambda c: -_priority_rank(str(prios.get(c["job_id"], "highest"))))
     for cand in ranked:
         jid = str(cand["job_id"])
+        # 模式由 hub 在 peek 里定（只有它知道这份活有没有活租约，见模块头那段）：`backup`
+        # 的活**不占租约**，所以不能把「池里那份」与「在飞那份」混成一件事。缺字段 = exclusive。
+        mode = str(cand.get("mode") or CLAIM_MODE_EXCLUSIVE)
+        if mode not in CLAIM_MODES:
+            mode = CLAIM_MODE_EXCLUSIVE  # 旧/未知值：保守回到独占（不静默背下别人给的档）
         got = claim_job(
             base_url,
             token,
             jid,
-            mode=CLAIM_MODE_EXCLUSIVE,
+            mode=mode,
             worker_id=worker_id,
             role=role,  # ★ 与 peek 同一份归属（漏了它 = 带标 worker 自锁）
             expected_epoch=epoch,
@@ -475,7 +486,6 @@ def post_result(
     req_body = pack_result_v2(result)
     ctype = WIRE_V2_CONTENT_TYPE
     req_body_json = json.dumps(result, ensure_ascii=False).encode("utf-8")
-    t0 = time.time()
     for attempt in range(1, attempts + 1):
         # 段账口径（2026-09-25）：只算**进槽之后**的真实上传 —— 进槽前的排队归调度账
         # （`wait=` / `排队 … 才拿到单通道`）。现场 `result=0.63MB/18-19s` 与同一段日志里的
@@ -512,16 +522,10 @@ def post_result(
         except Exception as e:
             status, body = None, repr(e).encode()
         if status in (200, 201):
+            # `result POST ok: … bytes in …s (attempt k) [JSON 体为 …]` 行已退役（2026-10-06，
+            # 用户指令「删除云机 worker 刷屏 log」）：同一笔账已在每 job 的 wire 行里
+            # （`result=…MB/…s(…KB/s)`），而 v2-vs-JSON 体积早已一次性验证完毕。
             _wire_add(jid, "result", len(req_body), time.time() - t_xfer)
-            log(
-                f"result POST ok: {len(req_body)} bytes ({ctype.rsplit('/', 1)[-1]})"
-                f" in {time.time() - t0:.1f}s (attempt {attempt})"
-                + (
-                    f"  [同内容 JSON 体为 {len(req_body_json)} bytes]"
-                    if ctype != "application/json"
-                    else ""
-                )
-            )
             return status
         if status == 409:
             # 竞速广播下这是**输家的正常结局**：同 job 已被别人先回传，本份结果丢弃。

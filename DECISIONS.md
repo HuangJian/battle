@@ -7797,6 +7797,225 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   `worker/{ppo/engine,ppo/np_core,ppo/trainer,models/student,scripts/init_spatial_leg,train/bc}.py` · 测试：`tests/nn/{policy-extra,spatial-tower,spatial-head-nonconstant}.test.ts` ·
   `nn-training/tests/{worker/test_dataset_mirror,worker/test_spatial_leg_smoke,common/test_schema_fingerprint}.py` · 探针：`nn-training/tools/spatial-probe*.py`。
 - **指针**：计划与读数表 → `plan/policy-spatial-head.plan.md` §7；探针 dump → `tmp/spatial-probe/hu150/`；S0-a → `tmp/spatial-s0a/`。
+
+## §2026-10-06-goalnn-rollout-io-ceiling（2026-10-06，云机离线 rollout 第三次「整轮卡死十几分钟」：一局有了自己的墙钟上界，不可取消的阻塞不再把人质扣到整轮）
+
+- **背景**：用户真机日志（Kaggle 离线轮 `x21-psh-a`）——§24 的有界回收/整轮重投/停滞点名三件套都在，
+  熔断行之后仍是每 120s 一条「整轮停滞：… 还有 55 局在飞」、一局都不结算，十几分钟不动；
+  **没有**一条「整轮重投」行，且「在飞」的数字一直不变 = 那 55 条线程谁也不返回。
+- **根因**：轮内重投的**唯一入口**是「某个 future 抛了 `UnreapableChildError`」；而一局的路径上有一批
+  **无法从 Python 里取消**的阻塞点（挂住的挂载点上的 `mkdir`/`open`/`write`/`rmtree`，以及
+  `Popen` 等子进程 exec 成功的那一手 `os.read`）——它们既不返回也不抛 ⇒ future 永不结算 ⇒
+  轮循环的 `wait()` 永远收不齐 ⇒ 永远出不了 `while inflight` ⇒ 护栏一次也触发不了。
+  「整轮停滞」那行只负责说，不管处置（拿不到 future 的结局）。⚠ 与 §24 的分工：那条修的是
+  「**子进程**收不了尸」，本条修的是「**调用线程自己**根本没走到有界回收那一步」。
+- **决定**：① 新增 `common.platform_utils.call_bounded(fn, timeout)`：真活跑在一条 **daemon** 线程里，
+  调用线程只在预算内等，超界返回 `(False, None)` 且**绝不 join**（`concurrent.futures` 的线程不是
+  daemon，解释器退出时会 join ⇒ 卡住的线程会把「进程退出」也一起按死，故不能用它兜这一层）；
+  `fn` 的异常在**调用方线程**里原样重抛（调用点 `except` 语义不变）。② 新增
+  `game_watch.GAME_IO_SLACK_SEC` + `game_ceiling_sec(base, explicit)` = `GAME_MAX_ATTEMPTS ×
+  (2 × 最宽尝试硬顶 + KILL_REAP_SEC) + 余量`（「2 ×」= 池回退那份）+ `ceiling_line()`。
+  ③ rollout 腿：轮循环提交 `_run_one_game_bounded`（超界 ⇒ `UnreapableChildError`，与「收不了尸」
+  同一条处置：**不就地重跑** + 清半截产出 + 整轮重投只补没产出的局）；`_clean_attempt` 也走
+  `call_bounded`（删不动就响亮一行照常重投）。④ eval 腿同一口径（`ex.map` 是同一个死结）。
+  ⑤ 轮账/重投文案改「没产出（收不了尸/超界）」。
+- **备选与否决**：① 轮循环 `wait()` 到点就放弃 future（放弃 future ≠ 停线程，且
+  `ThreadPoolExecutor.__exit__` 会 join 它们 ⇒ 只是把「卡在游戏线程」换成「卡在解释器退出」）；
+  ② 调大 5s 硬顶/就绪上限（卡住的那一步在那些闸**之后**）；③ 超界后原地重跑（两个写者写同一份
+  shard ⇒ 静默错数据）；④ 超界当「这一轮的确定性失败」扔出去（把机器的病记在内容头上 ⇒ hub 终局
+  ⇒ 停腿 ⇒ 反手停云机，与 §24/§25 口径冲突）；⑤ 超界即重启进程（丢 PPO 状态与整轮产出，代价远大于
+  重投那几局；留作「重投一直不降」时的下一档）。
+- **违反后果**：任何人再把「一局的整条链路」放回**没有上界**的等上面 ⇒ 十几分钟整轮静默会原样回来，
+  且日志里只会重复那行已经不再具有处置权的「整轮停滞」。
+- **落点**：`nn-training/common/{platform_utils,game_watch}.py` · `nn-training/worker/iter_rollout.py` ·
+  `nn-training/remote/offline_eval.py` · 测试：`nn-training/tests/{common/test_platform_utils_proc,
+  common/test_game_watch,remote/test_remote_iter,remote/test_offline_eval_cloud}.py`。
+- **指针**：全文（现场读数 / 不可取消阻塞点清单 / 下次真机该看的五个读数）→ `docs/nn/runtime-opt.md` §32。
+
+## §2026-10-06-goalnn-round-end-scan-ceiling（2026-10-06，轮末扫盘也有上界：主线程上的全量盘 IO 不再让整轮对日志静默）
+
+- **背景**：`§2026-10-06-goalnn-rollout-io-ceiling` 的同日收尾（当时 §32.4 ⑤ 就点名了下一个位置）。
+  `verify_shards` / `collect_reports` / `collect_shard_manifests` 在**主线程**上做全量文件 IO
+  （rglob 扫 shard、逐局读 `manifest.json`/`_rl_report.json`，`data_fp` 还要哈希每个 shard 的内容）
+  ——挂住的挂载点上它们**一样不返回也不抛**，而那里**连「整轮停滞」都没有**（那行只在轮循环里打）
+  ⇒ 整轮对日志完全静默（比游戏线程那一档更难查：连「还有几局在飞」都没有）。
+- **决定**：① 新增 `common/game_watch.SCAN_CEILING_SEC = 60.0`（**单列的第三个数**：扫盘没有子进程/
+  重试/写盘 ⇒ 不能沿 `game_ceiling_sec`，那个含尝试次数与回收预算，会大到让挂死的扫盘也过关；
+  正常一轮扫盘亚秒级 ⇒ 60s 是「机器挂了」不是「盘慢」）+ `scan_ceiling_line()`；
+  ② `worker/iter_rollout._scan_bounded` 把三步各套一层 `call_bounded`，超界 ⇒ `UnreapableChildError`
+  （本轮产物结不了算 ⇒ 还租约 + 立即重领重投；不报失败、云机不停）；
+  ③ **异常分类不许被上界改掉**：`verify_shards` 的 `ProtocolError`（实产集 ≠ 声明集）由 `call_bounded`
+  原样重抛 —— 确定性拒收不能被读成「机器卡住」（那是把内容的错记在机器头上）；`combine_reports`
+  是纯 CPU 聚合，不包。
+- **备选与否决**：① 复用 `game_ceiling_sec`（≈155s 起，对「扫一遍几百个小 JSON」太宽，等于没闸）；
+  ② 只要 `SCAN_CEILING_SEC` 报一行、不处置（那就是 §24.5 ④ 那种「说了但不动」的形态，正是本次事故的
+  成因）；③ 把超界当 `ProtocolError`（确定性拒收）上抛（会触发 `report_job_failure` ⇒ hub 终局 ⇒ 停腿
+  ⇒ 反手停云机，与 §24/§25 口径冲突）。
+- **落点**：`nn-training/common/game_watch.py` · `nn-training/worker/iter_rollout.py` ·
+  测试：`nn-training/tests/{common/test_game_watch,remote/test_remote_iter}.py`。
+- **指针**：`docs/nn/runtime-opt.md` §32.5（含「先红」取证：A/B 工作树上旧形态被 60s 外墙钟 kill）。
+
+## §2026-10-06-goalnn-pull-replica-any-unfinished（2026-10-06，用户报障：新 worker 上线「领不到」，要重启 trainer 才领得到；用户口径：只要没回传结果都算没完成，都能发出去竞速）
+
+**背景**：Kaggle 新 worker 起来后 `no job yet` 刷了一两分钟，重启 trainer 才领到活。机制链：空闲 worker 的
+候选只有可领取池（`hub/store_ledger.py::claimable_job_ids`，**排除活租约**）；而「活租约」由**独立心跳线程**
+续租（`remote/job_round.py::_hb_loop`）⇒ 持有人主线程卡死（D 状态 / 挂住的挂载点）时那份活对所有人隐身，
+且没有出口（`cancel_unsettled_jobs` 不撤在飞）。唯一解法是重启 trainer —— `trainer/queue.py::RUN_ID` 每进程
+随机 ⇒ 同一轮重发布换个 `job_id`，新身份自然可领。设计里那张表（`job_priority` 的 high/medium/low）与
+`claim(mode="backup")` 机制都保留着（§2026-09-22-goalnn-race-retired-priority-only：删判定、留机制），
+但 **pull 线从没接上**（只有 push 腿用；`acquire_job` 硬写 exclusive、`peek` 永不返回在飞 job）。
+
+**决定**：未完成就发得出去 —— `claimable_job_ids`（∧无活租约）与 `inflight_job_ids(not_held_by=…)`（∧有
+活租约）成为同一份「未完成」判据的两个视图（`_unfinished_pending` 是唯一筛子）；`peek` 每课程先看池
+（`mode="exclusive"`），池空则看在飞集并发**备份副本**（`mode="backup"`）；`acquire_job` 按候选自带的模式
+认领。排序交给优先级表；认领模式由 **hub** 定（只有它知道有没有活租约）。备份副本**不打** `/start`
+（`computing_at` 是主人的掉队时钟，R2-C1）且 `/ready` 不报身份（不写主人的 `_last_heartbeat`）。
+
+**否决与否决理由**：① 设 hub 侧「1 主 + 1 备份」上限 —— 否（用户口径是「都能发出去竞速」；副本数天然被
+空闲 worker 数封顶，上限那套住 push 腿的派发器里）；② 恢复无排序的竞速广播 —— 否（§2026-09-22 删的就是
+它：白烧 GPU）；③ 只在 worker 侧加整份 job 的墙钟上界让卡住者自己放手 —— 不够（那是另一条因：本条的
+持有人**心跳还活着**，主线程卡死时上界也读不到；两条并行修）；④ 让 hub 撤销在飞租约（takeover）——
+否（输家的工作**注定**白烧，而备份副本可能先赢；且会动 `_reclaims` ⇒ 毒包熔断阈值被自己人喂满）。
+
+**违反后果**：又在 `peek`/`acquire_job` 里各判一次「能不能领」⇒ 两套会漂的判据（出现「peek 说能领、
+claim 说不能」）；把 backup 的回传当 403 确定性失败上报 ⇒ 一个赢家把输家炸成训练停腿；备份打 `/start`
+⇒ 掉队救援永久沉默（现场看着像「机群不救援」）。
+
+**落点**：`nn-training/hub/{store_ledger,queue_claims}.py` · `nn-training/remote/{job_lifecycle,job_round}.py` ·
+测试 `nn-training/tests/hub/test_priority_schedule.py`（七条新用例，旧形状全红）。
+**指针**：`docs/nn/remote-transport.md` §68（机制链 / 落地表 / 边界 / 真机判据）。
+## §2026-10-06-goalnn-cloud-worker-log-diet（2026-10-06，用户指令「删除云机 worker 刷屏 log」）
+
+**背景**：用户贴出云机（Kaggle）worker cell 输出里的六行，要求删掉：`job …: DataParallel 生效（…）`、
+`[ppo] update start: … chunks x … epochs`、`bulk payload/P1: 让路合计 …`、
+`prefetch: held=… hits=… misses=… 本轮下载=…MB 会话累计=…MB`、
+`result POST ok: … bytes … (attempt k) [同内容 JSON 体为 …]`、`job … done — result accepted [回传 …]`。
+共同形状：**每 job / 每轮必然一行**，而信息要么是静态事实的复述，要么已在别处（wire 行 / hub 侧 / 异常行）。
+
+**决定**：这六行**删除**（不降频、不加开关），每 job 的观测出口收敛到既有的一行 wire 账
+（`wait=…/yield=…` 调度账 + 各段字节/秒 + `phases in/out/ppo/other`）；**异常与真异常路径各自仍然响亮**
+（`result POST 409`（竞速输家）/ `403`（backup 丢弃）、`cuda-dp 但只可见 N 张卡` 的退化告警、
+`排队 … 才拿到单通道`（>1s）、wire 的重抽/抢占/坏签行、状态码节流告警）。逐行落点：
+- `DataParallel 生效`：PPO（`remote/train_core.py`）与 BC（`worker/train/bc.py`）两处都删；「与单卡数值
+  不可逐位比」的警告留在原地注释里，运行事实由开机横幅 `device=cuda-dp` 与 rl-config 承担。
+- `update start`：三个 PPO 变体（`worker/ppo/{engine,goal,intent}.py`）一起删——同族同命，只删一个等于
+  换条课程又出现。
+- `让路合计`：`remote/bulk_sched.py::slot()` 的出口删除；`_yield_cur` **保留**——它同时是 S2「一条传输累计
+  让路 ≤ `yield_total_budget_sec`」的输入，不是纯日志账。
+- `prefetch` 摘要行：`remote/job_round.py::_flush_prefetch_round` 只剩 wire 传输行（真搬了字节才打）。
+- `result POST ok` 与 `done — result accepted`：同一笔账已在 wire 行（`result=` 段 / `out=` 阶段）里。
+
+**否决与否决理由**：① 「有活动才打」的降频（对 prefetch 零活动确实够，但另外五行是每次运行都有的，
+没解决「云机日志全是它们」）；② 加 `--quiet`/env 开关——被抱怨的**就是默认路径**，且新开关 = 新漂移点；
+③ 把被删的读数搬进 wire 行——那行会长到读不动（减噪的反面）；④ 只删 `[worker]` 前缀的、留 `[ppo]` 的那行——
+用户贴的就是它。
+
+**违反后果**：把「让路合计」当纯日志顺手连 `_yield_cur` 一起删 ⇒ 静默取消 S2 的累计封顶（每分片都停满单次
+预算，把让路税加倍）；删行时顺手碰掉 backup 的 409/403「按成功丢弃」语义 ⇒ 一个赢家把输家炸成训练停腿；
+再用「日志里有 DataParallel 生效」判「这轮是不是 DP」——该判据已退役，看横幅 / rl-config。
+
+**落点**：`nn-training/remote/{train_core,bulk_sched,job_round,job_lifecycle}.py` ·
+`nn-training/worker/ppo/{engine,goal,intent}.py` · `nn-training/worker/train/bc.py` · 测试：删掉三条只钉
+退役行的用例（`tests/remote/test_bulk_sched.py` 的让路合计行、`tests/remote/test_soft_hold_prefetch.py`
+的摘要行与它的「生产读者」守卫），两处留退役注记。
+**指针**：`docs/nn/remote-transport.md` §53（S3f 行标退役 / 让路策略表）· §39（让路账，2026-10-06 续）。
+## §2026-10-06-goalnn-test-console-isolation（2026-10-06，用户问「是不是你跑门禁触发的」⇒ 是；用户裁决「修」）
+
+**背景**：提交 `0e8442ba` 的 pre-commit（nn python gate）跑完，用户发现 `bun run dashboard`（:8900）的
+命令行刷出 **21 行** `[action] autoOfflineHandoff <课> → fail (HTTP 200): … 未开课 …`（10:32:17–10:32:42，
+与门禁窗口逐秒重叠）。课名全是测试夹具（`e2e-auto-a/b`、`e2e-on-1/2`、`c5-gae`）。根因：控制台地址解析是
+`hub/task_pack.py` 的「`BCITY_CONSOLE_URL` 为空 ⇒ `DEFAULT_CONSOLE_URL` = `http://127.0.0.1:8900`」，
+而 `e2e/test_auto_handoff_e2e.py` 起真 `hub.server` 子进程的 15 处 `_Hub(...)` 里 **10 处没传 `console_url`**；
+其余走 claim 路径的 hub 测试（`hub/offline.py::_ask_console_freshness` / `trigger_auto_handoff`）同样裸奔
+（只有 `tests/hub/test_auto_handoff.py` 自打了桩）。dashboard 没开时静默降级 ⇒ **环境决定测试语义**，
+开了才现形。本次无写入：那批课名当时都没开课 ⇒ `courseEnabled()` 为假、在 `applyTrainModeToConfig` 之前
+return；已核对同期 `nn-training/`、`dashboard/` 下无 `*.json` 被改。
+
+**决定**：测试**永不**指向在跑的控制台——`tests/conftest.py` 与 `e2e/conftest.py` 各挂一个 autouse fixture，
+把测试期 `BCITY_CONSOLE_URL` 钉到 `http://127.0.0.1:9`（死端口：连接当场被拒 ⇒ 漏网也只是「控制台不可达」
+的响亮降级）；死桩常量只许有一份定义（`tests/conftest.py::TEST_CONSOLE_URL`，e2e 侧引用它）。守卫 = 4 条
+用例（`tests/test_console_isolation.py`）：env 必须是死桩且 ≠ 生产默认 · 用捕获器把 `_net_urlopen` 换掉、
+证明裸 `trigger_auto_handoff` **拨的真是死桩**且不可达时 `(False, "OSError")` 降级为手动（不得读成
+「已触发」）· 生产默认仍须是本机 `:89xx`（漂了要重核假设）· 两层 conftest 都挂着隔离。
+
+**否决与否决理由**：① 只在 e2e 的 `_Hub` 里补 `console_url=`（10 处）——治不了根：下一个 e2e/单测又会漏，
+而漏网代价是**写真配置**；② 模块级 `os.environ` 设死桩——门禁是 `pytest tests/ e2e/` 同一进程，模块级
+setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且不随用例还原；③ 改 hub 侧：让
+`DEFAULT_CONSOLE_URL` 只在 `PYTEST_CURRENT_TEST` 缺失时生效——给生产代码塞测试感知分支（那是最难查的一类
+漂移），且默认端口对「本机 dashboard」的便利是真实需求；④ 把 dashboard 的 `autoOfflineHandoff` 加「测试态
+拒写」闸——同样的测试感知污染，且真机操作员可能就想要这条自动路。
+
+**违反后果**：测试再打到真控制台 ⇒ `applyTrainModeToConfig(…, 'offline', {remember: true})` 是控制台的
+**唯一配置写面**：课名撞上一门在开课的真课就把那门课翻成离线停采（并可能顺手导包）——一次 test run 改掉
+线上训练配置，且现场只会看到 dashboard 侧一行 `[action] … fail/ok`。反过来，把守卫当「日志噪声」删掉 ⇒
+回落到「dashboard 开着才现形」的环境决定语义。
+
+**落点**：`nn-training/tests/conftest.py`（`TEST_CONSOLE_URL` + autouse fixture）· `nn-training/e2e/conftest.py`
+（同款，引用同一常量）· 守卫 `nn-training/tests/test_console_isolation.py`（4 例；改前收集期 ImportError 红）
+—— 2026-10-06 当日与状态面守卫合并成 `nn-training/tests/test_production_isolation.py`（见下一节）。
+**指针**：`docs/nn/engineering.md` §64（现场 / 根因 / 修法表 / 证据）。
+## §2026-10-06-goalnn-test-state-isolation（2026-10-06，用户令「扫其它测试 → 生产泄漏」）
+
+**背景**：用户给完控制台隔离（上一节）后要求扫其余测试。直读法 = 跑门禁前后各拍一次真状态文件
+指纹（`find tmp dashboard/data nn-training/weights -type f -printf '%T@ %s %p\n'`）再 diff：一次门禁
+就看见 `dashboard/data/evalboard/runner_state.json`（EvalBoard 心跳，操作员面板读它）被改成
+`{"batch_id": "bp", …}` 的测试批次；逐目录 + 逐文件二分定位到 `e2e/test_cloud_iter_e2e.py`（跑真
+`TrainingLoop`）。同一张网还罩着 `tmp/gate-halt*.json`（平台门禁意图 = 能停全平台训练）、
+`tmp/loop-control*.json`（暂停/恢复真循环）、`nn-training/weights/`（面板权重选择器扫的真归档）。
+根因：这些都是「env 设了就改用它、否则用生产缺省」的开关，而单测层只是**逐文件自觉**打桩
+（`tests/trainer/test_batch_eval.py` 的夹具注释里就记着 2026-10-02 被写过一次 `batch_id="bch"`）
+—— 没有全局兜底，同一个坑换个层第二次现形。
+
+**决定**：测试**永不**写生产状态——`tests/conftest.py` 立唯一的 `PRODUCTION_STATE_PINS`
+（`NN_GATE_HALT` / `NN_GATE_HALT_APPLIED` / `NN_LOOP_CONTROL` / `NN_LOOP_CONTROL_APPLIED` /
+`EVALBOARD_DATA` / `BCITY_WEIGHTS_ARCHIVE_ROOT` → 本用例 `tmp_path` 下的相对路径）与唯一实现
+`pin_production_env(monkeypatch, root)`（含控制台死桩）；单测层与 e2e 层各挂一个 autouse fixture
+调它（e2e 不继承 tests 的夹具）。**只钉路径、不预建目录**（预建会顶掉「`tmp_path` 里应该只有哪些
+条目」的既有断言）。守卫 8 条（`tests/test_production_isolation.py`）：控制台 4 条（原
+`test_console_isolation.py` 合并进来）+ 状态 4 条 —— 变量都设在 `tmp_path` 内 · 缺省必须仍是仓库
+真路径（对照有效）· **行为面**：四个真写点都写成、都落 tmp、生产侧文件 `(mtime_ns, size)` 前后不动 ·
+源码守卫两层都挂且钉名单只有一份定义。
+
+**否决与否决理由**：① 逐文件补 `monkeypatch.setenv`（把 `test_batch_eval.py` 那套推广到每个文件）
+——治不了根：漏网代价是**操作员活状态**（幽灵 runner / 假权重轮次 / 停全平台的意图文件），而下一批
+测试必然又漏；② 运行时金丝雀（每用例前后给真状态拍指纹、变了就红）——本机**真训练在跑**时那些文件
+本就会被真进程更新 ⇒ 把并发训练变成假红，守卫必须只钉「测试进程自己写的落点」；③ 把缺省改成
+「`PYTEST_CURRENT_TEST` 存在就禁用生产缺省」——给生产代码塞测试感知分支（最难查的一类漂移）；
+④ 给 `EVALBOARD_CORPORA` / `ladder.json` / `corpora.json` 也钉 tmp —— 它们全仓无写者（只有读点）
+且是真内容，钉了要拷贝副本；不进名单，写了注释说明为何。
+
+**违反后果**：测试再写生产状态 ⇒ 门禁会（a）把操作员面板的 runner 心跳/台账写成测试批次、
+（b）可能翻平台门禁意图或循环控制（真训练当场停采/暂停）、（c）往真权重归档撒文件让面板列出假轮次；
+三种都**不会**让任何单测变红 ⇒ 只有人肉在面板上看见才发现。反过来删守卫 = 回落到「逐文件自觉」。
+
+**落点**：`nn-training/tests/conftest.py`（`PRODUCTION_STATE_PINS` + `pin_production_env` + 夹具）·
+`nn-training/e2e/conftest.py`（夹具 `request.getfixturevalue(\"tmp_path\")`）· 守卫
+`nn-training/tests/test_production_isolation.py`（8 例；改前收集期 ImportError 红）· 原
+`tests/test_console_isolation.py` 删除（内容并入）。
+**指针**：`docs/nn/engineering.md` §65（现场 / 扫描口径 / 修法表 / 证据 / 残余）· §64（控制台同族）。
+
+## §2026-10-06-goalnn-replay-export-eval-round-picker（2026-10-06，用户令「导出 replay 支持任意 eval 轮」）
+
+- **背景**：「导出 replay」只能导最新权重的轮。后端早就收 `iter` + `wver`（`POST evalReplays` →
+  `worker/eval_replays_once.py`），卡点只在前端：弹窗以「此刻滤出视图」为数据源，导完的产物也按
+  「最近一次 manifest」归因（`manifest.iter === 所选轮` 挡不住「同一轮的上一次成功导出」）。
+- **备选与否决**：① 前端从滤出视图推轮 —— 否，「哪一轮评过」不在选择器视野里，失败轮也会进可勾选集；
+  ② 保留 `evalReplayJob` 的「最近一次 manifest」语义、只在弹窗多加一层 iter 比对 —— 否，SIGKILL/OOM/
+  子进程没起来时 python 写不到失败 manifest，同轮的旧产物就会被当成本次结果（假「导出完成」+ 重复交付）；
+  ③ 只让 python 侧清旧 manifest —— 否，脚本可能根本没起来，清账必须在**控制台受理那一刻**；
+  ④ 每轮一个 manifest 文件（`replay-export-<iter>.json`）—— 否，`replayExportPaths` 是既有的单路径契约，
+  多文件会把「哪个是本次」变成扫描问题；⑤ 新增 api-client 的 POST helper —— 否，既有
+  `postAction('evalReplays', …)` 已是唯一动作入口，加第二个 = 第二份真相。
+- **决定**：① 选择器数据源 = 轮级账本（`iters.ts::readEvalRoundOptions`，summary-only 单趟，
+  谓词与 `readEvalGames` 同源，`reusedWver` 单独标注）；② **归因不变量：`POST evalReplays` 受理即
+  `rmSync` 旧 manifest**（抛则整次 POST 500，不吞、不「删不掉也照常起 python」）⇒「盘上有 manifest」
+  此后只可能是本次写的；③ 归因判据只看 `manifest.iter === 所选轮`，失败 manifest 透传 `failReason`
+  且其文件**不可下载**；④ 失败留痕是 python 的 `write_fail_manifest`（三处提前 return + 兜底 `except`
+  rc=4，与成功 manifest 同 schema——控制台是白名单式重建，缺键 = 等于没写）。
+- **违反后果**：拿掉受理时的清理 ⇒ 同轮的旧产物冒充本次结果，用户拿到「已完成」却点出 404；
+  把失败 manifest 的 schema 改窄 ⇒ 控制台侧静默看不到原因（缺键不报错，只显示「无产物」）。
+- **指针**：全文（现状 / 语义规格 / 落点 / 用例 / 二轮评审 F1–F10 处置）→ `plan/replay-export-eval-round-picker.plan.md`；
+  控制台侧全文 → `docs/nn/console.md` §32；二轮评审 → `plan/replay-export-eval-round-picker.review-bf.md`。
 ## §2026-10-06-psh-leg-a-verdict（2026-10-06，腿 A 终判：挂起 → "看见了但没转化"，K→5 立项 + 腿 B 可启动）
 
 - **背景**：plan `plan/policy-spatial-head.plan.md` §5 口径，A-it150 对 A0-it150（`x21-psh-a.it150.20261006-093718.json` /
@@ -7907,7 +8126,8 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 - **判据**：账本里没有时区字段，唯一可靠痕迹是 summary 的 `nodes` 含 `"cloud"` 键
   （`remote/offline_eval.py::CLOUD_NODE`）；逐局行自带 `node`，逐行判。
 - **决定**：**读侧**转换（历史数据必须修正）：`server/iters.ts` 的 `readEvalSummaries` /
-  `readLatestEvalGames` 把含 cloud 的 `time` 按 UTC 解析后按本机时区写回**同格式**；无 `nodes`
+  `readEvalGames` 把含 cloud 的 `time` 按 UTC 解析后按本机时区写回**同格式**（本条落账时该函数名
+  `readLatestEvalGames`，同日「按评估轮选」那条已泛化成 `readEvalGames(trajDir, iter?)`）；无 `nodes`
   的老行、非该格式的串一律原样透传（不猜）。写侧（新行带 `+00:00`）留作后续，不在本次。
 - **备选与否决**：显示层/前端转 —— 否，指标表 / Hero / eval 弹窗三处消费，且历史行必须修正。
 - **测试纪律**：bun test 在本机跑时 `getTimezoneOffset()` = 0（实测），UTC→本地是恒等 ⇒ 断言会

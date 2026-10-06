@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import common.platform_utils as plat
 from common import game_watch
 
 
@@ -104,6 +105,60 @@ def test_stall_line_names_the_games_still_in_flight() -> None:
     assert "s2/d1、s2/d2、s2/d3…" in line  # 前三个点名、其余只计数（日志不刷屏）
     assert game_watch.stall_line("eval", 0, 130.0, []).count("在飞") == 1
     assert "stall_line" in game_watch.__all__
+
+
+def test_game_ceiling_covers_every_attempt_plus_the_pool_fallback() -> None:
+    """★ 一局**整条链路**的墙钟上界：把「全部尝试 + 池回退 + 回收」都算进去，再多一点余量。
+
+    为什么必须有这条线（2026-10-06 云机离线轮「整轮停滞十几分钟」取证）：一局的路径上有
+    不可取消的阻塞点（挂住的挂载点上的 mkdir/open/写盘、`Popen` 等子进程 exec 的握手），
+    卡住时既不返回也不抛 ⇒ 那一局的 future 永远不结算 ⇒ 轮循环收不齐；轮内重投那套护栏
+    （触发条件 = future 抛 `UnreapableChildError`）一次都摸不到。所以一局必须有**自己的上界**。
+
+    上界只负责「不许无限等」，不负责「掐慢局」（那是硬顶/软告警）：所以它必须是保守的大数——
+    每一次尝试都要算上「先试池（吃满硬顶）→ 回退一次性（再吃满一次）→ kill + 有界回收」，
+    再乘上尝试次数，最后加余量。
+    """
+    base = game_watch.DEFAULT_GAME_TIMEOUT_SEC
+    ceiling = game_watch.game_ceiling_sec(base)
+    # 每一次尝试的硬顶（未显式配置时重试放宽）之和 + 每局的回收预算，全部盖住
+    caps = [game_watch.attempt_timeout_sec(base, a) for a in range(1, game_watch.GAME_MAX_ATTEMPTS + 1)]
+    assert ceiling > 2 * sum(caps), (ceiling, caps)  # 池回退那一份必须在里面
+    assert ceiling >= game_watch.GAME_MAX_ATTEMPTS * plat.KILL_REAP_SEC
+    assert ceiling == game_watch.GAME_MAX_ATTEMPTS * (2 * max(caps) + plat.KILL_REAP_SEC) + (
+        game_watch.GAME_IO_SLACK_SEC
+    )
+    # 显式给了上限 ⇒ 每次尝试都用它（不再放大），上界跟着变
+    assert game_watch.game_ceiling_sec(30.0, explicit=True) == game_watch.GAME_MAX_ATTEMPTS * (
+        2 * 30.0 + plat.KILL_REAP_SEC
+    ) + game_watch.GAME_IO_SLACK_SEC
+    # 余量必须是**小正数**：它只兜「小的文件操作」，不是给机器卡住留的后门
+    assert 0 < game_watch.GAME_IO_SLACK_SEC <= 60.0
+
+
+def test_ceiling_line_names_the_game_and_the_bound() -> None:
+    """超界行：带局身份 + 上界值 + 处置（不就地重跑，交回整轮）——停机时能一眼归因。"""
+    line = game_watch.ceiling_line("rollout", "s2001/d343296285", 155.0, "w106/rollout.log")
+    assert "单局超界" in line and "s2001/d343296285" in line and "155s" in line
+    assert "不可中断" in line and "整轮重投" in line and "w106/rollout.log" in line
+    assert "ceiling_line" in game_watch.__all__ and "game_ceiling_sec" in game_watch.__all__
+
+
+def test_scan_ceiling_line_names_what_and_the_bound() -> None:
+    """轮末扫盘超界行：带**是哪一步** + 上界值 + 处置（那一步在主线程上，连「整轮停滞」都没有）。
+
+    为什么单列一个数与一行（2026-10-06 §32.4 ⑤）：`verify_shards` / `collect_reports` /
+    `collect_shard_manifests` 在主线程做全量文件 IO（rglob + 逐局读 JSON + 内容哈希），挂住的挂载点
+    上它们永不返回；轮循环那行「整轮停滞」此刻不在跑 ⇒ **这一行是现场唯一的读数**。
+    """
+    assert 0 < game_watch.SCAN_CEILING_SEC <= 300.0, "只兜「机器挂了」，不是给慢盘留的后门"
+    # 扫盘不同于一局：没有子进程/重试/写盘 ⇒ 上界不该跟着 game_ceiling_sec 一起变成分钟级
+    per_game_ceiling = game_watch.game_ceiling_sec(game_watch.DEFAULT_GAME_TIMEOUT_SEC)
+    assert per_game_ceiling > game_watch.SCAN_CEILING_SEC
+    line = game_watch.scan_ceiling_line("rollout", "verify_shards", 60.0, "/job")
+    assert "轮末扫盘超界" in line and "verify_shards" in line and "60s" in line
+    assert "不可中断" in line and "还租约" in line and "/job" in line
+    assert "scan_ceiling_line" in game_watch.__all__ and "SCAN_CEILING_SEC" in game_watch.__all__
 
 
 def test_rollout_progress_paths_use_the_shared_cadence() -> None:

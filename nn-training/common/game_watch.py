@@ -7,7 +7,10 @@
   * 单局正常是**亚秒级**（云机 220 并发 328 局 4s；8 并发 600 局 57s）⇒ 用户口径
     「单局 >5s 肯定不正常」，所以 >5s 的局**当场杀掉原地重跑**，不留着等 651s。
 
-一条口径五个常量，任何调用点都不许再抄一份数字：
+一条口径一组常量，任何调用点都不许再抄一份数字：
+（上面两条是「单局多慢算不正常」；下面是「一条线程卡多久算机器卡住」——前者管慢局，
+后者管**不可取消的阻塞**：D 状态的挂载点 IO / `Popen` 等子进程 exec 的握手，它们既不返回
+也不抛，硬顶与看门狗都碰不到它们。）
 
   * ``SLOW_GAME_WARN_SEC`` (5.0) —— 点名线：超过它就打一行**带局身份**（`s3/d7`）的 WARN。
     默认硬顶与它同值 ⇒ 超时行自己已经点名了，此时不重复打（``warn_is_redundant``）；
@@ -29,6 +32,13 @@
     它管的是「所有线程一起卡住、连心跳都哑了」那一档（单局看门狗在那时什么都打不出来）。
   * ``PROGRESS_LOG_SEC`` (60.0) —— 进度行的节流间隔（`progress_due()`）：**按时间**而不是
     按局数，因为这条线的成本只与墙钟有关（用户 2026-09-23：每分钟一句就够）。
+  * ``SCAN_CEILING_SEC`` (60.0) —— **轮末扫盘**的墙钟上界（`verify_shards` / `collect_reports` /
+    `collect_shard_manifests`）：它们在**主线程**上做全量文件 IO，卡住时连「整轮停滞」都没有
+    （那行只在轮循环里打）⇒ 整轮对日志完全静默。超界 ⇒ 机器级停滞（还租约 + 立即重领）。
+  * ``GAME_IO_SLACK_SEC`` (20.0) + ``game_ceiling_sec()`` —— 一局**整条链路**（全部尝试 +
+    池回退 + 回收）的墙钟上界：超过它就是机器卡在**不可取消的阻塞**上（2026-10-06 云机离线轮
+    「整轮停滞十几分钟」取证：一条线程永不返回 ⇒ 轮循环收不齐 ⇒ 轮内重投那套护栏一次都
+    触发不了）。超界由腿侧按机器级停滞收场（清半截产出 + 整轮重投），**不**就地重跑。
 
 为什么重试而不是「竞速副本」（用户 2026-09-22 提的两条路）：argv 不变 ⇒ out 目录不变 ⇒
 声明的 shard 集（`data_fp`）逐字节不变；副本会多产一个同 (stage,seed) 的 shard 目录，直接撞上
@@ -39,6 +49,10 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+
+#: 回收预算的**唯一数字**从原语层取（`kill` 之后最多等多久回收一个子进程）：这里算「一局整条
+#: 链路的墙钟上界」时要用它——再抄一份就是第二个口径（见 `game_ceiling_sec`）。
+from common.platform_utils import KILL_REAP_SEC
 
 #: 点名线（秒）：单局超过它就打一行 WARN 点名（正常一局亚秒级）。
 SLOW_GAME_WARN_SEC = 5.0
@@ -60,6 +74,31 @@ GAME_POLL_SEC = 0.5
 #: 否则「跑完了」这件事会没有落点）。
 PROGRESS_LOG_SEC = 60.0
 
+#: 一局**整条链路**的墙钟上界（`game_ceiling_sec`）在「尝试次数 × (一局一次尝试 + 回收)」
+#: 之外再留的**余量**（秒）：覆盖池回退、`_clean_attempt`（删半截产出）这些小的文件操作。
+#:
+#: 为什么要有这条线（2026-10-06 Kaggle 离线轮「整轮停滞十几分钟」取证）：一局的路径上有若干
+#: **无法从 Python 里取消**的阻塞点（挂住的挂载点上的 `mkdir`/`open`/`write`/`rmtree`，以及
+#: `Popen` 等子进程 exec 成功的那一手 `os.read`）。它们卡在 D 状态时既不返回也不抛 ⇒ 那一局的
+#: 线程永远不结算 ⇒ 轮循环的 `wait()` 永远收不齐 ⇒ 轮内那套「机器级停滞」护栏一次都触发不了
+#: （它的触发条件是「有 future 抛了 `UnreapableChildError`」）。现场读数：每 120s 一条「整轮停滞：
+#: … 还有 55 局在飞」而一局都不结算，十几分钟不动。
+#:
+#: 所以一局必须有**自己的墙钟上界**：超了就按机器级停滞收场（清半截产出 + 整轮重投），
+#: 而不是把整轮当人质。余量给得宽（正常一局亚秒级、最坏一次尝试也就 20s）——它的职责不是
+#: 「掐慢局」（那是 `SLOW_GAME_WARN_SEC` / 硬顶），而是「不许无限等」。
+GAME_IO_SLACK_SEC = 20.0
+
+#: **轮末扫盘**（`verify_shards` / `collect_reports` / `collect_shard_manifests`）的墙钟上界（秒）。
+#:
+#: 为什么同一族要单列一个数（2026-10-06 §32.4 ⑤）：这三步在**主线程**上做全量文件 IO
+#: （rglob 扫 shard、逐局读 manifest/`_rl_report`、`data_fp` 还要哈希每个 shard 的内容）——挂住
+#: 的挂载点上它们一样永不返回，而那里**连「整轮停滞」都没有**（那行只在轮循环里打）⇒ 整轮对日志
+#: 完全静默（比游戏线程那一档更难查）。它们与「一局」的粒度不同（没有子进程、没有重试、不写盘），
+#: 所以不能拿 `game_ceiling_sec`（那个含尝试次数与回收预算，会大到让挂死的扫盘也过关）。
+#: 正常一轮的扫盘在亚秒级（几百个小 JSON + 一遍内容哈希）⇒ 60s 是「机器挂了」而不是「盘慢」。
+SCAN_CEILING_SEC = 60.0
+
 #: 「整轮停滞」的告警线（秒）：这么久**一局都没结算**就点名一次，并列出还在飞的局。
 #:
 #: 为什么需要它（2026-09-25 二次取证「rollout 卡死机器半天」）：进度行与心跳都挂在「有局结算」
@@ -78,6 +117,21 @@ def attempt_timeout_sec(base_sec: float, attempt: int, explicit: bool = False) -
     if explicit or attempt <= 1:
         return float(base_sec)
     return float(base_sec) * RETRY_TIMEOUT_FACTOR
+
+
+def game_ceiling_sec(base_sec: float, explicit: bool = False, reap_sec: float | None = None) -> float:
+    """一局（**全部尝试 + 池回退 + 回收**）的墙钟上界：超过它 = 机器卡在不可取消的 IO 上。
+
+    = `GAME_MAX_ATTEMPTS × (2 × 该次尝试的硬顶 + 回收预算) + GAME_IO_SLACK_SEC`。
+
+    为什么是「2 ×」：一次尝试的最坏路径是「先试长驻池（吃满本次硬顶）→ 回退一次性 spawn
+    （再吃满一次硬顶）→ kill + 有界回收」；漏掉池那一份就会把**正常的池回退**判成机器级停滞。
+    为什么按**最后一次**尝试的硬顶算：重试尝试的硬顶最宽（未显式配置时 ×`RETRY_TIMEOUT_FACTOR`），
+    上界取最宽的那一次不会误杀；这个数只用来兜「永不返回」，不追求紧。
+    """
+    reap = KILL_REAP_SEC if reap_sec is None else float(reap_sec)
+    widest = attempt_timeout_sec(base_sec, GAME_MAX_ATTEMPTS, explicit=explicit)
+    return GAME_MAX_ATTEMPTS * (2.0 * float(widest) + reap) + GAME_IO_SLACK_SEC
 
 
 def warn_is_redundant(timeout_sec: float) -> bool:
@@ -148,6 +202,34 @@ def stall_line(kind: str, inflight: int, since_sec: float, labels: Sequence[str]
     )
 
 
+def ceiling_line(kind: str, label: str, ceiling_sec: float, where: str) -> str:
+    """一局**超界**行（整条链路都没在上界内返回）：机器卡在不可取消的 IO 上。
+
+    与 `hard_cap_line` 的分工：那一行是「这一局慢」（有上限的等，超时即 kill + 就地重跑）；
+    这一行是「本线程连自己都没能返回」（不可中断的 IO，kill 也收不了场）——处置只能是
+    整轮重投（见 `game_ceiling_sec`）。
+    """
+    return (
+        f"WARN {kind} 单局超界（{ceiling_sec:g}s 内整条链路都没返回）：{label}"
+        f"——大概率卡在不可中断的 IO（挂住的挂载点：mkdir/open/写盘/子进程 exec 握手）；"
+        f"本局不就地重跑（同一目录上可能还有活写者），交回整轮重投（现场 {where}）"
+    )
+
+
+def scan_ceiling_line(kind: str, what: str, ceiling_sec: float, where: str) -> str:
+    """轮末扫盘**超界**行：卡在不可取消的文件 IO 上，本轮产物结不了算。
+
+    与 `ceiling_line` 的分工：那一行是「一局」；这一行是**轮末在主线程上**的全量扫盘
+    （`verify_shards`/`collect_reports`/`collect_shard_manifests`）——那里没有轮循环，也就没有
+    「整轮停滞」那行能说话，所以这一行是现场唯一的读数（见 `SCAN_CEILING_SEC`）。
+    """
+    return (
+        f"WARN {kind} 轮末扫盘超界（{ceiling_sec:g}s 内没返回）：{what}"
+        f"——大概率卡在不可中断的 IO（挂住的挂载点：rglob/读 manifest/_rl_report、data_fp 哈希）；"
+        f"本轮产物结不了算，交回 worker 还租约 + 立即重领重投（不报失败、云机不停）；现场 {where}"
+    )
+
+
 def retry_line(
     kind: str,
     label: str,
@@ -191,16 +273,21 @@ def _pct(sorted_secs: list[float], q: float) -> float:
 
 __all__ = [
     "DEFAULT_GAME_TIMEOUT_SEC",
+    "GAME_IO_SLACK_SEC",
     "GAME_MAX_ATTEMPTS",
     "GAME_POLL_SEC",
     "RETRY_TIMEOUT_FACTOR",
+    "SCAN_CEILING_SEC",
     "SLOW_GAME_WARN_SEC",
     "STALL_WARN_SEC",
     "attempt_timeout_sec",
+    "ceiling_line",
+    "game_ceiling_sec",
     "game_label",
     "game_time_summary",
     "hard_cap_line",
     "retry_line",
+    "scan_ceiling_line",
     "slow_warn_line",
     "stall_line",
     "warn_is_redundant",

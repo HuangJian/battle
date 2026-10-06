@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from common.protocol import (
+    CLAIM_MODE_BACKUP,
     HEARTBEAT_SEC,
     ROLE_ONLINE,
     CodeChangedError,
@@ -70,7 +71,7 @@ from remote.job_lifecycle import (
 )
 from remote.prefetch import PREFETCH_DEPTH_DEFAULT, PrefetchStore, pick_candidates
 from remote.result_upload import Outcome, ResultUploader, UploadTask
-from remote.wire import _wire_flush, _wire_hit, _wire_start, _wire_totals
+from remote.wire import _wire_flush, _wire_hit, _wire_start
 from remote.worker_proc import _request_reload
 
 
@@ -98,24 +99,15 @@ PREFETCH_WIRE_ID = "prefetch"
 PREFETCH_ROUND_SEC = 5.0
 
 
-def _flush_prefetch_round(store: PrefetchStore, log: Any, totals: list[int]) -> None:
-    """预取每轮收账（S3f/G6）：命中率摘要行 + wire 传输行。
+def _flush_prefetch_round(log: Any) -> None:
+    """预取每轮收账：**只剩 wire 传输行**（真搬了字节才有）。
 
-    字节读 wire 桶的**同一份账**（`_wire_totals` 只读不 pop），会话累计按轮累加；命中率来自
-    `store.stats()`——它是 `PrefetchStore.stats()` 的**生产读者**（2026-10-02 前全仓零调用）。
-    没有活动的轮不刷屏（无下载、无命中/未命中）——减去噪声，读数仍在。
+    `prefetch: held=… hits=… misses=… 本轮下载=…MB 会话累计=…MB` 摘要行已退役（2026-10-06，
+    用户指令「删除云机 worker 刷屏 log」）：它按轮打，而预取常态是 0 命中 / 0 下载（现场
+    `held=0 hits=0 misses=61 本轮下载=0.00MB 会话累计=0.00MB`）⇒ 每轮一行零信息增量。
+    字节账本来就在下面这行（本轮真下载时才有），命中账由 S3e 的 `payload=prefetch-hit`
+    落在该 job 的 wire 行上——S3f/G6 的读数改成「有事才说话」。
     """
-    round_bytes, round_wasted = _wire_totals(PREFETCH_WIRE_ID)
-    totals[0] += round_bytes
-    totals[1] += round_wasted
-    st = store.stats()
-    if round_bytes or st["hits"] or st["misses"]:
-        mb = 1024.0 * 1024.0
-        log(
-            f"prefetch: held={st['held']} hits={st['hits']} misses={st['misses']} "
-            f"本轮下载={round_bytes / mb:.2f}MB 会话累计={totals[0] / mb:.2f}MB"
-            + (f"（其中挤走作废 {totals[1] / mb:.2f}MB）" if totals[1] else "")
-        )
     _wire_flush(PREFETCH_WIRE_ID, log)
 
 
@@ -145,8 +137,6 @@ def _prefetch_fill(
     """
     skip = skip or set()
     log = log or (lambda _m: None)
-    #: 会话累计 `[成功下载字节, 被挤走作废字节]`——从 wire 桶逐轮累加（S3f，不新增 stats 字段）。
-    totals = [0, 0]
     while not stop.is_set():
         try:
             peeked = peek_jobs(
@@ -187,9 +177,9 @@ def _prefetch_fill(
                 continue
             if store.store(jid, payload, cand):
                 log(f"prefetch {jid[:8]}: 已预取 {len(payload)} bytes（软持有，无租约）")
-        _flush_prefetch_round(store, log, totals)
+        _flush_prefetch_round(log)
         stop.wait(PREFETCH_ROUND_SEC)
-    _flush_prefetch_round(store, log, totals)  # 收尾：最后一次没有等满一轮的也上账
+    _flush_prefetch_round(log)  # 收尾：最后一次没有等满一轮的也上账
 
 
 def settle_result(
@@ -200,25 +190,18 @@ def settle_result(
     uploader: ResultUploader,
     log: Callable[[str], None],
 ) -> None:
-    """回传落定：打结算行 + **把本 job 的传输账收在这一刻**（P2.5）。
+    """回传落定：**把本 job 的传输账收在这一刻**（P2.5）。
 
     账必须等到这里才收：`out` 的字节/秒是 `post_result` 内部记的，而 async 下它发生
     在关键路径之后 —— 提前 flush 会把回传读成 0s（那正是最该看见的一段）。
     `wall_end` 只在 async 下传（sync = 回传就在关键路径里，口径不变）。
+
+    `job … done — result accepted / lost the race / backup 副本被拒` 结算行已退役（2026-10-06，
+    用户指令「删除云机 worker 刷屏 log」）：每个 job 已有一行 wire 账（含 `result=` 段与
+    `out=` 阶段），而两种非成功结局各自有更响亮的一行（`result POST 409（…）` /
+    `result POST 403（…）`，见 `job_lifecycle.post_result`）；hub 侧另有一行受理记录。
+    `out` 仍在签名里（`on_settled` 回调形状），不再是日志输入。
     """
-    log(
-        f"job {jid} done — "
-        + (
-            "lost the race (409, 赢家已落账) — 本份丢弃"
-            if out.status == 409
-            else (
-                "backup 副本被拒（403，非本 job 租约持有人）— 本份丢弃，不算失败"
-                if out.status == 403
-                else "result accepted"
-            )
-        )
-        + (f"  [回传 {out.seconds:.1f}s]" if out.seconds else "")
-    )
     _wire_flush(jid, log, wall_end=wall_end if uploader.mode == "async" else None)
 
 
@@ -339,10 +322,20 @@ def run_one_round(
             preloaded=preloaded,  # P2 命中面：有它则 payload 段零网络
             log=log,
             should_cancel=_cancel.is_set,
-            on_ppo_start=lambda: job_started(base_url, token, jid, worker_id=worker_id),
+            # ★ 备份副本（`mode=backup`，无租约）**不打** computing_at：那份「PPO 真启动」的
+            # 时基是**主副本**的（掉队阈值认它），备份打一下就把主人的掉队时钟重置成自己的
+            # 开算时刻（`/start` 会覆写 `_computing` 与 `_claimed` 的 worker）——那正是
+            # 2026-10-06 要逃的那种「掉队救援被自己人压住」的形状。旧行为（有租约）逐字不变。
+            on_ppo_start=(
+                None
+                if claim_mode == CLAIM_MODE_BACKUP
+                else lambda: job_started(base_url, token, jid, worker_id=worker_id)
+            ),
         )
         # 算完待回传（P0 小包）：只降别人的优先级（低档备份保险），**永不**触发取消。
-        job_ready(base_url, token, jid, worker_id=worker_id)
+        # 备份副本不报身份：`set_ready` 会顺手写这份 job 的 `_last_heartbeat`，而那个字段是
+        # 主人孤儿判据（`_lease_state`）的输入——备份的一次「算完了」不该把主人的静默洗白。
+        job_ready(base_url, token, jid, worker_id="" if claim_mode == CLAIM_MODE_BACKUP else worker_id)
         # ★ 关键路径到此为止（P2.5 异步回传）：回传不再占着算力等。交给上传线程，
         #   主循环立刻去领下一份——而下一份的字节多半已被预取到本地（P2），两者
         #   资源不相交（链路 vs CPU/GPU），天然可叠。

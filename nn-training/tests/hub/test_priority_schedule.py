@@ -736,3 +736,189 @@ def test_race_judgment_has_no_production_path() -> None:
             if b in text:
                 hits.append(f"{f.relative_to(root)}: {b}")
     assert hits == [], f"竞速判定仍在生产代码里：{hits}"
+
+
+# ════════ 未完成就发得出去：在飞集的备份副本候选（2026-10-06 用户口径） ════════
+#
+# 现场（Kaggle 新 worker 上线）：`no job yet` 刷屏，直到**重启 trainer** 才领到活。机制：
+# 「在飞」（有活租约、还没回传）的 job 以前对别的 worker **完全不可见**（候选只在可领取池里），
+# 而卡住的持有人靠心跳线程续租 ⇒ 那份活谁都领不到；唯一解法是训练侧重启（`RUN_ID` 每进程
+# 随机 ⇒ 换个 job_id 重新发布）。用户口径：**只要没有回传结果都是没完成，都能发给 worker 竞速**
+# —— 排序交给优先级表，认领模式由 hub 定（池 ⇒ exclusive / 在飞 ⇒ backup）。
+
+
+def test_inflight_view_is_the_other_side_of_the_pool(tmp_path: Path) -> None:
+    """「未完成」的两个视图：池 = ∧无活租约；在飞 = ∧有活租约（筛子只写一遍）。"""
+    clock = _Clock()
+    store = _store(tmp_path, clock)
+    _publish(store)
+    assert store.claimable_job_ids() == [JID] and store.inflight_job_ids() == []
+    assert store.claim_outcome(JID, worker_id="A").ok is True
+    assert store.claimable_job_ids() == [], "活租约期内不在池中（P3b 独占）"
+    assert store.inflight_job_ids() == [JID], "但它在飞——空闲 worker 该能领它的备份副本"
+    assert store.inflight_job_ids(not_held_by="A") == [], (
+        "持有人自己不再领一份：结果可能还在异步回传（同一张卡跑两遍）"
+    )
+    assert store.inflight_job_ids(not_held_by="B") == [JID]
+    clock.t += CLAIM_TTL_SEC + 1  # 租约过期（持有人死掉）⇒ 回池，不再是「在飞」
+    assert store.claimable_job_ids() == [JID] and store.inflight_job_ids() == []
+
+
+def test_replica_candidates_keep_every_gate_the_pool_keeps(tmp_path: Path) -> None:
+    """熔断 / 已落盘的 job 不因「有人在跑」而被发出去（两个视图共用同一批闸）。"""
+    clock = _Clock()
+    store = _store(tmp_path, clock)
+    _publish(store)
+    store.claim_outcome(JID, worker_id="A")
+    assert store.inflight_job_ids() == [JID]
+    store._frozen[JID] = {"reclaims": 3, "worker": "A", "ts": clock.t, "announced": True}
+    assert store.inflight_job_ids() == [] and store.claimable_job_ids() == []
+    store._frozen.clear()
+    (store._job_dir(JID) / "result").mkdir(parents=True, exist_ok=True)
+    assert store.inflight_job_ids() == [], "首写已分胜负 ⇒ 不是「没完成」了"
+
+
+def test_peek_offers_a_replica_for_an_inflight_job(tmp_path: Path) -> None:
+    """池空 + 有在飞的活 ⇒ 候选带 `mode="backup"`（空闲 worker 领备份副本，先回传者胜）。
+
+    这条就是现场「新 worker 上线领不到、只有重启 trainer 能解」的修复面：
+    A 拿着租约在跑时，B 以前 peek 到的是空表（与「trainer 根本没发布」分不开）。
+    """
+    _publish_online_course(tmp_path)
+    with _hub(tmp_path) as (base, hub):
+        a = W.claim_job(base, TOKEN, JID, worker_id="A")
+        assert a is not None and a["status"] == "ok"
+        got = W.peek_jobs(base, TOKEN, worker_id="B")
+        assert got is not None
+        cands, _halt = got
+        assert [c["job_id"] for c in cands] == [JID]
+        assert cands[0]["mode"] == CLAIM_MODE_BACKUP
+        # 优先级表照旧：B 看到「有人在做」（中档）——按表排序由客户端做
+        pr = W.request_priority(base, TOKEN, worker_id="B", held=[JID])
+        assert pr["priorities"][JID] == PRIORITY_MEDIUM
+        # 拿着这个候选去认领 = 备份（无 token、双方回传都放行、首写定胜负）
+        b = W.claim_job(base, TOKEN, JID, mode=CLAIM_MODE_BACKUP, worker_id="B")
+        assert b is not None and b["status"] == "backup" and b["lease_token"] == ""
+        st = hub._store_of(JID)
+        assert st is not None and st.result_token_ok(JID, a["lease_token"]) is True
+        assert st.result_token_ok(JID, "") is True
+        # 持有人自己（A）不再领同一份的副本（peek 无副作用：结果只是空表）
+        got_a = W.peek_jobs(base, TOKEN, worker_id="A")
+        assert got_a is not None and got_a[0] == []
+
+
+def test_peek_prefers_the_claimable_head_over_a_replica(tmp_path: Path) -> None:
+    """同课既有可领取的又有在飞的 ⇒ 先给「没人拿租约」那份（exclusive 优先于备份）。"""
+    _publish_online_course(tmp_path)
+    jid2 = "k" * 16
+    with _hub(tmp_path) as (base, hub):
+        st = hub._store_of(JID)
+        assert st is not None
+        st.publish(jid2, _mini_manifest(jid2), b"PK\x03\x04fake")
+        a = W.claim_job(base, TOKEN, JID, worker_id="A")  # 先领走旧的那份
+        assert a is not None and a["status"] == "ok"
+        got = W.peek_jobs(base, TOKEN, worker_id="B")
+        assert got is not None
+        cands, _halt = got
+        assert [c["job_id"] for c in cands] == [jid2], "池里那份优先（每课程至多一个候选）"
+        assert cands[0]["mode"] == CLAIM_MODE_EXCLUSIVE
+
+
+def test_acquire_job_claims_with_the_mode_the_candidate_carries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """候选带 `mode="backup"` ⇒ 认领就发 backup（模式由 hub 定：只有它知道有没有活租约）。"""
+    monkeypatch.setattr(
+        JL,
+        "peek_jobs",
+        lambda *a, **k: ([{"job_id": "x1", "course": "cA", "mode": CLAIM_MODE_BACKUP}], False),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        JL,
+        "request_priority",
+        lambda *a, **k: {"epoch": 3, "priorities": {"x1": PRIORITY_MEDIUM}, "reasons": {}},
+        raising=True,
+    )
+    seen: list[str] = []
+
+    def _claim(base, token, jid, *, mode="exclusive", **k):
+        seen.append(mode)
+        return {"job_id": jid, "manifest": {"job_id": jid}, "status": "backup", "lease_token": ""}
+
+    monkeypatch.setattr(JL, "claim_job", _claim, raising=True)
+    got = W.acquire_job("http://hub", "tok", worker_id="B")
+    assert seen == [CLAIM_MODE_BACKUP], "空闲 worker 领在飞的活 = 备份副本，不是独占"
+    assert got is not None and got["status"] == "backup" and got["lease_token"] == ""
+
+
+def test_acquire_job_unknown_mode_falls_back_to_exclusive(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """候选里的 mode 是未知值 ⇒ 保守回独占（不静默背下别人给的档）。"""
+    monkeypatch.setattr(
+        JL,
+        "peek_jobs",
+        lambda *a, **k: ([{"job_id": "x1", "course": "cA", "mode": "sideways"}], False),
+        raising=True,
+    )
+    monkeypatch.setattr(
+        JL,
+        "request_priority",
+        lambda *a, **k: {"epoch": 1, "priorities": {"x1": PRIORITY_HIGHEST}, "reasons": {}},
+        raising=True,
+    )
+    seen: list[str] = []
+
+    def _claim(base, token, jid, *, mode="exclusive", **k):
+        seen.append(mode)
+        return {"job_id": jid, "manifest": {"job_id": jid}, "status": "ok", "lease_token": "t"}
+
+    monkeypatch.setattr(JL, "claim_job", _claim, raising=True)
+    assert W.acquire_job("http://hub", "tok", worker_id="B") is not None
+    assert seen == [CLAIM_MODE_EXCLUSIVE]
+
+
+def test_backup_round_does_not_touch_computing_at(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """备份副本（无租约）**不打** computing_at、也不以自己名号报 ready。
+
+    为什么必须分档：`/start` 会覆写 `_computing`/`_claimed` 的 worker 与时刻——备份打一下
+    就把**主人**的掉队时钟（掉队救援唯一时基）重置成自己的开算时刻；`/ready` 会顺手写
+    `_last_heartbeat`，而那是主人孤儿判据的输入。主副本（有租约）逐字旧行为。
+
+    两轮都跑（backup / ok），因为「分档」的判据是**两种都不变**：备份不动、主副本照旧。
+    """
+    jobs: list[dict] = [
+        {"job_id": JID, "manifest": {"job_id": JID}, "status": "backup", "lease_token": ""},
+        {"job_id": JID, "manifest": {"job_id": JID}, "status": "ok", "lease_token": "tok"},
+    ]
+    monkeypatch.setattr(
+        W, "acquire_job", lambda *a, **k: jobs.pop(0) if jobs else None, raising=True
+    )
+    monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: ([], False), raising=True)
+    monkeypatch.setattr(JR, "start_cancel_watcher", lambda *a, **k: None, raising=True)
+    monkeypatch.setattr(JR, "heartbeat", lambda *a, **k: True, raising=True)
+    started: list[str] = []
+    monkeypatch.setattr(JR, "job_started", lambda *a, **k: started.append(str(k)), raising=True)
+    ready: list[str] = []
+    monkeypatch.setattr(JR, "job_ready", lambda *a, **k: ready.append(str(k.get("worker_id"))), raising=True)
+    runs: list[dict] = []
+
+    def _run_job(*a, **kw):
+        runs.append(kw)
+        return {"job_id": JID, "weights_json": "", "opt_tar_b64": ""}
+
+    monkeypatch.setattr(W, "run_job", _run_job, raising=True)
+    monkeypatch.setattr(W, "post_result", lambda *a, **k: 200, raising=True)
+    for _ in range(2):
+        W.worker_loop(
+            "http://hub", "tok", work_dir=tmp_path, poll_sec=0.0, once=True, log=lambda m: None
+        )
+    assert len(runs) >= 2, f"两轮都要真的跑到（backup / ok）：{len(runs)}"
+    assert runs[0]["on_ppo_start"] is None, "备份不打 computing_at（主人掉队时钟不许被重置）"
+    assert runs[1]["on_ppo_start"] is not None, "主副本照旧：PPO 真启动前一刻打点（R2-C1）"
+    assert started == [], "一次也不许替主人打点"
+    assert ready[0] == "", "备份不报身份（不写主人的 _last_heartbeat）"
+    assert ready[1] != "", "主副本照旧报自己的名号"

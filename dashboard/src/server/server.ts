@@ -13,7 +13,8 @@
  *    - GET  /api/pool    → 池数据端点（api.buildPoolView：节点历史/selfStatus/localHash；?days= 本地日窗口，
  *                          独立慢节奏 + 课程键控 30s TTL 缓存，?fresh=1 强制）
  *    - GET  /api/log/<key> → 日志载荷（日志页 2s/4s 轮询）
- *    - GET  /api/evalGames            → 最新 in-loop eval 逐局视图（导出 replay 弹窗）
+ *    - GET  /api/evalGames            → 一轮 in-loop eval 逐局视图（`?iter=`；缺省最新轮；导出 replay 弹窗）
+ *    - GET  /api/evalRounds           → 该课程全部可导出 eval 轮（弹窗轮次选择器；summary-only 扫描）
  *    - GET  /api/evalReplayJob        → replay 导出任务态（busy + manifest + 日志尾）
  *    - GET  /api/evalReplayFile       → 单局 .replay 下载（manifest 白名单）
  *    - POST /api/<act>   → 动作（api.routeAction → actions：启/停/冒烟/预设/开关/节点编辑）
@@ -64,6 +65,7 @@ import {
   buildEvalCkptsView,
   buildEvalGamesView,
   buildEvalReplayJobView,
+  buildEvalRoundsView,
   buildPoolView,
   buildStateView,
   componentLogPayload,
@@ -73,6 +75,7 @@ import {
   evalboardPageDecision,
   evalboardRouteCounters,
   evalReplayFileResponse,
+  parseEvalIterParam,
   getLoopQueueView,
   invalidatesSnapshot,
   invalidateAfterAction,
@@ -383,11 +386,19 @@ async function main(): Promise<void> {
         if (req.method === 'GET' && url.pathname === '/api/curriculumLadder') {
           return json(curriculumLadderView())
         }
-        // 导出 replay：最新 in-loop eval 逐局视图 / 导出任务态 / tar.gz 下载。
+        // 导出 replay：最新 in-loop eval 逐局视图 / 轮选择器 / 导出任务态 / 单局 .replay 下载。
+        // 2026-10-06 换轮架构后，manifest 语义 = POST /api/replayExport 受理成功后落盘的 manifest（不再「最近一次」）。
         if (req.method === 'GET' && url.pathname === '/api/evalGames') {
-          return json(buildEvalGamesView(viewCourse || ''))
+          const iter = parseEvalIterParam(url.searchParams.get('iter'))
+          if (iter === null) return json({ ok: false, message: '?iter= 须为整数' }, 400)
+          return json(buildEvalGamesView(viewCourse || '', iter))
+        }
+        if (req.method === 'GET' && url.pathname === '/api/evalRounds') {
+          return json(buildEvalRoundsView(viewCourse || ''))
         }
         if (req.method === 'GET' && url.pathname === '/api/evalReplayJob') {
+          // F4 闭合（串话归因，服务端路由）：此接口返回的 manifest = POST /api/replayExport 受理成功后落盘的 manifest，
+          // 而不再是「最近一次导出的 manifest」。旧弹窗用法（此接口做轮选择）已废除——轮选择走 GET /api/evalRounds。
           return json(buildEvalReplayJobView(viewCourse || ''))
         }
         if (req.method === 'GET' && url.pathname === '/api/evalReplayFile') {

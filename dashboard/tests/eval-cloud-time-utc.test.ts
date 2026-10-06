@@ -1,7 +1,7 @@
 /** eval-cloud-time-utc.test.ts — 云机（`nodes` 含 `cloud`）写的 eval 时间戳是 UTC 钟，
  *  控制台读侧必须转成本机时区再显示（2026-10-06 用户报障：`x21-psh-a` it80 前的时间差 8h）。
  *
- *  分层：src/server/iters.ts（readEvalSummaries / readLatestEvalGames）。
+ *  分层：src/server/iters.ts（readEvalSummaries / readEvalGames）。
  *
  *  ⚠️ 时区纪律：bun 的 test runner 在**本机是 TZ=UTC**（实测 `getTimezoneOffset() === 0`），
  *  若不动 TZ，UTC→本机 是恒等变换 ⇒ 测试会在地道里空过（先红验证时实测到过）。
@@ -13,7 +13,7 @@ import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
-import { readEvalSummaries, readLatestEvalGames } from '../src/server/iters'
+import { readEvalSummaries, readEvalGames } from '../src/server/iters'
 
 const ORIG_TZ = process.env.TZ
 process.env.TZ = 'Asia/Shanghai'
@@ -116,7 +116,7 @@ describe('readEvalSummaries：云机 summary time UTC → 本机时区', () => {
   })
 })
 
-describe('readLatestEvalGames：summary head 与逐局行各自判节点', () => {
+describe('readEvalGames：summary head 与逐局行各自判节点', () => {
   it('cloud summary head time 转换；逐局行按自己的 node 判（cloud 转 / local 不转）', () => {
     const dir = mkDir('games-mixed')
     writeLog(dir, [
@@ -144,7 +144,7 @@ describe('readLatestEvalGames：summary head 与逐局行各自判节点', () =>
       },
       { event: 'eval_summary', iter: 10, wver: 'wv', time: CLOUD_UTC, nodes: { cloud: 400 } },
     ])
-    const v = readLatestEvalGames(dir)!
+    const v = readEvalGames(dir)!
     expect(v.time).toBe(CLOUD_LOCAL)
     const bySeed = new Map(v.rows.map((r) => [r.seed, r]))
     expect(bySeed.get(100)!.time).toBe(CLOUD_LOCAL)
@@ -173,7 +173,7 @@ describe('readLatestEvalGames：summary head 与逐局行各自判节点', () =>
         nodes: { mac: 200 },
       },
     ])
-    const v = readLatestEvalGames(dir)!
+    const v = readEvalGames(dir)!
     expect(v.time).toBe('2026-10-06 05:40:00')
     expect(v.rows[0]!.time).toBe(LOCAL_STAMP)
   })

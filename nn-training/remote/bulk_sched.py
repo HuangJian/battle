@@ -133,9 +133,10 @@ class BulkScheduler:
         self._yield_sec_total = 0.0
         self._preempted_count = 0
         self._p0_ms: list[float] = []
-        #: **当前 slot（= 一次传输）** 的让路账：`{"token", "count", "sec"}`。让路是分片间隙
-        #: 反复发生的（现场一次 payload 下载能让路 6 次），逐次打点会把日志刷爆 ⇒ 先记在这里，
-        #: 由 `slot()` 退出时**合并成一行**（见 `slot` 的 finally）。
+        #: **当前 slot（= 一次传输）** 的让路账：`{"token", "count", "sec"}`。它现在是
+        #: **S2 累计上限**（`yield_total_budget_sec`）的输入，不再有日志出口——`bulk <label>:
+        #: 让路合计 …` 行已于 2026-10-06 退役（用户指令「删除云机 worker 刷屏 log」）；每 job
+        #: 的调度账仍在 wire 行的 `wait=…/yield=…` 里。
         self._yield_cur: dict[str, Any] | None = None
         #: 排队归属（S3d）：token -> 本次 slot 的排队秒数，由调用方 `take_wait()` 取走。
         #: 单通道 ⇒ 同时在册的只有当前 token；前进式修剪兜底（见 `slot`）。
@@ -160,8 +161,9 @@ class BulkScheduler:
     def slot(self, prio: str, *, label: str = "") -> Iterator[int]:
         """占住唯一的 bulk 槽位（拿不到就在此等；P1 可以把 P2 挤出去）。
 
-        退出时把**本次传输**的让路账合并成一行（`bulk <label>: 让路合计 …`）——
-        让路在分片间隙反复发生，逐次打点只会刷屏。
+        本次传输的让路账记在 `_yield_cur`（S2 累计上限的输入）；**不再有让路日志出口**——
+        `bulk <label>: 让路合计 …` 行 2026-10-06 退役（它虽已是「一次传输一行」，但仍是每 job
+        必然多出来的一行；每 job 的 `yield=` 读数在 wire 行里）。
         """
         if prio not in (BULK_P1_CRITICAL, BULK_P2_PREFETCH):
             raise ValueError(f"未知 bulk 优先级: {prio!r}")
@@ -190,7 +192,7 @@ class BulkScheduler:
                         self._holding = self._seq
                         token = self._seq
                         self._released.clear()
-                        # 本次传输的让路账从零开始（退出时合并成一行）
+                        # 本次传输的让路账从零开始（S2 的累计上限按它算）
                         self._yield_cur = {"token": token, "count": 0, "sec": 0.0}
                         break
                 waited = True
@@ -221,19 +223,7 @@ class BulkScheduler:
                 self._holder_prio = None
                 self._holding = 0
                 self._released.set()
-                cur, self._yield_cur = self._yield_cur, None
-            # 让路账**合并成一行**（一次传输一条）：现场一次 payload 下载能让路 6 次，
-            # 逐次打点只是刷屏；秒数与次数在这里一次说清。锁外打点（日志是 I/O）。
-            if (
-                self._log is not None
-                and cur is not None
-                and cur["token"] == token
-                and cur["count"]
-            ):
-                self._log(
-                    f"bulk {label or prio}: 让路合计 {cur['sec']:.1f}s / {cur['count']} 次"
-                    f"（控制面在途；单次预算 ≤ {self._yield_budget:.0f}s）"
-                )
+                self._yield_cur = None  # 本 slot 的账随传输结束作废（下一个 slot 重建）
 
     def pace(self, token: int, prio: str = BULK_P1_CRITICAL) -> float:
         """分片间隙的让路回调（worker 把 `_read_body(pace=…)` 接到这里）。
@@ -344,7 +334,7 @@ class BulkScheduler:
         整份重试，也会撞上 hub 的 `SEND_TIMEOUT_SEC=60s`。
 
         本函数**只在 `slot()` 内**被调用（worker 的 `pace` 回调就是这么接的）：让路账记在
-        所属 slot 上，由 `slot()` 退出时合并成**一行**（一次传输一条 log，见 `slot`）。
+        所属 slot 上（`_yield_cur`）——它只喂 S2 的累计上限，**没有日志出口**。
         """
         if not self.control_active():
             return 0.0

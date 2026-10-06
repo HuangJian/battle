@@ -1,5 +1,5 @@
 /** route.ts — POST 动作路由（唯一动作入口，转到 server/actions 各处理器）。 */
-import { closeSync, existsSync, mkdirSync, openSync, readFileSync, writeFileSync } from 'fs'
+import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import path from 'path'
 import { loadConfig } from '../../core/config'
 import { log, warn } from '../../core/log'
@@ -571,6 +571,11 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         }
         if (busy.has(REPLAY_EXPORT_BUSY_KEY)) return errResp('已有 replay 导出在进行', 409)
         busy.add(REPLAY_EXPORT_BUSY_KEY)
+        // F4 闭合（串话归因，完成）：POST 受理成功时清掉旧 manifest ——
+        // 保证「盘上有 manifest」此后只可能是本次导出成功写的。失败轮要求表里不出现。
+        // 不能被此步吞（rmSync 404/readonly 等）：rmSync 抛 ⇒ 整次 POST 错（500），
+        // 决不做「删不掉就照常起 python」——那样等於接受串话交付。
+        rmSync(replayExportPaths(ctx.course).manifest, { force: true })
         const resolved = (await import('../../core/venv')).resolveVenvPython()
         const venvEntry =
           process.platform === 'win32'

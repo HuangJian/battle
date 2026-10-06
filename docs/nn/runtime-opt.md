@@ -8,6 +8,118 @@
 
 ---
 
+## §32 云机离线轮**三次**卡死：一局「不可取消的阻塞」把整轮当人质（2026-10-06）
+
+> 起因（用户真机日志，Kaggle 离线轮 `x21-psh-a` / `node-9b695f3a`，22:36–22:43）：§24 那套护栏
+> （有界回收 + 整轮重投 + 停滞点名）**都在**，但整轮还是十几分钟一局都不结算：
+>
+> ```
+> [22:36:11] [serve-pool] 熔断：本轮停掉**补位**（fallback=23 ≥ 阈值23；served=212 spawned=94 killed=22｜timeout=23）
+> [22:36:20] WARN rollout 单局子进程杀不掉：s2001/d343296285 —— SIGKILL 之后 5s 内回收不了（pid=1343193，很可能卡在不可中断的 IO 里）
+> [22:38:20] WARN rollout 整轮停滞：120s 里一局都没结算（还有 55 局在飞：s2002/d91898199、s2002/d784333296、s2003/d709048516…）
+> [22:40:20] …240s 里一局都没结算（还有 55 局在飞）…  [22:42:20] …360s 里一局都没结算（还有 55 局在飞）
+> ```
+>
+> 三个读数合起来就是结论：① **没有**「整轮重投」行 ⇒ `stuck` 一直是空的；② 「还有 55 局在飞」
+> 的**数字十几分钟不变**（且点的是同几个局）⇒ 那 55 条线程谁也不返回；③ 单局看门狗（5s 硬顶）
+> 此刻根本没被走到 —— 卡住的那一步在它**之前**。
+
+### 32.1 根因：轮内重投的触发条件是**异常**，而阻塞可以不抛
+
+`run_iter_rollout` 的轮内重投只有一个入口：某个 future **抛了** `UnreapableChildError`
+（`stuck.append(i)` 只在那个 `except` 分支里）。而「一局」的路径上有一批**无法从 Python 里
+取消**的阻塞点，它们卡住时既不返回也不抛：
+
+| 不可取消的阻塞点 | 位置 |
+|---|---|
+| 挂住的挂载点上的 `mkdir` / `open` / `write` / `unlink` | `_run_one_game` 起手、`serve_pool._write_log`、`_clean_attempt`（`rglob`+`rmtree`） |
+| **`subprocess.Popen` 等子进程 exec 成功的那一手 `os.read`** | `_run_one_game` / `serve_pool._spawn`（C 实现的 `fork_exec` 要等 errpipe 关闭；子进程卡在 D 状态的 `execve` 里，父进程就跟着无限等） |
+| 向池 worker 的 stdin 写任务行（管道满） | `serve_pool._submit` |
+
+于是：一条线程卡住 ⇒ 它的 future 永不结算 ⇒ 轮循环的 `wait()` 永远收不齐 ⇒ **永远出不了
+`while inflight`** ⇒ 重投那套护栏一次也触发不了；而「整轮停滞」那行只是**说了一声**，它没有任何
+处置权（它拿不到 future 的结局，唯一能做的就是再报一次）。这就是「熔断行之后 900s+ 一行不动」
+的**第三次**同族事故（前两次：§24 的无上限 `wait()`、§25 的同类；本条的残余恰好是 §24.5 ⑤
+预言的「卡点在写盘/挂载点 IO 那一侧」）。
+
+⚠ 与 §24 的分工：§24 修的是「**子进程**收不了尸」（`reap_bounded` 有界，已经修好；本场它按预期
+响了那一声）；本条修的是「**调用线程自己**根本没走到有界回收那一步」。
+
+### 32.2 落地：一局有了自己的墙钟上界（`call_bounded` + `game_ceiling_sec`）
+
+| 位置 | 改动 | 用例 |
+|---|---|---|
+| **新增 `common.platform_utils.call_bounded(fn, timeout)`** | 在一条 **daemon** 线程里跑 `fn`，本线程只在预算内等：预算内返回 `(True, 值)`；超界返回 `(False, None)` 且**绝不 join**（那条线程不拖任何东西）；`fn` 抛的异常在**调用方线程**里原样重抛（调用点的 `except` 语义不变） | `test_platform_utils_proc::test_call_bounded_returns_the_value_and_reraises_in_the_caller`、`::test_call_bounded_gives_up_instead_of_waiting_forever`、`::test_call_bounded_does_not_join_the_abandoned_thread` |
+| **新增 `common.game_watch` 常量/函数** | `GAME_IO_SLACK_SEC=20` + `game_ceiling_sec(base, explicit)` = `GAME_MAX_ATTEMPTS × (2 × 最宽尝试硬顶 + KILL_REAP_SEC) + 余量`（**「2 ×」= 池回退那份**：先试长驻池吃满硬顶、再一次性 spawn 吃满一次，漏掉它会把正常回退误判成机器卡住）+ `ceiling_line()` | `test_game_watch::test_game_ceiling_covers_every_attempt_plus_the_pool_fallback`、`::test_ceiling_line_names_the_game_and_the_bound` |
+| `worker/iter_rollout` | 轮循环提交的不再是 `_run_one_game_with_retries`，而是 **`_run_one_game_bounded`**（超界 ⇒ `UnreapableChildError` + `ceiling_line`）；`_clean_attempt` 也走 `call_bounded`（删不动就响亮一行照常重投）；轮账/重投文案改「没产出（收不了尸/超界）」 | `test_remote_iter::test_a_game_stuck_in_uncancellable_io_cannot_hold_the_round_hostage`（替身：第一次跑就永不返回 ⇒ 整轮 30s 内跑成、有超界行、有整轮重投行、不走单局重跑） |
+| `remote/offline_eval` | 同一条口径（`ex.map` 是同一个死结）：每局包一层 `call_bounded`，超界同样落 `UnreapableChildError` ⇒ 轮内重投只补没评的局 | `test_offline_eval_cloud::test_eval_game_stuck_in_uncancellable_io_is_resubmitted_in_round` |
+| `worker/iter_rollout`（**轮末扫盘**，同日收尾） | `_scan_bounded`：`verify_shards` / `collect_reports` / `collect_shard_manifests` 各套一层 `call_bounded`（`game_watch.SCAN_CEILING_SEC=60` + `scan_ceiling_line`）；超界 ⇒ `UnreapableChildError`（本轮产物结不了算 ⇒ 还租约 + 立即重领），**但 `verify_shards` 自己的 `ProtocolError` 照旧原样上抛**（确定性拒收不许被上界改读成「机器卡住」） | `test_remote_iter::test_a_round_end_scan_that_never_returns_stalls_the_round_loudly`（详见 §32.5） |
+
+口径：**超界 = 机器级停滞**（不是「这一局慢」）：不就地重跑（同一个 `w{i}/` / `eval-<it>-s…/`
+上可能还有活写者，见 `_clean_attempt` 存在的理由），而是清掉半截产出后与本轮其它没产出的局
+一起重投；不报失败、不退租约、云机不停（用户 2026-09-25 口径）。
+
+被放弃的那条线程**不回收**（还在跑）：假设机器恢复后它自己跑完了 —— 它写的是同
+`(stage,seed,wver)` 的**确定性**产物（与重投那一份逐字节同内容，本仓多处已依赖这个性质），
+所以这条与 §24「收不了尸的局整轮重投」是同一档已接受的代价；代价上限由「上界 + 只补没产出的局」
+封住（不是每轮把所有局重跑）。池侧一个已知后果：若被放弃的那一局正握着一个暖 worker，那个 worker
+的 `busy` 会被永久占着（池退化成「余下局走一次性 spawn」）——只慢不错，且 §23 的熔断本来就会把
+“回退越多越慢”这条回路刹住。
+
+上界只负责「不许无限等」，
+**不**负责「掐慢局」（那是 `SLOW_GAME_WARN_SEC` / 硬顶）：所以它是保守的大数（默认毫秒级的局
+要跑满 ~155s 才够线），且**只在机器卡住时**才会到。
+
+### 32.3 否决项
+
+* **把轮循环的 `wait()` 改成「等不到就放弃这一局」**：放弃一个 future 不等于停掉它的线程；
+  而 `ThreadPoolExecutor.__exit__` / `_python_exit` 会 **join** 这些（非 daemon）线程 ⇒ 只是把
+  「卡在游戏线程」换成「卡在解释器退出」。真活挪进可放弃的 daemon 线程才能真的走开。
+* **靠把 60s 就绪上限 / 5s 硬顶调大**：卡住的那一步在那些闸**之后**，调大只会让机器更久地
+  停在卡死态（§23.3 已否过一次同形）。
+* **超界后原地重跑同一局**：两个写者写同一份 shard / `_eval_report.json` ⇒ 静默错数据。
+* **把超界当「这一轮的确定性失败」扔出去**：那是把机器的病记在内容头上（`report_job_failure`
+  ⇒ hub 落终局 ⇒ 停腿 ⇒ 反过来把云机停掉），与 §24/§25 的口径直接冲突。
+* **超界后重启进程（`HOT_RELOAD_EXIT`）**：确实能连线程一起清掉，但会丢本进程的 PPO 状态与
+  整轮已产出的 shard 计数，代价远大于重投那几局；机器的病现场（本场 900s 量级）不值得为它
+  重启进程。若将出现「**超界后连重投也一直不降**」（机器长时间不恢复）再考虑这条。
+
+### 32.4 下次真机该看的读数
+
+① `WARN rollout 单局超界（155s 内整条链路都没返回）：sX/dY —— 大概率卡在不可中断的 IO…`
+（有它 ⇒ 卡点在文件 IO / exec 握手那一侧，且已按纪律收场）；② 同场应当**紧跟**一条
+`WARN rollout 整轮重投第 N 次：…（机器级停滞：收不了尸/单局超界，已结算 X/Y 局）`（**§24.5 ④
+那种「停滞几十秒却一条重投也没有」的形态不允许再出现**）；③ `WARN rollout 半截产出清不掉：…`
+（挂载点 IO 还没好；照常重投，**不是失败**）；④ 轮末 `整轮重投=N 次（机器级停滞：收不了尸/超界）`
+——正常轮恒空；⑤ `WARN rollout 轮末扫盘超界（60s 内没返回）：verify_shards|collect_reports|
+collect_shard_manifests`（main 线程自己卡住那一档，见 §32.5；它后面紧跟的是 job 级
+「机器级停滞 → release 租约 → 立即重领」，不是 `report_job_failure`）；⑥ 若出现「整轮停滞」
+且**连一条超界行都没有** ⇒ 卡点在还没上界的路径上（当前已知未覆盖：`_ensure_ts_code` 解包 /
+`unpack_payload` 那些**轮首**的盘 IO）——按同一条纪律给它加上界，而不是等下一次十几分钟。
+
+### 32.5 轮末扫盘（main 线程自己）也有上界（同日收尾）
+
+§32.4 ⑤ 当初预言的下一个位置被当场补上：`verify_shards` / `collect_reports` /
+`collect_shard_manifests` 都在**主线程**上做全量文件 IO（rglob 扫 shard、逐局读
+`manifest.json`/`_rl_report.json`，`data_fp` 还要哈希每个 shard 的内容）——挂住的挂载点上它们
+**一样不返回也不抛**，而那里**连「整轮停滞」都没有**（那行只在轮循环里打）⇒ 整轮对日志完全
+静默，比游戏线程那一档更难查（连「还有几局在飞」都没有）。
+
+* **`common/game_watch.SCAN_CEILING_SEC = 60.0`**（单列的第三个数）：扫盘没有子进程/重试/写盘
+  ⇒ 不能拿 `game_ceiling_sec`（那个含尝试次数与回收预算，会大到让挂死的扫盘也过关）；正常一轮
+  的扫盘是亚秒级（几百个小 JSON + 一遍内容哈希）⇒ 60s 是「机器挂了」而不是「盘慢」。
+* **`worker/iter_rollout._scan_bounded(what, fn, log, where)`**：超界 ⇒ `ceiling_line` 的同族行为
+  `scan_ceiling_line` + **`UnreapableChildError`**（本轮产物结不了算 ⇒ 交回 worker 还租约 + 立即
+  重领重投，不报失败、云机不停）。
+* **异常分类不许被上界改掉**：`verify_shards` 的 `ProtocolError`（实产集 ≠ 声明集）由
+  `call_bounded` 原样重抛 —— 确定性拒收**不能**因为套了一层上界就被读成「机器卡住」（那是把
+  内容的错记在机器头上，正好与 §24/§25 的分岔逻辑相反）。
+* 用例：`test_remote_iter::test_a_round_end_scan_that_never_returns_stalls_the_round_loudly`
+  （替身永不返回 ⇒ 30s 内上交、有「轮末扫盘超界 verify_shards」行、上抛的是机器级那一档；
+  A/B 工作树上旧形态被 60s 外墙钟 kill = 真红）、`test_game_watch::test_scan_ceiling_line_names_what_and_the_bound`。
+
+---
+
 ## §31 sampler 内存盘点 + 核数口径/空闲回收/超时定时器（2026-10-04）
 
 > 触发：用户「检查 sampler 的内存占用，找出优化空间」；落地指令四连：「`--workers` 缺省改为物理核」→

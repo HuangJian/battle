@@ -43,8 +43,28 @@ def _no_serve_pool(monkeypatch: pytest.MonkeyPatch) -> None:
 # 复用单测目录的 fixtures / session hooks（tmp_path 覆盖与清理语义一致）。
 from tests.conftest import (
     bp_args,
+    pin_production_env,
     pytest_runtest_makereport,
     pytest_sessionfinish,
     tmp,
     tmp_path,
 )
+
+
+@pytest.fixture(autouse=True)
+def _production_isolation(monkeypatch: pytest.MonkeyPatch, request: pytest.FixtureRequest) -> None:
+    """e2e 层的隔离（**必须两份**：e2e 是兄弟目录，不继承 `tests/conftest.py` 的夹具）。
+
+    2026-10-06 两起事故都在本层：① 本目录起的真 `hub.server` 子进程（`test_auto_handoff_e2e.py`
+    的 `_Hub`）有一半没传 `console_url` ⇒ 控制台地址回落到 `hub/task_pack.DEFAULT_CONSOLE_URL`
+    （`127.0.0.1:8900` = 开发机上正在跑的 dashboard，而那个动作会写本机配置）；
+    ② `test_cloud_iter_e2e.py` 跑真 `TrainingLoop` ⇒ 心跳（`EVALBOARD_DATA` 没钉）写进了
+    `dashboard/data/evalboard/runner_state.json`（操作员面板读它）。
+
+    钉名单与实现在**一处**（`tests/conftest.py::pin_production_env` / `PRODUCTION_STATE_PINS`）；
+    本层只负责挂上。守卫 `tests/test_production_isolation.py`（两层都挂没挂由它钉）。
+
+    `tmp_path` 走 `request.getfixturevalue` 而不是形参：本模块顶部 import 了同名夹具函数
+    （extend 语义），形参会撞 ruff F811（2026-10-06 门禁实测）。
+    """
+    pin_production_env(monkeypatch, request.getfixturevalue("tmp_path"))

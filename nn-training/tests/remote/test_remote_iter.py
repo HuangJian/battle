@@ -21,6 +21,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,6 +44,7 @@ from common.protocol import (
     WIRE_JOB_MAGIC,
     ProtocolError,
     RetryableError,
+    UnreapableChildError,
     data_fp,
     iter_declared_entries,
     iter_expected_data_fp,
@@ -1573,6 +1575,133 @@ def test_a_round_that_stalls_names_the_games_still_in_flight(
         job_dir2, _one_game_spec(tmp_path, fast, game_timeout_sec=20.0), log=msgs2.append
     )
     assert not any("整轮停滞" in m for m in msgs2), msgs2
+
+
+class _UncancellableStub:
+    """第一次跑某一局时**永不返回**（模拟 D 状态的挂载点 IO / 不可取消的 syscall）。
+
+    真态在单测里造不出来（要真的卡住的挂载点），所以替身只用一条永不置位的 `Event` 把那条
+    线程钉住：它既不返回也不抛 —— 这正是整轮被当人质的形态（5s 硬顶、看门狗都在它之后）。
+    """
+
+    def __init__(self, real: Any) -> None:
+        self.real = real
+        self.calls = 0
+        self.blocked = 0
+        self.release = threading.Event()
+
+    def __call__(self, *a: Any, **k: Any) -> Any:
+        self.calls += 1
+        if self.calls == 1:
+            self.blocked += 1
+            self.release.wait()  # 不可取消：永远不返回
+            raise AssertionError("不可取消的阻塞不该返回（本用例靠超界收场）")
+        return self.real(*a, **k)
+
+
+def test_a_game_stuck_in_uncancellable_io_cannot_hold_the_round_hostage(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """★ 一局卡在**不可取消**的阻塞点上，不许把整轮当人质（2026-10-06 Kaggle 离线轮取证）。
+
+    现场（用户真机日志）：`[serve-pool] 熔断` 之后每 120s 一条「整轮停滞：… 还有 55 局在飞」、
+    一局都不结算，十几分钟不动；同屏还有「单局子进程杀不掉 … 很可能卡在不可中断的 IO 里」
+    ——那行提示说的就是这一档：子进程 SIGKILL 都收不了尸（D 状态），**父进程自己**也一样会卡在
+    挂住的挂载点上（`mkdir`/`open`/写盘/`Popen` 等子进程 exec 成功的那一手 `os.read`），
+    这些调用既不返回也不抛。
+
+    为什么旧形态一次都触发不了重投：`wait(FIRST_COMPLETED)` 只在「有 future 结算」时才醒来，
+    而 future 结算的前提是「它的线程返回」——线程卡在不可取消的 syscall 上就永远不返回；
+    于是轮循环永远出不了 `while inflight`，而轮内重投的触发条件是「有 future 抛了
+    `UnreapableChildError`」——那条路也就永远走不到。
+
+    修法 = 一局**整条链路**有自己的墙钟上界（`game_watch.game_ceiling_sec` +
+    `platform_utils.call_bounded`，真活跑在一条可放弃的 daemon 线程里）：超界按机器级停滞
+    收场（清半截产出 + 整轮重投，**不**就地重跑），被放弃的线程不 join。
+    """
+    _fast_watchdog(monkeypatch)
+    script = tmp_path / "ok.py"
+    script.write_text(_STUB_SLOW.replace("@SECS@", "0"), encoding="utf-8")
+    stub = _UncancellableStub(iter_rollout._run_one_game)
+    monkeypatch.setattr(iter_rollout, "_run_one_game", stub)
+
+    # 墙钟上界：只裁**替身那一次**（毫秒级）；替身之后的真跑给足 —— 否则会把「真 python 启动
+    # 慢于 0.3s」误当成机器卡住，整轮在那里空转重投（判据是「超界有没有收场」，与绝对长度无关）。
+    def _ceiling(base: float, explicit: bool = False, reap_sec: float | None = None) -> float:
+        return 0.3 if stub.calls <= 1 else 60.0
+
+    monkeypatch.setattr(game_watch, "game_ceiling_sec", _ceiling)
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    t0 = time.time()
+    try:
+        out = run_iter_rollout(job_dir, _one_game_spec(tmp_path, script), log=msgs.append)
+        wall = time.time() - t0
+    finally:
+        stub.release.set()  # 放掉替身那条 daemon 线程（别让它白占一条线程到套件结束）
+    # timing-ok: 上界兜底（超界只需有界，30s 只挡挂起：旧形态在这里永远不会返回）
+    assert wall < 30.0, f"整轮不许被一局按死：{wall:.1f}s"
+    assert stub.blocked == 1, "替身必须真的卡过一次（否则本用例什么都没测到）"
+    # 超界必须当场点名（带局身份 + 上界值）——否则停机时只知道「没结算」
+    assert any("单局超界" in m and "s0/d0" in m and "0.3s" in m for m in msgs), msgs
+    # 超界的局**不走单局重跑**（同一目录上可能还有活写者）；由整轮重投只补这一局
+    assert not any("单局重试" in m for m in msgs), f"超界的局不许就地重跑：{msgs}"
+    assert any("整轮重投第 1 次" in m for m in msgs), msgs
+    assert any("整轮重投=1 次" in m for m in msgs), f"重投要在轮账里留痕：{msgs}"
+    assert out["report"]["games"] == 1 and out["report"]["shards"] == 1, out["report"]
+
+
+class _UncancellableScan:
+    """轮末扫盘那一步**永不返回**（挂住的挂载点上 rglob/读 manifest/内容哈希的真实形态）。"""
+
+    def __init__(self, real: Any) -> None:
+        self.real = real
+        self.calls = 0
+        self.blocked = 0
+        self.release = threading.Event()
+
+    def __call__(self, *a: Any, **k: Any) -> Any:
+        self.calls += 1
+        self.blocked += 1
+        self.release.wait()  # 不可取消：永远不返回
+        raise AssertionError("不可取消的阻塞不该返回（本用例靠超界收场）")
+
+
+def test_a_round_end_scan_that_never_returns_stalls_the_round_loudly(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """★ 轮末扫盘（主线程上的全量文件 IO）也有墙钟上界（2026-10-06 §32.4 ⑤ 的下一个位置）。
+
+    为什么它比游戏线程那一档更难查：那一步在**主线程**上，卡住时既没有「整轮停滞」（那行只在
+    轮循环里打），也没有任何还在飞的局 ⇒ 日志完全静默、整轮永不返回。所以上界超了必须
+    ① 当场点名「是哪一步」（`verify_shards`/`collect_reports`/`collect_shard_manifests`），
+    ② 按**机器级停滞**上交（`UnreapableChildError` ⇒ 外层还租约 + 立即重领重投），
+    而**不是**把它读成「这一轮的确定性失败」（那是把机器的病记在内容头上）。
+    """
+    _fast_watchdog(monkeypatch)
+    monkeypatch.setattr(game_watch, "SCAN_CEILING_SEC", 0.2)
+    stub = _UncancellableScan(iter_rollout.verify_shards)
+    monkeypatch.setattr(iter_rollout, "verify_shards", stub)
+    script = tmp_path / "ok.py"
+    script.write_text(_STUB_SLOW.replace("@SECS@", "0"), encoding="utf-8")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    t0 = time.time()
+    try:
+        with pytest.raises(UnreapableChildError) as ei:
+            run_iter_rollout(job_dir, _one_game_spec(tmp_path, script), log=msgs.append)
+        wall = time.time() - t0
+    finally:
+        stub.release.set()  # 放掉那条 daemon 线程（别让它占着线程到套件结束）
+    # timing-ok: 上界兜底（超界只需有界，30s 只挡挂起：旧形态在这里永远不会返回）
+    assert wall < 30.0, f"轮末扫盘不许把整轮按死：{wall:.1f}s"
+    assert stub.blocked == 1 and stub.calls == 1, "替身必须真的卡过一次"
+    # 超界必须点名**哪一步** + 上界值（现场唯一的读数）
+    assert any("轮末扫盘超界" in m and "verify_shards" in m and "0.2s" in m for m in msgs), msgs
+    # 处置：机器级停滞（不是「这一轮失败」）——消息里要说清交回 worker 重领重投
+    assert "轮末 verify_shards 超界" in str(ei.value) and "重领重投" in str(ei.value), ei.value
 
 
 def test_resolve_bun_missing_is_loud() -> None:

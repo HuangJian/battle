@@ -291,13 +291,9 @@ def train(args) -> dict:
         # DP 包装：前向/反向跨卡分发（batch 均分），参数共享原地更新——raw_model
         # 的 state_dict 始终是训练终态；落盘/恢复/参数计数一律走 raw（防 "module." 前缀）。
         # cast Any：包装后经 model 走前向；落盘/恢复走 raw_model（保持具体类型，.arch() 可用）
+        # `[train] DataParallel 生效（…）` 行同族同命（2026-10-06，同一条用户指令）：每轮重复的
+        # 静态事实（开机横幅已印 `device=`），DP 包装本身与 `raw_model` 的落盘纪律逐字不变。
         model = cast(Any, torch.nn.DataParallel(raw_model))
-        n_dp = torch.cuda.device_count()
-        print(
-            f"[train] DataParallel 生效（{n_dp} 卡，batch {args.batch} → 每卡 ~{args.batch // n_dp}）"
-            "——梯度归约顺序变化，与单卡 run 数值不可逐位比",
-            flush=True,
-        )
     n_params = param_count(raw_model)
     print(
         f"[train] model params={n_params} (~{n_params / 1000:.1f}K) budget<=200K: {n_params <= 200_000}"

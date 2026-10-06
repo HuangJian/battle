@@ -7,6 +7,7 @@ import type {
   EvalGameClass,
   EvalGameRow,
   EvalGamesData,
+  EvalRoundOption,
   EvalSummary,
   IterActuals,
   IterRow,
@@ -833,13 +834,15 @@ function evalGameClass(win: boolean, outcome: string): EvalGameClass {
   return outcome === 'max_ticks' ? 'timeout' : 'fail'
 }
 
-/** 读取最新 in-loop eval 的逐局行：latest = eval_summary 的最大 iter（与指标表
- *  「eval」视图同口径），行 = 该 (iter, wver) 的全部 event=eval 行。
+/** 读取一轮 in-loop eval 的逐局行：`iter` 缺省 = eval_summary 的最大 iter（与指标表
+ *  「eval」视图同口径，今天的行为逐字不变）；行 = 该 (iter, wver) 的全部 event=eval 行。
  *
+ *  - `iter` 给了但该轮没有 summary（或该轮 summary 缺 wver）→ null（调用方 → available:false，
+ *    **绝不回落到最新轮**：回落 = 拿别的轮的读数冒充）。
  *  - 排除带 `source` 字段的行（EvalBoard B/C 批与 A 层同册不同源，见 eval_done_keys）。
  *  - 同键重复落账取最后一条（断点重试诚实覆盖）。
  *  - 无任何 summary / 文件不可读 → null（弹窗显示「暂无 eval 评估记录」）。 */
-export function readLatestEvalGames(trajDir: string): EvalGamesData | null {
+export function readEvalGames(trajDir: string, iter?: number): EvalGamesData | null {
   const logPath = join(trajDir, 'eval_log.jsonl')
   if (!existsSync(logPath)) return null
   // 第一趟：summary 按 iter 归并（同 iter 重复 = 补跑后的重复落账，取最后一条）。
@@ -864,9 +867,17 @@ export function readLatestEvalGames(trajDir: string): EvalGamesData | null {
     return null
   }
   if (summaries.size === 0) return null
-  let latest = -1
-  for (const it of summaries.keys()) if (it > latest) latest = it
-  const head = summaries.get(latest)
+  let target: number
+  if (iter === undefined) {
+    let latest = -1
+    for (const it of summaries.keys()) if (it > latest) latest = it
+    target = latest
+  } else if (summaries.has(iter)) {
+    target = iter
+  } else {
+    return null // 该轮没有 summary —— 不回落（回落 = 拿别的轮的读数冒充）
+  }
+  const head = summaries.get(target)
   if (!head || !head.wver) return null
 
   // 第二趟：收集该 (iter, wver) 的逐局行（同键覆盖；B/C source 行排除）。
@@ -878,7 +889,7 @@ export function readLatestEvalGames(trajDir: string): EvalGamesData | null {
       try {
         const r = JSON.parse(line) as Record<string, unknown>
         if (r.event !== 'eval' || 'source' in r) continue
-        if (Number(r.iter ?? -1) !== latest || String(r.wver ?? '') !== head.wver) continue
+        if (Number(r.iter ?? -1) !== target || String(r.wver ?? '') !== head.wver) continue
         const stage = Number(r.stage)
         const seed = Number(r.seed)
         if (!Number.isInteger(stage) || !Number.isInteger(seed)) continue
@@ -935,7 +946,7 @@ export function readLatestEvalGames(trajDir: string): EvalGamesData | null {
     if (row.cleared) clears++
   }
   return {
-    iter: latest,
+    iter: target,
     wver: head.wver,
     time: head.time,
     games: all.length,
@@ -945,6 +956,52 @@ export function readLatestEvalGames(trajDir: string): EvalGamesData | null {
     outcomes,
     rows: all,
   }
+}
+
+/** 该课程的全部可导出 eval 轮（导出 replay 弹窗的选择器数据源）。
+ *
+ *  **summary-only 单趟扫描**：逐局行占体积 99%（单轮可达 200 行 × 上百轮），本函数一列都不读
+ *  ——成本纪律的先例见 eval-board/ckpts.ts（只 stat 不读内容）与 stack/kickstart-receipt.ts
+ *  （不调 readEvalSummaries）。按 iter 降序返回。
+ *
+ *  谓词与 readEvalGames 第一趟**同源**：`Number.isInteger(iter) && iter >= 0 && wver 非空`
+ *  ——否则会漏出「列表里有、点开零行」的形状（缺 wver 的轮在视图里配不上，无法导出）。
+ *  `reused_wver === true`（eval_a_once 的「同 wver 已在别轮评完」回填）单独标出：
+ *  这类 summary 的逐局行归属原 iter，本轮的逐局行**不存在**，选开是一张空表。
+ *  无 eval_log → 空数组（不是 null：弹窗按空列表显示「暂无评估记录」）。 */
+export function readEvalRoundOptions(trajDir: string): EvalRoundOption[] {
+  const logPath = join(trajDir, 'eval_log.jsonl')
+  if (!existsSync(logPath)) return []
+  const byIter = new Map<number, EvalRoundOption>()
+  try {
+    for (const line of readFileSync(logPath, 'utf8').split(String.fromCharCode(10))) {
+      if (!line.trim()) continue
+      try {
+        const r = JSON.parse(line) as Record<string, unknown>
+        if (r.event !== 'eval_summary') continue
+        const iter = Number(r.iter ?? -1)
+        const wver = String(r.wver ?? '')
+        if (!Number.isInteger(iter) || iter < 0 || !wver) continue
+        const games = typeof r.games === 'number' && Number.isFinite(r.games) ? r.games : null
+        const wins = typeof r.wins === 'number' && Number.isFinite(r.wins) ? r.wins : null
+        const rawWr = typeof r.winRate === 'number' && Number.isFinite(r.winRate) ? r.winRate : null
+        byIter.set(iter, {
+          iter,
+          wver,
+          time: String(r.time ?? ''),
+          games,
+          wins,
+          winRate: rawWr ?? (games != null && games > 0 && wins != null ? wins / games : null),
+          reusedWver: r.reused_wver === true,
+        })
+      } catch {
+        /* skip bad line */
+      }
+    }
+  } catch {
+    return []
+  }
+  return [...byIter.values()].sort((a, b) => b.iter - a.iter)
 }
 
 /** eval 逐局胜负表：iter → `stage:seed` → win（同键重复落账取最后一条）。
