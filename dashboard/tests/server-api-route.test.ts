@@ -9,6 +9,7 @@
 
 import { actions, loadConfig, post, postJson } from './helpers/console-fixture'
 import { configPath } from '../src/core/paths'
+import { EVAL_A_BUSY_KEY } from '../src/server/eval-a-run'
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'fs'
 
@@ -124,6 +125,21 @@ describe('console/api.routeAction', () => {
       expect(r.__status).toBe(409)
     } finally {
       actions.busy.delete('node:self')
+    }
+  })
+
+  it('evalA 单槽被占 ⇒ 409（忙判在 spawn 之前：不真起 python）', async () => {
+    actions.busy.add(EVAL_A_BUSY_KEY)
+    try {
+      const r = (await postJson('evalA', {
+        course: 'c4-dodge',
+        ckpt: 'nn-training/weights/c4-dodge.it27.json',
+        iter: 27,
+      })) as { __status: number; message: string }
+      expect(r.__status).toBe(409)
+      expect(r.message).toContain('已在运行')
+    } finally {
+      actions.busy.delete(EVAL_A_BUSY_KEY)
     }
   })
 

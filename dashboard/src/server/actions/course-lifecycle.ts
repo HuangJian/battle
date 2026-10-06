@@ -452,7 +452,9 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
         ...(autoBaseline
           ? autoBaseline.ok
             ? [
-                `it0 基线评估已后台启动（it0 = 本段起点权重；读数回填 eval_log，日志 tmp/${c}/evalA.log）`,
+                autoBaseline.queued
+                  ? 'it0 基线评估已排队（前面还有 evalA 在跑；跑完自动开始，读数回填 eval_log）'
+                  : `it0 基线评估已后台启动（it0 = 本段起点权重；读数回填 eval_log，日志 tmp/${c}/evalA.log）`,
               ]
             : [`it0 基线评估未能启动（${autoBaseline.message}）——停课 → 重新开课会自动补跑`]
           : []),
