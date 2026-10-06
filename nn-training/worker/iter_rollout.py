@@ -34,8 +34,9 @@ import subprocess
 import time
 from collections.abc import Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 # 单局看门狗的口径常量与 eval **共用一份**（`common/game_watch.py`）：点名线 5s、首次尝试硬顶
 # 也是 5s（用户口径「单局 >5s 肯定不正常」⇒ 超时原地重跑）、重试上限 ×4、最多 3 次、轮询 0.5s。
@@ -45,6 +46,7 @@ from common import game_watch
 from common.log_bundle import LogBundle
 from common.platform_utils import (
     KILL_REAP_SEC,
+    call_bounded,
     cores_note,
     cpu_worker_slots,
     keep_unreaped,
@@ -449,6 +451,88 @@ def _run_one_game_with_retries(
     )
 
 
+def _run_one_game_bounded(
+    bun: str,
+    argv: list[str],
+    job_dir: Path,
+    ts_dir: Path,
+    out_dir: str,
+    timeout_sec: float,
+    log=lambda msg: None,
+    explicit: bool = False,
+    pool: serve_pool.ServePool | None = None,
+    *,
+    ceiling_sec: float | None = None,
+) -> tuple[float, int]:
+    """跑一局，但**本线程永远在墙钟上界内返回**：真活交给一条可放弃的 daemon 线程。
+
+    为什么需要它（2026-10-06 Kaggle 离线轮「整轮停滞十几分钟」取证）：一局的路径上有若干
+    **无法从 Python 里取消**的阻塞点——挂住的挂载点上的 `mkdir`/`open`/`write`/`rmtree`，
+    以及 `Popen` 等子进程 exec 成功的那一手 `os.read`（子进程卡在 D 状态的 execve，父进程
+    就跟着无限等）。它们既不返回也不抛 ⇒ 那一局的 future 永远不结算 ⇒ 轮循环的 `wait()`
+    永远收不齐 ⇒ **轮内重投那套护栏一次都触发不了**（它的触发条件是「有 future 抛了
+    `UnreapableChildError`」）。现场：每 120s 一条「整轮停滞：… 还有 55 局在飞」，一局都不
+    结算，十几分钟不动；单局看门狗（5s 硬顶）此刻根本没被走到——卡的那一步在它**之前**。
+
+    上界超了就是**机器级停滞**（机器卡在不可取消的 IO 上，与收不了尸同一族）：扔
+    `UnreapableChildError` 交回整轮重投（只补没产出的局）——本局**不**就地重跑（同一个
+    `w{i}/` 上可能还有活写者，`_clean_attempt` 存在的全部理由）。被放弃的那条线程是 daemon：
+    不 join、不拖住任何东西，机器一好它自己结束。
+
+    `ceiling_sec=None` ⇒ 按 `game_watch.game_ceiling_sec()` 现场算（尝试次数 × 宽容的硬顶 +
+    回收预算 + 余量）；用例可传毫秒级的值（判据与绝对长度无关）。
+    """
+    label = _game_label(argv)
+    ceiling = (
+        game_watch.game_ceiling_sec(timeout_sec, explicit=explicit)
+        if ceiling_sec is None
+        else float(ceiling_sec)
+    )
+    ok, res = call_bounded(
+        lambda: _run_one_game_with_retries(
+            bun, argv, job_dir, ts_dir, out_dir, timeout_sec, log, explicit, pool
+        ),
+        ceiling,
+        name=f"rollout-{label}",
+    )
+    if not ok:
+        where = str(job_dir / out_dir / ROLLOUT_LOG_NAME)
+        log(game_watch.ceiling_line("rollout", label, ceiling, where))
+        raise UnreapableChildError(
+            f"rollout 单局超界（{ceiling:g}s 内整条链路都没返回）：{label}"
+            f"——大概率卡在不可中断的 IO（挂住的挂载点：mkdir/open/写盘/子进程 exec 握手）；"
+            "本局不再跑（同一目录上可能还有活写者）；整轮交回 worker，**立即**重领重投"
+            f"同一份活（不睡/不报失败/云机不停）；现场 {where}"
+        ) from None
+    return cast(tuple[float, int], res)
+
+
+def _scan_bounded(what: str, fn: Any, log, *, where: str) -> Any:
+    """轮末扫盘的**有上界的等**（`verify_shards` / `collect_reports` / `collect_shard_manifests`）。
+
+    为什么（2026-10-06 §32.4 ⑤ 的下一个位置）：这三步都在**主线程**上做全量文件 IO（rglob 扫
+    shard、逐局读 `manifest.json`/`_rl_report.json`、`data_fp` 还要哈希每个 shard 的内容）——挂住
+    的挂载点上它们一样**不返回也不抛**；而这里连「整轮停滞」都没有（那行只在轮循环里打）⇒ 整轮
+    对日志**完全静默**（比游戏线程那一档更难查，因为连“还在飞”的读数都没有）。
+
+    超界 ⇒ 机器级停滞（`UnreapableChildError`，与一局超界同一档）：本轮产物结不了算 ⇒ 交回
+    worker 还租约 + **立即**重领重投（不睡/不报失败/云机不停）。`fn` 自己抛的异常（如
+    `verify_shards` 的 `ProtocolError`）由 `call_bounded` 原样重抛 —— 确定性拒收**不许**被这条
+    上界改成「机器卡住」（那是把内容的错记在机器头上）。
+    """
+    ceiling = float(game_watch.SCAN_CEILING_SEC)
+    ok, value = call_bounded(fn, ceiling, name=what)
+    if not ok:
+        log(game_watch.scan_ceiling_line("rollout", what, ceiling, where))
+        raise UnreapableChildError(
+            f"rollout 轮末 {what} 超界（{ceiling:g}s 内没返回）：{where}"
+            "——大概率卡在不可中断的 IO（挂住的挂载点：rglob/读 manifest/_rl_report、"
+            "data_fp 哈希）；本轮产物结不了算，交回 worker 还租约 + **立即**重领重投"
+            "（不睡/不报失败/云机不停）"
+        ) from None
+    return value
+
+
 def scan_shard_dirs(job_dir: Path) -> list[Path]:
     """扫出 job 目录下的 shard 目录（`rl_s{stage}_seed{seed}` 且带 manifest.json）。
 
@@ -671,9 +755,15 @@ def run_iter_rollout(
             # 已结算的局一个字都不重跑（用户口径：不许空转烧配额）。
             pending: list[int] = [i for i in range(len(argvs))]
             while pending:
+                # 一局**整条链路**的墙钟上界（见 `game_watch.game_ceiling_sec`）：它才是「一局
+                # 永不放跑整轮」的那条闸。不设它的话，任何一步不可取消的阻塞（挂住的挂载点上的
+                # mkdir/open/写盘、`Popen` 等 exec 的握手）都会让 future 永不结算 ⇒ 下面的 `wait`
+                # 永远收不齐 ⇒ 重投那套护栏一次也触发不了（2026-10-06 现场）。每次尝试重新算：
+                # 常量可被用例 patch，展开的值会进超界行（读数与判据同一份）。
+                ceiling_sec = game_watch.game_ceiling_sec(timeout_sec, explicit=explicit)
                 futs = {
                     ex.submit(
-                        _run_one_game_with_retries,
+                        _run_one_game_bounded,
                         bun,
                         argvs[i],
                         jd,
@@ -683,6 +773,7 @@ def run_iter_rollout(
                         log,
                         explicit,
                         pool,
+                        ceiling_sec=ceiling_sec,
                     ): i
                     for i in pending
                 }
@@ -740,17 +831,33 @@ def run_iter_rollout(
                     # 只有操作员显式设了上限才走这里（缺省不限）：上抛交回调用方自己的重试语义。
                     raise RetryableError(
                         f"rollout 机器级停滞：轮内已重投 {round_retries - 1} 次仍有 "
-                        f"{len(stuck)} 局收不了尸（{ENV_ROUND_RETRY_MAX}={retry_cap} 是操作员设的上限）"
+                        f"{len(stuck)} 局没产出（收不了尸/超界；{ENV_ROUND_RETRY_MAX}={retry_cap} "
+                        "是操作员设的上限）"
                         f"——剩余 {len(stuck)} 局交回上层重试；现场见各局 w*/rollout.log"
                     ) from None
                 log(
-                    f"WARN rollout 整轮重投第 {round_retries} 次：本次尝试有 {len(stuck)} 局收不了尸"
-                    f"（机器级停滞，已结算 {settled_n}/{len(argvs)} 局）——只补这 {len(stuck)} 局，"
+                    f"WARN rollout 整轮重投第 {round_retries} 次：本次尝试有 {len(stuck)} 局没产出"
+                    f"（机器级停滞：收不了尸/单局超界，已结算 {settled_n}/{len(argvs)} 局）——"
+                    f"只补这 {len(stuck)} 局，"
                     f"先清掉它们的半截产出（旧写者可能还在）；不报失败、不退租约、云机不停"
                     + ("" if not retry_cap else f"（上限 {retry_cap} 次）")
                 )
                 for i in stuck:
-                    _clean_attempt(jd, argvs[i])
+                    # 清理也是**文件 IO**（rglob + rmtree）：挂住的挂载点上它会一样永不返回 ——
+                    # 主线程绝不能在这里被卡住（那同样会让整轮对日志静默）。有界地放弃它：
+                    # 旧写者本身正卡在不可中断的 IO 里，删不动也只能带着半截产出往下走
+                    # （下一轮的同名写入会截断它，兜底口径见 `_clean_attempt`）。
+                    cleaned, _ = call_bounded(
+                        partial(_clean_attempt, jd, argvs[i]),
+                        ceiling_sec,
+                        name=f"clean-{_game_label(argvs[i])}",
+                    )
+                    if not cleaned:
+                        log(
+                            f"WARN rollout 半截产出清不掉：{_game_label(argvs[i])}"
+                            f"（{ceiling_sec:g}s 内没返回——挂载点 IO 还没好）"
+                            "——不就地等，照常重投这一局（不是失败，云机不停）"
+                        )
                 pending = sorted(stuck)
         ok = True
     finally:
@@ -764,11 +871,24 @@ def run_iter_rollout(
             rb.emit("kind=iter rollout 中断")
     if round_retries:
         # 重投过就要可见（它是“机器卡过”的唯一记分）——正常轮恒空。
-        rb.add("整轮重投", f"{round_retries} 次（机器级停滞：收不了尸）")
-    shard_dirs = verify_shards(jd, iter_expected_data_fp(spec))
-    reports = collect_reports(jd, spec)
+        rb.add("整轮重投", f"{round_retries} 次（机器级停滞：收不了尸/超界）")
+    # ★ 轮末三步都在主线程上做全量文件 IO（rglob + 逐局读 JSON + 内容哈希）：挂住的挂载点上
+    # 它们永不返回，而这里没有轮循环、也就没有「整轮停滞」那行能说话 ⇒ 整轮对日志完全静默。
+    # 每一步都有自己的上界（`game_watch.SCAN_CEILING_SEC`），超界按机器级停滞上交。
+    where = str(jd)
+    expected_fp = iter_expected_data_fp(spec)
+    shard_dirs = _scan_bounded(
+        "verify_shards", lambda: verify_shards(jd, expected_fp), log, where=where
+    )
+    reports = _scan_bounded("collect_reports", lambda: collect_reports(jd, spec), log, where=where)
+    # `combine_reports` 是纯 CPU 聚合（不碰盘）：不包（上界只给**不可取消的等**）。
     report = combine_reports(reports)
-    per_game = collect_shard_manifests(shard_dirs)
+    per_game = _scan_bounded(
+        "collect_shard_manifests",
+        lambda: collect_shard_manifests(shard_dirs),
+        log,
+        where=where,
+    )
     # 逐局压缩画像随轮账本行走：云机离线腿没人把单局 manifest 拉回本机（轮末 prune 就删了），
     # 而控制台的「耗时/击杀/残血/道具」列是**逐局**聚合的 ⇒ 不带它那几列永远空（见
     # `biz/reports.compact_per_game` 的 docstring）。在线腿已有 `dist/<节点>/rl_s*/` 路也不冲突

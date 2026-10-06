@@ -388,6 +388,81 @@ def test_unreapable_eval_game_is_resubmitted_in_round_never_failing(
     assert len([r for r in rows if r["event"] == "eval_summary"]) == 1
 
 
+def test_eval_game_stuck_in_uncancellable_io_is_resubmitted_in_round(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ eval 腿同一条护栏：一局卡在**不可取消**的阻塞点上，不许把整轮当人质。
+
+    与 rollout 腿同一个现场（2026-10-06）：挂住的挂载点上的 mkdir/open/写盘、`Popen` 等子进程
+    exec 的握手都不返回也不抛 ⇒ 那个 slot 永远不回来、轮循环永远收不齐；而机器级停滞的重投只
+    在「有局抛了 `UnreapableChildError`」时才触发 ⇒ 旧形态下一次都触发不了（日志只剩每 120s
+    一条「整轮停滞」）。修法 = 一局有自己的墙钟上界（`game_watch.game_ceiling_sec` +
+    `platform_utils.call_bounded`）：超界按机器级停滞收场，只补没评的局，整轮照常跑成。
+    """
+    release = threading.Event()
+    calls: list[tuple[int, int]] = []
+    blocked: list[tuple[int, int]] = []
+    course = _course(eval_stages="0-1", eval_games_per_stage=2, eval_every=1)
+    plan = eval_plan_of(course)
+    toy = eval_pairs(plan, 1)  # 语料里的一个真 (stage,seed)（种子是 860001+，不是 1）
+    target = toy[-1]
+
+    def stuck(bun, weights, stage, seed, out_dir, max_ticks, difficulty, timeout, wver, **kw):
+        calls.append((stage, seed))
+        if (stage, seed) == target and not blocked:
+            blocked.append((stage, seed))
+            release.wait()  # 不可取消：永不返回
+            raise AssertionError("不可取消的阻塞不该返回（本用例靠超界收场）")
+        Path(out_dir).mkdir(parents=True, exist_ok=True)
+        return {
+            "win": stage == 0,
+            "cleared": True,
+            "outcome": "win" if stage == 0 else "loss",
+            "elapsedSec": 0.01,
+            "stage": stage,
+            "seed": seed,
+        }
+
+    monkeypatch.setattr(offline_eval, "run_local_eval_game", stuck)
+    monkeypatch.setattr(offline_eval, "find_bun", lambda *_a, **_k: "bun")
+    # 上界只裁**替身那一次**（毫秒级）；替身之后的真跑给足（与 rollout 腿的用例同规：
+    # 判据是「超界有没有收场」，与绝对长度无关）。
+    monkeypatch.setattr(
+        game_watch,
+        "game_ceiling_sec",
+        lambda base, explicit=False, reap_sec=None: 0.3 if not blocked else 60.0,
+    )
+    logs, log = _logs()
+    t0 = time.time()
+    try:
+        out = run_cloud_eval(
+            plan=plan,
+            it=1,
+            weights_path=_weights(tmp_path),
+            eval_jsonl=tmp_path / "eval_log.jsonl",
+            ts_root=_ts_root(tmp_path),
+            work_dir=tmp_path / "work",
+            course=course,
+            bun="bun",
+            slots=3,
+            log=log,
+        )
+        wall = time.time() - t0
+    finally:
+        release.set()  # 放掉替身那条 daemon 线程（别让它白占一条线程到套件结束）
+    # timing-ok: 上界兜底（超界只需有界，30s 只挡挂起：旧形态在这里永远不会返回）
+    assert wall < 30.0, f"整轮不许被一局按死：{wall:.1f}s"
+    assert blocked == [target], "替身必须真的卡过一次（否则本用例什么都没测到）"
+    # 超界必须当场点名（带局身份 + 上界值），且**不**走单局重跑（同一目录上可能还有活写者）
+    assert any("单局超界" in m and f"s{target[0]}/d{target[1]}" in m for m in logs), logs
+    assert not any("单局重试" in m for m in logs), logs
+    # 整轮跑成：4 局全落账 + 重投一次 + 零失败
+    assert out["ran"] and out["settled"] == 4 and out["games"] == 4, out
+    assert out["roundRetries"] == 1 and out["failed"] == 0, out
+    assert any("整轮重投第 1 次" in m and "机器级停滞" in m for m in logs), logs
+    assert calls.count(target) == 2, calls
+
+
 def test_eval_round_retry_cap_is_the_operators_exit_valve(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

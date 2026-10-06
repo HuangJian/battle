@@ -24,6 +24,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -147,6 +148,47 @@ def test_reap_bounded_returns_true_for_a_child_that_already_exited() -> None:
     assert plat.reap_bounded(p, 10.0) is True
 
 
+# ------------------------------------------------------------------ call_bounded（可放弃的调用）
+
+
+def test_call_bounded_returns_the_value_and_reraises_in_the_caller() -> None:
+    """预算内跑完：返回值原样带回；`fn` 抛的异常在**调用方线程**里重抛（调用点的 except 不变）。"""
+    assert plat.call_bounded(lambda: 7, 5.0) == (True, 7)
+    boom = ValueError("boom")
+
+    def _raise() -> int:
+        raise boom
+
+    with pytest.raises(ValueError) as ei:
+        plat.call_bounded(_raise, 5.0)
+    assert ei.value is boom, "重抛的必须是同一个异常对象（别包一层换成别的类型）"
+
+
+def test_call_bounded_gives_up_instead_of_waiting_forever() -> None:
+    """★ 卡住的调用**只在预算内等**：超界返回 False，**绝不 join**（那条线程是 daemon）。
+
+    为什么（2026-10-06 云机离线轮「整轮停滞十几分钟」取证）：挂住的挂载点上的
+    `mkdir`/`open`/写盘、以及 `Popen` 等子进程 exec 的握手都是**不可取消**的——它们既不返回
+    也不抛；而 `concurrent.futures` 的线程不是 daemon（解释器退出时会 join）⇒ 旧形态里一条
+    卡住的线程能把整轮、乃至进程退出一起按死。这里钉的就是「预算到点就回来」。
+    """
+    stuck = threading.Event()
+    t0 = time.monotonic()
+    ok, value = plat.call_bounded(stuck.wait, 0.1)  # 永不置位 = 永不返回
+    wall = time.monotonic() - t0
+    # timing-ok: 上界兜底（只挡「没回来」；0.1s 预算不该变成 5s 的等待）
+    assert (ok, value) == (False, None) and wall < 5.0, f"超界必须当场回来（{wall:.2f}s）"
+    assert not stuck.is_set()
+
+
+def test_call_bounded_does_not_join_the_abandoned_thread() -> None:
+    """被放弃的线程不 join：调用返回到解释器退出之间，它都不拖任何东西。"""
+    release = threading.Event()
+    ok, _ = plat.call_bounded(lambda: release.wait(), 0.05)
+    assert ok is False
+    release.set()  # 放掉它，别给别的用例留一条转着的线程
+
+
 # ------------------------------------------------------------------ 收不了尸的记账
 
 
@@ -190,5 +232,11 @@ def test_no_leftover_bookkeeping_from_this_file() -> None:
 def test_the_helpers_are_documented_in_the_module_map() -> None:
     """四个原语要在模块 docstring 的导出清单里（那一层的地图）。"""
     doc = plat.__doc__ or ""
-    for name in ("popen_own_group", "kill_process_tree", "reap_bounded", "KILL_REAP_SEC"):
+    for name in (
+        "popen_own_group",
+        "kill_process_tree",
+        "reap_bounded",
+        "KILL_REAP_SEC",
+        "call_bounded",
+    ):
         assert name in doc, name

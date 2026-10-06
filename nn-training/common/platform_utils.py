@@ -27,6 +27,8 @@ trainer/queue.py 各自维护了一份逐字节相同的 `_POPEN_NO_WINDOW`（Wi
   reap_bounded(proc, timeout) —— 有界回收（waitpid）；超时返回 False，**绝不无限等**。
   KILL_REAP_SEC —— 回收预算的唯一数字（kill 之后最多等这么久）。
   keep_unreaped(proc) / sweep_unreaped() / unreaped_count() —— 收不了尸的进程记账。
+  call_bounded(fn, timeout) —— **可放弃**地调用一个函数（自己的 daemon 线程 + 有上限的等）：
+    调用点永远在预算内回来，被放弃的那条线程不 join（见 docstring）。
 """
 
 from __future__ import annotations
@@ -36,6 +38,8 @@ import shutil
 import signal
 import subprocess
 import sys
+import threading
+from collections.abc import Callable
 from typing import Any
 
 # Windows：spawn 子进程时用 CREATE_NO_WINDOW，避免黑控制台窗口弹出抢焦点。
@@ -502,3 +506,47 @@ def sweep_unreaped() -> int:
 def unreaped_count() -> int:
     """还没收掉的「僵尸候选」个数（诊断与用例用）。"""
     return len(_UNREAPED)
+
+
+def call_bounded(
+    fn: Callable[[], Any], timeout: float, *, name: str = ""
+) -> tuple[bool, Any]:
+    """**可放弃**地调用 `fn`：在一条 daemon 线程里跑，本线程最多等 `timeout` 秒。
+
+    返回 `(True, fn 的返回值)`（预算内跑完）或 `(False, None)`（**超界**）。`fn` 抛的异常
+    在**调用方线程里原样重抛** ⇒ 调用点的 `except` 语义与直接调用逐字相同。
+
+    为什么必须有它（2026-10-06 Kaggle 离线轮「整轮停滞十几分钟」取证）：一局子进程的路径上
+    有若干**无法从 Python 里取消**的阻塞点——挂住的挂载点上的 `mkdir`/`open`/`write`/
+    `rmtree`，以及 `subprocess.Popen` 等子进程 exec 成功的那一手 `os.read`（子进程卡在 D 状态
+    的 execve 里，父进程就跟着无限等）。它们卡住时**既不返回也不抛**⇒ 那一局的线程永远不结算
+    ⇒ 轮循环里 `wait()` 永远收不齐 ⇒ 轮内那套「机器级停滞」护栏一次都触发不了（它的触发条件
+    是「有 future 抛了 `UnreapableChildError`」）。现场读数：每 120s 一条「整轮停滞：… 还有 55
+    局在飞」、一局都不结算，十几分钟不动。
+
+    与 `reap_bounded` 的分工：那个是「等一个**已经被 kill 的进程**死」的预算；这个是「等一段
+    **任意**的代码返回」的预算，用来把「不可取消的阻塞」从**结构上**挪出关键线程。
+
+    被放弃的那条线程是 **daemon**：不 join、不拖住任何东西（`concurrent.futures` 的线程不是
+    daemon，解释器退出时会 join 它们 ⇒ 卡住的那条会把「进程退出」也一起按死）。卡住的是哪条
+    代码由调用方在超界时响亮记一笔（诊断行不能埋在这层）。
+    """
+    box: dict[str, Any] = {}
+    done = threading.Event()
+
+    def _run() -> None:
+        try:
+            box["value"] = fn()
+        except BaseException as e:  # 原样带回调用方线程（含 SystemExit/KeyboardInterrupt）
+            box["error"] = e
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_run, name=name or "bounded-call", daemon=True)
+    t.start()
+    if not done.wait(max(0.0, float(timeout))):
+        return False, None
+    err = box.get("error")
+    if err is not None:
+        raise err
+    return True, box.get("value")

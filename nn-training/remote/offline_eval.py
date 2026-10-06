@@ -39,7 +39,7 @@ from typing import Any
 # 测试 patch 了 game_watch 那份、调用点还在读旧绑定就是静默的错口径。
 from common import game_watch
 from common.log import log as _rl_log
-from common.platform_utils import cpu_worker_slots, rmtree_best_effort
+from common.platform_utils import call_bounded, cpu_worker_slots, rmtree_best_effort
 from common.protocol import UnreapableChildError
 from worker import serve_pool
 from worker.eval_local import (
@@ -480,7 +480,6 @@ def run_cloud_eval(
         # 重试放宽（`attempt_timeout_sec`）——理由与 rollout 逐字相同。
         explicit = float(game_timeout_sec or 0.0) > 0
         base_cap = float(game_timeout_sec) if explicit else game_watch.DEFAULT_GAME_TIMEOUT_SEC
-
         def run_one(task: tuple[int, int]) -> None:
             stage, seed = task
             game_dir = Path(work_dir) / f"eval-{int(it)}-s{stage}-d{seed}"
@@ -494,6 +493,13 @@ def run_cloud_eval(
             wall = 0.0
             for attempt in range(1, game_watch.GAME_MAX_ATTEMPTS + 1):
                 cap = game_watch.attempt_timeout_sec(base_cap, attempt, explicit=explicit)
+                # 一局**整条链路**的墙钟上界（与 rollout 腿同一个口径，见
+                # `game_watch.game_ceiling_sec`）：一局的路径上有不可取消的阻塞点（挂住的挂载点
+                # 上的 mkdir/open/写盘、`Popen` 等子进程 exec 的握手），它们既不返回也不抛 ⇒
+                # 那一局的 slot 永远不回来、`ex.map` 永远收不齐（2026-10-06 rollout 腿的现场；
+                # 这条腿同形）。超界按**机器级停滞**收场：轮内重投只补没评的局（与
+                # `UnreapableChildError` 同一条处置）。每次尝试重算——常量可被用例 patch。
+                ceiling_sec = game_watch.game_ceiling_sec(base_cap, explicit=explicit)
                 if attempt > 1:
                     shutil.rmtree(game_dir, ignore_errors=True)  # 上一把可能留半截 _eval_report
                     log(
@@ -502,27 +508,46 @@ def run_cloud_eval(
                     )
                 t_game = time.time()
                 try:
-                    manifest = run_local_eval_game(
-                        bun_bin,
-                        str(wpath),
-                        int(stage),
-                        int(seed),
-                        game_dir,
-                        int(plan.max_ticks),
-                        plan.difficulty,
-                        float(cap),
-                        key16,
-                        stage_json=(course.stage_json(int(stage)) if course is not None else "") or "",
-                        lives_override=plan.lives,
-                        player_level=plan.level,
-                        cwd=str(ts),
-                        log_fn=log,
-                        attempt=attempt,
-                        pool=pool,
-                        # R2 事件 rung：云机跑 ts_code 新鲜 bundle（sha 版），与本机同语义；
-                        # 缺席 = 老行为。课程无该键（旧课）⇒ getattr 缺省 False。
-                        decision_events=bool(getattr(course, "decision_events", False)),
+                    # 真活跑在一条**可放弃的 daemon 线程**里，本线程只在 `ceiling_sec` 内等：
+                    # 超界（不可取消的阻塞）不会把这一轮的 slot 永远按住。
+                    finished, manifest = call_bounded(
+                        lambda: run_local_eval_game(
+                            bun_bin,
+                            str(wpath),
+                            int(stage),
+                            int(seed),
+                            game_dir,
+                            int(plan.max_ticks),
+                            plan.difficulty,
+                            float(cap),
+                            key16,
+                            stage_json=(
+                                course.stage_json(int(stage)) if course is not None else ""
+                            )
+                            or "",
+                            lives_override=plan.lives,
+                            player_level=plan.level,
+                            cwd=str(ts),
+                            log_fn=log,
+                            attempt=attempt,
+                            pool=pool,
+                            # R2 事件 rung：云机跑 ts_code 新鲜 bundle（sha 版），与本机同语义；
+                            # 缺席 = 老行为。课程无该键（旧课）⇒ getattr 缺省 False。
+                            decision_events=bool(getattr(course, "decision_events", False)),
+                        ),
+                        ceiling_sec,
+                        name=f"eval-{lab}",
                     )
+                    if not finished:
+                        # 超界 = 机器卡在不可取消的 IO 上（与「收不了尸」同一族）：按机器级停滞
+                        # 收场 —— 不就地重跑，交给轮内重投只补没评的局。
+                        log(game_watch.ceiling_line("eval", lab, ceiling_sec, str(game_dir)))
+                        raise UnreapableChildError(
+                            f"[eval-cloud] it{it} 单局超界（{ceiling_sec:g}s 内整条链路都没返回）："
+                            f"{lab}——大概率卡在不可中断的 IO（挂住的挂载点：mkdir/open/写盘/"
+                            "子进程 exec 握手）；本局不再跑，交回整轮重投（不报失败、云机不停）；"
+                            f"现场 {game_dir}"
+                        ) from None
                     wall = time.time() - t_game
                     break
                 except UnreapableChildError:

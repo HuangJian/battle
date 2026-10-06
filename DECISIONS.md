@@ -7797,3 +7797,60 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   `worker/{ppo/engine,ppo/np_core,ppo/trainer,models/student,scripts/init_spatial_leg,train/bc}.py` · 测试：`tests/nn/{policy-extra,spatial-tower,spatial-head-nonconstant}.test.ts` ·
   `nn-training/tests/{worker/test_dataset_mirror,worker/test_spatial_leg_smoke,common/test_schema_fingerprint}.py` · 探针：`nn-training/tools/spatial-probe*.py`。
 - **指针**：计划与读数表 → `plan/policy-spatial-head.plan.md` §7；探针 dump → `tmp/spatial-probe/hu150/`；S0-a → `tmp/spatial-s0a/`。
+
+## §2026-10-06-goalnn-rollout-io-ceiling（2026-10-06，云机离线 rollout 第三次「整轮卡死十几分钟」：一局有了自己的墙钟上界，不可取消的阻塞不再把人质扣到整轮）
+
+- **背景**：用户真机日志（Kaggle 离线轮 `x21-psh-a`）——§24 的有界回收/整轮重投/停滞点名三件套都在，
+  熔断行之后仍是每 120s 一条「整轮停滞：… 还有 55 局在飞」、一局都不结算，十几分钟不动；
+  **没有**一条「整轮重投」行，且「在飞」的数字一直不变 = 那 55 条线程谁也不返回。
+- **根因**：轮内重投的**唯一入口**是「某个 future 抛了 `UnreapableChildError`」；而一局的路径上有一批
+  **无法从 Python 里取消**的阻塞点（挂住的挂载点上的 `mkdir`/`open`/`write`/`rmtree`，以及
+  `Popen` 等子进程 exec 成功的那一手 `os.read`）——它们既不返回也不抛 ⇒ future 永不结算 ⇒
+  轮循环的 `wait()` 永远收不齐 ⇒ 永远出不了 `while inflight` ⇒ 护栏一次也触发不了。
+  「整轮停滞」那行只负责说，不管处置（拿不到 future 的结局）。⚠ 与 §24 的分工：那条修的是
+  「**子进程**收不了尸」，本条修的是「**调用线程自己**根本没走到有界回收那一步」。
+- **决定**：① 新增 `common.platform_utils.call_bounded(fn, timeout)`：真活跑在一条 **daemon** 线程里，
+  调用线程只在预算内等，超界返回 `(False, None)` 且**绝不 join**（`concurrent.futures` 的线程不是
+  daemon，解释器退出时会 join ⇒ 卡住的线程会把「进程退出」也一起按死，故不能用它兜这一层）；
+  `fn` 的异常在**调用方线程**里原样重抛（调用点 `except` 语义不变）。② 新增
+  `game_watch.GAME_IO_SLACK_SEC` + `game_ceiling_sec(base, explicit)` = `GAME_MAX_ATTEMPTS ×
+  (2 × 最宽尝试硬顶 + KILL_REAP_SEC) + 余量`（「2 ×」= 池回退那份）+ `ceiling_line()`。
+  ③ rollout 腿：轮循环提交 `_run_one_game_bounded`（超界 ⇒ `UnreapableChildError`，与「收不了尸」
+  同一条处置：**不就地重跑** + 清半截产出 + 整轮重投只补没产出的局）；`_clean_attempt` 也走
+  `call_bounded`（删不动就响亮一行照常重投）。④ eval 腿同一口径（`ex.map` 是同一个死结）。
+  ⑤ 轮账/重投文案改「没产出（收不了尸/超界）」。
+- **备选与否决**：① 轮循环 `wait()` 到点就放弃 future（放弃 future ≠ 停线程，且
+  `ThreadPoolExecutor.__exit__` 会 join 它们 ⇒ 只是把「卡在游戏线程」换成「卡在解释器退出」）；
+  ② 调大 5s 硬顶/就绪上限（卡住的那一步在那些闸**之后**）；③ 超界后原地重跑（两个写者写同一份
+  shard ⇒ 静默错数据）；④ 超界当「这一轮的确定性失败」扔出去（把机器的病记在内容头上 ⇒ hub 终局
+  ⇒ 停腿 ⇒ 反手停云机，与 §24/§25 口径冲突）；⑤ 超界即重启进程（丢 PPO 状态与整轮产出，代价远大于
+  重投那几局；留作「重投一直不降」时的下一档）。
+- **违反后果**：任何人再把「一局的整条链路」放回**没有上界**的等上面 ⇒ 十几分钟整轮静默会原样回来，
+  且日志里只会重复那行已经不再具有处置权的「整轮停滞」。
+- **落点**：`nn-training/common/{platform_utils,game_watch}.py` · `nn-training/worker/iter_rollout.py` ·
+  `nn-training/remote/offline_eval.py` · 测试：`nn-training/tests/{common/test_platform_utils_proc,
+  common/test_game_watch,remote/test_remote_iter,remote/test_offline_eval_cloud}.py`。
+- **指针**：全文（现场读数 / 不可取消阻塞点清单 / 下次真机该看的五个读数）→ `docs/nn/runtime-opt.md` §32。
+
+## §2026-10-06-goalnn-round-end-scan-ceiling（2026-10-06，轮末扫盘也有上界：主线程上的全量盘 IO 不再让整轮对日志静默）
+
+- **背景**：`§2026-10-06-goalnn-rollout-io-ceiling` 的同日收尾（当时 §32.4 ⑤ 就点名了下一个位置）。
+  `verify_shards` / `collect_reports` / `collect_shard_manifests` 在**主线程**上做全量文件 IO
+  （rglob 扫 shard、逐局读 `manifest.json`/`_rl_report.json`，`data_fp` 还要哈希每个 shard 的内容）
+  ——挂住的挂载点上它们**一样不返回也不抛**，而那里**连「整轮停滞」都没有**（那行只在轮循环里打）
+  ⇒ 整轮对日志完全静默（比游戏线程那一档更难查：连「还有几局在飞」都没有）。
+- **决定**：① 新增 `common/game_watch.SCAN_CEILING_SEC = 60.0`（**单列的第三个数**：扫盘没有子进程/
+  重试/写盘 ⇒ 不能沿 `game_ceiling_sec`，那个含尝试次数与回收预算，会大到让挂死的扫盘也过关；
+  正常一轮扫盘亚秒级 ⇒ 60s 是「机器挂了」不是「盘慢」）+ `scan_ceiling_line()`；
+  ② `worker/iter_rollout._scan_bounded` 把三步各套一层 `call_bounded`，超界 ⇒ `UnreapableChildError`
+  （本轮产物结不了算 ⇒ 还租约 + 立即重领重投；不报失败、云机不停）；
+  ③ **异常分类不许被上界改掉**：`verify_shards` 的 `ProtocolError`（实产集 ≠ 声明集）由 `call_bounded`
+  原样重抛 —— 确定性拒收不能被读成「机器卡住」（那是把内容的错记在机器头上）；`combine_reports`
+  是纯 CPU 聚合，不包。
+- **备选与否决**：① 复用 `game_ceiling_sec`（≈155s 起，对「扫一遍几百个小 JSON」太宽，等于没闸）；
+  ② 只要 `SCAN_CEILING_SEC` 报一行、不处置（那就是 §24.5 ④ 那种「说了但不动」的形态，正是本次事故的
+  成因）；③ 把超界当 `ProtocolError`（确定性拒收）上抛（会触发 `report_job_failure` ⇒ hub 终局 ⇒ 停腿
+  ⇒ 反手停云机，与 §24/§25 口径冲突）。
+- **落点**：`nn-training/common/game_watch.py` · `nn-training/worker/iter_rollout.py` ·
+  测试：`nn-training/tests/{common/test_game_watch,remote/test_remote_iter}.py`。
+- **指针**：`docs/nn/runtime-opt.md` §32.5（含「先红」取证：A/B 工作树上旧形态被 60s 外墙钟 kill）。
