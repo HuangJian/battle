@@ -43,6 +43,7 @@ import {
   isTrainingRow,
   kindBadge,
   type CourseMatrixRow,
+  type LoopComplete,
   type LoopQueueView,
   type ParallelOverviewView,
   matrixBadgeTone,
@@ -140,6 +141,9 @@ export interface CourseMatrixProps {
    *  hub 与意图都回到在线，而 `courses.<课>.rollout_src` 仍是 `run`（本课仍归云机）⇒ 本机在
    *  下一轮仍然收工、不采样（训练停住而面板看着「在训」，2026-09-24 / plan §2.5）。 */
   courseRolloutSrc?: Record<string, string> | null
+  /** ★2026-10-06：逐课停车态（`stateView.loopCompletes`，账本尾行 `run_complete`）——
+   *  状态列与 pill 同源说「已收官」（缺省 = 旧视图，行为不变）。 */
+  loopCompletes?: Record<string, LoopComplete> | null
   /** 当前查看课程（高亮）。 */
   course: string
   onSelectCourse: (course: string) => void
@@ -159,6 +163,7 @@ export function CourseMatrix({
   loopQueue,
   modeIntents,
   courseRolloutSrc,
+  loopCompletes,
   course,
   onSelectCourse,
   onAction,
@@ -174,6 +179,7 @@ export function CourseMatrix({
     queue: loopQueue,
     modeIntents,
     courseRolloutSrc,
+    loopCompletes,
     viewing: course,
     nowSec,
   })

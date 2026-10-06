@@ -152,7 +152,7 @@ export const EVAL_GAME_CLASS_LABEL: Record<EvalGameClass, string> = {
   timeout: '超时',
 }
 
-/** 单局 eval 行（最新 in-loop eval 逐局视图；iters.readLatestEvalGames 产出）。 */
+/** 单局 eval 行（最新 in-loop eval 逐局视图；iters.readEvalGames 产出）。 */
 export interface EvalGameRow {
   stage: number
   seed: number

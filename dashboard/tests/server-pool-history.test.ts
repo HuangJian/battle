@@ -1007,3 +1007,131 @@ describe('pool-history · 增量入账与扫描 memo（reload-perf W2）', () =>
     expect(src).toContain('readChunkLines(')
   })
 })
+
+// ────────────────────────── 离线腿剔除（2026-10-06 用户指令） ──────────────────────────
+// 口径：offline worker（云机）完成的轮 **算节点 PPO 贡献、不算 rollout/eval 贡献**
+// ——「剔除离线腿整段」。腿 = 课程账本里 `offline_artifact` 事件带的 it 集合。
+// PPO 侧（`contribution.ts` 读 `job_result_accepted` / `job_completed`）不走本模块，故不受影响。
+
+describe('pool-history · 离线腿剔除（offline worker 的轮不进采样贡献）', () => {
+  const now = Date.now()
+  const tsAt = (dayOffset: number, hhmmss = '12:00:00'): string => {
+    const d = new Date(now)
+    d.setDate(d.getDate() + dayOffset)
+    const y = d.getFullYear()
+    const m = String(d.getMonth() + 1).padStart(2, '0')
+    const day = String(d.getDate()).padStart(2, '0')
+    return `${y}-${m}-${day} ${hhmmss}`
+  }
+  const row = (node: string, it: number, ts: string, mode: 'rollout' | 'eval' = 'rollout') =>
+    JSON.stringify({ node, mode, it, ok: true, elapsedSec: 1.2, ts })
+  const iterEvent = (it: number, time = tsAt(0)) =>
+    JSON.stringify({ event: 'iteration', iter: it, time })
+  /** 云机离线腿的落盘痕迹（`hub/store_offline.py` 每轮一条）。 */
+  const artifact = (it: number) =>
+    JSON.stringify({ event: 'offline_artifact', run_id: 'r1', it, ts: 1791236340.9 })
+
+  const withRoot = (
+    flow:
+      | { name: string; meta: string[]; ledger?: string[] | null }
+      | Array<{ name: string; meta: string[]; ledger?: string[] | null }>,
+    fn: (root: string) => void,
+  ): void => {
+    const root = mkdtempSync(join(tmpdir(), 'bcity-pool-legs-'))
+    const prev = process.env.BCITY_POOL_DIR
+    process.env.BCITY_POOL_DIR = root
+    invalidateNodeHistoryMemo()
+    resetPoolHistoryCounters()
+    try {
+      const list = Array.isArray(flow) ? flow : [flow]
+      for (const f of list) {
+        const dir = join(root, f.name)
+        mkdirSync(dir, { recursive: true })
+        writeFileSync(join(dir, 'dist-agent-meta.jsonl'), `${f.meta.join('\n')}\n`, 'utf8')
+        if (f.ledger) {
+          writeFileSync(join(dir, 'training_log.jsonl'), `${f.ledger.join('\n')}\n`, 'utf8')
+        }
+      }
+      fn(root)
+    } finally {
+      if (prev === undefined) delete process.env.BCITY_POOL_DIR
+      else process.env.BCITY_POOL_DIR = prev
+      invalidateNodeHistoryMemo()
+      resetPoolHistoryCounters()
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  const T3 = tsAt(0, '08:00:00')
+  const T5 = tsAt(0, '09:00:00')
+  /** it3 三轮（2 rollout + 1 eval）+ it5 三行 —— 腿内/腿外的对照面。 */
+  const rows = (p: string): string[] => [
+    row(`${p}1`, 3, T3),
+    row(`${p}1`, 3, T3),
+    row(`${p}1`, 3, T3, 'eval'),
+    row(`${p}1`, 5, T5),
+    row(`${p}2`, 5, T5),
+    row(`${p}2`, 5, T5),
+  ]
+
+  it('腿内的轮：不进日桶计数 / 滚动环 / 贡献水位；无腿的对照课行为逐字不变', () => {
+    withRoot(
+      [
+        // 腿课：offline_artifact it3 ⇒ it3 的三行全剔
+        {
+          name: 'leg1',
+          meta: rows('p'),
+          ledger: [iterEvent(3), iterEvent(5), artifact(3)],
+        },
+        // 对照课：同一份 meta，没有腿
+        { name: 'noleg', meta: rows('q'), ledger: [iterEvent(3), iterEvent(5)] },
+      ],
+      () => {
+        const agg = aggregateNodeHistory()
+        const win = projectWindow(agg, resolveWindow('all', now, agg.epochMs))
+        // 腿课：it3 的 2 rollout + 1 eval 全剔，只剩 it5 的 1 行
+        expect(win.hist.get('p1')!.ok).toBe(1)
+        expect(win.hist.get('p1')!.winRollout).toBe(1)
+        expect(win.hist.get('p1')!.winEval).toBe(0)
+        expect(win.hist.get('p2')!.ok).toBe(2)
+        // 对照课：it3 三行 + it5 一行 = 4（口径只对腿课生效）
+        expect(win.hist.get('q1')!.ok).toBe(4)
+        expect(win.hist.get('q1')!.winEval).toBe(1)
+        expect(win.hist.get('q2')!.ok).toBe(2)
+        // 滚动环里连事件都不该有（否则 24h 滚窗会把它算回来）：p1 只剩 it5 的一条
+        const ringP = agg.rolling.get('p1')!
+        expect(ringP.length).toBe(1)
+        expect(ringP.every((e) => e.counted)).toBe(true)
+        expect(agg.rolling.get('q1')!.length).toBe(4)
+        // 贡献水位（it5）：腿课的 p1 只剩 it5 的 1 行（`lastContrib` 只认最新完成轮那一课，
+        // 对照课在这个口径下是 0——它的「没被剔」已由上面的日桶断言钉死）
+        expect(agg.lastContrib.get('p1')).toBe(1)
+      },
+    )
+  })
+
+  it('腿集合晚到（artifact 落盘晚于本机采样）⇒ 指纹变化触发全量重算，旧口径数字被换掉', () => {
+    withRoot({ name: 'c1', meta: rows('p'), ledger: [iterEvent(3), iterEvent(5)] }, (root) => {
+      // 起手没有腿：it3 的三行照常入账
+      const before = aggregateNodeHistory()
+      const w1 = projectWindow(before, resolveWindow('all', now, before.epochMs))
+      expect(w1.hist.get('p1')!.ok).toBe(4)
+
+      // 云机腿的 artifact 后到（与 `x21-psh-a` 的生产时序一致）
+      appendFileSync(join(root, 'c1', 'training_log.jsonl'), `${artifact(3)}\n`, 'utf8')
+      resetPoolHistoryCounters()
+      // +31s 跨过 AGG_MEMO_MIN_MS，免得被时间下限挡住看不见新账本
+      const after = aggregateNodeHistory(Date.now() + 31_000)
+      const w2 = projectWindow(after, resolveWindow('all', now, after.epochMs))
+      expect(w2.hist.get('p1')!.ok).toBe(1)
+      // 腿指纹变化必须真重算（清流态），不能复用旧聚合并只改 memo
+      expect(poolHistoryCounters().fullRescans).toBeGreaterThanOrEqual(1)
+      // 重算幂等：清 memo 再来一次，数字不变
+      invalidateNodeHistoryMemo()
+      const again = aggregateNodeHistory()
+      expect(
+        projectWindow(again, resolveWindow('all', now, again.epochMs)).hist.get('p1')!.ok,
+      ).toBe(1)
+    })
+  })
+})

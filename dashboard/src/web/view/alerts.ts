@@ -38,7 +38,7 @@ import { alertAckKey, cloudHaltAckKey, visibleCloudHalts } from './interaction'
 // 与 pill 的「排队·无人取」说的是同一件事（有活、没人认领）；「卡住」是另一类（有持有者但
 // 无进度）。两处各起一个名字 = 迟早漂开，所以词只在 `course-status.ts` 定义一次。
 import type { LoopQueueRow } from './loop-queue'
-import { NO_TAKER_LABEL, STUCK_LABEL } from './course-status'
+import { NO_TAKER_LABEL, PARKED_RESUME_ADVICE, STUCK_LABEL } from './course-status'
 
 /** 告警严重度（排序即这个顺序；`history` = 已恢复/已完成这类留痕）。 */
 export type AlertSeverity = 'err' | 'warn' | 'info' | 'history'
@@ -243,8 +243,9 @@ function loopCompleteAlerts(input: AlertInput): AlertItem[] {
           severity: 'history',
           icon: '✅',
           title: `${course ? `课程 ${course} ` : ''}训练已完成（${done.reason}）`,
-          detail:
-            '本地已停止采集，云机已停机省配额，进程停车等待重启。改大 iters 后经「停止→启动」继续。',
+          // 与 pill 的停车态同句（`course-status.ts::PARKED_RESUME_ADVICE`）——同一盘上事实
+          // 在两个 widget 上说话，文案只能一份。
+          detail: PARKED_RESUME_ADVICE,
           role: 'status',
           actions: [{ kind: 'ack', label: '知道了', ackKey }],
         },

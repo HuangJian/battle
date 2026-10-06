@@ -49,7 +49,13 @@ export function filterGroups(
 ): Array<{ iter: number; main: IterRow; eval: EvalSummary | null }> {
   if (mode === 'all') return groups
   if (mode === 'eval') return groups.filter((g) => g.eval !== null)
-  return groups.filter((g) => g.eval === null)
+  // rollout 档 = 「只显示主行」：分组的取舍与有没有 eval 无关（这一档在候选集里
+  // **全保**，由渲染层只取 `main` 实现「只主行」）。
+  //
+  // ★ 2026-10-06（用户报障）：「选 rollout only 时应显示所有 it 的 rollout 信息，
+  // 即使该 it 有 eval 也不应隐藏」——旧实现是 `groups.filter((g) => g.eval === null)`，
+  // 于是**有 eval 的轮整行消失**（rollout 采样是它自己的事实，与这一轮恰好也评过无关）。
+  return groups
 }
 
 /** Hero「最新 6 轮完整指标」主表行：真实迭代（iter>0）倒序前 6。

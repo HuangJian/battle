@@ -37,8 +37,7 @@ export async function startEvalA(
     iter,
     requester: 'metrics-ui',
   })
-  return {
-    ok: r.ok,
-    message: r.ok ? `${r.message}（完成后自动回填）` : r.message,
-  }
+  // 文案（含「读数自动回填」口径）由服务端那一句话给全——忙时排队与立刻启动两种回执都自洽，
+  // 这里不再各拼一段后缀（否则「已排队（…跑完自动开始）（完成后自动回填）」叠括号）。
+  return { ok: r.ok, message: r.message }
 }

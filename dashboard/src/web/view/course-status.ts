@@ -17,12 +17,20 @@
  *  本模块只放类型与纯函数（无 IO、无 node:、无 Bun）。
  */
 
+import type { LoopComplete } from './console-types'
 import type { CourseOverviewRow, ReadStaleView } from './course-overview'
 import type { CoursePillTone, LoopQueueRow } from './loop-queue'
 
 /** 「卡住」的展示阈值（秒）。= hub `CLAIM_TTL_SEC`：连一个租约周期都走完了还没回传，
  *  与稳态 wall（58–73s）差 ≥4×。**纯展示层常量**——不得被 hub / 训练侧 import。 */
 export const PILL_STUCK_SEC = 300
+
+/** 收官停车态的**续跑指引**（与告警坞 `alerts.ts::loopCompleteAlerts` 同句）。
+ *
+ *  ★2026-10-06：同一条盘上事实（账本尾行 `run_complete`）在两个 widget 上说话，文案只能一份
+ *  ——否则「pill 说改大 iters、告警坞说别的」又是同屏两种说法。 */
+export const PARKED_RESUME_ADVICE =
+  '本地已停止采集，云机已停机省配额，进程停车等待重启。改大 iters 后经「停止→启动」继续。'
 
 /** 「有活、**没人在飞**」这一类的**唯一词**（pill 与告警坞共用；2026-10-02 口径对齐，plan §6）：
  *  盘上的 `detectPpoQueueStall`（≥5min 无认领的红条）说的就是**同一件事**——两处不得各起
@@ -177,6 +185,14 @@ export interface CourseStatusInput {
   overviewStale?: ReadStaleView | null
   /** 训练侧读面新鲜度（`LoopQueueView.stale`）。 */
   queueStale?: ReadStaleView | null
+  /** **账本尾行 `run_complete` 的停车态**（`stateView.loopCompletes[课]`；缺省/null = 没有）。
+   *
+   *  ★2026-10-06（用户报障「收官的课程，pill 仍显示推进中」）：只读读面按盘重建计划——停在
+   *  某一轮的课（门禁 ABORT / 云机段末 / 预算跑满）指针仍指向下一轮、13 步表非空 ⇒ 报
+   *  `ready` ⇒ pill「推进中」，而账本尾行明明写着 `run_complete`。停车态是服务端**既有**
+   *  的派生事实（`collectLoopCompletes`，告警坞的「✅ 训练已完成」同源）——这里只消费它，
+   *  不另立判据；resume 后尾行变新 ⇒ 条目自动消失（本派生随之回到训练侧词）。 */
+  loopComplete?: LoopComplete | null
 }
 
 function statusOf(
@@ -209,7 +225,8 @@ function isTraining(lq: LoopQueueRow | null, ov: CourseOverviewRow | null): bool
 /**
  * **唯一派生**：把「这门课现在归谁 / 在干什么」算成一个语义状态（+ 词 + 滞回标注）。
  *
- * 优先级（与 pill 的既有读序一致；前四档是确定性事实，压过「在等什么」）：
+ * 优先级（与 pill 的既有读序一致；前几档是确定性事实，压过「在等什么」）：
+ *   ⓪ 账本尾行 `run_complete` 的停车态 ⇒ `done`（终态；它比「行缺失」更知道答案）；
  *   ① 调度器行缺失 ⇒ `unknown`（读面不可用，不是「空闲」）；
  *   ② 暂停意图 / 已收官 / 已中止 / **配置不可开课**；
  *   ③ 意图未生效（意图 ∧ hub 认得 ∧ 两侧不一致）；
@@ -223,6 +240,23 @@ function isTraining(lq: LoopQueueRow | null, ov: CourseOverviewRow | null): bool
  */
 export function courseStatus(input: CourseStatusInput): CourseStatus {
   const { lq, ov, hubOnline } = input
+  // ⓪ 收官停车态（账本尾行 `run_complete`）：**终态**——先于「行缺失 / 在等什么」，
+  //    也先于暂停意图（停车后「已暂停」既不准确，其文案「恢复走开课」也不成立：
+  //    完赛态必须用**停课**清，直接重开不清）。
+  if (input.loopComplete) {
+    const done = input.loopComplete
+    return statusOf(
+      input,
+      'done',
+      '已收官',
+      'gray',
+      `训练已完成（${done.reason}）。${PARKED_RESUME_ADVICE}`,
+      'loop',
+      // 终态不参与 hub 冲突升级（矩阵会把 `hub-unregistered` 前置成「在训 · hub 未注册」——
+      // 而课已停车，那个词只是在谎报算力在烧）。
+      { conflict: null },
+    )
+  }
   const training = isTraining(lq, ov)
   const hubKnown = ov !== null && hubOnline
   const conflict: CourseStatus['conflict'] =

@@ -79,10 +79,14 @@ describe('view 指标行分组 / 过滤 / 排序（DS-U1 13 列 + eval 子行语
     expect(iterGroups(rows).map((g) => g.iter)).toEqual([5, 4, 3])
   })
 
-  it('filterGroups：all 全保 / rollout 只主行 / eval 只子行', () => {
+  it('filterGroups：all 全保 / rollout 全保（只渲染主行）/ eval 只子行', () => {
     const groups = iterGroups(rows)
     expect(filterGroups(groups, 'all')).toHaveLength(3)
-    expect(filterGroups(groups, 'rollout')).toHaveLength(2)
+    // rollout 档 = 候选集全保（有没有 eval 与取舍无关），「只主行」由渲染层取 `main` 实现。
+    // ★ 2026-10-06 回归：旧实现 `filter((g) => g.eval === null)` 会把**有 eval 的轮整行隐藏**。
+    const ro = filterGroups(groups, 'rollout')
+    expect(ro.map((g) => g.iter)).toEqual([5, 4, 3])
+    expect(ro.some((g) => g.eval !== null)).toBe(true)
     const ev = filterGroups(groups, 'eval')
     expect(ev).toHaveLength(1)
     expect(ev[0]!.iter).toBe(4)

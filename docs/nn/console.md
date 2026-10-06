@@ -227,7 +227,9 @@ CPU/墙钟），则在 +3 it 的权重回传后在 hub 端使用 LAN 集群跑 e
 `W16` = 回传轮 `row.json.weights_fp` 前 16 位（缺则按权重文件 sha256 现算）；权重取回传树
 `remote-jobs/offline/<run>/it-NNN/weights.json`（首选）或交付镜像 `deliver/<run>/it-NNN/`。
 动作 = `launchEvalA`（与按钮 / 开课基线 / 导入后评估**同一条**链：LAN 节点直派 + 本机份额、
-同语料、同账本、同去重）；进程内 evalA 单槽 ⇒ 每拍至多启动一个（候选按 `(N, run)` 升序）；
+同语料、同账本、同去重）；进程内 evalA **串行队列** ⇒ 每拍至多启动一个（候选按 `(N, run)` 升序；
+手动连点多个 it 的按钮也在此排队，单槽语义不变——任一时刻恰一个子进程，互斥键持有到队列排空，
+见 `DECISIONS.md §2026-10-06-goalnn-evala-serial-queue`）；
 补评后由账本 summary 自然去重；失败按 `(课, run, N, W16)` 指数退避（10min 起、2h 封顶）。
 
 **为什么住控制台 TS（而不是 hub/python）**：启动 evalA 的唯一入口（spawn + `eval:A` 互斥 +
@@ -405,6 +407,10 @@ DECISIONS `§2026-10-03-goalnn-dashboard-alert-dock-global`。
 
 * 采样：既有 `aggregateNodeHistory`（memo）⊕ `projectWindow` / 新增 `projectCourseBreakdown`；滚动窗从
   **有界子日事件环**重建（`DayBucket` 只有日级计数、无 per-event 时间戳，无法从日桶投影）；
+  **★2026-10-06 修正（用户口径「剔除离线腿整段」）**：云机 offline worker 完成的轮**不进采样贡献**
+  ——腿 = 课程账本 `offline_artifact` 的 it 集合（`pool-history.readOfflineLegs`），行在 `ingestLine`
+  计数入口整行丢掉（日桶 / 滚动环 / it 分布都不进）；腿集合进聚合 memo 指纹，变化后清流态重读。
+  PPO 组（`job_*` 事件）不经本模块 ⇒ 照旧统计。详见 `DECISIONS.md §2026-10-06-goalnn-offline-leg-sampling-exclusion`。
 * PPO：逐课 `tmp/<课>/training_log.jsonl` **只读尾部**（4000 行，有界内存），`job_completed` 按 `job_id`
   join `job_result_accepted` 取 worker；`job_rejected` = 「晚到·白算」；进程内 memo（文件指纹 + 30s 下限，
   仿 `aggMemo`）——**不新增第二个缓存层**；
@@ -938,6 +944,10 @@ hub 不可达时配置照样落 / 文案含「本机不跑这门课」「不需�
 
 ⇒ 修在写方（回传/导入合并时把 summary 一并并进去，单调规则），**读方一字未动**。
 
+> ★2026-10-06：云机（`nodes` 含 `"cloud"`）写的 `time` 是 **UTC 钟**（同表读方原样透传，会差一个时区、
+> 时间列逆序）——现由读侧统一转本机：`iters.ts::evalStampLocal`（summary 看 `nodes`；逐局行看自带 `node`），
+> 无 `nodes` 的老行 / 非该格式的串原样透传。详见 `DECISIONS.md §2026-10-06-goalnn-eval-cloud-time-utc`。
+
 ---
 ## §12 两腿同字段收口：`demo_bc`/`kickstart` 进搬运表 + 逐局画像改取**单局 manifest**（2026-09-23）
 
@@ -1399,6 +1409,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
     ├ python -m remote.deliver_zip --zip … --dest tmp/<课>/deliver --course <课>
     │    （三道门：zip-slip / 形状（拿错包要指明「这是任务包」）/ 课程对账；原子落地）
     └ 接着起 evalA（共享启动器与互斥键 eval:A）评**末轮**权重 → 读数回填指标表
+         （手动连点多个 it 时串行排队，同 §2026-10-06-goalnn-evala-serial-queue）
 ```
 
 **怎么用**：面板「任务包（离线交出去 / 收回来）」；导出 → 下载 `task-<课程>.zip` → Kaggle/Colab

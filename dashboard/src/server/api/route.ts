@@ -464,7 +464,11 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         const iterRaw = Number(body.iter)
         const iter = Number.isFinite(iterRaw) && iterRaw > 0 ? iterRaw : (iterFromCkpt(ckpt) ?? 0)
         const r = launchEvalA(ctx.course, ckpt, iter)
-        if (!r.ok) return errResp(r.message, r.message.includes('已在运行') ? 409 : 500)
+        if (!r.ok) {
+          // busy/full = 「等一等就有位置」（409）；spawn 类失败才是 500。
+          return errResp(r.message, r.code === 'busy' || r.code === 'full' ? 409 : 500)
+        }
+        // 忙时不再拒：r.message 是「已启动」或「已排队（前面 N 个…）」——面板直接上屏。
         return okResp({ ok: true, message: r.message })
       }
       case 'exportTaskBundle': {

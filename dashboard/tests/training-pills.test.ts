@@ -125,6 +125,42 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
     expect(status({ kind: 'idle', text: '本轮无待办（账本已结算 / 未开训）' })).toBe('空闲')
   })
 
+  it('★2026-10-06：账本尾行 run_complete 的停车态 ⇒「已收官」（读面按盘重建仍报 ready 也**不**报推进中）；resume 后条目消失 ⇒ 回到训练侧词', () => {
+    // 事故（用户报障）：x21-psh-b 在 it16 被门禁 ABORT ⇒ trainer 写 run_complete 停车；
+    // 而只读读面按盘重建计划（指针=下一轮、13 步表非空）仍报 `ready` ⇒ pill「推进中」，
+    // 与告警坞的「✅ 训练已完成」同屏矛盾。判据不在这里另立：消费服务端**既有**的
+    // 停车态事实（`stateView.loopCompletes`，只认账本尾行 ⇒ resume 后自动消失）。
+    const parked = {
+      at: '2026-10-06 10:39:48',
+      reason: '正常收官（it16/150），本地停采、云机已停机',
+      iters: 150,
+    }
+    const base = {
+      courses: ['x21-psh-b'],
+      rows: [
+        row({
+          course: 'x21-psh-b',
+          it: 17,
+          state: 'ready' as const,
+          waiting: { kind: 'ready' as const, text: '无外部等待，下一步 precollect_join' },
+        }),
+      ],
+      trainerRunning: true,
+    }
+    const p = view.coursePills({ ...base, loopCompletes: { 'x21-psh-b': parked } })[0]!
+    expect(p).toMatchObject({ course: 'x21-psh-b', it: 17, status: '已收官', tone: 'gray' })
+    expect(p.title).toContain('it16/150') // 收官原因原文进悬停（与告警坞同句）
+    // 训练侧行缺失（只读读面不可用）也不影响终态：停车态是账本上的盘上事实。
+    const noRow = view.coursePills({
+      ...base,
+      rows: [],
+      loopCompletes: { 'x21-psh-b': parked },
+    })[0]!
+    expect(noRow).toMatchObject({ it: null, status: '已收官' })
+    // resume（停→开，新事件追加在后）⇒ 服务端条目消失 ⇒ 回到训练侧词。
+    expect(view.coursePills({ ...base, loopCompletes: {} })[0]!.status).toBe('推进中')
+  })
+
   it('★2026-09-22：离线课 pill 不提本地「推进中/采集中」，走「回传」维度（段由云机整段执行）', () => {
     const p = view.coursePills({
       courses: ['x20-off'],

@@ -14,6 +14,7 @@
  *  （与 hub 队列/隧道 A/B 的只读面容错口径一致）。
  */
 
+import type { LoopComplete } from './console-types'
 import type { ParallelOverviewView, ReadStaleView } from './course-overview'
 import { courseStatus } from './course-status'
 
@@ -135,6 +136,9 @@ export interface CoursePillView {
  *  逐课去 `rows` 里找它的队列行——找不到时**不编一个假状态**（读面不可用是事实，
  *  显示「视图不可用」而不是「空闲」：后者会让操作员去查一个不存在的卡顿）。
  *
+ *  ★2026-10-06：`loopCompletes`（账本尾行 `run_complete` 的停车态）是**盘上终态**，与读面行
+ *  是否可用无关——有它时交给 `courseStatus` 的 ⓪ 档说「已收官」（行缺失也一样，只是 it 未知）。
+ *
  *  ★P1-10（2026-10-05，plan §3.10）：状态词**不再在这里拼**——唯一派生是 `courseStatus`
  *  （`course-status.ts`），pill 只是它的渲染器之一（另一个是课程矩阵状态列）。本函数只负责
  *  「行缺失」这一档与字段搬运（it/kind/age），判据一个字不另写。
@@ -161,13 +165,18 @@ export function coursePills(input: {
   /** 登记在册的 push worker id（rl-config `nodes[].gpu_push` 的 id 集）：holder 不在表里
    *  ⇒ 悬停点名「不在 worker 登记表里」。`null`/缺省 = 名单不可知（不点名）。 */
   registeredWorkers?: string[] | null
+  /** **账本尾行 `run_complete` 的停车态**（`stateView.loopCompletes`）——收官终态事实，
+   *  resume 后服务端条目自动消失。`null`/缺省 = 没有停车态。 */
+  loopCompletes?: Record<string, LoopComplete> | null
 }): CoursePillView[] {
   const byCourse = new Map(input.rows.map((r) => [r.course, r]))
   const hubByCourse = new Map((input.overview?.rows ?? []).map((r) => [r.course, r]))
   return input.courses.map((course) => {
     const r = byCourse.get(course)
-    if (!r) {
+    const loopComplete = input.loopCompletes?.[course] ?? null
+    if (!r && !loopComplete) {
       // 训练侧行缺失 = 「不知道」（不是「空闲 / 未在训」）——唯一派生也表达不了它。
+      // （有停车态时不下这档：终态是盘上事实，走下面的 `courseStatus` ⓪ 档说「已收官」。）
       return {
         course,
         kind: 'rl' as LoopCourseKind,
@@ -181,7 +190,7 @@ export function coursePills(input: {
     }
     const st = courseStatus({
       course,
-      lq: r,
+      lq: r ?? null,
       ov: hubByCourse.get(course) ?? null,
       hubOnline: input.overview?.hubOnline ?? false,
       trainerRunning: input.trainerRunning,
@@ -189,11 +198,12 @@ export function coursePills(input: {
       registeredWorkers: input.registeredWorkers,
       overviewStale: input.overview?.stale ?? null,
       queueStale: input.queueStale ?? null,
+      loopComplete,
     })
     return {
       course,
-      kind: r.kind,
-      it: r.it,
+      kind: r?.kind ?? 'rl',
+      it: r?.it ?? null,
       status: st.text,
       age: st.age,
       tone: st.tone,

@@ -22,7 +22,12 @@
  *  该封存的那批）→ 封存段单独排（按封存时刻新→旧）。
  */
 
-import type { ArchivedCourseView, ConsoleStateView, CourseFactView } from './console-types'
+import type {
+  ArchivedCourseView,
+  ConsoleStateView,
+  CourseFactView,
+  LoopComplete,
+} from './console-types'
 import type { CourseOverviewRow, ParallelOverviewView } from './course-overview'
 import { fmtRel } from './format'
 import type { LoopQueueRow, LoopQueueView } from './loop-queue'
@@ -85,6 +90,8 @@ export interface CourseAdminInput {
   queue: LoopQueueView | null
   modeIntents?: Record<string, 'online' | 'offline'> | null
   courseRolloutSrc?: Record<string, string> | null
+  /** ★2026-10-06：逐课停车态（`stateView.loopCompletes`）——已收官的课在本页也不得报「在训」（与 pill / 课程矩阵同一派生）。 */
+  loopCompletes?: Record<string, LoopComplete> | null
   archived?: ArchivedCourseView[] | null
   viewing: string
   /** 当下时刻（秒）——相对时间与「段内」陈旧判据都拿它，纯函数不读墙钟。 */
@@ -192,6 +199,7 @@ export function buildCourseAdmin(input: CourseAdminInput): CourseAdminView {
     queue: input.queue,
     modeIntents: input.modeIntents,
     courseRolloutSrc: input.courseRolloutSrc,
+    loopCompletes: input.loopCompletes,
     viewing: input.viewing,
     nowSec: input.nowSec,
   })
@@ -257,6 +265,7 @@ export function courseAdminFromState(
     queue: s.loopQueue ?? null,
     modeIntents: s.courseModeIntents ?? null,
     courseRolloutSrc: s.courseRolloutSrc ?? null,
+    loopCompletes: s.loopCompletes ?? null,
     archived: s.archived ?? null,
     viewing,
     nowSec,

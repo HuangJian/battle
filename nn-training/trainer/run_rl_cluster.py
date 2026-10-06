@@ -30,6 +30,7 @@ TTL 缓存）：改 `--json` 的字段名/语义 = 改控制台，两边必须�
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
@@ -331,7 +332,15 @@ def main(argv: list[str] | None = None) -> int:
             print(f"[cluster] {traj_root} 下没有已开课的课程（先用 --courses，或在控制台点「开课」）")
         return 0
 
-    rows = build_rows(courses, traj_root, sup)
+    # ★ 2026-10-06（`--json` 契约回归修复）：计算期可能打诊断行——`course_openable` 走真课程
+    # 校验链（`course_args` → `apply_course`）会打 `[course] …`（真开课时人要看见它，故不动
+    # 它本身），只读入口按模式选诊断流的去处：`--json` 走 stderr（控制台只在非零退出时 tail
+    # 它，契约不破：`JSON.parse` 第一个字符就是 `{`），人读表模式仍走 stdout（与改造前逐字节
+    # 相同）。事故形状：那两行混进 stdout ⇒ 控制台报「输出不可解析」⇒ 整块读面不可用
+    #（顶部 pill 变 `it- 视图不可用`）。回归用例：`tests/trainer/test_course_openable.py::
+    # test_json_stdout_is_pure_json_when_course_check_logs`。
+    with contextlib.redirect_stdout(sys.stderr if args.json else sys.stdout):
+        rows = build_rows(courses, traj_root, sup)
 
     if args.json:
         print(json.dumps({"courses": rows, "pools": sup.snapshot()["pools"]}, ensure_ascii=False))

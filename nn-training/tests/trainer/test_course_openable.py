@@ -10,6 +10,7 @@ reason、合法课 ⇒ ok=true、BC 课不误报（覆盖边界，由 `loop_plan
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -92,6 +93,34 @@ def test_bc_course_is_out_of_scope_ok_true(tmp_path: Path, monkeypatch: pytest.M
     (bc_dir / "c-bc.bc.jsonc").write_text("{}", encoding="utf-8")
     monkeypatch.setattr(bc_config, "CURRICULA_DIR", bc_dir)
     assert course_openable("c-bc") == (True, "")
+
+
+def test_json_stdout_is_pure_json_when_course_check_logs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--json` 契约：只读路径里的诊断日志不得混进 stdout（2026-10-06 回归）。
+
+    事故形状：`course_openable` 走真课程校验链（`course_args` → `apply_course`），它的
+    `[course] …` 诊断行落到 stdout ⇒ 控制台 `JSON.parse` 第一个字符就是 `[` ⇒ 整块读面
+    不可用（顶部 pill 变 `it- 视图不可用`）。控制台消费的就是这一份 stdout
+    （`dashboard/server/api/loop-queue.ts`），故契约用例必须在**真链**上跑——把
+    `course_openable` monkeypatch 掉就再也照不到这种回归。
+    """
+    curricula = _tmp_curricula(tmp_path, monkeypatch)
+    (curricula / f"{FIXTURE}.jsonc").write_text(_real_source(), encoding="utf-8")
+    traj = tmp_path / "traj"
+    d = traj / FIXTURE
+    d.mkdir(parents=True)
+    (d / "training_log.jsonl").write_text('{"event": "run_start", "iter": 0}\n', encoding="utf-8")
+    (d / "training-enabled.txt").write_text("", encoding="utf-8")
+
+    import trainer.run_rl_cluster as cluster
+
+    assert cluster.main(["--traj-root", str(traj), "--json"]) == 0
+    out = capsys.readouterr()
+    body = json.loads(out.out.strip())  # 不可解析即失败（这里就是回归点）
+    assert [r["course"] for r in body["courses"]] == [FIXTURE]
+    assert body["courses"][0]["openable"] == {"ok": True, "reason": ""}
 
 
 def _never(task: Task, queue: CourseQueue) -> TaskResult:

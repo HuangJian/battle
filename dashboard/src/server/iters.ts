@@ -565,6 +565,33 @@ function saveActualsCache(trajDir: string, cache: Map<number, CachedActuals>): v
   }
 }
 
+// ---------------- eval 时间戳：云机（UTC 钟）→ 本机时区 ----------------
+
+/** `'YYYY-MM-DD HH:MM:SS'` 无时区戳 → 按 UTC 解析 → 本机时区**同一格式**。
+ *  非该格式（空串 / 已带时区 / 别的写法）原样返回：宁可显示原值，也不猜。 */
+function utcStampToLocal(stamp: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})$/.exec(stamp)
+  if (!m) return stamp
+  const d = new Date(Date.UTC(+m[1]!, +m[2]! - 1, +m[3]!, +m[4]!, +m[5]!, +m[6]!))
+  const p = (x: number): string => String(x).padStart(2, '0')
+  return (
+    `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ` +
+    `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+  )
+}
+
+/** eval summary 行的 time 是否需要时区修正：`nodes` 含 `cloud` ⇒ 该行由云机（UTC 钟）写。
+ *
+ *  为什么按节点判而不是按时区字段判：`eval_track.py` 只写裸 `strftime("%Y-%m-%d %H:%M:%S")`，
+ *  账本里没有时区信息；唯一可靠的痕迹是 `nodes` 里的 `"cloud"` 键（云机 `CLOUD_NODE`）。
+ *  2026-10-06 生产数据 `tmp/x21-psh-a`：it10 summary `time=2026-10-05 21:39:04`、
+ *  同轮本地 iteration `time=2026-10-06 05:39:00`（差 +8h），`nodes={"cloud":400}`。
+ *  本机 / 老行（无 `nodes` 或其中无 `cloud`）→ 原样。 */
+function evalStampLocal(time: string, nodes: unknown): string {
+  if (!nodes || typeof nodes !== 'object' || Array.isArray(nodes)) return time
+  return 'cloud' in (nodes as Record<string, unknown>) ? utcStampToLocal(time) : time
+}
+
 // ---------------- 干净评估汇总（eval_log.jsonl） ----------------
 
 /** 读取 eval_log.jsonl：eval_summary 按 iter 归并（同 iter 多条 = 断点续跑补评估
@@ -737,7 +764,7 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
         }
         if (r.event !== 'eval_summary') continue
         out.set(iter, {
-          time: String(r.time ?? ''),
+          time: evalStampLocal(String(r.time ?? ''), r.nodes),
           games: Number(r.games ?? 0),
           wins: Number(r.wins ?? 0),
           winRate: typeof r.winRate === 'number' ? r.winRate : null,
@@ -828,7 +855,10 @@ export function readEvalGames(trajDir: string, iter?: number): EvalGamesData | n
         if (r.event !== 'eval_summary') continue
         const iter = Number(r.iter ?? -1)
         if (!Number.isInteger(iter) || iter < 0) continue
-        summaries.set(iter, { wver: String(r.wver ?? ''), time: String(r.time ?? '') })
+        summaries.set(iter, {
+          wver: String(r.wver ?? ''),
+          time: evalStampLocal(String(r.time ?? ''), r.nodes),
+        })
       } catch {
         /* skip bad line */
       }
@@ -896,7 +926,9 @@ export function readEvalGames(trajDir: string, iter?: number): EvalGamesData | n
           pu: Number(r.powerUpsCollected ?? 0) || 0,
           score: typeof r.score === 'number' ? r.score : null,
           node: String(r.node ?? ''),
-          time: String(r.time ?? ''),
+          // 逐局行自带 node：云机的行（`node === 'cloud'`）time 也是 UTC 钟 → 逐行判，
+          // 不借 summary 的 nodes（混合节点轮里两种行并存）。
+          time: r.node === 'cloud' ? utcStampToLocal(String(r.time ?? '')) : String(r.time ?? ''),
         })
         outcomes[outcome] = (outcomes[outcome] ?? 0) + 1
       } catch {
