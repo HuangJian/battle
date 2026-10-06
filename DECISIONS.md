@@ -7919,3 +7919,77 @@ claim 说不能」）；把 backup 的回传当 403 确定性失败上报 ⇒ �
 退役行的用例（`tests/remote/test_bulk_sched.py` 的让路合计行、`tests/remote/test_soft_hold_prefetch.py`
 的摘要行与它的「生产读者」守卫），两处留退役注记。
 **指针**：`docs/nn/remote-transport.md` §53（S3f 行标退役 / 让路策略表）· §39（让路账，2026-10-06 续）。
+## §2026-10-06-goalnn-test-console-isolation（2026-10-06，用户问「是不是你跑门禁触发的」⇒ 是；用户裁决「修」）
+
+**背景**：提交 `0e8442ba` 的 pre-commit（nn python gate）跑完，用户发现 `bun run dashboard`（:8900）的
+命令行刷出 **21 行** `[action] autoOfflineHandoff <课> → fail (HTTP 200): … 未开课 …`（10:32:17–10:32:42，
+与门禁窗口逐秒重叠）。课名全是测试夹具（`e2e-auto-a/b`、`e2e-on-1/2`、`c5-gae`）。根因：控制台地址解析是
+`hub/task_pack.py` 的「`BCITY_CONSOLE_URL` 为空 ⇒ `DEFAULT_CONSOLE_URL` = `http://127.0.0.1:8900`」，
+而 `e2e/test_auto_handoff_e2e.py` 起真 `hub.server` 子进程的 15 处 `_Hub(...)` 里 **10 处没传 `console_url`**；
+其余走 claim 路径的 hub 测试（`hub/offline.py::_ask_console_freshness` / `trigger_auto_handoff`）同样裸奔
+（只有 `tests/hub/test_auto_handoff.py` 自打了桩）。dashboard 没开时静默降级 ⇒ **环境决定测试语义**，
+开了才现形。本次无写入：那批课名当时都没开课 ⇒ `courseEnabled()` 为假、在 `applyTrainModeToConfig` 之前
+return；已核对同期 `nn-training/`、`dashboard/` 下无 `*.json` 被改。
+
+**决定**：测试**永不**指向在跑的控制台——`tests/conftest.py` 与 `e2e/conftest.py` 各挂一个 autouse fixture，
+把测试期 `BCITY_CONSOLE_URL` 钉到 `http://127.0.0.1:9`（死端口：连接当场被拒 ⇒ 漏网也只是「控制台不可达」
+的响亮降级）；死桩常量只许有一份定义（`tests/conftest.py::TEST_CONSOLE_URL`，e2e 侧引用它）。守卫 = 4 条
+用例（`tests/test_console_isolation.py`）：env 必须是死桩且 ≠ 生产默认 · 用捕获器把 `_net_urlopen` 换掉、
+证明裸 `trigger_auto_handoff` **拨的真是死桩**且不可达时 `(False, "OSError")` 降级为手动（不得读成
+「已触发」）· 生产默认仍须是本机 `:89xx`（漂了要重核假设）· 两层 conftest 都挂着隔离。
+
+**否决与否决理由**：① 只在 e2e 的 `_Hub` 里补 `console_url=`（10 处）——治不了根：下一个 e2e/单测又会漏，
+而漏网代价是**写真配置**；② 模块级 `os.environ` 设死桩——门禁是 `pytest tests/ e2e/` 同一进程，模块级
+setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且不随用例还原；③ 改 hub 侧：让
+`DEFAULT_CONSOLE_URL` 只在 `PYTEST_CURRENT_TEST` 缺失时生效——给生产代码塞测试感知分支（那是最难查的一类
+漂移），且默认端口对「本机 dashboard」的便利是真实需求；④ 把 dashboard 的 `autoOfflineHandoff` 加「测试态
+拒写」闸——同样的测试感知污染，且真机操作员可能就想要这条自动路。
+
+**违反后果**：测试再打到真控制台 ⇒ `applyTrainModeToConfig(…, 'offline', {remember: true})` 是控制台的
+**唯一配置写面**：课名撞上一门在开课的真课就把那门课翻成离线停采（并可能顺手导包）——一次 test run 改掉
+线上训练配置，且现场只会看到 dashboard 侧一行 `[action] … fail/ok`。反过来，把守卫当「日志噪声」删掉 ⇒
+回落到「dashboard 开着才现形」的环境决定语义。
+
+**落点**：`nn-training/tests/conftest.py`（`TEST_CONSOLE_URL` + autouse fixture）· `nn-training/e2e/conftest.py`
+（同款，引用同一常量）· 守卫 `nn-training/tests/test_console_isolation.py`（4 例；改前收集期 ImportError 红）
+—— 2026-10-06 当日与状态面守卫合并成 `nn-training/tests/test_production_isolation.py`（见下一节）。
+**指针**：`docs/nn/engineering.md` §64（现场 / 根因 / 修法表 / 证据）。
+## §2026-10-06-goalnn-test-state-isolation（2026-10-06，用户令「扫其它测试 → 生产泄漏」）
+
+**背景**：用户给完控制台隔离（上一节）后要求扫其余测试。直读法 = 跑门禁前后各拍一次真状态文件
+指纹（`find tmp dashboard/data nn-training/weights -type f -printf '%T@ %s %p\n'`）再 diff：一次门禁
+就看见 `dashboard/data/evalboard/runner_state.json`（EvalBoard 心跳，操作员面板读它）被改成
+`{"batch_id": "bp", …}` 的测试批次；逐目录 + 逐文件二分定位到 `e2e/test_cloud_iter_e2e.py`（跑真
+`TrainingLoop`）。同一张网还罩着 `tmp/gate-halt*.json`（平台门禁意图 = 能停全平台训练）、
+`tmp/loop-control*.json`（暂停/恢复真循环）、`nn-training/weights/`（面板权重选择器扫的真归档）。
+根因：这些都是「env 设了就改用它、否则用生产缺省」的开关，而单测层只是**逐文件自觉**打桩
+（`tests/trainer/test_batch_eval.py` 的夹具注释里就记着 2026-10-02 被写过一次 `batch_id="bch"`）
+—— 没有全局兜底，同一个坑换个层第二次现形。
+
+**决定**：测试**永不**写生产状态——`tests/conftest.py` 立唯一的 `PRODUCTION_STATE_PINS`
+（`NN_GATE_HALT` / `NN_GATE_HALT_APPLIED` / `NN_LOOP_CONTROL` / `NN_LOOP_CONTROL_APPLIED` /
+`EVALBOARD_DATA` / `BCITY_WEIGHTS_ARCHIVE_ROOT` → 本用例 `tmp_path` 下的相对路径）与唯一实现
+`pin_production_env(monkeypatch, root)`（含控制台死桩）；单测层与 e2e 层各挂一个 autouse fixture
+调它（e2e 不继承 tests 的夹具）。**只钉路径、不预建目录**（预建会顶掉「`tmp_path` 里应该只有哪些
+条目」的既有断言）。守卫 8 条（`tests/test_production_isolation.py`）：控制台 4 条（原
+`test_console_isolation.py` 合并进来）+ 状态 4 条 —— 变量都设在 `tmp_path` 内 · 缺省必须仍是仓库
+真路径（对照有效）· **行为面**：四个真写点都写成、都落 tmp、生产侧文件 `(mtime_ns, size)` 前后不动 ·
+源码守卫两层都挂且钉名单只有一份定义。
+
+**否决与否决理由**：① 逐文件补 `monkeypatch.setenv`（把 `test_batch_eval.py` 那套推广到每个文件）
+——治不了根：漏网代价是**操作员活状态**（幽灵 runner / 假权重轮次 / 停全平台的意图文件），而下一批
+测试必然又漏；② 运行时金丝雀（每用例前后给真状态拍指纹、变了就红）——本机**真训练在跑**时那些文件
+本就会被真进程更新 ⇒ 把并发训练变成假红，守卫必须只钉「测试进程自己写的落点」；③ 把缺省改成
+「`PYTEST_CURRENT_TEST` 存在就禁用生产缺省」——给生产代码塞测试感知分支（最难查的一类漂移）；
+④ 给 `EVALBOARD_CORPORA` / `ladder.json` / `corpora.json` 也钉 tmp —— 它们全仓无写者（只有读点）
+且是真内容，钉了要拷贝副本；不进名单，写了注释说明为何。
+
+**违反后果**：测试再写生产状态 ⇒ 门禁会（a）把操作员面板的 runner 心跳/台账写成测试批次、
+（b）可能翻平台门禁意图或循环控制（真训练当场停采/暂停）、（c）往真权重归档撒文件让面板列出假轮次；
+三种都**不会**让任何单测变红 ⇒ 只有人肉在面板上看见才发现。反过来删守卫 = 回落到「逐文件自觉」。
+
+**落点**：`nn-training/tests/conftest.py`（`PRODUCTION_STATE_PINS` + `pin_production_env` + 夹具）·
+`nn-training/e2e/conftest.py`（夹具 `request.getfixturevalue(\"tmp_path\")`）· 守卫
+`nn-training/tests/test_production_isolation.py`（8 例；改前收集期 ImportError 红）· 原
+`tests/test_console_isolation.py` 删除（内容并入）。
+**指针**：`docs/nn/engineering.md` §65（现场 / 扫描口径 / 修法表 / 证据 / 残余）· §64（控制台同族）。

@@ -25,6 +25,144 @@
 
 ---
 
+## §65 测试永不写生产状态：四个开关（门禁意图 / 循环控制 / EvalBoard / 权重归档）钉进 tmp（2026-10-06）
+
+### 一句话
+
+`worker/gate_halt.py` 一类「env 设了就改用它、否则用生产缺省」的开关，缺省全指向操作员正在用的
+**活状态**；而工装用例（e2e 会跑真 `TrainingLoop`、起真 `hub.server` 子进程）照着缺省写下去。
+现在两层 conftest 共用一份 `tests/conftest.py::pin_production_env`，把 4 个状态面（6 个变量）钉进
+本用例自己的 `tmp_path`。
+
+### 现场（怎么发现的）
+
+「扫其它测试 → 真状态有没有被动过」的直读法：跑门禁前后各拍一次真状态文件的指纹再 diff：
+
+    cd /home/hj/battle && snap(){ find tmp dashboard/data nn-training/weights -type f \
+        -printf '%T@ %s %p\n' | sort -k3; }; snap > tmp/a.txt
+    bash tools/githook/nn-python-gate.sh && snap > tmp/b.txt && diff tmp/a.txt tmp/b.txt
+
+2026-10-06 实测：`dashboard/data/evalboard/runner_state.json` 出现 diff 行（`<` 旧 / `>` 新，size
+都是 169）——内容变成 `{"window_open": true, "batch_id": "bp", …}` 的**测试批次**。随后逐目录二分
+（每个 `tests/*/` 跑一次、比 mtime）定位到 `e2e/`，再逐文件定位到 `e2e/test_cloud_iter_e2e.py`
+（它跑真 `TrainingLoop`）。
+
+### 根因
+
+- `EVALBOARD_DATA` 缺省 = `dashboard/data/evalboard/`（EvalBoard 心跳 + 批次台账，**操作员面板读它**）
+  —— e2e 没钉 ⇒ 把幽灵 runner 写进活数据；
+- 同一张网还罩着：`NN_GATE_HALT(_APPLIED)`（`tmp/gate-halt*.json`，平台门禁意图 = 能停全平台训练）、
+  `NN_LOOP_CONTROL(_APPLIED)`（`tmp/loop-control*.json`，暂停/恢复真循环）、
+  `BCITY_WEIGHTS_ARCHIVE_ROOT`（`nn-training/weights/`，面板权重选择器扫它——撒文件 = 面板上多出假轮次）；
+- 单测层是**逐文件自觉**打桩（`tests/trainer/test_batch_eval.py` 的 autouse fixture 注释里甚至写着
+  「2026-10-02 实测：真 `runner_state.json` 被写进 `batch_id="bch"` 的测试状态」），没有全局兜底
+  —— 同一个坑换个层（e2e）第二次现形。
+
+### 修法
+
+| 件 | 机制 | 锚 |
+|---|---|---|
+| 钉名单（唯一一份） | `PRODUCTION_STATE_PINS`：env → tmp 下的相对路径（4 个状态面 = 6 个变量） | `tests/conftest.py` |
+| 实现（唯一一份） | `pin_production_env(monkeypatch, root)`：控制台死桩 + 6 个 env 指向 `root`；**只钉路径、不预建目录**（预建会顶掉「`tmp_path` 里应该只有哪些条目」的既有断言） | 同上 |
+| 两层夹具 | 单测层与 e2e 层各一个 autouse fixture 调它（e2e 是兄弟目录，**不继承** tests 的夹具） | `tests/conftest.py` · `e2e/conftest.py` |
+| 守卫 | 8 条用例：控制台 4 条（同 §64）+ 状态 4 条 | `tests/test_production_isolation.py` |
+
+守卫的状态 4 条：① 六个变量都设了且落在本用例 `tmp_path` 里；② 缺省必须仍是仓库里的真路径
+（对照不能失效）；③ **行为面**：真写点（`eval_heartbeat.write_state` / `gate_halt.write_intent` /
+`gate_halt.write_applied_if_changed` / `loop_control.write_applied`）都写成、都落在 tmp，且生产侧文件的
+`(mtime_ns, size)` 前后**一个字节不动**；④ 源码守卫：两层 conftest 都挂着隔离、钉名单只有一份定义
+（e2e 侧不许抄字面量）。
+
+### 同一次扫描的别处
+
+- 根项目（TS/Bun，`bun tools/run-root-tests.ts`）：全仓 mtime 快照 + `git status` 前后 diff ⇒ 只写
+  `tmp/<用例名>/` 自己的 scratch（`eval-acc-*` / `intent-tagger-test` / `native-stale-probe`），
+  **零**真状态、零 tracked 文件改动；
+- `nn-training/tests/*/`（含 hub / trainer / worker 各子目录）：干净；
+- `EVALBOARD_CORPORA` / `ladder.json` / `corpora.json`：全仓无写者（只在 `dashboard/src/evalboard/`
+  被读）⇒ 不入钉名单；
+- `tmp/gate-halt.applied.json`（10-02）与 `tmp/loop-control.applied.json`（10-03）的 mtime 是操作员
+  自己真运行留下的，门禁没碰过。
+
+### 证据
+
+- **修前红**：一次门禁就能看见 `runner_state.json` 的 diff 行（上）；逐文件二分给出
+  `e2e/test_cloud_iter_e2e.py`。新守卫文件在改前是收集期红（`ImportError: cannot import name
+  'PRODUCTION_STATE_PINS'`）。
+- **修后绿**：全量 nn gate `3732 passed / 9 skipped`，且同一套快照 diff 里**真状态零变更**
+  （只剩 `tmp/pytest-tmp/**` 与 ruff / mypy 缓存）。
+- 途中两次门禁红都是修法自身的问题，已就地修掉：① e2e 夹具形参 `tmp_path` 撞 ruff F811
+  （模块顶部 import 了同名夹具函数）⇒ 改走 `request.getfixturevalue("tmp_path")`；② 预建目录顶掉
+  `test_write_applied_shape_is_readable_by_the_console` 的 `list(tmp_path.iterdir()) == [f]` ⇒
+  改为只钉路径。
+
+### 残余（已知且刻意）
+
+- 若本机**真训练**在跑，它的回执/心跳会与测试无关地更新那些文件——守卫只钉「测试进程自己写的落点」，
+  不做跨进程的「文件没变」断言（那会把并发训练变成假红）；
+- 只覆盖**路径型**开关。凭证型（`BATTLE_HUB_TOKEN`）与平台探测（`KAGGLE_*` / `COLAB_*`）不在内：
+  它们不构成「写生产状态」；
+- 「每个用例前后给真状态拍指纹」的运行时金丝雀被否（否决面见决策）。
+
+决策 → `DECISIONS.md` §2026-10-06-goalnn-test-state-isolation。
+
+---
+
+## §64 测试永不指向在跑的控制台：两层 conftest 把 `BCITY_CONSOLE_URL` 钉到死端口（2026-10-06）
+
+### 一句话
+
+测试里的真 hub 子进程会核控制台（自动离线交接 / 包新鲜度），而地址解析是
+「`BCITY_CONSOLE_URL` 为空 ⇒ `hub/task_pack.DEFAULT_CONSOLE_URL` = `http://127.0.0.1:8900`」
+（生产便利）——本机跑着 dashboard 时，**门禁会直接操作开发机的控制台**。
+现在 `tests/conftest.py` 与 `e2e/conftest.py` 各挂一个 autouse fixture，把测试期的
+`BCITY_CONSOLE_URL` 钉到 `http://127.0.0.1:9`（死端口，连接当场被拒）。
+
+### 现场
+
+2026-10-06 提交 `0e8442ba` 的 pre-commit（nn python gate）跑完，用户发现 `bun run dashboard`
+（:8900）的命令行里刷出 **21 行** `[action] autoOfflineHandoff <课> → fail (HTTP 200): … 未开课 …`
+（`10:32:17–10:32:42`，与门禁窗口逐秒重叠）。课名全是测试夹具：`e2e-auto-a/b` · `e2e-on-1/2`
+（`e2e/test_auto_handoff_e2e.py` 的字面量）· `c5-gae`（hub 测试惯用的夹具课名，恰好也是真课程文件）。
+
+### 根因
+
+两条腿都通向真控制台，而且**只靠运气不入刑**：
+
+① `e2e/test_auto_handoff_e2e.py` 起真 `hub.server` 子进程的 15 处 `_Hub(...)` 里有 **10 处没传
+`console_url`** ⇒ 子进程 env 里没有 `BCITY_CONSOLE_URL` ⇒ 回落到 8900；
+② 其余走 claim 路径的 hub 测试（`hub/offline.py::_ask_console_freshness → trigger_auto_handoff`）
+同样裸奔——只有 `tests/hub/test_auto_handoff.py` 给自己打了桩（它的夹具注释早就写明
+「真发 HTTP 会打到开发机上正在跑的控制台」）。dashboard 没开时这些调用静默降级、**看起来没事**
+⇒ 这是「环境决定测试语义」；dashboard 开着时才现形。
+
+**危险的不是日志噪声**：`autoOfflineHandoff` 的动作本体是
+`applyTrainModeToConfig(course, 'offline', {remember: true})`（`dashboard/src/server/actions/
+course-mode.ts`）——控制台的**唯一配置写面**。课名撞上一门**在开课**的真课，一次测试就能把那门课
+翻成离线停采（并可能顺手导包）。本次侥幸无事：那批课名当时都没开课 ⇒ `courseEnabled()` 为假、
+在写配置之前 return（`course-mode.ts:506`）；也核对过 `nn-training/`、`dashboard/` 下同期无
+`*.json` 被改。
+
+### 修法
+
+| 件 | 机制 | 锚 |
+|---|---|---|
+| 夹具（单测层） | autouse fixture 把 `BCITY_CONSOLE_URL` 设为 `TEST_CONSOLE_URL`（死端口）；带假控制台的用例自己设 env ⇒ 天然覆盖 | `tests/conftest.py` |
+| 夹具（e2e 层） | 同款——**必须两份**：e2e 是兄弟目录，**不继承** `tests/conftest.py` 的夹具 | `e2e/conftest.py` |
+| 守卫 | 4 条用例：① 本进程 env = 死桩 ≠ 生产默认；② 把 `_net_urlopen` 换成捕获器 ⇒ 裸 `trigger_auto_handoff` 真的**拨的是死桩**且不可达时降级为手动（不得读成已触发）；③ 生产默认仍在本机 :89xx（漂了要重核）；④ 两层 conftest 都挂着隔离且死桩只有一份定义 | `tests/test_production_isolation.py`（2026-10-06 与状态面守卫合并成一份；同族事故 §65） |
+
+为什么用 fixture 而不是模块级 `os.environ`：门禁是 `pytest tests/ e2e/` **同一进程**，模块级
+setenv 会串味（同 `e2e/conftest.py::_no_serve_pool` 的教训）；`monkeypatch` 保证用例结束即还原。
+
+### 证据
+
+先红：新守卫文件在未改动代码上收集期 `ImportError: cannot import name 'TEST_CONSOLE_URL'`
+（夹具落地后 4/4 绿）；`tests/hub/test_auto_handoff.py` + `e2e/test_auto_handoff_e2e.py` 同跑 67 passed；
+全量 nn gate `3728 passed / 9 skipped`（+4）。
+决策 → `DECISIONS.md` §2026-10-06-goalnn-test-console-isolation。
+
+---
+
 ## §63 门禁 fail-fast：任一腿先红即停其余腿 + detach-run 在 POSIX 改 exec（2026-10-05）
 
 ### 一句话

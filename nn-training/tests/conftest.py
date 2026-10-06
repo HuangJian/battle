@@ -44,6 +44,60 @@ if sys.platform == "win32" and os.environ.get("NN_NO_IGNORE_CTRL_C") != "1":
     ctypes.windll.kernel32.SetConsoleCtrlHandler(None, True)
 
 
+#: 测试期的控制台地址（**死端口**）——见下面 `_production_isolation` 与
+#: `tests/test_production_isolation.py`（2026-10-06 事故：门禁跑完，本机 `bun run dashboard` 的
+#: 命令行刷出 21 行 `[action] autoOfflineHandoff …` —— 是测试里的真 hub 子进程打过去的）。
+TEST_CONSOLE_URL = "http://127.0.0.1:9"
+
+#: 测试期必须钉进**本用例自己的 `tmp_path`** 的生产状态面（env 名 → tmp 下的相对路径）。
+#: 这些开关的缺省全都指向操作员正在用的活状态（`worker/gate_halt.py::intent_path` 等）：
+#: 门禁意图能停全平台训练、循环控制能停真训练、`EVALBOARD_DATA` 是面板读的台账与心跳、
+#: `BCITY_WEIGHTS_ARCHIVE_ROOT` 是面板权重选择器扫的真归档。
+#: 2026-10-06 实测（不钉的后果）：门禁跑完，`dashboard/data/evalboard/runner_state.json`
+#: 被 e2e 的真 `TrainingLoop` 写成了测试批次（`batch_id="bp"`）——操作员面板上出现幽灵 runner。
+PRODUCTION_STATE_PINS: dict[str, str] = {
+    "NN_GATE_HALT": "gate-halt.json",
+    "NN_GATE_HALT_APPLIED": "gate-halt.applied.json",
+    "NN_LOOP_CONTROL": "loop-control.json",
+    "NN_LOOP_CONTROL_APPLIED": "loop-control.applied.json",
+    "EVALBOARD_DATA": "evalboard/",
+    "BCITY_WEIGHTS_ARCHIVE_ROOT": "weights-archive/",
+}
+
+
+def pin_production_env(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
+    """把测试期的生产面钉进 `root`（唯一实现；两层 conftest 的 autouse 夹具都调它）。
+
+    为什么必须有这一层：这些 env 的解析全是「设了就改用它，否则用生产缺省」。
+    `hub/task_pack.py` 的控制台地址是「`BCITY_CONSOLE_URL` 为空 ⇒ `DEFAULT_CONSOLE_URL`
+    = `http://127.0.0.1:8900`」（本机 dashboard 的默认端口，生产便利），于是测试里起的
+    **真 hub 子进程**（夹具拷贝 `os.environ`）若漏设就打到**开发机上正在跑的控制台**，而
+    `autoOfflineHandoff` 的动作本体是 `applyTrainModeToConfig(…, 'offline', {remember: true})`
+    —— 控制台的**唯一配置写面**：课名撞上一门在开课的真课，一次测试就能把那门课翻成离线停采
+    （2026-10-06 事故，侥幸：那批课名当时都没开课 ⇒ 在写配置之前就 return 了）。
+    控制台地址钉**死端口**：漏网也只是「控制台不可达」的响亮降级，绝不写真配置。
+
+    用 fixture 而**不是**模块级 `os.environ`：门禁是 `pytest tests/ e2e/` **同一进程**，
+    模块级 setenv 会串味（同 `e2e/conftest.py::_no_serve_pool` 的教训）；`monkeypatch` 保证
+    用例结束即还原。需要真控制台语义的用例（如 `e2e/test_auto_handoff_e2e.py` 的假控制台）
+    自己设 `env["BCITY_CONSOLE_URL"]`，天然覆盖本桩。
+    """
+    monkeypatch.setenv("BCITY_CONSOLE_URL", TEST_CONSOLE_URL)
+    for name, rel in PRODUCTION_STATE_PINS.items():
+        # 只钉路径、**不预建**：真写点自己会 `mkdir(parents=True)`（`write_state` /
+        # `write_intent` / `write_applied` 都这样），而预建目录会把「本用例的 tmp_path
+        # 里应该只有哪些条目」的断言顶掉（2026-10-06 门禁实测：`test_write_applied_
+        # shape_is_readable_by_the_console` 的 `list(tmp_path.iterdir()) == [f]` 红）。
+        monkeypatch.setenv(name, str(root / rel))
+
+
+@pytest.fixture(autouse=True)
+def _production_isolation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """两层隔离的本体（另一层是 `e2e/conftest.py` 的同名夹具——e2e 是兄弟目录，不继承本文件）。"""
+    pin_production_env(monkeypatch, tmp_path)
+    yield
+
+
 def bp_args(
     sps: int = 3,
     rotate_stages: int = 35,
