@@ -1726,7 +1726,7 @@ if str(manifest["kind"]) in ("iter", "run") and not echo:
 | 读方 | 建条目/行的条件 |
 |---|---|
 | `dashboard/src/server/iters.ts::readEvalSummaries`（指标表 eval 列、配对基准、`davgTicks` 等衍生列） | `r.event === 'eval_summary'` |
-| `iters.ts::readLatestEvalGames`（eval 弹窗） | 先找 summary 的最大 iter，再取该 `(iter,wver)` 的逐局行 |
+| `iters.ts::readEvalGames`（eval 弹窗） | 先找 summary 的最大 iter，再取该 `(iter,wver)` 的逐局行 |
 | `stack/kickstart-receipt.ts`（开课回执基线对照） | 同 |
 | `biz/gate_check.py::read_trend_rows`（门判据趋势） | 同 |
 

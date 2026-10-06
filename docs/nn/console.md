@@ -938,7 +938,7 @@ hub 不可达时配置照样落 / 文案含「本机不跑这门课」「不需�
 | 读方 | 位置 | 建条目的条件 |
 |---|---|---|
 | 指标表 eval 列 / 配对基准 / 衍生列（`avgTicks` 等） | `server/iters.ts::readEvalSummaries` | `event === 'eval_summary'` |
-| eval 逐局弹窗 | `iters.ts::readLatestEvalGames` | 先按 summary 找最大 iter |
+| eval 逐局弹窗 | `iters.ts::readEvalGames` | 先按 summary 找最大 iter |
 | 开课回执「起点-基线对照」 | `stack/kickstart-receipt.ts` | 同 |
 | 门判据趋势（python 侧） | `biz/gate_check.py::read_trend_rows` | 同 |
 

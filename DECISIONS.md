@@ -8110,7 +8110,8 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
 - **判据**：账本里没有时区字段，唯一可靠痕迹是 summary 的 `nodes` 含 `"cloud"` 键
   （`remote/offline_eval.py::CLOUD_NODE`）；逐局行自带 `node`，逐行判。
 - **决定**：**读侧**转换（历史数据必须修正）：`server/iters.ts` 的 `readEvalSummaries` /
-  `readLatestEvalGames` 把含 cloud 的 `time` 按 UTC 解析后按本机时区写回**同格式**；无 `nodes`
+  `readEvalGames` 把含 cloud 的 `time` 按 UTC 解析后按本机时区写回**同格式**（本条落账时该函数名
+  `readLatestEvalGames`，同日「按评估轮选」那条已泛化成 `readEvalGames(trajDir, iter?)`）；无 `nodes`
   的老行、非该格式的串一律原样透传（不猜）。写侧（新行带 `+00:00`）留作后续，不在本次。
 - **备选与否决**：显示层/前端转 —— 否，指标表 / Hero / eval 弹窗三处消费，且历史行必须修正。
 - **测试纪律**：bun test 在本机跑时 `getTimezoneOffset()` = 0（实测），UTC→本地是恒等 ⇒ 断言会
