@@ -68,10 +68,11 @@ describe('console hero 最新 6 轮 eval toggle', () => {
     const ev = view.filterGroups(view.iterGroups(rows), 'eval')
     expect(ev.map((g) => g.iter)).toEqual([8, 6, 4, 2])
     for (const g of ev) expect(g.eval).not.toBeNull()
-    // rollout 过滤 = 无 eval 的轮（奇数 iter：1,3,5,7）；eval 过滤 = 有 eval 的轮（偶数）
+    // rollout 档 = 候选集全保（1..8 全在，含偶数那些有 eval 的轮），「只主行」由渲染层实现；
+    // eval 档 = 只有 eval 的轮（偶数）。
     const mains = view.filterGroups(view.iterGroups(rows), 'rollout')
-    expect(mains.map((g) => g.iter)).toEqual([7, 5, 3, 1])
-    expect(mains.length).toBe(4)
+    expect(mains.map((g) => g.iter)).toEqual([8, 7, 6, 5, 4, 3, 2, 1])
+    expect(mains.length).toBe(8)
   })
 
   it('hero SSR 默认主行视图：渲染主行/eval toggle 与「最新 6 轮完整指标」', async () => {

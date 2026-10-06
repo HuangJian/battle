@@ -138,6 +138,8 @@ export function invalidateNodeHistoryMemo(): void {
   aggMemo = null
   scanMemo = null
   streams.clear()
+  legsMemo = null
+  appliedLegsFp = null
 }
 
 // ────────────────────────── 逐调用计数器（plan/dashboard-reload-perf：结构性断言的唯一数据面） ──────────────────────────
@@ -781,6 +783,73 @@ interface LedgerCandidate {
   size: number
 }
 
+// ────────────────────────── 离线腿（云机 offline worker 完成的轮） ──────────────────────────
+//
+// 用户口径（2026-10-06）：offline worker 完成的轮 **算节点 PPO 贡献、不算 rollout/eval 贡献**
+// ——「剔除离线腿整段」。腿 = 该课 `training_log.jsonl` 里 `offline_artifact` 事件带的 `it`
+// （写者 `hub/store_offline.py`，每轮一条；`x21-psh-a` = it9..87）。
+//
+// ★ 为什么剔除必须发生在**计数入口**（`ingestLine`）而不是投影层事后扣：日桶 / 课维度只有
+//   「天」粒度（`LocalDayBucket` 无 it），事后没有任何 it 可依；只有滚动环的事件带 it。
+// ★ 为什么是「整段」而不是「只剔云机写的行」：云腿的 meta 行**根本不写进本仓**
+//   `dist-agent-meta.jsonl`（2026-10-06 实测 `tmp/x21-psh-a`：`"node": "cloud"` = 0 行；
+//   云机只回 `eval_summary.nodes.cloud` 与 offline 事件），所以「只剔云行」= 什么都不剔。
+//   连带影响（诚实记录）：腿区间里的**本机行**（该腿开始前本机先采的那一两轮）会被一并剔掉。
+
+export const LEGS_MAX_BYTES = 64 * 1024 * 1024
+
+/** 逐课离线腿 it 集合 + 指纹（指纹 = 参与读取的账本 stat 拼串）。 */
+export interface OfflineLegs {
+  fp: string
+  byCourse: Map<string, Set<number>>
+}
+
+let legsMemo: OfflineLegs | null = null
+/** 当前**已生效**的腿指纹（变了 ⇒ 历史要按新口径重算，见 aggregateNodeHistory）。 */
+let appliedLegsFp: string | null = null
+
+function legsFingerprint(ledgers: LedgerCandidate[]): string {
+  return ledgers.map((l) => `${l.course}|${l.mtimeMs}|${l.size}`).join(String.fromCharCode(10))
+}
+
+/** 读课程账本里的离线腿集合（按账本 stat 指纹 memo：**账本没动 ⇒ 零读**）。
+ *
+ *  读整份账本（一次性的，只在指纹变化时发生）；超 `LEGS_MAX_BYTES` 的账本跳过
+ *  （宁可少剔，也不把一次聚合变成大文件全读）。 */
+export function readOfflineLegs(ledgers: LedgerCandidate[]): OfflineLegs {
+  const fp = legsFingerprint(ledgers)
+  if (legsMemo && legsMemo.fp === fp) return legsMemo
+  const byCourse = new Map<string, Set<number>>()
+  for (const l of ledgers) {
+    if (l.size > LEGS_MAX_BYTES) continue
+    let text: string
+    try {
+      text = readFileSync(l.path, 'utf8')
+    } catch {
+      continue
+    }
+    let set: Set<number> | null = null
+    for (const line of text.split(String.fromCharCode(10))) {
+      if (!line.includes('offline_artifact')) continue
+      try {
+        const r = JSON.parse(line) as { event?: string; it?: unknown }
+        if (r.event !== 'offline_artifact') continue
+        const it = Number(r.it)
+        if (!Number.isInteger(it) || it < 0) continue
+        if (!set) {
+          set = new Set()
+          byCourse.set(l.course, set)
+        }
+        set.add(it)
+      } catch {
+        /* 半行/坏行：跳过 */
+      }
+    }
+  }
+  legsMemo = { fp, byCourse }
+  return legsMemo
+}
+
 /** 扫描结果（plan/dashboard-reload-perf R2① / A5）：**一次 walk 产出两组候选** ——
  *  meta（每流一份、可嵌套）与课程账本（每课一份）。PPO 侧（`contribution.ts`）与采样侧
  *  （本模块）**共用同一份扫描结果**（`scanPoolStreams()`）—— 两个消费者各 readdir 一遍
@@ -1026,7 +1095,12 @@ interface StreamState {
   seq: number
   /** 该流已见的下一行序号（同流保序）。 */
   nextOrd: number
+  /** 该课的**离线腿** it 集合（云机 offline worker 完成的轮）：这些轮的行不进计数与滚动环。
+   *  空集 = 该课无离线腿（老课 / 从未跑 offline）。每次聚合从 `readOfflineLegs` 重取。 */
+  excludedIt: Set<number>
 }
+
+const EMPTY_IT_SET: ReadonlySet<number> = new Set()
 
 let streams = new Map<string, StreamState>()
 
@@ -1085,6 +1159,11 @@ function ingestLine(st: StreamState, line: string, epochStr: string, nowMs: numb
   if (!r) return
   st.flow.lines++
   const ord = st.nextOrd++
+
+  // ⓪ 离线腿剔除（用户 2026-10-06 口径）：该轮由云机 offline worker 完成 ⇒ 本机不认它的
+  //    rollout/eval 账（计数、样本、课维度、滚动环一律不进）。PPO 贡献走 `contribution.ts`
+  //    的 `job_*` 事件，不经过本模块 ⇒ 照旧算。
+  if (r.it >= 0 && st.excludedIt.has(r.it)) return
 
   // ① 逐流 it 分布（水位/贡献/翻转的唯一数据面）。
   if (r.ok && r.it >= 0) {
@@ -1259,6 +1338,9 @@ function settleWaterLevel(
 
 /** 把该流的全部状态归零（首见 / 回退 / 原地重写 / 水位后退 —— 全量重建的公共前置）。 */
 function resetStream(st: StreamState): void {
+  // ★ `excludedIt` 不在这里清：`rebuildStream` 是本函数的调用者，而它正是在「清空后重读」
+  //   的路径上——若在此清空，聚合循环刚设好的腿集合会被掎掉，剔除静默失效（2026-10-06 踩过）。
+  //   腿集合的属主是 `aggregateNodeHistory` 每拍的开场设置（读面判定之前）。
   st.agg = emptyStreamAggregate()
   st.itByNode = new Map()
   st.maxIt = -1
@@ -1326,7 +1408,14 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
   // ── 进程内 memo（二轮评审）──
   // 两个消费者（`api/pool` 探测层 + `snapshot-cache` 机群探测）用同一份聚合；
   // 空闲时靠指纹零重扫，训练中靠 AGG_MEMO_MIN_MS 把重扫节奏封顶。
-  const fp = srcs.map((c) => `${c.dir}|${c.mtimeMs}|${c.size}`).join('\n')
+  // 离线腿（用户 2026-10-06 口径）：腿集合进**指纹**（与 meta 同一套 memo 纪律）。
+  //  ★ 不能做成「腿一变就立刻作废」：腿随训练账本增长而长（`x21-psh-a` 的 it9/10 本机行
+  //    **先于** artifact 落盘），而 `x21-psh-b` 这种活课每秒都在动——立即作废 = 训练中每拍
+  //    全量重算，既打穿 `AGG_MEMO_MIN_MS` 的「≤1 次/窗口」上限，也让既有「暖缓存零重算」
+  //    的结构断言在活数据下随机红。进指纹后延迟 ≤1 个窗口，与其它变更同节奏。
+  const legs = readOfflineLegs(scan.ledgers)
+  const fp = srcs.map((c) => `${c.dir}|${c.mtimeMs}|${c.size}`).join('\n') + '\n#legs\n' + legs.fp
+
   if (
     aggMemo &&
     aggMemo.root === tmpDir &&
@@ -1336,6 +1425,12 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
     return aggMemo.val
   }
   counters.computes++
+
+  // 腿集合变了 ⇒ 已入账的行按旧口径算的，必须清流态重读一遍（绝不做事后扣减）。
+  if (legs.fp !== appliedLegsFp) {
+    appliedLegsFp = legs.fp
+    streams.clear()
+  }
 
   // 流序（归并决胜的 canonical order）：目录名升序 —— 增量下**不能**用 mtime 序
   // （旧流的 mtime 会被新写入推走，增量/全量就不可复现；见 plan O6）。
@@ -1370,11 +1465,13 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
         course,
         seq,
         nextOrd: 0,
+        excludedIt: EMPTY_IT_SET as Set<number>,
       }
       streams.set(src.path, st)
     }
     st.seq = seq
     st.course = course
+    st.excludedIt = (legs.byCourse.get(course) ?? EMPTY_IT_SET) as Set<number>
     st.flow.mtimeMs = src.mtimeMs
     st.pass = []
 

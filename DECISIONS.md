@@ -7797,3 +7797,103 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   `worker/{ppo/engine,ppo/np_core,ppo/trainer,models/student,scripts/init_spatial_leg,train/bc}.py` · 测试：`tests/nn/{policy-extra,spatial-tower,spatial-head-nonconstant}.test.ts` ·
   `nn-training/tests/{worker/test_dataset_mirror,worker/test_spatial_leg_smoke,common/test_schema_fingerprint}.py` · 探针：`nn-training/tools/spatial-probe*.py`。
 - **指针**：计划与读数表 → `plan/policy-spatial-head.plan.md` §7；探针 dump → `tmp/spatial-probe/hu150/`；S0-a → `tmp/spatial-s0a/`。
+## §2026-10-06-psh-leg-a-verdict（2026-10-06，腿 A 终判：挂起 → "看见了但没转化"，K→5 立项 + 腿 B 可启动）
+
+- **背景**：plan `plan/policy-spatial-head.plan.md` §5 口径，A-it150 对 A0-it150（`x21-psh-a.it150.20261006-093718.json` /
+  `x21-psh-a0.it150.20261006-053532.json`），N=1600（800 @415000 + 800 @417000，同命令先后跑，配对 800/800 全中，
+  dropped=0）。A 日常终点 32%/11.26（平台期后尾盘上翘）；it100 哨兵 28.5%/10.105（带上沿，未过峰，只读）。
+- **决定（§5.4/§5.5 落判）**：杀敌配对差 D=**+0.23** 95%CI **[-0.26,+0.71]**（含 0，非直关）；通关 D=**+2.56pp**
+  CI [-0.64,+5.77]（安全门过）；方向诊断 acc D=**+0.012** CI **[+0.0095,+0.0152]**（两段一致改善）⇒ **挂起**，
+  二级归因第一支"看见了但没转化" ⇒ **立项 K→5，并且腿 B 也可以启动**（标注"感知有效、转化不足"，与 K→5 并行；
+  腿 B 主判同时报杀敌和方向诊断，预注册可能同样读挂起，不算失败）。Edhit/enclR 不在终判行 schema 内，归因只凭 acc。
+- **否决与备选**："A≤A0 即判 9 维没用"（否决：对照对新输入偏保守，且 acc 方向显著为正）；"80 轮提前判"
+  （否决：慢轴假阴性，按计划跑满 150）。A0 侧杀敌段差 1.13 > MDE@800 0.98 ⇒ 记异质警告一条，不改合成规则。
+- **后果**：腿 B/B0 开工门已齐（起点须从腿 A 终点现转，占位件重转；课程 `x21-psh-b/b0.jsonc` 已立，paired_rotate_seed=20261012）；
+  K→5 另立案（预算只够一个时先做 K→5；并行且改节奏 ⇒ 腿 B 结果降级探索性）。
+- **落点**：`nn-training/curricula/x21-psh-{b,b0}.jsonc`（新立）· 终判局 → `tmp/x21-psh-{a,a0}-verdict/seg{415000,417000}.jsonl` ·
+  读数 → `plan/policy-spatial-head.plan.md` §7（it100 哨兵 + 腿 A verdict 行）。
+## §2026-10-06-psh-legB-start（2026-10-06，腿 B/B0 开课：起点机制与 B0 直接复制的不对称）
+
+- **背景**：腿 A 终判挂起→"看见了但没转化"，满足 §5.5"挂起 + 方向改善 ⇒ 腿 B 可启动"。课程
+  `x21-psh-b/b0.jsonc`（paired_rotate_seed=20261012 全新流，已立）经控制台同源 API `openCourse` 开课，
+  kickstart 缰绳开（0.1），干烧熔断参照物 = 同 V 对端臂。
+- **决定（起点机制）**：B = `init_spatial_leg.py --from 腿A-it150 --policy-extra --spatial-tower
+  --seed 20261012` 转出（85345 参数，warmstart_missing=头2+塔4键；旧占位件已覆盖）。
+  B0 = 腿 A 终点**直接复制**（plan 字面指令；sha256 逐字节相同见证，v4→v4 严格可载，70279 参数）。
+- **否决与备选**："B0 也走脚本转出使双头同冷"（否决：脚本对同形头是装载非重初始化，达不到目的；
+  真要双冷须改冻结的 S0 机制 = 偏离计划字面指令。代价：B0 头保持腿 A 训态，比 §5.6 原定价更偏保守——
+  verdict-safe：B>B0 结论更强，B≤B0 走既定两岔，不许定罪；课程头注 + 本条见证）。
+- **后果**：S0-e 训练侧冒烟在开训 20 步后查（塔 ‖ΔW‖>0 + param_group，进 `nn-python-gate.sh`）；
+  K→5 未立案前 B 先跑，若 K→5 后改节奏 ⇒ 本腿结果降级探索性（已预注册）。
+- **落点**：起点 → `nn-training/weights/spatial-leg{B,B0}/spatial-leg{B,B0}.it0.json` ·
+  账本 → `tmp/x21-psh-{b,b0}/training_log.jsonl`。
+## §2026-10-06-psh-leg-b-burn-abort（2026-10-06，B 在 it16 被配对熔断误杀：冷爬坡判成烧干，切 baseline 重开）
+
+- **背景**：B 按计划冷启动（it0/it5/it10/it15 胜率全 0），`kickstart_burn` 缺省 auto → 唯一同 V 对端 B0（31%）
+  ⇒ paired 模式"同 it 配对差连 3 点 < −5pp"在 it16 触发 ABORT（delta −31pp），`run_complete` 记"正常收官
+  （it16/150）"并停云机。A 全程零 burn 记录（守卫实际未判过 A）⇒ B 的遭遇是**误报**，不是烧干。
+- **决定**：B/B0 课程文件加 `kickstart_burn: {mode: "baseline"}`（B：floor=own-it0−5pp，对零起点 ≡ 永不触发，
+  可证明；B0：只防真塌〈连 3 点 < 30.2%〉，且防"后期 B 反超杀死对照组"。对照臂永不自杀，x20-clutch-null 前例）。
+  **删块 ≠ 关**：块缺席回落 auto/paired，it20 必再杀一次——"删熔断续跑"不可行，baseline 留着就是关闭态。
+  `paired_kill` 本就 opt-in 缺席（已关）；`ent_break` 0.25 / kl 缺省等过程守卫保留（冷腿熵最高，误伤不了；A 全程带着跑完）。
+  改的是停腿判据（块不进 corpus fp），不改数据/更新 ⇒ 不算新实验。
+- **后果**：B 经控制台 `openCourse` 幂等重开（权重/it16 不断点保留，回执确认"已显式关掉配对参照"），等云机
+  上线拉取；B0 未停（it18 在跑，baseline 块已被热加载 it19 生效）。重开后 kk 初值回执 0.1（缰绳衰减态是否续接
+  待首轮确认，影响 ≤4 轮可忽略）。"改大 iters"提示不适用（iters 本已 150，停因是守卫不是预算）。
+- **落点**：课程 `x21-psh-{b,b0}.jsonc`（kickstart_burn 块）· 中断现场 → `tmp/x21-psh-b/training_log.jsonl`
+ （it16 kickstart_burn/gate_verdict/run_complete 三连行）。
+- **续跑补记（2026-10-06 10:54 第二次误杀后修正）**：光 `openCourse` 不够，课程级停开也不够——it17
+  verdict 仍是 paired（回执与运行判据背离）。根因：`hot_reload.py` 的 `*` = 只记账不写回，burn 块快照活在
+  trainer 常驻进程里（"停止→启动后生效"指 trainer 重启，不是课程停开）。修法：`stop trainingLoop`
+  （注意：停的是**共享** trainer，B0 亦顿）→ `start trainingLoop`（新 PID）→ `openCourse B`；
+  B/B0 的 loop 均带新快照重生（B it18 / B0 it23 已确认，权重不断点）。B0 的 it19"热加载生效"同样只是记账，
+  同批次真生效。验收标准：it20 评估（B 必仍≈0% vs B0≈30%）——paired 会杀、baseline 不杀，出结果即见分晓。
+- **续跑补记 2（2026-10-06 11:20 B0 在 it31 被 baseline 误杀）**：floor=35.24−5=30.24，it20/25/30
+ （30.0/28.5/29.75）连低三点触发。但基线 it0 只有 105 局（dropped 95），SE≈4.7pp ⇒ margin 5pp≈1σ 口径，
+  天生误杀；且 B0 杀敌 primary 稳在 10.6+ 从未退（塌的是胜率噪声，win-only 守卫看不见 primary）。
+  修法：B0 `margin_pp` 5→10（floor 25.2%，真塌照抓；改停腿口径不改训练）+ 走完整重启循环
+  （停课 B0 → 重启共享 trainer → 重开 B0；B 不动，随 trainer 重启自动续跑）。两腿 it28/it32 已确认存活。
+  B 侧验收同步完成：it20/it25 零胜率**未触发** ⇒ baseline 快照生效实锤。
+## §2026-10-06-goalnn-evala-serial-queue（2026-10-06，用户报障：「evalA 在某 it 执行过后，其它 it 再点按键无反应，需要刷新页面」）
+
+- **背景**：evalA 单槽互斥（`eval:A`）：一单几十秒–几分钟里，其它 it 的 evalA 点击一律 409
+  「evalA 已在运行」——「连点多个 it、串行执行」的诉求落空；回执只在小面板顶部一闪，体感=无反应。
+- **备选与否决**：前端重试队列（忙就等一会儿再 POST）——否，队列是操作状态不是画面状态（§2.5），
+  刷新 / 多标签 / 两个面板（Hero 与指标表）会各排一份，服务端仍在 409 里空转。
+- **决定**：排队住唯一启动点 `server/eval-a-run.ts`：忙时返回「已排队（前面 N 个）」、子进程退出自动
+  接棒；`eval:A` 从第一单持有到**队列排空**（补评/导入侧看到的「忙」语义不变）；同 (课, iter, baseline)
+  去重；上限 8（满 ⇒ 响亮 409）；路由 busy/full → 409、spawn 类失败 → 500。按钮侧不改判据
+  （干活 / 排队的两种回执都按 ok 保 busy；「读数自动回填」口径收进服务端那一句话）。
+- **违反后果**：把排队挪回前端、或忙时静默丢单 ⇒ 刷新即丢队、两面板各排一份，单槽事实漂出服务端。
+## §2026-10-06-goalnn-offline-leg-sampling-exclusion（2026-10-06，用户指令：offline worker 完成的轮算节点 PPO 贡献、不算 rollout/eval 贡献）
+
+- **背景**：云机离线腿（`nn-training/remote/offline_eval.py` + `hub/store_offline.py`）替本机跑掉一段
+  it 的 rollout/eval；控制台「采样贡献」照本机 meta 账本算，把这批轮记在本机节点头上。
+- **口径（用户选定）**：**剔除离线腿整段**——例 `x21-psh-a` it9..87。
+- **决定**：腿 = 课程账本里 `offline_artifact` 事件带的 it 集合（`pool-history.readOfflineLegs`）；
+  剔除发生在**计数入口** `ingestLine`（日桶/课维度只有「天」粒度，事后扣减无 it 可依），行在
+  ①逐流 it 分布 / ②日桶 / ③滚动环 / ④计数之前就返回；腿集合进聚合 memo 的**指纹**
+  （变更后清流态重读，延迟 ≤ `AGG_MEMO_MIN_MS` 一个窗口，不做「一变即作废」）。
+- **为什么不能只剔「云机写的行」**：云腿的 meta 行**根本不写进本仓** `dist-agent-meta.jsonl`
+  （2026-10-06 实测 `tmp/x21-psh-a`：`"node": "cloud"` = 0 行），只剔云行 = 什么都不剔。
+- **代价（已知并接受）**：腿区间里的**本机行**一并被剔。实测 26 课里 11 课有腿、全场 297,181 行
+  剔 20,688 行（7%）；`x20-adv2-max` 剔 9,336 行（腿从 it0 起）、`x21-psh-a0` 腿 5..150 = 整课、
+  `x20-adv3-kind-r2` 腿在尾段（保留行只到 it31）。要「只剔云行」得先把云行写进 meta（写侧改动）。
+- **不动的部分**：PPO 贡献走 `contribution.ts` 的 `job_result_accepted` / `job_completed` 事件，
+  不经本模块 ⇒ 照旧统计（正是用户要的那一半）。
+- **违反后果**：把剔除挪到投影层（事后扣）：日桶无 it 可依，只能漏剔或错剔。
+
+## §2026-10-06-goalnn-eval-cloud-time-utc（2026-10-06，用户报障：offline 回传的 eval 时间是 UTC）
+
+- **背景**：`worker/eval_track.py` 写 summary `time` 用裸 `strftime("%Y-%m-%d %H:%M:%S")`
+  （写者本机钟）；云机 = UTC ⇒ 控制台把 `x21-psh-a` it10 显示成 `2026-10-05 21:39:04`，而同轮
+  本地 iteration 是 `2026-10-06 05:39:00`（差 +8h），it80 之前的时间列还会**逆序**。
+- **判据**：账本里没有时区字段，唯一可靠痕迹是 summary 的 `nodes` 含 `"cloud"` 键
+  （`remote/offline_eval.py::CLOUD_NODE`）；逐局行自带 `node`，逐行判。
+- **决定**：**读侧**转换（历史数据必须修正）：`server/iters.ts` 的 `readEvalSummaries` /
+  `readLatestEvalGames` 把含 cloud 的 `time` 按 UTC 解析后按本机时区写回**同格式**；无 `nodes`
+  的老行、非该格式的串一律原样透传（不猜）。写侧（新行带 `+00:00`）留作后续，不在本次。
+- **备选与否决**：显示层/前端转 —— 否，指标表 / Hero / eval 弹窗三处消费，且历史行必须修正。
+- **测试纪律**：bun test 在本机跑时 `getTimezoneOffset()` = 0（实测），UTC→本地是恒等 ⇒ 断言会
+  **静默空过**；`tests/eval-cloud-time-utc.test.ts` 必须把 TZ 钉成 `Asia/Shanghai` + offset 卫兵。
+- **违反后果**：把云机串按本地解析 ⇒ 时间列错 8h、按时间排序错乱。

@@ -171,6 +171,16 @@ describe('console/api.buildStateView', () => {
 describe('console/api.buildStateView · 请求路径零聚合（reload-perf W1）', () => {
   it('G1：暖缓存后 `buildStateView` 一次聚合调用都没有（调用计数 = 0）', async () => {
     // 先暖：冷启动首调**允许**经 SWR 触发一次聚合（那是设计行为，不是回归）。
+    //
+    // ★ 2026-10-06（修波动），**硬作废再暖**：`getFleetProbes` 的 TTL 只有 5s
+    //   （`SNAPSHOT_REFRESH_MS`），而 `swr-cache.get` 在「陈旧」时会**丢一次后台重算**
+    //   ——那次重算同样调 `aggregateNodeHistory`，于是「暖」这一拍若没落到新鲜值，
+    //   下面测量窗口里的计数就被后台重算染成 1。满载时单次 `buildStateView` 要 1–2.8s，
+    //   5s 线随时被越过（实测：单跑本文件 4/4 绿，满载全量 ~50% 红）。
+    //   `clear()` 后第一次 `get` **必须等**重算落地（`swr-cache` 语义③）⇒ 暖完缓存 `at`
+    //   是新鲜的，窗口内不再触发后台重算。判据本身一字未改（仍是 calls/computes/bytesRead = 0），
+    //   只是把「暖」这个前提真正兑现。
+    api.invalidateSlowSnapshot()
     await api.buildStateView()
     pool.resetPoolHistoryCounters()
     await api.buildStateView()
