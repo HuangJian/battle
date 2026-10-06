@@ -6,6 +6,61 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §68 未完成就发得出去：在飞的活也发**备份副本**，空闲 worker 不再空转（用户口径，2026-10-06）
+
+**触发**（用户报障，Kaggle 真机）：新 worker 上线后 `polling hub (no job yet …)` 刷了一两分钟，
+**重启 trainer** 才领到活。用户口径（原话）：
+
+> 按优先级表派任务，只要没有回传结果都是没完成，都能发给 worker 竞速！！！
+
+**根因（机制链，逐条落在代码上）**：
+
+1. 空闲 worker 的候选只有**可领取池**（`hub/store_ledger.py::claimable_job_ids`：pending ∧ payload 在盘
+   ∧ 无 `result` ∧ 无 `fail.json` ∧ 未熔断 ∧ **无活租约**）——「在飞」的活对别的 worker **完全不可见**；
+2. 而「活租约」的死活判据是 `_lease_state`（TTL 未到 **或**心跳仍在），心跳住在**独立线程**
+   （`remote/job_round.py::_hb_loop`，每 `HEARTBEAT_SEC=60s`）⇒ 主线程卡死（D 状态 / 挂住的挂载点
+   ——§2026-10-06 那两条同族事故）时租约被无限续，这份活**谁都领不到**；
+3. 也没有出口：`cancel_unsettled_jobs` 明确**不撤在飞**（2026-10-03 用户裁决「不管在算的，只管没领的」）；
+4. 于是唯一解法是训练侧重启 —— `trainer/queue.py::RUN_ID = secrets.token_hex(8)` 每进程随机 ⇒ 同一轮
+   重发布换一个 **job_id**（`common/job_identity.py`），新身份自然可领。「重启 trainer 才行」不是巧合。
+   设计里其实早有那张表：`job_priority`（`STRAGGLER_SEC=180s` 起 = 掉队救援 `high` / claimed = `medium` /
+   ready = `low`）与 `claim(mode="backup")` 机制都保留着（§30 的 P3「竞速**判定**退役、机制保留」），
+   但 **pull 线从来没接上**：只有 push 腿用（`remote/push_dispatch.py::_backup_target`），而 worker 的
+   `acquire_job` 对每个候选**硬写 exclusive**、`peek` 又永不返回在飞 job —— 表在、线没接。
+
+**落地（三条全是接线，不是新机制）**：
+
+| 面 | 变化 |
+|---|---|
+| `hub/store_ledger.py` | `_unfinished_pending()` 成为**唯一筛子**；`claimable_job_ids()`（∧无活租约）与 `inflight_job_ids(not_held_by=…)`（∧有活租约）是同一份判据的两个视图 |
+| `hub/queue_claims.py::peek_jobs` | 每课程仍**至多一个**候选：池里有人 ⇒ `mode="exclusive"`；池空 ⇒ 在飞集 ⇒ `mode="backup"`（`not_held_by` 排掉请求者自己握着的那份） |
+| `remote/job_lifecycle.py::acquire_job` | 按候选自带的 `mode` 认领（未知值回退 exclusive）；`remote/job_round.py` 对 backup **不打** `/start`、`/ready` 不报身份 |
+
+**为什么 backup 副本不能打 `/start`**：它会覆写 `_computing`/`_claimed` 的 worker 与时刻 —— 而
+`computing_at` 是**掉队阈值**（掉队救援的唯一时基，R2-C1）。备份打一下就把**主人**的掉队时钟重置成
+自己的开算时刻：救援被自己人压住（正是本条要逃的形状）。`/ready` 会顺手写 `_last_heartbeat`，那是主人
+孤儿判据（`_lease_state`）的输入 ⇒ 备份只报「算完了」，不报身份（`worker_id=""`）。
+
+**不做的事（明确边界）**：
+
+* **不设 hub 侧副本上限**（不做 pull 腿的「1 主 + 1 备份」计数）：用户口径是「都能发给 worker 竞速」，
+  而副本数天然被**空闲 worker 数**封顶（一个 worker 一轮只握一份活）；上限那套住在 push 腿
+  （`push_dispatch.backups_per_course`），pull 线要的是「没有空闲卡空转」。
+* **不恢复竞速判定**（`race_decision` / 广播）：那是 §30 删掉的**无排序**重复烧卡；这里是有排序
+  （优先级表）+ 有前提（请求者空闲、且是它自己来 peek）的授权。
+* **不碰**同日的两条机器级停滞上界（§2026-10-06 的一局上界 / 轮末扫盘上界）：本条的持有人**还活着**
+  （心跳在），那是另一条并行修的因；两条叠加才是「卡住的活也不会把整条腿绑死」。
+
+**门禁**：`tests/hub/test_priority_schedule.py` 七条新用例（两视图对称 · 熔断与已落盘仍被拦 ·
+peek 发备份候选 · 池优先于副本 · `acquire_job` 按候选模式认领 · 未知模式回退 · 备份轮不打 start/ready）。
+旧形状上这七条**全红**（A/B 工作树实测：`AttributeError: inflight_job_ids` / `KeyError: 'mode'` /
+`['exclusive'] != ['backup']` / `on_ppo_start` 不是 None）。
+
+**真机判据（下次云机会话读）**：新 worker 上线后 5–10s 内出现
+`job … claimed [mode=backup]（无租约：先回传者胜，后到者 409 丢弃）`；同一 job 上两份回传——先到者
+`result accepted`、后到者 `lost the race (409, 赢家已落账) — 本份丢弃`；hub 侧 `/admin/queue` 该 job
+仍是**单一** inflight 行（备份不设租约）。
+
 ## §67 在线/离线状态切换闭环：pin 重新成为硬意图 + 离线 = 等待（plan/offline-online-status-switch，2026-10-05）
 
 **触发**（用户 2026-10-04 报障两条）：

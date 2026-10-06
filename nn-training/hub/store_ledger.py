@@ -5,7 +5,9 @@
 * `_job_dir` —— 唯一的目录解析（别处不再 `job_root / job_id` 拼第二遍）；
 * `_read_ledger` / `_append_ledger` —— jsonl 双态账本（H6 增量读：记住上次 size，只解析
   新增行 ⇒ 长跑轮询不随账本线性变慢）；
-* `claimable_job_ids` —— 可领取池 = 账本 job_pending ∩ 结果未落盘 ∩ payload 在盘；
+* `claimable_job_ids` / `inflight_job_ids` —— 「未完成」的两侧（`_unfinished_pending` 是唯一
+  筛子）：可领取池 = ∧ **无**活租约；在飞集 = ∧ **有**活租约（2026-10-06：后者是空闲 worker
+  领备份副本的候选源，见 `inflight_job_ids`）；
 * `publish` —— 发布（写磁盘 + 记账）；
 * `job_failure` / `get_result` —— 两个**读回**面（失败标记 / 已落盘结果）。
 
@@ -44,6 +46,10 @@ class LedgerMixin:
     jsonl_path: Path
     #: 兄弟簇 `store_leases` 拥有的状态（本簇的 `claimable_job_ids` 要用它判「别处在做」）
     _leases: dict[str, float]
+    #: 租约**持有人身份**（同住 `store_leases`）：`inflight_job_ids(not_held_by=…)` 要按它
+    #: 排掉「请求者自己正在跑的那份」（只读，**不**走 `lease_worker()`——那个会顺手回收死租约，
+    #: 而 peek 面按 R1-4 是无副作用的）。
+    _lease_workers: dict[str, str]
     _frozen: dict[str, dict]
     #: 兄弟簇 `store_scheduling` 的「有人承诺在跑」痕迹：撤单（`cancel_unsettled_jobs`）
     #: 要跳过它们（在飞的不撤），并顺手撕掉以让拿旧 epoch 来的认领被 `demoted` 拒。
@@ -124,15 +130,19 @@ class LedgerMixin:
                 net = str(ev)
         return net
 
-    # ---- 可领取池（jsonl + 结果落盘重算，D8） ----
-    def claimable_job_ids(self) -> list[str]:
-        """job_pending 且未 job_completed 且 payload 在盘且**结果未落盘**的 job_id，按发布序。
+    # ---- 未完成的 pending job（一个判据，两个视图：可领取池 / 在飞集） ----
+    def _unfinished_pending(self) -> list[tuple[str, float]]:
+        """「**未完成**」的 pending job → `[(job_id, 发布时刻)]`，按发布序。
 
-        P3b 独占加超时（supersede §343）：持有**活租约**的 job 不在池中——
-        worker 领到 PPO 任务后超时前不被别 worker 重领。判据是 `_lease_held`
-        （活租约 = 未过期 ∧ 非孤儿，§52）而不是「未过期」：孤儿（claim 后零心跳、
-        超过宽限）也回池（死 worker 回收只管这一条，不管调大 TTL——it24 倒车禁令）。
-        已有结果未验收的 job 从池中剔除——首写锁定兜底（hub 重启丢租约时用）。
+        判据（`claimable_job_ids` 与本函数是两个视图，筛子必须**只写一遍**——两处各写一遍
+        必然漂成「池里看得见、认领说 held」那种更难查的形状）：
+
+          * 账本净态 = `job_pending`（`job_completed` / `job_cancelled` 折叠掉）；
+          * 未熔断（`_frozen`，§4.1：认领后零回传满阈值 ⇒ 不再回池，重发同 job_id 不清它）；
+          * 目录在盘 ∧ payload 在盘；
+          * **无 `result/`**（首写已分胜负）、**无 `fail.json`**（节点已报确定性失败）。
+
+        「有没有人在跑」不在这份判据里：池看的是 `_lease_held` **假**，在飞集看的是**真**。
         """
         pending: dict[str, dict] = {}
         for e in self._read_ledger():
@@ -143,7 +153,6 @@ class LedgerMixin:
                 pending[jid] = e
             elif e["event"] in ("job_completed", "job_cancelled"):
                 pending.pop(jid, None)
-        now = self._now()
         eligible: list[tuple[str, float]] = []
         for jid, e in pending.items():
             if jid in self._frozen:
@@ -164,7 +173,44 @@ class LedgerMixin:
                 continue
             eligible.append((jid, float(e.get("ts", 0.0) or 0.0)))
         eligible.sort(key=lambda kv: kv[1])  # 发布序（同 P3b 的池排序）
-        return [jid for jid, _ts in eligible if not self._lease_held(jid, now)]
+        return eligible
+
+    def claimable_job_ids(self) -> list[str]:
+        """可领取池 = 「未完成」（`_unfinished_pending`）∧ **没有活租约**，按发布序。
+
+        P3b 独占加超时（supersede §343）：持有**活租约**的 job 不在池中——
+        worker 领到 PPO 任务后超时前不被别 worker 重领（那条活由 `inflight_job_ids`
+        以**备份副本**的形式发出去，见那里）。判据是 `_lease_held`
+        （活租约 = 未过期 ∧ 非孤儿，§52）而不是「未过期」：孤儿（claim 后零心跳、
+        超过宽限）也回池（死 worker 回收只管这一条，不管调大 TTL——it24 倒车禁令）。
+        已有结果未验收的 job 从池中剔除——首写锁定兜底（hub 重启丢租约时用）。
+        """
+        now = self._now()
+        return [jid for jid, _ts in self._unfinished_pending() if not self._lease_held(jid, now)]
+
+    def inflight_job_ids(self, *, not_held_by: str = "") -> list[str]:
+        """**在飞集** = 「未完成」（同一个 `_unfinished_pending`）∧ **有活租约**，按发布序。
+
+        为什么需要它（2026-10-06 用户口径：「按优先级表派任务，只要没有回传结果都是没完成，
+        都能发给 worker 竞速」）：空闲 worker 的候选以前只有可领取池 =「没有活租约」那一半，
+        于是「**有人正在跑、但还没回传结果**」的活对别的 worker **完全不可见**。代价在现场看得见：
+        一份卡住的活（主线程卡死而心跳线程照旧每 60s 续租，`_lease_state` 永远是 ALIVE）能把
+        自己永久锁在池外，唯一解法是训练侧重启换一个 job 身份（`RUN_ID` 每进程随机 ⇒ 换 job_id）。
+        `peek` 用本集给空闲 worker 发**备份副本**（`mode="backup"`：无租约、先回传者胜、输家 409
+        丢弃），「哪份更值得复制」由优先级表 `job_priority` 排序。
+
+        `not_held_by`：把「**持有人就是请求者自己**」的那份排掉——空闲 worker 上一条 job 的结果
+        可能还在异步回传（`ResultUploader`），把同一份活当备份再领一遍 = 同一张卡跑两遍。
+        """
+        now = self._now()
+        out: list[str] = []
+        for jid, _ts in self._unfinished_pending():
+            if not self._lease_held(jid, now):
+                continue
+            if not_held_by and self._lease_workers.get(jid, "") == not_held_by:
+                continue
+            out.append(jid)
+        return out
 
     # ---- 撤单：切模式 = 上一段整体作废（plan/switch-mode-drops-jobs §0） ----
     def cancel_unsettled_jobs(self, *, reason: str = "mode-switch") -> list[str]:

@@ -33,6 +33,7 @@ from collections.abc import Callable
 from threading import Lock
 
 from common.protocol import (
+    CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_MODES,
     CLAIM_TTL_SEC,
@@ -200,6 +201,13 @@ class QueueClaimsMixin(QueuePeer):
         head** ⇒ 预取的**有效窗口 = min(depth, 开课数)**；想靠「多轮 peek 填满 depth」是不成立的
         （原注释口径已修正：2026-10-02 `plan/transfer-residual.plan.md` §1.5 / W3；得到了
         prefetch 深度的现场账：多 worker 抢同一 hub 时浅窗口 + 每轮新打包 ⇒ 命中率≈0）。
+
+        ★ **未完成就发得出去**（2026-10-06，用户口径：「按优先级表派任务，只要没有回传结果
+        都是没完成，都能发给 worker 竞速」）：每门课先看可领取池（`mode="exclusive"`）；
+        **池里没有**则看**在飞集**（`inflight_job_ids`）——那份活已经被别人拿着租约跑了，
+        但「没回传结果 = 没完成」，空闲 worker 领它的**备份副本**（`mode="backup"`：无租约、
+        先回传者胜、输家 409 丢弃）。「哪份更值得复制」不在这里判：那是 `job_priority`
+        优先级表的事（客户端 peek → `/jobs/priority` → claim 按表排序）。
         """
         self.discover()
         # R2-2：登记表（避让链的唯一输入）改由 peek/priority 喂——缺它
@@ -214,6 +222,16 @@ class QueueClaimsMixin(QueuePeer):
                 continue
             st = self._stores[course]
             ids = [j for j in st.claimable_job_ids() if not st.role_blocked(j, role)]
+            mode = CLAIM_MODE_EXCLUSIVE
+            if not ids:
+                # 池空 ⇒ 看在飞的（同一份「未完成」判据的另一侧）。`not_held_by` 排掉
+                # 请求者自己正握着的那份（它的结果可能还在异步回传）。
+                ids = [
+                    j
+                    for j in st.inflight_job_ids(not_held_by=worker_id)
+                    if not st.role_blocked(j, role)
+                ]
+                mode = CLAIM_MODE_BACKUP
             if not ids:
                 continue
             jid = ids[0]
@@ -226,6 +244,9 @@ class QueueClaimsMixin(QueuePeer):
                     "payload_sha256": man.get("payload_sha256"),
                     "runId": man.get("runId"),
                     "it": man.get("it"),
+                    # 认领模式由 **hub** 定（它才知道有没有活租约）：客户端照发即可。
+                    # 旧 hub 不发这个字段 ⇒ 客户端按 `exclusive` 处理（默认行为零变化）。
+                    "mode": mode,
                 }
             )
             # 预取窗口记账（2026-10-02，pill 精确化）：只在**返回候选**时写——没候选的课不在

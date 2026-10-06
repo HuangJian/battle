@@ -7854,3 +7854,32 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 - **落点**：`nn-training/common/game_watch.py` · `nn-training/worker/iter_rollout.py` ·
   测试：`nn-training/tests/{common/test_game_watch,remote/test_remote_iter}.py`。
 - **指针**：`docs/nn/runtime-opt.md` §32.5（含「先红」取证：A/B 工作树上旧形态被 60s 外墙钟 kill）。
+## §2026-10-06-goalnn-pull-replica-any-unfinished（2026-10-06，用户报障：新 worker 上线「领不到」，要重启 trainer 才领得到；用户口径：只要没回传结果都算没完成，都能发出去竞速）
+
+**背景**：Kaggle 新 worker 起来后 `no job yet` 刷了一两分钟，重启 trainer 才领到活。机制链：空闲 worker 的
+候选只有可领取池（`hub/store_ledger.py::claimable_job_ids`，**排除活租约**）；而「活租约」由**独立心跳线程**
+续租（`remote/job_round.py::_hb_loop`）⇒ 持有人主线程卡死（D 状态 / 挂住的挂载点）时那份活对所有人隐身，
+且没有出口（`cancel_unsettled_jobs` 不撤在飞）。唯一解法是重启 trainer —— `trainer/queue.py::RUN_ID` 每进程
+随机 ⇒ 同一轮重发布换个 `job_id`，新身份自然可领。设计里那张表（`job_priority` 的 high/medium/low）与
+`claim(mode="backup")` 机制都保留着（§2026-09-22-goalnn-race-retired-priority-only：删判定、留机制），
+但 **pull 线从没接上**（只有 push 腿用；`acquire_job` 硬写 exclusive、`peek` 永不返回在飞 job）。
+
+**决定**：未完成就发得出去 —— `claimable_job_ids`（∧无活租约）与 `inflight_job_ids(not_held_by=…)`（∧有
+活租约）成为同一份「未完成」判据的两个视图（`_unfinished_pending` 是唯一筛子）；`peek` 每课程先看池
+（`mode="exclusive"`），池空则看在飞集并发**备份副本**（`mode="backup"`）；`acquire_job` 按候选自带的模式
+认领。排序交给优先级表；认领模式由 **hub** 定（只有它知道有没有活租约）。备份副本**不打** `/start`
+（`computing_at` 是主人的掉队时钟，R2-C1）且 `/ready` 不报身份（不写主人的 `_last_heartbeat`）。
+
+**否决与否决理由**：① 设 hub 侧「1 主 + 1 备份」上限 —— 否（用户口径是「都能发出去竞速」；副本数天然被
+空闲 worker 数封顶，上限那套住 push 腿的派发器里）；② 恢复无排序的竞速广播 —— 否（§2026-09-22 删的就是
+它：白烧 GPU）；③ 只在 worker 侧加整份 job 的墙钟上界让卡住者自己放手 —— 不够（那是另一条因：本条的
+持有人**心跳还活着**，主线程卡死时上界也读不到；两条并行修）；④ 让 hub 撤销在飞租约（takeover）——
+否（输家的工作**注定**白烧，而备份副本可能先赢；且会动 `_reclaims` ⇒ 毒包熔断阈值被自己人喂满）。
+
+**违反后果**：又在 `peek`/`acquire_job` 里各判一次「能不能领」⇒ 两套会漂的判据（出现「peek 说能领、
+claim 说不能」）；把 backup 的回传当 403 确定性失败上报 ⇒ 一个赢家把输家炸成训练停腿；备份打 `/start`
+⇒ 掉队救援永久沉默（现场看着像「机群不救援」）。
+
+**落点**：`nn-training/hub/{store_ledger,queue_claims}.py` · `nn-training/remote/{job_lifecycle,job_round}.py` ·
+测试 `nn-training/tests/hub/test_priority_schedule.py`（七条新用例，旧形状全红）。
+**指针**：`docs/nn/remote-transport.md` §68（机制链 / 落地表 / 边界 / 真机判据）。

@@ -47,6 +47,7 @@ from pathlib import Path
 from typing import Any
 
 from common.protocol import (
+    CLAIM_MODE_BACKUP,
     HEARTBEAT_SEC,
     ROLE_ONLINE,
     CodeChangedError,
@@ -339,10 +340,20 @@ def run_one_round(
             preloaded=preloaded,  # P2 命中面：有它则 payload 段零网络
             log=log,
             should_cancel=_cancel.is_set,
-            on_ppo_start=lambda: job_started(base_url, token, jid, worker_id=worker_id),
+            # ★ 备份副本（`mode=backup`，无租约）**不打** computing_at：那份「PPO 真启动」的
+            # 时基是**主副本**的（掉队阈值认它），备份打一下就把主人的掉队时钟重置成自己的
+            # 开算时刻（`/start` 会覆写 `_computing` 与 `_claimed` 的 worker）——那正是
+            # 2026-10-06 要逃的那种「掉队救援被自己人压住」的形状。旧行为（有租约）逐字不变。
+            on_ppo_start=(
+                None
+                if claim_mode == CLAIM_MODE_BACKUP
+                else lambda: job_started(base_url, token, jid, worker_id=worker_id)
+            ),
         )
         # 算完待回传（P0 小包）：只降别人的优先级（低档备份保险），**永不**触发取消。
-        job_ready(base_url, token, jid, worker_id=worker_id)
+        # 备份副本不报身份：`set_ready` 会顺手写这份 job 的 `_last_heartbeat`，而那个字段是
+        # 主人孤儿判据（`_lease_state`）的输入——备份的一次「算完了」不该把主人的静默洗白。
+        job_ready(base_url, token, jid, worker_id="" if claim_mode == CLAIM_MODE_BACKUP else worker_id)
         # ★ 关键路径到此为止（P2.5 异步回传）：回传不再占着算力等。交给上传线程，
         #   主循环立刻去领下一份——而下一份的字节多半已被预取到本地（P2），两者
         #   资源不相交（链路 vs CPU/GPU），天然可叠。
