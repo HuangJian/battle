@@ -8165,3 +8165,35 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
 - **落点**：`nn-training/remote/{offline_deliver,deliver_worker,deliver_proc,plan_handoff}.py` ·
   `nn-training/tests/remote/test_offline_deliver_{async,proc}.py` · 全文 → `docs/nn/remote-transport.md` §69。
 - **未做（显式）**：P2 —— `_eval_rows_for` / `_row_for` 的增量读（33MB 全量解析），不在本次范围。
+
+## §2026-10-07-rollout-stage-balance（2026-10-07，分关采样平衡：est 上界初批 + 有界多批补差；不改身份，事件可见化）
+
+- **背景**：动态采集的**全离线腿**（`kind=run`）一轮只跑一批，局数按**全局** est 反解 ⇒ 每关同一个局数，
+  而达标线是**分关** quota。x21-psh-b it168 真机实测：缺 4405 样本、同时丢 3333 样本（关间 samples/局 差 1.75×）。
+  计划 `plan/rollout-stage-balance.plan.md`（v1 立案 → 评审 `plan/rollout-stage-balance.review-hy.md`
+  四条 P0 + 六条 P1 → v2 修订）；交付 = 规则 `per-stage-v3`。
+- **决定（两条链共用一套数学）**：① 首批按**分关** `est_hi = ceil(est_s × 1.15)` 反解（取上界 ⇒ 欠采小）；
+  ② 节点侧**有界多批补差**（≤3 补差批 ⇒ ≤4 次 `run_iter_rollout`；每批用**实测均值**重估，末批 `×0.85`
+  偏保守——缺口不可恢复、浪费可恢复）；③ 分关局数硬顶 `4 × ceil(quota/est_s)`（旧的**全局** est 口径会让
+  低 est 关「配额未满就触顶」，而 DoD 把触顶当合格路径 ⇒ 静默短采）；④ 缺口是**硬指标**、浪费是**软指标**：
+  触 cap / 批数用尽仍有缺口 ⇒ 轮报可见 + WARN，不静默。
+- **常量冻结（真机 142 轮 per-game，bootstrap 2×10⁴ 轮）**：`DEFAULT_EST_HI_FACTOR=1.15`（首批过采 10.6%）、
+  `DEFAULT_TOPUP_MAX_BATCHES=3`、`DEFAULT_LAST_BATCH_LO_FACTOR=0.85`。口径结果：P(本轮有缺口)
+  **91.1% → 3.0%**（今天 → 本计划）、E[局数/轮] 157.8 → 162.0（+2.7%）、E[浪费] ≈ 2056 样本（≈17% 配额，只烧节点时间）。
+- **否决与备选（评审 P0，逐条有现场数据）**：① **单批补差 + 末批实测均值**（P(缺口) 71.6%，与 DoD 互斥）；
+  ② **放宽 `verify_shards` 为闭集**（`data_fp` 在云机两条链上都是**回显** ⇒ 那是净放松；改为「补差批各带自己的
+  spec/`data_fp`」= 两次 `run_iter_rollout`）；③ **冷启动用课程声明 est + 无历史不派批**（回归：147 vs 真机 338.6，
+  首波 84 局/关；且无历史 ⇒ 永不派批 = 全冷死锁）；④ **只在 `kind=iter` 上做**（该链 `rollout_src=node` ×
+  `target_transitions>0` 被 `trainer/loop_remote_drive.py` 硬禁，打在死路上）⇒ 范围 = 本机连续配额链 + 全离线 `kind=run`。
+- **身份**：分关分配与 est 同类（预算/运行参数）⇒ **不进** `corpus_identity_fp`、**不 bump** `VOLUME_RULE`（用户拍板），
+  在训课程不拒收、不重开。代价：hub 重启后云机腿每关局数会变（§15.5 意义上的断点）⇒ 用**可见化**兜：本机链
+  iteration 事件带 `volume_alloc_rule` / `volume_stage_stats`（additive，旧行 None），云机腿轮报带
+  `volumeTopup{rule,batches,est_hi_factor,collected/games/shortfall_by_stage,wasted_samples,capped_stages}`。
+- **落地**：`worker/volume_alloc.py`（纯函数 + 常量 + 同源校验）· `worker/iter_topup.py`（节点侧补差：子目录
+  `job_dir/topup{k}/` 隔离 + 全局 `--out` 续号 + **同关**取 argv 模板）· `worker/rollout_argv.py`（`retarget_argv`
+  从 `worker/plan.py`(L4) **下沉**成 L0 叶子——L2 的补差模块 import L4 是上向边，而 L5 的 `remote/worker.py`
+  顶层 import 补差模块）· `worker/volume_waves.py`（分关字段 + 同源校验；秩 L0→L2）· `worker/plan.py` ·
+  `common/manifest.py`（`volume` 进白名单）· `remote/worker.py` · `trainer/loop_{volume,export,steps,core}.py`。
+- **门禁**：nn python gate 全绿（ruff + mypy + tests/ + e2e/）；根 `bun run check` 2418 pass / 0 fail。
+- **落点**：全文 → `docs/nn/training-stack.md` §30；单测 → `nn-training/tests/worker/test_{volume_alloc,iter_topup}.py`（含跨重启逐批 byte 相同）。
+

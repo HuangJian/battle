@@ -260,7 +260,7 @@ LAYERS: dict[str, int] = {
     # 搬进来同时抬了 12 条既有条目的秩（`remote.plan_run` 3→6 · `remote.plan_handoff` 2→5 ·
     # `remote.run_loop` 6→7 · `remote.bc_job` 3→4 · `remote.offline_boot` 7→8 等），
     # 因为它们的依赖从「账本外的 biz.*」变成了「账本内的 worker.*」。
-    # L0（44 个）
+    # L0（45 个）
     "worker.agent_meta": 0,
     "worker.archive": 0,
     "worker.backend": 0,
@@ -297,6 +297,10 @@ LAYERS: dict[str, int] = {
     "worker.ppo.trainer": 0,
     "worker.reports": 0,
     "worker.resume": 0,
+    # 逐局 argv 重定向原语（2026-10-07，plan/rollout-stage-balance）：从 `worker/plan.py`(L4)
+    # **下沉**出来的纯字符串叶子——L2 的补差模块与 L5 的 `remote/worker` 都要用它，
+    # 留 L4 会让 L2 长出上向边（见 `worker/rollout_argv.py` 头注与 `worker/plan.py` 的 import）。
+    "worker.rollout_argv": 0,
     "worker.schedule": 0,
     "worker.scripts.validate_export": 0,
     "worker.stop_loss": 0,
@@ -305,9 +309,8 @@ LAYERS: dict[str, int] = {
     "worker.train.device": 0,
     "worker.train.loop_util": 0,
     "worker.volume_quota": 0,
-    "worker.volume_waves": 0,
     "worker.workdir_sweep": 0,
-    # L1（11 个）
+    # L1（14 个）
     "worker.cli": 1,
     "worker.config": 1,
     "worker.data.dataset": 1,
@@ -319,7 +322,10 @@ LAYERS: dict[str, int] = {
     "worker.loop_scheduler": 1,
     "worker.ppo.common": 1,
     "worker.train_ledger": 1,
-    # L2（11 个）
+    # 分关采样分配纯函数（2026-10-07，plan/rollout-stage-balance §3）：只靠 L0 的
+    # `worker.volume_quota.target_per_stage`（无 IO/无 torch）⇒ 秩 1。
+    "worker.volume_alloc": 1,
+    # L2（13 个）
     "worker.bc_config": 2,
     # ★ 2026-10-05（plan/course-startup-recover）：课程解析/校验链从 loop_serve 抽出——顶层只
     # 用 `worker.modes`(L0) 与 `common.*`，函数内延迟用 `worker.cli`/`worker.config`(L1) ⇒ 秩 2。
@@ -327,6 +333,16 @@ LAYERS: dict[str, int] = {
     "worker.bc_eval": 2,
     "worker.eval_replays_once": 2,
     "worker.gate_judges": 2,
+    # 动态采集的计划块（初波构造 / `volume_block` / 同源校验）：2026-10-07 起它的分关公式
+    # 从 `worker.volume_alloc`(L1) 取（`est_hi` / `alloc_games_by_stage` / `validate_*`——
+    # **一份公式，不抄第二份**）⇒ 从 L0 升到 **L2**（1 + max(deps)）。唯一账本内读者
+    # `worker.plan`(L4) 仍在它上面。
+    "worker.volume_waves": 2,
+    # 节点侧**有界多批补差**（2026-10-07，plan/rollout-stage-balance §4.4）：顶层靠
+    # `worker.volume_alloc`(L1)，函数内延迟靠 `worker.iter_rollout`(L1)/`worker.reports`(L0)
+    # ⇒ 秩 2。⚠ 它**不得** import `worker.plan`(L4)：唯一的顶层读者 `remote/worker.py` 是
+    # L5（只能向下指）而 L5 → L2 才是向下边；本次为此把 `retarget_argv` 下沉到 L0。
+    "worker.iter_topup": 2,
     "worker.models.student": 2,
     "worker.paired": 2,
     "worker.scripts.eval_bridge": 2,

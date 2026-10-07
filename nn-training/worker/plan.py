@@ -38,6 +38,12 @@ from common.protocol import (
 )
 from worker.cmd import build_rollout_cmd
 
+#: argv 重定向原语：2026-10-07 **下沉**到 L0 叶子 `worker/rollout_argv.py` ——
+#: `worker.iter_topup`（L2，节点侧有界多批补差）也要用它，而本模块是 L4（靠 `worker.cmd`），
+#: L2 import L4 是**上向边**（而 `remote/worker.py` L5 顶层 import 那个补差模块）。
+#: 本模块继续以同名转发，`worker.plan.retarget_argv` 对读者不变（同一个函数对象）。
+from worker.rollout_argv import retarget_argv
+
 #: `build_pairs` 实际读的 args 字段（纯函数入参 = 计划必须携带的全部信息）。
 #: 少一个字段 ⇒ 云机重放出的对集与 hub 不同（`pairs_fp` 会在发布期就抓住）。
 PAIR_ARG_FIELDS: tuple[str, ...] = (
@@ -53,15 +59,6 @@ PAIR_ARG_FIELDS: tuple[str, ...] = (
     "total_stages",
 )
 
-#: 逐轮重定向的 flag → 占位符名。值一律按当轮/当局实值写入（模板里是目标轮的值）。
-_RETARGET_FLAGS: dict[str, str] = {
-    "--stages": "stage",
-    "--seeds": "seed",
-    "--out": "out",
-    "--wver": "wver",
-}
-
-
 # ------------------------------------------------------------------ 对集（纯函数重放）
 
 
@@ -73,18 +70,26 @@ def pair_args(args: Any) -> dict:
 def pairs_for(plan: dict, it: int) -> list[tuple[int, int]]:
     """重放第 `it` 轮的对集（计划是唯一的输入）。
 
-    两条口径（同一个计划里互斥，由 `volume` 块的有无决定）：
+    三条口径（同一个计划里互斥，由 `volume` 块的有无/形状决定）：
 
       * **无 `volume`**（老课程）：`build_pairs` 纯函数重放 —— 与 hub 侧逐字节一致；
-      * **有 `volume`**（`target_transitions > 0`）：`initial_wave_pairs` = 每关 G0 局的
+      * **有 `volume` + 分关字段**（2026-10-07，plan/rollout-stage-balance §4.3）：
+        `initial_wave_pairs_by_stage` —— **每关各自的 `G_s`**（按 `est_hi_s` 反解），
+        按 stage 升序、逐关独立抽签；
+      * **有 `volume`（老五字段）**：`initial_wave_pairs` = 每关 G0 局的
         **初波**对集，与本地集群 `TrainingLoop._iteration_pairs` 的 volume 分支**同函数**
         —— 云机采的这批种子与本地集群该轮初波逐位相同（2026-09-22，见 `biz/volume_waves`
         的「计划里的动态采集块」节）。
     """
     vol = plan.get("volume")
     if isinstance(vol, dict):
-        from worker.volume_waves import initial_wave_pairs
+        from worker.volume_waves import initial_wave_pairs, initial_wave_pairs_by_stage
 
+        per_stage = vol.get("games_per_stage_by_stage")
+        if isinstance(per_stage, dict) and per_stage:
+            return initial_wave_pairs_by_stage(
+                int(plan["rotate_seed"]), int(it), games_by_stage=per_stage
+            )
         return initial_wave_pairs(
             int(plan["rotate_seed"]),
             int(it),
@@ -119,62 +124,9 @@ def planned_iters(plan: dict) -> list[int]:
     return list(range(int(plan["start_it"]) + 1, int(plan["end_it"]) + 1))
 
 
-# ------------------------------------------------------------------ argv 重定向
-
-
-def retarget_argv(
-    template: list[str],
-    *,
-    stage: int,
-    seed: int,
-    out: str,
-    wver: str,
-    stage_json: str | None = None,
-) -> list[str]:
-    """把模板 argv 的四个动态 flag 换成当局/当轮实值；`--stage-json` 按关卡增删改。
-
-    为什么是「按 flag 替换」而不是「在云上重新拼命令」：拼命令的知识（三导出器 + 课程
-    覆盖 + D14 血缘）只有 `biz/cmd.build_rollout_cmd` 一份，复制到协议/云侧就会漂移。
-    这里只认识**四个必然逐局变化的 flag** + 一个「只有自定义关才有」的可选 flag，
-    导出器细节一概不知。
-
-    行为：
-      * `--stages/--seeds/--out/--wver` 一律替换其后的值；模板里没有则**追加**
-        （`--wver` 在模板里可能是占位空串）。
-      * `--stage-json`：`stage_json` 非空 → 替换/追加；为空 → **整对删除**（新关卡不是
-        自定义关时留着旧值 = 拿错关卡的 JSON 跑，比缺失更危险）。
-    """
-    values = {"stage": int(stage), "seed": int(seed), "out": str(out), "wver": str(wver)}
-    res: list[str] = []
-    seen: set[str] = set()
-    i = 0
-    n = len(template)
-    while i < n:
-        tok = template[i]
-        if tok in _RETARGET_FLAGS:
-            seen.add(tok)
-            res += [tok, str(values[_RETARGET_FLAGS[tok]])]
-            i += 2 if (i + 1 < n and not template[i + 1].startswith("--")) else 1
-            continue
-        if tok == "--stage-json":
-            seen.add(tok)
-            if i + 1 < n and not template[i + 1].startswith("--"):
-                if stage_json:
-                    res += [tok, str(stage_json)]
-                i += 2
-                continue
-            if stage_json:
-                res += [tok, str(stage_json)]
-            i += 1
-            continue
-        res.append(tok)
-        i += 1
-    for flag, name in _RETARGET_FLAGS.items():
-        if flag not in seen:
-            res += [flag, str(values[name])]
-    if stage_json and "--stage-json" not in seen:
-        res += ["--stage-json", str(stage_json)]
-    return res
+# ------------------------------------------------------------- argv 重定向（已下沉）
+# `retarget_argv` 现在住在 `worker/rollout_argv.py`（L0 叶子；理由见顶部 import 处），
+# 本模块继续以同名转发给读者（同一个函数对象）。
 
 
 def argv_fp(argv: list[list[str]]) -> str:
@@ -392,8 +344,16 @@ def check_plan_against_args(args: Any, plan: dict) -> None:
         if isinstance(vol, dict):
             from worker.volume_waves import volume_pairs_from_args
 
+            # 分关 G 是「est 决定的局数」这类运行参数：args 侧无法独立复算 ⇒ 把块里的
+            # 分关数字**注入**重解（自检此时守 stages/target/模板恒等；块自身的同源校验
+            # 在 validate_volume_block 里已经拦过一次）。
             real = volume_pairs_from_args(
-                args, it, int(plan["rotate_seed"]), est_samples_per_game=int(vol["est_samples_per_game"])
+                args,
+                it,
+                int(plan["rotate_seed"]),
+                est_samples_per_game=int(vol["est_samples_per_game"]),
+                ests_by_stage=vol.get("est_s_by_stage"),
+                est_hi_factor=vol.get("est_hi_factor"),
             )
             if real is None:
                 raise ProtocolError(
@@ -486,15 +446,31 @@ def iter_spec(plan: dict, it: int, pairs: list[tuple[int, int]], *, wver: str, c
 
     交付 `worker/iter_rollout.run_iter_rollout` 前仍会过 `validate_rollout_spec`
     （协议白名单 + 相对路径 + 逐局 stage/seed）——模板损坏/被篡改在这里被抓住。
+
+    计划带 `volume` 块（`target_transitions > 0`）时，把它**注入 spec**（补上运行时键
+    `it`/`rotate_seed` 并过一遍同源校验）——节点侧的有界多批补差（`worker/iter_topup`）
+    就靠它：节点没有 hub 的 jsonl，配额/分关 est/硬顶必须随轮钉在 spec 里。缺席 ⇒ 老行为。
     """
     from common.protocol import validate_rollout_spec
 
-    return validate_rollout_spec(
-        {
-            "argv": argv_for_iteration(plan, it, pairs, wver=wver, course=course),
-            "wver": str(wver or ""),
-            "workers": int(plan.get("workers", 1) or 1),
-            "game_timeout_sec": float(plan.get("game_timeout_sec", 0.0) or 0.0),
-            "bun": "bun",
-        }
-    )
+    spec: dict = {
+        "argv": argv_for_iteration(plan, it, pairs, wver=wver, course=course),
+        "wver": str(wver or ""),
+        "workers": int(plan.get("workers", 1) or 1),
+        "game_timeout_sec": float(plan.get("game_timeout_sec", 0.0) or 0.0),
+        "bun": "bun",
+    }
+    vol = plan.get("volume")
+    per_stage = vol.get("games_per_stage_by_stage") if isinstance(vol, dict) else None
+    if isinstance(vol, dict) and isinstance(per_stage, dict) and per_stage:
+        # 只有**分关块**（新导出）才转运行时块——老五字段的计划（在飞/手写）保持老行为：
+        # 不带 `volume` ⇒ 节点不跑补差，`pairs_for` 仍旧单值反解（逐字节不变）。
+        from worker.volume_alloc import validate_runtime_volume
+
+        try:
+            spec["volume"] = validate_runtime_volume(
+                {**vol, "it": int(it), "rotate_seed": int(plan["rotate_seed"])}
+            )
+        except ValueError as e:
+            raise ProtocolError(f"iter_spec: 计划 volume 块无法转运行时块：{e}") from e
+    return validate_rollout_spec(spec)

@@ -424,6 +424,8 @@ def wave_pairs(
 #   在导出那一刻的估计值上（见 `loop_export._volume_plan_block`），而不是让节点现算。
 
 #: `plan["volume"]` 的字段集（hub 组装 / 节点重放共用的形状；少一个字段就拒收）。
+#: ⚠ 这是**老五字段**（今天的重放路径只认它）；分关分配的扩展字段见
+#: `volume_alloc.validate_volume_block_ext`（additive：缺席即老行为）。
 VOLUME_BLOCK_FIELDS: tuple[str, ...] = (
     "target_transitions",
     "est_samples_per_game",
@@ -433,7 +435,14 @@ VOLUME_BLOCK_FIELDS: tuple[str, ...] = (
 )
 
 
-def volume_block(args: Any, *, est_samples_per_game: int = 0) -> dict | None:
+def volume_block(
+    args: Any,
+    *,
+    est_samples_per_game: int = 0,
+    ests_by_stage: Mapping[int, int] | None = None,
+    est_hi_factor: float | None = None,
+    topup: Mapping[str, Any] | None = None,
+) -> dict | None:
     """args → 计划里的动态采集块；**None = 未开动态采集**（老口径 `build_pairs`）。
 
     `target_transitions ≤ 0` ⇒ None（老课程一个函数都不调，逐字节不变）。开了就必须
@@ -442,6 +451,11 @@ def volume_block(args: Any, *, est_samples_per_game: int = 0) -> dict | None:
 
     `est_samples_per_game` 由调用方给（hub 侧给的是**当前** trailing 估计，回退课程声明值）
     ——与 `trainer/loop_volume._volume_est_samples` 同口径，两侧反解出同一个 G0。
+
+    `ests_by_stage`（2026-10-07，plan/rollout-stage-balance §4.3）非空 ⇒ 追加**分关**字段：
+    `est_s_by_stage` / `games_per_stage_by_stage`（按 `est_hi = ceil(est×factor)` 反解）/
+    `est_hi_factor` / `topup{...}`。老五字段**照旧写**（老重放路径与在飞计划兼容读）。
+    缺关的 est 回退全局 `est`（不静默丢关：`validate_volume_block_ext` 会要求关集一致）。
     """
     target = int(getattr(args, "target_transitions", 0) or 0)
     if target <= 0:
@@ -459,17 +473,66 @@ def volume_block(args: Any, *, est_samples_per_game: int = 0) -> dict | None:
             "动态采集需要 est_samples_per_game（samples/局，≥1）才能反解局数"
             "——课程声明里没有它就请显式给"
         )
-    return {
+    block: dict = {
         "target_transitions": target,
         "est_samples_per_game": est,
         "stages": [int(s) for s in stages],
         "games_per_stage": int(initial_games(target, len(stages), est)),
         "per_stage_quota": int(target_per_stage(target, len(stages))),
     }
+    if ests_by_stage:
+        from worker.volume_alloc import (
+            DEFAULT_EST_HI_FACTOR,
+            DEFAULT_LAST_BATCH_LO_FACTOR,
+            DEFAULT_TOPUP_MAX_BATCHES,
+            alloc_games_by_stage,
+            est_hi,
+        )
+
+        factor = float(DEFAULT_EST_HI_FACTOR if est_hi_factor is None else est_hi_factor)
+        est_s = {int(s): int(ests_by_stage.get(int(s), 0) or est) for s in stages}
+        block["est_s_by_stage"] = est_s
+        block["est_hi_factor"] = factor
+        block["games_per_stage_by_stage"] = {
+            int(s): int(n)
+            for s, n in alloc_games_by_stage(
+                [int(s) for s in stages],
+                target,
+                ests_hi={s: est_hi(est_s[s], factor=factor) for s in est_s},
+            ).items()
+        }
+        block["topup"] = {
+            "enabled": True,
+            "max_batches": int(DEFAULT_TOPUP_MAX_BATCHES),
+            "last_lo_factor": float(DEFAULT_LAST_BATCH_LO_FACTOR),
+            "max_games_per_stage": int(getattr(args, "max_games_per_stage", 0) or 0),
+            **dict(topup or {}),
+        }
+    return block
+
+
+def initial_wave_pairs_by_stage(
+    rotate_seed: int, it: int, *, games_by_stage: Mapping[int, int]
+) -> list[tuple[int, int]]:
+    """分关初波：每关各自的局数（`G_s`），按 stage 升序、逐关独立抽签（同 0x5EED 流）。
+
+    与 `initial_wave_pairs`（单一 `games_per_stage`）**同一个 `wave_pairs`**：所以「本地
+    连续流的前缀」这条不变量对每一关分别成立，节点补差从 `G_s` 续抽即接得上。
+    """
+    return wave_pairs(
+        int(rotate_seed),
+        int(it),
+        {int(s): int(n) for s, n in games_by_stage.items()},
+        0,
+    )
 
 
 def validate_volume_block(block: object) -> dict:
-    """计划里的 `volume` 块形状校验（畸形 ⇒ ValueError；`biz/plan.validate_plan` 转协议错）。"""
+    """计划里的 `volume` 块形状校验（畸形 ⇒ ValueError；`biz/plan.validate_plan` 转协议错）。
+
+    老五字段照旧；带分关扩展字段（`games_per_stage_by_stage` 等）时，同源校验交给
+    `volume_alloc.validate_volume_block_ext`（**一份**公式，不在这里抄第二份）。
+    """
     if not isinstance(block, dict):
         raise ValueError(f"volume 必须是对象，收到 {type(block).__name__}")
     missing = [k for k in VOLUME_BLOCK_FIELDS if k not in block]
@@ -503,6 +566,11 @@ def validate_volume_block(block: object) -> dict:
             f"volume.games_per_stage={block['games_per_stage']} 与"
             f"ceil(达标线/est)={want_g0} 不符（局数反解两侧必须同源）"
         )
+    if "games_per_stage_by_stage" in block or "est_s_by_stage" in block or "topup" in block:
+        from worker.volume_alloc import validate_volume_block_ext
+
+        out = validate_volume_block_ext({**block, "stages": stages})
+        return out
     out = dict(block)
     out["stages"] = stages
     return out
@@ -534,12 +602,31 @@ def initial_wave_pairs(
 
 
 def volume_pairs_from_args(
-    args: Any, it: int, rotate_seed: int, *, est_samples_per_game: int = 0
+    args: Any,
+    it: int,
+    rotate_seed: int,
+    *,
+    est_samples_per_game: int = 0,
+    ests_by_stage: Mapping[int, int] | None = None,
+    est_hi_factor: float | None = None,
 ) -> list[tuple[int, int]] | None:
-    """args → 本轮初波对集（`None` = 未开动态采集）；计划发布期自检用它对照重放结果。"""
-    block = volume_block(args, est_samples_per_game=est_samples_per_game)
+    """args → 本轮初波对集（`None` = 未开动态采集）；计划发布期自检用它对照重放结果。
+
+    `ests_by_stage` / `est_hi_factor` 由调用方（`check_plan_against_args`）从**计划块**注入：
+    分关 G 是「est 决定的局数」这类运行参数，args 侧无法独立复算出来 ⇒ 自检守的是
+    stages/target/模板恒等 + 块自身的同源（后者在 `validate_volume_block` 里已拦一次）。
+    """
+    block = volume_block(
+        args,
+        est_samples_per_game=est_samples_per_game,
+        ests_by_stage=ests_by_stage,
+        est_hi_factor=est_hi_factor,
+    )
     if block is None:
         return None
+    per_stage = block.get("games_per_stage_by_stage")
+    if isinstance(per_stage, dict) and per_stage:
+        return initial_wave_pairs_by_stage(rotate_seed, it, games_by_stage=per_stage)
     return initial_wave_pairs(
         rotate_seed, it, stages=block["stages"], games_per_stage=block["games_per_stage"]
     )

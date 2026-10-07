@@ -33,10 +33,11 @@ _volume_collect_continuous（VOLUME_RULE_V2 生产路径）──► _dispatch_v
 `TrainingLoop.__bases__ == (RoundSteps, TrainingSteps, TrainingGuards)` 与全部既有守卫**一行不改**
 （本刀零守卫改动，只有一处 patch 目标迁移，见下）。
 
-## 状态归属：七个 volume 槽位随簇搬来（声明在 `TrainingVolume`）
+## 状态归属：八个 volume 槽位随簇搬来（声明在 `TrainingVolume`）
 
 `_volume_target` / `_volume_collected` / `_volume_waves` / `_volume_g0` / `_volume_est` /
-`_volume_capped` / `_volume_stage_ests`：只被这一簇读写。`TrainingLoop.__init__` 仍负责**赋值**
+`_volume_capped` / `_volume_stage_ests` / `_volume_stage_stats`：只被这一簇读写。
+`TrainingLoop.__init__` 仍负责**赋值**
 （它持有全部跨轮字段），本模块提供**声明**——混入的状态契约必须在每个文件里对 mypy 可见。
 
 ## ⚠ DI seam：`log` 是本模块**自己的**注入点（本刀唯一要迁的 patch 目标）
@@ -109,6 +110,11 @@ class TrainingVolume:
     _volume_capped: bool
     #: 分关 est_s（`_volume_stage_ests_map` 的结果，循环里复用）。
     _volume_stage_ests: dict[int, int] | None
+    #: 分关采集账（规则版本 + 分关 collected/games/est_s/cap_games + 缺口）——收官后写，
+    #: `TrainingSteps._record_iteration` 读进 iteration 事件。None = 本轮不在连续配额链。
+    #: 这里必须**显式**声明：只在方法体里赋值会让 mypy 把类型推成 `dict[str, Any]`，
+    #: 与 `TrainingSteps` 一侧的 `dict | None` 冲突（`trainer/loop_core.py` 多继承合并报错）。
+    _volume_stage_stats: dict | None
 
     # ------------------------------------------------- 动态采集（按样本量）
     #
@@ -199,6 +205,7 @@ class TrainingVolume:
         self._volume_waves = 0
         self._volume_capped = False
         self._volume_stage_ests = None  # 连续采集启动时现算
+        self._volume_stage_stats = None  # 分关账：连续配额收官时写（不跑该链 ⇒ 留 None）
         # 每关 G0 局的初波前缀（= 连续配额流的前 G0 个 seed）。**与 `biz/plan.pairs_for`
         # 同一个函数**：云端重放的语料因此与本地集群同一轮的前缀批逐位相同（2026-09-22）。
         pairs = initial_wave_pairs(self._rotate_seed, it, stages=stages, games_per_stage=g0)
@@ -440,10 +447,10 @@ class TrainingVolume:
             return
         import common.distribution
         from worker.resume import settled_stage_totals
+        from worker.volume_alloc import VOLUME_ALLOC_RULE, default_game_caps
         from worker.volume_quota import (
             DEFAULT_MAX_BATCHES,
             continuous_pairs,
-            default_game_cap,
             plan_continuous_batch,
             target_per_stage,
         )
@@ -454,9 +461,11 @@ class TrainingVolume:
         est_global = int(self._volume_est or self._volume_est_samples() or 1)
         est_s = self._volume_stage_ests_map()
         self._volume_stage_ests = est_s
+        # 硬顶**分关**（2026-10-07，plan/rollout-stage-balance §4.2）：课程显式
+        # `--max-games-per-stage` 优先；否则 `4 × ceil(quota/est_s)`。用全局 est 算 cap
+        # 会让低 est 的关「配额未满就触顶」，而 DoD 把触顶当合格路径 ⇒ 静默短采。
         game_cap = int(getattr(args, "max_games_per_stage", 0) or 0)
-        if game_cap <= 0:
-            game_cap = default_game_cap(quota, est_global)
+        stage_caps = default_game_caps(stages, target, ests=est_s, explicit=game_cap)
         max_batches = int(getattr(args, "volume_max_batches", 0) or DEFAULT_MAX_BATCHES)
         course_fp = self._course_fp
         corpus_fp = self._corpus_fp
@@ -487,8 +496,9 @@ class TrainingVolume:
                 target_transitions=target,
                 ests=est_s,
                 games_done=games_done,
-                game_cap=game_cap,
+                game_cap=0,
                 fallback_est=est_global,
+                game_cap_by_stage=stage_caps,
             )
             if not plan.games_by_stage:
                 break
@@ -538,13 +548,25 @@ class TrainingVolume:
                 "collected": int(totals.get(s, (0, 0))[1]),
                 "games": int(totals.get(s, (0, 0))[0]),
                 "est_s": int(est_s.get(s, est_global)),
+                "cap_games": int(stage_caps.get(s, 0)),
             }
             for s in stages
+        }
+        # 进 iteration 事件的**分关账**（2026-10-07，plan/rollout-stage-balance §4.2）：
+        # 规则版本 + 分关 collected/games/est_s/cap_games + 缺口（硬指标）。为什么带上规则
+        # 版本：分关分配不进 `corpus_identity_fp`（与 est 同类，用户拍板 ②），所以「哪一轮起
+        # 换了分配口径」必须在**事件**里可读（§15.5 的精神：不许静默漂移，也不拒收在训课程）。
+        self._volume_stage_stats = {
+            "rule": VOLUME_ALLOC_RULE,
+            "est_src": "trailing",  # 本机链的 est 来源（分关 trailing，缺历史回退全局 est）
+            "quota": int(quota),
+            "stages": {str(s): stage_stats[s] for s in stages},
+            "shortfall": {str(s): int(v) for s, v in unmet.items()},
         }
         log(
             f"[volume] it{it}: continuous 收官 batches={self._volume_waves} "
             f"collected={collected_total}/{target} 达标关="
-            f"{len(stages) - len(unmet)}/{len(stages)} stats={stage_stats}"
+            f"{len(stages) - len(unmet)}/{len(stages)} rule={VOLUME_ALLOC_RULE} stats={stage_stats}"
         )
         self._volume_collected = collected_total
         # 报告真源 = 本轮盘上 shard（与 settled_stage_totals 同源）；wave 只补时间锚点。

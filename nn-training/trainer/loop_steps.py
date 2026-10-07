@@ -158,6 +158,9 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
     _volume_target: int | None
     _volume_collected: int | None
     _volume_capped: bool
+    #: 分关账（plan/rollout-stage-balance §4.2）：规则版本 + 分关 collected/games/est_s/
+    #: cap_games + 缺口。None = 本轮不在连续配额链（旧路径/未开该模式）⇒ 事件里那两键为 None。
+    _volume_stage_stats: dict | None
     #: bun 可执行文件路径（TrainingLoop 持有；延迟 eval 派发传给评估子进程）。
     bun: str
     #: 上轮节点配置快照（loop 每轮热读；drain 复用最近一份）。
@@ -543,6 +546,13 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
                     "transitions_target": self._volume_target,
                     "transitions_collected": self._volume_collected,
                     "transitions_capped": True if self._volume_capped else None,
+                    # 分关采样分配（2026-10-07，plan/rollout-stage-balance §4.2）：规则版本与
+                    # 分关账（additive，旧行无此键 → None）。分关分配**不进** `corpus_identity_fp`
+                    # （与 est 同类），所以「哪一轮起换了分配口径」只能在这里读。
+                    "volume_alloc_rule": (
+                        self._volume_stage_stats.get("rule") if self._volume_stage_stats else None
+                    ),
+                    "volume_stage_stats": self._volume_stage_stats,
                 },
             )
         )

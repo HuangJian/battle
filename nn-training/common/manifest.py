@@ -505,7 +505,12 @@ def validate_rollout_spec(spec: object) -> dict:
     """
     if not isinstance(spec, dict):
         raise ProtocolError(f"manifest.rollout 必须是对象，收到 {type(spec).__name__}")
-    allowed = set(ROLLOUT_SPEC_DEFAULTS) | {"argv"}
+    # `volume`（2026-10-07，plan/rollout-stage-balance §4.5）：动态采集的**运行时块**，
+    # 只由**节点自己**（`plan.iter_spec` 从计划块合成）填——`kind=run` 自产自销，因此不在
+    # wire 兼容面上。这里只要求「是对象」：完整形状 + 同源校验在
+    # `worker.volume_alloc.validate_runtime_volume`（节点在用它之前跑，失败即响亮报错），
+    # 免得在本层抄第三份字段表。
+    allowed = set(ROLLOUT_SPEC_DEFAULTS) | {"argv", "volume"}
     out = dict(ROLLOUT_SPEC_DEFAULTS)
     for k, v in spec.items():
         if k not in allowed:
@@ -513,6 +518,10 @@ def validate_rollout_spec(spec: object) -> dict:
                 f"manifest.rollout 未知字段 {k!r}（允许：{sorted(allowed)}——拒绝，非忽略）"
             )
         out[k] = v
+    if "volume" in out and not isinstance(out["volume"], dict):
+        raise ProtocolError(
+            f"manifest.rollout.volume 必须是对象，收到 {type(out['volume']).__name__}"
+        )
     raw_argv = spec.get("argv")
     if not isinstance(raw_argv, list) or not raw_argv:
         raise ProtocolError("manifest.rollout.argv 必须是非空数组（每局一项）")

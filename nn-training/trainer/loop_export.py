@@ -60,6 +60,8 @@ class TrainingExport:
     # mypy 可见，运行期的唯一真相仍是同一实例上的那一份。
     args: Any
     _rotate_seed: Any
+    #: 轨迹根（`tmp/<课>/`，含 `it*` 轮目录）——分关 est 从这里的历史 shard 读。
+    _traj_root: Any
     #: 本簇自己的懒建缓存：写在这里、被 `TrainingRemote` 读（见头注「跨模块槽位」）。
     _ts_code_sha256: Any
     _ts_code_zip_path: Any
@@ -107,8 +109,8 @@ class TrainingExport:
             return None
         if int(getattr(args, "target_transitions", 0) or 0) <= 0:
             return None
-        from worker.resume import trailing_samples_per_game
-        from worker.volume_waves import volume_block
+        from worker.resume import trailing_samples_per_game, trailing_stage_samples_per_game
+        from worker.volume_waves import parse_stages_arg, volume_block
 
         declared = int(getattr(args, "est_samples_per_game", 0) or 0)
         jsonl = getattr(self, "_jsonl_path", None)
@@ -117,8 +119,29 @@ class TrainingExport:
             if jsonl
             else declared
         )
+        # 分关 est（2026-10-07，plan/rollout-stage-balance §4.3）：与本地链
+        # `_volume_stage_ests_map` **同函数同窗口**（window=3、fallback=全局 est），
+        # 所以计划里的 `G_s` 就是导出那一刻本地循环会用的那套反解。
+        # `--stages` 用**共享解析器**再解一次（同一函数 ⇒ 同一结果；解析失败这里的
+        # SystemExit 与 volume_block 内部同源）。
+        #
+        # `self._traj_root` 直读、不给 `getattr(..., None)` 兜底：拿不到历史就响亮
+        # AttributeError，绝不静默退回「全局 est 一套 G」——那正是本设计要消灭的静默少采。
+        # （且本模块的依赖面守卫按「`self.x` 触达集 == 声明集」推导，`getattr` 形式的读会漏出闭集。）
         try:
-            return volume_block(args, est_samples_per_game=est)
+            stages = parse_stages_arg(str(getattr(args, "stages", "") or ""))
+        except ValueError as e:
+            raise SystemExit(f"[run_rl] 动态采集无法写进离线计划（--stages {e}）") from e
+        per_stage = trailing_stage_samples_per_game(
+            self._traj_root, stages, window_iters=3, fallback=est
+        )
+        try:
+            return volume_block(
+                args,
+                est_samples_per_game=est,
+                ests_by_stage=per_stage or None,
+                topup={"max_games_per_stage": int(getattr(args, "max_games_per_stage", 0) or 0)},
+            )
         except ValueError as e:
             raise SystemExit(
                 f"[run_rl] 动态采集无法写进离线计划（{e}）——修好课程/参数再导出："

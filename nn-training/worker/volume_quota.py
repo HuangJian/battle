@@ -152,8 +152,15 @@ def plan_continuous_batch(
     games_done: Mapping[int, int],
     game_cap: int = 0,
     fallback_est: int = 1,
+    game_cap_by_stage: Mapping[int, int] | None = None,
 ) -> ContinuousPlan:
-    """按**当前账本 + 在飞**决定下一批各关局数（差额大者多派；足额则 0）。"""
+    """按**当前账本 + 在飞**决定下一批各关局数（差额大者多派；足额则 0）。
+
+    `game_cap_by_stage`（2026-10-07，plan/rollout-stage-balance §4.2）：分关硬顶，优先于
+    单一 `game_cap`。为什么需要它：cap 必须与**分关** est 同源（低 est 的关需要更多局），
+    用全局 est 反解会让它「配额未满就触顶」，而 DoD 又把「触 game_cap」当合格路径
+    ⇒ 硬顶成了静默短采的借口（评审 P1-5）。
+    """
     stage_list = [int(s) for s in stages]
     if not stage_list:
         raise ValueError("plan_continuous_batch 需要至少一个 stage")
@@ -170,6 +177,9 @@ def plan_continuous_batch(
         est = int(ests.get(stage, 0) or fallback_est)
         if est <= 0:
             est = max(1, int(fallback_est))
+        cap = int(game_cap)
+        if game_cap_by_stage is not None and stage in game_cap_by_stage:
+            cap = int(game_cap_by_stage[stage])
         short = max(0, quota - got)
         shortfall[stage] = short
         proj_short[stage] = max(0, quota - got - inf * est)
@@ -179,7 +189,7 @@ def plan_continuous_batch(
             quota=quota,
             est=est,
             games_done=done,
-            game_cap=game_cap,
+            game_cap=cap,
         )
         if why == STOP_GAME_CAP:
             capped = True

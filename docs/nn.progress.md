@@ -28,7 +28,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 |---|---|---|
 | [`docs/nn/legacy.md`](nn/legacy.md) | **早期谱系归档**（2026-08-18 ~ 08-29）：v1/v2 student、P1.5 蒸馏、BC 热启动、无道具纪元、第一代 RL 流水线 —— 已被 goal-space 取代，只作史实与教训 | 22 |
 | [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / **在飞活的备份副本**（§68） | 43 |
-| [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart · **节点门的 bootId 一致性**（§26） | 25 |
+| [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart · **节点门的 bootId 一致性**（§26）· **分关采样平衡（§30）** | 25 |
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
 | [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** · **六包重组（刀 1–6）** · **门禁 fail-fast**（§63） · **测试不得碰在跑的控制台**（§64） · **测试不得写生产状态（门禁意图 / 循环控制 / EvalBoard / 权重归档）**（§65） | 33 |
 | [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 / 课程管理页 / 指标表抗轮转抄录 / **回放导出按评估轮选（§32）** | 32 |
@@ -102,6 +102,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 14 | **云机清单 + 租约的真机判据未取**（代码/单测已齐，见 `docs/nn/remote-transport.md` §44） | `docs/nn/remote-transport.md` §44 | 清空 `battle.offline/<课>/` 后把 `CFG.course` 留空跑一次 cell：日志出现 `hub 清单：N 条` + `领到租约`，两门课按 `ready`+mtime 升序跑完；**第二台**同时跑 ⇒ `已被 … 持有（Ns 后过期）` 且照旧跑完；控制台 `GET /admin/offline` 的 `leases` 能看到 holder |
 | 15 | **预取被挤走修复的真机判据未取**（代码/单测已齐，见 `docs/nn/remote-transport.md` §50） | `docs/nn/remote-transport.md` §50 | 重拉云 worker 跑同一双课程 ≥3 个 job：出现 `prefetch …: 命中（…零下载开算）`；关键下载 `排队 … 才拿到单通道` **≤5s**（现状峰值 17.6s）；`preempt=` 与日志里的「挤走」行数对得上；`p0_p95` **≤6s**（劣化 ⇒ `--prefetch-depth 0`） |
 | 16 | **抢占作废字节的真机读数未取**（它决定要不要做双端 Range 续传，见 `docs/nn/remote-transport.md` §51 第 3 行） | `docs/nn/remote-transport.md` §51 | 同 scenario 的三个 job 里把每轮 `preempt=N(wasted X.XXMB)` 相加：**Σwasted ≥ 3.4MB（一份 payload）或单次 ≥2MB ⇒ 立项做 Range**；否则不做（先量后裁，门槛已预注册） |
+| 22 | **分关采样平衡（`per-stage-v3`）的真机轮次未取**（代码/单测已齐，见 `docs/nn/training-stack.md` §30） | `docs/nn/training-stack.md` §30 | 一次真机 `kind=run` 轮：云机轮报出现 `volumeTopup{rule=per-stage-v3}` 且 `shortfall_by_stage` 为空（或触 `capped_stages`）；本机链那一轮 iteration 事件出现 `volume_alloc_rule` / `volume_stage_stats`；两处都**不得**退化成旧的全关同局数 |
 
 ### 3.4 控制台
 

@@ -398,6 +398,7 @@ from remote.worker_proc import (
     supervise_worker as supervise_worker,
 )
 from worker.iter_rollout import resolve_bun, run_iter_rollout
+from worker.iter_topup import merge_iter_reports, topup_rollout
 
 # ------------------------------------------------------------------ PPO 执行
 
@@ -633,6 +634,26 @@ def run_job(
                 job_dir, manifest["rollout"], ts_dir=_ts_dir, log=log
             )
             shard_dirs = list(iter_info["shard_dirs"])
+            # ---- 动态采集的**有界多批补差**（2026-10-07，plan/rollout-stage-balance §4.4）----
+            # 每批自己的 spec/argv/data_fp ⇒「实产 == 声明」照旧逐位（verify_shards 一个字不改）；
+            # 批子目录隔离（`topup1/`…）+ 全局 `--out` 续号 ⇒ 不覆盖、不重号。
+            # `manifest["rollout"].volume` 缺席 = 老行为（逐字节不变）——它只由节点侧的
+            # `plan.iter_spec` 从计划块合成（`kind=run`），hub 派发的 kind=iter 不带。
+            _extra = topup_rollout(
+                job_dir=job_dir,
+                spec=manifest["rollout"],
+                shard_dirs=shard_dirs,
+                ts_dir=_ts_dir,
+                log=log,
+            )
+            if _extra is not None:
+                shard_dirs = [*shard_dirs, *list(_extra["shard_dirs"])]
+                iter_info["shard_dirs"] = list(shard_dirs)
+                iter_info["report"] = merge_iter_reports(
+                    dict(iter_info.get("report") or {}), list(_extra["reports"])
+                )
+                iter_info["volumeTopup"] = dict(_extra["volume"])
+                iter_info["rollout_sec"] = float(iter_info["report"].get("elapsedSec") or 0.0)
 
     # ---- mode 红线（v1：仅 per-tick） ----
     if manifest["mode"] != "per-tick":

@@ -186,7 +186,8 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
     """iteration 事件（字段契约与旧 trainer/loop.py 内联写入逐字节一致）。
 
     m: {rollout_sec, ppo_sec, total_steps, chunks_n, agg, kl_cum, halted,
-        dropped_games, waves, load_sec, tail_drain_sec, eval_join_sec}
+        dropped_games, waves, load_sec, tail_drain_sec, eval_join_sec,
+        volume_alloc_rule, volume_stage_stats}
     """
     agg = m["agg"]
     return write_event(
@@ -232,6 +233,11 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
             "transitions_collected": m.get("transitions_collected"),
             #: 触单关局数硬顶而配额未满（长短局失衡 / est 偏差的指纹）。
             "transitions_capped": m.get("transitions_capped"),
+            # 分关采样分配（2026-10-07，plan/rollout-stage-balance §4.2；additive，旧行无此键
+            # → None）：规则版本 + 分关账。分关分配不进 `corpus_identity_fp`（与 est 同类），
+            # 「哪一轮起换了分配口径」只在这里可读（§15.5：不静默漂移）。
+            "volume_alloc_rule": m.get("volume_alloc_rule"),
+            "volume_stage_stats": m.get("volume_stage_stats"),
             # P1-12：reward/dodge 臂版本落盘（历史实验可归因——
             # 此前奖励规格无记录，复盘无法区分 v7/toy 臂）
             "reward": getattr(args, "reward", ""),

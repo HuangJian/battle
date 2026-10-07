@@ -166,6 +166,11 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         self._volume_est = 0
         self._volume_capped = False
         self._volume_stage_ests: dict[int, int] | None = None
+        #: 分关采集账（规则版本 + 分关 collected/games/est_s/cap_games + 缺口）；连续配额
+        #: 收官时写，`_record_iteration` 读进 iteration 事件。**必须在 `__init__` 初值**：
+        #: 只在 `_volume_collect_continuous` 里赋值会让「未开该模式 / stream / collect-only」
+        #: 的轮在落账时 AttributeError（e2e 当场抓到，2026-10-07）。
+        self._volume_stage_stats: dict | None = None
         self._rollout_sec = 0.0
         # M3（rollout 上云）：本轮节点侧采集墙钟；None = 本轮不在节点采集（本地轮）。
         # 每轮开头复位——_write_iter_stats / _log_report 靠它区分两种口径。

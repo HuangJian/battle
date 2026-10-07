@@ -7,6 +7,68 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §30 分关采样平衡：`est_hi` 初批 + 有界多批补差（2026-10-07，plan/rollout-stage-balance）
+
+**病**：动态采集的**全离线腿**（`kind=run`）一轮只跑一批，局数按**全局** est 反解 ⇒ 每关同一个局数，
+而达标线是**分关** `quota`。关间 `samples/局` 实测差 **1.75×**（x21-psh-b it168：关 2002 ≈ 241，关 2000 ≈ 422）
+⇒ 同一轮里既浪费（长局关溢出被裁）又缺口（短局关欠采），而节点**没有第二次机会**——一轮一个 job、
+PPO 在 job 里跑完。it168 逐关真值：**缺 4405 样本、同时丢 3333**（`tmp/x21-psh-b/it168/per-game.json`）；
+按 37 局/关反解可知导出那刻的 est 实际是 **338.6**（计划文本里的 ~332 会解出 38 局）。
+
+### 30.1 规则（`VOLUME_ALLOC_RULE = "per-stage-v3"`）
+
+| 环节 | 口径 | 为什么 |
+|---|---|---|
+| 首批 | 逐关 `G_s = ceil(quota / est_hi_s)`，`est_hi_s = ceil(est_s × 1.15)` | 上界 ⇒ 欠采概率小；定点化（`_scale`）避免二进制浮点把恰好整数的界抬一档（`20 × 1.15` 必须还是 23） |
+| 补差 | **有界多批**（≤3 补差批 = ≤4 次 `run_iter_rollout`）；每批用**已收样本的实测均值**重估 | 单批 + 实测均值 P(有缺口) **71.6%**（与 DoD 互斥）；≤3 批 ⇒ 18.9%、≤4 批 ⇒ **3.0%** |
+| 末批 | `est_lo = floor(est × 0.85)` ⇒ 派得**更多** | 缺口不可恢复、浪费可恢复（不对称） |
+| 硬顶 | 逐关 `4 × ceil(quota / est_s)`（课程显式 `--max-games-per-stage` 优先） | 旧的全**局** est 口径会让低 est 关「配额未满就触顶」，而 DoD 把触顶当合格路径 ⇒ 静默短采 |
+| 记账 | 缺口 = 硬指标（WARN + 轮报可见）；浪费 = 软指标（有上界） | 不静默短采是本节的唯一 KPI |
+
+### 30.2 常量与标定（真机 142 轮 per-game，bootstrap 2×10⁴ 轮）
+
+`DEFAULT_EST_HI_FACTOR = 1.15` · `DEFAULT_TOPUP_MAX_BATCHES = 3` · `DEFAULT_LAST_BATCH_LO_FACTOR = 0.85`。
+口径结果：P(本轮有缺口) **91.1% → 3.0%**、P(四关全达标) 8.9% → 97.0%、E[局数/轮] **157.8 → 162.0**（+2.7%）、
+E[浪费] ≈ 2056 样本（≈17% 配额，只烧节点时间）、调用数分布 2:28% / 3:49% / 4:23%。
+`per-stage est` 的抖动实测 p05/p50/p95 = 0.80/0.99/1.20–1.24 —— **`×1.15` 不是上界**（首批仍有 10.6% 过采），
+这正是「按批重估」而非「一次定死」的理由。复算配方：评审 `plan/rollout-stage-balance.review-hy.md` §7。
+
+### 30.3 落点（两条链共用一套数学）
+
+* **纯函数**：`worker/volume_alloc.py`（`est_hi` / `alloc_games_by_stage` / `topup_games_by_stage` /
+  `shortfall_by_stage` / `wasted_samples` / `stage_totals` / `default_game_caps` / 同源校验）——无 IO、无 torch。
+* **本机链（连续配额）**：`trainer/loop_volume._volume_collect_continuous` 用分关 `game_cap_by_stage`
+  （`worker/volume_quota.plan_continuous_batch` additive）⇒ 收官写 `self._volume_stage_stats` ⇒
+  `trainer/loop_steps._record_iteration` → `worker/events.write_iteration` 的
+  `volume_alloc_rule` / `volume_stage_stats`（additive，旧行 None）。
+* **全离线链（`kind=run`）**：`trainer/loop_export._volume_plan_block` 把分关 est（`trailing_stage_samples_per_game,
+  window=3, fallback=全局 est`）与分关 G / `topup{}` 钉进计划块（`worker/volume_waves.volume_block`）；
+  节点侧 `worker/iter_topup.topup_rollout` 逐批补差，`remote/worker.py` 接线，轮报增 `volumeTopup`。
+* **spec 通路**：`worker/plan.iter_spec(volume=)` + `common/manifest` 白名单（只查「是对象」；完整校验在
+  `volume_alloc.validate_runtime_volume`，节点跑前必跑）。
+
+### 30.4 与 DoD/身份的关系
+
+分关分配与 est **同类**（预算/运行参数）⇒ 不进 `corpus_identity_fp`、不 bump `VOLUME_RULE`：在训课程
+不拒收、不需要改课程文件。代价是 hub 重启后云机腿每关局数会变（§15.5 意义上的断点）⇒ 用**可见化**兜
+（上面那两处字段 + `volumeTopup`），而不是拒收。`target_transitions ≤ 0` 的课程一个函数都不调
+（`build_pairs` / `initial_wave_pairs` / `pairs_for` 输出逐字节不变，有单测钉住）。
+
+### 30.5 分层维护（为什么多了一个 `worker/rollout_argv.py`）
+
+`retarget_argv` 原先住 `worker/plan.py`（账本 **L4**），2026-10-07 多了一个读者 `worker.iter_topup`（**L2**）
+⇒ 上向边。按本仓既定手段「把共同依赖**下沉**」：纯替换逻辑下沉成 L0 叶子 `worker/rollout_argv.py`，
+`worker/plan.py` 顶层再引回来（`worker.plan.retarget_argv` 对读者不变）。**不得**改成「补差模块 import `plan`
+再靠延迟 import 化解」：延迟边同样要严格向下，而 `remote/worker.py`（L5）顶层 import 补差模块。
+账本同时把 `worker.volume_alloc` 记 L1、`worker.volume_waves` L0→**L2**（它现在靠 L1 的分关公式：
+**一份公式，不抄第二份**）。
+
+### 30.6 未闭（显式）
+
+* **真机轮次未取**：`kind=run` 的一轮真机读数（轮报 `volumeTopup` + 缺口为 0 或触 cap）——见
+  `docs/nn.progress.md` §3.3 未决表。
+* 训练侧 `dropped_shards`（`np_core`）**不进** iteration 事件（本次不动：那是加载侧的另一条账）。
+
 ## §29 跳过课的复活通道 + 只读 `openable`/`blocked` 判据（2026-10-05，plan/course-startup-recover）
 
 **事故**：`x20-adv3-open-r2` 课程文件自相矛盾（`kickstart_init>0` ∧ `kickstart_ref=false`）⇒ 启动期
