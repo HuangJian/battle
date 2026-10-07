@@ -162,10 +162,9 @@ export function OpenCourseModal({
         ) : null}
         {trainMode === 'offline' ? (
           <p className="tc-muted tc-small tc-hint">
-            离线（缺省在线）：本机**不跑** rollout/PPO。开课后本课 <code>rollout_src=run</code> +{' '}
-            <code>run_iters=-1</code>（整段），hub 该课置 offline——整段 job 只交给**带标**
-            worker（云机跑 <code>battle.offline.ipynb</code>）； 也可停课后在「导出」里拿{' '}
-            <code>task-&lt;课&gt;.zip</code> 人工搬上云。
+            离线（缺省在线）：本机**不跑** rollout/PPO。开课后控制台会导出任务包{' '}
+            <code>task-&lt;课&gt;.zip</code>，云机（<code>battle.offline.ipynb</code>）取包并 claim
+            成功后才**建立接管**（那时起本机不跑这门课；15 分钟无回传自动恢复协作派发）。
           </p>
         ) : (
           <>

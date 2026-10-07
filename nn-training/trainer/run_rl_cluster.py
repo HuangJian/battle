@@ -48,7 +48,7 @@ if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
 from trainer.loop_plan import (
-    course_is_offline,
+    course_is_held,
     course_kind,
     course_openable,
     course_traj,
@@ -117,12 +117,12 @@ def build_rows(courses: list[str], traj_root: str, sup: Supervisor) -> list[dict
             it=it,
             iters=iters,
             blocked="" if ok else reason,
-            # ★P1-3：离线课在「等云机」，不是收官——判据 与训练侧同一处（`course_is_offline`）。
-            # 只读面没有 `args`，用合成三件（`rollout_src=""` ⇒ 走 rl-config 的
-            # `courses.<课>.rollout_src`；`course_path=<课>` ⇒ stem 就是课名）。
-            offline=course_is_offline(
-                SimpleNamespace(rollout_src="", run_iters=0, course_path=course)
-            ),
+            # ★P1-3 / ★M2：被接管的课在「等云机」，不是收官——判据与训练侧同一处
+            # （`course_is_held` → `loop_hold.course_held`）。只读面没有真 args，合成一个
+            # **够用的**最小对象：`course=<课名>`（hub 直问与控制文件缓存都要这把键）。
+            # 没有 token/hub 地址 ⇒ hub 直问退回 None；**文件通道仍有效**（同机 `tmp/`），
+            # 而它正是控制台写的那份缓存（F13）。
+            held=course_is_held(SimpleNamespace(course=course)),
         )
         # 队列状态取自调度器本身（`add_course` 的 ready/done 判定），不在这里再写一遍
         # 「有任务 = ready」——两处各写一遍就是第一个分叉点。

@@ -8,8 +8,26 @@
 契约（单一来源；控制台侧见 `dashboard/src/server/actions/loop-control.ts`）：
 
 ```json
-{ "version": 1, "paused": ["c5"], "note": "由控制台写入；训练侧只读" }
+{
+  "version": 1,
+  "paused": ["c5"],
+  "held": [{ "course": "c5", "last_progress_at": 1760000000.0 }],
+  "note": "由控制台写入；训练侧只读"
+}
 ```
+
+`held`（★M2，plan/worker-type-dispatch-model §3-M2）是 **hub 事实的缓存**（云机正接管哪
+几门课），不是第二事实源：
+
+  * 判据只认 `last_progress_at`（与 hub 的 `hold_state` 同一把尺子）——**本机就地 900s 自判活**，
+    超窗的条目等于不存在（缓存过期 ≠ 永久接管）；
+  * **同机时钟前提**：两侧共享 `tmp/`，本机拿自己的墙钟去减这个时间戳；跨机部署（trainer 与
+    控制台不共享 `tmp/`）下这个通道本就不可用 —— 那时走 hub 直问（`trainer/loop_hold.py`）。
+  * 写方是控制台（hub 事实 → 文件），读方只读；`held` 改不了任何训练语义（它只回答
+    「本机该不该跑这一段」，与 `paused` 一样是**调度输入**）。
+
+**旧 trainer × 新文件**：旧版本只认 `paused`，多出来的 `held` 键被忽略 ⇒ 旧进程照旧跑
+（不会因为新字段 brick）；**新 trainer × 旧文件**：`held` 缺失 ⇒ 空集 ⇒ 退 hub 直问。
 
 **保守方向是刻意的**：读不到 / 解析失败 / 形状不对 ⇒ 一律当作「没有任何暂停意图」——
 宁可持续训练，绝不因为控制面坏掉而误停整条腿（与 `already_done` 的「算不出的判据不得
@@ -59,8 +77,14 @@ def applied_path() -> str:
     return os.environ.get("NN_LOOP_CONTROL_APPLIED") or DEFAULT_APPLIED_PATH
 
 
-def write_applied(paused: Iterable[str], path: str | None = None) -> str:
-    """原子写回执（tmp + replace）。返回错误文案（空 = 成功）——回执失败**不影响训练**。"""
+def write_applied(
+    paused: Iterable[str], path: str | None = None, *, held: Iterable[str] = ()
+) -> str:
+    """原子写回执（tmp + replace）。返回错误文案（空 = 成功）——回执失败**不影响训练**。
+
+    `held`（★M2）随回执一起报：控制台据此分辨「我写了 held、训练侧到底读到了没有」
+    （与 `paused` 同一套 pid 存活核对）。默认空 ⇒ 旧调用方逐字不变。
+    """
     p = Path(path or applied_path())
     body = json.dumps(
         {
@@ -68,6 +92,7 @@ def write_applied(paused: Iterable[str], path: str | None = None) -> str:
             "at": time.time(),
             "pid": os.getpid(),
             "paused": sorted(paused),
+            "held": sorted(held),
         },
         ensure_ascii=False,
     )
@@ -89,24 +114,32 @@ def _valid_course(name: object) -> str | None:
 
 @dataclass(frozen=True)
 class Control:
-    """控制意图的快照（`paused` = 要求暂停的课程集）。"""
+    """控制意图的快照（`paused` = 要求暂停的课程集；`held` = **仍然新鲜**的接管缓存）。"""
 
     paused: frozenset[str] = field(default_factory=frozenset)
+    #: ★M2：`held` 里**就地自判活后仍新鲜**的课程集（超窗/零进度的一律不算）。
+    held: frozenset[str] = field(default_factory=frozenset)
     #: 文件不存在（= 没有任何意图；不是错误）。
     found: bool = False
     #: 解析/形状错误（人读；空 = 无错）。错误时 `paused` 为**空**（保守 = 继续跑）。
     error: str = ""
 
 
-def parse_control(raw: object) -> Control:
-    """解析控制文件内容 → `Control`（纯函数；形状不对 ⇒ 空 + 错误文案）。"""
+def parse_control(raw: object, *, now: float | None = None) -> Control:
+    """解析控制文件内容 → `Control`（纯函数；形状不对 ⇒ 空 + 错误文案）。
+
+    `held` 在这就地自判活（★M2）：只留 `now - last_progress_at <= hold_progress_stale_sec()`
+    的那些课；窗常量与 hub 同一把（不许在控制台侧再抄一个）。`now` 可注入（测试）。
+    """
     if not isinstance(raw, dict):
         return Control(error="控制文件根不是对象")
+    t = float(now) if now is not None else time.time()
+    held_set, held_err = parse_held(raw.get("held"), now=t)
     paused_raw = raw.get("paused", [])
     if paused_raw is None:
-        return Control(found=True)
+        return Control(held=frozenset(held_set), found=True, error=held_err)
     if not isinstance(paused_raw, list):
-        return Control(error="paused 不是数组")
+        return Control(held=frozenset(held_set), found=True, error="paused 不是数组")
     bad: list[str] = []
     paused: set[str] = set()
     for item in paused_raw:
@@ -116,10 +149,48 @@ def parse_control(raw: object) -> Control:
         else:
             paused.add(c)
     err = f"paused 里有非法课程名（已忽略）：{', '.join(bad)}" if bad else ""
-    return Control(paused=frozenset(paused), found=True, error=err)
+    return Control(
+        paused=frozenset(paused),
+        held=frozenset(held_set),
+        found=True,
+        error="; ".join(x for x in (err, held_err) if x),
+    )
 
 
-def read_control(path: str | None = None) -> Control:
+def parse_held(raw: object, *, now: float) -> tuple[set[str], str]:
+    """解析 `held` 条目 → `(仍然新鲜的课程集, 错误文案)`（**纯函数**；见 `loop_hold` 的注释）。
+
+    条目形状 `{"course": c, "last_progress_at": t}`；缺 `/ 非法 / 超窗` ⇒ **不新鲜**
+    （只认进度：零进度不算活着，与 hub 的 `hold_state` 同一口径）。
+    """
+    from hub.task_pack import hold_progress_stale_sec
+
+    if raw is None:
+        return set(), ""
+    if not isinstance(raw, list):
+        return set(), "held 不是数组"
+    stale = float(hold_progress_stale_sec())
+    out: set[str] = set()
+    bad: list[str] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            bad.append(repr(item))
+            continue
+        c = _valid_course(item.get("course"))
+        if c is None:
+            bad.append(repr(item.get("course")))
+            continue
+        try:
+            at = float(item.get("last_progress_at") or 0.0)
+        except (TypeError, ValueError):
+            at = 0.0
+        if at > 0.0 and (now - at) <= stale:
+            out.add(c)
+    err = f"held 里有不新鲜/不合法的条目（已忽略）：{', '.join(bad[:3])}" if bad else ""
+    return out, err
+
+
+def read_control(path: str | None = None, *, now: float | None = None) -> Control:
     """读控制文件。文件不存在/读失败/解析失败 → 空意图（保守：不暂停）+ 错误文案。"""
     p = Path(path or control_path())
     try:
@@ -128,7 +199,7 @@ def read_control(path: str | None = None) -> Control:
         return Control()
     except (OSError, ValueError) as e:
         return Control(error=f"控制文件读失败（{type(e).__name__}: {e}）")
-    return parse_control(raw)
+    return parse_control(raw, now=now)
 
 
 class ControlApplier:
@@ -138,6 +209,9 @@ class ControlApplier:
         self.logger = logger
         self.applied_file = applied_file
         self._applied: frozenset[str] | None = None
+        #: ★M2：上一拍读到的 `held`（回执在它变化时也要重写——否则控制台无法分辨
+        #: 「我写的缓存被读到了没有」；两个输入**任一**变化都算回执该刷新）。
+        self._applied_held: frozenset[str] | None = None
         self._error = ""
 
     def apply(self, sup, control: Control, *, path: str | None = None) -> list[str]:
@@ -149,14 +223,23 @@ class ControlApplier:
         elif not control.error:
             self._error = ""
 
-        changed = self._applied is None or control.paused != self._applied
+        paused_changed = self._applied is None or control.paused != self._applied
+        held_changed = self._applied_held is None or control.held != self._applied_held
         self._applied = control.paused
-        if not changed:
+        self._applied_held = control.held
+        if not paused_changed and not held_changed:
             return lines
-        # 回执：控制台靠它分辨「已生效」与「还没读到」（首次施加也写一次：顺带续上 pid/at）
-        err = write_applied(control.paused, self.applied_file)
+        # 回执：控制台靠它分辨「已生效」与「还没读到」（首次施加也写一次：顺带续上 pid/at）。
+        # ★M2：`held` 一并回执（控制台写的缓存到底被读到没有，与 paused 同一套 pid 核对）。
+        err = write_applied(control.paused, self.applied_file, held=control.held)
         if err:
             lines.append(f"[loopcontrol] WARN 回执写入失败（不影响训练）：{err}")
+
+        if not paused_changed:
+            # 只有 `held` 变了：没有任何调度动作要施加/要报（单纯刷新回执）。
+            for line in lines:
+                self.logger(line)
+            return lines
 
         where = path or control_path()
         for course, q in sup.courses.items():

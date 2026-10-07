@@ -4,9 +4,10 @@
 —— 那条腿已退役（`plan/online-offline-role-routing.plan.md` §7）。剩下的两半仍然有用，
 而且都在**导出腿**（任务包）上：
 
-  * 开关解析：`--run-iters` > `courses.<课>.run_iters` > `rl.run_iters` > 0（缺省**关**）。
-    今天它声明「这门课由云机接手」，同时是 `--export-bundle` 的终点；`run` 仍在来源枚举里
-    （离线课 ⇒ 本机不跑，见 `tests/worker/test_loop_round.py` 的 `resolve_collect_mode`）；
+  * 开关解析：`--run-iters` > `courses.<课>.run_iters` > `rl.run_iters` > 0（缺省**关**）——
+    今天它只剩**一个**用途：`--export-bundle` 的终点（★M2 去掉了「声明这门课归云机」那半：
+    归不归云机看 hub 的 hold，见 `tests/worker/test_loop_round.py` 的 `resolve_collect_mode`
+    与 `tests/trainer/test_offline_leg_retired.py::test_retired_run_source_is_tolerated_not_bricked`）；
   * 发布形状：`publish_job(kind="run", plan_bytes=…)` 把 `plan.json` 放进 **payload**、
     manifest 记 `plan_sha256`；缺计划/带本地 shard 一律**拒发**（不是静默降级）——任务包
     （`--export-bundle`，带 `export_path` ⇒ `register=False`）靠的正是这套形状；
@@ -34,6 +35,7 @@ from common.protocol import PLAN_NAME, TS_CODE_NAME, unpack_payload
 from remote.hub_client import HubClientError, publish_job
 from trainer.loop_steps import (
     ROLLOUT_SRCS,
+    ROLLOUT_SRCS_RETIRED,
     _rollout_source,
     _run_segment_iters,
 )
@@ -99,22 +101,23 @@ def test_segment_iters_reads_course_then_rl() -> None:
 
 
 def test_console_written_course_keys_drive_the_per_round_read() -> None:
-    """控制台那颗「切离线/切换成在线」开关写的课程级键 ↔ 训练侧每轮解析（两腿的**接口**）。
+    """课程级键 ↔ 训练侧每轮解析（两腿的**接口**）——★M2 换了一半的语义。
 
-    plan/train-mode-hot-switch.plan.md L1：dashboard 侧 `applyTrainModeToConfig`（唯一写面）
-    写的形状就是这两把键；训练侧在 `loop_round_steps` **每轮**各读一次
-    （`_rollout_source` / `_run_segment_iters`，读的是 `common.distribution.load_dist_config()`）
-    ⇒ 机制上不需要重开课。本用例把「写面 ↔ 读面」钉在一起，防两腿各自漂：
+    ★M2（plan/worker-type-dispatch-model §3-M2）：`rollout_src="run"` 已退役 ⇒ 读到它一律
+    映射成 `local` + 一行 WARN（容忍读，不 brick）。仍在读的课程级键：
 
-      * 离线（云机接手）= `rollout_src="run"` **与** `run_iters=-1` 两键都在 ⇒ `run` + `-1`；
-      * 切回在线 = 两键**都删**（只删一个 = 半状态：要么本机采样却又被当段长，
-        要么反过来）⇒ `local` + `0`。
+      * `run_iters` —— `--export-bundle` 的终点（`-1` = 到课程末尾；控制台导出腿自带）；
+      * `rollout_src` —— `local` / `node` / `auto` 仍是活的选项（`node` = 整轮上云）。
 
-    反向守卫在 dashboard 侧：`tests/train-mode-offline.test.ts` + `tests/course-mode.test.ts`。
+    控制台侧对应断言（写面）：`tests/train-mode-offline.test.ts` + `tests/course-mode.test.ts`
+    ——它们钉住「控制台不再写 `run`/`run_iters`」。
     """
     cases: tuple[tuple[dict, str, int], ...] = (
-        ({"courses": {"x1": {"rollout_src": "run", "run_iters": -1}}}, "run", -1),
+        # 旧形状（M2 前控制台写的）：来源退役 ⇒ 本机 + 段长照读（导出终点仍在）
+        ({"courses": {"x1": {"rollout_src": "run", "run_iters": -1}}}, "local", -1),
         ({"courses": {"x1": {}}}, "local", 0),
+        # 活的选项不受影响
+        ({"courses": {"x1": {"rollout_src": "node"}}}, "node", 0),
     )
     for cfg, want_src, want_seg in cases:
         with patch("trainer.loop_transport.common.distribution") as dc:
@@ -124,14 +127,15 @@ def test_console_written_course_keys_drive_the_per_round_read() -> None:
             assert _run_segment_iters(args) == want_seg
 
 
-def test_rollout_src_run_is_a_declared_source() -> None:
-    """`run`（离线模式的机器侧写法）必须在来源枚举里——否则配置被静默读成 `local`。
+def test_rollout_src_run_is_retired_but_tolerated() -> None:
+    """★M2：`run` 已退役——不在活枚举里（`ROLLOUT_SRCS`）、却在**容忍表**里且被映射成 local。
 
-    这正是「云机在跑」与「本机在跑」看起来一样的那类静默分叉：`_rollout_source` 对**未知**
-    值一律回落 local（历史容忍），所以枚举少一个值 = 配置项静默失效。
+    这正是「云机在跑」与「本机在跑」那类静默分叉的收尾：`run` **不再**是「归云机」的写法
+    （那是 hub 的 hold），而残留配置不得 brick 课程 ⇒ 映射 local + 一行 WARN。
     """
-    assert "run" in ROLLOUT_SRCS
-    assert _rollout_source(_args(rollout_src="run")) == "run"
+    assert "run" not in ROLLOUT_SRCS
+    assert ROLLOUT_SRCS_RETIRED == ("run",)
+    assert _rollout_source(_args(rollout_src="run")) == "local"
     assert _rollout_source(_args(rollout_src="node")) == "node"
     # 显式 CLI 给了垃圾值 ⇒ 响亮拒跑（不许静默退化）
     with pytest.raises(SystemExit, match="未知 --rollout-src"):
@@ -143,7 +147,10 @@ def test_rollout_src_run_is_a_declared_source() -> None:
 
 
 def test_cli_accepts_rollout_src_run() -> None:
-    """命令行也必须收 `run`（argparse choices 与 ROLLOUT_SRCS 同源；否则控制台写了就拒启）。"""
+    """命令行仍须收 `run`（容忍读的最外一层）：控制台旧版本/历史命令行写了它，拒启 = brick 课程。
+
+    收下来之后由 `_rollout_source` 映射成 local + 一行 WARN（见上一条）。
+    """
     ns = build_argparser("rl", {}).parse_args(["--rollout-src", "run"])
     assert ns.rollout_src == "run"
     with pytest.raises(SystemExit):
@@ -163,11 +170,11 @@ def test_cli_default_rollout_src_never_shadows_the_course_level_key() -> None:
     """
     ns = build_argparser("rl", {"rollout_src": "node"}).parse_args([])
     assert ns.rollout_src == "auto"
-    # 课程级优先
+    # 课程级优先（用活取值 `node` 钉：退役取值 `run` 会被容忍读映射成 local，看不出优先级）
     with patch("trainer.loop_transport.common.distribution") as dc:
-        dc.load_dist_config.return_value = {"courses": {"x1": {"rollout_src": "run"}}}
+        dc.load_dist_config.return_value = {"courses": {"x1": {"rollout_src": "node"}}}
         assert (
-            _rollout_source(_args(rollout_src=ns.rollout_src, course_path="curricula/x1.jsonc")) == "run"
+            _rollout_source(_args(rollout_src=ns.rollout_src, course_path="curricula/x1.jsonc")) == "node"
         )
     # 课程级为空 ⇒ 顶层照旧生效（这条保证上面那次改动不是「把顶层配置关掉了」）
     with patch("trainer.loop_transport.common.distribution") as dc:

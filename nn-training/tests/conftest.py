@@ -72,10 +72,11 @@ def pin_production_env(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     `hub/task_pack.py` 的控制台地址是「`BCITY_CONSOLE_URL` 为空 ⇒ `DEFAULT_CONSOLE_URL`
     = `http://127.0.0.1:8900`」（本机 dashboard 的默认端口，生产便利），于是测试里起的
     **真 hub 子进程**（夹具拷贝 `os.environ`）若漏设就打到**开发机上正在跑的控制台**，而
-    `autoOfflineHandoff` 的动作本体是 `applyTrainModeToConfig(…, 'offline', {remember: true})`
-    —— 控制台的**唯一配置写面**：课名撞上一门在开课的真课，一次测试就能把那门课翻成离线停采
-    （2026-10-06 事故，侥幸：那批课名当时都没开课 ⇒ 在写配置之前就 return 了）。
-    控制台地址钉**死端口**：漏网也只是「控制台不可达」的响亮降级，绝不写真配置。
+    `autoOfflineHandoff` 的动作本体会**动生产状态**：★M2 之前是
+    `applyTrainModeToConfig(…, 'offline', {remember: true})`（控制台的**唯一配置写面**——一次
+    测试就能把一门在开课的真课翻成离线停采）；★M2 起写面退役，但它仍会**导任务包**
+    （起一次 python 进程 + 重写 `tmp/<课>/task-<课>.zip`）——课名撞上真课就是动了那门课的交付面。
+    控制台地址钉**死端口**：漏网也只是「控制台不可达」的响亮降级，绝不碰真课。
 
     用 fixture 而**不是**模块级 `os.environ`：门禁是 `pytest tests/ e2e/` **同一进程**，
     模块级 setenv 会串味（同 `e2e/conftest.py::_no_serve_pool` 的教训）；`monkeypatch` 保证

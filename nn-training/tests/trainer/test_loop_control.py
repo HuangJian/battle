@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -116,6 +117,71 @@ def test_read_ignores_extra_keys(tmp_path: Path) -> None:
     assert read_control(str(p)).paused == frozenset({"c5"})
 
 
+# ------------------------------------------------- ★M2：`held`（hub 事实的缓存）
+
+
+def test_held_missing_or_old_file_is_an_empty_set_not_an_error() -> None:
+    """旧控制台写的文件没有 `held` / 形状不对 ⇒ 空集（退回 hub 直问），**不算错**。
+
+    这条是 F13 的第二条前提（「旧 trainer × 新文件」的反向）：新 trainer 不得因为一个
+    它不认识的键而拒绝整份意图（那会把 `paused` 一起屏蔽掉）。
+    """
+    assert parse_control({"paused": [], "held": None}).held == frozenset()
+    assert parse_control({"paused": []}).held == frozenset()
+    assert parse_control({"paused": [], "held": "c5"}).held == frozenset()
+    assert parse_control({"paused": [], "held": "c5"}).error  # 形状不对要说出来（但不影响 paused）
+
+
+def test_held_is_judged_live_in_place_with_hub_stale_window() -> None:
+    """★ 就地 900s 自判活（与 hub 的 `hold_state` **同一把尺子**）。
+
+    为什么必须在本机再判一次：缓存是控制台某一时刻拍的快照，云机可能已经掉线——
+    拿旧快照当事实 = 「本机不跑 + 云机也不跑」的静默停摆（那正是旧模型的病）。
+    """
+    now = 1_760_000_000.0
+    c = parse_control(
+        {
+            "paused": [],
+            "held": [
+                {"course": "fresh", "last_progress_at": now - 10},
+                {"course": "edge", "last_progress_at": now - 900},  # 恰好窗内
+                {"course": "stale", "last_progress_at": now - 901},
+                {"course": "zero", "last_progress_at": 0},  # 零进度 = 不算活着
+                {"course": "missing"},
+            ],
+        },
+        now=now,
+    )
+
+    assert c.held == frozenset({"fresh", "edge"})
+    # 非法课名 / 坏条目一律丢掉（缓存坏了不该让整份意图作废）
+    bad = parse_control({"paused": [], "held": [{"course": "../etc", "last_progress_at": now}]})
+    assert bad.held == frozenset() and "不合法" in bad.error
+    # 超窗的课**不进** held：本机照常跑（保守方向 = 继续训练）
+    assert "stale" not in c.held
+
+
+def test_read_control_uses_wall_clock_for_held(tmp_path: Path) -> None:
+    """读盘路径也自判活（`now` 缺省 = 墙钟）——同机时钟前提写在这里。"""
+    p = tmp_path / "loop-control.json"
+    p.write_text(
+        json.dumps(
+            {
+                "paused": ["p1"],
+                "held": [
+                    {"course": "c5", "last_progress_at": time.time() - 5},
+                    {"course": "c6", "last_progress_at": time.time() - 10_000},
+                ],
+            }
+        ),
+        "utf-8",
+    )
+
+    c = read_control(str(p))
+
+    assert c.paused == frozenset({"p1"}) and c.held == frozenset({"c5"})
+
+
 def test_control_path_env_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.delenv("NN_LOOP_CONTROL")  # 夹具已重定向；本用例专测**缺省**路径
     assert control_path().endswith(str(Path("tmp") / "loop-control.json"))
@@ -205,7 +271,24 @@ def test_write_applied_shape_is_readable_by_the_console(tmp_path: Path) -> None:
     assert body["pid"] == os.getpid()
     assert body["paused"] == ["c4", "c5"]  # 排序：同一份意图永远同一个字节（便于对拍）
     assert body["version"] == 1 and isinstance(body["at"], float)
+    assert body["held"] == []  # ★M2：缺省空表（旧调用方逐字不变）
     assert list(tmp_path.iterdir()) == [f]  # 原子写不留 tmp 残渣
+
+
+def test_applier_receipt_carries_the_held_cache_it_read(tmp_path: Path) -> None:
+    """★M2：回执里的 `held` = 训练侧**实际读到并认下**的那批（缓存是否被读到的唯一凭据）。"""
+    sup = FakeSup("a", "b")
+    f = tmp_path / "applied.json"
+    applier = ControlApplier(applied_file=str(f))
+
+    fresh = {"course": "a", "last_progress_at": time.time() - 3}
+    applier.apply(sup, parse_control({"paused": [], "held": [fresh]}))
+    body = json.loads(f.read_text(encoding="utf-8"))
+    assert body["held"] == ["a"] and body["paused"] == []
+    # 缓存变旧（超窗）⇒ 回执照样刷新成空表（否则控制台会以为它还在被读）
+    stale = {"course": "a", "last_progress_at": time.time() - 10_000}
+    applier.apply(sup, parse_control({"paused": [], "held": [stale]}))
+    assert json.loads(f.read_text(encoding="utf-8"))["held"] == []
 
 
 def test_write_applied_failure_is_reported_not_raised(tmp_path: Path) -> None:

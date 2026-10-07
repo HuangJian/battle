@@ -43,8 +43,36 @@ describe('parseLoopControl（与 python parse_control 同判据）', () => {
   })
 
   it('缺 paused / null ⇒ 空表且不是错误（「没有意图」是合法稳态）', () => {
-    expect(parseLoopControl({ version: 1 })).toEqual({ paused: [], found: true, error: '' })
+    expect(parseLoopControl({ version: 1 })).toEqual({
+      paused: [],
+      held: [],
+      found: true,
+      error: '',
+    })
     expect(parseLoopControl({ paused: null }).paused).toEqual([])
+  })
+
+  it('★M2：`held`（hub 事实缓存）宽容解析：坏条目丢掉，永不报错、不影响 paused', () => {
+    const c = parseLoopControl({
+      paused: ['c5'],
+      held: [
+        { course: 'c6', last_progress_at: 1758.5 },
+        { course: 'c6', last_progress_at: 1 }, // 重复：取首条
+        { course: '../etc', last_progress_at: 1 }, // 非法课名
+        { course: 'c7' }, // 缺进度 ⇒ 0（0 = 未知 ⇒ 训练侧不算接管）
+        { course: 'c8', last_progress_at: 'x' },
+        'nope',
+      ],
+    })
+    expect(c.paused).toEqual(['c5'])
+    expect(c.error).toBe('')
+    expect(c.held).toEqual([
+      { course: 'c6', lastProgressAt: 1758.5 },
+      { course: 'c7', lastProgressAt: 0 },
+      { course: 'c8', lastProgressAt: 0 },
+    ])
+    // 形状不对（不是数组）⇒ 空集，不报错（旧 trainer/人手写的文件不含它）
+    expect(parseLoopControl({ held: 'nope' }).held).toEqual([])
   })
 
   it('paused 不是数组 ⇒ 空表 + 错误（保守：宁可不暂停）', () => {
@@ -71,7 +99,21 @@ describe('parseLoopControl（与 python parse_control 同判据）', () => {
 describe('readLoopControl（永不抛）', () => {
   it('文件不存在 ⇒ 空意图、found=false、无错误', () => {
     const c = readLoopControl(tmpFile('nope.json'))
-    expect(c).toEqual({ paused: [], found: false, error: '' })
+    expect(c).toEqual({ paused: [], held: [], found: false, error: '' })
+  })
+
+  it('★M2：写 `paused` **不覆盖** `held`（接管缓存不能被「点一下暂停」抹掉）', () => {
+    const f = tmpFile()
+    writeFileSync(
+      f,
+      JSON.stringify({ version: 1, paused: [], held: [{ course: 'c6', last_progress_at: 9 }] }),
+      'utf8',
+    )
+    expect(writeLoopControl(['c5'], f)).toBeNull()
+    const after = JSON.parse(readFileSync(f, 'utf8')) as Record<string, unknown>
+    expect(after.paused).toEqual(['c5'])
+    expect(after.held).toEqual([{ course: 'c6', last_progress_at: 9 }])
+    expect(after.version).toBe(1)
   })
 
   it('坏 JSON ⇒ 空意图 + 原因（保守：继续训练）', () => {

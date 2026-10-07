@@ -24,7 +24,6 @@ import type {
   RlConfig,
   RolloutSrcMode,
   SlimMode,
-  TrainMode,
 } from '../core/types'
 
 /** 课程日志目录（per-course；无课程走 `nocourse`——与旧单课路径同构）。 */
@@ -182,28 +181,12 @@ export function slimToCfg(mode: SlimMode): 0 | 1 {
  *  在 rl-config 没有该键时一律返回 `local`（历史行为）——这里若缺省成别的值，控制台
  *  就会在**没改过配置**的课上谎报「本轮上云」。
  *  与 `resolveCfTunnel`/`resolveSlim` 同形，但**无域换算**：两侧都是同字面量字符串。 */
-/** 训练模式 → 课程级 rl-config 键（**唯一推导点**；2026-09-19 离线训练模式）。
- *
- *  `offline` ⇒ `{rollout_src:'run', run_iters:-1}`：两个键缺一不可——
- *    · `run` 是**声明**（本机不跑这门课，交给云机接手）；
- *    · `run_iters:-1` 是**终点**（-1 = 直到课程末尾；与 `--export-bundle` 的任务包同口径）。
- *    两个键都在才判成离线课（`resolve_collect_mode`：来源 `run` **或**有终点值 ⇒ 离线）。
- *    缺终点值的代价是**静默分叉**：`--export-bundle` 会拒绝导出（`_export_offline_bundle`
- *    的 SystemExit），而离线课本身仍然不让本机采样 —— 那正是最难查的那类半状态。
- *  `online` ⇒ `{rolloutSrc: 选中的源, runIters: null}`，其中 `null` = **要求删除**该课
- *    的 `run_iters`/`rollout_src` 覆盖（不删就会「切回在线了但本课还归云机」）。
- *
- *  为什么放这里：模式与 rollout 源是**两个域**（一个用户口径、一个 python 字面量），
- *  换算只此一处，弹窗/preset/测试共用。
- */
-export function trainModeKnobs(
-  mode: TrainMode,
-  rolloutSrc: RolloutSrcMode,
-): { rolloutSrc: RolloutSrcMode; runIters: number | null } {
-  if (mode === 'offline') return { rolloutSrc: 'run', runIters: -1 }
-  // 在线不接受 `run`：`run` 是离线模式的产物，留在在线档位里就是自相矛盾的状态。
-  return { rolloutSrc: rolloutSrc === 'run' ? 'local' : rolloutSrc, runIters: null }
-}
+// ★M2（2026-10-07，plan/worker-type-dispatch-model §3-M2）：原 `trainModeKnobs`（模式 →
+// `courses.<课>.{rollout_src:'run', run_iters:-1}` 的**唯一**推导点）随写面一起删除 ——
+// 「这门课归云机」不再是 rl-config 的声明，而是 hub 的 hold 事实（云机 claim 成功且有进度才
+// 建立；掉线 900s 自动解除），训练侧每轮边界问一次即知（`trainer/loop_hold.py`）。
+// 盘上残留的 `run`/`run_iters` 由训练侧**容忍读**兜住（映射 local + 一行 WARN），
+// 并由开课/停课的 prune 与 M6 的一次性清理收尾。
 
 export function resolveRolloutSrc(cfg: RlConfig, course = ''): RolloutSrcMode {
   const cc = course ? cfg.courses?.[course] : undefined

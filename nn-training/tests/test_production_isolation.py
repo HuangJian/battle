@@ -13,9 +13,11 @@
 `tmp/gate-halt.json`（平台门禁意图：能停全平台训练）、`tmp/loop-control.json`（暂停/恢复真循环）、
 `nn-training/weights/`（真权重归档，控制台的权重选择器扫它；工装用例往里撒文件 = 面板上多出假轮次）。
 
-为什么必须堵死（不只是日志噪声）：`autoOfflineHandoff` 的动作本体是
-`applyTrainModeToConfig(course, 'offline', {remember: true})` —— 控制台的**唯一配置写面**。
-课名撞上一门**正在开课**的真课时，一次测试运行就能把那门课翻成离线停采（并可能顺手导包）。
+为什么必须堵死（不只是日志噪声）：`autoOfflineHandoff` 的动作本体会**动生产状态**——★M2 之前是
+`applyTrainModeToConfig(course, 'offline', {remember: true})`（控制台的**唯一配置写面**：课名撞上
+一门**正在开课**的真课，一次测试就能把它翻成离线停采）；★M2 起写面退役（接管 = hub 的 hold 事实，
+见 plan/worker-type-dispatch-model §3-M2），但它仍**导任务包**（起 python 进程 + 重写
+`tmp/<课>/task-<课>.zip`）—— 课名撞上真课就是动了那门课的交付面。
 
 修法（本文件钉住它）：两层 conftest 各挂一个 autouse fixture，调**同一份**
 `tests/conftest.py::pin_production_env` —— 控制台地址钉到**死端口**（连接当场被拒 ⇒ 万一漏网

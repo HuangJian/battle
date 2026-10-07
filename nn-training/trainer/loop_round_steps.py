@@ -29,6 +29,7 @@ import common.distribution
 from common.log import log
 from trainer.loop_baseline import TrainingBaseline
 from trainer.loop_dispatch import TrainingDispatch
+from trainer.loop_hold import course_held
 from trainer.loop_iter_dir import TrainingIterDir
 from trainer.loop_steps import (
     BundleExportedError,
@@ -41,12 +42,12 @@ from trainer.rollout_phase import join_precollect_child, precollect_ready, spawn
 from worker.config import course_key_of, resolve_course_quota
 from worker.events import log_iter_error
 from worker.loop_round import (
+    COLLECT_HELD,
     COLLECT_LOCAL,
     COLLECT_NODE,
-    COLLECT_OFFLINE,
     ROUND_BUNDLE_EXIT,
+    ROUND_HELD_EXIT,
     ROUND_NEXT,
-    ROUND_OFFLINE_EXIT,
     ROUND_RETRY,
     ROUND_SMOKE_STOP,
     ROUND_STOP,
@@ -60,9 +61,14 @@ from worker.loop_round import (
 )
 from worker.loop_tasks import ROUND_TASKS
 
-#: 离线课的**唯一**执行者指路（日志/报错共用一句，免得几处各写一份说法）。
-#: 背景：半离线整段腿（发一份 `kind=run` 队列项、本机等 8h）2026-09-25 退役。
-OFFLINE_LEG_HINT = "battle.offline.ipynb（/offline/tasks 清单 → /offline/task-pack 取包 → 跑完回传）"
+#: 被接管课的**唯一**执行者指路（日志/报错共用一句，免得几处各写一份说法）。
+#: 背景：半离线整段腿（发一份 `kind=run` 队列项、本机等 8h）2026-09-25 退役；
+#: ★M2 起判据换成 hub 的 hold（进度活性），不再看 rl-config 的 `rollout_src=run`。
+HELD_LEG_HINT = "battle.offline.ipynb（/offline/tasks 清单 → /offline/task-pack 取包 → 跑完回传）"
+
+#: 「本课被接管」的**人读原因**（★M2）——日志、`ROUND_HELD_EXIT` 的 detail 与控制台
+#: 「在等什么」共用同一句（plan §3-M2 定稿文案；三处各写一份必然漂移）。
+HELD_WAIT_HINT = "云机接管中：自主 worker 正在跑这段（15 分钟无回传自动恢复协作派发）"
 
 
 class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDispatch):
@@ -107,6 +113,8 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
     _log_report: Any
     #: 远端 PPO 的三相驱动（实现在 `TrainingSteps`）：`None` = 已收口，否则 = 让位/停车。
     _remote_ppo_step: Callable[[RoundContext], StepResult | None]
+    #: 接管等待的**去重文案**（★M2；声明在 `loop_core` 的构造器里）。
+    _held_note: str
     _export_weights: Any
     _join_eval: Any
     _record_iteration: Any
@@ -246,19 +254,23 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         # 本轮是否派发干净评估：**求值一次**并共享（原轮体在 rollout 调用点内联求值，
         # 同一 it 上是纯函数，故拆出来不改变行为）。
         ctx.eval_on_round = self._eval_on_round(it)
-        # ★ 采集模式由 `resolve_collect_mode` **一处**裁决（离线课 > 整轮上云 > 本机采样）：
+        # ★ 采集模式由 `resolve_collect_mode` **一处**裁决（被接管 > 整轮上云 > 本机采样）：
         #   R2c-3 拆 13 步时这里只算了 `ctx.seg` 而没翻 `collect_mode`，于是 kind=run 分支
         #   不可达（表面正常：本机照常采样、账本照常记账，只是云机永远领不到整段）。
         #   段长与来源的先后也必须在同一处对齐。
         #
         # ★ 2026-09-25（退役「半离线整段」腿，`plan/online-offline-role-routing.plan.md` §7）：
-        #   离线课不再由本机派发——不采样、不发队列项、不等待。执行者是云机（取任务包
+        #   被接管的课不再由本机派发——不采样、不发队列项、不等待。执行者是云机（取任务包
         #   接手），产物回传后在控制台「导入产物」即推进本机账本。本机侧到此干净收官。
+        #
+        # ★M2（plan/worker-type-dispatch-model §3-M2）：「被接管」不再是配置声明，而是**每轮
+        #   边界问一次事实**（`trainer/loop_hold.course_held`：hub 直问 ∨ 控制文件缓存；
+        #   ≤3s、异常全消化）——这是本模块唯一新增的轮边界 IO。
         src = _rollout_source(args)
         ctx.seg = _run_segment_iters(args)
-        # M3/离线：node 时本机**完全不采样**（也不预采/不补波），由 `_remote_iter`
-        # （kind=iter）派发；离线课（run）本机什么都不做。eval 不动（仍在本地 hub 跑，§5.4）。
-        ctx.collect_mode = resolve_collect_mode(src, ctx.seg)
+        # M3/接管：node 时本机**完全不采样**（也不预采/不补波），由 `_remote_iter`
+        # （kind=iter）派发；被接管的课本机什么都不做。eval 不动（仍在本地 hub 跑，§5.4）。
+        ctx.collect_mode = resolve_collect_mode(src, ctx.seg, held=course_held(args))
         self._node_rollout = ctx.collect_mode != COLLECT_LOCAL
         ctx.node_rollout = self._node_rollout
         if getattr(args, "export_bundle", ""):
@@ -269,15 +281,15 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
                     "（>0 = N 轮；<0 = 到课程末尾）"
                 )
             self._export_offline_bundle(it, ctx.pairs, ctx.seg)
-        if ctx.collect_mode == COLLECT_OFFLINE:
+        if ctx.collect_mode == COLLECT_HELD:
             # 不是失败：不落 iter_error、不计连击（在 `round_failure` 里另行开路）。
-            # ★P1-1（plan §3.5，五轮 P1-D）：离线 = **等待**不是收官 ⇒ 本轮留队、
-            # 每 `poll_interval` 重问一次，而这段四句日志就在重问路径上 ⇒ **同一模式状态
-            # 只喊一次**（`_offline_note` 去重）；否则比今天更吵。
+            # ★P1-1（plan §3.5，五轮 P1-D）：接管 = **等待**不是收官 ⇒ 本轮留队、
+            # 每 `poll_interval` 重问一次，而这段日志就在重问路径上 ⇒ **同一状态
+            # 只喊一次**（`_held_note` 去重）；否则比今天更吵。
             note = (
-                f"[run_rl] it{it}: 本课 rollout_src=run —— **离线课不由本机跑**"
-                "（等待控制台写回在线；云机取包链："
-                f"{OFFLINE_LEG_HINT}；产物回传后在控制台「导入产物」即推进本机账本"
+                f"[run_rl] it{it}: 本课**被接管** —— 云机（自主 worker）正在跑这一段"
+                "（等待接管解除；云机取包链："
+                f"{HELD_LEG_HINT}；产物回传后在控制台「导入产物」即推进本机账本"
                 + (
                     ""
                     if ctx.seg
@@ -285,10 +297,10 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
                 )
                 + "）"
             )
-            if note != getattr(self, "_offline_note", ""):
+            if note != getattr(self, "_held_note", ""):
                 log(note)
-                self._offline_note = note
-            return finish(ROUND_OFFLINE_EXIT, "离线课由云机取任务包接手（本机不跑）")
+                self._held_note = note
+            return finish(ROUND_HELD_EXIT, HELD_WAIT_HINT)
         return None
 
     # ------------------------------------------------------------- ⑤ 采集
@@ -299,15 +311,15 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         · `node`（整轮上云）：发 kind=iter job，本机不采样；
         · `local`（默认）：配额课程走**连续配额采集**（2026-09-19 VOLUME_RULE_V2，它自己
           实时读账本派批 + 软停 + 采纳报告，离散补波因此退役）；否则本机 `_rollout_phase`；
-        · `offline`（离线课，`rollout_src=run`）：**不该走到这里**——上一步（`step_course_iter`）
-          已让本轮以 `ROUND_OFFLINE_EXIT` 收官。真走到这里 = 步骤被改动过，**响亮报错**
-          而不是静默退化成「本机自己采样」（那会与云机取包链双跑）。
+        · `held`（本课被接管）：**不该走到这里**——上一步（`step_course_iter`）已让本轮以
+          `ROUND_HELD_EXIT` 收官。真走到这里 = 步骤被改动过，**响亮报错**而不是静默退化成
+          「本机自己采样」（那会与云机取包链双跑）。
         """
         it = ctx.it
-        if ctx.collect_mode == COLLECT_OFFLINE:
+        if ctx.collect_mode == COLLECT_HELD:
             raise RuntimeError(
-                "[run_rl] 离线课（rollout_src=run）走到了采集步——步骤顺序被改动过？"
-                f"本机不跑这门课：{OFFLINE_LEG_HINT}"
+                "[run_rl] 被接管的课走到了采集步——步骤顺序被改动过？"
+                f"本机不跑这门课：{HELD_LEG_HINT}"
             )
         if ctx.collect_mode == COLLECT_NODE:
             self._remote_iter(it, ctx.pairs)

@@ -19,6 +19,22 @@
  *  与「离线开关」（`course-mode.ts`）的区别：离线 = hub 不派 PPO 活；暂停 = **本机训练进程
  *  这一课不再推进**（连 rollout/本机 PPO 也停）。两者可独立使用（离线课也可以继续在跑本机
  *  降级/预采）。
+ *
+ *  ★M2（plan/worker-type-dispatch-model §3-M2，F13）：这份文件现在**还承载一份 hub 事实的
+ *  缓存**——`held: [{course, last_progress_at}]`（哪个课程正被自主 worker 接管）。训练侧
+ *  （`nn-training/trainer/loop_control.py::parse_held`）在 hub 问不到时读它，并**就地按 900s
+ *  自判活**（`last_progress_at` 超窗 = 不算接管）。三条前提必须写死（否则它是个假事实源）：
+ *
+ *    ① **版本/回执形状**：`held` 与 `paused` 同文件同版本号（`LOOP_CONTROL_VERSION`）；
+ *       训练进程的回执（`loop-control.applied.json`）同步回 `held`（它实际认下的那批）；
+ *    ② **旧 trainer × 新文件宽容**：旧 trainer 不认识 `held`（直接忽略）——所以**不能**靠它
+ *       传递任何旧 trainer 必须知道的事；反向（新 trainer × 旧文件）`held` 缺席 = 空集，
+ *       新 trainer 退回直问 hub；
+ *    ③ **同机时钟前提**：`tmp/` 是同机共享目录，"900s 自判活"用的是**同一口钟**；
+ *       跨机共享（NFS/不同时区）会让它把活的当死的（或反之）。
+ *
+ *  写侧纪律：**只能替补 `paused`**，其余键（尤其 `held`）原样保留——暂停一下就把接管
+ *  缓存抹掉 = 训练侧当场失去文件通道（那是静默的，只有下一次 hub 不可达才发作）。
  */
 
 import { existsSync, readFileSync, renameSync, writeFileSync } from 'fs'
@@ -32,24 +48,53 @@ export const LOOP_CONTROL_VERSION = 1
 /** 课程名合法字符集（与 `core/slots.validateCourseName` / python `loop_control._ALLOWED` 同一约束）。 */
 const COURSE_RE = /^[A-Za-z0-9._-]+$/
 
+/** 一条接管缓存（`held` 的一条；与 python `loop_control.parse_held` 同判据）。
+ *  只给**读面**（控制台展示 / M4 的 holds 列）——写侧不靠它，靠一个完整快照。 */
+export interface HeldEntry {
+  course: string
+  /** 最近一次进度信号的墙钟秒（0 = 未知 ⇒ 训练侧按「不算接管」处理）。 */
+  lastProgressAt: number
+}
+
 export interface LoopControl {
   /** 要求暂停的课程（顺序 = 写入顺序；训练侧只当集合用）。 */
   paused: string[]
+  /** 接管缓存（hub 事实的缓存，**不是**第二事实源）：坏条目丢掉，永不报错。 */
+  held: HeldEntry[]
   /** 文件不存在（正常态，不是错误）。 */
   found: boolean
   /** 读/解析问题（人读；空 = 无错）。有错时 `paused` 为空（保守：不误停）。 */
   error: string
 }
 
+/** 解析 `held`（宽容：形状不对的条目直接丢——它只是缓存，不该阻断读面）。 */
+function parseHeld(raw: unknown): HeldEntry[] {
+  if (!Array.isArray(raw)) return []
+  const out: HeldEntry[] = []
+  for (const item of raw) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) continue
+    const o = item as Record<string, unknown>
+    const c = typeof o.course === 'string' ? o.course.trim() : ''
+    if (!c || !COURSE_RE.test(c) || c.includes('..')) continue
+    const at =
+      typeof o.last_progress_at === 'number' && Number.isFinite(o.last_progress_at)
+        ? o.last_progress_at
+        : 0
+    if (!out.some((x) => x.course === c)) out.push({ course: c, lastProgressAt: at })
+  }
+  return out
+}
+
 /** 解析控制文件内容（纯函数；与 python `parse_control` 同判据）。 */
 export function parseLoopControl(raw: unknown): LoopControl {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) {
-    return { paused: [], found: false, error: '控制文件根不是对象' }
+    return { paused: [], held: [], found: false, error: '控制文件根不是对象' }
   }
   const o = raw as Record<string, unknown>
+  const held = parseHeld(o.held)
   const p = o.paused
-  if (p === undefined || p === null) return { paused: [], found: true, error: '' }
-  if (!Array.isArray(p)) return { paused: [], found: true, error: 'paused 不是数组' }
+  if (p === undefined || p === null) return { paused: [], held, found: true, error: '' }
+  if (!Array.isArray(p)) return { paused: [], held, found: true, error: 'paused 不是数组' }
   const bad: string[] = []
   const paused: string[] = []
   for (const item of p) {
@@ -59,6 +104,7 @@ export function parseLoopControl(raw: unknown): LoopControl {
   }
   return {
     paused,
+    held,
     found: true,
     error: bad.length > 0 ? `paused 里有非法课程名（已忽略）：${bad.join(', ')}` : '',
   }
@@ -67,23 +113,41 @@ export function parseLoopControl(raw: unknown): LoopControl {
 /** 读控制意图。文件不存在 / 读失败 / 解析失败 → 空意图 + 原因（**永不抛**：观测/操作面坏了不该带崩面板）。 */
 export function readLoopControl(file: string = loopControlPath()): LoopControl {
   try {
-    if (!existsSync(file)) return { paused: [], found: false, error: '' }
+    if (!existsSync(file)) return { paused: [], held: [], found: false, error: '' }
     return parseLoopControl(JSON.parse(readFileSync(file, 'utf8')) as unknown)
   } catch (e) {
     return {
       paused: [],
+      held: [],
       found: false,
       error: `控制文件读失败：${e instanceof Error ? e.message : String(e)}`,
     }
   }
 }
 
-/** 原子写控制文件（tmp + rename）。返回 null = 成功，否则人读错误。 */
+/** 原子写控制文件（tmp + rename）。返回 null = 成功，否则人读错误。
+ *
+ *  ★M2：**只替补 `paused`**，其余键（尤其 `held`）原样保留——暂停一下就把接管缓存（hub
+ *  事实的缓存，训练侧在 hub 问不到时用它）抹掉，训练侧当场失去文件通道，而那是**静默**的
+ *  （只有下一次 hub 不可达才发作）。
+ */
 export function writeLoopControl(
   paused: string[],
   file: string = loopControlPath(),
 ): string | null {
-  const body = `${JSON.stringify({ version: LOOP_CONTROL_VERSION, paused }, null, 2)}\n`
+  let doc: Record<string, unknown> = {}
+  try {
+    if (existsSync(file)) {
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        doc = { ...(parsed as Record<string, unknown>) }
+      }
+    }
+  } catch {
+    // 坏文件：从空文档起步（下面照样原子替换）。不在这里报错——`setCoursePaused` 读侧已经
+    // 报过并**拒写**，走到这里的是「文件本来就不存在」或人已确认要覆盖的那条路。
+  }
+  const body = `${JSON.stringify({ ...doc, version: LOOP_CONTROL_VERSION, paused }, null, 2)}\n`
   const tmp = path.join(path.dirname(file), `.loop-control.${process.pid}.tmp`)
   try {
     writeFileSync(tmp, body, 'utf8')
@@ -138,6 +202,11 @@ export function readLoopApplied(
 export function readPauseFacts(): { intent: string[]; applied: string[] } {
   return { intent: readLoopControl().paused, applied: readLoopApplied().paused }
 }
+
+// ── `held` 的**写侧**（M4 落点，理由写死免得漂）：写方（console）在**它每次从 hub 读到
+// holds 的同一处**写这份缓存——`overview.ts` 透出 `holds`（M4）时一并写，不在另一条腿里
+// 再读一遍 hub（同一份事实两次读 = 两个时刻的真相，缓存会与面板对不上）。M2 只立住读侧
+// （python `parse_held`）与「不覆盖」纪律；写侧与 holds 面板同席。
 
 /** 暂停/恢复一门课。**幂等**：重复点同一个方向不会把别的课程从表里挤掉。 */
 export function setCoursePaused(

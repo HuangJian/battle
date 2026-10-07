@@ -16,6 +16,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -224,27 +225,40 @@ def test_two_courses_alternate_and_both_finish(env: SimpleNamespace) -> None:
     assert rep.engines["loaded"] == []
 
 
-def test_offline_course_reaching_done_is_not_settled(
+def test_held_course_reaching_done_is_not_settled(
     env: SimpleNamespace, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """★P1-3 第二道闸：离线课即使走到 `QUEUE_DONE`（预算/硬边界），serve 腿也**不得**收官
+    """★P1-3 第二道闸：被接管的课即使走到 `QUEUE_DONE`（预算/硬边界），serve 腿也**不得**收官
     （`finish_course` = 落 `run_complete` + 发云机 PAUSE）——云机那边还在跑（R1-e）。
 
-    第一道闸（P1-1 的 WAIT 映射）让离线轮不再进 DONE；这一道是即使它进来了也不许写假收官。
-    对照组 = 既有 `test_two_courses_alternate_and_both_finish`（非离线课照常收官）。
+    第一道闸（P1-1 的 WAIT 映射）让被接管的轮不再进 DONE；这一道是即使它进来了也不许写假收官。
+    对照组 = 既有 `test_two_courses_alternate_and_both_finish`（没被接管的课照常收官）。
+
+    ★M2：判据不再从 args 读（旧写法给 `rollout_src="run"`）——**接管是 hub 的事实**，所以这里
+    走**控制文件通道**（`NN_LOOP_CONTROL` 重定向到测试 tmp）:那正是本机在 hub 不可达时用的那
+    条腿，顺带把它端到端钉一次（写一份新鲜的 `held` ⇒ serve 认）。
     """
+    ctl = env.tmp / "loop-control.json"
+    ctl.write_text(
+        json.dumps(
+            {"version": 1, "paused": [], "held": [{"course": "a", "last_progress_at": time.time()}]}
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("NN_LOOP_CONTROL", str(ctl))
 
     def fake_open_course(course: str, **kw: Any) -> CourseRuntime:
         args = SimpleNamespace(
             mode="per-tick",
+            # 真 args 一定有它（`course_args` 解析 `--course <stem>`）——接管判据按课程键查，
+            # 缺了它这场对账就废（测试会在 assert 里点名，不会静静假通过）。
+            course=course,
             traj=str(env.tmp / course),
             iters=2,
             out_log="",
             remote_hub_url="",
             remote_token="",
             force=False,
-            rollout_src="run",  # 显式离线声明（course_is_offline 的判据同源）
-            run_iters=-1,
         )
         return CourseRuntime(course=course, args=args)
 

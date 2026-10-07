@@ -307,12 +307,12 @@ describe('openCourse：课程级旋钮只落 courses.<课>', () => {
     expect(k.rollout_src).toBeUndefined()
   })
 
-  it('离线：声明 + 段长两把键成对落课程级（缺一不可）', async () => {
+  it('★M2：离线 ⇒ **一个字都不写** rl-config（接管 = hub 的 hold 事实，不再靠配置声明）', async () => {
     const r = await openCourse(COURSE, {
       trainMode: 'offline',
       hubMode: { attempts: 1, delayMs: 0 },
     })
-    expect(courseKeys()).toMatchObject({ rollout_src: 'run', run_iters: -1 })
+    expect(courseKeys()).toEqual({})
     // ★ 全局键（所有课共用的默认面）一个字不动——离线是**这门课**的决定
     const cfg = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
       rl: Record<string, unknown>
@@ -346,13 +346,35 @@ describe('openCourse：课程级旋钮只落 courses.<课>', () => {
     expect(courseKeys().remote_degrade_after).toBeUndefined()
   })
 
-  it('离线档忽略 rollout 选择（服务端侧：只认 run/run_iters 那对键）', async () => {
+  it('离线档忽略 rollout 选择（★M2：离线不落任何键 ⇒ 没有「哪把 keys 才对」这个问题）', async () => {
     await openCourse(COURSE, {
       trainMode: 'offline',
       rolloutSrc: 'node',
       hubMode: { attempts: 1, delayMs: 0 },
     })
-    expect(courseKeys().rollout_src).toBe('run')
+    expect(courseKeys()).toEqual({})
+  })
+
+  it('★M2：在线开课就地清退役键（`run_iters` + 残留的 `run`），清空则整条节点删', async () => {
+    writeFileSync(
+      process.env.BCITY_RL_CONFIG!,
+      JSON.stringify(
+        {
+          version: 1,
+          rl: { hub_port: 18787, agent_port: 8990, remote_token: 'tok' },
+          nodes: [],
+          courses: { [COURSE]: { rollout_src: 'run', run_iters: -1 } },
+        },
+        null,
+        2,
+      ),
+    )
+    await openCourse(COURSE, { trainMode: 'online', hubMode: { attempts: 1, delayMs: 0 } })
+    // 两条退役键都清掉，而课程节点本身（只剩它）也整条删掉（空节点不留痕）
+    const cfg = JSON.parse(readFileSync(process.env.BCITY_RL_CONFIG!, 'utf-8')) as {
+      courses: Record<string, unknown>
+    }
+    expect(cfg.courses[COURSE]).toBeUndefined()
   })
 })
 

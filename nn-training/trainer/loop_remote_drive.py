@@ -5,8 +5,9 @@
 打包/校验/落位全在 `TrainingRemoteJob`。
 
 ★ 半离线整段（`_remote_run_segment`，`kind=run`）**已于 2026-09-25 退役**
-（`plan/online-offline-role-routing.plan.md` §7）：离线课改由云机**取任务包**接手，
-本机侧由 `COLLECT_OFFLINE` → `ROUND_OFFLINE_EXIT` 干净收官（见 `trainer/loop_round_steps.py`）。
+（`plan/online-offline-role-routing.plan.md` §7）：被接管的课改由云机**取任务包**接手，
+本机侧由 `COLLECT_HELD` → `ROUND_HELD_EXIT` 干净收官（见 `trainer/loop_round_steps.py`；
+★M2 起判据是 hub 的 hold，不是 rl-config 的 `rollout_src=run`）。
 「发一份 kind=run 队列项、随后等 8h」那条腿与取包链干的是同一件事，两个执行者正是
 云机接错盘事故的结构。
 

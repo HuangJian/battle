@@ -55,7 +55,7 @@ from trainer.loop_core import (
     ROUND_WAIT,
     RoundOutcome,
 )
-from worker.loop_round import ROUND_OFFLINE_EXIT, STEP_METHOD, RoundContext, StepResult
+from worker.loop_round import ROUND_HELD_EXIT, STEP_METHOD, RoundContext, StepResult
 from worker.loop_scheduler import CourseQueue
 from worker.loop_tasks import (
     ROUND_TASKS,
@@ -306,17 +306,18 @@ class LoopRunner:
             self.finished = True
             self.finish_reason = "全离线任务包已导出"
             return done(it=out.it, final=True)
-        if out.status == ROUND_OFFLINE_EXIT:
-            # ★P1-1（plan §3.5）：离线课 = **等待**，不是收官——本机不跑这门课（云机取任务包
-            # 接手），但队列里的这一轮**保留**：控制台把 rl-config 写回在线（`train-mode.ts`
-            # 删 `run_iters` + 写 `rollout_src`）后，下一拍 `resolve_collect_mode` 重算即离开
-            # `COLLECT_OFFLINE` ⇒ 自动续跑（15s 量级，无需停开课）。旧写法 `done(final=True)`
+        if out.status == ROUND_HELD_EXIT:
+            # ★P1-1（plan §3.5）：被接管的课 = **等待**，不是收官——本机不跑这门课（云机取任务包
+            # 接手），但队列里的这一轮**保留**：接管解除（云机交还 / 900s 无进度自动恢复，
+            # ★M2 换成 hub 事实）后，下一拍 `resolve_collect_mode` 重算即离开
+            # `COLLECT_HELD` ⇒ 自动续跑（15s 量级，无需停开课）。旧写法 `done(final=True)`
             # 会让控制台显示「已收官」并写假 `run_complete`，而云机那边还在跑（R1-e）。
             # `hold=False`：本机没在替这一步干活（票还掉，别的课照常跑）。
             jid = getattr(self.loop, "inflight_job_id", lambda _it: None)(out.it)
             return waiting(
                 self.now() + self.poll_interval,
-                out.detail or "离线课由云机取任务包接手（切回在线自动恢复；本机不跑）",
+                # fallback 与 `trainer/loop_round_steps.HELD_WAIT_HINT` 同一句（真路径总带 detail）。
+                out.detail or "云机接管中：自主 worker 正在跑这段（15 分钟无回传自动恢复协作派发）",
                 hold=False,
                 jid=jid,
                 round=str(out.it),

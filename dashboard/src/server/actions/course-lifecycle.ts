@@ -25,11 +25,11 @@
 
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'fs'
 import path from 'path'
-import { loadConfig } from '../../core/config'
+import { loadConfig, saveConfig } from '../../core/config'
 import { readJsoncFile } from '../../core/jsonc'
 import { curriculaDir, REPO_ROOT, tmpLogsDir } from '../../core/paths'
 import { validateCourseName } from '../../core/slots'
-import type { RolloutSrcMode, TrainMode } from '../../core/types'
+import type { CourseConf, RolloutSrcMode, TrainMode } from '../../core/types'
 import {
   COURSE_ENABLE_MARKER,
   courseEnableMarkerPath,
@@ -42,7 +42,6 @@ import { kickstartReceipt } from '../../stack/kickstart-receipt'
 import { pairedSeedReceipt } from '../../stack/paired-seed-receipt'
 import { remoteExecutionFace } from '../../stack/push-config'
 import { type CourseMode, pushCourseMode } from './course-mode'
-import { applyTrainModeToConfig } from './train-mode'
 import { readLoopControl, setCoursePaused } from './loop-control'
 import { loopControlPath } from '../../core/paths'
 import { launchTaskBundleExport } from '../bundles'
@@ -61,9 +60,10 @@ export interface HubModeRetry {
 
 /** 开课参数（全部是**课程级**：绝不写进 `rl.*` 那块所有课程共用的默认面）。 */
 export interface OpenCourseOpts {
-  /** 训练模式（缺省在线）：`offline` = 云机接手（写 `rollout_src=run` + `run_iters=-1`，
-   *  并把该课 hub 置 offline、顺手导出任务包）；`online` = 撤掉离线标记（**必删** `run_iters`，
-   *  否则切回在线了本课仍归云机）。域换算只走 `stack/specs.ts::trainModeKnobs`。 */
+  /** 训练模式（缺省在线）。★M2（plan/worker-type-dispatch-model §3-M2）起**不再写 rl-config**：
+   *  `offline` 剩下的动作 = 把该课 hub 置 offline（M4 前仍是读面）+ 顺手导出任务包
+   *  （包到手、云机 claim 成功后才建立接管=hold）；`online` = 推在线 + 就地清退役键
+   *  （`run_iters` / 残留的 `rollout_src:'run'`）。 */
   trainMode?: TrainMode
   /** rollout 执行位置（在线时可选）：写课程级覆盖 `courses.<课>.rollout_src`，
    *  不碰全局 `rl.rollout_src`（那是所有课程共用的默认面）。离线档忽略它。 */
@@ -195,8 +195,17 @@ export function prepareCourseForOpen(course: string, seedPath?: string): { notes
   return { notes }
 }
 
-/** 写本课的 rl-config 键（开课那条路径；域映射已搬到 `train-mode.ts`，见该文件头）。
- *  返回人读说明 + 最终模式。
+/** 写本课的 rl-config 键（开课那条路径）。返回人读说明 + 最终模式。
+ *
+ *  ★M2（plan/worker-type-dispatch-model §3-M2）：**离线档不再写盘**——「这门课归云机」不再是
+ *  `rollout_src:'run'` + `run_iters:-1` 这对声明，而是 hub 的 **hold** 事实（云机 claim 成功
+ *  且有进度才建立；掉线 900s 自动解除）。离线档剩下的动作在调用方：推 hub 模式（M4 前仍是意图
+ *  读面）+ 导出任务包（`autoBundleDecision`）——包导出后云机才能 claim，hold 才可能建立。
+ *
+ *  在线档只落显式选的 `rollout_src`（`node`/`auto` 仍是活的训练侧选项），并**就地清掉退役键**
+ *  （`run_iters`，以及残留的 `rollout_src:'run'`）——退役值由训练侧容忍读兜住（映射 local +
+ *  一行 WARN，见 `loop_transport._rollout_source`），但人一开课就把话说明白才是干净的读面。
+ *  清完为空的课程节点整条删（与 `pruneStoppedCourseConfig` 的「空节点不留痕」同规）。
  *
  *  ★ 2026-09-21（§3）：不再写 `remote_degrade_after`——单一 PPO 路径下没有「降级本机」这个
  *  档位（loop 没有计算能力），残留值由 `pruneLegacyCourseKnobs` 清掉。
@@ -212,10 +221,39 @@ export function writeCourseConfigForOpen(
   // 三条入口各对应一种弹窗选择；模式与 rollout 位置都没给就**不写盘**
   //（历史行为下那是一次「内容不变的空写」，无语义——不重放它）。
   if (!opts.trainMode && !opts.rolloutSrc) return { notes: [], trainMode }
-  // 域映射只此一处（`train-mode.ts`）；开课路径**不**开 `remember`：弹窗每次都重选，没有往返要记。
-  const notes = applyTrainModeToConfig(course, opts.trainMode ? trainMode : 'online', {
-    rolloutSrc: opts.rolloutSrc,
-  }).notes
+  const cfg = loadConfig()
+  const row: Record<string, unknown> = { ...cfg.courses?.[course] }
+  const notes: string[] = []
+  let dirty = false
+  if ('run_iters' in row) {
+    delete row.run_iters
+    dirty = true
+    notes.push(`已清退役键 courses.${course}.run_iters（★M2：段长不再是「归云机」的声明）`)
+  }
+  if (trainMode === 'offline') {
+    notes.push(
+      '离线档不再写 rl-config（★M2：接管 = hub 的 hold 事实；导出任务包 + 云机 claim 后生效）',
+    )
+  } else {
+    if (row.rollout_src === 'run') {
+      delete row.rollout_src
+      dirty = true
+      notes.push(`已清退役值 courses.${course}.rollout_src='run'（★M2：同上）`)
+    }
+    if (opts.rolloutSrc) {
+      row.rollout_src = opts.rolloutSrc
+      dirty = true
+      notes.push(`rollout 位置覆盖：courses.${course}.rollout_src=${opts.rolloutSrc}`)
+    }
+  }
+  // 没删没写就不碰盘：rl-config 的 mtime 是 hub 热重载的输入之一（同 `pruneStoppedCourseConfig`）。
+  if (dirty) {
+    const courses = { ...cfg.courses }
+    // 清完为空 ⇒ 整条节点删（「空节点不留痕」，与 `pruneStoppedCourseConfig` 同规）。
+    if (Object.keys(row).length === 0) delete courses[course]
+    else courses[course] = row as CourseConf
+    saveConfig({ ...cfg, courses })
+  }
   return { notes, trainMode }
 }
 

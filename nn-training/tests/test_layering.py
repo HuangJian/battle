@@ -181,6 +181,10 @@ TRAINER_ORCHESTRATION = frozenset(
         "loop_eval",
         "loop_export",
         "loop_guards",
+        #: ★M2（2026-10-07，plan/worker-type-dispatch-model §3-M2）：`loop_hold`（「这门课被接管
+        #: 了吗」的双通道判据）—— 它直接拿 `worker.train.loop_util`（课程键归一到账本那把）
+        #: 与 `trainer.loop_control`（控制文件）⇒ 直接/传递达 worker 面。同前：先红、再登记。
+        "loop_hold",
         "loop_iter_dir",
         "loop_lifecycle",
         "loop_plan",

@@ -521,9 +521,12 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     # M3（2026-09-17，plan/remote-wire-remediation §5.2）：rollout 上云开关。
     # local = 历史行为（hub 采样本机产 shard，整轮口径逐字节不变）；
     # node = 本轮由节点自己跑 rollout（kind=iter job），hub 不再本地采样。
-    # run  = **离线课**（2026-09-25 起）= 本机不跑这门课（不采样/不派发/不等待），
-    #         执行者是云机（取任务包接手）。这条腿曾经是「发一份 kind=run 队列项、本机等 8h」
-    #         —— 那条已退役（plan/online-offline-role-routing §7）；形状（manifest.kind=run）
+    # run  = **已退役**（★M2，plan/worker-type-dispatch-model §3-M2）= 曾经的「离线课」声明。
+    #         「这门课由云机接手」现在是 hub 的 hold（进度活性的事实），不再是配置；
+    #         取值仍被 argparse 收下（容忍读：控制台/历史命令行写了它不许拒启），由
+    #         `_rollout_source` 映射回 local + 一行 WARN（不 brick 课程）。
+    #         这条腿曾经是「发一份 kind=run 队列项、本机等 8h」——那条已退役
+    #         （plan/online-offline-role-routing §7）；形状（manifest.kind=run）
     #         保留给 `--export-bundle` 的任务包。
     # 取值优先级：本参数 > rl-config `courses.<stem>.rollout_src` > rl.* > local。
     ap.add_argument(
@@ -535,23 +538,23 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         # 写死 "auto" 只是让裁决回到课程级；`rl.rollout_src` 仍在 `_rollout_source` 的
         # 兜底链里（课程级为空 ⇒ 照旧生效）⇒ 顶层配置的语义一字未变。
         default="auto",
+        # 容忍读：`run` 已退役（★M2）但仍收——history 命令行/旧控制台写了它只该 WARN 不该拒启。
         choices=("auto", "local", "node", "run"),
         help="M3 rollout 上云：'local'=本机采样（默认行为）；'node'=本轮整轮上云"
-        "（节点 bun 跑 exporter 产 shard + 跑 PPO，kind=iter job）；'run'=**离线课**"
-        "（本机不跑这门课：云机取任务包接手；需要 --run-iters 声明段长，控制台切离线会写这对键）；"
+        "（节点 bun 跑 exporter 产 shard + 跑 PPO，kind=iter job）；'run'=**已退役**"
+        "（容忍读：按 local 处理 + 一行 WARN；「这门课由云机接手」现为 hub 的 hold）；"
         "'auto'=按 rl-config（rl.rollout_src /"
         " courses.<课>.rollout_src）解析，缺省 local；取值进 iteration"
         " 事件的 wire.rollout_src（A/B 归因用）",
     )
-    # 段长（2026-09-17 引入的半离线「一整段」已于 2026-09-25 退役；这个参数只剩两个用途）：
-    #   ① 与 `--rollout-src run` 一起声明「这门课由云机（取包）接手」——`<0` = 跑到课程末尾；
-    #   ② `--export-bundle` 的终点（控制台导出用 `-1`）。0 = 关。
+    # 段长（2026-09-17 引入的半离线「一整段」已于 2026-09-25 退役；★M2 又去掉一个用途）：
+    #    `--export-bundle` 的终点（控制台导出用 `-1`；<0 = 跑到课程末尾）。0 = 关。
     ap.add_argument(
         "--run-iters",
         type=int,
         default=_d("run_iters", 0),
-        help="离线课段长声明（<0 = 跑到课程末尾；与 --rollout-src run 配对）"
-        "，也是 --export-bundle 的终点；0 = 关（本机自己采样，历史行为）",
+        help="导出任务包的段长（--export-bundle 的终点；<0 = 跑到课程末尾）；"
+        "0 = 关（本机自己采样，历史行为）",
     )
     ap.add_argument(
         "--export-bundle",

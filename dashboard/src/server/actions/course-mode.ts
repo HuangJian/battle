@@ -16,8 +16,16 @@
  *  hub 派发模式与本机训练配置（`courses.<课>.rollout_src/run_iters`）一起动，不再需要重开课。
  *  两件事拆在三个函数里，边界就是本文件的全部契约：
  *    · `pushCourseMode`：**只**推 hub + 落意图（开课/停课/回灌共用，绝不写配置）；
- *    · `setCourseMode`：**那颗开关** = `applyTrainModeToConfig`（唯一配置写面）+ `pushCourseMode`；
+ *    · `setCourseMode`：**那颗开关** = 推 hub（+ 落意图）；
  *    · `restoreCourseModes`：起 hub 回灌（只推 hub：回灌不是用户动作，不该改训练配置）。
+ *
+ *  ★M2（2026-10-07，plan/worker-type-dispatch-model §3-M2）：**本机配置那一腿已退役**——
+ *  「这门课归本机还是归云机」不再是 rl-config 的声明（`rollout_src=run` / `run_iters`），
+ *  而是 hub 的 **hold** 事实（云机 claim 成功 + 有进度信号才建；掉线 900s 自动解除），
+ *  训练侧每轮边界问一次即知（`nn-training/trainer/loop_hold.py`）。
+ *  于是本文件今天**一个字都不写 rl-config**：写盘那条腿删掉的正是 Q1 要拆的「翻 mode =
+ *  本机停跑」耦合（旧写法还会在 hub 不可达时留下「hub 离线、本机仍采样」的半状态）。
+ *  M4 会把 mode/pin 这颗钮本身也删掉（范围见 plan §3-M4）；在那之前它仍是控制台意图的读面。
  *
  *  ★ 2026-09-25（plan/offline-switch-auto-bundle）：这颗开关还要**顺手把任务包导出来**——
  *  「切离线」= 「这门课交给云机接手」，而云机取的是 `tmp/<课>/task-<课>.zip`；此前只有**开课**
@@ -41,7 +49,6 @@ import {
 } from '../bundles'
 import { loadConsoleState, saveConsoleState } from './console-state'
 import { busy, type ActionResult } from './result'
-import { applyTrainModeToConfig } from './train-mode'
 
 export type CourseMode = 'online' | 'offline'
 
@@ -274,18 +281,8 @@ export async function setCourseMode(
   if (!MODES.includes(m)) {
     return { ok: false, message: `模式非法: ${JSON.stringify(mode)}（只接受 online / offline）` }
   }
-  // ① 本机事实：`saveConfig` 的容量/槽位守卫会抛（core/config.ts）——写不进去就**不推 hub**，
-  //    回执如实说「本机配置未落」，而不是把两半拆成一个假状态。
-  let notes: string[] = []
-  try {
-    notes = applyTrainModeToConfig(c, m, { remember: true }).notes
-  } catch (e: unknown) {
-    return {
-      ok: false,
-      message: `${c} → ${m} 未生效：本机配置写不进去（${e instanceof Error ? e.message : String(e)}）——hub 未动（不留半状态）`,
-    }
-  }
-  // ② hub 镜像。★ 2026-10-03（plan/auto-offline-handoff §3.2）：人的一次开关 = **pin**
+  // ① hub 镜像（★M2 起**只有这一腿**：本机配置的写入已随 `train-mode.ts` 退役）。
+  //    ★ 2026-10-03（plan/auto-offline-handoff §3.2）：人的一次开关 = **pin**
   //    （该课此后归人管，自动交接不再插手）；「交还自动」是另一颗钮（`unsetCourseMode`）。
   //    ★ 2026-10-05（plan/offline-online-status-switch §4.2，**半球回摆**）：pin online 重新
   //    获得阻止力——`pinned_online` 的课离线盘不可 claim / seize / 翻模式（§3.1 权威三态）；
@@ -295,22 +292,21 @@ export async function setCourseMode(
   //    被推走」正是 e2e 钉住的既有行为，本 plan 把「不该推的那部分」撤掉）。在飞的不动。
   const res = await pushCourseMode(c, m, { pin: true, dropJobs: true })
   // 文案按**合并后**的语义写（不再复用 `pushCourseMode` 那句「只接收 it 权重/指标回传」——
-  // 那是旧的半语义：那颗开关现在同时把本机置成「这门课不归本机」，两句话并排会自相矛盾）。
+  // 那是旧的半语义：这颗开关的意图是「这门课交给云机」，而它今天经由 **hold** 生效，
+  // 两句话并排会自相矛盾）。
   // ★P1-5：切在线 = **固定在线**（pin）——回执必须说清它不再被离线盘抢（R3-d / §4.2）；
   // 要回自动池是另一颗钮（「交还自动」），不把两件事混成一句话。
   const head = res.message.includes('已经是')
-    ? `${c} 已经是 ${m}（幂等：hub 已重新下发 + 本机配置已重写）`
+    ? `${c} 已经是 ${m}（幂等：hub 已重新下发）`
     : m === 'offline'
-      ? `${c} 已切离线：本机不跑这门课（云机取任务包接手——battle.offline.ipynb 跑 rollout+PPO）`
+      ? `${c} 已切离线：本机不再写配置（★M2）——**导出任务包 + 云机 claim 成功后才建立接管**；` +
+        '接管期间本机不跑这门课（15 分钟无回传自动恢复协作派发）'
       : `${c} 已切在线并固定（pin）：本机采样 + 云机只算 PPO（不需要 bun）；` +
         '**离线盘不再自动抢它**——要放回自动交接池请点「交还自动」（交出后离线盘一上线就能领走）'
   const timing =
-    '★ 轮边界生效：本机在下一个轮边界干净收官（不再有「段等待」）；云机那份在它自己的会话里跑（要立刻断开请用停课/暂停）'
-  // 配置侧的实情也回执（write 的 notes）：尤其「rollout 位置恢复为 node」这种——
-  // 不说出来，操作员没法知道往返没把原来的选择弄丢。
-  const cfgNote = notes.length > 0 ? notes.join('；') : ''
-  // ③ 派生动作：切离线**顺手出包**（规则表 = autoBundleDecision）。
-  //    位置契约：排在本机配置 ① 与 hub 镜像 ② **之后**，且 `hubAccepted` 传进去 ⇒ ②
+    '★ 轮边界生效：本机在下一个轮边界问一次接管事实（不再有「段等待」）；云机那份在它自己的会话里跑（要立刻断开请用停课/暂停）'
+  // ② 派生动作：切离线**顺手出包**（规则表 = autoBundleDecision）。
+  //    位置契约：排在 hub 镜像 ① **之后**，且 `hubAccepted` 传进去 ⇒ ①
   //    失败时决定必然是「不导」（plan §3.1 的第 ② 条）。顺序之外**不改 ok**。
   let bundle: AutoBundleResult = autoBundleDecision({
     mode: m,
@@ -335,13 +331,13 @@ export async function setCourseMode(
   if (!res.ok) {
     return {
       ok: false,
-      message: [res.message, cfgNote, timing, bundle.note].filter(Boolean).join('；'),
+      message: [res.message, timing, bundle.note].filter(Boolean).join('；'),
       bundle,
     }
   }
   return {
     ok: true,
-    message: [head, cfgNote, timing, bundle.note].filter(Boolean).join('；'),
+    message: [head, timing, bundle.note].filter(Boolean).join('；'),
     bundle,
   }
 }
@@ -449,27 +445,19 @@ export async function restoreCourseModesNote(
  *  **不等于**「交还自动」——一个是固定在线（pin），一个是把课放回自动池。
  *  ★ 2026-10-05（plan/offline-online-status-switch §4.2）：pin online 重新成为硬意图
  *  （`pinned_online` 拦离线盘的 claim/seize/翻模式）；本函数就是它的唯一解除口。
- *  本函数做三件事（顺序同 `setCourseMode`）：
+ *  本函数做两件事（★M2 起第 ① 腿已退役：本机配置不再描述「归谁」）：
  *
- *    ① 本机配置：抄在线档（撑离线标记 `run/run_iters`，恢复被 offline 覆写前的源）；
- *    ② hub：`mode=online&pin=0` —— 清 pin + 清 claim 记账（该课重新可被自动接管）；
- *    ③ 意图表：**删掉这条**（= `unset`；下次起 hub 不再回灌它）。
+ *    ① hub：`mode=online&pin=0` —— 清 pin + 清 claim 记账（该课重新可被自动接管）；
+ *    ② 意图表：**删掉这条**（= `unset`；下次起 hub 不再回灌它）。
  *
- *  失败语义：配置写不进去 ⇒ 不推 hub（不留半状态）；hub 没接受 ⇒ 如实报告，但意图照删
- *  （`unset` 本来就不是要回灌的东西）。
+ *  失败语义：hub 没接受 ⇒ 如实报告，但意图照删（`unset` 本来就不是要回灌的东西）。
+ *  ★M2：不再撑离线标记——接管是 hub 的 hold 事实，云机交还/进度掉线时自己解除；
+ *  盘上遗留的 `rollout_src=run`/`run_iters` 由训练侧**容忍读**兜住（映射 local + 一行 WARN），
+ *  并由开课/停课的 prune 与 M6 的一次性清理收尾。
  */
 export async function unsetCourseMode(course: string): Promise<ActionResult> {
   const c = String(course ?? '').trim()
   if (!c) return { ok: false, message: '需要课程（hub 的模式是按课程记的）' }
-  let notes: string[] = []
-  try {
-    notes = applyTrainModeToConfig(c, 'online', { remember: true }).notes
-  } catch (e: unknown) {
-    return {
-      ok: false,
-      message: `${c} 交还自动未生效：本机配置写不进去（${e instanceof Error ? e.message : String(e)}）——hub 未动（不留半状态）`,
-    }
-  }
   const err = await pushMode(loadConfig(), c, 'online', undefined, false)
   // 意图表 v2：**删掉这条**（= `unset`）——删除优先于写 `{online,pinned:false}`：
   // 表里没有键才是「人没管过」（自动池），留下键会被下次回灌重新推成人的决定。
@@ -477,18 +465,19 @@ export async function unsetCourseMode(course: string): Promise<ActionResult> {
   delete table[c]
   saveConsoleState({ courseModes: table })
   const head = `${c} 已交还自动交接：离线盘一上线就能领走它（不再是人的决定）`
-  const timing = '★ 轮边界生效：本机在下一个轮边界恢复采样（若它之前在离线档）'
+  const timing = '★ 轮边界生效：本机在下一个轮边界问一次接管事实（若它之前在接管中）'
   const hubNote = err
     ? `hub 未接受：${err}（起 hub 时不再回灌这门课）`
     : 'hub 已清 pin + 清 claim 记账'
-  return { ok: !err, message: [head, ...notes, timing, hubNote].filter(Boolean).join('；') }
+  return { ok: !err, message: [head, timing, hubNote].filter(Boolean).join('；') }
 }
 
 /** **自动离线交接**：hub → 控制台的反向调用（2026-10-03，plan/auto-offline-handoff §3.4/T3）。
  *
  *  触发者不是人：离线盘在 hub 上 claim 了一门在训课（**无包** ⇒ hub 翻完 mode 调这里；
  *  2026-10-04 起 **有包但过期**也会被 hub 请过来判一次——见规则表 ⑥'）。
- *  控制台只做它唯一能写的那一件事——`courses.<课>.rollout_src=run`（本机停采）——并导包。
+ *  控制台只做它唯一能写的那一件事——**把任务包导出来**（本机停跑不再需要写配置：
+ *  ★M2 起「这门课归云机」= hub 的 hold 事实，claim 成功即建立）。
  *
  *  与 `setCourseMode` 的三点差异（刻意，逐条对应 plan 的二轮 P0）：
  *    ① **不写意图、不 pin**（二轮 P0-3）：这不是人的决定 —— `courseModes` 保持 `unset`，
@@ -497,8 +486,11 @@ export async function unsetCourseMode(course: string): Promise<ActionResult> {
  *    ③ 导包走同一张规则表 `autoBundleDecision`（已有包不重导、缺起点权重不导），
  *       但 `hubAccepted` 恒 true（hub 就是调用方）。
  *
- *  返回体就是 hub 日志里那一行 `trigger_note`；配置写不进去 ⇒ `ok:false`（响亮）——
- *  那半状态（hub 已翻离线、本机仍在采样）由 hub 的 `stalled` 告警面兜住（§3.9）。
+ *  ★F1（plan §1.6，M2 定案）：这个 action **保留但语义收窄成「只导包」**——旧写法那条
+ *  「写 `rollout_src=run` 停本机」的腿正是 Q1 要拆的耦合（本机停不停跑现在由 hub 的 hold
+ *  回答）。整条退役也不可行：hub 的触发链要靠它出包，否则 `pending_export` 永远没有包。
+ *
+ *  返回体就是 hub 日志里那一行 `trigger_note`。
  */
 export async function autoOfflineHandoff(course: string): Promise<ActionResult> {
   const c = String(course ?? '').trim()
@@ -507,15 +499,6 @@ export async function autoOfflineHandoff(course: string): Promise<ActionResult> 
     return {
       ok: false,
       message: `${c} 未开课（停课删了开课标记）——自动交接只接在训的课；hub 侧该课应停在 waiting 等人处理`,
-    }
-  }
-  let notes: string[] = []
-  try {
-    notes = applyTrainModeToConfig(c, 'offline', { remember: true }).notes
-  } catch (e: unknown) {
-    return {
-      ok: false,
-      message: `${c} 自动交接失败：本机配置写不进去（${e instanceof Error ? e.message : String(e)}）——本机仍会采样，与云机双跑的风险由 hub 的停摆告警兜`,
     }
   }
   const valve = Boolean(process.env.BCITY_NO_AUTO_TASK_BUNDLE)
@@ -533,7 +516,7 @@ export async function autoOfflineHandoff(course: string): Promise<ActionResult> 
     weightsMtimeMs: weightsMtimeMs(c),
     codeMtimeMs: newestCodeMtimeMs(),
   })
-  const head = `${c} 已自动切离线（rollout_src=run：本机不跑这门课）`
+  const head = `${c} 自动交接：云机已接管（hub 的 hold）——控制台只负责把任务包导出来`
   if (bundle.started) {
     const launched = launchTaskBundleExport(c)
     if (!launched.ok) {
@@ -541,20 +524,19 @@ export async function autoOfflineHandoff(course: string): Promise<ActionResult> 
         ok: false,
         message: [
           head,
-          ...notes,
           `任务包导出未能启动（${launched.message}）——云机会等新包直到停滞告警`,
-          '三条出路：TPU 重连 / 手工导入结果包 / 手工切回在线',
+          '三条出路：TPU 重连 / 手工导入结果包 / 停课',
         ]
           .filter(Boolean)
           .join('；'),
       }
     }
-    return { ok: true, message: [head, ...notes, launched.message].filter(Boolean).join('；') }
+    return { ok: true, message: [head, launched.message].filter(Boolean).join('；') }
   }
   // 没导：规则表说不用导（已有包 / 上一次导出还在跑 / 逃生阀）——都是正常结局；
   // `guardReason` 非空则是「导不了」（缺起点权重）：那半状态靠 hub 的 stalled 告警兜。
   return {
     ok: valve || guardReason === null,
-    message: [head, ...notes, bundle.note].filter(Boolean).join('；'),
+    message: [head, bundle.note].filter(Boolean).join('；'),
   }
 }

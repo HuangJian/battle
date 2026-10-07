@@ -228,8 +228,9 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
       }
       // ---- 开课 / 停课（2026-09-20 用户指令：进程启动与课程解耦，课程生命周期独立入口）----
       case 'openCourse': {
-        // 训练模式（`在线|离线`）：离线要同时写两个课程级键（run + run_iters=-1）并把该课
-        // hub 置 offline，换算在 `stack/specs.ts::trainModeKnobs`（这里只做白名单）。
+        // 训练模式（`在线|离线`）：★M2 起**不再写 rl-config**（旧换算 `trainModeKnobs` 已删）
+        // ——离线只是把该课 hub 置 offline + 导出任务包（接管是 hub 的 hold 事实）。
+        // 这里只做白名单。
         const trainMode = bodyStr(body, 'trainMode')
         if (trainMode && !['online', 'offline'].includes(trainMode)) {
           return errResp(`未知训练模式: ${trainMode}（只接受 online|offline）`, 400)

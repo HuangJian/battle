@@ -1,13 +1,14 @@
 /**
- * train-mode-offline.test.ts — 离线训练模式（2026-09-19 用户口径）
+ * train-mode-offline.test.ts — 离线训练模式（2026-09-19 用户口径；★M2 换模型）
  *
  * 「启动课程训练时，需指定 在线/离线 模式，缺省在线。」本文件守这条链路的四段：
  *
- *   ① **域换算**：模式 → 课程级 rl-config 键（`stack/specs.ts::trainModeKnobs` 是唯一推导点）。
- *      离线 = `{rollout_src:'run', run_iters:-1}`（声明 + 段长，缺一不可）；在线 = 撤掉离线标记。
- *   ② **落盘**：`course-lifecycle.ts`（2026-09-20 起：训练模式是**开课**的选项，不再搭启动的车）
- *      把换算结果写进 `courses.<课>.*`，且离线档的 `run` **绝不进**全局 `rl.rollout_src`
- *      （那会把所有课一起拖进离线）。
+ *   ① **写面已退役**（★M2，plan/worker-type-dispatch-model §3-M2）：模式**不再**翻译成
+ *      `courses.<课>.{rollout_src:'run', run_iters:-1}`——接管是 hub 的 **hold** 事实，
+ *      训练侧每轮边界问一次（`trainer/loop_hold.py`）。旧推导函数 `trainModeKnobs` 与唯一
+ *      写面 `train-mode.ts` 一起删除，本文件反向钉住「别把它们请回来」。
+ *   ② **落盘只剩两件事**：开课/切模式不再写 rl-config（离线档）；在线档只落显式选的
+ *      `rollout_src` 并就地清退役键（`run_iters` / 残留的 `'run'`）。
  *   ③ **入口**：route 白名单 + 开课弹窗（缺省在线；服务端生效值 `run` ⇒ 打开就已选中离线，
  *      否则重新开课 = 静默把离线课拉回在线）。
  *   ④ **读面**：`/admin/offline` 的逐轮产物 → 总览行（段内那几轮**不在课程账本里**，
@@ -20,75 +21,63 @@
 import { describe, expect, it } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { trainModeKnobs } from '../src/stack/specs'
 import { buildCourseRows, offlineSummary, parseOfflineProgress } from '../src/web/view'
 
 const DASHBOARD_ROOT = join(import.meta.dir, '..')
 const readSrc = (rel: string): string =>
   readFileSync(join(DASHBOARD_ROOT, ...rel.split('/')), 'utf8').replace(/\s+/g, ' ')
 
-// ────────────────────────── ① 域换算 ──────────────────────────
+// ────────────────────────── ① 写面已退役（★M2） ──────────────────────────
 
-describe('trainModeKnobs：模式 → 课程级键（唯一推导点）', () => {
-  it('离线 ⇒ 声明 + 段长两把键（只给 run 不给段长 = 训练侧静默退化成本机采样）', () => {
-    expect(trainModeKnobs('offline', 'local')).toEqual({ rolloutSrc: 'run', runIters: -1 })
-    // 段长与选中的 rollout 源无关（离线就是整段，`-1` = 直到课程末尾）
-    expect(trainModeKnobs('offline', 'node')).toEqual({ rolloutSrc: 'run', runIters: -1 })
+describe('★M2：模式 → rl-config 的写面退役（接管 = hub 的 hold 事实）', () => {
+  it('写面与它的推导函数一起消失（留一份现成配方 = 下次重构把旧语义写回来）', () => {
+    for (const rel of [
+      'src/stack/specs.ts',
+      'src/server/actions/course-lifecycle.ts',
+      'src/server/actions/course-mode.ts',
+    ]) {
+      expect(readSrc(rel)).not.toMatch(/function trainModeKnobs/)
+      expect(readSrc(rel)).not.toMatch(/function applyTrainModeToConfig/)
+      expect(readSrc(rel)).not.toMatch(/applyTrainModeToConfig\(/)
+    }
+    // 文件本身已删（读它必须炸——不是「还在、只是没人 import」）
+    expect(() => readSrc('src/server/actions/train-mode.ts')).toThrow()
   })
 
-  it('在线 ⇒ 保留选中的源，段长要求删除（`null`，不是 0）', () => {
-    expect(trainModeKnobs('online', 'local')).toEqual({ rolloutSrc: 'local', runIters: null })
-    expect(trainModeKnobs('online', 'node')).toEqual({ rolloutSrc: 'node', runIters: null })
-    expect(trainModeKnobs('online', 'auto')).toEqual({ rolloutSrc: 'auto', runIters: null })
-  })
-
-  it('在线不接受 `run`：那是离线模式的产物，留在在线档位是自相矛盾的状态', () => {
-    expect(trainModeKnobs('online', 'run')).toEqual({ rolloutSrc: 'local', runIters: null })
+  it('★M2 前盘上的残留（`run`/`run_iters`）由训练侧容忍读兜住，控制台不再产生它', () => {
+    // 容忍读的正面用例在 python 侧（`tests/worker/test_run_segment.py`）：
+    // `run` ⇒ 映射成 local + 一行 WARN（不 brick 课程）。这里只钉控制台不再写它。
+    const src = readSrc('src/server/actions/course-lifecycle.ts')
+    expect(src).not.toContain("row.rollout_src = 'run'")
+    expect(src).not.toContain('row.run_iters =')
   })
 })
 
-// ────────────────────────── ② 落盘（preset） ──────────────────────────
+// ────────────────────────── ② 落盘（开课） ──────────────────────────
 
-describe('course-lifecycle / train-mode（开课）：离线落课程级键 + hub 该课置 offline', () => {
+describe('course-lifecycle（开课）：离线不写盘 + 在线清退役键 + hub 该课置 offline', () => {
   const src = readSrc('src/server/actions/course-lifecycle.ts')
-  // ★ 2026-09-24（plan/train-mode-hot-switch §2.1）：域映射搬到 `train-mode.ts`（热切那颗开关
-  //   也要用它，而 `course-mode.ts` → `course-lifecycle.ts` 反向 import 会成环）。断言跟着搬——
-  //   不搬的话下面几条会**静默落空**（读的是不再含这段逻辑的文件）。
-  const tm = readSrc('src/server/actions/train-mode.ts')
 
-  it('换算只走 trainModeKnobs（第二处推导 = 两处一定会漂开）', () => {
-    expect(tm).toContain("trainModeKnobs('offline', opts.rolloutSrc ?? 'local')")
-    expect(tm).toContain('row.rollout_src = knobs.rolloutSrc')
-    expect(tm).toContain('row.run_iters = knobs.runIters ?? -1')
-    // 开课路径本身不再自己维护一份映射（只转调）
-    expect(src).toContain('applyTrainModeToConfig')
+  it('离线档不再写 rl-config（★M2）：只推 hub 模式 + 导出任务包', () => {
+    expect(src).toContain('离线档不再写 rl-config')
+    // 清退役键是**在线档**的事（离线档连它都不该碰：那是同一次开课的清理，不是模式语义）
+    expect(src).toContain('已清退役键')
+    expect(src).toContain('row.rollout_src = opts.rolloutSrc')
   })
 
-  it('离线档的 `run` 绝不写进全局 rl.rollout_src（否则全部课程一起离线）', () => {
-    // 写面只动 `courses.<课>` 那一行：唯一写面与开课路径都不得出现任何 `rl.rollout_src =` 赋值
-    expect(tm).not.toMatch(/rl\.rollout_src\s*=/)
+  it('任何档都不许写全局 rl.rollout_src（否则全部课程一起离线）', () => {
     expect(src).not.toMatch(/rl\.rollout_src\s*=/)
     // 反向对照：**启动**侧也不碰它（课程级选项不回流向全局默认面）
     const preset = readSrc('src/server/actions/preset.ts')
     expect(preset).not.toMatch(/rl\.rollout_src\s*=/)
   })
 
-  it('切回在线 = 撤掉离线标记（段长必删；只删 `run` 而不删段长 = 半状态）', () => {
-    expect(tm).toContain('delete row.run_iters')
-    // 课程级 `run` 才删：显式写的 `node`（另一个理由）不许顺手清掉。
-    //（旧断言是 `not.toContain('delete row.rollout_src\n')` —— readSrc 把空白压成单空格，
-    //  那个 `\n` 永远不可能出现 ⇒ 是条**恒真**的断言。换成查位置关系：删除必须在
-    //  `=== 'run'` 判定之内。）
-    const guard = tm.indexOf("if (row.rollout_src === 'run')")
+  it('切回在线 = 撤掉退役标记（`run_iters` 与残留的 `run` 都清；空节点整条删）', () => {
+    expect(src).toContain('delete row.run_iters')
+    const guard = src.indexOf("if (row.rollout_src === 'run')")
     expect(guard).toBeGreaterThan(-1)
-    expect(tm.indexOf('delete row.rollout_src')).toBeGreaterThan(guard)
-  })
-
-  it('node 往返记忆：切 offline 前记下生效源，切回 online 时取回（否则静默降成 local）', () => {
-    expect(tm).toContain('rememberRolloutSrc(course, resolveRolloutSrc(cfg, course))')
-    expect(tm).toContain('takeRolloutSrc(course)')
-    // 只记会丢信息的档位（local 是缺省，记了是噪声）
-    expect(tm).toContain("src === 'node' || src === 'auto'")
+    expect(src.indexOf('delete row.rollout_src')).toBeGreaterThan(guard)
+    expect(src).toContain('空节点不留痕')
   })
 
   it('开课时把该课 hub 模式一起放对：离线 ⇒ 该课停车；在线 ⇒ 恢复派发', () => {
@@ -147,15 +136,17 @@ describe('热切开关的接线：route → setCourseMode → 面板（三源一
     expect(src).toContain("await setCourseMode(bodyStr(body, 'course'), bodyStr(body, 'mode'))")
   })
 
-  it('course-mode：开关 = 唯一写面 + 推 hub 两步；推 hub 的原语不能回写配置', () => {
+  it('course-mode：★M2 起一个字都不写 rl-config（推 hub + 落意图）；autoOfflineHandoff 只导包', () => {
     const src = readSrc('src/server/actions/course-mode.ts')
-    expect(src).toContain('applyTrainModeToConfig(c, m, { remember: true })')
-    // `pushCourseMode` 是「只推 hub + 落意图」的原语：它自己不得出现配置写入
+    expect(src).not.toContain('applyTrainModeToConfig')
+    expect(src).not.toContain('saveConfig(')
+    // 那颗开关仍是「推 hub + 落意图」：pushCourseMode 是原语，setCourseMode 叠 pin/dropJobs
     const pushStart = src.indexOf('export async function pushCourseMode')
     const setStart = src.indexOf('export async function setCourseMode')
     expect(pushStart).toBeGreaterThan(-1)
     expect(setStart).toBeGreaterThan(pushStart)
-    expect(src.slice(pushStart, setStart)).not.toContain('applyTrainModeToConfig')
+    // F1：hub → 控制台的反向调用只有「出包」这一件事了
+    expect(src).toContain('控制台只负责把任务包导出来')
   })
 
   it('开课/停课的 hub 推送走 pushCourseMode（不再经过会写配置的 setCourseMode）', () => {

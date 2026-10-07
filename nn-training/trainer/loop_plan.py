@@ -263,22 +263,22 @@ WAIT_READY = "ready"
 #: ★ 2026-10-05（plan/course-startup-recover §3.2）：课程配置**不可开课**（整课会被 trainer
 #: 跳过）——不是「在等什么」的第五种等待，而是「这一轮根本起不来」；此前被误报成 `ready`。
 WAIT_BLOCKED = "blocked"
-#: ★P1-3（plan §3.5）：离线课 = **等待**（云机取任务包接手），不是「已收官」。
-WAIT_OFFLINE = "offline"
+#: ★P1-3（plan §3.5）：被接管的课 = **等待**（云机在跑这一段），不是「已收官」。
+#: ★M2：取值 `offline` → `held`（判据从 rl-config 的 `rollout_src=run` 换成 hub 的 hold）。
+WAIT_HELD = "held"
 
 
-def course_is_offline(args: Any) -> bool:
-    """这门课现在是不是离线课（由云机取任务包接手）——**唯一判据**（★P1-3）。
+def course_is_held(args: Any) -> bool:
+    """这门课现在是不是**被接管**（云机在跑这一段）——**唯一判据**（★P1-3 / ★M2）。
 
-    与 `step_course_iter` 用同一份 `_rollout_source` + `_run_segment_iters` + `resolve_collect_mode`
-    （写第二套必然分叉：R2c-3 的教训）。读不到（BC 课 / 合成 args 缺项）⇒ False（不吃旧行为）。
+    直接转给 `trainer/loop_hold.course_held`（与 `step_course_iter` **同一处裁决**：
+    hub 直问 ∨ 控制文件缓存；写第二套必然分叉：R2c-3 的教训）。读不到（BC 课 / 合成 args
+    缺项 / hub 与文件都问不到）⇒ False（不吃旧行为：**不接管** = 本机照跑）。
     """
     try:
-        from trainer.loop_transport import _rollout_source, _run_segment_iters
-        from worker.loop_round import COLLECT_OFFLINE, resolve_collect_mode
+        from trainer.loop_hold import course_held
 
-        source = _rollout_source(args)
-        return resolve_collect_mode(source, _run_segment_iters(args)) == COLLECT_OFFLINE
+        return course_held(args)
     except Exception:
         return False
 
@@ -294,7 +294,7 @@ def waiting_state(
     it: int = 0,
     iters: int = 0,
     blocked: str = "",
-    offline: bool = False,
+    held: bool = False,
 ) -> tuple[str, str]:
     """按**盘上事实**回答「这门课在等什么」→ `(kind, 文案)`。
 
@@ -319,17 +319,17 @@ def waiting_state(
     返回 `WAIT_IDLE` + 说清是**哪种** idle 的文案（不新增 `WAIT_*` kind：收官在语义上就是
     "没有待办"，缺的只是文案；pill 的「已收官」走 `state='done'`，不吃这一列）。
 
-    `offline=True`（★P1-3，调用方用 `course_is_offline(args)` 算好）⇒ `WAIT_OFFLINE`：
-    离线课是**在等云机**，不是收官——旧的离线早退把它当 `done(final=True)`，于是这一列
+    `held=True`（★P1-3 引入，★M2 换词；调用方用 `course_is_held(args)` 算好）⇒ `WAIT_HELD`：
+    被接管的课是**在等云机**，不是收官——旧的离线早退把它当 `done(final=True)`，于是这一列
     显示成「已收官」（R1-e）。
     """
     if finished:
         return WAIT_IDLE, f"已跑满 it{it - 1}/{iters}（改大 iters 后 停→开 可续跑）"
-    if offline:
-        # ★P1-3：离线课本机不跑（云机取包接手）——这一档写在 `inflight` 之前：它不派本机
-        # 队列项，报「在等什么」时必须先说清原因，否刚会显示成「本轮无待办」而让人以为
-        # 是「已收官」（R1-e 的读面症状）。
-        return WAIT_OFFLINE, "离线课由云机取任务包接手（切回在线自动恢复）"
+    if held:
+        # ★P1-3：被接管的课本机不跑（云机在跑这一段）——这一档写在 `inflight` 之前：它不派
+        # 本机队列项，报「在等什么」时必须先说清原因，否则会显示成「本轮无待办」而让人以为
+        # 是「已收官」（R1-e 的读面症状）。文案与 `loop_round_steps.HELD_WAIT_HINT` 同义。
+        return WAIT_HELD, "云机接管中：自主 worker 正在跑这段（15 分钟无回传自动恢复协作派发）"
     if inflight:
         what = "、".join(f"{r.get('phase', '?')}@{r.get('round', '?')}" for r in inflight[:3])
         if len(inflight) > 1:

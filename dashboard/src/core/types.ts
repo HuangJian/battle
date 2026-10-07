@@ -37,9 +37,9 @@ export interface CourseConf {
   /** 本课 rollout 执行位置覆盖（M3；缺省 = 用 rl.rollout_src，再缺省 local）。字符串域，
    *  与 python `--rollout-src` 的 choices 同字面量（`auto` = 按配置解析）。 */
   rollout_src?: RolloutSrcMode
-  /** 半离线段长覆盖（本课跑几轮一次上交；`-1` = 直到课程末尾，`0` = 关）。
-   *  与 `rollout_src:'run'` 是**一对**：离线训练模式（2026-09-19）同时写这两个键，
-   *  只给 `run` 不给段长在训练侧是配置错误（`_run_segment_iters` 回 0 ⇒ 响亮拒跑）。 */
+  /** ★M2 已退役：旧「离线段长声明」（与 `rollout_src:'run'` 配对）。今天只剩一个读者——
+   *  `--export-bundle` 的终点（控制台导出腿自带 `--run-iters -1`，不读这里）。
+   *  盘上残留值由训练侧容忍读（映射 local + 一行 WARN）与 M6 一次性清理收尾。 */
   run_iters?: number //  ── 共享 trainer 的**机器侧旋钮**（2026-09-19 / R3-5）──────────────────────────
   //  一个进程服务所有课程 ⇒ 「这门课怎么跑」不能是那个进程的命令行参数（只有一份）。
   //  住这里而**不能**住 `curricula/*.jsonc`：这些是**机器侧**旋钮（描述「这台机器怎么跑」）；
@@ -93,8 +93,10 @@ export type RolloutSrcMode = 'local' | 'node' | 'run' | 'auto'
  *    + hub 该课置 offline（该课停车、不再实时派发），并由控制台导出任务包给云机取（或人工搬上云）。
  *    ★ 2026-09-25：离线课**不再经 hub 队列**执行（那条腿已退役，plan/online-offline-role-routing §7）。
  *
- *  它不是「一个旋钮的显示名」：域换算（模式 → 课程级键）住在 `stack/specs.ts::trainModeKnobs`，
- *  是**唯一**推导点（在线要显式清掉 run 的两把键，否则切回在线还是这门课不归本机）。 */
+ *  ★M2（plan/worker-type-dispatch-model §3-M2）：这个模式**不再写 rl-config**（旧写面 =
+ *  `courses.<课>.{rollout_src:'run', run_iters:-1}`，随 `actions/train-mode.ts` 一起退役）——
+ *  「这门课归本机还是归云机」由 hub 的 hold 事实回答（云机 claim 成功 + 有进度才建立）。
+ *  今天它只剩两个作用：hub 模式/意图的推送（M4 前）与开课那一刻的「顺手导出任务包」。 */
 export type TrainMode = 'online' | 'offline'
 
 /** rl-config.json（本工具链只消费 nodes + rl + courses 块，其余键原样保留）。 */

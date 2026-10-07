@@ -566,13 +566,16 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
   // `blocked` 不在这里另列一档：上面 `!openable.ok || waiting.kind === 'blocked'` 已拦，
   // 列出即与窄化后的类型冲突（TS2678）——起不来的唯一出口就是上面的红档。
   switch (lq.waiting.kind) {
+    // ★M2：`held` = 训练侧新词（该课被接管：云机在跑这段）——与旧 python 的 `offline` 同一席
+    //（共存窗口的宽容读；词表重写与 `offline` 的删除属 M4）。
     case 'offline':
+    case 'held':
       return out(
         input,
         'offline-wait',
-        '离线（云机接手）',
+        '接管中（云机）',
         'y',
-        `本机不跑这门课：该课由云机取任务包接手（在线作业照常发布、由在线 worker 取）。${wait}`,
+        `本机不跑这门课：该课正被自主 worker 接管（作业照常发布、由协作 worker 取）。${wait}`,
         'loop',
         { conflict },
       )

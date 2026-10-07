@@ -88,25 +88,52 @@ def _course_cf_tunnel(args: Any) -> tuple[str | None, str | None]:
 
 
 #: `--rollout-src` 的合法值（auto = 按 rl-config 解析，缺省 local）。
-ROLLOUT_SRCS: tuple[str, ...] = ("auto", "local", "node", "run")
+#: ★M2：`run` 已**退役**（plan/worker-type-dispatch-model §3-M2）——「这门课由别人跑」不再是
+#: 配置声明，而是 hub 的 hold（`trainer/loop_hold.py`）。旧配置（`rollout_src=run` /
+#: `run_iters`）走**容忍读**：映射回 `local` + 一行 WARN，**不 brick 课程**（否则一份残留
+#: 配置会让那门课永远停在原地，而日志里只有一个「未知取值」）。
+ROLLOUT_SRCS: tuple[str, ...] = ("auto", "local", "node")
+#: 已退役但必须容忍的旧取值（读到就映射成 `local` 并喊一次，见 `_note_retired_source`）。
+ROLLOUT_SRCS_RETIRED: tuple[str, ...] = ("run",)
+
+
+def _note_retired_source(stem: str, val: str) -> None:
+    """旧 `run` 配置的容忍读告警（按课去重：`_rollout_source` 每轮都被问一次）。"""
+    key = (stem or "?", val)
+    if key in _RETIRED_SOURCE_NOTED:
+        return
+    _RETIRED_SOURCE_NOTED.add(key)
+    from common.log import log
+
+    log(
+        f"[run_rl] ⚠ {stem or '?'}: rollout_src={val} 已退役（★M2）——本机按 local 处理。"
+        "「这门课由云机接手」现在是 hub 的事实（hold）：控制台点「导出任务包」并等云机 claim 即生效；"
+        "本机不再读 rl-config 判断该不该跑（残留配置不会 brick 课程，但请删掉它）"
+    )
+
+
+#: 已喊过的旧取值（课, 值）去重。
+_RETIRED_SOURCE_NOTED: set[tuple[str, str]] = set()
 
 
 def _rollout_source(args: Any) -> str:
-    """本轮 rollout 在哪跑：`local`（历史行为）| `node`（M3 整轮上云）| `run`（整段上云）。
+    """本轮 rollout 在哪跑：`local`（历史行为）| `node`（M3 整轮上云）。
 
     优先级：CLI `--rollout-src`（非 auto）> `courses.<stem>.rollout_src` > `rl.rollout_src`
     > local。与 `_course_cf_tunnel` 同口径读 rl-config：选项住
     rl-config，**永不进 curricula**（D14 血缘），读不到一律 local（旧行为，不炸训练）。
 
-    ★ `run`（2026-09-19 离线训练模式）是**声明**：真正的段长在 `_run_segment_iters`
-    （`run_iters`），两者都进了 `ROLLOUT_SRCS` —— 只声明 `run` 而不给段长是配置错误，
-    在 `step_course_iter` 里响亮拒跑（静默退化成「本地采样」正是最难查的那类）。
+    ★ `run`（2026-09-19 离线训练模式）**已退役**（★M2）：读到就映射成 `local` + 一行 WARN
+    （`_note_retired_source`）。“这门课由别人跑”现在是 hub 的 hold，不再由配置声明。
 
     ⚠ 写进 iteration 事件的 wire.rollout_src 用的是本函数的返回值，**不是** args 字面量
     —— 否则 auto 会记成 "auto"，事后无法按「实测在哪跑」分组。
     """
     mode = str(getattr(args, "rollout_src", "") or "auto")
     if mode and mode != "auto":
+        if mode in ROLLOUT_SRCS_RETIRED:
+            _note_retired_source("CLI", mode)
+            return "local"
         if mode not in ROLLOUT_SRCS:
             raise SystemExit(
                 f"[run_rl] 未知 --rollout-src {mode!r}（只接受 {'|'.join(ROLLOUT_SRCS)}）"
@@ -131,6 +158,9 @@ def _rollout_source(args: Any) -> str:
         val = str(course.get("rollout_src") or rl.get("rollout_src") or "") or "local"
     except Exception:
         return "local"
+    if val in ROLLOUT_SRCS_RETIRED:
+        _note_retired_source(stem, val)
+        return "local"
     if val not in ROLLOUT_SRCS or val == "auto":
         return "local"
     return val
@@ -144,9 +174,10 @@ _RESTORE_UNSUPPORTED_NOTED: set[tuple[str, str]] = set()
 def _warn_explicit_source_blocks_restore(args: Any, mode: str) -> None:
     """声明「离线复原不支持」（§3.5 守卫，落判据自己身边）：只对离线相关档喊。
 
-    为什么只喊 `run`/`node`：`local` 是本机采样，不存在「等云机接手」这回事。
+    为什么只喊 `node`：`local` 是本机采样，不存在「等云机接手」这回事；而 `run` 已退役
+    （★M2），走到这里的 `run` 早被 `_note_retired_source` 换成本机 + 一行 WARN。
     """
-    if mode not in ("run", "node"):
+    if mode != "node":
         return
     try:
         from worker.train.loop_util import course_key_from_path
@@ -162,22 +193,22 @@ def _warn_explicit_source_blocks_restore(args: Any, mode: str) -> None:
 
     log(
         f"[run_rl] ⚠ {stem or '?'}: --rollout-src={mode} 是**显式**值（实测 {mode}）——"
-        "它会短路 rl-config ⇒ 「控制台切回在线后自动续跑」**不支持**（写回不会被读到）。"
-        "要保留自动复原请用 --rollout-src auto（缺省）并在 rl-config 里写 rollout_src/run_iters"
+        "它会短路 rl-config ⇒ 「控制台改回本机采样后自动续跑」**不支持**（写回不会被读到）。"
+        "要保留自动复原请用 --rollout-src auto（缺省）并在 rl-config 里写 rollout_src"
     )
 
 
 def _run_segment_iters(args: Any) -> int:
-    """离线课的段长声明（0 = 关；<0 = 直到课程末尾）。
+    """导出包的段长声明（0 = 关；<0 = 直到课程末尾）。
 
     优先级与 `_rollout_source` 同口径：CLI `--run-iters` > `courses.<stem>.run_iters` >
-    `rl.run_iters` > 0。**缺省 0 = 关**（历史行为逐字节不变；要离线才显式开）。
+    `rl.run_iters` > 0。**缺省 0 = 关**（历史行为逐字节不变；要导包才显式开）。
     选项住 rl-config，永不进 curricula（D14 血缘）。
 
     ★ 2026-09-25：它曾经是「半离线整段 job 的段长」（一次领走 it..end_it、本机等 8h）
-    —— 那条腿已退役（`plan/online-offline-role-routing.plan.md` §7）。这个值现在只剩
-    两个用途：① 与 `--rollout-src run` 一起声明「这门课由云机（取包）接手」；
-    ② `--export-bundle` 的终点（控制台导出用 `-1`）。
+    —— 那条腿已退役（`plan/online-offline-role-routing.plan.md` §7）。
+    ★M2：用途①「与 `--rollout-src run` 一起声明这门课由云机接手」也已退役（判据换成 hub
+    的 hold）⇒ 本值只剩**一个**用途：`--export-bundle` 的终点（控制台导出用 `-1`）。
     """
     n = int(getattr(args, "run_iters", 0) or 0)
     if n:

@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -28,11 +29,11 @@ if str(ROOT) not in sys.path:
 from trainer.loop_plan import (
     WAIT_BLOCKED,
     WAIT_COLLECT,
+    WAIT_HELD,
     WAIT_IDLE,
     WAIT_INFLIGHT,
-    WAIT_OFFLINE,
     WAIT_READY,
-    course_is_offline,
+    course_is_held,
     enabled_courses,
     plan_course,
     waiting_state,
@@ -61,30 +62,39 @@ def _state(**kw: object) -> tuple[str, str]:
 # ────────────────────────────── 在飞（进程外等待） ──────────────────────────────
 
 
-def test_offline_course_says_cloud_takes_over_not_a_finished_state() -> None:
-    """★P1-3（plan §3.5）：离线课 = **在等云机**，不是「已收官」（R1-e 的读面症状）。
+def test_held_course_says_cloud_takes_over_not_a_finished_state() -> None:
+    """★P1-3（plan §3.5）/ ★M2：被接管的课 = **在等云机**，不是「已收官」（R1-e 的读面症状）。
 
     旧写法由离线早退 `done(final=True)` 驱动 ⇒ 这一列掉到 `idle`（「本轮无待办」），
-    控制台看起来像跑完。离线档排在 `inflight` 之前：不先说清原因，那一行无法解释。
+    控制台看起来像跑完。接管档排在 `inflight` 之前：不先说清原因，那一行无法解释。
     """
-    kind, text = _state(offline=True)
-    assert kind == WAIT_OFFLINE, (kind, text)
-    assert "云机" in text and "切回在线" in text, text
-    # 真跑满（finished）优先：那是最强的事实，不得被离线档遮住
-    kind2, _ = _state(offline=True, finished=True, it=9, iters=9)
+    kind, text = _state(held=True)
+    assert kind == WAIT_HELD, (kind, text)
+    assert "接管" in text and "无回传" in text, text
+    # 真跑满（finished）优先：那是最强的事实，不得被接管档遮住
+    kind2, _ = _state(held=True, finished=True, it=9, iters=9)
     assert kind2 == WAIT_IDLE, kind2
 
 
-def test_course_is_offline_reads_the_same_source() -> None:
-    """`course_is_offline` 与 `step_course_iter` 同源：`rollout_src=run` ∧（run_iters 或 rl-config）。"""
-    from types import SimpleNamespace
+def test_course_is_held_reads_the_same_source(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`course_is_held` 与 `step_course_iter` 同源：直接转给 `loop_hold.course_held`。
 
-    off = SimpleNamespace(rollout_src="run", run_iters=-1, course_path="curricula/c5-gae.jsonc")
-    assert course_is_offline(off) is True
-    local = SimpleNamespace(rollout_src="local", run_iters=0, course_path="curricula/c5-gae.jsonc")
-    assert course_is_offline(local) is False
-    # 读不到（args 缺项）⇒ False（不吃旧行为，也不炸读面）
-    assert course_is_offline(SimpleNamespace()) is False
+    ★M2：判据从 rl-config（`rollout_src=run`）换成**双通道事实**（hub 直问 ∨ 控制文件缓存）；
+    这里只钉「同一处裁决」这把接力棒（双通道本身的用例在 `tests/trainer/test_loop_hold.py`）。
+    """
+
+    from trainer import loop_hold
+
+    monkeypatch.setattr(loop_hold, "course_held", lambda _args, **_kw: True)
+    assert course_is_held(SimpleNamespace(course="c5-gae")) is True
+    monkeypatch.setattr(loop_hold, "course_held", lambda _args, **_kw: False)
+    assert course_is_held(SimpleNamespace(course="c5-gae")) is False
+    # 读不到（args 缺项 / 判据自己抛）⇒ False（不吃旧行为，也不炸读面）
+    def _boom(_args: object, **_kw: object) -> bool:
+        raise KeyError("args")
+
+    monkeypatch.setattr(loop_hold, "course_held", _boom)
+    assert course_is_held(SimpleNamespace()) is False
 
 
 def test_inflight_wins_and_carries_job_identity() -> None:

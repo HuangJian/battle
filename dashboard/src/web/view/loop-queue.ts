@@ -26,8 +26,19 @@ import { courseStatus } from './course-status'
  *  翻版）⇒ 新增一格。取值域是契约面：python `run_rl_cluster.py` 文件头点名了这条纪律。
  *  ★P1-3（2026-10-05，plan/offline-online-status-switch）：`offline`——离线课在训练侧的
  *  等待词是「离线课由云机取任务包接手（切回在线自动恢复）」，**不是**收官（假收官是报障一的
- *  一半：`_map_outcome` 把 `ROUND_OFFLINE_EXIT` 当终局）。 */
-export type LoopWaitKind = 'inflight' | 'collect' | 'idle' | 'ready' | 'blocked' | 'offline'
+ *  一半：`_map_outcome` 把 `ROUND_OFFLINE_EXIT` 当终局）。
+ *  ★M2（plan/worker-type-dispatch-model §3-M2）：训练侧换了词与判据——`held`（该课被接管，
+ *  云机在跑这段）取代 `offline`（它曾是 rl-config 的 `rollout_src=run` 读出来的）。
+ *  两档**并列共存**：旧 python（未升级的训练进程）仍报 `offline`，新 python 报 `held`；
+ *  渲染同席（词表重写与 `offline` 的删除属 M4）。 */
+export type LoopWaitKind =
+  | 'inflight'
+  | 'collect'
+  | 'idle'
+  | 'ready'
+  | 'blocked'
+  | 'offline'
+  | 'held'
 
 /** 该课队列状态（python `loop_scheduler`：ready / running / waiting / paused / aborted / done）。 */
 export type LoopCourseState = 'ready' | 'running' | 'waiting' | 'paused' | 'aborted' | 'done'
@@ -234,7 +245,15 @@ export interface LoopQueueView {
   stale?: ReadStaleView | null
 }
 
-const WAIT_KINDS: LoopWaitKind[] = ['inflight', 'collect', 'idle', 'ready', 'blocked', 'offline']
+const WAIT_KINDS: LoopWaitKind[] = [
+  'inflight',
+  'collect',
+  'idle',
+  'ready',
+  'blocked',
+  'offline',
+  'held',
+]
 const STATES: LoopCourseState[] = ['ready', 'running', 'waiting', 'paused', 'aborted', 'done']
 
 function str(v: unknown): string {
@@ -486,8 +505,9 @@ export function waitCls(kind: LoopWaitKind): string {
     // 在飞 = 结果在别的进程/机器上，运维唯一能干预的一类 → 最醒目
     case 'inflight':
       return 'tc-mx__wait--inflight'
-    case 'offline':
-      // 离线等待 = 本机停机、云机接手（不是卡顿也不是故障）——与「等外部」同族但语义独立。
+    case 'offline': // 旧 python（未升级）的同一档；M4 删。
+    case 'held':
+      // 接管等待 = 本机停机、云机接手（不是卡顿也不是故障）——与「等外部」同族但语义独立。
       return 'tc-mx__wait--offline'
     case 'collect':
       return 'tc-mx__wait--collect'
@@ -508,6 +528,7 @@ export function waitCls(kind: LoopWaitKind): string {
 export const WAIT_TITLES: Record<LoopWaitKind, string> = {
   inflight: '已发布的 job 还没回传——结果在 GPU worker / 云机上；换节点或检查 worker 日志',
   offline: '离线课由云机取任务包接手——本机不跑这门课；切回在线会自动恢复（无需停开课）',
+  held: '该课被自主 worker 接管（云机在跑这一段）——本机不跑这门课；接管解除或 15 分钟无回传时自动恢复协作派发',
   collect: '本轮采集还在落盘（局数来自 it<N>/ 下的 manifest，配额只有课程计划知道）',
   idle: '本轮没有待办：账本已结算这一轮，或这门课还没开训',
   ready: '盘上事实看不出外部等待——没有在飞 job，采集也没在跑',

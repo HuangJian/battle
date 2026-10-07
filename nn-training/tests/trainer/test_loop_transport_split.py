@@ -86,6 +86,9 @@ MOVED_CONSTS = (
     "FATAL_REMOTE_HTTP",
     "REMOTE_TRANSPORTS",
     "ROLLOUT_SRCS",
+    # ★M2：`run` 退役 ⇒ 活枚举旁边多了一张**容忍表**（读到就映射 local + WARN）。
+    # 它与 `ROLLOUT_SRCS` 一样是对外契约（测试/控制台按它判「哪些取值已退役」）⇒ 同列门面。
+    "ROLLOUT_SRCS_RETIRED",
 )
 
 MOVED = MOVED_DEFS + MOVED_CONSTS

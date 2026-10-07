@@ -71,8 +71,8 @@ from worker.breaker import CIRCUIT_EXIT_CODE
 from worker.events import write_run_complete, write_run_start
 from worker.loop_round import (
     ROUND_BUNDLE_EXIT,
+    ROUND_HELD_EXIT,
     ROUND_NEXT,
-    ROUND_OFFLINE_EXIT,
     ROUND_RETRY,
     ROUND_SMOKE_STOP,
     ROUND_STOP,
@@ -385,12 +385,12 @@ class TrainingLifecycle:
             it = outcome.it  # 段跑会推进 it；必须以返回值为准
             if outcome.status == ROUND_BUNDLE_EXIT:
                 return
-            if outcome.status == ROUND_OFFLINE_EXIT:
-                # ★P1-2（plan §3.5）：单课程入口也把离线课当**等待**，不是收工——退避后再问
+            if outcome.status == ROUND_HELD_EXIT:
+                # ★P1-2（plan §3.5）：单课程入口也把被接管的课当**等待**，不是收工——退避后再问
                 # 同一轮（`it -= 1` 语义同 `ROUND_WAIT`）。为什么不能 `return`：return 会落到
-                # 下面的收官（`_park_after_completion` → `finish_course`）——离线课由此变成
+                # 下面的收官（`_park_after_completion` → `finish_course`）——被接管的课由此变成
                 # 「已收官 + run_complete」，而云机那边还在跑（R1-e）。
-                # 控制台把 rl-config 写回在线（删 `run_iters`）后，下一问即离开 COLLECT_OFFLINE。
+                # ★M2：接管解除（云机交还 / 900s 无进度自动恢复）后，下一问即离开 `COLLECT_HELD`。
                 it -= 1
                 time.sleep(WAIT_RETRY_SEC)
             if outcome.status == ROUND_SMOKE_STOP:

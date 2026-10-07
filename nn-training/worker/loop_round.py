@@ -51,10 +51,12 @@ ROUND_WAIT = "wait"
 ROUND_SMOKE_STOP = "smoke_stop"
 #: 全离线任务包已写出，整条腿结束。
 ROUND_BUNDLE_EXIT = "bundle_exit"
-#: **离线课不由本机跑**（`rollout_src=run`）：本机侧干净收官，执行者是云机（取任务包接手）。
+#: **本课被别人接管**（云机在跑这一段）：本机侧干净收官，执行者是持有 hold 的那台盘。
 #: 2026-09-25 起“半离线整段”（发一份 `kind=run` 队列项、本机等 8h）那条腿已退役
 #: —— 见 `plan/online-offline-role-routing.plan.md` §7。它不是失败：不落 `iter_error`、不计连击。
-ROUND_OFFLINE_EXIT = "offline_exit"
+#: ★M2（plan/worker-type-dispatch-model §3-M2）：判据从「rl-config 里的 `rollout_src=run`」
+#: 换成 **hub 的 hold**（`trainer/loop_hold.py` 的双通道），名字同步 `OFFLINE` → `HELD`。
+ROUND_HELD_EXIT = "held_exit"
 
 
 @dataclass(frozen=True)
@@ -62,7 +64,7 @@ class RoundOutcome:
     """`run_one_round` 的返回：终态 + 本轮结束时的迭代号。
 
     `it` 必须带回驱动循环：`ROUND_RETRY` / `ROUND_WAIT` 靠它原地重试（丢了返回值 = 跳轮）。
-    半离线整段曾一次吃掉 it..end_it（该腿已退役，`ROUND_OFFLINE_EXIT` 不推进指针）。
+    半离线整段曾一次吃掉 it..end_it（该腿已退役，`ROUND_HELD_EXIT` 不推进指针）。
 
     `detail`：`ROUND_WAIT` 的**人读原因**（在等什么、等谁）——它会直接上屏到控制台调度器
     卡片的「在等什么」列，所以必须是事实句（带 jid/轮号），而不是「等待中」。其它终态
@@ -81,13 +83,14 @@ class RoundOutcome:
 COLLECT_LOCAL = "local"
 #: 整轮上云（kind=iter）：节点自己跑 rollout + PPO，本机**完全不采样、不补波**。
 COLLECT_NODE = "node"
-#: **离线课**（kind=run / `rollout_src=run`）：本机**不跑这门课**——不采样、不派发、不等待；
-#: 执行者是云机（取任务包接手）。2026-09-25 替换掉 `COLLECT_SEGMENT`（半离线整段）。
-COLLECT_OFFLINE = "offline"
+#: **本课被别人接管**（★M2：由 hub 的 hold 注入，不再从 rl-config 推导）：本机**不跑这门课**
+#: ——不采样、不派发、不等待；执行者是持有 hold 的那台盘。2026-09-25 替换掉 `COLLECT_SEGMENT`
+#: （半离线整段）；2026-10-07 起判据从配置换成事实（`held` 参数）。
+COLLECT_HELD = "held"
 
 
-def resolve_collect_mode(source: str, seg: int) -> str:
-    """采集模式的**唯一**裁决点：离线课 > 整轮上云 > 本机采样。
+def resolve_collect_mode(source: str, seg: int, *, held: bool = False) -> str:
+    """采集模式的**唯一**裁决点：被接管 > 整轮上云 > 本机采样。
 
     为什么单拎出来：这三条支路决定「本机到底采不采样」，而派发点（`step_rollout`）与
     裁决点（`step_course_iter`）在两个文件里。2026-09-17 的半离线整段写着 `ctx.seg` 却
@@ -96,16 +99,20 @@ def resolve_collect_mode(source: str, seg: int) -> str:
     钉住，而不是靠人把两处对齐。
 
     ★ 2026-09-25（退役「半离线整段」腿）：`run` / 段长**不再**对应「本机替它派发并等」的任何
-    模式，而是 `COLLECT_OFFLINE` = 这门课不归本机（云机取任务包接手）。**绝不**回落到
-    `COLLECT_LOCAL` —— 那正是「本机偷偷自己采样、与云机双跑」的那个坑（§7.2）。
+    模式。**绝不**回落到「没搞清就本机偷偷自己采样、与云机双跑」的那个坑（§7.2）——
+    所以判断顺序是「先问有没有人被接管」。
+
+    ★M2：`COLLECT_HELD` 的输入是 **`held`**（调用方用 `trainer/loop_hold.course_held(args)`
+    算好：hub 直问 ∨ 控制文件缓存），不再是 `source` / `seg`。旧配置里的
+    `rollout_src=run` / `run_iters` 由 `_rollout_source` **容忍读**（映射成本机 + 一行 WARN）
+    —— 它们是历史残留，不代表「现在有人在跑」（那正是 §5 表里第 5 条要拆的耦合）。
 
     `source` 取 `trainer/loop_steps.py::_rollout_source` 的返回值（auto 已解析过）；`seg` 取
-    `_run_segment_iters`（`>0` = N 轮，`<0` = 到课程末尾）——退役后它只剩两个用途：
-    ① 与 `run` 一起声明「这门课由云机接手」（历史配置里可能只写了 `run_iters`）；
-    ② `--export-bundle` 的「跑到哪停」。
+    `_run_segment_iters`（`>0` = N 轮，`<0` = 到课程末尾）——退役后 `seg` 只剩一个用途：
+    `--export-bundle` 的「跑到哪停」。
     """
-    if source == "run" or seg:
-        return COLLECT_OFFLINE
+    if held:
+        return COLLECT_HELD
     if source == "node":
         return COLLECT_NODE
     return COLLECT_LOCAL
@@ -192,8 +199,8 @@ class RoundContext:
     dist_cfg: dict[str, Any] | None = None
     #: rollout 起点墙钟（`_log_report` 的耗时分母）。
     t_rollout: float = 0.0
-    #: 段长（`--run-iters`；0 = 未声明）。退役后本机只用它做两件事：
-    #: 判「这门课归云机」（与 `run` 同义）与 `--export-bundle` 的终点。
+    #: 段长（`--run-iters`；0 = 未声明）。两腿退役后本机只用它做**一件事**：
+    #: `--export-bundle` 的终点（★M2 去掉了「判这门课归云机」那半——归不归云机现在看 hold）。
     seg: int = 0
     #: 采集模式（见 `COLLECT_*`）。
     collect_mode: str = COLLECT_LOCAL

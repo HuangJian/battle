@@ -10,7 +10,8 @@
   ① 生产端只剩一个发布点、且必带 `export_path`（枚举式：第 2 个出现即红）；
   ② 发布咽喉点**当场响亮拒**（不许白等 8h，也不许静默降级成本机采样——那会与云机双跑）；
   ③ 消费端拒收 `kind=run`（且发生在零指令零下载之前）；
-  ④ 离线课本机循环 = 一行指路 + `ROUND_OFFLINE_EXIT`（不采样、不派发、不进账本、不等待）。
+  ④ 被接管的课本机循环 = 一行指路 + `ROUND_HELD_EXIT`（不采样、不派发、不进账本、不等待）
+     ——★M2：判据从 rl-config 的 `rollout_src=run` 换成 hub 的 hold（`trainer/loop_hold.py`）。
 
 另有两块「离线盘报名」的读数：`/offline/*` 面的盘身份（hub `offline_disk` 读数）与
 `offline_boot` 的自报头 —— 没有它，「本环境有没有离线盘」永远是无从回答的（审计 §4-L3）。
@@ -43,7 +44,7 @@ from tests.hub.test_role_routing import OFF_JID, _manifest, _store  # type: igno
 from tests.remote.test_worker_bun_precheck import _job as _worker_job  # type: ignore
 from trainer.loop_round_steps import RoundSteps
 from trainer.loop_steps import TrainingSteps
-from worker.loop_round import COLLECT_OFFLINE, ROUND_OFFLINE_EXIT, RoundContext
+from worker.loop_round import COLLECT_HELD, COLLECT_LOCAL, ROUND_HELD_EXIT, RoundContext
 
 TOKEN = "sekret"
 # 2026-09-30（刀 4）：`biz/` 是 `rl/` 的纯逻辑半（搬家前就在扫描面里）⇒ 必须补上，
@@ -208,20 +209,23 @@ def test_worker_refuses_a_run_kind_job_before_any_download(
     assert "battle.offline.ipynb" in str(ei.value), str(ei.value)
 
 
-# ═══════════════════════ ④ 本机循环：离线课不跑（一行指路 + 干净收官） ═══════════════════════
+# ═════════════════ ④ 本机循环：被接管的课不跑（一行指路 + 干净收官；★M2 换判据） ═════════════════
 
 
-def _bare_steps() -> Any:
+def _bare_steps(*, held: bool = True) -> Any:
     """不跑 `__init__` 的 `RoundSteps`：只喂 `step_course_iter` 真正会碰到的那几样。
 
     `Any` 是刻意的（与 `tests/worker/test_loop_round.py::_bare_loop` 同一手法）：本用例的**目的**
-    就是「这一步在离线课上做了什么」，替身不是被测对象。
+    就是「这一步在被接管的课上做了什么」，替身不是被测对象。
+
+    `held` 旗子由调用方经 `lrs.course_held` 的 monkeypatch 注入（★M2 的双通道判据不在本文件
+    的测程里——它有自己的用例，见 `tests/trainer/test_loop_hold.py`）。
     """
     steps: Any = RoundSteps()
     steps.args = SimpleNamespace(
         workers=0,
         local_slots=0,
-        rollout_src="run",
+        rollout_src="auto",
         run_iters=-1,
         export_bundle="",
         course_path="curricula/x1.jsonc",
@@ -236,19 +240,20 @@ def _bare_steps() -> Any:
 
 
 @pytest.mark.parametrize("run_iters", [-1, 3, 0])
-def test_offline_course_stops_the_round_cleanly_with_a_pointing_line(
+def test_held_course_stops_the_round_cleanly_with_a_pointing_line(
     monkeypatch: pytest.MonkeyPatch, run_iters: int
 ) -> None:
-    """离线课（`rollout_src=run`）⇒ 一行指路 + `ROUND_OFFLINE_EXIT`；**不**回落本机采样。
+    """被接管（`held`）⇒ 一行指路 + `ROUND_HELD_EXIT`；**不**回落本机采样。
 
-    `run_iters=0`（只写了来源、没写段长）也在内：回落 `COLLECT_LOCAL` 的代价是本机偷偷自己
-    采样、与云机取包链**双跑**（plan §7.2-1 那个坑），所以「来源是 run」就足够判离线。
+    段长三种值都在内（★M2 后它与「归谁」无关）：回落 `COLLECT_LOCAL` 的代价是本机偷偷自己
+    采样、与云机取包链**双跑**（plan §7.2-1 那个坑）。
     """
     import trainer.loop_round_steps as lrs
 
     lines: list[str] = []
     monkeypatch.setattr(lrs, "log", lines.append)
     monkeypatch.setattr(lrs.common.distribution, "load_dist_config", lambda: {})
+    monkeypatch.setattr(lrs, "course_held", lambda _args, **_kw: True)
     exported: list[tuple] = []
     steps = _bare_steps()
     steps.args.run_iters = run_iters
@@ -257,31 +262,47 @@ def test_offline_course_stops_the_round_cleanly_with_a_pointing_line(
 
     out = steps.step_course_iter(ctx)
 
-    assert out is not None and out.is_final and out.outcome == ROUND_OFFLINE_EXIT
-    assert ctx.collect_mode == COLLECT_OFFLINE
-    assert ctx.node_rollout is True, "离线课也在「不采样」那一档（别让它掉回本机）"
+    assert out is not None and out.is_final and out.outcome == ROUND_HELD_EXIT
+    assert ctx.collect_mode == COLLECT_HELD
+    assert ctx.node_rollout is True, "被接管的课也在「不采样」那一档（别让它掉回本机）"
     assert any("battle.offline.ipynb" in ln for ln in lines), lines
+    assert any("被接管" in ln for ln in lines), lines
     assert exported == [], "没给 --export-bundle 就不该走导出（那是另一条腿）"
 
 
-def test_export_bundle_still_wins_over_the_offline_early_exit(
+def test_not_held_keeps_the_local_leg_untouched(monkeypatch: pytest.MonkeyPatch) -> None:
+    """负对照：`held=False` ⇒ 一切旧行为（`local` + 轮子继续走）；卷轴不因「问了一次 hub」而变。"""
+    import trainer.loop_round_steps as lrs
+
+    monkeypatch.setattr(lrs.common.distribution, "load_dist_config", lambda: {})
+    monkeypatch.setattr(lrs, "course_held", lambda _args, **_kw: False)
+    steps = _bare_steps()
+    ctx = RoundContext(it=4, pairs=[])
+    assert steps.step_course_iter(ctx) is None
+    assert ctx.collect_mode == COLLECT_LOCAL
+    assert steps._node_rollout is False
+
+
+def test_export_bundle_still_wins_over_the_held_early_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """`--export-bundle` 早退仍在（取包链的入口）：它先跑，再轮到离线课的收官。
+    """`--export-bundle` 早退仍在（取包链的入口）：它先跑，再轮到接管的收官。
 
-    顺序是被钉住的：导出腿是**唯一**合法的 kind=run 形状，若被离线早退挡在前面，
-    控制台「切离线」的自动导出会静默什么都不做。
+    顺序是被钉住的：导出腿是**唯一**合法的 kind=run 形状，若被接管早退挡在前面，
+    控制台「切离线」的自动导出会静默什么都不做（而那次导包正是云机 claim 的前提）。
     """
     import trainer.loop_round_steps as lrs
 
     monkeypatch.setattr(lrs, "log", lambda _m: None)
     monkeypatch.setattr(lrs.common.distribution, "load_dist_config", lambda: {})
+    monkeypatch.setattr(lrs, "course_held", lambda _args, **_kw: True)
     exported: list[tuple] = []
     steps = _bare_steps()
     steps.args.export_bundle = "tools.task.zip"
     steps._export_offline_bundle = lambda *a: exported.append(a)
-    steps.step_course_iter(RoundContext(it=2, pairs=[]))
+    out = steps.step_course_iter(RoundContext(it=2, pairs=[]))
     assert len(exported) == 1
+    assert out is not None and out.outcome == ROUND_HELD_EXIT
 
 
 def test_export_refusal_rejects_a_course_that_already_reached_iters() -> None:
@@ -306,20 +327,20 @@ def test_export_refusal_rejects_a_course_that_already_reached_iters() -> None:
     assert "必须有终点" in export_refusal(export_path="tmp/x/task-x.zip", iters_total=0, start_it=1)
 
 
-def test_offline_course_never_reaches_the_collect_step() -> None:
-    """采集步对离线课**响亮报错**：真走到那里 = 步骤顺序被改动过，而静默退化的代价是双跑。"""
+def test_held_course_never_reaches_the_collect_step() -> None:
+    """采集步对被接管的课**响亮报错**：真走到那里 = 步骤顺序被改动过，静默退化的代价是双跑。"""
     steps = _bare_steps()
     ctx = RoundContext(it=1, pairs=[])
-    ctx.collect_mode = COLLECT_OFFLINE
-    with pytest.raises(RuntimeError, match="离线课"):
+    ctx.collect_mode = COLLECT_HELD
+    with pytest.raises(RuntimeError, match="被接管"):
         steps.step_rollout(ctx)
 
 
-def test_offline_round_maps_to_waiting_not_a_false_finish() -> None:
-    """★P1-1（plan §3.5）：调度层把 `ROUND_OFFLINE_EXIT` 映射成 **WAIT**，不是 DONE。
+def test_held_round_maps_to_waiting_not_a_false_finish() -> None:
+    """★P1-1（plan §3.5）：调度层把 `ROUND_HELD_EXIT` 映射成 **WAIT**，不是 DONE。
 
-    旧写法 `done(final=True)` 把离线课当「已收官」：控制台显示完结、写假 `run_complete`
-    （而云机那边还在跑，R1-e），且本轮从队列里消失 ⇒ 控制台写回在线也不会自动续跑。
+    旧写法 `done(final=True)` 把被接管的课当「已收官」：控制台显示完结、写假 `run_complete`
+    （而云机那边还在跑，R1-e），且本轮从队列里消失 ⇒ 接管解除也不会自动续跑。
     WAIT + `hold=False` 才是对的：本机没在替这一步干活，这一轮留着、下一拍重问。
     """
     from trainer.loop_runner import LoopRunner
@@ -329,22 +350,56 @@ def test_offline_round_maps_to_waiting_not_a_false_finish() -> None:
     runner = LoopRunner(
         loop=SimpleNamespace(inflight_job_id=lambda _it: None), course="c5-gae"
     )
-    res = runner._map_outcome(RoundOutcome(ROUND_OFFLINE_EXIT, 4))
+    res = runner._map_outcome(RoundOutcome(ROUND_HELD_EXIT, 4))
     assert res.status == WAIT, res
-    assert res.hold is False, "离线不是「后台还在干活」，票要还掉"
+    assert res.hold is False, "接管不是「后台还在干活」，票要还掉"
     assert res.payload.get("round") == "4", res.payload
-    assert "离线" in res.reason, res.reason
+    assert "接管" in res.reason, res.reason
     assert runner.finished is False and runner.finish_reason == ""
+
+
+def test_retired_run_source_is_tolerated_not_bricked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★M2（plan §3-M2）：旧配置里的 `run` **容忍读**——映射成本机 + 一行 WARN。
+
+    为什么不能拒启：一份残留配置（控制台旧版本写的，或人手改的）会让那门课永远停在原地，
+    而日志里只有一个「未知取值」——那正是「配置删字段」那个坑的镜像。
+    """
+    from common import log as common_log
+    from trainer import loop_transport as lt
+
+    lines: list[str] = []
+    monkeypatch.setattr(lt, "_RETIRED_SOURCE_NOTED", set())
+    monkeypatch.setattr(common_log, "log", lines.append)
+
+    # CLI 与 rl-config 两条入口都要容忍（一条拒启就够 brick 一门课）
+    assert lt._rollout_source(SimpleNamespace(rollout_src="run", course_path="")) == "local"
+    assert any("已退役" in ln for ln in lines), lines
+    n = len(lines)
+    assert lt._rollout_source(SimpleNamespace(rollout_src="run", course_path="")) == "local"
+    assert len(lines) == n, "同一（课, 值）只喊一次：`_rollout_source` 每轮都被问"
+
+    monkeypatch.setattr(
+        lt.common.distribution,
+        "load_dist_config",
+        lambda: {"courses": {"c5-gae": {"rollout_src": "run"}}},
+    )
+    assert (
+        lt._rollout_source(SimpleNamespace(rollout_src="auto", course_path="curricula/c5-gae.jsonc"))
+        == "local"
+    )
+    assert any("c5-gae" in ln and "已退役" in ln for ln in lines), lines
+    # 枚举本身不再含它（生产端不许把它当合法档传下去）
+    assert "run" not in lt.ROLLOUT_SRCS and "run" in lt.ROLLOUT_SRCS_RETIRED
 
 
 def test_explicit_rollout_src_declares_restore_unsupported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """★P1-1（plan §3.5）：显式 `--rollout-src run/node` 会短路 rl-config ⇒ 「控制台切回
-    在线后自动续跑」**不支持**——必须明说（隐式依赖不得静默失败；否则课程永远等下去）。
+    """★P1-1（plan §3.5）：显式 `--rollout-src node` 会短路 rl-config ⇒ 「控制台改回本机采样
+    后自动续跑」**不支持**——必须明说（隐式依赖不得静默失败；否则课程永远等下去）。
 
-    只为离线相关档喊（`local` 与本契约无关，不喊）；同一（课, 实测值）去重——
-    `_rollout_source` 每轮都会被问一次。
+    ★M2：这条契约现在只剩 `node`（`run` 已退役、走 `_note_retired_source` 那一条路）。
+    同一（课, 实测值）去重——`_rollout_source` 每轮都会被问一次。
     """
     from common import log as common_log
     from trainer import loop_transport as lt
@@ -353,11 +408,11 @@ def test_explicit_rollout_src_declares_restore_unsupported(
     monkeypatch.setattr(lt, "_RESTORE_UNSUPPORTED_NOTED", set())
     monkeypatch.setattr(common_log, "log", lines.append)
 
-    args = SimpleNamespace(rollout_src="run", run_iters=-1, course_path="curricula/c5-gae.jsonc")
-    assert lt._rollout_source(args) == "run"
+    args = SimpleNamespace(rollout_src="node", run_iters=0, course_path="curricula/c5-gae.jsonc")
+    assert lt._rollout_source(args) == "node"
     assert any("不支持" in ln for ln in lines), lines
     n = len(lines)
-    assert lt._rollout_source(args) == "run"  # 去重：不再刷第二行
+    assert lt._rollout_source(args) == "node"  # 去重：不再刷第二行
     assert len(lines) == n
     # `local` 与这条契约无关：不喊
     assert (

@@ -121,16 +121,16 @@ export function pruneLegacyCourseKnobs(cfg: RlConfig): { cfg: RlConfig; removed:
 // ────────────────────────── 停课清理（2026-10-02 用户口径） ──────────────────────────
 
 /** 课程级 `rollout_src` 的**缺省档**：`resolveRolloutSrc` 对缺键就返回它（`stack/specs.ts`）。
- *  开课弹窗的默认档会把它原值直写（`train-mode.ts` 的历史口径）⇒ 盘上出现纯噪声。 */
+ *  开课弹窗的默认档会把它原值直写（已删的 `train-mode.ts` 的历史口径）⇒ 盘上出现纯噪声。 */
 const DEFAULT_ROLLOUT_SRC = 'local'
 
 /** **停课清理**：剃掉本课在 rl-config 里已无信息量的残留（幂等；返回人读清单，空 = 一字未动）。
  *
  *  用户口径（2026-10-02）：「dashboard 上停课时，应该把 `rollout_src:'local'` 去掉，
  *  空的课程节点直接删除」。两条规则：
- *    ① `courses.<课>.rollout_src === 'local'` ⇒ 删——缺省档不留痕（与热切的
- *       `isWorthRemembering` 只记 node/auto 同一口径）；`node`/`auto`/`run`（离线声明）
- *       是显式语义，一个字不动。
+ *    ① `courses.<课>.rollout_src === 'local'` ⇒ 删——缺省档不留痕（与旧写面只记 node/auto
+ *       同一口径）；`node`/`auto` 是显式语义，一个字不动；`run`（★M2 退役的离线声明）
+ *       由开课/停课路径与 M6 的一次性清理收尾（训练侧容忍读兜住，不会 brick）。
  *    ② 剃完**为空**（`{}`）的课程节点整条删——留空壳只是「这门课配过什么」读面上的
  *       幻影行（本就空的节点也照删，规则一样）。
  *

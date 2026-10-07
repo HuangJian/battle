@@ -47,7 +47,7 @@ from trainer.loop_plan import (
     COURSE_ENABLE_MARKER,
     course_enabled,
     course_facts,
-    course_is_offline,
+    course_is_held,
     course_kind,
     course_traj,
     enabled_courses,
@@ -978,11 +978,11 @@ def maybe_auto_stop_course(*, kind: str, auto_stop: bool, traj: str | Path) -> b
     return True
 
 
-def _offline_waiting(rt: CourseRuntime | None) -> bool:
-    """这门课现在是不是「离线等云机」（★P1-3，plan §3.5）—— 判据住 `loop_plan.course_is_offline`
+def _held_waiting(rt: CourseRuntime | None) -> bool:
+    """这门课现在是不是「被接管、在等云机」（★P1-3 / ★M2）——判据住 `loop_plan.course_is_held`
     （与 `step_course_iter` 同一处裁决；这里只做 `rt` → `args` 的适配）。"""
     args = getattr(rt, "args", None)
-    return False if args is None else course_is_offline(args)
+    return False if args is None else course_is_held(args)
 
 
 def _settle_rounds(
@@ -1005,7 +1005,7 @@ def _settle_rounds(
         # ★P1-3：「离线 = 等待，不是收官」。P1-1 已把离线轮映射成 WAIT（队列因此不会走到
         # QUEUE_DONE）；这里是第二道闸：哪怕它真因预算/硬边界走到 DONE，也**不得**在这条
         # 腿上写 `run_complete` / 发云机 PAUSE——云机那边还在跑（R1-e）。
-        if _offline_waiting(rt):
+        if _held_waiting(rt):
             continue
         done_hooked.add(course)
         with prefix_scope(course):

@@ -139,8 +139,8 @@ describe('setCourseMode（热切 + 落意图）', () => {
     // ★ 2026-09-25（plan/online-offline-role-routing §7）：文案改指**取包链**——离线课不再经
     // hub 队列跑（那条腿退役），云机取任务包接手。
     expect(r.message).toContain('已切离线')
-    expect(r.message).toContain('battle.offline.ipynb')
-    expect(r.message).toContain('本机不跑这门课')
+    expect(r.message).toContain('导出任务包')
+    expect(r.message).toContain('接管')
     expect(r.message).not.toContain('只接收')
   })
 
@@ -306,55 +306,42 @@ describe('restoreCourseModes（起 hub 后回灌）', () => {
   })
 })
 
-// ──────────────── L1（2026-09-24）：那颗开关 = 唯一的模式开关 ────────────────
+// ──────────── L1（2026-09-24）→ ★M2：那颗开关只剩「推 hub + 落意图」 ────────────
 
-/** 用户报障：离线课切回在线后 Kaggle 仍因缺 bun 拒单（派出的 job 仍是 `kind:"run"`）。
+/** 历史：开关曾同时写 `courses.<课>.{rollout_src:'run', run_iters:-1}`（本机停采）。
  *
- *  根因：开关只翻了 hub 那半边，`courses.<课>.rollout_src=run` 一直没撒 ⇒ 本机下一轮仍不采样。
- *  本组钉的就是「一颗开关 = 完整语义」（plan/train-mode-hot-switch.plan.md L1）。
+ *  ★M2（plan/worker-type-dispatch-model §3-M2）：那条腿**退役**——「这门课归云机」不再是
+ *  配置声明，而是 hub 的 hold 事实（云机 claim 成功 + 有进度才建立）。本组反向钉住：
+ *  那颗开关一个字都不写 rl-config（写盘腿回来的那一天，这里会红）。
  */
-describe('★2026-09-24 L1：切模式同时写本机训练配置（不再需要重开课）', () => {
-  it('切离线：课程级两把键一起落（`run` 是声明，`run_iters:-1` 是段长）', async () => {
+describe('★M2：切模式**不再写**本机训练配置（接管 = hub 的 hold 事实）', () => {
+  it('切离线：rl-config 一个字不写（旧行为 = 落 run + run_iters）', async () => {
     const r = await setCourseMode('x20-firstkill', 'offline')
     expect(r.ok).toBe(true)
-    expect(courseRow('x20-firstkill')).toMatchObject({ rollout_src: 'run', run_iters: -1 })
+    expect('rollout_src' in courseRow('x20-firstkill')).toBe(false)
+    expect('run_iters' in courseRow('x20-firstkill')).toBe(false)
   })
 
-  it('切换成在线：两把键**都不在**（不是 =null / 空串——python 侧按缺席才算本机采样）', async () => {
-    await setCourseMode('x20-firstkill', 'offline')
-    const r = await setCourseMode('x20-firstkill', 'online')
-    expect(r.ok).toBe(true)
-    const row = courseRow('x20-firstkill')
-    expect('rollout_src' in row).toBe(false)
-    expect('run_iters' in row).toBe(false)
-  })
-
-  it('★ node 往返：显式选的 `node` 切离线再切回在线必须回来（否则静默降成 local）', async () => {
+  it('显式写的 `node` 不被切模式碰掉（它已经与本课归谁无关）', async () => {
     writeRlConfig({ 'x20-firstkill': { rollout_src: 'node' } })
     await setCourseMode('x20-firstkill', 'offline')
     await setCourseMode('x20-firstkill', 'online')
     expect(courseRow('x20-firstkill').rollout_src).toBe('node')
   })
 
-  it('`local` 不留痕：缺省档往返后配置里不出现 `rollout_src`（不写噪声）', async () => {
+  it('hub 不可达：意图照落、配置不动（不再有「本机配置已写、hub 没接受」的半状态）', async () => {
     writeRlConfig({ 'x20-firstkill': { rollout_src: 'local' } })
-    await setCourseMode('x20-firstkill', 'offline')
-    await setCourseMode('x20-firstkill', 'online')
-    expect('rollout_src' in courseRow('x20-firstkill')).toBe(false)
-  })
-
-  it('hub 不可达：**配置照样落**（回执仍如实说 hub 未接受，意图已记录）', async () => {
     mode = 'throw'
     const r = await setCourseMode('x20-firstkill', 'offline')
     expect(r.ok).toBe(false)
     expect(r.message).toContain('意图已记录')
-    expect(courseRow('x20-firstkill')).toMatchObject({ rollout_src: 'run', run_iters: -1 })
+    expect(courseRow('x20-firstkill')).toEqual({ rollout_src: 'local' })
   })
 
-  it('文案带语义与时机：离线 ⇒ 「本机不跑这门课」（取包链接手）；在线 ⇒ 「不需要 bun」+「轮边界生效」', async () => {
+  it('文案带语义与时机：离线 ⇒ 「导出任务包 + claim 后接管」；在线 ⇒ 「不需要 bun」+「轮边界生效」', async () => {
     const off = await setCourseMode('x20-firstkill', 'offline')
-    expect(off.message).toContain('本机不跑这门课')
-    expect(off.message).toContain('battle.offline.ipynb')
+    expect(off.message).toContain('导出任务包')
+    expect(off.message).toContain('接管')
     expect(off.message).toContain('轮边界生效')
     const on = await setCourseMode('x20-firstkill', 'online')
     expect(on.message).toContain('不需要 bun')
@@ -437,7 +424,9 @@ describe('★2026-10-03 自动离线交接：pin 与 unset 的分工', () => {
     expect(calls[0]!.url).not.toContain('drop_jobs')
   })
 
-  it('unsetCourseMode：撤离线标记 + hub 带 pin=0 + 删意图（重回自动池）', async () => {
+  it('unsetCourseMode：hub 带 pin=0 + 删意图（重回自动池）；★M2 起不动 rl-config', async () => {
+    // 盘上的 legacy 值（★M2 之前写的 run/run_iters）由训练侧容忍读兜住、由开课/停课 prune
+    // 与 M6 的一次性清理收尾——本函数不再负责捧它。
     writeRlConfig({ c5: { rollout_src: 'run', run_iters: -1 } })
     saveConsoleState({ courseModes: { c5: 'offline' } })
     const r = await unsetCourseMode('c5')
@@ -445,8 +434,7 @@ describe('★2026-10-03 自动离线交接：pin 与 unset 的分工', () => {
     expect(calls).toHaveLength(1)
     expect(calls[0]!.url).toContain('mode=online')
     expect(calls[0]!.url).toContain('pin=0')
-    expect(courseRow('c5').rollout_src).toBeUndefined()
-    expect(courseRow('c5').run_iters).toBeUndefined()
+    expect(courseRow('c5')).toEqual({ rollout_src: 'run', run_iters: -1 })
     expect(readCourseModes()).toEqual({})
     expect(loadConsoleState().courseModes).toEqual({})
   })
@@ -460,11 +448,13 @@ describe('★2026-10-03 自动离线交接：pin 与 unset 的分工', () => {
     expect(readCourseModes()).toEqual({})
   })
 
-  it('autoOfflineHandoff：写 rollout_src=run（本机停采），**不写意图、不打 hub 课程表**', async () => {
+  it('autoOfflineHandoff：★M2 起**只导包**（不再写 rollout_src=run），不写意图、不打 hub 课程表', async () => {
     enable('c5')
     const r = await autoOfflineHandoff('c5')
     expect(r.ok).toBe(true)
-    expect(courseRow('c5')).toMatchObject({ rollout_src: 'run', run_iters: -1 })
+    // F1（plan §1.6）：这条腿旧写法是「写 run 停本机 + 导包」，前者正是 Q1 要拆的耦合
+    //（本机停不停跑现在由 hub 的 hold 回答）⇒ 退役；留下的是「把包导出来」。
+    expect(courseRow('c5')).toEqual({})
     // P0-3 的回归锚：自动交接**不能**落意图（否则回灌会把自动翻的离线推回 online）
     expect(readCourseModes()).toEqual({})
     expect(calls.filter((c) => c.url.includes('/admin/courses')).length).toBe(0)
@@ -474,7 +464,7 @@ describe('★2026-10-03 自动离线交接：pin 与 unset 的分工', () => {
     const r = await autoOfflineHandoff('c5')
     expect(r.ok).toBe(false)
     expect(r.message).toContain('未开课')
-    expect(courseRow('c5').rollout_src).toBeUndefined()
+    expect(courseRow('c5')).toEqual({})
   })
 })
 

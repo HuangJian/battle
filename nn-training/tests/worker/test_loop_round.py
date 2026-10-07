@@ -25,9 +25,9 @@ from trainer.loop_core import TrainingLoop
 from trainer.loop_round_steps import RoundSteps
 from trainer.loop_steps import SmokeVoidRoundError
 from worker.loop_round import (
+    COLLECT_HELD,
     COLLECT_LOCAL,
     COLLECT_NODE,
-    COLLECT_OFFLINE,
     ROUND_NEXT,
     ROUND_RETRY,
     ROUND_SMOKE_STOP,
@@ -91,22 +91,24 @@ def test_precollect_join_runs_before_prepare_iter() -> None:
 
 
 def test_resolve_collect_mode_precedence() -> None:
-    """采集模式裁决点：**离线课 > 整轮上云 > 本机采样**；离线课**绝不**回落本机采样。
+    """采集模式裁决点：**被接管 > 整轮上云 > 本机采样**；被接管**绝不**回落本机采样。
 
     这不是纯风格：2026-09-17 的半离线整段只算了 `ctx.seg` 而没人翻 `collect_mode`，
     kind=run 分支因此**永远不可达**（表面一切正常：本机照常采样、账本照常记账）。
-    ★ 2026-09-25 那条腿退役（plan/online-offline-role-routing §7）后，`run` / 段长一律 =
-    **这门课不归本机**：若回落到 `COLLECT_LOCAL`，本机就会偷偷自己采样、与云机取包链双跑
-    （这正是「在配置里删字段」那个写法的坑，§7.2-1）。
+    ★M2（plan/worker-type-dispatch-model §3-M2）：输入从「rl-config 的 `rollout_src=run` /
+    段长」换成 **`held`**（hub 的 hold 事实，调用方算好）——若回落到 `COLLECT_LOCAL`，
+    本机就会偷偷自己采样、与云机取包链**双跑**（§7.2-1 那个坑的原形）。
+
+    `source` 仍只认 `node`（整轮上云）；段长 `seg` 与「归谁」无关了（只剩导出包的终点）。
     """
     assert resolve_collect_mode("local", 0) == COLLECT_LOCAL
     assert resolve_collect_mode("node", 0) == COLLECT_NODE
-    assert resolve_collect_mode("run", 3) == COLLECT_OFFLINE
-    assert resolve_collect_mode("run", -1) == COLLECT_OFFLINE  # <0 = 到课程末尾
-    assert resolve_collect_mode("run", 0) == COLLECT_OFFLINE  # 没写段长也仍是离线课
-    # 段长优先：声明 node 但又给了段长 ⇒ 按离线课处理（历史上这正是 kind=run 的形状）
-    assert resolve_collect_mode("node", 2) == COLLECT_OFFLINE
-    assert resolve_collect_mode("local", 1) == COLLECT_OFFLINE
+    # 被接管：与来源/段长无关，一律不跑（两个输入分别给极端值也不会被顶掉）
+    assert resolve_collect_mode("local", 0, held=True) == COLLECT_HELD
+    assert resolve_collect_mode("node", 9, held=True) == COLLECT_HELD
+    assert resolve_collect_mode("run", 3) == COLLECT_LOCAL  # 退役取值：调用方已映射成本机
+    assert resolve_collect_mode("local", 1) == COLLECT_LOCAL  # 段长不再是「归云机」的同义词
+    assert resolve_collect_mode("node", 2) == COLLECT_NODE
 
 
 def test_round_context_marks_are_ordered_and_unique() -> None:

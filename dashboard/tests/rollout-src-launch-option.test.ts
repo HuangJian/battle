@@ -84,14 +84,14 @@ describe('preset / route / UI 接线（源码断言：跨文件链路 tsc 抓不
     const preset = readSrc('src/server/actions/preset.ts').replace(/\s+/g, ' ')
     expect(preset).not.toMatch(/rl\.rollout_src\s*=/)
     // 字符串域**原样**落（过换算函数 = 训练启动直接报错退出）
-    // ★ 2026-09-24：写面搬到 `train-mode.ts`（热切那颗开关也要用它）——断言跟着搬，
-    //   否则它会对着一个不再含该逻辑的文件读，**静默落空**。
-    const tm = readSrc('src/server/actions/train-mode.ts').replace(/\s+/g, ' ')
-    expect(tm).toContain('row.rollout_src = opts.rolloutSrc')
-    expect(tm).not.toMatch(/rollout_src = \w*[Tt]oCfg\(/)
-    // 开课路径只转调（不再自己维护第二份映射）
+    // ★M2（plan/worker-type-dispatch-model §3-M2）：写面从已删的 `train-mode.ts` 搬回
+    //   `course-lifecycle.ts::writeCourseConfigForOpen`（模式 → rl-config 的那层换算没了，
+    //   这里只剩「在线档原样落 rollout 位置」这一件事）。断言跟着搬——否则它会对着一个不再
+    //   含该逻辑的文件读，**静默落空**。
     const life = readSrc('src/server/actions/course-lifecycle.ts').replace(/\s+/g, ' ')
-    expect(life).toContain('applyTrainModeToConfig')
+    expect(life).toContain('row.rollout_src = opts.rolloutSrc')
+    expect(life).not.toMatch(/rollout_src = \w*[Tt]oCfg\(/)
+    expect(() => readSrc('src/server/actions/train-mode.ts')).toThrow()
   })
 
   it('state-view：modes 带当前生效值（UI 才能显示「改动有没有生效」）', () => {
