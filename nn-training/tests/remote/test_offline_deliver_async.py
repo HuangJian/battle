@@ -11,22 +11,84 @@
   2. 后台线程里的任何异常**不外泄**，且线程继续活着（下一轮照样推）；
   3. `close()` 把积压推完（快 hub 下 pending 清零 + 落 `delivered.json`）；
   4. `close()` **有界**：hub 卡住时按预算收线，不把段末拖成无限等。
+
+2026-10-07 补（`plan/offline-deliver-isolation.plan.md` §2 / §10，2026-10-06 事故）：
+
+  5. **不许空转**：`_repost` 是唯一「只唤醒、不消费」的标志 —— 探活失败把它放回后，外层循环
+     既不 `wait` 也不干活，退化成 100% 核自旋（忙等期间这条腿**一个日志都不打**）。判据 =
+     **不变量探针** `_idle_spins`（只在违反时 +1 ⇒ 断言 `== 0`，确定性、无窗口/容差）；
+  6. **重投不许丢**：探活失败要能重试、段末只有 repost（backlog 空）也要送、送不掉要**响亮**；
+     而重投是**磁盘状态**（`delivered.json` 的 `owed_reposts`）—— 那一轮早已记账，`pending()`
+     不会再含它，丢了就是 hub 侧该轮 `eval_rows` **永久缺失**。
 """
 
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import time
+from collections.abc import Callable
+from io import BytesIO, StringIO
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.protocol import OFFLINE_ARTIFACT_PATH, OFFLINE_RESULT_PATH
+from remote.deliver_proc import DelivererProcess, make_deliverer
 from remote.offline_deliver import OfflineDeliverer
 from tests.remote.test_offline_deliver import RUN, _make_artifacts  # type: ignore
+
+
+class _FakeProc:
+    """假子进程：拉起面用（argv/env/cwd/退出码）——**不起真进程**。
+
+    为什么要它：真起子进程的用例是慢层（`test_offline_deliver_proc.py`），而「argv 里不许有
+    token」这类断言只需要看**拉起那一刻**的形状。八次 python 启动会把同一台机器上的邻居用例
+    （0.3s 级看门狗）顶红，所以能不起就不起（2026-10-07 实测）。
+    """
+
+    def __init__(self, boot: bool = True) -> None:
+        self.stdout = StringIO("boot ok 1\n" if boot else "")
+        self.stderr = StringIO("")
+        self.stdin = BytesIO()
+        self.pid = 1
+        self._code: int | None = None
+
+    def poll(self) -> int | None:
+        return self._code
+
+    def wait(self, timeout: float | None = None) -> int:
+        self._code = 0
+        return 0
+
+    def terminate(self) -> None:
+        self._code = -15
+
+    def kill(self) -> None:
+        self._code = -9
+
+
+def _seed_ledger(root: Path, *, artifacts: tuple[int, ...] = ()) -> None:
+    """手搓 `delivered.json`（「这几轮已经投过」是走重投那条路的前提）。"""
+    (root / "delivered.json").write_text(
+        json.dumps({"run_id": RUN, "artifacts": list(artifacts), "result_done": False}),
+        encoding="utf-8",
+    )
+
+
+def _ledger(root: Path) -> dict:
+    data = json.loads((root / "delivered.json").read_text(encoding="utf-8"))
+    return data if isinstance(data, dict) else {}
+
+
+def _dead_530(url: str, data: bytes, headers: dict, timeout: float) -> tuple[int, bytes]:
+    """假 opener：一律 530（隧道断线形态；注意 530 **不是** 401/403 ⇒ 不停用整条腿）。"""
+    return 530, b""
 
 
 def _wait_until(pred, *, timeout: float = 10.0, step: float = 0.01) -> bool:
@@ -81,14 +143,16 @@ class _Recorder:
         return {}
 
 
-def _deliverer(root: Path, rec: _Recorder, **kw) -> OfflineDeliverer:
+def _deliverer(
+    root: Path, rec: Callable[[str, bytes, dict, float], tuple[int, bytes]], **kw
+) -> OfflineDeliverer:
     return OfflineDeliverer(
         base_url="http://127.0.0.1:1",
         token="tok",
         run_id=RUN,
         artifacts_dir=root,
         background=True,
-        opener=rec,  # type: ignore[arg-type]
+        opener=rec,
         log=lambda _m: None,
         **kw,
     )
@@ -175,6 +239,202 @@ def test_submit_final_posts_the_segment_result(tmp_path: Path) -> None:
     assert d.status()["result_done"] is True
     # T6：`end_it_reached` 必须穿过后台队列（tuple 解包漏一格就会静默丢标志）
     assert rec.body_for(OFFLINE_RESULT_PATH)["end_it_reached"] is True
+
+
+def test_drain_loop_never_spins_without_waiting_or_working(tmp_path: Path) -> None:
+    """2026-10-06 事故回归：530（探活失败）+ 待重投 ⇒ 禁止「既不干活也不 wait」的圈。
+
+    事故形态：`_repost` 非空、`_want_sync`/`_final` 为假时，`_drain_loop` 的内层等待条件
+    认它（于是不进 `wait`），而 work 分支不认它（于是不干活）⇒ 纯转圈烧一个核。
+    判据是**不变量探针**（不是 CPU 时间/墙钟阈值——那是 `test_no_sleep_as_sync` 要拦的那类）。
+    """
+    root = _make_artifacts(tmp_path)
+    rec = _Recorder()
+    d = OfflineDeliverer(
+        base_url="http://127.0.0.1:1",
+        token="tok",
+        run_id=RUN,
+        artifacts_dir=root,
+        background=True,
+        opener=_dead_530,  # type: ignore[arg-type]
+        log=lambda _m: None,
+    )
+    d.start()
+    try:
+        d.submit_eval_round(1)  # 登记重投 + 唤醒（旧实现此后进自旋）
+        # sleep-ok: 轮询步长（等的是「探针是否被触发」这个状态，超时只当挂起兜底）
+        _wait_until(lambda: d._idle_spins > 0, timeout=0.6)
+        assert d._idle_spins == 0, (
+            f"补传线程空转了 {d._idle_spins} 圈（既不干活也不 wait）——"
+            "不变量：每一次唤醒，要么干活，要么 wait"
+        )
+        assert rec.calls == [], "530 时不该有任何请求被当成投递"
+    finally:
+        d.close(timeout=0.1)
+
+
+def test_repost_is_retried_after_the_probe_recovers(tmp_path: Path) -> None:
+    """修忙等不得把 `_repost` 弄丢：探活先失败、之后恢复 ⇒ 重投仍送达（§2.3 绿回归）。"""
+    root = _make_artifacts(tmp_path, iters=(1,))
+    _seed_ledger(root, artifacts=(1,))  # 这一轮「已投递」⇒ pending 空，只有重投一条路
+    rec = _Recorder(fail_first=1)  # 第一次探活炸（瞬断）
+    d = _deliverer(root, rec, probe_ttl=0.0)  # TTL=0 ⇒ 每次唤醒都重探（不赌 60s 缓存）
+    d.start()
+    try:
+        d.submit_eval_round(1)  # 这一次探活失败 ⇒ 重投留着
+        # sleep-ok: 轮询步长（等的是「探活真的失败过一次」这个状态）
+        assert _wait_until(lambda: len(rec.calls) >= 1, timeout=2.0)
+        assert d.unsent_reposts() == [1], "探活失败后重投必须留在集合里（不是丢掉）"
+        d.submit_round(1)  # 下一轮唤醒（真实里由下一轮 submit_round 承担）
+        # sleep-ok: 轮询步长（等的是「重投被送达」这个状态）
+        assert _wait_until(lambda: rec.posts(OFFLINE_ARTIFACT_PATH) == 1, timeout=5.0), (
+            "探活恢复后重投没被送到"
+        )
+        assert d.unsent_reposts() == [], "送达后必须销账"
+    finally:
+        d.close(timeout=2.0)
+
+
+def test_close_delivers_a_repost_when_the_backlog_is_empty(tmp_path: Path) -> None:
+    """段末只有 repost、backlog 为空 ⇒ 旧 `close()` 唤醒条件不含 `_repost`，直接把它丢了。"""
+    root = _make_artifacts(tmp_path, iters=(1,))
+    _seed_ledger(root, artifacts=(1,))
+    rec = _Recorder(fail_first=1)  # 让重投先失败一次（负结果被 TTL 缓存）
+    d = _deliverer(root, rec)
+    d.start()
+    try:
+        d.submit_eval_round(1)
+        # sleep-ok: 轮询步长（等的是「重投试过并留下」这个状态）
+        assert _wait_until(lambda: d.unsent_reposts() == [1] and bool(rec.calls), timeout=2.0)
+        d.close(timeout=5.0)  # 收线时强制探一次（绕过负结果 TTL）⇒ 这一趟必须把它送出去
+    finally:
+        pass
+    assert rec.posts(OFFLINE_ARTIFACT_PATH) == 1, "段末只剩重投时不许丢（旧代码在这里丢）"
+    assert d.pending() == []
+    assert _ledger(root)["owed_reposts"] == [], "送达即销账（磁盘状态要跟上）"
+
+
+def test_unsent_repost_is_loud_and_persisted(tmp_path: Path) -> None:
+    """送不掉的重投：响亮一行 + 落 `owed_reposts`（磁盘状态 = 下次会话能续投）。"""
+    root = _make_artifacts(tmp_path, iters=(1,))
+    _seed_ledger(root, artifacts=(1,))
+    logs: list[str] = []
+    d = OfflineDeliverer(
+        base_url="http://127.0.0.1:1",
+        token="tok",
+        run_id=RUN,
+        artifacts_dir=root,
+        background=True,
+        opener=_dead_530,  # type: ignore[arg-type]
+        log=logs.append,
+    )
+    d.start()
+    try:
+        d.submit_eval_round(1)
+        # sleep-ok: 轮询步长（等的是「重投已登记」这个状态）
+        assert _wait_until(lambda: d.unsent_reposts() == [1], timeout=2.0)
+        d.close(timeout=0.1)
+    finally:
+        pass
+    assert any("重投" in m and "未送达" in m for m in logs), f"段末必须响亮：{logs}"
+    assert d.status()["reposts_unsent"] == 1
+    assert _ledger(root)["owed_reposts"] == [1], "欠账必须落盘（否则下次会话无从续投）"
+
+
+def test_owed_reposts_are_resent_by_the_next_session(tmp_path: Path) -> None:
+    """跨会话续投：上一段没送出去的重投，新会话（同一产物目录）自动补上。
+
+    为什么必须落盘：那一轮**早已在 `delivered.json` 记账** ⇒ `pending()`（磁盘有−账本无）永远
+    不会再含它 ⇒ 丢一次就是 hub 侧该轮 `eval_rows` 永久缺失（`submit_eval_round` 存在的唯一理由）。
+    """
+    root = _make_artifacts(tmp_path, iters=(1,))
+    _seed_ledger(root, artifacts=(1,))
+    dead = _deliverer(root, _dead_530)  # 上个会话：全程 530（重投送不出去）
+    dead.start()
+    try:
+        dead.submit_eval_round(1)
+        # sleep-ok: 轮询步长（等的是「重投已登记」这个状态）
+        assert _wait_until(lambda: dead.unsent_reposts() == [1], timeout=2.0)
+        dead.close(timeout=0.1)
+    finally:
+        pass
+    assert _ledger(root)["owed_reposts"] == [1]
+    rec = _Recorder()  # 新会话：hub 活了
+    live = _deliverer(root, rec)
+    live.start()
+    live.close(timeout=5.0)  # `close()` 的唤醒条件含 `_repost` ⇒ 欠账这一趟就该清掉
+    assert rec.posts(OFFLINE_ARTIFACT_PATH) == 1, "上一段欠下的重投必须被新会话补上"
+    assert _ledger(root)["owed_reposts"] == []
+
+
+def test_process_mode_passes_the_token_by_env_never_by_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★拉起面的形状：token 只走 `$BATTLE_HUB_TOKEN`（argv 会在 `/proc/<pid>/cmdline` 上全机可读）。
+
+    「真的带上了鉴权头」由慢层证（`test_offline_deliver_proc.py` 的假 hub 对错 token 回 403、
+    而 403 = 停用整条腿）——那里真起子进程；这里只看拉起那一刻的 argv/env。
+    """
+    seen: dict = {}
+
+    def fake_popen(argv, *a, **kw):  # type: ignore[no-untyped-def]
+        seen["argv"] = [str(x) for x in argv]
+        seen["env"] = dict(kw.get("env") or {})
+        seen["cwd"] = str(kw.get("cwd") or "")
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    d = DelivererProcess(
+        base_url="http://127.0.0.1:1",
+        token="sekret-tok",
+        run_id=RUN,
+        artifacts_dir=tmp_path / "art",
+        work_dir=tmp_path / "work",
+        log=lambda _m: None,
+    )
+    d.start()
+    try:
+        assert seen, "没走到 Popen（进程模式没起来）"
+        assert "sekret-tok" not in " ".join(seen["argv"]), "token 出现在 argv 里了"
+        assert seen["env"].get("BATTLE_HUB_TOKEN") == "sekret-tok", "token 必须显式塞进子进程 env"
+        assert seen["env"].get("PYTHONPATH"), "PYTHONPATH 不继承 ⇒ 云机上会 No module named"
+        assert "-m" in seen["argv"] and "remote.deliver_worker" in seen["argv"]
+        assert seen["cwd"].replace("\\", "/").endswith("nn-training"), f"cwd 不对：{seen['cwd']}"
+        # 控制通道：`--ctl` 落点就是会话文件，命令以 JSONL append 进去（父→子的唯一入口）
+        ctl = Path(str(d.status()["ctl"]))
+        d.submit_round(7)
+        assert json.loads(ctl.read_text(encoding="utf-8").strip().splitlines()[-1]) == {"round": 7}
+        assert d.status()["mode"] == "process" and d.status()["drain_alive"] is True
+    finally:
+        d.close(timeout=0.0)
+    assert json.loads(ctl.read_text(encoding="utf-8").strip().splitlines()[-1]) == {
+        "stop": True,
+        "budget": 0.0,
+    }
+
+
+def test_make_deliverer_defaults_to_process_mode(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """工厂的缺省模式 = 独立子进程（离线路径的缺省；测试/单步调试才显式给别的）。
+
+    单测全局钉着 `NN_DELIVER_MODE=thread`（`tests/conftest.py::pin_production_env`：单测不为
+    补传起真子进程），所以这里先把那个桩拆掉 —— 顺带钉住解析顺序「参数 > env > 缺省」。
+    """
+    monkeypatch.delenv("NN_DELIVER_MODE", raising=False)
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _FakeProc())
+    d = make_deliverer(
+        hub_url="http://127.0.0.1:1",
+        hub_token="tok",
+        run_id=RUN,
+        artifacts_dir=_make_artifacts(tmp_path / "a"),
+        work_dir=tmp_path / "work",
+        log=lambda _m: None,
+    )
+    assert d is not None and isinstance(d, DelivererProcess), "离线路径的缺省必须是进程模式"
+    d.start()
+    assert d.status()["mode"] == "process"
+    d.close(timeout=0.0)
 
 
 def test_sync_mode_is_still_synchronous(tmp_path: Path) -> None:

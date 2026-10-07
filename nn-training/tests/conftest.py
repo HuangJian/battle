@@ -83,6 +83,11 @@ def pin_production_env(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     自己设 `env["BCITY_CONSOLE_URL"]`，天然覆盖本桩。
     """
     monkeypatch.setenv("BCITY_CONSOLE_URL", TEST_CONSOLE_URL)
+    # 补传腿的实现选择（2026-10-07）：缺省是**独立子进程**（`remote.deliver_worker`，
+    # 2026-10-06 事故的隔离面）。单测不该为此起真子进程（慢、且会去碰真 hub 地址面）：
+    # 钉成进程内线程模式，行为等价、无进程边界。真子进程只在
+    # `tests/remote/test_offline_deliver_proc.py` 里显式 `mode="process"` 跑。
+    monkeypatch.setenv("NN_DELIVER_MODE", "thread")
     for name, rel in PRODUCTION_STATE_PINS.items():
         # 只钉路径、**不预建**：真写点自己会 `mkdir(parents=True)`（`write_state` /
         # `write_intent` / `write_applied` 都这样），而预建目录会把「本用例的 tmp_path

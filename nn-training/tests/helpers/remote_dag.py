@@ -184,6 +184,16 @@ LAYERS: dict[str, int] = {
     "worker.iter_rollout": 1,
     "remote.job_fs": 1,
     "remote.offline_deliver": 1,
+    # 补传腿的进程模式（2026-10-07，`plan/offline-deliver-isolation.plan.md` P1）：
+    #   * `deliver_proc` = 父侧代理 `DelivererProcess` + 共同接口 + 工厂；
+    #   * `deliver_worker` = 子进程入口（`python -m remote.deliver_worker`）。
+    # 两个都只依赖 `offline_deliver`(L1) 与 stdlib ⇒ 拓扑秩 **L2**（2 已被 `offline_eval`/
+    # `http`/`push_dispatch` 占用，故不产生层号空洞）。为什么另立模块而不是塞进
+    # `offline_deliver`：`tests/test_python_loc_budget.py`（单文件代码行 < 1000）当场变红。
+    # ⚠ `deliver_worker` **不是** standalone 引导文件：它住在 `code.zip` 里（由
+    # `DelivererProcess` 用 `python -m` 拉起），不得进 `STANDALONE_BOOT_MODULES`。
+    "remote.deliver_proc": 2,
+    "remote.deliver_worker": 2,
     "remote.offline_eval": 2,
     "remote.wire": 1,
     "remote.http": 2,

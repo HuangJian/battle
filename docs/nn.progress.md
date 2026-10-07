@@ -980,3 +980,13 @@ DECISIONS → `DECISIONS.md §2026-10-06-goalnn-replay-export-eval-round-picker`
 全文 → `docs/nn/console.md` §32；
 门禁 → `bun run check`（根）/ 控制台 typecheck+test/build（`dashboard/`）/ nn python 用例 `nn-training/tests/worker/test_eval_replays_once.py`；
 落盘 → `plan/replay-export-eval-round-picker.plan.md` 二轮供述 + 签入 `[consolidation] replay-export-eval-round-picker: …`。
+
+**2026-10-07**：补传腿忙等修复 + 独立进程（`plan/offline-deliver-isolation.plan.md` 的 P0+P1，二次评审处置见其 §10）。
+根因 = `_repost` 只唤醒不消费 ⇒ `_drain_loop` 100% 核自旋（实测 0.6s 空转 **50085 圈**，且忙等期间零日志）；
+判据换成不变量探针 `_idle_spins == 0`（确定性，无窗口/容差）；欠账落盘（`owed_reposts` / `rejected`）
++ 每轮 CPU 埋点（`os.times` 差 = 云上 H6a/H6b 唯一判据，`plan/tpu-cpu-silent-downgrade.plan.md` §10.3 的闭环）。
+P1 = `remote/deliver_worker.py`（子进程）+ `remote/deliver_proc.py`（`DelivererProcess`，子进程起不来 ⇒ **sticky 降级**
+线程模式且补传仍送达）；切两模块是 LOC 预算（<1000 代码行/文件）逼的。
+DECISIONS → `DECISIONS.md §2026-10-07-goalnn-offline-deliver-isolation`；全文 → `docs/nn/remote-transport.md` §69；
+门禁 → nn python gate **3747 passed / 0 failed**（顺带修 `e2e/test_auto_handoff_e2e.py` 里赌开发机开着 dashboard 的用例）；
+未做（显式）→ P2 `_eval_rows_for` / `_row_for` 增量读。

@@ -633,7 +633,7 @@ def test_deliverer_carries_course_so_a_multi_course_hub_can_route(tmp_path: Path
 
 def test_make_deliverer_passes_the_course_through() -> None:
     """工厂也接这个参数（错过它 = 参数在构造链上静默丢掉，与「没实现」同效）。"""
-    from remote.offline_deliver import make_deliverer
+    from remote.deliver_proc import make_deliverer
 
     d = make_deliverer(
         hub_url="http://hub", hub_token="t", run_id=RUN, artifacts_dir="x", course="c4"

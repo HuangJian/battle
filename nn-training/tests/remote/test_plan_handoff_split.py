@@ -59,9 +59,14 @@ HANDOFF_NAMES = {
     "verify_plan_file",
 }
 
-#: `plan_handoff` 的允许 import 面（**闭集**）：stdlib 八 + 仓内八。
+#: `plan_handoff` 的允许 import 面（**闭集**）：stdlib 八 + 仓内九。
 #: `remote.offline_eval` 是 `_setup_cloud_eval` 里的**函数内延迟 import**（随跨度逐字节搬来，
 #: 云机 A 层评估才需要）；offline_eval 站在 L1 ⇒ L2 的 `plan_handoff` 依赖方向合法。
+#:
+#: 2026-10-07 加 `remote.deliver_proc`（`plan/offline-deliver-isolation.plan.md` P1）：装配点
+#: 从它拿 `make_deliverer` / `DelivererLike`（进程模式那一面；另立模块是因为
+#: `tests/test_python_loc_budget.py` 的单文件 <1000 代码行预算）。它是 L2：只向下依赖
+#: `offline_deliver`(L1) + `common.protocol`(L0) ⇒ 对 `plan_handoff`(L5) 方向合法。
 ALLOWED_IMPORTS = {
     "__future__",
     "collections.abc",
@@ -76,6 +81,7 @@ ALLOWED_IMPORTS = {
     "common.platform_utils",
     "remote.artifacts",
     "remote.bundle",
+    "remote.deliver_proc",
     "remote.offline_deliver",
     "remote.offline_eval",
     "worker.plan",
@@ -283,3 +289,38 @@ def test_eval_slot_writers_live_in_handoff() -> None:
     engine_src = ENGINE_FILE.read_text(encoding="utf-8")
     for reader in ("_maybe_cloud_eval", "runner_timeout", "_close_eval"):
         assert f"def {reader}(" in engine_src, f"引擎侧读者 {reader} 不见了（槽位契约要重判）"
+
+
+# ─────────────── ⑦ 补传收线顺序（换实现不许动调用方）───────────────
+
+
+def test_deliver_final_always_precedes_close_delivery() -> None:
+    """`plan_run` 的收尾路径：`deliver_final` 必在 `close_delivery` **之前**（逐路径成对）。
+
+    这是数据面契约：收线在前 = 段末摘要在 hub 侧缺失，而那就是 `submit_final` 存在的唯一理由
+    （失败收尾那条还带更短的预算，`plan_run.py` 的三条路径 = `:492/498` · `:533/534` · `:544/550`）。
+    换实现（进程内线程 → 独立子进程，2026-10-07）**不该改调用方** ⇒ 本闸钉在引擎源码上（不钉某个实现）。
+    末尾两条计数断言防「空过」：三条路径 × 2 次调用。
+    """
+    seq: list[str] = []
+    for fn in [n for n in ast.walk(_tree(ENGINE_FILE)) if isinstance(n, ast.FunctionDef)]:
+        calls = sorted(
+            (n.lineno, n.func.attr)
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Call)
+            and isinstance(n.func, ast.Attribute)
+            and n.func.attr in ("deliver_final", "close_delivery")
+        )
+        names = [name for _, name in calls]
+        if not names:
+            continue
+        assert names[0] == "deliver_final", f"`{fn.name}` 先收线再投段末摘要：{names}"
+        assert len(names) % 2 == 0, f"`{fn.name}` 的 final/close 不成对：{names}"
+        for a, b in zip(names[0::2], names[1::2], strict=True):
+            assert (a, b) == ("deliver_final", "close_delivery"), (
+                f"`{fn.name}` 的补传收线顺序乱了（段末摘要会丢）：{names}"
+            )
+        seq += names
+    assert seq.count("close_delivery") == 3, f"`plan_run` 的收尾路径数变了（现为 3）：{seq}"
+    assert len(seq) == 6, f"final/close 配对数变了：{seq}"
+

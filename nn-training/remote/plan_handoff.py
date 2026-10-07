@@ -60,11 +60,8 @@ from remote.artifacts import (
     sha256_file,
 )
 from remote.bundle import CODE_NAME as BUNDLE_CODE_NAME
-from remote.offline_deliver import (
-    DRAIN_FLUSH_SEC,
-    OfflineDeliverer,
-    make_deliverer,
-)
+from remote.deliver_proc import DelivererLike, make_deliverer
+from remote.offline_deliver import DRAIN_FLUSH_SEC
 from worker.plan import plan_pairs_fp, planned_iters, validate_plan
 
 #: 产物目录里随段携带的 TS 运行时树（让「只下载产物 zip」的机器也能续跑）。
@@ -168,7 +165,8 @@ class RunContext:
         budget_sec: float = 0.0,
         #: 产物补传（「中途能连上 hub 就自动恢复在线回传」）：None = 这条腿没有补传
         #: （纯离线且没给 hub 地址，或用户显式关掉）——产物照常落本地。
-        deliverer: OfflineDeliverer | None = None,
+        #: 类型是 `DelivererLike`：两种实现（进程内线程 / 独立子进程）同接口，换实现不动调用方。
+        deliverer: DelivererLike | None = None,
         run_job_fn: Callable[..., dict] | None = None,
         # ---- 云机 A 层评估（`eval_on_cloud`；见 `remote/offline_eval.py`）----
         #: True = 每 `eval_every` 轮在本机跑一遍 A 层语料（同 in-loop 口径，永不拖垮训练）。
@@ -308,7 +306,8 @@ def open_run_context(
     #: hub 侧的课程键（多课程 hub 的补传归位键；空 = 单课程 hub）。见 `OfflineDeliverer.course`。
     hub_course: str = "",
     deliver: bool = True,
-    deliverer: OfflineDeliverer | None = None,
+    #: 换实现不该动调用方（`DelivererProcess` 与本进程内线程版同接口，见 `DelivererLike`）。
+    deliverer: DelivererLike | None = None,
     run_job_fn: Callable[..., dict] | None = None,
     log: Callable[[str], None] = _log_default,
 ) -> RunContext:
@@ -363,6 +362,9 @@ def open_run_context(
                     run_id=store.run_id,
                     artifacts_dir=store.root,
                     course=hub_course,
+                    # 控制/状态文件的落点（只有子进程模式用）：`work_dir` **跨会话复用**，
+                    # 所以文件名必须带会话身份（见 `DelivererProcess._new_state_path`）。
+                    work_dir=work_dir,
                     log=log,
                 )
                 if deliver
@@ -378,6 +380,7 @@ def open_run_context(
         log(
             f"产物补传已启用：{st['hub_url']}（已投递 {st['delivered']} 轮，"
             f"待投递 {st['pending']} 轮；{'后台与 PPO 并行' if st['background'] else '同步'}"
+            f"；模式 {st.get('mode', 'thread')}"
             "）——连不上就静默跳过，训练不受影响"
         )
     _setup_cloud_eval(ctx)

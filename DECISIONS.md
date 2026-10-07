@@ -8133,3 +8133,31 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
 - **测试纪律**：bun test 在本机跑时 `getTimezoneOffset()` = 0（实测），UTC→本地是恒等 ⇒ 断言会
   **静默空过**；`tests/eval-cloud-time-utc.test.ts` 必须把 TZ 钉成 `Asia/Shanghai` + offset 卫兵。
 - **违反后果**：把云机串按本地解析 ⇒ 时间列错 8h、按时间排序错乱。
+
+## §2026-10-07-goalnn-offline-deliver-isolation（2026-10-07，补传腿忙等修复 + 独立进程：落地 plan/offline-deliver-isolation 的 P0+P1）
+
+- **背景**：云机 `x21-psh-b` 530 起 PPO 单步 `0.186 → 5.26 → 7.40 s/step`（墙钟 ≈**40×** 于
+  编译+追踪+拷贝之和 ⇒ 训练线程被抢 CPU/GIL，隧道恢复即自愈）。诊断 `plan/tpu-cpu-silent-downgrade.plan.md` §9/§10；
+  设计与两轮评审 → `plan/offline-deliver-isolation.plan.md`（§9 一审 / §10 二次评审六条）。
+- **根因（代码级）**：`_repost` 是唯一「只唤醒、不消费」的标志 —— `_drain_loop` 认它当唤醒源，`_sync`
+  探活失败又放回 ⇒ 内层 `while` 立刻退出、**不 wait 也不干活** = 100% 核自旋（实测 0.6s 空转 **50085 圈**）；
+  且忙等期间这条腿零日志。
+- **判据（新不变量）**：`_idle_spins` 只在「这一圈既没干活、也没 `wait`、也没收线」时 +1 ⇒ 修好后**该分支
+  不可达** ⇒ 断言 `== 0` 是确定性的（无窗口/容差/sleep）；`_drain_ticks` 只作埋点（它每 0.5s 超时唤醒仍涨）。
+  P0 顺序 = 先落计数器（不改行为）⇒ 未修代码上确认红 ⇒ 再修。
+- **P0**：`_repost` 降为工作项 + 持久集（只对真正处理过且 `ok`/`skip` 的销账，`stop`/被截断的一律留着）；
+  `close()` 唤醒条件补 `_repost`；**欠账落盘**（`delivered.json` 的 `owed_reposts`——该轮早已记账，只靠内存
+  就永久丢 hub 侧那一轮的 `eval_rows`；`rejected` 按 `weights_fp` 校验）；毒丸项（同一 it 连续 3 次异常 ⇒
+  降级销账）；每轮埋点 `cpu=+x.xxs ticks= idle= pending= repost=`（`os.times` 差 = 云上 H6a/H6b 唯一判据）。
+- **P1**：`remote/deliver_worker.py`（子进程：控制通道 / 状态面 / idle 三合一 / tick·stop 预算 / **stdin EOF
+  判父死**）+ `remote/deliver_proc.py`（`DelivererProcess` 与 `OfflineDeliverer` **同接口** = `DelivererLike`
+  Protocol；`make_deliverer(mode)`；子进程起不来 ⇒ **sticky 降级线程模式而补传仍送达**——老包没有新模块，
+  这是上线后的常态）。切两个模块是被 **LOC 预算**（单文件代码行 <1000）逼的。
+- **实现中抓到的真 bug（两轮评审都漏，慢层用例抓到）**：① `close()` 先关 stdin ⇒ 子进程把段末 flush 误当
+  「父进程已死」退出；② 子进程收线时 sync 推不动会等满预算 ⇒ 改成「一趟推不动就收线」（budget 是上界不是目标）。
+- **门禁**：nn python gate **3747 passed / 0 failed**；顺带修 `e2e/test_auto_handoff_e2e.py` 那条赌开发机
+  开着 dashboard 的用例（HEAD worktree 上复现为红）。慢层真 spawn 刻意只留 5 例：8 次 python 启动会把邻居
+  `remote_iter` 顶红（实测）。
+- **落点**：`nn-training/remote/{offline_deliver,deliver_worker,deliver_proc,plan_handoff}.py` ·
+  `nn-training/tests/remote/test_offline_deliver_{async,proc}.py` · 全文 → `docs/nn/remote-transport.md` §69。
+- **未做（显式）**：P2 —— `_eval_rows_for` / `_row_for` 的增量读（33MB 全量解析），不在本次范围。

@@ -48,6 +48,7 @@ flush（默认 `DRAIN_FLUSH_SEC`，超时就放手——产物已在本地，不
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import urllib.error
@@ -87,11 +88,27 @@ DRAIN_FLUSH_SEC = 90.0
 DRAIN_TICK_SEC = 0.5
 #: 一次 drain 里 `sync()` 的最多轮数（纯防御：`pending()` 单调收敛，正常远到不了）。
 DRAIN_MAX_PASSES = 256
-
-
+#: 同一轮**连续**投递异常多少次之后把它当内容问题（记进 `_rejected` 并销账）。
+#: 为什么需要：`_repost` 是持久集 ⇒ 一个永远投不出去的轮次（文件被删/盘抖动/解析炸）会在每次
+#: 唤醒时重抛一次、并让整趟 `_push_backlog` 中止 —— 既不响亮也不收敛（2026-10-07 补，见 plan §10.6-1）。
+POST_FAILURE_LIMIT = 3
 def _log_default(msg: str) -> None:
     """默认日志（tag=`deliver`）——行格式见 `common.logutil`（`clock=time` 保可注入）。"""
     log_line("deliver", msg, clock=time)
+
+
+def _cpu_seconds() -> float:
+    """本进程累计 CPU 秒（user+sys）。
+
+    为什么用 `os.times()` 而不是 `resource`：后者是 Unix-only，而这条腿要在 Windows 上跑测试
+    （2026-10-06 事故的埋点判据：**本进程 CPU 吃满 ⇒ H6a（进程内）**；本进程正常而同机被吃满
+    ⇒ H6b（`cloudflared` 等外部）**）。永不抛——埋点坏了不该影响补传。
+    """
+    try:
+        t = os.times()
+        return float(t.user) + float(t.system)
+    except Exception:
+        return 0.0
 
 
 def _urllib_opener(url: str, data: bytes, headers: dict, timeout: float) -> tuple[int, bytes]:
@@ -180,6 +197,22 @@ class OfflineDeliverer:
         self._stopping = False
         self._drain_until = 0.0
         self._thread: threading.Thread | None = None
+        #: `submit_final` 来过没有（段末核对的输入之一：final 提交了而 `result_done` 仍假 = 摘要丢了）。
+        self._final_submitted = False
+        # ---- 埋点与不变量探针（§2.4 / §2.3；零成本：两个 int + 一次 `os.times`）----
+        #: 外层循环**真正走到循环体**的圈数（内层 `wait` 超时不算）——忙等时每秒涨几万次。
+        #: 云上它是 H6a 的读数；本地它只是埋点（**判据**是下面的 `_idle_spins`）。
+        self._drain_ticks = 0
+        #: 不变量探针：**只在「这一圈既没干活、也没 wait、也没在收线」时 +1**。
+        #: 2026-10-06 事故（530 + 待重投 ⇒ 纯转圈烧一个核）就是这条不变量被破的形态；
+        #: 修好后该分支不可达 ⇒ 断言 `== 0` 是**确定性**的（无窗口、无容差、无 sleep）。
+        self._idle_spins = 0
+        self._cpu_prev = _cpu_seconds()
+        #: 已被 hub **内容拒收**的轮次的权重指纹（`it → sha256`）：只为把拒收跨会话带过去时
+        #: 能对账「这一轮还是不是那一轮」（见 `_load_ledger` / `_save_ledger`）。
+        self._rejected_fp: dict[int, str] = {}
+        #: 同一 `it` 连续投递异常的次数（毒丸项识别；见 `_post_artifact` 的调用点）。
+        self._post_failures: dict[int, int] = {}
         self._load_ledger()
         if not self.enabled and not self.disabled_reason:
             missing = []
@@ -225,6 +258,7 @@ class OfflineDeliverer:
         end_it_reached: bool = False,
     ) -> None:
         """段末：先推积压，再推段末摘要（非阻塞；段末摘要不可变不了，只能最新有效）。"""
+        self._final_submitted = True
         if not self.background:
             self.sync()
             self.deliver_result(
@@ -249,13 +283,39 @@ class OfflineDeliverer:
         if self._thread is None:
             return
         budget = max(0.0, float(timeout))
+        if self._thread is None:
+            # 同步/子进程模式没有后台线程可等：段末核对照样要做（响亮，不静默）。
+            self._report_close()
+            return
         with self._cv:
             self._stopping = True
             self._drain_until = self._now() + budget
-            self._want_sync = self._want_sync or bool(self.pending())
+            # 唤醒条件必须与 `_drain_loop` 的一致 —— 漏了 `_repost` 就会把「只欠重投」的段末丢掉
+            # （`pending()` 跳过已投递项，而重投的对象**正是**已投递的那一轮）。
+            self._want_sync = self._want_sync or bool(self.pending()) or bool(self._repost)
             self._cv.notify_all()
         # join 给内部预算之外的一点余量（线程要在自己那一侧判 deadline 并收尾）
         self._thread.join(timeout=budget + 5.0)
+        self._report_close()
+
+    def _report_close(self) -> None:
+        """段末收线后的**响亮核对**（不许静默丢东西）。
+
+        两种要响的情况：
+
+          * 还有没送达的重投 —— 那一轮**已在账本里**，`pending()` 永远不再含它，欠账只能靠
+            `delivered.json` 的 `owed_reposts` 在**下一次会话**续投（丢一次 = hub 侧该轮
+            `eval_rows` 永久缺失：这正是 `submit_eval_round` 存在的唯一理由）；
+          * `final` 提交过而 `result_done` 仍为假 = 段末摘要没送出去。
+        """
+        left = self.unsent_reposts()
+        if left:
+            self.log(
+                f"段末仍有 {len(left)} 轮重投未送达（it{left[0]}…it{left[-1]}）——"
+                "已记进 delivered.json 的 owed_reposts，下次会话（同一产物目录）会自动补"
+            )
+        if self._final_submitted and not self._result_done:
+            self.log("段末摘要未送达（final 已提交但 result_done=False）——留给下次会话")
 
     def _drain_loop(self) -> None:
         """后台线程主体：串行消费「该推一轮了」/「段末」两种请求。**永不退出到异常**。
@@ -263,12 +323,17 @@ class OfflineDeliverer:
         每个请求各自兜异常（一个坏请求不得让整条补传腿永久哑掉）。
         """
         while True:
+            self._drain_ticks += 1
             with self._cv:
+                # ⚠ 等待条件**不含** `_repost`（2026-10-06 事故）：它是唯一「只唤醒、不消费」的标志，
+                # 一旦把它当唤醒源，探活失败把它放回后就会变成「既不 wait 也不干活」的纯转圈
+                # （2026-10-07 实测：0.6s 空转 50085 圈 = 一个核烧满）。它是**工作项**，不是唤醒源：
+                # `_repost` 由同一次唤醒里的 `_push_backlog` → `_sync` 消费（`submit_eval_round`
+                # 自己会置 `_want_sync`，所以登记时会当场试一次）。
                 while not (
                     self._want_sync
                     or self._final is not None
                     or self._stopping
-                    or self._repost
                 ):
                     self._cv.wait(timeout=DRAIN_TICK_SEC)
                 stopping = self._stopping
@@ -277,9 +342,12 @@ class OfflineDeliverer:
                 self._want_sync = False
                 self._final = None
                 deadline = self._drain_until
+            worked = False
             if want_sync or final is not None:
+                worked = True
                 # 收线时强制探一次（绕过负结果 TTL）——否则整段最后一次 flush 会被上一次失败静默吞掉
                 self._guard(self._push_backlog, deadline, stopping)
+                self._guard(self._log_diag, "段末" if final is not None else "轮次")
             if final is not None:
                 it_end, state, summary, end_it_reached = final
                 self._guard(
@@ -291,7 +359,12 @@ class OfflineDeliverer:
                 )
             elif stopping:
                 # 收线：本次 flush 已按预算跑完（推不完也走——产物在本地目录里）。
+                # 段末核对统一在 `close()` 里做（一次，不重复刷日志）。
                 return
+            elif not worked:
+                # 不变量探针：走到这里 = 这一圈**既没干活、也没 wait、也没在收线** ⇒ 纯转圈。
+                # 不变量：*「每一次唤醒，要么干活，要么 `wait`；禁止既不 wait 也不干活的回圈。」*
+                self._idle_spins += 1
 
     def _push_backlog(self, deadline: float, force_probe: bool = False) -> int:
         """把积压尽量推完（每次 `sync()` 最多 sync_cap 轮，直到推空/推不动/超预算）。"""
@@ -306,6 +379,21 @@ class OfflineDeliverer:
             if not self.pending():
                 return total
         return total
+
+    def _log_diag(self, kind: str) -> None:
+        """每轮一条埋点（§2.4 最便宜那档）：进程 CPU 秒增量 + 圈数 + 积压。
+
+        判读（2026-10-06 事故）：**本进程 CPU 吃满 ⇒ H6a（进程内）**；**本进程正常而同机被吃满
+        ⇒ H6b（`cloudflared` 等外部）**。它的第二职能是不变量探针的读数（`idle` 必须恒为 0；
+        2026-10-06 那段忙等就是 `idle` 每秒涨几万的形态）。
+        """
+        now = _cpu_seconds()
+        dt = max(0.0, now - self._cpu_prev)
+        self._cpu_prev = now
+        self.log(
+            f"{kind}补传检查：cpu=+{dt:.2f}s ticks={self._drain_ticks} idle={self._idle_spins} "
+            f"pending={len(self.pending())} repost={len(self._repost)}"
+        )
 
     def _guard(self, fn: Callable[..., object], *a: object, **kw: object) -> None:
         """后台线程里执行一件补传工作：任何异常只记一笔（线程必须活到下次提交）。"""
@@ -338,8 +426,52 @@ class OfflineDeliverer:
             if isinstance(it, int) and not isinstance(it, bool):
                 self._delivered.add(it)
         self._result_done = bool(data.get("result_done"))
+        # 跨会话的两笔欠账（必须落盘；§10.3）：
+        #   * `owed_reposts` —— 上一段没送出去的重投，**本会话直接接手**（那些轮次早已记账，
+        #     `pending()` 不会再现它们 ⇒ 不读回就是丢一次补读数）；
+        #   * `rejected` —— 被 hub 内容拒收的轮次（按**权重指纹**记账）：核对得上才认，
+        #     指纹不符（同一 it 换了内容）⇒ 不认，新会话照常再试一次。
+        for it in data.get("owed_reposts") or []:
+            if isinstance(it, int) and not isinstance(it, bool):
+                self._repost.add(it)
+                self._rejected.pop(it, None)
+        if self._repost:
+            self.log(f"上个会话欠 {len(self._repost)} 轮重投（补评估读数）——本会话继续补")
+        for row in data.get("rejected") or []:
+            if not isinstance(row, dict):
+                continue
+            it = row.get("it")
+            fp = str(row.get("weights_fp", "") or "")
+            if not isinstance(it, int) or isinstance(it, bool):
+                continue
+            if not fp or not self._weights_fp_matches(it, fp):
+                continue  # 没证据 / 内容换了 ⇒ 当它没被拒过（宁多试一次，不静默丢一轮）
+            self._rejected[it] = str(row.get("why", "") or "")
+            self._rejected_fp[it] = fp
+
+    def refresh_from_ledger(self) -> None:
+        """重读 `delivered.json`（**只读镜像用**：进程模式下账本的写者是子进程，父侧那份缓存
+        不刷新就会骗人：明明三轮回传都到了，`pending()` 还列着它们）。
+
+        与 `_load_ledger` 的差别只有一个：先把上一份读面清掉（否则删除的记账永远删不掉）。
+        """
+        self._delivered.clear()
+        self._rejected.clear()
+        self._rejected_fp.clear()
+        self._result_done = False
+        self._load_ledger()
+
+    def _weights_fp_matches(self, it: int, fp: str) -> bool:
+        """这一轮的权重文件是不是**就是**上次被拒收的那份（只在加载时，对「被拒过的」那几轮算）。"""
+        try:
+            wj = ArtifactStore(self.root, run_id=self.run_id).weights_path(it).read_bytes()
+        except OSError:
+            return False
+        return sha256_bytes(wj) == fp
 
     def _save_ledger(self) -> None:
+        with self._cv:
+            owed = sorted(self._repost)
         atomic_write_json(
             self.ledger_path,
             {
@@ -347,6 +479,14 @@ class OfflineDeliverer:
                 "hub_url": self.base_url,
                 "artifacts": sorted(self._delivered),
                 "result_done": self._result_done,
+                # 欠账（§10.3）：`owed_reposts` = 还没送达的重投（送达即销账）；`rejected` = 内容
+                # 拒收过的轮次 + 当时的权重指纹。两者都是**磁盘状态**：_repost 只住内存时，
+                # 段末或子进程重启丢掉的那一次就永远补不回来了。
+                "owed_reposts": owed,
+                "rejected": [
+                    {"it": it, "weights_fp": self._rejected_fp.get(it, ""), "why": why}
+                    for it, why in sorted(self._rejected.items())
+                ],
                 "updated_at": self._now(),
             },
         )
@@ -474,16 +614,20 @@ class OfflineDeliverer:
 
     # ------------------------------------------------------------ 投递
 
-    def sync(self) -> int:
-        """把待投递轮次尽量推上去，返回本轮投递成功数。**永不抛**。"""
+    def sync(self, *, force_probe: bool = False) -> int:
+        """把待投递轮次尽量推上去，返回本轮投递成功数。**永不抛**。
+
+        `force_probe` = 绕过探活的**负结果 TTL**：段末 / 子进程收线时用——那是最后一次机会，
+        不能被上一次失败静默吞掉（否则整段最该送出去的那几轮会“什么都没做”地结束）。
+        """
         try:
-            return self._sync()
+            return self._sync(force_probe=force_probe)
         except Exception as e:  # 兜底：补传的任何意外都不得波及训练
             self.log(f"补传异常（忽略，训练继续）：{type(e).__name__}: {e}")
             return 0
 
     def submit_eval_round(self, it: int) -> None:
-        """云机评估落账后请求**重投**这一轮（幂等；非后台模式 = 空操作）。
+        """云机评估落账后请求**重投**这一轮（幂等；非后台模式 = 空操作，见 `mark_repost`）。
 
         为什么需要重投而非常规积压：产物 POST 发生在落盘之后而评估还在飞（两者刻意并行，
         见 `remote/offline_eval.CloudEvalRunner`）⇒ 第一次投递时这一轮的 `eval_rows` 还不存在。
@@ -491,13 +635,33 @@ class OfflineDeliverer:
         （`_post_offline_artifact` → `merge_eval_rows`）⇒ 重投一次就把读数补齐。
 
         非后台（同步）模式不做：那条路上评估本来就在投递之前跑完（`_close_eval` 的时序）。
+        子进程那条腿用它自己的循环调 `mark_repost`（同一个登记面，不依赖线程）。
         """
         if not self.background or self._thread is None:
             return
+        self.mark_repost(it)
+
+    def mark_repost(self, it: int) -> None:
+        """登记一轮「要重投」（评估行迟到）。**与模式无关**：线程模式走 `submit_eval_round`，
+        子进程（`background=False`）直接用这个。
+
+        三件事缺一不可：① 进持久集；② **落盘**（`owed_reposts`）—— 段末/重启丢掉的那一次，
+        只有磁盘知道；③ 唤醒线程（`submit_round` 之后的那次唤醒也会把它带上）。
+        重试节奏：由**下一次唤醒**承担（不是自动重试；轮间隔 30–700s ⇒ 最坏等一个轮间隔），
+        而跨会话由 `owed_reposts` 兜住。
+        """
+        it = int(it)
         with self._cv:
-            self._repost.add(int(it))
-            self._want_sync = True  # 唤醒后台线程（它的等待条件里也看 repost）
+            self._repost.add(it)
+            self._rejected.pop(it, None)  # 重投是「补读数」，与被内容拒收无关
+            self._want_sync = True
             self._cv.notify_all()
+        self._save_ledger()
+
+    def unsent_reposts(self) -> list[int]:
+        """还没送达的重投（升序）——段末核对与子进程状态面都读它。"""
+        with self._cv:
+            return sorted(self._repost)
 
     def _sync(self, *, force_probe: bool = False) -> int:
         """`force_probe` = 绕过探活的负结果 TTL。
@@ -507,33 +671,43 @@ class OfflineDeliverer:
         静默什么都不做（最该送出去的那份摘要就此丢掉）。
 
         排队顺序：真积压本轮的在前、重投（语评估行）的在后——重投那一轮的权重早在 hub 上，
-        它只是「把新的读数补上」，不该挡在真正的待投递轮次前面。
+        它只是「把新的读数补上」，不该挡在真正的待投递轮次前面（代价：backlog ≥ `sync_cap` 时
+        重投会饿着，而 backlog 总会清空 ⇒ 接受的饥饿，与本次改动前同语义）。
+
+        `_repost` 是**持久集**（2026-10-07）：不再「先取走、失败再放回」——那样会留下一个
+        「只唤醒、不消费」的入口，正是 2026-10-06 忙等事故的成因。只有**真正被 `_post_artifact`
+        处理过**且返回 `ok`/`skip` 的轮次才销账；被 `sync_cap` 截断在外的、返回 `stop` 的一律留着。
         """
         if not self.enabled or self.disabled_reason:
             return 0
         with self._cv:
             repost = sorted(self._repost)
-            self._repost.clear()
         todo = self.pending()
         todo += [it for it in repost if it not in todo]
         if not todo:
             return 0
         if not self.probe(force=force_probe):
-            with self._cv:
-                self._repost.update(repost)  # 还没送到，下一拍再试（重投天然幂等）
-            return 0
+            return 0  # 还没送到：重投留在 `_repost` 里（下一拍 / 下一次会话再试）
         done = 0
         sent: list[int] = []
+        changed = False
         for it in todo[: self.sync_cap]:
-            outcome = self._post_artifact(it)
+            outcome = self._post_artifact_guarded(it)
             if outcome == "stop":
-                break  # 传输坏了就别接着打——剩下的下轮再补
+                break  # 传输坏了/毒丸未达上限——别接着打，剩下的下轮再补
+            if outcome in ("ok", "skip"):
+                with self._cv:
+                    if it in self._repost:
+                        self._repost.discard(it)
+                        changed = True
+                self._post_failures.pop(it, None)
             if outcome == "ok":
                 done += 1
                 sent.append(it)
             # "skip" = 这一轮被内容拒收（已记进 `_rejected`）：跳过它，后面的照推
-        if done:
+        if done or changed:
             self._save_ledger()
+        if done:
             left = len(self.pending())
             self.log(
                 f"补传 {done} 轮（it{sent[0]}…it{sent[-1]}）→ {self.base_url}"
@@ -541,14 +715,37 @@ class OfflineDeliverer:
             )
         return done
 
-    def _reject_round(self, it: int, reason: str) -> str:
-        """把这一轮记进**会话内**拒收集（`pending()` 从下拍起不再带它），返回 "skip"。
+    def _post_artifact_guarded(self, it: int) -> str:
+        """`_post_artifact` 的**毒丸防护**：同一轮连续 `POST_FAILURE_LIMIT` 次异常 ⇒ 当内容问题处理。
+
+        为什么需要：`_repost` 是持久集 ⇒ 一个**永远投不出去**的轮次（权重文件被删/盘抖动/编码炸）
+        会在每次唤醒时重抛一次，并让整趟 `_push_backlog` 中止 —— 既不响亮也不收敛。
+        """
+        try:
+            return self._post_artifact(it)
+        except Exception as e:
+            n = self._post_failures.get(it, 0) + 1
+            self._post_failures[it] = n
+            why = f"{type(e).__name__}: {e}"
+            if n >= POST_FAILURE_LIMIT:
+                return self._reject_round(it, f"连续 {n} 次投递异常（{why}）")
+            self.log(f"补传 it{it} 投递异常（第 {n} 次，{why}）——本轮放弃，下轮再试")
+            return "stop"
+
+    def _reject_round(self, it: int, reason: str, weights_fp: str = "") -> str:
+        """把这一轮记进拒收集（`pending()` 从下拍起不再带它），返回 "skip"。
 
         与 401/403 的「停用整条腿」严格区分：内容问题（体形状/账本行）只毁一轮，而停用
         会把这一整段剩下的几十轮全部拦下（2026-09-22 事故：it1 一次 400 之后整段再没回过
         一轮）；而鉴权问题每轮重试会把本 IP 封掉（D9）——两者代价完全不同，不能共用一个反应。
+
+        跨会话（2026-10-07）：这条记录随 `delivered.json` 带上**权重指纹**——子进程重启/idle-timeout
+        会把「会话」缩到分钟级，只住内存的话同一轮会反复重投 ~1.9MB；而新会话读回时先核对指纹，
+        同一 `it` 换了内容就不认（照常再试一次）。
         """
         self._rejected[int(it)] = reason
+        if weights_fp:
+            self._rejected_fp[int(it)] = str(weights_fp)
         self.log(
             f"补传 it{it} **本轮跳过**（{reason}）——产物照常落本地；"
             f"其余轮次照推（本会话不再重试这一轮，新会话会再试一次）"
@@ -608,7 +805,9 @@ class OfflineDeliverer:
             body["course"] = self.course
         raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(raw) > OFFLINE_ARTIFACT_BODY_MAX:
-            return self._reject_round(it, f"补传体 {len(raw)}B 超上限 {OFFLINE_ARTIFACT_BODY_MAX}B")
+            return self._reject_round(
+                it, f"补传体 {len(raw)}B 超上限 {OFFLINE_ARTIFACT_BODY_MAX}B", wfp
+            )
         status, resp = self._post(OFFLINE_ARTIFACT_PATH, raw)
         if not status:  # 没送达（_post 已记一笔）
             return "stop"
@@ -621,7 +820,7 @@ class OfflineDeliverer:
             self._disable(f"补传 it{it} 被拒（HTTP {status}）——本会话停用补传")
             return "stop"
         if status in (400, 413, 422):
-            return self._reject_round(it, f"HTTP {status}: {_err_text(resp)}")
+            return self._reject_round(it, f"HTTP {status}: {_err_text(resp)}", wfp)
         self._reachable = False
         self._throttled_log(
             "post", f"补传 it{it} 失败（HTTP {status}: {_err_text(resp)}）——本轮放弃，下轮再试"
@@ -765,11 +964,20 @@ class OfflineDeliverer:
             "delivered": len(self._delivered),
             "pending": len(self.pending()),
             "rejected": dict(self._rejected),
+            #: 还没送达的重投（§10.3）：段末核对与子进程状态面（`delivered.json` 的 `owed_reposts`）
+            "reposts_unsent": len(self._repost),
+            #: 埋点/探针读数（§2.4）：`idle_spins` **恒应为 0**（非 0 = 有人在空转）
+            "ticks": self._drain_ticks,
+            "idle_spins": self._idle_spins,
             "result_done": self._result_done,
             "disabled_reason": self.disabled_reason,
             "background": self.background,
             "drain_alive": bool(self._thread is not None and self._thread.is_alive()),
         }
+
+
+#: 供调用方一致性检查（测试与 operator 脚本读它，避免抄第二份路径常量）。
+DELIVERED_NAME = OFFLINE_DELIVERED_NAME
 
 
 def _err_text(resp: bytes, max_chars: int = 300) -> str:
@@ -787,37 +995,5 @@ def _err_text(resp: bytes, max_chars: int = 300) -> str:
     return " ".join(s.split())[:max_chars]
 
 
-def make_deliverer(
-    *,
-    hub_url: str,
-    hub_token: str,
-    run_id: str,
-    artifacts_dir: str | Path,
-    course: str = "",
-    #: 后台并行（缺省开：补传与 PPO 并行是用户 2026-09-22 的硬要求，见模块 docstring）。
-    #: 只有需要「同步等它推完」的调用方（老测试/单步调试）才显式关掉。
-    background: bool = True,
-    log: Callable[[str], None] = _log_default,
-) -> OfflineDeliverer | None:
-    """构造补传器：**缺 hub_url 或 token 就返回 None**（= 这条腿没有补传，不是错误）。
-
-    调用方（`run_loop`）因此只需 `if d is not None`，不必自己判断「参数齐不齐」。
-    `course` = 本份产物在 hub 里的归位键（多课程 hub 必需；见 `OfflineDeliverer.__init__`）。
-    需要后台并行时调用方还得调一次 `start()`（构造与起线程分开，便于测试注入替身）。
-    """
-    if not str(hub_url or "").strip() or not str(hub_token or "").strip():
-        return None
-    return OfflineDeliverer(
-        base_url=hub_url,
-        token=hub_token,
-        run_id=run_id,
-        artifacts_dir=artifacts_dir,
-        course=course,
-        background=background,
-        log=log,
-    )
-
-
-#: 供调用方一致性检查（测试与 operator 脚本读它，避免抄第二份路径常量）。
-DELIVERED_NAME = OFFLINE_DELIVERED_NAME
-__all__ = ["DELIVERED_NAME", "OfflineDeliverer", "make_deliverer"]
+#: 本模块的出口（进程模式那一面在 `remote.deliver_proc.py`）。
+__all__ = ["DELIVERED_NAME", "OfflineDeliverer"]

@@ -6,6 +6,71 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §69 补传腿「忙等修复 + 独立进程」：`_repost` 降为工作项 / 欠账落盘 / `DelivererProcess`（plan/offline-deliver-isolation P0+P1，2026-10-07）
+
+**触发**：云机 `x21-psh-b` 530 起 PPO 单步 `0.186 → 5.26 → 7.40 s/step`（慢轮诊断给墙钟 ≈**40×** 于
+编译+追踪+拷贝之和 ⇒ 设备没换、没重编译，是**训练线程被抢 CPU/GIL**，隧道恢复即自愈）。
+诊断 → `plan/tpu-cpu-silent-downgrade.plan.md` §9/§10；设计与两轮评审 → `plan/offline-deliver-isolation.plan.md`
+（§9 一审 · §10 二次评审六条 · 本文件是落地后的事实记录）。
+
+**根因（代码级）**：`_repost` 是**唯一一个「只唤醒、不消费」的标志** —— `_drain_loop` 认它当唤醒源，
+`_sync` 探活失败又把它放回 ⇒ 内层 `while` 立刻退出、**无 work 分支、不进 `wait`** = 100% 核自旋
+（实测 0.6s 空转 **50085 圈**）；且忙等期间这条腿**一行日志都不打**（既不 wait 也不干活）。
+
+**P0 落地（`remote/offline_deliver.py`）**：
+
+1. **判据换成正不变量探针**：`_idle_spins` 只在「这一圈既没干活、也没 `wait`、也没收线」时 +1 ⇒ 修好后
+   **该分支不可达** ⇒ 断言 `== 0` 是**确定性**的（无窗口、无容差、无 sleep）。`_drain_ticks` 只作埋点
+   （它每 `DRAIN_TICK_SEC=0.5s` 超时唤醒仍会涨，「窗口内不增长」在绿实现上就是假的）。
+   顺序纪律：**先落计数器（不改行为）⇒ 在未修代码上确认红 ⇒ 再修**。
+2. **`_repost` 从唤醒条件降为工作项 + 持久集**：只有真正被 `_post_artifact` 处理过且返回 `ok`/`skip` 的才销账；
+   被 `sync_cap` 截断在外的、返回 `stop` 的**一律留着**（重投有意让位于真积压）；`close()` 的唤醒条件补
+   `_repost`（旧代码同病：段末只剩 repost 而 backlog 空 ⇒ 线程直接收线、repost 被丢）。
+3. **欠账必须是磁盘状态**：`delivered.json` 加 `owed_reposts`（未送达的重投——那一轮**早已记账**，只靠内存
+   ⇒ 下次会话 `pending()` 不再含它 ⇒ hub 侧该轮 `eval_rows` **永久缺失**）+ `rejected`（按 `weights_fp` 校验，
+   只对「被拒过的」那几轮读权重，`pending()` 的语义与开销不变）；送达即销账；段末/子进程退出仍有未销项
+   ⇒ **响亮一行**（`… 已记进 delivered.json 的 owed_reposts，下次会话会自动补`）。
+4. **毒丸项**：同一 `it` 连续 3 次异常 ⇒ 记进 `_rejected`（带原因）并销账（持久集下否则每次唤醒重抛 +
+   整趟 `_push_backlog` 中止）。
+5. **埋点**：每轮一条 `[deliver] … cpu=+x.xxs ticks=… idle=… pending=… repost=…`（`os.times()` 的
+   进程 CPU 秒**差值**）。云上判 H6a/H6b 的唯一判据就是它（与已有 `ppo_sec` 同屏看）；
+   **P0 与 P1 都要重新导出 `code.zip` 才生效**——在飞的包里连埋点都不存在。
+
+**P1 落地（进程隔离）**：
+
+* `remote/deliver_worker.py`（新，子进程）：控制通道（JSONL 增量 + 半行缓冲）、状态面、idle 三合一 + respawn、
+  tick 预算、`stop` 预算、**stdin EOF 判父死**、boot ok 握手；`DRAIN_FLUSH_SEC`/`DRAIN_TICK_SEC` 与主模块同源。
+* `remote/deliver_proc.py`（新，父侧）：`DelivererProcess` —— 与 `OfflineDeliverer` **同接口**（`DelivererLike`
+  Protocol：`start`/`submit_round`/`submit_eval_round`/`submit_final`/`close`/`status`/`pending`/`course`）·
+  `make_deliverer(mode)` · **sticky 降级**（子进程起不来 ⇒ 线程模式，补传仍然送达——老包没有新模块，
+  这是上线后的**常态**，不是异常）· 状态面 = 磁盘（`delivered.json` + artifacts）+ `deliver-status-<run_id>-<ts>.json`
+  + 父侧自持的 `restarts`；`drain_alive = proc.poll() is None`。
+* 为什么两个模块：**LOC 预算**（单文件代码行 <1000；`offline_deliver.py` 已 999 物理行）——不是设计偏好。
+* `remote/plan_handoff.py::open_run_context` 装配 + `mode=` 进启动日志（落地面 `DelivererLike | None` 替掉
+  `OfflineDeliverer | None`，`plan_run.py` 的顺序不动）。
+
+**实现中抓到的两个真 bug（两轮评审都没抓到，慢层用例抓到）**：
+
+1. `close()` 先关 stdin ⇒ 子进程把「段末 flush」误当「父进程已死」直接退出 ⇒ 修 EOF 与 `stop` 的优先级
+   （收线前必须先给 flush 机会）；
+2. 子进程收线时若 sync 推不动会等满预算 ⇒ 改成「**一趟推不动就收线**」（`budget` 是上界，不是目标值）。
+
+**测试**：快层（假 opener / 假 `Popen`，`tests/remote/test_offline_deliver_async.py`）+ 慢层（真子进程 +
+真 HTTP，`tests/remote/test_offline_deliver_proc.py`，5 例，全部显式 `pytest.mark.time_budget`）。
+慢层规模刻意压小：**8 次 python 启动会把邻居用例顶红**（实测 `remote_iter` 那条对 0.3s 判据的用例），
+故只留 5 例真 spawn，其余用「可注入的 spawn 函数」在快层跑。回归面：`_idle_spins == 0` 不变量 ·
+重投跨会话续投 · 毒丸销账 · 子进程死 ⇒ sticky 降级但补传仍达 · **`plan_run` 三条收尾路径的
+「`deliver_final` 先于 `close_delivery`」源级闸**（换实现不许动调用方，§4-D5）。
+
+**门禁**：nn python gate **3747 passed / 0 failed**（ruff + mypy 过）。顺带修掉
+`e2e/test_auto_handoff_e2e.py` 里「赌开发机开着 dashboard」的用例（在 HEAD worktree 上复现为红，
+改法 = 加自己的假控制台，与同文件兄弟用例同形）。
+
+**决策** → `DECISIONS.md` §2026-10-07-goalnn-offline-deliver-isolation；**未做（显式）** = P2
+（`_eval_rows_for` / `_row_for` 的增量读，33MB 全量解析；不在本次范围）。
+
+---
+
 ## §68 未完成就发得出去：在飞的活也发**备份副本**，空闲 worker 不再空转（用户口径，2026-10-06）
 
 **触发**（用户报障，Kaggle 真机）：新 worker 上线后 `polling hub (no job yet …)` 刷了一两分钟，

@@ -878,12 +878,19 @@ def test_dead_offline_holder_is_reclaimed_after_silence(tmp_path: Path) -> None:
 
 
 def test_dead_holder_does_not_block_seizing_another_course(tmp_path: Path) -> None:
-    """A 的租约 **活的** ⇒ B 领另一门课 409 `busy`（对照组）；A 静默超阈后 ⇒ 200。"""
+    """A 的租约 **活的** ⇒ B 领另一门课 409 `busy`（对照组）；A 静默超阈后 ⇒ 200。
+
+    ⚠ 必须给**自己的**假控制台（2026-10-07）：这一组的 409 判据走「请控制台核对任务包新鲜度」
+    那条路，而 `tests/conftest.py::pin_production_env` 把控制台地址钉在**死端口**上（2026-10-06
+    事故的隔离面）⇒ 控制台不可达时 hub 会**跳过**一拖一闸、直接 200。旧写法（不传
+    `console_url`）实际是在赌「开发机上正跑着 dashboard」，属于把测试打到真面上那一类。
+    """
     traj = tmp_path / "traj"
     for c in (C_AUTO, C_OTHER):
         _course_dirs(traj, c)
         _write_pack(traj, c, f"PK\x03\x04{c}".encode())
-    hub = _Hub(traj, lease_stale_sec=2.0)
+    console = _FakeConsole()
+    hub = _Hub(traj, lease_stale_sec=2.0, console_url=console.url)
     try:
         hub.ready(expect=[C_AUTO, C_OTHER])
         assert _offline_claim(hub, C_AUTO, "w-a")[0] == 200
@@ -902,6 +909,7 @@ def test_dead_holder_does_not_block_seizing_another_course(tmp_path: Path) -> No
         assert st2 == 200 and body2.get("lease"), body2
     finally:
         hub.close()
+        console.close()
 
 
 # ────── T5a（报障二）：导包窗口的**主人死掉且窗口过期** ⇒ 重开（可重触发、不占闸） ──────
