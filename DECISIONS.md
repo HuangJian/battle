@@ -8093,6 +8093,57 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
 - **落点**：终判局 → `tmp/x21-psh-{b,b0}-verdict/seg{415000,417000}.jsonl` · 读数 → plan §7（verdict/ΔW/golden 行）。
 - **ID 勘误（2026-10-07）**：原为 `2026-10-06-psh-legB-verdict` ⇒ 改小写（同上：大写 `B` 被撞号闸的解析正则
   截断成 `2026-10-06-psh-leg`，与 `-start` 报假撞号）；结论与判据一字未动。
+## §2026-10-07-psh-poolouter（2026-10-07，池外 800 局确认 + 两课结课报告回写课程文件）
+
+- **背景**：it150 verdict 关闭后，排除"段运气"最后一个借口：全新段 @419000（全仓零占用预查；
+  418000 被 x20-rebirth 诊断用过，弃选），B-it300 对 B0-it300，配对 800/800 全中，dropped=0。
+- **决定**：杀敌 D=**-0.11** CI [-0.80,+0.58]（含 0）+ 通关 D=**-1.12pp** CI [-5.51,+3.26]（破线）
+  + acc≈0 ⇒ 与 it150 终判**同形关闭**（单段 MDE@800：0.98/6.4pp，口径一致）。关闭 verdict 维持，
+  不切换，不加预算（延伸段已证伪欠训练）。
+- **后果**：结课报告已回写 `x21-psh-b/b0.jsonc` 头注（JSON 复验通过）；两课训练账本止于 it300；
+  spatial 纪元实验侧结案（S0/S1/腿A/腿B/verdict/池外确认全齐）；唯一遗留出口 K→5 待批。
+- **落点**：池外局 → `tmp/x21-psh-poolouter/{b,b0}-it300.jsonl`。
+## §2026-10-07-peak-crown（2026-10-07，四臂峰值同题排名：B0-it290 加冕，不改任何 verdict）
+
+- **背景**：各臂杀敌峰（A-it150 / A0-it20 / B-it120 / B0-it290）同跑 @415000+417000（N=1600/臂，
+  同种子天然全配对）：B0 **35.00%/11.721** > A0 32.56%/11.294 ≈ A 32.25%/11.231 > B 27.56%/11.159。
+  配对杀敌差：B0−A = **+0.49** CI [+0.01,+0.97]（显著）；B0−B = +0.56 显著；B0−A0 = +0.43 含 0；
+  A−A0、A−B 均为平（|D|<0.14）。
+- **决定**：加冕 B0-it290（`x21-psh-b0.it290.20261007-004553.json`）为全纪元最强权重。
+  三条如实声明：① 峰值自选 ⇒ 选择偏差（真优势小于测得值）；② B0 累计 ~290 轮 ≈ A 的两倍预算，
+  "最强权重" ≠ "最优架构"（同预算架构 verdict 维持：A≃A0，B<B0）；③ 只改名分，不改任何 verdict。
+- **落点**：同题局 → `tmp/peak-crown/{A,A0,B,B0}-{415000,417000}.jsonl`。
+## §2026-10-07-b0-vs-hu150（2026-10-07，B0-it290 配对挑战 hu150：双显著胜，加冕全场最强权重）
+
+- **背景**："B0 峰值优于 hu150 ⇒ A/B0 腿略强"的质疑，同题验证：hu150（`x20-adv-hurt.it150`）补跑
+  @415000+417000（N=1600），与 B0-it290 同种子配对（`tmp/peak-crown/hu150-*.jsonl`）。
+- **决定**：B0−hu150 杀敌 D=**+0.63** CI [+0.13,+1.12]、通关 D=**+3.75pp** CI [+0.48,+7.02]——**双显著**。
+  加冕 B0-it290 为全场最强权重（终判段口径；hu150 同段实测 31.25%/11.09，低于其账本口径 32.50%/11.370，
+  属段难度差，正常）。
+- **否决与备选**："⇒ 腿架构更强"（否决：混杂三重——峰值自选 + B0 约双倍预算 + 架构差；架构 verdict 维持
+  A≃A0、B<B0。"最强权重"是权重排名，不是架构判决）。
+- **落点**：对局 → `tmp/peak-crown/hu150-{415000,417000}.jsonl`。
+## §2026-10-07-k5-filing（2026-10-07，K→5 立案：起点 B0-it290 + K5/K10 同流配对；只写计划）
+
+- **背景**：腿 A"看见了但没转化" + 腿 B 关闭 ⇒ 稀释假说是唯一遗留解释（spatial §5.7）。用户指令三条：
+  ① 起点用最佳权重（B0-it290），不墨守"A-it150 注册端点"陈规；② K5/K10 同种子起跑；③ 顺带验证 B0 续跑平不平。
+- **决定**：立 `plan/k5-rhythm.plan.md`（待批准）：两臂同起点（B0-it290 sha 见证）/同预算 150/同新流 20261013/
+  同守卫（baseline+margin10），唯一差别 = K；判决沿用 §5 表；K 机制 audit（旋钮位置/半格对齐/obs 语义）
+  先行，**只写计划，不改代码不开课**。峰值起点偏差由配对对照对称抵消；K10 臂兼任 B0 续跑验证。
+- **否决与备选**："起点用 A-it150（注册端点纪律）"（否决：用户拍板用最佳权重测，且 B0 线 K10 到顶正是要
+  验证的对象，从 B0-it290 起跑才能回答"续跑平不平"；纪律让位给实验问题本身）。
+- **落点**：计划 → `plan/k5-rhythm.plan.md`。
+## §2026-10-06-psh-extend300（2026-10-06，两臂续跑到 it300：斜率归零，"半山腰"假设被证伪）
+
+- **背景**：it150 verdict 关闭后，"150 轮不够"的质疑成立验证条件（B it100→150 还在陡峭爬升）。
+  两臂同续 150 轮（新 out/traj 未开，属同一账本自然延伸；配对 verdict 未重跑，日常 400 局×30 点为准）。
+- **读数**：B it150–300 横盘 ~27%/10.5（峰值仍是 it150 的 11.49，之后 30 个点再未超越；it160/220/235 三探
+  9.2–9.7 均收回，无塌）；B0 同期 ~32%/11.2，高位横盘伴上探（it205/255/290 三破 12.0 杀）。
+  B0 日常重心全程压 B 约 0.6 杀——it150 配对差 −0.01 是运气好（CI ±0.5 内），真实差距可能更偏向 B0。
+  零杀率两臂全程 <2%，无塌；守卫零触发。
+- **决定**：延伸段证伪"欠训练" fork（+150 轮零斜率）⇒ **关闭 verdict 维持，不再加预算**；it300 配对终判
+  不跑（30 个日常点一致，翻盘概率≈0，省配额）。塔分支结案：C=8 在 150–300 轮预算下无转化。
+- **后果**：K→5 成为唯一遗留出口（腿 A "看见了但没转化"的既定分支）；B/B0 权重留档至 it300。
 ## §2026-10-07-k5-decision-k-channel（2026-10-07，K→5 案 v2 评审修订 + 决策周期 K 通道全链落地 + 两课备好）
 
 - **背景**：`plan/k5-rhythm.plan.md` 评审（2026-10-07）发现 2 P0 + 3 P1：守卫口径三处不一（表 margin10 /
@@ -8224,7 +8275,6 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   `common/manifest.py`（`volume` 进白名单）· `remote/worker.py` · `trainer/loop_{volume,export,steps,core}.py`。
 - **门禁**：nn python gate 全绿（ruff + mypy + tests/ + e2e/）；根 `bun run check` 2418 pass / 0 fail。
 - **落点**：全文 → `docs/nn/training-stack.md` §30；单测 → `nn-training/tests/worker/test_{volume_alloc,iter_topup}.py`（含跨重启逐批 byte 相同）。
-
 ## §2026-10-07-goalnn-serve-pool-readiness（2026-10-07，长驻池「假就绪」+ 重试路径裸文件 IO：真就绪判据 + 有界清理；清理超界改判「交整轮」）
 
 - **背景**：Kaggle 离线课 `x21-psh-b` it253（job `031e17e61777d09c`）一轮 **355s**（正常 32s）：
@@ -8263,4 +8313,144 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
 - **门禁**：nn python gate **3795 passed / 15 skipped**（ruff + mypy + tests/+e2e/）；根 `bun run check`。
 - **落点**：全文 → `docs/nn/runtime-opt.md` §33（按主题图：长驻池 / 单局看门狗 / 一局的墙钟上界归运行时档；
   plan v2 原写 engineering §66，已按索引 §2 的归属修正）；计划 → `plan/rollout-serve-pool-readiness.plan.md`（v2）。
+
+## §2026-10-07-goalnn-offline-graceful-exit（2026-10-07，自主 worker 收工即停：终态短窗口 + 保活收工即停）
+
+- **背景**：Kaggle 自主 worker 现场——两门课 17:03 跑完、17:04 hub 已报 `completed` + 「本会话已跑过这份包」，
+  却**空转到 17:33**（29 分钟）才收工；收工后 `[keepalive] alive` 一直报到 17:49。两条根因**性质不同**：
+  ① 空烧 = 全终态也走 `idle_wait_sec=1800`（`_run_auto` 的空队列分支）；② 收工后保活从不 `set()`（全仓无一处），
+  且 `CFG.course` **点名路**直调 `_run_batch`、**不过 `_run_auto`** ⇒ 收工语义必须落在**两条路的公共层 = notebook**。
+- **决定**：① 新增 `TERMINAL_STATES={completed,not_offline}` + 纯函数 `all_terminal(rows, served)`；
+  **判据并上「本会话已跑过这份包（同 sha）」**——现场那门是 `claimable` 行、只被 `_eligible` 的 served 过滤
+  （`state=ready`），**只判 state 是终态修不掉现场**；为此 `resolve_courses` 增加第三返回值 `manifest`
+  （原始 hub 行：`picks`/`blocked` 都不带 `state`，且到空队列分支时 `picks` 恒空）。`_run_auto` 在
+  `mode != "drain"` **之后**插终态窗口，用**独立**锚点 `terminal_since` 与**独立**预算
+  `idle_wait_terminal_sec`（缺省 `300`，走 `_num` ⇒ `0` 合法）。
+  ② notebook cell 1 的 `_run` 外套 `finally: _keepalive_stop.set()`；保活 Event 改**模块级单例 + 线程去重**。
+- **诚实边界（写进文档，别当已证）**：保活是 daemon 线程 ⇒ 停它**不影响 kernel/TPU**（危害只是日志噪音 + 线程泄漏）；
+  Kaggle 无 `unassign` API ⇒ 默认只把空烧 29 分钟压到 300s；`shutdown_kernel_on_exit=true`（默认关）走
+  `os._exit()`，**杀 kernel 是否让 Kaggle 释放会话/TPU 未经验证**；`set()` **不会**触发 Colab 的 `unassign`
+  （那个分支只在见到 `/tmp/battle-halt-request` 哨兵时才调）。
+- **否决与备选**：只判 `state ∈ TERMINAL_STATES`（**修不掉现场**，R2）· 把收工序列散在 `_run_auto` 的 return
+  （盖不住点名路；且 release/停心跳在那里是**空操作**——租约与心跳全在 `_run_batch` 的 per-course `finally` 里生灭）·
+  `shutdown_kernel_on_exit` 塞进 `CFG_KEYS`（元组语义 = 「`run()` 会读的键」，它只有 notebook 读 ⇒ 不进）·
+  默认 0 立即收工 / 调小 `DEFAULT_WAIT_SEC` / 收工不 release / hub 侧加字段 / Kaggle 造哨兵文件（详见 plan §3）。
+- **落地**：`remote/offline_boot.py`（`IDLE_WAIT_TERMINAL_SEC` · `TERMINAL_STATES` · `all_terminal` ·
+  `resolve_courses` 三元组 · `_run_auto` 终态窗口）· `ipynb/battle.offline.ipynb`（cell 1：单例去重 + 收工 `set()` +
+  `os._exit` 开关 + 两个新 CFG 键）· 单测 `tests/common/test_offline_task_queue.py`（5 条新用例）·
+  `tests/remote/test_offline_notebook.py`（5 条文本守卫 + `CFG_KEYS`）· `e2e/test_auto_handoff_e2e.py`（解包三元组 +
+  `idle_wait_terminal_sec: 0` 防挂 300s）。
+- **门禁**：nn python gate（ruff + mypy + tests/+e2e/）；定向子集 203 passed（云机侧单测）+ 15 passed（e2e auto-handoff）。
+- **落点**：全文 → `docs/nn/remote-transport.md` §70；计划（含一轮评审处置 R1–R8）→ `plan/offline-worker-graceful-exit.plan.md`。
+## §2026-10-07-pool-history-large-stream-rescan（2026-10-07，池历史大流：文件大只决定「怎么读」，不决定「要不要重读」）
+
+- **背景**：用户报「没开训练时控制台空置，WS 在 280–856MB 锯齿」。原 plan 把根因定为「45 个大流每 5s/15s
+  各重读一遍尾部 ≈ 每拍 5 万次 `JSON.parse`」。**评审（同日）先用 memo 判据 + 既有绿用例证伪了它**：
+  `aggMemoReusable` = 「指纹相同 ⇒ 复用、与时间无关」⇒ 空置无写入 ⇒ 指纹（全 meta 的 `dir|mtime|size` +
+  腿指纹）不变 ⇒ 命中 ⇒ 连流循环都不进。盘面也与原 plan 不符：池根是仓库根 `tmp/`，199 个 meta / 126.8MB，
+  其中 13 个 >2MiB、5 个 >8MiB（不是 45 个）。
+- **决定**：改重建判据 —— 拆出 `grewOrChanged`，大流条件改成 `src.size > LARGE_META_BYTES && grewOrChanged`
+  （阈值分支保留 ⇒ truncated 读法与口径一字不动）。真代价 = 「只要本循环被进入（任一流变动 / 首见 / 腿指纹
+  变化），所有 >2MiB 的流**无论自己变没变**都重读尾部」⇒ 一个流追加连坐 12 个大流。顺带：`readChunkLines`
+  逐行重建尾串（O(n²)，1MiB≈2GB 临时字符串）改 `start` 游标 + 块末归位一次（O(n)）；新增只读端点
+  `/api/poolCounters` 供空置取证（纯读，不触发聚合）。
+- **否决与备选**：①「空置降频 / 新增 `hasLiveTraining`」—— 要新造第二份「有没有课在训」的判据，与
+  `loop-queue.ts:204`「别再往外要第二个 `training: string[]`」冲突，且其前提已被证伪；②「调高
+  `LARGE_META_BYTES`」—— **方向反了**：阈值越大，走全量分块读的流越多，而 truncated 分支是**尾部 512KB
+  有界读**、更便宜；③「大流一律改走增量」—— 会让「只读尾部」与「累计全史」两条口径打架（原注释已写明）。
+- **后果**：856MB 峰值真凶**仍未定位**（pool-history 已被排除）；候选清单与下一步取证（空置取两次
+  `/api/poolCounters`，`computes` 不涨即确认）见 `docs/nn/console.md §33`。
+- **落点**：`dashboard/src/server/pool-history.ts`（判据 + 游标）· `dashboard/src/server/api/pool.ts` +
+  `dashboard/src/server/server.ts`（端点）· `dashboard/tests/server-pool-history.test.ts` ·
+  `dashboard/tests/server-api-pool.test.ts` · 全文 → `docs/nn/console.md` §33。
+## §2026-10-07-logtail-bounded-read（2026-10-07，`logTail` 改尾部窗口读：空置 WS 280↔856MB 的真凶）
+
+- **背景**：上一条把池历史排除（`aggMemo` 命中 ⇒ 空置零重算）后，峰值仍未定位。这次**先测量**：
+  临时探头（`dashboard/tmp/probe-idle-cost.ts`，只读）逐路径测「耗时 + **未 GC 的 heapΔ** + rssΔ」
+  ⇒ `componentViews` 2348ms / heapΔ **94.9MB** / rssΔ 260.9MB · `getSlowSnapshot` 751ms / **113.4MB** /
+  303.9MB · `buildStateView` 2087ms / **138.7MB** / 216.7MB · `computeFleetProbes` 1333ms / 18.0MB。
+- **根因**：`componentViews`（`views.ts:111`）对**每个**组件调 `logTail`，而 `logTail` 是
+  `readFileSync(整个文件)` + 逐行 `new TextDecoder`，最后只取尾 5 行；本机 selfNode（sampler-agent.log）
+  **22.5MB** + hubServer（hub-server.log）**56.2MB** ⇒ 单次读 ~80MB 磁盘 / 分配 ~95MB 堆 + ~100MB external。
+  `startSnapshotRefresher` 每 **5s** 拍一次（`/api/state` 每请求再拍）⇒ 这就是锯齿。次要同款：
+  `readLogTail.totalLines` 对 `fileSize ≤ 8MiB` 的文件 `readFileSync` **整个文件**只为数行数。
+- **决定**：两条都改「有界读」——`logTail` 尾部窗口（`LOG_TAIL_BYTES = 256KB`，文件 ≤ 窗口时与旧实现
+  逐字相同）；`totalLines` 分块计数（`countLines`，内存恒定 1MiB，与旧全文件版逐字节等价）。
+- **否决与备选**：① 只修 `totalLines` 不动 `logTail`（真凶是 `logTail`，实测已定位）；② 给 `logTail`
+  加结果 memo（浪费仍在首拍与失效后，有界读是根上的）；③ 轮转/截断组件日志（那是数据，不是缓存）。
+- **后果**：heapΔ 降**两个数量级**（`componentViews` 94.9→**0.1**MB · `getSlowSnapshot` 113.4→**0.0**MB ·
+  `buildStateView` 138.7→**2.8**MB · `logTail(22.5MB)` 3ms/0.0MB）；残留的 1.2–1.5s 是 ping/hub 的网络
+  超时预算（1.5–2.5s），非内存。真机空置 WS 峰值复核待控制台重启后按 plan §6 采样（预期收窄到基线量级）。
+- **落点**：`dashboard/src/server/api/logs.ts` · 测试 `dashboard/tests/server-api-logs.test.ts`（5 条）·
+  全文 → `docs/nn/console.md` §34。
+
+## §2026-10-07-offline-busy-gate-anchor（2026-10-07，离线「一拖一」闸两次自锁：锚点换 episode 起点 + 只算池内的课）
+
+- **背景**：用户报「离线 worker 领不到 `x21-psh-k10`，设成离线/在线都没有用」。现场读数：k10 是
+  `ready` + 有包（4.8MB）+ 无主，唯一拒因 = `busy: x21-psh-k5 正在交接（导包中）`（`_busy_locked`
+  第二条腿）。而 k5 的 `offline-dispatch.json` = `claimed_offline:true / claimed_by:d1aad… /
+  claimed_at:19:59:20`，`task-x21-psh-k5.zip` **不存在**：云机每 ~16s 重试一次 no-pack claim ⇒
+  `hub/offline.py:513` → `begin_auto_handoff` → `queue_offline.py:866` **重写 `claimed_at=now`**
+  ⇒「超窗 900s = 交接失败 ⇒ 不再占闸」这条**逃生门**被重试者自己永远推着走（重试者正是被卡住的
+  那台机器）。第二根因独立且更硬：k5 已跑到 it151 > `iters=150`，而 `--export-bundle` 的导出分支
+  只住在 `step_course_iter`（`trainer/loop_round_steps.py:264-271`），轮体在 `it > iters` 时
+  **一次都不进** ⇒ 静默不打一篇「全离线导出」，只 `ALL DONE` + 收官 drain（一场 ~1 小时的逐检查点
+  eval）⇒ 包永远不出现、闸永远被占。
+- **决定**：三处，全是换判据、不加机制。① `_busy_locked` 的交接窗口锚从 `claimed_at` 换成**本次
+  交接的起点 `flipped_at`**（`claimed_at` 只作缺键兜底）——`flipped_at` 只在首翻时写、重复 claim
+  不刷新、切在线才清 ⇒ 一次交接最多占闸 `AUTO_HANDOFF_PENDING_SEC`；两个锚点时间轴仍分叉
+  （`stall_verdict` 的 `pending-export` 照旧锚 `flipped_at`）。② 两条腿都改成「只算
+  `is_runnable_offline` 的课」（原来是「只豁免 `pinned_online`」）：停课（标记已删 ⇒ `stopped`）与
+  冷课 online 记录（`not_offline`）不可能再有合法交接，而它们的残留最清不掉（`stopCourse` 推的
+  `mode=offline` 走 `pin=None` ⇒ `set_mode_pinned` 那条腿**有意**不清 claim 记账，`:789-791`）
+  ⇒ 停课课不再把全池锁满一个窗口。③ `--export-bundle` 的**启动期**新增纯函数
+  `trainer/loop_lifecycle.export_refusal`：`start_it > iters` ⇒ 响亮 `SystemExit`（裸 `[run_rl]`
+  行，控制台 exit-watchdog 会把它当退出原因显示），不再静默退化成 drain。
+- **否决与备选**：① 保留 `claimed_at` 锚 + 另加「episode 硬上限 `AUTO_HANDOFF_MAX_SEC`」——
+  硬上限必然 ≤ 现场那条用例的 2000s，等于同一结果却多一个常量 + 一条判据（`dispatch.review-hy.md`
+  刚警告过「别合并/增生常量」）；② 只在「导包触发账本 `give_up`（3 次）」时才释放闸——现场只烧到
+  2 次（节流 600s）且随后 k5 被停课，**修不掉现场**；③ 改控制台 `stopCourse` 让它带 `pin=0`——
+  治的是已被 ② 治好的症状（离线按钮本来就命中 `:789` 那条清键腿），多一条 TS 写面不值。
+- **后果**：现网那台把 k10 锁住的窗口会在 `flipped_at + 900s` 自然打开（本次现场 = 2026-10-07
+  20:14:20）；此后**停课 / 离线 / 交还自动**三条路都能一次动作立刻开闸。R2-d（「换主重试 ⇒ 窗口
+  刷新」）到此作废——用例 `test_handoff_window_anchor_is_claimed_at` 按新契约重写为
+  `..._is_flipped_at`，现场原型 = `test_busy_gate_window_anchors_the_handoff_start_not_retries`
+  （旧码上红：`assert 409 == 200`）。
+- **落点**：`nn-training/hub/queue_offline.py`（`_busy_locked` 判据 + 文档）·
+  `nn-training/trainer/loop_lifecycle.py`（`export_refusal` + `run()` 启动期调用）·
+  用例 `nn-training/tests/hub/test_auto_handoff.py`（新 2 条 + 重写 1 条）·
+  `nn-training/tests/trainer/test_offline_leg_retired.py`（新 1 条）·
+  全文 → `docs/nn/remote-transport.md` §71。
+## §2026-10-08-k5-verdict（2026-10-08，K5 终判：直关；稀释假说死，关节奏分支）
+
+- **背景**：`plan/k5-rhythm.plan.md`，K5-it150 对 K10-it150（同起点 B0-it290、同流 20261013、同预算 150，
+  熔断全关 + 人盯盘），N=1600（800 @415000 + 800 @417000，同种子配对全中；K5 侧 `--decision-k 5`）。
+  日常：K5 37.5→20.75 阴跌（it24 三次远端 PPO 连败）；K10 34.5→38.0 上扬。
+- **决定**：杀敌 D=**-1.99** CI [-2.47,-1.50]（上限 < 0 ⇒ **直关**，显著变差覆盖一切）；通关 D=**-10.1pp**
+  CI [-13.1,-7.1]（破安全门）；acc D=**+0.015** 全正（瞄准更好，杀敌照跌）⇒ **稀释假说死**：
+  感知没问题，转化更差。关节奏分支。候选解释（未验证，另案）：半格对齐抖动 / 同超参下时域翻倍致
+  value 崩（it24 连败是症状）。
+- **后果**：spatial 纪元全部 trifecta 判完（腿A挂起/腿B关闭/K5直关）；K10-it150（日常 38%/12.46）
+  为全纪元最强日常读数（日常峰不算数，不加冕）；感知-转化链的候选只剩探索/连招（训练侧）。
+- **落点**：对局 → `tmp/k5-verdict/k{5,10}-{415000,417000}.jsonl` · 计划 §6 → `plan/k5-rhythm.plan.md`。
+  执行/训练分解（同日补）：B0-it290 零训练 `--decision-k 5` 对 K10 同种子配对 1600：杀敌 +0.37 含 0、
+  通关 +1.56pp 含 0 ⇒ 执行无差，伤全在训练（`tmp/k5-verdict/k5it0-*`）。
+  反向实验（同日补）：K10-it150 用 K5 密度执行 800 @415000 = 37.75%/12.49，对 K10 执行 +1.09 杀显著、
+  +4.37pp 方向正 ⇒ 节奏影响"学出来什么"不影响"执行行不行"（`tmp/k5-verdict/k10it150-at5-415000.jsonl`）。
+## §2026-10-08-diag-filing（2026-10-08，诊断重仿案立案：被包围/火线/背刺/远距四维；只写计划）
+
+- **背景**：K10@K5 深拆要四维，终判行无逐 tick 记录、export 链无 decision-k。立
+  `plan/diag-lane-instrument.plan.md`（待批准）：同权重同种子重仿 + 只读探针；口径冻结在先
+  （enclR/laneR/backR/Edhit 定义 + 分母 + K wire）；先量速定 N（800 或预注册 200 子集）；
+  K10 重仿与终判行逐种子全字段对账，不一致即停；探索性，永不进 verdict。
+- **落点**：计划 → `plan/diag-lane-instrument.plan.md`。
+## §2026-10-08-diag-verdict（2026-10-08，诊断重仿结论：K5 执行赢在"不被包+侧面磨"）
+
+- **背景**：`plan/diag-lane-instrument.plan.md`，K10-it150 @K5 vs @K10，800 @415000 同种子重仿
+  （新驱动 `tools/sim/diag-resim.ts`，`--skip` 16 分片并核；K10 重仿与终判行 800/800 逐字对账通过；
+  中途抓到命数口径 bug〈误读顶层 lives=3 命神仙局〉，按 eval 同式 course.player.lives=1 修复）。
+- **决定**：被包围 −2.0pp ✅、火线 −1.6pp ✅、背刺占比 −3.2pp ✅、侧击 +3.7pp ✅、远距 −0.05 含 0、
+  danger/near4 持平、自洽锚杀敌 +1.09 ✅。画像：细执行不靠刺杀/射程，靠"少被包 + 侧面磨 +
+  活得久"（与局长+269/承伤持平/拾取更多互锁）。⚠ threat≡lane 逐字相等，疑同探针双写，待 audit。
+- **落点**：重仿局 → `tmp/diag-probe/k10at{5,10}[.jsonl|-s*.jsonl]` · 读数 → plan §4。
 

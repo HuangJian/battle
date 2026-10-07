@@ -1,0 +1,80 @@
+// 课程 x22-kr10 —— K-retune 对照臂：K=10 老配方（节奏+超参双对照）。
+//
+// 立项 → plan/k5-rhythm.plan.md §8 后续。本课与 x22-kr5：同起点（K10-it150，
+//   sha `e76ed528…` 四份同源，见 kr5 头注）/ 同预算 150 / 同新流 20261014 / 同守卫（全关 + 人盯盘），
+//   差别 = K（本课 10）+ 三处超参保持老配方（target/est/gamma/lam，唯 target 随 kr5 同减半：
+//   49152→24576，见下；对局数 167/167 持平）。
+// 本课三重身份：节奏对照 + K10 线续跑验证（B0→K10 线是否继续涨）+ 同 V 熔断参照（两臂 baseline，不互杀）。
+// 终判见 x22-kr5 头注（§5 表；K5 侧 --decision-k 5）。
+//
+// ── 开工门 ─────────────────────────────────────────────────────────────────
+//   ① it0 sha 四份同源（✓ e76ed528）；② 与 x22-kr5 同时开（配对前提）；③ 开课走控制台（唯一入口）。
+{
+  "version": 5,
+  "name": "x22-kr10",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：K10-it150 副本（sha 见证，见 kr5 头注）──────────────────────────
+  "bc": "nn-training/weights/x22-kr10/x22-kr10.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 150,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 与 x22-kr5 同值（配对裁决前提）。
+  "paired_rotate_seed": 20261014,
+
+  "decision_events": false,
+  // K=10（历史默认；显式钉死只为对账可读）。
+  "decision_k": 10,
+
+  "out": "tmp/x22-kr10/weights.json",
+  "traj": "tmp/x22-kr10",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x22-kr10",
+  "backup_prefix": "x22-kr10",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

@@ -1,0 +1,102 @@
+// 课程 x22-kr5 —— K-retune 实验臂：K=5 + 按 K 重调超参（K5 训练崩的复仇战）。
+//
+// 立项 → plan/k5-rhythm.plan.md §8 后续 + 分解实验结论（执行无差/训练崩：B0-it290 零训练 K5 对 K10
+//   杀敌 +0.37 含 0；K5-it150 对 K10-it150 杀敌 −1.99 直关）。本案回答：配上 K 的超参，K5 训练能不能行。
+// 两臂（本课 vs x22-kr10）：同起点（K10-it150，`x21-psh-k10.it150.20261008-063311.json`，
+//   sha `e76ed528…` 四份同源：两课 it0 + in-use 双备份）/ 同预算 150 / 同新流 20261014 / 同守卫，
+//   差别 = 节奏 + 三处按 K 重调超参（γλ/采集；ent 未动，见下）。
+//
+// ── 按 K 重调（三处，两处动一处不动）─────────────────────────────────────────
+//   · target_transitions：初版 98304（对局数与 K10 持平 334 局），2026-10-08 传输减负两臂同减半
+//     ⇒ 本课 **49152**（49152/294≈167 局）vs kr10 24576（24576/147≈167 局），对局数仍持平。
+//     （旧 K5 腿 49152/294≈167 局，多样性腰斩——训练崩的主嫌；本案初版正是要补这个。）
+//     代价：两臂每轮 batch 减半，更新噪声同增（对称，不污染 K5−K10 差值）；kr10 与自身历史的
+//     续跑可比性稍弱（batch 减半），方向性结论不受影响。
+//   · gamma 0.998→**0.999**：K10 每决策（10 ticks）衰减 0.002 ⇒ 每 tick 0.0002；
+//     K5 每决策（5 ticks）衰减 0.001 ⇒ γ=0.999（每 tick 折扣率不变）。
+//   · lam 0.95→**0.975**：同式（每 tick 0.005 ⇒ K5 每决策 0.025）。
+//   · ent_coef 缺席（缺省 0.01，未动）：无 verified 按 K 换算律，硬凑"三档取中"是假精确——
+//     原提法在此修正（DECISIONS 见证）；若本案仍败，ent 是下一个待调旋钮，不在本案动。
+//   · est = 294（沿用 K5 口径：局均 ticks 1470 ÷ 5）；decision_k: 5（全链通道）；
+//     其余（lr/epochs/mb/ppo_schedule/奖励 11 参数/kickstart 0.1）逐字沿用。
+//   · 熔断全关（用户指令）：kickstart_burn {baseline, margin_pp: 100}；ent_break: 0；
+//     paired_kill 缺席即关。人盯盘（只判死没死，不判跑得好不好）。
+//
+// ── verdict（沿用 §5 表）────────────────────────────────────────────────────
+//   N=1600（800 @415000 + 800 @417000，同种子；本课侧 --decision-k 5）；主判杀敌 CI 下限 > 0；
+//   安全门通关 CI 下限 > −5pp；直关杀敌 CI 上限 < 0；方向诊断 acc。
+//   retuned-K5 ≥ K10 ⇒ 旧 K5 腿死因定为"超参失配"（节奏翻案）；持平/更差 ⇒ 节奏训练侧永久关闭，
+//   转向 commitment 整形（另案）。K10 臂兼任"K10 线续跑验证"。
+//
+// ── 开工门 ─────────────────────────────────────────────────────────────────
+//   ① it0 sha 四份同源（✓ e76ed528）；② 与 x22-kr10 同时开（配对前提）；③ 开课走控制台（唯一入口）。
+{
+  "version": 5,
+  "name": "x22-kr5",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：K10-it150 副本（sha 见证，见头注）────────────────────────────────
+  "bc": "nn-training/weights/x22-kr5/x22-kr5.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关（缺席回落 auto 互杀，B it16/17 前例）。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 150,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.999,
+  "lam": 0.975,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：按 K 重调（对局数与 K10 持平，见头注推导）────────────────────────
+  "target_transitions": 49152,
+  "est_samples_per_game": 294,
+  "seed_rotate": 150,
+  // 与 x22-kr10 同值（配对裁决前提；20261006–13 全占，§15.1 轮换）。
+  "paired_rotate_seed": 20261014,
+
+  "decision_events": false,
+  // K=5（本案实验变量；k10 臂=10）。
+  "decision_k": 5,
+
+  "out": "tmp/x22-kr5/weights.json",
+  "traj": "tmp/x22-kr5",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x22-kr5",
+  "backup_prefix": "x22-kr5",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
