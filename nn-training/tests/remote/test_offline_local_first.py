@@ -470,7 +470,7 @@ def _run_many(
     seen: list[str] = []
     it = iter(outcomes)
 
-    def fake_one(cfg, creds, log, stop, course=None, multi=False, lease=""):
+    def fake_one(cfg, creds, log, stop, course=None, multi=False, lease="", progress=None):
         seen.append(str(course))
         nxt = next(it)
         if isinstance(nxt, BaseException):

@@ -46,7 +46,7 @@ from typing import Any, cast
 # 也是 5s（用户口径「单局 >5s 肯定不正常」⇒ 超时原地重跑）、重试上限 ×4、最多 3 次、轮询 0.5s。
 # **一律通过模块属性读**（`game_watch.X`）而不是 `from ... import X`：import 会把值抄成第二份
 # 绑定，测试 patch 了 `game_watch` 的那一份、调用点却还在读旧绑定（两处不一致就是静默的错口径）。
-from common import game_watch
+from common import game_watch, progress_hook
 from common.log_bundle import LogBundle
 from common.platform_utils import (
     KILL_REAP_SEC,
@@ -899,6 +899,10 @@ def run_iter_rollout(
                         # 「每 10 局一句」在高并发轮上是每秒数行 —— 云端离线课的日志就是被它刷屏的
                         # （用户口径 2026-09-23）。最后一句恒打（轮结束的唯一落点）。
                         rb.add("进度", f"{settled_n}/{len(argvs)} games settled ({now - t0:.0f}s)")
+                        # ★M3 / Q2：轮内**打点**（每结算一局上报一个完成事件）。真正的 HTTP 与
+                        # 时间节流在打点层（云机侧 `remote/offline_boot.py`，每 240s 最多一句）；
+                        # 本机训练没有注册者 ⇒ `report` 立刻返回（一次 dict 查找，零副作用）。
+                        progress_hook.report("iter", done=settled_n, total=len(argvs))
                         if game_watch.progress_due(settled_n, len(argvs), now, last_log_at):
                             last_log_at = now
                             rb.beat("kind=iter rollout", now=now)

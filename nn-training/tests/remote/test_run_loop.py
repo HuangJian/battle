@@ -691,3 +691,36 @@ def test_pack_payload_with_extra_files_roundtrip(tmp_path: Path) -> None:
     _m, shards = unpack_payload(zip_path, dest)
     assert shards == []
     assert (dest / "init_weights.json").read_bytes() == ANCHOR_IN
+
+
+def test_segment_reports_round_boundaries_to_the_progress_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★M3 / Q2：轮边界打点是**第二层**（第一层在 `iter_rollout` 的每结算一局）。
+
+    钉住三件：段开工先报一句（一条长轮次里 hub 的 hold 活性全靠这些完成事件）；每轮
+    「开工」与「落盘+上传前」各一句；打点只经 `common.progress_hook` 这一个口（本机训练没有
+    注册者 ⇒ 一次 dict 查找，什么都不做——所以段跑完的产物必须与本条观测**毫不相干**）。
+    """
+    from types import ModuleType
+
+    from common import progress_hook
+
+    seen: list[tuple[str, dict]] = []
+
+    def note_progress(kind: str = "", **kw: Any) -> bool:
+        seen.append((kind, kw))
+        return True
+
+    mod = ModuleType(progress_hook.HOOK_NAME)
+    mod.__dict__["note_progress"] = note_progress
+    monkeypatch.setitem(sys.modules, progress_hook.HOOK_NAME, mod)
+    plan, _m, _fake, _result, _art = _run(tmp_path, iters=3)
+    kinds = [k for k, _kw in seen]
+    rounds = planned_iters(plan)
+    assert kinds[0] == "seg-start", kinds
+    assert kinds.count("round-start") == len(rounds)
+    assert kinds.count("round-done") == len(rounds)
+    # 轮边界是**强制**的（顶开时间节流）：打点层那一侧才做节流，上报口只报事实
+    assert all(kw.get("force") is True for k, kw in seen if k != "retry"), seen
+    assert [kw.get("it") for k, kw in seen if k == "round-start"] == list(rounds)

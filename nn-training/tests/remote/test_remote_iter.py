@@ -2078,3 +2078,41 @@ def test_quota_incident_not_triggered_on_node_rollout(tmp_path: Path, monkeypatc
     assert msgs == []
     TrainingLoop._check_quota_incident(local, 2)
     assert any("连续 2 轮零 shard" in m for m in msgs), msgs
+
+
+def test_rollout_reports_every_settled_game_to_the_progress_hook(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★M3 / Q2：轮内打点的**事件源** = 每结算一局（HTTP / 节流 / 409 都在打点层）。
+
+    为什么粒度必须这么细：hub 的 hold 活性只看 `last_progress_at`，而一轮 rollout 可能几十分钟
+    —— 只在轮边界报就够不着 900s 的静默阈。同一条也钉住「薄上报口」：没有注册者时
+    （本机训练）什么都不发生。
+    """
+    from types import ModuleType
+
+    from common import progress_hook
+
+    seen: list[tuple[str, dict]] = []
+
+    def note_progress(kind: str = "", **kw: Any) -> bool:
+        seen.append((kind, kw))
+        return True
+
+    mod = ModuleType(progress_hook.HOOK_NAME)
+    mod.__dict__["note_progress"] = note_progress
+    monkeypatch.setitem(sys.modules, progress_hook.HOOK_NAME, mod)
+    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
+    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "9.9.9-stub")
+    spec = _stub_spec(tmp_path, [(3, 7), (4, 1), (5, 2)])
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    run_iter_rollout(job_dir, spec, log=lambda _m: None)
+    assert [k for k, _kw in seen] == ["iter"] * 3
+    assert [kw["done"] for _k, kw in seen] == [1, 2, 3]
+    assert all(kw["total"] == 3 for _k, kw in seen)
+    # 没有注册者 ⇒ 一次 dict 查找、零副作用（本机训练/老快照那条路）
+    monkeypatch.delitem(sys.modules, progress_hook.HOOK_NAME)
+    job_dir2 = tmp_path / "job2"
+    job_dir2.mkdir()
+    assert run_iter_rollout(job_dir2, spec, log=lambda _m: None)["report"]["games"] == 3

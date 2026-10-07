@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import sys
 import threading
 import time
 import urllib.error
@@ -1206,3 +1207,471 @@ def test_worker_param_and_upper_bound_semantics(tmp_path: Path) -> None:
     assert scoped["c-b"]["claimable"] is False and scoped["c-b"]["busy"] is True
     assert upper[0]["hold"] == {} or upper[0]["hold"]  # 字段在（形状钉住，值随状态）
     assert "hold" in upper[0] and "pending_export" in upper[0] and "busy" in upper[0]
+
+
+# ───────────── M3（plan/worker-type-dispatch-model §3-M3，2026-10-07）：轮内打点 / 领取分流 ─────────────
+
+
+def test_progress_constants_track_the_wire_and_the_hold_window() -> None:
+    """打点端点名 / 钩子名各在云机侧宠了一份（不得 import `remote.*`）——必须逐字同步。
+
+    另钉一个**数量关系**（不是等值）：轮内打点的节流 M（`PROGRESS_MIN_INTERVAL_SEC`）必须
+    ≤ 300s（Q2 的硬上界），且 `3×M ≤` hold 的进度静默阈 —— 丢两三拍也不该把「正在算」判成
+    「掉线」（那是自动接管的入口，误判就是两处跑同一份活）。
+    """
+    from common import progress_hook, protocol
+    from hub import task_pack
+
+    assert offline_boot.OFFLINE_PROGRESS_PATH == protocol.OFFLINE_PROGRESS_PATH
+    assert offline_boot.PROGRESS_HOOK_NAME == progress_hook.HOOK_NAME
+    assert 0.0 < offline_boot.PROGRESS_MIN_INTERVAL_SEC <= 300.0, "Q2：M ≤ 300s"
+    assert task_pack.hold_progress_stale_sec() >= 3 * offline_boot.PROGRESS_MIN_INTERVAL_SEC
+
+
+def _pinger(
+    hub: str, lease: str = "lk", *, post: Any = None, interval: float = 3600.0, token: str = "tok"
+) -> tuple[Any, list[str]]:
+    """装一个打点层（`post` 是假 HTTP；None = 真 `_post_json`/真网络）→ `(detach, log 行)`。"""
+    lines: list[str] = []
+    detach = offline_boot.install_progress_pinger(
+        hub, token, "c5-gae", lease, lines.append, interval=interval, post=post
+    )
+    return detach, lines
+
+
+def test_progress_ping_lands_on_the_wire_once_per_window() -> None:
+    """形状 + 节流：URL/参数逐字（hub 只吃这两个查询参），首拍恒发，窗内不重复。"""
+    from common import progress_hook
+
+    seen: list[tuple[str, str, float]] = []
+
+    def fake_post(url: str, token: str, log: Any, *, timeout: float = 0.0) -> tuple[int, dict]:
+        seen.append((url, token, timeout))
+        return 200, {}
+
+    detach, lines = _pinger("http://hub", post=fake_post, interval=3600.0)
+    try:
+        assert progress_hook.report("iter", done=1, total=8) is True
+        assert progress_hook.report("iter", done=2, total=8) is False, "窗内（3600s）不再发"
+        assert progress_hook.report("round-start", it=7, force=True) is True, "轮边界能顶开节流"
+    finally:
+        assert detach() == ""
+    assert [u for u, _t, _s in seen] == [
+        "http://hub/offline/progress?course=c5-gae&lease=lk"
+    ] * 2
+    assert all(t == "tok" for _u, t, _s in seen)
+    assert all(0.0 < s <= offline_boot.PROGRESS_TIMEOUT_SEC for _u, _t, s in seen)
+    assert any("局 1/8" in ln for ln in lines), lines
+    assert any("it7" in ln for ln in lines), lines
+
+
+def test_progress_ping_opens_the_next_window_by_time() -> None:
+    """节流的尺子是**时间**（不是局数）：窗过就再发；`force` 与节流互不干扰。"""
+    from common import progress_hook
+
+    hits: list[int] = []
+
+    def fake_post(url: str, token: str, log: Any, *, timeout: float = 0.0) -> tuple[int, dict]:
+        hits.append(1)
+        return 200, {}
+
+    detach, _lines = _pinger("http://hub", post=fake_post, interval=0.0)
+    try:
+        for _ in range(3):
+            progress_hook.report("iter", done=1, total=3)
+    finally:
+        detach()
+    assert len(hits) == 3, "interval=0 ⇒ 每一拍都发（时间窗开着）"
+
+
+def test_progress_ping_409_outcomes_stop_pinging() -> None:
+    """409 三态各回各的结局：`revoked` / `expired` / `taken` —— 都**停打点**并带上原因。"""
+    from common import progress_hook
+
+    for body, want, needle in (
+        ({"revoked": True, "holder": {"worker_id": "w-else"}}, "revoked", "已被撤销"),
+        ({"expired": True}, "expired", "已过期"),
+        ({"holder": {"worker_id": "w-new"}}, "taken", "w-new"),
+    ):
+        hits: list[int] = []
+
+        def fake_post(url: str, token: str, log: Any, *, timeout: float = 0.0, _b: dict = body):
+            hits.append(1)
+            return 409, dict(_b)
+
+        detach, lines = _pinger("http://hub", post=fake_post, interval=0.0)
+        try:
+            assert progress_hook.report("iter", done=1, total=3) is False
+            assert progress_hook.report("iter", done=2, total=3) is False
+            assert len(hits) == 1, "409 之后不再打扰 hub"
+        finally:
+            assert detach() == want
+        assert any(needle in ln for ln in lines), (want, lines)
+
+
+def test_progress_ping_gives_up_after_the_failure_limit_without_touching_training() -> None:
+    """连不上（HTTP 0）不是什么大事：几拍之后停打点、留一行；训练与租约交给心跳兜。"""
+    from common import progress_hook
+
+    hits: list[int] = []
+
+    def fake_post(url: str, token: str, log: Any, *, timeout: float = 0.0) -> tuple[int, dict]:
+        hits.append(1)
+        return 0, {}
+
+    detach, lines = _pinger("http://hub", post=fake_post, interval=0.0)
+    try:
+        for _ in range(offline_boot.PROGRESS_FAIL_LIMIT + 2):
+            assert progress_hook.report("iter", done=1, total=3) is False
+    finally:
+        assert detach() == "unreachable"
+    assert len(hits) == offline_boot.PROGRESS_FAIL_LIMIT
+    assert any("停打点" in ln for ln in lines), lines
+
+
+def test_progress_pinger_detach_restores_a_previous_registration() -> None:
+    """同一进程里逐课装/卸（`_run_batch` 的顺序就是它）：卸下自己后要还原上一层，不许漏。"""
+    from types import ModuleType
+
+    outer = ModuleType(offline_boot.PROGRESS_HOOK_NAME)
+    outer.__dict__["note_progress"] = lambda kind="", **kw: True
+    sys.modules[offline_boot.PROGRESS_HOOK_NAME] = outer
+    try:
+        detach, _lines = _pinger("http://hub", post=lambda *a, **k: (200, {}))
+        assert sys.modules[offline_boot.PROGRESS_HOOK_NAME] is not outer
+        assert detach() == ""
+        assert sys.modules[offline_boot.PROGRESS_HOOK_NAME] is outer
+    finally:
+        sys.modules.pop(offline_boot.PROGRESS_HOOK_NAME, None)
+
+
+def test_install_progress_pinger_does_not_start_a_thread() -> None:
+    """★Q2 的红线：打点**绝不另起线程**（定时线程正是「心跳活、进度死」的成因）。
+
+    判据 = 装层前后线程数不变，且装完之后**不调完成事件就一枪都不发**。
+    """
+    from common import progress_hook
+
+    hits: list[int] = []
+    before = threading.active_count()
+
+    def fake_post(url: str, token: str, log: Any, *, timeout: float = 0.0) -> tuple[int, dict]:
+        hits.append(1)
+        return 200, {}
+
+    detach, _lines = _pinger("http://hub", post=fake_post)
+    try:
+        assert threading.active_count() == before
+        # sleep-ok: 夹具模拟的窗口——若真有定时线程，这段时间足够它打一枪（断言它没打）
+        time.sleep(0.05)
+        assert hits == [], "没有完成事件就不该有任何打点"
+        assert progress_hook.report("iter", done=1, total=2) is True
+    finally:
+        detach()
+    assert len(hits) == 1
+
+
+def test_progress_ping_refreshes_the_hold_on_a_real_hub(tmp_path: Path) -> None:
+    """端到端（真 hub + 真 HTTP）：带对租约的 ping ⇒ 200 且 hold 的活性锚被刷新。
+
+    为什么必须有这一条：URL/参数名漂了（`lease` 写成 `lease_token` 之类）时，假 `post` 那边
+    一路绿，只有真端点会说「不行」；而「进度刷新活性」才是这一层存在的理由 —— 长轮次里
+    静默 900s 就会被别人接管（自动接管是设计，误接管是事故）。
+    """
+    from common import progress_hook
+
+    base, hub, _srv = _offline_hub(tmp_path)
+    _write_pack(tmp_path)
+    st, doc = _claim(base)
+    assert st == 200, doc
+    tok = str(doc["lease"]["token"])
+    # 造出「心跳活、进度死」那一档（§68）：TTL 被心跳续到很后面，而进度锚停在接管那一刻
+    # （判据全走 `_now()`：把时钟推过静默阈 900s，但不超过续过的 TTL）。
+    now = time.time()
+    with hub._lease_lock:
+        hub._leases["c5-gae"]["expires_at"] = now + 10_000.0
+    real_now = hub._now
+    hub._now = lambda: now + 2_000.0  # type: ignore[method-assign]
+    try:
+        assert hub.hold_of("c5-gae")["state"] == "stale"
+        detach, lines = _pinger(base, tok, token=TOKEN)
+        assert sys.modules[offline_boot.PROGRESS_HOOK_NAME] is not None
+        assert hub.hold_of("c5-gae")["state"] == "stale", "装层本身不算进度"
+        assert progress_hook.report("iter", done=1, total=4) is True
+        assert hub.hold_of("c5-gae")["state"] == "live", "打点刷活了 hold"
+        assert detach() == ""
+    finally:
+        hub._now = real_now  # type: ignore[method-assign]
+    assert any("→ hub" in ln for ln in lines), lines
+    # 错租约（别人接管了 / token 过期）⇒ 真端点回 409，层按 taken/expired 停手（不再瞎 ping）
+    detach2, _l2 = _pinger(base, "not-my-token", token=TOKEN)
+    try:
+        assert progress_hook.report("iter", done=1, total=4) is False
+    finally:
+        assert detach2() in ("taken", "expired")
+
+
+def test_resolve_courses_puts_a_pending_export_row_last(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★M3：导包软态（`pending_export`）**排到最后**——它不占闸（Q1）所以照领，但 claim 必 409。
+
+    为什么是排序而不是跳过：先把能跑的挑完（列表顺序 = `_run_batch` 的 claim/执行顺序），
+    `_run_batch` 走到导包那门时记一笔 blocker 就换下一门——一次注定失败的 claim 不该排在队首。
+    """
+    tasks = [
+        {"course": "exporting", "claimable": True, "pending_export": {"by": "w", "at": 1.0}},
+        {"course": "ready", "claimable": True, "pending_export": {}},
+        {"course": "also-ready", "claimable": True},
+    ]
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
+    lines: list[str] = []
+    got, blocked = offline_boot.resolve_courses({}, {}, lines.append)
+    assert [t["course"] for t in got] == ["ready", "also-ready", "exporting"]
+    assert blocked == []
+    assert any("导包" in ln and "最后" in ln for ln in lines), lines
+
+
+def test_run_batch_reports_the_revoked_outcome_and_retires_the_course(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★M3：打点层报回 `revoked`（人把课切回在线/交还自动）⇒ 段照常跑完，本会话不再领它。
+
+    清单/结算两个方向都钉：`leases["revoked"]` 回填给 `_run_auto`（下拍跳过），而 rc 不受影响
+    （段已经完整落盘 + 打包，不是失败）。
+    """
+    beats: list[threading.Event] = []
+    released: list[str] = []
+
+    monkeypatch.setattr(offline_boot, "claim_course", lambda *a, **k: ("lease1", ""))
+
+    def fake_beat(hub: str, token: str, course: str, lease: str, log: Any, **kw: Any) -> Any:
+        beats.append(threading.Event())
+        return beats[-1]
+
+    monkeypatch.setattr(offline_boot, "heartbeat_loop", fake_beat)
+
+    def fake_release(hub: str, token: str, course: str, lease: str, log: Any, **kw: Any) -> None:
+        released.append("rel")
+
+    monkeypatch.setattr(offline_boot, "release_course", fake_release)
+
+    def fake_run(cfg, creds, log, stop, *, course, multi, lease, progress, **_kw: Any) -> int:
+        assert lease == "lease1"
+        progress["outcome"] = "revoked"
+        return 0
+
+    monkeypatch.setattr(offline_boot, "run_one_course", fake_run)
+    leases: dict = {"hub": "http://hub", "token": "tok", "worker": "w1", "served": {}}
+    lines: list[str] = []
+    rc = offline_boot._run_batch(
+        {}, {}, lines.append, None, ["c5-gae"], multi=False, leases=leases, shas={}
+    )
+    assert rc == 0
+    assert leases["revoked"] == ["c5-gae"] and leases["ran"] == 1
+    assert any("租约结局：revoked" in ln for ln in lines), lines
+    # 心跳线停、租约交还（交还可能 409，那是 hub 说「你已经不是持有人」——不影响成果）
+    assert beats and beats[0].is_set() and released == ["rel"]
+
+
+def test_run_auto_does_not_reclaim_a_revoked_course(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★M3：段内被撤销的课，本会话不再领（下一拍的 `resolve_courses(skip=…)` 必须看见它）。"""
+    state = {"n": 0}
+    seen_skip: list[set[str]] = []
+
+    def fake_resolve(cfg: dict, creds: dict, log: Any, **kw: Any) -> tuple[list[dict], list[dict]]:
+        state["n"] += 1
+        seen_skip.append(set(kw.get("skip") or ()))
+        if state["n"] == 1:
+            return [{"course": "c5-gae", "pack_sha256": ""}], []
+        return [], []
+
+    def fake_batch(cfg, creds, log, stop, courses, *, multi, leases, shas):
+        leases["revoked"] = ["c5-gae"]
+        leases["blockers"] = {}
+        leases["gave_up"] = []
+        leases["ran"] = 1
+        return 0
+
+    monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
+    monkeypatch.setattr(offline_boot, "_run_batch", fake_batch)
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    lines: list[str] = []
+    rc = offline_boot._run_auto(
+        {"work_dir": str(tmp_path), "idle_wait_sec": 0},
+        {"HUB_TOKEN": "tok"},
+        lines.append,
+        None,
+    )
+    assert rc == 0
+    assert len(seen_skip) >= 2 and "c5-gae" in seen_skip[1], seen_skip
+    assert any("租约已被撤销" in ln for ln in lines), lines
+
+
+def test_explicit_course_queue_claims_before_fetching_the_pack(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★M3 / P1-2 配套：`CFG.course` 点名腿也**先 claim 再取包**（次序是判据，不是风格）。
+
+    · 取包门看 hold：不 claim 的话，本机上一段留下的 live hold 会让**自己**取不到包；
+    · hub 侧「谁在跑这门课」只剩 hold 一个真源：不 claim = 控制台看到「没人接手」。
+    所以顺序必须是 claim → 取包，且 claim 拿到的租约要一路传到 `run_one_course`（→ `?lease=`）。
+    """
+    events: list[str] = []
+    got_lease: list[str] = []
+
+    def fake_claim(
+        hub: str, token: str, course: str, worker: str, log: Any, **kw: Any
+    ) -> tuple[str, str]:
+        events.append("claim")
+        return "lease9", ""
+
+    monkeypatch.setattr(offline_boot, "claim_course", fake_claim)
+
+    def fake_run(cfg, creds, log, stop, *, course, multi, lease, progress=None, **_kw: Any) -> int:
+        events.append("run")
+        got_lease.append(lease)
+        return 0
+
+    monkeypatch.setattr(offline_boot, "run_one_course", fake_run)
+    monkeypatch.setattr(offline_boot, "heartbeat_loop", lambda *a, **k: threading.Event())
+    monkeypatch.setattr(offline_boot, "release_course", lambda *a, **k: None)
+    leases = {"hub": "http://hub", "token": "tok", "worker": "w-exp", "served": {}}
+    rc = offline_boot._run_batch(
+        {}, {}, lambda _m: None, None, ["c5-gae"], multi=False, leases=leases, shas={}
+    )
+    assert rc == 0 and events == ["claim", "run"], events
+    assert got_lease == ["lease9"], "取包那条腿（run_one_course）必须拿到 claim 的租约"
+
+
+def test_run_hands_the_lease_context_to_the_batch_for_explicit_courses(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★M3：点名腿的接线（`run()` → `_run_batch(leases=…)`）——旧行为是 `leases=None`。"""
+    seen: dict = {}
+
+    monkeypatch.setattr(offline_boot, "_load_deliverable", lambda: _StubDeliverable())
+    monkeypatch.setattr(
+        offline_boot, "_explicit_leases", lambda cfg, creds, log: {"hub": "h", "worker": "w"}
+    )
+
+    def spy(cfg, creds, log, stop, courses, *, multi, leases, shas=None) -> int:
+        seen.update(courses=list(courses), leases=leases, multi=multi)
+        return 0
+
+    monkeypatch.setattr(offline_boot, "_run_batch", spy)
+    rc = offline_boot.run(
+        {"course": ["c5-gae"], "work_dir": str(tmp_path)},
+        lambda _m: None,
+        lambda _k, _d=None: "tok",
+    )
+    assert rc == 0
+    assert seen["courses"] == ["c5-gae"] and seen["leases"] == {"hub": "h", "worker": "w"}
+    assert seen["multi"] is False
+
+
+def test_explicit_leases_stays_empty_without_a_hub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """没有可用的 hub 地址 ⇒ 点名腿不领租约（纯离线 + 手动包：取包/回传照旧）。"""
+    _no_net(monkeypatch)
+    lines: list[str] = []
+    assert offline_boot._explicit_leases({}, {}, lines.append) == {}
+    assert any("纯离线" in ln for ln in lines), lines
+
+
+class _StubDeliverable:
+    """`_load_deliverable()` 的最小桩（点名腿只问它「要跑哪几门课」）。"""
+
+    def requested_courses(self, cfg: dict) -> list[str]:
+        return [str(c) for c in (cfg.get("course") or [])]
+
+    def download_dir(self, cfg: dict) -> Path:
+        return Path(str(cfg.get("work_dir") or "."))
+
+    def course_work_dir(self, cfg: dict, course: str, *, multi: bool = False) -> Path:
+        root = Path(str(cfg.get("work_dir") or "."))
+        return root / course if multi else root
+
+    def package_deliverable(self, dest: Path, course: str, download_dir: Path, log: Any) -> None:
+        """交付物打包（本用例不关心产物；`run_one_course` 的尾巴要它存在）。"""
+        return None
+
+
+def test_run_one_course_wires_the_progress_pinger_around_the_loop(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★M3：打点层装在「hub 可达 ∧ 领到租约」的整段外面，且**跑完必须卸下**。
+
+    为什么卸下是硬要求：`_run_batch` 逐课串行，而打点层的 URL 绑着课程名 + 租约；留着一个
+    指向上一课的层，下一段的进度就会报到别人账上（静默的错账）。顺序也钉住：
+    install → run_loop_main → detach（detach 的返回值 = 本段租约结局）。
+    """
+    order: list[str] = []
+
+    def spy_install(hub: str, token: str, course: str, lease: str, log: Any, **kw: Any):
+        assert (hub, token, course, lease) == ("http://hub", "tok", "c5-gae", "lease7")
+        order.append("install")
+
+        def _detach() -> str:
+            order.append("detach")
+            return "revoked"
+
+        return _detach
+
+    def fake_loop(argv: list[str]) -> int:
+        order.append("run")
+        return 0
+
+    monkeypatch.setattr(offline_boot, "_load_deliverable", lambda: _StubDeliverable())
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    monkeypatch.setattr(offline_boot, "probe_hub", lambda hub, token, log: True)
+    monkeypatch.setattr(offline_boot, "obtain_pack", lambda *a, **k: None)
+    monkeypatch.setattr(offline_boot, "ensure_code", lambda *a, **k: None)
+    monkeypatch.setattr(offline_boot, "ensure_ts_tree", lambda *a, **k: None)
+    monkeypatch.setattr(offline_boot, "fetch_resume", lambda *a, **k: None)
+    monkeypatch.setattr(offline_boot, "install_progress_pinger", spy_install)
+    monkeypatch.setattr(offline_boot, "local_artifacts", lambda dest: None)
+    progress: dict = {}
+    rc = offline_boot.run_one_course(
+        {"course": "c5-gae", "device": "cpu", "work_dir": str(tmp_path)},
+        {"HUB_TOKEN": "tok"},
+        lambda _m: None,
+        None,
+        course="c5-gae",
+        lease="lease7",
+        run_loop_main=fake_loop,
+        progress=progress,
+    )
+    assert rc == 0
+    assert order == ["install", "run", "detach"], order
+    assert progress["outcome"] == "revoked"
+
+
+def test_run_one_course_does_not_arm_the_pinger_without_a_lease(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """没领到租约（老 hub / 纯离线）⇒ 不装打点层：没有 hold 就没有「进度」这回事（Q1）。"""
+    armed: list[int] = []
+
+    monkeypatch.setattr(offline_boot, "_load_deliverable", lambda: _StubDeliverable())
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: [])
+    monkeypatch.setattr(offline_boot, "obtain_pack", lambda *a, **k: None)
+    monkeypatch.setattr(offline_boot, "ensure_code", lambda *a, **k: None)
+    monkeypatch.setattr(offline_boot, "ensure_ts_tree", lambda *a, **k: None)
+    def fake_install(*a: Any, **k: Any) -> Any:
+        armed.append(1)
+        return lambda: ""
+
+    monkeypatch.setattr(offline_boot, "install_progress_pinger", fake_install)
+    monkeypatch.setattr(offline_boot, "local_artifacts", lambda dest: None)
+    progress: dict = {}
+    rc = offline_boot.run_one_course(
+        {"course": "c5-gae", "device": "cpu", "work_dir": str(tmp_path)},
+        {},
+        lambda _m: None,
+        None,
+        course="c5-gae",
+        run_loop_main=lambda argv: 0,
+        progress=progress,
+    )
+    assert rc == 0 and armed == [] and progress == {}

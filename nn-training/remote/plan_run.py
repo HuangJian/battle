@@ -38,6 +38,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from common import progress_hook
 from common.log_bundle import LogBundle
 from common.platform_utils import (
     cores_note,
@@ -499,6 +500,9 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
         _close_eval(ctx)
         return _combined(ctx, last_it=start_from, session=session, state="noop")
     ctx.log(f"自主段开始：{len(todo)} 轮待跑（it{todo[0]} → it{todo[-1]}）")
+    # ★M3 / Q2：轮边界的第二层打点（第一层在 `worker/iter_rollout.py` 的每结算一局）。
+    # 段开工先报一句：一条长轮次（rollout+PPO）里 hub 的 hold 活性全靠这些完成事件。
+    progress_hook.report("seg-start", it=todo[0], force=True)
     # rollout 并行度**在这里**报一次（每段一次，不是每轮）：它是本机规模派生的，而计划里
     # 钉着的是**导出机**的值——两者不同时说出来，否则「明明改大了并发却不见快」没法归因。
     pinned = int(ctx.plan.get("workers", 0) or 0)
@@ -520,8 +524,11 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
                 )
                 break
             t0 = time.time()
+            progress_hook.report("round-start", it=it, force=True)
             result = _run_with_retries(ctx, it, prev_it=prev)
             session.append(_checkpoint(ctx, it, result, wall_sec=round(time.time() - t0, 2)))
+            # 轮边界「上传前」那一句：落盘/补传都已完成（`_checkpoint` 内部先落盘再尽力出网）。
+            progress_hook.report("round-done", it=it, force=True)
             _maybe_cloud_eval(ctx, it)
             prev = it
     except (ProtocolError, RetryableError) as e:
@@ -560,6 +567,9 @@ def _run_with_retries(ctx: RunContext, it: int, *, prev_it: int) -> dict:
         except RetryableError as e:  # 瞬时（单局超时 / rc≠0 / 传输）——重试值得
             last = e
             ctx.log(f"it{it} 第 {attempt} 次失败（瞬时）：{e}")
+            # ★M3 / Q2：重试也是「还在干活」的一个事实——报一句（打点层自己节流；没有
+            # 打点层时（本机训练）就一次 dict 查找，什么都不做）。
+            progress_hook.report("retry", it=it, done=attempt)
     assert last is not None
     raise last
 
