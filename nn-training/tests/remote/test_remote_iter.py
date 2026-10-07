@@ -1627,8 +1627,12 @@ def test_a_game_stuck_in_uncancellable_io_cannot_hold_the_round_hostage(
 
     # 墙钟上界：只裁**替身那一次**（毫秒级）；替身之后的真跑给足 —— 否则会把「真 python 启动
     # 慢于 0.3s」误当成机器卡住，整轮在那里空转重投（判据是「超界有没有收场」，与绝对长度无关）。
+    #
+    # 上界在**每次尝试之前**算（`iter_rollout` 先算后跑）⇒ 还没跑过（`calls == 0`）才是替身那一次。
+    # 2026-10-07 修：原写 `<= 1` 把**第一次重投**也裁到 0.3s —— 真跑（spawn + 导入 + 存盘）常在
+    # 0.3–0.5s，静默时恰好压线、机器一忙必越界，于是多算一次重投（`整轮重投=2 次`）而假红。
     def _ceiling(base: float, explicit: bool = False, reap_sec: float | None = None) -> float:
-        return 0.3 if stub.calls <= 1 else 60.0
+        return 0.3 if stub.calls == 0 else 60.0
 
     monkeypatch.setattr(game_watch, "game_ceiling_sec", _ceiling)
     msgs: list[str] = []

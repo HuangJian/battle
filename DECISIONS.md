@@ -8031,7 +8031,7 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   K→5 另立案（预算只够一个时先做 K→5；并行且改节奏 ⇒ 腿 B 结果降级探索性）。
 - **落点**：`nn-training/curricula/x21-psh-{b,b0}.jsonc`（新立）· 终判局 → `tmp/x21-psh-{a,a0}-verdict/seg{415000,417000}.jsonl` ·
   读数 → `plan/policy-spatial-head.plan.md` §7（it100 哨兵 + 腿 A verdict 行）。
-## §2026-10-06-psh-legB-start（2026-10-06，腿 B/B0 开课：起点机制与 B0 直接复制的不对称）
+## §2026-10-06-psh-leg-b-start（2026-10-06，腿 B/B0 开课：起点机制与 B0 直接复制的不对称）
 
 - **背景**：腿 A 终判挂起→"看见了但没转化"，满足 §5.5"挂起 + 方向改善 ⇒ 腿 B 可启动"。课程
   `x21-psh-b/b0.jsonc`（paired_rotate_seed=20261012 全新流，已立）经控制台同源 API `openCourse` 开课，
@@ -8046,6 +8046,8 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   K→5 未立案前 B 先跑，若 K→5 后改节奏 ⇒ 本腿结果降级探索性（已预注册）。
 - **落点**：起点 → `nn-training/weights/spatial-leg{B,B0}/spatial-leg{B,B0}.it0.json` ·
   账本 → `tmp/x21-psh-{b,b0}/training_log.jsonl`。
+- **ID 勘误（2026-10-07）**：原为 `2026-10-06-psh-legB-start` ⇒ 改小写（大写 `B` 被 `check-decisions.ts` 的解析
+  正则截断，与兄弟条目撞成同一个键 `2026-10-06-psh-leg`）；正文一字未动，课程头注的引用同步改了。
 ## §2026-10-06-psh-leg-b-burn-abort（2026-10-06，B 在 it16 被配对熔断误杀：冷爬坡判成烧干，切 baseline 重开）
 
 - **背景**：B 按计划冷启动（it0/it5/it10/it15 胜率全 0），`kickstart_burn` 缺省 auto → 唯一同 V 对端 B0（31%）
@@ -8073,7 +8075,7 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   修法：B0 `margin_pp` 5→10（floor 25.2%，真塌照抓；改停腿口径不改训练）+ 走完整重启循环
   （停课 B0 → 重启共享 trainer → 重开 B0；B 不动，随 trainer 重启自动续跑）。两腿 it28/it32 已确认存活。
   B 侧验收同步完成：it20/it25 零胜率**未触发** ⇒ baseline 快照生效实锤。
-## §2026-10-06-psh-legB-verdict（2026-10-06，腿 B 终判：关闭；梯度到达，真·持平；不切换）
+## §2026-10-06-psh-leg-b-verdict（2026-10-06，腿 B 终判：关闭；梯度到达，真·持平；不切换）
 
 - **背景**：plan §5 口径，B-it150 对 B0-it150（`x21-psh-b.it150.20261006-155320.json` /
   `x21-psh-b0.it150.20261006-172154.json`），N=1600（800 @415000 + 800 @417000，配对 800/800 全中，
@@ -8089,6 +8091,8 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   后续两案均需批准、均未启动：① K→5 立案（腿 A verdict 遗留）；② 塔"加预算"探针（新 out/traj，
   按 §5.6 fork② 另立）。B/B0 权重原位保留为实验档案。
 - **落点**：终判局 → `tmp/x21-psh-{b,b0}-verdict/seg{415000,417000}.jsonl` · 读数 → plan §7（verdict/ΔW/golden 行）。
+- **ID 勘误（2026-10-07）**：原为 `2026-10-06-psh-legB-verdict` ⇒ 改小写（同上：大写 `B` 被撞号闸的解析正则
+  截断成 `2026-10-06-psh-leg`，与 `-start` 报假撞号）；结论与判据一字未动。
 ## §2026-10-06-goalnn-evala-serial-queue（2026-10-06，用户报障：「evalA 在某 it 执行过后，其它 it 再点按键无反应，需要刷新页面」）
 
 - **背景**：evalA 单槽互斥（`eval:A`）：一单几十秒–几分钟里，其它 it 的 evalA 点击一律 409
