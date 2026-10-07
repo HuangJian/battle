@@ -939,11 +939,25 @@ class QueueOfflineMixin(QueuePeer):
         两条腿都只算**有活性**的东西（§3.4）：
         ① 别的课有活租约（`lease_verdict` 用哨兵空 id 问「是否有人持有」= `foreign`；
         过期/静默超阈/墓碑一律不算——死盘不再冻结全池，R2-b）；
-        ② 别的课正在交接（已翻 offline、包还没出现、`claimed_at` 窗内且有主）——锚点从
-        `flipped_at` 换成 **`claimed_at`**（每次 pending_export claim 由 `begin_auto_handoff`
-        刷新，R2-d；`flipped_at` 继续服务停滞告警——两个锚点时间轴**刻意分叉**）。
-        两条腿都对被检查方（`other`）先判 `authority != pinned_online`（pinned-online 不占闸；
+        ② 别的课正在交接（已翻 offline、包还没出现、窗内且有主）——窗口锚 **`flipped_at`**
+        （本次交接的起点；`claimed_at` 只作兜底），见下面 ★ 2026-10-07 的改动与理由。
+        两条腿都对被检查方（`other`）先判**它还在不在离线池**（`is_runnable_offline`：不在
+        池里的课——停课 / `pinned_online` / 冷课 online 记录——的残留一律不占闸；
         限制只作用于被检查方，发起方不受限——§3.4-4）。
+
+        ★ 2026-10-07（现场报障「离线 worker 领不到 x21-psh-k10，切离线/在线都没用」）：
+        这条闸**两次**让整个池子停摆，两处都是「换个判据」而不是加机制：
+
+        * ② 的锚点从 `claimed_at` 换回 `flipped_at`。旧锚每次 pending_export claim 都被
+          `begin_auto_handoff` 重写成 `now`（`:866`），而重试者**正是拿不到包的那台云机**
+          ⇒ 它每 ~16s 重试一次就把闸永久续上，「超窗 = 交接失败 ⇒ 不再占闸」的逃生门
+          （本函数旧注释的承诺）形同虚设。现场：k5 因「已跑满 it151 > iters 150」出不了包
+          （`--export-bundle` 的拒导见 `trainer/loop_lifecycle.py::export_refusal`），却把
+          ready 的 k10 锁了十几分钟，`pinned_offline` 也一样推不动。
+        * 两条腿都改成「只算离线池里的课」。旧写法只豁免 `pinned_online`，而**停课**的残留
+          最清不掉：`stopCourse` 推的 `mode=offline` 走 `pin=None`，`set_mode_pinned` 那条腿
+          **有意**不清 claim 记账（`:789-791`）⇒ 标记删了、课不再出现在任何清单里，
+          它的 `claimed_at` 却还能把全池锁满一个窗口。
         """
         now = float(self._now())
         for other, rec in self._leases.items():
@@ -959,7 +973,10 @@ class QueueOfflineMixin(QueuePeer):
         for other in self._order:
             if other == course:
                 continue
-            if self.authority_of(other) == AUTHORITY_PINNED_ONLINE:
+            # ★ 2026-10-07：只算**离线池里**的课（原写法只豁免 `pinned_online`）。停课（开课
+            #   标记已删 ⇒ `stopped`）与冷课 online 记录（`not_offline`）根本不可能再有合法的
+            #   交接在跑，而它们的残留偏偏清不掉（见 docstring）⇒ 一律不占闸。
+            if not self.is_runnable_offline(other):
                 continue
             live = self._leases.get(other)
             if live is not None and lease_verdict(now, live, "") == "foreign":
@@ -969,7 +986,10 @@ class QueueOfflineMixin(QueuePeer):
                 continue
             if not str(rec.get("claimed_by") or ""):
                 continue  # 没有主 = 不是交接中（新锚点必须有主，R2-d）
-            anchor = float(rec.get("claimed_at") or 0.0)
+            # ★ 2026-10-07：锚点 = **本次交接的起点** `flipped_at`（`claimed_at` 只兜底，
+            #   防老记录缺键）。`flipped_at` 只在首翻时写、重复 claim 不刷新、切在线才清
+            #   ⇒ 一次交接最多占闸 `AUTO_HANDOFF_PENDING_SEC`，逃生门恢复有效。
+            anchor = float(rec.get("flipped_at") or 0.0) or float(rec.get("claimed_at") or 0.0)
             if anchor <= 0 or now - anchor > AUTO_HANDOFF_PENDING_SEC:
                 continue  # 超窗 = 交接失败（告警面兜），不占闸
             try:

@@ -251,6 +251,44 @@ def should_park_on_done(args, smoke_void: bool) -> bool:
     return not bool(getattr(args, "exit_on_done", False))
 
 
+def export_refusal(*, export_path: str, iters_total: int, start_it: int) -> str:
+    """`--export-bundle` 的**启动期**拒因（纯函数；`""` = 可以导）。
+
+    ★ 2026-10-07（现场：离线 worker 领不到 x21-psh-k5/k10，hub 的「导包中」永远挂着）：
+    导出分支只住在 `step_course_iter`（`trainer/loop_round_steps.py:264-271`），而它是**轮内**
+    的一步——课已经跑到 `it{iters}` 之后，`run()` 的 `while` 一次都不进（入口条件
+    `it < args.iters` 不成立），于是进程**一条「全离线导出」都不打**，直接 `ALL DONE` +
+    收官 drain（`loop_lifecycle.py:369-380`）。现场代价：hub 反复触发导出（节流后仍三次），
+    每次只换来一场 ~1 小时的逐检查点 eval，任务包永远不出现；云机那侧看到的是
+    「k5 正在交接（导包中）」，而 hub 的「一拖一」闸就靠这条假交接把别的课一起锁死。
+
+    判据与 `_export_offline_bundle` 的两条既有拒导同源（那条住轮内、这里住启动期）：
+    `iters<=0` ⇒ 包里没有终点（那条在 `trainer/loop_export.py:169-173` 报）；
+    `start_it > iters` ⇒ 包里**没有剩余轮次**（新增：`plan.start_it = it-1 = iters` ⇒
+    `planned_iters` 为空）。空计划的任务包比没有更坏：云机会把它当活领走、跑 0 轮。
+
+    不拒的两种情况照旧：非导出路（`export_path` 空）、以及还有轮次可跑。
+    """
+    if not str(export_path or ""):
+        return ""
+    total = int(iters_total or 0)
+    first = int(start_it or 0)
+    if total <= 0:
+        # 与轮内那条同口径（`--export-bundle` 必须有终点）；这里先响亮拦下，免得等一轮。
+        return (
+            "[run_rl] --export-bundle 需要课程声明 iters（包里的计划必须有终点——"
+            "「跑到哪停」是任务定义的一部分，不能靠云机猜）"
+        )
+    if first > total:
+        return (
+            f"[run_rl] --export-bundle：这门课已经跑到 it{first - 1}"
+            f"（课程声明 iters={total}）——包里没有剩余轮次，导出无意义、也不会产出任务包。"
+            "要接着跑请把课程的 iters 调大（新的一段）或改用在线；"
+            "只想把当前权重交出去，请走控制台的「导出权重/产物」。"
+        )
+    return ""
+
+
 class TrainingLifecycle:
     """主循环骨架（7 方法 = 一条链；见本模块头注的宿主判据）。
 
@@ -318,6 +356,15 @@ class TrainingLifecycle:
     def run(self) -> None:
         args = self.args
         self._setup()
+        # ★ 2026-10-07：`--export-bundle` 的**启动期**拒导（理由与现场见 `export_refusal`）。
+        # 位置在这里而不是轮内：课跑满之后轮体一次都不进，轮内那条拒导够不着。
+        refusal = export_refusal(
+            export_path=str(getattr(args, "export_bundle", "") or ""),
+            iters_total=int(getattr(args, "iters", 0) or 0),
+            start_it=int(self._start_it),
+        )
+        if refusal:
+            raise SystemExit(refusal)
         it = self._start_it - 1
         smoke_void = False  # --smoke 作废干净退出：收官后仍退出进程（预演等待结束）
         while args.iters <= 0 or it < args.iters:

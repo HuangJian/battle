@@ -284,6 +284,28 @@ def test_export_bundle_still_wins_over_the_offline_early_exit(
     assert len(exported) == 1
 
 
+def test_export_refusal_rejects_a_course_that_already_reached_iters() -> None:
+    """★ 2026-10-07 现场（k5 跑到 it151，课程声明 iters=150，hub 反复触发导出却永远拿不到包）：
+
+    `--export-bundle` 的导出分支只住在轮内（`step_course_iter`，上面两例钉着它），而课跑满
+    之后 `run()` 的轮体**一次都不进** ⇒ 旧行为是**静默不导**：日志只有 ALL DONE + 收官
+    drain（一场 ~1 小时的逐检查点 eval），任务包永远不出现，「导包中」永远挂着。
+    启动期必须**响亮拒导**（裸 `[run_rl]` 行 ⇒ 控制台的 exit-watchdog 能把它当退出原因）。
+    """
+    from trainer.loop_lifecycle import export_refusal
+
+    msg = export_refusal(export_path="tmp/x/task-x.zip", iters_total=150, start_it=151)
+    assert msg.startswith("[run_rl] --export-bundle"), msg
+    assert "it150" in msg and "iters=150" in msg, msg
+    # 还有轮次可跑（start_it == iters 时轮体仍进得去）⇒ 不拒
+    assert export_refusal(export_path="tmp/x/task-x.zip", iters_total=150, start_it=150) == ""
+    assert export_refusal(export_path="tmp/x/task-x.zip", iters_total=150, start_it=1) == ""
+    # 非导出路（普通训练）不看这条判据
+    assert export_refusal(export_path="", iters_total=150, start_it=9999) == ""
+    # 缺终点（iters<=0）走与轮内那条同口径的文案
+    assert "必须有终点" in export_refusal(export_path="tmp/x/task-x.zip", iters_total=0, start_it=1)
+
+
 def test_offline_course_never_reaches_the_collect_step() -> None:
     """采集步对离线课**响亮报错**：真走到那里 = 步骤顺序被改动过，而静默退化的代价是双跑。"""
     steps = _bare_steps()

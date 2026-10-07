@@ -1001,9 +1001,14 @@ def test_handoff_trigger_budget_resets_on_new_round(tmp_path: Path, monkeypatch)
     assert tp.auto_handoff_decision("c5-gae", now=clock[0]) == "trigger"
 
 
-def test_handoff_window_anchor_is_claimed_at(tmp_path: Path, monkeypatch) -> None:
-    """§3.4/§2.4 R2-d：busy 窗口锚 `claimed_at`（每次 pending_export claim 刷新）；
-    无人重试超窗后不再占闸（`flipped_at` 继续服务停滞告警——两个锚点分道）。"""
+def test_handoff_window_anchor_is_flipped_at(tmp_path: Path, monkeypatch) -> None:
+    """★ 2026-10-07（**取代** R2-d 的 `claimed_at` 锚）：busy 窗口从**本次交接的起点**
+    `flipped_at` 量 —— 重试刷新 `claimed_at` 不再给闸续命。
+
+    旧形状（R2-d）：「换主重试 ⇒ 窗口跟着刷新」；新形状的代价理由见下面那条现场用例
+    （`test_busy_gate_window_anchors_the_handoff_start_not_retries`）——重试者就是被卡的
+    那台机器，锚能被它自己推着走 ⇒ 「超窗 = 交接失败 ⇒ 不再占闸」的逃生门永久失效。
+    `flipped_at` 继续服务停滞告警（两个锚点时间轴仍分叉）。"""
     _stub_auto_handoff(monkeypatch)
     clock = [1000.0]
     base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
@@ -1011,13 +1016,67 @@ def test_handoff_window_anchor_is_claimed_at(tmp_path: Path, monkeypatch) -> Non
     _course(tmp_path, hub, "c-b")
     _pack(tmp_path, "c-b")
     assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 409
-    clock[0] += 2000.0  # 超过窗口（900s）；新主重试刷新窗口
+    clock[0] += 2000.0  # 超过窗口（900s）
+    # 换主重试仍是 no-pack 409；但它**不再**把闸续上
     assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w2", method="POST")[0] == 409
     st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w2", method="POST")
-    assert st == 409 and _json(raw)["busy"] is True, raw[:300]
-    clock[0] += 1000.0  # 再超窗、无人重试 ⇒ 不占闸
-    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w2", method="POST")
-    assert st2 == 200, raw2[:200]
+    assert st == 200, raw[:300]
+
+
+def test_busy_gate_window_anchors_the_handoff_start_not_retries(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """★ 2026-10-07 现场（用户报障「离线 worker 领不到 x21-psh-k10，切离线/在线都没用」）：
+
+    没有包的课被 claim ⇒ 翻 offline + 请控制台导包（此时**不落租约**）。云机等不到包会一直
+    重试（`offline_boot` 15s 一拍 ⇒ `begin_auto_handoff` 每次把 `claimed_at` 重写成 now）。
+    旧实现拿 `claimed_at` 当闸的锚 ⇒ 重试者**正是被卡住的那台机器** ⇒ 闸永远续上，
+    「超窗 = 交接失败、不再占闸」的逃生门失效：现场 `x21-psh-k5`（已跑到 it151 > iters 150，
+    包永远出不来）把 ready 的 `x21-psh-k10` 锁了十几分钟，pinned_offline 也一样推不动。
+    """
+    _stub_auto_handoff(monkeypatch)
+    clock = [1000.0]
+    base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
+    _course(tmp_path, hub, "c-a")
+    _course(tmp_path, hub, "c-b")
+    _pack(tmp_path, "c-b")
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 409
+    # 云机每 15s 重试一次（每次都在窗口内 ⇒ 旧实现每次刷新锚点，闸永不解除）
+    for _ in range(6):
+        clock[0] += 15.0
+        assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 409
+    assert clock[0] - 1000.0 < 900.0, "重试阶段仍在窗口内"
+    rows = {r["course"]: r for r in hub.offline_tasks()}
+    assert str(rows["c-b"]["reason"]).startswith("busy:"), rows["c-b"]
+    # 从**起翻**算超窗（重试从没停过）⇒ 交接判失败，闸必须开
+    clock[0] = 1000.0 + 901.0
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 409
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w2", method="POST")
+    assert st == 200, raw[:300]
+
+
+def test_busy_gate_ignores_stopped_course_residue(tmp_path: Path, monkeypatch) -> None:
+    """★ 2026-10-07：停课（删开课标记）的课**立刻**不再占闸。
+
+    现场那条出路：用户对 `x21-psh-k5` 点停课（`stopCourse` ⇒ 删标记 + hub 置 offline，走
+    `pin=None` ⇒ `set_mode_pinned` **有意**不清 claim 记账，`:789-791`），期望「它不在了，
+    池子就该通」；旧实现只豁免 `pinned_online` ⇒ 停课课照占闸，`x21-psh-k10` 还是领不到。
+    """
+    _stub_auto_handoff(monkeypatch)
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c-a")
+    _course(tmp_path, hub, "c-b")
+    _pack(tmp_path, "c-b")
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 409
+    rows = {r["course"]: r for r in hub.offline_tasks()}
+    assert str(rows["c-b"]["reason"]).startswith("busy:"), rows["c-b"]
+    # 停课 c-a：`stopCourse` 做的就是删掉开课标记（+ hub 置 offline；这里只需前者）
+    (tmp_path / "c-a" / COURSE_ENABLE_MARKER).unlink()
+    rows = {r["course"]: r for r in hub.offline_tasks()}
+    assert "c-a" not in rows, "停课不列进清单（六轮 F3）"
+    assert rows["c-b"]["claimable"] is True, rows["c-b"]
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w2", method="POST")
+    assert st == 200, raw[:300]
 
 
 def test_republish_after_cancel_revives_job(tmp_path: Path) -> None:

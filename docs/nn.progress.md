@@ -1015,3 +1015,16 @@ DECISIONS → `DECISIONS.md §2026-10-07-goalnn-serve-pool-readiness`；全文 �
 新旋钮 `idle_wait_terminal_sec=300`（`0` = 立刻收工，走 `_num`）；`shutdown_kernel_on_exit` 默认 False 且**标注未验证**
 （杀 kernel 是否真让 Kaggle 释放会话/TPU 未证；`set()` 也不会触发 Colab 的 `unassign`）。
 DECISIONS → `DECISIONS.md §2026-10-07-goalnn-offline-graceful-exit`；全文 → `docs/nn/remote-transport.md` §70。
+
+**2026-10-07（四）**：离线「一拖一」闸**两次自锁**（用户报「离线 worker 领不到 `x21-psh-k10`，切离线/在线都没用」）。
+k10 自己没毛病（`ready` + 包在 + 无主），唯一拒因 = `busy: x21-psh-k5 正在交接（导包中）`。根因一：
+窗口锚 `claimed_at` 每次 pending_export claim 被 `begin_auto_handoff` 重写成 now，而**重试者正是被卡的
+那台机器**（15s 一拍）⇒「超窗 900s ⇒ 不再占闸」的逃生门被自己推着走，永久失效。根因二（独立）：
+k5 已到 it151 ≥ `iters=150`，`--export-bundle` 的导出分支只住轮内（`step_course_iter`），轮体一次都不进
+⇒ **静默不导**，只 `ALL DONE` + 一场 ~1 小时的收官 drain（逐检查点 400 局 eval）⇒ 包永远不出现，
+「重试」永远没尽头。三条出路（切 k10 模式 / 切 k5 在线 / 停课 k5）全无效的理由逐条写进 §71。
+落地 = ① 锚改 `flipped_at`（episode 起点，重试不刷新）② 豁免面从 `pinned_online` 扩到
+`is_runnable_offline`（停课/冷课残留不占闸）③ `export_refusal`（纯函数）在 `run()` 启动期对
+`start_it > iters` 的导出**响亮拒导**（裸 `[run_rl]` 行给 exit-watchdog）——`iters<=0` 与轮内
+`_export_offline_bundle` 同口径。R2-d 到此作废（旧用例按新契约重写）。
+DECISIONS → `DECISIONS.md §2026-10-07-offline-busy-gate-anchor`；全文 → `docs/nn/remote-transport.md` §71。

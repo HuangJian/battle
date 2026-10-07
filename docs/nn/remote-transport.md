@@ -6,6 +6,68 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §71 离线「一拖一」闸两次自锁：窗口锚换 episode 起点 + 只算池内的课 + `--export-bundle` 启动期拒导（2026-10-07）
+
+**触发**：用户报「离线 worker 领不到 `x21-psh-k10`，设成离线/在线都没有用」（Kaggle 自主 worker
+20:05 起连续 `不可领/不可抢：x21-psh-k10[ready；authority=pinned_offline；busy: x21-psh-k5
+正在交接（导包中）]`）。
+
+**读数（先看现场，不猜）**：k10 自己是 `ready` + 有包（`task-x21-psh-k10.zip` 4.8MB，20:01:27）+ 无主，
+唯一拒因是**别的课**占着闸。而 `tmp/x21-psh-k5/offline-dispatch.json` =
+`claimed_offline:true / claimed_by:d1aad0a78d7b-00d6397d / claimed_at:19:59:20 / flipped_at:19:48:31`，
+`task-x21-psh-k5.zip` **不存在**（`stale-packs/` 只有 17:37、18:51 两份作废包）。
+
+**根因一：逃生门被重试者自己推着走**。云机等不到包会一直重试（`offline_boot` 15s 一拍）：
+`hub/offline.py:513` → `begin_auto_handoff` → `queue_offline.py:866` **重写 `claimed_at = now`**。
+而 `_busy_locked` 的第二条腿正是拿 `claimed_at` 当锚 ⇒ **重试者就是被卡住的那台机器** ⇒
+「超窗 900s = 交接失败 ⇒ 不再占闸」（该函数旧注释的承诺，写在 `:979-980`）永久失效：hub 日志
+19:48:31 / 19:48:56 / … / 19:59:20 连续 claim k5，每一次都把全池锁再续 900s。
+
+**根因二（独立）：过期课永远出不了包**。k5 已跑到 it151 ≥ `iters=150`，而 `--export-bundle` 的
+导出分支只住在 `step_course_iter`（`trainer/loop_round_steps.py:264-271`）——它是**轮内**的一步，
+轮体在 `it > iters` 时一次都不进 ⇒ 进程**一条「全离线导出」都不打**，直接 `ALL DONE` + 收官
+drain（`loop_lifecycle.py:369-380`）。现场代价：19:07 那次导出只换来一场按 it5..it150 逐检查点
+400 局的 eval（~63 分钟，20:10 才到 it140），任务包永远不出现 ⇒ 根因一的「重试」永远没有尽头。
+**两条根因叠起来才是「永锁」**：单有其一都会自愈。
+
+**为什么用户三种动作都没用**（三条都是判据位置问题，不是操作问题）：
+
+| 动作 | 为什么无效 |
+|---|---|
+| 切 **k10** 离线/在线（19:48–19:54 六次，hub 全 200） | 闸读的是**别的课**（k5），与 k10 自己的 `authority` 无关 |
+| 切 **k5 在线/交还自动**（19:47:01） | 确实清了四键，但 90s 后云机 seize k5 ⇒ `begin_auto_handoff` 立刻重装（19:48:31） |
+| **停课 k5**（19:59:26） | `stopCourse` 推 `mode=offline` 走 `pin=None`，`set_mode_pinned` 只有 `pin is not None` 那条腿清 `claimed_offline`（`:789-791`）；而 `_busy_locked` 只豁免 `pinned_online`、**不豁免 `stopped`** ⇒ 停课照占闸（重启 hub 也没用：记录在盘上） |
+
+**落地（三处，全是换判据、不加机制）**：
+
+1. `queue_offline.py::_busy_locked` 交接窗口锚 = **`flipped_at`**（`claimed_at` 只作缺键兜底）。
+   `flipped_at` 只在首翻时写、重复 claim 不刷新、`set_mode_pinned` 切在线才清 ⇒ 一次交接最多
+   占闸 `AUTO_HANDOFF_PENDING_SEC`。两个锚点时间轴仍**刻意分叉**：`stall_verdict` 的
+   `pending-export` 照旧锚 `flipped_at`（活跃重试不触发停滞告警，也不该把死盘算作忙）。
+2. 两条腿都改成「只算**在离线池里**的课」（`is_runnable_offline`；原写法只豁免 `pinned_online`）。
+   停课（`stopped`）与冷课 online 记录（`not_offline`）不可能再有合法交接，而它们的残留**最清不掉**
+   （见上表第三行）⇒ 停课课不再把全池锁满一个窗口。
+3. `trainer/loop_lifecycle.py::export_refusal`（纯函数，`run()` 在 `self._setup()` 之后调用）：
+   `--export-bundle` 且 `start_it > iters` ⇒ 响亮 `SystemExit`（裸 `[run_rl]` 行 ⇒ 控制台
+   `exit-watchdog.tailFailureReason` 会把它当退出原因显示），文案给三条出路（调大 `iters` /
+   改在线 / 走「导出权重」）。`iters <= 0` 走与轮内 `_export_offline_bundle` 同口径的文案。
+
+**取舍（被否决的备选）**：
+
+- **保留 `claimed_at` 锚 + 加 episode 硬上限 `AUTO_HANDOFF_MAX_SEC`**：硬上限必然 ≤ 现场用例里的
+  2000s ⇒ 同一结果却多一个常量 + 一条判据（`plan/dispatch.review-hy.md` 已警告过常量别增生）；
+- **只在导包触发账本 `give_up`（3 次）时才释放闸**：现场只烧到 2 次（节流 600s）且随后 k5 被停课
+  ⇒ **修不掉现场**；
+- **改控制台 `stopCourse` 带 `pin=0`**：治的是已被第 2 条治好的症状（离线按钮本来就命中 `:789`
+  那条清键腿），多一条 TS 写面不值。
+
+**验收**：现网那台锁 → `flipped_at + 900s` 自然打开（本次 = 2026-10-07 20:14:20）；此后
+**停课 / 离线 / 交还自动**任一动作立刻开闸。用例：`test_busy_gate_window_anchors_the_handoff_start_not_retries`
+（现场原型，旧码上红 `assert 409 == 200`）· `test_busy_gate_ignores_stopped_course_residue`
+（旧码上红 `assert False is True`）· `test_handoff_window_anchor_is_flipped_at`（取代 R2-d 那条）·
+`test_export_refusal_rejects_a_course_that_already_reached_iters`。
+DECISIONS → `DECISIONS.md §2026-10-07-offline-busy-gate-anchor`。
+
 ## §70 自主 worker 收工即停：清单全终态 ⇒ 短窗口收工 + 保活线程收工即停（plan/offline-worker-graceful-exit，2026-10-07）
 
 **触发**：Kaggle 自主 worker 现场（2026-10-07 17:02–17:49，`x21-psh-b0` + `x21-psh-b`）：两门课
@@ -246,6 +308,9 @@ peek 发备份候选 · 池优先于副本 · `acquire_job` 按候选模式认�
   **`claimed_at`**（每次 pending_export claim 刷新）且窗口 ≤ `AUTO_HANDOFF_PENDING_SEC`(900s)。
   ★锚点分叉是有意的：busy 用 `claimed_at`（可刷新），`stall_verdict` 的 `pending-export` 仍锚 `flipped_at`
   （活跃重试不触发停滞告警，但也不该把死盘一直算作忙）。`pinned_online` 课**不占别人的闸**（限制只作用于**被检查方**）。
+  ⚠ **2026-10-07 已取代**（见 §71）：busy 锚改回 `flipped_at`（`claimed_at` 被重试者自己刷新 ⇒
+  逃生门失效，现场把 ready 的 k10 锁了十几分钟）；豁免面从「`pinned_online`」扩到「**所有不在
+  离线池的课**」（停课/冷课残留同样清不掉）。`stall_verdict` 锚不动。
 - **F3 停课/冷课 claim 409 `not_offline`**（行为变更）；但 `/offline/tasks` 的**取包端点不拦 `stopped`**
   （正在跑的会话停课后仍要能重取包；冷课无标记存量路径照发，`test_task_pack_cold_course_still_served`）。
 - **F4 新一轮交接 ⇒ 重置导包触发账本**：「新一轮」= 换 `worker_id` **∨** 距上次 claim 超
