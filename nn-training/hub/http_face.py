@@ -74,6 +74,8 @@ from common.protocol import (
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_CLAIM_PATH,
     OFFLINE_HEARTBEAT_PATH,
+    OFFLINE_HOLD_PATH,
+    OFFLINE_PROGRESS_PATH,
     OFFLINE_RELEASE_PATH,
     OFFLINE_RESULT_PATH,
     OFFLINE_RESUME_BLOB_PATH,
@@ -406,6 +408,8 @@ class HubHandler(
                 self._get_task_pack()
             elif path == OFFLINE_TASKS_PATH:
                 self._get_offline_tasks()
+            elif path == OFFLINE_HOLD_PATH:
+                self._get_offline_hold()
             elif path == OFFLINE_RESUME_PATH:
                 self._get_offline_resume()
             elif path == OFFLINE_RESUME_BLOB_PATH:
@@ -478,6 +482,8 @@ class HubHandler(
                 self._post_offline_lease("heartbeat")
             elif path == OFFLINE_RELEASE_PATH:
                 self._post_offline_lease("release")
+            elif path == OFFLINE_PROGRESS_PATH:
+                self._post_offline_progress()
             else:
                 self._json({"error": "not found"}, 404)
         except (ProtocolError, ValueError) as e:

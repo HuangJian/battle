@@ -437,7 +437,7 @@ def test_obtain_pack_optional_still_uses_the_hub_when_it_has_one(
     monkeypatch.setattr(offline_boot, "probe_hub", lambda *a, **k: True)
     n = {"calls": 0}
 
-    def fetch(hub, token, course, dest_dir, log, timeout=0.0):
+    def fetch(hub, token, course, dest_dir, log, timeout=0.0, *, lease: str = ""):
         n["calls"] += 1
         return _pack(Path(dest_dir) / f"task-{course}.zip")
 
@@ -470,7 +470,7 @@ def _run_many(
     seen: list[str] = []
     it = iter(outcomes)
 
-    def fake_one(cfg, creds, log, stop, course=None, multi=False):
+    def fake_one(cfg, creds, log, stop, course=None, multi=False, lease=""):
         seen.append(str(course))
         nxt = next(it)
         if isinstance(nxt, BaseException):

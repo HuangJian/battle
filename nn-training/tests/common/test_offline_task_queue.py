@@ -218,7 +218,10 @@ def test_tasks_reports_no_pack_stale_and_claimed(tmp_path: Path) -> None:
     row = _json(_req(base, OFFLINE_TASKS_PATH)[1])["tasks"][0]
     assert row["state"] == "stale" and row["stale_reason"] and row["claimable"] is True
 
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")[0] == 200
+    assert (
+        _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[0]
+        == 200
+    )
     row = _json(_req(base, OFFLINE_TASKS_PATH)[1])["tasks"][0]
     assert row["state"] == "claimed" and row["claimable"] is False
     assert row["holder"]["worker_id"] == "w1"
@@ -244,7 +247,9 @@ def test_tasks_without_a_traj_root_is_an_empty_list(tmp_path: Path) -> None:
 
 
 def _claim(base: str, course: str = "c5-gae", worker: str = "w1", **extra: str) -> tuple[int, dict]:
-    qs = {"course": course, "worker": worker, **extra}
+    # proto=2：★M1b 起 claim 必须带它（缺 ⇒ 409 busy+error+proto_required，旧端拒收）；
+    # 要测「旧端」就传 proto=""（`_claim(base, proto="")`）。
+    qs = {"course": course, "worker": worker, "proto": "2", **extra}
     st, raw = _req(base, OFFLINE_CLAIM_PATH + "?" + urllib.parse.urlencode(qs), method="POST")
     return st, _json(raw)
 
@@ -267,7 +272,7 @@ def test_claim_grants_a_lease_and_blocks_another_worker(tmp_path: Path) -> None:
     st2, doc2 = _claim(base, worker="w2")
     assert st2 == 409, doc2
     assert doc2["held"] is True and doc2["holder"]["worker_id"] == "w1"
-    assert "takeover=1" in doc2["error"], doc2
+    assert "不可被顶" in doc2["error"], doc2  # ★M1b：takeover 不再是出口（不变量 3）
 
 
 def test_claim_by_the_same_worker_reuses_the_lease(tmp_path: Path) -> None:
@@ -280,12 +285,20 @@ def test_claim_by_the_same_worker_reuses_the_lease(tmp_path: Path) -> None:
     assert doc["lease"]["token"] != first, "续领要换 token（旧会话的 token 立刻作废）"
 
 
-def test_claim_takeover_overrides_a_foreign_lease(tmp_path: Path) -> None:
+def test_claim_takeover_cannot_override_a_live_hold(tmp_path: Path) -> None:
+    """★M1b 语义反转（旧名 `..._overrides_a_foreign_lease`）：**live 的接管不可被顶**。
+
+    旧行为：别的盘一个 `?takeover=1` 就能顶掉活着的租约（= 同一份活两处跑，数据损坏级）。
+    新契约（plan §1.2-③ 不变量 3）：要清只有两条路——① 它自己**进度**静默超阈（新主自动
+    接管，无需任何参数）② 人到控制台点「强制解除接管」（hub 侧 = `revoke_offline_lease`）。
+    """
     base, _hub, _srv = _offline_hub(tmp_path)
     _write_pack(tmp_path)
     _claim(base, worker="w1")
     st, doc = _claim(base, worker="w2", takeover="1")
-    assert st == 200 and doc["lease"]["worker_id"] == "w2"
+    assert st == 409 and doc["held"] is True, doc
+    assert doc["holder"]["worker_id"] == "w1"
+    assert "不可被顶" in doc["error"], doc
 
 
 def test_claim_needs_a_worker_and_an_existing_pack(
@@ -1131,3 +1144,65 @@ def test_blocked_note_reports_stale_holder() -> None:
         }
     )
     assert "w-dead" in note and "301" in note and "可直接接管" in note, note
+
+
+# ───────────────── M1b（plan/worker-type-dispatch-model §3-M1b，2026-10-07）─────────────────
+
+
+def test_task_list_worker_claimable_implies_the_same_claim_succeeds(tmp_path: Path) -> None:
+    """★DoD#2 守门用例（清单/claim **同源契约**，`queue_offline.py` 模块头第 12-14 行）：
+
+    「带 `?worker=` 的清单说 `claimable=true`」⇒ 同参 `claim` **必成功**。
+
+    ⚠ 这是**上界**契约（F14）：清单与 claim 之间仍有并发窗口（别的盘在这几微秒里抢走），
+    所以本用例只在不引入并发的形状下跑——判据是「清单不是乐观的」，不是「claim 永不失败」。
+    """
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, "c-a")
+    _course(tmp_path, "c-b")
+    hub.discover(force=True)
+    _write_pack(tmp_path, "c-a")
+    _write_pack(tmp_path, "c-b")
+    # 1) 两台盘各自的第一门课都可领（不忙、无主）
+    rows = {r["course"]: r for r in _json(_req(base, OFFLINE_TASKS_PATH + "?worker=w1")[1])["tasks"]}
+    assert rows["c-a"]["claimable"] is True and rows["c-b"]["claimable"] is True
+    # 2) w1 领下 c-a（清单说的就成真）
+    st, _doc = _claim(base, course="c-a", worker="w1")
+    assert st == 200, _doc
+    # 3) 再问同一个 worker：c-a 不可领（自己持有）、c-b 不可领（一拖一）——拒因必须指名道姓
+    rows = {r["course"]: r for r in _json(_req(base, OFFLINE_TASKS_PATH + "?worker=w1")[1])["tasks"]}
+    assert rows["c-a"]["claimable"] is False and rows["c-a"]["busy"] is False
+    assert rows["c-b"]["claimable"] is False and rows["c-b"]["busy"] is True
+    assert "c-a" in rows["c-b"]["reason"]
+    st_busy, doc_busy = _claim(base, course="c-b", worker="w1")
+    assert st_busy == 409 and doc_busy["busy"] is True, doc_busy  # 一拖一：同源拒绝
+    # 自己持有那门：清单说「不可领」（对**别人**不可领）而**自己**再领 = 续领（mine 出口，
+    # cell 中断重跑用）——两边不矛盾：清单的 claimable 答的是「你现在拿到手了吗」。
+    st_mine, doc_mine = _claim(base, course="c-a", worker="w1")
+    assert st_mine == 200 and doc_mine["lease"]["token"] != "", doc_mine
+    # 4) 换一台盘：它的清单说可领 ⇒ 可领（多机并行；一拖一只管同一台盘）
+    rows = {r["course"]: r for r in _json(_req(base, OFFLINE_TASKS_PATH + "?worker=w2")[1])["tasks"]}
+    assert rows["c-b"]["claimable"] is True and rows["c-b"]["busy"] is False
+    st3, doc3 = _claim(base, course="c-b", worker="w2")
+    assert st3 == 200, doc3
+
+
+def test_worker_param_and_upper_bound_semantics(tmp_path: Path) -> None:
+    """★M1b / §69：清单缺 `?worker=` = **上界**语义（不含一拖一），带 worker 才是真判据。
+
+    为什么两种都要在：云机选下一门只认带 worker 的那份；而控制台排障不带 worker
+    （它不想让「某台盘正在跑」把别的课显示成不可领——那会让排障面说谎）。
+    """
+    base, hub, _srv = _boot(tmp_path)
+    for c in ("c-a", "c-b"):
+        _course(tmp_path, c)
+        _write_pack(tmp_path, c)
+    hub.discover(force=True)
+    assert _claim(base, course="c-a", worker="w1")[0] == 200
+    upper = _json(_req(base, OFFLINE_TASKS_PATH)[1])["tasks"]
+    rows = {r["course"]: r for r in upper}
+    assert rows["c-b"]["claimable"] is True and rows["c-b"]["busy"] is False
+    scoped = {r["course"]: r for r in _json(_req(base, OFFLINE_TASKS_PATH + "?worker=w1")[1])["tasks"]}
+    assert scoped["c-b"]["claimable"] is False and scoped["c-b"]["busy"] is True
+    assert upper[0]["hold"] == {} or upper[0]["hold"]  # 字段在（形状钉住，值随状态）
+    assert "hold" in upper[0] and "pending_export" in upper[0] and "busy" in upper[0]

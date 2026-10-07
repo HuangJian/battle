@@ -150,8 +150,13 @@ OFFLINE_TASKS_PATH = "/offline/tasks"
 OFFLINE_CLAIM_PATH = "/offline/claim"
 OFFLINE_HEARTBEAT_PATH = "/offline/heartbeat"
 OFFLINE_RELEASE_PATH = "/offline/release"
+OFFLINE_PROGRESS_PATH = "/offline/progress"
 OFFLINE_QUEUE_VERSION = 1
 OFFLINE_LEASE_TTL_SEC = 900
+#: **派发协议版本**（★M1b / plan/worker-type-dispatch-model §1.5.2-P0-4）：claim 必须带
+#: `?proto=2`。新 hub 对缺它的请求一律 409（`busy:true` + `proto_required:2`）——所以这个
+#: 常量不是「能力声明」，是**入场券**：漏了它本会话什么都领不到（会响亮地打一行日志）。
+OFFLINE_CLAIM_PROTO = 2
 #: 本机 worker 身份的落点（`<work>/.worker-id`）：**持久化** ⇒ cell 中断后重跑不会被**自己**
 #: 留下的租约挡在门外（hub 判 `mine` 直接续上；评审 G1）。
 WORKER_ID_NAME = ".worker-id"
@@ -533,13 +538,21 @@ def fetch_task_pack(
     dest_dir: Path,
     log: Callable[[str], None],
     timeout: float = PACK_TIMEOUT,
+    *,
+    lease: str = "",
 ) -> Path | None:
-    """`GET /offline/task-pack?course=<课>` → 落到 `dest_dir/task-<课>.zip`。
+    """`GET /offline/task-pack?course=<课>[&lease=<token>]` → 落到 `dest_dir/task-<课>.zip`。
 
     返回 None = **这一次**没取到（404 还没导出 / 网络抖动）——调用方据此重试或转手动。
     401/403 也不抛：包可能已经在用户手上，手动路仍然能把任务做完，所以只响亮记一笔。
+
+    ★M1b / P1-2：hub 的取包门现在还会问「这门课有没有 **live hold**」——有主时（包括
+    **本机自己**刚 claim 完）不带 `?lease=` 会吃 409。所以 `_run_batch` 领到租约后必须把
+    token 一路传到这里（空 = 老路径：没领租约的 `CFG.course` 腿，只有「无人持」时才取得到）。
     """
     url = f"{hub.rstrip('/')}/offline/task-pack?course={urllib.parse.quote(course)}"
+    if lease:
+        url += f"&lease={urllib.parse.quote(lease)}"
     try:
         raw = _fetch_guarded(
             url, _headers(token), log, "task-pack", timeout
@@ -664,6 +677,8 @@ def _try_hubs(
     course: str,
     work_dir: Path,
     log: Callable[[str], None],
+    *,
+    lease: str = "",
 ) -> Path | None:
     """对着候选逐个试一轮取包（探活 → 取包），返回包或 None（纯函数壳，只求可测）。
 
@@ -683,7 +698,7 @@ def _try_hubs(
         if not course:
             log("没填 CFG.course —— 没法按课程取包（去控制台看课程名，或在 CFG 里填）")
             return None
-        return fetch_task_pack(hub, tok, course, work_dir, log)
+        return fetch_task_pack(hub, tok, course, work_dir, log, lease=lease)
     return None
 
 
@@ -695,6 +710,7 @@ def obtain_pack(
     stop: Any = None,
     *,
     optional: bool = False,
+    lease: str = "",
 ) -> Path | None:
     """拿任务包：显式路径 → 已有落点 → （hub 取 / 等人传）等到 deadline 为止。
 
@@ -760,7 +776,7 @@ def obtain_pack(
             raise SystemExit("[offline] 收到停机信号 —— 等包中止（未开始任何训练）")
         if not hub_parked and hubs:
             hub_tries += 1
-            got = _try_hubs(hubs, hub_broken, creds, course, work_dir, log)
+            got = _try_hubs(hubs, hub_broken, creds, course, work_dir, log, lease=lease)
             if got is not None:
                 return got
             if not hubs_tried_ts and all(h in hub_broken for h in hubs):
@@ -1081,11 +1097,14 @@ def run_one_course(
     course: str,
     multi: bool = False,
     run_loop_main: Callable[[list[str]], int] | None = None,
+    lease: str = "",
 ) -> int:
     """跑**一门课**的整段：取包 → 引导代码 → `remote.run_loop` → 打交付物；返回 rc。
 
     `multi=True`（同一会话里还有别的课）时工作目录再套一层课程名——见 `course_work_dir`。
     `run_loop_main` 是测试用的注入点（生产走 `remote.run_loop.main`）。
+    `lease` = 本课的租约 token（`_run_batch` 领到后传进来）：取包要带它（P1-2 的 live hold 门），
+    空值只在「没领租约/老 hub」时出现。
     """
     work = _load_deliverable().course_work_dir(cfg, course, multi=multi)
     work.mkdir(parents=True, exist_ok=True)
@@ -1124,13 +1143,15 @@ def run_one_course(
             f"run={local['run_id'] or '-'}）⇒ 本机优先：不从包里导入 plan/manifest；"
             "包只当代码/TS 的备源"
         )
-        pack = obtain_pack(ccfg, creds, log, work, stop=keepalive_stop, optional=True)
+        pack = obtain_pack(
+            ccfg, creds, log, work, stop=keepalive_stop, optional=True, lease=lease
+        )
         if pack is None:
             log("本机优先：这次没取到任务包 —— 代码/TS 从产物目录取，回传 best-effort")
     else:
         if local is None:
             log(f"本机没有可续跑的产物（{dest}）——按老规矩取包起跑")
-        pack = obtain_pack(ccfg, creds, log, work, stop=keepalive_stop)
+        pack = obtain_pack(ccfg, creds, log, work, stop=keepalive_stop, lease=lease)
 
     idx: dict = {}
     if pack is not None:
@@ -1287,10 +1308,22 @@ def worker_id_of(work: Path, log: Callable[[str], None]) -> str:
 
 
 def fetch_task_list(
-    hub: str, token: str, log: Callable[[str], None], *, timeout: float = PING_TIMEOUT
+    hub: str,
+    token: str,
+    log: Callable[[str], None],
+    *,
+    worker: str = "",
+    timeout: float = PING_TIMEOUT,
 ) -> list[dict] | None:
-    """`GET /offline/tasks` → 任务清单；`None` = **hub 不支持 / 不可达**（调用方据此降级）。"""
+    """`GET /offline/tasks` → 任务清单；`None` = **hub 不支持 / 不可达**（调用方据此降级）。
+
+    ★M1b / Q3：带 `?worker=` 时清单会把「一拖一」算进去（`busy` / `claimable` 按**这台盘**
+    判）——这才是云机该看的那份（不带 = 上界语义，可能把「你这台盘正在跑别的课」漏掉，
+    于是选了一门 claim 必吃 409 的课）。
+    """
     url = f"{hub.rstrip('/')}{OFFLINE_TASKS_PATH}"
+    if worker:
+        url += f"?worker={urllib.parse.quote(worker)}"
     req = urllib.request.Request(url, headers=_headers(token))
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -1344,7 +1377,8 @@ def claim_course(
         缺包由 `PackUnavailableError` 响亮收场）。
     """
     url = (
-        f"{hub.rstrip('/')}{OFFLINE_CLAIM_PATH}?course={urllib.parse.quote(course)}"
+        f"{hub.rstrip('/')}{OFFLINE_CLAIM_PATH}?proto={OFFLINE_CLAIM_PROTO}"
+        f"&course={urllib.parse.quote(course)}"
         f"&worker={urllib.parse.quote(worker)}" + ("&takeover=1" if takeover else "")
     )
     code, doc = _post_json(url, token, log, timeout=timeout)
@@ -1353,6 +1387,14 @@ def claim_course(
         log(f"领到租约（{lease.get('ttl_sec')}s，worker={worker}）")
         return str(lease.get("token") or ""), ""
     if code == 409:
+        if doc.get("proto_required"):
+            # ★M1b：hub 显式拒旧端（本文件没带 `?proto=`）。正常不会发生（上面已带上），
+            # 真的发生了就是「克隆的 notebook 太旧 / 这份文件被改过」⇒ 响亮说清怎么修。
+            log(
+                f"hub 要求派发协议 v{doc.get('proto_required')}（本会话的客户端是 v"
+                f"{OFFLINE_CLAIM_PROTO}）：{doc.get('error') or ''}"
+            )
+            return "", "proto"
         if doc.get("pending_export"):
             if doc.get("give_up"):
                 log(
@@ -1378,9 +1420,13 @@ def claim_course(
             return "", "pinned_online"
         holder = doc.get("holder") or {}
         left = float(holder.get("expires_in") or 0.0)
+        # ★M1b / P0-4 后半（行为变更）：`held` 从「照旧跑」改成**本拍不跑，换下一门**。
+        # 为什么：hold v2 把「谁在跑」变成**互斥**（不是观测）——别人持着 live hold 时本机
+        # 再跑一遍 = 同一份活两处跑（数据损坏级）；hub 侧的 live hold 也不可被顶（不变量 3）。
+        # 旧口径「产物照落、回传被判 duplicate 丢弃」只在**没有互斥**的时代成立。
         log(
-            f"这门课已被 {holder.get('worker_id') or '?'} 持有（{left:.0f}s 后过期）"
-            "——本机照旧跑：产物照落，重复的那份回传会被判 duplicate 丢弃"
+            f"这门课正被 {holder.get('worker_id') or '?'} 接管（{left:.0f}s 内无进度即自动可接管）"
+            "——本拍不跑，换下一门（或等它静默后被本机自动接管）"
         )
         return "", "held"
     if code == 404:
@@ -1500,7 +1546,9 @@ def resolve_courses(
     hubs = hub_candidates(cfg, creds)
     if not hubs:
         raise SystemExit(_no_courses_msg("没有可用的 hub 地址（CFG.hub_url / HUB_IP 都没配）"))
-    tasks = fetch_task_list(hubs[0], str(creds.get("HUB_TOKEN") or ""), log)
+    tasks = fetch_task_list(
+        hubs[0], str(creds.get("HUB_TOKEN") or ""), log, worker=worker
+    )
     if tasks is None:
         if probe is not None:
             probe["unsupported"] = True
@@ -1716,7 +1764,7 @@ def _run_batch(
         beat: threading.Event | None = None
         if ctx:
             lease, why = claim_course(ctx["hub"], ctx["token"], course, ctx["worker"], log)
-            if why in ("busy", "pending_export", "completed", "not_offline"):
+            if why in ("busy", "pending_export", "completed", "not_offline", "held", "proto"):
                 # 自动交接的中间态：**本拍不跑**（不是「取不到包」的错误，也不进 skipped ——
                 # 它会在 caller 的下一拍重问；旧口径「一律照旧跑」会在这里白跑一场）。
                 blockers[course] = why
@@ -1732,7 +1780,9 @@ def _run_batch(
             if lease:
                 beat = heartbeat_loop(ctx["hub"], ctx["token"], course, lease, log)
         try:
-            rc = run_one_course(cfg, creds, log, keepalive_stop, course=course, multi=multi)
+            rc = run_one_course(
+                cfg, creds, log, keepalive_stop, course=course, multi=multi, lease=lease
+            )
         except PackUnavailableError as e:
             # ★ 只放宽「取不到包」这一类（顺序必须在 `except SystemExit` **之前**，
             #   否则会被父类吃掉）：记一行 + 继续下一门；汇总与非零退出在循环之后。

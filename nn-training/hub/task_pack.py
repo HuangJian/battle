@@ -124,13 +124,19 @@ def hold_progress_stale_sec() -> float:
 
 
 def hold_progress_at(hold: object) -> float:
-    """hold 记录里的**进度时刻**（0.0 = 没有记录 / 值不合法）。纯函数。"""
-    if not isinstance(hold, dict):
-        return 0.0
+    """hold 记录里的**进度时刻**；`-1.0` = 没有记录 / 值不合法。纯函数。
+
+    ★M1b：哨兵从 `0.0` 改成 **`-1.0`**。为什么：`0.0` 既是「没写」又是「写了一个真的 0」
+    ——生产时钟是 epoch（永远不会是 0），所以旧写法在线上不会错，而**假时钟从 0 起步的测试**
+    （`now_fn=lambda: 0.0`）会把「刚 claim 的进度锚」读成「没有进度」⇒ 活跃的 hold 当场被判
+    stale。真值域（≥0）与哨兵（-1）自此不重叠。
+    """
+    if not isinstance(hold, dict) or "last_progress_at" not in hold:
+        return -1.0
     try:
-        return max(0.0, float(hold.get("last_progress_at") or 0.0))
+        return max(0.0, float(hold["last_progress_at"]))
     except (TypeError, ValueError):
-        return 0.0
+        return -1.0
 
 
 def hold_touch_at(hold: object) -> float:
@@ -138,17 +144,19 @@ def hold_touch_at(hold: object) -> float:
 
     为什么单独一个字段：TTL 余量要从**接触**起算（心跳刷它），而活性只看进度 —— 两者分开，
     「心跳活、进度死」的假活才既不掉线也不被当成新鲜（plan §1.5.4-P2-1 的四象限）。
+    ★M1b：缺失哨兵同样改 **`-1.0`**（§`hold_progress_at` 的理由），且「有没有这个字段」
+    按**键存不存在**判，不再按 `> 0` 判。
     """
     if not isinstance(hold, dict):
-        return 0.0
+        return -1.0
     for key in ("touch_at", "at"):
+        if key not in hold:
+            continue
         try:
-            v = max(0.0, float(hold.get(key) or 0.0))
+            return max(0.0, float(hold.get(key) or 0.0))
         except (TypeError, ValueError):
-            v = 0.0
-        if v > 0:
-            return v
-    return 0.0
+            continue
+    return -1.0
 
 
 def hold_state(now: float, hold: object) -> str:
@@ -161,7 +169,7 @@ def hold_state(now: float, hold: object) -> str:
     if not isinstance(hold, dict) or not hold:
         return ""
     p = hold_progress_at(hold)
-    if p <= 0.0:
+    if p < 0.0:
         return "stale"
     return "stale" if float(now) - p > hold_progress_stale_sec() else "live"
 
@@ -182,8 +190,8 @@ def hold_expires_in(now: float, hold: object, *, ttl_sec: float, stale_sec: floa
     n = float(now)
     progress = hold_progress_at(hold)
     touch = hold_touch_at(hold)
-    left_progress = (progress + float(stale_sec)) - n if progress > 0.0 else 0.0
-    left_ttl = (touch + float(ttl_sec)) - n if touch > 0.0 else 0.0
+    left_progress = (progress + float(stale_sec)) - n if progress >= 0.0 else 0.0
+    left_ttl = (touch + float(ttl_sec)) - n if touch >= 0.0 else 0.0
     return max(0.0, min(left_progress, left_ttl))
 
 
@@ -374,9 +382,11 @@ def lease_verdict(now: float, rec: dict | None, worker_id: str) -> str:
     * `mine` 排在 `stale` **之前** ⇒ 同一个 worker 回来续领自己（可能静默过）的租约时
       判 `mine` 续上，不被判成 stale 而被自己 409（cell 中断重跑要用）。
 
-    `stale` = 身份不同 ∧ 连续静默超 `offline_lease_stale_sec()`；`beat_at` 缺失（旧记录）
-    ⇒ 用 `at`（语义不变）。token 不在这里判——那是 claim/heartbeat 内部的分流（它们本来
-    就有 token）。
+    ★ 2026-10-07（M1b，plan §1.6-F2）：`stale` 的判据从**心跳静默**改成**进度静默**
+    （`last_progress_at`，阈值 `hold_progress_stale_sec()`）——「心跳活、进度死」的假活
+    （docs/nn/remote-transport.md §68）不该被当成活（心跳只续 TTL，不作活性）。
+    没有进度字段的旧记录退回 `beat_at` + `offline_lease_stale_sec()`（过渡读路，
+    M1c 随 180s 常量一起删）。token 不在这里判——那是 claim/heartbeat 内部的分流。
     """
     if not rec:
         return "free"
@@ -386,6 +396,12 @@ def lease_verdict(now: float, rec: dict | None, worker_id: str) -> str:
         return "revoked"
     if str(rec.get("worker_id", "")) == worker_id:
         return "mine"
+    progress = hold_progress_at(rec)
+    if progress >= 0.0:
+        if float(now) - progress > hold_progress_stale_sec():
+            return "stale"
+        return "foreign"
+    # 旧记录（没有进度字段）⇒ 退回心跳静默（过渡读路；M1c 删除）。
     beat = rec.get("beat_at")
     try:
         beat_at = float(beat) if beat is not None else float(rec.get("at", 0.0) or 0.0)

@@ -627,8 +627,24 @@ OFFLINE_TASKS_PATH = "/offline/tasks"
 OFFLINE_CLAIM_PATH = "/offline/claim"
 OFFLINE_HEARTBEAT_PATH = "/offline/heartbeat"
 OFFLINE_RELEASE_PATH = "/offline/release"
+#: 接管（hold）**只读面**（★M1b / plan/worker-type-dispatch-model §1.5.2-P0-5①）：
+#: `GET /offline/hold?course=<课>` 回答「这门课上现在有没有活着的接管」——trainer 在
+#: **每轮边界**问一次（≤3s 超时，失败退 `tmp/loop-control.json` 文件通道），据此决定
+#: 「本机这段该不该让给云机」（`held` 语义）。**只读**：不建 hold、不刷活性、零副作用。
+OFFLINE_HOLD_PATH = "/offline/hold"
+#: **进度打点**（★M1b / §1.1 Q2）：`POST /offline/progress?course=<课>&lease=<token>`。
+#: 与 `heartbeat` 的区别是**唯一**一条：心跳刷 TTL 不刷活性，进度两者都刷（`last_progress_at`）。
+#: 打点必须落在**轮内完成事件**上（每 N 局完 / 每 M 秒检查点，M ≤ 300s），不许另开线程
+#: ——那正是「心跳活、进度死」的教训（§68：心跳不能当活性）。
+OFFLINE_PROGRESS_PATH = "/offline/progress"
 #: 清单协议版本：云机据此判断能力（老 hub 没有这个端点 ⇒ 404 ⇒ 降级到 `CFG.course`）。
 OFFLINE_QUEUE_VERSION = 1
+#: **派发协议版本**（★M1b / §1.5.2-P0-4）：`claim` 必须带 `?proto=2`（本轮 hold 语义）。
+#: 缺失 ⇒ 409 `{busy:true, error:<全文>, proto_required:2}`——**为什么借用 `busy` 这个键**：
+#: 旧云机（`remote/offline_boot.py` 的 409 分流）在 `busy` 分支会把 `error` **原样打进会话日志**
+#: 并走 blocker 路径（本拍不跑、不耗 idle 预算），于是「请刷新 notebook」这句话能真正到达现场，
+#: 且**绝不静默双跑**。新码据 `proto_required` 判读。
+OFFLINE_CLAIM_PROTO_VERSION = 2
 #: 离线租约时长（秒）。为什么与逐轮 job 的 `CLAIM_TTL_SEC = 300` 不同档：离线段是**小时级**
 #: （取包 + 跑完整段 + 打包交付），300s 只会让心跳压力白增。心跳周期沿用 `HEARTBEAT_SEC = 60`。
 #: 租约只管**领取资格**，不参与回传（`/offline/artifact` 一行不改）：回传靠 `(run_id, it)`

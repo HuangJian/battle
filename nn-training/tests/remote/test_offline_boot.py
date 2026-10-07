@@ -307,7 +307,7 @@ def test_obtain_pack_falls_back_to_upload_when_the_hub_has_no_pack(
     monkeypatch.setattr(offline_boot, "probe_hub", lambda *a, **k: True)
     calls = {"n": 0}
 
-    def fetch(hub, token, course, dest_dir, log, timeout=0.0):
+    def fetch(hub, token, course, dest_dir, log, timeout=0.0, *, lease: str = ""):
         calls["n"] += 1
         if calls["n"] == 1:
             fake_pack(up, course=course)  # 模拟「用户在这期间把包传上来了」
@@ -333,7 +333,7 @@ def test_obtain_pack_from_hub_writes_into_the_work_dir(
     monkeypatch.setattr(offline_boot, "probe_hub", lambda *a, **k: True)
     real = fake_pack(tmp_path / "src", course="c5-gae")
     monkeypatch.setattr(
-        offline_boot, "fetch_task_pack", lambda hub, tok, course, dest, log, timeout=0.0: _copy(real, dest)
+        offline_boot, "fetch_task_pack", lambda hub, tok, course, dest, log, timeout=0.0, **kw: _copy(real, dest)
     )
     got = offline_boot.obtain_pack({"course": "c5-gae", "wait_pack_sec": 1}, {}, quiet, work)
     assert got is not None and got.parent == work and offline_boot.is_task_pack(got)
@@ -502,7 +502,7 @@ def test_hub_fetch_gives_up_after_the_cap_and_switches_to_upload(
     monkeypatch.setattr(offline_boot, "probe_hub", lambda *a, **k: True)
     calls = {"n": 0}
 
-    def fetch(hub, token, course, dest_dir, log, timeout=0.0):
+    def fetch(hub, token, course, dest_dir, log, timeout=0.0, *, lease: str = ""):
         calls["n"] += 1
         if calls["n"] == offline_boot.DEFAULT_HUB_TRIES:
             fake_pack(up, course=course)  # 第 10 轮之后用户把包传上来了
@@ -539,7 +539,7 @@ def test_upload_prompt_comes_only_after_the_hub_tries_are_exhausted(
     monkeypatch.setattr(offline_boot, "probe_hub", lambda *a, **k: True)
     events: list[str] = []
 
-    def fetch(hub, token, course, dest_dir, log, timeout=0.0):
+    def fetch(hub, token, course, dest_dir, log, timeout=0.0, *, lease: str = ""):
         events.append("hub")
         return None
 
@@ -576,7 +576,7 @@ def test_hub_tries_zero_means_no_cap(tmp_path: Path, monkeypatch: pytest.MonkeyP
     calls = {"n": 0}
     beyond = offline_boot.DEFAULT_HUB_TRIES + 2  # 越缺省上限：够拿到它就证「0 = 不限」
 
-    def fetch(hub, token, course, dest_dir, log, timeout=0.0):
+    def fetch(hub, token, course, dest_dir, log, timeout=0.0, *, lease: str = ""):
         calls["n"] += 1
         if calls["n"] == beyond:
             return fake_pack(dest_dir, course=course)  # 第 beyond 轮 hub 才导出

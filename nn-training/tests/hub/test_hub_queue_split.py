@@ -192,11 +192,14 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "offline_task_courses",
             "offline_tasks",
             "_lease_rec",
+            "_lease_rec_locked",
             "offline_lease",
             "holder_info",
+            "_holder_info_locked",
             "claim_offline",
             "_lease_pub",
             "heartbeat_offline",
+            "progress_offline",
             "release_offline",
             "offline_leases",
             # 自动离线交接（2026-10-03，plan/auto-offline-handoff）
@@ -349,9 +352,10 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     "_leases": frozenset(
         {
             "__init__",
-            "_lease_rec",
+            "_lease_rec_locked",
             "claim_offline",
             "heartbeat_offline",
+            "progress_offline",
             "release_offline",
             "revoke_offline_lease",
         }
@@ -469,8 +473,10 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     """域成员各住一家；`_HubQueue` 不得再定义任何一个（组合类只组合）。"""
     # 域成员**不重名**（`halt_workers` 是属性对，一个名字两个 FunctionDef）；
     # 2026-10-07（M1a）新增 5 个：note_hold / note_progress / note_pending_export / hold_of /
-    # pending_export_of。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 121, len(DOMAIN_METHODS)
+    # pending_export_of；2026-10-07（M1b）再 +3：progress_offline（进度打点）与两个**无锁内核**
+    # `_lease_rec_locked` / `_holder_info_locked`（busy 闸按 worker 判 ⇒ 要在 `_lease_lock`
+    # 临界区里读持有面，而 Lock 不可重入——内核拆出来才不死锁）。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 124, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -480,7 +486,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 121, len(seen)
+    assert len(seen) == 124, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -504,9 +510,9 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
         for name in realized:
             assert seen.get(name, domain) == domain, f"{name} 同时住 {seen[name]} 与 {domain}"
             seen[name] = domain
-    # 121 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
+    # 124 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
     expect = set(DOMAIN_METHODS) | {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"}
-    assert len(seen) == 123 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
+    assert len(seen) == 126 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
 
 
 # ───────────────────── ② 接线正确 ─────────────────────

@@ -37,8 +37,11 @@ from common.protocol import (
     COURSE_ENABLE_MARKER,
     OFFLINE_CLAIM_PATH,
     OFFLINE_HEARTBEAT_PATH,
+    OFFLINE_HOLD_PATH,
+    OFFLINE_PROGRESS_PATH,
     OFFLINE_RELEASE_PATH,
     OFFLINE_RESULT_PATH,
+    OFFLINE_TASK_PACK_PATH,
     OFFLINE_TASKS_PATH,
 )
 from hub import offline as offline_mod
@@ -245,7 +248,7 @@ def test_pin_online_course_is_listed_but_locked(tmp_path: Path) -> None:
     assert str(row["reason"]).startswith("pinned:")
     assert row["open_time"] == hub.open_time_of("c5-gae")
     assert row["open_time"] < 1e18  # 开课标记在 ⇒ 真实 mtime（不是 +inf 哨兵）
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     body = _json(raw)
     assert st == 409 and body["pinned_online"] is True, body
     assert hub.mode_of("c5-gae") == "online"
@@ -269,7 +272,7 @@ def test_stopped_online_course_is_hidden_from_the_offline_disk(tmp_path: Path) -
     assert rows_all["c5-gae"]["state"] == "not_offline"
     assert rows_all["c5-gae"]["claimable"] is False
     assert rows_all["c5-gae"]["seize"] is False
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     body = _json(raw)
     assert st == 409 and body["not_offline"] is True, body
     assert "不在训练中" in body["error"], body
@@ -350,7 +353,7 @@ def test_claim_without_pack_flips_mode_and_triggers_export(
     calls = _stub_auto_handoff(monkeypatch)
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path, hub, "c5-gae")
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     body = _json(raw)
     assert st == 409, body
     assert body["auto_handoff"] is True and body["pending_export"] is True
@@ -361,7 +364,7 @@ def test_claim_without_pack_flips_mode_and_triggers_export(
     assert rec["claimed_offline"] is True and rec["mode"] == "offline"
     assert (tmp_path / "c5-gae" / "offline-dispatch.json").is_file()
     # 再问一次：节流（不重复打扰控制台）
-    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     assert st2 == 409 and _json(raw2)["triggered"] is False
     assert calls == ["c5-gae"]
 
@@ -372,7 +375,7 @@ def test_claim_without_pack_degrades_when_console_unreachable(
     _stub_auto_handoff(monkeypatch, (False, "OSError"))
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path, hub, "c5-gae")
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     body = _json(raw)
     assert st == 409 and body["pending_export"] is True
     assert "控制台" in body["trigger_note"], body
@@ -389,12 +392,12 @@ def test_stopped_course_with_offline_record_and_pack_is_rejected(tmp_path: Path)
     hub.set_mode_pinned("c5-gae", "offline", True)
     os.remove(tmp_path / "c5-gae" / COURSE_ENABLE_MARKER)
     assert [r["course"] for r in hub.offline_tasks()] == []
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     body = _json(raw)
     assert st == 409 and body["not_offline"] is True, body
     # 缺包也走同一条 409：不替停掉的课触发导包
     os.remove(tmp_path / "c5-gae" / "task-c5-gae.zip")
-    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     body2 = _json(raw2)
     assert st2 == 409 and body2["not_offline"] is True, body2
 
@@ -406,14 +409,14 @@ def test_pin_online_course_claim_is_rejected_then_unset_reopens(tmp_path: Path) 
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
     hub.set_mode_pinned("c5-gae", "online", True)
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     body = _json(raw)
     assert st == 409 and body["pinned_online"] is True, body
     assert hub.mode_of("c5-gae") == "online"
     assert hub.dispatch_record("c5-gae")["claimed_offline"] is False
     # 交还自动（pin=0）⇒ 同一份包可领，且 hub 当场翻 offline（T2 的正例）
     assert hub.set_mode_pinned("c5-gae", "online", False)[0] is True
-    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     assert st2 == 200 and _json(raw2).get("lease"), raw2[:200]
     assert hub.mode_of("c5-gae") == "offline"
     assert hub.dispatch_record("c5-gae")["claimed_offline"] is True
@@ -424,7 +427,7 @@ def test_claim_with_pack_flips_mode_and_persists(tmp_path: Path) -> None:
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
     assert hub.mode_of("c5-gae") != "offline"
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     assert st == 200, raw[:200]
     assert hub.mode_of("c5-gae") == "offline"
     disk = json.loads(
@@ -446,7 +449,7 @@ def test_claim_with_pack_asks_console_for_freshness(tmp_path: Path, monkeypatch)
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     assert st == 200, raw[:200]
     body = _json(raw)
     assert calls == ["c5-gae"], "有包的抢占也要问一次控制台（不然旧包直接开跑）"
@@ -460,7 +463,7 @@ def test_claim_with_pack_asks_console_for_freshness(tmp_path: Path, monkeypatch)
     _course(tmp_path, hub, "c-pinned")
     _pack(tmp_path, "c-pinned")
     hub.set_mode_pinned("c-pinned", "offline", True)
-    st2, _raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-pinned&worker=w1", method="POST")
+    st2, _raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-pinned&worker=w1", method="POST")
     assert st2 == 200, "pinned 离线课有包可领"
     assert calls == [], "非自动课不问控制台新鲜度"
 
@@ -471,7 +474,7 @@ def test_claim_with_pack_degrades_when_console_unreachable(tmp_path: Path, monke
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     assert st == 200, raw[:200]
     assert "控制台不可达" in _json(raw).get("handoff", ""), raw[:300]
 
@@ -481,7 +484,7 @@ def test_restart_restores_dispatch_state(tmp_path: Path) -> None:
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")[0] == 200
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[0] == 200
     # 模拟重启：同一目录、启动参数说 online
     hub2 = _HubQueue(
         {"c5-gae": hub._stores["c5-gae"]}, order=["c5-gae"], modes={"c5-gae": "online"}
@@ -502,39 +505,80 @@ def test_pin_survives_restart(tmp_path: Path) -> None:
 
 
 def test_busy_gate_blocks_second_auto_claim_and_releases(tmp_path: Path) -> None:
-    """U2 一拖一：全局任一时刻至多一门 running；release 后闸自动解除。"""
+    """U2 一拖一：**同一台盘**任一时刻至多一门 running（Q3/D3）；release 后闸自动解除。
+
+    ★M1b 语义变更：一拖一按 **worker** 判（不再是「全局只有一门」）——两台盘各跑一门是
+    多机并行的本意。而清单的 `busy`/`claimable` 只有**带 `?worker=`** 才知道「你在跑什么」，
+    不带就是**上界**语义（`claimable=true` 只保证「无并发时能领」，plan §1.5.4-P2-x/§69）。
+    """
     base, hub, _srv = _boot(tmp_path)
     for c in ("c-a", "c-b"):
         _course(tmp_path, hub, c)
         _pack(tmp_path, c)
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-a&worker=w1", method="POST")
     assert st == 200, raw[:200]
-    rows = {r["course"]: r for r in hub.offline_tasks()}
+    # 不带 worker ⇒ 上界：两台盘的多机并行在这里必须看起来「都可领」。
+    upper = {r["course"]: r for r in hub.offline_tasks()}
+    assert upper["c-b"]["claimable"] is True
+    assert upper["c-b"]["busy"] is False
+    # 带 worker=w1 ⇒ 一拖一生效（同一台盘）：c-b 看着不可领，拒因说得清「你在哪门课上」。
+    rows = {r["course"]: r for r in hub.offline_tasks(worker="w1")}
     assert rows["c-b"]["claimable"] is False
     assert str(rows["c-b"]["reason"]).startswith("busy:")
-    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w1", method="POST")
+    assert "c-a" in str(rows["c-b"]["reason"])
+    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-b&worker=w1", method="POST")
     body2 = _json(raw2)
     assert st2 == 409 and body2["busy"] is True, body2
-    # release c-a ⇒ c-b 可领
+    # 而**另一台盘** w2 领 c-b 不受 w1 影响（多机并行）：先交还 c-a 免得 c-b 被别人占，
+    # 这里只证「w2 的 claim 不被 w1 的 hold 挡住」⇒ 用 w2 直接领 c-b 即可（c-b 无主）。
+    st_w2, raw_w2 = _req(
+        base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-b&worker=w2", method="POST"
+    )
+    assert st_w2 == 200, raw_w2[:200]
+    # release c-a ⇒ w1 的 c-b 恢复可领（闸按 worker 解除）
     token = _json(raw)["lease"]["token"]
     rel = _req(base, f"{OFFLINE_RELEASE_PATH}?course=c-a&lease={token}", method="POST")
     assert rel[0] == 200, rel[1][:200]
-    st3, raw3 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w1", method="POST")
+    rows2 = {r["course"]: r for r in hub.offline_tasks(worker="w1")}
+    assert rows2["c-b"]["claimable"] is False  # 现在挡它的是 w2 的 hold（不是 busy）
+    assert str(rows2["c-b"]["reason"]).startswith("held:")
+    rel_w2 = _req(
+        base,
+        f"{OFFLINE_RELEASE_PATH}?course=c-b&lease={_json(raw_w2)['lease']['token']}",
+        method="POST",
+    )
+    assert rel_w2[0] == 200, rel_w2[1][:200]
+    st3, raw3 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-b&worker=w1", method="POST")
     assert st3 == 200, raw3[:200]
 
 
-def test_pending_export_window_also_blocks_second_course(tmp_path: Path, monkeypatch) -> None:
-    """导包窗口（已翻 offline、包还没出现）也算 busy —— 否则两台云机同时翻开两门课。"""
+def test_pending_export_soft_state_does_not_gate_others(tmp_path: Path, monkeypatch) -> None:
+    """★M1b / Q1 反转（旧名 `test_pending_export_window_also_blocks_second_course`）：
+
+    导包窗口（已翻 offline / 包还没出现 / `pending_export` 软态）**不占任何闸**——
+    旧行为是「一次导包把所有盘冻住」，那正是本次重构要拆的痛点（F11：`_busy_locked` 的腿②
+    整条删）。现在：同一台盘可以同时让两门课进入导包态（导包是几十分钟的后台活），
+    而**包到手那一刻**才由 `note_hold` 建 hold、才吃一拖一。
+    """
     _stub_auto_handoff(monkeypatch)
     base, hub, _srv = _boot(tmp_path)
     for c in ("c-a", "c-b"):
         _course(tmp_path, hub, c)
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 409
-    rows = {r["course"]: r for r in hub.offline_tasks()}
-    assert rows["c-b"]["claimable"] is False
-    assert "交接" in str(rows["c-b"]["reason"])
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w1", method="POST")
-    assert st == 409 and _json(raw)["busy"] is True
+    st_a, raw_a = _req(
+        base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-a&worker=w1", method="POST"
+    )
+    assert st_a == 409 and _json(raw_a)["pending_export"] is True
+    row_a = next(r for r in hub.offline_tasks(worker="w1") if r["course"] == "c-a")
+    assert row_a["state"] == "no_pack"
+    assert row_a["pending_export"]["by"] == "w1"
+    assert row_a["hold"] == {}  # Q1：无包 claim **不建 hold**
+    # 同一台盘的 c-b 照旧可领（导包软态不占闸），且 c-b 的 claim 也走导包腿。
+    rows = {r["course"]: r for r in hub.offline_tasks(worker="w1")}
+    assert rows["c-b"]["claimable"] is True
+    assert rows["c-b"]["busy"] is False
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-b&worker=w1", method="POST")
+    assert st == 409 and _json(raw)["pending_export"] is True
+    assert _json(raw).get("busy") is None
 
 
 def test_waiting_course_stays_offline_after_lease_expiry(tmp_path: Path) -> None:
@@ -543,7 +587,7 @@ def test_waiting_course_stays_offline_after_lease_expiry(tmp_path: Path) -> None
     base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     assert st == 200, raw[:200]
     clock[0] += 1000.0  # 租约 TTL=900 ⇒ 过期
     assert hub.offline_lease("c5-gae") is None
@@ -559,9 +603,9 @@ def test_completed_pack_cannot_be_reclaimed_until_re_export(tmp_path: Path) -> N
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae", b"PK-old")
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")[0] == 200
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[0] == 200
     hub.note_offline_completed("c5-gae")
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     body = _json(raw)
     assert st == 409 and body["completed"] is True, body
     rows = {r["course"]: r for r in hub.offline_tasks()}
@@ -581,7 +625,7 @@ def test_stalled_alert_covers_pending_export_window(tmp_path: Path, monkeypatch)
     clock = [1000.0]  # 不用 0：`flipped_at=0` 与「没有锚点」不可区分（生产时钟恒为墙钟）
     base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
     _course(tmp_path, hub, "c5-gae")
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")[0] == 409
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[0] == 409
     assert hub.offline_stalled() == []  # 刚开始交接：不算停
     clock[0] += 2000.0  # 超过缺省阈值 1800s
     stalled = hub.offline_stalled()
@@ -635,7 +679,7 @@ def test_result_end_it_reached_marks_completed_and_is_served(tmp_path: Path) -> 
 
     sha = _file_sha256(tmp_path / "c5-gae" / "task-c5-gae.zip")
     assert hub.completion_blocked("c5-gae", sha) is True
-    st3, raw3 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st3, raw3 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     assert st3 == 409 and _json(raw3)["completed"] is True, raw3[:200]
 
 
@@ -653,14 +697,14 @@ def test_result_without_end_flag_does_not_mark_completed(tmp_path: Path) -> None
     st2, raw2 = _req(base, "/admin/offline")
     assert _json(raw2)["results"]["c5-gae"]["seg-mid"]["end_it_reached"] is False
     # 未跑满 ⇒ 照旧可领（回归锚：别把每一次段末摘要都封包）
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")[0] == 200
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[0] == 200
 
 
 def test_admin_courses_get_reports_pin_and_claim_state(tmp_path: Path) -> None:
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")[0] == 200
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[0] == 200
     st, raw = _req(base, "/admin/courses")
     body = _json(raw)
     assert st == 200
@@ -674,7 +718,7 @@ def test_admin_courses_get_reports_pin_and_claim_state(tmp_path: Path) -> None:
     assert hub.mode_of("c5-gae") == "online"
     assert hub.pinned_of("c5-gae") is False
     # 不带 pin 的 legacy 写入在 claim-offline 之后被拒
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")[0] == 200
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[0] == 200
     assert hub.dispatch_record("c5-gae")["claimed_offline"] is True
     st3, raw3 = _req(base, "/admin/courses?course=c5-gae&mode=online", method="POST")
     assert st3 == 400 and "pin" in _json(raw3)["why"]
@@ -774,7 +818,7 @@ def test_seize_claim_flips_auto_course_and_drops_unclaimed_jobs(tmp_path: Path) 
         _course(tmp_path, hub, "c5-gae")
         _publish_job(hub, "c5-gae", "stale-auto")
         _pack(tmp_path, "c5-gae")
-        st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=tpu-1", method="POST")
+        st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=tpu-1", method="POST")
         assert st == 200, raw[:200]
         assert hub.mode_of("c5-gae") == "offline"
         assert _cancelled_ids(hub, "c5-gae") == {"stale-auto"}
@@ -784,7 +828,7 @@ def test_seize_claim_flips_auto_course_and_drops_unclaimed_jobs(tmp_path: Path) 
         _publish_job(hub, "c-hidden", "still-here")
         _pack(tmp_path, "c-hidden")
         hub.set_mode_pinned("c-hidden", "online", True)
-        st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-hidden&worker=tpu-1", method="POST")
+        st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-hidden&worker=tpu-1", method="POST")
         assert st2 == 409, raw2[:200]
         assert _cancelled_ids(hub, "c-hidden") == set()
         assert hub._stores["c-hidden"].claimable_job_ids() == ["still-here"]
@@ -865,7 +909,7 @@ def test_queue_state_and_admin_offline_expose_authority(tmp_path: Path) -> None:
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")[0] == 200
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[0] == 200
     q = _json(_req(base, "/admin/queue")[1])
     row = q["courses"]["c5-gae"]
     assert row["authority"] == AUTHORITY_AUTO and row["pinned"] is False
@@ -897,7 +941,7 @@ def test_switching_online_clears_all_four_handoff_fields(tmp_path: Path) -> None
     base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")[0] == 200
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[0] == 200
     rec = hub.dispatch_record("c5-gae")
     assert rec["claimed_offline"] is True and rec["claimed_by"] == "w1"
     assert rec["claimed_at"] > 0 and rec["flipped_at"] > 0
@@ -911,21 +955,27 @@ def test_switching_online_clears_all_four_handoff_fields(tmp_path: Path) -> None
     assert hub.offline_stalled() == []
 
 
-def test_stale_lease_is_reclaimed_by_new_worker(tmp_path: Path) -> None:
-    """T3（hub 侧）：静默超阈 ⇒ 清单 stale+claimable、新主 claim 200（带 reclaimed）、
-    旧主心跳 409 `taken`；同一 worker 回来仍判 mine。"""
+def test_stale_lease_is_reclaimed_by_new_worker(tmp_path: Path, monkeypatch) -> None:
+    """T3（hub 侧）：**进度**静默超阈 ⇒ 清单 stale+claimable、新主 claim 200（带 reclaimed）、
+    旧主心跳 409 `taken`；同一 worker 回来仍判 mine。
+
+    ★M1b/F2：超阈的尺子从「心跳静默 180s」换成「**进度**静默 900s」——两者是**两个量级**
+    （心跳 60s 一跳，进度按轮/按检查点）。本用例用 env 把新阈值调到 180s，保持原来的
+    时间尺（这同时钉住「生效的是新阈值，不是那个旧常量」）。
+    """
+    monkeypatch.setenv("BCITY_HOLD_PROGRESS_STALE_SEC", "180")
     clock = [1000.0]
     base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
     _course(tmp_path, hub, "c5-gae")
     _pack(tmp_path, "c5-gae")
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     assert st == 200, raw[:200]
     tok1 = _json(raw)["lease"]["token"]
-    clock[0] += 200.0  # 静默超阈（180s）但未过 TTL
+    clock[0] += 200.0  # 进度静默超阈（env 调成 180s）但未过 TTL
     row = next(r for r in hub.offline_tasks() if r["course"] == "c5-gae")
     assert row["claimable"] is True and row["holder"]["stale"] is True
     assert str(row["reason"]).startswith("held-stale")
-    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w2", method="POST")
+    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w2", method="POST")
     body2 = _json(raw2)
     assert st2 == 200 and body2["lease"].get("reclaimed") is True, body2
     assert body2["lease"]["reclaimed_from"] == "w1"
@@ -935,44 +985,68 @@ def test_stale_lease_is_reclaimed_by_new_worker(tmp_path: Path) -> None:
     assert st3 == 409, raw3[:200]
     # 新主自己再来（同 id）⇒ mine 续上，不被自己的静默 409（顺序：mine 在 stale 之前）
     clock[0] += 200.0
-    st4, raw4 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w2", method="POST")
+    st4, raw4 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w2", method="POST")
     assert st4 == 200 and _json(raw4)["lease"].get("reclaimed") is not True, raw4[:200]
 
 
 def test_busy_gate_blocks_pinned_offline_claim(tmp_path: Path) -> None:
-    """★六轮 F2：A 在跑 X 时，B 领 **pinned_offline** 的 Y 也要吃 409 `busy`
-    （旧写法 `if auto:` 会对着 pin 离线课静默放行）。"""
+    """★六轮 F2 + ★M1b/D3：一拖一**按 worker**判，覆盖面仍是「可领」闸（不是 `auto`）
+    ——所以 **pinned_offline** 的 Y 照样吃同一台盘的 409 `busy`（旧写法 `if auto:` 会静默放行）。
+
+    ★M1b 语义变更：闸不再是「全局只有一门」——**别的盘**（w2）领 Y 不受 w1 影响
+    （多机并行是真实痛点，§1.2-6）。
+    """
     base, hub, srv = _boot(tmp_path)
     try:
         for c in ("c-a", "c-y"):
             _course(tmp_path, hub, c)
             _pack(tmp_path, c)
         hub.set_mode_pinned("c-y", "offline", True)
-        st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")
+        st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-a&worker=w1", method="POST")
         assert st == 200, raw[:200]
-        rows = {r["course"]: r for r in hub.offline_tasks()}
-        assert rows["c-y"]["claimable"] is False
+        # 带 `?worker=w1` 才看得到一拖一（缺省 = 上界语义）
+        rows = {r["course"]: r for r in hub.offline_tasks(worker="w1")}
+        assert rows["c-y"]["claimable"] is False and rows["c-y"]["busy"] is True
         assert str(rows["c-y"]["reason"]).startswith("busy:")
-        st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-y&worker=w2", method="POST")
+        st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-y&worker=w1", method="POST")
         assert st2 == 409 and _json(raw2)["busy"] is True, raw2[:300]
+        # 别的盘：不被 w1 挡（并行的意义）
+        st_w2, raw_w2 = _req(
+            base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-y&worker=w2", method="POST"
+        )
+        assert st_w2 == 200, raw_w2[:200]
+        tok_y = _json(raw_w2)["lease"]["token"]
+        # 交还 c-a ⇒ w1 手上再没有课：c-y 不再吃 busy，而是被别人带 held
         token = _json(raw)["lease"]["token"]
         assert _req(base, f"{OFFLINE_RELEASE_PATH}?course=c-a&lease={token}", method="POST")[0] == 200
-        st3, raw3 = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-y&worker=w2", method="POST")
-        assert st3 == 200, raw3[:200]
+        rows2 = {r["course"]: r for r in hub.offline_tasks(worker="w1")}
+        assert rows2["c-y"]["busy"] is False
+        assert str(rows2["c-y"]["reason"]).startswith("held:")  # w2 拿着它
+        st3, raw3 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-y&worker=w1", method="POST")
+        assert st3 == 409 and _json(raw3).get("busy") is not True, raw3[:300]
+        # w2 交还 ⇒ w1 可以领它了（闸与持有面同时放开）
+        assert (
+            _req(base, f"{OFFLINE_RELEASE_PATH}?course=c-y&lease={tok_y}", method="POST")[0] == 200
+        )
+        st4, raw4 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-y&worker=w1", method="POST")
+        assert st4 == 200, raw4[:200]
     finally:
         srv.shutdown()
 
 
 def test_busy_gate_ignores_stale_lease(tmp_path: Path) -> None:
-    """§3.4：死盘（静默超阈）不占「一拖一」闸——新盘能领别的课。"""
+    """§3.4：死盘（**进度**静默超阈）不占「一拖一」闸——同一台盘能接着领别的课。
+
+    ★M1b：静默的尺子从「别的课的**心跳** 180s」换成「**进度** 900s」（活性只认进度）。
+    """
     clock = [1000.0]
     base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
     for c in ("c-a", "c-b"):
         _course(tmp_path, hub, c)
         _pack(tmp_path, c)
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 200
-    clock[0] += 200.0  # c-a 静默超阈
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w2", method="POST")
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-a&worker=w1", method="POST")[0] == 200
+    clock[0] += 1000.0  # c-a 进度静默超阈（900）⇒ 它不再算「w1 在跑」
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-b&worker=w1", method="POST")
     assert st == 200, raw[:200]
 
 
@@ -1001,38 +1075,14 @@ def test_handoff_trigger_budget_resets_on_new_round(tmp_path: Path, monkeypatch)
     assert tp.auto_handoff_decision("c5-gae", now=clock[0]) == "trigger"
 
 
-def test_handoff_window_anchor_is_flipped_at(tmp_path: Path, monkeypatch) -> None:
-    """★ 2026-10-07（**取代** R2-d 的 `claimed_at` 锚）：busy 窗口从**本次交接的起点**
-    `flipped_at` 量 —— 重试刷新 `claimed_at` 不再给闸续命。
+def test_pending_export_soft_state_does_not_gate_and_expires(tmp_path: Path, monkeypatch) -> None:
+    """★M1b 替换旧 `test_handoff_window_anchor_is_claimed_at`（Q1 + F8 + F11）：
 
-    旧形状（R2-d）：「换主重试 ⇒ 窗口跟着刷新」；新形状的代价理由见下面那条现场用例
-    （`test_busy_gate_window_anchors_the_handoff_start_not_retries`）——重试者就是被卡的
-    那台机器，锚能被它自己推着走 ⇒ 「超窗 = 交接失败 ⇒ 不再占闸」的逃生门永久失效。
-    `flipped_at` 继续服务停滞告警（两个锚点时间轴仍分叉）。"""
-    _stub_auto_handoff(monkeypatch)
-    clock = [1000.0]
-    base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
-    _course(tmp_path, hub, "c-a")
-    _course(tmp_path, hub, "c-b")
-    _pack(tmp_path, "c-b")
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 409
-    clock[0] += 2000.0  # 超过窗口（900s）
-    # 换主重试仍是 no-pack 409；但它**不再**把闸续上
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w2", method="POST")[0] == 409
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w2", method="POST")
-    assert st == 200, raw[:300]
-
-
-def test_busy_gate_window_anchors_the_handoff_start_not_retries(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """★ 2026-10-07 现场（用户报障「离线 worker 领不到 x21-psh-k10，切离线/在线都没用」）：
-
-    没有包的课被 claim ⇒ 翻 offline + 请控制台导包（此时**不落租约**）。云机等不到包会一直
-    重试（`offline_boot` 15s 一拍 ⇒ `begin_auto_handoff` 每次把 `claimed_at` 重写成 now）。
-    旧实现拿 `claimed_at` 当闸的锚 ⇒ 重试者**正是被卡住的那台机器** ⇒ 闸永远续上，
-    「超窗 = 交接失败、不再占闸」的逃生门失效：现场 `x21-psh-k5`（已跑到 it151 > iters 150，
-    包永远出不来）把 ready 的 `x21-psh-k10` 锁了十几分钟，pinned_offline 也一样推不动。
+    旧用例钉的是「导包窗口占一拖一闸」（腿②）——那条腿按 Q1 **已整条删**（一次导包不该把
+    整个生态冻住）。新语义分两半：① 软态**不占闸**（同一台盘领别的有包课照旧成功）；
+    ② 读面有**窗**（`AUTO_HANDOFF_PENDING_SEC`）——崩溃/换机的导包者不该在盘上留一条
+    永久「有人在导包」（惰性过期，不养清理线程）。`claimed_at` 仍被每次缺包 claim 刷新
+    （它服务的是「新一轮交接 ⇒ 触发账本清零」，不是闸）。
     """
     _stub_auto_handoff(monkeypatch)
     clock = [1000.0]
@@ -1040,43 +1090,19 @@ def test_busy_gate_window_anchors_the_handoff_start_not_retries(
     _course(tmp_path, hub, "c-a")
     _course(tmp_path, hub, "c-b")
     _pack(tmp_path, "c-b")
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 409
-    # 云机每 15s 重试一次（每次都在窗口内 ⇒ 旧实现每次刷新锚点，闸永不解除）
-    for _ in range(6):
-        clock[0] += 15.0
-        assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 409
-    assert clock[0] - 1000.0 < 900.0, "重试阶段仍在窗口内"
-    rows = {r["course"]: r for r in hub.offline_tasks()}
-    assert str(rows["c-b"]["reason"]).startswith("busy:"), rows["c-b"]
-    # 从**起翻**算超窗（重试从没停过）⇒ 交接判失败，闸必须开
-    clock[0] = 1000.0 + 901.0
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 409
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w2", method="POST")
-    assert st == 200, raw[:300]
-
-
-def test_busy_gate_ignores_stopped_course_residue(tmp_path: Path, monkeypatch) -> None:
-    """★ 2026-10-07：停课（删开课标记）的课**立刻**不再占闸。
-
-    现场那条出路：用户对 `x21-psh-k5` 点停课（`stopCourse` ⇒ 删标记 + hub 置 offline，走
-    `pin=None` ⇒ `set_mode_pinned` **有意**不清 claim 记账，`:789-791`），期望「它不在了，
-    池子就该通」；旧实现只豁免 `pinned_online` ⇒ 停课课照占闸，`x21-psh-k10` 还是领不到。
-    """
-    _stub_auto_handoff(monkeypatch)
-    base, hub, _srv = _boot(tmp_path)
-    _course(tmp_path, hub, "c-a")
-    _course(tmp_path, hub, "c-b")
-    _pack(tmp_path, "c-b")
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 409
-    rows = {r["course"]: r for r in hub.offline_tasks()}
-    assert str(rows["c-b"]["reason"]).startswith("busy:"), rows["c-b"]
-    # 停课 c-a：`stopCourse` 做的就是删掉开课标记（+ hub 置 offline；这里只需前者）
-    (tmp_path / "c-a" / COURSE_ENABLE_MARKER).unlink()
-    rows = {r["course"]: r for r in hub.offline_tasks()}
-    assert "c-a" not in rows, "停课不列进清单（六轮 F3）"
-    assert rows["c-b"]["claimable"] is True, rows["c-b"]
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w2", method="POST")
-    assert st == 200, raw[:300]
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-a&worker=w1", method="POST")[0] == 409
+    row = next(r for r in hub.offline_tasks(worker="w1") if r["course"] == "c-a")
+    assert row["pending_export"]["by"] == "w1" and row["hold"] == {} and row["busy"] is False
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-b&worker=w1", method="POST")
+    assert st == 200, raw[:200]  # 软态不占闸
+    clock[0] += 2000.0
+    anchor = float(hub.dispatch_record("c-a")["claimed_at"])
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-a&worker=w2", method="POST")[0] == 409
+    assert float(hub.dispatch_record("c-a")["claimed_at"]) > anchor  # 重试刷新锚点
+    clock[0] += 1000.0  # 再超窗（900s）且无人重试 ⇒ 读面不再当有人在导
+    assert hub.pending_export_of("c-a") == {}
+    row2 = next(r for r in hub.offline_tasks(worker="w1") if r["course"] == "c-a")
+    assert row2["pending_export"] == {}
 
 
 def test_republish_after_cancel_revives_job(tmp_path: Path) -> None:
@@ -1206,14 +1232,14 @@ def test_busy_gate_ignores_revoked_lease(tmp_path: Path) -> None:
     for c in ("c-a", "c-b"):
         _course(tmp_path, hub, c)
         _pack(tmp_path, c)
-    assert _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-a&worker=w1", method="POST")[0] == 200
+    assert _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-a&worker=w1", method="POST")[0] == 200
     # 交还自动（pin=0）⇒ 在线分支给租约立墓碑；authority 回 auto（不是 pinned_online，
     # 所以本用例真的走的是「墓碑不算忙」那条腿，而不是「pin 在线不占闸」）。
     assert hub.set_mode_pinned("c-a", "online", False)[0] is True
     assert hub.authority_of("c-a") == AUTHORITY_AUTO
     lease = hub.offline_lease("c-a")
     assert lease is not None and lease["revoked"] is True
-    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c-b&worker=w2", method="POST")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c-b&worker=w2", method="POST")
     assert st == 200, raw[:200]
 
 
@@ -1234,3 +1260,154 @@ def test_auto_eligible_alias_has_no_production_readers() -> None:
                 offenders.append(f"{py.name}: {ln.strip()}")
     assert offenders == [], offenders
     assert "def auto_eligible(" in (hub_dir / "queue_offline.py").read_text(encoding="utf-8")
+
+
+# ───────────────── M1b（plan/worker-type-dispatch-model §3-M1b，2026-10-07）─────────────────
+#
+# 这一节钉的是**消费点切换**：新端点（`/offline/hold` · `/offline/progress`）、旧端拒收
+# （`?proto=2`）、取包 lease 门（P1-2）、以及「心跳活 / 进度死」的四象限（§68 的防线）。
+
+
+def test_old_client_without_proto_is_rejected_loudly(tmp_path: Path) -> None:
+    """★DoD#3：claim 缺 `?proto=2` ⇒ 409，且响应**同时**含 `busy:true` + `error` 全文 +
+    `proto_required:2`。为什么借 `busy`：旧码的 409 分流只有 busy 腿会把 `error` 打进日志
+    且本拍不跑（不耗 idle 预算、绝不静默双跑）——「请刷新 notebook」得真能到达现场。"""
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?course=c5-gae&worker=w1", method="POST")
+    body = _json(raw)
+    assert st == 409 and body["busy"] is True and body["proto_required"] == 2, body
+    assert "battle.offline.ipynb" in body["error"], body
+    # 拒在入口：没有租约、没有 hold、磁盘记录一字未动
+    assert hub.offline_lease("c5-gae") is None and hub.hold_of("c5-gae") == {}
+    assert not (tmp_path / "c5-gae" / "offline-dispatch.json").exists()
+
+
+def test_hold_endpoint_reads_liveness_for_the_trainer(tmp_path: Path) -> None:
+    """★M1b / P0-5①：`GET /offline/hold` 是 trainer 的只读解锁通道。
+
+    只读（不建 hold、不刷活性）；`held` 只在 **live** 时为真 —— stale 必须给 false，
+    否则「云机掉线了本机该立刻恢复」这条腿会被一个陈旧的 hold 永久钉死。
+    """
+    clock = [1000.0]
+    base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
+    st, raw = _req(base, f"{OFFLINE_HOLD_PATH}?course=c5-gae")
+    body = _json(raw)
+    assert st == 200 and body["held"] is False and body["state"] == "", body
+    assert hub.hold_of("c5-gae") == {}  # 只读：读一次不建 hold
+    assert (
+        _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[0]
+        == 200
+    )
+    body = _json(_req(base, f"{OFFLINE_HOLD_PATH}?course=c5-gae")[1])
+    assert body["held"] is True and body["state"] == "live"
+    assert body["worker_id"] == "w1" and body["progress_ago"] == 0.0
+    assert body["pending_export"] is False
+    # 进度静默超阈（默认 900s）⇒ held=false（本机该恢复协作），但 holder 仍看得见
+    clock[0] += 1000.0
+    body = _json(_req(base, f"{OFFLINE_HOLD_PATH}?course=c5-gae")[1])
+    assert body["held"] is False and body["state"] == "stale"
+    assert body["worker_id"] == "w1" and body["progress_ago"] == 1000.0
+    # 课程名缺失 = 400（不是 500、也不是「held=false」的假答案）
+    assert _req(base, OFFLINE_HOLD_PATH)[0] == 400
+    assert _req(base, f"{OFFLINE_HOLD_PATH}?course=c5-gae", token="bad")[0] in (401, 403)
+
+
+def test_progress_endpoint_refreshes_liveness_only_for_the_holder(tmp_path: Path) -> None:
+    """★M1b / Q2：`POST /offline/progress` 与心跳同一套 token 分流，效果多一条：
+
+    **只认进度的活性**被刷（心跳刷 TTL 但不刷活性 —— §68 的假活就是心跳当活性算出来的）。
+    非持有者 / 过期 / 被撤销一律 409（不是 200 的静默 no-op：云机要能据此收尾）。
+    """
+    clock = [1000.0]
+    base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
+    tok = _json(
+        _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[1]
+    )["lease"]["token"]
+    clock[0] += 800.0  # 心跳与 TTL 还活着，但进度快超阈了
+    assert _json(_req(base, f"{OFFLINE_HOLD_PATH}?course=c5-gae")[1])["held"] is True
+    # 心跳不刷活性：推它一把，态度不变（仍会走向 stale）
+    assert (
+        _req(base, f"{OFFLINE_HEARTBEAT_PATH}?course=c5-gae&lease={tok}", method="POST")[0]
+        == 200
+    )
+    clock[0] += 200.0  # 距上次**进度** 1000s > 900
+    body = _json(_req(base, f"{OFFLINE_HOLD_PATH}?course=c5-gae")[1])
+    assert body["held"] is False and body["state"] == "stale", body
+    # 进度打点把它救回来（同一拍：TTL + 活性都刷）
+    st, raw = _req(
+        base, f"{OFFLINE_PROGRESS_PATH}?course=c5-gae&lease={tok}", method="POST"
+    )
+    assert st == 200 and _json(raw)["ok"] is True, raw[:200]
+    body = _json(_req(base, f"{OFFLINE_HOLD_PATH}?course=c5-gae")[1])
+    assert body["held"] is True and body["progress_ago"] == 0.0
+    assert hub.hold_of("c5-gae")["last_progress_at"] == clock[0]  # 活性锚 = 打点那一刻
+    # 换主后旧 token 打点 = 409 taken（旧主的 ping 不续新主的命）
+    st, raw = _req(base, f"{OFFLINE_PROGRESS_PATH}?course=c5-gae&lease=deadbeef", method="POST")
+    assert st == 409 and _json(raw)["ok"] is False, raw[:200]
+    # 没有租约的课：打点不建 hold（Q1）——只为不存在的租约开一条 200 会把「谁在跑」稀释掉
+    _course(tmp_path, hub, "c-cold")
+    assert (
+        _req(base, f"{OFFLINE_PROGRESS_PATH}?course=c-cold&lease={tok}", method="POST")[0]
+        == 409
+    )
+    assert hub.hold_of("c-cold") == {}
+
+
+def test_heartbeat_alive_progress_dead_is_stale_and_auto_takeover(tmp_path: Path) -> None:
+    """★DoD#1 反面（§68 的假活）：**心跳一直活着、进度整段死** ⇒ 判掉线、可被自动接管。
+
+    这正是 2026-10-05/06 两条事故的原形：旧判据只看心跳 ⇒ 云机挂死也能永久占着课。
+    """
+    clock = [1000.0]
+    base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
+    tok1 = _json(
+        _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[1]
+    )["lease"]["token"]
+    for _ in range(6):  # 每 200s 一拍心跳：TTL 一直被续（旧判据下这盘永远「活」）
+        clock[0] += 200.0
+        assert (
+            _req(base, f"{OFFLINE_HEARTBEAT_PATH}?course=c5-gae&lease={tok1}", method="POST")[0]
+            == 200
+        )
+    row = next(r for r in hub.offline_tasks() if r["course"] == "c5-gae")
+    assert row["holder"]["stale"] is True and row["holder"]["progress_ago"] == 1200.0
+    assert row["claimable"] is True and str(row["reason"]).startswith("held-stale")
+    assert row["state"] != "claimed", "主已掉线 ⇒ 清单不该还说「有人在跑」"
+    # 新盘无需任何参数即自动接管；旧主心跳立刻 409 taken
+    st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w2", method="POST")
+    assert st2 == 200 and _json(raw2)["lease"]["reclaimed_from"] == "w1", raw2[:200]
+    assert (
+        _req(base, f"{OFFLINE_HEARTBEAT_PATH}?course=c5-gae&lease={tok1}", method="POST")[0]
+        == 409
+    )
+
+
+def test_live_hold_requires_the_lease_token_to_fetch_the_pack(tmp_path: Path) -> None:
+    """★M1b / P1-2：取包门 = 「无 live hold ∨ 持 lease 且 token 相符」**加在**旧门上。
+
+    live hold ⇒ 不带 `?lease=` 的旧客户端拿 409（旧端兜底第二道闸：包在盘上不等于发给你）；
+    带对 token 的持有者照取。stale 的 hold 不再拦（那是接管窗口）。
+    """
+    clock = [1000.0]
+    base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
+    tok = _json(
+        _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")[1]
+    )["lease"]["token"]
+    st, raw = _req(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
+    body = _json(raw)
+    assert st == 409 and body["held"] is True and body["holder"]["worker_id"] == "w1", body
+    st, _raw = _req(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae&lease={tok}")
+    assert st == 200, _raw[:200]
+    # stale ⇒ 放行（新主会在取包前先 claim；旧客户端在这里也拿得到，包旧只是起点旧）
+    clock[0] += 1000.0
+    assert _req(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")[0] == 200

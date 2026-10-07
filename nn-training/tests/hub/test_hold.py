@@ -42,6 +42,7 @@ from hub.task_pack import (
     hold_progress_stale_sec,
     hold_restore_grace,
     hold_state,
+    hold_touch_at,
 )
 
 COURSE = "c5-gae"
@@ -98,9 +99,14 @@ def test_hold_state_reads_progress_only_and_treats_zero_progress_as_stale(
     assert hold_state(1000.0, {"last_progress_at": 100.0}) == "live"
     assert hold_state(1000.0, {"last_progress_at": 99.9}) == "stale"
     assert hold_state(1000.0, {"worker_id": "w1"}) == "stale"
-    # 值不合法 ⇒ 0（⇒ stale），不抛
-    assert hold_progress_at({"last_progress_at": "x"}) == 0.0
-    assert hold_progress_at(None) == 0.0
+    # 值不合法 / 没有字段 ⇒ 缺失哨兵 `-1.0`（⇒ stale），不抛。
+    # ★M1b：哨兵从 0.0 改成 -1.0 —— `0.0` 既是「没写」也是「真的 0 点」（假时钟从 0 起步的
+    # 用例里，刚 claim 的进度锚会被读成没进度，活跃的 hold 当场被判 stale）。
+    assert hold_progress_at({"last_progress_at": "x"}) == -1.0
+    assert hold_progress_at(None) == -1.0
+    assert hold_progress_at({"last_progress_at": 0.0}) == 0.0
+    assert hold_touch_at({"at": 0.0}) == 0.0  # 键在就是真值（不再要求 > 0）
+    assert hold_touch_at({}) == -1.0
     # env 调秒级 ⇒ 判据跟着走（同一条腿，不是两份阈值）
     monkeypatch.setenv(STALE_ENV, "10")
     assert hold_state(1000.0, {"last_progress_at": 995.0}) == "live"

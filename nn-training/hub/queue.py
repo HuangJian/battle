@@ -177,11 +177,6 @@ class _HubQueue(
         #: （在线云机把它的 job 领走 = 同一份活两处跑，数据损坏级）。读写见 `queue_offline`。
         self._dispatch: dict[str, dict] = {}
         self._dispatch_lock = Lock()
-        # 盘上的派发记录**优先于启动参数**（§3.8）：正在 TPU 上跑的课、人的 pin 重启不丢。
-        # 放这里（而不是上面 `_modes` 第一次赋值处）：读盘需要 `_dispatch_lock`，它在这几行才建。
-        for _c in self._order:
-            self._modes[_c] = self.dispatch_effective_mode(_c, self._modes[_c])
-            self._sync_parked(_c)
         #: 离线**盘**报名表：disk_id -> last_seen（秒）。★ 为什么单独一张表：跑
         #: `battle.offline.ipynb` 的机器**不碰队列**（取包链全在 `/offline/*` 上），它的身份
         #: 只能在那一面被看到；而「本环境有没有离线盘」这个读数此前恒为空（审计 §4-L3：
@@ -195,6 +190,14 @@ class _HubQueue(
         # 时钟与单课程 store 同源（测试注入的假时钟必须一致，否则 claimed 标记的时间戳
         # 会混入真实墙钟）。
         self._now = self._solo._now if self._solo is not None else (now_fn or time.time)
+        # 盘上的派发记录**优先于启动参数**（§3.8）：正在 TPU 上跑的课、人的 pin 重启不丢。
+        # 放这里（而不是上面 `_modes` 第一次赋值处）：读盘需要 `_dispatch_lock`；
+        # ★M1b：还必须排在 `self._now` **之后** —— 盘上有 hold 时 `_dispatch_load` 要打恢复宽限
+        # （`hold-restored`），那需要时钟。旧顺序下「带 hold 重启」= 构造期 AttributeError
+        # （hub 直接起不来）；M1a 之所以没爆，是因为当时还没有人写 hold。
+        for _c in self._order:
+            self._modes[_c] = self.dispatch_effective_mode(_c, self._modes[_c])
+            self._sync_parked(_c)
         #: 多课程时自己的 worker 登记表（worker_id -> last_seen）——避让链的唯一事实源。
         self._workers: dict[str, float] = {}
         # 停机达令**按课程**（2026-09-18 单 hub 化）：一个 hub 服务所有课程之后，若达令还是

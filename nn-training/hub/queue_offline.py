@@ -62,7 +62,6 @@ from hub.task_pack import (
     hold_restore_grace,
     hold_state,
     hold_touch_at,
-    lease_verdict,
     offline_lease_stale_sec,
     pack_index_meta,
     pack_index_part_sha,
@@ -301,11 +300,15 @@ class QueueOfflineMixin(QueuePeer):
                 continue
         return out
 
-    def offline_tasks(self, *, include_all: bool = False) -> list[dict]:
+    def offline_tasks(self, *, include_all: bool = False, worker: str = "") -> list[dict]:
         """`GET /offline/tasks` 的内容——**零副作用**（不触发重导、不写账本、不动游标）。
 
         每行字段定死在 §3.1：`course/state/claimable/pack/run_id/it/end_it/stale_reason/
         holder/progress`；`seize`/`open_time` 是 2026-10-03 用户裁决加的两个（见行内注释）。
+        ★M1b：另加 `hold`（接管镜像：worker/state/expires_in）· `pending_export`（导包软态，
+        **不占闸**）· `busy`（一拖一按 worker 的布尔结果）；`busy`/`claimable` 按 `?worker=` 判
+        （缺省 ⇒ 上界：不含一拖一，plan §69）。`state` 的 `held` 只算 **live** 的接管
+        （stale/revoked 的镜子 ⇒ 不算有主；见下方行内定案）。
         读不到就如实给空值（一个坏包不该把整张清单变成 500）。
         """
         progress = self.offline_progress()
@@ -361,7 +364,9 @@ class QueueOfflineMixin(QueuePeer):
             auto = authority == AUTHORITY_AUTO
             pack_sha = str((pack or {}).get("sha256") or "")
             completed = self.completion_blocked(course, pack_sha)
-            busy = self.busy_reason(course) if runnable else ""
+            busy = self.busy_reason(course, worker) if runnable else ""
+            hold = self.hold_of(course)
+            pending_export = self.pending_export_of(course)
             holder_stale = bool(holder and holder.get("stale"))
             holder_revoked = bool(holder and holder.get("revoked"))
             #: 可被**抢占**（用户 2026-10-03 裁决「没有离线课程就抢第一个在训在线课」）：
@@ -369,11 +374,19 @@ class QueueOfflineMixin(QueuePeer):
             #: busy/无主不在这里滤——云机抢到 busy 会走 409 `busy` 等下一拍，不吃 idle 预算）。
             seize = real and runnable and not offline and auto and not completed
             treat_offline = runnable
+            #: ★M1b 定案：`state` 的 `held` 只算**活着的接管**（`live`）——stale / revoked 的
+            #: 镜子不再算「有主」。理由：`state` 回答的是「现在能不能有人接手」，而那两个
+            #: 情况 `claimable=true`；`claimed ∧ claimable` 对任何读方都是自相矛盾。
+            #: 谁在跑仍然看得见：`holder` 字段照给，`reason` 前缀明说 `held-stale:` / `held-revoked:`。
+            #: （不用 `stale` 表示「主失联」：那个词在本清单里已经是**包旧**的意思，别叠加第二义。）
+            holder_live = bool(holder is not None and not holder_stale and not holder_revoked)
             if completed:
                 state = TASK_STATE_COMPLETED
             elif treat_offline:
                 state = task_state(
-                    pack_exists=pack is not None, stale=bool(stale_reason), held=holder is not None
+                    pack_exists=pack is not None,
+                    stale=bool(stale_reason),
+                    held=holder_live,
                 )
             else:
                 state = TASK_STATE_NOT_OFFLINE
@@ -393,9 +406,15 @@ class QueueOfflineMixin(QueuePeer):
                 )
             elif holder is not None:
                 if holder_stale:
+                    # ★M1b：文案跟判据走（活性 = **进度**静默）；旧记录（没有进度字段）
+                    # 退回心跳龄 —— `progress_ago < 0` 就是那一档。
+                    # 哨兵是 `-1.0`，别用 `or`（真值 0.0 会被吃成缺失）
+                    raw_ago = holder.get("progress_ago")
+                    ago = float(raw_ago) if raw_ago is not None else -1.0
+                    what = "进度" if ago >= 0 else "心跳"
                     reason = (
                         f"held-stale: {holder.get('worker_id') or '?'}"
-                        f"（静默 {float(holder.get('silent_sec') or 0.0):.0f}s，可直接接管）"
+                        f"（{what}静默 {max(0.0, ago):.0f}s，可直接接管）"
                     )
                 else:
                     reason = f"held: {holder.get('worker_id') or '?'}"
@@ -426,6 +445,11 @@ class QueueOfflineMixin(QueuePeer):
                         holder_revoked=holder_revoked,
                     ),
                     "reason": reason,
+                    #: ★M1b：**一拖一按 worker 判**的结果直接透出来（`bool(busy)`）。
+                    #: 为什么不只靠 `reason` 文案：云机选下一门时只做布尔判断（不解析中文），
+                    #: 而 `claimable` 把「忙」与「被别人带 held」两个原因合成了一个 false——
+                    #: 分开才能让「本拍不跑换下一门」与「等它 release」两条建议各归各位。
+                    "busy": bool(busy),
                     #: 领它会触发「自动交接」（写 rl-config + 导包；不写意图、不 pin）
                     "auto_handoff": auto,
                     #: 在线在训 ⇒ 离线盘可**抢占**它（hub 的 claim 会翻离线；用户 2026-10-03 裁决）。
@@ -439,6 +463,9 @@ class QueueOfflineMixin(QueuePeer):
                     "end_it": meta["end_it"],
                     "stale_reason": stale_reason,
                     "holder": holder,
+                    #: ★M1b：接管镜像（`{}` = 无 hold）+ 导包软态（超窗读面即空）。
+                    "hold": hold,
+                    "pending_export": pending_export,
                     "progress": {
                         "count": int(latest["count"]) if latest else 0,
                         "last_mtime": float(latest["last_mtime"]) if latest else 0.0,
@@ -459,43 +486,76 @@ class QueueOfflineMixin(QueuePeer):
 
         墓碑（`revoked=True`）**照返**（不是过期）：它的消费面见 `holder_info`（★六轮 F5）。
         """
-        now = float(self._now())
         with self._lease_lock:
-            rec = self._leases.get(course)
-            if rec is not None and float(rec.get("expires_at", 0.0)) <= now:
-                del self._leases[course]
-                return None
-            return dict(rec) if rec else None
+            return self._lease_rec_locked(course)
+
+    def _lease_rec_locked(self, course: str) -> dict | None:
+        """`_lease_rec` 的**无锁内核**（调用方持 `_lease_lock`，否则状态读到半截）。
+
+        ★M1b 由来：`holder_info` 会被 `_busy_locked` 在 `_lease_lock` 临界区里调（busy 闸按
+        worker 判 ⇒ 要看「别的课上是谁在跑」）——`threading.Lock` 不可重入，内核必须拆出来，
+        否则同一个盘自己就把自己锁死（表现为 claim / 清单请求挂死到超时）。
+        """
+        now = float(self._now())
+        rec = self._leases.get(course)
+        if rec is not None and float(rec.get("expires_at", 0.0)) <= now:
+            del self._leases[course]
+            return None
+        return dict(rec) if rec else None
 
     def offline_lease(self, course: str) -> dict | None:
         """某门课的**有效**租约（对外只读面：清单 / 拒因 / 控制台都用它）。"""
         return self._lease_rec(course)
 
     def holder_info(self, course: str) -> dict | None:
-        """持有人信息（`worker_id` / 龄 / 到期 / 静默 / stale / revoked）——清单与拒因共用一份。
+        """持有人信息（`worker_id` / 龄 / 到期 / 静默 / stale / revoked / progress_ago）——持有面共用一份。
+
+        ★M1b（plan §1.2-5「三处同源」）：**判据源 = hold 镜像**（落盘、重启不丢；`hold_state`
+        只认进度）；`_leases` 只补「心跳龄 / TTL 余量」这些 wire 记账。`stale` 从「心跳静默
+        超阈」改成 **进度静默超阈**（与 `lease_verdict` 同一把尺子，`last_progress_at`）；
+        心跳龄留在 `silent_sec`（现在只服务四象限排障，不再决定活性）。
 
         ★六轮 F5（墓碑 holder 形状定死）：**墓碑也返回**（`revoked=True` + 字段齐全）——
         清单才能渲染 `held-revoked`、`auto_claimable` 的 `holder_revoked` 才是真消费；
-        `/admin/offline` 的 `offline_leases()` 同样保留 revoked 条目（不静默删，便于排障）。
+        墓碑本身住内存租约（进程内），与「hold 落盘」这两层不冲突（★M1b：revoke 会清 hold）。
+        读面自己取 `_lease_lock`（锁序 `_lease_lock → _dispatch_lock`）；临界区内的调用方
+        （`_busy_locked`）走 `_holder_info_locked`。
         """
-        rec = self._lease_rec(course)
-        if not rec:
+        with self._lease_lock:
+            return self._holder_info_locked(course)
+
+    def _holder_info_locked(self, course: str) -> dict | None:
+        """`holder_info` 的**无锁内核**（调用方持 `_lease_lock`）——busy 闸 / 清单共用。"""
+        hold = self.hold_of(course)
+        rec = self._lease_rec_locked(course)
+        if not hold and not rec:
             return None
         now = float(self._now())
-        beat = rec.get("beat_at")
-        try:
-            beat_at = float(beat) if beat is not None else float(rec.get("at") or 0.0)
-        except (TypeError, ValueError):
-            beat_at = 0.0
-        silent = max(0.0, now - beat_at) if beat_at > 0 else 0.0
+        # ★M1b：缺失哨兵是 `-1.0`（≥0 才是真值）——`or` 链会把「真的 0 点」当成没有。
+        progress = hold_progress_at(hold)
+        if progress < 0.0:
+            progress = hold_progress_at(rec)
+        touch = hold_touch_at(hold)
+        if touch < 0.0:
+            touch = hold_touch_at(rec)
+        started = float((hold or {}).get("at") or (rec or {}).get("at") or 0.0)
+        beat_at = float((rec or {}).get("beat_at") or 0.0)
+        path_ago = round(max(0.0, now - progress), 1) if progress >= 0.0 else -1.0
+        if progress >= 0.0:
+            stale = path_ago > hold_progress_stale_sec()
+        else:  # 旧记录（没有进度字段）⇒ 退回心跳静默（过渡读路，M1c 删）
+            stale = bool(beat_at > 0 and (now - beat_at) > offline_lease_stale_sec())
+        left_ttl = (touch + OFFLINE_LEASE_TTL_SEC - now) if touch >= 0.0 else 0.0
+        left_progress = (progress + hold_progress_stale_sec() - now) if progress >= 0.0 else 0.0
         return {
-            "worker_id": str(rec.get("worker_id") or ""),
-            "age_sec": round(max(0.0, now - float(rec.get("at") or now)), 1),
-            "expires_in": round(max(0.0, float(rec.get("expires_at") or now) - now), 1),
+            "worker_id": str((hold or {}).get("worker_id") or (rec or {}).get("worker_id") or ""),
+            "age_sec": round(max(0.0, now - started), 1) if started > 0 else 0.0,
+            "expires_in": round(max(0.0, min(left_ttl, left_progress)), 1),
             "beat_at": round(beat_at, 1),
-            "silent_sec": round(silent, 1),
-            "stale": bool(beat_at > 0 and silent > offline_lease_stale_sec()),
-            "revoked": bool(rec.get("revoked")),
+            "silent_sec": round(max(0.0, now - beat_at), 1) if beat_at > 0 else 0.0,
+            "progress_ago": path_ago,
+            "stale": bool(stale),
+            "revoked": bool((rec or {}).get("revoked")),
         }
 
     def claim_offline(
@@ -521,23 +581,35 @@ class QueueOfflineMixin(QueuePeer):
             return {}, AUTHORITY_NOT_OFFLINE
         now = float(self._now())
         reclaimed_from = ""
+        # 锁序契约：`_lease_lock → _dispatch_lock`（hold 镜像住派发记录）。`_leases` 只剩
+        # 「token / TTL / 心跳」这些 wire 记账，**判据全部读 hold**（重启后仍然算数）。
         with self._lease_lock:
-            verdict = lease_verdict(now, self._leases.get(course), wid)
-            if verdict == "foreign" and not takeover:
+            hold = self.hold_of(course)
+            state = str(hold.get("state") or "")
+            holder = str(hold.get("worker_id") or "")
+            # `mine` **不看活性**：同一个 worker 回来续领自己（哪怕它已经静默超阈）——
+            # 与 `lease_verdict` 的 `mine` 排在 `stale` 之前同一条口径（cell 中断重跑要用）。
+            mine = bool(hold) and holder == wid
+            if state == "live" and not mine:
+                # ★不变量 3（plan §1.2-③）：live 的 hold **不可被顶**——`takeover=1` 也不行
+                #（要清先 revoke）。否则「不能覆盖 live」就是句空话。
                 return {}, "foreign"
-            # ★六轮 F2：busy 门用「可领」覆盖面（到这里 authority 已是 pinned_offline 或
-            # auto）；旧写法 `if auto:` 会让 pinned_offline 静默跳过「一拖一」。
-            busy = self._busy_locked(course)
+            if hold and not mine:
+                reclaimed_from = holder  # 别人 stale ⇒ 自动接管（不必 takeover=1）
+            # ★六轮 F2 + ★M1b/D3：busy 门用「可领」覆盖面（到这里 authority 已是
+            # pinned_offline 或 auto）且**按 worker 判**（同一个盘串行自己，别的盘不互挡）。
+            busy = self._busy_locked(course, wid)
             if busy:
                 return {}, "busy"
-            if verdict == "stale":
-                reclaimed_from = str((self._leases.get(course) or {}).get("worker_id") or "")
             lease = {
                 "token": secrets.token_hex(8),
                 "worker_id": wid,
                 "at": now,
                 "expires_at": now + OFFLINE_LEASE_TTL_SEC,
                 "beat_at": now,
+                "touch_at": now,
+                #: 接管即第一个进度锚（否则新 hold 会因「零进度」当场被判 stale）。
+                "last_progress_at": now,
                 "revoked": False,
             }
             self._leases[course] = lease
@@ -547,11 +619,12 @@ class QueueOfflineMixin(QueuePeer):
                 pub["reclaimed_from"] = reclaimed_from
         if reclaimed_from:
             print(
-                f"[hub-server] offline-lease-reclaim {course}: {reclaimed_from} 静默超阈，"
+                f"[hub-server] offline-hold-reclaim {course}: {reclaimed_from} 进度静默超阈，"
                 f"{wid} 自动接管（旧主心跳将拿 409 taken）",
                 flush=True,
             )
-        # 临界区外落账（盘 IO 不阻塞租约判定）：claimed_by/at + 自动课翻 offline（T2）
+        # 临界区外落账（盘 IO 不阻塞租约判定）：hold 镜像 + claimed_by/at + 自动课翻 offline
+        self.note_hold(course, worker_id=wid, token=str(lease.get("token") or ""))
         self.note_claim(course, wid)
         reset_auto_handoff_triggers(course)
         return pub, ""
@@ -586,8 +659,37 @@ class QueueOfflineMixin(QueuePeer):
             if str(rec.get("token") or "") != str(lease_token or ""):
                 return {}, "taken"
             rec["expires_at"] = now + OFFLINE_LEASE_TTL_SEC
+            # ★F2/P2-1：心跳只续 TTL 与「最近接触」——**进度字段不动**（心跳不作活性）。
             rec["beat_at"] = now
+            rec["touch_at"] = now
             return {"ttl_sec": OFFLINE_LEASE_TTL_SEC, "expires_at": rec["expires_at"]}, ""
+
+    def progress_offline(self, course: str, lease_token: str) -> tuple[bool, str]:
+        """进度打点（`POST /offline/progress`；plan §1.1 的第三种进度信号）。
+
+        与 `heartbeat_offline` 同一套 token 分流（过期 / revoked / taken），差别只在效果：
+        它同时刷 **`last_progress_at`**（活性）+ `touch_at`（TTL）——即「合法接触都刷 TTL，
+        只有进度刷 last_progress_at」中的那一个；并把镜像写进派发记录（落盘节流 ≥60s）。
+        没有租约的课 ⇒ `("", "expired")`**不建 hold**（hold 只由 claim 建，Q1）。
+        """
+        now = float(self._now())
+        token_now = ""
+        with self._lease_lock:
+            rec = self._leases.get(course)
+            if rec is None or float(rec.get("expires_at", 0.0)) <= now:
+                self._leases.pop(course, None)
+                return False, "expired"
+            if rec.get("revoked") is True:
+                return False, "revoked"
+            token_now = str(rec.get("token") or "")
+            if token_now != str(lease_token or ""):
+                return False, "taken"
+            rec["expires_at"] = now + OFFLINE_LEASE_TTL_SEC
+            rec["touch_at"] = now
+            rec["last_progress_at"] = now
+        # 镜像：内存每拍，落盘节流（`note_progress` 自带 token 门，换主后旧主的 ping 不生效）。
+        self.note_progress(course, token=token_now)
+        return True, ""
 
     def release_offline(self, course: str, lease_token: str) -> tuple[bool, str]:
         """交还租约（**不覆盖别人的**）：过期/没领过 ⇒ 本来就无主，空操作也算成功。"""
@@ -600,7 +702,8 @@ class QueueOfflineMixin(QueuePeer):
                 return False, "foreign"
             else:
                 del self._leases[course]
-        # mode 保持 offline（U3 的 waiting）；只清「谁在跑」的记账
+        # mode 保持 offline（U3 的 waiting）；只清「谁在跑」的记账 —— ★M1b：**hold 一并清**
+        # （这是「正常交还」那条腿，清完协作派发当天就恢复）。
         self.note_release(course)
         return True, ""
 
@@ -624,6 +727,9 @@ class QueueOfflineMixin(QueuePeer):
             # 三类写法，就地改引用不会被计入——回写一份才让「谁写 _leases」这张表不漏人。
             self._leases[course] = rec
             token = str(rec.get("token") or "")
+        # ★M1b：墓碑同时**清掉 hold 镜像** —— 派发闸只认 hold，不清就等于「墓碑仍占闸」。
+        #（墓碑本身住内存租约，`holder_info`/`offline_leases` 照样看得到，供排障。）
+        self._dispatch_update(course, hold={})
         print(
             f"[hub-server] offline-revoke {course} lease={token[:8]}… reason={reason or '-'}",
             flush=True,
@@ -1041,7 +1147,7 @@ class QueueOfflineMixin(QueuePeer):
         if not self.auto_handoff_allowed(course):
             return "not_auto", "该课未在自动池（开课标记已删或人固定其模式）"
         with self._lease_lock:
-            busy = self._busy_locked(course)
+            busy = self._busy_locked(course, worker_id)  # D3：一拖一按 worker（同一台盘串行）
             if busy:
                 return "busy", busy
         now = float(self._now())
@@ -1105,8 +1211,9 @@ class QueueOfflineMixin(QueuePeer):
             self.revoke_offline_lease(course, reason="race-pinned-online")
 
     def note_release(self, course: str) -> None:
-        """release 后的派发记账：持有者清空；mode 保持 offline（U3 的 waiting）。"""
-        self._dispatch_update(course, claimed_by="", claimed_at=0.0)
+        """release 后的派发记账：持有者清空、**hold 清空**（★M1b：清完协作派发当天恢复）；
+        mode 保持 offline（U3 的 waiting——M1c 随模式一起退）。"""
+        self._dispatch_update(course, claimed_by="", claimed_at=0.0, hold={})
 
     def note_offline_completed(self, course: str) -> None:
         """段末摘要报到跑满（`end_it_reached`）：记「哪个包已完成」⇒ 不可再领（U6）。
@@ -1127,77 +1234,56 @@ class QueueOfflineMixin(QueuePeer):
         rec = self.dispatch_record(course)
         return rec.get("completed_pack_sha") == pack_sha
 
-    def _busy_locked(self, course: str) -> str:
-        """busy 闸（调用方持 `_lease_lock`）：别的课在跑 / 正在交接 ⇒ 拒因文案（§3.3a 一拖一）。
+    def _busy_locked(self, course: str, worker: str = "") -> str:
+        """busy 闸：**这台盘已经在别的课上跑** ⇒ 拒因文案（plan §1.2-6 / D3「一拖一按 worker」）。
 
-        两条腿都只算**有活性**的东西（§3.4）：
-        ① 别的课有活租约（`lease_verdict` 用哨兵空 id 问「是否有人持有」= `foreign`；
-        过期/静默超阈/墓碑一律不算——死盘不再冻结全池，R2-b）；
-        ② 别的课正在交接（已翻 offline、包还没出现、窗内且有主）——窗口锚 **`flipped_at`**
-        （本次交接的起点；`claimed_at` 只作兜底），见下面 ★ 2026-10-07 的改动与理由。
-        两条腿都对被检查方（`other`）先判**它还在不在离线池**（`is_runnable_offline`：不在
-        池里的课——停课 / `pinned_online` / 冷课 online 记录——的残留一律不占闸；
-        限制只作用于被检查方，发起方不受限——§3.4-4）。
+        ★M1b 两处切换（与旧版逐字对照）：
+        · 判据从 `_leases` 活租约换成 **hold 镜像**（重启后仍然算数；锁序不变：
+          `_lease_lock → _dispatch_lock`——`hold_of` 只走后者）；
+        · **旧腿②「别课正在交接」整条删**：Q1 定死 `pending_export` 是软态、**不占任何闸**
+          （旧腿会让一次导包把所有盘冻住——那正是本次重构要拆的痛点）。
+        没有 worker 身份（清单缺 `?worker=`）⇒ **不判 busy**（= `claimable` 是上界，plan §1.5.4-P2-x/§69）。
 
-        ★ 2026-10-07（现场报障「离线 worker 领不到 x21-psh-k10，切离线/在线都没用」）：
-        这条闸**两次**让整个池子停摆，两处都是「换个判据」而不是加机制：
+        **调用方持 `_lease_lock`**（`busy_reason` / `claim_offline` / `begin_auto_handoff` 都各自
+        在临界区里调）；持有者按 `_holder_info_locked` 判，不走会再取锁的 `holder_info`。
 
-        * ② 的锚点从 `claimed_at` 换回 `flipped_at`。旧锚每次 pending_export claim 都被
-          `begin_auto_handoff` 重写成 `now`（`:866`），而重试者**正是拿不到包的那台云机**
-          ⇒ 它每 ~16s 重试一次就把闸永久续上，「超窗 = 交接失败 ⇒ 不再占闸」的逃生门
-          （本函数旧注释的承诺）形同虚设。现场：k5 因「已跑满 it151 > iters 150」出不了包
-          （`--export-bundle` 的拒导见 `trainer/loop_lifecycle.py::export_refusal`），却把
-          ready 的 k10 锁了十几分钟，`pinned_offline` 也一样推不动。
-        * 两条腿都改成「只算离线池里的课」。旧写法只豁免 `pinned_online`，而**停课**的残留
-          最清不掉：`stopCourse` 推的 `mode=offline` 走 `pin=None`，`set_mode_pinned` 那条腿
-          **有意**不清 claim 记账（`:789-791`）⇒ 标记删了、课不再出现在任何清单里，
-          它的 `claimed_at` 却还能把全池锁满一个窗口。
+        ★ 2026-10-07 两次现场事故（上游 `359391a6` 修的就是旧两腿）在此**结构性
+        消解**，不是被丢掉——别照事故史把腿②加回来：
+        * 「重试把闸续死」：旧腿②拿 `claimed_at` 当锚，而重试者**正是**被卡的那台云机
+          ⇒ 「超窗就不再占闸」的逃生门永久失效（现场：k5 已跑满 it151 > iters 150 出不了包，
+          却把 ready 的 k10 锁了十几分钟）。现在软态根本**不占闸**，无锚可续。
+        * 「停课残留冻结全池」：旧腿②吃 `claimed_at` 残留（`stopCourse` 走 `pin=None`，
+          `set_mode_pinned` 有意不清 claim 记账 ⇒ 课不在任何清单里却还能占闸）。现在唯一的
+          腿只认**本 worker 手上的活 hold**，停课的课留不下 hold（claim 要开课标记 ∧ 有包），
+          且已持有的 hold 进度静默超阈即 `stale` 让位 ⇒ 闸天然有界、单盘级，不会冻结全池。
+          上游那条 `is_runnable_offline(other)` 豁免**有意不移植**：它把 mode 读回派发路径，
+          与 M4 后的「派发路径零 mode/authority 读取」冲突。
         """
-        now = float(self._now())
-        for other, rec in self._leases.items():
-            if other == course:
+        wid = str(worker or "").strip()
+        if not wid:
+            return ""
+        seen: set[str] = set()
+        for other in (*self.offline_task_courses(), *self._order, *self._stores):
+            if other == course or other in seen:
                 continue
+            seen.add(other)
             if self.authority_of(other) == AUTHORITY_PINNED_ONLINE:
-                continue  # 人固定在线：它的记录不占别人的闸（§3.4-3）
-            holder = str(rec.get("worker_id") or "")
-            # 用哨兵空 id 问「除我自己外是否有人持有」：只有 `foreign` 才算在跑
-            if lease_verdict(now, rec, "") != "foreign":
-                continue  # 过期 / 静默超阈 / 墓碑：不算「在跑」
-            return f"busy: {other} 正在 {holder or '?'} 上跑（一拖一：它 release 后自动解除）"
-        for other in self._order:
-            if other == course:
-                continue
-            # ★ 2026-10-07：只算**离线池里**的课（原写法只豁免 `pinned_online`）。停课（开课
-            #   标记已删 ⇒ `stopped`）与冷课 online 记录（`not_offline`）根本不可能再有合法的
-            #   交接在跑，而它们的残留偏偏清不掉（见 docstring）⇒ 一律不占闸。
-            if not self.is_runnable_offline(other):
-                continue
-            live = self._leases.get(other)
-            if live is not None and lease_verdict(now, live, "") == "foreign":
-                continue  # 活租约已在上面处理
-            rec = self.dispatch_record(other)
-            if not rec.get("claimed_offline"):
-                continue
-            if not str(rec.get("claimed_by") or ""):
-                continue  # 没有主 = 不是交接中（新锚点必须有主，R2-d）
-            # ★ 2026-10-07：锚点 = **本次交接的起点** `flipped_at`（`claimed_at` 只兜底，
-            #   防老记录缺键）。`flipped_at` 只在首翻时写、重复 claim 不刷新、切在线才清
-            #   ⇒ 一次交接最多占闸 `AUTO_HANDOFF_PENDING_SEC`，逃生门恢复有效。
-            anchor = float(rec.get("flipped_at") or 0.0) or float(rec.get("claimed_at") or 0.0)
-            if anchor <= 0 or now - anchor > AUTO_HANDOFF_PENDING_SEC:
-                continue  # 超窗 = 交接失败（告警面兜），不占闸
-            try:
-                if self.task_pack_path(other).is_file():
-                    continue  # 包已出现 = 等云机领取（running/waiting），不占闸
-            except ProtocolError:
-                continue
-            return f"busy: {other} 正在交接（导包中；失败会由停滞告警兜住）"
+                continue  # 人固定在线：它的记录不占任何闸（§3.4-3）
+            info = self._holder_info_locked(other)  # 已在 `_lease_lock` 里：走无锁内核
+            if not info or info.get("stale") or info.get("revoked"):
+                continue  # 死盘 / 墓碑 / 进度静默：不算「在跑」（R2-b）
+            if str(info.get("worker_id") or "") != wid:
+                continue  # 别的盘在跑别的课 ⇒ **不占闸**（多机并行的本意）
+            return (
+                f"busy: 你这台盘正在 {other} 上跑（一拖一按 worker："
+                "它 release 后自动解除；换一台盘可并行）"
+            )
         return ""
 
-    def busy_reason(self, course: str) -> str:
-        """只读版 busy 拒因（清单面用；空串 = 不忙）。"""
+    def busy_reason(self, course: str, worker: str = "") -> str:
+        """只读版 busy 拒因（清单面用；空串 = 不忙）。**带 `worker` 才有意义**（见 `_busy_locked`）。"""
         with self._lease_lock:
-            return self._busy_locked(course)
+            return self._busy_locked(course, worker)
 
     def open_time_of(self, course: str) -> float:
         """开课时间 = `training-enabled.txt` 的 mtime（T4，SSOT）；读不到 ⇒ `+inf` 排最后。"""

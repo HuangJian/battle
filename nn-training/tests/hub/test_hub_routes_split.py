@@ -135,7 +135,9 @@ DRIFT = {
 #: 每个混入里**允许**内联 `_auth_ok` 的次数（只有「拿不到 job」的端点才该自己鉴权）。
 #: 离线面并入 origin 的取包链 / 任务清单 / 租约三端后从 5 涨到 7：那两处新端点（`/offline/tasks`、
 #: `/offline/lease` 及其 heartbeat / release）与旧的取包链一样都不挂 job，只能自己鉴权。
-ALLOWED_INLINE_AUTH = {"schedule": 2, "result": 0, "blob": 1, "offline": 7}
+#: ★M1b：`offline` 7 → **9**（新增 `GET /offline/hold` 与 `POST /offline/progress` 两个
+#: 「拿不到 job」的端点：课程名/租约 token 都在查询串上，与租约三端同一条形状）。
+ALLOWED_INLINE_AUTH = {"schedule": 2, "result": 0, "blob": 1, "offline": 9}
 
 ALLOWED_IMPORTS = {
     "hub.blob": {"common.protocol"},
@@ -245,6 +247,8 @@ def test_auth_is_inlined_only_where_there_is_no_job() -> None:
     for mod, want in ALLOWED_INLINE_AUTH.items():
         got = _code(HUB_DIR / f"{mod}.py").count("if not self._auth_ok():")
         assert got == want, f"{mod}.py 内联鉴权 {got} 处（期望 {want}）"
+    # 台账（★M1b）：`offline.py` 7 → 9 —— 新增 `GET /offline/hold` 与 `POST /offline/progress`
+    # 都是「拿不到 job」的端点（课程名/租约 token 在查询串上，没有 job 作用域），照旧内联鉴权。
 
 
 # ───────────────────────── ③ 依赖方向 / 账本 ─────────────────────────

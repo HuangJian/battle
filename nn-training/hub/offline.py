@@ -27,6 +27,8 @@ from common.protocol import (
     COURSE_MODE_OFFLINE,
     INIT_WEIGHTS_NAME,
     OFFLINE_ARTIFACT_BODY_MAX,
+    OFFLINE_CLAIM_PROTO_VERSION,
+    OFFLINE_LEASE_TTL_SEC,
     OFFLINE_QUEUE_VERSION,
     OFFLINE_RESULT_BODY_MAX,
     OFFLINE_RESUME_BLOB_NAMES,
@@ -178,6 +180,33 @@ class OfflineRoutes:
                 409,
             )
             return
+        # ★M1b / P1-2：**live hold ⇒ 只有持 lease 的那台盘拿得到包**（新客户端取包带 `?lease=`）。
+        # 为什么必须有这道门：上面的模式三门随模式一起退役后，「包在盘上」就等于「发给任何人」
+        # ——正在被云机 A 跑的课会被云机 B 取走 = 同一份活两处跑（数据损坏级）。判据取 **hold**
+        # （落盘、重启不丢）而不是内存租约：`state == "live"` 才是「有人真在跑」；stale
+        # （进度静默超阈）按设计**可以**被别人取（那是自动接管那条腿）。
+        # 旧客户端（不带 `?lease=`）在**没人持**的时候照旧能取包 —— 升级窗口里不 brick 现场；
+        # 有人持的时候拿 409，这就是 P1-2 要给旧端留的第二道闸。
+        hold = self.hub.hold_of(course)
+        if str(hold.get("state") or "") == "live":
+            qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            token = str((qs.get("lease") or [""])[0]).strip()
+            if token != str(hold.get("token") or ""):
+                who = str(hold.get("worker_id") or "?")
+                self._json(
+                    {
+                        "error": (
+                            f"这门课的离线任务正被 {who} 接管（hold v2）——"
+                            "要取包请先用 /offline/claim 领到租约并带上 ?lease=<token>；"
+                            "确实要顶掉它到控制台点「强制解除接管」"
+                        ),
+                        "course": course,
+                        "held": True,
+                        "holder": self.hub.holder_info(course),
+                    },
+                    409,
+                )
+                return
         # 新鲜度门（§8）：旧包比没包更危险（云机会从旧起点重跑几十轮）⇒ 过期就触发重导 + 409；
         # 判定不了（包不是 zip / 没索引 / 课程还没权重）⇒ 照发——本端点首先是文件递送。
         gate = self._task_pack_gate(course, p)
@@ -430,10 +459,56 @@ class OfflineRoutes:
             return
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         include_all = (qs.get("include") or [""])[0].strip().lower() == "all"
+        # ★M1b / Q3：`?worker=` 让清单把「一拖一」算进去（`busy` / `claimable` 按这台盘判）。
+        # 缺省仍是**上界**语义（不含一拖一）——控制台排障不带 worker，不想看到自己的机群互挡。
+        worker = str((qs.get("worker") or [""])[0]).strip()
         self._json(
             {
-                "tasks": self.hub.offline_tasks(include_all=include_all),
+                "tasks": self.hub.offline_tasks(include_all=include_all, worker=worker),
                 "hub_version": OFFLINE_QUEUE_VERSION,
+                "generated_at": time.time(),
+            },
+            200,
+        )
+
+    def _get_offline_hold(self) -> None:
+        """`GET /offline/hold?course=<课>`（★M1b / plan §1.5.2-P0-5①）：接管只读面。
+
+        回答一个问题：「这门课上现在有没有**活着**的接管」——trainer 在每轮边界问一次
+        （≤3s 超时），据此决定「本机这段该不该让给云机」（`held` 语义）。**只读**：不建 hold、
+        不刷活性、不写账本。活性判据只认 `last_progress_at`（900s 无进度即 `state="stale"`），
+        所以 `held = state == "live"` —— stale 不算 held（那是「云机掉线了」，本机该立刻恢复）。
+        取不到（hub 不可达 / 401 / 课程名错）= 调用方退文件通道，本端点不制造新失败态。
+        """
+        if not self._auth_ok():
+            return
+        course = self._query_course()
+        if not course:
+            self._json({"error": "需要 ?course=<课>"}, 400)
+            return
+        hold = self.hub.hold_of(course)
+        export = self.hub.pending_export_of(course)
+        # 龄/TTL 余量走 `holder_info`（它才是「心跳龄 / TTL 余量」的记账面；`hold_of` 只给
+        # hold 自己的字段 + state/expires_in）。两处同源：同一个 hold、同一把尺子。
+        info = self.hub.holder_info(course) or {}
+        state = str(hold.get("state") or "")
+        self._json(
+            {
+                "course": course,
+                "held": state == "live",
+                "state": state,
+                "worker_id": str(hold.get("worker_id") or ""),
+                # 注意不能用 `or -1.0`：`progress_ago=0.0`（刚打过点）是**真值**，`or` 会把它
+                # 变成缺失哨兵——「刚claim」在 trainer 眼里就成了「没进度」。
+                "progress_ago": (
+                    float(info["progress_ago"]) if info.get("progress_ago") is not None else -1.0
+                ),
+                "expires_in": float(info.get("expires_in") or 0.0),
+                "last_progress_at": float(hold.get("last_progress_at") or 0.0),
+                #: 导包软态：**不占闸**（Q1），读面照报 —— trainer 据此把文案从「云机在跑」
+                #: 换成「正在给云机造包」（两者对协作盘的含义相同：这段先别派给它）。
+                "pending_export": bool(export),
+                "pending_export_by": str(export.get("by") or ""),
                 "generated_at": time.time(),
             },
             200,
@@ -473,6 +548,28 @@ class OfflineRoutes:
                         "course": course,
                     },
                     400,
+                )
+                return
+            # ★M1b（plan §1.5.2-P0-4）：**显式拒旧端**。本轮起「谁在跑这门课」由 hold 记账；
+            # 旧码既不带 `?proto=2` 也不懂 hold ⇒ 在**入口**就让它停住（不靠它自律）。
+            # 为什么借 `busy` 这个键：旧码的 409 分流里只有 `busy` 腿会把 `error` **原样**
+            # 打进会话日志且本拍不跑（`remote/offline_boot.py` 的 blocker 路径；不耗 idle 预算、
+            # 绝不静默双跑）——于是「请刷新 notebook」这句能真正到达现场。新码据 `proto_required` 判读。
+            if _q("proto") != str(OFFLINE_CLAIM_PROTO_VERSION):
+                self._json(
+                    {
+                        "error": (
+                            "hub 的离线派发已改为 hold v2（接管模型）：本会话的客户端太旧"
+                            f"（缺 ?proto={OFFLINE_CLAIM_PROTO_VERSION}）——请刷新"
+                            "`battle.offline.ipynb` 后重开会话（旧会话把当前段跑完并打包即可，"
+                            "不会与云机双跑）"
+                        ),
+                        "course": course,
+                        "busy": True,
+                        "proto_required": OFFLINE_CLAIM_PROTO_VERSION,
+                        "retry_after": TASK_AUTO_HANDOFF_RETRY_SEC,
+                    },
+                    409,
                 )
                 return
             # 归属/权威门（★ 2026-10-05 六轮 F3/F6）：判据 = `authority_of`（不再只看
@@ -533,7 +630,9 @@ class OfflineRoutes:
                 if why == "busy":
                     self._json(
                         {
-                            "error": self.hub.busy_reason(course)
+                            # ★M1b：busy 按 **worker** 判（同一台盘串行；别的盘不互挡）——
+                            # 所以这里必须把发起方带进去，否则回执里说不出「哪台盘在跑哪门课」。
+                            "error": self.hub.busy_reason(course, worker)
                             or "别的课正在跑（一拖一：一次只 drain 一门）",
                             "course": course,
                             "busy": True,
@@ -545,11 +644,16 @@ class OfflineRoutes:
                 holder = self.hub.holder_info(course)
                 who = holder["worker_id"] if holder else "?"
                 left = float(holder["expires_in"]) if holder else 0.0
+                # ★M1b（plan §1.2-③ 不变量 3 + P2-4）：**live 的接管不可被顶**——`?takeover=1`
+                # 也不再能覆盖它（旧文案说的「加 takeover=1 顶掉」已作废）。要清只有两条路：
+                # ① 它自己进度静默超阈（届时新主**自动**接管）② 人到控制台点「强制解除接管」。
+                # 为什么改：旧写法把「不能覆盖 live」变成一句空话（任何人一个参数就能双跑）。
                 self._json(
                     {
                         "error": (
-                            f"这门课的离线任务已被 {who} 持有（{left:.0f}s 后过期；"
-                            "确实要顶掉它加 ?takeover=1）"
+                            f"这门课的离线任务正被 {who} 接管（{left:.0f}s 内无进度即自动可接管）"
+                            "——live 的接管不可被顶（takeover 也不行）；请换下一门，"
+                            "或到控制台点「强制解除接管」再领"
                         ),
                         "course": course,
                         "held": True,
@@ -619,6 +723,44 @@ class OfflineRoutes:
             return
         self._json({"released": True, "course": course}, 200)
 
+    def _post_offline_progress(self) -> None:
+        """`POST /offline/progress?course=<课>&lease=<token>`（★M1b / Q2）：**进度打点**。
+
+        与心跳**同一套** token 分流（过期 / revoked / taken），差别只在效果：心跳只续 TTL，
+        打点额外刷 `last_progress_at`（活性）——「任何合法接触都刷 TTL，只有进度刷活性」
+        （§1.1 / P2-1）。打点必须落在**轮内完成事件**上（每 N 局完 / ≤300s 的检查点），
+        不许另开一个定时线程 —— 那正是「心跳活、进度死」的教训（§68：心跳不能当活性）。
+        """
+        if not self._auth_ok():
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        course = str((qs.get("course") or [""])[0]).strip()
+        if not course:
+            self._json({"error": "需要 ?course=<课>"}, 400)
+            return
+        token = str((qs.get("lease") or [""])[0]).strip()
+        ok, why = self.hub.progress_offline(course, token)
+        if ok:
+            self._json(
+                {"ok": True, "course": course, "ttl_sec": OFFLINE_LEASE_TTL_SEC}, 200
+            )
+            return
+        error = {
+            "expired": "打点无效：租约已过期（本会话继续跑完并打包；回传可能被判 duplicate）",
+            "revoked": "打点无效：租约已被撤销（人把课切回在线/交还自动）——跑完当前段即退出",
+        }.get(why, "打点无效：租约已被别人接管——跑完当前段即退出")
+        self._json(
+            {
+                "ok": False,
+                "error": error,
+                "course": course,
+                "expired": why == "expired",
+                "revoked": why == "revoked",
+                "holder": self.hub.holder_info(course),
+            },
+            409,
+        )
+
     def _ask_console_freshness(self, course: str) -> str:
         """自动课 claim 成功后：请控制台核对任务包新鲜度；返回一行回执（空 = 不该问/没问到）。
 
@@ -677,6 +819,11 @@ class OfflineRoutes:
                 404,
             )
             return
+        # ★M1b / Q1：**无包 claim 不建 hold** —— 只在盘上记一条「有人在导包」的软态。
+        # 它**不占任何闸**：别的课 / 别的盘照领，本机也照跑（导包是几十分钟的后台活，
+        # 用一次导包把整个生态冻住正是本次重构要拆的痛点）。
+        # 为什么记 `by`：包到手后 `note_hold` 会顺手清掉它；崩溃/换机留下的残留由读面惰性过期。
+        self.hub.note_pending_export(course, by=worker_id)
         decision = auto_handoff_decision(course)
         if decision == "trigger":
             note_auto_handoff_trigger(course)

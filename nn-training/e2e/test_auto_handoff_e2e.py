@@ -56,6 +56,7 @@ from common import net_http
 from common.protocol import (
     COURSE_ENABLE_MARKER,
     OFFLINE_CLAIM_PATH,
+    OFFLINE_RELEASE_PATH,
     OFFLINE_RESULT_PATH,
     OFFLINE_TASKS_PATH,
 )
@@ -239,7 +240,7 @@ class _Hub:
         *,
         console_url: str = "",
         stall_sec: float = 0.0,
-        lease_stale_sec: float = 0.0,
+        hold_stale_sec: float = 0.0,
     ) -> None:
         def _argv(port: int) -> list[str]:
             return [
@@ -272,9 +273,11 @@ class _Hub:
             env["BCITY_CONSOLE_URL"] = console_url
         if stall_sec:
             env["BCITY_OFFLINE_STALL_SEC"] = str(stall_sec)
-        if lease_stale_sec:
-            # ★六轮 §3.3：租约「连续静默」阈值（e2e 不想真等 180s；hub/task_pack 调用时读 env）
-            env["BCITY_OFFLINE_LEASE_STALE_SEC"] = str(lease_stale_sec)
+        if hold_stale_sec:
+            # ★M1b/F2：「判掉线」的尺子 = **进度**静默（旧名 BCITY_OFFLINE_LEASE_STALE_SEC
+            # 管的是心跳静默，已降级为「没有进度字段的旧记录」的过渡读路）。e2e 不想真等
+            # 900s ⇒ 调秒级（hub/task_pack 调用时读 env）。
+            env["BCITY_HOLD_PROGRESS_STALE_SEC"] = str(hold_stale_sec)
         srv = spawn_bound_port(_argv, cwd=str(ROOT), env=env)
         self.port = srv.port
         self.proc = srv.proc
@@ -330,7 +333,7 @@ def test_full_flow_online_course_to_offline_completion(tmp_path: Path) -> None:
         assert row["pack"] is None, row
 
         # ---- ② claim 无包 ⇒ 409 指路（不是 404）+ mode 翻 + 触发控制台 ----
-        st2, body = _http(hub.base, f"{OFFLINE_CLAIM_PATH}?course={C_AUTO}&worker=w-tpu", method="POST")
+        st2, body = _http(hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_AUTO}&worker=w-tpu", method="POST")
         assert st2 == 409, body
         assert body["auto_handoff"] is True and body["pending_export"] is True, body
         assert body["triggered"] is True and body["give_up"] is False, body
@@ -346,7 +349,7 @@ def test_full_flow_online_course_to_offline_completion(tmp_path: Path) -> None:
         # ---- ③ 控制台导包完成（本层直接放包到盘上）⇒ 云机重 claim 拿租约 ----
         _write_pack(traj, C_AUTO, b"PK\x03\x04pack-v1")
         st3, body3 = _http(
-            hub.base, f"{OFFLINE_CLAIM_PATH}?course={C_AUTO}&worker=w-tpu", method="POST"
+            hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_AUTO}&worker=w-tpu", method="POST"
         )
         assert st3 == 200 and body3.get("lease"), body3
 
@@ -375,7 +378,7 @@ def test_full_flow_online_course_to_offline_completion(tmp_path: Path) -> None:
         assert row6["state"] == "completed", row6
         assert row6["claimable"] is False, row6
         st7, body7 = _http(
-            hub.base, f"{OFFLINE_CLAIM_PATH}?course={C_AUTO}&worker=w-other", method="POST"
+            hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_AUTO}&worker=w-other", method="POST"
         )
         assert st7 == 409, body7
         assert body7.get("completed") is True, body7
@@ -383,14 +386,14 @@ def test_full_flow_online_course_to_offline_completion(tmp_path: Path) -> None:
         # ---- ⑥ 重导包（sha 变）⇒ 自动解封：不再报 completed（此时报的是 held：租约还在）----
         _write_pack(traj, C_AUTO, b"PK\x03\x04pack-v2-DIFFERENT")
         st8, body8 = _http(
-            hub.base, f"{OFFLINE_CLAIM_PATH}?course={C_AUTO}&worker=w-other", method="POST"
+            hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_AUTO}&worker=w-other", method="POST"
         )
         assert st8 == 409, body8
         assert body8.get("completed") is not True, f"新包 sha 变必须解封 completed：{body8}"
         # 拿租约的那个人（同 worker 续领）仍然正常 —— `lease_verdict` 的 `mine` 档。
         # 注意：token 每次 claim 都会重发（`secrets.token_hex`），所以只判「又拿到了租约」。
         st9, body9 = _http(
-            hub.base, f"{OFFLINE_CLAIM_PATH}?course={C_AUTO}&worker=w-tpu", method="POST"
+            hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_AUTO}&worker=w-tpu", method="POST"
         )
         assert st9 == 200 and body9.get("lease"), body9
     finally:
@@ -398,11 +401,19 @@ def test_full_flow_online_course_to_offline_completion(tmp_path: Path) -> None:
         console.close()
 
 
-# ─────────────── ② U2 一拖一：第一门在交接窗口 ⇒ 第二门 busy 且**不被翻 offline** ───────────────
+# ── ② 导包窗口**不占闸**（★M1b Q1/F11 语义反转；旧名 `..._stays_online_while_first_drains`）──
 
 
-def test_second_course_stays_online_while_first_drains(tmp_path: Path) -> None:
-    """U2 是 **hub 侧不变量**（云机不可信）：第一门占着交接窗口，第二门领不到、且 mode 不动。"""
+def test_pending_export_does_not_gate_a_second_course(tmp_path: Path) -> None:
+    """导包软态不占闸：第一门进了导包窗口，第二门照旧可走它自己的那条腿。
+
+    旧行为（本用例原版）：第一门占着交接窗口 ⇒ 第二门 claim 吃 409 `busy` 且 mode 不翻。
+    那意味着**一次导包把整个机群冻住**（导包是分钟级后台活，而云机在窗口里每 60s 问一次）
+    —— 正是本次重构要拆的痛点（F11：`_busy_locked` 的腿②整条删）。
+
+    新契约（Q1）：一拖一闸只认**活着的 hold**（包到手那一刻才建）。两个导包可以同时在飞；
+    真正的互斥在「包到手之后」——那时才该对同一台盘 409 `busy`。
+    """
     traj = tmp_path / "traj"
     _course_dirs(traj, C_AUTO)
     _course_dirs(traj, C_OTHER)
@@ -411,27 +422,42 @@ def test_second_course_stays_online_while_first_drains(tmp_path: Path) -> None:
     try:
         hub.ready(expect=[C_AUTO, C_OTHER])
 
-        # 第一门：claim 无包 ⇒ 翻 offline + 进交接窗口（占闸）
+        # 第一门：claim 无包 ⇒ 翻 offline + 记一条「有人在导包」的软态（**不建 hold**）
         st1, body1 = _http(
-            hub.base, f"{OFFLINE_CLAIM_PATH}?course={C_AUTO}&worker=w-tpu", method="POST"
+            hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_AUTO}&worker=w-tpu", method="POST"
         )
         assert st1 == 409 and body1["pending_export"] is True, body1
+        assert body1.get("busy") is None, body1
         assert _mode_of(hub, C_AUTO) == "offline"
 
-        # 第二门：不是「也在导包」，而是明确的 busy（闸在 hub 侧）
+        # 第二门：不被软态挡住 —— 它走自己的「无包 ⇒ 翻 offline + 请控制台导包」那条腿
         st2, body2 = _http(
-            hub.base, f"{OFFLINE_CLAIM_PATH}?course={C_OTHER}&worker=w-tpu", method="POST"
+            hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_OTHER}&worker=w-tpu", method="POST"
         )
-        assert st2 == 409, body2
-        assert body2.get("busy") is True, body2
-        assert body2.get("pending_export") is not True, body2
-        # ★ 题眼：第二门**没被翻 offline**（其余课程照常在线推进）
-        assert _mode_of(hub, C_OTHER) == "online"
-        # 清单面同源：第二门 claimable=false，且拒因点名第一门
-        st3, tasks3 = _http(hub.base, OFFLINE_TASKS_PATH)
+        assert st2 == 409 and body2["pending_export"] is True, body2
+        assert body2.get("busy") is None, body2
+        assert _mode_of(hub, C_OTHER) == "offline"
+        # 两个导包都真到了控制台（软态是记账，不是闸）
+        assert _wait_for(lambda: sorted(console.handoff_courses()) == sorted([C_AUTO, C_OTHER])), (
+            f"控制台触发面：{console.handoff_courses()}；hub 输出：{hub.output()}"
+        )
+        # 清单面：两行都是 no_pack（无人持 hold、不忙）—— 软态也看得见
+        st3, tasks3 = _http(hub.base, OFFLINE_TASKS_PATH + "?worker=w-tpu")
         row3 = _task_row(tasks3, C_OTHER)
-        assert row3["claimable"] is False and "busy" in str(row3["reason"]), row3
-        assert C_AUTO in str(row3["reason"]), row3
+        assert row3["state"] == "no_pack" and row3["claimable"] is True, row3
+        assert row3["busy"] is False and row3["hold"] == {}, row3
+        assert row3["pending_export"]["by"] == "w-tpu", row3
+        # ……而**包到手那一刻**，一拖一立刻生效（这才是 hub 侧不变量）
+        _write_pack(traj, C_AUTO, b"PK\x03\x04pack-a")
+        st4, body4 = _http(
+            hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_AUTO}&worker=w-tpu", method="POST"
+        )
+        assert st4 == 200 and body4.get("lease"), body4
+        st5, body5 = _http(
+            hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_OTHER}&worker=w-tpu", method="POST"
+        )
+        assert st5 == 409 and body5.get("busy") is True, body5
+        assert C_AUTO in str(body5["error"]), body5
     finally:
         hub.close()
         console.close()
@@ -455,7 +481,7 @@ def test_stalled_course_raises_alert(tmp_path: Path) -> None:
 
         # claim 无包 ⇒ 翻 offline、无租约、包未出现 ⇒ 导包窗口超阈 ⇒ pending-export
         st1, body1 = _http(
-            hub.base, f"{OFFLINE_CLAIM_PATH}?course={C_AUTO}&worker=w-tpu", method="POST"
+            hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_AUTO}&worker=w-tpu", method="POST"
         )
         assert st1 == 409 and body1["pending_export"] is True, body1
 
@@ -719,8 +745,18 @@ def _prod_publish(traj_root: Path, course: str, *, it: int, run_id: str) -> dict
 
 
 def _offline_claim(hub: _Hub, course: str, worker: str) -> tuple[int, dict]:
+    """真云机形状的 claim（★M1b：**带 `?proto=2`** —— 缺它 = 旧端，hub 会 409 拒收）。"""
     return _http(
-        hub.base, f"{OFFLINE_CLAIM_PATH}?course={course}&worker={worker}", method="POST"
+        hub.base,
+        f"{OFFLINE_CLAIM_PATH}?proto=2&course={course}&worker={worker}",
+        method="POST",
+    )
+
+
+def _legacy_offline_claim(hub: _Hub, course: str, worker: str) -> tuple[int, dict]:
+    """旧端形状（不带 `?proto=2`）——只给「hub 显式拒旧端」那条用例用（DoD#3）。"""
+    return _http(
+        hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={course}&worker={worker}", method="POST"
     )
 
 
@@ -839,12 +875,12 @@ def test_pinned_online_course_is_not_seized_nor_claimed_by_offline_disk(tmp_path
 
 
 def test_dead_offline_holder_is_reclaimed_after_silence(tmp_path: Path) -> None:
-    """A 停跳（超 `BCITY_OFFLINE_LEASE_STALE_SEC`）⇒ B 清单 `claimable + holder.stale`、
+    """A 停跳（超 `BCITY_HOLD_PROGRESS_STALE_SEC`：**进度**静默）⇒ B 清单 `claimable + holder.stale`、
     claim 200（**不需要 `takeover=1`**、带 `reclaimed`）；A 心跳 409。"""
     traj = tmp_path / "traj"
     _course_dirs(traj, C_AUTO)
     _write_pack(traj, C_AUTO, b"PK\x03\x04t3-pack")
-    hub = _Hub(traj, lease_stale_sec=2.0)
+    hub = _Hub(traj, hold_stale_sec=2.0)
     try:
         hub.ready(expect=[C_AUTO])
         st, body = _offline_claim(hub, C_AUTO, "w-a")
@@ -880,25 +916,35 @@ def test_dead_offline_holder_is_reclaimed_after_silence(tmp_path: Path) -> None:
 
 
 def test_dead_holder_does_not_block_seizing_another_course(tmp_path: Path) -> None:
-    """A 的租约 **活的** ⇒ B 领另一门课 409 `busy`（对照组）；A 静默超阈后 ⇒ 200。
+    """★M1b/D3 一拖一按 worker：**同一台盘**手上有活 hold 时领另一门课 409 `busy`（对照组）；
+    那门课的 hold 进度静默超阈后，同一台盘再领 ⇒ 200（死盘不占闸）。
 
-    ⚠ 必须给**自己的**假控制台（2026-10-07）：这一组的 409 判据走「请控制台核对任务包新鲜度」
-    那条路，而 `tests/conftest.py::pin_production_env` 把控制台地址钉在**死端口**上（2026-10-06
-    事故的隔离面）⇒ 控制台不可达时 hub 会**跳过**一拖一闸、直接 200。旧写法（不传
-    `console_url`）实际是在赌「开发机上正跑着 dashboard」，属于把测试打到真面上那一类。
+    （旧版对照组用的是**另一台盘** w-b —— 在全球一拖一的旧口径下也对，但那是本重构
+    要拆的东西：多机并行时别的盘本来就不该被挡。）
     """
     traj = tmp_path / "traj"
     for c in (C_AUTO, C_OTHER):
         _course_dirs(traj, c)
         _write_pack(traj, c, f"PK\x03\x04{c}".encode())
-    console = _FakeConsole()
-    hub = _Hub(traj, lease_stale_sec=2.0, console_url=console.url)
+    hub = _Hub(traj, hold_stale_sec=2.0)
     try:
         hub.ready(expect=[C_AUTO, C_OTHER])
         assert _offline_claim(hub, C_AUTO, "w-a")[0] == 200
-        st, body = _offline_claim(hub, C_OTHER, "w-b")
+        st, body = _offline_claim(hub, C_OTHER, "w-a")
         assert st == 409 and body.get("busy") is True, body
-        # A 死掉（不再心跳）⇒ 静默超阈后闸自动解除
+        # 别的盘照旧不被挡（多机并行）——领下再交还，把 C_OTHER 空出来给最后那一步
+        st_other, body_other = _offline_claim(hub, C_OTHER, "w-b")
+        assert st_other == 200 and body_other.get("lease"), body_other
+        tok_b = str(body_other["lease"]["token"])
+        assert (
+            _http(
+                hub.base,
+                f"{OFFLINE_RELEASE_PATH}?course={C_OTHER}&lease={tok_b}",
+                method="POST",
+            )[0]
+            == 200
+        )
+
         def _row() -> dict:
             _st, t = _http(hub.base, OFFLINE_TASKS_PATH)
             return _task_row(t, C_AUTO) if _st == 200 else {}
@@ -906,12 +952,12 @@ def test_dead_holder_does_not_block_seizing_another_course(tmp_path: Path) -> No
         assert _wait_for(
             lambda: bool(_row().get("holder")) and _row()["holder"].get("stale") is True,
             timeout=15.0,
-        ), f"静默超阈没生效；输出：{hub.output()}"
-        st2, body2 = _offline_claim(hub, C_OTHER, "w-b")
-        assert st2 == 200 and body2.get("lease"), body2
+        ), f"进度静默超阈没生效；输出：{hub.output()}"
+        assert _row()["claimable"] is True  # 死盘让位
+        st2, body2 = _offline_claim(hub, C_OTHER, "w-a")
+        assert st2 == 200 and body2.get("lease"), body2  # 同一台盘：死 hold 不再占闸
     finally:
         hub.close()
-        console.close()
 
 
 # ────── T5a（报障二）：导包窗口的**主人死掉且窗口过期** ⇒ 重开（可重触发、不占闸） ──────
@@ -1030,7 +1076,7 @@ def test_full_cycle_offline_then_online_then_offline(tmp_path: Path) -> None:
     traj = tmp_path / "traj"
     _course_dirs(traj, C_AUTO)
     _write_pack(traj, C_AUTO, b"PK\x03\x04t7-pack")
-    hub = _Hub(traj, lease_stale_sec=2.0)
+    hub = _Hub(traj, hold_stale_sec=2.0)
     try:
         hub.ready(expect=[C_AUTO])
         # ① 在线（auto）：可抢
