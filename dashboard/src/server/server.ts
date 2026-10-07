@@ -77,6 +77,7 @@ import {
   evalReplayFileResponse,
   parseEvalIterParam,
   getLoopQueueView,
+  poolCountersView,
   invalidatesSnapshot,
   invalidateAfterAction,
   ladderTickAll,
@@ -366,6 +367,11 @@ async function main(): Promise<void> {
           // 池视图与课程无关，`?course=` 已移除（plan/nodes-decouple-from-course.plan.md）。
           const days = url.searchParams.get('days') ?? 'today'
           return json(await buildPoolView(fresh, days))
+        }
+        // 逐调用计数器只读视图（plan/dashboard-pool-history-idle-cost P1-3）：空置内存取证
+        // ⇒ 隔一段取两次，`computes`/`fullRescans`/`bytesRead` 不得持续增长。纯读，不触发聚合。
+        if (req.method === 'GET' && url.pathname === '/api/poolCounters') {
+          return json(poolCountersView())
         }
         if (req.method === 'GET' && url.pathname === '/api/evalboard') {
           const fresh = url.searchParams.get('fresh') === '1'

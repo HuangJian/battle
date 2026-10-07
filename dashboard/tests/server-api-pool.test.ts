@@ -10,7 +10,8 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { buildPoolView } from '../src/server/api'
+import { buildPoolView, poolCountersView } from '../src/server/api'
+import { poolHistoryCounters } from '../src/server/pool-history'
 
 // ────────────────────────── /api/pool 契约（DS-E1 / selfStatus 占位） ──────────────────────────
 describe('/api/pool（buildPoolView）', () => {
@@ -57,5 +58,16 @@ describe('/api/pool（buildPoolView）', () => {
     }
     const c = await buildPoolView(true)
     expect(c.cachedAt).toBeGreaterThanOrEqual(a.cachedAt)
+  })
+
+  it('/api/poolCounters：纯读计数器，不触发任何聚合（calls 不变）', () => {
+    // 观测面（plan/dashboard-pool-history-idle-cost P1-3）：它只做浅拷贝 —— 若哪天有人把
+    // 「顺手算一下」塞进来，空置取证的读数就不再可信，故这里钉死它零副作用。
+    const before = poolHistoryCounters()
+    const c = poolCountersView()
+    expect(typeof c.computes).toBe('number')
+    expect(typeof c.fullRescans).toBe('number')
+    expect(typeof c.bytesRead).toBe('number')
+    expect(poolHistoryCounters().calls).toBe(before.calls)
   })
 })

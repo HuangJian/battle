@@ -1112,7 +1112,7 @@ let streams = new Map<string, StreamState>()
  *
  *  @returns 新偏移（= 文件末尾）/ 残片 / 实读字节数。
  */
-function readChunkLines(
+export function readChunkLines(
   path: string,
   offset: number,
   carry: string,
@@ -1122,6 +1122,11 @@ function readChunkLines(
   const buf = Buffer.alloc(CHUNK)
   let pos = offset
   let tail = carry
+  /** ★ 块内已消费游标：`tail[0, start)` 是已经切出去的行（plan/dashboard-pool-history-idle-cost
+   *  P0-2）。旧实现每切一行就 `tail = tail.slice(idx + 1)` 重建整个尾串 ⇒ 单块拷贝量 ≈
+   *  块大小 × 行数 / 2（1MiB / ~4200 行 ≈ 2GB 临时字符串）。改成游标后**块内零重建**，
+   *  块末归位一次（`tail = tail.slice(start)`）⇒ 总拷贝量 O(文件大小)。 */
+  let start = 0
   let bytesRead = 0
   try {
     const fh = openSync(path, 'r')
@@ -1132,13 +1137,19 @@ function readChunkLines(
         bytesRead += n
         pos += n
         tail += buf.toString('utf8', 0, n)
-        let idx = tail.indexOf('\n')
+        let idx = tail.indexOf('\n', start)
         while (idx !== -1) {
-          onLine(tail.slice(0, idx))
-          tail = tail.slice(idx + 1)
-          idx = tail.indexOf('\n')
+          onLine(tail.slice(start, idx))
+          start = idx + 1
+          idx = tail.indexOf('\n', start)
         }
-        // 安全阀：单行异常长（坏文件）时丢弃残片，防无换行的文件把内存拉爆。
+        // 块末归位：丢掉已消费前缀（**每块一次**，不是每行一次）⇒ `tail` 只剩残片。
+        if (start > 0) {
+          tail = tail.slice(start)
+          start = 0
+        }
+        // 安全阀：单行异常长（坏文件）时丢弃残片，防无换行的文件把内存拉爆（归位后
+        // `tail` 就是残片，故这里的判据天然是**残片长度**）。
         if (tail.length > 8 * 1024 * 1024) tail = ''
       }
     } finally {
@@ -1479,7 +1490,14 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
     // 否则「只读尾部」与「累计全史」两条口径会打架、28.1/15.6MB 两条流的数字必变）；
     // size 回退 或 同 size 但 mtime 变了（原地重写）⇒ 全量重建。
     const rewritten = src.size < st.size || (src.size === st.size && src.mtimeMs !== st.mtimeMs)
-    if (st.size === 0 || src.size > LARGE_META_BYTES || rewritten) {
+    // ★ 2026-10-07（plan/dashboard-pool-history-idle-cost P0-1）：「文件大」只决定**怎么读**
+    //   （尾部窗口 vs 全量分块），不决定**要不要重读**。旧判据把 `src.size > LARGE_META_BYTES`
+    //   直接当成「要重建」⇒ 只要本循环被进入（首见 / 任意流变动 / 腿指纹变化），**所有**
+    //   >2MiB 的流无论自己变没变都重读一遍尾部 —— 一个流追加会连坐其余全部大流。
+    //   ⚠ 这不等于「空置时每拍重读」：空置无写入 ⇒ `fp` 不变 ⇒ `aggMemo` 命中 ⇒ 本函数
+    //   整个不被调用（见 `aggregateNodeHistory` 的 memo 判定与 `aggMemoReusable`）。
+    const grewOrChanged = src.size !== st.size || src.mtimeMs !== st.mtimeMs
+    if (st.size === 0 || (src.size > LARGE_META_BYTES && grewOrChanged) || rewritten) {
       counters.fullRescans++
       rebuildStream(st, src, epochStr, nowMs)
     } else if (src.size > st.size) {

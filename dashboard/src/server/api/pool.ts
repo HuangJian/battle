@@ -39,6 +39,7 @@ import {
   aggregateNodeHistory,
   emptyHistory,
   invalidateNodeHistoryMemo,
+  poolHistoryCounters,
   poolStatus,
   projectWindow,
   resolveWindow,
@@ -311,4 +312,15 @@ async function computePoolProbes(cfg: RlConfig): Promise<PoolProbes> {
     selfStatus: await fetchSelfStatus(cfg),
     inflightByWorker: inflightByWorkerFromQueue(hubAdmin?.queue ?? null),
   }
+}
+
+// ────────────────────────── /api/poolCounters（只读计数器：空置内存取证用） ──────────────────────────
+
+/** 逐调用计数器的只读视图（plan/dashboard-pool-history-idle-cost P1-3）。
+ *
+ *  用途 = 真机取证：空置状态下隔一段取两次，`computes` / `fullRescans` / `bytesRead`
+ *  **不得持续增长**（聚合指纹未变 ⇒ `aggMemo` 命中 ⇒ 一次都不该重算）；训练中的课不在此判据内。
+ *  **纯读**：`poolHistoryCounters()` 返回浅拷贝，不触发任何聚合、不动任何 memo。 */
+export function poolCountersView(): ReturnType<typeof poolHistoryCounters> {
+  return poolHistoryCounters()
 }

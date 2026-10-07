@@ -7,6 +7,45 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §33 池历史大流的重建判据：文件大只决定「怎么读」，不决定「要不要重读」（plan/dashboard-pool-history-idle-cost，2026-10-07）
+
+**触发**（用户）：没开训练时 `bun src/server/server.ts` 空置，内存 WS 在 280–856MB 锯齿。原 plan 的根因
+是「45 个大流每 5s/15s 各被重读一遍尾部 ≈ 每拍 5 万次 `JSON.parse`」。
+
+**评审更正（同日，先测量后动手）**：这条根因**不成立**。聚合入口 `aggregateNodeHistory` 早有 `aggMemo`，
+判据 `aggMemoReusable` = 「**指纹相同 ⇒ 复用，与时间无关**」（`pool-history.ts:128`），指纹 = 全部 meta 的
+`dir|mtimeMs|size` + 腿指纹（`:1417`）。空置无写入 ⇒ 指纹不变 ⇒ **命中 ⇒ 连流循环都不进**。旁证：
+`scanPoolStreams` 是 30s 时间窗但 `restat` 保序 ⇒ 指纹不抖；既有绿用例 G2「指纹未变 ⇒ 第二次调用零读盘」
+就是这条契约。原 plan 的 ★ 红用例（两拍不动、断言 `fullRescans === 0`）因此**测的是 memo，不是它想修的东西**
+（新旧代码上都绿）。盘面事实也与原 plan 不符：池根是**仓库根 `tmp/`**（不是 `nn-training/tmp/`），
+**199 个 meta / 126.8MB，其中 13 个 >2MiB、5 个 >8MiB**。
+
+**真代价（本次修的）**：旧判据 `st.size === 0 || src.size > LARGE_META_BYTES || rewritten` 把「文件大」和
+「要不要重建」绑死 ⇒ **只要本循环被进入**（首见 / 任意流变动 / 腿指纹变化），所有 >2MiB 的流**无论自己变没变**
+都重读一遍尾部 —— 即「一个流追加一行 ⇒ 连坐 12 个大流重扫」。修法：拆出 `grewOrChanged`（size 或 mtime 变了），
+大流条件改为 `src.size > LARGE_META_BYTES && grewOrChanged`（该分支保留 ⇒ truncated 读法与口径一字不动）。
+
+**同批修的另两条**：
+- `readChunkLines` 增量游标：旧实现每切一行 `tail = tail.slice(idx + 1)` 重建整个尾串 ⇒ 单块拷贝量
+  ≈ 块大小 × 行数 / 2（1MiB / ~4200 行 ≈ 2GB 临时字符串）。改 `start` 游标 + **块末归位一次** ⇒ O(文件大小)；
+  8MiB 安全阀因此天然判在「残片」上（归位后 `tail` 就是残片）。实测 ~8MiB / 30 万行 219ms。
+- `/api/poolCounters`：把 `poolHistoryCounters()` 暴露成只读端点 —— 空置隔段取两次，`computes` /
+  `fullRescans` / `bytesRead` 不得增长。**纯读**（浅拷贝，不触发聚合），测试钉死零副作用。
+
+**被否决**：① 空置降频（原 P1-1）—— 要新造一份「有没有课在训」的判据，与 `loop-queue.ts:204`「别再往外要
+第二个 `training: string[]`」冲突，且前提已被证伪 ⇒ 不做。② 调高 `LARGE_META_BYTES`（原 P1-2）——
+**方向反了**：阈值越大，走全量分块读的流越多，而 truncated 分支是**尾部 512KB 有界读**、更便宜 ⇒ 保持 2MiB。
+
+**未决（本 plan 范围外）**：856MB 峰值真凶**仍未定位**。候选：`readLogTail` 对 `fileSize ≤ 8MiB` 的文件会
+`readFileSync` **读整个文件**算 `totalLines`（`api/logs.ts:190-206`；每拍调用点 `snapshot-cache.ts:199` /
+`state-view.ts:43` / `ledger.ts:161` / `overview.ts:281` / `exit-watchdog.ts:444`）· `getHubAdmin` /
+`getFleetProbes` 的网络超时 buffer · `getLoopQueueView` 每 10s 起一个只读 python（`server.ts:291-295`）·
+`buildStateView` 的对象图。下一步：空置取 `/api/poolCounters` 两次，`computes` 不涨即确认 R1 证伪，再逐条测。
+
+**落点**：`dashboard/src/server/pool-history.ts`（判据 + 游标）· `dashboard/src/server/api/pool.ts` + `server.ts`
+（端点）· `dashboard/tests/server-pool-history.test.ts`（P0-1 三例 / P0-2 四例）· `dashboard/tests/server-api-pool.test.ts`。
+
+---
 ## §32 回放导出选择器：按评估轮选，而不是按「浏览器此时拿到的滤出视图」选（plan/replay-export-eval-round-picker，2026-10-06）
 
 **触发**（用户）：首页「导出 replay」只能导出**最新**权重的 replay，要改成支持用**任意 eval 轮**的权重导出。

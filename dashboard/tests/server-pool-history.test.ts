@@ -15,6 +15,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  statSync,
   utimesSync,
   writeFileSync,
 } from 'fs'
@@ -37,6 +38,7 @@ import {
   projectWindow,
   pruneByEpoch,
   pushWindowSample,
+  readChunkLines,
   resolveWindow,
   windowMeanSec,
 } from '../src/server/pool-history'
@@ -1132,6 +1134,185 @@ describe('pool-history · 离线腿剔除（offline worker 的轮不进采样贡
       expect(
         projectWindow(again, resolveWindow('all', now, again.epochMs)).hist.get('p1')!.ok,
       ).toBe(1)
+    })
+  })
+})
+
+// ────────────────────────── 大流只在自身变化时重建（plan/dashboard-pool-history-idle-cost P0-1） ──────────────────────────
+//
+// 为什么要有这一组（评审 2026-10-07 更正）：`aggregateNodeHistory` 的 `aggMemo` 判据是
+// **指纹相同 ⇒ 复用，与时间无关**（`aggMemoReusable`）⇒ 「空置（无写入）」**根本进不到**流循环，
+// 更不会每拍重读大流。旧判据 `src.size > LARGE_META_BYTES || …` 的真实代价是：
+// **只要本循环被进入**（任意流变动 / 首见 / 腿指纹变化），所有 >2MiB 的流**无论自己变没变**
+// 都重读一遍尾部 —— 一个流追加会连坐其余全部大流（本机 13 个 >2MiB / 5 个 >8MiB）。
+// 第一条用例钉住这条红线（旧实现上必红），第二条钉住「空置零重算」的既有 memo 契约。
+describe('pool-history · 大流只在自身变化时重建（P0-1）', () => {
+  /** >LARGE_META_BYTES(2MiB) 的单行：合法 JSON，靠 `pad` 撑体量（行数少 ⇒ 夹具快）。 */
+  const PAD = 'p'.repeat(3000)
+  const tsAt = (hhmmss: string): string => `2026-10-07 ${hhmmss}`
+  const bigRow = (it: number, hhmmss: string): string =>
+    JSON.stringify({
+      node: 'a1',
+      mode: 'rollout',
+      it,
+      ok: true,
+      elapsedSec: 1.2,
+      ts: tsAt(hhmmss),
+      pad: PAD,
+    })
+  const smallRow = (node: string, hhmmss: string): string =>
+    JSON.stringify({ node, mode: 'rollout', it: 1, ok: true, elapsedSec: 1.2, ts: tsAt(hhmmss) })
+  const iterEvent = (it: number): string =>
+    JSON.stringify({ event: 'iteration', iter: it, time: tsAt('12:00:00') })
+
+  /** 夹具：`big` 流 ≈ 2.3MiB（750 行 × ~3.1KB）· `small` 流一行。 */
+  const withFixtures = (fn: (root: string) => void): void => {
+    const root = mkdtempSync(join(tmpdir(), 'bcity-pool-large-'))
+    const prev = process.env.BCITY_POOL_DIR
+    process.env.BCITY_POOL_DIR = root
+    invalidateNodeHistoryMemo()
+    resetPoolHistoryCounters()
+    try {
+      const seed: Array<[string, string[]]> = [
+        ['big', Array.from({ length: 750 }, () => bigRow(1, '08:00:00'))],
+        ['small', [smallRow('b1', '09:00:00')]],
+      ]
+      for (const [name, meta] of seed) {
+        const dir = join(root, name)
+        mkdirSync(dir, { recursive: true })
+        writeFileSync(join(dir, 'dist-agent-meta.jsonl'), `${meta.join('\n')}\n`, 'utf8')
+        writeFileSync(join(dir, 'training_log.jsonl'), `${iterEvent(1)}\n`, 'utf8')
+      }
+      // 前置断言：夹具确实跨过 LARGE_META_BYTES（否则本组用例测不到目标分支，会静默假绿）
+      expect(statSync(join(root, 'big', 'dist-agent-meta.jsonl')).size).toBeGreaterThan(
+        2 * 1024 * 1024,
+      )
+      fn(root)
+    } finally {
+      if (prev === undefined) delete process.env.BCITY_POOL_DIR
+      else process.env.BCITY_POOL_DIR = prev
+      invalidateNodeHistoryMemo()
+      resetPoolHistoryCounters()
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  it('★ 只有一个流变动 ⇒ 未变的大流**不重扫**（旧判据会连坐重读全部大流）', () => {
+    withFixtures((root) => {
+      aggregateNodeHistory()
+      // 只动 small（追加一行）⇒ 聚合指纹变 ⇒ memo 未命中 ⇒ 真的进流循环
+      appendFileSync(
+        join(root, 'small', 'dist-agent-meta.jsonl'),
+        `${smallRow('b1', '09:10:00')}\n`,
+        'utf8',
+      )
+      resetPoolHistoryCounters()
+      aggregateNodeHistory(Date.now() + 31_000) // +31s 跨过 AGG_MEMO_MIN_MS，免得被时间下限挡住
+      const c = poolHistoryCounters()
+      expect(c.incremental).toBe(1) // 变动的 small 流走增量
+      expect(c.fullRescans).toBe(0) // ★ 未变的 big 流零重扫（旧判据 = 1 ⇒ 本行即是红线）
+    })
+  })
+
+  it('空置（无任何写入）⇒ 第二拍 `computes = 0`：memo 命中，大流连流循环都不进', () => {
+    withFixtures(() => {
+      aggregateNodeHistory()
+      resetPoolHistoryCounters()
+      aggregateNodeHistory(Date.now() + 31_000) // 即便跨过时间下限，指纹未变 ⇒ 复用
+      const c = poolHistoryCounters()
+      expect(c.calls).toBe(1)
+      expect(c.computes).toBe(0)
+      expect(c.fullRescans).toBe(0)
+      expect(c.bytesRead).toBe(0)
+    })
+  })
+
+  it('大流自己增长 ⇒ 仍重建（尾部窗口滑动语义不变）', () => {
+    withFixtures((root) => {
+      aggregateNodeHistory()
+      appendFileSync(
+        join(root, 'big', 'dist-agent-meta.jsonl'),
+        `${bigRow(1, '09:00:00')}\n`,
+        'utf8',
+      )
+      resetPoolHistoryCounters()
+      aggregateNodeHistory(Date.now() + 31_000)
+      expect(poolHistoryCounters().fullRescans).toBeGreaterThanOrEqual(1)
+    })
+  })
+})
+
+// ────────────────────────── `readChunkLines` 线性游标（plan/dashboard-pool-history-idle-cost P0-2） ──────────────────────────
+//
+// 旧实现每切一行就 `tail = tail.slice(idx + 1)` 重建整个尾串 ⇒ 单块拷贝量 ≈ 块大小 × 行数 / 2
+// （1MiB / ~4200 行 ≈ 2GB 临时字符串）。改为 `start` 游标 + 块末归位一次 ⇒ O(文件大小)。
+describe('pool-history · readChunkLines 线性游标（P0-2）', () => {
+  const withFile = (content: string, fn: (p: string) => void): void => {
+    const root = mkdtempSync(join(tmpdir(), 'bcity-chunk-'))
+    try {
+      const p = join(root, 'x.jsonl')
+      writeFileSync(p, content, 'utf8')
+      fn(p)
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  it('跨 1MiB 块边界：行不被切断/重复，行序与原文一致，末尾残片交还 carry', () => {
+    // 单行 ~1.5KB × 2000 行 ≈ 3MB ⇒ 至少跨 3 个块，且必然有行被块切开
+    const lines = Array.from({ length: 2000 }, (_, i) => `L${i}-${'x'.repeat(1500)}`)
+    withFile(`${lines.join('\n')}\n`, (p) => {
+      const seen: string[] = []
+      const r = readChunkLines(p, 0, '', (l) => seen.push(l))
+      expect(seen).toEqual(lines)
+      expect(r.offset).toBe(statSync(p).size)
+      expect(r.carry).toBe('')
+    })
+  })
+
+  it('carry 续读（模拟逐拍增量）：不重不漏，且与一次读完全量等价', () => {
+    const head = Array.from({ length: 900 }, (_, i) => `H${i}-${'y'.repeat(1500)}`)
+    const tailLines = Array.from({ length: 300 }, (_, i) => `T${i}-${'z'.repeat(1500)}`)
+    // 第一段末尾**不带换行**（半行）⇒ 第二段追加后由 carry 补齐
+    withFile(head.join('\n'), (p) => {
+      const first: string[] = []
+      const r1 = readChunkLines(p, 0, '', (l) => first.push(l))
+      expect(first).toEqual(head.slice(0, -1)) // 最后一行没换行 ⇒ 留在 carry
+      expect(r1.carry).toBe(head[head.length - 1])
+
+      appendFileSync(p, `\n${tailLines.join('\n')}\n`, 'utf8')
+      const second: string[] = []
+      const r2 = readChunkLines(p, r1.offset, r1.carry, (l) => second.push(l))
+      expect(second).toEqual([head[head.length - 1], ...tailLines])
+      expect(r2.carry).toBe('')
+      expect(r2.offset).toBe(statSync(p).size)
+    })
+  })
+
+  it('8MiB 安全阀仍按**残片**长度生效：超长无换行坏文件被丢弃，carry 清空', () => {
+    withFile('q'.repeat(9 * 1024 * 1024), (p) => {
+      let n = 0
+      const r = readChunkLines(p, 0, '', () => {
+        n += 1
+      })
+      expect(n).toBe(0) // 没有换行 ⇒ 一行都没产出
+      expect(r.carry).toBe('') // 残片超阀 ⇒ 丢弃（不把内存拉爆）
+      expect(r.offset).toBe(9 * 1024 * 1024)
+    })
+  })
+
+  it('性能护栏：~8MiB / 30 万行在宽松上限内完成（只挡平方级退化，非精确判据）', () => {
+    // 旧实现（每行重建 tail）= O(n²) 拷贝 ⇒ 本夹具约 1.2TB 临时字符串 ⇒ 分钟级 ⇒ 必然超限。
+    // 线性实现 ~0.1–0.5s。阈值刻意宽松：这里只排除平方级退化，不做耗时竞赛。
+    withFile('y'.repeat(26).concat('\n').repeat(300_000), (p) => {
+      const t0 = Date.now()
+      let n = 0
+      readChunkLines(p, 0, '', () => {
+        n += 1
+      })
+      const ms = Date.now() - t0
+      expect(n).toBe(300_000)
+      expect(ms).toBeLessThan(20_000)
     })
   })
 })
