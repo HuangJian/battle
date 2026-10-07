@@ -783,6 +783,24 @@ class CourseConfig(BaseModel):
     #: 进 `corpus_identity_fp`（仅激活时：transition 粒度变了，"一个样本是什么"已变，
     #: 与 seed_rotate/state_init 同类；缺席不进，老课程指纹不动）。
     decision_events: bool = False
+    #: 决策周期 K（均匀决策门 `t % K === 0` 的 K；单一来源 = TS `src/nn/decision-gate.ts`
+    #: 的 `DEFAULT_DECISION_K`，本字段是它在课程面的通道）。缺席/10 = 历史默认（全链
+    #: 逐字节不变）。**仅 ≠10 激活**：只有非默认值才透传 `--decision-k` / wire `decisionK` /
+    #: 进 `corpus_identity_fp`——老课程指纹、命令与节点行为一律不动。
+    #: 激活时：K 变 = 决策粒度变 ⇒ 样本身份变（同 decision_events 待遇）；
+    #: ⚠ `est_samples_per_game` 必须按 K 重标定（= 局均 ticks ÷ K；K=5 时 ≈ 2×）。
+    decision_k: int = 10
+
+    @field_validator("decision_k", mode="before")
+    @classmethod
+    def _decision_k_before(cls, v: Any) -> Any:
+        """脏值拒课（同 `_margin_pp_or_raise` 口径）：bool 不算 int，<1 拒绝。"""
+        if isinstance(v, bool) or not isinstance(v, int):
+            raise ValueError(f"decision_k={v!r} 必须是整数（决策周期；10 = 历史默认）")
+        if v < 1:
+            raise ValueError(f"decision_k={v!r} 必须 ≥1（决策周期；10 = 历史默认）")
+        return v
+
     #: rollout **起始分布**（plan/x20-state-init.plan.md）：人类 demo 磁带中段交棒。
     #: 缺席 = 标准开局（老课程逐字节不变）。开训前置（银行 manifest 在盘上）由
     #: `apply_course` 在启动期校验——`load_course` 不多读盘（它只读课程文件本身）。
@@ -999,6 +1017,9 @@ class CourseConfig(BaseModel):
             # 决策事件补充（§6 R2；漏映射 = 静默失效，ent_break/paired_rotate_seed 前科）：
             # 缺席 = args 走 getattr 缺省 False ⇒ 均匀 K 老行为。
             "decision_events": "decision_events",
+            # 决策周期 K（plan/k5-rhythm.plan.md；漏映射 = 静默失效，同上）：
+            # 缺席 = args 走 getattr 缺省 10 ⇒ 均匀 K=10 老行为。
+            "decision_k": "decision_k",
             "bc": "bc",
             "lr": "lr",
             "epochs": "epochs",

@@ -113,6 +113,17 @@ describe('decision-gate：均匀模式 = 旧 t % k === 0', () => {
     expect(r.minDt).toBe(10)
     expect(r.maxDt).toBe(10)
   })
+
+  it('K=5（k5-rhythm 实验臂）：到期集合 = 5 的整数倍，Δt 恒 = 5', () => {
+    const { world } = fixture()
+    const cfg = createDecisionGateConfig(false, 5)
+    const state = createDecisionGateState()
+    expect(dueTicks(world, state, cfg, 40)).toEqual([0, 5, 10, 15, 20, 25, 30, 35])
+    const r = decisionReadout(state)
+    expect(r.n).toBe(8)
+    expect(r.minDt).toBe(5)
+    expect(r.maxDt).toBe(5)
+  })
 })
 
 describe('decision-gate：threat-ONSET 是沿（入带翻沿 / 出带消沿 / 持续带不重触发）', () => {

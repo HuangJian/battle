@@ -28,7 +28,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 |---|---|---|
 | [`docs/nn/legacy.md`](nn/legacy.md) | **早期谱系归档**（2026-08-18 ~ 08-29）：v1/v2 student、P1.5 蒸馏、BC 热启动、无道具纪元、第一代 RL 流水线 —— 已被 goal-space 取代，只作史实与教训 | 22 |
 | [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / **在飞活的备份副本**（§68） | 43 |
-| [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart · **节点门的 bootId 一致性**（§26）· **分关采样平衡（§30）** | 25 |
+| [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart · **节点门的 bootId 一致性**（§26）· **分关采样平衡（§30）** · **决策周期 K 通道（§31）** | 26 |
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
 | [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** · **六包重组（刀 1–6）** · **门禁 fail-fast**（§63） · **测试不得碰在跑的控制台**（§64） · **测试不得写生产状态（门禁意图 / 循环控制 / EvalBoard / 权重归档）**（§65） | 33 |
 | [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 / 课程管理页 / 指标表抗轮转抄录 / **回放导出按评估轮选（§32）** | 32 |

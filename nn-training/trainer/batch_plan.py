@@ -76,6 +76,15 @@ def node_supports_decision_events(ping: dict) -> bool:
     return ping.get("decisionEventsSupport") is True
 
 
+def node_supports_decision_k(ping: dict) -> bool:
+    """决策周期 K 能力位（plan/k5-rhythm.plan.md；纯函数，单测覆盖）：True = 可派 K≠10 任务。
+
+    旧 agent 无此字段 ⇒ False（fail-closed，同 decisionEventsSupport：无位不派，
+    否则旧 agent 静默跑 K=10 局混入 K=5 批——比不派更坏）。
+    """
+    return ping.get("decisionKSupport") is True
+
+
 #: policy → agent 权重桶 `kind`。agent 的 `/v1/task` 按 **(kind, wver)** 精确查缓存桶
 #: （无 policy 豁免，2026-09-19 核实）⇒ 上传权重与查询任务的 kind **必须同值**，
 #: 否则一律 409 wver-not-cached。B 层（policy nn）与 C 层（policy god）用 'rollout'；

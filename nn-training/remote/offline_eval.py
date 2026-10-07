@@ -534,6 +534,9 @@ def run_cloud_eval(
                             # R2 事件 rung：云机跑 ts_code 新鲜 bundle（sha 版），与本机同语义；
                             # 缺席 = 老行为。课程无该键（旧课）⇒ getattr 缺省 False。
                             decision_events=bool(getattr(course, "decision_events", False)),
+                            # 决策周期 K（plan/k5-rhythm.plan.md）：云机与本机同节奏；
+                            # 缺席/10 = 老行为（getattr 缺省 10）。
+                            decision_k=int(getattr(course, "decision_k", 10)),
                         ),
                         ceiling_sec,
                         name=f"eval-{lab}",

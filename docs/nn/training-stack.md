@@ -7,6 +7,47 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §31 决策周期 K 通道：课程 `decision_k` 全链落地（2026-10-07，plan/k5-rhythm）
+
+**病**：决策门 `t % K === 0` 的 K 有单一实现（`src/nn/decision-gate.ts` + 8 处调用点），但**没有通道**——
+课程/CLI/计划都传不进去，所有执行面一律吃缺省 K=10。K→5 节奏实验（腿 A"看见了但没转化"的唯一遗留出口）
+要两臂唯一差别 = K，缺的正是这条链路。
+
+### 31.1 设计（激活型通道，缺席逐字节不变）
+- **课程**：`decision_k: int = 10`（脏值拒课：bool/非 int/<1）。**仅 ≠10 激活**三处：
+  `--decision-k`（rollout 命令）· wire `decisionK`（节点任务）· `corpus_identity_fp`（K 变 = 决策粒度变 = 样本身份，
+  同 `decision_events` 待遇）。
+- **rollout 链**：`worker/cmd.build_rollout_cmd` 追加 `--decision-k`（本机池 / 逐轮上云 argv / 全离线计划同一拼装点）；
+  `export-rl-rollout.ts` 收 `--decision-k`（非法响亮拒）→ `createDecisionGateConfig(events, K)` + 快照对齐 + shard manifest
+  `k` 记**有效值**。
+- **eval 链**：`export-eval-game.ts` 同收 `--decision-k`；本机 `worker/eval_local`、三个派单点
+  （`trainer/{dispatch,eval_dispatch,batch_runner}`）、云机 `remote/offline_eval`、终判 `eval-course-ckpt --decision-k`
+  （写进 spec，Python 侧 `args.decision_k`）。
+- **节点侧**：agent 收 `?decisionK=<n>`（非法 400）→ 同值透传导出器；taskKey 尾缀 `:k<N>`（提交/轮询/透传三处同配方，
+  缓存隔离）；ping 报 `decisionKSupport`，训练侧**无位不派**（fail-closed：旧 agent 会静默跑 K=10，混批比不派更坏）。
+- **评估预注册**（plan §2）：主判按**各自臂 K**——K5 臂日常 eval 随课程自动 K=5；终判显式 `--decision-k 5`。
+
+### 31.2 量纲与耦合（K≠10 时必须显式处理的派生项）
+- `est_samples_per_game = 局均 ticks ÷ K`（K=5 ⇒ ≈2×）；`per_stage_quota` 不变 ⇒ 每轮训练步数不变、
+  K5 每轮 distinct games 减半（K 派生，对账白名单；白名单外差异 = 违规）。
+- γ/λ 按决策步 ⇒ tick 视野随 K 成比例缩短（K 减半 = 视野减半）；属 K 固有耦合，登记不补偿（改 γ/λ = 另案）。
+
+### 31.3 实测取证（2026-10-07 冒烟，`tmp/k5-smoke/`）
+同 seed/stage 出口 shard manifest：`k=5 / nSamples=300` 对 `k=10 / nSamples=150`（2× 决策密度，1500 ticks）；
+eval 报告 `decisions` 160 vs 80；坏值 `--decision-k abc` 三端响亮拒（rollout throw / eval exit2 / agent 400）。
+
+### 31.4 顺带修复
+`common/distribution._poll_result` 的轮询 URL 此前缺决策门分量（提交键含 `:de1`、轮询键不含）⇒
+事件课程的 async 竞速副本必 404；`decisionEvents`/`decisionK` 一并补进（`tests/worker/test_decision_k.py` 钉住）。
+
+### 31.5 落点
+课程 schema `biz/course_spec.py` · 指纹 `biz/corpus_fp.py` · 派单/门
+`trainer/{batch_plan,dispatch,eval_dispatch,batch_runner,eval_course_once}.py` · 导出器/终判
+`tools/sim/{export-rl-rollout,export-eval-game,eval-course-ckpt}.ts` · agent `tools/agent/sampler-agent.ts` ·
+单测 `nn-training/tests/worker/test_decision_k.py` + `tests/{nn/decision-gate,agent/decision-events-taskkey,dist-node-gate}.test.ts`。
+两课 `nn-training/curricula/x21-psh-{k5,k10}.jsonc`（起点 B0-it290 五份 sha 同源；**开课待人工**）。
+
+---
 ## §30 分关采样平衡：`est_hi` 初批 + 有界多批补差（2026-10-07，plan/rollout-stage-balance）
 
 **病**：动态采集的**全离线腿**（`kind=run`）一轮只跑一批，局数按**全局** est 反解 ⇒ 每关同一个局数，

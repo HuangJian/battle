@@ -29,6 +29,8 @@ export interface DistPing {
   stageJsonSupport?: boolean
   /** R2 事件 rung 能力位（旧 agent 无此字段 ⇒ 不派事件任务，fail-closed）。 */
   decisionEventsSupport?: boolean
+  /** 决策周期 K 能力位（plan/k5-rhythm.plan.md；旧 agent 无此字段 ⇒ 不派 K≠10 任务）。 */
+  decisionKSupport?: boolean
   cpus?: number
 }
 
@@ -130,6 +132,12 @@ export function nodeGateReason(
 /** R2 事件 rung 能力位（纯函数）：旧 agent 无此字段 ⇒ false（不派，fail-closed）。 */
 export function nodeSupportsDecisionEvents(ping: DistPing | null): boolean {
   return ping?.decisionEventsSupport === true
+}
+
+/** 决策周期 K 能力位（纯函数；plan/k5-rhythm.plan.md）：旧 agent 无此字段 ⇒ false
+ *（不派 K≠10 任务，fail-closed——旧 agent 会静默按 K=10 跑，混批比不派更坏）。 */
+export function nodeSupportsDecisionK(ping: DistPing | null): boolean {
+  return ping?.decisionKSupport === true
 }
 
 export interface GateSummary {

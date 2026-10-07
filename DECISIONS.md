@@ -8093,6 +8093,34 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
 - **落点**：终判局 → `tmp/x21-psh-{b,b0}-verdict/seg{415000,417000}.jsonl` · 读数 → plan §7（verdict/ΔW/golden 行）。
 - **ID 勘误（2026-10-07）**：原为 `2026-10-06-psh-legB-verdict` ⇒ 改小写（同上：大写 `B` 被撞号闸的解析正则
   截断成 `2026-10-06-psh-leg`，与 `-start` 报假撞号）；结论与判据一字未动。
+## §2026-10-07-k5-decision-k-channel（2026-10-07，K→5 案 v2 评审修订 + 决策周期 K 通道全链落地 + 两课备好）
+
+- **背景**：`plan/k5-rhythm.plan.md` 评审（2026-10-07）发现 2 P0 + 3 P1：守卫口径三处不一（表 margin10 /
+  注释 margin_pp 100 / filing"margin10"）；评估 K 未预注册且全链无通道（K5 臂会被 OOD 按 10 拍评估）；
+  est 未按 K 重标定（K=5 沿用 147 ⇒ 每轮 2× 产样、一半被逐关配额裁废）；"K5>K10 ⇒ 稀释假说成立"归因过强；
+  K 机制事实（旋钮已在 `src/nn/decision-gate.ts`，缺的是通道）。用户指令：处理评审 → 更新文档 → 按文档自主开发/测试/审查/签入。
+- **口径修订（覆盖 `§2026-10-07-k5-filing` 原文"margin10"，全案以 plan v2 为准）**：守卫统一
+  `{mode: baseline, margin_pp: 100}`（等效关，用户"熔断全关"指令；floor=基线−100pp 永不触发）；K5 臂
+  `est 294`（=1470 ticks ÷ K=5）；评估 K **按各自臂**（K5@5、K10@10；终判显式 `--decision-k 5`）；
+  结论措辞 = "节奏**总效应**"（两臂同带 9 维 ⇒ 测不到"列收益被兑现"交互；判该交互的唯一后继 = K5 下重做 A/A0，另案）；
+  γ/λ 逐字不动 ⇒ tick 视野随 K 减半（固有耦合，登记不补偿）。
+- **决定（K 通道）**：课程键 `decision_k`（默认 10；**仅 ≠10 激活**——老课程命令/URL/指纹逐字节不变）
+  → `--decision-k` 贯通 rollout 链（`worker/cmd`）+ eval 链（`eval_local` / `dispatch` / `eval_dispatch` /
+  `batch_runner` / `offline_eval` / `eval-course-ckpt` spec）→ wire `decisionK`（agent URL + taskKey `:k<N>` 后缀 +
+  轮询同配方）→ 节点能力位 `decisionKSupport`（旧 agent fail-closed，绝不静默跑 K=10 混批）→ shard manifest
+  `k` 记有效值；corpus_fp 仅非默认值进 payload。半格几何结论：玩家 1.05px/tick ⇒ 决策间隔位移 K=10→10.5px /
+  K=5→5.25px（非 16px 格宽整数倍）⇒ 属 K 固有副作用，登记不修（原"半格对齐"词无定义，按此原始几何量落定）。
+- **顺带修复（实现中发现）**：`common/distribution._poll_result` 轮询 URL 缺 `decisionEvents`/`decisionK`
+  分量（提交键有 `:de1`、轮询键没有）⇒ 事件课程的 async 竞速副本必 404；一并补进。
+- **实测取证**：同 seed/stage 冒烟——shard manifest `k=5/nSamples=300` 对 `k=10/nSamples=150`（2× 决策密度）；
+  eval 报告 `decisions` 160 vs 80；坏值 `--decision-k abc` 三端响亮拒（rollout throw / eval exit2 / agent 400）。
+- **两课**：`nn-training/curricula/x21-psh-k5.jsonc` / `x21-psh-k10.jsonc`——同起点（B0-it290，五份副本
+  sha `2A658C67…3B6C` 逐字节同源，含 in-use 备份）/ 同流 20261013（预查空）/ 同预算 150 iter / 同守卫；
+  唯一差别 = K（派生白名单对账通过：`backup_dir/backup_prefix/bc/decision_k/est/name/out/traj`）。**开课待人工（控制台）**。
+- **落点**：plan/k5-rhythm.plan.md（v2）· 全文 → `docs/nn/training-stack.md` §31（索引 `docs/nn.progress.md`）·
+  单测 `nn-training/tests/worker/test_decision_k.py` + `tests/{nn/decision-gate,agent/decision-events-taskkey,dist-node-gate}.test.ts`。
+- **违反后果**：绕能力位给旧 agent 派 K≠10（静默 K=10 混批）；评估 K 留默认（拿 10 拍评 5 拍 policy）；
+  est 不重标定（2× 产样一半裁废）——三者任一都让"唯一差别=K"对账失效。
 ## §2026-10-06-goalnn-evala-serial-queue（2026-10-06，用户报障：「evalA 在某 it 执行过后，其它 it 再点按键无反应，需要刷新页面」）
 
 - **背景**：evalA 单槽互斥（`eval:A`）：一单几十秒–几分钟里，其它 it 的 evalA 点击一律 409

@@ -1024,6 +1024,12 @@ function runOne(
    * （均匀 K ∪ 事件 + Δt≥3）。缺省 false = 均匀 K 旧行为（既有调用逐字节不变）。
    */
   decisionEvents = false,
+  /**
+   * 决策周期 K（plan/k5-rhythm.plan.md）：均匀决策门 `t % k === 0` 的 k。
+   * 缺省 = DEFAULT_DECISION_K（10）⇒ 既有调用逐字节不变；K≠10 由课程 `decision_k`
+   * 经 `--decision-k` 透传（shard manifest 的 `k` 记有效值）。
+   */
+  decisionK: number = DEFAULT_DECISION_K,
 ): RunResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -1053,7 +1059,7 @@ function runOne(
   let initCounters: Record<string, number> | null = null
   let initSnapshotName = ''
   if (init) {
-    const snap = loadInitSnapshot(init.path, { stageIdx, maxTicks })
+    const snap = loadInitSnapshot(init.path, { stageIdx, maxTicks, k: decisionK })
     applyInitSnapshot(world, snap, {
       seed,
       difficultyKey: difficulty,
@@ -1077,7 +1083,7 @@ function runOne(
   }
   scripted.reset()
   // R2 决策门（唯一实现）：逐 tick 喂（事件模式要沿检测 + 最小间隔闸）。
-  const gateCfg = createDecisionGateConfig(decisionEvents)
+  const gateCfg = createDecisionGateConfig(decisionEvents, decisionK)
   const gate = createDecisionGateState()
   if (init) {
     // R2.4 共存裁决（方案 i，DECISIONS §2026-09-27-…）：交棒后首段禁 threat 事件，
@@ -1085,7 +1091,7 @@ function runOne(
     // 在交棒瞬间“首次入带”会变成一次伪造的 onset（不是真实的“从安全到危险”转移）。
     // 抑制窗 = 第一个 K 段（至下一个均匀边界），均匀决策照常；窗内 prevThreat 照常更新，
     // 所以窗内已开始的威胁不会被憋到窗后追发。
-    gate.suppressEventsUntilTick = initTick + K
+    gate.suppressEventsUntilTick = initTick + decisionK
   }
   // god 链臂（A3 A/B 对照专用）：God-AI 探针只读 World（自身独立 RNG，§47），
   // 不参与驱动仿真——每决策 tick 跑一次 think 判 _lastBranch==='dodge'。
@@ -1853,6 +1859,9 @@ export function main(argv: string[] = process.argv.slice(2)): void {
   // x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：显式开启才加 threat-ONSET；
   // 缺省 = 均匀 K（旧 manifest/_rl_report 逐字节不变）。
   let decisionEvents = false
+  // 决策周期 K（plan/k5-rhythm.plan.md）：缺省 = 单一来源常量（10，旧行为逐字节不变）；
+  // 仅课程 decision_k≠10 时由 --decision-k 显式传入（值非法 = 响亮拒，不静默回退）。
+  let decisionK = DEFAULT_DECISION_K
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--out') outDir = args[++i]
     else if (args[i] === '--difficulty') difficulty = args[++i]
@@ -1874,6 +1883,10 @@ export function main(argv: string[] = process.argv.slice(2)): void {
     else if (args[i] === '--pack-memory') packMemory = true
     else if (args[i] === '--init-snapshot') initSnapshotPath = args[++i]
     else if (args[i] === '--decision-events') decisionEvents = true
+    else if (args[i] === '--decision-k') decisionK = parseInt(args[++i], 10)
+  }
+  if (!Number.isInteger(decisionK) || decisionK < 1) {
+    throw new Error(`[export-rl-rollout] --decision-k 非法（${decisionK}；必须 ≥1 的整数）`)
   }
   const stages = parseRange(stagesStr)
   const seeds = parseRange(seedsStr)
@@ -1943,6 +1956,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         playerLevelOverride ? parseInt(playerLevelOverride, 10) : null,
         initSnapshotPath ? { path: initSnapshotPath } : null,
         decisionEvents,
+        decisionK,
       )
       decisionReadouts.push(res.decisionReadout)
       outcomes[res.outcome] = (outcomes[res.outcome] ?? 0) + 1
@@ -1964,7 +1978,9 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         outcome: res.outcome,
         ticks: res.ticks,
         nSamples: res.shard.n,
-        k: K,
+        // 决策周期 K 的**有效值**（k5-rhythm）：缺省 10 与历史逐字节相同；K≠10 时
+        // 由 --decision-k 透传（下游/取证按它判「这一局是几拍决策的」）。
+        k: decisionK,
         // R2.3 决策门读数（`--decision-events` 时才有意义；缺省不写，旧 manifest 逐字节不变）。
         ...(decisionEvents ? { decisionReadout: res.decisionReadout } : {}),
         score: res.score, // 已 gated（base_destroyed ×BASE_LOSS_MULT）；Python reconcile 输入

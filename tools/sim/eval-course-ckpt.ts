@@ -202,6 +202,9 @@ export interface CourseOnceSpec {
   windowSec?: number
   /** R2 事件 rung：True ⇒ 本批走事件门（均匀 K ∪ threat-ONSET + Δt≥3）；缺席 = 老行为。 */
   decisionEvents?: boolean
+  /** 决策周期 K（plan/k5-rhythm.plan.md）：缺席/10 = 老行为；K5 臂终判必须显式传 5
+   *  （训练/评估同节奏——否则拿 10 拍 hold 评一个按 5 拍训练的 policy）。 */
+  decisionK?: number
 }
 
 export function buildSpec(o: {
@@ -218,6 +221,7 @@ export function buildSpec(o: {
   distCfgPath?: string
   windowSec?: number
   decisionEvents?: boolean
+  decisionK?: number
 }): CourseOnceSpec {
   const spec: CourseOnceSpec = {
     course: o.course,
@@ -234,6 +238,8 @@ export function buildSpec(o: {
   if (o.distCfgPath) spec.distCfgPath = o.distCfgPath
   if (o.windowSec !== undefined) spec.windowSec = o.windowSec
   if (o.decisionEvents) spec.decisionEvents = true
+  // 决策周期 K：仅非默认值写进 spec（缺席/10 = 老行为，spec 逐字节不变）。
+  if (o.decisionK !== undefined && o.decisionK !== 10) spec.decisionK = o.decisionK
   return spec
 }
 
@@ -645,6 +651,15 @@ async function main(): Promise<void> {
 
   // dist 开关：默认「有 nodes 的 rl-config.json 即分布式」（与训练栈同源）；--no-dist 关。
   const noDist = flag('no-dist')
+  // 决策周期 K（plan/k5-rhythm.plan.md）：缺席/10 = 老行为（spec 逐字节不变）；
+  // K≠10 时写进 spec（Python 侧 args.decision_k → 派单/本机评估与训练同节奏）。
+  // 值非法 = 响亮拒（绝不静默回退成 K=10——那正是本通道要防的评估错拍）。
+  const decisionKArg = arg('decision-k')
+  const decisionK = decisionKArg === undefined ? undefined : Number.parseInt(decisionKArg, 10)
+  if (decisionK !== undefined && (!Number.isInteger(decisionK) || decisionK < 1)) {
+    console.error(`[eval-course-ckpt] --decision-k 非法（${decisionKArg}；必须 ≥1 的整数）`)
+    process.exit(2)
+  }
   let distCfgPath = arg('dist-nodes') ?? ''
   if (!distCfgPath && !noDist) {
     try {
@@ -731,6 +746,8 @@ async function main(): Promise<void> {
     // R2 事件 rung：显式开关才走事件门（缺席 = 老行为；训练课程侧由课程 decision_events 字段驱动，
     // 手动 judge 由本 flag 驱动，两条腿语义一致）。
     decisionEvents: flag('decision-events') || undefined,
+    // 决策周期 K：显式开关才写 spec（缺席/10 = 老行为；K5 臂终判必须传 5，见 spec 注释）。
+    decisionK,
   })
   process.stderr.write(
     `[eval-course-ckpt] 本机槽位 distLocal=${distLocal}（来源：${distLocalSource}）\n`,
@@ -745,6 +762,8 @@ async function main(): Promise<void> {
       `level=${course.player?.level ?? 0} ` +
       (distCfgPath ? `dist=${distCfgPath}` : 'dist=local') +
       ` distLocal=${distLocal}` +
+      // 决策周期 K：仅非默认值时打印（缺席/10 = 老日志逐字不变；可审计「这批是几拍评估」）。
+      (decisionK !== undefined && decisionK !== 10 ? ` decisionK=${decisionK}` : '') +
       ` iterId=${iterId} runDir=${runDir}\n`,
   )
 

@@ -47,6 +47,7 @@ from trainer.batch_plan import (
     kind_for_policy,
     node_gate_reason,
     node_supports_decision_events,
+    node_supports_decision_k,
 )
 from trainer.batch_store import BatchStore, data_root
 from trainer.queue import _record_agent_meta, bun_version
@@ -697,6 +698,16 @@ class _UnitLanes:
                 )
             lane["next_try"] = time.time() + self.recover_ping_sec
             return False
+        # 决策周期 K（plan/k5-rhythm.plan.md）：本批 K≠10 ⇒ 无能力位节点拒派
+        # （旧 agent 静默跑 K=10 混入；与 decisionEventsSupport 同规；缺省 10 = 不查）。
+        if int(getattr(getattr(self.owner, "args", None), "decision_k", 10)) != 10 and not node_supports_decision_k(ping):
+            if lane["tries"] == 1 or lane["tries"] % 3 == 0:
+                log(
+                    f'[batcheval] node {nid}: 缺 decisionKSupport 能力位（旧 agent）——'
+                    f'K≠10 任务被拒；不降级'
+                )
+            lane["next_try"] = time.time() + self.recover_ping_sec
+            return False
         # 本轮（本单元）bootId 核（plan/sampler-single-instance.plan.md §8-Q2）：就绪节点永不
         # 进本函数 ⇒ 这条只在「掉线重探 / 中途上线」上生效——回场时发现端口上换过进程，
         # 本单元拒派。复用 `given_up`（= 本单元不再等它）：主循环的「全部通道已放弃 ⇒ 收摊」
@@ -956,6 +967,8 @@ class _UnitLanes:
                 policy=self.owner.policy,
                 # R2 事件 rung：手动 judge 由 spec.decisionEvents 驱动（缺席 = 老行为）。
                 decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
+                # 决策周期 K：手动 judge 由 spec.decisionK 驱动（缺席/10 = 老行为）。
+                decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
             )
         else:
             m, _files = common.distribution.fetch_task(
@@ -977,6 +990,8 @@ class _UnitLanes:
                 policy=self.owner.policy,
                 # R2 事件 rung：与本机份额同源（self.args，缺席 = 老行为）。
                 decision_events=bool(getattr(getattr(self.owner, "args", None), "decision_events", False)),
+                # 决策周期 K：与本机份额同源（缺席/10 = 老行为）。
+                decision_k=int(getattr(getattr(self.owner, "args", None), "decision_k", 10)),
             )
         why = common.distribution.validate_eval_result(m, self.wver)
         if why:

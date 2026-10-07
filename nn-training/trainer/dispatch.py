@@ -745,6 +745,16 @@ class RolloutDispatcher:
                                 f"node {nd_id} 缺 decisionEventsSupport 能力位（旧 agent）——"
                                 "事件任务被拒；不降级（升级 agent 后自动加入）",
                             )
+                        # 决策周期 K（plan/k5-rhythm.plan.md）：K≠10 任务的局只派给能力位节点
+                        # （旧 agent 不认识 decisionK，静默跑 K=10 混入 ⇒ 数据污染；fail-closed 同上）。
+                        # 缺席/10 = 老课程不查（getattr 缺省 10）。
+                        _dk = int(getattr(args, "decision_k", 10))
+                        if _dk != 10 and not (nd.get("ping") or {}).get("decisionKSupport"):
+                            raise common.distribution.DistError(
+                                0,
+                                f"node {nd_id} 缺 decisionKSupport 能力位（旧 agent）——"
+                                f"K={_dk} 任务被拒；不降级（升级 agent 后自动加入）",
+                            )
                         manifest, files = common.distribution.fetch_task(
                             nd["url"],
                             nd["key"],
@@ -761,6 +771,8 @@ class RolloutDispatcher:
                             dodge=getattr(args, "dodge", ""),
                             # R2 事件 rung：与课程 decision_events 同步（缺席 = 老行为）。
                             decision_events=bool(getattr(args, "decision_events", False)),
+                            # 决策周期 K：与课程 decision_k 同步（缺席/10 = 老行为）。
+                            decision_k=_dk,
                             stage_json=_sj or "",
                             lives_override=int(_ov["lives_override"])
                             if "lives_override" in _ov

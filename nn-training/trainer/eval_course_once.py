@@ -305,6 +305,9 @@ def main() -> int:
     # R2 事件 rung：手动 judge 由 TS 侧 --decision-events 驱动（缺席 = 老行为）；
     # BatchEvalRunner 经 self.args 取（与 distLocal 的内存覆盖不同，这是语义开关）。
     args.decision_events = bool(spec.get("decisionEvents"))
+    # 决策周期 K（plan/k5-rhythm.plan.md）：手动 judge 由 TS 侧 --decision-k 驱动
+    # （缺席/10 = 老行为；K≠10 时节点能力门在 BatchEvalRunner 内 fail-closed）。
+    args.decision_k = int(spec.get("decisionK") or 10)
     bun = shutil.which("bun") or "bun"
     epoch = common.distribution.compute_engine_epoch()
 

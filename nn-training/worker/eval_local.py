@@ -354,6 +354,9 @@ def run_local_eval_game(
     # 共用同一份 cmd（上条注释），故两侧天然一致；远端 bundle 陈旧由既有 code_hash
     # 门排除（与 --policy 等既有透传同待遇，不另设门）。
     decision_events: bool = False,
+    # 决策周期 K（plan/k5-rhythm.plan.md）：课程 decision_k（默认 10）——评估与训练同节奏
+    # （train/deploy 不一致同属 plan 点名的静默分裂）；仅 ≠10 才透传，缺省命令逐字节不变。
+    decision_k: int = 10,
 ) -> dict:
     """本机直跑一局贪心评估（与节点 agent 同一 runner / 同一报告 schema）。
 
@@ -398,6 +401,9 @@ def run_local_eval_game(
     # 是 plan 点名的静默分裂；缺席 = 老行为，export 侧缺省 false）。
     if decision_events:
         cmd += ["--decision-events"]
+    # 决策周期 K：课程 decision_k ≠10 ⇒ 评估与训练同节奏（仅激活时透传，缺省逐字节不变）。
+    if int(decision_k) != 10:
+        cmd += ["--decision-k", str(int(decision_k))]
     if replay_dir:
         cmd += ["--replay", replay_dir]
     t0 = time.time()

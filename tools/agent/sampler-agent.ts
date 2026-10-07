@@ -31,6 +31,9 @@ import path from 'node:path'
 // /v1/restart 防循环 grace 护栏（独立纯函数文件，与单测共享——2026-09-01 重启循环修复）
 import { physicalCores } from '../lib/cores'
 import { RESTART_GRACE_MS, shouldAcceptRestart } from './restart-guard'
+// 决策周期 K 的缺省值（单一来源 = src/nn/decision-gate；agent 只用于未传参时的缺省与
+// 「是否为默认值」判定，runtime 语义全在导出器里）。
+import { DEFAULT_DECISION_K } from '../../src/nn/decision-gate'
 // BCV2 结果容器读写（服务耗时打点改口径用——unpack → 改 manifest → repack）。
 // 本文件另有 v1 遗留 packContainer/unpackContainer（下方导出，兼容旧消费方），
 // 故别名导入 v2 实现。
@@ -1310,6 +1313,9 @@ async function runGame(
   course = '',
   // R2 事件 rung：`?decisionEvents=1` 时本局走事件门；缺席/false = 老行为。
   decisionEvents = false,
+  // 决策周期 K（plan/k5-rhythm.plan.md）：`?decisionK=<n>` 时本局按该 K 跑
+  // （评估/rollout 同传）；缺席/10 = 导出器缺省（旧训练侧逐字节不变）。
+  decisionK: number = DEFAULT_DECISION_K,
 ): Promise<Buffer> {
   // 多桶：按 (course, kind, wver) 精确取——同节点可同时服务多个课程/权重的训练流。
   // mode=bc（BC 语料任务，2026-09-13）：God-AI 教师自对弈，无策略权重语义——
@@ -1396,6 +1402,9 @@ async function runGame(
         if (playerLevel) args.push('--player-level', playerLevel)
         // R2 事件 rung：本局走事件门（缺席/false = 老行为；BC 路径不进，语料保持均匀 K 典范）。
         if (decisionEvents) args.push('--decision-events')
+        // 决策周期 K（plan/k5-rhythm.plan.md）：仅非默认值透传（缺席 = 导出器缺省 10，
+        // 旧训练侧/旧调用逐字节不变）；评估必须与训练同节奏。
+        if (decisionK !== DEFAULT_DECISION_K) args.push('--decision-k', String(decisionK))
       } else {
         args.push('--stages', String(stage), '--seeds', String(seed))
         if (isIntentRollout && replan > 0) args.push('--replan', String(replan))
@@ -1411,6 +1420,8 @@ async function runGame(
         if (playerLevel) args.push('--player-level', playerLevel)
         // R2 事件 rung：本局走事件门（缺席/false = 老行为）。
         if (decisionEvents) args.push('--decision-events')
+        // 决策周期 K：仅非默认值透传（缺席 = 导出器缺省 10，旧训练侧逐字节不变）。
+        if (decisionK !== DEFAULT_DECISION_K) args.push('--decision-k', String(decisionK))
         // D14：语料血缘 course_fp 进 shard manifest（仅 per-tick rollout——
         // goal/intent exporter 不认识该参数）
         if (courseFp && !isGoalRollout && !isIntentRollout) args.push('--course-fp', courseFp)
@@ -1579,6 +1590,9 @@ export function taskKey(
   // （无条件进键会让一切既有键漂移，老缓存/老轮询对不上）。
   // export 供单测钉住键形状（与 common.distribution.fetch_task 的透传 + 轮询端配方一致）。
   de = '',
+  // 决策周期 K（plan/k5-rhythm.plan.md）：同一种子在不同 K 下是不同的局
+  // （决策边界不同）⇒ 非默认值时并入 `:k<N>` 后缀。仅激活时进键（同上）。
+  dk = '',
 ): string {
   let base: string
   if (sjHash && courseFp)
@@ -1586,7 +1600,7 @@ export function taskKey(
   else if (sjHash) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:${sjHash}`
   else if (courseFp) base = `${iterId}:${mode}:${kind}:${stage}:${seed}:c${courseFp.slice(0, 16)}`
   else base = `${iterId}:${mode}:${kind}:${stage}:${seed}`
-  return de ? `${base}:de1` : base
+  return `${base}${de ? ':de1' : ''}${dk ? `:k${dk}` : ''}`
 }
 
 function beginTask(
@@ -1615,6 +1629,8 @@ function beginTask(
   // R2 事件 rung：`?decisionEvents=1` 时本局走事件门（均匀 K ∪ threat-ONSET + Δt≥3）；
   // 缺席/false = 均匀 K 老行为（旧训练侧不传 ⇒ 行为与改造前一致）。
   decisionEvents = false,
+  // 决策周期 K：`?decisionK=<n>` 时本局按该 K 跑；缺席/10 = 导出器缺省（同上）。
+  decisionK: number = DEFAULT_DECISION_K,
 ): void {
   activeWorkers++
   inflight.set(key, { stage, seed, startedAt: Date.now() })
@@ -1641,6 +1657,7 @@ function beginTask(
     nearMiss,
     course,
     decisionEvents,
+    decisionK,
   )
     .then((buf) => {
       serveResult(key, buf)
@@ -1932,6 +1949,13 @@ async function handle(req: Request): Promise<Response> {
     const courseFp = url.searchParams.get('courseFp') ?? ''
     // R2 事件 rung：`?decisionEvents=1` 时本局走事件门；缺席 = 老行为（旧训练侧不传）。
     const decisionEvents = url.searchParams.get('decisionEvents') === '1'
+    // 决策周期 K（plan/k5-rhythm.plan.md）：`?decisionK=<n>` 时本局按该 K 跑；
+    // 缺席 = 导出器缺省 10（旧训练侧不传 → 行为与改造前一致）。值非法 = 响亮 400
+    // （绝不静默回退成 K=10——那正是本通道要防的混批）。
+    const dkRaw = url.searchParams.get('decisionK')
+    const decisionK = dkRaw === null ? DEFAULT_DECISION_K : Number.parseInt(dkRaw, 10)
+    if (!Number.isInteger(decisionK) || decisionK < 1)
+      return jsonResponse({ error: `decisionK invalid: ${dkRaw}` }, 400)
     if (stageJson && (stageJson.length > 16384 || !jsonParseSafe(stageJson)))
       return jsonResponse({ error: 'stageJson invalid/oversized' }, 400)
     if (mode === 'eval' && policy === 'intent-exec' && !latestWeightsOfKind('intent'))
@@ -1960,6 +1984,7 @@ async function handle(req: Request): Promise<Response> {
       sjHash,
       courseFp,
       decisionEvents ? 'de1' : '',
+      decisionK !== DEFAULT_DECISION_K ? String(decisionK) : '',
     )
     const cached = resultCache.get(key)
     if (cached) {
@@ -2002,6 +2027,7 @@ async function handle(req: Request): Promise<Response> {
         nearMissTimes,
         course, // v5 多课程：异步路径同规（取 (course,kind) 桶）
         decisionEvents,
+        decisionK,
       )
       return jsonResponse({ status: 'accepted', token: key }, 202)
     }
@@ -2044,6 +2070,7 @@ async function handle(req: Request): Promise<Response> {
           nearMissTimes,
           course, // v5 多课程：同步流式路径同规（取 (course,kind) 桶）
           decisionEvents,
+          decisionK,
         )
           .then((buf) => {
             if (hb) clearInterval(hb)
@@ -2094,6 +2121,9 @@ async function handle(req: Request): Promise<Response> {
     const sjHash = url.searchParams.get('stageJsonHash') ?? ''
     const courseFp = url.searchParams.get('courseFp') ?? ''
     // R2：轮询端同提交端配方（含决策事件后缀，否则异步任务永远找不到）。
+    // 决策周期 K 同规（plan/k5-rhythm.plan.md）：`decisionK` 解码为与提交端相同的
+    // 规范串（`String(parseInt)`），后缀与提交端逐字节一致。
+    const dkPoll = Number.parseInt(url.searchParams.get('decisionK') ?? '', 10)
     const key = taskKey(
       iterId,
       mode,
@@ -2103,6 +2133,7 @@ async function handle(req: Request): Promise<Response> {
       sjHash,
       courseFp,
       url.searchParams.get('decisionEvents') === '1' ? 'de1' : '',
+      Number.isInteger(dkPoll) && dkPoll !== DEFAULT_DECISION_K ? String(dkPoll) : '',
     )
     const cached = resultCache.get(key)
     if (cached) {
@@ -2210,6 +2241,10 @@ async function handle(req: Request): Promise<Response> {
       // R2 事件 rung 支持位：`/v1/task?decisionEvents=1`（均匀 K ∪ threat-ONSET + Δt≥3）。
       // 旧 agent 无此字段 ⇒ 训练侧不派事件任务（fail-closed，同 stageJsonSupport）。
       decisionEventsSupport: true,
+      // 决策周期 K 支持位（plan/k5-rhythm.plan.md）：`/v1/task?decisionK=<n>`（≠10）。
+      // 旧 agent 无此字段 ⇒ 训练侧不派 K≠10 任务（fail-closed：旧 agent 会静默按
+      // K=10 跑，混批比不派更坏；同 decisionEventsSupport）。
+      decisionKSupport: true,
       // BC 语料任务支持位（2026-09-13）：/v1/task ?mode=bc（God-AI 单局 → BCV2 npy
       // shard）。旧 agent 无此字段 → bc_dispatch 不派（fail-closed，同 stageJsonSupport）。
       bcSupport: true,

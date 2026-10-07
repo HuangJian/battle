@@ -1,0 +1,104 @@
+// 课程 x21-psh-k5 —— K→5 节奏案的**实验臂**：把决策从 10 拍加密到 5 拍（K=5）。
+//
+// 立项 → plan/k5-rhythm.plan.md（v2，2026-10-07 评审修订）；立案依据 = 腿 A verdict
+//   "看见了但没转化"（杀敌含 0 + acc 显著改善）+ spatial §5.7 触发器；腿 B 已关闭
+//   （it150 终判 + it300 延伸 + @419000 池外确认）⇒ K→5 是唯一遗留出口。
+// 两臂（本课 vs x21-psh-k10）：同起点 / 同预算 / 同配对随机流 / 同守卫，**唯一差别 = K**。
+//   对账白名单（允许的差异只有 K 派生项）：decision_k / est / G0 / 每轮 distinct games /
+//   每决策 tick 数 / 评估 K。其余任何差异 = 违规（plan §3.6）。
+//
+// ── 设计（逐条对齐 plan §1）────────────────────────────────────────────────
+//   · 起点 = B0-it290（全场最强权重，加冕见证：四峰同题排名第一 + 配对双显著胜 hu150；
+//     `x21-psh-b0.it290.20261007-004553.json`）——**副本 sha256 逐字节同源见证**：
+//     b0 源 / 本课 it0 / k10 it0 / in-use 备份 五份同 sha `2A658C67…3B6C`（2026-10-07 复核）。
+//     in-use 备份：`nn-training/weights/in-use/x21-psh-k5.it0.json`（tmp 会被周期清理，
+//     课程引用的权重必须有仓内备份 —— DECISIONS §379）。
+//   · K=5：`decision_k: 5`（课程面通道；仅 ≠10 激活 ⇒ --decision-k 5 贯通 rollout/eval，
+//     wire `decisionK=5` + 节点能力位 `decisionKSupport` fail-closed，corpus_fp 进键）。
+//     obs/动作语义/权重布局零改动（K 只改决策节拍，v4 权重直载）。
+//   · est = 294 = 局均 ticks 1470 ÷ K=5（**必须按 K 重标定**：沿用 K=10 的 147 会让
+//     每轮多采 2× 局、一半样本被逐关配额裁掉——plan §3.4 / P1-1）。
+//   · 熔断全关（用户指令）：kickstart_burn {baseline, margin_pp: 100}（等效关；无 off 档，
+//     缺席反而回落 auto→paired 互杀，B 在 it16/17 吃过两次亏）；ent_break: 0（仅真死才停：
+//     熵 ≤0 连 8 点且 winRate <0.5）；paired_kill 缺席即关。人盯盘代替熔断（真死才干预）。
+//   · 评估 K（**预注册**，plan §2）：主判按各自臂 K ⇒ 本课日常 eval 随 decision_k 自动
+//     K=5；终判命令必须显式 `bun tools/sim/eval-course-ckpt.ts … --decision-k 5`。
+//   · 判读边界：K5−K10 测"节奏总效应"（含反应时延/决策密度/γλ 的 tick 视野减半耦合），
+//     不能单独归因"9 维列收益被稀释/兑现"；判该交互的唯一后继 = K5 下重做 A/A0（另案）。
+//   · B0 续跑判读（k10 臂）：与自身日常重心（~32%/11.2）比，不与 35%/11.72 峰值比
+//     （峰值自选含选择偏差，回落属均值回归）。
+//
+// ── 开工门（必须先满足，不满足不开课）─────────────────────────────────────
+//   ① 本课 it0 副本 sha 与 b0 源一致（✓ 已见证）；② 两课同时可开（配对前提：同流并发，
+//   避免单臂先跑完）；③ 开课走控制台（唯一入口）。
+{
+  "version": 5,
+  "name": "x21-psh-k5",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：B0-it290 副本（sha 逐字节同源见证，见头注）────────────────────
+  "bc": "nn-training/weights/x21-psh-k5/x21-psh-k5.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关（floor = 基线 − 100pp，永不触发）。
+  // 保留块本身是纪律：缺席会回落 auto（同 V 唯一对端 ⇒ paired 互杀，B it16/17 前例）。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 150,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：与 psh 系同规格，唯一例外 = est 按 K 重标定（头注有理由）──────────
+  "target_transitions": 49152,
+  "est_samples_per_game": 294,
+  "seed_rotate": 150,
+  // 与 x21-psh-k10 同值（配对裁决前提；20261006–12 已被 adv2/adv3/psh-a/psh-b 占用，§15.1）。
+  "paired_rotate_seed": 20261013,
+
+  "decision_events": false,
+  // K→5：唯一实验变量（本课=5，k10 臂=10）。仅 ≠10 激活全链通道。
+  "decision_k": 5,
+
+  "out": "tmp/x21-psh-k5/weights.json",
+  "traj": "tmp/x21-psh-k5",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x21-psh-k5",
+  "backup_prefix": "x21-psh-k5",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

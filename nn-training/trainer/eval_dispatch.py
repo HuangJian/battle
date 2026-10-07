@@ -472,6 +472,8 @@ class EvalDispatcher:
                             stage_json=stage_json_for_args(args, task[0]) or "",
                             # R2 事件 rung：与训练 rollout 同语义（缺席 = 老行为）。
                             decision_events=bool(getattr(args, "decision_events", False)),
+                            # 决策周期 K：与训练 rollout 同语义（缺席/10 = 老行为）。
+                            decision_k=int(getattr(args, "decision_k", 10)),
                             lives_override=int(_ov["lives_override"])
                             if "lives_override" in _ov
                             else None,
@@ -662,6 +664,8 @@ class EvalDispatcher:
                             else None,
                             # R2 事件 rung：本机直跑与节点同语义（缺席 = 老行为）。
                             decision_events=bool(getattr(args, "decision_events", False)),
+                            # 决策周期 K：本机直跑与节点同语义（缺席/10 = 老行为）。
+                            decision_k=int(getattr(args, "decision_k", 10)),
                         )
                         why = common.distribution.validate_eval_result(manifest, wver)
                         if why:
@@ -798,6 +802,16 @@ class EvalDispatcher:
                 ):
                     log(
                         f"[eval] node {nid}: 事件课程 eval 需 decisionEventsSupport 能力位"
+                        f"（旧 agent）—— skipped，任务落本机 local"
+                    )
+                    continue
+                # 决策周期 K（plan/k5-rhythm.plan.md）：K≠10 课程的局同样只派给能力位节点
+                # （旧 agent 静默跑 K=10 混入，同规 fail-closed；缺席/10 = 不查）。
+                if int(getattr(args, "decision_k", 10)) != 10 and not ping.get(
+                    "decisionKSupport"
+                ):
+                    log(
+                        f"[eval] node {nid}: K≠10 课程 eval 需 decisionKSupport 能力位"
                         f"（旧 agent）—— skipped，任务落本机 local"
                     )
                     continue

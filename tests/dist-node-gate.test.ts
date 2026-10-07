@@ -14,6 +14,7 @@ import {
   gateWarning,
   nodeGateReason,
   nodeSupportsDecisionEvents,
+  nodeSupportsDecisionK,
   provenanceNote,
   type NodeGateEntry,
 } from '../tools/lib/dist-node-gate'
@@ -74,6 +75,15 @@ describe('nodeSupportsDecisionEvents（R2 事件 rung 能力位）', () => {
     expect(nodeSupportsDecisionEvents({})).toBe(false)
     expect(nodeSupportsDecisionEvents({ decisionEventsSupport: false })).toBe(false)
     expect(nodeSupportsDecisionEvents({ decisionEventsSupport: true })).toBe(true)
+  })
+})
+
+describe('nodeSupportsDecisionK（决策周期 K 能力位，k5-rhythm）', () => {
+  it('旧 agent（无字段）/null ⇒ false；true ⇒ true（fail-closed，不派 K≠10）', () => {
+    expect(nodeSupportsDecisionK(null)).toBe(false)
+    expect(nodeSupportsDecisionK({})).toBe(false)
+    expect(nodeSupportsDecisionK({ decisionKSupport: false })).toBe(false)
+    expect(nodeSupportsDecisionK({ decisionKSupport: true })).toBe(true)
   })
 })
 

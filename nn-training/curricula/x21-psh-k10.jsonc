@@ -1,0 +1,91 @@
+// 课程 x21-psh-k10 —— K→5 节奏案的**对照臂**：同起点/同预算/同流/同守卫，K=10。
+//
+// 立项 → plan/k5-rhythm.plan.md（v2，2026-10-07 评审修订）；与实验臂 `x21-psh-k5`
+// 唯一差别 = `decision_k`（本课 10 = 历史默认；显式钉死只为对账可读——语义与缺席相同：
+// 命令/URL/corpus_fp 三处都不激活，逐字节等价 psh 系）。
+// 双重身份：① 节奏对照（K5−K10 = 节奏总效应）；② B0 续跑验证（从 B0-it290 起跑 150 轮）。
+//   "熔断参照"身份已作废（margin_pp 100 下守卫两臂都是 baseline，参照无意义）。
+// 判读口径（plan §1）：续跑平不平**与自身日常重心（~32%/11.2）比**，不与 35%/11.72 峰值比
+//   （峰值自选含选择偏差，回落属均值回归）。
+//
+// ── 设计（与 x21-psh-k5 逐条同源，差异只有 decision_k / est / 目录）───────────
+//   · 起点 = B0-it290 副本（sha256 逐字节同源见证五份：b0 源 / k5 it0 / k10 it0 /
+//     in-use ×2 = `2A658C67…3B6C`；in-use 备份 `nn-training/weights/in-use/x21-psh-k10.it0.json`）。
+//   · est = 147（K=10 口径 = 局均 ticks 1470 ÷ 10，与 psh 系逐字同）。
+//   · 熔断全关（用户指令）：kickstart_burn {baseline, margin_pp: 100}（等效关）；
+//     ent_break: 0；paired_kill 缺席即关。人盯盘代替熔断（真死才干预）。
+//   · 评估 K：本课日常 eval 自动 K=10（同默认）；终判按各自臂 K（本课无需 --decision-k）。
+//
+// ── 开工门 ───────────────────────────────────────────────────────────────
+//   ① k10 it0 sha 与 b0 源一致（✓ 已见证）；② 与 x21-psh-k5 同时开（配对前提）；
+//   ③ 开课走控制台（唯一入口）。
+{
+  "version": 5,
+  "name": "x21-psh-k10",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：B0-it290 副本（sha 逐字节同源见证，见头注）────────────────────
+  "bc": "nn-training/weights/x21-psh-k10/x21-psh-k10.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关（floor = 基线 − 100pp，永不触发）。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 150,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：与 psh 系逐字同（est 147 = K=10 口径，不重标定）────────────────
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 与 x21-psh-k5 同值（配对裁决前提；20261006–12 已被 adv2/adv3/psh-a/psh-b 占用，§15.1）。
+  "paired_rotate_seed": 20261013,
+
+  "decision_events": false,
+  // 对照臂：K=10（显式钉死；与缺席语义相同，三处通道都不激活）。
+  "decision_k": 10,
+
+  "out": "tmp/x21-psh-k10/weights.json",
+  "traj": "tmp/x21-psh-k10",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x21-psh-k10",
+  "backup_prefix": "x21-psh-k10",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

@@ -102,6 +102,11 @@ def build_rollout_cmd(
         # 与 --dodge 同形：显式开关才透传，无静默。
         if bool(getattr(args, "decision_events", False)):
             cmd += ["--decision-events"]
+        # 决策周期 K（plan/k5-rhythm.plan.md）：课程 decision_k ≠10 才透传
+        # （缺席/10 = 导出器缺省 K=10，命令逐字节不变）。
+        _dk = int(getattr(args, "decision_k", 10))
+        if _dk != 10:
+            cmd += ["--decision-k", str(_dk)]
         # M1d：课程自定义关 stageJson + 命数/星级覆盖（plan §5.2；四守卫在导出器端）。
         # stageJson 只有 stage ∈ [2000..] 的自定义关才有；arena/真实关恒 None。
         from worker.config import args_rollout_overrides, stage_json_for_args

@@ -108,5 +108,10 @@ def corpus_identity_fp(course: CourseConfig) -> str:
     # 同样**仅在激活时**（无条件加入会让一切既有课程指纹漂移，在跑的腿 shard 被判异身份）。
     if bool(getattr(course, "decision_events", False)):
         payload["decision_events"] = True
+    # 决策周期 K（plan/k5-rhythm.plan.md）：K 变 = 决策粒度变（每 K tick 一个 transition）
+    # ⇒ 样本身份变，与 decision_events 同类；**仅非默认值激活**（=10 不入 payload，
+    # 老课程指纹逐字节不动——显式写 10 与缺席同义，语义相同即身份相同）。
+    if int(getattr(course, "decision_k", 10)) != 10:
+        payload["decision_k"] = int(course.decision_k)
     blob = json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()

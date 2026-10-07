@@ -1193,6 +1193,11 @@ def fetch_task(
     # 不支持的旧 agent 由**调用方**凭 ping.decisionEventsSupport 提前排除（fail-closed，
     # 同 stageJsonSupport），本函数只负责透传。
     decision_events: bool = False,
+    # 决策周期 K（plan/k5-rhythm.plan.md）：课程 `decision_k`（默认 10）透传。
+    # **仅 ≠10 激活**（缺席/10 = 老 agent 照旧，URL 逐字节不变）；agent 端 taskKey 含
+    # `:k<N>` 后缀（缓存隔离）；旧 agent 无 decisionKSupport 能力位 —— 由调用方提前排除
+    # （fail-closed；本函数只透传，不查 ping）。
+    decision_k: int = 10,
 ) -> tuple[dict, dict]:
     """获取一局结果 → (manifest, files)；失败抛 DistError。
 
@@ -1249,6 +1254,9 @@ def fetch_task(
     # R2 事件 rung：仅激活时透传（缺席 = 老 agent 照旧，老行为逐字节不变）。
     if decision_events:
         params["decisionEvents"] = "1"
+    # 决策周期 K：仅非默认值透传（缺席/10 = 老 agent 照旧，URL 逐字节不变）。
+    if int(decision_k) != 10:
+        params["decisionK"] = str(int(decision_k))
     if course_fp:
         params["courseFp"] = course_fp
     # v5 多课程：任务自报课程——agent 按 (course, kind) 取权重桶。缺省走进程级身份
@@ -1338,6 +1346,13 @@ def _poll_result(
     # courseFp 必须进轮询键（agent resultCache key 含课程血缘，D14）
     if params.get("courseFp"):
         qparams["courseFp"] = params["courseFp"]
+    # 决策门分量必须进轮询键（agent resultCache key 含 `:de1` / `:k<N>` 后缀，
+    # 提交端与轮询端同配方——漏传 = 同上键永远找不到任务，2026-10-07 审计修复：
+    # decisionEvents 此前漏在这一层，事件课程的 async 竞速副本必 404）。
+    if params.get("decisionEvents"):
+        qparams["decisionEvents"] = params["decisionEvents"]
+    if params.get("decisionK"):
+        qparams["decisionK"] = params["decisionK"]
     qs = urllib.parse.urlencode(qparams)
     deadline = time.monotonic() + max(POLL_MIN_BUDGET_SEC, budget)
     while True:

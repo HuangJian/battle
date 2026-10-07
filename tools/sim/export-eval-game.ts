@@ -91,6 +91,7 @@ import {
   keyRow,
 } from '../../src/nn/hit-geometry'
 import {
+  DEFAULT_DECISION_K,
   createDecisionGateConfig,
   createDecisionGateState,
   decisionDue,
@@ -487,6 +488,12 @@ export function runEvalOne(
    * 判决链与部署链必须同值（tools/sim/eval-game-parity.test.ts 钉住）。
    */
   decisionEvents = false,
+  /**
+   * 决策周期 K（plan/k5-rhythm.plan.md）：均匀决策门 `t % k === 0` 的 k。
+   * 缺省 = DEFAULT_DECISION_K（10）⇒ 既有调用逐字节不变；K≠10 由 `--decision-k`
+   * 透传（终判：K5 臂必须按 K=5 评估，否则训练/评估节奏不一致）。
+   */
+  decisionK: number = DEFAULT_DECISION_K,
 ): EvalResult {
   const world = new World()
   world.rng.reseed(seed)
@@ -676,7 +683,7 @@ export function runEvalOne(
   const stopRuns: number[] = []
   let curStopRun = 0
   // R2 决策门（唯一实现）：逐 tick 喂；`--decision-events` = 均匀 K ∪ threat-ONSET + Δt≥3。
-  const gateCfg = createDecisionGateConfig(decisionEvents)
+  const gateCfg = createDecisionGateConfig(decisionEvents, decisionK)
   const gate = createDecisionGateState()
 
   while (t < maxTicks) {
@@ -1198,6 +1205,9 @@ export function main(argv: string[]): void {
   // x2 事件 rung（plan/new-era-stop.plan.md §6 R2）：显式开启才加 threat-ONSET；
   // 缺省 = 均匀 K（旧报告逐字节不变）。
   let decisionEvents = false
+  // 决策周期 K（plan/k5-rhythm.plan.md）：缺省 = 10（旧报告逐字节不变）；
+  // 仅 K≠10 时由 --decision-k 显式传入（值非法 = 响亮拒，不静默回退）。
+  let decisionK = DEFAULT_DECISION_K
   // 可选：整局输入录制 → .replay 目录（训练控制台「导出 replay」）。报告 schema 零变化。
   let replayDir = ''
   for (let i = 0; i < argv.length; i++) {
@@ -1220,6 +1230,11 @@ export function main(argv: string[]): void {
     else if (argv[i] === '--player-level') playerLevelOverride = argv[++i]
     else if (argv[i] === '--replay') replayDir = argv[++i]
     else if (argv[i] === '--decision-events') decisionEvents = true
+    else if (argv[i] === '--decision-k') decisionK = parseInt(argv[++i], 10)
+  }
+  if (!Number.isInteger(decisionK) || decisionK < 1) {
+    console.error(`[export-eval-game] --decision-k 非法（${decisionK}；必须 ≥1 的整数）`)
+    process.exit(2)
   }
   if (!Number.isInteger(stageIdx) || !Number.isInteger(seed)) {
     console.error('[export-eval-game] --stage/--seed required')
@@ -1259,6 +1274,7 @@ export function main(argv: string[]): void {
     replayDir,
     stageIdx,
     decisionEvents,
+    decisionK,
   )
   // 权重指纹：eval 报告必须自带"用的是哪份权重"（2026-08-30 A4/A5 评估
   // 排查教训——无指纹时静默回退无法被发现）。
