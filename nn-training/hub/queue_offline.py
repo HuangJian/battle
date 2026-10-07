@@ -1179,7 +1179,7 @@ class QueueOfflineMixin(QueuePeer):
             fields["claimed_offline"] = False
         self._dispatch_update(course, **fields)
         self._modes[course] = m
-        self._sync_parked(course)
+        self._sync_hold(course)
         if m == COURSE_MODE_ONLINE:
             self.revoke_offline_lease(course, reason="switch-online")
         if drop_jobs and m == COURSE_MODE_OFFLINE:
@@ -1260,7 +1260,7 @@ class QueueOfflineMixin(QueuePeer):
             fields["flipped_at"] = now
         self._dispatch_update(course, **fields)
         self._modes[course] = COURSE_MODE_OFFLINE
-        self._sync_parked(course)
+        self._sync_hold(course)
         if new_round:
             reset_auto_handoff_triggers(course)
             print(
@@ -1285,7 +1285,7 @@ class QueueOfflineMixin(QueuePeer):
         flipped = False
         if self.auto_handoff_allowed(course) and self.mode_of(course) != COURSE_MODE_OFFLINE:
             self._modes[course] = COURSE_MODE_OFFLINE
-            self._sync_parked(course)
+            self._sync_hold(course)
             fields["mode"] = COURSE_MODE_OFFLINE
             fields["claimed_offline"] = True
             fields["flipped_at"] = now

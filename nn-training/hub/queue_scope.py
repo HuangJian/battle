@@ -123,10 +123,10 @@ class QueueScopeMixin(QueuePeer):
         # 把 `add_course(name, "offline")` 的显式模式吞掉），再让记录覆盖它。
         self._modes[c] = m
         self._modes[c] = self.dispatch_effective_mode(c, m)
-        # ★六轮 R3-a（P0-8）：发现/重启路径与构造路径同口径——不调 `_sync_parked` 的话，
-        # 盘上 `mode=offline` 只在**读面**（清单/取包）生效、`st.parked` 仍是 False ⇒
-        # 重启后残留的在线 job 可被在线盘领走（模式权威与停摆闸分叉）。
-        self._sync_parked(c)
+        # ★六轮 R3-a（P0-8）：发现/重启路径与构造路径同口径——不调 `_sync_hold` 的话，
+        # 盘上的 hold 只在**读面**（清单/取包）生效，而派发闸的镜像还是空的 ⇒
+        # 重启后一台盘能领走别人正在跑的课（接管闸与读面分叉）。
+        self._sync_hold(c)
         return True
 
     def _adopt_solo(self) -> None:
@@ -244,19 +244,11 @@ class QueueScopeMixin(QueuePeer):
                 n += 1
         return n
 
-    def _sync_parked(self, course: str) -> None:
-        """把课程模式推给 store（停摆闸的唯一输入；`_JobStore.role_blocked` 读它）。
-
-        ★M1b：顺手把 **hold 镜像**也推一份（同一处咽喉：这两样都是「这门课现在派不派活」
-        的输入，而构造/发现/换模式的路径已经全都会走到这里），见 `_sync_hold`。
-        """
-        st = self._stores.get(course)
-        if st is not None:
-            st.parked = self.mode_of(course) == COURSE_MODE_OFFLINE
-        self._sync_hold(course)
-
     def _sync_hold(self, course: str) -> None:
         """把本课当前的 hold 推给 store（★M1b / Q5：派发闸的第三层）。
+
+        ★M1c：它就是**唯一**的闸输入推送口（旧的 `_sync_parked` 随 `parked` 一起退役）——
+        构造 / 发现 / 每次改 hold 都必须过它，否则镜像与事实分叉。
 
         推的是**读数**（`hold_of`：惰性过期后的 live/stale 形状），不是判据：闸那侧自己拿
         `last_progress_at` 对时钟自判活——镜像可能很久没被推过（hub 重启、长时间不派活），
@@ -269,6 +261,8 @@ class QueueScopeMixin(QueuePeer):
         if str(hold.get("state") or "") != "live":
             st.hold_meta = {}
             return
+        # 到这里 hold 是活的（`hold_state` 只看进度）：镜像只带判活需要的两样
+        # （`hold_blocked` 自己拿时钟对窗，不依赖「推的人刚刚才推过」）。
         st.hold_meta = {
             "worker_id": str(hold.get("worker_id") or ""),
             "last_progress_at": float(hold_progress_at(hold)),

@@ -1164,18 +1164,21 @@ def test_full_cycle_offline_then_online_then_offline(tmp_path: Path) -> None:
 # ──────── T8（二轮 R3-a）：hub 重启后盘上的 offline 记录仍把课停摆（Job 不被派走） ────────
 
 
-def test_hub_restart_keeps_discovered_offline_course_parked(tmp_path: Path) -> None:
-    """discover-only 起 hub：盘上有 `offline` 记录的课 ⇒ **立即停摆**（`parked`），重启不变。
+def test_hub_restart_keeps_a_discovered_hold_out_of_the_queue(tmp_path: Path) -> None:
+    """★M1c（旧名 …_offline_course_parked）：discover-only 起 hub：盘上有 **live hold** ⇒
+    闸的镜像立刻从记录里恢复，重启不变。
 
-    题眼：记录是 `dispatch_effective_mode` 的输入（启动参数给的 mode 只是缺省）——没有它，
-    离线课重启后被解封队列，在线盘能把残留 job 领走（报告二的土壤）。
+    题眼：hold 是派发闸的输入，而它**落盘**（`_leases` 那种进程内状态重启就没了）——没有
+    这一手，接管中的课重启后被解封队列，在线盘能把残留 job 领走（报告二的土壤）。
+    旧版本钉的是 `mode=offline ⇒ st.parked`；`parked` 随 mode 退役后同一个防护责任整个搬到 hold。
     """
     traj = tmp_path / "traj"
     _course_dirs(traj, C_AUTO)
     _write_pack(traj, C_AUTO, b"PK\x03\x04t8-pack")
+    now = time.time()
     rec = {
-        "v": 1,
-        "mode": "offline",
+        "v": 2,
+        "mode": "online",
         "pinned": False,
         "claimed_offline": False,
         "claimed_by": "",
@@ -1183,25 +1186,32 @@ def test_hub_restart_keeps_discovered_offline_course_parked(tmp_path: Path) -> N
         "flipped_at": 0.0,
         "updated_at": 0.0,
         "completed_pack_sha": "",
+        "hold": {
+            "worker_id": "cloud-1",
+            "token": "tok-1",
+            "at": now,
+            "last_progress_at": now,
+            "touch_at": now,
+        },
     }
     (traj / C_AUTO / "offline-dispatch.json").write_text(json.dumps(rec), encoding="utf-8")
     _prod_publish(traj, C_AUTO, it=1, run_id="t8-run")
 
     def _peek_is_empty(h: _Hub, tag: str) -> None:
-        assert _peek_ids(h) == [], f"{tag}：停摆课的 job 不该被派走"
+        assert _peek_ids(h) == [], f"{tag}：接管中的课不许被在线盘领走"
 
     hub = _Hub(traj)
     try:
         hub.ready(expect=[C_AUTO])
-        assert _mode_of(hub, C_AUTO) == "offline"
         _peek_is_empty(hub, "首次启动")
     finally:
         hub.close()
     hub2 = _Hub(traj)
     try:
         hub2.ready(expect=[C_AUTO])
-        assert _mode_of(hub2, C_AUTO) == "offline", "重启不得把 offline 记录解封（§3.8）"
         _peek_is_empty(hub2, "重启后")
+        st, body = _http(hub2.base, f"/offline/hold?course={C_AUTO}")
+        assert st == 200 and body["held"] is True and body["worker_id"] == "cloud-1", body
     finally:
         hub2.close()
 

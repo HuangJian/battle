@@ -158,12 +158,11 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "_reclaims",
             "_frozen",
             "_backup_authorized",
-            # 归属路由（2026-09-25 并入 origin）：`_roles` = job → online/offline；
-            # `parked` = 该课程是否停摆（发布端下闸后不再派活）；`_role_lock` 各一把。
+            # 归属路由（2026-09-25 并入 origin）：`_roles` = job → online/offline；`_role_lock`
+            # 各一把。★M1b：`_kinds`（job → kind，Q5 的①）与 `hold_meta`（课程 hold 镜像）；
+            # ★M1c：`parked`（旧停摆位）已删——「这门课现在派不派活」只剩 hold 一个输入。
             "_roles",
             "_role_lock",
-            "parked",
-            # ★M1b：`_kinds`（job → kind，Q5 的①）与 `hold_meta`（课程 hold 镜像）。
             "_kinds",
             "hold_meta",
         ),

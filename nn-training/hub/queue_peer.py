@@ -175,12 +175,12 @@ class QueuePeer(Protocol):
     def store_offline_result(self, course: str, body: dict) -> dict: ...
 
     # 自动离线交接（2026-10-03，plan/auto-offline-handoff）：`queue_scope`（登记/热切模式）
-    # 与 `queue.py::__init__`（重启恢复）要跨簇调这三条——声明面是「谁都得能编译」的地方。
+    # 与 `queue.py::__init__`（重启恢复）要跨簇调这几条——声明面是「谁都得能编译」的地方。
+    # ★M1c：`_sync_parked` 已删（`parked` 随 mode 退役）；闸输入只走 `_sync_hold`。
     def dispatch_effective_mode(self, course: str, default: str) -> str: ...
     def set_mode_pinned(
         self, course: str, mode: str, pin: bool | None, *, drop_jobs: bool = False
     ) -> tuple[bool, str]: ...
-    def _sync_parked(self, course: str) -> None: ...
 
     # 权威派生（★ 2026-10-05，plan/offline-online-status-switch §3.1）：`queue_observe` 的
     # `/admin/queue` 每课行要读它们（P0-11 的读面出口）——跨簇调用一律写进共同声明面。

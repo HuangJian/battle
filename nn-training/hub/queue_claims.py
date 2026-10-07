@@ -293,7 +293,7 @@ class QueueClaimsMixin(QueuePeer):
         归不归你」+ 游标推进 + 熔断告警——**不再**在这里扫整张表。
         避让的「允不允许」仍在调用方算（`may_avoid_stale_holder`，R2-2 的避让链）。
 
-        `role`（2026-09-25）：归属/停摆不符 ⇒ `ClaimOutcome(False, "", "role"|"parked", …)`
+        `role`（2026-09-25）：归属/接管不符 ⇒ `ClaimOutcome(False, "", "role"|"held:<worker>", …)`
         ——**确定性拒**（不是 409 busy：重试一百次也不会变），面向「这个盘本来就不该跑它」。
         """
         st = self._store_of(job_id)  # 内部走 course_of：歧义会记进 self._ambiguous

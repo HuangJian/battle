@@ -143,9 +143,8 @@ class _HubQueue(
             c: str(md.get(c) or COURSE_MODE_ONLINE) for c in self._order
         }
         # 停摆位/hold 镜像同步到 store（唯一知道 mode 与 hold 的两层都在下面：`__init__` 末段
-        # 的 `_sync_parked` 循环）。★M1b 删掉了这里的一份：`_sync_parked` 现在还会推 hold 镜像
-        # （`_sync_hold` → `hold_of` → 时钟），而这一行的 `_now` 还没赋值 ⇒ 构造期 AttributeError；
-        # 且它做的事在下面那个循环里会**原样重做**（那里才是 `_modes` 的最终值）。
+        # 的 `_sync_hold` 循环）。★M1b 删掉了这里的一份：同步要时钟（`hold_of`），而这一行的
+        # `_now` 还没赋值 ⇒ 构造期 AttributeError；且它做的事在下面那个循环里会**原样重做**。
         #: 上次派发过的课程（轮转起点）；None = 从序首开始
         self._cursor: str | None = None
         #: job_id -> course（归属解析缓存；job_id 不可复用，故不会失效）
@@ -197,7 +196,7 @@ class _HubQueue(
         # （hub 直接起不来）；M1a 之所以没爆，是因为当时还没有人写 hold。
         for _c in self._order:
             self._modes[_c] = self.dispatch_effective_mode(_c, self._modes[_c])
-            self._sync_parked(_c)
+            self._sync_hold(_c)
         #: 多课程时自己的 worker 登记表（worker_id -> last_seen）——避让链的唯一事实源。
         self._workers: dict[str, float] = {}
         # 停机达令**按课程**（2026-09-18 单 hub 化）：一个 hub 服务所有课程之后，若达令还是

@@ -42,7 +42,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common import net_http
-from common.protocol import COURSE_ENABLE_MARKER
+from common.protocol import (
+    COURSE_ENABLE_MARKER,
+    OFFLINE_CLAIM_PATH,
+    OFFLINE_RELEASE_PATH,
+)
 from remote.hub_client import mark_job_completed, publish_job, wait_job
 from remote.worker_server import WorkerServerState, make_worker_server
 from tests.subproc_util import spawn_bound_port
@@ -251,6 +255,24 @@ class _Hub:
         assert st == 200, f"/admin/courses 热切失败：{st} {body}"
         return body
 
+    def take_hold(self, course: str, worker: str = "cloud-1") -> str:
+        """走真端点领这门课的接管租约（→ token），并把接管带进派发闸（★M1b/Q5）。"""
+        st, body = _http(
+            self.base,
+            f"{OFFLINE_CLAIM_PATH}?proto=2&course={course}&worker={worker}",
+            method="POST",
+        )
+        assert st == 200 and body.get("lease"), f"接管失败：{st} {body}"
+        return str(body["lease"]["token"])
+
+    def release_hold(self, course: str, token: str) -> None:
+        st, body = _http(
+            self.base,
+            f"{OFFLINE_RELEASE_PATH}?course={course}&lease={token}",
+            method="POST",
+        )
+        assert st == 200, f"交还接管失败：{st} {body}"
+
     def close(self) -> None:
         self.proc.terminate()
         try:
@@ -449,8 +471,12 @@ def test_single_hub_dispatches_two_courses_to_one_worker(tmp_path: Path) -> None
 # ────────────────────────── ② 离线课不实时派发 ──────────────────────────
 
 
-def test_offline_course_is_parked_and_resumes_on_going_online(tmp_path: Path) -> None:
-    """离线课：hub 不派它的活（job 留在队首）；切回在线后同一份活立刻被推走。"""
+def test_held_course_is_not_dispatched_and_resumes_on_release(tmp_path: Path) -> None:
+    """★M1c（旧名 `test_offline_course_is_parked_and_resumes_on_going_online`）：
+
+    接管中的课：hub 不派它的活（job 留在队首）；交还接管后同一份活立刻被推走。
+    判据从「课程模式」换成 **hold**（`parked` 随 mode 退役）——「谁在跑」是唯一的独占输入。
+    """
     traj = tmp_path / "traj"
     c_live, c_off = "e2e-online", "e2e-offline"
     dirs = {c: _course_dirs(traj, c) for c in (c_live, c_off)}
@@ -465,12 +491,14 @@ def test_offline_course_is_parked_and_resumes_on_going_online(tmp_path: Path) ->
     try:
         hub.ready(expect=[c_live, c_off])
 
-        # 先热切成离线（真端点；发现登记缺省是 online）
-        hub.set_mode(c_off, "offline")
+        # 给 c_off 放一份任务包（无包 claim 不建 hold，Q1）⇒ 真端点领接管租约
+        (traj / c_off / f"task-{c_off}.zip").write_bytes(b"PK\x03\x04fake-pack")
+        token_off = hub.take_hold(c_off)
         st, body = _http(hub.base, "/admin/courses")
         assert st == 200
-        modes = {row["course"]: row["mode"] for row in body["courses"]}
-        assert modes.get(c_off) == "offline" and modes.get(c_live) == "online", modes
+        rows = {row["course"]: row for row in body["courses"]}
+        assert rows[c_off]["held"] is True and rows[c_off]["holder"] == "cloud-1", rows
+        assert rows[c_live]["held"] is False, "别的课不受影响（按课判，不按机器）"
 
         m_off = _publish(c_off, dirs[c_off][0], dirs[c_off][1], traj, code_zip)
         jid_off = m_off["job_id"]
@@ -495,8 +523,8 @@ def test_offline_course_is_parked_and_resumes_on_going_online(tmp_path: Path) ->
         assert r_live["agg"]["policy"] == 0.1
         assert worker.started == [m_live["job_id"]]
 
-        # 切回在线 ⇒ 「已分派任务回落队首等 worker」的那份立刻被推走（无需重发）
-        hub.set_mode(c_off, "online")
+        # 交还接管 ⇒ 「已分派任务回落队首等 worker」的那份立刻被推走（无需重发）
+        hub.release_hold(c_off, token_off)
         r_off = wait_job(hub.base, TOKEN, jid_off, timeout_sec=60, poll_sec=0.1, poll_max_sec=0.5, log=_quiet)
         assert r_off["job_id"] == jid_off
         assert sorted(worker.started) == sorted([m_live["job_id"], jid_off])

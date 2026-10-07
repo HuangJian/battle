@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -224,36 +225,49 @@ def test_role_gate_lives_in_the_lease_critical_section() -> None:
     body = src[i : i + 8000]
     assert "blocked = self.role_blocked(job_id, role)" in body
     assert 'return False, "", blocked' in body
-    # 三道闸共用一份判据（归属 = job 的字段；接管 = 课程 hold；停摆 = 课程模式）――查一处就够
-    # 了。★M1b / Q5：分支**顺序**也是语义（bc 豁免角色闸 → 角色 → hold → 过渡的 parked），
-    # 所以这里连顺序一起钉：三行的相对位置写死，谁把顺序调了这条就红。
+    # 两道闸共用一份判据（归属 = job 的字段；接管 = 课程 hold）――查一处就够了。
+    # ★M1b / Q5：分支**顺序**也是语义（bc 豁免角色闸 → 角色 → hold），所以这里连顺序一起
+    # 钉：两行的相对位置写死，谁把顺序调了这条就红。
+    # ★M1c：旧的 `parked` 腿已删（随 mode 退役）——「这门课现在派不派活」只剩 hold 一个输入。
     j = src.index("def role_blocked(")
     gate = src[j : j + 2200]
     assert "if self.job_kind(job_id) != KIND_BC and self.job_role(job_id) != role" in gate
-    assert "if self.parked and role != ROLE_OFFLINE" in gate
-    assert "held = self.hold_blocked()" in gate
+    assert "return self.hold_blocked()" in gate
     assert (
-        gate.index("self.job_kind(job_id) != KIND_BC")
-        < gate.index("self.hold_blocked()")
-        < gate.index("self.parked and role != ROLE_OFFLINE")
-    ), "Q5 的分支顺序是语义：bc 豁免 → 角色 → hold → parked"
+        gate.index("self.job_kind(job_id) != KIND_BC") < gate.index("self.hold_blocked()")
+    ), "Q5 的分支顺序是语义：bc 豁免 → 角色 → hold"
+    # 判据本身不许再读停摆位（注释里提它是为了让后人知道为什么删了）
+    assert "self.parked" not in gate, "旧停摆闸不许回来（M1c 已删：模式不再是派发输入）"
 
 
-def test_parking_flag_is_synced_from_course_mode(tmp_path: Path) -> None:
-    """停摆位随 `set_mode` 热切（课程级闸的**唯一**输入）——否则重启/热切后离线课变成可领。"""
+def test_hold_mirror_is_synced_from_the_dispatch_record_on_startup(tmp_path: Path) -> None:
+    """课程级闸的**唯一**输入 = hold 镜像：盘上有 live hold ⇒ 构造/发现路径立刻把它推给 store。
+
+    （旧用例钉的是 `set_mode` → `parked` 同步；★M1c 随 `parked` 一起退役，换成这一条：
+    重启/发现后闸不许是空的，否则一台盘能领走另一台正在跑的课。）
+    """
     store = _JobStore(tmp_path / "c5-gae" / "remote-jobs", tmp_path / "c5-gae" / "log.jsonl")
     store.publish(JID, _manifest(JID), b"PK\x03\x04fake")
+    (tmp_path / "c5-gae").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "c5-gae" / "offline-dispatch.json").write_text(
+        json.dumps(
+            {
+                "v": 2,
+                "hold": {
+                    "worker_id": "cloud-1",
+                    "token": "tok-1",
+                    "at": time.time(),
+                    "last_progress_at": time.time(),
+                    "touch_at": time.time(),
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
     hub = _HubQueue({"c5-gae": store}, order=["c5-gae"])
-    assert store.parked is False
-    assert hub.set_mode("c5-gae", "offline") is True
-    assert store.parked is True, "热切没同步到 store ⇒ 停摆闸静默失效"
-    # 停摆：离线盘也领不到**在线归属**的活（归属闸仍在）——两道闸正交
-    assert hub.claim_next(worker_id="off", role=ROLE_OFFLINE) is None
-    # 同一门课切成在线 ⇒ 立刻可领（且无人丢失过 job）
-    assert hub.set_mode("c5-gae", "online") is True
-    assert store.parked is False
+    assert store.hold_meta.get("worker_id") == "cloud-1", store.hold_meta
     got = hub.claim_next(worker_id="on", role=ROLE_ONLINE)
-    assert got is not None and got[1] == JID
+    assert got is None, "接管中的课不许被在线盘领走（闸没推给 store 就是静默失效）"
 
 
 def test_store_gate_rejects_role_mismatch_without_touching_the_lease(tmp_path: Path) -> None:

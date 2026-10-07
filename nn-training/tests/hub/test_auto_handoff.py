@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
@@ -913,7 +914,7 @@ def test_cancelled_job_is_rejected_even_with_stale_peek(tmp_path: Path) -> None:
             )[0]
             == 200
         )
-        # 切回在线（parked 解除）——证明下面拒的是「作废」这条闸，不是停摆/归属闸
+        # 切回在线——证明下面拒的是「作废」这条闸，不是归属/接管闸
         assert hub.set_mode_pinned("c5-gae", "online", True)[0] is True
         st = hub._stores["c5-gae"]
         assert st.claimable_job_ids() == []  # 账本真闸：池子里没有它了
@@ -1220,21 +1221,30 @@ def test_switch_to_online_does_not_drop_unclaimed_jobs(tmp_path: Path) -> None:
         srv.shutdown()
 
 
-def test_discovered_course_inherits_parked_from_dispatch_record(tmp_path: Path) -> None:
-    """P0-8（R3-a）：hub 以 discover 起、盘上已有 offline 记录 ⇒ `st.parked` 立刻为真
-    （否则离线课重启后被解封队列，在线盘能领走残留 job）。"""
+def test_discovered_course_inherits_hold_from_dispatch_record(tmp_path: Path) -> None:
+    """P0-8（R3-a）+ ★M1c：hub 以 discover 起、盘上已有 **live hold** ⇒ 闸的镜像立刻为真
+    （否则接管中的课重启后被解封队列，在线盘能领走残留 job）。
+
+    旧版这条钉的是 `mode=offline ⇒ st.parked`；`parked` 随 mode 退役后，同一个防护责任
+    整个搬到 hold（「谁在跑」是唯一的独占判据）。"""
     d = tmp_path / "c5-gae"
     (d / "remote-jobs").mkdir(parents=True)
     (d / "training_log.jsonl").touch()
     (d / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
     rec = dispatch_record_default("online")
-    rec["mode"] = "offline"
+    rec["hold"] = {
+        "worker_id": "cloud-1",
+        "token": "tok-1",
+        "at": 1.0,
+        "last_progress_at": time.time(),
+        "touch_at": time.time(),
+    }
     (d / "offline-dispatch.json").write_text(json.dumps(rec), encoding="utf-8")
     hub = _HubQueue({}, discover_root=tmp_path)
     hub.discover(force=True)
     assert "c5-gae" in hub.courses()
-    assert hub.mode_of("c5-gae") == "offline"
-    assert hub._stores["c5-gae"].parked is True
+    assert hub.hold_of("c5-gae")["worker_id"] == "cloud-1"
+    assert hub._stores["c5-gae"].hold_blocked() == "held:cloud-1"
 
 
 def test_cold_course_authority_follows_dispatch_record(tmp_path: Path) -> None:

@@ -44,8 +44,6 @@ from common.protocol import (
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_TTL_SEC,
     COURSE_ENABLE_MARKER,
-    COURSE_MODE_OFFLINE,
-    COURSE_MODE_ONLINE,
     JOB_CANCEL_POLL_SEC,
     PAYLOAD_NAME,
     PRIORITY_HIGH,
@@ -376,15 +374,16 @@ def test_peek_carries_halt_and_role_gate(tmp_path: Path) -> None:
         )
         # ★ 按 id 直领同样受闸（F5：「只挡 peek」是漏的，claim 才是租约写入点）
         assert W.claim_job(base, TOKEN, OFF, worker_id="plain") is None
-        # 停摆闸（课程级）：切成离线 ⇒ 在线盘连**在线归属**的 JID 也看不到
-        assert hub.set_mode("c5-gae", COURSE_MODE_OFFLINE) is True
-        parked = W.peek_jobs(base, TOKEN, worker_id="plain")
-        assert parked is not None and parked[0] == [], "离线课对在线盘整体隐身（停摆）"
-        # 离线盘：停摆放行，但归属闸仍拦着在线归属的 JID（两道闸正交）
+        # 接管闸（课程级，★M1c：判据从「模式」换成「hold」）：这门课被云机接管 ⇒ 在线盘连
+        # **在线归属**的 JID 也看不到（旧用例钉的是 `set_mode(offline)`，随 parked 一起退役）
+        hub.note_hold("c5-gae", worker_id="cloud-1", token="tok-1")
+        held = W.peek_jobs(base, TOKEN, worker_id="plain")
+        assert held is not None and held[0] == [], "接管中的课对在线盘整体隐身"
+        # 离线盘：接管闸对所有 kind 都吃（包括它自己那份）——「谁在跑」优先于归属
         off_view = W.peek_jobs(base, TOKEN, worker_id="marked", role=ROLE_OFFLINE)
-        assert off_view is not None and [c["job_id"] for c in off_view[0]] == [OFF]
-        # 切回在线 ⇒ 恢复；离线盘领走自己那份（停在盘上的活不丢）
-        assert hub.set_mode("c5-gae", COURSE_MODE_ONLINE) is True
+        assert off_view is not None and off_view[0] == [], "接管期间这门课谁都不派"
+        # 接管结束（release）⇒ 恢复；离线盘领走自己那份（停在盘上的活不丢）
+        hub.note_release("c5-gae")
         again = W.peek_jobs(base, TOKEN, worker_id="plain")
         assert again is not None and [c["job_id"] for c in again[0]] == [JID]
         assert W.claim_job(base, TOKEN, OFF, worker_id="marked", role=ROLE_OFFLINE) is not None

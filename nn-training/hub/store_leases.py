@@ -26,7 +26,8 @@
 `_reclaims` · `_frozen`，外加 `_backup_authorized`（显式授权备份的回传放行票——它写在这里
 而不是调度簇：读它的三处全在租约/结果路径上）。
 
-归属路由（2026-09-25）也住本簇：`parked`（课程停摆位）· `_roles` / `_role_lock`（归属缓存）
+归属路由（2026-09-25）与接管闸（2026-10-07）也住本簇：`_roles` / `_kinds`（归属缓存）·
+`_role_lock`（缓存锁）· `hold_meta`（课程 hold 镜像，派发闸的第三层）
 与两个判据源 `job_role()` / `role_blocked()`——**闸必须与租约写入在同一个临界区**：
 `_claim_locked` 是租约的唯一入口，闸住那里则四条认领面（claim_next / peek+claim / 按 id
 直领 / push 派发）天然同源。
@@ -55,7 +56,6 @@ from common.protocol import (
     FAIL_NAME,
     PRIORITY_HIGHEST,
     PUSH_WORKER_PREFIX,
-    ROLE_OFFLINE,
     ROLE_ONLINE,
     role_of,
 )
@@ -160,11 +160,6 @@ class LeaseMixin:
         #: 可过期 ⇒ 毒包熔断失明；job 立刻回池 ⇒ 第三/第四份可自由领取；push 腿
         #: 「hub 持租约防同一份活两处跑」的自保也会失效。标记只放行回传，不动其它语义。
         self._backup_authorized: set[str] = set()
-        #: 课程停摆（离线课 = 活留着等切回在线，2026-09-20 的既有语义）。与 job 级归属闸
-        #: **正交**：这一位说的是「这门课现在还派不派活」（课程级），`role` 说的是「这份活
-        #: 归哪块盘」（job 级）。两者共用同一个咽喉点（`role_blocked` → `_claim_locked`），
-        #: 不各自为政——由 `_HubQueue` 在 `set_mode` / 构造时同步（它是唯一知道 mode 的层）。
-        self.parked = False
         #: job_id -> 归属角色缓存（`manifest.role`，2026-09-25）。为什么缓存：`claim_next` /
         #: `peek` 每拍都要按角色过滤候选，而 manifest 在盘上——每拍每候选重读一次盘是白烧 IO。
         #: 失效点 = `publish`（重发覆盖 manifest ⇒ 旧归属作废；见那里的 pop）——不靠
@@ -199,22 +194,18 @@ class LeaseMixin:
              租约面，不住这里）；
           ② `job_role != role` ⇒ `"role"`（归属不符）。
           ③ **课程 hold 闸所有 kind 都吃** ⇒ `"held:<worker>"`（有人接管这门课时，
-             这份活谁都别碰——包括接管者自己：它此刻在跑离线段）；
-          ④ 过渡腿 `parked`（旧「离线模式」闸，M1c 随 mode 一起退）：覆盖「人切了离线、
-             云机还没接手」那个窗口。
+             这份活谁都别碰——包括接管者自己：它此刻在跑离线段）。
 
-        为什么 hold 闸排最后（而不是像旧 parked 排最前）：拒因文案要**尽量具体**——一台
-        在线盘在接管期间被拒，"held:cloud-1" 当场回答了「为什么」，比一句 "parked" 有用。
+        为什么 hold 闸排最后：拒因文案要**尽量具体**——一台在线盘在接管期间被拒，
+        `"held:cloud-1"` 当场回答了「为什么」，比一句笼统的 "busy" 有用。
+
+        ★M1c：旧的 `parked`（旧「离线模式」闸，`_sync_parked` 推的那一位）已删。它守的
+        「人切了离线、云机还没接手」那个窗口如今是**有意协作**的一段：包还没到 = 没有独占
+        （Q1「无包不建 hold」），在线的未认领 job 照跑——这正是本重构要拆掉的旧耦合。
         """
         if self.job_kind(job_id) != KIND_BC and self.job_role(job_id) != role:
             return "role"
-        held = self.hold_blocked()
-        if held:
-            return held
-        if self.parked and role != ROLE_OFFLINE:
-            # 离线课：只对离线盘放行（旧口径就是「带标 worker 才领得走」，现在改成按归属判）。
-            return "parked"
-        return ""
+        return self.hold_blocked()
 
     def hold_blocked(self) -> str:
         """本课程若正被接管 ⇒ `"held:<worker>"`，否则 `""`。**活性自判**（见 `hold_meta`）。
