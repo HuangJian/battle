@@ -24,21 +24,14 @@ import { courseStatus } from './course-status'
  *  （整课起不来）。它不是「第五种等待」：`idle` 说的是「本轮无待办」这种**正常空转稳态**，
  *  把「配置不可运行」塞进 `idle` 会让停机中的课和起不来的课长得一样（本次事故「分不清」的
  *  翻版）⇒ 新增一格。取值域是契约面：python `run_rl_cluster.py` 文件头点名了这条纪律。
- *  ★P1-3（2026-10-05，plan/offline-online-status-switch）：`offline`——离线课在训练侧的
- *  等待词是「离线课由云机取任务包接手（切回在线自动恢复）」，**不是**收官（假收官是报障一的
- *  一半：`_map_outcome` 把 `ROUND_OFFLINE_EXIT` 当终局）。
  *  ★M2（plan/worker-type-dispatch-model §3-M2）：训练侧换了词与判据——`held`（该课被接管，
  *  云机在跑这段）取代 `offline`（它曾是 rl-config 的 `rollout_src=run` 读出来的）。
- *  两档**并列共存**：旧 python（未升级的训练进程）仍报 `offline`，新 python 报 `held`；
- *  渲染同席（词表重写与 `offline` 的删除属 M4）。 */
-export type LoopWaitKind =
-  | 'inflight'
-  | 'collect'
-  | 'idle'
-  | 'ready'
-  | 'blocked'
-  | 'offline'
-  | 'held'
+ *  ★M4（同 plan §3-M4）：旧词 `offline` 已删——M2+M3 之后训练侧恒报 `held`（双通道判据
+ *  见 `nn-training/trainer/loop_hold.py`），留着它只会让两条同义的词永久共存。
+ *  兼容窗口里旧进程报的字面量由 python 侧容忍（`loop_hold` 缺省 false ⇒ 它不会被写成
+ *  `offline` 以外的东西），控制台这边只认 `held` 一个（旧 python 的 `offline` 到了这里
+ *  会落进 `default`（当作 `idle`）——升级窗口内的读面降级见 M6 兼容矩阵。 */
+export type LoopWaitKind = 'inflight' | 'collect' | 'idle' | 'ready' | 'blocked' | 'held'
 
 /** 该课队列状态（python `loop_scheduler`：ready / running / waiting / paused / aborted / done）。 */
 export type LoopCourseState = 'ready' | 'running' | 'waiting' | 'paused' | 'aborted' | 'done'
@@ -169,10 +162,6 @@ export function coursePills(input: {
    *  `offlineRounds > 0` 才配得上；0 回传只能说「等云机」。`null`/缺省 = hub 侧不可读
    *  （那时不编离线状态，退回本地「在等什么」）。 */
   overview?: ParallelOverviewView | null
-  /** 控制台记录的每课 hub 派发**意图**（`stateView.courseModeIntents`）：与 hub 事实不一致
-   *  = 「意图未生效」（2026-09-23 实测的那种静默失配）——pill 上照实点名，而不是替 hub
-   *  那份 volatile 的表说话。`null`/缺省 = 无意图（不画漂移，不编状态）。 */
-  modeIntents?: Record<string, 'online' | 'offline'> | null
   /** 登记在册的 push worker id（rl-config `nodes[].gpu_push` 的 id 集）：holder 不在表里
    *  ⇒ 悬停点名「不在 worker 登记表里」。`null`/缺省 = 名单不可知（不点名）。 */
   registeredWorkers?: string[] | null
@@ -205,7 +194,6 @@ export function coursePills(input: {
       ov: hubByCourse.get(course) ?? null,
       hubOnline: input.overview?.hubOnline ?? false,
       trainerRunning: input.trainerRunning,
-      modeIntents: input.modeIntents,
       registeredWorkers: input.registeredWorkers,
       overviewStale: input.overview?.stale ?? null,
       queueStale: input.queueStale ?? null,
@@ -245,15 +233,7 @@ export interface LoopQueueView {
   stale?: ReadStaleView | null
 }
 
-const WAIT_KINDS: LoopWaitKind[] = [
-  'inflight',
-  'collect',
-  'idle',
-  'ready',
-  'blocked',
-  'offline',
-  'held',
-]
+const WAIT_KINDS: LoopWaitKind[] = ['inflight', 'collect', 'idle', 'ready', 'blocked', 'held']
 const STATES: LoopCourseState[] = ['ready', 'running', 'waiting', 'paused', 'aborted', 'done']
 
 function str(v: unknown): string {
@@ -505,7 +485,6 @@ export function waitCls(kind: LoopWaitKind): string {
     // 在飞 = 结果在别的进程/机器上，运维唯一能干预的一类 → 最醒目
     case 'inflight':
       return 'tc-mx__wait--inflight'
-    case 'offline': // 旧 python（未升级）的同一档；M4 删。
     case 'held':
       // 接管等待 = 本机停机、云机接手（不是卡顿也不是故障）——与「等外部」同族但语义独立。
       return 'tc-mx__wait--offline'
@@ -527,7 +506,6 @@ export function waitCls(kind: LoopWaitKind): string {
  *  （判据在哪算的），两处引用同一个常量以防漂移。 */
 export const WAIT_TITLES: Record<LoopWaitKind, string> = {
   inflight: '已发布的 job 还没回传——结果在 GPU worker / 云机上；换节点或检查 worker 日志',
-  offline: '离线课由云机取任务包接手——本机不跑这门课；切回在线会自动恢复（无需停开课）',
   held: '该课被自主 worker 接管（云机在跑这一段）——本机不跑这门课；接管解除或 15 分钟无回传时自动恢复协作派发',
   collect: '本轮采集还在落盘（局数来自 it<N>/ 下的 manifest，配额只有课程计划知道）',
   idle: '本轮没有待办：账本已结算这一轮，或这门课还没开训',

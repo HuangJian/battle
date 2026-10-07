@@ -31,6 +31,8 @@ const registry = (patch: Partial<PushWorkerRegistryView> = {}): PushWorkerRegist
       url: 'https://a.trycloudflare.com/very/long/path',
       enabled: true,
       concurrency: 2,
+      // ★M4：类型徽标（autonomous = 自主盘 / collaborative = 协作盘 / null = 还没露过面）。
+      kind: 'autonomous',
       online: true,
       busy: false,
       hubOnline: true,
@@ -40,6 +42,7 @@ const registry = (patch: Partial<PushWorkerRegistryView> = {}): PushWorkerRegist
       url: 'http://127.0.0.1:18797',
       enabled: true,
       concurrency: 1,
+      kind: 'collaborative',
       online: false,
       busy: null,
       hubOnline: false,
@@ -49,6 +52,7 @@ const registry = (patch: Partial<PushWorkerRegistryView> = {}): PushWorkerRegist
       url: 'http://127.0.0.1:1',
       enabled: false,
       concurrency: 1,
+      kind: null,
       online: null,
       busy: null,
       hubOnline: null,
@@ -72,6 +76,20 @@ describe('WorkerRegistry（push worker 登记入口）', () => {
     // URL 截断展示（完整 URL 在 title 里）
     expect(html).toContain('title="https://a.trycloudflare.com/very/long/path"')
     expect(html).toContain('aria-label="移除 worker gpu1"')
+  })
+
+  it('★M4：行上给**类型徽标**（自主 / 协作）；没露过面的那台不画（不猜）', async () => {
+    const { WorkerRegistry } = await import('../src/web/app/panels/WorkerRegistry')
+    const html = renderToString(
+      h(WorkerRegistry, { registry: registry(), onAction: async () => ({ ok: true }) }),
+    )
+    // 两型一句话可辨：自主盘领整段任务包、协作盘只领单 it 的 PPO job。
+    expect(html).toContain('自主')
+    expect(html).toContain('协作')
+    // `kind: null` 的 `off` 那台没有任何类型徽标——登记表里的一行不等于它在干活。
+    expect(html).not.toMatch(/aria-label="worker off，[^"]*自主/)
+    expect(html.match(/tc-badge--a"[^>]*>自主</g)?.length).toBe(1)
+    expect(html.match(/tc-badge--gray"[^>]*>协作</g)?.length).toBe(1)
   })
 
   it('派发开关（rl.hub_push，缺省开）与登记表同屏：配了节点走哪条路一眼可见', async () => {
@@ -181,14 +199,17 @@ describe('接线：面板动作字符串与路由注册同源', () => {
     expect(panel).toContain("'setNodeEnabled'")
   })
 
-  it('R3-2 模式开关：面板与路由两侧都有 setCourseMode，且 app 接了动作通道', () => {
+  it('★M4 R8 接管出口：面板与路由两侧都有 releaseCourseHold，且 app 接了动作通道', () => {
     const mx = readFileSync(
       path.join(DASHBOARD_ROOT, 'src', 'web', 'app', 'panels', 'CourseMatrix.tsx'),
       'utf-8',
     )
-    expect(mx).toContain("'setCourseMode'")
-    expect(route).toContain("'setCourseMode'")
-    // 面板拿到 onAction（否则开关渲染不出来，静默失效）
+    expect(mx).toContain("'releaseCourseHold'")
+    expect(route).toContain("case 'releaseCourseHold'")
+    // 旧的三颗模式钮不得回流（模式语义已随 M1c 退役）
+    expect(route).not.toContain("case 'setCourseMode'")
+    expect(route).not.toContain("case 'unsetCourseMode'")
+    // 面板拿到 onAction（否则按钮渲染不出来，静默失效）
     expect(app).toContain('onAction={doAction}')
   })
 

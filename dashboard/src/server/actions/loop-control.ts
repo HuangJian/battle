@@ -203,10 +203,61 @@ export function readPauseFacts(): { intent: string[]; applied: string[] } {
   return { intent: readLoopControl().paused, applied: readLoopApplied().paused }
 }
 
-// ── `held` 的**写侧**（M4 落点，理由写死免得漂）：写方（console）在**它每次从 hub 读到
-// holds 的同一处**写这份缓存——`overview.ts` 透出 `holds`（M4）时一并写，不在另一条腿里
-// 再读一遍 hub（同一份事实两次读 = 两个时刻的真相，缓存会与面板对不上）。M2 只立住读侧
-// （python `parse_held`）与「不覆盖」纪律；写侧与 holds 面板同席。
+/** **写 `held` 缓存**（★M4 落点；唯一写方 = `overview.getHubAdmin`，与面板读**同一拍**）。
+ *
+ *  为什么必须与面板同席：`held` 是 **hub 事实的缓存**，不是第二事实源（F13）。若在另一条腿
+ *  里再读一遍 hub，就得到两个时刻的真相——面板说「接管中」而缓存里是上一拍的空集（或反过来）。
+ *
+ *  写纪律（与 `writeLoopControl` 相同的「不覆盖别人」）：只替补 `held`，其余键原样保留
+ *  （尤其 `paused`——那是人的意图，缓存写入绝不能把它抹掉）。
+ *
+ *  失败语义：**永不抛**（纯缓存；hub 不可达 / 盘不可写都不影响主通道——训练侧每轮边界
+ *  直问 hub，文件只是兜底）。空数组也写：它表达「本拍没有接管」这个**真实结论**
+ *  （与「没写过」不同——后者让训练侧对文件通道无话可说，只能等它自己过期）。
+ */
+export function writeHeldCache(held: HeldEntry[], file: string = loopControlPath()): void {
+  const clean: Array<{ course: string; last_progress_at: number }> = []
+  const seen = new Set<string>()
+  for (const h of held) {
+    const c = String(h.course ?? '').trim()
+    if (!c || !COURSE_RE.test(c) || c.includes('..') || seen.has(c)) continue
+    seen.add(c)
+    clean.push({
+      course: c,
+      last_progress_at:
+        typeof h.lastProgressAt === 'number' && Number.isFinite(h.lastProgressAt)
+          ? h.lastProgressAt
+          : 0,
+    })
+  }
+  let doc: Record<string, unknown> = {}
+  try {
+    if (existsSync(file)) {
+      const parsed = JSON.parse(readFileSync(file, 'utf8')) as unknown
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        doc = { ...(parsed as Record<string, unknown>) }
+      }
+    }
+  } catch {
+    // 坏文件：从空文档起步（下面照样原子替换）——缓存丢失的代价只是训练侧退回直问 hub。
+  }
+  const body = `${JSON.stringify(
+    {
+      ...doc,
+      version: LOOP_CONTROL_VERSION,
+      held: clean.sort((a, b) => a.course.localeCompare(b.course)),
+    },
+    null,
+    2,
+  )}\n`
+  const tmp = path.join(path.dirname(file), `.loop-control.held.${process.pid}.tmp`)
+  try {
+    writeFileSync(tmp, body, 'utf8')
+    renameSync(tmp, file)
+  } catch {
+    /* 非致命：训练侧的主通道是直问 hub，文件只是降级兜底 */
+  }
+}
 
 /** 暂停/恢复一门课。**幂等**：重复点同一个方向不会把别的课程从表里挤掉。 */
 export function setCoursePaused(

@@ -205,7 +205,7 @@ describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
 
   // ────────────────────────── T8：离线静默停摆（plan/auto-offline-handoff §3.9） ──────────────────────────
 
-  it('离线静默停摆（pending-export）→ err 条：点名三条出路 + 自带「交还自动池」动作', () => {
+  it('静默停摆（pending-export）→ err 条：点名三条出路，且**不给**「强制解除接管」（本来就没接管）', () => {
     const items = buildAlerts({
       ...clean,
       offlineStalls: [
@@ -226,15 +226,14 @@ describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
     expect(a.title).toContain('云机没接手')
     expect(a.title).toContain('1 小时')
     // 三条出路逐条点名（U3 的出口就在这条告警里）
-    expect(a.detail).toContain('TPU 重连')
+    expect(a.detail).toContain('云机重连继续')
     expect(a.detail).toContain('手工导入结果包')
-    expect(a.detail).toContain('交还自动池')
-    // 自带动作 = 第三条出路（resume 语义：真调 API）+ 「知道了」（ack 只写本地）
-    expect(a.actions.map((x) => x.kind)).toEqual(['resume', 'ack'])
-    expect(a.actions[0]!.act).toBe('unsetCourseMode')
-    expect(a.actions[0]!.body).toEqual({ course: 'c5-gae' })
-    expect(a.actions[0]!.primary).toBe(true)
-    expect(a.actions[1]!.ackKey).toBe(`offline-stall|c5-gae|100`)
+    // ★M4：第三条出路不再是「交还自动池」（那个动作没了）——而是**本机什么都不用做**
+    // （pending_export 不占闸，采样与协作派发照跑）。
+    expect(a.detail).toContain('本机不需要做任何事')
+    // ★M4：没有接管 ⇒ **不给** release 动作（点下去必 409 的键就是假承诺）——ack 是唯一出口。
+    expect(a.actions.map((x) => x.kind)).toEqual(['ack'])
+    expect(a.actions[0]!.ackKey).toBe(`offline-stall|c5-gae|100`)
   })
 
   it('running-stale（有租约但无进度）→ warn 条，标题带上持有人', () => {
@@ -528,7 +527,7 @@ describe('全局收官 + 全条目可关闭可复制（2026-10-03 plan/dashboard
         if (act.kind === 'ack') continue
         // 既有 resume 动作的 act 名只允许是既有 2 个（不新增服务端消警路径）
         expect(act.act).toBeTruthy()
-        expect(['cloud-resume', 'unsetCourseMode']).toContain(act.act!)
+        expect(['cloud-resume', 'releaseCourseHold']).toContain(act.act!)
       }
     }
   })

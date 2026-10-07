@@ -176,7 +176,9 @@ describe('② 开课（course-lifecycle）：账本（发现判据）与机器�
   it('开课**不写任何执行面裁决**（课程与 worker 节点正交，§3）', () => {
     withTmpLogs(() => {
       writeFileSync(tmpConfig, JSON.stringify(fixture(), null, 2))
-      actions.writeCourseConfigForOpen(COURSE, { trainMode: 'online' })
+      // ★M4：开课不再指定模式（`trainMode` 已退役）——本组断言只关心「落盘的课程块里
+      //   有没有执行面裁决」，故传空选项。
+      actions.writeCourseConfigForOpen(COURSE, {})
       // 课程不带「走哪条路 / 打哪个 hub / 钉哪台机器 / 怎么降级算力」——
       // 执行面全交由 `rl.hub_push` + 登记节点 + hub 队列（§3：「无 fallback」）。
       for (const key of [

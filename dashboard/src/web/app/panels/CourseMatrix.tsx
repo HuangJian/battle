@@ -16,7 +16,7 @@
  *
  *  `StatusRow` 是「一行实体 + 状态 + 指标 + 动作」的**芯片行**原语（组件卡 / 节点 / worker）：
  *  它是 `inline-flex` 且会换行，**跨行不对齐**。矩阵的七列是要**竖着比**的（哪门课队列最深、
- *  哪门课段内停最久）——芯片行拼出来的「表」在同一列上每行宽度都不同，比较只能靠读。
+ *  哪门课的接管多久没回传）——芯片行拼出来的「表」在同一列上每行宽度都不同，比较只能靠读。
  *  所以矩阵用真表格（`tc-table` 基础样式 + `tabular-nums` 数字列），但**状态词表与语义档
  *  仍走 `matrixStatus` + `StatusDot`**（一个状态只有一个说法、一个颜色），这条才是 §4.2 的实质。
  *
@@ -130,17 +130,10 @@ export interface CourseMatrixProps {
   overview: ParallelOverviewView | null
   /** 训练侧事实（`null` = 只读视图不可用）。 */
   loopQueue: LoopQueueView | null
-  /** 控制台记录的每课 hub 派发**意图**（`stateView.courseModeIntents`；缺省 = 无意图）。
-   *
-   *  它不在这个面板的只读事实里：hub 的 mode 是 volatile，这份是运维的决定（切离线/
-   *  离线开课时写、起 hub 时回灌）。两者摆在一起才能看出「意图没落地」。 */
-  modeIntents?: Record<string, 'online' | 'offline'> | null
-  /** **逐课**生效 rollout 源（`stateView.courseRolloutSrc`；缺省 = 旧视图/不报）。
-   *
-   *  漂移徽标只比「意图 vs hub」两个源是不够的：用户报障的现场是**第三个**源没跟上——
-   *  hub 与意图都回到在线，而 `courses.<课>.rollout_src` 仍是 `run`（本课仍归云机）⇒ 本机在
-   *  下一轮仍然收工、不采样（训练停住而面板看着「在训」，2026-09-24 / plan §2.5）。 */
-  courseRolloutSrc?: Record<string, string> | null
+  // ★M4：`modeIntents`（控制台意图）与 `courseRolloutSrc`（逐课 rl-config 快照）两个入参
+  //  随模式语义一起退役——它们存在的前提是「意图 / hub 模式 / rl-config 三个源可能没对齐」，
+  //  而今天「这门课归谁」只有一个真源：hub 的 hold（见 `course-matrix.ts` 尾注）。
+  //  渲染器不再有「漂移徽标」这一栏，也不再有「意图」可摆。
   /** ★2026-10-06：逐课停车态（`stateView.loopCompletes`，账本尾行 `run_complete`）——
    *  状态列与 pill 同源说「已收官」（缺省 = 旧视图，行为不变）。 */
   loopCompletes?: Record<string, LoopComplete> | null
@@ -161,15 +154,13 @@ export interface CourseMatrixProps {
 export function CourseMatrix({
   overview,
   loopQueue,
-  modeIntents,
-  courseRolloutSrc,
   loopCompletes,
   course,
   onSelectCourse,
   onAction,
   archived,
 }: CourseMatrixProps) {
-  // 「段内多久没动」要当下时刻：读表在这里发生，纯函数只收数字（可单测、可回放）。
+  // 「接管多久没进度 / 产物多久没动」要当下时刻：读表在这里发生，纯函数只收数字（可单测、可回放）。
   const nowSec = Math.floor(Date.now() / 1000)
   // 封存分组**默认折叠**（不属于「盯着在跑的那几门」）。
   const [archOpen, setArchOpen] = useState(false)
@@ -177,8 +168,6 @@ export function CourseMatrix({
   const all = mergeCourseRows({
     overview,
     queue: loopQueue,
-    modeIntents,
-    courseRolloutSrc,
     loopCompletes,
     viewing: course,
     nowSec,
@@ -220,7 +209,7 @@ export function CourseMatrix({
         title="课程"
         count={rows.length}
         hint={
-          '只列在训课程（共享 trainer 在跑 ∧ 该课未收官）：hub 侧（派活/队列/离线段）与训练侧' +
+          '只列在训课程（共享 trainer 在跑 ∧ 该课未收官）：hub 侧（派活/队列/接管）与训练侧' +
           '（指针/卡在哪一步/在等什么）合并成一行。未在训的课不在此表——表头 chip 给出未列门数'
         }
       />
@@ -323,7 +312,7 @@ export function CourseMatrix({
                 <th scope="col" className="tc-mx__num">
                   队列 · 在飞
                 </th>
-                <th scope="col">段内</th>
+                <th scope="col">接管</th>
                 {onAction ? <th scope="col">操作</th> : null}
               </tr>
             </thead>
@@ -385,10 +374,11 @@ function MatrixTr({
             {kind.text}
           </span>
         ) : null}
-        {/* ★P1-6：权威三态徽标（固定在线 / 固定离线 / 自动）——`null` = 旧 hub 未上报，不猜。 */}
-        {r.pinBadge ? (
-          <span className={`tc-badge tc-badge--${r.pinBadge.tone}`} title={r.pinBadge.title}>
-            {r.pinBadge.text}
+        {/* ★M4：接管徽标（接管掉线 / 导包中）。live 的接管不画——状态列与「接管」列已经在说它
+            （同一件事不摆三遍），`null` = 没这两件事。 */}
+        {r.holdBadge ? (
+          <span className={`tc-badge tc-badge--${r.holdBadge.tone}`} title={r.holdBadge.title}>
+            {r.holdBadge.text}
           </span>
         ) : null}
         {/* ★P1-6：租约徽标（可接管 = 静默超阈；已撤租 = 墓碑）——只给需处置的两档。 */}
@@ -407,11 +397,14 @@ function MatrixTr({
         {r.iter === null ? '—' : `it${r.iter}`}
       </td>
       <td className="tc-mx__round">
-        {r.ov?.offline ? (
-          // ★2026-09-22（离线课列修正）：本轮这列对离线课读「云机回传」——本地 13 步表的
-          // 步骤（publish/等回传…）对操作员无读面意义，段由云机整段执行。
+        {r.ov?.hold ? (
+          // ★2026-09-22（离线课列修正）+ ★M4（判据换成 hold）：被接管的课这列读「云机回传」
+          // ——本地 13 步表的步骤（publish/等回传…）对操作员无读面意义，整段由云机执行。
           <span
-            title={`云机整段执行中：最新回传 it${r.ov.offlineLastIter ?? '—'}（本地只收回传、不实时派发）`}
+            title={
+              `云机整段执行中：最新回传 it${r.ov.offlineLastIter ?? '—'}（本机只收回传、` +
+              '不跑这门课；PPO 派发被 hold 闸压住）'
+            }
           >
             云机 it{r.ov.offlineLastIter ?? '—'}
           </span>
@@ -433,95 +426,36 @@ function MatrixTr({
         {r.queue.text}
       </td>
       <td
-        className={r.segment?.warn ? 'tc-mx__seg tc-mx__seg--stale' : 'tc-mx__seg'}
-        title={r.segment?.title}
+        className={r.hold?.warn ? 'tc-mx__seg tc-mx__seg--stale' : 'tc-mx__seg'}
+        title={r.hold?.title}
       >
-        {r.segment?.text ?? '—'}
+        {r.hold?.text ?? '—'}
       </td>
       {onAction ? (
         <td className="tc-mx__ops">
-          {/* 两个开关**并列**（§7 O4）：必须在视觉与文案上区分归属，否则会被读成「一个开关
-              管两件事」。分隔线 + 各自的 role=group aria-label 前缀（hub：/ 本地：）钉住归属。 */}
-          {r.canToggleMode ? (
-            <span
-              className="tc-mx__opgroup"
-              role="group"
-              aria-label={`hub：${r.ov?.offline ? '切换成在线' : '切离线'}`}
-            >
+          {/* ★M4：旧的三颗模式钮（切离线 / 切换成在线 / 交还自动池）与两个漂移徽标已随
+              「课程不再分在线/离线」退役——「这门课归谁」今天只有一个真源：hub 的**接管**
+              （`hold`）。人唯一能干预的动作是「强制解除接管」（`release_hold=1`）：立撤租墓碑
+              + 清 hold ⇒ 本机下一轮恢复采样、协作派发立即恢复、新自主盘可当场 claim。
+              只在真有接管时才画（`r.canReleaseHold`）：hub 离线 / 它不认识这门课 / 本来就没
+              接管时点下去一定 404/409——画一个一定失败的按钮是假承诺（能力边界，与「只读
+              不禁用」那条不同）。 */}
+          {r.canReleaseHold ? (
+            <span className="tc-mx__opgroup" role="group" aria-label="hub：强制解除接管">
               <button
                 type="button"
                 className="tc-btn tc-btn--sm"
-                aria-label={`hub：${
-                  r.ov?.offline ? `切换成在线 ${r.course}` : `切离线 ${r.course}`
-                }`}
+                aria-label={`hub：强制解除接管 ${r.course}`}
                 title={
-                  r.ov?.offline
-                    ? '切回在线：hub 恢复为这门课实时派发 PPO（写 hub 课程表）'
-                    : '切离线：hub 不再实时派发这门课的 PPO，只接收 it 权重/指标回传（本机训练与账本不动）；写 hub 课程表'
+                  '强制解除接管（`release_hold=1`）：立撤租墓碑 + 清 hold——本机在下一轮边界' +
+                  '恢复采样，协作派发立即恢复，新自主盘可当场 claim（不必等 15 分钟静默阈）。' +
+                  '若云机其实还在跑，它下次打点会收 409 且其产物只归档（有界，不会双写权重）。'
                 }
-                onClick={() =>
-                  void onAction('setCourseMode', {
-                    course: r.course,
-                    mode: r.ov?.offline ? 'online' : 'offline',
-                  })
-                }
+                onClick={() => void onAction('releaseCourseHold', { course: r.course })}
               >
-                {r.ov?.offline ? '切换成在线' : '切离线'}
+                强制解除接管
               </button>
-              {/* 漂移徽标：控制台意图 ≠ hub 此刻的表（2026-09-23 实测的那种静默失配）。
-                  它只在**两个源都读到且不一致**时上屏——所以点一下这个按钮就再来一次，
-                  或者点「hubServer」回灌全部意图。 */}
-              {r.modeDrift && r.modeDrift.hubOffline !== (r.modeDrift.intent === 'offline') ? (
-                <span
-                  className="tc-mx__pausebadge tc-badge tc-badge--warn"
-                  title={
-                    `意图未生效：控制台记的是「${r.modeDrift.intent === 'offline' ? '离线' : '在线'}」，` +
-                    `而 hub 现在把 ${r.course} 当「${r.modeDrift.hubOffline ? '离线' : '在线'}」。` +
-                    '点这个按钮再推一次（幂等）；或点「hubServer」把全部意图回灌一次。' +
-                    '常见成因：hub 刚重启，回灌跑在它发现这门课之前（那时 POST 会 400）。'
-                  }
-                >
-                  意图未生效
-                </span>
-              ) : null}
-              {/* 第三个源（rl-config 配置）没跟上：hub 与意图都已回到在线，而
-                  `courses.<课>.rollout_src` 还是 `run`（本课仍归云机）⇒ 本机在下一轮仍然收工、
-                  不采样（2026-09-24 用户报障的那条链）。它只在逐课配置下发后才算得出来。 */}
-              {r.modeDrift?.configRun ? (
-                <span
-                  className="tc-mx__pausebadge tc-badge tc-badge--warn"
-                  title={
-                    `配置未跟上：${r.course} 的 rl-config 里仍是 rollout_src=run（本课仍归云机：` +
-                    '本机在下一轮收工、不采样）。点这个按钮一次即修正（本机配置与 hub 一起改）——' +
-                    '★ 轮边界生效：下一轮换挡（不再有「段等待」）。'
-                  }
-                >
-                  配置仍是离线（云机接手）
-                </span>
-              ) : null}
             </span>
-          ) : null}
-          {/* 交还自动池（U3 第三条出路；plan/auto-offline-handoff §3.2a 动作表）：与「切换成在线」
-              **分开表述**——后者是人的决定（`pin=1`，永久退出自动交接），本钮是把课**放回自动池**
-              （`pin=0` + 删意图）：本机下一轮恢复采样，TPU 一上线就能再领走它。 */}
-          {r.canToggleMode && r.ov?.offline ? (
-            <>
-              <span className="tc-mx__opsep" aria-hidden="true" />
-              <span className="tc-mx__opgroup" role="group" aria-label="自动：交还自动池">
-                <button
-                  type="button"
-                  className="tc-btn tc-btn--sm"
-                  aria-label={`自动：交还自动池 ${r.course}`}
-                  title={
-                    '交还自动交接池：hub 清 pin + 清 claim 记账，本机在下一轮边界恢复采样；' +
-                    'TPU 一上线就能领走它。若云机还在跑就会双跑——那是人的决定（U3 第三条出路）。'
-                  }
-                  onClick={() => void onAction('unsetCourseMode', { course: r.course })}
-                >
-                  交还自动池
-                </button>
-              </span>
-            </>
           ) : null}
           {pause ? (
             <>
@@ -554,11 +488,12 @@ function MatrixTr({
               ) : null}
             </>
           ) : null}
-          {/* ★2026-09-22 改版：离线课的任务包能力（导出/导入训练结果）下沉到行内操作列——
-              「任务包」独立面板已从首页下线（无操作通道时不渲染，与其余行内动作同判据）。
-              ★2026-09-23（用户指令）：判据从「hub 标离线」放宽到「hub 标离线 ∨ 意图离线」
-              （`r.bundleOps`）——离线课**要先有包才能上云跑**，而回灌失配时 hub 还当它在
-              线，旧判据恰好在最需要这个键的时候把它藏了。 */}
+          {/* ★2026-09-22 改版：任务包能力（导出/导入训练结果）下沉到行内操作列——「任务包」
+              独立面板已从首页下线（无操作通道时不渲染，与其余行内动作同判据）。
+              ★2026-09-23（用户指令）：判据从「hub 标离线 ∨ 意图离线」再放宽到 **在训**
+              （`r.bundleOps` = `rowTraining`，★M4）——任何一门在训课都可能被自主 worker 领走
+              （claim 遇缺包时 hub 会请控制台导包，见 `pending_export`），所以导包对每门在训课
+              都是合法动作（与 hub 此刻派不派活正交：包就是给云机用的）。 */}
           {r.bundleOps ? <BundleRowActions course={r.course} /> : null}
         </td>
       ) : null}
@@ -566,12 +501,12 @@ function MatrixTr({
   )
 }
 
-/** 指针悬停：说清它是「下一轮要跑的 it」以及**来自哪一侧**（离线课 = 云机回传指针）。 */
+/** 指针悬停：说清它是「下一轮要跑的 it」以及**来自哪一侧**（被接管的课 = 云机回传指针）。 */
 function iterTitle(r: CourseMatrixRow): string {
-  if (r.iterSource === 'offline')
+  if (r.iterSource === 'hold')
     return (
-      `回传指针 it${r.iter} —— 云机回传的最新段内 it（离线课：hub 只收回传、不实时派发；` +
-      '本地「下一轮」队列指针对这本段无读面意义，见 /metrics 的账本尾行）'
+      `回传指针 it${r.iter} —— 云机回传的最新段内 it（接管中：hub 只收回传、不实时派发；` +
+      '本机「下一轮」队列指针对这一段无读面意义，见 /metrics 的账本尾行）'
     )
   const src = r.iterSource === 'queue' ? '训练侧队列（下一轮要跑）' : 'hub 侧账本尾行'
   const cross = r.iterSource === 'queue' ? '；hub 侧账本尾行另见 /metrics' : ''
@@ -580,6 +515,10 @@ function iterTitle(r: CourseMatrixRow): string {
 
 /** 两侧都没给出指针：**说清是不知道**，不是 0。 */
 function iterMissingTitle(r: CourseMatrixRow): string {
+  // ★M4：被接管的课还没有回传时，指针是**接管维度**的不可知——本机「下一轮」指针这一段
+  // 没有读面意义（本机不跑这门课），所以不能拿它充数（见「接管」列）。
+  if (r.ov?.hold)
+    return '接管中但还没有段内回传：云机回传的最新 it 未知（本机「下一轮」指针这一段不适用）'
   return r.lq || r.ov
     ? '没有账本指针：这门课还没有 iteration 事件（未开训 / 账本还没结算过这一轮）'
     : '两侧都读不到——指针不可知'

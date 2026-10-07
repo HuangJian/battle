@@ -8,7 +8,8 @@
  *   ② **未知 ≠ 否定**：hub 探针失败（保旧值）只降级 `stale` 标注、不把词跌回训练侧或编一个
  *      「hub 不认它」；没有旧事实时是「不知道」，不是「未在训」的肯定判断；
  *   ③ **滞回**：来源可用性 false→true 不改词（只动标注）；
- *   ④ **来源透明**：每词带 `source`（marker/registry/intent/hub/loop），`stale` 指向读面失败。
+ *   ④ **来源透明**：每词带 `source`（marker/registry/hub/loop/unknown），`stale` 指向读面失败
+ *      （★M4：`intent` 那一档随意图表退役）。
  *
  * 纯函数层（src/web/view/course-status.ts + course-matrix.ts 的接线），无 IO。
  */
@@ -16,6 +17,7 @@
 import { describe, expect, it } from 'bun:test'
 import type {
   CourseOverviewRow,
+  HubHoldView,
   LoopQueueRow,
   LoopQueueView,
   ParallelOverviewView,
@@ -59,12 +61,18 @@ function lqRow(patch: Partial<LoopQueueRow> & { course: string }): LoopQueueRow 
   }
 }
 
-/** hub 侧一行（默认：hub 认得、在线、无离线段）。 */
+/** 接管夹具（★M4：旧 `offline` 布尔/`authority`/`pinned` 三件已退役）。 */
+function hold(workerId: string, state: 'live' | 'stale' = 'live'): HubHoldView {
+  return { workerId, state, lastProgressAt: 0, at: 0, expiresIn: 870 }
+}
+
+/** hub 侧一行（默认：hub 认得、在线、无接管）。 */
 function ovRow(patch: Partial<CourseOverviewRow> & { course: string }): CourseOverviewRow {
   return {
     training: false,
     iter: null,
-    offline: false,
+    hold: null,
+    pendingExport: null,
     hubSeen: true,
     queuePending: 0,
     inflight: 0,
@@ -77,8 +85,6 @@ function ovRow(patch: Partial<CourseOverviewRow> & { course: string }): CourseOv
     stuckSec: null,
     peeked: null,
     nextJob: null,
-    authority: null,
-    pinned: null,
     lease: null,
     ...patch,
   }
@@ -95,7 +101,6 @@ function ovView(
     activeWorkers: 0,
     halt: false,
     recentDispatch: null,
-    offline: rows.filter((r) => r.offline).map((r) => r.course),
     offlineProgress: null,
     rows,
     ...patch,
@@ -109,28 +114,58 @@ function lqView(rows: Record<string, unknown>[], training: string[]): LoopQueueV
 // ────────────────────────── ① 同一派生 ──────────────────────────
 
 describe('courseStatus：pill 与矩阵状态列同源（R4-a）', () => {
-  it('★ 假收官不再出现：离线接管的课在两屏都不是「已收官」', () => {
-    // P1-1 之后训练侧对离线课发的是 waiting(offline)（不是 done）——旧形状的「本机收官、
-    // 云机在跑」在修好后不再出现；本用例钉的就是这个真形状：pill 与矩阵都在离线族里。
+  it('★ 假收官不再出现：被接管的课在两屏都不是「已收官」', () => {
+    // 旧形状的事故：「本机收官、云机在跑」——训练侧报 done 而云机还在跑这段。修好后训练侧
+    // 报的是 waiting(held)（本机不跑这门课），本用例钉的就是这个真形状。
     const live = lqRow({
       course: 'off',
       state: 'waiting',
       training: false,
-      waiting: { kind: 'offline', text: '离线课由云机取任务包接手（切回在线自动恢复）' },
+      waiting: { kind: 'held', text: '该课被自主 worker 接管（云机在跑这一段）' },
     })
-    const ov = ovRow({ course: 'off', offline: true, training: true })
+    const ov = ovRow({ course: 'off', hold: hold('tpu-1'), training: true })
     const pill = coursePills({
       courses: ['off'],
       rows: [live],
       trainerRunning: false,
       overview: ovView([ov]),
     })[0]!
-    expect(pill.status).toBe('等云机')
+    // 接管 ∧ 零回传 ⇒ 「等云机接管」（云机在跑但还没回传任何一段产物）
+    expect(pill.status).toBe('等云机接管')
     expect(pill.status).not.toBe('已收官')
-    expect(matrixStatus(ov, live, true).text).toBe('离线（只收回传）')
-    // 派生层唯一答案：两边同一个 kind（离线族）——矩阵词与 pill 词各自渲染，语义同源。
+    expect(matrixStatus(ov, live, true).text).toBe('接管中（云机）')
+    // 派生层唯一答案：两边同一个 kind（接管族）——矩阵词与 pill 词各自渲染，语义同源。
     const st = courseStatus({ course: 'off', lq: live, ov, hubOnline: true, trainerRunning: false })
-    expect(st.kind).toBe('offline-waiting')
+    expect(st.kind).toBe('autonomous-waiting')
+    // 有回传则是「云机执行中」（同一族，词更前一步）
+    const running = courseStatus({
+      course: 'off',
+      lq: live,
+      ov: { ...ov, offlineRounds: 4 },
+      hubOnline: true,
+      trainerRunning: false,
+    })
+    expect(running.kind).toBe('autonomous-running')
+    expect(running.text).toBe('云机执行中')
+  })
+
+  it('★M4：接管掉线（stale）⇒ 两屏都报「接管掉线」+ 已在悬停里说清自愈（不吓人）', () => {
+    const live = lqRow({ course: 'off', state: 'waiting', training: false })
+    const ov = ovRow({
+      course: 'off',
+      hold: hold('tpu-1', 'stale'),
+      training: true,
+      offlineRounds: 2,
+    })
+    const pill = coursePills({
+      courses: ['off'],
+      rows: [live],
+      trainerRunning: true,
+      overview: ovView([ov]),
+    })[0]!
+    expect(pill).toMatchObject({ status: '接管掉线', tone: 'y' })
+    expect(pill.title).toContain('已自动恢复')
+    expect(matrixStatus(ov, live, true).text).toBe('接管掉线')
   })
 
   it('★2026-10-06：账本尾行 run_complete ⇒ pill 与矩阵都「已收官」（读面 ready / hub 不认都不动终态）', () => {
@@ -204,7 +239,7 @@ describe('courseStatus：pill 与矩阵状态列同源（R4-a）', () => {
     expect(rows[0]!.status.text).toBe('已收官')
   })
 
-  it('★ pinned 三态徽标（P1-6）：固定在线 / 固定离线 / 自动；旧 hub 未上报 ⇒ 不画（不猜）', () => {
+  it('★M4 接管徽标（取代旧权威三态）：stale ⇒ 「已恢复协作」；live／无接管 ⇒ 不画', () => {
     const build = (patch: Partial<CourseOverviewRow>): ReturnType<typeof mergeCourseRows>[number] =>
       mergeCourseRows({
         overview: ovView([ovRow({ course: 'c', training: true, ...patch })]),
@@ -212,10 +247,11 @@ describe('courseStatus：pill 与矩阵状态列同源（R4-a）', () => {
         viewing: '',
         nowSec: 0,
       })[0]!
-    expect(build({ authority: 'pinned_online', pinned: true }).pinBadge?.text).toBe('固定在线')
-    expect(build({ authority: 'pinned_offline', pinned: true }).pinBadge?.text).toBe('固定离线')
-    expect(build({ authority: 'auto', pinned: false }).pinBadge?.text).toBe('自动')
-    expect(build({ authority: null, pinned: null }).pinBadge).toBeNull()
+    expect(build({ hold: hold('tpu-1', 'stale') }).holdBadge?.text).toBe('已恢复协作')
+    // 导包软态（还没有 hold）：不占闸，所以只在没接管时才画
+    expect(build({ pendingExport: { by: 'tpu-1', at: 0 } }).holdBadge?.text).toBe('导包中')
+    expect(build({ hold: hold('tpu-1') }).holdBadge).toBeNull()
+    expect(build({}).holdBadge).toBeNull()
   })
 
   it('★ 租约徽标（P1-6）：stale ⇒ 「可接管」；墓碑 ⇒ 「已撤租」；新鲜租约不画', () => {
@@ -249,7 +285,7 @@ describe('courseStatus：pill 与矩阵状态列同源（R4-a）', () => {
 describe('courseStatus：读面失败只降级标注（R4-b/g）', () => {
   it('★ hub 探针失败（保旧值）⇒ 词不变 + `stale` 上屏；不得跌成「未在训 / hub 不认」', () => {
     const lq = lqRow({ course: 'off' })
-    const ov = ovRow({ course: 'off', offline: true, training: true, offlineRounds: 3 })
+    const ov = ovRow({ course: 'off', hold: hold('tpu-1'), training: true, offlineRounds: 3 })
     const stale = { since: 1_700_000_000_000, reason: 'ECONNREFUSED 127.0.0.1:18787' }
     const st = courseStatus({
       course: 'off',
@@ -259,11 +295,11 @@ describe('courseStatus：读面失败只降级标注（R4-b/g）', () => {
       trainerRunning: true,
       overviewStale: stale,
     })
-    expect(st.text).toBe('回传中') // 上一拍的真实仍在——不换词
+    expect(st.text).toBe('云机执行中') // 上一拍的真实仍在——不换词
     expect(st.stale).toEqual(stale)
     expect(st.source).toBe('hub')
     const ms = matrixStatus(ov, lq, false, { overviewStale: stale })
-    expect(ms.text).toBe('离线（只收回传）')
+    expect(ms.text).toBe('接管中（云机）')
   })
 
   it('★ 没有旧事实 ⇒ 是「不知道」而不是「未在训」的肯定判断（不编冲突档）', () => {
@@ -310,7 +346,7 @@ describe('courseStatus：读面失败只降级标注（R4-b/g）', () => {
 describe('courseStatus：来源可用性变化不改词（R4-b/c/d 的滞回）', () => {
   it('hubOnline false→true（旧事实在手）：词完全一致，只有 `stale` 标注变', () => {
     const lq = lqRow({ course: 'off' })
-    const ov = ovRow({ course: 'off', offline: true, training: true, offlineRounds: 2 })
+    const ov = ovRow({ course: 'off', hold: hold('tpu-1'), training: true, offlineRounds: 2 })
     const a = courseStatus({
       course: 'off',
       lq,
@@ -327,7 +363,9 @@ describe('courseStatus：来源可用性变化不改词（R4-b/c/d 的滞回）'
   })
 
   it('pill 与矩阵都不因 hub 掉线而改变词（后台驱动的那次探测失败只动 chip）', () => {
-    const ov = ovView([ovRow({ course: 'off', offline: true, training: true, offlineRounds: 1 })])
+    const ov = ovView([
+      ovRow({ course: 'off', hold: hold('tpu-1'), training: true, offlineRounds: 1 }),
+    ])
     const rows = [lqRow({ course: 'off' })]
     const before = coursePills({ courses: ['off'], rows, trainerRunning: true, overview: ov })[0]!
     const after = coursePills({
@@ -337,6 +375,6 @@ describe('courseStatus：来源可用性变化不改词（R4-b/c/d 的滞回）'
       overview: { ...ov, hubOnline: false, stale: { since: 1, reason: 'boom' } },
     })[0]!
     expect(after.status).toBe(before.status)
-    expect(before.status).toBe('回传中')
+    expect(before.status).toBe('云机执行中')
   })
 })

@@ -259,10 +259,14 @@ describe('启动训练不选模式（防回流）', () => {
     expect(modal).not.toContain('pushAuthKey')
     // 已退役的 pull/push 模式 localStorage 键（`tc.train.mode`）不得回流
     expect(modal).not.toContain('tc.train.mode')
-    // ★ 课程级选项（在线/离线训练模式）**不在启动弹窗里**（2026-09-20 用户口径：
-    // 服务进程启动与课程解耦）——它们在开课弹窗。
+    // ★ 课程级选项**不在启动弹窗里**（2026-09-20 用户口径：服务进程启动与课程解耦）——它们在开课弹窗。
     expect(modal).not.toContain('训练模式')
-    expect(code('web/app/panels/OpenCourseModal.tsx')).toContain('训练模式')
+    // ★M4：开课弹窗也不再选「训练模式」（在线/离线已随 M1c 退役；归谁由自主 worker 的 claim
+    // 决定）——它只剩 rollout 位置（与接管正交），并明说接管不在这里选。
+    const open = code('web/app/panels/OpenCourseModal.tsx')
+    expect(open).not.toMatch(/['"]训练模式['"]/)
+    expect(open).toContain('rollout 执行位置')
+    expect(open).toContain('云机接管不在这里选')
   })
 
   it('launch 动作面不再传 mode / endpoint / authKey', () => {

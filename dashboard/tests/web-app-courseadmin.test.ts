@@ -79,13 +79,16 @@ describe('课程管理页 · 封存两步（预演 → 确认）', () => {
     expect(panelSrc).toContain("preview.phase === 'apply' ? '封存失败'")
   })
 
-  it('行内动作面齐全：查看 / 开课·停课 / 暂停·恢复 / 切离线·在线 / 交还自动池 / 封存', () => {
+  it('行内动作面齐全：查看 / 开课·停课 / 暂停·恢复 / 强制解除接管 / 封存', () => {
     expect(panelSrc).toContain("onAction('stopCourse', { course: r.course })")
     expect(panelSrc).toContain("onAction('setCoursePaused'")
-    expect(panelSrc).toContain("onAction('setCourseMode'")
-    // ★ 2026-10-03（plan/auto-offline-handoff T3）：交还自动池 = `pin=0` + 删意图，
-    //   与「切换成在线」（pin=1 永久固定）是**两件事**——面板侧必须是两颗钮。
-    expect(panelSrc).toContain("onAction('unsetCourseMode', { course: r.course })")
+    // ★M4（plan/worker-type-dispatch-model §3-M4）：三颗模式钮（切离线/切换成在线/交还自动池）
+    //   随模式语义一起退役——「这门课归谁」只有一个真源（hub 的 hold），人唯一能干预的动作是
+    //   「强制解除接管」（`release_hold=1`），且**只在真有接管时**才画（`r.canReleaseHold`）。
+    expect(panelSrc).toContain("onAction('releaseCourseHold', { course: r.course })")
+    expect(panelSrc).toContain('r.canReleaseHold')
+    expect(panelSrc).not.toContain("onAction('setCourseMode'")
+    expect(panelSrc).not.toContain("onAction('unsetCourseMode'")
     expect(panelSrc).toContain('onOpenCourseFor')
     expect(panelSrc).toContain('archiveOp')
   })

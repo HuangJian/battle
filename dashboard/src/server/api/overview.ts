@@ -25,6 +25,8 @@ import type { RlConfig } from '../../core/types'
 import { hubOfflineAdmin, hubPushWorkers, liveHub, withWorkerProbes } from '../../stack/hub-admin'
 import { hubPushEnabled } from '../../stack/push-config'
 import {
+  type HubHoldView,
+  type HubPendingExportView,
   type HubQueueView,
   type OfflineLeaseView,
   type OfflineResultView,
@@ -38,6 +40,7 @@ import {
   latestIterFromLedgerTail,
   overviewCourseNames,
 } from '../../web/view'
+import { writeHeldCache } from '../actions/loop-control'
 import { readLedgerTail } from './logs'
 
 // ────────────────────────── 共享 trainer 存活（「在训」的进程事实） ──────────────────────────
@@ -79,6 +82,13 @@ interface HubAdmin {
   offlineResults: Record<string, Record<string, OfflineResultView>> | null
   /** 停滞告警（`/admin/offline.stalled`；T8）；null = hub 不可达 / 旧版 hub。 */
   offlineStalled: OfflineStalledView[] | null
+  /** **逐课接管**（★M4：hub `/admin/queue` 每课行的 `hold`；从 `queue` 读取，零新增探测）。
+   *  空表 = 本拍没人被接管（含 hub 不可达——那一种由 `url===null`/`stale` 另行标注）。 */
+  holds: Record<string, HubHoldView>
+  /** **逐课导包软态**（★M4：`pending_export`；同上）。 */
+  pendingExports: Record<string, HubPendingExportView>
+  /** 近期报过到的自主盘（★P2-5；hub `offline_disk.recent`）；`null` = 旧 hub 未上报。 */
+  offlineDisks: string[] | null
   /** 读面新鲜度（P1-11）：非 null = 这是**上一拍**的 hub 事实（探测失败但还在保值窗口内）。
    *  `null` = 本拍探测成功，或已经超窗退化（那时 `url === null`，显式未知）。 */
   stale: ReadStaleView | null
@@ -96,12 +106,47 @@ interface HubProbe {
   leases: Record<string, OfflineLeaseView> | null
   offlineResults: Record<string, Record<string, OfflineResultView>> | null
   offlineStalled: OfflineStalledView[] | null
+  /** 从 `/admin/queue` 逐课行抽出的接管/导包/露面面（★M4；同一份应答，零新增网络）。 */
+  holds: Record<string, HubHoldView>
+  pendingExports: Record<string, HubPendingExportView>
+  offlineDisks: string[] | null
   /** worker 直探（id → online/busy；停用/无 key = 缺席）。 */
   workerPing: Map<string, { online: boolean | null; busy: boolean | null }>
 }
 
-/** rl-config 里的 push worker 行（未探活）。 */
-function workerRows(cfg: RlConfig): Array<Omit<PushWorkerView, 'online' | 'busy'>> {
+/** 从队列视图抽逐课接管面（纯函数；hub 不可达 ⇒ 两张空表）。 */
+function holdFacts(queue: HubQueueView | null): {
+  holds: Record<string, HubHoldView>
+  pendingExports: Record<string, HubPendingExportView>
+  offlineDisks: string[] | null
+} {
+  const holds: Record<string, HubHoldView> = {}
+  const pendingExports: Record<string, HubPendingExportView> = {}
+  for (const [course, row] of Object.entries(queue?.courses ?? {})) {
+    if (row.hold) holds[course] = row.hold
+    if (row.pendingExport) pendingExports[course] = row.pendingExport
+  }
+  return { holds, pendingExports, offlineDisks: queue?.offlineDisks ?? null }
+}
+
+/** **worker 类型**（★P2-5；纯函数，便于单测）：持 hold / 自主盘报过到 ⇒ autonomous；
+ *  否则只在队列在飞或 hub 登记表里出现 ⇒ collaborative；两个面都没有 ⇒ null（不猜）。 */
+export function workerKindOf(
+  id: string,
+  facts: { holds: Record<string, HubHoldView>; offlineDisks: string[] | null },
+  inflightHolders: Set<string>,
+  hubRegistered: boolean,
+): PushWorkerView['kind'] {
+  if (!id) return null
+  for (const h of Object.values(facts.holds))
+    if (h.workerId && h.workerId === id) return 'autonomous'
+  if (facts.offlineDisks?.includes(id)) return 'autonomous'
+  if (inflightHolders.has(id)) return 'collaborative'
+  return hubRegistered ? 'collaborative' : null
+}
+
+/** rl-config 里的 push worker 行（未探活；`kind` 由 `getHubAdmin` 按 hub 观测面补）。 */
+function workerRows(cfg: RlConfig): Array<Omit<PushWorkerView, 'online' | 'busy' | 'kind'>> {
   return (cfg.nodes ?? [])
     .filter((n) => n.gpu_push === true)
     .map((n) => ({
@@ -141,6 +186,9 @@ function emptyProbe(): HubProbe {
     leases: null,
     offlineResults: null,
     offlineStalled: null,
+    holds: {},
+    pendingExports: {},
+    offlineDisks: null,
     workerPing: new Map(),
   }
 }
@@ -187,6 +235,16 @@ export async function getHubAdmin(cfg: RlConfig, course: string): Promise<HubAdm
   const withinWindow = hubKeepWithin(hubFailSince)
   if (failed && !withinWindow) p = emptyProbe()
   const stale: ReadStaleView | null = failed ? { since: hubFailSince, reason: hubLastError } : null
+  // ★M4：接管面**就在这份探测里**（`/admin/queue` 每课行）——与面板同席写训练侧的
+  // `held` 缓存（那个文件的写侧契约见 `actions/loop-control.ts` 末段：同一份事实两次读 =
+  // 两个时刻的真相，所以必须与面板读的是同一拍）。写失败不抛（纯缓存，训练侧还有直问 hub 的主通道）。
+  writeHeldCache(
+    Object.entries(p.holds).map(([course, h]) => ({ course, lastProgressAt: h.lastProgressAt })),
+  )
+  const inflightHolders = new Set<string>()
+  for (const row of Object.values(p.queue?.courses ?? {})) {
+    for (const d of row.inflightDetail) if (d.worker) inflightHolders.add(d.worker)
+  }
   return {
     url: p.url,
     queue: p.queue,
@@ -195,11 +253,15 @@ export async function getHubAdmin(cfg: RlConfig, course: string): Promise<HubAdm
     leases: p.leases,
     offlineResults: p.offlineResults,
     offlineStalled: p.offlineStalled,
+    holds: p.holds,
+    pendingExports: p.pendingExports,
+    offlineDisks: p.offlineDisks,
     stale,
     workers: workerRows(cfg).map((w) => ({
       ...w,
       online: p.workerPing.get(w.id)?.online ?? null,
       busy: p.workerPing.get(w.id)?.busy ?? null,
+      kind: workerKindOf(w.id, p, inflightHolders, p.pushMap?.has(w.id) ?? false),
     })),
   }
 }
@@ -218,10 +280,12 @@ async function probeHubAdmin(cfg: RlConfig, course: string): Promise<HubProbe> {
   const [pushMap, offlineAdmin] = live
     ? await Promise.all([hubPushWorkers(live.url, token), hubOfflineAdmin(live.url, token)])
     : [null, null]
+  const facts = holdFacts(live?.queue ?? null)
   return {
     url: live?.url ?? null,
     queue: live?.queue ?? null,
     pushMap,
+    ...facts,
     offline: offlineAdmin?.progress ?? null,
     // ★ 2026-10-05（P0-11）：租约一览（beat_at/stale/revoked）与进度同一次 `/admin/offline`
     // 应答；旧 hub 无 leases 键 ⇒ null（parseOfflineLeases 兜底）。
@@ -310,7 +374,6 @@ export async function buildOverview(
     activeWorkers: admin.queue?.activeWorkers ?? 0,
     halt: admin.queue?.halt ?? false,
     recentDispatch: admin.queue?.cursor ?? null,
-    offline: admin.queue?.offline ?? [],
     offlineProgress: admin.offline,
     offlineStalled: admin.offlineStalled,
     // P2-1：租约一览透到读面（告警坞文案补 revoked/stale-holder 两态用；矩阵徽标也读它）。

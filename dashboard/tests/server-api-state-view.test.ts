@@ -38,9 +38,11 @@ describe('console/api.buildStateView', () => {
     expect(s.courses).toBeInstanceOf(Array)
   })
 
-  it('★2026-09-24 courseRolloutSrc：**逐课**生效 rollout 源（课程矩阵要按行判「配置没跟上」）', async () => {
-    // 为什么必须逐课：`modes.rolloutSrc` 只有**查看课程**一个（开课弹窗用），而那张表是逐行
-    // 全课表——非当前课程的行没有这一格，就判不出「hub 与意图都回到在线、配置还是 run」。
+  it('★M4：状态面不再带「意图 / 逐课 rollout 源」；存量 rollout_src=run 读成 local', async () => {
+    // 旧 `courseRolloutSrc` / `courseModeIntents` 两个字段随模式语义退役（plan §3-M4）：
+    // 「这门课归谁」不再是控制台的一个声明，而是 hub 的 hold 事实（逐课行随 /admin/queue）。
+    // 这里钉的是「两个字段真的不见了」——留着就会有旧客户端读它做漂移判断（退役值 `run`
+    // 的容忍读在 `rollout-src-launch-option.test.ts` 里逐条钉）。
     const before = readConfigText()
     try {
       const cfg = JSON.parse(before) as Record<string, unknown>
@@ -50,11 +52,10 @@ describe('console/api.buildStateView', () => {
         'utf-8',
       )
       const s = await api.buildStateView()
-      expect(s.courseRolloutSrc?.['p4-fast']).toBe('run')
-      // 没有课程级覆盖的课回落到全局/缺省（local）—— 不编一个假的「离线」
-      for (const c of s.courses.filter((x) => x !== 'p4-fast')) {
-        expect(s.courseRolloutSrc?.[c]).toBe('local')
-      }
+      expect(s).not.toHaveProperty('courseRolloutSrc')
+      expect(s).not.toHaveProperty('courseModeIntents')
+      // 弹窗那格还在（查看课程的生效值）——但它只回答「rollout 位置」，不再被拿去判接管。
+      expect(['local', 'node', 'auto'] as string[]).toContain(String(s.modes.rolloutSrc))
     } finally {
       writeFileSync(scratchConfig, before, 'utf-8')
     }

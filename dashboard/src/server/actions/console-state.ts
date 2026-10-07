@@ -50,33 +50,13 @@ export interface ConsoleState {
    *  recovered=灰横幅历史，不复位删除，确保"曾停机"可见。旧单键 `cloudHalt`
    *  在加载时一次性折叠进本表（键取当时的 `course`）。 */
   cloudHalts?: Record<string, CloudHaltInfo>
-  /** 每课 hub 派发模式**意图**（R3-2，additive）：`offline` = 只收回传、不实时派发。
-   *
-   *  为什么要在控制台落一份：hub 的 `mode` 是 **volatile**（重启回启动参数给的模式）
-   *  ——「这门课先别派活」是运维的决定，不该随 hub 的重启蒸发。所以控制台记住意图，
-   *  并在每次起 hub 时回灌（见 `actions/course-mode.ts::restoreCourseModes`）。
-   *
-   *  ★ 2026-10-03（plan/auto-offline-handoff §3.2a，二轮 P0-3）：**三态**——`unset`（或键不存在）
-   *  = 人没管过（自动交接池：离线盘 claim 即接管）；`online`/`offline` = 人的决定（带 pin，
-   *  自动逻辑不再插手）。**开课未显式选模式、自动交接写入都不落这张表**——否则回灌会把
-   *  每一门开过的课都钉成 `online`，自动交接永不发生。
-   *
-   *  ★ 2026-10-05（plan/offline-online-status-switch §3.9 / P1-8，**意图表 v2**）：值升级为
-   *  `{mode, pinned}`——`pinned:true` = 那颗开关（人固定）；`pinned:false` = 开课弹窗/停课的
-   *  一次性选择。**旧裸串按 `{mode, pinned:false}` 归一**（读时归一、写入一律 v2）：F9 之前
-   *  「每门开过的课都被写过 online」，一次性把噪声 pin 上会关掉整套自动交接——要固定请再点
-   *  一次那颗开关。类型仍允许旧值：回灌/读取要能吃历史盘。 */
-  courseModes?: Record<
-    string,
-    { mode: 'online' | 'offline'; pinned: boolean } | 'online' | 'offline' | 'unset'
-  >
-  /** 每课「切离线前生效的那个非 run rollout 源」（2026-09-24，additive）。
-   *
-   *  「离线」会把 `courses.<课>.rollout_src` **覆写**成 `run`，于是显式选过 `node` 的课一下离线
-   *  再切回在线，那格已经找不回来了（静默降成 `local`）。开课路径没这个问题（弹窗每次都重选），
-   *  **热切的一次点击往返**才把它变成可达 ⇒ 切离线时把当前生效源记在这里，切回在线时恢复。
-   *  只记 `node`/`auto`（`local` 是缺省值，记了只是噪声）。 */
-  courseRolloutSrc?: Record<string, RolloutSrcMode>
+  // ★M4（2026-10-07，plan/worker-type-dispatch-model §3-M4）：原来的两个模式键
+  //   （`courseModes` 每课派发**意图** + `courseRolloutSrc` 热切前的 rollout 源快照）已随
+  //   「课程不再区分在线/离线」一起删除 —— 「这门课归谁」今天只由 hub 的 **hold** 回答
+  //   （云机 claim 成功且有进度才建立；掉线 900s 自动解除），控制台不再持有意图、也不再
+  //   需要回灌（没有 volatile 的 hub 侧模式可丢）。盘上遗留的旧键**不进内存态**：
+  //   `loadConsoleState` 只合并已声明的字段，多余键被忽略（与 2026-09-19 删 `trainerPpo`
+  //   同一套宽容读）。
 }
 
 const DEFAULT_STATE: ConsoleState = { course: '', activeCourse: '' }
@@ -93,8 +73,6 @@ export function loadConsoleState(): ConsoleState {
       merged.cloudHalts = raw.cloudHalt ? { [merged.course || '']: raw.cloudHalt } : {}
     }
     merged.cloudHalts = merged.cloudHalts ?? {}
-    merged.courseModes = merged.courseModes ?? {}
-    merged.courseRolloutSrc = merged.courseRolloutSrc ?? {}
     delete (merged as unknown as Record<string, unknown>).cloudHalt
     return merged
   } catch {

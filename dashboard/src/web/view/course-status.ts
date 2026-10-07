@@ -7,8 +7,8 @@
  *  派生函数；渲染器只决定「词怎么说」（pill 用自己的细词，矩阵映射到粗词），不决定「是什么」。
  *
  *  事实来源与纪律：
- *    · **authority 不在这里猜**：hub 的 `/admin/queue` 每课行带 `authority`（P0-11），
- *      dashboard 只读（`CourseOverviewRow.authority`）——派生实现在 hub 的 `authority_of`；
+ *    · **接管（hold）不在这里猜**：hub 的 `/admin/queue` 每课行带 `hold`（★M1b），
+ *      dashboard 只读（`CourseOverviewRow.hold`）——活性（进度）由 hub 判（`hold_state`）；
  *    · **未知 ≠ 否定**：hub 探针失败 / 训练侧空行都是「不知道」，读面按 R4-g 标注，
  *      不得渲染成「未在训 / hub 不认」这类肯定判断（那是读面自己的缺陷）；
  *    · **滞回**：词只随派生值变化；来源可用性变化（读面失败/恢复）只改 `stale` 标注、
@@ -112,12 +112,12 @@ export type CourseStatusKind =
   | 'blocked'
   /** 已开课但共享 trainer 没在跑（启动服务进程就会入队）。 */
   | 'waiting-process'
-  /** 控制台意图与 hub 事实不一致（意图没落地）。 */
-  | 'intent-drift'
-  /** 离线（云机整段接手）∧ 已有段内产物回传。 */
-  | 'offline-running'
-  /** 离线（云机整段接手）∧ 还没有任何段内产物回传。 */
-  | 'offline-waiting'
+  /** **接管中**（自主 worker 在跑这段）∧ 已有段内产物回传（★M4 词：云机执行中）。 */
+  | 'autonomous-running'
+  /** **接管中** ∧ 还没回传任何段内产物（★M4 词：等云机接管，含「导包软态」）。 */
+  | 'autonomous-waiting'
+  /** **接管掉线**（进度静默超阈）：自动恢复协作派发（★M4 词）。 */
+  | 'autonomous-stale'
   /** hub 有在飞（未超阈）。 */
   | 'dispatch-inflight'
   /** hub 有在飞但龄超阈（有持有者，无进度）。 */
@@ -134,8 +134,8 @@ export type CourseStatusKind =
   | 'collecting'
   | 'ready'
   | 'idle'
-  /** 训练侧的「离线 = 等待」（P1-1/P1-3，不是收官）。 */
-  | 'offline-wait'
+  /** 训练侧的「接管中」等待词（M2 的 `held`；详见 `loop-queue.ts::LoopWaitKind`）。 */
+  | 'held-wait'
   /** 在训但 hub 不认（矩阵冲突档）。 */
   | 'hub-unregistered'
   /** hub 认且在派活、训练侧没进程（矩阵冲突档）。 */
@@ -145,8 +145,10 @@ export type CourseStatusKind =
   /** 在训（hub 无应答时也能知道的粗档；矩阵用）。 */
   | 'training'
 
-/** 这一词来自哪一类事实（R4-g 的来源标注；不是第二份判据）。 */
-export type CourseStatusSource = 'registry' | 'marker' | 'intent' | 'hub' | 'loop' | 'unknown'
+/** 这一词来自哪一类事实（R4-g 的来源标注；不是第二份判据）。
+ *
+ *  ★M4：`'intent'` 随意图表一起退役（没有「控制台意图 vs hub 事实」这层可漂移的东西了）。 */
+export type CourseStatusSource = 'registry' | 'marker' | 'hub' | 'loop' | 'unknown'
 
 /** 派生输出（pill 与矩阵**读同一份**；§3.10 的 `{state, source, stale, title}`）。 */
 export interface CourseStatus {
@@ -177,8 +179,6 @@ export interface CourseStatusInput {
   hubOnline: boolean
   /** **这门课此刻有存活进程**：pill 传共享 trainer 存活；矩阵由行自己推（`lq.training`）。 */
   trainerRunning: boolean
-  /** 控制台记录的每课派发**意图**（与 hub 事实不一致 = 「意图未生效」）。 */
-  modeIntents?: Record<string, 'online' | 'offline'> | null
   /** 登记在册的 push worker id（holder 不在表里 ⇒ 悬停点名）。 */
   registeredWorkers?: string[] | null
   /** hub 读面新鲜度（`ParallelOverviewView.stale`）；缺省 = 本拍读成功。 */
@@ -217,6 +217,64 @@ function statusOf(
   }
 }
 
+// ────────────────────────── 接管（hold）的词（★M4） ──────────────────────────
+//
+// 三个纯函数把一份 `HubHoldView` ＋ 段内轮数说成词/调子/悬停：**词表只有一处**（
+// plan §3-M4 定的三词 + 一个「导包中」预警），pill 与矩阵都从这里读（R4-a 的纪律：
+// 同一件事不得在两处各起一个名字）。
+
+/** hold → 语义档。三态：live+有回传 ⇒ 云机执行中；live+零回传 ⇒ 等云机接管；stale ⇒ 接管掉线。 */
+export function holdKind(
+  hold: NonNullable<CourseOverviewRow['hold']>,
+  rounds: number,
+): CourseStatusKind {
+  if (hold.state === 'stale') return 'autonomous-stale'
+  return rounds > 0 ? 'autonomous-running' : 'autonomous-waiting'
+}
+
+/** hold → 展示词（pill 与矩阵同词；矩阵那一列另有自己的粗词，见 `course-matrix.ts`）。 */
+export function holdWord(hold: NonNullable<CourseOverviewRow['hold']>, rounds: number): string {
+  if (hold.state === 'stale') return '接管掉线'
+  return rounds > 0 ? '云机执行中' : '等云机接管'
+}
+
+/** hold → 调子：执行中绿；等接管黄；**掉线黄不要红**——它已经自愈（协作派发恢复），不是故障。 */
+export function holdTone(
+  hold: NonNullable<CourseOverviewRow['hold']>,
+  rounds: number,
+): CoursePillTone {
+  if (hold.state === 'stale') return 'y'
+  return rounds > 0 ? 'g' : 'y'
+}
+
+/** hold → 悬停全文（把「谁在跑、多久没回传、掉线后发生了什么」一次说完）。 */
+export function holdTitle(course: string, ov: CourseOverviewRow, wait: string): string {
+  const hold = ov.hold
+  if (!hold) return ''
+  const who = hold.workerId || '未登记持有者'
+  const age =
+    hold.lastProgressAt > 0
+      ? `最近一次进度 ${ageLabel(Date.now() / 1000 - hold.lastProgressAt)} 前`
+      : '还没有进度信号'
+  const rounds =
+    ov.offlineRounds > 0
+      ? `已回传段内 ${ov.offlineRounds} 轮（最新 it${ov.offlineLastIter ?? '—'}）`
+      : '还没有任何段内产物回传'
+  if (hold.state === 'stale') {
+    return (
+      `接管掉线：持有人「${who}」${age}（超进度阈）——**协作派发与本机采样已自动恢复**` +
+      `（在队任务照常可领；被释放的 worker 若还活着，它的产物只归档）。${rounds}。` +
+      `新自主盘可直接 claim 接管（无需人工）。${wait}`
+    )
+  }
+  return (
+    `${course} 正被自主 worker「${who}」接管（接管建立时 hold 才存在）：该课对协作 worker ` +
+    `压下不派 + 本机不跑（held 等待）；${age}；${rounds}。` +
+    '活性**只认进度信号**（心跳不算）——15 分钟无进度自动解除，到控制台可「强制解除接管」。' +
+    `进度明细见课程矩阵的「接管」列 · ${wait}`
+  )
+}
+
 /** 这门课是否「在训」（矩阵冲突判据；两侧同源：有训练侧行就信它，否则信 hub 行的开课标记）。 */
 function isTraining(lq: LoopQueueRow | null, ov: CourseOverviewRow | null): boolean {
   return lq ? lq.training : (ov?.training ?? false)
@@ -229,11 +287,13 @@ function isTraining(lq: LoopQueueRow | null, ov: CourseOverviewRow | null): bool
  *   ⓪ 账本尾行 `run_complete` 的停车态 ⇒ `done`（终态；它比「行缺失」更知道答案）；
  *   ① 调度器行缺失 ⇒ `unknown`（读面不可用，不是「空闲」）；
  *   ② 暂停意图 / 已收官 / 已中止 / **配置不可开课**；
- *   ③ 意图未生效（意图 ∧ hub 认得 ∧ 两侧不一致）；
- *   ④ hub 离线（回传维度；与本地进程死活正交，排在下一档之前）；
- *   ⑤ 已开课但没进程 ⇒ `waiting-process`；
- *   ⑥ hub 派发态（在飞 / 卡住 / 排队·无人取 / 预取中）；
- *   ⑦ 训练侧「在等什么」四态 + 离线等待（P1-3）。
+ *   ③ **接管（hold）**（★M4：live = 云机执行中/等接管；stale = 接管掉线、已恢复协作）；
+ *   ④ 已开课但没进程 ⇒ `waiting-process`；
+ *   ⑤ hub 派发态（在飞 / 卡住 / 排队·无人取 / 预取中）；
+ *   ⑥ 训练侧「在等什么」五态 + 接管等待（M2 的 `held`）。
+ *
+ *  ★M4（plan §3-M4）：原来的 ③「意图未生效」与 ④「hub 离线（回传）」两档都随课程去
+ *  模式化消失——前者没了意图表，后者没了 `mode`；「谁在跑这门课」只剩 hold 一个真源。
  *
  * 冲突档（`hub-unregistered` / `hub-no-process`）与主词正交：矩阵状态列会把它们前置成
  * 警告词（那是矩阵独有的信号），pill 只把它写进悬停；**两者出自同一个 `isTraining` 判据**。
@@ -262,7 +322,7 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
   const conflict: CourseStatus['conflict'] =
     training && hubKnown && !ov!.hubSeen
       ? 'hub-unregistered'
-      : !training && hubKnown && ov!.hubSeen && !ov!.offline
+      : !training && hubKnown && ov!.hubSeen && !ov!.hold
         ? 'hub-no-process'
         : null
   /** 本课冲突档随词一起出（所有分支默认带上它；个别分支显式覆盖）——矩阵用它升级成警告词。 */
@@ -315,7 +375,7 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
         { conflict: 'hub-unregistered' },
       )
     }
-    if (ov.hubSeen && !ov.offline && !training) {
+    if (ov.hubSeen && !ov.hold && !training) {
       return out(
         input,
         'hub-no-process',
@@ -327,13 +387,13 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
         { conflict: 'hub-no-process' },
       )
     }
-    if (ov.offline) {
+    if (ov.hold) {
       return out(
         input,
-        'offline-waiting',
-        `离线（只收回传）`,
-        'y',
-        'hub 把这门课标为离线：不实时派发 PPO，只接收 it 权重/指标回传（本机训练与账本不动）',
+        holdKind(ov.hold, ov.offlineRounds),
+        holdWord(ov.hold, ov.offlineRounds),
+        holdTone(ov.hold, ov.offlineRounds),
+        holdTitle(input.course, ov, ''),
         'hub',
       )
     }
@@ -400,46 +460,32 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
     )
   }
   const hub = ov
-  const intent = input.modeIntents?.[input.course]
-  // ③ 意图 vs hub 事实（只有两侧都读得到才判；hub 不认识它 = 只有一侧事实，不编漂移）。
-  if (intent && hub?.hubSeen && hub.offline !== (intent === 'offline')) {
+  // ③ **接管（hold）**：★M4 取代了原来的「意图 vs hub 事实」与「hub 离线（回传）」两档。
+  //    它排在「进程没跑」之前：接管是 hub 侧事实，与本地进程死活正交——一门被云机接管的课
+  //    不该因为本机 trainer 没起就显示「待进程」（它会误导操作员去启动本机进程，而该课此刻归云机）。
+  if (hub?.hold) {
     return out(
       input,
-      'intent-drift',
-      '意图未生效',
-      'y',
-      `控制台意图是「${intent === 'offline' ? '离线' : '在线'}」，而 hub 现在把 ${input.course} 当「${
-        hub.offline ? '离线' : '在线'
-      }」——意图没落地（常见成因：hub 刚重启，回灌跑在它发现这门课之前）。` +
-        '在课程矩阵里点该课「切离线/切换成在线」再推一次（幂等），或点「hubServer」回灌全部意图。' +
-        ` · ${wait}`,
-      'intent',
+      holdKind(hub.hold, hub.offlineRounds),
+      holdWord(hub.hold, hub.offlineRounds),
+      holdTone(hub.hold, hub.offlineRounds),
+      holdTitle(input.course, hub, wait),
+      'hub',
     )
   }
-  // ④ hub 离线（回传维度）：进度断言只认真的收到过产物（R4-a 的「回传中」教训）。
-  //    ★ 它排在「进程没跑」之前：离线是 hub 的**模式**，与本地进程死活正交——
-  //    一门被云机接手的课不该因为本机 trainer 没起就显示「待进程」（它会误导操作员
-  //    去启动本机进程，而该课此刻归云机）。
-  if (hub?.offline) {
-    if (hub.offlineRounds > 0) {
-      return out(
-        input,
-        'offline-running',
-        '回传中',
-        'g',
-        `hub 离线（只收回传）：本段由云机整段执行，已回传 ${hub.offlineRounds} 轮` +
-          `${hub.offlineLastIter == null ? '' : `（最新 it${hub.offlineLastIter}）`} · ${wait}`,
-        'hub',
-      )
-    }
+  // ③' **导包软态**（`pending_export`）：有人正给这门课造包，但**还没建 hold**——它不占任何闸
+  //   （本机照跑、照派发），所以词要说得轻（「导包中」），不能画成「云机已接手」（那会让
+  //   操作员以为本机该停）。位置在 hold 之后、调度词之前：它是「这件课即将被接管」的预告。
+  if (hub?.pendingExport && !hub.hold) {
     return out(
       input,
-      'offline-waiting',
-      '等云机',
+      'autonomous-waiting',
+      '导包中',
       'y',
-      'hub 离线（只收回传）：本段交给云机整段执行，但**还没有任何段内产物回传**——' +
-        '云机可能还没取走任务包、或还在跑第一轮（本地 hub 只收回传、不实时派发）。' +
-        `进度与「最近多久没动」见课程矩阵的「段内」列 · ${wait}`,
+      `${input.course} 有自主 worker 已认领（hub 的 pending_export，触发方 ` +
+        `${hub.pendingExport.by || '未知'}）——控制台正在导出任务包；**包到手前不建接管**：` +
+        '本机照跑、协作照派（软态不占闸）。包写好且 claim 成功后才进入「接管中」。' +
+        ` · ${wait}`,
       'hub',
     )
   }
@@ -562,20 +608,21 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
       'hub',
     )
   }
-  // ⑦ 训练侧「在等什么」。★P1-3：离线课的 python 侧等待词（不是收官）。
+  // ⑦ 训练侧「在等什么」。
   // `blocked` 不在这里另列一档：上面 `!openable.ok || waiting.kind === 'blocked'` 已拦，
   // 列出即与窄化后的类型冲突（TS2678）——起不来的唯一出口就是上面的红档。
   switch (lq.waiting.kind) {
-    // ★M2：`held` = 训练侧新词（该课被接管：云机在跑这段）——与旧 python 的 `offline` 同一席
-    //（共存窗口的宽容读；词表重写与 `offline` 的删除属 M4）。
-    case 'offline':
+    // ★M4（词表定稿）：训练侧的接管等待词是 **`held-wait`**「接管中（云机）」——闲词 `offline`
+    // 已随 rollout_src 写面一起退役（见 `LoopWaitKind` 头注）。
+    // 判据是训练侧自己的 held（双通道：直问 hub ∨ 控制文件的缓存，见 `trainer/loop_hold.py`）。
     case 'held':
       return out(
         input,
-        'offline-wait',
+        'held-wait',
         '接管中（云机）',
         'y',
-        `本机不跑这门课：该课正被自主 worker 接管（作业照常发布、由协作 worker 取）。${wait}`,
+        `本机不跑这门课：该课正被自主 worker 接管（作业照常发布、由协作 worker 取）；` +
+          `15 分钟无回传会自动恢复协作派发。${wait}`,
         'loop',
         { conflict },
       )

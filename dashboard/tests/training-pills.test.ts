@@ -26,6 +26,7 @@ import path from 'path'
 import type {
   ConsoleStateView,
   CourseOverviewRow,
+  HubHoldView,
   HubInflightView,
   LoopQueueRow,
   ParallelOverviewView,
@@ -68,7 +69,10 @@ function ovRow(course: string, over: Partial<CourseOverviewRow> = {}): CourseOve
     course,
     training: true,
     iter: 37,
-    offline: true,
+    // ★M4：接管是「云机在跑这门课」的唯一真源（旧 `offline` 布尔已退役）。缺省不接管；
+    //  专测接管的用例自己传 `hold`（用 `hold()` 夹具）。
+    hold: null,
+    pendingExport: null,
     hubSeen: true,
     queuePending: 0,
     inflight: 0,
@@ -85,7 +89,19 @@ function ovRow(course: string, over: Partial<CourseOverviewRow> = {}): CourseOve
   }
 }
 
-/** hub 侧总览视图（`offline` 名集按行推，与 buildCourseRows 同口径）。 */
+/** 接管夹具（★M4）：逐字段与 hub `queue_state` 的 `hold` 块同形。
+ *
+ *  `lastProgressAt: 0` = 「还没有进度信号」——本组用例钉的是**词**（状态与轮数），
+ *  不依赖墙钟（`holdWord` 的输入只有 `state` 与 `offlineRounds`）。 */
+function hold(
+  workerId: string,
+  state: 'live' | 'stale' = 'live',
+  over: Partial<HubHoldView> = {},
+): HubHoldView {
+  return { workerId, state, lastProgressAt: 0, at: 0, expiresIn: 870, ...over }
+}
+
+/** hub 侧总览视图（与 `buildCourseRows` 同口径：每课行的 `hold` 随行带）。 */
 function ov(...rows: CourseOverviewRow[]): ParallelOverviewView {
   return {
     hubUrl: 'http://hub:8787',
@@ -94,7 +110,6 @@ function ov(...rows: CourseOverviewRow[]): ParallelOverviewView {
     activeWorkers: 0,
     halt: false,
     recentDispatch: null,
-    offline: rows.filter((r) => r.offline).map((r) => r.course),
     rows,
     offlineProgress: null,
   }
@@ -161,73 +176,79 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
     expect(view.coursePills({ ...base, loopCompletes: {} })[0]!.status).toBe('推进中')
   })
 
-  it('★2026-09-22：离线课 pill 不提本地「推进中/采集中」，走「回传」维度（段由云机整段执行）', () => {
+  it('★M4：被接管的课 pill 不提本地「推进中/采集中」，走「云机执行中」（整段由云机跑）', () => {
     const p = view.coursePills({
       courses: ['x20-off'],
       rows: [
         row({ course: 'x20-off', waiting: { kind: 'ready', text: '无外部等待，下一步 ppo' } }),
       ],
       trainerRunning: true,
-      overview: ov(ovRow('x20-off', { offlineRounds: 7, offlineLastIter: 42 })),
+      overview: ov(
+        ovRow('x20-off', {
+          hold: hold('tpu-1'),
+          offlineRounds: 7,
+          offlineLastIter: 42,
+        }),
+      ),
     })[0]!
-    expect(p).toMatchObject({ course: 'x20-off', status: '回传中', tone: 'g' })
-    expect(p.title).toContain('只收回传')
-    expect(p.title).toContain('已回传 7 轮')
-    // 确定性事实（暂停 / 收官 / 中止）优先级不被动摇：离线课也仍报「已暂停」
+    expect(p).toMatchObject({ course: 'x20-off', status: '云机执行中', tone: 'g' })
+    expect(p.title).toContain('接管')
+    expect(p.title).toContain('已回传段内 7 轮')
+    // 确定性事实（暂停 / 收官 / 中止）优先级不被动摇：被接管的课也仍报「已暂停」
     const paused = view.coursePills({
       courses: ['x20-off'],
       rows: [row({ course: 'x20-off', pausedIntent: true, pauseApplied: true })],
       trainerRunning: true,
-      overview: ov(ovRow('x20-off', { offlineRounds: 7 })),
+      overview: ov(ovRow('x20-off', { hold: hold('tpu-1'), offlineRounds: 7 })),
     })[0]!
     expect(paused.status).toBe('已暂停')
   })
 
-  it('★2026-09-23：离线 ∧ **0 回传** ⇒ 「等云机」（不说「回传中」——那是进度断言）', () => {
-    // 用户报障原文：三个离线课「两个显示「回传中」，一个显示「等回传」，实际上三个都没有被
-    // 云机接收」。旧形状只能回答「hub 说不说它离线」，于是把「还没取走包」写成「回传中」
-    // ——读着像在跑（而 hub 侧离线段进度是空的）。0 回传只能说「等云机」。
+  it('★M4：接管 ∧ **0 回传** ⇒ 「等云机接管」（不说「云机执行中」——那是进度断言）', () => {
+    // 用户报障原文（2026-09-23）：三个离线课「两个显示「回传中」，一个显示「等回传」，实际上
+    // 三个都没有被云机接收」。旧形状只能回答「hub 说不说它离线」，于是把「还没取走包」写成
+    // 「回传中」——读着像在跑（而 hub 侧离线段进度是空的）。0 回传只能说「等云机」。
     const p = view.coursePills({
       courses: ['x20-a', 'x20-b'],
       rows: [row({ course: 'x20-a' }), row({ course: 'x20-b' })],
       trainerRunning: true,
-      overview: ov(ovRow('x20-a'), ovRow('x20-b')),
+      overview: ov(
+        ovRow('x20-a', { hold: hold('tpu-a') }),
+        ovRow('x20-b', { hold: hold('tpu-b') }),
+      ),
     })
     expect(p.map((x) => [x.status, x.tone])).toEqual([
-      ['等云机', 'y'],
-      ['等云机', 'y'],
+      ['等云机接管', 'y'],
+      ['等云机接管', 'y'],
     ])
     expect(p[0]!.title).toContain('还没有任何段内产物回传')
   })
 
-  it('★2026-09-23：意图与 hub 事实不一致 ⇒ 「意图未生效」（那个「等回传」的真相）', () => {
-    // 三个离线课里那个显示「等回传」的，正是 hub 侧还留在 online 的那一门：pill 此前读的是
-    // 本地 waiting 词（等远端回传），看着像正常的在线课。两个源摆在一起才看得见失配。
-    const p = view.coursePills({
-      courses: ['x20-drift'],
-      rows: [row({ course: 'x20-drift', waiting: { kind: 'inflight', text: '等远端回传' } })],
+  it('★M4：接管是唯一真源——live 压过本地等待词、stale 说「接管掉线」、无接管才回落本地词', () => {
+    // 旧「意图 vs hub 失配」那一档随意图表退役：今天没有第二个源可以漂移，状态词只跟 hold 走。
+    const live = view.coursePills({
+      courses: ['x20-live'],
+      rows: [row({ course: 'x20-live', waiting: { kind: 'inflight', text: '等远端回传' } })],
       trainerRunning: true,
-      overview: ov(ovRow('x20-drift', { offline: false })),
-      modeIntents: { 'x20-drift': 'offline' },
+      overview: ov(ovRow('x20-live', { hold: hold('tpu-1'), offlineRounds: 1 })),
     })[0]!
-    expect(p).toMatchObject({ status: '意图未生效', tone: 'y' })
-    expect(p.title).toContain('意图没落地')
-    // 一致时（意图离线 ∧ hub 离线）不画漂移：回落到「回传」维度那两态
-    const ok = view.coursePills({
-      courses: ['x20-off'],
-      rows: [row({ course: 'x20-off' })],
+    expect(live.status).toBe('云机执行中')
+    expect(live.title).toContain('本机不跑')
+    // stale = 进度静默超阈 ⇒ 已自动恢复协作派发（黄，不是红：它已经自愈）
+    const stale = view.coursePills({
+      courses: ['x20-stale'],
+      rows: [row({ course: 'x20-stale' })],
       trainerRunning: true,
-      overview: ov(ovRow('x20-off', { offlineRounds: 3 })),
-      modeIntents: { 'x20-off': 'offline' },
+      overview: ov(ovRow('x20-stale', { hold: hold('tpu-1', 'stale'), offlineRounds: 3 })),
     })[0]!
-    expect(ok.status).toBe('回传中')
-    // hub 不认识这门课 ⇒ 无从判断（**不编**漂移：那时只有一侧事实）
+    expect(stale).toMatchObject({ status: '接管掉线', tone: 'y' })
+    expect(stale.title).toContain('已自动恢复')
+    // 没有接管（hub 也不认识它）⇒ 回落本地「在等什么」，不编状态
     const unknown = view.coursePills({
       courses: ['x20-new'],
       rows: [row({ course: 'x20-new' })],
       trainerRunning: true,
       overview: ov(),
-      modeIntents: { 'x20-new': 'offline' },
     })[0]!
     expect(unknown.status).toBe('采集中')
   })
@@ -276,7 +297,7 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
 
 /** 在线课的 hub 行（本组用例的默认：在线、hub 认得、无离线维度）。 */
 function hubRow(course: string, over: Partial<CourseOverviewRow> = {}): CourseOverviewRow {
-  return ovRow(course, { offline: false, ...over })
+  return ovRow(course, over)
 }
 
 /** 一条在飞明细（默认认领 40s / 心跳 4s）。 */
@@ -736,6 +757,8 @@ describe('顶部在训课程 pill 行（SSR）', () => {
             url: '',
             enabled: true,
             concurrency: 1,
+            // ★M4：worker 行多了类型（`null` = 还没露过面，不猜）。
+            kind: null,
             online: null,
             busy: null,
             hubOnline: null,

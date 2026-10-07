@@ -5,7 +5,7 @@
  *
  *  这两张表回答的是**同一个问题**——「这门课现在怎么样」——却各写了一半，而且两半**互相看不见**：
  *
- *  - 「并行课程总览」知道 hub 侧事实：这门课在不在 hub 课程表里、是离线还是在线、队列积压多少、
+ *  - 「并行课程总览」知道 hub 侧事实：这门课在不在 hub 课程表里、**谁在接管**、队列积压多少、
  *    离线段回传了多少轮。
  *  - 「训练调度器」知道训练侧事实：账本指针、这一轮卡在 13 步表的哪一步、在等谁回传。
  *
@@ -51,8 +51,10 @@ import {
 import type { RowBadge } from '../components/StatusRow'
 import type { StatusTone } from '../components/StatusDot'
 
-/** 段内产物「多久没动了」的红线：超过它就当可疑（离线课挂掉与还在跑的唯一区分）。
- *  离线课那份在云机上跑（一轮可能十几分钟），30 分钟仍属正常长轮，故定 1h。 */
+/** 接管段内产物「多久没动了」的红线：超过它就当可疑（自主盘挂掉与还在跑的唯一区分）。
+ *  自主盘那份在云机上跑（一轮可能十几分钟），30 分钟仍属正常长轮，故定 1h。
+ *  ★M4：真正的「掉线」判据是 hub 的 `hold.state`（900s 无**进度信号**）——本常量只是
+ *  这张表上「最近一件产物多久没动」的展示阈值，两者不得互相替代。 */
 export const OFFLINE_STALE_SEC = 3600
 
 // ────────────────────────── 状态判定 ──────────────────────────
@@ -60,8 +62,8 @@ export const OFFLINE_STALE_SEC = 3600
 /** 状态的档位（多对一映射到 `StatusDot` 的四档，映射的**理由**写在 `matrixStatus` 里）。
  *
  *  `info` 是四档之外的第五种**语义**：`off`（未在训）表示「没在干活」，而 `info` 表示
- *  「在干活、只是被 hub 标成了离线模式」——两者都不该涂成黄/红，但混成同一个灰点会把
- *  「离线回传中」读成「停着」。 */
+ *  「在干活、只是归云机管（接管中）」——两者都不该涂成黄/红，但混成同一个灰点会把
+ *  「云机执行中」读成「停着」。 */
 export type MatrixTone = StatusTone | 'info'
 
 /** 语义档 → 状态点档（`info` 归 `off`：它不是告警，点不必抢眼）。 */
@@ -143,7 +145,8 @@ export function isTrainingRow(r: CourseMatrixRow): boolean {
  * 矩阵词的顺序即「哪条信息最该先说」：
  * 1. 在训但 hub 没注册（warn）——算力在烧，job 永远不派发。
  * 2. 确定性状态（暂停/收官/中止）——此前矩阵看不见它们，与 pill 矛盾（R4-a）。
- * 3. hub 标了离线（info）——**这不是故障**，是 hub 的一种合法模式（只收回传）。
+ * 3. **接管（hold）**（info/warn）——★M4 取代了旧的「hub 标了离线」：
+ *    live = 归云机管（info）；stale = 接管掉线（warn，已自愈但要人知道）。
  * 4. 在训（ok）。
  * 5. hub 在线且注册了它，却没有进程（warn）——job 会堆起来。
  * 6. 其余：未在训（off）。
@@ -162,7 +165,6 @@ export function matrixStatus(
   opts?: {
     overviewStale?: ReadStaleView | null
     queueStale?: ReadStaleView | null
-    modeIntents?: Record<string, 'online' | 'offline'> | null
     registeredWorkers?: string[] | null
     /** ★2026-10-06：账本尾行 `run_complete` 的停车态（`stateView.loopCompletes[课]`）——
      *  终态词与 pill 同源（同屏两侧不得再互相矛盾）。 */
@@ -177,7 +179,6 @@ export function matrixStatus(
     // 有队列行就信它自己的进程事实（`lq.training` = 调度器存活 ∧ 未收官）；
     // 没有行时退 hub 的粗档（见 `rowProcessTraining`）。
     trainerRunning: rowProcessTraining(ov, lq),
-    modeIntents: opts?.modeIntents,
     registeredWorkers: opts?.registeredWorkers,
     overviewStale: opts?.overviewStale ?? null,
     queueStale: opts?.queueStale ?? null,
@@ -204,11 +205,13 @@ function matrixWord(st: CourseStatus): MatrixStatus {
   if (st.kind === 'aborted') return { text: '已中止', tone: 'err', title: st.title }
   // ★ 2026-10-05（plan/course-startup-recover §3.3）：配置不可开课 ⇒ 红（与 pill 同词）。
   if (st.kind === 'blocked') return { text: '起不来', tone: 'err', title: st.title }
-  // ③ hub 离线（只收回传）：合法模式，不涂黄/红。
-  if (st.kind === 'offline-running' || st.kind === 'offline-waiting') {
-    return { text: '离线（只收回传）', tone: 'info', title: st.title }
+  // ③ **接管（hold）**：★M4 词表。live = 归云机管（info，不是故障）；
+  //    stale = 接管掉线（warn：它已自愈，但「刚才丢了 15 分钟」这件事要人看见）。
+  if (st.kind === 'autonomous-running' || st.kind === 'autonomous-waiting') {
+    return { text: '接管中（云机）', tone: 'info', title: st.title }
   }
-  if (st.kind === 'offline-wait') return { text: '离线（云机接手）', tone: 'info', title: st.title }
+  if (st.kind === 'autonomous-stale') return { text: '接管掉线', tone: 'warn', title: st.title }
+  if (st.kind === 'held-wait') return { text: '接管中（云机）', tone: 'info', title: st.title }
   // ④ hub 注册了它却没进程：job 会堆起来（warn）。
   if (st.conflict === 'hub-no-process' || st.kind === 'hub-no-process') {
     return {
@@ -264,15 +267,16 @@ export interface MatrixCell {
 
 /** 「队列 N · 在飞 N」——hub 侧事实。hub 无应答时是「不知道」，不是 0。
  *
- *  ★ 2026-09-22（离线课列修正）：hub 把课标了**离线**（只收回传、不实时派发 PPO）时，
- *  队列深度不再适用——读面直接说「只收回传」，不摆一个会误读的「队列 0 · 在飞 0」。 */
+ *  ★M4（接管列修正）：这门课**正被接管**（hold live）时，队列深度不再适用——该课对协作
+ *  worker 是不可派的（派发闸看 hold），摆一个「队列 0 · 在飞 0」会被读成「没人要跑」。
+ *  `stale` 的 hold 不适用这一档：派发已经恢复，队列列就是真相。 */
 export function queueCell(ov: CourseOverviewRow | null, hubOnline: boolean): MatrixCell {
-  if (ov?.offline)
+  if (ov?.hold?.state === 'live')
     return {
-      text: '只收回传',
+      text: '接管中·不派发',
       title:
-        'hub 离线模式：不实时派发 PPO，只接收 it 权重/指标回传——队列深度不适用；' +
-        '云机整段的段内进度见「段内」列（回传轮次/最近产物）。',
+        '该课正被自主 worker 接管：PPO 派发被 hold 闸压住（在队任务不撤、也不派给协作盘）——' +
+        '队列深度不适用；段内进度见「接管」列（回传轮次/最近产物）。',
     }
   if (!ov || !hubOnline) return { text: CELL_UNKNOWN, title: HUB_DOWN_TITLE }
   return {
@@ -281,23 +285,49 @@ export function queueCell(ov: CourseOverviewRow | null, hubOnline: boolean): Mat
   }
 }
 
-/** 离线段内进度——**只给离线且已回传过的课**（其余的徽标已经说了「离线/未在训」）。
+/** **接管列**（★M4：取代旧的「段内」列）——holder / 最近回传龄 / 段内轮数。
+ *
+ *  为什么合并：旧「段内」列只在 `offline` 模式下出现，而今天「这堂课归谁」全靠 hold 回答——
+ *  一行得同时说清「谁在跑、多久没回传、跑到哪了」。**没有接管**时给 `null`（不画这列），
+ *  而不是一个空的「—」：本机跑的课不需要这一列（它的进度在「在等什么」与迭代列里）。
  *
  *  `nowSec` 由调用方给（不在这里读表）：判据与时刻解耦才能单测，也符合本仓「模拟里不读墙钟」
  *  的同款纪律（这里是呈现层，但确定性单测的价值一样）。 */
-export function segmentCell(ov: CourseOverviewRow | null, nowSec: number): MatrixCell | null {
-  if (!ov || !ov.offline || ov.offlineRounds === 0) return null
-  const stale = ov.offlineLastMtime > 0 && nowSec - ov.offlineLastMtime > OFFLINE_STALE_SEC
+export function holdCell(ov: CourseOverviewRow | null, nowSec: number): MatrixCell | null {
+  const hold = ov?.hold
+  if (!ov || !hold) return null
   const ago =
-    ov.offlineLastMtime > 0 ? fmtRel(ov.offlineLastMtime * 1000, nowSec * 1000) : CELL_UNKNOWN
-  return {
-    text: `段内 ${ov.offlineRounds} 轮 · 最近 ${ago}`,
-    warn: stale,
-    title:
-      `云机已回传的段内轮次：${ov.offlineRounds} 轮，最新 it${ov.offlineLastIter ?? CELL_UNKNOWN}，` +
-      `最近一件产物 ${ago}。这些轮**不在课程账本里**（hub 不跑它们），只有这里看得到。` +
-      (stale ? `⚠ 已超过 ${OFFLINE_STALE_SEC / 60} 分钟没新产物——云机可能挂了。` : ''),
+    hold.lastProgressAt > 0 ? fmtRel(hold.lastProgressAt * 1000, nowSec * 1000) : CELL_UNKNOWN
+  const staleArtifact = ov.offlineLastMtime > 0 && nowSec - ov.offlineLastMtime > OFFLINE_STALE_SEC
+  const who = hold.workerId || '未登记持有者'
+  if (hold.state === 'stale') {
+    return {
+      text: `接管掉线 · ${who}`,
+      warn: true,
+      title:
+        `持有人「${who}」的进度已静默超阈值（hub ` +
+        `hold.state=stale）——**协作派发与本机采样已自动恢复**，新自主盘可直接 claim 接管。` +
+        `已回传段内 ${ov.offlineRounds} 轮（最新 it${ov.offlineLastIter ?? CELL_UNKNOWN}）。` +
+        '到控制台可「强制解除接管」（立墓碑，现场看得见）。',
+    }
   }
+  return {
+    text: `${who} · 最近 ${ago}`,
+    warn: staleArtifact,
+    title:
+      `${who} 接管中（hold live：压住协作派发 + 本机不跑这门课），最近一次**进度**信号 ${ago} 前。` +
+      `已回传段内 ${ov.offlineRounds} 轮，最新 it${ov.offlineLastIter ?? CELL_UNKNOWN}；` +
+      `最近一件产物 ${
+        ov.offlineLastMtime > 0 ? fmtRel(ov.offlineLastMtime * 1000, nowSec * 1000) : CELL_UNKNOWN
+      }。` +
+      '活性只认进度信号（心跳不算）；15 分钟无进度自动解除。' +
+      (staleArtifact ? `⚠ 已超过 ${OFFLINE_STALE_SEC / 60} 分钟没新产物——云机可能挂了。` : ''),
+  }
+}
+
+/** 有接管吗（上屏/占列用；`null` = 旧 hub 没这一列）。 */
+export function hasHold(ov: CourseOverviewRow | null): boolean {
+  return !!ov?.hold
 }
 
 /** 「在等什么」——训练侧事实。调度器视图不可用时是「不知道」，不是「无待办」。 */
@@ -309,23 +339,31 @@ export function waitingCell(lq: LoopQueueRow | null): MatrixCell {
   }
 }
 
-/** 「在等什么」——**离线课**的（★2026-09-22 列修正）：不读本地 13 步表的「推进中/采集中」
- *  等词——那段由云机整段执行，本地只收回传。有回传就说「云机运行中 · 已回传 N 轮」，
- *  一次都还没回传就说「离线（只收回传）」。 */
-export function offlineWaitCell(ov: CourseOverviewRow): MatrixCell {
+/** 「在等什么」——**被接管的课**的（★M4）：不读本地 13 步表的「推进中/采集中」等词——
+ *  那段由自主 worker 整段执行，本地只收回传。有回传就说「云机运行中 · 已回传 N 轮」，
+ *  一次都还没回传就说「等待接管」。 */
+export function holdWaitCell(ov: CourseOverviewRow): MatrixCell {
+  if (ov.hold?.state === 'stale') {
+    return {
+      text: '接管掉线 · 已恢复协作',
+      title:
+        '接管已判掉线（进度静默超阈）：该课已回到协作派发 + 本机采样——这一行接下来会按' +
+        '训练侧的「在等什么」推进；要立刻清掉墓碑可点「强制解除接管」。',
+    }
+  }
   if (ov.offlineRounds > 0) {
     return {
       text: `云机运行中 · 已回传 ${ov.offlineRounds} 轮`,
       title:
-        `云机整段在上跑：已回传的段内轮次 ${ov.offlineRounds} 轮，最新 it${ov.offlineLastIter ?? CELL_UNKNOWN}；` +
-        '本地 hub 只收回传、不实时派发 PPO（进度明细与「最近多久没动」见「段内」列）。',
+        `自主 worker 整段在上跑：已回传的段内轮次 ${ov.offlineRounds} 轮，最新 it${ov.offlineLastIter ?? CELL_UNKNOWN}；` +
+        '本机不跑这门课（held 等待），PPO 派发也被 hold 闸压住（进度明细见「接管」列）。',
     }
   }
   return {
-    text: '离线（只收回传）',
+    text: '等待接管',
     title:
-      'hub 把该课标为离线：云机整段执行，本地只收 it 权重/指标回传；尚未有段内产物回传' +
-      '（刚开课 / 云机还没回第一件）。',
+      '该课被接管但还没有任何段内产物回传：云机可能刚领走任务包、或还在跑第一轮' +
+      '（本机不跑这门课，PPO 派发被 hold 闸压住）。',
   }
 }
 
@@ -336,49 +374,39 @@ export interface CourseMatrixRow {
   /** 当前查看的那门课（高亮）。 */
   viewing: boolean
   status: MatrixStatus
-  conflict: MatrixConflict
-  /** 账本/队列指针（**优先训练侧**：它是「下一轮要跑的 it」，hub 侧那个只读账本尾行）。
-   *  ★2026-09-22：**离线课**给的是 `offline`——云机回传的最新 it（不是本地「下一轮」指针）。 */
+  conflict: MatrixConflict /** 账本/队列指针（**优先训练侧**：它是「下一轮要跑的 it」，hub 侧那个只读账本尾行）。
+   * ★M4：**被接管的课**给的是 `hold`——云机回传的最新 it；这一段还没回传 ⇒ `null`
+   * （**不可知**，不是本地「下一轮」指针——本机这一段不跑这门课）。 */
   iter: number | null
-  iterSource: 'queue' | 'ledger' | 'offline' | null
+  iterSource: 'queue' | 'ledger' | 'hold' | null
   /** 两侧原始行（`null` = 那一侧没有这门课）。面板要用它们渲染各自的动作与徽章。 */
   ov: CourseOverviewRow | null
   lq: LoopQueueRow | null
-  /** 切离线/在线开关能不能给：**hub 在线 ∧ hub 认识这门课**。
+  /** **强制解除接管**能不能给：**hub 在线 ∧ hub 认识这门课 ∧ 确实有接管或导包软态**。
    *
-   *  不满足时任一侧点下去都是 400（hub 不认识它 / 根本没 hub）——画一个一定失败的按钮
-   *  就是假承诺，这不是「只读不禁用」那条：只读是权限边界，这里是能力边界。 */
-  canToggleMode: boolean
-  /** 控制台意图（`console-state.courseModes`）与 hub 事实**不一致**时的两侧取值。
-   *
-   *  这不是猜测：两个源都能读到才判（意图存在 ∧ hub 认识这门课），不一致就是「意图没落地」
-   *  ——2026-09-23 实测：hub 重启时控制台的回灌跑在 hub 发现这门课之前（POST 400），该课
-   *  静默留在 online，面板一路显示「在训 / 切离线」（而操作员以为自己开的是离线课），
-   *  直到翻 hub 日志才发现。UI 的职责是把这两个源摆在一起，不是替哪一边编状态。
-   *
-   *  `null` = 无从判断（没有意图 / hub 不认识它 —— 那时只有一侧事实）。
-   *
-   *  ★ 带上两侧取值（而不是一个 bool）：渲染层要用它们写清「意图是 X、hub 现在当 Y」，
-   *  否则组件就得自己去读那份意图表 —— 又一条知道真相的路径。 */
-  modeDrift: { intent: 'online' | 'offline'; hubOffline: boolean; configRun: boolean } | null
+   *  不满足时任一侧点下去都是 404/409（hub 不认识它 / 根本没 hub / 本来就没接管）——画一个
+   *  一定失败的按钮就是假承诺，这不是「只读不禁用」那条：只读是权限边界，这里是能力边界。
+   *  ★M4：它取代了旧的三颗模式钮（切离线/切换成在线/交还自动）。 */
+  canReleaseHold: boolean
   /** 行内是否给**任务包操作**（导出/导入训练结果）。
    *
-   *  判据 = `hub 标了离线 ∨ 控制台意图是离线`（**两个源任一为离线**）。
+   *  判据 = **这门课在训**（任一侧说在训，`rowTraining`）。
    *
-   *  ★2026-09-23（用户指令）：此前只看 hub 事实（`ov.offline`）——那形成一个死锁：
-   *  离线课**需要任务包**才能上云跑，而「导出任务包」键却要等 hub 先接受离线模式才出现；
-   *  偏偏回灌失配时（hub 仍当它在线，见 `modeDrift`）那个键正好不见了——最需要它的那一刻。
-   *  任务包能力是**课程级**的（与 hub 此刻派不派活正交：包就是给云机用的），故把意图也计入。
-   *  两个源都是「离线」时仍然只有一个键（不是两个）。 */
+   *  ★M4：旧判据是「hub 离线 ∨ 意图离线」——两个源都随模式语义退役。今天的事实是：
+   *  **任何一门在训课都可能被自主 worker 领走**（claim 遇缺包时 hub 会请控制台导包），
+   *  所以「导出任务包」对每一门在训课都是合法动作（与 hub 此刻派不派活正交：包就是给
+   *  云机用的）。停课的课不画（它连认课标记都没了，云机领不走）。 */
   bundleOps: boolean
   queue: MatrixCell
   waiting: MatrixCell
-  segment: MatrixCell | null
+  /** **接管列**（★M4：取代旧「段内」列）：holder / 最近回传龄 / 段内轮数；
+   *  `null` = 这门课没有接管（不画锁列，而不是画一个空的「—」）。 */
+  hold: MatrixCell | null
   /** 这一点位是否有 BC/RL 种类徽标（BC 行形状与 RL 不同，不标会被读错）。 */
   kind: 'rl' | 'bc'
-  /** **权威徽标**（P1-6）：固定在线 / 固定离线 / 自动（hub 每课行的 `authority`）。
-   *  `null` = 旧 hub 没上报 / hub 不可达——「未知」不画徽标（不猜）。 */
-  pinBadge: MatrixBadge | null
+  /** **接管徽标**（★M4：取代旧的权威三态徽标）：接管掉线（stale）/ 导包中（pending_export）。
+   *  `null` = 没有这两件事（live 接管由状态列与接管列说，不重复画徽标）。 */
+  holdBadge: MatrixBadge | null
   /** **离线租约徽标**（P1-6）：`stale`（静默超阈、新盘可直接接管）/ `revoked`（已撤租墓碑）。
    *  `null` = 没有租约 / 旧 hub。 */
   leaseBadge: MatrixBadge | null
@@ -391,37 +419,34 @@ export interface MatrixBadge {
   title: string
 }
 
-/** 权威三态 → 徽标（P1-6）。`auto` 也上屏（三态之一）：它是「离线盘可自取」的诚实标签
- * ——不画它，操作员分不清「没人管（自动池）」与「旧 hub 没上报」。 */
-export function pinBadgeOf(ov: CourseOverviewRow | null): MatrixBadge | null {
-  const auth = ov?.authority ?? null
-  switch (auth) {
-    case 'pinned_online':
-      return {
-        text: '固定在线',
-        tone: 'a',
-        title:
-          '人固定在线（pin）：离线盘不可 claim / seize / 翻模式（plan §3.1 的 pinned_online）。' +
-          '唯一解锁 = 「交还自动」（unset）——在那之前它不会被自动交接抢走',
-      }
-    case 'pinned_offline':
-      return {
-        text: '固定离线',
-        tone: 'a',
-        title:
-          '人固定离线（pin）：该课交给云机，只收回传；离线盘可领（有包），但不会自动翻它的模式',
-      }
-    case 'auto':
-      return {
-        text: '自动',
-        tone: 'gray',
-        title: '自动池：没被人固定——离线盘一上线就能 claim 接管（开课未选模式 = 这一档）',
-      }
-    default:
-      // stopped / not_offline 是两个正交维（停课 / 冷课带在线记录）：状态列与队列格已说清，
-      // 不另外造徽标（三态徽标只覆盖三态）。
-      return null
+/** **接管徽标**（★M4）：只画需要处置/需要知道的两态——
+ *  · `stale`（接管掉线）：状态列已经说了「接管掉线」，但徽标把**「已恢复协作」**放在同一行
+ *    的显眼处（操作员最常问的就是「本机到底跑不跑这门课」）；
+ *  · `pending_export`（导包中）：**不占闸**的软态——不画它，操作员会把「刚认领还没包」
+ *    误读成「没人管」。
+ *
+ *  live 的接管不另画徽标：状态列说「接管中（云机）」、接管列说 holder——同一件事不摆三遍。 */
+export function holdBadgeOf(ov: CourseOverviewRow | null): MatrixBadge | null {
+  if (!ov) return null
+  if (ov.hold?.state === 'stale') {
+    return {
+      text: '已恢复协作',
+      tone: 'y',
+      title:
+        '接管掉线（进度静默超阈）：该课已自动回到协作派发 + 本机采样（在队任务照常可领）。' +
+        '要立刻清掉墓碑可点「强制解除接管」。',
+    }
   }
+  if (ov.pendingExport && !ov.hold) {
+    return {
+      text: '导包中',
+      tone: 'a',
+      title:
+        `有自主 worker 已认领该课（触发方 ${ov.pendingExport.by || '未知'}）——控制台正在导出` +
+        '任务包。**包到手前不建接管**：本机照跑、协作照派（软态不占闸）。',
+    }
+  }
+  return null
 }
 
 /** 离线租约 → 徽标（P1-6）：只给两个需要处置的档（stale/revoked）；新鲜租约不画（队列格已说）。 */
@@ -454,18 +479,6 @@ export interface CourseMatrixInput {
   overview: ParallelOverviewView | null
   /** 训练侧（`null` = 只读视图不可用）。 */
   queue: LoopQueueView | null
-  /** 控制台记录的每课派发**意图**（`stateView.courseModeIntents`；缺省 = 旧视图/无意图）。
-   *
-   *  与 `overview` 里的 hub 事实**分开收**：一个是运维的决定，一个是 hub 此刻的表。
-   *  摆在一起才能看出「意图没落地」（`modeDrift`）——不在这里替任何一侧编事实。 */
-  modeIntents?: Record<string, 'online' | 'offline'> | null
-  /** **逐课**的生效 rollout 源（`stateView.courseRolloutSrc`；缺省 = 旧视图/不报）。
-   *
-   *  为什么要它（2026-09-24）：`modeDrift` 只比「意图 vs hub」两个源，而用户报障的现场是
-   *  **第三个**源没跟上——hub 已回到在线、意图也已是在线，但 `courses.<课>.rollout_src` 还是
-   *  `run`（本课仍归云机）⇒ 本机在下一轮仍然收工、不采样（训练就此停住，而面板看着「在训」）。
-   *  配置侧那一格只有逐课下发才算得出来（`modes.rolloutSrc` 只有查看课程一个）。 */
-  courseRolloutSrc?: Record<string, string> | null
   /** ★2026-10-06：逐课停车态（`stateView.loopCompletes`）——收官终态进状态列，
    *  与 pill 同一派生（缺省 = 旧视图/没有停车态，行为与从前逐字节相同）。 */
   loopCompletes?: Record<string, LoopComplete> | null
@@ -474,28 +487,9 @@ export interface CourseMatrixInput {
   nowSec: number
 }
 
-/** 意图 vs hub 事实：不一致 = 「意图没落地」（`null` = 无从判断，只一侧有事实）。
- *
- *  为什么是 `null` 而不是 `false`：没有意图（从没点过切离线 / 历史课）或 hub 不认识这门课时，
- *  「一致」根本没有内容——把「不知道」画成「没问题」正是这一整类事故的成因。
- */
-export function modeDriftOf(
-  course: string,
-  ov: CourseOverviewRow | null,
-  hubOnline: boolean,
-  intents?: Record<string, 'online' | 'offline'> | null,
-  /** 逐课生效 rollout 源（`stateView.courseRolloutSrc`）；缺 = 无从判断配置侧。 */
-  rolloutSrc?: Record<string, string> | null,
-): { intent: 'online' | 'offline'; hubOffline: boolean; configRun: boolean } | null {
-  const intent = intents?.[course]
-  if (!intent) return null
-  if (!ov || !hubOnline || !ov.hubSeen) return null
-  // 配置侧那一格（**第三个源**）：意图/ hub 都回到在线而配置还写着 `run` ⇒ 本机仍不跑这门课。
-  // 独立于「意图 vs hub」是否一致来算：两者一致也照样可能带着 `run`（用户报障的现场就是这个形状）。
-  const configRun = rolloutSrc?.[course] === 'run' && intent === 'online'
-  if (ov.offline === (intent === 'offline') && !configRun) return null
-  return { intent, hubOffline: ov.offline, configRun }
-}
+// ★M4：三源漂移派生（逐课 rollout 源入参）已删——它比的是「控制台意图 vs hub 模式 vs
+//  rl-config 的 `rollout_src=run`」三个源，而这三个源头全没了（课程不再有模式；`run` 已退役）。
+// 今天的对应物是**接管（hold）**：它只有一个真源（hub），不存在「三个源没对齐」这种形状。
 
 /** 两侧 outer join（顺序：先 hub 侧给出的序，再补训练侧独有的课 —— 稳定且「在训的在前」）。 */
 export function mergeCourseRows(input: CourseMatrixInput): CourseMatrixRow[] {
@@ -524,34 +518,40 @@ export function mergeCourseRows(input: CourseMatrixInput): CourseMatrixRow[] {
     const loopComplete = input.loopCompletes?.[course] ?? null
     const fromQueue = lq ? lq.it : null
     const fromLedger = ov ? ov.iter : null
-    // ★ 2026-09-22（离线课列修正）：离线课走「任务包+回传」维度——iter 列读**云机回传的最新
-    // it**（`offlineLastIter`），不是本地「下一轮要跑」的队列指针（那对本机读面是错的）。
-    const offlineIt = ov?.offline ? (ov.offlineLastIter ?? null) : null
-    const iter = offlineIt !== null ? offlineIt : fromQueue !== null ? fromQueue : fromLedger
+    // ★M4（接管列修正）：被接管的课走「任务包+回传」维度——iter 列**只**读云机回传的最新 it
+    // （`offlineLastIter`）；还没回传时是**不可知**（`null`），不拿本地「下一轮」指针充数
+    // （这一段本机压根不跑这门课，那个数字对读面是错的）。没接管的课照旧：队列指针 → 账本尾行。
+    const holdIt = ov?.hold ? (ov.offlineLastIter ?? null) : null
+    const iter = ov?.hold ? holdIt : fromQueue !== null ? fromQueue : fromLedger
+    const iterSource: CourseMatrixRow['iterSource'] = ov?.hold
+      ? holdIt !== null
+        ? 'hold'
+        : null
+      : fromQueue !== null
+        ? 'queue'
+        : fromLedger !== null
+          ? 'ledger'
+          : null
     return {
       course,
       viewing: course === input.viewing,
       status: matrixStatus(ov, lq, hubOnline, { loopComplete }),
       conflict: matrixConflict(ov, lq, hubOnline, loopComplete),
       iter,
-      iterSource:
-        offlineIt !== null
-          ? 'offline'
-          : fromQueue !== null
-            ? 'queue'
-            : fromLedger !== null
-              ? 'ledger'
-              : null,
+      iterSource,
       ov,
       lq,
-      canToggleMode: hubOnline && (ov?.hubSeen ?? false),
-      modeDrift: modeDriftOf(course, ov, hubOnline, input.modeIntents, input.courseRolloutSrc),
-      bundleOps: (ov?.offline ?? false) || input.modeIntents?.[course] === 'offline',
-      pinBadge: pinBadgeOf(ov),
+      canReleaseHold: hubOnline && (ov?.hubSeen ?? false) && !!ov?.hold,
+      bundleOps: rowTraining(ov, lq),
+      holdBadge: holdBadgeOf(ov),
       leaseBadge: leaseBadgeOf(ov),
       queue: queueCell(ov, hubOnline),
-      waiting: ov?.offline ? offlineWaitCell(ov) : waitingCell(lq),
-      segment: segmentCell(ov, input.nowSec),
+      waiting: ov?.hold
+        ? ov.hold.state === 'stale'
+          ? waitingCell(lq)
+          : holdWaitCell(ov)
+        : waitingCell(lq),
+      hold: holdCell(ov, input.nowSec),
       kind: lq?.kind ?? 'rl',
     }
   })

@@ -8,7 +8,7 @@
  * （见 docs/dashboard-redesign.md §6 P2）。凡是从旧文件搬过来的断言，都在用例里注明了它守的是什么，
  * 免得下一个人以为可以顺手删。
  *
- * 纯函数（join 规则 / 状态判定 / 段内红线）在 `web-course-matrix.test.ts`；本文件只管
+ * 纯函数（join 规则 / 状态判定 / 接管列）在 `web-course-matrix.test.ts`；本文件只管
  * 「操作员能从屏幕上读出什么」。点击行为 SSR 渲染不出来（`preact-render-to-string` 丢弃
  * 事件处理器），故动作接线用**源码接线断言**兜底。
  */
@@ -22,6 +22,7 @@ import { DASHBOARD_ROOT } from '../src/core/paths'
 import type {
   ArchivedCourseView,
   CourseOverviewRow,
+  HubHoldView,
   LoopQueueView,
   ParallelOverviewView,
 } from '../src/web/view'
@@ -34,7 +35,9 @@ function ovRow(patch: Partial<CourseOverviewRow> & { course: string }): CourseOv
   return {
     training: false,
     iter: null,
-    offline: false,
+    // ★M4：接管（hold）是「谁在跑这门课」的唯一真源——旧 `offline` 布尔已退役。
+    hold: null,
+    pendingExport: null,
     hubSeen: true,
     queuePending: 0,
     inflight: 0,
@@ -64,11 +67,15 @@ function ovView(
     activeWorkers: 3,
     halt: false,
     recentDispatch: 'c4',
-    offline: [],
     offlineProgress: null,
     rows,
     ...patch,
   }
+}
+
+/** 接管夹具（★M4）。 */
+function hold(workerId: string, state: 'live' | 'stale' = 'live'): HubHoldView {
+  return { workerId, state, lastProgressAt: 0, at: 0, expiresIn: 870 }
 }
 
 /** 五态各一行（覆盖全部状态档 + 两个冲突态）。 */
@@ -76,12 +83,12 @@ function defaultOverview(): ParallelOverviewView {
   return ovView([
     // 在训（hub 也认识它）
     ovRow({ course: 'c4', training: true, iter: 42, hubSeen: true, queuePending: 2, inflight: 1 }),
-    // 离线（只收回传）+ 段内已回传 3 轮（账本里没有这些行）
+    // 接管中（云机）+ 段内已回传 3 轮（账本里没有这些行）
     ovRow({
       course: 'c5',
       training: true,
       iter: 7,
-      offline: true,
+      hold: hold('tpu-1'),
       hubSeen: true,
       offlineRounds: 3,
       offlineLastIter: 9,
@@ -122,28 +129,22 @@ function queueView(
   })!
   return withPausedFacts(withTraining(v, training), pause.intent ?? [], pause.applied ?? [])
 }
-
 async function render(
   props: {
     overview?: ParallelOverviewView | null
     loopQueue?: LoopQueueView | null
-    /** 控制台意图（`stateView.courseModeIntents`）——缺省 = 旧视图/无意图。 */
-    modeIntents?: Record<string, 'online' | 'offline'> | null
-    /** 逐课生效 rollout 源（`stateView.courseRolloutSrc`）——缺省 = 旧视图/不报配置侧。 */
-    courseRolloutSrc?: Record<string, string> | null
     /** 已封存课程（`stateView.archived`）——缺省 = 旧视图/未封存过。 */
     archived?: ArchivedCourseView[] | null
     course?: string
     onAction?: (act: string, body: Record<string, unknown>) => void
   } = {},
 ): Promise<string> {
+  // ★M4：`modeIntents` / `courseRolloutSrc` 两个入参随模式语义退役（见面板内的注释）。
   const { CourseMatrix } = await import('../src/web/app/panels/CourseMatrix')
   return renderToString(
     h(CourseMatrix, {
       overview: props.overview === undefined ? defaultOverview() : props.overview,
       loopQueue: props.loopQueue === undefined ? queueView([lqRaw()], ['c4']) : props.loopQueue,
-      modeIntents: props.modeIntents,
-      courseRolloutSrc: props.courseRolloutSrc,
       course: props.course ?? 'c4',
       onSelectCourse: () => {},
       onAction: props.onAction,
@@ -155,12 +156,12 @@ async function render(
 // ────────────────────────── 合并后的状态列（新增信号） ──────────────────────────
 
 describe('课程矩阵：只列在训课程（2026-09-20 用户指令）', () => {
-  it('在训三态同屏可分辨：在训 / 离线 / 在训·hub 未注册', async () => {
+  it('在训三态同屏可分辨：在训 / 接管中（云机） / 在训·hub 未注册', async () => {
     const html = await render()
     expect(html).toContain('在训')
-    expect(html).toContain('离线（只收回传）')
+    expect(html).toContain('接管中（云机）')
     expect(html).toContain('在训 · hub 未注册')
-    // 徽章档位：在训 g / 离线 a / 冲突 y（fixture 里三行都在训）
+    // 徽章档位：在训 g / 接管 a / 冲突 y（fixture 里三行都在训）
     expect(html).toContain('tc-badge--g')
     expect(html).toContain('tc-badge--a')
     expect(html).toContain('tc-badge--y')
@@ -262,19 +263,19 @@ describe('课程矩阵：七列都有读数（旧「总览」+「调度器」的
     expect(down).toContain('没有任何 hub 在应答')
   })
 
-  it('段内列：只给离线且已有产物的课；超 1 小时变醒目（云机挂了 vs 在跑）', async () => {
+  it('接管列：只给**有接管**的课；产物超 1 小时变醒目（云机挂了 vs 在跑）', async () => {
     const html = await render()
-    expect(html).toContain('段内 3 轮')
-    expect((html.match(/tc-mx__seg\b/g) ?? []).length).toBe(3) // 每个上屏的行都有这一格
-    expect((html.match(/段内 \d+ 轮/g) ?? []).length).toBe(1) // 只有 c5 有读数
+    expect(html).toContain('tpu-1 · 最近 —') // 进度信号未上报 ⇒ 相对时间是 `—`（不是 1970）
+    expect((html.match(/tc-mx__seg\b/g) ?? []).length).toBe(3) // 每个上屏的行都有这一格（`—`）
+    expect((html.match(/tpu-1 · 最近/g) ?? []).length).toBe(1) // 只有 c5 有接管读数
     expect(html).not.toContain('tc-mx__seg--stale') // 1 分钟前 = 在跑
 
     const stale = await render({
       overview: ovView([
         ovRow({
           course: 'c5',
-          training: true, // 在训（否则这一行不上屏，段内列也就无从验证）
-          offline: true,
+          training: true, // 在训（否则这一行不上屏，接管列也就无从验证）
+          hold: hold('tpu-1'),
           hubSeen: true,
           offlineRounds: 3,
           offlineLastMtime: NOW_SEC - 7200,
@@ -283,10 +284,10 @@ describe('课程矩阵：七列都有读数（旧「总览」+「调度器」的
       loopQueue: null,
     })
     expect(stale).toContain('tc-mx__seg--stale')
-    expect(stale).toContain('可能挂了')
+    expect(stale).toContain('云机可能挂了')
   })
 
-  it('★2026-09-22：离线课列走「云机回传」维度——不再显示本地「推进中/队列 0」，也不冒充本地指针', async () => {
+  it('★2026-09-22 / ★M4：被接管的课走「云机回传」维度——不显示本地「推进中/队列 0」，也不冒充本地指针', async () => {
     const html = await render()
     // iter 列 = 云机回传的最新 it（默认夹具 c5：offlineLastIter=9，ov.iter=7 被覆盖）
     expect(html).toContain('>it9<')
@@ -294,10 +295,10 @@ describe('课程矩阵：七列都有读数（旧「总览」+「调度器」的
     expect(html).toContain('云机 it9')
     // 在等什么列 = 云机运行中 · 已回传 N 轮（不提本地 13 步表的词）
     expect(html).toContain('云机运行中 · 已回传 3 轮')
-    // 队列·在飞列 = 只收回传（不摆会误读的「队列 0 · 在飞 0」）
-    expect(html).toContain('只收回传')
-    // 段内列仍在（两列口径互补，不删）
-    expect(html).toContain('段内 3 轮')
+    // 队列·在飞列 = 接管中·不派发（不摆会误读的「队列 0 · 在飞 0」）
+    expect(html).toContain('接管中·不派发')
+    // 接管列给持有者（两列口径互补，不删）
+    expect(html).toContain('tpu-1 · 最近 —')
   })
 
   it('「在等什么」：四态各自有修饰类；表头汇总等回传的**在训**课数', async () => {
@@ -437,28 +438,31 @@ describe('操作列：两个开关并列且归属分明（§7 O4）', () => {
   it('有动作通道才渲染操作列；缺省时一个都不多渲染（不假装能控）', async () => {
     const withAct = await render({ onAction: () => {} })
     expect(withAct).toContain('tc-mx__ops')
-    expect(withAct).toContain('>切离线<')
+    expect(withAct).toContain('aria-label="hub：强制解除接管 c5"')
     expect(await render()).not.toContain('tc-mx__ops')
   })
 
-  it('hub 开关的能力边界：只给 hub 在线且认识它的课（否则点下去一定 400）', async () => {
+  it('「强制解除接管」的能力边界：只给 hub 在线 ∧ 认识它 ∧ 真有接管的课（否则点下去一定 404/409）', async () => {
     const acts: Array<[string, Record<string, unknown>]> = []
     const html = await render({ onAction: (a, b) => acts.push([a, b]) })
-    // 默认夹具里 hubSeen **且在训**的课：c4 / c5 两门 → 两个 hub 开关
-    // （未在训的 stalled 不上屏 ⇒ 它那个开关也就没有地方可以画）
-    expect((html.match(/tc-btn tc-btn--sm" aria-label="hub：/g) ?? []).length).toBe(2)
-    expect(html).toContain('>切换成在线<') // c5 已离线（文案不与「从暂停恢复」撞车）
+    // ★M4：默认夹具里真有接管的只有 c5（hold live）；c4 在两半都说在训、但没有接管
+    //   ⇒ 不画（一个点下去必 409 的键就是假承诺，与「只读不禁用」那条不同：那是权限边界，
+    //   这里是能力边界）。
+    expect((html.match(/aria-label="hub：强制解除接管 /g) ?? []).length).toBe(1)
+    expect(html).toContain('aria-label="hub：强制解除接管 c5"')
+    expect(html).not.toContain('aria-label="hub：强制解除接管 c4"')
     expect(acts).toEqual([]) // SSR 不模拟点击
   })
 
-  it('两个开关各有归属前缀：hub：写课程表 / 本地：写暂停意图（不许读成「一个开关管两件事」）', async () => {
+  it('动作归属前缀不混：hub：写 hub 的接管 / 本地：写暂停意图（不许读成「一个开关管两件事」）', async () => {
     const html = await render({ onAction: () => {} })
-    expect(html).toContain('role="group" aria-label="hub：切离线"')
+    expect(html).toContain('role="group" aria-label="hub：强制解除接管"')
     expect(html).toContain('role="group" aria-label="本地：暂停"')
-    expect(html).toContain('aria-label="hub：切离线 c4"')
+    expect(html).toContain('aria-label="hub：强制解除接管 c5"')
     expect(html).toContain('aria-label="本地：暂停 c4"')
     expect(html).toContain('tc-mx__opsep') // 两半之间必须有分隔线
-    expect(html).toContain('写 hub 课程表') // hub 侧开关写的是课程表
+    // hub 侧写的是 **hub 的接管**（`release_hold=1` → 立墓碑 + 清 hold）——不是本机的任何状态
+    expect(html).toContain('release_hold=1')
     expect(html).toContain('队列与账本保留') // 本地侧开关改的是训练进程推进
   })
 
@@ -546,95 +550,68 @@ describe('任务包行内操作：「导出」一个键即取回 + 导入改真�
     expect(html).not.toContain('tc-mx__bundleinfo')
   })
 
-  it('任务包操作只给**离线课**（纯在线课不挂这两个键）', async () => {
+  it('★M4：任务包操作给**在训课**（任何一门在训课都可能被自主 worker 领走）', async () => {
+    // 旧判据是「hub 标离线 ∨ 意图离线」——两个源都随模式语义退役。今天的事实是：claim 遇缺包
+    // 时 hub 会请控制台导包（`pending_export`），所以对每一门在训课，导包都是合法动作。
     const html = await render({
       overview: ovView([ovRow({ course: 'c4', training: true, hubSeen: true })]),
-      onAction: () => {},
-    })
-    expect(html).not.toContain('导出任务包')
-    expect(html).not.toContain('导入训练结果')
-    // 明确「在线」意图也仍不给（只放宽到「离线意图」，不是「所有课都挂」）
-    const online = await render({
-      overview: ovView([ovRow({ course: 'c4', training: true, hubSeen: true })]),
-      modeIntents: { c4: 'online' },
-      onAction: () => {},
-    })
-    expect(online).not.toContain('导出任务包')
-  })
-
-  it('★2026-09-23：意图离线但 hub 还当它在线（失配）时**也给**任务包键', async () => {
-    // 用户指令：离线课**要先有包才能上云跑**，而回灌失配（hub 仍 online）正是最需要这个键
-    // 的时刻——旧判据（只看 hub 事实）恰好把它藏了。与此同时行上会同时出现「意图未生效」
-    // 徽标（两个事实都要说）。
-    const html = await render({
-      overview: ovView([ovRow({ course: 'c4', training: true, hubSeen: true, offline: false })]),
-      modeIntents: { c4: 'offline' },
       onAction: () => {},
     })
     expect(html).toContain('aria-label="导出任务包 c4"')
     expect(html).toContain('aria-label="导入训练结果 c4"')
-    expect(html).toContain('意图未生效')
+    // 未在训的课不挂（停课连认课标记都没了，云机领不走）
+    const offline = await render({
+      overview: ovView([ovRow({ course: 'c4', training: false, hubSeen: true })]),
+      loopQueue: null,
+      onAction: () => {},
+    })
+    expect(offline).not.toContain('导出任务包')
+    expect(offline).not.toContain('导入训练结果')
   })
 })
 
-// ────────────────────────── 意图 vs hub 事实的漂移徽标（2026-09-23） ──────────────────────────
+// ────────────────────────── ★M4：接管（hold）的渲染与唯一人工出口 ──────────────────────────
+//
+// 旧一组用例守着「意图 / hub 模式 / rl-config 三源漂移」（2026-09-23/24 两次真机事故）。
+// ★M4 把三个源全拆了——今天不可能再有「没对齐」这种形状：接管只有一个真源（hub 的 hold），
+// 每课行随 `/admin/queue` 一起来。取而代之的是下面两条：接管在屏上怎么说、人能做什么。
 
-describe('「意图未生效」徽标：两个源不一致时上屏', () => {
-  it('意图离线 ∧ hub 在线 ⇒ 徽标 + 悬停写清两侧取值', async () => {
-    const html = await render({ modeIntents: { c4: 'offline' }, onAction: () => {} })
-    expect(html).toContain('意图未生效')
-    expect(html).toContain('控制台记的是「离线」')
-    expect(html).toContain('而 hub 现在把 c4 当「在线」')
-  })
-
-  it('一致 / 没有意图 ⇒ 不上屏（不把「不知道」画成「没问题」）', async () => {
-    const agrees = await render({ modeIntents: { c4: 'online' }, onAction: () => {} })
-    expect(agrees).not.toContain('意图未生效')
-    const none = await render({ onAction: () => {} })
-    expect(none).not.toContain('意图未生效')
-  })
-
-  it('★2026-09-24 第三个源：意图/hub 都在线 ∧ 配置仍是 run ⇒ 「配置仍是离线（云机接手）」', async () => {
-    // 用户报障的现场：切回在线后本机仍不采样（配置里 `rollout_src=run` 还在）——
-    // hub 与意图都回到了在线，**配置那一格没跟上**。它只在逐课配置下发后才算得出来。
-    const html = await render({
-      modeIntents: { c4: 'online' },
-      courseRolloutSrc: { c4: 'run' },
-      onAction: () => {},
-    })
-    expect(html).toContain('配置仍是离线（云机接手）')
-    expect(html).toContain('rollout_src=run')
-    // 两个源一致 ⇒ 不报「意图未生效」（两个徽标各说各的，不混成一个）
-    expect(html).not.toContain('意图未生效')
-  })
-
-  it('配置跟上了（local/node）或旧视图没下发 ⇒ 不上屏', async () => {
-    const follows = await render({
-      modeIntents: { c4: 'online' },
-      courseRolloutSrc: { c4: 'local' },
-      onAction: () => {},
-    })
-    expect(follows).not.toContain('配置仍是离线（云机接手）')
-    const legacy = await render({ modeIntents: { c4: 'online' }, onAction: () => {} })
-    expect(legacy).not.toContain('配置仍是离线（云机接手）')
-  })
-
-  it('hub 开关的文案：「切换成在线」（不叫「恢复在线」——那是暂停那个开关的词）', async () => {
+describe('★M4 接管：状态列 / 队列格 / 接管列同屏一致，唯一的人工出口是「强制解除接管」', () => {
+  it('接管中的课：三列同屏说同一件事（接管中（云机） · 接管中·不派发 · holder）', async () => {
     const html = await render({ onAction: () => {} })
-    expect(html).toContain('>切换成在线<')
-    expect(html).toContain('aria-label="hub：切换成在线 c5"')
+    expect(html).toContain('接管中（云机）')
+    expect(html).toContain('接管中·不派发')
+    expect(html).toContain('tpu-1 · 最近 —')
+    // 旧三颗模式钮一个都不在（它们的前提——课程有在线/离线模式——已经没了）
+    expect(html).not.toContain('切离线')
+    expect(html).not.toContain('切换成在线')
+    expect(html).not.toContain('交还自动池')
   })
 
-  it('★2026-10-03 交还自动池：离线行给第三颗钮，与「切换成在线」分开表述', async () => {
-    // T3 的 UI 面（plan §3.2a 动作表）：`unsetCourseMode` = `pin=0` + 删意图 ⇒ 重回自动池；
-    // 「切换成在线」= `pin=1` 永久退出自动逻辑。两颗钮都在，且文案彼此分开。
+  it('「强制解除接管」只在**有接管**的行上给（hub 在线 ∧ 认识它 ∧ hold 在）', async () => {
     const html = await render({ onAction: () => {} })
     expect(html).toMatch(
-      /<button[\s\S]*?aria-label="自动：交还自动池 c5"[\s\S]*?>交还自动池<\/button>/,
+      /<button[\s\S]*?aria-label="hub：强制解除接管 c5"[\s\S]*?>强制解除接管<\/button>/,
     )
-    expect(html).toContain('U3 第三条出路')
-    // 在线行（c4）不给这颗钮——它只在「课归自动池/离线」时才有意义
-    expect(html).not.toContain('aria-label="自动：交还自动池 c4"')
+    // 同一个面板里没有接管的行（c4、ghost）不给这颗钮——点下去必 409 的键就是假承诺
+    expect(html).not.toContain('aria-label="hub：强制解除接管 c4"')
+    // 没有动作通道时不渲染任何动作（与其它行内动作同判据）
+    //   注：按**按钮**判——「强制解除接管」这几个字也在接管列的悬停里（那是读数，不是动作）。
+    expect(await render()).not.toContain('aria-label="hub：强制解除接管')
+  })
+
+  it('接管掉线（stale）：状态列说「接管掉线」+ 徽标说「已恢复协作」（本机跑不跑一眼可见）', async () => {
+    const html = await render({
+      overview: ovView([
+        ovRow({ course: 'c5', training: true, hold: hold('tpu-1', 'stale'), offlineRounds: 2 }),
+      ]),
+      loopQueue: null,
+      onAction: () => {},
+    })
+    expect(html).toContain('接管掉线')
+    expect(html).toContain('已恢复协作')
+    // 掉线后队列列回到真相（派发已恢复，不能继续拿「接管中」把它藏掉）
+    expect(html).not.toContain('接管中·不派发')
   })
 })
 
@@ -736,19 +713,17 @@ describe('接线：面板挂载、跨区分流与动作路由同源', () => {
     expect(route).toContain('jobIdError(')
   })
 
-  it('动作走 route 表：setCourseMode（hub 侧）与 setCoursePaused（本地）都在，且处置调度器/快照缓存', () => {
+  it('动作走 route 表：releaseCourseHold（hub 侧）与 setCoursePaused（本地）都在，且处置调度器/快照缓存', () => {
     const route = readFileSync(
       path.join(DASHBOARD_ROOT, 'src', 'server', 'api', 'route.ts'),
       'utf-8',
     )
     const server = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'server', 'server.ts'), 'utf-8')
-    expect(panel).toContain("'setCourseMode'")
+    // ★M4：hub 侧那颗钮从三颗模式钮换成了「强制解除接管」（课程不再有模式）。
+    expect(panel).toContain("'releaseCourseHold'")
     expect(panel).toContain("'setCoursePaused'")
-    // ★ T3（2026-10-03）：交还自动池也走 route 表（面板 → onAction → route case）
-    expect(panel).toContain("'unsetCourseMode'")
-    expect(route).toContain("case 'setCourseMode'")
+    expect(route).toContain("case 'releaseCourseHold'")
     expect(route).toContain("case 'setCoursePaused'")
-    expect(route).toContain("case 'unsetCourseMode'")
     expect(app).toContain('onAction={doAction}')
     // 动作后走**单一处置入口**（2026-09-22）：课程级硬清 + 机群级/调度器软作废都收在它里面——
     // server.ts 不再逐个缓存手写作废（漏一个就退化成「动作后第一帧卡几秒」）。

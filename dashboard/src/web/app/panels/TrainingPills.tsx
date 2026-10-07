@@ -48,8 +48,6 @@ export interface TrainingPillsProps {
    *  于是**一件产物都没回传**的课也被写成「回传中」（用户报障：三个离线课显示为
    *  「回传中 ×2 + 等回传 ×1」，而三个都还没被云机取走）。`null` = hub 侧不可读。 */
   overview?: ParallelOverviewView | null
-  /** 控制台记录的每课 hub 派发意图（与 hub 事实不一致 = 「意图未生效」）。 */
-  modeIntents?: Record<string, 'online' | 'offline'> | null
   /** 登记在册的 push worker id（rl-config `nodes[].gpu_push`）：holder 不在表里 ⇒ 悬停点名。
    *  `null`/缺省 = 名单不可知（不点名）——与「未登记」是两件事。 */
   registeredWorkers?: string[] | null
@@ -79,7 +77,6 @@ export function TrainingPills({
   rows,
   trainerRunning,
   overview,
-  modeIntents,
   registeredWorkers,
   loopCompletes,
   viewCourse,
@@ -92,7 +89,6 @@ export function TrainingPills({
     rows,
     trainerRunning,
     overview,
-    modeIntents,
     registeredWorkers,
     loopCompletes,
   })

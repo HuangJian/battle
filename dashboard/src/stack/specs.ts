@@ -190,11 +190,13 @@ export function slimToCfg(mode: SlimMode): 0 | 1 {
 
 export function resolveRolloutSrc(cfg: RlConfig, course = ''): RolloutSrcMode {
   const cc = course ? cfg.courses?.[course] : undefined
-  const raw = cc?.rollout_src ?? cfg.rl.rollout_src
-  // `run`（离线训练模式；2026-09-19）也是合法值——漏掉它 = 离线课在 UI 上显示成 `local`，
-  // 而那正是「云机在跑」与「本机在跑」看起来一样的那类静默分叉。域与 python
-  // `trainer/loop_transport.py::ROLLOUT_SRCS` 同源（有测试对账；S4 首簇前在 `loop_steps.py`）。
-  return raw === 'node' || raw === 'run' || raw === 'auto' ? raw : 'local'
+  const raw: string | undefined = cc?.rollout_src ?? cfg.rl.rollout_src
+  // ★M4：退役值 `run`（「整段上云」的旧声明）按 `local` 读——与训练侧
+  // `trainer/loop_transport.py::_rollout_source()` 的容忍读**逐字同口径**（它也是
+  // 映射 local + 一行 WARN）。控制台若还把它当「离线档」展示，就是在替一个已退役的
+  // 声明说话：盘上残留 `run` 的训练进程实际就在本机采样。
+  // 活域与 python `ROLLOUT_SRCS` 同源（有测试对账）。
+  return raw === 'node' || raw === 'auto' ? raw : 'local'
 }
 
 /** cloudflared 隧道旗标（唯一来源）——cloudflaredSpec 与 hub.ts 的 spawn 共用，

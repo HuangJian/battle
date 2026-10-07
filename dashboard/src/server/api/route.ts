@@ -4,14 +4,7 @@ import path from 'path'
 import { loadConfig } from '../../core/config'
 import { log, warn } from '../../core/log'
 import { NN_TRAINING, REPO_ROOT, loopControlPath } from '../../core/paths'
-import type {
-  CfEdgeIp,
-  CfProtocol,
-  Component,
-  RolloutSrcMode,
-  SlimMode,
-  TrainMode,
-} from '../../core/types'
+import type { CfEdgeIp, CfProtocol, Component, RolloutSrcMode, SlimMode } from '../../core/types'
 import {
   ActionError,
   type ActionResult,
@@ -21,9 +14,9 @@ import {
   markCloudHaltRecovered,
   openCourse,
   registerPushWorker,
+  releaseCourseHold,
   reloadPushWorkers,
   removePushWorker,
-  setCourseMode,
   setCoursePaused,
   setMode,
   setNodeConcurrency,
@@ -37,7 +30,6 @@ import {
   stopCourse,
   triggerCloudHalt,
   unfreezeJob,
-  unsetCourseMode,
 } from '../actions'
 import {
   abortEvalBatch,
@@ -228,17 +220,25 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
       }
       // ---- 开课 / 停课（2026-09-20 用户指令：进程启动与课程解耦，课程生命周期独立入口）----
       case 'openCourse': {
-        // 训练模式（`在线|离线`）：★M2 起**不再写 rl-config**（旧换算 `trainModeKnobs` 已删）
-        // ——离线只是把该课 hub 置 offline + 导出任务包（接管是 hub 的 hold 事实）。
-        // 这里只做白名单。
-        const trainMode = bodyStr(body, 'trainMode')
-        if (trainMode && !['online', 'offline'].includes(trainMode)) {
-          return errResp(`未知训练模式: ${trainMode}（只接受 online|offline）`, 400)
+        // ★M4（plan/worker-type-dispatch-model §3-M4，需求 2）：**开课不再指定模式**——
+        // `trainMode` 请求字段整个退役。旧客户端（缓存的前端）还会带它：**响亮拒绝**，
+        // 不静默忽略（静默 = 一条不会发生的承诺：用户以为开了离线课，而 hub 侧连模式
+        // 都没有了）。
+        if (body.trainMode !== undefined) {
+          return errResp(
+            'trainMode 已退役：课程不再区分在线/离线（接管由自主 worker 的 claim 建立）' +
+              '——去掉该字段重新开课',
+            400,
+          )
         }
-        // rollout 位置：与 python `trainer/loop_transport.py::ROLLOUT_SRCS` 同字面量域。
+        // rollout 位置：与 python `trainer/loop_transport.py::ROLLOUT_SRCS` 同字面量域
+        // （★M4：`run` 已随离线模式退役——它是 `ROLLOUT_SRCS_RETIRED` 的容忍读值，不再可写）。
         const rolloutSrc = bodyStr(body, 'rolloutSrc')
-        if (rolloutSrc && !['auto', 'local', 'node', 'run'].includes(rolloutSrc)) {
-          return errResp(`未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node|run）`, 400)
+        if (rolloutSrc && !['auto', 'local', 'node'].includes(rolloutSrc)) {
+          return errResp(
+            `未知 rollout 位置: ${rolloutSrc}（只接受 auto|local|node；run 已随离线模式退役）`,
+            400,
+          )
         }
         // 起点权重来源（G4-①）：`{sourceCourse, it}`，服务端按 manifest 自解析路径
         //（客户端**不给路径**——给路径就是一条可被篡改的写面）。
@@ -255,7 +255,6 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         }
         return okResp(
           await openCourse(ctx.course, {
-            trainMode: (trainMode || undefined) as TrainMode | undefined,
             rolloutSrc: (rolloutSrc || undefined) as RolloutSrcMode | undefined,
             ...(seedFrom ? { seedFrom } : {}),
           }),
@@ -365,17 +364,13 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
           }),
         )
       }
-      // ---- 每课 hub 派发模式（R3-2）：热切 + 落意图（起 hub 时回灌）----
-      // ★ 2026-10-03（plan/auto-offline-handoff §3.2）：人的一次开关 = **pin**（该课此后归
-      //   人管，自动交接不再插手）。
-      case 'setCourseMode':
-        return okResp(await setCourseMode(bodyStr(body, 'course'), bodyStr(body, 'mode')))
-      // ---- 交还自动（三态的 `unset`）：清 pin + 删意图，让该课重回自动交接池 ----
-      case 'unsetCourseMode':
-        return okResp(await unsetCourseMode(bodyStr(body, 'course')))
-      // ---- 自动离线交接（hub 反向调用：离线盘领走无包的在训课之后）----
+      // ---- 强制解除接管（plan §1.3 状态表；需求 8）：人到控制台把被接管的课踢下来 ----
+      // ★M4：取代已退役的三颗模式钮（切离线/切换成在线/交还自动）。
+      case 'releaseCourseHold':
+        return okResp(await releaseCourseHold(bodyStr(body, 'course')))
+      // ---- 自动离线交接（hub 反向调用：自主 worker 领走一门缺包/包旧的在训课之后）----
       // 这不是控制台客户端的动作：hub（python）POST `/api/autoOfflineHandoff`。
-      // 不写意图、不 pin（二轮 P0-3）——控制台只写它唯一能写的那个键（rollout_src=run）并导包。
+      // ★M4/F1：它现在**只导包**（不写意图、不写 rl-config、不推 hub）。
       case 'autoOfflineHandoff':
         return okResp(await autoOfflineHandoff(bodyStr(body, 'course')))
       // ---- 每课「暂停/恢复」意图（R2d 操作面）：写 tmp/loop-control.json，训练进程每拍读 ----

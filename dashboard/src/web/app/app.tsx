@@ -20,7 +20,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
-import type { RolloutSrcMode, TrainMode } from '../../core/types'
+import type { RolloutSrcMode } from '../../core/types'
 import { DEFAULT_GATE_HALT_HOURS, gateHaltAppliedText } from '../view'
 import { AlertDock } from '../components/AlertDock'
 import { Flash, type FlashState } from '../components/Flash'
@@ -365,11 +365,13 @@ export function App({ initial }: AppProps) {
     await doAction('preset', body)
   }
 
-  /** 开课：课程级选项随它一起下发（服务端写 `courses.<课>.*` + 建发现事实 + 解暂停 + 置 hub
-   *  模式；进程没跑也能开）。与「启动服务进程」解耦——进程是共享的一台，回答不了
-   *  「这门课怎么跑」。 */
+  /** 开课：课程级选项随它一起下发（服务端写 `courses.<课>.*` + 建发现事实 + 解暂停；
+   *  进程没跑也能开）。与「启动服务进程」解耦——进程是共享的一台，回答不了
+   *  「这门课怎么跑」。
+   *
+   *  ★M4（plan/worker-type-dispatch-model §3-M4）：`trainMode` 已退役——开课不再指定
+   *  在线/离线（「这门课归谁」由 hub 的 hold 在云机 claim 成功时才建立）。 */
   const handleOpenCourse = async (opts: {
-    trainMode: TrainMode
     rolloutSrc?: RolloutSrcMode
     seedFrom?: { sourceCourse: string; it: number }
   }): Promise<void> => {
@@ -381,14 +383,13 @@ export function App({ initial }: AppProps) {
     setOpenCourseTarget(null)
     await doAction('openCourse', {
       ...(target ? { course: target } : {}),
-      trainMode: opts.trainMode,
       ...(opts.rolloutSrc ? { rolloutSrc: opts.rolloutSrc } : {}),
       // 起点权重（G4-①）：只传 `{sourceCourse, it}`，路径由服务端按 manifest 自解析。
       ...(opts.seedFrom ? { seedFrom: opts.seedFrom } : {}),
     })
   }
 
-  /** 停课：非破坏（删开课标记 + 写暂停意图 + 该课 hub 置离线；队列与账本一个字不动）。
+  /** 停课：非破坏（删开课标记 + 写暂停意图；队列与账本一个字不动。★M4：不再推 hub）。
    *
    *  ★ 课程显式带上（不依赖 doAction 的「当前查看课程」兜底）：停课入口在**每门课的 pill** 上，
    *  点 A 课的 ■ 必须停 A —— 走兜底时，一旦查看目标与 pill 不同步（或两次渲染之间切了课）
@@ -495,7 +496,6 @@ export function App({ initial }: AppProps) {
                 // 收官停车态（账本尾行 run_complete）：已收官的课不得再报「推进中」
                 //（与告警坞的「✅ 训练已完成」同一份事实，resume 后服务端条目自动消失）。
                 loopCompletes={stateView?.loopCompletes ?? null}
-                modeIntents={stateView?.courseModeIntents ?? null}
                 // 「不在 worker 登记表里」的判据输入 = rl-config 的 push worker id 集
                 // （`workerRegistry.workers` 的 id；不是 hub 探活 `pushMap`）。
                 registeredWorkers={stateView?.workerRegistry?.workers.map((w) => w.id) ?? null}
@@ -586,15 +586,13 @@ export function App({ initial }: AppProps) {
               />
             </PanelErrorBoundary>
             {/* 课程矩阵（**两区通用**，取代原「并行课程总览」+「训练调度器」两张表）：
-                hub 侧（派活/队列/离线段）与训练侧（指针/卡在哪一步/在等什么）合并成一行。
+                hub 侧（派活/队列/接管）与训练侧（指针/卡在哪一步/在等什么）合并成一行。
                 不受 isBc 门控——它是**跨课程**表，行自带 BC/RL 种类徽标；而两张表分开时
                「hub 在派活但没进程」/「在训但 hub 没注册」这两种矛盾各自都是「正常」的。 */}
             <PanelErrorBoundary>
               <CourseMatrix
                 overview={stateView?.overview ?? null}
                 loopQueue={stateView?.loopQueue ?? null}
-                modeIntents={stateView?.courseModeIntents ?? null}
-                courseRolloutSrc={stateView?.courseRolloutSrc ?? null}
                 loopCompletes={stateView?.loopCompletes ?? null}
                 course={viewCourse}
                 onSelectCourse={selectCourse}

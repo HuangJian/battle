@@ -6,30 +6,33 @@
  *  改造前：`启动训练` = selfNode → hubServer → **trainingLoop（顺带开课）**，课程准备
  *  （播权重 / 建账本 / 写旋钮 / 置 hub 模式）挂在启动 trainer 的第三步里。两个后果：
  *    ① 「起个进程」这件事必须先选一门课——操作员的动作语义被课程污染；
- *    ② **时序错位**：`setCourseMode` 在课程还不存在（hub 的课程表是**扫盘发现**，此刻
+ *    ② **时序错位**：置 hub 模式在课程还不存在（hub 的课程表是**扫盘发现**，此刻
  *       `tmp/<课>/remote-jobs` 还没出现）时打过去，hub 回 400
  *       `需要合法 course（[]）与 mode(...)`——2026-09-20 实测的那条「失败 x20-steady」。
  *
  *  现在：进程步骤只起进程（见 `start.ts::startSharedTrainer`），课程生命周期住这里，
  *  **两件事各自有入口、各自有回执**：
- *    · 开课 = 写课程级旋钮 → 建发现事实（账本 + `remote-jobs/` + 权重播种）→ 解除暂停
- *      → 置 hub 模式（有界重试）→ 报执行面。进程没跑也能开（训练进程是**发现式**的：
- *      下一拍扫到这门课就入队）。
- *    · 停课 = **非破坏**：写暂停意图（`tmp/loop-control.json`）+ 该课 hub 置 offline。
+ *    · 开课 = 写课程级旋钮 → 建发现事实（账本 + `remote-jobs/` + 权重播种）→ 解除暂停。
+ *      进程没跑也能开（训练进程是**发现式**的：下一拍扫到这门课就入队）；
+ *    · 停课 = **非破坏**：写暂停意图（`tmp/loop-control.json`）+ 删开课标记。
  *      队列与账本一个字不动，随时「开课」恢复（用户 2026-09-20 定案；不做「下架账本」
  *      ——那会让 iter/队列/账本等阅读面一起消失）。
  *      ★ 2026-10-02（用户口径）：顺手清理本课已无信息量的 rl-config 残留
  *      （`rollout_src='local'` 缺省档 + 空节点整条删；`pruneStoppedCourseConfig`），
  *      显式 `node`/`auto`/`run` 一个字不动。
+ *
+ *  ★M4（2026-10-07，plan/worker-type-dispatch-model §3-M4）：**课程不再区分在线/离线**——
+ *  开课不接受 `trainMode`（弹窗那格已删）、停课也不再推 hub（那边没有模式可推）。
+ *  「这门课归云机」= hub 的 **hold** 事实（自主 worker claim 成功且任务包在盘才建立；
+ *  掉线 900s 自动解除），开课弹窗只剩 rollout 位置这一把活旋钮。
  */
 
 import { appendFileSync, copyFileSync, existsSync, mkdirSync, writeFileSync, rmSync } from 'fs'
 import path from 'path'
 import { loadConfig, saveConfig } from '../../core/config'
-import { readJsoncFile } from '../../core/jsonc'
 import { curriculaDir, REPO_ROOT, tmpLogsDir } from '../../core/paths'
 import { validateCourseName } from '../../core/slots'
-import type { CourseConf, RolloutSrcMode, TrainMode } from '../../core/types'
+import type { CourseConf, RolloutSrcMode } from '../../core/types'
 import {
   COURSE_ENABLE_MARKER,
   courseEnableMarkerPath,
@@ -41,36 +44,20 @@ import { pruneLegacyCourseKnobs, pruneStoppedCourseConfig } from '../../stack/co
 import { kickstartReceipt } from '../../stack/kickstart-receipt'
 import { pairedSeedReceipt } from '../../stack/paired-seed-receipt'
 import { remoteExecutionFace } from '../../stack/push-config'
-import { type CourseMode, pushCourseMode } from './course-mode'
+import { hubCandidates, hubReleaseCourseHold } from '../../stack/hub-admin'
 import { readLoopControl, setCoursePaused } from './loop-control'
 import { loopControlPath } from '../../core/paths'
-import { launchTaskBundleExport } from '../bundles'
-import { launchEvalA } from '../eval-a-run'
 import { ActionError, ActionResult, done, guard, release } from './result'
 import { runRlLockHolder } from './labels'
 import { runBcLockHolder, runClusterLockHolder } from './start'
 
-/** hub 模式推送的有界重试（开课/停课共用）。缺省 3 次 × 2s：hub 的课程表是**扫盘发现**，
- *  新建的 `remote-jobs/` 要等它扫到才认这门课；测试注入 `delayMs: 0` 避免空等（见
- *  `tests/course-lifecycle.test.ts` 的「hub 不可达」用例——不注入就是 2×2s 死等）。 */
-export interface HubModeRetry {
-  attempts?: number
-  delayMs?: number
-}
-
 /** 开课参数（全部是**课程级**：绝不写进 `rl.*` 那块所有课程共用的默认面）。 */
 export interface OpenCourseOpts {
-  /** 训练模式（缺省在线）。★M2（plan/worker-type-dispatch-model §3-M2）起**不再写 rl-config**：
-   *  `offline` 剩下的动作 = 把该课 hub 置 offline（M4 前仍是读面）+ 顺手导出任务包
-   *  （包到手、云机 claim 成功后才建立接管=hold）；`online` = 推在线 + 就地清退役键
-   *  （`run_iters` / 残留的 `rollout_src:'run'`）。 */
-  trainMode?: TrainMode
-  /** rollout 执行位置（在线时可选）：写课程级覆盖 `courses.<课>.rollout_src`，
-   *  不碰全局 `rl.rollout_src`（那是所有课程共用的默认面）。离线档忽略它。 */
+  // ★M2/M4：原来的 `trainMode`（训练模式）已随「课程不再区分在线/离线」退役——
+  //  弹窗那格删了，开课也不再置 hub 模式（hub 侧连模式都没有了）。
+  /** rollout 执行位置（可选）：写课程级覆盖 `courses.<课>.rollout_src`，
+   *  不碰全局 `rl.rollout_src`（那是所有课程共用的默认面）。 */
   rolloutSrc?: RolloutSrcMode
-  /** hub 模式推送的有界重试（缺省 3 次 × 2s）。hub 的课程表是**扫盘发现**，新建的
-   *  `remote-jobs/` 要等它扫到才认这门课；测试注入 1 次避免空等。 */
-  hubMode?: HubModeRetry
   /** **起点权重来源**（plan/course-archive.plan.md §3.5 / G4-①）：指向一门**已封存**课的
    *  某个关键轮——开课时把该归档权重播种成 `tmp/<本课>/weights.json`（缺省 = BC 播种，
    *  行为不变）。
@@ -97,32 +84,10 @@ function assertCourseExists(course: string): void {
   )
 }
 
-/** 课程文件声明的 `iters`（终点轮数）；读不到 / 没声明 → null。
- *
- *  与 python 侧导出腿的守卫同口径（`trainer/loop_export.py::_export_offline_bundle`：`--export-bundle`
- *  需要课程声明 iters——**任务包里的计划必须有终点**，不能靠云机猜）：离线（云机接手）模式 =
- *  跑到课程末尾，没有有限终点云机会一直跑下去。开课预校验在这里读课程文件，**在 trainer
- *  接触坏配置之前**就把配备错拦下。
- *  JSONC 解析借 `core/jsonc.ts::readJsoncFile`（唯一 JSONC 解析器，别再手搓，见该文件头）。 */
-export function declaredCourseIters(course: string): number | null {
-  const files = [
-    path.join(curriculaDir(), `${course}.jsonc`),
-    path.join(curriculaDir(), `${course}.bc.jsonc`),
-  ]
-  for (const f of files) {
-    if (!existsSync(f)) continue
-    try {
-      const obj = readJsoncFile(f)
-      if (obj && typeof obj === 'object' && 'iters' in obj) {
-        const iters = (obj as { iters?: unknown }).iters
-        return typeof iters === 'number' ? iters : null
-      }
-    } catch {
-      return null // 课程文件解析失败 = 配影视作「未声明」（assertCourseExists 已保证存在）
-    }
-  }
-  return null
-}
+// ★M4：`declaredCourseIters()`（读课程文件声明的 iters）已删——它唯一的使用者就是
+// 「离线开课要求 iters>0」那道预校验，而开课不再有模式。约束本体仍在：python 导出腿
+// （`trainer/loop_export.py::_export_offline_bundle`）与 hub 的缺包自愈门都要求任务包
+// 有计划终点，只是不再在开课这一拍重复一次。
 
 // ────────────────────────── 开课标记（发现判据的显式闸） ──────────────────────────
 //
@@ -195,14 +160,13 @@ export function prepareCourseForOpen(course: string, seedPath?: string): { notes
   return { notes }
 }
 
-/** 写本课的 rl-config 键（开课那条路径）。返回人读说明 + 最终模式。
+/** 写本课的 rl-config 键（开课那条路径）。返回人读说明。
  *
- *  ★M2（plan/worker-type-dispatch-model §3-M2）：**离线档不再写盘**——「这门课归云机」不再是
- *  `rollout_src:'run'` + `run_iters:-1` 这对声明，而是 hub 的 **hold** 事实（云机 claim 成功
- *  且有进度才建立；掉线 900s 自动解除）。离线档剩下的动作在调用方：推 hub 模式（M4 前仍是意图
- *  读面）+ 导出任务包（`autoBundleDecision`）——包导出后云机才能 claim，hold 才可能建立。
+ *  ★M2（plan/worker-type-dispatch-model §3-M2）：**不再有「离线档」**——「这门课归云机」
+ *  不是 `rollout_src:'run'` + `run_iters:-1` 这对声明，而是 hub 的 **hold** 事实（云机 claim
+ *  成功且有进度才建立；掉线 900s 自动解除）。
  *
- *  在线档只落显式选的 `rollout_src`（`node`/`auto` 仍是活的训练侧选项），并**就地清掉退役键**
+ *  本函数只落显式选的 `rollout_src`（`node`/`auto` 仍是活的训练侧选项），并**就地清掉退役键**
  *  （`run_iters`，以及残留的 `rollout_src:'run'`）——退役值由训练侧容忍读兜住（映射 local +
  *  一行 WARN，见 `loop_transport._rollout_source`），但人一开课就把话说明白才是干净的读面。
  *  清完为空的课程节点整条删（与 `pruneStoppedCourseConfig` 的「空节点不留痕」同规）。
@@ -216,11 +180,11 @@ export function prepareCourseForOpen(course: string, seedPath?: string): { notes
 export function writeCourseConfigForOpen(
   course: string,
   opts: OpenCourseOpts,
-): { notes: string[]; trainMode: TrainMode } {
-  const trainMode: TrainMode = opts.trainMode === 'offline' ? 'offline' : 'online'
-  // 三条入口各对应一种弹窗选择；模式与 rollout 位置都没给就**不写盘**
-  //（历史行为下那是一次「内容不变的空写」，无语义——不重放它）。
-  if (!opts.trainMode && !opts.rolloutSrc) return { notes: [], trainMode }
+): { notes: string[] } {
+  // rollout 位置都没给就**不写盘**（历史行为下那是一次「内容不变的空写」，无语义——不重放它）。
+  // ★M4：退役键的清理**不靠这个早退**（从前 `trainMode='online'` 是它的另一条入口，而模式
+  //  已删）——今天只要点了开课就顺手清一遍退役键，以免盘上残留的 `run`/`run_iters` 把
+  //  「本课归云机」这个已经不存在的语义继续留在读面里。
   const cfg = loadConfig()
   const row: Record<string, unknown> = { ...cfg.courses?.[course] }
   const notes: string[] = []
@@ -230,21 +194,15 @@ export function writeCourseConfigForOpen(
     dirty = true
     notes.push(`已清退役键 courses.${course}.run_iters（★M2：段长不再是「归云机」的声明）`)
   }
-  if (trainMode === 'offline') {
-    notes.push(
-      '离线档不再写 rl-config（★M2：接管 = hub 的 hold 事实；导出任务包 + 云机 claim 后生效）',
-    )
-  } else {
-    if (row.rollout_src === 'run') {
-      delete row.rollout_src
-      dirty = true
-      notes.push(`已清退役值 courses.${course}.rollout_src='run'（★M2：同上）`)
-    }
-    if (opts.rolloutSrc) {
-      row.rollout_src = opts.rolloutSrc
-      dirty = true
-      notes.push(`rollout 位置覆盖：courses.${course}.rollout_src=${opts.rolloutSrc}`)
-    }
+  if (row.rollout_src === 'run') {
+    delete row.rollout_src
+    dirty = true
+    notes.push(`已清退役值 courses.${course}.rollout_src='run'（★M2：同上）`)
+  }
+  if (opts.rolloutSrc) {
+    row.rollout_src = opts.rolloutSrc
+    dirty = true
+    notes.push(`rollout 位置覆盖：courses.${course}.rollout_src=${opts.rolloutSrc}`)
   }
   // 没删没写就不碰盘：rl-config 的 mtime 是 hub 热重载的输入之一（同 `pruneStoppedCourseConfig`）。
   if (dirty) {
@@ -254,31 +212,12 @@ export function writeCourseConfigForOpen(
     else courses[course] = row as CourseConf
     saveConfig({ ...cfg, courses })
   }
-  return { notes, trainMode }
+  return { notes }
 }
 
-// ────────────────────────── hub 模式（有界重试） ──────────────────────────
-
-/** 把该课的 hub 模式推过去，**有界重试**：hub 的课程表是扫盘发现的，开课这一刻它可能
- *  还没扫到（400 需要合法 course）；等一两拍它就会认。重试耗尽也**不是失败** ——
- *  意图已落盘（`setCourseMode` 的契约），起 hub 时 `restoreCourseModes` 会按意图回灌。 */
-export async function pushHubMode(
-  course: string,
-  mode: CourseMode,
-  retry: { attempts?: number; delayMs?: number } = {},
-): Promise<{ ok: boolean; message: string }> {
-  const attempts = Math.max(1, retry.attempts ?? 3)
-  const delayMs = Math.max(0, retry.delayMs ?? 2000)
-  // ★ 2026-09-24（plan §2.2 F9）：调 `pushCourseMode`（**只**推 hub + 落意图）而**不是**
-  //   `setCourseMode`——后者会写训练配置：开课会因此重复写盘 1–3 次，停课（也走这里）还会把
-  //   「停课」误翻成「整段上云」。基础设施建设与用户动作的边界就在这一行。
-  let last = await pushCourseMode(course, mode)
-  for (let i = 1; i < attempts && !last.ok; i++) {
-    await Bun.sleep(delayMs)
-    last = await pushCourseMode(course, mode)
-  }
-  return { ok: last.ok, message: last.message }
-}
+// ★M4：`pushHubMode`（开课/停课的 hub 模式推送 + 有界重试）与 `HubModeRetry` 一起删除
+// ——hub 侧没有课程模式了（`/admin/courses?mode=` 退役），“重试到 hub 认这门课”这个
+// 语义也随模式一起消失：认课本身由训练侧发布 job / 开课建 `remote-jobs/` 完成。
 
 // ────────────────────────── 开课 / 停课 ──────────────────────────
 
@@ -310,18 +249,9 @@ export function courseRunnerFacts(course: string, bc: boolean): CourseRunnerFact
   return { holder, cluster, conflict: holder && holder !== cluster ? holder : null }
 }
 
-/** 离线开课要不要顺手补一次 **it0 基线评估**（纯函数：模式 + 测试逃生阀，便于钉住）。
- *
- *  为什么在开课那一刻补（2026-09-24）：离线档 = `rollout_src:'run'`（**本机不跑训练**），
- *  于是 it0 读数两条产路都不通——云机侧 `remote/offline_eval.CloudEvalPlan.due()` 对
- *  `it < 1` 恒 False，而本机主循环的基线派发（`trainer/loop_baseline.py::_maybe_dispatch_baseline_eval`）
- *  压根不在场上。缺了它，控制台的配对基线退化成「第一条 eval 轮」（随 run 起点漂移，
- *  跨腿不可比：`iters.ts` 的 `evalIters.includes(0) ? 0 : evalIters[0]`）。
- *
- *  `BCITY_NO_AUTO_BASELINE_EVAL`：测试逃生阀（同 `BCITY_NO_AUTO_TASK_BUNDLE`——用例不开真子进程）。 */
-export function shouldAutoBaseline(trainMode: TrainMode): boolean {
-  return trainMode === 'offline' && !process.env.BCITY_NO_AUTO_BASELINE_EVAL
-}
+// ★M4：`shouldAutoBaseline(trainMode)` 已删——它存在的唯一理由是「离线开课 = 本机不跑训练
+// ⇒ it0 读数两条产路都不通，得在开课那一刻补一次」（2026-09-24）。课程去模式化后开课
+// **恒为本机跑**，主循环的基线派发（`trainer/loop_baseline.py`）就在场上，不需要替代产路。
 
 /** **开课**：把一门课放进训练（进程没跑也能放——训练进程是发现式的，下一拍就入队）。 */
 export async function openCourse(course: string, opts: OpenCourseOpts = {}): Promise<ActionResult> {
@@ -378,20 +308,10 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
         ],
       )
     }
-    // ★ 2026-09-22 事故预校验：离线（云机接手）= 跑到课程末尾，课程必须声明有限 iters——
-    //   没有终点节点会一直跑下去（python 侧 `loop_round_steps` 的同款 SystemExit 曾把共享 trainer
-    //   整个弄崩）。在这里读课程文件、**在 trainer 接触坏配置之前**响亮拒绝（零副作用，
-    //   与上方其它预检同区）。
-    if (opts.trainMode === 'offline') {
-      const iters = declaredCourseIters(c)
-      if (iters === null || iters <= 0) {
-        throw new ActionError(
-          `课程 ${c} 声明 iters=${iters ?? '缺失'}≤0，离线（云机接手）要求 iters>0——` +
-            '任务包必须有终点（没有终点云机会一直跑下去）。请改「在线」模式开课，' +
-            '或在课程文件里声明 iters>0 后再开离线。本次开课未写任何东西。',
-        )
-      }
-    }
+    // ★M4：这里曾有「离线开课要求课程声明 iters>0」的预校验（任务包必须有终点）。开课不再
+    //   有模式 ⇒ 它随 `declaredCourseIters` 一起删；同一个约束**仍在生它的地方**守着：
+    //   导出任务包的那条腿（python `trainer/loop_export.py::_export_offline_bundle` 需要
+    //   课程声明 iters，否则拒导），以及 hub 的缺包自愈门（没有包就建不了 hold）。
     // ② 写面，三步的**顺序就是契约**（旋钮 → 解暂停 → 事实）：
     //    · **会抛的一步排最前**：`saveConfig` 的容量/槽位守卫会抛（`core/config.ts`）——
     //      它在最前 ⇒ 抛出的那一次盘上零变化（连暂停意图都没动）。
@@ -428,83 +348,21 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
           ]
         : []),
     ]
-    // hub 模式：离线档 = 该课停车（不再实时派发）；在线 = 恢复实时派发。
-    // ★ 2026-10-03（plan/auto-offline-handoff §3.2a，二轮 P0-3）：**没显式选模式就不推、不落意图**。
-    //   旧行为「无条件推 online + 写 `courseModes[课]='online'`」= 把每一门开过的课都记成
-    //   「人的决定」⇒ 自动交接（U1：TPU 一上线就能接续在训课程）在回灌/下一次点击后被静默关掉。
-    //   未指定 = 该课留在自动池（意图表保持 `unset`）；显式选择照旧推（**不带 pin** —— pin 是
-    //   运行中那颗开关与「交还自动」的语义，开课弹窗只是一次意图选择）。
-    const trainMode = opts.trainMode === 'offline' ? 'offline' : 'online'
-    const hub = opts.trainMode
-      ? await pushHubMode(c, trainMode, opts.hubMode)
-      : { ok: true, message: '未指定训练模式：hub 模式与意图都保持原状' }
+    // ★M4（plan/worker-type-dispatch-model §3-M4，需求 2）：**开课不再指定模式**——没有
+    //   hub 模式可推（hub 侧 `_modes` 连同 `/admin/courses?mode=` 一起退役），也不再在开课时
+    //   自动导任务包。任务包改由**需求侧**触发：自主 worker claim 遇缺包 ⇒ hub 记
+    //   `pending_export` 并 POST `/api/autoOfflineHandoff`（`actions/auto-offline-handoff.ts`）
+    //   ⇒ 控制台导包。这样「包」只为真实提出需求的云机而造，而不是每次开课替它预造一份
+    //   可能已经过期的快照（开课时那份包在代码/权重变动后就是旧包，规则表 ④' 会作废重导）。
     const face = remoteExecutionFace(loadConfig())
-    const hubNote = !opts.trainMode
-      ? '未指定训练模式：该课留在自动交接池（离线盘一上线 claim 即接管）'
-      : hub.ok
-        ? `hub 该课模式 = ${trainMode}`
-        : `hub 尚未认下这门课（${hub.message}）——意图已记录，起 hub 时会按意图回灌`
-    // ★ 2026-09-22：离线开课 = **自动生成任务包**（随时可导：导出是只读快照、不与训练抢
-    // per-course 锁）。任务包不手工搬运——hub 的 `GET /offline/task-pack` 直接按课上架
-    // 这份 zip，Kaggle/Colab 离线 worker 探到 hub 即可拉取（离线课状态列据此显示）。
-    // BCITY_NO_AUTO_TASK_BUNDLE：测试逃生阀（课程生命周期用例不开真导出子进程）；
-    // 导出本身的正确性由 server-api-task-bundle 套件覆盖。
-    // ★ 离线开课（含「停课 → 重新开课」这种重启）= **重新打一份带当前代码的包**：
-    //   `launchTaskBundleExport` 会先把旧包作废（挪进 `tmp/<课>/stale-packs/`）再起导出，
-    //   否则代码变过之后云机在导出窗口里探到的仍是旧代码的包，而它会拿旧代码跑完整段。
-    //   作废后 hub 的 `/offline/task-pack` 404，云机的等包循环会一直等到新包写好。
-    const autoExport =
-      trainMode === 'offline' && !process.env.BCITY_NO_AUTO_TASK_BUNDLE
-        ? launchTaskBundleExport(c)
-        : null
-    // ★ 2026-09-24：离线开课 = 本机不跑训练 ⇒ 云腿永远产不出 it0 读数（见
-    //   `shouldAutoBaseline` 的理由）。这里补一次：python 侧评的是**本段起点权重**
-    //   （缺省取课程 `out` = 任务包 manifest 里 init_weights 的同一份字节；`prepareCourseForOpen`
-    //   已保证该文件存在——缺它会从 bc 播种，播种失败则开课早就抛了）。
-    //   best-effort：起不来只记 note，**绝不让开课失败**；结果从 eval_log.jsonl 回填。
-    const autoBaseline = shouldAutoBaseline(trainMode)
-      ? launchEvalA(c, '', 0, { baseline: true })
-      : null
-    return done(
-      true,
-      `已开课 ${c}（训练模式 ${trainMode === 'offline' ? '离线（云机接手）' : '在线'}）` +
-        '——已进入调度课程表' +
-        `${hub.ok ? '' : `；${hubNote}`}`,
-      [
-        `本课（${c}）执行面：${face.text}${face.detail ? `（${face.detail}）` : ''}`,
-        ...notes,
-        hubNote,
-        ...(autoExport
-          ? autoExport.ok
-            ? [
-                `任务包自动导出：${autoExport.message}`,
-                ...(autoExport.invalidated
-                  ? [
-                      '★ 旧任务包已作废（代码可能已变）→ 已归档到 tmp/<课>/stale-packs/；' +
-                        '导出完成前云机取不到包（/offline/task-pack 404），它会等新包——这是预期行为，不是故障',
-                    ]
-                  : []),
-              ]
-            : [`任务包自动导出未能启动（${autoExport.message}）——可稍后在课程行手动「导出任务包」`]
-          : []),
-        ...(autoBaseline
-          ? autoBaseline.ok
-            ? [
-                autoBaseline.queued
-                  ? 'it0 基线评估已排队（前面还有 evalA 在跑；跑完自动开始，读数回填 eval_log）'
-                  : `it0 基线评估已后台启动（it0 = 本段起点权重；读数回填 eval_log，日志 tmp/${c}/evalA.log）`,
-              ]
-            : [`it0 基线评估未能启动（${autoBaseline.message}）——停课 → 重新开课会自动补跑`]
-          : []),
-        ...(trainMode === 'offline'
-          ? ['离线课重启 = 重新导出任务包（代码可能已变）：停课后重新开课即重打一份带当前代码的包']
-          : []),
-        // 机器侧旋钮在**开课时**施加（python `apply_course_machine_overrides`）：已经开着的课
-        // 要等它重开才换旋钮——暂停该课 → 重启共享 trainer（或等引擎驱逐重开）。
-        '★ 机器侧旋钮（降级本机等）在开课时施加：已开着的课要**停课 → 重新开课**（或重启共享 trainer）才换。',
-        '★ 共享 trainer 没在跑也能开课——它一起就会扫到已开课的课程；进程与课程是两件事。',
-      ],
-    )
+    return done(true, `已开课 ${c}——已进入调度课程表（本机采样；云机 claim 成功后才建立接管）`, [
+      `本课（${c}）执行面：${face.text}${face.detail ? `（${face.detail}）` : ''}`,
+      ...notes,
+      // 机器侧旋钮在**开课时**施加（python `apply_course_machine_overrides`）：已经开着的课
+      // 要等它重开才换旋钮——暂停该课 → 重启共享 trainer（或等引擎驱逐重开）。
+      '★ 机器侧旋钮（降级本机等）在开课时施加：已开着的课要**停课 → 重新开课**（或重启共享 trainer）才换。',
+      '★ 共享 trainer 没在跑也能开课——它一起就会扫到已开课的课程；进程与课程是两件事。',
+    ])
   } catch (e) {
     if (e instanceof ActionError) throw e
     throw new ActionError(e instanceof Error ? e.message : String(e))
@@ -513,21 +371,46 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
   }
 }
 
-/** **停课**：非破坏 —— 暂停调度意图（本机不再推进） + 该课 hub 置 offline。
+/** **停课**：非破坏 —— 删开课标记（训练侧与 hub 认课的**唯一 opt-out**）+ 写暂停意图。
  *
- *  与「暂停」按钮的关系：那条也是写暂停意图（同一份契约），差别在**离线闸**——停课连
- *  远端派发也一起收（否则云机仍会领走队列里已入队的 iter/ppo job，而操作员以为停了）。
- *  注：离线课那条腿 2026-09-25 退役后它已无队列项——云机上正在跑的那份只能由操作员在云机侧停。
+ *  与「暂停」按钮的关系：那条也只写暂停意图（同一份契约），但**不动开课标记**——所以停课
+ *  才是在训状态的开关（hub 侧不可领的唯一 opt-out，见 plan §1.3 状态表）。
+ *  ★M4：停课**不再推 hub**（hub 没有课程模式了）——在跑 hold 不杀（云机上那份只能由操作员在
+ *  云机侧停），已入队的 job 仍在队列里，恢复（开课）后从原处接着跑。
  *  课程表 / 账本 / 队列一律不动：恢复走「开课」。
  *
  *  ★ 2026-10-02（用户口径）：停课顺手**清残留**——`courses.<课>.rollout_src='local'`
  *  （缺省档不留痕）与清空的课程节点整条删（`course-knobs.ts::pruneStoppedCourseConfig`）。
  *  显式 `node`/`auto`/`run` 与任何训练语义键不动——这是停课唯一的配置写面。
  */
-export async function stopCourse(
-  course: string,
-  opts: { hubMode?: HubModeRetry } = {},
-): Promise<ActionResult> {
+/** **强制解除接管**（plan §1.3 状态表的「强制解除」行）：人到控制台把一门被自主 worker 接管的
+ *  课踢下来。
+ *
+ *  为什么必须有这颗钮：**live 的接管不可被顶**（不变量 3，`?takeover=1` 也不再能覆盖）——
+ *  取代那条旧路的是两条出口：① 它自己的进度静默超阈（自动）；② 人来点这一颗（人工）。
+ *  没有它，「云机卡死但还在心跳」就是一个只能等 TTL 的死局。
+ *
+ *  语义 = hub 的 `revoke_offline_lease`（立墓碑）：旧持有者下次心跳/打点收 409、新盘 claim
+ *  直接覆盖；本机与本课协作派发下一拍即恢复（hold 不再是 live）。
+ *  多候选基址逐个试（与旧 `pushMode` 同形：账本里活着的 hub 优先，末位槽位兜底）。
+ */
+export async function releaseCourseHold(course: string): Promise<ActionResult> {
+  const c = String(course ?? '').trim()
+  if (!c) return done(false, '需要课程（接管是按课记的）')
+  // 与已删的 `pushMode` 同一套候选枚举：本模块已 import `loadConfig`。
+  const cfg = loadConfig()
+  const token = String(cfg.rl?.remote_token ?? '')
+  const candidates = hubCandidates(cfg, c)
+  let last = '没有可试的 hub 地址'
+  for (const base of candidates) {
+    const r = await hubReleaseCourseHold(base, token, c)
+    if (r.ok) return done(true, `${c}：${r.message}`)
+    last = r.message
+  }
+  return done(false, `${c} 未能解除接管：${last}`)
+}
+
+export async function stopCourse(course: string): Promise<ActionResult> {
   guard(`course-stop:${course}`)
   try {
     const c = String(course ?? '').trim()
@@ -544,23 +427,22 @@ export async function stopCourse(
     rmSync(marker, { force: true })
     // ② 暂停意图（表内暂停，双保险：万一标记被手工建回来/还在旧进程的内存表里）
     const pause = setCoursePaused(c, true)
-    // ③ hub 该课置 offline（远端也不再实时派发）
-    const hub = await pushHubMode(c, 'offline', opts.hubMode)
+    // ★M4：原来的第 ③ 步「hub 该课置 offline」已删（hub 无模式）。开课标记是 hub 认课的
+    //   唯一 opt-out（`role_blocked` 的停课腿），删它就够了。
     const notes = [
       ...(pruned.length > 0 ? [`rl-config 清理：${pruned.join('；')}`] : []),
       hadMarker
-        ? '已删开课标记 training-enabled.txt（训练侧不再把这门课当在训）'
+        ? '已删开课标记 training-enabled.txt（训练侧不再把这门课当在训，hub 也不可领）'
         : '本课本就没有开课标记',
       `暂停意图：${pause.message}`,
-      hub.ok
-        ? 'hub 该课模式 = offline（不再实时派发；遗留的 iter/ppo job 也不会派给任何盘）'
-        : `hub 尚未认下这门课（${hub.message}）——意图已记录，起 hub 时会按意图回灌`,
       '队列与账本一个字不动：已入队的 job 仍在队列里，恢复（开课）后从原处接着跑。',
       '账本/iter/指标仍可看（课程下拉不筛历史课）——这是**非破坏**停课，不是下架。',
+      '★ 在云的接管（hold）不杀：云机上正在跑的那份只能由操作员在云机侧停；' +
+        '想要它立刻让出，到课程矩阵点「强制解除接管」。',
     ]
     return done(
       pause.ok,
-      pause.ok ? `已停课 ${c}（已删开课标记 + 本机调度暂停 + hub 置离线）` : '停课未生效',
+      pause.ok ? `已停课 ${c}（已删开课标记 + 本机调度暂停；hub 侧不再可领）` : '停课未生效',
       notes,
     )
   } catch (e) {

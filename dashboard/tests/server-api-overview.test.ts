@@ -35,7 +35,7 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
     const q = view.parseHubQueue({
       courses: {
         a: {
-          mode: 'online',
+          hold: { worker_id: 'tpu-1', state: 'live', last_progress_at: 1758.5, expires_in: 870 },
           pending_n: 3,
           pending: ['j1', 'j2', 'j3'],
           inflight: [
@@ -44,10 +44,11 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
           ],
           next_job: 'j1',
         },
-        b: { mode: 'offline', pending_n: 0, pending: [], inflight: [], next_job: null },
+        // ★M4：旧 `mode` / 顶层 `offline` 名集已退役——接管就是「有人领了这门课」。
+        b: { pending_n: 0, pending: [], inflight: [], next_job: null },
       },
       order: ['a', 'b'],
-      offline: ['b'],
+      offline_disk: { recent: ['tpu-1'], recent_n: 1 },
       active_courses: 1,
       active_workers: 2,
       halt: false,
@@ -56,8 +57,16 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
     expect(q.courses.a!.inflight).toBe(2)
     expect(q.courses.a!.holders).toEqual(['gpu-1', ''])
     expect(q.courses.a!.nextJob).toBe('j1')
-    expect(q.courses.b!.mode).toBe('offline')
-    expect(q.offline).toEqual(['b'])
+    expect(q.courses.a!.hold).toEqual({
+      workerId: 'tpu-1',
+      state: 'live',
+      lastProgressAt: 1758.5,
+      at: 0,
+      expiresIn: 870,
+    })
+    expect(q.courses.b!.hold).toBeNull()
+    // 自主盘的「最近露面面」（P2-5）：旧 hub 没这一块 ⇒ null（不可知 ≠ 没盘）
+    expect(q.offlineDisks).toEqual(['tpu-1'])
     expect(q.activeWorkers).toBe(2)
   })
 
@@ -66,12 +75,11 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
     expect(view.parseHubQueue('nope')).toBeNull()
     expect(view.parseHubQueue({})).toBeNull() // 无 courses 块 = 不是这个端点
     const q = view.parseHubQueue({ courses: { a: {} } })!
-    // 字段全缺 → 全零/缺省，绝不 NaN 或抛错；authority/pinned 缺=
-    // **未知**（旧 hub）而不是编一个档（★P0-11 / P1-10：dashboard 不猜权威）
+    // 字段全缺 → 全零/缺省，绝不 NaN 或抛错；hold / pending_export 缺 =
+    // **没有接管/没有导包**（旧 hub 不说这两件事，dashboard 也不据此编状态）
     expect(q.courses.a).toEqual({
-      mode: 'online',
-      authority: null,
-      pinned: null,
+      hold: null,
+      pendingExport: null,
       pending: 0,
       inflight: 0,
       nextJob: null,
@@ -87,20 +95,33 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
     expect(q.peekedCourses).toBeNull()
   })
 
-  it('★2026-10-05 P0-11：每课行带 authority + pinned（dashboard 的 courseStatus 从这里读，不猜）', () => {
+  it('★M4：每课行带 hold + pending_export（courseStatus 从这里读，不猜）', () => {
     const q = view.parseHubQueue({
       courses: {
-        a: { authority: 'pinned_online', pinned: true },
-        b: { authority: 'auto', pinned: false },
-        c: { authority: 'bogus', pinned: 'yes' }, // 形状不符 ⇒ 未知，不报错
+        a: {
+          hold: { worker_id: 'tpu-1', state: 'live', last_progress_at: 1758.5 },
+          pending_export: { by: 'tpu-2', at: 1750 },
+        },
+        // `state` 缺省按 **stale** 读（拿不到活性证据时不冒充 live——误报 live 会把一门
+        // 正常课压住，反向的代价只是「照常派发 + 本机照跑」）。
+        b: { hold: { worker_id: 'tpu-2' } },
+        c: { hold: { state: 'live' } }, // 既没 worker_id 也没 last_progress_at ⇒ 根本不是 hold 块
+        d: { hold: 'bogus', pending_export: 'bogus' }, // 形状不符 ⇒ 都当没有，不报错
       },
     })!
-    expect(q.courses.a!.authority).toBe('pinned_online')
-    expect(q.courses.a!.pinned).toBe(true)
-    expect(q.courses.b!.authority).toBe('auto')
-    expect(q.courses.b!.pinned).toBe(false)
-    expect(q.courses.c!.authority).toBeNull()
-    expect(q.courses.c!.pinned).toBeNull()
+    expect(q.courses.a!.hold).toEqual({
+      workerId: 'tpu-1',
+      state: 'live',
+      lastProgressAt: 1758.5,
+      at: 0,
+      expiresIn: 0,
+    })
+    expect(q.courses.a!.pendingExport).toEqual({ by: 'tpu-2', at: 1750 })
+    expect(q.courses.b!.hold!.state).toBe('stale')
+    expect(q.courses.b!.pendingExport).toBeNull()
+    expect(q.courses.c!.hold).toBeNull()
+    expect(q.courses.d!.hold).toBeNull()
+    expect(q.courses.d!.pendingExport).toBeNull()
   })
 
   it('★2026-10-05 P0-11：/admin/offline 的 leases 解析（stale/墓碑；整块缺 ⇒ null）', () => {
@@ -194,18 +215,23 @@ describe('overviewCourseNames / buildCourseRows', () => {
     ).toEqual([])
   })
 
-  it('每行四态可分辨：在训 / 离线 / hub 未注册 / 停止（队列列无 hub 时归零）', () => {
+  it('每行四态可分辨：在训 / 接管 / hub 未注册 / 停止（队列列无 hub 时归零）', () => {
     const rows = view.buildCourseRows({
-      courses: ['train', 'off', 'ghost', 'idle'],
+      courses: ['train', 'held', 'ghost', 'idle'],
       training: ['train', 'ghost'],
-      iters: { train: 12, off: 3 },
+      iters: { train: 12, held: 3 },
       queue: view.parseHubQueue({
         courses: {
-          train: { mode: 'online', pending_n: 2, inflight: [{ worker: 'gpu-1' }] },
-          off: { mode: 'offline', pending_n: 5, inflight: [] },
-          idle: { mode: 'online', pending_n: 0, inflight: [] },
+          train: { pending_n: 2, inflight: [{ worker: 'gpu-1' }] },
+          // ★M4：「离线」布尔已退役——取而代之的是 hold（谁在跑这门课的唯一真源）。
+          held: {
+            pending_n: 5,
+            inflight: [],
+            hold: { worker_id: 'tpu-1', state: 'live', last_progress_at: 1758 },
+          },
+          idle: { pending_n: 0, inflight: [] },
         },
-        order: ['train', 'off', 'idle'],
+        order: ['train', 'held', 'idle'],
         active_courses: 2,
         active_workers: 1,
       }),
@@ -216,10 +242,14 @@ describe('overviewCourseNames / buildCourseRows', () => {
       iter: 12,
       queuePending: 2,
       inflight: 1,
-      offline: false,
+      hold: null,
       hubSeen: true,
     })
-    expect(byName.off).toMatchObject({ training: false, offline: true, queuePending: 5 })
+    expect(byName.held).toMatchObject({
+      training: false,
+      hold: { workerId: 'tpu-1', state: 'live' },
+      queuePending: 5,
+    })
     // ghost 在训但 hub 不认识它 —— UI 用这一行提示「以 --course 重启 hub」
     expect(byName.ghost).toMatchObject({ training: true, hubSeen: false, queuePending: 0 })
     expect(byName.idle).toMatchObject({ training: false, hubSeen: true, iter: null })
@@ -326,19 +356,14 @@ afterEach(() => {
 const QUEUE = {
   courses: {
     c4: {
-      mode: 'online',
-      // ★P0-11：hub 每课行带 authority + pinned（dashboard 的 courseStatus 从这里读）。
-      authority: 'pinned_online',
-      pinned: true,
       pending_n: 1,
       pending: ['job-1'],
       inflight: [{ job_id: 'job-2', worker: 'gpu-1', heartbeat_ago: 1.5 }],
       next_job: 'job-1',
     },
+    // ★M4：c5 被自主盘接管（旧的 `mode` / `authority` / `pinned` 三件已退役）
     c5: {
-      mode: 'offline',
-      authority: 'pinned_offline',
-      pinned: true,
+      hold: { worker_id: 'tpu-1', state: 'live', last_progress_at: 1758, expires_in: 870 },
       pending_n: 0,
       pending: [],
       inflight: [],
@@ -346,7 +371,6 @@ const QUEUE = {
     },
   },
   order: ['c4', 'c5'],
-  offline: ['c5'],
   active_courses: 1,
   active_workers: 3,
   halt: true,
@@ -369,13 +393,10 @@ describe('buildOverview（hub 观测 → 总览行）', () => {
       const row = ov.rows.find((r) => r.course === 'c4')!
       expect(row.queuePending).toBe(1)
       expect(row.inflight).toBe(1)
-      expect(row.offline).toBe(false)
       const off = ov.rows.find((r) => r.course === 'c5')!
-      expect(off.offline).toBe(true)
-      // ★P1-11 接线：authority 从 `/admin/queue` 每课行**透传**到总览行（dashboard 读它、不猜）。
-      expect(row.authority).toBe('pinned_online')
-      expect(row.pinned).toBe(true)
-      expect(off.authority).toBe('pinned_offline')
+      // ★M4 接线：hold 从 `/admin/queue` 每课行**透传**到总览行（dashboard 读它、不猜「谁在跑」）。
+      expect(row.hold).toBeNull()
+      expect(off.hold).toMatchObject({ workerId: 'tpu-1', state: 'live' })
       expect(hub.hits).toContain('/admin/queue')
     } finally {
       restore()
@@ -383,7 +404,7 @@ describe('buildOverview（hub 观测 → 总览行）', () => {
     }
   })
 
-  it('★2026-10-05 P1-6/P1-10：`/admin/offline.leases` 透传 + pinned 徽标与租约徽标（接线用例）', async () => {
+  it('★2026-10-05 P1-6/P1-10 + ★M4：`/admin/offline.leases` 透传 + 接管徽标与租约徽标（接线用例）', async () => {
     const hub = fakeHub({
       queue: QUEUE,
       offline: {
@@ -403,11 +424,18 @@ describe('buildOverview（hub 观测 → 总览行）', () => {
       })
       // 端到端：hub 行 → CourseRow → mergeCourseRows → courseStatus 的徽标
       const merged = view.mergeCourseRows({ overview: ov, queue: null, viewing: '', nowSec: 0 })
-      expect(merged.find((r) => r.course === 'c4')!.pinBadge?.text).toBe('固定在线')
+      // ★M4：顶层旧 `offline` 键已删（段内轮次只从逐课行的 `offlineProgress` 派生，一个源）。
+      expect(Object.keys(ov)).not.toContain('offline')
+      const c4 = merged.find((r) => r.course === 'c4')!
+      expect(c4.holdBadge).toBeNull() // 没有接管 ⇒ 不画徽标
+      // c4 在 hub 的队列里有待领 job，而训练侧没进程（本用例没有传 training）⇒ 正是那一档 warn。
+      expect(c4.status.text).toBe('hub 已注册 · 无进程')
       const c5 = merged.find((r) => r.course === 'c5')!
-      expect(c5.pinBadge?.text).toBe('固定离线')
+      // live 接管不另画徽标（状态列与接管列已经在说它）；租约徽标仍由 hub 的 leases 面驱动。
+      expect(c5.holdBadge).toBeNull()
       expect(c5.leaseBadge?.text).toBe('可接管')
-      expect(c5.status.text).toBe('离线（只收回传）')
+      expect(c5.status.text).toBe('接管中（云机）')
+      expect(c5.hold?.text).toContain('tpu-1')
     } finally {
       restore()
       hub.stop()

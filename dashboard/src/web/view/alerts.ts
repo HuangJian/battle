@@ -286,15 +286,20 @@ function ppoStallAlerts(input: AlertInput): AlertItem[] {
   ]
 }
 
-/** 离线课程静默停摆（橙/红条；T8，plan/auto-offline-handoff §3.9）。
+/** 自主接管的停摆告警（橙/红条；T8，plan/auto-offline-handoff §3.9）。
  *
- *  为什么必须显式付：自动 claim 翻 offline 后本机**立刻停止采样**，而云机可能在
- *  领到租约前/中死掉、或控制台导包失败 ⇒「本机不采样 + 云机没跑」的静默停摆。
- *  U3 明令不许自动回退，所以唯一的出口是人——本条把三条出路逐条点名，不再靠「人总会看到」。
+ *  为什么必须显式付：云机领走整段后可能在领到租约前/中死掉、或控制台导包失败 ⇒
+ *  「云机没跑 + 没人知道」。U3 明令不许自动回退，所以出口得有人看得见。
  *
- *  判据全部来自已有事实（hub 侧 `stall_verdict`）：`pending-export` = 已翻 offline、无人跑、
- *  超阈值（最典型的静默停摆，红）；`running-stale` = 有租约但进度超阈值（可能只是长轮，橙）。
- *  告警**自带「交还自动池」动作**——它就是 U3 的第三条出路，让人在最需要它的位置直接按。 */
+ *  判据全部来自已有事实（hub 侧 `stall_verdict`）：`pending-export` = 有人认领但**没有接管**、
+ *  无新产物、超导包窗（云机没接手，红）；`running-stale` = 有接管但进度超阈值（可能只是长轮，橙）。
+ *
+ *  ★M4（plan/worker-type-dispatch-model §3-M4）：文案与动作随「课程不再分在线/离线」重写—— *  ① 旧模型里「已翻离线 ⇒ 本机立刻停采」那条腿已退役：`pending_export` **不占闸**，
+ *     本机采样与协作派发照跑（详见 plan §5 风险表）——它仍是红条（云机在饿着），但不再是
+ *     「本机停摆 ⇒ 算力全丢」那种红；
+ *  ② 动作从已退役的 `unsetCourseMode`（清 pin/claim 记账）换成 **`releaseCourseHold`**
+ *     （强制解除接管，`release_hold=1` → 立墓碑 + 清租约），且只在本课真有接管时才给：
+ *     没有接管的课（pending-export）按它会得到 409「本来就没有接管」——那是假承诺。 */
 function offlineStallAlerts(input: AlertInput): AlertItem[] {
   const out: AlertItem[] = []
   for (const s of input.offlineStalls ?? []) {
@@ -328,25 +333,39 @@ function offlineStallAlerts(input: AlertInput): AlertItem[] {
           severity: silent ? 'err' : 'warn',
           icon: '⚠',
           title: silent
-            ? `${s.course} 已切离线 ${ageText}：既没有租约也没有新进度——云机没接手`
-            : `${s.course} 离线段卡住：${who}持有租约但 ${ageText} 没有新进度`,
+            ? `${s.course} 没人接管 ${ageText}：既没有 hold 也没有新产物——云机没接手`
+            : `${s.course} 接管卡住：${who}持有接管但 ${ageText} 没有新进度`,
           detail:
-            '三条出路：① TPU 重连继续（它一上线就会在 /offline/tasks 再看到这门课）' +
-            '；② 手工导入结果包（课程矩阵行内的「导入训练结果」——导入后会自动评估）' +
-            '；③ 手工切回在线（矩阵行内「交还自动池」——本机在下一轮边界恢复采样）。' +
-            `判据只用已有事实：${silent ? '翻 mode 时刻' : '最近补传产物 mtime'} 超阈值；` +
+            (silent
+              ? '有自主 worker 认领过这门课（当时缺包），但到现在还没建立接管（既没有 hold、也没有新产物）。' +
+                '三条出路：'
+              : '接管还在（hold live）但进度静默超阈——hub 判掉线后会**自动**恢复协作派发与本机采样。' +
+                '要立刻收场就点下面的「强制解除接管」（立墓碑，新自主盘可当场 claim）。三条出路：') +
+            '① 云机重连继续（它一上线就会在 /offline/tasks 再看到这门课' +
+            (silent ? '，hub 会随即请控制台导包' : '') +
+            '）；② 手工导入结果包（课程矩阵行内的「导入训练结果」——导入后会自动评估）' +
+            (silent
+              ? '；③ **本机不需要做任何事**：pending_export 不占闸，本机采样与协作派发照跑（★M4：' +
+                '旧模型里「已翻离线 ⇒ 本机停采」那条腿已退役）——要包就点矩阵行内的「导出任务包」。'
+              : '；③ 强制解除接管（矩阵行内，本机在下一轮边界恢复采样，协作派发立即恢复）。') +
+            `判据只用已有事实：${silent ? '导包意向时刻（pending_export.at）' : '最近进度/产物时刻'} 超阈值；` +
             (leaseNote ? ` ${leaseNote} ` : ' ') +
-            '修好后（重连 / 导入 / 交还）告警自动消失。',
+            '修好后（重连 / 导入 / 解除）告警自动消失。',
           role: 'alert',
           actions: [
-            {
-              kind: 'resume',
-              label: '交还自动池',
-              act: 'unsetCourseMode',
-              body: { course: s.course },
-              title: '清 pin + 清 claim 记账，该课重回自动交接池（本机下一轮恢复采样）',
-              primary: true,
-            },
+            ...(silent
+              ? []
+              : [
+                  {
+                    kind: 'resume' as const,
+                    label: '强制解除接管',
+                    act: 'releaseCourseHold',
+                    body: { course: s.course },
+                    title:
+                      '立撤租墓碑 + 清 hold：本机下一轮恢复采样，协作派发立即恢复（新盘可当场 claim）',
+                    primary: true,
+                  },
+                ]),
             { kind: 'ack', label: '知道了', ackKey },
           ],
         },

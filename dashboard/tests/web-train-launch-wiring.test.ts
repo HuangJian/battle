@@ -149,9 +149,12 @@ describe('route.ts preset 分支：只认隧道/瘦身两个可选键（课程�
     expect(at).toBeGreaterThan(-1)
     expect(stopAt).toBeGreaterThan(at)
     const openCase = route.slice(at, stopAt)
-    expect(openCase).toContain("const trainMode = bodyStr(body, 'trainMode')")
-    expect(openCase).toContain("['online', 'offline']")
-    expect(openCase).toContain("['auto', 'local', 'node', 'run']")
+    // ★M4：`trainMode` 请求字段整个退役——旧客户端还会带它 ⇒ **响亮 400**，不静默忽略
+    //（静默 = 一条不会发生的承诺：用户以为开了离线课，而 hub 侧连模式都没有了）。
+    expect(openCase).toContain('body.trainMode !== undefined')
+    expect(openCase).toContain('trainMode 已退役')
+    expect(openCase).toContain("['auto', 'local', 'node']")
+    expect(openCase).not.toContain("'run'")
     expect(openCase).toContain('await openCourse(ctx.course')
     // ★ §3：`remoteDegrade` 已删除——开课分支不得再读它（否则死旋钮复活）
     expect(openCase).not.toContain('remoteDegrade')

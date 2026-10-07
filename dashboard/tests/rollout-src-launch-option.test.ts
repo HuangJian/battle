@@ -45,12 +45,14 @@ describe('resolveRolloutSrc：生效值解析', () => {
     expect(resolveRolloutSrc(cfg({ rollout_src: 'auto' }), '')).toBe('auto')
   })
 
-  it('rl.rollout_src 各值透传（含离线模式的 run）', () => {
+  it('rl.rollout_src 活值透传；退役的 run ⇒ local（与训练侧容忍读同口径）', () => {
     expect(resolveRolloutSrc(cfg({ rollout_src: 'node' }), '')).toBe('node')
     expect(resolveRolloutSrc(cfg({ rollout_src: 'local' }), '')).toBe('local')
-    // run = 离线训练模式（整段 job 交给云机）：漏掉它，离线课会在 UI 上显示成 local，
-    // 而那正是「云机在跑 / 本机在跑看起来一样」的静默分叉。
-    expect(resolveRolloutSrc(cfg({ rollout_src: 'run' }), '')).toBe('run')
+    // ★M4（plan/worker-type-dispatch-model §3-M4）：`run`（「整段上云」的旧声明）已退役——
+    // 它不在活域里，读到就按 `local` 读（python `ROLLOUT_SRCS_RETIRED` 也是映射 local + WARN）。
+    // 旧断言（透传成 'run'）守的是「离线课别显示成在线」那个年代的事实，而**今天那个声明
+    // 本身已经没了**：控制台再把它当离线档展示，就是在替一个不存在的模式说话。
+    expect(resolveRolloutSrc(cfg({ rollout_src: 'run' }), '')).toBe('local')
   })
 
   it('per-course 覆盖 > rl.*（两个方向都要生效）', () => {
@@ -72,9 +74,10 @@ describe('preset / route / UI 接线（源码断言：跨文件链路 tsc 抓不
   it('route：rolloutSrc 走白名单，非法值 400（与 mode / cfProtocol 同写法）', () => {
     const src = readSrc('src/server/api/route.ts').replace(/\s+/g, ' ')
     expect(src).toContain("const rolloutSrc = bodyStr(body, 'rolloutSrc')")
-    expect(src).toContain(
-      "if (rolloutSrc && !['auto', 'local', 'node', 'run'].includes(rolloutSrc))",
-    )
+    // ★M4：白名单收窄到活域（`run` 已退役，不得再被写进任何课程）——
+    // 与 python `loop_transport.ROLLOUT_SRCS`（不含 run）逐字同域。
+    expect(src).toContain("if (rolloutSrc && !['auto', 'local', 'node'].includes(rolloutSrc))")
+    expect(src).toContain('run 已随离线模式退役')
     expect(src).toContain('rolloutSrc: (rolloutSrc || undefined) as RolloutSrcMode | undefined')
   })
 

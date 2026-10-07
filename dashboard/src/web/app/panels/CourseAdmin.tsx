@@ -353,13 +353,13 @@ function iterTitle(r: CourseAdminRow): string {
     return r.tmp
       ? '没有账本指针：这门课还没有 iteration 事件（未开训 / 账本还没结算过这一轮）'
       : '没有活体账本——只有课程文件（这一门还没跑过），或它是封存档案的终点 it'
-  if (r.iterSource === 'offline')
-    return `回传指针 it${r.iter} —— 云机回传的最新段内 it（离线课：hub 只收回传、不实时派发）`
+  if (r.iterSource === 'hold')
+    return `回传指针 it${r.iter} —— 云机回传的最新段内 it（接管中：hub 只收回传、不实时派发）`
   if (r.iterSource === 'queue') return `账本指针 it${r.iter} —— 训练侧队列（下一轮要跑）`
   return `账本指针 it${r.iter} —— hub 侧账本尾行`
 }
 
-/** 行内动作列：查看 · 开课/停课 · 暂停/恢复 · 切离线/在线 · 封存。 */
+/** 行内动作列：查看 · 开课/停课 · 暂停/恢复 · 强制解除接管 · 封存。 */
 function RowOps({
   row: r,
   busy,
@@ -396,8 +396,9 @@ function RowOps({
           className="tc-btn tc-btn--sm"
           aria-label={`停课 ${r.course}`}
           title={
-            '非破坏停课：删开课标记 + 写暂停意图 + 该课 hub 置离线；队列与账本一个字不动。' +
-            '★ 它**不杀**在飞的那一轮——要封存请等这一轮写完（封存闸会拒新鲜目录）'
+            '非破坏停课：删开课标记 + 写暂停意图（★M4：不再推 hub——那边没有模式可推）；' +
+            '队列与账本一个字不动。★ 它**不杀**在飞的那一轮——要封存请等这一轮写完' +
+            '（封存闸会拒新鲜目录）'
           }
           onClick={() => void onAction('stopCourse', { course: r.course })}
         >
@@ -408,7 +409,7 @@ function RowOps({
           type="button"
           className="tc-btn tc-btn--sm"
           aria-label={`开课 ${r.course}`}
-          title="打开「开课」弹窗（训练模式 / rollout 位置 / 起点权重）——课程级选项随它一起下发"
+          title="打开「开课」弹窗（rollout 位置 / 起点权重）——课程级选项随它一起下发"
           onClick={() => onOpenCourseFor(r.course)}
         >
           开课
@@ -430,41 +431,23 @@ function RowOps({
           {pause.label}
         </button>
       ) : null}
-      {r.canToggleMode ? (
+      {/* ★M4：旧的三颗模式钮（切离线/切换成在线/交还自动池）随「课程不再分在线/离线」退役——
+          人唯一能干预接管的地方是「强制解除接管」（`release_hold=1`：立墓碑 + 清 hold ⇒
+          本机下一轮恢复采样、协作派发立即恢复、新自主盘可当场 claim）。与矩阵同行同一判据
+          （`r.canReleaseHold`），只在真有接管时画——假承诺不如不画。 */}
+      {r.canReleaseHold ? (
         <button
           type="button"
           className="tc-btn tc-btn--sm"
-          aria-label={`hub：${r.ov?.offline ? `切换成在线 ${r.course}` : `切离线 ${r.course}`}`}
+          aria-label={`hub：强制解除接管 ${r.course}`}
           title={
-            r.ov?.offline
-              ? '切回在线：hub 恢复为这门课实时派发 PPO（写 hub 课程表）'
-              : '切离线：hub 不再实时派发这门课的 PPO，只接收 it 权重/指标回传（本机训练与账本不动）'
+            '强制解除接管（`release_hold=1`）：立撤租墓碑 + 清 hold——本机在下一轮边界恢复采样，' +
+            '协作派发立即恢复，新自主盘可当场 claim（不必等 15 分钟静默阈）。' +
+            '若云机其实还在跑，它下次打点会收 409 且产物只归档（有界）。'
           }
-          onClick={() =>
-            void onAction('setCourseMode', {
-              course: r.course,
-              mode: r.ov?.offline ? 'online' : 'offline',
-            })
-          }
+          onClick={() => void onAction('releaseCourseHold', { course: r.course })}
         >
-          {r.ov?.offline ? '切换成在线' : '切离线'}
-        </button>
-      ) : null}
-      {/* 交还自动池（U3 第三条出路；plan §3.2a 动作表）：`unsetCourseMode` = 本机配置回在线档
-          + hub `mode=online&pin=0` + 删意图——该课重回自动交接池（与「切换成在线」的 pin=1
-          是**两件事**：后者还留一条人的意图，文案分开）。 */}
-      {r.canToggleMode && r.ov?.offline ? (
-        <button
-          type="button"
-          className="tc-btn tc-btn--sm"
-          aria-label={`自动：交还自动池 ${r.course}`}
-          title={
-            '交还自动交接池：hub 清 pin + 清 claim 记账，本机在下一轮边界恢复采样；' +
-            'TPU 一上线就能领走它。若云机还在跑就会双跑——那是人的决定（U3 第三条出路）。'
-          }
-          onClick={() => void onAction('unsetCourseMode', { course: r.course })}
-        >
-          交还自动池
+          强制解除接管
         </button>
       ) : null}
       {arch ? (

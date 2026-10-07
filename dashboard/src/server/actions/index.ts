@@ -24,6 +24,8 @@
  *    course-lifecycle 开课/停课（**独立于进程启停**：进程启动不再顺带开课）。★M2：
  *                    「训练模式」对 rl-config 的写面（旧 `train-mode.ts`）已随课程去模式化退役
  *                    ——接管是 hub 的 hold 事实，开课弹窗只保留 rollout 位置这一把活旋钮
+ *    auto-offline-handoff  hub 反向调用：自动交接只导任务包（★M4；旧 `course-mode.ts`
+ *                    的意图表/三颗钮/回灌随课程去模式化一起删除）
  */
 
 // ── facade 再导出（原 actions.ts 第 22 行的转发；调用方零改动）──
@@ -33,7 +35,7 @@ export { resolveCourseBc } from '../../stack/courses'
 export * from './result'
 export * from './console-state'
 export * from './cloud-halt'
-export * from './course-mode'
+export * from './auto-offline-handoff'
 export * from './poison'
 export * from './course-lifecycle'
 export * from './loop-control'

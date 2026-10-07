@@ -26,7 +26,6 @@ import {
 import { startLocalWorker } from '../../stack/local-worker'
 import { TRAINER_SERVE_ENTRY, trainerServeSpec } from '../../stack/specs'
 import { entryOf, markCloudHaltRecovered } from './cloud-halt'
-import { restoreCourseModesNote } from './course-mode'
 import { COMPONENT_LABELS, tailLines } from './labels'
 import { ActionError, ActionResult, busyKey, done, guard, release } from './result'
 
@@ -203,19 +202,14 @@ export async function startComponent(key: Component, ctx: StartCtx): Promise<Act
         // 共享 hub（2026-09-18）：**不需要 course**——一个进程服务所有并行课程，课程表
         // 由它自己从盘上发现。以前这里要求课程，是因为 hub 是「每课一份」。
         const hubPort = sharedHubPort(cfg)
-        // R3-2：hub 的每课模式是 **volatile**（重启回启动参数）⇒ 每次确认 hub 在跑之后
-        // 都回灌控制台的离线/在线意图。两个分支都回灌：hub 也可能是被别处（手敲命令、
-        // 别的终端）拉起来的，那时「已运行」这条早退路径同样需要把意图接回去。
+        // ★M4（plan/worker-type-dispatch-model §3-M4）：这里曾经在 hub 起来/已在跑之后
+        // **回灌控制台的离线/在线意图**（hub 的模式曾是 volatile 内存态）——模式语义随
+        // 「课程不再区分在线/离线」一起退役，没有可丢的 volatile 事实，回灌整腿删除。
         if (await hubServerHealthy(cfg)) {
-          const note = await restoreCourseModesNote(cfg)
-          return done(true, `hub-server 已在运行 (port ${hubPort})${note ? `；${note}` : ''}`)
+          return done(true, `hub-server 已在运行 (port ${hubPort})`)
         }
         await stepHubServer(cfg)
-        const note = await restoreCourseModesNote(cfg)
-        return done(
-          true,
-          `hub-server 已启动 (port ${hubPort}；服务所有课程)${note ? `；${note}` : ''}`,
-        )
+        return done(true, `hub-server 已启动 (port ${hubPort}；服务所有课程)`)
       }
       case 'cloudflared': {
         // 共享单隧道（指向共享 hub 端口；一条隧道服务所有课程）。

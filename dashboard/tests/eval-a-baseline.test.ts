@@ -7,31 +7,20 @@
  *  控制台的配对基线退化成「第一条 eval 轮」（`iters.ts`：`evalIters.includes(0) ? 0 : evalIters[0]`）
  *  ⇒ 随 run 起点漂移，跨腿（demo-mix vs firstkill）失去共同锚。
  *
- *  本文件钉**控制台这一侧**的两件事（python 一侧由 `nn-training/tests/trainer/test_eval_a_once.py` 钉）：
+ *  本文件钉**控制台这一侧**的一件事（python 一侧由 `nn-training/tests/trainer/test_eval_a_once.py` 钉）：
  *   ① `evalAArgs` 的 argv 形状：baseline ⇒ 带 `--baseline`；`ckpt` 空 ⇒ **不传** `--ckpt`
- *      （空串到 python 手里 `Path("")` 是 `.` = 存在的目录，会被当权重算指纹）；
- *   ② `shouldAutoBaseline` 的三态：离线补 / 在线不补 / 逃生阀置位不补。
+ *      （空串到 python 手里 `Path("")` 是 `.` = 存在的目录，会被当权重算指纹）。
  *  一律不真起 python（那会真跑几百局游戏）。
+ *
+ *  ★M4（plan/worker-type-dispatch-model §3-M4）：`shouldAutoBaseline` 三态那一组已随它一起删
+ *  ——它存在的唯一理由是「离线开课 = 本机不跑训练 ⇒ it0 读数两条产路都不通」。今天开课不再指定
+ *  模式（本机恒跑、主循环 `loop_baseline` 就在场上；整段被云机领走时基线由云腿产出），
+ *  那层替代产路被设计性地拆掉了（见 `course-lifecycle.ts` 的对应注释）。人工入口仍在：
+ *  面板的 evalA 按钮与「导入训练结果后自动评估」照旧走 `evalAArgs`（本文件两条用例）。
  */
 
 import { describe, expect, it } from 'bun:test'
-import { shouldAutoBaseline } from '../src/server/actions/course-lifecycle'
 import { evalAArgs } from '../src/server/eval-a-run'
-
-const ENV_KEY = 'BCITY_NO_AUTO_BASELINE_EVAL'
-
-/** 临时置/清逃生阀（跑完还原——同进程里别的用例可能依赖当前值）。 */
-function withEscapeHatch(value: string | undefined, fn: () => void): void {
-  const saved = process.env[ENV_KEY]
-  if (value === undefined) delete process.env[ENV_KEY]
-  else process.env[ENV_KEY] = value
-  try {
-    fn()
-  } finally {
-    if (saved === undefined) delete process.env[ENV_KEY]
-    else process.env[ENV_KEY] = saved
-  }
-}
 
 describe('evalAArgs（纯函数：一次性进程 argv）', () => {
   it('手动 evalA（控制台按钮/导入后自动评估）：显式 ckpt + iter，不带 --baseline', () => {
@@ -48,25 +37,5 @@ describe('evalAArgs（纯函数：一次性进程 argv）', () => {
     expect(a[a.indexOf('--iter') + 1]).toBe('0')
     // 课程名要在（python 侧靠它找 curricula/*.jsonc）
     expect(a[a.indexOf('--course') + 1]).toBe('x20-firstkill')
-  })
-})
-
-describe('shouldAutoBaseline（离线才补、逃生阀可关）', () => {
-  it('离线 + 无逃生阀 ⇒ 补（it0 是云腿产不出、控制台又必须要的那一格）', () => {
-    withEscapeHatch(undefined, () => {
-      expect(shouldAutoBaseline('offline')).toBe(true)
-    })
-  })
-
-  it('在线 ⇒ 不补（本机主循环 `_maybe_dispatch_baseline_eval` 自己会派）', () => {
-    withEscapeHatch(undefined, () => {
-      expect(shouldAutoBaseline('online')).toBe(false)
-    })
-  })
-
-  it('逃生阀置位（测试/应急）⇒ 不补', () => {
-    withEscapeHatch('1', () => {
-      expect(shouldAutoBaseline('offline')).toBe(false)
-    })
   })
 })

@@ -1,17 +1,25 @@
 /**
- * course-mode-bundle.test.ts — 「切离线」必须顺手把任务包导出来（plan/offline-switch-auto-bundle）。
+ * auto-offline-handoff.test.ts — hub → 控制台的**自动交接**：只导任务包（plan §1.6-F1）。
  *
- *  用户 2026-09-25 报障：在线课切成离线后云机取包 404，等满 `wait_pack_sec`（30 分钟）才
- *  由一句 `SystemExit` 告诉人。根因是**切离线那颗开关不导出**（只有开课导）。
+ *  触发者不是人：自主 worker 在 hub 上 claim 了一门在训课，而盘上没有包（或包比权重/源码旧）
+ *  ⇒ hub POST `/api/autoOfflineHandoff`，控制台导出任务包。包到手 + claim 成功才建立**接管
+ *  （hold）**——「这门课归谁」自此只由 hub 的 hold 回答。
  *
  *  本文件钉两半：
- *   ① `autoBundleDecision` 的**全表**（纯函数：六种输入逐条对上 plan §3.1 的规则）；
- *   ② `setCourseMode` 的接线**只以「不起子进程」为代价的**那几条：skip 分支零副作用
- *      （盘上的包不被挪进 `stale-packs/`）、回执带上那一行、`ok` 不被派生动作改写。
+ *   ① `autoBundleDecision` 的**全表**（纯函数：规则表逐条 —— 逃生阀 / 导出忙 / 缺起点权重 /
+ *      已有包不早于权重与源码 / 包过期 ⇒ 作废重导 / 缺包可导）；
+ *   ② `autoOfflineHandoff` 的接线**只以「不起子进程」为代价的**那几条：未开课拒收、
+ *      空课名拒收、逃生阀是**正常结局**（ok，不是失败）、缺起点权重是「导不了」（ok=false，
+ *      那半状态靠 hub 的 stalled 告警兜）、源码哨兵（决定说导 ⇒ 动作真的调了导出）。
  *
- *  真起导出（真起 `run_rl` 子进程）不在这里跑——`launchTaskBundleExport` 自己的 argv /
- *  作废 / 恢复由 `server-api-task-bundle` 套件覆盖。这里用假盘（仓 `tmp/` 下的一次性
- *  假课程名，收尾删掉）钉住最容易写歪的两条：**有包不动**、**缺权重不导**。
+ *  真起导出（`run_rl` 子进程）不在这里跑——`launchTaskBundleExport` 自己的 argv / 作废 /
+ *  恢复由 `server-api-task-bundle` 套件覆盖。这里用假盘（仓 `tmp/` 下的一次性假课程名，
+ *  收尾删掉）钉住最容易写歪的两条：**有包不动**、**缺权重不导**。
+ *
+ *  ★M4（plan/worker-type-dispatch-model §3-M4）：本套件原为 `course-mode-bundle.test.ts`
+ *  （「切离线必须顺手导包」）。那颗开关（`setCourseMode`）随模式语义退役，而**导包这条腿
+ *  必须活着**——hub 的 `pending_export` 触发链要靠它出包（F1 定案）。所以本文件留下规则表
+ *  与假盘两半，删掉「模式推送 / hub 接受与否 / 意图回执」那一整套（它们的前提没了）。
  */
 
 import { afterAll, beforeEach, describe, expect, it } from 'bun:test'
@@ -28,7 +36,7 @@ import os from 'os'
 import path from 'path'
 import { REPO_ROOT } from '../src/core/paths'
 
-const DIR = mkdtempSync(path.join(os.tmpdir(), 'bcity-cmode-bundle-'))
+const DIR = mkdtempSync(path.join(os.tmpdir(), 'bcity-auto-handoff-'))
 process.env.BCITY_CONSOLE_STATE = path.join(DIR, 'console-state.json')
 process.env.BCITY_REGISTRY_FILE = path.join(DIR, 'registry.json')
 process.env.BCITY_RL_CONFIG = path.join(DIR, 'rl-config.json')
@@ -38,8 +46,7 @@ writeFileSync(
   'utf-8',
 )
 
-import { saveConsoleState } from '../src/server/actions/console-state'
-import { autoBundleDecision, setCourseMode } from '../src/server/actions/course-mode'
+import { autoBundleDecision, autoOfflineHandoff } from '../src/server/actions/auto-offline-handoff'
 import {
   CODE_EXCLUDE_DIRS,
   CODE_EXCLUDE_FILES,
@@ -51,8 +58,8 @@ import {
 } from '../src/server/bundles'
 
 /** 假课程名：进的是仓 `tmp/` 之下，必须一眼看出是测试残留（收尾删整目录）。 */
-const WITH_PACK = '__cmode-with-pack__'
-const NO_WEIGHTS = '__cmode-no-weights__'
+const WITH_PACK = '__ahand-with-pack__'
+const NO_WEIGHTS = '__ahand-no-weights__'
 const FAKE_COURSES = [WITH_PACK, NO_WEIGHTS]
 
 /** 包 mtime 的两个人造档位（**秒**，`utimesSync` 的单位）：未来 = 刚导出；过去 = 过期。 */
@@ -61,6 +68,9 @@ const past = (Date.now() - 3_600_000) / 1000
 
 const livePack = (course: string): string => taskBundlePath(course)
 const tmpCourseDir = (course: string): string => path.join(REPO_ROOT, 'tmp', course)
+/** 开课标记（`courseEnabled` 的判据）：自动交接只接**在训**的课。 */
+const enableMarker = (course: string): string =>
+  path.join(tmpCourseDir(course), 'training-enabled.txt')
 
 afterAll(() => {
   for (const c of FAKE_COURSES) rmSync(tmpCourseDir(c), { recursive: true, force: true })
@@ -71,22 +81,7 @@ afterAll(() => {
   }
 })
 
-/** 假 hub：`mode = 'ok' | 'reject' | 'throw'`。 */
-let hub: 'ok' | 'reject' | 'throw' = 'ok'
-let calls = 0
-globalThis.fetch = (async (_input: string | URL | Request, _init?: RequestInit) => {
-  calls += 1
-  if (hub === 'throw') throw new Error('ECONNREFUSED 127.0.0.1:18787')
-  if (hub === 'reject') {
-    return new Response(JSON.stringify({ error: '需要合法 course（[]) 与 mode' }), { status: 400 })
-  }
-  return new Response(JSON.stringify({ course: 'c', mode: 'offline' }), { status: 200 })
-}) as typeof fetch
-
 beforeEach(() => {
-  hub = 'ok'
-  calls = 0
-  saveConsoleState({ courseModes: {}, courseRolloutSrc: {} })
   delete process.env.BCITY_NO_AUTO_TASK_BUNDLE
   for (const c of FAKE_COURSES) rmSync(tmpCourseDir(c), { recursive: true, force: true })
 })
@@ -97,10 +92,11 @@ beforeEach(() => {
  *  （mtime 必新于这里现造的临时文件），所以把包的 mtime 显式拨到「60s 之后」= 刚导出完
  *  的形态；要测「过期」请用 `seedStalePack`。
  */
-function seedPack(course: string, opts: { weights?: boolean } = {}): string {
+function seedPack(course: string, opts: { weights?: boolean; enabled?: boolean } = {}): string {
   const dir = tmpCourseDir(course)
   mkdirSync(dir, { recursive: true })
   if (opts.weights !== false) writeFileSync(path.join(dir, 'weights.json'), '{}', 'utf-8')
+  if (opts.enabled !== false) writeFileSync(enableMarker(course), '', 'utf-8')
   const p = livePack(course)
   writeFileSync(p, 'FAKE-PACK-BYTES', 'utf-8')
   utimesSync(p, future, future)
@@ -115,28 +111,16 @@ function seedStalePack(course: string): string {
 }
 
 const facts = (over: Partial<Parameters<typeof autoBundleDecision>[0]> = {}) => ({
-  mode: 'offline',
-  hubAccepted: true,
   valve: false,
   busy: false,
   guardReason: null,
-  pack: taskBundleInfo('__cmode-never-exported__'),
+  pack: taskBundleInfo('__ahand-never-exported__'),
   weightsMtimeMs: 0,
   codeMtimeMs: 0,
   ...over,
 })
 
 describe('autoBundleDecision（纯函数：规则表逐条）', () => {
-  it('切在线 ⇒ 不动、也不说话（导包只属于离线语义）', () => {
-    expect(autoBundleDecision(facts({ mode: 'online' }))).toEqual({ started: false, note: '' })
-  })
-
-  it('hub 没接受这次模式 ⇒ 不导（离线意图没落地，包没有消费者）', () => {
-    const r = autoBundleDecision(facts({ hubAccepted: false }))
-    expect(r.started).toBe(false)
-    expect(r.note).toContain('未接受离线意图')
-  })
-
   it('逃生阀 ⇒ 不导，且说明是逃生阀（不是「已经导过了」）', () => {
     const r = autoBundleDecision(facts({ valve: true }))
     expect(r.started).toBe(false)
@@ -156,7 +140,7 @@ describe('autoBundleDecision（纯函数：规则表逐条）', () => {
     expect(r.note).toContain('先跑至少一轮')
   })
 
-  it('盘上已有包（不早于权重与源码）⇒ 不导也不作废（热切不是重开课），回执给路径与「要重打」的指路', () => {
+  it('盘上已有包（不早于权重与源码）⇒ 不导也不作废，回执给路径与「要重打」的指路', () => {
     const p = seedPack(WITH_PACK)
     try {
       const r = autoBundleDecision(facts({ pack: taskBundleInfo(WITH_PACK) }))
@@ -228,70 +212,82 @@ describe('autoBundleDecision（纯函数：规则表逐条）', () => {
   })
 })
 
-describe('setCourseMode 的接线（假盘 + 假 hub；不起子进程）', () => {
-  it('切离线 + 盘上已有包 ⇒ ok=true、说「已有任务包」、**包没被挪走**', async () => {
-    const p = seedPack(WITH_PACK)
-    const r = await setCourseMode(WITH_PACK, 'offline')
-    expect(r.ok).toBe(true)
-    expect(r.bundle?.started).toBe(false)
-    expect(r.message).toContain('已有任务包')
-    // ★ 这条是本改动最容易写歪的地方：`launchTaskBundleExport` 会先把旧包作废，
-    //   所以「有包不动」必须体现在**不调用**，而不是调用后再恢复。
-    expect(existsSync(p)).toBe(true)
-    expect(existsSync(stalePackDir(WITH_PACK))).toBe(false)
+describe('autoOfflineHandoff 的接线（假盘；不起子进程）', () => {
+  it('空课程名 ⇒ ok=false（hub 的自动交接按课触发——没有课就没有这件事）', async () => {
+    const r = await autoOfflineHandoff('  ')
+    expect(r.ok).toBe(false)
+    expect(r.message).toContain('需要 course')
   })
 
-  it('切离线 + 缺起点权重 ⇒ ok=true、说清原因、不导也不作废', async () => {
-    const p = seedPack(NO_WEIGHTS, { weights: false })
-    const r = await setCourseMode(NO_WEIGHTS, 'offline')
-    expect(r.ok).toBe(true)
-    expect(r.bundle?.started).toBe(false)
-    expect(r.message).toContain('weights.json')
-    expect(r.message).toContain('起点权重')
-    expect(existsSync(p)).toBe(true)
+  it('未开课（没有开课标记）⇒ ok=false，并说清 hub 侧该停在等待', async () => {
+    // 有包也不接：停课的课连认课标记都没了，云机领不走（导包只会白烧一次子进程）。
+    seedPack(NO_WEIGHTS)
+    rmSync(enableMarker(NO_WEIGHTS), { force: true })
+    try {
+      const r = await autoOfflineHandoff(NO_WEIGHTS)
+      expect(r.ok).toBe(false)
+      expect(r.message).toContain('未开课')
+    } finally {
+      rmSync(tmpCourseDir(NO_WEIGHTS), { recursive: true, force: true })
+    }
   })
 
-  it('切在线 ⇒ 不导、也不多那一行（回执仍是原来的三段）', async () => {
-    const r = await setCourseMode(WITH_PACK, 'online')
-    expect(r.ok).toBe(true)
-    expect(r.bundle).toEqual({ started: false, note: '' })
-    expect(r.message).not.toContain('任务包')
-  })
-
-  it('逃生阀置位 ⇒ 不导（既有套件的兼容路径：用例不该起真子进程）', async () => {
+  it('逃生阀置位 ⇒ ok=true（正常结局）且不导（既有套件的兼容路径：用例不该起真子进程）', async () => {
     process.env.BCITY_NO_AUTO_TASK_BUNDLE = '1'
-    const r = await setCourseMode(NO_WEIGHTS, 'offline')
-    expect(r.ok).toBe(true)
-    expect(r.bundle?.started).toBe(false)
-    expect(r.message).toContain('逃生阀')
+    seedPack(NO_WEIGHTS, { weights: false })
+    try {
+      const r = await autoOfflineHandoff(NO_WEIGHTS)
+      expect(r.ok).toBe(true)
+      expect(r.message).toContain('逃生阀')
+      expect(r.message).toContain('自动交接')
+    } finally {
+      rmSync(tmpCourseDir(NO_WEIGHTS), { recursive: true, force: true })
+    }
   })
 
-  it('hub 拒绝（400）⇒ ok=false，且**派生动作照规矩不导**（这条把顺序钉死）', async () => {
-    hub = 'reject'
-    const r = await setCourseMode(NO_WEIGHTS, 'offline')
-    expect(r.ok).toBe(false)
-    expect(calls).toBe(1)
-    expect(r.bundle?.started).toBe(false)
-    expect(r.message).toContain('未接受离线意图')
+  it('缺起点权重 ⇒ ok=false（「导不了」不是好消息）+ 原样转述原因 + 指路', async () => {
+    const p = seedPack(NO_WEIGHTS, { weights: false })
+    try {
+      const r = await autoOfflineHandoff(NO_WEIGHTS)
+      expect(r.ok).toBe(false)
+      expect(r.message).toContain('weights.json')
+      expect(r.message).toContain('起点权重')
+      expect(existsSync(p)).toBe(true)
+    } finally {
+      rmSync(tmpCourseDir(NO_WEIGHTS), { recursive: true, force: true })
+    }
   })
 
-  it('hub 不可达 ⇒ 同上：模式没生效就不导包（不白起一个没有消费者的导出）', async () => {
-    hub = 'throw'
-    const r = await setCourseMode(NO_WEIGHTS, 'offline')
-    expect(r.ok).toBe(false)
-    expect(r.bundle?.started).toBe(false)
-    expect(r.message).toContain('未接受离线意图')
+  it('已有新鲜包 ⇒ ok=true、说「已有任务包」、**包没被挪走**', async () => {
+    const p = seedPack(WITH_PACK)
+    try {
+      const r = await autoOfflineHandoff(WITH_PACK)
+      expect(r.ok).toBe(true)
+      expect(r.message).toContain('已有任务包')
+      // ★ 这条是最容易写歪的地方：`launchTaskBundleExport` 会先把旧包作废，
+      //   所以「有包不动」必须体现在**不调用**，而不是调用后再恢复。
+      expect(existsSync(p)).toBe(true)
+      expect(existsSync(stalePackDir(WITH_PACK))).toBe(false)
+    } finally {
+      rmSync(tmpCourseDir(WITH_PACK), { recursive: true, force: true })
+    }
   })
 
   it('源码哨兵：started 的分支必须真的调 `launchTaskBundleExport`（决定与动作不许写岔）', () => {
     // 「决定说导、动作却没导」是本改动最隐蔽的失败态（回执会撒谎）。
     // 纯函数表已钉住决定；这里钉住**那个分支里确实有调用**。
     const src = readFileSync(
-      path.join(REPO_ROOT, 'dashboard/src/server/actions/course-mode.ts'),
+      path.join(REPO_ROOT, 'dashboard/src/server/actions/auto-offline-handoff.ts'),
       'utf-8',
     )
     expect(src).toContain('if (bundle.started) {')
     expect(src).toContain('launchTaskBundleExport(c)')
+    // 只导包：一个字都不写 rl-config / console-state，也不打 hub 课程表（F1 定案的另一半）。
+    // 旧写法是「写 `courses.<课>.rollout_src=run` 停本机 + 导包」——那条腿正是 Q1 要拆的耦合：
+    // 本机停不停跑现在由 hub 的 hold 回答；而写意图会被回灌把自动翻的离线推回 online。
+    expect(src).not.toContain('writeCourseConfigForOpen')
+    expect(src).not.toContain('saveConsoleState')
+    expect(src).not.toContain('/admin/courses')
   })
 })
 

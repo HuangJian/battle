@@ -35,8 +35,9 @@ export interface CourseConf {
    *  只认 1/0（`--remote-slim` 是 `type=int, choices=(0,1)`）。 */
   slim?: 0 | 1
   /** 本课 rollout 执行位置覆盖（M3；缺省 = 用 rl.rollout_src，再缺省 local）。字符串域，
-   *  与 python `--rollout-src` 的 choices 同字面量（`auto` = 按配置解析）。 */
-  rollout_src?: RolloutSrcMode
+   *  与 python `--rollout-src` 的 choices 同字面量（`auto` = 按配置解析）；`Retired` 只作
+   *  存量盘上的容忍读（★M2/M4）。 */
+  rollout_src?: RolloutSrcMode | RolloutSrcRetired
   /** ★M2 已退役：旧「离线段长声明」（与 `rollout_src:'run'` 配对）。今天只剩一个读者——
    *  `--export-bundle` 的终点（控制台导出腿自带 `--run-iters -1`，不读这里）。
    *  盘上残留值由训练侧容忍读（映射 local + 一行 WARN）与 M6 一次性清理收尾。 */
@@ -83,21 +84,23 @@ export type SlimMode = 'on' | 'off'
  *  `node` = 本轮**整轮上云**（节点 bun 跑 exporter 产 shard + 跑 PPO，kind=iter job）；
  *  `auto` = 不表态，交给训练侧按 `courses.<课>.rollout_src` > `rl.rollout_src` 解析
  *  （缺省仍是 local）。与 python `choices=("auto","local","node")` 同域——
- *  与 `SlimMode` 不同，这里**不需要**域换算（两侧都是字符串）。 */
-export type RolloutSrcMode = 'local' | 'node' | 'run' | 'auto'
+ *  与 `SlimMode` 不同，这里**不需要**域换算（两侧都是字符串）。
+ *
+ *  ★M4：域里的旧值 `run` 已剔除（它是 `RolloutSrcRetired`）——写面（开课弹窗 / route
+ *  白名单）只接受这三个活值；读面由 `resolveRolloutSrc` 把退役值映射成 `local`，
+ *  与训练侧容忍读（`loop_transport._note_retired_source`）逐字同口径。 */
+export type RolloutSrcMode = 'local' | 'node' | 'auto'
 
-/** 启动训练时的**训练模式**（2026-09-19 用户口径：启动时需指定，缺省在线）。
+/** 已退役但必须**容忍读**的 rollout 源（与 python `loop_transport.ROLLOUT_SRCS_RETIRED`
+ *  逐字同源）：`run` = 「整段上云」的旧声明，随离线模式（M2）退役。
  *
- *  · `online`  = 现状：本机跑 rollout，每个 it 向云端 worker 传语料；hub 实时派发。
- *  · `offline` = 本机不跑训练：云机接手（`courses.<课>.{rollout_src:'run', run_iters:-1}`）
- *    + hub 该课置 offline（该课停车、不再实时派发），并由控制台导出任务包给云机取（或人工搬上云）。
- *    ★ 2026-09-25：离线课**不再经 hub 队列**执行（那条腿已退役，plan/online-offline-role-routing §7）。
+ *  读到它的地方按 `local` 处理（训练侧映射 + 一行 WARN；控制台 `resolveRolloutSrc` 同映射）；
+ *  **不得**再用它写盘（route 白名单已拒）；存量盘上残留由 M6 一次性清理收尾。
  *
- *  ★M2（plan/worker-type-dispatch-model §3-M2）：这个模式**不再写 rl-config**（旧写面 =
- *  `courses.<课>.{rollout_src:'run', run_iters:-1}`，随 `actions/train-mode.ts` 一起退役）——
- *  「这门课归本机还是归云机」由 hub 的 hold 事实回答（云机 claim 成功 + 有进度才建立）。
- *  今天它只剩两个作用：hub 模式/意图的推送（M4 前）与开课那一刻的「顺手导出任务包」。 */
-export type TrainMode = 'online' | 'offline'
+ *  ★原本还有一个 `TrainMode`（`'online' | 'offline'`）类型——M4 随模式语义整个删掉：
+ *  今天「这门课归本机还是归云机」由 hub 的 hold 事实回答（云机 claim 成功 + 有进度才建立），
+ *  开课不再指定模式。 */
+export type RolloutSrcRetired = 'run'
 
 /** rl-config.json（本工具链只消费 nodes + rl + courses 块，其余键原样保留）。 */
 export interface RlConfig {
@@ -117,8 +120,9 @@ export interface RlConfig {
     cf_edge_ip?: CfEdgeIp
     /** 协议瘦身（M2；缺省 1 = 开）。数字域，见 `SlimMode` 注释。 */
     slim?: 0 | 1
-    /** rollout 执行位置（M3；缺省 = local，即本机采样）。字符串域，见 `RolloutSrcMode`。 */
-    rollout_src?: RolloutSrcMode
+    /** rollout 执行位置（M3；缺省 = local，即本机采样）。字符串域，见 `RolloutSrcMode`
+     *  （`Retired` 值只作存量容忍读）。 */
+    rollout_src?: RolloutSrcMode | RolloutSrcRetired
     /**
      * hub 中介 push 派发（2026-09-18；缺省 = 关）。
      *

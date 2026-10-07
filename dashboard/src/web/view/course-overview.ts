@@ -50,26 +50,36 @@ export interface HubInflightView {
   computingAgo: number | null
 }
 
-/** 权威三态 + 两个正交维（hub `queue_state` 每课的 `authority`；plan §3.1）。
+/** **接管（hold）**：自主 worker 领到了这门课的整段（hub `queue_state` 每课行的 `hold`）。
  *
- *  dashboard 的 `courseStatus` **从这里读**，不自己派生第二份（P0-2/P1-10 的接线契约）：
- *  派生实现在 hub（`queue_offline.authority_of`），控制台只是把答案摆上屏。
- *  `null` = 旧 hub 没上报 ⇒ 读面标注「未知」，退化成 hub authority 之前的行为（不编）。 */
-export type CourseAuthority =
-  | 'auto'
-  | 'pinned_online'
-  | 'pinned_offline'
-  | 'stopped'
-  | 'not_offline'
+ *  这是「谁在跑这门课」的**唯一真源**（plan/worker-type-dispatch-model §1.1）：云机 claim 成功
+ *  ∧ 任务包在盘才建立；活性**只认进度信号**（心跳不算，§68 的假活教训）。dashboard 只读它，
+ *  不自己派生第二份（与旧 authority 同一条接线纪律）。
+ *  `null` = 没有接管 / 旧 hub 没上报 ⇒ 读面标「未知」，不编。 */
+export interface HubHoldView {
+  /** 持有人（worker 身份）；空串 = 无身份。 */
+  workerId: string
+  /** `live` = 进度新鲜（该课对协作盘压下不派 + 本机 held）；
+   *  `stale` = 进度静默超阈（**自动恢复协作派发**，新盘可直接 claim 接管）。 */
+  state: 'live' | 'stale'
+  /** 最近一次进度信号的墙钟秒（0 = 无记录）。 */
+  lastProgressAt: number
+  /** 接管建立时刻（墙钟秒；0 = 未知）。 */
+  at: number
+  /** 距判掉线的剩余秒（hub `hold.expires_in` = min(进度余量, TTL 余量)；0 = 未知）。 */
+  expiresIn: number
+}
 
-/** 合法 authority 值（解析用；与 python `AUTHORITY_*` 常量逐字同域）。 */
-const AUTHORITIES: readonly CourseAuthority[] = [
-  'auto',
-  'pinned_online',
-  'pinned_offline',
-  'stopped',
-  'not_offline',
-]
+/** **导包软态**（`pending_export`）：有人正给这门课导包（claim 遇缺包/包旧）。
+ *
+ *  它**不占任何闸**（照常派发、本机照跑）——只服务两件事：告诉别的盘「有人在导包」
+ *  （清单排序靠后）与做停滞告警的锚点（plan §1.3 状态表）。 */
+export interface HubPendingExportView {
+  /** 触发方（worker id；空串 = 无身份）。 */
+  by: string
+  /** 首次记录时刻（墙钟秒；0 = 未知）——**首写为谁**（后续轮询不推着它走）。 */
+  at: number
+}
 
 /** 读面新鲜度标注（P1-11）：读失败时保留上一拍值并带它上屏；`null` = 本拍读成功。
  *
@@ -82,12 +92,10 @@ export interface ReadStaleView {
 
 /** 单课程队列行（hub `queue_state()` 的一行）。 */
 export interface HubQueueCourseView {
-  /** `online` = 参与实时派发；`offline` = 只收回传，不派活。 */
-  mode: 'online' | 'offline'
-  /** 权威三态（hub `authority_of`；`null` = 旧 hub 没上报 ⇒ 未知，不猜）。 */
-  authority: CourseAuthority | null
-  /** 「人固定过」（hub 派发记录的 `pinned`；`null` = 旧 hub）。 */
-  pinned: boolean | null
+  /** **接管**（★M4）：谁在跑这门课（`null` = 没人接管 / 旧 hub）。 */
+  hold: HubHoldView | null
+  /** **导包软态**（★M4）：有人在导包（`null` = 没有 / 旧 hub）。 */
+  pendingExport: HubPendingExportView | null
   /** 可领取 job 数（= 队列深度）。 */
   pending: number
   /** 在飞（租约未过期）条数。 */
@@ -111,12 +119,13 @@ export interface HubQueueView {
   order: string[]
   /** 上一份派发到的课程（轮转游标；null = 还没派过）——「最近派发」那一列。 */
   cursor: string | null
-  /** 离线课程名（只收回传、不实时派发）。 */
-  offline: string[]
-  /** 在实时派发的课程数。 */
+  /** 在本轮转里能拿到活的课程数（★M4 口径 = 非 live-hold 且有活；被 hold 压住的课不算）。 */
   activeCourses: number
   /** 窗口内活跃 worker 数（避让链/观测用）。 */
   activeWorkers: number
+  /** 近期报过到的**自主盘**（hub `offline_disk.recent`；★P2-5 的「最近露面面」之一）。
+   *  `null` = 旧 hub 没上报（不可知 ≠ 没盘）。 */
+  offlineDisks: string[] | null
   /** 云端停机达令（随任务同发；不停任务）。 */
   halt: boolean
   /** 近期（`PEEKED_WINDOW_SEC`）被 worker `peek` 扫到过的课程集；
@@ -153,6 +162,46 @@ export function parseFrozenBlock(raw: unknown): FrozenJobView[] {
   return out.sort((a, b) => b.reclaims - a.reclaims || a.jobId.localeCompare(b.jobId))
 }
 
+/** 解析 `/admin/queue` 每课行的 `hold` 块（★M4；宽容：形状不符 → null）。
+ *
+ *  `state` 缺省 `'stale'`（**不编 live**）：拿不到活性证据时，宁可当「没人有效地跑着」
+ *  ——那一边的后果是「照常派发 + 本机照跑」（正常训练），而误报 live 会把一门正常课压住。 */
+export function parseHold(raw: unknown): HubHoldView | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const workerId = typeof o.worker_id === 'string' ? o.worker_id : ''
+  const state = o.state === 'live' ? 'live' : 'stale'
+  // `worker_id` 与 `state` 都缺 = 根本不是 hold 块（旧 hub 的 `{}`）⇒ 没有接管。
+  if (!workerId && !('last_progress_at' in o)) return null
+  return {
+    workerId,
+    state,
+    lastProgressAt: num(o.last_progress_at),
+    at: num(o.at),
+    expiresIn: num(o.expires_in),
+  }
+}
+
+/** 解析 hub `/admin/queue` 的 `offline_disk` 块（★P2-5 的「最近露面面」）。
+ *
+ *  `null` = 旧 hub 没上报（**不可知 ≠ 没盘**：旧版 hub 不知道自主盘这个东西）；
+ *  空数组 = 报了且窗口内没盘。 */
+export function parseOfflineDisks(raw: unknown): string[] | null {
+  if (!raw || typeof raw !== 'object') return null
+  const recent = (raw as Record<string, unknown>).recent
+  if (!Array.isArray(recent)) return null
+  return recent.filter((x): x is string => typeof x === 'string' && !!x)
+}
+
+/** 解析 `/admin/queue` 每课行的 `pending_export` 块（★M4；宽容：形状不符 → null）。 */
+export function parsePendingExport(raw: unknown): HubPendingExportView | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const at = num(o.at)
+  if (at <= 0 && typeof o.by !== 'string') return null
+  return { by: typeof o.by === 'string' ? o.by : '', at }
+}
+
 /** 解析 hub `/admin/queue` 的响应体 → 视图；形状不符 → null（UI 显示空态，不炸整页）。
  *
  *  宽容解析是刻意的：hub 是独立进程、可能比控制台新/旧一个版本；缺字段退化为 0/空
@@ -182,13 +231,9 @@ export function parseHubQueue(body: unknown): HubQueueView | null {
         })
       }
     }
-    const authority = AUTHORITIES.includes(c.authority as CourseAuthority)
-      ? (c.authority as CourseAuthority)
-      : null
     courses[name] = {
-      mode: c.mode === 'offline' ? 'offline' : 'online',
-      authority,
-      pinned: typeof c.pinned === 'boolean' ? c.pinned : null,
+      hold: parseHold(c.hold),
+      pendingExport: parsePendingExport(c.pending_export),
       pending: num(c.pending_n),
       inflight: inflightRaw.length,
       nextJob: typeof c.next_job === 'string' ? c.next_job : null,
@@ -204,9 +249,6 @@ export function parseHubQueue(body: unknown): HubQueueView | null {
       ? raw.order.filter((x): x is string => typeof x === 'string')
       : [],
     cursor: typeof raw.cursor === 'string' && raw.cursor ? raw.cursor : null,
-    offline: Array.isArray(raw.offline)
-      ? raw.offline.filter((x): x is string => typeof x === 'string')
-      : [],
     activeCourses: num(raw.active_courses),
     activeWorkers: num(raw.active_workers),
     halt: raw.halt === true,
@@ -214,6 +256,7 @@ export function parseHubQueue(body: unknown): HubQueueView | null {
     peekedCourses: Array.isArray(raw.peeked_courses)
       ? (raw.peeked_courses as unknown[]).filter((x): x is string => typeof x === 'string')
       : null,
+    offlineDisks: parseOfflineDisks(raw.offline_disk),
   }
 }
 
@@ -444,8 +487,10 @@ export interface CourseOverviewRow {
   training: boolean
   /** 该课账本尾行的 iteration 号（无账本/无 iteration → null）。 */
   iter: number | null
-  /** hub 侧把这门课标为离线（只收回传，不派活）。 */
-  offline: boolean
+  /** hub 侧**接管**（谁在跑这门课；`null` = 没人接管 / 旧 hub）。 */
+  hold: HubHoldView | null
+  /** 导包软态（有人在导包；`null` = 没有 / 旧 hub）。 */
+  pendingExport: HubPendingExportView | null
   /** hub 是否认识这门课（false = 没在该 hub 的课程表里）。 */
   hubSeen: boolean
   queuePending: number
@@ -468,10 +513,6 @@ export interface CourseOverviewRow {
   peeked: boolean | null
   /** 待领队首 job_id（hub 观测；null = 没有待领 / hub 不可达）——悬停「队首 jid」。 */
   nextJob: string | null
-  /** 权威三态（hub `/admin/queue` 每课行；`null`/缺省 = 旧 hub / hub 不可达 ⇒ 未知，不猜）。 */
-  authority?: CourseAuthority | null
-  /** 「人固定过」（hub 派发记录；`null`/缺省 = 未知）。 */
-  pinned?: boolean | null
   /** 离线租约（`/admin/offline.leases`；`null`/缺省 = 没有租约 / 旧 hub）——stale/墓碑徽标用。 */
   lease?: OfflineLeaseView | null
 }
@@ -515,7 +556,8 @@ export function buildCourseRows(input: {
       course,
       training: training.has(course),
       iter: input.iters[course] ?? null,
-      offline: q?.mode === 'offline',
+      hold: q?.hold ?? null,
+      pendingExport: q?.pendingExport ?? null,
       hubSeen: q !== undefined,
       queuePending: q?.pending ?? 0,
       inflight: q?.inflight ?? 0,
@@ -526,8 +568,6 @@ export function buildCourseRows(input: {
       halt: q?.halt ?? false,
       inflightDetail,
       nextJob: q?.nextJob ?? null,
-      authority: q?.authority ?? null,
-      pinned: q?.pinned ?? null,
       lease: input.leases?.[course] ?? null,
       stuckSec: claimed.length ? Math.max(...claimed) : null,
       peeked:
@@ -564,8 +604,6 @@ export interface ParallelOverviewView {
   halt: boolean
   /** 最近派发到的课程（hub 轮转游标）；null = 还没派过或 hub 不可达。 */
   recentDispatch: string | null
-  /** ★2026-09-22：**离线课程名**（hub 标为只收回传）——顶栏 pill / 矩阵据此走「回传」维度。 */
-  offline: string[]
   rows: CourseOverviewRow[]
   /** 逐课程的离线段进度（原始形状，UI 需要按 run 展开时用；缺 = 没读到）。 */
   offlineProgress: Record<string, Record<string, OfflineRunView>> | null
@@ -633,6 +671,13 @@ export interface PushWorkerView {
   busy: boolean | null
   /** hub 派发器登记表里的探活结论（缺 = hub 未启用 push 派发 / 不可达）。 */
   hubOnline: boolean | null
+  /** **worker 类型**（★P2-5，plan §1.5.4）：`autonomous` = 跑整段课程的自主盘 / `collaborative`
+   *  = 只领 PPO/BC 作业的协作盘 / `null` = 还没露过面（不猜——登记表里的一行不等于它在干活）。
+   *
+   *  判据优先级（与 plan 同口径，纯观测、零新状态）：① **持 hold**（live 或 stale，含旧的
+   *  离线租约持有人）⇒ 自主；② 否则看**最近一次露面面**：hub 的 `offline_disk` 报名 ⇒ 自主；
+   *  队列在飞持有者 / hub 登记表 ⇒ 协作。两个面都没有它 ⇒ `null`。 */
+  kind: 'autonomous' | 'collaborative' | null
 }
 
 export interface PushWorkerRegistryView {

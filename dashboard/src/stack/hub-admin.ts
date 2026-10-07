@@ -149,40 +149,43 @@ export async function hubReloadPushWorkers(url: string, token: string): Promise<
   }
 }
 
-/** 热切某课的 hub 派发模式（R3-2）：`POST /admin/courses?course=X&mode=online|offline`。
+// ★M4：`hubSetCourseMode()`（`POST /admin/courses?course=X&mode=…[&pin=…][&drop_jobs=1]`）
+// 已删除——「课程模式」这个语义随 plan/worker-type-dispatch-model §3-M4 退役：hub 侧不再有
+// `_modes`/pin（M4 同批删），控制台也不再有意图表可落。**取代它的唯一写面** = 下面的
+// `hubReleaseCourseHold`（人工解除接管）与自主 worker 的 claim 链（后者不经过控制台）。
+
+/** **强制解除接管**（plan §1.3 状态表「强制解除」行）：
+ *  `POST /admin/courses?course=<课>&release_hold=1`（★M1b 起的 hub 端点）。
  *
- *  语义（hub 侧注释同口径）：volatile 内存态 —— 重启回启动参数，所以调用方（控制台）
- *  必须把**意图**单独落盘并在起 hub 时回灌。返回 null = 接受；否则返回人读错误（不抛）。
- *  为什么放在本模块：它是 `/admin/*` 客户端的一部分（与 halt/resume 同性质），
- *  动作层只负责「落意图 + 回灌 + 组话术」。 */
-export async function hubSetCourseMode(
+ *  语义（hub 侧同口径）：走 `revoke_offline_lease` 立**墓碑**——现场看得见「有人把它踢下来了」
+ *  （`holder_info` 照返 tombstone 形状），下一次 claim 直接覆盖；而不是一个凭空消失的 owner。
+ *  这是「live hold 不可被顶」（不变量 3）留给人的那条出口。
+ *
+ *  返回 `{ok, message}`：200 = 已解除；409 = 本来就没接管（「没接管可解」与「解不了」是
+ *  两件事，混成 false 会让操作员重复点）。 */
+export async function hubReleaseCourseHold(
   url: string,
   token: string,
   course: string,
-  mode: 'online' | 'offline',
-  pin?: boolean | null,
-  dropJobs?: boolean,
-): Promise<string | null> {
-  // `pin`（2026-10-03，plan/auto-offline-handoff §3.2）：标记「人的决定」并落盘、重启不丢
-  // （★ 同日用户裁决后 pin **不再拦离线盘**——在训课照样可被抢，唯一 opt-out = 停课）；
-  // `pin=0` = 交还自动（清锒 + 清 claim 记账）。不传 = legacy（hub 拒绝覆盖 claim 翻的 offline）。
-  const pinQs = pin === undefined || pin === null ? '' : `&pin=${pin ? 1 : 0}`
-  // `drop_jobs=1`（2026-10-03，plan/switch-mode-drops-jobs T0）：切模式顺手作废该课**未认领**
-  // 的未结算 job（「切模式 = 上一段整体作废」）。只有那颗开关（人的动作）带它；开课/停课/回灌
-  // 不带 ⇒ 「停课队列一字不动」的既有契约逐字不变。
-  const dropQs = dropJobs ? '&drop_jobs=1' : ''
-  const qs = `course=${encodeURIComponent(course)}&mode=${encodeURIComponent(mode)}${pinQs}${dropQs}`
+): Promise<{ ok: boolean; message: string }> {
+  const qs = `course=${encodeURIComponent(course)}&release_hold=1`
   try {
     const resp = await fetch(`${url.replace(/\/+$/, '')}/admin/courses?${qs}`, {
       method: 'POST',
       headers: { Authorization: `Bearer ${token}` },
       signal: AbortSignal.timeout(3000),
     })
-    if (resp.status === 200) return null
     const body = (await resp.json().catch(() => null)) as { error?: unknown } | null
-    return typeof body?.error === 'string' ? body.error : `HTTP ${resp.status}`
+    if (resp.status === 200) {
+      return { ok: true, message: '已解除接管（已立墓碑，下一次 claim 可直接覆盖）' }
+    }
+    const err = typeof body?.error === 'string' ? body.error : `HTTP ${resp.status}`
+    if (resp.status === 409) {
+      return { ok: true, message: '这门课当前没有被接管（无需解除）' }
+    }
+    return { ok: false, message: err }
   } catch (e) {
-    return String(e)
+    return { ok: false, message: `hub 不可达：${e instanceof Error ? e.message : String(e)}` }
   }
 }
 
@@ -241,19 +244,20 @@ export async function probePushWorker(
 
 /** push worker 视图的直探填充（并发探；任一失败只影响自己那一行）。 */
 export async function withWorkerProbes(
-  rows: Array<Omit<PushWorkerView, 'online' | 'busy'>>,
+  rows: Array<Omit<PushWorkerView, 'online' | 'busy' | 'kind'>>,
   cfg: RlConfig,
 ): Promise<PushWorkerView[]> {
   const keyById = new Map(
     (cfg.nodes ?? []).map((n) => [String(n.id ?? ''), String(n.authKey ?? '')] as const),
   )
+  // `kind`（★P2-5）不在这里定：它要 hub 观测面（接管/报名/在飞），由 `overview.getHubAdmin` 补。
   return Promise.all(
     rows.map(async (row) => {
-      if (!row.enabled) return { ...row, online: null, busy: null }
+      if (!row.enabled) return { ...row, online: null, busy: null, kind: null }
       const key = keyById.get(row.id) ?? ''
-      if (!key.trim()) return { ...row, online: null, busy: null }
+      if (!key.trim()) return { ...row, online: null, busy: null, kind: null }
       const r = await probePushWorker(row.url, key)
-      return { ...row, online: r.online, busy: r.busy }
+      return { ...row, online: r.online, busy: r.busy, kind: null }
     }),
   )
 }

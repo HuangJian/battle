@@ -19,6 +19,7 @@
 import { describe, expect, it } from 'bun:test'
 import type {
   CourseOverviewRow,
+  HubHoldView,
   LoopQueueRow,
   LoopQueueView,
   ParallelOverviewView,
@@ -39,8 +40,10 @@ import {
   rowTraining,
   parseLoopQueue,
   pauseOp,
+  holdBadgeOf,
+  holdCell,
+  holdWaitCell,
   queueCell,
-  segmentCell,
   waitingCell,
   withPausedFacts,
   withTraining,
@@ -53,7 +56,9 @@ function ovRow(patch: Partial<CourseOverviewRow> & { course: string }): CourseOv
   return {
     training: false,
     iter: null,
-    offline: false,
+    // ★M4：接管（hold）是「谁在跑这门课」的唯一真源——旧 `offline` 布尔已退役。
+    hold: null,
+    pendingExport: null,
     hubSeen: true,
     queuePending: 0,
     inflight: 0,
@@ -88,11 +93,15 @@ function ovView(
     activeWorkers: 3,
     halt: false,
     recentDispatch: 'c4',
-    offline: [],
     offlineProgress: null,
     rows,
     ...patch,
   }
+}
+
+/** 接管夹具（★M4）：形状与 hub `queue_state` 每课行的 `hold` 块一致。 */
+function hold(workerId: string, state: 'live' | 'stale' = 'live'): HubHoldView {
+  return { workerId, state, lastProgressAt: NOW - 30, at: NOW - 600, expiresIn: 870 }
 }
 
 /** 训练侧一行（默认：在训、RL、报 37 轮、下一步 ppo）。 */
@@ -202,17 +211,29 @@ describe('状态列：两侧判据打架时上屏（合并前漏掉的信号）'
     expect(matrixConflict(ovRow({ course: 'c5', hubSeen: false }), null, false)).toBeNull()
   })
 
-  it('状态优先级：离线（只收回传）压过「在训」——它是 hub 的一种模式，不是故障', () => {
-    const st = matrixStatus(ovRow({ course: 'c4', offline: true, training: true }), null, true)
-    expect(st.text).toBe('离线（只收回传）')
-    expect(st.tone).toBe('info') // 不涂成黄/红：离线是合法模式
+  it('★M4：接管（hold）压过「在训」——归云机管不是故障，但它也不是「在训」', () => {
+    const st = matrixStatus(
+      ovRow({ course: 'c4', hold: hold('tpu-1'), training: true }),
+      null,
+      true,
+    )
+    expect(st.text).toBe('接管中（云机）')
+    expect(st.tone).toBe('info') // 不涂成黄/红：接管是合法状态
+    // 掉线（进度静默超阈）= warn：它已自动恢复协作派发，但「刚才丢了 15 分钟」要人看见
+    const stale = matrixStatus(
+      ovRow({ course: 'c4', hold: hold('tpu-1', 'stale'), training: true }),
+      null,
+      true,
+    )
+    expect(stale.text).toBe('接管掉线')
+    expect(stale.tone).toBe('warn')
   })
 
   it('五态各是一个不同的说法（文案两两不同；语义档映射到点/徽章词表）', () => {
     const states = [
       matrixStatus(ovRow({ course: 'a', training: true, hubSeen: true }), null, true),
       matrixStatus(ovRow({ course: 'b', training: true, hubSeen: false }), null, true),
-      matrixStatus(ovRow({ course: 'c', offline: true }), null, true),
+      matrixStatus(ovRow({ course: 'c', hold: hold('tpu-1') }), null, true),
       matrixStatus(ovRow({ course: 'd', hubSeen: true }), null, true),
       matrixStatus(ovRow({ course: 'e', hubSeen: false }), null, true),
     ].map((s) => s.text)
@@ -220,7 +241,7 @@ describe('状态列：两侧判据打架时上屏（合并前漏掉的信号）'
     expect(states).toEqual([
       '在训',
       '在训 · hub 未注册',
-      '离线（只收回传）',
+      '接管中（云机）',
       'hub 已注册 · 无进程',
       '未在训',
     ])
@@ -234,45 +255,83 @@ describe('状态列：两侧判据打架时上屏（合并前漏掉的信号）'
   })
 })
 
-// ────────────────────────── ③ 离线段过期 ──────────────────────────
+// ────────────────────────── ③ 接管列（★M4：取代旧「段内」列） ──────────────────────────
 
-describe('段内列：离线课唯一的「死」信号', () => {
-  const offlineRow = (ageSec: number) =>
+describe('接管列：谁在跑这门课 + 多久没回传（旧「段内」列的唯一活信息）', () => {
+  const heldRow = (ageSec: number, state: 'live' | 'stale' = 'live') =>
     ovRow({
       course: 'c5',
-      offline: true,
+      hold: { ...hold('tpu-1', state), lastProgressAt: NOW - 30 },
       offlineRounds: 3,
       offlineLastIter: 9,
       offlineLastMtime: NOW - ageSec,
     })
 
-  it('未离线 / 没回传过 → 不给单元格（那一行的状态徽标已经说了）', () => {
-    expect(segmentCell(ovRow({ course: 'c4' }), NOW)).toBeNull()
-    expect(segmentCell(ovRow({ course: 'c4', offline: true }), NOW)).toBeNull()
-    expect(segmentCell(null, NOW)).toBeNull()
+  it('没有接管 → **不画这一格**（`null`，不是空 `—`：本机跑的课不需要这一列）', () => {
+    expect(holdCell(ovRow({ course: 'c4' }), NOW)).toBeNull()
+    expect(holdCell(null, NOW)).toBeNull()
   })
 
-  it('1 分钟前 = 在跑（不醒目）；2 小时前 = 醒目并点名「可能挂了」', () => {
-    const fresh = segmentCell(offlineRow(60), NOW)!
-    expect(fresh.text).toBe('段内 3 轮 · 最近 1m 前')
-    expect(fresh.warn).toBe(false)
-    expect(fresh.title).not.toContain('可能挂了')
+  it('live：holder + 最近一次**进度**信号（不是「上次心跳」——心跳不算活性）', () => {
+    const cell = holdCell(heldRow(60), NOW)!
+    expect(cell.text).toBe('tpu-1 · 最近 30s 前')
+    expect(cell.warn).toBe(false)
+    expect(cell.title).toContain('接管中')
+    expect(cell.title).toContain('已回传段内 3 轮')
+    expect(cell.title).not.toContain('云机可能挂了')
+  })
 
-    const stale = segmentCell(offlineRow(2 * OFFLINE_STALE_SEC), NOW)!
+  it('产物超红线（1h 无新产物）→ 醒目并点名「云机可能挂了」（进度仍活时只是提示）', () => {
+    const fresh = holdCell(heldRow(OFFLINE_STALE_SEC), NOW)!
+    expect(fresh.warn).toBe(false) // 判据是「超过」
+    const stale = holdCell(heldRow(OFFLINE_STALE_SEC + 1), NOW)!
     expect(stale.warn).toBe(true)
-    expect(stale.title).toContain('可能挂了')
+    expect(stale.title).toContain('云机可能挂了')
     expect(stale.title).toContain(`${OFFLINE_STALE_SEC / 60} 分钟`)
   })
 
-  it('红线边界：恰好 1 小时不算过期（判据是「超过」），1 小时零 1 秒算', () => {
-    expect(segmentCell(offlineRow(OFFLINE_STALE_SEC), NOW)!.warn).toBe(false)
-    expect(segmentCell(offlineRow(OFFLINE_STALE_SEC + 1), NOW)!.warn).toBe(true)
+  it('stale（接管掉线）→ 说清**已自动恢复协作**与新盘可直接 claim（不吓人）', () => {
+    const cell = holdCell(heldRow(60, 'stale'), NOW)!
+    expect(cell.text).toContain('接管掉线')
+    expect(cell.warn).toBe(true)
+    expect(cell.title).toContain('已自动恢复')
+    expect(cell.title).toContain('强制解除接管')
   })
 
-  it('mtime=0（还没有产物）→ 相对时间显示 `—`，不显示 1970 年前', () => {
-    const cell = segmentCell(ovRow({ course: 'c5', offline: true, offlineRounds: 2 }), NOW)!
+  it('lastProgressAt=0（还没有进度信号）→ 相对时间显示 `—`，不显示 1970 年前', () => {
+    const cell = holdCell(
+      ovRow({ course: 'c5', hold: { ...hold('tpu-1'), lastProgressAt: 0 }, offlineRounds: 2 }),
+      NOW,
+    )!
     expect(cell.text).toContain('最近 —')
     expect(cell.warn).toBe(false)
+  })
+
+  it('★M4：接管徽标只给两档——stale（已恢复协作）/ pending_export（导包中）；live 不重复画', () => {
+    expect(holdBadgeOf(ovRow({ course: 'c4', hold: hold('tpu-1') }))).toBeNull()
+    const stale = holdBadgeOf(ovRow({ course: 'c4', hold: hold('tpu-1', 'stale') }))!
+    expect(stale.text).toBe('已恢复协作')
+    // 导包软态：不占闸（本机照跑、协作照派）——所以它只在**没有**接管时才上屏
+    const pending = holdBadgeOf(
+      ovRow({ course: 'c4', pendingExport: { by: 'tpu-1', at: NOW - 60 } }),
+    )!
+    expect(pending.text).toBe('导包中')
+    expect(pending.title).toContain('不建接管')
+    expect(
+      holdBadgeOf(
+        ovRow({ course: 'c4', hold: hold('tpu-1'), pendingExport: { by: 'tpu-1', at: NOW - 60 } }),
+      ),
+    ).toBeNull()
+  })
+
+  it('★M4：「在等什么」对**被接管**的课换口径（本地 13 步表的词对它没有读面意义）', () => {
+    expect(holdWaitCell(ovRow({ course: 'c5', hold: hold('tpu-1') })).text).toBe('等待接管')
+    expect(holdWaitCell(ovRow({ course: 'c5', hold: hold('tpu-1'), offlineRounds: 2 })).text).toBe(
+      '云机运行中 · 已回传 2 轮',
+    )
+    expect(holdWaitCell(ovRow({ course: 'c5', hold: hold('tpu-1', 'stale') })).text).toBe(
+      '接管掉线 · 已恢复协作',
+    )
   })
 })
 
@@ -311,19 +370,22 @@ describe('单元格来源：指针优先训练侧，且说清来自哪一侧', (
     expect(r.iterSource).toBeNull()
   })
 
-  it('切离线开关的能力边界：只在 hub 在线 ∧ hub 认识它时给（否则点下去一定 400）', () => {
-    expect(merged(ovRow({ course: 'c4', hubSeen: true }), lqRow()).canToggleMode).toBe(false) // hub 离线
-    const online = mergeCourseRows({
+  it('★M4：`canReleaseHold` 的能力边界（hub 在线 ∧ 认识它 ∧ 确实有接管；否则点下去必 404/409）', () => {
+    // hub 离线（合并夹具里 hubUrl=null、hubOnline=false）⇒ 一个都不给。
+    expect(
+      merged(ovRow({ course: 'c4', hubSeen: true, hold: hold('t') }), lqRow()).canReleaseHold,
+    ).toBe(false)
+    const rows = mergeCourseRows({
       overview: ovView([
-        ovRow({ course: 'c4', hubSeen: true }),
-        ovRow({ course: 'c5', hubSeen: false }),
+        ovRow({ course: 'c4', hubSeen: true, hold: hold('tpu-1') }), // hub 认识它且有接管 ⇒ 给
+        ovRow({ course: 'c5', hubSeen: false, hold: hold('tpu-1') }), // hub 不认识它 ⇒ 不给
+        ovRow({ course: 'c6', hubSeen: true }), // 没有接管 ⇒ 不给（假承诺不如不画）
       ]),
       queue: null,
       viewing: '',
       nowSec: NOW,
     })
-    expect(online[0]!.canToggleMode).toBe(true)
-    expect(online[1]!.canToggleMode).toBe(false)
+    expect(rows.map((r) => r.canReleaseHold)).toEqual([true, false, false])
   })
 
   it('暂停开关的事实徽标：已暂停 / 待生效 / 恢复中 三种，且不回落到「暂停」态', () => {
@@ -462,8 +524,8 @@ describe('isTrainingRow：上屏筛选与状态列**同一个**判据', () => {
     // 「在训」/「在训 · hub 未注册」这两个判词**只能**出现在在训的行上（反过来说：
     // 写着在训却没上屏 = 漏筛了一条该看的行）；反之「未在训」/「hub 已注册 · 无进程」
     // 只能出现在未在训的行上。
-    // 注：`离线（只收回传）` 不在该对应关系里——它是 hub 侧 offline 事实（与在训与否正交：
-    // 离线课可能仍在本地跑 rollout），矩阵状态列的顺序有意把它排在 training 之前。
+    // 注：`接管中（云机）` / `接管掉线` 不在该对应关系里——接管是 hub 侧事实（与在训与否
+    // 正交：被接管的课本机不跑，但它在课程表里），矩阵状态列有意把它排在 training 之前。
     const TRAINING_WORDS = ['在训', '在训 · hub 未注册']
     const NOT_TRAINING_WORDS = ['未在训', 'hub 已注册 · 无进程']
     for (const r of shown) expect(TRAINING_WORDS, r.course).toContain(r.status.text)
@@ -476,115 +538,73 @@ describe('isTrainingRow：上屏筛选与状态列**同一个**判据', () => {
   })
 })
 
-// ────────────────────────── 意图 vs hub 事实（2026-09-23 事故） ──────────────────────────
+// ────────────────────────── 接管派生（★M4：取代「意图 vs hub 事实」三源漂移） ──────────────────────────
 
-describe('modeDrift：控制台意图 ≠ hub 此刻的表', () => {
-  // 真机事故（用户 2026-09-23 报障）：hub 重启时 `courses=[]`，控制台那份「离线意图回灌」
-  // 跑在 hub 发现课程**之前**（POST 400）——三门离线课里恰有一门输掉，静默留在 online：
-  // 面板显示「在训 / 切离线」，操作员以为自己开的是离线课。两个源摆在一起才看得见。
-  it('意图离线 ∧ hub 在线 ⇒ 漂移（带上两侧取值，供渲染层写清「意图是 X、hub 当 Y」）', () => {
+/** 旧一组用例钉的是「意图 / hub 模式 / rl-config 三源没对齐」（2026-09-23/24 两次真机事故）。
+ *
+ *  ★M4（plan/worker-type-dispatch-model §3-M4）：这三个源全没了——课程不再有模式、`run` 已
+ *  退役、控制台不再记意图。**不可能再有「没对齐」这种形状**：接管只有一个真源（hub 的 hold，
+ *  每课行随 `/admin/queue` 一起来）。取代它的是下面三条：hold 进列、队列格被 hold 接管、
+ *  在训课的导包键。
+ */
+describe('★M4 接管派生：队列格 / 在等什么 / 在训课的导包键', () => {
+  it('队列格：hold live ⇒ 「接管中·不派发」（队列深度对该课已不适用）；stale ⇒ 说真队列', () => {
+    expect(
+      queueCell(ovRow({ course: 'c4', hold: hold('tpu-1'), queuePending: 3 }), true).text,
+    ).toBe('接管中·不派发')
+    // stale：派发已恢复，队列列就是真相（不能继续拿「接管中」把它藏掉）
+    expect(
+      queueCell(ovRow({ course: 'c4', hold: hold('tpu-1', 'stale'), queuePending: 3 }), true).text,
+    ).toBe('队列 3 · 在飞 0')
+    // hub 不可达 ⇒ 仍是「不知道」，不是 0（与接管无关的那条老纪律）
+    expect(queueCell(ovRow({ course: 'c4', queuePending: 3 }), false).text).toBe(CELL_UNKNOWN)
+  })
+
+  it('行上的三个派生字段：waiting 走 holdWaitCell、iter 走云机回传、bundleOps = 在训', () => {
     const row = mergeCourseRows({
-      overview: ovView([ovRow({ course: 'x20-demo-mix', training: true, offline: false })]),
-      queue: lqView([lqRow({ course: 'x20-demo-mix' })], ['x20-demo-mix']),
-      modeIntents: { 'x20-demo-mix': 'offline' },
+      overview: ovView([
+        ovRow({ course: 'c4', hold: hold('tpu-1'), offlineRounds: 5, offlineLastIter: 42 }),
+        ovRow({ course: 'c5', hold: hold('tpu-2') }),
+      ]),
+      queue: lqView([lqRow({ course: 'c4' }), lqRow({ course: 'c5' })], ['c4', 'c5']),
       viewing: '',
       nowSec: NOW,
-    })[0]!
-    expect(row.modeDrift).toEqual({ intent: 'offline', hubOffline: false, configRun: false })
-  })
-
-  // ★ 2026-09-24（plan/train-mode-hot-switch §2.5）：第三个源 —— hub 与意图都已经是在线，
-  // 而 rl-config 里还写着 `rollout_src=run`（本课仍归云机）⇒ 本机在下一轮仍然收工、不采样。
-  // 用户报障的现场就是这个形状（切回在线后 Kaggle 仍因缺 bun 拒单）。
-  it('意图/ hub 都回到在线 ∧ 配置仍是 run ⇒ 漂移（configRun）', () => {
-    const drift = (rolloutSrc: Record<string, string> | null): unknown =>
-      mergeCourseRows({
-        overview: ovView([ovRow({ course: 'x20-firstkill', offline: false })]),
-        queue: lqView([lqRow({ course: 'x20-firstkill' })], ['x20-firstkill']),
-        modeIntents: { 'x20-firstkill': 'online' },
-        courseRolloutSrc: rolloutSrc,
-        viewing: '',
-        nowSec: NOW,
-      })[0]!.modeDrift
-    expect(drift({ 'x20-firstkill': 'run' })).toEqual({
-      intent: 'online',
-      hubOffline: false,
-      configRun: true,
     })
-    // 配置跟上了（local/node）⇒ 两个源都一致，不画漂移
-    expect(drift({ 'x20-firstkill': 'local' })).toBeNull()
-    expect(drift({ 'x20-firstkill': 'node' })).toBeNull()
-    // 没下发逐课配置（旧视图/夹具）⇒ 无从判断，**不编**漂移
-    expect(drift(null)).toBeNull()
-    // 意图离线时配置是 run 是**正常**的（离线就该是 run）——只有意图在线才算没跟上
-    expect(
-      mergeCourseRows({
-        overview: ovView([ovRow({ course: 'c9', offline: true })]),
-        queue: lqView([lqRow({ course: 'c9' })], ['c9']),
-        modeIntents: { c9: 'offline' },
-        courseRolloutSrc: { c9: 'run' },
-        viewing: '',
-        nowSec: NOW,
-      })[0]!.modeDrift,
-    ).toBeNull()
+    // 被接管的课：iter 读**云机回传的最新 it**（本地「下一轮」队列指针这一段没有读面意义）
+    expect(row[0]).toMatchObject({ iter: 42, iterSource: 'hold' })
+    expect(row[0]!.waiting.text).toBe('云机运行中 · 已回传 5 轮')
+    // 一次都没回传 ⇒ 「等待接管」；本地 waiting 词（“推进中”）不上屏
+    expect(row[1]!.waiting.text).toBe('等待接管')
+    // 没有回传轮 ⇒ 指针**不可知**：iter null 且来源也是 null——绝不拿本地「下一轮」指针（37）充数
+    //（这一段本机不跑这门课；悬停由 `iterMissingTitle` 说「接管中但还没有段内回传」）。
+    expect(row[1]!.iterSource).toBeNull()
+    expect(row[1]!.iter).toBeNull()
+    // 导包键：任何**在训**课都给（云机随时可能领走它；包与 hub 此刻派不派活正交）
+    expect(row.map((r) => r.bundleOps)).toEqual([true, true])
   })
 
-  it('一致（两种方向都算一致）⇒ null：不画漂移', () => {
-    const drift = (offline: boolean, intent: 'online' | 'offline'): unknown =>
-      mergeCourseRows({
-        overview: ovView([ovRow({ course: 'c4', offline })]),
-        queue: lqView([lqRow({ course: 'c4' })], ['c4']),
-        modeIntents: { c4: intent },
-        viewing: '',
-        nowSec: NOW,
-      })[0]!.modeDrift
-    expect(drift(true, 'offline')).toBeNull()
-    expect(drift(false, 'online')).toBeNull()
+  it('未在训的课不给导包键（停课连认课标记都没了，云机领不走）', () => {
+    const rows = mergeCourseRows({
+      overview: ovView([
+        ovRow({ course: 'c4', training: false }),
+        ovRow({ course: 'c5', training: true }),
+      ]),
+      queue: null,
+      viewing: '',
+      nowSec: NOW,
+    })
+    expect(rows.map((r) => r.bundleOps)).toEqual([false, true])
   })
 
-  it('**无从判断** ⇒ null（不把「不知道」画成「没问题」）', () => {
-    const drift = (
-      patch: Partial<CourseOverviewRow>,
-      intents: Record<string, 'online' | 'offline'> | null,
-      hubOnline = true,
-    ): unknown =>
-      mergeCourseRows({
-        overview: ovView([ovRow({ course: 'c4', ...patch })], { hubOnline }),
-        queue: lqView([lqRow({ course: 'c4' })], ['c4']),
-        modeIntents: intents,
-        viewing: '',
-        nowSec: NOW,
-      })[0]!.modeDrift
-    expect(drift({}, null)).toBeNull() // 没有意图（从没点过切离线 / 历史课）
-    expect(drift({ hubSeen: false }, { c4: 'offline' })).toBeNull() // hub 不认识它
-    expect(drift({}, { c4: 'offline' }, false)).toBeNull() // hub 不可达
-  })
-
-  it('★2026-09-23 bundleOps：hub 标离线 **∨** 意图离线（两个源任一为离线就给任务包键）', () => {
-    // 用户指令的动机：离线课**要先有任务包才能上云跑**，而“意图离线但 hub 还当它在线”
-    // 这个失配时刻，旧判据（只看 hub 事实）恰好把「导出任务包」键藏了——最需要它的时候。
-    const ops = (offline: boolean, intents: Record<string, 'online' | 'offline'> | null): boolean =>
-      mergeCourseRows({
-        overview: ovView([ovRow({ course: 'c5', offline })]),
-        queue: lqView([lqRow({ course: 'c5' })], ['c5']),
-        modeIntents: intents,
-        viewing: '',
-        nowSec: NOW,
-      })[0]!.bundleOps
-    expect(ops(true, null)).toBe(true) // hub 标离线（旧判据，不变）
-    expect(ops(true, { c5: 'offline' })).toBe(true) // 两个源都离线 → 仍只有一个键
-    expect(ops(false, { c5: 'offline' })).toBe(true) // ★失配时也给（本次改动）
-    expect(ops(false, { c5: 'online' })).toBe(false) // 明确在线 ⇒ 不给（不所有课都挂包）
-    expect(ops(false, null)).toBe(false) // 无意图、hub 也说在线 ⇒ 不给
-  })
-
-  it('旧服务端（没有 courseModeIntents 字段）⇒ null：不编状态、不报错', () => {
+  it('旧 hub（没有 hold 字段）⇒ 列与徽标都是「没有接管」：不编状态、不报错', () => {
     const row = mergeCourseRows({
-      overview: ovView([ovRow({ course: 'c4', offline: false })]),
+      overview: ovView([ovRow({ course: 'c4' })]),
       queue: lqView([lqRow({ course: 'c4' })], ['c4']),
       viewing: '',
       nowSec: NOW,
     })[0]!
-    expect(row.modeDrift).toBeNull()
+    expect(row.hold).toBeNull()
+    expect(row.holdBadge).toBeNull()
+    expect(row.canReleaseHold).toBe(false)
   })
 })

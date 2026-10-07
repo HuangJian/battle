@@ -1,14 +1,18 @@
 /** OpenCourseModal.tsx — **开课**弹窗（2026-09-20 用户指令：进程与课程解耦后的独立入口）。
  *
- *  为什么课程级选项（训练模式 / rollout 位置）住在这里而不是「启动服务进程」弹窗：
+ *  为什么课程级选项（rollout 位置 / 起点权重）住在这里而不是「启动服务进程」弹窗：
  *  它们全是**课程级**旋钮（落 rl-config `courses.<课>.*`）——进程是共享的一台，回答不了
  *  「这门课怎么跑」。放在启动弹窗里，操作员点一次「启动」就被迫为一门课做决定；放在这里，
  *  才与「开哪门课」这个动作对齐。
  *
+ *  ★M4（plan/worker-type-dispatch-model §3-M4）：原来的「训练模式」（在线/离线）那格已删
+ *  ——开课不再指定这门课归本机还是归云机（那由 hub 的 hold 在云机 claim 成功时才建立，
+ *  见 `course-lifecycle.ts` 头注）。rollout 位置那格留着：它是训练侧的采样位置，与接管正交。
+ *
  *  Esc / 遮罩关闭由 App 全局处理。 */
 
 import { useState } from 'preact/hooks'
-import type { RolloutSrcMode, TrainMode } from '../../../core/types'
+import type { RolloutSrcMode } from '../../../core/types'
 import type { ArchivedCourseView, ModeView } from '../../view'
 import { SegmentedControl } from '../../components/SegmentedControl'
 
@@ -16,14 +20,13 @@ export interface OpenCourseModalProps {
   open: boolean
   /** 要开的课程（空 = 弹窗不渲染：没课程就没有「开哪门课」这件事）。 */
   course: string
-  /** 该课当前生效值（`modes.rolloutSrc === 'run'` ⇒ 这把键已经是离线档）。 */
+  /** 该课当前生效值（rollout 位置；`'run'` = 存量盘上的退役值，按缺省档展示）。 */
   modes: ModeView
   /** 已封存课程（`stateView.archived`）：起点权重选择器的来源（**只读 manifest 的
    *  `weights[]`**，G4-①）。缺省 = 旧视图/尚未封存过 ⇒ 只有 BC 默认一档。 */
   archived?: ArchivedCourseView[] | null
   onClose: () => void
   onConfirm: (opts: {
-    trainMode: TrainMode
     rolloutSrc?: RolloutSrcMode
     /** 起点 = 封存课的某个关键轮（缺省 = BC 播种）。服务端按 manifest 自解析路径。 */
     seedFrom?: { sourceCourse: string; it: number }
@@ -32,7 +35,6 @@ export interface OpenCourseModalProps {
   readOnly?: boolean
 }
 
-const TC_OPEN_TRAIN_MODE = 'tc.openCourse.trainMode'
 const TC_OPEN_ROLLOUT = 'tc.openCourse.rolloutSrc'
 
 function readLocal(key: string): string {
@@ -60,14 +62,8 @@ export function OpenCourseModal({
   onConfirm,
   readOnly,
 }: OpenCourseModalProps) {
-  // 训练模式：**以 rl-config 为准**（`run` ⇒ 这门课正处离线档），localStorage 只记上次点选。
-  const [trainMode, setTrainMode] = useState<TrainMode>(() =>
-    modes.rolloutSrc === 'run'
-      ? 'offline'
-      : readLocal(TC_OPEN_TRAIN_MODE) === 'offline'
-        ? 'offline'
-        : 'online',
-  )
+  // rollout 位置：**以 rl-config 为准**（缺省 local），localStorage 只记上次点选。
+  // `run`（退役值）不在取值域里——存量盘上读到它就退回缺省档（与训练侧容忍读同口径）。
   const [rolloutSrc, setRolloutSrc] = useState<RolloutSrcMode>(() => {
     const local = readLocal(TC_OPEN_ROLLOUT)
     if (local === 'local' || local === 'node' || local === 'auto') return local
@@ -87,19 +83,13 @@ export function OpenCourseModal({
 
   if (!open || !course) return null
   const confirm = (): void => {
-    writeLocal(TC_OPEN_TRAIN_MODE, trainMode)
     writeLocal(TC_OPEN_ROLLOUT, rolloutSrc)
     const sep = seed.lastIndexOf(':')
     const seedFrom =
       seed === 'bc' || sep <= 0
         ? undefined
         : { sourceCourse: seed.slice(0, sep), it: Number(seed.slice(sep + 1)) }
-    onConfirm({
-      trainMode,
-      // 离线档忽略 rollout 选择（服务端也会忽略：离线只认 run/run_iters 那对键）。
-      rolloutSrc: trainMode === 'online' ? rolloutSrc : undefined,
-      ...(seedFrom ? { seedFrom } : {}),
-    })
+    onConfirm({ rolloutSrc, ...(seedFrom ? { seedFrom } : {}) })
   }
   return (
     <div className="tc-modal-mask" onClick={onClose}>
@@ -118,23 +108,13 @@ export function OpenCourseModal({
         <p className="tc-muted tc-small tc-mt-0">
           开课 = 把这门课**放进训练**：写课程级旋钮（<code>rl-config.json</code> 的{' '}
           <code>courses.{course}.*</code>）+ 建发现事实（
-          <code>tmp/{course}/training_log.jsonl</code> 与 <code>remote-jobs/</code>）+ 解除暂停意图
-          + 按下面选定的模式置 hub 派发闸。
+          <code>tmp/{course}/training_log.jsonl</code> 与 <code>remote-jobs/</code>）+
+          解除暂停意图。
           <b>共享 trainer 没在跑也能开</b>——它是发现式的，进程一起就会扫到这门课；
-          停课则相反（写暂停意图 + hub 置离线，队列与账本一个字不动）。
+          停课则相反（写暂停意图 + 删开课标记，队列与账本一个字不动）。
         </p>
-        <div className="tc-line">
-          <span className="tc-muted tc-small tc-launch__lbl">训练模式</span>
-          <SegmentedControl<TrainMode>
-            value={trainMode}
-            ariaLabel="训练模式"
-            options={[
-              { value: 'online', label: '在线' },
-              { value: 'offline', label: '离线' },
-            ]}
-            onChange={setTrainMode}
-          />
-        </div>
+        {/* ★M4：不再有「训练模式」（在线/离线）那格——开课只把课放进训练，归本机还是归云机
+            由 hub 的 hold 回答（云机 claim 成功才建立）。 */}
         {/* ★ 起点权重（G4-①）：从**封存档案**取关键轮归档权重作新腿起点；只在通知
             「开始」时服务端解析路径并把该文件播成 tmp/<本课>/weights.json（仅在本课
             尚无 weights.json 时生效）。无封存课 ⇒ 只有 BC 默认一档。 */}
@@ -160,34 +140,27 @@ export function OpenCourseModal({
             （仅在本课尚无该文件时生效；路径由服务端按 <code>archive-manifest.json</code> 解析）。
           </p>
         ) : null}
-        {trainMode === 'offline' ? (
-          <p className="tc-muted tc-small tc-hint">
-            离线（缺省在线）：本机**不跑** rollout/PPO。开课后控制台会导出任务包{' '}
-            <code>task-&lt;课&gt;.zip</code>，云机（<code>battle.offline.ipynb</code>）取包并 claim
-            成功后才**建立接管**（那时起本机不跑这门课；15 分钟无回传自动恢复协作派发）。
-          </p>
-        ) : (
-          <>
-            <div className="tc-line">
-              <span className="tc-muted tc-small tc-launch__lbl">rollout</span>
-              <SegmentedControl<RolloutSrcMode>
-                value={rolloutSrc}
-                ariaLabel="rollout 执行位置"
-                options={[
-                  { value: 'local', label: '本机' },
-                  { value: 'node', label: '上云（节点）' },
-                  { value: 'auto', label: 'auto' },
-                ]}
-                onChange={setRolloutSrc}
-              />
-            </div>
-            <p className="tc-muted tc-small tc-hint">
-              rollout 位置：本机 = 本机采样 + 只把 PPO 送云； 上云（节点）= 本轮**整轮**上云； auto
-              = 不表态，交回 <code>rl.rollout_src</code> 解析。写的是**本课**的覆盖 （
-              <code>courses.{course}.rollout_src</code>）——不碰其它课程共用的默认面。
-            </p>
-          </>
-        )}
+        <div className="tc-line">
+          <span className="tc-muted tc-small tc-launch__lbl">rollout</span>
+          <SegmentedControl<RolloutSrcMode>
+            value={rolloutSrc}
+            ariaLabel="rollout 执行位置"
+            options={[
+              { value: 'local', label: '本机' },
+              { value: 'node', label: '上云（节点）' },
+              { value: 'auto', label: 'auto' },
+            ]}
+            onChange={setRolloutSrc}
+          />
+        </div>
+        <p className="tc-muted tc-small tc-hint">
+          rollout 位置：本机 = 本机采样 + 只把 PPO 送云； 上云（节点）= 本轮**整轮**上云； auto =
+          不表态，交回 <code>rl.rollout_src</code> 解析。写的是**本课**的覆盖 （
+          <code>courses.{course}.rollout_src</code>）——不碰其它课程共用的默认面。
+          <br />
+          云机接管不在这里选：自主 worker（<code>battle.offline.ipynb</code>）自己来 claim，
+          成功且有进度才建立接管（15 分钟无进度自动解除）。
+        </p>
         {/* ★ §3（2026-09-21）：删掉「降级本机」开关。单一 PPO 路径下没有这个档位——
             PPO 恒为「发布到 hub 队列 + 等 worker 认领」，无人认领就响亮报「等待认领中」。 */}
         <div className="tc-modal__foot">

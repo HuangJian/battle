@@ -15,7 +15,12 @@
  *
  *  只读（局域网）视图：按钮保持可点、悬停给提示，真点击由服务端 403 + flash 兜底
  *  （与组件卡同一哲学：只读是动作边界，不是把整个区域画成灰的）。
- */
+ *
+ *  ★M4（plan/worker-type-dispatch-model §3-M4，需求 1）：行上给**类型徽标**——两型 worker
+ *  （自主盘领整段任务包 / 协作盘领单 it 的 PPO job）在同一个登记表里长得一模一样，而它们
+ *  对「这门课会不会被领走」的意义完全不同。判据由服务端从 hub 观测面派生（`kind`：
+ *  hub `offline_disk` 报过到 ∨ 持过 hold ⇒ 自主；在飞 holder ∨ hub 已登记 ⇒ 协作；
+ *  都算不出 ⇒ `null`，**不猜**）。 */
 
 import { useState } from 'preact/hooks'
 import { Switch } from '../../components/Switch'
@@ -139,10 +144,25 @@ export function WorkerRegistry({ registry, onAction, readOnly }: WorkerRegistryP
               { text: shortUrl(w.url), title: w.url, mono: true },
               { text: `×${w.concurrency}`, title: `并发数 ${w.concurrency}` },
             ]
-            const badges: RowBadge[] =
-              w.busy === true
-                ? [{ text: '忙', tone: 'y', title: 'worker 自报在跑活（/ping busy）' }]
-                : []
+            // 类型徽标（★M4）：`null` = hub 观测面没线索（新登记、还没接活）——不画，不猜。
+            const badges: RowBadge[] = []
+            if (w.kind === 'autonomous')
+              badges.push({
+                text: '自主',
+                tone: 'a',
+                title:
+                  '自主盘：领**整段**任务包（hub `offline_disk` 报名过 ∨ 持过 hold）——它接管一门课时' +
+                  '该课的 PPO 派发被压住、本机不跑那门课。',
+              })
+            else if (w.kind === 'collaborative')
+              badges.push({
+                text: '协作',
+                tone: 'gray',
+                title:
+                  '协作盘：只领单 it 的 PPO job（在飞 holder ∨ hub 已登记）——它不会被接管，也不占课程。',
+              })
+            if (w.busy === true)
+              badges.push({ text: '忙', tone: 'y', title: 'worker 自报在跑活（/ping busy）' })
             return (
               <StatusRow
                 key={w.id}

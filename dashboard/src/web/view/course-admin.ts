@@ -37,7 +37,7 @@ import {
   type MatrixStatus,
   matrixStatus,
   mergeCourseRows,
-  offlineWaitCell,
+  holdWaitCell,
   waitingCell,
 } from './course-matrix'
 
@@ -45,7 +45,7 @@ import {
  *
  *  ⚠ 口径只有一个：**开课标记**（`training-enabled.txt`，训练侧与 hub 的同一个闸）。
  *  它是「这一门被放进课程表了吗」，**不是**「进程在跑吗」——后者的说法彽在**状态列**上
- *  （矩阵词表的「在训 / 未在训 / 离线（只收回传）」），两列回答两个问题。 */
+ *  （矩阵词表的「在训 / 未在训 / 接管中（云机） / 接管掉线」），两列回答两个问题。 */
 export type CourseAdminKind = 'enabled' | 'stopped' | 'declared' | 'archived'
 
 export interface CourseAdminRow {
@@ -63,7 +63,7 @@ export interface CourseAdminRow {
   lastWriteMs: number | null
   /** 状态列（矩阵同一套词表）。 */
   status: MatrixStatus
-  /** 「在等什么」列（离线课给云机回传口径，与矩阵同源）。 */
+  /** 「在等什么」列（被接管的课给云机回传口径，与矩阵同源）。 */
   waiting: MatrixCell
   /** 账本/队列指针（null = 还没有任何一轮）。 */
   iter: number | null
@@ -71,8 +71,9 @@ export interface CourseAdminRow {
   /** hub 侧两侧事实（供操作列判断哪些开关成立；缺 = 那一侧没有这门课）。 */
   ov: CourseOverviewRow | null
   lq: LoopQueueRow | null
-  /** 「切离线/在线」能不能给（hub 在线 ∧ hub 认识这门课；矩阵同一判据，不另写一份）。 */
-  canToggleMode: boolean
+  /** 「强制解除接管」能不能给（hub 在线 ∧ hub 认识这门课 ∧ 确实有接管）。矩阵同一判据
+   *  （`mr.canReleaseHold`），不另写一份——旧的三颗模式钮已随模式语义退役（★M4）。 */
+  canReleaseHold: boolean
   /** BC/RL 种类徽标（`lq.kind`；缺 = 未知，不标）。 */
   kindBadge?: 'rl' | 'bc'
   /** 归档事实（仅 `archived` 行）。 */
@@ -88,8 +89,6 @@ export interface CourseAdminInput {
   facts?: CourseFactView[] | null
   overview: ParallelOverviewView | null
   queue: LoopQueueView | null
-  modeIntents?: Record<string, 'online' | 'offline'> | null
-  courseRolloutSrc?: Record<string, string> | null
   /** ★2026-10-06：逐课停车态（`stateView.loopCompletes`）——已收官的课在本页也不得报「在训」（与 pill / 课程矩阵同一派生）。 */
   loopCompletes?: Record<string, LoopComplete> | null
   archived?: ArchivedCourseView[] | null
@@ -151,12 +150,13 @@ function activeRow(
     // 两侧都没有这门课时也走同一套词表（`matrixStatus(null, null, …)` = 「未在训」）——
     // 不为「没被任何一侧登记」另写一个词，那样同一个事实会有两种说法。
     status: mr ? mr.status : matrixStatus(null, null, hubOnline),
-    waiting: ov?.offline ? offlineWaitCell(ov) : mr ? mr.waiting : waitingCell(null),
+    // 被接管的课走「云机整段执行」口径（`holdWaitCell`），其余行直接用矩阵已算好的那一格。
+    waiting: mr ? mr.waiting : ov?.hold ? holdWaitCell(ov) : waitingCell(null),
     iter: mr?.iter ?? null,
     iterSource: mr?.iterSource ?? null,
     ov,
     lq: mr?.lq ?? null,
-    canToggleMode: mr?.canToggleMode ?? false,
+    canReleaseHold: mr?.canReleaseHold ?? false,
     kindBadge: mr?.lq?.kind ?? (mr?.kind === 'bc' ? 'bc' : undefined),
   }
 }
@@ -183,7 +183,7 @@ function archivedRow(a: ArchivedCourseView, viewing: string): CourseAdminRow {
     iterSource: null,
     ov: null,
     lq: null,
-    canToggleMode: false,
+    canReleaseHold: false,
     archive: a,
   }
 }
@@ -197,8 +197,6 @@ export function buildCourseAdmin(input: CourseAdminInput): CourseAdminView {
   const matrix = mergeCourseRows({
     overview: input.overview,
     queue: input.queue,
-    modeIntents: input.modeIntents,
-    courseRolloutSrc: input.courseRolloutSrc,
     loopCompletes: input.loopCompletes,
     viewing: input.viewing,
     nowSec: input.nowSec,
@@ -263,8 +261,6 @@ export function courseAdminFromState(
     facts: s.courseFacts ?? null,
     overview: s.overview ?? null,
     queue: s.loopQueue ?? null,
-    modeIntents: s.courseModeIntents ?? null,
-    courseRolloutSrc: s.courseRolloutSrc ?? null,
     loopCompletes: s.loopCompletes ?? null,
     archived: s.archived ?? null,
     viewing,

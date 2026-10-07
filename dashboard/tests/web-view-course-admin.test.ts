@@ -66,7 +66,9 @@ function hub(rows: Array<Partial<CourseOverviewRow> & { course: string }>): Para
   const full: CourseOverviewRow[] = rows.map((r) => ({
     training: false,
     iter: null,
-    offline: false,
+    // ★M4：接管（hold）取代了旧 `offline` 布尔——默认无接管，专测的用例自己传。
+    hold: null,
+    pendingExport: null,
     hubSeen: true,
     queuePending: 0,
     inflight: 0,
@@ -88,7 +90,6 @@ function hub(rows: Array<Partial<CourseOverviewRow> & { course: string }>): Para
     activeWorkers: 1,
     halt: false,
     recentDispatch: full[0]?.course ?? null,
-    offline: full.filter((r) => r.offline).map((r) => r.course),
     rows: full,
     offlineProgress: null,
   }
@@ -203,17 +204,22 @@ describe('course-admin · 行集与分类', () => {
 })
 
 describe('course-admin · 列口径（复用矩阵词表）', () => {
-  it('状态/在等什么与矩阵同源：hub 标离线 → 「离线（只收回传）」+ 云机等待口径', () => {
+  it('状态/在等什么与矩阵同源：被接管 → 「接管中（云机）」+ 云机等待口径', () => {
     const v = build({
       courses: ['c'],
       facts: [fact('c')],
       queue: queue([queueRow('c')]),
-      overview: hub([{ course: 'c', offline: true }]),
+      overview: hub([
+        {
+          course: 'c',
+          hold: { workerId: 'tpu-1', state: 'live', lastProgressAt: 0, at: 0, expiresIn: 870 },
+        },
+      ]),
     })
     const r = v.rows[0]!
-    expect(r.status.text).toBe('离线（只收回传）')
-    expect(r.waiting.text).toBe('离线（只收回传）')
-    expect(r.canToggleMode).toBe(true)
+    expect(r.status.text).toBe('接管中（云机）')
+    expect(r.waiting.text).toBe('等待接管') // 零回传：云机刚领走/还在跑第一轮
+    expect(r.canReleaseHold).toBe(true)
   })
 
   it('两侧都没有它 → 「未在训」+ 「不知道」的等待占位（不是「无待办」）', () => {
@@ -221,7 +227,7 @@ describe('course-admin · 列口径（复用矩阵词表）', () => {
     const r = v.rows[0]!
     expect(r.status.text).toBe('未在训')
     expect(r.waiting.text).toBe('—')
-    expect(r.canToggleMode).toBe(false)
+    expect(r.canReleaseHold).toBe(false)
   })
 
   it('最后写入：无活体是 `—`（不是「刚刚」）；有活体给相对时间', () => {
