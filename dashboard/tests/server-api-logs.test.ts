@@ -211,3 +211,75 @@ describe('console/log viewer (§348 补 2)', () => {
     expect(await api.componentLogPayload('nope' as never, 50)).toBeNull()
   })
 })
+
+// ────────────────────────── 日志尾的有界读（plan/dashboard-pool-history-idle-cost §7） ──────────────────────────
+//
+// 触发（2026-10-07 实测）：`componentViews` 对**每个**组件调 `logTail`，而旧实现 `readFileSync`
+// **整个文件**再逐行 `new TextDecoder` —— 本机 selfNode 22.5MB / hubServer 56.2MB ⇒ 单次
+// `componentViews` 2348ms / heapΔ **94.9MB** / rssΔ 260.9MB，而 `getSlowSnapshot` 每 5s 拍一次
+// （`/api/state` 每请求再拍一次）⇒ 这就是空置时 280↔856MB 锯齿的**真凶**（池历史早在 R0 被排除）。
+// 改成尾部窗口读 + `totalLines` 分块计数后，同一测量：heapΔ 0.1MB / rssΔ 6.3MB。
+describe('logTail / readLogTail.totalLines 的有界读（idle-cost §7）', () => {
+  const withTmpFile = (content: string, fn: (abs: string) => void): void => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-logtail-'))
+    try {
+      const abs = path.join(dir, 'x.log')
+      writeFileSync(abs, content)
+      fn(abs)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('logTail：小文件（< 尾窗口）与「全文件切行 + 截 200 + 取尾 n」逐字相同', () => {
+    const lines = Array.from({ length: 40 }, (_, i) => `l${i}-${'x'.repeat(i * 3)}`)
+    withTmpFile(`${lines.join('\n')}\n`, (abs) => {
+      const expectTail = (n: number): string[] =>
+        lines.map((l) => (l.length > 200 ? l.slice(0, 200) : l)).slice(-n)
+      expect(api.logTail(abs, 5)).toEqual(expectTail(5))
+      expect(api.logTail(abs, 3)).toEqual(expectTail(3))
+    })
+  })
+
+  it('logTail：长行按 200 字符截断（无省略号，原语义）；空行被跳过', () => {
+    const long = 'y'.repeat(500)
+    withTmpFile(`a\n\n${long}\n\nb\n`, (abs) => {
+      expect(api.logTail(abs, 5)).toEqual(['a', 'y'.repeat(200), 'b'])
+    })
+  })
+
+  it('logTail：大文件（1.2MB / 4 万行）只取尾 n 行且内容完整（尾窗口不切坏最后一行）', () => {
+    const lines = Array.from({ length: 40_000 }, (_, i) => `L${i}-${'z'.repeat(20)}`)
+    withTmpFile(`${lines.join('\n')}\n`, (abs) => {
+      expect(api.logTail(abs, 5)).toEqual(lines.slice(-5))
+    })
+  })
+
+  it('性能护栏：8MB / 30 万行在 1s 内返回（旧实现读整文件 + 逐行 new TextDecoder ⇒ 秒级）', () => {
+    // 上限刻意宽松：只挡「把整文件读进堆并逐行解码」这一档，不做耗时竞赛。
+    const line = `${'w'.repeat(26)}\n`
+    withTmpFile(line.repeat(300_000), (abs) => {
+      const t0 = Date.now()
+      const out = api.logTail(abs, 5)
+      const ms = Date.now() - t0
+      expect(out.length).toBe(5)
+      expect(out[4]).toBe('w'.repeat(26))
+      expect(ms).toBeLessThan(1000)
+    })
+  })
+
+  it('readLogTail.totalLines：分块计数与「全文件行数」一致（含末尾无换行 / 空文件）', () => {
+    const lines = Array.from({ length: 1234 }, (_, i) => `n${i}`)
+    withTmpFile(`${lines.join('\n')}\n`, (abs) => {
+      const t = api.readLogTail(abs, 5)
+      expect(t.totalLines).toBe(1234)
+      expect(t.lines).toEqual(lines.slice(-5))
+    })
+    withTmpFile(lines.join('\n'), (abs) => {
+      expect(api.readLogTail(abs, 5).totalLines).toBe(1234) // 末尾无换行 ⇒ 残行也算一行
+    })
+    withTmpFile('', (abs) => {
+      expect(api.readLogTail(abs, 5).totalLines).toBe(0)
+    })
+  })
+})

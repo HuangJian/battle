@@ -1,5 +1,5 @@
 /** logs.ts — 日志读取：字节容错解码、日志尾、组件日志定位与载荷。 */
-import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'fs'
+import { closeSync, existsSync, openSync, readSync, readdirSync, statSync } from 'fs'
 import path from 'path'
 import { loadConfig } from '../../core/config'
 import { NN_TRAINING, REPO_ROOT, tmpLogsDir } from '../../core/paths'
@@ -37,15 +37,41 @@ function splitLogBytes(buf: Uint8Array): string[] {
   return out
 }
 
+/** 组件日志的尾窗口字节数（plan/dashboard-pool-history-idle-cost §7）。
+ *
+ *  **为什么必须是有界读**（2026-10-07 实测）：旧实现 `readFileSync(整个文件)` 再逐行切 —— 本机
+ *  `sampler-agent.log` 22.5MB / `hub-server.log` 56.2MB，而 `componentViews` 对**每个组件**都调它，
+ *  于是每拍读 ~80MB 并裂成行数组（实测单次 `componentViews` = **2348ms / heapΔ 94.9MB /
+ *  rssΔ 260.9MB**），只为了取最后 5 行。256KB 足以容纳任何正常日志的最后 5 行（需要单行 >51KB
+ *  才会截到）——不设更小是为了对「长行日志」保持语义余量。 */
+const LOG_TAIL_BYTES = 256 * 1024
+
 export function logTail(nnRel: string, n = 5): string[] {
-  let raw: Uint8Array
+  const abs = path.isAbsolute(nnRel) ? nnRel : path.join(REPO_ROOT, 'nn-training', nnRel)
+  let fileSize = 0
   try {
-    raw = readFileSync(path.isAbsolute(nnRel) ? nnRel : path.join(REPO_ROOT, 'nn-training', nnRel))
+    fileSize = statSync(abs).size
   } catch {
     return [] // 文件缺失/暂时不可读 = 无日志尾（正常态，非错误）
   }
+  if (fileSize === 0) return []
+  // 尾部窗口读（与 `readLogTail` 同法）：小文件 window = fileSize ⇒ 与旧实现逐字相同。
+  const window = Math.min(LOG_TAIL_BYTES, fileSize)
+  const buf = Buffer.alloc(window)
+  try {
+    const fh = openSync(abs, 'r')
+    try {
+      readSync(fh, buf, 0, window, fileSize - window)
+    } finally {
+      closeSync(fh)
+    }
+  } catch {
+    return []
+  }
+  const lines = splitLogBytes(buf)
+  if (window < fileSize) lines.shift() // 首行多半是被窗口切半的残行
   const out: string[] = []
-  for (const line of splitLogBytes(raw)) {
+  for (const line of lines) {
     if (!line) continue
     out.push(line.length > 200 ? line.slice(0, 200) : line)
   }
@@ -138,6 +164,39 @@ export function findLatestLog(key: Component, course: string): string | null {
   return scanLatestLog(tmpLogsDir(), key, course)
 }
 
+/** 分块数行（内存恒定 1MiB）。等价于「按 `\n` 计数 + 末尾无换行再算一行」—— 与旧的全文件版
+ *  逐字节等价，但不再把整个文件（≤8MiB）读进堆。不可读 ⇒ `null`（调用方按缺省退化显示）。 */
+function countLines(abs: string): number | null {
+  const CH = 1024 * 1024
+  const buf = Buffer.alloc(CH)
+  let n = 0
+  let pos = 0
+  let last = -1
+  try {
+    const fh = openSync(abs, 'r')
+    try {
+      for (;;) {
+        const k = readSync(fh, buf, 0, CH, pos)
+        if (k <= 0) break
+        pos += k
+        const chunk = buf.subarray(0, k)
+        let i = chunk.indexOf(10)
+        while (i !== -1) {
+          n++
+          i = chunk.indexOf(10, i + 1)
+        }
+        last = chunk[k - 1]
+      }
+    } finally {
+      closeSync(fh)
+    }
+  } catch {
+    return null
+  }
+  if (pos > 0 && last !== 10) n++
+  return n
+}
+
 /** 从文件末尾读取至多 maxLines 行（readFileSync 整文件读对 GB 级增长日志是浪费；
  *  先 stat 再只读尾部字节窗口——日志页 2s 自动刷新，这是热路径）。
  *  maxLines='all'（§371 优化 1）：读整个文件（字节窗口放宽到 4MB 上限，行数不截）。 */
@@ -187,23 +246,12 @@ export function readLogTail(
     .filter((l) => l.length > 0)
     .slice(all ? undefined : -maxLines)
     .map((l) => (maxLineLen === 'all' || l.length <= maxLineLen ? l : `${l.slice(0, maxLineLen)}…`))
-  // 顶部「共 N 行」要总行数：≤8MB 精确统计（字节计数换行 + 末尾残行），更大返回 null。
+  // 顶部「共 N 行」要总行数：≤8MB 精确统计（**分块**字节计数 + 末尾残行），更大返回 null。
+  // ★ 2026-10-07（plan/dashboard-pool-history-idle-cost §7）：旧实现 `readFileSync` 整个文件再
+  //   逐字节找换行 ⇒ 每调用一次就分配「文件大小（≤8MB）+ 分块结果」，而调用点里有一批是
+  //   **每拍**的（`snapshot-cache` 每 5s 读账本）。分块版内存恒定 1MiB、逐字节等价。
   let totalLines: number | null = null
-  if (fileSize <= 8 * 1024 * 1024) {
-    try {
-      const whole = readFileSync(abs)
-      let n = 0
-      let idx = whole.indexOf(10)
-      while (idx !== -1) {
-        n++
-        idx = whole.indexOf(10, idx + 1)
-      }
-      if (whole.length > 0 && whole[whole.length - 1] !== 10) n++
-      totalLines = n
-    } catch {
-      totalLines = null
-    }
-  }
+  if (fileSize <= 8 * 1024 * 1024) totalLines = countLines(abs)
   return {
     lines: out,
     exists: true,

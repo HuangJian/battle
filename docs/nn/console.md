@@ -7,6 +7,47 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §34 空置内存锯齿的真凶：`logTail` 读整文件，而 `componentViews` 每 5s 对每个组件调它（plan/dashboard-pool-history-idle-cost §7，2026-10-07）
+
+**触发**：§33 把池历史排除（`aggMemo` 命中 ⇒ 空置零重算）后，856MB 峰值**仍未定位**。这次**先测后改**：
+临时探头（`dashboard/tmp/probe-idle-cost.ts`，只读）逐路径测「耗时 + **未 GC 的 heapΔ** + rssΔ」——
+heapΔ 就是「分配速率」的代理。
+
+**改前实测**（`x21-psh-k10`；本机 `tmp/` 180 个 >512KB 的日志/账本，合计 1038.9MB，最大
+`trainer-cluster.log` 142.9MB）：
+
+| 路径 | 耗时 | heapΔ | rssΔ |
+|---|---|---|---|
+| `componentViews(course)` | 2348ms | **94.9MB** | 260.9MB |
+| `getSlowSnapshot(course)` | 751ms | **113.4MB** | 303.9MB |
+| `buildStateView()` | 2087ms | **138.7MB** | 216.7MB |
+| `computeFleetProbes(cfg)` | 1333ms | 18.0MB | 39.6MB |
+
+**根因**：`views.ts:111` 的 `componentViews` 对 **ALL_COMPONENTS 每一个组件**调 `logTail(logRel)`，
+而 `logTail` 的实现是 `readFileSync(整个文件)` + `splitLogBytes`（**逐行 `new TextDecoder`**），最后
+只取尾 5 行。本机 `sampler-agent.log`（selfNode）**22.5MB** + `hub-server.log`（hubServer）**56.2MB**
+⇒ **单次 `componentViews` 读 ~80MB 磁盘、分配 ~95MB 堆 + ~100MB external**（`readFileSync` 的 Buffer）。
+而 `startSnapshotRefresher` 每 **5s**（`SNAPSHOT_REFRESH_MS`）跑一次 `getSlowSnapshot(operatorCourse)`，
+`/api/state` 每请求再拍一次 ⇒ **锯齿就是这么来的**（峰谷都贴着 5s 拍）。
+次要同款：`readLogTail` 的 `totalLines` 分支对 `fileSize ≤ 8MiB` 的文件 `readFileSync` **整个文件**，
+只为数行数（调用点里有一批是每拍的：`snapshot-cache.ts:199` 每 5s 读账本）。
+
+**修法（两条，都是「有界读」）**：
+- `logTail` 改**尾部窗口读**（`LOG_TAIL_BYTES = 256KB`，与 `readLogTail` 同法；文件 ≤ 窗口时
+  `window = fileSize` ⇒ 与旧实现**逐字相同**）；行仍按 200 字符截断（无省略号，原语义不动）。
+- `readLogTail.totalLines` 改**分块计数**（`countLines`，内存恒定 1MiB；与旧全文件版逐字节等价）。
+
+**改后（同一测量）**：`componentViews` **1232ms / heapΔ 0.1MB / rssΔ 6.3MB** ·
+`getSlowSnapshot` **25ms / 0.0MB / 6.1MB** · `buildStateView` **1503ms / 2.8MB / 18.3MB** ·
+`logTail(22.5MB 文件)` **3ms / 0.0MB**。**heapΔ 降两个数量级**（94.9→0.1MB；113.4→0.0MB）。
+
+**残留的是网络、不是内存**：`componentViews` 仍 1.2s、`buildStateView` 仍 1.5s —— 那是 ping / hub
+探测的超时预算（1.5–2.5s）；`computeFleetProbes` 1.3s / 6.8MB 同理。内存面已干净。
+
+**落点**：`dashboard/src/server/api/logs.ts`（`logTail` + `countLines`）·
+`dashboard/tests/server-api-logs.test.ts`（等价性 ×2 · 大文件尾窗 · 性能护栏 · `totalLines` 分块）。
+
+---
 ## §33 池历史大流的重建判据：文件大只决定「怎么读」，不决定「要不要重读」（plan/dashboard-pool-history-idle-cost，2026-10-07）
 
 **触发**（用户）：没开训练时 `bun src/server/server.ts` 空置，内存 WS 在 280–856MB 锯齿。原 plan 的根因
