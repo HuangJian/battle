@@ -241,6 +241,7 @@ class _Hub:
         console_url: str = "",
         stall_sec: float = 0.0,
         hold_stale_sec: float = 0.0,
+        export_sec: float = 0.0,
     ) -> None:
         def _argv(port: int) -> list[str]:
             return [
@@ -278,6 +279,10 @@ class _Hub:
             # 管的是心跳静默，已降级为「没有进度字段的旧记录」的过渡读路）。e2e 不想真等
             # 900s ⇒ 调秒级（hub/task_pack 调用时读 env）。
             env["BCITY_HOLD_PROGRESS_STALE_SEC"] = str(hold_stale_sec)
+        if export_sec:
+            # ★M1b/F11：`offline_stalled` 的 `pending-export` 腿的**窗** = 导包窗（不是 1800s
+            # 那个停滞阈）——同样不想真等 900s ⇒ 调秒级。
+            env["BCITY_AUTO_HANDOFF_PENDING_SEC"] = str(export_sec)
         srv = spawn_bound_port(_argv, cwd=str(ROOT), env=env)
         self.port = srv.port
         self.proc = srv.proc
@@ -471,8 +476,9 @@ def test_stalled_course_raises_alert(tmp_path: Path) -> None:
     traj = tmp_path / "traj"
     _course_dirs(traj, C_AUTO)
     console = _FakeConsole()
-    # 阈值调到秒级：默认 1800s 会让用例「等或假钟」，而我们只要判据本身
-    hub = _Hub(traj, console_url=console.url, stall_sec=0.5)
+    # 窗调到秒级：默认的 1800s（停滞阈）/ 900s（导包窗，★M1b 起 ② 腿用它）会让用例
+    # 「等或假钟」，而我们只要判据本身
+    hub = _Hub(traj, console_url=console.url, stall_sec=0.5, export_sec=0.5)
     try:
         hub.ready(expect=[C_AUTO])
         # 安静时无告警（别把「一切正常」也画成红的）

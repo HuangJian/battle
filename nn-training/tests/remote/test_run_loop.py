@@ -507,6 +507,36 @@ def test_main_accepts_artifacts_only_and_leaves_the_local_plan_alone(
     assert (art / ArtifactStore.MANIFEST_NAME).read_bytes() == man_before
 
 
+def test_main_reads_the_lease_file_and_hands_it_to_the_runner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★M1b / P1-1：`--hub-lease-file` → `hub_lease` → 补传体里的 `lease_token`。
+
+    这一条把 CLI 面与「补传能不能推进活动起点」连起来（另一个例在 `test_offline_deliver`）。
+    文件读不到 / 不给这个 flag ⇒ 空串（不抛）——凭据缺失只意味着「不推进」，不该拦住训练。
+    """
+    _plan, _m, _fake, _result, art = _run(tmp_path)  # 一份完整产物
+    seen: dict[str, Any] = {}
+
+    def spy(*_a: Any, **kw: Any) -> dict[str, Any]:
+        seen.update(kw)
+        return {"it_end": 3, "run_state": "noop", "artifacts": {"dir": str(art), "zip": "x"}}
+
+    lease_file = tmp_path / "hub.lease"
+    lease_file.write_text("lease-9\n", encoding="utf-8")
+    monkeypatch.setattr(run_loop_mod, "run_standalone", spy)
+    assert run_loop_mod.main(["--artifacts", str(art), "--hub-lease-file", str(lease_file)]) == 0
+    assert seen["hub_lease"] == "lease-9"
+    seen.clear()
+    assert run_loop_mod.main(["--artifacts", str(art)]) == 0
+    assert seen["hub_lease"] == "", "不给 flag ⇒ 不带租约（补传照跑，只是不推进起点）"
+    seen.clear()
+    assert run_loop_mod.main(
+        ["--artifacts", str(art), "--hub-lease-file", str(tmp_path / "missing")]
+    ) == 0
+    assert seen["hub_lease"] == "", "文件读不到也不拦训练"
+
+
 def test_drive_says_the_local_segment_is_done_not_just_noop(tmp_path: Path) -> None:
     """G3：`todo` 空**且** `start_from >= end_it` ⇒ 文案要点明「本机段落已完成」与下一步。
 

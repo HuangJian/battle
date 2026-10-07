@@ -121,6 +121,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "set_mode",
             "active_courses",
             "_sync_parked",
+            # ★M1b：hold 镜像的推送（派发闸第三层；在 `_sync_parked` 里顺带推一份）
+            "_sync_hold",
             "_note_ambiguous",
             "ambiguous_jids",
         ),
@@ -235,6 +237,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "note_pending_export",
             "hold_of",
             "pending_export_of",
+            # P1-1 的判据（2026-10-07，M1b）：补传能不能推进活动起点
+            "offline_advance_ok",
         ),
     ),
     "queue_store_face": (
@@ -373,7 +377,9 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
 #: 八个混入 + 声明面允许的仓内依赖（多一个就说明又搬漏/搬多了）。
 #: `queue_resume` 不在表里：它有一处**延迟** `rl` 引用（见 `test_only_resume_touches_rl`）。
 ALLOWED_IMPORTS = {
-    "hub.queue_scope": {"common.protocol", "hub.queue_peer", "hub.store"},
+    # ★M1b：`queue_scope` 多一个向下依赖 —— `hub.task_pack.hold_progress_at`（推 hold 镜像时
+    # 取进度锚；判据源与 `queue_offline` 同一份，不另抄一个「进度怎么读」）。
+    "hub.queue_scope": {"common.protocol", "hub.queue_peer", "hub.store", "hub.task_pack"},
     "hub.queue_discover": {"common.protocol", "hub.queue_peer", "hub.store"},
     "hub.queue_auth": {
         "hub.auth",
@@ -476,7 +482,9 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # pending_export_of；2026-10-07（M1b）再 +3：progress_offline（进度打点）与两个**无锁内核**
     # `_lease_rec_locked` / `_holder_info_locked`（busy 闸按 worker 判 ⇒ 要在 `_lease_lock`
     # 临界区里读持有面，而 Lock 不可重入——内核拆出来才不死锁）。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 124, len(DOMAIN_METHODS)
+    # 2026-10-07（M1b 收尾）再 +2：`offline_advance_ok`（P1-1 的 advance 门，与 hold 判据同住）
+    # 与 `_sync_hold`（queue_scope：把 hold 推给 store，供派发闸读）。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 126, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -486,7 +494,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 124, len(seen)
+    assert len(seen) == 126, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -510,9 +518,9 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
         for name in realized:
             assert seen.get(name, domain) == domain, f"{name} 同时住 {seen[name]} 与 {domain}"
             seen[name] = domain
-    # 124 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
+    # 126 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
     expect = set(DOMAIN_METHODS) | {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"}
-    assert len(seen) == 126 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
+    assert len(seen) == 128 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
 
 
 # ───────────────────── ② 接线正确 ─────────────────────
@@ -851,8 +859,9 @@ def test_queue_peer_is_declarations_only() -> None:
     funcs = [n for n in body if isinstance(n, ast.FunctionDef)]
     # 80 个成员 - `__init__` - `_store_of`（见下一条）；2026-10-03 自动交接 +3；
     # 2026-10-05 权威派生 +2（authority_of / pinned_of）；2026-10-07 接管新面 +5
-    # （M1a：note_hold / note_progress / note_pending_export / hold_of / pending_export_of）。
-    assert len(funcs) == 85, len(funcs)
+    # （M1a：note_hold / note_progress / note_pending_export / hold_of / pending_export_of）；
+    # 2026-10-07 M1b 再 +1（`_sync_hold`：hold 镜像的推送，每次改 hold 都要调）。
+    assert len(funcs) == 86, len(funcs)
     for n in funcs:
         # 只滤掉文档字符串：`...` 也是 `Expr(Constant)`，滤它就把声明本身滤没了（本守卫
         # 第一版就是这么错的 —— `halt_of` 带 docstring 才暴露出来）。

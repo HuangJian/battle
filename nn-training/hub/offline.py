@@ -66,6 +66,14 @@ from hub.task_pack import (
     trigger_task_bundle_export,
 )
 
+#: `offline_advance_ok` 的拒因 → 日志文案（★P1-1）。住这里而不是 hub 深层的理由：这句话是给
+#: **现场的人**看的（为什么这一轮没推进起点），而判据住在 `_HubQueue`（那里不打印）。
+_ADVANCE_SKIP_TEXT = {
+    AUTHORITY_PINNED_ONLINE: "人切了固定在线——旧会话的回传不能把起点拉回旧轮",
+    "hold_stale": "持有人的进度已静默超阈（stale）——迟到回传不夺回起点",
+    "hold_token": "租约 token 不符（不是本课当前持有人）",
+}
+
 
 class OfflineRoutes:
     """offline 路由 mixin（`HubHandler(…, OfflineRoutes, BaseHTTPRequestHandler)`）。"""
@@ -336,13 +344,21 @@ class OfflineRoutes:
                     "补传无法归属课程：体里带 course（或 course_name），或加 ?course=；"
                     f"本 hub 的课程：{self.hub.courses()}"
                 )
-            # ★P1-7 / R3-f：人切了「固定在线」之后，旧会话的回传**不得推进活动权重**
-            # （`advance_active=False`）——镜像/归档照落（算过什么的证据），但当前起点不听旧轮。
-            res = self.hub.store_offline_artifact(
-                course,
-                body,
-                advance_active=self.hub.authority_of(course) != AUTHORITY_PINNED_ONLINE,
+            # ★P1-1（M1b）：**盖章无条件、advance 要活+持准**——镜像/归档照落（算过什么的
+            # 证据），但活动起点只听**活跃 hold 的持有人**。判据三态见 `offline_advance_ok`。
+            advance, why = self.hub.offline_advance_ok(
+                course, str(body.get("lease_token") or "")
             )
+            res = self.hub.store_offline_artifact(course, body, advance_active=advance)
+            res["advance_active"] = bool(advance)
+            if why:
+                res["advance_skipped"] = why
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] [hub-server] 补传不推进活动起点"
+                    f"（course={course} run={res.get('run_id')} it{res.get('it')}）："
+                    f"{_ADVANCE_SKIP_TEXT.get(why, why)}",
+                    flush=True,
+                )
             # 本轮随体重一并到达的云机评估行 → 课程账本（去重；失败只记一笔，
             # **不影响**补传本身的成功与否：权重才是这一趟的硬要求）。
             try:

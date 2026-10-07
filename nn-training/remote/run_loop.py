@@ -157,6 +157,9 @@ def run_standalone(
     hub_token: str = "",
     #: 本份产物在 hub 里的归位键（见 `OfflineDeliverer.course`；空 = 单课程 hub）。
     hub_course: str = "",
+    #: 本课租约 token（`--hub-lease-file`；见 `OfflineDeliverer.hub_lease`）。空 = 不声称
+    #: 持有 ⇒ hub 侧不推进活动起点（P1-1），但补传照落。
+    hub_lease: str = "",
     deliver: bool = True,
     run_job_fn: Callable[..., dict] | None = None,
     log: Callable[[str], None] = _log_default,
@@ -212,6 +215,7 @@ def run_standalone(
         hub_url=hub_url,
         hub_token=hub_token,
         hub_course=hub_course,
+        hub_lease=hub_lease,
         deliver=deliver,
         run_job_fn=run_job_fn or _real_run_job,  # 入口侧的注入：CLI 缺省 = 真 worker
         log=log,
@@ -362,6 +366,21 @@ def _resolve_hub_token(inline: str, token_file: str) -> str:
     return (os.environ.get("BATTLE_HUB_TOKEN") or "").strip()
 
 
+def _read_secret_file(path: str, flag: str) -> str:
+    """读一个 0600 secret 文件（空路径 ⇒ 空串；读不到只记一行、不抛）。
+
+    与 `_resolve_hub_token` 同一哲学：凭据缺失是配置问题，不能让它把训练拦在下游某个
+    更贵的地方（P1-1 的代价只是「不推进活动起点」）。
+    """
+    if not str(path or "").strip():
+        return ""
+    try:
+        return Path(path).read_text(encoding="utf-8").strip()
+    except OSError as e:
+        print(f"[run] 读 {flag} 失败：{e}", file=sys.stderr, flush=True)
+        return ""
+
+
 def main(argv: list[str] | None = None) -> int:
     """`python -m remote.run_loop --artifacts <dir>`：产物目录即任务，续跑到计划末尾。"""
     ap = argparse.ArgumentParser(description="自主段运行（产物目录是唯一输入；不需要 hub）")
@@ -404,6 +423,14 @@ def main(argv: list[str] | None = None) -> int:
         "--hub-token-file",
         default="",
         help="从文件读 token（Kaggle secret / Colab 挂载；避免进 shell 历史）",
+    )
+    ap.add_argument(
+        "--hub-lease-file",
+        default="",
+        help=(
+            "从文件读本课租约 token（offline_boot 领到租约后落的 0600 文件）——"
+            "它是「这份产物能推进活动起点」的凭据（P1-1）；缺了它补传照落、只是不推进"
+        ),
     )
     ap.add_argument(
         "--no-deliver",
@@ -471,6 +498,7 @@ def main(argv: list[str] | None = None) -> int:
             args.hub_url = str(got["hub_url"])  # 包里记着地址（**不记 token**）
     root = Path(args.artifacts)
     hub_token = _resolve_hub_token(args.hub_token, args.hub_token_file)
+    hub_lease = _read_secret_file(args.hub_lease_file, "--hub-lease-file")
     try:
         plan, manifest = load_planned_manifest(root)
         result = run_standalone(
@@ -491,6 +519,7 @@ def main(argv: list[str] | None = None) -> int:
             hub_url=args.hub_url,
             hub_token=hub_token,
             hub_course=args.hub_course,
+            hub_lease=hub_lease,
             deliver=not args.no_deliver,
         )
     except (ProtocolError, RetryableError) as e:

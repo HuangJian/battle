@@ -29,6 +29,7 @@ from common.protocol import sanitize_run_id
 from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
     DRAIN_TICK_SEC,
+    HUB_LEASE_ENV,
     OfflineDeliverer,
     _log_default,
 )
@@ -108,6 +109,9 @@ class DelivererProcess:
         run_id: str,
         artifacts_dir: str | Path,
         course: str = "",
+        #: 本课租约 token（★M1b/P1-1：随补传体上报，推进 hub 侧的活动起点）。走 env
+        #: 传给子进程（`HUB_LEASE_ENV`），**不进 argv**。空 = 不带。
+        hub_lease: str = "",
         #: 控制/状态文件的落点（缺省 = 产物目录下的 `work/`，与 `run_loop` 的老缺省一致）。
         work_dir: str | Path | None = None,
         ctl_path: str | Path | None = None,
@@ -123,6 +127,7 @@ class DelivererProcess:
         self._run_id_raw = str(run_id or "")
         self.root = Path(artifacts_dir)
         self.course = str(course or "").strip()
+        self.hub_lease = str(hub_lease or "").strip()
         self.work_dir = (
             Path(work_dir)
             if work_dir is not None
@@ -223,6 +228,9 @@ class DelivererProcess:
         # token **只走 env**（argv 会在 `/proc/<pid>/cmdline` 上全机可读）；而父侧手里的 token
         # 可能是 inline/文件来的（`run_loop` 的取值顺序 inline > token_file > env）⇒ 必须显式塞。
         env["BATTLE_HUB_TOKEN"] = self.token
+        # 租约 token 同理只走 env（★M1b/P1-1）：空值不塞，免得子进程拿到一个空串当 token。
+        if self.hub_lease:
+            env[HUB_LEASE_ENV] = self.hub_lease
         self._boot = threading.Event()
         try:
             proc = subprocess.Popen(
@@ -355,6 +363,7 @@ class DelivererProcess:
             run_id=self._run_id_raw,
             artifacts_dir=self.root,
             course=self.course,
+            hub_lease=self.hub_lease,
             background=True,
             log=self.log,
         )
@@ -556,6 +565,8 @@ def make_deliverer(
     run_id: str,
     artifacts_dir: str | Path,
     course: str = "",
+    #: 本课租约 token（★M1b/P1-1：可缺——缺了补传照落，只是不推进活动起点）。
+    hub_lease: str = "",
     #: 控制/状态文件的落点（只有进程模式用；缺省 = 产物目录下的 `work/`）。
     work_dir: str | Path | None = None,
     #: `""` = 自动（`$NN_DELIVER_MODE` > `"process"`，见模块常量）；
@@ -593,6 +604,7 @@ def make_deliverer(
             run_id=run_id,
             artifacts_dir=artifacts_dir,
             course=course,
+            hub_lease=hub_lease,
             work_dir=work_dir,
             log=log,
         )
@@ -602,6 +614,7 @@ def make_deliverer(
         run_id=run_id,
         artifacts_dir=artifacts_dir,
         course=course,
+        hub_lease=hub_lease,
         background=background if kind == "thread" else False,
         log=log,
     )

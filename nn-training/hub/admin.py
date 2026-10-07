@@ -179,6 +179,10 @@ class AdminRoutes:
                             "claimed_offline": bool(
                                 self.hub.dispatch_record(c).get("claimed_offline")
                             ),
+                            # ★M1b：接管读数（与 `/admin/queue` 同一口径；`token` 不外露）
+                            "held": str(self.hub.hold_of(c).get("state") or "") == "live",
+                            "holder": str(self.hub.hold_of(c).get("worker_id") or ""),
+                            "pending_export": bool(self.hub.pending_export_of(c)),
                         }
                         for c in self.hub.courses()
                     ]
@@ -188,6 +192,14 @@ class AdminRoutes:
             return
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         course = (qs.get("course") or [""])[0]
+        # ★M1b：`release_hold=1` = **强制解除接管**（立墓碑 ⇒ 下一次 claim 直接覆盖）。
+        # 为什么走 revoke 而不是「直接清 hold」：墓碑让现场看得见「有人把它踢下来了」
+        # （`holder_info` 照返 tombstone 形状），而不是一个凭空消失的 owner。
+        raw_release = (qs.get("release_hold") or [""])[0].strip().lower()
+        if raw_release in ("1", "true", "yes", "on"):
+            ok = self.hub.revoke_offline_lease(course, "admin release_hold=1")
+            self._json({"course": course, "released": ok}, 200 if ok else 409)
+            return
         mode = (qs.get("mode") or [""])[0]
         # `pin` = 人的决定（二轮 P0-2/P0-3）：带它才能覆盖「由 claim 翻的 offline」。
         # 不带 = legacy 调用方（回灌/旧版控制台）：只改没被 claim 翻过的课。

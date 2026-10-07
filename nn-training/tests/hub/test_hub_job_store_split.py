@@ -143,6 +143,11 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "release",
             "result_token_ok",
             "mark_completed",
+            # ★M1b / Q5（2026-10-07）：派发闸的第三层——课程 hold（本课程被接管 ⇒ 谁都不派）
+            # + `job_kind`（bc 只豁免角色闸）+ 判活窗。三道闸全在 `role_blocked` 一处定序。
+            "job_kind",
+            "hold_blocked",
+            "_hold_stale_sec",
         ),
         (
             "_leases",
@@ -158,6 +163,9 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "_roles",
             "_role_lock",
             "parked",
+            # ★M1b：`_kinds`（job → kind，Q5 的①）与 `hold_meta`（课程 hold 镜像）。
+            "_kinds",
+            "hold_meta",
         ),
     ),
     "store_results": (
@@ -305,15 +313,15 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
         for m in defined & set(MIXIN_METHODS):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(MIXIN_METHODS) == 55, len(MIXIN_METHODS)
-    assert len(seen) == 55, len(seen)
+    assert len(MIXIN_METHODS) == 58, len(MIXIN_METHODS)
+    assert len(seen) == 58, len(seen)
     # 49 = 拆分前 `_JobStore` 的 49 个方法；2026-09-25 并入 origin 的课程侧落位后又多了 2 条
     # （`_course_backup_target` / `_land_offline_round_extras`）；2026-10-01 §52 加 2 条
     # （`_lease_state` 判据 + `_lease_held` 布尔视图）；2026-10-03 T0 加 1 条
     # （`cancel_unsettled_jobs` 撤单）；2026-10-05 六轮 F1 加 1 条（`_ledger_net_state` 净态折叠）；
-    # 2026-10-06 加 2 条（`_unfinished_pending` 唯一筛子 + `inflight_job_ids` 在飞集）
-    # ⇒ 现在 55 + 2。
-    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 55 + 2, "_JobStore 的方法总数变了"
+    # 2026-10-06 加 2 条（`_unfinished_pending` 唯一筛子 + `inflight_job_ids` 在飞集）；
+    # 2026-10-07 M1b 加 3 条（`job_kind` / `hold_blocked` / `_hold_stale_sec`）⇒ 现在 58 + 2。
+    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 58 + 2, "_JobStore 的方法总数变了"
 
 
 def test_the_mixins_do_not_share_any_defined_name() -> None:

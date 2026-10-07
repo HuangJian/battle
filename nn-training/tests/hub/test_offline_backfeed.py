@@ -49,12 +49,12 @@ def _isolate_weights_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("BCITY_WEIGHTS_ARCHIVE_ROOT", str(tmp_path / "weights-archive"))
 
 
-def _boot(tmp_path: Path) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
+def _boot(tmp_path: Path, now_fn=None) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
     d = tmp_path / COURSE
     (d / "remote-jobs").mkdir(parents=True, exist_ok=True)
     (d / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
-    store = _JobStore(d / "remote-jobs", d / "training_log.jsonl")
-    hub = _HubQueue({COURSE: store}, order=[COURSE])
+    store = _JobStore(d / "remote-jobs", d / "training_log.jsonl", now_fn=now_fn)
+    hub = _HubQueue({COURSE: store}, order=[COURSE], now_fn=now_fn)
     srv = make_server(hub, 0, TOKEN, host="127.0.0.1")
     threading.Thread(target=srv.serve_forever, daemon=True).start()
     return f"http://127.0.0.1:{srv.server_address[1]}", hub, srv
@@ -211,6 +211,69 @@ def test_end_it_reached_must_match_the_current_pack_identity(
         row2 = next(r for r in hub.offline_tasks() if r["course"] == COURSE)
         assert row2["state"] == "completed" and row2["claimable"] is False, row2
 
+    finally:
+        srv.shutdown()
+
+
+# ─────────── ③ ★M1b / P1-1：盖章无条件，advance 要「活跃 hold + token 相符」 ───────────
+
+
+def test_live_hold_needs_the_matching_lease_token_to_advance(tmp_path: Path) -> None:
+    """接管期间的回传：**镜像照落、活动起点不动**，除非带着本课租约 token 来。
+
+    三道判据（`offline_advance_ok`）：无 hold ⇒ 准（旧端/手动腿，见另一条用例）；hold 活但
+    token 不符 ⇒ 拒；stale ⇒ 拒（下一条用例）。这里钉的是「活 + token 不符」与「活 + 相符」。
+    """
+    active = b'{"format":"nn-weights-json","params":{"w":1}}'
+    newer = b'{"format":"nn-weights-json","params":{"w":9}}'
+    (tmp_path / COURSE).mkdir(parents=True, exist_ok=True)
+    (tmp_path / COURSE / "weights.json").write_bytes(active)
+    base, hub, srv = _boot(tmp_path)
+    try:
+        hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
+        # ① 不带 token（旧端 / 手动腿在接管期间回传）⇒ 200 收下但**不推进**
+        st, doc = _post(base, OFFLINE_ARTIFACT_PATH, _round_body(7, newer, run_id="seg-x"))
+        assert st == 200 and doc.get("status") == "accepted", doc
+        assert doc.get("advance_active") is False and doc.get("advance_skipped") == "hold_token"
+        mirror = (
+            tmp_path / COURSE / "remote-jobs" / "offline" / "seg-x" / "it-007" / "weights.json"
+        )
+        assert mirror.read_bytes() == newer, "镜像照落（算过什么的证据面不受归属影响）"
+        assert (tmp_path / COURSE / "weights.json").read_bytes() == active
+        # ② token 不符（别的盘提着别人的名头）⇒ 同样拒
+        body = _round_body(8, newer, run_id="seg-x") | {"lease_token": "tok-BAD"}
+        st, doc = _post(base, OFFLINE_ARTIFACT_PATH, body)
+        assert st == 200 and doc.get("advance_active") is False, doc
+        assert (tmp_path / COURSE / "weights.json").read_bytes() == active
+        # ③ 带对 token ⇒ 推进（持有人自己的回传是「课程现在的进度」）
+        body = _round_body(9, newer, run_id="seg-x") | {"lease_token": "tok-1"}
+        st, doc = _post(base, OFFLINE_ARTIFACT_PATH, body)
+        assert st == 200 and doc.get("advance_active") is True, doc
+        assert (tmp_path / COURSE / "weights.json").read_bytes() == newer
+    finally:
+        srv.shutdown()
+
+
+def test_stale_hold_backfeed_does_not_advance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """心跳活、进度死（§68 的假活）⇒ 迟到回传不把活动起点夺回来（F2 与 `lease_verdict` 同尺）。"""
+    monkeypatch.setenv("BCITY_HOLD_PROGRESS_STALE_SEC", "10")
+    active = b'{"format":"nn-weights-json","params":{"w":1}}'
+    newer = b'{"format":"nn-weights-json","params":{"w":9}}'
+    clock = [1000.0]
+    (tmp_path / COURSE).mkdir(parents=True, exist_ok=True)
+    (tmp_path / COURSE / "weights.json").write_bytes(active)
+    base, hub, srv = _boot(tmp_path, now_fn=lambda: clock[0])
+    try:
+        hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
+        clock[0] += 20.0  # 超过 10s 的进度窗 ⇒ stale
+        body = _round_body(7, newer, run_id="seg-x") | {"lease_token": "tok-1"}
+        st, doc = _post(base, OFFLINE_ARTIFACT_PATH, body)
+        assert st == 200 and doc.get("status") == "accepted", doc
+        assert doc.get("advance_active") is False, doc
+        assert doc.get("advance_skipped") == "hold_stale", doc
+        assert (tmp_path / COURSE / "weights.json").read_bytes() == active
     finally:
         srv.shutdown()
 

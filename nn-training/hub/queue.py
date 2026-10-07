@@ -142,10 +142,10 @@ class _HubQueue(
         self._modes: dict[str, str] = {
             c: str(md.get(c) or COURSE_MODE_ONLINE) for c in self._order
         }
-        # 停摆位同步到 store（唯一知道 mode 的层是它）：`set_mode` 热切与启动参数两条路
-        # 都得过这里，否则「重启后离线课变成可领」这类偏差没有任何一处会报错。
-        for _c in self._order:
-            self._sync_parked(_c)
+        # 停摆位/hold 镜像同步到 store（唯一知道 mode 与 hold 的两层都在下面：`__init__` 末段
+        # 的 `_sync_parked` 循环）。★M1b 删掉了这里的一份：`_sync_parked` 现在还会推 hold 镜像
+        # （`_sync_hold` → `hold_of` → 时钟），而这一行的 `_now` 还没赋值 ⇒ 构造期 AttributeError；
+        # 且它做的事在下面那个循环里会**原样重做**（那里才是 `_modes` 的最终值）。
         #: 上次派发过的课程（轮转起点）；None = 从序首开始
         self._cursor: str | None = None
         #: job_id -> course（归属解析缓存；job_id 不可复用，故不会失效）

@@ -92,7 +92,28 @@ OFFLINE_STALL_SEC = 1800.0
 #: （§3.3a 一拖一）。超窗 = 交接失败，交给 `offline_stalled` 告警，**不再占闸**
 #: （否则一次导出失败会把整条自动链冻死）。
 #: ★ 它同时是「新一轮交接」的判据之一（★六轮 F4：换主 ∨ 距上次 claim 超窗 ⇒ 重置触发账本）。
+#: ★M1b：它也是 `offline_stalled` 的 `pending-export` 腿的窗（F11：旧 busy 腿② 删掉后，
+#: 这个常数就只剩这一个消费点）——「说了要导包、多久没动静算出事」。
 AUTO_HANDOFF_PENDING_SEC = 900.0
+#: 导包窗的 env 旋钮（e2e/单测调秒级，与 `offline_lease_stale_sec()` /
+#: `hold_progress_stale_sec()` 同一套做法：现场与用例都要能把长窗口压到秒级）。
+AUTO_HANDOFF_PENDING_ENV = "BCITY_AUTO_HANDOFF_PENDING_SEC"
+
+
+def auto_handoff_pending_sec() -> float:
+    """导包窗（秒；缺省 `AUTO_HANDOFF_PENDING_SEC`，`AUTO_HANDOFF_PENDING_ENV` 可覆盖）。
+
+    非法 / 非正 ⇒ 回缺省（绝不 0：0 窗会让刚写的导包意向当场过期）。
+    """
+    raw = os.environ.get(AUTO_HANDOFF_PENDING_ENV, "").strip()
+    if raw:
+        try:
+            v = float(raw)
+            if v > 0.0:
+                return v
+        except ValueError:
+            pass
+    return AUTO_HANDOFF_PENDING_SEC
 
 
 def dispatch_record_default(fallback_mode: str) -> dict:
@@ -229,23 +250,34 @@ def stall_verdict(
     flipped_at: float,
     threshold: float,
     now: float,
+    pending_export_at: float = 0.0,
+    export_window: float = 0.0,
 ) -> str:
     """停滞判据（**纯函数**）：`""` = 没停；否则是原因。
 
-    覆盖两段（二轮 P1-3）：① running（活租约）但进度超阈值；② 已翻 offline、无活租约、
-    未完成（导包窗口 / 导出失败）且翻 mode 时刻超阈值。只用已有事实，不引入新状态。
+    覆盖两段（二轮 P1-3）：① running（有人接管）但进度超阈值；② 无人接管、未完成
+    （导包窗口 / 导出失败）且超窗。只用已有事实，不引入新状态。
 
     ★六轮 P0-10（R3-e）：静音**只给 `pinned_online`**（人固定在在线，它不是离线候选）；
     `pinned_offline` 与 auto 的离线课照常告警（报障二里最该响的那一声就是云机停机的
     pinned_offline）。判据吃 `authority` 字符串，不再吃裸 `pinned` 布尔。
+
+    ★M1b：② 的锚换成**导包意向**的时刻（claim 没包那一刻写的 `pending_export.at`），窗换成
+    `export_window`（= `AUTO_HANDOFF_PENDING_SEC`，与 ① 的停滞阈**是两个常量**）——
+    「已翻 offline」这件事在新模型里有了它自己的时间戳，不再拿 mode 翻转时刻凑。
     """
     if not treat_offline or authority == AUTHORITY_PINNED_ONLINE or completed:
         return ""
     progress_age = now - last_progress_mtime if last_progress_mtime > 0 else math.inf
     if holder_present:
         return "running-stale" if progress_age > threshold else ""
-    anchor = max(flipped_at, last_progress_mtime if last_progress_mtime > 0 else 0.0)
-    if anchor > 0 and now - anchor > threshold:
+    anchor = max(
+        flipped_at,
+        last_progress_mtime if last_progress_mtime > 0 else 0.0,
+        pending_export_at,
+    )
+    window = export_window if export_window > 0.0 else threshold
+    if anchor > 0 and now - anchor > window:
         return "pending-export"
     return ""
 
@@ -715,26 +747,32 @@ class QueueOfflineMixin(QueuePeer):
         是既有嵌套方向，本函数不许在持 `_dispatch_lock` 时调）。写 `_leases` ⇒ 已录进
         `STATE_WRITERS['_leases']`（守卫）。
         """
+        token = ""
         with self._lease_lock:
             rec = self._leases.get(course)
-            if rec is None:
-                return False
-            if rec.get("revoked") is True:
-                return True
-            rec["revoked"] = True
-            rec["revoked_reason"] = str(reason or "")
-            # 显式回写：状态写者表（守卫）的 AST 扫描只认 `self.X[...] =` / `.pop` / `.del`
-            # 三类写法，就地改引用不会被计入——回写一份才让「谁写 _leases」这张表不漏人。
-            self._leases[course] = rec
-            token = str(rec.get("token") or "")
-        # ★M1b：墓碑同时**清掉 hold 镜像** —— 派发闸只认 hold，不清就等于「墓碑仍占闸」。
+            if rec is not None and rec.get("revoked") is not True:
+                rec["revoked"] = True
+                rec["revoked_reason"] = str(reason or "")
+                # 显式回写：状态写者表（守卫）的 AST 扫描只认 `self.X[...] =` / `.pop` / `.del`
+                # 三类写法，就地改引用不会被计入——回写一份才让「谁写 _leases」这张表不漏人。
+                self._leases[course] = rec
+                token = str(rec.get("token") or "")
+        # ★M1b：墓碑同时（且**无条件**）清掉 hold 镜像 —— 派发闸只认 hold，不清就等于
+        # 「墓碑仍占闸」。为什么无条件（而不是「有租约才清」）：hold 是**落盘的**，而
+        # `_leases` 是进程内的——hub 重启后 `offline` 的 `release_hold=1`（人点「强制解除
+        # 接管」）会命中「没有内存租约但盘上有 hold」，那时不清就等于按钮坏了。
         #（墓碑本身住内存租约，`holder_info`/`offline_leases` 照样看得到，供排障。）
-        self._dispatch_update(course, hold={})
-        print(
-            f"[hub-server] offline-revoke {course} lease={token[:8]}… reason={reason or '-'}",
-            flush=True,
-        )
-        return True
+        held = bool(self.hold_of(course))
+        if held or rec is not None:
+            self._dispatch_update(course, hold={})
+            self._sync_hold(course)
+        had = rec is not None or held
+        if had:
+            print(
+                f"[hub-server] offline-revoke {course} lease={token[:8]}… reason={reason or '-'}",
+                flush=True,
+            )
+        return had
 
     def offline_leases(self) -> dict[str, dict]:
         """租约一览（`/admin/offline` 的 `leases` 字段：控制台回答「谁在跑哪门课」）。
@@ -857,7 +895,9 @@ class QueueOfflineMixin(QueuePeer):
             "last_progress_at": now,
             "touch_at": now,
         }
-        return self._dispatch_update(course, hold=hold, pending_export={})
+        rec = self._dispatch_update(course, hold=hold, pending_export={})
+        self._sync_hold(course)  # ★M1b：派发闸的第三层跟着换输入
+        return rec
 
     def note_progress(self, course: str, *, token: str = "") -> bool:
         """进度打点（轮内完成事件 → 这里）：**内存每拍更新，落盘节流 ≥60s**。
@@ -889,15 +929,35 @@ class QueueOfflineMixin(QueuePeer):
             self._dispatch[course] = rec
             throttled = persisted > 0.0 and (now - persisted) < HOLD_PROGRESS_PERSIST_SEC
         if throttled:
+            # 内存里已推进（闸那侧看的也是这个 now），但**盘上没动** ⇒ 镜像要推，否则
+            # 闸读到的是上一次落盘时的旧进度（节流窗内每拍都推一次，代价是一次 dict 赋值）。
+            self._sync_hold(course)
             return False
         wrote = self._dispatch_update(course, guard_hold_token=token_now, hold=hold)
+        self._sync_hold(course)
         return str((wrote.get("hold") or {}).get("token") or "") == token_now
 
     def note_pending_export(self, course: str, *, by: str) -> dict:
-        """导包软态（Q1）：**不建 hold、不占任何闸、不停本机** —— 只是「有人在导包」的提示。"""
-        return self._dispatch_update(
-            course, pending_export={"by": str(by), "at": float(self._now())}
+        """导包软态（Q1）：**不建 hold、不占任何闸、不停本机** —— 只是「有人在导包」的提示。
+
+        两条纪律（★M1b）：
+
+        * `at` **首写为准**（同一位导包人重复 claim/轮询不刷新）——它是 `offline_stalled`
+          的 `pending-export` 锚点，被每次轮询推到「刚刚」= 告警永远不响。与 `flipped_at`
+          同一条理由（那里的注释也写了「两个锚点时间轴刻意分叉」）。
+          换主（不同 worker）或超窗 ⇒ 那是**新一轮**导包，重新计时。
+        * 窗用 `auto_handoff_pending_sec()`（与读面 `pending_export_of` 同一把尺子）。
+        """
+        now = float(self._now())
+        prev = self.dispatch_record(course).get("pending_export") or {}
+        prev_by = str(prev.get("by") or "")
+        prev_at = float(prev.get("at") or 0.0)
+        same_round = (
+            prev_by == str(by) and prev_at > 0.0 and now - prev_at <= auto_handoff_pending_sec()
         )
+        if same_round:
+            return self.dispatch_record(course)
+        return self._dispatch_update(course, pending_export={"by": str(by), "at": now})
 
     def hold_of(self, course: str) -> dict:
         """接管读数（`{}` = 没有 hold）。清单 / 派发闸 / 本机 held 派生**同源**读它。
@@ -916,6 +976,34 @@ class QueueOfflineMixin(QueuePeer):
         )
         return out
 
+    def offline_advance_ok(self, course: str, lease_token: str = "") -> tuple[bool, str]:
+        """补传的**这一份权重能不能推进活动起点**（★P1-1：盖章无条件，advance 要活+持准）。
+
+        四态（为什么是这个形状，而不是简单一句「check hold 是否存在」）：
+
+        · **`pinned_online`** ⇒ 拒（★P1-7 / R3-f 的既有腿，逐字保留）：人切了「固定在线」
+          之后，旧云机跑完的那几轮不是「课程现在的进度」（把人切在线的起点拉回旧轮是报障
+          一的另一半）。权威退役（M1c/M4）时这条一并删。
+        · **盘上无 hold** ⇒ 准。这条腿里「没有 hold」= 手动送包 / 旧端 / 协作回传——旧行为
+          逐字保留（与 `_end_seal_ok` 的兜底哲学同一条：不制造新的失败态）。
+        · **hold 是 stale** ⇒ 拒。这正是要拦的：旧主的迟到回传把活动起点夺回来（F2 的
+          「心跳活、进度死」在这一点上与 `lease_verdict` 同一把尺子）。
+        · **hold 活但 token 不符** ⇒ 拒（别的盘 / 手写 curl 顶着别人的名头推进起点）。
+
+        拒都只拒 **advance**：镜像 / 归档 / 账本照落（它们是「算过什么」的证据）。
+        """
+        if self.authority_of(course) == AUTHORITY_PINNED_ONLINE:
+            return False, AUTHORITY_PINNED_ONLINE
+        raw = self.dispatch_record(course).get("hold") or {}
+        if not raw:
+            return True, ""
+        hold = self.hold_of(course)
+        if str(hold.get("state") or "") != "live":
+            return False, "hold_stale"
+        if not lease_token or lease_token != str(raw.get("token") or ""):
+            return False, "hold_token"
+        return True, ""
+
     def pending_export_of(self, course: str) -> dict:
         """导包软态的读数：**超窗即视为没有**（惰性过期、不写盘清理）。
 
@@ -927,7 +1015,7 @@ class QueueOfflineMixin(QueuePeer):
         if not rec:
             return {}
         at = float(rec.get("at") or 0.0)
-        if at <= 0.0 or float(self._now()) - at > AUTO_HANDOFF_PENDING_SEC:
+        if at <= 0.0 or float(self._now()) - at > auto_handoff_pending_sec():
             return {}
         return dict(rec)
 
@@ -1214,6 +1302,7 @@ class QueueOfflineMixin(QueuePeer):
         """release 后的派发记账：持有者清空、**hold 清空**（★M1b：清完协作派发当天恢复）；
         mode 保持 offline（U3 的 waiting——M1c 随模式一起退）。"""
         self._dispatch_update(course, claimed_by="", claimed_at=0.0, hold={})
+        self._sync_hold(course)
 
     def note_offline_completed(self, course: str) -> None:
         """段末摘要报到跑满（`end_it_reached`）：记「哪个包已完成」⇒ 不可再领（U6）。
@@ -1315,6 +1404,7 @@ class QueueOfflineMixin(QueuePeer):
             if self.completion_blocked(course, pack_sha):
                 continue
             holder = self.holder_info(course)
+            pending = self.pending_export_of(course)
             runs = progress.get(course) or {}
             last = max((float(r.get("last_mtime") or 0.0) for r in runs.values()), default=0.0)
             why = stall_verdict(
@@ -1326,10 +1416,13 @@ class QueueOfflineMixin(QueuePeer):
                 flipped_at=float(rec.get("flipped_at") or 0.0),
                 threshold=threshold,
                 now=now,
+                # ★M1b / F11：② 的锚——导包意向的时刻与它的窗（导包窗，独立于 ① 的 1800s）。
+                pending_export_at=float(pending.get("at") or 0.0),
+                export_window=auto_handoff_pending_sec(),
             )
             if not why:
                 continue
-            anchor = max(last, float(rec.get("flipped_at") or 0.0))
+            anchor = max(last, float(rec.get("flipped_at") or 0.0), float(pending.get("at") or 0.0))
             out.append(
                 {
                     "course": course,

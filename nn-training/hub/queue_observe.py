@@ -112,6 +112,15 @@ class QueueObserveMixin(QueuePeer):
                 #: `courseStatus` 从本行读它（不猜）。`pinned` 同批暴露（人固定与否）。
                 "authority": self.authority_of(course),
                 "pinned": self.pinned_of(course),
+                #: ★M1b：接管（hold）与导包软态——控制台「谁在跑这门课」的**唯一真源**
+                #: （形状见 `hold_of`：worker_id/at/last_progress_at/touch_at/state/expires_in）。
+                #: `{}` = 没人接管；`state` = live/stale（活性按**进度**判）。
+                #: 去掉 `token`：它是「推进活动起点 / 取包」的**权力**（P1-1/P1-2），而这一面
+                #: 的读者不需要它（与 `/offline/hold` 的读面同一口径）。
+                "hold": {
+                    k: v for k, v in self.hold_of(course).items() if k != "token"
+                },
+                "pending_export": self.pending_export_of(course),
                 # 停机达令是**每课程**的（一门课的门禁 ABORT 只停那门课的云机）
                 "halt": self.halt_of(course),
                 "pending": pending,

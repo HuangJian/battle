@@ -476,6 +476,30 @@ def test_write_token_file_is_owner_only(tmp_path: Path) -> None:
     assert offline_boot.write_token_file(tmp_path, "") == ""
 
 
+def test_lease_file_is_owner_only_and_goes_to_argv(tmp_path: Path) -> None:
+    """★M1b / P1-1：租约 token 与 hub token 同量级 ⇒ 同样走 0600 文件 + `--hub-lease-file`。
+
+    没租约（旧 hub / 没 claim 成）时**不传这个 flag**：补传照跑，只是不推进活动起点
+    （hub 侧 `offline_advance_ok` 的三态之一），不能因为缺它把训练拦下来。
+    """
+    import os
+
+    p = offline_boot.write_lease_file(tmp_path, "lease-1")
+    assert Path(p).read_text(encoding="utf-8") == "lease-1"
+    if os.name == "posix":
+        assert (Path(p).stat().st_mode & 0o777) == 0o600
+    assert offline_boot.write_lease_file(tmp_path, "") == ""
+    cfg = {"course": "c5-gae", "live_backfeed": True}
+    argv = offline_boot.build_run_argv(
+        cfg, tmp_path / "t.zip", tmp_path / "run", "h", "f", lease_file=p
+    )
+    assert argv[argv.index("--hub-lease-file") + 1] == p
+    no_lease = offline_boot.build_run_argv(cfg, tmp_path / "t.zip", tmp_path / "run", "h", "f")
+    assert "--hub-lease-file" not in no_lease
+    # 日志用的 argv 不得把它露出来（与 `--hub-token` 同一处理）
+    assert "***" in offline_boot._redact(["--hub-lease", "l3ak"])
+
+
 def test_course_from_pack_name_only_speaks_when_it_is_sure(tmp_path: Path) -> None:
     assert offline_boot.course_from_pack_name("task-c5-gae.zip") == "c5-gae"
     assert offline_boot.course_from_pack_name(tmp_path / "deliver-c5-gae.zip") == ""

@@ -277,6 +277,31 @@ def test_hold_persists_across_restart_with_grace_and_logs_hold_restored(
     assert _disk(tmp_path)["hold"]["last_progress_at"] == 9000.0
 
 
+def test_pending_export_anchor_is_first_write_and_only_a_new_exporter_resets_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★M1b：导包意向的 `at` **首写为准**（同一位重复 claim/轮询不刷新）——它是停滞告警的锚点。
+
+    为什么必须钉：云机在等包时会**反复** claim（`begin_auto_handoff` 每拍都跑）。若每次
+    claim 都把 `at` 推到现在，「已翻 offline 却没人跑」永远算「刚刚才说」⇒ T8 的告警在
+    这正是最需要它的时候脑死。换主 ⇒ 新一轮导包，重新计时。
+    """
+    monkeypatch.setenv("BCITY_AUTO_HANDOFF_PENDING_SEC", "100")
+    clock = [1000.0]
+    hub = _hub(tmp_path, clock)
+    _course(tmp_path, hub)
+    hub.note_pending_export(COURSE, by="w9")
+    clock[0] = 1050.0  # 同一位、窗内 ⇒ 不刷新
+    hub.note_pending_export(COURSE, by="w9")
+    assert hub.pending_export_of(COURSE) == {"by": "w9", "at": 1000.0}
+    clock[0] = 1100.0  # 换主（另一台云机）⇒ 新一轮，重新计时
+    hub.note_pending_export(COURSE, by="w10")
+    assert hub.pending_export_of(COURSE) == {"by": "w10", "at": 1100.0}
+    clock[0] = 1100.0 + 200.0  # 超窗后同一位回来（上一轮早作废）⇒ 也重新计时
+    hub.note_pending_export(COURSE, by="w10")
+    assert hub.pending_export_of(COURSE) == {"by": "w10", "at": 1300.0}
+
+
 def test_pending_export_is_soft_and_expires_lazily(tmp_path: Path) -> None:
     """软态：不建 hold、不占闸；超窗的读面视为没有（惰性，不写盘清理）。"""
     clock = [1000.0]
@@ -289,3 +314,127 @@ def test_pending_export_is_soft_and_expires_lazily(tmp_path: Path) -> None:
     assert hub.pending_export_of(COURSE) == {}
     # 盘上那份还在（软态不是事实源，超窗只是不再当它存在）
     assert hub.dispatch_record(COURSE)["pending_export"]["by"] == "w9"
+
+
+# ──────────────────────── 派发闸的第三层（★M1b / Q5） ────────────────────────
+
+#: 本文件的 job manifest 最小形状（与 `test_role_routing` 同源：账本/租约不关心内容）。
+def _manifest(jid: str, *, kind: str = "ppo") -> dict:
+    return {
+        "proto": 1,
+        "runId": "run-x",
+        "it": 1,
+        "job_id": jid,
+        "commit": "c" * 40,
+        "code_sha256": "z" * 64,
+        "payload_sha256": "p" * 64,
+        "kind": kind,
+        "course": "// course\n{}",
+    }
+
+
+def test_store_gate_windows_match_task_pack_constants(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`store_leases` 里那份窗常量是**抄本**（它不许 import 调度上层）⇒ 这份对账必须有。"""
+    import hub.store_leases as sl
+    from hub.server import _JobStore
+    from hub.task_pack import HOLD_PROGRESS_STALE_SEC as TP_STALE
+
+    assert sl.HOLD_STALE_SEC == TP_STALE == 900.0
+    assert sl.HOLD_STALE_ENV == STALE_ENV
+    # 缺省与 env 两条路都对得上（同一把尺子：窗在两边都必须能调）
+    store = _JobStore(tmp_path / "jobs", tmp_path / "log.jsonl")
+    monkeypatch.delenv(STALE_ENV, raising=False)
+    assert store._hold_stale_sec() == 900.0
+    monkeypatch.setenv(STALE_ENV, "7")
+    assert store._hold_stale_sec() == 7.0
+
+
+def test_live_hold_blocks_every_kind_until_it_goes_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q5 ③：接管期间这门课的活**谁都别碰**（含接管者自己）；stale 即放行。"""
+    monkeypatch.setenv(STALE_ENV, "10")
+    clock = [1000.0]
+    hub = _hub(tmp_path, clock)
+    _course(tmp_path, hub)
+    st = hub._stores[COURSE]
+    st.publish("j" * 16, _manifest("j" * 16), b"PK\x03\x04fake")
+    hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
+    out = st.claim_outcome("j" * 16, worker_id="online-1", role="online")
+    assert out.ok is False and out.reason == "held:cloud-1", out
+    # 接管者自己也不许领（它此刻在跑离线段）——闸不看请求方是谁
+    out = st.claim_outcome("j" * 16, worker_id="cloud-1", role="online")
+    assert out.ok is False and out.reason == "held:cloud-1", out
+    # 进度静默超阈 ⇒ stale ⇒ 闸自己开（不必等人来解）
+    clock[0] += 20.0
+    out = st.claim_outcome("j" * 16, worker_id="online-1", role="online")
+    assert out.ok is True, out
+
+
+def test_bc_job_is_exempt_from_the_role_gate_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Q5 ①②③：`kind=bc` 只豁免角色闸；**接管闸照样吃它**（顺序不许调换）。"""
+    clock = [1000.0]
+    hub = _hub(tmp_path, clock)
+    _course(tmp_path, hub)
+    st = hub._stores[COURSE]
+    st.publish("k" * 16, _manifest("k" * 16, kind="bc"), b"PK\x03\x04fake")
+    # bc 的 kind 归属是 online（`KIND_ROLES`），但离线盘也能领 —— 这正是一刀「双角色」。
+    out = st.claim_outcome("k" * 16, worker_id="off-1", role="offline")
+    assert out.ok is True, out
+    st.abandon_job("k" * 16)
+    # 非 bc 的对照：同一份活换成 ppo ⇒ 角色闸拒绝（豁免是 bc 专属）
+    st.publish("m" * 16, _manifest("m" * 16, kind="ppo"), b"PK\x03\x04fake")
+    out = st.claim_outcome("m" * 16, worker_id="off-1", role="offline")
+    assert out.ok is False and out.reason == "role", out
+    # 接管闸吃 bc：有个活 hold 时同一个 bc 作业也领不走
+    hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
+    out = st.claim_outcome("k" * 16, worker_id="off-1", role="offline")
+    assert out.ok is False and out.reason == "held:cloud-1", out
+
+
+def test_publish_invalidates_the_kind_cache(tmp_path: Path) -> None:
+    """重发会换 manifest（可能换了 kind）⇒ 缓存必须跟着失效，否则闸拿旧 kind 判新 job。"""
+    clock = [1000.0]
+    hub = _hub(tmp_path, clock)
+    _course(tmp_path, hub)
+    st = hub._stores[COURSE]
+    st.publish("k" * 16, _manifest("k" * 16, kind="bc"), b"PK\x03\x04fake")
+    assert st.job_kind("k" * 16) == "bc"
+    assert st.job_kind("nope-not-on-disk") == "ppo", "读不到 manifest ⇒ 缺省 ppo（与 role_of 同兜底）"
+    # 同一个 job_id 重发成 ppo ⇒ 离线盘立刻被角色闸拦住（旧缓存必须已清）
+    st.publish("k" * 16, _manifest("k" * 16, kind="ppo"), b"PK\x03\x04fake")
+    assert st.job_kind("k" * 16) == "ppo"
+    out = st.claim_outcome("k" * 16, worker_id="off-1", role="offline")
+    assert out.ok is False and out.reason == "role", out
+
+
+def test_hold_mirror_is_pushed_to_the_store_and_reads_without_the_token(
+    tmp_path: Path,
+) -> None:
+    """闸的输入是**镜像**（`_sync_hold` 推）：`note_hold` 当拍生效，且清单面不外露 token。"""
+    clock = [1000.0]
+    hub = _hub(tmp_path, clock)
+    _course(tmp_path, hub)
+    st = hub._stores[COURSE]
+    assert st.hold_meta == {}
+    hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
+    assert st.hold_meta == {"worker_id": "cloud-1", "last_progress_at": 1000.0}, st.hold_meta
+    assert st.hold_blocked() == "held:cloud-1"
+    # 打点把进度锚推着走（闸跟着续命）
+    clock[0] = 1500.0
+    assert hub.note_progress(COURSE, token="tok-1") is True
+    assert st.hold_meta["last_progress_at"] == 1500.0
+    # 清单面（`/admin/queue`）看得到 hold、看不到 token
+    row = hub.queue_state()["courses"][COURSE]
+    assert row["hold"]["worker_id"] == "cloud-1" and row["hold"]["state"] == "live"
+    assert "token" not in row["hold"], row["hold"]
+    # release / revoke 清镜像（清完协作派发当天恢复）
+    hub.note_release(COURSE)
+    assert st.hold_meta == {} and st.hold_blocked() == ""
+    hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
+    assert hub.revoke_offline_lease(COURSE, "test") is True
+    assert st.hold_meta == {} and hub.hold_of(COURSE) == {}

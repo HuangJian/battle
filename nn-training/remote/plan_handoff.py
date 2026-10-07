@@ -305,6 +305,8 @@ def open_run_context(
     hub_token: str = "",
     #: hub 侧的课程键（多课程 hub 的补传归位键；空 = 单课程 hub）。见 `OfflineDeliverer.course`。
     hub_course: str = "",
+    #: 本课租约 token（P1-1：补传体里的 `lease_token`；空 = 补传照落但不推进活动起点）。
+    hub_lease: str = "",
     deliver: bool = True,
     #: 换实现不该动调用方（`DelivererProcess` 与本进程内线程版同接口，见 `DelivererLike`）。
     deliverer: DelivererLike | None = None,
@@ -365,6 +367,8 @@ def open_run_context(
                     # 控制/状态文件的落点（只有子进程模式用）：`work_dir` **跨会话复用**，
                     # 所以文件名必须带会话身份（见 `DelivererProcess._new_state_path`）。
                     work_dir=work_dir,
+                    # 本课租约 token（★M1b/P1-1「送信端」）：补传体据此推进 hub 侧活动起点。
+                    hub_lease=hub_lease,
                     log=log,
                 )
                 if deliver

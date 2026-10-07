@@ -1022,6 +1022,24 @@ def write_token_file(dest_dir: Path, token: str) -> str:
     return str(p)
 
 
+def write_lease_file(dest_dir: Path, lease: str) -> str:
+    """把本课的租约 token 落成 0600 文件（`--hub-lease-file`，形状同 `write_token_file`）。
+
+    为什么也要走文件：它是**权力**（P1-1：持它才能推进活动起点），与 hub token 同一量级的
+    敏感物 ⇒ 不进 argv（`ps` 能看）/日志（`_redact` 名单也会盖到）。
+    """
+    if not lease:
+        return ""
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    p = dest_dir / "hub.lease"
+    p.write_text(lease, encoding="utf-8")
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+    return str(p)
+
+
 def build_run_argv(
     cfg: dict,
     pack: Path | None,
@@ -1031,6 +1049,7 @@ def build_run_argv(
     resume_dir: str | Path | None = None,
     *,
     local_first: bool = False,
+    lease_file: str = "",
 ) -> list[str]:
     """run_loop 的 argv（纯函数，便于单测钉住回传/评估/锚点三组开关的形状）。
 
@@ -1083,6 +1102,11 @@ def build_run_argv(
         # 但控制台上看不到段内进度，只剩「跑完自己下载导入」那条路。
         if course:
             argv += ["--hub-course", course]
+        # ★M1b / P1-1：本课的租约 token → 补传体里的 `lease_token`。**没有它照样跑**
+        # （补传照落、只是不推进活动起点：hub 侧 `offline_advance_ok` 的三态之一），
+        # 所以缺租约（老 hub / 没 claim 成）不是错误。
+        if lease_file:
+            argv += ["--hub-lease-file", lease_file]
     else:
         argv += ["--no-deliver"]
     return argv
@@ -1214,16 +1238,20 @@ def run_one_course(
     # ★ `tok_file` 必须先置空：`live_backfeed=False`（或 hub 不可达）时下面不会赋值，
     #   而它又被传进 `build_run_argv`——原来那条路会 `NameError`（纯离线盘一直没跑到）。
     tok_file = ""
+    lease_file = ""
     if bool(ccfg.get("live_backfeed", True)):
         if hub:
             tok_file = write_token_file(work, token)
+            lease_file = write_lease_file(work, lease)
             log(f"实时回传开启 → {hub}（每轮 best-effort 推产物）")
         else:
             log("实时回传开着，但此刻够不着 hub —— 改为纯离线（产物照样逐轮落盘）")
     else:
         log("实时回传关闭（CFG.live_backfeed=False）—— 跑完统一打包，手动下载导入")
 
-    argv = build_run_argv(ccfg, pack, dest, hub, tok_file, resume_dir, local_first=local_first)
+    argv = build_run_argv(
+        ccfg, pack, dest, hub, tok_file, resume_dir, local_first=local_first, lease_file=lease_file
+    )
     log("开始训练：python -m remote.run_loop " + " ".join(_redact(argv)))
     rc = int(run_loop_main(argv) or 0)
     log(f"run_loop 退出 rc={rc}；产物目录 {dest}")
@@ -2054,5 +2082,5 @@ def _redact(argv: list[str]) -> list[str]:
             skip = False
             continue
         out.append(a)
-        skip = a in ("--hub-token",)
+        skip = a in ("--hub-token", "--hub-lease")
     return out

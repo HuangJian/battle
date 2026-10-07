@@ -64,6 +64,8 @@ class LedgerMixin:
     #: 归属缓存与它自己的锁（同住 `store_leases`）：`publish` 要随 manifest 一起失效它。
     #: 用独立锁的理由见那里（`job_role` 会被持 `_lock` 的临界区调到，共锁会自锁）。
     _roles: dict[str, str]
+    #: job → kind 缓存（★M1b：`publish` 要和 `_roles` 一起失效它 —— Q5 的 bc 豁免读它）。
+    _kinds: dict[str, str]
     _role_lock: Lock
 
     def _init_ledger(self) -> None:
@@ -256,6 +258,7 @@ class LedgerMixin:
         # 只此一处，放在这里就不需要「同 job_id 的 role 永不变」这条假设。
         with self._role_lock:
             self._roles.pop(job_id, None)
+            self._kinds.pop(job_id, None)  # 同理由：新的 manifest 可能换了 kind（Q5 的闸读它）
         with self._lock:
             jd = self._job_dir(job_id)
             jd.mkdir(parents=True, exist_ok=True)

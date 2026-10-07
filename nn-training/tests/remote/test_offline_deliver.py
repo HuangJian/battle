@@ -641,6 +641,35 @@ def test_make_deliverer_passes_the_course_through() -> None:
     assert d is not None and d.course == "c4"
 
 
+def test_deliverer_carries_the_lease_token_only_when_it_has_one(tmp_path: Path) -> None:
+    """★M1b / P1-1：体里带 `lease_token` ⇒ hub 才让这一轮**推进活动起点**。
+
+    没有租约时**连键都不带**（不是带空串）：hub 侧 `offline_advance_ok` 把「空 token」
+    当成「不是持有人」⇒ 带空串等于把「我没租约」写成「我持了一个空租约」。
+    """
+    seen: list[dict] = []
+
+    def opener(url: str, data: bytes, headers: dict, timeout: float) -> tuple[int, bytes]:
+        if url.endswith("/offline/artifact"):
+            seen.append(json.loads(data.decode("utf-8")))
+        return 200, b"{}"
+
+    root = _make_artifacts(tmp_path / "art")
+    with_lease = _deliverer("http://hub", root, opener=opener, hub_lease="lease-1")
+    assert with_lease.sync() == 3
+    assert len(seen) == 3 and all(b.get("lease_token") == "lease-1" for b in seen)
+    assert with_lease.status()["lease"] is True
+    # 另一份产物目录（无租约；`delivered.json` 是每目录一份）——键整个消失
+    seen.clear()
+    plain = _deliverer("http://hub", _make_artifacts(tmp_path / "art2"), opener=opener)
+    assert plain.sync() == 3
+    assert len(seen) == 3 and all("lease_token" not in b for b in seen)
+    assert plain.status()["lease"] is False
+
+
+
+
+
 def test_run_plan_job_ignores_delivery_failures(tmp_path: Path) -> None:
     """补传坏掉（hub 没人听）时整段照常跑完 —— 这是本功能唯一不可让步的性质。"""
     plan, m, job_dir, first = _prepare(tmp_path, iters=3, start_it=1)

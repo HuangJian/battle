@@ -224,11 +224,19 @@ def test_role_gate_lives_in_the_lease_critical_section() -> None:
     body = src[i : i + 8000]
     assert "blocked = self.role_blocked(job_id, role)" in body
     assert 'return False, "", blocked' in body
-    # 两道闸共用一份判据（归属 = job 的字段；停摆 = 课程模式）――查一处就够了
+    # 三道闸共用一份判据（归属 = job 的字段；接管 = 课程 hold；停摆 = 课程模式）――查一处就够
+    # 了。★M1b / Q5：分支**顺序**也是语义（bc 豁免角色闸 → 角色 → hold → 过渡的 parked），
+    # 所以这里连顺序一起钉：三行的相对位置写死，谁把顺序调了这条就红。
     j = src.index("def role_blocked(")
-    gate = src[j : j + 1600]
+    gate = src[j : j + 2200]
+    assert "if self.job_kind(job_id) != KIND_BC and self.job_role(job_id) != role" in gate
     assert "if self.parked and role != ROLE_OFFLINE" in gate
-    assert "if self.job_role(job_id) != role" in gate
+    assert "held = self.hold_blocked()" in gate
+    assert (
+        gate.index("self.job_kind(job_id) != KIND_BC")
+        < gate.index("self.hold_blocked()")
+        < gate.index("self.parked and role != ROLE_OFFLINE")
+    ), "Q5 的分支顺序是语义：bc 豁免 → 角色 → hold → parked"
 
 
 def test_parking_flag_is_synced_from_course_mode(tmp_path: Path) -> None:

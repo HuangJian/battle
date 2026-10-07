@@ -137,6 +137,7 @@ class OfflineDeliverer:
         run_id: str,
         artifacts_dir: str | Path,
         course: str = "",
+        hub_lease: str = "",
         timeout: float = HTTP_TIMEOUT_SEC,
         probe_ttl: float = PROBE_TTL_SEC,
         sync_cap: int = SYNC_CAP,
@@ -166,6 +167,10 @@ class OfflineDeliverer:
         #: 空 = 单课程 hub（那门课的键就是空串）：此时**不带这个键**（带空串与不带等价，
         #: 但不带更贴近旧字节行为）。
         self.course = str(course or "").strip()
+        #: 本课租约 token（`--hub-lease-file`）：随补传体一并上报，是「这份产物能推进活动
+        #: 起点」的凭据（★P1-1）。**空值不是错误**：补传照落（镜像/归档/账本），只是 hub
+        #: 不把这一轮当成「当前进度」——旧端/手动腿的旧行为因此逐字保留。
+        self.hub_lease = str(hub_lease or "").strip()
         self.timeout = float(timeout)
         self.probe_ttl = float(probe_ttl)
         self.sync_cap = int(sync_cap)
@@ -803,6 +808,8 @@ class OfflineDeliverer:
         }
         if self.course:
             body["course"] = self.course
+        if self.hub_lease:
+            body["lease_token"] = self.hub_lease
         raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(raw) > OFFLINE_ARTIFACT_BODY_MAX:
             return self._reject_round(
@@ -961,6 +968,7 @@ class OfflineDeliverer:
             "hub_url": self.base_url,
             "run_id": self.run_id,
             "course": self.course,
+            "lease": bool(self.hub_lease),
             "delivered": len(self._delivered),
             "pending": len(self.pending()),
             "rejected": dict(self._rejected),
@@ -978,6 +986,10 @@ class OfflineDeliverer:
 
 #: 供调用方一致性检查（测试与 operator 脚本读它，避免抄第二份路径常量）。
 DELIVERED_NAME = OFFLINE_DELIVERED_NAME
+
+#: 租约 token 传给**子进程**用的 env 名（★M1b/P1-1「送信端」）：与 `BATTLE_HUB_TOKEN` 同一条
+#: 规矩——**只走 env**，argv 会出现在 `/proc/<pid>/cmdline` 上（全机可读）。空 = 不带。
+HUB_LEASE_ENV = "BATTLE_HUB_LEASE"
 
 
 def _err_text(resp: bytes, max_chars: int = 300) -> str:

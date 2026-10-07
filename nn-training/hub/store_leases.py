@@ -42,6 +42,7 @@
 from __future__ import annotations
 
 import json
+import os
 from collections import namedtuple
 from threading import Lock
 from typing import Any
@@ -58,6 +59,17 @@ from common.protocol import (
     ROLE_ONLINE,
     role_of,
 )
+
+#: `manifest.kind` 的缺省（与 `role_of` 同一兜底：旧 job 没有该字段 ⇒ 逐轮的 ppo）。
+KIND_DEFAULT = "ppo"
+#: BC 作业的 kind（★Q5：双角色——两种 worker 都能领，只豁免角色闸）。
+KIND_BC = "bc"
+#: 课程 hold 的判活窗（秒）——与 `hub/task_pack.py::HOLD_PROGRESS_STALE_SEC` 同值。
+#: 为什么在这里**再抄一份**：本模块不得 import `task_pack`（那是调度上层，会成环），
+#: 而闸的自判活必须有两个数之一。守卫用例（`test_hold_gate_matches_task_pack`）把两边钉住。
+HOLD_STALE_SEC = 900.0
+#: 环境变量名（与 `task_pack.HOLD_PROGRESS_STALE_SEC` 同一个旋钮；测试与现场用）。
+HOLD_STALE_ENV = "BCITY_HOLD_PROGRESS_STALE_SEC"
 
 #: `claim_outcome()` 的返回形状（新 HTTP 面的出口；`token` 为空串 = 无租约/未拿到）。
 #: `status ∈ {"ok", "backup", "demoted", "held", "frozen", "stale_holder"}`——worker 侧
@@ -159,25 +171,99 @@ class LeaseMixin:
         #: 「同一 job_id 的 role 永不变」这种假设。只缓存**读成功**的值（manifest 还没落定时不缓存）。
         #: 用独立锁：`job_role` 会被持 `_lock` 的调度临界区调到，共锁会自锁。
         self._roles: dict[str, str] = {}
+        #: job_id -> 归属 kind 缓存（`manifest.kind`；★Q5 的 BC 豁免要它）。失效点与 `_roles`
+        #: 同（`publish` 重发覆盖 manifest ⇒ 旧归属/旧 kind 作废）；同样只缓存**读成功**的值。
+        self._kinds: dict[str, str] = {}
         self._role_lock = Lock()
+        # ---- 接管闸（2026-10-07，★M1b / Q5）----
+        #: 本课程当前的 **hold 镜像**（`{}` = 没人接管）。形状：
+        #: `{"worker_id": w, "last_progress_at": t}`——由 `_HubQueue::_sync_hold` 同步
+        #: （它是唯一知道 hold 住哪一层的层）。活性**自判**（时间戳 vs 窗）：闸不能依赖
+        #: 「推的人刚刚才推过」——hub 重启、长时间不派发都会让镜像陈旧，而那正是假活现场。
+        self.hold_meta: dict[str, Any] = {}
 
     def role_blocked(self, job_id: str, role: str) -> str:
-        """这份活能不能交给 `role`；`""` = 可以，否则是拒因（`"parked"` / `"role"`）。
+        """这份活能不能交给 `role`；`""` = 可以，否则是拒因。
 
-        **两道闸的唯一判据源**（2026-09-25）：派发面（`claim_next` / `peek_jobs` / push）
-        用它**过滤候选**，临界区（`_claim_locked`）用它**拒绝**——同一份判据两个方向，
-        不会出现「peek 说能领、claim 说不能」这类两套尺子。
+        **所有派发闸的唯一判据源**（2026-09-25，2026-10-07 扩）：派发面（`claim_next` /
+        `peek_jobs` / push）用它**过滤候选**，临界区（`_claim_locked`）用它**拒绝**——同一
+        份判据两个方向，不会出现「peek 说能领、claim 说不能」这类两套尺子。
 
-        为什么停摆闸也住这里（而不住各自的调用点）：push 腿（`Hub.claim`）**不经过**
+        为什么闸都住这里（而不住各自的调用点）：push 腿（`Hub.claim`）**不经过**
         `claim_job`，按 id 直领（`POST /jobs/{id}/claim`）也不经过 `claim_next`——闸写在
         调用点必然漏一条（F5 就是这么来的）。
+
+        ★M1b / Q5：**分支顺序定死**（别调换，「调换」就是把两条语义接错）：
+
+          ① `kind=bc` ⇒ **只豁免角色闸**（两种 worker 都能领 BC 作业；「领后独占」住在
+             租约面，不住这里）；
+          ② `job_role != role` ⇒ `"role"`（归属不符）。
+          ③ **课程 hold 闸所有 kind 都吃** ⇒ `"held:<worker>"`（有人接管这门课时，
+             这份活谁都别碰——包括接管者自己：它此刻在跑离线段）；
+          ④ 过渡腿 `parked`（旧「离线模式」闸，M1c 随 mode 一起退）：覆盖「人切了离线、
+             云机还没接手」那个窗口。
+
+        为什么 hold 闸排最后（而不是像旧 parked 排最前）：拒因文案要**尽量具体**——一台
+        在线盘在接管期间被拒，"held:cloud-1" 当场回答了「为什么」，比一句 "parked" 有用。
         """
+        if self.job_kind(job_id) != KIND_BC and self.job_role(job_id) != role:
+            return "role"
+        held = self.hold_blocked()
+        if held:
+            return held
         if self.parked and role != ROLE_OFFLINE:
             # 离线课：只对离线盘放行（旧口径就是「带标 worker 才领得走」，现在改成按归属判）。
             return "parked"
-        if self.job_role(job_id) != role:
-            return "role"
         return ""
+
+    def hold_blocked(self) -> str:
+        """本课程若正被接管 ⇒ `"held:<worker>"`，否则 `""`。**活性自判**（见 `hold_meta`）。
+
+        零进度算 **stale**（与 `task_pack.hold_state` 同一把尺子）：一个刚建立却从未打过
+        进度的 hold 只有在 `HOLD_STALE_SEC` 内算活——而 claim 本身就已经写了第一个进度锚，
+        所以真实场景里不会出现「刚建的 hold 被当场判死」。
+        """
+        meta = self.hold_meta or {}
+        if not meta:
+            return ""
+        worker = str(meta.get("worker_id") or "")
+        last = float(meta.get("last_progress_at") or 0.0)
+        if worker and last > 0.0 and (self._now() - last) <= self._hold_stale_sec():
+            return f"held:{worker}"
+        return ""
+
+    def _hold_stale_sec(self) -> float:
+        """判活窗（env 可覆写，与 `task_pack.hold_progress_stale_sec()` 同一口径）。"""
+        raw = os.environ.get(HOLD_STALE_ENV, "")
+        if raw:
+            try:
+                v = float(raw)
+                if v > 0.0:
+                    return v
+            except ValueError:
+                pass
+        return HOLD_STALE_SEC
+
+    def job_kind(self, job_id: str) -> str:
+        """job 的**kind**（`manifest.kind`；读不到 ⇒ `"ppo"`，与 `role_of` 同一兜底）。
+
+        缓存与失效同 `job_role`（`publish` 重发时 pop）——每一次派发判定都要问它（Q5 的
+        ① 在闸的最前面），而 manifest 在盘上，不缓存就是每拍每候选一次读盘。
+        """
+        with self._role_lock:
+            cached = self._kinds.get(job_id)
+        if cached is not None:
+            return cached
+        try:
+            man = json.loads((self._job_dir(job_id) / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return KIND_DEFAULT
+        if not isinstance(man, dict):
+            return KIND_DEFAULT
+        kind = str(man.get("kind") or KIND_DEFAULT)
+        with self._role_lock:
+            self._kinds[job_id] = kind
+        return kind
 
     def job_role(self, job_id: str) -> str:
         """job 的**归属角色**（`manifest.role`；旧 job 按 `kind` 兜底；读不到 ⇒ online）。

@@ -41,7 +41,12 @@ import time
 from pathlib import Path
 
 from remote.artifacts import atomic_write_json
-from remote.offline_deliver import DRAIN_FLUSH_SEC, DRAIN_TICK_SEC, OfflineDeliverer
+from remote.offline_deliver import (
+    DRAIN_FLUSH_SEC,
+    DRAIN_TICK_SEC,
+    HUB_LEASE_ENV,
+    OfflineDeliverer,
+)
 
 #: idle-timeout 缺省（秒）：纯兜底（见模块 docstring）。
 IDLE_TIMEOUT_SEC = 1800.0
@@ -185,6 +190,8 @@ def main(argv: list[str] | None = None) -> int:
     args = build_argparser().parse_args(argv)
     # token **只从环境变量读**（argv 里会出现 `/proc/<pid>/cmdline` 上，全机可读）。
     token = (os.environ.get("BATTLE_HUB_TOKEN") or "").strip()
+    # 租约 token 同走 env（★M1b/P1-1；父侧 `deliver_proc.HUB_LEASE_ENV` 塞的）。
+    lease = (os.environ.get(HUB_LEASE_ENV) or "").strip()
     ctl = CtlReader(args.ctl, args.ctl_offset)
     status_path = Path(args.status)
     d = OfflineDeliverer(
@@ -193,6 +200,7 @@ def main(argv: list[str] | None = None) -> int:
         run_id=args.run_id,
         artifacts_dir=args.artifacts,
         course=args.course,
+        hub_lease=lease,
         # 子进程里没有「训练线程」可并行 —— 它就是那条腿，同步语义即正确语义。
         background=False,
         log=_log,

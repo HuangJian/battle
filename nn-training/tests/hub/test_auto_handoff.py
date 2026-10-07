@@ -619,6 +619,42 @@ def test_completed_pack_cannot_be_reclaimed_until_re_export(tmp_path: Path) -> N
     ) is False
 
 
+def test_stall_verdict_pending_export_leg_uses_the_export_window_and_anchor() -> None:
+    """★M1b：② 的锚是**导包意向**的时刻（`pending_export.at`），窗是导包窗（独立常量）。
+
+    为什么不能拿 ① 的 threshold 当 ② 的窗：前者是「在跑但没进度」的容许量（1800s），后者是
+    「说了要导包、多久没动静算出事」（= 导包窗 900s），两个语义不同值也不同。
+    """
+    def verdict(
+        *,
+        now: float,
+        pending_export_at: float,
+        flipped_at: float = 0.0,
+        export_window: float = 0.0,
+    ) -> str:
+        return stall_verdict(
+            treat_offline=True,
+            authority=AUTHORITY_AUTO,
+            completed=False,
+            holder_present=False,
+            last_progress_mtime=0.0,
+            flipped_at=flipped_at,
+            threshold=100.0,
+            now=now,
+            pending_export_at=pending_export_at,
+            export_window=export_window,
+        )
+
+    # 只有导包意向：窗内不算停、超窗算停（窗 = export_window，不是 threshold）
+    assert verdict(now=1000.0, pending_export_at=950.0, export_window=100.0) == ""
+    assert verdict(now=1000.0, pending_export_at=899.0, export_window=100.0) == "pending-export"
+    # 不给 export_window ⇒ 退回 threshold（旧调用点/旧形状的缺省，不制造新的失败态）
+    assert verdict(now=1000.0, pending_export_at=899.0) == "pending-export"
+    assert verdict(now=1000.0, pending_export_at=950.0) == ""
+    # 锚取最大值：新的导包意向不该被旧锚点（flipped_at）拖着一起报停
+    assert verdict(now=1000.0, pending_export_at=950.0, flipped_at=100.0, export_window=100.0) == ""
+
+
 def test_stalled_alert_covers_pending_export_window(tmp_path: Path, monkeypatch) -> None:
     """T8：已翻 offline、没人跑 ⇒ 告警（不能靠「人总会看到」）。"""
     _stub_auto_handoff(monkeypatch)
@@ -633,6 +669,35 @@ def test_stalled_alert_covers_pending_export_window(tmp_path: Path, monkeypatch)
     assert stalled[0]["why"] == "pending-export"
     st, raw = _req(base, "/admin/offline")
     assert st == 200 and _json(raw)["stalled"][0]["course"] == "c5-gae"
+
+
+def test_admin_courses_exposes_hold_and_release_hold_clears_it(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """★M1b：控制台的「强制解除接管」= `/admin/courses?...&release_hold=1`。
+
+    两个面一起钉：① 读面（`/admin/courses` 的 `held`/`holder`/`pending_export`）——控制台
+    据此渲染徽标；② 写面（release_hold）= 立墓碑 + 清 hold，且**进程重启后仍然有效**
+    （hold 是落盘的，而内存租约可能已经没了 —— 那正是人在现场最可能遇到的情形）。
+    """
+    _stub_auto_handoff(monkeypatch)
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    hub.note_hold("c5-gae", worker_id="cloud-1", token="tok-1")
+    st, raw = _req(base, "/admin/courses")
+    row = next(r for r in _json(raw)["courses"] if r["course"] == "c5-gae")
+    assert st == 200 and row["held"] is True and row["holder"] == "cloud-1", row
+    # 清掉内存租约（模拟「hub 重启过，盘上还有 hold」）⇒ release_hold 仍要清得掉
+    hub._leases.clear()
+    st, raw = _req(base, "/admin/courses?course=c5-gae&release_hold=1", method="POST")
+    assert st == 200 and _json(raw)["released"] is True, raw
+    assert hub.hold_of("c5-gae") == {}
+    st, raw = _req(base, "/admin/courses")
+    row = next(r for r in _json(raw)["courses"] if r["course"] == "c5-gae")
+    assert row["held"] is False and row["holder"] == ""
+    # 本来就没接管 ⇒ 409（「没得解」要说出来，别谎报成功）
+    st, raw = _req(base, "/admin/courses?course=c5-gae&release_hold=1", method="POST")
+    assert st == 409 and _json(raw)["released"] is False, raw
 
 
 def _post_json(base: str, path: str, body: dict) -> tuple[int, bytes]:
