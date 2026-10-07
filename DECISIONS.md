@@ -8197,3 +8197,42 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
 - **门禁**：nn python gate 全绿（ruff + mypy + tests/ + e2e/）；根 `bun run check` 2418 pass / 0 fail。
 - **落点**：全文 → `docs/nn/training-stack.md` §30；单测 → `nn-training/tests/worker/test_{volume_alloc,iter_topup}.py`（含跨重启逐批 byte 相同）。
 
+## §2026-10-07-goalnn-serve-pool-readiness（2026-10-07，长驻池「假就绪」+ 重试路径裸文件 IO：真就绪判据 + 有界清理；清理超界改判「交整轮」）
+
+- **背景**：Kaggle 离线课 `x21-psh-b` it253（job `031e17e61777d09c`）一轮 **355s**（正常 32s）：
+  `94/94 就绪` 是假满（真含义 = 94 个进程没退出）⇒ 假就绪 worker 被当暖的发出去 ⇒ 5s/20s 超时回退一次性 ⇒
+  第二次尝试卡在重试路径上**无上界**的 `_clean_attempt`（rglob+rmtree）里 ⇒ 44 条线程各自吃满 155s。
+  计划 `plan/rollout-serve-pool-readiness.plan.md`（v1 → 评审 `plan/rollout-serve-pool-readiness.review-hy.md`
+  两处 P0 判据 + 七条 P1 → v2 修订；本条目 = v2 的落地）。
+- **决定（P0-1）**：判据唯一化 = `w.ready.is_set() and not w.dead`（`_acquire` **只发放**真就绪的）；
+  冷启动**分批**（`SPAWN_BATCH_SIZE=16`，批间串行、deadline 整池共用）；**未就绪不杀**（采纳评审备选 (h)）——
+  留在池里标 booting（`unready` 计数），`ready` 一亮点就自动可发放（杀掉 = 这批冷启动白付 + 补位再付一次）；
+  零真就绪但有一批在冷启动 ⇒ **不退池**，只有 `unready == 0`（一个都没起出来）才关池走一次性。
+- **决定（P0-2）**：`retry_line` **前置**（顺序即判据：「重试过的局 0 个」是那行被清理卡住的假象）+
+  `_clean_attempt` 套上界（新常量 `CLEAN_CEILING_SEC=5.0`，住 `common/game_watch.py`）；**超界 ⇒ 不就地重跑**
+  （评审 P0-1）：被放弃的删除者晚到时会删掉新写者刚写的同一批路径（`--out`/shard 名都没变）⇒「目录齐、obs 截断」
+  的静默错数据 ⇒ 归入机器级停滞（`UnreapableChildError`）交整轮重投。预算从 slack 出：
+  `3×(2×20+5)+2×5 = 145 ≤ 155` ⇒ **`game_ceiling_sec` 公式不动**（`tests/common/test_game_watch.py` 一字不改）。
+- **两条链语义（已核，写进 plan）**：重投**都**在新写者开写前整目录清场 —— hub `kind=iter` 重领与自主段
+  `plan_run._run_with_retries` → `run_job` → **同一个** `download._ensure_payload`，且清场在 `preloaded`（payload_zip）
+  来源上**同样执行** ⇒ 评审担心的「同目录裸重写」不成立。残留（不当成已修）：清场自身无上界；被放弃的删除者晚于
+  清场恢复仍可能删新文件；`Popen` **永不返回**那一档拿不到 pid（`subprocess` 固有形状）。
+- **决定（P1-1，卫生项）**：`call_bounded` 只弃线程、不给子进程处置 —— 被放弃的尝试现持随调用链走的
+  `abandoned` 标记（不用模块级墓碑：同 label 在新一轮是新尝试，全局表会误伤）；`_run_one_game` 在**进函数**
+  与 **`Popen` 返回后**两处查 ⇒ 就地处决刚起的进程 + 不产出（覆盖评审点名的 exec 握手窗口）。
+- **诊断**：池行 `N/M 真就绪（另 K 个仍在冷启动…）`；`summary()` 与轮报 `serve_pool` 带 `unready=`；熔断行带真就绪占比。
+  慢节点上 `fallback` 上升是**预期**（不再拿假就绪顶数），不是回归。
+- **归因修正（评审 P1-3/P1-7）**：①「44 个进程继续吃 IO/继续写」在本轮**不成立**（线程卡在 rmtree、手里没子进程；
+  池里超时的 worker 已被 `_drop` 杀掉）⇒ 弃线自杀降级为卫生项；② `spawned 恒 94` 的两个解释都与阈值无关
+  ⇒ **不动熔断阈值**、只加诊断。
+- **验收（真机，见 `docs/nn.progress.md` §3.3 #23）**：① 真就绪行（`N < M` 是预期）；② `unready=` 有值；
+  ③「单局超界」= 0；④ **逐局重试行**能出现（轮末 `重试过的局 N 个` **不是**判据：它只统计已结算局，
+  整轮重投会把它重置为 1）；⑤ 轮级墙钟 / `spawned` 不回归（变差 ⇒ 先撤分批、只留真就绪判据）。
+- **落地**：`worker/serve_pool.py`（判据 + 分批 + `unready`）· `worker/iter_rollout.py`（`retry_line` 前置 + 有界清理
+  + 超界上抛 + 弃线自杀 + 池行）· `common/game_watch.py`（`CLEAN_CEILING_SEC` + `clean_ceiling_line`）·
+  单测 `tests/worker/test_remote_serve_pool.py`（真就绪两面 / 分批时序 / 补位不杀 / 零就绪不退池）·
+  `tests/remote/test_remote_iter.py`（清理超界=机器级 + 弃线自清 ×2）。
+- **门禁**：nn python gate **3795 passed / 15 skipped**（ruff + mypy + tests/+e2e/）；根 `bun run check`。
+- **落点**：全文 → `docs/nn/runtime-opt.md` §33（按主题图：长驻池 / 单局看门狗 / 一局的墙钟上界归运行时档；
+  plan v2 原写 engineering §66，已按索引 §2 的归属修正）；计划 → `plan/rollout-serve-pool-readiness.plan.md`（v2）。
+

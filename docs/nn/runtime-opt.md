@@ -8,6 +8,91 @@
 
 ---
 
+## §33 长驻池「假就绪」+ 重试路径裸文件 IO：真就绪判据 / 分批冷启动 / 有界清理（2026-10-07）
+
+> 起因（Kaggle 离线课 `x21-psh-b` it253，job `031e17e61777d09c`）：一轮 **355s**（正常 32s）。四行现场：
+>
+> ```
+> [14:59:42] [serve-pool] 一局回退一次性 spawn（kind=rollout s2000/d902616182 timeout: rc=<仍在运行>；尾行：[features] native 启用 …
+> [14:59:42] [serve-pool] 熔断：本轮停掉**补位**（fallback=23 ≥ 阈值23；served=104 spawned=94 killed=22｜timeout=23）
+> [15:02:12] [run] WARN rollout 单局超界（155s 内整条链路都没返回）：s2000/d965058053 …
+> [15:05:32] [run] … 单局耗时（148 局）：p50=0.81s p90=1.50s p99=1.80s max=1.87s｜≥5s 有 0 局｜重试过的局 0 个
+> ```
+>
+> 三个读数合起来就是结论：① `p50=0.81s` 与「155s 超界」并存 ⇒ 超界不是在跑局；②「重试过的局 0 个」
+> 与 44 条线程各自卡了 155s 并存 ⇒ **重试行不是没发生，是打不出来**；③ `94/94 就绪` 是**假满**
+> （真含义 = 94 个进程没退出）。
+
+### 33.1 根因：假就绪 → 假 worker 被发出去 → 回退 + 二次冷启动；重试又卡在无上界的清理里
+
+* `serve_pool.start()` 旧形态只判 `w.dead`（`for w in ws: if w.dead: … else: ready.append(w)`）
+  ⇒ 「起来了但没打 `__SERVE_READY__` 也没退」的 worker 被当成暖 worker 收进池。94 个 bun 又是
+  **一次性并发 `Popen`**（冷启动风暴：exec + traverse `ts_code_cache` + wasm 实例化 + attest×3，
+  且紧挨着 PPO 落盘之后 5 秒内全砸在同一块盘上）⇒ 它就在「冷启动中」这一档里被发出去。
+  证据闭合：这些 worker 的冷启动 stdout 被 `_submit` 的 `w.drain()` 捞出来、经 `_write_log` 落进
+  **该局**的 rollout.log ⇒ 回退行的「尾行 = `[features] native 启用`」正是
+  `src/nn/conv/conv_native_adapter.ts` 打完 attest、还没到 READY 的那一刻。任务写进 stdin 没人读
+  ⇒ 5s/20s 超时 ⇒ `_drop` ⇒ **第二次冷启动**。
+* 那一局的**第二次尝试**卡在 `_clean_attempt`（rglob + rmtree 半截产出）里：它是**裸调**的（无上界），
+  而它排在 `retry_line` **之前** ⇒ 挂住的挂载点上它既不返回也不抛：44 条线程各自吃满整条链路的
+  上界（`game_ceiling_sec(5.0)` = 155s），而日志里连「重试了」都看不到。对照：同一份活在**整轮重投**
+  里是被 `call_bounded` 包着的 —— **同一份活，两道口径**，主路径漏了。
+
+### 33.2 修法（按评审 `plan/rollout-serve-pool-readiness.review-hy.md` 的两处判据）
+
+* **判据唯一化**：`w.ready.is_set() and not w.dead` 才算真就绪，`_acquire` **只发放**这种 worker
+  ⇒ 假就绪再也不可能被发出去；`start()` 返回真就绪数（读数语义随之改变）。
+* **分批冷启动**（`SPAWN_BATCH_SIZE = 16`，定值）：批内并发 `Popen`、批内统一等、批间串行；
+  `ready_timeout_sec` 是**整池共用**的一句（不按批重置）。16 ≈ 94//6：不追求最优批大小，
+  只消灭「94 并发同时砸盘」（这个 94 并发本身就是现场成因之一）。
+* **未就绪不杀**（采纳评审备选 (h)）：仍活着但没就绪的**留在池里**（`unready` 计数），读线程点亮
+  `ready` 就自动可发放 —— 杀掉 = 这批冷启动白付 + 之后补位再付一次（「一次超时 → 三份进程」的第三份）；
+  而「只发真就绪」已经让 `fallback` 读数诚实，不需要再靠杀来保证池的纯度。
+* **`retry_line` 前置 + 清理有上界**（`game_watch.CLEAN_CEILING_SEC = 5.0`；正常清理亚秒级）。
+* **清理超界 ⇒ 不就地重跑**（评审 P0-1，本次最关键的一处判据修正）：被放弃的那条 daemon 线程还在
+  rmtree，它删的正是**新一次尝试**要写的同一批路径（`--out`/shard 名都没变）⇒「目录齐、obs 截断」
+  = 静默错数据（`_clean_attempt` 存在的全部理由）⇒ 归入机器级停滞（`UnreapableChildError`）交整轮重投。
+* **两条链的重投语义（已核）**：hub `kind=iter` 重领与自主段 `plan_run._run_with_retries` → `run_job`
+  → **同一个** `download._ensure_payload`，且清场在 `preloaded`（payload_zip）那条来源上**同样执行**
+  ⇒ 两条链的「重投」都是**先整目录清场再重写**，不是同目录裸重写。残留风险（不当成已修）：清场本身
+  无上界（`rmtree_best_effort`，主线程）；被放弃的删除者**晚于清场**恢复仍可能删新文件。
+* **弃线自杀（P1-1，同族缺口）**：`call_bounded` 的契约里没有子进程处置 —— 被放弃的尝试现持一个随
+  调用链走的 `abandoned` 标记，`_run_one_game` 在**进函数（`mkdir` 前）**与 **`Popen` 返回后**两处查：
+  命中 ⇒ 就地处决刚起的进程 + 不产出。第二处覆盖评审点名的 **exec 握手窗口**（进程已在跑、父线程刚
+  拿回 pid）。**没覆盖**：线程卡在 `Popen` 内部**永不返回** ⇒ 拿不到 pid、无人可杀 —— 那是 `subprocess`
+  的固有形状，靠下一轮整目录清场 + 同名写入截断兜底。
+
+### 33.3 归因修正（评审 P1-3/P1-7：别把卫生项写成病因）
+
+* 旧叙述「44 个进程继续吃 IO / 继续写」在本轮**不成立**：那 44 条被放弃的线程卡在 rmtree 里、
+  **手里没有子进程**；池里超时的 worker 已被 `_drop` 杀掉（`kill_process_tree` 连进程组）。
+  15:02:13 → 15:05:31 那 200s 更可能是**挂载点还坏着**（重投后每局的 `mkdir`/`open`/`Popen` 仍在无界
+  那一侧 ⇒ 又一次超界）。⇒ 弃线自杀是**卫生项**，不是本次事故的因。
+* `spawned 恒 94` 有两个同样成立、且都与阈值无关的解释（① 假就绪槽位总能满足 `_acquire`；
+  ② 熔断自己关掉了补位）⇒ **本次失效与熔断阈值无关**，不动阈值、只加诊断。
+
+### 33.4 读数变化与验收（别把预期读成回归）
+
+* 池行现在是 `长驻 worker 池：N/M 真就绪（另 K 个仍在冷启动，就绪即入池）…`；`summary()` 与轮报
+  `serve_pool` 计数带 `unready=`；熔断行带真就绪占比。**慢节点上 `N < M`、`fallback` 上升是预期**
+  （不再拿假就绪顶数），不是回归。
+* 下一次云机轮看五条：① 真就绪行；② `unready=` 有值；③「单局超界（155s）」= 0；
+  ④ **逐局重试行**能出现；⑤ 轮级墙钟 / `spawned` 不回归。
+* ⚠ 轮末 `重试过的局 N 个` **不是** P0-2 的判据：它只统计**已结算**局的返回值（`iter_rollout.py` 的
+  `sum(1 for a in game_attempts if a > 1)`），整轮重投会把没结算的局重置成 attempt 1 ⇒ 同一现场那条
+  读数**不会**变非零。真正的判据是**逐局重试行**（诊断真值）与单局墙钟不再被无界 rmtree 吃满。
+
+### 33.5 落点
+
+* 代码：`worker/serve_pool.py`（判据 + 分批 + `unready`）· `worker/iter_rollout.py`（`retry_line` 前置 +
+  有界清理 + 超界上抛 + 弃线自杀 + 池行）· `common/game_watch.py`（`CLEAN_CEILING_SEC` +
+  `clean_ceiling_line`）。
+* 单测：`tests/worker/test_remote_serve_pool.py`（真就绪两面 / 分批时序 / 补位不杀 / 零就绪不退池）；
+  `tests/remote/test_remote_iter.py`（清理超界=机器级 + 弃线自清 ×2）。
+* 计划：`plan/rollout-serve-pool-readiness.plan.md`（v2）；决策：`DECISIONS.md §2026-10-07-goalnn-serve-pool-readiness`。
+
+---
+
 ## §32 云机离线轮**三次**卡死：一局「不可取消的阻塞」把整轮当人质（2026-10-06）
 
 > 起因（用户真机日志，Kaggle 离线轮 `x21-psh-a` / `node-9b695f3a`，22:36–22:43）：§24 那套护栏

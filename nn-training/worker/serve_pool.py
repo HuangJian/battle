@@ -107,6 +107,16 @@ ENV_SWITCH = "NN_SERVE_POOL"
 #: 阈值随池宽度走（大池按 1/4 收线，小池 4 条起步）——见 `_breaker_after`。
 FALLBACK_BREAKER_MIN = 4
 
+#: 冷启动**分批**的批大小（定值，不做旋钮）：`start()` 一批一批起、批间串行。
+#:
+#: 为什么要有它（2026-10-07 Kaggle「假就绪」轮）：94 个 bun 在 `start()` 里一次性并发 `Popen`，
+#: 每个都要 exec bun + traverse `ts_code_cache` + instantiate wasm + attest×3，且紧挨着 PPO 落盘
+#: 之后 5 秒内全砸在同一块盘上 ⇒ 冷启动风暴。**不追求最优批大小，只消灭 94 并发同时砸盘。**
+#: 16 ≈ 94//6（批数 ≤ 6，单批冷启动本机 <1s / Termux ~2.5s / Kaggle attested ~3s，合计远在
+#: `READY_TIMEOUT_SEC=60s` 内）；与现有 `FALLBACK_BREAKER_MIN=4` / `breaker_after=max(4, N//4)`
+#: 同一个习惯：都按「池宽的分数」定。
+SPAWN_BATCH_SIZE = 16
+
 #: 回退行的**详情**条数上限（超出部分只由熔断行/轮末汇总报数）。
 #:
 #: 对齐日志节食口径（`common/log_bundle.py`）：这一族行本来只回答「哪一局、为什么」，
@@ -276,6 +286,9 @@ class ServePool:
         self.served = 0
         self.spawned = 0
         self.killed = 0
+        #: 起出来但**还没就绪**就被留下的 worker 数（P0-1：不杀未就绪 ⇒ 这批冷启动不白付）。
+        #: 它长期不归零 = 节点冷启动被压住/根本起不来 —— 那是要看的读数（否则池静默变小）。
+        self.unready = 0
         self.fallback = 0
         self.fallback_reasons: dict[str, int] = {}
         self.closed = False
@@ -311,37 +324,55 @@ class ServePool:
         return _Worker(proc)
 
     def start(self) -> int:
-        """起满池并等齐 `__SERVE_READY__`；返回**真正就绪**的 worker 数。
+        """起满池并等 `__SERVE_READY__`；返回**真正就绪**的 worker 数。
 
         先起满再发第一个任务、且把就绪等待与单局硬顶分开：否则第一局的硬顶里会混进冷启动
         （Termux 上 ~2.5s）而被看门狗误杀 —— 那是「池看起来不如一次性」的假象。
 
-        **并发起（先全部 Popen，再统一等就绪）**：冷启动（bun + wasm 编译 + attestation）
-        彼此独立，串行等就绪会让它们排成一行 —— 实测 8 局的轮上池反而比逐局 spawn 慢
-        （那些进程本来能并发冷启动）。就绪上限是**整批共用**的，不是每个 worker 各一份。
-        起不来的（进程当场退出/超时）不保留也不会重试：本轮回到一次性路径。
+        **判据（唯一一条，2026-10-07）**：`w.ready.is_set() and not w.dead` 才算真就绪。
+        旧形态只判 `w.dead` ⇒ 「起来了但没打 READY 也没退」的 worker 被当成暖 worker 发出去
+        （94/94 那行读数的真实含义是「94 个进程没退出」）；任务写进它的 stdin 没人读 ⇒ 超时
+        ⇒ 回退一次性（**第二次冷启动**）⇒ 冷启动风暴。
+
+        **分批**（`SPAWN_BATCH_SIZE`）：批内并发 `Popen`、批内统一等、批间串行；`ready_timeout_sec`
+        是**整池共用**的一句（不按批重置，否则 6 批能拖出 6×60s）。
+
+        **未就绪不杀**（采纳评审备选 (h)）：仍活着但这次没就绪的留在池里（`unready` 计数），
+        读线程点亮的 `ready` 事件一到就自动可发放 —— 杀掉 = 这批冷启动白付 + 补位再付一次。
+        只有**已死**的才 kill（它已经不可能干活）。
         """
-        ws: list[_Worker] = []
-        for _ in range(self.max_workers):
-            w = self._spawn()
-            if w is None:
-                break
-            ws.append(w)
         deadline = time.time() + self.ready_timeout_sec
-        for w in ws:
-            left = deadline - time.time()
-            if left > 0:
-                w.ready.wait(left)
-        ready: list[_Worker] = []
-        for w in ws:
-            if w.dead:
-                self.killed += 1
-                w.kill()
-            else:
-                ready.append(w)
+        good: list[_Worker] = []
+        booting: list[_Worker] = []
+        attempted = 0
+        while attempted < self.max_workers and time.time() < deadline:
+            batch: list[_Worker] = []
+            for _ in range(min(SPAWN_BATCH_SIZE, self.max_workers - attempted)):
+                w = self._spawn()
+                if w is None:
+                    break
+                batch.append(w)
+                attempted += 1
+            if not batch:
+                break
+            for w in batch:  # 批内统一等（共享 deadline）
+                left = deadline - time.time()
+                if left > 0:
+                    w.ready.wait(left)
+            for w in batch:
+                if w.dead:
+                    self.killed += 1
+                    w.kill()
+                elif w.ready.is_set():
+                    good.append(w)
+                else:
+                    booting.append(w)
+            if len(good) >= self.max_workers:  # 提前退出：真就绪已够，不再起后面的批
+                break
         with self._lock:
-            self._workers = ready
-        return len(ready)
+            self._workers = [*good, *booting]
+            self.unready += len(booting)
+        return len(good)
 
     def close(self) -> None:
         self.closed = True
@@ -368,15 +399,18 @@ class ServePool:
 
         `timeout_sec` = 这一局**本次尝试的硬顶**（`_submit` 传进来）：补位冷启动的等待
         不得超过它 —— 否则「机器一慢」会把一个游戏线程按在就绪等待里（旧行为是固定 60s，
-        远超单局 5s 的硬顶，而看门狗在这段里什么都打不出来）。等不到就绪 ⇒ 当场放弃这个
-        新 worker，**交给调用方的一次性路径**（与「起不来」同一个出口，只慢不错）。
+        远超单局 5s 的硬顶，而看门狗在这段里什么都打不出来）。等不到就绪但**进程还活着** ⇒
+        **留在池里**标 booting（`unready++`），本次任务交给调用方的一次性路径（同一个出口，
+        只慢不错）——不杀掉它：杀了就是这次冷启动白付 + 之后补位再付一次（P0-1 同语义）。
 
         `replenish=False`（熔断后）：**只用还活着的（暖的）worker，一个都不新建** —— 冷启动就是
         「一次超时 → 三份进程」里的第三份，熔断的全部意义就是停掉它（见 `_fallback`）。
         """
         with self._lock:
             for w in self._workers:
-                if not w.busy and not w.dead:
+                # 只发**真就绪**的（P0-1 的唯一判据）：`ready` 未置位的还在冷启动，发给它 = 任务
+                # 写进没人读的 stdin ⇒ 白等一次硬顶再回退（那正是 2026-10-07 的现场）。
+                if not w.busy and not w.dead and w.ready.is_set():
                     w.busy = True
                     return w
             if (
@@ -395,13 +429,23 @@ class ServePool:
         ready = fresh.ready.wait(budget)
         with self._lock:
             if (
-                not ready
-                or fresh.dead
-                or self.closed
+                self.closed
                 or self.disabled
                 or len(self._workers) >= self.max_workers
             ):
-                # 没等到就绪 / 起不来 / 关池 / 已熔断 / 被别的线程先占满 ⇒ 多出来的这个直接收掉
+                # 关池 / 已熔断 / 被别的线程先占满 ⇒ 多出来的这个直接收掉
+                fresh.kill()
+                self.killed += 1
+                return None
+            if not ready and not fresh.dead:
+                # ★ 等不到就绪但**进程还活着** ⇒ 留下标 booting（与 `start()` 同一语义）：
+                # 它可能只是冷启动慢，之后就绪了照样入池服务（杀掉 = 这次冷启动白付，下次再付
+                # 一次——那就是「一次超时 → 三份进程」里的第三份）。`_acquire` 只发真就绪的
+                # worker ⇒ 留着无害；本次任务照旧走一次性路径（`no-slot`）。
+                self._workers.append(fresh)
+                self.unready += 1
+                return None
+            if fresh.dead:
                 fresh.kill()
                 self.killed += 1
                 return None
@@ -430,10 +474,15 @@ class ServePool:
         if not self.disabled and self.fallback >= self.breaker_after:
             self.disabled = True
             reasons = ",".join(f"{k}={v}" for k, v in sorted(self.fallback_reasons.items()))
+            # 真就绪占比是这条刹车线上最要紧的读数：慢节点上「真就绪少 ⇒ 池小 ⇒ fallback 多」
+            # 是**预期**（P0-1 之后不再拿假就绪顶数），不是回归。快照读、不加锁（诊断专用）。
+            total = len(self._workers)
+            ready_n = sum(1 for w in self._workers if w.ready.is_set() and not w.dead)
             self.log(
                 f"[serve-pool] 熔断：本轮停掉**补位**（fallback={self.fallback} ≥ 阈值"
                 f"{self.breaker_after}；served={self.served} spawned={self.spawned} "
-                f"killed={self.killed}｜{reasons}）——手上还暖的 worker 接着用（省一次冷启动），"
+                f"killed={self.killed}｜真就绪 {ready_n}/{total}｜unready={self.unready}｜{reasons}）——"
+                "手上还暖的 worker 接着用（省一次冷启动），"
                 "没有暖 worker 的局走一次性 spawn；不再新建 worker"
                 "（避免「一次超时 → 三份进程」的放大回路）"
             )
@@ -635,7 +684,7 @@ class ServePool:
         reasons = ",".join(f"{k}={v}" for k, v in sorted(self.fallback_reasons.items())) or "-"
         return (
             f"serve_pool: served={self.served} spawned={self.spawned} killed={self.killed} "
-            f"fallback={self.fallback}（{reasons}）"
+            f"unready={self.unready} fallback={self.fallback}（{reasons}）"
             + (
                 f"｜已熔断（停补位）：余下 {self.bypassed} 局没有暖 worker 可用，走一次性"
                 if self.disabled

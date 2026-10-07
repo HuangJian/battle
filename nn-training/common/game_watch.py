@@ -75,7 +75,8 @@ GAME_POLL_SEC = 0.5
 PROGRESS_LOG_SEC = 60.0
 
 #: 一局**整条链路**的墙钟上界（`game_ceiling_sec`）在「尝试次数 × (一局一次尝试 + 回收)」
-#: 之外再留的**余量**（秒）：覆盖池回退、`_clean_attempt`（删半截产出）这些小的文件操作。
+#: 之外再留的**余量**（秒）：覆盖池回退、`_clean_attempt`（删半截产出，重试前最多 2 次、
+#: 每次 ≤ `CLEAN_CEILING_SEC`）这些小的文件操作。
 #:
 #: 为什么要有这条线（2026-10-06 Kaggle 离线轮「整轮停滞十几分钟」取证）：一局的路径上有若干
 #: **无法从 Python 里取消**的阻塞点（挂住的挂载点上的 `mkdir`/`open`/`write`/`rmtree`，以及
@@ -98,6 +99,19 @@ GAME_IO_SLACK_SEC = 20.0
 #: 所以不能拿 `game_ceiling_sec`（那个含尝试次数与回收预算，会大到让挂死的扫盘也过关）。
 #: 正常一轮的扫盘在亚秒级（几百个小 JSON + 一遍内容哈希）⇒ 60s 是「机器挂了」而不是「盘慢」。
 SCAN_CEILING_SEC = 60.0
+
+#: **重试路径上「清半截产出」的墙钟上界**（秒）：`_clean_attempt` = rglob + rmtree 一个 `w{i}/`。
+#:
+#: 为什么必须给它上界（2026-10-07 云机「假就绪」轮复盘）：那个清理在**逐局重试路径**上是裸调的，
+#: 挂住的挂载点上它既不返回也不抛 ⇒ 44 条线程各自吃满整条链路的上界（整轮 32s → 355s），
+#: 且**重试行被卡在它后面永远打不出来**（「重试过的局 0 个」是假象；修法：`retry_line` 前置）。
+#: 正常清理是亚秒级（一个小目录）⇒ 5s 即「盘挂了」。与 `KILL_REAP_SEC = 5.0` 同族（都是「小 IO
+#: 的有界等」）——注意它的**住址**是 `common/platform_utils.py`，本模块只是 import 它。
+#:
+#: ⚠ 超界 ⇒ **不就地重跑**：被放弃的删除者可能晚到，删掉新写者刚写的同一批路径
+#: （`--out`/shard 名都没变）⇒「目录齐、obs 截断」= 静默错数据，正是 `_clean_attempt` 存在的
+#: 全部理由。归入机器级停滞（`UnreapableChildError`）交整轮重投。
+CLEAN_CEILING_SEC = 5.0
 
 #: 「整轮停滞」的告警线（秒）：这么久**一局都没结算**就点名一次，并列出还在飞的局。
 #:
@@ -237,10 +251,31 @@ def retry_line(
     prev: object,
     timeout_sec: float,
 ) -> str:
-    """重试行：说清「重跑第几次、上次为什么、这次的上限是多少」（上限变化必须可见）。"""
+    """重试行：说清「重跑第几次、上次为什么、这次的上限是多少」（上限变化必须可见）。
+
+    ⚠ 它必须**先于**重试前的清理打出来（调用点纪律）：清理一旦挂住，这行就是「到底重试了没」
+    的唯一读数——2026-10-07 的现场整轮都看不到它（「重试过的局 0 个」），而其实每局都在重试。
+    """
     return (
         f"{kind} 单局重试 {attempt}/{GAME_MAX_ATTEMPTS}：{label}"
         f"（上次：{prev}；本次上限 {timeout_sec:g}s）"
+    )
+
+
+def clean_ceiling_line(
+    kind: str, label: str, ceiling_sec: float, attempt: int, where: str
+) -> str:
+    """重试路径**清理超界**行：半截产出清不掉 ⇒ **不就地重跑**，按机器级停滞交整轮重投。
+
+    为什么不能「照常重跑这一局」：被放弃的那条 daemon 线程还在跑 rmtree，它删的正是新一次尝试
+    要写的同一批路径（`--out`/shard 名都没变）⇒ 目录齐、obs 截断的静默错数据（见
+    `CLEAN_CEILING_SEC`）。超界那一刻的现场（哪一局、第几次尝试、上界值）由本行留痕。
+    """
+    return (
+        f"WARN {kind} 半截产出清不掉（attempt {attempt}）：{label}"
+        f"（{ceiling_sec:g}s 内 rmtree 没返回——挂载点 IO 还没好）"
+        "——本局不就地重跑（删除者可能晚到，再起写者 = 静默错数据），"
+        f"交回整轮重投（现场 {where}）"
     )
 
 
@@ -272,6 +307,7 @@ def _pct(sorted_secs: list[float], q: float) -> float:
 
 
 __all__ = [
+    "CLEAN_CEILING_SEC",
     "DEFAULT_GAME_TIMEOUT_SEC",
     "GAME_IO_SLACK_SEC",
     "GAME_MAX_ATTEMPTS",
@@ -282,6 +318,7 @@ __all__ = [
     "STALL_WARN_SEC",
     "attempt_timeout_sec",
     "ceiling_line",
+    "clean_ceiling_line",
     "game_ceiling_sec",
     "game_label",
     "game_time_summary",

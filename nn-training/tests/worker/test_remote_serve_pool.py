@@ -202,6 +202,62 @@ print("booting…", flush=True)
 time.sleep(3600)
 """
 
+#: 起来后**延迟**报就绪，并把**就绪时刻**落盘（文件名带时间戳）：`start()` 的分批评据要靠
+#: 「批 k+1 的第一个 spawn ≥ 批 k 的最后一个就绪」这种**时序**断言来钉 —— 评审 P1-5：
+#: `spawned` 只是个计数、桩的计数目录只记「跑了哪几局」，两者都没有时间线。
+_STUB_SERVE_DELAY = """\
+import os, sys, time
+from pathlib import Path
+
+sys.stdout.reconfigure(line_buffering=True)
+READY = Path(r"@READY@")
+READY.mkdir(parents=True, exist_ok=True)
+time.sleep(float("@DELAY@"))
+(READY / f"r{os.getpid()}_{time.time():.6f}").write_text("1")
+print("__SERVE_READY__")
+for _line in sys.stdin:
+    print("__SERVE_OK__")
+"""
+
+#: 「serve 模式迟迟不报就绪（@DELAY@ 秒），一次性模式照常产一局」：造「0 真就绪但有一批
+#: 在冷启动」的现场 —— P0-1 的零就绪分支**不许关池**（关了 = 这批冷启动全扔掉）。
+_STUB_SLOW_BOOT = """\
+import json, os, sys, time
+from pathlib import Path
+
+sys.stdout.reconfigure(line_buffering=True)
+
+
+def one(a):
+    def val(flag):
+        return a[a.index(flag) + 1] if flag in a else ""
+
+    out = Path(val("--out"))
+    out.mkdir(parents=True, exist_ok=True)
+    stage, seed, wver = int(val("--stages")), int(val("--seeds")), val("--wver")
+    d = out.parent / f"rl_s{stage}_seed{seed}"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "manifest.json").write_text(json.dumps({"stage": stage, "seed": seed, "wver": wver}))
+    (out / "_rl_report.json").write_text(json.dumps({
+        "games": 1, "winRate": 1.0, "outcomes": {"stage_clear": 1},
+        "totalSamples": 2, "totalTicks": 20, "scoreList": [1.0], "dimLists": {"kills": [1.0]},
+    }))
+    print(f"[stub-slow-boot] done s{stage}/d{seed} pid={os.getpid()}")
+
+
+if "--serve" in sys.argv:      # 慢冷启动：就绪迟迟不来（但进程活着）
+    time.sleep(float("@DELAY@"))
+    print("__SERVE_READY__")
+    for line in sys.stdin:
+        if line.strip():
+            one(json.loads(line))
+            print("__SERVE_OK__")
+else:
+    one(sys.argv[1:])
+"""
+
+
+
 
 def _write_stub(tmp_path: Path, body: str, name: str = "stub_serve.py", **subs: str) -> Path:
     p = tmp_path / name
@@ -586,6 +642,11 @@ def test_fallback_breaker_stops_rebuilding_workers(
     script = _write_stub(tmp_path, _STUB_HANGS_ON_TASK, name="stub_hang_task.py")
     msgs: list[str] = []
     pool = ServePool(sys.executable, tmp_path, 1, msgs.append, entry=script.name)
+    # 补位的就绪预算给足（默认 = min(60s, max(1s, 本次硬顶 0.1s)) = 1s）：本用例钉的是
+    # 「超时 ⇒ kill ⇒ 回退 ⇒ 到阈值熔断」的**计数**，而 1s 在负载下可能不够一个 python 桩冷启动
+    # ⇒ 多出一条 `no-slot` 回退、计数就不再确定（P0-1 把没就绪的 worker **留下**之后，它还会
+    # 在熔断后服务下一局：那是**对的行为**，但会让计数随负载漂）。与就绪上限的绝对长度无关。
+    pool.READY_BUDGET_FLOOR_SEC = 30.0
     assert pool.start() == 1
     assert pool.breaker_after == serve_pool.FALLBACK_BREAKER_MIN  # 小池 = 下限起步
     total = 9
@@ -695,8 +756,76 @@ def test_acquire_gives_up_within_the_game_cap_instead_of_the_ready_timeout(tmp_p
     assert pool.try_pool(argv, logp, 0.3) is None  # 不 start()：首次取槽就是冷启动
     # timing-ok: 上界兜底（就绪等待应受本次硬顶约束，10s 只挡挂起）
     assert time.time() - t0 < 10.0, "就绪等待必须受本次尝试的硬顶约束，不是固定 60s"
-    assert pool.fallback_reasons == {"no-slot": 1} and pool.killed == 1
+    # ★ P0-1（2026-10-07）：等不到就绪但**进程还活着** ⇒ 留下标 booting（**不杀**）——杀掉
+    # 就是这次冷启动白付 + 之后补位再付一次（「一次超时 → 三份进程」的第三份）。它之后就绪了
+    # 照样入池（`_acquire` 只发真就绪的）。本次任务照旧走一次性（`no-slot`）。
+    assert pool.fallback_reasons == {"no-slot": 1}
+    assert pool.killed == 0 and pool.unready == 1 and len(pool._workers) == 1
+    assert pool._workers[0].proc.poll() is None, "进程还活着就不该被杀（P0-1）"
     pool.close()
+
+
+def test_start_counts_only_real_ready(tmp_path: Path) -> None:
+    """★ P0-1 的核心判据：`start()` 只数**上报过 `__SERVE_READY__` 且没死**的 worker。
+
+    旧形态只判 `w.dead` ⇒ 「起来了但没报就绪也没退」的静默进程被当成暖 worker 收进池，
+    任务写进它的 stdin 没人读 ⇒ 超时 + 回退一次性（第二次冷启动）——2026-10-07 现场的
+    `94/94 就绪` 就是它。
+
+    两个池分开钉两面（同一判据的两侧；混在一个池里要靠「按序号决定行为」的桩，而那引入
+    时序竞态——评审 P1-5 要的是**确定性**判据）：全真就绪 ⇒ 计数正确且 `unready=0`；
+    全静默 ⇒ 一个都不计数，且**也不杀**（留下标 booting，`ready` 一亮就自动可发放）。
+    """
+    ready_stub = _write_stub(
+        tmp_path, _STUB_SERVE_DELAY, name="stub_ready_now.py", ready=str(tmp_path / "r"), delay="0"
+    )
+    p1 = ServePool(sys.executable, tmp_path, 3, entry=ready_stub.name, ready_timeout_sec=10.0)
+    assert p1.start() == 3 and p1.unready == 0 and p1.killed == 0
+    p1.close()
+
+    silent_stub = _write_stub(tmp_path, _STUB_SILENT, name="stub_silent.py")
+    p2 = ServePool(sys.executable, tmp_path, 3, entry=silent_stub.name, ready_timeout_sec=0.4)
+    t0 = time.time()
+    assert p2.start() == 0
+    # timing-ok: 上界兜底（静默桩只有共享 deadline 能结束它；10s 只挡挂起）
+    assert time.time() - t0 < 10.0
+    assert p2.unready == 3 and p2.killed == 0 and len(p2._workers) == 3
+    assert all(w.proc.poll() is None for w in p2._workers), "未就绪不等于「坏」：不杀（P0-1）"
+    p2.close()
+
+
+def test_start_batches_spawns(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ 分批：批内并发、批间串行（评审 P1-5 的观测点：spawn 时间戳 + 就绪时刻落盘）。
+
+    为什么要钉它：94 个 bun 一次性并发 `Popen` 全砸在同一块盘上，是 2026-10-07 现场冷启动
+    风暴的直接成因；分批是杀它的那一条。断言不能看 `spawned`（计数没有时间线）。
+    """
+    monkeypatch.setattr(serve_pool, "SPAWN_BATCH_SIZE", 2)
+    ready_dir = tmp_path / "ready"
+    script = _write_stub(
+        tmp_path, _STUB_SERVE_DELAY, name="stub_delay.py", ready=str(ready_dir), delay="0.25"
+    )
+    spawns: list[float] = []
+    real_spawn = serve_pool.ServePool._spawn
+
+    def timed(self: serve_pool.ServePool) -> serve_pool._Worker | None:
+        t = time.time()
+        w = real_spawn(self)
+        spawns.append(t)
+        return w
+
+    monkeypatch.setattr(serve_pool.ServePool, "_spawn", timed)
+    pool = ServePool(
+        sys.executable, tmp_path, 6, entry=script.name, ready_timeout_sec=30.0
+    )
+    assert pool.start() == 6 and pool.unready == 0
+    pool.close()
+    ready = sorted(float(p.name.rsplit("_", 1)[1]) for p in ready_dir.iterdir())
+    assert len(spawns) == 6 and len(ready) == 6, (spawns, ready)
+    # ① 第一个就绪事件之前的 spawn 数 ≤ 批大小（= 没有把 6 个一次性全砸出去）
+    assert sum(1 for t in spawns if t <= ready[0]) <= 2, (spawns, ready)
+    # ② 第 3 个 spawn 必须等前两个就绪（批间串行；批内那两个已经在上面钉住了）
+    assert spawns[2] >= max(ready[0], ready[1]) - 0.1, (spawns, ready)
 
 
 def test_pool_start_fails_fast_when_script_has_no_serve(tmp_path: Path) -> None:
@@ -806,6 +935,41 @@ def test_run_iter_rollout_goes_through_the_pool(
         assert f"done s{st}/d{sd}" in text
     assert any("长驻 worker 池" in m for m in msgs), msgs
     assert any("serve_pool: served=3" in m for m in msgs), msgs
+
+
+def test_zero_real_ready_keeps_the_pool_instead_of_closing_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ P0-1 接线：零真就绪但有一批在冷启动 ⇒ **不退池**（旧形态：`ready_n == 0` 一律关池）。
+
+    为什么这条重要：`start()` 返回的是**真就绪**数（修后），慢节点上它可能正好是 0，而池里
+    那批 worker 正在冷启动 —— 关池 = 把它们全扔掉 + 余下每一局重付一次冷启动（放大器）；
+    留下则就绪一个省一次冷启动。本用例的桩「serve 模式迟迟不报就绪、一次性模式照常产局」。
+    """
+    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
+    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "")
+    # 池的就绪上限调小（60s 是生产口径；本用例只钉「零就绪分支」的处置，与绝对长度无关）。
+    real_make = serve_pool.make_pool
+
+    def fast_make(bun: str, ts_dir: Path, workers: int, log: object, **kw: object):
+        kw["ready_timeout_sec"] = 0.3
+        return real_make(bun, ts_dir, workers, log, **kw)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(iter_rollout.serve_pool, "make_pool", fast_make)
+    script = _write_stub(tmp_path, _STUB_SLOW_BOOT, name="stub_slow_boot.py", delay="3600")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    _install_entry(job_dir, _STUB_SLOW_BOOT, delay="3600")
+    out = iter_rollout.run_iter_rollout(
+        job_dir, _serve_spec(tmp_path, script, [(1, 1), (1, 2)]), log=msgs.append
+    )
+    assert out["report"]["games"] == 2 and len(out["shard_dirs"]) == 2
+    stats = out["serve_pool"]
+    assert stats is not None, "零真就绪但有在冷启动的 ⇒ 不许关池（P0-1）"
+    assert stats["unready"] == 2 and stats["killed"] == 0, stats
+    assert any("0/2 真就绪" in m and "仍在冷启动" in m for m in msgs), msgs
+    assert not any("起不来" in m for m in msgs), msgs
 
 
 def test_concurrent_pool_games_never_hit_the_counter_race(

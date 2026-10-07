@@ -1187,6 +1187,138 @@ def test_flaky_game_is_retried_in_place_and_round_succeeds(tmp_path: Path, monke
     assert marker.exists()
 
 
+def test_clean_overrun_is_machine_stall_not_in_place_retry(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """★ 清理超界 ⇒ **机器级停滞**（不就地重跑），且**重试行先于清理**（2026-10-07 评审 P0-1/P0-2）。
+
+    旧形态两处都反着：`_clean_attempt` 裸调、且排在 `retry_line` **之前** —— 挂住的挂载点上
+    44 条线程各自吃满整条链路的上界（整轮 32s → 355s），而「重试过的局 0 个」是假象
+    （那行永远打不出来）。修后：① 顺序反过来；② 超界 ⇒ `UnreapableChildError`（本局不产出，
+    交整轮重投）—— 绝不「照常重跑这一局」：被放弃的删除者可能晚到，删掉新写者刚写的同一批
+    路径（「目录齐、obs 截断」= 静默错数据，`_clean_attempt` 存在的全部理由）。
+    """
+    _fast_watchdog(monkeypatch)
+    marker = tmp_path / "flaky.marker"
+    script = tmp_path / "flaky.py"
+    script.write_text(_STUB_FLAKY.replace("@MARKER@", str(marker)), encoding="utf-8")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    release = threading.Event()
+    calls: list[int] = []
+    real_clean = iter_rollout._clean_attempt
+
+    def clean(jd: Path, argv: list[str]) -> None:
+        calls.append(1)
+        if len(calls) == 1:  # 第一次（逐局重试前那次）永不返回 = 挂住的挂载点
+            release.wait()
+            return
+        real_clean(jd, argv)
+
+    monkeypatch.setattr(iter_rollout, "_clean_attempt", clean)
+    monkeypatch.setattr(game_watch, "CLEAN_CEILING_SEC", 0.1)
+    games: list[list[str]] = []
+    real_one = iter_rollout._run_one_game
+
+    def counted(*a, **kw):  # 替身：只记「哪几局真的开跑过」
+        games.append(list(a[1]))
+        return real_one(*a, **kw)
+
+    monkeypatch.setattr(iter_rollout, "_run_one_game", counted)
+    try:
+        out = run_iter_rollout(job_dir, _one_game_spec(tmp_path, script), log=msgs.append)
+    finally:
+        release.set()  # 放掉被放弃的那条 daemon 线程（挂住的替身）
+    # 整轮成功（只补那一局）——但走的是「清理超界 ⇒ 整轮重投」那条路
+    assert out["report"]["games"] == 1 and len(out["shard_dirs"]) == 1
+    assert any("半截产出清不掉" in m and "不就地重跑" in m for m in msgs), msgs
+    assert any("整轮重投第 1 次" in m for m in msgs), msgs
+    # 顺序即判据：重试行必须先于清理超界行（否则「重试过的局 0 个」永远是真的）
+    i_retry = next(i for i, m in enumerate(msgs) if "单局重试 2/3" in m)
+    i_clean = next(i for i, m in enumerate(msgs) if "半截产出清不掉" in m)
+    assert i_retry < i_clean, msgs
+    # 只开跑过**两局**：链 A 的 attempt 1 + 重投后链 B 的 attempt 1。旧语义（照常就地面跑）
+    # 会看到第三局（链 A 的 attempt 2）——那正是「两个写者写同一份 shard」的那条路。
+    assert len(games) == 2, games
+
+
+def test_run_one_game_self_kills_when_the_attempt_was_abandoned(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """★ 被放弃的尝试在 `Popen` 返回那一刻**自清**（评审 P1-4 点名的 exec 握手窗口）。
+
+    形态等价于真实现场：整条链路的墙钟上界正好在「子进程已经起来、父线程刚拿回 pid」这一瞬间
+    超了。旧形态会照常跑完整局并往 `w{i}/` 写（=「同一目录上可能还有活写者」）；现在它必须就地
+    处决自己刚起的进程、不产出。
+    """
+    _fast_watchdog(monkeypatch)
+    script = tmp_path / "slow1s.py"
+    script.write_text(_STUB_SLOW.replace("@SECS@", "1"), encoding="utf-8")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    killed: list[object] = []
+    real_kill = iter_rollout.kill_process_tree
+
+    def _kill(p: object) -> None:
+        killed.append(p)
+        real_kill(p)
+
+    monkeypatch.setattr(iter_rollout, "kill_process_tree", _kill)
+    abandoned = threading.Event()
+
+    class _AbandonOnReturnPopen:
+        """真起进程，但**在返回给调用方之前**置位 `abandoned`（= exec 握手期间超界）。"""
+
+        real: Any = subprocess.Popen
+
+        def __init__(self, argv: object, **kw: object) -> None:
+            self.proc = self.real(argv, **kw)
+            abandoned.set()
+
+        def __getattr__(self, name: str) -> object:
+            return getattr(self.proc, name)
+
+    monkeypatch.setattr(iter_rollout.subprocess, "Popen", _AbandonOnReturnPopen)
+    argv = _one_game_spec(tmp_path, script)["argv"][0]
+    with pytest.raises(UnreapableChildError) as ei:
+        iter_rollout._run_one_game(
+            sys.executable, argv, job_dir, tmp_path, "w0", 5.0,
+            log=msgs.append, abandoned=abandoned,
+        )
+    assert "超界后自清" in str(ei.value) and "s0/d0" in str(ei.value)
+    assert killed, "被放弃的尝试必须就地处决自己刚起的子进程"
+    assert not (job_dir / "w0" / "rl_s0_seed0").exists(), "被放弃的尝试不许产出"
+
+
+def test_run_one_game_refuses_to_start_when_already_abandoned(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """被放弃的链**不再开写**：`Popen` 根本不该被构造（连 `mkdir` 之前就拦住）。"""
+    _fast_watchdog(monkeypatch)
+    script = tmp_path / "ok.py"
+    script.write_text(_STUB_SLOW.replace("@SECS@", "0"), encoding="utf-8")
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    abandoned = threading.Event()
+    abandoned.set()
+
+    def no_popen(*a: object, **kw: object) -> object:
+        raise AssertionError("被放弃的尝试不许再起进程")
+
+    monkeypatch.setattr(iter_rollout.subprocess, "Popen", no_popen)
+    argv = _one_game_spec(tmp_path, script)["argv"][0]
+    with pytest.raises(UnreapableChildError) as ei:
+        iter_rollout._run_one_game(
+            sys.executable, argv, job_dir, tmp_path, "w0", 5.0,
+            log=msgs.append, abandoned=abandoned,
+        )
+    assert "不再开写" in str(ei.value)
+    assert not (job_dir / "w0").exists(), "连 mkdir 都不该做"
+
+
 def test_clean_attempt_removes_half_outputs_but_never_escapes_job_dir(tmp_path: Path) -> None:
     """清理只在 job 目录内删（半截 shard / out 目录），越界路径一律跳过。"""
     job_dir = tmp_path / "job"

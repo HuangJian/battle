@@ -18,6 +18,9 @@ job kind = `iter` 的语义：**一整轮**上云。节点拿到的 payload 里�
 `sampler-agent` 的 `/v1/task` 路径同一份契约）—— 逐局 spawn 时每局都要重付 bun 启动 +
 wasm 编译 + 首用 attestation×3 + 权重解析，本模块实测 **1.45–1.47×**
 （`docs/nn/runtime-opt.md` §22；agent 侧同一机制为 §20 的 1.59×）。
+**池只发真就绪的 worker**（上报过 `__SERVE_READY__` 且没死；2026-10-07 之前只判「进程没退出」
+⇒ 假就绪被当暖 worker 发出去，全部超时回退 + 二次冷启动）；冷启动**分批**（`SPAWN_BATCH_SIZE`），
+没就绪的**不杀**（就绪即自动入池）。
 池只覆盖「省掉每局启动」：单局任何不确定（超时/worker 死掉/ERR/取不到位）都**当场回退**
 一次性 `Popen`，路径与池不存在时逐字节相同 ⇒ 只慢不错、绝不丢局。关池：`NN_SERVE_POOL=0`。
 
@@ -31,6 +34,7 @@ import json
 import os
 import shutil
 import subprocess
+import threading
 import time
 from collections.abc import Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -301,6 +305,7 @@ def _run_one_game(
     timeout_sec: float,
     log=lambda msg: None,
     attempt: int = 1,
+    abandoned: threading.Event | None = None,
 ) -> float:
     """跑一局：`bun <argv...>`（cwd = TS 代码根），日志落 `job_dir/out_dir/rollout.log`。
 
@@ -320,11 +325,21 @@ def _run_one_game(
     等待用**轮询**而不是一次 `p.wait(timeout=...)`：轮询让「单局异常慢」在卡住期间就能被
     点名（软告警），而不是等硬顶到了才知道某一局有问题（2026-09-22 it34 的 651s 就是这么
     发生的：10 局卡死，日志里只有计数）。
+
+    `abandoned`（P1-1，2026-10-07 评审）：本尝试所在的那条链已被整条链路的上界放弃 ⇒
+    **不再开写**（`mkdir` 之前）且**`Popen` 一返回就处决刚起的进程**。没有它时，被放弃的
+    线程照样会把整局跑完并往 `w{i}/` 写 —— 那正是「同一目录上可能还有活写者」（同一份 shard
+    两个写者 = 静默错数据）的唯一可闭缺口；评审点名的 exec 握手窗口就是第二次检查。
     """
+    label = _game_label(argv)
+    if abandoned is not None and abandoned.is_set():
+        raise UnreapableChildError(
+            f"rollout 单局已超界（整条链路上界内没返回）：{label}"
+            "——本尝试已被放弃，不再开写（避免与下一轮写者同目录竞争）"
+        ) from None
     wdir = job_dir / out_dir
     wdir.mkdir(parents=True, exist_ok=True)
     log_path = wdir / ROLLOUT_LOG_NAME
-    label = _game_label(argv)
     t0 = time.time()
     warned = False
     with open(log_path, "w", encoding="utf-8") as lf:
@@ -338,6 +353,14 @@ def _run_one_game(
             stderr=subprocess.STDOUT,
             **popen_own_group(),
         )
+        if abandoned is not None and abandoned.is_set():
+            # ★ exec 握手窗口（评审 P1-4 点名的那一档）：超界那一刻这个进程已经在跑，只是父线程
+            # 刚刚拿回 pid —— 就地处决，不让它继续写 `w{i}/`（本局不产出，交整轮重投）。
+            _kill_and_reap(p, label=label, log=log, where=str(log_path))
+            raise UnreapableChildError(
+                f"rollout 单局超界后自清：{label}（pid={p.pid}）——被放弃的尝试刚起完进程就被"
+                "发现，本局不产出（交回整轮重投）"
+            ) from None
         while True:
             try:
                 rc = p.wait(timeout=game_watch.GAME_POLL_SEC)
@@ -394,6 +417,7 @@ def _run_one_game_with_retries(
     log=lambda msg: None,
     explicit: bool = False,
     pool: serve_pool.ServePool | None = None,
+    abandoned: threading.Event | None = None,
 ) -> tuple[float, int]:
     """一局最多跑 `GAME_MAX_ATTEMPTS` 次（超时/rc≠0 都原地重跑），返回 `(墙钟秒, 尝试次数)`。
 
@@ -409,16 +433,47 @@ def _run_one_game_with_retries(
     ×`RETRY_TIMEOUT_FACTOR`（除非 plan 显式给了上限——那是配置说了算，不做解释）。
 
     全部尝试都失败 → RetryableError（整轮交给 worker 的既有重试语义）。**例外**：
-    `UnreapableChildError`（子进程 SIGKILL 后收不了尸）**直接上抛**，不重跑这一局——重跑会在
-    同一个 `w{i}/` 上再起一个写者（那个可能还活着），两个进程写同一份 shard = 静默错数据。
+    `UnreapableChildError`（子进程 SIGKILL 后收不了尸 / 清理超界 / 本尝试已被放弃）**直接上抛**，
+    不重跑这一局——重跑会在同一个 `w{i}/` 上再起一个写者（那个可能还活着），两个进程写同一份
+    shard = 静默错数据。
     """
     label = _game_label(argv)
     last: Exception | None = None
     for attempt in range(1, game_watch.GAME_MAX_ATTEMPTS + 1):
+        if abandoned is not None and abandoned.is_set():
+            # 链已超界（`_run_one_game_bounded` 置位）：本尝试不再开写/不再重跑。
+            raise UnreapableChildError(
+                f"rollout 单局被放弃（整条链路上界内没返回）：{label}"
+                "——本尝试不再开写/不再重跑（避免与下一轮写者同目录竞争）"
+            ) from None
         cap = game_watch.attempt_timeout_sec(timeout_sec, attempt, explicit=explicit)
         if attempt > 1:
-            _clean_attempt(job_dir, argv)  # 上一次可能留了半截 shard（见 _clean_attempt）
+            # ★ 顺序即判据（评审 P0-2）：重试行**先于**清理 —— 旧形态把清理排在它前面，
+            # 挂住的挂载点上「重试过的局 0 个」就是这么来的（不是没重试，是那行永远打不出来）。
             log(game_watch.retry_line("rollout", label, attempt, last, cap))
+            # 上一次可能留了半截 shard（见 _clean_attempt）——清理**有上界**（评审 P0-1）。
+            cleaned, _ = call_bounded(
+                partial(_clean_attempt, job_dir, argv),
+                game_watch.CLEAN_CEILING_SEC,
+                name=f"clean-{label}",
+            )
+            if not cleaned:
+                # ★ 超界 ⇒ 机器级停滞，**不就地重跑**：被放弃的那条 daemon 线程还在跑 rmtree，
+                # 它删的正是新一次尝试要写的同一批路径（`--out`/shard 名都没变）⇒「目录齐、obs
+                # 截断」= 静默错数据（`_clean_attempt` 存在的全部理由）。交整轮重投：那里先做一次
+                # 有界清理，且两条链的重投都在新写者开写前整目录清场（见 plan §2 P0-2）。
+                where = str(job_dir / out_dir / ROLLOUT_LOG_NAME)
+                log(
+                    game_watch.clean_ceiling_line(
+                        "rollout", label, game_watch.CLEAN_CEILING_SEC, attempt, where
+                    )
+                )
+                raise UnreapableChildError(
+                    f"rollout 半截产出清不掉（attempt {attempt}）：{label}"
+                    f"（{game_watch.CLEAN_CEILING_SEC:g}s 内 rmtree 没返回——挂载点 IO 还没好）"
+                    "——本局不就地重跑（删除者可能晚到）；整轮交回 worker，**立即**重领重投"
+                    f"；现场 {where}"
+                ) from None
         if pool is not None:
             # 送进池的 argv 必须与一次性路径**逐条相同**（含 job 相对路径的绝化）——worker 的
             # cwd 是 TS 代码根，而 `--out`/`--weights` 是相对 job 目录的（见 `_exec_argv`）。
@@ -435,7 +490,15 @@ def _run_one_game_with_retries(
         try:
             return (
                 _run_one_game(
-                    bun, argv, job_dir, ts_dir, out_dir, cap, log=log, attempt=attempt
+                    bun,
+                    argv,
+                    job_dir,
+                    ts_dir,
+                    out_dir,
+                    cap,
+                    log=log,
+                    attempt=attempt,
+                    abandoned=abandoned,
                 ),
                 attempt,
             )
@@ -488,14 +551,18 @@ def _run_one_game_bounded(
         if ceiling_sec is None
         else float(ceiling_sec)
     )
+    #: 被放弃时告诉那条链「你已经被放弃了」：它在 `Popen` 返回后据此就地处决自己的子进程
+    #: （P1-1，评审 P1-4 的 exec 握手窗口）——不置位 = 那条链会把整局跑完并往 `w{i}/` 写。
+    abandoned = threading.Event()
     ok, res = call_bounded(
         lambda: _run_one_game_with_retries(
-            bun, argv, job_dir, ts_dir, out_dir, timeout_sec, log, explicit, pool
+            bun, argv, job_dir, ts_dir, out_dir, timeout_sec, log, explicit, pool, abandoned
         ),
         ceiling,
         name=f"rollout-{label}",
     )
     if not ok:
+        abandoned.set()
         where = str(job_dir / out_dir / ROLLOUT_LOG_NAME)
         log(game_watch.ceiling_line("rollout", label, ceiling, where))
         raise UnreapableChildError(
@@ -734,9 +801,21 @@ def run_iter_rollout(
     if pool is not None:
         ready_n = pool.start()
         if ready_n:
+            # 读数语义（P0-1）：`ready_n` = **真打过 `__SERVE_READY__` 且没死**的个数（旧形态只数
+            # 「进程没退出」，于是 94/94 那种假满）。`unready` = 这次还在冷启动、被**留下**的个数
+            # （不杀：杀掉 = 这批冷启动白付 + 补位再付一次；就绪后自动可发放）。
             rb.note(
-                f"长驻 worker 池：{ready_n}/{workers} 就绪（{argvs[0][0]}）——"
-                "逐局进程启动/权重解析只付一次，单局失败自动回退一次性 spawn"
+                f"长驻 worker 池：{ready_n}/{workers} 真就绪"
+                + (f"（另 {pool.unready} 个仍在冷启动，就绪即入池）" if pool.unready else "")
+                + f"（{argvs[0][0]}）——逐局进程启动/权重解析只付一次，"
+                "单局失败自动回退一次性 spawn"
+            )
+        elif pool.unready:
+            # 零真就绪但有一批在冷启动 ⇒ **不退池**（P0-1 不杀）：那批就绪后随轮入池；现在关池
+            # 等于把它们全扔掉、余下局每局重付一次冷启动（旧形态的放大器之一）。
+            rb.note(
+                f"长驻 worker 池：0/{workers} 真就绪（{pool.unready} 个仍在冷启动，就绪即入池）"
+                "——本波先走一次性 spawn（就绪一个省一次冷启动）"
             )
         else:
             rb.note("长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn")
@@ -933,6 +1012,8 @@ def run_iter_rollout(
             "served": pool.served,
             "spawned": pool.spawned,
             "killed": pool.killed,
+            # 起出来但还没就绪就被留下的 worker 数（P0-1；长期不归零 = 冷启动被压住/根本起不来）
+            "unready": pool.unready,
             "fallback": pool.fallback,
             "reasons": dict(pool.fallback_reasons),
         },

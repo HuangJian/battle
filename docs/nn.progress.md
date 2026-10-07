@@ -32,7 +32,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
 | [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** · **六包重组（刀 1–6）** · **门禁 fail-fast**（§63） · **测试不得碰在跑的控制台**（§64） · **测试不得写生产状态（门禁意图 / 循环控制 / EvalBoard / 权重归档）**（§65） | 33 |
 | [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 / 课程管理页 / 指标表抗轮转抄录 / **回放导出按评估轮选（§32）** | 32 |
-| [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处）· **节点单实例互斥**（§29）· **一局的墙钟上界**（§32） | 31 |
+| [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处）· **节点单实例互斥**（§29）· **一局的墙钟上界**（§32）· **长驻池真就绪 + 有界清理**（§33） | 32 |
 | [`docs/nn/tpu-perf.md`](nn/tpu-perf.md) | TPU / XLA：设备实测 · 单步耗诊断 · 编译缓存 · PPO 吞吐 | 9 |
 
 > **另：每篇多了一个 `决策正文归档` 节（2026-09-23）**。`DECISIONS.md` 同日瘦身，把那批
@@ -103,6 +103,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 15 | **预取被挤走修复的真机判据未取**（代码/单测已齐，见 `docs/nn/remote-transport.md` §50） | `docs/nn/remote-transport.md` §50 | 重拉云 worker 跑同一双课程 ≥3 个 job：出现 `prefetch …: 命中（…零下载开算）`；关键下载 `排队 … 才拿到单通道` **≤5s**（现状峰值 17.6s）；`preempt=` 与日志里的「挤走」行数对得上；`p0_p95` **≤6s**（劣化 ⇒ `--prefetch-depth 0`） |
 | 16 | **抢占作废字节的真机读数未取**（它决定要不要做双端 Range 续传，见 `docs/nn/remote-transport.md` §51 第 3 行） | `docs/nn/remote-transport.md` §51 | 同 scenario 的三个 job 里把每轮 `preempt=N(wasted X.XXMB)` 相加：**Σwasted ≥ 3.4MB（一份 payload）或单次 ≥2MB ⇒ 立项做 Range**；否则不做（先量后裁，门槛已预注册） |
 | 22 | **分关采样平衡（`per-stage-v3`）的真机轮次未取**（代码/单测已齐，见 `docs/nn/training-stack.md` §30） | `docs/nn/training-stack.md` §30 | 一次真机 `kind=run` 轮：云机轮报出现 `volumeTopup{rule=per-stage-v3}` 且 `shortfall_by_stage` 为空（或触 `capped_stages`）；本机链那一轮 iteration 事件出现 `volume_alloc_rule` / `volume_stage_stats`；两处都**不得**退化成旧的全关同局数 |
+| 23 | **长驻池「假就绪」修复的真机轮次未取**（代码/单测已齐，见 `docs/nn/runtime-opt.md` §33） | `docs/nn/runtime-opt.md` §33 | 下一次云机 rollout 轮看五条：① 池行 `N/M 真就绪（另 K 个仍在冷启动…）`；② 熔断行/轮末 `serve_pool:` 汇总带 `unready=`；③「单局超界（155s）」= 0；④ **逐局重试行**（`单局重试 2/3：…`）能出现（⚠ 轮末 `重试过的局 N 个` **不是**判据）；⑤ 轮级墙钟 / `spawned` 不因分批变差（变差 ⇒ 先撤分批、只留真就绪判据） |
 
 ### 3.4 控制台
 
@@ -991,3 +992,16 @@ P1 = `remote/deliver_worker.py`（子进程）+ `remote/deliver_proc.py`（`Deli
 DECISIONS → `DECISIONS.md §2026-10-07-goalnn-offline-deliver-isolation`；全文 → `docs/nn/remote-transport.md` §69；
 门禁 → nn python gate **3747 passed / 0 failed**（顺带修 `e2e/test_auto_handoff_e2e.py` 里赌开发机开着 dashboard 的用例）；
 未做（显式）→ P2 `_eval_rows_for` / `_row_for` 增量读。
+
+**2026-10-07（二）**：长驻池「假就绪」+ 重试路径裸文件 IO（`plan/rollout-serve-pool-readiness.plan.md` 的 P0+P1；
+评审 → `plan/rollout-serve-pool-readiness.review-hy.md` 两处 P0 判据 + 七条 P1 → v2 修订后落地）。
+三处根因：① `start()` 只判 `w.dead` ⇒ 「起来了但没报就绪也没退」的 worker 被当暖的发出去（`94/94 就绪` 是假满）
++ 94 个 bun 一次性并发 `Popen`（冷启动风暴）；② 重试路径 `_clean_attempt`（rglob+rmtree）**裸调且排在 `retry_line` 之前**
+⇒ 44 条线程各自卡满 155s、整轮 32s → 355s，而「重试过的局 0 个」是假象；③ `call_bounded` 只弃线程、不给子进程处置
+（评审把 ③ 下调为**卫生项**：本轮那 44 条线程手里没有子进程）。
+判据修正（评审的）：清理超界 ⇒ **不就地重跑**（被放弃的删除者晚到会删新写者刚写的同一批路径）⇒ 归机器级停滞交整轮重投；
+且已核**两条链的重投都先整目录清场**（hub 重领与自主段 `plan_run` → 同一个 `download._ensure_payload`，preloaded 路径同样清场）。
+落地 = 真就绪判据 + 分批冷启动（`SPAWN_BATCH_SIZE=16`）+ 未就绪不杀（`unready` 计数）+ `retry_line` 前置 +
+有界清理（`game_watch.CLEAN_CEILING_SEC=5.0`；预算 `145 ≤ 155` ⇒ 公式不动）+ 弃线自杀（`abandoned` 标记随调用链走）。
+DECISIONS → `DECISIONS.md §2026-10-07-goalnn-serve-pool-readiness`；全文 → `docs/nn/runtime-opt.md` §33；
+门禁 → nn python gate **3795 passed / 15 skipped**（ruff + mypy + tests/+e2e/）；未决 → §3.3 #23。
