@@ -6,6 +6,54 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §70 自主 worker 收工即停：清单全终态 ⇒ 短窗口收工 + 保活线程收工即停（plan/offline-worker-graceful-exit，2026-10-07）
+
+**触发**：Kaggle 自主 worker 现场（2026-10-07 17:02–17:49，`x21-psh-b0` + `x21-psh-b`）：两门课
+17:03 就跑完，17:04 hub 已明说 `x21-psh-b0[completed…]` + `跳过 x21-psh-b：本会话已跑过这份包`，
+却**空转到 17:33**（29 分钟）才收工；收工后 `[keepalive] alive (110/270 min)` 一直报到 17:49。
+
+**根因（两条，性质不同）**：
+
+1. **空烧 = 等满 `idle_wait_sec=1800`**（`_run_auto` 的空队列分支）。清单里已经**没有会自己变好的活**
+   （`completed` = 本段跑满等人重导包；`not_offline` = 人把课固定在离线之外），只有人介入才复活——
+   但这些态与 `no_pack/held/busy` 走的是同一条 1800s 的线。
+2. **收工后保活不停**：`_keepalive_stop` 全仓**没有任何一处 `set()`**；`_run_auto` 的六条 return
+   与 `run()` 的点名路（`CFG.course` 非空，直调 `_run_batch`，**不过 `_run_auto`**）都没有收工语义。
+
+**诚实账（不要误读）**：保活线程是 **daemon**，停它**不影响 kernel**，更**不影响 TPU**——它的实际
+危害是日志噪音 + 跨轮次线程泄漏。Kaggle 上「不结束 kernel 就继续烧」是**平台约束**（无对应
+`unassign` API）。本节的默认行为只把空烧从 29 分钟压到 **300s**；`shutdown_kernel_on_exit=true`
+（默认关）才 `os._exit()` 结束 kernel 进程，而**杀 kernel 是否让 Kaggle 释放会话/TPU 未经验证**。
+
+**落地**：
+
+- **判据**（`remote/offline_boot.py`）：新增 `TERMINAL_STATES = {completed, not_offline}` 与纯函数
+  `all_terminal(rows, served)`；`resolve_courses` **增加第三个返回值 `manifest`**（原始 hub 行——
+  `picks`/`blocked` 都不带 `state`，而判据要它；且 `_run_auto` 走到空队列分支时 `picks` 恒空）。
+  `_run_auto` 在 `mode != "drain"` **之后**插终态窗口，用**独立**锚点 `terminal_since` 与
+  **独立**预算 `idle_wait_terminal_sec`（缺省 `IDLE_WAIT_TERMINAL_SEC=300`，走 `_num` ⇒ `0` 合法）。
+- **★ 判据必须并上「本会话已跑过这份包（同 sha）」**：现场那门 `x21-psh-b` **没进**
+  「不可领/不可抢」日志 ⇒ 它是 `claimable` 行，只被 `served` 过滤器挡下（`state=ready`）。
+  **只判 state 是终态修不掉现场**——这是首轮评审（`plan/offline-worker-graceful-exit.plan.md` §7 R2）
+  抓出的第一版设计漏洞。
+- **收工即停保活**：落在 **notebook**（`ipynb/battle.offline.ipynb` cell 1）——两条路的唯一公共层。
+  `_run` 的 `try/except/else` 外包 `finally`：`_keepalive_stop.set()`（异常路径也停）。
+  ⚠ **勘误**：`set()` **不会**触发 Colab 的 `runtime.unassign()`——那个分支只在看到哨兵文件
+  `/tmp/battle-halt-request` 时才调，`is_set()` 只让 `while` 退出。
+- **保活单例 + 去重**：`if "_keepalive_stop" not in globals(): …` + `_keepalive_stop.clear()`；
+  起线程前 `any(t.name == "keepalive" and t.is_alive() …)` 去重（同一个 kernel 重跑 cell 才不多起线程）。
+- **新 CFG 键**：`idle_wait_terminal_sec`（300，进 `CFG_KEYS`）· `shutdown_kernel_on_exit`（False，
+  **不进** `CFG_KEYS`——那元组的语义是「`run()` 会读的键」，它只有 notebook 读）。
+
+**没有动的**：hub 侧判据 / `queue_mode` once·drain 语义 / 轮内打点 / 心跳周期（60s）/
+`_run_batch` 的 per-course `finally`（租约与心跳本来就在那里生灭，覆盖全部出口 ⇒ 收工序列里
+再 release/停心跳是**空操作**，故不写）。**P2 条件触发**：若真机出现「本段已收工但 hub 上 hold
+仍 live 且 `expires_in` 持续被续」，再审计 `_run_batch` 的异常出口是否都 `done.set()`。
+
+**回归面**：`resolve_courses` 的签名变更（二元组 → 三元组）波及 `tests/common/test_offline_task_queue.py`
+的全部 fake 与 `e2e/test_auto_handoff_e2e.py` 的两处解包；e2e 那个「三门课全 `end_it_reached`」
+的用例必须显式给 `idle_wait_terminal_sec: 0`，否则按缺省等 300s（挂 5 分钟）。
+
 ## §69 补传腿「忙等修复 + 独立进程」：`_repost` 降为工作项 / 欠账落盘 / `DelivererProcess`（plan/offline-deliver-isolation P0+P1，2026-10-07）
 
 **触发**：云机 `x21-psh-b` 530 起 PPO 单步 `0.186 → 5.26 → 7.40 s/step`（慢轮诊断给墙钟 ≈**40×** 于

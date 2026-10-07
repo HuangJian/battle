@@ -578,7 +578,7 @@ def test_resolve_prefers_offline_course_over_seizing_a_live_online_course(tmp_pa
 
         from remote.offline_boot import resolve_courses
 
-        got, blocked = resolve_courses(
+        got, blocked, _manifest = resolve_courses(
             {"hub_url": hub.base}, {"HUB_TOKEN": TOKEN}, lambda _m: None
         )
         assert [t["course"] for t in got] == ["e2e-off-ready"], got
@@ -644,6 +644,8 @@ def test_auto_loop_seizes_in_training_courses_in_open_time_order(
                 "work_dir": str(tmp_path / "work"),
                 "queue_mode": "drain",
                 "idle_wait_sec": 1.0,
+                # ★ 三门课跑完都是 completed ⇒ 走终态窗口；给 0 = 立刻收工，别按缺省等 300s
+                "idle_wait_terminal_sec": 0,
                 "queue_poll_sec": 0.2,
             },
             {"HUB_TOKEN": TOKEN},
@@ -812,7 +814,7 @@ def test_pinned_online_course_is_not_seized_nor_claimed_by_offline_disk(tmp_path
         assert st2 == 409 and body2.get("pinned_online") is True, body2
         assert _mode_of(hub, C_AUTO) == "online"
         # 真云机选课：没有别的课时一行都不给（不抢人固定的课）
-        picks, blocked = resolve_courses(
+        picks, blocked, _manifest = resolve_courses(
             {"hub_url": hub.base}, {"HUB_TOKEN": TOKEN}, lambda _m: None
         )
         assert picks == [], picks

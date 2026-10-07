@@ -1005,3 +1005,13 @@ DECISIONS → `DECISIONS.md §2026-10-07-goalnn-offline-deliver-isolation`；全
 有界清理（`game_watch.CLEAN_CEILING_SEC=5.0`；预算 `145 ≤ 155` ⇒ 公式不动）+ 弃线自杀（`abandoned` 标记随调用链走）。
 DECISIONS → `DECISIONS.md §2026-10-07-goalnn-serve-pool-readiness`；全文 → `docs/nn/runtime-opt.md` §33；
 门禁 → nn python gate **3795 passed / 15 skipped**（ruff + mypy + tests/+e2e/）；未决 → §3.3 #23。
+
+**2026-10-07（三）**：自主 worker **收工即停**（`plan/offline-worker-graceful-exit.plan.md` 的 P0+P1；一轮评审修订见其 §7）。
+现场 = Kaggle 两门课 17:03 跑完、17:04 hub 已报「completed + 本会话已跑过这份包」，却**空转到 17:33**（29 分钟）才收工，
+且收工后 `[keepalive] alive` 报到 17:49。两条根因性质不同：① **空烧** = 全终态也走 1800s 的 `idle_wait_sec`；
+② 收工后**保活从不 `set()`**（全仓无一处），而点名路（`CFG.course` 直调 `_run_batch`）**不过 `_run_auto`** ⇒ 必须停在 notebook 层。
+判据 = `all_terminal(manifest, served)`：**并上「本会话已跑过这份包（同 sha）」**——现场那门是 `claimable` 行、
+只被 `served` 过滤（`state=ready`），只判终态**修不掉现场**（评审 R2）；为此 `resolve_courses` 增加第三返回值 `manifest`（原始 hub 行）。
+新旋钮 `idle_wait_terminal_sec=300`（`0` = 立刻收工，走 `_num`）；`shutdown_kernel_on_exit` 默认 False 且**标注未验证**
+（杀 kernel 是否真让 Kaggle 释放会话/TPU 未证；`set()` 也不会触发 Colab 的 `unassign`）。
+DECISIONS → `DECISIONS.md §2026-10-07-goalnn-offline-graceful-exit`；全文 → `docs/nn/remote-transport.md` §70。

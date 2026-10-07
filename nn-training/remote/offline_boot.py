@@ -182,6 +182,12 @@ DEFAULT_QUEUE_POLL_SEC = 15.0
 
 #: 等包缺省时长（秒）：hub 没导出 / 用户还没上传，都在这条线上等。
 DEFAULT_WAIT_SEC = 1800.0
+#: **清单全为终态**时的收工窗口（秒）——`CFG.idle_wait_terminal_sec`。
+#: 为什么和 `DEFAULT_WAIT_SEC` 分开：1800s 是「活还没到」的窗口（等新开课 / 等导出），
+#: 而终态（`completed` = 本段跑满待人重导包 / `not_offline` = 人固定在离线之外）只有**人介入**
+#: 才复活 ⇒ 再等下去纯烧会话时间（2026-10-07 现场：17:04 已全终态，却空转到 17:33 = 29 分钟）。
+#: 300s 只给人一个「重导包」的介入窗口；0 = 立刻收工，1800 = 恢复旧行为。
+IDLE_WAIT_TERMINAL_SEC = 300.0
 #: 等包循环的轮询间隔（秒）——两条源都在这条间隔上轮。
 DEFAULT_POLL_SEC = 15.0
 #: hub 取包的重试上限（轮数；`CFG["hub_tries"]`，0 = 不限）。到顶就转「等上传」模式。
@@ -1458,10 +1464,13 @@ def resolve_courses(
     probe: dict | None = None,
     skip: set[str] | None = None,
     worker: str = "",
-) -> tuple[list[dict], list[dict]]:
-    """本次要跑的课 → `([{"course", "pack_sha256"}], blocked)`。
+) -> tuple[list[dict], list[dict], list[dict]]:
+    """本次要跑的课 → `([{"course", "pack_sha256"}], blocked, manifest)`。
 
     `picks` = 要跑的课（同旧形状）；**空 + `blocked` 也空 = 队列真的空**（正常的没事干）。
+    `manifest` = hub 的**原始清单行**（每个 dict 带 `state`/`claimable`/`pack`/`holder`…）——
+    `picks`/`blocked` 都丢掉了 `state`，而 `_run_auto` 的终态收工判据要它（`all_terminal`）。
+    非 hub 路（`CFG.course` 点名）没有清单 ⇒ 给空表（`all_terminal([]) is False`，不误触发）。
     ★P1-9（R3-g，五轮 P1-E）：`blocked` = 「**有活、但被非自己的有效租约持有**」的行
     （`{course, holder, expires_in}`）——「空队列」与「还得等一会儿」从此在**预算**上分开：
     调用方对 `blocked` 退避再问且**不占 `idle_wait_sec`**（否则排 TTL 的十几分钟会被当成空转、
@@ -1485,7 +1494,7 @@ def resolve_courses(
     """
     explicit = _load_deliverable().requested_courses(cfg)
     if explicit:
-        return [{"course": c, "pack_sha256": ""} for c in explicit], []
+        return [{"course": c, "pack_sha256": ""} for c in explicit], [], []
     if probe is not None and probe.get("unsupported"):
         raise SystemExit(_no_courses_msg("hub 没有 /offline/tasks（本会话已探过）"))
     hubs = hub_candidates(cfg, creds)
@@ -1522,7 +1531,7 @@ def resolve_courses(
     ]
     if picked:
         log("清单里可领：" + "、".join(f"{p['course']}" for p in picked))
-        return picked, []
+        return picked, [], tasks
     # ★ 2026-10-04 现场（Kaggle「清单 3 条 ⇒ 队列为空」，用户：「colab 已停机、也切过模式，
     #   为什么还持有租约？」）：租约只有在**显式 release / 900s TTL 到期 / hub 重启**时才消失，
     #   切模式与停课都不动它。而 hub 早就为此分了一档 `lease_verdict == "mine"`（同一 worker_id
@@ -1540,7 +1549,7 @@ def resolve_courses(
             + "、".join(str(t.get("course") or "") for t in mine)
             + "（hub 判 mine ⇒ claim 直接续上，不必等 900s 过期）"
         )
-        return [_as_pick(t) for t in mine], []
+        return [_as_pick(t) for t in mine], [], tasks
     # 没有就绪的离线课 ⇒ 抢占第一个在训在线课。busy 的行**照收**：claim 会回 409 `busy`，
     # 调用方按「中间态不占 idle 预算」等到别的课跑完（比「空队列」更准确）。
     # ★P1-9（R3-g）：被**别人**的有效租约持有的行——带回给调用方（退避再问、不占 idle 预算）。
@@ -1565,7 +1574,7 @@ def resolve_courses(
         wait_rows = [t for t in tasks if not t.get("claimable") and not t.get("seize")]
         if wait_rows:
             log("不可领/不可抢：" + "、".join(f"{_blocked_note(t)}" for t in wait_rows))
-        return [], blocked
+        return [], blocked, tasks
 
     def _open_key(t: dict) -> tuple[float, str]:
         raw = t.get("open_time")
@@ -1578,7 +1587,7 @@ def resolve_courses(
         f"没有就绪的离线课 ⇒ 抢占第一个在训在线课：{first['course']}"
         "（hub 将把它翻成离线）"
     )
-    return [_as_pick(first)], []
+    return [_as_pick(first)], [], tasks
 
 
 def _holder_id(t: dict) -> str:
@@ -1624,6 +1633,42 @@ def _blocked_note(t: dict) -> str:
     if stale:
         bits.append(f"包过期:{stale}")
     return f"{t.get('course')}[{'；'.join(bits)}]"
+
+
+#: 「只有人介入才能复活」的清单态（`_run_auto` 的终态窗口用它）：
+#: `completed` = 本段跑满（等人重导包 / 停课；`hub/queue_offline.py` 的 `TASK_STATE_COMPLETED`）·
+#: `not_offline` = 人把课固定在离线之外（`pinned_online`）。
+#: ⚠ **停课（删开课标记）不在清单里**（hub 六轮 F3 之后：标记一删即不列，只有 `?include=all` 才附带），
+#: 而云机的 `fetch_task_list` 不带 `include=all` ⇒ 这一档实际对应的是 `pinned_online` 行。
+TERMINAL_STATES = frozenset({"completed", "not_offline"})
+
+
+def all_terminal(rows: list[dict], served: dict[str, str] | None = None) -> bool:
+    """清单非空 ∧ 每一行都「不会再自己变好」⇒ 等待没有意义（除非人去重导包 / 停课 / 开新课）。
+
+    两档算「不会自己变好」（判据是**整张清单**，不是 `resolve_courses` 的 picks）：
+
+      ① `state` ∈ `TERMINAL_STATES`；
+      ② **本会话已跑过这份包**（`served[course] == 行上 pack.sha256`）——`resolve_courses` 的
+         `_eligible` 会把它永远过滤掉（防自激：同 sha 再跑一遍 = 回传全判 duplicate），
+         包不换新段就再也领不到，效果与终态等同。
+         ★ 2026-10-07 现场：`x21-psh-b` 正是这一档（它没进「不可领/不可抢」日志 ⇒ 它是
+         `claimable` 行，只被 served 挡下）⇒ **只判 ① 会漏掉现场**。
+
+    `rows` 传**原始 hub 清单**（`resolve_courses` 的第三个返回值）：`picks`/`blocked` 都不带 `state`。
+    """
+    if not rows:
+        return False
+    for t in rows:
+        if str(t.get("state") or "") in TERMINAL_STATES:
+            continue
+        pack = t.get("pack")
+        sha = str(pack.get("sha256") or "") if isinstance(pack, dict) else ""
+        course = str(t.get("course") or "")
+        if sha and served and course and served.get(course) == sha:
+            continue
+        return False
+    return True
 
 
 def _no_courses_msg(why: str) -> str:
@@ -1762,6 +1807,8 @@ def _run_auto(
     一轮：问清单 → 领租约 → 取包 → 跑完 → 交还 → 记 `served[course]=包 sha`。
     队列空 ⇒ `queue_mode="once"` 直接收工；缺省 `"drain"` 驻守轮询，直到
     `idle_wait_sec` / `session_budget_sec` 用尽或收到停机信号（**空队列不是错误**）。
+    ★ 2026-10-07：清单**全为终态**（或本会话已跑过它的包）⇒ 用**独立**的短窗口
+    `idle_wait_terminal_sec` 收工——再等也不会自己变好，只有人介入才复活（`all_terminal`）。
     """
     served: dict[str, str] = {}
     probe: dict = {}
@@ -1782,19 +1829,24 @@ def _run_auto(
 
     budget = _num("session_budget_sec", 0.0)  # 0 = 不限（与逐段的 budget_sec 不是一把旋钮）
     idle_wait = _num("idle_wait_sec", _num("wait_pack_sec", DEFAULT_WAIT_SEC))
+    # 终态窗口：**独立**锚点与预算（不占 idle_wait_sec——「没活了」与「活还没到」是两件事）。
+    idle_wait_terminal = _num("idle_wait_terminal_sec", IDLE_WAIT_TERMINAL_SEC)
     poll = _num("queue_poll_sec", DEFAULT_QUEUE_POLL_SEC)
     start = time.monotonic()
     idle_since = start
+    #: 终态窗口的锚点（`None` = 本拍不是「全终态」）。在**非终态**的每一拍复位。
+    terminal_since: float | None = None
     while True:
         # 本机 worker id 在**取清单之前**备好：`resolve_courses` 要拿它认「自己的租约」
         # （hub 判 `mine` 直接续上——否则 cell 中断重跑会白等 900s TTL，G1 的原始动机）。
         # 它持久化在 `<work>/.worker-id`，重复调用只读文件（不打日志）。
         worker = worker_id_of(_queue_work_dir(cfg), log)
-        tasks, blocked_rows = resolve_courses(
+        tasks, blocked_rows, manifest = resolve_courses(
             cfg, creds, log, served=served, probe=probe, skip=gave_up, worker=worker
         )
         if tasks:
             idle_since = time.monotonic()
+            terminal_since = None  # 有活 ⇒ 终态窗口作废（下一拍若全终态，重新起算）
             hubs = hub_candidates(cfg, creds)
             leases = {
                 "hub": hubs[0] if hubs else "",
@@ -1846,11 +1898,44 @@ def _run_auto(
                 log(f"会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 收工")
                 return rc
             idle_since = time.monotonic()
+            terminal_since = None  # 有活（被别人持有）⇒ 同上，别让终态窗口提前收工
             time.sleep(poll)
             continue
         if mode != "drain":
             log("队列为空（queue_mode=once）⇒ 收工（rc=0：没活干不是失败）")
             return rc
+        # ★ 2026-10-07：清单**全为终态**（跑满待人重导包 / 人固定在离线之外）或**本会话已跑过这份包**
+        #   ⇒ 再等也不会自己变好（只有人介入才复活）。用**独立**的短窗口收工，而不是烧满
+        #   `idle_wait_sec`（现场：17:04 已全终态，却空转到 17:33 = 29 分钟）。
+        #   判据走 `all_terminal(manifest, served)`——注意是**原始清单**：`tasks`/`blocked_rows` 都不带 `state`。
+        if all_terminal(manifest, served):
+            now = time.monotonic()
+            if terminal_since is None:
+                terminal_since = now
+                log(
+                    "清单全为终态（completed / not_offline）或本会话已跑过它的包："
+                    + "、".join(str(t.get("course") or "?") for t in manifest)
+                    + f" —— 等 {idle_wait_terminal:.0f}s 确认无人介入后收工"
+                    "（要立刻收工把它设成 0；要恢复旧行为设成 1800）"
+                )
+            if now - terminal_since >= idle_wait_terminal:
+                log(
+                    f"清单全终态且已等满 idle_wait_terminal_sec={idle_wait_terminal:.0f}s ⇒ 收工"
+                )
+                return rc
+            if budget > 0 and now - start >= budget:
+                log(f"会话预算 session_budget_sec={budget:.0f}s 用尽 ⇒ 收工")
+                return rc
+            if keepalive_stop is not None and keepalive_stop.is_set():
+                log("收到停机信号 ⇒ 收工")
+                return rc
+            log(
+                f"清单全终态 —— {poll:.0f}s 后再问"
+                f"（已等 {now - terminal_since:.0f}s / 上限 {idle_wait_terminal:.0f}s）"
+            )
+            time.sleep(poll)
+            continue
+        terminal_since = None
         waited = time.monotonic() - idle_since
         if waited >= idle_wait:
             log(f"队列空且已等满 idle_wait_sec={idle_wait:.0f}s ⇒ 收工")

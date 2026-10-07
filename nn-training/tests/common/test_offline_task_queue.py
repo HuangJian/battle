@@ -424,7 +424,7 @@ def test_fetch_task_list_returns_none_on_an_old_hub(monkeypatch: pytest.MonkeyPa
 def test_resolve_courses_uses_cfg_and_never_asks_the_hub(monkeypatch: pytest.MonkeyPatch) -> None:
     """`CFG.course` 非空 ⇒ 老行为，清单端点一次都不问（老 hub 不该被每轮刷）。"""
     _no_net(monkeypatch)
-    got, blocked = offline_boot.resolve_courses({"course": ["a", "b"]}, {}, lambda _m: None)
+    got, blocked, _manifest = offline_boot.resolve_courses({"course": ["a", "b"]}, {}, lambda _m: None)
     assert [t["course"] for t in got] == ["a", "b"]
     assert all(t["pack_sha256"] == "" for t in got)
     assert blocked == []
@@ -441,7 +441,7 @@ def test_resolve_courses_filters_claimable_and_served(monkeypatch: pytest.Monkey
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
     lines: list[str] = []
-    got, _blocked = offline_boot.resolve_courses({}, {}, lines.append, served={"b": "bb" * 32})
+    got, _blocked, _manifest = offline_boot.resolve_courses({}, {}, lines.append, served={"b": "bb" * 32})
     assert [t["course"] for t in got] == ["a", "d"]
     assert any("已跑过这份包" in ln for ln in lines), lines
 
@@ -472,7 +472,7 @@ def test_resolve_courses_skips_given_up_courses(monkeypatch: pytest.MonkeyPatch)
     ]
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
-    got, _blocked = offline_boot.resolve_courses({}, {}, lambda _m: None, skip={"a"})
+    got, _blocked, _manifest = offline_boot.resolve_courses({}, {}, lambda _m: None, skip={"a"})
     assert [t["course"] for t in got] == ["b"]
 
 
@@ -511,7 +511,7 @@ def test_resolve_courses_renews_my_own_stale_lease(
     monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
     # 老调用形态（不传 worker）⇒ 谁也不认：空队列 + blocked 带回（两行都算「别人持有」）
     lines: list[str] = []
-    got0, blocked0 = offline_boot.resolve_courses({}, {}, lines.append)
+    got0, blocked0, _m0 = offline_boot.resolve_courses({}, {}, lines.append)
     assert got0 == []
     assert blocked0 == [
         {"course": "mine", "holder": "w-me", "expires_in": 812.0},
@@ -521,7 +521,7 @@ def test_resolve_courses_renews_my_own_stale_lease(
     assert "mine[claimed；held: w-me；持有 w-me（812s 后过期）]" in note, lines
     # 带上自己的 worker id ⇒ 续领那一门（别人的租约仍不动）
     lines2: list[str] = []
-    got, _blocked = offline_boot.resolve_courses({}, {}, lines2.append, worker="w-me")
+    got, _blocked, _manifest = offline_boot.resolve_courses({}, {}, lines2.append, worker="w-me")
     assert [t["course"] for t in got] == ["mine"]
     assert any("续领自己未交还的租约：mine" in ln for ln in lines2), lines2
 
@@ -563,7 +563,9 @@ def test_resolve_courses_logs_why_a_row_is_blocked(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
     lines: list[str] = []
-    assert offline_boot.resolve_courses({}, {}, lines.append) == ([], [])
+    got, blocked, manifest = offline_boot.resolve_courses({}, {}, lines.append)
+    assert (got, blocked) == ([], [])
+    assert manifest == tasks, "第三个返回值必须是原始清单（终态判据要它的 state）"
     note = "\n".join(lines)
     assert "不可领/不可抢" in note, lines
     assert "stopped[not_offline；not_offline]" in note, lines
@@ -580,9 +582,9 @@ def test_resolve_courses_prefers_offline_over_seize(monkeypatch: pytest.MonkeyPa
     ]
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
-    got, _blocked = offline_boot.resolve_courses({}, {}, lambda _m: None)
+    got, _blocked, _manifest = offline_boot.resolve_courses({}, {}, lambda _m: None)
     assert [t["course"] for t in got] == ["off"]
-    got2, _b2 = offline_boot.resolve_courses({}, {}, lambda _m: None, served={"off": "aa" * 32})
+    got2, _b2, _m2 = offline_boot.resolve_courses({}, {}, lambda _m: None, served={"off": "aa" * 32})
     assert [t["course"] for t in got2] == ["on"]
 
 
@@ -607,12 +609,12 @@ def test_resolve_courses_seizes_the_first_in_training_online_course(
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
     lines: list[str] = []
-    got, _blocked = offline_boot.resolve_courses({}, {}, lines.append)
+    got, _blocked, _manifest = offline_boot.resolve_courses({}, {}, lines.append)
     assert [t["course"] for t in got] == ["a-tie"]
     assert any("抢占第一个在训在线课" in ln for ln in lines), lines
 
     # 已跑过 a-tie 的这份包 ⇒ 顺延到下一门（c-tie）：过滤与离线路同一套。
-    got2, _b2 = offline_boot.resolve_courses({}, {}, lambda _m: None, served={"a-tie": "aa" * 32})
+    got2, _b2, _m2 = offline_boot.resolve_courses({}, {}, lambda _m: None, served={"a-tie": "aa" * 32})
     assert [t["course"] for t in got2] == ["c-tie"]
 
 
@@ -643,11 +645,11 @@ def test_run_auto_waits_for_the_export_without_burning_idle_budget(
     """导包窗口（分钟级）不能被当成空转：全会话不因它提前收工（U2/P0-1）。"""
     state = {"n": 0}
 
-    def fake_resolve(cfg: dict, creds: dict, log: Any, **kw: Any) -> tuple[list[dict], list[dict]]:
+    def fake_resolve(cfg: dict, creds: dict, log: Any, **kw: Any) -> tuple[list[dict], list[dict], list[dict]]:
         state["n"] += 1
         if state["n"] == 1:
-            return [{"course": "c5-gae", "pack_sha256": ""}], []
-        return [], []
+            return [{"course": "c5-gae", "pack_sha256": ""}], [], []
+        return [], [], []
 
     def fake_batch(cfg, creds, log, stop, courses, *, multi, leases, shas):
         leases["blockers"] = {"c5-gae": "pending_export"}
@@ -699,11 +701,11 @@ def test_run_auto_claims_runs_and_releases(monkeypatch: pytest.MonkeyPatch, tmp_
     """一轮的完整接线：问清单 → 领租约（带落盘的 worker id）→ 跑 → 交还 → 记 served。"""
     state = {"n": 0}
 
-    def fake_resolve(cfg: dict, creds: dict, log: Any, **kw: Any) -> tuple[list[dict], list[dict]]:
+    def fake_resolve(cfg: dict, creds: dict, log: Any, **kw: Any) -> tuple[list[dict], list[dict], list[dict]]:
         state["n"] += 1
         if state["n"] == 1:
-            return [{"course": "c5-gae", "pack_sha256": "aa" * 32}], []
-        return [], []
+            return [{"course": "c5-gae", "pack_sha256": "aa" * 32}], [], []
+        return [], [], []
 
     seen: dict = {}
 
@@ -731,7 +733,7 @@ def test_run_auto_once_mode_returns_on_an_empty_queue(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """`queue_mode="once"`：队列空 = 正常收工（rc=0），不驻守。"""
-    monkeypatch.setattr(offline_boot, "resolve_courses", lambda cfg, creds, log, **kw: ([], []))
+    monkeypatch.setattr(offline_boot, "resolve_courses", lambda cfg, creds, log, **kw: ([], [], []))
     lines: list[str] = []
     rc = offline_boot._run_auto(
         {"work_dir": str(tmp_path), "queue_mode": "once"}, {}, lines.append, None
@@ -743,7 +745,7 @@ def test_run_auto_drain_gives_up_after_idle_wait(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """缺省 drain：空队列驻守，等满 `idle_wait_sec` 才收工（空队列**不是**错误）。"""
-    monkeypatch.setattr(offline_boot, "resolve_courses", lambda cfg, creds, log, **kw: ([], []))
+    monkeypatch.setattr(offline_boot, "resolve_courses", lambda cfg, creds, log, **kw: ([], [], []))
     lines: list[str] = []
     rc = offline_boot._run_auto(
         {"work_dir": str(tmp_path), "idle_wait_sec": 0}, {}, lines.append, None
@@ -755,7 +757,7 @@ def test_run_auto_stops_on_the_keepalive_signal(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """停机信号（notebook 保活）⇒ 收工，不再空驻守。"""
-    monkeypatch.setattr(offline_boot, "resolve_courses", lambda cfg, creds, log, **kw: ([], []))
+    monkeypatch.setattr(offline_boot, "resolve_courses", lambda cfg, creds, log, **kw: ([], [], []))
     stop = threading.Event()
     stop.set()
     lines: list[str] = []
@@ -763,6 +765,178 @@ def test_run_auto_stops_on_the_keepalive_signal(
         {"work_dir": str(tmp_path), "idle_wait_sec": 999}, {}, lines.append, stop
     )
     assert rc == 0 and any("停机信号" in ln for ln in lines), lines
+
+
+# ───────────────────────── 终态收工窗口（plan/offline-worker-graceful-exit）─────────
+
+
+def test_all_terminal_accepts_terminal_and_served_rows() -> None:
+    """★ 2026-10-07：两档都算「不会再自己变好」——① 终态 ② 本会话已跑过这份包（同 sha）。"""
+    assert frozenset({"completed", "not_offline"}) == offline_boot.TERMINAL_STATES
+    assert offline_boot.all_terminal([{"state": "completed"}, {"state": "not_offline"}]) is True
+    # 现场原型：`x21-psh-b0` = completed；`x21-psh-b` = hub 仍列 `ready`，但本会话已跑过它的包
+    assert (
+        offline_boot.all_terminal(
+            [
+                {"course": "x21-psh-b0", "state": "completed", "pack": {"sha256": "a" * 64}},
+                {"course": "x21-psh-b", "state": "ready", "pack": {"sha256": "b" * 64}},
+            ],
+            {"x21-psh-b": "b" * 64},
+        )
+        is True
+    )
+
+
+def test_all_terminal_rejects_rows_that_can_still_change() -> None:
+    """负向：只要有一行还能自己变好（等导出 / 被别人持有 / 有可领的包）⇒ 不得提前收工。"""
+    assert offline_boot.all_terminal([]) is False, "空清单不是「全终态」（那是「队列真的空」）"
+    for row in ({"state": "held"}, {"state": "no_pack"}, {"state": "claimed"},
+                {"state": "ready"}, {"state": ""}, {}):
+        assert offline_boot.all_terminal([row]) is False, row
+    # served 只对**同一份包**有效：hub 换了新段（新 sha）⇒ 又能领 ⇒ 不是终态。
+    assert (
+        offline_boot.all_terminal(
+            [{"course": "b", "state": "ready", "pack": {"sha256": "c" * 64}}], {"b": "b" * 64}
+        )
+        is False
+    )
+    assert offline_boot.all_terminal([{"state": "completed"}, {"state": "no_pack"}]) is False
+
+
+def test_run_auto_all_terminal_uses_the_short_window(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★ 2026-10-07 现场：清单**全为终态** ⇒ 走独立短窗口，不再空转满 `idle_wait_sec`。
+
+    现场（17:04 已全终态 ⇒ 17:33 才收工 = 29 分钟）里 `idle_wait_sec=1800` 是元凶；
+    这里给 `idle_wait_sec=9999` 也照样立刻收工（窗口只认新旋钮）。
+    """
+    manifest = [
+        {"course": "x21-psh-b0", "state": "completed", "claimable": False, "pack": {"sha256": "a" * 64}},
+        {"course": "x21-psh-b", "state": "completed", "claimable": False, "pack": {"sha256": "b" * 64}},
+    ]
+
+    def _no_batch(*_a: Any, **_k: Any) -> int:
+        raise AssertionError("全终态 ⇒ 本拍不该跑任何课")
+
+    monkeypatch.setattr(offline_boot, "_run_batch", _no_batch)
+    monkeypatch.setattr(offline_boot, "resolve_courses", lambda cfg, creds, log, **kw: ([], [], manifest))
+    lines: list[str] = []
+    rc = offline_boot._run_auto(
+        {
+            "work_dir": str(tmp_path),
+            "idle_wait_sec": 9999,
+            "idle_wait_terminal_sec": 0,
+            "queue_poll_sec": 0,
+        },
+        {},
+        lines.append,
+        None,
+    )
+    assert rc == 0
+    assert any("全为终态" in ln for ln in lines), lines
+    assert any("idle_wait_terminal_sec=0s ⇒ 收工" in ln for ln in lines), lines
+
+
+def test_run_auto_stops_when_a_served_pack_comes_back_ready(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """★ 现场原型（判据 ②）：本会话跑过的课在 hub 上仍是 `ready`（同一份包）⇒ 也算终态。
+
+    只判 `state ∈ TERMINAL_STATES` 会漏掉这一档 —— 而**现场正是这一档**：
+    `x21-psh-b` 没进「不可领/不可抢」日志（说明它是 `claimable` 行，只被 `served` 挡下）。
+    """
+    manifest = [
+        {"course": "b0", "state": "completed", "claimable": False, "pack": {"sha256": "a" * 64}},
+        {"course": "b", "state": "ready", "claimable": True, "pack": {"sha256": "b" * 64}},
+    ]
+    state = {"n": 0}
+
+    def fake_resolve(cfg: dict, creds: dict, log: Any, **kw: Any) -> tuple[list[dict], list[dict], list[dict]]:
+        state["n"] += 1
+        if state["n"] == 1:
+            return [{"course": "b", "pack_sha256": "b" * 64}], [], manifest
+        return [], [], manifest
+
+    def fake_batch(cfg, creds, log, stop, courses, *, multi, leases, shas):
+        leases["served"]["b"] = "b" * 64  # 与生产 `_run_batch` 同义：跑完记 served[course]=sha
+        leases["blockers"] = {}
+        leases["gave_up"] = []
+        leases["ran"] = 1
+        return 0
+
+    monkeypatch.setattr(offline_boot, "resolve_courses", fake_resolve)
+    monkeypatch.setattr(offline_boot, "_run_batch", fake_batch)
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    lines: list[str] = []
+    rc = offline_boot._run_auto(
+        {
+            "work_dir": str(tmp_path),
+            "idle_wait_sec": 9999,
+            "idle_wait_terminal_sec": 0,
+            "queue_poll_sec": 0,
+        },
+        {},
+        lines.append,
+        None,
+    )
+    assert rc == 0
+    assert any("全为终态" in ln for ln in lines), lines
+    assert any("idle_wait_terminal_sec=0s ⇒ 收工" in ln for ln in lines), lines
+
+
+def test_run_auto_does_not_take_the_terminal_window_on_a_mixed_manifest(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """负向：有一行**还能自己变好**（`no_pack` = 等控制台导出）⇒ 照旧走 idle 口径。"""
+    manifest = [
+        {"course": "done", "state": "completed", "claimable": False, "pack": {"sha256": "a" * 64}},
+        {"course": "await-pack", "state": "no_pack", "claimable": False, "pack": None},
+    ]
+    monkeypatch.setattr(offline_boot, "resolve_courses", lambda cfg, creds, log, **kw: ([], [], manifest))
+    lines: list[str] = []
+    rc = offline_boot._run_auto(
+        {
+            "work_dir": str(tmp_path),
+            "idle_wait_sec": 0,
+            "idle_wait_terminal_sec": 0,
+            "queue_poll_sec": 0,
+        },
+        {},
+        lines.append,
+        None,
+    )
+    assert rc == 0
+    assert not any("全为终态" in ln for ln in lines), lines
+    assert any("已等满 idle_wait_sec=0s" in ln for ln in lines), lines
+
+
+def test_run_auto_terminal_window_is_independent_of_idle_wait(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """终态窗口是**独立**预算：`idle_wait_sec=0` 也不会把它提前收掉（旧口径由新旋钮接管）。
+
+    证明三点：① 进的是终态分支（不是 idle 分支）；② 窗口没到点；③ 最终由会话预算退出。
+    """
+    manifest = [{"course": "done", "state": "completed", "claimable": False, "pack": {"sha256": "a" * 64}}]
+    monkeypatch.setattr(offline_boot, "resolve_courses", lambda cfg, creds, log, **kw: ([], [], manifest))
+    lines: list[str] = []
+    rc = offline_boot._run_auto(
+        {
+            "work_dir": str(tmp_path),
+            "idle_wait_sec": 0,
+            "idle_wait_terminal_sec": 9999,
+            "session_budget_sec": 0.05,
+            "queue_poll_sec": 0.02,
+        },
+        {},
+        lines.append,
+        None,
+    )
+    assert rc == 0
+    assert any("全为终态" in ln for ln in lines), lines
+    assert not any("idle_wait_terminal_sec" in ln and "⇒ 收工" in ln for ln in lines), lines
+    assert any("session_budget_sec" in ln for ln in lines), lines
 
 
 def test_heartbeat_loop_beats_then_stops(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -907,7 +1081,7 @@ def test_resolve_skips_pinned_online_rows(monkeypatch: pytest.MonkeyPatch) -> No
     ]
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
-    got, blocked = offline_boot.resolve_courses({}, {}, lambda _m: None)
+    got, blocked, _manifest = offline_boot.resolve_courses({}, {}, lambda _m: None)
     assert [t["course"] for t in got] == ["auto"], got
     assert blocked == [], blocked  # 人固定的课不会自动放出来：不算「等它放」
 
@@ -933,7 +1107,7 @@ def test_resolve_picks_stale_holder_row(monkeypatch: pytest.MonkeyPatch) -> None
     ]
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
-    got, blocked = offline_boot.resolve_courses({}, {}, lambda _m: None)
+    got, blocked, _manifest = offline_boot.resolve_courses({}, {}, lambda _m: None)
     assert [t["course"] for t in got] == ["dead-held"], got
     assert got[0]["pack_sha256"] == "cc" * 32
     assert blocked == [], blocked

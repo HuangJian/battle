@@ -41,6 +41,7 @@ CFG_KEYS = (
     "queue_mode",
     "queue_poll_sec",
     "idle_wait_sec",
+    "idle_wait_terminal_sec",
     "session_budget_sec",
     "live_backfeed",
     "device",
@@ -275,3 +276,48 @@ def test_cell_has_no_key_material_or_hardcoded_course() -> None:
     )
     for key in ("hub_token", "ts_authkey", "hub_ip"):
         assert f'"{key}": ""' in text, f"{key} 不该预置值（凭据走 Secret / 现场填）"
+
+
+def test_keepalive_stop_is_a_session_singleton(cell: str) -> None:
+    """★ 2026-10-07：同 kernel 重跑本 cell 不得**新建** Event —— 旧保活线程持有旧 Event
+    就永远收不到 `set()`（现场：两串 alive 分钟数交替递增，其中一个所属的 `_run` 早已退出）。"""
+    assert 'if "_keepalive_stop" not in globals():' in cell, "保活 Event 必须是模块级单例"
+    assert "_keepalive_stop.clear()" in cell, (
+        "重跑前必须复位（上一轮收工若已 set()，新线程会立刻退出）"
+    )
+    guard = cell.index('if "_keepalive_stop" not in globals():')
+    assert cell.index("_keepalive_stop = threading.Event()") > guard, (
+        "Event 的赋值必须在 globals 守卫内（裸赋值会换掉旧线程看的那个对象）"
+    )
+
+
+def test_keepalive_thread_not_duplicated(cell: str) -> None:
+    """★ 2026-10-07：起保活线程前必须先去重（同名线程还活着就别再起一个）。"""
+    assert 't.name == "keepalive"' in cell and "threading.enumerate()" in cell, (
+        "起保活线程前要按 name + is_alive 去重"
+    )
+    assert cell.index("threading.enumerate()") < cell.rindex('name="keepalive"')
+
+
+def test_keepalive_stop_is_set_on_exit(cell: str) -> None:
+    """★ 2026-10-07：收工必须 `_keepalive_stop.set()`，且要在 **finally** 里。
+
+    为什么停在这一层而不是 `_run_auto`：两条路（自动队列 `_run_auto` 与 `CFG.course` 点名
+    直调 `_run_batch`）都只经过 notebook 这一层 ⇒ 只有它能一次盖全；`_run_auto` 的 return
+    收敛盖不住点名路。
+    """
+    assert "_keepalive_stop.set()" in cell, "收工必须停保活（否则 kernel 一直报到会话被回收）"
+    assert cell.index("_keepalive_stop.set()") > cell.rindex("finally:"), (
+        "停保活要在 finally 里（异常路径也要停）"
+    )
+
+
+def test_shutdown_kernel_switch_is_off_by_default(cell: str) -> None:
+    """★ 2026-10-07：结束 kernel 是不可逆的外部动作 ⇒ 默认关（cell 2 中途取回依赖同一 kernel）。"""
+    assert '"shutdown_kernel_on_exit": False' in cell, "缺省必须 False"
+
+
+def test_kernel_exit_uses_os_exit_not_sys_exit(cell: str) -> None:
+    """★ 2026-10-07：cell 里 `sys.exit()` 只抛 SystemExit（kernel 不死、TPU 照烧）⇒ 必须 `os._exit`。"""
+    assert "os._exit(" in cell, "结束 kernel 必须 os._exit（sys.exit 在 cell 里杀不掉 kernel）"
+    assert "sys.exit(0)" not in cell, "别用 sys.exit(0) 当「结束 kernel」（它在 cell 里无效）"
