@@ -1,0 +1,126 @@
+// 课程 x21-psh-b —— policy-spatial-head 腿 B：C=8 空间塔 + 9 维（头 151 输入）。
+//
+// 立项 → plan/policy-spatial-head.plan.md（v6）§4 Step 5：相对腿 A 的**唯一改动 = 加 §3.3 的塔**
+//   （1×1 64→8 + ReLU + 4×4 分区均值 + FC 128→112）；新头 [112+30+9]=151。
+// 对照臂 = `x21-psh-b0`（同起点/同预算/同配对随机流，唯一差别 = 有没有空间塔）。
+//
+// ── 开工门（必须先满足，不满足不开课）─────────────────────────────────────
+//   ① 腿 A 跑满 it150（✓ 2026-10-06，终判挂起→"看见了但没转化"——满足 §5.5"挂起 + 方向改善 ⇒ 腿 B 可启动"）。
+//   ② 起点已从腿 A 终点现转（命令见下，85345 参数，warmstart_missing=头2+塔4键；**不得复用**旧占位件）：
+//        bash tools/githook/nn-py-safe.sh nn-training/worker/scripts/init_spatial_leg.py \
+//          --from nn-training/weights/x21-psh-a/x21-psh-a.it150.20261006-093718.json \
+//          --to nn-training/weights/spatial-legB/spatial-legB.it0.json \
+//          --policy-extra --spatial-tower --allow-partial-init --seed 20261012
+//      （B0 = 腿 A 终点直接复制，头保持训态；详见 x21-psh-b0 头注。两臂同源腿 A 终点。）
+//
+// ⚠ 结论边界（plan §4 Step 5 + §5.6，先写在开课头上防误读）：
+//   · 腿 A 的 policy 路径权重在腿 B 里一个都加载不了（137 vs 151 + 路径变了），
+//     所以 B 的头+塔是冷启动；B0 系直接复制，头保持腿 A 训态（暖）⇒ 这个对照
+//     **对新架构不利（偏保守，比计划原定价更保守）**。详见 x21-psh-b0 头注 + DECISIONS。
+//   · 因此：B > B0 ⇒ 结论很强；B ≤ B0 ⇒ **不许判定"空间头没用"**，先查塔的 ‖ΔW‖/轮，分两岔：
+//       ① 梯度没到达（it50→it150 塔权重相对变化 < 5%，或 S0-e 复现失败）⇒ 回工程侧修，算工程失败；
+//       ② 一直在长但终判平 ⇒ 真·欠训练 ⇒ 另立"加预算"探针（新 out/traj，不在本计划内改数）。
+//   · 挂起同样可接受：主判同报杀敌与方向诊断，读到挂起预注册为"感知有效但转化不足在塔上重演",
+//     不算失败（启动条件里含"挂起 + 方向改善"——verdict 不能比启动门槛更严）。
+//
+// K→5  interplay（plan §5.7）：预算只够一个时**先做 K→5**（稀释前提下腿 B 在旧节奏必读挂起，
+//   白跑 300 iter）。若并行且 K→5 改了节奏，本腿结果降级为探索性（已预先声明）。
+//
+// 判决 → plan §5（与腿 A 同口径）：N=1600 两段式（415000+417000，分层配对等权合成）；
+//   主判 = 杀敌 CI 下限 > 0；安全门 = 通关率 CI 下限 > −5pp；直关 = 杀敌 CI 上限 < 0；
+//   it100 只读哨兵（800 局 @415000，子集，不改判决）；enclR 只报告不进分支。
+// 预算 150 iter、判决点 it150（与腿 A 同；拒绝 peak-pick）。
+// 配对随机流：`paired_rotate_seed = 20261012`（**与 b0 同值**；全新流：20261006–11 已被
+//   x20-adv2/adv3 腿与 psh-a/a0 占用，不与任何既往腿重复 → AGENTS §15.1）。
+// 开训检查（S0-e 同族）：开训 20 步后塔权重 ‖ΔW‖ > 0 且进 param_group，否则回工程侧修。
+//
+// ── 训练设置：与 x21-psh-a 逐字同（唯一变量 = 有没有空间塔）──────────────────
+//   奖励 11 参数 / lr / epochs / mb / gamma / lam / ppo_schedule / 采集配额 / eval 块全同；
+//   kickstart 锚 = 各自 bc（init 0.1 几何衰减）。
+// ── 结课报告（2026-10-07，it300 收官）──────────────────────────────────────
+//   训练：1–300 轮跑满（权重无缺档；中途 it16/it17 两次配对熔断误杀，经 baseline+重启 trainer 恢复；
+//   B0 一次 baseline 误杀，margin 5→10 校准）。日常终点 it300 = 29.50%/11.11（峰值仍是 it150 的 11.49）。
+//   终判（it150，N=1600 @415000+417000，配对全中）：杀敌 D=-0.01 CI [-0.50,+0.48]（含 0）
+//   + 通关 D=-2.25pp CI [-5.38,+0.88]（破线）+ acc 全负 ⇒ 关闭；塔 it50→it150 动 28–253%（梯度到，
+//   非工程失败）⇒ 真·持平。池外确认（it300，N=800 @419000 全新段，配对全中）：杀敌 D=-0.11
+//   CI [-0.80,+0.58]（含 0）+ 通关 D=-1.12pp CI [-5.51,+3.26]（破线）+ acc≈0 ⇒ 同形关闭，
+//   非段运气、非预算问题。延伸段 it150–300 零斜率，"半山腰"假设证伪。
+//   结论：C=8 空间塔在此任务/节奏/预算下无转化；不切换；权重留档。后续：K→5 立案待批。
+{
+  "version": 5,
+  "name": "x21-psh-b",
+  "mode": "per-tick",
+  // 环境：ladder-c20-lives1（4 关 2000-2003、20 敌、max_ticks 12900、lives 1、hard）。任务侧一个字不动。
+  "level": "ladder-c20-lives1",
+
+  // ── 奖励：x20-adv-hurt 逐字（本计划不碰奖励）─────────────────────────────
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0
+    },
+    // dense-only（与 A 一致）：terminal 空表合法。
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：腿 A 终点转出（v4 权重；主干/fc/value 继承，塔+头同分布初始化）────────
+  //   ⚠ 开课前必须按头注命令现转；占位件 warmstart_from 对不上。
+  "bc": "nn-training/weights/spatial-legB/spatial-legB.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断参照物：baseline（本腿 it0）。2026-10-06 it16 配对熔断误杀教训：B 按计划冷启动（it0 0%），
+  // paired 模式把"冷爬坡"当"烧干"处决（0% vs B0 31% 连 3 点）；A 全程零 burn 记录（= 实际未被守卫），
+  // 故 B 与 A 对齐用 baseline（own-it0=0% ⇒ floor −5pp，爬坡期不误杀；真正塌回 0 另有 F4/kl/ent 过程守卫）。
+  // 改的是停腿判据，不改数据/更新/评估 ⇒ 不触发新实验（块不进 corpus_identity_fp）。DECISIONS 见证。
+  "kickstart_burn": { "mode": "baseline" },
+  "warmup_iters": 0,
+
+  // ── 预算：150 轮（plan 判决点 it150）─────────────────────────────────────
+  "iters": 300,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  // ── 采集：与腿 A 逐字同 ─────────────────────────────────────────────────
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // b/b0 同值（公平比"有没有空间塔"的前提；不同值 = 两条不同语料流，裁决作废）。
+  "paired_rotate_seed": 20261012,
+
+  "decision_events": false,
+
+  // ── 路径：新目录、禁续跑（§15.5；新实验 = 新 out/traj）─────────────────────
+  "out": "tmp/x21-psh-b/weights.json",
+  "traj": "tmp/x21-psh-b",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x21-psh-b",
+  "backup_prefix": "x21-psh-b",
+
+  // ── 评估：与腿 A 逐字同（首达看日常点；终判另跑 415000/417000，见 plan §5.1）───
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

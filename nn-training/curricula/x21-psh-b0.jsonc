@@ -1,0 +1,111 @@
+// 课程 x21-psh-b0 —— policy-spatial-head 腿 B 的**对照臂**：腿 A 架构（头 137，无塔）。
+//
+// 立项 → plan/policy-spatial-head.plan.md（v6）§4 Step 5：B0 = 腿 A 终点**直接复制**
+//   （v4→v4 严格可载，旧架构头 128 在此不适用——B0 的架构就是腿 A 架构）；
+//   同预算 150、同判决点、同配对随机流，**唯一差别 = 有没有空间塔**。
+// 起点生成（plan 原文"直接复制"，B0 不从终点起跑的写法一律拒收）：
+//   cp nn-training/weights/x21-psh-a/x21-psh-a.it150.<ts>.json \
+//      nn-training/weights/spatial-legB0/spatial-legB0.it0.json
+//   （已执行，sha256 逐字节相同见证；v4→v4 严格可载，无需迁移；--legacy-arch 在此禁用——那是 A0 档。）
+//   ⚠ 机制含义：直接复制 ⇒ B0 的走位/开火头保持腿 A 训态（暖），而 B 的头+塔是冷启动。
+//   这比计划 §5.6 原定价（仅 fc 暖）更偏保守——verdict-safe：B > B0 结论更强；B ≤ B0 走两岔
+//   （梯度未到达 / 真欠训练），不许定罪。DECISIONS §2026-10-06-psh-leg-b-start 见证。
+//   （若要"双冷头"对称，须改 init 脚本加强制重初始化 = 偏离计划字面指令，未采用。）
+//
+// ── 开工门（必须先满足，不满足不开课）─────────────────────────────────────
+//   ① 腿 A 跑满 it150（✓ 2026-10-06，终判挂起→"看见了但没转化"）；② B0 起点已就位
+//   （直接复制，sha 相同）；③ B 起点同步转出（`--policy-extra --spatial-tower --seed 20261012`，
+//   85345 参数，warmstart_missing=头2+塔4键）。三项齐 ⇒ 可开课。
+//
+// ⚠ 结论边界（plan §4 Step 5 + §5.6，先写在开课头上防误读）：
+//   · B0 全路径承自腿 A 终点（含训过的 137 头，暖），B 的塔+头全冷 ⇒ 对照对新架构不利
+//     （偏保守，比计划原定价更保守，见上）。
+//   · B > B0 ⇒ 结论很强；B ≤ B0 ⇒ 不许定罪，按两岔（梯度未到达 / 真欠训练）分别处理（见 x21-psh-b 头注）。
+//   · 挂起预注册为"感知有效但转化不足在塔上重演"，不算失败。
+//
+// 其余设置（奖励 11 参数 / lr / epochs / mb / gamma / lam / ppo_schedule / 采集配额 / eval 块 /
+//   iters 150 / paired_rotate_seed 20261012 / kickstart 0.1）与 x21-psh-b **逐字同**——
+//   唯一变量 = 空间塔。终判口径见 x21-psh-b 头注（plan §5，两腿共用同一张裁决表 §5.4）。
+// ── 结课报告（2026-10-07，it300 收官，对照臂）────────────────────────────────
+//   训练：1–300 轮跑满（权重无缺档；it31 一次 baseline 熔断误杀〈基线 it0 仅 105 局、SE≈4.7pp〉，
+//   margin 5→10 校准后恢复）。日常终点 it300 = 28.00%/10.58；it150–300 高位横盘 ~32%/11.2，
+//   日常重心全程压 B 约 0.6 杀。
+//   终判与池外确认见 x21-psh-b 头注（对照臂读数：it150 @415000 26.9%/10.44 + @417000 32.5%/11.57；
+//   it300 @419000 27.1%/10.42）。对照臂使命完成：配对参照有效，无自杀，权重留档。
+//   加冕（2026-10-07）：峰值 B0-it290（35.00%/11.72）四峰同题排名第一，且配对双显著胜 hu150
+//   （杀敌 +0.63 [+0.13,+1.12]、通关 +3.75pp [+0.48,+7.02]，N=1600 同种子；`tmp/peak-crown/`）。
+//   全场最强权重 = `nn-training/weights/x21-psh-b0/x21-psh-b0.it290.20261007-004553.json`
+//   （峰值自选 + 约双倍预算在身，"最强权重"≠"最优架构"，架构 verdict 不变）。
+{
+  "version": 5,
+  "name": "x21-psh-b0",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：腿 A 终点转出（v4 权重；架构 = 腿 A 架构，头 137 同分布重初始化）────────
+  //   ⚠ 开课前必须按头注命令现转；文件尚不存在。
+  "bc": "nn-training/weights/spatial-legB0/spatial-legB0.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断参照物：baseline（本腿 it0=35.2%）。与 B 同改，另一半理由：paired 模式下若 B 后期反超，
+  // B0 会因"输给实验臂"被处决——对照臂永不自杀（x20-clutch-null 前例）；baseline 只守真塌
+  // （连 3 点 < 30.2%），不因输 B 而死。DECISIONS 见证。
+  // 2026-10-06 it31 误杀补记：基线 it0 只有 105 局（dropped 95），SE≈4.7pp，margin 5pp≈1σ 口径，
+  // B0 实际横盘 29–31%（杀敌 primary 稳 10.6+，从未退）也被处决 ⇒ margin 校准到 10pp（floor 25.2%，
+  // 真塌照抓）。改的是停腿口径，不改训练。restart-only：改完须重启 trainer + 停开课程才生效。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 10 },
+  "warmup_iters": 0,
+
+  "iters": 300,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 与 x21-psh-b 同值（配对裁决前提）；与 psh-a/a0（20261011）不同流（§15.1 轮换）。
+  "paired_rotate_seed": 20261012,
+
+  "decision_events": false,
+
+  "out": "tmp/x21-psh-b0/weights.json",
+  "traj": "tmp/x21-psh-b0",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/x21-psh-b0",
+  "backup_prefix": "x21-psh-b0",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
