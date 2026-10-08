@@ -574,6 +574,37 @@ def test_claim_with_pack_asks_console_for_freshness(tmp_path: Path, monkeypatch)
     assert calls == ["c-other"]
 
 
+def test_claim_hold_anchor_is_stamped_when_the_lease_reaches_the_client(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """claim 的进度锚打在**响应时刻**（不是 claim 开头）：控制台核对是阻塞调用。
+
+    真事故（2026-10-08 e2e 三条红）：`_ask_console_freshness` 在 claim 成功后、响应前同步跑
+    （控制台不可达时实测 ~2s，上限 `TASK_PACK_TRIGGER_TIMEOUT_SEC=8s`），而 hold 的第一个
+    进度锚在 claim 开头就打了 ⇒ 秒级判活窗（e2e 的 2s）下，刚交到客户端手里的 hold 当场
+    是 stale：`GET /offline/hold` 回 `state=stale`、清单 `claimable` 翻 true、同一台盘的
+    busy 闸同时失效（一拖一形同虚设）。
+    """
+    monkeypatch.setenv("BCITY_HOLD_PROGRESS_STALE_SEC", "2")
+    clock = [1000.0]
+
+    def slow_console(course: str, log=None) -> tuple[bool, str]:
+        clock[0] += 5.0  # 控制台核对耗 5s（> 判活窗 2s）
+        return True, "ok"
+
+    monkeypatch.setattr(offline_mod, "trigger_auto_handoff", slow_console)
+    base, hub, _srv = _boot(tmp_path, now_fn=lambda: clock[0])
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae")
+    st, raw = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
+    assert st == 200, raw[:200]
+    hold = hub.hold_of("c5-gae")
+    assert hold["state"] == "live", hold
+    assert hold["last_progress_at"] == pytest.approx(1005.0)
+    # 闸的镜像同拍跟随（否则「拿到租约」与「别人能不能碰这门课」分叉）
+    assert hub._stores["c5-gae"].hold_blocked() == "held:w1"
+
+
 def test_claim_with_pack_degrades_when_console_unreachable(tmp_path: Path, monkeypatch) -> None:
     """控制台不可达：claim 照常成功，只在回执里说清（不制造新的失败态）。"""
     _stub_auto_handoff(monkeypatch, (False, "OSError"))

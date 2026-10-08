@@ -6,6 +6,37 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §73 claim 的进度锚以**响应时刻**为准：控制台核对是阻塞调用，不得计入 hold 龄（2026-10-08）
+
+**触发**：`bun run pygate` 三条 e2e 红 —— `e2e/test_hold_e2e.py::test_full_hold_cycle_recovery_then_takeover_then_revoke`
+· `e2e/test_auto_handoff_e2e.py::test_full_cycle_hold_takeover_revoked_and_reclaim`
+· `e2e/test_auto_handoff_e2e.py::test_dead_holder_does_not_block_seizing_another_course`。
+症状是同一个：claim 明明回 200，紧接着 `GET /offline/hold` 却是 `state=stale` / `held=false`
+（`reason=held-stale: w-a（进度静默 2s…）`）、清单 `claimable` 翻 true、同一台盘的 busy 闸
+同时失效（一拖一形同虚设）。
+
+**根因（单变量，实测）**：claim 的第一个进度锚在 `claim_offline` 开头就打（`note_hold`），
+而 claim 成功后、响应前的控制台新鲜度核对（`hub/offline.py::_ask_console_freshness` →
+`trigger_auto_handoff`）是**阻塞**调用：控制台不可达时本机实测 **~2.1s**（上限
+`TASK_PACK_TRIGGER_TIMEOUT_SEC=8s`）⇒ 租约送到客户端手里时，锚已比判活窗（e2e 的
+`BCITY_HOLD_PROGRESS_STALE_SEC=2`）还老。「刚建、还没打点的 hold 不该被当场判死」这条写死的
+语义于是在最需要它的秒级窗 e2e 上破功；生产 900s 窗不显形（2s ≪ 900s），但语义上**任何**
+超过判活窗的核对延迟都会重演。
+
+**修复（一处）**：`hub/offline.py::_post_offline_lease` 在 `_ask_console_freshness` 之后、
+`self._json(payload, 200)` 之前，用 `note_progress(course, token=lease.token)` 重打锚 ——
+语义 = 第一个进度锚以「客户端拿到租约」为准；内存即新（闸镜像同拍），落盘走既有 60s 节流；
+带令牌门 ⇒ 核对期间万一被别人 stale-接管，这一拍不会把旧主复活。
+
+**被否决的备选**：① 把 e2e 判活窗 2s 调大 —— 治的是测试，而「响应时刻 = 客户端拿到租约」才是
+对的语义，且窗大了，秒级判活就不再被测；② 在 `hold_state` 里给新 hold 加宽限 —— 把「锚打早了」
+藏进判据，下一个阻塞副作用还会再演；③ 把控制台核对挪到 claim **之前** —— 领不到的 claim
+（busy/foreign）也会去敲控制台，且「作废在本次响应返回前完成」不再紧贴取包那一刻。
+
+**验收**：`tests/hub/test_auto_handoff.py::test_claim_hold_anchor_is_stamped_when_the_lease_reaches_the_client`
+（假钟 + 控制台核对耗 5s > 2s 窗；旧码上红 `assert 'stale' == 'live'`）·上述 3 条 e2e 转绿 ·
+`bun run pygate` 全绿（3887 passed）。
+
 ## §72 派发模型重构：课程无模式 · 接管（hold）唯一真源 · BC 独占（plan/worker-type-dispatch-model，2026-10-08）
 
 **一句话**：把「在线/离线」从**课程的一等概念**降成**worker 的类型**——课程不再区分在线/离线

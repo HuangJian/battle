@@ -620,6 +620,14 @@ class OfflineRoutes:
             #   跳过还是作废+重导（规则表 ⑥'），且作废是**同步**的（renameSync 在本次 HTTP
             #   响应内完成）⇒ 云机随后取包时旧包已不在（404 等新包）——竞态在响应返回前关闭。
             handoff_note = self._ask_console_freshness(course)
+            # ★ 2026-10-08（e2e 三条红 → 真 bug）：进度锚以**响应时刻**为准 —— claim 的第一个
+            # 进度锚在 claim 开头就打了（`claim_offline` 末段的 `note_hold`），而上面的控制台
+            # 核对是**阻塞调用**（控制台不可达时实测 ~2s，上限 `TASK_PACK_TRIGGER_TIMEOUT_SEC`）
+            # ⇒ 秒级判活窗下（e2e 用 `BCITY_HOLD_PROGRESS_STALE_SEC=2`）刚交到客户端手里的
+            # hold 当场是 stale：`GET /offline/hold` 回 held=false、清单 `claimable` 翻 true、
+            # 同一台盘的 busy 闸同时失效（一拖一形同虚设）。带 token 重打：核对期间万一被
+            # 别人 stale-接管，这一拍不会把旧主复活（`note_progress` 的令牌门）。
+            self.hub.note_progress(course, token=str(lease.get("token") or ""))
             print(
                 f"[{time.strftime('%H:%M:%S')}] [hub-server] offline-claim {course} "
                 f"worker={lease['worker_id']} takeover={int(takeover)}",
