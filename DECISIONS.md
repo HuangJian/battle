@@ -8421,6 +8421,27 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   用例 `nn-training/tests/hub/test_auto_handoff.py`（新 2 条 + 重写 1 条）·
   `nn-training/tests/trainer/test_offline_leg_retired.py`（新 1 条）·
   全文 → `docs/nn/remote-transport.md` §71。
+## §2026-10-08-crown-confirm（2026-10-08，N=3200 加冕赛：KR10-it150 双显著胜 B0-it290，王位易主）
+
+- **背景**：N=1600（+0.46 含 0）不够判，加 1600 新种子（415200/417200 段；417200 系 plan 预留扩 N 段；
+  415200/417200 全仓预查空，tmp/ 对局明细未扫）凑 N=3200，四段分层等权合成。
+- **决定**：杀敌 D=**+0.48** CI [+0.14,+0.82]、通关 D=**+2.53pp** CI [+0.20,+4.87]——**双显著**，
+  四段方向一致（+0.36/+0.54/+0.45/+0.56）。**王位易主**：KR10-it150
+  （`x22-kr10.it150.20261008-140718.json`）为全场最强权重；且它是注册端点（非峰值自选），
+  含金量高于 B0-it290。
+- **落点**：新局 → `tmp/crown-confirm/kr10|b0-{415200,417200}.jsonl`（旧局见 peak-crown/kr-verdict）。
+## §2026-10-08-kr-verdict（2026-10-08，K-retune 终判：直关且死得更透；K5 训练侧永久关闭）
+
+- **背景**：x22-kr5（K5 + target×2/gamma .999/lam .975）对 x22-kr10（K10 老配方半量），同起点
+  K10-it150、同流 20261014、同预算 150，N=1600（800 @415000 + 800 @417000，同种子配对全中；
+  KR5 侧 `--decision-k 5`）。日常：KR5 37.5→15.75 阴跌穿底；KR10 34.5→42.25 上扬。
+- **决定**：杀敌 D=**-3.87** CI [-4.34,-3.40]（上限 < 0 ⇒ **直关**，比旧 K5 腿的 -1.99 死得更透）；
+  通关 D=**-20.75pp**（破安全门）；acc D=**+0.029** 全正（瞄准又好了，第三次"看得见打不着"）。
+  retune（配额/gamma/lam）救不回 ⇒ 死因不在这三处，剩 ent/结构二选一；**K5 训练侧永久关闭**，
+  不再立 rhythm 案（要动节奏，先交新机制假说）。
+- **加冕赛附带**：KR10-it150 对 B0-it290 同段配对 1600：杀敌 +0.46 含 0、通关 +2.75pp 含 0 ⇒
+  方向对、不显著，**王位不动**（B0-it290 留 crown；KR10 日常 42.25% 系峰值 flavor）。
+- **落点**：对局 → `tmp/kr-verdict/kr{5,10}-{415000,417000}.jsonl`。
 ## §2026-10-08-k5-verdict（2026-10-08，K5 终判：直关；稀释假说死，关节奏分支）
 
 - **背景**：`plan/k5-rhythm.plan.md`，K5-it150 对 K10-it150（同起点 B0-it290、同流 20261013、同预算 150，
@@ -8552,7 +8573,6 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   六处先在 HEAD worktree 上确认红（ImportError/TypeError/KeyError/断言），再绿；`bun run pygate`
   **3932 passed / 15 skipped** · `bun run check` 绿。真机验收 → `docs/nn.progress.md` §3 行 25。
   —— 全文（四条根因链 / 评审 F1–F10 处置 / 云机侧口径）→ `docs/nn/engineering.md` §66
-
 ## §2026-10-08-goalnn-eval-task-key-coursefp（2026-10-08，bugfix：eval 腿任务缺课程血缘 ⇒ 兄弟课程评估局在节点 resultCache 互串）
 
 - **背景**：x23-cm3 it50 (2001,860141) 缺 1 局，meta `wver mismatch`，回传权重实为 x23-cm2 的 it50
@@ -8573,3 +8593,28 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
 - **测试**：`tests/trainer/test_eval_dispatch_resilience.py::test_eval_fetch_carries_course_fp`（先在 HEAD
   确认红：`course_fp=None`）· 相关回归 133 例全绿 · `bash tools/githook/nn-python-gate.sh` 绿。
   —— 全文（现场账 / 机制 / 各腿核查 / 兼容）→ `docs/nn/engineering.md` §67
+
+## §2026-10-09-goalnn-x23cm-verdict（2026-10-09，x23 commitment 三整形臂终判：it150 全否决）
+
+- **背景**：cm0 对照（11 参数原样，兼 K10 production 续跑）vs cm1 `+wFireHold 2.0` /
+  cm2 `+wStop 2.0` / cm3 `−wStuck 5.0`；同起点 KR10-it150（sha `a683e5da…`）/
+  paired 20261015 / K=10 / iters 0 手工停课 + 人工盯盘。终判点 it150（四臂共有最新对齐点；
+  cm1 停 it151、cm2 停 it158，比较只取 ≤151；cm0/cm3 后续轮次不纳入本次判决）。
+- **主读数**：it150 日常 400 局四臂同种子全配对（it0 四臂同 0.44/200 局）：
+  cm0 0.280 / cm1 0.2975（+1.75pp，McNemar χ²cc 0.22，ns）/
+  cm2 0.300（+2.0pp，0.32，ns）/ cm3 0.345（+6.5pp，3.68，p≈0.055）。
+  稳健性 pool（it140+145+150，1200 局）：cm1 −1.75pp / cm2 −4.0pp（负向）/ cm3 +2.17pp（ns）；
+  cm3 的 +6.5pp 几乎全由 2003 单关 +18pp（n=100）驱动，另三关持平或落后。
+- **方向诊断**（it150 配对）：fireHeld Δ−0.27pp（反向）/ stop Δ+0.2pp（≈6 tick/局，行为学零）/
+  stuck Δ−0.45pp（sd 10pp 噪声）；acc 0.935~0.938 全平，shots/dmg 全平。
+  预注册两风险（cm1 spray 加重、cm2 蹲坑挨打）均未现，加分条件同样全灭——有胜率无机制，不认功。
+- **备选与否决**：① 认 cm3 it150 +6.5pp——否（单关 spike + pool ns + 机制零动，三重不认）；
+  ② 加权续跑——否（剂量/定义至少其一错，先换操作化或剂量探针）；③ 用 456/460 最新轮判——否
+  （臂间不对齐，违反配对裁决前提；cm0/cm3 后续轮次另行结算）。
+- **决定**：三整形臂全否决，归档不续跑；cm0 对照线继续 production 续跑。
+- **违反后果**：把单点单关 spike 当功劳 ⇒ 在惰性项上继续烧配额；用不对齐轮次终判 ⇒
+  配对前提作废，结论不可比；wStop 这类全臂 ~0 的项不换操作化直接加量 ⇒ 继续无感。
+- **测试/证据**：`tmp/x23-cm{0,1,2,3}/eval_log.jsonl`（it150 同键 400 对 + it140~150 pool 1200 对，
+  McNemar 连续校正）· `tmp/x23-cm*/training_log.jsonl`（it1–150 KL 0.008~0.018 /
+  entropy 0.48~0.72，无熔断无坍缩）。
+  —— 全文 → `docs/nn/experiments.md` §81

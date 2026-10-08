@@ -1,0 +1,84 @@
+// 课程 x23-cm0 —— commitment 整形对照臂：K10 老配方（11 参数原样）+ production 续跑。
+//
+// 本课与 x23-cm1/cm2/cm3：同起点（KR10-it150，sha `a683e5da…` 四份同源，见 cm1 头注）/ 同预算（iters 0，
+// 手工停课，终判停齐同一 iter）/ 同新流 20261015 / 同守卫（全关 + 人盯盘），
+// 差别 = 奖励（本课 11 参数逐字沿用，不含三整形项）。
+// 本课双重身份：整形对照 + K10 线 production 续跑（跑满即续跑，一鱼两吃；对照臂必须跑满，
+// 中停 = 实验和续跑两头落空）。终判/开工门见 x23-cm1 头注（四臂通用条款）。
+{
+  "version": 5,
+  "name": "x23-cm0",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：KR10-it150 副本（sha 见证，见 cm 头注）──────────────────────────
+  "bc": "nn-training/weights/x23-cm0/x23-cm0.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 与 x23-cm1/cm2/cm3 同值（配对裁决前提）。
+  "paired_rotate_seed": 20261015,
+
+  "decision_events": false,
+  // K=10。
+  "decision_k": 10,
+
+  "out": "tmp/x23-cm0/weights.json",
+  "traj": "tmp/x23-cm0",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x23-cm0",
+  "backup_prefix": "x23-cm0",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 结算（2026-10-09 回填：it150 终判点；本课实际跑到 it456，对照身份继续 production 续跑）──
+// it150 日常 400 局四臂同种子全配对（it0 四臂同 0.44/200 局）：本课 0.280（112/400，
+// kills 10.39，anchor/rotor 同 0.28）——cm1 0.2975（+1.75pp，ns）/ cm2 0.300（+2.0pp，ns）/
+// cm3 0.345（+6.5pp：2003 单关 spike + pool 1200 局 ns，不认）；方向诊断三项机制全零动。
+// 判语：对照成立，三整形臂全否决归档；本课 production 续跑不受影响（后续轮次另行结算）。
+// 数据：`tmp/x23-cm0/eval_log.jsonl` · 全文 `docs/nn/experiments.md` §81 ·
+// 决策 `DECISIONS.md` §2026-10-09-goalnn-x23cm-verdict。

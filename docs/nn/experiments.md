@@ -7,6 +7,34 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 ---
 
+## §81 x23 commitment 三整形臂终判：it150 全否决，机制零动（2026-10-09）
+
+> 决策 `DECISIONS.md` §2026-10-09-goalnn-x23cm-verdict · 四课程文件尾 verdict
+> （`nn-training/curricula/x23-cm{0,1,2,3}.jsonc`）。
+
+- **设计**：KR10-it150 同起点（sha `a683e5da…`）/ paired 20261015 / K=10 / iters 0 手工停课 +
+  人工盯盘；cm0 对照（11 参数原样，兼 K10 production 续跑）vs cm1 `+wFireHold 2.0` /
+  cm2 `+wStop 2.0` / cm3 `−wStuck 5.0`。终判点 it150（四臂共有最新对齐点；
+  cm1 停 it151、cm2 停 it158，比较只取 ≤151；cm0/cm3 后续轮次不纳入本次判决）。
+- **主读数**（it150，2000-2003 日常 400 局四臂同种子全配对；it0 四臂同 0.44/200 局）：
+  cm0 0.280 / cm1 0.2975（+1.75pp，McNemar χ²cc 0.22，ns）/
+  cm2 0.300（+2.0pp，0.32，ns）/ cm3 0.345（+6.5pp，3.68，p≈0.055）。
+- **稳健性**（it140+145+150 pool 1200 局）：cm1 −1.75pp（0.82）/ cm2 −4.0pp（4.62，负向）/
+  cm3 +2.17pp（1.20，ns）；cm2 it145 出过 −11.75pp（12.5）深坑后收回，波动形态非稳定效应。
+  cm3 的 it150 +6.5pp 几乎全来自 2003 单关（0.45 vs 0.27，+18pp，n=100；另三关持平或落后）。
+- **方向诊断**（it150 配对）：fireHeld cm1 0.102 vs cm0 0.105（Δ−0.27pp，反向）；
+  stop cm2 0.21% vs 0.006%（Δ+0.2pp ≈ 一局 6 tick，行为学零）；
+  stuck cm3 6.97% vs 7.42%（Δ−0.45pp，sd 10pp 噪声）；acc 0.935~0.938 全平，
+  shots/dmg 全平。预注册风险（cm1 spray 加重、cm2 蹲坑挨打）均未现，但加分条件同样一个没满足——
+  有胜率无机制，不认功。
+- **训练健康**：it1–150 KL 0.008~0.018、entropy 0.48~0.72，四臂同带，无熔断无坍缩；零结果是真零。
+- **判决**：三整形臂全否决，归档不续跑；cm0 对照线继续 production 续跑。
+  后续要救先换操作化（stop 全臂 ~0 说明定义或剂量至少其一错）或做剂量探针，不直接加权续跑。
+- 证据：`tmp/x23-cm{0,1,2,3}/eval_log.jsonl`（it150 同键 400 对 + it140~150 pool）·
+  训练账本 `tmp/x23-cm*/training_log.jsonl`。
+
+---
+
 ## §80 下一阶段三腿设计：merge-max / dist-lastmile / acc-push，从 hu150 同起跑（2026-10-04）
 
 > 决策 `DECISIONS.md` §2026-10-04-goalnn-x20adv2-design · 课程

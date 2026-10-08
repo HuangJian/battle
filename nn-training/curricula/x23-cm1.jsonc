@@ -1,0 +1,83 @@
+// 课程 x23-cm1 —— commitment 整形臂之一：+wFireHold（开火承诺），单项单臂。
+//
+// 立项 → bundle 拆分（用户指令）：x23-cm bundle 撤销（一次改三样说不清功劳，spatial §0.3 纪律），
+//   拆成 cm1/cm2/cm3 三臂各一项 + x23-cm0 对照（四臂同起点/同流/同预算/同守卫）。
+// 本臂唯一改动（相对 cm0）：公式 +wFireHold*fireHeldTicks/(ticks+1)，wFireHold=2.0
+//   （fireHeld=开火输出 tick 累计 col55；冷却/弹量门掉的不罚）。
+// 风险预注册：spray 旧罪（NN 多喷 30–100%）可能加重 ⇒ acc 方向诊断盯死；acc 掉即本项死刑，另案减权。
+// 其余：起点 KR10-it150（sha `a683e5da…`，本课 it0 + in-use 备份同源）/ iters 0（手工停课，
+//   终判四臂停齐同一 iter）/ 新流 20261015 / K=10 / 守卫全关 + 人盯盘 / target 24576/est 147。
+// 终判沿用 §5 表（N=1600，同种子四臂全配对；方向诊断 acc + fireHeld 率）。
+{
+  "version": 5,
+  "name": "x23-cm1",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) + wFireHold*fireHeldTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0,
+      "wFireHold": 2.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  "bc": "nn-training/weights/x23-cm1/x23-cm1.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  "paired_rotate_seed": 20261015,
+
+  "decision_events": false,
+  "decision_k": 10,
+
+  "out": "tmp/x23-cm1/weights.json",
+  "traj": "tmp/x23-cm1",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x23-cm1",
+  "backup_prefix": "x23-cm1",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 结算（2026-10-09 回填：it150 终判点；本课停 it151）──
+// it150 日常 400 局对 cm0 同种子配对：0.2975 vs 0.280（+1.75pp，McNemar χ²cc 0.22，ns；
+// it140+145+150 pool 1200 局 −1.75pp）。方向：fireHeld 0.102 vs 0.105（Δ−0.27pp，反向），
+// acc 0.9380 vs 0.9369（平；预注册 spray 风险未现）。
+// 判语：否决（开火承诺没立起来），归档不续跑。数据：`tmp/x23-cm1/eval_log.jsonl` ·
+// 全文 `docs/nn/experiments.md` §81 · 决策 `DECISIONS.md` §2026-10-09-goalnn-x23cm-verdict。

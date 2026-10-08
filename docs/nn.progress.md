@@ -194,6 +194,11 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
    终判 @414000 vs hu150 ——
   `docs/nn/experiments.md` §80 ·
   决策 `DECISIONS.md` §2026-10-04-goalnn-x20adv2-design；人在控制台开课
+- **x23 commitment 三整形臂终判（2026-10-09）**：it150 四臂同种子全配对——cm0 0.280 /
+  cm1 0.2975（+1.75pp ns）/ cm2 0.300（+2.0pp ns）/ cm3 0.345（+6.5pp：2003 单关 spike +
+  pool ns，不认）；方向诊断机制全零动（fireHeld 反向 / stop ≈6 tick/局 / stuck 噪声，
+  acc 全平）；三臂全否决归档不续跑，cm0 继续 production 续跑 ——
+  `docs/nn/experiments.md` §81 · 决策 `DECISIONS.md` §2026-10-09-goalnn-x23cm-verdict
 - **三停腿收官（2026-10-03）**：主腿 it592 停，加冕 **a580**（28.75%/10.723；it175 13.50%/7.619
   → 过关翻倍杀敌 +41%）；plus it167 停，加冕 **q90**（29.25%/10.887）；h2 it330 停，
   诊断成功（hurtR −29%）终点落后归档（最优 h285 25.00%/9.963）——
