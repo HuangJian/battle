@@ -226,16 +226,19 @@ def test_role_gate_lives_in_the_lease_critical_section() -> None:
     assert "blocked = self.role_blocked(job_id, role)" in body
     assert 'return False, "", blocked' in body
     # 两道闸共用一份判据（归属 = job 的字段；接管 = 课程 hold）――查一处就够了。
-    # ★M1b / Q5：分支**顺序**也是语义（bc 豁免角色闸 → 角色 → hold），所以这里连顺序一起
-    # 钉：两行的相对位置写死，谁把顺序调了这条就红。
+    # ★M1b / Q5：分支**顺序**也是语义（双角色 kind 豁免角色闸 → 角色 → hold），
+    # 所以这里连顺序一起钉：两行的相对位置写死，谁把顺序调了这条就红。
     # ★M1c：旧的 `parked` 腿已删（随 mode 退役）——「这门课现在派不派活」只剩 hold 一个输入。
+    # ★M5：bc 的「双角色」名单从字面量 `KIND_BC` 换成 `BOTH_ROLE_KINDS`（单一来源：
+    # `common/manifest.py`；将来再加双角色 kind 只改那一行）。
     j = src.index("def role_blocked(")
     gate = src[j : j + 2200]
-    assert "if self.job_kind(job_id) != KIND_BC and self.job_role(job_id) != role" in gate
+    assert "if self.job_kind(job_id) not in BOTH_ROLE_KINDS and self.job_role(job_id) != role" in gate
     assert "return self.hold_blocked()" in gate
     assert (
-        gate.index("self.job_kind(job_id) != KIND_BC") < gate.index("self.hold_blocked()")
-    ), "Q5 的分支顺序是语义：bc 豁免 → 角色 → hold"
+        gate.index("self.job_kind(job_id) not in BOTH_ROLE_KINDS")
+        < gate.index("self.hold_blocked()")
+    ), "Q5 的分支顺序是语义：双角色豁免 → 角色 → hold"
     # 判据本身不许再读停摆位（注释里提它是为了让后人知道为什么删了）
     assert "self.parked" not in gate, "旧停摆闸不许回来（M1c 已删：模式不再是派发输入）"
 

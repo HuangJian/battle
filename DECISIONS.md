@@ -8454,3 +8454,46 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   活得久"（与局长+269/承伤持平/拾取更多互锁）。⚠ threat≡lane 逐字相等，疑同探针双写，待 audit。
 - **落点**：重仿局 → `tmp/diag-probe/k10at{5,10}[.jsonl|-s*.jsonl]` · 读数 → plan §4。
 
+## §2026-10-08-goalnn-dispatch-model（2026-10-08，派发模型重构收口：课程无模式 + 接管（hold）唯一真源 + BC 独占；plan/worker-type-dispatch-model M1–M6）
+
+- **背景**：旧模型把「在线/离线」当**课程的一等概念**（`_modes` + pin + `authority_of` 五档 +
+  `parked` 派发闸 + 离线租约），横跨 hub / 控制台 / trainer / 云机四层，三个后果已经出过现场：
+  ① 多机不能并行（`_busy_locked` 是**全局**一拖一）；② 云机掉线 = 课程永久停摆（租约挂着、
+  模式停在离线、本机等待永不恢复，§67 报障二）；③ 掉线后没有自动回落。
+- **决定（用户口径 D1–D4）**：**课程无模式**，派发只看两件事——**这门课有没有被接管（hold）**
+  与 **这份活归谁（job 自己的 role）**；**活性只认进度信号**（D1：心跳不算）；接管期间队列任务
+  **压下不撤单**（D2：掉线后即可被协作盘领取）；**一拖一放 hub、按 worker**（D3：清单 `?worker=`
+  才是同参可领，缺省是**上界**）；**BC = kind=bc 队列作业**（D4）。
+- **裁决 Q1–Q5（全部采纳）**：① Q1 无包 claim **不建 hold**，导包走独立软态 `pending_export`
+  （hold 推迟到「包到手」——导包期本机照跑、协作盘照领，这是**必付代价**）；② Q2 掉线阈值
+  **维持 900s**，但打点必须**下沉轮内**（完成事件驱动，M ≤ 300s）；③ Q3 一拖一判据放 **hub**、
+  清单带 `?worker=`（不采纳云机侧自律）；④ Q4 旧云机**不兼容**：claim 缺 `?proto=2` ⇒ 409 且
+  `busy:true` + error 全文（旧日志能看见「请刷新 notebook」且**不双跑**）；⑤ Q5 **领 BC 算 drain**
+  （hold 与 BC 互斥，两型都能领 BC、领取后独占、900s 无 epoch 让出）。
+- **P0-5 加固（本机解锁双通道）**：trainer 每轮边界直问 `GET /offline/hold?course=`（≤3s 超时、
+  失败退文件），文件通道的 `held` 条目带 `last_progress_at` 并**就地 900s 自判活**——控制台进程
+  死掉时冻结的文件会**自行过期**，不会把本机永久钉在 held。
+- **★M5（BC 独占）落地**：双角色 kind 集住 `common/manifest.py::BOTH_ROLE_KINDS`（`KIND_ROLES`
+  不动；豁免的只有角色闸）；bc **不发备份副本**（store 当面拒 `no_backup` + peek 不进备份候选 +
+  push 腿不试）；**进度租约**（`_last_progress` ← `POST /jobs/{id}/epoch` 唯一写入点，
+  `BC_PROGRESS_STALE_SEC=900s` env 可调，与 hold 的 900s **巧合同值、语义不同，禁合并**）；
+  `_lease_state` 的 bc 分支只认进度 ⇒ 卡死的 bc **不会把自主盘永久钉在 drain 上**；
+  **drain 互斥两腿**：带 hold 的盘领不到 BC（跨课程腿）+ 在跑 BC 的盘领不到课程（busy 腿）。
+- **一处对 plan 字面的偏离（有意，写死原因）**：plan/F6 说「`role_blocked` 扩成
+  `(job_id, role, worker_id)`」——落地时按**门面契约守卫**（`_HubQueue` 与 `_JobStore`
+  同名方法必须**逐字同签名**，闭集 34 条）改成**兄弟函数** `queue_claims._drain_blocked`
+  接在三个拉活面（`claim_next` / `peek_jobs` / `claim_job`）上：判据照样全在 hub 侧、
+  三条腿共用一处，而那个同名面不被迫长出一个 store 侧永远用不上的形参。
+- **一处未测（如实记）**：plan §3-M0 要求从既有回传的 `iters[].wall_sec` 统计单轮 P50/P95
+  （P95 > 600s ⇒ 重开 Q2）；本机**没有真机离线回传语料**（`offline/` 产物只在 pytest 临时目录）
+  ⇒ 未测，真机第一份回传后补记（全文 `docs/nn/remote-transport.md` §72）。
+- **落点**：`hub/store_leases.py`（role_blocked 顺序 / BC 进度租约 / 无备份）· `hub/queue_claims.py`
+  （`worker_holds` / `worker_bc_drain` / `_drain_blocked` / `hub.job_kind` 转发）· `hub/queue_offline.py`
+  （busy 腿的另一半）· `remote/push_dispatch.py`（备份过滤）· `remote/offline_boot.py`
+  （`try_take_bc_job` + `_run_bc_once` + `resolve_courses(holds=)`）。
+- **测试**：`tests/hub/test_hold.py` 三条新用例（无备份 / 进度租约与让出 / 双向互斥）·
+  `tests/remote/test_offline_bc_leg.py`（自主腿的闸与接线，6 例）· `tests/remote/test_hub_push_dispatch.py`
+  （push 不备份 bc）· `tests/common/test_offline_task_queue.py`（`holds["mine"]` 回填）。
+  **先红后绿实测**：把三条语义分别换成 `if False:` / 关掉 drain 腿，对应用例逐条转红（记录见提交信息）。
+- **违反后果**：拿心跳当活性 ⇒ §68 假活重演（进程活着、训练没在推进）；拿 bc 发备份 ⇒ 影子跑者
+  复制算力且没有 epoch 可判活；把 drain 判据放客户端 ⇒ 云机换台/重启即绕过（Q5 被架空）。

@@ -153,7 +153,13 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "priority_view",
             "abandon",
             "job_role",
+            "job_kind",
             "role_blocked",
+            # ★M5（Q5）：drain 互斥——「谁在带课 hold / 谁在跑 BC」的全视图只有 hub 层有
+            # （store 只看得到自己那门课），而三个拉活面都要它 ⇒ 判据住本簇。
+            "worker_holds",
+            "worker_bc_drain",
+            "_drain_blocked",
         ),
     ),
     "queue_resume": (
@@ -286,6 +292,7 @@ FACADE_SAME_SIG = (
     "heartbeat",
     "is_blocked",
     "job_failure",
+    "job_kind",
     "job_role",
     "mark_completed",
     "note_worker",
@@ -483,7 +490,9 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # `is_runnable_offline` / `auto_eligible` / `_dispatch_disk_record` / `set_mode_pinned` /
     # `_drop_unsettled` / `begin_auto_handoff` / `note_claim`）；+3 增（`mode_ignored` /
     # `course_open` / `begin_pending_export`）⇒ 114。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 114, len(DOMAIN_METHODS)
+    # ★M5（Q5）：+4（`job_kind` 的 hub 转发 / `worker_holds` / `worker_bc_drain` /
+    # `_drain_blocked`——drain 互斥的两半都要全课程视图）⇒ 114 + 4。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 118, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -493,7 +502,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 114, len(seen)
+    assert len(seen) == 118, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -517,9 +526,9 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
         for name in realized:
             assert seen.get(name, domain) == domain, f"{name} 同时住 {seen[name]} 与 {domain}"
             seen[name] = domain
-    # 114 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
+    # 118 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
     expect = set(DOMAIN_METHODS) | {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"}
-    assert len(seen) == 116 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
+    assert len(seen) == 120 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
 
 
 # ───────────────────── ② 接线正确 ─────────────────────
@@ -608,7 +617,8 @@ def test_the_same_name_surface_is_exactly_the_declared_closed_set() -> None:
     assert common == declared, (
         f"门面名单漂了：新增 {sorted(common - declared)}，消失 {sorted(declared - common)}"
     )
-    assert len(declared) == 33, len(declared)
+    # ★M5：33 → 34（`job_kind` 的 hub 转发：push 腿的备份过滤要读它）
+    assert len(declared) == 34, len(declared)
     # 改名那一条**不是**同名（store 侧没有 `abandon`）⇒ 它不属于这个闭集，另处单独钉。
     assert "abandon" in FACADE_RENAMED and "abandon" not in common
     assert "abandon_job" in _callable_names(_JobStore)
@@ -620,7 +630,8 @@ def test_the_identical_signature_facade_is_byte_for_byte_same_signature() -> Non
     这条在本刀里是真能抓住东西的：门面有 6 个形参全用关键字传的转发（如 `claim`）、
     有 3 个纯 `if st: st.X(...)`（无返回）、有 1 个带参注解返回值；漏一个或改一个名字就红。
     """
-    assert len(FACADE_SAME_SIG) == 30
+    # ★M5：30 → 31（`job_kind` 的逐字转发）
+    assert len(FACADE_SAME_SIG) == 31
     for name in FACADE_SAME_SIG:
         want = _params(getattr(_JobStore, name))
         got = _params(getattr(_HubQueue, name))

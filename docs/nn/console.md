@@ -6,6 +6,51 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §35 控制台 v2 词表与钮：接管（hold）是唯一真源（plan/worker-type-dispatch-model，2026-10-08）
+
+**触发**：M4（`beee107f`）把「课程模式」整条从控制台拆掉——意图表、回灌、三颗钮、权威徽标全删。
+本节是 v2 的**读面契约**：控制台显示什么、哪颗钮能改什么、四个词各自是什么意思。
+
+### 33.1 读面
+
+- `overview.holds`（`hub/admin.py` 的 `holds` + 同拍的 `holdFacts(queue.hold)`）= 接管唯一真源：
+  `{worker_id, state(live/stale), last_progress_at, progress_ago, expires_in, iter, iterSource}`。
+  · `iter` **只认云机回传**（`offlineLastIter`）；拿不到就是**未知**（`iterSource=null`，**不**拿本地队列
+    指针或账本指针充数——「本机下一轮指针」在接管期不适用）。
+  · `state` 与派发闸同源：`live` 才压下协作派发（`ppoQueueStall` 判据 = `state === 'live'`）。
+- `overview.pendingExports`：导包软态（`{by, at}`），超窗（900s）即**惰性过期**——「说了要导包、
+  多久没动静」就是 `offline_stalled` 的 `pending-export` 锚点。
+- `offlineDisks`：报到面（谁在跑自主腿）。worker 行按类型画徽标：持 hold ⇒ **自主**；
+  否则按最近一次露面面（`offline_disk` 报名 ∪ peek/claim 登记）；null **不画**（宁缺勿猜）。
+
+### 33.2 词表（课程状态 pill）
+
+| 词 | 含义 | 判据 |
+|---|---|---|
+| `autonomous-running` | 云机执行中 | hold `state=live` |
+| `autonomous-waiting` | 等云机接管 | 开课 ∧ 无 live hold ∧ 本机在 held 等待（`held-wait`） |
+| `autonomous-stale` | 接管掉线·已恢复协作 | hold 存在但 `state=stale`（15 分钟无进度自动恢复说明写进告警文案） |
+| `held-wait` | loop 侧 held 等待 | trainer 的 `WAIT_HELD`（与 `autonomous-*` 同席读） |
+
+### 33.3 钮（只剩这些）
+
+- **强制解除接管**（`release_hold=1` → `hubReleaseCourseHold`）：`409 ⇒ ok:true`「本来就没接管」
+  （目标态已达，不报错）。它是**唯一人工解除出口**。
+- **导出任务包**（保留）：`autoOfflineHandoff` **只导包**（不再「停本机」——「停本机」随
+  `course-mode.ts` 整模块退役；导包成功后由云机 claim 自动建立接管）。
+- **停课**：不再推 hub（唯一 opt-out 就在「开课标记」本身）。
+- `rolloutSrc`（auto/local/node）仍在**开课弹窗**里：它是**执行位置**不是在线/离线；
+  `'run'` 退役（容忍读 ⇒ 映射 `local` + 一行 WARN，不 brick 课程）。
+
+### 33.4 删除面（旧版对照）
+
+`course-mode.ts`（542 行）· `TrainMode` 类型 · `console-state.courseModes` · 启动回灌 ·
+开课弹窗 `trainMode`（`body.trainMode !== undefined` ⇒ **响亮 400** 退役文案）· 权威徽标/modeDrift ·
+切离线/切换成在线/交还自动三颗钮 · `intent-drift` · `state-view` 顶层 `offline` 键。
+`loop-control.json` 的 `held` 条目由控制台按**同一次读**写缓存（校验课名 / 去重 / 原子写 /
+只替补 `held` / 空数组也写 / 永不抛）；它是 hub 事实的**缓存**，不是第二事实源
+（三前提：版本+回执形状 / 旧 trainer 宽容 / 同机时钟）。
+
 ---
 ## §34 空置内存锯齿的真凶：`logTail` 读整文件，而 `componentViews` 每 5s 对每个组件调它（plan/dashboard-pool-history-idle-cost §7，2026-10-07）
 

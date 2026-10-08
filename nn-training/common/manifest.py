@@ -136,6 +136,13 @@ KIND_ROLES: dict[str, str] = {
     "ppo": ROLE_ONLINE,
     "bc": ROLE_ONLINE,
 }
+#: BC 作业的 kind（★M5/Q5，2026-10-08）——需求 7 点名的那一种活。
+KIND_BC = "bc"
+#: **双角色 kind 集**（★M5/Q5）：这些 kind 的作业两种 worker 都能领——豁免的只是**角色闸**
+#: （`store_leases.role_blocked` 的 ①）；「领取后独占（drain）」住在 hub 租约面，不在这里。
+#: `KIND_ROLES` **不动**：它仍是「这个 kind 的默认归属」，双角色是叠加在归属之上的豁免
+#: （bc 缺省归在线盘，但自主盘也能领——需求 7）。
+BOTH_ROLE_KINDS: frozenset[str] = frozenset({KIND_BC})
 
 
 def role_of(manifest: Mapping[str, object]) -> str:

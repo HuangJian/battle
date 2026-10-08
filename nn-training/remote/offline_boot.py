@@ -131,7 +131,7 @@ CODE_DIR = "/tmp/worker-code"
 #: （磁盘已是新版、`sys.modules` 里还是 08:09 那版，于是「看着新的、跑着旧的」）。
 #: notebook 打 `getattr(offline_boot, "BOOT_SELF", "<missing>")`，旧模块会显示 `<missing>`。
 #: **改本文件时把末位 +1**（纯人读约定，没有代码读它做判断）。
-BOOT_SELF = "boot-2026-10-07a"
+BOOT_SELF = "boot-2026-10-08a"
 
 #: 产物目录的三件「续跑真值」（与 `remote/artifacts.py::ArtifactStore` 逐字相同；测试守）。
 #: 三件齐全 = 本机有可续跑的产物（plan/offline-rerun-local-first §3 的判据）。
@@ -160,6 +160,12 @@ OFFLINE_CLAIM_PROTO = 2
 #: 本机 worker 身份的落点（`<work>/.worker-id`）：**持久化** ⇒ cell 中断后重跑不会被**自己**
 #: 留下的租约挡在门外（hub 判 `mine` 直接续上；评审 G1）。
 WORKER_ID_NAME = ".worker-id"
+#: ★M5（需求 7）：空档领 BC 作业的轮询节拍（秒）——包内 `worker_loop` 的 peek 间隔。
+BC_POLL_SEC = 5.0
+#: ★M5：没有 BC 可领时最多转多久就回来（秒）。有活时它跑完为限（`once=True`）：
+#: 这段时长是**阻塞**的，所以给个小上限，别让一个空转的 BC 轮询把课程轮回拖住。
+BC_TAKE_IDLE_SEC = 60.0
+
 #: 心跳周期（秒）：租约 900s ⇒ 60s 一跳留了 15 次补跳的余量（网络抖动 / 长轮之间）。
 HEARTBEAT_SEC = 60.0
 #: ★M3 / Q2：**轮内打点**的时间节流（秒）——「每 M 秒最多一句」，M ≤ 300s。hub 的 hold
@@ -1692,6 +1698,7 @@ def resolve_courses(
     probe: dict | None = None,
     skip: set[str] | None = None,
     worker: str = "",
+    holds: dict | None = None,
 ) -> tuple[list[dict], list[dict], list[dict]]:
     """本次要跑的课 → `([{"course", "pack_sha256"}], blocked, manifest)`。
 
@@ -1716,7 +1723,8 @@ def resolve_courses(
     共用同一套过滤：本会话已跑过的包（防自激：同一份包跑两次 = `run_id` 相同 ⇒ 回传全判
     duplicate ⇒ 看起来在跑、实际零产出）与 `skip`（本会话已放弃的课）。
     `probe` 是调用方持有的小字典（`{"unsupported": True}`）：老 hub 只探测**一次**，
-    之后不再每轮刷一个必然失败的端点。
+    之后不再每轮刷一个必然失败的端点。`holds` 同形（`{"mine": [课…]}`）：★M5 的 BC
+    前置闸读它（「本盘还带着课程 hold 吗」——Q5 的 hold×BC 互斥）。
     """
     explicit = _load_deliverable().requested_courses(cfg)
     if explicit:
@@ -1733,6 +1741,14 @@ def resolve_courses(
         if probe is not None:
             probe["unsupported"] = True
         raise SystemExit(_no_courses_msg("hub 不支持任务清单（或本机连不上它）"))
+
+    if holds is not None:
+        # ★M5：先回填「本盘自己还持着哪些课」——**不管下面走哪一支**（可领的行会早退），
+        # 也不管它是否 `_eligible`：被 skip 掉的自持课也要算（那时本盘确实还挂着 hold，
+        # 不该去领 BC）。Q5 的 BC 前置闸读 `holds["mine"]`。
+        holds["mine"] = [
+            str(t.get("course") or "") for t in tasks if worker and _holder_id(t) == worker
+        ]
 
     def _eligible(t: dict) -> bool:
         """两路共用的过滤：`skip` / 本会话已跑过的包（同 sha）。"""
@@ -2089,6 +2105,21 @@ def _run_auto(
         except (TypeError, ValueError):
             return default
 
+    #: ★M5：本盘自己此刻还持着的课（`resolve_courses` 回填）——BC 前置闸读它（Q5）。
+    holds: dict = {}
+
+    def _idle_take_bc() -> bool:
+        """空档（清单都払不到 / 都被别人持有）里顺路领一份 BC 作业跑掉（★M5）。
+
+        返回 True = 真跑了一份（调用方据此重置空转锚：干了活就不算 idle，否则一段长 BC
+        会把 `idle_wait_sec` 提前吃满——会话看着有产出却自我收工）。
+        """
+        summary = try_take_bc_job(cfg, creds, log, holding=bool(holds.get("mine")))
+        if not summary:
+            return False
+        log(summary)
+        return True
+
     budget = _num("session_budget_sec", 0.0)  # 0 = 不限（与逐段的 budget_sec 不是一把旋钮）
     idle_wait = _num("idle_wait_sec", _num("wait_pack_sec", DEFAULT_WAIT_SEC))
     # 终态窗口：**独立**锚点与预算（不占 idle_wait_sec——「没活了」与「活还没到」是两件事）。
@@ -2103,8 +2134,16 @@ def _run_auto(
         # （hub 判 `mine` 直接续上——否则 cell 中断重跑会白等 900s TTL，G1 的原始动机）。
         # 它持久化在 `<work>/.worker-id`，重复调用只读文件（不打日志）。
         worker = worker_id_of(_queue_work_dir(cfg), log)
+        holds.clear()
         tasks, blocked_rows, manifest = resolve_courses(
-            cfg, creds, log, served=served, probe=probe, skip=gave_up, worker=worker
+            cfg,
+            creds,
+            log,
+            served=served,
+            probe=probe,
+            skip=gave_up,
+            worker=worker,
+            holds=holds,
         )
         if tasks:
             idle_since = time.monotonic()
@@ -2147,6 +2186,8 @@ def _run_auto(
                     f"本拍没有可跑的课（{', '.join(sorted(blockers)) or '交接中'}）"
                     f"—— {poll:.0f}s 后再问（不占 idle 预算）"
                 )
+                if _idle_take_bc():  # ★M5：空档里领一份 BC（跑完才回来）
+                    idle_since = time.monotonic()
                 time.sleep(poll)
             continue
         # ★P1-9（R3-g）：`tasks` 空但 `blocked` 非空 = 「还得等一会儿」（别人的有效租约，
@@ -2154,6 +2195,7 @@ def _run_auto(
         # `idle_wait_sec`（重置 idle 锚点），只受会话预算与停机信号约束。
         # ⚠ 与上面 `leases["blockers"]`（tasks 非空时的交接中间态）同名不同物。
         if blocked_rows:
+            _idle_take_bc()  # ★M5：都被别人持着 ⇒ 用空档领一份 BC（Q5：两型均可领）
             log(
                 "清单里有活但都被别人持有："
                 + "、".join(
@@ -2218,7 +2260,88 @@ def _run_auto(
             log("收到停机信号 ⇒ 收工")
             return rc
         log(f"队列为空 —— {poll:.0f}s 后再问一次（idle 已等 {waited:.0f}s / 上限 {idle_wait:.0f}s）")
+        if _idle_take_bc():  # ★M5：队列空 = 自主盘最典型的空档（会话还在 wait）
+            idle_since = time.monotonic()
         time.sleep(poll)
+
+
+def _run_bc_once(
+    cfg: dict,
+    hub: str,
+    token: str,
+    log: Callable[[str], None],
+) -> int:
+    """真的去领一份 BC 作业并跑完 → 处理了几份（★M5/Q5）。
+
+    **独立函数 = 注入点**：单测 patch 它，不在单测里拉包内代码 / 不起网络。
+
+    代理 = 包内 `remote.worker.worker_loop(once=True, role="offline")`：它自己 peek →
+    claim → `run_one_round`（**同一套单 job 生命周期**，不与协作盘另写一份）。归属闸
+    天然只放行 bc：ppo 作业全是在线归属，自主角色领不到；bc 是双角色 kind（Q5）⇒
+    「只领 BC」不需要新端点。
+
+    ★ 领 BC 后**不得再 claim 课程**（到跑完/让出）：本函数是**阻塞**的（`once=True` 跑到
+    作业终局才回来），调用点（`_run_auto` 的空档分支）在它返回前不会回课程轮询。
+    """
+    code_dir = str(CODE_DIR)
+    if code_dir not in sys.path:
+        sys.path.insert(0, code_dir)
+    # 包内代码（顶层 import 会破 standalone 契约：取到任务包之前 `remote` 不存在）。
+    from remote.worker import worker_loop
+
+    return int(
+        worker_loop(
+            hub,
+            token,
+            work_dir=_queue_work_dir(cfg),
+            device=str(cfg.get("device") or "cpu"),
+            torch_threads=int(cfg.get("threads") or 0),
+            poll_sec=BC_POLL_SEC,
+            once=True,
+            max_idle_sec=BC_TAKE_IDLE_SEC,
+            role="offline",
+            log=log,
+        )
+    )
+
+
+def try_take_bc_job(
+    cfg: dict,
+    creds: dict,
+    log: Callable[[str], None],
+    *,
+    holding: bool = False,
+) -> str:
+    """空档里顺路领一份 BC 作业跑掉 → 一句话摘要；不该领 / 没领到 ⇒ `""`（★M5 / 需求 7）。
+
+    为什么这条路落在自主腿：Q5 定死「BC 两型均可领」，而自主盘的空档（清单里全是别人的
+    hold / 队列空但会话还在 wait）正是白白的算力——今天它只能轮询。
+
+    前置闸（两条，与 hub 侧同源，写在这里只为省一趟往返）：
+      · `holding=True`（本 worker 此刻带着课程 hold）⇒ 直接不领——Q5 的「hold 与 BC 互斥」
+        （**真正的闸在 hub**：`claim_offline` 的 busy 腿与 `role_blocked` 的 drain 腿）；
+      · hub 地址 / token 缺一、或包内代码还没就绪 ⇒ 不领（这条腿是 best-effort，
+        绝不打断课程主循环）。
+
+    失败一律**消化成本地日志**（不抛）：一段白跑的 BC 不该把整个会话带走。
+    """
+    if holding:
+        return ""
+    hubs = hub_candidates(cfg, creds)
+    token = str(creds.get("HUB_TOKEN") or "")
+    if not hubs or not token:
+        return ""
+    if not Path(CODE_DIR).is_dir():
+        log("BC：本机还没有包内代码（先跑一门课 / 用任务包引导）——这一拍不领")
+        return ""
+    try:
+        done = _run_bc_once(cfg, hubs[0], token, log)
+    except Exception as e:  # 这条腿 best-effort：任何异常都只记一行，不上抛
+        log(f"BC 领取/执行失败（不致命，不影响课程主循环）：{type(e).__name__}: {e}")
+        return ""
+    if done <= 0:
+        return ""
+    return f"BC：本轮跑完 {done} 份作业并已交回（hub={hubs[0]}）"
 
 
 def run(

@@ -33,6 +33,7 @@ from collections.abc import Callable
 from threading import Lock
 
 from common.protocol import (
+    BOTH_ROLE_KINDS,
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_MODES,
@@ -65,6 +66,10 @@ class QueueClaimsMixin(QueuePeer):
 
     # 本簇要调、而不在共同声明面 `QueuePeer` 里的那一个（理由见 `queue_peer.py` 头部）
     _store_of: Callable[[str], _JobStore | None]
+    # ★M5：跨课程 drain 腿要读「别课上谁在跑」（同居 queue_offline 簇；与 `_store_of` 同理，
+    # 不进共同声明面：它们只被这一个簇调）。
+    offline_task_courses: Callable[[], list[str]]
+    holder_info: Callable[[str], dict | None]
 
     # ---- 派发（跨课程轮转 + 超时换 worker） ----
     def claim_next(
@@ -97,8 +102,8 @@ class QueueClaimsMixin(QueuePeer):
                 continue
             st = self._stores[course]
             for jid in st.claimable_job_ids():
-                if st.role_blocked(jid, role):
-                    # 归属/停摆不符：**跳过这一份**，不是跳过整门课——同门课同时躺着两类
+                if st.role_blocked(jid, role) or self._drain_blocked(jid, worker_id):
+                    # 归属/停摆/drain 不符：**跳过这一份**，不是跳过整门课——同门课同时躺着两类
                     # 归属的活是「模式刚热切过」的常态（正是事故现场的形状）。
                     # 「跳过后一直无人领」的收尾是撤单腿的事
                     # （`plan/switch-mode-drops-jobs.plan.md`），不是这一层的职责。
@@ -147,10 +152,81 @@ class QueueClaimsMixin(QueuePeer):
         st = self._store_of(job_id)
         return st.job_role(job_id) if st is not None else ROLE_ONLINE
 
+    def job_kind(self, job_id: str) -> str:
+        """job 的 kind（经 store 的缓存读；★M5 给 push 腿的备份过滤用）；不归本 hub 管 ⇒ online 类。"""
+        st = self._store_of(job_id)
+        return st.job_kind(job_id) if st is not None else "ppo"
+
     def role_blocked(self, job_id: str, role: str) -> str:
-        """归属/停摆闸的**只读**探针（派发面用）；不归本 hub 管 ⇒ `""`（不锁死别人）。"""
+        """归属/停摆闸的**只读**探针（派发面用）；不归本 hub 管 ⇒ `""`（不锁死别人）。
+
+        签名与 `_JobStore.role_blocked` **逐字一致**（门面契约守卫钉着：同名则同参）——
+        所以 M5 的 drain 腿**不**并进这个函数，而是它的兄弟 `_drain_blocked`（跨课程那
+        一半；三个拉活面各自 ``st.role_blocked(...) or self._drain_blocked(...)``）。
+        """
         st = self._store_of(job_id)
         return st.role_blocked(job_id, role) if st is not None else ""
+
+    def worker_holds(self, worker_id: str) -> list[str]:
+        """本 worker 当前持 **live hold** 的课程（★M5/Q5 的跨课程读面；无 ⇒ 空表）。
+
+        活性自判（`holder_info`：进度静默 / 墓碑 ⇒ 不算），所以掉线后自动不再占闸——
+        与 `_busy_locked` 同一把尺子。纯读。
+        """
+        wid = str(worker_id or "").strip()
+        if not wid:
+            return []
+        out: list[str] = []
+        seen: set[str] = set()
+        for course in (*self.offline_task_courses(), *self._order, *self._stores):
+            if course in seen:
+                continue
+            seen.add(course)
+            info = self.holder_info(course)
+            if not info or info.get("stale") or info.get("revoked"):
+                continue
+            if str(info.get("worker_id") or "") == wid:
+                out.append(course)
+        return out
+
+    def worker_bc_drain(self, worker_id: str) -> tuple[str, str]:
+        """本 worker 正在 drain 的 BC 作业 → `(course, job_id)`；无 ⇒ `("", "")`（★M5/Q5）。
+
+        判据全在 store（`bc_drain_of`：租约活 ∧ 持有人是它 ∧ **进度新鲜**——心跳不算）。
+        用途：`_busy_locked` 的另一半（正在跑 BC 的盘不许再接课程 hold）。
+        """
+        wid = str(worker_id or "").strip()
+        if not wid:
+            return "", ""
+        seen: set[str] = set()
+        for course in (*self._order, *self._stores):
+            if course in seen:
+                continue
+            seen.add(course)
+            st = self._stores.get(course)
+            if st is None:
+                continue
+            jid = st.bc_drain_of(wid)
+            if jid:
+                return course, jid
+        return "", ""
+
+    def _drain_blocked(self, job_id: str, worker_id: str) -> str:
+        """★M5/Q5 的**跨课程** drain 腿：双角色 kind 的作业不发给「正带着某门课 hold」的盘。
+
+        同一门课的那一半已被 `_JobStore.role_blocked` 的③吃掉（hold 主人的 claim 会被
+        `held:<自己>` 挡）——所以这里只需回答跨课程那一种（在 A 课持 hold、去领 B 课的 BC）。
+        """
+        wid = str(worker_id or "").strip()
+        if not wid:
+            return ""
+        st = self._store_of(job_id)
+        if st is None or st.job_kind(job_id) not in BOTH_ROLE_KINDS:
+            return ""
+        holds = self.worker_holds(wid)
+        if not holds:
+            return ""
+        return f"holding:{holds[0]}"
 
     def claim(
         self,
@@ -223,15 +299,23 @@ class QueueClaimsMixin(QueuePeer):
             if not self._serves_course(course):
                 continue
             st = self._stores[course]
-            ids = [j for j in st.claimable_job_ids() if not st.role_blocked(j, role)]
+            ids = [
+                j
+                for j in st.claimable_job_ids()
+                if not st.role_blocked(j, role) and not self._drain_blocked(j, worker_id)
+            ]
             mode = CLAIM_MODE_EXCLUSIVE
             if not ids:
                 # 池空 ⇒ 看在飞的（同一份「未完成」判据的另一侧）。`not_held_by` 排掉
                 # 请求者自己正握着的那份（它的结果可能还在异步回传）。
+                # ★M5：双角色 kind 不进备份候选（bc 「领取后独占」；backup 会被 store 拒，
+                # 但让它进候选就会在客户端多一次无功往返）——`_drain_blocked` 同上。
                 ids = [
                     j
                     for j in st.inflight_job_ids(not_held_by=worker_id)
                     if not st.role_blocked(j, role)
+                    and st.job_kind(j) not in BOTH_ROLE_KINDS
+                    and not self._drain_blocked(j, worker_id)
                 ]
                 mode = CLAIM_MODE_BACKUP
             if not ids:
@@ -312,6 +396,11 @@ class QueueClaimsMixin(QueuePeer):
             )
         if mode not in CLAIM_MODES:
             return ClaimOutcome(False, "", "bad_mode", f"mode 必须是 {list(CLAIM_MODES)}")
+        # ★M5（Q5）：跨课程 drain 腿——正带着某门课 hold 的盘不许领双角色 kind 的作业。
+        # 住这里而不住 store：store 只有自己这门课的视野（本课那一半已在 ③ 里）。
+        drain = self._drain_blocked(job_id, worker_id)
+        if drain:
+            return ClaimOutcome(False, "", drain, drain)
         avoid = may_avoid_stale_holder(worker_id, self.active_worker_count())
         out = st.claim_outcome(
             job_id,

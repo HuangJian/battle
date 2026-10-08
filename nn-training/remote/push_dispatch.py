@@ -45,6 +45,7 @@ from common.logutil import log_line
 from common.protocol import (
     AUTH_HEADER,
     BLOB_NAMES,
+    BOTH_ROLE_KINDS,
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_TTL_SEC,
@@ -567,6 +568,10 @@ class PushDispatcher:
                     continue
                 tgt = self._backup_target(course)
                 if tgt is None:
+                    continue
+                if self.hub.job_kind(tgt) in BOTH_ROLE_KINDS:
+                    # ★M5（需求 7）：BC **不发备份副本**——「领取后独占」。判据源在 store
+                    # （`_claim_locked` 也拒 backup），这里只是「不值当推」的过滤。
                     continue
                 jid, mode = tgt, CLAIM_MODE_BACKUP
             if not jid:

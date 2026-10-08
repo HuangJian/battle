@@ -405,6 +405,129 @@ def test_publish_invalidates_the_kind_cache(tmp_path: Path) -> None:
     assert out.ok is False and out.reason == "role", out
 
 
+# ──────────────────────── ★M5：BC 独占（需求 7 / Q5） ────────────────────────
+
+
+def test_bc_never_gets_a_backup_replica(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """★M5：BC 「领取后独占」——备份副本被**当面拒**；ppo 的备份语义一点不动。"""
+    from common.protocol import CLAIM_MODE_BACKUP
+
+    clock = [1000.0]
+    hub = _hub(tmp_path, clock)
+    _course(tmp_path, hub)
+    st = hub._stores[COURSE]
+    st.publish("k" * 16, _manifest("k" * 16, kind="bc"), b"PK\x03\x04fake")
+    assert st.claim_outcome("k" * 16, worker_id="online-1", role="online").ok is True
+    out = st.claim_outcome(
+        "k" * 16, mode=CLAIM_MODE_BACKUP, worker_id="online-9", role="online"
+    )
+    assert out.ok is False and out.reason == "no_backup", out
+    # 对照：同样的路子给 ppo 发备份是成立的（R2-3 的显式授权腿不许被误伤）
+    st.publish("m" * 16, _manifest("m" * 16, kind="ppo"), b"PK\x03\x04fake")
+    assert st.claim_outcome("m" * 16, worker_id="online-1", role="online").ok is True
+    out = st.claim_outcome(
+        "m" * 16, mode=CLAIM_MODE_BACKUP, worker_id="online-9", role="online"
+    )
+    assert out.ok is True and out.status == "backup", out
+    # 前置：bc 确实在飞（否则下面那条什么都没验到）；而在飞面里它**不进**备份候选
+    assert "k" * 16 in st.inflight_job_ids(not_held_by="online-9")
+    assert "k" * 16 not in [
+        j["job_id"] for j in hub.peek_jobs(worker_id="online-9", role="online")
+    ], "bc 不做备份：peek 不许把它摆出来（客户端少一趟无功往返）"
+    # 对照：ppo 的在飞作业照旧进备份候选（peek 的备份腿没被误伤）
+    assert "m" * 16 in [
+        j["job_id"] for j in hub.peek_jobs(worker_id="online-9", role="online")
+    ]
+
+
+def test_bc_liveness_is_progress_only_and_a_dead_lease_is_conceded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★M5：bc 判活**只认 epoch**（心跳不算）；超窗 ⇒ 孤儿 ⇒ 让出（别人立刻能领）。"""
+    import hub.store_leases as sl
+    from hub.task_pack import HOLD_PROGRESS_STALE_SEC
+
+    #: 两个窗巧合同值、语义不同（P0-1 禁合并）——两个名字都得在，且都可由 env 调。
+    assert sl.BC_PROGRESS_STALE_SEC == 900.0 == HOLD_PROGRESS_STALE_SEC
+    monkeypatch.setenv(sl.BC_PROGRESS_STALE_ENV, "10")
+    clock = [1000.0]
+    hub = _hub(tmp_path, clock)
+    _course(tmp_path, hub)
+    st = hub._stores[COURSE]
+    jid = "k" * 16
+    st.publish(jid, _manifest(jid, kind="bc"), b"PK\x03\x04fake")
+    out = st.claim_outcome(jid, worker_id="off-1", role="offline")
+    assert out.ok is True and out.token, out
+    assert st.lease_worker(jid) == "off-1"
+    # 心跳把 TTL 推着走（每 5s 一跳），但**一次 epoch 都不打**
+    for t in (1005.0, 1010.0, 1015.0):
+        clock[0] = t
+        assert st.heartbeat(jid, out.token) is True
+    clock[0] = 1030.0  # 距 claim 30s > 10s 窗 ⇒ 心跳活、进度死 —— 判死（§68 的教训）
+    assert st.lease_worker(jid) == "", "心跳不算活性：超窗必须让出"
+    assert st.reclaims(jid) == 1, "回收与过期同路：毒包计数 +1"
+    events = [
+        json.loads(ln).get("event")
+        for ln in st.jsonl_path.read_text(encoding="utf-8").splitlines()
+        if ln.strip()
+    ]
+    assert events.count("lease-orphan-reaped") == 1, (
+        "孤儿回收必须在账本里留凭据（health 面就是靠它证明队列诚实）"
+    )
+    # 让出后可被别人领；新主拿到的是**新**租约（进度锚重写）
+    clock[0] = 1031.0
+    out2 = st.claim_outcome(jid, worker_id="off-2", role="offline")
+    assert out2.ok is True, out2
+    assert st.lease_worker(jid) == "off-2"
+    assert st.job_progress_at(jid) == 1031.0
+    # 打点续命：下一次 epoch 把窗重新推满（同一条腿，不是两份阈值）
+    st.note_job_progress(jid)
+    clock[0] = 1040.0
+    assert st.bc_drain_of("off-2") == jid
+    clock[0] = 1042.0
+    assert st.bc_drain_of("off-2") == "", "超窗 ⇒ 不再是 drain（卡死的 bc 不许把盘钉住）"
+
+
+def test_hold_and_bc_are_mutually_exclusive_in_both_directions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★M5/Q5：一台盘同一时刻至多占一样——带 hold 的领不到 BC，在跑 BC 的领不到课程。"""
+    import hub.store_leases as sl
+
+    monkeypatch.setenv(STALE_ENV, "600")  # hold 很长命（本用例不许它自然过期）
+    monkeypatch.setenv(sl.BC_PROGRESS_STALE_ENV, "600")
+    clock = [1000.0]
+    hub = _hub(tmp_path, clock)
+    _course(tmp_path, hub, COURSE)
+    _course(tmp_path, hub, "c9-bc")
+    #: 课 A 上的 hold（自主盘 off-1 在跑）+ 课 B 上的一个 bc 作业
+    hub.note_hold(COURSE, worker_id="off-1", token="tok-a")
+    stb = hub._stores["c9-bc"]
+    jid = "b" * 16
+    stb.publish(jid, _manifest(jid, kind="bc"), b"PK\x03\x04fake")
+    # 方向①：带着 A 的 hold 去领 B 的 bc ⇒ 拒（跨课程腿，住 hub 层）
+    out = hub.claim_job(jid, worker_id="off-1", role="offline")
+    assert out.ok is False and out.reason == f"holding:{COURSE}", out
+    # 同源：peek 也不把它摆给这台盘（“清单是上界”的同上口径）
+    assert jid not in [j["job_id"] for j in hub.peek_jobs(worker_id="off-1", role="offline")]
+    assert jid in [j["job_id"] for j in hub.peek_jobs(worker_id="off-2", role="offline")]
+    # 别的盘能领（闸是按 worker 的，不是把活冻住）
+    assert hub.claim_job(jid, worker_id="off-2", role="offline").ok is True
+    # 方向②：这台（现在在跑 bc 的）盘去接课程 ⇒ busy（`_busy_locked` 的另一半）
+    lease, why = hub.claim_offline(COURSE, "off-2")
+    assert (lease, why) == ({}, "foreign")  # A 上还有别人的活 hold（先证“不是被这两条闸拒的”）
+    hub.note_release(COURSE)  # 课 A 空出来
+    assert hub.busy_reason(COURSE, "off-2").startswith("busy:"), hub.busy_reason(COURSE, "off-2")
+    lease, why = hub.claim_offline(COURSE, "off-2")
+    assert (lease, why) == ({}, "busy"), (lease, why)
+    assert hub.worker_bc_drain("off-2") == ("c9-bc", jid)
+    # bc 进度超窗（= 让出）⇒ 课程接管自动恢复（惰性判据，无清理线程）
+    clock[0] += 601.0
+    assert hub.worker_bc_drain("off-2") == ("", "")
+    lease, why = hub.claim_offline(COURSE, "off-2")
+    assert why == "" and lease.get("token"), (lease, why)
+
+
 def test_hold_mirror_is_pushed_to_the_store_and_reads_without_the_token(
     tmp_path: Path,
 ) -> None:

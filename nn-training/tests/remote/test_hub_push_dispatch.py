@@ -22,6 +22,7 @@ import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -336,6 +337,52 @@ def test_busy_worker_is_skipped_and_held_course_is_not_dispatched(
     assert hub._stores["off"].get_result("b" * 16) is None
     # 在线课推完即出结果
     assert _wait_until(lambda: hub._stores["on"].get_result("a" * 16) is not None)
+
+
+def test_bc_job_is_never_backed_up_by_the_push_leg(
+    tmp_path: Path, worker_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★M5（需求 7）：BC 「领取后独占」——push 腿连**试都不试**（与 ppo 的备份腿对照）。
+
+    真的闸在 store（`_claim_locked` 当面拒：`no_backup`，见 `tests/hub/test_hold.py`）；
+    这里钉的是派发面那层「不值当推」的过滤：bc 在飞 ⇒ 不发备份（否则每拍都白试一次）。
+    """
+    from common.protocol import CLAIM_MODE_BACKUP, PRIORITY_LOW
+
+    w1 = worker_factory()
+    hub = _hub(tmp_path, ["bc-c", "ppo-c"])
+    # bc 那份手写发布：kind 决定它是不是双角色作业（`_publish` 的夹具不带 kind）
+    bc_m = _manifest("b" * 16)
+    bc_m["kind"] = "bc"
+    bc_m["payload_sha256"] = hashlib.sha256(PAYLOAD).hexdigest()
+    hub._stores["bc-c"].publish("b" * 16, bc_m, PAYLOAD)
+    _publish(hub, "ppo-c", "p" * 16)
+    tried: list[tuple[str, str]] = []
+
+    def spy(jid: str, **kw: Any) -> str | None:
+        tried.append((jid, str(kw.get("mode"))))
+        return None  # 一律不发租约：本用例只看「试没试哪一份」
+
+    monkeypatch.setattr(hub, "claim", spy)
+    ws = _workers_with(tmp_path, worker_factory, (w1, {"id": "g1"}))
+    disp = _dispatcher(hub, ws)
+    # 预置两条「主副本在飞」的派发账（真推送不在本用例范围：`_run_one` 不该被走到）
+    for course, jid in (("bc-c", "b" * 16), ("ppo-c", "p" * 16)):
+        disp._inflight[jid] = {
+            "job_id": jid,
+            "slot": jid,
+            "course": course,
+            "worker": "g3",
+            "lease": "L",
+            "mode": "exclusive",
+            "url": "",
+            "key": "",
+            "state": "upload",
+            "started": 0.0,
+        }
+    monkeypatch.setattr(disp, "_job_priority_of", lambda jid: PRIORITY_LOW)
+    disp.tick()
+    assert tried == [("p" * 16, CLAIM_MODE_BACKUP)], tried
 
 
 def test_dead_worker_requeues_to_queue_head_and_another_worker_takes_it(

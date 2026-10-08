@@ -36,6 +36,8 @@ class ResultsMixin:
     _backup_authorized: set[str]
     #: 兄弟簇 `store_ledger` 的方法
     _job_dir: Any
+    #: 兄弟簇 `store_leases` 的方法（★M5：epoch 是 BC 唯一的进度信号，落盘即打点）
+    note_job_progress: Any
 
     # ---- 结果 ----
     def store_result(self, job_id: str, result: dict) -> bool:
@@ -88,6 +90,10 @@ class ResultsMixin:
     def store_bc_epoch(self, job_id: str, body: dict) -> bool:
         """BC epoch 回传落盘：bc-resume.json（单文件原子覆盖 = 最新 epoch 权重）+
         bc-metrics.jsonl（追加一行指标）。返回 False = 体非法。调用方已验租约。"""
+        # ★M5（Q5）：epoch 是 BC 作业**唯一**的进度信号（心跳只续租、不当活性）⇒ 落盘成功
+        # 即打一个进度锚：`_lease_state` 的 bc 判活、`bc_drain_of`、900s 让出回收都读它。
+        # 打点住 store（写入点唯一），handler 不另写一行。
+        self.note_job_progress(job_id)
         with self._lock:
             epoch = body.get("epoch")
             if not isinstance(epoch, int) or isinstance(epoch, bool) or epoch < 1:

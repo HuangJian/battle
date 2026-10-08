@@ -148,6 +148,11 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "job_kind",
             "hold_blocked",
             "_hold_stale_sec",
+            # ★M5（Q5）：BC 进度租约——打点 / 读 / 判活窗 / drain 判据（四者同源一处）
+            "note_job_progress",
+            "job_progress_at",
+            "_bc_progress_stale_sec",
+            "bc_drain_of",
         ),
         (
             "_leases",
@@ -165,6 +170,9 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "_role_lock",
             "_kinds",
             "hold_meta",
+            # ★M5（Q5）：BC 进度锚 + 它的锁（`POST /jobs/{id}/epoch` 是**唯一**写入点）
+            "_last_progress",
+            "_progress_lock",
         ),
     ),
     "store_results": (
@@ -312,15 +320,17 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
         for m in defined & set(MIXIN_METHODS):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(MIXIN_METHODS) == 58, len(MIXIN_METHODS)
-    assert len(seen) == 58, len(seen)
+    assert len(MIXIN_METHODS) == 62, len(MIXIN_METHODS)
+    assert len(seen) == 62, len(seen)
     # 49 = 拆分前 `_JobStore` 的 49 个方法；2026-09-25 并入 origin 的课程侧落位后又多了 2 条
     # （`_course_backup_target` / `_land_offline_round_extras`）；2026-10-01 §52 加 2 条
     # （`_lease_state` 判据 + `_lease_held` 布尔视图）；2026-10-03 T0 加 1 条
     # （`cancel_unsettled_jobs` 撤单）；2026-10-05 六轮 F1 加 1 条（`_ledger_net_state` 净态折叠）；
     # 2026-10-06 加 2 条（`_unfinished_pending` 唯一筛子 + `inflight_job_ids` 在飞集）；
-    # 2026-10-07 M1b 加 3 条（`job_kind` / `hold_blocked` / `_hold_stale_sec`）⇒ 现在 58 + 2。
-    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 58 + 2, "_JobStore 的方法总数变了"
+    # 2026-10-07 M1b 加 3 条（`job_kind` / `hold_blocked` / `_hold_stale_sec`）；
+    # 2026-10-08 M5 加 4 条（`note_job_progress` / `job_progress_at` / `_bc_progress_stale_sec` /
+    # `bc_drain_of`——BC 进度租约与 drain 判据）⇒ 现在 62 + 2。
+    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 62 + 2, "_JobStore 的方法总数变了"
 
 
 def test_the_mixins_do_not_share_any_defined_name() -> None:

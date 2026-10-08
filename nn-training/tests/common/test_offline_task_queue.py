@@ -621,6 +621,36 @@ def test_resolve_courses_picks_all_claimable_without_mode_keys(
     assert [t["course"] for t in got2] == ["b-late"]
 
 
+def test_resolve_courses_reports_my_own_holds_for_the_bc_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★M5：清单面回填「本盘自己还持着哪些课」（`holds["mine"]`）——Q5 的 BC 前置闸读它。
+
+    为什么在 `mine` 的**过滤之前**回填：被 `skip`（本会话已放弃/被撤销）的自持课也要算上
+    ——那时本盘确实还挂着 hold，不该去领 BC。
+    """
+    tasks = [
+        {"course": "mine", "claimable": False, "holder": {"worker_id": "w-me"}, "pack": None},
+        {"course": "other", "claimable": True, "pack": {"sha256": "oo" * 32}},
+    ]
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
+    holds: dict = {}
+    got, _blocked, _manifest = offline_boot.resolve_courses(
+        {}, {}, lambda _m: None, worker="w-me", holds=holds
+    )
+    # 有可领的课就先去跑它；而「我自己还持着哪门」这件事**照样**要带出去（BC 闸读它）
+    assert [t["course"] for t in got] == ["other"]
+    assert holds["mine"] == ["mine"], holds
+    # skip 掉的自持课不算「可跑」，但仍旧算「我持着」（BC 闸不能因此放行）
+    holds2: dict = {}
+    got2, _b2, _m2 = offline_boot.resolve_courses(
+        {}, {}, lambda _m: None, worker="w-me", holds=holds2, skip={"mine"}
+    )
+    assert [t["course"] for t in got2] == ["other"]
+    assert holds2["mine"] == ["mine"], holds2
+
+
 def test_run_batch_does_not_run_while_the_handoff_is_pending(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

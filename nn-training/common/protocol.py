@@ -58,6 +58,9 @@ from common.manifest import (
     _WIN_DRIVE_RE as _WIN_DRIVE_RE,
 )
 from common.manifest import (
+    BOTH_ROLE_KINDS as BOTH_ROLE_KINDS,
+)
+from common.manifest import (
     EVAL_SCRIPT as EVAL_SCRIPT,
 )
 from common.manifest import (
@@ -71,6 +74,9 @@ from common.manifest import (
 )
 from common.manifest import (
     ITER_OUT_REL as ITER_OUT_REL,
+)
+from common.manifest import (
+    KIND_BC as KIND_BC,
 )
 from common.manifest import (
     KIND_ROLES as KIND_ROLES,

@@ -6,6 +6,156 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §72 派发模型重构：课程无模式 · 接管（hold）唯一真源 · BC 独占（plan/worker-type-dispatch-model，2026-10-08）
+
+**一句话**：把「在线/离线」从**课程的一等概念**降成**worker 的类型**——课程不再区分在线/离线
+（更没有 auto），派发只看两件事：**这门课有没有被接管（hold）** 与 **这份活归谁（job 自己的 role）**；
+「还活着吗」只认**进度信号**（心跳不算）。本节是全文（判据 / 状态表 / 真值表 / 上界语义 / 代价 /
+兼容矩阵 / 落地与门禁）。
+
+**交付序**（每步独立绿、独立提交）：
+
+| 刀 | 内容 | 提交 |
+|---|---|---|
+| M1a | 判据 + `offline-dispatch.json` v2 双写（`hold` / `pending_export`） | 2026-10-07 |
+| M1b | 消费点切换（派发闸 / 清单 / claim / 取包门 / true 观测面） | `d8a5a0e2` + `427d8e21` |
+| M1c | 删「已无消费者」的旧符号（`parked` / `_sync_parked`） | 2026-10-07 |
+| M2 | 训练侧 `held` 通道（去 rl-config 模式；双通道读 hub + 文件） | `701846cb` |
+| M3 | 自主腿：轮内打点 + 点名腿先 claim + 409 三态分流 | `cfd9a4b7` |
+| M4 | 控制台去模式（删意图表 / 三颗钮 / 权威徽标；`overview.holds`） | `beee107f` |
+| M4b | hub 侧旧符号删除（`_modes`/`mode_of`/`authority_of`/`AUTO_*`） | `013bac5b` |
+| M5 | BC 独占（双角色 kind / 无备份 / 进度租约 / drain 互斥 / 自主腿 BC） | 本笔 |
+
+### 69.1 术语与不变量
+
+| 术语 | 定义 | 旧口径 |
+|---|---|---|
+| **自主 worker** | 跑 `battle.offline.ipynb`（`remote/offline_boot.py`）：按课领整段，云端自主跑 rollout+PPO | 旧「离线盘」（role=offline） |
+| **协作 worker** | 跑 `battle.cloudflared/tailscale.ipynb`（`remote/worker.py`）：只领 PPO / BC 作业 | 旧「在线盘」 |
+| **接管（hold）** | 自主 worker **claim 成功且任务包在盘**后的**课程级独占**；只认一个持有者 | 旧「离线租约 + 翻 mode」 |
+| **进度信号** | `/offline/progress`（轮内打点）· `/offline/artifact` · `/offline/result` · BC `/jobs/{id}/epoch` | 新增（**心跳不算**） |
+| **掉线** | 接管后 **900s 无任何进度信号** ⇒ 判掉线（惰性判据，谁读谁算） | 旧 180s 心跳静默 + 900s TTL |
+| **pending_export** | 「有人正在给这门课导包」的**软态**：不建 hold、不压派发、不停本机、不撤单 | 旧 `begin_auto_handoff` 的翻 mode 半边 |
+| **drain** | 自主盘**正在跑一份还在推进的 BC 作业**（Q5） | 无 |
+
+六条不变量（违反即 bug）：
+
+1. **课程无模式**：hub 无 `_modes`/pin/authority；console 无意图表/回灌；trainer 的等待不再读
+   `rollout_src=run`/`run_iters`。**唯一 opt-out = 停课**（开课标记不在）。
+2. **接管只在「包到手」后建立**（Q1）：claim 时包不在盘 ⇒ **不建 hold**，回 409 `pending_export`。
+3. **接管的解除**：`release`（段末交还）/ 进度掉线（900s，惰性）/ 人工 `revoke`。
+   `takeover=1` **不得覆盖 live hold**（覆盖 live 必须先 revoke）。
+4. **活性只认进度信号**；心跳（60s 独立线程）只续 TTL。
+5. **掉线 = 惰性判据**：派发闸 / `/offline/tasks` 读面 / 本机 held 派生**三处同源**（同一把尺子）。
+6. **压下只在进度新鲜时**：hold live ⇒ 该课对所有协作面不可派 + 本机停跑；stale ⇒ 自动恢复
+   （新盘可直接 stale 接管，不必 `takeover=1`）。
+
+### 69.2 状态表（课程视角）
+
+| 状态 | 进入 | hub 派发 | 本机 trainer | 备注 |
+|---|---|---|---|---|
+| 在训·无接管 | 开课（**无模式参数**） | 正常派 PPO 给协作盘 | 跑 rollout + 发布 | — |
+| 导包中（pending_export，**软态**） | claim 遇缺包（Q1） | **照常派**（不占任何闸） | **照常跑** | 只服务：①别的盘知道「有人在导包」（排序靠后，不是闸）②`offline_stalled` 的 `pending-export` 锚点 |
+| 接管中 | claim 成功 ∧ 包在盘 | 该课**压下不派**（含 §68 备份副本腿） | held 等待（轮边界生效） | 导包完成前到不了这一档 |
+| 接管掉线 | 进度静默 ≥900s（惰性） | **自动恢复**派发（在队任务照常可领） | 自动恢复（`GET /offline/hold` + 文件双通道） | §69.4 |
+| 正常交还 | 段末跑满 / release | 恢复 | 恢复 | 摘要链不变 |
+| 停课 | 删开课标记 | 不可领（唯一 opt-out） | 既有停课语义 | **在跑 hold 不杀** |
+| 强制解除 | 人工 revoke | 同掉线 | 同掉线 | 控制台钮（`release_hold=1`） |
+
+### 69.3 判据：四象限真值表（P2-1「三钟收敛成一条」）
+
+**「任何合法接触（心跳 ∨ 进度）都刷 TTL；只有进度刷 `last_progress_at`」**。心跳死 ≠ 掉线，
+心跳活 ≠ 活着——两者组合出四象限（`lease_verdict` 的顺序仍是 expired → revoked → mine → stale → foreign）：
+
+| 心跳 | 进度 | 判读 | 依据 |
+|---|---|---|---|
+| 活 | 新 | **live** | 正常在跑 |
+| 活 | 老 | **stale** | §68 的假活教训：进程活着但没有任何推进 |
+| 死 | 新 | 判 live（防御） | 进度本身刷 TTL ⇒ 这格理论上不可达 |
+| 死 | 老 | **expired** | 掉线（子集：stale） |
+
+判活窗唯一来源 `hub/task_pack.py::hold_progress_stale_sec()`（900s，env `BCITY_HOLD_PROGRESS_STALE_SEC`）；
+`store_leases.HOLD_STALE_SEC` 是**抄本**（那个模块不许 import 调度上层），由
+`test_store_gate_windows_match_task_pack_constants` 把两份钉住。★M4b 删掉了旧的
+`OFFLINE_LEASE_STALE_SEC(180s)` 与 `lease_verdict` 的 `beat_at` 退回腿——**一条租约没有进度字段
+即不可证明活着**（保守方向：允许新主接管）。
+
+**轮内打点**（Q2 硬要求）：`remote/offline_boot.py::install_progress_pinger` 挂在
+`common/progress_hook` 上，事件源两层——`worker/iter_rollout` 每结算一局（轮内）+
+`remote/plan_run` 的段开工/每轮开工/落盘上传前/重试（轮边界，`force=True` 顶开节流）。
+节流 `PROGRESS_MIN_INTERVAL_SEC=240`（M ≤ 300s，且 `3M ≤ 900s`）；**绝不另起线程**（那是心跳的教训）。
+回归用例（评审 §6-1 的修订版）：**单轮 wall_sec >900s ∧ 轮内每 ≤300s 有完成事件 ⇒ live**；
+**整轮零完成事件 >900s ⇒ 判掉线**。
+
+**M0 前置读数（本机无法给出，如实记）**：plan §3-M0 要求从既有回传的 `iters[].wall_sec` 统计各课
+单轮 P50/P95，并定下「P95 > 600s ⇒ 重开 Q2 阈值裁决」。本机（开发仓）**没有任何真机离线回传语料**
+（`offline/` 产物只出现在 pytest 临时目录）⇒ P50/P95 **未测**，Q2 的重开条件**既未触发也未证伪**。
+⇒ 待办：真机下一份离线段回传落盘后补记 P50/P95 到本节（若 P95 > 600s，按 plan 重开 Q2，**不许默默改常量**）。
+
+### 69.4 清单 / 领取 / 取包：三面同源
+
+- **`?worker=` 上界语义（P2-x/F14）**：`/offline/tasks` 的 `claimable` 是**上界**——不带 `?worker=` 时
+  **不含**「一拖一（D3）」这一层；带 `?worker=` 才是**同参可领**（清单说 `claimable=true` ⇒ 同参
+  `claim_offline` 必成功，守门用例 2）。并发窗口（别人抢先领走）不在契约里，守卫只在无并发下跑。
+- **claim 三态**（Q4 / P0-4）：`POST /offline/claim` 必须带 `?proto=2`，缺它 ⇒ 409 且响应体带
+  `busy:true` + `error` 全文 + `proto_required:2`（旧 notebook 会把这行原样打进会话日志 ⇒
+  「请刷新 `battle.offline.ipynb`」能到达现场，且它走 blocker 路径**不会双跑**）。
+- **拒因分流**：`not_offline`（停课）/ `busy`（本盘在别处忙，**按 worker**）/ `foreign`（别人 live hold）/
+  `held`（含 takeover 覆盖 live 的尝试）/ `pending_export`（无包；软态）——云机侧一律「本拍不跑，换下一门」。
+- **取包门（P1-2）**：`GET /offline/task-pack` =「**无 live hold ∨ 持 lease 且 token 相符**」；
+  live hold 时非持有者 409。点名腿（`CFG.course`）**统一先 claim 再取包**（M3）——不 claim 时，
+  **自己上一段留下的 live hold 会把包锁住**；且「谁在跑这门课」在 hub 只认 hold 一个真源。
+  `/offline/resume*`（只读锚点）**不加**此门。
+- **`active_courses` 抖动（P2-7，有意）**：`/admin/queue.active_courses` = 「非 live-hold 且**有活**的课程数」
+  ⇒ 一门课进 hold 会让它 0↔1 抖一次；**它是观测口径，不是判据**（判据在 `role_blocked`）。
+
+### 69.5 BC 独占（★M5 / Q5 / 需求 7）
+
+BC 是**双角色 kind**：`common/manifest.py::BOTH_ROLE_KINDS = {bc}`（`KIND_ROLES` 不动——bc 缺省仍归在线盘，
+双角色是叠加在归属之上的**豁免**）。四条语义：
+
+1. **只豁免角色闸**（`store_leases.role_blocked` 的 ①）；②归属 ③课程 hold 闸**照样吃它**
+   （分支顺序 = 语义，`test_role_gate_lives_in_the_lease_critical_section` 连位置一起钉）。
+2. **领取后独占、不发备份副本**：`_claim_locked` 对 `mode=backup` 的 bc 当面拒（`no_backup`）；
+   `peek_jobs` 不把在飞 bc 摆成备份候选；push 腿的备份过滤**连试都不试**（判据源在 store）。
+3. **进度租约**：`_last_progress` ← `POST /jobs/{id}/epoch`（**唯一写入点** `note_job_progress`）。
+   `_lease_state` 的 bc 分支只认进度（心跳续 TTL 但不作活性）；**900s 无 epoch ⇒ 孤儿 ⇒ 让出**
+   （与过期同路回收：stale 记录 + 毒包计数 + 账本 `lease-orphan-reaped`）。窗 = `BC_PROGRESS_STALE_SEC`
+   （env `BCITY_BC_PROGRESS_STALE_SEC`），与 hold 的 900s **巧合同值、语义不同**（禁合并常量）。
+   **有界代价（写死）**：租约被回收后原 holder 仍可能在跑 ⇒ 最坏这份 BC 被别人重跑一遍；
+   它自己的回传仍被首写锁定挡掉（`_backup_authorized` 之外的重复回传不吃 403 的那条腿已由
+   `store_result` 的首写锁定兜住）。
+4. **drain 互斥**（一台盘同一时刻至多占一样——hold 或一个 BC 作业）：
+   · 带课程 hold 的盘领不到 BC：`queue_claims._drain_blocked`（**跨课程腿**，只有 hub 层有全视图）
+     接在 `claim_next` / `peek_jobs` / `claim_job` 三个拉活面上；同一门课那一半已被 ③ 吃掉。
+   · 在跑 BC 的盘领不到课程：`queue_offline._busy_locked` 的 BC 腿（D3 的 busy 门再加一条）。
+   · 实现细节：hub 层的 `role_blocked` 与 store **逐字同签名**（门面契约守）
+     ⇒ drain 腿是它的兄弟 `_drain_blocked`，**没有**改那个函数的签名。
+5. **自主腿**（`remote/offline_boot.py::try_take_bc_job`）：空档（清单里全是别人的 hold / 队列空）里
+   顺路领一份 BC 跑掉——代理 = 包内 `worker_loop(once=True, role="offline")`，执行链与协作盘
+   **逐字同一条**（`run_one_round` 单 job 生命周期）。前置闸 = 「本盘无 live hold」（`holds["mine"]`，
+   与 Q3 同一份清单事实）；`holding=True` 连试都不试。领 BC 是**阻塞**的 ⇒ 跑完/让出才回课程轮询。
+   失败一律消化成一行日志（这段腿绝不带走会话）。
+
+### 69.6 兼容矩阵（F10 收窄后）
+
+| 组合 | 结论 |
+|---|---|
+| 旧云机 × 新 hub | **不支持**：claim 缺 `?proto=2` ⇒ 409（`busy` + error 全文送达旧日志，且**不双跑**）。升级窗口 = 刷新 notebook |
+| 新云机 × 旧 hub | 读不到 hold ⇒ 按现状降级照跑（与现状同级），UI 显示未知 |
+| 旧 console × 新 hub | 模式 POST 400 退役文案（响亮）；启动参数 `--course a=offline` 保留解析 + WARN + 忽略（`/admin/courses` 行给 `mode_ignored`） |
+| 新 console × 旧 hub | 读不到 hold ⇒ `held` 按空集写；UI 显示未知 |
+| 旧 python × 新 console | `loop-control.json` 的 `held` 条目**宽容读**（`version`/`applied` 形状不变）；同机时钟前提（`tmp/` 共享） |
+| 刷 notebook **但**用旧包 | 新引导 + 旧 `code.zip` ⇒ 打点层仍生效（打点住引导侧，F3 定案）；`proto=2` 由引导代填 |
+
+### 69.7 一次性清理与门禁（M6）
+
+- **数据面清理核对（本机实测，2026-10-08）**：`nn-training/rl-config.json` 的 `courses` 为空
+  （无 `run_iters` / `rollout_src=run` 可删）；`tmp/console-state.json` **不存在**（无 `courseModes` 键）；
+  `tmp/loop-control.json` 只剩 `{version, held}`（已是新形状）⇒ **三项清理无残留**。
+- **门禁**：`bash tools/githook/nn-python-gate.sh`（ruff + mypy + pytest `tests/ e2e/`）**3810 passed / 9 skipped**；
+  `bun run check` 与控制台两条腿见提交信息（本刀未动 TS）。
+
 ## §71 离线「一拖一」闸两次自锁：窗口锚换 episode 起点 + 只算池内的课 + `--export-bundle` 启动期拒导（2026-10-07）
 
 **触发**：用户报「离线 worker 领不到 `x21-psh-k10`，设成离线/在线都没有用」（Kaggle 自主 worker

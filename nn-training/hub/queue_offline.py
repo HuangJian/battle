@@ -31,6 +31,7 @@ import json
 import math
 import os
 import secrets
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -267,7 +268,9 @@ class QueueOfflineMixin(QueuePeer):
     #: （包 sha）。带值声明在组合类 `__init__`；每次更新原子落盘 `<课>/offline-dispatch.json`。
     _dispatch: dict[str, dict]
     _dispatch_lock: Lock
-
+    #: ★M5（Q5 的另一半）：本盘是否正在 drain 一份 BC 作业——判据住 store（`bc_drain_of`：
+    #: 租约活 ∧ 持有人是它 ∧ 进度新鲜），跨课程读面住 sibling `queue_claims`。
+    worker_bc_drain: Callable[[str], tuple[str, str]]
 
     def offline_task_courses(self) -> list[str]:
         """清单的**候选面**（评审 S-1）：课程表里**开课标记在**的 ∪ 盘上有开课标记的冷课。
@@ -1065,6 +1068,15 @@ class QueueOfflineMixin(QueuePeer):
         wid = str(worker or "").strip()
         if not wid:
             return ""
+        # ★M5（Q5 的另一半）：本盘正在 drain 一份 **还在推进** 的 BC 作业 ⇒ 也不接课程
+        # （「一台自主 worker 同一时刻至多占一样」）。判据在 store（心跳不算、900s 让出），
+        # 这里只取答案；锁序安全：store 的锁从不反向取 `_lease_lock`。
+        bc_course, _bc_jid = self.worker_bc_drain(wid)
+        if bc_course:
+            return (
+                f"busy: 你这台盘正在跑 BC 作业（课 {bc_course}，kind=bc）"
+                "——跑完 / 让出后才接课程接管（Q5：hold 与 BC 互斥）"
+            )
         seen: set[str] = set()
         for other in (*self.offline_task_courses(), *self._order, *self._stores):
             if other == course or other in seen:
