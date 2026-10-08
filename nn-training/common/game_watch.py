@@ -113,6 +113,17 @@ SCAN_CEILING_SEC = 60.0
 #: 全部理由。归入机器级停滞（`UnreapableChildError`）交整轮重投。
 CLEAN_CEILING_SEC = 5.0
 
+#: **搬回**（scratch → job 目录，一局）的墙钟上界（秒）：`common/scratch.drain_tree` 的一次拷贝。
+#:
+#: 为什么给它上界（2026-10-08 `plan/rollout-local-scratch.plan.md`）：搬回在主线程上（天然单线程的
+#: 顺序 IO），而它写的是**网络挂载点** —— 挂住时既不返回也不抛，整轮的进度循环就跟着静默。
+#: 与 `SCAN_CEILING_SEC` / `CLEAN_CEILING_SEC` 同族（都是「单线程上的有界文件 IO」），但量级不同：
+#: 正常一局 2–3MB 顺序写 <1s，所以 30s 是「盘挂了」而不是「盘慢」。
+#:
+#: ⚠ 超界 ⇒ 作废这一局的**安装票**（评审 F4：被放弃的 copier 从此装不进去）并入 `stuck` 交整轮重投；
+#: 确定性失败（`ENOSPC/EROFS/EACCES`…）由 `drain_tree` 直接抛 `ProtocolError`，**不进**那条循环（评审 F3）。
+DRAIN_CEILING_SEC = 30.0
+
 #: 「整轮停滞」的告警线（秒）：这么久**一局都没结算**就点名一次，并列出还在飞的局。
 #:
 #: 为什么需要它（2026-09-25 二次取证「rollout 卡死机器半天」）：进度行与心跳都挂在「有局结算」
@@ -279,6 +290,29 @@ def clean_ceiling_line(
     )
 
 
+def drain_ceiling_line(kind: str, label: str, ceiling_sec: float, where: str) -> str:
+    """搬回**超界**行：本地盘 → job 目录的一局拷贝在上界内没返回。
+
+    与 `scan_ceiling_line` / `ceiling_line` 的分工：那两行管「跑局/扫盘」，这一行管**结算之后的搬回**
+    （见 `DRAIN_CEILING_SEC`）。处置：安装票作废（被放弃的 copier 从此装不进去）+ 本局并入 `stuck`
+    交整轮重投 —— 与机器级停滞同口径，不就地重跑。
+    """
+    return (
+        f"WARN {kind} 搬回超界（{ceiling_sec:g}s 内没返回）：{label}"
+        "——本地盘 → job 目录的拷贝卡住了（网络盘 IO 还没好）；本局不装进去"
+        "（半截拷贝不许进 job 目录：`scan_shard_dirs` 会把它当产出），交整轮重投"
+        f"；现场 {where}"
+    )
+
+
+def drain_fail_line(kind: str, label: str, n_done: int, n_failed: int, where: str) -> str:
+    """搬回失败的**一局**行（非绑口；轮账里的 `搬回=` 汇总是它的汇总）。"""
+    return (
+        f"WARN {kind} 搬回失败：{label}（本地盘上的产出还在，本局不产出）"
+        f"——累计 {n_done} 成 / {n_failed} 败；现场 {where}"
+    )
+
+
 def game_time_summary(kind: str, items: list[tuple[float, str]], *, retried: int = 0) -> str:
     """一轮结束时的**单局耗时分布**（每轮都打：5s 这条线要靠真数据校准，不靠猜）。
 
@@ -309,6 +343,7 @@ def _pct(sorted_secs: list[float], q: float) -> float:
 __all__ = [
     "CLEAN_CEILING_SEC",
     "DEFAULT_GAME_TIMEOUT_SEC",
+    "DRAIN_CEILING_SEC",
     "GAME_IO_SLACK_SEC",
     "GAME_MAX_ATTEMPTS",
     "GAME_POLL_SEC",
@@ -319,6 +354,8 @@ __all__ = [
     "attempt_timeout_sec",
     "ceiling_line",
     "clean_ceiling_line",
+    "drain_ceiling_line",
+    "drain_fail_line",
     "game_ceiling_sec",
     "game_label",
     "game_time_summary",

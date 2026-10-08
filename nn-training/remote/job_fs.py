@@ -31,6 +31,7 @@ from typing import Any
 from common.fs import extract_tar_bytes
 from common.proc import run_capture
 from common.protocol import ProtocolError, unpack_payload
+from common.scratch import DRAIN_STAGE_SUFFIX
 from remote.prefetch import PREFETCH_DIR_NAME
 
 __all__ = [
@@ -73,12 +74,18 @@ def prune_job_dirs(
 
     ⚠ 新增内容寻址缓存目录时必须加进这份豁免名单（2026-09-17 M2 事故：`blob_cache`
     漏了名单 → 每轮被当旧 job 目录删掉 → 缓存永远未命中，而现象看起来是「协议没生效」）。
+
+    ★ 2026-10-08（plan/rollout-local-scratch §2 P0-3，评审 F1）：搬回的**暂存根**
+    （`<job_dir>__drain__/`，住 job 目录**隔壁**所以不在真 job 目录里）也在本函数视野里。
+    不豁免它就会被算成一个 job 目录，把 keep-2 窗口挤掉一个真 job（而那个的 `_result.json`
+    正是「回传失败后重领同 job」幂等路径要用的）⇒ 按后缀豁免。
     """
     try:
         dirs = [
             d
             for d in work_dir.iterdir()
             if d.is_dir()
+            and not d.name.endswith(DRAIN_STAGE_SUFFIX)
             and d.name not in ("code_cache", "blob_cache", "ts_code_cache", PREFETCH_DIR_NAME)
         ]
     except OSError:

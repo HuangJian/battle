@@ -32,7 +32,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
 | [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** · **六包重组（刀 1–6）** · **门禁 fail-fast**（§63） · **测试不得碰在跑的控制台**（§64） · **测试不得写生产状态（门禁意图 / 循环控制 / EvalBoard / 权重归档）**（§65） | 33 |
 | [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 / 课程管理页 / 指标表抗轮转抄录 / **回放导出按评估轮选（§32）** / **池历史大流按变化重建（§33）** / **空置内存真凶：logTail 整文件读（§34）** / **v2 词表与钮：接管是唯一真源（§35）** | 35 |
-| [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处）· **节点单实例互斥**（§29）· **一局的墙钟上界**（§32）· **长驻池真就绪 + 有界清理**（§33） | 32 |
+| [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处）· **节点单实例互斥**（§29）· **一局的墙钟上界**（§32）· **长驻池真就绪 + 有界清理**（§33）· **热路径 IO 换节点本地盘（rollout/eval 共用一套 scratch）**（§34） | 33 |
 | [`docs/nn/tpu-perf.md`](nn/tpu-perf.md) | TPU / XLA：设备实测 · 单步耗诊断 · 编译缓存 · PPO 吞吐 | 9 |
 
 > **另：每篇多了一个 `决策正文归档` 节（2026-09-23）**。`DECISIONS.md` 同日瘦身，把那批
@@ -104,6 +104,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 16 | **抢占作废字节的真机读数未取**（它决定要不要做双端 Range 续传，见 `docs/nn/remote-transport.md` §51 第 3 行） | `docs/nn/remote-transport.md` §51 | 同 scenario 的三个 job 里把每轮 `preempt=N(wasted X.XXMB)` 相加：**Σwasted ≥ 3.4MB（一份 payload）或单次 ≥2MB ⇒ 立项做 Range**；否则不做（先量后裁，门槛已预注册） |
 | 22 | **分关采样平衡（`per-stage-v3`）的真机轮次未取**（代码/单测已齐，见 `docs/nn/training-stack.md` §30） | `docs/nn/training-stack.md` §30 | 一次真机 `kind=run` 轮：云机轮报出现 `volumeTopup{rule=per-stage-v3}` 且 `shortfall_by_stage` 为空（或触 `capped_stages`）；本机链那一轮 iteration 事件出现 `volume_alloc_rule` / `volume_stage_stats`；两处都**不得**退化成旧的全关同局数 |
 | 23 | **长驻池「假就绪」修复的真机轮次未取**（代码/单测已齐，见 `docs/nn/runtime-opt.md` §33） | `docs/nn/runtime-opt.md` §33 | 下一次云机 rollout 轮看五条：① 池行 `N/M 真就绪（另 K 个仍在冷启动…）`；② 熔断行/轮末 `serve_pool:` 汇总带 `unready=`；③「单局超界（155s）」= 0；④ **逐局重试行**（`单局重试 2/3：…`）能出现（⚠ 轮末 `重试过的局 N 个` **不是**判据）；⑤ 轮级墙钟 / `spawned` 不因分批变差（变差 ⇒ 先撤分批、只留真就绪判据） |
+| 24 | **热路径换本地盘的真机轮次未取**（代码/单测已齐，见 `docs/nn/runtime-opt.md` §34 · `plan/rollout-local-scratch.plan.md` §7） | `docs/nn/runtime-opt.md` §34 | 下一轮云机 rollout 看四条：① `产出落点=…（本地盘；可用 X GB｜本轮需 Y MB）`**不得**是「回退原地」（例外：速度闸测出不够快）；② `单局超界` = 0、`整轮重投` 不出现（出现 ⇒ 本地盘也没顶住 ⇒ 上并发自适应的 L1/L2）；③ `搬回=85 局/失败 0 局` 且逐局 `w*/rollout.log` 存在；④ 单局 p50 显著好于事故轮。eval 腿（同一轮）：`[eval-cloud]` 单局 p50/p90 同步改善 + `eval_log.jsonl` 行数 == settled 局数 |
 
 ### 3.4 控制台
 

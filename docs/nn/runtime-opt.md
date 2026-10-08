@@ -8,6 +8,94 @@
 
 ---
 
+## §34 热路径 IO 换节点本地盘：rollout / eval 两条腿的 TS 树 · 每局产出 · 权重落 scratch（2026-10-08）
+
+> 起因（plan/rollout-local-scratch）：云机 rollout 一轮 85 个 bun **同时**打 `/kaggle/working`
+> （Kaggle 的持久化网络挂载点）—— 读的是同一棵 TS 运行时树（traverse + dlopen `.so` + 读 stage json）、
+> 写的是每局 2–3MB 的 shard、还各读一遍权重。卡住的进程末行 = `[features] native 启用`
+> （attest 3/3 打完、写产出之前）⇒ 读写都在那一档。
+> **判定性对照**：本机同样 85 并发、同样 bun、同样 shard 尺寸**从不生病**，因为本机写的是本地盘 `tmp/`
+> ⇒「85 并发」不是病，**「85 并发 × 网络挂载点」才是**。
+
+### 34.1 被搬走的三样热数据（两条腿共用一套机制）
+
+| 数据 | 原落点 | 谁在读/写 |
+|---|---|---|
+| TS 运行时树 | `run/ts_code_cache/<sha>/` | **rollout 85 个 bun 各读一遍；eval 94 个各读一遍（同一棵树）** |
+| 每局 shard | `job_dir/w{i}/rl_s*_seed*/` | 85 个 bun 各写一份 |
+| 初始权重 | `job_dir/init_weights.json` | 85 个 bun 各读一遍 |
+| （eval 腿）每局 `game_dir` + 当轮权重 | `work_dir/eval-*` / `it-NNN/weights.json` | 94 个 bun 各写/各读一份（200 个目录） |
+
+eval 腿的病**不在写量**（200 × 3.4KB ≈ 680KB），在：① 94 路冷启动读同一棵网络盘上的树；
+② 200 次 mkdir+写+读的**元数据操作**落在网络盘上；③ 它与下一轮 PPO 并行（`plan_handoff` 的设计）。
+**逐局账本 `eval_log.jsonl` 刻意不动**（见 34.3）。
+
+### 34.2 落点链与布局（`common/scratch.py`）
+
+候选链 `NN_ROLLOUT_SCRATCH`（env，无条件）> `/dev/shm` > `/tmp` > **`None`（回落 `job_dir`）**；
+两个闸：容量（`free ≥ need × 1.5`，`need` 不含比值 —— 只乘一次）与**速度**
+（16→8MB 顺序写 + fsync 粗测；不比 job 目录快 5× 就不用手）。
+
+* **为什么量速度**（评审 F6）：「`/tmp` 是本地盘、IOPS 高一到两个数量级」在仓内无取证；
+  若 Kaggle 的 `/tmp` 也在同一块慢后端上，本 plan 收益为 0 而 drain/清理/拷贝三条失败面照旧
+  ⇒ **测出来不够快就回落**（宁可原地跑）。
+* **为什么不用 `/dev/shm`**：Docker/Kaggle 默认 64MB，85 局需 170–280MB ⇒ 由容量闸弹掉；
+  它仍是候选链第 2 档（TPU/大内存实例上可能真够）。
+* **布局**：作业私有目录 `<根>/nn-rollout-<作业名>-<hash8(作业根绝对路径)>/`（**同机多会话互不误删**，
+  评审 F5）；其中 `r/` = rollout 的 job 相对镜像、`eval/` = 云机评估的 game 目录（互不相干、各清各的）；
+  TS 家 `nn-rollout-ts-<sha>/` 在根下、**内容寻址**（两条腿/跨轮命中同一份，先到先拷、后到复用）。
+* **回退档 = 逐字今天的行止**（评审 F9）：不搬、不 drain、不换 `_exec_argv` 的根（连候选探针都不跑）。
+  非 POSIX 上候选链为空 ⇒ 单测默认跑的就是回退档。
+
+### 34.3 三条硬约束（评审 F1/F3/F4，都改了实现形态）
+
+1. **暂存在 job 目录之外**（F1）：搬回先拷到 `<job_dir>__drain__/<out>/`，对完账再 `os.replace` 改名。
+   `scan_shard_dirs` 是 `job_dir.rglob("rl_s*_seed*")`（**目录层级任意**），而 `copytree` 不保证
+   `manifest.json` 最后落盘 ⇒ 暂存住在 job 目录里 = 一个「有 manifest、`obs.npy` 还差几 MB」的目录
+   会被认成产出；更糟的是 `data_fp` 只读 manifest 的 `{wver,stage,seed}`，**半截拷贝与真产出逐位相同**
+   ⇒ 对账也拦不住。该后缀同时被 `prune_job_dirs` 豁免（它就在 `work_dir` 下，否则会挤掉 keep-2 窗口）。
+2. **确定性失败不进重投**（F3）：`ENOSPC/EROFS/EACCES/EPERM/EDQUOT` ⇒ `ProtocolError` 响亮上抛。
+   整轮重投缺省**不限次**（对「机器卡住」合理，会自愈），对「job 目录满/只读」却是**空转**。
+3. **安装闸**（F4）：`call_bounded` 只弃线程、**不杀** ⇒ 被放弃的 copier 会拷完并在挂载点恢复时把
+   （已过期的）数据 rename 进 `job_dir`。修法 = 每局一张**安装票**，主线程超界时作废它，copier 在
+   **同一把锁下**复核票据后才 `os.replace` ⇒ 判据与安装原子地串在一起（没有竞态窗口）。
+
+* **搬回的时序**（评审 F7）：**结算一局搬一局**，且 drain 在 `settled_n += 1` / 进度行 / `progress_hook.report`
+  **之前** —— 搬不回去的局**不算结算**，与机器级停滞同口径并入 `stuck` 交整轮重投。
+* **eval 腿只搬三样**（P0-5-1/2/3）：TS 树（同一个内容寻址的家）、当轮权重（逐字节拷贝 ⇒ 账本里的
+  `wver`/key16 **不变**，两腿读数可配对）、每局 `game_dir`；**账本留在产物目录**（P0-5-4 已删，评审 F2：
+  `settle_eval_summary` 的聚合读面是**文件**，且逐局行是 cell 死后续跑的唯一凭据；而它换掉的只有
+  `open` 的目标 —— 收益最小、新面最多）。
+
+### 34.4 协议零改动（这是本案最大的安全性来源）
+
+`--out`/`--weights` 在**协议层**仍是 job 目录内相对路径（`protocol.validate_rollout_spec` 校验的就是它）；
+只在**节点侧绝化**时换根（`_exec_argv`）。搬回之后 `job_dir/w{i}/rl_s*_seed*/` + `w{i}/rollout.log`
+与今天**逐字一致** ⇒ `scan_shard_dirs` / `collect_reports` / `collect_shard_manifests` / `data_fp`
+**全部零改动**，wire 形状与声明集一个字节不动。
+`_clean_attempt`（半截产出的唯一防线）改成**两个根都扫**（R1），第二个根走关键字参数 `exec_root=`
+⇒ 回退档的调用形状与今天逐字相同。
+
+### 34.5 落地与未取证
+
+* 实现：`common/scratch.py`（新，L0 叶子层；不落 `remote/job_fs.py` 是因为 `worker → remote` 是
+  `tests/remote/test_job_fs_split.py` 钉死的禁向）· `worker/iter_rollout.py`（exec 根 + 流式搬回 +
+  轮账 `产出落点=`/`搬回=N 局/失败 M 局`）· `remote/plan_handoff._eval_job_builder`（eval 三样）·
+  `remote/job_fs.prune_job_dirs`（豁免暂存根）· `common/game_watch.DRAIN_CEILING_SEC = 30.0`。
+* 单测：`tests/remote/test_rollout_scratch.py`（30 例：落点链两道闸 / env 不可写响亮失败 / 布局与清理
+  只动自己那份 / 原子安装 / drain 跨设备与校验 / 致命 errno / 安装票 / 暂存不可见 / 换根档真跑 +
+  回退档逐字 / drain 失败不算结算 / R1 双根 / eval 三样与账本不动 / prune 豁免）；
+  四处反探针（暂存放回 job 目录 · 票据不查 · errno 不映射 · 清理不看 exec 根）**逐条转红**。
+* **未取证**（如实记）：① `/tmp` 在 Kaggle 上的真实介质与 `/dev/shm` 大小 —— 由落点自检行实测；
+  ② `est_shard_bytes` 的「上一轮实测 p90」**没有生产者**（轮报告里只有墙钟）⇒ 先用缺省 8MB，
+  把「逐局字节之和进轮报告」留作 P1。
+* **真机验收**（`plan/rollout-local-scratch.plan.md` §7，agent 不起训练）：`产出落点=…（本地盘…）`
+  不得是「回退原地」（**除非**速度闸测出不够快 —— 那是正当例外）；`单局超界`=0、`整轮重投`不出现；
+  `搬回=85 局/失败 0 局` 且 `job_dir/w{i}/rollout.log` 存在（直接断言，逐局画像来自单局 manifest，
+  **不是**它的间接证据）；eval 那轮的单局 p50/p90 同步改善且 `eval_log.jsonl` 行数 == settled 局数。
+
+---
+
 ## §33 长驻池「假就绪」+ 重试路径裸文件 IO：真就绪判据 / 分批冷启动 / 有界清理（2026-10-07）
 
 > 起因（Kaggle 离线课 `x21-psh-b` it253，job `031e17e61777d09c`）：一轮 **355s**（正常 32s）。四行现场：

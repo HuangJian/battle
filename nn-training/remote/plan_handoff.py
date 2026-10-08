@@ -41,6 +41,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+# 按**模块**粒度 import（而不是 `from common import scratch`）：本文件的依赖面是闭集守卫
+# （`tests/remote/test_plan_handoff_split.py` 白名单逐条对账），写成点分名才能让白名单说清
+# 「用的是哪个 common 模块」。
+import common.scratch as scratch
 from common.logutil import log_line
 from common.platform_utils import cpu_worker_slots
 from common.protocol import (
@@ -792,16 +796,71 @@ def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], dict]:
 
     权重用 `it-NNN/weights.json` 而不是任何「活指针」：那是这一轮不可变且已在盘上的
     W(it)，`wver` 因此与本地/节点评同一份权重时逐位相同（账本可配对）。
+
+    ★ 2026-10-08（plan/rollout-local-scratch §2 P0-5）：**三样热数据换到节点本地盘**
+    （TS 运行时树 / 当轮权重 / 每局 `game_dir`）—— 94 路冷启动读同一棵树、200 次
+    mkdir+写+读的**元数据操作**都从网络挂载点上拿走。**逐局账本不动**（`eval_log.jsonl`
+    仍在产物目录：`settle_eval_summary` 的聚合读面是**文件**，且那是 cell 死后唯一能续跑的凭据）。
+    换不过去就**逐字**走今天的行为（评估是旁路：宁可不搬，不能拖训练）。
     """
+    #: 每轮 build 都重建一次（runner 串行评轮）⇒ 上一轮的 game 目录/权重当场回收，占用有界。
+    state: dict[str, Any] = {}
+
+    def _layout() -> Any:
+        """解析 + 安装本腿的 scratch（一次）；`None` = 回退原地。"""
+        if "layout" in state:
+            return state["layout"]
+        layout = None
+        if str(ctx.ts_tree_dir or ""):
+            try:
+                layout = scratch.open_scratch(
+                    ctx.store.root,
+                    # 本轮局数 = 关数 × 种子数（`offline_eval.eval_pairs` 同一口径）；
+                    # eval 单局产出 ~3.4KB ⇒ 需求极小，真正的判据总是速度那条（F6）。
+                    need_bytes=scratch.need_bytes_for(
+                        max(1, len(ep.stages) * ep.n_seeds), scratch.SCRATCH_EST_EVAL_BYTES
+                    ),
+                    log=ctx.log,
+                )
+            except ProtocolError as e:  # env 显式指定但不可写 ⇒ 评估腿记一笔、走原地
+                ctx.log(f"WARN 云机评估 scratch 落点不可用（{e}）——本轮评估走原地")
+            if layout is not None:
+                src = Path(str(ctx.ts_tree_dir))
+                if not src.is_dir() or not scratch.install_tree(
+                    src, layout.ts_for(src.name), log=ctx.log
+                ):
+                    ctx.log("WARN 云机评估 TS 树换本地盘失败——本轮评估回落原地（不搬）")
+                    layout = None
+        state["layout"] = layout
+        if layout is not None:
+            ctx.log(f"云机评估热路径换到本地盘：{layout.job}（TS 树内容寻址，与 rollout 腿共用）")
+        return layout
 
     def build(it: int) -> dict:
+        layout = _layout()
+        weights = ctx.store.weights_path(int(it))
+        ts_root = ctx.ts_tree_dir or ""
+        work_dir = ctx.work_dir / "eval-work"
+        if layout is not None:
+            # 上一轮的 game 目录/权重当场回收（占用有界；轮与轮串行 ⇒ 不会删到在跑的）
+            scratch.clear_dir(layout.eval_dir)
+            scratch.clear_dir(layout.eval_weights_for(int(it)).parent)
+            dst_w = layout.eval_weights_for(int(it))
+            if scratch.install_file(weights, dst_w, log=ctx.log):
+                weights = dst_w  # 逐字节拷贝 ⇒ key16/wver 不变（账本可配对）
+                work_dir = layout.eval_dir
+                ts_root = str(layout.ts_for(Path(str(ctx.ts_tree_dir)).name))
+            else:
+                ctx.log(f"WARN 云机评估权重拷本地盘失败（{weights}）——本轮评估回落原地")
+                scratch.clear_dir(layout.eval_dir)
         return {
             "plan": ep,
             "it": int(it),
-            "weights_path": ctx.store.weights_path(int(it)),
+            "weights_path": weights,
+            # ⚠ 账本**不动**：逐局行走真产物目录的 eval_log.jsonl（plan §2 P0-5 第 4 条已删）。
             "eval_jsonl": ctx.store.root / ArtifactStore.EVAL_LOG_NAME,
-            "ts_root": ctx.ts_tree_dir or "",
-            "work_dir": ctx.work_dir / "eval-work",
+            "ts_root": ts_root,
+            "work_dir": work_dir,
             "course": ctx.course,
             "course_fp": str(ctx.manifest.get("course_fp", "") or ""),
             "slots": ctx.eval_slots,

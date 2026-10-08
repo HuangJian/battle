@@ -46,7 +46,7 @@ from typing import Any, cast
 # 也是 5s（用户口径「单局 >5s 肯定不正常」⇒ 超时原地重跑）、重试上限 ×4、最多 3 次、轮询 0.5s。
 # **一律通过模块属性读**（`game_watch.X`）而不是 `from ... import X`：import 会把值抄成第二份
 # 绑定，测试 patch 了 `game_watch` 的那一份、调用点却还在读旧绑定（两处不一致就是静默的错口径）。
-from common import game_watch, progress_hook
+from common import game_watch, progress_hook, scratch
 from common.log_bundle import LogBundle
 from common.platform_utils import (
     KILL_REAP_SEC,
@@ -189,9 +189,12 @@ def bun_version(bun: str) -> str:
 _JOB_REL_FLAGS: tuple[str, ...] = ("--out", "--weights")
 
 
-def _exec_argv(argv: list[str], job_dir: Path) -> list[str]:
+def _exec_argv(argv: list[str], exec_dir: Path) -> list[str]:
     """把 argv 里的 job 相对路径换算成绝对路径（**不改协议**：协议层只允许相对，
     节点侧才知道自己的真实目录）。
+
+    `exec_dir` = **本轮的 exec 根**：回退档就是 job 目录（逐字同今天），换根档是 scratch 的 `r/`
+    （plan §2 P0-2 的「两个根的分工」）。路径全在**节点侧**变换 ⇒ wire 形状/`data_fp` 一个字节不改。
 
     为什么必须换算：导出器脚本本身（argv[0] = `tools/sim/export-rl-rollout.ts`）是相对
     **TS 代码根**解析的，而 `--out`/`--weights` 是相对 **job 目录**的——两个根不是同一个
@@ -204,7 +207,7 @@ def _exec_argv(argv: list[str], job_dir: Path) -> list[str]:
             continue
         j = out.index(flag) + 1
         if j < len(out):
-            out[j] = str((job_dir / out[j]).resolve())
+            out[j] = str((exec_dir / out[j]).resolve())
     return out
 
 
@@ -256,21 +259,38 @@ def _kill_and_reap(p: Any, *, label: str, log, where: str) -> bool:
     return False
 
 
-def _clean_attempt(job_dir: Path, argv: list[str]) -> None:
+def _clean_partial(job_dir: Path, exec_dir: Path, argv: list[str]) -> Any:
+    """清理的 partial：**回退档（两个根相同）与今天逐字相同**（连关键字都不多传一个）。
+
+    为什么这点重要：换根是新增档 ⇒ 回退档的调用形状不能变（既有用例里那些两参替身
+    `def clean(jd, argv)` 就是它的守卫）。换根档才多传 `exec_root=`。
+    """
+    if Path(exec_dir) == Path(job_dir):
+        return partial(_clean_attempt, job_dir, argv)
+    return partial(_clean_attempt, job_dir, argv, exec_root=Path(exec_dir))
+
+
+def _clean_attempt(job_dir: Path, argv: list[str], *, exec_root: Path | None = None) -> None:
     """删掉一次失败尝试可能留下的半截产出（**就地重跑前必须做**）。
+
+    `exec_root` 非空 = 换根档：**两个根都扫**（本轮的产出写在 scratch 的 exec 根下，半截也在那儿；
+    而上一轮/回退档的残留在 job 目录）—— 见 plan §3 的 R1（漏一边就是「目录齐、obs 截断」）。
 
     为什么：卡死/被杀的 bun 可能已经写完 `manifest.json` 而 `obs.npy` 只写了一半——
     `scan_shard_dirs` 只认「名字合法 + 有 manifest.json」，半截目录会被当成产出，
     于是重跑成功与否都不影响它留在实产集里（读数静默错一局）。
 
-    只删 job 目录**里面**的东西（out 目录 + 同 (stage,seed) 的 shard 目录），任何越界路径一
+    只删这些根**里面**的东西（out 目录 + 同 (stage,seed) 的 shard 目录），任何越界路径一
     律跳过——这个函数的输入全部来自协议层校验过的 argv，但删除是没得撤销的动作，值一道闸。
     """
-    root = job_dir.resolve()
+    roots: list[Path] = [Path(job_dir)]
+    if exec_root is not None and Path(exec_root) != Path(job_dir):
+        roots.append(Path(exec_root))
+    resolved = [r.resolve() for r in roots]
     targets: list[Path] = []
     out = _game_out_dir(argv)
     if out:
-        targets.append(job_dir / out)
+        targets += [r / out for r in roots]
     stage = seed = None
     try:
         stage = int(argv[argv.index("--stages") + 1])
@@ -281,12 +301,14 @@ def _clean_attempt(job_dir: Path, argv: list[str]) -> None:
         name = shard_name(stage, seed)
         # 递归扫：`scan_shard_dirs` 认的是「job 目录下任何位置的合法 shard 目录」，这里必须**同口径**
         # （宽一边就是半截 shard 留在盘上被当成产出）。
-        targets += list(job_dir.rglob(name))
+        for r in roots:
+            targets += list(r.rglob(name))
     for t in targets:
         try:
             if not t.exists():
                 continue
-            if root not in t.resolve().parents:
+            rt = t.resolve()
+            if not any(r in rt.parents for r in resolved):
                 continue
             if t.is_dir():
                 shutil.rmtree(t, ignore_errors=True)
@@ -299,7 +321,7 @@ def _clean_attempt(job_dir: Path, argv: list[str]) -> None:
 def _run_one_game(
     bun: str,
     argv: list[str],
-    job_dir: Path,
+    exec_dir: Path,
     ts_dir: Path,
     out_dir: str,
     timeout_sec: float,
@@ -307,7 +329,10 @@ def _run_one_game(
     attempt: int = 1,
     abandoned: threading.Event | None = None,
 ) -> float:
-    """跑一局：`bun <argv...>`（cwd = TS 代码根），日志落 `job_dir/out_dir/rollout.log`。
+    """跑一局：`bun <argv...>`（cwd = TS 代码根），日志落 `exec_dir/out_dir/rollout.log`。
+
+    `exec_dir` = **本轮的 exec 根**（回退档 = job 目录，换根档 = scratch 的 `r/`）：`--out`/
+    `--weights` 都相对它解析、产出也写在它下面——见 plan §2 P0-2 的「两个根的分工」。
 
     返回墙钟秒。失败语义：
       * 超过 `timeout_sec`（**本次尝试的硬顶**，由 `_run_one_game_with_retries` 按尝试次数算：
@@ -337,7 +362,7 @@ def _run_one_game(
             f"rollout 单局已超界（整条链路上界内没返回）：{label}"
             "——本尝试已被放弃，不再开写（避免与下一轮写者同目录竞争）"
         ) from None
-    wdir = job_dir / out_dir
+    wdir = exec_dir / out_dir
     wdir.mkdir(parents=True, exist_ok=True)
     log_path = wdir / ROLLOUT_LOG_NAME
     t0 = time.time()
@@ -347,7 +372,7 @@ def _run_one_game(
         # 只杀父进程会留下孤儿继续吃 CPU/内存，机器越跑越卡）；代价是 Ctrl+C 不再自动传到它，
         # 而这条路径本来就总是自己 kill（超时/rc≠0/收池都各有出口）。
         p = subprocess.Popen(
-            [bun, *_exec_argv(argv, job_dir)],
+            [bun, *_exec_argv(argv, exec_dir)],
             cwd=str(ts_dir),
             stdout=lf,
             stderr=subprocess.STDOUT,
@@ -410,7 +435,7 @@ def _run_one_game(
 def _run_one_game_with_retries(
     bun: str,
     argv: list[str],
-    job_dir: Path,
+    exec_dir: Path,
     ts_dir: Path,
     out_dir: str,
     timeout_sec: float,
@@ -418,6 +443,8 @@ def _run_one_game_with_retries(
     explicit: bool = False,
     pool: serve_pool.ServePool | None = None,
     abandoned: threading.Event | None = None,
+    *,
+    job_dir: Path | None = None,
 ) -> tuple[float, int]:
     """一局最多跑 `GAME_MAX_ATTEMPTS` 次（超时/rc≠0 都原地重跑），返回 `(墙钟秒, 尝试次数)`。
 
@@ -436,7 +463,11 @@ def _run_one_game_with_retries(
     `UnreapableChildError`（子进程 SIGKILL 后收不了尸 / 清理超界 / 本尝试已被放弃）**直接上抛**，
     不重跑这一局——重跑会在同一个 `w{i}/` 上再起一个写者（那个可能还活着），两个进程写同一份
     shard = 静默错数据。
+
+    `job_dir` 只在**换根档**才需要（= 真 job 目录）：清理要两个根都扫（R1），而跑局一律在 `exec_dir`。
+    缺席 ⇒ 与 `exec_dir` 同一个（回退档：调用形状与今天逐字相同）。
     """
+    real_job = Path(exec_dir) if job_dir is None else Path(job_dir)
     label = _game_label(argv)
     last: Exception | None = None
     for attempt in range(1, game_watch.GAME_MAX_ATTEMPTS + 1):
@@ -453,7 +484,7 @@ def _run_one_game_with_retries(
             log(game_watch.retry_line("rollout", label, attempt, last, cap))
             # 上一次可能留了半截 shard（见 _clean_attempt）——清理**有上界**（评审 P0-1）。
             cleaned, _ = call_bounded(
-                partial(_clean_attempt, job_dir, argv),
+                _clean_partial(real_job, exec_dir, argv),
                 game_watch.CLEAN_CEILING_SEC,
                 name=f"clean-{label}",
             )
@@ -462,7 +493,7 @@ def _run_one_game_with_retries(
                 # 它删的正是新一次尝试要写的同一批路径（`--out`/shard 名都没变）⇒「目录齐、obs
                 # 截断」= 静默错数据（`_clean_attempt` 存在的全部理由）。交整轮重投：那里先做一次
                 # 有界清理，且两条链的重投都在新写者开写前整目录清场（见 plan §2 P0-2）。
-                where = str(job_dir / out_dir / ROLLOUT_LOG_NAME)
+                where = str(Path(exec_dir) / out_dir / ROLLOUT_LOG_NAME)
                 log(
                     game_watch.clean_ceiling_line(
                         "rollout", label, game_watch.CLEAN_CEILING_SEC, attempt, where
@@ -479,8 +510,8 @@ def _run_one_game_with_retries(
             # cwd 是 TS 代码根，而 `--out`/`--weights` 是相对 job 目录的（见 `_exec_argv`）。
             # 漏了这一步会让 worker 拿着错的权重路径直接报错（只慢不错地回落，但池就白建了）。
             served = pool.try_pool(
-                _exec_argv(argv, job_dir),
-                job_dir / out_dir / ROLLOUT_LOG_NAME,
+                _exec_argv(argv, exec_dir),
+                Path(exec_dir) / out_dir / ROLLOUT_LOG_NAME,
                 cap,
                 label=label,
                 attempt=attempt,
@@ -492,7 +523,7 @@ def _run_one_game_with_retries(
                 _run_one_game(
                     bun,
                     argv,
-                    job_dir,
+                    exec_dir,
                     ts_dir,
                     out_dir,
                     cap,
@@ -517,7 +548,7 @@ def _run_one_game_with_retries(
 def _run_one_game_bounded(
     bun: str,
     argv: list[str],
-    job_dir: Path,
+    exec_dir: Path,
     ts_dir: Path,
     out_dir: str,
     timeout_sec: float,
@@ -526,6 +557,7 @@ def _run_one_game_bounded(
     pool: serve_pool.ServePool | None = None,
     *,
     ceiling_sec: float | None = None,
+    job_dir: Path | None = None,
 ) -> tuple[float, int]:
     """跑一局，但**本线程永远在墙钟上界内返回**：真活交给一条可放弃的 daemon 线程。
 
@@ -544,6 +576,8 @@ def _run_one_game_bounded(
 
     `ceiling_sec=None` ⇒ 按 `game_watch.game_ceiling_sec()` 现场算（尝试次数 × 宽容的硬顶 +
     回收预算 + 余量）；用例可传毫秒级的值（判据与绝对长度无关）。
+
+    `exec_dir` / `job_dir` 同 `_run_one_game_with_retries`（回退档两个同值 ⇒ 形状与今天逐字相同）。
     """
     label = _game_label(argv)
     ceiling = (
@@ -556,14 +590,25 @@ def _run_one_game_bounded(
     abandoned = threading.Event()
     ok, res = call_bounded(
         lambda: _run_one_game_with_retries(
-            bun, argv, job_dir, ts_dir, out_dir, timeout_sec, log, explicit, pool, abandoned
+            bun,
+            argv,
+            exec_dir,
+            ts_dir,
+            out_dir,
+            timeout_sec,
+            log,
+            explicit,
+            pool,
+            abandoned,
+            job_dir=job_dir,
         ),
         ceiling,
         name=f"rollout-{label}",
     )
     if not ok:
         abandoned.set()
-        where = str(job_dir / out_dir / ROLLOUT_LOG_NAME)
+        # 现场 = 日志真身处（换根档在 scratch；回退档就是 job 目录）。
+        where = str(Path(exec_dir) / out_dir / ROLLOUT_LOG_NAME)
         log(game_watch.ceiling_line("rollout", label, ceiling, where))
         raise UnreapableChildError(
             f"rollout 单局超界（{ceiling:g}s 内整条链路都没返回）：{label}"
@@ -778,6 +823,44 @@ def run_iter_rollout(
             f"并行槽上限 {cap}｜{ENV_WORKERS_CAP}=0 可关）",
         )
     rb.add("bun", f"{bun} ({ver or '?'})")
+    # ---- 热路径落点（plan/rollout-local-scratch §2 P0-1/P0-2）----
+    # 三样热数据（TS 树的读、每局 shard 的写、权重的读）全在网络挂载点上 ⇒ 换到节点本地盘，
+    # 结算一局搬回一局（P0-3）。换不过去就**逐字**走今天的行为（不搬、不 drain、不换根）。
+    exec_jd = jd
+    s_layout: scratch.ScratchLayout | None = None
+    gate = scratch.InstallGate()
+    need = scratch.need_bytes_for(len(argvs))
+    picked = scratch.open_scratch(jd, need_bytes=need, log=rb.note) if argvs else None
+    if picked is not None:
+        ts_new = picked.ts_for(tsd.name)
+        ok_tree, tree_res = call_bounded(
+            partial(scratch.install_tree, tsd, ts_new, log=rb.note),
+            game_watch.SCAN_CEILING_SEC,
+            name="scratch-ts",
+        )
+        ok_mirror, mirror_res = (False, False)
+        if ok_tree and tree_res:
+            ok_mirror, mirror_res = call_bounded(
+                partial(scratch.mirror_inputs, jd, picked.exec_dir, argvs, log=rb.note),
+                game_watch.SCAN_CEILING_SEC,
+                name="scratch-mirror",
+            )
+        if ok_tree and tree_res and ok_mirror and mirror_res:
+            s_layout, tsd, exec_jd = picked, ts_new, picked.exec_dir
+            rb.note(f"热路径换到本地盘：TS 树 {ts_new}｜每局产出 {picked.exec_dir}")
+        else:
+            rb.note(
+                "WARN rollout 本地盘换根失败（TS 树/权重装不过去或超界）"
+                "——本轮回落原地（逐字走今天的行为：不搬、不 drain、不换根）"
+            )
+    if s_layout is not None:
+        rb.add(
+            "产出落点",
+            f"{s_layout.root}（本地盘；可用 {(scratch.free_bytes(s_layout.root) or 0.0) / 1e9:.1f}GB"
+            f"｜本轮需 {need / 1e6:.0f}MB）——结算一局搬回一局到 job 目录",
+        )
+    else:
+        rb.add("产出落点", f"{jd}（回退原地＝今天的行为：不搬、不 drain、不换根）")
     rb.add("ts_root", tsd)
     rb.note(
         f"单局看门狗：软告警 >{game_watch.SLOW_GAME_WARN_SEC:g}s（正常一局亚秒级），"
@@ -826,6 +909,40 @@ def run_iter_rollout(
     ok = False
     round_retries = 0  # 「整轮重投」次数（类：机器级停滞）
     retry_cap = round_retry_max()
+    drained_n = 0
+    drain_failed_n = 0
+
+    def _drain_one(i: int, out_rel: str) -> bool:
+        """结算一局就搬一局（主线程、有界、**闸内**原子安装）。
+
+        三条硬约束见 plan §2 P0-3：暂存在 job 目录之外（F1）· 确定性 errno 响亮上抛（F3）·
+        超界作废安装票（F4）。返回 False ⇒ 本局**不算结算**（与机器级停滞同口径交整轮重投）。
+        """
+        nonlocal drained_n, drain_failed_n
+        label = _game_label(argvs[i])
+        src, dst = Path(exec_jd) / out_rel, jd / out_rel
+        ticket = gate.ticket(out_rel)
+        done, res = call_bounded(
+            partial(scratch.drain_tree, src, dst, ticket=ticket, log=log),
+            float(game_watch.DRAIN_CEILING_SEC),
+            name=f"drain-{label}",
+        )
+        if not done:
+            ticket.cancel()  # ★ 评审 F4：被放弃的 copier 从此装不进去（锁内复核）
+            drain_failed_n += 1
+            log(
+                game_watch.drain_ceiling_line(
+                    "rollout", label, game_watch.DRAIN_CEILING_SEC, str(src)
+                )
+            )
+            return False
+        if not res:
+            drain_failed_n += 1
+            log(game_watch.drain_fail_line("rollout", label, drained_n, drain_failed_n, str(src)))
+            return False
+        drained_n += 1
+        return True
+
     try:
         with ThreadPoolExecutor(max_workers=workers) as ex:
             last_log_at = t0
@@ -845,7 +962,7 @@ def run_iter_rollout(
                         _run_one_game_bounded,
                         bun,
                         argvs[i],
-                        jd,
+                        exec_jd,
                         tsd,
                         argvs[i][argvs[i].index("--out") + 1],
                         timeout_sec,
@@ -853,6 +970,7 @@ def run_iter_rollout(
                         explicit,
                         pool,
                         ceiling_sec=ceiling_sec,
+                        job_dir=jd,
                     ): i
                     for i in pending
                 }
@@ -894,7 +1012,15 @@ def run_iter_rollout(
                             # 其它在飞的局收完（它们可能只是慢），再由外层重投补它（见循环头）。
                             stuck.append(i)
                         else:
-                            settled_n += 1
+                            # ★ 换根档：**先搬回再算结算**（评审 F7）——搬不回去的局不算产出，
+                            # 与机器级停滞同口径并入 stuck（下一轮重投补它）。排进度/打点**之前**，
+                            # 所以 hold 判活看到的 settled 数永远是「真落地的」。
+                            if s_layout is not None and not _drain_one(
+                                i, argvs[i][argvs[i].index("--out") + 1]
+                            ):
+                                stuck.append(i)
+                            else:
+                                settled_n += 1
                         # 进度行**按时间**节流（`game_watch.progress_due`，缺省每分钟一句）：原来的
                         # 「每 10 局一句」在高并发轮上是每秒数行 —— 云端离线课的日志就是被它刷屏的
                         # （用户口径 2026-09-23）。最后一句恒打（轮结束的唯一落点）。
@@ -948,6 +1074,23 @@ def run_iter_rollout(
             # 池的收益与代价（served/spawned/killed/fallback）进同一行的收尾字段。
             rb.note(pool.summary(), final_only=True)
             pool.close()
+        if s_layout is not None:
+            # 轮末只清**自己那一份**（评审 F5）：ts 家内容寻址、永不清（跨轮/两腿复用）。
+            ok_clean, _ = call_bounded(
+                partial(scratch.clear_dir, s_layout.exec_dir),
+                float(game_watch.DRAIN_CEILING_SEC),
+                name="scratch-clean",
+            )
+            ok_stage, _ = call_bounded(
+                partial(scratch.drop_drain_stage, jd),
+                float(game_watch.DRAIN_CEILING_SEC),
+                name="scratch-stage",
+            )
+            if not (ok_clean and ok_stage):
+                log(
+                    f"WARN rollout scratch 轮末没清完（{game_watch.DRAIN_CEILING_SEC:g}s 内没返回）："
+                    f"{s_layout.job}——本地盘占着就占着（下一轮同名会重建），不阻塞收尾"
+                )
         if not ok:
             # 中断也要交代现场（看门狗口径/池计数/已结算到哪一局）——否则「为什么被杀了」
             # 无从归因。重试/慢局那几行已经在抛出前各自打过了。
@@ -990,6 +1133,9 @@ def run_iter_rollout(
     if not report["perGame"]:
         # 四列数据源没了是**要看的**（控制台耗时/击杀/残血/道具会恒空）。
         rb.note("逐局画像 0 行 = 控制台耗时/击杀/残血/道具恒空，查单局 manifest")
+    if s_layout is not None:
+        # 搬回的读数（正常轮 85 成 / 0 败）：它是「本地盘 → job 目录」这一段的唯一记分。
+        rb.add("搬回", f"{drained_n} 局/失败 {drain_failed_n} 局（本地盘 → job 目录，主线程单线程）")
     # 单局耗时分布：<5s 这条线（以及重试次数）要靠每轮的真数据校准，不靠猜。
     # `final_only`：轮末才有，心跳里不该出现半个分布。
     rb.note(

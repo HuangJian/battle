@@ -8497,3 +8497,29 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   **先红后绿实测**：把三条语义分别换成 `if False:` / 关掉 drain 腿，对应用例逐条转红（记录见提交信息）。
 - **违反后果**：拿心跳当活性 ⇒ §68 假活重演（进程活着、训练没在推进）；拿 bc 发备份 ⇒ 影子跑者
   复制算力且没有 epoch 可判活；把 drain 判据放客户端 ⇒ 云机换台/重启即绕过（Q5 被架空）。
+
+## §2026-10-08-goalnn-rollout-local-scratch（2026-10-08，rollout/eval 热路径 IO 落节点本地盘：共用一套 scratch，回落即今天的行为；立案 plan/rollout-local-scratch）
+
+- **背景**：云机 rollout 一轮 85 个 bun **同时**把 TS 运行时树（读）· 每局 shard（写）· 权重（读）
+  压在 `/kaggle/working`（网络挂载点）上；本机同样 85 并发从不生病（它写本地盘 `tmp/`）
+  ⇒ 病在「并发 × 网络挂载点」。eval 腿（94 并发 / 200 局 / 与下一轮 PPO 并行）读的是**同一棵树**。
+- **备选与否决**：① 只写 `/dev/shm`（用户原话的「内存」）——否（Docker 默认 64MB，一轮需 170–280MB），
+  降为候选链第 2 档；② 整轮跑完再一次性搬回——否（峰值占满本地盘 + 盘坏要等 85 局跑完才知道）⇒ 流式；
+  ③ 起后台 drain 线程——否（主线程在 `wait()` 循环里本就串行，多一套队列与锁只换来跨线程回传 stuck）；
+  ④ 只搬产出、TS 树留网络盘——否（它是**每进程读一遍**且文件数最多，治不干净）；
+  ⑤ 把 `run/` 整体搬 `/tmp`——否（`run/` 是产物目录 = 跨会话续跑的锚点）；
+  ⑥ 把 eval 的逐局账本也搬 scratch——否（`settle_eval_summary` 的聚合读面是**文件**，且它是 cell 死后
+  唯一的续跑凭据，而换掉的只有 open 的目标）⇒ 账本留在产物目录；⑦ 硬指定 `/tmp`（不测速度）——否（无取证）。
+- **决定**：新 `common/scratch.py`（L0 叶子层）提供落点链（`NN_ROLLOUT_SCRATCH` > `/dev/shm` > `/tmp` >
+  **`None`**；容量**与速度**两闸）+ 作业私有布局（`r/`、`eval/`）+ 内容寻址的共用 TS 家
+  （`nn-rollout-ts-<sha>`）+ 闸内原子 drain；`worker/iter_rollout` 与 `remote/plan_handoff` 分别在
+  **装载期**换根、**结算一局搬回一局**（eval 轮末清）；**回退档 = 逐字今天的行为**（不搬 / 不 drain /
+  不换根），协议与 `data_fp` 一个字节不改。三条写死的判据：暂存在 job 目录**之外**（`scan_shard_dirs`
+  是 rglob、`data_fp` 只读 manifest 三项 ⇒ 半截拷贝拦不住）· 确定性 errno（`ENOSPC`/`EROFS`/`EACCES`…）
+  响亮上抛、**不进无界重投** · **安装票**（锁内复核 + `os.replace`）让被放弃的 copier 永远装不进去。
+- **违反后果**：暂存放回 job 目录 ⇒「目录齐、obs 截断」静默错一局；被放弃的 copier 装旧数据 ⇒
+  跨轮静默错数据；账本搬 scratch ⇒ summary 欠计 + cell 一死整轮重评；往不比 job 目录快的盘换根 ⇒
+  零收益 + 多两条失败面。
+- **测试**：`tests/remote/test_rollout_scratch.py`（30 例；四处反探针逐条转红）·
+  `tests/remote/test_remote_iter.py` **一个字不改**全绿（协议零改动的验收点）· `bun run pygate` /
+  `bun run check` 绿。—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §34

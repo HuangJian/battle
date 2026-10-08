@@ -79,6 +79,10 @@ ALLOWED_IMPORTS = {
     "common.logutil",
     "common.protocol",
     "common.platform_utils",
+    # 2026-10-08（plan/rollout-local-scratch §2 P0-5）：云机评估的三样热数据换到节点本地盘
+    # （TS 树 / 当轮权重 / 每局 game_dir）——落点解析与搬回原语住在 `common/scratch.py`
+    # （L0 叶子层，不引入任何新依赖：它只依赖 stdlib + `common.platform_utils` + `common.protocol`）。
+    "common.scratch",
     "remote.artifacts",
     "remote.bundle",
     "remote.deliver_proc",
