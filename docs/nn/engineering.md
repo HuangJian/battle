@@ -25,6 +25,56 @@
 
 ---
 
+## §67 eval 腿任务缺课程血缘：兄弟课程评估局在节点 resultCache 互串（2026-10-08）
+
+### 一句话
+
+多课程 serve 同进程共享 `RUN_ID` ⇒ A-eval 的 iterId 恒同（`{RUN_ID}.{it}ev`）、stage/seed/sjHash
+也同；而 eval 腿 `fetch_task` 没带 `course_fp`（rollout 腿早已带，D14）⇒ 兄弟课程同 (stage,seed)
+的任务在任一节点 resultCache **同键**：先落的那门课的结果（带自己的 wver）回给另一门课，
+`validate_eval_result` 拒收（门是对的），但 attempt 打光即 `dropped`。补一行参数：eval 腿透传
+`course_fp`（agent `taskKey` 的 `:c<fp16>` 后缀；2026-09-05 已进轮询键）。
+
+### 现场账（同模式两次）
+
+| 缺局 | 节点 | meta `reason` | 回传权重实际归属 | 撞车对象 |
+|---|---|---|---|---|
+| x21-psh-b0 it155 (2003,860027)，2026-10-06 21:06 | a97 | wver mismatch | `x21-psh-b.it155.*`（21:04:18 归档） | x21-psh-b it155（21:04:52–21:05:50 评估） |
+| x23-cm3 it50 (2001,860141)，2026-10-08 18:40 | mac | wver mismatch | `x23-cm2.it50.*`（78048983…） | x23-cm2 it50（同秒起：两课皆 18:39:50） |
+
+- cm2 的同局 18:40:19 在 mac 落账（wver=7804898…），cm3 的同键请求 18:40:22（终局 meta）命中
+  该缓存 ⇒ 拒收；重投再撞 ⇒ 两次 attempt 打光。cm2/cm3 的 forensics pid 同为 6852（同一进程锁步）。
+- `tmp/dist-agent/weights-eval-78048983071720b5.json` 与 `weights/x23-cm2/x23-cm2.it50.*.json` 同源。
+
+### 机制与各腿核查
+
+`tools/agent/sampler-agent.ts::taskKey` = `iterId:mode:kind:stage:seed[:sjHash][:c<courseFp16>]`，
+**wver 不进键**；v4.1 起权重切换不再整池清缓存（注释假定「结果缓存按 iterId 天然分命名空间」——
+对独立进程成立，对同进程多课程**不成立**）。⇒ 同进程多课的 eval 键逐字节相同，唯一能分离课程的
+分量就是 `course_fp`。各腿核查：rollout（`trainer/dispatch.py`）带 ✓ · bc_dispatch 带 ✓ ·
+bc_eval 的 iterId 内嵌 wver ✓ · B/C 批 iterId 内嵌 `batch_id`（`A-{course}`）✓ ·
+**A-eval（`trainer/eval_dispatch.py`）是唯一缺口**。
+
+### 修法与备选
+
+- **修**：`EvalDispatcher.run` 计算一次 `course_fp_for_args(args)`（与 summary 同源），
+  `fetch_task(..., course_fp=course_fp)`；summary 复用同一读数（消除两处各算）。
+- **否决**：① `wver` 进 agent taskKey——提交/轮询/agent 三处配方全漂移、全部缓存键失效，
+  且同一问题的既有先例就是 `course_fp`（D14）；② 失败重试换节点——治标（霉点仍在，
+  同进程锁步下命中概率不降）；③ wver mismatch 归 transient 无限重投——烧配额且掩盖真因。
+- **兼容**：非课程路径 `course_fp=""` ⇒ 键与历史逐字节一致；旧 agent 对未知参数无感
+  （提交/轮询同走其自身 key 配方，不会 404）。
+
+### 验证
+
+`tests/trainer/test_eval_dispatch_resilience.py::test_eval_fetch_carries_course_fp`（先在未改动
+代码上确认红：`course_fp=None`）· 相关回归 133 例全绿（eval_dispatch / eval_a_once / dual_track /
+baseline / eval_timing / yield_split / finish_course / hot_reload / dist_common_poll）·
+`bash tools/githook/nn-python-gate.sh` 绿。
+决策 → `DECISIONS.md` §2026-10-08-goalnn-eval-task-key-coursefp。
+
+---
+
 ## §66 it0 基线 eval「从未派出」缺口：收工自报原因 + 缺口三分 + 基线自带本机门（2026-10-08，plan/eval-baseline-undispatched）
 
 ### 一句话

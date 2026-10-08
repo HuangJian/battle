@@ -166,6 +166,17 @@ class EvalDispatcher:
             deadline = time.time() + window
             wver = common.distribution.weights_fingerprint(rl_path)
             key16 = wver[:16]
+            # D14 课程血缘（节点 resultCache 键的课程隔离分量，2026-10-08）：
+            # 多课程同进程共享 RUN_ID ⇒ eval iterId 恒同（`{RUN_ID}.{it}ev`）、stage/seed/
+            # sjHash 也同 ⇒ 不带 course_fp 时兄弟课程的同 (stage,seed) 任务在任一节点
+            # 同键互串——先落的那门课的结果带着自己的 wver 回给另一门课，被
+            # validate_eval_result 拒绝，attempt 打光即 dropped（现场：x23-cm2/cm3 it50
+            # 同秒派发、node mac 实缺 1 局；2026-10-06 x21-psh-b0 it155 同模式一次）。
+            # rollout 腿早已带（D14），本腿补齐。延迟导入避免 biz.cmd ↔ 本模块环（同
+            # summary 落账处的既有口径）。
+            from worker.cmd import course_fp_for_args
+
+            course_fp = course_fp_for_args(args)
             eval_iter_id = f"{iter_id}{EVAL_ITER_SUFFIX}"
             eval_jsonl = traj_dir.parent / "eval_log.jsonl"
             # 采样机健康账本：eval 局与 rollout 同册入账（mode:"eval" 标记区分）——
@@ -470,6 +481,9 @@ class EvalDispatcher:
                             timeout=task_timeout,
                             mode="eval",
                             kind=EVAL_WEIGHTS_KIND,
+                            # D14 课程血缘进任务键（agent taskKey 的 `:c<fp16>` 后缀）：
+                            # 兄弟课程同 (stage,seed) 不再互串结果缓存（2026-10-08）。
+                            course_fp=course_fp,
                             stage_json=stage_json_for_args(args, task[0]) or "",
                             # R2 事件 rung：与训练 rollout 同语义（缺席 = 老行为）。
                             decision_events=bool(getattr(args, "decision_events", False)),
@@ -995,9 +1009,7 @@ class EvalDispatcher:
                     f"— 未落盘局带 missing 原因进 summary，收官 drain 可补"
                 )
 
-            # 课程血缘进 summary 行（门控趋势过滤；延迟导入避免 biz.cmd ↔ 本模块环）。
-            from worker.cmd import course_fp_for_args
-
+            # 课程血缘进 summary 行（门控趋势过滤；与派发同源、同一份读数）。
             settle_eval_summary(
                 eval_jsonl=eval_jsonl,
                 key16=key16,
@@ -1013,7 +1025,7 @@ class EvalDispatcher:
                 t_eval_start=t_eval_start,
                 rollout_winrate=rollout_winrate,
                 # D14 课程血缘（门按 course_fp 过滤趋势行；无课程 = ""=不过滤）。
-                course_fp=course_fp_for_args(args),
+                course_fp=course_fp,
                 # 2026-10-08（plan/eval-baseline-undispatched §2 P0-1/P0-2）：收工读数进 summary。
                 # `left_pending` = 收工时的待办余量（含重投回队）；`left_pairs` = 真·从未派出
                 # 的那批（attempts==0）——`never_dispatched`/`never-dispatched` 两个读面都只认它。

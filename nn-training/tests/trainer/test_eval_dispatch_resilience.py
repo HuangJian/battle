@@ -632,6 +632,53 @@ def test_eval_dispatch_kind_is_single_sourced() -> None:
 
 
 # ---------------------------------------------------------------------------
+# 2026-10-08：eval 腿任务缺课程血缘 ⇒ 兄弟课程的评估局在节点 resultCache 互串。
+#   多课程同进程共享 RUN_ID ⇒ eval iterId=`{RUN_ID}.{it}ev` 恒同；stage/seed/sjHash
+#   也同 ⇒ 同键。节点键配方（tools/agent/sampler-agent.ts::taskKey）里 course_fp 是
+#   唯一的课程隔离分量——rollout 腿已带（D14），eval 腿漏了。
+#   现场：2026-10-08 18:40 x23-cm3 it50 (2001,860141) 从 node mac 拿到 x23-cm2
+#   it50 权重的结果（wver mismatch ×2、attempt 打光 ⇒ dropped=1）；同模式 2026-10-06
+#   已在 x21-psh-b0 it155 (2003,860027) 发生过一次。
+# ---------------------------------------------------------------------------
+
+
+def test_eval_fetch_carries_course_fp(tmp_path, monkeypatch) -> None:
+    """A-eval 的局请求必须带 course_fp（节点 resultCache 键的课程隔离分量）。
+
+    缺它时，两门课**同秒**评估（同进程锁步）在任一节点上同 (stage,seed) 请求会命中
+    对方先落的结果——回传对方 wver 被 `validate_eval_result` 拒绝；重试仍可能再命中
+    同一霉点，两次 attempt 打光即 dropped（不是节点故障，是键串了）。
+    """
+    import hashlib
+
+    class _FakeCourse:
+        """最小课程桩：只需 course_fp 取值前提 + stage_json（非自定义关 ⇒ None）。"""
+
+        def stage_json(self, stage: int) -> str | None:
+            return None
+
+    h = _Harness(tmp_path, monkeypatch, games=1)
+    h.args.course_obj = _FakeCourse()  # 非 None ⇒ 课程路径（course_fp_for_args 的取值前提）
+    h.args.course_frozen_bytes = b'{"name":"x23-cm3"}'
+    expect = hashlib.sha256(h.args.course_frozen_bytes).hexdigest()
+    seen: list[dict] = []
+
+    def fetch(*_a, **kw):
+        seen.append(kw)
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    rows = h.run(fetch)
+    assert seen, "该轮应有远端结算的局"
+    assert all(kw.get("course_fp") == expect for kw in seen), (
+        "eval 腿 fetch 必须透传课程血缘（缺 ⇒ 兄弟课程同 (stage,seed) 在节点同键互串，"
+        f"回传对方权重结果被 wver 门拒绝）: {[kw.get('course_fp') for kw in seen]}"
+    )
+    # summary 的课程血缘与请求同源（同一份 course_fp_for_args 读数，不许两处各算）。
+    summ = [r for r in rows if r.get("event") == "eval_summary"]
+    assert summ and summ[-1]["course_fp"] == expect
+
+
+# ---------------------------------------------------------------------------
 # 2026-10-02：收官轮 eval 缺失 + dropped 局静默丢失（plan/eval-final-round-and-dropped）。
 #   ① record 失败 = 「认领已计、行未落盘」（h4-aim-k25 it0 的 8 局）——成功边界必须是
 #      **eval 行落盘**；失败要有 record-failed meta + WARN + summary missing 原因。

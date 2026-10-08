@@ -8552,3 +8552,24 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   六处先在 HEAD worktree 上确认红（ImportError/TypeError/KeyError/断言），再绿；`bun run pygate`
   **3932 passed / 15 skipped** · `bun run check` 绿。真机验收 → `docs/nn.progress.md` §3 行 25。
   —— 全文（四条根因链 / 评审 F1–F10 处置 / 云机侧口径）→ `docs/nn/engineering.md` §66
+
+## §2026-10-08-goalnn-eval-task-key-coursefp（2026-10-08，bugfix：eval 腿任务缺课程血缘 ⇒ 兄弟课程评估局在节点 resultCache 互串）
+
+- **背景**：x23-cm3 it50 (2001,860141) 缺 1 局，meta `wver mismatch`，回传权重实为 x23-cm2 的 it50
+  —— 两课同进程（forensics pid 6852）锁步评估（皆 18:39:50 起），cm2 的同局 18:40:19 在 node mac 落账，
+  cm3 的同键请求命中该缓存 ⇒ 两次 attempt 打光。同模式 2026-10-06 已在 x21-psh-b0 it155 发生过一次
+  （拿到 x21-psh-b 的 it155 权重）。§61/§66 修的是可见性与 it0 基线，这条才是单局缺口的重复病因。
+- **根因**：多课程 serve 同进程共享 `RUN_ID` ⇒ eval iterId 恒同（`{RUN_ID}.{it}ev`）；
+  `sampler-agent::taskKey` 里 **wver 不进键**，唯一能分离课程的分量是 `course_fp`——而 eval 腿
+  `fetch_task` 没带（rollout/bc_dispatch 都带、bc_eval 键内嵌 wver、B/C 批键内嵌含课程名的 batch_id）。
+  v4.1 起权重切换不再整池清缓存（原注释假定「结果缓存按 iterId 天然分命名空间」——对同进程多课不成立）放大了它。
+- **备选与否决**：① `wver` 进 agent taskKey——否（提交/轮询/agent 三处配方全漂移、全部缓存键失效；
+  同一问题的既有先例就是 course_fp）；② 失败重试换节点——否（治标，霉点仍在）；③ wver mismatch 归
+  transient 无限重投——否（烧配额且掩盖真因）。
+- **决定**：`EvalDispatcher.run` 计算一次 `course_fp_for_args(args)` 并透传 `fetch_task(..., course_fp=...)`；
+  summary 复用同一读数（消除两处各算）。非课程路径 `course_fp=""` ⇒ 键与历史逐字节一致。
+- **违反后果**：漏传 ⇒ 同进程多课同 (stage,seed) 互串结果缓存（并发课数越多、锁步越紧命中面越大），
+  回传对方 wver 被门拒后按 attempt 打光记缺口——查两轮都以为是「节点失败」。
+- **测试**：`tests/trainer/test_eval_dispatch_resilience.py::test_eval_fetch_carries_course_fp`（先在 HEAD
+  确认红：`course_fp=None`）· 相关回归 133 例全绿 · `bash tools/githook/nn-python-gate.sh` 绿。
+  —— 全文（现场账 / 机制 / 各腿核查 / 兼容）→ `docs/nn/engineering.md` §67
