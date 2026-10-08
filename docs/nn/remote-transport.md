@@ -153,7 +153,13 @@ BC 是**双角色 kind**：`common/manifest.py::BOTH_ROLE_KINDS = {bc}`（`KIND_
 - **数据面清理核对（本机实测，2026-10-08）**：`nn-training/rl-config.json` 的 `courses` 为空
   （无 `run_iters` / `rollout_src=run` 可删）；`tmp/console-state.json` **不存在**（无 `courseModes` 键）；
   `tmp/loop-control.json` 只剩 `{version, held}`（已是新形状）⇒ **三项清理无残留**。
-- **门禁**：`bash tools/githook/nn-python-gate.sh`（ruff + mypy + pytest `tests/ e2e/`）**3810 passed / 9 skipped**；
+- **e2e（`e2e/test_hold_e2e.py`，2026-10-08 追加）**：真 hub 子进程 + 真 HTTP + **秒级窗**
+  （`BCITY_HOLD_PROGRESS_STALE_SEC` / `BCITY_BC_PROGRESS_STALE_SEC`）——“15 分钟无进度 ⇒ 掉线 ⇒
+  自动恢复”在本层是真的跑出来的：① 全循环（claim 建 hold → 协作被压 → 超窗掉线 ⇒ 协作恢复 →
+  轮内进度事件刷回 live → 新盘 stale 接管 → `release_hold=1`）；② BC 独占链（`holding:<课>` /
+  双角色领 BC / `no_backup` / 在跑 BC ⇒ `busy` / 超窗让出 + 账本 `lease-orphan-reaped` /
+  课程自动恢复）。A/B：关掉 drain 与 busy 的 BC 腿 ⇒ ② 当场红。
+- **门禁**：`bash tools/githook/nn-python-gate.sh`（ruff + mypy + pytest `tests/ e2e/`）**3812 passed / 9 skipped**；
   `bun run check` 与控制台两条腿见提交信息（本刀未动 TS）。
 
 ## §71 离线「一拖一」闸两次自锁：窗口锚换 episode 起点 + 只算池内的课 + `--export-bundle` 启动期拒导（2026-10-07）
