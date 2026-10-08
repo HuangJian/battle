@@ -186,6 +186,46 @@ def test_gate_pytest_targets_cover_both_layers() -> None:
     assert "not heavy" not in strip_comments(text), "层应由路径决定，不要回到标记过滤"
 
 
+def test_py_safe_wrapper_pins_blas_threads() -> None:
+    """`nn-py-safe.sh -m pytest …` 必须把 BLAS 内线程封到 1（docs/nn/engineering.md §68）。
+
+    不封的代价实测是**每进程 +483MB 私有提交**（import torch 后 642MB → 封顶 159MB），
+    而工作集两条路径只差 1MB —— 工作集/任务管理器口径根本看不见这笔账，但它顶的是
+    Windows 的 commit limit（「内存紧张杀进程」的直接成因）。门禁脚本（GATE_THREADS）
+    早就封了，**单跑入口没有** ⇒ 日常单跑才是内存暴涨的那条路。
+    """
+    text = strip_comments(WRAPPER.read_text(encoding="utf-8"))
+    for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        assert f"{key}=" in text, (
+            f"nn-py-safe.sh 未封 {key}（§68：不封则按物理核开满 BLAS 线程，每线程一份缓冲）"
+        )
+    assert "export OMP_NUM_THREADS" in text, "变量设了但没 export ⇒ 内层 pytest 进程看不到"
+
+
+def test_root_conftest_pins_blas_threads_before_heavy_imports() -> None:
+    """根 conftest 必须在 numpy/torch 被 import **之前** setdefault 三个 BLAS 变量。
+
+    「之前」是语义的一部分：BLAS 在**载入瞬间**按环境变量决定开几条线程、各留一份缓冲，
+    事后 `torch.set_num_threads(1)` 只收 PyTorch 自己的线程池，收不掉 numpy 侧已经 commit
+    出去的那部分（§68 实测：`set_num_threads(1)` 那一步的工作集/私有提交**一行没动**）。
+    用 `setdefault` 而非直接赋值，是为了不覆盖门禁脚本 / CI 已经 export 的值。
+    """
+    text = strip_comments((NN_ROOT / "conftest.py").read_text(encoding="utf-8"))
+    hits = [
+        text.find(f'"{key}"')
+        for key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+    ]
+    found = [i for i in hits if i != -1]
+    assert len(found) == 3, f"根 conftest 没封全三个 BLAS 变量（§68）：命中 {len(found)}/3"
+    assert "setdefault" in text, "必须 setdefault（覆盖式赋值会顶掉门禁/CI 显式设的线程数）"
+    first = min(found)
+    for mod in ("import torch", "import numpy"):
+        idx = text.find(mod)
+        assert idx == -1 or idx > first, (
+            f"{mod} 早于 BLAS 封顶 ⇒ 载入时缓冲已按默认线程数 commit 出去，封顶失效"
+        )
+
+
 def strip_comments(text: str) -> str:
     """去掉整行注释——在注释里解释历史坑是合法的，不该被判红；只看真正生效的代码。"""
     return "\n".join(ln for ln in text.splitlines() if not ln.lstrip().startswith("#"))

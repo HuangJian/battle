@@ -30,6 +30,25 @@ standalone 脚本迁来的用例用 `FAILS: list[str]` + `check()` 累积失败�
 from __future__ import annotations
 
 import os
+
+# ---- CPU 内线程封顶（2026-10-09，docs/nn/engineering.md §68）----
+# ⚠ 位置是语义的一部分：必须落在 numpy / torch **被 import 之前**（BLAS 在载入时就按
+# 环境变量决定开几条线程、各留一份缓冲；事后 `torch.set_num_threads()` 只收 PyTorch 自己的
+# 线程池，收不掉 numpy 侧已经 commit 出去的那部分）。
+# 实测（本机 venv + torch 2.7.1+cpu，单进程**私有提交** PagefileUsage）：
+#     不封    ：baseline 9MB → import numpy 500MB → +torch 642MB
+#     封到 1  ：baseline 8MB → import numpy  17MB → +torch 159MB   （−75%）
+# 而**工作集**两条路径几乎一样（178MB vs 177MB）⇒ 那 483MB 是「已 commit、未触碰」的
+# BLAS 线程缓冲：任务管理器/工作集口径根本看不见，但它顶的就是 Windows 的 commit limit
+# ——「系统内存紧张杀进程」（vscode 被误伤）的直接成因。xdist 下**每 worker 各付一份**。
+# 为什么放根 conftest 而不只放门禁脚本：这里能**兜住所有 pytest 入口**（裸
+# `python -m pytest` / CI / Makefile / WSL 侧 forkdist 的 worker），而门禁脚本已经
+# export 过 ⇒ `setdefault` 不覆盖它。逃生口：NN_TEST_BLAS_THREADS=0（退回默认）。
+_BLAS_THREADS = os.environ.get("NN_TEST_BLAS_THREADS", "1")
+if _BLAS_THREADS != "0":
+    for _blas_key in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS"):
+        os.environ.setdefault(_blas_key, _BLAS_THREADS)
+
 import socketserver as _socketserver
 
 import pytest

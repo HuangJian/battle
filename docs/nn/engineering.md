@@ -25,6 +25,68 @@
 
 ---
 
+## §68 pytest 内存：真正的黑洞不是 torch，是 BLAS 线程缓冲（2026-10-09）
+
+### 一句话
+
+用户报障「pytest 每进程 ~300MB，Windows + WSL 同时跑内存暴涨，系统内存紧张时杀进程（vscode 被误伤）」。
+实测发现**工作集口径完全看不见**的那笔账：BLAS 按物理核开满线程、每线程预留一份缓冲，单进程
+**私有提交 642MB**；封 `OMP/MKL/OPENBLAS_NUM_THREADS=1` 后 **159MB（−75%）**，而工作集只从 178MB
+掉到 177MB。修法 = 单跑入口 `nn-py-safe.sh` 补上封顶 + 根 conftest 兜住所有入口。
+
+### 实测（本机 venv，torch 2.7.1+cpu，`PROCESS_MEMORY_COUNTERS`）
+
+| 阶段 | 工作集（不封） | 私有提交（不封） | 工作集（封 1） | 私有提交（封 1） |
+|---|---|---|---|---|
+| 裸 python | 17 MB | 9 MB | 17 MB | 8 MB |
+| `import numpy` | 28 MB | **500 MB** | 27 MB | 17 MB |
+| `import torch` | 178 MB | **642 MB** | 177 MB | 159 MB |
+| `import pytest` | 185 MB | 648 MB | 183 MB | 166 MB |
+
+两个要点：
+
+1. **工作集（≈用户看到的「300MB」）与私有提交差 3.9 倍**。多出来的 ~483MB 是 BLAS 载入时
+   **每线程预留的缓冲**：已 commit、未触碰 ⇒ 不进工作集、任务管理器不显示，但**顶的就是
+   Windows 的 commit limit**。系统「内存紧张杀进程」正是 commit 触顶触发，所以症状（杀 vscode）
+   与观测口径（300MB）对不上——这笔账不看 `PagefileUsage` / 提交量永远发现不了。
+2. `torch.set_num_threads(1)` **救不了**：实测那一步工作集与私有提交**一行没动**。BLAS 线程数与
+   缓冲在**载入瞬间**按环境变量定下来，事后只收 PyTorch 自己的线程池 ⇒ 封顶必须发生在
+   `import numpy/torch` **之前**。
+
+### 为什么之前没暴露
+
+`nn-python-gate.sh:130-136` 早就 export 了这三个变量（2026-09-17 §9 的「worker 数 × 内线程数
+成对调」结论）。**但日常单跑入口 `nn-py-safe.sh` 没有** —— AGENTS §5 规定 pytest 一律走它，
+于是「手工跑单个/一组用例」这条最常用的路径一直在按物理核开满 BLAS 线程：xdist 下**每 worker
+各付一份 642MB 提交**。门禁路径反而是干净的。
+
+### 改动
+
+* `tools/githook/nn-py-safe.sh`：pytest 分支封顶（`NN_PY_THREADS` 覆盖，0 = 不设），与门禁同口径。
+* `nn-training/conftest.py`：**所有入口**的兜底（裸 `python -m pytest` / CI / Makefile /
+  WSL 侧 forkdist worker 都过这里）。用 `os.environ.setdefault` 而非赋值 ⇒ 不覆盖门禁已 export 的值；
+  位置在 `import numpy/torch` 之前是**语义的一部分**。逃生口 `NN_TEST_BLAS_THREADS=0`。
+* `tests/test_githook_scripts.py` 两条回归：① 包装器必须封且 export；② 根 conftest 必须
+  `setdefault` 且**早于**任何 `import torch` / `import numpy`。
+
+### 未做 / 评估过的三条（附判据）
+
+* **「xdist 每个 worker 都全量收集」能不能省**：不能。`--dist=load|loadscope|loadfile` 都要 worker
+  先拿到全部 nodeid 才能按 id 派发，xdist 没有开关能绕（`tools/forkdist.py` 的「收集一次 + fork」
+  正是为这个，但 Windows 无 `os.fork`）。手动分片（起 N 个进程各传一份子集）能省**收集**这一截，
+  但收集只占 ~115MB/进程、且 torch 的 240MB DLL 是**跨进程共享映射**（只占一份物理内存），
+  收益远小于付出的「失去全局 `-x` / 汇总语义」代价 ⇒ 不采纳。
+* **惰性化 torch（18 个测试文件顶层 `import torch` 移进 fixture）**：单独做**零收益**。
+  `worker/` 下 27 个生产模块顶层 `import torch`（`ppo/np_core.py` 一处 12 行），测试 import
+  `worker.ppo.common` 就把 torch 拉起来；而 360 个 torch 用例在 worker 间均匀分布 ⇒ 惰性化只是把
+  import 从收集期挪到运行期，每个 worker 照样付那 151MB。要真省，必须**同时**把 torch 用例聚到
+  少数 worker（`xdist_group`）⇒ 那是另一个量级的改动，收益约 40%，留作备选。
+* **`MALLOC_ARENA_MAX` / `gc.freeze()`（WSL 侧）**：本次没动（用户裁定双环境互不干预）。若日后
+  要压 WSL 那套，先做 `tools/forkdist.py` fork 前的 `gc.freeze()`（§49 记的「峰值持平 4.8GB」
+  说明 COW 基本没命中）。
+
+---
+
 ## §67 eval 腿任务缺课程血缘：兄弟课程评估局在节点 resultCache 互串（2026-10-08）
 
 ### 一句话

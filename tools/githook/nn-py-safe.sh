@@ -37,6 +37,21 @@ fi
 # 超时兜不住 C 层原生阻塞（subprocess.wait/文件锁，实测沙箱下 test_rollout_volume 卡住
 # 不触发），进程外 watchdog 连树杀才兜得住（tools/githook/nn-wall.py）。非 pytest 透传。
 if [ "${1:-}" = "-m" ] && [ "${2:-}" = "pytest" ]; then
+  # ---- CPU 内线程封顶（2026-10-09，docs/nn/engineering.md §68）----
+  # 与 nn-python-gate.sh 的 GATE_THREADS=1 同口径。为什么这里也必须封：单跑
+  # `bash tools/githook/nn-py-safe.sh -m pytest …` **不经门禁脚本** ⇒ 三个 BLAS 变量没人设
+  # ⇒ numpy/torch 按物理核开满 BLAS 线程、每线程各吃一份缓冲。实测单进程**私有提交**
+  # 642MB → 159MB（封到 1，−75%），而**工作集 178MB → 177MB 几乎不变** —— 那 483MB 是
+  # 已 commit、未触碰的线程缓冲：工作集口径看不见，却实打实顶 Windows 的 commit limit
+  # （「系统内存紧张杀进程」的直接成因）。xdist 下是每 worker 各付一份。
+  # 0 = 不设（退回 torch/numpy 默认）；NN_PY_THREADS 覆盖。
+  PY_THREADS=${NN_PY_THREADS:-1}
+  if [ "$PY_THREADS" != "0" ]; then
+    OMP_NUM_THREADS=$PY_THREADS
+    MKL_NUM_THREADS=$PY_THREADS
+    OPENBLAS_NUM_THREADS=$PY_THREADS
+    export OMP_NUM_THREADS MKL_NUM_THREADS OPENBLAS_NUM_THREADS
+  fi
   # 路径转换的必要条件不是「哪个 uname」而是「python 是不是 Windows 二进制」：
   # 选中 .venv/Scripts/python.exe（Windows）⇒ argv 里的 POSIX 路径必须转 Win32；选中
   # .venv/bin/python（原生 Linux）⇒ POSIX 路径本就正确原样透传。
