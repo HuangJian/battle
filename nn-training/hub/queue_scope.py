@@ -1,7 +1,7 @@
-"""hub/queue_scope.py — 课程表 · 归属路由 · 模式 · 停机达令 · worker 登记。
+"""hub/queue_scope.py — 课程表 · 归属路由 · 停机达令 · worker 登记。
 
 `_HubQueue` 的七个域混入之一（S4 第十五刀）。本簇是**状态的主人**：`_stores` / `_order` /
-`_modes` / `_solo` / `_locate_cache` / `_halts` / `_workers` 都写在它身上，而组合类的
+`_mode_ignored` / `_solo` / `_locate_cache` / `_halts` / `_workers` 都写在它身上，而组合类的
 `__init__` 是这些字段**唯一**的带值声明点（见 `hub/queue.py` 头部那段「为什么 `__init__`
 不再拆钩子」）。
 
@@ -36,12 +36,7 @@ from pathlib import Path
 from threading import Lock
 from typing import Any
 
-from common.protocol import (
-    COURSE_MODE_OFFLINE,
-    COURSE_MODE_ONLINE,
-    COURSE_MODES,
-    WORKER_SEEN_WINDOW_SEC,
-)
+from common.protocol import WORKER_SEEN_WINDOW_SEC
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
 from hub.task_pack import hold_progress_at
@@ -60,7 +55,8 @@ class QueueScopeMixin(QueuePeer):
     _halts: dict[str, bool]
     _locate_cache: dict[str, str]
     _lock: Lock
-    _modes: dict[str, str]
+    #: 启动参数里带过模式段的课程（`--course a=offline`；★M4b/P1-3：WARN + 忽略）。
+    _mode_ignored: set[str]
     _now: Any
     _order: list[str]
     _solo: _JobStore | None
@@ -98,7 +94,7 @@ class QueueScopeMixin(QueuePeer):
         return True
 
     # ---- 课程表自动发现（`--discover`） ----
-    def add_course(self, name: str, mode: str = COURSE_MODE_ONLINE) -> bool:
+    def add_course(self, name: str) -> bool:
         """登记一门课程（现建 `_JobStore`）；已登记/空名/未开发现 → False（幂等）。
 
         派生目录与 `--course` 启动参数**逐字节相同**（`<root>/<name>/remote-jobs` +
@@ -115,14 +111,6 @@ class QueueScopeMixin(QueuePeer):
             now_fn=self._now,  # 时钟同源：租约时间戳与判定不能一边真墙钟一边假钟
         )
         self._order.append(c)
-        m = (mode or "").strip().lower()
-        if m not in COURSE_MODES:
-            m = COURSE_MODE_ONLINE
-        # 盘上的派发记录优先（claim 翻的 offline / 人的 pin 重启不丢 —— §3.8 数据损坏防线）。
-        # 先落 `_modes[c] = m`：它是 `_dispatch_load` 的缺省回退值（不先落会拿 ONLINE 当回退，
-        # 把 `add_course(name, "offline")` 的显式模式吞掉），再让记录覆盖它。
-        self._modes[c] = m
-        self._modes[c] = self.dispatch_effective_mode(c, m)
         # ★六轮 R3-a（P0-8）：发现/重启路径与构造路径同口径——不调 `_sync_hold` 的话，
         # 盘上的 hold 只在**读面**（清单/取包）生效，而派发闸的镜像还是空的 ⇒
         # 重启后一台盘能领走别人正在跑的课（接管闸与读面分叉）。
@@ -213,31 +201,24 @@ class QueueScopeMixin(QueuePeer):
         course = self.course_of(job_id)
         return None if course is None else self._stores.get(course)
 
-    def mode_of(self, course: str) -> str:
-        return self._modes.get(course, COURSE_MODE_ONLINE)
+    def mode_ignored(self, course: str) -> bool:
+        """启动参数里这门课带过模式段（★M4b / P1-3：`--course a=offline` ⇒ WARN + 忽略）。
 
-    def offline_courses(self) -> list[str]:
-        return [c for c in self._order if self.mode_of(c) == COURSE_MODE_OFFLINE]
-
-    def set_mode(self, course: str, mode: str) -> bool:
-        """热切一门课的模式（在线/离线）。非法课程/模式 → False。
-
-        legacy 入口（既有测试/调用方）：等价于「非人写入」——不落 pin、且**拒结覆盖**由
-        claim 翻出的 offline（要切回请用 `/admin/courses?...&pin=0`，即 `set_mode_pinned`）。
-        模式落盘（`dispatch.json`）——重启不再回启动参数（plan/auto-offline-handoff §3.2b）。
+        只服务 `/admin/courses` 行上的 `mode_ignored` 标记（排障时知道「有人还在按老脚本
+        传模式」）；不参与任何派发判据。
         """
-        ok, _why = self.set_mode_pinned(course, mode, None)
-        return ok
+        return course in self._mode_ignored
 
     def active_courses(self) -> int:
-        """**在实时派发**的课程数（竞速判据的分母）：非离线，且有待领或未过期在飞 job。
+        """**在实时派发**的课程数（竞速判据的分母）：有待领或未过期在飞 job，且未被接管。
 
-        离线课程不算（用户口径：它不实时派发 PPO）；已跑完无待办的课程不算（没活可抢，
-        把它算进去只会白降压竞速阈值）。
+        ★M4b（plan §1.5.4-P2-7）：课程不再有模式 —— 被 **live hold** 压住的课不算
+        （它的队列被派发闸压着，没人能领）；已跑完无待办的课不算（没活可抢）。
+        读数会随接管建立/掉线在 1↔N 之间跳（§69 写明），这是**观测口径**不是派发输入。
         """
         n = 0
         for course in self._order:
-            if self.mode_of(course) == COURSE_MODE_OFFLINE:
+            if str(self.hold_of(course).get("state") or "") == "live":
                 continue
             st = self._stores[course]
             if st.claimable_job_ids() or st.inflight():

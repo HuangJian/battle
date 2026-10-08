@@ -332,12 +332,6 @@ class _Hub:
         assert st == 200, body
         return body
 
-    def set_mode(self, course: str, mode: str) -> None:
-        st, body = _http(
-            self.base, f"/admin/courses?course={course}&mode={mode}", method="POST"
-        )
-        assert st == 200, f"/admin/courses 热切失败：{st} {body}"
-
     def close(self) -> None:
         self.proc.terminate()
         try:
@@ -365,9 +359,9 @@ def test_offline_segment_is_claimable_only_by_a_marked_worker(tmp_path: Path) ->
     hub = _Hub(traj)
     try:
         hub.ready(expect=[C_OFF, C_ON])
-        hub.set_mode(C_OFF, "offline")
 
         # 普通 poller：离线课被跳过，先拿到在线课那份（能力闸不是「全都不给」）
+        # （★M4b：不再需要切模式——归属只看 job 自己的 `role`）
         plain = hub_poll(hub.base, TOKEN, worker_id="plain-1")
         assert plain is not None and plain["job_id"] == man_on["job_id"], plain
         assert plain["course"] == C_ON
@@ -411,7 +405,6 @@ def test_segment_rounds_backfeed_into_the_right_course_and_show_up_on_the_read_f
     hub = _Hub(traj)
     try:
         hub.ready(expect=[C_OFF, C_ON])
-        hub.set_mode(C_OFF, "offline")
         got = hub_poll(hub.base, TOKEN, worker_id="marked-1", role="offline")
         assert got is not None and got["job_id"] == man_off["job_id"], got
         course = got["course"]
@@ -567,9 +560,9 @@ def test_a_fresh_run_lays_down_code_and_ts_tree_before_the_loop(
 def test_task_pack_endpoint_hands_over_the_console_export(tmp_path: Path) -> None:
     """`GET /offline/task-pack?course=` 递的就是控制台导出的那份 zip（404/401/越界各有话说）。
 
-    ⚠ 取包要**先切离线**（2026-09-25 的 mode 闸，plan/online-offline-role-routing §2.4）：
-    包在盘上 ≠ 该发给你——切离线时控制台会自动导出且「已有包不动」⇒ 切回在线后包还在，
-    不查 mode 就等于在线课也能被离线盘取走跑整段（L6）。所以本用例先钉 409、切离线后 200。
+    ★M4b：取包门只剩 **live hold 的 lease 门**（P1-2）——没有人持时包在盘就发（升级窗口里
+    旧端不 brick）；有人持时只有持 `?lease=<token>` 的那台盘拿得到（否则同一份活两处跑）。
+    旧 mode 三门随模式一起退役（本用例旧版钉的「课在 online ⇒ 409」已作废）。
     """
     traj = tmp_path / "traj"
     _course_dirs(traj, C_OFF)
@@ -580,15 +573,23 @@ def test_task_pack_endpoint_hands_over_the_console_export(tmp_path: Path) -> Non
     try:
         hub.ready(expect=[C_OFF, C_ON])
 
-        # 课还是在线 ⇒ 409（包在、没丢：正文要说清下一步，不是 404 把人引向「再导一次」）
-        st, raw = _http_bytes(hub.base, f"/offline/task-pack?course={C_OFF}")
-        assert st == 409 and raw != pack_bytes, (st, raw[:200])
-        assert "online" in raw.decode("utf-8"), raw[:200]
-
-        hub.set_mode(C_OFF, "offline")
+        # 没人在跑 ⇒ 照发（旧端升级窗口不 brick；mode 三门随模式退役）
         st, raw = _http_bytes(hub.base, f"/offline/task-pack?course={C_OFF}")
         assert st == 200 and raw == pack_bytes, (st, raw[:40])
         assert hashlib.sha256(raw).hexdigest() == hashlib.sha256(pack_bytes).hexdigest()
+
+        # 云机 claim（有包 ⇒ hold 建立）⇒ 门立刻收窄：非持有者 409 held；持有者带 ?lease= 照发
+        st_c, claim = _http(
+            hub.base,
+            f"/offline/claim?proto=2&course={C_OFF}&worker=w-holder",
+            method="POST",
+        )
+        assert st_c == 200 and claim.get("lease"), claim
+        tok = str(claim["lease"]["token"])
+        st2, raw2 = _http_bytes(hub.base, f"/offline/task-pack?course={C_OFF}")
+        assert st2 == 409 and b"held" in raw2, (st2, raw2[:200])
+        st3, raw3 = _http_bytes(hub.base, f"/offline/task-pack?course={C_OFF}&lease={tok}")
+        assert st3 == 200 and raw3 == pack_bytes, (st3, raw3[:40])
 
         # 没有这门课的包 ⇒ 404 + 人读下一步（「先去控制台导出」），而不是空体
         st, raw = _http_bytes(hub.base, f"/offline/task-pack?course={C_ON}")

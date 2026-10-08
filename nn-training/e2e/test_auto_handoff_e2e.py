@@ -1,33 +1,34 @@
-"""e2e/test_auto_handoff_e2e.py —— 自动离线交接的**端到端**（plan/auto-offline-handoff，2026-10-03）。
+"""e2e/test_auto_handoff_e2e.py —— 自主 worker 接管（hold）的**端到端**。
+
+（★M4b：课程不再区分在线/离线（plan/worker-type-dispatch-model）——文件名保留，wire 与
+端点名不变；下面的「自动交接」一律按今天的口径读：**claim 无包 ⇒ 导包软态；包到手 ⇒ hold**。）
 
 真 `hub.server` 子进程 + 真 HTTP + 真云机 `claim_course` + **假控制台**（只收 POST 并记录）。
 层 = `e2e/`（hermetic：不 spawn bun/node、不加载 torch、不跑真 rollout/PPO/eval）。
 
-覆盖的链路（一条主线 + 四条专项）：
+覆盖的链路（★M4b：课程无模式 —— 清单/领取判据只剩「开课标记 + hold」）：
 
-  ① **全链**（`test_full_flow_online_course_to_offline_completion`）：在训、online、**无包**的课
-     → 清单给 `claimable + auto_handoff`（P0-1 的唯一入口）
+  ① **全链**（`test_full_flow_online_course_to_offline_completion`）：在训课、**无包**
+     → 清单给 `claimable`（P0-1 的唯一入口）
      → 云机 claim 无包 ⇒ **409 `pending_export`**（不是 404）+ **真触发控制台**（假控制台收到）
-       + mode 翻 offline + `offline-dispatch.json` 落盘（§3.8 数据损坏防线）
+       + `offline-dispatch.json` 落盘（Q1：无包**不建 hold**）
      → 控制台导包完成（测试直接放一份包到盘上）
-     → 云机重 claim ⇒ 200 + 租约
+     → 云机重 claim ⇒ 200 + 租约（包到手 ⇒ **hold 建立**）
      → 云机报段末摘要 `end_it_reached`
      → `/admin/offline.results` 按 run_id 带出（T6 读面）∧ 清单 `completed` + `claimable=false`
      → 换人再 claim ⇒ 409 `completed`（P1-1：不可再领）
      → 重导包（sha 变）⇒ 自动解封（同一份租约下不再报 completed）
-  ② **U2 一拖一**（hub 侧不变量，不是云机自觉）：第一门在交接窗口 ⇒ 第二门 claim 得 409 `busy`
-     且**第二门 mode 仍是 online**（U2 的题眼：第一门 drain 时其余照常在线推进）。
-  ③ **T8 停摆告警**：已翻 offline、无租约、无进度 ⇒ `/admin/offline.stalled` 点名该课
+  ② **导包软态不占闸**：第一门进了导包窗口，第二门照旧可走它自己的那条腿（F11 腿② 已删）；
+     **包到手那一刻**一拖一（按 worker）立刻生效。
+  ③ **T8 停摆告警**：记了导包意向、超窗没人跑 ⇒ `/admin/offline.stalled` 点名该课
      （文案由控制台渲染；hub 只出判据）。
-  ④ **T0 撤单**：`&drop_jobs=1` 把该课**未认领**的 job 作物（`/admin/queue.pending_n` 归零）；
-     不带 `drop_jobs` 的切模式**一个 job 都不动**（停课「队列一字不动」契约）。
+  ④ **旧端拒收**（Q4/DoD#3）：claim 缺 `?proto=2` ⇒ 409（`busy`+error 全文+`proto_required`）。
   ⑤ **T2 云机腿**：`offline_boot.claim_course` 对中间态返回 `reason` 码而非裸 token ——
      调用方据此**本拍不跑**（旧口径「一律照旧跑」会无租约干等 30 分钟再 SystemExit）。
-  ⑥ **离线优先**（2026-10-03 用户裁决）：就绪离线课 + pin online 的在训课 ⇒ 真
-     `resolve_courses` 只回离线那门（在线那门带 `seize=True`，可抢但不抢）。
-  ⑦ **抢占全循环**（用户裁决「领到的课训练完成后再次开启接活循环」）：没有离线课 ⇒ 真
-     `_run_auto` 循环按 `open_time` 逐门抢占在训在线课（hub 逐门翻 offline；假训练报
-     `end_it_reached` ⇒ 换下一门），全部跑完才收工。
+  ⑥ **resolve 一层选择**（★M4b）：`claimable` 的行**整批**取（旧的「离线优先 / 没有就抢第一
+     门在线课」两腿塌成一条）；`pending_export` 的排最后。
+  ⑦ **接活全循环**：真 `_run_auto` 按清单顺序逐门跑（假训练报 `end_it_reached` ⇒ 换下一门），
+     全部跑完才收工。
 
 纪律：不 spawn bun/node、不加载 torch；HTTP 全在本机临时端口；hub 子进程的 env 显式隔离
 （权重归档根 + 假控制台 URL + 停摆阈值）。
@@ -156,15 +157,6 @@ def _task_row(tasks_body: dict, course: str) -> dict:
         if isinstance(row, dict) and row.get("course") == course:
             return dict(row)
     raise AssertionError(f"清单里没有 {course}：{tasks_body}")
-
-
-def _mode_of(hub: _Hub, course: str) -> str:
-    st, body = _http(hub.base, "/admin/courses")
-    assert st == 200, body
-    for row in body.get("courses") or []:
-        if row.get("course") == course:
-            return str(row.get("mode") or "")
-    raise AssertionError(f"/admin/courses 里没有 {course}：{body}")
 
 
 def _queue_course(hub: _Hub, course: str) -> dict:
@@ -333,23 +325,27 @@ def test_full_flow_online_course_to_offline_completion(tmp_path: Path) -> None:
         assert st == 200, tasks
         row = _task_row(tasks, C_AUTO)
         assert row["claimable"] is True, row
-        assert row["auto_handoff"] is True, row
         assert row["state"] == "no_pack", row
-        assert row["pack"] is None, row
+        assert row["pack"] is None and row["hold"] == {}, row
 
-        # ---- ② claim 无包 ⇒ 409 指路（不是 404）+ mode 翻 + 触发控制台 ----
+        # ---- ② claim 无包 ⇒ 409 指路（不是 404）+ 记软态 + 触发控制台 ----
         st2, body = _http(hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_AUTO}&worker=w-tpu", method="POST")
         assert st2 == 409, body
-        assert body["auto_handoff"] is True and body["pending_export"] is True, body
+        assert body["pending_export"] is True, body
         assert body["triggered"] is True and body["give_up"] is False, body
-        assert "已翻成离线" in body["error"], body
+        assert "auto_handoff" not in body, "★M4b：响应里不再有模式时代的 auto_handoff 键"
+        assert "正在生成" in body["error"], body
         # 真触发到了假控制台（跨进程：hub 子进程 → 本测试进程的 HTTP server）
         assert _wait_for(lambda: console.handoff_courses() == [C_AUTO]), (
             f"控制台没被触发；hub 输出：{hub.output()}"
         )
-        # mode 已翻 + 派发状态落盘（§3.8：重启后不能退回 online）
-        assert _mode_of(hub, C_AUTO) == "offline"
+        # 软态落盘（§3.8：重启后不丢）+ Q1：无包**不建 hold**
+        st_h, hold = _http(hub.base, f"/offline/hold?course={C_AUTO}")
+        assert st_h == 200 and hold["held"] is False, hold
         assert (traj / C_AUTO / "offline-dispatch.json").is_file()
+        st_a, admin_rows = _http(hub.base, "/admin/courses")
+        row_a = next(r for r in admin_rows["courses"] if r["course"] == C_AUTO)
+        assert st_a == 200 and row_a["pending_export"] is True, row_a
 
         # ---- ③ 控制台导包完成（本层直接放包到盘上）⇒ 云机重 claim 拿租约 ----
         _write_pack(traj, C_AUTO, b"PK\x03\x04pack-v1")
@@ -357,6 +353,12 @@ def test_full_flow_online_course_to_offline_completion(tmp_path: Path) -> None:
             hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_AUTO}&worker=w-tpu", method="POST"
         )
         assert st3 == 200 and body3.get("lease"), body3
+        # 包到手 ⇒ hold 建立（Q1：这才是「谁在跑这门课」的那一笔）；软态被清
+        st_h2, hold2 = _http(hub.base, f"/offline/hold?course={C_AUTO}")
+        assert st_h2 == 200 and hold2["held"] is True and hold2["worker_id"] == "w-tpu", hold2
+        st_a2, admin2 = _http(hub.base, "/admin/courses")
+        row_a2 = next(r for r in admin2["courses"] if r["course"] == C_AUTO)
+        assert row_a2["held"] is True and row_a2["pending_export"] is False, row_a2
 
         # ---- ④ 云机报段末摘要（跑满）----
         st4, res4 = _http(
@@ -388,7 +390,7 @@ def test_full_flow_online_course_to_offline_completion(tmp_path: Path) -> None:
         assert st7 == 409, body7
         assert body7.get("completed") is True, body7
 
-        # ---- ⑥ 重导包（sha 变）⇒ 自动解封：不再报 completed（此时报的是 held：租约还在）----
+        # ---- ⑥ 重导包（sha 变）⇒ 自动解封：不再报 completed（此时报的是 held：hold 还活着）----
         _write_pack(traj, C_AUTO, b"PK\x03\x04pack-v2-DIFFERENT")
         st8, body8 = _http(
             hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_AUTO}&worker=w-other", method="POST"
@@ -433,15 +435,13 @@ def test_pending_export_does_not_gate_a_second_course(tmp_path: Path) -> None:
         )
         assert st1 == 409 and body1["pending_export"] is True, body1
         assert body1.get("busy") is None, body1
-        assert _mode_of(hub, C_AUTO) == "offline"
 
-        # 第二门：不被软态挡住 —— 它走自己的「无包 ⇒ 翻 offline + 请控制台导包」那条腿
+        # 第二门：不被软态挡住 —— 它走自己的「无包 ⇒ 记软态 + 请控制台导包」那条腿
         st2, body2 = _http(
             hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={C_OTHER}&worker=w-tpu", method="POST"
         )
         assert st2 == 409 and body2["pending_export"] is True, body2
         assert body2.get("busy") is None, body2
-        assert _mode_of(hub, C_OTHER) == "offline"
         # 两个导包都真到了控制台（软态是记账，不是闸）
         assert _wait_for(lambda: sorted(console.handoff_courses()) == sorted([C_AUTO, C_OTHER])), (
             f"控制台触发面：{console.handoff_courses()}；hub 输出：{hub.output()}"
@@ -452,6 +452,7 @@ def test_pending_export_does_not_gate_a_second_course(tmp_path: Path) -> None:
         assert row3["state"] == "no_pack" and row3["claimable"] is True, row3
         assert row3["busy"] is False and row3["hold"] == {}, row3
         assert row3["pending_export"]["by"] == "w-tpu", row3
+        assert "mode" not in row3 and "seize" not in row3, row3
         # ……而**包到手那一刻**，一拖一立刻生效（这才是 hub 侧不变量）
         _write_pack(traj, C_AUTO, b"PK\x03\x04pack-a")
         st4, body4 = _http(
@@ -501,46 +502,36 @@ def test_stalled_course_raises_alert(tmp_path: Path) -> None:
         hit = next(r for r in _stalled() if r.get("course") == C_AUTO)
         assert hit["why"] == "pending-export", hit
         assert hit["holder"] is None, hit
-        assert float(hit["flipped_at"]) > 0.0, hit
+        assert "flipped_at" not in hit, "★M4b：模式时代的 flipped_at 锚随模式退役"
+        assert float(hit["age_sec"]) > 0.0, hit  # 锚 = 导包意向时刻
     finally:
         hub.close()
         console.close()
 
 
-# ─────────────── ④ T0 撤单：`&drop_jobs=1` 只撤未认领的 ───────────────
+# ─────────────── ④ 旧端拒收：claim 缺 `?proto=2` ⇒ 409（Q4 / DoD#3）───────────────
 
 
-def test_drop_jobs_cancels_unclaimed_online_jobs(tmp_path: Path) -> None:
-    """切模式撤单（plan/switch-mode-drops-jobs）：撤**没被领的**；不带参数则一个都不动。"""
+def test_legacy_client_claim_is_refused_loudly(tmp_path: Path) -> None:
+    """旧云机（没刷新 notebook）claim 时缺 `?proto=2` ⇒ **409 + `busy` + error 全文**。
+
+    为什么借 `busy` 键（P0-4）：旧码的 409 分流只有 busy 腿会把 `error` 原样打进会话日志
+    且本拍不跑 —— 「请刷新笔记本」这句才能真正到达现场，而**绝不静默双跑**（新码据
+    `proto_required` 判读）。
+    """
     traj = tmp_path / "traj"
-    job_root, jsonl = _course_dirs(traj, C_AUTO)
-    _seed_jobs(job_root, jsonl, ["job-drop-1", "job-drop-2"])  # 同一门课的两个未认领 job
+    _course_dirs(traj, C_AUTO)
+    _write_pack(traj, C_AUTO, b"PK\x03\x04legacy")
     hub = _Hub(traj)
     try:
         hub.ready(expect=[C_AUTO])
-        assert _queue_course(hub, C_AUTO)["pending_n"] == 2, _queue_course(hub, C_AUTO)
-
-        # 不带 drop_jobs：切模式但**队列一字不动**（停课/回灌走的就是这条）
-        st1, body1 = _http(hub.base, f"/admin/courses?course={C_AUTO}&mode=offline&pin=1", method="POST")
-        assert st1 == 200, body1
-        assert _queue_course(hub, C_AUTO)["pending_n"] == 2, "不带 drop_jobs 不许动队列"
-
-        # 带 drop_jobs=1：未认领的 job 全作废
-        st2, body2 = _http(
-            hub.base,
-            f"/admin/courses?course={C_AUTO}&mode=offline&pin=1&drop_jobs=1",
-            method="POST",
-        )
-        assert st2 == 200, body2
-        assert _queue_course(hub, C_AUTO)["pending_n"] == 0, _queue_course(hub, C_AUTO)
-        # 幂等：再撤一次不炸也不变
-        st3, body3 = _http(
-            hub.base,
-            f"/admin/courses?course={C_AUTO}&mode=offline&pin=1&drop_jobs=1",
-            method="POST",
-        )
-        assert st3 == 200, body3
-        assert _queue_course(hub, C_AUTO)["pending_n"] == 0
+        st, body = _legacy_offline_claim(hub, C_AUTO, "w-old")
+        assert st == 409 and body.get("busy") is True, body
+        assert body.get("proto_required") == 2, body
+        assert "刷新" in str(body.get("error")), body
+        # 没建 hold（拒在入口，状态零污染）
+        st_h, hold = _http(hub.base, f"/offline/hold?course={C_AUTO}")
+        assert st_h == 200 and hold["held"] is False, hold
     finally:
         hub.close()
 
@@ -576,45 +567,44 @@ def test_cloud_claim_course_middle_states_do_not_run(tmp_path: Path) -> None:
 # ─────────── ⑥ 离线优先：有就绪的离线课就不抢在训在线课（2026-10-03 用户裁决） ───────────
 
 
-def test_resolve_prefers_offline_course_over_seizing_a_live_online_course(tmp_path: Path) -> None:
-    """用户口径：「优先取当时就绪的离线课程；没有离线才抢第一个在训在线课」——真 HTTP 上验。
-
-    ★六轮 §4.2 半回摆：可抢的只能是在训的 **auto** 课（开课未选模式 / 交还自动）；
-    pin online 重新获得阻止力⇒ 那门课不再带 `seize`（其专属用例 = 本文件 T2）。
+def test_resolve_takes_every_claimable_course(tmp_path: Path) -> None:
+    """★M4b：`resolve_courses` 一层选择 —— `claimable` 的行**整批**取（旧口径的「离线优先 /
+    没有就抢第一门在线课」两条腿塌成一条）；无包课也在内（claim 会触发导包，P0-1 入口）；
+    退役键读到即忽略。真 hub 子进程 + 真 HTTP。
     """
     traj = tmp_path / "traj"
-    _course_dirs(traj, "e2e-off-ready")
-    _course_dirs(traj, "e2e-on-live")
-    _write_pack(traj, "e2e-off-ready", b"PK\x03\x04off")
-    _write_pack(traj, "e2e-on-live", b"PK\x03\x04on")
+    _course_dirs(traj, "e2e-ready-a")
+    _course_dirs(traj, "e2e-nopack-b")
+    _write_pack(traj, "e2e-ready-a", b"PK\x03\x04off")
     hub = _Hub(traj)
     try:
-        hub.ready(expect=["e2e-off-ready", "e2e-on-live"])
-        st, body = _http(
-            hub.base, "/admin/courses?course=e2e-off-ready&mode=offline&pin=1", method="POST"
-        )
-        assert st == 200, body
-        st, body = _http(
-            hub.base, "/admin/courses?course=e2e-on-live&mode=online&pin=0", method="POST"
-        )
-        assert st == 200, body
-
+        hub.ready(expect=["e2e-ready-a", "e2e-nopack-b"])
         st, tasks = _http(hub.base, OFFLINE_TASKS_PATH)
         assert st == 200, tasks
-        row_off = _task_row(tasks, "e2e-off-ready")
-        row_on = _task_row(tasks, "e2e-on-live")
-        assert row_off["seize"] is False and row_off["claimable"] is True, row_off
-        # 未 pin 的在训在线课（auto 档）带 seize=True（可抢，但本拍不抢——离线课优先）
-        assert row_on["authority"] == "auto", row_on
-        assert row_on["seize"] is True and row_on["claimable"] is True, row_on
+        row_a = _task_row(tasks, "e2e-ready-a")
+        row_b = _task_row(tasks, "e2e-nopack-b")
+        assert row_a["claimable"] is True and row_a["state"] == "ready", row_a
+        # 无包的课也可领（claim 会触发导包）——这是 P0-1 的唯一入口
+        assert row_b["claimable"] is True and row_b["state"] == "no_pack", row_b
+        for dead in ("authority", "auto_handoff", "seize"):
+            assert dead not in row_a and dead not in row_b, dead
 
         from remote.offline_boot import resolve_courses
 
         got, blocked, _manifest = resolve_courses(
             {"hub_url": hub.base}, {"HUB_TOKEN": TOKEN}, lambda _m: None
         )
-        assert [t["course"] for t in got] == ["e2e-off-ready"], got
+        # hub 排序：state rank（ready 0 < no_pack 3）——客户端不再自己挑一门
+        assert [t["course"] for t in got] == ["e2e-ready-a", "e2e-nopack-b"], got
         assert blocked == [], blocked
+        # 已跑过的包（served 同 sha）⇒ 只剩另一门：过滤对整批同一套
+        got2, _b2, _m2 = resolve_courses(
+            {"hub_url": hub.base},
+            {"HUB_TOKEN": TOKEN},
+            lambda _m: None,
+            served={"e2e-ready-a": str(row_a["pack"]["sha256"])},
+        )
+        assert [t["course"] for t in got2] == ["e2e-nopack-b"], got2
     finally:
         hub.close()
 
@@ -622,18 +612,17 @@ def test_resolve_prefers_offline_course_over_seizing_a_live_online_course(tmp_pa
 # ─────────── ⑦ 抢占全循环：没有离线课 ⇒ 逐门抢在训在线课（open_time 升序） ───────────
 
 
-def test_auto_loop_seizes_in_training_courses_in_open_time_order(
+def test_auto_loop_runs_the_claimable_batch_in_order(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """用户口径的全链：领到的课跑完后**再次开启接活循环**。
+    """用户口径的全链：领到的课跑完后**再次开启接活循环**（★M4b：课程无模式）。
 
-    就绪离线课（C_OFF）先跑；跑完没有离线课 ⇒ 按 `open_time` 抢 C_ON1 → C_ON2，
-    hub 每抢一门就把它翻成 offline；全部跑完循环才收工。真 hub 子进程 + 真 HTTP +
-    真 `_run_auto`/`resolve_courses`/`claim_course`，只把真训练换成假跑。
+    三节课都有包 ⇒ 真 `resolve_courses` **整批**取（hub 按 `state` rank + `open_time` 排序）；
+    真 `_run_auto` 逐门跑，假训练每门报 `end_it_reached`（hub 记 completed，下一拍不再可领），
+    全部跑完循环才收工。真 hub 子进程 + 真 HTTP + 真 `claim_course`，只把真训练换成假跑。
     """
     traj = tmp_path / "traj"
-    _course_dirs(traj, "e2e-off-first")
-    for name, when in (("e2e-on-1", 1000.0), ("e2e-on-2", 2000.0)):
+    for name, when in (("e2e-off-first", 500.0), ("e2e-on-1", 1000.0), ("e2e-on-2", 2000.0)):
         _course_dirs(traj, name)
         os.utime(traj / name / COURSE_ENABLE_MARKER, (when, when))  # 开课时间顺序（SSOT）
     for name in ("e2e-off-first", "e2e-on-1", "e2e-on-2"):
@@ -641,10 +630,6 @@ def test_auto_loop_seizes_in_training_courses_in_open_time_order(
     hub = _Hub(traj)
     try:
         hub.ready(expect=["e2e-off-first", "e2e-on-1", "e2e-on-2"])
-        st, body = _http(
-            hub.base, "/admin/courses?course=e2e-off-first&mode=offline&pin=1", method="POST"
-        )
-        assert st == 200, body
 
         from remote import offline_boot
 
@@ -686,10 +671,13 @@ def test_auto_loop_seizes_in_training_courses_in_open_time_order(
         )
         assert rc == 0
         assert seen == ["e2e-off-first", "e2e-on-1", "e2e-on-2"], (seen, lines[-20:])
-        assert any("抢占第一个在训在线课" in ln for ln in lines), lines
-        # hub 把两门在训在线课都翻成了 offline（用户口径「hub 将其改为离线」）
-        assert _mode_of(hub, "e2e-on-1") == "offline"
-        assert _mode_of(hub, "e2e-on-2") == "offline"
+        assert any("清单里可领" in ln for ln in lines), lines
+        # 三门都跑满 ⇒ 下一拍清单里一行可领都没有（这是循环收工的理由）
+        st, tasks = _http(hub.base, OFFLINE_TASKS_PATH)
+        assert st == 200 and all(
+            _task_row(tasks, n)["state"] == "completed"
+            for n in ("e2e-off-first", "e2e-on-1", "e2e-on-2")
+        ), tasks
     finally:
         hub.close()
 
@@ -697,7 +685,7 @@ def test_auto_loop_seizes_in_training_courses_in_open_time_order(
 # ══════════════ ★六轮评审 T1–T5b/T8（plan/offline-online-status-switch §6.2）══════════════
 #
 # 层纪律（§6.1）：真 hub 子进程 + 真 HTTP + 真生产写者（`remote.hub_client.publish_job`）；
-# 不真等 900s（交接窗口用「盘上旧 `claimed_at` 的记录」构造，烧满触发账本那条由 hub 侧
+# 不真等 900s（导包窗用「盘上旧 `pending_export.at` 的记录」构造，烧满触发账本那条由 hub 侧
 # 假钟用例 `test_handoff_trigger_budget_resets_on_new_round` 盖）。
 
 from common.protocol import (
@@ -760,9 +748,9 @@ def _offline_claim(hub: _Hub, course: str, worker: str) -> tuple[int, dict]:
 
 
 def _legacy_offline_claim(hub: _Hub, course: str, worker: str) -> tuple[int, dict]:
-    """旧端形状（不带 `?proto=2`）——只给「hub 显式拒旧端」那条用例用（DoD#3）。"""
+    """旧端形状（**不带** `?proto=2`）——只给「hub 显式拒旧端」那条用例用（DoD#3）。"""
     return _http(
-        hub.base, f"{OFFLINE_CLAIM_PATH}?proto=2&course={course}&worker={worker}", method="POST"
+        hub.base, f"{OFFLINE_CLAIM_PATH}?course={course}&worker={worker}", method="POST"
     )
 
 
@@ -773,20 +761,20 @@ def _peek_ids(hub: _Hub, *, role: str = ROLE_ONLINE) -> list[str]:
     return [str(c.get("job_id") or "") for c in cands]
 
 
-# ─────────── T1（报障一）：切在线撤租约 + **重发布同一 job_id 可领**（★F1 ③ 生产写者） ───────────
+# ─────────── T1（报障一）：强制解除接管撤租约 + **重发布同一 job_id 可领**（★F1 ③ 生产写者） ───────────
 
 
-def test_manual_online_switch_revokes_lease_and_republished_job_is_claimable(
+def test_release_hold_revokes_lease_and_republished_job_is_claimable(
     tmp_path: Path,
 ) -> None:
-    """用户报障一「切成在线不稳定」的端到端复现。
+    """用户报障一「切成在线不稳定」的端到端（★M4b：旧名 `..._manual_online_switch_...`）。
 
     链（每步都在真 HTTP / 真盘面上断言）：
       ① 生产写者发一份 role=online 的 job（同 it/runId ⇒ 幂等键固定）
-      ② A 盘 claim（有包）⇒ hub 翻 offline 并**撤掉未认领 job**（`_cancelled` 进 hub 内存）
-      ③ 人切 `mode=online&pin=1&drop_jobs=1` ⇒ 租约成**墓碑**
-      ④ A 心跳 409 `revoked`；清单 `authority=pinned_online`、`claimable/seize=false`（照发行）
-      ⑤ **重发布同一 job_id**（生产写者）⇒ peek 可见 ∧ 在线 role claim 200（旧 bug：永久 cancelled）
+      ② A 盘 claim（有包）⇒ **hold 建立**；**队列一字不动**（D2：压下不撤单）
+      ③ 人点「强制解除接管」（`release_hold=1`）⇒ 租约成**墓碑**、hold 清掉
+      ④ A 心跳 409 `revoked`；清单行 `held-revoked`、`claimable=true`（新主可直接接）
+      ⑤ **重发布同一 job_id**（生产写者）⇒ peek 可见 ∧ 在线 role claim 200
     """
     traj = tmp_path / "traj"
     _course_dirs(traj, C_AUTO)
@@ -798,21 +786,20 @@ def test_manual_online_switch_revokes_lease_and_republished_job_is_claimable(
         m1 = _prod_publish(traj, C_AUTO, it=1, run_id="t1-run")
         jid = str(m1["job_id"])
         assert jid
-        # ② A claim（有包那条腿）⇒ 翻 offline + 撤单（`_cancelled`）
+        # ② A claim（有包那条腿）⇒ hold 建立；队列一字不动（D2）
         st, body = _offline_claim(hub, C_AUTO, "w-a")
         assert st == 200 and body.get("lease"), body
         token = str(body["lease"]["token"])
-        assert _mode_of(hub, C_AUTO) == "offline"
-        assert _queue_course(hub, C_AUTO)["pending_n"] == 0, _queue_course(hub, C_AUTO)
-        # ③ 人切固定在线（带 drop_jobs=1；P0-6 半球：只对 offline 生效）
+        assert _queue_course(hub, C_AUTO)["pending_n"] == 1, "★D2：接管不撤单"
+        st_h, hold = _http(hub.base, f"/offline/hold?course={C_AUTO}")
+        assert st_h == 200 and hold["held"] is True and hold["worker_id"] == "w-a", hold
+        # ③ 人点「强制解除接管」
         st2, body2 = _http(
-            hub.base,
-            f"/admin/courses?course={C_AUTO}&mode=online&pin=1&drop_jobs=1",
-            method="POST",
+            hub.base, f"/admin/courses?course={C_AUTO}&release_hold=1", method="POST"
         )
-        assert st2 == 200, body2
-        assert _mode_of(hub, C_AUTO) == "online"
-        # ④ 墓碑 + 心跳 409 revoked + 清单行照发但锁住
+        assert st2 == 200 and body2.get("released") is True, body2
+        assert _http(hub.base, f"/offline/hold?course={C_AUTO}")[1]["held"] is False
+        # ④ 墓碑 + 心跳 409 revoked + 清单行 held-revoked（可被新主直接接）
         leases = _admin_offline(hub).get("leases") or {}
         assert leases.get(C_AUTO, {}).get("revoked") is True, leases
         st3, body3 = _http(
@@ -821,58 +808,14 @@ def test_manual_online_switch_revokes_lease_and_republished_job_is_claimable(
         assert st3 == 409 and body3.get("revoked") is True, body3
         st4, tasks4 = _http(hub.base, OFFLINE_TASKS_PATH)
         row = _task_row(tasks4, C_AUTO)
-        assert row["authority"] == "pinned_online", row
-        assert row["claimable"] is False and row["seize"] is False, row
-        assert str(row["reason"]).startswith("pinned:"), row
+        assert row["claimable"] is True, row
+        assert str(row["reason"]).startswith("held-revoked"), row
         # ⑤ 重发布同一 job_id（生产写者，同 it/runId）⇒ 池可见 ∧ claim 200
         m2 = _prod_publish(traj, C_AUTO, it=1, run_id="t1-run")
         assert m2["job_id"] == jid, "同一幂等键必须给同一 job_id（幂等键 = 课程+it+runId）"
         assert jid in _peek_ids(hub), f"重发布后 peek 里没有 {jid}"
         got = claim_job(hub.base, TOKEN, jid, worker_id="w-us", role=ROLE_ONLINE)
         assert got is not None and got["status"] == "ok", got
-    finally:
-        hub.close()
-
-
-# ─────── T2（报障一）：pin online 不被抢——claim 拒 + 真 resolve_courses 不选它 ───────
-
-
-def test_pinned_online_course_is_not_seized_nor_claimed_by_offline_disk(tmp_path: Path) -> None:
-    """pin online = 人固定在线：离线盘 claim 409 `pinned_online`；真 `resolve_courses` 空表；
-    「交还自动」后同一门课立刻回到可抢（`seize=true` + claim 200 并翻 offline）。"""
-    from remote.offline_boot import resolve_courses
-
-    traj = tmp_path / "traj"
-    _course_dirs(traj, C_AUTO)
-    _write_pack(traj, C_AUTO, b"PK\x03\x04t2-pack")
-    hub = _Hub(traj)
-    try:
-        hub.ready(expect=[C_AUTO])
-        st, body = _http(
-            hub.base, f"/admin/courses?course={C_AUTO}&mode=online&pin=1", method="POST"
-        )
-        assert st == 200, body
-        st2, body2 = _offline_claim(hub, C_AUTO, "w-a")
-        assert st2 == 409 and body2.get("pinned_online") is True, body2
-        assert _mode_of(hub, C_AUTO) == "online"
-        # 真云机选课：没有别的课时一行都不给（不抢人固定的课）
-        picks, blocked, _manifest = resolve_courses(
-            {"hub_url": hub.base}, {"HUB_TOKEN": TOKEN}, lambda _m: None
-        )
-        assert picks == [], picks
-        # ★P1-9：pin online 的课不算「被别人持有」的等活（它是人固定的，不会自动放出来）
-        assert blocked == [], blocked
-        # 交还自动 ⇒ 回到自动池：可抢（seize）且 claim 立刻翻 offline
-        st3, body3 = _http(
-            hub.base, f"/admin/courses?course={C_AUTO}&mode=online&pin=0", method="POST"
-        )
-        assert st3 == 200, body3
-        st4, tasks4 = _http(hub.base, OFFLINE_TASKS_PATH)
-        row = _task_row(tasks4, C_AUTO)
-        assert row["authority"] == "auto" and row["seize"] is True, row
-        st5, body5 = _offline_claim(hub, C_AUTO, "w-a")
-        assert st5 == 200 and body5.get("lease"), body5
-        assert _mode_of(hub, C_AUTO) == "offline"
     finally:
         hub.close()
 
@@ -970,43 +913,31 @@ def test_dead_holder_does_not_block_seizing_another_course(tmp_path: Path) -> No
 
 
 def test_export_window_owner_death_reopens_the_course(tmp_path: Path) -> None:
-    """无包 claim 翻 offline 后主人死掉、窗口（`AUTO_HANDOFF_PENDING_SEC=900`）过期：
+    """无包 claim 记下软态后主人死掉、窗口（`AUTO_HANDOFF_PENDING_SEC=900`）过期：
 
-    · 同一门课：B claim ⇒ 409 `pending_export`（可重触发，**不是** busy/give_up）
+    · 同一门课：B claim ⇒ 409 `pending_export`（新一轮 ⇒ 可重触发，**不是** busy/give_up）
     · 窗口**不占闸**：B 能同时领另一门课（真 claim 200）
 
-    窗口过期不真等 900s：起 hub **之前**在盘上写一条旧 `claimed_at` 的派发记录（`_dispatch_load`
-    读的就是它）——这正是「hub 重启后旧窗口不再冻结全池」的现场形状（§3.8）。
+    窗口过期不真等 900s：起 hub **之前**在盘上写一条旧 `at` 的软态记录（`_dispatch_load`
+    读的就是它）——这正是「hub 重启后旧窗口不再冻结全池」的现场形状（§3.8）。★M4b：
+    记录里只有 `pending_export`（mode/claimed_* 已退役，读到即忽略）。
     """
     traj = tmp_path / "traj"
     _course_dirs(traj, C_AUTO)
     _course_dirs(traj, C_OTHER)
     _write_pack(traj, C_OTHER, b"PK\x03\x04t5a-other")
-    # 旧窗口记录：已翻 offline、有主、`claimed_at` 远超窗口（900s）、包还没出现
+    # 旧窗口记录：主人 w-dead、`at` 远超窗口（900s）、包还没出现
     old = time.time() - 5000.0
     (traj / C_AUTO / "offline-dispatch.json").write_text(
-        json.dumps(
-            {
-                "v": 1,
-                "mode": "offline",
-                "pinned": False,
-                "claimed_offline": True,
-                "claimed_by": "w-dead",
-                "claimed_at": old,
-                "flipped_at": old,
-                "updated_at": old,
-                "completed_pack_sha": "",
-            }
-        ),
+        json.dumps({"v": 2, "hold": {}, "pending_export": {"by": "w-dead", "at": old}}),
         encoding="utf-8",
     )
     console = _FakeConsole()
     hub = _Hub(traj, console_url=console.url)
     try:
         hub.ready(expect=[C_AUTO, C_OTHER])
-        assert _mode_of(hub, C_AUTO) == "offline"  # 盘上记录优先（T1 数据损坏防线）
-        # 顺序要紧：先证「旧窗口不占闸」（另一门课照常可领）——B 领 C_AUTO 会把 `claimed_at`
-        # 刷成现在（新一轮交接正式开始），那一刻之后别的课又该被一拖一挡住。
+        # 顺序要紧：先证「旧窗口不占闸」（另一门课照常可领）——B 领 C_AUTO 会开新一轮，
+        # 那一刻之后同一台盘又该被一拖一挡住。
         st0, body0 = _offline_claim(hub, C_OTHER, "w-b")
         assert st0 == 200 and body0.get("lease"), body0
         rel = _http(
@@ -1015,12 +946,13 @@ def test_export_window_owner_death_reopens_the_course(tmp_path: Path) -> None:
             method="POST",
         )
         assert rel[0] == 200, rel[1]
-        # 同一门课：可重触发（不是 busy，也不是 give_up）
+        # 同一门课：软态超窗 ⇒ 新一轮（换主 ⇒ 触发账本重置 ⇒ 可重触发）
         st, body = _offline_claim(hub, C_AUTO, "w-b")
         assert st == 409, body
         assert body.get("pending_export") is True, body
         assert body.get("busy") is not True, body
         assert body.get("give_up") is not True, body
+        assert body.get("triggered") is True, body
     finally:
         hub.close()
         console.close()
@@ -1064,20 +996,19 @@ def test_export_window_new_owner_resets_the_trigger_budget(tmp_path: Path) -> No
         console.close()
 
 
-# ──────── T7（报障一+二）：全循环 —— 在线 → A 接手 → A 死 → B 接管 → 人切在线 → 交还自动 → C 再抢 ────────
+# ──────── T7（报障一+二）：全循环 —— 无主 → A 接手 → A 死 → B 接管 → 人强制解除 → C 再抢 ────────
 
 
-def test_full_cycle_offline_then_online_then_offline(tmp_path: Path) -> None:
-    """一条课穿过全部归属档，每次转移断言 `mode/authority/lease/holder`；末尾账本无假 `run_complete`。
+def test_full_cycle_hold_takeover_revoked_and_reclaim(tmp_path: Path) -> None:
+    """一条课穿过接管的全生命周期，每次转移断言 `hold/lease/holder`；末尾账本无假 `run_complete`。
 
-    链（真 hub 子进程 + 真 HTTP）：
-      ① 在线（auto）：清单可抢（seize=true）
-      ② A claim ⇒ 200 租约 + mode 翻 offline + holder=w-a
-      ③ A 死（停跳）⇒ 静默超阈 ⇒ B 静态接管（`reclaimed_from=w-a`）；A 旧 token 心跳 409
-      ④ 人切「固定在线」⇒ B 租约成**墓碑**（心跳 409 revoked）；行锁住（pinned_online、claimable/seize=false）
-      ⑤ 交还自动 ⇒ 回 auto 池（seize=true）
-      ⑥ C 再抢走 ⇒ 200 + mode 再翻 offline（报障一的「切回切走」全程可重复）
-      ⑦ 账本无假 `run_complete`（假收官只在训练侧；hub 永不代替它写）
+    链（真 hub 子进程 + 真 HTTP；★M4b：旧版的 mode/authority/pinned 三档随模式退役）：
+      ① 在训无主：清单可领（`claimable=true`、`hold={}`）
+      ② A claim（有包）⇒ 200 + `hold=w-a`（包到手才有 hold，Q1）
+      ③ A 死（进度停跳）⇒ 静默超阈 ⇒ B 自动接管（`reclaimed_from=w-a`）；A 旧 token 心跳 409
+      ④ 人点「强制解除接管」⇒ B 租约成**墓碑**（心跳 409 revoked）；行 `held-revoked`、可被新主接
+      ⑤ C 再抢走 ⇒ 200 + `hold=w-c`（报障一的「切回切走」全程可重复）
+      ⑥ 账本无假 `run_complete`（假收官只在训练侧；hub 永不代替它写）
     """
     traj = tmp_path / "traj"
     _course_dirs(traj, C_AUTO)
@@ -1085,20 +1016,16 @@ def test_full_cycle_offline_then_online_then_offline(tmp_path: Path) -> None:
     hub = _Hub(traj, hold_stale_sec=2.0)
     try:
         hub.ready(expect=[C_AUTO])
-        # ① 在线（auto）：可抢
-        st, tasks = _http(hub.base, OFFLINE_TASKS_PATH)
-        assert st == 200, tasks
-        row = _task_row(tasks, C_AUTO)
-        assert row["authority"] == "auto" and row["seize"] is True, row
+        # ① 在训无主：可领
+        row0 = _task_row(_http(hub.base, OFFLINE_TASKS_PATH)[1], C_AUTO)
+        assert row0["claimable"] is True and row0["hold"] == {}, row0
 
-        # ② A 接手（claim 翻 offline）
+        # ② A 接手（包到手 ⇒ hold 建立）
         st1, body1 = _offline_claim(hub, C_AUTO, "w-a")
         assert st1 == 200 and body1.get("lease"), body1
         tok_a = str(body1["lease"]["token"])
-        assert _mode_of(hub, C_AUTO) == "offline"
-        assert _task_row(_http(hub.base, OFFLINE_TASKS_PATH)[1], C_AUTO)["holder"][
-            "worker_id"
-        ] == "w-a"
+        row1 = _task_row(_http(hub.base, OFFLINE_TASKS_PATH)[1], C_AUTO)
+        assert row1["holder"]["worker_id"] == "w-a" and row1["claimable"] is False, row1
 
         # ③ A 死 ⇒ 静默超阈 ⇒ B 静态接管（T3 链）
         def _row() -> dict:
@@ -1118,11 +1045,11 @@ def test_full_cycle_offline_then_online_then_offline(tmp_path: Path) -> None:
         )
         assert st_a == 409
 
-        # ④ 人切「固定在线」⇒ B 租约墓碑；心跳 409 revoked；行锁住
+        # ④ 人点「强制解除接管」⇒ 墓碑；心跳 409 revoked；行 held-revoked（可接）
         st3, body3 = _http(
-            hub.base, f"/admin/courses?course={C_AUTO}&mode=online&pin=1", method="POST"
+            hub.base, f"/admin/courses?course={C_AUTO}&release_hold=1", method="POST"
         )
-        assert st3 == 200, body3
+        assert st3 == 200 and body3.get("released") is True, body3
         leases = _admin_offline(hub).get("leases") or {}
         assert leases.get(C_AUTO, {}).get("revoked") is True, leases
         st_b, body_b = _http(
@@ -1130,30 +1057,17 @@ def test_full_cycle_offline_then_online_then_offline(tmp_path: Path) -> None:
         )
         assert st_b == 409 and body_b.get("revoked") is True, body_b
         row4 = _task_row(_http(hub.base, OFFLINE_TASKS_PATH)[1], C_AUTO)
-        assert row4["authority"] == "pinned_online", row4
-        assert row4["claimable"] is False and row4["seize"] is False, row4
-        assert str(row4["reason"]).startswith("pinned:"), row4
-        assert _mode_of(hub, C_AUTO) == "online"
-        # 锁住期间：claim 409 `pinned_online`（离线盘抢不走）
-        st_pin, body_pin = _offline_claim(hub, C_AUTO, "w-c")
-        assert st_pin == 409 and body_pin.get("pinned_online") is True, body_pin
+        assert row4["claimable"] is True and row4["hold"] == {}, row4
+        assert str(row4["reason"]).startswith("held-revoked"), row4
 
-        # ⑤ 交还自动 ⇒ 回 auto 池（可抢）
-        st5, body5 = _http(
-            hub.base, f"/admin/courses?course={C_AUTO}&mode=online&pin=0", method="POST"
-        )
-        assert st5 == 200, body5
-        row5 = _task_row(_http(hub.base, OFFLINE_TASKS_PATH)[1], C_AUTO)
-        assert row5["authority"] == "auto" and row5["seize"] is True, row5
-
-        # ⑥ C 再抢走：claim 200 + mode 再翻 offline
+        # ⑤ C 再抢走（同一门课可反复接管）
         st6, body6 = _offline_claim(hub, C_AUTO, "w-c")
         assert st6 == 200 and body6.get("lease"), body6
-        assert _mode_of(hub, C_AUTO) == "offline"
         row6 = _task_row(_http(hub.base, OFFLINE_TASKS_PATH)[1], C_AUTO)
         assert row6["holder"]["worker_id"] == "w-c", row6
+        assert row6["claimable"] is False, row6
 
-        # ⑦ 账本无假 `run_complete`（事件名级断言，不是子串巧合）
+        # ⑥ 账本无假 `run_complete`（事件名级断言，不是子串巧合）
         ledger = (traj / C_AUTO / "training_log.jsonl").read_text(encoding="utf-8")
         events = [json.loads(ln).get("event") for ln in ledger.splitlines() if ln.strip()]
         assert "run_complete" not in events, events
@@ -1178,13 +1092,7 @@ def test_hub_restart_keeps_a_discovered_hold_out_of_the_queue(tmp_path: Path) ->
     now = time.time()
     rec = {
         "v": 2,
-        "mode": "online",
-        "pinned": False,
-        "claimed_offline": False,
-        "claimed_by": "",
-        "claimed_at": 0.0,
-        "flipped_at": 0.0,
-        "updated_at": 0.0,
+        "updated_at": now,
         "completed_pack_sha": "",
         "hold": {
             "worker_id": "cloud-1",

@@ -1,14 +1,14 @@
-"""tests/hub/test_hold.py — 接管（hold）判据 + `offline-dispatch.json` v2 双写（M1a）。
+"""tests/hub/test_hold.py — 接管（hold）判据 + `offline-dispatch.json` v2（M1a/M4b）。
 
 `plan/worker-type-dispatch-model.plan.md` §3-M1a（2026-10-07 起并入评审
-`plan/worker-type-dispatch-model.review-bf.md` 的 F2/F8）。这一刀**只加判据与写入面**，
-旧语义（mode/pinned/claimed_*）一字不动：
+`plan/worker-type-dispatch-model.review-bf.md` 的 F2/F8）。★M4b：旧语义
+（mode/pinned/claimed_*）已随「课程无模式」删除 —— 盘上旧键**读到即忽略**，写出只剩 v2 形状：
 
   * **纯判据**（住叶子 `hub/task_pack.py`，与 `lease_verdict` 同域）：`hold_progress_stale_sec()`
     · `hold_progress_at()` · `hold_state()`（只认进度，零进度 = stale）· `hold_restore_grace()`
     · `hold_expires_in()`（= min(进度余量, TTL 余量)）；
-  * **落盘 v2**：`{v:2, …, hold:{worker_id,token,at,last_progress_at,touch_at},
-    pending_export:{by,at}}` **与旧字段并存**（双写；读侧仍收 v1 形状，旧读方零变化）；
+  * **落盘 v2**：`{v:2, completed_pack_sha, hold:{worker_id,token,at,last_progress_at,touch_at},
+    pending_export:{by,at}, updated_at}`（读侧照样收 v1 形状）；
   * **`note_progress` 落盘节流 ≥60s**（内存每拍更新）——hub 重启最多丢 60s 龄，由恢复宽限吸收；
   * **恢复宽限**：盘上恢复的 hold 把 `last_progress_at`/`touch_at` 抬到 `now-300s` + 一行
     `hold-restored`（防「刚重启就把活着的 worker 判掉线」）；
@@ -141,13 +141,16 @@ def test_hold_expires_in_is_min_of_progress_and_ttl_remainder() -> None:
 
 
 def test_dispatch_record_merge_reads_v1_and_normalizes_hold_shapes() -> None:
-    """读侧 tolerate 到底：v1 文件（没有新键）照读；垃圾 hold 不造幽灵接管。"""
-    v1 = dispatch_record_merge({"v": 1, "mode": "offline", "claimed_by": "w1"}, "online")
+    """读侧 tolerate 到底：v1 文件（没有新键）照读；垃圾 hold 不造幽灵接管。
+
+    ★M4b：v1/v2 盘上的 mode/pinned/claimed_* 旧键**读到即忽略**（不再进结果、不报错）。
+    """
+    v1 = dispatch_record_merge({"v": 1, "mode": "offline", "claimed_by": "w1"})
     assert v1["hold"] == {} and v1["pending_export"] == {}
-    assert v1["mode"] == "offline" and v1["claimed_by"] == "w1"
-    assert dispatch_record_default("offline")["v"] == DISPATCH_VERSION == 2
-    assert dispatch_record_merge(None, "offline") == dispatch_record_default("offline")
-    junk = dispatch_record_merge({"hold": "x", "pending_export": [1]}, "online")
+    assert "mode" not in v1 and "claimed_by" not in v1 and "pinned" not in v1
+    assert dispatch_record_default()["v"] == DISPATCH_VERSION == 2
+    assert dispatch_record_merge(None) == dispatch_record_default()
+    junk = dispatch_record_merge({"hold": "x", "pending_export": [1]})
     assert junk["hold"] == {} and junk["pending_export"] == {}
     # 全空字段的 hold 记录 = 没有 hold（不让一个坏 dict 变成「有人持有」）
     assert hold_record_merge({"worker_id": "", "at": 0}) == {}
@@ -169,10 +172,8 @@ def test_dispatch_record_merge_reads_v1_and_normalizes_hold_shapes() -> None:
 # ------------------------------------------------------------------ 写入 / 读数
 
 
-def test_note_hold_writes_v2_keeps_old_fields_and_clears_pending_export(
-    tmp_path: Path,
-) -> None:
-    """双写：新键落盘 + 旧键一个不少（旧读方零变化）；hold 建立 = 包到手 ⇒ 清软态。"""
+def test_note_hold_writes_v2_and_clears_pending_export(tmp_path: Path) -> None:
+    """hold 建立 = 包到手 ⇒ 清软态；落盘是**纯 v2 形状**（★M4b：旧 mode 键一个不写）。"""
     clock = [1000.0]
     hub = _hub(tmp_path, clock)
     _course(tmp_path, hub)
@@ -182,23 +183,15 @@ def test_note_hold_writes_v2_keeps_old_fields_and_clears_pending_export(
     hub.note_hold(COURSE, worker_id="w1", token="tok-a")
     disk = _disk(tmp_path)
     assert disk["v"] == DISPATCH_VERSION == 2
+    assert set(disk) == {"v", "completed_pack_sha", "hold", "pending_export", "updated_at"}
     assert disk["hold"]["worker_id"] == "w1" and disk["hold"]["token"] == "tok-a"
     assert disk["hold"]["at"] == 1000.0
     assert disk["hold"]["last_progress_at"] == 1000.0  # claim 本身是第一个进度锚
     assert disk["hold"]["touch_at"] == 1000.0
     assert disk["pending_export"] == {} and hub.pending_export_of(COURSE) == {}
-    # ★ 旧字段并存（旧读者零变化）
-    for key in ("mode", "pinned", "claimed_offline", "claimed_by", "claimed_at", "flipped_at"):
-        assert key in disk, key
-    assert hub.pinned_of(COURSE) is False
-    assert hub.dispatch_effective_mode(COURSE, "online") == "online"
     hold = hub.hold_of(COURSE)
     assert hold["state"] == "live" and hold["worker_id"] == "w1"
     assert hold["expires_in"] == 900.0
-    # 旧写者（claim 记账）不会把新键抹掉
-    hub.note_claim(COURSE, "w1")
-    again = _disk(tmp_path)
-    assert again["hold"]["token"] == "tok-a" and again["claimed_by"] == "w1"
 
 
 def test_note_progress_throttles_disk_writes_but_keeps_memory_fresh(tmp_path: Path) -> None:
@@ -282,7 +275,7 @@ def test_pending_export_anchor_is_first_write_and_only_a_new_exporter_resets_it(
 ) -> None:
     """★M1b：导包意向的 `at` **首写为准**（同一位重复 claim/轮询不刷新）——它是停滞告警的锚点。
 
-    为什么必须钉：云机在等包时会**反复** claim（`begin_auto_handoff` 每拍都跑）。若每次
+    为什么必须钉：云机在等包时会**反复** claim（`begin_pending_export` 每拍都跑）。若每次
     claim 都把 `at` 推到现在，「已翻 offline 却没人跑」永远算「刚刚才说」⇒ T8 的告警在
     这正是最需要它的时候脑死。换主 ⇒ 新一轮导包，重新计时。
     """

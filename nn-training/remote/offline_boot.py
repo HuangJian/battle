@@ -58,7 +58,6 @@ import hashlib
 import importlib
 import io
 import json
-import math
 import os
 import re
 import sys
@@ -1421,15 +1420,16 @@ def claim_course(
     无包 claim 的 409 当成「被别人持有」，于是没有租约就进入 run、干等 30 分钟再整会话
     `SystemExit`，busy 闸/stalled 告警全被绕开）：
 
-      · `pending_export`：hub 已把课翻成离线、正在等控制台导包（分钟级）⇒ 本拍**不跑**，
+      · `pending_export`：hub 已记下导包意向（`pending_export`）、正在等控制台导包（分钟级）⇒ 本拍**不跑**，
         过一会儿再问；
       · `busy`：另一门课正在跑（U2 一拖一，闸在 hub 侧）⇒ 本拍**不跑**，等它 release；
       · `completed`：当前包已跑满（U6）⇒ 本拍**不跑**（重导包后 sha 变会自动解封）；
       · `not_offline`：这门课不在训练中（停课）⇒ 本拍**不跑**；
       · `give_up`：hub 触发导包已到上界 ⇒ **本会话放弃这门课**（三条出路留给人：TPU 重连 /
-        手工导入结果包 / 手工切回在线）；
-      · `held`：被别人持有 —— **照旧跑**（历史口径：租约是排他与观测，不是训练前置；
-        重复的那份由回传首写幂等丢弃）；
+        手工导入结果包 / 到控制台重导任务包）；
+      · `held`（★M1b / P0-4 后半，行为变更）：被别人 **live hold** 占据 ⇒ **本拍不跑，换下一门**
+        （旧口径「照旧跑」= 同一份活两处跑；重复的那份由回传首写幂等丢弃）；
+      · `proto`：对面 hub 嫌本端旧（Q4）⇒ 本拍不跑，刷新 notebook 后重开会话；
       · `no_pack`（404，人管课缺包）/ `net`（连不上）：照旧跑（训练永不因网络停摆；
         缺包由 `PackUnavailableError` 响亮收场）。
     """
@@ -1456,10 +1456,10 @@ def claim_course(
             if doc.get("give_up"):
                 log(
                     "hub 触发导包已到上界 —— 本会话放弃这门课（三条出路：TPU 重连 / "
-                    "手工导入结果包 / 手工切回在线）"
+                    "手工导入结果包 / 到控制台重导任务包）"
                 )
                 return "", "give_up"
-            log("这门课已翻成离线、任务包正在生成（导包约需数分钟）——本拍不跑，稍后再问")
+            log("这门课正在导包（hub 已记下 pending_export，导包约需数分钟）——本拍不跑，稍后再问")
             return "", "pending_export"
         if doc.get("busy"):
             log(f"别的课正在跑（一拖一）：{doc.get('error') or 'busy'}——本拍不跑，稍后再问")
@@ -1470,11 +1470,8 @@ def claim_course(
         if doc.get("not_offline"):
             log("这门课不在训练中（停课 ⇒ 不是自动候选）——本拍不跑")
             return "", "not_offline"
-        if doc.get("pinned_online"):
-            # ★P1-4 / 六轮 F6：人把课固定在在线（§4.2 半回摆）——离线盘不抢；
-            # 到控制台点「交还自动」后它会回到 seize 候选。
-            log("这门课由人固定在在线（离线盘不抢）——本拍不跑；到控制台点「交还自动」后才可领")
-            return "", "pinned_online"
+        # ★M4b：旧的 `pinned_online`（人固定在在线）随模式退役 —— hub 不会再发这一档；
+        # 万一对面是旧 hub，它会落到下面这条「有主」腿（保守不跑，不双跑）。
         holder = doc.get("holder") or {}
         left = float(holder.get("expires_in") or 0.0)
         # ★M1b / P0-4 后半（行为变更）：`held` 从「照旧跑」改成**本拍不跑，换下一门**。
@@ -1520,12 +1517,12 @@ def heartbeat_loop(
                 continue
             if code == 409:
                 if doc.get("revoked"):
-                    # ★P1-4（plan §3.3）：人把课切回在线/交还自动了——**停止再领**，当前段在
-                    # 下一个轮边界收尾并打包（旧 worker 照旧跑完，兼容降级）。
-                    # 为什么在此处置事件：心跳线程是唯一知道「课被切回在线」的地方，而
+                    # ★M1b / M4b：人强制解除了接管（`/admin/courses?release_hold=1`）——**停止再领**，
+                    # 当前段在下一个轮边界收尾并打包（旧 worker 照旧跑完，兼容降级）。
+                    # 为什么在此处置事件：心跳线程是唯一知道「接管被强制解除」的地方，而
                     # `run_loop` 的轮边界读的就是这个停止信号（不能杀正在算的那一轮）。
                     log(
-                        "⚠ 租约已被撤销（人把课切回在线/交还自动）——停止再领本课；"
+                        "⚠ 租约已被撤销（人强制解除了接管）——停止再领本课；"
                         "当前段在下一个轮边界收尾并打包（回传可能被判 duplicate 丢弃）"
                     )
                     done.set()
@@ -1585,7 +1582,7 @@ def install_progress_pinger(
 
     返回的 `detach()` 撤销注册，并给出**本段的租约结局**（空串 = 一切正常）：
 
-      · `"revoked"`（409）：租约被撤销（人把课切回在线/交还自动）⇒ 调用方**别再领这一课**
+      · `"revoked"`（409）：租约被撤销（人强制解除了接管）⇒ 调用方**别再领这一课**
         （当前段照常跑完并打包）；
       · `"expired"` / `"taken"`（409）：租约过期 / 已被别人接管 ⇒ 跑完当前段并打包，停打点
         （继续 ping 只会每 `interval` 秒刷一行 409）；
@@ -1622,7 +1619,7 @@ def install_progress_pinger(
             state["outcome"] = why
             log(
                 {
-                    "revoked": "⚠ 打点被拒：租约已被撤销（人把课切回在线/交还自动）——"
+                    "revoked": "⚠ 打点被拒：租约已被撤销（人强制解除了接管）——"
                     "本段跑完即打包，本会话不再领这一课",
                     "expired": "⚠ 打点被拒：租约已过期——本段继续跑完并打包"
                     "（回传可能被判 duplicate 丢弃）",
@@ -1709,19 +1706,17 @@ def resolve_courses(
     **同名不同物**，别接错线。`picks` 非空时它恒为空表。
 
     `CFG.course` 非空 ⇒ 老行为（顺序/校验一字不改），`pack_sha256` 空。
-    空 ⇒ 向 hub 问清单，**两层选择**（★ 2026-10-03 用户裁决，逐字：「不管什么时候上线接活，
-    优先取当时就绪的离线课程；如果没有离线课程但是有在线课程在训练，则抢占第一个在线课程，
-    hub 将其改为离线」）：
+    空 ⇒ 向 hub 问清单，**一层选择**（★M4b：课程无模式 ⇒「离线课」与「在线课」不再可区分，
+    旧口径的「离线优先、没有就抢第一个在训在线课」两条腿塌成一条：no-hold 的课一律可领）：
 
-      ① **离线可领优先**（`claimable` ∧ ¬`seize`）⇒ 整批取（保持既有口径，含无包自动课）；
-      ② 没有就绪的离线课 ⇒ 从 `seize` 行（在线在训）里取 `open_time` 最小的**一门**抢占
-         （tie 用课名；hub 的 claim 会把它翻成离线）。
+      ① `claimable` 的行整批取（含无包课：它的 claim 会触发导包、回来 409 `pending_export`）；
+      ② `pending_export` 的排最后（软态不占闸，但 claim 必然 409 ⇒ 别让注定失败的 claim 排队首）；
+      ③ 都没有、而某几行是**自己的**租约 ⇒ 照领（claim 续上，不必等 900s 过期）。
 
-    两路共用同一套过滤：本会话已跑过的包（防自激：同一份包跑两次 = `run_id` 相同 ⇒ 回传全判
+    共用同一套过滤：本会话已跑过的包（防自激：同一份包跑两次 = `run_id` 相同 ⇒ 回传全判
     duplicate ⇒ 看起来在跑、实际零产出）与 `skip`（本会话已放弃的课）。
     `probe` 是调用方持有的小字典（`{"unsupported": True}`）：老 hub 只探测**一次**，
-    之后不再每轮刷一个必然失败的端点。**老 hub 降级**：清单没有 `seize` 字段 ⇒ 行票全按
-    「离线」算，退回旧口径（与升级前逐字相同）。
+    之后不再每轮刷一个必然失败的端点。
     """
     explicit = _load_deliverable().requested_courses(cfg)
     if explicit:
@@ -1761,9 +1756,7 @@ def resolve_courses(
         sha = str(pack_doc.get("sha256") or "") if isinstance(pack_doc, dict) else ""
         return {"course": str(t.get("course") or ""), "pack_sha256": sha}
 
-    claimable_rows = [
-        t for t in tasks if t.get("claimable") and not t.get("seize") and _eligible(t)
-    ]
+    claimable_rows = [t for t in tasks if t.get("claimable") and _eligible(t)]
     # ★M3：**导包软态（`pending_export`）排到最后**——`pending_export` 不占闸（Q1），所以行
     # 照样 `claimable`，但它的 claim 必然 409（包还没造出来）：排后面 = 先把能跑的挑完，
     # `_run_batch` 走到它时记一笔 blocker 就换下一门（不让一次注定失败的 claim 排在队首）。
@@ -1782,15 +1775,10 @@ def resolve_courses(
         return picked, [], tasks
     # ★ 2026-10-04 现场（Kaggle「清单 3 条 ⇒ 队列为空」，用户：「colab 已停机、也切过模式，
     #   为什么还持有租约？」）：租约只有在**显式 release / 900s TTL 到期 / hub 重启**时才消失，
-    #   切模式与停课都不动它。而 hub 早就为此分了一档 `lease_verdict == "mine"`（同一 worker_id
-    #   重领直接续上，评审 G1）——但**清单行的 `claimable` 把任何持有者（包括自己）一律排除**，
-    #   这一档到不了现场 ⇒ 自己把自己锁到 TTL 过期（Kaggle 十几分钟的会话就废在这一等上）。
+    #   而**清单行的 `claimable` 把任何持有者（包括自己）一律排除**，这一档到不了现场 ⇒
+    #   自己把自己锁到 TTL 过期（Kaggle 十几分钟的会话就废在这一等上）。
     #   这里补上：没有可领的课、而某几行是**我自己**的租约 ⇒ 照领（claim 会续上）。
-    mine = [
-        t
-        for t in tasks
-        if worker and _holder_id(t) == worker and not t.get("seize") and _eligible(t)
-    ]
+    mine = [t for t in tasks if worker and _holder_id(t) == worker and _eligible(t)]
     if mine:
         log(
             "续领自己未交还的租约："
@@ -1798,9 +1786,9 @@ def resolve_courses(
             + "（hub 判 mine ⇒ claim 直接续上，不必等 900s 过期）"
         )
         return [_as_pick(t) for t in mine], [], tasks
-    # 没有就绪的离线课 ⇒ 抢占第一个在训在线课。busy 的行**照收**：claim 会回 409 `busy`，
-    # 调用方按「中间态不占 idle 预算」等到别的课跑完（比「空队列」更准确）。
-    # ★P1-9（R3-g）：被**别人**的有效租约持有的行——带回给调用方（退避再问、不占 idle 预算）。
+    # busy 的行**照收**：claim 会回 409 `busy`，调用方按「中间态不占 idle 预算」等到
+    # 别的课跑完（比「空队列」更准确）。★P1-9（R3-g）：被**别人**的有效租约持有的行——带回
+    # 给调用方（退避再问、不占 idle 预算）。
     blocked = [
         {
             "course": str(t.get("course") or ""),
@@ -1808,34 +1796,16 @@ def resolve_courses(
             "expires_in": _holder_left(t),
         }
         for t in tasks
-        if _holder_id(t)
-        and _holder_id(t) != worker
-        and not t.get("seize")
-        and _eligible(t)
+        if _holder_id(t) and _holder_id(t) != worker and _eligible(t)
     ]
-    seized = [t for t in tasks if t.get("seize") and _eligible(t)]
-    if not seized:
-        # ★ 2026-10-04 现场（Kaggle：「hub 清单：3 条」接着「队列为空」，看不出为什么）：
-        #   不可领的原因**就在 hub 行的 `state`/`reason`/`holder` 里**（not_offline=停课 /
-        #   held=有主 / completed=本段跑满 / busy / 无任务包 / 包过期），不打印就等于把排查
-        #   推给人工去 curl `/offline/tasks`。这里逐行报出——空队列从此自解释。
-        wait_rows = [t for t in tasks if not t.get("claimable") and not t.get("seize")]
-        if wait_rows:
-            log("不可领/不可抢：" + "、".join(f"{_blocked_note(t)}" for t in wait_rows))
-        return [], blocked, tasks
-
-    def _open_key(t: dict) -> tuple[float, str]:
-        raw = t.get("open_time")
-        # 缺字段（老 hub）/ 形状不对 ⇒ +inf 排最后，不猜（hub 的哨兵方向同义）。
-        when = float(raw) if isinstance(raw, (int, float)) else math.inf
-        return (when, str(t.get("course") or ""))
-
-    first = min(seized, key=_open_key)
-    log(
-        f"没有就绪的离线课 ⇒ 抢占第一个在训在线课：{first['course']}"
-        "（hub 将把它翻成离线）"
-    )
-    return [_as_pick(first)], [], tasks
+    # ★ 2026-10-04 现场（Kaggle：「hub 清单：3 条」接着「队列为空」，看不出为什么）：
+    #   不可领的原因**就在 hub 行的 `state`/`reason`/`holder` 里**（not_offline=停课 /
+    #   held=有主 / completed=本段跑满 / busy / 无任务包 / 包过期），不打印就等于把排查
+    #   推给人工去 curl `/offline/tasks`。这里逐行报出——空队列从此自解释。
+    wait_rows = [t for t in tasks if not t.get("claimable")]
+    if wait_rows:
+        log("不可领：" + "、".join(f"{_blocked_note(t)}" for t in wait_rows))
+    return [], blocked, tasks
 
 
 def _holder_id(t: dict) -> str:
@@ -1861,9 +1831,6 @@ def _blocked_note(t: dict) -> str:
     「为什么还持有租约、还要等多久」——这个数字就是答案（切模式/停课都不会清租约）。
     """
     bits = [str(t.get("state") or "?")]
-    authority = str(t.get("authority") or "")
-    if authority:
-        bits.append(f"authority={authority}")
     reason = str(t.get("reason") or "")
     if reason:
         bits.append(reason)
@@ -1981,7 +1948,7 @@ def _run_batch(
     # 自动交接的两个「不跑」名单（§3.1a/§3.3a）：中间态（等下一拍）与会话放弃。
     blockers: dict[str, str] = {}
     gave_up: list[str] = []
-    # ★M3：打点层报回「租约被撤销」（人把课切回在线/交还自动）的课——本会话不再领它
+    # ★M3：打点层报回「租约被撤销」（人强制解除了接管）的课——本会话不再领它
     # （段已跑完并打包；hub 也已经不收它了）。
     revoked: list[str] = []
     ran = 0
@@ -2161,7 +2128,7 @@ def _run_auto(
             )
             rc = batch_rc or rc
             gave_up.update(leases.get("gave_up") or [])
-            # ★M3：租约在段内被撤销的课（人切回在线/交还自动）——本会话不再领它（段已跑完
+            # ★M3：租约在段内被撤销的课（人强制解除接管）——本会话不再领它（段已跑完
             # 并打包）。与 `gave_up`（hub 触发导包到上界）同一处理，只是原因不同。
             revoked_now = leases.get("revoked")
             if revoked_now:

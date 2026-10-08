@@ -29,7 +29,6 @@ if str(ROOT) not in sys.path:
 import remote.job_lifecycle as jl_mod
 import remote.worker as worker_mod
 from common.protocol import (
-    COURSE_MODE_ONLINE,
     collision_rows,
     idempotency_key,
     normalize_manifest,
@@ -246,11 +245,7 @@ def _hub(tmp_path: Path, courses: tuple[str, ...] = ("a", "b")) -> _HubQueue:
         c: _JobStore(tmp_path / c / "remote-jobs", tmp_path / c / "training_log.jsonl")
         for c in courses
     }
-    return _HubQueue(
-        stores,
-        order=list(courses),
-        modes={c: COURSE_MODE_ONLINE for c in courses},
-    )
+    return _HubQueue(stores, order=list(courses))
 
 
 def _publish_store(hub: _HubQueue, course: str, jid: str, *, course_fp: str = "8" * 64) -> None:

@@ -15,8 +15,8 @@
 
 覆盖三条只有**跨进程**才暴露的接线（单进程单测各自绿、接起来却断的那种）：
   ① 课程表发现 → 轮转派发 → 结果路由回**本课**目录（串课 = 权重写错课程）；
-  ② 离线课（`POST /admin/courses?mode=offline` 真热切）不实时派发、且切回在线后同一份
-     job 仍在队首被推走（用户口径「离线课不实时派发、已分派任务回落队首等 worker」）；
+  ② 被自主 worker 接管的课（真 `POST /offline/claim` 取 hold）不实时派发，交还后同一份
+     job 仍在队首被推走（★M4b：旧口径的「切离线/切回在线」已随模式退役，判据换成 hold）；
   ③ 训练侧的 job 身份（幂等键/账本行）与 hub 的认领判据（`manifest.dispatch`）用同一个字面量。
 
 纪律：不 spawn bun/node、不加载 torch（假 PPO）；HTTP 全在本机临时端口。
@@ -247,13 +247,6 @@ class _Hub:
         disp = body.get("dispatcher")
         assert isinstance(disp, dict), body
         return disp
-
-    def set_mode(self, course: str, mode: str) -> dict:
-        st, body = _http(
-            self.base, f"/admin/courses?course={course}&mode={mode}", method="POST"
-        )
-        assert st == 200, f"/admin/courses 热切失败：{st} {body}"
-        return body
 
     def take_hold(self, course: str, worker: str = "cloud-1") -> str:
         """走真端点领这门课的接管租约（→ token），并把接管带进派发闸（★M1b/Q5）。"""

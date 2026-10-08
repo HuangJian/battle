@@ -148,10 +148,11 @@ class OfflineRoundsMixin:
     def store_offline_artifact(self, body: dict, *, advance_active: bool = True) -> dict:
         """落一轮补传产物，返回 {"status": "accepted"|"duplicate", "it": n, "run_id": r}。
 
-        `advance_active=False`（★P1-7 / R3-f）= 调用方已知该课现在归 `pinned_online`
-        （人切了固定在线）⇒ 这轮回传**不得推进活动权重**（`weights.json`）：旧云机跑完的轮
-        不是「当前进度」，把人切在线后的起点拉回旧轮是报障一的另一半。镜像/归档照落
-        （它们是「算过什么」的证据，不是「现在在哪」的声明）。
+        `advance_active=False`（★P1-7 / R3-f）⇒ 这轮回传**不得推进活动权重**
+        （`weights.json`）：旧主（hold 已 stale）或没带对 token 的迟到回传，其终点不是
+        「当前进度」，把它拉回旧轮就是报障一的另一半。判据在 `offline_advance_ok`
+        （★M4b：旧口径的 `pinned_online` 随模式退役）。镜像/归档照落（它们是「算过什么」
+        的证据，不是「现在在哪」的声明）。
 
         校验（任一不过抛 ProtocolError → 400，且**不落盘任何东西**）：
           * `run_id` 合法（目录名的唯一防护面）；

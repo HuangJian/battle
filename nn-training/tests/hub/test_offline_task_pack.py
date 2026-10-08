@@ -117,32 +117,25 @@ def test_task_pack_missing_is_actionable_404(tmp_path: Path) -> None:
     assert body["known_courses"] == ["c5-gae"]
 
 
-def test_task_pack_online_course_is_409_even_when_the_pack_lives_on_disk(tmp_path: Path) -> None:
-    """★ mode 门（2026-09-25，plan/online-offline-role-routing §2.4）：包在盘上 ≠ 该发给你。
+def test_task_pack_in_training_course_is_served_when_not_held(tmp_path: Path) -> None:
+    """★M4b：包在盘上且**无 live hold** ⇒ 照发（模式门随「课程无模式」删除）。
 
-    现场：切离线时控制台会自动导出 `task-<课>.zip`，而且「已有包不动」⇒ **切回在线后那个包
-    还在**。本端点原来不查 mode ⇒ 离线盘能把一门**在线**课取走并自己跑整段（L6）。
-    判据用 409 而不是 404：包在、没丢，正确动作是「去控制台切回离线」，404 会把人引向
-    「再导一次」（越导越乱）。
+    旧行为（2026-09-25 L6）是 409「先到控制台切离线」；新模型里取包面只有两道闸：
+    ① live hold 的 lease 门（见 `test_live_hold_requires_the_lease_token...`，住
+    `test_auto_handoff.py` 的迁入版）② 新鲜度门。**停课也不在这条腿上拦**（F3 定死：
+    正在跑的会话被停课后仍要能重取包）。
     """
-    payload = b"PK\x03\x04" + b"stale-but-present" * 8
+    payload = b"PK\x03\x04" + b"served-regardless" * 8
     _write_pack(tmp_path, "c5-gae", payload)
     (tmp_path / "c5-gae" / "remote-jobs").mkdir(parents=True, exist_ok=True)
     (tmp_path / "c5-gae" / "training_log.jsonl").touch()
     (tmp_path / "c5-gae" / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
     base, hub, _srv = _boot(tmp_path)
     hub.discover()
-    assert hub.courses() == ["c5-gae"] and hub.mode_of("c5-gae") != "offline"
+    assert hub.courses() == ["c5-gae"] and hub.course_open("c5-gae") is True
 
     st, raw, _h = _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
-    body = _as_json(raw)
-    assert st == 409, body
-    assert raw != payload, "拦住就不能把包发出去"
-    assert body["mode"] != "offline" and "online" in body["error"]
-    # 反面：同一份包、同一门课，切成离线后照发（证明上面拦的是归属而不是「文件没了」）
-    assert hub.set_mode("c5-gae", "offline") is True
-    st2, raw2, _h2 = _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
-    assert st2 == 200 and raw2 == payload
+    assert st == 200 and raw == payload
 
 
 def test_task_pack_cold_course_still_served(tmp_path: Path) -> None:
@@ -459,24 +452,25 @@ def test_role_header_name_is_shared_with_workers() -> None:
 # 只管「过期」；缺包连门都不进。现在 hub 替这门课推一次控制台重导（带节流 + 上界）。
 #
 # 候选面的判据（评审 S-1）：**盘上的事实优先于「hub 扫到了没有」**。课程表是「1 小时新鲜度
-# 扫描」的产物，而离线课本机不训练 ⇒ 冷掉/重启后它就从表里消失；只认表会在最需要自愈的
-# 场景里静默无作为。所以：表里明确 online ⇒ 不导（配置误会）；否则盘上有开课标记就算数。
+# 扫描」的产物，而自主课本机不训练 ⇒ 冷掉/重启后它就从表里消失；只认表会在最需要自愈的
+# 场景里静默无作为。所以：盘上有开课标记就算数；表里有它但读不到标记（单课程裸 job_root 等）
+# 也不误杀。★M4b：旧的「表里明确 online ⇒ 不导」一条随模式删除。
 
 
-def _offline_course(tmp_path: Path, hub: _HubQueue, course: str = "c5-gae") -> None:
-    """造一门「hub 认为是离线」的课：目录 + 开课标记 + 账本 + `mode=offline`。"""
+def _training_course(tmp_path: Path, hub: _HubQueue, course: str = "c5-gae") -> None:
+    """造一门在训课：目录 + 开课标记 + 账本（★M4b：不再需要翻任何模式）。"""
     (tmp_path / course / "remote-jobs").mkdir(parents=True)
     (tmp_path / course / "training_log.jsonl").touch()
     (tmp_path / course / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
     hub.discover(force=True)
-    assert hub.set_mode(course, "offline") is True
+    assert hub.course_open(course) is True
 
 
 def test_missing_pack_triggers_one_rebuild_and_says_so(tmp_path, monkeypatch) -> None:
     """缺包 ⇒ 替云机推一次重导（404 正文如实报），窗内第二次只节流、**不再打扰控制台**。"""
     calls = _stub_trigger(monkeypatch)
     base, hub, _srv = _boot(tmp_path)
-    _offline_course(tmp_path, hub)
+    _training_course(tmp_path, hub)
 
     st, raw, _h = _get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")
     body = _as_json(raw)
@@ -497,7 +491,7 @@ def test_missing_pack_gives_up_after_the_miss_limit(tmp_path, monkeypatch) -> No
     monkeypatch.setattr(offline_mod, "TASK_PACK_STALE_THROTTLE_SEC", 0.0)
     calls = _stub_trigger(monkeypatch)
     base, hub, _srv = _boot(tmp_path)
-    _offline_course(tmp_path, hub)
+    _training_course(tmp_path, hub)
     url = f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae"
 
     for _ in range(hub_server.TASK_PACK_MISS_TRIGGER_LIMIT):
@@ -518,7 +512,7 @@ def test_missing_pack_ledger_resets_when_the_pack_appears(tmp_path, monkeypatch)
     monkeypatch.setattr(offline_mod, "TASK_PACK_STALE_THROTTLE_SEC", 0.0)
     calls = _stub_trigger(monkeypatch)
     base, hub, _srv = _boot(tmp_path)
-    _offline_course(tmp_path, hub)
+    _training_course(tmp_path, hub)
     url = f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae"
 
     for _ in range(hub_server.TASK_PACK_MISS_TRIGGER_LIMIT):
@@ -533,20 +527,25 @@ def test_missing_pack_ledger_resets_when_the_pack_appears(tmp_path, monkeypatch)
     assert calls == ["c5-gae"] * (hub_server.TASK_PACK_MISS_TRIGGER_LIMIT + 1)
 
 
-def test_missing_pack_online_course_is_not_triggered(tmp_path, monkeypatch) -> None:
-    """表里明确是 online ⇒ **不替它导**（云机来取包是配置误会），正文里说清下一步。"""
+def test_missing_pack_in_table_course_without_marker_still_triggers(
+    tmp_path, monkeypatch
+) -> None:
+    """★M4b：表里有它但盘上读不到标记（停课残留 / 单课程裸 job_root）⇒ **仍替它导**。
+
+    旧规则「表里明确 online ⇒ 不导」随模式删除；不误杀比省一次导包重要（导出只是多造
+    一份包，而误杀会把「缺包自愈」在最需要它的场景里静默关掉）。
+    """
     calls = _stub_trigger(monkeypatch)
     base, hub, _srv = _boot(tmp_path)
     (tmp_path / "c5-gae" / "remote-jobs").mkdir(parents=True)
     (tmp_path / "c5-gae" / "training_log.jsonl").touch()
     (tmp_path / "c5-gae" / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
     hub.discover(force=True)
-    assert hub.mode_of("c5-gae") == "online"
+    (tmp_path / "c5-gae" / COURSE_ENABLE_MARKER).unlink()  # 表还在，但标记没了
 
     body = _as_json(_get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")[1])
-    assert body["triggered"] is False
-    assert "online" in body["trigger_note"] and "控制台" in body["trigger_note"], body
-    assert calls == []
+    assert body["triggered"] is True, body
+    assert calls == ["c5-gae"]
 
 
 def test_missing_pack_unknown_course_does_not_trigger(tmp_path, monkeypatch) -> None:
@@ -580,7 +579,7 @@ def test_missing_pack_trigger_unreachable_console_points_to_manual(tmp_path, mon
     """控制台不可达 ⇒ 降级成「请手动导」（云机还得能排障，不抛、不 brick）。"""
     _stub_trigger(monkeypatch, (False, "OSError"))
     base, hub, _srv = _boot(tmp_path)
-    _offline_course(tmp_path, hub)
+    _training_course(tmp_path, hub)
 
     body = _as_json(_get(base, f"{OFFLINE_TASK_PACK_PATH}?course=c5-gae")[1])
     assert body["triggered"] is False and body["give_up"] is False

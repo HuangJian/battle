@@ -107,12 +107,8 @@ class QueueObserveMixin(QueuePeer):
                     }
                 )
             courses[course] = {
-                "mode": self.mode_of(course),
-                #: 权威三态（★ 2026-10-05，plan/offline-online-status-switch §3.1）：dashboard 的
-                #: `courseStatus` 从本行读它（不猜）。`pinned` 同批暴露（人固定与否）。
-                "authority": self.authority_of(course),
-                "pinned": self.pinned_of(course),
                 #: ★M1b：接管（hold）与导包软态——控制台「谁在跑这门课」的**唯一真源**
+                #: （★M4b：`mode`/`authority`/`pinned` 三键随「课程无模式」一并删除）
                 #: （形状见 `hold_of`：worker_id/at/last_progress_at/touch_at/state/expires_in）。
                 #: `{}` = 没人接管；`state` = live/stale（活性按**进度**判）。
                 #: 去掉 `token`：它是「推进活动起点 / 取包」的**权力**（P1-1/P1-2），而这一面
@@ -147,7 +143,6 @@ class QueueObserveMixin(QueuePeer):
             "peeked_courses": sorted(
                 c for c, seen in self._peeked.items() if now - seen <= PEEKED_WINDOW_SEC
             ),
-            "offline": self.offline_courses(),
             "active_courses": self.active_courses(),
             "active_workers": self.active_worker_count(),
             "halt": self.all_halted(),

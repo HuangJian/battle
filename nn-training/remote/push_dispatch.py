@@ -25,8 +25,8 @@
 一眼能分清是哪条腿（`push:` 前缀），避让记录（`_stale_holders`）也按同一身份比对。
 
 本模块**不 import hub_server**（避免环）：hub 以鸭子类型传入，只用它的公开调度面
-（`courses/mode_of/claimable_job_ids/claim/heartbeat/release/store_result/store_job_failure/
-_job_dir`）。
+（`courses/claimable_job_ids/role_blocked/claim/heartbeat/release/store_result/
+store_job_failure/_job_dir`；★M4b：`mode_of` 随模式退役）。
 """
 
 from __future__ import annotations
@@ -556,7 +556,7 @@ class PushDispatcher:
             # 「课程当前 mode」——模式一热切，历史 job 的归属就跳一次（事故本体）。
             # push 登记表里**没有**角色字段（`push_worker_from_node` 只有 id/url/key/
             # concurrency）⇒ 一律把 push worker 当**在线盘**：role=offline 的活、以及
-            # 停摆（离线）课的活，一律不推。
+            # **被接管的课**的活，一律不推（★M4b：旧口径「停摆（离线）课」随模式退役）。
             # 真正的闸在 `hub.claim` → `_JobStore.role_blocked`（本文件的判断只是
             # 「不值当推」的过滤，不是判据源）。
             prim, backup = self._course_counts(course)

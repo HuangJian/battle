@@ -33,6 +33,12 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 >
 > ★ 2026-10-03（plan/switch-mode-drops-jobs T0）：`queue_offline` 再涨 **1** 个成员
 > （`_drop_unsettled`，切模式撤单的收尾）⇒ 域成员 **110**、实现名 **112**。
+>
+> ★ 2026-10-08（M4b，plan/worker-type-dispatch-model）：**去模式收口** —— 删 14（`mode_of` /
+> `offline_courses` / `set_mode` / `dispatch_effective_mode` / `pinned_of` / `authority_of` /
+> `auto_handoff_allowed` / `is_runnable_offline` / `auto_eligible` / `_dispatch_disk_record` /
+> `set_mode_pinned` / `_drop_unsettled` / `begin_auto_handoff` / `note_claim`）、增 3
+> （`mode_ignored` / `course_open` / `begin_pending_export`）⇒ 域成员 **114**、实现名 **116**。
 
 同一刀还把**两个组合类搬出自己的家**（这是本刀能成立的**使能缝**，不是顺手清洁）：第十四刀只搬了
 `_JobStore` 的六个混入，组合类还在 `hub_server` 里；而 `queue_scope.add_course` 要**构造** store、
@@ -44,16 +50,16 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 1. **一把锁是类的不变式**：`_lock` 有 5 个直接读者（`_serves_course` / `active_worker_count` /
    `claim_job` / `claim_next` / `note_worker`），它就是 `_AuthGuard.__init__` 建的那把。
    协作对象各持一把锁 = **换语义**；
-2. **跨域互调是常态**：`claim_next` → `discover` / `_serves_course` / `mode_of` /
-   `active_worker_count` / `_announce_freeze`；`queue_state` → `halt_of` / `mode_of` /
-   `active_courses` / `offline_courses` / `all_halted` / `active_worker_count`；
+2. **跨域互调是常态**：`claim_next` → `discover` / `_serves_course` /
+   `active_worker_count` / `_announce_freeze`；`queue_state` → `halt_of` /
+   `active_courses` / `all_halted` / `active_worker_count`；
    `resume_anchor` → `resume_sources`…混入把它们留在 `self.X` 上 ⇒ **零 seam**；
-3. **tests 直读私有状态**（`hub._stores` / `._order` / `._halts` / `._modes` / `._locate_cache` /
+3. **tests 直读私有状态**（`hub._stores` / `._order` / `._halts` / `._locate_cache` /
    `._workers`，多处断言）——协作对象会让这些**全部改路**；混入是同一个对象 ⇒ **一行测试都不用改**。
 
 ## 本文件钉住的东西
 
-1. **定义唯一**：110 个域成员各住一家，`_HubQueue` 不得再定义任何一个（组合类只组合）；
+1. **定义唯一**：114 个域成员各住一家，`_HubQueue` 不得再定义任何一个（组合类只组合）；
 2. **接线正确**：`_HubQueue.X is Mixin.X`（同一函数对象）+ MRO 逐项 + 类常量经 MRO 可达；
 3. **★ 门面契约**（`queue_store_face` 那一簇的**存在理由**）：与 `_JobStore` 同名的方法
    **逐参数对账**——30 个完全一致 + 3 个只多一个前置 `course`（课程寻址），且这份名单是**闭集**；
@@ -116,9 +122,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "courses",
             "course_of",
             "_store_of",
-            "mode_of",
-            "offline_courses",
-            "set_mode",
+            # ★M4b：启动参数里的模式段标记（`--course a=offline` ⇒ WARN + 忽略）。
+            "mode_ignored",
             "active_courses",
             # ★M1b：hold 镜像的推送（派发闸第三层）——★M1c 起它是**唯一**的闸输入推送口
             # （旧的 `_sync_parked` 随 `parked` 一起退役）。
@@ -204,26 +209,17 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "progress_offline",
             "release_offline",
             "offline_leases",
-            # 自动离线交接（2026-10-03，plan/auto-offline-handoff）
+            # 自主任务清单与派发状态（2026-10-03 起；★M4b：去模式的收口）
             "_dispatch_path",
             "dispatch_record",
             "_dispatch_load",
             "_dispatch_update",
-            "dispatch_effective_mode",
-            "pinned_of",
-            # 权威三态 + 租约围栏（2026-10-05，plan/offline-online-status-switch）
-            "authority_of",
-            "auto_handoff_allowed",
-            "is_runnable_offline",
-            "auto_eligible",
+            # 开课标记的唯一公开读面（停课 = 唯一 opt-out；claim/清单/停滞三处同源）。
+            "course_open",
             "_marker_exists",
-            "_dispatch_disk_record",
             "revoke_offline_lease",
-            "set_mode_pinned",
-            # 切模式撤单（2026-10-03，plan/switch-mode-drops-jobs T0）：三条翻模式路径共用的收尾。
-            "_drop_unsettled",
-            "begin_auto_handoff",
-            "note_claim",
+            # claim 无包的软态写入（Q1：不建 hold、不占闸、不翻模式）。
+            "begin_pending_export",
             "note_release",
             "note_offline_completed",
             "completion_blocked",
@@ -339,11 +335,8 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     "_halt_default": frozenset({"__init__", "_adopt_solo", "set_halt"}),
     "_halts": frozenset({"__init__", "set_halt"}),
     "_locate_cache": frozenset({"__init__", "course_of"}),
-    #: 模式写点（2026-10-03，plan/auto-offline-handoff）：`set_mode` 已改为委派
-    #: `set_mode_pinned`（写点收敛到一处），另两个是自动交接的两腿（翻 mode / claim 记账）。
-    "_modes": frozenset(
-        {"__init__", "add_course", "begin_auto_handoff", "note_claim", "set_mode_pinned"}
-    ),
+    #: ★M4b：模式表 `_modes` 随「课程无模式」删除；只剩启动参数的模式段标记（只读）。
+    "_mode_ignored": frozenset({"__init__"}),
     #: 派发状态（课程 → 记录）：`dispatch_record` 首次载入时就地缓存（写），`_dispatch_update` 改，
     #: `note_progress` 的**节流腿**也在内存里就地改（落盘才走 `_dispatch_update`——节流基准
     #: 只认盘上那份的 `updated_at`）。
@@ -484,8 +477,13 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # 临界区里读持有面，而 Lock 不可重入——内核拆出来才不死锁）。
     # 2026-10-07（M1b 收尾）再 +2：`offline_advance_ok`（P1-1 的 advance 门，与 hold 判据同住）
     # 与 `_sync_hold`（queue_scope：把 hold 推给 store，供派发闸读）；★M1c −1：`_sync_parked`
-    # 随 `parked` 一起退役 ⇒ 125。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 125, len(DOMAIN_METHODS)
+    # 随 `parked` 一起退役。
+    # ★M4b（课程无模式）：−14 删（`mode_of` / `offline_courses` / `set_mode` /
+    # `dispatch_effective_mode` / `pinned_of` / `authority_of` / `auto_handoff_allowed` /
+    # `is_runnable_offline` / `auto_eligible` / `_dispatch_disk_record` / `set_mode_pinned` /
+    # `_drop_unsettled` / `begin_auto_handoff` / `note_claim`）；+3 增（`mode_ignored` /
+    # `course_open` / `begin_pending_export`）⇒ 114。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 114, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -495,7 +493,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 125, len(seen)
+    assert len(seen) == 114, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -519,9 +517,9 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
         for name in realized:
             assert seen.get(name, domain) == domain, f"{name} 同时住 {seen[name]} 与 {domain}"
             seen[name] = domain
-    # 125 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
+    # 114 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
     expect = set(DOMAIN_METHODS) | {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"}
-    assert len(seen) == 127 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
+    assert len(seen) == 116 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
 
 
 # ───────────────────── ② 接线正确 ─────────────────────
@@ -787,7 +785,7 @@ def test_the_state_writer_table_matches_reality() -> None:
     """★ 24 个字段的**写者集合**逐字段对账（含下标赋值与 `self.X.append(...)` 三种写法）。
 
     为什么需要它：状态声明分散到八个文件之后，「谁动它」是最容易漂的事。而**只数
-    `self.X = …` 会瞎掉一半**——`_locate_cache` / `_halts` / `_modes` / `_order` /
+    `self.X = …` 会瞎掉一半**——`_locate_cache` / `_halts` / `_order` /
     `_no_marker_warned` 全部是下标或方法式变更，只看赋值会得到「只有 `__init__` 写」的假表。
     """
     actual: dict[str, set[str]] = {}
@@ -862,8 +860,10 @@ def test_queue_peer_is_declarations_only() -> None:
     # 2026-10-05 权威派生 +2（authority_of / pinned_of）；2026-10-07 接管新面 +5
     # （M1a：note_hold / note_progress / note_pending_export / hold_of / pending_export_of）；
     # 2026-10-07 M1b 再 +1（`_sync_hold`：hold 镜像的推送，每次改 hold 都要调）；★M1c −1
-    # （`_sync_parked` 删：闸输入只剩 hold）。
-    assert len(funcs) == 85, len(funcs)
+    # （`_sync_parked` 删：闸输入只剩 hold）；★M4b −7 删（`mode_of` / `offline_courses` /
+    # `set_mode` / `dispatch_effective_mode` / `set_mode_pinned` / `pinned_of` / `authority_of`）、
+    # +1 增（`course_open`：开课标记的唯一公开读面）⇒ 79。
+    assert len(funcs) == 79, len(funcs)
     for n in funcs:
         # 只滤掉文档字符串：`...` 也是 `Expr(Constant)`，滤它就把声明本身滤没了（本守卫
         # 第一版就是这么错的 —— `halt_of` 带 docstring 才暴露出来）。
@@ -1026,7 +1026,7 @@ def test_cross_domain_chain_works_on_one_object(tmp_path: Path) -> None:
     """★ 跨域链路真的连通（经 `self`），落点全在**同一个**对象上。
 
     链路：`add_course`（课程表簇）→ `discover`（发现簇，因 `_discover_root` 已给）→
-    `peek_jobs`（认领簇，要读 `_serves_course`/`mode_of`/`_manifest_summary`）→
+    `peek_jobs`（认领簇，要读 `_serves_course`/`_manifest_summary`）→
     `queue_state`（观测簇，要读另四簇）→ `reload_lock` 那一层（门面簇）。
     """
     root = tmp_path / "traj"
@@ -1037,7 +1037,7 @@ def test_cross_domain_chain_works_on_one_object(tmp_path: Path) -> None:
     added = hub.discover()
     assert added == ["c1"], added
     assert hub.courses() == ["c1"]
-    assert "c1" in hub._stores and hub._modes["c1"] == "online"
+    assert "c1" in hub._stores and hub.course_open("c1") is True
 
     # 发布一份 job（走 store 本体 —— 队列不做发布）并让它可领
     st = hub._stores["c1"]

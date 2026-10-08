@@ -213,20 +213,23 @@ def main() -> None:
     hub: _HubQueue
     traj_root = Path(args.traj_root).resolve()
     if args.course or args.discover:
-        specs: dict[str, str] = {}
+        specs: dict[str, bool] = {}  # 课程名 → 启动参数里是否带过模式段（P1-3 的兼容标记）
         for raw in args.course:
             try:
                 name, mode = parse_course_arg(raw)
             except ProtocolError as e:
                 print(f"[hub-server] ERROR: --course {raw!r}: {e}", flush=True)
                 sys.exit(1)
-            if name in specs and specs[name] != mode:
+            if mode:
+                # ★M4b / P1-3：课程模式已退役（课程不再区分在线/离线，接管 hold 才是唯一
+                # 真源）。**保留解析、WARN + 忽略**（不 400，别 brick 老启动脚本）；
+                # `/admin/courses` 行上留一个 `mode_ignored` 标记供排障。
                 print(
-                    f"[hub-server] ERROR: 课程 {name!r} 被重复声明且模式不同（{specs[name]} vs {mode}）",
+                    f"[hub-server] WARN: --course {raw!r} 带了模式 {mode!r}——"
+                    "课程模式已退役（课程不再区分在线/离线），本次按无模式处理",
                     flush=True,
                 )
-                sys.exit(1)
-            specs[name] = mode
+            specs.setdefault(name, bool(mode))
         root = traj_root
         stores = {
             name: _JobStore(
@@ -238,13 +241,13 @@ def main() -> None:
         hub = _HubQueue(
             stores,
             order=list(specs),
-            modes=specs,
+            ignored_modes=[c for c, ignored in specs.items() if ignored],
             discover_root=root if args.discover else None,
         )
-        desc = ", ".join(f"{c}:{specs[c]}" for c in specs)
+        desc = ", ".join(specs)
         print(
             f"[hub-server] courses={len(specs)} [{desc}] traj_root={root} "
-            f"discover={bool(args.discover)} offline={hub.offline_courses() or '-'}",
+            f"discover={bool(args.discover)}",
             flush=True,
         )
         if args.discover:

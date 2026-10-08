@@ -78,23 +78,6 @@ TASK_STATE_NO_PACK = "no_pack"
 TASK_STATE_CLAIMED = "claimed"
 TASK_STATE_NOT_OFFLINE = "not_offline"
 TASK_STATE_COMPLETED = "completed"
-#: 权威三态 + 两个正交维（plan/offline-online-status-switch §3.1 `authority_of` 的值域）：
-#: `pinned_online` / `pinned_offline` / `auto` 是三态；`stopped`（开课标记不在）与
-#: `not_offline`（冷课带 online 记录）是两个正交维。常量住叶子：离线路由面（`hub/offline.py`）
-#: 与队列面（`queue_offline.py`）都要读它们。派生实现在 `queue_offline.authority_of`。
-AUTHORITY_PINNED_ONLINE = "pinned_online"
-AUTHORITY_PINNED_OFFLINE = "pinned_offline"
-AUTHORITY_AUTO = "auto"
-AUTHORITY_STOPPED = "stopped"
-AUTHORITY_NOT_OFFLINE = "not_offline"
-#: 离线租约「连续静默」阈值（秒，2026-10-05，plan/offline-online-status-switch §3.3）：
-#: 租约持有人超过它没有一点心跳 ⇒ 判 `stale`，允许新盘**自动接管**（不必 `takeover=1`）。
-#: 为什么住本模块（叶子）而不是 `queue_offline`：判据 `lease_verdict` 就在本模块，常量跟着判据走；
-#: 这是**纯 hub 侧**语义（不进 `common/protocol.py`，两端共享协议面一字不改）。env 覆盖
-#: `BCITY_OFFLINE_LEASE_STALE_SEC`（e2e/单测调秒级）。
-#: ★ 与 job 侧 `ORPHAN_GRACE_SEC` 同值**不同义**：job 侧 = claim 后**零心跳**；离线段 = **连续静默**
-#: （心跳线程整段在跑，慢网/挂起的人为短静默不该误杀）——别照抄 store_leases._lease_state。
-OFFLINE_LEASE_STALE_SEC = 180.0
 # ── 接管（hold）的进度活性（plan/worker-type-dispatch-model §1.2/§1.5.2，2026-10-07）──
 #
 # 新派发模型把三件事拆正交：**谁在跑**（worker 类型）/ **归谁独占**（hold）/ **还活着吗**（进度）。
@@ -104,8 +87,8 @@ OFFLINE_LEASE_STALE_SEC = 180.0
 # 为什么与 `AUTO_HANDOFF_PENDING_SEC` 分开写：两者都是 900s 是**巧合**（一个是导包窗口、
 # 一个是接管活性），调一个会误伤另一个 —— plan §1.5.2-P0-1 明令**禁止合并常量**。
 #: 接管后连续静默（无任何进度信号）超过它 ⇒ 判「掉线」（惰性判据：谁读谁算，不养清理线程）。
-#: env 覆盖 `BCITY_HOLD_PROGRESS_STALE_SEC`（e2e/单测调秒级）——与 `offline_lease_stale_sec()`
-#: 同款「调用时读 env」。
+#: env 覆盖 `BCITY_HOLD_PROGRESS_STALE_SEC`（e2e/单测调秒级）。**唯一**的离线段静默阈值
+#: （★M4b：旧的 180s `OFFLINE_LEASE_STALE_SEC` 与 `lease_verdict` 的 beat_at 退回腿已删）。
 HOLD_PROGRESS_STALE_SEC = 900.0
 #: hub 重启给**盘上恢复的 hold** 的宽限（秒）：把 `last_progress_at`/`touch_at` 抬到 `now - 它`。
 #: 为什么需要：重启时盘上的时间是旧的，而 worker 大概率还活着（它不知道自己「被重启」了）——
@@ -198,15 +181,6 @@ def hold_expires_in(now: float, hold: object, *, ttl_sec: float, stale_sec: floa
 #: 「离线盘在线」的窗口（秒）：与离线租约 TTL 同档 —— 取包腿的报到节奏就是这个量级。
 OFFLINE_DISK_WINDOW_SEC = 900.0
 
-
-def offline_lease_stale_sec() -> float:
-    """生效的离线租约静默阈值（env 覆盖；非法/非正数 ⇒ 缺省）。**调用时读 env**（可 monkeypatch）。"""
-    raw = os.environ.get("BCITY_OFFLINE_LEASE_STALE_SEC", "").strip()
-    try:
-        v = float(raw)
-    except ValueError:
-        return OFFLINE_LEASE_STALE_SEC
-    return v if v > 0 else OFFLINE_LEASE_STALE_SEC
 #: 离线腿的指路（2026-09-25 退役「发一份 kind=run 队列项」之后，离线课的唯一载体是任务包）。
 OFFLINE_LEG_HINT = (
     "离线课不再经 hub 队列执行：云机用 battle.offline.ipynb 取任务包接手"
@@ -385,8 +359,9 @@ def lease_verdict(now: float, rec: dict | None, worker_id: str) -> str:
     ★ 2026-10-07（M1b，plan §1.6-F2）：`stale` 的判据从**心跳静默**改成**进度静默**
     （`last_progress_at`，阈值 `hold_progress_stale_sec()`）——「心跳活、进度死」的假活
     （docs/nn/remote-transport.md §68）不该被当成活（心跳只续 TTL，不作活性）。
-    没有进度字段的旧记录退回 `beat_at` + `offline_lease_stale_sec()`（过渡读路，
-    M1c 随 180s 常量一起删）。token 不在这里判——那是 claim/heartbeat 内部的分流。
+    ★M4b：beat_at 退回腿与 180s 常量一起删——一条租约没有进度字段就**不可证明活着**，
+    按 stale 处理（保守方向：允许接管；`_leases` 是进程内的，跨重启不存在这种记录）。
+    token 不在这里判——那是 claim/heartbeat 内部的分流。
     """
     if not rec:
         return "free"
@@ -397,17 +372,9 @@ def lease_verdict(now: float, rec: dict | None, worker_id: str) -> str:
     if str(rec.get("worker_id", "")) == worker_id:
         return "mine"
     progress = hold_progress_at(rec)
-    if progress >= 0.0:
-        if float(now) - progress > hold_progress_stale_sec():
-            return "stale"
-        return "foreign"
-    # 旧记录（没有进度字段）⇒ 退回心跳静默（过渡读路；M1c 删除）。
-    beat = rec.get("beat_at")
-    try:
-        beat_at = float(beat) if beat is not None else float(rec.get("at", 0.0) or 0.0)
-    except (TypeError, ValueError):
-        beat_at = 0.0
-    if beat_at > 0 and float(now) - beat_at > offline_lease_stale_sec():
+    if progress < 0.0:
+        return "stale"
+    if float(now) - progress > hold_progress_stale_sec():
         return "stale"
     return "foreign"
 

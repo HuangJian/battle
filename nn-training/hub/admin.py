@@ -37,7 +37,7 @@ from email.message import Message
 from io import BufferedIOBase
 from typing import Any
 
-from common.protocol import COURSE_MODES, ProtocolError
+from common.protocol import ProtocolError
 
 # ------------------------------------------------------------------ net-probe（M0）
 
@@ -156,33 +156,29 @@ class AdminRoutes:
             200,
         )
 
-    def _admin_courses(self, set_mode: bool = False) -> None:
-        """`GET /admin/courses` 看课程表；`POST ?course=X&mode=online|offline[&pin=1|0]` 热切。
+    def _admin_courses(self, post: bool = False) -> None:
+        """`GET /admin/courses` 看课程表；`POST ?course=X&release_hold=1` 强制解除接管。
 
-        ★ 2026-10-03（plan/auto-offline-handoff §3.2b）：模式**已落盘**（`dispatch.json`），
-        重启不再回启动参数——自动 claim 翻的 offline / 人的 pin 都必须活过重启（§3.8）。
-        `pin=1` 才是**人的决定**（可覆盖自动 claim 翻的 offline；此后离线盘永不自取）；
-        不带 pin = legacy 调用方（回灌/旧版控制台），遇 claim 翻的 offline 会被拒。
+        ★M4b：模式热切（`?mode=&pin=&drop_jobs=`）**已退役** —— 课程不再区分在线/离线，
+        接管（hold）才是「谁在跑这门课」的唯一真源。带 `mode=` 的 POST 响亮 400
+        （旧控制台/老脚本会看到「模式已退役」而不是静默失败）。
         """
         if not self._auth_ok():
             return
-        if not set_mode:
+        if not post:
             self._json(
                 {
                     "courses": [
                         {
                             "course": c,
-                            "mode": self.hub.mode_of(c),
-                            # `pinned` = 人的决定（自动交接永不碰它）；`claimed_offline` = 由
-                            # 离线盘 claim 自动翻的（重启后仍生效 —— §3.8 的落盘事实）。
-                            "pinned": self.hub.pinned_of(c),
-                            "claimed_offline": bool(
-                                self.hub.dispatch_record(c).get("claimed_offline")
-                            ),
+                            # 「在训」= 开课标记在（唯一 opt-out = 停课）。
+                            "training": self.hub.course_open(c),
                             # ★M1b：接管读数（与 `/admin/queue` 同一口径；`token` 不外露）
                             "held": str(self.hub.hold_of(c).get("state") or "") == "live",
                             "holder": str(self.hub.hold_of(c).get("worker_id") or ""),
                             "pending_export": bool(self.hub.pending_export_of(c)),
+                            # 启动参数里带过模式段（`--course a=offline`；P1-3 的兼容标记）。
+                            "mode_ignored": self.hub.mode_ignored(c),
                         }
                         for c in self.hub.courses()
                     ]
@@ -200,56 +196,25 @@ class AdminRoutes:
             ok = self.hub.revoke_offline_lease(course, "admin release_hold=1")
             self._json({"course": course, "released": ok}, 200 if ok else 409)
             return
-        mode = (qs.get("mode") or [""])[0]
-        # `pin` = 人的决定（二轮 P0-2/P0-3）：带它才能覆盖「由 claim 翻的 offline」。
-        # 不带 = legacy 调用方（回灌/旧版控制台）：只改没被 claim 翻过的课。
-        raw_pin = (qs.get("pin") or [""])[0].strip().lower()
-        pin: bool | None = None
-        if raw_pin in ("1", "true", "yes", "on"):
-            pin = True
-        elif raw_pin in ("0", "false", "no", "off"):
-            pin = False
-        # `drop_jobs=1`（plan/switch-mode-drops-jobs §3 改点 1）= 顺手作废该课**未认领**的
-        # 未结算 job（切模式 = 上一段整体作废）。只有**人的动作**带它（控制台那颗开关）；
-        # 开课/停课/回灌走的 `pushCourseMode` 不带 —— 「停课队列一字不动」的既有契约逐字不变。
-        raw_drop = (qs.get("drop_jobs") or [""])[0].strip().lower()
-        drop_jobs = raw_drop in ("1", "true", "yes", "on")
-        # 课程未知 ⇒ **按需真扫一次再试**（2026-09-23）：`set_mode` 只认已登记的课程，
-        # 而登记依赖顺带扫描（`claim_next`/`queue_state` 触发、有 2s 间隔闸）。于是
-        # 「刚开课 / hub 刚重启」那一刻打来的 mode POST 必然 400——控制台那侧的重试窗口
-        # 一旦整段落在发现之前，意图就静默失配（课留在 online，面板显示「在训/切离线」，
-        # 用户实测：三个离线课里恰有一个如此）。指名一门课的写动作有资格要求一次真扫。
-        # 只在「课不在表里」时扫（模式非法就不必扫盘了，直接落到下面 400）。
-        ok, why = self.hub.set_mode_pinned(course, mode, pin, drop_jobs=drop_jobs)
-        if not ok and course and course not in self.hub.courses():
-            self.hub.discover(force=True)
-            ok, why = self.hub.set_mode_pinned(course, mode, pin, drop_jobs=drop_jobs)
-        if not ok:
+        # ★M4b：模式的三个旧参数（mode / pin / drop_jobs）反而是**退役信号**。
+        if (qs.get("mode") or [""])[0] or "pin" in qs or "drop_jobs" in qs:
             self._json(
                 {
                     "error": (
-                        f"需要合法 course（{self.hub.courses()}）与 mode（{list(COURSE_MODES)}）"
-                        + (f"；本次未接受：{why}" if why else "")
+                        "课程模式已退役（课程不再区分在线/离线，接管 hold 才是唯一真源）"
+                        "——要解除接管请用 release_hold=1"
                     ),
                     "course": course,
-                    "mode": mode,
-                    "why": why,
                 },
                 400,
             )
             return
-        print(
-            f"[{time.strftime('%H:%M:%S')}] [hub-server] course={course or '-'} mode -> {mode} "
-            f"pin={raw_pin or '-'}",
-            flush=True,
-        )
         self._json(
             {
+                "error": "未知动作：POST /admin/courses 只认 release_hold=1（模式已退役）",
                 "course": course,
-                "mode": self.hub.mode_of(course),
-                "pinned": self.hub.pinned_of(course),
             },
-            200,
+            400,
         )
 
     def _admin_unfreeze(self) -> None:

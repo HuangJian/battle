@@ -24,7 +24,6 @@ from typing import Any
 
 from common.protocol import (
     COURSE_ENABLE_MARKER,
-    COURSE_MODE_OFFLINE,
     INIT_WEIGHTS_NAME,
     OFFLINE_ARTIFACT_BODY_MAX,
     OFFLINE_CLAIM_PROTO_VERSION,
@@ -44,9 +43,6 @@ from hub.task_pack import (
     _TASK_PACK_LOCK,
     _TASK_PACK_MISS_TRIGGERS,
     _TASK_PACK_TRIGGERS,
-    AUTHORITY_NOT_OFFLINE,
-    AUTHORITY_PINNED_ONLINE,
-    AUTHORITY_STOPPED,
     TASK_AUTO_HANDOFF_RETRY_SEC,
     TASK_PACK_MISS_TRIGGER_LIMIT,
     TASK_PACK_STALE_THROTTLE_SEC,
@@ -68,8 +64,8 @@ from hub.task_pack import (
 
 #: `offline_advance_ok` 的拒因 → 日志文案（★P1-1）。住这里而不是 hub 深层的理由：这句话是给
 #: **现场的人**看的（为什么这一轮没推进起点），而判据住在 `_HubQueue`（那里不打印）。
+#: ★M4b：`pinned_online` 那条腿随权威删除。
 _ADVANCE_SKIP_TEXT = {
-    AUTHORITY_PINNED_ONLINE: "人切了固定在线——旧会话的回传不能把起点拉回旧轮",
     "hold_stale": "持有人的进度已静默超阈（stale）——迟到回传不夺回起点",
     "hold_token": "租约 token 不符（不是本课当前持有人）",
 }
@@ -134,60 +130,10 @@ class OfflineRoutes:
                 404,
             )
             return
-        # ★ 模式门（2026-09-25，plan/online-offline-role-routing §2.4）：包**确实在盘上**
-        # 不等于「该发给你」。切离线时控制台会自动导出 `task-<课>.zip`、而且「已有包不动」
-        # （course-mode.ts）⇒ **切回在线后那个包还在**，而本端点原来不查 mode ⇒ 离线盘
-        # 能把在线课取走并跑整段（L6）。判据用状态码而不是 404：包在、没丢，正确动作是
-        # 「去控制台切回离线」，404 会把人引向「再导一次」（越导越乱）。
-        # ⚠ 只在「**表里有它且明确 online**」时拦：冷课/未扫到的课必须照旧放行
-        # （与 `_task_pack_miss_candidate` ① 同一条规则——离线课本来就不常训练，从表里
-        # 掉出去是常态，拿“不在表里”当 online 会把正常取包锁死）。
-        authority = self.hub.authority_of(course)
-        if authority == AUTHORITY_PINNED_ONLINE:
-            self._json(
-                {
-                    "error": (
-                        "该课由人固定在在线（离线盘不抢）——到控制台点「交还自动」后才可领；"
-                        "要现在离线跑请先交还自动再 claim"
-                    ),
-                    "course": course,
-                    "authority": authority,
-                },
-                409,
-            )
-            return
-        # ★六轮 F3 定死：**停课（`stopped`）不在这条腿上拦**——F3 的 409 `not_offline` 只落在
-        # claim 门与 `claimable`/`offline_task_courses`（入口已堵）；本端点只是「把同一个文件按
-        # HTTP 递出去」，且正在跑的会话被停课后仍要能重取包（§3.2「在跑租约**不杀**」；冷课
-        # 无标记的存量路径也靠它照发，见 `test_task_pack_cold_course_still_served`）。
-        if authority == AUTHORITY_NOT_OFFLINE:
-            self._json(
-                {
-                    "error": (
-                        "这门课当前不在离线池（盘上的派发记录是 online）——"
-                        "要离线跑请到控制台切离线"
-                    ),
-                    "course": course,
-                    "not_offline": True,
-                },
-                409,
-            )
-            return
-        # 旧 mode 门（判据保持）：表内 auto 但 mode 还是 online ⇒ 先 claim（claim 会翻 mode）；
-        # 这里只拦「取包不取包」的其他情形（表内 online 且停课已在上面的 STOPPED 分支拦掉）。
-        if course in self.hub.courses() and self.hub.mode_of(course) != COURSE_MODE_OFFLINE:
-            self._json(
-                {
-                    "error": (
-                        "该课现在是 online —— 离线课请先在控制台切离线（切换会自动导出"
-                        "任务包）；在线课请用 battle.tailscale.ipynb"
-                    ),
-                    "course": course,
-                    "mode": self.hub.mode_of(course),
-                },
-                409,
-            )
-            return
+        # ★M4b：模式三门（`pinned_online` / `not_offline` / 旧 mode）随「课程无模式」删除 ——
+        # 取包面现在只有两道闸：① live hold 的 lease 门（下一段）② 新鲜度门（再下一段）。
+        # 停课不在这条腿上拦（★六轮 F3 定死：正在跑的会话被停课后仍要能重取包；冷课无标记
+        # 的存量路径也靠它照发，见 `test_task_pack_cold_course_still_served`）。
         # ★M1b / P1-2：**live hold ⇒ 只有持 lease 的那台盘拿得到包**（新客户端取包带 `?lease=`）。
         # 为什么必须有这道门：上面的模式三门随模式一起退役后，「包在盘上」就等于「发给任何人」
         # ——正在被云机 A 跑的课会被云机 B 取走 = 同一份活两处跑（数据损坏级）。判据取 **hold**
@@ -588,30 +534,15 @@ class OfflineRoutes:
                     409,
                 )
                 return
-            # 归属/权威门（★ 2026-10-05 六轮 F3/F6）：判据 = `authority_of`（不再只看
-            # 「在不在表 + mode」）：人固定在线 ⇒ `pinned_online`；停课（标记不在）与冷课
-            # online 记录 ⇒ `not_offline`。在训的 auto 课一律放行（它的包由下面的自动交接
-            # 现场生成）；pinned_offline 照旧可领（有包）。
-            authority = self.hub.authority_of(course)
-            if authority == AUTHORITY_PINNED_ONLINE:
+            # 开课门（★M4b）：唯一 opt-out = 停课（标记不在）⇒ 409 `not_offline`。
+            # （旧的 pinned_online 与「冷课 online 记录」两条门随权威删除；在训课一律放行，
+            # 它的包由下面的导包触发现场生成。）
+            if not self.hub.course_open(course):
                 self._json(
                     {
                         "error": (
-                            "这门课由人固定在在线（离线盘不抢）——"
-                            "到控制台点「交还自动」后才可领"
-                        ),
-                        "course": course,
-                        "pinned_online": True,
-                    },
-                    409,
-                )
-                return
-            if authority in (AUTHORITY_STOPPED, AUTHORITY_NOT_OFFLINE):
-                self._json(
-                    {
-                        "error": (
-                            "这门课不在训练中（开课标记已删）⇒ 不在自动候选："
-                            "重新开课后云机会自动接走；要现在离线跑请到控制台切离线"
+                            "这门课不在训练中（开课标记已删）⇒ 不在候选："
+                            "重新开课后云机会自动接走"
                         ),
                         "course": course,
                         "not_offline": True,
@@ -620,9 +551,10 @@ class OfflineRoutes:
                 )
                 return
             if not pack.is_file():
-                # P0-1（plan/auto-offline-handoff §3.1a）：自动课**本来就没有包**——claim 不能 404，
-                # 而是「翻 mode + 请控制台导包 + 409 指路」；其余课仍是旧 404。
-                # ★六轮 F4：带上 worker（`begin_auto_handoff` 的「换主/超窗 ⇒ 重置触发账本」要用它）。
+                # P0-1（plan/auto-offline-handoff §3.1a）：在训课**本来就没有包**——claim 不能 404，
+                # 而是「记 `pending_export` + 请控制台导包 + 409 指路」（★M4b：不建 hold）；
+                # 不属候选的课（停课/未知）仍是 404。
+                # ★六轮 F4：带上 worker（`begin_pending_export` 的「换主/超窗 ⇒ 重置触发账本」要用它）。
                 self._claim_without_pack(course, pack, worker)
                 return
             sha = _file_sha256(pack)
@@ -706,7 +638,7 @@ class OfflineRoutes:
                 who = holder["worker_id"] if holder else "?"
                 if why == "revoked":
                     error = (
-                        "租约已被撤销（人把课切回在线/交还自动）——本会话继续跑完并打包；"
+                        "租约已被撤销（人强制解除了接管）——本会话继续跑完并打包；"
                         "下一会话不要再领它"
                     )
                 elif why == "expired":
@@ -763,7 +695,7 @@ class OfflineRoutes:
             return
         error = {
             "expired": "打点无效：租约已过期（本会话继续跑完并打包；回传可能被判 duplicate）",
-            "revoked": "打点无效：租约已被撤销（人把课切回在线/交还自动）——跑完当前段即退出",
+            "revoked": "打点无效：租约已被撤销（人强制解除了接管）——跑完当前段即退出",
         }.get(why, "打点无效：租约已被别人接管——跑完当前段即退出")
         self._json(
             {
@@ -785,7 +717,7 @@ class OfflineRoutes:
         云机在导包窗口里的轮询不会把控制台打爆。控制台不可达/不接受 ⇒ 只在回执里说清，
         半状态（包偏旧）由停滞告警与人工导出兜住。
         """
-        if not self.hub.auto_handoff_allowed(course):
+        if not self.hub.course_open(course):
             return ""
         decision = auto_handoff_decision(course)
         if decision == "throttled":
@@ -805,13 +737,15 @@ class OfflineRoutes:
         )
 
     def _claim_without_pack(self, course: str, pack: Path, worker_id: str = "") -> None:
-        """claim 遇缺包：自动课 ⇒ 翻 mode + 请控制台导包（409 指路）；其余 ⇒ 旧 404。
+        """claim 遇缺包：记 `pending_export` 软态 + 请控制台导包（409 指路）；其余 ⇒ 旧 404。
 
-        为什么不能让云机先等着：包的出现路径是「有人导出」——而自动模式下**没有人**会替它导
-        （导包由 claim 触发）。所以这个分支是整个自动交接的**入口**（plan §3.1a），
+        为什么不能让云机先等着：包的出现路径是「有人导出」——而**没有人**会替它导
+        （导包由 claim 触发）。所以这个分支是整个导包链的**入口**（plan §3.1a），
         它必须在「包里没有包」时也能推进状态，而不是让云机在 30 分钟超时后 SystemExit。
+        ★M4b：写入软态与导包触发两件事都已在 `begin_pending_export` 里与触发账本同步
+        （Q1：无包 claim **不建 hold、不翻任何模式**）。
         """
-        verdict, why = self.hub.begin_auto_handoff(course, worker_id)
+        verdict, why = self.hub.begin_pending_export(course, worker_id)
         if verdict == "busy":
             self._json(
                 {
@@ -823,8 +757,8 @@ class OfflineRoutes:
                 409,
             )
             return
-        if verdict != "flipped":
-            # 404 与 `/offline/task-pack` 同口径（带已知课程表）：这门课不是自动候选，
+        if verdict != "pending":
+            # 404 与 `/offline/task-pack` 同口径（带已知课程表）：这门课不是候选，
             # 缺包只能人工导（不替人决定）。
             self._json(
                 {
@@ -835,11 +769,6 @@ class OfflineRoutes:
                 404,
             )
             return
-        # ★M1b / Q1：**无包 claim 不建 hold** —— 只在盘上记一条「有人在导包」的软态。
-        # 它**不占任何闸**：别的课 / 别的盘照领，本机也照跑（导包是几十分钟的后台活，
-        # 用一次导包把整个生态冻住正是本次重构要拆的痛点）。
-        # 为什么记 `by`：包到手后 `note_hold` 会顺手清掉它；崩溃/换机留下的残留由读面惰性过期。
-        self.hub.note_pending_export(course, by=worker_id)
         decision = auto_handoff_decision(course)
         if decision == "trigger":
             note_auto_handoff_trigger(course)
@@ -855,9 +784,8 @@ class OfflineRoutes:
             note = "连续触发导包仍没有包——请到控制台检查这门课的自动交接（导出失败？）"
         self._json(
             {
-                "error": f"这门课已翻成离线，任务包正在生成：{note}",
+                "error": f"这门课的任务包正在生成：{note}",
                 "course": course,
-                "auto_handoff": True,
                 "pending_export": True,
                 "triggered": decision == "trigger",
                 "give_up": decision == "give_up",
@@ -870,20 +798,15 @@ class OfflineRoutes:
     def _task_pack_miss_candidate(self, course: str) -> tuple[bool, str]:
         """「这门课该不该替它造一份包」——**盘上的事实优先于「hub 扫到了没有」**（评审 S-1）。
 
-        为什么不只认 `courses()`：课程表是「1 小时新鲜度扫描」的产物，而**离线课本机不训练**
+        为什么不只认 `courses()`：课程表是「1 小时新鲜度扫描」的产物，而**自主课本机不训练**
         ⇒ 冷掉或 hub 重启之后它从表里消失；那时只认表就会让「缺包自愈」在最需要它的场景里
         静默失效（云机 404 里 `known_courses` 也没有它，排障被指向错方向）。判据：
-          ① hub 表里有它且**明确是 online** ⇒ 不替它导（云机来取包是配置误会）；
-          ② 其余情形只要盘上有它的开课标记（`training-enabled.txt`，控制台开课写的）就算
-             「这是门真课」——拼错的课程名不会在盘上有这个文件；
-          ③ 表里是 offline 但标记被删（停课残留）⇒ 也替它导（mode 是更权威的意图）。
+          ① 盘上有它的开课标记（`training-enabled.txt`，控制台开课写的）⇒「这是门真课」
+             ——拼错的课程名不会在盘上有这个文件；
+          ② 表里有它但盘上读不到标记（单课程裸 job_root 等）⇒ 也替它导（不误杀）。
+        ★M4b：旧的「表里是 online ⇒ 不替它导」一条随模式删除（没有在线/离线之分了）。
         """
         in_table = course in self.hub.courses()
-        if in_table and self.hub.mode_of(course) != COURSE_MODE_OFFLINE:
-            return False, (
-                "这门课在 hub 里是 online（云机来取包是配置误会，不替它导）："
-                "先到控制台把它切成离线；若刚重启过 hub，检查启动参数里的课程模式"
-            )
         root = self.hub.traj_root()
         if root is not None and (root / course / COURSE_ENABLE_MARKER).exists():
             return True, ""

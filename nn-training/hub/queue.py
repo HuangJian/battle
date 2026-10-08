@@ -6,7 +6,7 @@ S4 第十五刀把 1033 行 / 76 个方法的 `_HubQueue` 按**域**拆成七个
 ```
 class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaimsMixin,
                 QueueResumeMixin, QueueObserveMixin, QueueStoreFaceMixin, _AuthGuard)
-  queue_scope       课程表 · 归属路由 · 模式 · 停机达令 · worker 登记（状态的主人）
+  queue_scope       课程表 · 归属路由 · 停机达令 · worker 登记（状态的主人）
   queue_discover    自动发现三相：扫盘 / 开课标记闸 / 「在训」判据
   queue_auth        鉴权面四覆写 + `halt_workers` 旧名的委派
   queue_claims      派发与认领：轮转挑选 · peek · 熔断告警 · 合法放弃
@@ -21,11 +21,11 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 1. **一把锁是类的不变式**：`_lock` 有 5 个直接读者（`_serves_course` / `active_worker_count` /
    `claim_job` / `claim_next` / `note_worker`），而它就是 `_AuthGuard.__init__` 建的那一把。
    协作对象各持一把锁 = **换语义**（并发行为不同），不满足「零行为变化」；
-2. **跨域互调是常态**：`claim_next` → `discover` / `_serves_course` / `mode_of` /
-   `active_worker_count` / `_announce_freeze`；`queue_state` → `halt_of` / `mode_of` /
-   `active_courses` / `offline_courses` / `all_halted` / `active_worker_count`；
+2. **跨域互调是常态**：`claim_next` → `discover` / `_serves_course` /
+   `active_worker_count` / `_announce_freeze`；`queue_state` → `halt_of` /
+   `active_courses` / `all_halted` / `active_worker_count`；
    `resume_anchor` → `resume_sources`…混入把它们留在 `self.X` 上 ⇒ **零 seam**；
-3. **tests 直接读私有状态**（`hub._stores` / `hub._order` / `hub._halts` / `hub._modes` /
+3. **tests 直接读私有状态**（`hub._stores` / `hub._order` / `hub._halts` /
    `hub._locate_cache` / `hub._workers` / `hub._discover_last`，多处断言）——协作对象会让这些
    **全部改路**；混入是同一个对象 ⇒ **一行测试都不用改**。
 
@@ -58,7 +58,6 @@ import time
 from pathlib import Path
 from threading import Lock
 
-from common.protocol import COURSE_MODE_ONLINE
 from hub.auth import _AuthGuard
 from hub.queue_auth import QueueAuthMixin
 from hub.queue_claims import QueueClaimsMixin
@@ -125,7 +124,7 @@ class _HubQueue(
         self,
         stores,
         order=None,
-        modes=None,
+        ignored_modes=None,
         now_fn=None,
         discover_root=None,
         discover_fresh_sec: float = DISCOVER_FRESH_SEC,
@@ -138,13 +137,11 @@ class _HubQueue(
         self._discover_last = 0.0
         #: 「跳过未开课课程」的告警去重集（每门课只喊一次，不刷屏）。
         self._no_marker_warned: set[str] = set()
-        md = modes or {}
-        self._modes: dict[str, str] = {
-            c: str(md.get(c) or COURSE_MODE_ONLINE) for c in self._order
-        }
-        # 停摆位/hold 镜像同步到 store（唯一知道 mode 与 hold 的两层都在下面：`__init__` 末段
-        # 的 `_sync_hold` 循环）。★M1b 删掉了这里的一份：同步要时钟（`hold_of`），而这一行的
-        # `_now` 还没赋值 ⇒ 构造期 AttributeError；且它做的事在下面那个循环里会**原样重做**。
+        #: 启动参数里带过模式段的课程（`--course a=offline`；★M4b/P1-3：WARN + 忽略，
+        #: 只在 `/admin/courses` 行上留一个 `mode_ignored` 标记供排障）。
+        self._mode_ignored: set[str] = {str(c) for c in (ignored_modes or ())}
+        # hold 镜像同步到 store（★M1b：`__init__` 末段的 `_sync_hold` 循环——同步要时钟
+        # （`hold_of`），必须在 `self._now` 赋值之后）。
         #: 上次派发过的课程（轮转起点）；None = 从序首开始
         self._cursor: str | None = None
         #: job_id -> course（归属解析缓存；job_id 不可复用，故不会失效）
@@ -189,13 +186,11 @@ class _HubQueue(
         # 时钟与单课程 store 同源（测试注入的假时钟必须一致，否则 claimed 标记的时间戳
         # 会混入真实墙钟）。
         self._now = self._solo._now if self._solo is not None else (now_fn or time.time)
-        # 盘上的派发记录**优先于启动参数**（§3.8）：正在 TPU 上跑的课、人的 pin 重启不丢。
-        # 放这里（而不是上面 `_modes` 第一次赋值处）：读盘需要 `_dispatch_lock`；
-        # ★M1b：还必须排在 `self._now` **之后** —— 盘上有 hold 时 `_dispatch_load` 要打恢复宽限
-        # （`hold-restored`），那需要时钟。旧顺序下「带 hold 重启」= 构造期 AttributeError
-        # （hub 直接起不来）；M1a 之所以没爆，是因为当时还没有人写 hold。
+        # 盘上的 hold 镜像同步（★M1b）：必须排在 `self._now` **之后** —— 盘上有 hold 时
+        # `_dispatch_load` 要打恢复宽限（`hold-restored`），那需要时钟。旧顺序下「带 hold
+        # 重启」= 构造期 AttributeError（hub 直接起不来）。
+        # ★M4b：`_modes` 与 `dispatch_effective_mode` 已随「课程无模式」删除。
         for _c in self._order:
-            self._modes[_c] = self.dispatch_effective_mode(_c, self._modes[_c])
             self._sync_hold(_c)
         #: 多课程时自己的 worker 登记表（worker_id -> last_seen）——避让链的唯一事实源。
         self._workers: dict[str, float] = {}

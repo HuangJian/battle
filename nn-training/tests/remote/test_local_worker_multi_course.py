@@ -25,7 +25,7 @@ import sys
 import threading
 from pathlib import Path
 
-from common.protocol import COURSE_ENABLE_MARKER, COURSE_MODE_ONLINE, normalize_manifest
+from common.protocol import COURSE_ENABLE_MARKER, normalize_manifest
 from hub.server import _HubQueue, _JobStore, make_server
 from remote.worker import acquire_job
 
@@ -88,7 +88,6 @@ def _hub(tmp_path: Path, courses: tuple[str, ...]) -> _HubQueue:
     return _HubQueue(
         stores,
         order=list(courses),
-        modes={c: COURSE_MODE_ONLINE for c in courses},
         discover_root=tmp_path,
     )
 

@@ -522,31 +522,28 @@ def push_job_wants_hub_push(manifest: Mapping[str, object]) -> bool:
     return str(manifest.get("dispatch") or "") == DISPATCH_HUB_PUSH
 
 
-#: 课程模式：`online` = 实时派发 PPO；`offline` = 整段自主（kind=run），不实时派发、
-#: 只收回传。用户口径（2026-09-18）：离线课程「不实时分派 ppo，但要接收 it 权重/指标
-#: 回传 worker」。
-COURSE_MODE_ONLINE = "online"
-COURSE_MODE_OFFLINE = "offline"
-COURSE_MODES = (COURSE_MODE_ONLINE, COURSE_MODE_OFFLINE)
+#: 课程模式（`COURSE_MODE_ONLINE` / `COURSE_MODE_OFFLINE` / `COURSE_MODES`）已退役
+#: （★M4b，plan/worker-type-dispatch-model §1.2-1：课程不再区分在线/离线，接管 hold
+#: 才是「谁在跑」的唯一真源）。wire 上也不再有任何 mode 字段。
 
 
 def parse_course_arg(raw: object) -> tuple[str, str]:
-    """解析一个课程规格：`NAME` / `NAME=mode`（mode ∈ {online, offline}）。
+    """解析一个课程规格：`NAME` / `NAME=mode`（mode 段**已退役**，只为 WARN 而返回）。
 
     空名/含路径分隔符/含空白 → ProtocolError（**响亮拒启**：课程名进的是磁盘路径，
     `../x` 之类必须在这里断掉，不能等落盘才发现写到别处去了）。
+    第二项返回值 = 模式段原文（没有就空串）——它不再是任何判据、不校验值域，
+    只用来让调用方（`hub/boot.py`）在启动日志里说一句「模式已退役，按无模式处理」
+    （P1-3：不 400，别 brick 老启动脚本）。
     """
     s = str(raw or "").strip()
     name, _, mode = s.partition("=")
     name = name.strip()
-    mode = (mode.strip() or COURSE_MODE_ONLINE).lower()
     if not name:
         raise ProtocolError(f"课程名不能为空（收到 {raw!r}）")
     if any(ch in name for ch in "/\\") or any(ch.isspace() for ch in name) or name in (".", ".."):
         raise ProtocolError(f"课程名非法（不许路径分隔符/空白）: {name!r}")
-    if mode not in COURSE_MODES:
-        raise ProtocolError(f"课程模式必须是 {list(COURSE_MODES)}，收到 {mode!r}")
-    return name, mode
+    return name, (mode.strip() or "")
 
 #: M2 blob 载荷名（pull 端点 `GET /jobs/{id}/blob?name=opt|ref|demo|init`；push body `blobs`）。
 BLOB_OPT = "opt"

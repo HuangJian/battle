@@ -79,12 +79,12 @@ def _manifest(jid: str, it: int = 1, *, dispatch: str = "push") -> dict:
     return normalize_manifest(m)
 
 
-def _hub(tmp_path: Path, courses: list[str], modes: dict[str, str] | None = None) -> _HubQueue:
+def _hub(tmp_path: Path, courses: list[str]) -> _HubQueue:
     stores = {
         c: _JobStore(tmp_path / c / "remote-jobs", tmp_path / c / "training_log.jsonl")
         for c in courses
     }
-    return _HubQueue(stores, order=courses, modes=modes or {})
+    return _HubQueue(stores, order=courses)
 
 
 def _publish(hub: _HubQueue, course: str, jid: str, it: int = 1, *, dispatch: str = "push") -> dict:
@@ -310,23 +310,29 @@ def test_dispatch_pushes_to_idle_worker_and_ingests_result(tmp_path: Path, worke
     assert hub.claimable_job_ids("x2") == []
 
 
-def test_busy_worker_is_skipped_and_offline_course_is_not_dispatched(
+def test_busy_worker_is_skipped_and_held_course_is_not_dispatched(
     tmp_path: Path, worker_factory
 ) -> None:
-    """忙的 worker 不接活（推给另一台）；离线课**一份都不推**（它只收回传）。"""
+    """忙的 worker 不接活（推给另一台）；**被接管的课一份都不推**（它只跑离线段）。
+
+    ★M4b：旧用例钉的是「离线课不推」——模式退役后同一道闸换成 **hold**（role_blocked
+    的第三层，它吃所有 kind）。
+    """
     busy = worker_factory(busy=True)
     idle = worker_factory()
-    hub = _hub(tmp_path, ["on", "off"], modes={"off": "offline"})
+    hub = _hub(tmp_path, ["on", "off"])
     _publish(hub, "on", "a" * 16)
     _publish(hub, "off", "b" * 16)
+    hub.note_hold("off", worker_id="cloud-1", token="tok")
     ws = _workers_with(tmp_path, worker_factory, (busy, {"id": "g1"}), (idle, {"id": "g2"}))
     disp = _dispatcher(hub, ws)
 
     disp.tick()
     assert _wait_until(lambda: idle.received == ["a" * 16])
     assert busy.received == []
-    # 离线课：队列里躺着也没人推（job 仍在池里等它自己的腿）
+    # 被接管的课：队列里躺着也没人推（job 仍在池里等接管解除/掉线）
     assert hub.claimable_job_ids("off") == ["b" * 16]
+    assert hub.role_blocked("b" * 16, "online").startswith("held:")
     assert hub._stores["off"].get_result("b" * 16) is None
     # 在线课推完即出结果
     assert _wait_until(lambda: hub._stores["on"].get_result("a" * 16) is not None)

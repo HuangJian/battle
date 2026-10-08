@@ -32,7 +32,6 @@ import remote.worker as W
 from common.protocol import (
     AUTH_HEADER,
     COURSE_ENABLE_MARKER,
-    COURSE_MODE_OFFLINE,
     ROLE_HEADER,
     ROLE_HEADER_VALUE,
     ROLE_OFFLINE,
@@ -247,8 +246,9 @@ def test_run_job_forwards_the_hub_course_into_the_backfeed() -> None:
 def _publish_offline_course(root: Path, course: str, jid: str) -> None:
     """在盘上造一门**已开课**的课，里面躺着一份 `kind=run`（整段 ⇒ 离线盘的活）的 job。
 
-    ⚠ 这里**不**调 `set_mode(OFFLINE)`：归属是 job 自己的属性（发布时定死），与课程当前
-    mode 无关——这正是本文件要钉住的那条（旧口径靠 mode，切一次就漂）。
+    ⚠ 这里不碰任何课程级状态（★M4b：mode 已退役——今天课程上只剩 hold，而它也不该
+    参与归属）：归属是 job 自己的属性（发布时定死）——这正是本文件要钉住的那条
+    （旧口径靠 mode，切一次就漂）。
     """
     from hub.server import _JobStore
 
@@ -288,8 +288,9 @@ def test_offline_role_job_is_invisible_to_online_disk_and_claimable_by_offline(
     try:
         _publish_offline_course(tmp_path, "c5-gae", "j" * 16)
         assert hub.discover() == ["c5-gae"]
-        # 课程 mode 是**在线**：看看它能不能改变归属（不能——旧口径就是在这里读 mode 的）
-        assert hub.mode_of("c5-gae") != COURSE_MODE_OFFLINE
+        # 课程上没有任何模式状态（★M4b 已删）；只有 hold 能动派发——而本段没接管 =
+        # 归属完全由 job 自己的 role 决定
+        assert hub.hold_of("c5-gae") == {}
 
         # 在线盘：hub 说「没有可领的 job」（整段 job 只给离线盘）
         assert hub_poll(base, TOKEN, worker_id="plain") is None

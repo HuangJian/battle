@@ -129,35 +129,28 @@ def _export_pack(tmp_path: Path, *, run_id: str, plan: bytes, monkeypatch) -> Pa
 # ───────────────── ① 撤销后的回传：不推进活动权重（镜像/归档照落） ─────────────────
 
 
-def test_revoked_backfeed_does_not_advance_active_weights(tmp_path: Path) -> None:
-    base, hub, srv = _boot(tmp_path)
+def test_backfeed_without_a_hold_advances_active_weights(tmp_path: Path) -> None:
+    """无 hold ⇒ 回传照旧推进活动权重（手动送包 / 旧端 / 协作回传的兼容腿，★M4b）。
+
+    旧的 pinned_online「人固定在线 ⇒ 不推进」用例随权威删除；接管期的两态（live+token /
+    stale）由 `test_live_hold_needs_the_matching_lease_token_to_advance` 与
+    `test_stale_hold_backfeed_does_not_advance` 覆盖 —— 本条钉第三态（无 hold ⇒ 准）。
+    """
+    base, _hub, srv = _boot(tmp_path)
     try:
         active = b'{"format":"nn-weights-json","params":{"w":1}}'
         (tmp_path / COURSE / "weights.json").write_bytes(active)
-        assert hub.set_mode_pinned(COURSE, "online", True)[0] is True  # 人切「固定在线」
-        assert hub.authority_of(COURSE) == "pinned_online"
-
         newer = b'{"format":"nn-weights-json","params":{"w":999}}'
         st, doc = _post(
             base, OFFLINE_ARTIFACT_PATH, _round_body(7, newer, run_id="seg-old")
         )
         assert st == 200 and doc.get("status") == "accepted", doc
-        # 镜像照落（「算过什么」的证据面不受归属影响）
+        assert doc.get("advance_active") is True, doc
+        # 镜像照落（「算过什么」的证据面）且活动权重推进
         mirror = (
             tmp_path / COURSE / "remote-jobs" / "offline" / "seg-old" / "it-007" / "weights.json"
         )
-        assert mirror.is_file()
-        assert mirror.read_bytes() == newer
-        # 活动权重**不动**：旧会话的回传不是「课程现在的进度」
-        assert (tmp_path / COURSE / "weights.json").read_bytes() == active
-
-        # 对照组：交还自动（pin=0）⇒ 同形状的回传照旧推进活动权重
-        assert hub.set_mode_pinned(COURSE, "online", False)[0] is True
-        assert hub.authority_of(COURSE) == "auto"
-        st2, doc2 = _post(
-            base, OFFLINE_ARTIFACT_PATH, _round_body(8, newer, run_id="seg-new")
-        )
-        assert st2 == 200 and doc2.get("status") == "accepted", doc2
+        assert mirror.is_file() and mirror.read_bytes() == newer
         assert (tmp_path / COURSE / "weights.json").read_bytes() == newer
     finally:
         srv.shutdown()

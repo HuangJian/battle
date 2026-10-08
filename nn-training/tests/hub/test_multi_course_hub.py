@@ -37,8 +37,6 @@ from common.protocol import (
     AUTH_HEADER,
     CLAIM_TTL_SEC,
     COURSE_ENABLE_MARKER,
-    COURSE_MODE_OFFLINE,
-    COURSE_MODE_ONLINE,
     ROLE_OFFLINE,
     ROLE_ONLINE,
     WORKER_ID_HEADER,
@@ -72,18 +70,21 @@ def _isolate_weights_archive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 @pytest.mark.parametrize(
     ("raw", "want"),
     [
-        ("tiny-a", ("tiny-a", COURSE_MODE_ONLINE)),
-        ("tiny-a=offline", ("tiny-a", COURSE_MODE_OFFLINE)),
-        (" tiny-a = OFFLINE ", ("tiny-a", COURSE_MODE_OFFLINE)),
-        ("x1-rebirth-a2", ("x1-rebirth-a2", COURSE_MODE_ONLINE)),
-        ("tiny-a=", ("tiny-a", COURSE_MODE_ONLINE)),  # 空模式 = online（不是错误）
+        # ★M4b：模式段已退役 —— 第二项 = 段原文（不再归一化、不校验值域），
+        # 只用来让 hub 启动时 WARN 一句（P1-3）。
+        ("tiny-a", ("tiny-a", "")),
+        ("tiny-a=offline", ("tiny-a", "offline")),
+        (" tiny-a = OFFLINE ", ("tiny-a", "OFFLINE")),
+        ("x1-rebirth-a2", ("x1-rebirth-a2", "")),
+        ("tiny-a=", ("tiny-a", "")),  # 空模式段 = 没带（不是错误）
     ],
 )
 def test_parse_course_arg(raw: str, want: tuple[str, str]) -> None:
     assert parse_course_arg(raw) == want
 
 
-@pytest.mark.parametrize("raw", ["", "   ", "=offline", "../x", "a/b", "a\\b", "a b", "..", ".", "a=bogus"])
+# ★M4b：模式值域不再校验（`a=bogus` 今天合法 —— 模式段只作 WARN 标记）。
+@pytest.mark.parametrize("raw", ["", "   ", "=offline", "../x", "a/b", "a\\b", "a b", "..", "."])
 def test_parse_course_arg_rejects(raw: str) -> None:
     """课程名进磁盘路径 ⇒ 非法名必须在这里响亮拒启，不能等落盘才发现写歪了。"""
     with pytest.raises(ProtocolError):
@@ -168,7 +169,6 @@ def _manifest(
 def _hub(
     tmp_path: Path,
     courses: tuple[str, ...] = ("a", "b"),
-    offline: tuple[str, ...] = (),
     clock: _Clock | None = None,
 ) -> _HubQueue:
     stores = {
@@ -179,8 +179,7 @@ def _hub(
         )
         for c in courses
     }
-    modes = {c: (COURSE_MODE_OFFLINE if c in offline else COURSE_MODE_ONLINE) for c in courses}
-    return _HubQueue(stores, order=list(courses), modes=modes, now_fn=clock)
+    return _HubQueue(stores, order=list(courses), now_fn=clock)
 
 
 def _publish(
@@ -250,30 +249,30 @@ def test_offline_role_job_needs_offline_role(tmp_path: Path) -> None:
     assert hub.claim_next(worker_id="w2", role=ROLE_OFFLINE) is None
 
 
-def test_role_survives_mode_flips(tmp_path: Path) -> None:
-    """本 plan 的核心不变式：**归属不随课程 mode 漂移**（含连续重复的切换）。
+def test_role_survives_hold_cycles(tmp_path: Path) -> None:
+    """本 plan 的核心不变式：**归属不随课程状态漂移**（★M4b：循环量从 mode 切换换成
+    hold 的建立/解除 —— 那是今天唯一还在动的课程级状态）。
 
     旧行为：切回在线 ⇒ 同一份离线 job 立刻敞开放给所有 worker（事故现场的形状）。
+    今天两条闸各自独立：**归属闸**永远按 job 的 role 拒在线盘；**接管闸**在 hold 期间
+    把两边都压住（包括离线盘 —— 接管者此刻在跑离线段），解除后立刻放开。
     """
     hub = _discover_hub(tmp_path)
     _publish_standalone(tmp_path, "c1", "j" * 16, role=ROLE_OFFLINE)
     hub.discover()
 
-    modes = (
-        COURSE_MODE_OFFLINE,
-        COURSE_MODE_ONLINE,
-        COURSE_MODE_ONLINE,
-        COURSE_MODE_OFFLINE,
-        COURSE_MODE_ONLINE,
-    )
-    for i, mode in enumerate(modes):
-        assert hub.set_mode("c1", mode) is True
-        assert hub.job_role("j" * 16) == ROLE_OFFLINE, f"第 {i} 次切换后归属漂了（mode={mode}）"
+    for i in range(2):
+        hub.note_hold("c1", worker_id="w1", token=f"tok-{i}")
+        assert hub.job_role("j" * 16) == ROLE_OFFLINE, f"第 {i} 次接管后归属漂了"
         assert hub.claim_next(worker_id="w1", role=ROLE_ONLINE) is None, (
-            f"第 {i} 次切换后在线盘拿到了离线盘的活（mode={mode}）"
+            f"第 {i} 次接管期间在线盘拿到了离线盘的活"
         )
-    # 离线盘从头到尾都能领（上面每一次尝试都没能搬走它）
-    assert _claim(hub, "w1", role=ROLE_OFFLINE)[:2] == ("c1", "j" * 16)
+        assert hub.claim_next(worker_id="w2", role=ROLE_OFFLINE) is None, "接管期间离线盘也领不到"
+        assert hub.hold_of("c1")["state"] == "live"
+        assert hub.revoke_offline_lease("c1", "test") is True
+        assert hub.hold_of("c1") == {}
+    # 解除后离线盘立刻能领（归属从头到尾没漂过）
+    assert _claim(hub, "w2", role=ROLE_OFFLINE)[:2] == ("c1", "j" * 16)
 
 
 def test_offline_role_worker_no_longer_claims_online_jobs(tmp_path: Path) -> None:
@@ -412,13 +411,18 @@ def test_offline_role_job_is_not_dispatched_to_online_pool(tmp_path: Path) -> No
     assert _claim(hub, "w1")[:2] == ("b", "c" * 16)
 
 
-def test_active_courses_excludes_offline_and_idle(tmp_path: Path) -> None:
-    """竞速判据的分母：非离线 + 有活（待领或在飞）。空转的课不算。"""
-    hub = _hub(tmp_path, courses=("a", "b", "c"), offline=("c",))
+def test_active_courses_excludes_held_and_idle(tmp_path: Path) -> None:
+    """竞速判据的分母：**非 live-hold** + 有活（待领或在飞）。空转的课不算。
+
+    ★M4b（P2-7）：模式退役后判据换成 hold —— 读数随接管建立/解除在 1↔N 间跳，
+    这是**观测口径**不是派发输入（§69 写明）。
+    """
+    hub = _hub(tmp_path, courses=("a", "b", "c"))
     assert hub.active_courses() == 0, "谁都没活"
     _publish(hub, "a", "a" * 16)
     assert hub.active_courses() == 1
-    _publish(hub, "c", "c" * 16)  # 离线课即便有活也不计
+    _publish(hub, "c", "c" * 16)
+    hub.note_hold("c", worker_id="w1", token="tok")  # 被接管：即便有活也不计
     assert hub.active_courses() == 1
     _publish(hub, "b", "b" * 16)
     assert hub.active_courses() == 2
@@ -511,7 +515,7 @@ def test_http_serves_all_courses_and_reports_course(tmp_path: Path) -> None:
 
 
 def test_admin_queue_and_courses_surfaces(tmp_path: Path) -> None:
-    """/admin/queue（每课深度/在飞/轮转游标）与 /admin/courses（含热切离线）。"""
+    """/admin/queue（每课深度/在飞/轮转游标）与 /admin/courses（★M4b：去模式，只认 hold）。"""
     hub = _hub(tmp_path)
     _publish(hub, "a", "a" * 16)
     _publish(hub, "b", "b1" + "0" * 14)
@@ -523,57 +527,54 @@ def test_admin_queue_and_courses_surfaces(tmp_path: Path) -> None:
         assert q["courses"]["a"]["pending_n"] == 1
         assert q["courses"]["b"]["pending_n"] == 2
         assert q["courses"]["b"]["next_job"] == "b1" + "0" * 14, "FIFO：队首是先生成的"
-        assert q["offline"] == [] and q["order"] == ["a", "b"]
+        assert "offline" not in q and q["order"] == ["a", "b"], "★M4b：离线课单随模式退役"
 
         st, c = _http(base, "/admin/courses")
         assert st == 200 and [x["course"] for x in c["courses"]] == ["a", "b"]
-        # 热切 b 为离线 ⇒ 立刻不派，但它仍在队列里
-        st, r = _http(base, "/admin/courses?course=b&mode=offline", method="POST")
-        assert st == 200 and r["mode"] == "offline"
+        # 模式热切已退役 ⇒ 响亮 400（旧控制台/老脚本看得见「为什么」），且不改现状
+        for bad in ("?course=b&mode=offline", "?course=b&mode=bogus", "?course=b&pin=1"):
+            st, r = _http(base, "/admin/courses" + bad, method="POST")
+            assert st == 400 and "退役" in str(r["error"]), (bad, r)
+        # release_hold（唯一还在的写动作）：本来就没接管 ⇒ 409
+        st, r = _http(base, "/admin/courses?course=b&release_hold=1", method="POST")
+        assert st == 409, r
+        # 接管建立 ⇒ 队列行读得到；pending 一字不动（D2：压下不撤单）
+        hub.note_hold("b", worker_id="w1", token="tok")
         st, q2 = _http(base, "/admin/queue")
-        assert q2["offline"] == ["b"] and q2["courses"]["b"]["mode"] == "offline"
-        assert q2["courses"]["b"]["pending_n"] == 2, "改模式不动队列内容"
-        # 非法课程/模式 → 400 且不改现状
-        for bad in ("?course=zz&mode=offline", "?course=b&mode=bogus"):
-            st, _r = _http(base, "/admin/courses" + bad, method="POST")
-            assert st == 400, bad
-        st, q3 = _http(base, "/admin/queue")
-        assert q3["offline"] == ["b"]
+        assert q2["courses"]["b"]["pending_n"] == 2, "接管不动队列内容"
+        assert q2["courses"]["b"]["hold"]["state"] == "live", q2["courses"]["b"]
+        # release_hold ⇒ 立刻解除（这就是「强制解除接管」那颗钮）
+        st, r = _http(base, "/admin/courses?course=b&release_hold=1", method="POST")
+        assert st == 200 and r["released"] is True, r
+        assert hub.hold_of("b") == {}
     finally:
         srv.shutdown()
         srv.server_close()
         th.join(timeout=5)
 
 
-def test_mode_post_discovers_the_course_on_demand(tmp_path: Path) -> None:
-    """`POST /admin/courses` 指名的课**刚建好目录、扫描还没轮到**时，也必须靠按需真扫接住。
+def test_mode_post_is_retired_and_discovers_nothing(tmp_path: Path) -> None:
+    """★M4b（兼容矩阵「旧 console × 新 hub」）：模式 POST 只回 400 退役文案，
+    **不再触发按需发现**——旧控制台的意图写面已随模式一起消失（唯一 opt-out = 停课）。
 
-    2026-09-23 用户报障（真机日志）：共享 hub 刚重启（`courses=[]`）——控制台那份「离线意图
-    回灌」跑在第一次顺带扫描**之前**，九条 POST 全 400；随后三个离线课各自靠「开课时有界
-    重试（3×2s）」去赌发现时机，**恰有一门输掉**（最后一次重试 20:29:46、发现也 20:29:46）
-    ⇒ 该课静默留在 online，面板一直显示「在训 / 切离线」，而操作员以为自己开的是离线课。
-    修法：POST 只在「课不在表里」时跳间隔闸真扫一次再试（模式非法不白扫盘）。
+    旧名 `test_mode_post_discovers_the_course_on_demand`：那条钉的是 2026-09-23 的
+    「按需真扫」修法，随 mode POST 一起退役。
     """
     clock = _Clock()
     hub = _discover_hub(tmp_path, clock)
     base, _hub_ref, srv, th = _boot(tmp_path, hub)
     try:
-        # 第一次顺带扫描之后才开课（模拟「刚建好 remote-jobs/」）——此刻闸还没过期
         _mk_course_dir(tmp_path, "late")
         clock.tick(hub.DISCOVER_SCAN_MIN_SEC / 2)
         assert hub.courses() == []
-        st, r = _http(base, "/admin/courses?course=late&mode=offline", method="POST")
-        assert st == 200, r
-        assert r["mode"] == "offline"
-        assert hub.courses() == ["late"] and hub.mode_of("late") == COURSE_MODE_OFFLINE
-        st, q = _http(base, "/admin/queue")
-        assert q["offline"] == ["late"]
-        # 真不存在的课仍然 400（按需发现不是「什么都接受」），且不改变课程表
-        st, _r = _http(base, "/admin/courses?course=ghost&mode=offline", method="POST")
-        assert st == 400 and hub.courses() == ["late"]
-        # 模式非法不用扫盘：直接 400
-        st, _r = _http(base, "/admin/courses?course=late&mode=bogus", method="POST")
-        assert st == 400 and hub.mode_of("late") == COURSE_MODE_OFFLINE
+        for bad in ("?course=late&mode=offline", "?course=ghost&mode=offline", "?course=late&mode=bogus"):
+            st, r = _http(base, "/admin/courses" + bad, method="POST")
+            assert st == 400 and "退役" in str(r["error"]), (bad, r)
+        # 课程表一字不动（不为旧意图写面扫盘）
+        assert hub.courses() == []
+        # 没有模式参数、也没有 release_hold ⇒ 未知动作 400（不是静默成功）
+        st, r = _http(base, "/admin/courses?course=late", method="POST")
+        assert st == 400 and "只认 release_hold" in str(r["error"]), r
     finally:
         srv.shutdown()
         srv.server_close()
@@ -762,14 +763,13 @@ def test_discover_registers_published_course(tmp_path: Path) -> None:
     assert hub.courses() == []
     _publish_standalone(tmp_path, "c1", "j" * 16)
     assert hub.discover() == ["c1"]
-    assert hub.courses() == ["c1"]
-    assert hub.mode_of("c1") == COURSE_MODE_ONLINE
+    assert hub.hold_of("c1") == {} and hub.pending_export_of("c1") == {}
     course, jid, _tok = _claim(hub, "w1")
     assert (course, jid) == ("c1", "j" * 16)
-    # 幂等：已登记的课不重复登记（返回空），而模式不被重置
-    hub.set_mode("c1", COURSE_MODE_OFFLINE)
+    # 幂等：已登记的课不重复登记（返回空）——接管不属于「登记态」，不被重置
+    hub.note_hold("c1", worker_id="w1", token="tok")
     assert hub.discover() == []
-    assert hub.mode_of("c1") == COURSE_MODE_OFFLINE
+    assert hub.hold_of("c1")["worker_id"] == "w1"
 
 
 def test_discover_skips_a_course_that_was_never_opened(tmp_path: Path) -> None:

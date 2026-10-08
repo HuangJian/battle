@@ -11,8 +11,8 @@ hub 问询，逐个下载离线任务包并完成训练任务」。
     等于废掉整个会话）、`release` **不覆盖**别人的租约；
   * **云机侧**（`fetch_task_list` / `resolve_courses` / `_run_auto` / `worker_id_of` / 心跳）：
     老 hub 只探测一次就降级、`CFG.course` 非空时**一次都不问清单**、清单空 = 正常收工（rc=0）、
-    `served[包 sha]` 防自激、租约的任何失败**不影响**训练；`resolve_courses` 两层选择
-    （★ 2026-10-03 用户裁决）：离线可领整批优先，没有就抢 `seize` 行里 `open_time` 最小的一门。
+    `served[包 sha]` 防自激、租约的任何失败**不影响**训练；`resolve_courses` 一层选择
+    （★M4b：课程无模式）：`claimable` 的行整批取，`pending_export` 的行排最后。
 """
 
 from __future__ import annotations
@@ -116,11 +116,13 @@ def _age(path: Path, secs: float = 7200.0) -> None:
 
 
 def _offline_hub(tmp_path: Path) -> tuple[str, _HubQueue, ThreadingHTTPServer]:
-    """起 hub + 一门已切离线的课（大部分清单用例的公共前戏）。"""
+    """起 hub + 一门在训的课（大部分清单用例的公共前戏）。
+
+    ★M4b：不再「切离线」——课程无模式；在训 = 开课标记在（唯一 opt-out = 停课）。
+    """
     base, hub, srv = _boot(tmp_path)
     _course(tmp_path)
     hub.discover(force=True)
-    assert hub.set_mode("c5-gae", "offline") is True
     return base, hub, srv
 
 
@@ -158,40 +160,31 @@ def test_tasks_is_readonly_and_stable(tmp_path: Path) -> None:
     assert dict(hub_server._TASK_PACK_TRIGGERS) == before, "清单不得写触发账本"
 
 
-def test_tasks_marks_in_training_online_course_as_seize(tmp_path: Path) -> None:
-    """★ 默认清单的在线在训课 + ★六轮 §4.2 半回摆（pin online 重新获得阻止力）：
+def test_tasks_lists_in_training_course_and_stop_is_the_only_opt_out(tmp_path: Path) -> None:
+    """★M4b（去模式）：在训课一律进默认清单（无包也进 —— claim 即触发导包，唯一入口）；
+    停课（删开课标记）= **唯一 opt-out**：默认面不列，`?include=all` 给 `not_offline`。
 
-    · 在训的 **auto** 在线课会出现（允许无包；claim 即触发导包 —— 自动交接的唯一入口）
-      且带 `seize=True`（离线盘可抢）与 `open_time`（抢的顺序键）；
-    · **pin online ⇒ `pinned_online`**：行**照发**（小项 5：云机空队列自解释不该少这一档），
-      但 `claimable=false`、`seize=false`、`reason` 以 `pinned:` 开头；点「交还自动」后恢复可抢。
-    · 停课（删开课标记）= 唯一 opt-out：默认面不列，`?include=all` 给 `not_offline`。
+    `authority`/`auto_handoff`/`seize`/`pinned_online` 这些模式时代的键**一个都不许回来**。
     """
     base, hub, _srv = _boot(tmp_path)
     _course(tmp_path)
     hub.discover(force=True)
-    assert hub.mode_of("c5-gae") == "online"
 
     rows = _json(_req(base, OFFLINE_TASKS_PATH)[1])["tasks"]
     assert [r["course"] for r in rows] == ["c5-gae"]
-    assert rows[0]["authority"] == "auto"
-    assert rows[0]["auto_handoff"] is True and rows[0]["claimable"] is True
-    assert rows[0]["seize"] is True and rows[0]["open_time"] < 1e18
-
-    # pin online：不再可抢，但**不藏**——行照发、只是 claimable/seize 都是 false（六轮 F6）。
-    assert hub.set_mode_pinned("c5-gae", "online", True)[0] is True
-    rows2 = _json(_req(base, OFFLINE_TASKS_PATH)[1])["tasks"]
-    assert [r["course"] for r in rows2] == ["c5-gae"]
-    assert rows2[0]["authority"] == "pinned_online"
-    assert rows2[0]["seize"] is False and rows2[0]["claimable"] is False
-    assert str(rows2[0]["reason"]).startswith("pinned:")
+    assert rows[0]["state"] == "no_pack" and rows[0]["claimable"] is True
+    assert rows[0]["open_time"] < 1e18, "开课时间还在（hub 排序键，不是给云机抢活的）"
+    for dead in ("authority", "auto_handoff", "seize"):
+        assert dead not in rows[0], dead
 
     # 停课：唯一 opt-out（默认面消失；排障面 not_offline）
     os.remove(tmp_path / "c5-gae" / COURSE_ENABLE_MARKER)
     assert _json(_req(base, OFFLINE_TASKS_PATH)[1])["tasks"] == []
     rows_all = _json(_req(base, OFFLINE_TASKS_PATH + "?include=all")[1])["tasks"]
     assert [r["state"] for r in rows_all] == ["not_offline"]
-    assert rows_all[0]["claimable"] is False and rows_all[0]["seize"] is False
+    assert rows_all[0]["claimable"] is False
+    for dead in ("authority", "auto_handoff", "seize"):
+        assert dead not in rows_all[0], dead
 
 
 def test_tasks_candidate_face_is_disk_fact_not_the_course_table(tmp_path: Path) -> None:
@@ -307,10 +300,9 @@ def test_claim_needs_a_worker_and_an_existing_pack(
 ) -> None:
     """空 worker = 400（两台会互相顶租约）；缺包分两种（2026-10-03，plan/auto-offline-handoff）：
 
-    · **自动候选**（在训课 —— pin 不再拦，用户 2026-10-03 裁决）⇒ 409 + 翻 mode + 触发导包
-      （P0-1：旧的 404 会让「自动课普遍无包」变成死锁，整条自动交接链永不启动）；
-    · **停课残留**（开课标记已删）⇒ ★六轮 F3（行为变更）：**409 `not_offline`**（旧写法是 404
-      ——生产 `stopCourse` 推 `mode=offline`，旧 claim 门会放行 ⇒ 停课 + 有包今天能被领走）。
+    · **在训课**（唯一候选 = 开课标记在）⇒ 409 + `pending_export`（★M4b/Q1：旧的「翻 mode
+      + 触发导包」今天只剩导包软态半边；无包**不建 hold** —— 导包产出的包要能追移动靶）；
+    · **停课残留**（开课标记已删）⇒ 409 `not_offline`（唯一 opt-out）。
     """
     from hub import offline as offline_mod
 
@@ -321,10 +313,11 @@ def test_claim_needs_a_worker_and_an_existing_pack(
     st, doc = _claim(base, worker="")
     assert st == 400 and "worker" in doc["error"]
     st, doc = _claim(base, worker="w1")
-    assert st == 409 and doc["auto_handoff"] is True and doc["pending_export"] is True
-    assert hub.mode_of("c5-gae") == "offline"
+    assert st == 409 and doc["pending_export"] is True
+    assert hub.pending_export_of("c5-gae")["by"] == "w1"
+    assert hub.hold_of("c5-gae") == {}, "★Q1：无包不建 hold（导包只是软态）"
 
-    os.remove(tmp_path / "c5-gae" / COURSE_ENABLE_MARKER)  # 停课 ⇒ 退出自动候选
+    os.remove(tmp_path / "c5-gae" / COURSE_ENABLE_MARKER)  # 停课 ⇒ 唯一 opt-out
     st, doc = _claim(base, worker="w1")
     assert st == 409 and doc["not_offline"] is True, doc
 
@@ -505,7 +498,6 @@ def test_resolve_courses_renews_my_own_stale_lease(
         {
             "course": "mine",
             "claimable": False,
-            "seize": False,
             "state": "claimed",
             "reason": "held: w-me",
             "holder": {"worker_id": "w-me", "expires_in": 812.0},
@@ -514,7 +506,6 @@ def test_resolve_courses_renews_my_own_stale_lease(
         {
             "course": "other",
             "claimable": False,
-            "seize": False,
             "state": "claimed",
             "reason": "held: w-other",
             "holder": {"worker_id": "w-other", "expires_in": 500.0},
@@ -551,7 +542,6 @@ def test_resolve_courses_logs_why_a_row_is_blocked(monkeypatch: pytest.MonkeyPat
         {
             "course": "stopped",
             "claimable": False,
-            "seize": False,
             "state": "not_offline",
             "reason": "not_offline",
             "pack": {"sha256": "aa" * 32},
@@ -559,7 +549,6 @@ def test_resolve_courses_logs_why_a_row_is_blocked(monkeypatch: pytest.MonkeyPat
         {
             "course": "held",
             "claimable": False,
-            "seize": False,
             "state": "ready",
             "reason": "held: tpu-1",
             "pack": {"sha256": "bb" * 32},
@@ -567,7 +556,6 @@ def test_resolve_courses_logs_why_a_row_is_blocked(monkeypatch: pytest.MonkeyPat
         {
             "course": "nopack",
             "claimable": False,
-            "seize": False,
             "state": "empty",
             "reason": "",
             "pack": None,
@@ -581,55 +569,56 @@ def test_resolve_courses_logs_why_a_row_is_blocked(monkeypatch: pytest.MonkeyPat
     assert (got, blocked) == ([], [])
     assert manifest == tasks, "第三个返回值必须是原始清单（终态判据要它的 state）"
     note = "\n".join(lines)
-    assert "不可领/不可抢" in note, lines
+    assert "不可领" in note, lines
     assert "stopped[not_offline；not_offline]" in note, lines
     assert "held[ready；held: tpu-1]" in note, lines
     assert "nopack[empty；无任务包（等控制台导出）]" in note, lines
 
 
-def test_resolve_courses_prefers_offline_over_seize(monkeypatch: pytest.MonkeyPatch) -> None:
-    """★ 用户裁决的优先级：有就绪的离线课 ⇒ 只取它，在训在线课（seize）这次不碰；
-    离线课那份已跑过（served 同 sha）⇒ 顺延去抢。"""
-    tasks = [
-        {"course": "off", "claimable": True, "seize": False, "pack": {"sha256": "aa" * 32}},
-        {"course": "on", "claimable": True, "seize": True, "pack": {"sha256": "bb" * 32}},
-    ]
-    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
-    monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
-    got, _blocked, _manifest = offline_boot.resolve_courses({}, {}, lambda _m: None)
-    assert [t["course"] for t in got] == ["off"]
-    got2, _b2, _m2 = offline_boot.resolve_courses({}, {}, lambda _m: None, served={"off": "aa" * 32})
-    assert [t["course"] for t in got2] == ["on"]
-
-
-def test_resolve_courses_seizes_the_first_in_training_online_course(
+def test_resolve_courses_takes_the_claimable_batch_pending_export_last(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """没有就绪的离线课 ⇒ 按 `open_time` 升序抢**一门**（tie 用课名）；缺 `open_time`
-    （老 hub / 磁盘读不到）排最后；busy 的行照收（claim 会回 409 busy，调用方等下一拍
-    而不是烧 idle 预算）。"""
+    """★M4b：课程无模式 ⇒ 旧口径的「离线优先 / 没有就抢第一个在训在线课」两条腿塌成一条：
+    `claimable` 的行**整批**取（hub 已排好序，客户端不再自己挑一门）；`pending_export`
+    的行排最后（软态不占闸，但 claim 必然 409 —— 别让它把注定失败的 claim 排在队首）。"""
     tasks = [
-        {"course": "b-late", "claimable": False, "seize": True, "open_time": 200.0, "pack": None},
-        {"course": "c-tie", "claimable": False, "seize": True, "open_time": 100.0, "pack": None},
-        {
-            "course": "a-tie",
-            "claimable": False,
-            "seize": True,
-            "open_time": 100.0,
-            "pack": {"sha256": "aa" * 32},
-        },
-        {"course": "d-nokey", "claimable": False, "seize": True, "pack": None},
+        {"course": "exporting", "claimable": True, "pending_export": True, "pack": None},
+        {"course": "ready-b", "claimable": True, "pack": {"sha256": "bb" * 32}},
+        {"course": "ready-a", "claimable": True, "pack": {"sha256": "aa" * 32}},
+        {"course": "stopped", "claimable": False, "state": "not_offline", "pack": None},
     ]
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
     lines: list[str] = []
     got, _blocked, _manifest = offline_boot.resolve_courses({}, {}, lines.append)
-    assert [t["course"] for t in got] == ["a-tie"]
-    assert any("抢占第一个在训在线课" in ln for ln in lines), lines
+    assert [t["course"] for t in got] == ["ready-b", "ready-a", "exporting"]
+    assert any("pending_export" in ln for ln in lines), lines
+    # 已跑过的包（served 同 sha）⇒ 顺延下一门：过滤对两条腿同一套
+    got2, _b2, _m2 = offline_boot.resolve_courses(
+        {}, {}, lambda _m: None, served={"ready-b": "bb" * 32}
+    )
+    assert [t["course"] for t in got2] == ["ready-a", "exporting"]
 
-    # 已跑过 a-tie 的这份包 ⇒ 顺延到下一门（c-tie）：过滤与离线路同一套。
-    got2, _b2, _m2 = offline_boot.resolve_courses({}, {}, lambda _m: None, served={"a-tie": "aa" * 32})
-    assert [t["course"] for t in got2] == ["c-tie"]
+
+def test_resolve_courses_picks_all_claimable_without_mode_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★M4b：hub 不再发 `seize`/`authority`/`auto_handoff` —— 判据只剩 `claimable`
+    （含无包课：claim 会触发导包、回 409 移交调用方）；`served` 过滤与在训课同一套。"""
+    tasks = [
+        {"course": "a-tie", "claimable": True, "state": "ready", "pack": {"sha256": "aa" * 32}},
+        {"course": "b-late", "claimable": True, "state": "no_pack", "pack": None},
+        {"course": "stopped", "claimable": False, "state": "not_offline", "pack": None},
+    ]
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
+    monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
+    got, _blocked, _manifest = offline_boot.resolve_courses({}, {}, lambda _m: None)
+    assert [t["course"] for t in got] == ["a-tie", "b-late"]
+    assert all("seize" not in t and "authority" not in t for t in tasks), "夹具不得带退役键"
+    got2, _b2, _m2 = offline_boot.resolve_courses(
+        {}, {}, lambda _m: None, served={"a-tie": "aa" * 32}
+    )
+    assert [t["course"] for t in got2] == ["b-late"]
 
 
 def test_run_batch_does_not_run_while_the_handoff_is_pending(
@@ -1027,8 +1016,7 @@ def test_claim_course_maps_auto_handoff_states(monkeypatch: pytest.MonkeyPatch) 
         ({"pending_export": True, "give_up": True}, "give_up"),
         ({"completed": True}, "completed"),
         ({"not_offline": True}, "not_offline"),
-        # ★P1-4 / 六轮 F6：人固定在线 ⇒ 与「停课/被持有」分开的一码（本拍不跑）
-        ({"pinned_online": True}, "pinned_online"),
+        # ★M4b：`pinned_online` 一档随模式退役（hub 不再发它）——新客户端只认下面这几种。
         ({"holder": {"worker_id": "w9"}}, "held"),
     ]
     for doc, want in cases:
@@ -1066,38 +1054,27 @@ def test_heartbeat_loop_stops_on_revoked(monkeypatch: pytest.MonkeyPatch) -> Non
     assert len(hits) <= n + 1, "revoked 之后不该继续打点"
 
 
-def test_resolve_skips_pinned_online_rows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """★P1-4 / 六轮 F6：pin online 的行**不抢**（行照发、只是锁住）；同表 auto 的照抢。
-
-    「人固定的课」与「被别人持有」不同：它不会自动放出来（不算 blocked 等活）。
-    """
+def test_resolve_ignores_retired_mode_keys(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★M4b 兼容窗：旧 hub 仍可能发 `authority`/`seize`/`auto_handoff` 键（升级窗口里
+    新客户端 × 旧 hub）——新客户端**读到即忽略**（判据只有 `claimable`）：一行带着
+    `seize=false`（旧口径的「不可抢」）但 `claimable=true` ⇒ 照取。"""
     tasks = [
         {
-            "course": "fixed",
+            "course": "legacy",
             "authority": "pinned_online",
-            "claimable": False,
             "seize": False,
-            "state": "online",
+            "auto_handoff": False,
+            "claimable": True,
+            "state": "ready",
             "reason": "pinned: 人固定在在线",
             "pack": {"sha256": "aa" * 32},
-            "open_time": 1.0,
-        },
-        {
-            "course": "auto",
-            "authority": "auto",
-            "claimable": False,
-            "seize": True,
-            "state": "online",
-            "reason": "",
-            "pack": {"sha256": "bb" * 32},
-            "open_time": 2.0,
         },
     ]
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
     got, blocked, _manifest = offline_boot.resolve_courses({}, {}, lambda _m: None)
-    assert [t["course"] for t in got] == ["auto"], got
-    assert blocked == [], blocked  # 人固定的课不会自动放出来：不算「等它放」
+    assert [t["course"] for t in got] == ["legacy"], got
+    assert blocked == [], blocked
 
 
 def test_resolve_picks_stale_holder_row(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1105,9 +1082,7 @@ def test_resolve_picks_stale_holder_row(monkeypatch: pytest.MonkeyPatch) -> None
     tasks = [
         {
             "course": "dead-held",
-            "authority": "auto",
             "claimable": True,
-            "seize": False,
             "state": "claimed",
             "reason": "held-stale: w-dead 已静默",
             "pack": {"sha256": "cc" * 32},
@@ -1425,7 +1400,7 @@ def test_resolve_courses_puts_a_pending_export_row_last(monkeypatch: pytest.Monk
     monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg, creds: ["http://hub"])
     monkeypatch.setattr(offline_boot, "fetch_task_list", lambda *a, **k: tasks)
     lines: list[str] = []
-    got, blocked = offline_boot.resolve_courses({}, {}, lines.append)
+    got, blocked, _manifest = offline_boot.resolve_courses({}, {}, lines.append)
     assert [t["course"] for t in got] == ["ready", "also-ready", "exporting"]
     assert blocked == []
     assert any("导包" in ln and "最后" in ln for ln in lines), lines
@@ -1480,12 +1455,14 @@ def test_run_auto_does_not_reclaim_a_revoked_course(
     state = {"n": 0}
     seen_skip: list[set[str]] = []
 
-    def fake_resolve(cfg: dict, creds: dict, log: Any, **kw: Any) -> tuple[list[dict], list[dict]]:
+    def fake_resolve(
+        cfg: dict, creds: dict, log: Any, **kw: Any
+    ) -> tuple[list[dict], list[dict], list[dict]]:
         state["n"] += 1
         seen_skip.append(set(kw.get("skip") or ()))
         if state["n"] == 1:
-            return [{"course": "c5-gae", "pack_sha256": ""}], []
-        return [], []
+            return [{"course": "c5-gae", "pack_sha256": ""}], [], []
+        return [], [], []
 
     def fake_batch(cfg, creds, log, stop, courses, *, multi, leases, shas):
         leases["revoked"] = ["c5-gae"]

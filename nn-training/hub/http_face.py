@@ -399,7 +399,7 @@ class HubHandler(
             elif path == "/admin/push-workers":
                 self._admin_push_workers(set_action=False)
             elif path == "/admin/courses":
-                self._admin_courses(set_mode=False)
+                self._admin_courses()
             elif path == "/admin/net-probe":
                 self._admin_net_probe()
             elif path == "/admin/offline":
@@ -467,7 +467,7 @@ class HubHandler(
             elif path == "/admin/unfreeze":
                 self._admin_unfreeze()
             elif path == "/admin/courses":
-                self._admin_courses(set_mode=True)
+                self._admin_courses(post=True)
             elif path == "/admin/push-workers":
                 self._admin_push_workers(set_action=True)
             elif path == "/admin/net-probe":
