@@ -68,6 +68,7 @@ ALLOWED_IMPORTS = {"__future__"}
 READERS = {
     "trainer/eval_dispatch.py": (
         "EVAL_LOCAL_SLOTS_DEFAULT",
+        "eval_close_reason",
         "hold_for_local",
         "release_local_gate_if_starved",
         "reserve_local_slots",
@@ -262,6 +263,18 @@ def test_release_local_gate_semantics() -> None:
     assert y.release_local_gate_if_starved(live, [{"id": "self"}]) is False
     assert live.is_set() is False
     assert y.release_local_gate_if_starved(None, []) is False
+
+
+def test_eval_close_reason_semantics() -> None:
+    """收工原因三态（plan/eval-baseline-undispatched §2 P0-1）：`workers-gone` 只在
+    **窗口还有余量**时成立 —— 窗口到期的正常收工里消费线程本来就会退光，不加这个
+    条件的话 `window` 永远报不出来（三条互斥成空话）。"""
+    y = eval_yield_mod
+    assert y.eval_close_reason(True, False, False) == "settled"
+    assert y.eval_close_reason(True, True, True) == "settled"  # 落盘满优先，另两条不参与
+    assert y.eval_close_reason(False, True, False) == "workers-gone"
+    assert y.eval_close_reason(False, True, True) == "window"
+    assert y.eval_close_reason(False, False, False) == "window"
 
 
 def test_release_plan_and_early_epoch_semantics() -> None:

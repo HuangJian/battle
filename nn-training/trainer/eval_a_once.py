@@ -279,9 +279,19 @@ def main() -> int:
     # 幂等早退（离线课「停课→重开」/重试不重派）：判据与主循环 `baseline_summary_landed`
     # 逐字同口径——`event=eval_summary ∧ iter=0 ∧ 同 wver`（本文件的 `_read_summary` 就是
     # 同一把尺，读的也是同一册 `traj/eval_log.jsonl`）。
+    # ⚠ 2026-10-08（plan/eval-baseline-undispatched §2 P1-1，评审 F3-3）：加上同一道
+    # 阈值例外 `baseline_needs_retry`——否则「缺口大到不算落账」只在主循环生效，
+    # 人工补基线（--baseline）会被这句早退挡住，补不动（缺口的一局不补 = 白派一趟）。
     if args.baseline and _read_summary(eval_jsonl, key16, BASELINE_EVAL_ITER) is not None:
-        log(f"[evalA] it0 基线已落账（wver={key16[:12]}…）——跳过派发")
-        return 0
+        from worker.eval_local import BASELINE_RETRY_MAX, baseline_needs_retry
+
+        if not baseline_needs_retry(eval_jsonl, key16):
+            log(f"[evalA] it0 基线已落账（wver={key16[:12]}…）——跳过派发")
+            return 0
+        log(
+            f"[evalA] it0 基线缺口大到不算落账（wver={key16[:12]}…）"
+            f"——不早退（重派预算 {BASELINE_RETRY_MAX} 轮，按 wver 记在账本里）"
+        )
     enabled = [
         str(n.get("id") or n.get("url") or "?")
         for n in (cfg.get("nodes") or [])

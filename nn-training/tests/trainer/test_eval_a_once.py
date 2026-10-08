@@ -370,3 +370,45 @@ def test_main_baseline_after_restart_does_not_append_foreign_wver(
     assert seen == {}
     rows = _ledger_rows(traj)
     assert {r.get("wver") for r in rows if r.get("event") == "eval"} == set()
+
+
+def test_main_baseline_retries_when_gap_large(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """缺口大到不算落账的 it0 summary 在册 ⇒ 人工补基线**不得**被幂等早退挡住
+    （plan/eval-baseline-undispatched §2 P1-1，评审 F3-3：只改 `loop_baseline` 不改这里，
+    补基线就补不动 —— 那 95 局永远不会回来）。
+
+    注意与 `test_main_baseline_skips_when_summary_landed` 的对照：那条的 summary **没有**
+    `dropped` 字段（§61 之前的旧课）⇒ 缺字段 = unknown ⇒ 照旧早退（不给老课引入新行为）。
+    """
+    bc = tmp_path / "bc.json"
+    bc.write_text('{"w": "bc"}', encoding="utf-8")
+    out = tmp_path / "weights.json"
+    out.write_text('{"w": 1}', encoding="utf-8")
+    traj = tmp_path / "traj"
+    traj.mkdir(parents=True, exist_ok=True)
+    course_p = _course_file_with_bc(tmp_path, bc=bc, out=out, traj=traj)
+
+    import common.distribution
+
+    fp = common.distribution.weights_fingerprint(str(bc))[:16]
+    (traj / "eval_log.jsonl").write_text(
+        json.dumps(
+            {
+                "event": "eval_summary",
+                "iter": 0,
+                "wver": fp,
+                "games": 105,
+                "wins": 1,
+                "dropped": 95,
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    seen = _fake_dispatch_recorder(monkeypatch)
+
+    assert _run_main(monkeypatch, ["--course", str(course_p), "--iter", "0", "--baseline"]) == 0
+    assert seen, "大缺口 summary 不得走「已落账——跳过派发」早退"
+    assert seen["it"] == 0 and seen["baseline"] is True

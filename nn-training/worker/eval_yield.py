@@ -139,11 +139,39 @@ def release_local_gate_if_starved(local_gate, nodes_ok: list) -> bool:
     2026-09-15 x3-power it30：engine_epoch 全员 mismatch → nodes_ok=[] →
     local_worker 空等 gate 到 deadline（600s 零局），drain 超时后才写 run_complete
     ——控制台「训练已完成」横幅被拖到 10 分钟后，且终轮 eval 缺失。
+
+    ⚠ 现状（2026-10-08 复核）：A-eval 轮的门由 `local_gate_release_plan` 恒判
+    `immediate`（PPO 恒在节点上跑）⇒ 门**只要被创建就已置位**；本函数在生产里只剩
+    「无节点时再确认一次」的兜底语义。it0 基线的缺口不是「门未放行」而是「门不存在」
+    （`_dispatch_delayed_eval` 的建门点在第 1 轮早退之后）—— 那一刀在
+    `trainer/loop_baseline.py`（plan/eval-baseline-undispatched §2 P0-4）。
     """
     if local_gate is None or nodes_ok:
         return False
     local_gate.set()
     return True
+
+
+def eval_close_reason(settled: bool, no_consumers: bool, window_expired: bool) -> str:
+    """收工原因（三值互斥）：`settled` / `workers-gone` / `window`。
+
+    为什么需要它（plan/eval-baseline-undispatched §2 P0-1，2026-10-08）：收工行原先
+    只说「未全落盘 N/M」——it0 那 95 局就是在 21s/1500s 时因消费线程归零而收工，
+    日志层却报不出「哪条路径收的工」，④（线程为什么退光）无从查。
+
+    判据顺序（写死，别重算）：
+      · `settled`：落盘满 ⇒ 正常收工，另两条不参与；
+      · `workers-gone`：**窗口还有余量**而消费线程已归零 —— 这是「远端线程异常退出」
+        的指纹；
+      · `window`：其余（窗口到期）。
+
+    ⚠ `workers-gone` 必须带 `not window_expired`：窗口到期那条路上，消费线程本来就因
+    `time.time() >= deadline` 而退出 ⇒ 不加这个条件的话 `window` 永远报不出来
+    （三条互斥就成了空话）。`no_consumers` 由调用方**已经算好的那个变量**传进来。
+    """
+    if settled:
+        return "settled"
+    return "workers-gone" if no_consumers and not window_expired else "window"
 
 
 # ---- 从 `EvalDispatcher.run()` 的内联判决点提出的三个公式（S5 第十二刀，2026-09-27）---------

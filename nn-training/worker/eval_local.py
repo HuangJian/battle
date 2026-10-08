@@ -147,6 +147,13 @@ EVAL_ITER_SUFFIX = "ev"  # eval iterId = {runId}.{it}ev → 与采集任务在 a
 # 排除（gate_check.read_trend_rows），控制台/配对裁判仍用它当基线。账本双向隔离：
 # 基线按 iter==0（且排除 B/C source 行）去重，A-eval 按 min_iter=1 去重。
 BASELINE_EVAL_ITER = 0
+#: it0 基线「缺口大到不算落账」的阈值（plan/eval-baseline-undispatched §2 P1-1，2026-10-08）：
+#: 分母 = `games + dropped`（与控制台「缺 N / 共 N」同口径）。2% 的取法：单局节点失败
+#: （1/400 = 0.25%）仍算落账，不因噪声重派；it0 实测的 95/200 = 47.5% 重派。
+BASELINE_DROP_FRAC_MAX = 0.02
+#: 基线重派预算（轮）：**计数从账本导出**（同 wver 的 it0 summary 行数）而不是内存计数
+#: ⇒ 跨进程重启依然成立（内存计数一重启就回满，"上限 3" 就是句空话）。
+BASELINE_RETRY_MAX = 3
 EVAL_TASK_ATTEMPTS = 2  # 单局重试上限；超限放弃并计数（权重切换后未完成局自然作废）
 #: eval 行**落盘**失败的原地重试次数（plan/eval-final-round-and-dropped S2，2026-10-02）：
 #: 失败边界是「eval 行 append 成功」——行没落盘就不算结算；本机落盘问题不重跑整局，
@@ -497,14 +504,17 @@ def eval_done_keys(
     return out
 
 
-def baseline_summary_landed(traj_dir: Path, wver16: str) -> bool:
-    """it0 基线是否已落账：eval_log.jsonl 里存在**同权重指纹**的 `iter=0` summary 行。
+def _as_number(v: object) -> float | None:
+    """数值读取（`bool` 不算数——它也是 int 的子类，`games=True` 是脏数据不是 1）；
+    非数值 → None（unknown，不伪装成 0）。"""
+    if isinstance(v, (int, float)) and not isinstance(v, bool):
+        return float(v)
+    return None
 
-    主循环据此决定是否（重）派基线——落账即停，未落账（进程首派、节点瞬时全挂
-    被跳过、bc 换文件）每轮重试，账本去重让重试天然只补缺口。按 wver 匹配：bc
-    换文件后旧基线不算数，控制台合成行取的也是最后一条 it0 summary。
-    """
-    eval_jsonl = traj_dir.parent / "eval_log.jsonl"
+
+def _baseline_summary_rows(eval_jsonl: Path, wver16: str) -> list[dict]:
+    """账本里同 wver 的全部 `iter=0` `eval_summary` 行（行序 = 追加序，末条 = 最新读数）。"""
+    rows: list[dict] = []
     try:
         if eval_jsonl.exists():
             for line in eval_jsonl.read_text(encoding="utf-8").splitlines():
@@ -520,9 +530,64 @@ def baseline_summary_landed(traj_dir: Path, wver16: str) -> bool:
                     and r.get("iter") == BASELINE_EVAL_ITER
                     and r.get("wver") == wver16
                 ):
-                    return True
+                    rows.append(r)
     except OSError:
         pass
-    return False
+    return rows
+
+
+def baseline_summary_landed(traj_dir: Path, wver16: str) -> bool:
+    """it0 基线是否已落账：eval_log.jsonl 里存在**同权重指纹**的 `iter=0` summary 行。
+
+    主循环据此决定是否（重）派基线——落账即停，未落账（进程首派、节点瞬时全挂
+    被跳过、bc 换文件）每轮重试，账本去重让重试天然只补缺口。按 wver 匹配：bc
+    换文件后旧基线不算数，控制台合成行取的也是最后一条 it0 summary。
+
+    ⚠ 它只判「行在不在」：`games=0 / dropped=200`（节点全挂那一轮照样会写 summary）
+    也算落账 ⇒ 「缺口大到不算落账」是另一条判据 `baseline_needs_retry`（2026-10-08）。
+    """
+    return bool(_baseline_summary_rows(traj_dir.parent / "eval_log.jsonl", wver16))
+
+
+def baseline_needs_retry(
+    eval_jsonl: Path,
+    wver16: str,
+    *,
+    drop_frac_max: float = BASELINE_DROP_FRAC_MAX,
+    retry_max: int = BASELINE_RETRY_MAX,
+) -> bool:
+    """同 wver 的 it0 summary 已存在，但**缺口大到不算落账** ⇒ 应当重派（纯函数）。
+
+    为什么需要它（plan/eval-baseline-undispatched §2 P1-1，2026-10-08）：旧判据「summary
+    带 dropped 也算落账」是为了不因**噪声**无限重跑失败局（2026-09-13 评审）——但 it0 实测
+    `games=105 / dropped=95`（47.5%）也会被它判成落账 ⇒ 基线从此永不补派。本函数只把
+    「结构性大缺口」从「噪声」里分出来，阈值不追求最优。
+
+    收的是**账本文件路径**（不是 `traj_dir` —— `baseline_summary_landed` 收 traj_dir 是
+    历史契约，别把两个签名混着用）。判据四条（全写死）：
+
+    ① 没有同 wver 的 it0 summary ⇒ False（这是**首派**，不是重派）；
+    ② 已写行数 > `retry_max` ⇒ False（预算用尽 ⇒ 收敛保证；行数是账本导出量，跨重启成立）；
+    ③ `games`/`dropped` 缺失或非数（§61（2026-10-02）之前的旧课没有 `dropped`）
+       ⇒ False ——「缺字段 = unknown」，不给老课引入新的重派行为；
+    ④ 否则看**最后一条**读数（与 `_read_summary` 同口径：行序 = 追加序，最新为准）：
+       `games <= 0` ⇒ True（一局都没落账 = 节点全挂，比 2% 硬）；
+       `frac = dropped / (games + dropped) > drop_frac_max` ⇒ True；
+       `games + dropped == 0` ⇒ False（无信息）。
+    """
+    rows = _baseline_summary_rows(eval_jsonl, wver16)
+    if not rows:
+        return False
+    if len(rows) > retry_max:
+        return False
+    games_v = _as_number(rows[-1].get("games"))
+    dropped_v = _as_number(rows[-1].get("dropped"))
+    if games_v is None or dropped_v is None:
+        return False
+    if games_v + dropped_v <= 0:
+        return False
+    if games_v <= 0:
+        return True
+    return dropped_v / (games_v + dropped_v) > drop_frac_max
 
 

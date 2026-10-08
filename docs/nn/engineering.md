@@ -25,6 +25,87 @@
 
 ---
 
+## §66 it0 基线 eval「从未派出」缺口：收工自报原因 + 缺口三分 + 基线自带本机门（2026-10-08，plan/eval-baseline-undispatched）
+
+### 一句话
+
+it0 基线派 200 局只落 105：收工循环只看消费线程数（`pending` 还剩 95、窗口还剩 1479s 也照样 `break`），
+而 it0 那一轮**根本没有本机门**（`_eval_gate` 是 None —— A-eval 还没派过）⇒ 只剩远端线程，一退光就收工；
+收工行不报原因与队列余量、`missing` 的 `undispatched` 是混类、落账判据又把 47.5% 的大缺口当落账
+⇒ 缺口既查不出也补不上。本刀：收工自报 `close_reason` + 缺口三分（`dropped` 数值**一字不动**）
++ 基线自带一把已置位的门 + `baseline_needs_retry` 重派。
+
+### 现场账（x21-psh-b0，2026-10-07 立案；评审 `plan/eval-baseline-undispatched.review-bf.md`）
+
+| 证据 | 读数 | 说明 |
+|---|---|---|
+| `eval_log.jsonl` it0 | 105 行 / 21s（it5 是 400 局 38s） | 一轮 200 局在 21 秒里结束 |
+| `dist-agent-meta.jsonl` it0 | 105 条，全 `ok=True`，零失败行 | 没有一局是「派出去了失败」 |
+| it0 的 nodes | 无 `local`（it5+ 都有 `local:100`） | 本机槽位在 it0 结构性缺席 |
+| 三本账收工行 | `派出=200 认领=105 落盘=105 缺口=95` | **幅度可见、病因不可见**：该行不报收工路径与队列余量；`认领≠落盘` WARN 恰好在「从未派出」时**不**触发（认领==落盘） |
+
+⚠ 现场目录（`nn-training/tmp/x21-psh-b0`）已不在盘上 ⇒ 上述读数只作机制证据，实现不依赖它们。
+
+### 四条根因链
+
+- **① `total=200` 只派 105**：派发时刻账面为空（it0 首派）⇒ `todo=200`；轮末账本 105 行 ⇒ `landed=105`
+  ⇒ `dropped=95`。（把这条读成「105 行 ⇒ `done` 非空」会把人引去改 `eval_done_keys` —— 那是**正确**的隔离。）
+- **② 收工不看队列剩余**：`while not all_done and time.time() < deadline` 里 `if live_workers[0] <= 0: break`。
+- **③ it0 结构性没有本机槽位**：门 `self._eval_gate` 只在 `_dispatch_delayed_eval` 里创建，而创建点在
+  `select_delayed_eval_it` 早退（第 1 轮 `m is None`）**之后** ⇒ it0 那一轮门是 **None**；基线复用
+  `self._eval_gate` ⇒ 不建冻结快照、不起本机线程。两条救急路都够不着它：`release_local_gate_if_starved`
+  对 None 恒 False；`local_gate_release_plan` 现在恒 `immediate`（PPO 恒在远端）⇒ 门只要存在就已置位。
+- **④ 远端线程为什么退光**：未证实（meta 零失败行排除任务失败、1500s 窗口排除超时、收工行不落盘）
+  —— 本刀只让它**可查**。
+
+### 决定（总原则：`dropped` 数值一字不动）
+
+1. **收工自报**（`trainer/eval_dispatch.py`）：一次取齐 `no_consumers / left_pending / inflight_n /
+   spawned_n / never_pairs` + `remain`；`close_reason = eval_close_reason(settled, no_consumers, window_expired)`
+   ∈ `settled`/`workers-gone`/`window`（判定单一实现 `worker/eval_yield.py`）。**`workers-gone` 必须带
+   `not window_expired`**：窗口到期那条路上消费线程本来就会退光，不然 `window` 永远报不出来。
+   `left_pending > 0` 追加一行 WARN —— 只作可读性：`log()` 只在 `prefix_scope` 内镜像课程日志，
+   而 eval 跑在后台线程 ⇒ **落盘的验收面只有 summary**。
+2. **缺口三分**（`worker/eval_track.py::settle_eval_summary`，五个纯新增键）：
+   `never_dispatched = len(left_pairs)`（**只数 `attempts==0`** 的局：`pending` 是待办队列，失败局会被
+   `pending.append` 放回去，算成「从未派出」会在**有失败的轮**里撒谎）·
+   `lost = max(0, total - 落盘 - never_dispatched)`（从**第一项**推，不是 `dropped - never` —— 后者会让
+   「别轮已评」整块灌成幻数：续跑轮会报「丢 180 局」）· `carried = dropped - never - lost`（第二项残留）·
+   `left_pending` · `close_reason`。`missing` 加第四值 `never-dispatched`（`left_pairs` 命中），
+   `undispatched` 收窄为「meta 有 `ok=True` 却无落盘行」的罕怪态。
+3. **基线自带门**（`trainer/loop_baseline.py`）：`self._eval_gate is None` 时就地建一把**已置位**的门
+   （PPO 恒在节点上跑 ⇒ 本机核心空闲）；既有门（哪怕未置位）一字不动。这一条才是「新课 it0 不再丢局」的
+   承重墙：本机线程计进 `live_workers` ⇒ 收工循环不再被远端线程的死亡触发，队列被本机抽干。
+4. **大缺口重派**（`worker/eval_local.py::baseline_needs_retry` + 两处调用点）：`games<=0` 或
+   `dropped/(games+dropped) > BASELINE_DROP_FRAC_MAX(2%)` ⇒ 不算落账、继续重派；缺 `dropped`
+   （§61 之前的旧课）= unknown ⇒ 不重派；预算按**账本行数**导出（`BASELINE_RETRY_MAX=3`，跨重启成立）。
+   `loop_baseline` 与 `eval_a_once` 的幂等早退**同一判据**（只改一处 ⇒ 人工补基线补不动）。
+
+### 云机侧（同一函数的第二个生产调用点）
+
+`remote/offline_eval.py` 用**位置参数**调用 `settle_eval_summary`（新参在 `course_fp` 之后带缺省 ⇒ 零改动）：
+云机没有「本机待办队列」这个概念 ⇒ `never_dispatched=0`、`lost` = 派出去没落账、`carried` = 全集口径残留。
+不传是**有意**的，不是遗漏；`tests/remote/test_offline_eval_cloud.py` 钉住这个缺省形状。
+控制台侧：summary 新键纯新增，`dashboard/src/server/{iters,eval-games,offline-eval-backfill,pool-history}.ts`
+的读面不受影响（无需 TS 改动）。
+
+### 验证
+
+- 六处用例**先在 HEAD worktree（`git worktree add --detach tmp/redcheck HEAD`）上确认红**
+  （ImportError / TypeError / KeyError / 断言四种红法各见一条），再在当前树绿：
+  `tests/worker/{test_eval_yield_split,test_dual_track_eval,test_baseline_eval}.py` ·
+  `tests/trainer/{test_eval_dispatch_resilience,test_eval_a_once}.py` · `tests/remote/test_offline_eval_cloud.py`。
+  关键断言：`dropped` 与旧实现同值（历史可比性）· `dropped == never_dispatched + lost + carried` ·
+  三态 `close_reason` 互斥 · 重投回队只进 `lost`（不进 `never_dispatched`）。
+- `bun run pygate` **3932 passed / 15 skipped**（ruff + mypy 全量）· `bun run check` 绿。
+- 真机验收（下一门新课的 it0）：nodes 里出现 `local` 且 `never_dispatched == 0`；若仍
+  `close_reason=workers-gone ∧ never_dispatched>0` ⇒ ④ 可查（触发 P2：修远端线程退出原因）。
+  未决事项行 → `docs/nn.progress.md` §3。
+
+决策 → `DECISIONS.md` §2026-10-08-goalnn-eval-baseline-undispatched。
+
+---
+
 ## §65 测试永不写生产状态：四个开关（门禁意图 / 循环控制 / EvalBoard / 权重归档）钉进 tmp（2026-10-06）
 
 ### 一句话

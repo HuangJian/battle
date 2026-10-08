@@ -331,6 +331,161 @@ def test_resume_dedup_dual_track_seeds(tmp_path: Path) -> None:
     assert all(s[1] >= 860101 for s in todo2 if not is_anchor_seed(s[1]))
 
 
+# ── 缺口细分（plan/eval-baseline-undispatched §2 P0-2/P0-3；评审 F1/F2）─────────────
+# 铁律：`dropped` 的**数值**一字不动（控制台「缺N」/门控趋势行的历史可比性），
+# 新增的 `never_dispatched` / `lost` / `carried` 只解释它由什么组成。
+
+
+def _settle_summary(
+    elog: Path,
+    *,
+    it: int = 0,
+    pairs: list[tuple[int, int]],
+    total: int,
+    landed: set[tuple[int, int]],
+    left_pending: int = 0,
+    left_pairs: set[tuple[int, int]] | None = None,
+    close_reason: str | None = None,
+) -> dict:
+    """跑一次 `settle_eval_summary` 并把**本次落的那条** summary 读回来。"""
+    settle_eval_summary(
+        eval_jsonl=elog,
+        key16=WVER,
+        it=it,
+        pairs=pairs,
+        total=total,
+        landed=landed,
+        wins=[0],
+        cleared_total=[0],
+        outcomes={},
+        node_games={},
+        jsonl_lock=threading.Lock(),
+        t_eval_start=0.0,
+        rollout_winrate=None,
+        left_pending=left_pending,
+        left_pairs=left_pairs,
+        close_reason=close_reason,
+    )
+    last = [
+        json.loads(ln)
+        for ln in elog.read_text(encoding="utf-8").splitlines()
+        if '"eval_summary"' in ln
+    ][-1]
+    assert isinstance(last, dict)
+    return last
+
+
+def test_settle_summary_never_dispatched_vs_lost_split(tmp_path: Path) -> None:
+    """it0 现场形状（200 派 105）：`dropped` 同值（硬性），细分指出「没派」不是「丢了」。"""
+    elog = tmp_path / "eval_log.jsonl"
+    pairs = [(2003, 860001 + i) for i in range(200)]
+    landed = set(pairs[:105])
+    _write_eval_rows(elog, [_eval_row(0, s, sd, 0) for (s, sd) in sorted(landed)])
+    summ = _settle_summary(
+        elog,
+        pairs=pairs,
+        total=200,
+        landed=landed,
+        left_pending=95,
+        left_pairs=set(pairs[105:]),
+        close_reason="workers-gone",
+    )
+    assert summ["dropped"] == 95, "dropped 与旧实现同值是硬性断言（历史可比性）"
+    assert summ["games"] == 105
+    assert summ["never_dispatched"] == 95
+    assert summ["lost"] == 0
+    assert summ["carried"] == 0
+    assert summ["left_pending"] == 95
+    assert summ["close_reason"] == "workers-gone"
+    assert {m["reason"] for m in summ["missing"]} == {"never-dispatched"}
+    assert len(summ["missing"]) == 20, "缺口清单仍有界（MISSING_MAX）"
+
+
+def test_settle_summary_lost_only(tmp_path: Path) -> None:
+    """全派出、只缺 1 局（it155 那种）：`never_dispatched=0`、`lost=1`。"""
+    elog = tmp_path / "eval_log.jsonl"
+    pairs = [(2003, 860001 + i) for i in range(400)]
+    landed = set(pairs[:399])
+    _write_eval_rows(elog, [_eval_row(1, s, sd, 0) for (s, sd) in sorted(landed)])
+    summ = _settle_summary(
+        elog, it=1, pairs=pairs, total=400, landed=landed, left_pending=0, close_reason="window"
+    )
+    assert summ["dropped"] == 1
+    assert summ["never_dispatched"] == 0
+    assert summ["lost"] == 1
+    assert summ["carried"] == 0
+
+
+def test_settle_summary_carried_covers_other_iters(tmp_path: Path) -> None:
+    """评审 F2 的幻数现场：续跑轮（it5 只派 20 局，另 180 局在 it3 已评）不得报 `lost=180`。"""
+    elog = tmp_path / "eval_log.jsonl"
+    pairs = [(2003, 860001 + i) for i in range(200)]
+    todo = pairs[180:]
+    _write_eval_rows(elog, [_eval_row(5, s, sd, 1) for (s, sd) in todo])
+    summ = _settle_summary(elog, it=5, pairs=pairs, total=20, landed=set(todo), left_pending=0)
+    assert summ["dropped"] == 180, "第二项（语料全集 − 本轮台账）历史读数不变"
+    assert summ["never_dispatched"] == 0
+    assert summ["lost"] == 0, "一局都没丢：`lost = dropped - never` 的旧写法在这里会报 180"
+    assert summ["carried"] == 180
+
+
+def test_settle_summary_mixed_pending_partition(tmp_path: Path) -> None:
+    """评审 F1：`pending` 里混有 attempts=0（从未派出）与 attempts>0（重投回队）——
+    收工快照 `left_pairs` 只装前者（`never_dispatched` 只数它），后者落进 `lost`。"""
+    elog = tmp_path / "eval_log.jsonl"
+    pairs = [(2000, 860001 + i) for i in range(4)]
+    summ = _settle_summary(
+        elog,
+        pairs=pairs,
+        total=4,
+        landed=set(),
+        left_pending=4,  # 队列余量：1 个从未派出 + 3 个派过没落盘
+        left_pairs={pairs[1]},
+    )
+    assert summ["dropped"] == 4
+    assert summ["never_dispatched"] == 1, "只有 attempts==0 的那一局算「从未派出」"
+    assert summ["lost"] == 3, "派过没落盘（含重投回队）一律进 lost"
+    assert summ["carried"] == 0
+    assert summ["dropped"] == summ["never_dispatched"] + summ["lost"] + summ["carried"]
+    reasons = {m["seed"]: m["reason"] for m in summ["missing"]}
+    assert reasons[860002] == "never-dispatched"
+    assert set(reasons.values()) == {"never-dispatched", "undispatched"}
+
+
+def test_settle_summary_reason_undispatched_when_meta_ok_but_no_row(tmp_path: Path) -> None:
+    """P0-3：真·从未派出 = `never-dispatched`；meta 有 `ok=True` 却无台账行的罕怪态仍叫
+    `undispatched`（两个成因各占一个值，不再混——这是本刀要消灭的那个病）。"""
+    elog = tmp_path / "eval_log.jsonl"
+    pairs = [(2000, 860001), (2000, 860002)]
+    (tmp_path / "dist-agent-meta.jsonl").write_text(
+        json.dumps(
+            {"node": "a97", "mode": "eval", "it": 0, "stage": 2000, "seed": 860002, "ok": True}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    summ = _settle_summary(elog, pairs=pairs, total=2, landed=set(), left_pending=1, left_pairs={pairs[0]})
+    assert {m["seed"]: m["reason"] for m in summ["missing"]} == {
+        860001: "never-dispatched",
+        860002: "undispatched",
+    }
+
+
+def test_settle_summary_defaults_keep_cloud_caller_shape(tmp_path: Path) -> None:
+    """云机调用点（`remote/offline_eval.py`，位置参数、不传新参）的形状：
+    `never_dispatched=0`、`lost` = 派出去没落盘、`carried` 只反映全集口径残留。"""
+    elog = tmp_path / "eval_log.jsonl"
+    pairs = [(2000, 860001 + i) for i in range(6)]
+    landed = set(pairs[:4])
+    _write_eval_rows(elog, [_eval_row(1, s, sd, 1) for (s, sd) in sorted(landed)])
+    summ = _settle_summary(elog, it=1, pairs=pairs, total=6, landed=landed)
+    assert summ["never_dispatched"] == 0
+    assert summ["lost"] == 2
+    assert summ["carried"] == 0
+    assert summ["left_pending"] == 0
+    assert summ["close_reason"] is None, "旧调用点不传 ⇒ unknown（不是编一个值出来）"
+
+
 def test_dispatcher_local_dual_track_round(tmp_path: Path, monkeypatch) -> None:
     """本地 runner 注入：n_seeds=50 → 100 局双轨 + summary 三字段 + 续跑/换段。"""
     import types

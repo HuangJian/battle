@@ -70,7 +70,7 @@ class _Harness:
             max_ticks=10,
             difficulty="hard",
         )
-        self.cfg = {
+        self.cfg: dict[str, Any] = {
             "nodes": [{"id": "a97", "url": "http://a97.local", "concurrency": 1}],
             "policy": {"nodeFailStreak": 3},
         }
@@ -775,6 +775,80 @@ def test_fanout_copy_during_record_is_deduped(tmp_path, monkeypatch) -> None:
     assert len(played) == 2, f"每局只许一行（fanout 双计）: {played}"
     summ = [r for r in rows if r.get("event") == "eval_summary"]
     assert summ and summ[-1]["games"] == 2 and summ[-1]["dropped"] == 0, summ
+
+
+# ── 收工自报：原因 + 队列剩余（plan/eval-baseline-undispatched §2 P0-1；评审 F1/F9/F10）──
+# 断言面一律读 `eval_log.jsonl` 的 summary（**不**依赖日志行：eval 跑在后台线程，
+# `log()` 只在 `prefix_scope` 内镜像课程日志 ⇒ 新增行不保证落盘）。日志只作辅助证据。
+
+
+def test_close_reason_workers_gone_reports_left_pending(tmp_path, monkeypatch) -> None:
+    """it0 那个形状（worker 线程归零、队列还剩一片）：summary 必须自报
+    `close_reason=workers-gone` + 队列余量，且细分指出「没派」/「派了没落」各多少。
+
+    `nodeFailStreak=1` + 确定性失败（`DistError(400)` —— **不是**瞬断：
+    `TRANSIENT_HTTP_STATUS` 含 500/502/503/504）⇒ 第一个局失败回队后线程就退，
+    剩余队列无人取。
+    """
+    h = _Harness(tmp_path, monkeypatch, games=4)
+    h.cfg["policy"]["nodeFailStreak"] = 1
+
+    def fetch(*_a, **_kw):
+        raise common.distribution.DistError(400, "boom")
+
+    rows = h.run(fetch)
+    summ = [r for r in rows if r.get("event") == "eval_summary"]
+    assert summ, "收工时必须落一条 summary"
+    s = summ[-1]
+    assert s["close_reason"] == "workers-gone", "21s/1500s 那种收工必须自报原因"
+    # 4 局：1 局派过（失败回队、收工前没落盘）+ 3 局从未离开队列（F1 的分区在真轮里成立）。
+    assert s["left_pending"] == 4
+    assert s["never_dispatched"] == 3
+    assert s["lost"] == 1
+    assert s["dropped"] == 4 and s["carried"] == 0
+    assert s["dropped"] == s["never_dispatched"] + s["lost"] + s["carried"]
+    joined = "\n".join(h.logs)
+    assert "worker 线程归零" in joined, joined
+    assert "从未派出 3 局" in joined, joined
+    assert "never-dispatched" in joined, joined
+
+
+def test_close_reason_settled_when_all_land(tmp_path, monkeypatch) -> None:
+    """全落盘 ⇒ `settled` 且队列余量/细分值全为 0（三条互斥的第一条）。"""
+    h = _Harness(tmp_path, monkeypatch, games=4)
+
+    def fetch(*_a, **kw):
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    rows = h.run(fetch)
+    s = [r for r in rows if r.get("event") == "eval_summary"][-1]
+    assert s["close_reason"] == "settled"
+    assert s["games"] == 4 and s["dropped"] == 0
+    assert s["left_pending"] == 0 and s["never_dispatched"] == 0 and s["lost"] == 0
+    assert "settled 满（4/4）" in "\n".join(h.logs)
+
+
+def test_close_reason_window_when_deadline_hits(tmp_path, monkeypatch) -> None:
+    """窗口到期收工 ⇒ `window`（**不是** workers-gone：窗口到点后消费线程本来就会退光，
+    判定必须用「窗口还有没有余量」把两者分开 —— 否则这一档永远报不出来）。"""
+    import time
+
+    h = _Harness(tmp_path, monkeypatch, games=2)
+    h.args.eval_window_sec = 0.5
+
+    def fetch(*_a, **kw):
+        # sleep-ok: 夹具模拟「窗口内跑不完的一局」（0.6s > 窗口 0.5s）
+        time.sleep(0.6)
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    rows = h.run(fetch)
+    s = [r for r in rows if r.get("event") == "eval_summary"][-1]
+    assert s["close_reason"] == "window", "窗口到期不是 workers-gone"
+    assert s["games"] == 1 and s["left_pending"] == 1, "第二局还在队列里"
+    assert s["never_dispatched"] == 1
+    assert s["lost"] == 0
+    assert s["dropped"] == 1
+    assert "窗口到期" in "\n".join(h.logs)
 
 
 def test_settled_full_requires_landed_not_claimed(tmp_path, monkeypatch) -> None:

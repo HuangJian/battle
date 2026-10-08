@@ -30,7 +30,13 @@ if str(ROOT) not in sys.path:
 
 import common.distribution
 from trainer.loop_core import TrainingLoop
-from worker.eval_local import BASELINE_EVAL_ITER, baseline_summary_landed, eval_done_keys
+from worker.eval_local import (
+    BASELINE_EVAL_ITER,
+    BASELINE_RETRY_MAX,
+    baseline_needs_retry,
+    baseline_summary_landed,
+    eval_done_keys,
+)
 
 WVER = "a" * 16
 
@@ -128,6 +134,118 @@ def test_baseline_summary_landed(tmp_path: Path) -> None:
     assert baseline_summary_landed(traj, WVER) is False  # 只有 it1 / 异 wver 的 it0
     log.write_text(summ(0, WVER) + "\n", encoding="utf-8")
     assert baseline_summary_landed(traj, WVER) is True
+
+
+# ── 缺口大到不算落账（plan/eval-baseline-undispatched §2 P1-1；评审 F3）────────────
+# 旧判据「summary 带 dropped 也算落账」是为**噪声**设的（不因单局失败无限重跑），
+# 但它把 it0 实测的 95/200 = 47.5% 也判成落账 ⇒ 基线从此永不补派。本刀只把
+# 「结构性大缺口」从「噪声」里分出来。
+
+
+def _summ_row(it: int, wver: str, games: int, dropped: int | None = None) -> str:
+    body: dict = {"event": "eval_summary", "iter": it, "wver": wver, "games": games, "wins": 0}
+    if dropped is not None:
+        body["dropped"] = dropped
+    return json.dumps(body)
+
+
+def test_baseline_needs_retry_gate(tmp_path: Path) -> None:
+    """阈值判据（分母 = `games + dropped`，与控制台「缺 N / 共 N」同口径）。"""
+    log = tmp_path / "eval_log.jsonl"
+    assert baseline_needs_retry(log, WVER) is False, "首派（无 summary）不是重派"
+    log.write_text(_summ_row(0, WVER, 105, 95) + "\n", encoding="utf-8")
+    assert baseline_needs_retry(log, WVER) is True, "95/200 = 47.5% > 2%"
+    log.write_text(_summ_row(0, WVER, 399, 1) + "\n", encoding="utf-8")
+    assert baseline_needs_retry(log, WVER) is False, "1/400 = 0.25% 是噪声，不因它重派"
+    log.write_text(_summ_row(0, WVER, 105) + "\n", encoding="utf-8")
+    assert baseline_needs_retry(log, WVER) is False, "缺 dropped（§61 之前的旧课）= unknown"
+    log.write_text(_summ_row(0, WVER, 0, 200) + "\n", encoding="utf-8")
+    assert baseline_needs_retry(log, WVER) is True, "一局都没落账（节点全挂）比 2% 硬"
+    log.write_text(_summ_row(0, WVER, 0, 0) + "\n", encoding="utf-8")
+    assert baseline_needs_retry(log, WVER) is False, "games+dropped==0 = 无信息"
+    log.write_text(_summ_row(0, "b" * 16, 105, 95) + "\n", encoding="utf-8")
+    assert baseline_needs_retry(log, WVER) is False, "异 wver 的 it0 summary 不算数"
+
+
+def test_baseline_needs_retry_capped(tmp_path: Path) -> None:
+    """重派预算按**账本行数**算 ⇒ 上限 3 跨进程重启依然成立（内存计数一重启就回满）。"""
+    log = tmp_path / "eval_log.jsonl"
+    rows = [_summ_row(0, WVER, 105, 95) for _ in range(BASELINE_RETRY_MAX)]
+    log.write_text("\n".join(rows) + "\n", encoding="utf-8")
+    assert baseline_needs_retry(log, WVER) is True, "预算内仍重派"
+    log.write_text("\n".join([*rows, _summ_row(0, WVER, 105, 95)]) + "\n", encoding="utf-8")
+    assert baseline_needs_retry(log, WVER) is False, "第 4 条 summary 已落盘 ⇒ 预算用尽"
+
+
+def test_dispatch_retries_baseline_when_gap_large(tmp_path, monkeypatch) -> None:
+    """大缺口 summary 在册 ⇒ 后续轮继续派（且不得把它缓存成「已落账」）。"""
+    bc = tmp_path / "bc.json"
+    bc.write_text("{}", encoding="utf-8")
+    loop = _loop(tmp_path, bc=str(bc))
+    loop._start_it = 1
+    wver = common.distribution.weights_fingerprint(str(bc))[:16]
+    (tmp_path / "eval_log.jsonl").write_text(_summ_row(0, wver, 105, 95) + "\n", encoding="utf-8")
+    calls: list[dict] = []
+
+    def _fake_bg(*_a, **kw):
+        calls.append(kw)
+        return _FakeThread(False)
+
+    monkeypatch.setattr("trainer.eval_dispatch.dispatch_eval_bg", _fake_bg)
+    loop._maybe_dispatch_baseline_eval(NODES)
+    assert len(calls) == 1, "大缺口不得算落账（否则那 95 局永远补不回来）"
+    assert loop._baseline_landed_wver is None, "重派中的 wver 不许缓存成已落账"
+
+    # 预算用尽（账本里第 4 条 it0 summary）⇒ 落账停派（旧语义的收敛保证仍在）
+    rows = [_summ_row(0, wver, 105, 95) for _ in range(BASELINE_RETRY_MAX + 1)]
+    (tmp_path / "eval_log.jsonl").write_text("\n".join(rows) + "\n", encoding="utf-8")
+    loop._baseline_eval_thread = None
+    loop._maybe_dispatch_baseline_eval(NODES)
+    assert len(calls) == 1
+    assert loop._baseline_landed_wver == wver
+
+
+def test_baseline_self_makes_gate_when_absent(tmp_path, monkeypatch) -> None:
+    """P0-4：it0 那一轮 A-eval 还没派过 ⇒ `_eval_gate` 是 None ⇒ 本机槽位结构性缺席。
+
+    自建一把**已置位**的门（PPO 恒在节点上跑 ⇒ 本机核心空闲）。不放行的后果：
+    远端线程一退光，收工循环就 `break`，队列里剩下的局无声蒸发（x21-psh-b0 it0 的 95 局）。
+    """
+    bc = tmp_path / "bc.json"
+    bc.write_text("{}", encoding="utf-8")
+    loop = _loop(tmp_path, bc=str(bc))
+    loop._eval_gate = None
+    calls: list[dict] = []
+
+    def _fake_bg(*_a, **kw):
+        calls.append(kw)
+        return _FakeThread(False)
+
+    monkeypatch.setattr("trainer.eval_dispatch.dispatch_eval_bg", _fake_bg)
+    loop._maybe_dispatch_baseline_eval(NODES)
+    assert len(calls) == 1
+    gate = calls[0]["local_gate"]
+    assert gate is not None and gate.is_set(), "门缺席 ⇒ 自建并放行"
+    assert loop._eval_gate is gate
+
+
+def test_baseline_reuses_unset_gate(tmp_path, monkeypatch) -> None:
+    """既有的门（哪怕未置位）一字不动 —— 「本机让位训练」的策略归 A-eval 那条路管。"""
+    bc = tmp_path / "bc.json"
+    bc.write_text("{}", encoding="utf-8")
+    loop = _loop(tmp_path, bc=str(bc))
+    gate = threading.Event()
+    loop._eval_gate = gate
+    calls: list[dict] = []
+
+    def _fake_bg(*_a, **kw):
+        calls.append(kw)
+        return _FakeThread(False)
+
+    monkeypatch.setattr("trainer.eval_dispatch.dispatch_eval_bg", _fake_bg)
+    loop._maybe_dispatch_baseline_eval(NODES)
+    assert calls and calls[0]["local_gate"] is gate
+    assert not gate.is_set(), "未置位的既有门不得被基线偷偷放行"
 
 
 def test_start_it_zero_rejected() -> None:

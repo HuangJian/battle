@@ -42,6 +42,7 @@ from worker.eval_local import (
 # 宽限强制释放点 / 在飞落账宽限的**公式**也住那边（不再是内联表达式）。
 from worker.eval_yield import (
     EVAL_LOCAL_SLOTS_DEFAULT,
+    eval_close_reason,
     hold_for_local,
     inflight_grace_cap,
     local_release_due,
@@ -911,20 +912,53 @@ class EvalDispatcher:
                     if not inflight or live_workers[0] <= 0:
                         break
                 all_done.wait(0.2)
+            # —— 收工自报（plan/eval-baseline-undispatched §2 P0-1）：原因 + 队列剩余 ——
+            # 旧收工行只说「未全落盘 N/M」——it0 那 95 局在 21s/1500s 收工（worker 线程归零），
+            # 日志层却报不出「哪条路径收的工、队列还剩多少」，所以 ④（线程为什么退光）无从查。
+            # `never_pairs` 只装 attempts==0 的局：`pending` 是**待办**队列，失败局会被
+            # `pending.append` 放回去（重投回队）——把它算成「从未派出」会在有失败的轮里撒谎
+            # （2026-10-08 评审 F1）。`left_pending` 照报全量（人读最顺），归因只认 `never_pairs`。
             with lock:
                 no_consumers = live_workers[0] <= 0
+                left_pending = len(pending)
+                inflight_n = len(inflight)
+                spawned_n = len(threads)
+                never_pairs = {p for p in pending if attempts.get(p, 0) == 0}
+            remain = deadline - time.time()
+            close_reason = eval_close_reason(
+                all_done.is_set(), no_consumers, time.time() >= deadline
+            )
+            never_n = len(never_pairs)
+            tail = (
+                f"【{close_reason}：剩余待派 {left_pending}（从未派出 {never_n}）、"
+                f"在飞 {inflight_n}、已起线程 {spawned_n}、窗口余 {remain:.0f}s】"
+            )
             # settled 满 = 断连（收工只等「正在写行」的赢家落盘）。
             closing = common.distribution.abort_active_requests(req_scope)
             if all_done.is_set():
                 log(
                     f"[eval] it{it}: settled 满（{len(landed)}/{total}）— 断连 {closing} 条"
-                    f"在飞连接 + 拒发新请求，立即收工（慢节点/竞速副本不再等）"
+                    f"在飞连接 + 拒发新请求，立即收工（慢节点/竞速副本不再等）{tail}"
+                )
+            elif close_reason == "workers-gone":
+                log(
+                    f"[eval] it{it}: 收工（worker 线程归零，未全落盘 {len(landed)}/{total}）"
+                    f"— 断连 {closing} 条在飞连接（在途局丢弃，下次续跑）{tail}"
                 )
             else:
                 log(
-                    f"[eval] it{it}: 收工（未全落盘 {len(landed)}/{total}）— 断连 {closing} 条"
-                    f"在飞连接（在途局丢弃，下次续跑）"
-                    + ("【消费线程已全退】" if no_consumers else "")
+                    f"[eval] it{it}: 收工（窗口到期 {window - remain:.0f}s，"
+                    f"未全落盘 {len(landed)}/{total}）— 断连 {closing} 条在飞连接"
+                    f"（在途局丢弃，下次续跑）{tail}"
+                )
+            if left_pending > 0:
+                # 可读性行（**不是**验收通道：log() 只在 prefix_scope 内镜像课程日志，
+                # eval 跑在后台线程 ⇒ 落盘的验收面只有 summary 的 close_reason/left_pending，
+                # 2026-10-08 评审 F10）。
+                log(
+                    f"[eval] it{it}: WARN 有 {left_pending} 局未落盘 —— 从未派出 {never_n} 局"
+                    f"（never-dispatched）、派出未落盘 {left_pending - never_n} 局（lost）"
+                    f"—— 查 worker 退出原因（远端节点断连/线程异常），不是节点失败"
                 )
             all_done.set()
             quiet_deadline = time.monotonic() + 1.0
@@ -980,6 +1014,12 @@ class EvalDispatcher:
                 rollout_winrate=rollout_winrate,
                 # D14 课程血缘（门按 course_fp 过滤趋势行；无课程 = ""=不过滤）。
                 course_fp=course_fp_for_args(args),
+                # 2026-10-08（plan/eval-baseline-undispatched §2 P0-1/P0-2）：收工读数进 summary。
+                # `left_pending` = 收工时的待办余量（含重投回队）；`left_pairs` = 真·从未派出
+                # 的那批（attempts==0）——`never_dispatched`/`never-dispatched` 两个读面都只认它。
+                left_pending=left_pending,
+                left_pairs=never_pairs,
+                close_reason=close_reason,
             )
         except Exception as e:
             log(f"[eval] round error (ignored): {type(e).__name__}: {str(e)[:200]}")

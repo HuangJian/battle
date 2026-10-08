@@ -201,6 +201,12 @@ def test_run_cloud_eval_records_rows_and_settles_the_summary(
     assert summary[0]["games"] == 6 and summary[0]["wins"] == 3
     assert summary[0]["nodes"] == {CLOUD_NODE: 6}
     assert summary[0]["iter"] == 1 and summary[0]["wver"] == key16
+    # 缺口细分（2026-10-08 plan/eval-baseline-undispatched §2 P0-2，评审 F2）：云机调用点
+    # 是**位置参数**调用、不传新参 ⇒ 缺省形状必须自洽：云机没有「本机待办队列」这个概念，
+    # `never_dispatched=0`、`lost` = 派出去没落盘、`carried` 只反映全集口径残留。
+    assert summary[0]["never_dispatched"] == 0
+    assert summary[0]["lost"] == 0 and summary[0]["carried"] == 0
+    assert summary[0]["left_pending"] == 0 and summary[0]["close_reason"] is None
 
     # 幂等：同一 wver 再来一次 ⇒ 一局不重跑（账本去重）
     again = run_cloud_eval(

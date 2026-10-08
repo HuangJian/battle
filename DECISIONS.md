@@ -8523,3 +8523,32 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
 - **测试**：`tests/remote/test_rollout_scratch.py`（30 例；四处反探针逐条转红）·
   `tests/remote/test_remote_iter.py` **一个字不改**全绿（协议零改动的验收点）· `bun run pygate` /
   `bun run check` 绿。—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §34
+## §2026-10-08-goalnn-eval-baseline-undispatched（2026-10-08，it0 基线 eval「从未派出」缺口：收工自报原因 + 缺口三分 + 基线自带本机门 + 大缺口重派；立案 plan/eval-baseline-undispatched）
+
+- **背景**：`tmp/x21-psh-b0` 结课盘点：it0 派 200 局只落 105，剩 95 局**从未离开 `pending`**。收工循环只看
+  `live_workers`（队列还剩 95、窗口还剩 1479s 也照样 `break`），收工行不报「哪条路径收的工、队列剩多少」；
+  `missing` 的 `undispatched` 是混类（真·从未派出 vs meta ok 却无落盘行）；it0 那一轮的 `_eval_gate` 是 **None**
+  （A-eval 还没派过 ⇒ `_dispatch_delayed_eval` 的建门点走不到）⇒ 本机槽位结构性缺席，远端线程一退光队列就没人抽；
+  落账判据「summary 带 dropped 也算落账」让 47.5% 的大缺口永远不补派。取证与评审 → `plan/eval-baseline-undispatched.review-bf.md`。
+- **备选与否决**：① 先修「远端线程为什么退光」——否（未证实；先让 P0-1 把原因落盘，真机数据到了再修）；
+  ② `dropped` 改成只算 `lost`——否（会把「语料全集 − 本轮台账」的老缺口从读数上抹掉，退回 §61 之前）；
+  ③ 收工时就地补派剩局——否（与 §61 的整轮重投护栏重复，且在窗口已到期路径上加第二段等待）；
+  ④ 基线一律重派到满——否（回到 2026-09-13 之前的无限重跑，节点瞬时全挂会烧配额）；
+  ⑤ 原方案「放宽 `release_local_gate_if_starved` 的饥饿判据」——否（门在生产恒已置位 ⇒ 死代码；判据在现场不可判定；
+  it0 的缺口是「门**不存在**」而不是「门未放行」）。
+- **决定**：① 收工自报 `close_reason ∈ settled/window/workers-gone`（单一实现 `worker/eval_yield.eval_close_reason`；
+  `workers-gone` 只在**窗口还有余量**时成立 —— 否则窗口到期永远报不出来）+ `left_pending/inflight/spawned/窗口余`；
+  ② `settle_eval_summary` 新增 `never_dispatched`/`lost`/`carried`/`left_pending`/`close_reason` 五个**纯新增**键
+  （`dropped` 数值一字未动）：`never_dispatched` 只数 `attempts==0` 的局（重投回队归 `lost`）、`lost` 从第一项推
+  （续跑轮不再报「丢 180 局」的幻数）、残留归 `carried`；`missing` 加第四值 `never-dispatched`；
+  ③ 基线轮 `_eval_gate is None` 时自建一把**已置位**的门（PPO 恒在远端 ⇒ 本机核心空闲；既有门一字不动）；
+  ④ `baseline_needs_retry`：`games<=0` 或 `dropped/(games+dropped) > 2%` ⇒ 不算落账、继续重派，预算按**账本行数**
+  导出（上限 3，跨重启成立）；`loop_baseline` 与 `eval_a_once` 两处幂等早退同一判据。
+- **违反后果**：改 `dropped` 口径 ⇒ 控制台「缺N」/门控趋势行历史不可比；把重投回队算成「从未派出」⇒ 有失败的轮里
+  两个成因重新混回一个桶（本刀要消灭的病）；验收断言落在 WARN 日志行 ⇒ 后台线程里 `log()` 不保证镜像（落盘面只有 summary）；
+  重派预算用内存计数 ⇒ 一重启就回满，「上限 3」是空话；只改 `loop_baseline` 不改 `eval_a_once` ⇒ 人工补基线补不动。
+- **测试**：`tests/worker/{test_eval_yield_split,test_dual_track_eval,test_baseline_eval}.py` ·
+  `tests/trainer/{test_eval_dispatch_resilience,test_eval_a_once}.py` · `tests/remote/test_offline_eval_cloud.py`；
+  六处先在 HEAD worktree 上确认红（ImportError/TypeError/KeyError/断言），再绿；`bun run pygate`
+  **3932 passed / 15 skipped** · `bun run check` 绿。真机验收 → `docs/nn.progress.md` §3 行 25。
+  —— 全文（四条根因链 / 评审 F1–F10 处置 / 云机侧口径）→ `docs/nn/engineering.md` §66

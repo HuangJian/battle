@@ -295,6 +295,9 @@ def settle_eval_summary(
     t_eval_start: float,
     rollout_winrate: float | None,
     course_fp: str | None = None,
+    left_pending: int = 0,
+    left_pairs: set[tuple[int, int]] | None = None,
+    close_reason: str | None = None,
 ) -> None:
     """评估窗口结束后的对账与 summary 落账（原 dispatch_eval_round 尾部，纯函数化）。
 
@@ -317,6 +320,21 @@ def settle_eval_summary(
     eval 行 append 成功才计入——本参数曾名 `seen`（认领集），改名正是为了让下一个调用方
     不再喂认领集（`dropped` 公式一字未动，φ 语义从「结算」变「落盘」）。缺口原因清单
     同时进 summary 的 `missing` 字段（G6）。
+
+    缺口细分（2026-10-08，plan/eval-baseline-undispatched §2 P0-2/P0-3）：`dropped` 的**数值
+    一字未动**（控制台「缺N」/门控趋势行的历史可比性靠它），另加三个纯新增读数——
+    `never_dispatched`（本轮**从未离开 `pending`** 的局数 = `len(left_pairs)`）、
+    `lost`（派出去了但没落盘 = `max(0, total - 落盘 - never_dispatched)`）、
+    `carried`（`dropped` 的**第二项**残留：语料全集 − 本轮台账 —— 别轮已评/断点续跑复用；
+    只为不让它混进 `lost`，不参与门判）。`left_pending` = 收工时的待办余量（含重投回队
+    的局，人读用）；`close_reason` ∈ `settled`/`window`/`workers-gone`（判定单一实现：
+    `worker/eval_yield.py::eval_close_reason`）。`missing` 的 reason 同步细分：`left_pairs`
+    命中 ⇒ `never-dispatched`（真·从未派出），否则走 `_missing_reasons`。
+
+    三个新参数均带缺省值（`left_pending=0` / `left_pairs=None` / `close_reason=None`）⇒
+    云机调用点（`remote/offline_eval.py`，位置参数调用）**零改动**：它的
+    `never_dispatched=0`、`lost` = 失败局数、`carried` = 全集口径残留 —— 云机侧没有
+    「本机待办队列」这个概念，不传是**有意**的，不是遗漏。
     """
     dropped = total - len(landed)
     #: 账本里已有的 (stage, seed)（与 n 同口径的行）——`missing` 的判据（G6）。
@@ -399,13 +417,33 @@ def settle_eval_summary(
         wins_v = wins[0]
         clears_v = cleared_total[0]
     dropped = max(dropped, len(pairs) - n)
+    # 缺口细分（2026-10-08，plan/eval-baseline-undispatched §2 P0-2，评审 F1/F2）：
+    # `dropped` 数值不动，只解释它由什么组成。`lost` 从**第一项**推，不是 `dropped - never`
+    # ——后者会让第二项（别轮已评/零梯度复用）整块灌进 `lost` 变成幻数（续跑轮会报出
+    # 「一局没丢却丢了 180 局」）。`left_pairs` 只收 attempts==0 的局（派过的重投回队
+    # 不算「从未派出」——那是 `lost`）。
+    never_set = set(left_pairs) if left_pairs else set()
+    never_dispatched = len(never_set)
+    not_landed = max(0, total - len(landed))
+    lost = max(0, not_landed - never_dispatched)
+    # 第二项残留（≥0：`pending ∩ landed = ∅` 且 `pending ⊆ todo` ⇒ never ≤ not_landed）。
+    carried = max(0, dropped - never_dispatched - lost)
     # 缺口原因（G6）：只在真有缺口时扫 meta；有界 MISSING_MAX、按 seed 升序。
     missing: list[dict[str, object]] = []
     if dropped > 0:
-        reasons = _missing_reasons(eval_jsonl.parent / "dist-agent-meta.jsonl", it)
+        meta_reasons = _missing_reasons(eval_jsonl.parent / "dist-agent-meta.jsonl", it)
         gap_pairs = sorted((p for p in pairs if p not in led_keys), key=lambda p: (p[1], p[0]))
         missing = [
-            {"stage": s, "seed": sd, "reason": reasons.get((s, sd), "undispatched")}
+            {
+                "stage": s,
+                "seed": sd,
+                # 真·从未派出（收工时的 pending 快照，attempts==0）优先于 meta 扫描；
+                # `undispatched` 从此只表示「meta 有 ok=True 行却没落盘行」的罕怪态
+                # （P0-3；评审 F9：字段名与 reason 不再同义）。
+                "reason": "never-dispatched"
+                if (s, sd) in never_set
+                else meta_reasons.get((s, sd), "undispatched"),
+            }
             for (s, sd) in gap_pairs[:MISSING_MAX]
         ]
     clean_wr = (wins_v / n) if n else None
@@ -429,6 +467,14 @@ def settle_eval_summary(
         "clearRate": round(clear_rate, 4) if clear_rate is not None else None,
         "outcomes": outcomes,
         "dropped": dropped,
+        # 缺口细分（plan/eval-baseline-undispatched §2 P0-2）：dropped 数值不动，
+        # 三个新键解释它由什么组成（恒有 dropped == never_dispatched + lost + carried）。
+        "never_dispatched": never_dispatched,
+        "lost": lost,
+        "carried": carried,
+        # 收工时的待办余量（含重投回队的局）与收工原因（新行才有；旧行缺字段 = unknown）。
+        "left_pending": int(left_pending),
+        "close_reason": close_reason,
         # 缺口局 + 原因（G6；上限 MISSING_MAX）。旧行缺本字段 = unknown（不是 0）。
         "missing": missing,
         "rolloutWinRate": report_winrate_safe(rollout_winrate),
@@ -456,6 +502,11 @@ def settle_eval_summary(
         done_msg = (
             f"[eval] it{it} DONE wver={key16[:12]}… clean winRate="
             f"{clean_wr:.1%} ({wins_v}/{n}, dropped={dropped})"
+            + (
+                f"（never_dispatched={never_dispatched} lost={lost} carried={carried}）"
+                if dropped > 0
+                else ""
+            )
             + (f" clearRate={clear_rate:.1%} ({clears_v}/{n})" if clear_rate is not None else "")
             + (f" vs rollout(sampled)={rollout_winrate:.1%}" if rollout_winrate is not None else "")
             + f" outcomes={json.dumps(outcomes)}"
