@@ -211,9 +211,9 @@ workers 8 · inflight 3 · done 1234 · disk 1212MB(warn)
 | **A** | 阈值与分级 | `tools/agent/sampler-agent.ts`                                | 提出 `DISK_FLOOR_MB=2048`（值冻结）· 新增 `DISK_WARN_MB=4096` · 新增导出纯函数 `classifyDiskFree()` · `:1969` 改用常量 |
 | **A** | 上报    | 同上 `/v1/ping`（`:2221+`）与 `/v1/status`（`:2213`）                | 各加 `diskFreeMB` / `diskLevel` / `diskWarnMB` / `diskFloorMB`                                       |
 | **A** | 单测    | `tests/`（根套件，关注点镜像）                                           | `classifyDiskFree` 边界 + 回差 + 不抖                                                                    |
-| **D** | 探测契约  | `dashboard/src/server/api/views.ts:143-152`                   | `NodeProbeResult` 加 `diskFreeMB: number \| null` / `diskLevel: DiskLevel \| null`；`:173-175` 解析该字段 |
+| **D** | 探测契约  | `dashboard/src/server/api/views.ts:148-152`                   | `NodeProbeResult` 加 `disk: DiskFactsView \| null`（**五个 wire 字段打包成一个事实对象**，不散成并列字段）；`parseDiskFacts()` 解析（F1/F4：缺任一 ⇒ null，不编事实） |
 | **D** | 节点视图  | `dashboard/src/web/view/console-types.ts:62`（**`NodeView` 本体住这里**，评审 F6）+ `views.ts:188-206` `mergeNodeProbes`                 | 透传磁盘事实（行级档位，顺带覆盖全部节点）                                                                              |
-| **D** | 视图契约  | `dashboard/src/web/view/console-types.ts`                     | 新增 `SelfDiskView`（`{freeMB, level, warnMB, floorMB, since}`）+ `ConsoleStateView.selfDisk`；`NodeView` 加行级磁盘事实（同型）                           |
+| **D** | 视图契约  | `dashboard/src/web/view/console-types.ts`                     | 新增 `DiskLevel` 与 `DiskFactsView`（`{freeMB, level, warnMB, floorMB, since}`）+ `selfDiskBadge()` 徽标口径 + `ConsoleStateView.selfDisk`；`NodeView` 加行级 `disk`（同型）                           |
 | **D** | 装配    | `dashboard/src/server/api/state-view.ts`（`:128-134` 那段 try 内） | 从 `getFleetProbes(cfg)` 取 self 节点的磁盘事实 → `selfDisk`；整段 try（探测坏不得带崩 `/api/state`）                   |
 | **D** | ack 事件类 | `dashboard/src/web/view/interaction.ts:33-42`                                                                                             | `AlertAckKind` 闭集加 `'self-disk'`（F7）                                                                                     |
 | **D** | 徽标取数  | `dashboard/src/server/api/pool.ts`（`:126/136` 解析）+ `dashboard/src/web/view/pool-types.ts:84-94`                                    | `SelfStatus` 加 `diskLevel/diskWarnMB/diskFloorMB/diskLevelSince`（F4：徽标要显示档位就得收它们）                                        |
@@ -244,7 +244,7 @@ workers 8 · inflight 3 · done 1234 · disk 1212MB(warn)
 ### W-D1 — 契约搬运：ping → NodeProbeResult → FleetProbes → ConsoleStateView
 
 1. `NodeProbeResult` / `NodeView` 加磁盘两字段；`nodeProbeResults` 解析；
-2. `console-types.ts` 加 `selfDisk?: SelfDiskView | null`；
+2. `console-types.ts` 加 `selfDisk?: DiskFactsView | null`；
 3. `state-view.ts` 在既有 `getFleetProbes` try 内取 self 行 → `selfDisk`（**只读缓存值**：不得在这里
    裸调 `/v1/status`——`fetchSelfStatus` 是 4s 超时且模块私有，而 `state-view` 有 R1 结构闸）；
 4. **必红自查**：把 `selfDisk` 写死 `null` ⇒ W-D0 三条全红；把整段从 try 里挪出去 ⇒  
