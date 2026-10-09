@@ -293,10 +293,14 @@ def test_validate_rollout_spec_normalizes_and_rejects_bad_argv() -> None:
     dup = {"argv": [_argv(1, 0), _argv(1, 0)]}
     with pytest.raises(ProtocolError, match="重复声明"):
         manifest_mod.validate_rollout_spec(dup)
-    # 显式 0 worker 拒收（不静默改成 1）
+    # 显式 0 = **节点自定**（2026-10-09，plan/course-workers-removal §3-S2-1）：kind=iter 上
+    # 唯一能表达「并发由跑 rollout 的机器决定」的 wire 形状；缺席仍 = 1（老字节语义，见上）。
     zero = {"argv": [_argv(1, 0)], "workers": 0}
+    assert manifest_mod.validate_rollout_spec(zero)["workers"] == 0
+    # 负值仍拒收：0 现在有定义（机器自定），「配错」与「没配」不再可混。
+    neg = {"argv": [_argv(1, 0)], "workers": -1}
     with pytest.raises(ProtocolError, match=">="):
-        manifest_mod.validate_rollout_spec(zero)
+        manifest_mod.validate_rollout_spec(neg)
     # 未知字段拒收（非忽略）
     with pytest.raises(ProtocolError, match="未知字段"):
         manifest_mod.validate_rollout_spec({**_argv_spec(), "nope": 1})

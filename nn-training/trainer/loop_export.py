@@ -180,9 +180,12 @@ class TrainingExport:
         from worker.plan import RUN_NODE_LABEL, build_plan, dump_plan, planned_iters
 
         wver = common.distribution.weights_fingerprint(args.out)
-        workers = int(getattr(args, "remote_iter_workers", 0) or 0) or int(
-            getattr(args, "workers", 1) or 1
-        )
+        # 节点并发（2026-10-09，plan/course-workers-removal §3-S2-3）：**0 = 节点自定**
+        # （wire 语义），不再回退 `args.workers`（训练机配额 ≠ 云机规模）。
+        # 注：计划块里的 `workers` 是「导出机规模」的老位置（`build_plan` 仍把 0 钳成 1）——
+        # 它只是 legacy 提示：离线段在唯一装配点 `plan_handoff` 已把它解析成 `cpu_worker_slots()`，
+        # 节点侧 `with_rollout_workers` 照旧覆盖 ⇒ 这条腿口径不变（§3 S2-3 的注解）。
+        workers = int(getattr(args, "remote_iter_workers", 0) or 0)
         game_timeout = float(getattr(args, "remote_iter_game_timeout", 0.0) or 0.0)
         spec = build_iter_spec(
             args,

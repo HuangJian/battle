@@ -8679,3 +8679,34 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   · `dashboard/tests/ppo-worker-live.test.ts`（13 例）· 分域守卫 `tests/hub/test_hub_queue_split.py` /
   `test_hub_admin_split.py` 同批更新（域成员 118→120、状态表 +2、admin 方法 9→10）。
   —— 全文（规格 / 评审 F1–F8 处置 / 逐文件落点）→ `plan/dashboard-ppo-live-rows.plan.md`
+
+## §2026-10-09-goalnn-course-workers-removal（2026-10-09，`workers` 从课程文件退场：机器级键；kind=iter 的 wire 补一档「0 = 节点自定」）
+
+- **背景**：用户 2026-10-09「课程里的 `workers: 8` 不合理——课程并不知道它将会在哪个环境做 rollout」。
+  代码事实：`curricula/*.jsonc` 167/167 门课都写 `workers`（164×8、3×2，复制粘贴常量）；远端 kind=iter
+  那条腿取 `remote_iter_workers or args.workers` ⇒ **训练机**的本机配额（8）被当成**节点并发**发下去，
+  而节点侧夹取只降不升（`min(requested, …, cpu_worker_slots())`）⇒ 96 核机器上 `min(8, 94) = 8`。
+- **备选与否决**：① 只改 value / 加值校验——否，值描述的是机器，课程文件不是它该待的地方（rl-config §1.1
+  A 类判据）；② 「不下发 workers」（spec 不带键）——**否（评审阻断）**：wire 上不可表达（`ROLLOUT_SPEC_DEFAULTS`
+  缺席=1、显式 0 当时拒收、`build_iter_spec` `else 1`），真链路会变 8→**1**；③ 新增 `workers_auto` 布尔字段
+  ——否，多一个可漂字段，而 0 已有定义可用；④ 把「缺席」默认也改成 0——否，会改手写/在飞 spec 的字节语义
+  且让测试依赖机器核数；⑤ 剃存量 167 个文件的键（用户已裁决「永不剃」）——否，课程字节 = `course_fp`
+  （门过滤 / D14 去重 / 血缘），为死键抖动血缘不划算；⑥ 删 `CourseConfig.workers` 字段——否，
+  `extra="forbid"` ⇒ 167 门课拒启；⑦ 告警放 `apply_course`——否，只读视图 `course_openable` 同链，
+  控制台每拍轮询重复打 + 弄脏 `run_rl_cluster --json`；⑧ 照抄 `with_rollout_workers`——否，离线段的 spec
+  由**节点自己**拼，kind=iter 由训练机拼，「谁在拼 spec」不同。
+- **决定**：`workers` 判定为**机器级**键 ⇒ 课程侧读面删除（`flat_overrides` / `RESTART_ONLY_FIELDS` /
+  ladder 模板），字段与存量键永久保留，死键由**开课侧**一行告警点名；本机配额与离线段口径不动。
+  wire 侧 `manifest.rollout.workers` 补一档 **显式 `0` = 节点自定（auto）**（缺席仍 = 1；负值仍拒收），
+  节点按 `cpu_worker_slots()` 定档（96 核 ⇒ 94）并出「并发定档」行；发布侧不再回退 `args.workers`，
+  `--remote-iter-workers` 只剩操作员加压阀语义。
+- **违反后果**：把训练机读数当节点并发 ⇒ 大核机器被钉死在 8（本次病灶）；把 0 读成 1（或让归一化拒收 0）
+  ⇒ 节点并发从 94 掉到 1（比现状更糟）；剃课程键 ⇒ `course_fp` 断裂（门过滤 / D14 拒收）；
+  删字段 ⇒ 167 门拒启；告警放进只读链 ⇒ 控制台轮询刷屏 + `--json` 契约回归。
+- **测试/证据**：`tests/remote/test_remote_iter.py`（发布侧 0 保留 / 节点自定取核数口径 /
+  env 正整数压上限 / env=0 不塌成 256 / 训练侧不发 `args.workers`）· `tests/common/test_manifest_split.py`
+  （0 接受 / 负值拒收 / 缺席仍 = 1）· `tests/biz/test_hot_reload.py`（死键读面、`same` 判定、告警文案）·
+  `tests/biz/test_course_spec_split.py`（模块面闭集 + 门面转发）。门禁 `bash tools/githook/nn-python-gate.sh`
+  （ruff + mypy + tests/ + e2e/）绿（2026-10-09，72s）。
+  —— 全文（评审 R1–R9 处置、逐文件落点）→ `plan/course-workers-removal.plan.md` ·
+  wire 档案 → `docs/nn/remote-transport.md` §76 · 键分类 → `docs/nn/rl-config.md` §4

@@ -41,7 +41,9 @@ def build_iter_spec(
     用 `run`（`biz.plan.RUN_NODE_LABEL`）——事后按 shard 就能分清“这一批局是逐轮上云跑的”
     还是“云端自主段跑的”。
 
-    workers<=0 → 退化为 1（节点侧另有上限钳制）；`wver` 必须是本轮权重的指纹
+    `workers<=0` ⇒ **`0` = 节点自定**（2026-10-09，plan/course-workers-removal §3-S2-1）：
+    节点按本机核数（`cpu_worker_slots()`）定并发，**不再退化成 1**（那会把 96 核云机
+    钉死在训练机的 8）；节点侧另有上限钳制。`wver` 必须是本轮权重的指纹
     （`common.distribution.weights_fingerprint(args.out)`）——它同时进 argv（`--wver`，写进每局
     shard manifest）和规格（声明集），两侧必须同值，否则节点复算 data_fp 必然不符。
     """
@@ -67,7 +69,9 @@ def build_iter_spec(
     return {
         "argv": argv,
         "wver": str(wver or ""),
-        "workers": int(workers) if int(workers) > 0 else 1,
+        # 0 = 节点自定（wire 语义 = auto，见 `common.manifest.validate_rollout_spec`）；
+        # 不再 `else 1`：那会把「没配」读成「钉死 1」。
+        "workers": max(0, int(workers)),
         "game_timeout_sec": float(game_timeout_sec or 0.0),
         "bun": "bun",
     }

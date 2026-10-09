@@ -706,6 +706,9 @@ class CourseConfig(BaseModel):
     """课程配置文件（`nn-training/curricula/*.jsonc`）。
 
     顶层键 1:1 映射 argparse dest；`stages` / `reward` / `ppo_schedule` 为嵌套块。
+    ⚠ 例外：`workers` 已无读者（机器级键，2026-10-09 `plan/course-workers-removal`；
+    见 `DEAD_COURSE_KEYS`）——字段保留只为 `extra="forbid"` 下不拒启存量课程文件，
+    **不要再给它接读面**。
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -870,6 +873,9 @@ class CourseConfig(BaseModel):
     # ---- 运行 ----
     iters: int = 15
     max_hours: float = 0.0
+    #: ⚠ 死键（2026-10-09，plan/course-workers-removal）：并发是**机器侧**属性，读面已删
+    #: （不覆盖 args.workers、不记账 restart-only）。字段**永久保留** = 存量课程文件
+    #: （167/167 都写了）在 `extra="forbid"` 下仍能解析；删字段 = 全部拒启。
     workers: int = 8
     warmup_iters: int = 1
     stream: int = 1
@@ -1037,7 +1043,9 @@ class CourseConfig(BaseModel):
             "lam": "lam",
             "iters": "iters",
             "max_hours": "max_hours",
-            "workers": "workers",
+            # ★ 2026-10-09（plan/course-workers-removal §3-S1）：`workers` 不在映射表里——
+            #   机器级并发键（课程值曾把 96 核节点钉死在 8）。字段与存量键保留，
+            #   由 `dead_key_warnings()` 在开课时点名。
             "stream": "stream",
             "keep_iters": "keep_iters",
             "out": "out",
@@ -1092,3 +1100,31 @@ def _default_lives(difficulty: str) -> int:
     只在课程未显式声明 `player.lives` 时兜底，不复制难度表的演进。
     """
     return 3
+
+
+# ---------------------------------------------------------------- 死键（无读者的课程键）
+
+#: 已无读者的课程键 → 告警文案（2026-10-09，plan/course-workers-removal）。
+#:
+#: 为什么不删字段 / 不剃存量键：课程文件字节 = `course_fp`（语料血缘 / 门过滤 / D14 去重键），
+#: 为删一个死键去抖动血缘不划算；字段删掉则 `extra="forbid"`（本文件 `CourseConfig`）会把
+#: 存量 167 门课全部拒启。⇒ 唯一动作 = 开课时打一行可 grep 的告警（只告警不拒）。
+#: 判据 = `model_fields_set`（**显式声明**才算命中）——与 `flat_overrides` 同一套语义。
+DEAD_COURSE_KEYS: dict[str, str] = {
+    "workers": (
+        "[course] 课程里的 workers 已无读者：并发由机器侧决定"
+        "（rl-config rl.workers / courses.<课>.workers / 节点核数）"
+    ),
+}
+
+
+def dead_key_warnings(course: CourseConfig | None) -> list[str]:
+    """课程文件里显式声明了死键 ⇒ 返回告警行（没有 / 课程为空 ⇒ 空表）。
+
+    ⚠ 只在**开课侧**调用（`loop_serve.open_course` / `run_rl` 课程段）。不要搬进
+    `apply_course` / `course_args`：只读视图 `course_openable` 走的是同一条链
+    （控制台每拍轮询），放那里会重复刷屏，还会弄脏 `run_rl_cluster --json` 的输出。
+    """
+    if course is None:
+        return []
+    return [msg for key, msg in DEAD_COURSE_KEYS.items() if key in course.model_fields_set]

@@ -434,6 +434,8 @@ _ITER_PATH_FLAGS: tuple[str, ...] = ("--out", "--weights")
 #: rollout 规格默认值（缺省即旧行为，additive）。
 ROLLOUT_SPEC_DEFAULTS: dict[str, object] = {
     "wver": "",
+    # 缺席 = 1（历史默认，逐字节兼容）；**显式 0 = 节点自定**（2026-10-09，
+    # plan/course-workers-removal：并发是机器侧属性，节点按 `cpu_worker_slots()` 定）。
     "workers": 1,
     # 0 = plan 没给 ⇒ **节点兜底硬顶**（`iter_rollout.DEFAULT_GAME_TIMEOUT_SEC`）。
     # 2026-09-22 改口径：旧注释写的是「0 = 不设单局超时（本机历史行为）」，也就是一个卡住的
@@ -561,8 +563,12 @@ def validate_rollout_spec(spec: object) -> dict:
         argv_out.append(argv)
     out["argv"] = argv_out
     out["wver"] = str(out["wver"] or "")
-    # workers：缺席 = 1（默认值）；**显式 0 拒收**（不静默改成 1——那会让「配错了」
-    # 与「没配」长得一样，而并发配错正是那种「跑起来了但完全不是你要的」错误）。
+    # workers：**缺席 = 1**（历史默认，逐字节兼容：树内两个生产者——`worker.iter_job.build_iter_spec`
+    # 与 `worker.plan.iter_spec`——总是显式写这个键，缺席只对手写/在飞的老 spec 有意义）；
+    # **显式 0 = 节点自定（auto）**（2026-10-09，plan/course-workers-removal §3-S2-1）：
+    # 节点按本机核数（`cpu_worker_slots()`）定并发——这是 kind=iter 唯一能表达「并发由跑 rollout
+    # 的那台机器决定」的 wire 形状。负值/非整数仍拒收：0 现在有**定义**（机器自定），
+    # 「配错」与「没配」不再可混——旧口径「显式 0 拒收」按新语义换靶，不是放宽纪律。
     _w: object = 1 if out["workers"] is None else out["workers"]
     if isinstance(_w, bool):
         raise ProtocolError(f"manifest.rollout.workers 必须是整数，收到 {_w!r}")
@@ -572,8 +578,8 @@ def validate_rollout_spec(spec: object) -> dict:
         _wn = int(_w)
     else:
         raise ProtocolError(f"manifest.rollout.workers 必须是整数，收到 {_w!r}")
-    if _wn < 1:
-        raise ProtocolError("manifest.rollout.workers 必须 >= 1（显式 0 拒收，不静默改成 1）")
+    if _wn < 0:
+        raise ProtocolError("manifest.rollout.workers 必须 >= 0（0 = 节点自定；负值拒收）")
     out["workers"] = _wn
     _t: object = 0.0 if out["game_timeout_sec"] is None else out["game_timeout_sec"]
     if isinstance(_t, bool) or not isinstance(_t, (int, float)):

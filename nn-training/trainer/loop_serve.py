@@ -218,6 +218,12 @@ def open_course(
     from trainer.run_rl import _acquire_run_rl_lock, _cleanup_run_rl_lock
 
     args = course_args(course, argv)
+    # 死键点名（plan/course-workers-removal §3-S1.5）：**开课侧**一次，一行/门课。
+    # 不放 `apply_course`：只读视图 `course_openable` 走同一条链，会被控制台每拍轮询重复打。
+    from biz.course_spec import dead_key_warnings
+
+    for _msg in dead_key_warnings(getattr(args, "course_obj", None)):
+        log(_msg)
     traj = Path(args.traj)
     expected = Path(course_traj(traj_root, course))
     if str(traj) != str(expected):

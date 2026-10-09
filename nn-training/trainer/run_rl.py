@@ -268,6 +268,13 @@ def main() -> None:
         echo_config(args, course)
         log("[run_rl] --echo-config done — exit")
         return
+    # 死键点名（plan/course-workers-removal §3-S1.5）：**开课侧**一次/门课。放在 echo 短路
+    # **之后**——`--echo-config` 是纯 dump 面（对拍 oracle 读它的 stdout），不该多出别的行。
+    if course is not None:
+        from biz.course_spec import dead_key_warnings
+
+        for _msg in dead_key_warnings(course):
+            log(_msg)
     # 课程名（与锁段共用一次推导；非法 stem 在此即响亮拒启）。
     #
     # ❌ 2026-09-18 删掉了“按课程回填 remote_hubs[<stem>]”那段：hub/隧道已收敛为**单**

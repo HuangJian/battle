@@ -59,6 +59,9 @@ from biz.course_spec import (
     CUSTOM_STAGE_BASE as CUSTOM_STAGE_BASE,
 )
 from biz.course_spec import (
+    DEAD_COURSE_KEYS as DEAD_COURSE_KEYS,
+)
+from biz.course_spec import (
     GATE_CROSS_COURSE_KINDS as GATE_CROSS_COURSE_KINDS,
 )
 from biz.course_spec import (
@@ -135,6 +138,9 @@ from biz.course_spec import (
 )
 from biz.course_spec import (
     _points_or_raise as _points_or_raise,
+)
+from biz.course_spec import (
+    dead_key_warnings as dead_key_warnings,
 )
 
 # ------------------------------------------------------------------ 下沉（S5 第十刀，2026-09-27）
@@ -413,10 +419,13 @@ def apply_course(args, course: CourseConfig) -> None:
 # 机器配额只住 rl-config 的 `courses.<课>` 块，**永不写进 curricula/*.jsonc**：这是**机器侧**
 # 旋钮（D14 混训拒收判 `corpus_fp`；`course_fp` 是 D13/幂等/门过滤的文件血缘——机器配额不是实验设计）。
 # 实验设计块（如止损 `kickstart_burn`/`paired_kill`）进课程文件，见
-# DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file。课程文件里
-# 的 `workers` 是「课程声明」，`courses.<课>.workers` 是「本机实际切分」；两者分叉时
-# 必须打响亮行（C1），不能静默顶替。后来者：不要把覆盖逻辑"顺手"搬进 apply_course——
-# 那会让课程覆盖与机器配额重新纠缠（plan C1 ③）。
+# DECISIONS §2026-10-02-goalnn-burn-rule-in-course-file。
+# ★ 2026-10-09（plan/course-workers-removal）：课程文件里的 `workers` 已成**死键**
+#   （读面已删）——课程不知道它将在哪台机器上做 rollout，并发只由本机配额
+#   （`courses.<课>.workers` > `rl.workers`）与**跑 rollout 那台机器的核数**决定。
+#   存量键不清理（课程字节 = course_fp），开课时由 `dead_key_warnings()` 点名。
+#   后来者：不要把覆盖逻辑"顺手"搬进 apply_course——
+#   那会让课程覆盖与机器配额重新纠缠（plan C1 ③）。
 
 
 def course_key_of(args) -> str:

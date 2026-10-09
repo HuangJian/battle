@@ -3,7 +3,7 @@
 分类学沿用 §2026-09-13-level-extraction：
 - **非语料改动**（corpus_identity_fp 不变；B/C 类）：白名单字段直接写回 args——消费点
   每轮活读（iters/gamma/lam/epochs/mb/eval_*/ent_break*，loop_core:207 / loop_steps
-  _course_iter），**下一 iter 即生效**；结构绑定字段（bc/workers/out/traj 等）记
+  _course_iter），**下一 iter 即生效**；结构绑定字段（bc/out/traj 等）记
   restart-only，响亮日志「停止→启动后生效」，不静默吞。
 - **语料身份改动**（corpus_fp 变了 = A 类破坏性）：拒绝热应用，写 `course_edit` 事件
   （控制台横幅）+ 响亮日志，**沿用启动期配置继续训练**。云端不可见：D13 课程快照 /
@@ -39,7 +39,10 @@ HOT_FIELDS: tuple[str, ...] = (
 #: 模型手术/一次构建的 update_kwargs）——只记日志提示「停止→启动后生效」。
 RESTART_ONLY_FIELDS: tuple[str, ...] = (
     "bc",
-    "workers",
+    # ★ 2026-10-09（plan/course-workers-removal §3-S1）：`workers` 已摘除——读面没了
+    #   （不覆盖 args），再记 restart-only 就是给死键报「停止→启动后生效」的假提示。
+    #   只改 workers 的课程编辑现在判 `same`（`loop_steps` 直接 return）：键是死的，
+    #   没有活字段随它变——这是预期行为，不是 bug。
     "stream",
     "keep_iters",
     "warmup_iters",

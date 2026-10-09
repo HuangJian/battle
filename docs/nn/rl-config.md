@@ -10,6 +10,17 @@
 
 ---
 
+## §4 2026-10-09：`curricula/*.jsonc` 里的 `workers` 成死键（机器侧并发只认 rl-config / 节点核数）
+
+* 课程侧的 `workers` **读面已删**（`plan/course-workers-removal`）：并发是**机器侧**属性
+  （§1.1 A 类），课程不知道它将在哪台机器上做 rollout——曾被当成节点规模把 96 核云机钉死在 8。
+  存量 **167** 个课程文件里的键**不清理**（课程字节 = `course_fp` 语料血缘；`extra="forbid"` 下
+  删字段 = 全部拒启）——开课时由 `biz.course_spec.dead_key_warnings()` 打一行告警点名。
+* 本机配额仍只看 `rl.workers` / `courses.<课>.workers`（§1.4b 口径不变）；远端 kind=iter 的
+  节点并发改由**节点自己**按 `cpu_worker_slots()` 定（wire：`workers: 0` = auto，详见
+  `docs/nn/remote-transport.md` §76）。
+* 本节不影响 §1.1 的两行判据：`rl.workers` / `rl.local_slots` 仍是 A 类（机器级），位置正确。
+
 ## §3 2026-10-02：止损两键成死键（第二刀）+ 存量噪声一次性清理
 
 `kickstart_burn` / `paired_kill` 2026-10-02 第一条已搬进 `curricula/*.jsonc`（随腿入库、课程块权威），

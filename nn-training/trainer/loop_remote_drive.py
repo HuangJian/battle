@@ -112,9 +112,10 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
         from worker.iter_job import build_iter_spec
 
         wver = common.distribution.weights_fingerprint(args.out)
-        workers = int(getattr(args, "remote_iter_workers", 0) or 0) or int(
-            getattr(args, "workers", 1) or 1
-        )
+        # 节点并发（2026-10-09，plan/course-workers-removal §3-S2-3）：**0 = 节点自定**
+        # （wire 语义），不再回退 `args.workers`——那是**训练机**的本机配额，曾被当成
+        # 节点规模把 96 核云机钉死在 8。正整数 = 操作员加压阀（节点仍按核数夹取）。
+        workers = int(getattr(args, "remote_iter_workers", 0) or 0)
         spec = build_iter_spec(
             args,
             pairs,
@@ -125,7 +126,7 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
         )
         log(
             f"[run_rl] rollout_src=node it{it}: {len(pairs)} 局上云采集"
-            f"（node workers={workers}，wver={wver[:12] if wver else '-'}…）"
+            f"（node workers={workers if workers > 0 else '自定'}，wver={wver[:12] if wver else '-'}…）"
         )
         t_roll = time.time()
         try:

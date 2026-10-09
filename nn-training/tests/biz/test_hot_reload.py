@@ -77,14 +77,16 @@ def test_apply_hot_fields_updates_args_and_marks_restart_only(tmp_path: Path) ->
     d = _course_dict()
     d["iters"] = 99
     d["max_hours"] = 6.0
-    d["workers"] = 4  # restart-only
+    # restart-only 的样例用 `stream`（2026-10-09：`workers` 已成机器级死键，
+    # 从 RESTART_ONLY_FIELDS 摘除——见文末 test_workers_*）。
+    d["stream"] = 0
     new = load_course(_write_course(tmp_path, d))
     changed = apply_hot_fields(args, new)
 
     assert "iters" in changed and "max_hours" in changed
-    assert "workers*" in changed  # `*` = restart-only
+    assert "stream*" in changed  # `*` = restart-only
     assert args.iters == 99 and args.max_hours == 6.0
-    assert args.workers == old.workers  # 结构字段未被写回
+    assert args.stream == old.stream  # 结构字段未被写回
     assert args.course_obj is new
     assert corpus_identity_fp(args.course_obj) == corpus_identity_fp(new)
 
@@ -133,3 +135,50 @@ def test_changed_field_names_lists_all(tmp_path: Path) -> None:
     new = load_course(_write_course(tmp_path, d))
     names = changed_field_names(old, new)
     assert "iters" in names and "reward" in names
+
+
+# ---------------------------------------------- 死键（`workers`，2026-10-09）
+#
+# 读面已删（机器级键，plan/course-workers-removal）；字段与存量课程文件里的键保留。
+
+
+def test_workers_is_a_dead_key_not_a_restart_only_field() -> None:
+    """`workers` 已从 restart-only 摘除（plan/course-workers-removal §3-S1.2）。
+
+    读面没了（不覆盖 args）⇒ 再记 restart-only 就是给死键报「停止→启动后生效」的假提示。
+    """
+    from biz.hot_reload import HOT_FIELDS, RESTART_ONLY_FIELDS
+
+    assert "workers" not in RESTART_ONLY_FIELDS
+    assert "workers" not in HOT_FIELDS
+
+
+def test_workers_edit_is_a_dead_key(tmp_path: Path) -> None:
+    """只改 `workers`：文件字节变了、但没有任何**活字段**变 ⇒ 判 `same`（两个空清单）。
+
+    预期行为（不是 bug）：调用方（`trainer/loop_steps`）因此既不写 args 也不打 restart 提示
+    ——键是死的，没有活字段随它变。R7 已记账，免得后来者当 bug 查。
+    """
+    old = load_course(C6_DMGFIX)
+    d = _course_dict()
+    d["workers"] = 4
+    new = load_course(_write_course(tmp_path, d))
+    verdict, hot, restart = plan_reload(old, new)
+    assert (verdict, hot, restart) == ("same", [], [])
+    assert new.workers == 4  # 字段还在（extra="forbid" 下必须能解析）
+
+
+def test_workers_is_not_a_flat_override_and_gets_a_startup_notice(tmp_path: Path) -> None:
+    """读面已删（本机并发不再被课程覆盖）+ 开课侧点名（死键的唯一可见手段）。"""
+    from biz.course_spec import DEAD_COURSE_KEYS, dead_key_warnings
+
+    course = load_course(C6_DMGFIX)
+    assert "workers" in course.model_fields_set
+    assert "workers" not in course.flat_overrides()
+    assert dead_key_warnings(course) == [DEAD_COURSE_KEYS["workers"]]
+    assert "已无读者" in DEAD_COURSE_KEYS["workers"]  # 文案固定、可 grep（R6）
+    # 没声明 ⇒ 不打；课程缺席 ⇒ 不打
+    d = _course_dict()
+    d.pop("workers", None)
+    assert dead_key_warnings(load_course(_write_course(tmp_path, d, "nodel.jsonc"))) == []
+    assert dead_key_warnings(None) == []

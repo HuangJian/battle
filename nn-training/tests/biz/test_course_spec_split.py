@@ -65,6 +65,11 @@ MOVED_NAMES = {
     "_default_lives",
     "_margin_pp_or_raise",
     "_points_or_raise",
+    # 2026-10-09 增 2：死键点名（`workers` 摘读面，plan/course-workers-removal §3-S1.5）。
+    # 名字**没搬过家**（本刀新建），但本表的语义是「course_spec 的模块面闭集」⇒ 一并登记，
+    # 门面（`worker/config.py`）同批转发。
+    "DEAD_COURSE_KEYS",
+    "dead_key_warnings",
 }
 
 ALLOWED_IMPORTS = {

@@ -576,8 +576,8 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "--remote-iter-workers",
         type=int,
         default=_d("remote_iter_workers", 0),
-        help="M3 rollout 上云：节点侧 rollout 并发（0 = 用 args.workers，即课程 quotas.workers；"
-        "节点侧另有上限钳制）",
+        help="M3 rollout 上云：节点侧 rollout 并发（0 = **节点按本机核数自定**，缺省；"
+        ">0 = 钉住该值，节点侧仍按核数上限钳制；课程文件里的 workers 已无读者）",
     )
     ap.add_argument(
         "--gate-remediate-stop-after",

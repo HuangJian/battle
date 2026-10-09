@@ -261,8 +261,10 @@ def test_spec_rejects_missing_out_or_weights() -> None:
 
 
 def test_spec_workers_and_timeout_validated() -> None:
+    # 0 = 节点自定（2026-10-09，plan/course-workers-removal §3-S2-1）；负值仍拒收。
+    assert validate_rollout_spec(_spec([(0, 0)], workers=0))["workers"] == 0
     with pytest.raises(ProtocolError):
-        validate_rollout_spec(_spec([(0, 0)], workers=0))
+        validate_rollout_spec(_spec([(0, 0)], workers=-1))
     with pytest.raises(ProtocolError):
         validate_rollout_spec(_spec([(0, 0)], game_timeout_sec=-1))
 
@@ -580,8 +582,14 @@ def test_build_iter_spec_never_leaks_hub_bun_path() -> None:
     assert all(not any(x.endswith(".exe") for x in argv) for argv in spec["argv"])
 
 
-def test_build_iter_spec_workers_default_is_one() -> None:
-    assert build_iter_spec(_rollout_args(), [(0, 0)], wver="w", workers=0)["workers"] == 1
+def test_build_iter_spec_workers_zero_means_auto() -> None:
+    """`workers<=0` ⇒ `0`（节点自定），**不再**退化成 1（那会把 96 核云机钉死在训练机的 8）。
+
+    2026-10-09，plan/course-workers-removal §3-S2-1：这是发布侧「不表达并发」的唯一 wire 形状。
+    """
+    assert build_iter_spec(_rollout_args(), [(0, 0)], wver="w", workers=0)["workers"] == 0
+    assert build_iter_spec(_rollout_args(), [(0, 0)], wver="w", workers=-3)["workers"] == 0
+    assert build_iter_spec(_rollout_args(), [(0, 0)], wver="w", workers=4)["workers"] == 4
 
 
 def test_build_iter_spec_empty_pairs_is_refused() -> None:
@@ -1025,6 +1033,64 @@ def test_rollout_workers_are_clamped_to_the_local_core_budget(
     out2 = run_iter_rollout(job_dir2, spec2, log=msgs2.append)
     assert out2["workers"] == 3, "3 局 / 不夹取 ⇒ 并发受局数限制 = 3"
     assert not any("并发夹取" in m for m in msgs2), msgs2
+
+
+def test_auto_workers_use_the_local_core_budget(tmp_path, monkeypatch) -> None:
+    """端到端钉（评审 R2）：`workers=0` 从**发布侧归一化**一路到节点 ⇒ 并发 = 本机核数口径。
+
+    为什么必须过 `validate_rollout_spec`：手搓 spec 的单测会掩盖「归一化把 0 读成 1」这类真链路
+    bug（2026-10-09 评审 P1 就是它）。核数取 3 + 5 局：若 auto 退化成 1 ⇒ 得 1；若错用
+    MAX_WORKERS/局数 ⇒ 得 5；只有取核数基数才得 3。96⇒94 的公式本身由
+    `tests/remote/test_offline_eval_wiring.py` 钉（同一个 `cpu_worker_slots`）。
+    """
+    monkeypatch.setattr(iter_rollout, "resolve_bun", lambda name="": sys.executable)
+    monkeypatch.setattr(iter_rollout, "bun_version", lambda bun: "9.9.9-stub")
+    monkeypatch.setattr(iter_rollout, "cpu_worker_slots", lambda cores=None: 3)
+    monkeypatch.delenv(iter_rollout.ENV_WORKERS_CAP, raising=False)
+    # ① 发布侧（hub 必经）：白名单 argv 的 spec，0 必须原样保留（不得被归一化成 1）。
+    # ② 节点侧：用桩 argv 真跑（argv 白名单只在发布侧校验，节点执行器不重验）。
+    pub = {
+        "argv": [
+            [
+                "tools/sim/export-rl-rollout.ts",
+                "--weights",
+                "init_weights.json",
+                "--out",
+                "w0",
+                "--stages",
+                "1000",
+                "--seeds",
+                "1",
+            ]
+        ],
+        "wver": "W" * 64,
+        "workers": 0,
+    }
+    assert validate_rollout_spec(pub)["workers"] == 0
+    msgs: list[str] = []
+    job_dir = tmp_path / "job"
+    job_dir.mkdir()
+    spec = _stub_spec(tmp_path, [(3, 7), (4, 1), (5, 2), (6, 3), (7, 4)], workers=0)
+    out = run_iter_rollout(job_dir, spec, log=msgs.append)
+    assert out["workers"] == 3, "节点自定 = 本机核数口径"
+    assert any("并发定档" in m and "3" in m for m in msgs), msgs
+    assert not any("并发夹取" in m for m in msgs), msgs  # 自定不是「夹」出来的
+
+    # env=0（显式「不夹」）⇒ 自定仍取核数口径，**不能**塌成 MAX_WORKERS=256（评审 M4）
+    monkeypatch.setenv(iter_rollout.ENV_WORKERS_CAP, "0")
+    msgs2: list[str] = []
+    job_dir2 = tmp_path / "job2"
+    job_dir2.mkdir()
+    out2 = run_iter_rollout(job_dir2, spec, log=msgs2.append)
+    assert out2["workers"] == 3
+
+    # env=正整数 = 上限（对自定档也生效）
+    monkeypatch.setenv(iter_rollout.ENV_WORKERS_CAP, "2")
+    msgs3: list[str] = []
+    job_dir3 = tmp_path / "job3"
+    job_dir3.mkdir()
+    out3 = run_iter_rollout(job_dir3, spec, log=msgs3.append)
+    assert out3["workers"] == 2
 
 
 def test_workers_cap_falls_back_to_cores_on_garbage_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2020,6 +2086,33 @@ def test_remote_iter_transient_failure_stays_retryable(tmp_path: Path, monkeypat
     assert st.events() == []
     assert st._leg_abort is False
     assert st.calls == 1
+
+
+def test_remote_iter_workers_zero_means_node_decides(tmp_path: Path, monkeypatch) -> None:
+    """S2-3 钉子：发布侧不再把**训练机**的本机配额当成节点并发（§3-S2-3）。
+
+    旧行为 `remote_iter_workers or args.workers` 会把课程/rl-config 的 8 发下去 ⇒ 96 核云机
+    被钉死在 8（plan/course-workers-removal §0）。0 = 节点自定；正整数 = 操作员加压阀。
+    """
+    from remote.hub_client import HubClientError
+
+    seen: dict = {}
+
+    def _capture(_args, _pairs, **kw):
+        seen.update(kw)
+        return {"argv": [], "wver": "w"}
+
+    monkeypatch.setattr("worker.iter_job.build_iter_spec", _capture)
+    st = _IterStub(tmp_path, HubClientError("boom"))
+    st.args.workers = 8  # 训练机配额（旧行为会把它发下去）
+    with pytest.raises(HubClientError):
+        st._remote_iter(4, [(0, 0)])
+    assert seen["workers"] == 0, "0 = 节点自定；不得回退 args.workers"
+    seen.clear()
+    st.args.remote_iter_workers = 3
+    with pytest.raises(HubClientError):
+        st._remote_iter(4, [(0, 0)])
+    assert seen["workers"] == 3, "正整数 = 操作员加压阀"
 
 
 # ------------------------------------------------- 控制面迁移「最容易漏一半」的两处

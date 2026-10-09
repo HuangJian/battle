@@ -793,9 +793,20 @@ def run_iter_rollout(
     bun = resolve_bun(str(spec.get("bun") or ""))
     ver = bun_version(bun)
     argvs: list[list[str]] = list(spec["argv"])
-    requested_workers = max(1, int(spec.get("workers") or 1))
-    cap = workers_cap() or MAX_WORKERS  # 0 = 显式不夹
-    workers = max(1, min(requested_workers, len(argvs), MAX_WORKERS, cap))
+    # 并发来源二分（2026-10-09，plan/course-workers-removal §3-S2-2）：
+    #   `>0` = hub/导出机**显式**给的数（照旧按本机上限夹取）；
+    #   `0`/缺席 = **节点自定**（wire 语义 = auto）⇒ 按**本机核数**定档。
+    # 为什么不能沿用 `or 1`：那会把 auto 读成 1（96 核机器上从 94 掉到 1）。
+    requested_workers = int(spec.get("workers") or 0)
+    cap = workers_cap() or MAX_WORKERS  # 0 = 显式不夹 ⇒ 这里退化成 MAX_WORKERS
+    if requested_workers > 0:
+        workers = max(1, min(requested_workers, len(argvs), MAX_WORKERS, cap))
+    else:
+        # 自定档：基数是**本机核数口径**——不能拿上面的 `cap` 当基数（env=「不夹」时
+        # 它会塌成 MAX_WORKERS=256，那是给显式值放行用的，不该变成自定的基数）。
+        # env 正整数档仍是上限（`min(base, cap)`），见 test 里的两组断言。
+        base = cpu_worker_slots() or MAX_WORKERS
+        workers = max(1, min(base, cap, len(argvs), MAX_WORKERS))
     # 首次尝试的硬顶：plan 给了正数就完全按它；**0/缺省就是节点兜底** `DEFAULT_GAME_TIMEOUT_SEC`
     # （旧口径「0 = 不限」= 卡住的局可以永远等下去；本机历史行为不能当云机的安全策略）。
     requested = float(spec.get("game_timeout_sec") or 0.0)
@@ -808,7 +819,15 @@ def run_iter_rollout(
     rb = LogBundle(log)
     rb.add("games", len(argvs))
     rb.add("workers", workers)
-    if workers < min(requested_workers, len(argvs)):
+    if requested_workers <= 0:
+        # 自定档也要可见（2026-10-09，plan/course-workers-removal §3-S2-3）：日志里不留
+        # 出处，下游只看到「并发忽然变 94」而无从归因（与「夹取必须可见」同一条纪律）。
+        rb.add(
+            "并发定档",
+            f"{workers}（节点按本机核数自定：{cores_note()}，并行槽上限 {cap}｜"
+            f"{ENV_WORKERS_CAP}=0 可关）",
+        )
+    elif workers < min(requested_workers, len(argvs)):
         # 夹取必须可见：否则「hub 说 220、实际跑 12」会变成一个静默的口径分叉。
         # 只在**本机上限**真的掐住了才报（「游戏数比并发数少」是常事，不是夹取）。
         # 「本机」= 跑这一轮的节点/云机（`effective_cores()`），带上核数以免被误读成 hub/导出机。

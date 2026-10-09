@@ -288,7 +288,8 @@ def emit_course(count: int) -> dict[str, Any]:
         "bc": f"nn-training/weights/{name}-bc/bc-latest.json",
         "iters": 60,
         "max_hours": 12,
-        "workers": 8,
+        # ★ 2026-10-09（plan/course-workers-removal §3-S1）：不再发 `workers`——并发是
+        #   机器侧属性（课程值曾把 96 核节点钉死在 8）。留着这个模板 = 新课程继续抄 8。
         "kickstart_ref": True,
         "warmup_iters": 0,
         "lr": 0.00015,

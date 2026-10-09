@@ -6,6 +6,46 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §76 kind=iter 的 rollout 并发：`workers: 0` = 节点自定；课程侧 `workers` 成死键（plan/course-workers-removal，2026-10-09）
+
+**触发**（用户 2026-10-09）：「课程里的 `workers: 8` 不合理——课程并不知道它将会在哪个环境做
+rollout。不管是 LAN 集群还是自主 worker（tpu 机有 96 cpu 核心可用），该设置项都未能有效校准
+rollout 进程数。」
+
+**病灶（机械解释）**：`curricula/*.jsonc` **167/167** 门课都写着 `workers`（164 个 `8`、3 个 `2`，
+复制粘贴常量，无实验语义）。远端 kind=iter 那条腿 `trainer/loop_remote_drive.py` / `loop_export.py`
+取 `remote_iter_workers or args.workers` ⇒ 训练机的**本机配额**（8）被当成**节点并发**发下去；
+节点侧 `worker/iter_rollout.py` 的夹取只降不升（`min(requested, …, cap)`，`cap = cpu_worker_slots()`）
+⇒ 96 核机器上 `min(8, 94) = 8`。
+
+**决定（两部分）**：
+
+1. **课程侧**：`workers` 是**机器级**键（`docs/nn/rl-config.md` §1.1 A 类），读面删除（不再覆盖
+   `args.workers`、不再记 restart-only、生成模板不再发）。**字段与存量 167 个文件里的键永久保留**
+   （课程文件字节 = `course_fp` 语料血缘；`extra="forbid"` 下删字段 = 全部拒启），死键由**开课侧**
+   一行告警点名（`biz.course_spec.dead_key_warnings()`；不放 `apply_course`——只读视图
+   `course_openable` 走同一条链，会被控制台每拍轮询重复打）。
+2. **wire**：`manifest.rollout.workers` 新增一档 **显式 `0` = 节点自定（auto）**（缺席仍 = 1，
+   老字节语义不变；负值仍拒收）。节点按 `cpu_worker_slots()` 定档（96 核 ⇒ 94，与离线段
+   `with_rollout_workers` 同口径），日志出「**并发定档**」行；env `NN_ROLLOUT_WORKERS_MAX`
+   正整数仍是上限，「0 = 不夹」**不再**把自定档抬成 `MAX_WORKERS`。发布侧不再回退 `args.workers`，
+   `--remote-iter-workers` 只剩操作员加压阀语义（0 = 自定，>0 = 钉住）。
+
+**为什么不能照抄离线段**：离线段的 spec 是**节点自己**拼的（`remote/plan_run.py` 的 `iter_spec` +
+`with_rollout_workers`）——它当然知道自己几核；kind=iter 的 spec 由训练/导出机拼、hub 归一化后
+下发，训练机**不可能**知道节点核数 ⇒ 只能让节点在 wire 上收到「自定」。
+
+**为什么 `0=auto` 不引入版本 skew**：kind=iter 的节点跑的是**随 job 落地的 hub 侧代码**
+（`remote/worker.py` 的 `_ACTIVE_CODE_SHA` 热替换护栏：版本不符 ⇒ `CodeChangedError` 自重启），
+两侧永远同一 commit 解释 `workers`。
+
+**测试/证据**：`tests/remote/test_remote_iter.py`（发布侧 0 保留 · 节点自定取核数口径 ·
+env 正整数压上限 · env=0 不塌成 256 · 训练侧不发 `args.workers`）· `tests/common/test_manifest_split.py`
+（0 接受 / 负值拒收 / 缺席仍 = 1）· `tests/biz/test_hot_reload.py`（死键读面与告警）·
+`tests/biz/test_course_spec_split.py`（模块面闭集登记）。
+门禁：`bash tools/githook/nn-python-gate.sh`（ruff + mypy + tests/ + e2e/）绿。
+—— 全文（评审 R1–R9 处置、逐文件落点）→ `plan/course-workers-removal.plan.md`
+
 ## §75 worker 预取状态上报：`POST /admin/worker-prefetch`（纯观测，不参与调度）（plan/dashboard-ppo-live-rows，2026-10-09）
 
 **触发**（用户 2026-10-08）：首页 PPO 区只有一行历史份额（`PPO 合计 N job · <名> <份额>`），
