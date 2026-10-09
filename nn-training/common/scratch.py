@@ -215,6 +215,11 @@ def resolve_scratch_root(
             )
         return p
     cands = SCRATCH_CANDIDATES if candidates is None else tuple(candidates)
+    if not cands:
+        # 没有候选 ⇒ 立刻回落：**连 job 目录的基准探针都不跑**（runtime-opt §34.2 对回退档的
+        # 承诺原话）。非 POSIX 的缺省链、测试里钉死回退档的通用用例都走这里——每轮白写
+        # 8MB + fsync 买不到任何决策（2026-10-09；探针读数还随负载漂移，见根 conftest）。
+        return None
     measure = probe or probe_write_speed_mbps
     base_speed = measure(Path(job_root))
     for name in cands:

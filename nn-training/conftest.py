@@ -163,3 +163,31 @@ def _no_silent_check_failures(request):
     new = fails[before:]
     if new:
         raise AssertionError("check() 静默失败（模块级 FAILS 增长）: " + "; ".join(map(str, new)))
+
+
+@pytest.fixture(autouse=True)
+def _scratch_off(monkeypatch):
+    """通用用例一律固定走 **scratch 回退档**（2026-10-09）。
+
+    为什么必须钉：rollout / eval 要不要把热路径换到节点本地盘，由
+    `common.scratch.resolve_scratch_root` 的**速度探针**当场决定（真写 8MB + fsync，判据
+    「≥5× job 目录」）⇒ 同一份用例走哪一档是**机器速度 + 当时负载**的函数。2026-10-09
+    门禁红现场：安静时本机 /dev/shm 只测出 2.6×（回退，绿）；`bun run pygate` 8 worker
+    满载时 job 目录变慢 ⇒ 探针放行（换根档）⇒ `tests/remote/test_remote_iter.py` /
+    `tests/worker/test_remote_serve_pool.py` 里那批「假导出器把 shard 平铺在 `--out` 之外」
+    的用例转红（真导出器把 shard 写在 `--out` **里面**，见 `tools/sim/export-rl-rollout.ts`；
+    `-x` 又只报第一条）。
+
+    这与 `common/scratch.py` 的设计注记同源：「用例靠显式注入候选/env 才走 scratch ⇒
+    **回退档是默认被回归覆盖的那一档**」—— 非 POSIX 上候选链本就为空，所以那句话在
+    Windows 上白成立；POSIX 上必须由本 fixture 钉住（docs/nn/runtime-opt.md §34.2）。
+
+    换根档本身由 `tests/remote/test_rollout_scratch.py` 用 `_only_candidate` + 常数探针
+    **确定性**覆盖（30 例）；要 scratch 的用例自己 `setattr` 候选 / `setenv` env（后设的赢，
+    monkeypatch 按反向顺序还原）。顺手清掉 env：操作员 shell 里带着 `NN_ROLLOUT_SCRATCH`
+    时通用用例也不该悄悄改走换根档。
+    """
+    from common import scratch
+
+    monkeypatch.delenv(scratch.SCRATCH_ENV, raising=False)
+    monkeypatch.setattr(scratch, "SCRATCH_CANDIDATES", ())

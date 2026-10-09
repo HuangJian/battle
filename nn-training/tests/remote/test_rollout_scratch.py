@@ -218,6 +218,24 @@ def test_resolve_falls_back_to_none_when_nothing_qualifies(
     ), "没有可用候选 ⇒ None（调用方逐字走今天的行为）"
 
 
+def test_generic_tests_pin_the_fallback_path(tmp_path: Path) -> None:
+    """通用用例必须**确定性**走回退档 —— 机器速度/负载不许决定走哪一档（2026-10-09 门禁红）。
+
+    现场：安静时 /dev/shm 只比 job 目录快 ~2.6×（回落，绿）；`bun run pygate` 8 worker 满载时
+    同一台机器测出 ≥5×（换根）⇒「假导出器把 shard 平铺在 `--out` 之外」的那批用例转红。
+    钉住它的就是根 conftest 的 autouse `_scratch_off`（本用例是那条钉子的回归守卫）。
+    同时钉住「没候选就**连基准探针都不跑**」：回退档不该为一次注定 None 的决策写 8MB。
+    """
+    assert scratch.SCRATCH_CANDIDATES == (), "缺 pin：见 nn-training/conftest.py::_scratch_off"
+
+    def boom(*a: object, **kw: object) -> float:
+        raise AssertionError("回退档不该跑探针（runtime-opt §34.2：连候选探针都不跑）")
+
+    job = tmp_path / "job"
+    job.mkdir()
+    assert scratch.resolve_scratch_root(job, need_bytes=1, probe=boom) is None
+
+
 def test_env_override_wins_even_with_no_candidates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
