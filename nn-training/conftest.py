@@ -165,6 +165,39 @@ def _no_silent_check_failures(request):
         raise AssertionError("check() 静默失败（模块级 FAILS 增长）: " + "; ".join(map(str, new)))
 
 
+@pytest.hookimpl(trylast=True)
+def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
+    """**skip 率上报表**（2026-10-09，`plan/nn-training-test-debt-cleanup.plan.md` §3-S3-3）。
+
+    为什么要打：本机（Windows）门禁跑 `tests/ e2e/` 时有一批用例因**环境**恒 skip
+    （POSIX-only / forkdist-only / 非 Linux）。它们不占墙钟、但也**一秒守卫都不提供**，
+    而「本机门禁里到底有多少收集是被跳掉的」此前只能靠 `-rs` 逐条数。这里让恒 skip 的
+    文件自己现形：一行总数 + 按文件分组的 top（T4 类要整文件挪走时，看这张表就够）。
+    不计 `deselected`/`xfail`：前者不是「该跑没跑」，后者另有语义。
+    """
+    stats = getattr(terminalreporter, "stats", None)
+    if not stats:
+        return
+    skipped = stats.get("skipped", [])
+    counted = {"passed", "failed", "error", "skipped"}
+    total = sum(len(v) for k, v in stats.items() if k in counted)
+    if not total:
+        return
+    per_file: dict[str, int] = {}
+    reasons: dict[str, int] = {}
+    for rep in skipped:
+        per_file[rep.nodeid.split("::")[0]] = per_file.get(rep.nodeid.split("::")[0], 0) + 1
+        why = (rep.longrepr or ("", "", ""))[2].split("\n")[0].strip() if rep.longrepr else ""
+        key = why[:60] or "(no reason)"
+        reasons[key] = reasons.get(key, 0) + 1
+    pct = 100.0 * len(skipped) / total
+    terminalreporter.write_sep("-", f"skip 率：{len(skipped)} skipped / {total} 收下（{pct:.1f}%）")
+    for rel, n in sorted(per_file.items(), key=lambda kv: (-kv[1], kv[0]))[:12]:
+        terminalreporter.write_line(f"  skipped {n:2d}  {rel}")
+    for why, n in sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0]))[:6]:
+        terminalreporter.write_line(f"  ·×{n:<3d} {why}")
+
+
 @pytest.fixture(autouse=True)
 def _scratch_off(monkeypatch):
     """通用用例一律固定走 **scratch 回退档**（2026-10-09）。
