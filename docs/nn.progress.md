@@ -199,6 +199,9 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
   pool ns，不认）；方向诊断机制全零动（fireHeld 反向 / stop ≈6 tick/局 / stuck 噪声，
   acc 全平）；三臂全否决归档不续跑，cm0 继续 production 续跑 ——
   `docs/nn/experiments.md` §81 · 决策 `DECISIONS.md` §2026-10-09-goalnn-x23cm-verdict
+- **冠军易主（2026-10-09）**：KR10-it150 vs hu150 正面对决 1600 对——0.3738 vs 0.3119
+  （−6.19pp，p≈0.0003；kills 12.24 vs 11.22）；hu150 的冠军只对 q90 系成立，现役最优改挂 KR10 ——
+  `docs/nn/experiments.md` §82 · 决策 `DECISIONS.md` §2026-10-09-goalnn-kr10-dethrones-hu150
 - **三停腿收官（2026-10-03）**：主腿 it592 停，加冕 **a580**（28.75%/10.723；it175 13.50%/7.619
   → 过关翻倍杀敌 +41%）；plus it167 停，加冕 **q90**（29.25%/10.887）；h2 it330 停，
   诊断成功（hurtR −29%）终点落后归档（最优 h285 25.00%/9.963）——
