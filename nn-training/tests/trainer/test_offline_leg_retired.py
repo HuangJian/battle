@@ -19,10 +19,8 @@
 
 from __future__ import annotations
 
-import io
 import re
 import threading
-import tokenize
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -48,7 +46,8 @@ from worker.loop_round import COLLECT_HELD, COLLECT_LOCAL, ROUND_HELD_EXIT, Roun
 
 TOKEN = "sekret"
 # 2026-09-30（刀 4）：`biz/` 是 `rl/` 的纯逻辑半（搬家前就在扫描面里）⇒ 必须补上，
-# 否则「已退役契约不得回流」的判据会静默少扫 64 个模块。
+# 否则本文件的「发布点 / 导出路径」枚举判据会静默少扫 64 个模块。
+# （「已退役标识不得回流」的本尊已改为单点 `tests/retired_contracts.py`，它的扫描面自带基线守卫。）
 PROD_DIRS = ("trainer", "biz", "remote")
 #: 根目录上的两块生产代码（与 `trainer/`、`biz/` 同级，别漏）。
 PROD_FILES = ("trainer/run_rl.py", "common/distribution.py")
@@ -81,50 +80,12 @@ def _call_args(src: str, start: int) -> str:
 
 
 # ═══════════════════════ ① 生产端：只有一个发布点，且必带 export_path ═══════════════════════
-
-#: 退役腿的**标识**：这些名字回到生产代码里就等于那条腿复活（`run_wait_sec` 是 8h 白等，
-#: `_remote_run_segment` 是发布端本体，另外两个是它的读数/入口）。
-_RETIRED_TOKENS = (
-    "_remote_run_segment",
-    "RUN_WAIT_DEFAULT_SEC",
-    "_run_wait_sec",
-    "run_wait_sec",
-)
-
-
-def _code_only(src: str) -> str:
-    """剥掉**注释与字符串字面量**后的源码 token 流（退役守卫只看「代码里有没有这个名字」）。
-
-    为什么必须剥（2026-09-25 并入 `origin/goal-nn` 时实撞；本仓第五次撞上「读源码文本的
-    守卫」）：本仓的文档**应该**能点名那条腿（它的历史、它挖出的 8h 白等）——把 docstring
-    里的提及当命中，等于「文档写得越诚实越红」。而真正的复活形态只会出现在名字/属性 token
-    上（`def _remote_run_segment` / `self._run_wait_sec`），注释与字符串到不了那里。
-    """
-    keep: list[str] = []
-    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
-        if tok.type in (tokenize.COMMENT, tokenize.STRING):
-            continue
-        keep.append(tok.string)
-    return " ".join(keep)
-
-
-def test_production_code_has_no_trace_of_the_retired_leg() -> None:
-    """退役腿的标识在生产代码里**零命中**（`run` 作为来源枚举值留着，见本文件 ④）。
-
-    只看**代码**（剥注释/字符串，见 `_code_only`）：文档点名它是历史，不是复活。
-    """
-    hits: list[str] = []
-    for rel, src in _prod_sources().items():
-        # 廉价预筛：`_code_only` 只会**删** token（注释/字符串），不会造出新名字 ⇒
-        # 源码文本里一个标识都不出现就不可能在 token 流里出现。tokenize 是本条的实测热点
-        # （174 个文件全量走 `tokenize.generate_tokens` ≈ 独占秒级）。
-        if not any(tok in src for tok in _RETIRED_TOKENS):
-            continue
-        code = _code_only(src)
-        for tok in _RETIRED_TOKENS:
-            if tok in code:
-                hits.append(f"{rel}: {tok}")
-    assert hits == [], f"退役腿的标识又出现在生产代码里：{hits}（plan §7.6 的退役清单）"
+#
+# ⓘ 2026-10-09：原来这里还有一条 `test_production_code_has_no_trace_of_the_retired_leg`
+# （全仓扫源码、断言「`_remote_run_segment` / `run_wait_sec` 这些名字不在生产代码里」）。
+# 它已迁进**单点** `tests/retired_contracts.py`（清单 `RETIRED_CONTRACTS` + 唯一扫描器
+# `scan()`；驱动 `tests/test_retired_contracts.py`）——plan/nn-training-test-debt-cleanup.plan.md
+# §2-T2：同一件事的措辞散在 8 个文件里，下次退役必然漏同步。别照着重写一份。
 
 
 def test_run_manifest_is_published_from_exactly_one_place_with_export_path() -> None:
