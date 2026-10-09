@@ -7,6 +7,24 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 ---
 
+## §83 fore-it335 加冕（拼池 1600 对 +13.44pp）：新王 + stack 确认（2026-10-10）
+
+> 决策 `DECISIONS.md` §2026-10-10-goalnn-fore-crown · 课程文件尾 verdict
+> （`x24-fore.jsonc` + `x24-stack.jsonc`）· 前置 §82（KR10 对 hu150 确认战）。
+
+- **拼池**（414000+414200 系两段各 800 对，同种子配对，全 settled）：
+  fore-it335 **0.4875** vs KR10-it150 0.3531（**+13.44pp，χ²cc 58.34**），kills ~13.7–14.0；
+  stack-it125 **0.4344**（**+8.12pp，p≈0.000003**），kills ~12.8–13.5；
+  fore-it195 0.4331（+7.06pp，p≈0.00003，前置已报）。
+  单块：it335 在 416000（+13.50pp）与 416200（+13.38pp）两段同向，无段运气。
+- **结论**：**fore-it335 加冕现役最优**（胜率 + kills 双第一）；stack-it125 确认（对 bc
+  fore-it195 单块 +4.25pp ns，但对 KR10 拼池显著——叠加没翻车且加了东西）。
+  fore 线（threat/corner 税）是从 KR10 起唯一走通的加压线；face/move 单腿未加冕。
+- 证据：`tmp/crown-416/rows.jsonl` + `tmp/crown-4162/rows.jsonl`（拼池键 stageId+seed）·
+  前置 `tmp/fore-best/`（414400）+ `tmp/fore-peaks/`（414600）。
+
+---
+
 ## §82 KR10-it150 正面对决掀翻 hu150：1600 对 −6.19pp，易主（2026-10-09）
 
 > 决策 `DECISIONS.md` §2026-10-09-goalnn-kr10-dethrones-hu150。
