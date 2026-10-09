@@ -128,15 +128,22 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   // 每台工作盘此刻在干什么（plan/dashboard-ppo-live-rows）：与 brief **同一拍**的产物
   // （`computeFleetProbes` 里同一次 `peekHubAdmin()`），只是分栏装——brief 那份要逐字可对账。
   let ppoWorkerLive: ConsoleStateView['ppoWorkerLive'] = null
+  // 本机磁盘水位（plan/self-node-disk-alert）：源 = 同一份 `getFleetProbes`（它已经在逐节点
+  // ping，磁盘只是 ping 响应体里的加法字段 ⇒ 零新增探测），**只读缓存值**——
+  // 不得在这里裸调 `/v1/pool` 那条 `fetchSelfStatus`（4s 超时 + 模块私有，违反本段 R1 结构闸）。
+  let selfDisk: ConsoleStateView['selfDisk'] = null
   try {
     // 缩略口径住在产物处 `computeFleetProbes`（snapshot-cache.ts）：24h 滚动窗（用户 2026-10-03）
     // + 采样 top-3 / PPO 全列（两侧 N 分开给）——这里只读缓存值，不裸调聚合（R1 结构闸）。
     const probes = await getFleetProbes(cfg)
     contributionBrief = probes.contributionBrief
     ppoWorkerLive = probes.ppoWorkerLive
+    // self 行缺席（节点停用/未探）或旧 agent 无字段 ⇒ null ⇒ 告警坞**不出条目、不推算**。
+    selfDisk = probes.nodes.get('self')?.disk ?? null
   } catch {
     contributionBrief = null
     ppoWorkerLive = null
+    selfDisk = null
   }
   return {
     time: new Date().toISOString(),
@@ -198,5 +205,6 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     loopCompletes,
     contributionBrief,
     ppoWorkerLive,
+    selfDisk,
   }
 }

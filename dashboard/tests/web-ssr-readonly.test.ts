@@ -42,6 +42,9 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
       loopCompletes: {},
       ppoQueueStall: null,
       courseEdit: null,
+      // 本机磁盘水位同理（plan/self-node-disk-alert / 评审 F11）：它取的是 `buildStateView()`
+      // 的**活状态**——本机盘一旦跌破预警档，坞里就多一条 err/warn，这条只读用例会跟着红/绿。
+      selfDisk: null,
     }
     const html = render.renderConsolePage({ ...clean, readOnly: true })
     // 只读可见面（docs/dashboard-redesign.md §5.4）：

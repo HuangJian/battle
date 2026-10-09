@@ -38,6 +38,10 @@ export type AlertAckKind =
   // 课程配置不可开课（2026-10-05，plan/course-startup-recover §3.3）：事件身份 = reason 原文
   // 而非课名——改了但没修好 ⇒ reason 变 ⇒ 新事件 ⇒ 会重新弹（这是我们要的）。
   | 'course-startup'
+  // 本机磁盘水位（2026-10-09，plan/self-node-disk-alert）：事件身份 = **档位 × 进档时刻**——
+  // 档位内不重复打断、换档/复发必重弹（持续态且会复发 ⇒ 键里两个成分都要；纯档位键会被
+  // 只增不减的 `TC_ALERT_ACKS` 永久吃掉）。
+  | 'self-disk'
 
 export function alertAckKey(kind: AlertAckKind, subject: string, eventId: string): string {
   return `${kind}|${subject}|${eventId}`

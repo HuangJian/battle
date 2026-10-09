@@ -69,3 +69,52 @@ describe('console/api.nodeViews 并行 ping（§365：串行导致 /api/state �
     }
   })
 })
+
+describe('磁盘水位透传（plan/self-node-disk-alert：ping 的纯加法字段）', () => {
+  it('新 agent（五字段齐）⇒ disk 解析出来；旧 agent（无字段）⇒ null，不编事实', async () => {
+    const origFetch = globalThis.fetch
+    globalThis.fetch = ((url: unknown) => {
+      const body = String(url).includes('node-new')
+        ? {
+            codeHash: 'abcd1234',
+            cpus: 8,
+            diskFreeMB: 1212,
+            diskLevel: 'warn',
+            diskWarnMB: 4096,
+            diskFloorMB: 2048,
+            diskLevelSince: 1_700_000_000_000,
+          }
+        : { codeHash: 'abcd1234', cpus: 8 }
+      return Promise.resolve(
+        new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        }),
+      )
+    }) as typeof fetch
+    try {
+      const cfg = {
+        version: 1,
+        nodes: [
+          { id: 'self', url: 'http://node-new', authKey: 'k', concurrency: 2, enabled: true },
+          { id: 'old', url: 'http://node-old', authKey: 'k', concurrency: 2, enabled: true },
+        ],
+        rl: { hub_port: 8900, agent_port: 8910, remote_token: 't' },
+      } as Parameters<typeof api.nodeViews>[0]
+      const nv = await api.nodeViews(cfg)
+      // 五字段齐备 ⇒ 原样落地（阈值也是 agent 报的，看板不硬编码）
+      expect(nv[0]!.disk).toEqual({
+        freeMB: 1212,
+        level: 'warn',
+        warnMB: 4096,
+        floorMB: 2048,
+        since: 1_700_000_000_000,
+      })
+      // 旧 agent：探测照样成功（online=true），只是**没有盘位事实** ⇒ null
+      expect(nv[1]!.online).toBe(true)
+      expect(nv[1]!.disk).toBeNull()
+    } finally {
+      globalThis.fetch = origFetch
+    }
+  })
+})

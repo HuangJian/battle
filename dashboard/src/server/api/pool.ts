@@ -124,6 +124,10 @@ async function fetchSelfStatus(cfg: RlConfig): Promise<SelfStatus | null> {
       gamesDoneTotal?: number
       inflight?: unknown[]
       diskFreeMB?: number | null
+      // 磁盘水位（plan/self-node-disk-alert）：旧 agent 无这些键 ⇒ 解析成 null（徽标降级为只显 MB）。
+      diskLevel?: string | null
+      diskWarnMB?: number | null
+      diskFloorMB?: number | null
       lastError?: string
       uptimeSec?: number
       resultCache?: { items?: number; bytes?: number }
@@ -134,6 +138,12 @@ async function fetchSelfStatus(cfg: RlConfig): Promise<SelfStatus | null> {
       inflight: Array.isArray(b.inflight) ? b.inflight.length : 0,
       gamesDoneTotal: Number(b.gamesDoneTotal ?? 0),
       diskFreeMB: typeof b.diskFreeMB === 'number' ? b.diskFreeMB : null,
+      diskLevel:
+        b.diskLevel === 'ok' || b.diskLevel === 'warn' || b.diskLevel === 'critical'
+          ? b.diskLevel
+          : null,
+      diskWarnMB: typeof b.diskWarnMB === 'number' ? b.diskWarnMB : null,
+      diskFloorMB: typeof b.diskFloorMB === 'number' ? b.diskFloorMB : null,
       lastError: b.lastError ? stripIsoPrefix(String(b.lastError)).slice(0, 200) : null,
       uptimeSec: typeof b.uptimeSec === 'number' ? b.uptimeSec : null,
       resultCacheItems: Number(b.resultCache?.items ?? 0),

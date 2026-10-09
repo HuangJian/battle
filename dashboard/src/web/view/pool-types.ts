@@ -6,6 +6,7 @@
  *   · 「上轮贡献」→ **窗口内局数**（`winRollout` / `winEval` 两列），「状态」列改名「成功率」。
  */
 import type { ContributionView } from './contribution'
+import type { DiskLevel } from './console-types'
 
 // ────────────────────────── /api/pool 视图类型 ──────────────────────────
 
@@ -84,6 +85,11 @@ export interface SelfStatus {
   inflight: number
   gamesDoneTotal: number
   diskFreeMB: number | null
+  /** 磁盘档位（plan/self-node-disk-alert）：`null` = 旧 agent 没报 ⇒ 徽标只显 MB（**不编档位**）。 */
+  diskLevel: DiskLevel | null
+  /** 两条阈值（由 agent 报；看板不硬编码 MB）。`null` = 旧 agent 没报。 */
+  diskWarnMB: number | null
+  diskFloorMB: number | null
   lastError: string | null
   uptimeSec: number | null
   resultCacheItems: number

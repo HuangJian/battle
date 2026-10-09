@@ -43,6 +43,9 @@ const mkNode = (over: Partial<NodeView>): NodeView => ({
   lastContrib: 3,
   slow: false,
   ...over,
+  // 磁盘事实（plan/self-node-disk-alert）：`Partial<NodeView>` 展开会把必填字段染成 optional，
+  // 显式收口（旧 agent 没报 ⇒ null ⇒ 不画）。
+  disk: over.disk ?? null,
 })
 
 const mkLocal = (over: Partial<NodeLocalView>): NodeLocalView => ({

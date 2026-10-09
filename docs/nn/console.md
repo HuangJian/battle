@@ -6,6 +6,37 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §36 self 节点低盘告警：预警档（4096）与拒收地板（2048）是两件事（plan/self-node-disk-alert，2026-10-09）
+
+**触发**：2026-10-08 self 节点 1h41m（08:13–09:55）不参与 rollout/eval，全程控制台**零告警**——
+`diskFreeMB` 早就在 `/v1/status` 里（`pool.ts` 取回、塞进 `SelfStatus`），但 `dashboard/src/web`
+一个字都没渲染；告警坞 7 个条目函数无一与磁盘有关。故障在操作员的视野里完全不存在。
+
+**口径（两张表不能合并）**
+
+| 名字 | 值 | 语义 | 谁执行 |
+|---|---|---|---|
+| 拒收地板 `DISK_FLOOR_MB` | **2048（冻结）** | 低于它 agent 对全部作业回 503 | agent（强制） |
+| 预警档 `DISK_WARN_MB` | 4096 | 低于它只是**告诉操作员**，照常收活 | 纯观测（告警坞） |
+
+抬地板的备选被**轨迹否决**：实测训练中盘长期停在 1.2–1.8GB（Oct8 08:13→09:44）⇒ 抬线 = 永久拒收。
+
+**读面契约**
+
+- agent `/v1/ping` 与 `/v1/status` **同源同拍**报五字段：`diskFreeMB / diskLevel(ok|warn|critical) /
+  diskWarnMB / diskFloorMB / diskLevelSince`（进档时刻）。阈值由 agent 报——**看板永不硬编码 MB**。
+- 档位带回差 512（入档严格 `<`、出档 `>= 阈值+512`）⇒ 不抖振；**回差带 [2048,2560) 里 agent 照常收活**
+  ⇒ 「已在拒收作业」只能由 `freeMB < floorMB` 判，**不得由档位推**。
+- 告警坞新一类条目：`warn`→warn / `critical`→err；**ack 事件身份 = 档位 × 进档时刻**
+  （`self-disk\|self\|<level>@<since>`）——档位内不打断、换档/复发必重弹；条目排在坞最前
+  （同严重度按输入顺序稳定，最会变糟的那条不被折叠）。动作只有「知道了」（磁盘要人去清）。
+- **降级**：`selfDisk = null`（旧 agent / self 行未探到 / 不可知）⇒ **不出条目**；NodeStats 徽标同款
+  ——没有档位就只显 MB，**绝不编一个档位**（不可知 ≠ ok）。
+- 取数面 = 机群级 `FleetProbes.nodes` 的 self 行（`state-view` **只读缓存值**，不裸调 4s 超时的
+  `/v1/status`）；徽标走 `/api/pool.selfStatus`（同一份 agent 事实的另一条读面）。
+
+**测试/证据**：见 DECISIONS §2026-10-09-goalnn-self-node-disk-alert；全文 → `plan/self-node-disk-alert.plan.md`。
+
 ## §35 控制台 v2 词表与钮：接管（hold）是唯一真源（plan/worker-type-dispatch-model，2026-10-08）
 
 **触发**：M4（`beee107f`）把「课程模式」整条从控制台拆掉——意图表、回灌、三颗钮、权威徽标全删。

@@ -765,6 +765,88 @@ function diskFreeMB(): number | null {
   }
 }
 
+// ---------------- 磁盘水位（plan/self-node-disk-alert） ----------------
+
+/** 拒收地板：低于它，agent 拒绝接受任何作业（HTTP 503）。**值冻结**。
+ *
+ *  §4.1 的否决（2026-10-09）：实测训练中盘会长期停在 1.2–1.8 GB（Oct8 08:13→09:44 横跨 1.5h），
+ *  把地板抬到 4–5 GB = 节点在几乎全部训练时段拒收一切作业，比故障更糟。
+ *  守门用例：`decideTaskAdmission(3000) === 'accept'`（tests/agent/disk-level.test.ts）。 */
+export const DISK_FLOOR_MB = 2048
+/** 预警档：低于它只是**告诉操作员**（dashboard 告警坞），agent 照常收活。
+ *  4096 距地板 ≈10h（实测排水 ≈205 MB/h），且高于健康水位（4.5–4.9 GB）⇒ 不会常亮。 */
+export const DISK_WARN_MB = 4096
+/** 回差：入档用严格 `<`、出档要 `>= 阈值 + 回差` ⇒ 阈值附近不抖振（512 MB ≈ 2.5h 排水量）。 */
+export const DISK_HYST_MB = 512
+
+/** 磁盘档位（wire 契约；dashboard 侧同口径类型见 `web/view/console-types.ts::DiskLevel`）。 */
+export type DiskLevel = 'ok' | 'warn' | 'critical'
+
+/** 分级（纯函数）。入参 `prevLevel` = 上一次档位（回差需要；agent 进程内记忆，重启后从 `ok` 重算）。
+ *
+ *  ★ 回差只做**防抖**：档位里的 `critical` **不等于**「正在拒收」——回差带 `[floor, floor+hyst)` 里
+ *  agent 照常收活（门是 `free < DISK_FLOOR_MB`）。"已在拒收作业"类后果句**只能由数字判**
+ *  （`freeMB < diskFloorMB`），不得由档位推（plan §4.2-F3）。 */
+export function classifyDiskFree(
+  freeMB: number,
+  prevLevel: DiskLevel,
+  opts: { floor?: number; warn?: number; hyst?: number } = {},
+): DiskLevel {
+  const floor = opts.floor ?? DISK_FLOOR_MB
+  const warn = opts.warn ?? DISK_WARN_MB
+  const hyst = opts.hyst ?? DISK_HYST_MB
+  if (freeMB < (prevLevel === 'critical' ? floor + hyst : floor)) return 'critical'
+  return freeMB < (prevLevel === 'ok' ? warn : warn + hyst) ? 'warn' : 'ok'
+}
+
+/** 作业准入（纯函数）：拒收地板的**唯一判据**。
+ *
+ *  抽出来是为了可测：`/v1/task` 里的 free 来自真实 `statfsSync`，测试注不进去，
+ *  而「地板不得被抬高」这条恰恰是本案最重要的守门（plan §6-W-A / §11-F5）。 */
+export function decideTaskAdmission(
+  freeMB: number | null,
+  floor = DISK_FLOOR_MB,
+): 'accept' | 'low-disk' {
+  return freeMB !== null && freeMB < floor ? 'low-disk' : 'accept'
+}
+
+/** 档位记忆（模块级：agent 是单实例进程，档位是**当前事实**不是持久状态）——
+ *  只服务回差；`diskLevelSince` 只在**换档**时刷新，它是告警坞 ack 的事件身份（plan §4.5-F2：
+ *  纯档位键会被只增不减的本地 ack 表永久吃掉，回到 ok 后再跌破必须能重弹）。 */
+let diskLevel: DiskLevel = 'ok'
+let diskLevelSince = 0
+
+/** ping/status 共用的磁盘事实（两处**同源同拍**；不可知时 `level=null` 而不是编一个档位）。 */
+function diskReport(): {
+  diskFreeMB: number | null
+  diskLevel: DiskLevel | null
+  diskWarnMB: number
+  diskFloorMB: number
+  diskLevelSince: number | null
+} {
+  const free = diskFreeMB()
+  if (free === null)
+    return {
+      diskFreeMB: null,
+      diskLevel: null,
+      diskWarnMB: DISK_WARN_MB,
+      diskFloorMB: DISK_FLOOR_MB,
+      diskLevelSince: null,
+    }
+  const next = classifyDiskFree(free, diskLevel)
+  if (next !== diskLevel) {
+    diskLevel = next
+    diskLevelSince = Date.now()
+  }
+  return {
+    diskFreeMB: free,
+    diskLevel,
+    diskWarnMB: DISK_WARN_MB,
+    diskFloorMB: DISK_FLOOR_MB,
+    diskLevelSince,
+  }
+}
+
 /**
  * 工作目录磁盘收敛（boot + 权重切换时调用）：
  *  - 权重文件按 kind 各留最新 KEEP 份（修正则匹配 weights-<kind>-<sha16>.json）；
@@ -1966,7 +2048,9 @@ async function handle(req: Request): Promise<Response> {
     if (mode === 'eval' && policy === 'goal' && !latestWeightsOfKind('goal'))
       return jsonResponse({ error: 'goal weights not cached (POST /v1/weights x-kind=goal)' }, 409)
     const free = diskFreeMB()
-    if (free !== null && free < 2048) return jsonResponse({ error: `low disk: ${free}MB` }, 503)
+    // 地板是冻结的 2048（plan/self-node-disk-alert §4.1）；判据住纯函数（守门用例吃它）。
+    if (decideTaskAdmission(free) === 'low-disk')
+      return jsonResponse({ error: `low disk: ${free}MB` }, 503)
     if (activeWorkers >= workers)
       return jsonResponse({ error: 'busy' }, 503, { 'Retry-After': '5' })
 
@@ -2210,7 +2294,8 @@ async function handle(req: Request): Promise<Response> {
       })),
       lastError,
       recentFailed: failedTasks.size,
-      diskFreeMB: diskFreeMB(),
+      // 磁盘水位（plan/self-node-disk-alert）：五字段与 /v1/ping 同源同拍（diskReport() 单点）。
+      ...diskReport(),
       cacheHits,
       cacheEvicted,
       rejectedCount,
@@ -2248,6 +2333,8 @@ async function handle(req: Request): Promise<Response> {
       // BC 语料任务支持位（2026-09-13）：/v1/task ?mode=bc（God-AI 单局 → BCV2 npy
       // shard）。旧 agent 无此字段 → bc_dispatch 不派（fail-closed，同 stageJsonSupport）。
       bcSupport: true,
+      // 磁盘水位（plan/self-node-disk-alert）：纯加法字段，旧消费方忽略未知键。
+      ...diskReport(),
     })
   }
 

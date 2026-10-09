@@ -30,7 +30,7 @@
  *  按课成列，否则「它已经跑完了」在多课场景**不可达**（2026-10-02：k25/k10 相继收官，不切课看不到）。
  */
 
-import type { CloudHaltView, LoopComplete } from './console-types'
+import type { CloudHaltView, DiskFactsView, LoopComplete } from './console-types'
 import type { OfflineLeaseView, OfflineStalledView } from './course-overview'
 import { fmtTs } from './format'
 import { alertAckKey, cloudHaltAckKey, visibleCloudHalts } from './interaction'
@@ -142,6 +142,11 @@ export interface AlertInput {
    *  （2026-10-05，plan/course-startup-recover §3.3/§4.3）。`null`/缺省 = 读面不可用
    *  （旧控制台 / python 读失败）：什么都不画，**不编**「起不来」。 */
   loopQueueRows?: LoopQueueRow[] | null
+  /** 本机磁盘水位（`ConsoleStateView.selfDisk`；plan/self-node-disk-alert）。
+   *
+   *  `null`/缺省 = 旧 agent 没报 / self 行没探到 ⇒ **不出条目、不推算**（不可知 ≠ ok）。
+   *  五字段（含两条阈值）由 agent 给，告警坞只呈现与 ack，不硬编码 MB。 */
+  selfDisk?: DiskFactsView | null
   readOnly: boolean
   /** 只读提示是否已被关掉（写盘的状态由调用方给）。 */
   roDismissed: boolean
@@ -152,6 +157,9 @@ export interface AlertInput {
 /** 全部条目（未排序；排序由 `sortAlerts` / `alertDockSplit` 负责）。 */
 export function buildAlerts(input: AlertInput): AlertItem[] {
   return [
+    // 磁盘排最前（同严重度内按输入顺序稳定排序）：它和停机同为 `err` 时，坞默认只展开 2 条，
+    // 而低盘是**会自己变得更糟**的那一条，不能被折进「还有 N 条」。
+    ...selfDiskAlerts(input),
     ...cloudHaltAlerts(input),
     ...loopCompleteAlerts(input),
     ...ppoStallAlerts(input),
@@ -159,6 +167,46 @@ export function buildAlerts(input: AlertInput): AlertItem[] {
     ...courseEditAlerts(input),
     ...courseStartupAlerts(input),
     ...readOnlyAlerts(input),
+  ]
+}
+
+/** 本机磁盘水位（plan/self-node-disk-alert）：`warn` → 橙条，`critical` → 红条。
+ *
+ *  ★ 后果句由数字判（评审 F3）：回差带 `[floorMB, floorMB+hyst)` 里档位仍可能是 `critical`，
+ *  而 agent 此刻**正常收活** ⇒ 「已在拒收作业」只在 `freeMB < floorMB` 时出现；档位只决定
+ *  严重度与是否打断。
+ *
+ *  ★ ack 键 = 档位 × 进档时刻（评审 F2）：`acks` 是只增不减的本地表，纯档位键一旦被点过就
+ *  永久静默；带上 `since` 后「回到 ok 再跌破」= 新键 ⇒ 必重弹。 */
+function selfDiskAlerts(input: AlertInput): AlertItem[] {
+  const d = input.selfDisk
+  if (!d || d.level === 'ok') return []
+  const ackKey = alertAckKey('self-disk', 'self', `${d.level}@${d.since}`)
+  if (input.acks.includes(ackKey)) return []
+  const belowFloor = d.freeMB < d.floorMB
+  const levelWord = d.level === 'critical' ? '严重' : '预警'
+  return [
+    withCopy(
+      {
+        id: `self-disk-${d.level}`,
+        severity: d.level === 'critical' ? 'err' : 'warn',
+        icon: '💾',
+        title: belowFloor
+          ? `本机磁盘 ${d.freeMB}MB — 已在拒收作业（跌破地板 ${d.floorMB}MB）`
+          : `本机磁盘 ${d.freeMB}MB（${levelWord}：预警档 ${d.warnMB}MB）`,
+        detail:
+          `${d.freeMB}MB 可用（预警档 <${d.warnMB}MB / 拒收地板 <${d.floorMB}MB）。` +
+          (belowFloor
+            ? '已跌破地板：agent 对全部作业回 503，trainer 连续瞬时失败达阈值即停派 self' +
+              '（rollout 与 eval 两条链路）。'
+            : '尚未跌破地板——agent 仍在正常收活；跌破后会对全部作业回 503，' +
+              'trainer 连续瞬时失败达阈值即停派 self（rollout 与 eval 两条链路）。') +
+          '处置：清 nn-training/tmp 下陈旧课程分片（节点统计抽屉里有本机盘余量读数）。',
+        role: 'alert',
+        actions: [{ kind: 'ack', label: '知道了', ackKey }],
+      },
+      '',
+    ),
   ]
 }
 

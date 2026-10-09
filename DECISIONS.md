@@ -8710,3 +8710,29 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   （ruff + mypy + tests/ + e2e/）绿（2026-10-09，72s）。
   —— 全文（评审 R1–R9 处置、逐文件落点）→ `plan/course-workers-removal.plan.md` ·
   wire 档案 → `docs/nn/remote-transport.md` §76 · 键分类 → `docs/nn/rl-config.md` §4
+
+## §2026-10-09-goalnn-self-node-disk-alert（2026-10-09，self 节点低盘从「静默」变「响亮」：预警档 4096 + 告警坞条目 + 徽标；**拒收地板 2048 冻结**）
+
+- **背景**：2026-10-08 self 节点 1h41m（08:13–09:55）不参与 rollout/eval——D: 可用空间破 2048MB
+  硬地板 ⇒ 每个作业回 503 ⇒ trainer 连 9 次瞬时失败停派；全程 `node self: offline` 0 次、控制台零告警、
+  `diskFreeMB` 从没上屏（`/v1/status` 早就带回它，只是没人渲染）。故障在操作员视野里不存在。
+- **备选与否决**：① 把**拒收**地板抬到 4–5GB——**否（轨迹否决）**：实测训练中盘长期停在 1.2–1.8GB，
+  抬线 = 节点在几乎全部训练时段拒收一切作业（比故障更糟）；② 纯档位级 ack 键——否（`TC_ALERT_ACKS`
+  只增不减 ⇒ 同一浏览器 warn 档一辈子只响一次，正是本案要消灭的静默）；③ 纯事件级键——否（持续态
+  每次重算都真 ⇒ 疲劳）；④ D 先行（dashboard 本地兜底阈值）——否（A 落地前 ping 上一个磁盘数都没有，
+  `selfDisk` 恒 null，告警永不出现）；⑤ agent 自动清 tmp/——否（删训练产物不可逆，是操作员的决定）。
+- **决定**：agent 单源两层阈值——**预警 `DISK_WARN_MB=4096`（纯观测）** + **拒收地板
+  `DISK_FLOOR_MB=2048`（冻结；准入判据抽 `decideTaskAdmission()` 纯函数）**，回差 512；五字段
+  （`diskFreeMB/diskLevel/diskWarnMB/diskFloorMB/diskLevelSince`）走既有 `/v1/ping`（零新增探测，
+  顺带覆盖全机群）与 `/v1/status`；dashboard 搬运到 `selfDisk`，告警坞新一类条目
+  （`warn`→warn / `critical`→err；ack 事件身份 = **档位 × 进档时刻**），NodeStats 徽标上屏
+  （旧 agent 无档位 ⇒ 只显 MB）。
+- **违反后果**：抬地板 ⇒ 节点永久拒收；拿档位当拒收判据 ⇒ 回差带 [2048,2560) 里告警说「已在拒收」
+  而 agent 正在收活（后果句只能由 `freeMB < floorMB` 判）；纯档位 ack ⇒ 早期预警只响一次；
+  看板硬编码 MB ⇒ 阈值以后改了 UI 漂开。
+- **测试/证据**：`tests/agent/disk-level.test.ts`（14 例：边界/回差/不抖/准入守门 3000MB⇒accept/
+  上报接线源码守卫）· `dashboard/tests/web-alert-dock.test.ts`（新一类：回差带不说拒收、换档与复发
+  必重弹、同严重度排在停机前）· `dashboard/tests/web-app-nodestats.test.ts`（徽标口径 + SSR）·
+  `dashboard/tests/server-api-node-views.test.ts`（新 agent 解析 / 旧 agent null）。
+  —— 全文（评审 F1–F11 处置 / 逐文件落点 / 驳回的抬线论证）→ `plan/self-node-disk-alert.plan.md` ·
+  评审 → `plan/self-node-disk-alert.review-bf.md`

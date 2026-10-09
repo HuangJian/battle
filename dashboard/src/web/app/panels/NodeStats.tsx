@@ -11,11 +11,13 @@ import { useCallback, useEffect, useRef, useState } from 'preact/hooks'
 import {
   fmtBytes,
   fmtTs,
+  selfDiskBadge,
   TC_NODE_VIEW,
   WINDOW_OPTIONS,
   type NodeHistoryRow,
   type PoolView,
   type PoolWindowKey,
+  type SelfStatus,
 } from '../../view'
 import { Badge, Pill } from '../../components/Pill'
 import { DataTable, type Col } from '../../components/DataTable'
@@ -28,6 +30,26 @@ export interface NodeStatsProps {
   /** 抽屉开着才轮询（DS-U5 语义；展开补拉一次）。 */
   enabled: boolean
   poolFreshNonce: number
+}
+
+/** 本机磁盘徽标（plan/self-node-disk-alert G6）：口径在 `view/console-types.ts::selfDiskBadge`。
+ *
+ *  为什么放这里：`/v1/status` 是唯一带 `diskFreeMB` 的既有读面（`/api/pool.selfStatus`），
+ *  而**档位/阈值**是新增字段——旧 agent 没报 ⇒ 只显 MB（降级，不编档位；告警坞那条另走 ping）。 */
+export function SelfDiskBadge({ st }: { st: SelfStatus | null }) {
+  const view =
+    st && typeof st.diskFreeMB === 'number'
+      ? selfDiskBadge({ freeMB: st.diskFreeMB, level: st.diskLevel })
+      : null
+  if (!view) return null
+  return (
+    <Badge
+      tone={view.tone}
+      title={`本机 agent 工作目录（tmp/dist-agent）可用空间${st?.diskFloorMB != null ? `；低于 ${st.diskFloorMB}MB 会拒收作业` : ''}`}
+    >
+      {view.text}
+    </Badge>
+  )
 }
 
 /** 成功率（窗口内最近 ≤10 次结算的完成率；阈值 ≥90% / ≥70% / <70%）。
@@ -299,6 +321,7 @@ export function NodeStats({ enabled, poolFreshNonce }: NodeStatsProps) {
         ) : (
           <span className="tc-badge tc-badge--gray">agent 未启动</span>
         )}
+        <SelfDiskBadge st={st} />
         <SegmentedControl<PoolWindowKey>
           value={days}
           options={WINDOW_OPTIONS.map((o) => ({ value: o.key, label: o.label }))}

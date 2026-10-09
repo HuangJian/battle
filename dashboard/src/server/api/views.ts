@@ -2,7 +2,7 @@
 import { httpOk, pidAlive } from '../../core/net'
 import { componentScope, entryForCourse, loadRegistry, scopeOf } from '../../core/registry'
 import type { Component, RlConfig } from '../../core/types'
-import type { ComponentView, NodeView } from '../../web/view'
+import type { ComponentView, DiskFactsView, NodeView } from '../../web/view'
 import { COMPONENT_LABELS, busy, componentBusy } from '../actions'
 import { ALL_COMPONENTS, HEALTHY_PORTS } from './component-meta'
 import { logTail, resolveComponentLog } from './logs'
@@ -139,6 +139,7 @@ export function nodeStructure(cfg: RlConfig): NodeView[] {
     slow: false,
     codeHash: null,
     cpus: null,
+    disk: null,
     busy: busy.has(`node:${n.id}`),
     lastContrib: -1,
   }))
@@ -149,6 +150,27 @@ export interface NodeProbeResult {
   online: boolean | null
   codeHash: string | null
   cpus: number | null
+  /** 磁盘水位（plan/self-node-disk-alert）：`null` = 旧 agent 无这些字段/探测失败 ⇒ 不推算。 */
+  disk: DiskFactsView | null
+}
+
+/** 磁盘事实解析（纯函数）：**五字段齐备**才算有事实，缺任一（旧 agent）⇒ `null`。
+ *
+ *  为什么不容忍部分字段：阈值是**agent 的**（看板不硬编码 MB），没有 `floorMB` 就无法判断
+ *  「是否已在拒收」，没有 `level` 就无法决定该不该画金标——“不可知”与“ok”在告警面上必须分开。 */
+export function parseDiskFacts(body: Record<string, unknown>): DiskFactsView | null {
+  const { diskFreeMB, diskLevel, diskWarnMB, diskFloorMB, diskLevelSince } = body
+  if (typeof diskFreeMB !== 'number') return null
+  if (typeof diskWarnMB !== 'number' || typeof diskFloorMB !== 'number') return null
+  if (diskLevel !== 'ok' && diskLevel !== 'warn' && diskLevel !== 'critical') return null
+  return {
+    freeMB: diskFreeMB,
+    level: diskLevel,
+    warnMB: diskWarnMB,
+    floorMB: diskFloorMB,
+    // 缺进档时刻 ⇒ 0（ack 键仍稳定：同档不重弹；换档本身就是新键）
+    since: typeof diskLevelSince === 'number' ? diskLevelSince : 0,
+  }
 }
 
 /** **并行**探测 enabled 节点（§365：串行会让 /api/state 在节点离线时拖到 N×4s ——
@@ -163,6 +185,7 @@ export async function nodeProbeResults(cfg: RlConfig): Promise<Map<string, NodeP
       let online: boolean | null = null
       let codeHash: string | null = null
       let cpus: number | null = null
+      let disk: DiskFactsView | null = null
       try {
         const resp = await fetch(`${n.url}/v1/ping`, {
           headers: { Authorization: `Bearer ${n.authKey}` },
@@ -170,14 +193,17 @@ export async function nodeProbeResults(cfg: RlConfig): Promise<Map<string, NodeP
         })
         online = resp.status === 200
         if (online) {
-          const body = (await resp.json()) as { codeHash?: string; cpus?: number }
-          codeHash = body.codeHash ? body.codeHash.slice(0, 12) : null
+          const body = (await resp.json()) as Record<string, unknown>
+          codeHash =
+            typeof body.codeHash === 'string' && body.codeHash ? body.codeHash.slice(0, 12) : null
           cpus = typeof body.cpus === 'number' ? body.cpus : null
+          // 磁盘事实是**纯加法字段**：旧 agent 不带 ⇒ parseDiskFacts 返回 null（探测仍算成功）
+          disk = parseDiskFacts(body)
         }
       } catch {
         online = false
       }
-      return [n.id, { online, codeHash, cpus }]
+      return [n.id, { online, codeHash, cpus, disk }]
     }),
   )
   for (const r of rows) if (r) out.set(r[0], r[1])
@@ -198,6 +224,7 @@ export function mergeNodeProbes(
       online,
       codeHash: p?.codeHash ?? null,
       cpus: p?.cpus ?? null,
+      disk: p?.disk ?? null,
       // ping 失败但近期仍在成功结算（结算耗时表明算力受限）= 慢节点，
       // 不标「离线」（2026-09-11 用户指令：慢节点 chip 误报离线的根治）。
       slow: online === false && (slowById?.get(r.id) ?? false),

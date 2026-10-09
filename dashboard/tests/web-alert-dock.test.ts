@@ -29,6 +29,7 @@ import {
   STUCK_LABEL,
   type AlertInput,
   type AlertItem,
+  type DiskFactsView,
 } from '../src/web/view'
 
 /** 一件都不告警的基线输入（每条用例只改它关心的那一项）。 */
@@ -45,6 +46,16 @@ const clean: AlertInput = {
 }
 
 /** 条目夹具（补 `copyText`：`AlertItem` 必填，2026-10-03 G4）。 */
+/** 本机磁盘水位夹具（plan/self-node-disk-alert）：五字段与 agent 上报同形。 */
+const disk = (over: Partial<DiskFactsView> = {}): DiskFactsView => ({
+  freeMB: 1212,
+  level: 'warn',
+  warnMB: 4096,
+  floorMB: 2048,
+  since: 1_700_000_000_000,
+  ...over,
+})
+
 const item = (id: string, severity: AlertItem['severity']): AlertItem => ({
   id,
   severity,
@@ -420,11 +431,12 @@ describe('全局收官 + 全条目可关闭可复制（2026-10-03 plan/dashboard
       },
     ],
     courseEdit: { verdict: 'rejected', fields: ['reward'], at: '2026-10-03 10:00:00' },
+    selfDisk: disk({ level: 'critical', freeMB: 1212 }),
     readOnly: true,
   })
 
   // 停机「已恢复」与「停机中」互斥（同一课同一时刻只有一态），不能塞进同一份输入；
-  // 其余每类都已在 allOn 里。两份输入拼起来 = 七类 / 九条全覆。
+  // 其余每类都已在 allOn 里（含本机磁盘，plan/self-node-disk-alert）。两份输入拼起来 = 八类 / 十条全覆。
   const recovered = (): AlertInput => ({
     ...clean,
     cloudHalts: {
@@ -445,7 +457,7 @@ describe('全局收官 + 全条目可关闭可复制（2026-10-03 plan/dashboard
 
   it('G3：全部条目都有 kind=ack（穷举 buildAlerts 产出集，不手写类目清单）', () => {
     const items = allItems()
-    expect(items.length).toBeGreaterThanOrEqual(9) // 守卫：穷举集非空（防空跑）
+    expect(items.length).toBeGreaterThanOrEqual(10) // 守卫：穷举集非空（防空跑；含磁盘那条）
     for (const a of items) {
       const acks = a.actions.filter((x) => x.kind === 'ack')
       expect(acks.length).toBeGreaterThanOrEqual(1)
@@ -750,6 +762,67 @@ describe('第 8 类：课程配置不可开课（2026-10-05，plan/course-startu
     expect(html).toContain('课程配置不可开课')
     expect(html).toContain('boom')
     expect(html).toContain('>知道了</button>')
+  })
+})
+
+describe('本机磁盘水位（plan/self-node-disk-alert：告警坞新一类）', () => {
+  it('ok ⇒ 不出条目；selfDisk 缺省/null ⇒ 不出条目（旧 agent 不编事实）', () => {
+    expect(buildAlerts({ ...clean, selfDisk: disk({ level: 'ok' }) })).toEqual([])
+    expect(buildAlerts({ ...clean, selfDisk: null })).toEqual([])
+    expect(buildAlerts(clean)).toEqual([])
+  })
+
+  it('warn ⇒ 1 条 warn 级、role=alert、ack 键 = 档位×进档时刻', () => {
+    const items = buildAlerts({ ...clean, selfDisk: disk() })
+    expect(items.length).toBe(1)
+    const a = items[0]!
+    expect(a.severity).toBe('warn')
+    expect(a.role).toBe('alert')
+    expect(a.title).toContain('1212MB')
+    expect(a.actions.map((x) => x.ackKey)).toEqual(['self-disk|self|warn@1700000000000'])
+  })
+
+  it('★ 回差带（评审 F3）：critical 但 freeMB >= floorMB ⇒ 不得说「已在拒收作业」', () => {
+    const a = buildAlerts({ ...clean, selfDisk: disk({ level: 'critical', freeMB: 2500 }) })[0]!
+    expect(a.severity).toBe('err')
+    expect(a.title).not.toContain('拒收')
+    expect(a.detail).toContain('尚未跌破地板')
+  })
+
+  it('跌破地板 ⇒ 红条 + 「已在拒收作业」；detail 含 503/停派与两条阈值（G3）', () => {
+    const a = buildAlerts({ ...clean, selfDisk: disk({ level: 'critical', freeMB: 1212 }) })[0]!
+    expect(a.severity).toBe('err')
+    expect(a.title).toContain('已在拒收作业')
+    expect(a.detail).toContain('503')
+    expect(a.detail).toContain('停派')
+    expect(a.detail).toContain('2048')
+    expect(a.detail).toContain('4096')
+  })
+
+  it('★ 档位内 ack 后不再出；回 ok 后再跌破 / 升档 ⇒ 必重弹（评审 F2）', () => {
+    const acked = [...clean.acks, 'self-disk|self|warn@1700000000000']
+    expect(buildAlerts({ ...clean, acks: acked, selfDisk: disk() })).toEqual([])
+    // 同一档位、新的进档时刻（跌 → 回 ok → 再跌）= 新 episode ⇒ 重弹
+    expect(
+      buildAlerts({ ...clean, acks: acked, selfDisk: disk({ since: 1_700_000_999_000 }) }).length,
+    ).toBe(1)
+    // 升档（换档换键）⇒ 必重弹
+    const up = buildAlerts({
+      ...clean,
+      acks: acked,
+      selfDisk: disk({ level: 'critical', freeMB: 1212 }),
+    })
+    expect(up.length).toBe(1)
+    expect(up[0]!.severity).toBe('err')
+  })
+
+  it('★ 磁盘 err 排在停机 err 之前（同严重度稳定序：最会变糟的那条不被折叠）', () => {
+    const items = buildAlerts({
+      ...clean,
+      cloudHalts: { c1: { at: 'T1', reason: '手动停机', status: 'halted' } },
+      selfDisk: disk({ level: 'critical', freeMB: 1212 }),
+    })
+    expect(items.map((a) => a.id)).toEqual(['self-disk-critical', 'halt-c1'])
   })
 })
 

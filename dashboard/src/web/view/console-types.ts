@@ -59,6 +59,40 @@ export interface PushFleetProbe {
   probes: Array<{ id: string; url: string; healthy: boolean | null }>
 }
 
+/** 磁盘档位（wire 契约；agent 侧同口径 → `tools/agent/sampler-agent.ts::DiskLevel`）。
+ *
+ *  ⚠ 档位是**防抖后的展示口径，不是拒收判据**：回差带 `[floorMB, floorMB+Hyst]` 里 agent 照常收活
+ *  ⇒ 「已在拒收作业」只能由 `freeMB < floorMB` 判（plan/self-node-disk-alert §4.2-F3）。 */
+export type DiskLevel = 'ok' | 'warn' | 'critical'
+
+/** 磁盘水位事实（agent `/v1/ping` 与 `/v1/status` 同源同拍的五字段）。
+ *
+ *  **五字段缺任一 ⇒ 调用方给 `null`**（旧 agent 只报 `freeMB` 也算缺）：不可知与 ok 是两件事，
+ *  看板不得拿一个数自己编档位（阈值由 agent 报，看板不硬编码 MB）。 */
+export interface DiskFactsView {
+  freeMB: number
+  level: DiskLevel
+  warnMB: number
+  /** 拒收地板（`freeMB < floorMB` ⇒ agent 对全部作业回 503）。 */
+  floorMB: number
+  /** **进档时刻**（换档才刷新）：告警坞 ack 的事件身份——同档不重复打断、换档/复发必重弹。 */
+  since: number
+}
+
+/** 磁盘徽标口径（纯函数；`null` = 没有盘位事实 ⇒ 不画）。
+ *
+ *  人要看的是「还剩多少 + 要不要管」：`ok` 只报 MB（不喊狼），`warn`/`critical` 带档位字样。
+ *  **不在这里说「已拒收」**——那是 `freeMB < floorMB` 的事，告警坞的 detail 负责（F3）。 */
+export function selfDiskBadge(
+  d: { freeMB: number; level: DiskLevel | null } | null,
+): { text: string; tone: 'a' | 'y' | 'r' } | null {
+  if (!d) return null
+  const tone = d.level === 'critical' ? 'r' : d.level === 'warn' ? 'y' : 'a'
+  const marked = d.level === 'warn' || d.level === 'critical'
+  // `level === null`（旧 agent 没报档位）与 `ok` 渲染相同：报 MB 而不喊狼——但绝不编一个档位。
+  return { text: marked ? `disk ${d.freeMB}MB（${d.level}）` : `disk ${d.freeMB}MB`, tone }
+}
+
 export interface NodeView {
   id: string
   url: string
@@ -75,6 +109,8 @@ export interface NodeView {
   slow: boolean
   codeHash: string | null
   cpus: number | null
+  /** 磁盘水位（plan/self-node-disk-alert）：`null` = 旧 agent 没报或探测失败 ⇒ 不画（不推算）。 */
+  disk: DiskFactsView | null
   busy: boolean
   /** 最近**完成**轮贡献数（该轮内该节点成功局数，rollout + eval；-1 = 无池数据）。
    *  「完成」= 训练账本已写该轮 `iteration` 事件——进行中那一轮的半截计数不算数
@@ -285,6 +321,11 @@ export interface ConsoleStateView {
   localNode?: NodeLocalView | null
   /** push 执行面（机群级；2026-09-19 起不再按课程）：登记节点 + hub_push + 逐节点探活。 */
   pushFleet?: PushFleetProbe | null
+  /** **本机（self 节点）磁盘水位**（plan/self-node-disk-alert：告警坞第 8 个条目函数的取数面）。
+   *
+   *  取数面 = 机群级 `FleetProbes.nodes` 的 self 行（`/v1/ping` 顺带带回来的磁盘事实）——
+   *  与节点表同源；`null` = 旧 agent / 探测失败 / agent 未运行 ⇒ **不出条目、不推算**。 */
+  selfDisk?: DiskFactsView | null
   modes: ModeView
   metrics: MetricsView
   /** 当前训练阶段（顶栏图标用）。 */
