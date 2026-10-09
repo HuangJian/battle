@@ -15,7 +15,15 @@
 
 import { useState } from 'preact/hooks'
 import { SegmentedControl } from '../../components/SegmentedControl'
-import { type ContributionBrief, type ContributionView, fmtCount, fmtShare } from '../../view'
+import { StatusDot } from '../../components/StatusDot'
+import {
+  type ContributionBrief,
+  type ContributionView,
+  fmtCount,
+  fmtShare,
+  type PpoJobRef,
+  type PpoWorkerLiveView,
+} from '../../view'
 
 export interface WorkerContributionProps {
   /** 节点页主体（两组并排的表 + 脚注）。首页的两条缩略行见 `SamplingBrief` / `PpoBrief`。 */
@@ -275,6 +283,84 @@ export function PpoBrief({ brief }: { brief: ContributionBrief | null }) {
       <b>{ppo.totalDone > 0 ? `${fmtCount(ppo.totalDone)} job` : '—'}</b>
       {parts.length > 0 ? <span className="tc-muted">{parts.join(' · ')}</span> : null}
     </p>
+  )
+}
+
+/** 一段 job 引用的文本：`§<课>:it<N>`；`it` 不可知 ⇒ `it?`；课解析不出 ⇒ `?:it<N>`。
+ *
+ *  纯函数、导出以便单测（与 `fmtShare` 同规）——三段共用同一个形状，不各拼一遍。 */
+export function jobRefText(r: PpoJobRef): string {
+  return `§${r.course || '?'}:${r.it == null ? 'it?' : `it${r.it}`}`
+}
+
+/** 段（计算中 / 已下载 / 下载中）：**空段整段不渲染**（不是渲染一个空标题）。 */
+function JobSeg({ label, refs, title }: { label: string; refs: PpoJobRef[]; title: string }) {
+  if (refs.length === 0) return null
+  return (
+    <span className="tc-contrib-jobseg" title={title}>
+      <b>{label}</b>
+      {refs.map(jobRefText).join(',')}
+    </span>
+  )
+}
+
+/** 首页 PPO 区的**每台一行**（plan/dashboard-ppo-live-rows，2026-10-09）：
+ *  「这几台机器现在正在算哪一轮、下一轮下好了没」。
+ *
+ *  与 `PpoBrief`（汇总行）**并存**：那一行回答「谁贡献过多少」（逐字不动：合计 + 各台份额），
+ *  这一块回答「此刻在干什么」。两类的身份/单位口径仍各自成规（WC-plan §4.1b）。
+ *
+ *  三段的口径（全部据实，缺数据一律标不可知）：
+ *    · **计算中** = hub 的活租约 ∧ 已 `POST /start`（`computing_ago` 非空）；
+ *    · **已下载** = worker 上报的软持有（hub 完全看不到的那部分，是「下一轮已经躺好了」的证据）；
+ *    · **下载中** = 认领后还在取包/下 payload ∪ worker 上报的软持有下载中（按 job 去重）。
+ *  自主盘（持 live hold）也出行，轮次是**派生读数**（已补传产物，落后 ≤1 轮）——悬停里写明。 */
+export function PpoWorkerRows({ live }: { live: PpoWorkerLiveView[] | null }) {
+  if (!live || live.length === 0) return null
+  return (
+    <div className="tc-contrib-ppolive" aria-label="PPO worker 当前在做什么">
+      {live.map((w) => (
+        <p className="tc-contrib-ppolive--row" key={w.worker}>
+          <StatusDot
+            tone="ok"
+            title="在工作中（hub 侧有活租约 / 持 live 接管 / 有已下好的软持有）"
+          />
+          <span className="tc-contrib-ppolive--name">{w.worker}</span>
+          <span className="tc-muted">{fmtShare(w.share)}</span>
+          <JobSeg
+            label="计算中"
+            refs={w.computing}
+            title="hub 的活租约且已开算（`POST /jobs/{id}/start`）"
+          />
+          <JobSeg
+            label="已下载"
+            refs={w.held}
+            title="worker 上报：软持有里已下好（下一轮开算时零下载；无租约，随时可能被挤掉）"
+          />
+          <JobSeg
+            label="下载中"
+            refs={w.dl}
+            title="正在取包/下载 payload：hub 侧「认领未开算」∪ worker 上报的预取下载中"
+          />
+          {w.autonomous ? (
+            <span
+              className="tc-contrib-badge--auto"
+              title={
+                '自主盘：领整段任务包（hub 接管的 live 持有者）。轮次 = 已补传产物口径，' +
+                '落后真实进度 ≤1 轮'
+              }
+            >
+              自主
+            </span>
+          ) : null}
+          {w.ageSec != null ? (
+            <span className="tc-muted tc-small" title="预取状态上报龄（hub 侧 TTL 60s）">
+              {`${w.ageSec.toFixed(0)}s前`}
+            </span>
+          ) : null}
+        </p>
+      ))}
+    </div>
   )
 }
 

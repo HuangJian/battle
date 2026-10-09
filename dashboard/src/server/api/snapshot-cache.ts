@@ -11,7 +11,9 @@ import {
   type NodeLocalView,
   type NodeView,
   type PhaseInfo,
+  type PpoWorkerLiveView,
   type PushFleetProbe,
+  buildWorkerLive,
   compactSummary,
   parsePhaseFromLog,
 } from '../../web/view'
@@ -75,6 +77,13 @@ export interface FleetProbes {
    *  两侧 N 分开给（采样 3 / PPO 全列 `BRIEF_ALL`）。窗口档进缓存值不进缓存键（§4 解耦裁决）。
    *  聚合不可用（读盘失败）→ null（缩略不渲染，不伪造 0）。 */
   contributionBrief: ContributionBrief | null
+  /** 首页 PPO 区的**每台一行**（谁在算哪一轮 / 下一轮下好了没；plan/dashboard-ppo-live-rows）。
+   *
+   *  ★ 它**不进** `contributionBrief`：`/api/state` ↔ `/api/pool` 的守卫用例比的是那份 brief
+   *  逐字相等，而 live 行是**时间敏感**读数（两条路径的 hub 拍点可能差一拍）——放同级独立字段，
+   *  各自据实。数据与 brief **同一拍**（同一次 `peekHubAdmin()`），所以首页零新增探测。
+   *  聚合不可用/读面失败 ⇒ null（不渲染，不伪造空行）。 */
+  ppoWorkerLive: PpoWorkerLiveView[] | null
 }
 
 export interface SlowSnapshot {
@@ -134,6 +143,7 @@ export async function computeFleetProbes(cfg: RlConfig): Promise<FleetProbes> {
   // 且发生在后台刷新器里）；`inflight` 取 `hubCache.peek()` 的**上一拍**值——**不** await
   // 一次 1.2–1.5s 的 hub 探测（A6 裁决；刷新器每拍本来就把 getHubAdmin 暖在同一缓存里）。
   let contributionBrief: ContributionBrief | null = null
+  let ppoWorkerLive: PpoWorkerLiveView[] | null = null
   if (agg) {
     const all = projectWindow(agg, resolveWindow('all', Date.now(), agg.epochMs))
     // 输入是窗口投影，但其中的时刻/耗时字段取**全部行**（含进行中那一轮）——「还在结算吗」
@@ -149,13 +159,17 @@ export async function computeFleetProbes(cfg: RlConfig): Promise<FleetProbes> {
       const w = resolveWindow('24h', Date.now(), agg.epochMs)
       // 两侧 N 分开给：采样 top-3（节点行已逐个列身份）；PPO **全列**（用户口径：云机就那几台，
       // 「哪几台在干活、各占多少」比只看前三名有用）——两种人群、两种单位（WC-plan §4.1b）。
-      contributionBrief = compactSummary(
-        buildContributionView(agg, w, inflightByWorkerFromQueue(peekHubAdmin()?.queue ?? null)),
-        3,
-        BRIEF_ALL,
-      )
+      // 一次窥视、两处消费（同一拍；`peek` 不触发探测，见 plan/dashboard-reload-perf A6）。
+      const admin = peekHubAdmin()
+      const queue = admin?.queue ?? null
+      const view = buildContributionView(agg, w, inflightByWorkerFromQueue(queue))
+      contributionBrief = compactSummary(view, 3, BRIEF_ALL)
+      // 每台一行（plan/dashboard-ppo-live-rows）：hub 的租约分档 ⊕ worker 上报的预取状态
+      // ⊕ 自主盘的接管（`offline` = 已补传产物的轮次，见 `buildWorkerLive`）。
+      ppoWorkerLive = buildWorkerLive(queue, view.ppo.rows, admin?.offline ?? null)
     } catch {
       contributionBrief = null
+      ppoWorkerLive = null
     }
   }
   const [nodes, pushProbes, componentHealth] = await Promise.all([
@@ -171,6 +185,7 @@ export async function computeFleetProbes(cfg: RlConfig): Promise<FleetProbes> {
     pushProbes,
     componentHealth,
     contributionBrief,
+    ppoWorkerLive,
   }
 }
 

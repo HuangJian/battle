@@ -25,12 +25,18 @@
  */
 
 import { useState } from 'preact/hooks'
-import { type ContributionBrief, nodeHealth, type NodeLocalView, type NodeView } from '../../view'
+import {
+  type ContributionBrief,
+  nodeHealth,
+  type NodeLocalView,
+  type NodeView,
+  type PpoWorkerLiveView,
+} from '../../view'
 import { Switch } from '../../components/Switch'
 import { SectionHeader } from '../../components/SectionHeader'
 import { StatusRow } from '../../components/StatusRow'
 import type { StatusTone } from '../../components/StatusDot'
-import { PpoBrief, SamplingBrief } from './WorkerContribution'
+import { PpoBrief, PpoWorkerRows, SamplingBrief } from './WorkerContribution'
 
 export interface NodePillsProps {
   nodes: NodeView[]
@@ -43,6 +49,11 @@ export interface NodePillsProps {
    *  各带标签与单位，永不并排（2026-10-04 起 PPO 也压成一行，不再铺逐行列表）。
    *  此前一个按钮里同时塞两组（两种单位、两种分母并排）就是「混在一起」的来源。 */
   brief?: ContributionBrief | null
+  /** 每台工作盘**此刻**在干什么（plan/dashboard-ppo-live-rows；缺省不画）。
+   *
+   *  ★ 它**不在** `brief` 里：首页整份 brief 与服务端 `/api/pool` 的投影逐字相等（守卫钉着），
+   *  而这一块是时间敏感读数（谁在飞、谁下好了）。两者来自**同一拍**的 hub 观测，只是分栏装。 */
+  live?: PpoWorkerLiveView[] | null
   onAction: (act: string, body: Record<string, unknown>) => void
   onMore: () => void
   /** 局域网只读视图：行无点击语义（编辑/启用/冒烟仅本机），悬停提示说明。 */
@@ -249,7 +260,15 @@ export function LocalRow({ local, off }: { local: NodeLocalView; off?: boolean }
   )
 }
 
-export function NodePills({ nodes, local, brief, onAction, onMore, readOnly }: NodePillsProps) {
+export function NodePills({
+  nodes,
+  local,
+  brief,
+  live,
+  onAction,
+  onMore,
+  readOnly,
+}: NodePillsProps) {
   const [editing, setEditing] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [showDisabled, setShowDisabled] = useState(false)
@@ -340,6 +359,9 @@ export function NodePills({ nodes, local, brief, onAction, onMore, readOnly }: N
           两类身份各自成行、各有标签与单位，永不并排（2026-10-03 + 2026-10-04 两轮口径）。 */}
       <SamplingBrief brief={brief ?? null} />
       <PpoBrief brief={brief ?? null} />
+      {/* 汇总行下面：每个工作中 worker 一行（谁在算哪一轮、下一轮下好了没）。
+          空数组 ⇒ 一点都不渲染（无活 worker 时首页不长出新空白）。 */}
+      <PpoWorkerRows live={live ?? null} />
       {/* 深链：全页唯一入口（两行缩略都是纯读数，不各自带按钮） */}
       <button type="button" className="tc-btn tc-btn--sm" onClick={onMore}>
         节点统计 ›

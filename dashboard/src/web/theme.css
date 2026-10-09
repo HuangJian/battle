@@ -3654,6 +3654,45 @@ a.tc-btn {
 .tc-contrib-brieflabel {
   color: var(--muted);
 }
+/* ── 每台工作盘**此刻**在干什么（2026-10-09，plan/dashboard-ppo-live-rows）──
+   汇总行（`.tc-contrib-ppobrief`）下面逐台一行：● 名字 份额 计算中§… 已下载§… 下载中§…
+   同样 `flex-basis:100%`：`.tc-nodes` 是 pill 行，不加这条每行会被当成胶囊挤到行尾。 */
+.tc-contrib-ppolive {
+  flex: 0 0 100%;
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-1);
+  margin-top: var(--sp-1);
+  font-size: var(--fs-sm);
+}
+.tc-contrib-ppolive--row {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--sp-2);
+  margin: 0;
+}
+/* 名字用等宽字：对齐后一眼能比出「哪台在下、哪台在算」。
+   ⚠ 字体栈**写显式**、不引 `--mono`：那个 token 是个**颜色**（`#4b5563`），`var()` 进来
+   是非法 font-family（实测：`.tc-contrib-legend` 那一行就被静默丢弃了）。 */
+.tc-contrib-ppolive--name,
+.tc-contrib-jobseg {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
+/* 段：`计算中§课:itN`——标签加粗、引用等宽，段内逗号连接（不换行拆段）。 */
+.tc-contrib-jobseg {
+  white-space: nowrap;
+  color: var(--muted);
+}
+/* 「自主」徽标（文案与节点页 WorkerRegistry 同一枚，不新造词）。 */
+.tc-contrib-badge--auto {
+  padding: 0 var(--sp-1);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+  color: var(--muted);
+  font-size: var(--fs-xs);
+}
 /* 2026-10-04：PPO 的**逐行列表 + 份额条**（`.tc-contrib-ppolist/-pporow/-ppofoot`）已删 ——
    用户口径「不需要百分比 progress bar，像采样合计一样缩略显示即可」。份额仍在（缩略行的
    价值就是「谁占多少」），去掉的只是进度条与逐行列式排版；两者现在是对称的两行。 */

@@ -581,6 +581,7 @@ export function App({ initial }: AppProps) {
                 nodes={nodes}
                 local={localNode}
                 brief={stateView?.contributionBrief ?? null}
+                live={stateView?.ppoWorkerLive ?? null}
                 onAction={doAction}
                 onMore={() => navigate('nodes')}
                 readOnly={readOnly}

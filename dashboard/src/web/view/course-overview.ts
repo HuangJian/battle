@@ -40,6 +40,10 @@ export interface FrozenJobView {
 export interface HubInflightView {
   /** hub 侧 job_id（与训练侧 `LoopInflightView.jid` 对号用）。 */
   jobId: string
+  /** 归属课程（2026-10-09，plan/dashboard-ppo-live-rows）：旧 hub 没有 ⇒ `''`（读面据实标缺）。 */
+  course: string
+  /** 轮次（同上；旧 hub / 无 manifest ⇒ `null`——**不编 0**）。 */
+  it: number | null
   /** 持有人（worker 身份）；空串 = 无身份（旧 worker / 手写 curl）。 */
   worker: string
   /** 心跳龄（秒）；null = 缺失（旧 hub）——不编 0。 */
@@ -123,6 +127,9 @@ export interface HubQueueView {
   activeCourses: number
   /** 窗口内活跃 worker 数（避让链/观测用）。 */
   activeWorkers: number
+  /** worker 上报的**预取状态**（`worker_prefetch`；plan/dashboard-ppo-live-rows）。
+   *  空对象 = 旧 hub 没这个键 / 当前没有人在上报（两者对读面同义：只有 hub 侧两段可看）。 */
+  workerPrefetch: Record<string, HubWorkerPrefetchView>
   /** 近期报过到的**自主盘**（hub `offline_disk.recent`；★P2-5 的「最近露面面」之一）。
    *  `null` = 旧 hub 没上报（不可知 ≠ 没盘）。 */
   offlineDisks: string[] | null
@@ -131,6 +138,26 @@ export interface HubQueueView {
   /** 近期（`PEEKED_WINDOW_SEC`）被 worker `peek` 扫到过的课程集；
    *  **null = hub 未上报（旧版 hub）** ⇒ 不区分「排队·无人取」与「预取中」。 */
   peekedCourses: string[] | null
+}
+
+/** 首页 live 行里的一条 job 引用（`plan/dashboard-ppo-live-rows`）。
+ *
+ *  `course` / `it` 由 **hub 解析**（`course_of` + manifest）：worker 只报 jid。解析不出时
+ *  留空串 / `null`——读面据实标「不可知」（`?:it?`），**不编**轮次。 */
+export interface HubJobRefView {
+  jobId: string
+  course: string
+  it: number | null
+}
+
+/** 一台 worker 上报的预取状态（hub `queue_state().worker_prefetch[worker]`）。 */
+export interface HubWorkerPrefetchView {
+  /** 已下好（软持有入暂存区）的候选。 */
+  held: HubJobRefView[]
+  /** 正在下载的候选（进程内 in-flight，只有 worker 自己知道）。 */
+  dl: HubJobRefView[]
+  /** 上报龄（秒）——时效性读数，配 TTL 才有意义。 */
+  age: number | null
 }
 
 function num(v: unknown): number {
@@ -146,6 +173,39 @@ function numOrNull(v: unknown): number | null {
  *
  *  宽容解析（与整个 `/admin/queue` 同规）：形状不符 → 空数组（缺这一块 = 这个 hub 版本
  *  还没有熔断，而不是「没有冻的 job」——但两者对操作员都是「无需处理」，故不另设不可知态）。 */
+/** 解析一条 job 引用（`{job_id, course, it}`）；没有 job_id ⇒ null（不是引用）。
+ *
+ *  ⚠ `it` 走 `numOrNull`：**`null` 不是 0**——旧 hub / manifest 缺轮次时读面必须能区分
+ *  「不可知」与「第 0 轮」（与 `HubInflightView` 的龄同一纪律）。 */
+export function parseJobRef(raw: unknown): HubJobRefView | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as Record<string, unknown>
+  const jobId = typeof o.job_id === 'string' ? o.job_id : ''
+  if (!jobId) return null
+  return {
+    jobId,
+    course: typeof o.course === 'string' ? o.course : '',
+    it: numOrNull(o.it),
+  }
+}
+
+/** 解析 `/admin/queue` 的 `worker_prefetch` 块：`{worker: {held, dl, age}}`。
+ *
+ *  宽容（与整份 `/admin/queue` 同规）：形状不符 ⇒ 空对象（旧 hub 没这个键 / 上报面坏了），
+ *  一行都不编。 */
+export function parseWorkerPrefetch(raw: unknown): Record<string, HubWorkerPrefetchView> {
+  const out: Record<string, HubWorkerPrefetchView> = {}
+  if (!raw || typeof raw !== 'object') return out
+  for (const [worker, v] of Object.entries(raw as Record<string, unknown>)) {
+    if (!worker || !v || typeof v !== 'object') continue
+    const o = v as Record<string, unknown>
+    const refs = (x: unknown): HubJobRefView[] =>
+      (Array.isArray(x) ? x : []).map(parseJobRef).filter((r): r is HubJobRefView => r !== null)
+    out[worker] = { held: refs(o.held), dl: refs(o.dl), age: numOrNull(o.age) }
+  }
+  return out
+}
+
 export function parseFrozenBlock(raw: unknown): FrozenJobView[] {
   if (!raw || typeof raw !== 'object') return []
   const out: FrozenJobView[] = []
@@ -224,6 +284,8 @@ export function parseHubQueue(body: unknown): HubQueueView | null {
         holders.push(typeof w === 'string' ? w : '')
         inflightDetail.push({
           jobId: typeof i.job_id === 'string' ? i.job_id : '',
+          course: typeof i.course === 'string' ? i.course : '',
+          it: numOrNull(i.it),
           worker: typeof w === 'string' ? w : '',
           heartbeatAgo: numOrNull(i.heartbeat_ago),
           claimedAgo: numOrNull(i.claimed_ago),
@@ -252,6 +314,8 @@ export function parseHubQueue(body: unknown): HubQueueView | null {
     activeCourses: num(raw.active_courses),
     activeWorkers: num(raw.active_workers),
     halt: raw.halt === true,
+    // worker 上报的预取状态（plan/dashboard-ppo-live-rows）：缺这个键 = 旧 hub / 没人上报。
+    workerPrefetch: parseWorkerPrefetch(raw.worker_prefetch),
     // null = 旧版 hub 没上报（不可知 ≠ 不在窗口——前者退化成「排队中」）。
     peekedCourses: Array.isArray(raw.peeked_courses)
       ? (raw.peeked_courses as unknown[]).filter((x): x is string => typeof x === 'string')

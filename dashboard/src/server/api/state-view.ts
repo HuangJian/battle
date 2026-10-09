@@ -125,12 +125,18 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   //  就是那个「既有 SWR」，`getSlowSnapshot` 内部同款。
   //  观测面坏掉不得把 /api/state 带崩 ⇒ 整段 try（与旧行为一致）。
   let contributionBrief: ConsoleStateView['contributionBrief'] = null
+  // 每台工作盘此刻在干什么（plan/dashboard-ppo-live-rows）：与 brief **同一拍**的产物
+  // （`computeFleetProbes` 里同一次 `peekHubAdmin()`），只是分栏装——brief 那份要逐字可对账。
+  let ppoWorkerLive: ConsoleStateView['ppoWorkerLive'] = null
   try {
     // 缩略口径住在产物处 `computeFleetProbes`（snapshot-cache.ts）：24h 滚动窗（用户 2026-10-03）
     // + 采样 top-3 / PPO 全列（两侧 N 分开给）——这里只读缓存值，不裸调聚合（R1 结构闸）。
-    contributionBrief = (await getFleetProbes(cfg)).contributionBrief
+    const probes = await getFleetProbes(cfg)
+    contributionBrief = probes.contributionBrief
+    ppoWorkerLive = probes.ppoWorkerLive
   } catch {
     contributionBrief = null
+    ppoWorkerLive = null
   }
   return {
     time: new Date().toISOString(),
@@ -191,5 +197,6 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     ppoQueueStall,
     loopCompletes,
     contributionBrief,
+    ppoWorkerLive,
   }
 }

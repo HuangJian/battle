@@ -6,6 +6,50 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §75 worker 预取状态上报：`POST /admin/worker-prefetch`（纯观测，不参与调度）（plan/dashboard-ppo-live-rows，2026-10-09）
+
+**触发**（用户 2026-10-08）：首页 PPO 区只有一行历史份额（`PPO 合计 N job · <名> <份额>`），
+回答不了「这几台机器**此刻**正在算哪一轮、下一轮下好了没」。
+
+**三段的数据来源**（每段都据实，缺就不画）：
+
+| 段 | 事实面 | 谁提供 |
+|---|---|---|
+| 计算中 | hub 活租约 ∧ `computing_ago` 非空（已 `POST /jobs/{id}/start`） | `queue_state().courses[].inflight[]`（+`course`/`it`） |
+| 下载中 | 认领未开算（`computing_ago == null`）∪ worker 上报的预取下载中 | 同上 + worker 上报（按 job_id 去重） |
+| 已下载 | 软持有里已下好的候选（`held()`）—— hub 完全看不到 | worker 上报 |
+
+**为什么单开一条端点**（而不塞进 `/jobs/peek`）：peek 的「不认领 / 无副作用 / 不动游标」是有测试
+钉住的契约（`tests/hub/test_priority_schedule.py`），写旁路表会把它弄脏；而这条上报**零副作用**、
+失败即丢（与 `prefetch.py` 的「预取失败不是失败」同口径：不进 `ProtocolError` / `report_job_failure`）。
+
+**形状**：`{"worker": "<env>-<link>", "held": [jid…], "dl": [jid…]}`；**worker 只报 jid**，
+`course` / `it` 由 hub 解析（`course_of` + `_manifest_summary`）——权威 manifest 在 hub，
+worker 那份 `meta.json.summary` 只是 peek 时的快照（一处解析、一处口径）。
+读面在 `GET /admin/queue` 的 `worker_prefetch`（TTL `WORKER_PREFETCH_TTL_SEC = 60s` 过滤；
+全空报告不出现；解析不出的 jid 保留条目但 `course=""` / `it=null`——**不编**轮次）。
+
+**两个「不许」**：① 上报**不进任何派发判据**（写面只碰 `_worker_prefetch` 那张 TTL 表，与
+`_offline_disks` 同规）；② **失败不重试**——hub 的 `_auth_ok` 按来源 IP 记无效鉴权（满 5 次封 3600s），
+一条观测腿不该有能力把配错 token 的盘自己封掉。
+
+**节拍与退避**：worker 每轮预取末（`PREFETCH_ROUND_SEC = 5s`）比对**规范化**快照，
+形状没变就**不发** HTTP（常态 0 命中/0 下载 ⇒ 一个进程生命周期只发首轮那一笔——首轮必发是因为
+hub 的表是进程内存：worker 不重报就会让面板永久少一行）；失败后**静默 12 轮**
+（`PREFETCH_REPORT_BACKOFF_ROUNDS`）再试——实测一条连不通的观测腿每轮各付一次连接超时会
+把预取本身拖慢（≈1.6s/轮，四轮就吃掉一次现场）。
+
+**自主盘**同样出行：持 `hold.state == 'live'` 的盘领整段任务包（在 PPO 归属账本里根本不出现），
+轮次取 `/admin/offline.progress` 的**已补传产物口径**（跨 run 取最大，落后真实进度 ≤1 轮）。
+
+**验收**：`tests/hub/test_worker_prefetch.py`（11 例：读数形状/TTL/身份/空报告清空/未知 jid/端点
+400-413-200/纯观测+peek 无副作用回归）· `tests/remote/test_soft_hold_prefetch.py`（新增 5 例：
+`begin/end/snapshot` 窗口、形状未变不发、失败后不留悬挂、退避、上报腿 best-effort）·
+`dashboard/tests/ppo-worker-live.test.ts`（13 例）。
+
+**指针**：决策 `DECISIONS.md` §2026-10-09-goalnn-ppo-live-rows；计划与规格 →
+`plan/dashboard-ppo-live-rows.plan.md`。
+
 ## §74 补传腿 `_append` 自锁死：重启的「重述段末摘要」重入不可重入锁（2026-10-09）
 
 **触发**：`bun run pygate` 满载时慢层红 ——

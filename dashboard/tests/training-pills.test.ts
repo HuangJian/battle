@@ -304,6 +304,10 @@ function hubRow(course: string, over: Partial<CourseOverviewRow> = {}): CourseOv
 function fl(claimedAgo: number | null, over: Partial<HubInflightView> = {}): HubInflightView {
   return {
     jobId: 'j9',
+    // 归属课程 / 轮次（2026-10-09，plan/dashboard-ppo-live-rows）：不动这套「派发态」用例的
+    // 语义，缺省给「不可知」形态（空串 / null）——它们本来就不看这两个字段。
+    course: '',
+    it: null,
     worker: 'gpu-7',
     heartbeatAgo: 4,
     claimedAgo,

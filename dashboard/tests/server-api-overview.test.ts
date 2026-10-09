@@ -163,8 +163,18 @@ describe('parseHubQueue（hub /admin/queue 的宽容解析）', () => {
     })!
     expect(q.courses.a!.halt).toBe(true)
     expect(q.courses.a!.nextJob).toBe('j8')
+    // `course` / `it`（2026-10-09，plan/dashboard-ppo-live-rows）：这一拍的体里没带它们 ⇒
+    // 解析成「不可知」（空串 / null），**不编 0**（旧 hub 的诚实形态）。
     expect(q.courses.a!.inflightDetail).toEqual([
-      { jobId: 'j9', worker: 'gpu-7', heartbeatAgo: 4, claimedAgo: 1620, computingAgo: null },
+      {
+        jobId: 'j9',
+        course: '',
+        it: null,
+        worker: 'gpu-7',
+        heartbeatAgo: 4,
+        claimedAgo: 1620,
+        computingAgo: null,
+      },
     ])
     expect(q.peekedCourses).toEqual(['a', 'other'])
   })

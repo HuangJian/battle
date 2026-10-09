@@ -8659,3 +8659,23 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   无账本进 unavailable / 缓存命中·指纹·TTL 计数可证）· 门禁：dashboard `typecheck` + 全量 1479 用例（0 fail，
   含 `web-style-discipline` / `architecture-layering`）+ 三份 bundle + 仓根 `bun run check` 全绿。
   —— 设计全文（含评审 10 处事实修正 + 8 处规格补全）→ `plan/dashboard-compare-trends.plan.md`
+
+## §2026-10-09-goalnn-ppo-live-rows（2026-10-09，首页 PPO 区加「每台一行」：谁在算哪一轮 / 下一轮下好了没）
+
+- **背景**：首页 PPO 区只有一行历史份额；「此刻在干什么」的三个事实里，hub 有租约但不给 `course`/`it`，
+  预取状态只住 worker 本地盘、**没有任何上行通道**；自主盘领整段任务包、不进 PPO 归属账本。
+- **备选与否决**：① dashboard 直探 worker —— 否，直探键是 rl-config 的 `nodes[].id`（`self`/`mac`），
+  与屏上的 env 派生名（`kaggle-c`）对不上；② 塞进 `/jobs/peek` 回包 —— 否，peek 的「不认领/无副作用/不动游标」
+  有测试钉着（`tests/hub/test_priority_schedule.py`），写旁路表会把它弄脏；③ 把 live 行并进
+  `contributionBrief` —— 否，那份 brief 要与 `/api/pool` 投影**逐字相等**（跨端点一致性守卫），而 live 是
+  时间敏感读数；④ 每轮无条件上报 —— 否，常态空转的零信息 HTTP，且失败腿会拖慢预取节拍（实测 ≈1.6s/轮）。
+- **决定**：worker 每轮末经 `POST /admin/worker-prefetch` **只报 jid**（形状未变不发 / 失败静默退避 12 轮 /
+  绝不重试）；hub 解析 `course`/`it` 并在 `/admin/queue` 的 `worker_prefetch` 出读面（TTL 60s；**纯观测**，
+  不进任何派发判据）；inflight 行补 `course`/`it`，**段归属按 `computing_ago` 分档**（已认领 ≠ 计算中）；
+  live 行独立于 `contributionBrief`（`ConsoleStateView.ppoWorkerLive`）；自主盘轮次取「已补传产物」派生口径。
+- **违反后果**：上报写进调度判据 ⇒ 观测腿能改派发（One-Author 破例）；live 塞进 brief ⇒ 跨端点一致性用例
+  变 flake 源；不复用 `computing_ago` ⇒ 同一段等待在屏上被叫成两件事（「已认领」显示成「计算中」）。
+- **测试/证据**：`nn-training/tests/hub/test_worker_prefetch.py`（11 例）· `tests/remote/test_soft_hold_prefetch.py`（+5）
+  · `dashboard/tests/ppo-worker-live.test.ts`（13 例）· 分域守卫 `tests/hub/test_hub_queue_split.py` /
+  `test_hub_admin_split.py` 同批更新（域成员 118→120、状态表 +2、admin 方法 9→10）。
+  —— 全文（规格 / 评审 F1–F8 处置 / 逐文件落点）→ `plan/dashboard-ppo-live-rows.plan.md`

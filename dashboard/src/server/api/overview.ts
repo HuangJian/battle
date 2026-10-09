@@ -326,10 +326,17 @@ export function invalidateHubAdmin(): void {
  *
  *  新鲜度 = 后台刷新器每拍暖一次的上一拍值（≤1 个刷新周期）；这与「inflight 本来就是 5s 陈旧的
  *  观测」口径一致。冷启动首拍（缓存空）返回 null —— 缩略里暂时没有「只在飞」的 worker，
- *  第二拍起一致（守卫用例钉死这条）。 */
-export function peekHubAdmin(): { queue: HubQueueView | null } | null {
+ *  第二拍起一致（守卫用例钉死这条）。
+ *
+ *  ★ 2026-10-09（plan/dashboard-ppo-live-rows）：两个键**同一次窥视**给出——`queue` 里现在
+ *  带着 inflight 的 `course`/`it` 与 worker 上报的预取状态，`offline` 是自主盘那一行
+ *  「跑到第几轮」的唯一来源（`HubProbe` 早就探了它，只是以前没透出去）。 */
+export function peekHubAdmin(): {
+  queue: HubQueueView | null
+  offline: Record<string, Record<string, OfflineRunView>> | null
+} | null {
   const p = hubCache.peek()
-  return p ? { queue: p.queue } : null
+  return p ? { queue: p.queue, offline: p.offline } : null
 }
 
 // ────────────────────────── 组装 ──────────────────────────

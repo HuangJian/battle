@@ -1,6 +1,6 @@
 /** console-types.ts — 控制台整页视图类型（组件 / 节点 / 模式 / 指标 / 整页快照）与展示辅助。 */
 import { ParallelOverviewView, PushWorkerRegistryView } from './course-overview'
-import { ContributionBrief } from './contribution'
+import { ContributionBrief, PpoWorkerLiveView } from './contribution'
 import { LoopQueueView } from './loop-queue'
 import { IterRow, PairedReferee } from './metric-types'
 import { PhaseInfo } from './phase'
@@ -313,6 +313,11 @@ export interface ConsoleStateView {
   /** 并行 worker 贡献度缩略（plan/worker-contribution-view W3b；首页 NodePills 下方一行）。
    *  缺省/null = 旧视图或计算失败（UI 不画该行）。 */
   contributionBrief?: ContributionBrief | null
+  /** 每台工作盘**此刻**在干什么（plan/dashboard-ppo-live-rows；首页 PPO 汇总行下面一行一台）。
+   *
+   *  与 `contributionBrief` **同一拍**但**不在它里面**：那份 brief 要与 `/api/pool` 的投影
+   *  逐字相等（跨端点守卫），而这一块是时间敏感读数。缺省/null = 旧视图或计算失败（不画）。 */
+  ppoWorkerLive?: PpoWorkerLiveView[] | null
   /** 课程热加载最新判决（§2026-09-13-hot-reload；账本最近一条 course_edit 事件）。
    *  rejected = 语料身份编辑被拒 → 错误横幅；restored/applied 不上横幅。 */
   courseEdit?: CourseEdit | null
