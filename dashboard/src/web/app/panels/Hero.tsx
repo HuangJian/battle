@@ -48,6 +48,7 @@ import { COLOR_EVAL, TrendChart } from '../../components/TrendChart'
 import { InlineNotice } from '../../components/InlineNotice'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
 import { ReplayExportModal } from './ReplayExportModal'
+import { CompareTrendsModal } from './CompareTrendsModal'
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 
@@ -57,6 +58,9 @@ export interface HeroProps {
   /** 触发评估入队后拉一次 /api/state（回填 eval 列）。 */
   onRefresh?: () => void
   readOnly?: boolean
+  /** 顶栏刷新节奏（秒）：「比较课程」弹窗跟它走（同一个旋钮管两处，不新增第二个开关）。
+   *  缺省 300 = `REFRESH_INTERVALS` 的默认档（直构 Hero 的旧用例不受影响）。 */
+  refreshSec?: number
 }
 
 /** 序列最后一个有效点（缺值 = null，不冒充 0）。 */
@@ -659,7 +663,13 @@ function LastIters({
   )
 }
 
-export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroProps) {
+export function Hero({
+  stateView,
+  onMore,
+  onRefresh,
+  readOnly = false,
+  refreshSec = 300,
+}: HeroProps) {
   const iters = stateView?.metrics.iters ?? []
   const course = stateView?.course ?? ''
   const head = latestRow(iters)
@@ -795,6 +805,9 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
     }
   }
 
+  // 「比较课程」弹窗开关（弹窗自持数据与轮询；Hero 只负责入口与透传节奏）。
+  const [compareOpen, setCompareOpen] = useState(false)
+
   if (!head) {
     return (
       <section className="tc-hero" aria-label="训练状态">
@@ -813,7 +826,22 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
           <button type="button" className="tc-link" onClick={onMore}>
             完整指标表 ›
           </button>
+          {/* 当前课没迭代也能比**别的**课（历史课有账本）⇒ 空态分支同样给入口 */}
+          <button
+            type="button"
+            className="tc-btn tc-btn--sm"
+            title="把多门课的同一指标叠在一张大图上（默认在训课；含历史课，最多 8 门）"
+            onClick={() => setCompareOpen(true)}
+          >
+            比较课程
+          </button>
         </div>
+        <CompareTrendsModal
+          open={compareOpen}
+          stateView={stateView}
+          refreshSec={refreshSec}
+          onClose={() => setCompareOpen(false)}
+        />
       </section>
     )
   }
@@ -842,6 +870,16 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
               </button>
             ))}
           </div>
+          <span className="tc-trendctl__end">
+            <button
+              type="button"
+              className="tc-btn tc-btn--sm"
+              title="把多门课的同一指标叠在一张大图上（默认在训课；含历史课，最多 8 门）"
+              onClick={() => setCompareOpen(true)}
+            >
+              比较课程
+            </button>
+          </span>
         </div>
         {evalFlash ? <InlineNotice>{evalFlash}</InlineNotice> : null}
         <div className="tc-trends">
@@ -913,6 +951,12 @@ export function Hero({ stateView, onMore, onRefresh, readOnly = false }: HeroPro
         readOnly={readOnly}
         onEvalQueued={onEvalQueued}
         busyIters={busyIters}
+      />
+      <CompareTrendsModal
+        open={compareOpen}
+        stateView={stateView}
+        refreshSec={refreshSec}
+        onClose={() => setCompareOpen(false)}
       />
     </section>
   )

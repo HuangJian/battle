@@ -563,6 +563,7 @@ export function App({ initial }: AppProps) {
                   onMore={() => navigate('metrics')}
                   onRefresh={() => void refreshState()}
                   readOnly={readOnly}
+                  refreshSec={refreshInterval}
                 />
               </PanelErrorBoundary>
             )}

@@ -8634,3 +8634,28 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
 - **违反后果**：继续以 hu150 为基线 ⇒ 所有相对增益虚高约 3~6pp（冠军锚本身低了）。
 - **测试/证据**：`tmp/hu150-vs-kr10/rows.jsonl` + `tmp/x23-best800[b]/rows.jsonl`（KR10 侧）。
   —— 全文 → `docs/nn/experiments.md` §82
+## §2026-10-09-goalnn-compare-trends-modal（2026-10-09，首页趋势图加「比较课程」：跨课程端点独立于 /api/state）
+
+- **背景**：用户要的是「首页趋势图右上角一个比较入口 → 一张大图叠 N 门课的同一指标；指标/口径/起止可切、
+  课程可增删（含历史课）、打开期间自动刷新」。而 `/api/state` 的 `metrics` 只算**当前查看课程**一门课；
+  `TrendChart` 又是「两序列 + 下标 x 轴」组件（多课 iter 网格不同 ⇒ 按下标画会把 it50 和 it10 叠在同一列）。
+- **备选与否决**：① N 门课的序列塞进 `/api/state`——否（3s 全局轮询要为「可能没人在看的弹窗」每次读 N 份
+  账本；冷开 8 门课是秒级同步读，还压在控制台事件循环上）；② 弹窗自带第二个刷新节奏开关——否（顶栏旋钮已管
+  全局，两个节奏必然漂开）；③ 多课图沿用 eval 橙——否（8 门课全橙 = 认不出课；口径改由线型表达）；
+  ④ 起止 it 复用 Hero 的「最近 N」——否（多课下每门的 N 不一样，「最近 10 轮」失去可比性）；
+  ⑤ 顺手迁掉旧端点写死 `REPO_ROOT/tmp`（不随 `BCITY_TMP_LOGS_DIR` 重定向）的坑——否（另开任务，本端点不重复它）。
+- **决定**：新增 `GET /api/compareTrends`（`?courses=a,b&metric=&source=&from=&to=`；≤8 门、逐个
+  `sanitizeViewCourse` 剔除非法/不存在、剔空 ⇒ 400 而不静默回退）；课程级缓存 TTL 10s + 账本
+  `mtimeMs:size` 指纹（命中不读日志正文）；弹窗**只在打开时**轮询、节奏复用 Hero 透传的 `refreshSec`
+  （= app.tsx 顶栏旋钮），并带请求序号 + 「请求身份 ∩ 账本指纹」门闩；多课口径 = 课色实线（rollout）/
+  课色虚线（eval）；封存课不可画（只读 manifest、无逐轮账本）；读账本最多最新 500 轮（`readIterMetrics`
+  既有截断，图注写明）。
+- **违反后果**：把跨课数据塞回 `/api/state` ⇒ 首页每次轮询都读 N 份日志（冷开秒级 + 事件循环阻塞）；
+  丢掉指纹门闩 ⇒ 每拍 `setState` 把 hover 准星清掉、图周期性闪；起止/口径变化不立即重拉 ⇒ 用户看到的是上
+  一个口径的读数（**假读数比空图贵**）；给弹窗单开一个节奏开关 ⇒ 两处节奏漂开，用户再也说不清「多久刷一次」。
+- **测试/证据**：`dashboard/tests/web-compare-trends.test.ts`（档位表 / y 规则 / 切片 / 解析 / 选课 / 门闩 +
+  大图 SSR 形状：数值 x 轴、缺值断笔、eval 虚线、空态、Hero 两分支入口）·
+  `dashboard/tests/server-api-compare-trends.test.ts`（参数校验 / iter 切片 / eval 缺值 = null（**不是 0**）/
+  无账本进 unavailable / 缓存命中·指纹·TTL 计数可证）· 门禁：dashboard `typecheck` + 全量 1479 用例（0 fail，
+  含 `web-style-discipline` / `architecture-layering`）+ 三份 bundle + 仓根 `bun run check` 全绿。
+  —— 设计全文（含评审 10 处事实修正 + 8 处规格补全）→ `plan/dashboard-compare-trends.plan.md`

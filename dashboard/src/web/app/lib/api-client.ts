@@ -4,6 +4,8 @@
  *  互斥转译为人话（GLM-U4）。 */
 
 import type {
+  CompareMetric,
+  CompareTrendsView,
   ConsoleStateView,
   EvalBoardView,
   EvalCkptsView,
@@ -12,6 +14,7 @@ import type {
   EvalRoundsView,
   LogPayload,
   PoolView,
+  TrendSource,
 } from '../../view'
 
 export interface ActionResult {
@@ -88,6 +91,27 @@ export async function fetchLog(
   const r = await fetch(`/api/log/${key}?${params.toString()}`)
   if (!r.ok) throw new Error(`/api/log/${key} HTTP ${r.status}`)
   return (await r.json()) as LogPayload
+}
+
+/** 比较课程（弹窗打开期间自持轮询）：`GET /api/compareTrends`。
+ *  `from`/`to` = null 表示全量；非法参数由调用方先过 `parseIterRange`（这里只管发请求）。 */
+export async function fetchCompareTrends(params: {
+  courses: string[]
+  metric: CompareMetric
+  source: TrendSource
+  from: number | null
+  to: number | null
+}): Promise<CompareTrendsView> {
+  const q = new URLSearchParams({
+    courses: params.courses.join(','),
+    metric: params.metric,
+    source: params.source,
+  })
+  if (params.from != null) q.set('from', String(params.from))
+  if (params.to != null) q.set('to', String(params.to))
+  const r = await fetch(`/api/compareTrends?${q.toString()}`)
+  if (!r.ok) throw new Error(`/api/compareTrends HTTP ${r.status}`)
+  return (await r.json()) as CompareTrendsView
 }
 
 export async function fetchEvalBoard(fresh = false, course = ''): Promise<EvalBoardView> {

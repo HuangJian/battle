@@ -19,6 +19,18 @@ export const TC_HERO_ITERS_COLLAPSED = `${TC_KEY_PREFIX}hero.iters.collapsed`
 export const TC_TREND_RANGE = `${TC_KEY_PREFIX}trend.range`
 /** hero 走势图数据源档位（'all' 全部叠加 / 'rollout' 只看采样 / 'eval' 只看干净评估）。 */
 export const TC_TREND_SOURCE = `${TC_KEY_PREFIX}trend.source`
+// 「比较课程」弹窗的本地偏好（5 键，plan/dashboard-compare-trends.plan.md §3.11）。
+// 恢复纪律与 Hero 的 TC_TREND_RANGE 同款：**首帧不读**（SSR/hydrate 一致），mount 后的
+// effect 里恢复 + 与当前 courses 求交（选过的课可能已封存/删除）。
+/** 已选课程（逗号分隔，顺序 = 色序）。 */
+export const TC_COMPARE_COURSES = `${TC_KEY_PREFIX}compare.courses`
+/** 指标档位（6 档之一；非法值丢弃）。 */
+export const TC_COMPARE_METRIC = `${TC_KEY_PREFIX}compare.metric`
+/** 口径档位（all/rollout/eval）。 */
+export const TC_COMPARE_SOURCE = `${TC_KEY_PREFIX}compare.source`
+/** 起止 iter（空串 = 全量；非负整数）。 */
+export const TC_COMPARE_FROM = `${TC_KEY_PREFIX}compare.from`
+export const TC_COMPARE_TO = `${TC_KEY_PREFIX}compare.to`
 // ★ `tc.train.mode`（last-used pull/push/local）已随「启动训练不选模式」于 2026-09-19 退役；
 //   旧值留在 localStorage 里无害（tc.* 前缀不会被 cleanupNonTcKeys 误删），不再有任何读者。
 // ★ `tc.train.toggles`（行为开关的本地偏好）已于 2026-09-26 退役：三个键（stream /

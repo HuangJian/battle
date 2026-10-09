@@ -15,6 +15,8 @@
  *    - GET  /api/log/<key> → 日志载荷（日志页 2s/4s 轮询）
  *    - GET  /api/evalGames            → 一轮 in-loop eval 逐局视图（`?iter=`；缺省最新轮；导出 replay 弹窗）
  *    - GET  /api/evalRounds           → 该课程全部可导出 eval 轮（弹窗轮次选择器；summary-only 扫描）
+ *    - GET  /api/compareTrends        → 多课程同图对比（`?courses=a,b&metric=&source=&from=&to=`；
+ *                                       比较弹窗打开时自持轮询，不进 /api/state）
  *    - GET  /api/evalReplayJob        → replay 导出任务态（busy + manifest + 日志尾）
  *    - GET  /api/evalReplayFile       → 单局 .replay 下载（manifest 白名单）
  *    - POST /api/<act>   → 动作（api.routeAction → actions：启/停/冒烟/预设/开关/节点编辑）
@@ -62,6 +64,7 @@ import { error, info, initConsoleLog, log, warn } from '../core/log'
 import { monitorTouch } from '../core/reload-touch'
 import {
   buildBcEpochsView,
+  buildCompareTrendsView,
   buildEvalCkptsView,
   buildEvalGamesView,
   buildEvalReplayJobView,
@@ -76,6 +79,7 @@ import {
   evalboardRouteCounters,
   evalReplayFileResponse,
   parseEvalIterParam,
+  parseCompareQuery,
   getLoopQueueView,
   poolCountersView,
   invalidatesSnapshot,
@@ -401,6 +405,19 @@ async function main(): Promise<void> {
         }
         if (req.method === 'GET' && url.pathname === '/api/evalRounds') {
           return json(buildEvalRoundsView(viewCourse || ''))
+        }
+        // 比较课程（plan/dashboard-compare-trends.plan.md）：跨课程指标对比的数据面。
+        // 弹窗打开期间自持轮询（节奏 = 顶栏全局间隔）——不进 /api/state 的 3s 路径。
+        if (req.method === 'GET' && url.pathname === '/api/compareTrends') {
+          const parsed = parseCompareQuery({
+            courses: url.searchParams.get('courses'),
+            metric: url.searchParams.get('metric'),
+            source: url.searchParams.get('source'),
+            from: url.searchParams.get('from'),
+            to: url.searchParams.get('to'),
+          })
+          if (!parsed.ok) return json({ ok: false, message: parsed.message }, 400)
+          return json(buildCompareTrendsView(parsed.params))
         }
         if (req.method === 'GET' && url.pathname === '/api/evalReplayJob') {
           // F4 闭合（串话归因，服务端路由）：此接口返回的 manifest = POST /api/replayExport 受理成功后落盘的 manifest，

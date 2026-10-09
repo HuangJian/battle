@@ -55,7 +55,10 @@ const AXIS_FONT = { fontSize: '8', fill: 'var(--muted)' } as const
 export const COLOR_EVAL = 'var(--eval-line, #ea580c)'
 const COLOR2_DEFAULT = COLOR_EVAL
 
-function pathFrom(
+/** 折线 `d`：逐点 `M`/`L`，非有限值处**断笔**（缺值不连线——连了就是假数据）。
+ *  导出理由：比较图（`MultiTrendChart`）画 N 条线要用同一份断笔语义；
+ *  `px` 由调用方给（本图按下标，比较图按 iter 数值），断笔规则只有一处。 */
+export function pathFrom(
   vals: number[],
   n: number,
   px: (i: number) => number,
@@ -240,7 +243,7 @@ export function TrendChart({
           )
         })}
 
-        {/* 面积 + 主折线 + 叠加线（eval：白描边 + 紫实线 + 点，压在最上层） */}
+        {/* 面积 + 主折线 + 叠加线（eval：白描边 + 橙实线 + 点，压在最上层） */}
         {area ? <path d={area} fill={`url(#tg-${series.key})`} /> : null}
         <path
           d={line}
