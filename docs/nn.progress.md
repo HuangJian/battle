@@ -27,10 +27,10 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 文档 | 覆盖 | 节数 |
 |---|---|---|
 | [`docs/nn/legacy.md`](nn/legacy.md) | **早期谱系归档**（2026-08-18 ~ 08-29）：v1/v2 student、P1.5 蒸馏、BC 热启动、无道具纪元、第一代 RL 流水线 —— 已被 goal-space 取代，只作史实与教训 | 22 |
-| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / **在飞活的备份副本**（§68） / **自主 worker 收工即停（§70）** / **补传腿忙等修复 + 独立进程（§69）** / **一拖一闸两次自锁（§71）** / **派发模型重构：课程无模式 + 接管 + BC 独占（§72）** / **claim 的进度锚以响应时刻为准（§73）** | 44 |
+| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / **在飞活的备份副本**（§68） / **自主 worker 收工即停（§70）** / **补传腿忙等修复 + 独立进程（§69）** / **一拖一闸两次自锁（§71）** / **派发模型重构：课程无模式 + 接管 + BC 独占（§72）** / **claim 的进度锚以响应时刻为准（§73）** / **补传腿 `_append` 自锁死：重启重述重入不可重入锁（§74）** | 45 |
 | [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart · **节点门的 bootId 一致性**（§26）· **分关采样平衡（§30）** · **决策周期 K 通道（§31）** | 26 |
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
-| [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** · **六包重组（刀 1–6）** · **门禁 fail-fast**（§63） · **测试不得碰在跑的控制台**（§64） · **测试不得写生产状态（门禁意图 / 循环控制 / EvalBoard / 权重归档）**（§65） · **it0 基线 eval「从未派出」缺口：收工自报 + 缺口三分 + 基线自带门**（§66） · **eval 腿任务缺课程血缘：兄弟课程评估局在节点 resultCache 互串**（§67） | 35 |
+| [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** · **六包重组（刀 1–6）** · **门禁 fail-fast**（§63） · **测试不得碰在跑的控制台**（§64） · **测试不得写生产状态（门禁意图 / 循环控制 / EvalBoard / 权重归档）**（§65） · **it0 基线 eval「从未派出」缺口：收工自报 + 缺口三分 + 基线自带门**（§66） · **eval 腿任务缺课程血缘：兄弟课程评估局在节点 resultCache 互串**（§67） · **pytest 私有提交 642MB→159MB：BLAS 内线程封顶**（§68） · **scratch 换根档由速度探针决定：通用用例钉死回退档**（§69） · **锁重入守卫扩容：方法内/闭包锁 + 组合组（hub store 混入）+ 全仓审计**（§70） | 37 |
 | [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 / 课程管理页 / 指标表抗轮转抄录 / **回放导出按评估轮选（§32）** / **池历史大流按变化重建（§33）** / **空置内存真凶：logTail 整文件读（§34）** / **v2 词表与钮：接管是唯一真源（§35）** | 35 |
 | [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处）· **节点单实例互斥**（§29）· **一局的墙钟上界**（§32）· **长驻池真就绪 + 有界清理**（§33）· **热路径 IO 换节点本地盘（rollout/eval 共用一套 scratch）**（§34） | 33 |
 | [`docs/nn/tpu-perf.md`](nn/tpu-perf.md) | TPU / XLA：设备实测 · 单步耗诊断 · 编译缓存 · PPO 吞吐 | 9 |

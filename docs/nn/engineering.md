@@ -25,6 +25,131 @@
 
 ---
 
+## §70 锁重入守卫扩容：方法内/闭包锁 + 组合组（hub store 混入）+ 全仓审计（2026-10-09）
+
+### 一句话
+
+`remote/deliver_proc.py` 的自锁死（`remote-transport.md` §74）修完后，把「同一线程重入
+不可重入锁」这条判据在**全仓**审了一遍 —— 顺路发现前一条守卫（`tests/test_lock_reentrancy.py`，
+同日建）有两个**只看不见的危险面**：① 方法内局部锁（`run()` 里 `lock = threading.Lock()`
++ 十几个嵌套闭包 `with lock:`，`trainer/eval_dispatch.py` / `trainer/dispatch.py` 的形状）
+因为登记条件写成 `self.cls is None` 而**完全不在管辖范围**；② hub store 的六个混入
+（30/49 个方法共一把 `self._lock`，且互调是常态）在模块内调用图里**必然解析不到**
+（`self._facts_locked()` 的定义在 `store_scheduling.py`），只能落进「看不到目标」的棘轮。
+
+### 判据的两处扩容
+
+* **闭包链**：`_Fn.key` 改成 `(类名, qualname)`（`run.worker`，嵌套同名不互相覆盖），
+  `visit_Assign` 对**任何**函数登记局部锁，`with lock:` 从最内层往外沿词法作用域找定义处 ⇒
+  键归到**定义它的那个函数**（引用处与赋值处同键）。
+* **组合组**：`_compose_groups` 算每个类的「可能共享同一个 `self` 的类名闭包」（向上的组合类/
+  子类 + 其基类闭包）。`self.f()` 本模块解析不到时到组内按名字找；**锁身份也按组归并**
+  （组内同名 `self._lock` = 同一对象），**跨组不归并** —— 名字归并的假阳（全仓有 72 处
+  `LogBundle._lock` vs `WorkerServerState._lock` 这类）由此消失。
+* 回调面棘轮改为**目标面**去重（「哪个类上的哪个目标」），且回调判据逐**调用**看
+  （此前 `InstallTicket(self, str(name), gen)` 同行两个调用会把 `str` 也报成回调候选）。
+
+### 审计结论（本机，2026-10-09）
+
+* 扫描面 = `common/ remote/ trainer/ worker/ hub/ biz/ tools/ tests/ e2e/` + 仓库根 `tools/`
+  （venv/tmp 排除）。**受管辖锁点 209 个**（含新纳入的闭包临界区），**同名锁重入 0 处** ——
+  含 hub store 六个混入之间的全部互调（`_claim_locked` → `_job_priority_locked` /
+  `_collect_expired_locked` → `_drop_commitment_locked` → `_bump_epoch_locked` …）。
+* 「看不到目标」15 个，**逐个回答完**（清单落在守卫常量旁）：`_now` ×10 / `_clock` ×2 是
+  构造时注入的时钟（`now_fn or time.time`、`self._solo._now`、`clock=time.time`）；
+  `CloudEvalRunner.log` 生产不传 ⇒ `_log_default` → `log_line` → `print`（无锁）；
+  `CloudEvalRunner._build` = `_eval_job_builder(ctx, ep)` **在 runner 之前**构造、拿不到 runner
+  的 `_lock`；`InstallGate.ticket` 持锁只造票，`_valid/_cancel/_install` 由 copier 线程在
+  `with` 之外调（跨线程，非重入）。
+* 旁证：手写 `lock.acquire()` 全仓 0 处（只在 `.venv` 里）；`Condition` 只出现在
+  `tests/remote/test_bulk_sched.py`（缺省内建 RLock，重入合法，判据本就跳过）。
+* **命名陷阱（留给下次读的人）**：hub store 的 `_*_locked` 后缀口径是「临界区内的那半」，
+  但 `_claim_locked` 是**自己拿锁**（它的调用方 `claim` / `claim_outcome` 都不持锁），
+  而 `_collect_expired_locked` / `_drop_commitment_locked` / `_bump_epoch_locked` 是
+  **调用方必须持锁**（前者被 `_claim_locked` 在锁内直接调）。两种形状同名后缀 ⇒ 今后任何人
+  在 `with self._lock:` 里调 `_claim_locked` 都是自锁死；这条在**同一组合对象内静态可判**
+  （守卫当场报红），不用靠读者记性 —— 跨对象的调用（如 `queue._store._claim_locked(...)`）
+  解析不到，落进目标面棘轮由人回答。
+
+### 验证
+
+* 守卫 `tests/test_lock_reentrancy.py`：5 个用例绿（含 3 个自带反探针：§74 历史形态、
+  闭包形态红/RLock 绿、组合组形态红 + 跨组同名锁**不得**牵连）；`MIN_LOCK_SITES=60`
+  对 209 有 3× 余量（解析面缩水当场红）。
+* 门禁：`bun run pygate` 绿；根 `bun run check` 绿（读数见 `docs/nn.progress.md` 索引行）。
+
+---
+
+## §69 门禁红：scratch 换根档由**速度探针**决定 ⇒ 同一份用例随机器/负载换分支（2026-10-09）
+
+### 一句话
+
+`bun run pygate` 红在 `tests/remote/test_remote_iter.py::test_run_iter_rollout_with_stub_bun`
+（`ProtocolError: kind=iter 跑完但 job 目录没有任何 shard`，末尾还贴着「首个局 rollout.log 尾：
+stub ok」），而**单跑同一条用例全绿**。根因不在被测代码，在**测试的确定性**：`worker/iter_rollout`
+走回退档还是换根档（runtime-opt §34），由 `common.scratch.resolve_scratch_root` 的**速度探针**
+（真写 8MB + fsync，判据「≥5× job 目录」）当场决定 —— 同一台机器上，安静时 /dev/shm 只测出
+**2.6×**（回落 = 绿），`pygate` 8 worker 满载时 job 目录变慢、测出 **≥5×**（换根 = 红）。
+
+### 现场（本机，Linux）
+
+* 门禁：`1 failed, 1532 passed, 1 skipped in 11.02s` 后 `-x` 停（**38% 处**，latter 半套没跑）。
+* 反证 1：`pytest …::test_run_iter_rollout_with_stub_bun -q` **单跑绿**。
+* 反证 2：`NN_ROLLOUT_SCRATCH=/dev/shm/nnprobe` 强制换根 ⇒ 单跑**逐字复现**门禁那条报错。
+* 反证 3：`ls /dev/shm/nn-rollout-job-*` 在门禁那次跑完后**真有**残留作业目录（换根确实发生过）。
+* 全量强制换根（`--maxfail=50`）后同一根因还挂着 9 条：`test_remote_iter` 3 条（`_stub_spec`
+  桩）+ `tests/worker/test_remote_serve_pool.py` 6 条（同一个平铺桩），外加一条同批的测试面：
+  `test_clean_overrun_is_machine_stall_not_in_place_retry` 的 `def clean(jd, argv)` 两参替身
+  撞上换根档的 `exec_root=` 关键字（`_clean_partial` 只在换根档多传它）。
+* 同一次排障里还露出**另一条红面不同、且是真 bug**的：
+  `tests/remote/test_offline_deliver_proc.py::test_restart_does_not_replay_consumed_commands`
+  满载下 60s 超时（转储栈停在 `remote/deliver_proc.py::_append` 的 `with self._lock:`）——
+  补传腿「重启后重述段末摘要」重入不可重入锁 ⇒ 同一线程自锁死。修法与回归用例见
+  `docs/nn/remote-transport.md` §74（本条只管门禁/测试确定性那条）。
+
+### 为什么会这样
+
+真导出器把 shard 写在 `--out` **里面**（`tools/sim/export-rl-rollout.ts`：
+`shardDir = ${outDir}/rl_s…`；`tests/remote/test_rollout_scratch.py` 的桩也照这个形状落盘），
+而 `_drain_one` 只把 `<exec 根>/<--out>` 那一个目录搬回 job 目录 ⇒ 平铺在 `--out` **之外**的
+假 shard 搬不回去（换根档 `verify_shards` 因此报「没有任何 shard」）。回退档没这问题：不搬不动，
+而 `scan_shard_dirs` 是递归扫（平铺也认）。⇒ 这批用例的绿红**成了探针读数的函数**。
+
+`common/scratch.py` 的设计注记本来就假定「用例靠显式注入候选/env 才走 scratch ⇒ **回退档是默认
+被回归覆盖的那一档**」—— 非 POSIX（候选链为空）上白成立，POSIX 上站不住（runtime-opt §34.2
+原文）。
+
+### 改动
+
+* `nn-training/conftest.py`：新 autouse `_scratch_off` —— 清掉 `NN_ROLLOUT_SCRATCH` 并把
+  `SCRATCH_CANDIDATES` 钉成 `()` ⇒ **通用用例确定性走回退档**（机器速度/负载不再参与分支）。
+  要换根档的用例自己 `setattr` 候选 / `setenv` env（后设的赢）：`test_rollout_scratch.py` 的
+  `_only_candidate` + 常数探针照旧、30 例全绿。
+* `nn-training/common/scratch.py`：候选链为空 ⇒ **立刻 `None`，连 job 目录的基准探针都不跑**
+  （§34.2 对回退档的原话；非 POSIX 与钉住后的通用用例都走这里 —— 否则每轮白写 8MB + fsync）。
+* `tests/remote/test_rollout_scratch.py`：`test_generic_tests_pin_the_fallback_path` 守卫
+  （断言 pin 在 + 空候选不跑探针）。**已验反探针**：把 fixture 里的候选钉回真链，这条当场红
+  （`assert ('/dev/shm', '/tmp') == ()`）。
+
+### 备选与否决
+
+* **只把假导出器改成嵌套布局**（与真导出器一致）：能让那 10 条在换根档也过，但用例**依旧**按
+  机器速度换分支（换根档的覆盖时有时无），且两参 `clean` 替身得放宽（它正是 §34.4 R1「回退档
+  调用形状逐字不变」的守卫）⇒ 没采用。
+* **只改门禁脚本 export**：门禁绿了，`nn-py-safe.sh` 单跑、CI、其余 pytest 入口照旧漂 ⇒ 没采用。
+* **换根档要不要顺手支持平铺 shard**：不要 —— 真导出器写不出那种布局，为它加「每局 rglob 扫
+  执行根」的热路径 IO 与失败面是净负担（`_clean_attempt` 扫两个根是为**上一轮残留**，性质不同）。
+
+### 验收（2026-10-09，本机 Linux）
+
+* `bun run pygate`：**3942 passed / 9 skipped in 34.14s**（ruff `All checks passed!` + mypy
+  `no issues found in 611 source files`），门禁总墙钟 **36s**。
+* 三个受影响文件 148 例全绿；**带 `NN_ROLLOUT_SCRATCH` 再跑一遍仍全绿**（操作员 shell 环境
+  不再能改通用用例的分支）。
+* `bun run check` 绿（2403 pass / 12 skip / 0 fail）。
+
+---
+
 ## §68 pytest 内存：真正的黑洞不是 torch，是 BLAS 线程缓冲（2026-10-09）
 
 ### 一句话

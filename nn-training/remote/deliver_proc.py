@@ -141,7 +141,14 @@ class DelivererProcess:
         self._idle_timeout = float(idle_timeout)
         self._tick_sec = float(tick_sec)
         self._cwd = Path(__file__).resolve().parents[1]  # nn-training 根
-        self._lock = threading.Lock()
+        # ⚠ 必须**可重入**：`_append` 持锁调 `_ensure_alive()`，而按需重启那条路（子进程死了、
+        # 而 `result_done` 还没落盘）会在锁内**再调一次** `_append` 重述段末摘要（★C1/C15）——
+        # `threading.Lock()` 在那里就是同一线程自锁死 ⇒ `submit_round()` 永不返回（训练线程永挂，
+        # 而它正是本类要救的「腿半死」形态）。2026-10-09 门禁满载时真踩到（慢层
+        # `test_restart_does_not_replay_consumed_commands` 60s 超时，转储栈停在 `_append` 的
+        # `with self._lock:`；回归用例 `test_restart_restating_the_final_does_not_self_lock`）。
+        # 跨线程互斥语义不变（只有 `_append` 用这把锁）。
+        self._lock = threading.RLock()
         self._proc: subprocess.Popen | None = None
         self._forwarders: list[threading.Thread] = []
         self._boot = threading.Event()

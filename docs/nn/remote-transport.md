@@ -6,6 +6,32 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §74 补传腿 `_append` 自锁死：重启的「重述段末摘要」重入不可重入锁（2026-10-09）
+
+**触发**：`bun run pygate` 满载时慢层红 ——
+`tests/remote/test_offline_deliver_proc.py::test_restart_does_not_replay_consumed_commands` 60s 超时，
+转储栈停在 `remote/deliver_proc.py::DelivererProcess._append` 的 `with self._lock:`；单跑 / 空载全绿。
+
+**根因**：`_append` 持 `self._lock` 调 `_ensure_alive()`；按需重启那条路里，子进程已死 +
+`_final_obj` 有值 + `_result_done_from_disk()` 还是 False ⇒ 锁内**再调一次** `_append()` 重述段末摘要
+（★C1/C15 的设计行为）—— 而锁是 `threading.Lock()`（**不可重入**）⇒ **同一线程自锁死**，
+`submit_round()` 永不返回（生产形态 = 训练线程永挂，比它要救的「腿半死」更难查）。触发窗口 =
+kill 子进程时 hub 已收到 POST、而子进程还没把 `result_done` 落盘；满载时子进程记账一慢，窗口就开
+（这正是本类 `close(timeout)` 与 `_ensure_alive` 存在的场景 —— 旧装里的「脏」后半段）。
+
+**修法**：`self._lock = threading.RLock()`（跨线程互斥语义不变 —— 全模块只有 `_append` 用这把锁；
+同一线程重入是设计需要的），原地注释写明原因。回归用例（快层、无子进程、无网络）
+`tests/remote/test_offline_deliver_async.py::test_restart_restating_the_final_does_not_self_lock`：
+kill 假子进程 + 钉 `_result_done_from_disk()=False`，另起线程调 `submit_round`，主线程**有界**等它
+返回（自锁死是「不返回」不是「抛错」；没返回就不收线 —— `close` 也要拿那把锁），先红后绿。
+
+**验收**：`bun run pygate` 三连绿（3943 passed / 9 skipped，34s / 33s / 41s）；快层 + 慢层两文件
+19 例绿；`bun run check` 绿。
+
+**后续（同日）**：这条判据已扩成静态守卫并在**全仓**每条持锁路径上审过一遍（含此前两个盲区：
+方法内/闭包锁、hub store 跨文件混入）—— 见 `docs/nn/engineering.md` §70 与
+`tests/test_lock_reentrancy.py`。
+
 ## §73 claim 的进度锚以**响应时刻**为准：控制台核对是阻塞调用，不得计入 hold 龄（2026-10-08）
 
 **触发**：`bun run pygate` 三条 e2e 红 —— `e2e/test_hold_e2e.py::test_full_hold_cycle_recovery_then_takeover_then_revoke`

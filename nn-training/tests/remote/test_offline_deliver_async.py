@@ -27,6 +27,7 @@ from __future__ import annotations
 import json
 import subprocess
 import sys
+import threading
 import time
 from collections.abc import Callable
 from io import BytesIO, StringIO
@@ -453,3 +454,50 @@ def test_sync_mode_is_still_synchronous(tmp_path: Path) -> None:
     d.submit_round(1)
     assert rec.posts(OFFLINE_ARTIFACT_PATH) == 1, "同步模式下 submit 应当场推完"
     d.close()  # 没起线程 → 空操作
+
+
+def test_restart_restating_the_final_does_not_self_lock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★C1+C15 的重启路径会在 `_append` **锁内**再调一次 `_append`（重述段末摘要）——
+    锁若不可重入 ⇒ 同一线程自锁死 ⇒ `submit_round()` 永不返回（训练线程永挂）。
+
+    2026-10-09 门禁在 8 worker 满载下真踩到：慢层 `test_restart_does_not_replay_consumed_commands`
+    60s 超时，转储栈停在 `remote/deliver_proc.py::_append` 的 `with self._lock:`。
+    触发窗口 = kill 子进程时 hub 已收到 POST、而子进程还没把 `result_done` 落盘。
+
+    判据是**有界返回**（自锁死是「不返回」不是「抛错」）：起一条线程调 `_append`，主线程等 5s；
+    没返回就不收线（收线也要拿那把锁，会跟着一起挂死），直接判失败。
+    """
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: _FakeProc())
+    d = DelivererProcess(
+        base_url="http://127.0.0.1:1",
+        token="tok",
+        run_id=RUN,
+        artifacts_dir=tmp_path / "art",
+        work_dir=tmp_path / "work",
+        log=lambda _m: None,
+    )
+    d.start()
+    ctl = Path(str(d.status()["ctl"]))
+    d.submit_final(it_end=1, state="complete", summary={}, end_it_reached=True)
+    assert d._proc is not None
+    d._proc.kill()  # 子进程「崩了」（OOM / 被平台杀）
+    # `result_done` 还没落的窗口（hub 收到 POST ≠ 子进程已记账）⇒ 重启后要重述 final
+    monkeypatch.setattr(d, "_result_done_from_disk", lambda: False)
+    done = threading.Event()
+
+    def call() -> None:
+        d.submit_round(2)
+        done.set()
+
+    t = threading.Thread(target=call, daemon=True, name="append-under-test")
+    t.start()
+    ok = done.wait(5.0)
+    # 先读盘再收线：`close` 自己也会 `_append`（stop 行），而它同样要拿那把锁
+    lines = [json.loads(x) for x in ctl.read_text(encoding="utf-8").splitlines() if x.strip()]
+    if ok:
+        d.close(timeout=0.0)  # 没自锁死才敢收线（挂死的线程正持着锁）
+    assert ok, "`_append` 自锁死（同一线程重入不可重入锁）——训练线程会永挂"
+    assert lines[-1] == {"round": 2}, lines
+    assert sum(1 for x in lines if "final" in x) == 2, f"重启后的重述要再落一行 final：{lines}"
