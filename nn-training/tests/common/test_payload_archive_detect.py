@@ -63,16 +63,10 @@ def test_tarxz_unpacks_when_is_zipfile_misreports(tmp_path, monkeypatch) -> None
     assert (dest / "rl_s0_seed1" / "metrics.npy").read_bytes() == b"\x93NUMPY fake"
 
 
-def test_legacy_zip_payload_still_extracts(tmp_path) -> None:
-    """② tar.xz 化（2026-09-10）之前的 zip 包必须仍可解。"""
-    src = tmp_path / "src"
-    _write_shard(src)
-    payload = tmp_path / "payload.zip"
-    with zipfile.ZipFile(payload, "w", zipfile.ZIP_DEFLATED) as z:
-        z.write(src / "rl_s0_seed1" / "manifest.json", "rl_s0_seed1/manifest.json")
-        z.write(src / "rl_s0_seed1" / "metrics.npy", "rl_s0_seed1/metrics.npy")
-    _m, shard_dirs = unpack_payload(payload, tmp_path / "out")
-    assert [Path(d).name for d in shard_dirs] == ["rl_s0_seed1"]
+# ②（tar.xz 化之前的 zip 包必须仍可解）**不在这里守**（2026-10-09 去重，
+# `plan/nn-training-test-debt-cleanup.plan.md` §2-T3）：本文件原先那一条与
+# `tests/remote/test_remote_ppo.py::test_payload_unpack_accepts_legacy_zip` 同义（后者是**超集**：
+# 多断言了 zip 里根级 `manifest.json` 的读取）⇒ 只留那一处；本文件只守上面的判别顺序与失败语义。
 
 
 def test_unreadable_payload_is_deterministic_failure(tmp_path) -> None:

@@ -148,18 +148,10 @@ def test_pack_then_unpack_roundtrip_tar_xz(tmp_path: Path) -> None:
     assert [Path(s).name for s in shards] == [shard.name]
 
 
-def test_unpack_reads_legacy_zip_too(tmp_path: Path) -> None:
-    """★ **双读**：legacy `payload.zip` 仍能解（tar.xz 化之前的包不能作废）。"""
-    shard = _make_shard(tmp_path / "src")
-    zpath = tmp_path / "job" / "payload.zip"
-    zpath.parent.mkdir(parents=True)
-    with zipfile.ZipFile(zpath, "w") as z:
-        for f in sorted(shard.iterdir()):
-            z.write(f, arcname=f"{shard.name}/{f.name}")
-
-    manifest, shards = payload_mod.unpack_payload(zpath, tmp_path / "dest")
-    assert manifest == {}
-    assert [Path(s).name for s in shards] == [shard.name]
+# ★ legacy `payload.zip` 的「双读」**不在这里守**（2026-10-09 去重，plan/nn-training-test-debt-cleanup.plan.md
+# §2-T3）：同义断言在 `tests/remote/test_remote_ppo.py::test_payload_unpack_accepts_legacy_zip`
+# 里是**超集**（旧 hub 产的 zip + 根级 manifest 读取 + 落盘字节）⇒ 只留那一处。
+# 本文件守：tar.xz 往返、判别顺序（先 tar 后 zip）、失败语义。
 
 
 def test_extract_prefers_tar_over_the_zip_heuristic(tmp_path: Path) -> None:

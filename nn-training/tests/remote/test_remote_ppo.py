@@ -425,7 +425,13 @@ def test_payload_container_is_tarxz_and_smaller(tmp_path: Path) -> None:
 
 
 def test_payload_unpack_accepts_legacy_zip(tmp_path: Path) -> None:
-    """**双读**：旧 hub 产的 zip payload 必须仍能解 —— 新旧双向互通。"""
+    """**双读**：旧 hub 产的 zip payload 必须仍能解 —— 新旧双向互通。
+
+    2026-10-09（`plan/nn-training-test-debt-cleanup.plan.md` §2-T3 去重）：这条是 legacy `payload.zip`
+    的**唯一守卫**。原先还有两条同义用例（`tests/common/test_payload_archive_detect.py`、
+    `tests/common/test_payload_split.py`）已删 —— 它们是本条的**子集**（少了「zip 里根级
+    manifest.json 被读出来」这一段）。别照着补回去。
+    """
     import zipfile
 
     shard_dir = tmp_path / "rl_s1_seed10"
