@@ -32,7 +32,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from common.protocol import PRIORITY_NONE, ROLE_OFFLINE
+from common.protocol import PRIORITY_NONE, ROLE_OFFLINE, WORKER_PREFETCH_TTL_SEC
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
 from hub.task_pack import OFFLINE_DISK_WINDOW_SEC, OFFLINE_LEG_HINT
@@ -73,6 +73,9 @@ class QueueObserveMixin(QueuePeer):
     _order: list[str]
     #: 课程 -> 最近一次被 `peek_jobs` 返回候选的时刻（秒；组合类 `__init__` 建）。
     _peeked: dict[str, float]
+    #: worker 预取状态上报的表 + 它自己的锁（都是组合类 `__init__` 建；见 `note_worker_prefetch`）。
+    _worker_prefetch: dict[str, dict]
+    _pf_lock: Any
     _stores: dict[str, _JobStore]
 
     # 本簇要调、而不在共同声明面 `QueuePeer` 里的那一个（理由见 `queue_peer.py` 头部）
@@ -80,7 +83,8 @@ class QueueObserveMixin(QueuePeer):
 
     # ---- 观测面 ----
     def queue_state(self) -> dict:
-        """`/admin/queue`：每课程的深度/在飞/最近心跳/退避记录 + 竞速的两个判据数。
+        """`/admin/queue`：每课程的深度/在飞/最近心跳/退避记录 + 竞速的两个判据数
+        + worker 上报的预取状态（plan/dashboard-ppo-live-rows）。
 
         只读观测——不参与任何调度决策，但它是「为什么某门课在饿着」的唯一答案面。
         """
@@ -100,9 +104,16 @@ class QueueObserveMixin(QueuePeer):
                 inflight.append(
                     {
                         "job_id": jid,
+                        # 归属课程 + 轮次（2026-10-09，plan/dashboard-ppo-live-rows）：控制台首页
+                        # 要回答「这台机器在算哪一轮」。`course` 这一圈本来就有；`it` 走已有的
+                        # `_manifest_summary`（**不**新造第二个读 manifest 的函数——一处口径）。
+                        "course": course,
+                        "it": self._manifest_summary(jid).get("it"),
                         "worker": holder,
                         "heartbeat_ago": round(now - st._last_heartbeat.get(jid, now), 1),
                         "claimed_ago": _age_of(now, claimed),
+                        # `computing_ago == None` = 认领了但还没 `POST /start`（关键下载/取包中）
+                        # —— 读面据此把它与真「计算中」分档，别把「已认领」一律叫计算中（F5）。
                         "computing_ago": _age_of(now, computing),
                     }
                 )
@@ -151,6 +162,10 @@ class QueueObserveMixin(QueuePeer):
             "ambiguous_jids": self.ambiguous_jids(),
             # 离线盘的报到面 + 「没人能领的离线队列项」（plan §7.2.3 的读数；见方法 docstring）
             "offline_disk": self.offline_disk_readout(),
+            # worker 上报的预取状态（plan/dashboard-ppo-live-rows）：**纯观测中转**——
+            # 「软持有里哪些下好了 / 哪些正在下」是 worker 本地事实，hub 只做一次 TTL 过滤
+            # 与 jid→(course, it) 解析。旧 hub 没有这个键 ⇒ 客户端退化成只剩 hub 侧两段。
+            "worker_prefetch": self.worker_prefetch_readout(),
         }
 
     # ---- job 作用域委派（与 `_JobStore` 同名同签名） ----
@@ -294,3 +309,74 @@ class QueueObserveMixin(QueuePeer):
             # 只有真存在「没人能领的离线项」才喊：这句话是给操作员的下一步，不是背景噪音。
             out["hint"] = OFFLINE_LEG_HINT
         return out
+
+    # ---- worker 预取状态上报（plan/dashboard-ppo-live-rows，2026-10-09）----
+    def note_worker_prefetch(self, worker_id: str, held: Any, dl: Any) -> None:
+        """登记一次 worker 的预取状态上报（`POST /admin/worker-prefetch`）。
+
+        **纯观测**：只写这张 TTL 表，不碰租约 / 游标 / 派发判据（与 `note_offline_disk` 同规）。
+        `held` = 软持有里**已下好**的 jid；`dl` = 正在下的 jid。
+
+        无身份的 worker_id ⇒ 忽略：上报没有可归属的行，编一个占位名只会让面板多一坨假机器。
+        空报告（两个列表都空）**照记**——「上一拍有 3 份、这一拍都没有」是一次真实的状态变化，
+        必须能把读面清回空（读面自己跳过全空条目，不给面板造噪音）。
+        """
+        wid = (worker_id or "").strip()
+        if not wid:
+            return
+
+        def jids(raw: Any) -> list[str]:
+            return [str(j) for j in (raw if isinstance(raw, list) else []) if j]
+
+        with self._pf_lock:
+            self._worker_prefetch[wid] = {
+                "held": jids(held),
+                "dl": jids(dl),
+                "at": self._now(),
+            }
+
+    def worker_prefetch_readout(self) -> dict:
+        """worker 上报的预取状态 → 控制台可读形状（plan/dashboard-ppo-live-rows）。
+
+        形状：`{worker_id: {"age": 秒, "held": [{job_id, course, it}], "dl": [...]}}`。
+
+        **jid → (course, it) 由 hub 解析**（`course_of` + `_manifest_summary`）：worker 那份
+        `meta.json.summary` 只是 peek 时的快照，权威副本在 hub ⇒ 一处解析、一处口径
+        （代价 = 每个上报 jid 读一次 manifest，量级个位数，与 `/admin/queue` 的 5s 节拍同阶）。
+
+        三条读数纪律：
+          · 超 `WORKER_PREFETCH_TTL_SEC` ⇒ 整体剔除（worker 死后不留幽灵「已下载」）；
+          · 全空报告 ⇒ 不出现（没有可渲染的行）；
+          · 解析不出的 jid（归属歧义 / 未知）⇒ **保留**条目、`course=""`、`it=None`——
+            读面据实标「不可知」，**不编**轮次（不编 0、不编 1）。
+        """
+        now = self._now()
+        with self._pf_lock:
+            rows = {w: dict(r) for w, r in self._worker_prefetch.items()}
+
+        def refs(raw: Any) -> list[dict]:
+            out: list[dict] = []
+            for item in raw if isinstance(raw, list) else []:
+                jid = str(item or "")
+                if not jid:
+                    continue
+                it = self._manifest_summary(jid).get("it")
+                out.append(
+                    {
+                        "job_id": jid,
+                        "course": self.course_of(jid) or "",
+                        "it": it if isinstance(it, int) else None,
+                    }
+                )
+            return out
+
+        readout: dict[str, dict] = {}
+        for worker_id, rec in rows.items():
+            age = now - float(rec.get("at") or 0.0)
+            if age > WORKER_PREFETCH_TTL_SEC:
+                continue
+            held, dl = refs(rec.get("held")), refs(rec.get("dl"))
+            if not held and not dl:
+                continue
+            readout[worker_id] = {"age": round(age, 1), "held": held, "dl": dl}
+        return readout

@@ -39,6 +39,11 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 > `auto_handoff_allowed` / `is_runnable_offline` / `auto_eligible` / `_dispatch_disk_record` /
 > `set_mode_pinned` / `_drop_unsettled` / `begin_auto_handoff` / `note_claim`）、增 3
 > （`mode_ignored` / `course_open` / `begin_pending_export`）⇒ 域成员 **114**、实现名 **116**。
+>
+> ★ 2026-10-09（plan/dashboard-ppo-live-rows）：`queue_observe` 涨 **2** 个成员
+> （`note_worker_prefetch` 的写入面 / `worker_prefetch_readout` 的读面——worker 软持有预取
+> 状态上报，**纯观测**：只写一张 TTL 表，不进任何派发判据）⇒ 域成员 **118 → 120**、
+> 实现名 **120 → 122**；状态表 +2（`_worker_prefetch` / `_pf_lock`）。
 
 同一刀还把**两个组合类搬出自己的家**（这是本刀能成立的**使能缝**，不是顺手清洁）：第十四刀只搬了
 `_JobStore` 的六个混入，组合类还在 `hub_server` 里；而 `queue_scope.add_course` 要**构造** store、
@@ -59,7 +64,7 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 
 ## 本文件钉住的东西
 
-1. **定义唯一**：114 个域成员各住一家，`_HubQueue` 不得再定义任何一个（组合类只组合）；
+1. **定义唯一**：120 个域成员各住一家，`_HubQueue` 不得再定义任何一个（组合类只组合）；
 2. **接线正确**：`_HubQueue.X is Mixin.X`（同一函数对象）+ MRO 逐项 + 类常量经 MRO 可达；
 3. **★ 门面契约**（`queue_store_face` 那一簇的**存在理由**）：与 `_JobStore` 同名的方法
    **逐参数对账**——30 个完全一致 + 3 个只多一个前置 `course`（课程寻址），且这份名单是**闭集**；
@@ -197,6 +202,10 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "last_heartbeat_ago",
             "note_offline_disk",
             "offline_disk_readout",
+            # worker 预取状态上报的写面与读面（2026-10-09，plan/dashboard-ppo-live-rows）：
+            # 写入面只碰 `_worker_prefetch`（纯观测），读面做 TTL 过滤 + jid→(course, it) 解析。
+            "note_worker_prefetch",
+            "worker_prefetch_readout",
         ),
     ),
     "queue_offline": (
@@ -366,6 +375,10 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     ),
     "_now": frozenset({"__init__"}),
     "_offline_disks": frozenset({"__init__", "note_offline_disk"}),
+    #: worker 预取状态上报（2026-10-09，plan/dashboard-ppo-live-rows）：唯一写者是写入面
+    #: （`note_worker_prefetch` 整体换记录），锁只被 `__init__` 建。
+    "_worker_prefetch": frozenset({"__init__", "note_worker_prefetch"}),
+    "_pf_lock": frozenset({"__init__"}),
     "_order": frozenset({"__init__", "add_course"}),
     #: 多课程预取窗口（2026-10-02，plan/course-pill-precision §4.1）：写点只有启动与 peek。
     "_peeked": frozenset({"__init__", "peek_jobs"}),
@@ -492,7 +505,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # `course_open` / `begin_pending_export`）⇒ 114。
     # ★M5（Q5）：+4（`job_kind` 的 hub 转发 / `worker_holds` / `worker_bc_drain` /
     # `_drain_blocked`——drain 互斥的两半都要全课程视图）⇒ 114 + 4。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 118, len(DOMAIN_METHODS)
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 120, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -502,7 +515,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 118, len(seen)
+    assert len(seen) == 120, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -526,9 +539,9 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
         for name in realized:
             assert seen.get(name, domain) == domain, f"{name} 同时住 {seen[name]} 与 {domain}"
             seen[name] = domain
-    # 118 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
+    # 120 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
     expect = set(DOMAIN_METHODS) | {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"}
-    assert len(seen) == 120 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
+    assert len(seen) == 122 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
 
 
 # ───────────────────── ② 接线正确 ─────────────────────
@@ -793,7 +806,7 @@ def test_the_missing_store_default_is_the_declared_one_per_method(tmp_path: Path
 
 
 def test_the_state_writer_table_matches_reality() -> None:
-    """★ 24 个字段的**写者集合**逐字段对账（含下标赋值与 `self.X.append(...)` 三种写法）。
+    """★ 26 个字段的**写者集合**逐字段对账（含下标赋值与 `self.X.append(...)` 三种写法）。
 
     为什么需要它：状态声明分散到八个文件之后，「谁动它」是最容易漂的事。而**只数
     `self.X = …` 会瞎掉一半**——`_locate_cache` / `_halts` / `_order` /

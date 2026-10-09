@@ -43,6 +43,9 @@ from common.protocol import ProtocolError
 
 #: /admin/net-probe 响应体上限（与前端探针脚本约定；2MB 腿只需 2_097_152）。
 NET_PROBE_MAX = 16 * 1024 * 1024
+#: /admin/worker-prefetch 请求体上限（plan/dashboard-ppo-live-rows）：体里只有 worker id 与
+#: 两组 jid 列表（16 字节 × 预取深度）—— 64KB 已宽裕两个数量级，超限 413 而不是读进内存。
+WORKER_PREFETCH_BODY_MAX = 64 * 1024
 #: 确定性填充块（固定种子，绝不用随机——同一 bytes=N 每次必须逐字节相同，
 #: 这样隧道 A/B 的差异只可能来自协议，不可能来自载荷）。
 #:
@@ -133,6 +136,44 @@ class AdminRoutes:
         if not self._auth_ok():
             return
         self._json(self.hub.queue_state(), 200)
+
+    def _post_worker_prefetch(self) -> None:
+        """`POST /admin/worker-prefetch`：worker 上报**软持有预取状态**（纯观测）。
+
+        body：`{"worker": "<id>", "held": ["<jid>"…], "dl": ["<jid>"…]}`。
+        读面在 `GET /admin/queue` 的 `worker_prefetch`（同一次 TTL 过滤 + jid→(course, it) 解析）。
+
+        三条口径：
+          · **缺 `worker` ⇒ 400**：无归属的上报没有可渲染的行，与其记成占位名不如响亮拒绝；
+          · 体上限 `WORKER_PREFETCH_BODY_MAX` ⇒ 413（不把任意大的体读进内存）；
+          · 鉴权用与 job 面**同一枚** token（worker 手里本来就有），失败即丢——调用方
+            best-effort 不重试，否则配错 token 的盘会被自己的观测腿喂满鉴权计数（5 次封 3600s）。
+        """
+        if not self._auth_ok():
+            return
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._json({"error": "Content-Length 非法"}, 400)
+            return
+        if n < 0 or n > WORKER_PREFETCH_BODY_MAX:
+            self._json({"error": f"请求体越界（0..{WORKER_PREFETCH_BODY_MAX}），收到 {n}"}, 413)
+            return
+        try:
+            raw = self.rfile.read(n)
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, OSError) as e:
+            self._json({"error": f"bad json: {e}"}, 400)
+            return
+        if not isinstance(body, dict):
+            self._json({"error": "体必须是对象"}, 400)
+            return
+        worker = str(body.get("worker") or "").strip()
+        if not worker:
+            self._json({"error": "需要 worker=<worker_id>"}, 400)
+            return
+        self.hub.note_worker_prefetch(worker, body.get("held"), body.get("dl"))
+        self._json({"ok": True, "worker": worker}, 200)
 
     def _admin_offline(self) -> None:
         """`GET /admin/offline`：已收到的离线段进度（只读，逐课程 × 逐 run）。

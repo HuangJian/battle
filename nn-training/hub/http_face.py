@@ -70,6 +70,7 @@ from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
 from common.protocol import (
+    ADMIN_WORKER_PREFETCH_PATH,
     AUTH_HEADER,
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_CLAIM_PATH,
@@ -484,6 +485,11 @@ class HubHandler(
                 self._post_offline_lease("release")
             elif path == OFFLINE_PROGRESS_PATH:
                 self._post_offline_progress()
+            elif path == ADMIN_WORKER_PREFETCH_PATH:
+                # worker 的预取状态上报（plan/dashboard-ppo-live-rows）：**纯观测**——
+                # 与 `/jobs/*` 那一族分开（那一族有租约/游标语义），也不走 `/offline/*`
+                # （它报的是 job 队列的软持有，不是离线盘）。
+                self._post_worker_prefetch()
             else:
                 self._json({"error": "not found"}, 404)
         except (ProtocolError, ValueError) as e:

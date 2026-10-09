@@ -642,6 +642,18 @@ OFFLINE_HOLD_PATH = "/offline/hold"
 OFFLINE_PROGRESS_PATH = "/offline/progress"
 #: 清单协议版本：云机据此判断能力（老 hub 没有这个端点 ⇒ 404 ⇒ 降级到 `CFG.course`）。
 OFFLINE_QUEUE_VERSION = 1
+
+#: **预取状态上报**（worker → hub；plan/dashboard-ppo-live-rows，2026-10-09）：worker 每轮预取
+#: 末尾把「软持有里哪些下好了 / 哪些正在下」报一次，供控制台首页回答「下一轮下好了没」。
+#:
+#: 为什么**不**开在 `/jobs/*` 下：那一族是取活协议（租约、优先级、游标语义都在里面），而这条
+#: 上报是**纯观测**——无副作用、失败即丢、绝不参与任何派发判据（塞进去会把 peek 的
+#: 「不认领/无副作用/不动游标」契约弄脏，`tests/hub/test_priority_schedule.py` 钉着它）。
+ADMIN_WORKER_PREFETCH_PATH = "/admin/worker-prefetch"
+#: 上报的存活窗口（秒）：超窗即剔除（worker 死后不留下幽灵「已下载」）。
+#: 取值 = 12 × 预取节拍（`remote/job_round.PREFETCH_ROUND_SEC = 5s`）——形状未变时 worker 不发，
+#: 窗口必须宽到「一轮空转」不至于把还活着的持有显示成过期。
+WORKER_PREFETCH_TTL_SEC = 60.0
 #: **派发协议版本**（★M1b / §1.5.2-P0-4）：`claim` 必须带 `?proto=2`（本轮 hold 语义）。
 #: 缺失 ⇒ 409 `{busy:true, error:<全文>, proto_required:2}`——**为什么借用 `busy` 这个键**：
 #: 旧云机（`remote/offline_boot.py` 的 409 分流）在 `busy` 分支会把 `error` **原样打进会话日志**

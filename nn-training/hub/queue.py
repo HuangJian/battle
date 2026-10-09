@@ -182,6 +182,13 @@ class _HubQueue(
         #: 独立锁：`offline_disk_readout` 会被 `/admin/queue` 调到，而那条路不持 `_lease_lock`
         #: 也不该持 `_lock`（观测面不许和调度临界区互等）。
         self._disk_lock = Lock()
+        #: **worker 预取状态上报**（worker_id → `{held, dl, at}`；plan/dashboard-ppo-live-rows）：
+        #: 「软持有里哪些下好了 / 哪些正在下」是 worker 本地事实，hub 只做**中转站**。
+        #: 与 `_offline_disks` 同口径：进程内、惰性 TTL、重启即清、**绝不进任何调度判据**。
+        self._worker_prefetch: dict[str, dict] = {}
+        #: 独立锁：`worker_prefetch_readout` 会被 `/admin/queue` 调到（同 `_disk_lock` 的理由——
+        #: 观测面不许和调度临界区互等）。
+        self._pf_lock = Lock()
         _AuthGuard.__init__(self, now_fn)
         # 时钟与单课程 store 同源（测试注入的假时钟必须一致，否则 claimed 标记的时间戳
         # 会混入真实墙钟）。
