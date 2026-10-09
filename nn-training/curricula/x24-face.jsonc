@@ -1,0 +1,112 @@
+// 课程 x24-face —— 防贴脸腿：-wNear×近敌率 + wDist 0.738→1.3。起点 KR10-it150。
+//
+// 状态：草稿（2026-10-09 冻结；未开课）。本腿今日可跑（全用既有日常列）。
+//   开课 = 人在控制台点（agent 不开训）。
+//   立项 → 用户 2026-10-09 直接指定（方向1：D09 多扣 + A06 多扣 + A07 多加），
+//   用户同日两刀裁定：① D09/W12 按“靠近就扣分，不管动作”（nearEnemy4 现货，不做动作版）；
+//   ② A05/A06/A07 按“打中的算”（实测 aimHits 30.6 vs shots 32.5，命中率 94%，差别可忽略）
+//   ⇒ 三项并为两杠杆：近就罚（D09+W12 合一：远=免税即奖，不另设远奖）+ 距离均值单杠杆
+//   （A05/A06/A07 合一：wDist 既有旋钮加剂量）。项内归因不拆（decomposed-by-direction）。
+//   基线 → KR10-it150（冻结 1600 对 0.3738/12.239；日常 killEV=38.89，near4 率 0.4812，
+//   dist 率 3.089，均日常池 n=600）。
+//   起点 KR10-it150 + 其余参数逐字（下）。
+//
+// ── 定价（f 以 killEV=38.89 计）─────────────────────────────────────────────
+//   近敌 -wNear×nearEnemy4Ticks/(ticks+1)（col58 现货；“在附近”口径——“往上凑”版动作列
+//   不做，用户裁定），wNear=8.0 → −3.85/局（9.9%）。
+//   注：罚的是全部近身（含合法近战杀伤——NN 2/3 开火在 4 格内），逼它学人类 5.4 格交战。
+//   距离 wDist 0.738 → 1.3（既有旋钮；打中均值单杠杆，A05/A06/A07 合一），
+//   inflow 2.28 → 4.02/局（+1.74，+4.5%；合计 f 10.3%）。
+//   degeneracy 双旗：kills 相对 it0 −15% ⇒ 人工干预（近战税误伤杀伤区，或远射奖养出
+//   放风筝——两头都要防；wMiss gun-shy 旧训诫一并适用）。
+//
+// ── 机制门（it40，硬门；看因）───────────────────────────────────────────────
+//   near4 率 ↓≥15% + dist 率 ↑（方向对）。任一不满足 ⇒ 杀腿，不看胜率。
+//
+// ── 人工盯盘（无自动熔断）───────────────────────────────────────────────────
+//   本腿不设任何自动停规则（课程内 ent_break=0、kickstart 熔断全关；开课时控制台也别挂
+//   kl/ent 自动 halt）。人看：日常胜率 vs 基线、kills（近战税误伤/放风筝两头）、机制门两项。
+//   停不停人说了算，不设触发线。
+//
+// ── yardstick ─────────────────────────────────────────────────────────────
+//   终判：冻结 1600 对 vs KR10-it150；单批 800 对只算提示，必须复测拼池。
+//   方向诊断：near4/dist 两项必报。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 KR10-it150 warm start + kickstart 锚（ref=true, init=0.1）；iters 0 无上限，
+//   手工停课；进 x23 流 paired_rotate_seed=20261015（与 x23-cm0 续跑同流同 seed_rotate，
+//   rollout 可比；三腿同流，跨腿可配对）。
+//   机器与 KR10 同配方（只改价，见 params）。max_hours 24 保留（x23-cm0 同形）。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh；backup 新目录）。
+{
+  "version": 5,
+  "name": "x24-face",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wNear*nearEnemy4Ticks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.3,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0,
+      "wNear": 8.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：KR10-it150 副本（sha a683e5da，与 x23-cm*.it0 同源）─────────────
+  "bc": "nn-training/weights/x24-face/x24-face.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 进 x23 流（与 x23-cm0 续跑同流同 seed_rotate，rollout 可比；三腿同流跨腿可配对）。
+  "paired_rotate_seed": 20261015,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪，不动）。
+  "decision_k": 10,
+
+  "out": "tmp/x24-face/weights.json",
+  "traj": "tmp/x24-face",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x24-face",
+  "backup_prefix": "x24-face",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

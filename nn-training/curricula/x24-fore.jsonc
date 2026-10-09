@@ -1,0 +1,111 @@
+// 课程 x24-fore —— 提前预判腿：wThreat 30→60（l2b 未执行的升档）+ wCorner 25→40。
+//   起点 KR10-it150。
+//
+// 状态：草稿（2026-10-09 冻结；未开课）。本腿今日可跑（全用既有日常列）。
+//   开课 = 人在控制台点（agent 不开训）。
+//   立项 → 用户 2026-10-09 直接指定（方向2：D03 多扣 + A05 多加 + W05 多扣 + W12 多加），
+//   用户同日裁定：A05 并入 face 的 wDist（打中的算，单杠杆不重复建），W12 并入 face 的
+//   near 税（远=免税即奖，不另设远奖）⇒ 本腿剩两项：D03 + W05。项内归因不拆。
+//   基线 → KR10-it150（冻结 1600 对 0.3738/12.239；日常 killEV=38.89）。
+//   起点 KR10-it150 + 其余参数逐字（下）。
+//
+// ── 定价（f 以 killEV=38.89 计）─────────────────────────────────────────────
+//   D03 危险lane 71.8 vs 96.1/千tick（−0.248，弱但方向对）：-wThreat×threatTicks/(ticks+1)，
+//   wThreat=60.0。这是 l2b 关账时原判的升档（“应升 60”从未执行，§42）；旧网死刑在新网下重审。
+//   口径注：panel 的“危险lane”（inThreatLane 口径）与日常 threatTicks（v9 body-aware 口径）
+//   定义不同源——门判读以日常 threatTicks 自比（it0→it40 方向）为准，不跨口径比绝对值。
+//   今日可跑（threatTicks 日常有）。预期税 ≈ 60×0.096=5.8/局（15%）——税重，人盯紧点。
+//   W05 角落加权 5.2 vs 24.7/千tick（−0.280）：wCorner 25 → 40（既有旋钮加剂量，今日可跑），
+//   税 1.73 → 2.77/局（+1.0/局）。注：贴角本身 0 vs 0 无 gap，罚的是“蹲角落区”。
+//   两项合计税 ≈ 8.6/局（22%，重税腿，人盯紧点）。
+//
+// ── 机制门（it40，硬门；看因）───────────────────────────────────────────────
+//   threat↓ + corner↓（两项都方向对）。否则杀腿，不看胜率。
+//
+// ── 人工盯盘（无自动熔断）───────────────────────────────────────────────────
+//   本腿不设任何自动停规则（课程内 ent_break=0、kickstart 熔断全关；开课时控制台也别挂
+//   kl/ent 自动 halt；税合计 ≈ 8.6/局，重税更要人看）。人看：日常胜率 vs 基线、kills、
+//   机制门两项。停不停人说了算，不设触发线。
+//
+// ── yardstick ─────────────────────────────────────────────────────────────
+//   终判：冻结 1600 对 vs KR10-it150；单批 800 对只算提示，必须复测拼池。
+//   方向诊断：threat/corner 两项必报。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 KR10-it150 warm start + kickstart 锚（ref=true, init=0.1）；iters 0 无上限，
+//   手工停课；进 x23 流 paired_rotate_seed=20261015（与 x23-cm0 续跑同流同 seed_rotate，
+//   rollout 可比；三腿同流，跨腿可配对）。
+//   机器与 KR10 同配方（只改价，见 params）。max_hours 24 保留（x23-cm0 同形）。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh；backup 新目录）。
+{
+  "version": 5,
+  "name": "x24-fore",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 40.0,
+      "wThreat": 60.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：KR10-it150 副本（sha a683e5da，与 x23-cm*.it0 同源）─────────────
+  "bc": "nn-training/weights/x24-fore/x24-fore.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 进 x23 流（与 x23-cm0 续跑同流同 seed_rotate，rollout 可比；三腿同流跨腿可配对）。
+  "paired_rotate_seed": 20261015,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪，不动）。
+  "decision_k": 10,
+
+  "out": "tmp/x24-fore/weights.json",
+  "traj": "tmp/x24-fore",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x24-fore",
+  "backup_prefix": "x24-fore",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

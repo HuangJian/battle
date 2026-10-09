@@ -1,0 +1,107 @@
+// 课程 x24-move —— 防卡死腿：单项 -wBlock×(idleTicks−stopTicks)/(ticks+1)。起点 KR10-it150。
+//
+// 状态：草稿（2026-10-09 冻结；未开课）。本腿今日可跑（全用既有日常列，无需新观测）。
+//   开课 = 人在控制台点（agent 不开训）。
+//   立项 → 用户 2026-10-09 直接指定（方向3：W07 多扣 + W08 多扣 + W09 多扣）。
+//   W07/W08/W09 同源（撞墙/顶住时长/顶住占比是同一现象的三个切面）⇒ 合并为单一定价项，
+//   项内不拆（三个号一个价，归因只到“卡死”层）。
+//   基线 → KR10-it150（冻结 1600 对 0.3738/12.239；日常 killEV=38.89）。
+//   起点 KR10-it150 + 其余 11 参数逐字（下）。
+//
+// ── 定价（f 以 killEV=38.89 计；gap2 探针 160 对）───────────────────────────
+//   被挡率 ≈ (idle−stop)/ticks：人约 7 vs 机约 26/千tick（约 4 倍；idle=moving==false 全集，
+//   stop=无移动输出，差值即“想动被挡”，cm2 头注口径；panel pressNoMove 208 vs 560 交叉印证）。
+//   -wBlock×(idleTicks−stopTicks)/(ticks+1)，wBlock=150.0 → −3.9/局（10%）。
+//   公式仅用既有列（idle col56、stop col54；减法 c6 min/max 式已有先例）⇒ 今日可跑。
+//   K=1 探针交叉：cadence 1 下被挡更多（278 vs 75）——卡死是策略问题，不是决策间隔问题，
+//   定价针对“想去哪”，不碰 K。
+//
+// ── 机制门（it40，硬门；看因）───────────────────────────────────────────────
+//   被挡率 ↓≥30%（gap 4 倍，要得多）。不满足 ⇒ 杀腿，不看胜率。
+//
+// ── 人工盯盘（无自动熔断）───────────────────────────────────────────────────
+//   本腿不设任何自动停规则（课程内 ent_break=0、kickstart 熔断全关；开课时控制台也别挂
+//   kl/ent 自动 halt）。人看：日常胜率 vs 基线、被挡率、机制门。停不停人说了算，不设触发线。
+//
+// ── yardstick ─────────────────────────────────────────────────────────────
+//   终判：冻结 1600 对 vs KR10-it150；单批 800 对只算提示，必须复测拼池。
+//   方向诊断：被挡率必报；附带撞墙 episode 均长（panel 口径，终判时 resim）。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 KR10-it150 warm start + kickstart 锚（ref=true, init=0.1）；iters 0 无上限，
+//   手工停课；进 x23 流 paired_rotate_seed=20261015（与 x23-cm0 续跑同流同 seed_rotate，
+//   rollout 可比；三腿同流，跨腿可配对）。
+//   机器与 KR10 同配方（只加价，见 params）。max_hours 24 保留（x23-cm0 同形）。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh；backup 新目录）。
+{
+  "version": 5,
+  "name": "x24-move",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.738,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 25.0,
+      "wBlock": 150.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：KR10-it150 副本（sha a683e5da，与 x23-cm*.it0 同源）─────────────
+  "bc": "nn-training/weights/x24-move/x24-move.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 进 x23 流（与 x23-cm0 续跑同流同 seed_rotate，rollout 可比；三腿同流跨腿可配对）。
+  "paired_rotate_seed": 20261015,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪，不动）。
+  "decision_k": 10,
+
+  "out": "tmp/x24-move/weights.json",
+  "traj": "tmp/x24-move",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x24-move",
+  "backup_prefix": "x24-move",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
