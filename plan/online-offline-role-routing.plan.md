@@ -306,7 +306,9 @@ it0 基线 + 本机产物优先；四份 plan 在建/已实施）⇒ 保留它 =
       `test_publish_choke_point_refuses_a_run_queue_job_loudly`，消息含 `battle.offline.ipynb`
       与 `--export-bundle`）+ worker 侧零下载拒收（`test_worker_refuses_a_run_kind_job_before_any_download`）
       + `RUN_WAIT_DEFAULT_SEC`/`_run_wait_sec`/`--run-wait-sec`/`rl.run_wait_sec` 全部退役
-      （`test_production_code_has_no_trace_of_the_retired_leg`）。
+      （2026-10-09 起由**单点** `nn-training/tests/retired_contracts.py` 的 `RETIRED_CONTRACTS` 守 ——
+      原用例 `test_production_code_has_no_trace_of_the_retired_leg` 已迁入该清单，见
+      `plan/nn-training-test-debt-cleanup.plan.md` §2-T2）。
 - [x] `--export-bundle` / `/offline/*` 逐字节不变（取包链 e2e 全绿；`e2e/test_offline_training_e2e.py`
       的两条段用例改成钉「**遗留**离线项仍按归属派发 + 补传读面」）；§7.0 的三种收尾与「能传回来多少
       是多少」不被本裁决改动。
