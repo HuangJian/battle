@@ -7,6 +7,8 @@
     （这是本工具诞生时的实测坑：2700 行全「未知 wver」）；
   · **守卫线的方向语义**：`rel_down` / `rel_up` / `abs_down` / `abs_up` 四种，各自能分辨
     「已证实破线」与「只是没证据」——§11 的 13 条线一条都不能漏。
+
+端到端判决读数（b1 −10.60% / b2 +3.19%、§11 十三条线）**不再钉死在测试里**（2026-10-09，`plan/nn-training-test-debt-cleanup.plan.md` §2-T1）：它们的输入是 `tmp/` 下的未入库账本 ⇒ 门禁里只有 skip 空壳；结论已归档，要重跑就 `bash tools/githook/nn-py-safe.sh -m tools.wave2_judge`。
 """
 
 from __future__ import annotations
@@ -39,7 +41,6 @@ def _load() -> Any:
 
 
 WJ = _load()
-LEDGERS_OK = all(p.exists() for p in WJ.LEDGERS.values())
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -188,41 +189,3 @@ def test_line_verdict_covers_the_four_directions() -> None:
     # 与共用面的 Z 常量同源（不是本地魔数）
     assert pytest.approx(1.959963985) == WJ.PP.Z_TWO_SIDED_95
     assert math.isclose(0.001 * WJ.PP.Z_TWO_SIDED_95, 0.00196, abs_tol=1e-5)
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# 端到端：Wave 2 判决（b1 效应可靠为正但未过绿线；b2 零效应）
-# ─────────────────────────────────────────────────────────────────────────────
-@pytest.mark.skipif(not LEDGERS_OK, reason="判据段账本不在 tmp/h4-lane-judge/（未入库证据）")
-def test_main_judges_wave2_and_pins_the_two_dose_outcomes(capsys: Any) -> None:
-    """换语料/换权重会立刻红——这是故意的（判决数字进 §69 与 DECISIONS）。"""
-    assert WJ.main() == 0
-    out = capsys.readouterr().out
-    assert "Wave 2 判据段" in out
-    assert "300/ 300/ 300" in out  # 每点三臂各 300 局
-    assert "未知 wver 行 0" in out  # 臂归属没有漏行（wver / ckpt_sha16）
-    assert "与日常段 860001–860200 / 补评估段 861011–861310 **均不相交**" in out
-    assert "效应为正、未排除绿线" in out  # b1 = −10.60%（CI 下沿 −19.11%）
-    assert "不到绿线已证实" in out  # b2 = +3.19%（零效应）
-    assert "同向" in out and "**反号**" in out  # 日常段独立复现：b1 同向、b2 反号
-    assert "体检：通过" in out
-    # 止损：生产侧回退 baseline（三臂共享 paired_rotate_seed）——事件 mode 可见
-    assert "baseline" in out and "未触发 ABORT" in out
-
-
-@pytest.mark.skipif(not LEDGERS_OK, reason="判据段账本不在 tmp/h4-lane-judge/（未入库证据）")
-def test_main_reports_guardlines_as_unbroken_at_both_doses(capsys: Any) -> None:
-    """§11 守卫表 13 条线零破线（两档）——b2 的零效应不是被守卫拦出来的。"""
-    assert WJ.main() == 0
-    out = capsys.readouterr().out
-    assert "§11 逐条阈值" in out
-    # 9 条守卫线 × 2 臂 = 18 个判语全部「未破」；2 条目标线 × 2 臂 = 4 个「未达标」
-    assert out.count("未破（") == 18
-    # 2 条目标线 × 2 臂：四条判语全是「未达标」（表头里那个「未达标」字样不算）
-    assert out.count("未达标（未证实）") == 2 and out.count("未达标且已证实") == 2
-    assert "未达标且已证实（+2.9%）" in out  # b2 的 rA2：不到绿线已证实
-    assert "未达标（未证实）（-10.5%）" in out  # b1 的 rA2：够正但不够绿、且「不到绿线」未证实
-    assert "破线且已证实" not in out and "破线未证实" not in out
-    # 另 2 条（ticks/局、timeout）× 2 臂 = 信息项
-    assert out.count("信息（不设阈值）") == 4
-    assert "timeout 频次：b0 0 / b1 0 / b2 0" in out

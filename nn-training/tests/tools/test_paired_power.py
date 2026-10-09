@@ -5,8 +5,10 @@
     手算常数对账——工具里的数进 `DECISIONS.md` 与 `experiments.md`，不许只有一条实现；
   · **归档口径**：§65 的 MDE 三元组（25.0 / 17.7 / 12.5）自己就服从 MDE ∝ 1/√N
     （200 / 400 / 800 局）——这就是「那组数是从某个点的 SE 按 √N 外推」的证据；
-  · **逐局复算对得上归档**：`main()` 读三腿逐局账本（`tmp/` 证据，未入库；缺则 skip），
-    对账不通过就非零退出。
+  · **逐局复算对得上归档**：`main()` 读三腿逐局账本 —— 那批账本是 `tmp/` 下的**未入库证据**，
+    端到端对账**不再钉死在测试里**（2026-10-09，`plan/nn-training-test-debt-cleanup.plan.md` §2-T1）：
+    门禁里它只会 skip；结论已归档，要重跑就 `bash tools/githook/nn-py-safe.sh -m tools.paired_power`。
+    本文件只守算术与口径（不依赖任何输入文件）。
 """
 
 from __future__ import annotations
@@ -45,8 +47,6 @@ def _load() -> Any:
 
 
 PP = _load()
-CORPUS_OK = all(p.exists() for p in PP.PATHS.values())
-EXT_OK = CORPUS_OK and all(p.exists() for p in PP.EXT_LEDGERS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -280,31 +280,6 @@ def test_load_rows_is_the_full_row_store_and_load_games_is_its_ra2_view(tmp_path
     assert PP.load_games(p) == {(0, 1): pytest.approx(0.1)}
 
 
-@pytest.mark.skipif(not CORPUS_OK, reason="Wave 1 三腿逐局账本不在 tmp/（未入库证据）")
-def test_main_reconciles_per_game_rows_against_the_archive(capsys: Any) -> None:
-    assert PP.main() == 0  # 对账不过就非零退出
-    out = capsys.readouterr().out
-    assert "配对前提 成立" in out
-    assert "归档 Δrel / t / p₁ 逐点对账：**全部一致**" in out
-    assert "归档 MDE 对账：**一致" in out
-    # §5–§8：次要终点 / 尾巴合并 / 更长时程 / 装配表
-    assert "§5 次要终点与守卫表的配对功效" in out
-    assert "跨点差异**全部**由抽样噪声解释" in out  # §6 平稳性前提成立
-    assert "§7 更长时程" in out
-    assert "§8 Wave 2 判据表" in out
-    # 三条“结构不可判”必须印出来（换成别的语料会立刻红，这是故意的）
-    assert "∞（要数字）" in out  # 静止∧在线「不升」margin=0
-    assert "无方差" in out  # timeout：全库 1/3400
-    assert "—（要数字）" in out  # 四条「非劣」没数字
-    assert "否（需 2130）" in out  # pass「−3pp 非劣」在 Wave 2 规模内不可判
-    # §9：三腿回填（口径 = 尾巴 3 点均值 / 全点均值 / 旧 it20 单点）——结论改变的那条要钉住
-    assert "§9 Wave 1 回填" in out
-    assert "对照臂 A0（零奖励）在同一判据下的自漂：尾巴 3 点均值 +15.0%" in out
-    assert "A1 全 7 点均值 = -11.14%（SE 3.68%，p₁ = 0.001）" in out  # 效应「量得出」⇒ ③ 的免责失效
-    assert "但「无效」这个标签要改" in out  # 主终点判语不变、标签改判
-    assert "已证实不到 16%" in out and "≈ 1.57× 局数" in out  # 补局数的唯一用途 = 证伪绿线
-
-
 # ─────────────────────────────────────────────────────────────────────────────
 # §67 补评估块（sha16 归属 / 异质性 Q / 两条预注册断言 / 剂量倍数）
 # ─────────────────────────────────────────────────────────────────────────────
@@ -359,20 +334,3 @@ def test_dose_multiple_uses_the_preregistered_bracket_rule() -> None:
     assert mults[0] == pytest.approx(1.111, abs=1e-3) and mults[1] == pytest.approx(2.083, abs=1e-3)
     assert [f for f, x in zip(PP.DOSE_BRACKET_PCT, mults, strict=True) if x >= m] == [7.5]  # 只 7.5% 够
     assert math.isinf(PP.dose_multiple(0.0))  # 零效应 ⇒ 多少倍都到不了
-
-
-@pytest.mark.skipif(not EXT_OK, reason="补评估块不在 tmp/h4-lane-ext/（未入库证据）")
-def test_main_recomputes_the_extended_block_and_keeps_the_two_claims(capsys: Any) -> None:
-    assert PP.main() == 0
-    out = capsys.readouterr().out
-    assert "§10 补评估后的重算" in out
-    assert "不相交检查：与旧段（860001–860200）重叠 0 / 0 局" in out
-    assert "已证实不到绿线" in out  # 尾巴 3 点：CI 下沿 > −16%
-    assert "效应为正 True" in out  # 且 CI 完全 < 0
-    assert "选 7.5%" in out  # 剂量推论：4.0% 档（1.11×）不够
-    # §11：Wave 2 预注册阈值表（每条线一个数；N_WAVE2 = 300/点）
-    assert "§11 Wave 2 预注册阈值表" in out
-    assert f"尾巴 3 点均值 × {PP.N_WAVE2} 局/点" in out
-    assert "给数字：不劣于" in out  # 四条「非劣」拿到数字
-    assert "不升过 +0.007927 abs" in out  # margin=0 改成有限阈值
-    assert "只报频次（全库 sd = 0" in out  # timeout 不当功效项

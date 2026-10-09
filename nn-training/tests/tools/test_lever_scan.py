@@ -8,8 +8,7 @@
   · **税基口径是 pooled 占比**（Σnum/Σticks）：「这笔税实际压在多少 tick 上」——
     这是本扫描全部结论的地基（lane 税基 0.251%）。
 
-端到端读数（§2 0.251% / §4 −3.12 / §5 1.15 & 0.37 / §9 144–316）**故意钉死**：
-换语料/换权重会立刻红——那些数进 `docs/nn/experiments.md` §70。
+端到端读数（§2 0.251% / §4 −3.12 / §5 1.15 & 0.37 / §9 144–316）**不再钉死在测试里**（2026-10-09，`plan/nn-training-test-debt-cleanup.plan.md` §2-T1）：它们的输入是 `tmp/` 下的未入库账本 ⇒ 门禁里只有 skip 空壳；结论已归档，要重跑就 `bash tools/githook/nn-py-safe.sh -m tools.lever_scan`。本文件只守上列三件事（纯逻辑，无输入依赖）。
 """
 
 from __future__ import annotations
@@ -41,8 +40,6 @@ def _load() -> Any:
 
 
 LS = _load()
-LEDGERS_OK = all(p.exists() for p in LS.WJ.LEDGERS.values())
-C05_OK = all((LS.ROOT / "tmp" / name / "eval_log.jsonl").exists() for name, _ in LS.C05_LEGS)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -155,47 +152,10 @@ def test_leg_trend_reads_eval_rows_only_and_sorts_by_iter(tmp_path: Path) -> Non
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# main()：账本缺席 ⇒ 跳过（非失败）；在场 ⇒ 读数钉死
+# main()：账本缺席 ⇒ 跳过（非失败）
 # ─────────────────────────────────────────────────────────────────────────────
 def test_main_skips_when_ledgers_missing(monkeypatch: Any, tmp_path: Path, capsys: Any) -> None:
     bogus = {it: tmp_path / f"judge_it{it}.jsonl" for it in LS.WJ.ITS}
     monkeypatch.setattr(LS.WJ, "LEDGERS", bogus)
     assert LS.main() == 0
     assert "扫描跳过" in capsys.readouterr().out
-
-
-@pytest.mark.skipif(not LEDGERS_OK, reason="判据段账本不在 tmp/h4-lane-judge/（未入库证据）")
-def test_main_scan_pins_the_readings(capsys: Any) -> None:
-    """换语料/换权重会立刻红——这些数进 §70，故意钉死。"""
-    assert LS.main() == 0
-    out = capsys.readouterr().out
-    assert "语料：判据段 2700 局（未知权重键 0 行）" in out
-    # §1 面板：三臂各 900 局、b1 阵亡率 18.2%
-    assert "736" in out and "18.2%" in out
-    # §2 税基：现役 lane 税的税基只有 0.251% 的 tick；lane 全家 4.610%
-    assert "0.251%" in out and "4.610%" in out
-    # §3 两档最醒目的付账：豁免子集翻倍（+131.3% / +110.0%）
-    assert "131.3%" in out and "110.0%" in out
-    # §4 承伤/tick 是最强区分量（−3.12）；危险 tick 几乎不区分（−0.09）；卡死反向（+0.42）
-    assert "-3.12" in out and "-0.09" in out and "12.193%" in out and "0.42" in out
-    # §5 pooled 相位：全体 1.15（开局不是热点）、阵亡组 0.37（堆在死前）；开局占伤害 45.2%
-    assert "1.15" in out and "0.37" in out and "45.2%" in out
-    # §9 致死余量：阵亡下界 144 / 清关上界 316
-    assert "下界 144" in out and "上界 316" in out
-    # §10 STOP 缺口（引用 54.5%）
-    assert "54.5%" in out
-    assert "§8 结论与排序" in out
-
-
-@pytest.mark.skipif(
-    not (LEDGERS_OK and C05_OK), reason="判据段或 h5a/h5b 账本不在 tmp/（未入库证据）"
-)
-def test_main_reads_the_two_c05_legs(capsys: Any) -> None:
-    """c05 同款杠杆腿的实付账：h5a 机制动 −34.3% 但 pass 只 +2.0pp；h5b pass −6.0pp。"""
-    assert LS.main() == 0
-    out = capsys.readouterr().out
-    assert "h5a-earlydmg" in out and "h5b-clean" in out
-    assert "pass 0.6450→0.6650（+2.0pp）" in out
-    assert "dmgFirst600 72.9→47.9（-34.3%）" in out
-    assert "pass 0.6450→0.5850（-6.0pp）" in out
-    assert "机制动了 ≠ 胜负动了" in out

@@ -414,8 +414,8 @@ per-seed 的 damage / ticks / outcome **200/200 相等**。
 
 > 上游 §69（Wave 2 剂量轴到顶）· §67/§65（Wave 1）· §64（metrics v9 列）· **H 系列/BC 系列结算**
 > （§44/§47/§52–§56 与 `nn-training/curricula/h{1..5}-stop.jsonc` 尾节）· 工具
-> `nn-training/tools/lever_scan.py`（九节；`tmp/lever-scan.txt` 留档）· 测试 `nn-training/tests/test_lever_scan.py`
-> （14 例，端到端读数钉死）· 语料 = 判据段 2700 局（seed 862001–862300）+ Wave 2 日常段 + c05 `h5a/h5b` 日常段。
+> `nn-training/tools/lever_scan.py`（九节；`tmp/lever-scan.txt` 留档）· 测试 `nn-training/tests/tools/test_lever_scan.py`
+> （12 例，只守池化口径/共用算术/常量；端到端读数**不再钉在测试里**——2026-10-09，见 `plan/nn-training-test-debt-cleanup.plan.md` §2-T1）· 语料 = 判据段 2700 局（seed 862001–862300）+ Wave 2 日常段 + c05 `h5a/h5b` 日常段。
 > **口径纪律**：本节全部为**探索性读数**（不进 DoD / 门 / 阈值）；任何新价仍须按 §15.5 另立项、另预注册。
 
 ### ① 税基尺寸表：现役 lane 税只压 0.251% 的 tick
@@ -467,7 +467,8 @@ per-seed 的 damage / ticks / outcome **200/200 相等**。
 
 - 全体/清关 ≈1.15（接近摊平）；阵亡组 0.37 是**「阵亡」的定义性后果**（伤害堆在死前），不是可定价窗口。
 - 口径说明：逐局均值会因**短局截尾**把阵亡组窗后密度虚高（旧稿 0.63 vs 0.11，方向都能读反）⇒ 本节全部 pooled
-  （Σ伤害/Σtick），由 `tests/test_lever_scan.py` 钉住。
+  （Σ伤害/Σtick），由 `tools/lever_scan.py` 的 `phase_densities` 实现（本节的 1.15 / 0.37 是它的输出留档，
+  端到端不再由测试钉住——测试只守池化口径 **本身**）。
 
 ### ⑤ 同款杠杆实测：买行为 ≠ 买胜负（c05 腿）
 
@@ -833,7 +834,9 @@ pack 到手 → kit pack（courseSha / 表校验 / §0 校准门）→ annotate 
 ## §66 Wave 1 遗留三项定案 + 功效复算（2026-09-30）
 
 > 决策 `DECISIONS.md` §2026-09-30-goalnn-wave2-design · 上游 §65 · 工具 `nn-training/tools/paired_power.py`
-> （+ `tests/test_paired_power.py`）· 本节的功效数**全部可复算**（逐局行，不再 reported 级）。
+> （+ `tests/tools/test_paired_power.py`）· 本节的功效数**全部可复算**（逐局行，不再 reported 级）。
+> ⓘ 2026-10-09：配对功效的**端到端复算**（`main()` 对账 `tmp/` 三腿账本）已不在测试里跑——账本未入库，门禁里只会 skip；
+> 算术与口径仍逐条钉在 `tests/tools/test_paired_power.py`（22 例）。
 
 **一句话**：Wave 1 判无效之后要把尺子修好，所以先把「配对差到底有多准」从 `tmp/` 一次性探针里救出来：
 逐局复算证明 §65 归档表**逐点对得上**，并给出三判——漂移按共模消、剂量不重锚、几何只留 A1。
