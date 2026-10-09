@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import sys
 import threading
 import time
@@ -32,6 +33,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import remote.http as http_mod
+import remote.job_lifecycle as JL
 import remote.job_round as JR
 import remote.worker as W
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError
@@ -511,3 +513,169 @@ def test_prefetch_hit_is_visible_in_the_wire_line(tmp_path: Path, monkeypatch) -
     assert not any(j1 in ln and "payload=prefetch-hit" in ln for ln in logs), (
         "j1 是下载轮，不该有命中标记"
     )
+
+
+# ──────────── ⑤ 预取状态上报（plan/dashboard-ppo-live-rows）────────────
+
+
+def test_snapshot_tracks_the_download_window_and_clears_on_store(tmp_path: Path) -> None:
+    """`begin`/`end`/`snapshot`：观测面要知道「这一轮正在下哪一份」，且形状是**规范化**的。"""
+    store = PrefetchStore(tmp_path)
+    assert store.snapshot() == {"held": [], "dl": []}
+
+    b, a = "b" * 16, "a" * 16
+    store.begin(b, _summary(_payload(16), b))
+    store.begin(a, _summary(_payload(16), a))
+    assert store.downloading() == {a, b}
+    assert store.snapshot()["dl"] == [a, b], "快照没排序（形状会随顺序抖动）"
+
+    p = _payload(64)
+    assert store.store(a, p, _summary(p, a)) is True
+    assert store.snapshot() == {"held": [a], "dl": [b]}, "入库即从「正在下载」摘掉"
+
+    store.end(b)
+    store.end(b)  # 幂等：失败路径与成功路径都会调
+    store.clear()
+    assert store.snapshot() == {"held": [], "dl": []}
+
+
+def test_filler_reports_the_shape_once_and_never_leaves_a_failed_download_hanging(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """填充器每轮末上报一次，**形状没变就不发**；失败的那份**不许**留在「下载中」。"""
+    store = _FakeStore(tmp_path)
+    sent: list[dict] = []
+
+    def _report(base_url, token, snap, **kw):
+        sent.append(dict(snap))
+        return True
+
+    monkeypatch.setattr(JR, "report_prefetch", _report)
+    monkeypatch.setattr(JR, "PREFETCH_ROUND_SEC", 0.02)
+    monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: _peek_of("a" * 16, "b" * 16))
+
+    def _dl(*a, **k):
+        raise BulkPreemptError("被高优传输挤走")  # 每个候选都失败
+
+    monkeypatch.setattr(JR, "download_payload", _dl)
+    stop = threading.Event()
+    t = threading.Thread(
+        target=JR._prefetch_fill,
+        args=("http://hub", "tok", store, stop),
+        kwargs={"depth": 2, "log": lambda _m: None},
+        daemon=True,
+    )
+    t.start()
+    # sleep-ok: 轮询步长（等的是「填充器跑过若干轮」这个状态，0.2s 只当挂起兜底）
+    time.sleep(0.2)
+    stop.set()
+    t.join(5)
+    assert not t.is_alive()
+    # 首轮无条件报一次（hub 重启后表是空的，靠 worker 的下一轮重建）
+    assert sent and sent[0] == {"held": [], "dl": []}, sent
+    assert all(s == {"held": [], "dl": []} for s in sent), sent
+    assert len(sent) == 1, f"形状没变却重复上报了 {len(sent)} 次（常态空转本该零 HTTP）"
+
+
+def test_filler_reports_the_held_set_and_stops_on_unchanged_shape(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """下好一份 ⇒ 上报里出现它（`held`），且下一轮形状相同时不再发。"""
+    store = _FakeStore(tmp_path)
+    sent: list[dict] = []
+
+    def _report(base_url, token, snap, **kw):
+        sent.append(dict(snap))
+        return True
+
+    monkeypatch.setattr(JR, "report_prefetch", _report)
+    monkeypatch.setattr(JR, "PREFETCH_ROUND_SEC", 0.02)
+    monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: _peek_of("a" * 16))
+    monkeypatch.setattr(JR, "download_payload", lambda *a, **k: _payload(64))
+    stop = threading.Event()
+    t = threading.Thread(
+        target=JR._prefetch_fill,
+        args=("http://hub", "tok", store, stop),
+        kwargs={"depth": 1, "log": lambda _m: None},
+        daemon=True,
+    )
+    t.start()
+    deadline = time.time() + 5
+    while store.held() != {"a" * 16} and time.time() < deadline:
+        # sleep-ok: 轮询步长（等的是「那份下好了」这个状态，5s 只当挂起兜底）
+        time.sleep(0.01)
+    # sleep-ok: 轮询步长（等的是「接下来几轮都不再上报」这个状态，0.1s 只当挂起兜底）
+    time.sleep(0.1)  # 再多跑几轮：形状不变就不该再发
+    stop.set()
+    t.join(5)
+    assert store.held() == {"a" * 16}
+    assert sent == [{"held": ["a" * 16], "dl": []}], sent
+
+
+def test_filler_backs_off_after_a_failed_report(tmp_path: Path, monkeypatch) -> None:
+    """上报失败 ⇒ 静默一段再试（**不许**每轮各付一次连接超时把预取节拍拖慢）。"""
+    store = _FakeStore(tmp_path)
+    peeks = {"n": 0}
+    calls = {"n": 0}
+
+    def _peek(*a, **k):
+        peeks["n"] += 1
+        return _peek_of("a" * 16)
+
+    monkeypatch.setattr(JR, "peek_jobs", _peek)
+    monkeypatch.setattr(JR, "PREFETCH_ROUND_SEC", 0.01)
+    monkeypatch.setattr(JR, "download_payload", lambda *a, **k: _payload(64))
+
+    def _report(base_url, token, snap, **kw):
+        calls["n"] += 1
+        return False  # 连不通
+
+    monkeypatch.setattr(JR, "report_prefetch", _report)
+    stop = threading.Event()
+    t = threading.Thread(
+        target=JR._prefetch_fill,
+        args=("http://hub", "tok", store, stop),
+        kwargs={"depth": 1, "log": lambda _m: None},
+        daemon=True,
+    )
+    t.start()
+    deadline = time.time() + 5
+    while peeks["n"] < 8 and time.time() < deadline:
+        # sleep-ok: 轮询步长（等的是「跑够 8 轮」这个计数，5s 只当挂起兜底）
+        time.sleep(0.01)
+    stop.set()
+    t.join(5)
+    assert peeks["n"] >= 8, f"填充器没在跑（peeks={peeks['n']}）"
+    assert calls["n"] == 1, f"失败后仍在每轮重试（发了 {calls['n']} 次，应当在退避窗口内静默）"
+
+
+def test_report_prefetch_is_best_effort_and_never_raises(monkeypatch) -> None:
+    """上报腿的契约：200 ⇒ True；非 200 / 任何异常 ⇒ False 且**不抛**（训练一字不受影响）。"""
+    seen: list[tuple[str, dict]] = []
+
+    def _ok(base_url, token, path, **kw):
+        seen.append((path, json.loads(kw["data"].decode("utf-8"))))
+        return 200, b'{"ok": true}'
+
+    monkeypatch.setattr(JL, "_request", _ok)
+    snap = {"held": ["a" * 16], "dl": ["b" * 16]}
+    assert JL.report_prefetch("http://hub", "tok", snap, worker_id="kaggle-c") is True
+    assert seen == [
+        (
+            "/admin/worker-prefetch",
+            {"worker": "kaggle-c", "held": ["a" * 16], "dl": ["b" * 16]},
+        )
+    ], seen
+
+    monkeypatch.setattr(JL, "_request", lambda *a, **k: (403, b'{"error":"nope"}'))
+    logs: list[str] = []
+    assert JL.report_prefetch("http://hub", "tok", snap, log=logs.append) is False
+    assert any("被拒" in m for m in logs), logs
+
+    def _boom(*a, **k):
+        raise W.RetryableError("hub 不可达")
+
+    monkeypatch.setattr(JL, "_request", _boom)
+    logs.clear()
+    assert JL.report_prefetch("http://hub", "tok", snap, log=logs.append) is False
+    assert any("上报失败" in m for m in logs), logs

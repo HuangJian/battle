@@ -45,6 +45,7 @@ from typing import Any
 
 import common.env_probe as env_probe
 from common.protocol import (
+    ADMIN_WORKER_PREFETCH_PATH,
     CLAIM_MODE_BACKUP,
     CLAIM_MODE_EXCLUSIVE,
     CLAIM_MODES,
@@ -87,6 +88,7 @@ __all__ = [
     "post_result",
     "release_job",
     "report_job_failure",
+    "report_prefetch",
     "request_priority",
     "start_cancel_watcher",
     "worker_tag",
@@ -132,6 +134,56 @@ def peek_jobs(
         else []
     )
     return cands, data.get("halt") is True
+
+
+def report_prefetch(
+    base_url: str,
+    token: str,
+    snap: dict,
+    *,
+    worker_id: str = "",
+    timeout: float = 3.0,
+    log: Any = None,
+) -> bool:
+    """`POST /admin/worker-prefetch`：把预取状态（哪些下好了 / 哪些正在下）报给 hub。
+
+    这是**纯观测**腿（plan/dashboard-ppo-live-rows）：控制台首页据此回答「下一轮下好了没」。
+    三条纪律（与 `prefetch.py` 的「预取失败不是失败」同一口径）：
+
+      · best-effort：任何异常只记一行 log，**不抛**、不进 `ProtocolError`/`report_job_failure`；
+      · **不重试**：hub 的 `_auth_ok` 按来源 IP 记无效鉴权（满 5 次封 3600s）——一条观测腿
+        不该有能力把「token 配错」的盘自己封掉；下一条腿由预取轮询节拍自然带来，不靠重试；
+      · 失败 = 静默退化：hub 那侧少一拍状态，面板少一行「已下载」，**训练一字不影响**。
+
+    `snap` = `{"held": [jid…], "dl": [jid…]}`（`PrefetchStore.snapshot()` 的规范化形状）。
+    返回是否 200（仅当 `True` 时调用方才该认为「这一拍报过了」——hub 重启后靠下一拍重建）。
+    """
+    log = log or (lambda _m: None)
+    payload = json.dumps(
+        {
+            "worker": worker_id,
+            "held": [str(j) for j in (snap.get("held") or [])],
+            "dl": [str(j) for j in (snap.get("dl") or [])],
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    try:
+        status, _body = _request(
+            base_url,
+            token,
+            ADMIN_WORKER_PREFETCH_PATH,
+            timeout=timeout,
+            data=payload,
+            method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+    except Exception as e:  # 连不上/超时/URL 写错：观测腿永不把主循环拖下水
+        log(f"prefetch 上报失败（{type(e).__name__}: {exc_tail(e)}）——本轮跳过，下轮再来")
+        return False
+    if status != 200:
+        log(f"prefetch 上报被拒：HTTP {status}（hub 这拍没有状态，不影响训练）")
+        return False
+    return True
 
 
 def request_priority(

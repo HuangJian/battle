@@ -20,6 +20,11 @@
 
 另一个必须记住的口径：**预取失败不是失败**。被挤走（`BulkPreemptError`）、404、sha 不符、预算不足
 ——一律就地丢弃、**不进** `ProtocolError`/`report_job_failure`（预取是提前量，不是任务）。
+
+★ 2026-10-09（plan/dashboard-ppo-live-rows）：本类还多一份职责——回答「现在下到哪一份了」。
+`begin` / `end` / `snapshot` 只服务那个**观测**问句（`snapshot()` → `POST /admin/worker-prefetch`
+→ 控制台首页），与 `held()` / `take()` 的去重与命中逻辑**互不影响**：它们不改 `_items`、
+不参与 `pick_candidates`，也不进任何调度判据。
 """
 
 from __future__ import annotations
@@ -67,6 +72,10 @@ class PrefetchStore:
         self.blob_root = Path(blob_root) if blob_root is not None else Path(work_dir) / "blob_cache"
         self._lock = threading.Lock()
         self._items: dict[str, dict] = {}  # jid -> {sha, bytes, at, manifest}
+        #: **正在下载**的候选（jid -> {summary, at}）——只为观测面存在（plan/dashboard-ppo-live-rows）：
+        #: 「这一轮下到哪一份了」是控制台首页唯一想知道的问句，而进程内此前根本没有这个集合
+        #: （`_items` 只记「已入库」）。不入任何调度判据（与 `_items` 无关的两件事）。
+        self._active: dict[str, dict] = {}
         self.hits = 0
         self.misses = 0
 
@@ -104,6 +113,8 @@ class PrefetchStore:
                 "at": self._clock(),
                 "summary": summary,
             }
+            # 入库即「下好了」：从观测面的"正在下载"里摘掉（调用方的 `end` 也幂等）。
+            self._active.pop(jid, None)
         self.prune()
         return True
 
@@ -123,6 +134,39 @@ class PrefetchStore:
         """当前持有的候选 jid 集合（填充器用它去重：同一份活不重复预取）。"""
         with self._lock:
             return set(self._items)
+
+    def begin(self, jid: str, summary: dict | None = None) -> None:
+        """标记「这一份开始下了」（进 `download_payload` **之前**调）。
+
+        `summary` 只是留给排障/观测的上下文（`meta.json` 的形状就是它），本类不改它、不读它。
+        """
+        with self._lock:
+            self._active[jid] = {"summary": dict(summary or {}), "at": self._clock()}
+
+    def end(self, jid: str) -> None:
+        """标记「这一份下完了」（成功与**每一条**失败路径都要调；幂等）。
+
+        不调它只会让观测面多挂一会儿——所以调用方用 `try/finally` 兜，而不是靠每条分支自觉
+        （预取失败不是失败，同样也不该在面板上装成「还在下」）。
+        """
+        with self._lock:
+            self._active.pop(jid, None)
+
+    def downloading(self) -> set[str]:
+        """正在下载的候选 jid 集合（观测面用；与 `held()` 不交）。"""
+        with self._lock:
+            return set(self._active)
+
+    def snapshot(self) -> dict:
+        """观测快照：`{"held": [jid…], "dl": [jid…]}`（**排序**，供「形状未变就不上报」比对）。
+
+        为什么排序：上报是每轮一次的 HTTP，列表顺序抖动不该被当成状态变化；规范化在这里
+        一次做掉，调用方只管 `==` 比对。
+        """
+        with self._lock:
+            held = sorted(self._items)
+            dl = sorted(self._active)
+        return {"held": held, "dl": dl}
 
     def has(self, jid: str) -> bool:
         with self._lock:
@@ -168,6 +212,7 @@ class PrefetchStore:
         with self._lock:
             jids = list(self._items)
             self._items.clear()
+            self._active.clear()
         for jid in jids:
             self._drop_dir(jid)
 

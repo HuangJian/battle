@@ -67,6 +67,7 @@ from remote.job_lifecycle import (
     peek_jobs,
     release_job,
     report_job_failure,
+    report_prefetch,
     start_cancel_watcher,
 )
 from remote.prefetch import PREFETCH_DEPTH_DEFAULT, PrefetchStore, pick_candidates
@@ -97,6 +98,13 @@ class RoundOutcome:
 PREFETCH_WIRE_ID = "prefetch"
 #: 预取填充的轮询间隔（秒）：一轮填满后等这么久再问下一次 peek。
 PREFETCH_ROUND_SEC = 5.0
+#: 预取状态上报失败后的**静默轮数**（≈ 失败后 1 分钟再试）。
+#:
+#: 为什么需要退避：上报是 best-effort 的**观测腿**，而本轮询的节拍是预取**真活**的节拍——
+#: 一条连不通的观测腿若每轮各付一次连接超时，会把预取本身拖慢（实测：地址解析不了时
+#: ≈1.6s/轮，四轮就把一次「重试到第 4 次」的现场拖过 5s）。「失败不重试」的语义不变
+#: （不写 `ProtocolError`、不动训练），只是把「下一拍」放成「下一分钟」。
+PREFETCH_REPORT_BACKOFF_ROUNDS = 12
 
 
 def _flush_prefetch_round(log: Any) -> None:
@@ -137,6 +145,12 @@ def _prefetch_fill(
     """
     skip = skip or set()
     log = log or (lambda _m: None)
+    #: 上一拍**成功**上报的规范化快照（`None` = 还没报过 ⇒ 首轮无条件报一次）。
+    #: 为什么首轮必报：hub 的表是进程内存（重启即清），worker 不重报就会让面板永久少一行
+    #: ——「形状未变不发」的前提是「对面已经有一份」。失败不落账 ⇒ 下一拍自然再试一次。
+    reported: dict | None = None
+    #: 上报失败后的静默倒计时（见 `PREFETCH_REPORT_BACKOFF_ROUNDS`）。
+    report_backoff = 0
     while not stop.is_set():
         try:
             peeked = peek_jobs(
@@ -157,6 +171,9 @@ def _prefetch_fill(
             if stop.is_set():
                 break
             jid = str(cand["job_id"])
+            # 观测面（plan/dashboard-ppo-live-rows）：这一份开始下了——只影响上报快照，
+            # 不参与去重/命中（`held()` 仍只看已入库的那份）。
+            store.begin(jid, cand)
             try:
                 payload = download_payload(
                     base_url,
@@ -175,8 +192,22 @@ def _prefetch_fill(
             except Exception as e:
                 log(f"prefetch {jid[:8]}: 放弃（{type(e).__name__}: {e}）")
                 continue
+            finally:
+                # 成功与**每一条**失败路径都摘掉「正在下载」（`end` 幂等）——不靠各分支自觉，
+                # 否则失败的那份会永远挂在面板上装成「还在下」。
+                store.end(jid)
             if store.store(jid, payload, cand):
                 log(f"prefetch {jid[:8]}: 已预取 {len(payload)} bytes（软持有，无租约）")
+        # 预取状态上报（plan/dashboard-ppo-live-rows）：规范化形状没变就不发 HTTP
+        # （常态 0 命中/0 下载 ⇒ 一个进程生命周期只发首轮那一笔）。
+        snap = store.snapshot()
+        if snap != reported:
+            if report_backoff > 0:
+                report_backoff -= 1
+            elif report_prefetch(base_url, token, snap, worker_id=worker_id, log=log):
+                reported = snap
+            else:
+                report_backoff = PREFETCH_REPORT_BACKOFF_ROUNDS
         _flush_prefetch_round(log)
         stop.wait(PREFETCH_ROUND_SEC)
     _flush_prefetch_round(log)  # 收尾：最后一次没有等满一轮的也上账
