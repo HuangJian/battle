@@ -8736,3 +8736,34 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   `dashboard/tests/server-api-node-views.test.ts`（新 agent 解析 / 旧 agent null）。
   —— 全文（评审 F1–F11 处置 / 逐文件落点 / 驳回的抬线论证）→ `plan/self-node-disk-alert.plan.md` ·
   评审 → `plan/self-node-disk-alert.review-bf.md`
+
+## §2026-10-09-goalnn-test-debt-cleanup（2026-10-09，nn-training 测试债清理：**口径先于数字** —— 两个可执行计数口径 + 三条防回流护栏；T1 删除面收窄 6 条、T2 拆 a/b、T5 撤掉「≥40%」）
+
+- **背景**：`plan/nn-training-test-debt-cleanup.plan.md`（同日拍板）要清掉「不再守卫任何现行契约」的用例。
+  执行前评审（`plan/nn-training-test-debt-cleanup.review-bf.md`，F1–F8）实测出三处**会删掉活守卫**的判据：
+  F1 T1 的「恒 skip 空壳」为假（三文件 47 例、账本门只有各 2 条）；F2 T2 的 10 个候选里 6 条是**行为拒绝**
+  （并进源码扫描器 = 覆盖降级）；F3 T5 的「20 文件/100 处」三种读法都对不上 ⇒ DoD「下降 ≥40%」不可证伪。
+- **备选与否决**：① 照原稿删三个分析脚手架文件——**否**：47 例里 41 条是工具的纯逻辑守卫（共享算术/池化口径/统计量），
+  今天全绿，删=纯损失；② T2 八处散落断言合并成一份——**否**：其中六条断言的是**现行代码的行为**
+  （worker 拒收 `kind=run`、mode POST 回 400、resolve 忽略旧键；`test_offline_task_queue.py` 里 `read_text(` = 0），
+  文本覆盖换不掉行为覆盖；③ 只删不改写（原拍板）——**保留**；④ 恒 skip 文件整批挪出——否：它们守 POSIX/CI 契约，
+  本机 skip 是设计（且 F8 实测 `test_instance_lock` 本机反而会跑，属正常覆盖）。
+- **决定**：① **口径代码化**：`tests/helpers/text_asserts.py`（放在既有 `source_scan.py` 旁，不另开第三套读盘逻辑）
+  —— 口径 A（形态：`"字面量" in <文本>`，含 capsys）与口径 B（+「被读的必须是 `.py` 源码」门）；实测 A=1488、B=1084 条；
+  ② **T1 收窄**：只删 6 条账本门端到端，三文件的逻辑守卫与三个工具本体全留；`docs/nn/experiments.md` 三处指针同 commit 修；
+  ③ **T2 拆 a/b**：扫描型进单点 `tests/retired_contracts.py`（清单 + 唯一 `scan()` + **扫描面基线 90 文件**），
+  行为型六条原地保留并登记（`docs/nn/test-contract-map.md` §3）；④ **T3**：`payload.zip` 双读 3→1（留超集那一处）、
+  wire v1 复核后不删；⑤ **T5**：删除面 = 口径 B，批次 1（判据 2 的机械筛）实测 **0 条可删**（23 条候选全为假阳）⇒
+  **撤掉「≥40%」**，替代 = 护栏只许降 + 工作清单落盘；⑥ **S3 三条护栏**：退役单点 · `tests/test_source_text_assert_budget.py`
+  （A=1435/B=1082 写死 + 计数下界自检）· `conftest.pytest_terminal_summary` 的 skip 率上报表。
+- **违反后果**：不用口径就删测试 ⇒ 顺手删掉活守卫（F1/F2 各差一步）；把行为拒绝并进文本扫描 ⇒ 判据变弱而不报警；
+  退役扫描没有**扫描面基线** ⇒ 搬目录后 glob 面缩水 = 判据永真（2026-09-30 刀 4 已撞过一次）；
+  护栏不设**计数下界** ⇒ 口径坏了恒 0 ⇒ 恒绿；skip 率不上报 ⇒ 恒 skip 文件永远隐形。
+- **测试/证据**：`tests/tools/test_lever_scan.py`(12) · `test_wave2_judge.py`(7) · `test_paired_power.py`(22)
+  （各删 2 条账本门）· `tests/test_retired_contracts.py`(4，新) · `tests/retired_contracts.py`(新) ·
+  `tests/test_source_text_assert_budget.py`(1，新) · `tests/common/test_payload_split.py` /
+  `test_payload_archive_detect.py` / `tests/remote/test_remote_ppo.py`（T3 去重）· `nn-training/conftest.py`（skip 率表）。
+  用例数 `--collect-only` 3978 → 3974（删 9 / 增 5）；本机全量 3963 passed / 15 skipped / 76.3s（`-n 6`）；
+  `bash tools/githook/nn-python-gate.sh` 与根 `bun run check` 绿。
+  —— 全文（实施记录 / 逐条改判 / 修正记录）→ `plan/nn-training-test-debt-cleanup.plan.md` §2.0·§7 ·
+  归属表 → `docs/nn/test-contract-map.md` · 工程档 → `docs/nn/engineering.md` §71
