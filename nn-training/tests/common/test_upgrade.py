@@ -590,6 +590,62 @@ def test_codehash_manifest_expansion() -> None:
     check(len(rels) == len(set(rels)), "文件集无重复")
 
 
+def _parse_code_hash_files(stdout: str) -> tuple[set[str], str]:
+    """`--print-code-hash-files` 的输出 → `(文件集, codeHash 行)`（**只认形态，不认行号**）。
+
+    文件行 = 恰有两列制表福分隔的三字段（`hash\tsize\trelpath`）；末行 = `codeHash=<full>`。
+
+    ★ 为什么不能按「除末行外都是文件行」解析（2026-10-10 修满载 flake）：agent 的 stdout 上
+    还会落**引导期日志**（如 `[11:55:19] [sampler-agent] workdir swept @boot (5 stale entries
+    removed)`），位置在文件行之前；满载门禁下原实现 `ln.split("\t")[2]` 在那种行上 IndexError
+    ⇒ 用例偶发红（单跑 3 次红 1 次；裸命令 5 次里复现 1 次）。日志行不应该让**文件集对拍**失效，
+    但也不能静默忽略：这里把「认不出的行」统一交给调用方（本函数只挑出可识别的两类）。
+    """
+    files: set[str] = set()
+    hash_line = ""
+    for raw in stdout.splitlines():
+        ln = raw.rstrip("\r")
+        if ln.startswith("codeHash="):
+            hash_line = ln
+            continue
+        parts = ln.split("\t")
+        if len(parts) == 3:
+            files.add(parts[2])
+    return files, hash_line
+
+
+def test_code_hash_files_parser_tolerates_boot_log_lines() -> None:
+    """解析器自身的判据（不依赖 bun/网络）：混进引导期日志行也不得丢行或炸。"""
+    clean = (
+        "aaaa\t100\tsrc/a.ts\n"
+        "bbbb\t200\tsrc/b.ts\n"
+        "codeHash=deadbeef\n"
+    )
+    files, hash_line = _parse_code_hash_files(clean)
+    assert files == {"src/a.ts", "src/b.ts"} and hash_line == "codeHash=deadbeef"
+
+    # 复现现场：boot 日志在文件行**之前**（原实现在这里 IndexError）
+    noisy = (
+        "[11:55:19] [sampler-agent] workdir swept @boot (5 stale entries removed)\n"
+        + clean
+    )
+    files2, hash_line2 = _parse_code_hash_files(noisy)
+    assert (files2, hash_line2) == (files, hash_line)
+
+    # 日志插在文件行**中间**也不得影响集合
+    interleaved = (
+        "aaaa\t100\tsrc/a.ts\n"
+        "[11:55:19] [sampler-agent] keepalive tick\n"
+        "bbbb\t200\tsrc/b.ts\n"
+        "[11:55:20] [sampler-agent] done\n"
+        "codeHash=deadbeef\n"
+    )
+    files3, hash_line3 = _parse_code_hash_files(interleaved)
+    assert (files3, hash_line3) == (files, hash_line)
+    # 真的丢了行的输入必须看得见（解析器不替 agent 保证完整性）
+    assert _parse_code_hash_files("no tabs here\ncodeHash=x\n")[0] == set()
+
+
 def test_codehash_bilingual_contract() -> None:
     """双语 codeHash 契约：TS 侧（节点）与 Python 侧（训练机）算出的 hash 必须逐字节
     一致。任一侧漂移（文件集/内容/排序/归一化）都会红。bun 不可用则跳过。"""
@@ -619,18 +675,14 @@ def test_codehash_bilingual_contract() -> None:
     if proc2.returncode != 0:
         check(False, f"bun --print-code-hash-files 非零退出: {proc2.stderr.strip()}")
         return
-    ts_lines = proc2.stdout.strip().splitlines()
-    ts_files = {ln.split("\t")[2] for ln in ts_lines[:-1]}
+    # 行形态由 `_parse_code_hash_files` 认（boot 日志行会落在 stdout 上，别按行号解析）
+    ts_files, hash_line = _parse_code_hash_files(proc2.stdout)
     py_files = {rel for rel, _c in common.distribution._collect_code_hash_files()}
     check(
         ts_files == py_files,
         f"双侧文件集逐文件一致 (TS={len(ts_files)} vs Python={len(py_files)})",
     )
-    if ts_lines:
-        check(
-            ts_lines[-1].startswith("codeHash="),
-            f"--print-code-hash-files 末行 codeHash=<full>, got {ts_lines[-1][:20]!r}",
-        )
+    check(hash_line.startswith("codeHash="), f"--print-code-hash-files 的 codeHash 行, got {hash_line[:20]!r}")
 
 
 def main() -> None:
@@ -647,6 +699,7 @@ def main() -> None:
     test_codehash_f3_noise_filtering()
     test_code_hash_report()
     test_codehash_manifest_expansion()
+    test_code_hash_files_parser_tolerates_boot_log_lines()
     test_codehash_bilingual_contract()
     print(f"== {'PASS' if not FAILS else 'FAIL'} ({len(FAILS)} failures) ==")
     for m in FAILS:

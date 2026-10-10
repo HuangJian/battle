@@ -11,7 +11,7 @@
 |---|---|---|
 | 计数口径（唯一） | `nn-training/tests/helpers/text_asserts.py` | 代码即定义（口径 A 形态 / 口径 B 生产源码面） |
 | 口径 A（形态，含 capsys 子串断言） | **1435** 条 / 228 文件 | 2026-10-09 实测（清理前 1488） |
-| 口径 B（生产源码面，T5 删除面） | **1082** 条 / 106 文件 | 同上（清理前 1084；**是下界**，见模块头口径边界） |
+| 口径 B（生产源码面，T5 删除面） | **1091** 条 / 106 文件 | 同上（清理前 1084；**2026-10-10 抬一格**：新 notebook 接线守卫 +9 —— 理由见 `tests/test_source_text_assert_budget.py` 模块头；`docs/nn/engineering.md` §71 里那张表保留当时值 1082；**是下界**，见模块头口径边界） |
 | 护栏 | `nn-training/tests/test_source_text_assert_budget.py` | 只许降不许升 + 计数下界自检 |
 | 重跑 | `bash tools/githook/nn-py-safe.sh -m tests.helpers.text_asserts --scope source` | 逐文件行号清单 |
 | 全量基线（`-n 6` 本机） | 3963 passed / 15 skipped / 76.3s | `tmp/pytest-tmp/step0-pytest.log` |
