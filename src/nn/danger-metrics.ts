@@ -20,6 +20,10 @@
  *   `enemyBulletLaneWeightTick(...)` —— 敌弹火线承伤逐摄权重 Σ(6−x)（本批 `hurtWeight`）
  *   `enclWeightTick(world)`      —— n≥2 时 Σ max(0,K_ENCL−d)（本批 `enclWeightTicks`；与计数共用扫描）
  *   `cornerWeightTick(world)`    —— 四角锚点 Σ max(0,K_CORNER−d)（本批 `cornerWeightTicks`）
+ *   —— metrics v11（plan/metrics-v11-hotlane.plan.md §2；**签入 2 列 idx74–75**，第三列被
+ *   §4bis.4 杀线拦下）：
+ *   `nearSqWeightTick(world)`    —— 全敌 Σ(K_NEAR_SQ−d)²（本批 `nearSqSum`）
+ *   `hotLaneAxisOf/Open/Tick`    —— 热线停留窗（本批 `postHitLaneTicks`；**逐局实例**，非模块级状态）
  *   以及 `DANGER_HP_THRESHOLD`  —— 残血阈值 0.4（与 `src/nn/goal-mask.ts:154` 同源）
  *
  * `inThreatLane` 口径（**2026-09-29 metrics v9 改定义**，plan/geo-threat-instrumentation.plan.md
@@ -53,7 +57,7 @@
  * 纯函数、零分配、不读 rng、不写 World（AGENTS §2.3 / §14.1–14.2）。
  */
 import { BULLET, CELL, GRID, TANK } from '../constants'
-import type { Bullet } from '../types'
+import type { Bullet, Tank } from '../types'
 import type { World } from '../game/World'
 import { TileMap } from '../game/TileMap'
 import { BULLET_LANE_MISS, bulletInFrontDist, bulletLaneDist } from '../utils/helpers'
@@ -414,6 +418,177 @@ export function cornerWeightTick(world: World): number {
   dd = Math.max(Math.abs(col - a), Math.abs(row - b))
   if (dd < d) d = dd
   return d < K_CORNER ? K_CORNER - d : 0
+}
+
+// ───────────────────────── metrics v11（idx74–75）─────────────────────────
+// plan/metrics-v11-hotlane.plan.md §2；核与 K 常量与本族并列（R13）。
+
+/**
+ * 近敌平方核的 K（`nearSqSum`）：核 = (K−d)²，`d ≤ K`。
+ * ⚠ `d = K` 处核值恒 0 ⇒ **有效半径 = K−1 = 2 格**；不许再写成「3 格带/3 格缓冲」（R13）。
+ */
+export const K_NEAR_SQ = 3
+/**
+ * 热线窗并发硬护栏（语义上限 = 存活敌数：**一源一窗**）；溢出即丢弃并 `dropped++`，
+ * 调用方读到增量就打 warn（「warn 即非静默」，plan §2.1）。
+ */
+export const MAX_HOT_LANES = 64
+
+/** 中心格编号（像素中心 floor；与 `nearestPickupDist`/`playerCenterCell` 同式）。 */
+function cellOf(x: number, y: number, w: number, h: number, vertical: boolean): number {
+  return vertical ? Math.floor((x + w / 2) / CELL) : Math.floor((y + h / 2) / CELL)
+}
+
+/**
+ * `nearSqSum` 的逐拍项（metrics v11 idx74）：对每个**存活已激活**敌车（`spawnTimer <= 0`，
+ * 与 `nearestEnemyDistPx`/`alignedEnemyCount` 同规）取**切比雪夫**格距 d，`d ≤ K_NEAR_SQ`
+ * 时累加 (K_NEAR_SQ−d)²。与 `nearEnemy4Ticks`（4 格**像素**带、只认最近一个）不是等比量。
+ *
+ * 纯函数、零分配、不读 rng、不写 World。
+ */
+export function nearSqWeightTick(world: World): number {
+  const p = world.player
+  if (!p || !p.alive) return 0
+  const pcol = Math.floor((p.x + p.w / 2) / CELL)
+  const prow = Math.floor((p.y + p.h / 2) / CELL)
+  let sum = 0
+  const tanks = world.allTanks
+  for (let i = 0; i < tanks.length; i++) {
+    const t = tanks[i]
+    if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
+    const d = Math.max(
+      Math.abs(Math.floor((t.x + t.w / 2) / CELL) - pcol),
+      Math.abs(Math.floor((t.y + t.h / 2) / CELL) - prow),
+    )
+    if (d <= K_NEAR_SQ) {
+      const w = K_NEAR_SQ - d
+      sum += w * w
+    }
+  }
+  return sum
+}
+
+/**
+ * 热线轴（`postHitLaneTicks` 的窗键）：开窗瞬间记录的源火线，**整数格轴**。
+ * ⚠ 与 `threatLaneSources` 家族的 19px **像素连续带**是两套谓词（R3）：带边缘抖动会让
+ * 「玩家还在轴上」高频翻转 ⇒ 关窗抖动，故本窗用整数轴；本窗也**不判遮挡**。
+ */
+export interface HotLane {
+  /** true = 沿**列**（源朝 up/down；轴上序号 = 源中心格 col）；false = 沿行。 */
+  vertical: boolean
+  /** 记录瞬间的轴序号（vertical ⇒ col，否则 row）。 */
+  axis: number
+}
+
+/** 取坦克当前的火线轴（显式返回对象：只用于开窗/关窗判定，不在逐拍热路径里分配）。 */
+export function hotLaneAxisOf(t: Tank): HotLane {
+  const vertical = t.dir === 'up' || t.dir === 'down'
+  return { vertical, axis: cellOf(t.x, t.y, t.w, t.h, vertical) }
+}
+
+/** 玩家中心格是否落在给定轴上（整数格比较）。 */
+function playerOnLane(world: World, lane: HotLane): boolean {
+  const p = world.player
+  if (!p || !p.alive) return false
+  return cellOf(p.x, p.y, p.w, p.h, lane.vertical) === lane.axis
+}
+
+/** 源是否仍沿同一条轴持有火线（存活 ∧ 朝向轴不变 ∧ 自己的轴序号不变 ⇒ 未转向换道）。 */
+function sourceHeldLane(world: World, sourceId: number, lane: HotLane): boolean {
+  const tanks = world.allTanks
+  for (let i = 0; i < tanks.length; i++) {
+    const t = tanks[i]
+    if (t.id !== sourceId) continue
+    if (!t.alive) return false
+    return (
+      hotLaneAxisOf(t).vertical === lane.vertical &&
+      cellOf(t.x, t.y, t.w, t.h, lane.vertical) === lane.axis
+    )
+  }
+  return false
+}
+
+interface HotLaneSlot {
+  sourceId: number
+  lane: HotLane
+}
+
+/** 逐局热线窗状态（**每局一个实例**，见 `createHotLaneWindow`）。 */
+export interface HotLaneWindow {
+  slots: HotLaneSlot[]
+  /** 溢出丢弃次数（只增；调用方读增量打 warn）。 */
+  dropped: number
+}
+
+/**
+ * 逐局新建窗状态。
+ * ⚠ **严禁模块级单例**（AGENTS §2.2 隐藏状态）：eval worker / 测试在同一进程里连跑多局，
+ * 模块级容器会让第二局继承第一局的窗（R10）。
+ */
+export function createHotLaneWindow(): HotLaneWindow {
+  return { slots: [], dropped: 0 }
+}
+
+/**
+ * 开/重开窗（只由伤害事件驱动，§2.1）：同源重开 = 用新一击的轴替换旧窗（**一源一窗**
+ * ⇒ 并发上限天然 = 存活敌数）；超 `MAX_HOT_LANES` 丢弃并 `dropped++`。
+ * 豁免**不影响开窗**（窗可以开在豁免拍上，只是那些拍不计数）。
+ */
+export function hotLaneOpen(win: HotLaneWindow, sourceId: number, lane: HotLane): void {
+  const slots = win.slots
+  for (let i = 0; i < slots.length; i++) {
+    if (slots[i].sourceId === sourceId) {
+      slots[i].lane = lane
+      return
+    }
+  }
+  if (slots.length >= MAX_HOT_LANES) {
+    win.dropped++
+    return
+  }
+  slots.push({ sourceId, lane })
+}
+
+/**
+ * 按源 id 开窗（伤害事件驱动，两个导出器共用本实现）：源不存在 / 已死 ⇒ 不开
+ * （state-init 交棒的死源是合法漏窗，不 warn）；溢出丢弃记在 `win.dropped`，
+ * 由调用方在局末统一 warn（「warn 即非静默」，plan §2.1）。
+ */
+export function hotLaneOpenFromTank(win: HotLaneWindow, world: World, sourceId: number): void {
+  const tanks = world.allTanks
+  for (let i = 0; i < tanks.length; i++) {
+    const t = tanks[i]
+    if (t.id !== sourceId) continue
+    if (t.alive) hotLaneOpen(win, sourceId, hotLaneAxisOf(t))
+    return
+  }
+}
+
+/**
+ * 逐拍推进：返回**本拍应计的 tick 数**（0 或 1×持有窗数）。
+ * 关窗只看「源死亡 / 源转向换道 / 本局结束」（与豁免无关）；`exempt` 只决定**本拍是否计数**
+ * （决定 A：豁免拍照常持有窗但不计入）——两件事必须分开，否则冻住时站在轴上会被关窗。
+ * 零分配（原地 splice/截断），不读 rng。
+ */
+export function hotLaneTick(win: HotLaneWindow, world: World, exempt: boolean): number {
+  if (!world.player?.alive) {
+    if (win.slots.length > 0) win.slots.length = 0 // 局终/阵亡：全关
+    return 0
+  }
+  let n = 0
+  const slots = win.slots
+  for (let i = slots.length - 1; i >= 0; i--) {
+    const s = slots[i]
+    // 关窗：源已不持有该轴（转向/换道/死亡）**或玩家已脱离该轴**。
+    // ⚠ 「玩家脱离即关」是 §2.1 的硬口径（“位移回归不自动重开”）：脱离后再走回来**不算**
+    // 续窗，要重新被击中才开新窗——否则站回轴上可无限续长度，税基被行为刷出来。
+    if (!playerOnLane(world, s.lane) || !sourceHeldLane(world, s.sourceId, s.lane)) {
+      slots.splice(i, 1)
+      continue
+    }
+    if (!exempt) n++
+  }
+  return n
 }
 
 /**

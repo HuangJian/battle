@@ -55,7 +55,7 @@ from worker.config import load_course
 # ------------------------------------------------------------------ shard 合成
 
 def _synthetic_metrics(n: int, seed: int = 7):
-    """n 决策行 + 1 终局行（METRICS_DIM 维，当前 v6=39）——列序一律由
+    """n 决策行 + 1 终局行（METRICS_DIM 维，当前 v11=76）——列序一律由
     `reward_library.METRIC_INDEX` 决定（不再硬编码 21 列的旧索引表；metrics 版本
     追加列时本 harness 自动跟上，不会再次因列数陈旧被 load_shard 拒收）。
     值域贴合 p4-onset 公式的语义（不触发公式守卫）。"""

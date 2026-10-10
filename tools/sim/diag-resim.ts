@@ -119,6 +119,9 @@ for (let g0 = 0; g0 < games; g0++) {
       aimDist: pick(r, 'aimHitDistSum'),
       danger: pick(r, 'dangerTicks'),
       near4: pick(r, 'nearEnemy4Ticks'),
+      // metrics v11（plan/metrics-v11-hotlane.plan.md §2）：热线族读数（探针/事后交叉验证）。
+      nearSq: pick(r, 'nearSqSum'),
+      hotLane: pick(r, 'postHitLaneTicks'),
       dmgTaken: pick(r, 'playerDamageTaken'),
       shots: pick(r, 'playerShots'),
     }),

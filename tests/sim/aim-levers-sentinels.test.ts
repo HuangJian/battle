@@ -72,8 +72,24 @@ describe('口径源码哨兵：训练导出器（P3）', () => {
     expect(apply).toBeLessThan(score) // 打包/打分前一次应用
   })
 
-  it('METRICS_VERSION = 10（v10 全批未签入；本批并入不升版，sb P0-E）', () => {
-    expect(roll).toContain('export const METRICS_VERSION = 10')
+  it('METRICS_VERSION = 11（metrics v11 热线族 2 列；plan/metrics-v11-hotlane.plan.md）', () => {
+    expect(roll).toContain('export const METRICS_VERSION = 11')
+  })
+
+  it('metrics v11：bulletOwnerId 接线（3 处 push，且写在 bulletId 之后）', () => {
+    const combatV11 = read('src/game/SimulationCombat.ts')
+    // 两个 player_hit push（致死 + 星盾）+ 一个 player_damage ⇒ 3 处带 bulletOwnerId。
+    const owners = (combatV11.match(/bulletOwnerId: bullet\.ownerId/g) ?? []).length
+    expect(owners).toBe(3)
+    // 位置写死：紧跟 `bulletId: bullet.id`（插在中间会让上面的源码子串/正则哨兵红）；
+    // 空白归一后匹配（formatter 会把 player_damage 那条折成多行）。
+    const flatCombat = flat(combatV11)
+    const ordered = (
+      flatCombat.match(/bulletId: bullet\.id, bulletOwnerId: bullet\.ownerId/g) ?? []
+    ).length
+    expect(ordered).toBe(3)
+    // 导出器侧只消费 `e.bulletOwnerId`（不产生事件）。
+    expect(roll).toContain('hotLaneOpenFromTank(hotLane, world, e.bulletOwnerId)')
   })
 
   it('对消几何近似作废：无 BULLET_CANCEL_DIST_PX', () => {

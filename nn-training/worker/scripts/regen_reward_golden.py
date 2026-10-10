@@ -14,7 +14,11 @@ import json
 import sys
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parent.parent
+#: `nn-training/` 根 —— 本脚本住 `worker/scripts/`（2026-09 包化重构搬进来）⇒ 必须上溯 3 层。
+#: 曾经写 `parent.parent`（= `nn-training/worker`），搬包后**静默写错地方**：golden 落在
+#: 无人读的 `worker/tests/golden/`，`metrics_version` bump 后 `test_reward_golden` 照旧红
+#: （2026-10-10 metrics v11 实测踩到）。
+ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 

@@ -297,10 +297,36 @@ interface LabelAgg {
   hurtWeight: number
   enclWeightTicks: number
   cornerWeightTicks: number
+  /**
+   * metrics v11（idx74–75）逐 label 求和。行侧字段是**可选**（mixed-version 窗口期旧行整键
+   * 缺席），但本聚合对象是构造时就填零的必填字段。
+   * `v11Known` = 有 v11 键的局数（均值分母，与 `dmg600Known` 同规：缺席整局不入分母，
+   * 不把未知读成 0 去稀释均值 —— R15 / 同 `clean600%` 旧坑）。
+   */
+  nearSqSum: number
+  postHitLaneTicks: number
+  v11Known: number
   /** 有 `dmgFirst600` 字段的局数（clean600 的分母）。 */
   dmg600Known: number
   /** `dmgFirst600 === 0` 的局数（「前 600 tick 零承伤」，plan §1 T2）。 */
   clean600: number
+}
+
+/**
+ * metrics v11（idx74–75）的 **known 计数契约**（plan §3.3.5 / R15）：
+ * **以 `nearSqSum` 为见证键**——缺键整局不入分母（不把未知读成 0 去稀释均值，与
+ * `dmg600Known` 同规，同 `clean600%` 旧坑）。两列是同一 shard 格式单位（一个导出器一次
+ * 写全），故一个见证键就够；`postHitLaneTicks` 缺席（不该发生）按 0 计但已计 known。
+ *
+ * 抽成导出纯函数的唯一理由：让 mixed-version 分母成为**可测契约**（plan §3.5 新②）。
+ */
+export function v11KnownDelta(r: { nearSqSum?: number; postHitLaneTicks?: number }): {
+  known: 0 | 1
+  nearSqSum: number
+  postHitLaneTicks: number
+} {
+  if (r.nearSqSum === undefined) return { known: 0, nearSqSum: 0, postHitLaneTicks: 0 }
+  return { known: 1, nearSqSum: r.nearSqSum, postHitLaneTicks: r.postHitLaneTicks ?? 0 }
 }
 
 function summarize(
@@ -359,6 +385,10 @@ function summarize(
         hurtWeight: 0,
         enclWeightTicks: 0,
         cornerWeightTicks: 0,
+        // metrics v11（idx74–75；known 计数：分母只数有键的局，R15）。
+        nearSqSum: 0,
+        postHitLaneTicks: 0,
+        v11Known: 0,
         dmg600Known: 0,
         clean600: 0,
       }
@@ -408,6 +438,11 @@ function summarize(
     a.hurtWeight += r.hurtWeight ?? 0
     a.enclWeightTicks += r.enclWeightTicks ?? 0
     a.cornerWeightTicks += r.cornerWeightTicks ?? 0
+    // metrics v11（idx74–75）：**known 计数**（契约见 `v11KnownDelta`）。
+    const v11 = v11KnownDelta(r)
+    a.v11Known += v11.known
+    a.nearSqSum += v11.nearSqSum
+    a.postHitLaneTicks += v11.postHitLaneTicks
     if (r.dmgFirst600 !== undefined) {
       a.dmg600Known++
       if (r.dmgFirst600 === 0) a.clean600++
@@ -465,6 +500,14 @@ function summarize(
         ` brick ${(a.aimBricks / per).toFixed(2)} ign ${(a.aimIgnited / per).toFixed(2)} miss ${(a.aimMisses / per).toFixed(2)}` +
         ` | hurt ${(a.hurtWeight / per).toFixed(2)} enclW ${(a.enclWeightTicks / per).toFixed(1)}` +
         ` cornerW ${(a.cornerWeightTicks / per).toFixed(1)}\n`,
+    )
+    // metrics v11（plan/metrics-v11-hotlane.plan.md §2）：热线族两列逐局均值。
+    // 分母 = `v11Known`（有 v11 键的局），mixed-version 窗口期不会静默稀释（R15）。
+    const perV11 = Math.max(1, a.v11Known)
+    process.stderr.write(
+      `${''.padEnd(28)}   ↳ v11 nearSq ${(a.nearSqSum / perV11).toFixed(2)}` +
+        ` hotLane ${(a.postHitLaneTicks / perV11).toFixed(1)}` +
+        ` (known ${a.v11Known}/${a.games})\n`,
     )
   }
   // 参与度账（provenance）：**谁跑的必须自证**。只打汇总表会让“熔断/满负荷静默降本地”

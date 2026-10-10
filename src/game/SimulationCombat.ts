@@ -633,6 +633,7 @@ export class CombatSystem {
           type: 'player_damage',
           damage: bullet.damage,
           bulletId: bullet.id,
+          bulletOwnerId: bullet.ownerId,
         })
       }
       // 玩家子弹命中敌方（含致死命中，命中即有意义）。
@@ -692,7 +693,7 @@ export class CombatSystem {
 
     if (tank.isPlayer) {
       w.pushEvent({ type: 'tank_destroyed', tank, by: 'enemy', byId: bullet.ownerId })
-      w.pushEvent({ type: 'player_hit', bulletId: bullet.id })
+      w.pushEvent({ type: 'player_hit', bulletId: bullet.id, bulletOwnerId: bullet.ownerId })
     } else if (tank.allegiance === 'ally') {
       // Allied guard destroyed — no score, no kill credit, no drops. The
       // guard simply stops fighting (§31 Phase 2).
@@ -827,7 +828,7 @@ export class CombatSystem {
     // Brief grace: the shield was just spent, so a same-volley bullet can't
     // immediately re-kill the demoted 2★ player.
     tank.shieldTimer = STAR_SHIELD_GRACE_MS
-    w.pushEvent({ type: 'player_hit', bulletId: bullet.id })
+    w.pushEvent({ type: 'player_hit', bulletId: bullet.id, bulletOwnerId: bullet.ownerId })
   }
 
   private bulletHitsBullet(bullet: Bullet): boolean {

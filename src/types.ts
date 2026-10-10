@@ -291,10 +291,12 @@ export type GameEvent =
   | { type: 'stage_clear'; stage: number }
   /** 玩家被击中（致死命中，或 3★ 星盾消耗——两者都由本事件记一笔）。
    *  `bulletId` = additive 只读观测（携带者弹 id，2026-10-01 aim-dodge-levers
-   *  `hurtWeight` 归因键）；非弹源（炸弹/地雷）不填。 */
-  | { type: 'player_hit'; bulletId?: number }
-  /** 玩家被击伤（非致死；致死已由 `player_hit` 覆盖）。`bulletId` 同 `player_hit`。 */
-  | { type: 'player_damage'; damage: number; bulletId?: number }
+   *  `hurtWeight` 归因键）；非弹源（炸弹/地雷）不填。
+   *  `bulletOwnerId` = 同上族 additive 只读观测（metrics v11 `postHitLaneTicks` 开窗键）：
+   *  开火坦克 id **直抄**，不靠 registry 反查（state-init 交棒时已在飞的弹查不到 shooter）。 */
+  | { type: 'player_hit'; bulletId?: number; bulletOwnerId?: number }
+  /** 玩家被击伤（非致死；致死已由 `player_hit` 覆盖）。`bulletId`/`bulletOwnerId` 同 `player_hit`。 */
+  | { type: 'player_damage'; damage: number; bulletId?: number; bulletOwnerId?: number }
   | {
       type: 'enemy_hit'
       damage: number

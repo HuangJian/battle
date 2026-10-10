@@ -100,6 +100,10 @@ export interface EvalCourseRow {
   hurtWeight?: number
   enclWeightTicks?: number
   cornerWeightTicks?: number
+  /** metrics v11（idx74–75；可选：mixed-version 窗口期旧 bundle 的行整键缺席，汇总侧走
+   *  **known 计数**——缺席整局不入分母，不伪造 0）。 */
+  nearSqSum?: number
+  postHitLaneTicks?: number
   /** Phase 0 逐敌种画像（T3）：索引 = ENEMY_KIND_ORDER = [basic, fast, power, armor]。
    *  `exposureByKind` = 存活×接战 tick 积分（④ 的归一化分母）。 */
   hitsByKind: number[]
@@ -196,6 +200,8 @@ self.onmessage = (ev: MessageEvent<EvalCourseWorkerPayload>): void => {
         hurtWeight: res.hurtWeight,
         enclWeightTicks: res.enclWeightTicks,
         cornerWeightTicks: res.cornerWeightTicks,
+        nearSqSum: res.nearSqSum,
+        postHitLaneTicks: res.postHitLaneTicks,
         hitsByKind: res.hitsByKind,
         killsByKind: res.killsByKind,
         exposureByKind: res.exposureByKind,

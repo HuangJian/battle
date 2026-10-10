@@ -192,6 +192,34 @@ def eval_v10_fields(manifest: dict | None) -> dict:
     return out
 
 
+#: metrics v11 热线族 2 列（plan/metrics-v11-hotlane.plan.md §2；`src/nn/danger-metrics.ts`
+#: 同名同义）。`export-eval-game.ts` 顶层直出；旧报告/未同步节点缺键 = None（与 v8/v9/v10 同约）。
+#: ⚠ 与前批同一条纪律：本表**只此一处**（同键两表赋值会在行构造点重复赋值，行宽对账抓不到）。
+#: ⚠ `pickupProxMax`（原候选 idx76）**不在本表**：它被 §4bis.4 两条杀线拦下，本批未签入。
+EVAL_V11_KEYS = (
+    "nearSqSum",
+    "postHitLaneTicks",
+)
+
+
+def eval_v11_fields(manifest: dict | None) -> dict:
+    """从 eval 报告 manifest 抽出 v11 热线族两列（缺键 = 整键省略，不写 None）。
+
+    与 `eval_v8/v9/v10_fields` 逐字同形、同一个理由（0 是合法读数；下游
+    `eval-course-ckpt` 以键缺席判未知并走 **known 计数**分母）与同一条纪律：
+    `worker/eval_rows.py::eval_row`、`trainer/batch_runner.py`（两处行构造点）
+    必须**经本函数**取数（2026-09-24 v8 提交就是 Python 两处全漏 ⇒ 日常 eval 失明）。
+    """
+    out: dict = {}
+    if not isinstance(manifest, dict):
+        return out
+    for k in EVAL_V11_KEYS:
+        v = manifest.get(k)
+        if v is not None:
+            out[k] = v
+    return out
+
+
 def eval_row(
     manifest: dict,
     *,
@@ -258,6 +286,8 @@ def eval_row(
         **eval_v9_fields(manifest),
         # metrics v10 差距四族（与 batch_runner 同源，见 eval_v10_fields）。
         **eval_v10_fields(manifest),
+        # metrics v11 热线族 2 列（与 batch_runner 同源，见 eval_v11_fields）。
+        **eval_v11_fields(manifest),
         "puSpawnBomb": manifest.get("puSpawnBomb"),
         "puSpawnTank": manifest.get("puSpawnTank"),
         "puSpawnFreeze": manifest.get("puSpawnFreeze"),

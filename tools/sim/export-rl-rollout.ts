@@ -81,8 +81,12 @@ import {
   NEAR_ENEMY_BAND_PX,
   alignedEnemyCount,
   cornerWeightTick,
+  createHotLaneWindow,
   damageClusterStats,
   enclWeightTick,
+  hotLaneOpenFromTank,
+  hotLaneTick,
+  nearSqWeightTick,
   enemyBulletLaneWeightTick,
   exposureExempt,
   inThreatLane,
@@ -233,12 +237,21 @@ export const RL_SHARD_FILES = [
 //   量纲：54–56/58/62–64/72–73 是累计 tick 计数器（Φ 逐行差分 ⇒ 直接入公式 = 每 tick
 //   罚款且 Φ 无界）；59/60/65 单调增（差分 ≥ 0）；57 带 -1 哨兵，公式侧必须 `where` 归零；
 //   66–71 是**回写列**（开火拍信用；不得当逐窗口速率用）。
+// metrics v11（plan/metrics-v11-hotlane.plan.md §2，**本批只签入 2 列**）：idx74 nearSqSum ·
+//   idx75 postHitLaneTicks —— 两条都是累计计数器（同 54–56 的量纲警告：直接入公式 = 每 tick
+//   罚款且 Φ 无界）；两条**拌入**豁免 A（只累计非豁免拍）；74 有效半径 2 格，与 raw-only 的
+//   nearEnemy4Ticks（4 格像素带）不是等比量（勿互比）。
+//   ⚠ 第三列 `pickupProxMax`（原 idx76）**未签入**：§4bis.4 两条杀线在 E0 探针上命中
+//   （见 plan §2.1 / §4bis 执行记录），故本批不建；常量与核一并未入本模块。
 // **本常量必须与 `buildMetricsRow` 的行宽一致** —— 2026-09-12 的 P0：只改了行、没改
 // 这里，`metrics.set(row, i * METRICS_DIM)` 每局越界抛 RangeError，整条采集腿零产出。
 // 导出仅供测试断言行宽（tests/export-rl-rollout-metrics.test.ts）。
-export const METRICS_DIM = 74
-/** metrics v10：差距四族 15 列 + aim-dodge 批次 8 列（idx54–73）。与 Python METRICS_VERSION 同步。 */
-export const METRICS_VERSION = 10
+export const METRICS_DIM = 76
+/**
+ * metrics v11：热线族 2 列（idx74–75，plan/metrics-v11-hotlane.plan.md §2；第三列被 §4bis 杀线
+ * 拦下）。与 Python METRICS_VERSION 同步；变更元组 = shard 格式变更（老规矩，见文件头注释）。
+ */
+export const METRICS_VERSION = 11
 /**
  * 列名（顺序 = `buildMetricsRow` 的实现顺序，SSOT）。Python `reward_library.METRICS`
  * 必须与本数组**逐位相等**（跨语言列序 oracle，sb P2-D；tests/export-rl-rollout-metrics.test.ts）。
@@ -326,6 +339,8 @@ export const METRICS_COLUMN_NAMES: readonly string[] = [
   'hurtWeight',
   'enclWeightTicks',
   'cornerWeightTicks',
+  'nearSqSum',
+  'postHitLaneTicks',
 ]
 /**
  * pickupDist 哨兵：无存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
@@ -540,6 +555,11 @@ export interface Telemetry {
   enclWeightTicks: number
   /** 角落距离加权 tick 累计（Σ max(0,4−d)，d≤3；**拌入**豁免 A）。 */
   cornerWeightTicks: number
+  // ---- metrics v11：热线族 2 列（plan/metrics-v11-hotlane.plan.md §2；idx74–75）----
+  /** 全敌 Σ(K_NEAR_SQ−d)²（d ≤ 3 格切比雪夫；**有效 2 格**）；**拌入**豁免 A。 */
+  nearSqSum: number
+  /** 被击中后仍留在该源火线轴上的 tick 累计（整数轴；窗关 = 源转向/死亡/局终；**拌入**豁免 A）。 */
+  postHitLaneTicks: number
 }
 
 function countBaseWall(world: World): number {
@@ -715,6 +735,8 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     tel.hurtWeight, // 71 hurtWeight（aim-dodge：敌弹火线承伤；回写列）
     tel.enclWeightTicks, // 72 enclWeightTicks（aim-dodge：n≥2 ⇒ Σ max(0,5−d)；拌入 A）
     tel.cornerWeightTicks, // 73 cornerWeightTicks（aim-dodge：Σ max(0,4−d)；拌入 A）
+    tel.nearSqSum, // 74 nearSqSum（v11：全敌 Σ(3−d)²；拌入 A）
+    tel.postHitLaneTicks, // 75 postHitLaneTicks（v11：热线窗停留 tick；拌入 A）
   ]
 }
 
@@ -995,6 +1017,9 @@ interface RunResult {
   hurtWeight: number
   enclWeightTicks: number
   cornerWeightTicks: number
+  /** metrics v11（每局标量读数；逐决策步分布见 metrics 行）。 */
+  nearSqSum: number
+  postHitLaneTicks: number
   enemyTotal: number
   startLives: number
   puGotTank: number
@@ -1167,6 +1192,9 @@ function runOne(
     hurtWeight: 0,
     enclWeightTicks: 0,
     cornerWeightTicks: 0,
+    // metrics v11（idx74–75；plan/metrics-v11-hotlane.plan.md §2）。
+    nearSqSum: 0,
+    postHitLaneTicks: 0,
   }
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
@@ -1182,6 +1210,11 @@ function runOne(
    * 消费侧（encl/corner/敌弹权重）只经 `exposureExempt` 问它，不直接读分类。
    */
   const shieldWin = createShieldWindow()
+  /**
+   * metrics v11：热线窗（**每局一个实例**）。R10：严禁模块级状态——eval worker / 测试在
+   * 同一进程里连跑多局，模块级容器会让第二局继承第一局的窗（AGENTS §2.2）。
+   */
+  const hotLane = createHotLaneWindow()
   /**
    * 本批 shot registry（§3.1/§3.2/§3.4）：`bullet_fired` 登记、结算即删（settle-once）。
    * 实现与评估侧共用（`aim-shot-registry.ts`）；与 `fireOriginByBullet`（v9 的 shooter
@@ -1379,6 +1412,9 @@ function runOne(
           tel.damageWhileLow += e.damage
         // 本批：承伤结算（非致死；权重 Σ(6−x) 由逐 tick 累计而来）。
         if (e.bulletId !== undefined) settleHurtShot(e.bulletId)
+        // metrics v11（idx75）：开窗——只由伤害事件开，源 id **直抄** `bulletOwnerId`（不走
+        // registry：state-init 交棒时已在飞的弹反查不到 shooter，而那正是最要用的局）。
+        if (e.bulletOwnerId !== undefined) hotLaneOpenFromTank(hotLane, world, e.bulletOwnerId)
       } else if (e.type === 'bullet_fired') {
         const eb = e.bullet
         if (eb.isPlayer) {
@@ -1531,11 +1567,16 @@ function runOne(
         else tel.encl1Ticks++
         if (encl > tel.enclMax) tel.enclMax = encl
       }
-      // 本批暴露杠杆（A 拌入，§3.6）：非豁免拍才累计（两列分开 gate；冻期/盾道具窗跳过）。
-      if (!exposureExempt(world, shieldWin)) {
+      // 本批暴露杠杆（A 拌入，§3.6）：非豁免拍才累计（冻期/盾道具窗跳过）；v11 两列同规。
+      const exempt = exposureExempt(world, shieldWin)
+      if (!exempt) {
         tel.enclWeightTicks += enclWeightTick(world)
         tel.cornerWeightTicks += cornerWeightTick(world)
+        tel.nearSqSum += nearSqWeightTick(world) // 74（v11）
       }
+      // 75（v11）：热线窗**每拍都推进**（关窗只看源转向/死亡/局终），但豁免拍不计数（决定 A）——
+      // 关窗与计数必须分离，否则「冻住时站在轴上」会被误关窗（plan §2.1 / 决定 A）。
+      tel.postHitLaneTicks += hotLaneTick(hotLane, world, exempt)
       if (playerHpRatio(world) < DANGER_HP_THRESHOLD) tel.dangerTicks++
       if (inThreatLane(world)) {
         tel.threatTicks++
@@ -1631,6 +1672,11 @@ function runOne(
   // 训练时才存在），故 `win` 统一为 win ∪ cleared。`outcome` 字段保留原始值不受影响
   // （reward 仍按 `terminal[outcome]` 结算，见 c6-bonus.jsonc 的补偿项）。
   const win = outcome === 'stage_clear' || allEnemiesCleared(world)
+  // metrics v11：热线窗溢出丢弃是一次性的局末读数（「warn 即非静默」，plan §2.1）。
+  if (hotLane.dropped > 0)
+    console.error(
+      `[metrics-v11] hot-lane window overflow: dropped=${hotLane.dropped}（> MAX_HOT_LANES）`,
+    )
   const dims: Record<string, { value: number | null; raw: number }> = {}
   for (const k of Object.keys(scored.dims) as DimensionKey[]) {
     dims[k] = { value: scored.dims[k].value, raw: scored.dims[k].raw }
@@ -1691,6 +1737,8 @@ function runOne(
     hurtWeight: tel.hurtWeight,
     enclWeightTicks: tel.enclWeightTicks,
     cornerWeightTicks: tel.cornerWeightTicks,
+    nearSqSum: tel.nearSqSum,
+    postHitLaneTicks: tel.postHitLaneTicks,
     enemyTotal: tel.enemyTotal,
     startLives: tel.startLives,
     puGotTank: tel.puGotTank,
@@ -1971,7 +2019,7 @@ export function main(argv: string[] = process.argv.slice(2)): void {
         schemaMajor: OBS_SCHEMA_MAJOR,
         collector: 'RL',
         policy: 'nn-student-rl',
-        metrics_version: METRICS_VERSION, // [N+1,41] f8（idx0–40）—— v7 追加 puGotOther/pickupDist；shape[0] 下游据此分版本
+        metrics_version: METRICS_VERSION, // 行宽见 METRICS_DIM（当前 v11 = [N+1,76]）；shape[0] 下游据此分版本
         difficulty,
         stage: si,
         seed,

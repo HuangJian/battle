@@ -30,7 +30,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / **在飞活的备份副本**（§68） / **自主 worker 收工即停（§70）** / **补传腿忙等修复 + 独立进程（§69）** / **一拖一闸两次自锁（§71）** / **派发模型重构：课程无模式 + 接管 + BC 独占（§72）** / **claim 的进度锚以响应时刻为准（§73）** / **补传腿 `_append` 自锁死：重启重述重入不可重入锁（§74）** / **kind=iter 并发 `workers: 0` = 节点自定 + 课程侧 `workers` 死键（§76）** / **重启不重放已消费的 final：判据要与可判定的证据对齐（§77）** / **采样节点自动注册：hub 成为 `rl-config.json` 的第二写者（§78）** | 48 |
 | [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart · **节点门的 bootId 一致性**（§26）· **分关采样平衡（§30）** · **决策周期 K 通道（§31）** | 26 |
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
-| [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** · **六包重组（刀 1–6）** · **门禁 fail-fast**（§63） · **测试不得碰在跑的控制台**（§64） · **测试不得写生产状态（门禁意图 / 循环控制 / EvalBoard / 权重归档）**（§65） · **it0 基线 eval「从未派出」缺口：收工自报 + 缺口三分 + 基线自带门**（§66） · **eval 腿任务缺课程血缘：兄弟课程评估局在节点 resultCache 互串**（§67） · **pytest 私有提交 642MB→159MB：BLAS 内线程封顶**（§68） · **scratch 换根档由速度探针决定：通用用例钉死回退档**（§69） · **锁重入守卫扩容：方法内/闭包锁 + 组合组（hub store 混入）+ 全仓审计**（§70） · **测试债清理：口径先于数字（`text_asserts` / 退役单点 / 三条护栏）**（§71） · **pytest 最慢用例第二轮：第三条 HTTP 缝 + 三处全仓扫描的口径内提速**（§72） | 39 |
+| [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** · **六包重组（刀 1–6）** · **门禁 fail-fast**（§63） · **测试不得碰在跑的控制台**（§64） · **测试不得写生产状态（门禁意图 / 循环控制 / EvalBoard / 权重归档）**（§65） · **it0 基线 eval「从未派出」缺口：收工自报 + 缺口三分 + 基线自带门**（§66） · **eval 腿任务缺课程血缘：兄弟课程评估局在节点 resultCache 互串**（§67） · **pytest 私有提交 642MB→159MB：BLAS 内线程封顶**（§68） · **scratch 换根档由速度探针决定：通用用例钉死回退档**（§69） · **锁重入守卫扩容：方法内/闭包锁 + 组合组（hub store 混入）+ 全仓审计**（§70） · **测试债清理：口径先于数字（`text_asserts` / 退役单点 / 三条护栏）**（§71） · **pytest 最慢用例第二轮：第三条 HTTP 缝 + 三处全仓扫描的口径内提速**（§72） · **metrics v11：热线族 2 列（idx74–75）+ 探针杀列 + 跨链 parity 判据改判**（§73） | 40 |
 | [`docs/nn/test-contract-map.md`](nn/test-contract-map.md) | **测试 → 契约归属表**：两个可执行计数口径与其基线（A=1435 形态 / B=1082 生产源码面）· 已填契约（本次动过与 T1–T5 命中文件）· T2b 行为拒绝登记 · T4 本机恒 skip 登记 · 批次 2 工作清单 | 5 |
 | [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 / 课程管理页 / 指标表抗轮转抄录 / **回放导出按评估轮选（§32）** / **池历史大流按变化重建（§33）** / **空置内存真凶：logTail 整文件读（§34）** / **v2 词表与钮：接管是唯一真源（§35）** / **self 节点低盘告警：预警档与拒收地板是两件事（§36）** | 36 |
 | [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处）· **节点单实例互斥**（§29）· **一局的墙钟上界**（§32）· **长驻池真就绪 + 有界清理**（§33）· **热路径 IO 换节点本地盘（rollout/eval 共用一套 scratch）**（§34） | 33 |
@@ -121,6 +121,16 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 ### 3.5 课程侧待办（可能已被后续条目取代）
 
 - x20-rebirth M2 三选一（kills 最优 it30 / pass 最优 it30 / 末 it96）+ 池外段 —— `docs/nn/experiments.md` §13
+- **metrics v11 已落地（2 列 `idx74–75`：`nearSqSum` / `postHitLaneTicks`；第三列 `pickupProxMax`
+  被 §4bis.4 两条杀线拦下）**：列先行、**不得定价**——判据 1（人类 vs NN 分离度）本机不可跑，
+  定价前必须先补（`docs/nn/engineering.md` §73 · 决策 `DECISIONS.md` §2026-10-10-goalnn-metrics-v11）
+- **`trainer/batch_runner.py` 已顶到 LOC 天花板（999/1000，v11 加两行后曾破 1000 被门禁拦下）**：
+  下一族 metrics 列**必须先按 `plan/nn-training-refactor.md` §5.7 拆模块**再加行；
+  `docs/nn/engineering.md` §73 已记 —— 关闭判据：拆分后 LOC < 1000 且 v8–v11 四族 sentinel
+  （`tests/worker/test_eval_row_v{8,9,10}.py::test_batch_runner_record_uses_shared_helper`）仍绿
+- **`x24-face.jsonc` 的 raw-only 偏差未结清**（`wNear=8.0` 给 raw-only 名单里的 `nearEnemy4Ticks`
+  定价，`:50/:63`）：x24 系仍为草稿未开课 ⇒ **开课前**按 plan/metrics-v11-hotlane.plan.md §2.2.2
+  加头注临时豁免注记 + DECISIONS 指针
 - metrics v6 后继 / wChip 生存腿备选 —— `docs/nn/experiments.md` §4
 - 「多敌关是否需要真正的朝向信号」尚未验证 —— `docs/nn/experiments.md` §11
 - EVAL_SEEDS 扩池 / 正式门口径 / dashboard 必改 —— `docs/nn/training-stack.md` §8

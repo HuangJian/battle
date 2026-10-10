@@ -122,6 +122,11 @@ DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     "hurtWeight": (0.0, 216000.0),  # K_HURT=6 × maxTicks（每拍单弹权重 ≤6；探针上界）
     "enclWeightTicks": (0.0, 720000.0),  # ≤5 × 4 敌 × maxTicks（单关敌上限 4）
     "cornerWeightTicks": (0.0, 144000.0),  # K_CORNER−1=4 × maxTicks（玩家中心单点最大 4）
+    # metrics v11（idx74–75）：
+    # nearSqSum 上界 = (K_NEAR_SQ−1)²=4 × 每拍最大近敌车数；保守取 20 辆 × maxTicks。
+    "nearSqSum": (0.0, 4.0 * 20.0 * 36000.0),
+    # postHitLaneTicks ≤ ticks（一拍最多一条轴上一格）。
+    "postHitLaneTicks": (0.0, 36000.0),
 }
 
 #: 单加性项在角点上的绝对上界（超过即判为数值爆炸风险）。

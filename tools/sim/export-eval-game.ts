@@ -62,8 +62,12 @@ import {
   NEAR_ENEMY_BAND_PX,
   alignedEnemyCount,
   cornerWeightTick,
+  createHotLaneWindow,
   damageClusterStats,
   enclWeightTick,
+  hotLaneOpenFromTank,
+  hotLaneTick,
+  nearSqWeightTick,
   enemyBulletLaneWeightTick,
   exposureExempt,
   inThreatLane,
@@ -291,6 +295,11 @@ interface Telemetry {
   enclWeightTicks: number
   /** 角落距离加权 tick 累计（Σ max(0,4−d)，d≤3；A 拌入）。 */
   cornerWeightTicks: number
+  // ---- metrics v11（idx74–75，plan/metrics-v11-hotlane.plan.md §2；与 rollout 同名同义）----
+  /** 全敌 Σ(3−d)²（d ≤ 3 切比雪夫；**有效 2 格**）；A 拌入。 */
+  nearSqSum: number
+  /** 被击中后仍留在该源火线轴上的 tick 累计（整数轴；A 拌入）。 */
+  postHitLaneTicks: number
   /**
    * Phase 0 逐敌种画像（T3；索引 = ENEMY_KIND_ORDER）：
    * `hitsByKind` = `enemy_hit` 事件按**目标 kind** 累计；`killsByKind` = `by='player'`
@@ -407,6 +416,9 @@ interface EvalResult {
   hurtWeight: number
   enclWeightTicks: number
   cornerWeightTicks: number
+  /** metrics v11（idx74–75）。 */
+  nearSqSum: number
+  postHitLaneTicks: number
   playerShots: number
   powerUpsCollected: number
   /** T0.4 提顶层（scorable 有、需提顶层 §3.3 🟠）。 */
@@ -642,6 +654,9 @@ export function runEvalOne(
     hurtWeight: 0,
     enclWeightTicks: 0,
     cornerWeightTicks: 0,
+    // metrics v11（idx74–75）。
+    nearSqSum: 0,
+    postHitLaneTicks: 0,
     hitsByKind: [0, 0, 0, 0],
     killsByKind: [0, 0, 0, 0],
     exposureByKind: [0, 0, 0, 0],
@@ -659,6 +674,8 @@ export function runEvalOne(
   // ---- aim-dodge-levers：shield tracker + shot registry（**与 export-rl-rollout 共用
   // `aim-shot-registry.ts`**；评估侧无行序 ⇒ 结算即计数、无回写补丁，§3.5）----
   const shieldWin = createShieldWindow()
+  /** metrics v11：热线窗（**每局一个实例**；R10：严禁模块级状态）。 */
+  const hotLane = createHotLaneWindow()
   const shotRegistry: AimShotTable = new Map()
   const settleAimShot = (id: number, isPlayer: boolean): AimShotRec | null =>
     takeAimShot(shotRegistry, id, isPlayer)
@@ -797,6 +814,9 @@ export function runEvalOne(
         if (e.bulletId !== undefined) settleHurtShot(e.bulletId)
       } else if (e.type === 'player_damage') {
         tel.playerDamageTaken += (e as { damage: number }).damage
+        // metrics v11（idx75）：开窗——源 id 直抄 `bulletOwnerId`（不走 registry，§3.0）。
+        const ownerId = (e as { bulletOwnerId?: number }).bulletOwnerId
+        if (ownerId !== undefined) hotLaneOpenFromTank(hotLane, world, ownerId)
         // metrics v8：开局窗累计（事件属 tick t-1；tick < 600 即局内前 600 tick）。
         if (t - 1 < DMG_FIRST_WINDOW_TICKS) tel.dmgFirst600 += (e as { damage: number }).damage
         // metrics v10：伤害成簇（事件序列）+ 低血期承伤（与 rollout 同口径）。
@@ -940,11 +960,15 @@ export function runEvalOne(
         else tel.encl1Ticks++
         if (encl > tel.enclMax) tel.enclMax = encl
       }
-      // 本批暴露杠杆（A 拌入）：非豁免拍才累计（与 rollout 同式，§3.6）。
-      if (!exposureExempt(world, shieldWin)) {
+      // 本批暴露杠杆（A 拌入）：非豁免拍才累计（与 rollout 同式，§3.6）；v11 两列同规。
+      const exempt = exposureExempt(world, shieldWin)
+      if (!exempt) {
         tel.enclWeightTicks += enclWeightTick(world)
         tel.cornerWeightTicks += cornerWeightTick(world)
+        tel.nearSqSum += nearSqWeightTick(world) // 74（v11）
       }
+      // 75（v11）：热线窗每拍都推进（关窗只看源转向/死亡/局终），豁免拍不计数（决定 A）。
+      tel.postHitLaneTicks += hotLaneTick(hotLane, world, exempt)
       if (playerHpRatio(world) < DANGER_HP_THRESHOLD) tel.dangerTicks++
       if (inThreatLane(world)) {
         tel.threatTicks++
@@ -1151,6 +1175,8 @@ export function runEvalOne(
     hurtWeight: tel.hurtWeight,
     enclWeightTicks: tel.enclWeightTicks,
     cornerWeightTicks: tel.cornerWeightTicks,
+    nearSqSum: tel.nearSqSum,
+    postHitLaneTicks: tel.postHitLaneTicks,
     cellsVisited: tel.cellsVisited.size,
     firstKillTick: tel.firstKillTick ?? null,
     stuckTicks: tel.stuckTicks,
@@ -1334,6 +1360,9 @@ export function main(argv: string[]): void {
     hurtWeight: res.hurtWeight,
     enclWeightTicks: res.enclWeightTicks,
     cornerWeightTicks: res.cornerWeightTicks,
+    // metrics v11（idx74–75）：顶层直出（与 rollout metrics 行同源；eval_rows 侧经 EVAL_V11_KEYS）。
+    nearSqSum: res.nearSqSum,
+    postHitLaneTicks: res.postHitLaneTicks,
     hitRate: res.playerShots > 0 ? +(res.enemyHits / res.playerShots).toFixed(4) : 0,
     powerUpsCollected: res.powerUpsCollected,
     // T0.4 顶层贯通（§3.3 🟠🔴）：EvalStore / eval_dispatch.record() 直读这些键。
