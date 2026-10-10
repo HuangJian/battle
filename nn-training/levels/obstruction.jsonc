@@ -1,0 +1,174 @@
+// 关卡 obstruction —— 障碍物感知基础图（2026-10-10）
+//
+// 这是**关卡配置**（任务定义 / 语料身份），与**课程配置**（curricula/*.jsonc）分离：
+//   · 本文件持有：grid / forces / count / 出生点 / 命 / difficulty / max_ticks —— 全部**环境语义**。
+//   · 课程文件通过 `"level": "obstruction"` 引用本文件；课程**不得**重复声明这四类键
+//     （stages / difficulty / max_ticks / player —— load_course 冲突即 raise）。
+//
+// ── 几何（grid = stageData 13×13 数字瓦格，经 stages.ts::decodeLevel 解成引擎原生
+//    26×26 子块，见 src/constants.ts:17 GRID=26）────────────────────────────────
+//   · **无外围钢圈**：整场 26×26 子块全空，边界 = 场地边缘（坦克出不去，子弹照飞）。经典关
+//      本来就不画外框（stages.ts LEVELS[0] 首行全 0），故与本仓库一致。
+//   · **中心 2×2 钢铁**：tile (6,6) = 码 6（WHOLE）→ 子块 rows 12-13 / cols 12-13。
+//   · **4 个象限中心 2×2 障碍**：26 子块切 4 个 13×13 矩形。
+//       ⚠ 13 是奇数 ⇒ 象限边界落在**第 13 条子块**（tile 中间），象限中心不是一个 tile。
+//       取最接近的**偶数对齐**落点（即整 tile，误差 ≤0.5 子块）：
+//         TL tile (3,3) · TR tile (3,9) · BL tile (9,3) · BR tile (9,9)
+//       每格一个整 tile = 正好 2×2 子块；材质 = 砖(1) / 水(13) / 草(11) / 雪(12)。
+//   · **基地**：删掉码 15（无基地），保留经典基地 U 形砖墙
+//         tile (5,11)=18 · (6,11)=4 · (7,11)=17 · (5,12)=3 · (7,12)=5
+//       → 子块 = 左墙 col 11 rows 23-25 · 顶 row 23 cols 11-14 · 右墙 col 14 rows 23-25。
+//       底边之外是场地边缘 ⇒ 基地位（子块 cols 12-13 / rows 24-25）成为**朝底边封死的 2×2 口袋**，
+//       坦克进不去（除非打掉砖）。这是「不设基地、只留环基地墙」的字面结果。
+//   · 无基地码 ⇒ 目标 = 全歼 20 敌（outcome: stage_clear / lives_exhausted / timeout），
+//     与 s5-open20 同口径。
+//
+// ── 出生点（26×26 子块坐标 = 2×2 坦克左上角；越界/压 solid/压基地即 decode 期抛错，
+//    src/nn/config-stage.ts:89-103 assertSpawnClear）─────────────────────────────
+//   · player：**p1 / p2 两个经典位** —— PLAYER_SPAWN {col:8,row:24} / DEFAULT_P2_SPAWN {col:16,row:24}
+//     （src/constants.ts:81,89，两者分列基地口袋左右两侧）。
+//   · enemy：**最顶行左 / 中 / 右** —— {0,0} / {12,0} / {24,0}（2×2 坦克在 row 0 占 rows 0-1）。
+//
+// ── 随机化 = spawn_variants（唯一能按 (stage,seed) 变形的机制；注意它**只改出生点**，
+//    改不了 grid —— src/nn/config-stage.ts:39-69 / TS 选点 = pickVariantIndex 哈希）──────
+//   每关 6 元池 = {p1,p2} × {敌首点=左,中,右}；引擎 spawner 按轮转取点
+//   （src/game/SimulationSpawn.ts:82-84），故把「本轮随机选中的那个点」排在列表首位。
+//   语料与 rollout 用同一哈希 ⇒ BC 分布与 RL 分布自动对齐。
+//
+// ── 材质轮换 = 4 个 stage 循环移位（grid 每 stage 固定，跨关才轮换）────────────
+//   tex-a: TL=砖 TR=水 BL=草 BR=雪      tex-b: TL=水 TR=草 BL=雪 BR=砖
+//   tex-c: TL=草 TR=雪 BL=砖 BR=水      tex-d: TL=雪 TR=砖 BL=水 BR=草
+//   每张图仍四材质各一；跨 4 关每个象限轮到每种材质。**等效随机需要课程侧 `seed_rotate`**
+//   （否则只跑第一关 ⇒ 材质位置固定）。
+//
+// ── 参数（本次一次拍定）──────────────────────────────────────────────────────
+//   count=20 / forces = 四类各 5 交替（a=basic b=fast c=power d=armor，与 x20 主线
+//   ladder-c20-lives1 同串口径）/ lives=1（仓库任务口径）/ max_ticks=12000。
+//   ⚠ max_ticks：ladder 家族的立案公式是 600×count+900 = **12900**（DECISIONS
+//   §2026-09-13-goalnn-max-ticks-rule）。本图按用户显式选择用 12000；此键属 C 类
+//   （预算/测量，随时可改、不破坏血脉），要合规则改成 12900 即可。
+//
+// ── 课程侧 ────────────────────────────────────────────────────────────────
+//   本文件 4 关 → 自定义关 ID **2000-2003**（CUSTOM_STAGE_BASE=2000）。
+//   课程写 `"level": "obstruction"` + `"eval_stages": "2000-2003"` + `seed_rotate: N`。
+{
+  "version": 1,
+  "name": "obstruction",
+  "difficulty": "hard",
+  "max_ticks": 12000,
+  "player": { "lives": 1, "level": 0 },
+  "stages": [
+    {
+      "name": "obstruction-tex-a",
+      "grid": [
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 1, 0, 0, 0, 0, 0, 13, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 11, 0, 0, 0, 0, 0, 12, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 18, 4, 17, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 3, 0, 5, 0, 0, 0, 0, 0],
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 20,
+      "spawn_variants": [
+        { "player_spawn": { "col": 8, "row": 24 }, "enemy_spawns": [{ "col": 0, "row": 0 }, { "col": 12, "row": 0 }, { "col": 24, "row": 0 }] },
+        { "player_spawn": { "col": 8, "row": 24 }, "enemy_spawns": [{ "col": 12, "row": 0 }, { "col": 24, "row": 0 }, { "col": 0, "row": 0 }] },
+        { "player_spawn": { "col": 8, "row": 24 }, "enemy_spawns": [{ "col": 24, "row": 0 }, { "col": 0, "row": 0 }, { "col": 12, "row": 0 }] },
+        { "player_spawn": { "col": 16, "row": 24 }, "enemy_spawns": [{ "col": 0, "row": 0 }, { "col": 12, "row": 0 }, { "col": 24, "row": 0 }] },
+        { "player_spawn": { "col": 16, "row": 24 }, "enemy_spawns": [{ "col": 12, "row": 0 }, { "col": 24, "row": 0 }, { "col": 0, "row": 0 }] },
+        { "player_spawn": { "col": 16, "row": 24 }, "enemy_spawns": [{ "col": 24, "row": 0 }, { "col": 0, "row": 0 }, { "col": 12, "row": 0 }] },
+      ],
+    },
+    {
+      "name": "obstruction-tex-b",
+      "grid": [
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 13, 0, 0, 0, 0, 0, 11, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 12, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 18, 4, 17, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 3, 0, 5, 0, 0, 0, 0, 0],
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 20,
+      "spawn_variants": [
+        { "player_spawn": { "col": 8, "row": 24 }, "enemy_spawns": [{ "col": 0, "row": 0 }, { "col": 12, "row": 0 }, { "col": 24, "row": 0 }] },
+        { "player_spawn": { "col": 8, "row": 24 }, "enemy_spawns": [{ "col": 12, "row": 0 }, { "col": 24, "row": 0 }, { "col": 0, "row": 0 }] },
+        { "player_spawn": { "col": 8, "row": 24 }, "enemy_spawns": [{ "col": 24, "row": 0 }, { "col": 0, "row": 0 }, { "col": 12, "row": 0 }] },
+        { "player_spawn": { "col": 16, "row": 24 }, "enemy_spawns": [{ "col": 0, "row": 0 }, { "col": 12, "row": 0 }, { "col": 24, "row": 0 }] },
+        { "player_spawn": { "col": 16, "row": 24 }, "enemy_spawns": [{ "col": 12, "row": 0 }, { "col": 24, "row": 0 }, { "col": 0, "row": 0 }] },
+        { "player_spawn": { "col": 16, "row": 24 }, "enemy_spawns": [{ "col": 24, "row": 0 }, { "col": 0, "row": 0 }, { "col": 12, "row": 0 }] },
+      ],
+    },
+    {
+      "name": "obstruction-tex-c",
+      "grid": [
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 11, 0, 0, 0, 0, 0, 12, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 1, 0, 0, 0, 0, 0, 13, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 18, 4, 17, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 3, 0, 5, 0, 0, 0, 0, 0],
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 20,
+      "spawn_variants": [
+        { "player_spawn": { "col": 8, "row": 24 }, "enemy_spawns": [{ "col": 0, "row": 0 }, { "col": 12, "row": 0 }, { "col": 24, "row": 0 }] },
+        { "player_spawn": { "col": 8, "row": 24 }, "enemy_spawns": [{ "col": 12, "row": 0 }, { "col": 24, "row": 0 }, { "col": 0, "row": 0 }] },
+        { "player_spawn": { "col": 8, "row": 24 }, "enemy_spawns": [{ "col": 24, "row": 0 }, { "col": 0, "row": 0 }, { "col": 12, "row": 0 }] },
+        { "player_spawn": { "col": 16, "row": 24 }, "enemy_spawns": [{ "col": 0, "row": 0 }, { "col": 12, "row": 0 }, { "col": 24, "row": 0 }] },
+        { "player_spawn": { "col": 16, "row": 24 }, "enemy_spawns": [{ "col": 12, "row": 0 }, { "col": 24, "row": 0 }, { "col": 0, "row": 0 }] },
+        { "player_spawn": { "col": 16, "row": 24 }, "enemy_spawns": [{ "col": 24, "row": 0 }, { "col": 0, "row": 0 }, { "col": 12, "row": 0 }] },
+      ],
+    },
+    {
+      "name": "obstruction-tex-d",
+      "grid": [
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 12, 0, 0, 0, 0, 0, 1, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 6, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 13, 0, 0, 0, 0, 0, 11, 0, 0, 0],
+        [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 18, 4, 17, 0, 0, 0, 0, 0],
+        [0, 0, 0, 0, 0, 3, 0, 5, 0, 0, 0, 0, 0],
+      ],
+      "forces": "abcdabcdabcdabcdabcd",
+      "count": 20,
+      "spawn_variants": [
+        { "player_spawn": { "col": 8, "row": 24 }, "enemy_spawns": [{ "col": 0, "row": 0 }, { "col": 12, "row": 0 }, { "col": 24, "row": 0 }] },
+        { "player_spawn": { "col": 8, "row": 24 }, "enemy_spawns": [{ "col": 12, "row": 0 }, { "col": 24, "row": 0 }, { "col": 0, "row": 0 }] },
+        { "player_spawn": { "col": 8, "row": 24 }, "enemy_spawns": [{ "col": 24, "row": 0 }, { "col": 0, "row": 0 }, { "col": 12, "row": 0 }] },
+        { "player_spawn": { "col": 16, "row": 24 }, "enemy_spawns": [{ "col": 0, "row": 0 }, { "col": 12, "row": 0 }, { "col": 24, "row": 0 }] },
+        { "player_spawn": { "col": 16, "row": 24 }, "enemy_spawns": [{ "col": 12, "row": 0 }, { "col": 24, "row": 0 }, { "col": 0, "row": 0 }] },
+        { "player_spawn": { "col": 16, "row": 24 }, "enemy_spawns": [{ "col": 24, "row": 0 }, { "col": 0, "row": 0 }, { "col": 12, "row": 0 }] },
+      ],
+    },
+  ],
+}
