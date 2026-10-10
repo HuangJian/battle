@@ -8767,3 +8767,56 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   `bash tools/githook/nn-python-gate.sh` 与根 `bun run check` 绿。
   —— 全文（实施记录 / 逐条改判 / 修正记录）→ `plan/nn-training-test-debt-cleanup.plan.md` §2.0·§7 ·
   归属表 → `docs/nn/test-contract-map.md` · 工程档 → `docs/nn/engineering.md` §71
+
+## §2026-10-10-goalnn-pytest-top16-round2（2026-10-10，pytest 最慢 16 条第二轮：控制面第三条 HTTP 缝 + 三处全仓扫描的口径内提速；全量 sum_min −16%、墙钟中位 −24%）
+
+- **背景**：用户指令「pytest 耗时又来到了接近一分钟…找出耗时最长的 16 个测试，尝试优化；`--forkdist 8` 已调过很多次、不要再试」。
+  按 §43 的手法量准（forkdist 8 不动；4 连跑取 min；本轮新增**纯净 worktree 基线**与 `cProfile` 定位）后，16 条里
+  7 条真能改、9 条属「不可动」（真 torch 固定成本 / 秒级真窗 / 真子进程）。
+- **备选与否决**：① 单次 `--durations` 下结论 —— **否**（同配置墙钟 31~58s，名次会换人）；② `HTTP_PROXY=""` 全局治
+  「1.4s 空等」—— **否**（治的是本容器走代理的现象，不是「假 hub 用例本就不该发请求」这条判据，且会掩掉真需要代理的行为）；
+  ③ 两条 lock 全仓用例合一 —— **否**（判据粒度 > 省下的 4s）；④ `graph()` 裸 `@cache` —— **否**（合成源码的自证用例
+  monkeypatch 包目录）；⑤ 扫描结果落盘共享给各 worker —— **否**（陈旧缓存 = 守卫静默变弱）；⑥ 为迁就测试改生产配速 —— **否**（§14 先例）。
+- **决定**：① 假 hub 的桩补齐**第三条**控制面缝（`report_prefetch`）：`tests/helpers/hub_seams.stub_round_http` + 4 处显式补桩
+  —— 此后**新加控制面请求必须同步进该助手**（否则一批用例各白等 ~1.4s/轮；本轮这类共 14 条 / ~22s）；
+  ② `text_asserts` 口径 A/B 共用**一次索引**、`_producer_funcs` 单遍、绑定预计算、`.py` 面字面量预筛（判据逐条不变）；
+  ③ `remote_dag.graph()` / `remote_modules()` 进程内缓存，**键 = 三个包目录的当前取值**（合成用例 monkeypatch 目录后各算一份），返回值给副本；
+  ④ `test_lock_reentrancy` 的「无类且无锁词」预筛（充分性见 `_needs_index`）。
+- **违反后果**：新加控制面请求不打桩 ⇒ 一批假 hub 用例集体多付秒级；给扫描助手加裸 `@cache` ⇒ 合成源码用例读到真仓库那份（哑绿）；
+  扫描结果跨进程共享缓存 ⇒ 陈旧 = 守卫**静默**失效（比慢严重得多）。
+- **测试/证据**：nn 门禁绿（ruff + mypy 617 文件 + **3971 passed / 3 skipped**）· 全量 `sum_min` 182.3 → **152.9s**、
+  `--forkdist 8` 墙钟 min 37 → **31s**（中位 43.5 → 33s），纯净 worktree 同配置 min **36s** 作基线；
+  今早又做了一次两棵树交叉插空的 solo 对照（各 4 次）：min **33.8 → 27.7s**，与 −16% 同向同量级 ——
+  **注意门禁单跑不是 A/B 的量**（同一腿在本机可为 27s 或 57s，两列完全重叠）·
+  旧/新对账：`text_asserts` 全仓 241 个命中文件**条数 + 命中行号 0 mismatch**、lock `_check` 2.49 → 2.02s 且
+  `sites/problems/opaque` 逐条相同。另：满载全量下 `test_offline_deliver_proc::test_restart_does_not_replay_consumed_commands`
+  约 1/6 概率红 —— **既存负载 flake**（纯净 worktree 同款复现、与改动零依赖交集、隔离 12/12 绿），本轮不动。
+  —— 同日续：**已修** —— 见下一条 §2026-10-10-goalnn-deliverproc-final-flake（修前/修后 A/B：纯净树 3/6 红 → 本树 0/6 红）。
+  —— 全文（量法 / 逐条表 / 不可动的 9 条 / 被否决）→ `docs/nn/engineering.md` §72
+
+## §2026-10-10-goalnn-deliverproc-final-flake（2026-10-10，补传腿重启的满载 flake：判据对齐「可判定」的证据 + 账本优先）
+
+- **背景**：慢层 `tests/remote/test_offline_deliver_proc.py::test_restart_does_not_replay_consumed_commands`
+  满载约 1/6 红（`result POST 出现 2 次`），单跑/空载必绿；同一用例 §74 记过另一种显形（自锁挂死）。
+  用户指令：修这条既存 flake。
+- **量出来的机制**（只读探针挂在并发全量上）：`hub 收到 POST` 与 `子进程把「已送」落盘` 之间隔着一趟
+  真网络 —— 在那窗口里杀子进程，父侧**所有**磁盘证据（状态面快照 + 账本）都还说「没送」⇒ 按设计
+  **重述一次**（hub 侧覆盖写）。逐轮产物同理。
+- **备选与否决**：① 让子进程**先落「已送」再 POST** —— **否**（把「重复一次」换成「丢一份段末摘要」，
+  与 §10.3「未送达要响亮记录」的已记录要求冲突；两将军问题下只能二选一）；② 父侧问 hub「收到了吗」
+  —— **否**（父侧零网络是这条腿的隔离面之一，且隧道断时它照样答不出来）；③ 把断言放宽成 `<= 2`
+  —— **否**（含糊、且丢了「已落盘 ⇒ 绝不重述」这条真判据）；④ 把两条 lock/慢层用例的杀点一直
+  留在窗口里 —— **否**（不可判定 = 必 flake）。
+- **决定**：① 慢层用例的**杀点同步到磁盘证据**（账本记全 3 轮 + `result_done`；不是 hub 那边的计数），
+  此后断言「result POST 恰好 1 次 · `final` 行只有 1 行 · 已投轮次各恰好 1 次」，重启后再摆第 4 轮
+  断言**新积压照推**；② 窗口那条路（`result_done` 钉成 False ⇒ 必须重述 + 有界返回）留在快层
+  §74 的 `test_restart_restating_the_final_does_not_self_lock`；③ `_result_done_from_disk()` 改
+  **账本优先、快照兜底**（账本写完即落盘，快照每 tick 才刷 ⇒ 先看快照会白重述一次 ~1.9MB 的摘要，
+  且 `close()` 会虚报「段末摘要未送达」）。
+- **违反后果**：再往「窗口里恰好一次」上写判据 ⇒ 满载必 flake（不可判定）；把子进程改成「先落盘后
+  POST」⇒ 段末摘要会**静默消失**（比重复投递严重）；父侧为了判重去碰网络 ⇒ 破坏这条腿的隔离面。
+- **测试/证据**：新用例 `test_result_done_prefers_the_ledger_over_a_stale_status_snapshot` 先红后绿 ·
+  慢层单文件 12 连跑 0 红 · 两两并发全量 A/B（各 3 波 × 2 并发、同一时段同一配置）：改动后 **0/6 红**，
+  纯净 HEAD（`/home/hj/battle-base`）**3/6 红且全是同一条断言**（`result POST 出现 2 次`）·
+  nn 门禁绿（ruff + mypy + 3971/3971）。
+  —— 全文（探针原始记录 / 逐条判据 / 被否决）→ `docs/nn/remote-transport.md` §77

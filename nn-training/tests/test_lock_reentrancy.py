@@ -33,6 +33,10 @@
   **完全不在管辖范围**；补上后受管辖锁点 209 个（其中这一族是新增的闭包临界区）。
 * **例外通道**：临界区那一行（`with` / `.acquire()`，或它的上一行）带
   `# lock-reentrant-ok: <理由>` ⇒ 跳过该点。今天 0 处 —— 新加一处必须写明「为什么同一线程重入安全」。
+* **廉价预筛（2026-10-10 提速）**：**无类且无锁词**的文件不进 `ast.parse` —— 判据见
+  `_needs_index` 的注释（充分条件，不是近似）：锁点必然含 lock/cv/cond/sem 词，跨文件可达只走
+  组合组（类继承）。扫描面 622 文件里 249 个（40%）命中此条件，而两个全仓用例各要扫一遍
+  （`_REPO_CACHE` 只在**同一进程**内共享，forkdist 下它们常被分到不同 worker）。
 
 ## 红检（本用例自带反探针）
 
@@ -78,6 +82,24 @@ REENTRANT: Final = frozenset({"RLock", "Condition"})
 LOCK_SUFFIX: Final = re.compile(r"(lock|cv|cond|sem)$", re.I)
 #: 例外标注（临界区那一行或它的上一行）。
 OK_MARK: Final = re.compile(r"lock-reentrant-ok:\s*\S")
+#: 廉价预筛的「类」判据（`class` 关键字；超集：注释/字符串里出现也算命中，只会少跳不会误跳）。
+CLASS_TOKEN: Final = re.compile(r"\bclass\b")
+#: 廉价预筛的「锁词」判据：`LOCK_SUFFIX` 的四个词根 + `CTORS` 全名都含它（见 `_needs_index`）。
+LOCK_WORD: Final = re.compile(r"lock|sem|cond|cv", re.I)
+
+
+def _needs_index(text: str) -> bool:
+    """这份源码可能贡献锁点 / 组合图节点吗？—— 不相交就整文件跳过（省 parse + walk）。
+
+    充分性（逐条对应本文件被跳过的三类东西）：
+      · **锁点**（`with` 临界区 / `.acquire()`）：`_lock_of` 只认 `LOCK_SUFFIX` 命名的表达式
+        （`self.<attr>` / 局部 / 全局 / 导入名），构造名（`CTORS`）也只服务已过后缀的名字
+        ⇒ 这样的名字里必然出现 lock/cv/cond/sem 之一；
+      · **跨文件可达**：`_resolve` 的三种调用里只有 `self.f()` 会跨文件，且只走**组合组**
+        （类继承/混入）⇒ 一个类都没有的文件永远不会被解析成可达目标；
+      · **类图**（`bases` / `children` / `cls_mods`）：由类定义喂 —— 无类的文件不贡献。
+    """
+    return bool(CLASS_TOKEN.search(text) or LOCK_WORD.search(text))
 #: 扫描面下锁点的下限（结构性 sanity：解析面缩水/空转时当场红，而不是「0 命中」的假绿）。
 MIN_LOCK_SITES: Final = 60
 #: 目标面棘轮：临界区里「看得到调用、看不到目标」的**去重目标数**（今天 15，见文件头「边界」）。
@@ -506,13 +528,16 @@ _REPO_CACHE: dict[str, _Report] = {}
 def _repo_report() -> _Report:
     """全仓扫描（源文件白名单见 `SCAN_ROOTS`）——只跑一次，两个用例共用。"""
     if not _REPO_CACHE:
-        sources = {
-            str(p): source_scan.read_text(str(p))
-            for root in SCAN_ROOTS
-            for p in source_scan.py_files(str(root))
-            if not any(part in SKIP_PARTS for part in p.parts)
-        }
-        assert len(sources) > 200, f"扫描面缩水了（只拿到 {len(sources)} 个文件）"
+        sources: dict[str, str] = {}
+        for root in SCAN_ROOTS:
+            for p in source_scan.py_files(str(root)):
+                if any(part in SKIP_PARTS for part in p.parts):
+                    continue
+                text = source_scan.read_text(str(p))
+                if not _needs_index(text):  # 预筛：与判据不相交的文件（见 `_needs_index`）
+                    continue
+                sources[str(p)] = text
+        assert len(sources) > 200, f"扫描面缩水了（预筛后只剩 {len(sources)} 个文件）"
         _REPO_CACHE["report"] = _check(sources)
     return _REPO_CACHE["report"]
 

@@ -170,7 +170,12 @@ class _State:
         )
 
     def ledger(self) -> dict:
-        data = json.loads((self.root / "delivered.json").read_text(encoding="utf-8"))
+        """读账本；**还没落盘时算空账本** —— 重启那几条判据要 poll 它，而子进程第一次落盘之前
+        这个文件并不存在（把「还没写」当异常会让 poll 变成竞态）。"""
+        try:
+            data = json.loads((self.root / "delivered.json").read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return {}
         return data if isinstance(data, dict) else {}
 
 
@@ -275,9 +280,20 @@ def test_control_file_is_consumed_incrementally_and_half_lines_survive(
 
 
 def test_restart_does_not_replay_consumed_commands(tmp_path: Path, hub: _HubStub) -> None:
-    """★C15：子进程被杀后按需重启 ⇒ 从已写字节处继续，**不重放**已消费的 `final`。
+    """★C15：子进程被杀后按需重启 ⇒ 从已写字节处继续，**不重放**已消费的请求。
 
-    判据：段末摘要只被投一次（若从头重放，就会看到第二次 `/offline/result` POST）。
+    判据（都在**确定性的杀点**上成立）：段末摘要只被投一次（若从头重放，就会看到第二次
+    `/offline/result` POST）· 控制文件里那行 `final` 只有一行 · 已投过的逐轮产物**各恰好一次**
+    —— 而重启后**新的**那一轮照样被推上去（respawn 不是罢工）。
+
+    ⚠ 杀子进程的**时机**必须落在「上一批活全干完、且结果都落了盘」之后（下面两条 poll）：
+    hub 收到 POST 与子进程把结果落盘之间隔着一趟真网络，在那窗口里杀 ⇒ 父侧所有磁盘证据
+    都还说着「没送到」⇒ 按设计**重发一次**（at-least-once；hub 侧覆盖写，重发安全）。
+    那是**设计行为，不是重放**，而「恰好一次」在那个窗口里**不可判定** —— 这正是本用例
+    2026-10-10 那条满载 flake 的根因（只读探针实测：窗口里账本与状态面快照两边都还没落）。
+    窗口那条路仍被快层钉住：
+    `test_offline_deliver_async.py::test_restart_restating_the_final_does_not_self_lock`
+    （把 `result_done` 钉成 False ⇒ 确定性触发重述 + 有界返回）。
     """
     st = _State(tmp_path, hub)
     d = st.d
@@ -285,6 +301,13 @@ def test_restart_does_not_replay_consumed_commands(tmp_path: Path, hub: _HubStub
     try:
         d.submit_final(it_end=3, state="complete", summary={"last_it": 3}, end_it_reached=True)
         assert _wait_until(lambda: len(hub.result_bodies()) == 1, timeout=20.0), st.logs
+        # 安静点 = 一批活全干完**且落了盘**（账本是子进程自己写的：一轮推完/摘要送完当即落）。
+        # 只等 hub 那边的计数不够：POST 到了 hub 而子进程还没落盘时杀，重启会照设计重发
+        # （逐轮产物同那个道理），计数就会比预期多一次。
+        assert _wait_until(
+            lambda: sorted(st.ledger().get("artifacts") or []) == [1, 2, 3], timeout=25.0
+        ), st.logs
+        assert _wait_until(lambda: bool(st.ledger().get("result_done")), timeout=20.0), st.logs
         proc = d._proc
         assert proc is not None
         proc.kill()  # 夹具模拟的工作量：子进程「崩了」（OOM / 被平台杀掉）
@@ -293,14 +316,24 @@ def test_restart_does_not_replay_consumed_commands(tmp_path: Path, hub: _HubStub
         d.submit_round(1)
         assert _wait_until(lambda: d.status()["restarts"] == 1, timeout=20.0), st.logs
         assert any("按需重启" in m for m in st.logs), f"重启必须响亮：{st.logs}"
-        assert _wait_until(lambda: len(hub.artifact_bodies()) == 3, timeout=25.0), (
-            f"重启后积压没推完：{st.logs}"
+        # 重启之后摆上第 4 轮：新积压必须被推上去（respawn 之后这条腿照常干活）
+        _make_artifacts(st.root, iters=(1, 2, 3, 4))
+        assert _wait_until(lambda: len(hub.artifact_bodies()) == 4, timeout=25.0), (
+            f"重启后新积压没推上去：{st.logs}"
         )
     finally:
         d.close(timeout=10.0)
     assert len(hub.result_bodies()) == 1, (
         f"重启重放了已消费的 final（result POST 出现 {len(hub.result_bodies())} 次）"
     )
+    assert sorted(int(b.get("it") or 0) for b in hub.artifact_bodies()) == [1, 2, 3, 4], (
+        "重启后已投过的轮次被重投了（每轮恰好一次）"
+    )
+    # 最直接的那条判据：控制文件里的 `final` 行数（重述会让它在文件里再出现一次）
+    ctl = Path(str(d.status()["ctl"]))
+    lines = [json.loads(x) for x in ctl.read_text(encoding="utf-8").splitlines() if x.strip()]
+    n_final = sum(1 for x in lines if "final" in x)  # 计数写在 assert 外（见 text_asserts 口径）
+    assert n_final == 1, f"已落盘的段末摘要不许被重述：{lines}"
 
 
 def test_boot_failure_degrades_to_thread_mode_and_still_delivers(

@@ -195,6 +195,8 @@ def test_filler_uses_p2_and_only_download_payload(tmp_path: Path, monkeypatch) -
 
     monkeypatch.setattr(JR, "peek_jobs", _peek)
     monkeypatch.setattr(JR, "PREFETCH_ROUND_SEC", 0.05)
+    # 第三條 HTTP 缝（预取状态上报）：不打桩就首轮白等 ~1.4s（见 tests/helpers/hub_seams.py）。
+    monkeypatch.setattr(JR, "report_prefetch", lambda *a, **k: False)
 
     def _dl(base_url, token, jid, *, bulk_prio=BULK_P1_CRITICAL, wire_jid="", log=None, **kw):
         calls.append((jid, bulk_prio, wire_jid))
@@ -241,6 +243,7 @@ def test_filler_swallows_preemption_and_errors(tmp_path: Path, monkeypatch) -> N
 
     monkeypatch.setattr(JR, "download_payload", _dl)
     monkeypatch.setattr(JR, "PREFETCH_ROUND_SEC", 0.05)  # 别真等 5s 一轮
+    monkeypatch.setattr(JR, "report_prefetch", lambda *a, **k: False)  # 第三条 HTTP 缝
     logs: list[str] = []
     stop = threading.Event()
 
@@ -313,7 +316,10 @@ def test_worker_loop_uses_prefetched_payload_without_downloading(tmp_path: Path,
     # `base_url="http://hub"` 发真 HTTP，靠 `except Exception: pass` 吞掉连接失败。
     # 那条路径本机实测每次 1.4s（不可达地址 + 重试），两个 job = 2.9s 纯空等
     # （本用例总耗时几乎全是它）——§14 的「测试空等生产超时」同型。
+    # 2026-10-10：第三条同型的缝 = 预取状态上报（`report_prefetch`，每个填充线程**首轮
+    # 无条件发一笔**）——同上打桩（见 tests/helpers/hub_seams.py 的模块头）。
     monkeypatch.setattr(JR, "job_ready", lambda *a, **k: None)
+    monkeypatch.setattr(JR, "report_prefetch", lambda *a, **k: False)
 
     store = PrefetchStore(tmp_path)
     real_init = PrefetchStore.__init__
@@ -374,6 +380,9 @@ def test_prefetch_survives_the_cancel_watcher_control_ring(tmp_path: Path, monke
     # `PREFETCH_ROUND_SEC`）的 global 解析都在 `remote.job_round`；HTTP 核心在 `remote.http`。
     monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: ([_summary(payload, JID)], False))
     monkeypatch.setattr(JR, "PREFETCH_ROUND_SEC", 0.05)
+    # 第三条 HTTP 缝：本用例只把 `remote.http._request` 换成假响应，而 `job_lifecycle`
+    # 是 `from remote.http import _request`（自己持一份引用）⇒ 上报腿仍会真发 HTTP（1.4s）。
+    monkeypatch.setattr(JR, "report_prefetch", lambda *a, **k: False)
     # 控制面窗口在本用例里一直开着 ⇒ 把让路预算压小，否则每次 `pace` 要停满 5s。
     monkeypatch.setattr(W._BULK, "_yield_budget", 0.01)
     monkeypatch.setattr(W._BULK, "_yield_step", 0.005)
@@ -488,6 +497,7 @@ def test_prefetch_hit_is_visible_in_the_wire_line(tmp_path: Path, monkeypatch) -
     monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: ([], False))
     monkeypatch.setattr(JR, "start_cancel_watcher", lambda *a, **k: None)
     monkeypatch.setattr(JR, "job_ready", lambda *a, **k: None)
+    monkeypatch.setattr(JR, "report_prefetch", lambda *a, **k: False)  # 第三条 HTTP 缝
     monkeypatch.setattr(W, "_release_cloud_machine", lambda *a, **k: None)
     store = PrefetchStore(tmp_path)
     real_init = PrefetchStore.__init__
