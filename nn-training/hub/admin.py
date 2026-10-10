@@ -1,7 +1,7 @@
 """hub/admin.py —— HubHandler 的 **admin 控制面**（2026-09-23 S4 第三步，从 `hub/server.py` 拆出）。
 
 运维/控制面路由：云端停机与恢复 · 课程表热切 · 队列与状态快照 · GPU 推送 worker 清单 ·
-net-probe（隧道 A/B 的确定性载荷）。它们与数据面（claim / result / blob / task-pack …）
+net-probe（隧道 A/B 的确定性载荷）· 采样节点自动注册（`/admin/nodes*`，写 rl-config `nodes[]`）。它们与数据面（claim / result / blob / task-pack …）
 职责分明，却和 `HubHandler` 其余 40 个方法挤在同一个 1343 行的类里。
 
 ## 依赖方向：混入（调用者依赖被调用者）
@@ -31,12 +31,16 @@ from __future__ import annotations
 
 import json
 import random
+import re
 import time
 import urllib.parse
 from email.message import Message
 from io import BufferedIOBase
+from pathlib import Path
 from typing import Any
 
+from common import distribution
+from common.fs import atomic_write_json
 from common.protocol import ProtocolError
 
 # ------------------------------------------------------------------ net-probe（M0）
@@ -73,6 +77,71 @@ def _deterministic_fill(n: int) -> bytes:
     return block * q + block[:rem]
 
 
+# ---------------------------------------------------------- 采样节点自动注册（2026-10-10）
+#
+# plan/rollout-node-auto-register v2：云机（采样节点）自报 {id,url,authKey} 到 hub，hub 是
+# rl-config.json 的**第二作者**（控制台之外唯一持久写者）。约定（S3 用例钉住）：
+#   * 只动 `nodes[]` 一项 + 原子写 + 无变化不写盘；
+#   * `enabled` 归控制台：新条目 true；既有 managed 条目只在「上一轮干净收工」（带
+#     `unregistered_at`）时恢复 true —— 云机**不顶**控制台在会话进行中的停用；
+#   * `concurrency` 只在**新条目**且 body 给值时才写（F2：缺省不写键 = 派发按 `ping.cpus`）；
+#   * ping 门：`common.distribution.node_ping` 不通 ⇒ 422 不写盘（`skipPing=true` 可绕过，日志响亮）。
+
+#: 节点 id 合法域（与 `dashboard/src/web/view/course-overview.ts::validWorkerId` 同域：
+#: 1-40 位 `[A-Za-z0-9._-]`；它会进日志与 rl-config，含空格会让「谁在跑」读不出来）。
+_NODE_ID_RE = re.compile(r"[A-Za-z0-9._-]{1,40}")
+#: label（env-link 口径，如 `colab-t`）：同字符集，放宽到 64。
+_NODE_LABEL_RE = re.compile(r"[A-Za-z0-9._-]{1,64}")
+#: 自报并发槽位的合法域（按核数自报；上限留足余量，挡住手抖的 99999）。
+_NODE_CONC_MAX = 1024
+
+
+def _nodes_config_path() -> Path:
+    """rl-config 路径的唯一来源（env `BCITY_RL_CONFIG` > `nn-training/rl-config.json`）。"""
+    return Path(distribution.rl_config_path())
+
+
+def _read_rl_config(path: Path) -> dict | None:
+    """读整份 rl-config（utf-8-sig 容忍 BOM，与 `load_dist_config` 同口径）；读不到 ⇒ None。"""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _merge_managed_node(prev: dict | None, payload: dict) -> dict:
+    """register 的 upsert 合并（F1 语义，唯一权威）。
+
+    * 新条目：`enabled=True`（此后归控制台）；
+    * 既有 managed：只改 `url`/`authKey`/`label`；`concurrency` **永不改**（控制台手工值不被顶）；
+      `enabled` 只在上一轮干净收工（带 `unregistered_at`）时恢复 True，否则原样保留
+      （会话进行中的控制台停用不被云机顶掉）。
+    """
+    if prev is None:
+        node: dict = {
+            "id": payload["id"],
+            "url": payload["url"],
+            "authKey": payload["authKey"],
+            "managed": True,
+            "enabled": True,
+        }
+        if "concurrency" in payload:
+            node["concurrency"] = payload["concurrency"]
+        if "label" in payload:
+            node["label"] = payload["label"]
+        return node
+    node = dict(prev)
+    node["url"] = payload["url"]
+    node["authKey"] = payload["authKey"]
+    if "label" in payload:
+        node["label"] = payload["label"]
+    if node.pop("unregistered_at", None) is not None:
+        node["enabled"] = True  # 上轮干净收工 ⇒ 本轮回来即恢复启用
+    node["managed"] = True
+    return node
+
+
 class AdminRoutes:
     """admin 控制面路由 mixin（`HubHandler(AdminRoutes, BaseHTTPRequestHandler)`）。"""
 
@@ -92,6 +161,8 @@ class AdminRoutes:
     _bytes: Any
     _json: Any
     _query_course: Any
+    _read_raw_body: Any
+    client_address: tuple[str, int]
 
     # ---- 云端停机 / 恢复（§386：停机=发"停机命令"随任务同发；云机先试停机停不掉照常干活） ----
     # 用法：console 在 TrainingLoop 死亡/设计内停车时 GET /admin/workers/halt 置停机态，
@@ -399,3 +470,171 @@ class AdminRoutes:
             self._json({"error": f"请求体截断（声明 {n}，实收 {got}）"}, 400)
             return
         self._json({"bytes": got})
+
+    # ---- 采样节点自动注册（2026-10-10；plan/rollout-node-auto-register v2）----
+
+    def _admin_nodes_list(self) -> None:
+        """GET /admin/nodes —— managed 条目清单（**不回 authKey**：够排障、不多泄露）。
+
+        `last_seen` 有意不在读面里（评审 F4：无合法落点；台账看 hub 日志 + 条目自带的
+        `unregistered_at`）。
+        """
+        if not self._auth_ok():
+            return
+        cfg = _read_rl_config(_nodes_config_path())
+        nodes: list[dict] = []
+        if cfg is not None and isinstance(cfg.get("nodes"), list):
+            keep = ("id", "url", "label", "enabled", "concurrency", "unregistered_at")
+            nodes = [
+                {k: n[k] for k in keep if k in n}
+                for n in cfg["nodes"]
+                if isinstance(n, dict) and n.get("managed")
+            ]
+        self._json({"nodes": nodes, "count": len(nodes)}, 200)
+
+    def _admin_nodes_register(self) -> None:
+        """POST /admin/nodes/register —— 云机自报 upsert（语义见本文件上方「采样节点自动注册」块）。"""
+        if not self._auth_ok():
+            return
+        raw = self._read_raw_body()
+        if raw is None:
+            return
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except ValueError as e:
+            self._json({"error": f"bad json: {e}"}, 400)
+            return
+        if not isinstance(body, dict):
+            self._json({"error": "体必须是对象"}, 400)
+            return
+        nid = str(body.get("id") or "").strip()
+        if not _NODE_ID_RE.fullmatch(nid):
+            self._json({"error": f"id 非法: {nid!r}（只接受 1-40 位字母/数字/._-）"}, 400)
+            return
+        url = str(body.get("url") or "").strip().rstrip("/")
+        if not (url.startswith("http://") or url.startswith("https://")):
+            self._json({"error": f"url 必须是 http(s):// 完整地址，收到 {body.get('url')!r}"}, 400)
+            return
+        auth_key = str(body.get("authKey") or "").strip()
+        if not auth_key:
+            self._json({"error": "authKey 不能为空（节点 tools/agent/agent.auth 的内容）"}, 400)
+            return
+        payload: dict = {"id": nid, "url": url, "authKey": auth_key}
+        if body.get("concurrency") is not None:
+            conc = body.get("concurrency")
+            if isinstance(conc, bool) or not isinstance(conc, int) or not 1 <= conc <= _NODE_CONC_MAX:
+                self._json(
+                    {"error": f"concurrency 需为 1-{_NODE_CONC_MAX} 的整数，收到 {conc!r}"}, 400
+                )
+                return
+            payload["concurrency"] = conc
+        if body.get("label"):
+            label = str(body["label"]).strip()
+            if not _NODE_LABEL_RE.fullmatch(label):
+                self._json({"error": f"label 非法: {label!r}（1-64 位 [A-Za-z0-9._-]）"}, 400)
+                return
+            payload["label"] = label
+
+        path = _nodes_config_path()
+        cfg = _read_rl_config(path)
+        if cfg is None:
+            self._json({"error": f"rl-config.json 读不到或不是对象: {path}"}, 409)
+            return
+        raw_nodes = cfg.get("nodes")
+        nodes: list[Any] = list(raw_nodes) if isinstance(raw_nodes, list) else []
+        idx = next(
+            (i for i, n in enumerate(nodes) if isinstance(n, dict) and n.get("id") == nid),
+            -1,
+        )
+        prev = nodes[idx] if idx >= 0 else None
+        if prev is not None and not prev.get("managed"):
+            self._json(
+                {"error": f"id {nid} 已被本机表节点占用（非 managed）——云机不许覆盖：换 id 或先移除该条目"},
+                409,
+            )
+            return
+        if body.get("skipPing") is True:
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] 节点登记 skipPing=1 id={nid} url={url}"
+                "（跳过 ping 门——排障路径，节点可能不可达）",
+                flush=True,
+            )
+        else:
+            ping = distribution.node_ping(url, auth_key)
+            if ping is None:
+                self._json(
+                    {"error": f"节点 ping 不通（{url}/v1/ping 无应答，或 authKey 不符）——不写盘"},
+                    422,
+                )
+                return
+        merged = _merge_managed_node(prev, payload)
+        if prev is not None and merged == prev:
+            self._json({"ok": True, "id": nid, "action": "unchanged"}, 200)
+            return
+        new_nodes = list(nodes)
+        if idx >= 0:
+            new_nodes[idx] = merged
+        else:
+            new_nodes.append(merged)
+        atomic_write_json(path, {**cfg, "nodes": new_nodes}, indent=2)
+        action = "created" if idx < 0 else "updated"
+        restored = prev is not None and "unregistered_at" in prev
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] 节点登记 id={nid} url={url} action={action}"
+            + ("（上轮干净收工 ⇒ 恢复 enabled=true）" if restored else "")
+            + f"（来源 {self.client_address[0]}）",
+            flush=True,
+        )
+        self._json({"ok": True, "id": nid, "action": action}, 200)
+
+    def _admin_nodes_unregister(self) -> None:
+        """POST /admin/nodes/unregister —— 会话收工（enabled=false + unregistered_at，**不删**）。"""
+        if not self._auth_ok():
+            return
+        raw = self._read_raw_body()
+        if raw is None:
+            return
+        try:
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except ValueError as e:
+            self._json({"error": f"bad json: {e}"}, 400)
+            return
+        if not isinstance(body, dict):
+            self._json({"error": "体必须是对象"}, 400)
+            return
+        nid = str(body.get("id") or "").strip()
+        if not nid:
+            self._json({"error": "unregister 需要 id"}, 400)
+            return
+        path = _nodes_config_path()
+        cfg = _read_rl_config(path)
+        if cfg is None:
+            self._json({"error": f"rl-config.json 读不到或不是对象: {path}"}, 409)
+            return
+        raw_nodes = cfg.get("nodes")
+        nodes: list[Any] = list(raw_nodes) if isinstance(raw_nodes, list) else []
+        idx = next(
+            (
+                i
+                for i, n in enumerate(nodes)
+                if isinstance(n, dict) and n.get("id") == nid and n.get("managed")
+            ),
+            -1,
+        )
+        if idx < 0:
+            self._json({"ok": False, "id": nid, "error": "没有该 managed 条目"}, 404)
+            return
+        prev = nodes[idx]
+        merged = {**prev, "enabled": False, "unregistered_at": time.strftime("%Y-%m-%dT%H:%M:%S")}
+        if merged == prev:
+            self._json({"ok": True, "id": nid, "action": "unchanged"}, 200)
+            return
+        new_nodes = list(nodes)
+        new_nodes[idx] = merged
+        atomic_write_json(path, {**cfg, "nodes": new_nodes}, indent=2)
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] 节点收工 id={nid}（enabled=false，"
+            f"下个会话注册时恢复）（来源 {self.client_address[0]}）",
+            flush=True,
+        )
+        self._json({"ok": True, "id": nid, "action": "unregistered"}, 200)

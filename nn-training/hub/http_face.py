@@ -399,6 +399,8 @@ class HubHandler(
                 self._admin_queue()
             elif path == "/admin/push-workers":
                 self._admin_push_workers(set_action=False)
+            elif path == "/admin/nodes":
+                self._admin_nodes_list()
             elif path == "/admin/courses":
                 self._admin_courses()
             elif path == "/admin/net-probe":
@@ -471,6 +473,10 @@ class HubHandler(
                 self._admin_courses(post=True)
             elif path == "/admin/push-workers":
                 self._admin_push_workers(set_action=True)
+            elif path == "/admin/nodes/register":
+                self._admin_nodes_register()
+            elif path == "/admin/nodes/unregister":
+                self._admin_nodes_unregister()
             elif path == "/admin/net-probe":
                 self._admin_net_probe_upload()
             elif path == OFFLINE_ARTIFACT_PATH:

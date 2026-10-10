@@ -14,6 +14,18 @@ export interface NodeConf {
    *  队列）决定。`local_push` 标记已删除——本机伪节点与那套「一键本机 push」在 R3-7 全部退场
    *  （启动时由 `pruneLegacyCourseKnobs` 连同按课程的指针一并清理）。 */
   gpu_push?: boolean
+  /** 云机**自注册**的条目（DECISIONS §2026-10-10-goalnn-rollout-node-auto-register）：
+   *
+   *  hub 的 `/admin/nodes/register` upsert 时打上；`managed` 不为真的条目云机不许覆盖（hub 侧 409）。
+   *  这三个键都由 hub 写、控制台**只读**（`nodes.ts` 的启停/并发编辑整份回写时会原样带过）。 */
+  managed?: boolean
+  /** 节点自报的「环境-通道」口径（如 `colab-t`），与 worker 名同域；仅排障用。 */
+  label?: string
+  /** 上一轮**干净收工**的时刻（hub `unregister` 写入，ISO 本地时间）：
+   *
+   *  下次注册时 hub 据此恢复 `enabled=true`；会话进行中被控制台停用的条目**没有**这个标记，
+   *  因而不会被云机顶掉（`enabled` 归控制台）。 */
+  unregistered_at?: string
 }
 
 /** 课程配置块（plan multi-course-parallel-training §1.3）。

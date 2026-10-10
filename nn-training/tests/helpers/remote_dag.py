@@ -144,6 +144,10 @@ LAYERS: dict[str, int] = {
     # 那些边就会静默消失 —— `test_layer_numbers_are_dense_and_meaningful` 会当场报空洞。
     "worker.serve_pool": 0,
     "remote.tailscale_boot": 0,
+    # 采样节点运行时（2026-10-10，plan/rollout-node-auto-register v2）：cell 拆薄后逻辑住
+    # 这里。依赖 `remote.tailscale_boot`(L0，经 clone 导入，**不是** standalone 引导文件)
+    # ⇒ 拓扑秩 **L1**；`common.*` 不在账本内，不计边。
+    "remote.rollout_node": 1,
     # 离线引导的交付面（S5 第十四刀）：从 `offline_boot` 搬出的 standalone 兄弟文件；
     # stdlib-only ⇒ 无仓内依赖 ⇒ **L0**（`offline_boot`(L7) 经 `importlib` 惰性装载——
     # AST 看不见该边，这是有意的：引导文件集按 raw 拉取，不参与包内环账本）。

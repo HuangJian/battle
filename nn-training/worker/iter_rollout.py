@@ -159,7 +159,7 @@ def resolve_bun(name: str = "") -> str:
 
     ★ 2026-09-25 重裁：**在线 worker 盘（tailscale / cloudflared 两条隧道）不装 bun、不跑 rollout**
     （`tailscale_boot.ensure()` 已不再装 bun）。会拿到 `kind=iter` 的只有**自己跑 rollout 的盘**：
-    `battle.offline.ipynb`（Kaggle/TPU 走 cloudflared 隧道）与采样节点 `rollout.cloudflared.ipynb`。
+    `battle.offline.ipynb`（Kaggle/TPU 走 cloudflared 隧道）与采样节点 `rollout.ipynb`（自适应通道）。
     所以这条拒单不是在报「盘坏了」，而是在报「这份活派错了盘」—— 消息里直接把这条说清楚。
     """
     want = str(name or "").strip() or "bun"
@@ -168,7 +168,7 @@ def resolve_bun(name: str = "") -> str:
         raise ProtocolError(
             f"节点上找不到 {want!r}（kind=iter 需要 bun 在节点上跑 rollout）——"
             "本 worker 所属的盘不跑 rollout（在线 worker 盘不装 bun）："
-            "请改用自己跑 rollout 的盘（battle.offline.ipynb / rollout.cloudflared.ipynb），"
+            "请改用自己跑 rollout 的盘（battle.offline.ipynb / rollout.ipynb），"
             "或把这门课的 rollout 放回本机（rollout_src=local）"
         )
     return found

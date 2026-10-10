@@ -2,8 +2,8 @@
 
 `hub/server.py` 3974 行里有三个大状态类（`_JobStore` 1002 / `_HubQueue` 1033 /
 `HubHandler` 1343）与零散小函数。第三刀取 `HubHandler`（49 方法 / 1343 行）里**最安全**的一组：
-admin 控制面 10 方法（停机恢复 / 课程热切 / 队列与状态 / push-worker 清单 / net-probe /
-worker 预取上报的接收面）。
+admin 控制面方法（停机恢复 / 课程热切 / 队列与状态 / push-worker 清单 / net-probe /
+采样节点自动注册 / worker 预取上报的接收面）。
 依据（plan §5.3.2 实测）：`HubHandler` 只有 3 个类属性 ⇒ 本组方法近乎无状态；本组只往外调 4 个
 通用助手；**测试接缝为零**（全仓对 `hub.server` 的 patch 只有 `SEND_TIMEOUT_SEC`）。
 
@@ -14,7 +14,8 @@ worker 预取上报的接收面）。
 本文件钉住四条（含一条**功能性**断言：net-probe 的边界与确定性不变量——那是隧道 A/B 台架
 的物理前提，不是装饰）：
 
-1. 10 个 admin 方法**定义**在 `AdminRoutes`；`HubHandler` **不得**再定义（组合类只能是组合类）；
+1. `ADMIN_METHODS` 里的 admin 方法**定义**在 `AdminRoutes`；`HubHandler` **不得**再定义
+   （组合类只能是组合类）——新方法要同步加进下面的清单，否则守卫覆盖会静默变窄；
 2. `HubHandler` 的 MRO 里 `AdminRoutes` 在 `BaseHTTPRequestHandler` **之前**（否则 typeshed 的
    `headers` / `rfile` 精确类型会被混入的声明遮蔽——`no-any-return` 的成因）；
 3. `hub/` **不 import `hub.server`**（混入包不得反向依赖组装模块，否则成环）；
@@ -44,6 +45,10 @@ ADMIN_METHODS = (
     "_admin_queue",
     "_admin_status",
     "_admin_unfreeze",
+    # 2026-10-10（plan/rollout-node-auto-register v2）：采样节点自动注册（写 rl-config nodes[]）。
+    "_admin_nodes_list",
+    "_admin_nodes_register",
+    "_admin_nodes_unregister",
     # 2026-10-09（plan/dashboard-ppo-live-rows）：worker 预取状态上报的接收面（纯观测）。
     "_post_worker_prefetch",
 )

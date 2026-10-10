@@ -6,6 +6,94 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §78 采样节点自动注册：hub 成为 `rl-config.json` 的第二写者（2026-10-10，plan/rollout-node-auto-register v2）
+
+**触因**：采样节点（云机 rollout / eval）原来靠**人工**把日志里的 ★URL + ★authKey 抄进本机
+`nn-training/rl-config.json` 的 `nodes[]`。两处疼：① 抄错/忘抄 = 节点不干活（而队列模式看着像「没节点」）；
+② **quick tunnel 每次重连换域名** ⇒ 没同步就是整天 HTTP 530（旧 cell 注释已写明，仍是手工同步）。
+用户指令：让云机自己把 `{id,url,authKey}` 注册进训练机。
+
+### 改名
+
+`mv nn-training/ipynb/rollout.cloudflared.ipynb nn-training/ipynb/rollout.ipynb`（`mv` 不是 `git mv`）。
+**必改的活引用**：`worker/iter_rollout.py`（拒单文本 2 处）· `remote/tailscale_boot.py`（注释）·
+`tests/remote/test_tailscale_boot_bun.py`（守卫常量 + 注释）· 本节与 §49「唯一口径」表的采样节点行。
+**历史正文不就地改名**（`docs/nn/runtime-opt.md:340/1078` · 本节之前的 §49 老正文 · `DECISIONS.md` 的
+老条目 · `plan/online-offline-role-routing.plan.md`）：与 §2026-10-01-goalnn-log-keeps-era-names 同精神 ——
+旧名指向「写下当时那个文件」，就地改名会把当时坐标读成今天坐标。
+
+### 协议（hub 侧，Bearer = `HUB_TOKEN`，与其余 admin 端点同鉴权）
+
+| 端点 | 语义 |
+|---|---|
+| `POST /admin/nodes/register` | `{id,url,authKey,concurrency?,label?,skipPing?}` → upsert `nodes[]` 该 id；响应 `{ok,id,action}`（`created\|updated\|unchanged`） |
+| `POST /admin/nodes/unregister` | `{id}` → `enabled=false` + `unregistered_at=<ISO>`，**不删**（下个会话原地复用） |
+| `GET /admin/nodes` | managed 条目清单（id/url/label/enabled/concurrency/unregistered_at；**不回 authKey**） |
+
+判定顺序即契约：鉴权 → body 形状与字段域（id `[A-Za-z0-9._-]{1,40}`，与控制台 `validWorkerId` 同域；
+url 必须带 scheme；`authKey` 非空；`concurrency` 可选 1..1024；`label` 可选 1..64）→ **本机表节点保护**
+（命中非 managed 条目 ⇒ 409，云机不许覆盖手工登记的 `mac`/`a97`）→ **ping 门**
+（`distribution.node_ping` 不通 ⇒ 422 **不写盘**；`skipPing=true` 可绕，日志响亮）→ 落盘（读整份 rl-config、
+**只改 `nodes[]`**、`common.fs.atomic_write_json` 原子替换、无变化不写盘；文件不存在 ⇒ 409 不凭空造）。
+
+### F1：`enabled` 归控制台（状态机必须闭合）
+
+评审 pre-check 抓到的洞：若 `register` 只声明「保留 enabled」，而 `unregister` 置 `enabled=false`，则
+**第二个会话起节点永久 disabled**（新会话的 `agent.auth` 必是新 key ⇒ 必走保留腿）—— 崩溃退出反而正常，
+DoD 只测了「置 false」那半。定案三条路径：
+
+| 上一轮结束方式 | 条目状态 | 再注册时 |
+|---|---|---|
+| 干净收工（`unregister`） | `enabled=false` + `unregistered_at` | **恢复** `enabled=true`，清掉标记 |
+| 崩溃/被杀（无标记） | 原样（`enabled=true`） | 照旧可用 |
+| 会话进行中控制台停用（无标记） | `enabled=false` | **原样保留**（云机不顶运维的决定） |
+
+⇒ **永久停用 = 删条目**（或去掉 `managed`）：这是有意保留的残余语义，写进 DECISIONS 条目。
+
+### F2：缺省 `concurrency` **不写键**
+
+派发读 `n.get("concurrency") or ping.cpus`（`trainer/dispatch.py:343`、`eval_dispatch.py:859`、
+`queue_local.py:425`）。旧 cell 的载荷语义本来就是「0/不填 = 不额外限流」，而注册 body 若填 1 会把 96 核云机
+**静默限成单槽**。故：只有 `workers > 0` 才带 `concurrency`；既有条目的 `concurrency` **永不改**（控制台手工值）。
+
+### 实现落点
+
+* `hub/admin.py`：三个路由 + 模块级**纯函数** `_read_rl_config` / `_merge_managed_node`；
+  ⚠ 只 import `common.distribution` / `common.fs`（F3：`worker.config_file` 也是 L0，同层上向边会红在
+  `tests/test_remote_dag.py`——而它不在本 plan 的 pytest 子集里，别踩）；`ADMIN_METHODS` 已补三个方法名。
+* `remote/rollout_node.py`（新，L1）：通道决策 `resolve_link` · 地址 `registry_url`（转调
+  `tailscale_boot.resolve_hub_url`，不再抄第二份「逐字一致」）· 载荷 `build_register_payload` · 去重
+  `should_register` · 错误分类 `classify_error`（auth 立即放弃 / net·server 30→60→…→300s）· `register` /
+  `unregister`（注入 `urlopen`）· `run(cfg, log, secret)` 主流程。三条顺序硬纪律：**凭据先于 `ensure()`**
+  （代理注入后平台 Secrets 取不到，2026-09-17 事故同族）· **公网下载包 `platform_net_env()`**（bun 在
+  ensure 之前装、cloudflared 在 `_public_net()` 里装，先例 `battle.offline.ipynb:408-409`）·
+  **422 ⇒ 回落到 cloudflared 并重注册**（tailscale userspace 的入站不可达是已知限制）。
+* `ipynb/rollout.ipynb`：薄 cell（CFG / `_secret` / 保活 / clone / `run()` 调用 + 日志 tee 到文件）；
+  bun / cloudflared / 通道 / 注册全搬进模块 —— 与 `battle.tailscale.ipynb` 同构。
+
+### 证据 / 门禁
+
+`tests/hub/test_node_register.py`（28 例：F1 三路径 · 字段域与 `validWorkerId` 对拍 · 本机表节点 409 ·
+ping 门 422 与 `skipPing` · unchanged 不写盘 · 原子写后 JSON 合法且只动 `nodes[]` · unregister 语义 ·
+GET 脱敏）· `tests/remote/test_rollout_node.py`（纯函数 + register 三态）·
+`tests/remote/test_rollout_node_notebook.py`（cell 可编译 · CFG 覆盖模块读的每个键 · 凭据先于 `ensure` ·
+下载包 `platform_net_env`）· `tests/test_remote_dag.py`（层号 `remote.rollout_node: 1`）· 各 hub 拆分守卫。
+
+### 不做 / 残余
+
+* **不做** `last_seen`：无合法落点（admin 禁模块级可变状态、`_HubQueue.STATE_WRITERS` 是精确集合、
+  写进条目 = 60s 一写）；排障看 hub 日志 + 条目自带的 `unregistered_at`。
+* **不做** TTL/过期剔除：每轮热读 + ping 门 + 派发失败 `nodeFailStreak` 兜底已够；无可用节点时回落纯本机。
+* 控制台的并发输入仍是 1–64（`actions/nodes.ts`），云机可自报 1–1024：超 64 的值控制台手工改动会被拒，
+  属既有边界（hub 侧不改写 `concurrency`）。
+* **威胁模型**：`HUB_TOKEN` 持有者（= 全部云 worker）能 register / unregister 任意 managed id / 用
+  `skipPing` 绕 ping 门 —— 与「job 提交」同级信任，接受；两侧都打响亮日志。
+* **真机冒烟未跑**（Colab tailscale 入站 / 换名重注册 / 会话终止恢复）：要真云机，见 plan §4 DoD。
+
+—— 决策（含被否决备选）→ `DECISIONS.md` §2026-10-10-goalnn-rollout-node-auto-register；
+实施细节与 DoD → `plan/rollout-node-auto-register.plan.md`；评审（F1–F13 逐条事实链）→
+`plan/rollout-node-auto-register.review-bf.md`。
+
 ## §77 「重启不重放已消费的 final」：判据要与**可判定**的证据对齐（2026-10-10，修满载 flake）
 
 **触发**：`bun run pygate` 满载时慢层红 —— `tests/remote/test_offline_deliver_proc.py::test_restart_does_not_replay_consumed_commands`
@@ -1460,7 +1548,7 @@ wire 账（`preempt=N(wasted X.XXMB)`，仅 N>0 打印）。
 | `battle.tailscale.ipynb` | **tailnet** | ❌ | ❌ **不装** |
 | `battle.cloudflared.ipynb` | **cloudflared 公网** | ❌ | ❌ **不装** |
 | `battle.offline.ipynb`（Kaggle TPU，Kaggle 不给 tailnet ⇒ 只能走 cloudflared 隧道） | cloudflared | ✅ 自己跑 | ✅ **装**（cell 里那段） |
-| `rollout.cloudflared.ipynb`（采样节点） | cloudflared | ✅ 自己跑 | ✅ **装**（cell 里那段） |
+| `rollout.ipynb`（采样节点；2026-10-10 由 `rollout.cloudflared.ipynb` 改名） | **自适应**（tailscale 优先 / cloudflared 回落） | ✅ 自己跑 | ✅ **装**（`remote/rollout_node.py`） |
 
 两块盘服务**不同的云机网络环境**（进不了 tailnet 的机器只能走公网隧道）—— **两条隧道都保留**，
 各有用途。node 侧的 rollout（`kind=iter`）只在**自己跑 rollout 的链**上跑：离线盘与采样节点。

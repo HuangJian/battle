@@ -472,7 +472,9 @@ def trigger_auto_handoff(course: str, log=_hub_log) -> tuple[bool, str]:
 
     与 `trigger_task_bundle_export` 的分工：那个是「缺包自愈」（取包路径的附带动作）；
     这个是「hub 已把课翻成 offline，请控制台把本机停采并出包」——多出来的唯一一步是
-    rl-config（控制台的唯一写面，§3.4）。控制台不可达 ⇒ 降级为手动，半状态由 stalled 兜住。
+    rl-config（**课程/训练态一侧**仍只由控制台写：§3.4。2026-10-10 起 rl-config 多了第二个写者——
+    本进程的 `/admin/nodes/register` 只 upsert `nodes[]` 的 `managed` 条目，
+    §2026-10-10-goalnn-rollout-node-auto-register）。控制台不可达 ⇒ 降级为手动，半状态由 stalled 兜住。
     """
     base = os.environ.get(CONSOLE_URL_ENV, "").strip() or DEFAULT_CONSOLE_URL
     body = json.dumps({"course": course}, ensure_ascii=False).encode("utf-8")

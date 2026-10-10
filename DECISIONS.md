@@ -8838,3 +8838,29 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   纯净 HEAD（`/home/hj/battle-base`）**3/6 红且全是同一条断言**（`result POST 出现 2 次`）·
   nn 门禁绿（ruff + mypy + 3971/3971）。
   —— 全文（探针原始记录 / 逐条判据 / 被否决）→ `docs/nn/remote-transport.md` §77
+
+## §2026-10-10-goalnn-rollout-node-auto-register（2026-10-10，采样节点自注册：hub 成为 `rl-config.json` 第二写者）
+
+- **背景**：采样节点（云机 rollout / eval）原来靠人工把 ★URL + ★authKey 抄进本机 `rl-config.json` 的
+  `nodes[]`；quick tunnel 每次重连换名，没同步就是整天 HTTP 530。用户指令：云机自报自注册。
+- **备选与否决**：① 接收端放**控制台** —— 否（控制台 REST 对非回环请求 403，云机够不到）；
+  ② 另写一份 `remote-nodes.json` —— 否（读取面 / 控制台表 / 派发三处都要加第二事实源）；
+  ③ `register` 对既有 managed 条目**无条件 re-enable** —— 否（会顶掉运维在会话进行中的停用，
+  且新会话 `agent.auth` 必是新 key ⇒ 若无条件保留则第二会话起永久 disabled，必须靠状态机而非忽略）；
+  ④ 记 `last_seen` —— 否（无合法落点：admin 禁模块级可变状态、`STATE_WRITERS` 是精确集合、写条目 = 60s 一写）。
+- **决定**：`POST /admin/nodes/register|unregister` + `GET /admin/nodes`（Bearer = `HUB_TOKEN`）由 hub
+  upsert `rl-config.json` 的 `nodes[]`：只动这一项 + 原子替换 + **无变化不写盘**；新条目打
+  `managed:true`/`enabled:true`；**`enabled` 归控制台** —— 既有条目只在「上轮干净收工」（带
+  `unregistered_at`）时恢复，否则原样保留；`concurrency` 只在**新条目**且 body 给值时才写、且永不改写
+  （缺省不写键 = 派发按 `ping.cpus`）；云机收线 best-effort unregister（`enabled=false` +
+  `unregistered_at`，**不删**）。永久停用 = **删条目**。ipynb 改名 `ipynb/rollout.ipynb`，逻辑住
+  `nn-training/remote/rollout_node.py`（cell 只留 CFG/凭据/保活/clone/调用）。
+- **违反后果**：谁把「新会话回来」写成无条件 re-enable，就顶掉运维的停用；谁给 register 写死
+  `concurrency=1`，96 核云机被静默限成单槽；谁在 hub 侧绕开原子写/鉴权，就是第二个「rl-config 被写坏
+  且无痕迹」的事故源；谁把 bun/cloudflared 安装内联回 cell，就复活「代理注入后公网不通」那类事故。
+- **测试/证据**：`tests/hub/test_node_register.py`（28 例：F1 三路径 · 字段域 · 本机表节点 409 · ping 门
+  422 与 `skipPing` · unchanged 不写盘 · 原子写后 JSON 合法 · GET 脱敏）· `tests/remote/test_rollout_node.py` ·
+  `tests/remote/test_rollout_node_notebook.py`（cell 可编译 · CFG 覆盖模块读的键 · 凭据先于 `ensure`）·
+  `tests/test_remote_dag.py`（`remote.rollout_node: 1`）· 各 hub 拆分守卫。
+  —— 全文（协议字段 / F1–F13 处置 / 残余语义 / 真机冒烟项）→ `docs/nn/remote-transport.md` §78 ·
+  `plan/rollout-node-auto-register.plan.md`
