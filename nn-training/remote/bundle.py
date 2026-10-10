@@ -52,6 +52,14 @@ BUNDLE_INDEX = "tools.task.json"
 #: 包身份标记（防「拿错 zip」这类最贵的错误）。
 BUNDLE_MAGIC = "battle2-task-bundle"
 BUNDLE_PROTO = 1
+
+#: 任务包**旁挂**元数据的身份（`<包路径>.meta.json`，2026-10-10，plan/cluster-code-snapshot §4.2）。
+#: 为什么旁挂而不是包内：控制台要读「包里的代码到底是哪一份」来判包是否过期，而 dashboard
+#: **零运行时依赖、没有 zip 读能力**（`taskBundleInfo()` 只 `statSync`）——为它给控制台加一个
+#: zip 库，就是把一个只读判据变成新依赖。它只是**旁挂件**，`import_bundle` 不认它、也不受它影响。
+BUNDLE_META_SUFFIX = ".meta.json"
+BUNDLE_META_MAGIC = "battle2-task-bundle-meta"
+BUNDLE_META_PROTO = 1
 #: 包内固定件名（与产物目录布局一致：导入后就是可直接续跑的产物目录）。
 CODE_NAME = "code.zip"
 TS_TREE_NAME = "ts_code"
@@ -69,7 +77,7 @@ OPTIONAL_PARTS = ("opt.tar", "ts_code.zip", "demo.npz", "ref_weights.json")
 # 定义必须只有一处。
 from common.hashing import (
     sha256_bytes,
-    sha256_file,  # noqa: F401 — re-export（历史公开名，本模块自身未用）
+    sha256_file,  # 旁挂件对包自身算 sha（`_write_bundle_meta`）；同时仍是历史公开名的 re-export
 )
 
 # ------------------------------------------------------------------ 导出（hub 侧）
@@ -191,7 +199,41 @@ def export_bundle(
         for name, raw in parts.items():
             z.writestr(name, raw)
     tmp.replace(out)
+    _write_bundle_meta(out, index)
     return index
+
+
+def bundle_meta_path(out_zip: str | Path) -> Path:
+    """旁挂元数据路径：`<包路径>.meta.json`（**跨语言契约**：控制台按同一条规则拼）。"""
+    return Path(str(out_zip) + BUNDLE_META_SUFFIX)
+
+
+def _write_bundle_meta(out: Path, index: dict) -> None:
+    """原子写旁挂元数据。**绝不抛**：写不下只降级（控制台的代码判据回落旧 mtime 口径），
+    导出本身不该因为一个旁挂件而失败。
+    """
+    side = bundle_meta_path(out)
+    meta = {
+        "magic": BUNDLE_META_MAGIC,
+        "proto": BUNDLE_META_PROTO,
+        # ★ 控制台判据唯一要的字段：包内 code.zip 的 sha（= manifest.code_sha256 = 快照 sha）。
+        "code_sha256": str(index.get("code_sha256") or ""),
+        "ts_code_sha256": str(index.get("ts_code_sha256") or ""),
+        "commit": str(index.get("commit") or ""),
+        "run_id": str(index.get("run_id") or ""),
+        "it": int(index.get("it", 0) or 0),
+        "created_at": str(index.get("created_at") or ""),
+        "pack": {"sha256": sha256_file(out), "bytes": out.stat().st_size},
+    }
+    tmp = side.with_name(side.name + ".tmp")
+    try:
+        tmp.write_text(json.dumps(meta, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(side)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
 
 
 def _readme(index: dict) -> str:

@@ -507,8 +507,14 @@ def pack_code_zip(
     *,
     log=lambda msg: None,
 ) -> str:
-    """打包 nn-training Python 源文件为 code.zip（hub 启动时一次打包，避免后继
+    """打包 nn-training Python 源文件为 code.zip（**一个集群会话一次**，避免后继
     并行修改干扰云端代码一致性）。
+
+    ⚠ 2026-10-10（plan/cluster-code-snapshot）：调用方已不再是「每门课首次 publish」，
+    而是**启动路径的集群代码快照**（`remote/code_snapshot.py::ensure_cluster_snapshot`，
+    锚 = hub / trainer / 导出进程中最先起来的那个，落 `<repo>/tmp/.code-snapshot/`）。
+    本函数本身逐字节未变（名单/排除表/固定时间戳全保留）；消费侧只在快照缺失时才直接
+    调它（回落 per-course 打包 + WARN）。
 
     包含：所有 .py + .jsonc 文件（递归）。
     排除：`tmp/` `weights/` `__pycache__/` `tests/` `rl-config.json`，

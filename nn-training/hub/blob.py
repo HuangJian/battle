@@ -101,12 +101,21 @@ class BlobRoutes:
     def _get_shared_code(self) -> None:
         if not self._auth_ok():
             return
-        # 多课程：code.zip 是**每课程一份**（各课的训练循环往自己的 job_root 写）。
-        # `?course=` 指定就取那门课的；不指定（旧 colab bootstrap）取第一份真存在的
-        # ——代码区份份同源（同一个仓、同一支），取哪门课的都一样。
+        # 2026-10-10（plan/cluster-code-snapshot）：**集群代码快照优先**——会话内所有课程共用
+        # 同一份 code.zip（`hub/queue_observe.py::shared_code_zip`），`?course=` 只在快照
+        # 缺失/损坏时才影响结果（回落旧行为：那门课的 / 第一份真存在的）。
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         p = self.hub.shared_code_zip((qs.get("course") or [""])[0])
         if p is None:
-            self._json({"error": "no shared code zip — training loop 尚未启动"}, 404)
+            # 措辞要点名「快照没建起来」：只写「training loop 尚未启动」会把排障指向错方向
+            # （hub 与 trainer 是两个进程，快照由**先起来的那个**建，与有没有课在跑无关）。
+            self._json(
+                {
+                    "error": "no shared code zip — 集群代码快照未建立"
+                    "（hub/trainer 重启一次就会建；见 remote/code_snapshot.py），"
+                    "且各课 job_root 里也没有 code.zip"
+                },
+                404,
+            )
             return
         self._serve_path(p, missing="shared code zip 在两次调用之间消失了（训练循环刚重启？）")

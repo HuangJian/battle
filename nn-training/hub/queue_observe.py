@@ -21,8 +21,9 @@
 
 ## 依赖方向
 
-`queue_observe → {common.protocol, hub.store}`（向下，`hub.store` 是
-`_stores` 的注解需求）。**不 import 任何兄弟混入**。
+`queue_observe → {common.protocol, hub.store, hub.task_pack, remote.code_snapshot}`（向下，
+`hub.store` 是 `_stores` 的注解需求；`remote.code_snapshot` 提供集群代码快照路径）。
+**不 import 任何兄弟混入**。
 """
 
 from __future__ import annotations
@@ -36,6 +37,7 @@ from common.protocol import PRIORITY_NONE, ROLE_OFFLINE, WORKER_PREFETCH_TTL_SEC
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
 from hub.task_pack import OFFLINE_DISK_WINDOW_SEC, OFFLINE_LEG_HINT
+from remote.code_snapshot import read_cluster_snapshot
 
 #: 未知 job_id 的哨兵根（随 `_job_dir` 一起搬进来）。
 #: 选 tempdir 而不是仓库内目录：任何漏网的 mkdir 都落在系统临时目录（不污染真 store），
@@ -181,7 +183,15 @@ class QueueObserveMixin(QueuePeer):
         return st.job_root if st else None
 
     def shared_code_zip(self, course: str = "") -> Path | None:
-        """共享 code.zip 路径：给课程就用它，否则用第一份**真存在**的（bootstrap 用）。"""
+        """共享 code.zip 路径：**集群代码快照优先**（会话级锚，2026-10-10 用户指令）。
+
+        快照在 ⇒ 它就是答案（同一个 hub 上代码只有一份，「取哪门课先被扫到」不再是变量）；
+        快照缺失/损坏 ⇒ 回落旧行为（课程指定的 / 第一份**真存在**的——旧 hub 与无快照场景
+        逐字节不变）。`course` 参数保留：签名是 `hub/queue_peer.py` 与拆分守卫钉着的契约。
+        """
+        snap = read_cluster_snapshot()
+        if snap is not None:
+            return snap.zip_path
         order = [course] if course in self._stores else self._order
         for c in order:
             p = self._stores[c].job_root / "code.zip"

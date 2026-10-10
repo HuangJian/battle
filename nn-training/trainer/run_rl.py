@@ -275,6 +275,21 @@ def main() -> None:
 
         for _msg in dead_key_warnings(course):
             log(_msg)
+    # ---- 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）----
+    # 本入口覆盖两条腿：① `--export-bundle` 导出进程（控制台「切离线」起的）；② 单课程直跑。
+    # 两者都是「会话」的候选锚点：集群活着 ⇒ 锚还在 ⇒ 直接复用（用户口径「导出复用集群快照」）；
+    # 集群全停 ⇒ 本进程成为新锚（重启 = 换代码）。
+    # ★ serve 路径**不经过本文件**（`loop_serve.py` 只借它的锁助手）⇒ 那条腿由
+    #   `run_rl_cluster.py::main` 负责。
+    # 警告不致命（同 hub）：publish 有 per-course 兜底，起不来比一份旧代码严重得多。
+    try:
+        from remote.code_snapshot import ensure_cluster_snapshot
+
+        ensure_cluster_snapshot(
+            anchor_kind="export" if getattr(args, "export_bundle", "") else "run_rl", log=log
+        )
+    except OSError as e:
+        log(f"[run_rl] WARN: 集群代码快照未能建立（{e}）——publish 将回落 per-course 打包")
     # 课程名（与锁段共用一次推导；非法 stem 在此即响亮拒启）。
     #
     # ❌ 2026-09-18 删掉了“按课程回填 remote_hubs[<stem>]”那段：hub/隧道已收敛为**单**

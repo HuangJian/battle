@@ -262,6 +262,22 @@ def main(argv: list[str] | None = None) -> int:
                 f"[serve] 已有单进程服务器在跑（锁 {lock_path}）——一个进程服务所有课程，"
                 "双开会两套调度器抢同一批 traj；先停掉它，或确认无人在跑后加 --force 接管"
             )
+        # ---- 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）----
+        # serve 是**进程内**多课程（本进程持集群锁 + 一个 Supervisor + N 门课，`loop_serve.py`
+        # 头注）⇒ 这里就是「会话」的锚点：一份 code.zip 供本会话所有课程——**包括之后由
+        # 控制台新开的课**（发现模式每拍重扫 traj-root）——使用。
+        # 警告不致命（同 hub）：publish 有 per-course 兜底，起不来比一份旧代码严重得多。
+        from remote.code_snapshot import ensure_cluster_snapshot
+
+        try:
+            # 打一行进 trainer 日志（`[code-snapshot] sha12=… reused=…`）：事后要能对上
+            # 「本轮跑的是哪份代码」——§4.3 明确不做源码新鲜度检测，这行就是唯一的线索。
+            ensure_cluster_snapshot(anchor_kind="trainer", log=lambda m: print(m, flush=True))
+        except OSError as e:
+            print(
+                f"[serve] WARN: 集群代码快照未能建立（{e}）——publish 将回落 per-course 打包",
+                flush=True,
+            )
         # `--mode` 是**课程级**附加参数（rl-config 默认按模式取）——只有它需要透传给开课。
         # 它必须是本解析器**显式声明**的参数：不声明则 argparse 先以 unrecognized arguments
         # 拒启（`--serve --mode goal` 的老坑）。★ §3：`--ppo` 已删除，无此项可透传。

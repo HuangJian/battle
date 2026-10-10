@@ -8906,3 +8906,36 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
 - **指针**：全文（规格 / lockstep 十处 / 探针两臂读数 / 未跑项 / 违反后果）→
   `docs/nn/engineering.md` §73 · 计划与两轮评审处置 → `plan/metrics-v11-hotlane.plan.md`
   §6/§7 + `plan/metrics-v11-hotlane.review-buffy.md`。
+
+## §2026-10-10-goalnn-cluster-code-snapshot（2026-10-10，`code.zip` 打包时机从「每课首次 publish」上移到「集群会话启动」，锚 = 首个声明进程的存活期；用户指令）
+
+- **背景**：同一 hub 上多课程各自打包 ⇒ 会话内改本机代码后开新课，共享 worker 池交替领到的 job 跑在
+  **两份代码**上（shard 行宽 / METRICS_VERSION / 奖励语义都可能不同）。四个打包点全是 per-course：
+  `trainer/loop_remote_job.py:252-259`（进程内去重 + 每课 job_root）· `trainer/bc_loop.py:346-347`
+  （**每轮**重打、无去重）· `hub/queue_observe.py::shared_code_zip`（取「第一份存在的」，
+  拿哪门课取决于 `--discover` 顺序）· `trainer/loop_export.py::_ensure_ts_code`（`ts_code.zip` 同族，本次未做）。
+- **决定**：新增 `remote/code_snapshot.py`；快照落 `<repo>/tmp/.code-snapshot/`，**内容寻址**
+  （`code.<sha12>.zip` + 最后原子替换的 `snapshot.json`）；启动期 `ensure`（`hub/boot.py` ·
+  `run_rl_cluster.py --serve` · `run_rl.py`——**导出进程就是 run_rl 进程** ⇒ 集群全停时导出会重打并成为
+  新锚）；消费期**只 `read`、永不换代**（PPO/BC publish 走 `published_code_zip()`，缺快照 ⇒ 回落
+  per-course 打包 + WARN，**绝不**在 publish 里建锚；`shared_code_zip()` 首选快照、`course=` 不再影响结果）。
+  锚 pid 死 / 命令行指纹不符 / 命令行读不到 ⇒ 下一个启动者重打（内容寻址 ⇒ 误重打同 sha、代价≈0）。
+  **不做**源码新鲜度检测（用户口径：开发中的代码不能重打包，**重启才生效**）；不做 TTL。
+- **配套（不可拆）**：§63 的包过期判据**代码维度换锚**（源文件 mtime → 「包内 `code.zip` 的 sha vs
+  当前集群快照 sha」）——冻结语义下旧判据会把「改源码但不重启」误判成过期：作废 + 重导出来的**还是同一份
+  代码**，白烧一次分钟级导出并让云机多等一段 404 等包窗口（导出失败支还会因为 `restorePackIfMissing`
+  用 `renameSync` 挪回归档、mtime 保留而反复触发）。两个输入：控制台新增
+  `bundles/snapshot.ts::readClusterSnapshot()`；包内 sha 由 python 旁挂 `<包>.meta.json`
+  （`remote/bundle.py::bundle_meta_path`；跨语言常量 `bundles/marks.ts`）——**不给 dashboard 加 zip 依赖**
+  （它零运行时依赖是刻意不变式）。快照不可知（没快照 / 锚已死 / 老包没 sidecar）⇒ 回落
+  `newestCodeMtimeMs` 口径（保守：宁可白重导一次，也不放旧代码去云端）。
+- **被否决**：TTL 过期；快照住 `nn-training/`；下沉 `pack_code_zip` 到 `common/`；源码 mtime 检测 +
+  自动重打；内容寻址决定「是否重打」（内容寻址只管「字节的身份」）；给 dashboard 加 zip 依赖；
+  导出进程另设一个「先 read 复用」钩子（与 run_rl 钩子同进程、语义互斥）。
+- **违反后果**：让消费侧 `read` 触发重打（半死集群里新课悄悄换代码，正是本需求要防的）；把快照写回
+  **固定名** `code.zip`（活着的消费者缓存 `path+sha` ⇒ 读到新字节却报旧 sha，云端 `ensure_code` 逐候选
+  拒收且报错指向「传输损坏」）；快照落进被打包的根（会被 `pack_code_zip` 自吞）。
+- **落地与门槛**：`nn-training/remote/code_snapshot.py` + 三处启动钩子 + PPO/BC/`shared_code_zip` 消费点 +
+  `remote/bundle.py` 旁挂件 + dashboard 换锚；回归与门槛见 `docs/nn/remote-transport.md §79`；
+  新依赖边已登记（`tests/helpers/remote_dag.py::LAYERS` · `test_hub_queue_split.py::ALLOWED_IMPORTS` ·
+  `test_loop_remote_split.py::DELAYED_IMPORTS`）。

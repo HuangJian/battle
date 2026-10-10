@@ -184,6 +184,9 @@ DELAYED_IMPORTS: dict[str, frozenset[str]] = {
     "loop_remote_job.py": frozenset(
         {
             "remote.bundle",
+            # 2026-10-10（plan/cluster-code-snapshot）：code.zip 改为「读集群会话快照」
+            # （快照缺失才回落 per-course 打包）——快照模块住 `remote/`，同层向下。
+            "remote.code_snapshot",
             "remote.hub_client",
             "remote.push_client",
             "trainer.collect_only",

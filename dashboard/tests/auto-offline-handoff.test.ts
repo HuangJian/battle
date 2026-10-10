@@ -46,14 +46,26 @@ writeFileSync(
   'utf-8',
 )
 
-import { autoBundleDecision, autoOfflineHandoff } from '../src/server/actions/auto-offline-handoff'
+import {
+  autoBundleDecision,
+  autoOfflineHandoff,
+  codeDimensionStale,
+} from '../src/server/actions/auto-offline-handoff'
 import {
   CODE_EXCLUDE_DIRS,
   CODE_EXCLUDE_FILES,
+  CODE_SNAPSHOT_MAGIC,
+  CODE_SNAPSHOT_PROTO,
+  bundleMetaMagic,
+  codeSnapshotDir,
+  codeSnapshotMetaPath,
   newestCodeMtimeMs,
+  readClusterSnapshot,
   stalePackDir,
   taskBundleFileName,
   taskBundleInfo,
+  taskBundleMeta,
+  taskBundleMetaPath,
   taskBundlePath,
 } from '../src/server/bundles'
 
@@ -116,7 +128,8 @@ const facts = (over: Partial<Parameters<typeof autoBundleDecision>[0]> = {}) => 
   guardReason: null,
   pack: taskBundleInfo('__ahand-never-exported__'),
   weightsMtimeMs: 0,
-  codeMtimeMs: 0,
+  // 缺省走**回落**口径（mtime 0 = 不比包新）——快照口径的用例显式传 code
+  code: { kind: 'mtime' as const, mtimeMs: 0 },
   ...over,
 })
 
@@ -158,7 +171,11 @@ describe('autoBundleDecision（纯函数：规则表逐条）', () => {
     try {
       const info = taskBundleInfo(WITH_PACK)
       const r = autoBundleDecision(
-        facts({ pack: info, weightsMtimeMs: info.mtimeMs + 1000, codeMtimeMs: 0 }),
+        facts({
+          pack: info,
+          weightsMtimeMs: info.mtimeMs + 1000,
+          code: { kind: 'mtime', mtimeMs: 0 },
+        }),
       )
       expect(r.started).toBe(true)
       expect(r.note).toContain('已过期')
@@ -175,7 +192,11 @@ describe('autoBundleDecision（纯函数：规则表逐条）', () => {
     try {
       const info = taskBundleInfo(WITH_PACK)
       const r = autoBundleDecision(
-        facts({ pack: info, weightsMtimeMs: 0, codeMtimeMs: info.mtimeMs + 1000 }),
+        facts({
+          pack: info,
+          weightsMtimeMs: 0,
+          code: { kind: 'mtime', mtimeMs: info.mtimeMs + 1000 },
+        }),
       )
       expect(r.started).toBe(true)
       expect(r.note).toContain('代码在导出之后改过')
@@ -194,7 +215,7 @@ describe('autoBundleDecision（纯函数：规则表逐条）', () => {
         facts({
           pack: info,
           weightsMtimeMs: info.mtimeMs + 1000,
-          codeMtimeMs: info.mtimeMs + 2000,
+          code: { kind: 'mtime', mtimeMs: info.mtimeMs + 2000 },
         }),
       )
       expect(r.started).toBe(true)
@@ -315,5 +336,147 @@ describe('代码新鲜度扫描（与 python 打包器逐名对账）', () => {
     }
     expect(body).toContain('.py')
     expect(body).toContain('.jsonc')
+  })
+})
+
+/** ★ 2026-10-10（plan/cluster-code-snapshot §4.2）：代码维度**换锚**。
+ *
+ *  旧判据「源文件 mtime 比包新」在集群代码快照冻结后是**错的**：改了源码但不重启 ⇒ 重导也
+ *  只能拿到同一份代码，而旧判据会作废 + 重导（白烧一次分钟级导出，并让云机多等一段 404
+ *  等包窗口）。新判据 = 「包里的 `code.zip` 是不是当前集群快照那一份」。
+ */
+describe('代码维度换锚（集群代码快照口径）', () => {
+  const SNAP_SHA = 'ab'.repeat(32)
+
+  it('快照同 sha ⇒ **不**判旧（源码 mtime 更新也没关系）', () => {
+    const p = seedPack(WITH_PACK)
+    try {
+      const r = autoBundleDecision(
+        facts({
+          pack: taskBundleInfo(WITH_PACK),
+          code: { kind: 'snapshot', same: true, sha: SNAP_SHA },
+        }),
+      )
+      expect(r.started).toBe(false)
+      expect(r.note).toContain('当前集群代码快照')
+      expect(existsSync(p)).toBe(true)
+    } finally {
+      rmSync(tmpCourseDir(WITH_PACK), { recursive: true, force: true })
+    }
+  })
+
+  it('快照 sha 变（重启过 hub/trainer）⇒ 作废 + 重导，且回执点名代码维度', () => {
+    // 关键：包按 mtime 是**新鲜**的（seedPack 拨到未来）——只有快照口径看得见它旧了。
+    const p = seedPack(WITH_PACK)
+    try {
+      const r = autoBundleDecision(
+        facts({
+          pack: taskBundleInfo(WITH_PACK),
+          code: { kind: 'snapshot', same: false, sha: SNAP_SHA },
+        }),
+      )
+      expect(r.started).toBe(true)
+      expect(r.note).toContain('已过期')
+      expect(r.note).toContain('集群代码快照已换')
+      expect(r.note).toContain('404')
+      expect(existsSync(p)).toBe(true) // 纯函数只做决定；作废是 launchTaskBundleExport 的事
+    } finally {
+      rmSync(tmpCourseDir(WITH_PACK), { recursive: true, force: true })
+    }
+  })
+
+  it('两套口径的判据本身（纯函数）', () => {
+    expect(codeDimensionStale({ kind: 'snapshot', same: true, sha: SNAP_SHA }, 1)).toBe(false)
+    expect(codeDimensionStale({ kind: 'snapshot', same: false, sha: SNAP_SHA }, 1)).toBe(true)
+    expect(codeDimensionStale({ kind: 'mtime', mtimeMs: 100 }, 100)).toBe(false)
+    expect(codeDimensionStale({ kind: 'mtime', mtimeMs: 101 }, 100)).toBe(true)
+  })
+})
+
+/** 集群快照的**只读**读取（`bundles/snapshot.ts`）与旁挂件的跨语言契约。 */
+describe('集群快照读取 / 旁挂元数据', () => {
+  const SNAP_ROOT = mkdtempSync(path.join(os.tmpdir(), 'bcity-snap-'))
+  afterAll(() => rmSync(SNAP_ROOT, { recursive: true, force: true }))
+
+  const writeSnapMeta = (body: string): void => {
+    mkdirSync(codeSnapshotDir(SNAP_ROOT), { recursive: true })
+    writeFileSync(codeSnapshotMetaPath(SNAP_ROOT), body, 'utf-8')
+  }
+
+  it('没有元数据 ⇒ null（不抛）', () => {
+    expect(readClusterSnapshot(path.join(SNAP_ROOT, 'nope'))).toBeNull()
+  })
+
+  it('坏 JSON / 魔数不符 / 协议不认 ⇒ null（不猜、不迁移）', () => {
+    writeSnapMeta('{ not json')
+    expect(readClusterSnapshot(SNAP_ROOT)).toBeNull()
+    writeSnapMeta(
+      JSON.stringify({ magic: 'other', proto: CODE_SNAPSHOT_PROTO, zip: 'a', sha256: 'b' }),
+    )
+    expect(readClusterSnapshot(SNAP_ROOT)).toBeNull()
+    writeSnapMeta(
+      JSON.stringify({ magic: CODE_SNAPSHOT_MAGIC, proto: 99, zip: 'code.x.zip', sha256: 'b' }),
+    )
+    expect(readClusterSnapshot(SNAP_ROOT)).toBeNull()
+  })
+
+  it('合法元数据 ⇒ 字段齐；anchorAlive 按 pid 存活（廉价口径）', () => {
+    writeSnapMeta(
+      JSON.stringify({
+        magic: CODE_SNAPSHOT_MAGIC,
+        proto: CODE_SNAPSHOT_PROTO,
+        zip: 'code.abababababab.zip',
+        sha256: 'ab'.repeat(32),
+        packed_at_epoch: 123,
+        anchor: { kind: 'hub', pid: process.pid, cmdline_sha12: 'x' },
+      }),
+    )
+    const s = readClusterSnapshot(SNAP_ROOT)
+    expect(s?.sha256).toBe('ab'.repeat(32))
+    expect(s?.zip).toBe('code.abababababab.zip')
+    expect(s?.anchorKind).toBe('hub')
+    expect(s?.anchorAlive).toBe(true)
+    writeSnapMeta(
+      JSON.stringify({
+        magic: CODE_SNAPSHOT_MAGIC,
+        proto: CODE_SNAPSHOT_PROTO,
+        zip: 'code.abababababab.zip',
+        sha256: 'ab'.repeat(32),
+        anchor: { kind: 'hub', pid: 0, cmdline_sha12: 'x' },
+      }),
+    )
+    expect(readClusterSnapshot(SNAP_ROOT)?.anchorAlive).toBe(false)
+  })
+
+  it('旁挂元数据：没有 / 没魔数 ⇒ null；合法 ⇒ 读得到 code_sha256', () => {
+    mkdirSync(tmpCourseDir(WITH_PACK), { recursive: true })
+    try {
+      expect(taskBundleMeta(WITH_PACK)).toBeNull()
+      writeFileSync(taskBundleMetaPath(WITH_PACK), JSON.stringify({ code_sha256: 'cd'.repeat(32) }))
+      expect(taskBundleMeta(WITH_PACK)).toBeNull() // 没魔数 = 不认
+      writeFileSync(
+        taskBundleMetaPath(WITH_PACK),
+        JSON.stringify({ magic: bundleMetaMagic, proto: 1, code_sha256: 'cd'.repeat(32), it: 3 }),
+      )
+      const m = taskBundleMeta(WITH_PACK)
+      expect(m?.codeSha256).toBe('cd'.repeat(32))
+      expect(m?.it).toBe(3)
+    } finally {
+      rmSync(tmpCourseDir(WITH_PACK), { recursive: true, force: true })
+    }
+  })
+
+  it('跨语言契约：后缀/魔数与 `remote/bundle.py` 同表（读 python 源对账）', () => {
+    const py = readFileSync(path.join(REPO_ROOT, 'nn-training/remote/bundle.py'), 'utf-8')
+    expect(py).toContain('BUNDLE_META_SUFFIX = ".meta.json"')
+    expect(py).toContain('BUNDLE_META_MAGIC = "battle2-task-bundle-meta"')
+    // 落点规则必须是「包路径 + 后缀」（两边都得能从包路径推出旁挂件路径）
+    expect(py).toContain('def bundle_meta_path')
+    expect(py).toContain('Path(str(out_zip) + BUNDLE_META_SUFFIX)')
+    // 控制台的「当前快照 sha」读的是同一份元数据（python: code_snapshot.SNAPSHOT_MAGIC）
+    const csSrc = readFileSync(path.join(REPO_ROOT, 'nn-training/remote/code_snapshot.py'), 'utf-8')
+    expect(csSrc).toContain('SNAPSHOT_MAGIC = "battle2-code-snapshot"')
+    expect(csSrc).toContain('META_NAME = "snapshot.json"')
+    expect(csSrc).toContain('SNAPSHOT_DIR_NAME = ".code-snapshot"')
   })
 })

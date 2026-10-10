@@ -160,10 +160,10 @@ class TrainingRemoteJob(TrainingRemotePush):
         self._forensics(f"remote_pre it{it}")
         # 本相位只做「打包 + 发布」：等结果与校验落位各在自己的相位里（三相拆分后
         # 三处的导入也各自独立——一份 import 清单服务三段，是拆相前那种形状的残留）。
+        from remote.code_snapshot import published_code_zip
         from remote.hub_client import (
             git_head,
             iter_shard_dirs,
-            pack_code_zip,
             publish_job,
         )
 
@@ -250,13 +250,19 @@ class TrainingRemoteJob(TrainingRemotePush):
         )
 
         commit = git_head()
-        # 启动时一次打包源文件 code.zip（避免后继并行修改干扰云端代码一致性）
+        # 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）：「只要不重启，所有
+        # 课程都用同一份 code.zip」——快照由**启动路径**建（hub/boot · run_rl_cluster · run_rl），
+        # 消费侧**只读、永不换代**（半死集群里开新课不该悄悄换代码）。
+        # 快照缺失（从没起过 hub/trainer，或 tmp 被清理过）⇒ **回落 per-course 打包**（改动前
+        # 的逐字节行为）+ 响亮 WARN：绝不在这里悄悄把工作区变成新锚——那正是本需求要防的
+        # 「改代码中开新课拿到不同代码」。进程内缓存保留：一进程一份，逐轮零成本。
         if not hasattr(self, "_code_sha256"):
             nn_root = Path(__file__).resolve().parent.parent
-            code_zip_path = Path(job_root) / "code.zip"
-            cs = pack_code_zip(nn_root, code_zip_path, log=log)
-            self._code_sha256 = cs
-            self._code_zip_path = code_zip_path
+            _zip, _sha, _from_snapshot = published_code_zip(
+                job_root, pack_root=nn_root, log=lambda m: log(f"[run_rl] {m}")
+            )
+            self._code_sha256 = _sha
+            self._code_zip_path = _zip
         # code.zip 已包含当前源码快照（含未提交修改），无需 git commit-pin 检查。
         from trainer.queue import RUN_ID
 

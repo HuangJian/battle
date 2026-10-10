@@ -27,7 +27,9 @@ import {
   exportGuard,
   launchTaskBundleExport,
   newestCodeMtimeMs,
+  readClusterSnapshot,
   taskBundleInfo,
+  taskBundleMeta,
   weightsMtimeMs,
   type TaskBundleInfo,
 } from '../bundles'
@@ -45,8 +47,43 @@ export interface AutoBundleFacts {
   pack: TaskBundleInfo
   /** 活动权重（`tmp/<课程>/weights.json`）的 mtime（ms，0 = 读不到）。 */
   weightsMtimeMs: number
-  /** `code.zip` 源文件的最新 mtime（ms；`newestCodeMtimeMs()`，0 = 读不到）。 */
-  codeMtimeMs: number
+  /** 代码维度的事实（两套口径，见 `codeFreshness()`）。 */
+  code: CodeFreshness
+}
+
+/** 代码维度的事实（plan/cluster-code-snapshot §4.2）。
+ *
+ *  · `snapshot`（首选）：集群代码快照在、锚活着、包旁挂的 `.meta.json` 也在 ⇒ 比 sha。
+ *    会话冻结语义下这才是**对的**判据：改了源码但不重启 ⇒ 重导也只能拿到同一份代码，
+ *    旧 mtime 口径却会判「旧」⇒ 白烧一次分钟级导出 + 让云机多等一段 404 窗口。
+ *  · `mtime`（回落）：其余一切情形（没快照 / 锚已死 / 老包没 sidecar）。保守方向：
+ *    「宁可白重导一次，也不放一份旧代码去云端」。
+ */
+export type CodeFreshness =
+  | { kind: 'snapshot'; same: boolean; sha: string }
+  | { kind: 'mtime'; mtimeMs: number }
+
+/** 代码维度是否比包「新」（纯函数：两套口径各自的判据）。 */
+export function codeDimensionStale(code: CodeFreshness, packMtimeMs: number): boolean {
+  return code.kind === 'snapshot' ? !code.same : code.mtimeMs > packMtimeMs
+}
+
+/** 取代码维度事实（**唯一**读盘处；判据本身是纯函数，便于单测）。 */
+export function codeFreshness(course: string): CodeFreshness {
+  const snap = readClusterSnapshot()
+  const meta = snap && snap.anchorAlive ? taskBundleMeta(course) : null
+  if (snap && meta) {
+    return { kind: 'snapshot', same: meta.codeSha256 === snap.sha256, sha: snap.sha256 }
+  }
+  return { kind: 'mtime', mtimeMs: newestCodeMtimeMs() }
+}
+
+/** 回执里点出代码维度那一半（排障要知道「等的是什么」）。 */
+function codeSideNote(code: CodeFreshness, packMtimeMs: number): string {
+  if (!codeDimensionStale(code, packMtimeMs)) return ''
+  return code.kind === 'snapshot'
+    ? `集群代码快照已换（包里的 code.zip 是上一份；当前快照 sha ${code.sha.slice(0, 12)}）`
+    : '代码在导出之后改过（包里的 code.zip 是旧的）'
 }
 
 /** 自动导出的结果：`started` 给人/测试断言，`note` 是人读一行（空串 = 没什么可说）。 */
@@ -61,12 +98,16 @@ export interface AutoBundleResult {
  *    ① 逃生阀 ⇒ 不导；
  *    ② 导出忙 ⇒ 不导（已有一次在跑，成果一样会被取到）；
  *    ③ 缺起点权重（`exportGuard`）⇒ 不导，**原样转述原因** + 指路；
- *    ④ 盘上已有包 **且不比权重/源码旧** ⇒ **不导也不作废**（旧包仍代表当前起点与当前代码）；
- *    ④' 盘上已有包**但比活动权重或源码旧** ⇒ **作废 + 重导**（2026-10-04 补，两个维度）：
+ *    ④ 盘上已有包 **且不比权重/代码旧** ⇒ **不导也不作废**（旧包仍代表当前起点与当前代码）；
+ *    ④' 盘上已有包**但比活动权重或代码旧** ⇒ **作废 + 重导**（2026-10-04 补，两个维度）：
  *       · 权重更新（训练已推进）——离线腿的续跑锚点只认回传/导入的轮次、看不见本机在线轮
  *         ⇒ 拿旧包会把云机拖回旧起点（在线训练的权重与动量白丢）；
- *       · 代码更新（开课导出包之后改过代码 / 带新代码重启过 hub）——包里是**导出那一刻的
- *         代码快照**（`code.zip`），旧包 = 云端跑旧代码；
+ *       · 代码更新——包里是**导出那一刻的代码快照**（`code.zip`），旧包 = 云端跑旧代码。
+ *         ★ 2026-10-10（plan/cluster-code-snapshot §4.2）：**代码维度的判据换了**——不再是
+ *         「源文件 mtime vs 包 mtime」（集群代码快照冻结后，改源码但不重启会被**误**判成旧：
+ *         重导也只能拿到同一份代码，白烧一次分钟级导出、还让云机多等一段 404 窗口），
+ *         而是「包里的 `code.zip` 是不是**当前集群快照**那一份」（`codeFreshness()`）；
+ *         快照不可知（没快照 / 锚已死 / 老包没旁挂件）才回落旧 mtime 口径。
  *    ⑤ 其余（缺包且可导）⇒ 导。
  *
  *  ★M4 删掉的两条（它们的前提是「课程有在线/离线模式」，随模式语义一起退役）：
@@ -82,16 +123,21 @@ export function autoBundleDecision(f: AutoBundleFacts): AutoBundleResult {
   if (f.guardReason) {
     return skip(`${f.guardReason} —— 未自动导出；先跑至少一轮（或导入一份权重）再重导`)
   }
-  if (f.pack.exists && f.pack.mtimeMs >= Math.max(f.weightsMtimeMs, f.codeMtimeMs)) {
+  const codeStale = codeDimensionStale(f.code, f.pack.mtimeMs)
+  if (f.pack.exists && f.pack.mtimeMs >= f.weightsMtimeMs && !codeStale) {
+    const how =
+      f.code.kind === 'snapshot'
+        ? '不早于当前权重，且 code.zip 就是当前集群代码快照'
+        : '不早于当前权重与源码'
     return skip(
-      `已有任务包 ${f.pack.path}（${f.pack.bytes} bytes，不早于当前权重与源码）——` +
+      `已有任务包 ${f.pack.path}（${f.pack.bytes} bytes，${how}）——` +
         '云机可直接取；要重打请点「导出任务包」（那会先把旧包作废）',
     )
   }
   if (f.pack.exists) {
     const sides = [
       f.weightsMtimeMs > f.pack.mtimeMs ? '训练已推进（权重/动量比包新）' : '',
-      f.codeMtimeMs > f.pack.mtimeMs ? '代码在导出之后改过（包里的 code.zip 是旧的）' : '',
+      codeSideNote(f.code, f.pack.mtimeMs),
     ]
       .filter(Boolean)
       .join('；')
@@ -131,10 +177,10 @@ export async function autoOfflineHandoff(course: string): Promise<ActionResult> 
     guardReason,
     pack: taskBundleInfo(c),
     // ★ 2026-10-04：这条路的课**正在（或刚在）训练**——盘上的旧包会把云机拖回旧起点
-    //   （离线腿的续跑锚点看不见本机在线轮）；代码也可能在导出之后改过 ⇒ 规则表 ④'
-    //   按「权重/源码谁比包新」判重导。
+    //   （离线腿的续跑锚点看不见本机在线轮）；代码维度见 `codeFreshness()`（2026-10-10
+    //   plan/cluster-code-snapshot：快照口径优先，mtime 只在快照不可知时兜底）。
     weightsMtimeMs: weightsMtimeMs(c),
-    codeMtimeMs: newestCodeMtimeMs(),
+    code: codeFreshness(c),
   })
   const head = `${c} 自动交接：云机已认领（hub 的 pending_export）——控制台只负责把任务包导出来`
   if (bundle.started) {

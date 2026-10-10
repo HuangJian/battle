@@ -6,6 +6,82 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §79 集群代码快照：`code.zip` 的打包时机从「每课首次 publish」上移到「会话启动」（2026-10-10，plan/cluster-code-snapshot）
+
+**用户报障**：「每一门课程，开课时实时打包 code.zip，不对！应该是 trainer/hub 启动时打包一份
+code.zip，只要不重启，所有训练的课程都用它。用以避免本机代码修改中开新课，worker 取到不同的代码。」
+
+**问题：打包点是四个，且都是 per-course**：
+
+- `trainer/loop_remote_job.py:252-259`（PPO）：`hasattr(self, "_code_sha256")` 只做**进程内**去重；
+  `code_zip_path = Path(job_root)/"code.zip"`，而 job_root 来自 `<traj>/remote-jobs` = **每课程一份**。
+- `trainer/bc_loop.py:346-347`（BC）：**每轮**重打（连进程内去重都没有），同一个 per-course job_root。
+- `hub/queue_observe.py::shared_code_zip`（`GET /code`，colab bootstrap）：遍历各课 job_root 取
+  「第一份真存在的」⇒ 拿到哪门课的代码**取决于 `--discover` 的发现顺序**。
+- `trainer/loop_export.py::_ensure_ts_code`（`ts_code.zip` 同族；本次**未做**，见下方未决）。
+
+⇒ 会话内改本机代码后开新课：共享的 worker 池交替领到**两份代码**的 job（shard 行宽 /
+METRICS_VERSION / 奖励语义都可能不同）。文档其实早写着这个意图（`remote/hub_client.py:510`
+的 docstring「hub 启动时一次打包」、`hub/smoke_loopback.py:195`、「改了 `remote/` 必须重启 loop」），
+只是锚点选在了「课」而不是「会话」。
+
+**修法（已实施）**：
+
+- 新增 `remote/code_snapshot.py`：快照落 `<repo>/tmp/.code-snapshot/`，**内容寻址**
+  （`code.<sha12>.zip` + `snapshot.json`；元数据最后原子替换）。内容寻址是**必做**而非美化：
+  消费者把 `(zip_path, sha256)` 缓存在进程里，固定名 `code.zip` 会在「锚死亡、下一个启动者重打」时
+  让活着的消费者**读到新字节、手里却是旧 sha** ⇒ 云端 `ensure_code` 逐候选按 manifest 的 sha 选件
+  必对不上（报错还会指向「传输损坏」）。
+- **启动路径 `ensure`**（锚活着 ⇒ 复用；死了 / 指纹不符 / 元数据坏 ⇒ 重打）：`hub/boot.py`（`anchor=hub`）·
+  `trainer/run_rl_cluster.py::main`（`--serve`：进程内多课程，就是本会话的锚）· `trainer/run_rl.py`
+  （`export` / `run_rl`，**含控制台「切离线」起的导出进程**）。抢锚用 `O_CREAT|O_EXCL` 锁 + 有界等待
+  （≤10s，超时自打：启动绝不挂住）。
+- **消费路径只 `read`、永不换代**：PPO/BC publish 走 `published_code_zip()`（缺快照 ⇒ 回落
+  per-course 打包 + WARN，**绝不**悄悄成为新锚）；`shared_code_zip()` 首选快照（`course=` 参数保留但
+  不再影响结果），缺失/坏 ⇒ 回落旧扫描。半死集群（hub 死、trainer 活）里开新课也不会悄悄换代码。
+- **锚存活两个口径**：读面（含每轮 BC publish、每个 `/code`）只看 **pid 存活**（`proc_cmdline` 在
+  Win11 24H2 起要起子进程——热路不付这个钱）；`ensure` 的分岔口再加**命令行指纹**（pid 复用必须重打；
+  误重打在固定时间戳打包器下同 sha ⇒ 代价≈0）。命令行读不到 ⇒ fail-closed（重打）。
+- **不做**源码新鲜度检测 / TTL（用户口径：开发中的代码不能重打包，**重启才生效**）。代价是硬性的：
+  改了 `nn-training/*.py` 而不重启 ⇒ 云端继续跑旧代码、本地无任何异常；只能用启动日志里的 `sha12`
+  事后对账。
+
+**配套：控制台「包是否过期」的代码维度换锚（同一变更，不可拆）**：§63 立的判据是「源文件 mtime 不早于
+包 mtime」，在冻结语义下会把「改源码但不重启」**误**判成过期——作废 + 重导出来的**还是同一份代码**：
+白烧一次分钟级导出，并让云机多等一段 404 等包窗口（导出失败支还会因为 `restorePackIfMissing` 用
+`renameSync` 挪回归档、**mtime 保留**而反复触发）。新判据 = 「包内 `code.zip` 的 sha vs 当前集群快照 sha」：
+
+- 控制台新增 `bundles/snapshot.ts::readClusterSnapshot()`（只读元数据；`anchorAlive` 用 `pidAlive`）。
+- 包内 sha **不给 dashboard 加 zip 依赖**（它至今零运行时依赖）：python 导出时旁挂
+  `<包>.meta.json`（`remote/bundle.py::bundle_meta_path`；跨语言常量 `bundles/marks.ts`，用例读 python 源对账）；
+  作废/恢复包时 sidecar 跟着走。
+- 快照不可知（没快照 / 锚已死 / 老包没 sidecar）⇒ **回落** `newestCodeMtimeMs` 口径（保守方向：
+  宁可白重导一次，也不放旧代码去云端）。
+- ⚠ §63 正文与本仓 `DECISIONS §2026-10-04-goalnn-pack-freshness-on-handoff` 里写的
+  `actions/course-mode.ts` 规则表 **⑥/⑥'** 是**历史编号**（该文件 M4 已删）；活实现是
+  `actions/auto-offline-handoff.ts::autoBundleDecision` 的 **④/④'**。按「旧条目只增不改」，本条目反指，
+  不就地改旧正文。
+
+**回归**：`tests/remote/test_code_snapshot.py`（14 例：幂等复用 / 锚死重打 / 损坏自愈 / `read` 不打包不删 /
+内容寻址不失配 / 同源码重打同 sha / pid 复用指纹 / 命令行读不到 fail-closed / 陈锁接管 / 抢锁不挂启动 /
+保留份数 / publish 快照优先 / 无快照回落且不建锚）· `tests/hub/test_shared_code_snapshot.py`（4 例：快照优先且
+`course=` 不再影响结果 / 回落旧扫描 / 坏快照回落 / 全无 ⇒ None + 404 措辞）·
+`tests/helpers/remote_dag.py` 账本登记（`remote.code_snapshot: 2`）+ `tests/hub/test_hub_queue_split.py::ALLOWED_IMPORTS`
++ `tests/trainer/test_loop_remote_split.py::DELAYED_IMPORTS`（三处「新边先红再登记」）·
+dashboard `tests/auto-offline-handoff.test.ts`（换锚两例 + 两套口径纯判据 + 旁挂件跨语言对账 + 快照读取边界）。
+
+**未决（下一步）**：① `ts_code.zip` 仍是 per-course（`_ensure_ts_code` 同构，plan §5 的 P1）；
+② 控制台组件卡展示当前快照 sha（P2）；③ `--no-cluster-snapshot` 逃生开关（现场排障用，住 `rl-config` 的 `rl.*` 块）。
+
+**门槛（2026-10-10 实测）**：`bash tools/githook/nn-py-safe.sh -m pytest -q tests/remote tests/hub tests/test_remote_dag.py
++ tests/test_layering.py tests/trainer/test_loop_remote_split.py` ⇒ **1446 pass / 0 fail**（先 `ruff check .` + `mypy .` 全绿）；
+`bun run check` ⇒ **2479 pass / 3 skip**；`bun run build` 过。**caveat（环境）**：本机**有在跑的训练集群**，
+`tmp/<课>/` 被训练进程持续写 ⇒ dashboard 全量套件（`cd dashboard && bun run test`，1528 例）会偶发 1–2 例
+读实时课程态的 flake（`server-api-course-ctx` / `server-api-course-override` / `server-api-snapshot-cache`），
+**同一文件单跑即绿**（本轮也拿到过一次全量全绿）；nn 侧同因：`tests/remote/test_offline_deliver_proc.py::
+test_restart_does_not_replay_consumed_commands` 满载红、单跑绿（沙箱/文件占用，非回归）。
+落地记录见 DECISIONS `§2026-10-10-goalnn-cluster-code-snapshot`。
+
 ## §78 采样节点自动注册：hub 成为 `rl-config.json` 的第二写者（2026-10-10，plan/rollout-node-auto-register v2）
 
 **触因**：采样节点（云机 rollout / eval）原来靠**人工**把日志里的 ★URL + ★authKey 抄进本机
@@ -4582,9 +4658,12 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   「kernel 模式那次 TUN/路由尝试动过容器网络」这条待验证假设）。
 - **违反后果**：任何人再把「读平台 Secrets / pip / git」放到引导之后，Kaggle 上都会复现「无声终结」；
   任何只打 stdout 的引导都会在下一次无声死亡里丢掉全部证据（本轮排障成本的一大半在这里）。
-- **配套事实（同批）**：`code.zip` 是 **TrainingLoop 启动时**的快照（`trainer/loop_steps.py::pack_code_zip`，
-  hub `/code` 直接回文件）——改了 `remote/` **必须重启 loop**，否则云机跑的是旧运行时；日志里的
+- **配套事实（同批）**：`code.zip` 是**会话启动时**的快照（现实现：`remote/code_snapshot.py`，
+  hub `/code` 直接回文件）——改了 `remote/` **必须重启 loop/hub**，否则云机跑的是旧运行时；日志里的
   `sha12` 就是用来跟 loop 侧对账的（§2026-09-16-kaggle-kernel-no-torch 的子进程探测修复正是靠它才生效）。
+  ⚠ 本节原文写的是「**TrainingLoop 启动时**的快照（`trainer/loop_steps.py::pack_code_zip`）」——那是
+  2026-10-10 之前的旧口径（§79 已把打包时机上移到会话启动，`pack_code_zip` 也早已搬到 `remote/hub_client.py`）。
+  按「记账只增不改」保留原文，以 §79 为准。
 - **回归测试**：`nn-training/tests/remote/test_bootstrap_proxy.py`（7 例：NO_PROXY 合并 / 平台代理还原 /
   异常路径还原 / 引擎顺序 / ★凭据前置 / `_pull` 签名 / 缺 token 点名）；`tmp/repro-old-order.py`
   对 HEAD 的**修复前**代码复现了「引导后读 HUB_TOKEN」，断言当场抓住（§7.1）。

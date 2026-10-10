@@ -10,9 +10,18 @@
  *  改这一个常量即可（`exportRunIters`）。
  */
 
-import { appendFileSync, existsSync, mkdirSync, readdirSync, renameSync, statSync } from 'fs'
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  renameSync,
+  statSync,
+} from 'fs'
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
+import { bundleMetaMagic, bundleMetaSuffix } from './marks'
 import { pidAlive, sleep } from '../../core/net'
 import { courseLogDir } from '../../stack/specs'
 import { busy, release } from '../actions/result'
@@ -37,6 +46,49 @@ export function taskBundlePath(course: string): string {
 
 export function taskBundleLogPath(course: string): string {
   return path.join(courseLogDir(course), 'export-bundle.log')
+}
+
+/** 任务包**旁挂元数据**路径（`<包路径>.meta.json`）。
+ *
+ *  跨语言契约：python 侧 `remote/bundle.py::bundle_meta_path` 按同一条规则拼（`+ 后缀`），
+ *  导出时原子写；`tests/auto-offline-handoff.test.ts` 读 python 源对账，防两边写岔
+ *  （写岔的后果是判据**静默**退化回旧 mtime 口径，不报错）。
+ */
+export function taskBundleMetaPath(course: string): string {
+  return `${taskBundlePath(course)}${bundleMetaSuffix}`
+}
+
+/** 旁挂元数据的形状（只有判据要的字段；python 写全量，控制台只读这几项）。 */
+export interface TaskBundleMeta {
+  /** 包内 `code.zip` 的 sha256（= 导出那一刻 `manifest.code_sha256` = 当时的快照 sha）。 */
+  codeSha256: string
+  tsCodeSha256: string
+  commit: string
+  it: number
+}
+
+/** 读旁挂元数据（没有 / 坏 JSON / 魔数不符 ⇒ `null`，**永不抛**）。 */
+export function taskBundleMeta(course: string): TaskBundleMeta | null {
+  let raw: string
+  try {
+    raw = readFileSync(taskBundleMetaPath(course), 'utf-8')
+  } catch {
+    return null
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return null
+    const j = parsed as Record<string, unknown>
+    if (j.magic !== bundleMetaMagic) return null
+    return {
+      codeSha256: String(j.code_sha256 ?? ''),
+      tsCodeSha256: String(j.ts_code_sha256 ?? ''),
+      commit: String(j.commit ?? ''),
+      it: Number(j.it ?? 0) || 0,
+    }
+  } catch {
+    return null
+  }
 }
 
 /** 作废任务包的归档目录（**挪走而非删除**：导出失败时它还是唯一能跑的东西）。 */
@@ -74,6 +126,7 @@ export function invalidateTaskBundle(course: string): {
   try {
     mkdirSync(path.dirname(dest), { recursive: true })
     renameSync(src, dest)
+    moveBundleMetaTo(course, `${dest}${bundleMetaSuffix}`)
     return {
       invalidated: true,
       archived: dest,
@@ -121,12 +174,28 @@ export function restoreTaskBundle(
     if (!archived || !existsSync(archived))
       return { restored: false, message: '归档里没有可恢复的包' }
     renameSync(archived, live)
+    moveBundleMetaTo(course, taskBundleMetaPath(course), archived)
     return { restored: true, message: `已恢复旧包 ${path.relative(REPO_ROOT, live)}` }
   } catch (e) {
     return {
       restored: false,
       message: `恢复旧包失败（${e instanceof Error ? e.message : String(e)}）——请手动从 ${path.relative(REPO_ROOT, archived)} 取回`,
     }
+  }
+}
+
+/** 把旁挂元数据挪到 *dest*（best-effort，**永不抛**）。
+ *
+ *  包被作废/恢复时 sidecar 必须跟着走：留一份孤儿不会立刻出错（判据先看包在不在），
+ *  但「包回来了而 sidecar 是更早那份」会把判据指向上一份代码（plan §4.2）。
+ */
+function moveBundleMetaTo(course: string, dest: string, srcOverride?: string): void {
+  const src = srcOverride ? `${srcOverride}${bundleMetaSuffix}` : taskBundleMetaPath(course)
+  if (!existsSync(src)) return
+  try {
+    renameSync(src, dest)
+  } catch {
+    /* 挪不动只是留个孤儿；判据仍安全（先看包在不在） */
   }
 }
 

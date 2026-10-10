@@ -192,7 +192,9 @@ def main() -> int:
 
     # ---- 4) 多轮发布/执行（M2：slim 默认开；第 2 轮起 opt blob 应缓存命中）----
     commit = git_head(REPO)
-    # 打包 code.zip（hub 启动时一次打包，smoke 测试也遵循此流程）
+    # 打包 code.zip（**一个集群会话一次**：2026-10-10 起真链路由启动路径的
+    # `remote/code_snapshot.py::ensure_cluster_snapshot` 建（hub/trainer 会话级锚）；
+    # 冒烟预演自己起假云机，不走那条锚，故这里按同一意图现打一份。
     code_zip_path = work / "code.zip"
     code_sha256 = pack_code_zip(ROOT, code_zip_path, log=log)
     out_weights = work / "weights.json"

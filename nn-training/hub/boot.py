@@ -48,6 +48,7 @@ from common.protocol import (
 from hub.http_face import HubHandler
 from hub.queue import _HubQueue
 from hub.store import _JobStore
+from remote.code_snapshot import ensure_cluster_snapshot
 from remote.push_dispatch import (
     DEFAULT_PUSH_CONFIG,
     PushDispatcher,
@@ -202,6 +203,18 @@ def main() -> None:
     except RuntimeError as e:
         print(f"[hub-server] ERROR: {e}", flush=True)
         sys.exit(1)
+    # ---- 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）----
+    # hub 是「会话」的第一个锚点候选：一启动就把当前工作区打成一份 code.zip，之后所有课程的
+    # 所有 job（以及 `/code` 的 bootstrap 取件）都用它——「只要不重启，大家跑同一份代码」。
+    # **警告不致命**：hub 起不来的代价远高于一份旧代码；训练侧 publish 有兜底（缺快照 ⇒
+    # per-course 打包 + WARN），`/code` 拿不到快照时会 404 且措辞点名。
+    try:
+        ensure_cluster_snapshot(anchor_kind="hub", log=lambda m: print(m, flush=True))
+    except OSError as e:
+        print(
+            f"[hub-server] WARN: 集群代码快照未能建立（{e}）——训练侧将回落 per-course 打包",
+            flush=True,
+        )
     # ---- 课程表：--course 优先；两者都给 = 响亮拒启（不知道听谁的比听错好）----
     if (args.course or args.discover) and (args.job_root or args.jsonl):
         print(

@@ -159,6 +159,10 @@ LAYERS: dict[str, int] = {
     # 上面（顶层边）⇒ 从 L1 升到 **L2**。
     "remote.hub_http": 0,
     "remote.hub_client": 1,
+    # 2026-10-10（plan/cluster-code-snapshot）：集群代码快照——会话级 `code.zip` 锚点。
+    # 它只 import `remote.hub_client`(L1) 的 `pack_code_zip` + `common.*` ⇒ 拓扑秩 1 + 1 = **L2**；
+    # 消费侧（`hub.queue_observe` / `trainer.*`）都在它上面，边一律严格向下。
+    "remote.code_snapshot": 2,
     "hub.store_offline": 1,
     # `_JobStore` 组合类（S4 第十五刀）：第十四刀把六个域混入拆到 `hub/store_*.py`，本刀把组合类
     # 本身也从 `hub_server` 搬出来 —— 不是对称好看，而是 `_HubQueue` 的课程表域要**构造** store、

@@ -411,6 +411,9 @@ ALLOWED_IMPORTS = {
         "hub.store",
         # 离线盘读数的两个窗口常量住 `hub/task_pack.py`（与 `hub.offline` 共用同一份口径）
         "hub.task_pack",
+        # 2026-10-10（plan/cluster-code-snapshot）：共享 `/code` 的取件口改为「集群代码
+        # 快照优先」（同一个 hub 上代码只有一份），快照模块住在 `remote/`（L3，向下）。
+        "remote.code_snapshot",
     },
     "hub.queue_offline": {
         "common.protocol",

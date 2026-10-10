@@ -45,11 +45,11 @@ from pathlib import Path
 
 from common.log import log
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from remote.code_snapshot import current_code_zip_path, published_code_zip
 from remote.hub_client import (
     git_head,
     iter_bc_shard_dirs,
     mark_job_completed,
-    pack_code_zip,
     publish_job,
     verify_and_land_bc,
 )
@@ -343,8 +343,12 @@ def publish_bc_job(
             f"[run_bc] it{it}: 无完整 BC shard（{traj / 'bc-data' / f'it{it}'} 空）——无法发布"
         )
     commit = git_head()
-    code_zip_path = job_root / "code.zip"
-    code_sha = pack_code_zip(NN_ROOT, code_zip_path, log=log)
+    # 集群代码快照优先（2026-10-10 用户指令，plan/cluster-code-snapshot）：会话内全体消费者
+    # 共用同一份 code.zip（PPO / BC 两条腿走**同一个** `published_code_zip`）；缺失才 per-course
+    # 打包 + WARN。本函数**每轮**都会到这里 ⇒ 绝不能让它成为锚（见该函数 docstring）。
+    code_zip_path, code_sha, _from_snapshot = published_code_zip(
+        job_root, pack_root=NN_ROOT, log=lambda m: log(f"[run_bc] {m}")
+    )
     is_smoke = round_name == "smoke"
     epochs = 1 if is_smoke else int(course.train.epochs)
     batch = min(int(course.train.batch), 256) if is_smoke else int(course.train.batch)
@@ -1158,7 +1162,8 @@ class BcLoop:
         from remote.push_client import submit_job
 
         payload_path = rt.job_root / jid / "payload.tar.xz"
-        code_zip = rt.job_root / "code.zip"
+        # 与 publish 同源（快照优先）：不硬读 job_root 级的那份——快照模式下它根本不存在。
+        code_zip = current_code_zip_path(rt.job_root)
         manifest = self._jobs[it][1] if it in self._jobs else {}
         submit_job(
             rt.push_url,
