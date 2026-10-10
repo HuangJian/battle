@@ -1,0 +1,128 @@
+// 课程 x24-stack2 —— 叠加第二轮：五项加剂量（near12/dist1.8/threat80/corner55/block110hold）。
+//   起点 stack-it165（冻结已验证）。
+//
+// 状态：草稿（2026-10-10 冻结；未开课）。本腿今日可跑（全用既有日常列）。
+//   开课 = 人在控制台点（agent 不开训）。
+//   立项 → 用户 2026-10-10 直接指定（D03/D09/A05/A06/W05/W07/W09 加重税 + W13 超重税 +
+//   A07/A08 加奖励），bc 用 stack165。执行如下（有拒有改，理由冻死）：
+//   ① W13 首杀时机超重税——拒。三条理由：禁区（首杀 family，§80 及第 1 条就ban过）+
+//      无 firstContact 列（日常只有 firstKillTick）+ 藏 400 拍=鼓励 camp，与通关目标直接
+//      相反。三条任一都是死刑，不立项。
+//   ② A06/A07（近射/远射占比）——按用户既有裁定并入 wDist（打中的算，单杠杆不重复建）。
+//   ③ A08（停下开火奖）——defer：shotsStopped 无日常列（panel 有 16v0，gap 实锤），
+//      列出来后单独立腿，本腿不等。
+//   ④ 其余五项（D03/D09/A05/W05/W07/W09 的既有旋钮版）全部执行，剂量见下。
+//   bc 选点依据：stack-it165 冻结 800 对（416400 新段）0.4325 vs KR10 0.3600
+//   （+7.25pp，p≈0.003，四关全胜）；日常 it165 0.475/13.26。
+//   基线 → 双基线：bc stack-it165（0.4325/13.08，416400 段）为主判；KR10-it150 为参照。
+//   起点 stack-it165 + 下述加价（日常 it165 n=400 实测率，killEV=39.77）。
+//
+// ── 定价（增量 f 以 killEV=39.77 计；括号里是相对 stack 现价的增量）──────────
+//   近敌 wNear 8 → 12（D09；率 0.456）：−3.65 → −5.47/局（+1.8，+4.6%）。
+//   距离 wDist 1.3 → 1.8（A05/A06/A07 合一；打中均值 3.239）：+4.21 → +5.83/局（+1.6，+4%）。
+//   威胁 wThreat 60 → 80（D03；率 0.1057）：−6.34 → −8.46/局（+2.1，+5.3%）。
+//   角落 wCorner 40 → 55（W05；率 0.0377，已从 0.069 压下来）：−1.51 → −2.07/局
+//   （+0.56，+1.4%； diminishing 写明：没多少可压，象征性跟一档）。
+//   被挡 wBlock 110 HOLD（W07/W09；率 0.009，已压到墙角无税可加——加了也白加，
+//   明确不加；若反弹再议）。
+//   本轮增量合计 ≈ −4.0/局净（−10%）。degeneracy 旗：近战税误伤杀伤区 + 远射 camp +
+//   威胁税过载（E3a −7.8pp 前例）——全由人工盯盘覆盖（下）。
+//
+// ── 检查点（it40，只报不杀）───────────────────────────────────────────────
+//   普查五项方向：near↓ dist↑ threat↓ corner↓ blocked（维持≈0）+ 胜率/kills。
+//   用户裁定争胜率、不设杀腿线——停不停人看盘定（无自动熔断，见下）。
+//
+// ── 人工盯盘（无自动熔断）───────────────────────────────────────────────────
+//   本腿不设任何自动停规则（课程内 ent_break=0、kickstart 熔断全关；开课时控制台也别挂
+//   kl/ent 自动 halt）。人看：日常胜率 vs stack-it165 基线、kills、五项方向。
+//   重点盯 corner 反弹（move 前科）与 kills（近战税误伤）。停不停人说了算，不设触发线。
+//
+// ── yardstick ─────────────────────────────────────────────────────────────
+//   终判：冻结 1600 对 vs bc stack-it165（主判）+ vs KR10-it150（参照）；单批 800 对只算提示，
+//   必须复测拼池。方向诊断：五项必报。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 stack-it165 warm start + kickstart 锚（ref=true, init=0.1）；iters 0 无上限，手工停课；
+//   进 x23 流 paired_rotate_seed=20261015（家族同流，rollout 可比）。
+//   机器与 KR10 同配方（只改价，见 params）。max_hours 24 保留。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh；backup 新目录）。
+{
+  "version": 5,
+  "name": "x24-stack2",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNear*nearEnemy4Ticks/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wNear": 12.0,
+      "wBlock": 110.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack-it165 副本（sha `f47bc62f2cad528f`，与 x24-stack.it165 同字节）─
+  "bc": "nn-training/weights/x24-stack2/x24-stack2.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 进 x23 流（家族同流，rollout 可比）。
+  "paired_rotate_seed": 20261015,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪，不动）。
+  "decision_k": 10,
+
+  "out": "tmp/x24-stack2/weights.json",
+  "traj": "tmp/x24-stack2",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x24-stack2",
+  "backup_prefix": "x24-stack2",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 结课报告（2026-10-10 回填：353 轮停，无突破，归档）──────────────────────
+// 日常 0.50 开局，全程 0.37~0.47 横盘（it280/it340 双峰 0.465，kills ~13.5；
+// 收 it350 0.39 坑里）。机制：near4 −6%（门外）、corner 反升、blocked 从小基数砍六成、
+// dist +1%——加剂量没买到新行为。KL 0.010~0.028、熵 0.56~0.77，全程健康（非崩盘，是横盘）。
+// 判语：无突破，归档；峰（it280/it340）从未冻结验证，不认。证据 `tmp/x24-stack2/` 账本。

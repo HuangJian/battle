@@ -8907,6 +8907,20 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   `docs/nn/engineering.md` §73 · 计划与两轮评审处置 → `plan/metrics-v11-hotlane.plan.md`
   §6/§7 + `plan/metrics-v11-hotlane.review-buffy.md`。
 
+## §2026-10-10-goalnn-v11-criterion1-split（2026-10-10，v11 两列判据 1 分流：nearSq 可定价，hotLane 维持诊断）
+
+- **背景**：v11 签入时判据 1（人类 vs NN 分离度）全空，两列暂定“可入库但不得定价”。
+  用 panel 扩展（`tmp/gap2-panel-v11.ts`，共享核直调）补测：人类 160 对 stack2-it145 160
+  对 KR10-it150 160，同码 resim。
+- **读数**：nearSqSum 人均 454 vs s2t145 895 vs KR10 940（per-kTick 92 vs 248 vs 286，
+  cliff −0.46，中位全非零）——分离确认；postHitLaneTicks 人均 4.0 vs 11.5 vs 12.8
+  （中位全 0，人类 24% 局有窗 vs NN 34–42%，cliff −0.12~−0.21）——弱，且≈挨打频率×停留
+  （wHurt/wDmg/threat 已定过三遍的肉）。
+- **决定**：nearSqSum 判据 1 通过，定价解禁（首用 `x24-stack4`，替换 near4，B6 条件替换执行）；
+  postHitLaneTicks 维持诊断列，不定价（v11 commit 限制维持）。
+- **违反后果**：给 hotLane 定价 ⇒ 第四遍买同一块肉，且税的是“挨打多”不是“跑得慢”。
+- **证据**：`tmp/probe-human-v11.jsonl` + `tmp/probe-s2t145-v11.jsonl` + `tmp/probe-kr10-v11.jsonl`。
+
 ## §2026-10-10-goalnn-cluster-code-snapshot（2026-10-10，`code.zip` 打包时机从「每课首次 publish」上移到「集群会话启动」，锚 = 首个声明进程的存活期；用户指令）
 
 - **背景**：同一 hub 上多课程各自打包 ⇒ 会话内改本机代码后开新课，共享 worker 池交替领到的 job 跑在
@@ -8939,3 +8953,42 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   `remote/bundle.py` 旁挂件 + dashboard 换锚；回归与门槛见 `docs/nn/remote-transport.md §79`；
   新依赖边已登记（`tests/helpers/remote_dag.py::LAYERS` · `test_hub_queue_split.py::ALLOWED_IMPORTS` ·
   `test_loop_remote_split.py::DELAYED_IMPORTS`）。
+
+## §2026-10-10-goalnn-cluster-code-snapshot-ts（2026-10-10，`ts_code.zip` 并入集群代码快照——P1，承接 §2026-10-10-goalnn-cluster-code-snapshot）
+
+- **背景**：`code.zip` 冻结后，第四个打包点 `trainer/loop_export.py::_ensure_ts_code` 仍是同构的
+  per-course 缺陷——TS 运行时 zip 落 `<job_root>/ts_code.zip` + 进程内缓存，而 `job_root` 是每课一份
+  ⇒ 同一个 hub 上两门课的 rollout 可能跑在**两份 TS 运行时**上（`worker/iter_rollout.py` 靠这个 zip 跑
+  rollout，`tools/sim/export-rl-rollout.ts` 的依赖闭包跨 `src/` + `tools/`）。P0 条目把它记为「本次未做」。
+- **决定**：快照**一次打包产出两件**（`code.<sha12>.zip` + `ts_code.<sha12>.zip`，元数据加 `ts_zip` /
+  `ts_sha256` / `ts_bytes`）；新消费口 `published_ts_code_zip()` 与 `published_code_zip()` **逐字同规**
+  （快照优先 / 缺失回落 per-course 打包 + 响亮 WARN / **绝不建锚**）；`_ensure_ts_code` 改调它，延迟
+  import 面从 `remote.hub_client` 换成 `remote.code_snapshot`（`test_loop_export_split.py::DELAYED_IMPORTS`
+  同步换锚）。`_prune` 改成**按族**算保留窗口（两族混排会把刚打的 `code.zip` 挤掉）。
+- **两条计划没写、实现补上的判据**：
+  ① ts 打包是 **best-effort**（失败只 WARN + 该字段留空 ⇒ 消费侧回落）——hub/trainer 启动不接受
+  「一个可选件打不出来就不起」，而 ts 回落的后果与改动前逐字节等价；
+  ② ts 件的 sha **核验放在消费点**（`published_ts_code_zip`）而不是读面——读面每次调用已经要哈希
+  1.4MB 的 `code.zip`，再叠 ~2.5MB 的 ts 就是给「两件都不看的调用方」白付，而它的唯一消费者每进程
+  只被调一次（`_ensure_ts_code` 有实例缓存）。核验失败 ⇒ WARN + 回落（不把对不上 sha 的字节送云端）。
+- **被否决**：ts 失败拖垮整份快照（启动代价）；在读面哈希 ts；给 ts 单开一套「缺失/坏」措辞分支
+  （与 code 件同规即可）；hub 侧另建「共享 ts_code」端点（只有 job 级 `/jobs/{id}/ts_code`，由
+  `publish_job` 按路径拷贝 ⇒ 指针跟着快照走）。
+- **违反后果**：让 ts 回落静默（同一 hub 上两份 TS 运行时——正是本需求要防的）；把 ts 塞进 `code.`
+  名字空间（两族保留窗口互相挤掉，`_prune` 不再能保证「当前那份不被删」）。
+- **落地与门槛**：`docs/nn/remote-transport.md §79` 的「TS 运行时同族」段；回归 =
+  `tests/remote/test_code_snapshot.py`（+6 例）· `tests/trainer/test_loop_export_split.py`（注入点换锚 +
+  真跑回落支）；`plan/cluster-code-snapshot.plan.md §5.1` 记实现与计划的差异。
+
+## §2026-10-10-goalnn-s4-crown（2026-10-10，s4-it180 三腿拼池居首，加冕）
+
+- **背景**：x24 三腿最优（s2-it235 / s3-it135 / s4-it180）拼池复测（416800+417200 系），
+  KR10-it150 同批配对。
+- **主读数**（拼池 1600 对）：s4-it180 0.4925（+11.75pp，χ²cc 43.82）/ s2-it235 0.4825
+  （+10.75pp）/ s3-it135 0.4750（+10.00pp）；kills ~13.7–14.2。三腿新段单独看亦全胜。
+- **备选与否决**：① 与 fore-it335（拼池 0.4875，414000 系）比点数——否（不在同一批种子，
+  不直接比；用户裁定 s4-it180 为新王，后续正面对决再议）；② 只认单块——否（拼池是加冕必要条件）。
+- **决定**：**s4-it180 加冕现役最优**；后继基线改挂；人机对照见三腿合并大表
+  `tmp/merged-gap-trio-best-v2.txt`（s4：会停 49.2 + 用盾一半；撞墙/脱离/贴脸三硬骨头未动）。
+- **违反后果**：跳过拼池加冕 ⇒ 下一个 cm3-it155。
+  —— 全文 → `docs/nn/experiments.md` §84

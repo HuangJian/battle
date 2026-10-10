@@ -1,0 +1,131 @@
+// 课程 x24-stack4 —— v11 第一腿：近敌平方税（替换 near4）+ 拾取分型奖。起点 stack2-it145。
+//
+// 状态：草稿（2026-10-10 冻结；未开课）。本腿今日可跑（v11 已签入，全 loader 绿）。
+//   开课 = 人在控制台点（agent 不开训）。
+//   立项 → 用户 2026-10-10 直接指定（stack2-it145 与人类语料对比后定权重：贴脸税 +
+//   挨打停留税 + 道具税）。执行如下（一拒两改，理由冻死）：
+//   ① 贴脸税 → nearSqSum（v11 idx74），**替换** wNear×nearEnemy4Ticks（B6 条件替换设计：
+//      加权 + 全敌 vs 二值最近，不并存，免共线双税）。near4 税在本腿退役。
+//   ② 挨打停留税 → **拒**。判据 1 未过：人类 24% 局有窗 vs NN 34–42%，中位全 0，
+//      cliff −0.12~−0.21；且该列≈挨打频率×停留（已在 wHurt/wDmg/threat 里定过三遍的肉）。
+//      postHitLaneTicks 留诊断列，不定价（v11 commit 的限制维持）。
+//   ③ 道具税 → 拾取分型奖（v11 pickup 列已死：共存 0.31% + Spearman 0.507；改用现货
+//      puGotFreeze/Bomb + starsCollected，stack3 同剂量）。
+//   基线 → 双基线：bc stack2-it145（日常 0.47/13.48；gap 面板通关 73/160）为主判；
+//   KR10-it150（冻结 1600 对 0.3625）为参照。日常 killEV≈40.5（it145 n=400）。
+//   起点 stack2-it145 + 下述改价（stack2 价继承：dist1.8/threat80/corner55/block110）。
+//
+// ── 定价（f 以 killEV≈40.5 计；v11 panel 160 对实测率，unbaked，豁免份额<5% 备忘）─
+//   近敌平方 -wNearSq×nearSqSum/(ticks+1)：s2t145 率 0.2477/拍 vs 人类 0.0922（2.7x，
+//   cliff −0.46，判据 1 通过，中位全非零）——wNearSq=16.0 → −4.0/局（10%）。
+//   冻拾取 +wFrFreeze×puGotFreeze（0.5 vs 1.0，2x gap），wFrFreeze=2.0 → +1.0/局。
+//   弹拾取 +wFrBomb×puGotBomb（0.5 vs 1.0），wFrBomb=2.0 → +1.0/局。
+//   星拾取 +wFrStar×starsCollected（0 vs 1），wFrStar=3.0 → +0/局（零梯度起步；40 轮仍 0 则认死）。
+//   本轮增量 ≈ +2.0/局净（奖金对冲税场）。税侧一字不动。
+//
+// ── 检查点（it40，只报不杀）───────────────────────────────────────────────
+//   普查：nearSq↓15% + 冻/弹/星收集↑ + 胜率/kills。星 40 轮仍 0 则该项认死，其余继续。
+//
+// ── 人工盯盘（无自动熔断）───────────────────────────────────────────────────
+//   本腿不设任何自动停规则（课程内 ent_break=0、kickstart 熔断全关；开课时控制台也别挂
+//   kl/ent 自动 halt）。人看：日常胜率 vs stack2-it145 基线、kills、近敌平方/拾取分型。
+//   停不停人说了算，不设触发线。
+//
+// ── yardstick ─────────────────────────────────────────────────────────────
+//   终判：冻结 1600 对 vs bc stack2-it145（主判）+ vs KR10-it150（参照）；单批 800 对只算提示，
+//   必须复测拼池。方向诊断：nearSq/拾取分型必报；postHitLane 只作诊断数（不定价）。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 stack2-it145 warm start + kickstart 锚（ref=true, init=0.1）；iters 0 无上限，手工停课；
+//   进 x23 流 paired_rotate_seed=20261015（家族同流，rollout 可比）。
+//   机器与 KR10 同配方（只改价，见 params）。max_hours 24 保留。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh；backup 新目录）。
+{
+  "version": 5,
+  "name": "x24-stack4",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 16.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack2-it145 副本（sha `24319505aa987ad4`，与 x24-stack2.it145 同字节）─
+  "bc": "nn-training/weights/x24-stack4/x24-stack4.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 进 x23 流（家族同流，rollout 可比）。
+  "paired_rotate_seed": 20261015,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪，不动）。
+  "decision_k": 10,
+
+  "out": "tmp/x24-stack4/weights.json",
+  "traj": "tmp/x24-stack4",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x24-stack4",
+  "backup_prefix": "x24-stack4",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 加冕结算（2026-10-10 回填：s4-it180 三腿拼池居首，加冕现役最优）─────────
+// 拼池 1600 对（416800+417200 系）：0.4925 vs KR10 0.3750（+11.75pp，χ²cc 43.82），
+// kills ~13.7–14.2；同批 s2-it235 +10.75pp、s3-it135 +10.00pp。
+// 后继基线改挂 s4-it180。全文 `docs/nn/experiments.md` §84 ·
+// 决策 `DECISIONS.md` §2026-10-10-goalnn-s4-crown。
+
+// ── 结课报告（2026-10-10 回填：204 轮停，部分成立；it180 已加冕见上）────────
+// 日常 it25 0.4825 开峰 → it100 0.3675 → it150 0.46 → it195 0.3375 深坑 → 收 0.40，过山车。
+// 拾取门过了：冻 +7%、弹 +13%、星 +34%（0.40→0.54）、盾 +13%，四个全涨——三腿里唯一买到行为的；
+// 近敌平方门半过（−8.5%，门要 15%）。人机对照：会停（W01 49.2）+ 用盾一半，撞墙/脱离/贴脸未动。
+// 判语：部分成立（拾取方向有效，近敌平方待续）；it180 加冕见上。证据 `tmp/x24-stack4/` 账本。

@@ -1,0 +1,124 @@
+// 课程 x24-stack3 —— 叠加第三轮：拾取分型奖 + 距离小幅加压；税一分不加。起点 stack2-it145。
+//
+// 状态：草稿（2026-10-10 冻结；未开课）。本腿今日可跑（全用既有日常列）。
+//   开课 = 人在控制台点（agent 不开训）。
+//   立项 → 用户 2026-10-10 直接指定（stack2-it145 与人类语料对比后定权重）。
+//   对比结论（gap2 160 对 + 日常 it145 n=400）：税侧饱和——threat 税 22% 已是 E3a 量级、
+//   blocked 压到 0.0042 无税可加、corner 在税下反升（无响应证据）、near 持平；
+//   缺口全在奖金侧：冻/弹/星收集 0.5/0.5/0 vs 人类 1/1/1（2 倍 gap，从没定价过），
+//   距离均值 3.36 vs 4.40（wDist 还有 headroom）。故本轮只做奖金轮，不加任何税。
+//   归因 waive（叠加包惯例，用户已裁）。
+//   基线 → 双基线：bc stack2-it145（日常 0.47/13.48；gap 面板通关 73/160）为主判；
+//   KR10-it150（冻结 1600 对 0.3625）为参照。日常 killEV=40.45。
+//   起点 stack2-it145 + 下述加价（stack2 价继承：near12/dist1.8/threat80/corner55/block110）。
+//
+// ── 定价（增量 f 以 killEV=40.45 计）────────────────────────────────────────
+//   冻拾取 +wFrFreeze×puGotFreeze，wFrFreeze=2.0 → +1.0/局（人类率下 +2.0）。
+//   弹拾取 +wFrBomb×puGotBomb，wFrBomb=2.0 → +1.0/局。
+//   星拾取 +wFrStar×starsCollected（星无 puGot 列，用通用星计数列），wFrStar=3.0 → +0/局（当前 0，零梯度起步；人类率下 +3.0。
+//   鸡生蛋注：从没捡过就吃不到奖，全靠 wPickup 底价 + 接近税带路；若 40 轮仍为 0 则认死）。
+//   距离 wDist 1.8 → 2.2（打中均值单杠杆），inflow +1.3/局（+3%）。
+//   本轮增量合计 ≈ +3.3/局（+8%），对冲 −16.8 的税场。税侧一字不动（饱和声明见上）。
+//   使用侧（exFreeze 134 vs 0）仍无列——收集奖先行，使用税排队等列。
+//
+// ── 检查点（it40，只报不杀）───────────────────────────────────────────────
+//   普查：冻/弹/星收集率↑ + dist↑ + 胜率/kills。任一项都不杀腿（奖金腿只看方向）。
+//   若星 40 轮仍为 0 ⇒ 该项认死（鸡生蛋失败），其余继续。
+//
+// ── 人工盯盘（无自动熔断）───────────────────────────────────────────────────
+//   本腿不设任何自动停规则（课程内 ent_break=0、kickstart 熔断全关；开课时控制台也别挂
+//   kl/ent 自动 halt）。人看：日常胜率 vs stack2-it145 基线、kills、拾取分型三项。
+//   停不停人说了算，不设触发线。
+//
+// ── yardstick ─────────────────────────────────────────────────────────────
+//   终判：冻结 1600 对 vs bc stack2-it145（主判）+ vs KR10-it150（参照）；单批 800 对只算提示，
+//   必须复测拼池。方向诊断：拾取分型 + dist 必报。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 stack2-it145 warm start + kickstart 锚（ref=true, init=0.1）；iters 0 无上限，手工停课；
+//   进 x23 流 paired_rotate_seed=20261015（家族同流，rollout 可比）。
+//   机器与 KR10 同配方（只改价，见 params）。max_hours 24 保留。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh；backup 新目录）。
+{
+  "version": 5,
+  "name": "x24-stack3",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNear*nearEnemy4Ticks/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 2.2,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wNear": 12.0,
+      "wBlock": 110.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack2-it145 副本（sha `24319505aa987ad4`，与 x24-stack2.it145 同字节）─
+  "bc": "nn-training/weights/x24-stack3/x24-stack3.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 进 x23 流（家族同流，rollout 可比）。
+  "paired_rotate_seed": 20261015,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪，不动）。
+  "decision_k": 10,
+
+  "out": "tmp/x24-stack3/weights.json",
+  "traj": "tmp/x24-stack3",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x24-stack3",
+  "backup_prefix": "x24-stack3",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 结课报告（2026-10-10 回填：205 轮停，无效，归档）────────────────────────
+// 日常 0.455 开局，0.385~0.4725 横盘（峰 it50 0.4725/it175 0.46，收 0.445）。
+// 奖金门没过：冻/弹收集纹丝不动，只有星 +10%（0.40→0.44）；dist +4% 是唯一亮点。
+// 花了钱（wFr 2/2/3）没买到货——收集行为对价格不敏感，瓶颈疑在“看见/够到”不在“想捡”。
+// 判语：无效，归档；峰从未冻结验证，不认。证据 `tmp/x24-stack3/` 账本。
