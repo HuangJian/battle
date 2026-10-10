@@ -897,6 +897,8 @@ def test_backup_round_does_not_touch_computing_at(
         W, "acquire_job", lambda *a, **k: jobs.pop(0) if jobs else None, raising=True
     )
     monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: ([], False), raising=True)
+    # 假 hub 的第三条 HTTP 缝（预取状态上报）：不打桩 = 每轮白等 ~1.4s（hub_seams 头部）。
+    monkeypatch.setattr(JR, "report_prefetch", lambda *a, **k: False, raising=True)
     monkeypatch.setattr(JR, "start_cancel_watcher", lambda *a, **k: None, raising=True)
     monkeypatch.setattr(JR, "heartbeat", lambda *a, **k: True, raising=True)
     started: list[str] = []

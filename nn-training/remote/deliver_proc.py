@@ -517,14 +517,24 @@ class DelivererProcess:
         return [int(it) for it in (rows or []) if isinstance(it, int) and not isinstance(it, bool)]
 
     def _result_done_from_disk(self) -> bool:
-        child = self._child_status()
-        if "result_done" in child:
-            return bool(child.get("result_done"))
+        """段末摘要「已送达」的**磁盘证据**（重启时决定要不要重述、收线时核对）。
+
+        **账本优先、状态面快照兜底**：两份证据的写入时刻差一整拍 —— 账本是子进程拿到 200 后
+        **当即** `_save_ledger()` 写的那份，而状态面是**每 tick 的快照**（`DRAIN_TICK_SEC = 0.5`
+        再加一趟 sync）。先看快照 ⇒ 在「hub 已收到 POST、快照还没刷新」这一段里判 False ⇒
+        白重述一次段末摘要（hub 侧覆盖写，不丢数据，但白付一次 ~1.9MB 的 POST，且 `close()`
+        会虚报「段末摘要未送达」）。2026-10-10 量到（回归用例
+        `tests/remote/test_offline_deliver_async.py::test_result_done_prefers_the_ledger_over_a_stale_status_snapshot`）。
+
+        两边都没有结果时返回 False（= 「按没送处理」）：宁可重述（覆盖写幂等），也不赌它送过。
+        """
         try:
             data = json.loads(self._mirror().ledger_path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
-            return False
-        return bool(data.get("result_done")) if isinstance(data, dict) else False
+            data = None
+        if isinstance(data, dict) and "result_done" in data:
+            return bool(data.get("result_done"))
+        return bool(self._child_status().get("result_done"))
 
     def status(self) -> dict:
         """父侧可见的状态：账本/磁盘 + **子进程状态面** + 重启计数 + 模式。

@@ -74,10 +74,14 @@ class _FakeProc:
         self._code = -9
 
 
-def _seed_ledger(root: Path, *, artifacts: tuple[int, ...] = ()) -> None:
+def _seed_ledger(
+    root: Path, *, artifacts: tuple[int, ...] = (), result_done: bool = False
+) -> None:
     """手搓 `delivered.json`（「这几轮已经投过」是走重投那条路的前提）。"""
     (root / "delivered.json").write_text(
-        json.dumps({"run_id": RUN, "artifacts": list(artifacts), "result_done": False}),
+        json.dumps(
+            {"run_id": RUN, "artifacts": list(artifacts), "result_done": bool(result_done)}
+        ),
         encoding="utf-8",
     )
 
@@ -501,3 +505,34 @@ def test_restart_restating_the_final_does_not_self_lock(
     assert ok, "`_append` 自锁死（同一线程重入不可重入锁）——训练线程会永挂"
     assert lines[-1] == {"round": 2}, lines
     assert sum(1 for x in lines if "final" in x) == 2, f"重启后的重述要再落一行 final：{lines}"
+
+
+def test_result_done_prefers_the_ledger_over_a_stale_status_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """重启时判「段末摘要送没送」的证据优先级：**账本 > 状态面快照**。
+
+    两份证据的写入时刻差一整拍 —— 账本是子进程拿到 200 后**当即** `_save_ledger()` 写的那份，
+    而状态面是**每 tick 的快照**（`DRAIN_TICK_SEC = 0.5` 再加一趟 sync）。先看快照 ⇒ 在
+    「hub 已收到 POST、快照还没刷新」这一段里判 False ⇒ 白重述一次段末摘要（hub 侧覆盖写，
+    不丢数据，但白付一次 ~1.9MB 的 POST，且 `close()` 会虚报「段末摘要未送达」）。
+
+    2026-10-10：这条优先级是查慢层 `test_restart_does_not_replay_consumed_commands` 的满载
+    flake 时量出来的（探针实测：窗口里**两边都还没落** ⇒ 那次重述是设计行为，见该用例与
+    `docs/nn/remote-transport.md` §77）。
+    """
+    root = _make_artifacts(tmp_path / "art")
+    _seed_ledger(root, artifacts=(1,), result_done=True)  # 子进程拿到 200 后当即写的
+    d = DelivererProcess(
+        base_url="http://127.0.0.1:1",
+        token="tok",
+        run_id=RUN,
+        artifacts_dir=root,
+        work_dir=tmp_path / "work",
+        log=lambda _m: None,
+    )
+    # 状态面：**陈旧快照**（上一个 tick 写的，说没送）—— 0.5s 的窗口就在这
+    monkeypatch.setattr(d, "_child_status", lambda: {"pid": 4321, "result_done": False})
+    assert d._result_done_from_disk() is True, (
+        "账本说送了、快照还没刷新 ⇒ 必须信账本（否则重启白重述一次 ~1.9MB 的段末摘要）"
+    )

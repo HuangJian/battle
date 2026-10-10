@@ -25,6 +25,147 @@
 
 ---
 
+## §72 pytest 最慢用例第二轮：第三条 HTTP 缝 + 三处全仓扫描的口径内提速（2026-10-10，用户指令「找出耗时最长的 16 个 pytest，尝试优化」）
+
+**一句话**：先把「最慢 16 条」**量准**（forkdist 8 不动；4 连跑取 min，见 §43），再逐条定位；
+16 条里 **7 条真能改**（合计 ~22s CPU），其余 **9 条是「不可动」**（真 torch 固定成本 / 秒级真窗 /
+真子进程）。全量 `sum_min` **182.3s → 152.9s（−16%）**，`tests/+e2e/` 墙钟 **min 37s → 31s、
+中位 43.5s → 33s（−24%）**；门禁 pytest 腿 32.0s → 30.0s，3971 passed / 3 skipped 全绿。
+根因只有三类：**新加的一条控制面 HTTP 缝没进假 hub 桩**、**同一份源码被反复解析/遍历**、
+**派生小结果没缓存**（后两类正是 §43 那两条规矩的漏网面）。
+
+### 测速手法（本轮新增两条，其余同 §43）
+
+| 手法 | 为什么 |
+|---|---|
+| **纯净 worktree 基线**（`git worktree add --detach`，venv 做软链 + 补一份未跟踪的 `nn-training/rl-config.json`） | 同机同配置的「改前」样本，不再依赖会话早期那批日志；也用来给 flake 归因（见末节） |
+| **隔离复测**（单文件 12 连跑）区分「负载 flake」与「改动引入」 | 全量里 1/10 红的用例，隔离下 12/12 绿 ⇒ 它要的是负载，不是改动 |
+| 被点名的用例另跑**单进程串行** + `cProfile`（`tmp/prof_one.py`）看**钱花在哪** | `--durations` 只说明「这条慢」，不说明是 parse / walk / 网络空等 |
+
+### 七个能改的（改前 = 4 连跑 min；改后 = 6 次完整跑 min）
+
+| # | 用例 | 改前 | 改后 | 根因 / 修法 |
+|---|---|---|---|---|
+| 1 | `test_source_text_assert_budget.py::test_text_assert_counts_only_go_down` | 5.62 | **3.85** | 口径 B 内部重复遍历（下详） |
+| 2 | `test_soft_hold_prefetch.py::test_worker_loop_uses_prefetched_payload_without_downloading` | 2.85 | **0.30** | 第三条 HTTP 缝没打桩（下详） |
+| 3 | 同文件 `::test_prefetch_hit_is_visible_in_the_wire_line` | 2.83 | **0.30** | 同上 |
+| 4 | `test_priority_schedule.py::test_backup_round_does_not_touch_computing_at` | 2.87 | **~0.3** | 同上（两轮 ×1.4s） |
+| 5 | `test_lock_reentrancy.py::test_no_rerun_of_an_owned_lock_through_the_critical_section` | 4.08 | 3.6（同进程实测 2.49→2.02） | 全仓扫描的「无类且无锁词」预筛（下详） |
+| 6 | `test_gate_inputs_split.py::test_gate_inputs_stays_pure_logic`（+ `gate_judges` / `eval_*` 同族） | 1.35 | **0.63** | `remote_dag.graph()` 每个进程重建 161 模块的图（下详） |
+| 7 | 假 hub 的另外 7 条（`remote_hotswap` ×4 · `worker_queue` ×2 · `job_round_split` ×1） | 1.42~1.43 | **~0.05~0.32** | 第三条 HTTP 缝（同上） |
+
+> 上表只算「被点名的用例」；同族里还有 `soft_hold` 的 `filler_*`（1.40~1.56 → 0.10~0.15）、
+> `priority_schedule::test_worker_loop_cancel_abandons…`（1.43 → ~0.05）等，一并受益。
+
+### 三条根因与修法
+
+**① 第三条控制面 HTTP 缝（`report_prefetch`）没进假 hub 桩（14 条用例，~22s）**
+
+`plan/dashboard-ppo-live-rows` 给 `_prefetch_fill` 加了一条**每轮末上报预取状态**的腿
+（`POST /admin/worker-prefetch`），而它的 `reported` 初值是 `None` ⇒ **每个填充线程首轮无条件发一笔**。
+假 hub（`http://hub` / `http://h0`）下的用例看不见这条腿（best-effort 失败被 `except Exception: pass`
+吞掉），看得见的只有耗时：本容器里每次 **~1.4s**（`HTTP_PROXY` 指向一个把不可达主机转成 502 的代理；
+不走代理的机器上 ~0.2s 的 DNS 失败）。⇒ `tests/helpers/hub_seams.py::stub_round_http` **补上第三条桩**
+（`report_prefetch → False` = 生产「hub 不可达」的同形返回），并在不用该助手的四处显式补桩。
+
+> 为什么值得单独记一条：这条缝**已经白等了整整一批用例**，而「新加控制面请求 ⇒ 假 hub 用例集体变慢」
+> 是**会重犯**的形态（§14 那族）。判据很便宜：`--durations` 里出现整齐的 1.4s 台阶 + 该用例并不测这条腿。
+
+**② `text_asserts` 口径 B 的内部重复遍历（1 条用例，~1.8s）**
+
+`totals()` 对 338 个测试文件跑 A/B 两个口径，实测 A 0.57s、**B 2.62s**，而 B 的钱花在：
+`_producer_funcs` 对**每个函数**各 `ast.walk(fn)` 一遍（嵌套函数被重复走，1.14s）+ `py_source_derived_names`
+的**不动点每轮重走所有绑定表达式**（1.00s）。三刀（判据逐条不变）：
+
+1. **一次索引**：`_index(tree)` 用**一遍** `ast.walk` 同时收 `binds`（= 原 `_assignments` 的同一串 if/elif）/ `funcs` / `asserts`，
+   A/B 共用（`funcs` 保持 **BFS 顺序** —— `calls[fn.name]` 对同名函数是「后者覆盖前者」，顺序是语义）；
+2. **`_producer_funcs` 单遍**：每个节点只归到**最内层**函数、出栈时并给外层（= `ast.walk(fn)` 含嵌套子树的**并集**），
+   显式栈遍历，不再按函数重复走；
+3. **绑定预计算**：每条绑定先算一次「值里有没有 `.py` 门节点 / 引用了哪些名字」，不动点循环从此只做集合运算；
+4. **廉价预筛**：源码里一个 `_PY_FACE_TOKENS`（`.py` / `py_files` / `logic_*` / `getsource`）都没有 ⇒ B 记 0，连闭包都不建（338 文件里 46 个命中）。
+
+**验证**（不许「看起来更快了」就收）：旧实现从 `git show HEAD:` 取出，与新实现在**全仓 241 个命中文件**上对账 ——
+A/B **条数**与**每条命中行号**逐条相同（`EQUIVALENT`，0 mismatch），`totals` 3.42s → 2.23s。
+
+**③ `remote_dag.graph()` 不缓存（~14 处问一次建一次，~5s）**
+
+`graph()` 要把 161 个模块全 AST 扫一遍（0.62s），而「纯逻辑不达传输面」在 5 个拆分守卫里各问一次、
+`test_remote_dag` 里另有 4 处在用例体里再算一遍 ⇒ **同一个 worker 进程里白扫十来遍**（`--durations` 实测
+`gate_inputs` 1.35s、`gate_judges` 1.32s 几乎全是它）。⇒ `graph()` / `remote_modules()` 各加一份
+**进程内缓存，键 = 三个包目录的当前取值**（`package_roots()` 现读全局：合成源码的自证用例 monkeypatch 目录后
+必须各算一份 —— 这是键里带目录、而不是简单 `@cache` 的原因），返回值给**副本**（缓存那份没人能动）。
+
+**④ `test_lock_reentrancy` 的「无类且无锁词」预筛（~1s）**：见该文件 `_needs_index` 的注释 ——
+锁点必然含 lock/cv/cond/sem 词、跨文件可达只走组合组（类继承）⇒ 无类且无锁词的文件既不贡献锁点、
+也不贡献可达目标、也不进类图。扫描面 622 文件里 **249 个（40%）**可跳。对账：同一批 sources 下
+`sites/problems/opaque` 逐条相同（`EQUIVALENT`），`_check` 2.49s → 2.02s。
+（双保险：用例本来的 `sites >= 60` 下界自检会让「预筛跳多了」当场红。）
+
+### 九条「不可动」（写下来，免得下一个人再试一遍）
+
+| 类 | 用例 | 为什么不动 |
+|---|---|---|
+| 真 torch 固定成本 / 真训练 | `bc_epoch_resume` ×2 · `ppo_goal::test_ppo_update_smoke` · `ppo_common::test_ppo_save_load` / `kickstart_off_is_identity` · `log_diet` ×3 | 每 worker 一次的 `torch._dynamo` 懒导入 + 真 BC/PPO update（§43 已判过：改小语料只会把守卫变窄） |
+| 秒级**真**窗 | `e2e/test_hold_e2e.py` ×2（4.24 / 1.66）· `e2e/test_auto_handoff_e2e.py` ×3（2.2~2.3） | 真 `hub.server` 子进程 + 真 HTTP，`HOLD_STALE=2.0` / `BC_STALE=1.5` 是**被测对象**（「900s 静默超阈」在本层真的跑出来）；文件头已写明「窗不能再小，否则满载 xdist 下全是假红」 |
+| 真子进程 | `offline_deliver_proc` ×2（1.6）· `test_forkdist` ×2（1.3~1.6） | 前者起真 `DelivererProcess` 子进程并等它读/写控制文件（66 次轮询 ≈ 1.5s 全在等子进程）；后者是分发器自证，5 次 `subprocess.run` 起真 pytest |
+| 扫描型但已到底 | `test_no_sleep_as_sync::test_every_wallclock_upper_bound_assert_declares_a_reason`（1.56） | §43 已加过 `assert` + 时间/时长词的文本预筛；剩下的成本是**命中文件**的 parse + walk |
+
+### 效果（同一容器：改前 = 会话起点 4 连跑；改后 = 6 次完整跑）
+
+| 指标 | 改前 | 改后 |
+|---|---|---|
+| 全量 `sum_min`（1345~1708 条可见 call） | 182.3s | **152.9s（−16%）** |
+| `pytest tests/ e2e/ --forkdist 8` 墙钟 | 37 / 41 / 46 / 58s（min 37 · 中位 43.5） | **31~34s（min 31 · 中位 33，−24%）** |
+| 纯净 worktree 同配置墙钟（6 次有效跑） | 36 / 36 / 37 / 38 / 47 / 49s（min 36） | — |
+| 最慢单测 | 5.62s（文本断言护栏） | **4.67s**（lock 守卫的第二次全仓扫 —— 见下「调度」） |
+| 门禁 pytest 腿（**单跑不可比**，见下注） | 27.5 / 30.2 / 32.6 / 41.6s（纯净树 4 次） | 27.7 / 28.6 / 30.9 / 48.3s（改后树 4 次） |
+| 用例数 | 3974 收下 / 3 skipped | 不变（3971 passed / 3 skipped） |
+
+> **门禁单跑不是 A/B 的量**：本机其它负载能把同一条腿拉到 27s 或 57s（上表两列**完全重叠**），
+> 谁先跑谁吃亏。要判定只有两条路：`sum_min`（负载下的**净工作量**）与**同一批连跑取 min**
+> （今天做了一次交叉插空对照：纯净树 4 次 = 38.4 / 52.4 / 35.9 / 33.8s，改后树 4 次 =
+> 27.7 / 28.6 / 48.3 / 30.9s ⇒ min **33.8 → 27.7s**，与 `sum_min` 的 −16% 同向同量级）。
+
+**为什么墙钟只降 ~6s**：与本轮无关的那个 1/6 概率 flake 会把跑截断，`-x` 下一次早停就白赚；
+真正决定墙钟的仍是 ① 收集相（单进程 import + collect **~4s**，占墙钟 1/8。`-X importtime` 实测
+**import 自耗时合计只有 157ms** ⇒ 那 4s 是 317 个测试模块的**模块级代码**与 pytest 建 item，
+不是 import 链）；② lock 那对全仓扫描用例被 forkdist **分到两个 worker** 时各扫一遍（各 ~4s，
+本轮只把单次扫描砍了 19%）；③ 上面那 9 条不可动的长尾。要继续压墙钟，动的是「收集相」与
+「扫描结果的跨 worker 复用」，不是继续抠单条用例。
+
+### 一条既存 flake 的归因（不是本轮的锅，但必须写下来）
+
+`tests/remote/test_offline_deliver_proc.py::test_restart_does_not_replay_consumed_commands`
+在**满载全量**下约 **1/6** 概率红（`重启重放了已消费的 final（result POST 出现 2 次）`）。
+同一条用例、同一个窗口 `docs/nn/remote-transport.md` §74 也记过（kill 子进程时 hub 已收到 POST、
+而子进程还没把 `result_done` 落盘；「满载时子进程记账一慢，窗口就开」）—— 那次的红是**挂死**
+（`_append` 自锁，已由 `RLock` 修掉），今天这是同一窗口的另一种**表现形态**（不挂，而是重放）。三条证据：
+
+1. 本轮 14 次全量里红 2 次（runs 7/12）；**纯净 worktree 的 7 次有效跑里也红 1 次**（同一条断言、同一句报错）；
+2. 本轮改动的 7 个文件与该用例的 import 链（`remote.deliver_proc` / `remote.offline_deliver` /
+   `tests.remote.test_offline_deliver` / `common.protocol` / `tests.subproc_util`）**零交集**；
+3. 隔离复测 `pytest tests/remote/test_offline_deliver_proc.py` **12/12 绿**（无负载就不现形）。
+
+⇒ 它是**负载敏感的既存 flake**（要么修生产侧的 `result_done` 落盘与首写锁定的窗口，要么把这条用例的
+kill 时机改成事件驱动 —— 属另一道题，本轮不动）。
+
+> **同日续（2026-10-10）**：修了 —— 判据对齐「可判定」的磁盘证据（杀点同步到安静点）+ 账本优先：
+> `docs/nn/remote-transport.md` §77 · `DECISIONS.md` §2026-10-10-goalnn-deliverproc-final-flake。
+> 修前/修后 A/B：纯净树 3/6 红 → 本树 0/6 红（同条件）。
+
+### 被否决
+
+* **单次 `--durations` 下结论**：本机负载波动仍在（同配置墙钟 31~58s）⇒ 名次会换人，改前/改后不可比。
+* **全局关掉代理 env 来治 1.4s 空等**（`HTTP_PROXY=""`）：它治的是「本容器走代理」这一现象，而不是
+  「假 hub 用例本来就不该发请求」这条判据；而且会把真需要代理的行为一起掩掉。
+* **把两条 lock 全仓用例合并成一条**（省一次扫描）：判据粒度（硬判据 vs 目标面棘轮）比省下的 4s 值钱；
+  要省得动「跨 worker 复用扫描结果」，不是把两条判据揉成一条。
+* **给 `graph()` 加裸 `@cache`**：合成源码的自证用例 monkeypatch 了包目录，裸缓存会把真仓库那份发回去。
+* **把扫描结果落盘共享给 8 个 worker**：守卫的缓存一旦陈旧就是**静默变弱**（比慢严重得多）。
+* **为迁就测试改生产配速**（窗口 / 固定等待）：一律不动生产缺省（§14 先例）。
+
+---
+
 ## §71 测试债清理：口径先于数字（`text_asserts` / 退役单点 / 两条护栏）· 2026-10-09
 
 ### 一句话

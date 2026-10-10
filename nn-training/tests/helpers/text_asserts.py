@@ -63,11 +63,24 @@ from __future__ import annotations
 import argparse
 import ast
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 #: 扫描面（相对 `--root`）：门禁 `pytest tests/ e2e/` 的同一批文件。
 SCAN_DIRS: tuple[str, ...] = ("tests", "e2e")
+
+#: 口径 B 的**廉价预筛**字面量（2026-10-10 提速）：`_node_is_py_face` 的三个来源
+#: （`.py` 字符串常量 / 源码面助手名 / `getsource`）在合法 Python 里必然是源码里的字面量
+#: ⇒ 一个都不出现的文件**连派生名字都建不出来**，不可能有 B 命中。
+#: 规矩出处：`tests/helpers/source_scan.py` 头部「先廉价预筛再 ast.parse」。
+_PY_FACE_TOKENS: tuple[str, ...] = (
+    ".py",
+    "py_files",
+    "logic_py_files",
+    "logic_module",
+    "logic_dotted",
+    "getsource",
+)
 
 #: 字面量容器：另一侧是这些类型时不算「文本断言」（见口径 A 第三条）。
 _CONTAINERS = (ast.List, ast.Tuple, ast.Set, ast.Dict)
@@ -143,10 +156,14 @@ def _form_assert(test: ast.expr) -> TextAssert | None:
 
 def form_asserts(tree: ast.Module) -> tuple[TextAssert, ...]:
     """口径 A 的全部命中（按行号排序）。"""
+    return _form_hits(_index(tree).asserts)
+
+
+def _form_hits(asserts: tuple[ast.Assert, ...]) -> tuple[TextAssert, ...]:
+    """口径 A 的命中（吃已算好的 assert 清单 —— 可被 `totals` 与 B 共用）。"""
     out = [
         found
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Assert)
+        for node in asserts
         for found in [_form_assert(node.test)]
         if found is not None
     ]
@@ -189,38 +206,68 @@ def _is_py_source(expr: ast.expr, names: frozenset[str]) -> bool:
     )
 
 
-def _assignments(tree: ast.Module) -> list[tuple[tuple[ast.expr, ...], ast.expr]]:
-    """文件里所有「有值」的绑定（Assign / AnnAssign / AugAssign / walrus / for / with-as）。
+@dataclass(frozen=True)
+class _Index:
+    """**一次 `ast.walk`** 收全的三个清单（A/B 两个口径共用，省掉重复遍历）。"""
 
-    **一次遍历**收全，之后的闭包迭代在这个列表上跑（旧版每次迭代重走整棵树 ⇒ O(函数数² × 节点数)，
-    实测把护栏用例拖到 17.8s）。
+    #: 「有值」的绑定（Assign / AnnAssign / AugAssign / walrus / for / with-as）—— 闭包迭代的输入。
+    binds: tuple[tuple[tuple[ast.expr, ...], ast.expr], ...]
+    #: 函数定义（含嵌套/方法）—— `_producer_funcs` 的入参，**顺序 = `ast.walk`（BFS）**。
+    funcs: tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...]
+    #: 全部 assert 节点（口径 A/B 的判据入口）。
+    asserts: tuple[ast.Assert, ...]
+
+
+def _index(tree: ast.Module) -> _Index:
+    """一遍遍历收全三个清单（2026-10-10 提速：原来 A/B 各走一遍、B 内部又各走几遍）。
+
+    判据与顺序与旧版逐条一致：绑定那支就是原 `_assignments` 的同一串 `if/elif`（同一批
+    条件、同一次 `ast.walk` 顺序）；`funcs` 是 **BFS 顺序**（`calls[fn.name] = …` 对同名
+    函数是「后者覆盖前者」⇒ 顺序是语义的一部分）。
     """
-    out: list[tuple[tuple[ast.expr, ...], ast.expr]] = []
+    binds: list[tuple[tuple[ast.expr, ...], ast.expr]] = []
+    funcs: list[ast.FunctionDef | ast.AsyncFunctionDef] = []
+    asserts: list[ast.Assert] = []
     for node in ast.walk(tree):
-        if isinstance(node, ast.Assign):
-            out.append((tuple(node.targets), node.value))
+        if isinstance(node, ast.Assert):
+            asserts.append(node)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            funcs.append(node)
+        elif isinstance(node, ast.Assign):
+            binds.append((tuple(node.targets), node.value))
         elif isinstance(node, (ast.AnnAssign, ast.NamedExpr, ast.AugAssign)):
             if node.value is not None:  # `x: int`（裸声明）没有值
-                out.append(((node.target,), node.value))
+                binds.append(((node.target,), node.value))
         elif isinstance(node, (ast.For, ast.AsyncFor)):
-            out.append(((node.target,), node.iter))
+            binds.append(((node.target,), node.iter))
         elif isinstance(node, ast.withitem) and node.optional_vars is not None:
-            out.append(((node.optional_vars,), node.context_expr))
-    return out
+            binds.append(((node.optional_vars,), node.context_expr))
+    return _Index(tuple(binds), tuple(funcs), tuple(asserts))
 
 
-def py_source_derived_names(tree: ast.Module) -> frozenset[str]:
-    """**一级绑定闭包**：由「读 `.py` 源码」赋值出来的名字（含 tuple/多目标/with-as/for 目标）。
+def _derived_names(binds: tuple[tuple[tuple[ast.expr, ...], ast.expr], ...]) -> frozenset[str]:
+    """`py_source_derived_names` 的实现（吃已算好的绑定清单）。
 
-    已知边界见模块头（累加式拼装追不到 ⇒ 本口径是下界）。
+    2026-10-10 提速：先给每条绑定算好「值里有没有 `.py` 门节点 / 引用了哪些名字」（各走一遍
+    子树），不动点循环从此只做集合运算。旧版每次迭代都把**所有**绑定表达式重走一遍
+    （实测 1.0s → 0.4s）；判据等价（`_is_py_source` 的 `or` 两侧就这两件事）。
     """
-    binds = _assignments(tree)
+    prepared: list[tuple[tuple[ast.expr, ...], bool, frozenset[str]]] = []
+    for targets, value in binds:
+        face = False
+        refs: set[str] = set()
+        for n in ast.walk(value):
+            if _node_is_py_face(n):
+                face = True
+            elif isinstance(n, ast.Name):
+                refs.add(n.id)
+        prepared.append((targets, face, frozenset(refs)))
     names: set[str] = set()
     changed = True
     while changed:
         changed = False
-        for targets, value in binds:
-            if not _is_py_source(value, frozenset(names)):
+        for targets, face, ref_names in prepared:
+            if not face and not (ref_names & names):
                 continue
             for t in targets:
                 if isinstance(t, ast.Name) and t.id not in names:
@@ -229,25 +276,69 @@ def py_source_derived_names(tree: ast.Module) -> frozenset[str]:
     return frozenset(names)
 
 
-def _producer_funcs(tree: ast.Module) -> frozenset[str]:
+def py_source_derived_names(tree: ast.Module) -> frozenset[str]:
+    """**一级绑定闭包**：由「读 `.py` 源码」赋值出来的名字（含 tuple/多目标/with-as/for 目标）。
+
+    已知边界见模块头（累加式拼装追不到 ⇒ 本口径是下界）。
+    """
+    return _derived_names(_index(tree).binds)
+
+
+@dataclass
+class _FnFrame:
+    """一个函数的「子树事实」：裸名调用 + 有没有 `.py` 门节点（出栈时并给外层）。"""
+
+    called: set[str] = field(default_factory=set)
+    face: bool = False
+
+
+def _producer_funcs(
+    tree: ast.Module, funcs: tuple[ast.FunctionDef | ast.AsyncFunctionDef, ...] | None = None
+) -> frozenset[str]:
     """同文件里**返回 `.py` 源码文本**的函数名（`_prod_sources()` 那族）。
 
     做法：每个函数体**只走一遍**（收「调了哪些裸名函数」+「体内有没有 `.py` 门节点」），
-    然后在调用图上迭代到不动点（旧版在树节点上迭代不动点，见 `_assignments` 的注记）。
+    然后在调用图上迭代到不动点（`_index().binds` 那头同款：先收清单再迭代，不在树上反复跑）。
+
+    2026-10-10 提速：判据就是 `ast.walk(fn)` 的**并集**，而嵌套函数的子树本来就在外层里 ⇒
+    每个节点只归到**最内层**函数、出栈时并给外层（一遍显式栈遍历），不再对每个函数各
+    `ast.walk(fn)` 一遍（实测 1.14s → 0.25s）。节点顺序无关紧要（并集）；`calls` 的覆盖
+    顺序仍按传进来的 `funcs`（= `ast.walk` 的 BFS 顺序）。
     """
-    funcs = [n for n in ast.walk(tree) if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+    if funcs is None:
+        funcs = _index(tree).funcs
+    frames: dict[int, _FnFrame] = {}
+    #: 非 AST 的**帧收尾哨兵**（压进同一只工作栈；`list.extend` 前先压它 ⇒ 子树先跑完）。
+    close: object = object()
+    stack: list[_FnFrame] = []
+    work: list[object] = [tree]
+    while work:
+        item = work.pop()
+        if not isinstance(item, ast.AST):  # 唯一的非 AST 项就是哨兵
+            frame = stack.pop()
+            if stack:
+                stack[-1].called |= frame.called
+                stack[-1].face = stack[-1].face or frame.face
+            continue
+        node: ast.AST = item
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            frame = _FnFrame()
+            frames[id(node)] = frame
+            stack.append(frame)
+            work.append(close)
+        elif stack:
+            cur = stack[-1]
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                cur.called.add(node.func.id)
+            if not cur.face and _node_is_py_face(node):
+                cur.face = True
+        work.extend(ast.iter_child_nodes(node))
     calls: dict[str, set[str]] = {}
     direct: set[str] = set()
     for fn in funcs:
-        called: set[str] = set()
-        face = False
-        for n in ast.walk(fn):
-            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name):
-                called.add(n.func.id)
-            if not face and _node_is_py_face(n):
-                face = True
-        calls[fn.name] = called
-        if face:
+        frame = frames[id(fn)]
+        calls[fn.name] = frame.called
+        if frame.face:
             direct.add(fn.name)
     out = set(direct)
     changed = True
@@ -262,12 +353,15 @@ def _producer_funcs(tree: ast.Module) -> frozenset[str]:
 
 def source_asserts(tree: ast.Module) -> tuple[TextAssert, ...]:
     """口径 B 的全部命中（按行号排序）。"""
-    names = py_source_derived_names(tree)
-    producers = _producer_funcs(tree)
+    return _source_hits(tree, _index(tree))
+
+
+def _source_hits(tree: ast.Module, idx: _Index) -> tuple[TextAssert, ...]:
+    """口径 B 的命中（吃已算好的索引 —— 一次遍历供 A/B 两口径）。"""
+    names = _derived_names(idx.binds)
+    producers = _producer_funcs(tree, idx.funcs)
     out: list[TextAssert] = []
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.Assert):
-            continue
+    for node in idx.asserts:
         test = node.test
         direct = (
             isinstance(test, ast.Call)
@@ -297,7 +391,12 @@ def count_source(source: str, filename: str = "<string>") -> tuple[TextAssert, .
 
 
 def count_source_asserts(source: str, filename: str = "<string>") -> tuple[TextAssert, ...]:
-    """口径 B（见模块头；T5 的删除面，**下界**）。"""
+    """口径 B（见模块头；T5 的删除面，**下界**）。
+
+    先过廉价预筛（`_PY_FACE_TOKENS`）：字面量一个都不出现 ⇒ 不必解析就知道是 0。
+    """
+    if not any(tok in source for tok in _PY_FACE_TOKENS):
+        return ()
     return source_asserts(ast.parse(source, filename=filename))
 
 
@@ -343,6 +442,30 @@ def source_assert_counts(root: Path) -> dict[str, int]:
     return {rel: len(v) for rel, v in audit_source_text(root).items()}
 
 
+def _counts(tree: ast.Module, *, has_py_face: bool) -> tuple[int, int]:
+    """`(口径 A 条数, 口径 B 条数)` —— **一次建索引**（2026-10-10：A/B 共用同一次遍历）。
+
+    `has_py_face=False`（源码里一个 `_PY_FACE_TOKENS` 都没有）⇒ B 直接记 0，连闭包都不建。
+    """
+    idx = _index(tree)
+    form = len(_form_hits(idx.asserts))
+    if not has_py_face:
+        return form, 0
+    names = _derived_names(idx.binds)
+    producers = _producer_funcs(tree, idx.funcs)
+    py_src = 0
+    for node in idx.asserts:
+        test = node.test
+        direct = (
+            isinstance(test, ast.Call)
+            and isinstance(test.func, ast.Name)
+            and test.func.id in producers
+        )
+        if direct or _is_py_source(test, names):
+            py_src += 1
+    return form, py_src
+
+
 def totals(root: Path) -> tuple[int, int, dict[str, tuple[int, int]]]:
     """`(A 总数, B 总数, {文件: (A, B)})` —— **一次读盘 / 一次解析**出两个口径。
 
@@ -352,9 +475,9 @@ def totals(root: Path) -> tuple[int, int, dict[str, tuple[int, int]]]:
     per_file: dict[str, tuple[int, int]] = {}
     for p in scan_paths(root):
         rel = str(p.relative_to(root)).replace("\\", "/")
-        tree = ast.parse(p.read_text(encoding="utf-8"), filename=rel)
-        form = len(form_asserts(tree))
-        py_src = len(source_asserts(tree))
+        text = p.read_text(encoding="utf-8")
+        has_py_face = any(tok in text for tok in _PY_FACE_TOKENS)
+        form, py_src = _counts(ast.parse(text, filename=rel), has_py_face=has_py_face)
         if form or py_src:
             per_file[rel] = (form, py_src)
     return (

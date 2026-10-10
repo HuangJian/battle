@@ -378,6 +378,9 @@ def test_the_moved_seam_resolves_in_the_round_module(monkeypatch, tmp_path: Path
         lambda *a, **k: (_ for _ in ()).throw(AssertionError("打偏：填充器不该走 remote.worker")),
     )
     monkeypatch.setattr(round_mod, "PREFETCH_ROUND_SEC", 0.02)
+    # 第三条缝（预取状态上报）：本用例只钉 `peek_jobs` 的命名空间，上报腿不打桩就会
+    # 在首轮真发 HTTP（~1.4s）并把线程 join 拖住（见 tests/helpers/hub_seams.py）。
+    monkeypatch.setattr(round_mod, "report_prefetch", lambda *a, **k: False)
 
     stop = threading.Event()
     store = PrefetchStore(tmp_path / "work", budget_bytes=1 << 20)

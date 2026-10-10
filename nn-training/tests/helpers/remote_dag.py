@@ -414,11 +414,32 @@ def project_roots() -> set[str]:
     return out
 
 
-def remote_modules() -> dict[str, Path]:
-    """`remote/` 下的**生产模块**（dotted name → 路径）。
+def _package_dir_key() -> tuple[str, ...]:
+    """缓存键 = 三个包目录的**当前**取值。
 
-    `__init__.py` 不入账：它是包门面/文档，不是依赖图的节点（`hub/__init__.py` 同理）。
+    `package_roots()` 现读全局（合成源码的自证用例 monkeypatch 目录）⇒ 键里必须带上目录，
+    否则合成用例会撞上真仓库那份缓存。
     """
+    roots = package_roots()
+    return tuple(str(roots[pkg]) for pkg in LEDGER_PACKAGES)
+
+
+#: `remote_modules()` / `graph()` 的进程内缓存（键 = 包目录）。
+#:
+#: 2026-10-10（提速）：`graph()` 要把 161 个模块全 AST 扫一遍（实测 ~0.6s），而「纯逻辑不达
+#: 传输面」（`reaches_transport` 在 5 个拆分守卫里各问一次）与全图对账（`test_remote_dag`
+#: 多处）在**同一个 worker 进程**里会各问一次 ⇒ 白扫十来遍（--durations 实测
+#: `test_gate_inputs_split::test_gate_inputs_stays_pure_logic` 1.35s、`test_gate_judges_split`
+#: 1.32s，几乎全是它）。两份返回值都是**派生小结果**（模块名 / 边集合，字符串容器）
+#: ⇒ 按 `tests/helpers/source_scan.py` 头部的规矩可以常驻；AST 仍现解析即释放（不缓存 AST）。
+_MODULES_CACHE: dict[tuple[str, ...], dict[str, Path]] = {}
+_GRAPH_CACHE: dict[
+    tuple[str, ...], tuple[dict[str, set[str]], dict[str, set[str]], dict[str, set[str]]]
+] = {}
+
+
+def _list_modules() -> dict[str, Path]:
+    """真的枚举一遍（`remote_modules()` 的未缓存实现）。"""
     out: dict[str, Path] = {}
     for top, base in package_roots().items():
         if not base.is_dir():
@@ -429,6 +450,20 @@ def remote_modules() -> dict[str, Path]:
             rel = p.relative_to(base).with_suffix("").as_posix()
             out[f"{top}." + rel.replace("/", ".")] = p
     return out
+
+
+def remote_modules() -> dict[str, Path]:
+    """`remote/` 下的**生产模块**（dotted name → 路径）。
+
+    `__init__.py` 不入账：它是包门面/文档，不是依赖图的节点（`hub/__init__.py` 同理）。
+    返回值是副本（`_MODULES_CACHE` 的那份谁也不许改）。
+    """
+    key = _package_dir_key()
+    got = _MODULES_CACHE.get(key)
+    if got is None:
+        got = _list_modules()
+        _MODULES_CACHE[key] = got
+    return dict(got)
 
 
 def _package_of(module: str) -> str:
@@ -503,7 +538,25 @@ def _collect(path: Path, module: str, known: set[str]) -> tuple[set[str], set[st
 
 
 def graph() -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, set[str]]]:
-    """整张图：`(顶层边, 延迟边, 解析不出的目标)`，三者都按模块分组。"""
+    """整张图：`(顶层边, 延迟边, 解析不出的目标)`，三者都按模块分组。
+
+    结果按包目录缓存（见 `_GRAPH_CACHE`）；返回**副本**，缓存里的那份没人能动。
+    """
+    key = _package_dir_key()
+    got = _GRAPH_CACHE.get(key)
+    if got is None:
+        got = _build_graph()
+        _GRAPH_CACHE[key] = got
+    top, deferred, unresolved = got
+    return (
+        {m: set(v) for m, v in top.items()},
+        {m: set(v) for m, v in deferred.items()},
+        {m: set(v) for m, v in unresolved.items()},
+    )
+
+
+def _build_graph() -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, set[str]]]:
+    """真的扫一遍（`graph()` 的未缓存实现）。"""
     known = set(remote_modules())
     top: dict[str, set[str]] = {}
     deferred: dict[str, set[str]] = {}
