@@ -1925,6 +1925,21 @@ a.tc-btn {
   line-height: 18px;
   font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
 }
+/* 集群代码快照徽章（2026-10-10，plan/cluster-code-snapshot 的 P2）：贴在建快照的那个进程行上。
+   中性灰 + 等宽：它是「会话身份」这类读数（本会话跑的是哪份代码），不与模式/执行面徽章抢权重。 */
+.tc-cc__snap {
+  display: inline-block;
+  margin-left: 6px;
+  padding: 0 7px;
+  border-radius: 999px;
+  background: var(--gray-bg);
+  color: var(--muted);
+  font-weight: 700;
+  font-size: var(--fs-xs);
+  white-space: nowrap;
+  line-height: 18px;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+}
 /* push 执行面徽章（2026-09-15）：本课 job 现在推给本机还是云机——
    绿=本机 worker_server / 蓝=云 GPU / 红=未匹配（python 会回落 pull）；
    --idle = 当前模式不是 push（徽章只是「配置指向」，不抢模式徽章的视觉权重）。 */

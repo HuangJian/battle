@@ -64,6 +64,21 @@ METRICS_VERSION / 奖励语义都可能不同）。文档其实早写着这个�
   （`_ensure_ts_code` 有实例缓存）。核验失败（截断/手改）⇒ WARN + 回落——不把对不上 sha 的字节送去
   云端（那会在云机侧报「传输损坏」，错指向本地实测不符）。
 
+**控制台侧（P2，同日）**：组件卡在**建快照的那个进程行**上贴一枚 `code <sha12>` 徽章——回答
+「本次集群会话跑的是哪份代码」（打包时机已上移到会话启动 ⇒ 它在会话期间是常量）。链路 =
+`bundles/snapshot.ts::readClusterSnapshot()`（只读元数据）→ `stateView.codeSnapshot` →
+`panels/ComponentCards.tsx::codeSnapshotBadge()`（锚种类 → 行：`hub`→hubServer；
+`trainer`/`export`/`run_rl`→trainingLoop；**认不出 ⇒ 不贴**，不猜）。悬停给全量（zip 名 / 完整 sha256 /
+打包时刻 / 锚 pid 与存活）；锚已亡时文字不变、悬停点名。`codeSnapshotDir()` 认
+`BCITY_CODE_SNAPSHOT_DIR`（**与 python 侧同名同义**）⇒ 两侧可一起重定向到夹具，控制台读的那份与
+trainer 建的那份不会各读一处。
+
+**逃生开关（plan §8.3，同日）**：`rl-config.json` 的 `rl.no_cluster_snapshot`（与 `slim` / `cf_*` 同规；
+**不进课程文件**——改课程文件会动 `course_fp` 触发 D14 熔断）或 env `BCITY_NO_CODE_SNAPSHOT`。打开后
+**所有消费点**一起回落 per-course（= 改动前的行为）：判据只住**读侧一处**（`read_cluster_snapshot()`
+开头 `→ None`），启动路径**不分岔**（`ensure` 仍照常建一份，一次 ≈4s，但没有任何读者 ⇒ 语义就是禁用）
+——这样开关不可能「只关掉三条启动路径里的两条」。控制台的包过期判据随之回落 mtime 口径（保守方向）。
+
 **配套：控制台「包是否过期」的代码维度换锚（同一变更，不可拆）**：§63 立的判据是「源文件 mtime 不早于
 包 mtime」，在冻结语义下会把「改源码但不重启」**误**判成过期——作废 + 重导出来的**还是同一份代码**：
 白烧一次分钟级导出，并让云机多等一段 404 等包窗口（导出失败支还会因为 `restorePackIfMissing` 用
@@ -83,17 +98,19 @@ METRICS_VERSION / 奖励语义都可能不同）。文档其实早写着这个�
 **回归**：`tests/remote/test_code_snapshot.py`（20 例：幂等复用 / 锚死重打 / 损坏自愈 / `read` 不打包不删 /
 内容寻址不失配 / 同源码重打同 sha / pid 复用指纹 / 命令行读不到 fail-closed / 陈锁接管 / 抢锁不挂启动 /
 保留份数 / publish 快照优先 / 无快照回落且不建锚 · **P1**：两件同拍产出 / ts 打包失败只降级 / ts 快照优先 /
-ts 无快照回落 / 坏 ts 件被消费点拦下 / 两族保留窗口互不挤）· `tests/trainer/test_loop_export_split.py`
+ts 无快照回落 / 坏 ts 件被消费点拦下 / 两族保留窗口互不挤 · **逃生开关**：打开后 code+ts 两条腿都回落且
+不建锚 / 两个入口（env 与 `rl.*` 键）的判据逐条）· `tests/trainer/test_loop_export_split.py`
 （`_ensure_ts_code` 的注入点上移到 `remote.code_snapshot` + 真跑回落支且不建锚）·
 `tests/hub/test_shared_code_snapshot.py`（4 例：快照优先且
 `course=` 不再影响结果 / 回落旧扫描 / 坏快照回落 / 全无 ⇒ None + 404 措辞）·
 `tests/helpers/remote_dag.py` 账本登记（`remote.code_snapshot: 2`）+ `tests/hub/test_hub_queue_split.py::ALLOWED_IMPORTS`
 + `tests/trainer/test_loop_remote_split.py::DELAYED_IMPORTS`（三处「新边先红再登记」）·
-dashboard `tests/auto-offline-handoff.test.ts`（换锚两例 + 两套口径纯判据 + 旁挂件跨语言对账 + 快照读取边界）。
+dashboard `tests/auto-offline-handoff.test.ts`（换锚两例 + 两套口径纯判据 + 旁挂件跨语言对账 + 快照读取边界）·
+`tests/web-component-snapshot-badge.test.ts`（锚 → 行：hub→hubServer / trainer·export·run_rl→trainingLoop /
+认不出不贴 / 悬停全量 + 锚已亡点名 / SSR 落行位置）+ `tests/server-api-state-view.test.ts` 的快照投影
+（`BCITY_CODE_SNAPSHOT_DIR` 夹具 ⇒ sha12·锚·存活；坏 JSON ⇒ null）。
 
-**未决（下一步）**：① 控制台组件卡展示当前快照 sha（plan 的 P2）；
-② `--no-cluster-snapshot` 逃生开关（现场排障用，住 `rl-config` 的 `rl.*` 块）。
-（原 ①「`ts_code.zip` 仍是 per-course」已于 2026-10-10 同日并入，见上「TS 运行时同族」段。）
+**未决（下一步）**：无。P0 / P1 / P2 与 §8.3 的逃生开关均已落地（2026-10-10）。
 
 **门槛（2026-10-10 实测）**：`bash tools/githook/nn-py-safe.sh -m pytest -q tests/remote tests/hub tests/test_remote_dag.py
 + tests/test_layering.py tests/trainer/test_loop_remote_split.py` ⇒ **1446 pass / 0 fail**（先 `ruff check .` + `mypy .` 全绿）；

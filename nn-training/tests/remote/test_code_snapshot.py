@@ -84,9 +84,18 @@ def _counting_pack(monkeypatch: pytest.MonkeyPatch) -> list[int]:
 
 
 def test_ensure_packs_once_then_reuses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """启动路径：第一次打，锚活着时后续每次都是复用（且不改锚主人）。"""
+    """启动路径：第一次打，锚活着时后续每次都是复用（且不改锚主人）。
+
+    ★ 2026-10-10（flake）：命令行指纹**打桩成常量**。判据本身依赖 `proc_cmdline(pid)`
+    （Windows 先 `wmic`、被移除的新机回落 PowerShell `Get-CimInstance`）——满载时这条子进程
+    探测**会间歇性返回空**，于是「读不到 ⇒ 不可核验 ⇒ 重打」（fail-closed，是设计行为）把
+    `reused=True` 变成拒绝服务式的假红（实测同一份代码 2 分钟内 一红一绿；两处指纹探测的
+    细节用例另有 `test_pid_reuse_fingerprint_mismatch_repacks` / `test_unreadable_cmdline_is_fail_closed`
+    用打桩**显式**覆盖）。本用例要钉的是**文件级幂等**（不重打包、不改锚主人），不是探针可靠性。
+    """
     root = _fake_repo(tmp_path)
     calls = _counting_pack(monkeypatch)
+    monkeypatch.setattr(cs, "proc_cmdline", lambda _pid: "python -m pytest fixture")
     lines: list[str] = []
     a = cs.ensure_cluster_snapshot(anchor_kind="hub", log=lines.append, repo_root=root)
     assert a.reused is False and len(calls) == 1
@@ -418,3 +427,50 @@ def test_prune_keeps_both_families(tmp_path: Path) -> None:
     assert snap.zip_path.is_file() and snap.ts_zip_path is not None and snap.ts_zip_path.is_file()
     assert not (d / "code.old000000.zip").exists()
     assert not (d / "ts_code.old000000.zip").exists()
+
+
+# ------------------------------------------------- 逃生开关（plan §8.3）
+
+
+def test_escape_hatch_disables_every_consumer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """开关打开 ⇒ `read` 恒 None ⇒ code/ts 两条消费腿都回落 per-course（= 改动前的行为）。"""
+    root = _fake_repo(tmp_path)
+    snap = cs.ensure_cluster_snapshot(anchor_kind="hub", repo_root=root)
+    assert snap.zip_path.is_file() and cs.read_cluster_snapshot(root) is not None
+
+    monkeypatch.setenv(cs.DISABLE_ENV, "1")
+    monkeypatch.setattr(cs, "load_dist_config", lambda *_a, **_k: None)
+    assert cs.cluster_snapshot_disabled() is True
+    assert cs.read_cluster_snapshot(root) is None  # 盘上那份还在，但没人能读到
+
+    job_root = tmp_path / "traj" / "c" / "remote-jobs"
+    lines: list[str] = []
+    path, _sha, used = cs.published_code_zip(
+        job_root, pack_root=root / "nn-training", log=lines.append
+    )
+    assert used is False and path == job_root / "code.zip" and path.is_file()
+    assert lines and lines[0].startswith("WARN: 集群代码快照缺失")
+    ts_path, _ts_sha, ts_used = cs.published_ts_code_zip(
+        job_root, repo_root=root, log=lambda _m: None
+    )
+    assert ts_used is False and ts_path == job_root / "ts_code.zip" and ts_path.is_file()
+
+
+def test_escape_hatch_reads_rl_config_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """常设档 = `rl-config.json` 的 `rl.no_cluster_snapshot`（与 slim/cf_* 同规；不进课程文件）。
+
+    这里打桩的是 `load_dist_config`（**不是** env 路径）：`common.distribution.load_dist_config`
+    的默认参数 `path=CONFIG_PATH` 是**导入期**绑定的常量，测试里改 `BCITY_RL_CONFIG` 影響不到它
+    ——路径解析是 `common.distribution` 自己的契约（另有它的用例），本用例只钉开关的**判据**。
+    """
+    monkeypatch.delenv(cs.DISABLE_ENV, raising=False)
+    monkeypatch.setattr(cs, "load_dist_config", lambda *_a, **_k: {"rl": {cs._DISABLE_KEY: True}})
+    assert cs.cluster_snapshot_disabled() is True
+    monkeypatch.setattr(cs, "load_dist_config", lambda *_a, **_k: {"rl": {}})
+    assert cs.cluster_snapshot_disabled() is False
+    monkeypatch.setattr(cs, "load_dist_config", lambda *_a, **_k: None)
+    assert cs.cluster_snapshot_disabled() is False  # 读不到配置 ⇒ 当作没开（走快照）
+    monkeypatch.setenv(cs.DISABLE_ENV, "0")
+    assert cs.cluster_snapshot_disabled() is False

@@ -46,13 +46,23 @@ export interface ClusterSnapshot {
   anchorAlive: boolean
 }
 
-/** 快照目录（`<root>/tmp/.code-snapshot`）。 */
-export function codeSnapshotDir(root: string = REPO_ROOT): string {
+/** 快照目录（`<root>/tmp/.code-snapshot`）。
+ *
+ *  `root` 不给时先看 `BCITY_CODE_SNAPSHOT_DIR`（**与 python 侧同名同义**：
+ *  `nn-training/remote/code_snapshot.py::snapshot_dir()`；单测把两侧一起重定向到夹具目录，
+ *  「控制台看到的快照」与「trainer 建的那份」才不会各读一处）。显式传 `root` 优先于 env
+ *  （老调用点/老用例零改动）；env 是**惰性**读的（每次调用现读，不在模块加载时定死）。 */
+export function codeSnapshotDir(root?: string): string {
+  if (root === undefined) {
+    const override = process.env.BCITY_CODE_SNAPSHOT_DIR
+    if (override) return override
+    root = REPO_ROOT
+  }
   return path.join(root, 'tmp', CODE_SNAPSHOT_DIR_NAME)
 }
 
 /** 快照元数据路径。 */
-export function codeSnapshotMetaPath(root: string = REPO_ROOT): string {
+export function codeSnapshotMetaPath(root?: string): string {
   return path.join(codeSnapshotDir(root), CODE_SNAPSHOT_META_NAME)
 }
 
@@ -61,7 +71,7 @@ export function codeSnapshotMetaPath(root: string = REPO_ROOT): string {
  *  「没有快照」与「快照坏了」在判据里同一条路（回落 mtime 口径）——不区分它们是因为两者
  *  对控制台的含义相同：**当前集群快照 sha 不可知**。
  */
-export function readClusterSnapshot(root: string = REPO_ROOT): ClusterSnapshot | null {
+export function readClusterSnapshot(root?: string): ClusterSnapshot | null {
   let raw: string
   try {
     raw = readFileSync(codeSnapshotMetaPath(root), 'utf-8')

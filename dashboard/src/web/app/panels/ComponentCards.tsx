@@ -11,8 +11,15 @@
  */
 
 import { useState } from 'preact/hooks'
-import type { ComponentView, ConsoleStateView, PushFleetProbe } from '../../view'
-import { cardFamilies, componentHover, componentName, pendingLockReleases } from '../../view'
+import type { CodeSnapshotView, ComponentView, ConsoleStateView, PushFleetProbe } from '../../view'
+import {
+  cardFamilies,
+  componentHover,
+  componentName,
+  fmtRel,
+  fmtTs,
+  pendingLockReleases,
+} from '../../view'
 import { CopyButton } from '../../components/CopyButton'
 import { SectionHeader } from '../../components/SectionHeader'
 import { StatusRow, type RowBadge } from '../../components/StatusRow'
@@ -65,6 +72,40 @@ function pushBadgeTitle(f: PushFleetProbe): string {
     lines.push(`· ${p.id || '(未命名)'} ${p.url} — ${probe}`)
   }
   return lines.join('\n')
+}
+
+/** 快照锚种类 → 组件行 key：**谁建的快照就贴在谁那行**（锚 = 会话里最先声明快照的进程）。
+ *  导出进程就是 `run_rl.py` 进程（plan/cluster-code-snapshot §3.4 ③）⇒ 与普通训练共用
+ *  trainingLoop 行。认不出的种类**不猜**（徽章不贴）。 */
+const SNAPSHOT_ROW_BY_ANCHOR: Record<string, string> = {
+  hub: 'hubServer',
+  trainer: 'trainingLoop',
+  export: 'trainingLoop',
+  run_rl: 'trainingLoop',
+}
+
+/** 集群代码快照徽章（plan/cluster-code-snapshot 的 P2；纯函数，导出以便单测）。
+ *
+ *  「本次集群会话跑的是哪份代码」——打包时机已上移到会话启动（重启才换，见 remote-transport §79），
+ *  所以这枚徽章在会话期间是**常量**：它回答的不是「刚发生了什么」，而是「我这轮跑的是什么」。
+ *  悬停给全量：zip 名 / 完整 sha256 / 打包时刻 / 锚（pid 存活与否）。 */
+export function codeSnapshotBadge(
+  snap: CodeSnapshotView | null | undefined,
+  componentKey: string,
+): RowBadge | null {
+  if (!snap || SNAPSHOT_ROW_BY_ANCHOR[snap.anchorKind] !== componentKey) return null
+  const anchor = `${snap.anchorKind}/pid=${snap.anchorPid}${snap.anchorAlive ? '' : '（锚已亡）'}`
+  return {
+    text: `code ${snap.sha12}`,
+    cls: 'tc-cc__snap',
+    title:
+      `集群代码快照 ${snap.zip}——会话内全体课程共用这一份，**重启才换**\n` +
+      `sha256 ${snap.sha256}\n` +
+      `打包 ${fmtTs(snap.packedAtEpoch * 1000)}（${fmtRel(snap.packedAtEpoch * 1000)}）· 锚 ${anchor}` +
+      (snap.anchorAlive
+        ? ''
+        : '\n锚已亡：下一个启动的 hub/trainer 会重打并成为新锚（内容寻址 ⇒ 同源码同 sha）'),
+  }
 }
 
 /** 组件状态 → 语义档（领域映射留在本面板，原语不认识组件）。
@@ -164,6 +205,10 @@ export function ComponentCards({
               const pb = pushBadge(fleet)
               if (pb) badges.push(pb)
             }
+            // 集群代码快照（plan/cluster-code-snapshot 的 P2）：贴在建它的那个进程行上
+            // （锚 = 会话里最先声明快照的进程）。认不出的 anchorKind **不猜**、不贴。
+            const snapBadge = codeSnapshotBadge(stateView.codeSnapshot, c.key)
+            if (snapBadge) badges.push(snapBadge)
             return (
               <StatusRow
                 key={c.key}

@@ -20,6 +20,7 @@ import { readTunnelAbRuns } from './tunnel-ab'
 import { buildGateHaltView } from '../../stack/gate-halt'
 import { collectLoopCompletes } from './loop-complete'
 import { readLogTail } from './logs'
+import { readClusterSnapshot } from '../bundles/snapshot'
 import { getFleetProbes, getSlowSnapshot } from './snapshot-refresher'
 
 export async function buildStateView(courseOverride?: string): Promise<ConsoleStateView> {
@@ -145,6 +146,21 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     ppoWorkerLive = null
     selfDisk = null
   }
+  // 集群代码快照（plan/cluster-code-snapshot 的 P2）：组件卡上贴一枚「本次会话跑的是哪份代码」。
+  // 只读元数据（`bundles/snapshot.ts`，永不抛）——读不到 ⇒ null（UI 不画徽章，不假装有一份）。
+  // 它是**机群级**事实（与查看哪门课无关），故不进任何按课键控的缓存。
+  const snap = readClusterSnapshot()
+  const codeSnapshot: ConsoleStateView['codeSnapshot'] = snap
+    ? {
+        sha12: snap.sha256.slice(0, 12),
+        sha256: snap.sha256,
+        zip: snap.zip,
+        packedAtEpoch: snap.packedAtEpoch,
+        anchorKind: snap.anchorKind,
+        anchorPid: snap.anchorPid,
+        anchorAlive: snap.anchorAlive,
+      }
+    : null
   return {
     time: new Date().toISOString(),
     course,
@@ -206,5 +222,6 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     contributionBrief,
     ppoWorkerLive,
     selfDisk,
+    codeSnapshot,
   }
 }

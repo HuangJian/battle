@@ -8992,3 +8992,45 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   `tmp/merged-gap-trio-best-v2.txt`（s4：会停 49.2 + 用盾一半；撞墙/脱离/贴脸三硬骨头未动）。
 - **违反后果**：跳过拼池加冕 ⇒ 下一个 cm3-it155。
   —— 全文 → `docs/nn/experiments.md` §84
+
+## §2026-10-10-goalnn-cluster-code-snapshot-ui-hatch（2026-10-10，快照的可见性（组件卡 sha 徽章）与逃生开关——plan 的 P2 + §8.3；承接 §2026-10-10-goalnn-cluster-code-snapshot）
+
+- **背景**：P0/P1 把 `code.zip` / `ts_code.zip` 的打包时机上移到**会话启动**（重启才换）之后，
+  「本会话跑的到底是哪份代码」在控制台上**不可见**——而它正是这套冻结语义下最该被看见的一件事
+  （改了 `nn-training/*.py` 而不重启 ⇒ 云端继续跑旧代码、本地毫无异常，只能靠人记住）。
+  plan 的 P2（组件卡展示 sha）与 §8.3（逃生开关）各留了一个口子。
+- **决定（P2 · 可见性）**：组件卡在**建快照的那个进程行**上贴一枚 `code <sha12>` 徽章
+  （锚种类 → 行：`hub`→hubServer；`trainer`/`export`/`run_rl`→trainingLoop；**认不出 ⇒ 不贴**，不猜）。
+  链路 = `bundles/snapshot.ts::readClusterSnapshot()`（只读元数据）→ `stateView.codeSnapshot` →
+  `panels/ComponentCards.tsx::codeSnapshotBadge()`（纯函数，导出以便单测）。悬停给全量：zip 名 /
+  完整 sha256 / 打包时刻 / 锚 pid 与存活；**锚已亡时文字不变、悬停点名**（它仍是本会话在读的代码）。
+  `codeSnapshotDir()` 认 `BCITY_CODE_SNAPSHOT_DIR`（**与 python 侧同名同义**）⇒ 两侧可一起重定向到
+  夹具，「控制台读的那份」与「trainer 建的那份」不会各读一处。
+- **决定（逃生开关 · §8.3）**：`rl-config.json` 的 `rl.no_cluster_snapshot`（与 `slim` / `cf_*` 同规；
+  **不进课程文件**——改课程文件会动 `course_fp`，直接触发 D14 血缘熔断）或 env
+  `BCITY_NO_CODE_SNAPSHOT`。判据只住**读侧一处**（`read_cluster_snapshot()` 开头 ⇒ `None`）⇒ 所有消费点
+  （PPO/BC publish、TS 运行时、hub `/code`、控制台的包过期判据）一起回落 per-course；**启动路径不分岔**
+  （`ensure` 仍照常建一份、一次 ≈4s，但没有任何读者 ⇒ 语义就是禁用）。
+- **被否决**：三条启动路径各分一支开关（会漏改其中一条腿 ⇒ 「只回了半条链」）；把徽章做成全局条
+  （锚是**某一行进程**的事实，贴错位置等于告诉操作员错的锚）；给 `ensure_cluster_snapshot` 换
+  `CodeSnapshot | None` 返回类型（20+ 处用例为一个调试开关付改造成本，且调用点本就都不用返回值）。
+- **违反后果**：徽章贴错行 ⇒ 操作员对「哪份代码在跑」得出错误结论（比不显示更坏）；把「开关只在读侧」
+  当成漏改而在启动路径又加一支 ⇒ 开关语义分叉（本条的判据就是「一处」）。
+- **落地与门槛**：`docs/nn/remote-transport.md §79`（「控制台侧」+「逃生开关」两段）·
+  `docs/nn/console.md` 顶部指针；回归 = `dashboard/tests/web-component-snapshot-badge.test.ts`（6 例）+
+  `dashboard/tests/server-api-state-view.test.ts` 的快照投影（env 夹具 ⇒ sha12/锚/存活；坏 JSON ⇒ null）+
+  `nn-training/tests/remote/test_code_snapshot.py` 的逃生开关两例（env 与 `rl.*` 两个入口）。
+
+## §2026-10-10-goalnn-v11-hotlane-unblock（2026-10-10，postHitLaneTicks 定价解禁：判据 1 分流通过）
+
+- **背景**：v11 签入时判据 1 全空，`postHitLaneTicks` 暂定“可入库但不得定价”。
+  panel 扩展（`tmp/gap2-panel-v11.ts`，共享核直调）补测：人类 160 对 s4-it180 160
+  （+ s2t145/KR10 参照），同码 resim。
+- **读数**：s4-it180 均 15.9 tick/局（中位 0，41% 局有窗）vs 人类 4.0（24% 有窗）；
+  per-kTick 比 6.8x，cliff −0.207；postHit~dmg Pearson 0.12–0.36（三组）——独立信号，
+  不是挨打的复述（wHurt/wDmg 定的是“挨多少”，本项定“挨了走不走”）。
+- **决定**：`postHitLaneTicks` 定价解禁，首用 `x24-stack5`（wHotLane=800，−3.6/局；
+  稀有行为单价大，中位局不交钱）。`nearSqSum` 解禁已在 §2026-10-10-goalnn-v11-criterion1-split。
+- **违反后果**：沿用旧禁 ⇒ 放着 6.8x 的行为差不用；滥用（给“挨得多”加第四遍税）⇒ 看 r，
+  r≥0.9 即停（本轮 0.12–0.36，放行）。
+- **证据**：`tmp/probe-s4it180-v11.jsonl` + `tmp/probe-human-v11.jsonl`。

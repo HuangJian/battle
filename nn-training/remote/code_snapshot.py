@@ -74,6 +74,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
+from common.distribution import load_dist_config
 from common.hashing import sha256_file
 from common.instance_lock import proc_cmdline, read_lock
 from common.pid_probe import pid_alive
@@ -81,8 +82,10 @@ from common.protocol import TS_CODE_NAME
 from remote.hub_client import pack_code_zip, pack_ts_code_zip
 
 __all__ = [
+    "DISABLE_ENV",
     "SNAPSHOT_DIR_NAME",
     "CodeSnapshot",
+    "cluster_snapshot_disabled",
     "current_code_zip_path",
     "ensure_cluster_snapshot",
     "published_code_zip",
@@ -108,6 +111,36 @@ LOCK_WAIT_SEC = 10.0
 LOCK_POLL_SEC = 0.1
 #: 写进元数据的命令行指纹长度（sha1 前 N 位，只用于「同一个进程吗」这种粗判）。
 _CMDLINE_SHA12 = 12
+#: 逃生开关的 env 名（现场排障最直接的一档；常设档住 rl-config 的 `rl.no_cluster_snapshot`）。
+DISABLE_ENV = "BCITY_NO_CODE_SNAPSHOT"
+#: 逃生开关在 `rl-config.json` 里的键（`rl.*` 块——与 `slim` / `cf_*` 同规，**不进课程文件**：
+#: 改课程文件会动 `course_fp`，直接触发 D14 血缘熔断）。
+_DISABLE_KEY = "no_cluster_snapshot"
+
+
+def cluster_snapshot_disabled() -> bool:
+    """逃生开关（plan §8.3）：打开后**所有消费点**一律回落 per-course（= 改动前的行为）。
+
+    两个入口：env `BCITY_NO_CODE_SNAPSHOT`（现场最直接 + 单测通道）与 `rl-config.json` 的
+    `rl.no_cluster_snapshot`。判据只住**读侧**一处（`read_cluster_snapshot` 开头）——启动路径
+    不分岔：`ensure` 仍照常建一份（一次 ≈4s）；而没有任何读者 ⇒ 语义就是「回到 per-course」。
+    这样开关不可能「只关掉三条启动路径里的两条」。
+
+    读配置失败 / 文件不在 / 键不在 ⇒ **当作没开**（默认走快照：那是新语义的正路）。
+
+    **刻意不做进程内缓存**（代价 = 每调用读一次小 JSON：BC 每轮一次、量级 0.2ms）：缓存会让
+    「测试里改 env 再读」拿不到新值（同一进程内的用例互相污染），也把「现场改了 rl-config」变成
+    一个静默不生效的坑——而这条判据的唯一目的就是排障。
+    """
+    flag = os.environ.get(DISABLE_ENV, "").strip().lower()
+    if flag not in ("", "0", "false", "no"):
+        return True
+    try:
+        cfg = load_dist_config()
+    except Exception:  # 读配置永远不该让消费路径炸（`load_dist_config` 自己也会吞 IO 错）
+        return False
+    rl = (cfg or {}).get("rl")
+    return bool(isinstance(rl, dict) and rl.get(_DISABLE_KEY))
 
 
 @dataclass(frozen=True)
@@ -231,7 +264,12 @@ def read_cluster_snapshot(
     TS 件（`ts_zip_path`）只做**形状 + 存在性**检查（名字前缀/无路径分隔符/文件在），
     **不哈希**：见 `CodeSnapshot.ts_sha256` 的注释（核验推迟到唯一消费者
     `published_ts_code_zip`）。ts 缺失/坏 **不影响** 本函数的返回值——它是可降级的第二件。
+
+    ★ 逃生开关（plan §8.3）：`cluster_snapshot_disabled()` 打开 ⇒ 恒 `None`（全部消费点
+    一起回落 per-course，含控制台的包过期判据回落 mtime）。开关的判据只有这一处。
     """
+    if cluster_snapshot_disabled():
+        return None
     d = snapshot_dir(repo_root)
     meta = _load_meta(d / META_NAME)
     if meta is None:
@@ -579,7 +617,15 @@ def ensure_cluster_snapshot(
 
     失败策略由**调用方**决定（hub / trainer 一律「警告不致命」：起不来代价远比一份旧代码高）。
     本函数只在极端情形（如盘只读）抛 OSError——调用方按需要兜。
+
+    ⚠ 逃生开关打开时这里**照常建快照**（一次 ≈4s）：开关的判据只在读侧（见
+    `cluster_snapshot_disabled`）——三条启动路径不必各分一支，而结果是「没有任何读者」。
     """
+    if cluster_snapshot_disabled():
+        log(
+            f"[code-snapshot] WARN: 逃生开关已开（{DISABLE_ENV} / rl.{_DISABLE_KEY}）——"
+            "消费侧一律回落 per-course 打包；本会话建的快照不会被任何腿读取"
+        )
     d = snapshot_dir(repo_root)
     # 启动路径：**严格**核验一次（一次命令行读取换「复用还是重打」的正确判定）。
     cur = read_cluster_snapshot(repo_root, strict_anchor=True)

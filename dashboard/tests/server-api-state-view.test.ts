@@ -303,6 +303,50 @@ describe('console/api.buildStateView · 请求路径零聚合（reload-perf W1�
     })
   })
 
+  it('集群代码快照投影（P2）：读 `tmp/.code-snapshot/snapshot.json` ⇒ `codeSnapshot` 带 sha12；读不到 ⇒ null', async () => {
+    // 夹具重定向：`BCITY_CODE_SNAPSHOT_DIR`（与 python `code_snapshot.snapshot_dir()` 同名同义）
+    // ——否则本用例读的是**真机**那份快照（本机有在跑的集群 ⇒ 结果随它变）。
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-snap-'))
+    const prev = process.env.BCITY_CODE_SNAPSHOT_DIR
+    const sha = `${'ab12cd34ef56'}${'0'.repeat(52)}`
+    try {
+      // ① 没有元数据 ⇒ null（不假装有一份）
+      process.env.BCITY_CODE_SNAPSHOT_DIR = dir
+      expect((await api.buildStateView()).codeSnapshot).toBeNull()
+      // ② 有元数据 ⇒ 投影出 sha12 / 锚 / 存活（pid = 本进程 ⇒ 活着）
+      writeFileSync(
+        path.join(dir, 'snapshot.json'),
+        JSON.stringify({
+          magic: 'battle2-code-snapshot',
+          proto: 1,
+          zip: 'code.ab12cd34ef56.zip',
+          sha256: sha,
+          bytes: 1,
+          packed_at_epoch: 1_786_442_686,
+          anchor: { kind: 'hub', pid: process.pid, cmdline_sha12: 'x' },
+        }),
+        'utf-8',
+      )
+      const s = await api.buildStateView()
+      expect(s.codeSnapshot).toEqual({
+        sha12: 'ab12cd34ef56',
+        sha256: sha,
+        zip: 'code.ab12cd34ef56.zip',
+        packedAtEpoch: 1_786_442_686,
+        anchorKind: 'hub',
+        anchorPid: process.pid,
+        anchorAlive: true,
+      })
+      // ③ 坏 JSON ⇒ 同样 null（`readClusterSnapshot` 永不抛）
+      writeFileSync(path.join(dir, 'snapshot.json'), '{ nope', 'utf-8')
+      expect((await api.buildStateView()).codeSnapshot).toBeNull()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+      if (prev === undefined) delete process.env.BCITY_CODE_SNAPSHOT_DIR
+      else process.env.BCITY_CODE_SNAPSHOT_DIR = prev
+    }
+  })
+
   it('W4：冷启动保证在 `await reconcileWatch()` 链（先于 Bun.serve），不是刷新器首拍', () => {
     const src = readFileSync(path.join(DASHBOARD_ROOT, 'src', 'server', 'server.ts'), 'utf-8')
     const lines = src.split('\n')

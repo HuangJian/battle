@@ -8,7 +8,9 @@
 
 > **指针**：任务包「是否过期」的**代码维度**判据于 2026-10-10 换锚（源文件 mtime → 「包内 `code.zip` 的 sha
 > vs 当前集群代码快照 sha」，快照不可知才回落 mtime）——实现住 `src/server/bundles/snapshot.ts` +
-> `actions/auto-offline-handoff.ts::codeFreshness()`；全文与理由见
+> `actions/auto-offline-handoff.ts::codeFreshness()`；组件卡还在**建快照的那个进程行**上贴一枚
+> `code <sha12>` 徽章（本会话跑的是哪份代码；`stateView.codeSnapshot` ← `readClusterSnapshot()`，
+> 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
 ## §36 self 节点低盘告警：预警档（4096）与拒收地板（2048）是两件事（plan/self-node-disk-alert，2026-10-09）

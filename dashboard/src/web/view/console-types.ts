@@ -194,6 +194,28 @@ export interface LoopComplete {
   iters: number
 }
 
+/** 集群代码快照的**展示投影**（plan/cluster-code-snapshot 的 P2）。
+ *
+ *  服务端从 `<repo>/tmp/.code-snapshot/snapshot.json` 读（`bundles/snapshot.ts`，只读元数据），
+ *  这里只带组件卡徽章要用的字段。`anchorKind` ∈ `hub` / `trainer` / `export` / `run_rl`
+ *  （空串 = 认不出，**不猜**：徽章不贴）。 */
+export interface CodeSnapshotView {
+  /** sha256 前 12 位（= 快照 zip 文件名里的那段；屏上只出它）。 */
+  sha12: string
+  /** 完整 sha256（悬停/复制用）。 */
+  sha256: string
+  /** 快照 zip 文件名（`code.<sha12>.zip`）。 */
+  zip: string
+  /** 打包时刻（epoch 秒）。 */
+  packedAtEpoch: number
+  /** 建这份快照的进程种类（`ensure` 的 `anchor_kind`）。 */
+  anchorKind: string
+  /** 锚进程 pid。 */
+  anchorPid: number
+  /** 锚进程是否还活着（控制台侧**廉价口径** = `pidAlive`，不做命令行指纹）。 */
+  anchorAlive: boolean
+}
+
 /** course_edit 事件（trainer 每轮热加载钩子写入本地账本，不进云端 payload；
  *  §2026-09-13-hot-reload）。rejected = 语料身份编辑被拒 → 控制台错误横幅。 */
 export interface CourseEdit {
@@ -359,6 +381,13 @@ export interface ConsoleStateView {
    *  与 `contributionBrief` **同一拍**但**不在它里面**：那份 brief 要与 `/api/pool` 的投影
    *  逐字相等（跨端点守卫），而这一块是时间敏感读数。缺省/null = 旧视图或计算失败（不画）。 */
   ppoWorkerLive?: PpoWorkerLiveView[] | null
+  /** 集群代码快照的**展示投影**（plan/cluster-code-snapshot 的 P2；组件卡徽章）。
+   *
+   *  服务端读 `<repo>/tmp/.code-snapshot/snapshot.json`（`bundles/snapshot.ts::readClusterSnapshot`，
+   *  只读元数据、不碰 zip 字节）。它回答的是「本次集群会话跑的是哪份代码」——`code.zip` /
+   *  `ts_code.zip` 的打包时机已上移到会话启动，**重启才换**（见 remote-transport §79）。
+   *  缺省/null = 旧视图 / 没快照 / 元数据坏（UI 不画徽章，不假装有一份）。 */
+  codeSnapshot?: CodeSnapshotView | null
   /** 课程热加载最新判决（§2026-09-13-hot-reload；账本最近一条 course_edit 事件）。
    *  rejected = 语料身份编辑被拒 → 错误横幅；restored/applied 不上横幅。 */
   courseEdit?: CourseEdit | null
