@@ -6,6 +6,176 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §80 aistudio 传输硬化：砍三笔纯税（预取自停 / 让路自停 / 持久缓存）+ 控制面连接池与短预算 + 批量 blob（2026-10-11，plan/aistudio-transfer-hardening）
+
+**触发**（用户 2026-10-09 + 现场 log）：aistudio（`worker 身份 aistudio-c`，hub 走
+`rochester-athletes-herbs-statutes.trycloudflare.com` quick tunnel）是三块云盘里网络最不稳的。
+**换链路已否决**（named tunnel / tailscale / 国内中继一律不动）⇒ 本条的收益**只能来自传输层省税**，
+链路固有特性（`p0_p95` 尾部、同会话速率 358→187→43 KB/s 单调衰减）按**已知不可改的环境参数**对待。
+决策与被否决备选 → `DECISIONS.md` §2026-10-11-goalnn-aistudio-transfer-hardening。
+
+**一句话**：病灶**不在字节量**（payload 早已 tar.xz 瘦身到 2.12MB），而在三笔**纯税** ——
+① 预取白传 4.24MB / **0 命中**（它自己还排队 23.9s、让路 10 次）；② 让路税买不回控制面速度
+（`p0_p95=30.3s` 而 `p0_p50=1.1s`）；③ 冷启动每会话白付 3.23MB（code 2.49 + init 0.38 + ref 0.36），
+因为缓存根在 `/tmp`（`run_pull_worker` 的 `work_dir` 缺省 `/tmp/remote-worker`）。
+
+### ★ 现场标签怎么读（这一处**读反过**，评审 P0 抓的）
+
+`remote/http.py` 的 wire 标签是 `label = f"{wire_seg or path}/{bulk_prio}"`：
+
+| 行 | 含义 |
+|---|---|
+| `payload/P1` | 本 job 的**关键下载** |
+| `payload/P2` | **预取自己**（预取也走 `download_payload`：`wire_seg="payload"`、`bulk_prio=P2`） |
+
+⇒ `bulk payload/P2: 排队 15.7s` 是**预取自己在等通道**，不是「关键 payload 被预取挤到 15.7s」；
+方向也相反——`bulk_sched.py` 是 **P1 挤走 P2**（P1 在等时 P2 不许新开工）。**P2 是受害者，不是加害者。**
+「关键下载排队 ≤2s」这条目标据此**撤下**（本次 log 里没有 P1 排队的证据）；预取的净成本记在
+**带宽 + 它自己的排队**上（它仍值得关，但理由不是「挤了关键下载」）。
+
+### 七件改动
+
+| 档 | 病灶 | 处置 | 装配点 |
+|---|---|---|---|
+| **A1** | 预取白传 4.24MB / 0 命中 | 会话内**自适应自停**（**不动**全局默认 `PREFETCH_DEPTH_DEFAULT=3`） | `prefetch.py::prefetch_worth_it`（纯函数）· `job_round.py::_prefetch_fill` |
+| **A2** | 让路税买不回控制面 | `p0_p95` 超阈值 ⇒ 会话级降到 never 语义 | `bulk_sched.py::yield_worth_it`（纯函数）· `worker.py::worker_loop` 每轮收尾 |
+| **A3** | 缓存根在 `/tmp`，冷启动 3.23MB | 缓存根可配持久目录（缺省**逐字旧行为**）+ 容量上限 | `notebook_runtime.py::run_pull_worker` · `worker.py --cache-dir` · `download.py::prune_caches` |
+| **B1** | opt/ref 两次 GET = 两次建连 + 两次慢启动 | 批量 blob 端点（一次 GET 分帧多件；旧 hub 逐个回退） | `hub/blob.py::_serve_blob_batch` · `download.py::parse_blob_batch` / `download_blobs` / `resolve_blobs_batch` · `train_core.py` |
+| **B2** | 控制面每请求一次 TLS 握手（取消环 1.5s 一发） | 控制面专用连接池（**永不进 bulk**；**复刻代理判据**） | `remote/control_pool.py`（新叶子模块）· `http.py::_request` |
+| **B3** | 控制面干等 15–30s | 预算收到 6s + 失败**不退避、立刻换连接**重抽一次 | `job_lifecycle.py::CONTROL_TIMEOUT_SEC` · `http.py::_request` |
+| **E1** | 「准备 95.2s」分不清在传还是在算 | 拆三个计时：解包 / 物料落地 / blob 解析 | `worker.py::run_job` 准备段 |
+
+### A1 预取自适应自停（判据是纯函数）
+
+**判据**（`prefetch_worth_it`，三条同时成立才停）：`prefetched ≥ 2` 且
+`white_bytes ≥ 3MiB` 且 `taken/prefetched < 1/3`。证据不足一律「继续」（返回 `True` = 继续）。
+停 ⇒ `_prefetch_fill` **在 peek 之前** `return`，**连 peek 都不发**（peek 本身也抢控制面；
+现场 `11:00:00 prefetch: peek 失败（TimeoutError）` 就是证据），并打一行**可观测的**原因：
+`预取自停：白传 4.24MB / 命中 0/2（门槛 <1:3 且白传≥3MB）——机制保留，--prefetch-depth 可重开`。
+
+**两处口径改动（评审 P0，原文案按原定义**永不触发**）**：
+
+1. **白传 = 「已下载但从未被 `take()` 的字节」+ 被 P1 挤走的半截**（`PrefetchStore.white_bytes()`）。
+   原案写「挤走 + 入库未命中丢弃」，现场只有 ≈0.25MB ≪ 3MB 门槛 ⇒ 判据是**死的**。
+   白传的 4.24MB 全在「下过网但从没被吃」这一笔上。
+2. **最小样本 2 + 预热豁免**：`job_round` 每次 claim 都 `take()`，而预取的是**下一份** ⇒
+   **会话第一个 job 的命中率按构造 = 0**（轮到它之前不可能被 `take()`）。只用命中率会把完全
+   健康的预取在前两轮关掉。⚠ 别拿 `misses` 当分母（「claim 到的 job ≠ 预取候选」是**正常**事件）。
+
+`preempt_wasted` 必须在 `_wire_flush` **之前**登记（`wire.py` 的 flush 会 `pop` 整只桶）
+⇒ `_flush_prefetch_round(store, log)` 先读 `_wire_totals(PREFETCH_WIRE_ID)` 再 flush。
+
+### A2 让路档位按 p0 自适应
+
+常量与判据住 **`bulk_sched.py`**（判据是**调度器**的，`wire.py` 只是账本）：
+`YIELD_GIVEUP_P95_MS=10_000` + `YIELD_GIVEUP_MIN_SAMPLES=20`（**必须有**：分位数是小样本噪声
+敏感量，会话早期 1–2 个坏样本就能把 p95 拉到 30s，据此关让路 = 拿噪声当证据；分位为 0 = 还没测到，
+也一律「继续让」）。`worker_loop` 每轮收尾读一次 `stats()`，不划算 ⇒ 一次性
+`configure_yield(after_sec=inf, total_budget_sec=0)` + 一行
+`让路自适应关闭：p0_p95=30.4s ≫ p50=1.1s（控制面尾部不是被 bulk 挤的）——让路只拖长传输`。
+**会话内不回升**（分位数只增不清）。`--bulk-yield never` 起步 ⇒ `_yield_live=False`，根本不进这个复查。
+装配是**进程单例**上的全局动作 ⇒ 退出必须还原（`finally` 里
+`configure_yield(after_sec=_prev_yield[0], total_budget_sec=_prev_yield[1])`，既有还原链未动）。
+
+### A3 持久缓存根
+
+`cfg["cache_dir"]` 为空 ⇒ **逐字旧行为**（子进程 argv 一字不改）；给了才 `--cache-dir`，
+`worker_loop(cache_dir=…)` 把三棵**内容寻址缓存**（`code_cache` / `ts_code_cache` / `blob_cache`）
+挂过去，**job 工作目录仍走 `work_dir`**（`/tmp`，每轮清场重建的语义不变）。
+
+**容量上限是 A3 的前置，不是可选项**：这三棵树按 sha 存且原本**完全没有预算**（预取有 64MB，它们没有）。
+`download.py::CODE_CACHE_MAX_BYTES = 256MB`，**三棵合计**（每棵各 256MB = 把上限悄悄放成 768MB）、
+按 mtime 丢最旧、`*.tmp`（写入中的半成品）**永不 prune**、删除走 `rmtree_best_effort`
+（沙箱删除保护拦得住 `shutil.rmtree`）。
+
+**两个附带修掉的洞（评审 P2）**：
+
+- **命中必须 touch mtime**：`_cache_blob` / `_ensure_code` / `_ensure_ts_code` 原先命中就 `return`，
+  不 touch ⇒ prune 按 mtime 丢的**不是最久没用**，而是最早写进来的（「谁先来谁先死」，会把天天命中的
+  code 删掉）。
+- **坏件覆盖修复**：键是 sha、内容却不是它的那份坏缓存，原先「存在就跳过」⇒ 每轮
+  「命中 → 校验不过 → 重下 → 又不写」，白付一辈子下载税。现在用刚校验过的字节**覆盖**。
+
+**aistudio 的持久目录由用户在笔记本 cell 里给**（plan 不指定路径：`/home/aistudio` 只是
+`tailscale_boot.py` 的**搜索根**之一，找不到也不报错 ⇒ 「它存在且可写」的证据不成立）。
+
+### B1 批量 blob（一次 GET 拿 opt+ref）
+
+**落点在 `train_core.py`**：opt/ref 的解析都在训练核里（不在 `download.py`），所以「合成一次 GET」
+必须把 **ref 的开关提前判**——`kickstart_kl` 的阈值判断是**纯 manifest 读**（不依赖任何计算），
+上提安全；判据抽成 `kick_kl_value()` 与 `blob_wanted()` 两个纯函数（可直接钉行为，不必读源码找字符串），
+判据原文与措辞逐字照搬。`_wanted = {opt: opt_sha}`（+ `ref: ref_sha` **仅在 kick 开时**）
+⇒ 一次 `resolve_blobs_batch`；`_resolved()` 是「先查本轮批量结果，查不到逐字退回 `_resolve_blob`」
+（退回而不是重写，才不会把安全阀分叉成两份——那是静默 warm-start 的入口）。
+
+**帧格式刻意不用 base64**（+33% 膨胀会吃掉省下的字节）：`name\n<len>\n` + raw 重复。
+
+- hub 侧认 `?name=a,b,c`（**单名逐字走旧分支**）；**任一环节不可得就整笔 404** —— 半份会让调用方
+  把「部分成功」读成「全拿到」⇒ 静默 warm-start 那一类事故的形状。
+- worker 侧解析**任一环节不对就 `ValueError` ⇒ 整批逐个回退 `download_blob` 单取**；这条回退链
+  就是「旧 hub 兼容」本身（旧 hub 收到逗号名会走 `blob_path` 的未知名 400）。
+- **缺件就少一个键，绝不编造**；preloaded 字节不符 / 网络字节不符 sha ⇒ `RetryableError`。
+
+★ **稳态收益要诚实**：opt 首次下载后会自查进 `blob_cache`、ref 的 sha 恒定（BC 冻结 master）
+⇒ 稳态两件都走缓存命中，能省的只有**冷启动那一次**建连（≈1–2s）。**不是**「每轮省 2 次往返」。
+
+### B2/B3 控制面：连接池 + 短预算
+
+- **池只服务控制面**（`control_path(path)`），且**只在非回环**时走（回环 = 本机 hub 走
+  `net_http.urlopen` 绕代理，不能改）；bulk 仍每次新建连接（「换连接 = 重抽一次签」的能力必须留着）。
+  实现 = `remote/control_pool.py`（**零仓内依赖的叶子**，DAG 层 0）：stdlib `http.client.HTTP(S)Connection`
+  懒建 + 「异常即丢弃重建」。**为什么单独成模块**：`tests/remote/test_http_split.py` 有一条护栏 ——
+  `http.py` 顶层可变容器**只能有 `_POLL_WARN_AT`**，连接池就是个进程级 dict，塞进去会当场踩那条护栏。
+- ★ **代理判据必须复刻 `_get_opener`**：自造的 `http.client` 连接若不挂代理，非回环的控制请求在
+  Colab userspace 这类「`urlopen()` 不读 `HTTP_PROXY`」的环境里会直接连不通。
+  `control_pool._proxy_for` 与 `http._get_opener` 用**同一套 env 名**（`{scheme}_proxy` /
+  `{scheme.upper()}_PROXY`，有单测钉住不许分叉），HTTPS 走 `set_tunnel`（SNI 用目标主机）。
+  （已知残留：平台**全局**代理设置——Windows 注册表——只有 urllib 侧认，池侧只认 env 名。）
+- **超时预算** `CONTROL_TIMEOUT_SEC = 6.0`（`peek` / `priority` / `status` / `release` / `fail` /
+  `heartbeat` / 取消环），失败**不退避、立刻换连接重试一次**（`CONTROL_ATTEMPTS=2`，重试发生在
+  `http._request` 的**传输层**）。⚠ **心跳是 POST**（不是「幂等 GET」），但语义上幂等（续租只是把 TTL
+  推后）；安全性：心跳周期 60s、租约 300s ⇒ 连续 2 次 6s 失败仍剩 4 次机会。
+- 与 `priority 问询失败 —— 按无人在做处理` 这条降级语义无冲突：重试后仍失败才降级，且**日志写明重试次数**
+  （旧文案只写「失败」，会把「6s×2」读成「一次没接上」，进而误判要不要去和别人抢同一份活）。
+- **重抽只在传输层一遍**：`job_lifecycle` 层不许再套一层循环（两层相乘 = 4 次 × 6s，预算与
+  「把 30s 切成可见失败」的账一起失效）——有单测钉住。
+
+### 判据（预注册，真机取数用）
+
+| # | 判据 | 回退档 |
+|---|---|---|
+| 1 | 单会话出现 `预取自停：…` 一行，且此后 **0 条** `prefetch …` 日志（含 peek 失败行）；预取这行的 `wait=` 不再出现 | `--prefetch-depth 0` |
+| 2 | 同会话 `yield=` 从 10 降到 **0**，而 `p0_p95` **不劣化**（劣化 >2× ⇒ 回退，说明让路确实在干事） | `--bulk-yield always` |
+| 3 | 第二次会话起 `code=cache-hit`、`blob:ref=cache-hit`；`cache_dir` 占用 ≤ `CODE_CACHE_MAX_BYTES`；出现 `cache prune: …` 才说明预算在起作用 | 不给 `cache_dir` |
+| 4 | 冷启动那一次的 blob 段合并为一次（`blob:opt+ref`）；**下行字节数不变**（省的是建连） | 旧 hub 自动回退单取 |
+| 5 | 控制面失败行的延迟 ≤6s（现状最长干等 30s），且日志写明「已重试 2 次」 | 恢复 15s / `REMOTE_CONTROL_POOL=0` |
+
+`p0_p95` 的门槛刻意写成「让路关掉后**不劣化**」而不是「降到 6s」：链路本身是瓶颈时，
+传输层只省税、治不了病；剩余可用的手段只有 B1/B2/B3（**减少往返次数**，让尾部少暴露几次）。
+
+### 验证面（本机可跑的）
+
+新增/改动 7 个测试文件 **107 用例全绿**（`tests/remote/`）：`test_prefetch_adaptive.py`(9) ·
+`test_yield_adaptive.py`(7) · `test_control_pool.py`(14) · `test_blob_batch.py`(16) ·
+`test_cache_persist.py`(9) · `test_train_core_split.py`(+3：批量优先 / 缺件退回安全阀 / kick 门在批量之前) ·
+`test_notebook_runtime.py`(+2：缺省 argv **没有** `--cache-dir` / 给了才有且 `--out` 不变)。
+
+★ 本轮落进实现的一处真 bug（门禁抓的，不是 review）：`train_core.py` 的 ref 分支在把 `ref_sha`
+上提进 `blob_wanted` 之后**仍引用那个名字** ⇒ 一开 kick 就 `NameError`。修法是从**同一份装批结果**
+取回（`ref_sha = _wanted.get(BLOB_REF, "")`），不重读 manifest（两份读法 = 未来会分叉）。
+门禁（`bash tools/githook/nn-python-gate.sh` = ruff + mypy + `pytest tests/ e2e/`）**全绿**。
+
+### 未做 / 未取（不写成已做）
+
+① **§判据五条的真机读数未取**（aistudio 重拉一个会话、跑 ≥3 个 job 才行）——代码与单测已齐，
+本机无该环境（见 `docs/nn.progress.md` §3.1 的未决行）。② **Range 续传**不做（本次唯一浪费是
+preempt 的 0.25MB，救不回来；门槛未变）。③ **更高压 payload** 不做（preset 3→6 已量：体积只
+−2.6~−3.0%、打包 +6.2s，换 0.08s 传输 = 净亏）。④ **第二 bulk 通道 / 分块并行下载**不做（违反
+「同一时刻仅 1 条 bulk」硬不变量；若要动，先单变量实测确认不会重现「两侧同时沉默」再谈）。
+⑤ **C1 `code.zip` 按角色裁剪** 未做（要先量一次冷启动里真正被 `import` 的模块占包体多少）。
+
+---
+
 ## §79 集群代码快照：`code.zip` 的打包时机从「每课首次 publish」上移到「会话启动」（2026-10-10，plan/cluster-code-snapshot）
 
 **用户报障**：「每一门课程，开课时实时打包 code.zip，不对！应该是 trainer/hub 启动时打包一份

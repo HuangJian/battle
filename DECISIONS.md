@@ -9034,3 +9034,26 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
 - **违反后果**：沿用旧禁 ⇒ 放着 6.8x 的行为差不用；滥用（给“挨得多”加第四遍税）⇒ 看 r，
   r≥0.9 即停（本轮 0.12–0.36，放行）。
 - **证据**：`tmp/probe-s4it180-v11.jsonl` + `tmp/probe-human-v11.jsonl`。
+
+## §2026-10-11-goalnn-aistudio-transfer-hardening（2026-10-11，用户 2026-10-09 报障 + 现场 log；plan/aistudio-transfer-hardening）
+
+- **背景**：aistudio（最不稳的那块云盘，走 Cloudflare quick tunnel）单 job 准备 95.2s，三笔**纯税**：
+  预取白传 4.24MB / 0 命中（自己还排队 23.9s、让路 10 次）；让路税买不回控制面速度
+  （`p0_p95=30.3s` 而 `p0_p50=1.1s`）；冷启动每会话白付 3.23MB（缓存根在 `/tmp`）。
+- **备选与否决**：① **换链路**（named tunnel / tailscale / 国内中继）——否，**用户 2026-10-09 裁决**：
+  quick tunnel 是既定事实，保留证据不保留方案；后果明写：链路是瓶颈时只省税、治不了病。
+  ② **Range 续传 / 第二 bulk 通道 / 分块并行**——否：唯一浪费是 preempt 的 0.25MB 救不回来；
+  「同一时刻仅 1 条 bulk」是硬不变量（§21 事故），要动必须先单变量实测。③ **更高压 payload
+  （preset 3→6）**——否：已量（体积 −2.6~−3.0%、打包 +6.2s = 净亏）。④ **预取全局关掉**——否：
+  其它盘不受影响，只做**会话内自适应**（`--prefetch-depth` 回退档保留）。⑤ **A1 白传按「挤走 + 入库
+  未命中丢弃」计**——否：那样现场只有 ≈0.25MB，3MB 门槛**永不触发**；改「已下载但从未被 `take()`」。
+  ⑥ **只用命中率判 A1**——否：会话首个 job 命中率**按构造 = 0** ⇒ 会把健康会话误杀；加最小样本。
+- **决定**：只做传输层省税（A1 预取自停 / A2 让路自停 / A3 持久缓存根+容量上限 / B1 批量 blob /
+  B2 控制面连接池 / B3 6s 预算 + 换连接重抽 / E1 准备段计时拆分）；**每条都必须可观测地关
+  （一行原因）+ 有回退档**；`p0_p95` 的门槛从「降到 6s」改为「让路关掉后不劣化」。
+- **违反后果**：关掉自适应而**静默**（不写原因行）⇒ 后人读成 bug；A3 给持久根却不做 prune ⇒ 无界增长；
+  在 `job_lifecycle` 层再套一层重抽 ⇒ 2×2×6s 把预算账算穿；把 `payload/P2` 读成「关键下载」⇒ 证据方向反。
+- **落地与门槛**：全文 → `docs/nn/remote-transport.md` **§80**（含标签口径 / 五条判据 / 回退档 / 未做清单）；
+  回归 = `nn-training/tests/remote/` 的 7 个文件 107 例（`test_prefetch_adaptive` / `test_yield_adaptive` /
+  `test_control_pool` / `test_blob_batch` / `test_cache_persist` / `test_train_core_split` / `test_notebook_runtime`）；
+  **真机五条读数未取 ⟹ 本条的收益结论尚未成立**（未决行见 `docs/nn.progress.md` §3.1）。

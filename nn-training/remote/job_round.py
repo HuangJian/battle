@@ -70,9 +70,14 @@ from remote.job_lifecycle import (
     report_prefetch,
     start_cancel_watcher,
 )
-from remote.prefetch import PREFETCH_DEPTH_DEFAULT, PrefetchStore, pick_candidates
+from remote.prefetch import (
+    PREFETCH_DEPTH_DEFAULT,
+    PrefetchStore,
+    pick_candidates,
+    prefetch_worth_it,
+)
 from remote.result_upload import Outcome, ResultUploader, UploadTask
-from remote.wire import _wire_flush, _wire_hit, _wire_start
+from remote.wire import _wire_flush, _wire_hit, _wire_start, _wire_totals
 from remote.worker_proc import _request_reload
 
 
@@ -107,7 +112,7 @@ PREFETCH_ROUND_SEC = 5.0
 PREFETCH_REPORT_BACKOFF_ROUNDS = 12
 
 
-def _flush_prefetch_round(log: Any) -> None:
+def _flush_prefetch_round(store: PrefetchStore, log: Any) -> None:
     """预取每轮收账：**只剩 wire 传输行**（真搬了字节才有）。
 
     `prefetch: held=… hits=… misses=… 本轮下载=…MB 会话累计=…MB` 摘要行已退役（2026-10-06，
@@ -115,7 +120,14 @@ def _flush_prefetch_round(log: Any) -> None:
     `held=0 hits=0 misses=61 本轮下载=0.00MB 会话累计=0.00MB`）⇒ 每轮一行零信息增量。
     字节账本来就在下面这行（本轮真下载时才有），命中账由 S3e 的 `payload=prefetch-hit`
     落在该 job 的 wire 行上——S3f/G6 的读数改成「有事才说话」。
+
+    ★ `wire` 台账必须**在 flush 之前**取：`_wire_flush` 会 `pop` 掉整只桶（wire.py:320），
+    而自停判据要的是**会话累计**。被 P1 挤走的半截字节从未入库（不在 `store.downloaded_bytes`），
+    所以必须在这里把它登记进 store，否则判据看不见最大的一笔浪费（现场 `preempt=2(wasted 0.25MB)`）。
     """
+    _raw_total, _preempt = _wire_totals(PREFETCH_WIRE_ID)
+    if _preempt:
+        store.note_preempt_wasted(_preempt)  # 桶每轮被 pop ⇒ 这里拿到的是**本轮增量**
     _wire_flush(PREFETCH_WIRE_ID, log)
 
 
@@ -152,6 +164,23 @@ def _prefetch_fill(
     #: 上报失败后的静默倒计时（见 `PREFETCH_REPORT_BACKOFF_ROUNDS`）。
     report_backoff = 0
     while not stop.is_set():
+        # ── 会话级自停（plan/aistudio-transfer-hardening §3.1）─────────────────
+        # 判据是纯函数（`prefetch_worth_it`），这里只负责「问一次 + 停 + 说清为什么」。
+        # ★ 必须**在 peek 之前**判：自停后连 peek 都不发（peek 本身也在抢控制面，
+        #   11:00:00 那行 TimeoutError 就是证据）；否则省下的只是字节、排队还在。
+        # ★ 必须是**可观测地关**：静默不预取会被后人读成 bug（两次事故教训）。
+        _st = store.stats()
+        if not prefetch_worth_it(
+            prefetched=int(_st["prefetched"]),
+            taken=int(_st["taken"]),
+            white_bytes=int(_st["white_bytes"]),
+        ):
+            log(
+                f"预取自停：白传 {_st['white_bytes'] / 1048576:.2f}MB / 命中 "
+                f"{_st['taken']}/{_st['prefetched']}（门槛 <1:3 且白传≥3MB）"
+                "——机制保留，--prefetch-depth 可重开"
+            )
+            return
         try:
             peeked = peek_jobs(
                 base_url,
@@ -208,9 +237,9 @@ def _prefetch_fill(
                 reported = snap
             else:
                 report_backoff = PREFETCH_REPORT_BACKOFF_ROUNDS
-        _flush_prefetch_round(log)
+        _flush_prefetch_round(store, log)
         stop.wait(PREFETCH_ROUND_SEC)
-    _flush_prefetch_round(log)  # 收尾：最后一次没有等满一轮的也上账
+    _flush_prefetch_round(store, log)  # 收尾：最后一次没有等满一轮的也上账
 
 
 def settle_result(

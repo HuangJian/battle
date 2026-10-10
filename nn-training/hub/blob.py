@@ -83,18 +83,52 @@ class BlobRoutes:
 
 
     # ---- GET /jobs/{id}/blob?name=opt|ref（M2 B3：内容寻址 opt/ref 载荷）----
+    # ---- 批量形态 ---- `?name=init,ref,opt`（plan/aistudio-transfer-hardening §3.4）----
+    # 三个 blob 原本是三次 GET = 三次建连 + 三次 TCP 慢启动。慢链路上「建连」本身就是
+    # 一笔税（现场 aistudio：控制面 p95 30s 而 p50 1.1s），所以把三件并成**一次 GET**。
+    #
+    # 帧格式刻意选「`name\nlen\n` + raw」而**不用 base64**：base64 的 +33% 膨胀会吃掉
+    # 省下的字节（这本来就是 minimize-payload 那一刀砍掉的东西）。
+    #
+    # 兼容：单名（`?name=opt`）逐字走旧分支；**旧 hub** 收到逗号名会走 `blob_path` 的
+    # 未知名 400 ⇒ worker 侧自动逐个回退单取（回退链在 `remote/download.download_blobs`）。
     def _get_blob(self) -> None:
         jid = self._job_or_404()
         if jid is None:
             return
         qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
         name = (qs.get("name") or [""])[0]
+        names = [s for s in (str(name).split(",")) if s.strip()]
+        if len(names) > 1:
+            self._serve_blob_batch(jid, [s.strip() for s in names])
+            return
         try:
             bp = blob_path(self.hub._job_dir(jid), name)
         except ProtocolError as e:
             self._json({"error": str(e)}, 400)
             return
         self._serve_path(bp, missing="no blob")
+
+    def _serve_blob_batch(self, jid: str, names: list[str]) -> None:
+        """分帧拼出多件 blob 的响应体；**任一环节不可得就整笔 404**（让 worker 去逐个回退）。
+
+        为什么是「整笔失败」而不是「能给的先给」：worker 侧的安全阀要求 `sha` 非空时只认
+        内容寻址、缺一件就响亮失败（`_resolve_blob`）。半份响应会让调用方把「部分成功」
+        误读成「全部拿到」，那是静默 warm-start 那一类事故的形状。
+        """
+        parts: list[bytes] = []
+        for n in names:
+            try:
+                bp = blob_path(self.hub._job_dir(jid), n)
+            except ProtocolError as e:
+                self._json({"error": str(e)}, 400)
+                return
+            if not bp.exists():
+                self._json({"error": f"no blob {n}"}, 404)
+                return
+            raw = bp.read_bytes()
+            parts.append(n.encode("utf-8") + b"\n" + str(len(raw)).encode("ascii") + b"\n" + raw)
+        self._bytes(b"".join(parts))
 
 
     # ---- GET /code（共享 code.zip，colab bootstrap 用） ----

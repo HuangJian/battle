@@ -246,6 +246,13 @@ def run_pull_worker(cfg: dict[str, Any], log) -> int:
         "--poll-sec", str(cfg["poll_interval_sec"]),
         "--max-idle-sec", str(max_idle),
     ]
+    # A3 持久缓存根（plan/aistudio-transfer-hardening §3.3）：`cfg["cache_dir"]` 非空才加这个
+    # 参数（**缺省空 = 逐字旧行为**——不写这一行时子进程 argv 与改造前完全一致）。
+    # 用途：云盘 `/tmp` 每会话被清，code(2.5MB)/init/ref 每次冷启重下；把内容寻址缓存挂到
+    # 持久目录后跨会话复用。⚠ 只挪**缓存**，`--out` 的 job 目录仍留 /tmp（清场语义不变）。
+    if str(cfg.get("cache_dir") or "").strip():
+        restart_argv += ["--cache-dir", str(cfg["cache_dir"])]
+        log(f"持久缓存根：{cfg['cache_dir']}（code/ts_code/blob 跨会话复用）")
     # 离线训练模式（2026-09-19）：`CFG["offline_worker"]` 打开 ⇒ 自报**归属**「本会话属于
     # 离线盘」——hub 只把归属为 offline 的整段 job 放给这台机器，**且**它不再兼领在线盘的活
     # （2026-09-25 语义从「能力」升为「归属」：有能力的盘接走不属于它的 job 就是那次事故；

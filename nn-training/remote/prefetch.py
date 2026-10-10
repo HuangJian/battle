@@ -47,6 +47,47 @@ PREFETCH_BUDGET_BYTES_DEFAULT = 64 * 1024 * 1024
 #: 暂存目录名（`work_dir/prefetch/`，单 hub ⇒ 不做 hub{i} 分区）。**必须在 prune 豁免名单里**。
 PREFETCH_DIR_NAME = "prefetch"
 
+# ── 会话级自停（plan/aistudio-transfer-hardening §3.1）─────────────────────────
+#: 下结论前的最小下载份数。**只需 2**：真正兜住误杀的是下面那道白传门槛（健康预取的白传
+#: 恒 ≈0，因为每份都会被下一次 claim 吃掉；白传 ≥3MiB 本身就是「至少两份没被吃」）。
+#: 这道样本位只挡一种退化：单份 payload 恰好 >3MiB 时「一份没被吃」就触发。
+#: ⚠ **不要**改用 `misses` 当分母（会话首个 job 的命中率按构造 = 0，会把健康会话前两轮关掉）。
+PREFETCH_GIVEUP_MIN_SAMPLES = 2
+#: 白传字节门槛：低于它不下结论（省下的带宽不足以补偿误杀风险）。
+PREFETCH_GIVEUP_WASTED_BYTES = 3 * 1024 * 1024
+#: 命中率门槛：`taken / prefetched` 低于它且白传超门槛 ⇒ 停。
+PREFETCH_GIVEUP_TAKEN_RATIO = 1.0 / 3.0
+
+
+def prefetch_worth_it(
+    *,
+    prefetched: int,
+    taken: int,
+    white_bytes: int,
+    min_samples: int = PREFETCH_GIVEUP_MIN_SAMPLES,
+    min_wasted: int = PREFETCH_GIVEUP_WASTED_BYTES,
+    min_taken_ratio: float = PREFETCH_GIVEUP_TAKEN_RATIO,
+) -> bool:
+    """预取还划不划算（纯函数，判据不埋进控制流）。**True = 继续，False = 停**。
+
+    口径（plan §53 的门槛①，去掉了它对 `misses` 的依赖——`misses` 会被「claim 到的
+    job ≠ 预取候选」这类**正常**事件灌满，当命中率分母就把健康会话判死）：
+
+      · `prefetched` —— 成功入库（= 真下过网）的份数，**不是** take 尝试次数；
+      · `taken` —— 其中被 `take()` 拿走的份数；
+      · `white_bytes` —— **已下载但从未被 take 的字节**（含被 P1 挤走的半截）。
+
+    返回值语义是「继续」，所以**证据不足一律 True**：样本不够 / 白传不够，都不构成
+    「停」的理由。三条同时成立才停。
+    """
+    if int(prefetched) < int(min_samples):
+        return True
+    if int(white_bytes) < int(min_wasted):
+        return True
+    if int(prefetched) <= 0:
+        return True
+    return (int(taken) / int(prefetched)) >= float(min_taken_ratio)
+
 
 class PrefetchStore:
     """预取暂存区：`work_dir/prefetch/<jid>/` = `payload.zip` + `meta.json`（纯磁盘，无租约）。
@@ -78,6 +119,14 @@ class PrefetchStore:
         self._active: dict[str, dict] = {}
         self.hits = 0
         self.misses = 0
+        #: 会话级自停读数（plan/aistudio-transfer-hardening §3.1）：`prefetched` = 成功入库
+        #: 次数（= 真下过网），`taken` 见 `hits`，白传 = `downloaded_bytes - taken_bytes`
+        #: （+ `_preempt_wasted`）。**只有这三个数进判据**，`misses` 不进（理由见
+        #: `prefetch_worth_it`）。
+        self.prefetched = 0
+        self.downloaded_bytes = 0
+        self.taken_bytes = 0
+        self._preempt_wasted = 0
 
     # ---------------------------------------------------------------- 写
 
@@ -115,6 +164,9 @@ class PrefetchStore:
             }
             # 入库即「下好了」：从观测面的"正在下载"里摘掉（调用方的 `end` 也幂等）。
             self._active.pop(jid, None)
+        # 自停读数：**只有成功入库才计白传分母**（sha 不符那条不算——它没进暂存区）。
+        self.prefetched += 1
+        self.downloaded_bytes += len(payload)
         self.prune()
         return True
 
@@ -199,6 +251,7 @@ class PrefetchStore:
             return None
         self._drop_dir(jid)
         self.hits += 1
+        self.taken_bytes += len(payload)
         self._log_line(f"prefetch {jid[:8]}: 命中（{len(payload)} bytes 零下载开算）")
         return {"payload_zip": payload, "blob_sha": sha, "summary": it.get("summary") or {}}
 
@@ -248,6 +301,20 @@ class PrefetchStore:
                 f"prefetch {oldest[:8]}: 丢弃（超预算 {self.budget_bytes // 1048576}MB，按最旧先丢）"
             )
 
+    def note_preempt_wasted(self, nbytes: int) -> None:
+        """记一笔「被 P1 挤走的半截字节」（由调用方从 wire 的 `preempt_wasted` 推进来）。
+
+        挤走的字节**从未入库**，所以不在 `downloaded_bytes` 里；漏记它 = 自停判据看不见
+        最大的一笔浪费（aistudio 现场：`preempt=2(wasted 0.25MB)`）。
+        """
+        if int(nbytes) > 0:
+            self._preempt_wasted += int(nbytes)
+
+    def white_bytes(self) -> int:
+        """已下载但**从未被 `take()`** 的字节（含被挤走的半截）= 纯白传。"""
+        with self._lock:
+            return max(0, self.downloaded_bytes - self.taken_bytes) + self._preempt_wasted
+
     def stats(self) -> dict:
         with self._lock:
             return {
@@ -255,6 +322,12 @@ class PrefetchStore:
                 "bytes": sum(int(it["bytes"]) for it in self._items.values()),
                 "hits": self.hits,
                 "misses": self.misses,
+                # 自停判据的三件读数（plan §3.1）——`prefetch_worth_it` 只读这三个。
+                "prefetched": self.prefetched,
+                "taken": self.hits,
+                "white_bytes": max(0, self.downloaded_bytes - self.taken_bytes)
+                + self._preempt_wasted,
+                "preempt_wasted": self._preempt_wasted,
             }
 
     def _log_line(self, msg: str) -> None:

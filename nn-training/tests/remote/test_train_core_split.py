@@ -52,6 +52,8 @@ if str(ROOT) not in sys.path:
 import remote.train_core as core_mod
 import remote.worker as worker_mod
 import remote.worker_proc as proc_mod
+from common.protocol import BLOB_OPT, BLOB_REF
+from remote import download as download_mod
 from remote import wire as wire_mod
 from tests.helpers import remote_dag as dag
 
@@ -333,3 +335,91 @@ def test_training_core_sits_below_the_host() -> None:
     assert layers["remote.train_core"] < layers["remote.worker"] <= layers["remote.run_loop"]
     assert layers["remote.worker_proc"] == 0
     assert layers["remote.wire"] < layers["remote.train_core"]
+
+
+# ──────────────────── ⑧ B1：opt+ref 合成一次 GET 的装配点 ────────────────────
+#
+# plan/aistudio-transfer-hardening §3.4：一轮里 opt 与 ref 是两次独立 blob GET。合成一次
+# 省的是**建连 + TCP 慢启动**（字节数逐字不变）。装配点在本模块（`train_core.py:295` 附近），
+# 因为「这轮要不要 ref」的开关 `kickstart_kl` 也是在这里判的——**必须**先判开关才知道要不要
+# 把 ref 放进同一批。
+
+
+def test_resolved_prefers_the_batch_result(monkeypatch) -> None:
+    """批量解析里有这件 ⇒ 直接用（**不**再走一次 `_resolve_blob`：那会各发一次 GET）。"""
+    monkeypatch.setattr(
+        core_mod,
+        "_resolve_blob",
+        lambda **_k: (_ for _ in ()).throw(AssertionError("批量已给结果，不该再单取")),
+    )
+    raw = b"opt-bytes"
+    got = core_mod._resolved(
+        jid="j1",
+        name="opt",
+        sha="a" * 64,
+        inline_b64="",
+        base_url="http://hub",
+        token="t",
+        blob_root=Path("."),
+        preloaded=None,
+        batch={"opt": (raw, True, "cache")},
+        log=lambda _m: None,
+    )
+    assert got == (raw, True, "cache")
+
+
+def test_resolved_delegates_when_the_batch_has_no_such_piece(monkeypatch) -> None:
+    """批量里**没有**这件（ref 未开 / 旧 hub 回退 / sha 空）⇒ 逐字退回 `_resolve_blob`。
+
+    退回而不是重写，才不会把 `_resolve_blob` 那套安全阀分叉成两份（那是静默 warm-start 的入口）。
+    """
+    sentinel = (b"inline-bytes", True, "inline")
+    monkeypatch.setattr(core_mod, "_resolve_blob", lambda **_k: sentinel)
+    got = core_mod._resolved(
+        jid="j1",
+        name="ref",
+        sha="",
+        inline_b64="aaaa",
+        base_url="http://hub",
+        token="t",
+        blob_root=Path("."),
+        preloaded=None,
+        batch={},
+        log=lambda _m: None,
+    )
+    assert got is sentinel
+
+
+def test_the_batch_assembly_uses_the_same_resolver_as_the_download_cluster() -> None:
+    """装配用的是 `remote.download` 那**同一个**函数（不是训练核里另抄一份判据）。"""
+    assert core_mod.resolve_blobs_batch is download_mod.resolve_blobs_batch
+
+
+def test_ref_enters_the_batch_only_while_kick_is_on() -> None:
+    """★ 「ref 只在 kick 打开时进批」是**纯函数**判据（`blob_wanted`）——可直接钉行为，
+    不用去源码里找 `_wanted[BLOB_REF]` 那串字符。"""
+    mani = {"opt_sha": "a" * 64, "ref_sha": "b" * 64}
+    assert core_mod.blob_wanted(mani, kick_kl=0.5) == {BLOB_OPT: "a" * 64, BLOB_REF: "b" * 64}
+    assert core_mod.blob_wanted(mani, kick_kl=0.0) == {BLOB_OPT: "a" * 64}, (
+        "kick 关了就不该为 ref 付一次取字节的代价"
+    )
+    # sha 为空的名字**逐个**不进批（那走 `_resolve_blob` 的 inline/legacy 路径）。门槛是
+    # 「这件自己有没有 sha」，**不是**「opt 在不在」——opt 走 inline 时 ref 仍可进批
+    # （单名批 = `download_blobs` 委派 `download_blob`，与改造前逐字同路）。
+    assert core_mod.blob_wanted({"opt_sha": "", "ref_sha": "b" * 64}, kick_kl=1.0) == {
+        BLOB_REF: "b" * 64
+    }
+    assert core_mod.blob_wanted({"opt_sha": "", "ref_sha": "b" * 64}, kick_kl=0.0) == {}
+
+
+def test_the_kick_gate_is_a_pure_read_of_the_manifest() -> None:
+    """`kick_kl_value` = 纯 manifest 读：低于 `coef_active` 阈值 ⇒ 0（关）。
+
+    它是「B1 能把 ref 提前判掉」的**前提**：这个开关不依赖任何计算，所以上提是安全的。
+    """
+    assert core_mod.kick_kl_value({}) == 0.0
+    assert core_mod.kick_kl_value({"kickstart_kl": 0.0}) == 0.0
+    tiny = core_mod.coef_active(1.0)  # 阈值判据与生产同源（同一函数，不抄一份）
+    assert isinstance(tiny, bool)
+    assert core_mod.kick_kl_value({"kickstart_kl": 1e-12}) == 0.0, "低到阈值以下 ⇒ 按关闭处理"
+    assert core_mod.kick_kl_value({"kickstart_kl": 1.0}) == 1.0, "够大 ⇒ 原值（不改写）"

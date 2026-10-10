@@ -48,6 +48,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import sys
 import time
 from pathlib import Path
@@ -73,6 +74,7 @@ from remote.job_fs import JOB_DIR_KEEP, prune_job_dirs, unpack_payload_or_fail
 from remote.wire import _wire_hit
 
 __all__ = [
+    "CODE_CACHE_MAX_BYTES",
     "WEIGHT_SOURCES",
     "CodeLanded",
     "PayloadLanded",
@@ -85,9 +87,13 @@ __all__ = [
     "_resolve_blob",
     "_resolve_weights",
     "download_blob",
+    "download_blobs",
     "download_code",
     "download_payload",
     "download_ts_code",
+    "parse_blob_batch",
+    "prune_caches",
+    "resolve_blobs_batch",
 ]
 
 
@@ -222,6 +228,145 @@ def download_blob(
     )
 
 
+def parse_blob_batch(body: bytes) -> dict[str, bytes]:
+    """解批量 blob 响应体（`name\\n<len>\\n` + raw 重复）→ `{name: raw}`（纯函数）。
+
+    解析**任一环节不对就抛 ValueError**：调用方据此整批回退到逐个单取。绝不返回「半份」
+    ——安全阀那条路（`_resolve_blob`）要求 sha 非空时只认内容寻址，半份会被读成全拿到。
+    """
+    out: dict[str, bytes] = {}
+    i = 0
+    n = len(body)
+    while i < n:
+        nl1 = body.find(b"\n", i)
+        if nl1 < 0:
+            raise ValueError("批量 blob：帧头缺第一个换行")
+        name = body[i:nl1].decode("utf-8")
+        nl2 = body.find(b"\n", nl1 + 1)
+        if nl2 < 0:
+            raise ValueError(f"批量 blob：{name!r} 帧头缺长度换行")
+        try:
+            size = int(body[nl1 + 1 : nl2])
+        except ValueError as e:
+            raise ValueError(f"批量 blob：{name!r} 的长度字段不是整数") from e
+        if size < 0:
+            raise ValueError(f"批量 blob：{name!r} 的长度为负")
+        end = nl2 + 1 + size
+        if end > n:
+            raise ValueError(f"批量 blob：{name!r} 声明 {size} 字节但只剩 {n - nl2 - 1}")
+        out[name] = body[nl2 + 1 : end]
+        i = end
+    return out
+
+
+def download_blobs(
+    base_url: str,
+    token: str,
+    jid: str,
+    names: list[str],
+    *,
+    attempts: int = 3,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
+) -> dict[str, bytes]:
+    """一次 GET 取多件 blob（plan/aistudio-transfer-hardening §3.4）。
+
+    省的是**建连 + TCP 慢启动**那笔税（不是字节：字节数逐字不变）。
+    **任一环节 404/400/解析失败 ⇒ 整批逐个回退** `download_blob` 单取 —— 旧 hub 收到
+    逗号名会走 `blob_path` 的未知名 400，所以这条回退链就是「旧 hub 兼容」本身。
+
+    返回的 dict **可能缺键**（某件在 hub 侧不存在）；`_resolve_blob` 的安全阀口径不变：
+    sha 非空时只认内容寻址，缺件 = 响亮失败，绝不静默 warm-start。
+    """
+    names = [str(n) for n in names if str(n)]
+    if not names:
+        return {}
+    if len(names) == 1:
+        return {names[0]: download_blob(base_url, token, jid, names[0], log=log)}
+    try:
+        body = _get_with_retry(
+            base_url,
+            token,
+            f"/jobs/{jid}/blob?name={','.join(names)}",
+            timeout=BODY_TOTAL_TIMEOUT_SEC,
+            attempts=attempts,
+            log=log,
+            idle_timeout=BODY_IDLE_TIMEOUT_SEC,
+            total_timeout=BODY_TOTAL_TIMEOUT_SEC,
+            progress=_progress_logger(f"job {jid}: blob {len(names)} 件", log),
+            wire_jid=jid,
+            wire_seg=f"blob:{'+'.join(names)}",
+            reroll=True,
+        )
+        return parse_blob_batch(body)
+    except Exception as e:
+        log(
+            f"job {jid}: 批量 blob（{','.join(names)}）取不到（{type(e).__name__}）"
+            "——逐个回退单取（旧 hub 或其中一件缺失）"
+        )
+        out: dict[str, bytes] = {}
+        for n in names:
+            try:
+                out[n] = download_blob(base_url, token, jid, n, log=log)
+            except Exception as e2:
+                log(f"job {jid}: blob {n} 单取也失败（{type(e2).__name__}）——由调用方按安全阀处置")
+        return out
+
+
+def resolve_blobs_batch(
+    *,
+    wanted: dict[str, str],
+    blob_root: Path,
+    jid: str,
+    base_url: str,
+    token: str,
+    preloaded: dict | None,
+    log,
+) -> dict[str, tuple[bytes, bool, str]]:
+    """一次 GET 解析**多件** blob → `{name: (raw, hit, src)}`（plan §3.4 B1）。
+
+    `wanted = {name: sha}`。`sha` 为空的名字**不进本函数**——那走 `_resolve_blob` 的
+    inline/legacy 路径（`_resolve_blob` 与安全阀同口径，不在这里复制一遍）。
+
+    与 `_resolve_blob` 的三条同规（判据同源，改一条必须改两条）：
+      ① 缓存命中 ⇒ `hit=True`，零字节；② sha 不符 ⇒ `RetryableError`（瞬时，重下可修）；
+      ③ **缺件就少一个键，绝不编造**（`raw is None` 与「取不到」在调用方是同一件事，
+         由调用方按安全阀响亮失败，绝不静默 warm-start）。
+    """
+    out: dict[str, tuple[bytes, bool, str]] = {}
+    need: dict[str, str] = {}
+    for name, sha in (wanted or {}).items():
+        if not sha:
+            continue
+        cp = blob_root / sha
+        if cp.exists():
+            raw = cp.read_bytes()
+            if hashlib.sha256(raw).hexdigest() == sha:
+                _wire_hit(jid, f"blob:{name}")
+                out[name] = (raw, True, "cache")
+                continue
+            log(f"job {jid}: blob {name} cache 命中但 sha 不符（损坏）——重新取")
+        pl = (preloaded or {}).get("blobs") or {}
+        if name in pl:
+            raw = pl[name]
+            if hashlib.sha256(raw).hexdigest() == sha:
+                _wire_hit(jid, f"blob:{name}", "preloaded")
+                out[name] = (raw, False, "preloaded")
+                continue
+            raise RetryableError(f"blob {name}: preloaded 的字节与 sha 不符——拒用坏字节")
+        need[name] = sha
+    if need:
+        got = download_blobs(base_url, token, jid, sorted(need), log=log)
+        for name, sha in need.items():
+            batch_raw: bytes | None = got.get(name)
+            if batch_raw is None:
+                continue  # 缺件：留给调用方按安全阀处置（**不**在这里降级或 warm-start）
+            if hashlib.sha256(batch_raw).hexdigest() != sha:
+                raise RetryableError(f"blob {name} sha 不匹配——传输损坏（重下可修复）")
+            _cache_blob(blob_root, sha, batch_raw, log)
+            out[name] = (batch_raw, False, "download")
+    return out
+
+
 def _cache_produced_weights(blob_root: Path, raw: bytes, log) -> str:
     """把**本轮产出的** `weights.json` 原始字节写进 `blob_cache/<sha256(raw)>`；返回该 sha。
 
@@ -247,12 +392,125 @@ def _cache_blob(blob_root: Path, sha: str, raw: bytes, log) -> None:
         blob_root.mkdir(parents=True, exist_ok=True)
         p = blob_root / sha
         if p.exists():
-            return
+            # ★ A3：命中也要 **touch mtime**——`prune_caches` 按 mtime 丢最旧，不 touch 会把
+            #   「高频命中但现在没被写」的件当最旧删掉（那不是 LRU，是「谁先来谁先死」）。
+            # ★ 命中**且字节一致**才提前返回。字节不一致 = 磁盘上这件是坏的（键是 sha，
+            #   内容却不是它）⇒ 用刚校验过的 `raw` **覆盖修复**：否则这份坏件会永远待在那里，
+            #   每一轮都「命中 → 校验不过 → 重下 → 又跳过写」，白付一辈子下载税。
+            try:
+                if p.read_bytes() == raw:
+                    _touch(p)
+                    return
+            except OSError:
+                pass
+            log(f"blob cache {sha[:12]}… 内容与 sha 不符（损坏）——用刚校验过的字节覆盖")
         tmp = p.with_suffix(p.suffix + ".tmp")
         tmp.write_bytes(raw)
         tmp.replace(p)
     except OSError as e:
         log(f"blob cache 写失败（{e}）——下一轮将重传该 blob")
+
+
+# ── 内容寻址缓存的容量上限（plan/aistudio-transfer-hardening §3.3）──────────────
+#: `code_cache` / `ts_code_cache` / `blob_cache` 三者**合计**的字节上限。缺省 256 MB。
+#:
+#: 为什么必须有：这三棵树按 sha 存且**原本完全没有预算**（预取暂存区有 64MB，它们没有）；
+#: 一旦 A3 把它们挂到持久目录（跨会话复用），每会话一次热替换就是一份新 sha ⇒ 无界增长。
+#: 缺省 `/tmp` 会话下这条几乎不会触发（几次热替换的量级 ≪ 256MB），所以对旧行为等价。
+CODE_CACHE_MAX_BYTES = 256 * 1024 * 1024
+#: 缓存树的三个成员（`prune_job_dirs` 的豁免名单同源；加一个必须两处都加）。——见下。
+_CACHE_SUBDIRS = ("code_cache", "ts_code_cache", "blob_cache")
+
+
+def _touch(p: Path) -> None:
+    """把 mtime 抬到现在（best-effort；失败只意味着这件更早被 prune 挑中）。"""
+    try:
+        os.utime(p, None)
+    except OSError:
+        pass
+
+
+def _dir_bytes(p: Path) -> int:
+    """目录/文件的字节数（best-effort：读不到的项按 0 计，绝不让 prune 因 I/O 抛）。"""
+    try:
+        if p.is_file():
+            return int(p.stat().st_size)
+        total = 0
+        for root, _dirs, files in os.walk(p):
+            for f in files:
+                try:
+                    total += int(os.stat(os.path.join(root, f)).st_size)
+                except OSError:
+                    pass
+        return total
+    except OSError:
+        return 0
+
+
+def prune_caches(
+    cache_root: Path,
+    *,
+    budget_bytes: int = CODE_CACHE_MAX_BYTES,
+    log=lambda msg: None,
+) -> int:
+    """三棵内容寻址缓存**合计**超预算 ⇒ 按 mtime **最旧先丢**。返回删掉的条目数。
+
+    只动 `cache_root` 下 `_CACHE_SUBDIRS` 的**直接子项**（`<sha>` 目录或文件），
+    **跳过 `*.tmp`**（那是写入中的半成品，`replace` 会自己收拾）。删除走
+    `rmtree_best_effort`（沙箱删除保护拦得住 `shutil.rmtree`，拦不住它）。
+
+    为什么是「合计」而不是每棵单独封顶：无界增长的账本来就是三家之和；每棵各给 256MB
+    等于把上限悄悄放成 768MB。预算 ≤0 = 关闭（旧行为）。
+    """
+    if int(budget_bytes) <= 0:
+        return 0
+    entries: list[tuple[float, int, Path, bool]] = []
+    total = 0
+    for sub in _CACHE_SUBDIRS:
+        d = cache_root / sub
+        if not d.is_dir():
+            continue
+        try:
+            children = list(d.iterdir())
+        except OSError:
+            continue
+        for child in children:
+            if child.name.endswith(".tmp"):
+                continue
+            try:
+                is_dir = child.is_dir()
+                mtime = child.stat().st_mtime
+            except OSError:
+                continue
+            nbytes = _dir_bytes(child)
+            entries.append((mtime, nbytes, child, is_dir))
+            total += nbytes
+    if total <= int(budget_bytes):
+        return 0
+    entries.sort(key=lambda t: t[0])  # 最旧先
+    from common.platform_utils import rmtree_best_effort
+
+    dropped = 0
+    for _mt, nbytes, child, is_dir in entries:
+        if total <= int(budget_bytes):
+            break
+        try:
+            if is_dir:
+                ok = rmtree_best_effort(child, ignore_errors=True)
+            else:
+                child.unlink()
+                ok = True
+        except BaseException:  # 含 SystemExit：沙箱删除守卫会打死调用线程
+            ok = False
+        if ok:
+            total -= nbytes
+            dropped += 1
+    if dropped:
+        log(
+            f"cache prune: 丢 {dropped} 个最旧的缓存条目（合计仍 {total / 1048576:.0f}MB / "
+            f"上限 {int(budget_bytes) / 1048576:.0f}MB）"
+        )
+    return dropped
 
 
 def _resolve_blob(
@@ -549,6 +807,9 @@ def _ensure_code(
     blob_root = code_root.parent / "blob_cache"
     cache_dir = code_root / manifest["code_sha256"]
     if cache_dir.exists():
+        # ★ A3：命中必须 touch mtime（`prune_caches` 按 mtime 丢最旧）——否则「高频命中、
+        #   但本会话没被重写」的那份会被当最旧删掉。
+        _touch(cache_dir)
         sys.path.insert(0, str(cache_dir))
         _wire_hit(jid, "code")  # 零字节命中也要进本 job 的传输账（否则摘要读数失真）
         if bundle is not None:
@@ -582,6 +843,9 @@ def _ensure_code(
             bundle.add("code", _line)
         else:
             log(f"job {jid}: {_line}")
+    # A3：容量上限（含本轮刚落地的那一份）。放在**落地之后**——新件 mtime 最新，不会被自己
+    # 的 prune 挑中；放在之前则可能在旧件还没超预算时白扫一遍。
+    prune_caches(code_root.parent, log=log)
     return CodeLanded(code_root=code_root, code_cache_dir=cache_dir, blob_root=blob_root)
 
 
@@ -611,6 +875,8 @@ def _ensure_ts_code(
         raise ProtocolError("kind=iter 的 manifest 缺 ts_code_sha256——无法定位 TS 运行时")
     cache = ts_root / sha
     if cache.exists():
+        # ★ A3：命中 touch（与 `_ensure_code` 同规，`prune_caches` 按 mtime 丢最旧）。
+        _touch(cache)
         _wire_hit(jid, "ts_code")  # 零字节命中也要进账（与 code 同规，否则 wire 摘要读数失真）
         if bundle is not None:
             bundle.add("ts_code", f"cache 命中（{sha[:12]}…）——跳过下载解压")
@@ -650,4 +916,6 @@ def _ensure_ts_code(
         bundle.add("ts_code", _line)
     else:
         log(f"job {jid}: {_line}")
+    # A3：容量上限（`_ensure_code` 那条路径也会扫一遍，这里补上「只跑 kind=iter 的会话」）。
+    prune_caches(ts_root.parent, log=log)
     return cache, len(raw), False

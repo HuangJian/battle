@@ -56,6 +56,34 @@ YIELD_AFTER_SEC_DEFAULT = 1.0
 #: 槽位等待的轮询步长（秒）：`Event.wait` 兜底用（真释放会立刻唤醒）。
 BULK_WAIT_STEP_SEC = 0.05
 
+# ── 让路自适应关闭（plan/aistudio-transfer-hardening §3.2）─────────────────────
+#: 控制面 p95 超过它就判「让路买不回来」。**P0 从不排队**（独立 socket，见 `slot()` 的
+#: `_control_waiting` 注释）⇒ `p95 ≫ p50` 的尾部只能来自链路本身，让路只是把 bulk 拖长。
+YIELD_GIVEUP_P95_MS = 10_000.0
+#: 分位数的最小样本。**必须**有：会话早期 1–2 个坏样本就能把 p95 拉到 30s，据此关掉让路
+#: 是拿噪声当证据（`stats()["p0_count"]` 是现成的读数）。
+YIELD_GIVEUP_MIN_SAMPLES = 20
+
+
+def yield_worth_it(
+    *,
+    p50_ms: float,
+    p95_ms: float,
+    n: int,
+    min_samples: int = YIELD_GIVEUP_MIN_SAMPLES,
+    threshold_ms: float = YIELD_GIVEUP_P95_MS,
+) -> bool:
+    """让路还值不值得留（纯函数）。**True = 继续让，False = 关掉**。
+
+    判据（plan §53 门槛②）：控制面 p95 远高于阈值 ⇒ 让路换不回控制面速度，只拖长传输。
+    证据不足（样本 < `min_samples` / 分位为 0=还没测到）一律 True —— 不下结论 ≠ 关掉。
+    """
+    if int(n) < int(min_samples):
+        return True
+    if float(p50_ms) <= 0.0 or float(p95_ms) <= 0.0:
+        return True
+    return float(p95_ms) <= float(threshold_ms)
+
 
 class BulkPreemptError(RuntimeError):
     """P2 bulk 被 **P1** 挤走：**丢半截、稍后重下**（payload 幂等，不算失败）。

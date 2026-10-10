@@ -50,10 +50,82 @@ from common.protocol import (
     job_seed,
     pack_result_v2,
 )
-from remote.download import WEIGHT_SOURCES, _cache_blob, _cache_produced_weights, _resolve_blob
+from remote.download import (
+    WEIGHT_SOURCES,
+    _cache_blob,
+    _cache_produced_weights,
+    _resolve_blob,
+    resolve_blobs_batch,
+)
 from remote.job_fs import pack_opt_tar, unpack_opt_tar
 from remote.job_lifecycle import job_body_error
 from remote.wire import _wire_block, _wire_time
+
+
+def kick_kl_value(manifest: dict) -> float:
+    """`kickstart_kl` 的**有效值**（纯函数）：低于 `coef_active` 阈值一律按 0（= 关）处理。
+
+    抽出来的理由：B1 要把 opt/ref 合成一次 GET，就必须**在批量之前**知道 ref 要不要 ——
+    而这个判据是纯 manifest 读（不依赖任何计算）。抽成函数后判据可单测，不用去源码里
+    找字符串（那类判据改个变量名就红，而行为没变）。
+    """
+    kl = float(manifest.get("kickstart_kl", 0.0) or 0.0)
+    if kl != 0.0 and not coef_active(kl):
+        return 0.0
+    return kl
+
+
+def blob_wanted(manifest: dict, *, kick_kl: float) -> dict[str, str]:
+    """本轮**要向 hub 要哪几件** blob（纯函数）→ `{name: sha}`。
+
+    * `opt` —— 只要有 sha 就必进批（每轮都有的那一件）；
+    * `ref` —— **只在 kick 打开时**进批（关了就不该为它付一次取字节的代价）；
+    * sha 为空的名字**不进本批**（那走 `_resolve_blob` 的 inline/legacy 路径）。
+    """
+    wanted: dict[str, str] = {}
+    opt_sha = str(manifest.get("opt_sha", "") or "")
+    if opt_sha:
+        wanted[BLOB_OPT] = opt_sha
+    if float(kick_kl) > 0.0:
+        ref_sha = str(manifest.get("ref_sha", "") or "")
+        if ref_sha:
+            wanted[BLOB_REF] = ref_sha
+    return wanted
+
+
+def _resolved(
+    *,
+    jid: str,
+    name: str,
+    sha: str,
+    inline_b64: str,
+    base_url: str,
+    token: str,
+    blob_root: Path,
+    preloaded: dict | None,
+    batch: dict | None,
+    log,
+) -> tuple[bytes, bool, str]:
+    """先查本轮批量解析的结果（`resolve_blobs_batch`），查不到再逐字退回 `_resolve_blob`。
+
+    为什么要有这一层而不是直接改 `_resolve_blob`：批量只覆盖「sha 非空 **且** 本轮真需要」
+    的件；其余形状（sha 空 + inline、旧 hub 回退、kick 关闭）必须走老路径。**退回而不是
+    重写**，才不会把 `_resolve_blob` 那套安全阀分叉成两份（那是静默 warm-start 的入口）。
+    """
+    got: tuple[bytes, bool, str] | None = (batch or {}).get(name)
+    if got is not None:
+        return got
+    return _resolve_blob(
+        blob_root=blob_root,
+        name=name,
+        sha=sha,
+        inline_b64=inline_b64,
+        jid=jid,
+        base_url=base_url,
+        token=token,
+        preloaded=preloaded,
+        log=log,
+    )
 
 
 def run_training_core(
@@ -221,17 +293,43 @@ def run_training_core(
     # 安全阀（plan §4.3）：opt_sha 存在而 blob 不可得 → 响亮失败，绝不静默 warm-start
     # （那会把 D5 的 Adam 动量悄悄归零，日志上却一切正常）。
     opt_sha = str(manifest.get("opt_sha", "") or "")
+    # ---- B1（plan/aistudio-transfer-hardening §3.4）：opt 与 ref 合成**一次** GET ----
+    # 省的是**建连 + TCP 慢启动**（不是字节：字节数逐字不变）。为此必须把 ref 的开关提前
+    # 判：ref 的加载条件 `kickstart_kl > 0` 是**纯 manifest 读**（不依赖上面任何计算），
+    # 所以上提是安全的——判据原文（阈值 + coef_active）逐字照搬，只是换个位置求值。
+    # ref_sha 为空 / kick 关闭 ⇒ ref 不进本批，仍走下面原位的 `_resolve_blob`（含 inline 兜底）。
+    #: 「这轮要不要 ref」与「本批要哪几件」抽成**两个纯函数**（判据可单测，不必读源码）：
+    #: 判据与旧写法逐字同源（阈值 `coef_active` + `kickstart_kl > 0`），只是换个位置求值。
+    _raw_kick = float(manifest.get("kickstart_kl", 0.0) or 0.0)
+    _kick_kl = kick_kl_value(manifest)
+    if _raw_kick != 0.0 and _kick_kl == 0.0:
+        log(f"job {jid}: kickstart_kl={_raw_kick:g} 低于阈值 —— 按关闭处理（省 ref 加载+预计算）")
+    _wanted = blob_wanted(manifest, kick_kl=_kick_kl)
+    _batch = (
+        resolve_blobs_batch(
+            wanted=_wanted,
+            blob_root=blob_root,
+            jid=jid,
+            base_url=base_url,
+            token=token,
+            preloaded=preloaded,
+            log=log,
+        )
+        if _wanted
+        else {}
+    )
     # `blob_hits` / `blob_miss_bytes` 的值由入参传来（init 那一手账在作业壳的权重解析处建）
     # —— 本模块只在它上面累加 opt/ref/demo，最后一次性交给 `_wire_block`。
-    opt_raw, opt_hit, opt_src = _resolve_blob(
-        blob_root=blob_root,
+    opt_raw, opt_hit, opt_src = _resolved(
+        jid=jid,
         name=BLOB_OPT,
         sha=opt_sha,
         inline_b64=str(manifest.get("opt_init", "") or ""),
-        jid=jid,
         base_url=base_url,
         token=token,
+        blob_root=blob_root,
         preloaded=preloaded,
+        batch=_batch,
         log=log,
     )
     if opt_hit and opt_src == "cache":
@@ -318,30 +416,32 @@ def run_training_core(
 
     # ---- BC-anchored kickstart ref（§363）：有系数无尺子＝静默裸奔，不可接受——
     # 缺字节响亮拒绝；系数为 0 直接跳过（零开销，旧 manifest 行为不变）。
-    kick_kl = float(manifest.get("kickstart_kl", 0.0) or 0.0)
-    # 阈值判据（见 common/protocol.NEGLIGIBLE_COEF）：课程按几何衰减永远到不了精确 0，
-    # 实测 1.455e-11 时旧判据 `> 0` 仍会加载 ref 并每轮预计算 3 s。用 coef_active 兜底，
-    # 也覆盖"旧 hub 产出的、仍带微小系数的在途 manifest"。
-    if kick_kl != 0.0 and not coef_active(kick_kl):
-        log(f"job {jid}: kickstart_kl={kick_kl:g} 低于阈值 —— 按关闭处理（省 ref 加载+预计算）")
-        kick_kl = 0.0
+    #
+    # ★ B1：判据**已上提**到 opt 解析之前（那里要用它决定 ref 进不进批量 GET）；这里只把
+    #   上提算出的 `_kick_kl` 落回 `kick_kl`（下面的引用点一个字不改）。判据原文逐字照搬。
+    kick_kl = _kick_kl
     ref_model: torch.nn.Module | None = None
     if kick_kl > 0:
         import hashlib as _hl
 
-        ref_sha = str(manifest.get("ref_sha", "") or "")
         ref_b64 = str(manifest.get("ref_weights_b64", "") or "")
         ref_fp = str(manifest.get("ref_weights_fp", "") or "")
+        # B1：sha 的**唯一来源**是本轮装批的结果（`blob_wanted` 读 manifest 的同一处）——
+        # 这里取回来给 `_resolved`，而不是再读一次 manifest（两份读法 = 未来会分叉）。
+        ref_sha = _wanted.get(BLOB_REF, "")
         # M2 B3：ref 也走内容寻址（ref_sha = sha256(raw 权重) = ref_weights_fp）。
-        ref_raw, ref_hit, ref_src = _resolve_blob(
-            blob_root=blob_root,
+        # B1：ref 与 opt 已在上面那一次批量 GET 里一起取回（`_batch`）；`ref_sha` 为空 /
+        # kick 关闭 / 旧 hub 回退单取等形状仍由 `_resolved` 逐字退回 `_resolve_blob`。
+        ref_raw, ref_hit, ref_src = _resolved(
+            jid=jid,
             name=BLOB_REF,
             sha=ref_sha,
             inline_b64=ref_b64,
-            jid=jid,
             base_url=base_url,
             token=token,
+            blob_root=blob_root,
             preloaded=preloaded,
+            batch=_batch,
             log=log,
         )
         if not ref_raw:

@@ -114,6 +114,9 @@ LAYERS: dict[str, int] = {
     # 会当场报 stale）。它们是 stdlib-only 叶子（L0），搬走不改变任何残留边的方向。
     "remote.artifacts": 0,
     "remote.bulk_sched": 0,
+    # 控制面连接池（2026-10-10，plan/aistudio-transfer-hardening B2）：**零仓内依赖**（只用
+    # stdlib `http.client` / `ssl` / `urllib.parse`）⇒ **L0**。读者只有 `remote.http`(L2)。
+    "remote.control_pool": 0,
     "remote.worker_proc": 0,
     "remote.bundle": 0,
     "remote.colab_bc": 0,

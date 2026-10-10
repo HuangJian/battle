@@ -51,6 +51,18 @@ from common.protocol import (
     RetryableError,
 )
 from remote.bulk_sched import BULK_P1_CRITICAL, BULK_P2_PREFETCH, BulkPreemptError, control_path
+
+# 控制面连接池（B2）：**单独成模块** —— `http.py` 顶层不许再多一份可变容器（护栏见
+# `tests/remote/test_http_split.py::test_http_top_level_mutable_container_is_only_the_warn_throttle`）。
+from remote.control_pool import (
+    CONTROL_ATTEMPTS as CONTROL_ATTEMPTS,
+)
+from remote.control_pool import (
+    CONTROL_POOL_ENABLED as CONTROL_POOL_ENABLED,
+)
+from remote.control_pool import (
+    request as _control_pool_request,
+)
 from remote.wire import (
     _BULK,
     WIRE_PREEMPT_MAX,
@@ -307,23 +319,51 @@ def _request(
     sock_timeout = idle_timeout if idle_timeout is not None else timeout
     # 控制面标记（P0）：命中即让 bulk 在分片间隙让路；控制面自己**不进** bulk 队列。
     ctl = _BULK.control(label=path) if control_path(path) else nullcontext()
+    # B2：控制面走连接池（省每请求一次 TLS 握手 / 建连）。**三个条件同时成立**才走池：
+    #   ① 池开着；② 这条是控制面（`control_path`）；③ **非回环**（本机 hub 走 net_http.urlopen，
+    #   绕代理是它的既有语义，不能改）。bulk（大 body）永远不进池。
+    _use_pool = (
+        CONTROL_POOL_ENABLED
+        and control_path(path)
+        and progress is None
+        and idle_timeout is None
+        and not net_http.is_loopback(url)
+    )
+    # B3：控制面**短预算 + 立刻换连接重抽一次**（plan §3.5）。只给幂等的控制面小请求
+    # （无 body 下载那一套），且**不退避**——退避就是接着干等，与「把 30s 切成 6s×N」相反。
+    _tries = CONTROL_ATTEMPTS if (control_path(path) and not stream) else 1
+    _last: BaseException | None = None
     with ctl:
-        try:
-            # 回环（本机 hub）绕开代理；非回环走进程内的显式 ProxyHandler（Colab 实测需要）。
-            open_fn = net_http.urlopen if net_http.is_loopback(url) else _get_opener().open
-            with open_fn(req, timeout=sock_timeout) as resp:
-                if not stream or resp.status != 200:
-                    return resp.status, resp.read()
-                return resp.status, _read_body(
-                    resp,
-                    idle_timeout=sock_timeout,
-                    total_timeout=total_timeout,
-                    progress=progress,
-                    allow_reroll=allow_reroll,
-                    pace=pace,
-                )
-        except urllib.error.HTTPError as e:
-            return e.code, e.read()
+        for _t in range(_tries):
+            try:
+                if _use_pool:
+                    return _control_pool_request(
+                        url,
+                        method=method or ("POST" if data is not None else "GET"),
+                        headers={AUTH_HEADER: f"Bearer {token}", **(headers or {})},
+                        data=data,
+                        timeout=sock_timeout,
+                    )
+                # 回环（本机 hub）绕开代理；非回环走进程内的显式 ProxyHandler（Colab 实测需要）。
+                open_fn = net_http.urlopen if net_http.is_loopback(url) else _get_opener().open
+                with open_fn(req, timeout=sock_timeout) as resp:
+                    if not stream or resp.status != 200:
+                        return resp.status, resp.read()
+                    return resp.status, _read_body(
+                        resp,
+                        idle_timeout=sock_timeout,
+                        total_timeout=total_timeout,
+                        progress=progress,
+                        allow_reroll=allow_reroll,
+                        pace=pace,
+                    )
+            except urllib.error.HTTPError as e:
+                return e.code, e.read()
+            except Exception as e:  # 网络层：立刻换连接重抽（池内已丢连接；非池本就是新连接）
+                _last = e
+        if _last is not None:
+            raise _last
+    raise RuntimeError(f"_request: 控制面 {path} 重试耗尽却无结果（不应到这里）")
 
 
 # ---- 新调度面（2026-09-22，plan/transfer-scheduling）：peek / priority / claim ----

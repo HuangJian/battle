@@ -62,6 +62,7 @@ from common.protocol import (
 from common.text import exc_tail
 from remote.bulk_sched import BULK_P1_CRITICAL
 from remote.http import (
+    CONTROL_ATTEMPTS,
     _request,
     _sched_headers,
     _warn_non_200,
@@ -94,6 +95,17 @@ __all__ = [
     "worker_tag",
 ]
 
+#: 控制面请求的**超时预算**（plan/aistudio-transfer-hardening §3.5，B3）。
+#:
+#: 为什么收紧：慢链路上 p95 可以干等 15–30s（现场 aistudio `p0_p95=30.4s` 而 `p0_p50=1.1s`）。
+#: 一次干等 30s 的代价不只是这 30s——它把「链路坏了」伪装成「还没回来」，而**换一条连接重抽**
+#: 才是这类尾部的真实解法（§22 同款判据）。6s 把一次不可见的 30s 等待切成**可见的失败**，
+#: 上层（B2 的池）随即丢连接重建再试一次。
+#:
+#: 安全性：心跳周期 60s、租约 300s ⇒ 连续 2 次 6s 失败仍剩 4 次机会，续租不降。
+CONTROL_TIMEOUT_SEC = 6.0
+
+
 def peek_jobs(
     base_url: str,
     token: str,
@@ -101,7 +113,7 @@ def peek_jobs(
     worker_id: str = "",
     role: str = ROLE_ONLINE,
     n: int = 3,
-    timeout: float = 30.0,
+    timeout: float = CONTROL_TIMEOUT_SEC,
     log: Any = None,
 ) -> tuple[list[dict], bool] | None:
     """`GET /jobs/peek?n=K` → `([候选…], halt)`；hub 不可达/被拒 → None（已记日志）。
@@ -194,7 +206,7 @@ def request_priority(
     held: list[str] | tuple[str, ...] = (),
     computing: str = "",
     ready_upload: str = "",
-    timeout: float = 30.0,
+    timeout: float = CONTROL_TIMEOUT_SEC,
     log: Any = None,
 ) -> dict:
     """`POST /jobs/priority` → `{epoch, priorities, reasons}`；不可达 → `{epoch:None,...}`。
@@ -202,6 +214,10 @@ def request_priority(
     不可达时的回落是**有意的**：拿不到优先级就按「无人在做」（highest）选——
     网络抖动不应该把 worker 变成只等不干的空转卡；唯一性由 hub 侧的 claim 闸兜底，
     而「选一份别人正在算的活」的代价只是白算一份（首写定胜负），比空转便宜。
+
+    ⚠ B3：**重试过**才谈「不可达」。`_request` 对控制面会自动换连接重抽一次
+    （`CONTROL_ATTEMPTS`），所以走到这里的是**两次都失败**。日志必须写明这一点——旧文案
+    只写「失败」，会把「链路卡了 6s×2」读成「一次没接上」，进而误判要不要去和别人抢同一份活。
     """
     payload = json.dumps(
         {
@@ -227,7 +243,10 @@ def request_priority(
         )
     except Exception as e:  # 不可达：按 highest 下垂（见 docstring）
         if log is not None:
-            log(f"priority 问询失败（{type(e).__name__}）——按无人在做处理")
+            log(
+                f"priority 问询失败（{type(e).__name__}）——已重试 "
+                f"{CONTROL_ATTEMPTS} 次（换连接）仍失败，按无人在做处理"
+            )
         return {"epoch": None, "priorities": {}, "reasons": {}}
     if status != 200:
         _warn_non_200(base_url, status, log, body=body)
@@ -352,7 +371,9 @@ def abandon_job(
         pass  # 不可达：租约过期兜底（与 release_job 同策略）
 
 
-def job_status(base_url: str, token: str, jid: str, *, timeout: float = 15.0) -> dict | None:
+def job_status(
+    base_url: str, token: str, jid: str, *, timeout: float = CONTROL_TIMEOUT_SEC
+) -> dict | None:
     """`GET /jobs/{id}/status` → 摘要 dict；不可达/未知名 → None（调用方不据此取消）。"""
     try:
         status, body = _request(base_url, token, f"/jobs/{jid}/status", timeout=timeout)
@@ -375,7 +396,7 @@ def start_cancel_watcher(
     cancelled: threading.Event,
     *,
     interval: float = JOB_CANCEL_POLL_SEC,
-    timeout: float = 15.0,
+    timeout: float = CONTROL_TIMEOUT_SEC,
     log: Any = None,
 ) -> threading.Thread:
     """计算期间盯 `landed`（**唯一**硬取消信号）——独立线程走 P0 小包。
@@ -624,7 +645,7 @@ def release_job(
             base_url,
             token,
             f"/jobs/{jid}/release",
-            timeout=15.0,
+            timeout=CONTROL_TIMEOUT_SEC,
             method="POST",
             headers={**({} if not lease_token else {"X-Lease-Token": lease_token})},
         )
@@ -731,7 +752,7 @@ def report_job_failure(
             base_url,
             token,
             f"/jobs/{jid}/fail",
-            timeout=15.0,
+            timeout=CONTROL_TIMEOUT_SEC,
             data=body,
             method="POST",
             headers={
@@ -750,12 +771,18 @@ def report_job_failure(
 
 
 def heartbeat(base_url: str, token: str, jid: str, lease_token: str = "") -> None:
+    """续租（B3：6s 预算 + 换连接重抽一次；重试在 `_request` 里，失败才到这里）。
+
+    ⚠ 它是 **POST**（不是「幂等 GET」），但语义上幂等：续租只是把 TTL 推后，重复一次无害
+    （唯一性/胜负由 hub 的首写锁定管）。失败一律吞掉——下一次心跳（60s 周期）会自己来，
+    而租约 300s ⇒ 连续 4 次全败才会掉租约。
+    """
     try:
         _request(
             base_url,
             token,
             f"/jobs/{jid}/heartbeat",
-            timeout=15.0,
+            timeout=CONTROL_TIMEOUT_SEC,
             method="POST",
             headers={**({} if not lease_token else {"X-Lease-Token": lease_token})},
         )

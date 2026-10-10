@@ -334,6 +334,40 @@ def test_pull_max_idle_floor_with_long_session(
     assert argv[argv.index("--max-idle-sec") + 1] == "28800"
 
 
+# ------------------------------------------------------------------ A3 持久缓存根
+
+
+def test_pull_argv_has_no_cache_dir_by_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 缺省 = **逐字旧行为**：`--cache-dir` 不出现（老 worker 收到陌生参数会直接拒启）。"""
+    _patch_hub_open(monkeypatch, 200)
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "remote.worker.supervise_worker", lambda argv: seen.setdefault("argv", argv) or 0
+    )
+    nbr.run_pull_worker(_base_cfg(tmp_path), lambda m: None)
+    argv = seen["argv"]
+    assert argv.count("--cache-dir") == 0, f"缺省不该带 --cache-dir：{argv}"
+
+
+def test_pull_argv_carries_the_cache_dir_when_configured(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """给了 `cfg["cache_dir"]` ⇒ 子进程 argv 带上它（热替换重拉才不会丢掉持久缓存根）。"""
+    _patch_hub_open(monkeypatch, 200)
+    seen: dict[str, Any] = {}
+    monkeypatch.setattr(
+        "remote.worker.supervise_worker", lambda argv: seen.setdefault("argv", argv) or 0
+    )
+    cache_root = tmp_path / "persist-cache"
+    nbr.run_pull_worker(_base_cfg(tmp_path, cache_dir=str(cache_root)), lambda m: None)
+    argv = seen["argv"]
+    assert argv[argv.index("--cache-dir") + 1] == str(cache_root)
+    # ⚠ 只挪**缓存**：`--out`（job 工作目录 / 每轮清场）仍是注入的 work_dir
+    assert argv[argv.index("--out") + 1] == str(tmp_path / "work")
+
+
 # ------------------------------------------------------------------ run_push_worker
 
 

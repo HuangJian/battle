@@ -106,6 +106,11 @@ from remote.bulk_sched import (
     YIELD_AFTER_SEC_DEFAULT as YIELD_AFTER_SEC_DEFAULT,
 )
 
+# 让路自适应关闭的判据（plan/aistudio-transfer-hardening §3.2）：纯函数，装配点在这里。
+from remote.bulk_sched import (
+    yield_worth_it as yield_worth_it,
+)
+
 # 下载簇（S4 第七刀）+ 物料落地（S4 第十二刀）：**显式转发**。
 # 注入点分档（第十二刀后重划）：
 #   * `run_job` **自己读**的只有 `_ensure_payload` / `_ensure_code` / `_ensure_ts_code`
@@ -501,6 +506,10 @@ def run_job(
     # `remote/download.py`（与 kind=iter 的 `_ensure_ts_code` 并列成三兄弟）。
     # 这一刀之后 `run_job` 不再认识缓存树 / 解包 / 清场细节——它读三个 `_ensure_*` 的**返回值**，
     # 那些返回值（`PayloadLanded` / `CodeLanded`）就是「摆到哪儿了」的完整答案。
+    # E1（plan/aistudio-transfer-hardening §4）：准备段的**计时**拆出来。
+    # 为什么值得：慢链路上「准备 95s」分不清是**在传**还是在**本地处理**；解包/blob 解析
+    # 是纯 CPU，把它们从准备合计里切出来，剩下的差额就是链路（而链路正是本 plan 的病灶）。
+    t_land = time.time()
     landed = _ensure_payload(
         base_url, token, jid, manifest, work_dir, preloaded=preloaded, log=log, bundle=prep_b
     )
@@ -508,6 +517,7 @@ def run_job(
     job_dir = landed.job_dir
     shard_dirs = landed.shard_dirs
     payload_dl_sec, unpack_sec = landed.dl_sec, landed.unpack_sec
+    prep_b.add("解包", f"{unpack_sec:.1f}s → {len(shard_dirs)} shard（CPU，不含传输）")
     # `code_cache_dir` 是 run_job 的**入参**（共享根提示），落地后换成 per-sha 目录。
     code = _ensure_code(
         base_url,
@@ -522,6 +532,10 @@ def run_job(
         bundle=prep_b,
     )
     code_root, code_cache_dir, blob_root = code.code_root, code.code_cache_dir, code.blob_root
+    prep_b.add(
+        "物料落地",
+        f"{time.time() - t_land:.1f}s（下载 {payload_dl_sec:.1f}s + 解包 {unpack_sec:.1f}s + code）",
+    )
 
     # ---- 热替换护栏（2026-09-11）：本进程已 import 的代码版本必须 == 本 job 要求 ----
     # sys.path.insert 只影响**尚未导入**的模块；已进 sys.modules 的 ppo/rl 不会重读。
@@ -579,6 +593,7 @@ def run_job(
     # 传输账的两个计数器在这里建账：后面的 opt/ref/demo blobs 与训练核共用这一手账。
     blob_hits = 0
     blob_miss_bytes = 0
+    t_blob = time.time()
     init_w, weights_src, weights_wire_bytes = _resolve_weights(
         job_dir=job_dir,
         init_weights_fp=str(manifest["init_weights_fp"]),
@@ -589,6 +604,7 @@ def run_job(
         preloaded=preloaded,
         log=log,
     )
+    prep_b.add("blob 解析", f"{time.time() - t_blob:.1f}s src={weights_src}")
     if weights_src == "cache":
         blob_hits += 1
     elif weights_src == "download":
@@ -828,6 +844,9 @@ def worker_loop(
     bulk_yield: str = "auto",
     # 结果回传模式（P2.5，2026-09-22）：async = 回传**不占关键路径**（缺省）；sync = 旧行为
     result_upload: str = RESULT_UPLOAD_MODE_DEFAULT,
+    # A3 持久缓存根（plan/aistudio-transfer-hardening §3.3）：None = 旧行为（缓存住 work_dir）。
+    # 给了就只把**内容寻址缓存**挪过去（code/ts_code/blob），job 目录不动。
+    cache_dir: Path | None = None,
     log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [worker] {msg}", flush=True),
 ) -> int:
     """无状态轮询主循环。返回处理的 job 数。
@@ -850,6 +869,9 @@ def worker_loop(
     # （测试套件里多处在同一进程调 `worker_loop`，plan/transfer-residual §3.5 ★）。
     _yield_after, _yield_total = _bulk_yield_params(bulk_yield)
     _prev_yield = _BULK.configure_yield(after_sec=_yield_after, total_budget_sec=_yield_total)
+    #: 会话级让路自适应（A2）：`--bulk-yield never` 起步就不需要它；其余档位每轮收尾复查
+    #: 控制面分位数，超阈值即**就地降为 never 语义**并打一行原因（一次性、不回升）。
+    _yield_live = bulk_yield != "never"
     _after_s = "∞" if _yield_after == float("inf") else f"{_yield_after:.1f}"
     _total_s = "∞" if _yield_total is None else f"{_yield_total:.0f}"
     log(f"bulk 让路策略：mode={bulk_yield} after={_after_s}s total<={_total_s}s")
@@ -870,7 +892,15 @@ def worker_loop(
     if not hubs:
         hubs = [base_url]
     multi = len(hubs) > 1
-    shared_code_cache = work_dir / "code_cache"
+    # A3 持久缓存根（plan/aistudio-transfer-hardening §3.3）：`cache_dir` 给了就把**内容寻址
+    # 缓存**（code / ts_code / blob）挂到它下面（跨会话复用），**job 工作目录仍走 work_dir**
+    # （`/tmp`，每轮清场重建的语义不变）。缺省 None ⇒ 逐字旧行为（`work_dir/code_cache`）。
+    _cache_root = Path(cache_dir) if cache_dir is not None else work_dir
+    shared_code_cache = _cache_root / "code_cache"
+    if cache_dir is not None:
+        _cache_root.mkdir(parents=True, exist_ok=True)
+    # 单 hub 且无 cache_dir 时**故意仍传 None**（保持改造前的调用形状）；否则显式给根。
+    _code_cache_arg = shared_code_cache if (multi or cache_dir is not None) else None
     hi = 0
     # §386：停机状态感知（过渡尝试一次；halt 清除后复位，下次停机可再试）——按 hub 独立。
     halt_seen: dict[int, bool] = {}
@@ -958,7 +988,7 @@ def worker_loop(
                 job,
                 part_dir=part_dir,
                 # 多 hub 才分区 code_cache；`multi` 是宿主概念，本模块不收（见 job_round 文档）
-                code_cache_dir=shared_code_cache if multi else None,
+                code_cache_dir=_code_cache_arg,
                 pf_store=pf_store,
                 polls_since_accept=_polls_since_accept,
                 worker_id=worker_id,
@@ -984,6 +1014,26 @@ def worker_loop(
                 # 「距上次**被接受**」变成「距上次**产出结果**」（收没收看落定行/收尾行）。
                 # 它是存活日志里的诊断读数（是不是在疯狂轮询却不产活），不是判据。
                 _polls_since_accept = 0
+            # ── A2 让路自适应关闭（plan/aistudio-transfer-hardening §3.2）──────
+            # 每轮收尾复查一次控制面分位数：**纯函数判定 + 一行原因**（静默关闭会被读成 bug）。
+            # 一次性降级、会话内不回升——分位数是会话累计的（`stats()` 的 `p0_ms` 只增不清），
+            # 回升需要「这一轮比之前好」，那是另一个判据，本轮不做。
+            if _yield_live:
+                _sd = _BULK.stats()
+                # ★ 直接**下标**取（不是 `.get(..., 0.0)`）：键名被改时这里当场 KeyError，
+                #   而不是静默拿到 0.0 ⇒「分位为 0 = 没数据」⇒ 自适应永不触发、无人察觉。
+                #   （两个键都恒在，见 `BulkScheduler.stats()`；对应用例
+                #   `test_the_check_reads_the_quantiles_stats_exposes`。）
+                _p50 = float(_sd["p0_rt_ms_p50"])
+                _p95 = float(_sd["p0_rt_ms_p95"])
+                if not yield_worth_it(p50_ms=_p50, p95_ms=_p95, n=int(_sd["p0_count"])):
+                    _yield_live = False
+                    _BULK.configure_yield(after_sec=float("inf"), total_budget_sec=0)
+                    log(
+                        f"让路自适应关闭：p0_p95={_p95 / 1000:.1f}s ≫ p50={_p50 / 1000:.1f}s"
+                        f"（n={int(_sd['p0_count'])}，控制面尾部不是被 bulk 挤的）"
+                        "——让路只拖长传输；回退档 --bulk-yield always"
+                    )
             if round_.stop:
                 return done
             job_ok = round_.ok
@@ -1034,6 +1084,13 @@ def main() -> None:
     ap.add_argument("--token", default="", help="bearer token（与 hub-server 一致）")
     ap.add_argument("--token-file", default="", help="从文件读取 token（避免进程列表泄露，H10）")
     ap.add_argument("--out", default="tmp/remote-worker", help="work dir (payloads/ckpts)")
+    # A3 持久缓存根（plan/aistudio-transfer-hardening §3.3）：缺省空 = 旧行为（缓存住 --out 下）。
+    # 给了就只把内容寻址缓存（code/ts_code/blob）挪到它下面，好跨会话复用（云盘 /tmp 每会话被清）。
+    ap.add_argument(
+        "--cache-dir",
+        default="",
+        help="内容寻址缓存的持久根（code/ts_code/blob 跨会话复用）；空=住 --out 下（旧行为）",
+    )
     ap.add_argument("--device", default="cpu", help="torch device: cpu / cuda / cuda:0")
     ap.add_argument("--threads", type=int, default=0, help="torch intra-op threads (0=default)")
     ap.add_argument("--poll-sec", type=float, default=5.0)
@@ -1126,6 +1183,7 @@ def main() -> None:
             prefetch_depth=args.prefetch_depth,
             bulk_yield=args.bulk_yield,
             result_upload=args.result_upload,
+            cache_dir=Path(args.cache_dir) if args.cache_dir else None,
         )
         print(f"[{time.strftime('%H:%M:%S')}] [worker] done: {n} job(s) processed", flush=True)
         # H8：--once 失败（返回 -1）→ 非零退出码
