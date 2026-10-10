@@ -9,14 +9,18 @@
  *  三条纪律：
  *   ① SVG 属性一律短横线拼法（Preact 客户端 diff 原样 `setAttribute`，见 `TrendChart.tsx` 头注）；
  *   ② 断笔复用 `TrendChart` 导出的 `pathFrom`（缺值不连线，同一份语义只有一个实现）；
+ *      与之配套的「孤点补圆点」判据同在 `TrendChart`（`isolatedPointIndexes`）——稀疏序列
+ *      只落孤立 `M`，不补点就整条线不可见。
  *   ③ 布局一律走 class（内联样式属性在 `src/web/**` 只有 TrendChart 的 3 处计算值豁免）——所以
  *      hover 提示框画在 **SVG 内**（`<rect>`+`<text>`，坐标是属性），不是 HTML 浮层。
+ *   ④ `width`/`height` 由调用方按**实测容器**给（缺省 720×240 供 SSR/旧调用方）：viewBox 与视口
+ *      1:1 时缩放系数为 1 ⇒ 轴标签、圆点、描边都是设计尺寸；容器一变宽，画布就得跟着变。
  */
 
 import { useState } from 'preact/hooks'
 import type { JSX } from 'preact'
 import { compareYBounds, nearestIter, type CompareMetric } from '../view'
-import { pathFrom } from './TrendChart'
+import { isolatedPointIndexes, pathFrom } from './TrendChart'
 
 export interface MultiTrendSeries {
   /** 课程名（hover 提示与图例的键）。 */
@@ -33,14 +37,31 @@ export interface MultiTrendChartProps {
   seriesList: MultiTrendSeries[]
   metric: CompareMetric
   fmt: (v: number | null) => string
+  /** 画布宽（px）= 容器实测宽；缺省 720。
+   *
+   *  **为什么必须传实数**：`viewBox` 与视口同尺寸时缩放系数恰好是 1，文字/圆点/描边才是设计
+   *  尺寸。若画布宽与容器宽不一致，默认的 `preserveAspectRatio="meet"` 会把整张图缩在容器中间
+   *  （两边留白、坐标轴不铺满），换成 `none` 又会把 9px 轴标签横向拉变形——两条都不是能接受的
+   *  折中（用户 2026-10-10：弹窗改成 80vw 后必须铺满）。 */
+  width?: number
   height?: number
+  /** 把稀疏 **eval** 序列的相邻有效点直连（跨缺口连线）。
+   *
+   *  「只看 eval」档专用（用户 2026-10-10 裁定：那一档就是把散点连成线读趋势）。
+   *  只对 eval 口径生效：rollout 的缺轮是**采样缺失**，连它是编数据；而 eval 口径的点是
+   *  固定语料上的真读数，相邻两点之间连一条虚线是这条线的正常读法（`TrendChart` 的单图叠加层
+   *  因为同时有 rollout 实线作参照，才保持只打点不连线）。 */
+  bridgeGaps?: boolean
 }
 
-const VB_W = 720
+/** 缺省画布宽（`width` 不传时：SSR 首帧与旧调用方都按它画）。 */
+const VB_W_DEFAULT = 720
 const PAD_L = 46
 const PAD_R = 12
 const PAD_T = 10
 const PAD_B = 24
+/** 画布宽下限（极窄容器下别把坐标轴压成负数）。 */
+const VB_W_MIN = 320
 /** 轴刻度统一字体（与 `TrendChart` 同款：小、灰、短横线属性）。 */
 const AXIS_FONT = { fontSize: '9', fill: 'var(--muted)' } as const
 /** 提示框宽度（给「课程名 eval: 0.123」留够；超出会被裁成省略号般的错觉，故宁宽勿窄）。 */
@@ -49,8 +70,16 @@ const TIP_W = 168
 /** eval 口径 = 虚线（多课共图时不能再靠颜色区分口径——颜色已经被课程占用）。 */
 const isEvalKey = (key: string): boolean => key.startsWith('eval')
 
-export function MultiTrendChart({ seriesList, metric, fmt, height = 240 }: MultiTrendChartProps) {
+export function MultiTrendChart({
+  seriesList,
+  metric,
+  fmt,
+  width = VB_W_DEFAULT,
+  height = 240,
+  bridgeGaps = false,
+}: MultiTrendChartProps) {
   const [hover, setHover] = useState<number | null>(null)
+  const vbW = Math.max(VB_W_MIN, Math.round(width))
 
   const allIters: number[] = []
   const nums: number[] = []
@@ -84,17 +113,33 @@ export function MultiTrendChart({ seriesList, metric, fmt, height = 240 }: Multi
   const itersSorted = [...new Set(allIters)].sort((a, b) => a - b)
   const xMin = itersSorted[0] ?? 0
   const xMax = itersSorted[itersSorted.length - 1] ?? xMin
-  const plotW = VB_W - PAD_L - PAD_R
+  const plotW = vbW - PAD_L - PAD_R
   const plotH = height - PAD_T - PAD_B
   const xOf = (it: number): number =>
     xMin === xMax ? PAD_L + plotW / 2 : PAD_L + (plotW * (it - xMin)) / (xMax - xMin)
   const yOf = (v: number): number => PAD_T + plotH * (1 - (v - lo) / (hi - lo))
 
+  /** 折线 `d`：默认断笔（`pathFrom` 缺值不连线）；`bridgeGaps` 的 eval 口径把相邻**有效**
+   *  点直连（跳过中间缺口），x 仍取每个点自己的 iter ⇒ 连的是真实读数之间的趋势，不是等距假点。 */
+  const lineOf = (s: MultiTrendSeries): string => {
+    if (!bridgeGaps || !isEvalKey(s.key)) {
+      return pathFrom(s.vals, s.vals.length, (i) => xOf(s.iters[i] ?? xMin), yOf)
+    }
+    const idx: number[] = []
+    for (let i = 0; i < s.vals.length; i++) if (Number.isFinite(s.vals[i])) idx.push(i)
+    return pathFrom(
+      idx.map((i) => s.vals[i]),
+      idx.length,
+      (i) => xOf(s.iters[idx[i] ?? 0] ?? xMin),
+      yOf,
+    )
+  }
+
   const onMove = (e: JSX.TargetedMouseEvent<SVGSVGElement>): void => {
     const box = (e.currentTarget as SVGSVGElement).getBoundingClientRect()
     if (box.width <= 0) return
-    // 视口坐标 → viewBox 坐标（viewBox 宽 720，实际宽度随容器伸缩）。
-    const vx = ((e.clientX - box.left) / box.width) * VB_W
+    // 视口坐标 → viewBox 坐标（viewBox 宽 = 实测容器宽 ⇒ 两者 1:1，只差四舍五入的亚像素）。
+    const vx = ((e.clientX - box.left) / box.width) * vbW
     const target = xMin === xMax ? xMin : xMin + ((vx - PAD_L) / plotW) * (xMax - xMin)
     setHover(nearestIter(itersSorted, target))
   }
@@ -114,14 +159,14 @@ export function MultiTrendChart({ seriesList, metric, fmt, height = 240 }: Multi
           text: `${s.course}${isEvalKey(s.key) ? ' · eval' : ''}: ${fmt(valueAt(s, hover))}`,
         }))
   const tipH = 14 + tipLines.length * 11
-  const tipX = hover == null ? 0 : Math.min(Math.max(xOf(hover) + 8, PAD_L), VB_W - PAD_R - TIP_W)
+  const tipX = hover == null ? 0 : Math.min(Math.max(xOf(hover) + 8, PAD_L), vbW - PAD_R - TIP_W)
   const midIter = Math.round((xMin + xMax) / 2)
 
   return (
     <div className="tc-mchart">
       <svg
         className="tc-mchart__svg"
-        viewBox={`0 0 ${VB_W} ${height}`}
+        viewBox={`0 0 ${vbW} ${height}`}
         width="100%"
         height={height}
         role="img"
@@ -138,7 +183,7 @@ export function MultiTrendChart({ seriesList, metric, fmt, height = 240 }: Multi
               <line
                 x1={PAD_L}
                 y1={y.toFixed(1)}
-                x2={VB_W - PAD_R}
+                x2={vbW - PAD_R}
                 y2={y.toFixed(1)}
                 stroke="var(--border)"
                 stroke-width="1"
@@ -170,18 +215,31 @@ export function MultiTrendChart({ seriesList, metric, fmt, height = 240 }: Multi
           </text>
         ))}
 
-        {/* N 条折线：课色；eval 口径虚线；缺值断笔（pathFrom 只吃有限值） */}
+        {/* N 条折线：课色；eval 口径虚线；缺值断笔（`lineOf`：默认断笔，「只看 eval」档跨缺口直连）；
+            孤点补圆点——稀疏口径（eval 每 K 轮一个有效点）在 path 里只剩孤立的 `M`，
+            而「只含 moveto 的 path」SVG 什么都不画 ⇒ 整条 eval 线肉眼不存在
+            （2026-10-10 用户报告：选 eval 档整张图没有线）。判据住 `isolatedPointIndexes`。 */}
         {seriesList.map((s) => (
-          <path
-            key={`${s.course}:${s.key}`}
-            d={pathFrom(s.vals, s.vals.length, (i) => xOf(s.iters[i] ?? xMin), yOf)}
-            fill="none"
-            stroke={s.color}
-            stroke-width={isEvalKey(s.key) ? '1.6' : '1.8'}
-            stroke-dasharray={isEvalKey(s.key) ? '4 3' : undefined}
-            stroke-linejoin="round"
-            stroke-linecap="round"
-          />
+          <g key={`${s.course}:${s.key}`}>
+            <path
+              d={lineOf(s)}
+              fill="none"
+              stroke={s.color}
+              stroke-width={isEvalKey(s.key) ? '1.6' : '1.8'}
+              stroke-dasharray={isEvalKey(s.key) ? '4 3' : undefined}
+              stroke-linejoin="round"
+              stroke-linecap="round"
+            />
+            {isolatedPointIndexes(s.vals).map((i) => (
+              <circle
+                key={`p${i}`}
+                cx={xOf(s.iters[i] ?? xMin).toFixed(1)}
+                cy={yOf(s.vals[i]).toFixed(1)}
+                r="2.2"
+                fill={s.color}
+              />
+            ))}
+          </g>
         ))}
 
         {/* hover：竖线 + 各课点 + SVG 内提示框（对齐到最近的真实 iter，不是鼠标 x） */}

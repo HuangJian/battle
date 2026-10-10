@@ -13,7 +13,10 @@
  *      与「用户删空」——后者要显示空态，不能被默认值悄悄填回来；
  *   ③ 请求带自增序号 + 指纹/请求身份门闩（`shouldApplyCompareData`）：过期响应丢弃、
  *      账本没变不 setState（否则每拍重绘把 hover 准星清掉）；
- *   ④ 一切布局走 class（内联样式属性在全仓 `src/web/**` 只有 TrendChart 的 3 处计算值豁免）。
+ *   ④ 一切布局走 class（内联样式属性在全仓 `src/web/**` 只有 TrendChart 的 3 处计算值豁免）；
+ *   ⑤ 弹窗吃窗口 80vw×80vh，**图要铺满**：图表槽是列里唯一 `flex: 1` 的兄弟，槽的实测宽高
+ *      一路传给 `MultiTrendChart`（`viewBox` 与视口 1:1 才有正确字号/点径，见那支的 `width` 注释）；
+ *      注释行必须住槽**外**，否则它们会被算进「可用给图的空间」。
  */
 
 import { useEffect, useRef, useState } from 'preact/hooks'
@@ -29,6 +32,7 @@ import {
   TREND_SOURCE_OPTIONS,
   addCompareCourse,
   colorOf,
+  compareChartRows,
   compareCourseCandidates,
   compareFmt,
   compareRequestKey,
@@ -41,7 +45,7 @@ import {
   removeCompareCourse,
   shouldApplyCompareData,
   toChartValues,
-  visibleCompareSeries,
+  toggleHiddenCourse,
   type CompareMetric,
   type CompareTrendsView,
   type ConsoleStateView,
@@ -61,6 +65,13 @@ export interface CompareTrendsModalProps {
   refreshSec: number
   onClose: () => void
 }
+
+/** 图表槽留给图例/间隙的高度预算（图例行 `nowrap` ⇒ 恒一行：fs-sm(12px) 行盒 ≈17px + `.tc-mchart` 的 6px gap）。
+ *  槽高由 CSS 给（`flex: 1`，见 theme.css 的 `.tc-modal.tc-cmp`），SVG 高度必须由它算出来
+ *  —— `viewBox` 是运行时数值，写不成类名也不是内联样式的活（样式纪律豁免只给 TrendChart 3 处）。 */
+const LEGEND_RESERVE = 26
+/** 视口极小/标签页不可见（`clientHeight === 0`）时的兜底画布高，别把图压成一条线。 */
+const MIN_CHART_H = 200
 
 function writeLocal(key: string, value: string): void {
   try {
@@ -135,6 +146,8 @@ export function CompareTrendsModal({
   const [restored, setRestored] = useState(false)
   const [courses, setCourses] = useState<string[]>([])
   const [touched, setTouched] = useState(false)
+  /** 临时隐藏的课（**不进 localStorage**：临时就是临时，重开弹窗回到全显）。 */
+  const [hidden, setHidden] = useState<string[]>([])
   const [metric, setMetric] = useState<CompareMetric>('winRate')
   const [source, setSource] = useState<TrendSource>('all')
   const [fromText, setFromText] = useState('')
@@ -148,6 +161,9 @@ export function CompareTrendsModal({
   const [picker, setPicker] = useState(false)
   const [query, setQuery] = useState('')
   const [visible, setVisible] = useState(() => typeof document === 'undefined' || !document.hidden)
+  /** 图表槽（量它的可用宽高 → SVG 画布；见 `LEGEND_RESERVE`）。 */
+  const slotRef = useRef<HTMLDivElement | null>(null)
+  const [chartBox, setChartBox] = useState({ w: 720, h: 320 })
   /** 已应用数据的身份（请求身份 + 账本指纹）——门闩的另一半。 */
   const appliedMetaRef = useRef<{ requestKey: string; fingerprint: string } | null>(null)
   /** 请求序号：迟到的响应不许盖新的。 */
@@ -172,6 +188,28 @@ export function CompareTrendsModal({
     from: applied.from,
     to: applied.to,
   })
+
+  /** 有效隐藏名单：与当前选课求交（课程被移出再选回来 ⇒ 自动恢复显示，不留幽灵状态）。 */
+  const hiddenKeys = hidden.filter((c) => effective.includes(c))
+  const toggleHidden = (course: string): void => setHidden((h) => toggleHiddenCourse(h, course))
+
+  /** 图表槽实测宽高 → SVG 画布（槽高 = 80vh 弹窗里扣完全部兄弟节点后的余量）。
+   *  **必须是真实 px**：SVG 的 `viewBox` 与视口 1:1 时缩放才是 1，轴标签/圆点才是设计尺寸
+   *  （见 `MultiTrendChart` 的 `width` prop 注释）。 */
+  useEffect(() => {
+    if (!open) return
+    const el = slotRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const apply = (): void => {
+      const w = Math.max(320, Math.round(el.clientWidth))
+      const h = Math.max(MIN_CHART_H, Math.round(el.clientHeight - LEGEND_RESERVE))
+      setChartBox((prev) => (prev.w === w && prev.h === h ? prev : { w, h }))
+    }
+    apply()
+    const ro = new ResizeObserver(apply)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [open])
 
   // ① 本地偏好恢复（mount 一次；此后才允许写）
   useEffect(() => {
@@ -290,22 +328,18 @@ export function CompareTrendsModal({
 
   if (!open) return null
 
-  // 图上序列（按选择顺序取色；口径过滤走 view 层纯函数）
-  const chartSeries: MultiTrendSeries[] = []
-  const noPoints: string[] = []
-  if (data) {
-    data.courses.forEach((row, idx) => {
-      const color = colorOf(idx)
-      const visibleSeries = visibleCompareSeries(row.series, source)
-      let has = false
-      for (const s of visibleSeries) {
-        const vals = toChartValues(s.vals)
-        if (vals.some((v) => Number.isFinite(v))) has = true
-        chartSeries.push({ course: row.course, key: s.key, color, iters: s.iters, vals })
-      }
-      if (!has) noPoints.push(row.course)
-    })
-  }
+  // 图上序列：口径过滤 + 临时隐藏都住 view 层纯函数（`compareChartRows`）。
+  // 色按**选课顺序**（`effective`）取 —— 与 chip 圆点同源；隐藏/无账本都不让别人换色。
+  const { rows: chartRows, noPoints } = compareChartRows(data?.courses ?? [], source, hiddenKeys)
+  const chartSeries: MultiTrendSeries[] = chartRows.flatMap((r) =>
+    r.series.map((s) => ({
+      course: r.course,
+      key: s.key,
+      color: colorOf(Math.max(0, effective.indexOf(r.course))),
+      iters: s.iters,
+      vals: toChartValues(s.vals),
+    })),
+  )
   const fmt = compareFmt(metric)
   const loading = effective.length > 0 && data == null && err == null
   const atCap = effective.length >= COMPARE_MAX_COURSES
@@ -376,32 +410,46 @@ export function CompareTrendsModal({
           {effective.length === 0 ? (
             <span className="tc-muted tc-small">至少选一门课程</span>
           ) : null}
-          {effective.map((c, i) => (
-            <span className="tc-chip" key={c}>
-              <svg
-                className="tc-cmp__dot"
-                viewBox="0 0 8 8"
-                width="8"
-                height="8"
-                aria-hidden="true"
-              >
-                <circle cx="4" cy="4" r="4" fill={colorOf(i)} />
-              </svg>
-              {c}
-              <button
-                type="button"
-                className="tc-chip__x"
-                aria-label={`移除 ${c}`}
-                title={`移除 ${c}`}
-                onClick={() => {
-                  setTouched(true)
-                  setCourses(removeCompareCourse(effective, c))
-                }}
-              >
-                ×
-              </button>
-            </span>
-          ))}
+          {effective.map((c, i) => {
+            const off = hiddenKeys.includes(c)
+            return (
+              <span className={`tc-chip${off ? ' tc-chip--off' : ''}`} key={c}>
+                <svg
+                  className="tc-cmp__dot"
+                  viewBox="0 0 8 8"
+                  width="8"
+                  height="8"
+                  aria-hidden="true"
+                >
+                  <circle cx="4" cy="4" r="4" fill={colorOf(i)} />
+                </svg>
+                {c}
+                {/* 临时隐藏（不进 localStorage）：只摘图上的线，选课与请求都不动。 */}
+                <button
+                  type="button"
+                  className="tc-chip__eye"
+                  aria-pressed={off}
+                  aria-label={off ? `显示 ${c}` : `暂时隐藏 ${c}`}
+                  title={off ? `恢复显示 ${c}` : `暂时隐藏 ${c}（只摘这张图上的线，不改选课）`}
+                  onClick={() => toggleHidden(c)}
+                >
+                  {off ? '隐' : '显'}
+                </button>
+                <button
+                  type="button"
+                  className="tc-chip__x"
+                  aria-label={`移除 ${c}`}
+                  title={`移除 ${c}`}
+                  onClick={() => {
+                    setTouched(true)
+                    setCourses(removeCompareCourse(effective, c))
+                  }}
+                >
+                  ×
+                </button>
+              </span>
+            )
+          })}
           <button
             type="button"
             className="tc-btn tc-btn--sm"
@@ -434,15 +482,33 @@ export function CompareTrendsModal({
           />
         ) : null}
 
-        <div className="tc-cmp__chart">
+        {/* 图表槽 = 弹窗里唯一 `flex: 1` 的兄弟 ⇒ 它的高度就是 80vh 扣完控制条后的余量；
+            SVG 高度由 `slotRef` 量出来后算（见 LEGEND_RESERVE）。注释行**必须住槽外**，
+            否则它们的高度也会被算进「可用空间」，把图挤掉一行。 */}
+        <div className="tc-cmp__chart" ref={slotRef}>
           {err ? <InlineNotice>比较数据拉取失败：{err}（图保留上一帧）</InlineNotice> : null}
           {effective.length === 0 ? (
             <InlineNotice>至少选一门课程</InlineNotice>
           ) : loading ? (
             <span className="tc-muted tc-small">正在读账本…</span>
           ) : (
-            <MultiTrendChart seriesList={chartSeries} metric={metric} fmt={fmt} height={260} />
+            <MultiTrendChart
+              seriesList={chartSeries}
+              metric={metric}
+              fmt={fmt}
+              width={chartBox.w}
+              height={chartBox.h}
+              bridgeGaps={source === 'eval'}
+            />
           )}
+        </div>
+
+        <div className="tc-cmp__notes">
+          {effective.length > 0 && hiddenKeys.length === effective.length ? (
+            <p className="tc-muted tc-small tc-cmp__note">
+              全部选课都被临时隐藏了（点课程名旁的「隐」恢复）
+            </p>
+          ) : null}
           {data && data.unavailable.length > 0 ? (
             <p className="tc-muted tc-small tc-cmp__note">
               无数据：

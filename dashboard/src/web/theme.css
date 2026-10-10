@@ -986,8 +986,16 @@ a.tc-btn {
 }
 
 /* ── 比较课程弹窗（plan/dashboard-compare-trends.plan.md）：一张大图 + 选课/档位 ── */
-.tc-cmp {
-  width: min(1180px, 96vw);
+/* 尺寸写 `.tc-modal.tc-cmp`（双类）而不是 `.tc-cmp`：本元素的类序是 `tc-modal tc-modal--wide tc-cmp`，
+   三者都声明 `width` ⇒ **同特异性下后出现的赢**，`.tc-cmp` 那份（在文件更早的位置）一直是死代码。
+   双类提特异性之后，这里才是真正生效的那一份（用户 2026-10-10：弹窗取窗口宽高的 80%）。 */
+.tc-modal.tc-cmp {
+  width: 80vw;
+  height: 80vh;
+  max-height: 80vh;
+  overflow: auto; /* 窗口很矮时整体可滚（图表槽有 min-height，见下） */
+  display: flex;
+  flex-direction: column;
 }
 .tc-cmp__hd {
   display: flex;
@@ -1045,6 +1053,31 @@ a.tc-btn {
 .tc-chip__x:hover {
   color: var(--red);
 }
+/* 临时隐藏开关（比较课程弹窗）：显/隐两态，`aria-pressed` 与视觉同源 */
+.tc-chip__eye {
+  border: none;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font-size: var(--fs-sm);
+  line-height: 1;
+  padding: 0 2px;
+  opacity: 0.55;
+}
+.tc-chip__eye:hover {
+  opacity: 1;
+  color: var(--accent);
+}
+.tc-chip__eye[aria-pressed='true'] {
+  opacity: 1;
+  font-weight: 700;
+}
+/* 被临时隐藏的课：chip 与图上的线一起「摘掉」，但仍在选课里（点「隐」可恢复） */
+.tc-chip--off {
+  background: var(--gray-bg);
+  color: var(--muted);
+  text-decoration: line-through;
+}
 .tc-cmp__dot {
   flex: 0 0 auto;
 }
@@ -1089,8 +1122,25 @@ a.tc-btn {
   border-style: dashed;
   cursor: not-allowed;
 }
-.tc-cmp__chart {
-  min-height: 280px;
+/* 图表槽：弹窗（80vh 定高 flex 列）里唯一吃剩余高度的兄弟。
+   `flex-basis: 0` 是关键 —— 槽高只由弹窗高度决定，与槽里画了什么无关
+   （否则 ResizeObserver 量高度 → 改 SVG 高度 → 又改槽高，自己咬自己）。
+   算出来的 SVG 高度 = 槽高 − 图例行（LEGEND_RESERVE，见 CompareTrendsModal）。 */
+.tc-modal.tc-cmp .tc-cmp__chart {
+  flex: 1 1 0;
+  min-height: 240px;
+  overflow: hidden;
+}
+/* 图例恒单行（横向可滚）：`LEGEND_RESERVE` 这个常量才成立。 */
+.tc-modal.tc-cmp .tc-mchart__legend {
+  flex-wrap: nowrap;
+  overflow-x: auto;
+}
+/* 注释行（无数据 / 无有效点 / 500 轮提示）住槽外：它们的高度不许被算进「可用给图的空间」。 */
+.tc-cmp__notes {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 .tc-cmp__note {
   margin: 4px 0 0;

@@ -18,6 +18,7 @@ import { renderToString } from 'preact-render-to-string'
 import { CompareCoursePicker, CompareTrendsModal } from '../src/web/app/panels/CompareTrendsModal'
 import { Hero } from '../src/web/app/panels/Hero'
 import { MultiTrendSeries, MultiTrendChart } from '../src/web/components/MultiTrendChart'
+import { isolatedPointIndexes } from '../src/web/components/TrendChart'
 import {
   COMPARE_COLORS,
   COMPARE_MAX_COURSES,
@@ -25,6 +26,7 @@ import {
   COMPARE_METRIC_SPECS,
   addCompareCourse,
   colorOf,
+  compareChartRows,
   compareCourseCandidates,
   compareFmt,
   compareRequestKey,
@@ -40,7 +42,9 @@ import {
   shouldApplyCompareData,
   sliceIterRange,
   toChartValues,
+  toggleHiddenCourse,
   visibleCompareSeries,
+  type CompareCourseSeries,
   type CompareSeriesData,
 } from '../src/web/view'
 import type { ConsoleStateView } from '../src/web/view'
@@ -50,8 +54,11 @@ const countOccurrences = (s: string, needle: string): number => s.split(needle).
 function chartHtml(
   seriesList: MultiTrendSeries[],
   metric: 'winRate' | 'winTicks' | 'kills' = 'winRate',
+  bridgeGaps = false,
 ): string {
-  return renderToString(h(MultiTrendChart, { seriesList, metric, fmt: compareFmt(metric) }))
+  return renderToString(
+    h(MultiTrendChart, { seriesList, metric, fmt: compareFmt(metric), bridgeGaps }),
+  )
 }
 
 const series = (
@@ -214,6 +221,14 @@ describe('选课助手（默认/增删/候选/搜索）', () => {
     expect(removeCompareCourse(['a'], 'a')).toEqual([])
   })
 
+  it('临时隐藏开关：点一下加/去（纯函数；名单不持久化）', () => {
+    expect(toggleHiddenCourse([], 'a')).toEqual(['a'])
+    expect(toggleHiddenCourse(['a'], 'a')).toEqual([])
+    expect(toggleHiddenCourse(['a', 'b'], 'b')).toEqual(['a'])
+    // 幂等性口径：同一次点击只翻一次（重复调用等于来回）
+    expect(toggleHiddenCourse(toggleHiddenCourse([], 'x'), 'x')).toEqual([])
+  })
+
   it('候选：当前课置顶 + 去重；搜索大小写不敏感、空查询原样', () => {
     expect(compareCourseCandidates(['b', 'a', 'b'], 'cur')).toEqual(['cur', 'b', 'a'])
     expect(filterCourseCandidates(['ladder-x', 'bc-c4'], 'C4')).toEqual(['bc-c4'])
@@ -317,6 +332,76 @@ describe('MultiTrendChart（SSR 形状）', () => {
     expect(html).toContain('a · eval</span>')
   })
 
+  // 2026-10-10 用户报告「比较课程图选 eval 不显示图形」的根因回归。
+  it('稀疏 eval：孤点补圆点（只落孤立 M 的 path 不描边 ⇒ 此前整条 eval 线不可见）', () => {
+    const html = chartHtml([series('a', 'eval', [2, 4, 6, 8], [0.4, Number.NaN, Number.NaN, 0.5])])
+    const d = html.match(/d="([^"]+)"/)?.[1] ?? ''
+    expect(countOccurrences(d, 'M')).toBe(2) // 断笔：两个孤点各起一笔
+    expect(countOccurrences(d, 'L')).toBe(0) //           …且不连线（不造假数据）
+    expect(countOccurrences(html, '<circle')).toBe(2) // 补圆点：肉眼可见
+    expect(html).toContain('fill="#111111"')
+  })
+
+  it('密集序列不补圆点（相邻点相连就不撒噪声）', () => {
+    const html = chartHtml([series('a', 'winRate', [1, 2, 3], [0.4, 0.5, 0.6])])
+    expect(countOccurrences(html, '<circle')).toBe(0)
+  })
+
+  it('isolatedPointIndexes：端点/单点/相邻对/全 NaN 的边界', () => {
+    expect(isolatedPointIndexes([0.4])).toEqual([0]) // 单点：也是一种「孤点」
+    expect(isolatedPointIndexes([0.4, 0.5])).toEqual([]) // 相邻 ⇒ 有线段可画
+    expect(isolatedPointIndexes([Number.NaN, 0.4, Number.NaN])).toEqual([1])
+    expect(isolatedPointIndexes([0.4, Number.NaN, 0.5])).toEqual([0, 2])
+    expect(isolatedPointIndexes([0.4, 0.5, Number.NaN, 0.6])).toEqual([3]) // 0/1 相连 ⇒ 只有 3 是孤点
+    expect(isolatedPointIndexes([Number.NaN, Number.NaN])).toEqual([])
+    expect(isolatedPointIndexes([])).toEqual([])
+  })
+
+  // 用户 2026-10-10：「只看 eval」档要把散点连成线。
+  it('bridgeGaps：eval 序列跨缺口直连（点自己的 iter 定 x，不是等距假点）', () => {
+    // 真实形态：eval 每 4 轮一次（it2/6/10），中间全是缺口。
+    const html = chartHtml(
+      [series('a', 'eval', [2, 4, 6, 8, 10], [0.4, Number.NaN, 0.5, Number.NaN, 0.6])],
+      'winRate',
+      true,
+    )
+    const d = html.match(/d="([^"]+)"/)?.[1] ?? ''
+    expect(countOccurrences(d, 'M')).toBe(1) // 一笔到底
+    expect(countOccurrences(d, 'L')).toBe(2) // 三个有效点 ⇒ 两段连线（跨缺口）
+    const xs = [...d.matchAll(/[ML]([\d.]+) /g)].map((m) => Number(m[1]))
+    expect(xs).toHaveLength(3)
+    expect(xs[0]).toBeLessThan(xs[1]) // it2 < it6 < it10（x 按真实 iter 铺，不是等距）
+    expect(xs[1]).toBeLessThan(xs[2])
+    // 孤点仍补圆点：线是插值，三个真读数都要有标记
+    expect(countOccurrences(html, '<circle')).toBe(3)
+  })
+
+  it('bridgeGaps 只管 eval 口径：rollout 缺轮仍是断笔（连它是编数据）', () => {
+    const html = chartHtml(
+      [series('a', 'winRate', [1, 2, 3], [0.4, Number.NaN, 0.6])],
+      'winRate',
+      true,
+    )
+    const d = html.match(/d="([^"]+)"/)?.[1] ?? ''
+    expect(countOccurrences(d, 'M')).toBe(2)
+    expect(countOccurrences(d, 'L')).toBe(0)
+  })
+
+  it('width 决定 viewBox（与视口 1:1 ⇒ 字号/点径不被缩放）', () => {
+    const html = renderToString(
+      h(MultiTrendChart, {
+        seriesList: [series('a', 'winRate', [1, 2], [0.4, 0.5])],
+        metric: 'winRate',
+        fmt: compareFmt('winRate'),
+        width: 1180,
+        height: 460,
+      }),
+    )
+    expect(html).toContain('viewBox="0 0 1180 460"')
+    // x 轴右端随画布宽走（否则轴铺不满容器）
+    expect(html).toContain('x2="1168"')
+  })
+
   it('全 NaN ⇒ 空态文案（不画轴、不造假数据）', () => {
     const html = chartHtml([series('a', 'winRate', [1, 2], [Number.NaN, Number.NaN])])
     expect(html).toContain('该指标在所选课程上暂无有效点')
@@ -327,6 +412,47 @@ describe('MultiTrendChart（SSR 形状）', () => {
     const html = chartHtml([series('a', 'winTicks', [1, 2], [100, 200])], 'winTicks')
     expect(html).toContain('>100<')
     expect(html).not.toContain('>0<')
+  })
+})
+
+describe('compareChartRows（图上序列：口径过滤 + 临时隐藏）', () => {
+  const row = (course: string, series: CompareSeriesData[]): CompareCourseSeries => ({
+    course,
+    series,
+    points: 0,
+  })
+  const s = (key: string, vals: Array<number | null>): CompareSeriesData => ({
+    key,
+    label: key,
+    vals,
+    iters: vals.map((_, i) => i + 1),
+  })
+  const data = [
+    row('a', [s('winRate', [0.4, 0.5]), s('eval', [null, 0.42])]),
+    row('b', [s('winRate', [null, null]), s('eval', [null, null])]),
+    row('c', [s('winRate', [0.3, 0.3]), s('eval', [0.31, null])]),
+  ]
+
+  it('source 过滤照旧；隐藏的课整条不进图，也不进「无有效点」名单', () => {
+    const all = compareChartRows(data, 'all', [])
+    expect(all.rows.map((r) => r.course)).toEqual(['a', 'b', 'c'])
+    expect(all.rows[0]!.series.map((x) => x.key)).toEqual(['winRate', 'eval'])
+    expect(all.noPoints).toEqual(['b'])
+
+    const ev = compareChartRows(data, 'eval', [])
+    expect(ev.rows[0]!.series.map((x) => x.key)).toEqual(['eval'])
+
+    const hidden = compareChartRows(data, 'all', ['b', 'c'])
+    expect(hidden.rows.map((r) => r.course)).toEqual(['a'])
+    expect(hidden.noPoints).toEqual([]) // 被藏起来的两门不再出现在提示里
+  })
+
+  it('隐藏名单里的陌生课名不影响结果（选课变过之后不留幽灵）', () => {
+    expect(compareChartRows(data, 'all', ['ghost']).rows.map((r) => r.course)).toEqual([
+      'a',
+      'b',
+      'c',
+    ])
   })
 })
 
@@ -356,6 +482,33 @@ describe('CompareTrendsModal（SSR 骨架）', () => {
     expect(html).not.toContain('aria-label="移除 b"')
     expect(html).toContain('每 180s')
     expect(html).toContain('正在读账本…') // 没有 fetch 的首帧：loading 态，不是假数据
+  })
+
+  it('每门选课带「临时隐藏」开关（首帧全显）', () => {
+    const html = renderToString(
+      h(CompareTrendsModal, { open: true, stateView, refreshSec: 180, onClose: () => {} }),
+    )
+    expect(html).toContain('aria-label="暂时隐藏 a"')
+    expect(html).toContain('aria-label="暂时隐藏 cur"')
+    expect(countOccurrences(html, 'tc-chip__eye')).toBe(2) // 两门选课各一个开关
+    expect(html).not.toContain('tc-chip--off') // 首帧没有任何课被藏起来
+  })
+
+  it('图表槽是量尺寸的锚点（`ref` 挂着那个 div；注释行住槽外）', () => {
+    const src = readFileSync(
+      join(import.meta.dir, '..', 'src', 'web', 'app', 'panels', 'CompareTrendsModal.tsx'),
+      'utf8',
+    ).replace(/\s+/g, ' ')
+    expect(src).toContain('<div className="tc-cmp__chart" ref={slotRef}>')
+    expect(src).toContain('new ResizeObserver(apply)')
+    // 尺寸住 CSS（tsx 里不许出现内联尺寸）
+    expect(src).not.toMatch(/\bstyle=\{\{/)
+    // 注释行在图表槽**之后**（槽高才等于「可用给图的空间」）
+    expect(src.indexOf('className="tc-cmp__notes"')).toBeGreaterThan(
+      src.indexOf('className="tc-cmp__chart"'),
+    )
+    // 「只看 eval」档才把散点连成线
+    expect(src).toContain("bridgeGaps={source === 'eval'}")
   })
 
   it('没有任何课程 ⇒ 空态「至少选一门课程」', () => {

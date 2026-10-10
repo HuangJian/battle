@@ -78,6 +78,27 @@ export function pathFrom(
   return d
 }
 
+/** 孤立有效点的下标（左右两邻居都不是有效值）。
+ *
+ *  **为什么必须有它**：`pathFrom` 在孤点上只落一个 `M`，而「只含 moveto 的 path」在 SVG 里
+ *  **什么都不画**（没有线段可描边）。稀疏口径 —— eval 每 K 轮才评一次、单轮课程、中间大段
+ *  缺口 —— 于是整条线肉眼不存在；只有坐标轴在，看起来像「这个口径没数据」。
+ *  （2026-10-10 用户报告：「比较课程」图选 eval 档整张图没有线。）
+ *
+ *  `TrendChart` 的 eval 叠加层一直在补圆点（`series2` 的 `<circle>`），这里把同一判据抽出来，
+ *  让按下标画的单图与按 iter 数值画的多课图**共用一份**「哪些点是不可见的孤点」。
+ *  相邻相连的点不补：密集序列上撒点只是噪声。 */
+export function isolatedPointIndexes(vals: number[]): number[] {
+  const out: number[] = []
+  for (let i = 0; i < vals.length; i++) {
+    if (!Number.isFinite(vals[i])) continue
+    const prev = i > 0 ? vals[i - 1] : Number.NaN
+    const next = i + 1 < vals.length ? vals[i + 1] : Number.NaN
+    if (!Number.isFinite(prev) && !Number.isFinite(next)) out.push(i)
+  }
+  return out
+}
+
 export function TrendChart({
   series,
   series2,

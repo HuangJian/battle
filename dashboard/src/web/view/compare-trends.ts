@@ -311,6 +311,12 @@ export function removeCompareCourse(selected: string[], course: string): string[
   return selected.filter((c) => c !== course)
 }
 
+/** 临时隐藏开关（用户 2026-10-10）：把该课从「隐藏名单」里去掉 / 加进来。
+ *  纯函数、无状态：名单本身住组件（**不进 localStorage** —— 临时就是临时，重开弹窗全显）。 */
+export function toggleHiddenCourse(hidden: readonly string[], course: string): string[] {
+  return hidden.includes(course) ? hidden.filter((c) => c !== course) : [...hidden, course]
+}
+
 /** 8 色色板（**顺序 = 选择顺序 = 色序**；与 `--accent` 蓝、eval 橙都拉得开）。
  *  颜色是数据不是主题 ⇒ 不进 theme.css 变量表（单一出处就在这）。 */
 export const COMPARE_COLORS: readonly string[] = [
@@ -337,6 +343,43 @@ export function visibleCompareSeries(
 ): CompareSeriesData[] {
   if (source === 'all') return series
   return series.filter((s) => (source === 'eval') === s.key.startsWith('eval'))
+}
+
+/** 图上的一门课：`source` 过滤后、且**不在临时隐藏名单**里。
+ *  **不带色**：色是「选课顺序」的身份（chip 圆点与图上折线必须同色），而选课顺序只有弹窗知道
+ *  ——服务端响应里少了「无账本」的课，用它的下标取色会让 chip 与线错位。 */
+export interface CompareChartRow {
+  course: string
+  series: CompareSeriesData[]
+}
+
+/** 组装图上序列（弹窗唯一的「哪几门进图」判据）。
+ *
+ *  · **临时隐藏**（用户 2026-10-10）：被隐藏的课整条不进图，但**仍在选课与请求里**
+ *    —— 隐藏是纯渲染态，不发请求、不改选课，所以切换是瞬时的、也不需要第二次读盘；
+ *  · `noPoints` = 过滤后仍无任何有效点的课（提示文案用；隐藏的课不进这个名单，
+ *    否则「无有效点」会去解释一门用户刚刚亲手藏起来的课）。 */
+export function compareChartRows(
+  courses: CompareCourseSeries[],
+  source: TrendSource,
+  hidden: readonly string[],
+): { rows: CompareChartRow[]; noPoints: string[] } {
+  const skip = new Set(hidden)
+  const rows: CompareChartRow[] = []
+  const noPoints: string[] = []
+  for (const row of courses) {
+    if (skip.has(row.course)) continue
+    const series = visibleCompareSeries(row.series, source)
+    let has = false
+    for (const s of series) {
+      for (const v of s.vals) {
+        if (v != null) has = true
+      }
+    }
+    rows.push({ course: row.course, series })
+    if (!has) noPoints.push(row.course)
+  }
+  return { rows, noPoints }
 }
 
 /** 跨课 hover 对齐：合并全部 iter，取离 `target` 最近的一个（并列取小）。无 iter ⇒ null。 */
