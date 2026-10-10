@@ -173,8 +173,16 @@ def test_run_reads_secrets_first_at_runtime(tmp_path: Path, monkeypatch: pytest.
 
 
 def test_run_requires_a_course(tmp_path: Path) -> None:
+    """`CFG.course` 空且拿不到清单 ⇒ 响亮拒（文案点名 `course`）。
+
+    `work_dir` 是**必填**，不是凑数：`run()` 空 course 会落到 `_run_auto`，而 `_run_auto`
+    在取清单**之前**就调 `worker_id_of(_queue_work_dir(cfg))`；cfg 里没有 `work_dir` /
+    `download_dir` 时，`download_dir()` 回落到 `Path.cwd()` ⇒ 把 `.worker-id` 扔进
+    **跑 pytest 的那个目录**（仓根与 `nn-training/` 下都实测出现过 `battle-offline/.worker-id`
+    这个垃圾，2026-10-08 还连带被提交进库）。给个 `tmp_path` 就把落点关进临时目录。
+    """
     with pytest.raises(SystemExit, match="course"):
-        offline_boot.run({}, _quiet, lambda k, v="": "")
+        offline_boot.run({"work_dir": str(tmp_path)}, _quiet, lambda k, v="": "")
 
 
 def test_long_task_logging_is_wired(cell: str) -> None:

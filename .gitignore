@@ -39,6 +39,12 @@ nn-training/weights/**/*.md
 nn-training/archive
 nn-training/data
 
+# 离线腿的本机 worker 身份：`remote/offline_boot.py::worker_id_of` 往 `<work>/.worker-id` 落盘，
+# 而 `<work>` 缺省 = `download_dir(cfg)/battle-offline` = **cwd 下**（云机上是产物面，本机就是垃圾；
+# 2026-10-08 的 M4b 提交 05640bbb 曾把 `nn-training/battle-offline/.worker-id` 连带 `git add` 进库）。
+# 永不入库：任何深度下的 `battle-offline/` 都是运行期瞬态物。
+battle-offline/
+
 # 课程封存区（plan/course-archive.plan.md §3.1）：只入库索引两件（可查/可比的载体：
 # ARCHIVE.md + archive-manifest.json），权重/账本/判决行/gz 件留本地——与上面
 # nn-training/weights/**/*.json 同一条理（大件不进库，且这些 json 本来就已被忽略）。
