@@ -28,21 +28,37 @@ export function cloudflaredHealthy(
 export type ComponentHealthMap = ReadonlyMap<Component, boolean | null>
 
 /** 探一次共享/单例组件的健康（不落缓存；落缓存由机群级 SWR 负责）。 */
+/** 健康探活的注入面（单测用；默认真实 `httpOk`）。 */
+export interface ComponentHealthIO {
+  probe?: (url: string, token: string, timeoutMs: number) => Promise<boolean>
+}
+
 export async function computeComponentHealth(
   cfg: RlConfig,
+  io: ComponentHealthIO = {},
 ): Promise<Map<Component, boolean | null>> {
+  const probeHttp = io.probe ?? httpOk
   const reg = loadRegistry()
   const out = new Map<Component, boolean | null>()
   await Promise.all(
     ALL_COMPONENTS.map(async (key): Promise<void> => {
       // 共享/单例槽恒 `''`（selfNode 是扁平单例，course 参数对它无效）。
       const e = entryForCourse(reg, key, scopeOf(key, ''))
-      if (!pidAlive(e?.pid)) return // 没在跑 = 无健康可言（结构层显示 stopped/exited）
+      // ★ 2026-10-10（selfNode 账本陈旧事故）：**账本 pid 死 ≠ 组件死**。账本只能记「控制台 spawn 的
+      //   那个 pid」，而 agent 换代（`/v1/restart` 交接）可能是**控制台之外**发起的（trainer M8）
+      //   ⇒ 账本必然陈旧。所以 pid 死时**再探一次**——但只对「自己有探测端点」的组件做，
+      //   判据 = `HEALTHY_PORTS` 有没有条目（现在只有 selfNode / hubServer）。
+      //   `cloudflared` **不走这条**：它的健康是 **hub 派生**的（hub 通 ∧ 条目无 url ⇒ true，
+      //   见下面的分支）——拿它当存活判据会把「隧道进程已死」渲染成 `running`（评审 F3）。
+      //   trainingLoop / localWorker 没有端点 ⇒ 维持原路。
+      if (!pidAlive(e?.pid) && !HEALTHY_PORTS[key]) return
       const probe = HEALTHY_PORTS[key]?.(cfg, '')
       if (probe) {
+        // 超时与正常路径**同值**：这是后台 SWR 探测（请求路径上永不探测），没有理由给
+        // 「账本陈旧」这一档更小的预算——那等于让不可信的 pid 决定「看得多清楚」（评审 F1）。
         out.set(
           key,
-          await httpOk(
+          await probeHttp(
             probe,
             key === 'selfNode'
               ? (cfg.nodes.find((n) => n.id === 'self')?.authKey ?? '')
@@ -86,7 +102,10 @@ export async function componentViews(
     // 展示路径：严格按槽取条目（旧扁平键已在 P5 移除，R2）。共享组件（hub/隧道）
     // 恒读 `''` 槽——任何课程页看到的都是**同一个**共享实例，并带上 shared 标记。
     const e = entryForCourse(reg, key, scopeOf(key, course))
-    const alive = pidAlive(e?.pid)
+    // 账本 pid 死 ≠ 组件死：健康探到「有实例在服务」也算 alive（2026-10-10 现场：账本 8340 已死、
+    // 真身 21300 在正常应答 ⇒ 卡片报「已退出」，而同一页的 `nodes.self.online` / 达标 10/10 全是好的）。
+    // pid 只是账本里的开销提示**之一**，不再是判决依据（plan §2-S1）。
+    const alive = pidAlive(e?.pid) || h.get(key) === true
     const status: ComponentView['status'] = e ? (alive ? 'running' : 'exited') : 'stopped'
     // 健康只在**在跑**时有意义（停了的组件没有「健康」这回事，陈旧探测不得上屏）。
     let healthy: boolean | null = status === 'running' ? (h.get(key) ?? null) : null

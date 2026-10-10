@@ -66,6 +66,22 @@ export function selfNodeSpec(cfg: RlConfig): ProcSpec {
     healthy: async () =>
       (await portListen(cfg.rl.agent_port)) &&
       (await httpOk(`http://127.0.0.1:${cfg.rl.agent_port}/v1/ping`, selfKey)),
+    // 组件自报 pid（换代第二事实源，2026-10-10 账本陈旧事故）：与 `healthy` 同一个端点，
+    // 只是把响应体里的 `pid` 取出来（agent 自己写的，比控制台的本地记账权威）。
+    // 不用它兼职健康：端口不通 / 超时 / 字段缺失 → null（**绝不猜**）。
+    probePid: async () => {
+      try {
+        const resp = await fetch(`http://127.0.0.1:${cfg.rl.agent_port}/v1/ping`, {
+          headers: selfKey ? { Authorization: `Bearer ${selfKey}` } : {},
+          signal: AbortSignal.timeout(1500),
+        })
+        if (!resp.ok) return null
+        const b = (await resp.json()) as { pid?: unknown }
+        return typeof b.pid === 'number' && Number.isInteger(b.pid) && b.pid > 0 ? b.pid : null
+      } catch {
+        return null
+      }
+    },
     sentinels: agentSentinels(SELF_NODE_ENTRY),
   }
 }

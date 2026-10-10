@@ -10,9 +10,11 @@ import { httpOk, killPid, pidAlive, portListen, waitUntil } from '../core/net'
 import {
   entryForCourse,
   loadRegistry,
+  pidHolderOf,
   saveAnyComponent,
   saveComponent,
   clearAnyComponent,
+  scopeOf,
   type SharedComponent,
 } from '../core/registry'
 import { launchSpec, portOwnedBy, portOwnerPids, spawnBg } from '../core/proc'
@@ -29,7 +31,7 @@ import {
   selfNodeSpec,
 } from './specs'
 import { sharedHubPort, sharedHubUrl, sharedTunnelMetricsPort } from '../core/slots'
-import type { RlConfig } from '../core/types'
+import type { Registry, RegistryEntry, RlConfig } from '../core/types'
 
 // ──────────────────────────────────────────────────── cloudflared 辅助 ──────────────────────────
 
@@ -114,11 +116,68 @@ export async function reclaimPort(port: number, io: ReclaimPortIO = {}): Promise
 
 // ────────────────────────── 组件步骤 ──────────────────────────
 
+/** `stepSelfNode` 的注入面（单测用；默认真实探测 / 真实账本写入）。 */
+export interface StepSelfNodeIO {
+  healthy?: (cfg: RlConfig) => Promise<boolean>
+  probePidOf?: (cfg: RlConfig) => Promise<number | null>
+  loadReg?: () => Registry
+  save?: (entry: RegistryEntry) => void
+}
+
+/** 「已在运行」分支也要对齐账本（2026-10-10 事故的第 ② 条根因）。
+ *
+ *  早退（健康检查通过）过去**什么都不写**，于是账本里留的是上一代的 pid —— 控制台「明知 8443 在应答
+ *  （还验了 authKey），却不知道是谁在应答」。这里用**组件自报 pid**（`/v1/ping` 的 `pid`）对齐。
+ *
+ *  不变量：写之前仍过 `pidHolderOf`（跨课错配不放松，2026-09-17 前科）；拿不到自报 pid / 已经一致 /
+ *  被别人认领 ⇒ **一个字都不改**（没证据就不动账本，是本模块的纪律）。
+ *  返回修正后的 pid（没修 = null），便于调用方与用例下判据。
+ *
+ *  与看护器路径（`exit-watchdog::resolveLivePid`）的关系：这条在**动作路径**上收敛（操作员点「启动」
+ *  立刻对齐），那条在**监督路径**上收敛（没人点按钮也会在 ~2 个看护周期内跟上）。两者共用同一个
+ *  `ProcSpec.probePid`，没有第二份 pid 来源。 */
+export async function syncSelfNodeLedger(
+  cfg: RlConfig,
+  io: StepSelfNodeIO = {},
+): Promise<number | null> {
+  const askSelf =
+    io.probePidOf ?? (async (c: RlConfig) => (await selfNodeSpec(c).probePid?.()) ?? null)
+  let pid: number | null
+  try {
+    pid = (await askSelf(cfg)) ?? null
+  } catch {
+    return null
+  }
+  if (pid === null) return null
+  const reg = (io.loadReg ?? loadRegistry)()
+  const entry = entryForCourse(reg, 'selfNode', scopeOf('selfNode'))
+  if (entry?.pid === pid) return null // 已对齐（稳态：不必每一拍写盘）
+  const holder = pidHolderOf(reg, { key: 'selfNode', course: '' }, pid)
+  if (holder) {
+    warn(
+      `[console] self-node 自报 PID ${pid} 已被 ${holder.key}` +
+        `${holder.course ? `[${holder.course}]` : ''} 认领 → 不写账本` +
+        '（跨课错配比不修更糟；请人工核对两条登记）',
+    )
+    return null
+  }
+  const next: RegistryEntry = entry
+    ? { ...entry, pid }
+    : { pid, entry: SELF_NODE_ENTRY, startedAt: Date.now() }
+  // 注意：**不动** `error` / `exitAt` —— 「意外退出」标记归看护器的自愈路径清（exit-watchdog）。
+  ;(io.save ?? ((e: RegistryEntry) => saveComponent('selfNode', e)))(next)
+  info(`self-node 账本 pid 修正 ${entry?.pid ?? '(无)'} → ${pid}（换代接管）`)
+  return pid
+}
+
 /** self-node（sampler-agent）步骤。 */
-export async function stepSelfNode(cfg: RlConfig): Promise<void> {
+export async function stepSelfNode(cfg: RlConfig, io: StepSelfNodeIO = {}): Promise<void> {
   log('检查 self-node (sampler-agent)...')
-  if (await selfNodeHealthy(cfg)) {
+  if (await (io.healthy ?? selfNodeHealthy)(cfg)) {
     ok(`self-node 已在运行 (port ${cfg.rl.agent_port})`)
+    // 「已在运行」不再只印一行就走：账本里的 pid 可能是上一代（2026-10-10 事故）。
+    // 对齐失败（自报 pid 拿不到）⇒ 交给看护器的第二事实源，不在这里猜。
+    await syncSelfNodeLedger(cfg, io)
     return
   }
   log('启动 self-node...')

@@ -264,6 +264,25 @@ export function registryTriples(reg: Registry): WatchedEntry[] {
   return out
 }
 
+/** 该 pid 被账本里**另一个条目**占用吗？返回占用方 `(key, course)`，null = 没人认领。
+ *
+ *  「端口被谁答」之外的第二问：同一个 pid 可能被**别的课程/组件**的条目记着（槽位撞车 /
+ *  同槽接管后旧条目没清）。把占用者的 pid 认成自己的 = **跨课错配**（2026-09-17 前科，比不修更糟）。
+ *
+ *  纯 registry 查询，故住这里（唯一实现）；`exit-watchdog::pidClaimedElsewhere` 只把返回值
+ *  翻成展示名。**不要**在调用点各写一遍这个循环（第二份名单 = 漂开）。 */
+export function pidHolderOf(
+  reg: Registry,
+  self: { key: Component; course: string },
+  pid: number,
+): { key: Component; course: string } | null {
+  for (const item of registryTriples(reg)) {
+    if (item.key === self.key && item.course === self.course) continue
+    if (item.entry.pid === pid) return { key: item.key, course: item.course }
+  }
+  return null
+}
+
 /** 账本里全部登记的条目（legacy 合并后）——三元组形态，遍历统一走这里。 */
 export function registryComponents(): WatchedEntry[] {
   return registryTriples(loadRegistry())

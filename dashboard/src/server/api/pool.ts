@@ -26,8 +26,6 @@
  *  `cachedAt`（= 探测层算完时刻）推进为「新的一份到了」的判据，做一次有界再校验（见 NodeStats）。
  *  显式 `?fresh=1`（手动刷新 / 重试）仍是**硬清 + 等重算**——那时操作员的诉求就是“现在就给我新的”。 */
 import { loadConfig } from '../../core/config'
-import { pidAlive } from '../../core/net'
-import { loadRegistry } from '../../core/registry'
 import type { RlConfig } from '../../core/types'
 import { type NodeHistoryRow, type PoolView, type SelfStatus, stripIsoPrefix } from '../../web/view'
 import { loadConsoleState } from '../actions'
@@ -108,13 +106,29 @@ async function localCodeHash(): Promise<string> {
   }
 }
 
-/** selfNode 存活时拉 /v1/status；失败/未启动 → null（UI 显示「agent 未启动」占位，不伪造）。 */
-async function fetchSelfStatus(cfg: RlConfig): Promise<SelfStatus | null> {
-  const reg = loadRegistry()
-  if (!pidAlive(reg.selfNode?.pid)) return null
+/** `fetchSelfStatus` 的注入面（单测用；默认真实 `fetch`）。 */
+export interface SelfStatusIO {
+  probe?: (url: string, init: RequestInit) => Promise<Response>
+}
+
+/** 拉 selfNode 的 `/v1/status`；**探不通** → null（UI 显示「agent 未启动」占位，不伪造）。
+ *
+ *  ★ 2026-10-10（selfNode 账本陈旧事故）：**账本 pid 不再是前置闸**。它只能提示「上一代进程是谁」，
+ *  不得单独推出「未启动 / 已退出」——现场：账本 8340（`tasklist` 查无此进程）、真身 21300
+ *  （11:47:31 由 `/v1/restart` 换代，正常服务、达标 10/10），而这条闸让 `/api/pool.selfStatus`
+ *  恒 `null` ⇒ 面板「agent 未启动」+ 磁盘徽标消失，与**同一页**的 `nodes.self.online=true` 自相矛盾。
+ *
+ *  代价：账本为空/陈旧时也照探一次（超时恒 4000，与正常路径同值——后台 SWR 探测，不给「账本陈旧」
+ *  这一档更小的预算，否则又是一个「用不可信的 pid 决定行为」的角落，评审 F1）。
+ *  `export` 只为单测（本模块的既有两个消费者都走 `computePoolProbes`）。 */
+export async function fetchSelfStatus(
+  cfg: RlConfig,
+  io: SelfStatusIO = {},
+): Promise<SelfStatus | null> {
   const auth = cfg.nodes.find((n) => n.id === 'self')?.authKey ?? ''
+  const probe = io.probe ?? fetch
   try {
-    const resp = await fetch(`http://127.0.0.1:${cfg.rl.agent_port}/v1/status`, {
+    const resp = await probe(`http://127.0.0.1:${cfg.rl.agent_port}/v1/status`, {
       headers: auth ? { Authorization: `Bearer ${auth}` } : {},
       signal: AbortSignal.timeout(4000),
     })

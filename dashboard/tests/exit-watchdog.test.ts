@@ -503,21 +503,79 @@ describe('classifyExit', () => {
     expect(repaired).toBe(0)
   })
 
-  it('健康但拿不到新 pid → 仍 alive（跳过标记，不改账本）', async () => {
-    let repaired = 0
+  // ★ 2026-10-11（plan/self-node-ledger-pid-desync 评审 T3）：本用例**改期望**。
+  // 原版把「端口占用者拿不到」当成终态（= 不修账本）。那是**探测失败**，不是**换代不存在**——
+  // 现场（2026-10-10）本机 `netstat -ano` 的 LISTENING 行会给 PID 0，于是这条分支让陈旧账本
+  // **永不收敛**（卡片报「已退出」而 agent 正常服务 10/10）。新规格 S2-②：端口占用者拿不到时
+  // **再问一次组件自报 pid**（`/v1/ping` 的 `pid`），拿得到就照旧修（仍过 `pidClaimedElsewhere`）。
+  it('端口占用者拿不到 → 第二事实源（组件自报 pid）修账本', async () => {
+    const repaired: number[] = []
     const v = await classifyExit(
-      { key: 'selfNode', course: '', entry: { pid: 8100 } },
+      { key: 'selfNode', course: '', entry: { pid: 70001 } },
       {
         healthyOf: async () => true,
         ownerPidOf: () => null,
-        repair: () => {
-          repaired++
-        },
+        probePidOf: async () => 30332,
+        repair: (_it, p) => repaired.push(p),
         warnFn: () => {},
       },
     )
     expect(v).toBe('alive')
-    expect(repaired).toBe(0)
+    expect(repaired).toEqual([30332])
+  })
+
+  it('两条来源都拿不到 → 仍 alive、不修、文案写明「需人工介入」', async () => {
+    const repaired: number[] = []
+    const warns: string[] = []
+    const v = await classifyExit(
+      { key: 'selfNode', course: '', entry: { pid: 70002 } },
+      {
+        healthyOf: async () => true,
+        ownerPidOf: () => null,
+        probePidOf: async () => null,
+        repair: (_it, p) => repaired.push(p),
+        warnFn: (t) => warns.push(t),
+      },
+    )
+    expect(v).toBe('alive')
+    expect(repaired).toEqual([]) // 绝不猜 pid
+    expect(warns).toHaveLength(1)
+    expect(warns[0]).toContain('需人工介入')
+  })
+
+  it('两条来源都拿不到 → 同一 stale pid 只报一次（换代周期去重）', async () => {
+    const warns: string[] = []
+    const item = { key: 'selfNode' as Component, course: '', entry: { pid: 70003 } }
+    const io = {
+      healthyOf: async () => true,
+      ownerPidOf: () => null,
+      probePidOf: async () => null,
+      repair: () => {},
+      warnFn: (t: string) => warns.push(t),
+    }
+    await classifyExit(item, io)
+    await classifyExit(item, io)
+    await classifyExit(item, io)
+    expect(warns).toHaveLength(1)
+    // 换代周期变了（stale pid 换成上一个新的）⇒ 允许再报一次（不是「一辈子只响一次」）。
+    await classifyExit({ ...item, entry: { pid: 70004 } }, io)
+    expect(warns).toHaveLength(2)
+  })
+
+  it('自报 pid == 账本 pid（没换代）→ 不修、不发告警修账本', async () => {
+    const repaired: number[] = []
+    const v = await classifyExit(
+      { key: 'selfNode', course: '', entry: { pid: 70005 } },
+      {
+        healthyOf: async () => true,
+        ownerPidOf: () => null,
+        probePidOf: async () => 70005,
+        repair: (_it, p) => repaired.push(p),
+        warnFn: () => {},
+      },
+    )
+    expect(v).toBe('alive')
+    expect(repaired).toEqual([])
   })
 
   it('端口被**别的课程**的进程占着 → 清陈旧条目，不改 pid（2026-09-17 幽灵条目）', async () => {
@@ -616,5 +674,42 @@ describe('healRecoveredErrors（误报自愈）', () => {
     )
     expect(healed).toEqual([])
     expect(saved).toHaveLength(0)
+  })
+
+  // ★ 2026-10-11（评审 F9）：自愈路径同样不得把**陈旧 pid 写回去**。
+  // 旧实现的 `ownerPidOf(...) ?? e.pid` 在「端口占用者拿不到」时原样写回旧 pid，
+  // 却打一行「服务已恢复应答」——与「账本 pid 是提示」这条原则反向。
+  it('端口占用者拿不到 → 用组件自报 pid（不把陈旧 pid 写回去）', async () => {
+    const saved: Array<[Component, RegistryEntry]> = []
+    const healed = await healRecoveredErrors(
+      { selfNode: { pid: 8340, error: '意外退出 (PID 8340)', exitAt: 'T0' } },
+      {
+        healthyOf: async () => true,
+        ownerPidOf: () => null,
+        probePidOf: async () => 21300,
+        save: (k, _c, e) => saved.push([k, e]),
+        warnFn: () => {},
+      },
+    )
+    expect(healed).toEqual(['selfNode|'])
+    expect(saved[0]![1].pid).toBe(21300)
+    expect(saved[0]![1].error).toBeUndefined()
+  })
+
+  it('两条来源都拿不到 → 保留原 pid 上屏（没证据就不改），仍清 error', async () => {
+    const saved: Array<[Component, RegistryEntry]> = []
+    const healed = await healRecoveredErrors(
+      { selfNode: { pid: 8340, error: '意外退出 (PID 8340)', exitAt: 'T0' } },
+      {
+        healthyOf: async () => true,
+        ownerPidOf: () => null,
+        probePidOf: async () => null,
+        save: (k, _c, e) => saved.push([k, e]),
+        warnFn: () => {},
+      },
+    )
+    expect(healed).toEqual(['selfNode|'])
+    expect(saved[0]![1].pid).toBe(8340) // 两条来源都 null ⇒ 维持原值（行为与今天一致）
+    expect(saved[0]![1].error).toBeUndefined()
   })
 })

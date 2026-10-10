@@ -244,6 +244,18 @@ export interface ProcSpec {
    *  「新进程已就绪」：控制台报成功、账本记新 pid，而实际服务的是旧进程；监督器同理会把
    *  僵尸的 200 当成「重启成功」。二者都只对「独占端口的组件」有意义，故用可选字段。 */
   ownsResource?: (pid: number) => Promise<boolean>
+  /** 可选：**组件自报 pid**（「换代后是谁在服务」的第二事实源，2026-10-10 selfNode 账本陈旧事故）。
+   *
+   *  为什么需要它：账本只能记「控制台 spawn 的那个 pid」，而 agent 的 `/v1/restart` 交接
+   *  （父进程 spawn detached 子进程后退出）由**控制台之外**的调用方触发（trainer 的 M8 主动升级
+   *  / `tools/dist_upgrade_cli.py` / 手工 curl）；而「端口占用者」这条既有来源在 Windows 上可能
+   *  给不出归属（`netstat -ano` 的 LISTENING 行 PID 0，逐 socket）。两条来源同时失效时账本永不
+   *  收敛：UI 报「已退出」而服务好好的（现场：账本 8340、真身 21300、达标 10/10）。
+   *
+   *  返回 null = 问不到（超时 / 未应答 / 字段缺失）——**不得**据此判死；调用方只在「另有证据说明
+   *  它还活着」时才来问它（`exit-watchdog` 先过健康检查与端口占用者）。不要用 `healthy` 兼职：
+   *  那个的语义是「就绪/健康」，这个的语义是「账本上该记哪个 pid」。 */
+  probePid?: () => Promise<number | null>
   /** 变更检测哨兵文件（mtime 变了 = 该进程运行的代码已更新）。 */
   sentinels: string[]
   /** 归属课程（多课监督以 (key, course) 为单位；空串 = 无课程）。 */

@@ -9057,3 +9057,40 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   回归 = `nn-training/tests/remote/` 的 7 个文件 107 例（`test_prefetch_adaptive` / `test_yield_adaptive` /
   `test_control_pool` / `test_blob_batch` / `test_cache_persist` / `test_train_core_split` / `test_notebook_runtime`）；
   **真机五条读数未取 ⟹ 本条的收益结论尚未成立**（未决行见 `docs/nn.progress.md` §3.1）。
+
+## §2026-10-11-goalnn-ledger-pid-not-liveness（2026-10-11，账本 pid ≠ 存活判据；plan/self-node-ledger-pid-desync + 首轮评审 F1–F14）
+
+- **背景**：2026-10-10 现场 —— self agent 11:47:31 由 `/v1/restart` 换代（pid 8340 → 21300），
+  控制台账本没跟上，于是①组件卡红点 `exited`、②`/api/pool.selfStatus = null`（节点统计页「agent 未启动」+
+  磁盘徽标消失），而**同一页**的 `nodes.self.online=true` / ping 2ms / 达标 10/10 / `selfDisk.level=ok` 全是好的
+  —— 一个读数坏掉，操作员看到的是「采集节点挂了」这个伪结论，且控制台上**没有任何按钮能修**。
+  三条根因同时成立：①换代触发者在**控制台之外**（`trainer/dispatch.py:179` 的 M8 主动升级 →
+  `POST /v1/restart`）⇒ 本地记账永远看不到新 pid；② `stepSelfNode` 的「已在运行」分支早退时**不写账本**；
+  ③端口占用者这条自愈来源在 Windows 上可能给不出归属（`netstat -ano` 的 LISTENING 行 PID 0，**逐 socket**）
+  ⇒ `ownerPidOf` 为 null ⇒ 那个「视为进程换代」的分支**永不修账本**。
+- **备选与否决**：① **换 netstat 方案 / 引第三方进程表库**——否：加运行时依赖要论证（AGENTS §5），
+  且正解是「**不依赖单一来源**」，不是换来源。② **让 agent 反向写控制台账本**——否：单向观测是既有设计。
+  ③ **给远端节点做同样兜底**——否：远端节点**没有账本条目**，该症状在那一边不存在。
+  ④ **顺手改 `stopAllManaged` 的端口兜底**——否：同族但**另一个后果**（清场漏杀），一个 PR 只一个语义。
+  ⑤ **「账本 pid 只影响探测超时」（`pidAlive ? 4000 : 1200`）**——否（评审 F1）：那**还是**让被证实
+  会陈旧的 pid 决定行为，且恰好把「账本陈旧」这一档（本案的修复目标）的预算压小 3.3×；它是后台 SWR 探测，
+  4s 换不到任何东西。⑥ **把 `cloudflared` 也算进「有探针」**——否（评审 F3）：它的健康是 **hub 派生**的
+  （hub 通 ∧ 无 url ⇒ true），会把「隧道进程已死」渲染成 `running`。
+- **决定**：**账本 pid 降级为提示，不再是判决**（S1 只针对 selfNode：`hubServer`/`trainingLoop` 的换代
+  都经过控制台 ⇒ 无实测动机，登记为预备案）。(a) `fetchSelfStatus` 拆掉 pid 前置闸，超时**恒 4000**；
+  (b) `computeComponentHealth` 只对**有探测端点**的组件（判据 = `HEALTHY_PORTS` 有条目）在 pid 死时照探，
+  `componentViews` 的 `alive = pidAlive || health===true`；(c) `ProcSpec.probePid`（selfNode = `/v1/ping` 的
+  `pid`）+ `exit-watchdog::resolveLivePid`（① 端口占用者 → ② **组件自报 pid** → null）；
+  (d) `stepSelfNode` 早退时也要用自报 pid 对齐账本（仍过 `pidHolderOf`，跨课错配不放松）；
+  (e) 自愈路径（`healRecoveredErrors`）同样不得把陈旧 pid 写回去。两条来源都拿不到 ⇒ 只告警**且写明「需人工介入」**
+  （去重键 `watchId#stalePid` 本身 = 「每换代周期一次」，不用改）。
+- **违反后果**：再拿账本 pid 当存活判据 ⇒ 换代后假红（本案），且「采集节点挂了」会连带
+  让人去查一个没坏的东西；把「两条来源都拿不到」读成「没事，只是换代」（③ 档原本文案）⇒ 假红挂一小时没人管；
+  新增「pid 死也照探」而不给用例重定向账本 ⇒ 用例结论随「本机此刻有没有 agent 在跑」变
+  （实测：账本换成死 pid 后 `web-ssr-console` 立刻红，`logHrefs` 只剩 `trainingLoop`）。
+- **落地与门槛**：plan/self-node-ledger-pid-desync.plan.md（§10 = F1–F14 处置）·
+  首轮评审 plan/self-node-ledger-pid-desync.review-bf.md；回归 = `dashboard/tests/self-node-ledger-pid-desync.test.ts`（20 例）
+  + `exit-watchdog.test.ts` 的 T3/F6/F9 用例 + `web-ssr-console.test.ts` 自带 fixture 账本；
+  **必红复核五刀全红**（改回旧逻辑 ⇒ 对应用例 fail=4/5/6/8/11）；
+  `cd dashboard && bun run typecheck && bun run test`（1568 例）· `bun run check`（2482 例）· `bun run build` 均绿；
+  **真栈现场验收未做**（未起控制台 / agent ⇒ 「8s 内自动跟上」与「kill 后仍 exited」只有单测证据，未在真机取数）。

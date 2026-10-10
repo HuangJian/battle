@@ -22,6 +22,7 @@ import { portOwnerPids } from '../core/proc'
 import {
   clearAnyComponent,
   loadRegistry,
+  pidHolderOf,
   registryTriples,
   saveAnyComponent,
   type WatchedEntry,
@@ -277,18 +278,49 @@ export function ownerPidOf(key: Component, course: string, stalePid: number): nu
   return owners.find((p) => p !== stalePid) ?? owners[0] ?? null
 }
 
+/** 「换代后是谁在服务」的 pid：① 端口占用者 → ② **组件自报 pid**（`/v1/ping` 的 `pid`）→ null。
+ *
+ *  **为什么必须有 ②**（2026-10-10 selfNode 账本陈旧事故）：① 在本机可能给不出归属
+ *  （Windows `netstat -ano` 的 LISTENING 行 PID 0，逐 socket；`portOwnerPids` 过滤 `pid>0`
+ *  ⇒ 返回 `[]` ⇒ `ownerPidOf` 为 null），而换代**可能是控制台之外发起的**（trainer 的 M8 主动升级
+ *  `POST /v1/restart`）——控制台的本地记账永远看不到新 pid，只能问组件自己。
+ *
+ *  返回值：**与账本 pid 不同**的新 pid；null = 两条来源都拿不到。
+ *  调用方**不得**把 null 当成「没在服务」（那是 `healthy` 的判决面，不归这里）——只影响「能不能修账本」。
+ */
+export async function resolveLivePid(
+  item: WatchedEntry,
+  stalePid: number,
+  io: Pick<ClassifyIO, 'ownerPidOf' | 'probePidOf'> = {},
+): Promise<number | null> {
+  const byPort = (
+    io.ownerPidOf ?? ((it: WatchedEntry, stale: number) => ownerPidOf(it.key, it.course, stale))
+  )(item, stalePid)
+  if (byPort !== null && byPort !== stalePid) return byPort
+  // 事实源 ②：组件自报 pid。拿不到 / 就报账本那一个死 pid ⇒ 一律视同「没证据」。
+  const askSelf =
+    io.probePidOf ??
+    (async (it: WatchedEntry) => (await restartSpecFor(it.key, it.course)?.probePid?.()) ?? null)
+  let self: number | null = null
+  try {
+    self = (await askSelf(item)) ?? null
+  } catch {
+    self = null
+  }
+  return self !== null && self !== stalePid ? self : null
+}
+
 /** 该 pid 是否被账本里**另一个条目**占用。
  *
  *  这是「端口被谁答」之外的第二问：同一个端口可能被**别的课程/组件**的进程占着
  *  （槽位撞车 / 同槽接管后旧条目没清）。此时把占用者的 pid 写进本条 = 跨课错配
  *  （比不修更糟）。返回占用方的展示名，null = 没人认领（= 大概率是本条自己的下一代）。
+ *
+ *  判据本体在 `core/registry.ts::pidHolderOf`（纯查询，唯一实现）；这里只把结果翻成展示名。
  */
 export function pidClaimedElsewhere(reg: Registry, self: WatchedEntry, pid: number): string | null {
-  for (const item of registryTriples(reg)) {
-    if (item.key === self.key && item.course === self.course) continue
-    if (item.entry.pid === pid) return labelOf(item.key, item.course)
-  }
-  return null
+  const holder = pidHolderOf(reg, self, pid)
+  return holder ? labelOf(holder.key, holder.course) : null
 }
 
 export interface ClassifyIO {
@@ -298,6 +330,8 @@ export interface ClassifyIO {
   repair?: (item: WatchedEntry, newPid: number) => void
   /** 端口占用者（注入用于测试）；默认 specPort + portOwnerPids。 */
   ownerPidOf?: (item: WatchedEntry, stalePid: number) => number | null
+  /** 组件自报 pid（换代第二事实源，注入用于测试）；默认 `restartSpecFor(key,course).probePid`。 */
+  probePidOf?: (item: WatchedEntry) => Promise<number | null>
   /** 「该 pid 被别的条目认领了吗」（注入用于测试）；默认 pidClaimedElsewhere。 */
   claimedBy?: (item: WatchedEntry, pid: number) => string | null
   /** 陈旧条目清除（注入用于测试）；默认 clearAnyComponent。 */
@@ -335,10 +369,8 @@ export async function classifyExit(
   }
   if (!alive) return 'exited'
 
-  const newPid = (io.ownerPidOf ?? ((it, stale) => ownerPidOf(it.key, it.course, stale)))(
-    item,
-    entry.pid,
-  )
+  // 换代事实源 ① 端口占用者 → ② 组件自报 pid（见 resolveLivePid）。两条都拿不到也不判死。
+  const newPid = await resolveLivePid(item, entry.pid, io)
   const say = io.warnFn ?? warn
   const onceKey = `${watchIdOf(item)}#${entry.pid}`
   if (newPid && newPid !== entry.pid) {
@@ -370,10 +402,13 @@ export async function classifyExit(
     }
   } else if (!warnedGhost.has(onceKey)) {
     // 认不出占用者（specPort 也拿不到端口）：只报一次，不每周期刷屏。
+    // ⚠ 这条**不是**「换代不存在」，而是「两条来源都拿不到」⇒ 账本修不了，必须有人去看
+    // （2026-10-10 现场：这行原本文案读起来像「没事，只是换代」，于是假红挂了 1 小时没人管）。
     warnedGhost.add(onceKey)
     say(
       `[console] ${labelOf(key, course)} 账本 PID ${entry.pid} 已消失，但服务仍在应答 → ` +
-        '视为进程换代，跳过意外退出标记（同一 pid 只报一次）',
+        '视为进程换代，但端口占用者与组件自报 pid 都拿不到 ⇒ 无法自动修正账本，**需人工介入**' +
+        '（同一 pid 只报一次）',
     )
   }
   return 'alive'
@@ -389,6 +424,8 @@ export async function healRecoveredErrors(
   io: {
     healthyOf?: (item: WatchedEntry) => Promise<boolean | null>
     ownerPidOf?: (item: WatchedEntry, stalePid: number) => number | null
+    /** 组件自报 pid（换代第二事实源）；默认 restartSpecFor(key,course).probePid。 */
+    probePidOf?: (item: WatchedEntry) => Promise<number | null>
     save?: (key: Component, course: string, entry: RegistryEntry) => void
     warnFn?: (t: string) => void
   } = {},
@@ -410,8 +447,9 @@ export async function healRecoveredErrors(
       alive = false
     }
     if (!alive) continue
-    const pid =
-      (io.ownerPidOf ?? ((it, stale) => ownerPidOf(it.key, it.course, stale)))(item, e.pid) ?? e.pid
+    // 换代第二事实源（评审 F9）：旧实现是 `ownerPidOf(...) ?? e.pid` —— 在「端口占用者拿不到」时
+    // 把**陈旧 pid 原样写回**却打一行「服务已恢复应答」，账本 pid 依然是上一代进程（与 S1 反向）。
+    const pid = (await resolveLivePid(item, e.pid, io)) ?? e.pid
     const { error: _err, exitAt: _at, ...rest } = e
     ;(io.save ?? saveAnyComponent)(key, course, { ...rest, pid })
     ;(io.warnFn ?? warn)(

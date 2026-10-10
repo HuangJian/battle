@@ -14,9 +14,50 @@
  */
 
 import { api, render } from './helpers/console-fixture'
-import { describe, expect, it } from 'bun:test'
-import { existsSync, readFileSync, readdirSync } from 'node:fs'
+import { afterAll, describe, expect, it } from 'bun:test'
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import os from 'node:os'
+
+/**
+ * **本文件必须自带一份 fixture 账本**（2026-10-11，plan/self-node-ledger-pid-desync 评审 F2）。
+ *
+ * `console-fixture` 只重定向 `rl-config` / `console-state`，**账本仍是本机的**
+ * `tmp/training-start/registry.json` ⇒ 下面「组件卡的 /log 入口」那条断言实际取决于
+ * 「此刻这台机器上 hub 有没有在跑」。实测（把账本换成「死 pid」再跑全量）：
+ * 本用例立刻红 —— `logHrefs` 只剩 `trainingLoop`，因为 hubServer 从「running（≡ 入口）」
+ * 变成「exited 但无 error」（两个分支都不渲染）。同一族的两次前科：2026-09-09（测试默认 io
+ * 写了真账本）、`self-node-disk-alert` 评审 F11（SSR 夹具吃活状态、无端变红）。
+ *
+ * 所以这里把「⚠ = exited + error / ≡ = running」**钉成账本里的确定事实**，不再靠机器恰好长成那样：
+ *  · `hubServer.pid = 0` ⇒ `pidAlive(0)` 恒 false（`if (!pid) return false`）⇒ `exited` 是**确定的**；
+ *  · `trainingLoop.pid = process.pid` ⇒ 存活也**是确定的**（不依赖机器上跑着什么）。
+ */
+const REG_DIR = mkdtempSync(join(os.tmpdir(), 'bcity-ssr-console-reg-'))
+process.env.BCITY_REGISTRY_FILE = join(REG_DIR, 'registry.json')
+writeFileSync(
+  process.env.BCITY_REGISTRY_FILE,
+  JSON.stringify({
+    hubServers: {
+      '': {
+        pid: 0,
+        course: '',
+        url: 'http://127.0.0.1:18787', // 夹具端口（SEED_CONFIG.rl.hub_port）：探不通但**即时**
+        error: '意外退出 (PID 0)',
+        exitAt: 'T0',
+      },
+    },
+    trainingLoops: { '': { pid: process.pid, course: '', slot: 0 } },
+  }),
+  'utf-8',
+)
+afterAll(() => {
+  try {
+    rmSync(REG_DIR, { recursive: true, force: true })
+  } catch {
+    /* noop */
+  }
+})
 
 /**
  * 只取 `#root` 内的 SSG 渲染体。
