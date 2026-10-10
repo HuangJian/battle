@@ -117,6 +117,10 @@ for (let g0 = 0; g0 < games; g0++) {
       side: pick(r, 'sideHits'),
       aimHits: pick(r, 'aimHits'),
       aimDist: pick(r, 'aimHitDistSum'),
+      // aim-dodge-levers（2026-10-01）目标族读数：miss/brick/ignited 的归因口（探针/事后交叉验证）。
+      aimMiss: pick(r, 'aimMisses'),
+      aimBrick: pick(r, 'aimBricks'),
+      aimIgn: pick(r, 'aimIgnited'),
       danger: pick(r, 'dangerTicks'),
       near4: pick(r, 'nearEnemy4Ticks'),
       // metrics v11（plan/metrics-v11-hotlane.plan.md §2）：热线族读数（探针/事后交叉验证）。
