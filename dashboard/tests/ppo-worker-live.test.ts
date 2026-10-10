@@ -10,6 +10,8 @@
  */
 
 import { describe, expect, it } from 'bun:test'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { h } from 'preact'
 import { renderToString } from 'preact-render-to-string'
 import { PpoWorkerRows, jobRefText } from '../src/web/app/panels/WorkerContribution'
@@ -17,7 +19,9 @@ import {
   type HubJobRefView,
   type HubQueueCourseView,
   type HubQueueView,
+  type PpoWorkerLiveView,
   buildWorkerLive,
+  limitLiveToCourses,
   parseHubQueue,
   parseWorkerPrefetch,
 } from '../src/web/view'
@@ -274,6 +278,70 @@ describe('buildWorkerLive', () => {
 
 // ────────────────────────── ③ 渲染 ──────────────────────────
 
+describe('limitLiveToCourses（三段只在训课程，用户 2026-10-10）', () => {
+  const row = (
+    worker: string,
+    computing: HubJobRefView[],
+    held: HubJobRefView[],
+    dl: HubJobRefView[],
+  ): PpoWorkerLiveView => ({
+    worker,
+    share: null,
+    autonomous: false,
+    ageSec: null,
+    computing,
+    held,
+    dl,
+  })
+
+  it('只留在训课程的引用；同机混课只砍非在训那几条', () => {
+    const live = [
+      row(
+        'kaggle-c',
+        [ref(J1, 'x24-stack', 110), ref(J2, 'x20-steady', 175)],
+        [ref('c'.repeat(16), 'x20-steady', 176)],
+        [],
+      ),
+    ]
+    const out = limitLiveToCourses(live, ['x24-stack'])
+    expect(out).toHaveLength(1)
+    expect(out[0]!.computing).toEqual([ref(J1, 'x24-stack', 110)])
+    expect(out[0]!.held).toEqual([])
+    expect(out[0]!.dl).toEqual([])
+  })
+
+  it('三段被裁空的机器整行丢弃（不出一条只有名字和份额的空行）', () => {
+    const live = [
+      row('colab-t', [], [], [ref(J2, 'x20-steady', 176)]),
+      row('kaggle-c', [ref(J1, 'x24-stack', 110)], [], []),
+    ]
+    expect(limitLiveToCourses(live, ['x24-stack']).map((r) => r.worker)).toEqual(['kaggle-c'])
+  })
+
+  it('course 不可知的引用（空串）一并裁掉——这块只答「在训课算到哪一轮」', () => {
+    const live = [row('colab-t', [ref(J1, '', 121), ref(J2, 'x24-stack', 122)], [], [])]
+    expect(limitLiveToCourses(live, ['x24-stack'])[0]!.computing).toEqual([
+      ref(J2, 'x24-stack', 122),
+    ])
+  })
+
+  it('没有在训课（空名单）⇒ 三段全空 ⇒ 空数组（残影不端上屏）', () => {
+    expect(limitLiveToCourses([row('colab-t', [ref(J1, 'c1', 7)], [], [])], [])).toEqual([])
+  })
+
+  it('trainingCourses 缺省（旧视图）⇒ 原样返回，不编「没有在训课」', () => {
+    const live = [row('colab-t', [ref(J1, 'c1', 7)], [], [])]
+    expect(limitLiveToCourses(live, null)).toEqual(live)
+    expect(limitLiveToCourses(live, undefined)).toBe(live)
+  })
+
+  it('不改原对象（读面裁剪不许动上游那拍的数据）', () => {
+    const live = [row('colab-t', [ref(J1, 'c1', 7), ref(J2, 'c2', 8)], [], [])]
+    limitLiveToCourses(live, ['c1'])
+    expect(live[0]!.computing).toHaveLength(2)
+  })
+})
+
 describe('PpoWorkerRows / jobRefText', () => {
   it('引用文本：缺 course ⇒ `?`，缺 it ⇒ `it?`（都不编数）', () => {
     expect(jobRefText(ref(J1, 'x23-cm2', 121))).toBe('§x23-cm2:it121')
@@ -284,6 +352,52 @@ describe('PpoWorkerRows / jobRefText', () => {
   it('空数组 / null ⇒ 一点都不渲染（无空区块）', () => {
     expect(renderToString(h(PpoWorkerRows, { live: null }))).toBe('')
     expect(renderToString(h(PpoWorkerRows, { live: [] }))).toBe('')
+    // 传了在训名单但三段全被裁空 ⇒ 同样一点都不渲染
+    expect(
+      renderToString(
+        h(PpoWorkerRows, {
+          live: [
+            {
+              worker: 'colab-t',
+              share: null,
+              autonomous: false,
+              ageSec: null,
+              computing: [ref(J1, 'x20-steady', 175)],
+              held: [],
+              dl: [],
+            },
+          ],
+          trainingCourses: ['x24-stack'],
+        }),
+      ),
+    ).toBe('')
+  })
+
+  it('在训名单传进来 ⇒ 屏上只剩在训课程的引用（用户 2026-10-10）', () => {
+    const html = renderToString(
+      h(PpoWorkerRows, {
+        live: [
+          {
+            worker: 'kaggle-c',
+            share: 0.23,
+            autonomous: false,
+            ageSec: 4,
+            computing: [ref(J1, 'x24-stack', 110), ref(J2, 'x20-steady', 175)],
+            held: [],
+            dl: [],
+          },
+        ],
+        trainingCourses: ['x24-stack'],
+      }),
+    )
+    expect(html).toContain('§x24-stack:it110')
+    expect(html).not.toContain('§x20-steady')
+  })
+
+  it('接线：app.tsx 同时透传 live 与 trainingCourses（少一个 ⇒ 裁剪失效或整块不画）', () => {
+    const src = readFileSync(join(import.meta.dir, '..', 'src', 'web', 'app', 'app.tsx'), 'utf8')
+    expect(src).toContain('live={stateView?.ppoWorkerLive ?? null}')
+    expect(src).toContain('trainingCourses={stateView?.trainingCourses ?? null}')
   })
 
   it('三段的空段整段不渲染；有段才出段；自主盘带徽标', () => {

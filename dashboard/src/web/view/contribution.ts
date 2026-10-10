@@ -269,6 +269,40 @@ export function buildWorkerLive(
   return out
 }
 
+/** 读面裁剪：把首页 live 行的三段（计算中 / 已下载 / 下载中）限定到**正在训练的课程**。
+ *
+ *  为什么要它（用户 2026-10-10 报障：「这三段只需要显示正在训练课程的内容」）：
+ *  hub 的课程表是**发现那一刻**建的（`hub/queue_discover.py::discover`），删掉开课标记后
+ *  `_serves_course` 只挡**新派发**，`_stores` 里那门课**仍在** ⇒ `/admin/queue.courses` 仍带着它的
+ *  `inflight`（陈旧租约 / 旧软持有），worker 的预取面也会报「这个包我下好了」⇒ 首页会拿
+ *  「某台机器正在算 §早停那门课」的残影，盖住真在读的那门课。
+ *
+ *  `trainingCourses` = 控制台的「在训课程」，判据 = `tmp/<课>/training-enabled.txt`
+ *  —— **与 hub 派发闸（`_serves_course`）同一个事实**，所以裁掉的必然是不该再被端出来的引用，
+ *  而不可能是「还没轮到的活」。
+ *
+ *  口径边界（据实，不编）：`course` 为空（hub 解析不出）的引用**一并裁掉**——这块读面只回答
+ *  「在训的课现在算到哪一轮」，一个无法归属到在训课的引用不该在这里占位。
+ *  三段全空的机器整行丢弃（与 `buildWorkerLive` 的「三段全空不出行」同规）。
+ *  `trainingCourses` 为 null/undefined（旧视图）⇒ **原样返回**：不编事实、也不假装「没有在训课」。 */
+export function limitLiveToCourses(
+  live: PpoWorkerLiveView[],
+  trainingCourses: readonly string[] | null | undefined,
+): PpoWorkerLiveView[] {
+  if (!trainingCourses) return live
+  const keep = new Set(trainingCourses)
+  const out: PpoWorkerLiveView[] = []
+  for (const w of live) {
+    const f = (refs: PpoJobRef[]): PpoJobRef[] => refs.filter((r) => keep.has(r.course))
+    const computing = f(w.computing)
+    const held = f(w.held)
+    const dl = f(w.dl)
+    if (!computing.length && !held.length && !dl.length) continue
+    out.push({ ...w, computing, held, dl })
+  }
+  return out
+}
+
 /** PPO 组：份额 = 组内完成 job 占比；「实际投入 = 完成 + 晚到」由两列并看。
  *
  *  **先按机器归并，再算份额/排序**（见 `machineOf`）：输入是身份级（账本里落的就是身份），

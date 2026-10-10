@@ -21,6 +21,7 @@ import {
   type ContributionView,
   fmtCount,
   fmtShare,
+  limitLiveToCourses,
   type PpoJobRef,
   type PpoWorkerLiveView,
 } from '../../view'
@@ -314,12 +315,31 @@ function JobSeg({ label, refs, title }: { label: string; refs: PpoJobRef[]; titl
  *    · **计算中** = hub 的活租约 ∧ 已 `POST /start`（`computing_ago` 非空）；
  *    · **已下载** = worker 上报的软持有（hub 完全看不到的那部分，是「下一轮已经躺好了」的证据）；
  *    · **下载中** = 认领后还在取包/下 payload ∪ worker 上报的软持有下载中（按 job 去重）。
- *  自主盘（持 live hold）也出行，轮次是**派生读数**（已补传产物，落后 ≤1 轮）——悬停里写明。 */
-export function PpoWorkerRows({ live }: { live: PpoWorkerLiveView[] | null }) {
-  if (!live || live.length === 0) return null
+ *  自主盘（持 live hold）也出行，轮次是**派生读数**（已补传产物，落后 ≤1 轮）——悬停里写明。
+ *
+ *  ★ 2026-10-10（用户报障）：三段只显示**正在训练课程**的内容 ⇒ 走 `limitLiveToCourses`
+ *  （判据 = `trainingCourses` = `tmp/<课>/training-enabled.txt`，与 hub 派发闸同一个事实）。
+ *  传 null/undefined（旧视图）时不过滤，保持原行为。 */
+export function PpoWorkerRows({
+  live,
+  trainingCourses,
+}: {
+  live: PpoWorkerLiveView[] | null
+  /** 在训课程（控制台 `trainingCourses`）；缺省 = 不过滤（旧视图不编事实）。 */
+  trainingCourses?: readonly string[] | null
+}) {
+  const rows = live ? limitLiveToCourses(live, trainingCourses) : null
+  if (!rows || rows.length === 0) return null
   return (
-    <div className="tc-contrib-ppolive" aria-label="PPO worker 当前在做什么">
-      {live.map((w) => (
+    <div
+      className="tc-contrib-ppolive"
+      aria-label="PPO worker 当前在做什么"
+      title={
+        '只列**在训课程**的轮次（判据 = tmp/<课>/training-enabled.txt，与 hub 派发闸同一事实）' +
+        '；份额一列仍是窗口内全量口径（含已停课的历史 job）'
+      }
+    >
+      {rows.map((w) => (
         <p className="tc-contrib-ppolive--row" key={w.worker}>
           <StatusDot
             tone="ok"

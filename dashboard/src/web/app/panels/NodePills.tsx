@@ -52,8 +52,11 @@ export interface NodePillsProps {
   /** 每台工作盘**此刻**在干什么（plan/dashboard-ppo-live-rows；缺省不画）。
    *
    *  ★ 它**不在** `brief` 里：首页整份 brief 与服务端 `/api/pool` 的投影逐字相等（守卫钉着），
-   *  而这一块是时间敏感读数（谁在飞、谁下好了）。两者来自**同一拍**的 hub 观测，只是分栏装。 */
+   *  而这一块是时间敏感读数（谁在飞、谁下好了）。两者来自**同一拍**的 hub 观测，只是分栏装。
+   *  ★ 2026-10-10：三段（计算中/已下载/下载中）只显示**在训课程**的内容 ⇒ 还要 `trainingCourses`。 */
   live?: PpoWorkerLiveView[] | null
+  /** 在训课程（控制台 `trainingCourses`；见 `live` 的注释）。缺省 = 不过滤（旧视图不编事实）。 */
+  trainingCourses?: readonly string[] | null
   onAction: (act: string, body: Record<string, unknown>) => void
   onMore: () => void
   /** 局域网只读视图：行无点击语义（编辑/启用/冒烟仅本机），悬停提示说明。 */
@@ -265,6 +268,7 @@ export function NodePills({
   local,
   brief,
   live,
+  trainingCourses,
   onAction,
   onMore,
   readOnly,
@@ -360,8 +364,8 @@ export function NodePills({
       <SamplingBrief brief={brief ?? null} />
       <PpoBrief brief={brief ?? null} />
       {/* 汇总行下面：每个工作中 worker 一行（谁在算哪一轮、下一轮下好了没）。
-          空数组 ⇒ 一点都不渲染（无活 worker 时首页不长出新空白）。 */}
-      <PpoWorkerRows live={live ?? null} />
+          只显示**在训课程**的引用（用户 2026-10-10）；空数组 ⇒ 一点都不渲染。 */}
+      <PpoWorkerRows live={live ?? null} trainingCourses={trainingCourses ?? null} />
       {/* 深链：全页唯一入口（两行缩略都是纯读数，不各自带按钮） */}
       <button type="button" className="tc-btn tc-btn--sm" onClick={onMore}>
         节点统计 ›

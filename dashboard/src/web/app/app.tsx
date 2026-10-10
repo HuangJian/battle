@@ -584,6 +584,8 @@ export function App({ initial }: AppProps) {
                 local={localNode}
                 brief={stateView?.contributionBrief ?? null}
                 live={stateView?.ppoWorkerLive ?? null}
+                // 三段（计算中/已下载/下载中）只显示在训课程的内容（用户 2026-10-10）
+                trainingCourses={stateView?.trainingCourses ?? null}
                 onAction={doAction}
                 onMore={() => navigate('nodes')}
                 readOnly={readOnly}
