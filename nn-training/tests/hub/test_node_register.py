@@ -12,6 +12,9 @@
 from __future__ import annotations
 
 import json
+import threading
+import urllib.error
+import urllib.request
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
@@ -92,6 +95,77 @@ def _reg_default(**override: Any) -> _Stub:
 
 
 # ---------------------------------------------------------------- 鉴权 / 文件面
+
+def _http(
+    base: str, path: str, method: str = "GET", payload: dict | None = None, token: str = "sekret"
+) -> tuple[int, dict]:
+    """真 HTTP 一发（返回 (状态码, JSON 体)）。"""
+    raw = None if payload is None else json.dumps(payload).encode("utf-8")
+    headers: dict[str, str] = {"Content-Type": "application/json"} if raw is not None else {}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+    req = urllib.request.Request(base + path, data=raw, method=method, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return int(resp.status), json.loads(resp.read().decode("utf-8") or "{}")
+    except urllib.error.HTTPError as e:
+        return int(e.code), json.loads(e.read().decode("utf-8") or "{}")
+
+
+# ---------------------------------------------------------------- 真 HTTP 面（route 表 + 鉴权）
+
+
+def test_http_face_dispatches_the_nodes_endpoints(
+    cfg_path: Path, ping_ok: None, tmp_path: Path
+) -> None:
+    """端到端（真服务器 / 真 route 表 / 真鉴权 / 真落盘）。
+
+    上面那批 stub 用例钉的是方法本身；**「请求能不能走到这个方法」只有真服务器能钉** ——
+    `do_GET`/`do_POST` 的分派表少一行，stub 全绿而云机永远 404。
+    """
+    from hub.server import _JobStore, make_server
+
+    hub = _JobStore(tmp_path / "jobs", tmp_path / "ledger.jsonl")
+    srv = make_server(hub, 0, "sekret", host="127.0.0.1")
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        code, _ = _http(base, "/admin/nodes", token="")
+        assert code == 401, "无 Bearer 必须 401（与其余 admin 端点同鉴权）"
+
+        payload = {"id": "rollout-e2e", "url": "http://100.64.0.9:8443", "authKey": "k"}
+        code, out = _http(base, "/admin/nodes/register", "POST", payload)
+        assert code == 200 and out["action"] == "created", out
+        node = _nodes(cfg_path)[0]
+        assert node["id"] == "rollout-e2e" and node["managed"] is True and node["enabled"] is True
+
+        code, out = _http(base, "/admin/nodes")
+        assert code == 200 and out["count"] == 1 and out["nodes"][0]["id"] == "rollout-e2e", out
+
+        # 心跳：同样的 url/authKey ⇒ unchanged（不重写文件 = 不打扰控制台）
+        code, out = _http(base, "/admin/nodes/register", "POST", payload)
+        assert code == 200 and out["action"] == "unchanged", out
+
+        code, out = _http(base, "/admin/nodes/unregister", "POST", {"id": "rollout-e2e"})
+        assert code == 200 and out["action"] == "unregistered", out
+        node = _nodes(cfg_path)[0]
+        assert node["enabled"] is False and bool(node.get("unregistered_at"))
+
+        # 下个会话（新 authKey）回来 ⇒ 恢复启用（F1 的关键那条腿）
+        code, out = _http(
+            base,
+            "/admin/nodes/register",
+            "POST",
+            {**payload, "url": "http://100.64.0.10:8443", "authKey": "k2"},
+        )
+        assert code == 200 and out["action"] == "updated", out
+        node = _nodes(cfg_path)[0]
+        assert node["enabled"] is True and node["url"] == "http://100.64.0.10:8443"
+        assert node.get("unregistered_at") is None
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
 
 def test_requires_bearer(cfg_path: Path) -> None:
     before = cfg_path.read_bytes()
