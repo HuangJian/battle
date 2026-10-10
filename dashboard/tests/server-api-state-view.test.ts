@@ -13,6 +13,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { DASHBOARD_ROOT } from '../src/core/paths'
+import { invalidatePpoAttributionMemo } from '../src/server/contribution'
 import * as pool from '../src/server/pool-history'
 import * as poolView from '../src/web/view'
 
@@ -210,17 +211,96 @@ describe('console/api.buildStateView · 请求路径零聚合（reload-perf W1�
     expect(code).toContain('getFleetProbes(cfg)')
   })
 
-  it('缩略与面板同源：brief 是 `/api/pool` 同一份聚合的裁剪（逐字相等）', async () => {
-    // 同一个窗口（首页 = 24h 滚动档，2026-10-03 用户口径取代 today）+ 同一套 N（采样 3 / PPO 全列）
-    // 下，两个端点必须给出同一份数字——防「两份真相」。
-    api.invalidateSlowSnapshot()
-    pool.invalidateNodeHistoryMemo()
-    const s = await api.buildStateView()
-    const view = await api.buildPoolView(false, '24h')
-    expect(view.contribution).toBeTruthy()
-    expect(s.contributionBrief).toEqual(
-      poolView.compactSummary(view.contribution!, 3, poolView.BRIEF_ALL),
+  /** 池根夹具（`BCITY_POOL_DIR` 重定向 + 两侧聚合 memo 的清理）。
+   *
+   *  ★ 2026-10-10（flake 修复）：本用例比的是**两次独立聚合的逐字相等**——state 的 brief 产自
+   *  `computeFleetProbes`、pool 视图的 contribution 产自 `getPoolProbes`，而两者的输入根是
+   *  **同一个** `tmpPoolDir()`。真实池根在训练期间一直在长：两次聚合之间落盘的新局会把采样
+   *  总数推高（实测 `total` 11617 ≠ 11576）⇒ 断言退化成时序竞态（同一份代码：16:00 全绿、
+   *  19:30 连红两次）。冻结输入之后它才是确定性用例，还顺带能断言「不是空对空」。
+   *
+   *  与同文件「课程发现目录可重定向」用同一套纪律：夹具起手清 memo、`finally` 里恢复 env
+   *  并**再清一次** memo（否则下一个用例会读到夹具根的那份聚合）。 */
+  async function withPoolFixture(fn: () => Promise<void>): Promise<void> {
+    const root = mkdtempSync(path.join(os.tmpdir(), 'bcity-stateview-pool-'))
+    const prev = process.env.BCITY_POOL_DIR
+    const nowMs = Date.now()
+    /** 毫秒 → 'YYYY-MM-DD HH:MM:SS'（与 python 侧 `strftime` 写入同形）。 */
+    const ts = (ms: number): string => {
+      const d = new Date(ms)
+      const p = (n: number): string => String(n).padStart(2, '0')
+      return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(
+        d.getMinutes(),
+      )}:${p(d.getSeconds())}`
+    }
+    // 锚点：24h 滚动窗要吃「子日事件环」，环的下界由它给出（与 pool-history 的预筛用例同规）。
+    mkdirSync(path.join(root, 'dist-agent'), { recursive: true })
+    writeFileSync(path.join(root, 'dist-agent', 'pool-epoch.txt'), String(nowMs - 3_600_000))
+    // 采样侧：一条流 4 局（fx-a 2 rollout + 1 eval；fx-b 1 rollout）⇒ 合计 4、top[0] = fx-a。
+    const flow = path.join(root, 'fx-flow')
+    mkdirSync(flow, { recursive: true })
+    const meta = (node: string, mode: 'rollout' | 'eval'): string =>
+      JSON.stringify({
+        node,
+        mode,
+        it: 7,
+        stage: 0,
+        seed: 1,
+        ok: true,
+        elapsedSec: 1,
+        ts: ts(nowMs - 60_000),
+      })
+    writeFileSync(
+      path.join(flow, 'dist-agent-meta.jsonl'),
+      `${[meta('fx-a', 'rollout'), meta('fx-a', 'rollout'), meta('fx-a', 'eval'), meta('fx-b', 'rollout')].join('\n')}\n`,
     )
+    // PPO 侧：一份课程账本，`job_result_accepted`（带 worker）join `job_completed` ⇒ done=1。
+    const course = path.join(root, 'fx-course')
+    mkdirSync(course, { recursive: true })
+    const sec = Math.floor((nowMs - 60_000) / 1000)
+    writeFileSync(
+      path.join(course, 'training_log.jsonl'),
+      `${[
+        JSON.stringify({
+          event: 'job_result_accepted',
+          job_id: 'fxj1',
+          worker: 'fx-cloud',
+          ts: sec,
+        }),
+        JSON.stringify({ event: 'job_completed', job_id: 'fxj1', ts: sec + 1 }),
+      ].join('\n')}\n`,
+    )
+    process.env.BCITY_POOL_DIR = root
+    pool.invalidateNodeHistoryMemo()
+    invalidatePpoAttributionMemo()
+    try {
+      await fn()
+    } finally {
+      if (prev === undefined) delete process.env.BCITY_POOL_DIR
+      else process.env.BCITY_POOL_DIR = prev
+      pool.invalidateNodeHistoryMemo()
+      invalidatePpoAttributionMemo()
+      rmSync(root, { recursive: true, force: true })
+    }
+  }
+
+  it('缩略与面板同源：brief 是 `/api/pool` 同一份聚合的裁剪（逐字相等）', async () => {
+    await withPoolFixture(async () => {
+      // 同一个窗口（首页 = 24h 滚动档，2026-10-03 用户口径取代 today）+ 同一套 N（采样 3 / PPO 全列）
+      // 下，两个端点必须给出同一份数字——防「两份真相」。
+      api.invalidateSlowSnapshot()
+      // 先 pool 后 state：`fresh` 会把探测层与聚合 memo 一起硬清 ⇒ 这一份 fixture 聚合
+      // 就是两边共用的那一份（state 侧走 memo 命中，不再重扫）。
+      const view = await api.buildPoolView(true, '24h')
+      expect(view.contribution).toBeTruthy()
+      const s = await api.buildStateView()
+      // 不是空对空：夹具那 4 局采样 + 1 个 PPO 完成必须真的**在两边**读出来
+      expect(s.contributionBrief?.sampling.total).toBe(4)
+      expect(s.contributionBrief?.ppo.totalDone).toBe(1)
+      expect(s.contributionBrief).toEqual(
+        poolView.compactSummary(view.contribution!, 3, poolView.BRIEF_ALL),
+      )
+    })
   })
 
   it('W4：冷启动保证在 `await reconcileWatch()` 链（先于 Bun.serve），不是刷新器首拍', () => {
