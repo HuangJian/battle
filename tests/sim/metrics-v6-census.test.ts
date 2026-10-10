@@ -143,6 +143,9 @@ function makeTel(over: Partial<Telemetry> = {}): Telemetry {
     hurtWeight: 0,
     enclWeightTicks: 0,
     cornerWeightTicks: 0,
+    // metrics v11（idx74–75；plan/metrics-v11-hotlane.plan.md）。
+    nearSqSum: 0,
+    postHitLaneTicks: 0,
     ...over,
   }
 }

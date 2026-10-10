@@ -25,6 +25,103 @@
 
 ---
 
+## §73 metrics v11：热线族 **2 列**（idx74–75；dim 74→76）+ 事件加 `bulletOwnerId` + 探针**杀列**（pickupProxMax 未签入）（2026-10-10，plan/metrics-v11-hotlane.plan.md）
+
+- **交付**：`METRICS_DIM 74→76`、`METRICS_VERSION 10→11`（TS `tools/sim/export-rl-rollout.ts` +
+  Python `biz/reward_library.py` 双侧同源）。新列（列序即契约，只能加尾）：
+  `nearSqSum`(74) · `postHitLaneTicks`(75)。**公式一个字不动**（reward golden 64/64
+  逐位不变、只有 `metrics_version` 与向量宽度变；见下「逐位对账」）。**零训练腿**。
+- **口径冻结（改动 = 新实验）**：
+  ① `nearSqSum` = 每拍对每个**存活已激活**敌车（`spawnTimer <= 0`，与 `nearestEnemyDistPx`
+  /`alignedEnemyCount` 同规）按**切比雪夫**格距 d 累加 `(K_NEAR_SQ−d)²`（d ≤ 3）
+  ⇒ **有效半径 = 2 格**（d=3 处核值 0）；**不是**「3 格带」，与 raw-only 的
+  `nearEnemy4Ticks`（4 格**像素**带、只认最近一个）不是等比量，禁止互比。
+  ② `postHitLaneTicks` = 被击中后仍留在**该源火线轴**上的 tick 累计；轴是**整数格轴**
+  （开窗瞬间记录源的中心格 col/row + 朝向轴），**不是** `threatLaneSources` 家族的 19px
+  连续带（带边缘抖动会高频误关窗；两条谓词**刻意不共用**，共享的只有 `laneOccluded` 一族）。
+  **关窗四条**：玩家脱离该轴 / 源转向换道 / 源死亡 / 局终；**位移回归不自动重开**（要重新
+  被击中才开新窗）；同源重开 = 替换旧窗（一源一窗 ⇒ 并发上限天然 = 存活敌数）；**无封顶**。
+  ③ 两列都**拌入豁免 A**（冻 ∨ 盾道具窗拍不计数），但**豁免不关窗**（决定 A 的分工：
+  关窗与计数是两件事，冻住时站在轴上不被误关、也不被记钱）。
+- **事件扩展（additive 只读）**：`player_damage` / `player_hit`（致死 + 星盾两条）补
+  `bulletOwnerId`（开火坦克 id **直抄**，不走 registry 反查——state-init 交棒时已在飞的弹
+  反查不到 shooter，而那正是最要用的局）。字段**写死在 `bulletId` 之后**（源码哨兵是子串 +
+  正则计数，插在中间即红）。事件不进 `tickHash`（该文件根本没有事件哈希）⇒ `freeze:check`
+  逐字节不变（实测 FROZEN-SIGNATURE OK）。
+- **探针杀列（§4bis 执行记录，plan §4bis）**：第三列 `pickupProxMax`（原候选 idx76）
+  **未签入**。E0 探针 `tmp/v11-e0.ts`（不入库；两臂配对，4 关 × 20 seed × 1600t，策略 =
+  站定开火 / 追最近道具）：判据 2（冗余）**通过**（`nearSqSum~nearEnemy4Ticks` 行级 r=0.39–0.46、
+  局级 0.57–0.74 ≪ 0.9）；判据 3（`bulletOwnerId` 覆盖）**100%**（71/71、74/74）；
+  判据 4 两条杀线**都命中**（会消耗道具的 seek 臂：同拍 ≥2 存活道具占比 **0.31% ≤ 2%**
+  ⇒ 本列实质是 `pickupDist` 的变换；`pickupProxMax~kills` Spearman **0.507 ≥ 0.3**
+  ⇒ 「打得多→掉落多→税更高」的方向性错误）⇒ 按 §4bis.5 **该列不入库**，常量与核一并未入模块。
+  **判据 1（人类 vs NN 分离度）本机不可跑**（无人类语料、`tmp/gap2-compare.ts` 不在树内）
+  ⇒ 按 DoD：**两列可入库但不得定价**（列先行、价后议）；定价前必须先补判据 1。
+  探针语料是脚本策略（非 NN/人类）⇒ 判据 2/4 的读数按 §15.2 作**哨兵**，不作判决。
+- **nearSqSum 的定位（R4 条件替换）**：设计为 `nearEnemy4Ticks` 的**替换候选**（加权 + 全敌
+  vs 二值最近）。它本身是 raw-only（明令不得定价）⇒ 与它的高相关**不构成杀列理由**；
+  杀列只按「与**已定价**同源列 ≥ 0.9」。课程侧是否从 near4 迁到 nearSq 属课程决策。
+- **lockstep（本次实测 10 处，漏一处即静默错读）**：① TS rollout 行构造（dim/版本/列名表/
+  `Telemetry`/终局类型/init/逐拍累加/`buildMetricsRow`/报告对象）· ② TS eval 导出器
+  `export-eval-game.ts` **每列 5 处**（Telemetry 声明 / 结果类型 / init / 逐拍累加 / **两处**写出）
+  · ③ `eval-course-ckpt.ts`（行类型/init/累加/**known 计数**/打印）+ `-worker.ts` 透传
+  · ④ `diag-resim.ts` 读数 · ⑤ Python `METRICS` + `METRICS_VERSION` + 行数断言 ·
+  ⑥ `reward_validation.DEFAULT_RANGES`（**不**在 reward_library.py）· ⑦ `worker/eval_rows.py`
+  `EVAL_V11_KEYS` + `eval_v11_fields()` + `eval_local.py` 转出 + `worker/tests` 导出清单 ·
+  ⑧ 行构造点**两处**（`worker/eval_rows.py::eval_row`、`trainer/batch_runner.py`）必须经同一
+  helper（v8 教训：只改 TS 侧 ⇒ 日常 eval 失明）· ⑨ golden 重生成 + 根测试三处版本钉 +
+  `test_item_metrics_layout_locked` 尾部穷举清单 · ⑩ `hub/smoke_loopback.py` 过时注释。
+  ⚠ **既有哨兵抓不到的一类漏**：`aim-levers-sentinels` 的 `/type: 'player_hit', bulletId: bullet\.id/g`
+  只匹配**前缀** ⇒ 星盾那条 push 漏改 `bulletOwnerId` 它照绿；本次靠**新加的计数哨兵**
+  （`bulletOwnerId: bullet.ownerId` 计数 == 3）才抓到（已修）。
+- **known 计数（R15）**：`eval-course-ckpt` 的 v11 均值分母 = `v11Known`（有 v11 键的局数，
+  以 `nearSqSum` 为见证键，契约抽成导出的 `v11KnownDelta`）；**缺键整局不入分母**，
+  不把未知读成 0 去稀释（同 `clean600%` 旧坑；现状 `?? 0` 只在旧列上）。
+- **预算天花板提醒（门禁抓到的）**：`trainer/batch_runner.py` 加完 v11 两行后计到 **LOC 1000**
+  ⇒ `tests/test_python_loc_budget.py` 红（门禁拦下第一次提交）。本轮按**最小改动**把 v10/v11
+  两族的 spread 挤到同一物理行（999 行）+ 原地写明“预算所迫”；⚠ **下一族必须**先按
+  `plan/nn-training-refactor.md` §5.7 拆模块，**不得**再加行（该文件是当前全仓第一（第二是
+  `trainer/dispatch.py` 970）；顶到天花板说明它的行数来自「一个人人都在用的方法体」）。
+- **顺带修掉的缺陷**：`worker/scripts/regen_reward_golden.py` 的 `ROOT` 用 `parent.parent`
+  —— 2026-09 包化重构把脚本搬进 `worker/scripts/` 后它算成 `nn-training/worker`，于是
+  golden **静默写到无人读的 `worker/tests/golden/`**（`metrics_version` bump 后 `test_reward_golden`
+  照旧红，实测踩到）。已改 `parents[2]` 并重生成**正确**那份。
+- **逐位对账（golden）**：`nn-training/tests/golden/reward_golden.json` 重生成后 64/64 用例
+  `reward` **逐位相同**、`gated` 相同、输入向量前缀逐位相同（尾部 +2 个 0 = 宽度 74→76），
+  只有 `metrics_version 10→11` 变（禁 md5 含糊）。
+- **门禁读数**：根 `bun run check` **2443 pass / 0 fail**（12 skip 为环境项；2455 条 / 234 文件）·
+  `bun run build` ✓ ·
+  `bun run freeze:check` **FROZEN-SIGNATURE OK**（`c2c25cdb…`，与事件不进哈希的预期一致）·
+  nn `pytest tests/biz tests/worker tests/trainer` **1970 pass / 2 skip（0 fail）**。
+  新增用例 `tests/sim/metrics-v11-hotlane.test.ts`（25 条）：核/半径/全敌累加 + 独立重实现对账 +
+  窗四条关法与重开/多源/豁免分工 + **同进程隔离**（两个窗实例互不影响，R10）+ mixed-version 分母
+  契约 + **真实 rollout 金标**（采样链 3 局非零/零例 + 重跑一致；评估链 god 3 局两列非零）+
+  **单实现哨兵**（两条累加点各恰好一次 + 核只 import + 豁免门位置）。
+- **自审发现（§3.5 新① 改判，2026-10-10 复核）**：原判据「同策略同 seed ⇒ rollout 终值 ==
+  eval manifest」**作废**——训练链决策处是 `sampleCat`（**采样**）、评估链是 `argmaxCat`
+  （**greedy**），正是 §15.3 写死的「采样 ≠ greedy」。实测同 (stage, seed) 本就是**两局不同
+  的对局**：s0/13 rollout ticks 2161 / nearSq 30 vs eval ticks 211 / nearSq 0；s1/7 rollout 441
+  vs eval 211。⚠ 且改判前挑的两个 seed 两侧恰好都是 **0** ⇒ 旧 parity 用例是**空洞的**
+  （断言 0 == 0 也在绿）。⇒ 改为「链内确定性金标（两侧各自固定 seed 逐值冻结，非零正例 +
+  零例）+ 跨链**同名单实现**哨兵」；跨链逐值相等不再作为判据。教训：**跨链 parity 必须同模式**，
+  且**任何等式断言先证非空洞**（两侧都取 0 时它什么都没测）。
+- **未跑 / 未证**：判据 1（人 vs NN 分离度，无语料）· state-init **交棒局**的 `bulletOwnerId`
+  覆盖未实测（探针语料未用 `--init-snapshot`；§3.0 的兜底理由仍是结构性的：字段直抄，
+  registry 路径才漏）· 两列的**剂量**未定（课程侧）· **`x24-face.jsonc` 的 raw-only 偏差
+  仍未结清**（`wNear=8.0` 在给 raw-only 名单里的 `nearEnemy4Ticks` 定价，`x24-face.jsonc:50/:63`）：
+  x24 系仍是**草稿、未开课** ⇒ 偏差处于**潜伏**态，§2.2.2 强制项按「**开课前**加头注豁免注记
+  + DECISIONS 指针」执行（本批仅记债，课程文件未动）· 采样链的 `postHitLaneTicks` 非零局**极稀有**
+  （学生夹具 4 关 × 30 seed 实测 1/120：s1/7 → 12）——列本身的非零由 god 评估链与
+  脚本化小世界覆盖，**不要**指望采样链大面积非零。
+- **违反后果**：把 `nearSqSum` 当「3 格带」或与 `nearEnemy4Ticks` 直接对照 ⇒ 两个不是等比量的
+  读数互比；给未跑判据 1 的列定价 ⇒ 拿脚本策略读数当人/NN 判决（§15.2 反例）；
+  把热线窗改用 19px 带 ⇒ 带边缘抖动高频误关窗；把窗状态放模块级 ⇒ 同进程连跑多局串味；
+  给 `bulletOwnerId` 插在 `bulletId` **之前** ⇒ 源码哨兵红。
+- **回滚**：单次 revert 即回（TS + Python + 版本同一 commit 内）；已发版节点混跑先
+  `--upgrade-nodes` 拉齐再验，不要部分 revert。
+  —— 计划与评审处置（R1–R15）→ `plan/metrics-v11-hotlane.plan.md` §6/§7 · 独立评审 →
+  `plan/metrics-v11-hotlane.review-buffy.md` · 决策索引 → `DECISIONS.md` §2026-10-10-goalnn-metrics-v11
+
 ## §72 pytest 最慢用例第二轮：第三条 HTTP 缝 + 三处全仓扫描的口径内提速（2026-10-10，用户指令「找出耗时最长的 16 个 pytest，尝试优化」）
 
 **一句话**：先把「最慢 16 条」**量准**（forkdist 8 不动；4 连跑取 min，见 §43），再逐条定位；

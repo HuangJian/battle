@@ -255,7 +255,7 @@ describe('P1 注入语义（applyInitSnapshot / runOneBench 端到端）', () =>
     expect(a.initCounters).toBeNull()
     expect(a.initSnapshot).toBe('')
     expect(a.shard.metrics[0][0]).toBe(0)
-    expect(METRICS_VERSION).toBe(10) // v10：差距四族 15 列（行宽 54→69）
+    expect(METRICS_VERSION).toBe(11) // v11：热线族 2 列（行宽 74→76）
     expect(a.shard.n).toBe(b.shard.n)
     expect(a.ticks).toBe(b.ticks)
     expect(a.kills).toBe(b.kills)

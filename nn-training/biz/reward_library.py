@@ -194,14 +194,21 @@ METRICS: tuple[str, ...] = (
     #                     相关性 >0.8 时替换之（plan §5 E2 门）。
     "enclWeightTicks",  # 72  ← n≥2 ⇒ Σ max(0,5−d)；**拌入**豁免 A（只累计非豁免拍）。
     "cornerWeightTicks",  # 73  ← 四角锚点最小切比雪夫格距 ⇒ Σ max(0,4−d)；**拌入**豁免 A。
-    #                     54–56/58/62–64/72 都是累计 tick 计数器（同 dangerTicks 警告）；
+    # ---- metrics v11：热线族 2 列（plan/metrics-v11-hotlane.plan.md §2；idx74–75）----
+    "nearSqSum",  # 74  ← 每拍对每个**存活已激活**敌车（切比雪夫 d ≤ 3）累加 (3−d)²；
+    #                     **拌入**豁免 A（只累计非豁免拍）。⚠ 有效半径 = **2 格**
+    #                     （d=3 处核值 0），与 raw-only 的 nearEnemy4Ticks（4 格像素带）不是等比量。
+    "postHitLaneTicks",  # 75  ← 被击中后仍留在该源**火线轴**（整数格轴，非 19px 带）上的 tick 累计；
+    #                     **拌入**豁免 A；窗关 = 源转向/换道/死亡/局终；重开只由新伤害事件；无封顶。
+    #                     （第三列 pickupProxMax 被 §4bis.4 两条杀线拦下 ⇒ 本批不签入。）
+    #                     54–56/58/62–64/72/74–75 都是累计 tick 计数器（同 dangerTicks 警告）；
     #                     59/60/65 单调增（差分 ≥ 0）；57 带 -1 哨兵；
     #                     66–71 为局内累计计数/权重（差分 ≥ 0）。
 )
 
 METRIC_INDEX: dict[str, int] = {name: i for i, name in enumerate(METRICS)}
 METRICS_DIM = len(METRICS)
-#: shard manifest 版本：`[N+1,74] f8（idx0–73）` 布局。任何用 `shape[0]` 推 episode 长度的
+#: shard manifest 版本：`[N+1,76] f8（idx0–75）` 布局。任何用 `shape[0]` 推 episode 长度的
 #: 下游在版本不匹配时必须响亮报错，而非静默错读（评审 LC §1.1）。
 #: v8（plan/x20-dodge-avoidance §2）：危险暴露四列。
 #: v9（plan/geo-threat-instrumentation §1.1/§1.3）：命中方位 5 列 + 穿越税 4 列；
@@ -212,7 +219,10 @@ METRICS_DIM = len(METRICS)
 #: 被包围率（encl1/2/3p + 峰值）· 开火结果四桶（aimHits/aimBricks/aimIgnited/aimMisses）·
 #: 命中距离和（aimHitDistSum）· 火线承伤（hurtWeight）· 暴露加权（encl/cornerWeightTicks）。
 #: **不加价**：公式一个字不动。
-METRICS_VERSION = 10
+#: v11（plan/metrics-v11-hotlane.plan.md §2）：热线族 2 列（idx74–75）—— nearSqSum /
+#: postHitLaneTicks（第三列 pickupProxMax 被 §4bis.4 两条杀线拦下 ⇒ 不签入）；
+#: **两条都拌入豁免 A**；公式一个字不动（列先行、价后议）。
+METRICS_VERSION = 11
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
@@ -942,7 +952,8 @@ def _self_check() -> None:
     # v9：追加 idx45–53 命中方位 5 列 + 穿越税 4 列
     # v10：追加 idx54–68 差距四族 15 列；aim-dodge 批次内整理：移除 enclExempt1/2/3pTicks，
     #      追加 aim/dodge 8 列（idx66–73），enclMax 顺位 68 → 65 ⇒ 总列数 74。
-    assert len(METRICS) == METRICS_DIM == 74, METRICS_DIM
+    # v11：追加 idx74–75 热线族 2 列（plan/metrics-v11-hotlane；第三列被 §4bis 杀线拦下）
+    assert len(METRICS) == METRICS_DIM == 76, METRICS_DIM
     assert len(set(METRICS)) == METRICS_DIM
 
 

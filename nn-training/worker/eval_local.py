@@ -180,6 +180,9 @@ from worker.eval_rows import (
     EVAL_V10_KEYS as EVAL_V10_KEYS,
 )
 from worker.eval_rows import (
+    EVAL_V11_KEYS as EVAL_V11_KEYS,
+)
+from worker.eval_rows import (
     _read_ledger_rows as _read_ledger_rows,
 )
 from worker.eval_rows import (
@@ -217,6 +220,9 @@ from worker.eval_rows import (
 )
 from worker.eval_rows import (
     eval_v10_fields as eval_v10_fields,
+)
+from worker.eval_rows import (
+    eval_v11_fields as eval_v11_fields,
 )
 from worker.eval_rows import (
     merge_eval_rows as merge_eval_rows,

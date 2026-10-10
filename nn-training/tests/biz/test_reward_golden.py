@@ -761,6 +761,8 @@ def test_item_metrics_layout_locked() -> None:
         "hurtWeight",  # idx71（aim-dodge：敌弹火线承伤 Σmax(0,6−x)，拌入豁免 A；回写列）
         "enclWeightTicks",  # idx72（aim-dodge：n≥2 ⇒ Σmax(0,5−d)，拌入豁免 A）
         "cornerWeightTicks",  # idx73（aim-dodge：四角锚点 Σmax(0,4−d)，拌入豁免 A）
+        "nearSqSum",  # idx74（v11：全敌 Σ(3−d)²，有效 2 格；拌入豁免 A）
+        "postHitLaneTicks",  # idx75（v11：被击后仍在该源火线轴（整数轴）上的 tick；拌入豁免 A）
     ]
     assert METRIC_INDEX["puGotBomb"] == 25
     assert METRIC_INDEX["puSpawnShield"] == 24
@@ -893,7 +895,7 @@ def test_credit_p6_formula_and_course() -> None:
     assert rep.ok, rep.errors
     assert rep.warnings == (), rep.warnings
     # v10（plan/metrics-v10-gap-columns §1）：列宽 69、版本 10。
-    assert METRICS_VERSION == 10
+    assert METRICS_VERSION == 11
 
     # 公式按列加权：杀 1 basic 再杀 1 power 的两步势差 = +3 / +6（wHit/wWin 本例为 0）
     spec = RewardSpec(

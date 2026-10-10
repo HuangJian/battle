@@ -67,6 +67,7 @@ from worker.eval_local import (
     eval_v8_fields,
     eval_v9_fields,
     eval_v10_fields,
+    eval_v11_fields,
     run_local_eval_game,
 )
 from worker.eval_yield import EVAL_LOCAL_SLOTS_DEFAULT
@@ -883,8 +884,11 @@ class _UnitLanes:
             **eval_v8_fields(manifest),
             # metrics v9 命中方位 + 穿越税观测族（与 eval_row 同源，见 eval_v9_fields）。
             **eval_v9_fields(manifest),
-            # metrics v10 差距四族（与 eval_row 同源，见 eval_v10_fields）。
-            **eval_v10_fields(manifest),
+            # metrics v10 差距四族 + v11 热线族 2 列（与 eval_row 同源，见 eval_v10/v11_fields）。
+            # 两族挤在同一物理行是**预算所迫**，不是风格：本文件已在天花板
+            # （`tests/test_python_loc_budget.py` LOC < 1000），下一族必须先按
+            # `plan/nn-training-refactor.md` §5.7 拆模块，别再往这里加行。
+            **eval_v10_fields(manifest), **eval_v11_fields(manifest),
             # 新纪元死刑通道（plan §2 #9/P1-2 方案 a）：裸透传；旧报告缺键 = None，
             # 读数方按无信号处理（与 EvalCourseRow 可选字段同约）。
             "moveHist": manifest.get("moveHist"),

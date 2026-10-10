@@ -89,6 +89,9 @@ function makeTelemetry(over: Partial<Telemetry> = {}): Telemetry {
     hurtWeight: 0,
     enclWeightTicks: 0,
     cornerWeightTicks: 0,
+    // metrics v11（idx74–75；plan/metrics-v11-hotlane.plan.md）。
+    nearSqSum: 0,
+    postHitLaneTicks: 0,
     ...over,
   }
 }
@@ -168,8 +171,11 @@ describe('export-rl-rollout metrics 行宽', () => {
     expect(names[71]).toBe('hurtWeight')
     expect(names[72]).toBe('enclWeightTicks')
     expect(names[73]).toBe('cornerWeightTicks')
+    // metrics v11（plan/metrics-v11-hotlane.plan.md §2）：尾部追加 2 列（第三列被 §4bis 杀线拦下）。
+    expect(names[74]).toBe('nearSqSum')
+    expect(names[75]).toBe('postHitLaneTicks')
     // 列数变更必须 bump 版本（旧 shard 靠它响亮报错，不静默错读）
-    expect(py).toContain('METRICS_VERSION = 10')
+    expect(py).toContain('METRICS_VERSION = 11')
   })
 
   it('差距四族 15 列写入 idx54–68（metrics v10）', () => {

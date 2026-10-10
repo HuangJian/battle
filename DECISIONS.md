@@ -8820,3 +8820,46 @@ setenv 会串味（`e2e/conftest.py::_no_serve_pool` 早有这条教训），且
   纯净 HEAD（`/home/hj/battle-base`）**3/6 红且全是同一条断言**（`result POST 出现 2 次`）·
   nn 门禁绿（ruff + mypy + 3971/3971）。
   —— 全文（探针原始记录 / 逐条判据 / 被否决）→ `docs/nn/remote-transport.md` §77
+
+## §2026-10-10-goalnn-metrics-v11（2026-10-10，metrics v11：热线族 **2 列** idx74–75 / dim 74→76 / 事件加 `bulletOwnerId`；plan/metrics-v11-hotlane.plan.md）
+
+- **决定（列布局）**：尾部追加 2 列 —— `nearSqSum`(74)（每拍对每个**存活已激活**敌车按切比雪夫
+  格距 d 累加 `(3−d)²`，**有效半径 2 格**）· `postHitLaneTicks`(75)（被击中后仍留在**该源火线轴**上
+  的 tick 累计）⇒ `METRICS_DIM 74→76`、`METRICS_VERSION 10→11`。0–73 列号/语义一字不动；
+  **公式一个字不动**（reward golden 64/64 逐位不变，只有 version 与向量宽度变）；**零训练腿**。
+- **决定（口径）**：① 热线轴用**整数格轴**（开窗瞬间记录源中心格 col/row + 朝向轴），**不**与
+  `threatLaneSources` 的 19px 连续带共用谓词（带边缘抖动会高频误关窗）；**关窗四条** = 玩家脱离该轴 /
+  源转向换道 / 源死亡 / 局终，**位移回归不自动重开**，同源重开替换旧窗（一源一窗），无封顶。
+  ② 两列**拌入豁免 A**（冻 ∨ 盾道具窗拍不计数），但**豁免不关窗**（关窗 ≠ 计数，决定 A 的分工）。
+  ③ `nearSqSum` 定位 = `nearEnemy4Ticks` 的**替换候选**；后者是 raw-only（明令不得定价）⇒
+  与它的高相关**不作杀列理由**（R4），杀列只按「与**已定价**同源列 ≥ 0.9」。
+- **决定（引擎事件，additive 只读）**：`player_damage`/`player_hit`（致死 + 星盾两条）补
+  `bulletOwnerId`（开火坦克 id 直抄，**不走 registry 反查**——state-init 交棒时已在飞的弹查不到
+  shooter）；字段写死在 `bulletId` **之后**（源码哨兵是子串+正则计数）。事件不进 `tickHash` ⇒
+  `freeze:check` 逐字节不变（实测 OK）。
+- **决定（探针杀列）**：第三列 `pickupProxMax`（原候选 idx76）**不签入**——§4bis 预注册的两条杀线
+  在 E0 探针上**都命中**（会消耗道具的臂：同拍 ≥2 存活道具占比 0.31% ≤ 2% ⇒ 实质是 `pickupDist`
+  变换；`pickupProxMax~kills` Spearman 0.507 ≥ 0.3 ⇒ 「打得多→掉落多→税更高」反向激励）。
+  ⚠ **判据 1（人类 vs NN 分离度）本机不可跑**（无人类语料、`tmp/gap2-compare.ts` 不在树内）
+  ⇒ 已入的两列**可入库但不得定价**（列先行、价后议）；定价前必须先补判据 1。
+- **被否决**：① 保留 `pickupProxMax` 入库（探针说了算，§4bis.5）；② 把热线窗改用 19px 带
+  （抖动误关窗）；③ 窗状态放模块级（同进程连跑多局串味，违 AGENTS §2.2）；④ 靠 registry 反查
+  shooter（交棒局漏窗且无声）；⑤ 给 pickup 列留「公式侧改写 pickupDist」的退路
+  （`pickupDist` 带 −1 哨兵、曼哈顿口径、每行采样 ⇒ 与切比雪夫逐拍累加不同口径，替代式会漏哨兵
+  守卫 = 清场反被罚最重）。
+- **顺带修**：`worker/scripts/regen_reward_golden.py` 的 `ROOT`（`parent.parent` 在 2026-09 包化后
+  算成 `nn-training/worker` ⇒ golden 静默写到无人读的路径，bump 版本后测试照旧红）→ `parents[2]`。
+- **证据/门禁**：根 `bun run check` 绿 · `bun run build` ✓ · `freeze:check`
+  FROZEN-SIGNATURE OK · nn `pytest tests/biz tests/worker tests/trainer` 0 fail ·
+  golden 64/64 逐位对账 · 新用例 `tests/sim/metrics-v11-hotlane.test.ts`（25 条：共享核 +
+  真实 rollout **金标** + 单实现哨兵 + 同进程隔离）。
+- **自审发现三条（2026-10-10）**：① **§3.5 新① 跨链 parity 判据作废**——训练链决策处
+  `sampleCat`（采样）、评估链 `argmaxCat`（greedy），同 (stage, seed) 本就是两局不同对局
+  （s0/13 rollout 2161t/nearSq 30 vs eval 211t/0），且旧用例两个 seed 两侧恰好都取 0 ⇒
+  **空洞断言**；改为「链内确定性金标 + 跨链同名单实现哨兵」，跨链逐值相等不再作判据
+  （跨链 parity 必须**同模式**，等式断言先证**非空洞**）。② 星盾那条 `player_hit` push 漏
+  `bulletOwnerId`——既有哨兵正则只匹配**前缀**故照绿，靠新加的计数哨兵（==3）才抓到。
+  ③ `worker/scripts/regen_reward_golden.py` 的 `ROOT` 包化后错算 ⇒ golden 静默写错路径。
+- **指针**：全文（规格 / lockstep 十处 / 探针两臂读数 / 未跑项 / 违反后果）→
+  `docs/nn/engineering.md` §73 · 计划与两轮评审处置 → `plan/metrics-v11-hotlane.plan.md`
+  §6/§7 + `plan/metrics-v11-hotlane.review-buffy.md`。
