@@ -127,7 +127,9 @@ GONE_FROM_STEPS = ("common", "backup_weights", "_MODE_BACKUP_PREFIX")
 #: 本模块允许的**延迟** import 目标（方法体内；那是原有的注入面）。
 DELAYED_IMPORTS = frozenset(
     {
-        "remote.hub_client",  # `_ensure_ts_code` → pack_ts_code_zip（本模块唯一的 remote 触点）
+        # `_ensure_ts_code` → published_ts_code_zip（本模块唯一的 remote 触点；
+        # 2026-10-10 P1 起 TS 运行时也走集群会话快照，原注入点 `remote.hub_client` 随之下移）
+        "remote.code_snapshot",
         "worker.iter_job",  # `_export_offline_bundle` → build_iter_spec
         "worker.plan",  # `_export_offline_bundle` → build_plan / dump_plan / planned_iters / RUN_NODE_LABEL
         "worker.resume",  # `_volume_plan_block` → trailing_samples_per_game
@@ -399,28 +401,62 @@ def test_volume_plan_block_gates_run_from_the_new_home() -> None:
 
 
 def test_ensure_ts_code_cache_semantics(monkeypatch, tmp_path) -> None:
-    """★ `_ensure_ts_code` 真跑：seam = `remote.hub_client.pack_ts_code_zip`（**延迟** import 的面）。
+    """★ `_ensure_ts_code` 真跑：seam = `remote.code_snapshot.published_ts_code_zip`（**延迟** import 的面）。
 
     顺带钉住 S4 的老事故形状：seam 若被搬到这里却仍打旧家命名空间，会**静默空操作**——
-    所以这里直接断言「注入点就是实现模块」。
+    所以这里直接断言「注入点就是实现模块」。★ 2026-10-10（P1）：TS 运行时也走集群会话快照，
+    注入点从 `remote.hub_client.pack_ts_code_zip` 上移到 `remote.code_snapshot`（`_ensure_ts_code`
+    只与那一个函数打交道：快照优先 / 缺失回落都封在它里面）。
     """
-    import remote.hub_client as hub_client
+    import remote.code_snapshot as code_snapshot
     from trainer.loop_export import TrainingExport
 
     calls: list[str] = []
 
-    def fake_pack(repo_root: Any, zip_path: Any, *, log: Any) -> str:
-        calls.append(str(zip_path))
-        return "deadbeef"
+    def fake_published(job_root: Any, *, repo_root: Any, log: Any) -> tuple[Path, str, bool]:
+        calls.append(str(job_root))
+        return Path(job_root) / "ts_code.zip", "deadbeef", False
 
-    monkeypatch.setattr(hub_client, "pack_ts_code_zip", fake_pack)
+    monkeypatch.setattr(code_snapshot, "published_ts_code_zip", fake_published)
     obj = _stub()
     obj._ts_code_sha256 = ""
     cast(Any, TrainingExport._ensure_ts_code)(obj, str(tmp_path), log=lambda m: None)
     assert obj._ts_code_sha256 == "deadbeef"
     assert obj._ts_code_zip_path == Path(tmp_path) / "ts_code.zip"
     cast(Any, TrainingExport._ensure_ts_code)(obj, str(tmp_path), log=lambda m: None)  # 第二次
-    assert len(calls) == 1, "缓存没生效——第二次又打了一遍 zip"
+    assert len(calls) == 1, "缓存没生效——第二次又走了一遍发布路径"
+
+
+def test_ensure_ts_code_falls_back_through_the_snapshot_seam(monkeypatch, tmp_path) -> None:
+    """★ 真跑到底（不打桩）：快照不可知 ⇒ per-course 打包落在 job_root，且**不建锚**。
+
+    这是 `_ensure_ts_code` 与快照模块之间的真接线（上面那条只钉注入点）：
+    `BCITY_CODE_SNAPSHOT_DIR` 指到一个空目录 ⇒ 走 `published_ts_code_zip` 的回落支，
+    真打一份 zip 出来（seam = `code_snapshot.pack_ts_code_zip`，**延迟** import 的面）。
+    """
+    import remote.code_snapshot as code_snapshot
+    from trainer.loop_export import TrainingExport
+
+    snap_dir = tmp_path / "no-snapshot"
+    monkeypatch.setenv("BCITY_CODE_SNAPSHOT_DIR", str(snap_dir))
+    lines: list[str] = []
+
+    def fake_pack_ts(repo_root: Any, zip_path: Any, *, log: Any) -> str:
+        Path(zip_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(zip_path).write_bytes(b"PK\x03\x04-ts")
+        return "cafebabe"
+
+    monkeypatch.setattr(code_snapshot, "pack_ts_code_zip", fake_pack_ts)
+    job_root = tmp_path / "traj" / "course" / "remote-jobs"
+    obj = _stub()
+    obj._ts_code_sha256 = ""
+    cast(Any, TrainingExport._ensure_ts_code)(obj, str(job_root), log=lines.append)
+    assert obj._ts_code_sha256 == "cafebabe"
+    assert obj._ts_code_zip_path == job_root / "ts_code.zip"
+    assert obj._ts_code_zip_path.is_file()
+    # 回落必须**响亮**（形态判据：只看 WARN 前缀，不钉整句话——文本断言预算只许降），且绝不建锚
+    assert any(m.startswith("[run_rl] WARN: 集群代码快照") for m in lines), lines
+    assert not (snap_dir / code_snapshot.META_NAME).exists()
 
 
 def test_export_weights_runs_and_log_seam_lands_here(monkeypatch, tmp_path) -> None:

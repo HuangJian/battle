@@ -2,7 +2,8 @@
 
 这一簇 4 个成员共享一个判据：**「这一轮要给出去的东西」**——把产物打成能被别人拿走 / 上传的东西。
 
-- `_ensure_ts_code`：把 rollout 用的 TS 运行时打成 `ts_code.zip`（内容寻址，同源码只传一次）。
+- `_ensure_ts_code`：把 rollout 用的 TS 运行时打成 `ts_code.zip`（内容寻址，同源码只传一次；
+  2026-10-10 起与 `code.zip` 共用**集群会话快照**，见 `remote/code_snapshot.py`）。
 - `_volume_plan_block`：离线计划里必须带上的**动态采集块**——节点没有 hub 的 jsonl，est 只能被钉在
   计划里（`--stages` 不可解析 / est ≤ 0 一律**响亮退出**，静默降级回老口径正是要防的事）。
 - `_export_offline_bundle`：`--export-bundle`——it..it+n-1 打成**可上传云机**的全离线任务包。
@@ -76,14 +77,21 @@ class TrainingExport:
         的链路**零第三方运行时依赖**（非相对 import 只有 node 内建 `fs`/`path`），所以
         打包即可，云机不必装依赖（plan §5.3）。内容固定时间戳 + 内容寻址 sha，
         同源码反复跑只传一次。
+
+        ★ 2026-10-10（plan/cluster-code-snapshot 的 P1）：与 `code.zip` **同一个会话快照**——
+        原来是 per-course 同构缺陷（同一个 hub 上两门课的 rollout 跑在两份 TS 上）。
+        快照优先；缺失/坏 ⇒ 回落 per-course 打包 + WARN；消费侧**只读、永不换代**
+        （见 `remote/code_snapshot.py::published_ts_code_zip`）。进程内缓存保留：一进程一份。
         """
         if str(getattr(self, "_ts_code_sha256", "") or ""):
             return
-        from remote.hub_client import pack_ts_code_zip
+        from remote.code_snapshot import published_ts_code_zip
 
         repo_root = Path(__file__).resolve().parents[2]  # nn-training/trainer/x.py -> 仓根
-        zp = Path(job_root) / "ts_code.zip"
-        self._ts_code_sha256 = pack_ts_code_zip(repo_root, zp, log=log)
+        zp, sha, _from_snapshot = published_ts_code_zip(
+            job_root, repo_root=repo_root, log=lambda m: log(f"[run_rl] {m}")
+        )
+        self._ts_code_sha256 = sha
         self._ts_code_zip_path = zp
 
     def _volume_plan_block(self) -> dict | None:

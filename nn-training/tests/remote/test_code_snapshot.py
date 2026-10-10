@@ -20,11 +20,20 @@ from remote import code_snapshot as cs
 
 
 def _fake_repo(tmp_path: Path) -> Path:
-    """最小可打包仓：`<root>/nn-training/**`（快照字节非空）。"""
+    """最小可打包仓：`code.zip` 用 `<root>/nn-training/**`，`ts_code.zip` 用 `<root>/src|tools|…`。
+
+    ★ 2026-10-10（P1）：两件物料都得打得出。`pack_ts_code_zip` 对 `src/` · `tools/` ·
+    `src/nn/conv/prebuilt/` 三处是**硬要求**（缺一抛 `HubClientError`）——夹具不补齐，
+    每个用例都会落到「ts 打包失败」那条降级分支上，ts 的快照路径就永远测不到。
+    """
     nn = tmp_path / "nn-training"
     (nn / "curricula").mkdir(parents=True)
     (nn / "trainer.py").write_text("x = 1\n", encoding="utf-8")
     (nn / "curricula" / "c.jsonc").write_text("{}\n", encoding="utf-8")
+    (tmp_path / "tools" / "sim").mkdir(parents=True)
+    (tmp_path / "tools" / "sim" / "export-rl-rollout.ts").write_text("export const x = 1\n", encoding="utf-8")
+    (tmp_path / "src" / "nn" / "conv" / "prebuilt").mkdir(parents=True)
+    (tmp_path / "src" / "main.ts").write_text("export const y = 2\n", encoding="utf-8")
     return tmp_path
 
 
@@ -292,3 +301,120 @@ def test_current_code_zip_path_prefers_snapshot(tmp_path: Path, monkeypatch: pyt
     snap = cs.ensure_cluster_snapshot(anchor_kind="hub", repo_root=snap_source)
     monkeypatch.setenv("BCITY_CODE_SNAPSHOT_DIR", str(cs.snapshot_dir(snap_source)))
     assert cs.current_code_zip_path(job_root) == snap.zip_path
+
+
+# ------------------------------------------------- TS 运行时（P1：与 code.zip 同一份会话快照）
+
+
+def test_snapshot_packs_both_artifacts(tmp_path: Path) -> None:
+    """一次 `ensure` 产出两件：`code.<sha12>.zip` + `ts_code.<sha12>.zip`，且元数据/读面同源。"""
+    root = _fake_repo(tmp_path)
+    snap = cs.ensure_cluster_snapshot(anchor_kind="hub", repo_root=root)
+    assert snap.ts_zip_path is not None and snap.ts_zip_path.is_file()
+    assert snap.ts_zip_path.name.startswith(cs._TS_ZIP_PREFIX)
+    assert snap.ts_zip_path.name != snap.zip_path.name  # 两族文件名不可能互撞
+    assert snap.ts_sha256 and snap.ts_bytes > 0
+    assert snap.ts_sha256[:12] in snap.ts_zip_path.name  # 内容寻址：文件名 = 内容
+    meta = _meta(root)
+    assert meta["ts_zip"] == snap.ts_zip_path.name
+    assert meta["ts_sha256"] == snap.ts_sha256
+    got = cs.read_cluster_snapshot(root)
+    assert got is not None and got.ts_zip_path == snap.ts_zip_path
+    assert got.ts_sha256 == snap.ts_sha256 and got.ts_bytes == snap.ts_bytes
+
+
+def test_ts_part_is_best_effort_and_does_not_block_code_snapshot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ts 打包失败 ⇒ code.zip 快照照常建立（只 WARN + ts 字段留空）——hub 起不来代价更高。"""
+    root = _fake_repo(tmp_path)
+    lines: list[str] = []
+
+    def boom(repo_root: object, zip_path: object, *, log: object = None) -> str:
+        raise RuntimeError("no bun / no src")
+
+    monkeypatch.setattr(cs, "pack_ts_code_zip", boom)
+    snap = cs.ensure_cluster_snapshot(anchor_kind="hub", log=lines.append, repo_root=root)
+    assert snap.zip_path.is_file() and snap.sha256  # 关键件在
+    assert snap.ts_zip_path is None and snap.ts_sha256 == "" and snap.ts_bytes == 0
+    # 降级必须**响亮**（形态判据：只看 WARN 前缀，不钉整句话——文本断言预算只许降，见
+    # `tests/test_source_text_assert_budget.py`）
+    assert any(m.startswith("[code-snapshot] WARN: TS") for m in lines), lines
+    meta = _meta(root)
+    assert meta["ts_zip"] == "" and meta["ts_sha256"] == ""
+    got = cs.read_cluster_snapshot(root)
+    assert got is not None and got.ts_zip_path is None  # 读面把「没有 ts 件」如实报出来
+    assert _log_fields(lines[-1])["ts"] == "none"
+
+
+def test_published_ts_code_zip_prefers_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """有快照 ⇒ TS 走快照（会话冻结），**不**在 job_root 里留 per-course 的那份。"""
+    snap_source = _fake_repo(tmp_path / "src")
+    snap = cs.ensure_cluster_snapshot(anchor_kind="hub", repo_root=snap_source)
+    monkeypatch.setenv("BCITY_CODE_SNAPSHOT_DIR", str(cs.snapshot_dir(snap_source)))
+    job_root = tmp_path / "traj" / "course" / "remote-jobs"
+    path, sha, used = cs.published_ts_code_zip(
+        job_root, repo_root=snap_source, log=lambda _m: None
+    )
+    assert used is True and path == snap.ts_zip_path and sha == snap.ts_sha256
+    assert not (job_root / "ts_code.zip").exists()
+
+
+def test_published_ts_code_zip_falls_back_without_creating_an_anchor(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """无快照 ⇒ 回落 per-course 打包 + WARN，且**绝不**建快照（与 code 件同规）。"""
+    snap_dir = tmp_path / "snap"
+    monkeypatch.setenv("BCITY_CODE_SNAPSHOT_DIR", str(snap_dir))
+    repo = _fake_repo(tmp_path / "repo")
+    job_root = repo / "tmp" / "course" / "remote-jobs"
+    lines: list[str] = []
+    path, sha, used = cs.published_ts_code_zip(job_root, repo_root=repo, log=lines.append)
+    assert used is False and path == job_root / "ts_code.zip" and path.is_file() and sha
+    assert lines and lines[0].startswith("WARN: 集群代码快照缺失")
+    assert not (snap_dir / cs.META_NAME).exists()
+
+
+def test_published_ts_code_zip_rejects_a_corrupt_ts_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """ts 件被截断（元数据 sha 没变）⇒ 消费点核验拦下 ⇒ 回落 per-course。
+
+    设计上是**故意**把 ts 的核验放在这里而不是 `read_*`：读面带 code.zip 已经哈希 1.4MB，
+    再叠 2.5MB 的 ts 就是给不关心 ts 的调用方白付（见 `CodeSnapshot.ts_sha256` 注释）。
+    """
+    snap_source = _fake_repo(tmp_path / "src")
+    snap = cs.ensure_cluster_snapshot(anchor_kind="hub", repo_root=snap_source)
+    monkeypatch.setenv("BCITY_CODE_SNAPSHOT_DIR", str(cs.snapshot_dir(snap_source)))
+    assert snap.ts_zip_path is not None
+    snap.ts_zip_path.write_bytes(b"PK\x03\x04 truncated")
+    # 读面只说「文件在」（形状检查），不假装它能用：
+    got = cs.read_cluster_snapshot(snap_source)
+    assert got is not None and got.ts_zip_path is not None
+    job_root = tmp_path / "traj" / "course" / "remote-jobs"
+    lines: list[str] = []
+    path, sha, used = cs.published_ts_code_zip(job_root, repo_root=snap_source, log=lines.append)
+    assert used is False and path == job_root / "ts_code.zip" and path.is_file()
+    # 回落打的是**同一个源码根** ⇒ 固定时间戳打包器给同一个 sha（离线/内容寻址的既有性质）：
+    # 这里要比的是「用的是哪份文件」，不是 sha 值——sha 相同恰恰说明回落没换掉内容。
+    assert sha == snap.ts_sha256
+    assert any(m.startswith("WARN: 集群快照里的 ts_code") for m in lines), lines
+
+
+def test_prune_keeps_both_families(tmp_path: Path) -> None:
+    """两族各自的保留窗口独立：ts 件变新不许把刚打的 `code.zip` 挤掉。"""
+    root = _fake_repo(tmp_path)
+    d = cs.snapshot_dir(root)
+    d.mkdir(parents=True)
+    old = time.time() - 10_000
+    for i in range(cs.KEEP_ZIPS + 2):
+        for name in (f"code.old{i:06d}.zip", f"ts_code.old{i:06d}.zip"):
+            p = d / name
+            p.write_bytes(b"stale")
+            os.utime(p, (old + i, old + i))
+    snap = cs.ensure_cluster_snapshot(anchor_kind="hub", repo_root=root)
+    assert len(sorted(d.glob("code.*.zip"))) == cs.KEEP_ZIPS
+    assert len(sorted(d.glob("ts_code.*.zip"))) == cs.KEEP_ZIPS
+    assert snap.zip_path.is_file() and snap.ts_zip_path is not None and snap.ts_zip_path.is_file()
+    assert not (d / "code.old000000.zip").exists()
+    assert not (d / "ts_code.old000000.zip").exists()

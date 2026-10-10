@@ -1,4 +1,4 @@
-"""remote/code_snapshot.py — 集群代码快照：会话级 `code.zip` 锚点。
+"""remote/code_snapshot.py — 集群代码快照：会话级 `code.zip` + `ts_code.zip` 锚点。
 
 **它解决什么**（2026-10-10 用户指令）：`code.zip` 原来是「每门课的训练进程首次 publish 时打一份」
 （`trainer/loop_remote_job.py` per-instance 去重 + per-course job_root；`trainer/bc_loop.py` 更是
@@ -6,11 +6,19 @@
 交替领到**两份不同代码**的 job（shard 行宽 / METRICS_VERSION / 奖励语义都可能不同）。
 用户口径：**trainer/hub 启动时打一份，只要不重启，所有课程都用它**——锚点从「课」上移到「会话」。
 
+**两件物料一起冻**（2026-10-10 同日 P1）：`code.zip`（Python 侧 AI 代码）与 `ts_code.zip`（节点跑
+rollout 的 TS 运行时，`trainer/loop_export.py::_ensure_ts_code` 原样是 per-course 同构缺陷：同一次
+`--discover` 会话里两门课的 rollout 跑在两份 TS 上，`worker/iter_rollout.py` 靠它跑 rollout）。
+两件在**同一次打包**里产出 ⇒ 它们的 `*_sha256` 天然同拍，且消费侧共用一条「快照优先 / 缺失回落 +
+WARN」的读法。两件**独立降级**：ts 打包失败（例如 checkout 里没有 `src/`）不影响 `code.zip`——
+只留 WARN 与空 ts 字段，消费侧回落 per-course（见 `_pack_and_publish`）。
+
 ## 谁在什么时候动它
 
 ```
 启动路径（ensure）        hub/boot.py · trainer/run_rl_cluster.py · trainer/run_rl.py（含导出进程）
 消费路径（read 只读）      trainer/loop_remote_job.py（PPO publish）· trainer/bc_loop.py（BC publish）
+                          trainer/loop_export.py（TS 运行时，P1）
                           hub/queue_observe.py::shared_code_zip（GET /code 的取件口）
 ```
 
@@ -27,26 +35,27 @@
 ## 载体：为什么是**内容寻址**
 
 ```
-<repo>/tmp/.code-snapshot/snapshot.json      # 元数据（最后原子写；指向下面那份 zip）
-<repo>/tmp/.code-snapshot/code.<sha12>.zip   # 快照字节（≈1.4MB；文件名 = 内容 sha 前缀）
-<repo>/tmp/.code-snapshot/.pack.lock         # 抢锚锁
+<repo>/tmp/.code-snapshot/snapshot.json          # 元数据（最后原子写；指向下面两份 zip）
+<repo>/tmp/.code-snapshot/code.<sha12>.zip       # Python 代码快照（≈1.4MB）
+<repo>/tmp/.code-snapshot/ts_code.<sha12>.zip    # TS 运行时快照（≈2.5MB）
+<repo>/tmp/.code-snapshot/.pack.lock             # 抢锚锁
 ```
 
-消费者把 `(zip_path, sha256)` **缓存在自己的进程里**（`_code_zip_path` / `_code_sha256`）。若文件名
-固定为 `code.zip`，「旧锚死亡 → 下一个启动者重打」就会 `os.replace` 掉**同一个路径**——活着的消费者
-下一轮 publish 的 `manifest.code_sha256` 还是旧的、上传的字节却已经是新的：云端 `ensure_code`
-逐候选按 manifest 的 sha 选件，必对不上，报错还指向「传输损坏」（`remote-transport.md:1943`）。
-内容寻址把「文件身份 = 内容」钉死（旧副本保留 ⇒ 缓存永不失配），顺带消灭「半截 zip 被读到」
-（先写临时文件，`snapshot.json` **最后**替换）。
+消费者把 `(zip_path, sha256)` **缓存在自己的进程里**（`_code_zip_path` / `_code_sha256`、
+`_ts_code_zip_path` / `_ts_code_sha256`）。若文件名固定为 `code.zip`，「旧锚死亡 → 下一个启动者重打」
+就会 `os.replace` 掉**同一个路径**——活着的消费者下一轮 publish 的 `manifest.code_sha256` 还是旧的、
+上传的字节却已经是新的：云端 `ensure_code` 逐候选按 manifest 的 sha 选件，必对不上，报错还指向
+「传输损坏」（`remote-transport.md:1943`）。内容寻址把「文件身份 = 内容」钉死（旧副本保留 ⇒ 缓存
+永不失配），顺带消灭「半截 zip 被读到」（先写临时文件，`snapshot.json` **最后**替换）。
 
 > 注意分工：**内容寻址只用于「字节的身份」**，**不用来决定「是否重打」**。「改代码后开新课」
 > 必须继续拿到旧代码——那正是本模块存在的理由。
 
 ## 分层与依赖
 
-住 `remote/`（L3）：打包器 `pack_code_zip` 在 `remote/hub_client.py`（L1），而 `common/` 是 L0
-（stdlib-only，不得上溯）⇒ 住 common 会造 `common → remote` 的上向边。`hub(L4)/trainer(L4) → remote(L3)`
-是既有方向（先例：`hub/boot.py` import `remote.push_dispatch`）。
+住 `remote/`（L3）：打包器 `pack_code_zip` / `pack_ts_code_zip` 在 `remote/hub_client.py`（L1），
+而 `common/` 是 L0（stdlib-only，不得上溯）⇒ 住 common 会造 `common → remote` 的上向边。
+`hub(L4)/trainer(L4) → remote(L3)` 是既有方向（先例：`hub/boot.py` import `remote.push_dispatch`）。
 
 探活**不新造**：`common.pid_probe.pid_alive`（跨平台，Windows 走 TerminateProcess 语义的探测）与
 `common.instance_lock.proc_cmdline`（POSIX `/proc`；Windows 先 `wmic`、被移除的新机回落 PowerShell）。
@@ -68,7 +77,8 @@ from pathlib import Path
 from common.hashing import sha256_file
 from common.instance_lock import proc_cmdline, read_lock
 from common.pid_probe import pid_alive
-from remote.hub_client import pack_code_zip
+from common.protocol import TS_CODE_NAME
+from remote.hub_client import pack_code_zip, pack_ts_code_zip
 
 __all__ = [
     "SNAPSHOT_DIR_NAME",
@@ -76,6 +86,7 @@ __all__ = [
     "current_code_zip_path",
     "ensure_cluster_snapshot",
     "published_code_zip",
+    "published_ts_code_zip",
     "read_cluster_snapshot",
     "snapshot_dir",
 ]
@@ -88,6 +99,7 @@ SNAPSHOT_PROTO = 1
 META_NAME = "snapshot.json"
 LOCK_NAME = ".pack.lock"
 _ZIP_PREFIX = "code."
+_TS_ZIP_PREFIX = "ts_code."
 _ZIP_SUFFIX = ".zip"
 #: 保留的快照 zip 份数（按 mtime 留最近 N 份；旧锚的副本还可能在活着的消费者手里）。
 KEEP_ZIPS = 4
@@ -117,6 +129,15 @@ class CodeSnapshot:
     anchor_cmdline_sha12: str
     #: 本次调用是「复用盘上那份」还是「新打了一份」。
     reused: bool
+    #: TS 运行时快照（P1）。**可为 None**：ts 打包是 best-effort（缺 `src/` 之类只 WARN），
+    #: 且坏掉的 ts 件不该拖垮 `code.zip` ⇒ 两件独立降级。`None` ⇒ 消费侧回落 per-course。
+    ts_zip_path: Path | None = None
+    #: 元数据里记的 ts zip sha256（**不在 `read_*` 里核验**：读面带 code.zip 一次哈希是 1.4MB，
+    #: 再加 2.5MB 的 ts 就白付在两件都不看的调用方身上；核验推迟到 `published_ts_code_zip`，
+    #: 它每个进程只被调一次——`_ensure_ts_code` 有进程内缓存）。
+    ts_sha256: str = ""
+    #: ts zip 字节数（0 = 不可知/缺席）。
+    ts_bytes: int = 0
 
 
 def _repo_root_default() -> Path:
@@ -146,6 +167,11 @@ def _pack_root(repo_root: str | Path | None = None) -> Path:
     """被打包的源码根（`pack_code_zip` 的 `nn_root`）。"""
     root = Path(repo_root) if repo_root is not None else _repo_root_default()
     return root / "nn-training"
+
+
+def _pack_repo_root(repo_root: str | Path | None = None) -> Path:
+    """`pack_ts_code_zip` 的 `repo_root`（它打的是 `<repo>/src` + `<repo>/tools`）。"""
+    return Path(repo_root) if repo_root is not None else _repo_root_default()
 
 
 def _cmdline_sha12(pid: int) -> str:
@@ -201,6 +227,10 @@ def read_cluster_snapshot(
     元数据不自洽（zip 缺失 / sha 与文件实际字节不符 / 文件名带路径分隔符）⇒ `None`；
     锚已死不影响返回——`anchor_alive=False` 由调用方决定怎么用（见模块头注）。
     `strict_anchor=True` 时才花一次命令行核验（`ensure` 用；读面默认便宜口径）。
+
+    TS 件（`ts_zip_path`）只做**形状 + 存在性**检查（名字前缀/无路径分隔符/文件在），
+    **不哈希**：见 `CodeSnapshot.ts_sha256` 的注释（核验推迟到唯一消费者
+    `published_ts_code_zip`）。ts 缺失/坏 **不影响** 本函数的返回值——它是可降级的第二件。
     """
     d = snapshot_dir(repo_root)
     meta = _load_meta(d / META_NAME)
@@ -230,7 +260,29 @@ def read_cluster_snapshot(
         anchor_alive=_anchor_alive(pid, fp, strict=strict_anchor),
         anchor_cmdline_sha12=fp,
         reused=True,
+        ts_zip_path=_ts_zip_path_of(d, meta),
+        ts_sha256=str(meta.get("ts_sha256") or ""),
+        ts_bytes=int(meta.get("ts_bytes") or 0),
     )
+
+
+def _ts_zip_path_of(d: Path, meta: dict) -> Path | None:
+    """元数据里的 ts 件 → 路径（形状不合/文件不在 ⇒ None）。
+
+    与 code 件同一条防手改纪律（只认同目录内的 `ts_code.` 前缀文件名）；**不哈希**（见
+    `read_cluster_snapshot` 的 docstring）。
+    """
+    ts_name = str(meta.get("ts_zip") or "")
+    if (
+        not ts_name
+        or "/" in ts_name
+        or "\\" in ts_name
+        or not ts_name.startswith(_TS_ZIP_PREFIX)
+        or not ts_name.endswith(_ZIP_SUFFIX)
+    ):
+        return None
+    p = d / ts_name
+    return p if p.is_file() else None
 
 
 def _acquire_pack_lock(lock_path: Path, log: Callable[[str], None]) -> int | None:
@@ -273,32 +325,32 @@ def _write_meta(d: Path, meta: dict, log: Callable[[str], None]) -> None:
 
 
 def _prune(d: Path, keep: int, log: Callable[[str], None]) -> None:
-    """只留最近 `keep` 份快照 zip（best-effort：删不动只 WARN，不影响本次快照）。"""
-    try:
-        zips = sorted(
-            (p for p in d.glob(f"{_ZIP_PREFIX}*{_ZIP_SUFFIX}") if p.is_file()),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True,
-        )
-    except OSError:
-        return
-    for old in zips[keep:]:
+    """每族（`code.*` / `ts_code.*`）只留最近 `keep` 份快照 zip（best-effort：删不动只 WARN）。
+
+    两族**分开**算保留窗口：混在一起按 mtime 排会把「刚打的 code.zip」挤掉（ts 件更新时更常见）。
+    """
+    for prefix in (_ZIP_PREFIX, _TS_ZIP_PREFIX):
         try:
-            old.unlink()
-            log(f"[code-snapshot] 清理旧快照 {old.name}（保留最近 {keep} 份）")
-        except OSError as e:
-            log(f"[code-snapshot] WARN: 旧快照 {old.name} 删不掉（{e}）")
+            zips = sorted(
+                (p for p in d.glob(f"{prefix}*{_ZIP_SUFFIX}") if p.is_file()),
+                key=lambda p: p.stat().st_mtime,
+                reverse=True,
+            )
+        except OSError:
+            continue
+        for old in zips[keep:]:
+            try:
+                old.unlink()
+                log(f"[code-snapshot] 清理旧快照 {old.name}（保留最近 {keep} 份）")
+            except OSError as e:
+                log(f"[code-snapshot] WARN: 旧快照 {old.name} 删不掉（{e}）")
 
 
-def _pack_and_publish(
-    d: Path, repo_root: str | Path | None, *, anchor_kind: str, log: Callable[[str], None]
-) -> CodeSnapshot:
-    """打一份新快照并原子发布（内容寻址的文件名 + 最后写元数据）。"""
-    d.mkdir(parents=True, exist_ok=True)
-    stamp = f"{os.getpid()}.{int(time.time() * 1000)}"
-    tmp_zip = d / f"{_ZIP_PREFIX}{stamp}.tmp"
-    sha = pack_code_zip(_pack_root(repo_root), tmp_zip, log=log)
-    final = d / f"{_ZIP_PREFIX}{sha[:12]}{_ZIP_SUFFIX}"
+def _publish_zip(
+    d: Path, tmp_zip: Path, sha: str, prefix: str, log: Callable[[str], None]
+) -> Path:
+    """把刚打好的临时 zip 落到内容寻址的最终名（同名先验 sha；不需要写就删临时件）。"""
+    final = d / f"{prefix}{sha[:12]}{_ZIP_SUFFIX}"
     # 内容寻址的纪律：同名 ≠ 同字节。同源码重打（打包器固定时间戳 ⇒ 同 sha）时不必写盘；
     # 但同名文件**必须先验 sha**——上一个副本可能是被截断/手改过的（自愈路径就落在这里）。
     if final.exists() and sha256_file(final) == sha:
@@ -306,12 +358,73 @@ def _pack_and_publish(
             tmp_zip.unlink()
         except OSError:
             pass
-    else:
-        os.replace(tmp_zip, final)
+        return final
+    os.replace(tmp_zip, final)
+    return final
+
+
+def _pack_one(
+    d: Path,
+    *,
+    prefix: str,
+    packer: Callable[[Path, Path], str],
+    stem: str,
+    log: Callable[[str], None],
+) -> tuple[Path, str, int]:
+    """打一份（`packer` 决定内容）→ 内容寻址发布 → `(最终路径, sha, 字节数)`。"""
+    stamp = f"{os.getpid()}.{int(time.time() * 1000)}"
+    tmp_zip = d / f"{prefix}{stem}.{stamp}.tmp"
+    sha = packer(d, tmp_zip)
+    final = _publish_zip(d, tmp_zip, sha, prefix, log)
+    return final, sha, final.stat().st_size
+
+
+def _pack_ts(
+    d: Path, repo_root: str | Path | None, log: Callable[[str], None]
+) -> tuple[Path, str, int] | None:
+    """打 TS 运行时快照（best-effort）：失败只 WARN 并返回 None。
+
+    为什么**不**让 ts 失败拖垮整份快照（与 `code.zip` 区别对待）：hub/trainer 启动不接受
+    「因为一个可选件打不出来就不起」，而且 ts 件坏掉的后果是**可恢复的**——消费侧
+    （`published_ts_code_zip`）会回落 per-course 打包，与改动前逐字节等价。反过来说
+    `code.zip` 失败必须抛（它是快照存在的理由）。
+    """
+    try:
+        return _pack_one(
+            d,
+            prefix=_TS_ZIP_PREFIX,
+            packer=lambda _d, p: pack_ts_code_zip(_pack_repo_root(repo_root), p, log=log),
+            stem="tmp",
+            log=log,
+        )
+    except Exception as e:  # 打包器可能抛 OSError/HubClientError/…，一律降级
+        log(
+            f"[code-snapshot] WARN: TS 运行时快照打包失败（{e}）——本会话 ts_code 回落 per-course；"
+            "code.zip 快照不受影响"
+        )
+        return None
+
+
+def _pack_and_publish(
+    d: Path, repo_root: str | Path | None, *, anchor_kind: str, log: Callable[[str], None]
+) -> CodeSnapshot:
+    """打一份新快照并原子发布（内容寻址的文件名 + 最后写元数据）。
+
+    两件物料**同一次调用**产出：`code.zip`（关键件，失败即抛）+ `ts_code.zip`（best-effort，
+    失败只 WARN ⇒ 该字段留空、消费侧回落）。
+    """
+    d.mkdir(parents=True, exist_ok=True)
+    final, sha, size = _pack_one(
+        d,
+        prefix=_ZIP_PREFIX,
+        packer=lambda _d, p: pack_code_zip(_pack_root(repo_root), p, log=log),
+        stem=str(os.getpid()),
+        log=log,
+    )
+    ts = _pack_ts(d, repo_root, log)
     now = time.time()
     # 先算成局部量再进元数据：同一次调用的返回值与写盘内容**同源**（不从字面量字典里回读，
     # 免得两个值哪天分叉，也免得 mypy 对 `dict[str, object]` 的索引抱怨）。
-    size = final.stat().st_size
     self_pid = os.getpid()
     self_fp = _cmdline_sha12(self_pid)
     meta = {
@@ -331,6 +444,10 @@ def _pack_and_publish(
         },
         "src_root": str(_pack_root(repo_root)),
         "commit": _git_head(repo_root),
+        # TS 件：缺席（打包失败）⇒ 这两个键留空串/0，读面据此给 `ts_zip_path=None`。
+        "ts_zip": ts[0].name if ts else "",
+        "ts_sha256": ts[1] if ts else "",
+        "ts_bytes": ts[2] if ts else 0,
     }
     _write_meta(d, meta, log)
     _prune(d, KEEP_ZIPS, log)
@@ -344,6 +461,9 @@ def _pack_and_publish(
         anchor_alive=True,
         anchor_cmdline_sha12=self_fp,
         reused=False,
+        ts_zip_path=ts[0] if ts else None,
+        ts_sha256=ts[1] if ts else "",
+        ts_bytes=ts[2] if ts else 0,
     )
 
 
@@ -402,11 +522,50 @@ def current_code_zip_path(job_root: str | Path) -> Path:
     return snap.zip_path if snap is not None else Path(job_root) / "code.zip"
 
 
+def published_ts_code_zip(
+    job_root: str | Path,
+    *,
+    repo_root: str | Path,
+    log: Callable[[str], None] = lambda _m: None,
+) -> tuple[Path, str, bool]:
+    """**消费路径**（TS 运行时）用的 `(ts_code.zip 路径, sha256, 是否快照)`。
+
+    与 `published_code_zip` 逐字同规（快照优先；缺失回落 per-course 打包 + 响亮 WARN；
+    **绝不建快照**）。两点差异，都是 ts 件的性质决定的：
+
+      * **这里才核验 ts 件的 sha**（`read_cluster_snapshot` 只做形状/存在性）：本函数每个
+        进程只被调一次（`_ensure_ts_code` 有进程内缓存），而读面带 code.zip 一次哈希已经
+        1.4MB——再叠 2.5MB 的 ts 就是给「两件都不看的调用方」白付（见 `CodeSnapshot.ts_sha256`）。
+        核验失败（被截断/手改）⇒ WARN + 回落 per-course：不把一份对不上 sha 的字节送去云端
+        （那会在云机侧报「传输损坏」，与本地实测不符的错指向）。
+      * ts 件**缺席**（打包时失败，`ts_zip_path=None`）与「没有快照」走同一条回落，措辞分开。
+
+    `repo_root` 只喂**打包侧**（`pack_ts_code_zip` 打 `<repo>/src` + `<repo>/tools`）；读侧与
+    `published_code_zip` 同规——走 `snapshot_dir()` 的环境变量可重定向口径（不取本参数）。
+    """
+    snap = read_cluster_snapshot()
+    if snap is not None and snap.ts_zip_path is not None:
+        if sha256_file(snap.ts_zip_path) == snap.ts_sha256:
+            return snap.ts_zip_path, snap.ts_sha256, True
+        log(
+            "WARN: 集群快照里的 ts_code 与元数据 sha 不符（被截断/手改？）——回落 per-course 打包；"
+            "建议重启 hub/trainer 重打快照"
+        )
+    else:
+        log(
+            "WARN: 集群代码快照缺失或不含 ts_code（remote/code_snapshot）——"
+            "回落 per-course 打包；会话中途改代码后新开的课会拿到不同 TS 运行时，建议重启 hub/trainer"
+        )
+    path = Path(job_root) / TS_CODE_NAME
+    return path, pack_ts_code_zip(_pack_repo_root(repo_root), path, log=log), False
+
+
 def _line(snap: CodeSnapshot, *, reused: bool) -> str:
+    ts = f"ts={snap.ts_sha256[:12]}" if snap.ts_sha256 else "ts=none"
     return (
         f"[code-snapshot] sha12={snap.sha256[:12]} packed_at={snap.packed_at:.0f} "
         f"anchor={snap.anchor_kind}/pid={snap.anchor_pid} reused={1 if reused else 0} "
-        f"bytes={snap.bytes} file={snap.zip_path.name}"
+        f"{ts} bytes={snap.bytes} file={snap.zip_path.name}"
     )
 
 
