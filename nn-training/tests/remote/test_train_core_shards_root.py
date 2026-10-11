@@ -47,4 +47,7 @@ def test_it_takes_a_str_or_path_and_returns_str(tmp_path: Path) -> None:
     job = tmp_path / "job"
     assert isinstance(ppo_shards_root(job, {}), str)
     assert isinstance(ppo_shards_root(str(job), {}), str)
-    assert ppo_shards_root(str(job), {"shards_root": Path("/x/y")}) == "/x/y"
+    # 平台中性：断言钉的是「Path 进 ⇒ str 出、**逐字透传**」，不是钉 POSIX 形态
+    # （Windows 的 `str(Path("/x/y"))` = `\x\y`；拿字面量 "/x/y" 比会在 Windows 恒红）
+    p = Path("/x/y")
+    assert ppo_shards_root(str(job), {"shards_root": p}) == str(p)
