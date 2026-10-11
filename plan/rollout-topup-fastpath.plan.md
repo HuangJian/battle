@@ -703,6 +703,26 @@ def verify_round(batch_specs: list[tuple[Path, dict]]) -> list[Path]:
 ⚠ **非 P0**：它是用户第 1 条的余项，与墙钟无关。若不顺路**可以后置**——
 但必须在 DoD 里可见（不能悄悄丢）。
 
+**落地（2026-10-11 第五刀）**：
+
+* 落点就是本文写的两处：`remote/job_fs.backup_failed_result(work_dir, jid, result, *, it, log)` +
+  回传落定处 `remote/job_round._on_settled` 的失败分支（`not out.ok`）。触发点实现时定位到的是
+  **落定回调**而不是 `post_result` 内部：async 模式下失败发生在上传线程，而
+  `pack_result_v2(result)` 的全局唯一入口在那里（`post_result` 内部只拿得到已编码的 `req_body`）。
+* **落的是线上体**（`pack_result_v2` 的字节，与 POST 逐字节相同）⇒ 恢复 = 原样重发；
+  文件名 `it<N>-<jid>-<sha256:16>.result.v2`；原子落盘（临时名 + `os.replace`）。
+  （不落 `_result.json`：那是 dict，重发还得再过一遍编码器——而那正是失败现场最不确定的一环。）
+* 三条纪律逐条对上：绝不抛（写不成只 WARN，回调还跑在上传线程里）· 不改 job 状态 · 不进任何门禁。
+  成功路径**一个字节都不多写**（用例钉住）。
+* 回收按本文写的走：备份住 `<job_dir>/backup/` ⇒ `prune_job_dirs` 随 job 目录回收（无需新豁免）。
+* 新边：`remote/job_round` → `remote/job_fs`（DAG 守则的允许名单已同步 + 写明理由：job 目录布局
+  本就归 job_fs，放这一轮里会把布局知识漏进 L4）。
+* 判据：`tests/remote/test_result_backup.py`（5 例）。
+* ⚠ **没做**（明写，见 `docs/nn/remote-transport.md` §81 的「已知边界」）：① 同 job 重领时
+  `download.py` 清场重建 job 目录 ⇒ 备份随之消失（它是恢复窗口，不是永久档案）；
+  ② `drain()` 超时（在飞结果不落定）那一档**不**写备份；
+  ③ 云机/离线腿没有把 `backup/` 带回本机的通道（目前主要服务可直接登机器的现场）。
+
 ### 3.7 P1-2 — 补差批的池宽与局数解耦
 
 `iter_rollout.py:802-809` 的 `workers = min(requested, len(argvs), …)` 对**首批**是对的，
@@ -945,7 +965,8 @@ def verify_round(batch_specs: list[tuple[Path, dict]]) -> list[Path]:
 | §3.2 `RoundContext`（批间复用） | ✅ **本轮已落** | `tests/remote/test_round_ctx.py`（新，3 例）；`remote/worker.py` 首批建 ctx、补差后 `close()`；字段收敛见 §3.2 落地段 |
 | §3.5 取消搬回（含 P0-1 读取根 + P0-3 空间口径） | ✅ **本轮已落** | `shards_root` 由产出方给出（`ppo_shards_root`）；批产出根镜像进轮 scratch；轮初清场 + PPO 后 `cleanup()`；判据迁移逐行在 §3.5b 回执 |
 | §3.4 轮末扫盘分组 | ✅ **本轮已落（有意降级为小形状）** | §3.5 的批镜像已自然给出「按批分组」；真正的重复读（同批 manifest 读两遍）用逐局画像消掉；装配契约写进 `remote/worker.py`。偏离与理由见 §3.4 末段 |
-| §3.6 回传失败备份 / §3.8 探针缓存（§3.2 后是冗余保险）/ §3.9 读数五分项 / §3.10 LAN 队列 | ⬜ 待取证 / 待排 | §3.7 已被 §3.2 吸收（见 §3.7 末注）；§3.9 的读数要等真机一轮才有意义（归因 G 还没被真机确证）；§3.10 取证不足则降级待立项 |
+| §3.6 回传失败备份（含已知边界） | ✅ **本轮已落** | `tests/remote/test_result_backup.py`（5 例，端到端走真 `run_one_round` + 真 `ResultUploader`）；全文 → `docs/nn/remote-transport.md` §81 |
+| §3.8 探针缓存（§3.2 后是冗余保险）/ §3.9 读数五分项 / §3.10 LAN 队列 | ⬜ 待取证 / 待排 | §3.7 已被 §3.2 吸收（见 §3.7 末注）；§3.9 的读数要等真机一轮才有意义（归因 G 还没被真机确证）；§3.10 取证不足则降级待立项 |
 
 ### 10.2 记录（AGENTS §4 / §15.5 要求，v3 整篇缺失 ⇒ v4 补齐）
 

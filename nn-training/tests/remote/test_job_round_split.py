@@ -87,10 +87,14 @@ ALIVE_FN = "_alive_log"
 ALIVE_TEXT = "polling hub"
 
 #: 本模块允许的顶层仓内依赖（多一个就说明搬多了/搬漏了）。
+#: `remote.job_fs`（2026-10-11，`plan/rollout-topup-fastpath` §3.6）：回传**失败**时把那一份备份到
+#: `<job_dir>/backup/` —— 「作业工作区怎么摆」本就是 job_fs 的职责（`_persist_result` 同族），
+#: 放在这一轮里会让 job 目录布局知识漏进 L4。
 ALLOWED_PROJECT_IMPORTS = {
     "common.protocol",
     "remote.bulk_sched",
     "remote.download",
+    "remote.job_fs",
     "remote.job_lifecycle",
     "remote.prefetch",
     "remote.result_upload",

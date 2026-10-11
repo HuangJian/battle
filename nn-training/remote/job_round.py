@@ -58,6 +58,7 @@ from common.protocol import (
 )
 from remote.bulk_sched import BULK_P2_PREFETCH, BulkPreemptError
 from remote.download import download_payload
+from remote.job_fs import backup_failed_result
 from remote.job_lifecycle import (
     _failure_detail,
     abandon_job,
@@ -306,6 +307,8 @@ def run_one_round(
     """
 
     jid = job["job_id"]
+    # 本轮的 it（回传失败备份的文件名要它；§3.6）：hub 派的 job 必带，缺了就算 0。
+    job_it = int((job.get("manifest") or {}).get("it") or 0)
     _wire_start(jid)  # 阶段占比（in/out/ppo/other）的 wall 从 claim 起算
     lease_token = str(job.get("lease_token", "") or "")
     claim_mode = str(job.get("status") or "ok")  # ok（独占）| backup（无租约副本）
@@ -404,8 +407,17 @@ def run_one_round(
         _t_ready = time.time()
 
         def _on_settled(_j: str, _out: Outcome, _t: float = _t_ready) -> None:
-            """绑住本 job 的 `wall_end`（默认参数而非闭包变量——B023 的口径）。"""
+            """绑住本 job 的 `wall_end`（默认参数而非闭包变量——B023 的口径）。
+
+            ★ §3.6（用户第 1 条后半句）：回传**失败**时才把那一份备份到 `<job_dir>/backup/`
+            ——尽力而为：只 WARN、不改 job 状态、不进任何门禁（`backup_failed_result` 自己也不抛）。
+            常态（成功）= 一个字节都不多写（`_persist_result` 的本地盘路径逐字不变）。
+            ⚠ 回调跑在**上传线程**里（sync 模式则在主线程），所以它绝不能抛：
+            `backup_failed_result` 自带兜底，`ResultUploader._settle` 另有一层。
+            """
             settle_result(_j, _out, _t, uploader=uploader, log=log)
+            if not _out.ok:
+                backup_failed_result(part_dir, _j, result, it=job_it, log=log)
 
         uploader.submit(
             UploadTask(
