@@ -402,7 +402,7 @@ from remote.worker_proc import (
 from remote.worker_proc import (
     supervise_worker as supervise_worker,
 )
-from worker.iter_rollout import resolve_bun, run_iter_rollout
+from worker.iter_rollout import RoundContext, resolve_bun, run_iter_rollout
 from worker.iter_topup import merge_iter_reports, topup_rollout
 
 # ------------------------------------------------------------------ PPO 执行
@@ -646,8 +646,11 @@ def run_job(
         if echo:
             log(f"job {jid}: kind=iter + echo——跳过 rollout（只验传输链）")
         else:
+            # 轮级资源（落点/TS 树/长驻池）在**首批**建、补差批复用（plan/rollout-topup-fastpath §3.2）：
+            # 池在 `finally` 里收（补差之后、PPO 之前）——不让 94 个常驻 bun 陪 PPO 吃内存。
+            rctx = RoundContext()
             iter_info = run_iter_rollout(
-                job_dir, manifest["rollout"], ts_dir=_ts_dir, log=log
+                job_dir, manifest["rollout"], ts_dir=_ts_dir, log=log, ctx=rctx
             )
             shard_dirs = list(iter_info["shard_dirs"])
             # ---- 动态采集的**有界多批补差**（2026-10-07，plan/rollout-stage-balance §4.4）----
@@ -655,16 +658,21 @@ def run_job(
             # 批子目录隔离（`topup1/`…）+ 全局 `--out` 续号 ⇒ 不覆盖、不重号。
             # `manifest["rollout"].volume` 缺席 = 老行为（逐字节不变）——它只由节点侧的
             # `plan.iter_spec` 从计划块合成（`kind=run`），hub 派发的 kind=iter 不带。
-            _extra = topup_rollout(
-                job_dir=job_dir,
-                spec=manifest["rollout"],
-                shard_dirs=shard_dirs,
-                ts_dir=_ts_dir,
-                log=log,
-                # 补差批按**首批实际用过的**宽度铺满（plan/rollout-topup-fastpath §3.3）：
-                # 缺口方程会把批越补越小，而批次级固定开销与批内局数无关。
-                width=int(iter_info.get("workers") or 0),
-            )
+            try:
+                _extra = topup_rollout(
+                    job_dir=job_dir,
+                    spec=manifest["rollout"],
+                    shard_dirs=shard_dirs,
+                    ts_dir=_ts_dir,
+                    log=log,
+                    # 补差批按**首批实际用过的**宽度铺满（plan/rollout-topup-fastpath §3.3）：
+                    # 缺口方程会把批越补越小，而批次级固定开销与批内局数无关。
+                    width=int(iter_info.get("workers") or 0),
+                    # 复用首批的轮级资源（探针结论 / TS 树家 / 长驻池）
+                    ctx=rctx,
+                )
+            finally:
+                rctx.close()  # 池：补差跑完就收（PPO 之前）
             if _extra is not None:
                 shard_dirs = [*shard_dirs, *list(_extra["shard_dirs"])]
                 iter_info["shard_dirs"] = list(shard_dirs)

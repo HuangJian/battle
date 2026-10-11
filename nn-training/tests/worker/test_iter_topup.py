@@ -90,8 +90,17 @@ class _FakeRunner:
         self.samples = dict(samples)
         self.calls: list[dict] = []
 
-    def __call__(self, job_dir, spec, *, ts_dir=None, log=lambda msg: None) -> dict:
-        self.calls.append({"job_dir": str(job_dir), "spec": spec, "rows": [list(r) for r in spec["argv"]]})
+    def __call__(
+        self, job_dir, spec, *, ts_dir=None, log=lambda msg: None, ctx=None
+    ) -> dict:
+        self.calls.append(
+            {
+                "job_dir": str(job_dir),
+                "spec": spec,
+                "rows": [list(r) for r in spec["argv"]],
+                "ctx": ctx,
+            }
+        )
         dirs: list[str] = []
         total = 0
         for row in spec["argv"]:
@@ -170,6 +179,32 @@ def _seed_pairs(dirs: list[str]) -> dict[int, list[int]]:
     for v in out.values():
         v.sort()
     return out
+
+
+def test_ctx_is_forwarded_to_every_batch(tmp_path: Path) -> None:
+    """`ctx` 必须透传给每一批（plan §3.2）：否则补差批又各自重建壳子（
+    探针 / TS 树 / **长驻池 94 个冷启动**）——现场最贵的那一段。
+
+    `None` 也要能跑（老调用逐字不变）。
+    """
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "init_weights.json").write_text("{}", encoding="utf-8")
+    spec = _plan_and_spec(job)
+    sentinel = object()
+    run = _FakeRunner()
+    info1 = run(job, spec, ts_dir=job)
+    topup_rollout(
+        job_dir=job,
+        spec=spec,
+        shard_dirs=list(info1["shard_dirs"]),
+        run_fn=run,
+        log=lambda m: None,
+        width=4,
+        ctx=sentinel,
+    )
+    assert run.calls[1:], "至少跑了一批补差"
+    assert all(c["ctx"] is sentinel for c in run.calls[1:]), "每一批都要把 ctx 传下去"
 
 
 def test_width_source_chain_is_explicit_then_spec_then_argv() -> None:

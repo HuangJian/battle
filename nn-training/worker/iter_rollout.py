@@ -38,6 +38,7 @@ import threading
 import time
 from collections.abc import Sequence
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
 from typing import Any, cast
@@ -768,12 +769,50 @@ def _make_pool(
     return serve_pool.make_pool(bun, ts_dir, workers, log, for_script=argvs[0][0])
 
 
+@dataclass
+class RoundContext:
+    """一轮 job 的**轮级**资源：首批解析一次，补差批复用（`plan/rollout-topup-fastpath` §3.2）。
+
+    为什么需要它（2026-10-11 现场）：补差批复用的是同一个 `run_iter_rollout`，于是**每一批**
+    都重付一遍「与批内局数无关」的开销——落点探针（8MB + fsync ×(1+候选数)）、TS 树安装、
+    权重镜像、以及最贵的**长驻池建池 + 冷启动**（94 个 bun：exec + traverse + wasm + attest×3）。
+    批越小这笔开销占比越高（it34 补差2 只有 **1 局**，却付了 48.9s 的壳子）⇒ 池的收益
+    （`docs/nn/runtime-opt.md` §20 的 1.59×）被「池的生命周期 = 批」吃掉了。
+
+    ⚠ 只装**轮级**的东西：`jd` / `s_layout` / `exec_dir` 是**批级**的（每批一个 `topup{k}/`，
+    各自的 scratch 私有目录 / `--out` 续号 / 轮末清理都属于批）。
+    ⚠ **池的所有权随 ctx 转移**：`ctx=None`（老调用）= 本轮自建自收（逐字今天）；
+    传 ctx = 调用方建、调用方在**补差跑完之后、PPO 之前** `close()`（`remote/worker.py`）
+    ——别让 94 个常驻 bun 陪 PPO 吃内存。
+    """
+
+    #: scratch 根（探针结论；`None` = 回退档：不换根 / 不搬 / 不 drain）。
+    root: Path | None = None
+    #: TS 树在 scratch 的家（按名寻址 ⇒ 跨批同一份）；`None` = 本轮未换根。
+    ts_home: Path | None = None
+    #: 长驻池（生命周期 = 轮）。
+    pool: Any = None
+    #: 轮级池宽（= 首批实际用过的那个数；补差批的满铺器拿它当 `width`）。
+    workers: int = 0
+    #: 首批是否已完成解析（探针 / TS 树）；补差批看到 `True` 就跳过那一整段。
+    resolved: bool = False
+    #: 探针耗时（读数用）。
+    probe_sec: float = 0.0
+
+    def close(self) -> None:
+        """收掉本 ctx 拥有的长驻池（幂等）。**不**动 scratch 上的产出（那是 §3.5 的事）。"""
+        pool, self.pool = self.pool, None
+        if pool is not None:
+            pool.close()
+
+
 def run_iter_rollout(
     job_dir: str | Path,
     spec: dict,
     *,
     ts_dir: str | Path | None = None,
     log=lambda msg: print(f"[iter] {msg}", flush=True),
+    ctx: RoundContext | None = None,
 ) -> dict[str, Any]:
     """执行整轮 rollout，返回 `{report, shard_dirs, rollout_sec, bun_version, game_secs}`。
 
@@ -849,56 +888,74 @@ def run_iter_rollout(
     s_layout: scratch.ScratchLayout | None = None
     gate = scratch.InstallGate()
     need = scratch.need_bytes_for(len(argvs))
-    # ---- 探针段**必须**有上界（2026-10-11，plan/rollout-topup-fastpath §3.1）----
-    # `open_scratch` 整段是这条热路径上**唯一**没有上界的一步：`probe_write_speed_mbps` 只有
-    # `except OSError`（挂住的挂载点既不返回也不抛），而它跑在下面两个 `call_bounded` **之外**。
-    # 现场形状：网络盘一抖，8MB + fsync 变成几十秒，而这笔等待**每批付一次**（1 局的补差批 48.9s）。
-    # 超界 ⇒ **逐字回退档**（`picked=None`：不换根/不搬/不 drain），并响亮记一笔 + 进 `probe_probe` 读数
-    # ——它是「盘抖动」的直接读数，不是失败（判据口径见 `game_watch.PROBE_CEILING_SEC`）。
-    picked = None
-    if argvs:
-        _probe_t0 = time.time()
-        _ok_probe, _probe_res = call_bounded(
-            partial(scratch.open_scratch, jd, need_bytes=need, log=rb.note),
-            float(game_watch.PROBE_CEILING_SEC),
-            name="scratch-probe",
-        )
-        if _ok_probe:
-            picked = _probe_res  # `ScratchLayout | None`（闸没过 = `None` = 回退档）
-            rb.add(
-                "probe_probe",
-                f"{'换根' if picked is not None else '原地'}｜探测 {time.time() - _probe_t0:.2f}s"
-                f"｜上界 {float(game_watch.PROBE_CEILING_SEC):g}s",
+    rctx = ctx if ctx is not None else RoundContext()
+    if not rctx.resolved:
+        rctx.workers = workers  # 轮级池宽：首批实际用过的那个数（补差批的满铺器拿它当 width）
+    # ---- 首批：解析**轮级**资源（探针 → TS 树）；补差批整段跳过（plan §3.2）----
+    # 探针段**必须**有上界（2026-10-11，plan/rollout-topup-fastpath §3.1）：`open_scratch` 整段是
+    # 这条热路径上**唯一**没有上界的一步（`probe_write_speed_mbps` 只有 `except OSError`，挂住的
+    # 挂载点既不返回也不抛），而它当时跑在下面两个 `call_bounded` **之外**。超界 ⇒ **逐字回退档**
+    # （不换根/不搬/不 drain），并响亮记一笔 + 进 `probe_probe` 读数——它是「盘抖动」的直接读数。
+    if not rctx.resolved:
+        _root: Path | None = None
+        if argvs:
+            _probe_t0 = time.time()
+            _ok_probe, _probe_res = call_bounded(
+                partial(scratch.open_scratch, jd, need_bytes=need, log=rb.note),
+                float(game_watch.PROBE_CEILING_SEC),
+                name="scratch-probe",
             )
-        else:
-            rb.add(
-                "probe_probe",
-                f"超界回退｜{float(game_watch.PROBE_CEILING_SEC):g}s 内没返回（盘抖的直接读数）",
-            )
-            rb.note(
-                f"WARN rollout scratch 探针超界（{float(game_watch.PROBE_CEILING_SEC):g}s 内没返回）"
-                "——本轮回落原地（网络盘）；这是**盘抖动的直接读数**，不是失败"
-            )
-    if picked is not None:
-        ts_new = picked.ts_for(tsd.name)
-        ok_tree, tree_res = call_bounded(
-            partial(scratch.install_tree, tsd, ts_new, log=rb.note),
-            game_watch.SCAN_CEILING_SEC,
-            name="scratch-ts",
-        )
-        ok_mirror, mirror_res = (False, False)
-        if ok_tree and tree_res:
-            ok_mirror, mirror_res = call_bounded(
-                partial(scratch.mirror_inputs, jd, picked.exec_dir, argvs, log=rb.note),
+            rctx.probe_sec = round(time.time() - _probe_t0, 3)
+            if _ok_probe:
+                # `ScratchLayout | None`（闸没过 = `None` = 回退档）；ctx 只留**根**
+                # （批级布局由每批自己 `layout_for(root, jd)` 推）。
+                _root = None if _probe_res is None else _probe_res.root
+                rb.add(
+                    "probe_probe",
+                    f"{'换根' if _root is not None else '原地'}｜探测 {rctx.probe_sec:.2f}s"
+                    f"｜上界 {float(game_watch.PROBE_CEILING_SEC):g}s",
+                )
+            else:
+                rb.add(
+                    "probe_probe",
+                    f"超界回退｜{float(game_watch.PROBE_CEILING_SEC):g}s 内没返回（盘抖的直接读数）",
+                )
+                rb.note(
+                    f"WARN rollout scratch 探针超界（{float(game_watch.PROBE_CEILING_SEC):g}s 内没返回）"
+                    "——本轮回落原地（网络盘）；这是**盘抖动的直接读数**，不是失败"
+                )
+        if _root is not None:
+            ts_new = scratch.ts_home(_root, tsd.name)
+            ok_tree, tree_res = call_bounded(
+                partial(scratch.install_tree, tsd, ts_new, log=rb.note),
                 game_watch.SCAN_CEILING_SEC,
-                name="scratch-mirror",
+                name="scratch-ts",
             )
-        if ok_tree and tree_res and ok_mirror and mirror_res:
-            s_layout, tsd, exec_jd = picked, ts_new, picked.exec_dir
-            rb.note(f"热路径换到本地盘：TS 树 {ts_new}｜每局产出 {picked.exec_dir}")
+            if ok_tree and tree_res:
+                rctx.ts_home = ts_new
+            else:
+                _root = None  # 树装不过去 ⇒ 整轮回落（逐字回退档）
+                rb.note(
+                    "WARN rollout 本地盘换根失败（TS 树装不过去或超界）"
+                    "——本轮回落原地（逐字走今天的行为：不搬、不 drain、不换根）"
+                )
+        rctx.root = _root
+        rctx.resolved = True
+    # ---- 批级：本批的 scratch 布局 + **权重镜像**（每批一个 exec 根 ⇒ 镜像必须各自就位）----
+    if rctx.root is not None:
+        s_layout = scratch.layout_for(rctx.root, jd)
+        ok_mirror, mirror_res = call_bounded(
+            partial(scratch.mirror_inputs, jd, s_layout.exec_dir, argvs, log=rb.note),
+            game_watch.SCAN_CEILING_SEC,
+            name="scratch-mirror",
+        )
+        if ok_mirror and mirror_res:
+            tsd, exec_jd = (rctx.ts_home or tsd), s_layout.exec_dir
+            rb.note(f"热路径换到本地盘：TS 树 {tsd}｜每局产出 {exec_jd}")
         else:
+            s_layout = None
             rb.note(
-                "WARN rollout 本地盘换根失败（TS 树/权重装不过去或超界）"
+                "WARN rollout 本地盘换根失败（权重装不过去或超界）"
                 "——本轮回落原地（逐字走今天的行为：不搬、不 drain、不换根）"
             )
     if s_layout is not None:
@@ -928,8 +985,16 @@ def run_iter_rollout(
     )
     # 长驻 worker 池：逐局 spawn 的启动成本（bun + wasm 编译 + attestation×3 + 权重解析）
     # 每局重付一次，实测 1.59×（§20）。池不可用/跑挂都回退一次性路径 —— 只慢不错。
-    pool = _make_pool(bun, tsd, argvs, workers, log)
-    if pool is not None:
+    # ★ 池的**生命周期 = 轮**（plan §3.2/S2）：首批建，补差批复用（`rctx.pool`）——
+    #   「每批重建池」正是现场那 48.9s 里最贵的一段。
+    #   ⚠ 建不起来（`make_pool` 返回 None = 开关关/脚本不在准入名单，或 `start()` 0 就绪）时
+    #   **不缓存** ⇒ 下一批允许再试（有意：冷启动失败多为瞬态；确定性拒绝重试也只是常数级判断）。
+    pool = rctx.pool
+    _pool_fresh = pool is None
+    if _pool_fresh:
+        pool = _make_pool(bun, tsd, argvs, workers, log)
+        rctx.pool = pool
+    if _pool_fresh and pool is not None:
         ready_n = pool.start()
         if ready_n:
             # 读数语义（P0-1）：`ready_n` = **真打过 `__SERVE_READY__` 且没死**的个数（旧形态只数
@@ -952,6 +1017,7 @@ def run_iter_rollout(
             rb.note("长驻 worker 池起不来 ⇒ 本轮全部走一次性 spawn")
             pool.close()
             pool = None
+            rctx.pool = None  # 别把「已关掉的池」留给下一批复用（同一轮内的下一个批会直接用它）
     game_secs: list[float] = [0.0] * len(argvs)
     game_attempts: list[int] = [1] * len(argvs)
     ok = False
@@ -1121,7 +1187,10 @@ def run_iter_rollout(
         if pool is not None:
             # 池的收益与代价（served/spawned/killed/fallback）进同一行的收尾字段。
             rb.note(pool.summary(), final_only=True)
-            pool.close()
+            # 池的**生命周期 = 轮**（plan §3.2/S2）：传 ctx 的调用方自己收（`RoundContext.close()`，
+            # 在补差跑完之后、PPO 之前）——本批不收，否则补差批又要重建池。
+            if ctx is None:
+                pool.close()
         if s_layout is not None:
             # 轮末只清**自己那一份**（评审 F5）：ts 家内容寻址、永不清（跨轮/两腿复用）。
             ok_clean, _ = call_bounded(

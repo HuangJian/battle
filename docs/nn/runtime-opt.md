@@ -8,7 +8,7 @@
 
 ---
 
-## §35 rollout 热路径两刀：scratch 探针有上界 · 补差批按机器宽度铺满（2026-10-11）
+## §35 rollout 热路径三刀：scratch 探针有上界 · 补差批按机器宽度铺满 · 轮级 `RoundContext`（2026-10-11）
 
 > 起因（`plan/rollout-topup-fastpath.plan.md`，评审 `plan/rollout-topup-fastpath.review-bf.md`）：
 > Kaggle 自主 worker（96 核 / 94 槽）上**同一轮内相邻两批天差地别** —— it34 补差1（18 局）3.35s、
@@ -56,9 +56,31 @@
 * 守卫：新增 `tests/worker/test_spread_games.py`（7 例；含「无顶被写成余量 0 ⇒ 满铺静默成空」
   这个真 bug 的回归）+ `test_iter_topup.py` 按满铺口径重算常量。
 
-### 35.3 未落地（下一刀；前置判据已写进 plan）
+### 35.3 轮级 `RoundContext`（同一病的另一半：批间重复固定开销）
 
-§3.2 `RoundContext`（批间复用）· §3.4 轮末扫盘分组 · **§3.5 取消搬回**。
+补差批复用的是同一个 `run_iter_rollout` ⇒ 在 35.1/35.2 之前，**每一批**都重付一遍与批内局数无关的
+壳子：落点探针（8MB+fsync）、TS 树安装、权重镜像、以及最贵的**建池 + 冷启动**（94 个 bun：
+`exec` + `traverse` + `wasm` + `attest`×3）。批越小占比越高（it34 补差2 只有 **1 局**，却付了 48.9s）
+——§34 的「逐局 spawn 重付启动成本」至此在**批**这一层也复现了一次。
+
+* `iter_rollout.RoundContext`（dataclass）只装**轮级**四件：`root`（探针结论，`None` = 回退档）、
+  `ts_home`、`pool`、`workers`（+ `resolved`/`probe_sec` 两个状态/读数）。
+  **批级**的 `jd` / `s_layout` / `exec_dir` / `gate` **不进** ctx：每批有自己的 `topup{k}/`、自己的
+  `--out` 续号与批级清理 ⇒ 布局由每批自己 `layout_for(root, jd)` 推，TS 树那份才是跨批共用的。
+* **池的生涯 = 轮**（S2）：首批建、补差批复用；所有权随之转移给调用方——`remote/worker.py`
+  在**补差跑完、PPO 之前** `rctx.close()`（不让 94 个常驻 bun 陪 PPO 吃内存）。
+  `ctx=None`（老调用）⇒ 本轮自建自收，行为逐字今天。
+* 池**建不起来**（`make_pool` 返回 `None`：开关关 / 脚本不在准入名单；或 `start()` 0 就绪）⇒
+  **不**缓存进 ctx ⇒ 下一批允许再试一次（有意：冷启动失败多为瞬态，确定性拒绝重试也只是常数级判断）。
+* 守卫：新增 `tests/remote/test_round_ctx.py`（3 例）——探针/TS 树**一轮一次**（含回退档也只探一次）、
+  池**一轮只建一次且只冷启动一次**、所有权随 ctx（`ctx=None` 自建自收 + `close()` 幂等）；
+  `ctx=None` 的逐字行为仍由 `tests/remote/test_remote_iter.py` / `test_rollout_scratch.py` 守（两文件一字未改）。
+* 副作用：`plan §3.7`（补差批池宽）被本节**吸收**——补差批根本不建池了，而「批内并发 = 批内局数」
+  不是损失（15 局最多 15 路并行）。
+
+### 35.4 未落地（下一刀；前置判据已写进 plan）
+
+§3.4 轮末扫盘分组 · **§3.5 取消搬回**。
 ⚠ §3.5 有一处**已定案但未实现**的连通项：节点自己的 PPO 读的是 `job_dir`
 （`remote/train_core.py:526` `shards_root = str(job_dir)`）⇒ 搬回是**承重段**；取消它必须同时把
 `shards_root` 指向 scratch 的 exec 根（评审 P0-1 的修法已写进 §2.2-S6 / §3.5 动作表）。

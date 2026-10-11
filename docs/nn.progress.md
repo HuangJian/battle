@@ -33,7 +33,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** · **六包重组（刀 1–6）** · **门禁 fail-fast**（§63） · **测试不得碰在跑的控制台**（§64） · **测试不得写生产状态（门禁意图 / 循环控制 / EvalBoard / 权重归档）**（§65） · **it0 基线 eval「从未派出」缺口：收工自报 + 缺口三分 + 基线自带门**（§66） · **eval 腿任务缺课程血缘：兄弟课程评估局在节点 resultCache 互串**（§67） · **pytest 私有提交 642MB→159MB：BLAS 内线程封顶**（§68） · **scratch 换根档由速度探针决定：通用用例钉死回退档**（§69） · **锁重入守卫扩容：方法内/闭包锁 + 组合组（hub store 混入）+ 全仓审计**（§70） · **测试债清理：口径先于数字（`text_asserts` / 退役单点 / 三条护栏）**（§71） · **pytest 最慢用例第二轮：第三条 HTTP 缝 + 三处全仓扫描的口径内提速**（§72） · **metrics v11：热线族 2 列（idx74–75）+ 探针杀列 + 跨链 parity 判据改判**（§73） · **两条满载 flake 的根因：hub 备份腿 TOCTOU + instance_lock 写入窗口**（§74） · **锁收敛（四处→唯一原语）+ 派发器一拍一次自有状态快照**（§75） | 42 |
 | [`docs/nn/test-contract-map.md`](nn/test-contract-map.md) | **测试 → 契约归属表**：两个可执行计数口径与其基线（A=1435 形态 / B=1091 生产源码面，2026-10-10 抬一格）· 已填契约（本次动过与 T1–T5 命中文件）· T2b 行为拒绝登记 · T4 本机恒 skip 登记 · 批次 2 工作清单 | 5 |
 | [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 / 课程管理页 / 指标表抗轮转抄录 / **回放导出按评估轮选（§32）** / **池历史大流按变化重建（§33）** / **空置内存真凶：logTail 整文件读（§34）** / **v2 词表与钮：接管是唯一真源（§35）** / **self 节点低盘告警：预警档与拒收地板是两件事（§36）** | 36 |
-| [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处）· **节点单实例互斥**（§29）· **一局的墙钟上界**（§32）· **长驻池真就绪 + 有界清理**（§33）· **热路径 IO 换节点本地盘（rollout/eval 共用一套 scratch）**（§34） | 33 |
+| [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处）· **节点单实例互斥**（§29）· **一局的墙钟上界**（§32）· **长驻池真就绪 + 有界清理**（§33）· **热路径 IO 换节点本地盘（rollout/eval 共用一套 scratch）**（§34）· **rollout 热路径三刀：探针上界 / 补差批满铺 / 轮级 ctx**（§35） | 35 |
 | [`docs/nn/tpu-perf.md`](nn/tpu-perf.md) | TPU / XLA：设备实测 · 单步耗诊断 · 编译缓存 · PPO 吞吐 | 9 |
 | [`docs/nn/reuse-audit.md`](nn/reuse-audit.md) | **复用账本（S0，2026-10-11）**：跨模块重复实现清单（逐字节 / 结构克隆 / 同名散落）+ 三类处置判据（A 提到 `common/` · B 域内共用 · C 库替代 / R2 结构性豁免）+ 复跑法与基线守卫（**工具说明 + 现行水位**，不是逐条历史；出题见 `plan/nn-training-reuse-and-deps.plan.md`） | — |
 
@@ -1093,3 +1093,15 @@ DECISIONS → `DECISIONS.md §2026-10-07-offline-busy-gate-anchor`；全文 → 
 未落地（下一刀）：§3.2 轮级 ctx · §3.4 轮末扫盘分组 · **§3.5 取消搬回**（前置已定案：`remote/train_core.py:526`
 的 PPO 读取根要同时改，否则读 0 局语料；评审 P0-1）。
 DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`；全文 → `docs/nn/runtime-opt.md` §35。
+
+**2026-10-11（二）**：§3.2 轮级 `RoundContext`（同一病的另一半：**批间重复固定开销**）。
+补差批复用的是同一个 `run_iter_rollout` ⇒ 在（一）之前每一批都重付一遍与局数无关的壳子（探针 / TS 树 / 权重镜像 /
+**建池 + 94 个冷启动**）——批越小占比越高（it34 补差2 只有 **1 局**却付 48.9s）。
+落地 = `iter_rollout.RoundContext` 只装**轮级**四件（`root` 探针结论 / `ts_home` / `pool` / `workers` + `resolved`/`probe_sec`），
+**批级**的 `jd`/`s_layout`/`exec_dir`/`gate` 不进 ctx（每批有自己的 `topup{k}/` + `--out` 续号 + 批级清理）；
+**池的生涯 = 轮**（首批建、补差批复用，`remote/worker.py` 在补差跑完、PPO 之前 `close()`——不让 94 个常驻 bun 陪 PPO
+吃内存）；`ctx=None`（老调用）自建自收、逐字今天；池**建不起来**时不缓存 ⇒ 下一批可重试（有意，非漏缓存）。
+副作用：`plan §3.7`（补差批池宽）被本刀吸收（补差批根本不建池了；批内并发 = 批内局数不是损失）。
+守卫：新增 `tests/remote/test_round_ctx.py`（3 例：探针/TS 树一轮一次（含回退档）、池一轮只建一次且只冷启动一次、
+所有权随 ctx + `close()` 幂等）；`ctx=None` 的逐字行为仍由 `test_remote_iter.py` / `test_rollout_scratch.py` 守（两文件一字未改）。
+DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`（③）；全文 → `docs/nn/runtime-opt.md` §35.3。

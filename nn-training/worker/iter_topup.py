@@ -185,6 +185,7 @@ def topup_rollout(
     log: Callable[[str], None] = lambda msg: print(f"[topup] {msg}", flush=True),
     run_fn: Callable[..., dict] | None = None,
     width: int | None = None,
+    ctx: Any = None,
 ) -> dict | None:
     """按 spec 里的 `volume` 块补差；返回 `{shard_dirs, reports, volume}` 或 **None**（无需补差）。
 
@@ -196,6 +197,9 @@ def topup_rollout(
     调用方（`remote/worker.py`）传**首批实际用的** `iter_info["workers"]`（已夹过核数/上限）；
     取不到时的回退链 = `spec["workers"]`（>0）→ 首批 `argv` 条数——**都拿不到就不补差**
     （宁可不补，也不猜一个宽度：批大小直接决定墙钟）。
+
+    `ctx` = 首批的 `iter_rollout.RoundContext`（plan §3.2）：补差批复用轮级资源（落点探针结论 /
+    TS 树家 / **长驻池**）——传 `None` 时补差批就各自重建一遍壳子（逐字今天，慢但不坏）。
     """
     raw = spec.get("volume")
     if not isinstance(raw, dict):
@@ -270,7 +274,7 @@ def topup_rollout(
             f"it{it} 补差批 {batches}/{max_batches}: {len(spec2['argv'])} 局"
             f"（满铺 width={batch_width} → {sub.name}/，games={plan_g}，cap={caps}，est_s={ests}）"
         )
-        info = run(sub, spec2, ts_dir=ts_dir, log=log)
+        info = run(sub, spec2, ts_dir=ts_dir, log=log, ctx=ctx)
         dirs_b = [str(d) for d in info["shard_dirs"]]
         added, games_b = _totals(dirs_b)
         for s, v in added.items():
