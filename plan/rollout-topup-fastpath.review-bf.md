@@ -221,17 +221,17 @@ common/platform_utils.py:511    call_bounded 等满 timeout 才返回 False
 
 | 评审项 | 处置 |
 |---|---|
-| **P0-1**（PPO 读 `job_dir`，搬回是承重段） | plan §1.9 行改 ⚠ + §1.8 结论改正 + §2.2-S6 连通项 + §3.5 动作表两行 + §4.1 专用用例（待 §3.5 同笔）：`shards_root` 由产出方显式给出 |
+| **P0-1**（PPO 读 `job_dir`，搬回是承重段） | plan §1.9 行改 ⚠ + §1.8 结论改正 + §2.2-S6 连通项 + §3.5 动作表两行 + §4.1 专用用例：`shards_root` 由产出方显式给出 —— ✅ **已落**（`1f44e605`→`c8ad664f`：`iter_info["shards_root"]` = 轮产出根 + `train_core.ppo_shards_root`；判据 `tests/remote/test_train_core_shards_root.py` + 两张 rollout 用例的 `shards_root` 断言） |
 | **P0-2**（探针复用 60s 与 DoD 不相容） | ✅ **已落**：新增 `game_watch.PROBE_CEILING_SEC = 5.0`（实测依据 + 为什么不复用 `SCAN_CEILING_SEC`），§2.3/§3.1/§5-B2/§9 同步改正 |
-| **P0-3**（S3+S6 空间口径） | plan §2.2-S3 加连带项（峰值 = Σ批 vs 判据 = 单批）+ §8 风险行（待 §3.5 一并落） |
-| **P1-1**（既有守卫面） | plan 新增 **§3.5b 判据迁移表**（5 行，逐条交代判据去哪；含三处实测现场与日志路径） |
+| **P0-3**（S3+S6 空间口径） | plan §2.2-S3 加连带项（峰值 = Σ批 vs 判据 = 单批）+ §8 风险行 —— ✅ **已落**（`c8ad664f`：`_round_need_bytes` = 单批局数 × (1 + `volume.topup.max_batches`) × per_game；判据 `test_round_capacity_budget_covers_the_topup_batches`） |
+| **P1-1**（既有守卫面） | plan 新增 **§3.5b 判据迁移表**（5 行，逐条交代判据去哪；含三处实测现场与日志路径）—— ✅ **已逐行执行**（`c8ad664f`；plan §3.5b 底部有「落地回执」五行的实际落点） |
 | **P1-2**（`topup_games_by_stage` 归置） | ✅ **已落**：模块里标注「无生产调用点 + 对账规格身份」，plan §3.3 兼容段改正 |
 | **P1-3**（证据/课程不可复现） | plan §1.11 加注（归因降级为**假说**）+ §5-A 要求仓内复算脚本 + §4.2 写清课程来源 + 数字对齐（53→54、554/523/500 标为待复算） |
 | **P1-4**（无记录节） | plan 新增 §10.2 记录表；`DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath` + `docs/nn/runtime-opt.md` §35 + `docs/nn.progress.md` 已落 |
 | **P2-1**（`ts_home` 按名非内容寻址） | ✅ **已落**：`common/scratch.py` 三处注释/docstring 改正（代码行为不变） |
 | **P2-2**（「理论下界」不是下界） | plan §1.2 改成 `max(单局 max, Σ单局/并发)` + 负「空等」自证破绽的加注 |
 | **P2-3**（轮级报告装配契约） | plan §3.4 末注写死（含 `artifacts.py:536` 读 `perGame`、`clean_sec`/`搬回` 无 TS 读方的查证） |
-| **P2-4**（S2 池生命周期点 + 资源账） | plan §8 加风险行（“最后一批之后、D14/PPO 之前”写法待 §3.2 落地时定） |
+| **P2-4**（S2 池生命周期点 + 资源账） | plan §8 加风险行 —— ✅ **写法已定并落地**：池在**补差跑完、PPO 之前**收（`remote/worker.py` 的 `finally: rctx.close()`，同一 `finally` 罩住首批 + 补差；scratch 回收在 PPO 之后 `rctx.cleanup()`）。⚠ 落地时发现一处本节没预见到的漏：首批自己抛的路径（D14/verify/超界）若不在同一个 `try` 里收池，94 个常驻 bun 会一直挂着 —— 已修（`de62a66d`）+ 回归用例 |
 
 **本轮另有两条实现期发现（已落）**：① 满铺器的「无顶」若写成余量 0 ⇒ 整个满铺静默成空（新用例抓到，已修）；
 ② cap 语义：plan v3 的「不做 cap 截断」会让课程旋钮失效、并推翻一条活判据 ⇒ 落地版改成 **cap 硬顶**，
