@@ -6,7 +6,7 @@
 （Windows/macOS 继续走 xdist），所以它的失效模式全部要钉住——这类 runner 的典型事故是
 「**静默少跑**」：worker 死了、用例丢了、报告丢了，而退出码照样是 0。
 
-已发生过的两个坑（各一条断言）：
+已发生过的三个坑（各一条断言）：
 
 1. **重放阶段的异常会把 waitpid 变成死等**（2026-09-29 实测）。master 先在 `finally` 里
    `waitpid`、后关命令管道 ⇒ worker 永远读不到 EOF、守卫里也看不到那条异常（只有
@@ -19,6 +19,12 @@
    setup 失败」——真正出错的是前一条用例的夹具收尾。修法：子进程
    `stop_global_capturing()` + `start_global_capturing()` 重建自己的捕获
    （`_reset_global_capture`）。**丢掉这一步不会立刻红**，只会在满机时假红，故在此钉住调用点。
+3. **muted terminal 把超时真错误盖成 AssertionError**（2026-10-11）：子进程摘掉
+   TerminalReporter 后，pytest-timeout 的 SIGALRM 处理函数先调 `config.get_terminal_writer()`
+   ⇒ 踩它自己的 `assert terminalreporter is not None`，报告里「Timeout (>1.0s)
+   from pytest-timeout.」被换成一条指向 `_pytest/config` 的断言错（handler 帧又被
+   `__tracebackhide__` 藏了，现场看着像用例自己崩在 ast 里）。修法：`_mute_terminal` 摘完
+   给 config 实例挂 `_muted_terminal_writer` 替身。下方端到端用例钉住真错误文本。
 """
 
 from __future__ import annotations
@@ -30,6 +36,7 @@ import subprocess
 import sys
 import types
 from pathlib import Path
+from xml.etree import ElementTree
 
 import pytest
 
@@ -381,3 +388,73 @@ def test_forkdist_reports_a_worker_that_dies_instead_of_dropping_the_item(tmp_pa
     assert proc.returncode != 0, f"worker 死了却判成功（就是这类 runner 最危险的失效模式）\n{out}"
     assert "[forkdist]" in out, f"没有点名「worker 丢了用例」\n{out}"
     assert "1 failed" in out, f"丢掉的用例没计成失败\n{out}"
+
+
+#: **真超时**的用例：pytest-timeout 的 SIGALRM 处理函数会调 `config.get_terminal_writer()`
+#: —— muted worker 里曾踩 assert（见模块 docstring 第 3 条）。旁边放一条正常用例：只有
+#: 一条用例时 runner 会主动退回串行循环（没东西可并行），整条路径就不经过了。
+_TIMEOUT = '''\
+"""超时现场：报告必须是「Timeout (>1.0s) from pytest-timeout.」，不许被 assert 盖掉。"""
+
+from __future__ import annotations
+
+import threading
+import time
+
+
+def test_ok():
+    assert True
+
+
+def test_sleeps_past_the_timeout():
+    # 多一条线程 ⇒ pytest-timeout 会走 `terminal.sep` + `print_stack` 的 dump 路径
+    # （单线程时整段跳过）——dump 写的正是 muted worker 里那个被摘掉的 writer
+    threading.Thread(target=time.sleep, args=(30,), daemon=True).start()
+    time.sleep(5)
+'''
+
+
+@_no_bash
+@_no_fork
+def test_timeout_reports_its_real_cause(tmp_path: Path) -> None:
+    """超时真错误不许被 muted-terminal 的 AssertionError 盖掉（模块 docstring 第 3 条）。
+
+    现场（2026-10-11）：报告里「Timeout (>1.0s) from pytest-timeout.」被换成
+    `assert terminalreporter is not None`——排查时看着像用例自己崩在 ast 里。
+    判据走 junit XML 的 `failure@message`（结构化出口，与 console 同一份 longrepr）：
+    真错误必须**以超时文案收尾**；被盖掉时这里是 AssertionError 那套。
+    """
+    scratch = tmp_path / "timeout"
+    scratch.mkdir()
+    (scratch / "test_timeout.py").write_text(_TIMEOUT, encoding="utf-8", newline="\n")
+    report = tmp_path / "report.xml"
+
+    proc = subprocess.run(
+        [
+            "bash",
+            _bash_path(WRAPPER),
+            "-m",
+            "pytest",
+            str(scratch),
+            "-p",
+            "tools.forkdist",
+            "--forkdist",
+            "2",
+            "--timeout=1",  # CLI 覆盖 ini 的 60s（实测：addopts 先、CLI 后，后者生效）
+            "--maxfail=0",
+            f"--junitxml={report}",
+        ],
+        cwd=NN_ROOT,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=240,
+    )
+    out = proc.stdout + proc.stderr
+    assert proc.returncode != 0, f"超时用例竟然判成功\n{out}"
+    crashes = [node.get("message") or "" for node in ElementTree.parse(report).iter("failure")]
+    assert len(crashes) == 1, f"必须恰好一条失败（超时的那条）\n{out}"
+    assert crashes[0].endswith("Timeout (>1.0s) from pytest-timeout."), (
+        f"超时真错误丢了（被什么盖掉了？）：{crashes[0]!r}\n{out}"
+    )

@@ -19,6 +19,9 @@
   `pytest_runtest_logreport` 重放 ⇒ 汇总、`-ra`、`--tb=short`、`-x`(maxfail) 全是 pytest 自己
   的语义，不是我们另写一套。
 * 子进程里把 TerminalReporter 摘掉（否则 12 份进度点/自己的汇总会打到共享 stdout 上），
+  同时给 config 实例挂一个 `get_terminal_writer()` 替身——pytest-timeout 的 SIGALRM
+  处理函数第一件事就是调它，摘而不补会把超时真错误盖成它自己的 assert（2026-10-11 事故，
+  见 `_mute_terminal`），
   并把 `config.workerinput` 填上（xdist 的既有约定：cacheprovider 的 `lastfailed` 写入、
   junitxml、stepwise 都会**自动跳过**，不再有 12 个进程抢写同一个缓存文件）。
 
@@ -50,6 +53,7 @@ from collections import deque
 from typing import Any
 
 import pytest
+from _pytest._io import TerminalWriter
 
 #: 帧头：4 字节大端长度。子↔父两个方向都用它（pickle 流）。
 _HDR = struct.Struct("!I")
@@ -572,6 +576,22 @@ def _mute_terminal(config: pytest.Config) -> None:
     reporter = pluginmanager.getplugin("terminalreporter")
     if reporter is not None:
         pluginmanager.unregister(reporter)
+    # ⚠ 摘掉后 `config.get_terminal_writer()` 会踩它自己的
+    # `assert terminalreporter is not None`——pytest-timeout 的 SIGALRM 处理函数（超时现场）
+    # 第一件事就是调它。2026-10-11 事故：真错误「Timeout (>1.0s) from pytest-timeout.」被换成
+    # 一条指向 `_pytest/config` 的 AssertionError（handler 帧还被 `__tracebackhide__` 藏了，
+    # 现场看着像用例自己崩在 ast 里）。给实例挂替身 ⇒ 谁再调都不炸、诊断照写。
+    config.get_terminal_writer = _muted_terminal_writer  # type: ignore[method-assign]  # 只改本子进程的实例属性
+
+
+def _muted_terminal_writer() -> TerminalWriter:
+    """muted worker 的 `get_terminal_writer()` 替身（见 `_mute_terminal`）。
+
+    每次现建、绑**当前** `sys.stdout`：测试期那是子进程自己的捕获缓冲 ⇒ 超时诊断
+    （线程栈 dump）作为「Captured stdout」段挂到失败报告上，由 master 统一打印；
+    `-s` / 捕获停摆时退化成直写真实 stdout（进日志）。
+    """
+    return TerminalWriter()
 
 
 def _die_with_parent() -> None:
