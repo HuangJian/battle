@@ -18,6 +18,11 @@ socket 同时 bind 同一端口（后绑定者不报错，静默变成「永远�
 端口守卫），写不下锁不该变成启动拦路鬼 —— 响亮告警后本次退化为仅靠端口守卫；反之，「已有
 活实例」的拒启仍是 fail-closed。
 
+**本模块是全仓唯一的「创建后写盘」锁实现**（2026-10-11 收敛）：hub/worker 启动守卫、
+课程实例锁（`worker/train/loop_util`）、`trainer/run_rl` 的单实例锁、`remote/code_snapshot`
+的抢锚锁全部走这里。四家各自写 `os.open(O_CREAT|O_EXCL)` + `os.write` 的版本曾**各自**带着
+同一个写入窗口（见下），修一处只修一处，所以收敛到一个实现 = 四个窗口一起关。
+
 **陈旧锁接管规则**（判据只有下列几条，宁可 fail-closed）：
 
   * 持有者已死 → 陈旧锁，接管（响亮打印）；
@@ -201,16 +206,42 @@ def _create_exclusive(lock_path: str) -> int | None:
 
 
 def acquire_instance_lock(
-    lock_path: str, *, marker: str | tuple[str, ...], tag: str = "instance-lock"
+    lock_path: str,
+    *,
+    marker: str | tuple[str, ...] = (),
+    tag: str = "instance-lock",
+    force: bool = False,
+    announce: bool = True,
 ) -> bool:
-    """取锁：True = 本进程持有（锁文件已写入）；False = 已有活实例（已响亮打印，调用方应退出）。
+    """取锁：True = 本进程持有（锁文件已写入）；False = 已有活实例（默认已响亮打印）。
 
     *marker* 是持有者身份指纹（如 `"hub_server"`）：只在持有者**活着**时用来区分
     「同一程序的第二个实例」（拒启）与「PID 被系统复用给了别的程序」（接管陈旧锁）。
     可给多个指纹（元组）——同一个服务常有多个合法入口（如 worker_server 既走
     `-m remote_worker_serve` 也可能被以模块名拉起），**任一命中即认作同一程序**。
+    **空（缺省）= 不做身份核验**：持有者活着就拒启（fail-closed）、死了/够旧的残缺才接管
+    ——互斥型锁（课程实例 / run_rl / push / claim / 快照）要的就是这个语义，它们没有
+    稳定的「同程序指纹」（同一个锁的持有者可以是 run_rl / loop_serve / bc / 控制台）。
+
+    *force*=True：**显式接管**（操作员 `--force` / 运维重启）——不问身份直接删掉现有锁再重取，
+    调用方已确认「该跑的那个不在」。
+
+    *announce*（2026-10-11）：拒启/接管那几句话要不要打印。缺省 True（启动守卫该响）；
+    **False 给「抢不到就改走别的路」的调用方**（如 `remote/code_snapshot` 的抢锚：它抢不到
+    就有界等待后自打，打印一句「拒绝启动」是误导）。锁文件**创建失败**的 WARN 不受它管辖
+    （那是「没做串行化」的告警，什么时候都不该静默）。
     """
     markers = (marker,) if isinstance(marker, str) else tuple(marker)
+
+    def _say(msg: str) -> None:
+        if announce:
+            print(msg, flush=True)
+
+    if force:
+        try:
+            os.remove(lock_path)
+        except OSError:
+            pass
     try:
         fd = _create_exclusive(lock_path)
     except OSError as e:
@@ -231,39 +262,36 @@ def acquire_instance_lock(
             age = _lock_age_sec(lock_path)
             if age is None or age < PARTIAL_LOCK_GRACE_SEC:
                 shown = "年龄未知" if age is None else f"{age:.2f}s 前"
-                print(
+                _say(
                     f"[{tag}] ERROR: 锁文件 {lock_path} 残缺（{shown}创建，里面没有持有者身份）"
                     f"——另一个启动者可能正在写入——拒绝启动（fail-closed）。"
-                    f"若确认它只是崩溃残留，删除它后重试。",
-                    flush=True,
+                    f"若确认它只是崩溃残留，删除它后重试。"
                 )
                 return False
         if holder is not None and _pid_alive(holder):
             cmd = proc_cmdline(holder)
-            if cmd is None or any(m in cmd for m in markers):
-                why = (
-                    "命令行不可读，身份未知（fail-closed）"
-                    if cmd is None
-                    else "命令行含同一程序指纹"
-                )
-                print(
+            if cmd is None or not markers or any(m in cmd for m in markers):
+                if cmd is None:
+                    why = "命令行不可读，身份未知（fail-closed）"
+                elif not markers:
+                    why = "未给身份指纹（无从核验）"
+                else:
+                    why = "命令行含同一程序指纹"
+                _say(
                     f"[{tag}] ERROR: 已有实例在运行（PID {holder}，{why}）——拒绝启动。"
-                    f"锁文件 {lock_path}；确认该进程已死后删除锁文件并重试。",
-                    flush=True,
+                    f"锁文件 {lock_path}；确认该进程已死后删除锁文件并重试。"
                 )
                 return False
-            print(
+            _say(
                 f"[{tag}] 锁持有人 PID {holder} 不是本程序（命令行: {cmd[:_CMD_CLIP]}；"
                 f"指纹 {list(markers)}）——判为 PID 复用，接管陈旧锁 {lock_path}"
-                f"（原 start_ts={holder_ts}）",
-                flush=True,
+                f"（原 start_ts={holder_ts}）"
             )
         else:
             note = f"PID {holder}" if holder is not None else "已残缺不可解析"
-            print(
+            _say(
                 f"[{tag}] 陈旧锁（持有人 {note} 已不存在）——接管 {lock_path}"
-                + (f"（原 exe={holder_exe}）" if holder_exe else ""),
-                flush=True,
+                + (f"（原 exe={holder_exe}）" if holder_exe else "")
             )
         try:
             os.remove(lock_path)
@@ -271,10 +299,7 @@ def acquire_instance_lock(
             pass
         fd = _create_exclusive(lock_path)
         if fd is None:
-            print(
-                f"[{tag}] ERROR: 锁 {lock_path} 被并发启动者抢占——拒绝启动（再试一次即可）",
-                flush=True,
-            )
+            _say(f"[{tag}] ERROR: 锁 {lock_path} 被并发启动者抢占——拒绝启动（再试一次即可）")
             return False
     try:
         os.write(fd, f"{os.getpid()}|{sys.executable}|{int(time.time())}".encode())

@@ -6,6 +6,9 @@
   3. 陈旧锁（持有者已死）→ 自动接管（锁在、进程没了，不该永远启不来）；
   3b. **写入窗口**（锁文件空/残缺且新鲜）→ 拒启且**一个字节都不动**；够久的残缺残留仍接管
      （2026-10-11 满载 flake 回归：创建与写 PID 之间那个毫秒级窗口被后来的 starter 穿过）；
+  3c. **收敛护栏**（2026-10-11 用户指令）：全仓生产码只有 `common/instance_lock.py` 手写
+     `O_CREAT|O_EXCL`（AST 判据），且四个历史调用点里三处薄壳（`loop_util.acquire_lock` ·
+     `run_rl._acquire_run_rl_lock` · `code_snapshot._acquire_pack_lock`）在写入窗口里同行为；
   4. **PID 复用**（持有者活着但不是本程序）→ 核验身份后接管；
   5. 身份**读不到** → fail-closed 拒启（绝不静默双监听）；
   6. 默认锁路径按**端口**键控；
@@ -14,6 +17,7 @@
 """
 from __future__ import annotations
 
+import ast
 import os
 import shutil
 import socket
@@ -28,6 +32,7 @@ NN_TRAINING = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(NN_TRAINING))
 
 from common import instance_lock as il
+from tests.helpers import source_scan
 from tests.subproc_util import (
     PortStolenError,
     port_race_seen,
@@ -293,6 +298,74 @@ def test_simultaneous_starts_leave_exactly_one_instance(tmp_path: Path) -> None:
     finally:
         for p, _ in procs:
             _kill(p)
+
+
+# ────────────────────────── 收敛护栏：全仓只有一份「创建后写盘」 ──────────────────────────
+
+#: 允许直接引用 `os.O_EXCL` 的生产文件（唯一实现自己；它才是做原子创建的地方）。
+_EXCL_ALLOWED = frozenset({"common/instance_lock.py"})
+
+#: 生产码扫描面（`tests/`+`e2e/`+`tmp/` 不算生产码；`common/`/`remote/`/`hub/` 不在
+#: `source_scan.logic_py_files` 的三棵树里，故在这里显式列出）。
+_PROD_ROOTS = ("common", "remote", "hub", "trainer", "worker", "biz", "tools")
+
+
+def test_only_the_primitive_references_o_excl() -> None:
+    """★ 2026-10-11 收敛护栏（用户指令）：生产码里 `os.O_EXCL` 只许出现在唯一实现里。
+
+    为什么钉这个：`loop_util` / `run_rl` / `code_snapshot` 三处各自写了一份
+    `os.open(O_CREAT|O_EXCL)` + `os.write` ⇒ **三份写入窗口**（同一类 bug，修一处只修一处）。
+    收敛之后谁再手写一份，三件事同时回来：窗口、分叉的接管规则、各自漂移的守卫。
+
+    判据走 **AST**（`O_EXCL` 是以 `os.O_EXCL` 属性形式出现在代码里的），不是字符串匹配：
+    本仓注释/文档到处在讨论 `O_CREAT|O_EXCL`，字符串匹配会把说明文字判成违规。
+    """
+    offenders: list[str] = []
+    for root in _PROD_ROOTS:
+        for path in sorted((NN_TRAINING / root).rglob("*.py")):
+            rel = path.relative_to(NN_TRAINING).as_posix()
+            if rel in _EXCL_ALLOWED:
+                continue
+            src = source_scan.read_text(str(path))
+            if "O_EXCL" not in src:  # 廉价预筛（缓存读；合法 Python 里它就是字面量）
+                continue
+            tree = source_scan.parse(str(path))
+            if any(
+                isinstance(n, ast.Attribute) and n.attr == "O_EXCL" for n in ast.walk(tree)
+            ):
+                offenders.append(rel)
+    assert offenders == [], (
+        f"这些生产文件自己手写了 O_EXCL 锁（应收敛到 common/instance_lock）：{offenders}"
+    )
+
+
+def test_former_lock_sites_share_the_write_window_gate(tmp_path: Path) -> None:
+    """★ 收敛的**行为**面：三处薄壳在「残缺且新鲜」的锁上同行为（拒启 ∧ 一个字未动）。
+
+    为什么不只扫 import：窗口是**运行期**的事，源码变形（把 `acquire_instance_lock` 换成一个
+    同名本地函数、或包一层自己写 O_EXCL）骗得过 import 扫描。三处各自跑同一份剧本，才真的
+    钉住「一个实现」。
+    """
+    from remote import code_snapshot as cs
+    from trainer.run_rl import _acquire_run_rl_lock
+    from worker.train.loop_util import acquire_lock
+
+    def _partial(name: str) -> Path:
+        p = tmp_path / name
+        p.write_text("", encoding="utf-8")  # 窗口里的形状：刚 O_EXCL 创建、pid 还没写
+        return p
+
+    cases: list[tuple[str, str, Path]] = []
+    for label, name, call in (
+        ("loop_util.acquire_lock", ".run_rl.course-a.lock", lambda p: acquire_lock(str(p))),
+        ("run_rl._acquire_run_rl_lock", ".run_rl.course-b.lock", lambda p: _acquire_run_rl_lock(str(p))),
+        ("code_snapshot._acquire_pack_lock", ".pack.lock", lambda p: cs._acquire_pack_lock(p, lambda _m: None)),
+    ):
+        lock = _partial(name)
+        assert call(lock) is False, f"{label}：窗口里的残缺锁应拒启"
+        assert lock.read_text(encoding="utf-8") == "", f"{label}：不得删/改别人的半成品锁"
+        cases.append((label, name, lock))
+    assert len(cases) == 3
 
 
 # ────────────────────────── 辅助 ──────────────────────────

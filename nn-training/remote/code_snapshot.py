@@ -76,7 +76,11 @@ from pathlib import Path
 
 from common.distribution import load_dist_config
 from common.hashing import sha256_file
-from common.instance_lock import proc_cmdline, read_lock
+from common.instance_lock import (
+    acquire_instance_lock,
+    proc_cmdline,
+    release_instance_lock,
+)
 from common.pid_probe import pid_alive
 from common.protocol import TS_CODE_NAME
 from remote.hub_client import pack_code_zip, pack_ts_code_zip
@@ -323,28 +327,24 @@ def _ts_zip_path_of(d: Path, meta: dict) -> Path | None:
     return p if p.is_file() else None
 
 
-def _acquire_pack_lock(lock_path: Path, log: Callable[[str], None]) -> int | None:
-    """抢锚锁：`O_CREAT|O_EXCL` 原子创建；锁文件里的持有者已死 ⇒ 接管重试一次。
+def _acquire_pack_lock(lock_path: Path, log: Callable[[str], None]) -> bool:
+    """抢锚锁：实现唯一住在 `common/instance_lock`（`O_CREAT|O_EXCL` + 陈旧接管 + 写窗口闸）。
 
-    返回 fd（调用方负责 `os.close` + 删除）；`None` = 没抢到（别人在打，或锁不可创建）。
+    返回 True = 本进程持有（调用方负责 `release_instance_lock`）；False = 没抢到（别人在打）。
+    2026-10-11 收敛：这里原来自带一套与 `loop_util` / `run_rl` 同形的「创建后写盘」锁
+    （同一个写入窗口），现在四家共用一个实现。`announce=False`：抢不到并非启动失败
+    （调用方有界等待后自打），打印一句「拒绝启动」是误导——由调用方自己给那行 WARN。
     """
-    for attempt in range(2):
-        try:
-            return os.open(str(lock_path), os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        except FileExistsError:
-            holder, _exe, _ts = read_lock(str(lock_path))
-            if holder is not None and pid_alive(holder):
-                return None
-            if attempt:
-                return None
-            try:
-                os.remove(lock_path)  # 陈旧锁（崩溃残留）⇒ 接管重试
-            except OSError:
-                return None
-        except OSError as e:
-            log(f"[code-snapshot] WARN: 抢锚锁不可创建（{e}）——本次不做串行化")
-            return None
-    return None
+    try:
+        ok = acquire_instance_lock(
+            str(lock_path), marker=(), tag="code-snapshot", announce=False
+        )
+    except OSError as e:  # 防守：原语只在创建失败时 fail-open（打印 WARN），不会抛
+        log(f"[code-snapshot] WARN: 抢锚锁不可创建（{e}）——本次不做串行化")
+        return False
+    if not ok:
+        log("[code-snapshot] 抢锚锁未得（另一进程在打）——有界等待后复用/自打")
+    return ok
 
 
 def _count_zip_entries(zp: Path) -> int:
@@ -633,8 +633,7 @@ def ensure_cluster_snapshot(
         log(_line(cur, reused=True))
         return cur
 
-    fd = _acquire_pack_lock(d / LOCK_NAME, log)
-    if fd is None:
+    if not _acquire_pack_lock(d / LOCK_NAME, log):
         # 别人正在打：有界等待后复用（等不到就自己打——启动绝不挂住）。
         # 轮询用廉价口径（只看 pid），只在真拿到候选时花一次指纹核验。
         deadline = time.monotonic() + LOCK_WAIT_SEC
@@ -664,11 +663,5 @@ def ensure_cluster_snapshot(
         log(_line(snap, reused=False))
         return snap
     finally:
-        try:
-            os.close(fd)
-        except OSError:
-            pass
-        try:
-            lock_path.unlink()
-        except OSError:
-            pass
+        # 只放自己的锁（易主时不动别人的）——`release_instance_lock` 就是那条判据。
+        release_instance_lock(str(lock_path))

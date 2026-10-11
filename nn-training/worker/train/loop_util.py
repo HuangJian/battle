@@ -14,10 +14,10 @@ import os
 import re
 import shutil
 import subprocess
-import sys
 import threading
 import time
 
+from common.instance_lock import acquire_instance_lock, release_instance_lock
 from common.pid_probe import pid_alive
 
 # 子进程捕获统一走 common.proc.run_capture（显式 UTF-8 + Windows 隐藏窗口）。
@@ -218,95 +218,29 @@ def course_key_from_path(course_path: str) -> str:
     return validate_course_name(stem)
 
 
-def _write_lock(lock_path: str) -> None:
-    """Write our lock info: ``PID|EXE|START_TS``."""
-    fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-    try:
-        payload = f"{os.getpid()}|{sys.executable}|{int(time.time())}"
-        os.write(fd, payload.encode())
-    finally:
-        os.close(fd)
-
-
-def _read_lock(lock_path: str) -> tuple[int | None, str | None, int | None]:
-    """Read lock file → (pid, exe_path, start_ts).  Any parse error → Nones."""
-    try:
-        with open(lock_path) as f:
-            raw = f.read().strip()
-    except OSError:
-        return None, None, None
-    parts = raw.split("|")
-    if len(parts) >= 3:
-        try:
-            return int(parts[0]), parts[1], int(parts[2])
-        except (ValueError, IndexError):
-            pass
-    # Legacy format: bare PID integer.
-    try:
-        return int(raw), None, None
-    except ValueError:
-        return None, None, None
-
-
 def acquire_lock(lock_path: str, *, force: bool = False, tag: str = "train_loop") -> bool:
-    """PID-file based single-instance lock with stale lock auto-cleanup.
+    """PID 文件单实例锁（**薄壳**——实现唯一住在 `common/instance_lock`；锁文件格式仍是
+    ``PID|EXE_PATH|START_TIMESTAMP``，裸 PID 旧文件仍兼容）。
 
-    Lock file format: ``PID|EXE_PATH|START_TIMESTAMP`` (pipe-delimited).
-    Legacy bare-PID files are also accepted for backward compat.
+    本函数只提供历史调用面（`tag` 只用于争用/接管那几句话）：
 
-    When *force* is True, any existing lock is broken regardless of
-    whether the holder is alive (operator-initiated restart).
+      * 持有者活着 ⇒ False（同课/同 kind 双开响亮拒启）；
+      * 持有者已死 / 够旧的残缺锁 ⇒ 接管；
+      * 锁文件**残缺且新鲜**（别人刚 `O_EXCL` 创建还没写 pid）⇒ False **且不动那个文件**
+        （2026-10-11：这个毫秒级窗口曾让两个 starter 各自自认唯一，见 `common.instance_lock`
+        的「写入窗口」一节）；
+      * `force=True` ⇒ 显式接管（操作员 `--force`，不问身份直接删了重取）。
 
-    *tag* only names the holder in the contention message (default keeps the
-    historical train_loop wording); mechanics are identical for every caller —
-    there is exactly one lock implementation in this file.
+    为什么要收敛（2026-10-11 用户指令）：本文件、`trainer/run_rl.py`、`remote/code_snapshot.py`
+    三处各自写了同一套 `os.open(O_CREAT|O_EXCL)` + `os.write`，**三个写入窗口**；修一处只修一处。
+    现在三处都是这里的薄壳，窗口与接管规则只有一份。
     """
-    # --- Force mode: destroy any existing lock first. ---
-    if force:
-        try:
-            os.remove(lock_path)
-        except OSError:
-            pass
-
-    # Try atomic create.
-    try:
-        _write_lock(lock_path)
-        return True
-    except FileExistsError:
-        pass
-
-    # File exists — check liveness.
-    old_pid, old_exe, _ts_ = _read_lock(lock_path)
-
-    if old_pid is not None and _pid_alive(old_pid):
-        exe_note = f" ({old_exe})" if old_exe else ""
-        print(
-            f"[loop] another {tag} is running (PID {old_pid}{exe_note}); exiting.",
-            flush=True,
-        )
-        return False
-
-    # Stale lock — old process is dead. Clean up and retry.
-    try:
-        os.remove(lock_path)
-    except OSError:
-        pass
-
-    try:
-        _write_lock(lock_path)
-        return True
-    except FileExistsError:
-        return False  # lost a race with another starter
+    return acquire_instance_lock(lock_path, marker=(), tag=tag, force=force)
 
 
 def cleanup_lock(lock_path: str) -> None:
     """Remove our lock file on exit (best-effort, only if we own it)."""
-    try:
-        our_pid, _, _ = _read_lock(lock_path)
-        if our_pid == os.getpid():
-            os.remove(lock_path)
-    except (ValueError, OSError):
-        pass
+    release_instance_lock(lock_path)
 
 
 def auto_export_corpus(data_dir: str, log=None) -> int:

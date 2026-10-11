@@ -17,6 +17,7 @@ _SCRIPT_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(_SCRIPT_DIR.parent))
 
 from common.cli import run_main
+from common.instance_lock import acquire_instance_lock, release_instance_lock
 from common.log import Tee as _Tee
 from common.log import log
 from common.pid_probe import pid_alive as _pid_alive_impl
@@ -115,52 +116,24 @@ def _runrl_pid_alive(pid: int) -> bool:
 
 
 def _acquire_run_rl_lock(lock_path: str, *, force: bool = False) -> bool:
-    """PID 文件单实例锁（O_CREAT|O_EXCL 原子创建；holder 死亡 → stale 自动清理）。
+    """PID 文件单实例锁（**薄壳**：实现唯一住在 `common/instance_lock`）。
 
     2026-09-06 事故：旧启动器 start-training --kill-previous 漏杀旧 trainer（msys pgrep 对
     Windows 原生进程不可靠）→ 两个 trainer 并行写同一 traj 7 分钟，it57-59 各被
-    两遍训练/落账。锁在进入训练主循环前把关，双开=响亮拒启而非静默并行。"""
-    if force:
-        try:
-            os.remove(lock_path)
-        except OSError:
-            pass
-    try:
-        fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-        try:
-            os.write(fd, f"{os.getpid()}|{sys.executable}|{int(time.time())}".encode())
-        finally:
-            os.close(fd)
-        return True
-    except FileExistsError:
-        pass
-    try:
-        with open(lock_path) as f:
-            holder = int(f.read().split("|")[0])
-    except (OSError, ValueError):
-        holder = None
-    if holder is not None and _runrl_pid_alive(holder):
-        return False
-    try:
-        os.remove(lock_path)
-    except OSError:
-        pass
-    return _acquire_run_rl_lock(lock_path, force=True)
+    两遍训练/落账。锁在进入训练主循环前把关，双开=响亮拒启而非静默并行。
+
+    2026-10-11 收敛：本函数曾自带一套 `os.open(O_CREAT|O_EXCL)` + `os.write`（与
+    `worker/train/loop_util`、`remote/code_snapshot` 各自一套 ⇒ 三个写入窗口），现在一律走
+    `common/instance_lock`：持有者活着 → False；已死 / 够旧的残缺锁 → 接管；**残缺且新鲜**
+    （别人刚创建还没写 pid）→ False **且不动那个文件**（那个毫秒级窗口曾让两个 starter
+    各自自认唯一）。`force=True` = 显式接管（控制台/运维重启）。
+    """
+    return acquire_instance_lock(lock_path, marker=(), tag="run_rl", force=force)
 
 
 def _cleanup_run_rl_lock(lock_path: str) -> None:
     """仅清理自己持有的锁——锁已易主（--force 抢占）时不删别人的。"""
-    try:
-        with open(lock_path) as f:
-            holder = int(f.read().split("|")[0])
-        if holder != os.getpid():
-            return
-    except (OSError, ValueError):
-        return
-    try:
-        os.remove(lock_path)
-    except OSError:
-        pass
+    release_instance_lock(lock_path)
 
 
 def _require_course_open(args, traj_root: Path) -> None:
