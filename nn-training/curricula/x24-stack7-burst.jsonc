@@ -1,0 +1,117 @@
+// 课程 x24-stack7-burst —— stack6-it165 上单加连击税：+wBurst×damageBursts。
+//
+// 状态：草稿（2026-10-11 冻结；未开课）。
+//   开课 = 人在控制台点（agent 不开训）。
+//   立项 → 用户 2026-10-10/11 连令：早崩主因链是连续挨打（D01 承伤率 2.4x/D02 中弹频率 8x/
+//   D05 挨打后贴脸），stack5 的 bundle 失败 ≠ 单项失败——本腿单变量重测 bursts 一项。
+//   基线 → fork 点 stack6-it165（it165 日常 400 局 0.5125/14.31；burst 0.438/局；
+//   ⚠ fork 点疑似峰：门以因子为主，胜率只参考不判门）；终判主判 bc s4-it180
+//   （拼池 0.4925/13.7–14.2），KR10-it150 为参照。
+//   起点 stack6-it165 + 单变量（stack6 价全继承，其余不动；日常 killEV≈40）。
+//
+// ── 定价（f 以 killEV≈40 计）────────────────────────────────────────────
+//   damageBursts（idx59，相邻扣血≤120t 次数，单调计数，无需封顶；现货直读）：
+//   wBurst=6.0 → 按 stack5 实测 −3.1/局（~8%，与 stack5 同剂量可比）。
+//   不用 maxDamage120（60，h5a 禁区）；不同时加 dangerTicks（42，stack5 已败方向，
+//   合加 = 重组 bundle，重犯 stack5 的 credit 稀释错）；hurtWeight/playerDamageTaken
+//   总量边际已有（wHurt=110/wDmg=0.03），不动。
+//   组合预算：near 16.5% + bursts 8% ≈ 24% 塑形负荷——E3a 的坑是单税超 15%，
+//   总额无硬线，但 gun-shy 风险真实存在，盯盘只看 kills。
+//
+// ── 检查点（it40，硬门；看因）───────────────────────────────────────────────
+//   burst 均值 ↓（400 局口径 vs fork 点 0.438）+ kills ≥ 12.2（14.31×0.85）。
+//   胜率不判门（fork 点 0.5125 疑似峰，回归均值不判负）。
+//   任一不满足 ⇒ 杀腿。
+//
+// ── 人工盯盘（无自动熔断）───────────────────────────────────────────────────
+//   本腿不设任何自动停规则（课程内 ent_break=0、kickstart 熔断全关；开课时控制台也别挂
+//   kl/ent 自动 halt）。人看：日常胜率（参考）、kills（−15% 即掐）、burst 方向。
+//   停不停人说了算，不设触发线。
+//
+// ── yardstick ─────────────────────────────────────────────────────────────
+//   终判：冻结 1600 对 vs bc s4-it180（主判）+ vs KR10-it150（参照）；单批 800 对只算提示，
+//   必须复测拼池。方向诊断：bursts/连击必报。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 stack6-it165 warm start + kickstart 锚（ref=true, init=0.1）；iters 200，手工可提前停；
+//   进 x23 流 paired_rotate_seed=20261015（家族同流，rollout 可比）。
+//   机器与 stack6 同配方（只加一项，见 params）。max_hours 24 保留。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh；backup 新目录；fork 点后与 stack6 不共享账本）。
+{
+  "version": 5,
+  "name": "x24-stack7-burst",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected - wBurst*damageBursts",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 28.0,
+      "wBurst": 6.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack6-it165 副本（sha `4e0d3a6c76f26188`，与 stack6.it165 同字节）─
+  "bc": "nn-training/weights/x24-stack7-burst/x24-stack7-burst.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 300,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 进 x23 流（家族同流，rollout 可比）。
+  "paired_rotate_seed": 20261015,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪，不动）。
+  "decision_k": 10,
+
+  "out": "tmp/x24-stack7-burst/weights.json",
+  "traj": "tmp/x24-stack7-burst",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x24-stack7-burst",
+  "backup_prefix": "x24-stack7-burst",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

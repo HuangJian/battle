@@ -1,0 +1,117 @@
+// 课程 x24-stack7-dist —— stack6-it165 上单加远杀补贴：wDist 1.8 → 2.5。
+//
+// 状态：草稿（2026-10-11 冻结；未开课）。
+//   开课 = 人在控制台点（agent 不开训）。
+//   立项 → 用户 2026-10-10/11 连令：贴脸（A06 0.60 vs 人 0.375）是工具性必需——
+//   它的杀法就是贴脸开火（A05 4.5 格），near 税只能罚不能替。本腿走替代品补贴：
+//   给不贴脸也能杀的工具（远命中）加钱，看能不能把 A06 压下来。低信心腿，严门快杀。
+//   基线 → fork 点 stack6-it165（it165 日常 400 局 0.5125/14.31；panel 中位 A06 0.600/
+//   A07 0.217；⚠ fork 点疑似峰：门以因子为主，胜率只参考不判门）；终判主判 bc s4-it180
+//   （拼池 0.4925/13.7–14.2），KR10-it150 为参照。
+//   起点 stack6-it165 + 单变量（stack6 价全继承，只动 wDist；日常 killEV≈40）。
+//
+// ── 定价（f 以 killEV≈40 计）────────────────────────────────────────────
+//   aimHitDistSum/(aimHits+1)（idx67，干净列，非 raw-only）：wDist 1.8 → 2.5，
+//   边际约 +2.5/局（现 +6.5/局）。剂量保守：前科“远射奖没反应”（A07 0.23 vs 人 0.35
+//   纹丝不动），疑似远命中太稀、奖发不出去（与 hotlane 同一个稀疏病）——先小步看门。
+//   不动 wNearSq（28 已贴 E3a 上限）；不用 nearEnemy4Ticks（58，同边际 + raw-only 包袱）；
+//   不用 enemyDist（57，同边际 dense 版，更 noisy）；远近命中拆分（shotsNear4 类）训练侧
+//   无列，要做等加列清单第一位（排 stuckMax/laneExitPostHit 之后），本腿不等。
+//
+// ── 检查点（it40，硬门；看因，需 panel resim 判定）───────────────────────────
+//   A06 ↓ + A07 ↑（gap2-pairs resim，`bun tmp/gap2-panel-v11.ts nn <it40权重> …`，~15–140s）
+//   + kills 持平（vs fork 点 14.31，−15% 即掐）。
+//   A07 不动 ⇒ 杀腿（前科已判一次，复测是最后一次机会）。
+//   任一不满足 ⇒ 杀腿。
+//
+// ── 人工盯盘（无自动熔断）───────────────────────────────────────────────────
+//   本腿不设任何自动停规则（课程内 ent_break=0、kickstart 熔断全关；开课时控制台也别挂
+//   kl/ent 自动 halt）。人看：日常胜率（参考）、kills、A06/A07（it40 panel 见）。
+//   停不停人说了算，不设触发线。
+//
+// ── yardstick ─────────────────────────────────────────────────────────────
+//   终判：冻结 1600 对 vs bc s4-it180（主判）+ vs KR10-it150（参照）；单批 800 对只算提示，
+//   必须复测拼池。方向诊断：A06/A07 必报（位置与开火分开看，看传导）。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 stack6-it165 warm start + kickstart 锚（ref=true, init=0.1）；iters 200，手工可提前停；
+//   进 x23 流 paired_rotate_seed=20261015（家族同流，rollout 可比）。
+//   机器与 stack6 同配方（只改价，见 params）。max_hours 24 保留。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh；backup 新目录；fork 点后与 stack6 不共享账本）。
+{
+  "version": 5,
+  "name": "x24-stack7-dist",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 2.5,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 28.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack6-it165 副本（sha `4e0d3a6c76f26188`，与 stack6.it165 同字节）─
+  "bc": "nn-training/weights/x24-stack7-dist/x24-stack7-dist.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 300,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 进 x23 流（家族同流，rollout 可比）。
+  "paired_rotate_seed": 20261015,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪，不动）。
+  "decision_k": 10,
+
+  "out": "tmp/x24-stack7-dist/weights.json",
+  "traj": "tmp/x24-stack7-dist",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x24-stack7-dist",
+  "backup_prefix": "x24-stack7-dist",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

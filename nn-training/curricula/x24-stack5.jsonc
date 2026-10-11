@@ -1,0 +1,152 @@
+// 课程 x24-stack5 —— s4 补因果腿 v3：现货版（转身结果 + 残血时长 + 连击 + 蹲线架枪）。
+//   wStop 已删，shotsStopped/turnTicks 不建。起点 s4-it180。
+//
+// 状态：已结课（2026-10-11 用户令；结论见尾部结课报告）。
+//   开课 = 人在控制台点（agent 不开训）。
+//   立项 → 用户 2026-10-10 连下两令：① 停是战术结果，给原因定价（wStop 表面税删除）；
+//   ② 不许加列，把现货柜子翻到底。本文件即执行结果。
+//   基线 → 双基线：bc s4-it180（拼池 0.4925/13.7–14.2）为主判；KR10-it150 为参照。
+//   起点 s4-it180 + 下述四因（s4 价继承，其余不动；it180 n=400 实测率，killEV≈40）。
+//
+// ── 人为什么停（三原因 → 现货映射；机制证据见头注 v2 版，已保留）──────────────
+//   ① 转身瞄准 → 结果可测：backHits+sideHits（v9 几何列，现货）。正面硬冲打不出背/侧命中，
+//      只有转身（或绕侧）才有。s4-it180 22.47/局。
+//      +wGeo×(backHits+sideHits)，wGeo=0.2 → +4.5/局（11%）。
+//   ② 破预测闪避/急脱离 → 结果可测：dangerTicks（hp<0.4 时长，现货 col42）。
+//      被打后赖在残血区=没跑；跑了=残血时长掉。s4-it180 率 0.2041（五分之一时间残血！）。
+//      -wDangerT×dangerTicks/(ticks+1)，wDangerT=15.0 → −3.1/局（7.7%）。
+//      注：l2a 死的是“深度式”（max(0,0.4−hp)），本项是“时长式”，不是一回事。
+//   ③ 连挨揍形状 → damageBursts（相邻扣血≤120t 次数，现货 col59，从没定价过）。
+//      s4-it180 0.517/局。-wBurst×damageBursts，wBurst=6.0 → −3.1/局。
+//      注：maxDamage120 同族但禁区在身（h5a 坟），用 bursts 不碰 max120。
+//   ④ 蹲线架枪 → onLaneHoldFireTicks（在线∧静止∧开火，现货 col53）。
+//      s4-it180 率 0.0153。+wHold×onLaneHoldFireTicks/(ticks+1)，wHold=20.0 → +0.3/局（种子价）。
+//      ⚠ 纪律冲突声明：该列是 raw-only 名单（审计专用）+ 标注“反证门专用”——
+//      本腿是第一次给它定价。理由：① 停火 ambush 别无现货表达；② 剂量种子级（+0.3/局），
+//      即使口径偏了也烧不动大局；③ 豁免 overlap（冻住时架枪）方向与决定 A 一致（好行为不该罚，
+//      本项是奖）。用户已阅（2026-10-10 连令“充分利用现货”）。
+//   ⑤ 热线停留 → postHitLaneTicks（v11 idx75，现货，已签入）。
+//      s4-it180 均 15.9 tick/局（中位 0，41% 局有窗）vs 人类 4.0/局（24% 有窗）；
+//      per-kTick 比 6.8x，cliff −0.207。-wHotLane×postHitLaneTicks/(ticks+1)，
+//      wHotLane=800.0 → −3.6/局（9%）。数大是因为行为稀有（均值 15.9，中位 0）——
+//      稀有行为单价必然大；中位局一分钱不交，只罚犯事的局，这是优点不是 bug。
+//      旧拒理由逐条注销（2026-10-10 实测）：① 分离弱？per-kTick 6.8x + 有窗率 41vs24，够；
+//      ② 与挨打混淆？postHit~dmg Pearson 0.12–0.36（人/机三组），独立信号；
+//      ③ v11 提交限制？本条目 + DECISIONS 新条目即解禁文书（判据 1 已补）。
+//      ④ 三遍肉？wHurt/wDmg 定的是“挨多少”，本项定的是“挨了走不走”——r<0.4 实证不是一回事。
+//   明确不用的现货（免得后人再翻）：stopTicks（STOP 输出恒 0，定价=空气，x23 前科）；
+//   playerHits（col3 语义不明，不碰）；aimBricks（0.02/局，无量）；
+//   maxDamage120（禁区）。
+//
+// ── 检查点（it40，硬门；看因）───────────────────────────────────────────────
+//   背侧命中↑ + 残血时长↓ + 连击↓（三项中两项方向对）。蹲线只看不动门（种子价）。
+//   都不动 ⇒ 杀腿。
+//
+// ── 人工盯盘（无自动熔断）───────────────────────────────────────────────────
+//   本腿不设任何自动停规则（课程内 ent_break=0、kickstart 熔断全关；开课时控制台也别挂
+//   kl/ent 自动 halt）。人看：日常胜率 vs s4-it180 基线、kills、四因方向。
+//   停不停人说了算，不设触发线。
+//
+// ── yardstick ─────────────────────────────────────────────────────────────
+//   终判：冻结 1600 对 vs bc s4-it180（主判）+ vs KR10-it150（参照）；单批 800 对只算提示，
+//   必须复测拼池。方向诊断：四因必报。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 s4-it180 warm start + kickstart 锚（ref=true, init=0.1）；iters 0 无上限，手工停课；
+//   进 x23 流 paired_rotate_seed=20261015（家族同流，rollout 可比）。
+//   机器与 KR10 同配方（只改价，见 params）。max_hours 24 保留。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh；backup 新目录）。
+//
+// ── 结课报告（2026-10-11，用户令结课）────────────────────────────────────────
+//   跑量：rollout it2–145（it0/1 葬于 11:14–11:15 三重校验 ABORT，见
+//   plan/aborted-course-revival.plan.md；offline 腿回灌 it2–55 + fresh 续跑 it56+）；
+//   eval it0–145（30 点，全 settled/dropped=0）。
+//   终判：it145 日常 0.4375/13.25；it5+ 均值 0.4567/13.45（it0 0.51/13.98）。
+//   it40 门 0/3 全反（geo 22.88→21.47↓ / dangerR 0.2004→0.2120↑ / burst 0.540→0.627↑）；
+//   it145 五项仍全反/平（21.93/0.2062/0.610/holdR 0.0152/hotR 0.0049
+//   vs it0 22.88/0.2004/0.540/0.0154/0.0053）。
+//   结论：杀腿归档（bundle 五税齐下 credit 稀释；hotlane 稀疏 59% 局零信号；
+//   lane 税 vs 欧氏 D05 几何错配，panel 实测税基仅占 D05 体量 ~7%）。
+//   1600 对拼池不跑（日常已够判阴）。后继：bursts 单变量由 x24-stack7-burst 重测。
+{
+  "version": 5,
+  "name": "x24-stack5",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wGeo*(backHits+sideHits) - wDangerT*dangerTicks/(ticks+1) - wBurst*damageBursts + wHold*onLaneHoldFireTicks/(ticks+1) - wHotLane*postHitLaneTicks/(ticks+1)",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 16.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wGeo": 0.2,
+      "wDangerT": 15.0,
+      "wBurst": 6.0,
+      "wHold": 20.0,
+      "wHotLane": 800.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：s4-it180 副本（sha `551d784694be0b01`，与 x24-stack4.it180 同字节）─
+  "bc": "nn-training/weights/x24-stack5/x24-stack5.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 320,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 进 x23 流（家族同流，rollout 可比）。
+  "paired_rotate_seed": 20261015,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪，不动）。
+  "decision_k": 10,
+
+  "out": "tmp/x24-stack5/weights.json",
+  "traj": "tmp/x24-stack5",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x24-stack5",
+  "backup_prefix": "x24-stack5",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

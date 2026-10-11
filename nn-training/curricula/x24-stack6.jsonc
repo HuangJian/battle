@@ -1,0 +1,123 @@
+// 课程 x24-stack6 —— 近敌平方加量：wNearSq 16 → 28。起点 s4-it180（现役冠军）。
+//
+// 状态：已结课（2026-10-11 用户令；权重 it165 冻结为 stack7 双腿 fork 点）。
+//   开课 = 人在控制台点（agent 不开训）。
+//   立项 → 用户 2026-10-10 直接指定（位置税太低，s4/s2 拉不开，加量）。
+//   基线 → 双基线：bc s4-it180（拼池 0.4925/13.7–14.2）为主判；KR10-it150 为参照。
+//   起点 s4-it180 + 单变量（s4 价继承，其余不动；日常 killEV≈40）。
+//
+// ── 定价（f 以 killEV≈40 计；v11 panel s4-it180 率 0.2352/拍）────────────────
+//   近敌平方 wNearSq 16 → 28：−3.8 → −6.6/局（10% → 16.5%）。
+//   耦合说明（诚实版）：
+//   “站远自然打远”只对了一半——s4 站得远了（235 全场最低），开火还是贴脸开（0.667 最高），
+//   说明它是“跑过去贴脸开一炮再跑开”（approach 219 佐证）。位置税罚的是全部近身时间，
+//   包括 unavoidable 的穿行/撤退/救家部分；真正 voluntary 的是“贴脸开火”那一下，
+//   那需要 shotsNear4 列（已砍，无列）。本腿加量推的是 margin（让连穿行都贵），
+//   能不能传导到开火，看 it40 的 A06。
+//   E3a 警告：单税超 15% 进过 −7.8pp 坑。本腿 16.5% 贴线上限，不再加；
+//   kills 相对 it0 −15% 即人工干预（gun-shy 熔断，人工执行）。
+//
+// ── 检查点（it40，硬门；看因）───────────────────────────────────────────────
+//   nearSq 率 ↓25%（0.235→0.176）且 kills 持平。任一不满足 ⇒ 杀腿。
+//
+// ── 人工盯盘（无自动熔断）───────────────────────────────────────────────────
+//   本腿不设任何自动停规则（课程内 ent_break=0、kickstart 熔断全关；开课时控制台也别挂
+//   kl/ent 自动 halt）。人看：日常胜率 vs s4-it180 基线、kills、近敌平方/A06。
+//   停不停人说了算，不设触发线。
+//
+// ── yardstick ─────────────────────────────────────────────────────────────
+//   终判：冻结 1600 对 vs bc s4-it180（主判）+ vs KR10-it150（参照）；单批 800 对只算提示，
+//   必须复测拼池。方向诊断：nearSq/A06 必报（位置与开火分开看，看传导）。
+//
+// ── 训练设置 ─────────────────────────────────────────────────────────────
+//   起点 s4-it180 warm start + kickstart 锚（ref=true, init=0.1）；iters 0 无上限，手工停课；
+//   进 x23 流 paired_rotate_seed=20261015（家族同流，rollout 可比）。
+//   机器与 KR10 同配方（只改价，见 params）。max_hours 24 保留。
+//
+// ── §15.5 ─────────────────────────────────────────────────────────────────
+//   新实验（新 out/traj；opt fresh；backup 新目录）。
+//
+// ── 结课报告（2026-10-11，用户令结课）────────────────────────────────────────
+//   跑量：rollout it1–165（零事故），eval it0–165（34 点，全 settled/dropped=0）。
+//   终判：it165 日常 0.5125/14.31（单批峰，回归均值风险已声明）；it5+ 均值 0.4663/13.62
+//   （it0 0.51/13.98）。it40 门双 miss（nearR −16% 未达 −25%，kills −10.7%）；
+//   it165 nearR 0.1630（相对 it0 只 −8.7%，曲线回吐）——位置税有轻微传导但未转成胜率。
+//   gap 实证：it165 人类 160/160 vs NN 71/160（`tmp/probe-gap-stack6it165-table.txt`）；
+//   早崩 51 局三列均值（`tmp/probe-gap-early51-means.txt`）定案 D05/D08 下一步。
+//   结论：按门杀腿；权重 it165 冻结为 stack7 双腿 fork 点（sha `4e0d3a6c76f26188`）。
+//   1600 对拼池不跑。后继：x24-stack7-burst（连击）/ x24-stack7-dist（远杀）并行。
+{
+  "version": 5,
+  "name": "x24-stack6",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 28.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：s4-it180 副本（sha `551d784694be0b01`，与 x24-stack4.it180 同字节）─
+  "bc": "nn-training/weights/x24-stack6/x24-stack6.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 进 x23 流（家族同流，rollout 可比）。
+  "paired_rotate_seed": 20261015,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪，不动）。
+  "decision_k": 10,
+
+  "out": "tmp/x24-stack6/weights.json",
+  "traj": "tmp/x24-stack6",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x24-stack6",
+  "backup_prefix": "x24-stack6",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

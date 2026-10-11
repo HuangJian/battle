@@ -4656,3 +4656,48 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   训练侧重启」——自 §82 起不再成立，旧条文按「只增不改」原样保留）。
 —— 全文（现场三源 / 根因链 / 评审响应表 / DoD）→ `plan/aborted-course-revival.plan.md` §1–§9 ·
 `docs/nn/remote-transport.md` §82 · 评审 → `plan/aborted-course-revival.review-bf.md`
+
+## §2026-10-11-goalnn-x24-stack7-fork（2026-10-11，stack6-it165 上并行两单变量腿：burst 连击税 + dist 远杀补贴）
+
+- **背景**：it165 gap 表（人类 160/160 vs NN 71/160；`tmp/probe-gap-stack6it165-table.txt`）+
+  早崩 51 局三列均值表（`tmp/probe-gap-early51-means.txt`）定案两条因果链：
+  ① 早崩 = 连续挨打（D01 2.4x / D02 8x / D05 129 vs 26），stack5 的 bundle 失败 ≠ 单项失败；
+  ② 贴脸是工具性必需（A06 0.60 vs 人 0.375，near 税只能罚不能替），`wNearSq` 已贴 E3a 上限。
+  D06 经分解证伪「重炮」说（每中伤害 94/96/105 三组同款，gap 全系 D07 命中率）；
+  D08 距离中介说证伪（组内 corr ≈0/−0.4），不可定价的理由换为分母操纵 + 无动作梯度。
+- **决定**：fork 两腿（起点均为 stack6-it165，sha `4e0d3a6c76f26188`，it0 原样拷贝；
+  §15.5 新实验：新 out/traj/opt fresh，不在 stack6 账本上续跑）——
+  `x24-stack7-burst`（stack6 价 + `wBurst=6.0`，−3.1/局，与 stack5 同剂量可比；
+  it40 门 burst↓ + kills≥12.2，胜率不判门）/
+  `x24-stack7-dist`（仅 `wDist 1.8→2.5`；it40 门 A06↓ + A07↑（panel resim 判定）+ kills 持平，
+  A07 不动即杀）。终判均为冻结 1600 对 vs s4-it180 + KR10-it150。
+  maxDamage120 维持禁区；dangerT 不同时加（防重组 bundle）；wNearSq 不再加（E3a 上限）。
+- **备选与否决**：① wBlock 加量治顶住 —— 否（W11 碰次数机已优于人 9 vs 15，病在 persistence，
+  总量价教不会撒手；要治等加列 `stuckMax`）；② onLaneMoveTicks 代理“离开” —— 否
+  （语义错 + raw-only 名单；离开奖等加列 `laneExitPostHit`）；③ burst+dist 塞同一条腿 —— 否
+  （重演 bundle，credit 稀释）；④ s4-it180 起点重测 bursts —— 否（本问是 stack6 上的边际效应，
+  fork 点基线冻结更直接）。
+- **后果**：两 `.jsonc` + it0 已冻结待开（`nn-training/curricula/x24-stack7-{burst,dist}.jsonc`，
+  公式列全对 `reward_library.METRICS` 校验过，单变量 diff 已验）；
+  开课 = 人在控制台点（agent 不开训）；加列清单（`stuckMax`/`laneExitPostHit`/`shotsNear4` 类）
+  因 `batch_runner.py` LOC 天花板（999/1000）顺延至重构后。
+—— 全文（剂量/门/熔断/yardstick）→ 两课程文件头注 · 基线 `tmp/x24-stack6/eval_log.jsonl:it165`
+  （0.5125/14.31，疑似峰已在门里声明）
+
+## §2026-10-11-goalnn-x24-s56-close（2026-10-11，stack5/stack6 结课判杀 + gap 注两条订正）
+
+- **背景**：stack5（rollout it2–145，eval it0–145）：终点 it145 0.4375/13.25，
+  it5+ 均值 0.4567/13.45（it0 0.51/13.98）；it40 门 0/3 全反且 it145 五项仍全反/平。
+  stack6（rollout it1–165 零事故，eval it0–165）：终点 it165 0.5125/14.31（单批峰），
+  it5+ 均值 0.4663/13.62；it40 双 miss，it165 nearR 只 −8.7%（曲线回吐）。
+  it165 gap 表 + 早崩 51 局三列均值表见上条。1600 对拼池两腿皆不跑（日常已够判阴）。
+- **决定**：两腿按门杀腿归档，结课报告写回各自课程文件尾部；stack6-it165 冻结为 stack7
+  双腿 fork 点；`tools/gap-text-table.ts` NOTES 订正两条——D06「重炮」说证伪
+  （每中 94/96/105 同款，gap 全系 D07 + 局短虚高）→「命中率问题，局短虚高；炮弹同款」；
+  D08 距离中介说证伪（组内 corr≈0/−0.4）→「结果率，分母可操纵，不定价」（头注留出处）。
+- **备选与否决**：① stack6 趁 it165 峰续跑 —— 否（峰是单批 400 局噪声，门已 miss，
+  续跑烧机时；要的边际已由 stack7 接手）；② 1600 对终判 —— 否（判阴不需要拼池，
+  拼池只用于加冕）；③ D06/D08 照旧注留档 —— 否（注是指南，会被后人当定价依据引用，
+  错注必须当场改）。
+- **后果**：课程文件状态行 → 已结课；停训由人在控制台执行（agent 不开/停训）。
+—— 全文 → `nn-training/curricula/x24-stack{5,6}.jsonc` 尾部结课报告
