@@ -90,6 +90,9 @@ from remote.hub_http import (
     ProbeResult as ProbeResult,
 )
 from remote.hub_http import (
+    TripleCheckError as TripleCheckError,
+)
+from remote.hub_http import (
     _job_failed_from_body as _job_failed_from_body,
 )
 from remote.hub_http import (
@@ -1212,6 +1215,47 @@ def cancel_stale_jobs(jsonl_path: str | Path, it: int, keep_job_id: str) -> int:
     return n
 
 
+def cancel_job(
+    jsonl_path: str | Path, job_id: str, *, reason: str = "", it: int | None = None
+) -> bool:
+    """**单 job 定向作废**（写 `job_cancelled` 账本事件；净态门 + 幂等）。
+
+    与 `cancel_stale_jobs`（发布时按 `it <= 当前` 批量清滞后项）互补：这是「**这一个** job
+    已证明永远不会被接受」的收口（2026-10-11 事故；评审 F2）——三重校验拒收后由
+    `trainer/loop_remote_job.py::_remote_ppo_land` 调用（人工作废走 hub 的
+    `POST /admin/cancel-job`，那是另一条腿）。
+
+    判据 = **净态**（文件序里该 jid 最后一条 pending/completed/cancelled 事件）：
+    只有 `job_pending` 才追加作废并返回 True；已 completed/cancelled/账本缺失 ⇒ False
+    （幂等可重放——重复拒收不重复记账）。hub 的 `claimable_job_ids` 从同一份账本重算
+    （共读），重启后仍然有效（I-5）。
+    """
+    p = Path(jsonl_path)
+    if not p.exists():
+        return False
+    net = ""
+    for line in p.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if e.get("job_id") == job_id and e.get("event") in (
+            "job_pending",
+            "job_completed",
+            "job_cancelled",
+        ):
+            net = str(e["event"])
+    if net != "job_pending":
+        return False
+    event: dict = {"event": "job_cancelled", "job_id": job_id, "reason": reason, "ts": time.time()}
+    if it is not None:
+        event["it"] = int(it)
+    _append_ledger(p, event)
+    return True
+
+
 # ------------------------------------------------------------------ 校验落位
 
 
@@ -1243,7 +1287,7 @@ def verify_and_land(
     """
     m = normalize_manifest(manifest)
     if result["init_weights_fp"] != _sha256_file(init_weights_path):
-        raise HubClientError("三重校验失败: init_weights_fp 不匹配（云起点 ≠ 当前 args.out）——拒收")
+        raise TripleCheckError("三重校验失败: init_weights_fp 不匹配（云起点 ≠ 当前 args.out）——拒收")
     if str(m.get("kind", "ppo") or "ppo") == "iter":
         local_fp = str(m["data_fp"])
     else:
@@ -1261,12 +1305,12 @@ def verify_and_land(
             )
         )
     if result["data_fp"] != local_fp:
-        raise HubClientError(
+        raise TripleCheckError(
             f"三重校验失败: data_fp 不匹配（云={result['data_fp'][:12]}… "
             f"本地={local_fp[:12]}…）——拒收"
         )
     if result["commit_echo"] != m["commit"]:
-        raise HubClientError(
+        raise TripleCheckError(
             f"三重校验失败: commit_echo={result['commit_echo'][:12]}… != "
             f"manifest.commit={m['commit'][:12]}…——拒收"
         )

@@ -48,9 +48,11 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: | 2026-10-11 S3（`biz.course_spec.block_dict`：`_block_dict` ×2 → 1） | 14 | 17 | 82 |
 #: | 2026-10-11 S3（`worker/models/intent_net.build_intent_model`：`build_model` ×2 → 1） | 13 | 17 | 81 |
 #: | 2026-10-11 S2（`common.http_respond`：`_json` ×2 → **类属性别名**，不留第二份 `def`） | **12** | 17 | **80** |
+#: | 2026-10-11 W7（`plan/aborted-course-revival`：`cancel_job` = store 核心 + 门面转发 +
+#:   Protocol 声明——与 `unfreeze` 同款的**合法同名面**，不是抄了一份实现） | 12 | 17 | **81** |
 BASELINE_EXACT = 12
 BASELINE_CLONE = 17
-BASELINE_SAME_NAME_GE3 = 80
+BASELINE_SAME_NAME_GE3 = 81
 
 
 def _stems(modules: frozenset[str]) -> frozenset[str]:

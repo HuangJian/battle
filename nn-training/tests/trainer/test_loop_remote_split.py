@@ -198,7 +198,10 @@ DELAYED_IMPORTS: dict[str, frozenset[str]] = {
     ),
     "loop_remote_fail.py": frozenset(),
     # `biz.plan` 随半离线整段（`_remote_run_segment`）退役 —— 它原来是那条腿算计划用的。
-    "loop_remote_drive.py": frozenset({"worker.iter_job"}),
+    # 2026-10-11（plan/aborted-course-revival W6）：`remote.hub_client` 进延迟集——
+    # 落位失败要**按类型**判「三重校验拒收」（`TripleCheckError`）才好清会话/不重落，
+    # 而本模块的相位方法都走「方法体内自带 import」的既有形状（同 loop_remote_job）。
+    "loop_remote_drive.py": frozenset({"worker.iter_job", "remote.hub_client"}),
 }
 
 #: 反向边（禁）：本族谁都不许 import 这些（它只靠 `self.*` 回调 / 组合根除外）。

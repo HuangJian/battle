@@ -480,21 +480,41 @@ class TrainingRemoteJob(TrainingRemotePush):
         """
         args = self.args
         # 三重校验 + 落位（D12）：任一不等响亮拒绝，不落盘
-        from remote.hub_client import mark_job_completed, verify_and_land
+        from remote.hub_client import (
+            TripleCheckError,
+            cancel_job,
+            mark_job_completed,
+            verify_and_land,
+        )
         from worker.resume import state_init_enabled
 
-        verify_and_land(
-            result,
-            sess.manifest,
-            init_weights_path=args.out,
-            traj_dir=args.traj,
-            it=sess.it,
-            out_weights=args.out,
-            # data_fp 重算必须用与发布**同一条**过滤（P3.5）：否则本地算出的集合
-            # 与云端收到的集合分叉，三重校验会响亮拒收一份本来正常的 job。
-            state_init=state_init_enabled(args),
-            log=log,
-        )
+        try:
+            verify_and_land(
+                result,
+                sess.manifest,
+                init_weights_path=args.out,
+                traj_dir=args.traj,
+                it=sess.it,
+                out_weights=args.out,
+                # data_fp 重算必须用与发布**同一条**过滤（P3.5）：否则本地算出的集合
+                # 与云端收到的集合分叉，三重校验会响亮拒收一份本来正常的 job。
+                state_init=state_init_enabled(args),
+                log=log,
+            )
+        except TripleCheckError as e:
+            # ★ 2026-10-11（事故；评审 F2）：三重校验拒收 = 这份 job 的**确定性终局**。
+            # 收口两件事：①账本落 `job_cancelled`（审计 + hub 读面从净态重算；人不用再猜
+            # 它为什么躺在那里）；②**原样上抛**（判决链不变，I-4）——调用方
+            # `_remote_ppo_step` 会清掉保留会话，下一次 attempt 重新发布/规划，
+            # 不再把同一份坏结果重落 5 次（x24-stack5 事故的形状）。
+            cancelled = cancel_job(
+                self._jsonl_path, sess.jid, it=sess.it, reason=f"三重校验拒收：{str(e)[:200]}"
+            )
+            log(
+                f"[run_rl] remote ppo it{sess.it}: job {sess.jid} 三重校验拒收——"
+                f"{'已作废（账本 job_cancelled）' if cancelled else '净态非 pending，不重复作废'}"
+            )
+            raise
         mark_job_completed(self._jsonl_path, sess.jid)
         # I1：远端提交序列完成（校验落位 + job 记账）——WAL 收口。冒烟作废轮也算
         # 完成（commit 本身成功了；作废轮由 _prepare_iter_dir 清场后重试新轮）。

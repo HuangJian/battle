@@ -463,6 +463,10 @@ def _all_settled(sup: Supervisor) -> bool:
     **暂停不算收官**（用户口径「暂停 = 保留队列，恢复后接着跑」）：把 PAUSED 当收官会让
     「暂停一门课」顺手把整个进程退掉，于是恢复意图永远没人执行。暂停的课会让显式课程模式
     的进程一直等（用 `--max-seconds` 兜底）；发现模式本来就不退。
+
+    ★ 已处理 ≠ 已收官（2026-10-11；W1）：ABORTED 计入本判据（「没有活可干」）是对的，
+    且**逻辑不动**；但它在 `_settle_rounds` 里会被记进 `done_hooked`（`reopened_parked`
+    的准入）——两个谓词的分叉见那里的 docstring。
     """
     return all(q.state in (QUEUE_DONE, ABORTED) for q in sup.courses.values())
 
@@ -482,7 +486,7 @@ def _marker_mtime_ns(traj_root: str | Path, course: str) -> int | None:
 SKIP_KIND_CONFIG = "config"  #: 开课校验失败（课程文件/环境配置）：判据 = 课程文件 + 开课标记
 SKIP_KIND_LOCK = "lock"  #: 按课程锁被占：判据 = 锁签名（释放 / 换主 / 持有者死）
 SKIP_KIND_ENQUEUE = "enqueue"  #: 入队失败（读盘）：判据 = 账本 + 课程文件 + 开课标记
-SKIP_KIND_STEP = "step"  #: 一步级 SystemExit 下线：课仍在 runtimes ⇒ 走「重置队列」通道
+SKIP_KIND_STEP = "step"  #: 一步级失败/调度器停腿下线：课仍在 runtimes ⇒ 走「重置队列」通道（判据 = 账本 + 课程文件 + 开课标记）
 
 
 def _course_file_identity(course: str) -> tuple[int, int] | None:
@@ -539,7 +543,10 @@ def _skip_fingerprint(course: str, kind: str, traj_root: str | Path) -> dict[str
     }
     if kind == SKIP_KIND_LOCK:
         fp["lock"] = _lock_signature(course)
-    elif kind == SKIP_KIND_ENQUEUE:
+    elif kind in (SKIP_KIND_ENQUEUE, SKIP_KIND_STEP):
+        # ★ 2026-10-11（评审 F5）：STEP 也看**账本 mtime**——「人作废/重发中毒 job」落的
+        # `job_cancelled`/`job_pending` 就是盘上事实变化（与 I-2 的第三触发对齐）；
+        # 只改课程文件 / 停课再开课同样能复活（三种触发过同一道闸：判据变了才重试）。
         fp["ledger"] = _ledger_mtime_ns(traj_root, course)
     return fp
 
@@ -695,6 +702,35 @@ def _revive_skipped(
     return opened
 
 
+def _revive_hygiene(rt: CourseRuntime | None) -> None:
+    """复活前清掉**这条腿的判决态**（2026-10-11 事故；评审 F1 的必修项）。
+
+    为什么必须有：`_leg_abort` / `_remote_fail` 是**引擎级终态**（`loop_remote_fail.py:111`
+    置位，`loop_core.__init__` 之外全仓无复位点），而复活**复用同一个引擎对象**
+    （C-0 前科：不重建 runtime/引擎）。不清的两种结局都不叫复活：
+    ① **同 it 复活**：保留的 `ctx.remote` 只 probe 同一 jid ⇒ 重落同一份坏结果，且
+    `_leg_abort` 让 `round_failure` 立刻上抛 ⇒ 5×30s 后再停腿；
+    ② **it 已前进复活**：成功收口一轮后 `step_ppo` 撞**陈旧的** `_leg_abort` ⇒
+    `finish(ROUND_STOP)` ⇒ planner 空表 ⇒ 队列 DONE ⇒ 假收官（写 run_complete）。
+    清的是**判决态**，不是训练进度：权重/账本/指针都不动；`_setup` 重建的进程重启
+    本来就不继承这些，复活是同一语义的进程内版。
+
+    **不动** `runner.finished`：它只可能来自真硬边界/预算（ROUND_STOP / 预算耗尽），
+    属另一语义（重开一门真收官的课不在本刀范围）——写在这里防误加。
+    """
+    if rt is None:
+        return
+    engine = rt.engine
+    for attr, value in (("_leg_abort", False), ("_remote_fail", 0), ("_consec_fail", 0)):
+        if hasattr(engine, attr):
+            setattr(engine, attr, value)
+    runner = rt.runner
+    if runner is not None:
+        # 丢弃**保留的远端会话**（`_remote_ppo_step` 在落位失败时不清的那种）：
+        # 下一次 ppo 重新发布/规划，不再重落同一份结果。
+        runner.contexts.pop(rt.course, None)
+
+
 def _revive_aborted(
     sup: Supervisor,
     runtimes: dict[str, CourseRuntime],
@@ -704,12 +740,14 @@ def _revive_aborted(
     step_mode: bool,
     traj_root: str,
 ) -> bool:
-    """判据已变的「一步级失败」课：重置队列、**复用原 runtime 与热引擎**重新入队。
+    """判据已变的「一步级失败/停腿」课：重置队列、**复用原 runtime 与热引擎**重新入队。
 
     C-0 前科（DECISIONS §2026-09-25-clutch-null-kill）：重走 `_open_courses` 会建一个
     `runner=None` 的新 runtime，而池里还是旧引擎 ⇒ `ensure_ready` 对不上 ⇒ 每轮断言失败进
-    无限 RETRY。故这里只重置队列（`_enqueue`），runtime/引擎原样复用。
+    无限 RETRY。故这里只重置队列（`_enqueue`），runtime/引擎原样复用——**复用前先过
+    `_revive_hygiene`**（评审 F1：不清判决态 = 复活后立再死/假收官）。
     """
+    _revive_hygiene(runtimes.get(course))  # ★ W3：先清判决态再重新入队
     try:
         old_rounds = int(sup.courses[course].rounds_done) if course in sup.courses else 0
         _enqueue(sup, runtimes, course, step_mode=step_mode)
@@ -855,6 +893,12 @@ def serve(
                 report.steps += 1
                 if trace.action in ("aborted", "round_done", "blocked_pool"):
                     log(f"[serve] {trace.course}: {trace.action} {trace.kind} {trace.detail}")
+                if trace.action == "aborted":
+                    # ★ 停腿 = 一个**可复活**的跳过（2026-10-11 事故；W2）：记下判据
+                    # （课程文件 / 开课标记 / 账本），变了就经 `reopenable_skipped` →
+                    # `_revive_aborted` 复活；判据没变不重试、不刷日志（与 SystemExit 同闸）。
+                    # 只记一次：`_abort` 后该课 `runnable()` 恒假，`step()` 不会再返回它。
+                    _record_skip(report, trace.course, SKIP_KIND_STEP, trace.detail, traj_root)
                 if max_steps and report.steps >= max_steps:
                     report.stop_reason = "max_steps"
                     break
@@ -876,6 +920,7 @@ def serve(
                     traj_root,
                 ):
                     try:
+                        _revive_hygiene(runtimes.get(_c))  # ★ W3：先清判决态（评审 F1）
                         _old_rounds = (
                             sup.courses[_c].rounds_done if _c in sup.courses else 0
                         )
@@ -885,6 +930,10 @@ def serve(
                     except BaseException as _e:
                         log(f"[serve] 课程 {_c} 复活入队失败，本次仍停车：{type(_e).__name__}: {_e}")
                         continue
+                    # ★ W4（评审 F3）：这条通道复活成功后从跳过记账里摘名——否则同一空转拍内
+                    # `reopenable_skipped` 会对同一个 trigger 再复活一次（双入队/双日志）。
+                    report.skipped.pop(_c, None)
+                    report.skipped_at.pop(_c, None)
                     done_hooked.discard(_c)
                     _m = _marker_mtime_ns(traj_root, _c)
                     if _m is not None:
@@ -999,11 +1048,21 @@ def _settle_rounds(
     跑满的课：`TrainingLoop.finish_course()`（收敛预采 / 云机 PAUSE / 收官 eval drain /
     `run_complete` 落账，与单课程入口共用同一份实现）——**不停车**（停车会冻住其余课，见
     模块 docstring）。RL 的 drain 传 `block=False`（派发即返回，G2）；BC 是另一份实现
-    （`BcLoop.finish_course(self, it)`），按 kind 分派、**不带 kwargs**（P0-2）。停腿
-    （ABORTED）的课不做收官副作用（它不是正常跑满）。
+    （`BcLoop.finish_course(self, it)`），按 kind 分派、**不带 kwargs**（P0-2）。
+
+    ★ 「已处理」与「已收官」分开记账（2026-10-11 事故；W1）：**停腿（ABORTED）的课
+    不做收官副作用**（它不是正常跑满），但要**记进 `done_hooked`**——`done_hooked` 的语义
+    是「这门课本状态已处理过」，而 `reopened_parked` 的准入门（`:596`）正是它；以前
+    ABORTED 永远进不来 ⇒ 停课再开课也复活不了停腿课。两个谓词的分叉是有意的：
+    `_all_settled` 回答「进程能不能退」，`done_hooked` 回答「还欠不欠一次处理」。
     """
     for course, q in sup.courses.items():
-        if q.state != QUEUE_DONE or course in done_hooked:
+        if course in done_hooked:
+            continue
+        if q.state == ABORTED:
+            done_hooked.add(course)  # 已处理（但不写收官副作用，I-3）
+            continue
+        if q.state != QUEUE_DONE:
             continue
         rt = runtimes.get(course)
         if rt is None or rt.engine is None:

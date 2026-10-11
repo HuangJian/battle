@@ -362,6 +362,40 @@ class AdminRoutes:
             {"job_id": jid, "unfrozen": True, "reclaims": info.get("reclaims", 0)}, 200
         )
 
+    def _admin_cancel_job(self) -> None:
+        """`POST /admin/cancel-job?job_id=<jid>`：人工作废**一个**未被认领的 job（W7）。
+
+        为什么必须有这个口（2026-10-11 事故）：毒 job（三重校验必拒收的那类）以前没有任何
+        人工把手——`/admin/unfreeze` 只解冻、`release_hold` 只解接管，而 `cancel_unsettled_jobs`
+        是全池撤单且无入口。判据与全池版**同源**（可领取池 ∧ 不在飞）；**在飞不撤**
+        （2026-10-03 用户裁决「不管在算的，只管没领的」）。
+
+        三态：job 不明 / 不属于本 hub → 404（响亮，不静默造无归属状态）；在飞 → 409
+        （硬拒绝——它将来也不会变成可撤）；其余 → 200 + 明细（含幂等重放：已终局
+        `cancelled:false` + why，可安全重发）。
+        """
+        if not self._auth_ok():
+            return
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        jid = (qs.get("job_id") or qs.get("job") or [""])[0].strip()
+        if not jid:
+            self._json({"error": "需要 job_id=<jid>"}, 400)
+            return
+        if not (self.hub._job_dir(jid) / "manifest.json").exists():
+            self._json({"error": f"未知 job {jid}"}, 404)
+            return
+        info = self.hub.cancel_job(jid, reason="admin cancel-job")
+        if info.get("inflight"):
+            self._json(info, 409)
+            return
+        if info.get("cancelled"):
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] 人工作废：job={jid} "
+                "（账本 job_cancelled；已从可领池移除）",
+                flush=True,
+            )
+        self._json(info, 200)
+
     # ---- push worker 登记表（2026-09-18；控制台 worker 登记入口的服务面）----
     def _admin_push_workers(self, set_action: bool = False) -> None:
         """`GET /admin/push-workers` 看登记表 + 派发器状态；`POST` 增/删/热重载。

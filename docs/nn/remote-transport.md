@@ -6,6 +6,60 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §82 停腿课复活：ABORTED 不再是终身停车 + 复活卫生 + 拒收作废 + `/admin/cancel-job`（2026-10-11，plan/aborted-course-revival）
+
+**触发**（x24-stack5 事故，2026-10-11）：一门课被调度器判停腿（ABORTED）后**三条复活通道
+（`reopened_parked` / `reopenable_skipped` / `fresh`）在设计上都够不到它** ⇒ 不重启 serve 就是
+终身停车。事故当日 11:15:33 停腿 → 16:05:59 因 node upgrade 重启才经 `fresh` 在 it56 续跑
+（窗口 ≈4h50m）。⇒ **§68 第 3/4 条的两句陈述（「也没有出口」/「唯一解法是训练侧重启」）自本条起
+不再成立**（旧条文按「只增不改」原样保留）——出口 = 人改课程文件 / 停课再开课 / 作废中毒的 job。
+
+**根因（逐条在代码上核实）**：① `_settle_rounds` 只对 QUEUE_DONE 记 `done_hooked`，
+而 `reopened_parked` 的准入门要求 `course in done` ⇒ ABORTED 永不入；② 调度器级 `_abort`
+（`worker/loop_scheduler.py`，连败 5 次/门禁 ABORT 的落点）不写 `report.skipped_at`（唯一写者是
+`loop_serve._record_skip`）⇒ `reopenable_skipped` 遍历不到；③ `fresh` 要求课不在 `runtimes`
+（停腿课仍在）。另两处「拒收 ≠ 作废」：三重校验拒收只抛异常、**训练侧会话保留**（`ctx.remote`
+不清）⇒ 重试只 probe 同一 jid、把同一份坏结果重落 5 次——毒 job 炸的是**领它的那门课**。
+
+**落地（W1–W7，serve 侧零协议 / hub 侧纯加法）**：
+
+* **W1/W2（`trainer/loop_serve.py`）**：ABORTED 进 `done_hooked`（「已处理 ≠ 已收官」——不写
+  `run_complete`、不发云机 PAUSE）；serve 主循环在 `trace.action == "aborted"` 拍补
+  `_record_skip(SKIP_KIND_STEP, …)`（与一步级 SystemExit 同闸）。
+* **W3 复活卫生（评审 F1 的必修项）**：`_leg_abort` / `_remote_fail` / `_consec_fail` 是**引擎级
+  终态**（`loop_remote_fail.py:111` 置位、全仓无复位点），而复活**复用热引擎**（C-0 前科）——
+  不清的两种结局都不叫复活：同 it 复活 ⇒ 重落坏结果 + `_leg_abort` 立刻上抛 ⇒ 2.5 分钟后再停腿；
+  it 已前进复活 ⇒ 成功收口一轮后撞陈旧 `_leg_abort` ⇒ `finish(ROUND_STOP)` ⇒ **一轮假收官**。
+  新增 `_revive_hygiene(rt)`（两处复活共用）：清三旗 + `runner.contexts.pop(本课)`；
+  **不动** `runner.finished`（真硬边界/预算的语义）。
+* **W4 去重**：`reopened_parked` 复活成功后从 `skipped`/`skipped_at` 摘名——同一「停→开」不双复活。
+* **W5 判据**：`SKIP_KIND_STEP` 指纹纳入**账本 mtime**（与 ENQUEUE 同款）——「人作废/重发 job」落的
+  `job_cancelled`/`job_pending` 本身就是盘上事实变化 ⇒ 课自动复活（用户停课仍拦）。
+* **W6 拒收终局**：`verify_and_land` 三处拒收改抛 `TripleCheckError`（`HubClientError` 子类，
+  消息逐字不变）；`remote/hub_client.cancel_job`（净态门 + 幂等）在 `_remote_ppo_land` 拒收时落
+  `job_cancelled`（含可读 reason）并原样上抛；`_remote_ppo_step` 对拒收**清 `ctx.remote`**
+  （瞬时性落位失败**不清**——重试只重落，不白烧云上重算）。⇒ 下一次 attempt 重新发布/规划。
+* **W7 人工把手**：`hub/store_ledger.cancel_job`（单 job 定向作废；判据 = `claimable_job_ids()` ∧
+  ∉`_claimed|_computing`——与全池版**同源**，在飞不撤）+ `hub/queue_observe` 门面转发 +
+  `POST /admin/cancel-job?job_id=…`（404 未知 / 409 在飞 / 200 + `{cancelled, inflight, why}`，
+  幂等可重放）。全池版循环体抽成 `_cancel_job_locked` 复用，行为逐字不变。
+
+**M0-a（前置读数，已答）**：hub 与训练侧**共读**同一份 job 账本——多课程 hub 每课 store 的
+`jsonl_path = <traj>/<course>/training_log.jsonl`（`hub/queue_scope.py:108-110`），训练侧同址
+（`trainer/loop_lifecycle.py:585`）⇒ 拒收作废走账本路线成立，不必走 HTTP。
+
+**守卫**：`tests/trainer/test_serve_aborted_revival.py`（7 例：W1/W2 记账、两条复活通道、
+**复活后连续两轮仍活**（W3 判别式）、同拍只复活一次（W4）、判据不变不复活、指纹含账本（W5）、
+卫生纯函数）· `tests/remote/test_remote_ppo.py`（拒收作废 + 幂等）·
+`tests/worker/test_remote_ppo_phases.py`（拒收清会话 / 瞬时不清）·
+`tests/hub/test_admin_cancel_job.py`（三态 + 幂等 + 判据同源）· 既有契约
+（`test_serve_skipped_retry.py:362`、`test_loop_scheduler.py:262`、`test_auto_handoff.py:1017/:1034`）原样绿。
+门禁：`nn-python-gate.sh` 4202 passed / 10 skipped。
+
+**后果**：停腿课在**改课程文件 / 停开一次课 / 作废毒 job** 后自动复活**并真正续跑**（不必重启
+serve、不重建引擎）；毒 job 有账本终局与人工把手；复活判决态不再跨复活存活。**未做**：定时器式
+自动重试（I-2：复活仍以「盘上事实变化」为闸）。
+
 ## §81 结果回传失败时备份那一份线上体：`<job_dir>/backup/`（2026-10-11，plan/rollout-topup-fastpath §3.6）
 
 **触发**（用户第 1 条后半句）：结果是最贵的产物，而回传是它唯一的出口。`post_result` 已经重试 5 次

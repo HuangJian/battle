@@ -97,6 +97,10 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "job_failure",
             "get_result",
             "cancel_unsettled_jobs",
+            # 2026-10-11（plan/aborted-course-revival W7）：单 job 定向作废——全池版与单版本
+            # 共用 `_cancel_job_locked`（判据留入口、落账动作只此一份）。
+            "_cancel_job_locked",
+            "cancel_job",
         ),
         ("_ledger_cache", "_cancelled"),
     ),
@@ -320,8 +324,8 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
         for m in defined & set(MIXIN_METHODS):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(MIXIN_METHODS) == 62, len(MIXIN_METHODS)
-    assert len(seen) == 62, len(seen)
+    assert len(MIXIN_METHODS) == 64, len(MIXIN_METHODS)
+    assert len(seen) == 64, len(seen)
     # 49 = 拆分前 `_JobStore` 的 49 个方法；2026-09-25 并入 origin 的课程侧落位后又多了 2 条
     # （`_course_backup_target` / `_land_offline_round_extras`）；2026-10-01 §52 加 2 条
     # （`_lease_state` 判据 + `_lease_held` 布尔视图）；2026-10-03 T0 加 1 条
@@ -329,8 +333,10 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
     # 2026-10-06 加 2 条（`_unfinished_pending` 唯一筛子 + `inflight_job_ids` 在飞集）；
     # 2026-10-07 M1b 加 3 条（`job_kind` / `hold_blocked` / `_hold_stale_sec`）；
     # 2026-10-08 M5 加 4 条（`note_job_progress` / `job_progress_at` / `_bc_progress_stale_sec` /
-    # `bc_drain_of`——BC 进度租约与 drain 判据）⇒ 现在 62 + 2。
-    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 62 + 2, "_JobStore 的方法总数变了"
+    # `bc_drain_of`——BC 进度租约与 drain 判据）；
+    # 2026-10-11 W7（plan/aborted-course-revival）加 2 条（`cancel_job` / `_cancel_job_locked`）
+    # ⇒ 现在 64 + 2。
+    assert len(MIXIN_METHODS) + len(OWN_METHODS) == 64 + 2, "_JobStore 的方法总数变了"
 
 
 def test_the_mixins_do_not_share_any_defined_name() -> None:

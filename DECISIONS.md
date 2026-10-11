@@ -4620,3 +4620,39 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   新 `--out`/`--traj`，**不跨改动续跑**。
 —— 全文（现场读数 / 根因链 / 判据迁移表 / DoD）→ `plan/rollout-topup-fastpath.plan.md` §1–§4 · §10 ·
 `docs/nn/runtime-opt.md` §35 · 评审 → `plan/rollout-topup-fastpath.review-bf.md`
+
+## §2026-10-11-goalnn-aborted-course-revival（2026-10-11，停腿课复活 + 复活卫生 + 拒收终局 + `/admin/cancel-job`；plan/aborted-course-revival + 首轮评审 F1–F8）
+
+- **背景**：x24-stack5 事故（2026-10-11）——调度器级 5 连败判停腿（ABORTED）后**三条复活通道
+  都够不到它**（`reopened_parked` 要求 `course in done_hooked` 而 ABORTED 永不入；`reopenable_skipped`
+  的记账只在一步级 SystemExit/开课失败两处写；`fresh` 要求课不在 `runtimes`），不重启 serve 即终身
+  停车（窗口 ≈4h50m，靠当晚 node upgrade 重启经 `fresh` 在 it56 续跑）。深挖后另有两条结构性欠账：
+  ① 复活**复用热引擎**（C-0 前科）但 `_leg_abort`/`_remote_fail` 是引擎级终态且全仓无复位点
+  ⇒ 「复活」会立再死或一轮假收官（评审 F1）；② 三重校验拒收只抛异常、**训练侧会话保留**
+  ⇒ 同一份坏结果被重落 5 次，毒 job 炸的是领它的那门课（评审 F2）。
+- **决定**（W1–W7；serve 侧零协议、hub 侧纯加法）：
+  - W1/W2 `_settle_rounds` 把「已处理」与「已收官」分开记账（ABORTED 进 `done_hooked`，不写
+    `run_complete`）；serve 在 `trace.action=="aborted"` 拍补 `_record_skip(SKIP_KIND_STEP, …)`；
+  - **W3 复活卫生** `_revive_hygiene(rt)`：复活前清 `_leg_abort`/`_remote_fail`/`_consec_fail` +
+    `runner.contexts.pop(本课)`（丢弃保留会话）；两处复活共用；**不动** `runner.finished`；
+  - W4 摘名去重（同一「停→开」不双复活）；W5 `SKIP_KIND_STEP` 指纹纳入**账本 mtime**
+    （「作废/重发 job」本身即复活触发，用户停课仍拦）；
+  - W6 拒收终局：`verify_and_land` 改抛 `TripleCheckError`（`HubClientError` 子类，消息逐字不变）；
+    `cancel_job` 落账本 `job_cancelled`（净态门 + 幂等）+ `_remote_ppo_step` 对拒收**清会话**
+    （瞬时性落位失败不清）；
+  - W7 人工把手 `POST /admin/cancel-job`（单 job 定向作废；判据 = `claimable ∩ ¬(_claimed|_computing)`
+    与全池版同源；404/409/200 + `{cancelled, inflight, why}`，幂等可重放）；全池版循环体抽
+    `_cancel_job_locked` 复用，行为不变。
+- **备选与否决**：① 定时器式自动重试停腿课 —— 否（I-2：复活唯一触发 = **盘上事实变化**，
+  自动重试＝把 5×30s 空转变无限空转）；② 单 job 撤单直接调全池版 —— 否（多课共 hub，
+  会顺手撤别人的活，违反 `test_auto_handoff.py:982` 契约）；③ 拒收按消息文本匹配判定 —— 否
+  （改文案即静默失效，用专用异常类型）；④ 落位失败一律清会话 —— 否（瞬时性失败应重落取回的结果，
+  清会话会白烧一次云上重算）；⑤ 复活时重建引擎 —— 否（C-0 前科：新 runtime/引擎对不上，
+  进无限 RETRY；清判决态即可）。
+- **后果**：停腿课在「改课程文件 / 停开一次课 / 作废毒 job」后自动复活**并真正续跑**（不重启 serve、
+  不重建引擎、不写假收官）；毒 job 有账本终局与人工把手。新增守卫 7+2+2+6 例；
+  门禁 `nn-python-gate.sh` **4202 passed / 10 skipped**（ruff+mypy 绿）。
+  ⚠ 该改动同时修正了 `docs/nn/remote-transport.md` §68 的两句旧陈述（「也没有出口」/「唯一解法是
+  训练侧重启」——自 §82 起不再成立，旧条文按「只增不改」原样保留）。
+—— 全文（现场三源 / 根因链 / 评审响应表 / DoD）→ `plan/aborted-course-revival.plan.md` §1–§9 ·
+`docs/nn/remote-transport.md` §82 · 评审 → `plan/aborted-course-revival.review-bf.md`

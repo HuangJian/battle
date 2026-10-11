@@ -202,3 +202,37 @@ def test_land_failure_goes_through_the_policy() -> None:
     with pytest.raises(JobFailedError):
         rig.step._remote_ppo_step(RoundContext(it=1, resumable=True))
     assert rig.calls[-1] == "policy"
+
+
+def test_triple_check_reject_clears_the_session() -> None:
+    """★ 2026-10-11（事故；评审 F2）：三重校验拒收 ⇒ **清会话**——下一次 attempt 重新发布，
+    不再只 probe 同一 jid、把同一份坏结果重落 5 次（x24-stack5 的形状）。"""
+    from remote.hub_client import TripleCheckError
+
+    rig = _Rig(probe_result={"agg": {}})
+
+    def reject(_sess: RemotePpoJob, _result: dict) -> dict:
+        raise TripleCheckError("三重校验失败: init_weights_fp 不匹配（云起点 ≠ 当前 args.out）——拒收")
+
+    _stub(rig.step, "_remote_ppo_land", reject)
+    ctx = RoundContext(it=1, resumable=True)
+    with pytest.raises(TripleCheckError):
+        rig.step._remote_ppo_step(ctx)
+    assert ctx.remote is None  # ★ 会话已清（拒收 = 这个会话死了）
+    assert rig.calls[-1] == "policy"  # 判决链不变（I-4）
+
+
+def test_transient_land_failure_keeps_the_session() -> None:
+    """瞬时性落位失败**不清**会话：重试只重落取回的结果，不白烧一次云上重算。"""
+    from remote.hub_client import HubClientError
+
+    rig = _Rig(probe_result={"agg": {}})
+
+    def transient(_sess: RemotePpoJob, _result: dict) -> dict:
+        raise HubClientError("weights 落盘失败: disk full")  # 非 TripleCheckError
+
+    _stub(rig.step, "_remote_ppo_land", transient)
+    ctx = RoundContext(it=1, resumable=True)
+    with pytest.raises(HubClientError):
+        rig.step._remote_ppo_step(ctx)
+    assert ctx.remote is not None and ctx.remote.jid == "job-1"  # 会话保留（可重落）

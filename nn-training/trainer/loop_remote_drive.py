@@ -85,6 +85,14 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
         try:
             self._remote_ppo_land(sess, result)
         except remote_retryable_exceptions() as e:
+            from remote.hub_client import TripleCheckError
+
+            if isinstance(e, TripleCheckError):
+                # ★ 2026-10-11（事故；评审 F2）：三重校验拒收 = 这个会话已死。
+                # 清掉它 ⇒ 下一次 attempt 重新发布/规划（不再只 probe 同一 jid、不再把
+                # 同一份坏结果重落 5 次）。**只对拒收清**：瞬时性落位失败保留会话，
+                # 重试只重落取回的结果，不白烧一次云上重算。
+                ctx.remote = None
             if self._handle_remote_failure(it, e):
                 raise
             return None

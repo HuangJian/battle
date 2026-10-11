@@ -1709,3 +1709,76 @@ def test_cancel_stale_jobs_old_runs_only(tmp_path: Path) -> None:
     # keep-d 仍 pending、done-c 仍未动
     assert any(e.get("event") == "job_pending" and e.get("job_id") == "keep-d" for e in evs)
     assert not any(e.get("event") == "job_cancelled" and e.get("job_id") == "done-c" for e in evs)
+
+
+# ------------------------------------------------------------------ W6 拒收终局（2026-10-11 事故）
+
+
+def test_cancel_job_is_idempotent(tmp_path: Path) -> None:
+    """W6：单 job 作废按**净态**折叠——pending ⇒ 撤（True）；再撤/completed/缺失 ⇒ False。
+
+    （与 hub 侧 `cancel_unsettled_jobs`、hub_client 的 `cancel_stale_jobs` 同一族事件形状；
+    幂等是为了「重复拒收不重复记账」与「人可重放」。）
+    """
+    from remote.hub_client import cancel_job  # 免 torch，纯账本操作
+
+    jl = tmp_path / "training_log.jsonl"
+    jl.write_text(
+        json.dumps({"event": "job_pending", "job_id": "poison-1", "it": 1, "ts": 1.0}) + "\n",
+        encoding="utf-8",
+    )
+    assert cancel_job(jl, "poison-1", it=1, reason="三重校验拒收") is True
+    assert cancel_job(jl, "poison-1", it=1, reason="三重校验拒收") is False  # 幂等：不重复记账
+    evs = [json.loads(line) for line in jl.read_text(encoding="utf-8").splitlines()]
+    cancelled = [e for e in evs if e.get("event") == "job_cancelled"]
+    assert len(cancelled) == 1 and cancelled[0]["job_id"] == "poison-1"
+    assert cancelled[0]["it"] == 1 and cancelled[0]["reason"].startswith("三重校验拒收")
+
+    jl2 = tmp_path / "l2.jsonl"
+    jl2.write_text(
+        json.dumps({"event": "job_completed", "job_id": "done-x", "ts": 1.0}) + "\n",
+        encoding="utf-8",
+    )
+    assert cancel_job(jl2, "done-x", reason="x") is False  # 已终局：不撤
+    assert cancel_job(tmp_path / "missing.jsonl", "y", reason="x") is False  # 缺失：不造文件
+
+
+def test_remote_ppo_land_reject_cancels_poisoned_job(tmp_path: Path) -> None:
+    """W6：`_remote_ppo_land` 遇三重校验拒收 ⇒ ①账本 `job_cancelled`（含人可读原因）
+    ②原样上抛（I-4：拒收仍然响亮、判决链不变；调用方负责清会话重规划）。"""
+    import types
+
+    from remote.hub_client import TripleCheckError
+    from trainer.loop_remote_job import TrainingRemoteJob
+    from worker.loop_round import RemotePpoJob
+
+    out = tmp_path / "weights.json"
+    out.write_bytes(b"weights-bytes")
+    jl = tmp_path / "training_log.jsonl"
+    jl.write_text(
+        json.dumps({"event": "job_pending", "job_id": "poison-1", "it": 3, "ts": 1.0}) + "\n",
+        encoding="utf-8",
+    )
+    host = TrainingRemoteJob()
+    host.args = types.SimpleNamespace(out=str(out), traj=str(tmp_path))
+    host._jsonl_path = jl
+    sess = RemotePpoJob(
+        it=3,
+        jid="poison-1",
+        manifest=_mini_manifest(),
+        transport="hub",
+        hub_url="http://hub.invalid",
+        hub_token="t",
+        timeout_sec=60.0,
+    )
+    result = {"init_weights_fp": "0" * 64}  # 与本地 any-bytes 权重必不匹配 ⇒ 第一道即拒
+
+    with pytest.raises(TripleCheckError) as ei:
+        host._remote_ppo_land(sess, result)
+
+    assert str(ei.value).startswith("三重校验失败: init_weights_fp")
+    evs = [json.loads(line) for line in jl.read_text(encoding="utf-8").splitlines()]
+    cancelled = [e for e in evs if e.get("event") == "job_cancelled"]
+    assert len(cancelled) == 1 and cancelled[0]["job_id"] == "poison-1"
+    # 账本 reason = 可读原因（含拒收原文，人一眼能对上修法）。
+    assert cancelled[0]["reason"] == f"三重校验拒收：{ei.value}"

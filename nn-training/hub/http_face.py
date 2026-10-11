@@ -71,6 +71,7 @@ from pathlib import Path
 
 from common.http_respond import respond_json
 from common.protocol import (
+    ADMIN_CANCEL_JOB_PATH,
     ADMIN_WORKER_PREFETCH_PATH,
     AUTH_HEADER,
     OFFLINE_ARTIFACT_PATH,
@@ -467,6 +468,9 @@ class HubHandler(
                 self._post_bc_epoch()
             elif path == "/admin/unfreeze":
                 self._admin_unfreeze()
+            elif path == ADMIN_CANCEL_JOB_PATH:
+                # 单 job 定向作废（2026-10-11 事故 W7）：与 /admin/unfreeze 同为人工口。
+                self._admin_cancel_job()
             elif path == "/admin/courses":
                 self._admin_courses(post=True)
             elif path == "/admin/push-workers":

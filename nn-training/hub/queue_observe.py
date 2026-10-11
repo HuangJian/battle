@@ -253,6 +253,17 @@ class QueueObserveMixin(QueuePeer):
         st = self._store_of(job_id)
         return st.unfreeze(job_id) if st else None
 
+    def cancel_job(self, job_id: str, *, reason: str = "manual") -> dict:
+        """单 job 定向作废（2026-10-11 事故 W7）：委派给归属 store；未知 job → 拒答明细。
+
+        与 `unfreeze` 同款门面：跨课程按 job 认领（`_store_of`），命中才转发；未知 job 的
+        返回值形状钉在 `tests/hub/test_hub_queue_split.py`（缺省值逐方法不同）。
+        """
+        st = self._store_of(job_id)
+        if st is None:
+            return {"job_id": job_id, "cancelled": False, "inflight": False, "why": "未知 job"}
+        return st.cancel_job(job_id, reason=reason)
+
     def frozen_jobs(self) -> list[str]:
         """全部已冻结 job（跨课程，观测面用）。"""
         out: list[str] = []

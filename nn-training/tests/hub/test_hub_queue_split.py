@@ -197,6 +197,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "frozen_info",
             "consume_freeze_announcement",
             "unfreeze",
+            # 2026-10-11（plan/aborted-course-revival W7）：单 job 定向作废的门面转发。
+            "cancel_job",
             "frozen_jobs",
             "lease_expires_in",
             "last_heartbeat_ago",
@@ -292,6 +294,9 @@ FACADE_SAME_SIG = (
     "auth_failure",
     "auth_success",
     "blocked_remaining",
+    # 2026-10-11（plan/aborted-course-revival W7）：单 job 定向作废的门面转发
+    # （签名与 `_JobStore.cancel_job` 逐参数一致 ⇒ 进同名闭集）。
+    "cancel_job",
     "claim",
     "consume_freeze_announcement",
     "frozen_info",
@@ -507,8 +512,9 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # `_drop_unsettled` / `begin_auto_handoff` / `note_claim`）；+3 增（`mode_ignored` /
     # `course_open` / `begin_pending_export`）⇒ 114。
     # ★M5（Q5）：+4（`job_kind` 的 hub 转发 / `worker_holds` / `worker_bc_drain` /
-    # `_drain_blocked`——drain 互斥的两半都要全课程视图）⇒ 114 + 4。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 120, len(DOMAIN_METHODS)
+    # `_drain_blocked`——drain 互斥的两半都要全课程视图）⇒ 114 + 4；
+    # 2026-10-11 W7（plan/aborted-course-revival）：+1（`cancel_job` 门面转发）⇒ 121。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 121, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -518,7 +524,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 120, len(seen)
+    assert len(seen) == 121, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -542,9 +548,10 @@ def test_the_eight_mixins_do_not_share_any_realized_name() -> None:
         for name in realized:
             assert seen.get(name, domain) == domain, f"{name} 同时住 {seen[name]} 与 {domain}"
             seen[name] = domain
-    # 120 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）
+    # 120 个域成员名 + 两个发现类常量（`halt_workers` 的 setter 与 getter 同名，不另算一项）；
+    # 2026-10-11 W7：域成员名 120→121（`cancel_job`），故此刻不清点总数（见上一测的断言）。
     expect = set(DOMAIN_METHODS) | {"DISCOVER_FRESH_SEC", "DISCOVER_SCAN_MIN_SEC"}
-    assert len(seen) == 122 and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
+    assert len(seen) == len(expect) and set(seen) == expect, (len(seen), sorted(set(seen) ^ expect))
 
 
 # ───────────────────── ② 接线正确 ─────────────────────
@@ -634,7 +641,8 @@ def test_the_same_name_surface_is_exactly_the_declared_closed_set() -> None:
         f"门面名单漂了：新增 {sorted(common - declared)}，消失 {sorted(declared - common)}"
     )
     # ★M5：33 → 34（`job_kind` 的 hub 转发：push 腿的备份过滤要读它）
-    assert len(declared) == 34, len(declared)
+    # 2026-10-11 W7：34 → 35（`cancel_job` 的门面转发：单 job 定向作废）
+    assert len(declared) == 35, len(declared)
     # 改名那一条**不是**同名（store 侧没有 `abandon`）⇒ 它不属于这个闭集，另处单独钉。
     assert "abandon" in FACADE_RENAMED and "abandon" not in common
     assert "abandon_job" in _callable_names(_JobStore)
@@ -646,8 +654,8 @@ def test_the_identical_signature_facade_is_byte_for_byte_same_signature() -> Non
     这条在本刀里是真能抓住东西的：门面有 6 个形参全用关键字传的转发（如 `claim`）、
     有 3 个纯 `if st: st.X(...)`（无返回）、有 1 个带参注解返回值；漏一个或改一个名字就红。
     """
-    # ★M5：30 → 31（`job_kind` 的逐字转发）
-    assert len(FACADE_SAME_SIG) == 31
+    # ★M5：30 → 31（`job_kind` 的逐字转发）；2026-10-11 W7：31 → 32（`cancel_job`）
+    assert len(FACADE_SAME_SIG) == 32
     for name in FACADE_SAME_SIG:
         want = _params(getattr(_JobStore, name))
         got = _params(getattr(_HubQueue, name))
@@ -788,6 +796,12 @@ def test_the_missing_store_default_is_the_declared_one_per_method(tmp_path: Path
         ("frozen_info", (unknown,), None),
         ("consume_freeze_announcement", (unknown,), None),
         ("unfreeze", (unknown,), None),
+        # 2026-10-11 W7：未知 job ⇒ 拒答明细（形状恒定：cancelled/inflight/why）。
+        (
+            "cancel_job",
+            (unknown,),
+            {"job_id": unknown, "cancelled": False, "inflight": False, "why": "未知 job"},
+        ),
         ("reclaims", (unknown,), 0),
         ("wire_stats", (unknown,), {}),
         ("get_bc_metrics", (unknown,), []),
@@ -797,7 +811,7 @@ def test_the_missing_store_default_is_the_declared_one_per_method(tmp_path: Path
         got = getattr(hub, name)(*args)
         assert got == want and type(got) is type(want), (name, got, want)
         seen.append(name)
-    assert len(seen) == 17
+    assert len(seen) == 18
     # `_job_dir` 走**哨兵路径**（返回类型不同，单独断言）：路径存在与否就是「有没有这个 job」。
     assert not (hub._job_dir(unknown) / "manifest.json").exists()
     # `claim` 未知 job → None（与 `claimable_job_ids` 空表同一语义）
@@ -889,8 +903,8 @@ def test_queue_peer_is_declarations_only() -> None:
     # 2026-10-07 M1b 再 +1（`_sync_hold`：hold 镜像的推送，每次改 hold 都要调）；★M1c −1
     # （`_sync_parked` 删：闸输入只剩 hold）；★M4b −7 删（`mode_of` / `offline_courses` /
     # `set_mode` / `dispatch_effective_mode` / `set_mode_pinned` / `pinned_of` / `authority_of`）、
-    # +1 增（`course_open`：开课标记的唯一公开读面）⇒ 79。
-    assert len(funcs) == 79, len(funcs)
+    # +1 增（`course_open`：开课标记的唯一公开读面）；2026-10-11 W7 +1（`cancel_job`）⇒ 80。
+    assert len(funcs) == 80, len(funcs)
     for n in funcs:
         # 只滤掉文档字符串：`...` 也是 `Expr(Constant)`，滤它就把声明本身滤没了（本守卫
         # 第一版就是这么错的 —— `halt_of` 带 docstring 才暴露出来）。

@@ -39,6 +39,16 @@ from common.protocol import AUTH_HEADER, FAIL_BODY_MAX, JobFailedError
 class HubClientError(RuntimeError):
     """hub 侧远程 PPO 失败（发布/等待/校验任一环）。"""
 
+
+class TripleCheckError(HubClientError):
+    """三重校验**拒收**（起点/语料/commit 任一对不上）——确定性终局，不是瞬时错误。
+
+    为什么要单独一个类型（2026-10-11 事故；评审 F2）：「拒收 ⇒ 作废该 job + 清会话」
+    这一刀要有**可判别的类**才敢下——按消息文本匹配（"三重校验失败"）会在下一次改文案时
+    静默失效。行为面全兼容：它是 `HubClientError` 子类，`remote_retryable_exceptions()`
+    照旧捕获，消息逐字不变。
+    """
+
 # ------------------------------------------------------------------ 等待（HTTP）
 
 

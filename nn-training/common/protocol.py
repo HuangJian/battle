@@ -650,6 +650,13 @@ OFFLINE_QUEUE_VERSION = 1
 #: 上报是**纯观测**——无副作用、失败即丢、绝不参与任何派发判据（塞进去会把 peek 的
 #: 「不认领/无副作用/不动游标」契约弄脏，`tests/hub/test_priority_schedule.py` 钉着它）。
 ADMIN_WORKER_PREFETCH_PATH = "/admin/worker-prefetch"
+#: **单 job 定向作废**（人 → hub；2026-10-11 事故，plan/aborted-course-revival W7）：
+#: 毒 job（三重校验必拒收的那类）以前没有任何人工把手——`/admin/unfreeze` 只解冻、
+#: `release_hold` 只解接管，而 `cancel_unsettled_jobs` 是全池撤单且无入口。
+#: 形如 `/admin/unfreeze`：400 缺参 / 404 未知 job / **409 在飞（不撤）** /
+#: 200 + `{"cancelled": true|false, "inflight": bool, "why": …}`（幂等可重放；
+#: 判据与全池版同源，见 `hub/store_ledger.cancel_job`）。
+ADMIN_CANCEL_JOB_PATH = "/admin/cancel-job"
 #: 上报的存活窗口（秒）：超窗即剔除（worker 死后不留下幽灵「已下载」）。
 #: 取值 = 12 × 预取节拍（`remote/job_round.PREFETCH_ROUND_SEC = 5s`）——形状未变时 worker 不发，
 #: 窗口必须宽到「一轮空转」不至于把还活着的持有显示成过期。

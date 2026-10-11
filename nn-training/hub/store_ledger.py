@@ -218,6 +218,20 @@ class LedgerMixin:
         return out
 
     # ---- 撤单：切模式 = 上一段整体作废（plan/switch-mode-drops-jobs §0） ----
+    def _cancel_job_locked(self, job_id: str, *, reason: str) -> None:
+        """单 job 作废的**唯一核心**（须持 `_lock`）：账本事件 + 撕承诺 + 即时闸。
+
+        全池版（`cancel_unsettled_jobs`）与单 job 版（`cancel_job`）共用本函数——
+        判据（谁可撤）留在各自的入口，落账动作只有这一份（2026-10-11，W7）。
+        """
+        self._append_ledger(
+            {"event": "job_cancelled", "job_id": job_id, "reason": reason, "ts": self._now()}
+        )
+        # 撕掉残留承诺并 bump epoch：拿着作废前 epoch 来的认领会被 `_claim_locked`
+        # 判 `demoted` 拒掉，不必等它自己发现池子空了。
+        self._drop_commitment_locked(job_id)
+        self._cancelled.add(job_id)
+
     def cancel_unsettled_jobs(self, *, reason: str = "mode-switch") -> list[str]:
         """把**未被认领**的可领取 job 作废（写 `job_cancelled` 账本事件）。返回被撤的 jid。
 
@@ -238,16 +252,42 @@ class LedgerMixin:
         with self._lock:
             claimed = set(self._claimed) | set(self._computing)
             drop = [jid for jid in self.claimable_job_ids() if jid not in claimed]
-            now = self._now()
             for jid in drop:
-                self._append_ledger(
-                    {"event": "job_cancelled", "job_id": jid, "reason": reason, "ts": now}
-                )
-                # 撕掉残留承诺并 bump epoch：拿着作废前 epoch 来的认领会被 `_claim_locked`
-                # 判 `demoted` 拒掉，不必等它自己发现池子空了。
-                self._drop_commitment_locked(jid)
-                self._cancelled.add(jid)
+                self._cancel_job_locked(jid, reason=reason)
             return drop
+
+    def cancel_job(self, job_id: str, *, reason: str = "manual") -> dict:
+        """**单 job 定向作废**（人的动作；2026-10-11 事故，plan W7）。
+
+        治什么：毒 job（三重校验必拒收的那类）以前没有任何人工把手——它既不在
+        `cancel_unsettled_jobs` 的批量语义里（那是「切模式撤上一段」），单为它撤也说不出
+        「撤哪一个」。返回 `{"job_id", "cancelled", "inflight", "why"}`（**形状恒定**，
+        admin 层据 `inflight` 分 409/200）：撤成功 `cancelled=True`；在飞 ⇒ `inflight=True`；
+        不可撤（已终局/结果已落盘/无 payload/已冻结）⇒ `cancelled=False` + why
+        （**幂等可重放**，不报错）。
+
+        判据与全池版**同源**（同一份 `claimable_job_ids()` ∧ 同一份 `_claimed|_computing`
+        在飞排除，2026-10-03 用户裁决「不管在算的，只管没领的」）——单版本只多一层
+        「哪一个」的寻址，不是第二份口径（评审 F4）。
+        """
+        with self._lock:
+            claimed = set(self._claimed) | set(self._computing)
+            if job_id in claimed:
+                return {
+                    "job_id": job_id,
+                    "cancelled": False,
+                    "inflight": True,
+                    "why": "在飞（已认领/在算）——不撤",
+                }
+            if job_id not in self.claimable_job_ids():
+                return {
+                    "job_id": job_id,
+                    "cancelled": False,
+                    "inflight": False,
+                    "why": "不在可领取池（已终局/结果已落盘/无 payload/已冻结）",
+                }
+            self._cancel_job_locked(job_id, reason=reason)
+            return {"job_id": job_id, "cancelled": True, "inflight": False, "why": reason}
 
     # ---- 发布（训练主循环调用：写磁盘 + 账本） ----
     def publish(self, job_id: str, manifest: dict, payload_zip: bytes) -> None:
