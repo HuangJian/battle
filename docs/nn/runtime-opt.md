@@ -103,9 +103,25 @@
   两批同一个 `shards_root` + `cleanup()`）、`tests/remote/test_rollout_scratch.py`（产出在 scratch 且
   轮末**不再清**、job 目录零产出副本、轮容量预算、结算=future 返回 + 空局轮末响亮）。
 
-### 35.5 未落地（下一刀；前置判据已写进 plan）
+### 35.5 扫盘去重 + 轮级装配契约（§3.4，就地降级）
 
-§3.4 轮末扫盘分组（依赖 ctx 累积 `batch_specs`）。
+plan §3.4 原本要上一个 `verify_round`（「扫全轮再按声明集分组」）——**§3.5 之后它已无必要**：批产出根
+镜像进轮目录后，**批根本身就是分组单位**（每批各验各的 = 按批分组，且失败当场）。剩下真正值得做的
+只剩两件，都已落：
+
+* **同一批 manifest 不再读两遍**：`run_iter_rollout` 为 `perGame` 读过本批全部单局 manifest，
+  `iter_topup._totals` 又为记账扫一遍盘（一轮 300+ 个小 JSON）⇒ `_batch_totals` 优先吃批次报告里的
+  **逐局画像**（字段与磁盘单局 manifest 逐字同名，见 `reports._PER_GAME_FIELDS`），
+  缺画像（注入的 `run_fn` / 老信息形状）回落磁盘扫。守卫：等价性
+  （`test_batch_totals_from_the_portrait_equal_the_disk_scan`）+ 扫盘次数 == 1
+  （`test_topup_batches_do_not_rescan_the_same_manifests`）。
+* **轮级装配契约进代码**（`remote/worker.py`）：`shards`/`perGame`/`perGameSecs`/`elapsedSec` 四个
+  收尾键由调用方一次装配、同键同型；`clean_sec`/`搬回` 无 TS 读方的查证也在那条注释里。
+
+### 35.6 未落地（下一刀；前置判据已写进 plan）
+
+§3.6 回传失败备份 · §3.7 池宽（已被 §3.2 吸收，见 plan 重判）· §3.8 探针缓存（§3.2 后是冗余保险）·
+§3.9 读数五分项 · §3.10 LAN 队列同理念。
 ⚠ §3.5 有一处**已定案但未实现**的连通项：节点自己的 PPO 读的是 `job_dir`
 （`remote/train_core.py:526` `shards_root = str(job_dir)`）⇒ 搬回是**承重段**；取消它必须同时把
 `shards_root` 指向 scratch 的 exec 根（评审 P0-1 的修法已写进 §2.2-S6 / §3.5 动作表）。

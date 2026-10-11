@@ -102,12 +102,16 @@ class _FakeRunner:
             }
         )
         dirs: list[str] = []
+        per_game: list[dict] = []
         total = 0
         for row in spec["argv"]:
             stage = int(_flag_value(list(row), "--stages"))
             seed = int(_flag_value(list(row), "--seeds"))
             out = _flag_value(list(row), "--out")
             n = int(self.samples[stage])
+            # 逐局画像：字段与磁盘单局 manifest **逐字同名**（`stage`/`nSamples`）——§3.4 之后
+            # 补差的账就吃它（不再扫盘读同一批 manifest），所以替身也得照真形状给。
+            per_game.append({"stage": stage, "seed": seed, "nSamples": n})
             d = Path(job_dir) / out / f"rl_s{stage}_seed{seed}"
             d.mkdir(parents=True, exist_ok=True)
             (d / "manifest.json").write_text(
@@ -135,7 +139,7 @@ class _FakeRunner:
             "dimLists": {},
             "shards": len(dirs),
             "elapsedSec": 0.5,
-            "perGame": [{"stage": 1, "seed": 2}] * len(dirs),
+            "perGame": per_game,
             "perGameSecs": [0.5] * len(dirs),
             "rolloutSrc": "node",
         }
@@ -205,6 +209,65 @@ def test_ctx_is_forwarded_to_every_batch(tmp_path: Path) -> None:
     )
     assert run.calls[1:], "至少跑了一批补差"
     assert all(c["ctx"] is sentinel for c in run.calls[1:]), "每一批都要把 ctx 传下去"
+
+
+def test_batch_totals_from_the_portrait_equal_the_disk_scan(tmp_path: Path) -> None:
+    """§3.4 等价性：逐局画像与磁盘单局 manifest 两条路算出**同一份**账。
+
+    这是这个优化的全部风险面：画像行少一个字段（或少一行）就静默少算样本 ⇒ 补差批会多跑或少跑。
+    所以口径不是「画像够用」而是「两者逐位相等」——同一批产出、两条路各自算一遍。
+    """
+    from worker.iter_rollout import collect_shard_manifests
+    from worker.volume_alloc import stage_totals
+
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "init_weights.json").write_text("{}", encoding="utf-8")
+    spec = _plan_and_spec(job)
+    info = _FakeRunner()(job, spec, ts_dir=job)
+
+    rows = info["report"]["perGame"]
+    disk = collect_shard_manifests([Path(d) for d in info["shard_dirs"]])
+    assert stage_totals(rows) == stage_totals(disk)
+    # 也钉住「不是两个空字典相等」：真有两关的账。
+    assert stage_totals(rows)[1] == {2000: 9, 2001: 18}
+
+
+def test_topup_batches_do_not_rescan_the_same_manifests(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3.4 行为面：补差批不再为记账**重扫**一批刚读过的 manifest。
+
+    扫盘次数 = 1（首批基线：调用方手里只有 `shard_dirs`，那一次必须读盘）；
+    之后每批都吃该批报告里的逐局画像。（没有画像时才回落扫盘，由上一个用例守等价性。）
+    """
+    import worker.iter_rollout as iter_rollout
+
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "init_weights.json").write_text("{}", encoding="utf-8")
+    spec = _plan_and_spec(job)
+    run = _FakeRunner()
+    info1 = run(job, spec, ts_dir=job)
+
+    scans = {"n": 0}
+    real = iter_rollout.collect_shard_manifests
+
+    def counting(dirs: object) -> list[dict]:
+        scans["n"] += 1
+        return real(dirs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(iter_rollout, "collect_shard_manifests", counting)
+    extra = topup_rollout(
+        job_dir=job,
+        spec=spec,
+        shard_dirs=list(info1["shard_dirs"]),
+        run_fn=run,
+        log=lambda m: None,
+        width=6,
+    )
+    assert extra is not None and extra["volume"]["batches"] >= 1
+    assert scans["n"] == 1, "除了首批基线，补差批不该再扫盘读同一批 manifest"
 
 
 def test_width_source_chain_is_explicit_then_spec_then_argv() -> None:

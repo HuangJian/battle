@@ -1119,3 +1119,14 @@ DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`（③）
 轮容量预算、结算=future 返回 + 空局轮末响亮）；判据迁移逐行回执在 plan §3.5b。
 未落地（下一刀）：§3.4 轮末扫盘分组（依赖 ctx 累积 `batch_specs`）。
 DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`（④）；全文 → `docs/nn/runtime-opt.md` §35.4。
+
+**2026-10-11（四）**：§3.4 **扫盘去重 + 轮级装配契约**（就地降级为小形状）。
+原计划的 `worker/iter_verify.verify_round`（「扫全轮再按声明集分组」）在 §3.5 之后已无必要：**批产出根本身
+就是分组单位**（每批各验各的 = 按批分组，且失败当场）。真正值得做的只剩两件：① `run_iter_rollout` 为
+`perGame` 读过本批 manifest 之后，`iter_topup` 又为记账扫一遍盘（一轮 300+ 个小 JSON）⇒
+`_batch_totals` 改吃批次报告的**逐局画像**（字段逐字同名），缺画像回落磁盘扫；② 轮级报告装配契约写进
+`remote/worker.py`（四个收尾键由调用方一次装配、同键同型；`clean_sec`/`搬回` 无 TS 读方的查证同处）。
+守卫：`test_batch_totals_from_the_portrait_equal_the_disk_scan`（等价性）+ `test_topup_batches_do_not_rescan_the_same_manifests`
+（扫盘次数 == 1）。
+剩余队列：§3.6 回传失败备份 · §3.8 探针缓存 · §3.9 读数五分项 · §3.10 LAN 队列（§3.7 已被 §3.2 吸收）。
+DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`（⑤）；全文 → `docs/nn/runtime-opt.md` §35.5。

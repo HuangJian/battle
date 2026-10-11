@@ -215,8 +215,25 @@ def topup_rollout(
     from worker.iter_rollout import collect_shard_manifests, run_iter_rollout
 
     def _totals(dirs: list[str]) -> tuple[dict[int, int], dict[int, int]]:
-        """目录（字符串，来自轮结果）→ 逐关 `(collected, games)`（**产出集**口径）。"""
+        """目录（字符串，来自轮结果）→ 逐关 `(collected, games)`（**产出集**口径）。
+
+        磁盘回退路径：只在首批基线（调用方手里只有 `shard_dirs`）与「批次报告缺画像」时用。
+        """
         return stage_totals(collect_shard_manifests([Path(d) for d in dirs]))
+
+    def _batch_totals(info: dict, dirs: list[str]) -> tuple[dict[int, int], dict[int, int]]:
+        """**本批**的逐关 `(collected, games)`：优先用批次报告里的逐局画像（plan §3.4）。
+
+        为什么（§3.4 落地为这个小形状）：这批 shard 的 manifest 刚被 `run_iter_rollout` 读过一遍
+        （为 `perGame`）——再扫一次盘读同一批文件就是**同一份数据算两遍**（一轮 300+ 个小 JSON）。
+        画像行的字段与磁盘单局 manifest **逐字同名**（`stage`/`nSamples`，见 `reports._PER_GAME_FIELDS`）
+        ⇒ `stage_totals` 吃它口径不变（`tests/worker/test_iter_topup.py` 有等价性用例钉着）。
+        缺画像（注入的 `run_fn` 替身 / 老信息形状 / 空产出）⇒ 回落磁盘扫（逐字今天）。
+        """
+        rows = (info.get("report") or {}).get("perGame")
+        if isinstance(rows, list) and rows:
+            return stage_totals(rows)
+        return _totals(dirs)
 
     run = run_fn or run_iter_rollout
     stages = [int(s) for s in vol["stages"]]
@@ -276,7 +293,7 @@ def topup_rollout(
         )
         info = run(sub, spec2, ts_dir=ts_dir, log=log, ctx=ctx)
         dirs_b = [str(d) for d in info["shard_dirs"]]
-        added, games_b = _totals(dirs_b)
+        added, games_b = _batch_totals(info, dirs_b)
         for s, v in added.items():
             collected[s] = collected.get(s, 0) + int(v)
         for s, v in games_b.items():

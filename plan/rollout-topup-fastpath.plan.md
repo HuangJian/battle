@@ -1,7 +1,7 @@
 # Plan: rollout-topup-fastpath — 补差从「每批一个完整 rollout 轮 + 缺口解算」改成「轮内增量 + 按 worker 数满铺 + 取消搬回」
 
 > **状态**：**v4**（2026-10-11 二轮修订；评审 `plan/rollout-topup-fastpath.review-bf.md` 的 P0×3 / P1×4 / P2×4 已并入）。
-> **落地进度见 §10**（本轮已落 §3.1 + §3.2 + §3.3 + **§3.5（含 P0-1/P0-3）**；§3.4 是下一刀，其前置判据已写进本文）。路径基准除注明外相对 `nn-training/`。
+> **落地进度见 §10**（本轮已落 §3.1 + §3.2 + §3.3 + §3.4 + **§3.5（含 P0-1/P0-3）**；§3.6–§3.10 仍在队列，判据已写进本文）。路径基准除注明外相对 `nn-training/`。
 > **触发**：Kaggle TPU 自主 worker（96 核 cgroup 配额 / 94 并行槽）在训课程 `x24-stack5`：
 > 96 核机器上 rollout 稳态应 < 10s，实测大面积 60–111s（**54** 轮里 p50=11.8s、p90=88.9s、max=111.2s；
 > v3 曾写「53 轮」——与 §1.1/§1.11 表的 31+23=54 不符，以逐轮账本为准，见评审 P1-3）。
@@ -575,6 +575,8 @@ def spread_games_by_stage(
 
 ### 3.4 P0-3 — 扫盘三连一轮一次，按批分组验声明集
 
+> **✅ 落地（2026-10-11 第四刀，含一处**有意的降级** —— 见下面「落地形状与偏离」）**
+
 **落点**：`iter_rollout.py:1120-1136` → 上移到 `topup_rollout` 之后
 
 新增 `worker/iter_verify.py`（L1 叶子，**不造 `worker → remote` 边**）：
@@ -595,6 +597,24 @@ def verify_round(batch_specs: list[tuple[Path, dict]]) -> list[Path]:
 > 建议：轮级装配者 = `topup_rollout` 的调用方（`remote/worker.py`），产出与今天同键同型；
 > 另：`clean_sec` / `搬回` 两个键已核**无 TS 读方**（`dashboard/src/**` 无命中）⇒ 删除安全，
 > 但这条查证要写进实现笔（免得下次有人再查一遍）。
+
+**落地形状与偏离（2026-10-11 第四刀；§3.5 落地后重判）**：
+
+* **`worker/iter_verify.verify_round` 不再需要**：本节写于 §3.5 之前，当时「按批分组」得靠「扫全轮
+  再按声明集分组」实现；§3.5 把批产出根**镜像进轮目录**之后，**批根本身就是分组单位** ⇒
+  `run_iter_rollout` 对本批产出根调一次 `verify_shards`（逐位判据一字不改）就完成「每批实产 ==
+  每批声明」，而且**失败当场**（不必等到轮末）。再套一个叶子模块只是单元素列表的间接层。
+* **真正的重复读只剩一处，已消**：`run_iter_rollout` 为 `perGame` 读过本批全部单局 manifest 之后，
+  `iter_topup._totals` 为记账**又扫一遍盘**读同一批文件（一轮 300+ 个小 JSON）。改法：`_batch_totals`
+  优先吃批次报告里的**逐局画像**（字段与磁盘单局 manifest 逐字同名，见 `reports._PER_GAME_FIELDS`），
+  缺画像（注入的 `run_fn` / 老信息形状 / 空产出）回落磁盘扫。等价性用例：
+  `test_batch_totals_from_the_portrait_equal_the_disk_scan`；行为用例：
+  `test_topup_batches_do_not_rescan_the_same_manifests`（扫盘次数 == 1 = 首批基线）。
+* **装配契约写进了代码**（`remote/worker.py` 轮级合并处）：`shards`/`perGame`/`perGameSecs`/`elapsedSec`
+  四个收尾键由**调用方**一次装配、同键同型；`clean_sec`/`搬回` 无 TS 读方的查证也落在那条注释里
+  （免得下一个人再查一遍）。
+* **没做**：风险表里的 `NN_ROUND_SCAN=0` 逃生开关——§3.5 之后没有「轮级一次扫盘」可关，
+  「每批一次」是批根带来的自然形状。
 
 ### 3.5 P0-4 — ★ 取消搬回（治根因 E；用户第 1 条）
 
@@ -924,7 +944,7 @@ def verify_round(batch_specs: list[tuple[Path, dict]]) -> list[Path]:
 | §3.3 满铺器 `spread_games_by_stage`（含 P1-2 的旧口径归置） | ✅ **本轮已落** | `tests/worker/test_spread_games.py`（新）+ `test_iter_topup.py` 按满铺口径改 |
 | §3.2 `RoundContext`（批间复用） | ✅ **本轮已落** | `tests/remote/test_round_ctx.py`（新，3 例）；`remote/worker.py` 首批建 ctx、补差后 `close()`；字段收敛见 §3.2 落地段 |
 | §3.5 取消搬回（含 P0-1 读取根 + P0-3 空间口径） | ✅ **本轮已落** | `shards_root` 由产出方给出（`ppo_shards_root`）；批产出根镜像进轮 scratch；轮初清场 + PPO 后 `cleanup()`；判据迁移逐行在 §3.5b 回执 |
-| §3.4 轮末扫盘分组 | ⬜ 下一刀（依赖 §3.2 的 ctx 累积 `batch_specs`） | 轮级报告装配契约见 §3.4 末注 |
+| §3.4 轮末扫盘分组 | ✅ **本轮已落（有意降级为小形状）** | §3.5 的批镜像已自然给出「按批分组」；真正的重复读（同批 manifest 读两遍）用逐局画像消掉；装配契约写进 `remote/worker.py`。偏离与理由见 §3.4 末段 |
 | §3.6 / §3.7 / §3.8 / §3.10 | ⬜ 待取证 / 依赖 §3.2 | §3.8 在 §3.2 后是冗余保险；§3.10 取证不足则降级待立项 |
 
 ### 10.2 记录（AGENTS §4 / §15.5 要求，v3 整篇缺失 ⇒ v4 补齐）

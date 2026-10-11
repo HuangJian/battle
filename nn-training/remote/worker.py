@@ -675,6 +675,12 @@ def run_job(
             finally:
                 rctx.close()  # 池：补差跑完就收（PPO 之前）
             if _extra is not None:
+                # ★ 轮级报告装配（plan/rollout-topup-fastpath §3.4 写死的契约）：这四个**由收尾步骤产生**
+                # 的键（`shards` / `perGame` / `perGameSecs` / `elapsedSec`）由**调用方**在这里一次装配，
+                # 与逐批报告**同键同型**。它们有仓库外读方：`remote/artifacts.py` 读 `perGame`
+                # （控制台「耗时/击杀/残血/道具」四列的数据源），`merge_iter_reports` 显式相加这四个键。
+                # （`clean_sec` / `搬回` 两个键已核无 TS 读方（`dashboard/src/**` 无命中）⇒ 前者从未
+                #   落库、后者随 §3.5 取消搬回删除。）
                 shard_dirs = [*shard_dirs, *list(_extra["shard_dirs"])]
                 iter_info["shard_dirs"] = list(shard_dirs)
                 iter_info["report"] = merge_iter_reports(
