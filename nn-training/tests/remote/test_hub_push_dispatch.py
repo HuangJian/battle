@@ -385,6 +385,57 @@ def test_bc_job_is_never_backed_up_by_the_push_leg(
     assert tried == [("p" * 16, CLAIM_MODE_BACKUP)], tried
 
 
+def test_settled_job_is_never_backed_up_by_the_push_leg(
+    tmp_path: Path, worker_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 2026-10-11 满载 flake 回归（`e2e/test_multi_course_single_hub_e2e.py` 的 `pushed == 3`）。
+
+    现场的交错形状（本用例把它**确定性地**摆出来，而不是撞时序）：
+      · 备份腿先读一次状态（`_course_counts` / `_backup_target`）⇒「主副本在飞，值得开备份」；
+      · 主副本的线程在这两次读之间**落地并 pop 掉在飞记录** ⇒ `_worker_counts` 已看不到它；
+      · 于是那台机器被当成空闲 ⇒ **第三份推送**（假 worker 在现场的证词就是日志里那句
+        「job … 重复提交——幂等受理（当前 done），不重复执行」）。
+    代价不是免费的：已结算的活被推给机器，它会**真的从头算一遍**（白烧一轮 GPU），回传必吃 409。
+
+    闸住 store（`_claim_locked` 当面拒：`landed`，见 `tests/hub/test_hub_leases.py`）；本用例把
+    两条**过期读数**如实注入（优先表说 low、在飞视图说没人），确保红的是「闸没了」而不是夹具。
+    """
+    from common.protocol import CLAIM_MODE_BACKUP, PRIORITY_LOW
+
+    w1 = worker_factory()
+    hub = _hub(tmp_path, ["c1"])
+    jid = "j" * 16
+    _publish(hub, "c1", jid)
+    # 主副本赢下首写（result/ 落盘）——它此刻可能还没 pop 在飞记录
+    assert hub._stores["c1"].store_result(jid, {"job_id": jid, "agg": {}}) is True
+    assert hub.claimable_job_ids("c1") == [], "已落盘 ⇒ 出池（这一半是既有语义）"
+
+    ws = _workers_with(tmp_path, worker_factory, (w1, {"id": "g1"}))
+    disp = _dispatcher(hub, ws)
+    disp._inflight[jid] = {  # 过期读数①：主副本还在飞（线程尚未 pop 那一条）
+        "job_id": jid,
+        "slot": jid,
+        "course": "c1",
+        "worker": "g1",
+        "lease": "L",
+        "mode": "exclusive",
+        "url": w1.url,
+        "key": "sekret",
+        "state": "waiting",
+        "started": 0.0,
+    }
+    monkeypatch.setattr(disp, "_job_priority_of", lambda _jid: PRIORITY_LOW)  # 过期读数②
+    monkeypatch.setattr(disp, "_worker_counts", lambda: {})  # pop 之后的视图：这台空了
+
+    tick = disp.tick()
+    assert tick["started"] == [], tick
+    assert not any(str(s).endswith("#b0") for s in disp._inflight), disp._inflight
+    # 给了推送线程足够时间真把 POST 发出去（红的时候就是这么抓到它的）
+    if _wait_until(lambda: w1.received != [], timeout=2.0):
+        raise AssertionError(f"已结算的活被推给了机器（白烧一轮 GPU）：{w1.received}")
+    assert disp.state()["pushed"] == 0
+
+
 def test_dead_worker_requeues_to_queue_head_and_another_worker_takes_it(
     tmp_path: Path, worker_factory
 ) -> None:

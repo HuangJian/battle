@@ -77,7 +77,8 @@ HOLD_STALE_SEC = 900.0
 HOLD_STALE_ENV = "BCITY_HOLD_PROGRESS_STALE_SEC"
 
 #: `claim_outcome()` 的返回形状（新 HTTP 面的出口；`token` 为空串 = 无租约/未拿到）。
-#: `status ∈ {"ok", "backup", "demoted", "held", "frozen", "stale_holder"}`——worker 侧
+#: `status ∈ {"ok", "backup", "demoted", "held", "frozen", "stale_holder", "no_backup",
+#: "landed"}`（后两个是备份腿的两种「不发」：BC 不发 / 已结算不发，2026-10-11）——worker 侧
 #: 只关心「拿到了吗」+「没拿到是降级还是真轮不到」：前者丢副本、后者按 low 处理。
 ClaimOutcome = namedtuple("ClaimOutcome", "ok token status reason")
 
@@ -126,6 +127,9 @@ class LeaseMixin:
     _bump_epoch_locked: Any
     _drop_commitment_locked: Any
     _job_priority_locked: Any
+    #: 调度事实面（`store_scheduling._facts_locked`；备份腿的「已结算不发」闸要用它的 `landed`
+    #: ——盘上 `result/` ∨ `fail.json`，与 `claimable_job_ids` 同一条式子）。
+    _facts_locked: Any
     #: 兄弟簇 `store_ledger` 的状态与方法（读账本判「这份 job 还在不在池里」）
     _job_dir: Any
     _append_ledger: Any
@@ -523,6 +527,18 @@ class LeaseMixin:
                     # ★M5（需求 7）：BC **不发备份副本**——它「领取后独占」，而备份那份
                     # 不会有 epoch（进度只从开辟的那一份来），发出去只会多一个影子跑者。
                     return False, "", "no_backup"
+                if self._facts_locked(job_id)["landed"]:
+                    # ★ 已结算（`result/` 或 `fail.json` 在盘）⇒ **不发备份副本**（2026-10-11）。
+                    # 为什么这条闸必须住 claim：派发器的备份腿要读**两次**状态
+                    # （①`_course_counts`/`_backup_target` 决定「值不值得开备份」；
+                    # ②`_worker_counts`/`claim` 挑人 + 授权），两次之间主副本的线程可能刚好
+                    # 落地并 pop 掉在飞记录 ⇒ ①说「在飞」而②看不到它 ⇒ 备份被推给一台
+                    # 「看起来空闲」的机器。代价不是免费的：那份副本回传必吃 409，而它**会真的
+                    # 从头算一遍**（白烧一轮 GPU；满载下就是 e2e「pushed == 3」那条 flake）。
+                    # 判据复用 `_facts_locked` 的 `landed`（与 `claimable_job_ids` /
+                    # `_unfinished_pending` 的同一条式子：首写已分胜负 ∨ 节点已报确定性失败）
+                    # ——别在这里另写一遍筛子。
+                    return False, "", "landed"
                 # 备份副本：不设租约、不动原租约（R2-3），只授权「你的回传不吃 403」。
                 self._backup_authorized.add(job_id)
                 self._last_heartbeat[job_id] = now  # 仅供观测（谁在跑）

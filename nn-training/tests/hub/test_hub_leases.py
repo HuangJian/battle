@@ -7,6 +7,8 @@ plan: `plan/multi-course-parallel-training.md`（P3b-W3/W5、§3.9 B3）。
 - **孤儿早收（§52，2026-10-01）**：claim 后**自始至终零心跳**且静默超 `ORPHAN_GRACE_SEC`
   ⇒ 提前回池 + 账本事件 `lease-orphan-reaped`；push 腿（`push:` 前缀持有人）豁免。
 - 有活租约验回传 token；无租约照收；首写锁定保留。
+- **备份副本不发已结算的活（2026-10-11 flake 回归）**：`result/` / `fail.json` 在盘 ⇒
+  `claim(mode="backup")` 拒发——派发器的备份腿读两次状态，两次之间主副本可能刚好落盘。
 - halt 不拦分发/不清租约（正交回归）。
 
 时间一律 fake 时钟（`_JobStore(now_fn=...)` 注入点），禁止睡真 300s。
@@ -261,6 +263,38 @@ def test_backup_never_reaped(tmp_path: Path) -> None:
     clock.t += ORPHAN_GRACE_SEC * 3  # 远超宽限
     assert store.claimable_job_ids() == ["j" * 16]  # 副本不占池（既有语义）
     assert _orphan_events(store) == []
+
+
+def test_backup_claim_refused_once_the_job_is_settled(tmp_path: Path) -> None:
+    """★ 2026-10-11 满载 flake 回归（`e2e/test_multi_course_single_hub_e2e.py` 的
+    `pushed == 3` / `remote/push_dispatch._dispatch`）：**已结算的活不发备份副本**。
+
+    现场形状（先解出来再写测试的，不是猜的）：`_dispatch` 的备份腿要读**两次**状态——
+    ①`_course_counts` / `_backup_target`（决定「这活值得开备份」）；②`_worker_counts` /
+    `claim`（挑人 + 授权）。两次之间主副本的线程可能刚好**落地并 pop 掉在飞记录**：
+    ①仍说「主副本在飞（medium）」而②已看不到它在飞 ⇒ 同一台机器被当成空闲 ⇒ 第 3 次推送
+    （worker 侧看到的就是日志里那句「重复提交——幂等受理（当前 done）」）。
+    闸必须住 `claim`——它才是租约/备份授权的唯一写入口；住在派发器就是第二个会漂的判据。
+
+    反例同时钉住：**未结算**的活备份照发（不能为了关这个洞把备份腿本身关掉）。
+    """
+    clock = _Clock()
+    store = _store(tmp_path, clock)
+    jid = "j" * 16
+    _publish(store, jid)
+    assert store.claim(jid), "主副本在飞"
+    assert store.claim(jid, mode=CLAIM_MODE_BACKUP) == "", "未结算：备份副本照发（既有语义）"
+
+    # 主副本赢下首写（result/ 落盘）——此刻它可能还没 pop 在飞记录
+    assert store.store_result(jid, {"job_id": jid, "agg": {}}) is True
+    assert store.claim(jid, mode=CLAIM_MODE_BACKUP) is None, "已结算的活不得再发备份（白烧一轮 GPU）"
+
+    # 节点报的**确定性失败**同理：再跑一遍只是把同一个失败重演（`_unfinished_pending` 也这么筛）
+    jid2 = "k" * 16
+    _publish(store, jid2)
+    assert store.claim(jid2), "主副本在飞"
+    assert store.store_job_failure(jid2, {"reason": "能力缺失", "kind": "capability"}) is True
+    assert store.claim(jid2, mode=CLAIM_MODE_BACKUP) is None, "已报失败的活不得再发备份"
 
 
 # ────────────────────────── 回传鉴权 / 首写 ──────────────────────────
