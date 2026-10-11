@@ -385,22 +385,36 @@ def test_bc_job_is_never_backed_up_by_the_push_leg(
     assert tried == [("p" * 16, CLAIM_MODE_BACKUP)], tried
 
 
-def test_settled_job_is_never_backed_up_by_the_push_leg(
+def _in_flight_primary(disp: PushDispatcher, jid: str, course: str, *, worker: str, url: str) -> None:
+    """预置一条「主副本在飞」的派发账（真推送不在这些用例的范围，只摆状态）。"""
+    disp._inflight[jid] = {
+        "job_id": jid,
+        "slot": jid,
+        "course": course,
+        "worker": worker,
+        "lease": "L",
+        "mode": "exclusive",
+        "url": url,
+        "key": "sekret",
+        "state": "waiting",
+        "started": 0.0,
+    }
+
+
+def test_backup_claim_of_settled_job_is_refused_by_the_store_gate(
     tmp_path: Path, worker_factory, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """★ 2026-10-11 满载 flake 回归（`e2e/test_multi_course_single_hub_e2e.py` 的 `pushed == 3`）。
+    """★ 2026-10-11 满载 flake 回归（`e2e/…` 的 `pushed == 3`）—— **store 闸**这一半。
 
-    现场的交错形状（本用例把它**确定性地**摆出来，而不是撞时序）：
-      · 备份腿先读一次状态（`_course_counts` / `_backup_target`）⇒「主副本在飞，值得开备份」；
-      · 主副本的线程在这两次读之间**落地并 pop 掉在飞记录** ⇒ `_worker_counts` 已看不到它；
-      · 于是那台机器被当成空闲 ⇒ **第三份推送**（假 worker 在现场的证词就是日志里那句
-        「job … 重复提交——幂等受理（当前 done），不重复执行」）。
-    代价不是免费的：已结算的活被推给机器，它会**真的从头算一遍**（白烧一轮 GPU），回传必吃 409。
+    现场的交错形状（确定性摆出，不撞时序）：主副本落地后，派发器仍认为「这份活值得开备份」
+    （优先表说 low）——本用例把在飞账挂在**另一台** worker id 上（`gX`），于是登记表里那台
+    真机器（`g1`）看着空闲、派发器会真去 `claim`。代价不是免费的：被推的机器会**真的从头算
+    一遍**（白烧一轮 GPU），其回传随后被首写锁定 409 丢掉。
 
-    闸住 store（`_claim_locked` 当面拒：`landed`，见 `tests/hub/test_hub_leases.py`）；本用例把
-    两条**过期读数**如实注入（优先表说 low、在飞视图说没人），确保红的是「闸没了」而不是夹具。
+    权威判据住 `_claim_locked`（当面拒：`landed`，直接用例见 `tests/hub/test_hub_leases.py`）
+    ——本用例证的是它真能挡住派发器这条腿。
     """
-    from common.protocol import CLAIM_MODE_BACKUP, PRIORITY_LOW
+    from common.protocol import PRIORITY_LOW
 
     w1 = worker_factory()
     hub = _hub(tmp_path, ["c1"])
@@ -412,20 +426,8 @@ def test_settled_job_is_never_backed_up_by_the_push_leg(
 
     ws = _workers_with(tmp_path, worker_factory, (w1, {"id": "g1"}))
     disp = _dispatcher(hub, ws)
-    disp._inflight[jid] = {  # 过期读数①：主副本还在飞（线程尚未 pop 那一条）
-        "job_id": jid,
-        "slot": jid,
-        "course": "c1",
-        "worker": "g1",
-        "lease": "L",
-        "mode": "exclusive",
-        "url": w1.url,
-        "key": "sekret",
-        "state": "waiting",
-        "started": 0.0,
-    }
-    monkeypatch.setattr(disp, "_job_priority_of", lambda _jid: PRIORITY_LOW)  # 过期读数②
-    monkeypatch.setattr(disp, "_worker_counts", lambda: {})  # pop 之后的视图：这台空了
+    _in_flight_primary(disp, jid, "c1", worker="gX", url="http://127.0.0.1:1")
+    monkeypatch.setattr(disp, "_job_priority_of", lambda _jid: PRIORITY_LOW)
 
     tick = disp.tick()
     assert tick["started"] == [], tick
@@ -433,6 +435,46 @@ def test_settled_job_is_never_backed_up_by_the_push_leg(
     # 给了推送线程足够时间真把 POST 发出去（红的时候就是这么抓到它的）
     if _wait_until(lambda: w1.received != [], timeout=2.0):
         raise AssertionError(f"已结算的活被推给了机器（白烧一轮 GPU）：{w1.received}")
+    assert disp.state()["pushed"] == 0
+
+
+def test_dispatch_reads_its_own_state_once_per_tick(
+    tmp_path: Path, worker_factory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 2026-10-11（二）：挑活挑人**只用一份自有状态快照**——类的消除，不是逐处补闸。
+
+    本用例把交错**确定性地**摆在两次读数之间：主副本的线程恰好在派发器读完「主副本在飞」
+    之后、挑人之前落地并 pop 掉在飞记录（`_job_priority_of` 被钩上即执行这一下）。
+    旧实现（两次读）此时拿到的在飞视图已经是**空的** ⇒ 刚跑完这份活的 `g1` 被当成空闲 ⇒
+    第三份推送；新实现（`_snapshot`）挑人用的仍是同一份快照 ⇒ 快照里 `g1` 正在飞 ⇒ 挑不到人。
+
+    `hub.claim` 被让开（返回租约）是**故意的**：本用例要证的是快照，不是 store 那道闸
+    （后者由 `test_backup_claim_of_settled_job_is_refused_by_the_store_gate` 单独钉）。
+    """
+    from common.protocol import PRIORITY_LOW
+
+    w1 = worker_factory()
+    hub = _hub(tmp_path, ["c1"])
+    jid = "j" * 16
+    _publish(hub, "c1", jid)
+    ws = _workers_with(tmp_path, worker_factory, (w1, {"id": "g1"}))
+    disp = _dispatcher(hub, ws)
+    _in_flight_primary(disp, jid, "c1", worker="g1", url=w1.url)
+    popped = {"n": 0}
+
+    def _priority_and_pop(_jid: str) -> str:
+        popped["n"] += 1
+        disp._inflight.pop(jid, None)  # 主副本线程恰在此刻落地并 pop 掉在飞记录
+        return PRIORITY_LOW
+
+    monkeypatch.setattr(disp, "_job_priority_of", _priority_and_pop)
+    monkeypatch.setattr(hub, "claim", lambda jid, **kw: "")  # 让开 store 闸：只证快照
+
+    tick = disp.tick()
+    assert popped["n"] == 1, "夹具没走到「备份值不值得开」那一步"
+    assert tick["started"] == [], tick
+    if _wait_until(lambda: w1.received != [], timeout=2.0):
+        raise AssertionError(f"同一份活被推给刚跑完它的机器：{w1.received}")
     assert disp.state()["pushed"] == 0
 
 

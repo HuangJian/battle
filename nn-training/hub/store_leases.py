@@ -529,12 +529,12 @@ class LeaseMixin:
                     return False, "", "no_backup"
                 if self._facts_locked(job_id)["landed"]:
                     # ★ 已结算（`result/` 或 `fail.json` 在盘）⇒ **不发备份副本**（2026-10-11）。
-                    # 为什么这条闸必须住 claim：派发器的备份腿要读**两次**状态
-                    # （①`_course_counts`/`_backup_target` 决定「值不值得开备份」；
-                    # ②`_worker_counts`/`claim` 挑人 + 授权），两次之间主副本的线程可能刚好
-                    # 落地并 pop 掉在飞记录 ⇒ ①说「在飞」而②看不到它 ⇒ 备份被推给一台
-                    # 「看起来空闲」的机器。代价不是免费的：那份副本回传必吃 409，而它**会真的
-                    # 从头算一遍**（白烧一轮 GPU；满载下就是 e2e「pushed == 3」那条 flake）。
+                    # 为什么这条闸必须住 claim：派发器的自有账本读数已由 `_snapshot()` 收敛成
+                    # **一份**（自洽了），但 store 侧的事实（别人的活跑没跑完、结算没结算）
+                    # 根本无法被它快照——授权只有在这里（唯一临界区）才是权威的：决策时读到
+                    # 「值得开备份」与真正授权之间，主副本可能刚好落地。代价不是免费的：那份
+                    # 副本回传必吃 409，而它**会真的从头算一遍**（白烧一轮 GPU；满载下就是
+                    # e2e「pushed == 3」那条 flake）。
                     # 判据复用 `_facts_locked` 的 `landed`（与 `claimable_job_ids` /
                     # `_unfinished_pending` 的同一条式子：首写已分胜负 ∨ 节点已报确定性失败）
                     # ——别在这里另写一遍筛子。

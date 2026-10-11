@@ -269,11 +269,13 @@ def test_backup_claim_refused_once_the_job_is_settled(tmp_path: Path) -> None:
     """★ 2026-10-11 满载 flake 回归（`e2e/test_multi_course_single_hub_e2e.py` 的
     `pushed == 3` / `remote/push_dispatch._dispatch`）：**已结算的活不发备份副本**。
 
-    现场形状（先解出来再写测试的，不是猜的）：`_dispatch` 的备份腿要读**两次**状态——
-    ①`_course_counts` / `_backup_target`（决定「这活值得开备份」）；②`_worker_counts` /
-    `claim`（挑人 + 授权）。两次之间主副本的线程可能刚好**落地并 pop 掉在飞记录**：
-    ①仍说「主副本在飞（medium）」而②已看不到它在飞 ⇒ 同一台机器被当成空闲 ⇒ 第 3 次推送
-    （worker 侧看到的就是日志里那句「重复提交——幂等受理（当前 done）」）。
+    现场形状（先解出来再写测试的，不是猜的）：备份腿「值不值得开」（优先表/自有在飞账）与
+    「真正授权」（`claim`）之间隔着一段窗口，主副本的线程可能刚好**落地**并 pop 掉在飞记录；
+    于是同一台机器被当成空闲 ⇒ 第 3 次推送（worker 侧看到的就是日志里那句
+    「重复提交——幂等受理（当前 done）」）。
+    两边各管一段：派发器**自有账本的自洽**由 `remote/push_dispatch._snapshot()` 一份快照保证
+    （它的回归在下半：`tests/remote/test_hub_push_dispatch.py::test_dispatch_reads_its_own_state_once_per_tick`），
+    而 **store 侧的事实**（别人跑完没/结算没）只能在这里判——本用例钉的就是后一半。
     闸必须住 `claim`——它才是租约/备份授权的唯一写入口；住在派发器就是第二个会漂的判据。
 
     反例同时钉住：**未结算**的活备份照发（不能为了关这个洞把备份腿本身关掉）。

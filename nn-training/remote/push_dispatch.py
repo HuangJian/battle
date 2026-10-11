@@ -36,6 +36,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 from typing import Any
@@ -400,10 +401,27 @@ _KEEP_ON_RELOAD = (
 # ---------------------------------------------------------------- 派发器
 
 
-class PushDispatcher:
-    """hub 中介 push 派发器：按队列顺序推给空闲 worker，超时回落队首换 worker。
+@dataclass(frozen=True)
+class _TickView:
+    """一拍内派发器**自有状态**的唯一一份读数（`PushDispatcher._snapshot` 的产物）。
 
-    一拍（`tick`）做四件事：热重载登记表 → 到点探活 → 挑活挑人 → 起一条 job 线程。
+    字段都是**拷贝**（调用方不持锁也不碰 `self._inflight`）：
+
+      * `records` —— `(slot, rec)` 全量在飞记录；
+      * `avoid` —— `jid -> 避让名单`；
+      * `worker_counts` —— `worker id -> 在飞数`，**由同一份 `records` 派生**（不是第二次读）。
+
+    只装「派发器自己知道的事」；store 侧（租约/结算/优先级）本就不是它的事实源，不入快照。
+    """
+
+    records: tuple[tuple[str, dict], ...]
+    avoid: dict[str, tuple[str, ...]]
+    worker_counts: dict[str, int]
+
+
+class PushDispatcher:
+    """hub 中介 push 派发器：按队列顺序推给空闲 worker，超时回落队首换 worker。        一拍（`tick`）做四件事：热重载登记表 → 到点探活 → 挑活挑人 → 起一条 job 线程。
+        挑活挑人**全程只用 `_snapshot()` 那一份自有状态读数**（见那里的「为什么」）。
     **每课程 1 主 + N 备份**（§2.9）：课程内的轮次有硬序（轮 N+1 的 init 权重就是轮 N
     的产出），主副本走序；备份只在主副本 **ready / 掉队**（hub 本地同一张优先级表）时
     才派——空闲的卡不再靠「无排序硬抢」，而是被显式授权去追一份可能落空的活。
@@ -492,19 +510,37 @@ class PushDispatcher:
             "inflight": sorted(self._inflight),
         }
 
-    def _worker_counts(self) -> dict[str, int]:
+    def _snapshot(self) -> _TickView:
+        """一拍内**唯一**一份派发器自有状态的读数（一次 `self._lock` 取出；`_dispatch` 的入口）。
+
+        ★ 为什么要一致快照（2026-10-11）：`_dispatch` 原来分**两次**读自己的在飞账——
+        ①`_course_counts` / `_backup_target`（决定「这份活值不值得开备份」）与 ②`_worker_counts`
+        （挑人）。主副本的线程可能正好在这两次读之间**落地并 pop 掉在飞记录**：①说「主副本在飞」
+        而②说「这台机器空闲」 ⇒ 同一份活被推给刚跑完它的那台（它会**真的从头算一遍**，白烧一轮
+        GPU；其回传随后被首写锁定 409 丢掉）。两次读落在同一份快照上，「自相矛盾的自我读数」
+        就不再可能——这是**类**的消除（自己账本一次读），不是给某一处补闸。
+
+        闸仍然有两层，各管一段，**不要混为一谈**：自有账本的**自洽**由本快照保证；而 store 侧
+        （别人的活/租约/结算）根本无法被快照—— 那一半的权威判据是 `claim`（写入口的唯一临界区，
+        见 `hub/store_leases._claim_locked`）。本快照只保证「我不会自相矛盾地挑人和挑活」。
+        """
         with self._lock:
-            recs = list(self._inflight.values())
+            records = tuple((slot, dict(rec)) for slot, rec in self._inflight.items())
+            avoid = {jid: tuple(sorted(ws)) for jid, ws in self._avoid.items()}
         counts: dict[str, int] = {}
-        for rec in recs:
+        for _slot, rec in records:
             wid = str(rec.get("worker") or "")
             counts[wid] = counts.get(wid, 0) + 1
-        return counts
+        return _TickView(records=records, avoid=avoid, worker_counts=counts)
 
-    def _course_counts(self, course: str) -> tuple[int, int]:
-        """该课在途的 `(主副本数, 备份数)` —— 上限 = 1 主 + N 备份（§2.9）。"""
-        with self._lock:
-            recs = [r for r in self._inflight.values() if r.get("course") == course]
+    @staticmethod
+    def _course_records(view: _TickView, course: str) -> list[dict]:
+        """快照里该课的在飞记录（副本；不碰 `self._inflight`）。"""
+        return [rec for _slot, rec in view.records if rec.get("course") == course]
+
+    def _course_counts_in(self, view: _TickView, course: str) -> tuple[int, int]:
+        """快照口径的 `(主副本数, 备份数)` —— 上限 = 1 主 + N 备份（§2.9）。"""
+        recs = self._course_records(view, course)
         prim = sum(1 for r in recs if r.get("mode") != CLAIM_MODE_BACKUP)
         return prim, len(recs) - prim
 
@@ -518,15 +554,14 @@ class PushDispatcher:
         except Exception:
             return PRIORITY_HIGHEST
 
-    def _backup_target(self, course: str) -> str | None:
-        """该课「值得再派一份备份」的那份活的 jid；无 → None。
+    def _backup_target_in(self, view: _TickView, course: str) -> str | None:
+        """该课「值得再派一份备份」的那份活的 jid；无 → None（判据全部取自**快照**）。
 
         判据 = hub 本地那一份 `job_priority_of`：仍处 highest（没别人在做）不派备份；
         ready / 掉队（low/medium/high）才派——与 pull 侧同一张表、同一套语义。
+        在飞记录来自 `view`（同一次读），不重新去 `_inflight` 取。
         """
-        with self._lock:
-            recs = [r for r in self._inflight.values() if r.get("course") == course]
-        for r in recs:
+        for r in self._course_records(view, course):
             if r.get("mode") == CLAIM_MODE_BACKUP:
                 continue
             jid = str(r.get("job_id") or "")
@@ -550,6 +585,8 @@ class PushDispatcher:
         """
         started: list[str] = []
         hub = self.hub
+        # ★ 一拍只读一次自己的状态（见 `_snapshot` 的「为什么」）；下面每门课都用这一份。
+        view = self._snapshot()
         for course in rotation_order(list(hub.courses()), getattr(hub, "_cursor", None)):
             # ★ 归属闸（2026-09-25，plan/online-offline-role-routing §2.2）：原来这里读
             # 「课程当前 mode」——模式一热切，历史 job 的归属就跳一次（事故本体）。
@@ -558,13 +595,13 @@ class PushDispatcher:
             # **被接管的课**的活，一律不推（★M4b：旧口径「停摆（离线）课」随模式退役）。
             # 真正的闸在 `hub.claim` → `_JobStore.role_blocked`（本文件的判断只是
             # 「不值当推」的过滤，不是判据源）。
-            prim, backup = self._course_counts(course)
+            prim, backup = self._course_counts_in(view, course)
             if prim == 0:
                 jid, mode = self._pick_primary(course)
             else:
                 if backup >= self.backups_per_course:
                     continue
-                tgt = self._backup_target(course)
+                tgt = self._backup_target_in(view, course)
                 if tgt is None:
                     continue
                 if self.hub.job_kind(tgt) in BOTH_ROLE_KINDS:
@@ -581,9 +618,8 @@ class PushDispatcher:
                 manifest = json.loads((jd / "manifest.json").read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 continue
-            with self._lock:
-                avoid = set(self._avoid.get(jid, ()))
-            worker = pick_push_worker(self.workers.snapshot(), self._worker_counts(), avoid)
+            avoid = set(view.avoid.get(jid, ()))
+            worker = pick_push_worker(self.workers.snapshot(), view.worker_counts, avoid)
             if worker is None:
                 continue  # 没有空闲 worker —— 等下一拍
             wid = str(worker["id"])
