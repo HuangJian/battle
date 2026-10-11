@@ -4701,3 +4701,44 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   错注必须当场改）。
 - **后果**：课程文件状态行 → 已结课；停训由人在控制台执行（agent 不开/停训）。
 —— 全文 → `nn-training/curricula/x24-stack{5,6}.jsonc` 尾部结课报告
+
+## §2026-10-12-goalnn-offline-start-checkpoint（2026-10-12，离线腿起点 checkpoint 的 `it` 错位：起点单源化 + 播种先于补传腿 + 补传 409 冲突闸；plan/offline-start-checkpoint-it-collision + 首轮评审 F1–F6）
+
+- **背景**：x24-stack5 事故（2026-10-11）——自主 worker 领课后 **it1 的真训练结果永不到 hub**：
+  `it-000` 与 `it-001` sha 相同（同一份起点被铺了两格，`it-001` 的 mtime 还早 1.177s），
+  hub 账本前两行是 rowless 的 `it=1`/`it=0`。四条独立根因：① **起点定位有两份实现**
+  （`remote/bundle.py` 按 `manifest.it` 铺 `it-{manifest.it}`，`plan_handoff._seed_start_checkpoint`
+  按 `plan["start_it"]`）——而契约是 **`manifest.it == plan.start_it + 1`**（左端点=已完成那一轮，
+  其权重就是 payload 的 `init_weights`；`manifest.it`=包里要跑的第一轮）；② 守卫断言写反（`!=`）
+  且**无生产调用者**，夹具又造 `manifest.it == plan.start_it` ⇒ 断言与夹具**互相印证了一个错误的
+  世界模型**；③ 补传腿 `pending()` 只认「目录名 + `weights.json`」，起点与真轮次不可区分；
+  ④ 播种晚于补传腿启动（首扫看到「铺到一半」的目录）；再叠 hub 首写锁定 + advance 分支不看三件齐全
+  ⇒ 假 it1 被锁死、真 it1 重推被判 duplicate（**= 成功**）静默丢弃、活动权重还被推到起点。
+- **决定**（D1=A 起点永不回传 / D2=首写锁定不动但区分 rollout-only / D3=A 断言抽函数在装配点 / D4=A 同族一起修）：
+  S1 起点单源化（删 `bundle.py` 的铺设块 + 零读者的返回键 `it`；补「包根 `opt.tar` 回退」——
+  否则云上 Adam 黍黍归零）；S1b `deliverer.start()` 挪到 `_seed_start_checkpoint` **之后**（结构性质，
+  不靠判据兜）；S2 抽 `_assert_plan_manifest_aligned`（判据 `+1`）进**唯一装配点** `open_run_context`
+  ⇒ 矛盾包在任何落盘之前拒收；S3 客户端判据换为「**账本里有这一轮的行 ⟺ 真轮次**」
+  （`_ledger_its()`，按 `(size, mtime_ns)` 惰性失效）；S4 hub 侧「已存在且**字节相同** ⇒ duplicate（仍 200）/
+  **字节不同 ⇒ 409 conflict**」+ 客户端把 409 从 ok 元组摘出走 `_reject_round`（带指纹、跨会话）；
+  S6 `plan_run` 的 `artifacts["start_it"]`（值其实是 `manifest.it`）改名 `anchor_it` + `build_plan` 文档串纠错；
+  S9 advance 分支加「必须带真账本行」闸（判据看**请求体**的 `row`）。
+- **备选与否决**：① 判据用 `it <= start_it`（旧草案）——否（事故冒充的正是 `it-001 = start_it+1`，
+  它抓不到；且它更宽，会压掉跨腿复用目录里更早的合法轮次，而回溯那些轮次是 `pending()` 的本职）；
+  ② 让 hub 从落盘产物反推「是不是起点」——否（`row=None` / 无 opt 的信息落盘后消失，hub 照样写裸行
+  `row.json`，且 hub 侧目录里**没有** `plan.json` ⇒ 判据只能在客户端）；③ 只改 hub 加冲突闸——否
+  （旧客户端把 409 记成「已投递 = 成功」，新闸会被静默吞掉）；④ 「统一」`plan.start_it` 与 `manifest.it`——否
+  （两者语义本就不同且被多处依赖：区间左端点 vs 本 job 那一轮）；⑤ 冲突时覆盖 hub 上那一份——否
+  （同一轮权重是不可变快照，谁先到不能决定历史；不匹配只能由人裁决）。
+- **后果**：把这类事故的**上游**（起点被当成一轮）与**下游**（假轮次推进进度 / 真轮次被静默丢）两段
+  都堵住；新增守卫 4+1 例（`tests/remote/test_offline_deliver.py`：409 端到端「不覆盖、不并账」·
+  **客户端 409 = 内容拒收**（`artifacts` 不含它 / `rejected` 带指纹落盘 / 不停腿 / 本会话不重试）·
+  无账本行不上行 · advance 闸（含反例）；`tests/remote/test_run_loop.py`：拒收
+  `manifest.it == plan.start_it` 的包 + 拒收在任何落盘之前 + 正对照），另把三个文件的夹具从错世界模型
+  改回真实契约。门禁 `nn-python-gate.sh` **4207 passed / 10 skipped**（ruff+mypy 绿）。
+  ⚠ **`x24-stack5` 的 hub 侧假 it1 必须人工清理或重跑该轮**（`offline/0805a8f36a305708/it-001/`,
+  fp=`551d7846…`、rowless，与账本 `it=1 opt_bytes=0` 那一行），否则真 it1 重传会撞 **409 conflict**
+  ——这正是新闸的本意（让人看见并裁决，而不是静默丢）。**未做（明写）**：S8 `hub/task_pack.py`
+  清单读面的两源 fallback（`idx["it"] or plan["start_it"]`），独立可后置。
+—— 全文（现场证据 / 根因 A–D / S1–S9 / 验收门槛 / 评审修订表）→ `plan/offline-start-checkpoint-it-collision.plan.md` ·
+`docs/nn/remote-transport.md` §83 · 评审 → `plan/offline-start-checkpoint-it-collision.review-bf.md`

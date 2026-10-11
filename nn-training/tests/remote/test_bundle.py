@@ -151,11 +151,14 @@ def test_export_then_import_lays_out_resumable_artifacts(tmp_path: Path) -> None
     assert set(index["parts"]) >= {"plan.json", "manifest.json", "init_weights.json", "code.zip"}
     dest = tmp_path / "art"
     got = import_bundle(zip_path, dest)
-    assert got["it"] == 3 and got["end_it"] == 5
+    assert got["end_it"] == 5
     assert got["hub_url"] == "https://hub.example"
-    # 起点：it-003/weights.json（= 本段输入）与 opt.tar（Adam 动量）
-    assert (dest / "it-003" / "weights.json").read_bytes() == INIT_W
-    assert (dest / "it-003" / "opt.tar").stat().st_size > 0
+    # ★ 2026-10-11 事故回归：导入**不再**铺 `it-{manifest.it}`。
+    # 旧行为把起点铺到「本段要跑的第一轮」那一格（`it-003`），而真正的起点是
+    # `plan.start_it`（`it-002`）—— 同一份起点被两份定位逻辑各铺一次，补传腿先把
+    # 无账本行的那一份推上 hub 并锁死首写 ⇒ 真 it1（权重 + 读数）永不到岸。
+    # 起点现在只有一个事实源：`open_run_context` → `_seed_start_checkpoint`。
+    assert not list(dest.glob("it-*")), "导入不铺任何 it-NNN（起点由播种腿铺）"
     assert (dest / "ts_code" / "tools" / "sim" / "export-rl-rollout.ts").exists()
     assert (dest / "code.zip").read_bytes() == CODE_ZIP
     assert json.loads((dest / BUNDLE_INDEX).read_text(encoding="utf-8"))["run_id"] == "run-bundle"
@@ -307,9 +310,14 @@ def test_imported_bundle_runs_whole_segment_without_hub(tmp_path: Path) -> None:
     store = ArtifactStore(dest, run_id="run-bundle")
     for it in [plan["start_it"], *want]:
         assert store.weights_path(it).exists()
+    # 起点那一格（`plan.start_it`）：**只落权重 + opt**（动量随包来，见 `_seed_start_checkpoint`
+    # 的包根 `opt.tar` 回退），且**不记账**。这正是 2026-10-11 事故里被当成 it1 推上 hub 的形状。
+    assert store.weights_path(plan["start_it"]).read_bytes() == INIT_W
+    assert store.opt_path(plan["start_it"]).stat().st_size > 0
     rows = [json.loads(x) for x in (dest / "metrics.jsonl").read_text().splitlines() if x.strip()]
     # 账本只记**真跑过的轮**（起点是 checkpoint 不放账本——`ArtifactStore.checkpoint(row=None)`）
     assert [r["it"] for r in rows] == want
+    assert plan["start_it"] not in [r["it"] for r in rows]
     assert json.loads((dest / "state.json").read_text(encoding="utf-8"))["state"] == "complete"
     # 再跑一次：无事可做（续跑判定认得出同一段；不会从 start_it 重来）
     again = _FakeRunJob()
@@ -567,6 +575,10 @@ def test_offline_start_opt_reaches_blob_cache(tmp_path: Path) -> None:
     assert fake.calls, "全离线段没跑起来"
     cache = dest / "work" / "blob_cache" / opt_sha
     assert cache.read_bytes() == opt_raw, "起点动量必须在启动期进 blob_cache（合成轮只认它）"
+    # 这道断言同时也是「包根 opt.tar 回退」的守卫：起点那一格也必须有动量。
+    # （2026-10-11：删掉 `import_bundle` 的复制后，若 `_seed_start_checkpoint` 不认包根那份，
+    # 这里会变空文件/不存在，而合成轮会黍黍归零——一个静默的精度回归。）
+    assert (dest / f"it-{_plan['start_it']:03d}" / "opt.tar").stat().st_size == len(opt_raw)
     # 与合成轮**同一次调用形态**：空 base_url + 缓存命中 ⇒ 零网络
     # （旧代码走到 download_blob ⇒ unknown url type ⇒ 整段失败）
     got, hit, src = _resolve_blob(

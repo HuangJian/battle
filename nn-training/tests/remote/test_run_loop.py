@@ -206,11 +206,19 @@ ANCHOR_OUT = b'{"it":1,"w":0}'  # 本轮 it 的**输出**权重（first_result�
 
 
 def _prepare(tmp_path: Path, *, iters: int = 4, start_it: int = 1):
-    """造一个 kind=run 的交接现场：job 目录（payload 权重 + plan.json）+ 本轮结果。"""
+    """造一个 kind=run 的交接现场：job 目录（payload 权重 + plan.json）+ 本轮结果。
+
+    ★ 2026-10-11 事故回归：`manifest.it` 必须是 **`plan.start_it + 1`**（不是相等）。
+      * `plan.start_it` = 计划区间左端点 = **已完成**的那一轮，其权重就是包里的
+        `init_weights.json` = `ANCHOR_IN`；
+      * `manifest.it` = 本 job 自己那一轮 = 包里要跑的第一轮。
+    旧夹具让两者相等（与真实导出相反：`loop_export` 传的是 `it-1`）⇒ 「断言 + 夹具互相印证一个
+    错误的世界模型」，真包里的差一永远照不出来。`build_plan(it=start_it)` 给出的就是 `start_it`。
+    """
     plan = build_plan(
         _args(), it=start_it, iters_total=iters - 1 + start_it, rotate_seed=4242, log=_quiet
     )
-    m = _manifest(it=start_it)
+    m = _manifest(it=start_it + 1)
     m["plan_sha256"] = sha256_bytes(dump_plan(plan))
     m = normalize_manifest(m)
     job_dir = tmp_path / "job"
@@ -343,7 +351,9 @@ def test_chain_runs_whole_plan_and_writes_artifacts(tmp_path: Path) -> None:
     """计划区间全跑完：逐轮同构 job（指纹链 + 逐局 argv）、逐轮产物、合并结果过协议校验。"""
     plan, m, fake, result, art = _run(tmp_path)
     want = planned_iters(plan)
-    assert [c["manifest"]["it"] for c in fake.calls] == want
+    # 锚点轮（= `manifest.it` = `want[0]`）的结果由 `first_result` 给定，不经替身；
+    # 替身跑的是它**之后**的每一轮。
+    assert [c["manifest"]["it"] for c in fake.calls] == want[1:]
     # 逐轮 manifest 与 kind=iter 同构：kind / argv 条数 / 逐局 stage+seed / wver
     for c in fake.calls:
         mm = c["manifest"]
@@ -355,19 +365,26 @@ def test_chain_runs_whole_plan_and_writes_artifacts(tmp_path: Path) -> None:
         seeds = [int(a[a.index("--seeds") + 1]) for a in mm["rollout"]["argv"]]
         assert list(zip(stages, seeds, strict=True)) == [(int(s), int(d)) for s, d in pairs]
         assert all(a[0] == "tools/sim/export-rl-rollout.ts" for a in mm["rollout"]["argv"])
-    # 权重链：第 1 轮的 init = 本轮（job 自己的 it）输出；此后逐轮 = 上一轮输出
+    # 权重链：第一轮真跑的（`want[1]`）的 init = 锚点轮（= job 自己那一轮）的输出；此后逐轮 = 上一轮输出
     assert fake.calls[0]["init"] == ANCHOR_OUT
+    assert m["it"] == want[0]
     for prev, cur in zip(fake.calls, fake.calls[1:], strict=False):
         assert cur["init"] == prev["weights"]
         assert cur["manifest"]["init_weights_fp"] == sha256_bytes(prev["weights"])
     # 产物：逐轮 weights/opt + 账本 + state + README/LATEST/全量包
     store = ArtifactStore(art, run_id="run-runloop")
-    for it in [plan["start_it"], *want]:
+    # 起点（`plan.start_it`）是**只落权重、不记账**的 checkpoint（上一轮的产物）：
+    # 没有 opt（包里没带）、也没账本行——这正是 2026-10-11 事故里被误当成 it1 的那一份的形状。
+    assert store.weights_path(plan["start_it"]).read_bytes() == ANCHOR_IN
+    assert not store.opt_path(plan["start_it"]).exists()
+    for it in want:
         assert store.weights_path(it).exists() and store.opt_path(it).exists()
-    assert store.weights_path(plan["start_it"]).read_bytes() == ANCHOR_OUT  # 被本轮输出覆盖
+    assert store.weights_path(m["it"]).read_bytes() == ANCHOR_OUT  # job 自己那一轮被本轮输出覆盖
     rows = _ledger(art)
-    assert [r["it"] for r in rows] == [plan["start_it"], *want]  # 账本 it 唯一
-    assert rows[0]["phase"] == "anchor"  # 起点行（来自本轮结果）
+    assert [r["it"] for r in rows] == want  # 账本一行 = 一轮（起点不记账）
+    assert plan["start_it"] not in [r["it"] for r in rows], "起点不得进账本（row=None 的语义）"
+    assert rows[0]["phase"] == "anchor"  # 锚点轮行（来自本轮结果）
+    assert rows[0]["it"] == m["it"]
     # 逐维度/分数统计要进产物行（2026-09-22）：控制台的 kills/accuracy/loot 与 score 列读它，
     # 而导入的离线产物腿要靠这行把同一批列点起来（不带就恒空）。
     assert rows[1]["report"]["dimMeans"] == {"progress": 0.4, "accuracy": 0.12, "loot": 0.3}
@@ -387,7 +404,8 @@ def test_chain_runs_whole_plan_and_writes_artifacts(tmp_path: Path) -> None:
     # 合并结果：末轮形状 + 明细；**过协议层校验**是它能直接走 hub 落位链的前提
     assert result["it_end"] == want[-1]
     # `iters` = 本段覆盖的**每一轮**，含本 job 自己那一轮（它也是一次真采集，明细必须带上）
-    assert [r["it"] for r in result["iters"]] == [plan["start_it"], *want]
+    assert [r["it"] for r in result["iters"]] == want
+    assert result["artifacts"]["anchor_it"] == m["it"]  # 键名不再是 start_it（那个名字属于计划）
     assert result["iters"][0]["report"]["winRate"] == pytest.approx(0.4)  # 本轮的采集口径
     assert result["iters"][-1]["weights_fp"] == sha256_file(store.weights_path(want[-1]))
     assert result["agg"]["mean_ret"] == pytest.approx(0.5 + 0.01 * want[-1])
@@ -433,12 +451,13 @@ def test_combined_rejects_result_without_any_report(tmp_path: Path) -> None:
 
 def test_budget_stops_before_starting_next_iteration(tmp_path: Path) -> None:
     """预算到点：在下一轮**开始之前**干净停机（产物自洽），再跑一次接着跑完。"""
-    plan, _m, fake, result, art = _run(tmp_path, budget_sec=1e-9)
+    plan, m, fake, result, art = _run(tmp_path, budget_sec=1e-9)
     assert fake.calls == []
     st = json.loads((art / ArtifactStore.STATE_NAME).read_text(encoding="utf-8"))
-    assert (st["state"], st["last_it"]) == ("budget", plan["start_it"])
+    # 预算到点：只落了锚点轮（= 本 job 自己那一轮，结果由 first_result 给定）
+    assert (st["state"], st["last_it"]) == ("budget", m["it"])
     assert result["run_state"] == "budget"
-    assert [r["it"] for r in result["iters"]] == [plan["start_it"]]  # 只有本轮（锚点）
+    assert [r["it"] for r in result["iters"]] == [m["it"]]  # 只有锚点轮
     fake2 = _FakeRunJob(tmp_path)
     res2 = run_standalone(
         artifacts_dir=art,
@@ -448,15 +467,21 @@ def test_budget_stops_before_starting_next_iteration(tmp_path: Path) -> None:
         log=_quiet,
     )
     assert res2["it_end"] == plan["end_it"]
-    assert [c["manifest"]["it"] for c in fake2.calls] == planned_iters(plan)
-    assert fake2.calls[0]["init"] == ANCHOR_OUT  # 起点权重 = 本轮输出（不是重跑本轮）
+    # 续跑从锚点**之后**接上（锚点轮不重跑）
+    assert [c["manifest"]["it"] for c in fake2.calls] == planned_iters(plan)[1:]
+    assert fake2.calls[0]["init"] == ANCHOR_OUT  # 起点权重 = 锚点轮输出（不是重跑本轮）
 
 
 def test_max_iters_caps_single_invocation(tmp_path: Path) -> None:
     """`--run-max-iters`：本次只跑 N 轮（计划仍写到末尾，下次接着跑）。"""
-    plan, _m, fake, result, art = _run(tmp_path, max_iters=2)
+    plan, m, fake, result, art = _run(tmp_path, max_iters=2)
     want = planned_iters(plan)
-    assert [c["manifest"]["it"] for c in fake.calls] == want[:2]
+    # 上限 = 「计划区间 ∩ CLI 上限」，再滤掉产物里已有的轮次。锚点轮（`manifest.it` = `want[0]`）
+    # 已经在产物里 ⇒ 本次实跑的是它之后、落在上限内的那一批。
+    # ★ 已知小瑕疵（**不在本 plan 范围**，见 plan §7 的「顺带发现」）：截断发生在 `start_from`
+    # 过滤**之前**（`_drive` 用 `ctx.planned_range()`）⇒ 已跑过的轮会吃掉一格预算，
+    # 所以「上限 2」在这里只跑出 1 轮。要修得动 `_drive` 的语义，另开任务。
+    assert [c["manifest"]["it"] for c in fake.calls] == [want[1]]
     assert result["it_end"] == want[1]
     assert json.loads((art / ArtifactStore.STATE_NAME).read_text())["last_it"] == want[1]
 
@@ -475,7 +500,7 @@ def test_standalone_resume_continues_without_duplicate_rows(tmp_path: Path) -> N
     )
     assert [c["manifest"]["it"] for c in fake2.calls] == planned_iters(plan)[2:]
     after = _ledger(art)
-    assert [r["it"] for r in after] == [plan["start_it"], *planned_iters(plan)]
+    assert [r["it"] for r in after] == planned_iters(plan)  # 起点不记账
     assert len(after) == len(before) + len(planned_iters(plan)) - 2
     assert res["it_end"] == plan["end_it"]
     # 续跑后状态仍在 complete（不是"新段"）
@@ -580,7 +605,7 @@ def test_reclaim_skips_iterations_already_in_artifacts(tmp_path: Path) -> None:
         log=_quiet,
     )
     assert [c["manifest"]["it"] for c in fake2.calls] == planned_iters(plan)[len(done) :]
-    assert [r["it"] for r in _ledger(art)] == [plan["start_it"], *planned_iters(plan)]
+    assert [r["it"] for r in _ledger(art)] == planned_iters(plan)  # 起点不记账
     assert res["it_end"] == plan["end_it"]
 
 
@@ -602,7 +627,8 @@ def test_iteration_failure_finalizes_artifacts_and_stays_resumable(tmp_path: Pat
             run_job_fn=bad,
             log=_quiet,
         )
-    assert [c["manifest"]["it"] for c in bad.calls] == [2, 3, 3, 3]  # it2 一次 + it3 重试 3 次
+    # 锚点轮（it2）由 first_result 给定、不经替身；失败的是 it3（重试 3 次）
+    assert [c["manifest"]["it"] for c in bad.calls] == [3, 3, 3]
     st = json.loads((art / ArtifactStore.STATE_NAME).read_text(encoding="utf-8"))
     assert st["state"] == "failed" and st["last_it"] == 2
     assert (art / ArtifactStore.ALL_ZIP).exists()  # 失败也收尾（否则人拿不到中间产物）
@@ -617,7 +643,7 @@ def test_iteration_failure_finalizes_artifacts_and_stays_resumable(tmp_path: Pat
     )
     assert [c["manifest"]["it"] for c in good.calls] == [3, 4]
     assert res["it_end"] == 4
-    assert [r["it"] for r in _ledger(art)] == [1, 2, 3, 4]
+    assert [r["it"] for r in _ledger(art)] == [2, 3, 4]  # 起点（it1）不记账
 
 
 # ────────────────────────── 计划交接的三道门 ──────────────────────────
@@ -630,7 +656,8 @@ def test_verify_plan_file_rejects_tampered_or_mismatched(tmp_path: Path) -> None
     job_dir.mkdir(parents=True, exist_ok=True)
     raw = dump_plan(plan)
     (job_dir / "plan.json").write_bytes(raw)
-    good = _manifest(it=2)
+    # ★ 合法值：`manifest.it == plan.start_it + 1`（plan.start_it=2 ⇒ it=3）
+    good = _manifest(it=3)
     good["plan_sha256"] = sha256_bytes(raw)
     good = normalize_manifest(good)
     got, sha = verify_plan_file(job_dir, good, log=_quiet)
@@ -650,10 +677,10 @@ def test_verify_plan_file_rejects_tampered_or_mismatched(tmp_path: Path) -> None
         )
     assert "对集指纹不符" in str(ei2.value)
 
-    # ③ 计划与 job 不是同一轮的交接
+    # ③ 计划与 job 不是同一段的交接（这里用旧夹具的那个错值：manifest.it == plan.start_it）
     (job_dir / "plan.json").write_bytes(raw)
     with pytest.raises(ProtocolError) as ei3:
-        verify_plan_file(job_dir, {**good, "it": 3}, log=_quiet)
+        verify_plan_file(job_dir, {**good, "it": 2}, log=_quiet)
     assert "start_it" in str(ei3.value)
 
     # ④ 缺计划文件（手工递送时最容易漏的一样）
@@ -661,6 +688,43 @@ def test_verify_plan_file_rejects_tampered_or_mismatched(tmp_path: Path) -> None
     with pytest.raises(ProtocolError) as ei4:
         verify_plan_file(job_dir, good, log=_quiet)
     assert "plan.json" in str(ei4.value)
+
+
+def test_open_run_context_rejects_misaligned_plan_and_manifest(tmp_path: Path) -> None:
+    """★ 2026-10-11 事故回归：`manifest.it == plan.start_it` 的包**开跑前**当场拒收。
+
+    不变式是 `manifest.it == plan.start_it + 1`（前者=已完成那一轮、其权重就是 payload 的
+    init_weights；后者=包里要跑的第一轮）。这条断言原本写反（`!=`）**且没有生产调用者**，
+    加上夹具造的是「两者相等」⇒ 真包里的差一永远照不出来（事故就是它放过去的）。
+    现在它住在唯一装配点，并在**任何落盘之前**响。
+    """
+    plan, m, job_dir, _first = _prepare(tmp_path, iters=2)
+    bad = {**m, "it": plan["start_it"]}  # 旧夹具的错值（与真实导出相反）
+    art = tmp_path / "art9"
+    with pytest.raises(ProtocolError):
+        open_run_context(
+            plan=plan,
+            plan_sha256=bad["plan_sha256"],
+            manifest=bad,
+            job_dir=job_dir,
+            work_dir=tmp_path / "w9",
+            artifacts_dir=art,
+            log=_quiet,
+        )
+    assert not art.exists(), "拒收必须发生在任何落盘之前（不留脏产物）"
+    # 正对照：只把 `it` 换回合法值，**同一个包**就开跑，并把起点按不变式落在 `it-{start_it}`
+    # （判据在产物字节上，不在消息措辞上——「拒绝的确实是这条差一」由这份对照成立）
+    ok = tmp_path / "art9ok"
+    ctx = open_run_context(
+        plan=plan,
+        plan_sha256=m["plan_sha256"],
+        manifest=m,
+        job_dir=job_dir,
+        work_dir=tmp_path / "w9ok",
+        artifacts_dir=ok,
+        log=_quiet,
+    )
+    assert ctx.store.weights_path(plan["start_it"]).read_bytes() == ANCHOR_IN
 
 
 def test_seed_checkpoint_requires_payload_weights(tmp_path: Path) -> None:
@@ -717,7 +781,9 @@ def test_segment_reports_round_boundaries_to_the_progress_hook(
     monkeypatch.setitem(sys.modules, progress_hook.HOOK_NAME, mod)
     plan, _m, _fake, _result, _art = _run(tmp_path, iters=3)
     kinds = [k for k, _kw in seen]
-    rounds = planned_iters(plan)
+    # 锚点轮（`manifest.it` = `rounds[0]`）由 first_result 给定、不经进程内轮循环
+    # ⇒ 打点只覆盖它**之后**的轮次
+    rounds = planned_iters(plan)[1:]
     assert kinds[0] == "seg-start", kinds
     assert kinds.count("round-start") == len(rounds)
     assert kinds.count("round-done") == len(rounds)

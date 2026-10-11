@@ -161,8 +161,13 @@ class OfflineRoundsMixin:
           * **声明指纹与实际字节相符**——传输损坏（截断/串包）必须在入口拦住，否则一条
             损坏的权重会以「hub 上的产物」身份进入 eval/续跑，而真因在几千行日志之外。
 
-        幂等：`it-NNN/weights.json` 已存在 ⇒ duplicate（**不改写**）。同一轮权重是不可变
-        快照：覆盖它意味着「谁先到」决定了历史，而补传天然会重传（重连、重启续投）。
+        幂等：`it-NNN/weights.json` 已存在且**字节相同** ⇒ duplicate（**不改写**）。同一轮权重是
+        不可变快照：覆盖它意味着「谁先到」决定了历史，而补传天然会重传（重连、重启续投）。
+
+        ★ 2026-10-11 事故新增：已存在但**字节不同** ⇒ `conflict`（调用方透成 409）。
+        事故现场就是这个形状的反面：起点（无账本行）先占了 `it-1`，而真 it1 推上来被判 duplicate
+        （=「成功」）静默丢弃 ⇒ 真权重与读数永不到岸，而运维以为那一轮已经回传了。
+        响比静默好：一份不匹配的**不可变快照**只能由人来裁决（哪一份才是这一轮的真实产物）。
         """
         run_id = sanitize_run_id(body.get("run_id"))
         it = body.get("it")
@@ -202,8 +207,31 @@ class OfflineRoundsMixin:
         with self._lock:
             d = self.offline_run_dir(run_id)
             it_dir = d / f"it-{int(it):03d}"
-            if (it_dir / "weights.json").exists():
-                return {"status": "duplicate", "run_id": run_id, "it": int(it)}
+            wpath = it_dir / "weights.json"
+            if wpath.exists():
+                # 字节级比对（先比 size 再读：幂等重传是常态，不给它每次多读 ~380KB）。
+                # `_write_bytes` 就是把 `wj` 原样写下 ⇒ 字节相等 ⟺ 同一份不可变快照。
+                try:
+                    same = wpath.stat().st_size == len(wj) and wpath.read_bytes() == wj
+                except OSError:
+                    same = False  # 读不动 = 不敢当幂等（宁可报冲突让人看）
+                if same:
+                    return {"status": "duplicate", "run_id": run_id, "it": int(it)}
+                try:
+                    have = hashlib.sha256(wpath.read_bytes()).hexdigest()
+                except OSError:
+                    have = ""
+                return {
+                    "status": "conflict",
+                    "run_id": run_id,
+                    "it": int(it),
+                    "have_fp": have,
+                    "got_fp": got,
+                    "error": (
+                        f"补传冲突 it{int(it)}：hub 已有**不同**字节的权重"
+                        f"（hub {have[:12]}… 本次 {got[:12]}…）——不覆盖、需人裁决"
+                    ),
+                }
             it_dir.mkdir(parents=True, exist_ok=True)
             _write_bytes(it_dir / "weights.json", wj)
             if opt:
@@ -428,6 +456,16 @@ class OfflineRoundsMixin:
         if not advance_active:
             print(
                 f"[hub-server] 补传 it{it} 不推进活动权重（课程已固定在线；旧会话的回传只归档）",
+                flush=True,
+            )
+        elif not isinstance(row, dict):
+            # ★ 2026-10-11 事故：起点（`ArtifactStore.checkpoint(row=None)`）没有账本行，却照样
+            # 把活动权重推到了它自己 —— 「假轮次推进了当前进度」。判据看**请求体**的 `row`：
+            # 落盘后的 `row.json` 无论真假都存在（无 row 时写裸行），反推不出来。
+            # 不变量：**有账本行 ⟺ 真轮次**（客户端 `pending()` 用的是同一条）。
+            print(
+                f"[hub-server] 补传 it{it} 不推进活动权重：非真轮次"
+                "（无账本行，疑似起点/半截写入）——镜像与归档照落",
                 flush=True,
             )
         elif not self._ledger_has_newer_iter(int(it)):

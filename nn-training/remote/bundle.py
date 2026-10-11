@@ -29,7 +29,6 @@ sha256 + 字节数，导入时**逐件对账**（包要过 Kaggle dataset / Driv
 from __future__ import annotations
 
 import json
-import shutil
 import sys
 import time
 import zipfile
@@ -363,17 +362,13 @@ def import_bundle(zip_path: str | Path, dest: str | Path) -> dict:
             raise ProtocolError(
                 f"{name} 与索引不符（搬运截断/损坏？）——拒收，不跑任何一局"
             )
-    # 起点 checkpoint：`it-{it}` = 本段的输入（= 上一段/上一条腿的产物）。
-    # 位置与 `ArtifactStore.dir_for` 同规；`run_standalone` 从 state.json 接不上时也认它。
-    start_it = int(idx.get("it", 0) or 0)
-    it_dir = root / f"it-{start_it:03d}"
-    it_dir.mkdir(parents=True, exist_ok=True)
+    # ★ 2026-10-11 事故（x24-stack5）：这里曾经把起点铺到 `it-{idx["it"]}`，而 `idx["it"]`
+    # = `manifest.it` = 本段**要跑的第一轮**（`:182`）——不是起点那一轮。于是同一个「起点」
+    # 被两份不同的定位逻辑各铺一次（本处 `it-001` + `plan_handoff._seed_start_checkpoint` 的
+    # `it-000`），补传腿先把无账本行的那一份推上 hub、hub 首写锁定 ⇒ 真 it1 永不到岸。
+    # ⇒ **起点只有一个事实源：`plan["start_it"]`**，播种归 `_seed_start_checkpoint`（跑起
+    # 来之前铺，见该函数的 docstring）；导入只负责把包里的件解到产物目录。
     init_p = root / "init_weights.json"
-    if not (it_dir / "weights.json").exists():
-        shutil.copyfile(init_p, it_dir / "weights.json")
-    opt_src = root / "opt.tar"
-    if opt_src.exists() and not (it_dir / "opt.tar").exists():
-        shutil.copyfile(opt_src, it_dir / "opt.tar")
     # TS 运行时树：解成 `ts_code/`（`run_standalone` 的 `ensure_ts_cache_layout` 认这个目录），
     # 同时保留 zip 原件——`run_job` 的 preloaded 直接吃 zip 字节（省一次解压重打）。
     ts_zip = root / "ts_code.zip"
@@ -393,7 +388,8 @@ def import_bundle(zip_path: str | Path, dest: str | Path) -> dict:
     return {
         "artifacts_dir": str(root),
         "run_id": idx.get("run_id", ""),
-        "it": start_it,
+        # ★ 曾经这里回一份 `"it": idx["it"]`，读起来像「起点那一轮」而实际是 `manifest.it`
+        # （差一）——零读者的误导线，随事故一并删掉。
         "end_it": int(idx.get("end_it", 0) or 0),
         "plan": str(root / PLAN_NAME),
         "manifest": str(root / "manifest.json"),

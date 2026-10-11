@@ -188,6 +188,9 @@ class OfflineDeliverer:
         self._rejected: dict[int, str] = {}
         self._result_done = False
         self._manifest_cache: dict | None = None
+        #: 账本轮次集（`_ledger_its()`）的惰性缓存：`((size, mtime_ns), its)`。
+        #: 为什么需要：`pending()` 每拍被调（`_log_diag` 也调），而 `metrics.jsonl` 可达 MB 级。
+        self._ledger_cache: tuple[tuple[int, int] | None, set[int]] = (None, set())
         # ---- 后台并行（单写者线程；除 submit_*/close 外所有状态读写都在它里面）----
         self.background = bool(background)
         self._cv = threading.Condition()
@@ -542,13 +545,67 @@ class OfflineDeliverer:
 
     # ------------------------------------------------------------ 待投递集
 
+    def _ledger_its(self) -> set[int]:
+        """账本（`metrics.jsonl`）里有行的轮次集合。**这就是「真轮次」的判据**。
+
+        ★ 2026-10-11 事故（x24-stack5）：起点被当成 it1 推上 hub，hub 首写锁定 ⇒ 真 it1（权重与
+        读数）永不到岸。起点与真轮次的**唯一结构差别就是「记不记账」**：
+          * `ArtifactStore.checkpoint(row=None)` 是起点专用（`remote/plan_handoff.py:586` —— 全仓
+            **唯一**省略 `row` 的调用点），`remote/artifacts.py:268` 的 `if row is not None:` 才追
+            加行 ⇒ **有行 ⟺ 真轮次**；
+          * 所以不需要指纹（「取哪一行」是 `_row_for` 的事，它配不上时只意味着不发 row，不意味着
+            这一轮不该投），也不需要 `plan.start_it` 或 `plan.json`（`it <= start_it` 反而更宽：
+            会把跨腿复用目录里 `start_it` **之前**的合法轮次一起压掉，而回溯它们正是本函数的本职）。
+
+        为什么缓存：`pending()` 每拍被调，而账本行带 `perGame` 时可以到 MB 级。该文件是
+        append-only ⇒ 按 `(size, mtime_ns)` 失效是安全的（对不上就重解析，永远不会读到旧集合）。
+        """
+        p = self.root / ArtifactStore.METRICS_NAME
+        try:
+            st = p.stat()
+            key: tuple[int, int] | None = (int(st.st_size), int(st.st_mtime_ns))
+        except OSError:
+            self._ledger_cache = (None, set())
+            return set()
+        cached_key, cached = self._ledger_cache
+        if cached_key == key:
+            return cached
+        its: set[int] = set()
+        try:
+            text = p.read_text(encoding="utf-8")
+        except OSError:
+            text = ""
+        for line in text.splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue  # 半截行（被 kill）——与 `ArtifactStore.rows` 同口径地跳过
+            if isinstance(row, dict):
+                it = row.get("it")
+                if isinstance(it, int) and not isinstance(it, bool):
+                    its.add(it)
+        self._ledger_cache = (key, its)
+        return its
+
     def pending(self) -> list[int]:
-        """磁盘上有、记账里没有的轮次（升序）。**这是「重启续投」的全部实现**。"""
+        """磁盘上有、记账里没有、**且是训练轮**的轮次（升序）。**这是「重启续投」的全部实现**。
+
+        「是训练轮」= 账本里有它自己的行（见 `_ledger_its`）⇒ **起点永不回传**（D1：起点不是
+        一轮训练，hub 拿到也无用；它只是上一次交接的产物）。2026-10-11 事故的根因就在这里：
+        只认「目录名 `it-*` + 有 `weights.json`」的话，起点与真轮次完全不可区分。
+
+        代价：撞上「权重已落盘、行还没写」的纳秒级窗口时，这一拍不投（下一拍投）——**延迟，
+        不是丢**；而发一个无行的体上去会让 hub 把它锁成裸行（首写锁定）。
+        """
         out: list[int] = []
         try:
             dirs = sorted(self.root.glob(f"{ArtifactStore.IT_PREFIX}*"))
         except OSError:
             return out
+        rounds = self._ledger_its()
         for d in dirs:
             if not d.is_dir():
                 continue
@@ -557,6 +614,13 @@ class OfflineDeliverer:
                 continue
             it = int(name)
             if it in self._delivered or it in self._rejected:
+                continue
+            if it not in rounds:
+                self._throttled_log(
+                    f"no-row:{it}",
+                    f"补传跳过 it{it}：账本里没有这一轮的行 ⇒ 不是训练轮"
+                    "（起点/半截写入）——不上行",
+                )
                 continue
             if (d / "weights.json").exists():
                 out.append(it)
@@ -686,7 +750,9 @@ class OfflineDeliverer:
         with self._cv:
             repost = sorted(self._repost)
         todo = self.pending()
-        todo += [it for it in repost if it not in todo]
+        # 重投只服务**真轮次**（纵深防御：旧账本/旧会话里的起点或半截轮次不该被重投带出去）。
+        rounds = self._ledger_its()
+        todo += [it for it in repost if it not in todo and it in rounds]
         if not todo:
             return 0
         if not self.probe(force=force_probe):
@@ -816,11 +882,21 @@ class OfflineDeliverer:
         status, resp = self._post(OFFLINE_ARTIFACT_PATH, raw)
         if not status:  # 没送达（_post 已记一笔）
             return "stop"
-        if status in (200, 201, 409):
+        if status in (200, 201):
             self._delivered.add(it)
-            if status == 409:
-                self.log(f"补传 it{it}：hub 已有这一轮（幂等，记为已投递）")
             return "ok"
+        if status == 409:
+            # ★ 2026-10-11 事故：409 曾经与 200 同一个分支（`_delivered.add(it)` + "ok"）——
+            # 于是 hub 说「同一轮已有**不同**字节」时，这一轮被记成「投递成功」、本会话永不重试，
+            # 日志还写「幂等」。hub 侧 duplicate 仍回 200（`hub/offline.py::_post_offline_artifact`），
+            # 这条腿上的 409 只有一个来源（`store_offline_artifact` 的 conflict）⇒ 当成内容拒收：
+            # 只丢这一轮、其余照推、新会话会再试一次（指纹记账）。
+            return self._reject_round(
+                it,
+                "hub 冲突：本轮在 hub 上已有**不同**权重，不覆盖"
+                f"（{_err_text(resp)}）——需人裁决后清理 hub 侧那一份",
+                wfp,
+            )
         if status in (401, 403):
             self._disable(f"补传 it{it} 被拒（HTTP {status}）——本会话停用补传")
             return "stop"

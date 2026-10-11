@@ -297,6 +297,19 @@ class OfflineRoutes:
             )
             res = self.hub.store_offline_artifact(course, body, advance_active=advance)
             res["advance_active"] = bool(advance)
+            # ★ 2026-10-11 事故：同一轮已有**不同字节**的权重 ⇒ 409（不静默、不覆盖、不并账）。
+            # 这一支必须在 `merge_eval_rows` **之前**返回：那些 eval 行属于本次这一份权重，
+            # 把它们并进 hub 上那份**不同**的轮，等于伪造读数。
+            if res.get("status") == "conflict":
+                print(
+                    f"[{time.strftime('%H:%M:%S')}] [hub-server] 补传冲突（不覆盖）："
+                    f"course={course or '-'} run={res.get('run_id')} it{res.get('it')} "
+                    f"hub={str(res.get('have_fp') or '')[:12]}… "
+                    f"got={str(res.get('got_fp') or '')[:12]}…",
+                    flush=True,
+                )
+                self._json(res, 409)
+                return
             if why:
                 res["advance_skipped"] = why
                 print(

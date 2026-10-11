@@ -620,7 +620,11 @@ def _combined(ctx: RunContext, *, last_it: int, session: list[dict], state: str)
             "dir": str(ctx.store.root),
             "zip": str(ctx.store.root / ArtifactStore.ALL_ZIP),
             "rows": len(ctx.store.rows),
-            "start_it": int(manifest["it"]),
+            # ★ 2026-10-11 事故同族：这个键曾经叫 `start_it` 而值是 `manifest["it"]`（= 本段
+            # 锚点轮 = `plan.start_it + 1`）⇒ 任何按「起点」读它的下游都会拿错一轮。
+            # 键名改成它真正的语义（
+            # `plan.start_it` 是**计划区间左端点**，不是本段锚点）。零读者，改名无旁开销。
+            "anchor_it": int(manifest["it"]),
         },
     }
     return result

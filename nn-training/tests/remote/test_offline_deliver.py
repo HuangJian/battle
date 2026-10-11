@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import (
     OFFLINE_ARTIFACT_PATH,
+    OFFLINE_DELIVERED_NAME,
     OFFLINE_RESULT_PATH,
     ProtocolError,
     encode_weights_json,
@@ -256,6 +257,66 @@ def test_rejected_round_is_skipped_but_the_rest_keep_flowing(tmp_path: Path) -> 
     assert len(op.calls) == n, "被拒的那一轮本会话不再重试（新会话会再试一次）"
 
 
+def test_conflict_409_is_a_content_rejection_not_a_delivery(tmp_path: Path) -> None:
+    """★ 2026-10-11 事故的**客户端**半边（评审 F1）：409 = 内容拒收，不是「已投递」。
+
+    旧代码把 409 与 200/201 放同一个分支（`_delivered.add(it)` + `return "ok"`）⇒ hub 说
+    「同一轮已有**不同**字节」时，这一轮被记成投递成功、本会话永不重试，日志还写「幂等」——
+    与 hub 侧新闸的「响亮、不静默丢」正好相反（只改 hub = 冲突被静默吞掉）。
+    改后：这一轮进 `rejected`（**带权重指纹**，跨会话生效）、其余轮次照推、整条腿不停用。
+    """
+    root = _make_artifacts(tmp_path / "art")
+    msgs: list[str] = []
+
+    class _Op:
+        def __init__(self) -> None:
+            self.calls: list[str] = []
+
+        def __call__(self, url: str, data: bytes, headers: dict, timeout: float):
+            if url.endswith("/ping"):
+                self.calls.append("ping")
+                return 200, b"{}"
+            it = json.loads(data)["it"]
+            self.calls.append(f"post:{it}")
+            if it == 1:
+                body = {
+                    "status": "conflict",
+                    "run_id": RUN,
+                    "it": 1,
+                    "have_fp": "a" * 64,
+                    "got_fp": "b" * 64,
+                    "error": "补传冲突 it1：hub 已有**不同**字节的权重——不覆盖、需人裁决",
+                }
+                return 409, json.dumps(body).encode("utf-8")
+            return 200, b"{}"
+
+    op = _Op()
+    d = OfflineDeliverer(
+        base_url="http://hub.invalid",
+        token="t",
+        run_id=RUN,
+        artifacts_dir=root,
+        opener=op,
+        log=msgs.append,
+    )
+    assert d.sync() == 2, "被 409 拒的那一轮不得连坐后面的轮次"
+    assert d.disabled_reason == "", "409 是内容问题，不得停用整条腿"
+    assert d.pending() == [], "冲突轮不再进待投集（1）、已投的也不进（2/3）"
+    led = json.loads((root / OFFLINE_DELIVERED_NAME).read_text(encoding="utf-8"))
+    assert led["artifacts"] == [2, 3], "409 那一轮**不算已投递**（旧代码把它记成成功）"
+    assert [r["it"] for r in led["rejected"]] == [1], "冲突要落盘（跨会话不再重试）"
+    import hashlib
+
+    want_fp = hashlib.sha256((root / "it-001" / "weights.json").read_bytes()).hexdigest()
+    assert led["rejected"][0]["weights_fp"] == want_fp, "拒收记账按权重指纹（同一 it 换内容才再试）"
+    # 判据用**结构**不用措辞：拒收必须为人留下可裁决的两样东西（原因 + 指纹）
+    assert led["rejected"][0]["why"], "拒收要写明原因（人要看的是现场，不是一行「失败」）"
+    assert any(m.startswith("补传 it1") for m in msgs), msgs
+    n = len(op.calls)
+    d.sync()
+    assert len(op.calls) == n, "本会话不再重试冲突轮（新会话指纹对得上也不再试）"
+
+
 def test_row_is_picked_by_matching_bytes_not_by_first_same_iter(tmp_path: Path) -> None:
     """同名 it 有多行（跨会话追加）⇒ 取**与本轮字节相符**的最后一行，不是第一条。
 
@@ -419,27 +480,112 @@ def test_row_fingerprint_mismatch_is_rejected(tmp_path: Path) -> None:
 
 
 def test_duplicate_artifact_keeps_the_first_write(tmp_path: Path) -> None:
-    """同一轮权重是不可变快照：重传（重连/重启/重试）不得改写已有产物。"""
+    """同一轮权重是不可变快照：**同一份字节**重传（重连/重启/重试）⇒ 200 duplicate，不改写。
+
+    幂等重传必须是 200：409 会让节点把它当成失败、每轮把已投过的再传一遍。
+    """
     base, store, srv, th = _boot_server(tmp_path)
     try:
         root = _make_artifacts(tmp_path / "art")
         first = _artifact_body(root, 1)
+        it_dir = store.offline_run_dir(RUN) / "it-001"
         assert _http(base, "sekret", OFFLINE_ARTIFACT_PATH, "POST", data=json.dumps(first).encode())[0] == 200
-        w1 = (store.offline_run_dir(RUN) / "it-001" / "weights.json").read_bytes()
+        w1 = (it_dir / "weights.json").read_bytes()
 
+        status, resp = _http(
+            base, "sekret", OFFLINE_ARTIFACT_PATH, "POST", data=json.dumps(first).encode()
+        )
+        assert int(status) == 200 and resp["status"] == "duplicate"
+        assert (it_dir / "weights.json").read_bytes() == w1
+        rows = (store.offline_run_dir(RUN) / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
+        assert len([r for r in rows if r.strip()]) == 1  # 账本一行 = 一轮
+    finally:
+        srv.shutdown()
+        th.join(timeout=5)
+
+
+def test_conflicting_artifact_is_409_and_never_overwrites(tmp_path: Path) -> None:
+    """★ 2026-10-11 事故可见面：同一轮已有**不同字节** ⇒ 409 `conflict`（不是 200 duplicate）。
+
+    事故形状：起点（无账本行）先占了 `it-1`，真 it1 推上来被判 duplicate（= 成功！）静默丢弃
+    ⇒ 真权重与读数永不到岸，而控制面以为那一轮已经回传了。
+    「首写锁定」本身是对的（同一轮是不可变快照），但**不匹配必须响亮**：409 + 两个指纹 +
+    不覆盖、不并账、不推进活动权重。
+    """
+    import hashlib
+
+    base, store, srv, th = _boot_server(tmp_path)
+    try:
+        root = _make_artifacts(tmp_path / "art")
+        first = _artifact_body(root, 1)
+        it_dir = store.offline_run_dir(RUN) / "it-001"
+        assert _http(base, "sekret", OFFLINE_ARTIFACT_PATH, "POST", data=json.dumps(first).encode())[0] == 200
+        w1 = (it_dir / "weights.json").read_bytes()
+
+        w2 = b'{"it":1,"w":999}'
         other = dict(first)
-        other["weights_json"] = encode_weights_json(b'{"it":1,"w":999}')  # 另一份字节
-        import hashlib
-
-        other["weights_fp"] = hashlib.sha256(b'{"it":1,"w":999}').hexdigest()
+        other["weights_json"] = encode_weights_json(w2)  # 另一份字节
+        other["weights_fp"] = hashlib.sha256(w2).hexdigest()
         status, resp = _http(
             base, "sekret", OFFLINE_ARTIFACT_PATH, "POST", data=json.dumps(other).encode()
         )
-        # duplicate 回 200（补传是重试友好的：409 会让节点每轮把已投过的再传一遍）
-        assert int(status) == 200 and resp["status"] == "duplicate"
-        assert (store.offline_run_dir(RUN) / "it-001" / "weights.json").read_bytes() == w1
+        assert int(status) == 409 and resp["status"] == "conflict"
+        assert resp["have_fp"] == hashlib.sha256(w1).hexdigest()
+        assert resp["got_fp"] == hashlib.sha256(w2).hexdigest()
+        assert (it_dir / "weights.json").read_bytes() == w1, "不得覆盖已有产物"
         rows = (store.offline_run_dir(RUN) / "metrics.jsonl").read_text(encoding="utf-8").splitlines()
-        assert len([r for r in rows if r.strip()]) == 1  # 账本一行 = 一轮
+        assert len([r for r in rows if r.strip()]) == 1, "冲突不并账（不新增行）"
+    finally:
+        srv.shutdown()
+        th.join(timeout=5)
+
+
+def test_rowless_rounds_are_never_delivered(tmp_path: Path) -> None:
+    """★ 2026-10-11 事故回归（客户端）：**没有账本行**的 `it-NNN` 不上行。
+
+    起点是 `ArtifactStore.checkpoint(row=None)` 落的 —— 全仓唯一不收 `row` 的调用点
+    （`remote/plan_handoff.py::_seed_start_checkpoint`）⇒ 它没有 `metrics.jsonl` 行，而每一轮
+    真训练都有。旧 `pending()` 只认「目录名 + weights.json」，两者完全不可区分：事故里起点被
+    当成 it1 推上 hub、首写锁定 ⇒ 真 it1（权重 + 读数）永不到岸。
+    这里用**两个同形状目录**（一个无行、一个有行）把「行」这件事单独拿出来钉。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    seed = root / "it-002"  # 起点形状：只落权重、**没有账本行**
+    seed.mkdir()
+    (seed / "weights.json").write_bytes(b'{"it": 2, "start": true}')
+    d = _deliverer("http://hub.invalid", root)
+    assert d.pending() == [1], "只有有账本行的那一轮才算待投递（起点不上行）"
+
+
+def test_rowless_round_does_not_advance_the_active_weights(tmp_path: Path) -> None:
+    """★ 2026-10-11 事故的第二道防线（hub 侧）：无账本行 ⇒ **不推进活动权重**。
+
+    事故里假 it1（无账本行、无 opt）在 `advance_active` 为真时把 `<traj>/weights.json` 推到了
+    起点 —— hub 的「当前进度」白涨一格，而那一轮的真实读数并不存在。
+    镜像/归档**照落**（它们是「算过什么」的证据），只有活动权重这一格被挡；
+    判据看**请求体**的 `row`（落盘后的 `row.json` 无论真假都存在，反推不出来）。
+    """
+    base, store, srv, th = _boot_server(tmp_path)
+    try:
+        traj = store.jsonl_path.parent
+        root = _make_artifacts(tmp_path / "art")
+        rowless = _artifact_body(root, 1)
+        rowless.pop("row")  # 起点形状：没有账本行
+        st, res = _http(
+            base, "sekret", OFFLINE_ARTIFACT_PATH, "POST", data=json.dumps(rowless).encode()
+        )
+        assert int(st) == 200 and res["status"] == "accepted", res  # 权重照收
+        assert (store.offline_run_dir(RUN) / "it-001" / "weights.json").is_file(), "镜像照落"
+        assert not (traj / "weights.json").exists(), "无账本行不得推进活动权重"
+        # 反向（防「这道断言恒真」）：带账本行的真轮次必须推进
+        real = _artifact_body(root, 2)
+        st, res = _http(
+            base, "sekret", OFFLINE_ARTIFACT_PATH, "POST", data=json.dumps(real).encode()
+        )
+        assert int(st) == 200 and res["status"] == "accepted", res
+        assert (traj / "weights.json").read_bytes() == (
+            root / "it-002" / "weights.json"
+        ).read_bytes(), "真轮次才推进活动权重"
     finally:
         srv.shutdown()
         th.join(timeout=5)
@@ -544,7 +690,10 @@ def test_run_plan_job_delivers_each_round_while_the_segment_runs(tmp_path: Path)
         delivered = sorted(
             int(p.name[3:]) for p in run_dir.glob("it-*") if (p / "weights.json").exists()
         )
-        assert delivered == [1, 2, 3, 4]  # 锚点轮 + 逐轮都到了
+        # 锚点轮（= manifest.it = 2）+ 逐轮都到了；★ 而**起点（plan.start_it = 1）不到 hub**
+        # ---- 2026-10-11 事故的正面回归：那一份曾经被当成 it1 推上来、锁死 hub 首写。
+        assert delivered == [2, 3, 4]
+        assert not (run_dir / "it-001").exists(), "起点永不回传（D1）"
         rec = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
         assert rec["it_end"] == result["it_end"] == 4 and rec["state"] == "complete"
         # T6：跑到计划终点 ⇒ 段末摘要自报 `end_it_reached`（控制台导入后据此转交 run_complete）

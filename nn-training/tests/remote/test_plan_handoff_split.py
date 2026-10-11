@@ -222,7 +222,8 @@ def test_verify_plan_file_three_gates(tmp_path: Path) -> None:
     job_dir.mkdir(parents=True, exist_ok=True)
     raw = dump_plan(plan)
     (job_dir / "plan.json").write_bytes(raw)
-    m = {"it": 2, "plan_sha256": sha256_bytes(raw)}
+    # ★ 合法值：`manifest.it == plan.start_it + 1`（plan.start_it=2 ⇒ it=3）
+    m = {"it": 3, "plan_sha256": sha256_bytes(raw)}
 
     got, sha = handoff_mod.verify_plan_file(job_dir, m, log=_quiet)
     assert got["end_it"] == plan["end_it"] and sha == sha256_bytes(raw)
@@ -237,14 +238,14 @@ def test_verify_plan_file_three_gates(tmp_path: Path) -> None:
     (job_dir / "plan.json").write_bytes(dump_plan(tampered))
     with pytest.raises(ProtocolError) as ei2:
         handoff_mod.verify_plan_file(
-            job_dir, {"it": 2, "plan_sha256": sha256_bytes(dump_plan(tampered))}, log=_quiet
+            job_dir, {"it": 3, "plan_sha256": sha256_bytes(dump_plan(tampered))}, log=_quiet
         )
     assert "对集指纹不符" in str(ei2.value)
 
-    # ③ 计划与 job 不是同一轮的交接
+    # ③ 计划与 job 不是同一段的交接（这里用旧夹具的那个错值：manifest.it == plan.start_it）
     (job_dir / "plan.json").write_bytes(raw)
     with pytest.raises(ProtocolError) as ei3:
-        handoff_mod.verify_plan_file(job_dir, {"it": 3, "plan_sha256": sha256_bytes(raw)}, log=_quiet)
+        handoff_mod.verify_plan_file(job_dir, {"it": 2, "plan_sha256": sha256_bytes(raw)}, log=_quiet)
     assert "start_it" in str(ei3.value)
 
     # ④ 缺计划文件（手工递送时最容易漏的一样）

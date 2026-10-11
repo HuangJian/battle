@@ -185,7 +185,13 @@ def build_plan(
     volume: dict | None = None,
     log=lambda msg: None,
 ) -> dict:
-    """组装计划（hub 侧）。`it` = 本 job 自己那一轮（其权重已在 payload 里）。
+    """组装计划（hub 侧）。`it` = 计划区间左端点 = **本 job 要跑的上一轮**
+    （它的权重就是 payload 里的 init_weights；job 自己那一轮是 `it+1`，见下面的
+    `tmpl_it` 与 `planned_iters`）。
+
+    ★ 2026-10-11 修正：这里原先写的是「`it` = 本 job 自己那一轮」——后半句（其权重已在
+    payload 里）对，前半句错，而调用方正是按「要跑的上一轮」用的（`loop_export` 传 `it-1`）。
+    两种读法混用起来刚好差一，是 x24-stack5 那起「起点被当成 it1」事故的语境之一。
 
     `max_iters`：本次最多自主跑几轮（0 = 跑到课程预算 `iters_total`）。`end_it` 取二者
     交集，并受 `RUN_MAX_ITERS_HARD_CAP` 钳制（手写/损坏的计划不许把节点按在机上一整天）。

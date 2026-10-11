@@ -83,7 +83,9 @@ def _run_ctx(
     ctx = open_run_context(
         plan={"start_it": 1, "end_it": 5, "pair_args": {}, "workers": plan_workers},
         plan_sha256="x" * 64,
-        manifest={"runId": "run-eval", "it": 1, "commit": "c" * 40, "course_fp": "f" * 16},
+        # ★ 真实契约：`manifest.it == plan.start_it + 1`（plan.start_it=1 ⇒ it=2）。
+        # 旧夹具写 `it=1`（与 start_it 相等）——那正是 2026-10-11 事故的错世界模型。
+        manifest={"runId": "run-eval", "it": 2, "commit": "c" * 40, "course_fp": "f" * 16},
         job_dir=tmp_path / "job",
         work_dir=tmp_path / "work",
         artifacts_dir=tmp_path / "art",

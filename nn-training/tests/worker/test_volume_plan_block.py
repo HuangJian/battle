@@ -286,7 +286,8 @@ def test_iteration_manifest_carries_per_stage_quota(tmp_path: Path) -> None:
             "proto": 1,
             "kind": "run",
             "runId": "run-volume",
-            "it": 0,
+            # ★ 真实契约：`manifest.it == plan.start_it + 1`（plan.start_it = 0 ⇒ 本 job 自己那一轮 = 1）
+            "it": 1,
             "job_id": "j" * 16,
             "commit": "c" * 40,
             "code_sha256": "z" * 64,

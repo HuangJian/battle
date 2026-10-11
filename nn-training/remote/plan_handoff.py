@@ -94,6 +94,36 @@ _log_default = tag_logger("run", lambda: time)
 # ------------------------------------------------------------------ 计划交接
 
 
+def _assert_plan_manifest_aligned(plan: dict, manifest: dict) -> None:
+    """★ 不变式：`manifest.it == plan.start_it + 1`。违反即拒收（未跑任何一局）。
+
+    两个字段**本来就差一，不是同一个数**（权威表述：`trainer/loop_export.py:166-169`）：
+      * `plan.start_it` = 计划区间左端点 = **已完成**的那一轮，其权重就是 payload 里的
+        `init_weights.json`（`worker/plan.py:123-124` 的区间是 `start_it+1 .. end_it`）；
+      * `manifest.it` = **本 job 自己那一轮** = 包里要跑的第一轮（`remote/hub_client.py:891`）。
+
+    ★ 2026-10-11 事故（x24-stack5，起点被当成 it1 锁死在 hub）：这条断言原本写的是 `!=`
+    （把两者当成同一个数），而它又没有生产调用者（唯一调用者 `run_plan_job` 于 2026-09-25
+    退役），加上测试夹具造的是 `manifest.it == plan.start_it` ⇒ **断言与假夹具互相印证了
+    一个错误的世界模型**，真包里的差一永远照不出来。现在：判据改成 `+1`，并搬到唯一装配点
+    `open_run_context`（`run_standalone` 与退役前的 `run_plan_job` 都过它）。
+    """
+    start_it = plan.get("start_it")
+    job_it = manifest.get("it")
+    try:
+        ok = start_it is not None and job_it is not None and int(start_it) + 1 == int(job_it)
+    except (TypeError, ValueError):
+        ok = False
+    if ok:
+        return
+    raise ProtocolError(
+        f"计划 start_it={start_it!r} 与 manifest.it={job_it!r} 不是同一段的交接："
+        "不变式是 `manifest.it == plan.start_it + 1`（前者是**已完成**的那一轮、"
+        "其权重就是本次 payload 的 init_weights；后者是**包里要跑的第一轮**）"
+        "——拒收，未跑任何一局"
+    )
+
+
 def verify_plan_file(job_dir: str | Path, manifest: dict, *, log: Callable[[str], None] = _log_default) -> tuple[dict, str]:
     """payload 里的 `plan.json` → 校验 sha + 形状 + **全段对集指纹**。
 
@@ -118,11 +148,7 @@ def verify_plan_file(job_dir: str | Path, manifest: dict, *, log: Callable[[str]
         plan = validate_plan(json.loads(raw.decode("utf-8")))
     except UnicodeDecodeError as e:
         raise ProtocolError(f"plan.json 不是 UTF-8: {e}") from e
-    if int(plan["start_it"]) != int(manifest["it"]):
-        raise ProtocolError(
-            f"计划 start_it={plan['start_it']} != manifest.it={manifest['it']}"
-            "（计划与 job 不是同一轮的交接）——拒收"
-        )
+    _assert_plan_manifest_aligned(plan, manifest)
     got = plan_pairs_fp(plan)
     if got != str(plan.get("pairs_fp", "")):
         raise ProtocolError(
@@ -317,6 +343,8 @@ def open_run_context(
     它产物目录就不自洽**（续跑要「最后一轮的权重」，而第一轮的输入正是上一段的产物——
     把它也写进来，产物才真正可以独立重放）。
     """
+    # ★ 事故回归：矛盾包在**任何落盘之前**当场拒收（曾经这条判据写反、又不住生产路径上）。
+    _assert_plan_manifest_aligned(plan, manifest)
     root = resolve_artifact_dir(
         artifacts_dir, run_id=str(manifest.get("runId", "")), work_dir=work_dir
     )
@@ -376,15 +404,6 @@ def open_run_context(
         run_job_fn=run_job_fn,
         log=log,
     )
-    if ctx.deliverer is not None:
-        ctx.deliverer.start()  # 后台并行（未启用/同步模式时是空操作）
-        st = ctx.deliverer.status()
-        log(
-            f"产物补传已启用：{st['hub_url']}（已投递 {st['delivered']} 轮，"
-            f"待投递 {st['pending']} 轮；{'后台与 PPO 并行' if st['background'] else '同步'}"
-            f"；模式 {st.get('mode', 'thread')}"
-            "）——连不上就静默跳过，训练不受影响"
-        )
     _setup_cloud_eval(ctx)
     last = int(state.get("last_it", plan["start_it"]))
     _seed_demo_blob_cache(
@@ -402,6 +421,19 @@ def open_run_context(
         log=log,
     )
     _seed_start_checkpoint(ctx, job_dir=Path(job_dir), start_it=int(plan["start_it"]), last_it=last)
+    # ★ 2026-10-11 事故：补传腿必须在**起点铺好之后**才起（曾经它在 `_seed_start_checkpoint`
+    # 之前 start，于是首次扫盘看得到「铺到一半」的产物目录 —— 事故里它先扫到的正是
+    # `import_bundle` 留在 `it-{manifest.it}` 的那一份，无账本行、hub 首写锁定 ⇒ 真 it1 永不到岸）。
+    # 位置换一行，换来「首扫永远看到一个自洽的产物目录」是**结构性质**，不靠上游判据兜。
+    if ctx.deliverer is not None:
+        ctx.deliverer.start()  # 后台并行（未启用/同步模式时是空操作）
+        st = ctx.deliverer.status()
+        log(
+            f"产物补传已启用：{st['hub_url']}（已投递 {st['delivered']} 轮，"
+            f"待投递 {st['pending']} 轮；{'后台与 PPO 并行' if st['background'] else '同步'}"
+            f"；模式 {st.get('mode', 'thread')}"
+            "）——连不上就静默跳过，训练不受影响"
+        )
     _carry_ts_tree(ctx, ts_code_cache_dir=ts_code_cache_dir, ts_tree=ts_tree)
     return ctx
 
@@ -581,6 +613,14 @@ def _seed_start_checkpoint(ctx: RunContext, *, job_dir: Path, start_it: int, las
                 f"缺起点权重 init_weights.json（自主段的起点无从落盘，拒收）：{src}"
             )
         opt = _opt_bytes_from_manifest(ctx)
+        if not opt:
+            # ★ 2026-10-11：任务包把起点动量放在**包根** `opt.tar`（`import_bundle` 解出来就在那儿）。
+            # 旧实现靠 `import_bundle` 顺手复制到 `it-{manifest.it}`（错的那一格）+ 本函数从
+            # `manifest.opt_init`/`opt_sha` 取，两路都不覆盖包根这份；“起点单源化”删掉那条复制后
+            # 它就成了唯一落点 —— 漏了它 = **云上 Adam 黍黍归零**（一个静默的精度回归）。
+            cand = Path(job_dir) / "opt.tar"
+            if cand.exists():
+                opt = cand.read_bytes()
         # 不记账本（row=None）：起点不是一轮训练。写进去会多出一条无 agg/report 的行，
         # 而「账本一行 = 一轮」是它给人看曲线的唯一契约（详见 ArtifactStore.checkpoint）。
         ctx.store.checkpoint(start_it, weights_json=src.read_bytes(), opt_tar=opt)
