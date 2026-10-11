@@ -661,6 +661,9 @@ def run_job(
                 shard_dirs=shard_dirs,
                 ts_dir=_ts_dir,
                 log=log,
+                # 补差批按**首批实际用过的**宽度铺满（plan/rollout-topup-fastpath §3.3）：
+                # 缺口方程会把批越补越小，而批次级固定开销与批内局数无关。
+                width=int(iter_info.get("workers") or 0),
             )
             if _extra is not None:
                 shard_dirs = [*shard_dirs, *list(_extra["shard_dirs"])]

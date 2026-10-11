@@ -7,7 +7,10 @@
   2. **同一条连续流续抽**：首批 ∪ 补差批 = 该关连续流的前缀 `[0, K_s)`（不重抽、不漏号），
      `--out` 全局续号且两批不相交（`data_fp` 的条目含目录名，重号就是假账）；
   3. **每关模板取自本关**：`--stage-json` 不被跨关覆盖/删除（自定义关课程）；
-  4. **缺口/浪费分开记账**：触 `game_cap` 与批数用尽仍有缺口 ⇒ `volumeTopup` 里可见，不静默。
+  4. **缺口/浪费分开记账**：触 `game_cap` 与批数用尽仍有缺口 ⇒ `volumeTopup` 里可见，不静默；
+  5. **补差批按机器宽度铺满**（`plan/rollout-topup-fastpath.plan.md` §3.3，2026-10-11）：一批
+     = `width` 局均分（不再是缺口方程），批与机器宽度同量级；宽度的来路 = 调用方给的
+     首批实际 workers → `spec["workers"]` → 首批 argv 条数。
 
 假 `run_fn` 替身（不跑 bun）：按 `--out` 造 `rl_s{stage}_seed{seed}/manifest.json`，样本数由
 用例给定（**产出集**口径）。`iter_rollout._exec_argv` 只把 `--out`/`--weights` 绝化成
@@ -29,7 +32,13 @@ if str(ROOT) not in sys.path:
 
 from common.errors import ProtocolError
 from common.protocol import data_fp, iter_expected_data_fp
-from worker.iter_topup import _flag_value, merge_iter_reports, next_batch_spec, topup_rollout
+from worker.iter_topup import (
+    _flag_value,
+    _resolve_width,
+    merge_iter_reports,
+    next_batch_spec,
+    topup_rollout,
+)
 from worker.plan import build_plan, iter_spec, pairs_for
 from worker.volume_quota import stage_seeds
 from worker.volume_waves import initial_wave_pairs_by_stage, volume_block
@@ -163,6 +172,19 @@ def _seed_pairs(dirs: list[str]) -> dict[int, list[int]]:
     return out
 
 
+def test_width_source_chain_is_explicit_then_spec_then_argv() -> None:
+    """补差批的宽度来路（plan §3.3）：首批**实际用过**的 workers → `spec["workers"]` → argv 条数。
+
+    三者都拿不到 ⇒ `0`（调用方据此**不补差**）——批大小直接决定批次级固定开销摊在几局上，
+    猜一个宽度就是拿墙钟赌（宁可不补）。
+    """
+    spec = {"argv": [["x"], ["y"], ["z"]]}
+    assert _resolve_width(7, spec) == 7  # 调用方给的（首批实际 workers）优先
+    assert _resolve_width(0, {**spec, "workers": 4}) == 4
+    assert _resolve_width(None, {**spec, "workers": 0}) == 3  # 首批 argv 条数
+    assert _resolve_width(None, {"argv": []}) == 0  # 拿不到 ⇒ 不猜
+
+
 def test_topup_is_off_without_volume_block(tmp_path: Path) -> None:
     """没有 `volume` 块 ⇒ 返回 None（老行为逐字节不变：不跑补差、不加字段）。"""
     spec = {"argv": [["x", "--stages", "2000", "--seeds", "1", "--out", "w0"]], "wver": "w"}
@@ -184,15 +206,22 @@ def test_topup_continues_stream_and_keeps_bitwise_accounting(tmp_path: Path) -> 
     assert len(spec["argv"]) == 27
     assert data_fp(info1["shard_dirs"]) == iter_expected_data_fp(spec)
 
+    # ⑥ 满铺：本批 = width 局（不再是缺口方程）。显式给 width = 6（生产里由首批 workers 给）
+    # ⇒ 两关轮转均分 3/3；缺口本只需 1+2 局，铺满后过采 500 样本 —— 那是**预期的**（软指标）。
     extra = topup_rollout(
-        job_dir=job, spec=spec, shard_dirs=list(info1["shard_dirs"]), run_fn=run, log=lambda m: None
+        job_dir=job,
+        spec=spec,
+        shard_dirs=list(info1["shard_dirs"]),
+        run_fn=run,
+        log=lambda m: None,
+        width=6,
     )
     assert extra is not None
-    # 缺口 = {2000: 200, 2001: 200} ⇒ 补 1 + 2 = 3 局，刚好达标（浪费 0、缺口 0）。
     assert extra["volume"]["batches"] == 1
     assert extra["volume"]["shortfall_by_stage"] == {}
-    assert extra["volume"]["wasted_samples"] == 0
-    assert extra["volume"]["collected_by_stage"] == {2000: QUOTA, 2001: QUOTA}
+    assert extra["volume"]["wasted_samples"] == 500
+    assert extra["volume"]["collected_by_stage"] == {2000: 2400, 2001: 2100}
+    assert sum(c["rows"].__len__() for c in run.calls[1:]) == 6, "批大小 == width（满铺）"
     assert extra["volume"]["rule"] == "per-stage-v3"
     # 补差批跑在子目录（隔离 = 逐位对账不失真），且权重被拷进去了。
     assert run.calls[1]["job_dir"].endswith("topup1")
@@ -201,7 +230,7 @@ def test_topup_continues_stream_and_keeps_bitwise_accounting(tmp_path: Path) -> 
     assert data_fp(extra["shard_dirs"]) == iter_expected_data_fp(
         next_batch_spec(
             spec,
-            {2000: 1, 2001: 2},
+            {2000: 3, 2001: 3},
             start_idx={2000: 9, 2001: 18},
             out_base=27,
             rotate_seed=ROTATE,
@@ -212,18 +241,18 @@ def test_topup_continues_stream_and_keeps_bitwise_accounting(tmp_path: Path) -> 
     outs = [_flag_value(r, "--out") for r in spec["argv"]] + [
         _flag_value(r, "--out") for c in run.calls[1:] for r in c["rows"]
     ]
-    assert len(outs) == len(set(outs)) == 30
-    assert sorted(int(o[1:]) for o in outs) == list(range(30))
+    assert len(outs) == len(set(outs)) == 33
+    assert sorted(int(o[1:]) for o in outs) == list(range(33))
     # 种子 = 连续流前缀 `[0, K_s)`（不重抽、不漏局）。
     produced = _seed_pairs([*info1["shard_dirs"], *extra["shard_dirs"]])
-    assert produced[2000] == sorted(stage_seeds(ROTATE, 7, 2000, 0, 10))
-    assert produced[2001] == sorted(stage_seeds(ROTATE, 7, 2001, 0, 20))
+    assert produced[2000] == sorted(stage_seeds(ROTATE, 7, 2000, 0, 12))
+    assert produced[2001] == sorted(stage_seeds(ROTATE, 7, 2001, 0, 21))
     # 轮报合并：games/样本相加、逐局画像拼接（漏了这一条 = 云机轮账少算一批）。
     merged = merge_iter_reports(dict(info1["report"]), list(extra["reports"]))
-    assert merged["games"] == 30
-    assert merged["totalSamples"] == 2 * QUOTA
-    assert merged["shards"] == 30
-    assert len(merged["perGame"]) == 30
+    assert merged["games"] == 33
+    assert merged["totalSamples"] == 2400 + 2100
+    assert merged["shards"] == 33
+    assert len(merged["perGame"]) == 33
     assert merged["elapsedSec"] == pytest.approx(1.0)
 
 
@@ -236,8 +265,10 @@ def test_topup_needs_same_stage_template_and_weights(tmp_path: Path) -> None:
         topup_rollout(job_dir=job, spec=spec, shard_dirs=[], run_fn=_FakeRunner())
     (job / "init_weights.json").write_text("{}", encoding="utf-8")
     stripped = {**spec, "argv": [r for r in spec["argv"] if _flag_value(list(r), "--stages") == "2000"]}
+    # 满铺下要让两关都进本批（width=2）才能碰到「缺 2001 模板」那条：宽度为 1 时本批只包含
+    # stages 序里的第一关，压根不会去取第二关的模板。
     with pytest.raises(ProtocolError, match="模板"):
-        topup_rollout(job_dir=job, spec=stripped, shard_dirs=[], run_fn=_FakeRunner())
+        topup_rollout(job_dir=job, spec=stripped, shard_dirs=[], run_fn=_FakeRunner(), width=2)
 
 
 def test_topup_stage_json_is_taken_from_same_stage_row(tmp_path: Path) -> None:
@@ -311,12 +342,18 @@ def test_topup_records_waste_and_skips_met_stages(tmp_path: Path) -> None:
     run = _FakeRunner(samples={2000: 260, 2001: 100})
     info1 = run(job, spec, ts_dir=job)
     extra = topup_rollout(
-        job_dir=job, spec=spec, shard_dirs=list(info1["shard_dirs"]), run_fn=run, log=lambda m: None
+        job_dir=job,
+        spec=spec,
+        shard_dirs=list(info1["shard_dirs"]),
+        run_fn=run,
+        log=lambda m: None,
+        width=5,
     )
     assert extra is not None
-    # 2000：9 局 × 260 = 2340 > 2000（过采 340）；2001 仍需补 2 局。
-    assert extra["volume"]["wasted_samples"] == 340
-    assert extra["volume"]["collected_by_stage"] == {2000: 2340, 2001: QUOTA}
+    # 2000：9 局 × 260 = 2340 > 2000（过采 340，已达标 ⇒ 不再进 eligible）；2001 还需补，
+    # 满铺给 5 局（width）⇒ collected 2300（比缺口多很多，浪费 640 是**预期的**）。
+    assert extra["volume"]["wasted_samples"] == 640
+    assert extra["volume"]["collected_by_stage"] == {2000: 2340, 2001: 2300}
     assert extra["volume"]["shortfall_by_stage"] == {}
 
 
