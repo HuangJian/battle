@@ -4488,6 +4488,32 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   eng 7 · con 3 · ts 7 · rt 1 · exp 19），索引行压成……
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §20「决策正文归档」· 锚 `### §2026-10-11-decisions-slim-round4`
 
+## §2026-10-11-goalnn-lock-single-source（2026-10-11，用户指令：三处同款锁收敛到 `instance_lock` 原语，消掉同样的窗口）
+
+- **背景**：`loop_util.acquire_lock` · `run_rl._acquire_run_rl_lock` · `remote/code_snapshot._acquire_pack_lock`
+  各自一份 `os.open(O_CREAT|O_EXCL)` + `os.write`，与 `common/instance_lock` 合计**四个写入窗口**
+  （§2026-10-11-goalnn-load-flake-pair 只修了 hub/worker 那一个），接管规则也各自漂移。
+- **决定**：`common/instance_lock` 为**唯一实现**；新增 `marker=()`（空 = 不做身份核验：活着就拒启，
+  死了/够旧的残缺才接管）· `force=True`（显式接管）· `announce=False`（抢不到就改走别的路的调用方，
+  如 `code_snapshot`，不打「拒绝启动」）；三处各留薄壳（`code_snapshot` 不再返回 fd，改拿 bool +
+  `release_instance_lock`）。**护栏**：生产码 AST 上只允许唯一实现引用 `os.O_EXCL`（源码面）+ 三处薄壳
+  对「残缺且新鲜」的锁一律拒启且不动文件（行为面）。
+- **备选与否决**：保留三份实现只各自打补丁 —— 否（同一条规则四处漂，且下一个人会再抄一份）；
+  给互斥型锁也编一个「同程序指纹」 —— 否（同一个锁的持有者可以是 run_rl / loop_serve / bc / 控制台，
+  指纹编不准就是把活锁当 PID 复用接管）。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §75
+
+## §2026-10-11-goalnn-push-snapshot（2026-10-11，用户指令：`_dispatch` 两次状态读收敛成一次一致快照）
+
+- **决定**：`PushDispatcher._snapshot() -> _TickView`（一张 `self._lock` 内取出 records/avoid，
+  `worker_counts` 由同一份 records 派生）；`_dispatch` 入口取一次、每门课都用它；三个旧读取口
+  （`_course_counts` / `_worker_counts` / `_backup_target`）**删除**。
+- **闸的分层（写进注释，别再混为一谈）**：自有账本的自洽由快照保证；**store 侧的事实无法被快照**
+  ——它的权威判据是 `claim`（`_claim_locked`，即上面那条 `landed` 闸）。
+- **回归**：`tests/remote/test_hub_push_dispatch.py` 两条（快照面：决策途中 pop + 让开 store 闸，
+  改回「第二次读」当场红；闸面：在飞账挂另一台 id ⇒ 派发器真去 claim）。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §75
+
 ## §2026-10-11-goalnn-load-flake-pair（2026-10-11，两条满载 flake 的根因修复：hub 备份腿 TOCTOU + instance_lock 写入窗口）
 
 - **背景**：提交 hook 两次被「与改动无关」的负载型 flake 拦下；复核历史日志后两者都是**真缺陷**，不是判据太严：

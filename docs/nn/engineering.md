@@ -25,6 +25,38 @@
 
 ---
 
+## §75 锁收敛（唯一原语）+ 派发器一致快照（2026-10-11，用户指令：二连）
+
+**① 四处「创建后写盘」锁 → 一个原语**（用户：「把 loop_util / run_rl / code_snapshot 三处同款锁
+收敛到 instance_lock 原语，消掉同样的窗口」）。四家原来各自 `os.open(O_CREAT|O_EXCL)` + `os.write`：
+`common/instance_lock`（hub/worker 启动守卫）· `worker/train/loop_util.acquire_lock`（课程实例锁 /
+push 锁 / batch claim 锁，五个调用点）· `trainer/run_rl._acquire_run_rl_lock`（同课双开闸，
+四个调用点）· `remote/code_snapshot._acquire_pack_lock`（抢锚，返回 fd 那套）。⇒ **四个写入窗口**
+（§74 的 §② 只修了 hub/worker 那一个），且四条接管规则各自漂移。
+**落地**：`common/instance_lock` 成为**唯一实现**，新增三个旋钮——
+`marker=()`（空 = 不做身份核验：**活着就拒启，死了/够旧的残缺才接管**——互斥型锁要的语义，
+它们没有稳定的「同程序指纹」）、`force=True`（显式接管，操作员的 `--force`）、`announce=False`
+（抢不到就改走别的路的调用方：`code_snapshot` 有界等待后自打，打一句「拒绝启动」是误导；
+创建失败的 WARN 不受它管）。三处各留薄壳：`loop_util.acquire_lock` / `run_rl._acquire_run_rl_lock` /
+`code_snapshot._acquire_pack_lock -> bool`（不再返回 fd；`finally` 改 `release_instance_lock`）。
+**护栏**（`tests/common/test_instance_lock.py`）：① 源码面——生产码里 **AST 上只允许
+`common/instance_lock.py` 引用 `os.O_EXCL`**（字符串判据不行：注释里到处在讨论它）；
+② 行为面——三处薄壳对「残缺且新鲜」的锁一律拒启 ∧ 一个字节不动（窗口是**运行期**的事，
+只扫 import 会被同名本地函数骗过）。实测面：`引用 O_EXCL 的生产文件: ['common/instance_lock.py']`。
+
+**② 派发器一拍一次自有状态快照**（用户：「把 `_dispatch` 的两次状态读收敛成一次一致快照，
+从根上消掉这类 TOCTOU」）。`_dispatch` 原来两次读自己的在飞账（①`_course_counts`/`_backup_target`
+决定值不值得开备份 ②`_worker_counts` 挑人），中间主副本线程落地并 pop 就能让两次读数**自相矛盾**。
+**落地**：`PushDispatcher._snapshot() -> _TickView`（一张 `self._lock` 内取出 records/avoid，
+`worker_counts` 由**同一份 records 派生**），`_dispatch` 入口取一次、每门课都用它；
+`_course_counts`/`_worker_counts`/`_backup_target` 三个旧读取口**删除**（第二个会漂的读路就是下一处 bug）。
+**两层闸的分工写进注释**：自有账本的自洽由快照保证；**store 侧的事实（别人跑完没/结算没）无法被
+快照**——它的权威判据是 `claim`（唯一临界区，§74 的 §①）。回归：
+`tests/remote/test_hub_push_dispatch.py` 两条——`…snapshot…once_per_tick`（钩 `_job_priority_of`
+在决策途中 pop 掉在飞记录 + 让开 store 闸 ⇒ 只证快照；把挑人改回「第二次读」当场红
+`started=['jjjj…']`）与 `…refused_by_the_store_gate`（在飞账挂**另一台** id ⇒ 派发器真去 claim，
+只证闸）。
+
 ## §74 两条满载 flake 的根因：hub 备份腿 TOCTOU + instance_lock 写入窗口（2026-10-11，提交 hook 现场 + 历史日志复核）
 
 **症状**：① `e2e/test_multi_course_single_hub_e2e.py::test_single_hub_dispatches_two_courses_to_one_worker`
