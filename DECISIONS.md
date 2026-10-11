@@ -4551,3 +4551,72 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   （`uv lock` 每次重解析都依赖它）。
 - **R1 / R2 不变**：`common/` 仍 stdlib-only；三个引导模块仍零依赖。
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `plan/nn-training-reuse-and-deps.plan.md` §5.1 · §5.2 · §5.3
+
+## §2026-10-11-goalnn-rollout-topup-fastpath（2026-10-11，rollout 热路径四刀：探针上界**另立常量** + 补差批按机器宽度铺满 + 轮级 `RoundContext` + **取消搬回**）
+
+- **背景**：Kaggle 自主 worker（96 核 / 94 槽）上**同一轮内相邻两批天差地别**（it34 补差1（18 局）3.35s vs
+  补差2（**1 局**）48.90s；it49 同形 3.00s → 52.49s；54 轮 p90 88.9s / max 111.2s）。现场四条否定式同时成立
+  （≥5s 有 0 局 / 重试 0 / 池 killed=0 unready=0 fallback=0 / 搬回 0 失败）⇒ 既不在跑局、也不在重试、池回退、搬回超界。
+  两条根因（均已在代码上闭合）：① `scratch.open_scratch` 是这条热路径上**唯一没有 `call_bounded` 的一步**
+  （`probe_write_speed_mbps` 只有 `except OSError`；8MB+fsync 每批付一次）；② 补差批大小由**缺口方程**
+  （`ceil(缺口/est)`）决定 ⇒ 批越补越小，而**批次级固定开销与批内局数无关**（§34 的「逐局 spawn 重付启动成本」
+  在批次层面的重演）。
+- **决定**：
+  - ① 探针上界**另立** `game_watch.PROBE_CEILING_SEC = 5.0`（本机实测 8MB 探针 0.009–0.015s / 690–1250 MB/s
+    ⇒ ×300 余量）；**不复用** `SCAN_CEILING_SEC`（`call_bounded` 超界要等满 timeout，60s 与「补差批 < 8s /
+    rollout max < 30s」不可兼得；而扫盘那 60s 管的是几百个小 JSON + 内容哈希，不能被探针压低）。
+    超界 ⇒ **逐字回退档** + 响亮一行 + 轮报 `probe_probe` 读数（盘抖的直接读数，不是失败）。
+  - ② 新增 `worker/volume_alloc.spread_games_by_stage`：补差批 = `width`（首批**实际用过的** workers）局，
+    轮转均分给「未达标且未触顶」的关（顺序 = `stages` 给定序 ⇒ 确定性）；不吃 est / 不吃 `last_lo_factor`；
+    超采（相对 quota）丢弃（`wasted_samples` 上升，**软指标**）；`game_cap` 仍是**硬顶**。
+  - ③ 新增 `iter_rollout.RoundContext`（**轮级**资源的唯一住处）：只装 `layout`（轮级 scratch 布局，
+    `root` 是它的属性）/ `ts_home` / `job_dir` / `pool` / `workers` + `resolved`/`probe_sec`；
+    **批级**的 `jd`/`s_layout`/`exec_dir`/`gate` **不进** ctx（每批一个 `topup{k}/`，批级布局由
+    `batch_layout(layout, batch_rel(轮 job 目录, 批 job 目录))` 镜像推出来）。**池的生涯 = 轮**：
+    首批建、补差批复用，调用方（`remote/worker.py`）在**补差跑完、PPO 之前** `close()`
+    （不让 94 个常驻 bun 陪 PPO 吃内存）；`ctx=None`（老调用）⇒ 本轮自建自收，逐字今天。
+    池**建不起来**时（`make_pool` 返回 `None` / `start()` 0 就绪）**不**缓存进 ctx ⇒ 下一批再试（冷启动失败多为瞬态；
+    而确定性拒绝下的重试也只是常数级判断）——这是有意的，不是漏缓存。
+  - ④ **取消搬回**（用户第 1 条，§3.5）：产出就住在节点本地盘的轮 scratch 目录里，`shard_dirs` 报真实路径；
+    节点自己的 PPO 装载根改由**产出方显式给出**（`iter_info["shards_root"]` → `train_core.ppo_shards_root`，
+    评审 P0-1——漏了就是「读 0 局语料静默训空」）；回收从「每批 `finally`」移到**全 job 收尾、PPO 之后**
+    （`RoundContext.cleanup()`），并新增**轮初清场**（否则上一轮/上次尝试的残留会被轮末对账当成实产）；
+    容量判据改成**整轮**需求（`_round_need_bytes` = 单批局数 × (1 + `volume.topup.max_batches`) × per_game，
+    评审 P0-3）；批的产出根**镜像**进轮 scratch 目录（`scratch.batch_layout`/`batch_rel`，越界响亮）——
+    否则补差批的产出没有共同祖先可被 PPO 的**单一**读取根扫到。
+    ⚠ **判据前移**（代价写在这里）：F7「搬不回去的局不算结算」随搬回一起消失，结算判据简化为
+    「跑局 future 正常返回」；「结了算却没产出」的发现从**搬回那一刻**退到**轮末逐位对账**
+    （`verify_shards`：实产集 ≠ 声明集 ⇒ 响亮 `ProtocolError`）。也就是说失败的**发现变晚**，但它们
+    仍然是响亮的（不静默少一局）。
+  - ⑤ **§3.4 降级为小形状**（2026-10-11 第四刀，plan §3.4 末段）：原计划的
+    `worker/iter_verify.verify_round`（「扫全轮再按声明集分组」）在 §3.5 把批产出根**镜像进轮目录**
+    之后已无必要——**批根本身就是分组单位**（每批各验各的 = 按批分组，且失败当场）。真正的重复读
+    只剩「同一批 manifest 为 `perGame` 读一遍、又为补差记账扫一遍盘」⇒ 改成 `_batch_totals` 优先吃
+    批次报告里的逐局画像（字段逐字同名，等价性用例钉住），缺画像回落磁盘扫。轮级报告装配契约
+    （`shards`/`perGame`/`perGameSecs`/`elapsedSec` 由调用方一次装配、同键同型）写进 `remote/worker.py`。
+    **没做** `NN_ROUND_SCAN=0`：没有「轮级一次扫盘」可关。
+- **备选与否决**：① 「探针整段不跑，直接原地跑」——否（本地盘换根是 §34 的既有收益，回退只在**真超界**时发生）；
+  ② 「复用 `SCAN_CEILING_SEC`」——否（两个语义共用一个数 ⇒ 必有一头错）；
+  ③ 「缺口解算但设下限（如 ≥ width/2）」——否（下限是另一个要标定的魔数；「批 = 机器宽度」不需要）；
+  ④ 「cap 不截断」（plan v3 原文）——否（课程字段是操作员的**硬省**，且改造前就有活判据钉着
+  `games_by_stage == {2000: 10}`：保留活判据比改写它划算）；
+  ⑤ 「宽度猜一个（缺省 = 首批 argv 条数就已足够）」——否（批大小直接决定墙钟；拿不到就去**不补差**）；
+  ⑥ 「ctx 里连批级布局一起缓存（plan v4 的字段草图）」——否（那会让第二节批把产出写进**第一批的** exec 根，
+  与「批目录隔离 / `--out` 续号 / 批级清理」相冲）；  ⑥b「把池生命周期交给 `remote/worker.py` 单独管理
+  （不经 ctx）」——否（池的建与用都在 `run_iter_rollout` 内，多一条旁路就要同步一份 ts 树/宽度，
+  ctx 是同一个信息的单一来源）；
+  ⑦「取消搬回但保留『每批一个独立 scratch 作业目录』」——否（PPO 只收**一个**读取根，而各批目录
+  彼此不是祖孙关系，`<根>` 又是整个本地盘 ⇒ 必须镜像进一个轮目录）；
+  ⑦b「产出不回 job 目录但让 PPO 收一串根（`shards_roots: list`）」——否（`discover_shards` 的调用面、
+  D14 与合并账都得跟着改成复数；镜像一个目录只需三行，且与回退档形状同构）。
+  ⚠ 搬回原语（`scratch.drain_tree` / `InstallGate` / `drop_drain_stage`）**保留**（有全套用例）但
+  **已无生产用点**（模块头已标注）——删它要另开一刀（连带清用例），本轮只降为“备用腿”。
+- **后果**：§3.1/§3.2/§3.3/§3.4/§3.5 已落地（探针有界 + 轮级 ctx + 批=机器宽度 + 扫盘去重/装配契约
+  + 取消搬回/PPO 读取根/整轮容量）；§3.6–§3.10（回传失败备份 / 池宽 / 探针缓存 / 读数五分项 / LAN 队列）
+  仍在队列。§3.5 那个**已定案的前置已实现**：`remote/train_core.py` 的装载根不再是写死的 `job_dir`，
+  而是产出方给的 `iter_info["shards_root"]`（纯函数 `ppo_shards_root`，空串/缺键/`None` 逐字回落）——
+  「取消搬回但忘记改读取根 ⇒ job 内 PPO 读 0 局语料」这条已闭。
+  ⚠ 满铺器改的是**每轮样本量/更新构成**（非语料身份/课程/奖励）⇒ 属训练侧；按 §15.5 口径当**新实验**处理：
+  新 `--out`/`--traj`，**不跨改动续跑**。
+—— 全文（现场读数 / 根因链 / 判据迁移表 / DoD）→ `plan/rollout-topup-fastpath.plan.md` §1–§4 · §10 ·
+`docs/nn/runtime-opt.md` §35 · 评审 → `plan/rollout-topup-fastpath.review-bf.md`

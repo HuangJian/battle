@@ -16,14 +16,18 @@
   env 给了但不可写 ⇒ **响亮失败**（不静默回落：操作员以为在测 scratch 是最坏的形状）。
 * `ScratchLayout` —— `<根>/nn-rollout-<作业名>-<hash8(作业根)>/`，**按作业标识命名**（评审 F5：
   同机多会话不互删），内部 `r/`（rollout 的 job 相对镜像）与 `eval/`（云机评估的 game 目录）
-  互不相干、各清各的。TS 家**不在**作业目录里：它按内容寻址（`ts_home()`），两条腿/跨轮共用一份。
+  互不相干、各清各的。TS 家**不在**作业目录里：它按 TS 目录名寻址（`ts_home()`），两条腿/跨轮共用一份。
 * `install_tree` / `install_file` —— **临时目录 + `os.replace`** 的原子安装（评审 R9：两腿并发拷
   同一个 sha 不会看见半截树）。
 * `InstallGate` / `drain_tree` —— 搬回：copytree → 逐文件对账 → **闸内改名**。暂存目录放在
+  ⚠ **已无生产调用点**（2026-10-11 `plan/rollout-topup-fastpath` §3.5 取消搬回后，产出入住 scratch、
   目标 job 目录**之外**（评审 F1：`scan_shard_dirs` 是 `job_dir.rglob`，半截拷贝住在 job 目录里
   会被当成产出，而 `data_fp` 只读 manifest 三项字段、拦不住）；改名前的票据复核与 `os.replace`
   **在同一把锁下**（评审 F4：`call_bounded` 只弃线程不杀，被放弃的 copier 不许把旧数据装进去）；
   确定性失败（无空间/只读/校验不过）一律 `ProtocolError` 响亮上抛（评审 F3：不许进「无限重投」）。
+  ⚠ **已无生产调用点**（2026-10-11，`plan/rollout-topup-fastpath` §3.5 取消搬回：产出入住 scratch、
+  节点自己的 PPO 改读 `shards_root`）——保留 = 一套仍有完整用例的现成原语（将来若要让某条腿
+  把产出搬回 job 目录可直接用）；**别把它读回成 rollout 还在搬**。
 
 依赖：stdlib + `common.platform_utils.rmtree_best_effort` + `common.protocol.ProtocolError`
 （叶子层；`worker/` 与 `remote/` 都能 import —— 这也是它**不住** `remote/job_fs.py` 的原因：
@@ -50,7 +54,7 @@ from common.protocol import ProtocolError
 SCRATCH_ENV = "NN_ROLLOUT_SCRATCH"
 #: 作业 scratch 目录前缀（人眼辨识用；清理只动**自己那一份**，名字里带作业 hash）。
 SCRATCH_DIR_PREFIX = "nn-rollout-"
-#: TS 运行时树的家前缀（**内容寻址**、跨轮/两腿共用、永不清理）。
+#: TS 运行时树的家前缀（按 **TS 目录名**寻址、跨轮/两腿共用、永不清理——见 `ts_home`）。
 SCRATCH_TS_PREFIX = "nn-rollout-ts-"
 #: 容量余量比值（**只乘一次**：`need` 是原始估算，判据在 `resolve_scratch_root` 里乘）。
 SCRATCH_MIN_FREE_RATIO = 1.5
@@ -134,12 +138,51 @@ def scratch_job_dir(root: Path, job_root: Path) -> Path:
 
 
 def ts_home(root: Path, name: str) -> Path:
-    """TS 运行时树在 scratch 里的家（`<根>/nn-rollout-ts-<sha>`；内容寻址 ⇒ 两腿共用）。"""
+    """TS 运行时树在 scratch 里的家：`<根>/nn-rollout-ts-<TS 目录名>`（按**名**寻址）。
+
+    ⚠ 不是内容寻址（前缀注释与本文旧版曾写「`<sha>`」——2026-10-11 修正，见
+    `plan/rollout-topup-fastpath.review-bf.md` P2-1）：键是 `ts_dir.name`
+    （调用方 `iter_rollout` 传 `tsd.name`），它在一轮/两腿内稳定 ⇒ 「跨批/跨轮命中」成立；
+    但**两个不同 commit 若同名**会指到同一个家 —— 那份正确性由 `install_tree` 的原子安装
+    负责（内容对不上就装），不是本函数给的。
+    """
     return Path(root) / f"{SCRATCH_TS_PREFIX}{_slug(name or 'ts')}"
 
 
 def layout_for(root: Path, job_root: Path) -> ScratchLayout:
     return ScratchLayout(root=Path(root), job=scratch_job_dir(Path(root), Path(job_root)))
+
+
+def batch_rel(round_job_dir: Path, batch_job_dir: Path) -> str:
+    """批目录相对**轮 job 目录**的位置（`""` = 本批就是轮本身；否则如 `topup1`）。
+
+    不在轮目录之下 ⇒ **响亮**（`ProtocolError`）：这不是能就近补救的事 —— 批的产出根
+    必须落在轮产出根的下面，否则 PPO 的单一读取根（`remote/train_core.py` 的 `shards_root`）
+    扫不到它 ⇒ 静默少训一局的语料。
+    """
+    try:
+        rel = Path(batch_job_dir).resolve().relative_to(Path(round_job_dir).resolve())
+    except ValueError as e:
+        raise ProtocolError(
+            f"rollout 批目录 {batch_job_dir} 不在轮 job 目录 {round_job_dir} 之下"
+            "——取消搬回后产出就住在 scratch，批必须嵌在轮里（否则 PPO 读取根扫不到）"
+        ) from e
+    return "" if str(rel) == "." else str(rel)
+
+
+def batch_layout(round_layout: ScratchLayout, rel: str | Path = "") -> ScratchLayout:
+    """轮级布局 → **批级**布局：把批在真 job 目录树里的相对位置**镜像**进轮 scratch 目录。
+
+    为什么（`plan/rollout-topup-fastpath` §3.5）：取消搬回后产出留在 scratch，而节点自己的
+    PPO 要**一个**读取根（`shards_root = 轮 scratch 目录`）。补差批各有各的子目录（`topup{k}/`）
+    —— 若每批各占 `<根>/nn-rollout-*` 一个目录，就没有共同的祖先能把它们包住（`<根>` 是整个
+    本地盘，递归扫会扫到 TS 家与别的会话）。镜像后：**轮产出根 = 轮 scratch 目录，批产出根 =
+    它下面的镜像子目录** —— 与回退档（产出住在真 job 目录树里）**形状同构**，PPO 递归扫一次全拿。
+    """
+    rel_p = Path(rel)
+    if str(rel_p) in ("", "."):
+        return round_layout
+    return ScratchLayout(root=round_layout.root, job=round_layout.job / rel_p)
 
 
 def need_bytes_for(games: int, per_game: float = SCRATCH_EST_DEFAULT_BYTES) -> float:

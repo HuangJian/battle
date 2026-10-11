@@ -42,8 +42,8 @@ from worker.volume_alloc import (
     VOLUME_ALLOC_RULE,
     default_game_caps,
     shortfall_by_stage,
+    spread_games_by_stage,
     stage_totals,
-    topup_games_by_stage,
     validate_runtime_volume,
     wasted_samples,
 )
@@ -83,6 +83,23 @@ def _out_base(argv: list[list[str]], fallback: int) -> int:
         if txt.startswith("w") and txt[1:].isdigit():
             top = max(top, int(txt[1:]))
     return max(int(fallback), top + 1)
+
+
+def _resolve_width(explicit: int | None, spec: dict) -> int:
+    """补差批的目标局数（机器宽度）：调用方给的（首批**实际用过**的 workers）优先。
+
+    回退链 = `explicit` → `spec["workers"]`（>0）→ 首批 `argv` 条数；都拿不到 ⇒ `0`
+    （调用方据此**不补差**）——宁可不补，也不猜宽度：批大小直接决定批次级固定开销摊在几局上
+    （`plan/rollout-topup-fastpath` §1.7）。
+    """
+    for cand in (explicit, spec.get("workers")):
+        try:
+            n = int(cand or 0)
+        except (TypeError, ValueError):
+            n = 0
+        if n > 0:
+            return n
+    return len(list(spec.get("argv") or []))
 
 
 def next_batch_spec(
@@ -167,12 +184,22 @@ def topup_rollout(
     ts_dir: str | Path | None = None,
     log: Callable[[str], None] = lambda msg: print(f"[topup] {msg}", flush=True),
     run_fn: Callable[..., dict] | None = None,
+    width: int | None = None,
+    ctx: Any = None,
 ) -> dict | None:
     """按 spec 里的 `volume` 块补差；返回 `{shard_dirs, reports, volume}` 或 **None**（无需补差）。
 
     `shard_dirs` = **首批**的产出目录（调用方已经拿到）——本函数只从这里读账本，
     自己新产的批落在 `job_dir/topup{k}/` 并向返回值里追加，绝不重扫首批目录。
     `run_fn` 注入时为单测用（默认 = `worker.iter_rollout.run_iter_rollout`）。
+
+    `width` = 补差批的**目标局数**（= 机器 worker 宽度，plan/rollout-topup-fastpath §3.3）：
+    调用方（`remote/worker.py`）传**首批实际用的** `iter_info["workers"]`（已夹过核数/上限）；
+    取不到时的回退链 = `spec["workers"]`（>0）→ 首批 `argv` 条数——**都拿不到就不补差**
+    （宁可不补，也不猜一个宽度：批大小直接决定墙钟）。
+
+    `ctx` = 首批的 `iter_rollout.RoundContext`（plan §3.2）：补差批复用轮级资源（落点探针结论 /
+    TS 树家 / **长驻池**）——传 `None` 时补差批就各自重建一遍壳子（逐字今天，慢但不坏）。
     """
     raw = spec.get("volume")
     if not isinstance(raw, dict):
@@ -188,8 +215,25 @@ def topup_rollout(
     from worker.iter_rollout import collect_shard_manifests, run_iter_rollout
 
     def _totals(dirs: list[str]) -> tuple[dict[int, int], dict[int, int]]:
-        """目录（字符串，来自轮结果）→ 逐关 `(collected, games)`（**产出集**口径）。"""
+        """目录（字符串，来自轮结果）→ 逐关 `(collected, games)`（**产出集**口径）。
+
+        磁盘回退路径：只在首批基线（调用方手里只有 `shard_dirs`）与「批次报告缺画像」时用。
+        """
         return stage_totals(collect_shard_manifests([Path(d) for d in dirs]))
+
+    def _batch_totals(info: dict, dirs: list[str]) -> tuple[dict[int, int], dict[int, int]]:
+        """**本批**的逐关 `(collected, games)`：优先用批次报告里的逐局画像（plan §3.4）。
+
+        为什么（§3.4 落地为这个小形状）：这批 shard 的 manifest 刚被 `run_iter_rollout` 读过一遍
+        （为 `perGame`）——再扫一次盘读同一批文件就是**同一份数据算两遍**（一轮 300+ 个小 JSON）。
+        画像行的字段与磁盘单局 manifest **逐字同名**（`stage`/`nSamples`，见 `reports._PER_GAME_FIELDS`）
+        ⇒ `stage_totals` 吃它口径不变（`tests/worker/test_iter_topup.py` 有等价性用例钉着）。
+        缺画像（注入的 `run_fn` 替身 / 老信息形状 / 空产出）⇒ 回落磁盘扫（逐字今天）。
+        """
+        rows = (info.get("report") or {}).get("perGame")
+        if isinstance(rows, list) and rows:
+            return stage_totals(rows)
+        return _totals(dirs)
 
     run = run_fn or run_iter_rollout
     stages = [int(s) for s in vol["stages"]]
@@ -200,21 +244,24 @@ def topup_rollout(
     )
     rotate_seed = int(vol["rotate_seed"])
     it = int(vol["it"])
+    batch_width = _resolve_width(width, spec)
+    if batch_width <= 0:
+        log(f"WARN it{it} 补差批拿不到机器宽度（workers/argv 都为空）——本轮不补差（不猜宽度）")
+        return None
     collected, games = _totals(shard_dirs)
     out_base = _out_base(list(spec["argv"]), len(spec["argv"]))
     new_dirs: list[str] = []
     reports: list[dict] = []
     batches = 0
     while batches < max_batches:
-        plan_g = topup_games_by_stage(
+        # 满铺：本批恰好 `batch_width` 局（不再解缺口方程 —— 见 volume_alloc.spread_games_by_stage）
+        plan_g = spread_games_by_stage(
             stages=stages,
             collected=collected,
             games_done=games,
             target_transitions=target,
-            ests=ests,
             game_caps=caps,
-            batches_left=max_batches - batches,
-            last_lo_factor=float(topup["last_lo_factor"]),
+            width=batch_width,
         )
         if not plan_g:
             break
@@ -241,12 +288,12 @@ def topup_rollout(
             )
         shutil.copyfile(src_w, sub / INIT_WEIGHTS_NAME)
         log(
-            f"it{it} 补差批 {batches}/{max_batches}: {len(spec2['argv'])} 局 "
-            f"（games={plan_g} → {sub.name}/，est_s={ests} cap={caps}）"
+            f"it{it} 补差批 {batches}/{max_batches}: {len(spec2['argv'])} 局"
+            f"（满铺 width={batch_width} → {sub.name}/，games={plan_g}，cap={caps}，est_s={ests}）"
         )
-        info = run(sub, spec2, ts_dir=ts_dir, log=log)
+        info = run(sub, spec2, ts_dir=ts_dir, log=log, ctx=ctx)
         dirs_b = [str(d) for d in info["shard_dirs"]]
-        added, games_b = _totals(dirs_b)
+        added, games_b = _batch_totals(info, dirs_b)
         for s, v in added.items():
             collected[s] = collected.get(s, 0) + int(v)
         for s, v in games_b.items():

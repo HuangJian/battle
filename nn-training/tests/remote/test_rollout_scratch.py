@@ -15,6 +15,8 @@
   * **R1**：`_clean_attempt` 两个根都扫、两个根之外一个不删；回退档的调用形状不变。
   * **eval 腿**（P0-5）：TS 树/权重/每局 `game_dir` 换到本地盘，而**逐局账本不动**（F2）。
   * **prune**（F1）：搬回暂存根不被 `prune_job_dirs` 算成一个 job 目录。
+  * **probe 上界**（`plan/rollout-topup-fastpath.plan.md` §3.1）：探针超 `PROBE_CEILING_SEC` ⇒
+    回退档 + 响亮一行 + `probe_probe` 读数，**整轮不挂住**；上界内 ⇒ 照旧换根。
 
 真 bun + 真 exporter 的逐位对拍在 `e2e/`（本文件不依赖 bun；也不写 8MB 探针）。
 """
@@ -25,6 +27,7 @@ import errno
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
@@ -234,6 +237,40 @@ def test_generic_tests_pin_the_fallback_path(tmp_path: Path) -> None:
     job = tmp_path / "job"
     job.mkdir()
     assert scratch.resolve_scratch_root(job, need_bytes=1, probe=boom) is None
+
+
+def test_round_capacity_budget_covers_the_topup_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """评审 P0-3：容量门按**整轮**算（首批 + 最多补差批），不是只按单批。
+
+    为什么（§3.5 取消搬回后）：产出留在本地盘 ⇒ 轮内峰值 = 各批之和。只按单批算就选不出够大的盘，
+    于是在轮中途 ENOSPC（写盘失败 → 逐局重试 → 机器级停滞重投），而缺盘本该在**进这一轮之前**
+    就回退档。本用例盯的就是传给落点闸的那个数。
+    """
+    _watchdog(monkeypatch)
+    seen: dict[str, float] = {}
+
+    def fake_open(job_root: object, *, need_bytes: float, log: object = None) -> None:
+        seen["need"] = float(need_bytes)
+        return None  # 回退档（本用例只关心“要了多少容量”）
+
+    monkeypatch.setattr(scratch, "open_scratch", fake_open)
+    # 每个阶段一个干净的 job 目录：回退档的产出就住在那儿，复用会撞上上一次的 shard 集。
+    (tmp_path / "b").mkdir(exist_ok=True)
+    (tmp_path / "c").mkdir(exist_ok=True)
+    run_iter_rollout(_job_dir(tmp_path), _stub_spec(tmp_path, [(0, 0), (1, 1)]), log=lambda _m: None)
+    assert seen["need"] == scratch.need_bytes_for(2), "没配 volume ⇒ 就是首批（与旧行为一致）"
+
+    spec = _stub_spec(tmp_path, [(0, 0), (1, 1)])
+    spec["volume"] = {"topup": {"max_batches": 3}}
+    run_iter_rollout(_job_dir(tmp_path / "b"), spec, log=lambda _m: None)
+    assert seen["need"] == scratch.need_bytes_for(2 * (1 + 3)), seen
+
+    bad = _stub_spec(tmp_path, [(0, 0)])
+    bad["volume"] = {"topup": {"max_batches": "nonsense"}}
+    run_iter_rollout(_job_dir(tmp_path / "c"), bad, log=lambda _m: None)
+    assert seen["need"] == scratch.need_bytes_for(1), "畸形字段 ⇒ 当成没配（不把整轮推去回退档）"
 
 
 def test_env_override_wins_even_with_no_candidates(
@@ -473,10 +510,16 @@ def test_staging_dir_is_invisible_to_the_shard_scan(tmp_path: Path) -> None:
 # ------------------------------------------------------------ rollout 腿（换根档）
 
 
-def test_rollout_reroots_to_local_scratch_and_drains_back(
+def test_rollout_reroots_and_keeps_the_produce_in_scratch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """换根档全链路：产出写在本地盘 → 结算一局搬回一局 → job 目录形状与今天逐字一致。"""
+    """换根档全链路（§3.5 取消搬回后）：产出**就住在**本地盘，PPO 读轮 scratch 根。
+
+    本用例取代旧的「搬回后 job 目录形状不变」（§3.5b 判据迁移表第 1 行）：搬回这个步骤本身没了，
+    取而代之的是三件可判的事——① 产出在 scratch 且**轮末不再被清**（反探针：重新加回清理 ⇒ 本条红）；
+    ② `job_dir` 下不再出现 `w{i}/` 产出副本（= 真没搬回）；③ `shards_root` = 轮 scratch 目录
+    （节点自己的 PPO 读它；评审 P0-1 的承重面）。
+    """
     _watchdog(monkeypatch)
     local = _local_root(tmp_path)
     _only_candidate(monkeypatch, local)
@@ -485,32 +528,31 @@ def test_rollout_reroots_to_local_scratch_and_drains_back(
     out = run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0), (1, 1)]), log=msgs.append)
     layout = scratch.layout_for(local, job)
 
-    # ① 搬回后的形状 = 今天的形状（`scan_shard_dirs` / `collect_reports` / `data_fp` 零改动）
-    assert sorted(p.name for p in scan_shard_dirs(job)) == ["rl_s0_seed0", "rl_s1_seed1"]
+    # ① 产出在 scratch（形状与出厂时逐字相同：`scan_shard_dirs` / `collect_reports` / `data_fp` 零改动）
+    assert sorted(p.name for p in scan_shard_dirs(layout.exec_dir)) == ["rl_s0_seed0", "rl_s1_seed1"]
     assert out["report"]["shards"] == 2
     for i, (st, sd) in enumerate([(0, 0), (1, 1)]):
-        assert (job / f"w{i}" / f"rl_s{st}_seed{sd}" / "manifest.json").exists()
+        assert (layout.exec_dir / f"w{i}" / f"rl_s{st}_seed{sd}" / "manifest.json").exists()
         # F9②：`rollout.log` 是诊断现场（`_first_rollout_log_tail` 靠它）⇒ 直接断言它在
-        assert (job / f"w{i}" / "rollout.log").exists()
+        assert (layout.exec_dir / f"w{i}" / "rollout.log").exists()
     # ② 换根真的生效了：桩把 `--weights` 打了出来，它必须在 scratch 里（= 镜像 + 再绝化）
-    tail = (job / "w0" / "rollout.log").read_text(encoding="utf-8")
+    tail = (layout.exec_dir / "w0" / "rollout.log").read_text(encoding="utf-8")
     assert str(layout.exec_dir) in tail, tail
-    # ③ 读数可见（P1-1）
+    # ③ 没搬回：真 job 目录下一个产出副本都没有（`--out` 从没落到那里）
+    assert scan_shard_dirs(job) == [], "§3.5：产出不许再往 job 目录搬"
+    assert not (job / "w0").exists()
+    # ④ 读数可见 + PPO 的装载根（P0-1）
     assert any("产出落点" in m and "本地盘" in m for m in msgs), msgs
-    assert any("搬回=2 局/失败 0 局" in m for m in msgs), msgs
-    # ④ 轮末清自己那一份 + 暂存根回收
-    if list(layout.exec_dir.iterdir()) and sandbox_delete_blocked(tmp_path):
-        pytest.skip(_SKIP_BLOCKED)
-    assert not list(layout.exec_dir.iterdir()), "轮末要把本地盘上的镜像清掉"
-    assert layout.ts_for(Path(str(layout.job)).name) is not None  # ts 家不受影响（内容寻址）
-    assert not scratch.drain_stage_root(job).exists(), "暂存根也要回收（否则会被 prune 当 job）"
-    assert list(local.glob(f"{scratch.SCRATCH_TS_PREFIX}*")), "TS 家不清（跨轮复用）"
+    assert out["shards_root"] == str(layout.job), out["shards_root"]
+    # ⑤ 轮末**不再清** scratch（清在这里 = 没得训练）；回收由调用方在 PPO 之后 `ctx.cleanup()`
+    assert list(layout.exec_dir.iterdir()), "产出必须留在本地盘上等 PPO 读"
+    assert list(local.glob(f"{scratch.SCRATCH_TS_PREFIX}*")), "TS 家不在轮目录里（跨轮复用）"
 
 
 def test_rollout_falls_back_byte_for_byte_when_no_candidate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F9：候选链全不过 ⇒ **逐字**走今天的行为（不搬、不 drain、不换根、不留暂存）。"""
+    """F9：候选链全不过 ⇒ **逐字**走今天的行为（不换根、产出住真 job 目录）。"""
     _watchdog(monkeypatch)
     monkeypatch.setattr(scratch, "SCRATCH_CANDIDATES", ())
     job = _job_dir(tmp_path)
@@ -519,40 +561,113 @@ def test_rollout_falls_back_byte_for_byte_when_no_candidate(
     assert out["report"]["shards"] == 1
     assert (job / "w0" / "rl_s0_seed0" / "manifest.json").exists()
     assert any("回退原地" in m for m in msgs), msgs
-    assert not any("搬回=" in m for m in msgs), "回退档没有搬回这一说"
+    # 回退档的装载根就是 job 目录（与改动前逐字相同）
+    assert out["shards_root"] == str(job), out["shards_root"]
     assert not scratch.drain_stage_root(job).exists()
     assert not list(tmp_path.glob(f"{scratch.SCRATCH_DIR_PREFIX}*")), "回退档不建 scratch"
 
 
-def test_rollout_drain_failure_is_not_counted_as_settled(
+def test_rollout_probe_over_the_ceiling_falls_back_without_hanging(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """F7：搬不回去的局**不算结算**（并入 stuck ⇒ 重投补它），且报一行搬回失败。"""
+    """探针超界 ⇒ 走回退档（不换根/不搬），**整轮不挂住**，并留一条 `probe_probe` 读数。
+
+    回归（2026-10-11，`plan/rollout-topup-fastpath.plan.md` §1.11 / 评审 P0-2）：`open_scratch`
+    整段是 rollout 热路径上**唯一没有上界**的一步——`probe_write_speed_mbps` 只有 `except OSError`，
+    而它跑在 `install_tree`/`mirror_inputs` 的 `call_bounded` **之外**。网络盘抖到 0.2 MB/s ⇒
+    一次 8MB 写 + fsync 就是几十秒，而这笔等待**每批付一次**（现场：1 局的补差批 48.9s）。
+    """
+    _watchdog(monkeypatch)
+    local = _local_root(tmp_path)
+    monkeypatch.setattr(game_watch, "PROBE_CEILING_SEC", 0.3)
+    monkeypatch.setattr(scratch, "SCRATCH_CANDIDATES", (str(local),))
+
+    def slow_probe(p: Path, **kw: object) -> float:
+        # 被模拟对象（探针）自己的耗时：8MB 写 + fsync 在网络盘抖时就是几十秒；
+        # 假本地盘仍"快" ⇒ 速度闸本该放行。睡的不是「等对方先跑」。
+        time.sleep(2.0)  # sleep-ok: 夹具模拟的工作量：盘抖时的探针耗时（非同步手段）
+        return 4096.0 if "local-disk" in Path(p).parts else 64.0
+
+    monkeypatch.setattr(scratch, "probe_write_speed_mbps", slow_probe)
+    job = _job_dir(tmp_path)
+    msgs: list[str] = []
+    t0 = time.time()
+    out = run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0)]), log=msgs.append)
+    elapsed = time.time() - t0
+
+    # 判据就是被测的那条上界本身：超界必须在上界内返回；0.3s×5 只留夹具开销，紧是设计
+    # ——未包上界时实测 4.09s，正是它要抓的那一类回归。
+    assert elapsed < 1.5, f"探针超界必须在上界内返回（实测 {elapsed:.2f}s，上界 0.3s）"  # timing-ok: 契约上界（=被测的 0.3s 上界×5）
+    assert out["report"]["shards"] == 1
+    # 回退档：产出照旧落在 job 目录（逐字今天的行为：不换根/不搬/drain）
+    assert (job / "w0" / "rl_s0_seed0" / "manifest.json").exists()
+    # 行为判据（不看措辞）：换根档会在候选盘上留 `nn-rollout-*`（TS 家 + 作业私有目录）
+    assert not list(local.glob(f"{scratch.SCRATCH_DIR_PREFIX}*")), "超界必须逐字走回退档（不换根）"
+    assert not scratch.drain_stage_root(job).exists()
+    # 响亮 + 可查的读数（同一条轮报行）：这行**就是**操作员接口本身，没有结构化出口
+    #（plan v4 §3.9 的 `probe_probe`；口径 A 抬一格的账见 test_source_text_assert_budget.py）。
+    assert any("探针超界" in m and "probe_probe" in m and "超界回退" in m for m in msgs), msgs
+
+
+def test_rollout_probe_within_the_ceiling_keeps_the_scratch_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """上界只在**真超**时才降档：慢而能返回（假探针 10ms/次）⇒ 照旧换根，读数记下探测耗时。
+
+    这是「上界不是一键关掉 scratch」的守卫（合上一条读：过界 ⇒ 回退，界内 ⇒ 照旧）。
+    """
+    _watchdog(monkeypatch)
+    local = _local_root(tmp_path)
+    monkeypatch.setattr(scratch, "SCRATCH_CANDIDATES", (str(local),))
+
+    def slow_but_ok(p: Path, **kw: object) -> float:
+        # 探针的非零耗时：证明「界内也真的探过」，不是跳过探针。
+        time.sleep(0.01)  # sleep-ok: 夹具模拟的工作量：探针的非零耗时
+        return 4096.0 if "local-disk" in Path(p).parts else 64.0
+
+    monkeypatch.setattr(scratch, "probe_write_speed_mbps", slow_but_ok)
+    job = _job_dir(tmp_path)
+    msgs: list[str] = []
+    out = run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0)]), log=msgs.append)
+
+    # 行为判据：换根真的发生了（候选盘上有 scratch 家），且产出落在本地盘（§3.5：不搬回）
+    assert list(local.glob(f"{scratch.SCRATCH_DIR_PREFIX}*")), "界内 ⇒ 照旧换根（探针没被一键关掉）"
+    layout = scratch.layout_for(local, job)
+    assert (layout.exec_dir / "w0" / "rl_s0_seed0" / "manifest.json").exists()
+    assert out["shards_root"] == str(layout.job)
+
+
+def test_settlement_is_future_return_and_missing_produce_is_loud(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """§3.5b 判据迁移表第 3 行：F7「搬不回去的局不算结算」随搬回一起消失。
+
+    取代它的是两件可判的事：
+
+      ① 结算判据 = **跑局 future 正常返回**（进度行跑到 N/N）；
+      ② 「结了算却没产出」不再能静默溜过 —— 轮末逐位对账（`verify_shards`）响亮拒收。
+     ⚠ 这是一次**判据前移**（发现从「搬回那一刻」退到「轮末」）——代价已记进 DECISIONS。
+    """
     _watchdog(monkeypatch)
     local = _local_root(tmp_path)
     _only_candidate(monkeypatch, local)
     job = _job_dir(tmp_path)
-    mark = tmp_path / "runs.txt"
-    real_drain = scratch.drain_tree
-    calls = {"n": 0}
-
-    def flaky(
-        src: Path, dst: Path, *, ticket: scratch.InstallTicket | None = None, log: Any = None
-    ) -> bool:
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return False  # 第一次搬回失败（票被作废的形状）
-        return bool(real_drain(src, dst, ticket=ticket, log=log))
-
-    monkeypatch.setattr(scratch, "drain_tree", flaky)
     msgs: list[str] = []
-    out = run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0)], mark=mark), log=msgs.append)
-    assert calls["n"] == 2
-    assert mark.read_text(encoding="utf-8").count("run") == 2, "这一局必须被重投（= 真重跑了一次）"
-    assert any("搬回失败" in m and "s0/d0" in m for m in msgs), msgs
-    assert any("整轮重投第 1 次" in m for m in msgs), msgs
-    assert any("搬回=1 局/失败 1 局" in m for m in msgs), msgs
-    assert out["report"]["shards"] == 1, "最终还是要有一局产出"
+    out = run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0), (1, 1)]), log=msgs.append)
+    assert any("2/2 games settled" in m for m in msgs), msgs
+    assert out["report"]["shards"] == 2
+
+    # ② 空局（rc=0 但什么都没写）：轮末响亮（而不是“已经结算了两局”就这么过去）
+    empty = tmp_path / "empty_exporter.py"
+    empty.write_text("print('nothing')\n", encoding="utf-8")
+    spec = _stub_spec(tmp_path, [(0, 0)])
+    spec["argv"] = [
+        [str(empty), "--out", "w0", "--stages", "0", "--seeds", "0", "--wver", "W" * 64,
+         "--weights", INIT_WEIGHTS_NAME]
+    ]
+    with pytest.raises(ProtocolError) as ei:
+        run_iter_rollout(job, spec, log=msgs.append)
+    assert "没有任何 shard" in str(ei.value), ei.value
 
 
 def test_clean_attempt_scans_both_roots_and_nothing_else(tmp_path: Path) -> None:

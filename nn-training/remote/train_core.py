@@ -128,6 +128,19 @@ def _resolved(
     )
 
 
+def ppo_shards_root(job_dir: str | Path, iter_info: dict | None) -> str:
+    """PPO 的**装载根**（`plan/rollout-topup-fastpath` §3.5 / 评审 P0-1）。
+
+    产出方（`worker.iter_rollout`）显式给出它：换根档下 rollout 的 shard 住在节点本地盘的
+    轮 scratch 目录里（**不再搬回** job 目录），与本轮所有批的产出同在一个轮目录下
+    （`topup{k}/` 镜像在里面）⇒ 递归扫一次就全拿。
+
+    回落 `job_dir` 的两个面：① 回退档（`shards_root` 就是 job 目录，逐字老行为）；
+    ② 老调用方/老 hub（`iter_info is None` 或没这个键）——不吃「空串键」当根。
+    """
+    return str((iter_info or {}).get("shards_root") or job_dir)
+
+
 def run_training_core(
     base_url: str,
     token: str,
@@ -523,7 +536,10 @@ def run_training_core(
     # ★ §4.2（2026-09-21）：grad 段（含读 shard / 分块）的崩溃归确定性失败。
     # 为什么连读 shard 一起包：那同样是「这份字节决定的」失败（缺字段/形状不符），
     # 而 OOM 那类真瞬态由 `job_body_error` 原样放回重领路径。
-    shards_root = str(job_dir)
+    # ★ 2026-10-11（plan/rollout-topup-fastpath §3.5 / 评审 P0-1）：装载根由**产出方**给出
+    # （`iter_info["shards_root"]`）。换根档下 shard 住在 scratch、不再搬回 job 目录 ⇒ 这里若
+    # 仍写 `str(job_dir)` 就会以 0 局语料开练（静默训空）。见 `ppo_shards_root`。
+    shards_root = ppo_shards_root(job_dir, iter_info)
     if on_ppo_start is not None:
         try:
             # 打点失败不致命：最坏后果是这份 job 的掉队阈值晚起算（多开一份备份）。

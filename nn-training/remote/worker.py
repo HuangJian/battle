@@ -402,7 +402,7 @@ from remote.worker_proc import (
 from remote.worker_proc import (
     supervise_worker as supervise_worker,
 )
-from worker.iter_rollout import resolve_bun, run_iter_rollout
+from worker.iter_rollout import RoundContext, resolve_bun, run_iter_rollout
 from worker.iter_topup import merge_iter_reports, topup_rollout
 
 # ------------------------------------------------------------------ PPO 执行
@@ -625,6 +625,7 @@ def run_job(
     # 是刚跑出来的（payload 里没有 shard），D14 必须看到它们；echo 轮则整个跳过 rollout
     # （回显冒烟不跑任何重计算，只验 payload/code/ts_code 三样传输）。
     iter_info: dict | None = None
+    rctx: RoundContext | None = None  # 轮级资源（kind=iter 非 echo 才有；PPO 之后由它回收 scratch）
     ts_code_bytes = 0
     ts_code_hit = False
     if str(manifest["kind"]) == "iter":
@@ -646,23 +647,42 @@ def run_job(
         if echo:
             log(f"job {jid}: kind=iter + echo——跳过 rollout（只验传输链）")
         else:
-            iter_info = run_iter_rollout(
-                job_dir, manifest["rollout"], ts_dir=_ts_dir, log=log
-            )
-            shard_dirs = list(iter_info["shard_dirs"])
-            # ---- 动态采集的**有界多批补差**（2026-10-07，plan/rollout-stage-balance §4.4）----
-            # 每批自己的 spec/argv/data_fp ⇒「实产 == 声明」照旧逐位（verify_shards 一个字不改）；
-            # 批子目录隔离（`topup1/`…）+ 全局 `--out` 续号 ⇒ 不覆盖、不重号。
-            # `manifest["rollout"].volume` 缺席 = 老行为（逐字节不变）——它只由节点侧的
-            # `plan.iter_spec` 从计划块合成（`kind=run`），hub 派发的 kind=iter 不带。
-            _extra = topup_rollout(
-                job_dir=job_dir,
-                spec=manifest["rollout"],
-                shard_dirs=shard_dirs,
-                ts_dir=_ts_dir,
-                log=log,
-            )
+            # 轮级资源（落点/TS 树/长驻池）在**首批**建、补差批复用（plan/rollout-topup-fastpath §3.2）：
+            # 池在 `finally` 里收（补差之后、PPO 之前）——不让 94 个常驻 bun 陪 PPO 吃内存。
+            # ⚠ **ctx 的所有权在这里** ⇒ 收池必须罩住**整段**（含首批自己抛的那些路径）：
+            #   rollout 失败（D14/verify/超界……）时若没人收，94 个常驻 bun 会一直挂着。
+            rctx = RoundContext()
+            try:
+                iter_info = run_iter_rollout(
+                    job_dir, manifest["rollout"], ts_dir=_ts_dir, log=log, ctx=rctx
+                )
+                shard_dirs = list(iter_info["shard_dirs"])
+                # ---- 动态采集的**有界多批补差**（2026-10-07，plan/rollout-stage-balance §4.4）----
+                # 每批自己的 spec/argv/data_fp ⇒「实产 == 声明」照旧逐位（verify_shards 一个字不改）；
+                # 批子目录隔离（`topup1/`…）+ 全局 `--out` 续号 ⇒ 不覆盖、不重号。
+                # `manifest["rollout"].volume` 缺席 = 老行为（逐字节不变）——它只由节点侧的
+                # `plan.iter_spec` 从计划块合成（`kind=run`），hub 派发的 kind=iter 不带。
+                _extra = topup_rollout(
+                    job_dir=job_dir,
+                    spec=manifest["rollout"],
+                    shard_dirs=shard_dirs,
+                    ts_dir=_ts_dir,
+                    log=log,
+                    # 补差批按**首批实际用过的**宽度铺满（plan/rollout-topup-fastpath §3.3）：
+                    # 缺口方程会把批越补越小，而批次级固定开销与批内局数无关。
+                    width=int(iter_info.get("workers") or 0),
+                    # 复用首批的轮级资源（探针结论 / TS 树家 / 长驻池）
+                    ctx=rctx,
+                )
+            finally:
+                rctx.close()  # 池：补差跑完就收（PPO 之前）；失败路径也收
             if _extra is not None:
+                # ★ 轮级报告装配（plan/rollout-topup-fastpath §3.4 写死的契约）：这四个**由收尾步骤产生**
+                # 的键（`shards` / `perGame` / `perGameSecs` / `elapsedSec`）由**调用方**在这里一次装配，
+                # 与逐批报告**同键同型**。它们有仓库外读方：`remote/artifacts.py` 读 `perGame`
+                # （控制台「耗时/击杀/残血/道具」四列的数据源），`merge_iter_reports` 显式相加这四个键。
+                # （`clean_sec` / `搬回` 两个键已核无 TS 读方（`dashboard/src/**` 无命中）⇒ 前者从未
+                #   落库、后者随 §3.5 取消搬回删除。）
                 shard_dirs = [*shard_dirs, *list(_extra["shard_dirs"])]
                 iter_info["shard_dirs"] = list(shard_dirs)
                 iter_info["report"] = merge_iter_reports(
@@ -747,35 +767,42 @@ def run_job(
     # ---- 训练核（2026-09-24）：从算子到产物整段在 `remote/train_core.py`（L4）----
     # 本模块只剩「作业壳」：网络 / 校验 / 分叉 / 上报。核不认识 hub 的作业面，也不 import
     # 本模块（守卫钉住）；它读的模块全局都是**它自己命名空间**的（seam-free，见那边头部）。
-    result, course = run_training_core(
-        base_url,
-        token,
-        jid=jid,
-        job_dir=job_dir,
-        work_dir=work_dir,
-        manifest=manifest,
-        iter_info=iter_info,
-        blob_root=blob_root,
-        payload_bytes=len(raw),
-        payload_dl_sec=payload_dl_sec,
-        unpack_sec=unpack_sec,
-        ts_code_bytes=ts_code_bytes,
-        ts_code_hit=ts_code_hit,
-        device=device,
-        torch_threads=torch_threads,
-        preloaded=preloaded,
-        # opt-blob-diet：五源解析在**壳**里做完（必须早于 rollout），训练核只消费结果。
-        init_w=init_w,
-        weights_src=weights_src,
-        weights_wire_bytes=weights_wire_bytes,
-        blob_hits=blob_hits,
-        blob_miss_bytes=blob_miss_bytes,
-        prep=prep_b,
-        t_prep=t_prep,
-        should_cancel=should_cancel,
-        on_ppo_start=on_ppo_start,
-        log=log,
-    )
+    try:
+        result, course = run_training_core(
+            base_url,
+            token,
+            jid=jid,
+            job_dir=job_dir,
+            work_dir=work_dir,
+            manifest=manifest,
+            iter_info=iter_info,
+            blob_root=blob_root,
+            payload_bytes=len(raw),
+            payload_dl_sec=payload_dl_sec,
+            unpack_sec=unpack_sec,
+            ts_code_bytes=ts_code_bytes,
+            ts_code_hit=ts_code_hit,
+            device=device,
+            torch_threads=torch_threads,
+            preloaded=preloaded,
+            # opt-blob-diet：五源解析在**壳**里做完（必须早于 rollout），训练核只消费结果。
+            init_w=init_w,
+            weights_src=weights_src,
+            weights_wire_bytes=weights_wire_bytes,
+            blob_hits=blob_hits,
+            blob_miss_bytes=blob_miss_bytes,
+            prep=prep_b,
+            t_prep=t_prep,
+            should_cancel=should_cancel,
+            on_ppo_start=on_ppo_start,
+            log=log,
+        )
+    finally:
+        # ★ 2026-10-11（§3.5）：产出不搬回 ⇒ 本地盘回收从「每批 finally」移到**全 job 收尾、PPO 之后**
+        #（PPO 读的就是这份产出）。清本轮 scratch 目录（ts 家不在里面、永不清）；失败也尽力清、
+        # 幂等、不抛（`cleanup` 自带墙钟上界，清不动只 WARN）。
+        if rctx is not None:
+            rctx.cleanup(log=log)
     validate_result(result, manifest, commit_echo_must_match=False)  # 自查
     _persist_result(work_dir, jid, result)
     return result

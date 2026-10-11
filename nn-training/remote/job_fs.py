@@ -23,7 +23,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
 import tarfile
 from pathlib import Path
 from typing import Any
@@ -32,13 +34,16 @@ from common.fs import extract_tar_bytes
 from common.proc import run_capture
 from common.protocol import ProtocolError, unpack_payload
 from common.scratch import DRAIN_STAGE_SUFFIX
+from common.wire_codec import pack_result_v2
 from remote.prefetch import PREFETCH_DIR_NAME
 
 __all__ = [
     "JOB_DIR_KEEP",
     "REPO_ROOT",
+    "RESULT_BACKUP_DIR",
     "_git_head",
     "_persist_result",
+    "backup_failed_result",
     "pack_opt_tar",
     "prune_job_dirs",
     "unpack_opt_tar",
@@ -61,6 +66,58 @@ def _persist_result(work_dir: Path, jid: str, result: dict) -> None:
     rpath = work_dir / jid / "_result.json"
     rpath.parent.mkdir(parents=True, exist_ok=True)
     rpath.write_text(json.dumps(result, ensure_ascii=False), encoding="utf-8")
+
+
+#: 回传失败备份的目录名（在 `<job_dir>/` 下）——`prune_job_dirs` 只看 `work_dir` 下的**job 目录**，
+#: 所以它在 job 目录内部，随 job 目录一起回收（不需要新的豁免/保留策略）。
+RESULT_BACKUP_DIR = "backup"
+
+
+def backup_failed_result(
+    work_dir: Path,
+    jid: str,
+    result: dict,
+    *,
+    it: int = 0,
+    log=lambda msg: None,
+) -> Path | None:
+    """回传失败时把**失败的那一份**复制到 `<job_dir>/backup/`（`plan/rollout-topup-fastpath` §3.6）。
+
+    为什么落的是**线上体**（`pack_result_v2` 的字节，与 POST 发出去的那份逐字节相同）：
+    恢复 = 原样重发（一个 POST，`Content-Type = WIRE_V2_CONTENT_TYPE`），不需要重跑 PPO、
+    也不需要任何翻译层。文件名带 `it`/`jid`/`sha256`（前 16 位）⇒ 不看内容就知道是谁的哪一轮、
+    字节变没变。原子落盘（临时名 + `os.replace`）⇒ 半个文件不会被误当完整备份。
+
+    三条纪律（§3.6）：① **绝不抛**（写不成只 WARN）——它是最后一米的保险，
+    不能反过来把收尾搞挂；② **不改 job 状态**（备份不是回传，hub 不知道它存在）；
+    ③ **不进任何门禁**（判据/DoD 不看它）。
+
+    ⚠ 已知边界：同一 job **被重领**时 `remote/download.py` 会清场重建 job 目录 ⇒ 这一份随之消失——
+    它是一个**恢复窗口**，不是永久档案（要跨重领留存得另立位置与自己的保留策略）。
+    """
+    dst: Path | None = None
+    tmp: Path | None = None
+    try:
+        body = pack_result_v2(result)
+        sha = hashlib.sha256(body).hexdigest()
+        d = Path(work_dir) / str(jid) / RESULT_BACKUP_DIR
+        d.mkdir(parents=True, exist_ok=True)
+        dst = d / f"it{int(it)}-{jid}-{sha[:16]}.result.v2"
+        tmp = dst.with_name(f"{dst.name}.tmp-{os.getpid()}")
+        tmp.write_bytes(body)
+        os.replace(tmp, dst)
+        tmp = None
+    except BaseException as e:  # 含沙箱删除守卫/ENOSPC：备份尽力而为，绝不外溢
+        log(f"WARN 结果备份没写成（{type(e).__name__}: {e}）——只丢备份，不改本 job 状态")
+        return None
+    finally:
+        if tmp is not None:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+    log(f"回传失败的结果已备份：{dst}")
+    return dst
 
 
 def prune_job_dirs(

@@ -3,8 +3,9 @@
 为什么存在：`target_transitions` 的达标线是**分关** quota（`ceil(target/关数)`），而云机腿
 过去按**全局** est 反解**每关同一个**局数（`volume_waves.initial_games`）⇒ 关间 `samples/局`
 差 1.75× 时，同一轮里既有浪费（长局关溢出被裁）又有缺口（短局关欠采）。本模块把「每关多少局」
-拆成两个纯函数：**首批按上界反解**（故意偏小 ⇒ 过采率低）、**补差按实测均值 + 有界多批**
-（缺口不可恢复、浪费可恢复 ⇒ 末批偏保守）。
+拆成三个纯函数：**首批按上界反解**（故意偏小 ⇒ 过采率低）、**补差按机器宽度铺满**
+（`spread_games_by_stage`：批次级固定开销与批内局数无关 ⇒ 批要按机器宽度走，不住缺口走，
+2026-10-11）、以及**缺口解算**的老口径（`topup_games_by_stage`：现在只剩「对账规格」身份）。
 
 标定（真机 `tmp/x21-psh-b` 142 轮 per-game，bootstrap 2×10⁴ 轮；配方见评审 §7）：
 
@@ -84,6 +85,81 @@ def alloc_games_by_stage(
     return out
 
 
+def spread_games_by_stage(
+    *,
+    stages: Sequence[int],
+    collected: Mapping[int, int],
+    games_done: Mapping[int, int],
+    target_transitions: int,
+    game_caps: Mapping[int, int],
+    width: int,
+) -> dict[int, int]:
+    """补差批的**满铺**配额：一批恰好 `width` 局，均分给「仍未达标且未触顶」的关。
+
+    为什么不再用缺口解算（`topup_games_by_stage`，2026-10-11 `plan/rollout-topup-fastpath`
+    §1.7 / 评审 P0-3）：补差批**每批都要付一遍批次级固定开销**（scratch 落点/探针、TS 树安装、
+    权重镜像、建池冷启动、轮末扫盘与清理），这些成本**与批内局数无关** ⇒ 批越小，固定开销占比
+    越接近 100%。缺口方程（`ceil(缺口/est)`）的设计目标是「不缺口」，副产品是**批必然小且越补越小**
+    ——现场形状：it34 补差1（18 局）3.35s，补差2（**1 局**）48.90s；it49 同形（3.00s → 52.49s）。
+    机器宽度（`width` = 首批**实际用过的** workers）已经摆在那里，不用它才是浪费。
+
+    语义（与 `topup_games_by_stage` 的差别是**故意的**）：
+
+    * eligible = `collected < quota` **且**未触 `game_cap`；空 ⇒ 返回 `{}`（本轮不再补差）；
+    * 否则把 `width` 局**轮转均分**给 eligible（顺序 = `stages` 给定序 ⇒ 确定性，不吃随机）——
+      轮转等价于大余数法（基数 `width // n`，前 `width % n` 个关各 +1），但能**顺手管住硬顶**；
+    * **`game_cap` 是硬顶**（与 v3 的「不截断」不同——评审后改成尊重课程字段）：每关拿到的不超过
+      它的 cap 余量，余下的局轮转给其它还有余量的 eligible 关；
+      ⇒ 批小于 `width` 的**唯一**情形 = 所有 eligible 关的 cap 余量加起来 < `width`
+      （即「别再烧了」真的生效时才缩短批，与「缺口小 ⇒ 批就小」是两回事）；
+    * `width <= len(eligible)` ⇒ 前 `width` 个 eligible 关各 1 局（退化档：机器比关数还窄）；
+    * **不吃 `est`**（不问「一局能产多少样本」，只问「机器能同时跑几局」）；
+    * 超采（相对 quota）是故意的（口径：「多余样本直接丢弃」），`wasted_samples` 因此会上升——
+      它是**软指标**（不进任何门禁）；硬顶则不越（上面那条）。
+
+    为什么不缺口仍成立：PPO 本就有**逐关样本量配额**（`per_stage_quota`，截断在 GAE 之前）⇒
+    多跑的局只烧墙钟，不改训练语义；而缺口由「eligible 非空就继续铺」+ `max_batches` 兜。
+    """
+    stage_list = [int(s) for s in stages]
+    if not stage_list:
+        raise ValueError("spread_games_by_stage 需要至少一个 stage")
+    if int(width) <= 0:
+        raise ValueError(f"spread_games_by_stage 需要 width ≥ 1，得到 {width!r}")
+    quota = target_per_stage(int(target_transitions), len(stage_list))
+    eligible: list[int] = []
+    for stage in stage_list:
+        if int(collected.get(stage, 0) or 0) >= quota:
+            continue
+        cap = int(game_caps.get(stage, 0) or 0)
+        if cap > 0 and int(games_done.get(stage, 0) or 0) >= cap:
+            continue
+        eligible.append(stage)
+    if not eligible:
+        return {}
+    n = int(width)
+    if n <= len(eligible):
+        return {s: 1 for s in eligible[:n]}
+    #: 逐关硬顶余量（cap ≤ 0 = **无顶**）。轮转发放：谁还有余量谁拿下一局 —— 与大余数法的分配
+    #: 逐关相同（对无限顶时），但硬顶触发时会自然落到其它关，而不是把这一批变小。
+    #: ⚠ 「无顶」的等价物取 `n`（本批局数），**不能**取 0：循环最多发 `n` 局 ⇒ `n` 就代表
+    #: 「发不完」；写成 0 会让无顶档（`game_caps={}`，例如 `explicit=0` 的调用方漏算 cap）
+    #: 整个满铺静默成空 —— 一个静默短采，正是本模块要防的那类。
+    slack: dict[int, int] = {}
+    for s in eligible:
+        cap = int(game_caps.get(s, 0) or 0)
+        slack[s] = n if cap <= 0 else max(0, cap - int(games_done.get(s, 0) or 0))
+    out: dict[int, int] = {s: 0 for s in eligible}
+    left, i = n, 0
+    while left > 0 and any(v > 0 for v in slack.values()):
+        s = eligible[i % len(eligible)]
+        if slack[s] > 0:
+            out[s] += 1
+            slack[s] -= 1
+            left -= 1
+        i += 1
+    return {s: v for s, v in out.items() if v > 0}
+
+
 def topup_games_by_stage(
     *,
     stages: Sequence[int],
@@ -96,6 +172,11 @@ def topup_games_by_stage(
     last_lo_factor: float = DEFAULT_LAST_BATCH_LO_FACTOR,
 ) -> dict[int, int]:
     """补差批：逐关 `max(0, ceil((quota − collected) / est))`，`game_cap` 截断。
+
+    ⚠ **无生产调用点（2026-10-11）**：`kind=iter` 的补差路径已改走 `spread_games_by_stage`
+    （机器宽度铺满，见其 docstring）；本函数唯一的调用点是它自己，保留是因为它是
+    「缺口解算」语义的**唯一可执行规格**（对账 `volume_waves.plan_topup` 的单 est 老口径）。
+    若将来 `volume_waves` 的口径并进本模块 ⇒ 同笔删（连同它在 `tests/worker/` 的用例）。
 
     * 已达标的关**不进结果**（`collected ≥ quota`）；
     * 触 `game_cap`（`games_done ≥ cap`）的关**不进结果**（调用方负责把「未达标 + 触顶」

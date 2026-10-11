@@ -27,13 +27,13 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 文档 | 覆盖 | 节数 |
 |---|---|---|
 | [`docs/nn/legacy.md`](nn/legacy.md) | **早期谱系归档**（2026-08-18 ~ 08-29）：v1/v2 student、P1.5 蒸馏、BC 热启动、无道具纪元、第一代 RL 流水线 —— 已被 goal-space 取代，只作史实与教训 | 22 |
-| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / **在飞活的备份副本**（§68） / **自主 worker 收工即停（§70）** / **补传腿忙等修复 + 独立进程（§69）** / **一拖一闸两次自锁（§71）** / **派发模型重构：课程无模式 + 接管 + BC 独占（§72）** / **claim 的进度锚以响应时刻为准（§73）** / **补传腿 `_append` 自锁死：重启重述重入不可重入锁（§74）** / **kind=iter 并发 `workers: 0` = 节点自定 + 课程侧 `workers` 死键（§76）** / **重启不重放已消费的 final：判据要与可判定的证据对齐（§77）** / **采样节点自动注册：hub 成为 `rl-config.json` 的第二写者（§78）** / **集群代码快照：`code.zip` / `ts_code.zip` 打包时机上移到会话启动 + 控制台包过期判据换锚 + 组件卡 sha 徽章 + 逃生开关（§79）** / **aistudio 传输硬化：预取自停 / 让路自停 / 持久缓存根 + 控制面连接池与 6s 预算 + 批量 blob（§80）** | 50 |
+| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / **在飞活的备份副本**（§68） / **自主 worker 收工即停（§70）** / **补传腿忙等修复 + 独立进程（§69）** / **一拖一闸两次自锁（§71）** / **派发模型重构：课程无模式 + 接管 + BC 独占（§72）** / **claim 的进度锚以响应时刻为准（§73）** / **补传腿 `_append` 自锁死：重启重述重入不可重入锁（§74）** / **kind=iter 并发 `workers: 0` = 节点自定 + 课程侧 `workers` 死键（§76）** / **重启不重放已消费的 final：判据要与可判定的证据对齐（§77）** / **采样节点自动注册：hub 成为 `rl-config.json` 的第二写者（§78）** / **集群代码快照：`code.zip` / `ts_code.zip` 打包时机上移到会话启动 + 控制台包过期判据换锚 + 组件卡 sha 徽章 + 逃生开关（§79）** / **aistudio 传输硬化：预取自停 / 让路自停 / 持久缓存根 + 控制面连接池与 6s 预算 + 批量 blob（§80）** / **回传失败时备份那一份线上体（§81）** | 81 |
 | [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart · **节点门的 bootId 一致性**（§26）· **分关采样平衡（§30）** · **决策周期 K 通道（§31）** | 26 |
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
 | [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** · **六包重组（刀 1–6）** · **门禁 fail-fast**（§63） · **测试不得碰在跑的控制台**（§64） · **测试不得写生产状态（门禁意图 / 循环控制 / EvalBoard / 权重归档）**（§65） · **it0 基线 eval「从未派出」缺口：收工自报 + 缺口三分 + 基线自带门**（§66） · **eval 腿任务缺课程血缘：兄弟课程评估局在节点 resultCache 互串**（§67） · **pytest 私有提交 642MB→159MB：BLAS 内线程封顶**（§68） · **scratch 换根档由速度探针决定：通用用例钉死回退档**（§69） · **锁重入守卫扩容：方法内/闭包锁 + 组合组（hub store 混入）+ 全仓审计**（§70） · **测试债清理：口径先于数字（`text_asserts` / 退役单点 / 三条护栏）**（§71） · **pytest 最慢用例第二轮：第三条 HTTP 缝 + 三处全仓扫描的口径内提速**（§72） · **metrics v11：热线族 2 列（idx74–75）+ 探针杀列 + 跨链 parity 判据改判**（§73） · **两条满载 flake 的根因：hub 备份腿 TOCTOU + instance_lock 写入窗口**（§74） · **锁收敛（四处→唯一原语）+ 派发器一拍一次自有状态快照**（§75） · **publish/serve 预算 flake 根因：`collision_rows` 把共享 basetemp 当兄弟面扫**（§76） | 43 |
 | [`docs/nn/test-contract-map.md`](nn/test-contract-map.md) | **测试 → 契约归属表**：两个可执行计数口径与其基线（A=1435 形态 / B=1091 生产源码面，2026-10-10 抬一格）· 已填契约（本次动过与 T1–T5 命中文件）· T2b 行为拒绝登记 · T4 本机恒 skip 登记 · 批次 2 工作清单 | 5 |
 | [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 / 课程管理页 / 指标表抗轮转抄录 / **回放导出按评估轮选（§32）** / **池历史大流按变化重建（§33）** / **空置内存真凶：logTail 整文件读（§34）** / **v2 词表与钮：接管是唯一真源（§35）** / **self 节点低盘告警：预警档与拒收地板是两件事（§36）** | 36 |
-| [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处）· **节点单实例互斥**（§29）· **一局的墙钟上界**（§32）· **长驻池真就绪 + 有界清理**（§33）· **热路径 IO 换节点本地盘（rollout/eval 共用一套 scratch）**（§34） | 33 |
+| [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处）· **节点单实例互斥**（§29）· **一局的墙钟上界**（§32）· **长驻池真就绪 + 有界清理**（§33）· **热路径 IO 换节点本地盘（rollout/eval 共用一套 scratch）**（§34）· **rollout 热路径四刀：探针上界 / 补差批满铺 / 轮级 ctx / 取消搬回**（§35） | 35 |
 | [`docs/nn/tpu-perf.md`](nn/tpu-perf.md) | TPU / XLA：设备实测 · 单步耗诊断 · 编译缓存 · PPO 吞吐 | 9 |
 | [`docs/nn/reuse-audit.md`](nn/reuse-audit.md) | **复用账本（S0，2026-10-11）**：跨模块重复实现清单（逐字节 / 结构克隆 / 同名散落）+ 三类处置判据（A 提到 `common/` · B 域内共用 · C 库替代 / R2 结构性豁免）+ 复跑法与基线守卫（**工具说明 + 现行水位**，不是逐条历史；出题见 `plan/nn-training-reuse-and-deps.plan.md`） | — |
 
@@ -1082,3 +1082,63 @@ k5 已到 it151 ≥ `iters=150`，`--export-bundle` 的导出分支只住轮内�
 `start_it > iters` 的导出**响亮拒导**（裸 `[run_rl]` 行给 exit-watchdog）——`iters<=0` 与轮内
 `_export_offline_bundle` 同口径。R2-d 到此作废（旧用例按新契约重写）。
 DECISIONS → `DECISIONS.md §2026-10-07-offline-busy-gate-anchor`；全文 → `docs/nn/remote-transport.md` §71。
+
+**2026-10-11（一）**：rollout 热路径两刀（`plan/rollout-topup-fastpath` 的 §3.1 + §3.3；评审 P0-2 / P1-2）。
+现场 = 同一轮内相邻两批 18 局 3.35s / **1 局** 48.90s（it49 同形），而 0 局 ≥5s、0 重试、池零回退、搬回 0 失败。
+① 探针上界**另立** `game_watch.PROBE_CEILING_SEC = 5s`（本机实测 8MB 探针 0.009–0.015s；复用
+`SCAN_CEILING_SEC` 会让「补差批 < 8s」从定义上不可达）⇒ 超界逐字回退档 + `probe_probe` 读数；
+② 补差批改按**机器宽度**铺满（`volume_alloc.spread_games_by_stage`；不吃 est / 不吃 `last_lo_factor`；
+`game_cap` 仍硬顶）⇒ 不再有「1 局的批」。守卫：`test_rollout_scratch.py` +2（红：未包上界实测 4.09s）、
+`tests/worker/test_spread_games.py` 新增 7（红：无顶被写成余量 0 ⇒ 满铺静默成空）、`test_iter_topup.py` 按满铺口径重算。
+未落地（下一刀）：§3.2 轮级 ctx · §3.4 轮末扫盘分组 · **§3.5 取消搬回**（前置已定案：`remote/train_core.py:526`
+的 PPO 读取根要同时改，否则读 0 局语料；评审 P0-1）。
+DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`；全文 → `docs/nn/runtime-opt.md` §35。
+
+**2026-10-11（二）**：§3.2 轮级 `RoundContext`（同一病的另一半：**批间重复固定开销**）。
+补差批复用的是同一个 `run_iter_rollout` ⇒ 在（一）之前每一批都重付一遍与局数无关的壳子（探针 / TS 树 / 权重镜像 /
+**建池 + 94 个冷启动**）——批越小占比越高（it34 补差2 只有 **1 局**却付 48.9s）。
+落地 = `iter_rollout.RoundContext` 只装**轮级**四件（`root` 探针结论 / `ts_home` / `pool` / `workers` + `resolved`/`probe_sec`），
+**批级**的 `jd`/`s_layout`/`exec_dir`/`gate` 不进 ctx（每批有自己的 `topup{k}/` + `--out` 续号 + 批级清理）；
+**池的生涯 = 轮**（首批建、补差批复用，`remote/worker.py` 在补差跑完、PPO 之前 `close()`——不让 94 个常驻 bun 陪 PPO
+吃内存）；`ctx=None`（老调用）自建自收、逐字今天；池**建不起来**时不缓存 ⇒ 下一批可重试（有意，非漏缓存）。
+副作用：`plan §3.7`（补差批池宽）被本刀吸收（补差批根本不建池了；批内并发 = 批内局数不是损失）。
+守卫：新增 `tests/remote/test_round_ctx.py`（3 例：探针/TS 树一轮一次（含回退档）、池一轮只建一次且只冷启动一次、
+所有权随 ctx + `close()` 幂等）；`ctx=None` 的逐字行为仍由 `test_remote_iter.py` / `test_rollout_scratch.py` 守（两文件一字未改）。
+DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`（③）；全文 → `docs/nn/runtime-opt.md` §35.3。
+
+**2026-10-11（三）**：§3.5 **取消搬回**（用户第 1 条；含评审 P0-1/P0-3）。
+产出就住在节点本地盘的**轮 scratch 目录**里，`shard_dirs` 报真实路径；节点自己的 PPO 装载根改由产出方
+给出（`iter_info["shards_root"]` = 轮产出根 → `remote/train_core.ppo_shards_root`；P0-1：漏了就是
+「0 局语料静默训空」）；补差批的产出根**镜像**进轮目录（`scratch.batch_layout`/`batch_rel`）⇒ 单一读取根
+与「每批实产 == 每批声明」同时成立；轮初清场 + 回收前移到 PPO 之后（`RoundContext.cleanup()`）；
+容量判据改成**整轮**需求（`_round_need_bytes`，P0-3）。⚠ 代价：F7「搬不回去不算结算」消失 ⇒ 结算 =
+「跑局 future 正常返回」，而「结了算却没产出」的发现退到轮末逐位对账（仍响亮，只是变晚）。搬回原语
+（`drain_tree`/`InstallGate`/`drop_drain_stage`）保留但已无生产用点。
+守卫：新增 `tests/remote/test_train_core_shards_root.py`（3 例）、`test_round_ctx.py`（批镜像 + 同一个
+`shards_root` + `cleanup()`）、`test_rollout_scratch.py`（产出在 scratch 且轮末不再清、job 目录零产出副本、
+轮容量预算、结算=future 返回 + 空局轮末响亮）；判据迁移逐行回执在 plan §3.5b。
+未落地（下一刀）：§3.4 轮末扫盘分组（依赖 ctx 累积 `batch_specs`）。
+DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`（④）；全文 → `docs/nn/runtime-opt.md` §35.4。
+
+**2026-10-11（四）**：§3.4 **扫盘去重 + 轮级装配契约**（就地降级为小形状）。
+原计划的 `worker/iter_verify.verify_round`（「扫全轮再按声明集分组」）在 §3.5 之后已无必要：**批产出根本身
+就是分组单位**（每批各验各的 = 按批分组，且失败当场）。真正值得做的只剩两件：① `run_iter_rollout` 为
+`perGame` 读过本批 manifest 之后，`iter_topup` 又为记账扫一遍盘（一轮 300+ 个小 JSON）⇒
+`_batch_totals` 改吃批次报告的**逐局画像**（字段逐字同名），缺画像回落磁盘扫；② 轮级报告装配契约写进
+`remote/worker.py`（四个收尾键由调用方一次装配、同键同型；`clean_sec`/`搬回` 无 TS 读方的查证同处）。
+守卫：`test_batch_totals_from_the_portrait_equal_the_disk_scan`（等价性）+ `test_topup_batches_do_not_rescan_the_same_manifests`
+（扫盘次数 == 1）。
+剩余队列：§3.6 回传失败备份 · §3.8 探针缓存 · §3.9 读数五分项 · §3.10 LAN 队列（§3.7 已被 §3.2 吸收）。
+DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`（⑤）；全文 → `docs/nn/runtime-opt.md` §35.5。
+
+**2026-10-11（五）**：§3.6 回传失败时备份那一份（用户第 1 条后半句）。
+`post_result` 重试 5 次耗尽之后，那一份结果就只剩一行日志（`_result.json` 在本地盘却没有出站通道）。
+新增 `remote/job_fs.backup_failed_result`，接在回传**落定回调**的失败分支（`job_round._on_settled`，
+`not out.ok`）：把发出去的那份**线上体**（`pack_result_v2` 字节，逐字节相同）落到
+`<job_dir>/backup/it<N>-<jid>-<sha256:16>.result.v2` ⇒ 恢复 = 原样重发一个 POST，不重跑 PPO。
+三条纪律：绝不抛（只 WARN，回调跑在上传线程里）· 不改 job 状态 · 不进任何门禁；成功路径零多余写。
+回收随 job 目录（`prune_job_dirs`，无需新豁免）。新边 `job_round → job_fs` 已进 DAG 允许名单（写明理由）。
+守卫：`tests/remote/test_result_backup.py`（5 例，端到端走真 `run_one_round` + 真 `ResultUploader`）。
+⚠ 已知边界（明写未做）：同 job 重领会清场重建 job 目录 ⇒ 备份是**恢复窗口**不是档案；`drain()` 超时那一档
+不写备份；云机/离线腿没有把 `backup/` 带回本机的通道。
+全文 → `docs/nn/remote-transport.md` §81。
