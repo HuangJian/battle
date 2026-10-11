@@ -849,7 +849,36 @@ def run_iter_rollout(
     s_layout: scratch.ScratchLayout | None = None
     gate = scratch.InstallGate()
     need = scratch.need_bytes_for(len(argvs))
-    picked = scratch.open_scratch(jd, need_bytes=need, log=rb.note) if argvs else None
+    # ---- 探针段**必须**有上界（2026-10-11，plan/rollout-topup-fastpath §3.1）----
+    # `open_scratch` 整段是这条热路径上**唯一**没有上界的一步：`probe_write_speed_mbps` 只有
+    # `except OSError`（挂住的挂载点既不返回也不抛），而它跑在下面两个 `call_bounded` **之外**。
+    # 现场形状：网络盘一抖，8MB + fsync 变成几十秒，而这笔等待**每批付一次**（1 局的补差批 48.9s）。
+    # 超界 ⇒ **逐字回退档**（`picked=None`：不换根/不搬/不 drain），并响亮记一笔 + 进 `probe_probe` 读数
+    # ——它是「盘抖动」的直接读数，不是失败（判据口径见 `game_watch.PROBE_CEILING_SEC`）。
+    picked = None
+    if argvs:
+        _probe_t0 = time.time()
+        _ok_probe, _probe_res = call_bounded(
+            partial(scratch.open_scratch, jd, need_bytes=need, log=rb.note),
+            float(game_watch.PROBE_CEILING_SEC),
+            name="scratch-probe",
+        )
+        if _ok_probe:
+            picked = _probe_res  # `ScratchLayout | None`（闸没过 = `None` = 回退档）
+            rb.add(
+                "probe_probe",
+                f"{'换根' if picked is not None else '原地'}｜探测 {time.time() - _probe_t0:.2f}s"
+                f"｜上界 {float(game_watch.PROBE_CEILING_SEC):g}s",
+            )
+        else:
+            rb.add(
+                "probe_probe",
+                f"超界回退｜{float(game_watch.PROBE_CEILING_SEC):g}s 内没返回（盘抖的直接读数）",
+            )
+            rb.note(
+                f"WARN rollout scratch 探针超界（{float(game_watch.PROBE_CEILING_SEC):g}s 内没返回）"
+                "——本轮回落原地（网络盘）；这是**盘抖动的直接读数**，不是失败"
+            )
     if picked is not None:
         ts_new = picked.ts_for(tsd.name)
         ok_tree, tree_res = call_bounded(
