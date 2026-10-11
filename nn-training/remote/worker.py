@@ -649,17 +649,19 @@ def run_job(
         else:
             # 轮级资源（落点/TS 树/长驻池）在**首批**建、补差批复用（plan/rollout-topup-fastpath §3.2）：
             # 池在 `finally` 里收（补差之后、PPO 之前）——不让 94 个常驻 bun 陪 PPO 吃内存。
+            # ⚠ **ctx 的所有权在这里** ⇒ 收池必须罩住**整段**（含首批自己抛的那些路径）：
+            #   rollout 失败（D14/verify/超界……）时若没人收，94 个常驻 bun 会一直挂着。
             rctx = RoundContext()
-            iter_info = run_iter_rollout(
-                job_dir, manifest["rollout"], ts_dir=_ts_dir, log=log, ctx=rctx
-            )
-            shard_dirs = list(iter_info["shard_dirs"])
-            # ---- 动态采集的**有界多批补差**（2026-10-07，plan/rollout-stage-balance §4.4）----
-            # 每批自己的 spec/argv/data_fp ⇒「实产 == 声明」照旧逐位（verify_shards 一个字不改）；
-            # 批子目录隔离（`topup1/`…）+ 全局 `--out` 续号 ⇒ 不覆盖、不重号。
-            # `manifest["rollout"].volume` 缺席 = 老行为（逐字节不变）——它只由节点侧的
-            # `plan.iter_spec` 从计划块合成（`kind=run`），hub 派发的 kind=iter 不带。
             try:
+                iter_info = run_iter_rollout(
+                    job_dir, manifest["rollout"], ts_dir=_ts_dir, log=log, ctx=rctx
+                )
+                shard_dirs = list(iter_info["shard_dirs"])
+                # ---- 动态采集的**有界多批补差**（2026-10-07，plan/rollout-stage-balance §4.4）----
+                # 每批自己的 spec/argv/data_fp ⇒「实产 == 声明」照旧逐位（verify_shards 一个字不改）；
+                # 批子目录隔离（`topup1/`…）+ 全局 `--out` 续号 ⇒ 不覆盖、不重号。
+                # `manifest["rollout"].volume` 缺席 = 老行为（逐字节不变）——它只由节点侧的
+                # `plan.iter_spec` 从计划块合成（`kind=run`），hub 派发的 kind=iter 不带。
                 _extra = topup_rollout(
                     job_dir=job_dir,
                     spec=manifest["rollout"],
@@ -673,7 +675,7 @@ def run_job(
                     ctx=rctx,
                 )
             finally:
-                rctx.close()  # 池：补差跑完就收（PPO 之前）
+                rctx.close()  # 池：补差跑完就收（PPO 之前）；失败路径也收
             if _extra is not None:
                 # ★ 轮级报告装配（plan/rollout-topup-fastpath §3.4 写死的契约）：这四个**由收尾步骤产生**
                 # 的键（`shards` / `perGame` / `perGameSecs` / `elapsedSec`）由**调用方**在这里一次装配，

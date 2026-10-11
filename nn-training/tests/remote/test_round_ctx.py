@@ -27,7 +27,7 @@ if str(ROOT) not in sys.path:
 
 import common.scratch as scratch
 import worker.iter_rollout as iter_rollout
-from common.protocol import INIT_WEIGHTS_NAME
+from common.protocol import INIT_WEIGHTS_NAME, ProtocolError
 from tests.remote.test_rollout_scratch import (  # type: ignore[import-not-found]
     _job_dir,
     _local_root,
@@ -163,6 +163,37 @@ def test_pool_ownership_moves_to_the_ctx(tmp_path: Path, monkeypatch: pytest.Mon
     assert shared.closed == 1
     rctx.close()
     assert shared.closed == 1, "close() 幂等"
+
+
+def test_a_failing_batch_leaves_the_pool_for_the_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """首批自己抛（D14/verify/超界……）时，池**仍挂在 ctx 上** —— 由调用方收。
+
+    这是所有权边界的回归：§3.2 把池的生涯提到轮级后，批内的 `finally` 不再收池；若调用方只在
+    「补差跑完」那条路上 `close()`，首批抛出的那些路径就会把 94 个常驻 bun 挂着（本地盘/内存都有代价）。
+    所以约定是：**ctx 归调用方所有 ⇒ 调用方用 try/finally 罩住整段**（`remote/worker.py`），
+    而本事例钉的是「抛出后 ctx 里还握着那个池」——漏了就静默泄。
+    """
+    _watchdog(monkeypatch)
+    _only_candidate(monkeypatch, _local_root(tmp_path))
+    pool = _FakePool()
+    monkeypatch.setattr(iter_rollout, "_make_pool", lambda *a, **kw: pool)
+    job = _job_dir(tmp_path)
+    # 空局（rc=0 但什么都没写）⇒ verify_shards 响亮（抛点在池建立**之后**）
+    empty = tmp_path / "empty_exporter.py"
+    empty.write_text("print('nothing')\n", encoding="utf-8")
+    spec = _stub_spec(tmp_path, [(0, 0)])
+    spec["argv"] = [
+        [str(empty), "--out", "w0", "--stages", "0", "--seeds", "0", "--wver", "W" * 64,
+         "--weights", INIT_WEIGHTS_NAME]
+    ]
+    rctx = RoundContext()
+    with pytest.raises(ProtocolError):
+        run_iter_rollout(job, spec, log=lambda _m: None, ctx=rctx)
+    assert rctx.pool is pool and pool.closed == 0, "抛出时池还在 ctx 上（等调用方收）"
+    rctx.close()
+    assert pool.closed == 1
 
 
 def test_round_ctx_fallback_probes_once_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
