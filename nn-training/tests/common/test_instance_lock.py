@@ -4,6 +4,8 @@
   1. 取锁写 `PID|EXE|TS`、释放只清自己的；
   2. **同一程序**的第二个实例 → 拒启（身份指纹命中）；
   3. 陈旧锁（持有者已死）→ 自动接管（锁在、进程没了，不该永远启不来）；
+  3b. **写入窗口**（锁文件空/残缺且新鲜）→ 拒启且**一个字节都不动**；够久的残缺残留仍接管
+     （2026-10-11 满载 flake 回归：创建与写 PID 之间那个毫秒级窗口被后来的 starter 穿过）；
   4. **PID 复用**（持有者活着但不是本程序）→ 核验身份后接管；
   5. 身份**读不到** → fail-closed 拒启（绝不静默双监听）；
   6. 默认锁路径按**端口**键控；
@@ -88,6 +90,41 @@ def test_stale_lock_taken_over_when_holder_dead(tmp_path: Path, capsys: pytest.C
     assert il.acquire_instance_lock(str(lock), marker="hub_server", tag="hub-server") is True
     assert "陈旧锁" in capsys.readouterr().out
     assert il.read_lock(str(lock))[0] == os.getpid()
+
+
+def test_partial_lock_in_the_write_window_is_not_taken_over(tmp_path: Path) -> None:
+    """★ 2026-10-11 满载 flake 回归（`test_simultaneous_*` 偶发红）：创建与写 PID 之间的**空文件**
+    不得被当成陈旧锁接管。
+
+    现场形状：`_create_exclusive` 的 `O_CREAT|O_EXCL` 与随后的 `os.write` 是两次系统调用，
+    中间那个毫秒级窗口里文件是**空的**（解析不出持有者）。旧实现把「解析不出」一律读成
+    「陈旧锁（已残缺不可解析）」⇒ **删掉先行者刚创建的锁**再接管；满载下三个 starter 抢同一个
+    锁时，后来的进程能完整穿过这个窗口，后果两层：① 真持有者的锁文件被删/易主，
+    「锁在 ∧ 端口答 200」的读数从此撒谎（`_wait_ready` 等到超时）；② 两个进程都以为自己
+    是唯一实例。新行为：残缺 ∧ **太新** ⇒ 响亮拒启（fail-closed）且不动那个文件。
+    """
+    lock = tmp_path / ".hub_server.lock"
+    lock.write_text("", encoding="utf-8")  # 窗口里的形状：刚 O_EXCL 创建、PID 还没写
+    assert il.acquire_instance_lock(str(lock), marker="hub_server", tag="hub-server") is False
+    # 判据全是**行为**（文本形态断言的预算见 `tests/test_source_text_assert_budget.py`）：
+    # 拒启 ∧ 文件一字未动——旧行为会把这一行读成「陈旧锁」、把它删掉重敲成自己的 PID
+    # （空文件 ⇒ 内容变非空就是接管），所以这两条就足够把新旧两个分支区分开。
+    assert lock.exists() and lock.read_text(encoding="utf-8") == "", "不得删/改别人的半成品锁"
+
+
+def test_stale_partial_lock_is_still_taken_over(tmp_path: Path) -> None:
+    """上一条的反面（防越拧越紧）：崩溃残留的残缺锁**够久**之后仍按陈旧锁接管。
+
+    没有这条，“写不完的锁”就变成永久拦路鬼——要操作员手删锁，而它本来就只是个残片。
+    年龄用 `os.utime` 做旧（不睡钟；mtime 是这条规则的唯一输入）。
+    """
+    lock = tmp_path / ".hub_server.lock"
+    lock.write_text("", encoding="utf-8")
+    old = time.time() - (il.PARTIAL_LOCK_GRACE_SEC + 1)
+    os.utime(lock, (old, old))
+    assert il.acquire_instance_lock(str(lock), marker="hub_server", tag="hub-server") is True
+    assert il.read_lock(str(lock))[0] == os.getpid(), "够久的残缺残留仍按陈旧锁接管"
+    assert lock.read_text(encoding="utf-8") != "", "接管 = 把锁敲成自己的（空文件已不再空）"
 
 
 def test_pid_reuse_taken_over_after_identity_check(

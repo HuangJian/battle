@@ -18,12 +18,23 @@ socket 同时 bind 同一端口（后绑定者不报错，静默变成「永远�
 端口守卫），写不下锁不该变成启动拦路鬼 —— 响亮告警后本次退化为仅靠端口守卫；反之，「已有
 活实例」的拒启仍是 fail-closed。
 
-**陈旧锁接管规则**（判据只有两条，宁可 fail-closed）：
+**陈旧锁接管规则**（判据只有下列几条，宁可 fail-closed）：
 
   * 持有者已死 → 陈旧锁，接管（响亮打印）；
   * 持有者活着但命令行**不含 marker** → PID 已被系统复用给别的程序，接管（响亮打印）；
+  * 锁文件**解析不出持有者**（空/残缺）且**新鲜**（`PARTIAL_LOCK_GRACE_SEC` 内）→ **拒启**，
+    且（2026-10-11）**一个字节都不动**：它是 `O_CREAT|O_EXCL` 与随后写盘之间的窗口
+    （见下「写入窗口」）；够久的残缺残留仍按第一条接管（崩溃残留不永久锁死启动）。
   * 持有者活着、命令行读不到（无 `/proc`、命令行工具不可用）→ **拒启**并打印持有者 pid
     （fail-closed：宁可让操作员确认后删锁，也不静默双监听）。
+
+**写入窗口**（2026-10-11 事故）：`_create_exclusive` 的 `O_CREAT|O_EXCL` 与 `os.write` 是
+两次系统调用，中间那个毫秒级窗口里文件是**空的**。满载下三个 starter 同时抢一个锁时，
+后来的进程能完整穿过窗口；旧实现把「解析不出」一律读成「陈旧锁」⇒ **删掉先行者刚创建
+的锁**再接管，两层后果：① 真持有者的锁文件被删/易主，「锁在 ∧ 端口答 200」的读数从此
+撒谎（`tests/remote/test_worker_server_lock.py` 的 `_wait_ready` 等到超时 = 满载 flake）；
+② 两个进程都以为自己是唯一实例。判据只能取「文件太新」（PID 都还没写上 ⇒ 没有身份可
+核验），故**拒启**（fail-closed）而不是删别人可能正在写的锁。
 
 **为什么不复用 `train/loop_util.py` 的 `acquire_lock`**（曾评估，此处否决）：它是
 训练侧的流程级锁（面比实例锁大得多），反向依赖 `train/` 会把 hub 的启动链拖进训练侧依赖——
@@ -52,6 +63,13 @@ __all__ = [
 
 #: 命令行打印长度上限（死锁排障只需认得「这是哪个程序」，不需要整条 argv）。
 _CMD_CLIP = 160
+
+#: 「残缺锁的写入窗口」宽限（秒）：锁文件解析不出持有者、且比这个还新 ⇒ 判为
+#: **别的启动者正在写**（`O_CREAT|O_EXCL` 与 `os.write` 之间），拒启且不动那个文件。
+#: 窗口本身是毫秒级，宽限取 30s 是给 NFS/慢盘与「stat 精度只有 1s」留余量；
+#: 超过它仍按陈旧锁接管（崩溃残留不永久锁死启动）。定值不做旋钮：它与
+#: `CLAIM_TTL_SEC` 同款——一个旋钮只是把现场调成另一种偶发。
+PARTIAL_LOCK_GRACE_SEC = 30.0
 
 
 def _pid_alive(pid: int) -> bool:
@@ -158,6 +176,18 @@ def read_lock(lock_path: str) -> tuple[int | None, str | None, int | None]:
         return None, None, None
 
 
+def _lock_age_sec(lock_path: str) -> float | None:
+    """锁文件的年龄（秒）；stat 失败/时钟倒着走 → None 或 0（调用方按「太新」fail-closed）。
+
+    mtime 是「这个残缺文件是不是刚从别人手里生出来」唯一可用的信号（空文件里没有 pid
+    可核验）。用 `max(0.0, …)`：粗粒度时间戳/时钟跳变下的负年龄必须读成「刚创建」。
+    """
+    try:
+        return max(0.0, time.time() - os.stat(lock_path).st_mtime)
+    except OSError:
+        return None
+
+
 def _create_exclusive(lock_path: str) -> int | None:
     """`O_CREAT|O_EXCL` 原子创建（原子性正是本锁的全部价值）；已存在 → None。
 
@@ -194,6 +224,20 @@ def acquire_instance_lock(
         return True
     if fd is None:  # 已存在锁文件：判定「真双开」还是「陈旧锁/ PID 复用」
         holder, holder_exe, holder_ts = read_lock(lock_path)
+        if holder is None:
+            # 解析不出持有者：要么是**写入窗口**（别人刚创建还没写 pid），要么是崩溃残留。
+            # 只能按年龄分流（空文件里没有身份可核验）；新鲜的必须 fail-closed——删掉它就是把
+            # 先行者的锁抢走（2026-10-11：三启同时只该活一个，旧行为会让两个都自认唯一）。
+            age = _lock_age_sec(lock_path)
+            if age is None or age < PARTIAL_LOCK_GRACE_SEC:
+                shown = "年龄未知" if age is None else f"{age:.2f}s 前"
+                print(
+                    f"[{tag}] ERROR: 锁文件 {lock_path} 残缺（{shown}创建，里面没有持有者身份）"
+                    f"——另一个启动者可能正在写入——拒绝启动（fail-closed）。"
+                    f"若确认它只是崩溃残留，删除它后重试。",
+                    flush=True,
+                )
+                return False
         if holder is not None and _pid_alive(holder):
             cmd = proc_cmdline(holder)
             if cmd is None or any(m in cmd for m in markers):
