@@ -4488,6 +4488,19 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   eng 7 · con 3 · ts 7 · rt 1 · exp 19），索引行压成……
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §20「决策正文归档」· 锚 `### §2026-10-11-decisions-slim-round4`
 
+## §2026-10-11-goalnn-load-flake-pair（2026-10-11，两条满载 flake 的根因修复：hub 备份腿 TOCTOU + instance_lock 写入窗口）
+
+- **背景**：提交 hook 两次被「与改动无关」的负载型 flake 拦下；复核历史日志后两者都是**真缺陷**，不是判据太严：
+  ① 队首 e2e 偶发 `pushed == 3`——已结算的活仍被开备份（那台机器会**真的从头算一轮**，白烧 GPU，回传必吃 409）；
+  ② 三启同抢一个锁时先行者的锁文件被后来者当「陈旧锁」删掉（⇒ 两个进程都自认唯一，且「锁在 ∧ 端口答 200」的
+  读数撒谎；历史失败日志两处**全部**落在 `_wait_ready`）。
+- **决定**：① 备份副本的闸住 `_claim_locked`（`_facts_locked(...)["landed"]` ⇒ 拒发，与 `claimable_job_ids`
+  / `_unfinished_pending` 同一条式子：`result/` ∨ `fail.json`）；② `common/instance_lock` 的残缺锁 + 新鲜
+  （`PARTIAL_LOCK_GRACE_SEC = 30s` 内）⇒ 拒启且**一个字节都不动**，够久的残留仍按陈旧锁接管。
+- **备选与否决**：把 flake 读成「测试太紧」去放宽断言 —— 否（会掩盖白烧 GPU 与双实例窗口）；锁改「原子化
+  创建+内容」（tempfile 写完再 `os.link`）—— 否（多一层 FS 支持面，而只省掉一个 30s 宽限）。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §74
+
 ## §2026-10-11-goalnn-no-httpx-dep（2026-10-11，**不引入** `httpx`（T1）；plan/nn-training-reuse-and-deps §5.2）
 
 - **决定**（用户最终裁决 2026-10-11；新运行时依赖属 AGENTS §6.5 点名须问人的四类）：**不引入** `httpx`。

@@ -25,6 +25,41 @@
 
 ---
 
+## §74 两条满载 flake 的根因：hub 备份腿 TOCTOU + instance_lock 写入窗口（2026-10-11，提交 hook 现场 + 历史日志复核）
+
+**症状**：① `e2e/test_multi_course_single_hub_e2e.py::test_single_hub_dispatches_two_courses_to_one_worker`
+偶发 `st["pushed"] == 3`（同一次运行的假 worker 侧证词：`job … 重复提交——幂等受理（当前 done），不重复执行`）；
+② `tests/remote/test_worker_server_lock.py::test_simultaneous_worker_starts_leave_exactly_one`（同族
+`tests/common/test_instance_lock.py`）—— 历史日志（`tmp/dur/ab50ci2-tests-r2-B.log`）里该用例的失败**全部**落在
+`assert _wait_ready(port, lock, None, None)`（「存活的那个必须真的在服务」），从未落在 `alive == 1`。
+
+**① 备份腿 TOCTOU（hub）**：`remote/push_dispatch._dispatch` 决定开不开备份要读**两次**状态
+（①`_course_counts`/`_backup_target` 决定「值不值得开」；②`_worker_counts`/`claim` 挑人 + 授权）。两次之间主副本
+的线程可能刚好**落地并 pop 掉在飞记录**：① 仍说「主副本在飞（medium）」而 ② 已看不到它在飞 ⇒ 那台机器被当成
+空闲 ⇒ 同一个 jid 推第二份；而 `_claim_locked` 的 backup 分支旧实现**连结算状态都不看**（无条件放行）。
+代价不是免费的：已结算的活被推给机器，它会**真的从头算一遍**（白烧一轮 GPU），回传必吃 409。
+**修**：闸住 `claim`——它是租约与备份授权的**唯一**写入口（「闸住 `_claim_locked` 则四条认领面天然同源」，本簇自己的规矩）：
+已结算（`_facts_locked(...)["landed"]`，判据与 `claimable_job_ids` / `_unfinished_pending` 同一条式子：`result/` ∨ `fail.json`）
+⇒ `False, "", "landed"`；派发器不做第二份判据。
+
+**② instance_lock 写入窗口（common，hub/worker 启动守卫）**：`_create_exclusive` 的 `O_CREAT|O_EXCL` 与随后的
+`os.write` 是**两次系统调用**，中间那个毫秒级窗口里锁文件**是空的**。旧实现把「解析不出持有者」一律读成
+「陈旧锁（已残缺不可解析）」⇒ **删掉先行者刚创建的锁**再接管。满载下三个 starter 同抢一个锁时后来的进程能完整
+穿过窗口，后果两层：① 真持有者的锁文件被删/易主，「锁在 ∧ 端口答 200」的读数从此撒谎（`_wait_ready` 等到超时
+= 满载偶发红）② 两个进程都自认唯一实例。**修**：残缺锁 + 新鲜（`PARTIAL_LOCK_GRACE_SEC = 30s` 内）
+⇒ **拒启（fail-closed）且一个字节都不动**（判据只能取年龄：空文件里没有身份可核验）；够久的残缺残留仍按陈旧锁
+接管（崩溃残留不永久锁死启动）。
+
+**备选与否决**：把 flake 读成「测试太紧」去放宽断言 —— 否（掩盖白烧 GPU 与双实例窗口两个真缺陷）；
+锁改「原子化创建+内容」（tempfile 写完再 `os.link`）—— 否：多一层 FS 支持面（FAT / 部分网盘无硬链接）
+而只省掉一个 30s 宽限。
+
+**回归与验证**：`tests/hub/test_hub_leases.py::test_backup_claim_refused_once_the_job_is_settled`（先红：陈备份
+领得动已结算的活）· `tests/remote/test_hub_push_dispatch.py::test_settled_job_is_never_backed_up_by_the_push_leg`
+（把两条**过期读数**如实注入 ⇒ 摘掉闸当场红：`started=['jjjj…']`）· `tests/common/test_instance_lock.py` 新增两条
+（写入窗口拒启 ∧ 够久仍接管；判据全**行为**——文本断言预算不允许新增）。两条曾偶发红的用例 + 相关 4 个文件
+**× 10 轮 @8 核满载**全绿；`bun run pygate` **4162 passed / 1 skipped**。
+
 ## §73 metrics v11：热线族 **2 列**（idx74–75；dim 74→76）+ 事件加 `bulletOwnerId` + 探针**杀列**（pickupProxMax 未签入）（2026-10-10，plan/metrics-v11-hotlane.plan.md）
 
 - **交付**：`METRICS_DIM 74→76`、`METRICS_VERSION 10→11`（TS `tools/sim/export-rl-rollout.ts` +
