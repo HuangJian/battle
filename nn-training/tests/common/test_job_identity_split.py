@@ -178,3 +178,22 @@ def test_collision_rows_ignores_unreadable_sibling_manifests(tmp_path: Path) -> 
     d.mkdir(parents=True)
     (d / "manifest.json").write_text("{ not json", encoding="utf-8")
     assert identity_mod.collision_rows(tmp_path / "courseA" / "remote-jobs", m) == []
+
+
+def test_collision_rows_does_not_scan_custom_job_root_layouts(tmp_path: Path) -> None:
+    """★ `job_root` 目录名不是 `remote-jobs`（非契约布局）⇒ 守卫不扫 `parent.parent`、一律放行。
+
+    2026-10-11 门禁现场：一批 publish/serve 用例的 `job_root=tmp_path/"jobs"` ⇒ `parent.parent`
+    恰好是**共享 basetemp**（当时 4.3 万目录）⇒ 一次 glob ≈10s；重发布用例 publish 两次即
+    顶穿 30s 预算 ⇒ 满载下成片「耗时预算超限」。兄弟课程面只由契约布局
+    `<store-root>/<course>/remote-jobs` 定义——认不出它时「扫不到就放过」，
+    不许把无关大目录当兄弟面扫（那是性能事故，不是守卫）。
+    """
+    m = _manifest()
+    jid = identity_mod.job_id(m)
+    # 诱饵：契约形状的兄弟 store 就躺在 parent.parent 里——旧行为会扫到并命中（本用例曾红）
+    d = tmp_path / "decoy" / "remote-jobs" / jid
+    d.mkdir(parents=True)
+    (d / "manifest.json").write_text(json.dumps({**m, "job_id": jid}), encoding="utf-8")
+    custom_root = tmp_path / "c" / "jobs"  # parent.parent = tmp_path（诱饵所在层）
+    assert identity_mod.collision_rows(custom_root, m) == []

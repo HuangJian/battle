@@ -84,9 +84,13 @@ def collision_rows(job_root: str | Path, manifest: dict) -> list[dict]:
     不同」：后者正是本事故的配置，而它在 `course_fp` 进键之后是**合法**的（两门课各有各的
     id），拿它当判据会把已经修好的场景全部拒掉。
 
-    成本：一次 glob（兄弟课程数 × 每课 `remote-jobs/` 现存 job 目录数）+ **至多 1 次**
-    manifest 读取（见下方快速闸）。扫描根不存在（节点侧/自定义 `job_root` 布局）⇒ 返回空：
-    它是 best-effort 哨兵，扫不到就放过，绝不误伤。
+    成本：`job_root` 必须落在契约布局（`<store-root>/<course>/remote-jobs`，目录名即
+    `remote-jobs`）——否则**一步不扫**、直接返回空。2026-10-11 门禁现场：一批 publish/serve
+    用例的 `job_root=tmp_path/"jobs"` ⇒ `parent.parent` 变成 4.3 万目录的**共享 basetemp**，
+    一次 glob ≈10s、publish 两次即顶穿 30s 预算（成片「耗时预算超限」flake）。布局匹配时 =
+    一次 glob（兄弟课程数 × 每课 `remote-jobs/` 现存 job 目录数）+ **至多 1 次** manifest
+    读取（见下方快速闸）。扫描根不存在 / 自定义 `job_root` 布局 ⇒ 返回空：它是 best-effort
+    哨兵，扫不到就放过，绝不误伤。
 
     ⚠ 快速闸的前提是「**目录名 == 该 manifest 的 `job_id`**」——这是**发布端的写入不变量**
     （`publish_job` 先算 id、再以它为目录名），也是 `course_of` 认归属用的同一条。手写 manifest
@@ -94,6 +98,11 @@ def collision_rows(job_root: str | Path, manifest: dict) -> list[dict]:
     不构成本守卫要防的「两个 store 抢同一身份」。
     """
     root = Path(job_root)
+    if root.name != "remote-jobs":
+        # ★ 契约布局闸（2026-10-11）：兄弟课程面只由 `<store-root>/<course>/remote-jobs` 定义。
+        # 目录名不认识（自定义 job_root：测试的 `…/jobs`、smoke 的 `work/jobs`…）⇒ 一步不扫
+        # （代价与现场见 docstring「成本」段）：硬凑 `parent.parent` 会把无关大目录当兄弟面。
+        return []
     own_course = root.parent.name  # `<root>/<课程>/remote-jobs` ⇒ 本课目录名
     try:
         want = idempotency_key(manifest)

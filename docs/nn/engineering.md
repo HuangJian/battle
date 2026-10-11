@@ -25,6 +25,39 @@
 
 ---
 
+## §76 publish/serve 用例的 30s 预算 flake：`collision_rows` 把共享 basetemp 当「兄弟课程面」扫（2026-10-11）
+
+**症状**：提交钩子 / `bun run pygate` 在实盘训练负载 + `-n 8` 下，publish/serve 一族
+wall-clock 超 30s 预算（两轮分别红 4 / 2 例，且集合会漂：`role_override` 10→55s ·
+`republish` 17→48s · `slim_blob` 8→31s…）。**单进程复跑同样超**（`role_override` 30.62s）
+⇒ 不是 xdist 竞争。`--timeout=10 --timeout-method=thread` 线程栈一把定位（§14 手法）：
+
+    test_publish_role_override_is_honored → publish_job → collision_rows
+        → scan_root.glob("*/remote-jobs/*/manifest.json") → scandir
+
+**根因**：`collision_rows`（发布端撞名守卫，`common/job_identity.py`）把
+`job_root.parent.parent` 当「兄弟课程根」**无条件 glob**。测试的 `job_root=tmp_path/"jobs"`
+⇒ scan_root = `tmp_path.parent` = **共享 basetemp**（本机实测 **4.3 万目录**）⇒ 一次 glob
+**≈10s**（层 1 scandir ×4 万 + 每项一次 `remote-jobs` stat；Windows + 实盘 I/O 争用放大到
+10–20s）；重发布用例 publish 两次即 30s+。生产布局（`<store-root>/<course>/remote-jobs`）
+里兄弟课程只有几十个 ⇒ 平时看不出（此坑 2026-09 就在，只是满载才冒头）。
+
+**修法（一处闸）**：`root.name != "remote-jobs"`（非契约布局）⇒ **一步不扫**、返回空——
+「兄弟课程」只由契约布局定义；自定义 `job_root`（测试 `…/jobs`、smoke `work/jobs`）按
+docstring 原文本就是 best-effort 放行，硬凑 `parent.parent` 是把无关大目录当兄弟面扫。
+**备选与否决**：① 给这批用例加 `@pytest.mark.time_budget(60)` 放宽 —— 否（这是**无谓**扫描，
+不是「真 I/O」；放宽会把 §14 的护栏信号一起放宽，且没治根）；② 改测试 fixture 让
+`tmp_path.parent` 私有（多包一层 wrapper）—— 否（动全局测试基建、波及清理/保留逻辑，且
+生产函数里的无界扫描仍在）；③ 按目录数阈值跳过（>N 不扫）—— 否（魔数）。
+
+**回归**：`tests/common/test_job_identity_split.py::test_collision_rows_does_not_scan_custom_job_root_layouts`
+（**先红**：旧行为扫到诱饵并命中；闸后绿）。守卫的契约面（跨 store 命中/放行、本课历史不
+算冲突）由既有 `test_job_identity_collision.py` 逐条钉住不变。
+
+**验证（实盘负载下实测）**：受影响家族单进程 call **0.02–0.24s**（原 8–55s）；
+`NN_GATE_NPROC=8 bun run pygate` 全量 **4159 passed / 10 skipped**（117.8s；>5s 警告
+25 → 9）——钩子默认档不再需要 `NN_GATE_NPROC=4` 让行（那是上一轮提交的临时绕行）。
+
 ## §75 锁收敛（唯一原语）+ 派发器一致快照（2026-10-11，用户指令：二连）
 
 **① 四处「创建后写盘」锁 → 一个原语**（用户：「把 loop_util / run_rl / code_snapshot 三处同款锁
