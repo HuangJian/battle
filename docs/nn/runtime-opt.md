@@ -8,6 +8,65 @@
 
 ---
 
+## §35 rollout 热路径两刀：scratch 探针有上界 · 补差批按机器宽度铺满（2026-10-11）
+
+> 起因（`plan/rollout-topup-fastpath.plan.md`，评审 `plan/rollout-topup-fastpath.review-bf.md`）：
+> Kaggle 自主 worker（96 核 / 94 槽）上**同一轮内相邻两批天差地别** —— it34 补差1（18 局）3.35s、
+> 补差2（**1 局**）48.90s；it49 同形（3.00s → 52.49s）。54 轮里 p50 11.8s / p90 88.9s / max 111.2s。
+> 两条根因性质不同（一个是**无界的等**，一个是**批粒度口径**），所以是两刀。
+
+### 35.1 探针上界（真根因）
+
+`worker/iter_rollout.py` 的落点解析 `scratch.open_scratch(jd, …)` 是这条热路径上**唯一没有上界**
+的一步：`probe_write_speed_mbps` 只有 `except OSError`（挂住的挂载点既不返回也不抛），而它跑在
+`install_tree` / `mirror_inputs` 的 `call_bounded` **之外**。网络盘一抖，8MB + fsync + 回读
+（共 `1 + 候选数` 次）就是几十秒，而这笔等待**每批付一次**。
+
+* **上界另立** `game_watch.PROBE_CEILING_SEC = 5.0`，**不复用** `SCAN_CEILING_SEC`：
+  `call_bounded` 超界要**等满 timeout** 才返回（它是「可放弃的等」，不是熔断）⇒ 复用 60s 会让
+  「补差批 < 8s / rollout max < 30s」从定义上不可达；而扫盘那 60s 另有语义（几百个小 JSON +
+  一遍内容哈希），不能被探针压低。取值 = 本机实测 8MB 探针 **0.009–0.015s / 690–1250 MB/s**
+  （tmpfs 与普通盘同量级）× 300 余量，且小于补差批目标。
+* **超界的行为** = 逐字回退档（不换根 / 不搬 / 不 drain）+ 响亮一行 + 轮报 `probe_probe`
+  读数（`超界回退` / `换根｜探测 x.xxs`）——它是**盘抖动的直接读数**，不是失败。
+* 守卫：`tests/remote/test_rollout_scratch.py` 两条新用例（超界 ⇒ 回退且**不挂住**——未包上界时
+  实测 4.09s；界内 ⇒ 照旧换根）。新判据里三条是**行为**判据（墙钟上界 / 候选盘有无
+  `nn-rollout-*` / 产出在不在 `job_dir`），文本断言基线只抬 1 格（理由在
+  `tests/test_source_text_assert_budget.py` 模块头）。
+
+### 35.2 补差批满铺（结构性）
+
+补差批的大小原来由**缺口方程**决定（`topup_games_by_stage` = `ceil(缺口/est)`）⇒ 批必然小、
+越补越小；而**批次级固定开销与批内局数无关**（scratch 落点/探针、TS 树安装、权重镜像、
+建池冷启动、轮末扫盘与清理）⇒ 批越小，固定开销占比越接近 100%（§34 的「逐局 spawn 重付启动
+成本」在**批次**层面的重演）。
+
+* 新纯函数 `worker/volume_alloc.spread_games_by_stage`：本批恰好 `width` 局，轮转均分给
+  「未达标且未触顶」的关（顺序 = `stages` 给定序 ⇒ 确定性，不吃随机）；不吃 est /
+  不吃 `last_lo_factor`（签名即契约，有用例钉住）。
+* `width` 来路 = 首批**实际用过的** workers（`iter_info["workers"]`，`remote/worker.py` 传）
+  → `spec["workers"]` → 首批 argv 条数；都拿不到 ⇒ **不补差**（不猜宽度：批大小直接决定墙钟）。
+* `game_cap` 仍是**硬顶**（与 plan v3 文本「不做 cap 截断」相反，这是落地的有意修正：既保住
+  `test_topup_records_shortfall_when_cap_binds` 的活判据，也不让课程旋钮失效）；批小于 `width`
+  的唯一情形 = 所有 eligible 关都到顶。
+* 超采（相对 quota）是故意的 ⇒ `wasted_samples` 上升；它是**软指标**（不进任何门禁），
+  训练语义不变（`per_stage_quota` 截断在 GAE 之前 ⇒ 多跑的局只烧墙钟）。
+* 旧口径归置：`topup_games_by_stage` 的**唯一生产调用点**就是被换掉的那个（`kind=run` 的补波走
+  `volume_waves.topup_games`/`plan_topup`）⇒ 保留不删但标注「无生产调用点」，身份 = 对账规格。
+* 守卫：新增 `tests/worker/test_spread_games.py`（7 例；含「无顶被写成余量 0 ⇒ 满铺静默成空」
+  这个真 bug 的回归）+ `test_iter_topup.py` 按满铺口径重算常量。
+
+### 35.3 未落地（下一刀；前置判据已写进 plan）
+
+§3.2 `RoundContext`（批间复用）· §3.4 轮末扫盘分组 · **§3.5 取消搬回**。
+⚠ §3.5 有一处**已定案但未实现**的连通项：节点自己的 PPO 读的是 `job_dir`
+（`remote/train_core.py:526` `shards_root = str(job_dir)`）⇒ 搬回是**承重段**；取消它必须同时把
+`shards_root` 指向 scratch 的 exec 根（评审 P0-1 的修法已写进 §2.2-S6 / §3.5 动作表）。
+
+DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`。
+
+---
+
 ## §34 热路径 IO 换节点本地盘：rollout / eval 两条腿的 TS 树 · 每局产出 · 权重落 scratch（2026-10-08）
 
 > 起因（plan/rollout-local-scratch）：云机 rollout 一轮 85 个 bun **同时**打 `/kaggle/working`

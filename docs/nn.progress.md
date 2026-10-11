@@ -1082,3 +1082,14 @@ k5 已到 it151 ≥ `iters=150`，`--export-bundle` 的导出分支只住轮内�
 `start_it > iters` 的导出**响亮拒导**（裸 `[run_rl]` 行给 exit-watchdog）——`iters<=0` 与轮内
 `_export_offline_bundle` 同口径。R2-d 到此作废（旧用例按新契约重写）。
 DECISIONS → `DECISIONS.md §2026-10-07-offline-busy-gate-anchor`；全文 → `docs/nn/remote-transport.md` §71。
+
+**2026-10-11（一）**：rollout 热路径两刀（`plan/rollout-topup-fastpath` 的 §3.1 + §3.3；评审 P0-2 / P1-2）。
+现场 = 同一轮内相邻两批 18 局 3.35s / **1 局** 48.90s（it49 同形），而 0 局 ≥5s、0 重试、池零回退、搬回 0 失败。
+① 探针上界**另立** `game_watch.PROBE_CEILING_SEC = 5s`（本机实测 8MB 探针 0.009–0.015s；复用
+`SCAN_CEILING_SEC` 会让「补差批 < 8s」从定义上不可达）⇒ 超界逐字回退档 + `probe_probe` 读数；
+② 补差批改按**机器宽度**铺满（`volume_alloc.spread_games_by_stage`；不吃 est / 不吃 `last_lo_factor`；
+`game_cap` 仍硬顶）⇒ 不再有「1 局的批」。守卫：`test_rollout_scratch.py` +2（红：未包上界实测 4.09s）、
+`tests/worker/test_spread_games.py` 新增 7（红：无顶被写成余量 0 ⇒ 满铺静默成空）、`test_iter_topup.py` 按满铺口径重算。
+未落地（下一刀）：§3.2 轮级 ctx · §3.4 轮末扫盘分组 · **§3.5 取消搬回**（前置已定案：`remote/train_core.py:526`
+的 PPO 读取根要同时改，否则读 0 局语料；评审 P0-1）。
+DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`；全文 → `docs/nn/runtime-opt.md` §35。

@@ -4551,3 +4551,35 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   （`uv lock` 每次重解析都依赖它）。
 - **R1 / R2 不变**：`common/` 仍 stdlib-only；三个引导模块仍零依赖。
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `plan/nn-training-reuse-and-deps.plan.md` §5.1 · §5.2 · §5.3
+
+## §2026-10-11-goalnn-rollout-topup-fastpath（2026-10-11，rollout 热路径两刀：探针上界**另立常量** + 补差批按机器宽度铺满）
+
+- **背景**：Kaggle 自主 worker（96 核 / 94 槽）上**同一轮内相邻两批天差地别**（it34 补差1（18 局）3.35s vs
+  补差2（**1 局**）48.90s；it49 同形 3.00s → 52.49s；54 轮 p90 88.9s / max 111.2s）。现场四条否定式同时成立
+  （≥5s 有 0 局 / 重试 0 / 池 killed=0 unready=0 fallback=0 / 搬回 0 失败）⇒ 既不在跑局、也不在重试、池回退、搬回超界。
+  两条根因（均已在代码上闭合）：① `scratch.open_scratch` 是这条热路径上**唯一没有 `call_bounded` 的一步**
+  （`probe_write_speed_mbps` 只有 `except OSError`；8MB+fsync 每批付一次）；② 补差批大小由**缺口方程**
+  （`ceil(缺口/est)`）决定 ⇒ 批越补越小，而**批次级固定开销与批内局数无关**（§34 的「逐局 spawn 重付启动成本」
+  在批次层面的重演）。
+- **决定**：
+  - ① 探针上界**另立** `game_watch.PROBE_CEILING_SEC = 5.0`（本机实测 8MB 探针 0.009–0.015s / 690–1250 MB/s
+    ⇒ ×300 余量）；**不复用** `SCAN_CEILING_SEC`（`call_bounded` 超界要等满 timeout，60s 与「补差批 < 8s /
+    rollout max < 30s」不可兼得；而扫盘那 60s 管的是几百个小 JSON + 内容哈希，不能被探针压低）。
+    超界 ⇒ **逐字回退档** + 响亮一行 + 轮报 `probe_probe` 读数（盘抖的直接读数，不是失败）。
+  - ② 新增 `worker/volume_alloc.spread_games_by_stage`：补差批 = `width`（首批**实际用过的** workers）局，
+    轮转均分给「未达标且未触顶」的关（顺序 = `stages` 给定序 ⇒ 确定性）；不吃 est / 不吃 `last_lo_factor`；
+    超采（相对 quota）丢弃（`wasted_samples` 上升，**软指标**）；`game_cap` 仍是**硬顶**。
+- **备选与否决**：① 「探针整段不跑，直接原地跑」——否（本地盘换根是 §34 的既有收益，回退只在**真超界**时发生）；
+  ② 「复用 `SCAN_CEILING_SEC`」——否（两个语义共用一个数 ⇒ 必有一头错）；
+  ③ 「缺口解算但设下限（如 ≥ width/2）」——否（下限是另一个要标定的魔数；「批 = 机器宽度」不需要）；
+  ④ 「cap 不截断」（plan v3 原文）——否（课程字段是操作员的**硬省**，且改造前就有活判据钉着
+  `games_by_stage == {2000: 10}`：保留活判据比改写它划算）；
+  ⑤ 「宽度猜一个（缺省 = 首批 argv 条数就已足够）」——否（批大小直接决定墙钟；拿不到就去**不补差**）。
+- **后果**：§3.1/§3.3 已落地（探针有界 + 批=机器宽度）；§3.2 轮级 ctx / §3.4 轮末扫盘分组 / **§3.5 取消搬回**
+  未落地，且 §3.5 有一处**定案未实现的前置**：节点自己的 PPO 读的是 `job_dir`
+  （`remote/train_core.py:526` `shards_root = str(job_dir)`）⇒ 搬回是**承重段**，取消它必须同时把读取根
+  指向 scratch 的 exec 根（评审 P0-1），否则 job 内 PPO 读 0 局语料。
+  ⚠ 满铺器改的是**每轮样本量/更新构成**（非语料身份/课程/奖励）⇒ 属训练侧；按 §15.5 口径当**新实验**处理：
+  新 `--out`/`--traj`，**不跨改动续跑**。
+—— 全文（现场读数 / 根因链 / 判据迁移表 / DoD）→ `plan/rollout-topup-fastpath.plan.md` §1–§4 · §10 ·
+`docs/nn/runtime-opt.md` §35 · 评审 → `plan/rollout-topup-fastpath.review-bf.md`

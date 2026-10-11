@@ -16,7 +16,7 @@
   env 给了但不可写 ⇒ **响亮失败**（不静默回落：操作员以为在测 scratch 是最坏的形状）。
 * `ScratchLayout` —— `<根>/nn-rollout-<作业名>-<hash8(作业根)>/`，**按作业标识命名**（评审 F5：
   同机多会话不互删），内部 `r/`（rollout 的 job 相对镜像）与 `eval/`（云机评估的 game 目录）
-  互不相干、各清各的。TS 家**不在**作业目录里：它按内容寻址（`ts_home()`），两条腿/跨轮共用一份。
+  互不相干、各清各的。TS 家**不在**作业目录里：它按 TS 目录名寻址（`ts_home()`），两条腿/跨轮共用一份。
 * `install_tree` / `install_file` —— **临时目录 + `os.replace`** 的原子安装（评审 R9：两腿并发拷
   同一个 sha 不会看见半截树）。
 * `InstallGate` / `drain_tree` —— 搬回：copytree → 逐文件对账 → **闸内改名**。暂存目录放在
@@ -50,7 +50,7 @@ from common.protocol import ProtocolError
 SCRATCH_ENV = "NN_ROLLOUT_SCRATCH"
 #: 作业 scratch 目录前缀（人眼辨识用；清理只动**自己那一份**，名字里带作业 hash）。
 SCRATCH_DIR_PREFIX = "nn-rollout-"
-#: TS 运行时树的家前缀（**内容寻址**、跨轮/两腿共用、永不清理）。
+#: TS 运行时树的家前缀（按 **TS 目录名**寻址、跨轮/两腿共用、永不清理——见 `ts_home`）。
 SCRATCH_TS_PREFIX = "nn-rollout-ts-"
 #: 容量余量比值（**只乘一次**：`need` 是原始估算，判据在 `resolve_scratch_root` 里乘）。
 SCRATCH_MIN_FREE_RATIO = 1.5
@@ -134,7 +134,14 @@ def scratch_job_dir(root: Path, job_root: Path) -> Path:
 
 
 def ts_home(root: Path, name: str) -> Path:
-    """TS 运行时树在 scratch 里的家（`<根>/nn-rollout-ts-<sha>`；内容寻址 ⇒ 两腿共用）。"""
+    """TS 运行时树在 scratch 里的家：`<根>/nn-rollout-ts-<TS 目录名>`（按**名**寻址）。
+
+    ⚠ 不是内容寻址（前缀注释与本文旧版曾写「`<sha>`」——2026-10-11 修正，见
+    `plan/rollout-topup-fastpath.review-bf.md` P2-1）：键是 `ts_dir.name`
+    （调用方 `iter_rollout` 传 `tsd.name`），它在一轮/两腿内稳定 ⇒ 「跨批/跨轮命中」成立；
+    但**两个不同 commit 若同名**会指到同一个家 —— 那份正确性由 `install_tree` 的原子安装
+    负责（内容对不上就装），不是本函数给的。
+    """
     return Path(root) / f"{SCRATCH_TS_PREFIX}{_slug(name or 'ts')}"
 
 
