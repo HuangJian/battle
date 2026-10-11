@@ -176,6 +176,22 @@ def accept_result(
         _append_attribution(hub, jid, "job_rejected", worker, "result already stored (duplicate write-back)")
         return 409, "result already stored (duplicate write-back)"
     _append_attribution(hub, jid, "job_result_accepted", worker, "")
+    # ★ 结果落地 ⇒ 这份活**已结束**，租约当场就该收（2026-10-11 用户报障：首页把一台机的
+    # 多份「结果已落盘但租约没放」的旧活全标成「计算中」，一台盘看着同时在算 4 轮）。
+    #
+    # 为什么必须放在这里（而不是让 worker 自己 release）：本函数是**结果入账的唯一入口**，
+    # 直连腿（云机 POST）与 push 腿（hub 代发后取回）共用它 ⇒ 在这里收，两条腿同时治好，
+    # 也不会出现「一条腿收了、另一条没」的第二套判据（本模块头注的那条纪律）。
+    #
+    # 为什么不靠租约自然过期：`CLAIM_TTL_SEC=300s` 是「worker 死了」的兜底，不是「干完了」
+    # 的通知。靠它回收 ⇒ 每份活结束后 5 分钟内 `/admin/queue` 仍把它报成 inflight，
+    # 而 `computing_ago` 非空 ⇒ 读面（`buildWorkerLive`）一律推进「计算中」段 ⇒ 屏上撒谎。
+    #
+    # 释放是安全的：`claimable_job_ids` 独立按「已有结果」剔除（store_ledger.py:191），
+    # 所以 release 之后这份 job **不会**回池被重跑；而 release 只在首写成功（200）后调，
+    # 409 输家（备份副本）走不到这里——那份**本就没租约**（`CLAIM_MODE_BACKUP` 不设租约），
+    # token 为空 ⇒ 即便调了也是无副作用 no-op（`release` 对空 token 直接 False）。
+    hub.release(jid, lease_token)
     return 200, "accepted"
 
 

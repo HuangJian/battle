@@ -226,6 +226,54 @@ def test_missing_worker_identity_falls_back_to_lease_holder(tmp_path: Path) -> N
     assert [e["worker"] for e in acc] == ["cloudOld"], acc
 
 
+def test_accepted_result_releases_lease_at_once(tmp_path: Path) -> None:
+    """★ 结果落地 ⇒ 租约**当场**收（2026-10-11 用户报障）。
+
+    缺陷：`accept_result` 收下结果只写 `result/`，**不 release**；租约要等
+    `CLAIM_TTL_SEC=300s` 自然过期才回收。那 5 分钟里 `/admin/queue` 仍把这 job 报成
+    inflight 且 `computing_ago` 非空 ⇒ 读面（`buildWorkerLive`）把它推进「计算中」段
+    ⇒ 首页把一台盘的多份「已算完的旧活」全标成「计算中」（用户看到的
+    `一台 ppo worker 同时在算多轮` 就是这个形状）。
+
+    钉住三件事：① 承接成功 ⇒ 该 job 不再是租约持有人（`lease_worker` 空）；
+    ② 不再出现在 `inflight`（观测面判据）；③ 结果仍在盘上（release 不伤产物）。
+    """
+    ledger = _publish_course(tmp_path)
+    manifest = _read_manifest(tmp_path)
+    with _hub(tmp_path) as (_base, hub):
+        holder = push_worker_id_of("gpu1")
+        lease = hub.claim(
+            JID,
+            ttl=CLAIM_TTL_SEC,
+            worker_id=holder,
+            mode=CLAIM_MODE_EXCLUSIVE,
+            role=ROLE_ONLINE,
+        )
+        assert lease
+        # 观测面（= 首页正读的那一份）：承接前它在这门课的 inflight 里，且已开算。
+        rows = hub.queue_state()["courses"][COURSE]["inflight"]
+        assert [r["job_id"] for r in rows] == [JID], rows
+        code, _why = accept_result(hub, JID, result_of(manifest), lease, worker=holder)
+        assert code == 200
+        rows = hub.queue_state()["courses"][COURSE]["inflight"]
+        assert rows == [], "结果落地后必须当场从 inflight 摘掉（不是等 300s 过期）"
+        assert (tmp_path / COURSE / "remote-jobs" / JID / "result" / "result.json").exists()
+    assert len(_events(ledger, "job_result_accepted")) == 1
+
+
+def test_result_without_lease_token_is_safe_noop(tmp_path: Path) -> None:
+    """备份副本（`CLAIM_MODE_BACKUP`，lease_token 为空）回传的收租约**必须无副作用**。
+
+    备份本就没占租约（`_claim_locked` 的 backup 分支返回空 token）⇒ `release(jid, "")`
+    是 no-op（`release` 对空 token 直接 False）。钉住：这条路径不许因新增的 release 抛错。
+    """
+    _publish_course(tmp_path)
+    manifest = _read_manifest(tmp_path)
+    with _hub(tmp_path) as (_base, hub):
+        code, _why = accept_result(hub, JID, result_of(manifest), "", worker="cloudB")
+        assert code == 200
+
+
 def test_post_result_sends_worker_header(monkeypatch: pytest.MonkeyPatch) -> None:
     """`post_result` 的请求头必须带身份——没有它，输家的 409 归不到人。"""
     seen: dict[str, str] = {}
