@@ -5,8 +5,8 @@
 
 1. `run_main` 的三态行为（`None→0` · `int→该码` · `Ctrl-C→130`）—— 出口语义是新的契约；
 2. 生产树里**没有裸 `argparse.ArgumentParser`**（构造点唯一化，否则「全迁」下次就退回原样）；
-3. `if __name__ == "__main__":` 块里**不许**再出现旧出口（裸 `main()` / `sys.exit(main())`），
-   且 house 构造点与出口的**采用数有下限**（只许涨：新入口必须走它）。
+3. `if __name__ == "__main__":` 块里**不许**再出现旧出口（裸 `main()` / `sys.exit(main())`，
+   **含 `try` / `if` 等嵌套**），且 house 构造点与出口的**采用数有下限**（只许涨：新入口必须走它）。
 
 扫描逻辑住 `tests/helpers/cli_surface.py`（判据只读 AST，不读源码文本）。
 """
@@ -18,8 +18,13 @@ import pytest
 from common.cli import house_parser, run_main
 from tests.helpers import cli_surface
 
-#: 采用数下限（2026-10-11 全迁当天实测：构造点 54 · 出口 62）——**只许涨**
-MIN_HOUSE_CTOR_CALLS = 54
+#: 采用数下限（2026-10-11 全迁复核：构造点 53 · 出口 62）——**只许涨**。
+#: 口径 = 生产树里真实**调用点**（AST 扫描，定义点不计）：
+#:   · 构造点 53 = 全迁 diff 实际新增的生产调用点；旧基线 54 高于扫描器能数到的真实
+#:     调用点数（把定义点之类的非调用行也算了进去）⇒ 门禁恒红，2026-10-11 按真数订正；
+#:   · 出口 62 = 含当天补齐的 `hub/tunnel_ab_probe.py`（它的旧出口包在 `try:` 里，
+#:     旧版扫描只看 `__main__` 顶层语句，整块漏过）。
+MIN_HOUSE_CTOR_CALLS = 53
 MIN_HOUSE_EXIT_CALLS = 62
 
 

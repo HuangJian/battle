@@ -82,7 +82,11 @@ def bare_parser_sites() -> list[str]:
 
 
 def old_style_exit_sites() -> list[str]:
-    """`__main__` 块里还留着裸 `main()` 或 `sys.exit(main())` 的站点。"""
+    """`__main__` 块里还留着裸 `main()` 或 `sys.exit(main())` 的站点（**含 try/if 等嵌套**）。
+
+    嵌套面是实测漏洞：旧版只看 `__main__` 的顶层语句，`hub/tunnel_ab_probe.py` 的
+    `try: sys.exit(main())` 整块漏过（2026-10-11 全迁复核补齐）。
+    """
     out: list[str] = []
     for p in production_files():
         tree = _tree(p)
@@ -91,7 +95,9 @@ def old_style_exit_sites() -> list[str]:
         for n in ast.walk(tree):
             if not isinstance(n, ast.If) or not is_main_guard(n.test):
                 continue
-            for st in n.body:
+            # walk 到块内所有节点；只认 **表达式语句**（`ast.Expr`），这样
+            # `run_main(lambda: main(...))` 里作为实参出现的 main(...) 不会被误报。
+            for st in (node for block in n.body for node in ast.walk(block)):
                 if not isinstance(st, ast.Expr) or not isinstance(st.value, ast.Call):
                     continue
                 fn = st.value.func

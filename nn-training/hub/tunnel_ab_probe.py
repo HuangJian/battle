@@ -46,7 +46,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from common.cli import house_parser
+from common.cli import house_parser, run_main
 from hub.server import _JobStore, make_server
 
 #: 探针客户端一律**不走环境代理**。
@@ -307,7 +307,7 @@ def main() -> int:
 
 if __name__ == "__main__":
     try:
-        sys.exit(main())
+        run_main(main)
     except urllib.error.HTTPError as e:
         # 鉴权/越界类错误点名（**绝不重试**——D9）
         print(f"[ab] HTTP {e.code}: {e.read()[:200]!r}", flush=True)

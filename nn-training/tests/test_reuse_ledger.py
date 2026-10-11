@@ -17,6 +17,7 @@
 
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import pytest
@@ -180,6 +181,57 @@ def test_fingerprint_is_not_empty_for_body_functions(tmp_path: Path) -> None:
     # 用**词数**判「体真的被取到了」，不用 `"return" in content`：后者是文本形态断言，
     # 会顶破 `tests/test_source_text_assert_budget.py` 的基线（那边要求新判据走行为口径）。
     assert len(content.split()) >= 3, content
+
+
+def test_scan_does_not_re_split_source_per_statement(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 性能守卫（2026-10-11）：扫描**不得**按语句重切源码。
+
+    根因：`ast.get_source_segment()` 每次调用都把整份源码重切一遍，而指纹是按**每条子语句**
+    取的 ⇒ O(文件大小 × 语句数)。实测 288 文件 / 2847 函数 **94s**（其中 87s 在
+    `_splitlines_no_ff`）——单个用例预算只有 60s，账本必红；forkdist 下还会先被
+    pytest-timeout 的 SIGALRM 打成一条难认的 AssertionError（子进程的 terminalreporter
+    被摘掉，`get_terminal_writer()` 的 assert 把真错误盖掉）。
+    修法 = 每文件切一次（`reuse_audit._split_lines`）+ 本地取片段（`reuse_audit._segment`）。
+    """
+    _py_tree(tmp_path, {"common/a": "def f(x):\n    y = x + 1\n    return y * 2\n"})
+    calls = 0
+    real = ast.get_source_segment
+
+    def counting(source: str, node: ast.AST, *, padded: bool = False) -> str | None:
+        nonlocal calls
+        calls += 1
+        return real(source, node, padded=padded)
+
+    monkeypatch.setattr(ast, "get_source_segment", counting)
+    reuse_audit.scan(root=tmp_path)
+    assert calls == 0, f"扫描里还有 {calls} 次 stdlib 逐语句重切（每文件只该切一次）"
+
+
+def test_split_lines_and_segment_match_stdlib() -> None:
+    """`_split_lines`/`_segment` 与 stdlib 逐节点对账 —— 「每文件只切一次」的等价前提。
+
+    取样面故意带 CRLF / 裸 CR / 换页符 / 非 ASCII（字节列偏移 ≠ 字符列偏移）——
+    行切法与列偏移的坑全在这。
+    """
+    src = (
+        "def a(x):\r\n"
+        "    y = '中'  # 中文注释\r\n"
+        "    return y\r\n"
+        "\r\n"
+        "def b(x):\n"
+        "    \f\n"
+        "    z = x\r"
+        "    return z\n"
+    )
+    tree = ast.parse(src)
+    lines = reuse_audit._split_lines(src)
+    nodes = [n for n in ast.walk(tree) if isinstance(n, (ast.stmt, ast.expr))]
+    assert nodes, "样例源码没解析出节点"
+    for node in nodes:
+        expected = ast.get_source_segment(src, node)
+        assert reuse_audit._segment(lines, node) == (expected or ""), ast.dump(node)
 
 
 def test_docstring_does_not_affect_the_fingerprint(tmp_path: Path) -> None:

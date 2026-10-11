@@ -29,6 +29,7 @@ import sys
 import tokenize
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import cast
 
 # 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -118,17 +119,75 @@ def _body_without_docstring(node: ast.FunctionDef | ast.AsyncFunctionDef) -> lis
     return body or [ast.Pass()]
 
 
-def _norm_source(node: ast.FunctionDef | ast.AsyncFunctionDef, src: str) -> str:
+def _split_lines(src: str) -> list[str]:
+    """把源码切成「解析器口径」的行 —— `ast._splitlines_no_ff` 的等价实现。
+
+    为什么自己切（2026-10-11 实测）：`ast.get_source_segment()` **每次调用**都把整份源码
+    重切一遍，而指纹是按**每条子语句**取的 ⇒ O(文件大小 × 语句数)。生产树 288 文件 /
+    2847 函数实测 **94s**（`_splitlines_no_ff` 占 87s）—— 单个用例预算只有 60s，账本守卫
+    必红（forkdist 下更绕：SIGALRM 先打在扫描里，报错被 terminalreporter 的 assert 盖成
+    一条难认的 AssertionError）。修法 = 每文件切一次 + 按预切行取片段（`_segment`）。
+    等价性由 `tests/test_reuse_ledger.py::test_split_lines_and_segment_match_stdlib` 钉住
+    （CRLF / 裸 CR / 换页符 / 非 ASCII 字节偏移对账）。
+
+    与 `str.splitlines()` 的差别：只认 `\n` 与 `\r`（`\r\n` 成对）；**不认** `\f` / `\x85`
+    等 —— 它们在 Python 源码里不是换行（`\f` 合法地当空白），照 `splitlines()` 切会把行号切歪。
+    """
+    lines: list[str] = []
+    start = 0
+    idx = 0
+    total = len(src)
+    while idx < total:
+        c = src[idx]
+        idx += 1
+        if c == "\r":
+            if idx < total and src[idx] == "\n":  # \r\n 不拆开
+                idx += 1
+        elif c != "\n":
+            continue
+        lines.append(src[start:idx])
+        start = idx
+    if start < total:
+        lines.append(src[start:])
+    return lines
+
+
+def _segment(lines: list[str], node: ast.AST) -> str:
+    """预切行版的 `ast.get_source_segment(..., padded=False)`（缺位置信息 ⇒ `""`）。
+
+    ⚠ 列偏移是 **UTF-8 字节偏移**（与 stdlib 同款：`lines[i].encode()[col:end].decode()`）——
+    别改成字符切片，含中文注释/字符串的行会切歪。多行片段按 stdlib 语义拼接：行自身带换行符，
+    直接 `""` 连接（不是 `"\n".join`）。
+    """
+    lineno = getattr(node, "lineno", None)
+    col_offset = getattr(node, "col_offset", None)
+    end_lineno = getattr(node, "end_lineno", None)
+    end_col_offset = getattr(node, "end_col_offset", None)
+    if lineno is None or col_offset is None or end_lineno is None or end_col_offset is None:
+        return ""  # 重建出来的占位节点（`_body_without_docstring` 的 `Pass`）没有位置
+    # getattr 的静态类型是 `Any | None`；上面已排除 None，这里收窄（`no-any-return`）。
+    lineno = cast(int, lineno) - 1
+    end_lineno = cast(int, end_lineno) - 1
+    col_offset = cast(int, col_offset)
+    end_col_offset = cast(int, end_col_offset)
+    if end_lineno == lineno:
+        return lines[lineno].encode()[col_offset:end_col_offset].decode()
+    first = lines[lineno].encode()[col_offset:].decode()
+    last = lines[end_lineno].encode()[:end_col_offset].decode()
+    middle = lines[lineno + 1 : end_lineno]
+    return "".join((first, *middle, last))
+
+
+def _norm_source(node: ast.FunctionDef | ast.AsyncFunctionDef, lines: list[str]) -> str:
     """去掉 docstring / 注释 / 换行 / 缩进后的内容指纹。
 
     ⚠ **不要重建 AST 节点**来剔 docstring：新建的节点没有 `lineno`/`col_offset`
-    ⇒ `ast.get_source_segment` 返回 `None` ⇒ 所有函数指纹都是空串、全仓被归为一组
+    ⇒ 取出的片段是空串 ⇒ 所有函数指纹都成空串、全仓被归为一组
     （本工具初版就是这么错的，由用例 `test_fingerprint_is_not_empty_for_body_functions` 钉住）。
-    正确做法：按**子语句**取源码片段（位置信息在原子节点上）。
+    正确做法：按**子语句**取源码片段（位置信息在原子节点上）。行表由 `_funcs()` 每文件切一次
+    后传入 —— **别**改回调 `ast.get_source_segment`（那是 O(文件大小)/语句，见 `_split_lines`）。
     """
-    seg = "\n".join(
-        ast.get_source_segment(src, st) or "" for st in _body_without_docstring(node)
-    )
+    seg = "\n".join(_segment(lines, st) for st in _body_without_docstring(node))
     try:
         toks = tokenize.generate_tokens(io.StringIO(seg).readline)
         keep = [
@@ -194,6 +253,7 @@ def _funcs(path: Path) -> list[tuple[str, str, str, int]]:
         tree = ast.parse(src)
     except (SyntaxError, UnicodeDecodeError, OSError):
         return []
+    lines = _split_lines(src)  # 每文件只切一次（逐语句重切 = 94s，见 `_split_lines`）
     out: list[tuple[str, str, str, int]] = []
     for node in ast.walk(tree):
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
@@ -203,7 +263,7 @@ def _funcs(path: Path) -> list[tuple[str, str, str, int]]:
             shape = _shape(node)
         except Exception:  # `unparse` 对个别语法（新版 match 等）可能失败 ⇒ 不因此丢整份文件
             shape = ""
-        out.append((node.name, _norm_source(node, src), shape, node.lineno))
+        out.append((node.name, _norm_source(node, lines), shape, node.lineno))
     return out
 
 
