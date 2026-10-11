@@ -2978,6 +2978,601 @@ localWorker→丹徒），hover 提示各服务用途。
 
 <!-- OLD-NUMBER-MAP: 自动生成，勿手改 -->
 
+
+---
+
+> **第二轮归档（2026-10-11）**：`DECISIONS.md` 第三次瘦身把 **2026-09-24 起、正文 >12 非空行**的 **18** 条决策全文按主题落到本节（第一轮 2026-09-23 见上文）。家族分组只归类、只连线，结论与理由一律引原文；`DECISIONS.md` 索引行末尾的指针 = `docs/nn/console.md` §11「决策正文归档」· 锚 `### §<id>`。
+
+**家族谱系（同一问题的先后进展按主题归并，先后为时间序）**
+
+- **A｜节点统计与贡献度**（4 条，2026-09-26～10-06）：`§2026-09-26-nodes-decouple-from-course` → `§2026-10-02-goalnn-worker-contribution` → `§2026-10-02-nodes-lastcontrib-winner-must-have-completed-round` → `§2026-10-06-goalnn-offline-leg-sampling-exclusion`
+  - 末条决定（原文节录）：**剔除离线腿整段**——例 `x21-psh-a` it9..87。……
+- **B｜课程 pill 精确化**（1 条，2026-10-02）：`§2026-10-02-goalnn-course-pill-precision`
+  - 末条决定（原文节录）：hub 观测面纯加法（inflight 行 `claimed_ago`/`computing_ago`；顶层 `peeked_courses`……
+- **C｜告警坞与磁盘预警**（2 条，2026-10-03～10-09）：`§2026-10-03-goalnn-dashboard-alert-dock-global` → `§2026-10-09-goalnn-self-node-disk-alert`
+  - 末条决定（原文节录）：agent 单源两层阈值——**预警 `DISK_WARN_MB=4096`（纯观测）** + **拒收地板……
+- **D｜控制台请求路径与内存**（3 条，2026-10-03～10-07）：`§2026-10-03-goalnn-request-path-zero-aggregate` → `§2026-10-07-pool-history-large-stream-rescan` → `§2026-10-07-logtail-bounded-read`
+  - 末条决定（原文节录）：两条都改「有界读」——`logTail` 尾部窗口（`LOG_TAIL_BYTES = 256KB`，文件 ≤ 窗口时与旧实现……
+- **E｜指标表抵轮转拄录**（1 条，2026-09-28）：`§2026-09-28-goalnn-console-metrics-harvest`
+  - 末条决定（原文节录）：① 控制台侧修：`snapshot-refresher` 新增抗轮转抄录（**独立 15s 节拍**），对**所有已开课**课……
+- **F｜evalBoard 停用与评估时间口径**（2 条，2026-10-05～10-06）：`§2026-10-05-evalboard-off` → `§2026-10-06-goalnn-eval-cloud-time-utc`
+  - 末条决定（原文节录）：**读侧**转换（历史数据必须修正）：`server/iters.ts` 的 `readEvalSummaries` /……
+- **G｜回放导出与趋势图**（3 条，2026-10-06～10-09）：`§2026-10-06-goalnn-replay-export-eval-round-picker` → `§2026-10-09-goalnn-compare-trends-modal` → `§2026-10-09-goalnn-ppo-live-rows`
+  - 末条决定（原文节录）：worker 每轮末经 `POST /admin/worker-prefetch` **只报 jid**（形状未变不发 / 失败静默退避 12 轮 /……
+- **H｜哨兵路径必须实存**（1 条，2026-09-30）：`§2026-09-30-goalnn-dashboard-sentinel-paths-must-exist`
+  - 末条决定（原文节录）：① 哨兵路径改指真实家（`common/protocol.py`）；② 加**机械守卫**……
+- **I｜账本 pid 与存活判据**（1 条，2026-10-11）：`§2026-10-11-goalnn-ledger-pid-not-liveness`
+  - 末条决定（原文节录）：**账本 pid 降级为提示，不再是判决**（S1 只针对 selfNode：`hubServer`/`trainingLoop` 的换代……
+
+**家族 A — 节点统计与贡献度**
+
+### §2026-09-26-nodes-decouple-from-course（2026-09-26，节点统计与课程解耦 + 按天窗口）
+> 决策 `DECISIONS.md` §2026-09-26-nodes-decouple-from-course。归档 2026-10-11（第二轮瘦身）。
+
+**来历**：控制台节点页自称“机群级”，但 `aggregateNodeHistory()` 一直只聚合 `tmp/**` 里 mtime
+最新的**那一个** `dist-agent-meta.jsonl`（旧动机：避免旧训练流数千条历史淹没新数据）——实际是
+「最近活跃那一门课」的页。plan/nodes-decouple-from-course.plan.md（2026-09-24 用户指令 + 2026-09-26
+评审修订）。
+
+**决定**：① 数据源合并**所有**训练流（课程目录 + 独立 eval run 目录），逐流取完成水位
+（账本 `iteration`）**只用于过滤进行中那一轮**；② 视图按**本地日**分桶、`?days=` 切窗口
+（today/yesterday/7/all/N）；③ 课程内序号 `it` 是**课程内**序号、跨课不可比，**不进任何展示
+字段**；④ `aggregateNodeHistory()`（全量、与窗口无关、进 SWR 缓存）⊕ `projectWindow()`（纯投影）
+⇒ 切天零重算，预筛钉在 epoch；⑤ 健康度取「最新完成轮」（跨课按**完成时刻**选，`nodeHealth` 判据
+不变）；pill 的 `lastContrib` 与节点表**共用同一份 agg**；表格状态列改名「成功率」（窗口内完成率）
+与 pill「产能」分列分名。
+
+**被否决**：把「全局 it 基准」当跨课对齐口径（`it` 是课程内序号，课 A 的 it300 会把课 B 的 it50
+全算成 0 贡献，看着像掉线）；预筛随窗口变（会让 `days=1` 与 `days=all` 读不同文件集 ⇒
+「切天零重算」不成立）；把「最新完成轮」按 it 大小排序（停摆课的高序号会误胜）。
+
+**违反后果**：展示面出现 `it` ⇒ 跨课比较无意义（同一数字两门课含义不同）；按 it 选最新完成轮 ⇒
+停摆课永久占据基准，活跃节点被算成 0 贡献（假离线）；UTC 换算 ts（训练机本地时间）⇒ 傍晚的局
+跨天错桶。
+
+**落点**：`dashboard/src/server/pool-history.ts`（byDay / projectWindow / resolveWindow /
+lastContrib）、`server/api/pool.ts` + `snapshot-cache.ts`（两个消费者）、`web/view/pool-types.ts` +
+`NodeStats.tsx`（Segmented + 列改名）；正文 `docs/nn/console.md §16`。
+
+**二轮评审补正（2026-09-26，同日）**：① `aggregateNodeHistory()` 加**进程内 memo**（池根 + epoch +
+候选指纹〔路径/mtime/体积〕+ `AGG_MEMO_MIN_MS = 30s` 时间下限）—— 两个消费者共一份，训练中
+（meta 逐秒追加）重扫节奏也封顶（否则快照刷新器每 5s 重扫全池）；② **水位只作用于计数/样本，
+时间戳/错误列取全部行**：`isSlowNode` 与「最近成功/失败」是**可达性**口径（含进行中那一轮），
+统计是数据卫生口径 —— 两者混用会把「轮前段就交完活」的节点推回上一轮时刻、在 30 分钟窗边界
+把「慢」误判成「离线」（2026-09-11 报障的反面）；③ 「最近失败」与「最近错误」同按**近一小时**
+判定；④ 预筛锚点随**池扫描根**取（默认路径逐字节不变）⇒ 单测可端到端验预筛；⑤ 预筛命中数
+按**扫描深度护栏**算（`tmp/**` 下 131 个 meta 文件 ≠ 实际命中的 15 个流），ts 解析不出的行丢弃、
+不再落进 1970-01-01 桶。
+
+**被否决（二轮）**：只给候选流数加硬上限（静默丢流，面上看不出、行却少算）；memo 只留指纹不留
+时间下限（训练中 meta 逐秒追加 ⇒ 指纹每秒都变，等于没缓存）；把 `lastFailTs` 从窗口改成窗口无关
+的全量最大（脚注说的近一小时就变成假话）。
+
+### §2026-10-02-goalnn-worker-contribution（2026-10-02，并行 worker 贡献度：承接面归属 + 两个单位组永不合并 + 课程只作 breakdowns 轴）
+> 决策 `DECISIONS.md` §2026-10-02-goalnn-worker-contribution。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：7 门课并行、2 个云端 worker 领活的场景下，「谁干得多」在数据面上不成立：采样侧只有绝对
+  局数（无份额/无课程维度/无盯盘窗）；PPO 侧**归属在结算那一刻被丢掉**——`job_completed` 由训练侧写
+  （`remote/hub_client.py::mark_job_completed`）且无 worker，身份只在 hub 承接结果那一刻可得。评审另纠
+  两处：`hub/store_leases.py::mark_completed` 是生产零调用者的死代码（改它没有数据）；`DayBucket` 无
+  per-event 时间戳（滚动窗不能从日桶投影，须有界子日事件环）。
+- **备选与否决**：① 做一个综合贡献分（局 + job + 秒加权）——否：口径混算（与「成功率/产能分列分名」
+  同款裁决相悖），且会把 7 门课之间的差异抹平；② 把课程维度接回「按课缓存」——否：2026-09-26 解耦
+  裁决不动，课程只作 breakdowns 轴（按课名、不用 `it`）；③ 让云端 PPO worker 的采样局也计进 PPO 组
+  （或反向合并）——否：两组分母/单位/失败语义都不同，用户裁决**角色隔离**（归属由来源决定），同名不合并；
+  ④ 滚动窗从日桶投影——否：日桶只有日级计数、无子日时间戳，会做出看着对实际错的窗。
+- **决定**：① hub 承接面新增归属事件（**扩事件不新建账本**）：`accept_result` 成功写
+  `job_result_accepted`（worker = 显式传入 ∪ 当前租约持有人，push 腿 `push:` 前缀），三条 409 路径
+  （`_post_result` 早退 / `store_result` 失败 / push 输家）写 `job_rejected`；结果 POST 补 `X-Worker-Id`
+  （`post_result`，与 claim 同一身份）。事件与训练侧 `job_completed` 同册（`tmp/<课>/training_log.jsonl`），
+  读侧按 `job_id` join。⚠ 身份缺失（旧 worker 无头）⇒ 回退当前租约持有人，但 `lease_worker` 住在每课
+  `_JobStore`（`_HubQueue` 没有）⇒ 必须经 `_store_of` 解析，结果面不得 500。② 面板两组**永不合并**
+  （采样=局 / PPO=job），份额分母组内自洽，缺数据「—」；课程维度只作 breakdowns（机器×课矩阵 + 单点依赖
+  标记）；新增 `近 30 分钟/近 2 小时`滚动窗（既有 4 档一字不动），滚动窗吃**有界子日事件环**（2h+10min 保、
+  每节点 20000 条、触顶 `rollingTruncated` 出脚注）。③ 落位：节点页主体（份额列表 ⇄ 矩阵）+ 首页一行
+  缩略（同一份聚合的 `compactSummary` 裁剪，防两份真相）。
+- **违反后果**：把两组分母互加/做综合分 ⇒ 产出既非局数也非 job 数的假数；按名字归并同名身份 ⇒ 把采样机
+  与云机 worker 当同一台机器；用 `mark_completed` 或训练侧 `job_completed` 补归属 ⇒ 永远空手（写手无
+  身份）；从日桶投影滚动窗 ⇒ 窗内数字静默失真；缩略行另起一份计算 ⇒ 首页与节点页对不上；`_append_attribution`
+  直接调 `hub.lease_worker` ⇒ 旧 worker 的结果面 500（全量门禁抓到，回归用例已钉）。
+- **指针**：全文 → `docs/nn/console.md` §23 · `docs/nn/remote-transport.md` §55；计划 →
+  `plan/worker-contribution-view.plan.md`（2026-10-02 评审修订版）；回归 → `dashboard/tests/worker-contribution.test.ts`
+  （12 例）· `nn-training/tests/hub/test_worker_attribution.py`（6 例）；实现 → `dashboard/src/server/contribution.ts` ·
+  `dashboard/src/web/view/contribution.ts` · `dashboard/src/server/pool-history.ts`（滚动环/byCourse）·
+  `nn-training/remote/push_dispatch.py`（`_append_attribution`）· `nn-training/remote/job_lifecycle.py` ·
+  `nn-training/hub/result.py`。
+
+### §2026-10-02-nodes-lastcontrib-winner-must-have-completed-round（2026-10-02，节点「贡献 0 / 离线」误报的根治）
+> 决策 `DECISIONS.md` §2026-10-02-nodes-lastcontrib-winner-must-have-completed-round。归档 2026-10-11（第二轮瘦身）。
+
+- **症状**：控制台节点 pill 把 `self` 显示成「贡献 0 / 离线」，而它是当天贡献最高的节点
+  （窗口内 rollout 9644 + eval 1950 局）；表格展开行的「最近完成轮贡献」也是 0。
+- **根因**：`lastContrib` 取自跨流的「最新完成轮」winner，而 winner 的完成时刻写作
+  `completed?.atMs ?? src.mtimeMs`（`dashboard/src/server/pool-history.ts`）——**一轮都没跑完**
+  的流（没有 `iteration` 事件）也会带着 meta 文件的 mtime 进场，而它常常是最新写入的那个 ⇒
+  抢走 winner ⇒ `contribAtBase` 落在它那条**没跑完**的轮上 ⇒ 没参与那轮的节点全被算成 0 局。
+  数字对得上：线上 `mac=130 / a95=38` 正是崩溃循环流 `h4-hurt-f75` 那条 it1 的逐节点计数。
+  0 局 → `nodeHealth(0, 并发)` = `offline` → pill 报「离线」。
+- **决定**：winner **只在真跑完过至少一轮的流**（`completedIt !== null`）里选；全部流都没跑完
+  ⇒ `latestRound = null` + `lastContrib` 空表（消费方得 -1 = 「无池数据」），**不挑一个充数**。
+  实现形状：`FlowState` 增 `completedIt`（该流账本最后一个 `iteration` 的 it），判据只用它。
+- **被否决**：改 `nodeHealth`（不再用「最近完成轮贡献」判离线）—— `console-types.ts` 记着
+  2026-09-20 **用户指令**「健康度只由最近完成轮的贡献数判定，与 ping 探测无关」⇒ 那是刻意的
+  语义，不是洞。故「该轮确实交了 0 局 ⇒ 仍判离线」这条**不动**（它现在是诚实的 0，而不是被
+  别的流污染的 0）；若将来要改成窗口口径，属新指令。
+- **落点**：`dashboard/src/server/pool-history.ts`（`FlowState.completedIt` + winner 资格）
+  · 类型文档 `web/view/{console-types,pool-types}.ts` · 回归
+  `dashboard/tests/server-pool-history.test.ts`（+2 例：崩溃流不得抢 winner /全员未完成 ⇒ 无完成轮）。
+
+**指针**：事故现场 `tmp/h4-hurt-f75/`（含其崩溃循环的真因）· 训练侧修复
+`DECISIONS.md §2026-10-02-goalnn-engine-pool-midround-pin` · 课程 pill 的状态精确化
+`plan/course-pill-precision.plan.md`（不同面：那个是**课程** pill）。
+
+### §2026-10-06-goalnn-offline-leg-sampling-exclusion（2026-10-06，用户指令：offline worker 完成的轮算节点 PPO 贡献、不算 rollout/eval 贡献）
+> 决策 `DECISIONS.md` §2026-10-06-goalnn-offline-leg-sampling-exclusion。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：云机离线腿（`nn-training/remote/offline_eval.py` + `hub/store_offline.py`）替本机跑掉一段
+  it 的 rollout/eval；控制台「采样贡献」照本机 meta 账本算，把这批轮记在本机节点头上。
+- **口径（用户选定）**：**剔除离线腿整段**——例 `x21-psh-a` it9..87。
+- **决定**：腿 = 课程账本里 `offline_artifact` 事件带的 it 集合（`pool-history.readOfflineLegs`）；
+  剔除发生在**计数入口** `ingestLine`（日桶/课维度只有「天」粒度，事后扣减无 it 可依），行在
+  ①逐流 it 分布 / ②日桶 / ③滚动环 / ④计数之前就返回；腿集合进聚合 memo 的**指纹**
+  （变更后清流态重读，延迟 ≤ `AGG_MEMO_MIN_MS` 一个窗口，不做「一变即作废」）。
+- **为什么不能只剔「云机写的行」**：云腿的 meta 行**根本不写进本仓** `dist-agent-meta.jsonl`
+  （2026-10-06 实测 `tmp/x21-psh-a`：`"node": "cloud"` = 0 行），只剔云行 = 什么都不剔。
+- **代价（已知并接受）**：腿区间里的**本机行**一并被剔。实测 26 课里 11 课有腿、全场 297,181 行
+  剔 20,688 行（7%）；`x20-adv2-max` 剔 9,336 行（腿从 it0 起）、`x21-psh-a0` 腿 5..150 = 整课、
+  `x20-adv3-kind-r2` 腿在尾段（保留行只到 it31）。要「只剔云行」得先把云行写进 meta（写侧改动）。
+- **不动的部分**：PPO 贡献走 `contribution.ts` 的 `job_result_accepted` / `job_completed` 事件，
+  不经本模块 ⇒ 照旧统计（正是用户要的那一半）。
+- **违反后果**：把剔除挪到投影层（事后扣）：日桶无 it 可依，只能漏剔或错剔。
+
+
+**家族 B — 课程 pill 精确化**
+
+### §2026-10-02-goalnn-course-pill-precision（2026-10-02，pill 精确化：hub 派发面接进 pill + 只读读面拿 iters 判收官）
+> 决策 `DECISIONS.md` §2026-10-02-goalnn-course-pill-precision。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：两起独立缺陷。① pill 的在线课五态全是**本地进度词**；h4-aim-c0 的首个 job 被一个误启
+  持有者「有心跳地」按住 27 分钟（真 GRAD 33.7s，对照 k10/k25 同配置 2.7/3.3 分钟），三道既有
+  防线结构上判不出（孤儿要零心跳 / 熔断要租约过期 / 队列停滞检测看 pending→completed 缺口），
+  而 pill 只会说「等回传」。② h4-aim-k10/k25 跑满 40 轮仍显示「推进中」——只读读面按盘重建计划
+  却拿不到 `iters` 预算，`state='done'` 从未点亮。
+- **备选与否决**：① 对「有心跳但慢」加自动处置（回收/降优先级）——否：先要读数面跑一段再定阈值
+  与动作（plan O1），且不动调度是本刀的边界；② 用账本 `run_complete` 当收官判据——否：它是上一次
+  run 的陈述（改大 iters 续跑后陈旧），收官 SSOT 是预算，第二份判据必然分叉；③ pill 布尔
+  `peeked`——否：无法区分「旧 hub 没字段」与「确实不在窗口」；④ 控制台自己判收官——否：显示层
+  不新增判据；⑤ 本机 inflight 与「排队·无人取」并置——否：对不上 hub jid = 本机在算，必须压过排队态。
+- **决定**：hub 观测面纯加法（inflight 行 `claimed_ago`/`computing_ago`；顶层 `peeked_courses`
+  = 60s 内被 `peek_jobs` 返回过候选的课程集；只被 `/admin/queue` 读，调度判据零引用）· 收官判据
+  单点 `worker/loop_tasks.budget_exhausted(it, iters)`（`iters<=0` ⇒ False；`LoopRunner.planner`
+  行为逐字节不变），读面 `plan_course(iters=)` 跑满 ⇒ 空任务表 ⇒ `QUEUE_DONE`，
+  `waiting_state(finished=)` ⇒ `WAIT_IDLE` + 诚实文案（不新增 WAIT kind）；预算 = 课程声明
+  `curricula/<课>.jsonc`（读不到 ⇒ 0 = 不限，保持今天行为）· pill 四态（卡住/等回传/排队·无人取/
+  预取中）+ 龄 + jid 连接（本机/远端）+ 未登记持有者点名；`PILL_STUCK_SEC=300` 是**展示层常量**，
+  不得被 hub/训练侧 import。
+- **违反后果**：展示字段接进 `_claim_locked`/优先级 ⇒ 展示需求烧进调度语义；读面写第二份收官判据
+  ⇒ pill 与实际续跑各说各话；缺龄编 0 ⇒ 卡死 27 分钟显示成「刚认领」。
+- **指针**：全文 → `docs/nn/remote-transport.md` §54 · `docs/nn/training-stack.md` §28 ·
+  `docs/nn/console.md` §22；计划 → `course-pill-precision.plan.md`（评审 P1–P4 已并入）；回归 →
+  `tests/hub/test_queue_observe_pill.py` · `tests/worker/test_loop_tasks.py` ·
+  `tests/trainer/test_loop_plan_waiting.py` · `dashboard/tests/training-pills.test.ts`。
+
+
+**家族 C — 告警坞与磁盘预警**
+
+### §2026-10-03-goalnn-dashboard-alert-dock-global（2026-10-03，告警坞全局化：收官横幅按课成列 + 七类条目全可关可复制）
+> 决策 `DECISIONS.md` §2026-10-03-goalnn-dashboard-alert-dock-global。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：用户 2026-10-02 两条指令（收官横幅要全局可见 / 所有横幅可关闭可复制）。改前收官横幅读面是
+  单课单值（`StateView.loopComplete` + 按课程键控的 `computeSlowSnapshot`）⇒ 不切课看不到「已经跑完了」；
+  七类条目里 4 类没有 ack、7 类全没有复制。
+- **备选与否决**：① 停机 ack 换到新键空间（新 kind + 新表）——否：无收益的净回归（升级后重弹红条），
+  且要双表并读 + 迁移；② 保留 `loopComplete` 单值做兼容——否：第二份真相（server/web 同批构建无版本错位）；
+  ③ 聚合塞进按课程键控的慢快照——否：全课聚合会被按「请求课程」各缓存一份，切课即重算、并发各算一遍；
+  ④ 聚合遍历全部已知课程（含历史课）——否：几十门历史课账本在盘上，逐拍全扫是浪费（同 harvest 闸）；
+  ⑤ 给收官条造「立即恢复」——否：第二份真相（N6）。
+- **决定**：收官横幅读面扩为 `loopCompletes: Record<course, LoopComplete>`，聚合落 `state-view.ts`，判活用
+  共享 `trainingLoop` 的全局存活事实，课程清单 = 已开课 ∪ 查看课，条目按课成列、标题带课名、按课名排序；
+  新 `alertAckKey(kind, subject, eventId)` 统一事件身份键（`cloudHaltAckKey` 委托它 ⇒ 停机键逐字节不变），
+  存储仍用同一张表（常量改名 `TC_ALERT_ACKS`、值冻结 `tc.cloudHalt.ack`）；`AlertItem.copyText` 由
+  `withCopy()` 统一派生（三行纯文本），`AlertDock` 用现成 `CopyButton`（icon）与动作区分区。
+- **违反后果**：改 `visibleCloudHalts` 的「只弹本课」= 重演 2026-09-14 事故；换停机键 kind = 用户重关一次红条；
+  开第二张 ack 表 = 双读双写 + 迁移；给 `alerts.ts` 引进 IO/localStorage = SSR/水合红线（它必须仍是纯函数）。
+- **指针**：全文 `docs/nn/console.md` §24 · plan `plan/dashboard-banner-global.plan.md`（评审修订版，§11 处置表）。
+
+### §2026-10-09-goalnn-self-node-disk-alert（2026-10-09，self 节点低盘从「静默」变「响亮」：预警档 4096 + 告警坞条目 + 徽标；**拒收地板 2048 冻结**）
+> 决策 `DECISIONS.md` §2026-10-09-goalnn-self-node-disk-alert。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：2026-10-08 self 节点 1h41m（08:13–09:55）不参与 rollout/eval——D: 可用空间破 2048MB
+  硬地板 ⇒ 每个作业回 503 ⇒ trainer 连 9 次瞬时失败停派；全程 `node self: offline` 0 次、控制台零告警、
+  `diskFreeMB` 从没上屏（`/v1/status` 早就带回它，只是没人渲染）。故障在操作员视野里不存在。
+- **备选与否决**：① 把**拒收**地板抬到 4–5GB——**否（轨迹否决）**：实测训练中盘长期停在 1.2–1.8GB，
+  抬线 = 节点在几乎全部训练时段拒收一切作业（比故障更糟）；② 纯档位级 ack 键——否（`TC_ALERT_ACKS`
+  只增不减 ⇒ 同一浏览器 warn 档一辈子只响一次，正是本案要消灭的静默）；③ 纯事件级键——否（持续态
+  每次重算都真 ⇒ 疲劳）；④ D 先行（dashboard 本地兜底阈值）——否（A 落地前 ping 上一个磁盘数都没有，
+  `selfDisk` 恒 null，告警永不出现）；⑤ agent 自动清 tmp/——否（删训练产物不可逆，是操作员的决定）。
+- **决定**：agent 单源两层阈值——**预警 `DISK_WARN_MB=4096`（纯观测）** + **拒收地板
+  `DISK_FLOOR_MB=2048`（冻结；准入判据抽 `decideTaskAdmission()` 纯函数）**，回差 512；五字段
+  （`diskFreeMB/diskLevel/diskWarnMB/diskFloorMB/diskLevelSince`）走既有 `/v1/ping`（零新增探测，
+  顺带覆盖全机群）与 `/v1/status`；dashboard 搬运到 `selfDisk`，告警坞新一类条目
+  （`warn`→warn / `critical`→err；ack 事件身份 = **档位 × 进档时刻**），NodeStats 徽标上屏
+  （旧 agent 无档位 ⇒ 只显 MB）。
+- **违反后果**：抬地板 ⇒ 节点永久拒收；拿档位当拒收判据 ⇒ 回差带 [2048,2560) 里告警说「已在拒收」
+  而 agent 正在收活（后果句只能由 `freeMB < floorMB` 判）；纯档位 ack ⇒ 早期预警只响一次；
+  看板硬编码 MB ⇒ 阈值以后改了 UI 漂开。
+- **测试/证据**：`tests/agent/disk-level.test.ts`（14 例：边界/回差/不抖/准入守门 3000MB⇒accept/
+  上报接线源码守卫）· `dashboard/tests/web-alert-dock.test.ts`（新一类：回差带不说拒收、换档与复发
+  必重弹、同严重度排在停机前）· `dashboard/tests/web-app-nodestats.test.ts`（徽标口径 + SSR）·
+  `dashboard/tests/server-api-node-views.test.ts`（新 agent 解析 / 旧 agent null）。
+  —— 全文（评审 F1–F11 处置 / 逐文件落点 / 驳回的抬线论证）→ `plan/self-node-disk-alert.plan.md` ·
+  评审 → `plan/self-node-disk-alert.review-bf.md`
+
+
+**家族 D — 控制台请求路径与内存**
+
+### §2026-10-03-goalnn-request-path-zero-aggregate（2026-10-03，控制台重载 ~10s + 常驻 1GB：请求路径零聚合 + 聚合增量入账）
+> 决策 `DECISIONS.md` §2026-10-03-goalnn-request-path-zero-aggregate。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：用户 2026-10-03 报「dashboard 重载 ~10s + 进程占 1GB」。实测：`/api/state` 40 连击
+  17/40 落 0.3–2.7s、WS 涨到 1.38GB、空载 CPU ~30% 单核；`aggregateNodeHistory()` 冷算 1057ms /
+  +116MB、命中 memo 仍 37ms（walk 在 memo 前）、`listCourseLedgers()` 9.9ms/次无 memo。
+- **备选与否决**：① 只降 `LARGE_META_BYTES`（少读几份大文件）——否：**丢历史窗口**（把内存换成错数，
+  与「全部根治」口径冲突；本 plan 用增量而非截断换性能）；② 新增一个 `createSwrCache<ContributionView>`——
+  否：WC-plan §1.3 明禁的**第二个缓存层**，且会与 `fleetProbeCache` 各算一份 `agg`；③ 后台刷新器为缩略
+  的 inflight 多 await 一次 hub 探测（1.2s）——否：为不显示的数字付超时预算、拖慢整拍；④ 给 G7 开
+  「纯在飞 worker 可缺失」的例外——否：那是把不一致写成规格；⑤ 跨流同毫秒平局沿用 mtime 序——否：
+  增量下不可复现（旧流 mtime 会被新写入推走），canonical 目录名升序才是「增量/全量相等」的必要条件；
+  ⑥ truncated 流也做增量累计——否：与「只读尾部」两条口径打架，28.1/15.6MB 两条流数字必变。
+- **决定**：三条一起做（缺一条只是把症状搬位置）——
+  **R1** 贡献度缩略挂 `FleetProbes.contributionBrief`（`computeFleetProbes` 后台顺手产出；
+  `inflight` 走 `peekHubAdmin()` 的上一拍值），`state-view.ts` 只读缓存（请求路径零聚合）；
+  **R2** `aggregateNodeHistory` 改「扫描 memo（同 `AGG_MEMO_MIN_MS`）+ 每流增量入账（`size:mtime`
+  指纹；未变零读、变大读 `[offset,size)` 分块游标、回退/重写/水位后退全量重建）+ 可合并桶归并
+  （每流尾窗口截尾 + `(ts, seq)` 归并再截尾；`>=` 决胜同规）+ 水位 `pending` 翻转」；
+  **R3** `listCourseLedgers` 消费 `scanPoolStreams()`（一次 walk 两组候选），PPO memo 判定前置。
+- **违反后果**：把聚合放回请求路径 = 每请求 47ms 同步扫描 + 每 30s 1s 级全停（本事故重演）；用
+  `split` 全文读 = 13 万行数组 + 116MB 峰值（JSC 堆高水位不归还）；反向扣减水位 = 双计/漏计；
+  两个消费者各扫一遍 = R1 的病根同构；truncated 流做增量 = 贡献度数字与面板不一致。
+- **落点**：`dashboard/src/server/{pool-history,contribution}.ts` ·
+  `dashboard/src/server/api/{snapshot-cache,state-view,overview}.ts` · `dashboard/src/server/server.ts`（注释）·
+  `dashboard/tools/perf-probe.ts`（新）· 回归 `dashboard/tests/{server-pool-history,server-api-state-view,worker-contribution}.test.ts`。
+- **指针**：全文 `docs/nn/console.md` §25 · plan `plan/dashboard-reload-perf.plan.md`（评审修订版 A1–A6）。
+
+### §2026-10-07-pool-history-large-stream-rescan（2026-10-07，池历史大流：文件大只决定「怎么读」，不决定「要不要重读」）
+> 决策 `DECISIONS.md` §2026-10-07-pool-history-large-stream-rescan。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：用户报「没开训练时控制台空置，WS 在 280–856MB 锯齿」。原 plan 把根因定为「45 个大流每 5s/15s
+  各重读一遍尾部 ≈ 每拍 5 万次 `JSON.parse`」。**评审（同日）先用 memo 判据 + 既有绿用例证伪了它**：
+  `aggMemoReusable` = 「指纹相同 ⇒ 复用、与时间无关」⇒ 空置无写入 ⇒ 指纹（全 meta 的 `dir|mtime|size` +
+  腿指纹）不变 ⇒ 命中 ⇒ 连流循环都不进。盘面也与原 plan 不符：池根是仓库根 `tmp/`，199 个 meta / 126.8MB，
+  其中 13 个 >2MiB、5 个 >8MiB（不是 45 个）。
+- **决定**：改重建判据 —— 拆出 `grewOrChanged`，大流条件改成 `src.size > LARGE_META_BYTES && grewOrChanged`
+  （阈值分支保留 ⇒ truncated 读法与口径一字不动）。真代价 = 「只要本循环被进入（任一流变动 / 首见 / 腿指纹
+  变化），所有 >2MiB 的流**无论自己变没变**都重读尾部」⇒ 一个流追加连坐 12 个大流。顺带：`readChunkLines`
+  逐行重建尾串（O(n²)，1MiB≈2GB 临时字符串）改 `start` 游标 + 块末归位一次（O(n)）；新增只读端点
+  `/api/poolCounters` 供空置取证（纯读，不触发聚合）。
+- **否决与备选**：①「空置降频 / 新增 `hasLiveTraining`」—— 要新造第二份「有没有课在训」的判据，与
+  `loop-queue.ts:204`「别再往外要第二个 `training: string[]`」冲突，且其前提已被证伪；②「调高
+  `LARGE_META_BYTES`」—— **方向反了**：阈值越大，走全量分块读的流越多，而 truncated 分支是**尾部 512KB
+  有界读**、更便宜；③「大流一律改走增量」—— 会让「只读尾部」与「累计全史」两条口径打架（原注释已写明）。
+- **后果**：856MB 峰值真凶**仍未定位**（pool-history 已被排除）；候选清单与下一步取证（空置取两次
+  `/api/poolCounters`，`computes` 不涨即确认）见 `docs/nn/console.md §33`。
+- **落点**：`dashboard/src/server/pool-history.ts`（判据 + 游标）· `dashboard/src/server/api/pool.ts` +
+  `dashboard/src/server/server.ts`（端点）· `dashboard/tests/server-pool-history.test.ts` ·
+  `dashboard/tests/server-api-pool.test.ts` · 全文 → `docs/nn/console.md` §33。
+
+### §2026-10-07-logtail-bounded-read（2026-10-07，`logTail` 改尾部窗口读：空置 WS 280↔856MB 的真凶）
+> 决策 `DECISIONS.md` §2026-10-07-logtail-bounded-read。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：上一条把池历史排除（`aggMemo` 命中 ⇒ 空置零重算）后，峰值仍未定位。这次**先测量**：
+  临时探头（`dashboard/tmp/probe-idle-cost.ts`，只读）逐路径测「耗时 + **未 GC 的 heapΔ** + rssΔ」
+  ⇒ `componentViews` 2348ms / heapΔ **94.9MB** / rssΔ 260.9MB · `getSlowSnapshot` 751ms / **113.4MB** /
+  303.9MB · `buildStateView` 2087ms / **138.7MB** / 216.7MB · `computeFleetProbes` 1333ms / 18.0MB。
+- **根因**：`componentViews`（`views.ts:111`）对**每个**组件调 `logTail`，而 `logTail` 是
+  `readFileSync(整个文件)` + 逐行 `new TextDecoder`，最后只取尾 5 行；本机 selfNode（sampler-agent.log）
+  **22.5MB** + hubServer（hub-server.log）**56.2MB** ⇒ 单次读 ~80MB 磁盘 / 分配 ~95MB 堆 + ~100MB external。
+  `startSnapshotRefresher` 每 **5s** 拍一次（`/api/state` 每请求再拍）⇒ 这就是锯齿。次要同款：
+  `readLogTail.totalLines` 对 `fileSize ≤ 8MiB` 的文件 `readFileSync` **整个文件**只为数行数。
+- **决定**：两条都改「有界读」——`logTail` 尾部窗口（`LOG_TAIL_BYTES = 256KB`，文件 ≤ 窗口时与旧实现
+  逐字相同）；`totalLines` 分块计数（`countLines`，内存恒定 1MiB，与旧全文件版逐字节等价）。
+- **否决与备选**：① 只修 `totalLines` 不动 `logTail`（真凶是 `logTail`，实测已定位）；② 给 `logTail`
+  加结果 memo（浪费仍在首拍与失效后，有界读是根上的）；③ 轮转/截断组件日志（那是数据，不是缓存）。
+- **后果**：heapΔ 降**两个数量级**（`componentViews` 94.9→**0.1**MB · `getSlowSnapshot` 113.4→**0.0**MB ·
+  `buildStateView` 138.7→**2.8**MB · `logTail(22.5MB)` 3ms/0.0MB）；残留的 1.2–1.5s 是 ping/hub 的网络
+  超时预算（1.5–2.5s），非内存。真机空置 WS 峰值复核待控制台重启后按 plan §6 采样（预期收窄到基线量级）。
+- **落点**：`dashboard/src/server/api/logs.ts` · 测试 `dashboard/tests/server-api-logs.test.ts`（5 条）·
+  全文 → `docs/nn/console.md` §34。
+
+
+**家族 E — 指标表抵轮转拄录**
+
+### §2026-09-28-goalnn-console-metrics-harvest（2026-09-28，逐轮实际值抗轮转抄录：表列不再依赖「谁在屏幕上」）
+> 决策 `DECISIONS.md` §2026-09-28-goalnn-console-metrics-harvest。归档 2026-10-11（第二轮瘦身）。
+
+**来历**：用户报障「两课并行，`h5a-earlydmg` 的击杀/残血/承伤全都有，`h5b-clean` 丢了一大半」。
+查下来那五列（击杀/残血/承伤·杀/道具/耗时）**不是账本字段**，是 `/api/state` 扫 `it<N>` 现算后写
+`<traj>/.pool-actuals-cache.json` 的派生值；而请求路径只算**查看课程**（`state-view.ts`），训练侧每轮
+按 `keep_iters`（rl-config 缺省 3）删 `it<N>`（`rl/loop_guards_sweep.py::_rotate_cleanup`）⇒
+「谁在屏幕上谁才有数」（实测两课缺口在时间轴上互补：h5a 缺 it22–25 ↔ h5b 抄录窗，h5b 缺 it7–17 ↔ h5a 抄录窗）。
+
+**决定**：
+① 控制台侧修：`snapshot-refresher` 新增抗轮转抄录（**独立 15s 节拍**），对**所有已开课**课
+   （`training-enabled.txt`，与训练侧同一道闸）跑一次 `iters.readIterMetrics` 让缓存落盘；
+② 两道闸：只抄在训课；账本 stat 签名（`size:mtime`）未变则跳过——**仅当上一轮把该课所有轮次都抄到**
+   时才允许跳过（云机/回传腿的 `it<N>/per-game.json` 与账本行落地先后不保证，早一拍抄到 null
+   必须重试，否则缺口被签名闸自锁 = 空白）；
+③ 训练侧不动（不改 `keep_iters`、不加跨轮画像文件）：那是另一条腿的改动，留白另议。
+
+**被否决**：调大这两课的 `keep_iters`（只拖长曝光窗口，`it<N>` 目录线性涨盘，且治不了下一门课）；
+训练侧轮末把逐局画像写进跨轮文件（治本但要动账本口径 + python 侧 + 归档清单，超出本次报障范围）；
+控制台侧不加签名闸（长驻服务 × 在训课数 × 天数：实测 27ms/课/拍的稳态整本账本解析纯浪费）；
+抄录挂进慢快照那次 `run()`（会被节点 ping 1.2–2.5s 超时预算拖住，抄录赶不上轮转）。
+
+**违反后果**：抄录节拍挪进慢快照刷新或改成「只抄查看课程」⇒ 本 bug 原样回来（列随轮转永久空白）；
+去掉签名闸 ⇒ 在训课每 15s 解析一次整本账本 + 全量 eval 账本。
+
+**落点**：`dashboard/src/server/api/snapshot-refresher.ts`（`harvestTrainingCourseActuals` /
+`startSnapshotRefresher`）· `dashboard/tests/server-metrics-harvest.test.ts`（4 例）·
+全文 `docs/nn/console.md` §20。
+。
+
+
+**家族 F — evalBoard 停用与评估时间口径**
+
+### §2026-10-05-evalboard-off（2026-10-05，evalBoard 缺省停用：四处接线一门开关 + 账本冻结）
+> 决策 `DECISIONS.md` §2026-10-05-evalboard-off。归档 2026-10-11（第二轮瘦身）。
+
+- **背景（内存盘点 R4）**：首页 EvalBoard 摘要 + `/eval` 页 + 每 30s auto-ladder 是控制台请求
+  路径上最后一块常驻聚合面；用户 2026-10-04 指令「先关掉 evalBoard」——**不删代码、不删数据**。
+- **决定**：功能开关 `BCITY_EVALBOARD`（`src/core/feature-flags.ts::evalboardEnabled`，**缺省 `0`**，
+  `=1` 开）一处控四处接线（首页面板 / `/api/evalboard` / 30s ladder ticker / `/eval` 页）；
+  决策与计数器集中 `server/eval-board/routes.ts`，`server.ts` 零 `buildEvalBoardView(` 直调；
+  `/eval` 停用时出说明页且**不注入任何 bundle**（`eval-app.tsx` 自己会轮询 API）；开关信号随
+  `/api/state` 的 `evalboardEnabled` stamp 下发（同 `isBc` 机制），**`src/web/**` 零 `process.env`**。
+  账本数据（`dashboard/data/evalboard/**`，`EVALBOARD_DATA` 可改根）**原样保留**。
+- **冻结语义（2026-10-05 二轮评审R2-2 连带决定）**：`composeEvalBoardView` 是
+  `ingestCourseEvalLog` 的唯一生产调用者（视图路径）⇒ **停用 = 入账停**；停机期间的新 games 行
+  不进增量索引。**本阶段接受冻结**（R4 目标是内存）；持续入账（先 ingest 后归档）归阶段二
+  账本归档 CLI（plan W7′–W9′）。训练侧 in-loop eval / `evalA` / §28 补评**不受影响**，只是新读数
+  在停用期间不入控制台账本。
+- **被否决**：① 删代码 + 删数据（用户明令不删；且阶段二归档还要用）；② 给 `loadRowsCached` 加
+  LRU 上限（只改内存曲线，不停三处常驻；复杂度和风险都更高）；③ 只删数据留代码（数据是各轮
+  评估的唯一读数，删了不可再生）；④ 只关首页面板（`/eval` 页 + ticker 仍常驻，内存收益不全）；
+  ⑤ 开关读 env 进客户端 bundle（本轮 `Bun.build` 实证：`define` 只带 `process.env.NODE_ENV`
+  ⇒ 产物里留裸 `process.env` ⇒ 浏览器 ReferenceError）；⑥ 门控点放进 `buildEvalBoardView` 内部
+  （视图层还持有缓存/账本句柄，门要住在**调用面**才真停；且源码守卫无处可钉）。
+- **未来会重犯**：「未使用的功能留在请求路径上」——本轮配机械守卫：
+  `tests/evalboard-disabled.test.ts` 三类断言（缺省零 compose / ticker 源码门控 / `src/web` 零 env）+
+  `evalboardComposeCalls()` / `evalboardRouteCounters` 逐调用计数。
+- **违反后果**：客户端读 env ⇒ 首页白屏（ReferenceError）；门控落进视图内部 ⇒ `/api/evalboard`
+  仍冷算 + 台账仍被 ingest（假停用）；说明页复活 `/eval.js` ⇒ `eval-app` 周期拉 API（等于没关）。
+- **指针**：全文 `docs/nn/console.md` §29 · plan `plan/dashboard-memory-evalboard-off.plan.md`。
+
+### §2026-10-06-goalnn-eval-cloud-time-utc（2026-10-06，用户报障：offline 回传的 eval 时间是 UTC）
+> 决策 `DECISIONS.md` §2026-10-06-goalnn-eval-cloud-time-utc。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：`worker/eval_track.py` 写 summary `time` 用裸 `strftime("%Y-%m-%d %H:%M:%S")`
+  （写者本机钟）；云机 = UTC ⇒ 控制台把 `x21-psh-a` it10 显示成 `2026-10-05 21:39:04`，而同轮
+  本地 iteration 是 `2026-10-06 05:39:00`（差 +8h），it80 之前的时间列还会**逆序**。
+- **判据**：账本里没有时区字段，唯一可靠痕迹是 summary 的 `nodes` 含 `"cloud"` 键
+  （`remote/offline_eval.py::CLOUD_NODE`）；逐局行自带 `node`，逐行判。
+- **决定**：**读侧**转换（历史数据必须修正）：`server/iters.ts` 的 `readEvalSummaries` /
+  `readEvalGames` 把含 cloud 的 `time` 按 UTC 解析后按本机时区写回**同格式**（本条落账时该函数名
+  `readLatestEvalGames`，同日「按评估轮选」那条已泛化成 `readEvalGames(trajDir, iter?)`）；无 `nodes`
+  的老行、非该格式的串一律原样透传（不猜）。写侧（新行带 `+00:00`）留作后续，不在本次。
+- **备选与否决**：显示层/前端转 —— 否，指标表 / Hero / eval 弹窗三处消费，且历史行必须修正。
+- **测试纪律**：bun test 在本机跑时 `getTimezoneOffset()` = 0（实测），UTC→本地是恒等 ⇒ 断言会
+  **静默空过**；`tests/eval-cloud-time-utc.test.ts` 必须把 TZ 钉成 `Asia/Shanghai` + offset 卫兵。
+- **违反后果**：把云机串按本地解析 ⇒ 时间列错 8h、按时间排序错乱。
+
+
+**家族 G — 回放导出与趋势图**
+
+### §2026-10-06-goalnn-replay-export-eval-round-picker（2026-10-06，用户令「导出 replay 支持任意 eval 轮」）
+> 决策 `DECISIONS.md` §2026-10-06-goalnn-replay-export-eval-round-picker。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：「导出 replay」只能导最新权重的轮。后端早就收 `iter` + `wver`（`POST evalReplays` →
+  `worker/eval_replays_once.py`），卡点只在前端：弹窗以「此刻滤出视图」为数据源，导完的产物也按
+  「最近一次 manifest」归因（`manifest.iter === 所选轮` 挡不住「同一轮的上一次成功导出」）。
+- **备选与否决**：① 前端从滤出视图推轮 —— 否，「哪一轮评过」不在选择器视野里，失败轮也会进可勾选集；
+  ② 保留 `evalReplayJob` 的「最近一次 manifest」语义、只在弹窗多加一层 iter 比对 —— 否，SIGKILL/OOM/
+  子进程没起来时 python 写不到失败 manifest，同轮的旧产物就会被当成本次结果（假「导出完成」+ 重复交付）；
+  ③ 只让 python 侧清旧 manifest —— 否，脚本可能根本没起来，清账必须在**控制台受理那一刻**；
+  ④ 每轮一个 manifest 文件（`replay-export-<iter>.json`）—— 否，`replayExportPaths` 是既有的单路径契约，
+  多文件会把「哪个是本次」变成扫描问题；⑤ 新增 api-client 的 POST helper —— 否，既有
+  `postAction('evalReplays', …)` 已是唯一动作入口，加第二个 = 第二份真相。
+- **决定**：① 选择器数据源 = 轮级账本（`iters.ts::readEvalRoundOptions`，summary-only 单趟，
+  谓词与 `readEvalGames` 同源，`reusedWver` 单独标注）；② **归因不变量：`POST evalReplays` 受理即
+  `rmSync` 旧 manifest**（抛则整次 POST 500，不吞、不「删不掉也照常起 python」）⇒「盘上有 manifest」
+  此后只可能是本次写的；③ 归因判据只看 `manifest.iter === 所选轮`，失败 manifest 透传 `failReason`
+  且其文件**不可下载**；④ 失败留痕是 python 的 `write_fail_manifest`（三处提前 return + 兜底 `except`
+  rc=4，与成功 manifest 同 schema——控制台是白名单式重建，缺键 = 等于没写）。
+- **违反后果**：拿掉受理时的清理 ⇒ 同轮的旧产物冒充本次结果，用户拿到「已完成」却点出 404；
+  把失败 manifest 的 schema 改窄 ⇒ 控制台侧静默看不到原因（缺键不报错，只显示「无产物」）。
+- **指针**：全文（现状 / 语义规格 / 落点 / 用例 / 二轮评审 F1–F10 处置）→ `plan/replay-export-eval-round-picker.plan.md`；
+  控制台侧全文 → `docs/nn/console.md` §32；二轮评审 → `plan/replay-export-eval-round-picker.review-bf.md`。
+
+### §2026-10-09-goalnn-compare-trends-modal（2026-10-09，首页趋势图加「比较课程」：跨课程端点独立于 /api/state）
+> 决策 `DECISIONS.md` §2026-10-09-goalnn-compare-trends-modal。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：用户要的是「首页趋势图右上角一个比较入口 → 一张大图叠 N 门课的同一指标；指标/口径/起止可切、
+  课程可增删（含历史课）、打开期间自动刷新」。而 `/api/state` 的 `metrics` 只算**当前查看课程**一门课；
+  `TrendChart` 又是「两序列 + 下标 x 轴」组件（多课 iter 网格不同 ⇒ 按下标画会把 it50 和 it10 叠在同一列）。
+- **备选与否决**：① N 门课的序列塞进 `/api/state`——否（3s 全局轮询要为「可能没人在看的弹窗」每次读 N 份
+  账本；冷开 8 门课是秒级同步读，还压在控制台事件循环上）；② 弹窗自带第二个刷新节奏开关——否（顶栏旋钮已管
+  全局，两个节奏必然漂开）；③ 多课图沿用 eval 橙——否（8 门课全橙 = 认不出课；口径改由线型表达）；
+  ④ 起止 it 复用 Hero 的「最近 N」——否（多课下每门的 N 不一样，「最近 10 轮」失去可比性）；
+  ⑤ 顺手迁掉旧端点写死 `REPO_ROOT/tmp`（不随 `BCITY_TMP_LOGS_DIR` 重定向）的坑——否（另开任务，本端点不重复它）。
+- **决定**：新增 `GET /api/compareTrends`（`?courses=a,b&metric=&source=&from=&to=`；≤8 门、逐个
+  `sanitizeViewCourse` 剔除非法/不存在、剔空 ⇒ 400 而不静默回退）；课程级缓存 TTL 10s + 账本
+  `mtimeMs:size` 指纹（命中不读日志正文）；弹窗**只在打开时**轮询、节奏复用 Hero 透传的 `refreshSec`
+  （= app.tsx 顶栏旋钮），并带请求序号 + 「请求身份 ∩ 账本指纹」门闩；多课口径 = 课色实线（rollout）/
+  课色虚线（eval）；封存课不可画（只读 manifest、无逐轮账本）；读账本最多最新 500 轮（`readIterMetrics`
+  既有截断，图注写明）。
+- **违反后果**：把跨课数据塞回 `/api/state` ⇒ 首页每次轮询都读 N 份日志（冷开秒级 + 事件循环阻塞）；
+  丢掉指纹门闩 ⇒ 每拍 `setState` 把 hover 准星清掉、图周期性闪；起止/口径变化不立即重拉 ⇒ 用户看到的是上
+  一个口径的读数（**假读数比空图贵**）；给弹窗单开一个节奏开关 ⇒ 两处节奏漂开，用户再也说不清「多久刷一次」。
+- **测试/证据**：`dashboard/tests/web-compare-trends.test.ts`（档位表 / y 规则 / 切片 / 解析 / 选课 / 门闩 +
+  大图 SSR 形状：数值 x 轴、缺值断笔、eval 虚线、空态、Hero 两分支入口）·
+  `dashboard/tests/server-api-compare-trends.test.ts`（参数校验 / iter 切片 / eval 缺值 = null（**不是 0**）/
+  无账本进 unavailable / 缓存命中·指纹·TTL 计数可证）· 门禁：dashboard `typecheck` + 全量 1479 用例（0 fail，
+  含 `web-style-discipline` / `architecture-layering`）+ 三份 bundle + 仓根 `bun run check` 全绿。
+  —— 设计全文（含评审 10 处事实修正 + 8 处规格补全）→ `plan/dashboard-compare-trends.plan.md`
+
+### §2026-10-09-goalnn-ppo-live-rows（2026-10-09，首页 PPO 区加「每台一行」：谁在算哪一轮 / 下一轮下好了没）
+> 决策 `DECISIONS.md` §2026-10-09-goalnn-ppo-live-rows。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：首页 PPO 区只有一行历史份额；「此刻在干什么」的三个事实里，hub 有租约但不给 `course`/`it`，
+  预取状态只住 worker 本地盘、**没有任何上行通道**；自主盘领整段任务包、不进 PPO 归属账本。
+- **备选与否决**：① dashboard 直探 worker —— 否，直探键是 rl-config 的 `nodes[].id`（`self`/`mac`），
+  与屏上的 env 派生名（`kaggle-c`）对不上；② 塞进 `/jobs/peek` 回包 —— 否，peek 的「不认领/无副作用/不动游标」
+  有测试钉着（`tests/hub/test_priority_schedule.py`），写旁路表会把它弄脏；③ 把 live 行并进
+  `contributionBrief` —— 否，那份 brief 要与 `/api/pool` 投影**逐字相等**（跨端点一致性守卫），而 live 是
+  时间敏感读数；④ 每轮无条件上报 —— 否，常态空转的零信息 HTTP，且失败腿会拖慢预取节拍（实测 ≈1.6s/轮）。
+- **决定**：worker 每轮末经 `POST /admin/worker-prefetch` **只报 jid**（形状未变不发 / 失败静默退避 12 轮 /
+  绝不重试）；hub 解析 `course`/`it` 并在 `/admin/queue` 的 `worker_prefetch` 出读面（TTL 60s；**纯观测**，
+  不进任何派发判据）；inflight 行补 `course`/`it`，**段归属按 `computing_ago` 分档**（已认领 ≠ 计算中）；
+  live 行独立于 `contributionBrief`（`ConsoleStateView.ppoWorkerLive`）；自主盘轮次取「已补传产物」派生口径。
+- **违反后果**：上报写进调度判据 ⇒ 观测腿能改派发（One-Author 破例）；live 塞进 brief ⇒ 跨端点一致性用例
+  变 flake 源；不复用 `computing_ago` ⇒ 同一段等待在屏上被叫成两件事（「已认领」显示成「计算中」）。
+- **测试/证据**：`nn-training/tests/hub/test_worker_prefetch.py`（11 例）· `tests/remote/test_soft_hold_prefetch.py`（+5）
+  · `dashboard/tests/ppo-worker-live.test.ts`（13 例）· 分域守卫 `tests/hub/test_hub_queue_split.py` /
+  `test_hub_admin_split.py` 同批更新（域成员 118→120、状态表 +2、admin 方法 9→10）。
+  —— 全文（规格 / 评审 F1–F8 处置 / 逐文件落点）→ `plan/dashboard-ppo-live-rows.plan.md`
+
+
+**家族 H — 哨兵路径必须实存**
+
+### §2026-09-30-goalnn-dashboard-sentinel-paths-must-exist（2026-09-30，`specs.ts` 哨兵路径必须实存 —— 孤儿哨兵修复 + 机械守卫）
+> 决策 `DECISIONS.md` §2026-09-30-goalnn-dashboard-sentinel-paths-must-exist。归档 2026-10-11（第二轮瘦身）。
+
+**背景**：`dashboard/src/stack/specs.ts` 的 `localWorker` / `trainingLoop` 各有 `sentinel`（`core/reload.ts`
+的 `snap()` 记 mtime，变了就重启进程；`core/sentinels.ts` 比对）。它是 `codehash-files.txt` 之外的**手工补面**，
+注释写明「漏报 = worker 用旧协议跑新 job」。
+
+**问题**：刀 2（S3，5624856，2026-09-23）把 `remote/protocol.py` 下沉进 `common/`，两条哨兵仍指旧路径。
+`snap()` 对**不存在的文件**返回 `null` ⇒ 哨兵**永不触发**、一行日志都没有 —— 恰好就是它要防的那件事。
+更糟：`dashboard/tests/local-worker.test.ts` 用 `endsWith('remote/protocol.py')` 把旧路径**断言住了**
+（把 bug 钉成契约），于是 1229 个 dashboard 测试全绿，没有任何信号。
+
+**决策**：① 哨兵路径改指真实家（`common/protocol.py`）；② 加**机械守卫**
+`dashboard/tests/stack-sentinel-paths.test.ts` —— 扫 `specs.ts` 源码里所有 `'nn-training/…'` / `'tools/…'`
+**文件**字面量，逐条断言 ①扫描面 ≥5 条（防「扫描面缩水 = 哑绿」）②`existsSync` ③是文件不是目录（目录 mtime 只在
+增删条目时变，当哨兵同样哑）。**否决的备选**（只改路径、不加守卫）：搬家是本仓常态，而这种失效**完全哑**
+（无报错、无日志，面板照常显示），下一次搬家必重犯。先证明守卫在**旧**代码上红，再改代码。
+
+**理由**：可机械判定的不变量就该机械判定；「按路径监视」的东西被搬家静默孤儿化是这一类残渣的**共同根因**
+（同源先例：`hub` 侧 S4 用 `hubImplementationFiles()` 目录枚举修过同一个坑）。
+
+**影响面**：`specs.ts`（2 处哨兵路径）、`local-worker.test.ts`（断言改到新路径）、`WirePanel.tsx` /
+`server/api/tunnel-ab.ts` 文案，新增 1 个测试文件。**不动**：`snap()` 语义与重启策略。
+
+—— 全文（守卫口径 / 事故链）→ `docs/nn/engineering.md` §53 末节。
+
+
+**家族 I — 账本 pid 与存活判据**
+
+### §2026-10-11-goalnn-ledger-pid-not-liveness（2026-10-11，账本 pid ≠ 存活判据；plan/self-node-ledger-pid-desync + 首轮评审 F1–F14）
+> 决策 `DECISIONS.md` §2026-10-11-goalnn-ledger-pid-not-liveness。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：2026-10-10 现场 —— self agent 11:47:31 由 `/v1/restart` 换代（pid 8340 → 21300），
+  控制台账本没跟上，于是①组件卡红点 `exited`、②`/api/pool.selfStatus = null`（节点统计页「agent 未启动」+
+  磁盘徽标消失），而**同一页**的 `nodes.self.online=true` / ping 2ms / 达标 10/10 / `selfDisk.level=ok` 全是好的
+  —— 一个读数坏掉，操作员看到的是「采集节点挂了」这个伪结论，且控制台上**没有任何按钮能修**。
+  三条根因同时成立：①换代触发者在**控制台之外**（`trainer/dispatch.py:179` 的 M8 主动升级 →
+  `POST /v1/restart`）⇒ 本地记账永远看不到新 pid；② `stepSelfNode` 的「已在运行」分支早退时**不写账本**；
+  ③端口占用者这条自愈来源在 Windows 上可能给不出归属（`netstat -ano` 的 LISTENING 行 PID 0，**逐 socket**）
+  ⇒ `ownerPidOf` 为 null ⇒ 那个「视为进程换代」的分支**永不修账本**。
+- **备选与否决**：① **换 netstat 方案 / 引第三方进程表库**——否：加运行时依赖要论证（AGENTS §5），
+  且正解是「**不依赖单一来源**」，不是换来源。② **让 agent 反向写控制台账本**——否：单向观测是既有设计。
+  ③ **给远端节点做同样兜底**——否：远端节点**没有账本条目**，该症状在那一边不存在。
+  ④ **顺手改 `stopAllManaged` 的端口兜底**——否：同族但**另一个后果**（清场漏杀），一个 PR 只一个语义。
+  ⑤ **「账本 pid 只影响探测超时」（`pidAlive ? 4000 : 1200`）**——否（评审 F1）：那**还是**让被证实
+  会陈旧的 pid 决定行为，且恰好把「账本陈旧」这一档（本案的修复目标）的预算压小 3.3×；它是后台 SWR 探测，
+  4s 换不到任何东西。⑥ **把 `cloudflared` 也算进「有探针」**——否（评审 F3）：它的健康是 **hub 派生**的
+  （hub 通 ∧ 无 url ⇒ true），会把「隧道进程已死」渲染成 `running`。
+- **决定**：**账本 pid 降级为提示，不再是判决**（S1 只针对 selfNode：`hubServer`/`trainingLoop` 的换代
+  都经过控制台 ⇒ 无实测动机，登记为预备案）。(a) `fetchSelfStatus` 拆掉 pid 前置闸，超时**恒 4000**；
+  (b) `computeComponentHealth` 只对**有探测端点**的组件（判据 = `HEALTHY_PORTS` 有条目）在 pid 死时照探，
+  `componentViews` 的 `alive = pidAlive || health===true`；(c) `ProcSpec.probePid`（selfNode = `/v1/ping` 的
+  `pid`）+ `exit-watchdog::resolveLivePid`（① 端口占用者 → ② **组件自报 pid** → null）；
+  (d) `stepSelfNode` 早退时也要用自报 pid 对齐账本（仍过 `pidHolderOf`，跨课错配不放松）；
+  (e) 自愈路径（`healRecoveredErrors`）同样不得把陈旧 pid 写回去。两条来源都拿不到 ⇒ 只告警**且写明「需人工介入」**
+  （去重键 `watchId#stalePid` 本身 = 「每换代周期一次」，不用改）。
+- **违反后果**：再拿账本 pid 当存活判据 ⇒ 换代后假红（本案），且「采集节点挂了」会连带
+  让人去查一个没坏的东西；把「两条来源都拿不到」读成「没事，只是换代」（③ 档原本文案）⇒ 假红挂一小时没人管；
+  新增「pid 死也照探」而不给用例重定向账本 ⇒ 用例结论随「本机此刻有没有 agent 在跑」变
+  （实测：账本换成死 pid 后 `web-ssr-console` 立刻红，`logHrefs` 只剩 `trainingLoop`）。
+- **落地与门槛**：plan/self-node-ledger-pid-desync.plan.md（§10 = F1–F14 处置）·
+  首轮评审 plan/self-node-ledger-pid-desync.review-bf.md；回归 = `dashboard/tests/self-node-ledger-pid-desync.test.ts`（20 例）
+  + `exit-watchdog.test.ts` 的 T3/F6/F9 用例 + `web-ssr-console.test.ts` 自带 fixture 账本；
+  **必红复核五刀全红**（改回旧逻辑 ⇒ 对应用例 fail=4/5/6/8/11）；
+  `cd dashboard && bun run typecheck && bun run test`（1568 例）· `bun run check`（2482 例）· `bun run build` 均绿；
+  **真栈现场验收未做**（未起控制台 / agent ⇒ 「8s 内自动跟上」与「kill 后仍 exited」只有单测证据，未在真机取数）。
+
+
+---
+
+> **第三轮归档（2026-10-11）**：`DECISIONS.md` 第四次瘦身把**仍带成篇正文、且正文 >6 非空行**的 **3** 条决策全文按主题落到本节（上一轮：三次瘦身切 >12 的 192 条 = 本节「第二轮归档」）。家族谱系**续上一张表**：沿用旧字母 = 同一族（链上含第一~三轮成员，全文在本节内），新族从本档下一个字母续编；只归类连线，结论引原文。`DECISIONS.md` 索引行末尾指针 = `docs/nn/console.md` §11「决策正文归档」· 锚 `### §<id>`。
+
+**家族谱系（续上一张表，先后为时间序）**
+
+- **家族 A｜节点统计与贡献度**（5 条，2026-09-19～10-06）：`§2026-09-19-console-wallsec-undefined-guard` → `§2026-09-26-nodes-decouple-from-course` → `§2026-10-02-goalnn-worker-contribution` → `§2026-10-02-nodes-lastcontrib-winner-must-have-completed-round` → `§2026-10-06-goalnn-offline-leg-sampling-exclusion`
+  - 末条决定（原文节录）：**剔除离线腿整段**——例 `x21-psh-a` it9..87。……
+- **家族 J｜受管组件面收口（workerServe 伪节点退役）**（1 条，2026-09-19）：`§2026-09-19-goalnn-retire-local-fake-node`
+  - 末条决定（原文节录）：伪节点**整体退出控制台**——不是换个轴（原计划 R3-6 否决④的「收敛为节点轴」也不再需要），而是从「受管」这件事里退出。它此后只以**冒烟预演的一次性配角**存在（`stack/push.ts` 起、跑完/失败即杀）。……
+- **家族 K｜evalA 串行队列与按键反应**（1 条，2026-10-06）：`§2026-10-06-goalnn-evala-serial-queue`
+  - 末条决定（原文节录）：排队住唯一启动点 `server/eval-a-run.ts`：忙时返回「已排队（前面 N 个）」、子进程退出自动……
+
+**家族 A — 节点统计与贡献度（续）**
+
+### §2026-09-19-console-wallsec-undefined-guard（2026-09-19，bugfix：节点统计「机侧墙钟」显示 undefineds）
+> 决策 `DECISIONS.md` §2026-09-19-console-wallsec-undefined-guard。归档 2026-10-11（第三轮归档）。
+
+- **背景**：新列渲染 `${r.avgWallSec}s`；服务端进程未重启或旧 API 缺键时
+  `undefined !== null` 为真 → 显示 `undefineds`。
+- **备选与否决**：只提醒用户重启 dashboard —— 否，UI 不应把缺字段画成 undefined；
+  只改服务端 —— 否，客户端仍可能吃到缓存/旧包。
+- **决定**：展示层 `secCell`（仅正有限数 → `Ns`，否则 `-`）；`fetchPool` 将
+  `avgWallSec ?? null` 归一；服务端继续显式写字段。
+- **违反后果**：任何 `x !== null ? x : '-'` 模板在字段缺席时都会画出 `undefined…`。
+- **落地**：`dashboard/src/web/app/panels/NodeStats.tsx`、`api-client.ts`；
+  回归 `dashboard/tests/server-pool-history.test.ts`（secCell 语义）。
+
+
+**家族 J — 受管组件面收口（workerServe 伪节点退役）（续）**
+
+### §2026-09-19-goalnn-retire-local-fake-node（2026-09-19，用户指令：workerServe 伪节点直接从 dashboard 去掉）
+> 决策 `DECISIONS.md` §2026-09-19-goalnn-retire-local-fake-node。归档 2026-10-11（第三轮归档）。
+
+- **背景**：`workerServe`（`remote_worker_serve`，本机伪 GPU 节点）是控制台里的第五个受管组件：有卡片、有账本键、有日志页入口、有端口兜底清场、有变更检测重启、有一套「无可用 gpu_push 就回落本机」的 push 预设。用户口径：**「它只是用于 trainingloop 冒烟测试，用户只关心冒烟是否通过，不会手动去开启/停止伪节点」**。
+- **决定**：伪节点**整体退出控制台**——不是换个轴（原计划 R3-6 否决④的「收敛为节点轴」也不再需要），而是从「受管」这件事里退出。它此后只以**冒烟预演的一次性配角**存在（`stack/push.ts` 起、跑完/失败即杀）。
+  - **受管面全删**：`Component` 键、`COURSE_COMPONENTS`、`PLURAL`/`Registry.workerServes`、`ALL_COMPONENTS`、`restartSpecFor` 分支、`startComponent` 分支、`stopComponent` 端口表、`smokeComponent` 分支、`COMPONENT_LOGS`/`HEALTHY_PORTS`/`LOG_NAME_MATCH`、`WORKER_SERVE_ENTRY`/`workerServeSpec`（ProcSpec）。
+  - **冒烟自起自停**：`stack/push.ts::startLocalWorkerServer` 直接 `spawnBg`（不再造 ProcSpec——它没有账本键可用），仍按课程取槽位 push 端口与 per-course work 目录（**双课同冒**不得互踩），20s 未就绪则杀掉自己起的进程再抛错（不再留一个没人认领的孤儿）。
+  - **「一键本机 push」一并删除**：`applyLocalPushNodeConfig` / `localPushUrl` / `configurePushEndpoint` 的 `allowLocal` opt-in / `findHealthyGpuPushNode` 的 `includeLocal` / `PushTarget.viaLocalWorker` / `preset.ts` 的第三条启动顺序分支。**理由**：执行面解析在 2026-09-15 就已经把「缺 gpu_push → 自动回落本机」改成响亮报错（那会把「云机连不上」伪装成「训练正常」），剩下的 opt-in 只是测试口；而在伪节点不再是受管组件之后，这条路径唯一的效果就是**把课程 push 目标指向一条没人服务的本机地址**——留着就是一条静默失败通道。
+  - **读面只留「识别」**：`NodeConf.local_push` 标记保留，`pushTargetFromConfig` 仍把它报成 `kind: 'local'`——历史配置里残留的 `local_push` 条目与指它的 `courses.<课>.push_node_url` 必须**看得见**（卡片会显示「执行面 = 本机」），否则操作员看到的是「一切正常」。复用扫描**一律排除**它（没有 opt-in 了）。
+  - **UI 的连带退出**：`NODE_FACE_COMPONENTS` 例外名单删除（它存在的唯一理由就是这个键）；`ComponentFamilyId` 回到两族；`LogNavCard` 的 filter 消失（受管组件全集 = 日志页入口全集）；`TrainLaunchModal` 的 endpoint 文案改为「留空 = 复用 config 里 ping 通的 gpu_push；都没有则**响亮报错**」。
+- **备选与否决**：① 保留卡片但默认隐藏——否（隐藏 ≠ 不存在：端口兜底清场仍会杀它、变更检测仍会重启它，操作员无法理解一个自己看不见的东西被谁停掉）；② 改成「节点轴」账本键（原 R3-6 否决④的延后项）——否（它的语义轴是**冒烟预演的临时件**：生命周期 20s、只服务一次预演、与任何 GPU 身份无关；给它造节点轴只是给一个不该常驻的东西一个常驻身份）；③ 顺手把 `run_rl.py --smoke` 的伪节点依赖也去掉（改用假执行器）——否（预演要证明的正是「真课程发布 job → 推送 → 执行 → 回传 → 落位」这条链路本身，换假件会让它不再证明它该证明的事）；④ 保留 `allowLocal` 供离线诊断——否（见上：它此刻唯一的效果是静默指向死端点）。
+- **违反后果**：任何「重新给伪节点加受管键」的改动都会让它重新出现在「服务面 · 单例」卡行（用户明确不要的管理面）；任何在 `configurePushEndpoint` 里恢复「回落本机」的改动都会让云机连不上时的现象变成「训练正常」（旧缺陷原样复活）；把 `local_push` 标记从读面删掉则会让历史配置里的本机执行面**静默**留在 `courses.<课>.push_node_url` 里。
+- **落地**：`core/{registry,types}.ts` · `stack/{specs,push,push-config}.ts` · `server/actions/{start,stop,restart,smoke,preset}.ts` · `server/api/{component-meta,logs}.ts` · `web/view/{component-groups,console-types,course-overview}.ts` · `web/app/panels/{LogNavCard,TrainLaunchModal}.tsx`。回归：`tests/push-config.test.ts`（本地回落 describe 重写为「没有写入口、只有识别面」+ 三把防回流尺子：受管组件全集 / 启动面与 spec 面 / 冒烟侧确实自起自停）· `tests/{server-api-logs,server-api-state-view,single-hub-tunnel,training-multi-course,web-component-groups,web-components,training-port-reclaim}.test.ts` 同步真值。训练侧只改一句日志提示（`remote/worker_server.py` 的 `CodeChangedError` 指引不再是「重起 workerServe」，而是「重跑 `remote_worker_serve`」）。
+
+
+**家族 K — evalA 串行队列与按键反应（续）**
+
+### §2026-10-06-goalnn-evala-serial-queue（2026-10-06，用户报障：「evalA 在某 it 执行过后，其它 it 再点按键无反应，需要刷新页面」）
+> 决策 `DECISIONS.md` §2026-10-06-goalnn-evala-serial-queue。归档 2026-10-11（第三轮归档）。
+
+- **背景**：evalA 单槽互斥（`eval:A`）：一单几十秒–几分钟里，其它 it 的 evalA 点击一律 409
+  「evalA 已在运行」——「连点多个 it、串行执行」的诉求落空；回执只在小面板顶部一闪，体感=无反应。
+- **备选与否决**：前端重试队列（忙就等一会儿再 POST）——否，队列是操作状态不是画面状态（§2.5），
+  刷新 / 多标签 / 两个面板（Hero 与指标表）会各排一份，服务端仍在 409 里空转。
+- **决定**：排队住唯一启动点 `server/eval-a-run.ts`：忙时返回「已排队（前面 N 个）」、子进程退出自动
+  接棒；`eval:A` 从第一单持有到**队列排空**（补评/导入侧看到的「忙」语义不变）；同 (课, iter, baseline)
+  去重；上限 8（满 ⇒ 响亮 409）；路由 busy/full → 409、spawn 类失败 → 500。按钮侧不改判据
+  （干活 / 排队的两种回执都按 ok 保 busy；「读数自动回填」口径收进服务端那一句话）。
+- **违反后果**：把排队挪回前端、或忙时静默丢单 ⇒ 刷新即丢队、两面板各排一份，单槽事实漂出服务端。
+
 ## 附：本文件旧编号对照（拆分前 `docs/nn.progress.md` 的 § 号）
 
 旧 §28→§1 · 旧 §29→§2 · 旧 §64→§3 · 旧 §73→§4 · 旧 §82→§5 · 旧 §87→§6 · 旧 §88→§7 · 旧 §91→§8 · 旧 §122→§9 · 旧 §138→§10

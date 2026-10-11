@@ -95,8 +95,10 @@ teacher's only job is getting the NN started (BC distillation corpus + scaffoldi
 - `MANIFEST.md` — the creed; §13 settles most doubts. Non-negotiable.
 - `DECISIONS.md` — the decision **index**: per decision a heading (§ number + date/source), a compact
   `决定` (+ `违反后果`) and a pointer. You extend it, not contradict it. **Each index line names where its
-  full body is** (`—— 全文（…）→ <path> §N`); after the 2026-09-23 slim that is either a topic doc's
-  `决策正文归档` section (`### §<id>` anchor) or `docs/decisions/details/<domain>.md` (`## §<id>` anchor).
+  full body is** (`—— 全文（…）→ <path> §N`); after the 2026-09-23 slim (and again after the
+  2026-10-11 round-3 slim, 192 entries >12 lines) that is either a topic doc's `决策正文归档` section
+  (`### §<id>` anchor; its top carries a **家族谱系** that groups one problem's successive rounds) or
+  `docs/decisions/details/<domain>.md` (`## §<id>` anchor).
   Older bodies live in `docs/decisions.details.md` (foundational §1–§10, refactor/engineering §239–§271,
   God-AI freeze ops §273–§276, replay/RL-bridge §279–§280, NN epoch §289–§290)
   and the topic progress docs (`docs/god-ai-tuning.progress.md`, `docs/perf-optimization.progress.md`,
@@ -635,6 +637,8 @@ bugfix / UI 调整 / 运维清理 → **commit message only**（要防重犯处�
    单条正文 >40 行会触发 `check-decisions` 告警（该搬 progress 文档了）。2026-09-23 已把 107 条
    超长条目按同一口径搬走（正文 → 主题档 `决策正文归档` 节 / `docs/decisions/details/`），索引行
    只留 `决定` + `违反后果` + 指针；新写条目**直接写索引形态**，正文按主题落一处，禁双写。
+   2026-10-11 第三轮同一口径清掉后三周积累的 192 条（2026-09-24 起正文 >12 行），并在各主题档
+   归档节顶生成「家族谱系」（同一问题的先后进展归并 + 末条决定原文节录）。
 
 **真写才走的流程（只有过闸门才执行）**：
 - **New-entry ID (自治理生效起)**: `§YYYY-MM-DD-<branch>-<slug>`（branch 去连字符，如

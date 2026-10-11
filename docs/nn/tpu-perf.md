@@ -684,6 +684,77 @@ pull 模式下 `hub_server._get_payload()` 是 `self._bytes(p.read_bytes())`，*
 
 <!-- OLD-NUMBER-MAP: 自动生成，勿手改 -->
 
+
+---
+
+> **第二轮归档（2026-10-11）**：`DECISIONS.md` 第三次瘦身把 **2026-09-24 起、正文 >12 非空行**的 **2** 条决策全文按主题落到本节（第一轮 2026-09-23 见上文）。家族分组只归类、只连线，结论与理由一律引原文；`DECISIONS.md` 索引行末尾的指针 = `docs/nn/tpu-perf.md` §9「决策正文归档」· 锚 `### §<id>`。
+
+**家族谱系（同一问题的先后进展按主题归并，先后为时间序）**
+
+- **A｜Colab/TPU 核数口径与导入守卫**（2 条，2026-10-03～10-04）：`§2026-10-03-goalnn-cpu-slots-reserve2` → `§2026-10-04-goalnn-sympy-printing-guard`
+  - 末条决定（原文节录）：`worker/ppo/np_core.py` 新增 `_ensure_sympy_printing()`——**只在缺失时**补绑……
+
+**家族 A — Colab/TPU 核数口径与导入守卫**
+
+### §2026-10-03-goalnn-cpu-slots-reserve2（2026-10-03，TPU 核数口径：Colab 配额=4 核不是 24；预留 4→2 统一；log 报三源出处）
+> 决策 `DECISIONS.md` §2026-10-03-goalnn-cpu-slots-reserve2。归档 2026-10-11（第二轮瘦身）。
+
+- **背景（误读现场）**：Colab TPU 上 `kind=iter rollout done in 34.909s｜games=176｜workers=3`，
+  用户据「实例有 24 个 cpu 核」怀疑 3 workers 不可能跑完 176 局。现场诊断（同一台）：宿主
+  `/proc/cpuinfo` 24 个 processor（12 核×2 线程）、`os.cpu_count()/亲和` 都是 24，而
+  **cgroup v2 `cpu.max=400000 100000` ⇒ 可用算力 4 核**——内核配额才是「这台机器能给多少」的
+  硬口径（Kaggle 同款：宿主 224 / 配额 96，2026-09-25 的 2.3× 超订事故就是拿宿主数当配额）。
+  `cpu_worker_slots(4)=max(4−4, 0.8×4)=3` 与 log 逐字一致；且 176 局（p50 0.52s）÷3 ≈ 30s ≈
+  实测 34.9s，池行 `spawned=3 / served=176 / fallback=0` 证明全程只有 3 个 bun 进程
+  ⇒ **workers=3 是真的**，不是日志假数。
+- **决定**：① **用户校准：预留 4 → 2**，统一改 `max(cores−2, cores×0.8)`（`CPU_RESERVE=2`；
+  Kaggle 96→94、Colab 4→3、16→14、8→6；`rollout.cloudflared.ipynb` 的内联回退同步）；
+  ② **「修 log」= 报出处**：新增 `common.platform_utils.cores_note()` →
+  `cpu_count 24 / 亲和 24 / cgroup 配额 4 ⇒ 可用 4`，挂进 `plan_run`「rollout 并发局数」行与
+  `iter_rollout`「并发夹取」行——「可用核 4」不会再被读成「这台机器只有 4 核」。
+- **被否决**：把核数检测改成忽略 cgroup 配额（Colab 上会拿 ~22 workers 去挤 4 核算力 ⇒ 需求
+  22 核 vs 配额 4，单局墙钟 ~5×、p99 越过 5s 硬顶 ⇒ 成批超时 + 池回退放大 = 2026-09-25 停摆
+  形态）。Colab 上加压的唯一正当旋钮 = `CFG.rollout_workers` / `NN_ROLLOUT_WORKERS_MAX=0`
+  （实验用；判读看 p50 与总时长——配额饱和时只涨单局墙钟）。
+- **落点**：`nn-training/common/platform_utils.py`（CPU_RESERVE + cores_note）·
+  `nn-training/remote/{plan_run,plan_handoff,offline_eval,offline_boot}.py` ·
+  `nn-training/worker/iter_rollout.py` · `nn-training/ipynb/{battle.offline,rollout.cloudflared}.ipynb` ·
+  回归 `nn-training/tests/{common/test_platform_utils_cores.py,remote/{test_offline_eval_wiring,
+  test_offline_eval_cloud,test_remote_iter,test_offline_notebook}.py}`（含新增
+  `test_cores_note_reports_all_three_sources`）。
+- **门槛**：nn python gate 绿（**3600 pass/7 skip**，ruff+mypy 干净）。
+- **指针**：全文 `docs/nn/remote-transport.md` §60（含完整诊断读数）；旧口径档案
+  `docs/nn/runtime-opt.md` §7 顶部已加「2026-10-03 更新」行。
+
+### §2026-10-04-goalnn-sympy-printing-guard（2026-10-04，Colab TPU：`import torch_xla` 抛 `sympy.printing` 缺绑定 ⇒ 导入前补绑守卫）
+> 决策 `DECISIONS.md` §2026-10-04-goalnn-sympy-printing-guard。归档 2026-10-11（第二轮瘦身）。
+
+- **背景（真机事故）**：Colab TPU 离线课程，rollout 正常跑完 176 局后，PPO 起步时
+  `remote/train_core.run_training_core` → `xla_device()` → `import torch_xla` 抛
+  `AttributeError: module 'sympy' has no attribute 'printing'`，整段挂掉。
+  **同一台机器上独立进程全部正常**（用户实测：sympy 1.14.0、`hasattr(sympy,'printing')=True`、
+  `import torch_xla` 成功、`import sympy.printing; import torch_xla` rc=0）⇒ 不是镜像坏、不是
+  sympy 坏，是**进程内形态**：本进程已被 torch 的导入链引入 `sympy`（顶层），而 torch_xla 的
+  导入链**假定 `sympy.printing` 已随包初始化绑定好**；绑定一旦缺失（子模块在 `sys.modules`
+  里但父包属性没设），那条链就踩 AttributeError。
+- **夹带病理**：`xla_enable_compile_cache()`（train_core 在取设备**之前**调）用
+  `except Exception` 吞掉第一次同类失败并报成「不可用（…: 无 torch_xla）」——把「装了但导入
+  炸了」指成「没装」，真因被藏到第二次 import 的裸 traceback 里。
+- **决定**：`worker/ppo/np_core.py` 新增 `_ensure_sympy_printing()`——**只在缺失时**补绑
+  `sympy.printing`（幂等；sympy 不存在静默放过；绝不抛），并在**本进程第一次** `import
+  torch_xla` 之前调它（`xla_device()` 与 `xla_enable_compile_cache()` 两个入口，后者是训练
+  路径上的首个 torch_xla 触点）。同时把上面那句误导文案改为带上真实异常
+  （`不可用（{type}: {err}）`）。
+- **被否决**：(a) 只在 notebook/镜像里预装或 `import sympy.printing` 一次——修的是「这一次会话」，
+  换镜像/换会话即复发，且与「云机自主跑」相悖；(b) 在 `train_core` 里 try/except 把 TPU 降级成
+  CPU——那正是 §2026-09-22 花力气拒掉的**静默降级**（CPU 上跑整段「看着正常、慢两个数量级」）。
+- **落点**：`nn-training/worker/ppo/np_core.py`（守卫 + 两处接线 + 文案）·
+  `nn-training/pyproject.toml`（mypy 第三方豁免加 `sympy.*`——它无 py.typed，与 torch/numpy 同册）·
+  回归 `nn-training/tests/worker/test_tpu_backend_guard.py`（新增 `TestSympyPrintingGuard` 三例：
+  缺绑补回 / 已绑幂等 / sympy 不存在静默）。
+- **门槛**：nn python gate 绿（见下）；ruff + mypy 干净。
+- **指针**：全文 `docs/nn/remote-transport.md` §61。
+
 ## 附：本文件旧编号对照（拆分前 `docs/nn.progress.md` 的 § 号）
 
 旧 §21→§1 · 旧 §25→§2 · 旧 §41→§3 · 旧 §132→§4 · 旧 §133→§5 · 旧 §134→§6 · 旧 §135→§7 · 旧 §131→§8（重号 §131 的第二条）

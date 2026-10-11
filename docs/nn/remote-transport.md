@@ -6465,6 +6465,1399 @@ job 级 `uploaded` 标志 + 主循环 `try/finally` 收尾 + `--result-upload`�
 
 <!-- OLD-NUMBER-MAP: 自动生成，勿手改 -->
 
+
+---
+
+> **第二轮归档（2026-10-11）**：`DECISIONS.md` 第三次瘦身把 **2026-09-24 起、正文 >12 非空行**的 **40** 条决策全文按主题落到本节（第一轮 2026-09-23 见上文）。家族分组只归类、只连线，结论与理由一律引原文；`DECISIONS.md` 索引行末尾的指针 = `docs/nn/remote-transport.md` §32「决策正文归档」· 锚 `### §<id>`。
+
+**家族谱系（同一问题的先后进展按主题归并，先后为时间序）**
+
+- **A｜角色路由与离线腿收尾**（6 条，2026-09-25）：`§2026-09-25-goalnn-role-routing` → `§2026-09-25-goalnn-offline-leg-retired` → `§2026-09-25-goalnn-online-worker-no-bun` → `§2026-09-25-goalnn-cloud-cpu-ledger` → `§2026-09-25-goalnn-rollout-reap-wedge` → `§2026-09-25-goalnn-eval-round-retry`
+  - 末条决定（原文节录）：`§2026-09-25-goalnn-rollout-reap-wedge` 把 rollout 腿的「机器级停滞」改成轮内重投，……
+- **B｜离线任务包与产物交换**（6 条，2026-09-24～10-04）：`§2026-09-24-goalnn-opt-blob-diet` → `§2026-09-24-goalnn-offline-local-first` → `§2026-09-25-goalnn-offline-switch-auto-bundle` → `§2026-09-25-goalnn-offline-task-discovery` → `§2026-10-03-offline-pack-truncation-and-ref-blob` → `§2026-10-04-goalnn-offline-eval-backfill`
+  - 末条决定（原文节录）：新 `dashboard/src/server/offline-eval-backfill.ts`（纯选择 + 增量账本索引 + 编排）；……
+- **C｜课程封存**（2 条，2026-09-26）：`§2026-09-26-course-archive-compress` → `§2026-09-26-course-archive-guard-and-startpoint`
+  - 末条决定（原文节录）：① **新鲜度升为与 marker 无关的第二道闸**：目录新鲜（不论有无 marker）默认拒绝封存；……
+- **D｜hub 回灌 / 模式切换 / 离线接管**（7 条，2026-09-26～10-07）：`§2026-09-26-hub-mode-restore-enabled-only` → `§2026-10-03-goalnn-auto-offline-handoff` → `§2026-10-03-goalnn-auto-offline-handoff-t6` → `§2026-10-03-goalnn-switch-mode-drops-jobs` → `§2026-10-03-goalnn-offline-seize` → `§2026-10-05-goalnn-offline-online-status-switch` → `§2026-10-07-offline-busy-gate-anchor`
+  - 末条决定（原文节录）：三处，全是换判据、不加机制。① `_busy_locked` 的交接窗口锚从 `claimed_at` 换成**本次……
+- **E｜租约 / 派发 / 节点自注册**（7 条，2026-09-24～10-10）：`§2026-09-24-job-identity-collision` → `§2026-09-25-goalnn-prefetch-p0-not-preempt` → `§2026-10-01-goalnn-lease-orphan-reap` → `§2026-10-06-goalnn-pull-replica-any-unfinished` → `§2026-10-08-goalnn-dispatch-model` → `§2026-10-09-goalnn-course-workers-removal` → `§2026-10-10-goalnn-rollout-node-auto-register`
+  - 末条决定（原文节录）：`POST /admin/nodes/register/unregister` + `GET /admin/nodes`（Bearer = `HUB_TOKEN`）由 hub……
+- **F｜传输让路税**（1 条，2026-10-02）：`§2026-10-02-goalnn-transfer-residual-yield`
+  - 末条决定（原文节录）：让路条件化（**最老在途**控制请求 ≥ `YIELD_AFTER_SEC_DEFAULT=1.0s` 才让）+ 按传输累计 ≤5s；……
+- **G｜自主段起点与打包新鲜度**（2 条，2026-10-04）：`§2026-10-04-goalnn-opt-blob-must-ride-the-pack` → `§2026-10-04-goalnn-pack-freshness-on-handoff`
+  - 末条决定（原文节录）：（判据 = 「包是否仍代表当前起点与当前代码」，全在控制台侧判）：……
+- **H｜补传腿与自主 worker 收工**（3 条，2026-10-07～10-10）：`§2026-10-07-goalnn-offline-deliver-isolation` → `§2026-10-07-goalnn-offline-graceful-exit` → `§2026-10-10-goalnn-deliverproc-final-flake`
+  - 末条决定（原文节录）：① 慢层用例的**杀点同步到磁盘证据**（账本记全 3 轮 + `result_done`；不是 hub 那边的计数），……
+- **I｜云机日志与 worker 身份**（2 条，2026-10-04～10-06）：`§2026-10-06-goalnn-cloud-worker-log-diet` → `§2026-10-04-goalnn-worker-readable-name`
+  - 末条决定（原文节录）：① 判据唯一实现 `common/env_probe.py`（纯函数）：env = `kaggle_secrets` /……
+- **J｜集群代码快照**（3 条，2026-10-10）：`§2026-10-10-goalnn-cluster-code-snapshot` → `§2026-10-10-goalnn-cluster-code-snapshot-ts` → `§2026-10-10-goalnn-cluster-code-snapshot-ui-hatch`
+  - 末条决定（原文节录）：组件卡在**建快照的那个进程行**上贴一枚 `code <sha12>` 徽章……
+- **K｜aistudio 传输硬化**（1 条，2026-10-11）：`§2026-10-11-goalnn-aistudio-transfer-hardening`
+  - 末条决定（原文节录）：只做传输层省税（A1 预取自停 / A2 让路自停 / A3 持久缓存根+容量上限 / B1 批量 blob /……
+
+**家族 A — 角色路由与离线腿收尾**
+
+### §2026-09-25-goalnn-role-routing（2026-09-25，plan/online-offline-role-routing.plan.md）
+> 决策 `DECISIONS.md` §2026-09-25-goalnn-role-routing。归档 2026-10-11（第二轮瘦身）。
+
+**「该由哪个盘执行」成为 job 的不变式**：`manifest.role ∈ {offline, online}` 在**发布时**定死
+（`publish_job`，`kind` 的同一快照：`run ⇒ offline`；`iter/ppo/bc ⇒ online`；`MANIFEST_KINDS`/`KIND_ROLES`
+共用一份全集 + 穷举用例）。**闸下沉到 `_JobStore._claim_locked`**（租约写入的唯一临界区）⇒ 四条认领腿
+（`claim_next` / `peek`+`claim` / 按 id 直领 / **push 派发**）天然同源；判据函数只有一份
+`role_blocked(job_id, role) -> "" | "parked" | "role"`（派发面用它过滤候选、临界区用它拒绝）。
+**两道正交的闸**：归属闸（job 级，`manifest.role`）+ **停摆闸**（课程级，`mode=offline` 且请求方不是
+离线盘——2026-09-20 的既有语义，**保留**：离线课的活留给切回在线，`pending_n` 不降）。
+worker 侧**复用既有载体**（`CFG["offline_worker"] → --offline → X-Battle-Offline: 1`，头名与取值逐字节不变，
+只把语义从「能力」升为「归属」），且 **peek 与 claim 两跳都带**（旧代码里 claim 从不带这条头）；
+取包端点 `_get_task_pack` 补 mode 闸（只在「表里有它且明确 online」时 409；冷课/未扫到的课放行）；
+`/admin/queue` 每行加 `roles: {jid: role}`（**不**报 `claimable` 布尔——它是相对请求方角色的属性）。
+**行为变更**：带 `X-Battle-Offline` 的盘**不再兼领在线盘的活**（一个盘一种任务，用户 2026-09-25 裁决）
+——这**supersede `§2026-09-19` 的能力语义**（原 `protocol.py`「带标 worker 仍可领在线课」）：`kind=run`
+整段**确实**由在线盘跑得动（审计 §3）⇒ 能力闸拦不住「有能力的盘接走不属于它的活」，判据必须是角色。
+顺带修：`rl/cli.py --rollout-src` 的默认从 `_d("rollout_src", …)` 改为字面量 `"auto"`（旧写法把顶层
+`rl.rollout_src` 读成 argparse 默认值 ⇒ `_rollout_source` 早返回 ⇒ **课程级配置被整个忽略**；顶层仍在兜底链里）。
+**被否决**：新增独立 `X-Battle-Role` 头 / `--role` 参数（= 第 4 个模式载体，且旧 worker 不带新头会静默掉线）·
+`role` 进 `MANIFEST_OPTIONAL_DEFAULTS`（静态默认值 = 第二个事实源）· `NN_ROLE_ROUTING=0` 回退开关
+（把「一个盘一种任务」变成**可选**，正好在最需要它的混部期复现事故；回滚面 = 笔记本开关 + 本提交同批）·
+只在各调用点分别加闸（push 腿必然漏——它就是本轮的第一个洞）· 归属缓存永不失效（重发覆盖 manifest 即谎报；
+改为 `publish` 里 pop）。**违反后果**：归属写在调用点 ⇒ 新加一条腿就静默绕过闸；归属读 mode ⇒ 每切一次模式
+历史 job 跳一次（本轮事故：两小时前缺 bun 被拒的 `kind=run` job 被另一块盘领走）；claim 不带头 ⇒
+带标 worker 自锁（peek 说能领、claim 当场拒）；取包端点不查 mode ⇒ 离线盘能取走在线课的包跑整段（L6）。
+—— 全文（症状 / 三条根因 / 落地表 / 被否决策 / 真机验证点）→ `docs/nn/remote-transport.md` §47 · 锚 `## §47`
+
+### §2026-09-25-goalnn-offline-leg-retired（2026-09-25，plan/online-offline-role-routing.plan.md §7）
+> 决策 `DECISIONS.md` §2026-09-25-goalnn-offline-leg-retired。归档 2026-10-11（第二轮瘦身）。
+
+**「离线 = 本机发一份 `kind=run` 队列项、随后等 8h」这条腿退役** —— 离线场景**没有「一整段」这个
+中间概念**（用户 2026-09-25 口径）：云机接手一门课就一直跑，直到 ① 跑完课程 ② 云机配额用尽
+③ 人工停机/停课，**能传回来多少是多少**。离线课的唯一载体是**任务包**（`--export-bundle` →
+云机 `battle.offline.ipynb`：`/offline/tasks` 清单 → 取包 → 跑完逐轮回传 → 控制台导入产物）。
+落地（P5，逐条都在代码里）：
+
+1. **砍在发布点，不砍配置**：发布端（发一份带段长的队列项那个方法）删除，
+   `RUN_WAIT_DEFAULT_SEC` / `_run_wait_sec` / `--run-wait-sec` / `rl.run_wait_sec` 一并退役（**没有
+   8h 白等这回事了**）。配置里的 `rollout_src=run` + `run_iters` **保留**——它是「这门课由云机
+   接手」的既有声明，也是导出腿的终点口径（删字段会让 `resolve_collect_mode` 落回 `COLLECT_LOCAL`
+   ⇒ **本机偷偷自己采样、与云机双跑**）。
+2. **本机循环遇离线课干净收官**：`resolve_collect_mode` 的 `COLLECT_SEGMENT` → `COLLECT_OFFLINE`
+   （来源 `run` **或**写了终点值 ⇒ 离线，**绝不**回落本机采样）；`step_course_iter` 打一行指路
+   （`battle.offline.ipynb`）后返回 `ROUND_OFFLINE_EXIT`：不采样、不发队列项、不等待、不进账本
+   （不是失败：不落 `iter_error`、不计连击）。该课的权重/读数由**产物导入**推进本机账本。
+3. **无消费者改成当场报错**：`_remote_ppo_publish` 是 `kind=run` 的唯一咽喉 —— 带 `plan_bytes`
+   而不带 `export_path` ⇒ `SystemExit`，消息指路取包链与本机该走的那一步（任务包）。
+   worker 侧对 `kind=run` **响亮拒收**（最前，零指令零下载）：不是「当成 iter 跑一轮」——半跑会
+   产出权重、让控制面看着像在推进，而 hub 侧早就不等了（那是最难查的静默分叉）。
+4. **离线盘报名**（R3：离线盘在 hub 眼里是匿名的）：`offline_boot` 的每个 hub 调用都带
+   `X-Battle-Offline: 1`（与 job 腿共用同一份归属判据；本模块不 import `remote.*`，两份字面量由
+   测试守逐字相同），hub 在 `/offline/*` 前缀记一次 ⇒ `/admin/queue.offline_disk` 报
+   `recent`/`last_seen_ago` + **`stale_jobs`**（还挂着的离线待领项 = 盘上遗留 / 手写参数 /
+   混部期旧 hub）+ `hint`。这是「本环境有没有离线盘」**唯一**的报到面（此前恒为空）。
+5. **保留的两条能力（用户点名，一个字节都不改）**：① 离线云机**串行跑多门课**（清单 + `drain`
+   驻守 + 租约 + 预算/空闲上限）；② **notebook 不写课程名**（`requested_courses` 空 ⇒ 清单发现）。
+   所以「报名」只能是**这块盘的身份**，不许做成「每门课一个开关」。
+
+**被否决**：① 取向 2「保留这条腿、只给离线盘」——`role=offline` 的消费者**当时并不存在**（全仓只有
+测试设过 `CFG["offline_worker"]`），要成立就得新造并部署一个，而它的活已被取包链完整覆盖
+⇒ 一个任务两个执行者，正是 2026-09-25 云机接错盘事故的结构；② 在 `setCourseMode` 里**删配置字段**
+来关掉这条腿（见落地 1：会静默退回本机采样、与云机双跑）；③ 只做「熔断」（单独用 = 每次切离线先
+白等一轮，且不解决「两个执行者」的结构）；④ 把 `remote/run_loop.py::run_plan_job` 一并删掉
+（它无生产调用者了，但它是「从首轮结果续下去」的唯一入口，`tests/remote/test_run_loop.py` 的 4 组段语义
+回归挂在它上面——删它等于把这些回归一起删）；⑤ 加回退开关（`NN_ROLE_ROUTING=0` 那类）——
+会把「一个盘一种任务」变成可选，而它正是这次事故的判据。
+
+**违反后果**：留着旧腿 ⇒ 队列项无人能领、本机白等 8h，而日志一切正常（队列不降、没人报错）·
+在配置里删字段 ⇒ 本机与云机**双跑**同一门课（两份权重、账本互相污染）· 只在测试里改断言而不动
+生产枚举 ⇒ 第 5 条认领/发布路径静默绕过归属闸 · 把「报名」做成每门课的开关 ⇒ 用户点名的两条能力
+（多课程串行 / 不写课程名）当场作废。
+—— 全文（口径、R1–R4、残留清单、DoD）→ `plan/online-offline-role-routing.plan.md` §7 ·
+档案 `docs/nn/remote-transport.md` §48 · 回归 `nn-training/tests/trainer/test_offline_leg_retired.py`
+
+### §2026-09-25-goalnn-online-worker-no-bun（2026-09-25，plan/online-offline-role-routing.plan.md §9）
+> 决策 `DECISIONS.md` §2026-09-25-goalnn-online-worker-no-bun。归档 2026-10-11（第二轮瘦身）。
+
+> 前身：同日 16:39 曾立过一条 `…-cloudflared-notebook-retired`（「把 cloudflared 盘退役」）——
+> **那条是误判，已于当日全量撤回**（notebook 已恢复原状）。留下这个错形状，防止再犯。
+
+**裁决（两块盘的分工与 bun）**：在线 worker 的两块盘 —— `battle.tailscale.ipynb`（**tailnet**）与
+`battle.cloudflared.ipynb`（**cloudflared 公网隧道**），服务**不同的云机网络环境**，**都保留**；
+且**都不跑 rollout** ⇒ 两块盘**不装 bun、也不传 ts 代码**。
+bun 只属于**自己跑 rollout 的链**：`battle.offline.ipynb`（Kaggle/TPU，Kaggle 不给 tailnet ⇒ 只能走
+cloudflared 隧道进 hub，它自己跑 rollout）与采样节点 `rollout.cloudflared.ipynb`。
+
+**拦截的错误形状（两条，都得记住）**：
+① **退役**：把「能力归属」（谁跑 rollout）当成「接入方式」（怎么连到 hub）来判 —— 能力重叠 ≠ 入口冗余；
+公网隧道的机器进不了 tailnet，那块盘就是它**唯一**的路。
+② **补装 bun**：把「在线腿收到 kind=iter 却被拒单」当成「盘少了 bun」去修（§46 那修法）——
+真正的错是**不该给不跑 rollout 的盘派 kind=iter**，而不是让它们也装上 bun。
+
+**落地**：`remote/tailscale_boot.py` 的 `ensure()` 不再调 `ensure_bun`；`BUN_INSTALL_URL` /
+`bun_path()` / `ensure_bun()` 三处**退役**（无消费者）；`remote/iter_rollout.py::resolve_bun` 的拒单
+消息改成「这份活派错了盘」+ 指路；`tests/remote/test_tailscale_boot_bun.py` 重写成三条边界的守卫
+（在线盘 4 份源码 + 2 个 ipynb 零 bun 安装 / 退役符号不许回来 / 跑 rollout 的盘**必顶还有** bun）。
+`kind=ppo` 本来就不碰 bun 与 ts_code（零下载自检与 `_ensure_ts_code` 都只在 `kind == "iter"` 分支），
+所以「不传 ts 代码」这一半不需要新代码 —— 守卫用例把它钉住了。
+
+**被否决**：① 退役 cloudflared 盘（见上 ①）；② 给 cloudflared 线也补装 bun（见上 ②）；
+③ bun 改由 hub 随包下发 / 发布 `bun build --compile` 产物（本仓无此流水线）—— 两条都是为「本不该发生的
+派单」修路；④ 「派单前按能力筛节点」（L3.1）—— 本次不做（另题），但拒单消息已带指路。
+
+**违反后果**：把 bun 安装加回在线引导链 ⇒ 两块盘重新背上「公网 curl + 必须在改代理之前」的顺序
+硬约束，而这件根本不需要发生；把「不跑 rollout」的盘派上 kind=iter ⇒ 每单零下载空转（安静）。
+
+**回归**：`nn-training/tests/remote/test_tailscale_boot_bun.py`（5 条）· `tests/remote/test_ts_offline_install.py`（去桩）。
+—— 全文（分工表、实施表、DoD、误判留档）→ `plan/online-offline-role-routing.plan.md` §9 ·
+档案 `docs/nn/remote-transport.md` §49
+
+### §2026-09-25-goalnn-cloud-cpu-ledger（2026-09-25，云机 rollout 卡死取证）
+> 决策 `DECISIONS.md` §2026-09-25-goalnn-cloud-cpu-ledger。归档 2026-10-11（第二轮瘦身）。
+
+**云机上的「rollout 卡死」= 两条 CPU 腿同时开满 + 池的回退放大**（不是导出器坏了、也不是局真的
+卡住：超时局 `rc=<仍在运行>`、尾行只到 `[features] native 启用`，是**活着的慢局**）。三处落地：
+① `run_loop._maybe_cloud_eval` 提交后**有界等**本轮云机评估收线（`EVAL_ALTERNATE_WAIT_SEC=300`）
+——「rollout 与 eval 交替跑、互不预留」从注释假设变成**代码保证**（旧版的提交点恰好落在下一轮
+rollout 的开跑瞬间 ⇒ 两条腿同时各开满一份 ⇒ 成批踩 5s 硬顶）；
+② `serve_pool` 加**熔断**（累计回退 ≥ `max(4, workers//4)` ⇒ 余下局改一次性、**不再补位/重建
+worker**）+ 补位就绪等待受**本次尝试硬顶**约束 + 回退行**带 kind/label/where**且只留前 5 条详情
+（「一次超时 = 三份进程」是「越回退越慢」的正反馈，必须有刹车）；
+③ **核数按物理数目**：`platform_utils.effective_cores()` = min(cgroup 配额, 亲和掩码) 优先，
+`os.cpu_count()` 只当最后的兜底 —— 容器里它报的是**宿主机**核数（Kaggle 实测 224，而 cgroup
+只给 **96**），所以日志里那个 `workers=220` 本身就是 2.3× 超订的产物（不是「这台机器有 224 核」），
+两条腿各开满时真实超订是 4.6×；
+④ `iter_rollout` 按该核数夹取 hub 给的并发（旧状态只有 `MAX_WORKERS=256` 一道闸；云机
+220→92），夹取进轮末日志、`NN_ROLLOUT_WORKERS_MAX=0` 可关；
+⑤ **「本机几核」只允许一个答案**（同日收尾）：口径铺到所有**定并行度**的入口 —— TS 侧新增
+`tools/lib/cores.ts`（`cgroupCpuQuota` + `affinityCores`（`/proc/self/status` 的 `Cpus_allowed_list`，
+Node/Bun 无 `sched_getaffinity`）+ `hostLogicalCores` 兜底，逐条镜像 `effective_cores`），消费方 =
+`worker-pool.physicalCores`（⇒ `eval-course-ckpt`/`export-*`/`sim-pool`/`m1-eval` 的默认 worker 数）、
+`sampler-agent` 的 `CPUS`（默认 `workers` **与**上报的 `cpus`）、`perf-cmp-rollout` 的核探测、
+`dashboard/src/core/venv.ts` 的 torch 线程数；python/脚本侧补 `rl/cli.py --workers`、
+`nn-python-gate.sh` 的 `-n`、两个 notebook 的并发单元格。**夹取只降不升** ⇒ 裸机/dev 机逐位不变
+（本机 16 核读数不变）。dashboard 因此多消费一个仓根模块 ⇒ 已同步 `.github/workflows/dashboard.yml`
+的 paths（`dashboard/tests/ci-scope.test.ts` 钉这条边）。
+**被否决**：抬高 5s 单局硬顶（用户口径「>5s 肯定不正常」，而本案的慢局正是被超订挤慢的，
+抬高只会让它更久停在超订态）· 给 eval 预留核数（2026-09-22 已否；按物理数目定池后 rollout
+就吃掉 96 核的大部分，预留等于停掉云机评估——真交替能同时满足两边）· 评估挪到另台机
+（没有这条设施，且语料/口径必须与 in-loop 同一份）· 继续用 `os.cpu_count()` 当核数（容器里
+它是宿主机的数字，不反映配额——本轮的 220 就是从它算出来的）。
+**违反后果**：两条腿同时开满 ⇒ 每轮成批超时并触发回退放大（现场：整轮 4 分钟 `[run]` 零行）·
+池无熔断 ⇒ 一个环境抖动就能把节点推入「回退越多、进程越多、越慢」的死循环 · 节点不夹取 ⇒
+小核数节点被 hub 的导出机规模打爆 · 回退行不带 kind ⇒ 一屏同形行，分不出哪条腿（本轮排查的
+第一道坎）· 只改一处核数读数 ⇒ python 按 96 算、TS 工具/脚本按 224 算，同一次跑里两个口径
+（`eval-course-ckpt` 的默认 worker、agent 上报的 `cpus`、gate 的 `-n` 都还在按宿主机数排）。
+—— 全文（现场读数 / 三条根因 / 落地表 / 下次真机该看的四个读数）→ `docs/nn/runtime-opt.md` §23 · 锚 `## §23`
+
+### §2026-09-25-goalnn-rollout-reap-wedge（2026-09-25，云机 rollout 二次卡死取证）
+> 决策 `DECISIONS.md` §2026-09-25-goalnn-rollout-reap-wedge。归档 2026-10-11（第二轮瘦身）。
+
+**现场**：battle.offline.ipynb × x20-dodge-l3（96 核配额）。§23 的三件套都已生效（`workers=92`、
+健康轮 336 局 3.29s、熔断会响），但两次各损失 15–24 分钟：开跑 5s 内 ≥23 局踩硬顶 ⇒ 熔断 ⇒
+随后 `进度=271/336 games settled (910s)` 一行不动（890s 里零结算），两条同批回退局的重试行
+在 910s 那一刻才出现，且写着「上次：rollout 单局超时（5.0s > 硬顶 5s）」。
+
+**根因**：`p.kill(); p.wait()` **没有上限**。超时行里的 elapsed 是 kill **之前**算的（所以照旧
+写 5.0s），而 890s 花在 kill 之后的**回收**上——子进程卡在不可中断的 IO（D 状态）时 SIGKILL 要
+等系统调用返回才生效。一条线程不返回 ⇒ 整轮收不齐（后面的 65 局连开始都开始不了）。
+**放大器**：熔断（§23）把余下每一局推去**一次性冷启动**，而手上 70 个**暖** worker 空转——
+那正是它要掐掉的正反馈；「不再补位」被实现成了「余下局全走一次性」。
+
+**变更**：① `platform_utils` 新增 `popen_own_group`（POSIX 进程组）/ `kill_process_tree`（SIGKILL
+整组、不等回收）/ `reap_bounded`（有界回收）/ `keep_unreaped`+`sweep_unreaped`（收不了尸的记账）
+与 `KILL_REAP_SEC=5.0`（全仓唯一那个数）；② 两条 CPU 腿（`iter_rollout` 的逐局、`eval_local` 的
+抓取）都改成进程组 + **有界**回收；③ 回收不了 ⇒ **`UnreapableChildError`**（`RetryableError`
+子类）：本局**不就地重跑**（同一 `w{i}/` 上再起一个写者 = 半截/交错 shard = 静默错数据）；
+④ 熔断语义收窄为 **只停补位**（暖 worker 继续服务、一个都不新建）；⑤ `game_watch.STALL_WARN_SEC=120`
++ `stall_line`：整轮停滞时点名（进度行只在「有局结算」时才打 ⇒ 全卡住时它们一起哑，这就是
+890s 零行的成因）；⑥ **重投放在轮内**（用户口径「失败就重试，不许关云机让任务失败，也不许空转
+烧配额」）：`run_iter_rollout` 自己接住 `UnreapableChildError`，**只补没产出的那几局**（已结算的
+局不重跑，先 `_clean_attempt` 清掉半截产出），不睡、不报失败、不消耗调用方重试预算 ⇒ 训练腿与
+云机都不受影响；重投次数缺省**不限**（`ENV_ROUND_RETRY_MAX` 是操作员退出阀，缺省 0=不限）；
+**为什么不能扔给外层**：外层每条腿预算极小（云机自主段 `run_loop._run_with_retries` 只有 3 次）
+⇒「一台机器短管卡住」会直接把整段训练判死；⑦ `worker_loop` 保留同名分支作为回落：
+能上抛到那里的（操作员设了上限 / 非 rollout 腿）只做「还租约 + 立即重领」，不睡、不报失败（hub
+只对**租约过期**计毒包，主动 release 不算 ⇒ 反复重投不会把自己冻死）。
+
+**被否决**：收不了尸就**原地重跑这一局**（静默错数据的入口）· 熔断=停用整池（旧实现，等于在最挤的
+时刻把每一局都换成冷启动）· 抬高 5s 硬顶（§23.3 已否，且本条的慢局是被系统事件挤慢的）·
+给「回收不了」加固定等待/固定重试（把机器问题记在内容头上，且那个等待又是无上限的风险）·
+**退避/冷却（试过 30s，用户当天否决）**：云机按分钟计费，机器卡死的那 15 分钟里睡掉的分钟
+就是白烧的配额；而要的东西（别把整轮反复重投打在被卡住的机器上）由「**只补没产出的那几局**」
+回答 —— 重投不再是「336 局重跑一遍」，而是接着把它没做完的那几局做完（既不空转也不浪费）·
+把重投扔给调用方重试预算（3 次即判死整段训练）· 拿 `FREEZE_AFTER_RECLAIMS` 当刹车（主动 release
+刻意不计数，否则诚实重试会被冻成毒包）· 拆掉 `_clean_attempt` 的全树 rglob（与 `scan_shard_dirs`
+同口径，收窄 = 半截 shard 会被当成产出）。
+
+**违反后果**：任何一处裸 `wait()`/`communicate()`（无上限）⇒ 一条线程就能把整轮按住且**日志看不出
+来**（elapsed 是 kill 之前算的）· 熔断写成「余下局全走一次性」⇒ 卡死时反而最大化进程 churn ·
+进度/心跳只挂在「有局结算」上 ⇒ 全卡住时零日志，operator 只能看着机器卡死 ·
+把「机器级停滞」当成一轮失败扔出去 ⇒ 3 次就把整段训练判死（云机白烧）· 重投时**重跑整轮** ⇒
+机器卡 15 分钟就白烧 15 分钟的重复活（要的是「只补没产出的那几局」）。
+—— 全文（现场读数 / 根因 / 落地表 / 否决项 / 下次该看的四个读数）→ `docs/nn/runtime-opt.md` §24 · 锚 `## §24`
+
+### §2026-09-25-goalnn-eval-round-retry（2026-09-25，eval 腿对齐机器级停滞口径）
+> 决策 `DECISIONS.md` §2026-09-25-goalnn-eval-round-retry。归档 2026-10-11（第二轮瘦身）。
+
+**现场/来历**：`§2026-09-25-goalnn-rollout-reap-wedge` 把 rollout 腿的「机器级停滞」改成轮内重投，
+但**eval 腿只改了一半**：`rl/eval_local.run_eval_runner_capture` 已经用进程组 + 有界回收（收不了尸
+就 `keep_unreaped`），可它把那一态**当成普通超时上抛** ⇒ `run_cloud_eval.run_one` 的通用分支把它当
+内容失败：原地重跑 3 次、失败就记一轮 `failed` ⇒ 这一轮**永远缺一个读数**（且没有任何重订机会：
+评估腿的调用方 `CloudEvalRunner` / 云机自主段不重试，rollout 腿的 3 次预算也不盖它）。
+
+**变更**：① `UnreapableChildError` 的**定义**上移到 `remote/protocol.py`（与 `RetryableError` 同册：
+它是**两腿共用**的分类语义），`remote/iter_rollout.py` 只 import 它当模块属性（worker.py / 用例
+零改动）；② `run_eval_runner_capture` 在「SIGKILL 之后 `KILL_REAP_SEC` 内连输出都收不回来」时抛它
+（普通超时照旧 `TimeoutExpired` —— 分类就住在抛出点上）；③ `run_cloud_eval` 加**轮循环**：
+`except UnreapableChildError` ⇒ 本局**不原地重跑**（同一 `eval-<it>-s<stage>-d<seed>/` 上可能还有
+活写者 ⇒ 半截/交错的 `_eval_report.json`）、**不记 `failed`**，只把它记进 `machine_stuck`；一趟跑完
+若有它的局，就用 `eval_done_keys` 算缺口**只补没评的局**（已落账的不重跑 = 不空转），投前
+`rmtree_best_effort` 清半截产出，然后重投；④ 重投次数缺省**不限**（`NN_EVAL_ROUND_RETRY_MAX`
+是操作员退出阀，缺省 0=不限；到上限**不上抛**——评估腿「永不抛」，抛出去连 summary 都没了——
+而是把还没评的局记成本轮 `failed` 并照常收尾）；⑤ 内容面失败（rc≠0 / 落账失败）仍归 `failed`；
+⑥ `out` 新增 `roundRetries`（只进日志/诊断，不进 wire），DONE 行在卡过时追加「整轮重投 N 次」。
+
+**被否决**：收不了尸 = 普通超时（把机器的问题记在内容头上 ⇒ 每轮都缺同一批读数）· 原地重跑同一
+`game_dir`（两个写者写同一份报告 = 静默错读数）· 把机器级停滞上抛给调用方（`CloudEvalRunner` 只
+记一笔 WARN 就走 ⇒ 这一轮白评）· 重投时重跑整轮（机器卡 15 分钟就白烧 15 分钟重复活）· 睡/退避
+（云机按分钟计费；且「只补没评的局」已经把「反复重投」的范围缩到真正没做完的那几局）。
+
+**违反后果**：把收不了尸并进 `TimeoutExpired` ⇒ 调用方只能二选一（机器问题记成内容失败 / 内容
+失败无限重投）· 用 `seen` 内存计数而非账本算缺口 ⇒ 断点续跑/落账失败时漏补或重复评 ·
+在轮内重投时**不**清半截产出 ⇒ 旧写者与被杀进程的产物被当成有效读数。
+—— 全文（现场/两腿口径对照/日志样例/下次该看的读数）→ `docs/nn/runtime-opt.md` §25 · 锚 `## §25` ·
+同源条目 `§2026-09-25-goalnn-rollout-reap-wedge`（rollout 腿）
+
+
+**家族 B — 离线任务包与产物交换**
+
+### §2026-09-24-goalnn-opt-blob-diet（2026-09-24，plan/opt-blob-diet.plan.md）
+> 决策 `DECISIONS.md` §2026-09-24-goalnn-opt-blob-diet。归档 2026-10-11（第二轮瘦身）。
+
+回传的 `opt` tar 从 `model.pt + opt.pt` 缩成**只 `opt.pt`**；初始权重改走内容寻址的 **`init` blob**
+（`BLOB_NAMES` 加 `init`，`sha = manifest.init_weights_fp` —— **复用既有字段，manifest 字段集不变**）。
+上行 760,658 → ~491,662 B/轮（x20 it176 口径 **−35.3%**），稳态下行零变化；同一份权重**一个方向只传一遍**。
+**可判据的不变量是差值**：去掉 tar 里 `model.pt` 成员 = 本机实测 **−262,790 B（−25.4%）**
+（绝对值随 `opt.pt` 可压缩性漂，§40 有口径警告）。
+worker 侧五源：payload → `blob_cache` → preloaded → `GET ?name=init` → tar 里旧形状 `model.pt`；
+四源皆尽 ⇒ `ProtocolError`（**永不**静默 warm-start），瞬时 ⇒ `RetryableError`；哨兵
+`init_weights_fp ∈ {"", "bc"}`（BC job / 全新 run 首轮）⇒ **零 blob 请求**，节点侧索取 `init`
+还要过 `manifest.slim` 闸。**稳态零下行依赖 `run_job` 产物段把 `weights.json` 原始字节也写进
+`blob_cache`**（与 opt tar 缓存同一手法；缺它每轮净亏 110 KB）。
+**被否决**：另写 init 下载路径 · hub 重打 tar · 「同一 worker」当命中判据 · 新增 `init_sha` 字段 ·
+保留 `model.pt` 让旧 worker 不炸 · 给 `_resolve_blob` 加 `cache` 开关。
+**升级顺序**：停 worker → 升 hub → 升 worker（禁半套回退；混跑时旧 hub + 换机必然响亮失败）。
+—— 全文（背景 / 实测量 / 五源 / 顺序 / 落地差异 / 判据 / 未决）→ `docs/nn/remote-transport.md` §40 · 锚 `## §40`
+
+### §2026-09-24-goalnn-offline-local-first（2026-09-24，plan/offline-rerun-local-first.plan.md）
+> 决策 `DECISIONS.md` §2026-09-24-goalnn-offline-local-first。归档 2026-10-11（第二轮瘦身）。
+
+**重跑离线 cell 时，起点、计划、代码一律以「机器上已经跑过的那份产物」为准**。决策与实现都落在
+`remote/offline_boot.py`（notebook 每次会话从 GitHub raw 刷新它），**不碰 `run_loop`/`bundle` 的导入语义**。
+判据（`local_artifacts`）：产物目录三件齐全（`state.json` + `plan.json` + `manifest.json`）⇒ **本机优先**：
+`run_loop` 的 argv **不带 `--bundle`**（`--artifacts` 单用），包只当代码/TS 的**备源**；取包改走
+`obtain_pack(optional=True)`（只试一次 hub、取不到返回 `None`、不弹上传框、**不 `SystemExit`**）⇒ 本机有
+进度时不再为取包白等 30 分钟。`CFG.force_pack=true` 或显式 `CFG.task_zip` = 显式老行为（包覆盖计划/清单）。
+有 `state.json` 而缺计划/清单 ⇒ **响亮拒**（让包补齐会重置本机 state 并**重跑**已跑过的 `it-NNN`）。
+代码/TS「跟着产物走」：`<dest>/code.zip` → 包 → hub `/code` 逐候选用 **manifest 的 sha** 选中，全部对不上
+⇒ 拒（不写 `CODE_DIR`）；选中字节 ≠ 现盘 `<dest>/code.zip` 时**用同 sha 副本修复**（`run_loop` 读的是那份）。
+**为什么决策不住在 `run_loop`/`bundle`**：那两份来自**代码快照**（= 本机优先要保护的那份，可能很旧），
+新参数传给旧快照要么 argparse 崩、要么静默退化 ⇒ 跨层 version skew。**不变式**：同一进程里住着
+① raw 刷新的 `offline_boot.py` 与 ② 产物 `code.zip` 的 `remote.*`，跨这条边界只允许走两条腿都认的东西
+（argv/`--artifacts`），不得新增只有新代码认识的参数。
+**§8 附则（云机重启 + 包必须跟课程状态走）**：`GET /offline/task-pack` 递包前判
+`sha256(tmp/<课>/weights.json)` 是否等于包内 `init_weights.json` 的 sha（导出本来就是 `args.out` 的原字节，
+判据可满足）；过期 ⇒ 触发控制台 action `exportTaskBundle`（控制台是唯一打包者）+ **409**（含节流 600s、
+连续触发上界 2）；到上界仍过期 ⇒ **照发旧包 + 告警**（不把云机 brick 到 deadline，起点仍由 resume 锚点兜）；
+控制台不可达/只读门控 ⇒ 降级 409+指引；**判不了（索引不可读/课程无权重）⇒ 照发**。
+**被否决**：`bundle.preserve_existing` + `safe_extract_zip(skip_existing)` + `run_loop --force-pack`
+（跨层 version skew；逐件对账读的是**落点**，保留件必然与包索引不符 ⇒ 第一次真实重跑就 `ProtocolError`；
+`skip_existing` 会填补 `code.zip`/`it-N/weights.json` ⇒ 包代码 + 本机 manifest 混血，报错还指向"传输损坏"）·
+hub 自己重打包（造第二份打包逻辑）· 进度停滞时自动清空 `dest` 重开（**绝不**静默重跑）。
+**违反后果**：按包覆盖计划 ⇒ 从旧起点重跑几十上百轮（白烧算力，本条目要修的就是它）；
+把进度停滞当成"没什么可做" ⇒ 人看不出下一步是清目录还是等新包。
+—— 全文（现状七环 / 判定表 / 评审 F1–F8 处置 / §8 判据与上界）→ `docs/nn/remote-transport.md` §41 · 锚 `## §41`
+
+### §2026-09-25-goalnn-offline-switch-auto-bundle（2026-09-25，plan/offline-switch-auto-bundle.plan.md）
+> 决策 `DECISIONS.md` §2026-09-25-goalnn-offline-switch-auto-bundle。归档 2026-10-11（第二轮瘦身）。
+
+**「切离线」这颗开关必须顺手把任务包导出来；包真没有时 hub 替离线课推一次重导；云机侧一门课取不到包
+就跳过继续下一门（末尾汇总、全跳过非零退出）**。用户报障 2026-09-25：在线课切成离线后云机 404 白等 28 分钟
+才由一句 `SystemExit` 告诉人，第二门课一行没跑。四层同改：① 控制台 `setCourseMode` 在 hub 推送之后跑纯函数
+`autoBundleDecision`（八条规则：非离线 / hub 未接受 / 逃生阀 / 导出忙 / 缺起点权重 / **盘上已有包** ⇒ 不导，
+有包**不作废**；缺包且可导 ⇒ 起导出；**任何结局都不改 `ok`**）；② 云机 404 日志经 `_http_error_parts`
+（HTTPError 的 fp **只能读一次**）打出 hub 的 `path`/`known_courses`/触发回执；③ hub 缺包自愈门
+（另一本账 + 上界 3 + 节流 600s，包出现即清零；**候选面 = 盘上的事实**：表里明确 online 才排除，
+否则看开课标记）；④ `PackUnavailableError` ⇒ 跳过继续下一门 + 汇总，配置错误/训练失败照旧立即停。
+**被否决**：让 hub 自己打包（控制台是唯一打包者）·「有包也重导」（作废旧包 ⇒ 云机在窗口期探到 404）·
+按包内 `commit` 与 HEAD 不符判过期（新鲜度只看 `init_weights` sha，比对另开工单）。
+**违反后果**：热切离线仍不出包 ⇒ 云机白等满 `wait_pack_sec`（用户花 28 分钟才拿到一行日志）；
+缺包路径没有自愈 ⇒ 排障人要自己猜是该重导还是课程名写错；把「全被跳过」与「队列本来就空」合并 ⇒
+没活干时响亮失败（两条判据来源不同，见 plan/offline-task-discovery §3.3）。
+—— 全文（S1–S6 落码清单 / 评审 F1–F9 + S-1 + X1–X3 处置 / 实测）→ `docs/nn/remote-transport.md` §43 · 锚 `## §43`
+
+### §2026-09-25-goalnn-offline-task-discovery（2026-09-25，plan/offline-task-discovery.plan.md）
+> 决策 `DECISIONS.md` §2026-09-25-goalnn-offline-task-discovery。归档 2026-10-11（第二轮瘦身）。
+
+**离线云机不再在 notebook 里写死课程名**：新增只读清单 `GET /offline/tasks`（课程 + 包 + 新鲜度 +
+持有者 + 段内进度；`?include=all` 才带 `not_offline`）+ 硬租约三端点
+`POST /offline/{claim,heartbeat,release}`（TTL 900s + 60s 心跳、**惰性过期**、**409 而非 403**、
+`release` 不覆盖别人的）。**候选面 = 课程表 ∪ 盘上的开课标记**（离线课本机不训练 ⇒ 冷掉后从
+1 小时新鲜窗里消失而包还在盘上）。`worker_id` 持久化在 `<work>/.worker-id` ⇒ 同一台机器重跑
+判 `mine` 直接续领（否则被自己留下的租约挡到过期，Kaggle 上等于废掉整个会话）。
+云机侧 `CFG.course` 退化为**可选覆盖**：填了 = 老行为且**一次都不问清单**；留空 = 问清单 → 领租约 →
+取包 → 跑完 → 交还，`served[包 sha]` 防自激（同段重跑 = 回传全判 `duplicate`）；`queue_mode`
+缺省 `drain`，受 `session_budget_sec`（**新键**，与逐段 `budget_sec` 是两把旋钮）/`idle_wait_sec`/
+停机信号限制；老 hub 只探测一次就降级。**边界**：点名要跑的课取不到包 = 异常（跳过继续、全跳过
+响亮失败）；**队列空 = 正常收工（rc=0）**。**被否决**：软占位（两台同跑白烧一张卡，第二份回传被
+静默丢弃）· 只靠 `(run_id,it)` 幂等不要租约 · 403 表达租约不匹配（会重演「worker 把它读成
+ProtocolError ⇒ 停腿」）· 租约参与回传。**违反后果**：清单只认课程表 ⇒ 冷课永远等不到云机；
+租约不绑定持久 worker id ⇒ 中断重跑白白等满 TTL；把「清单空」与「全被跳过」合并 ⇒ 没活干时响亮失败。
+—— 全文（规则表 / 兼容矩阵 / 评审 G1–G7 + S-1 + X1–X3 处置）→ `docs/nn/remote-transport.md` §44 · 锚 `## §44`
+
+### §2026-10-03-offline-pack-truncation-and-ref-blob（2026-10-03，用户报障×2：半截任务包被当成功 / 离线包缺 kickstart ref 字节）
+> 决策 `DECISIONS.md` §2026-10-03-offline-pack-truncation-and-ref-blob。归档 2026-10-11（第二轮瘦身）。
+
+- **背景（事故一）**：Kaggle 取包 `task-pack` 声明 `Content-Length=4322911`，隧道在 3670016
+  （**14×256KB**）处干净 FIN，而引导期护栏记 `attempts=1 rerolls=0`（= 成功）⇒ 半截 zip 落盘
+  → `read_pack_index` 才炸 `BadZipFile: File is not a zip file`（未捕获 ValueError ⇒ 整场多课程
+  会话陪葬、后两门课未跑；重跑一次 cell 就好）。机制：**`http.client` 对 `read(amt)` 的提前 EOF
+  故意不抛 IncompleteRead**（兼容）⇒ 旧 `_read_body` 只看 EOF、不看「已收 == 声明长度」。
+- **背景（事故二）**：x20-adv-hurt（`kickstart_ref: true`，kk=0.1）云机 it1 的 PPO 装载失败：
+  `/jobs/…/blob?name=ref` 重试 3 次仍 `ValueError: unknown url type`（相对路径 ⇒ 空 base_url）。
+  发布 slim 后 manifest 只剩 `ref_sha`（`blob.ref` 379114B 就在 job 目录，sha 逐字相符），而
+  `export_bundle` 带 code/ts/init/opt/demo **唯独不带 ref**；离线段逐轮 job 由
+  `plan_run._run_iteration` 本地合成（`run_job("", "", …)`；hub 上没有这份 job）⇒ 内容寻址
+  未命中 = 向空 base_url 发 GET，重试只是在刷同一条必然失败。
+- **决定**：① 两处孪生 `_read_body`（`remote/tailscale_boot.py`、`remote/http.py`）在 EOF 处
+  比对「已收 vs Content-Length」，不足即按传输失败抛（引导期 `BootBodyError` 进同一次 fetch 的
+  内层换连接重试；worker 侧带正文 `TimeoutError` 进退避重试）。② ref 与 demo 同规进离线链：
+  `export_bundle` 带 `ref_weights.json`（`OPTIONAL_PARTS` + README + `blob.ref` sha 对账），
+  新增 `plan_handoff._seed_ref_blob_cache`（启动期种子进 `blob_cache/<ref_sha>`，候选 = 产物目录
+  `ref_weights.json` → job 目录 `blob.ref`；缺件**启动期响亮拒收**、一轮都不跑），`plan_run` /
+  `run_loop` 门面与分片表 18→19 同步。
+- **被否决**：① 离线段给 `run_job` 传 hub_url 让 ref 联网下载——run 模式 hub 上没有这份合成
+  job（下载通道不存在），且违反「全离线不依赖网络」；② 只在 `read_pack_index` 前加 zip 校验
+  兜住——语义上「传了半截」是传输失败，该在传输层重试，且 worker 侧下载的 payload/code/blob
+  同病（孪生）；③ 给 export 改回 `slim=False` 内联 ref——放弃 opt-blob-diet 的内容寻址账且包更大。
+- **运维口径**：已导出的旧包（没有 ref 件）会被收紧后的启动期门**直接拒收**；x20-adv 三腿上
+  云机前先在控制台**重导任务包**（job 目录 `blob.ref` 还在，重导即自动带上）。
+- **门槛**：nn python gate 绿（**3592 pass/7 skip，54s**，含 e2e；对照上一条 3586 → +6 = 本次新增用例）。
+- **指针**：全文 `docs/nn/remote-transport.md` §58。
+
+### §2026-10-04-goalnn-offline-eval-backfill（2026-10-04，离线课：云机没回传 eval 时 hub 端用 LAN 集群补评）
+> 决策 `DECISIONS.md` §2026-10-04-goalnn-offline-eval-backfill。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：云机 A 层 eval 可关（`eval_on_cloud`）⇒ 整段回传期间零读数，日常评估点与收官轮没人评。
+  用户口径：评估点 N 的权重回传后等 +3 轮仍无读数 ⇒ hub 补评；课程收官轮若需评估也执行。
+- **备选与否决**：① hub/python 直接触发 —— 否，hub 是 L4 对端（同层禁 import trainer），也没有
+  spawn/互斥/日志持有者；② 无宽限立即评 —— 否，云机自己的 eval 可能还在路上，重复烧 LAN 算力；
+  ③ 在 TS 重算训练侧评估判据 —— 否，只读课程配置 / 回传产物 / eval 账本三个事实源，不发明第二条口径。
+- **决定**：新 `dashboard/src/server/offline-eval-backfill.ts`（纯选择 + 增量账本索引 + 编排）；
+  +3 宽限 = 该 run `max(its) >= N+3`；收官 = `end_it_reached` 时最后一个评估点
+  （`floor(it_end/eval_every)*eval_every`）缺读数立即补；动作复用唯一启动点 `launchEvalA`
+  （LAN 节点 + 本机份额）；`(iter, wver16)` summary 幂等 + 失败指数退避（10min→2h）+ 单槽串行；
+  `server.ts` 60s ticker（`unref`）+ 启动一拍；`api/overview.ts` 的 `/admin/offline` 探测补
+  `offlineResults`（同一次应答，零新增网络）；逃生阀 `BCITY_NO_OFFLINE_EVAL_BACKFILL`。
+- **违反后果**：去掉宽限 ⇒ 云机 eval 在途时重复评估；绕过账本去重 ⇒ 双写 eval_log / 读数竞争；
+  另造评估链 ⇒ 语料与去重口径出现第二事实源。
+- **指针**：全文 `docs/nn/console.md` §28 · plan `plan/offline-eval-backfill.plan.md`。
+
+
+**家族 C — 课程封存**
+
+### §2026-09-26-course-archive-compress（2026-09-26，课程封存默认 gzip：重开 O3「不压缩」）
+> 决策 `DECISIONS.md` §2026-09-26-course-archive-compress。归档 2026-10-11（第二轮瘦身）。
+
+**来历**：`plan/course-archive.plan.md §8-O3` 原裁决「不压缩」，理由是「单课 ≤80 MB 收益小、
+且会破坏 `eval_log.jsonl` 可直接读」。同日 E0 基线实测 13 门已停课的保留集（L0）合计
+**334 MB**（其中 `eval_log.jsonl` 单门 16–30 MB），用户 2026-09-26 指令重开该裁决。
+
+**决定**：
+① **默认 gzip（level 6）逐件压缩 L0 文本件**（`*.jsonl` / `*.json` / `.console.log` / settle 行）；
+实测 `eval_log.jsonl` 10.5–11.7×、`judge/backtest` 10.0×、`dist-agent-meta` 11.6×、
+`training_log` 8.9× ⇒ 334 MB → **≈50 MB**。
+② **不压**四类：`archive-manifest.json` 与 `ARCHIVE.md`（控制台 S3「只读 manifest、不扫盘」
+必须零解压成本）、L3 保留的 `.npy` shards（dense 数组 + BC 复算要直接 mmap）、
+`ppo_ckpt_remote.tar`（实测仅 1.4×，白搭一层）。
+③ `--codec xz` **可选**，固定 **preset 3**（依 `remote-transport.md §B6`：preset 3→6 已量、
+不采用）；`--no-compress` 为逃生舱（一次性排障要直接 grep）。
+④ manifest 的 `sha256` 一律算**解压后的原字节**，另记 `codec` / `bytes_raw` / `bytes_stored`
+——否则换机/换级别重压 ⇒ sha 变，⑤校验仪式失效。
+⑤ `tools/course_compare.py` **透明读 `.gz`**（照 `remote/protocol.py` 的 gzip 魔数判别先例）；
+G5 断言由「逐行逐字段一致」升为「**解压后逐字节一致**」（更强且更好测）。
+⑥ 封存目录形态 = `<课>/eval_log.jsonl.gz` 等（原名 + `.gz`，逐件、不打包）。
+
+**被否决**：**zstd**（新依赖，§5 要求先论证；仓库既有惯例就是 stdlib gzip）；
+**xz preset 6**（`remote-transport §B6` 已量，体积仅 −2.6…−3.0%）；
+**压整包含 manifest**（控制台列封存课要逐课解压 gz，违背 S3「不扫盘」初衷）；
+**整目录打一个 tar.gz**（丢「一件一文件」的 manifest 模型，也丢单件 sha 可验）。
+
+**违反后果**：sha 算在压缩字节上 ⇒ 换机重压即校验失败，「建→校验→删」的顺序保证被架空；
+压 manifest ⇒ 控制台每次列封存课都要解压。
+
+**落点**：`nn-training/rl/course_archive.py`（未建，E1+ 实现）、`nn-training/tools/course_compare.py`
+（未建，E5）；裁决正文同步进 `plan/course-archive.plan.md §8-O3`，基线数 `docs/nn/course-archive.md §1`。
+
+**边界**：这是一条**便利 vs 体积**的裁决，**不是 G1 的杠杆** —— 封存后 `tmp/` 地板 10.0 GB 里
+L0 只占 0.3 GB（3%），压到 0.05 GB 只把地板降到 9.75 GB。`tmp/ ≤ 1 GB` 的瓶颈是
+在训课 9.0 GB 与非课程 0.70 GB（E0 基线），别拿压缩当空间问题的答案。
+
+### §2026-09-26-course-archive-guard-and-startpoint（2026-09-26：封存硬闸补第二道新鲜度 + 起点 sha 可验）
+> 决策 `DECISIONS.md` §2026-09-26-course-archive-guard-and-startpoint。归档 2026-10-11（第二轮瘦身）。
+
+**来历**：2026-09-26 外部评审用真模块探针实测两处实现稿缺陷
+（`plan/course-archive.plan.md`）：① `course_guard` 首句 `if not marker.exists(): return ""`
+⇒ **无 marker 时新鲜度整条失效**；② manifest `keys` 只认 `L0'-opt-key`（offline 族），
+A/B 形态的 `it<N>/ppo_ckpt_remote.tar` 走 `L0-ckpt-key` ⇒ 多数课 `weights[]` 恒空、
+`ARCHIVE.md` 标签（「opt/ckpt」）与实际不符。另有一处规格偏差未记：`weights[]` 只有目录级
+glob 提示，没有 sha256/bytes（G4-① 明写「sha 可验」）。
+
+**决定**：
+① **新鲜度升为与 marker 无关的第二道闸**：目录新鲜（不论有无 marker）默认拒绝封存；
+`--force` 只越「陈旧 marker」与「无 marker 的新鲜目录」，**不越「新鲜 marker」**。
+来历：停课动作 = 删 marker 但**不杀循环**（`stopCourse` 注释自己承认云机上那份只能由操作员
+在云机侧停）⇒ 正规流程「先停课 → 再封存」正好落在「无 marker 但仍在写」的窗口，旧实现会把
+**撕裂的树**搬进档案再 `rmtree` 活体（⑤ 的 sha 链只证「拷贝保真」，证不了「源已静止」）。
+② **关键轮 = opt ∪ ckpt 两族并集**（`_KEY_REASONS`）；`ARCHIVE.md` 标签与实际一致。
+③ **`weights[]` 起点「sha 可验」落地**：解析到具体归档件 ⇒ 记实际 `path` + `sha256`/`bytes`；
+解析不到 ⇒ 退化为目录级 glob 提示且**不带** sha（绝不编造哈希）。
+④ **控制台起点选择器落地**：`openCourse` 收 `seedFrom:{sourceCourse,it}`（**不收路径**，服务端按
+manifest 自解析并校验落在权重归档内）；解析不到响亮拒绝（绝不退回 BC 播种）。
+
+**被否决**：修正 ①时把「无 marker」一律放行到 `--force` 才做（会让正规流程必须先 `--force`，
+把逃生阀变成必经步）；起点「让客户端传路径」（可被篡改的写面）；找不到归档件时退回 BC
+（静默拿错起点，与 §384 同类错）；把 sha 记在 glob 提示上（假哈希）。
+
+**违反后果**：放行新鲜无 marker 目录 ⇒ 搬到撕裂的树 + 删活体（不可逆）；只认 opt 族 ⇒
+A/B 课起点入口失效；编造 sha ⇒ 校验仪式变假。
+
+**落点**：`nn-training/rl/course_archive.py`（guard / `_KEY_REASONS` / `resolve_archived_weight`）、
+`dashboard/src/stack/courses.ts::resolveArchivedSeedPath`、
+`dashboard/src/server/actions/course-lifecycle.ts`、`dashboard/src/web/app/panels/OpenCourseModal.tsx`；
+正文同步进 `plan/course-archive.plan.md §1.3-1 / §3.5 / §3.6`。
+
+
+**家族 D — hub 回灌 / 模式切换 / 离线接管**
+
+### §2026-09-26-hub-mode-restore-enabled-only（2026-09-26，用户报障：起 hub/trainer 等很久——回灌把停掉的历史课逐课重试）
+> 决策 `DECISIONS.md` §2026-09-26-hub-mode-restore-enabled-only。归档 2026-10-11（第二轮瘦身）。
+
+**症状**：控制台首页点「启动服务进程」，停在 `hubServer` 那一步几十秒；回执刷出一串
+`失败 x20-clutch: 需要合法 course（[]）与 mode(...)`、`x20-demo-mix`、`x20-dodge-l1` …（真机 11 门）。
+
+**根因（代码实锤，非「扫盘慢」）**：`courseModes` 是**只增**意图表（开课 / 停课 / 热切都往里写），
+停在 `tmp/` 下的历史课永久留着一份意图；而 `restoreCourseModes`（起 hub 回灌，挂在
+`startComponent('hubServer')` 的**两个分支**上、同步 await）**逐条** 推全部意图。hub 的认课判据是
+**开课标记**（`remote/hub/queue_discover.py::_course_dir_live` / `_serves_course` 都要求
+`training-enabled.txt`）⇒ 停掉的课按设计**必回 400**，于是每门课都白烧整段有界重试
+（`pushModeWithRetry`：3 次首试 + 2×2s ≈ **4s/门**，串行）。11 门 ≈ **44s** 纯 sleep。
+实盘核对：`tmp/*/training-enabled.txt` 存在的两门（`x20-dodge-l3d2`/`x20-steady-cont`）回灌成功，
+其余 11 门全失败——与报障日志一一对应。
+
+**决定**：`restoreCourseModes` **只回灌已开课的课程**（判据 = 开课标记
+`stack/courses.ts::courseEnabled`，与 hub 同源）。未开课的课进 `skipped`（**不是失败**）：
+意图一个字不丢（仍在 `courseModes` 里），摘要如实写「跳过 N 门未开课（意图保留，开课即下发）」，
+真正开课时 `openCourse` 按弹窗模式重新下发。
+
+**落地**：判据从 `server/actions/course-lifecycle.ts` 搬到 `stack/courses.ts`（该文件本就是
+仓库里「课程域共享判据、不断环」的家：`course-lifecycle` 已 import `course-mode`，回灌反向
+import 会成环）；`course-mode.ts`（gate + `RestoreResult.skipped`）· `state-view.ts` 改 import 口 ·
+`course-lifecycle.ts` 改 import；回归 `tests/course-mode.test.ts`（+2：未开课 ⇒ 零 POST 零重试、
+跳过如实上摘要不算失败；既有 5 例补开课标记）。
+
+**备选与否决**：① 只把回灌改成并行（`Promise.all`）——否，省掉串行 sleep 但**仍**白打 33 次
+POST、仍刷一串假「失败」，根因（推了必被拒的课）没治；② 缩短重试窗口 / 去掉重试——否，
+那次有界重试是 2026-09-23 真机事故（新开课 hub 还没扫到）的解药，不能为省时间砍掉；
+③ 停课时删掉意图项——否，丢记录且 `stopCourse` 的 hub 置离线要写它；
+④ 起 hub 时先 `GET /admin/courses` 取 hub 课程表再筛——否，又把「发现时序」引回回灌路径
+（`docs/nn/remote-transport.md §36` 的坑）。
+
+**违反后果**：任何「回灌按意图表全量推」的写法都会随历史课积累线性变慢（且刷假失败）；
+任何把回灌判据换成「hub 课程表」的写法会把发现时序竞态引回来。全文 →
+`docs/nn/console.md §15`。
+
+### §2026-10-03-goalnn-auto-offline-handoff（2026-10-03，离线盘 claim 即接管：一拖一闸 + 派发状态落盘 + 三态意图表）
+> 决策 `DECISIONS.md` §2026-10-03-goalnn-auto-offline-handoff。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：Kaggle TPU 排队数小时，开课时无法预判「该不该离线」；「开课时指定离线/在线」只能事后手切，
+  而离线课程在 TPU 上优势极大。用户 2026-10-02 口径 U1-U6（plan/auto-offline-handoff，评审两轮 bf/hy）。
+- **决定**：① 触发点在 **claim**（不是「盘上线」）：清单一律对未 pin 的在训课开放且**允许无包**；
+  claim 无包 = 翻 mode + 控制台反向调用（`/api/autoOfflineHandoff`）导包 + 409；云机侧
+  `claim_course` 返回值升级为 `(token, reason)`，中间态（`busy`/`pending_export`/`completed`/
+  `not_offline`）本拍不跑、不耗 idle 预算，到上界就本会话放弃。② U2「一拖一」做成 **hub 侧不变量**
+  （活租约 ∪ 交接窗口都占闸；release 后自动解除）。③ 派发状态（mode/pin/claim 记账/完成锚）落
+  `<课>/offline-dispatch.json`，重启**优先于启动参数**（数据损坏防线）。④ 控制台意图表**三态**
+  （unset/online/offline）：开课未选模式不推不落意图；人的开关 = `pin=1`；新增「交还自动」
+  （`mode=online&pin=0` + 删意图）。⑤ `eval_on_cloud` 默认 true（ipynb + runtime 两处同值）。
+  ⑥ 完成态锚在**包 sha**（重导即自动解封，不新增状态机）。
+- **被否决**：控制台每轮常驻导包（包体积大 + `plan_sha` 每轮变 = 每次都在制造 404 窗口）；TS 侧写
+  `run_complete`（python 是账本唯一写者，TS 复刻 = 第二个实现源）；「人工切回在线 = pin online」
+  （等于该课永久退出自动逻辑，与 U1「TPU 一上线就能接续」冲突）；检测到盘上线即全切（会收走全部本机
+  采样，且 `recent_n` 在长段期间衰减 ⇒ 双跑）；把自动逻辑放进 hub 调度（`offline_tasks` 仍是零副作用读面）。
+- **落点**：`nn-training/hub/{queue,queue_scope,queue_offline,queue_peer,offline,admin,task_pack}.py` ·
+  `nn-training/remote/offline_boot.py` · `nn-training/ipynb/battle.offline.ipynb` ·
+  `dashboard/src/server/actions/{course-mode,console-state,course-lifecycle}.ts` ·
+  `dashboard/src/server/api/route.ts` · `dashboard/src/stack/hub-admin.ts` · 测试
+  `nn-training/tests/hub/test_auto_handoff.py`（新建，22 例）· `tests/common/test_offline_task_queue.py` ·
+  `tests/remote/test_offline_notebook.py` · `tests/remote/test_offline_eval_wiring.py` ·
+  `dashboard/tests/{course-mode,course-lifecycle}.test.ts`。
+- **门槛如实**：T0（`switch-mode-drops-jobs` 撤单）/ T6（跑满灰横幅走导入链）/ T3 的面板接线（「交还
+  自动」按钮）/ T8 的控制台告警渲染 **未落地**；plan 文档（未跟踪）已按 2026-10-03 实况标注。
+- **指针**：全文 `docs/nn/remote-transport.md` §56 · plan `plan/auto-offline-handoff.plan.md`（§7a 评审处置）。
+
+### §2026-10-03-goalnn-auto-offline-handoff-t6（2026-10-03，T6 完成态链 + T3 面板钮 + T8 告警渲染落地）
+> 决策 `DECISIONS.md` §2026-10-03-goalnn-auto-offline-handoff-t6。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：`§2026-10-03-goalnn-auto-offline-handoff` 门槛如实记了四处未落地；本轮除 T0 外全部落地。
+- **决定**：
+  ① **T6 判决在控制台、落账在 python**：`end_it_reached` 由云机自报（`plan_run._end_it_reached`：
+     `complete`/`noop` ∧ `it_end >= plan.end_it`；`max_iters` 截断不算）；hub 字段白名单 + 联动
+     `note_offline_completed`（该包 completed ⇒ 不可再领，重导 sha 变自动解封——此前它是死代码）；
+     `/admin/offline.results[课][run_id]` 按 run 带出；控制台在导入那一步按「run_id 对齐 ∧
+     `end_it_reached` ∧ **末轮号一致**」转交 python **第二趟** `deliver_zip --end-it-reached --run-id …`
+     （不重新解包）落 `run_complete` ⇒ 现成灰横幅读面直接亮。**半段导入不亮横幅**；TS 侧无账本写入。
+  ② **T3 面板**：矩阵 / 课程管理离线行加「交还自动池」钮（`unsetCourseMode`），与「切换成在线」
+     （`pin=1` 永久固定）**文案分开**。
+  ③ **T8 控制台**：告警坞渲染 `/admin/offline.stalled`（`pending-export` 红 / `running-stale` 橙），
+     文案点名三条出路并自带「交还自动池」动作；hub 不可达/旧版 = `null`（不可知 ≠ 没停）。
+- **被否决**：① 一趟导入里转交（run_id 在解包前不可知 ⇒ 只能两趟）；② TS 直接写 `run_complete`
+  账本（python 是唯一写者；`server-api-task-bundle` 源码守卫钉住）；③ 转交只对 run_id + 跑满、
+  不校末轮号（同一 run 的旧半包会被误亮横幅）；④ stalled 自动切回在线（U3 明令不许自动回退，
+  只出告警 + 人来按）。
+- **落点**：`nn-training/{hub/{store_offline,queue_resume,offline,admin}.py, remote/{deliver_zip,offline_deliver,plan_handoff,plan_run}.py}` ·
+  `dashboard/src/{server/{api/overview,bundles/import},stack/hub-admin,web/{view/{course-overview,alerts},app/{app.tsx,panels/{CourseMatrix,CourseAdmin}}.tsx}}` ·
+  回归 `nn-training/tests/{hub/test_auto_handoff.py（24 例）,remote/{test_deliver_zip,test_offline_deliver,test_offline_deliver_async}.py}` ·
+  `dashboard/tests/{server-api-task-bundle,web-alert-dock,web-app-coursematrix,train-mode-offline}.test.ts`。
+- **门槛**：`bun run check` 绿（2357 pass/3 skip）· nn python gate 绿（ruff+mypy+pytest 3568 pass/7 skip）·
+  dashboard 全量 1303 pass。**仍未落地：T0**（`switch-mode-drops-jobs` 撤单；T0a 落点重定位已确认）。
+- **指针**：全文 `docs/nn/remote-transport.md` §56（2026-10-03 补段）· plan `plan/auto-offline-handoff.plan.md`。
+
+### §2026-10-03-goalnn-switch-mode-drops-jobs（2026-10-03，切模式撤单落地：复用 `job_cancelled` 账本事件 + 只撤没被领的）
+> 决策 `DECISIONS.md` §2026-10-03-goalnn-switch-mode-drops-jobs。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：`plan/auto-offline-handoff` 的 T0（唯一未落地项）= 落地 `plan/switch-mode-drops-jobs`：
+  切「在线/离线」= 上一个模式留在队列里的 job 该作废。原始触发是 2026-09-25 报障「x20-dodge-l1 离线
+  跑到 it43，切成在线后云机仍在节点跑 rollout」（离线时期发布的整段 job 躺队列里被补做）。
+- **决定**：
+  ① **落点重定位（T0a 的实质结论）**：原 plan §3 改点 2 钉 `remote/plan_run.py::run_plan_job`，但它
+     **今天零生产调用者**——`kind=run`（整段 job）2026-09-25 双端退役（发布端 `loop_remote_job.py`
+     当场 `SystemExit` / worker 端 `worker.py` 响亮 `ProtocolError`），`tests/remote/test_plan_run_split.py`
+     有机器断言「worker 里不得再出现这个名字」。⇒ 按原文落点做 = 给死代码加功能，改走**既有**
+     `job_cancelled` 账本事件（读面 `claimable_job_ids` 早已把它当终态剔除；写面此前只有训练侧的
+     `remote/hub_client.py::cancel_stale_jobs`，按 `it <= 当前` 清自己的滞后项，管不到模式翻转）。
+  ② **只管没领的**（用户 2026-10-03 裁决，逐字：「不管在算的，只管没领的」）：
+     `_JobStore.cancel_unsettled_jobs()` 只对 `claimable_job_ids()` 里**未被认领**的 job 写
+     `job_cancelled` + `_drop_commitment_locked`（撕承诺 + bump epoch ⇒ 拿作废前 epoch 来的认领被
+     判 `demoted`）+ 进程内 `_cancelled` set（挡「拿作废前 peek 到的 jid 硬领」的秒级窗口）；
+     有活租约 / 在 `_computing` 的**不撤**——撤销在飞 job 属于轮边界强杀，本 plan 不做。
+  ③ **claim 自动翻模式也撤**（裁决 Q2）：`begin_auto_handoff`（无包腿）/ `note_claim`（有包腿）与人的
+     开关共用同一条切模式链，不只挂在 `&drop_jobs=1` 上（`auto-offline-handoff` §4 的口径）。
+  ④ **只有人的动作带参数**：`POST /admin/courses?...&pin=1&drop_jobs=1`；控制台只有那颗开关带它
+     （`setCourseMode` → `pushCourseMode(..., { dropJobs: true })`）。**开课/停课/回灌一律不带** ⇒
+     「停课队列与账本一个字不动」的既有契约（`course-lifecycle.ts`）逐字不变。
+  ⑤ 撤单失败**不回滚** mode（那会做成「切了但没切」），只响亮记一笔；残留由可领池按账本重算兜。
+- **被否决**：① 按原 plan 在 `run_plan_job` 里加 `/jobs/state` 查询（死代码，加了不生效）；
+  ② 新建内存 `_dropped` 表（原 plan 裁决 4 的口径）——账本 `job_cancelled` 读面已存在且落盘持久，
+  新建表 = 第二个事实源；③ 撤销在飞 job（轮边界强杀，本轮不做）；④ `GET /jobs/{id}/status` 加
+  `dropped` 位 + 云机取消监视器（= 「在飞也撤」方案的一半，随 ③ 一并搁置；既有 cancel 通道
+  `remote/job_lifecycle.py::start_cancel_watcher` 只认 `landed`，未动）。
+- **落点**：`nn-training/hub/{store_ledger,store_leases,queue_offline,queue_peer,admin}.py` ·
+  `dashboard/src/{stack/hub-admin.ts,server/actions/course-mode.ts}` ·
+  回归 `nn-training/tests/hub/test_auto_handoff.py`（+4 例：撤未认领 / 在飞不撤 / 不带参数则队列不动 /
+  claim 自动翻模式也撤 / 作废两道闸）· `dashboard/tests/course-mode.test.ts`（+1 例）·
+  **端到端** `nn-training/e2e/test_auto_handoff_e2e.py`（新，5 例：全链 / U2 一拖一 / T8 stalled /
+  T0 撤单 / 云机腿中间态；真 hub 子进程 + 真 HTTP + 假控制台）。
+- **门槛**：`bash tools/githook/nn-python-gate.sh` 绿 + `cd dashboard && bun run typecheck && bun run test` 绿
+  （按本仓纪律由用户终端复跑）。
+- **指针**：全文 `docs/nn/remote-transport.md` §57 · plan `plan/switch-mode-drops-jobs.plan.md`（未跟踪）
+  · `plan/auto-offline-handoff.plan.md` §4 T0。
+
+### §2026-10-03-goalnn-offline-seize（2026-10-03，用户裁决：pin 不再拦离线盘——离线优先、没有就抢第一个在训在线课）
+> 决策 `DECISIONS.md` §2026-10-03-goalnn-offline-seize。归档 2026-10-11（第二轮瘦身）。
+
+- **背景（报障）**：用户把三门在训课（x20-adv-{encl,hurt,acc}）手动设成 online（pin=1）后，
+  Colab 离线云机 `GET /offline/tasks` 持续 0 条（`plan/auto-offline-handoff` 的 P0-3 判据：
+  pin online ⇒ 不进候选面）。用户裁决（逐字）：「offline 云机，不管什么时候上线接活，优先取
+  当时就绪的离线课程；如果没有离线课程但是有在线课程在训练，则抢占第一个在线课程，hub 将其改为
+  离线；领到的课程训练完成后，再次开启接活循环！」。并明令：不要人操作课程模式，改代码 + e2e。
+- **决定**：
+  ① **pin 语义坍缩**：`auto_eligible` 去掉 pin 项（在表 ∧ 开课标记在）——pin 仍落盘/重启不丢，
+     但**不再拦离线盘**；唯一 opt-out = **停课**（删 `training-enabled.txt`）。副产物：pin 的
+     课缺包不再 404，改走 `_claim_without_pack`→`begin_auto_handoff`（翻模式 + 触发控制台导包）。
+  ② **清单行新增两字段**（零副作用读面不变）：`seize` = 表内在训 ∧ 在线 ∧ 未跑满（completed 不
+     进 seize —— 二轮 P1-1 的同一理由；busy/无主**不**滤：云机抢到 busy 行会拿 409 `busy` 等
+     下一拍，比「空队列」更准确、不烧 `idle_wait_sec`，plan §9 P2-4 的多盘轮流 drain 顺带解决）
+     + `open_time`（开课时间 = T4 的排序 SSOT，读不到 ⇒ `+inf` 排最后）。
+  ③ **云机两层选择**（`resolve_courses`）：`claimable ∧ ¬seize` 整批优先（离线就绪）；没有 ⇒ 从
+     `seize` 行取 `open_time` 最小的一门（tie 用课名）**只抢一个**；两路共用 `skip`/`served` 过滤。
+     老 hub（无 `seize` 字段）⇒ 全行按离线算，退回旧口径逐字不变。
+  ④ **循环复用既有 drain**：claim 翻模式（`note_claim`/`begin_auto_handoff` 已接好）→ 跑完 →
+     回 `_run_auto` 顶端再 resolve ⇒「跑完再次开启接活循环」零新代码；blockers 不占 idle 预算的
+     既有语义不动。
+- **被否决**：① 云机按清单顺序取「第一门」（hub 排序含状态名次，`no_pack` 自动课会顶到 `ready`
+  前）；② completed 留在 seize 里让云机自己跳过（要解析 `state`/`reason` 文案 = 第二事实源）；
+  ③ busy 行滤出 seize（会把「别的盘在跑」误判成空队列、烧 idle 预算）；④ 由 hub 端定期翻模式
+  （翻模式必须发生在真的有盘领走它的那一刻——claim 是唯一触发点）。
+- **落点**：`nn-training/{hub/{queue_offline,offline}.py, remote/offline_boot.py}` ·
+  `dashboard/src/{stack/hub-admin.ts,server/actions/course-mode.ts,web/app/panels/CourseAdmin.tsx}`
+  （三处「离线盘永不自取」注释更正）· 回归 `nn-training/tests/{hub/test_auto_handoff.py,
+  common/test_offline_task_queue.py}` · **端到端** `nn-training/e2e/test_auto_handoff_e2e.py`
+  （+2 例：离线优先 / 抢占全循环 seen==[离线课, 在线1, 在线2] 且逐门翻 offline）。
+- **门槛**：nn python gate 绿（**3599 pass/7 skip**，ruff+mypy 干净）· `bun run check` 绿
+  （**2365 pass/0 fail**；本机沙箱 shell 的裸 `bash` 解析到 WSL shim ⇒ `node-upgrade` 真子进程
+  用例假红，PATH 前置 `C:\Program Files\Git\bin` 后全绿——环境假红，非回归）· dashboard
+  `typecheck` + 全量 **1312 pass/0 fail** + 三份 bundle `all bundles ok`。
+- **指针**：全文 `docs/nn/remote-transport.md` §59 · plan `plan/auto-offline-handoff.plan.md`
+  （未跟踪；§3.2 pin 语义已按其顶部裁决注作废）。
+
+### §2026-10-05-goalnn-offline-online-status-switch（2026-10-05，用户报障×2：手动切在线不稳定 / 云机掉线后课程永久停摆）
+> 决策 `DECISIONS.md` §2026-10-05-goalnn-offline-online-status-switch。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：报障一「切成在线不稳定」= pin 语义在 §2026-10-03-goalnn-offline-seize 坍缩后「我要在线」没有表达（切了被抢回）+ 撤单即时闸不认账本复活 + 本机腿把离线等待当收官；
+  报障二「课程永久停摆」= 死租约冻结全池 / 无包腿烧满 `give_up` 后被新盘 skip / 导包窗口无主也不释放。
+  计划全文 `plan/offline-online-status-switch.plan.md`（六轮评审修订版）。
+- **决定（行为变更 21 条，摘要）**：① `pinned ∧ mode=online` 重新获得阻止力（离线盘不可 claim/seize/翻模式 = `pinned_online`）；
+  ② 切在线/交还自动撤销离线租约（墓碑 + 心跳 409 `revoked`）；③ 离线租约失联早收（静默 180s 自动可接管）与 busy 活性口径
+  （stale/revoked/expired 不算忙；窗口锚 `claimed_at`，停滞告警仍锚 `flipped_at`）；④ 切在线不撤单 + `_cancelled` 按**账本净态**
+  对账（生产写者 = `remote/hub_client.publish_job`）；⑤ 训练侧离线 = 等待（不写假 `run_complete`），复原前提 `--rollout-src auto`
+  ∧ 删 `run_iters`，显式 run/node 声明不支持复原；⑥ 发现/开课同步 `parked`；⑦ 再发布 = 复活按净态落账本；
+  ⑧ 冷课读盘派生 authority（读失败退缺省不 500）；⑨ `pinned_online` 回传不推进活动权重 ∧ 段末盖章要求包身份相符；
+  ⑩ 意图表 v2 `{mode,pinned}` + 回灌带 pin（旧裸串按 `pinned:false` 归一）；⑪ 停滞告警只静音 `pinned_online`；
+  ⑫ 首页课态单一派生 `courseStatus`（pill/矩阵同源）；⑬ 读面失败保上一拍值 + `stale` 标注（窗口 = 1 TTL，超窗显示未知）；
+  ⑭ 词切换滞回（只随派生值变化）；⑮ `lease_verdict` 的 `revoked` 不看身份（顺序 expired→revoked→mine→stale→foreign）；
+  ⑯ authority 进 `/admin/queue` 每课行（读面不猜）；⑰ pinned 存量课先盘点（见下）；⑱ `auto_claimable` 加 stale/墓碑可领；
+  ⑲ 导包触发账本换主/超窗即重置；⑳ `auto` 档额外要求 `course in _stores`（冷课无记录 = `pinned_offline`）；
+  ㉑ `bc_ledger.inflight_jobs` 改净态折叠（复活 jid 不再被旧 `job_cancelled` 判「已收口」）。完整语义/状态转换表 → `docs/nn/remote-transport.md` §67。
+- **§4.2 回摆理由（不是翻烧饼）**：2026-10-03 §59 坍缩 pin 的背景是「当时云机上线后任务清单持续 0 条，pin online 是唯一让课继续训的表达」；
+  今天已有三态意图表 + 「交还自动」按钮，而用户报障正是「手动切在线不稳定」⇒ pin online 必须再成硬意图。
+  回摆是**精准的一半**：pin offline 与 auto 抢占语义不动（开课未选模式 = 自动池，离线盘照抢）。
+- **备选与否决**：① 只修租约失联不动 pin（报障一原样）；② 切在线时把课从 seize 候选临时摘 N 分钟（第三个事实源、问题延后）；
+  ③ hub 后台 tick 扫死租约（本仓形状是「谁先看谁回收」）；④ `held` ⇒ 新 worker 自动 `takeover=1`（无活性依据的盲接管）；
+  ⑤ 硬杀云机会话（无反向通道）；⑥ 离线租约照抄 job 侧「零心跳才早收」（云机心跳整段在跑、慢网误杀代价高）；
+  ⑦ 竞态收尾改回 409（要撤回 `note_claim` 已写的字段 = 新增回滚路径，两种到达顺序终态等价）；
+  ⑧ `lease_verdict` 加 token 按身份判 `revoked`（新主永远命中不了）；⑨ 冷课一律 `pinned_offline`（徽标打给从没人管的课）；
+  ⑩ 再发布只清 `_cancelled` 内存 set（账本仍撤单，撒谎形状）。全表 → plan §8。
+- **存量盘点（P1-7）**：2026-10-05 全仓 `offline-dispatch.json` 仅命中 pytest 临时目录（6 份 `pinned=true` 为测试瞬态物）；
+  真课程目录零记录 ⇒ **无存量 pinned 课**，上线当天无课被 pin 回摆影响。
+- **违反后果**：pin 再坍缩 ⇒「切成在线」语义不存在（切了随时被抢回）；stale/墓碑算忙 ⇒ 死盘冻结全池（报障二）；
+  恢复按裸 `pinned` 判 ⇒ `pinned_offline` 告警被误静音或 busy 漏判；读面猜 authority / 失败清空 ⇒ 同屏两个 widget 各说一套或读面抖动换词。
+- **落点**：`hub/{task_pack,queue_offline,offline,store_ledger,store_leases,store_offline,queue_scope,queue_peer,queue_observe}.py` ·
+  `remote/offline_boot.py` · `trainer/{loop_runner,loop_lifecycle,loop_serve,loop_plan,loop_round_steps,loop_core,loop_transport}.py` ·
+  `dashboard/src/server/actions/{course-mode,console-state}.ts` · `dashboard/src/server/api/{loop-queue,overview}.ts` ·
+  `dashboard/src/web/view/{course-status.ts（新）,course-overview,loop-queue,course-matrix,alerts}.ts` · `dashboard/src/web/app/{app.tsx,panels/CourseMatrix.tsx}`。
+- **指针**：全文（状态转换表 / 六态表 / F1–F6 / 兼容矩阵）→ `docs/nn/remote-transport.md` §67 · 控制台侧 → `docs/nn/console.md` §31 ·
+  计划 → `plan/offline-online-status-switch.plan.md`。
+
+### §2026-10-07-offline-busy-gate-anchor（2026-10-07，离线「一拖一」闸两次自锁：锚点换 episode 起点 + 只算池内的课）
+> 决策 `DECISIONS.md` §2026-10-07-offline-busy-gate-anchor。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：用户报「离线 worker 领不到 `x21-psh-k10`，设成离线/在线都没有用」。现场读数：k10 是
+  `ready` + 有包（4.8MB）+ 无主，唯一拒因 = `busy: x21-psh-k5 正在交接（导包中）`（`_busy_locked`
+  第二条腿）。而 k5 的 `offline-dispatch.json` = `claimed_offline:true / claimed_by:d1aad… /
+  claimed_at:19:59:20`，`task-x21-psh-k5.zip` **不存在**：云机每 ~16s 重试一次 no-pack claim ⇒
+  `hub/offline.py:513` → `begin_auto_handoff` → `queue_offline.py:866` **重写 `claimed_at=now`**
+  ⇒「超窗 900s = 交接失败 ⇒ 不再占闸」这条**逃生门**被重试者自己永远推着走（重试者正是被卡住的
+  那台机器）。第二根因独立且更硬：k5 已跑到 it151 > `iters=150`，而 `--export-bundle` 的导出分支
+  只住在 `step_course_iter`（`trainer/loop_round_steps.py:264-271`），轮体在 `it > iters` 时
+  **一次都不进** ⇒ 静默不打一篇「全离线导出」，只 `ALL DONE` + 收官 drain（一场 ~1 小时的逐检查点
+  eval）⇒ 包永远不出现、闸永远被占。
+- **决定**：三处，全是换判据、不加机制。① `_busy_locked` 的交接窗口锚从 `claimed_at` 换成**本次
+  交接的起点 `flipped_at`**（`claimed_at` 只作缺键兜底）——`flipped_at` 只在首翻时写、重复 claim
+  不刷新、切在线才清 ⇒ 一次交接最多占闸 `AUTO_HANDOFF_PENDING_SEC`；两个锚点时间轴仍分叉
+  （`stall_verdict` 的 `pending-export` 照旧锚 `flipped_at`）。② 两条腿都改成「只算
+  `is_runnable_offline` 的课」（原来是「只豁免 `pinned_online`」）：停课（标记已删 ⇒ `stopped`）与
+  冷课 online 记录（`not_offline`）不可能再有合法交接，而它们的残留最清不掉（`stopCourse` 推的
+  `mode=offline` 走 `pin=None` ⇒ `set_mode_pinned` 那条腿**有意**不清 claim 记账，`:789-791`）
+  ⇒ 停课课不再把全池锁满一个窗口。③ `--export-bundle` 的**启动期**新增纯函数
+  `trainer/loop_lifecycle.export_refusal`：`start_it > iters` ⇒ 响亮 `SystemExit`（裸 `[run_rl]`
+  行，控制台 exit-watchdog 会把它当退出原因显示），不再静默退化成 drain。
+- **否决与备选**：① 保留 `claimed_at` 锚 + 另加「episode 硬上限 `AUTO_HANDOFF_MAX_SEC`」——
+  硬上限必然 ≤ 现场那条用例的 2000s，等于同一结果却多一个常量 + 一条判据（`dispatch.review-hy.md`
+  刚警告过「别合并/增生常量」）；② 只在「导包触发账本 `give_up`（3 次）」时才释放闸——现场只烧到
+  2 次（节流 600s）且随后 k5 被停课，**修不掉现场**；③ 改控制台 `stopCourse` 让它带 `pin=0`——
+  治的是已被 ② 治好的症状（离线按钮本来就命中 `:789` 那条清键腿），多一条 TS 写面不值。
+- **后果**：现网那台把 k10 锁住的窗口会在 `flipped_at + 900s` 自然打开（本次现场 = 2026-10-07
+  20:14:20）；此后**停课 / 离线 / 交还自动**三条路都能一次动作立刻开闸。R2-d（「换主重试 ⇒ 窗口
+  刷新」）到此作废——用例 `test_handoff_window_anchor_is_claimed_at` 按新契约重写为
+  `..._is_flipped_at`，现场原型 = `test_busy_gate_window_anchors_the_handoff_start_not_retries`
+  （旧码上红：`assert 409 == 200`）。
+- **落点**：`nn-training/hub/queue_offline.py`（`_busy_locked` 判据 + 文档）·
+  `nn-training/trainer/loop_lifecycle.py`（`export_refusal` + `run()` 启动期调用）·
+  用例 `nn-training/tests/hub/test_auto_handoff.py`（新 2 条 + 重写 1 条）·
+  `nn-training/tests/trainer/test_offline_leg_retired.py`（新 1 条）·
+  全文 → `docs/nn/remote-transport.md` §71。
+
+
+**家族 E — 租约 / 派发 / 节点自注册**
+
+### §2026-09-24-job-identity-collision（2026-09-24，plan/job-identity-collision.plan.md）
+> 决策 `DECISIONS.md` §2026-09-24-job-identity-collision。归档 2026-10-11（第二轮瘦身）。
+
+**job 身份纳入课程维度，且归属唯一才认**。2026-09-24 用户报障「双课程并行，调度请求 409」，
+根因是 `idempotency_key = (runId, it, init_weights_fp, data_fp)` **不含课程**：单 hub 多课程
+（`--serve` 共享 trainer）下 `runId` 进程级共享、`data_fp` 只哈希 shard 元组（per-stage seed 与课程无关）、
+`init_weights_fp` 同 warm-start、`it` 同轮 ⇒ 两门课发布出**同一个 `job_id`**；而 `course_of` 的
+「取第一个匹配」在**读（`wait_job`→`/result`）写（claim/result）两条路径**上都生效 ⇒ 两个训练轮
+读到**同一份结果**、各自落进自己的 `args.out`（静默污染 + 自持循环：污染让 `init_weights_fp`
+持续相同 ⇒ 下一轮继续撞）。
+**L1**：`idempotency_key = (runId, course_fp, it, init_weights_fp, data_fp)`。选 `course_fp`（jsonc 字节
+sha256）而非课程名/hub 课程键 —— 它是 manifest 必填字段，且**同进程内恒定**（课程字节装载时冻结，
+`args.course_frozen_bytes`）⇒ mid-run 编辑不换 id、不产生孤儿。**只做键分量，不做路由键**。
+**L1'**：`course_of` 归属**唯一才认**（≥2 门课都持有 ⇒ `None`/404 + 一行歧义日志 + `/admin/queue`
+的 `ambiguous_jids`），歧义**绝不**进 `_locate_cache`。原「取第一个匹配」正是事故的静默通道；
+代价是「响亮失败」（404/等到超时），收益是「绝不污染」—— 方向刻意如此。
+**L3**：发布端守卫 `protocol.collision_rows`，判据 = 「**完整幂等键**相同 且 落在**别的 store**」
+⇒ 拒发，位置在 `job_id` 算完之后、**任何写盘之前**（连 `.extra_tmp` 都不建）。它是哨兵（正常发布
+撞不出来），拦手写 manifest / 回灌历史 job / 跨 hub 搬目录。
+**L4**：409 不再被 worker 读成「hub 异常」；worker 打 `reason`+jid，hub 侧对每次 claim/result 拒绝
+留一行（`(jid,status)` 60s 节流）。
+**被否决**：① 给 17 个 job 作用域端点加 `course` 形参的逐端点迁移（L1 后 id 已按 store 唯一、
+L1' 已堵死静默通道 ⇒ 不值得半套迁移的第二事实源风险；重开条件 = 出现新碰撞源或需同 id 跨课程共存）；
+② 守卫判据用「四分量相同且 `course_fp` 不同」（那正是本事故的配置，L1 之后**合法**，会拒掉已修好的
+场景）；③ 用 hub 课程键（目录名/stem）当键分量（要新 manifest 字段 + 第二个派生点，违反判据唯一）；
+④ `course_fp` 纳入 `data_fp`（改所有 `data_fp` ⇒ 波及 D12 验收/离线包，另起 plan）；
+⑤ `job_seed` 纳入课程（换数值，与修复分开裁）。
+**违反后果**：再出现「两门课共享一个 job 身份」⇒ 权重互串且**静默**（三重校验天然通过）；
+把归属歧义「猜一个」⇒ 直接回到本事故的通道。
+—— 全文（现场五条实测 / 三层决定 / 判据表 / E0 成本 / 迁移）→ `docs/nn/remote-transport.md §38`
+
+### §2026-09-25-goalnn-prefetch-p0-not-preempt — 抢占权专属 P1：控制面只让路 + P2 补齐开工门禁 + 挤走不占重试预算（plan/bulk-p2-preempt-fix）
+> 决策 `DECISIONS.md` §2026-09-25-goalnn-prefetch-p0-not-preempt。归档 2026-10-11（第二轮瘦身）。
+
+**背景**：2026-09-24 现场（x20-dodge-l1 / x20-dodge-l3 双课程 + 单云 worker）：**预取零命中**，每个 job 都刷
+`定期预取被高优 bulk 挤走 → 重试次数用完，放弃这份提前量`，且**每条** payload 下载都带
+`reroll=1(wasted 0.25MB)`。四条根因（全文读数与算术自证 → `docs/nn/remote-transport.md` §50）：
+① `control()` 里 `if self._holding: self._preempt_at = self._holding` ⇒ **任何**控制面请求都置抢占标记，
+而 job 期间常驻的取消环每 1.5s 一个 `/jobs/{id}/status` ⇒ P2 每读完一个 256KB 分片就被打断一次 ⇒
+3 次 attempt 上限 ≈1.5MB < 3.4MB payload，**数学上永远传不完**；② `_control_waiting` 只写不读且没有
+`_p1_waiting` ⇒ 被挤走后 P2 立刻回抢 ⇒ 关键下载排队 17.6s；③ 让路时间污染首块速率探针
+（256KB/5s ≈ 51KB/s 恒低于 `WIRE_MIN_RATE=80KB/s`）⇒ 每次下载假性重抽；④ 抢占作废字节不入账
+⇒ 预取成本恒等于 0。
+
+**决定（后来者极容易做错，故入册）**
+① **抢占权专属 P1**：控制面（P0）**只让 bulk 让路、永不抢占**。取消环每 1.5s 一个包是**常态**，
+一个常态事件不该有权丢掉别人的半截；P0 怕的是被大 body 拖到分钟级，而那由 `pause_if_needed`
+（分片间隙暂停，预算 ≤5s/次）解决。**不要再把「P0 能抢占」加回来**去换 p0 延迟（见「被否决」）。
+② **P2 开工门禁**：`slot()` 的 P2 分支加两条否决 —— 此刻有 P1 在等（`_p1_waiting`）或有控制面在途
+（`_control_waiting`）就不许新开工。口径是「**此刻**」而不是「最近」（取消环 1.5s 一个包，要求
+「最近无控制面」= P2 永远开不了工）。**P1 不受这道门禁**（否则两个 P1 互等）。
+③ **被挤走不占重试预算**：P2 的 `BulkPreemptError` 走独立预算 `WIRE_PREEMPT_MAX=6`（`_get_with_retry`
+因此是**外层 while + 内层 for**，`WireSlowError` 仍在内层消耗 `attempts`）；**上限用完抛的仍是
+`BulkPreemptError`**（不是 `RetryableError`）—— 挤走不是失败，`_prefetch_fill` 只吞前者。
+④ **速率判据用净值**：`elapsed_net = 墙钟 − Σ(pace() 返回的让路秒)`；`total_timeout` 与进度行
+**仍按墙钟**（它们回答的是「这份传了多久」，含暂停才诚实）。
+⑤ **抢占作废字节入账**：`BulkPreemptError.bytes_read` → `_wire_note_preempt` → wire 行
+`preempt=N(wasted X.XXMB)`（仅 N>0 打印），与日志里的「挤走」行数**恒等**（G4 的对账口径）。
+
+**被否决**：保留 P0 抢占 + 把预取深度调小/关掉（`--prefetch-depth 0`）—— 那是**拿机制换读数**，
+现场要的正是这份提前量能命中 · 取消环降频（1.5s → 更稀疏）—— 延迟判据 <20s 是硬需求，且它治不了
+「P0 有抢占权」这个根因 · 只补 P2 门禁而不动抢占权（P2 仍会被每 1.5s 打断）· 抢占也做 HTTP Range
+续传（双端改造，成本远高于本次收益）· 用 `time.sleep` 赌时序证明门禁（已改用 `_CountingEvent` 事件驱动）。
+
+**违反后果**：把「P0 可抢占」加回来 ⇒ 多 MB 预取重新变成不可用（现场那屏日志一模一样）·
+抢占计入 `attempts` ⇒ 三次被 P1 打断就把整份预取判死 · 耗尽时抛 `RetryableError` ⇒ 预取失败被
+当成节点故障上报（违反「预取失败不是失败」）· 门禁用「最近 1.5s 内无控制面」⇒ P2 永久不开工 ·
+让路算进速率 ⇒ 每次下载白扔一块（现场 100%）。
+—— 全文（现场读数表 / 四条根因 / 改后语义表 / 门禁与独立预算的测试口径 / 真机复核待办）→ `docs/nn/remote-transport.md` §50 · 锚 `## §50` ·
+同源条目 `§2026-09-22-goalnn-bulk-single-channel`（本条是它的更正/延伸：单通道与让路预算不变，改的是
+**谁有抢占权**）
+
+### §2026-10-01-goalnn-lease-orphan-reap（2026-10-01，孤儿租约早收：claim 后**零心跳**超 `ORPHAN_GRACE_SEC=180` 即回池；hub-only，协议面零改动）
+> 决策 `DECISIONS.md` §2026-10-01-goalnn-lease-orphan-reap。归档 2026-10-11（第二轮瘦身）。
+
+**决策**：租约若**自 claim 起一次成功心跳都没有**且 `now - claimed_at > ORPHAN_GRACE_SEC` ⇒ 判为孤儿，
+走**同一条** `_collect_expired_locked` 回收路径提前回池（不等满 `CLAIM_TTL_SEC=300`），并记账本事件
+`lease-orphan-reaped {job_id, worker, silent_sec, reclaims, ts}`。实现只在 hub 侧：
+`hub/store_leases.py` 新增 `ORPHAN_GRACE_SEC` + 唯一判据 `_lease_state`（四态
+`LEASE_NONE/ALIVE/EXPIRED/ORPHAN`）+ `_lease_held`（布尔视图，供拿不到常量的兄弟混入）。
+
+**为什么**：认领是**单程**——hub 在 claim POST 到达时即设 owner+expiry+`last_heartbeat`，而
+`lease_token` 装在响应 body 里；客户端读超时（`remote/job_lifecycle.claim_job`，`timeout=30s`）⇒
+「hub 有主、世上无人持有 token」。还租与心跳都要 token ⇒ 这份 job 在 peek 里**隐身整整一个 TTL**
+（2026-09-28 bc-human-retrial job `460b637b`：16:09:39 → 16:14:12，V100 干烧 5 分钟）。
+立项理由不是省机时（触发苛刻、一年几次），是**队列诚实**：peek 看不见的 job 不该存在。
+
+**判据只能长在既有事实上**：store 里唯一会写租约活动的信号是 `heartbeat()`——`/start` 只打
+`computing_at`、`/ready` 只 `set_ready`、`/result` 只做 token 校验，hub **看不到**下载进度
+（blob GET 不记任何租约活动，POST 面就是那 10 个）。把「零 /start / 零下载进度」写进判据会逼实现者
+给四个端点各加一个写点；改成「零心跳」后**零新状态**（`_last_heartbeat` 不晚于 `_claimed[jid]["at"]`，
+正是控制台 `last_heartbeat_ago` 读的字段）。
+
+**三条边界**：① **push 腿豁免**——`PushDispatcher` 住 hub 进程内、只在 `_await_result` 里续租，
+**上传段零心跳是它的正常形状**（判它孤儿 = 同一份活两处跑 + 回传 403 丢结果）；判别据 = 协议层已有的
+`PUSH_WORKER_PREFIX` + `push_worker_id_of`。② **离线腿不适用**（`/offline/lease` 是小时级另一套，
+不经 `_JobStore._leases`）。③ **手工认领（无 worker_id）适用**——它同样不可能有心跳。
+
+**实现形状（★ 判据唯一，否则做出更坏的形状）**：池过滤 / `_claim_locked` 的 `recovering` /
+`lease_worker` / `inflight` **四处同源**调 `_lease_state`。只在 `claimable_job_ids` 的过滤里加判据
+是不够的——`_claim_locked` 会因 `job_id in self._claimed` 回 `held` ⇒ **池里看得见、谁都领不到**。
+回收点仍只有 `_collect_expired_locked`（stale + 毒包计数 + `_drop_commitment_locked`），
+**不许**用 `release()`：它不动 `_claimed`，那份 job 会被 highest 唯一性闸永久挡在门外。
+无后台 tick：沿用「谁先看谁回收」⇒ 事件时刻 = 第一次有人看的时刻，`silent_sec` 是被看见时的静默秒数。
+
+**代价（写下来才算诚实账）**：误杀 = 一次 reclaim（`_reclaims+1`，三度达 `FREEZE_AFTER_RECLAIMS=3`
+冻成毒包）+ 进 `_stale_holders`（避让链在 ≥2 活跃 worker 时拒它重领）+ 结果回传 403 被丢
+（`remote/result_upload._call` 吞成一行 ★ 日志）+ 同一份活两处跑。窄判据下只剩一种窗口：
+**已收到 token 却在心跳线程起来之前死掉/卡住**（`remote/job_round.run_round` 在下载之前就起心跳）。
+
+**被否决的备选**：① 认领下载两阶段（意向锁短 TTL + 就绪转正）——两端都动，云机旧码不认新语义就要
+全网升级一次，不值得为一年几次的事故付升级税；② blind-abandon（凭 worker_id 放宽 H2）——开放 hub 上
+等于允许别人 abandon 你的 job（可 DoS）；③ 过期回池后优先重领——治发现延迟，不治隐身本身；
+④ 「静默 180s（从最后一次活动起算）」而非「自 claim 起零心跳」——会把「心跳过两次后死掉」的租约
+提前判死（误杀率上升），而事故形状（零心跳）不需要它；⑤ 取 `CLAIM_TTL_SEC` 的一半当阈值——与
+`HEARTBEAT_SEC` 脱钩且对「心跳过但慢」的活 worker 同样误杀。
+
+**为什么值得记**（AGENTS §6.3）：① 有被否决备选（上面五条）；② **未来会重犯**——「给观测面加一条
+写点就能让判据更准」是同族诱惑（本次拒绝了给 `/start`/`/ready`/`/result` 加写点），判据是
+「这个信号在**今天的 store 里**有没有」；③ 不能就近表达——判据唯一性、push 豁免的理由、
+误杀的具体代价跨 `store_leases`/`store_ledger`/`push_dispatch` 三处。
+
+**指针**：全文 `docs/nn/remote-transport.md` §52 · 计划 `plan/lease-orphan-reap.plan.md`（2026-10-01
+评审修订版，§7 记 O1–O6）· 实现 `nn-training/hub/store_leases.py`（`ORPHAN_GRACE_SEC` / `_lease_state` /
+`_lease_held` / `_collect_expired_locked(orphan=)`）· `hub/store_ledger.py::claimable_job_ids` ·
+回归 `nn-training/tests/hub/test_hub_leases.py`（4 例新用例 + 既有 TTL 边界用例补一次心跳）·
+`tests/hub/test_hub_job_store_split.py`（方法计数 49 → 51）。
+落账门禁：`tests/hub` 294/0 + push 腿族（`tests/remote/test_hub_push_dispatch.py` 等）绿 ·
+ruff + mypy 全量绿。
+
+### §2026-10-06-goalnn-pull-replica-any-unfinished（2026-10-06，用户报障：新 worker 上线「领不到」，要重启 trainer 才领得到；用户口径：只要没回传结果都算没完成，都能发出去竞速）
+> 决策 `DECISIONS.md` §2026-10-06-goalnn-pull-replica-any-unfinished。归档 2026-10-11（第二轮瘦身）。
+
+**背景**：Kaggle 新 worker 起来后 `no job yet` 刷了一两分钟，重启 trainer 才领到活。机制链：空闲 worker 的
+候选只有可领取池（`hub/store_ledger.py::claimable_job_ids`，**排除活租约**）；而「活租约」由**独立心跳线程**
+续租（`remote/job_round.py::_hb_loop`）⇒ 持有人主线程卡死（D 状态 / 挂住的挂载点）时那份活对所有人隐身，
+且没有出口（`cancel_unsettled_jobs` 不撤在飞）。唯一解法是重启 trainer —— `trainer/queue.py::RUN_ID` 每进程
+随机 ⇒ 同一轮重发布换个 `job_id`，新身份自然可领。设计里那张表（`job_priority` 的 high/medium/low）与
+`claim(mode="backup")` 机制都保留着（§2026-09-22-goalnn-race-retired-priority-only：删判定、留机制），
+但 **pull 线从没接上**（只有 push 腿用；`acquire_job` 硬写 exclusive、`peek` 永不返回在飞 job）。
+
+**决定**：未完成就发得出去 —— `claimable_job_ids`（∧无活租约）与 `inflight_job_ids(not_held_by=…)`（∧有
+活租约）成为同一份「未完成」判据的两个视图（`_unfinished_pending` 是唯一筛子）；`peek` 每课程先看池
+（`mode="exclusive"`），池空则看在飞集并发**备份副本**（`mode="backup"`）；`acquire_job` 按候选自带的模式
+认领。排序交给优先级表；认领模式由 **hub** 定（只有它知道有没有活租约）。备份副本**不打** `/start`
+（`computing_at` 是主人的掉队时钟，R2-C1）且 `/ready` 不报身份（不写主人的 `_last_heartbeat`）。
+
+**否决与否决理由**：① 设 hub 侧「1 主 + 1 备份」上限 —— 否（用户口径是「都能发出去竞速」；副本数天然被
+空闲 worker 数封顶，上限那套住 push 腿的派发器里）；② 恢复无排序的竞速广播 —— 否（§2026-09-22 删的就是
+它：白烧 GPU）；③ 只在 worker 侧加整份 job 的墙钟上界让卡住者自己放手 —— 不够（那是另一条因：本条的
+持有人**心跳还活着**，主线程卡死时上界也读不到；两条并行修）；④ 让 hub 撤销在飞租约（takeover）——
+否（输家的工作**注定**白烧，而备份副本可能先赢；且会动 `_reclaims` ⇒ 毒包熔断阈值被自己人喂满）。
+
+**违反后果**：又在 `peek`/`acquire_job` 里各判一次「能不能领」⇒ 两套会漂的判据（出现「peek 说能领、
+claim 说不能」）；把 backup 的回传当 403 确定性失败上报 ⇒ 一个赢家把输家炸成训练停腿；备份打 `/start`
+⇒ 掉队救援永久沉默（现场看着像「机群不救援」）。
+
+**落点**：`nn-training/hub/{store_ledger,queue_claims}.py` · `nn-training/remote/{job_lifecycle,job_round}.py` ·
+测试 `nn-training/tests/hub/test_priority_schedule.py`（七条新用例，旧形状全红）。
+**指针**：`docs/nn/remote-transport.md` §68（机制链 / 落地表 / 边界 / 真机判据）。
+
+### §2026-10-08-goalnn-dispatch-model（2026-10-08，派发模型重构收口：课程无模式 + 接管（hold）唯一真源 + BC 独占；plan/worker-type-dispatch-model M1–M6）
+> 决策 `DECISIONS.md` §2026-10-08-goalnn-dispatch-model。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：旧模型把「在线/离线」当**课程的一等概念**（`_modes` + pin + `authority_of` 五档 +
+  `parked` 派发闸 + 离线租约），横跨 hub / 控制台 / trainer / 云机四层，三个后果已经出过现场：
+  ① 多机不能并行（`_busy_locked` 是**全局**一拖一）；② 云机掉线 = 课程永久停摆（租约挂着、
+  模式停在离线、本机等待永不恢复，§67 报障二）；③ 掉线后没有自动回落。
+- **决定（用户口径 D1–D4）**：**课程无模式**，派发只看两件事——**这门课有没有被接管（hold）**
+  与 **这份活归谁（job 自己的 role）**；**活性只认进度信号**（D1：心跳不算）；接管期间队列任务
+  **压下不撤单**（D2：掉线后即可被协作盘领取）；**一拖一放 hub、按 worker**（D3：清单 `?worker=`
+  才是同参可领，缺省是**上界**）；**BC = kind=bc 队列作业**（D4）。
+- **裁决 Q1–Q5（全部采纳）**：① Q1 无包 claim **不建 hold**，导包走独立软态 `pending_export`
+  （hold 推迟到「包到手」——导包期本机照跑、协作盘照领，这是**必付代价**）；② Q2 掉线阈值
+  **维持 900s**，但打点必须**下沉轮内**（完成事件驱动，M ≤ 300s）；③ Q3 一拖一判据放 **hub**、
+  清单带 `?worker=`（不采纳云机侧自律）；④ Q4 旧云机**不兼容**：claim 缺 `?proto=2` ⇒ 409 且
+  `busy:true` + error 全文（旧日志能看见「请刷新 notebook」且**不双跑**）；⑤ Q5 **领 BC 算 drain**
+  （hold 与 BC 互斥，两型都能领 BC、领取后独占、900s 无 epoch 让出）。
+- **P0-5 加固（本机解锁双通道）**：trainer 每轮边界直问 `GET /offline/hold?course=`（≤3s 超时、
+  失败退文件），文件通道的 `held` 条目带 `last_progress_at` 并**就地 900s 自判活**——控制台进程
+  死掉时冻结的文件会**自行过期**，不会把本机永久钉在 held。
+- **★M5（BC 独占）落地**：双角色 kind 集住 `common/manifest.py::BOTH_ROLE_KINDS`（`KIND_ROLES`
+  不动；豁免的只有角色闸）；bc **不发备份副本**（store 当面拒 `no_backup` + peek 不进备份候选 +
+  push 腿不试）；**进度租约**（`_last_progress` ← `POST /jobs/{id}/epoch` 唯一写入点，
+  `BC_PROGRESS_STALE_SEC=900s` env 可调，与 hold 的 900s **巧合同值、语义不同，禁合并**）；
+  `_lease_state` 的 bc 分支只认进度 ⇒ 卡死的 bc **不会把自主盘永久钉在 drain 上**；
+  **drain 互斥两腿**：带 hold 的盘领不到 BC（跨课程腿）+ 在跑 BC 的盘领不到课程（busy 腿）。
+- **一处对 plan 字面的偏离（有意，写死原因）**：plan/F6 说「`role_blocked` 扩成
+  `(job_id, role, worker_id)`」——落地时按**门面契约守卫**（`_HubQueue` 与 `_JobStore`
+  同名方法必须**逐字同签名**，闭集 34 条）改成**兄弟函数** `queue_claims._drain_blocked`
+  接在三个拉活面（`claim_next` / `peek_jobs` / `claim_job`）上：判据照样全在 hub 侧、
+  三条腿共用一处，而那个同名面不被迫长出一个 store 侧永远用不上的形参。
+- **一处未测（如实记）**：plan §3-M0 要求从既有回传的 `iters[].wall_sec` 统计单轮 P50/P95
+  （P95 > 600s ⇒ 重开 Q2）；本机**没有真机离线回传语料**（`offline/` 产物只在 pytest 临时目录）
+  ⇒ 未测，真机第一份回传后补记（全文 `docs/nn/remote-transport.md` §72）。
+- **落点**：`hub/store_leases.py`（role_blocked 顺序 / BC 进度租约 / 无备份）· `hub/queue_claims.py`
+  （`worker_holds` / `worker_bc_drain` / `_drain_blocked` / `hub.job_kind` 转发）· `hub/queue_offline.py`
+  （busy 腿的另一半）· `remote/push_dispatch.py`（备份过滤）· `remote/offline_boot.py`
+  （`try_take_bc_job` + `_run_bc_once` + `resolve_courses(holds=)`）。
+- **测试**：`tests/hub/test_hold.py` 三条新用例（无备份 / 进度租约与让出 / 双向互斥）·
+  `tests/remote/test_offline_bc_leg.py`（自主腿的闸与接线，6 例）· `tests/remote/test_hub_push_dispatch.py`
+  （push 不备份 bc）· `tests/common/test_offline_task_queue.py`（`holds["mine"]` 回填）。
+  **先红后绿实测**：把三条语义分别换成 `if False:` / 关掉 drain 腿，对应用例逐条转红（记录见提交信息）。
+- **违反后果**：拿心跳当活性 ⇒ §68 假活重演（进程活着、训练没在推进）；拿 bc 发备份 ⇒ 影子跑者
+  复制算力且没有 epoch 可判活；把 drain 判据放客户端 ⇒ 云机换台/重启即绕过（Q5 被架空）。
+
+### §2026-10-09-goalnn-course-workers-removal（2026-10-09，`workers` 从课程文件退场：机器级键；kind=iter 的 wire 补一档「0 = 节点自定」）
+> 决策 `DECISIONS.md` §2026-10-09-goalnn-course-workers-removal。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：用户 2026-10-09「课程里的 `workers: 8` 不合理——课程并不知道它将会在哪个环境做 rollout」。
+  代码事实：`curricula/*.jsonc` 167/167 门课都写 `workers`（164×8、3×2，复制粘贴常量）；远端 kind=iter
+  那条腿取 `remote_iter_workers or args.workers` ⇒ **训练机**的本机配额（8）被当成**节点并发**发下去，
+  而节点侧夹取只降不升（`min(requested, …, cpu_worker_slots())`）⇒ 96 核机器上 `min(8, 94) = 8`。
+- **备选与否决**：① 只改 value / 加值校验——否，值描述的是机器，课程文件不是它该待的地方（rl-config §1.1
+  A 类判据）；② 「不下发 workers」（spec 不带键）——**否（评审阻断）**：wire 上不可表达（`ROLLOUT_SPEC_DEFAULTS`
+  缺席=1、显式 0 当时拒收、`build_iter_spec` `else 1`），真链路会变 8→**1**；③ 新增 `workers_auto` 布尔字段
+  ——否，多一个可漂字段，而 0 已有定义可用；④ 把「缺席」默认也改成 0——否，会改手写/在飞 spec 的字节语义
+  且让测试依赖机器核数；⑤ 剃存量 167 个文件的键（用户已裁决「永不剃」）——否，课程字节 = `course_fp`
+  （门过滤 / D14 去重 / 血缘），为死键抖动血缘不划算；⑥ 删 `CourseConfig.workers` 字段——否，
+  `extra="forbid"` ⇒ 167 门课拒启；⑦ 告警放 `apply_course`——否，只读视图 `course_openable` 同链，
+  控制台每拍轮询重复打 + 弄脏 `run_rl_cluster --json`；⑧ 照抄 `with_rollout_workers`——否，离线段的 spec
+  由**节点自己**拼，kind=iter 由训练机拼，「谁在拼 spec」不同。
+- **决定**：`workers` 判定为**机器级**键 ⇒ 课程侧读面删除（`flat_overrides` / `RESTART_ONLY_FIELDS` /
+  ladder 模板），字段与存量键永久保留，死键由**开课侧**一行告警点名；本机配额与离线段口径不动。
+  wire 侧 `manifest.rollout.workers` 补一档 **显式 `0` = 节点自定（auto）**（缺席仍 = 1；负值仍拒收），
+  节点按 `cpu_worker_slots()` 定档（96 核 ⇒ 94）并出「并发定档」行；发布侧不再回退 `args.workers`，
+  `--remote-iter-workers` 只剩操作员加压阀语义。
+- **违反后果**：把训练机读数当节点并发 ⇒ 大核机器被钉死在 8（本次病灶）；把 0 读成 1（或让归一化拒收 0）
+  ⇒ 节点并发从 94 掉到 1（比现状更糟）；剃课程键 ⇒ `course_fp` 断裂（门过滤 / D14 拒收）；
+  删字段 ⇒ 167 门拒启；告警放进只读链 ⇒ 控制台轮询刷屏 + `--json` 契约回归。
+- **测试/证据**：`tests/remote/test_remote_iter.py`（发布侧 0 保留 / 节点自定取核数口径 /
+  env 正整数压上限 / env=0 不塌成 256 / 训练侧不发 `args.workers`）· `tests/common/test_manifest_split.py`
+  （0 接受 / 负值拒收 / 缺席仍 = 1）· `tests/biz/test_hot_reload.py`（死键读面、`same` 判定、告警文案）·
+  `tests/biz/test_course_spec_split.py`（模块面闭集 + 门面转发）。门禁 `bash tools/githook/nn-python-gate.sh`
+  （ruff + mypy + tests/ + e2e/）绿（2026-10-09，72s）。
+  —— 全文（评审 R1–R9 处置、逐文件落点）→ `plan/course-workers-removal.plan.md` ·
+  wire 档案 → `docs/nn/remote-transport.md` §76 · 键分类 → `docs/nn/rl-config.md` §4
+
+### §2026-10-10-goalnn-rollout-node-auto-register（2026-10-10，采样节点自注册：hub 成为 `rl-config.json` 第二写者）
+> 决策 `DECISIONS.md` §2026-10-10-goalnn-rollout-node-auto-register。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：采样节点（云机 rollout / eval）原来靠人工把 ★URL + ★authKey 抄进本机 `rl-config.json` 的
+  `nodes[]`；quick tunnel 每次重连换名，没同步就是整天 HTTP 530。用户指令：云机自报自注册。
+- **备选与否决**：① 接收端放**控制台** —— 否（控制台 REST 对非回环请求 403，云机够不到）；
+  ② 另写一份 `remote-nodes.json` —— 否（读取面 / 控制台表 / 派发三处都要加第二事实源）；
+  ③ `register` 对既有 managed 条目**无条件 re-enable** —— 否（会顶掉运维在会话进行中的停用，
+  且新会话 `agent.auth` 必是新 key ⇒ 若无条件保留则第二会话起永久 disabled，必须靠状态机而非忽略）；
+  ④ 记 `last_seen` —— 否（无合法落点：admin 禁模块级可变状态、`STATE_WRITERS` 是精确集合、写条目 = 60s 一写）。
+- **决定**：`POST /admin/nodes/register|unregister` + `GET /admin/nodes`（Bearer = `HUB_TOKEN`）由 hub
+  upsert `rl-config.json` 的 `nodes[]`：只动这一项 + 原子替换 + **无变化不写盘**；新条目打
+  `managed:true`/`enabled:true`；**`enabled` 归控制台** —— 既有条目只在「上轮干净收工」（带
+  `unregistered_at`）时恢复，否则原样保留；`concurrency` 只在**新条目**且 body 给值时才写、且永不改写
+  （缺省不写键 = 派发按 `ping.cpus`）；云机收线 best-effort unregister（`enabled=false` +
+  `unregistered_at`，**不删**）。永久停用 = **删条目**。ipynb 改名 `ipynb/rollout.ipynb`，逻辑住
+  `nn-training/remote/rollout_node.py`（cell 只留 CFG/凭据/保活/clone/调用）。
+- **违反后果**：谁把「新会话回来」写成无条件 re-enable，就顶掉运维的停用；谁给 register 写死
+  `concurrency=1`，96 核云机被静默限成单槽；谁在 hub 侧绕开原子写/鉴权，就是第二个「rl-config 被写坏
+  且无痕迹」的事故源；谁把 bun/cloudflared 安装内联回 cell，就复活「代理注入后公网不通」那类事故。
+- **测试/证据**：`tests/hub/test_node_register.py`（28 例：F1 三路径 · 字段域 · 本机表节点 409 · ping 门
+  422 与 `skipPing` · unchanged 不写盘 · 原子写后 JSON 合法 · GET 脱敏）· `tests/remote/test_rollout_node.py` ·
+  `tests/remote/test_rollout_node_notebook.py`（cell 可编译 · CFG 覆盖模块读的键 · 凭据先于 `ensure`）·
+  `tests/test_remote_dag.py`（`remote.rollout_node: 1`）· 各 hub 拆分守卫。
+  —— 全文（协议字段 / F1–F13 处置 / 残余语义 / 真机冒烟项）→ `docs/nn/remote-transport.md` §78 ·
+  `plan/rollout-node-auto-register.plan.md`
+
+
+**家族 F — 传输让路税**
+
+### §2026-10-02-goalnn-transfer-residual-yield（2026-10-02，让路税清算：条件让路 + 按传输累计上限 + 观测补面）
+> 决策 `DECISIONS.md` §2026-10-02-goalnn-transfer-residual-yield。归档 2026-10-11（第二轮瘦身）。
+
+**背景**：L2 真机实测一条 wire 传输让路 **7.0s（= 传输时间的 38%）**，其中 **5.5s 压在关键路径**
+（`payload` 1.0 + `blob:opt` 2.0 + `blob:ref` 2.5）。机制：控制请求整体在途期间 `_read_body` 每
+256KB 分片都无条件让路，而旧预算只有「**单次调用** ≤5s」、**一条传输无累计上界**。
+
+**备选与否决**：① 保持「无条件让路」（2026-09-25 §50 现状语义）—— 否：`p0_p95=1.02s` 远低于既有
+`≤6s` 门槛（余量 ≈6×），让路买到的保护用不完，而税随取消环 1.5s 周期结构性复发；② 直接默认删让路
+（`never`）—— 否：没有真机 `p0_*` 对照前不拍死，留 `always`/`never` 逃生口，按预注册门槛现场裁。
+
+**决定**：让路条件化（**最老在途**控制请求 ≥ `YIELD_AFTER_SEC_DEFAULT=1.0s` 才让）+ 按传输累计 ≤5s；
+库层缺省保持老语义（0.0 / None），由 worker 显式装配 `--bulk-yield {auto,always,never}` 且 `worker_loop`
+**finally 还原**；观测补面（label 带优先级 / `p0_p50` / 排队按 jid 归属 / 预取命中入账 + 每轮摘要 /
+`wire_report.py` 调度账）。两条预注册门槛（不改默认）：预取 `hits/misses < 1:3` 且白传 ≥3MB ⇒ 默认关；
+`never` 臂下 `p0_p95`/`p0_max` 劣化 <2× ⇒ auto total 收到 0。
+
+**违反后果**：装配不还原 ⇒ 同进程后续测试确定性变红（`test_control_plane_bypass.py` 的 bulk ~0.1s、
+age 到不了 1.0s）；把「单次」预算当「每条传输」⇒ 改库层缺省语义并丢掉 45s/60s 的上界推导；
+`_wire_hit` 落 `_ensure_payload` ⇒ 把 push 腿误标为预取命中。
+
+**指针**：全文 `docs/nn/remote-transport.md` §53 · 现场账 `docs/nn.progress.md` 2026-10-02 节 ·
+计划 `plan/transfer-residual.plan.md` · 回归 5 文件新 19 例 + 1 例加断言 · 门禁 nn **3483 passed /
+9 skipped** · 根 `bun run check` **2345 pass / 0 fail**。
+
+
+**家族 G — 自主段起点与打包新鲜度**
+
+### §2026-10-04-goalnn-opt-blob-must-ride-the-pack（2026-10-04，自主段起点动量必须种子进 blob_cache；合成轮只声明「本地可兑现」的 opt sha）
+> 决策 `DECISIONS.md` §2026-10-04-goalnn-opt-blob-must-ride-the-pack。归档 2026-10-11（第二轮瘦身）。
+
+- **背景（真机事故）**：Colab TPU 离线盘抢占到在线课 x20-adv-acc（计划 it195→it250），
+  rollout 每轮正常跑完 184 局，紧接着 **PPO 起步前**失败：
+  `/jobs/1f05d5db170855c3/blob?name=opt` 3 次重试后 `unknown url type`——
+  整段停在 it196（每重试白跑 33s rollout）。
+- **根因（两条，都在「自主段没有下载通道」这条前提下）**：
+  ① `plan_run._run_iteration` 用 `run_job("", "")` 合成轮次 ⇒ `_resolve_blob` 只有
+     `blob_cache/<sha>` / preloaded 两个本地源；而起点 `opt.tar` 字节（包根 / 产物目录
+     `it-N/opt.tar` / job 目录 `blob.opt`）**从不进 blob_cache** ⇒ 每轮 miss ⇒ 向空 base_url
+     发 GET（`_get_with_retry` 还把它当瞬时抖动退避重试 3 次）。
+  ② `_seed_start_checkpoint` / `plan_run` 三处在**没有本地字节**时退回 `manifest.opt_sha`
+     ——那是 hub 侧字节的地址，自主段无从兑现 ⇒ 幽灵声明（必失败；且旧轮次的 sha 还会把
+     错动量接上来）。
+- **决定**：① 新增 `plan_handoff._seed_opt_blob_cache`（与 `_seed_ref_blob_cache` 同规）：
+  按 产物 `it-N/opt.tar` → 包根 `opt.tar` → job `blob.opt` 找字节，种进 `blob_cache/<sha>`，
+  **返回本地字节的 sha**；`_seed_start_checkpoint` 与 `run_loop.apply_resume_overlay`
+  （续跑锚点）都改用它赋 `last_opt_sha`（进 plan_run/run_loop 门面 + 交接面 20 名）。
+  ② `last_opt_sha` 一律**只声明本地可兑现的 sha**（`_stored_opt_sha` 兜底；无字节 → 空 +
+  响亮 WARN 说明「按 Adam 从头跑 + 重导带 opt 的包」）。③ `_get_with_retry` 开头拒空
+  `base_url`（确定性 `ProtocolError`，不再 3 次退避 + `unknown url type` 误导文案）。
+- **被否决**：把 `import_bundle` 的起点落位从 `it-{idx.it}` 改成 `it-{idx.it-1}`——
+  语义上更「教科书」（包件 = W(it-1)），但它被既有用例明钉（`it-003/weights.json`），而
+  消费者读的是包根 `init_weights.json` + 三个 seed 链 ⇒ 改它只是无谓的爆炸半径。
+  真正的缺陷在**消费侧不看手边的字节**，种子链覆盖了两种落位。
+- **落点**：`nn-training/remote/{plan_handoff,plan_run,run_loop,http}.py` ·
+  回归 `nn-training/tests/remote/{test_bundle,test_download_split,test_plan_run_split,
+  test_plan_handoff_split}.py`（新增 3 例：起点动量进 blob_cache 且空 base_url 可解析；
+  种子三来源 + 无字节返回空串；空 base_url 不重试）。
+- **门槛**：nn python gate 绿（**3606 pass/7 skip**；ruff+mypy 干净）。
+- **指针**：全文 `docs/nn/remote-transport.md` §62；同族前两次 §59（seize）/ §61（sympy）
+  与 2026-10-03 的 ref 版（bundle 带 ref + 启动期种子）。
+
+### §2026-10-04-goalnn-pack-freshness-on-handoff（2026-10-04，抢占在训在线课必须重导包： 权重/动量维度 + **代码**维度；hub 有包那条腿也要问控制台）
+> 决策 `DECISIONS.md` §2026-10-04-goalnn-pack-freshness-on-handoff。归档 2026-10-11（第二轮瘦身）。
+
+- **背景（用户报障）**：「如果只在开课时生成离线包，然后手工转为在线模式，那么训练中途被
+  离线 worker 抢占后，这个课程在线训练的权重和 opt 不就全丢了吗？」——属实，两个放行口叠加：
+  ① 自动导包的规则表第 ⑥ 条「已有包 ⇒ 不导也不作废」（热切语义），② **有包**那条 claim 腿
+  （`note_claim` 翻 mode）**从不问控制台**。而离线腿的续跑锚点只认「回传 / 人工导入」的轮次
+  （`queue_resume.resume_sources`），**看不见本机在线轮** ⇒ 云机拿旧包 = 回到旧起点重跑，
+  在线训练的权重与动量白丢；包里的 `code.zip` 也是导出那一刻的快照 ⇒ 连代码都是旧的。
+- **决定**（判据 = 「包是否仍代表当前起点与当前代码」，全在控制台侧判）：
+  ① 规则表 ⑥ 拆成 ⑥/⑥'：包的 mtime **不早于**「活动权重（`tmp/<课>/weights.json`）mtime」
+  且**不早于**「`code.zip` 源文件最大 mtime」⇒ 复用（不导不废）；任一更旧 ⇒ **作废 + 重导**
+  （⑥'，与 2026-09-22「重启离线课要重打包」同一条）。
+  ② 代码新鲜度判据：`newestCodeMtimeMs()` 扫 `nn-training` 的 `.py`/`.jsonc`，排除
+  `tmp/weights/__pycache__/tests/` 与一切点目录（**与 `pack_code_zip` 同表**，跨语言逐名
+  对账用例钉住）；**不比对 commit**——`pack_code_zip` 明说「含未提交修改」，HEAD 相同不等于
+  字节相同。
+  ③ hub：**有包**的自动课 claim 成功也要请控制台核对新鲜度（`hub/offline._ask_console_freshness`，
+  与缺包触发共用同一套节流/上界账本）。控制台在**本次 HTTP 响应内**同步作废旧包 ⇒ 云机随后
+  取包 404、等新包（竞态在响应返回前关闭，不需要另设「翻牌时间闸」）。
+- **被否决**：(a) 扩展 `resume_anchor` 去扫本机在线轮——本机增量只有「活动权重 + 每轮
+  `ppo_ckpt_remote`」，没有 `row.json`（「同轮齐全」语义会被破坏），且**代码维度它救不了**：
+  包是唯一携带代码的通道；(b) 改 `import_bundle` 的起点落位（同 §62 的否决）；(c) 只在
+  「开课/重开课」重导（现状）——正是本 bug。
+- **落点**：`dashboard/src/server/bundles/export.ts`（`weightsMtimeMs` / `newestCodeMtimeMs`
+  + 排除表常量）· `dashboard/src/server/actions/course-mode.ts`（规则表 ⑥/⑥' + 两个调用点）·
+  `nn-training/hub/offline.py`（`_ask_console_freshness` + claim 成功回执 `handoff` 字段）·
+  回归：`dashboard/tests/course-mode-bundle.test.ts`（纯表 3 例 + 扫描/对账 2 例）·
+  `nn-training/tests/hub/test_auto_handoff.py`（有包 claim 问控制台 / 不可达降级；autouse 桩
+  防真打控制台）。
+- **门槛**：nn python gate 绿（**3608 pass/7 skip**）；dashboard `typecheck` +
+  **1317 pass/0 fail**。
+- **指针**：全文 `docs/nn/remote-transport.md` §63。
+
+
+**家族 H — 补传腿与自主 worker 收工**
+
+### §2026-10-07-goalnn-offline-deliver-isolation（2026-10-07，补传腿忙等修复 + 独立进程：落地 plan/offline-deliver-isolation 的 P0+P1）
+> 决策 `DECISIONS.md` §2026-10-07-goalnn-offline-deliver-isolation。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：云机 `x21-psh-b` 530 起 PPO 单步 `0.186 → 5.26 → 7.40 s/step`（墙钟 ≈**40×** 于
+  编译+追踪+拷贝之和 ⇒ 训练线程被抢 CPU/GIL，隧道恢复即自愈）。诊断 `plan/tpu-cpu-silent-downgrade.plan.md` §9/§10；
+  设计与两轮评审 → `plan/offline-deliver-isolation.plan.md`（§9 一审 / §10 二次评审六条）。
+- **根因（代码级）**：`_repost` 是唯一「只唤醒、不消费」的标志 —— `_drain_loop` 认它当唤醒源，`_sync`
+  探活失败又放回 ⇒ 内层 `while` 立刻退出、**不 wait 也不干活** = 100% 核自旋（实测 0.6s 空转 **50085 圈**）；
+  且忙等期间这条腿零日志。
+- **判据（新不变量）**：`_idle_spins` 只在「这一圈既没干活、也没 `wait`、也没收线」时 +1 ⇒ 修好后**该分支
+  不可达** ⇒ 断言 `== 0` 是确定性的（无窗口/容差/sleep）；`_drain_ticks` 只作埋点（它每 0.5s 超时唤醒仍涨）。
+  P0 顺序 = 先落计数器（不改行为）⇒ 未修代码上确认红 ⇒ 再修。
+- **P0**：`_repost` 降为工作项 + 持久集（只对真正处理过且 `ok`/`skip` 的销账，`stop`/被截断的一律留着）；
+  `close()` 唤醒条件补 `_repost`；**欠账落盘**（`delivered.json` 的 `owed_reposts`——该轮早已记账，只靠内存
+  就永久丢 hub 侧那一轮的 `eval_rows`；`rejected` 按 `weights_fp` 校验）；毒丸项（同一 it 连续 3 次异常 ⇒
+  降级销账）；每轮埋点 `cpu=+x.xxs ticks= idle= pending= repost=`（`os.times` 差 = 云上 H6a/H6b 唯一判据）。
+- **P1**：`remote/deliver_worker.py`（子进程：控制通道 / 状态面 / idle 三合一 / tick·stop 预算 / **stdin EOF
+  判父死**）+ `remote/deliver_proc.py`（`DelivererProcess` 与 `OfflineDeliverer` **同接口** = `DelivererLike`
+  Protocol；`make_deliverer(mode)`；子进程起不来 ⇒ **sticky 降级线程模式而补传仍送达**——老包没有新模块，
+  这是上线后的常态）。切两个模块是被 **LOC 预算**（单文件代码行 <1000）逼的。
+- **实现中抓到的真 bug（两轮评审都漏，慢层用例抓到）**：① `close()` 先关 stdin ⇒ 子进程把段末 flush 误当
+  「父进程已死」退出；② 子进程收线时 sync 推不动会等满预算 ⇒ 改成「一趟推不动就收线」（budget 是上界不是目标）。
+- **门禁**：nn python gate **3747 passed / 0 failed**；顺带修 `e2e/test_auto_handoff_e2e.py` 那条赌开发机
+  开着 dashboard 的用例（HEAD worktree 上复现为红）。慢层真 spawn 刻意只留 5 例：8 次 python 启动会把邻居
+  `remote_iter` 顶红（实测）。
+- **落点**：`nn-training/remote/{offline_deliver,deliver_worker,deliver_proc,plan_handoff}.py` ·
+  `nn-training/tests/remote/test_offline_deliver_{async,proc}.py` · 全文 → `docs/nn/remote-transport.md` §69。
+- **未做（显式）**：P2 —— `_eval_rows_for` / `_row_for` 的增量读（33MB 全量解析），不在本次范围。
+
+### §2026-10-07-goalnn-offline-graceful-exit（2026-10-07，自主 worker 收工即停：终态短窗口 + 保活收工即停）
+> 决策 `DECISIONS.md` §2026-10-07-goalnn-offline-graceful-exit。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：Kaggle 自主 worker 现场——两门课 17:03 跑完、17:04 hub 已报 `completed` + 「本会话已跑过这份包」，
+  却**空转到 17:33**（29 分钟）才收工；收工后 `[keepalive] alive` 一直报到 17:49。两条根因**性质不同**：
+  ① 空烧 = 全终态也走 `idle_wait_sec=1800`（`_run_auto` 的空队列分支）；② 收工后保活从不 `set()`（全仓无一处），
+  且 `CFG.course` **点名路**直调 `_run_batch`、**不过 `_run_auto`** ⇒ 收工语义必须落在**两条路的公共层 = notebook**。
+- **决定**：① 新增 `TERMINAL_STATES={completed,not_offline}` + 纯函数 `all_terminal(rows, served)`；
+  **判据并上「本会话已跑过这份包（同 sha）」**——现场那门是 `claimable` 行、只被 `_eligible` 的 served 过滤
+  （`state=ready`），**只判 state 是终态修不掉现场**；为此 `resolve_courses` 增加第三返回值 `manifest`
+  （原始 hub 行：`picks`/`blocked` 都不带 `state`，且到空队列分支时 `picks` 恒空）。`_run_auto` 在
+  `mode != "drain"` **之后**插终态窗口，用**独立**锚点 `terminal_since` 与**独立**预算
+  `idle_wait_terminal_sec`（缺省 `300`，走 `_num` ⇒ `0` 合法）。
+  ② notebook cell 1 的 `_run` 外套 `finally: _keepalive_stop.set()`；保活 Event 改**模块级单例 + 线程去重**。
+- **诚实边界（写进文档，别当已证）**：保活是 daemon 线程 ⇒ 停它**不影响 kernel/TPU**（危害只是日志噪音 + 线程泄漏）；
+  Kaggle 无 `unassign` API ⇒ 默认只把空烧 29 分钟压到 300s；`shutdown_kernel_on_exit=true`（默认关）走
+  `os._exit()`，**杀 kernel 是否让 Kaggle 释放会话/TPU 未经验证**；`set()` **不会**触发 Colab 的 `unassign`
+  （那个分支只在见到 `/tmp/battle-halt-request` 哨兵时才调）。
+- **否决与备选**：只判 `state ∈ TERMINAL_STATES`（**修不掉现场**，R2）· 把收工序列散在 `_run_auto` 的 return
+  （盖不住点名路；且 release/停心跳在那里是**空操作**——租约与心跳全在 `_run_batch` 的 per-course `finally` 里生灭）·
+  `shutdown_kernel_on_exit` 塞进 `CFG_KEYS`（元组语义 = 「`run()` 会读的键」，它只有 notebook 读 ⇒ 不进）·
+  默认 0 立即收工 / 调小 `DEFAULT_WAIT_SEC` / 收工不 release / hub 侧加字段 / Kaggle 造哨兵文件（详见 plan §3）。
+- **落地**：`remote/offline_boot.py`（`IDLE_WAIT_TERMINAL_SEC` · `TERMINAL_STATES` · `all_terminal` ·
+  `resolve_courses` 三元组 · `_run_auto` 终态窗口）· `ipynb/battle.offline.ipynb`（cell 1：单例去重 + 收工 `set()` +
+  `os._exit` 开关 + 两个新 CFG 键）· 单测 `tests/common/test_offline_task_queue.py`（5 条新用例）·
+  `tests/remote/test_offline_notebook.py`（5 条文本守卫 + `CFG_KEYS`）· `e2e/test_auto_handoff_e2e.py`（解包三元组 +
+  `idle_wait_terminal_sec: 0` 防挂 300s）。
+- **门禁**：nn python gate（ruff + mypy + tests/+e2e/）；定向子集 203 passed（云机侧单测）+ 15 passed（e2e auto-handoff）。
+- **落点**：全文 → `docs/nn/remote-transport.md` §70；计划（含一轮评审处置 R1–R8）→ `plan/offline-worker-graceful-exit.plan.md`。
+
+### §2026-10-10-goalnn-deliverproc-final-flake（2026-10-10，补传腿重启的满载 flake：判据对齐「可判定」的证据 + 账本优先）
+> 决策 `DECISIONS.md` §2026-10-10-goalnn-deliverproc-final-flake。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：慢层 `tests/remote/test_offline_deliver_proc.py::test_restart_does_not_replay_consumed_commands`
+  满载约 1/6 红（`result POST 出现 2 次`），单跑/空载必绿；同一用例 §74 记过另一种显形（自锁挂死）。
+  用户指令：修这条既存 flake。
+- **量出来的机制**（只读探针挂在并发全量上）：`hub 收到 POST` 与 `子进程把「已送」落盘` 之间隔着一趟
+  真网络 —— 在那窗口里杀子进程，父侧**所有**磁盘证据（状态面快照 + 账本）都还说「没送」⇒ 按设计
+  **重述一次**（hub 侧覆盖写）。逐轮产物同理。
+- **备选与否决**：① 让子进程**先落「已送」再 POST** —— **否**（把「重复一次」换成「丢一份段末摘要」，
+  与 §10.3「未送达要响亮记录」的已记录要求冲突；两将军问题下只能二选一）；② 父侧问 hub「收到了吗」
+  —— **否**（父侧零网络是这条腿的隔离面之一，且隧道断时它照样答不出来）；③ 把断言放宽成 `<= 2`
+  —— **否**（含糊、且丢了「已落盘 ⇒ 绝不重述」这条真判据）；④ 把两条 lock/慢层用例的杀点一直
+  留在窗口里 —— **否**（不可判定 = 必 flake）。
+- **决定**：① 慢层用例的**杀点同步到磁盘证据**（账本记全 3 轮 + `result_done`；不是 hub 那边的计数），
+  此后断言「result POST 恰好 1 次 · `final` 行只有 1 行 · 已投轮次各恰好 1 次」，重启后再摆第 4 轮
+  断言**新积压照推**；② 窗口那条路（`result_done` 钉成 False ⇒ 必须重述 + 有界返回）留在快层
+  §74 的 `test_restart_restating_the_final_does_not_self_lock`；③ `_result_done_from_disk()` 改
+  **账本优先、快照兜底**（账本写完即落盘，快照每 tick 才刷 ⇒ 先看快照会白重述一次 ~1.9MB 的摘要，
+  且 `close()` 会虚报「段末摘要未送达」）。
+- **违反后果**：再往「窗口里恰好一次」上写判据 ⇒ 满载必 flake（不可判定）；把子进程改成「先落盘后
+  POST」⇒ 段末摘要会**静默消失**（比重复投递严重）；父侧为了判重去碰网络 ⇒ 破坏这条腿的隔离面。
+- **测试/证据**：新用例 `test_result_done_prefers_the_ledger_over_a_stale_status_snapshot` 先红后绿 ·
+  慢层单文件 12 连跑 0 红 · 两两并发全量 A/B（各 3 波 × 2 并发、同一时段同一配置）：改动后 **0/6 红**，
+  纯净 HEAD（`/home/hj/battle-base`）**3/6 红且全是同一条断言**（`result POST 出现 2 次`）·
+  nn 门禁绿（ruff + mypy + 3971/3971）。
+  —— 全文（探针原始记录 / 逐条判据 / 被否决）→ `docs/nn/remote-transport.md` §77
+
+
+**家族 I — 云机日志与 worker 身份**
+
+### §2026-10-06-goalnn-cloud-worker-log-diet（2026-10-06，用户指令「删除云机 worker 刷屏 log」）
+> 决策 `DECISIONS.md` §2026-10-06-goalnn-cloud-worker-log-diet。归档 2026-10-11（第二轮瘦身）。
+
+**背景**：用户贴出云机（Kaggle）worker cell 输出里的六行，要求删掉：`job …: DataParallel 生效（…）`、
+`[ppo] update start: … chunks x … epochs`、`bulk payload/P1: 让路合计 …`、
+`prefetch: held=… hits=… misses=… 本轮下载=…MB 会话累计=…MB`、
+`result POST ok: … bytes … (attempt k) [同内容 JSON 体为 …]`、`job … done — result accepted [回传 …]`。
+共同形状：**每 job / 每轮必然一行**，而信息要么是静态事实的复述，要么已在别处（wire 行 / hub 侧 / 异常行）。
+
+**决定**：这六行**删除**（不降频、不加开关），每 job 的观测出口收敛到既有的一行 wire 账
+（`wait=…/yield=…` 调度账 + 各段字节/秒 + `phases in/out/ppo/other`）；**异常与真异常路径各自仍然响亮**
+（`result POST 409`（竞速输家）/ `403`（backup 丢弃）、`cuda-dp 但只可见 N 张卡` 的退化告警、
+`排队 … 才拿到单通道`（>1s）、wire 的重抽/抢占/坏签行、状态码节流告警）。逐行落点：
+- `DataParallel 生效`：PPO（`remote/train_core.py`）与 BC（`worker/train/bc.py`）两处都删；「与单卡数值
+  不可逐位比」的警告留在原地注释里，运行事实由开机横幅 `device=cuda-dp` 与 rl-config 承担。
+- `update start`：三个 PPO 变体（`worker/ppo/{engine,goal,intent}.py`）一起删——同族同命，只删一个等于
+  换条课程又出现。
+- `让路合计`：`remote/bulk_sched.py::slot()` 的出口删除；`_yield_cur` **保留**——它同时是 S2「一条传输累计
+  让路 ≤ `yield_total_budget_sec`」的输入，不是纯日志账。
+- `prefetch` 摘要行：`remote/job_round.py::_flush_prefetch_round` 只剩 wire 传输行（真搬了字节才打）。
+- `result POST ok` 与 `done — result accepted`：同一笔账已在 wire 行（`result=` 段 / `out=` 阶段）里。
+
+**否决与否决理由**：① 「有活动才打」的降频（对 prefetch 零活动确实够，但另外五行是每次运行都有的，
+没解决「云机日志全是它们」）；② 加 `--quiet`/env 开关——被抱怨的**就是默认路径**，且新开关 = 新漂移点；
+③ 把被删的读数搬进 wire 行——那行会长到读不动（减噪的反面）；④ 只删 `[worker]` 前缀的、留 `[ppo]` 的那行——
+用户贴的就是它。
+
+**违反后果**：把「让路合计」当纯日志顺手连 `_yield_cur` 一起删 ⇒ 静默取消 S2 的累计封顶（每分片都停满单次
+预算，把让路税加倍）；删行时顺手碰掉 backup 的 409/403「按成功丢弃」语义 ⇒ 一个赢家把输家炸成训练停腿；
+再用「日志里有 DataParallel 生效」判「这轮是不是 DP」——该判据已退役，看横幅 / rl-config。
+
+**落点**：`nn-training/remote/{train_core,bulk_sched,job_round,job_lifecycle}.py` ·
+`nn-training/worker/ppo/{engine,goal,intent}.py` · `nn-training/worker/train/bc.py` · 测试：删掉三条只钉
+退役行的用例（`tests/remote/test_bulk_sched.py` 的让路合计行、`tests/remote/test_soft_hold_prefetch.py`
+的摘要行与它的「生产读者」守卫），两处留退役注记。
+**指针**：`docs/nn/remote-transport.md` §53（S3f 行标退役 / 让路策略表）· §39（让路账，2026-10-06 续）。
+
+### §2026-10-04-goalnn-worker-readable-name（2026-10-04，worker 身份 = 环境+连接方式；环境判据 = 平台包可导入性；不做重名消解但留观测守卫）
+> 决策 `DECISIONS.md` §2026-10-04-goalnn-worker-readable-name。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：dashboard PPO 贡献度的 worker id 是 `hostname:pid`——Kaggle/Colab 容器的 hostname 是平台
+  随机串（`2f3dd8b0e0e2:4128`），既不表环境也不表连接方式。用户裁决六条：格式 `{env}-{link}`；历史 id
+  原样不映射；纯自动名（不加 `--worker-name`）；环境判据 = 尝试读平台 secret；同一环境不会同时有
+  多台云机 ⇒ 不做重名消解；`local` 不带 link 段。
+- **备选与否决**：① 目录判据（`/kaggle/working`、`/content`）——否：用户裁决 ④ 点名用 secret 客户端
+  （且 AI Studio 镜像也可能有 `/content`，目录判据会被 colab 吞掉）；② 真读 secret 值判定——否：
+  判据与「key 有没有配」无关（`ImportError` 才是否定），纯 import 不发网络、不需要绕代理，顺带消掉
+  第三份 `_platform_net_env`；③ hub 分配后缀 / 本地 hash 后缀——否：裁决 ⑤ 同环境单台，少一个协议
+  字段就少一类兼容问题；④ 模块级 memo 缓存身份——否：`common/__init__.py` 层契约「无模块级可变状态」
+  + `job_lifecycle` 拆分守卫「顶层零状态/禁 `global`」⇒ 改为 worker_loop 单次计算 + 显式下传
+  （零隐藏状态）；⑤ 把旧 id 映射成可读名——否：裁决 ②（映射是猜的，会编身份）。
+- **决定**：① 判据唯一实现 `common/env_probe.py`（纯函数）：env = `kaggle_secrets` /
+  `google.colab.userdata` 可导入性（顺序 kaggle→colab→aistudio→local）或 `/home/aistudio`；
+  link = offline ⇒ `o`、host ∈ `100.64/10` 或 `.ts.net` ⇒ `t`、其余 ⇒ `c`；`local` 无 link 段。
+  ② `worker_tag(offline, hub_url)` 纯函数；生产三处调用点单次计算后显式下传（`post_result(worker_id=)`
+  / `UploadTask.worker_id` / `report_job_failure(worker_id=)`），缺参回退。③ 零协议改动：hub 入账与
+  dashboard 零改动（既有 `machineOf` 对新名恒等）；旧 worker `hostname:pid` 照旧入账、不映射。
+  ④ 观测守卫：`hub/http_face.py::_watch_worker_source`——同名 + 异来源（既有 `attributed_source`）
+  在 180s 窗口内 ⇒ 一行告警（60s 节流）；只观测，不改名/不入账。⑤ push 腿身份 `push:<id>` 不动。
+- **违反后果**：重名消解会引入协议字段与升级顺序负担（裁决 ⑤ 明确不需要）；探测去调 getter ⇒
+  绕代理/secret 副作用回来（且判据仍与 key 配置无关）；加 memo/模块状态 ⇒ 撞 `common` 层契约与拆分
+  守卫；把 `local` 拼上 link ⇒ 违反裁决 ⑥；守卫改名/写账 ⇒ 观测面污染账本。
+- **指针**：全文 `docs/nn/remote-transport.md` §66 · `docs/nn/console.md` §27 · plan
+  `plan/worker-name-readable.plan.md`；回归 `tests/common/test_env_probe.py` ·
+  `tests/remote/test_worker_name.py` · `tests/hub/test_worker_name_guard.py` ·
+  `e2e/test_worker_name_ledger_e2e.py`。
+
+
+**家族 J — 集群代码快照**
+
+### §2026-10-10-goalnn-cluster-code-snapshot（2026-10-10，`code.zip` 打包时机从「每课首次 publish」上移到「集群会话启动」，锚 = 首个声明进程的存活期；用户指令）
+> 决策 `DECISIONS.md` §2026-10-10-goalnn-cluster-code-snapshot。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：同一 hub 上多课程各自打包 ⇒ 会话内改本机代码后开新课，共享 worker 池交替领到的 job 跑在
+  **两份代码**上（shard 行宽 / METRICS_VERSION / 奖励语义都可能不同）。四个打包点全是 per-course：
+  `trainer/loop_remote_job.py:252-259`（进程内去重 + 每课 job_root）· `trainer/bc_loop.py:346-347`
+  （**每轮**重打、无去重）· `hub/queue_observe.py::shared_code_zip`（取「第一份存在的」，
+  拿哪门课取决于 `--discover` 顺序）· `trainer/loop_export.py::_ensure_ts_code`（`ts_code.zip` 同族，本次未做）。
+- **决定**：新增 `remote/code_snapshot.py`；快照落 `<repo>/tmp/.code-snapshot/`，**内容寻址**
+  （`code.<sha12>.zip` + 最后原子替换的 `snapshot.json`）；启动期 `ensure`（`hub/boot.py` ·
+  `run_rl_cluster.py --serve` · `run_rl.py`——**导出进程就是 run_rl 进程** ⇒ 集群全停时导出会重打并成为
+  新锚）；消费期**只 `read`、永不换代**（PPO/BC publish 走 `published_code_zip()`，缺快照 ⇒ 回落
+  per-course 打包 + WARN，**绝不**在 publish 里建锚；`shared_code_zip()` 首选快照、`course=` 不再影响结果）。
+  锚 pid 死 / 命令行指纹不符 / 命令行读不到 ⇒ 下一个启动者重打（内容寻址 ⇒ 误重打同 sha、代价≈0）。
+  **不做**源码新鲜度检测（用户口径：开发中的代码不能重打包，**重启才生效**）；不做 TTL。
+- **配套（不可拆）**：§63 的包过期判据**代码维度换锚**（源文件 mtime → 「包内 `code.zip` 的 sha vs
+  当前集群快照 sha」）——冻结语义下旧判据会把「改源码但不重启」误判成过期：作废 + 重导出来的**还是同一份
+  代码**，白烧一次分钟级导出并让云机多等一段 404 等包窗口（导出失败支还会因为 `restorePackIfMissing`
+  用 `renameSync` 挪回归档、mtime 保留而反复触发）。两个输入：控制台新增
+  `bundles/snapshot.ts::readClusterSnapshot()`；包内 sha 由 python 旁挂 `<包>.meta.json`
+  （`remote/bundle.py::bundle_meta_path`；跨语言常量 `bundles/marks.ts`）——**不给 dashboard 加 zip 依赖**
+  （它零运行时依赖是刻意不变式）。快照不可知（没快照 / 锚已死 / 老包没 sidecar）⇒ 回落
+  `newestCodeMtimeMs` 口径（保守：宁可白重导一次，也不放旧代码去云端）。
+- **被否决**：TTL 过期；快照住 `nn-training/`；下沉 `pack_code_zip` 到 `common/`；源码 mtime 检测 +
+  自动重打；内容寻址决定「是否重打」（内容寻址只管「字节的身份」）；给 dashboard 加 zip 依赖；
+  导出进程另设一个「先 read 复用」钩子（与 run_rl 钩子同进程、语义互斥）。
+- **违反后果**：让消费侧 `read` 触发重打（半死集群里新课悄悄换代码，正是本需求要防的）；把快照写回
+  **固定名** `code.zip`（活着的消费者缓存 `path+sha` ⇒ 读到新字节却报旧 sha，云端 `ensure_code` 逐候选
+  拒收且报错指向「传输损坏」）；快照落进被打包的根（会被 `pack_code_zip` 自吞）。
+- **落地与门槛**：`nn-training/remote/code_snapshot.py` + 三处启动钩子 + PPO/BC/`shared_code_zip` 消费点 +
+  `remote/bundle.py` 旁挂件 + dashboard 换锚；回归与门槛见 `docs/nn/remote-transport.md §79`；
+  新依赖边已登记（`tests/helpers/remote_dag.py::LAYERS` · `test_hub_queue_split.py::ALLOWED_IMPORTS` ·
+  `test_loop_remote_split.py::DELAYED_IMPORTS`）。
+
+### §2026-10-10-goalnn-cluster-code-snapshot-ts（2026-10-10，`ts_code.zip` 并入集群代码快照——P1，承接 §2026-10-10-goalnn-cluster-code-snapshot）
+> 决策 `DECISIONS.md` §2026-10-10-goalnn-cluster-code-snapshot-ts。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：`code.zip` 冻结后，第四个打包点 `trainer/loop_export.py::_ensure_ts_code` 仍是同构的
+  per-course 缺陷——TS 运行时 zip 落 `<job_root>/ts_code.zip` + 进程内缓存，而 `job_root` 是每课一份
+  ⇒ 同一个 hub 上两门课的 rollout 可能跑在**两份 TS 运行时**上（`worker/iter_rollout.py` 靠这个 zip 跑
+  rollout，`tools/sim/export-rl-rollout.ts` 的依赖闭包跨 `src/` + `tools/`）。P0 条目把它记为「本次未做」。
+- **决定**：快照**一次打包产出两件**（`code.<sha12>.zip` + `ts_code.<sha12>.zip`，元数据加 `ts_zip` /
+  `ts_sha256` / `ts_bytes`）；新消费口 `published_ts_code_zip()` 与 `published_code_zip()` **逐字同规**
+  （快照优先 / 缺失回落 per-course 打包 + 响亮 WARN / **绝不建锚**）；`_ensure_ts_code` 改调它，延迟
+  import 面从 `remote.hub_client` 换成 `remote.code_snapshot`（`test_loop_export_split.py::DELAYED_IMPORTS`
+  同步换锚）。`_prune` 改成**按族**算保留窗口（两族混排会把刚打的 `code.zip` 挤掉）。
+- **两条计划没写、实现补上的判据**：
+  ① ts 打包是 **best-effort**（失败只 WARN + 该字段留空 ⇒ 消费侧回落）——hub/trainer 启动不接受
+  「一个可选件打不出来就不起」，而 ts 回落的后果与改动前逐字节等价；
+  ② ts 件的 sha **核验放在消费点**（`published_ts_code_zip`）而不是读面——读面每次调用已经要哈希
+  1.4MB 的 `code.zip`，再叠 ~2.5MB 的 ts 就是给「两件都不看的调用方」白付，而它的唯一消费者每进程
+  只被调一次（`_ensure_ts_code` 有实例缓存）。核验失败 ⇒ WARN + 回落（不把对不上 sha 的字节送云端）。
+- **被否决**：ts 失败拖垮整份快照（启动代价）；在读面哈希 ts；给 ts 单开一套「缺失/坏」措辞分支
+  （与 code 件同规即可）；hub 侧另建「共享 ts_code」端点（只有 job 级 `/jobs/{id}/ts_code`，由
+  `publish_job` 按路径拷贝 ⇒ 指针跟着快照走）。
+- **违反后果**：让 ts 回落静默（同一 hub 上两份 TS 运行时——正是本需求要防的）；把 ts 塞进 `code.`
+  名字空间（两族保留窗口互相挤掉，`_prune` 不再能保证「当前那份不被删」）。
+- **落地与门槛**：`docs/nn/remote-transport.md §79` 的「TS 运行时同族」段；回归 =
+  `tests/remote/test_code_snapshot.py`（+6 例）· `tests/trainer/test_loop_export_split.py`（注入点换锚 +
+  真跑回落支）；`plan/cluster-code-snapshot.plan.md §5.1` 记实现与计划的差异。
+
+### §2026-10-10-goalnn-cluster-code-snapshot-ui-hatch（2026-10-10，快照的可见性（组件卡 sha 徽章）与逃生开关——plan 的 P2 + §8.3；承接 §2026-10-10-goalnn-cluster-code-snapshot）
+> 决策 `DECISIONS.md` §2026-10-10-goalnn-cluster-code-snapshot-ui-hatch。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：P0/P1 把 `code.zip` / `ts_code.zip` 的打包时机上移到**会话启动**（重启才换）之后，
+  「本会话跑的到底是哪份代码」在控制台上**不可见**——而它正是这套冻结语义下最该被看见的一件事
+  （改了 `nn-training/*.py` 而不重启 ⇒ 云端继续跑旧代码、本地毫无异常，只能靠人记住）。
+  plan 的 P2（组件卡展示 sha）与 §8.3（逃生开关）各留了一个口子。
+- **决定（P2 · 可见性）**：组件卡在**建快照的那个进程行**上贴一枚 `code <sha12>` 徽章
+  （锚种类 → 行：`hub`→hubServer；`trainer`/`export`/`run_rl`→trainingLoop；**认不出 ⇒ 不贴**，不猜）。
+  链路 = `bundles/snapshot.ts::readClusterSnapshot()`（只读元数据）→ `stateView.codeSnapshot` →
+  `panels/ComponentCards.tsx::codeSnapshotBadge()`（纯函数，导出以便单测）。悬停给全量：zip 名 /
+  完整 sha256 / 打包时刻 / 锚 pid 与存活；**锚已亡时文字不变、悬停点名**（它仍是本会话在读的代码）。
+  `codeSnapshotDir()` 认 `BCITY_CODE_SNAPSHOT_DIR`（**与 python 侧同名同义**）⇒ 两侧可一起重定向到
+  夹具，「控制台读的那份」与「trainer 建的那份」不会各读一处。
+- **决定（逃生开关 · §8.3）**：`rl-config.json` 的 `rl.no_cluster_snapshot`（与 `slim` / `cf_*` 同规；
+  **不进课程文件**——改课程文件会动 `course_fp`，直接触发 D14 血缘熔断）或 env
+  `BCITY_NO_CODE_SNAPSHOT`。判据只住**读侧一处**（`read_cluster_snapshot()` 开头 ⇒ `None`）⇒ 所有消费点
+  （PPO/BC publish、TS 运行时、hub `/code`、控制台的包过期判据）一起回落 per-course；**启动路径不分岔**
+  （`ensure` 仍照常建一份、一次 ≈4s，但没有任何读者 ⇒ 语义就是禁用）。
+- **被否决**：三条启动路径各分一支开关（会漏改其中一条腿 ⇒ 「只回了半条链」）；把徽章做成全局条
+  （锚是**某一行进程**的事实，贴错位置等于告诉操作员错的锚）；给 `ensure_cluster_snapshot` 换
+  `CodeSnapshot | None` 返回类型（20+ 处用例为一个调试开关付改造成本，且调用点本就都不用返回值）。
+- **违反后果**：徽章贴错行 ⇒ 操作员对「哪份代码在跑」得出错误结论（比不显示更坏）；把「开关只在读侧」
+  当成漏改而在启动路径又加一支 ⇒ 开关语义分叉（本条的判据就是「一处」）。
+- **落地与门槛**：`docs/nn/remote-transport.md §79`（「控制台侧」+「逃生开关」两段）·
+  `docs/nn/console.md` 顶部指针；回归 = `dashboard/tests/web-component-snapshot-badge.test.ts`（6 例）+
+  `dashboard/tests/server-api-state-view.test.ts` 的快照投影（env 夹具 ⇒ sha12/锚/存活；坏 JSON ⇒ null）+
+  `nn-training/tests/remote/test_code_snapshot.py` 的逃生开关两例（env 与 `rl.*` 两个入口）。
+
+
+**家族 K — aistudio 传输硬化**
+
+### §2026-10-11-goalnn-aistudio-transfer-hardening（2026-10-11，用户 2026-10-09 报障 + 现场 log；plan/aistudio-transfer-hardening）
+> 决策 `DECISIONS.md` §2026-10-11-goalnn-aistudio-transfer-hardening。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：aistudio（最不稳的那块云盘，走 Cloudflare quick tunnel）单 job 准备 95.2s，三笔**纯税**：
+  预取白传 4.24MB / 0 命中（自己还排队 23.9s、让路 10 次）；让路税买不回控制面速度
+  （`p0_p95=30.3s` 而 `p0_p50=1.1s`）；冷启动每会话白付 3.23MB（缓存根在 `/tmp`）。
+- **备选与否决**：① **换链路**（named tunnel / tailscale / 国内中继）——否，**用户 2026-10-09 裁决**：
+  quick tunnel 是既定事实，保留证据不保留方案；后果明写：链路是瓶颈时只省税、治不了病。
+  ② **Range 续传 / 第二 bulk 通道 / 分块并行**——否：唯一浪费是 preempt 的 0.25MB 救不回来；
+  「同一时刻仅 1 条 bulk」是硬不变量（§21 事故），要动必须先单变量实测。③ **更高压 payload
+  （preset 3→6）**——否：已量（体积 −2.6~−3.0%、打包 +6.2s = 净亏）。④ **预取全局关掉**——否：
+  其它盘不受影响，只做**会话内自适应**（`--prefetch-depth` 回退档保留）。⑤ **A1 白传按「挤走 + 入库
+  未命中丢弃」计**——否：那样现场只有 ≈0.25MB，3MB 门槛**永不触发**；改「已下载但从未被 `take()`」。
+  ⑥ **只用命中率判 A1**——否：会话首个 job 命中率**按构造 = 0** ⇒ 会把健康会话误杀；加最小样本。
+- **决定**：只做传输层省税（A1 预取自停 / A2 让路自停 / A3 持久缓存根+容量上限 / B1 批量 blob /
+  B2 控制面连接池 / B3 6s 预算 + 换连接重抽 / E1 准备段计时拆分）；**每条都必须可观测地关
+  （一行原因）+ 有回退档**；`p0_p95` 的门槛从「降到 6s」改为「让路关掉后不劣化」。
+- **违反后果**：关掉自适应而**静默**（不写原因行）⇒ 后人读成 bug；A3 给持久根却不做 prune ⇒ 无界增长；
+  在 `job_lifecycle` 层再套一层重抽 ⇒ 2×2×6s 把预算账算穿；把 `payload/P2` 读成「关键下载」⇒ 证据方向反。
+- **落地与门槛**：全文 → `docs/nn/remote-transport.md` **§80**（含标签口径 / 五条判据 / 回退档 / 未做清单）；
+  回归 = `nn-training/tests/remote/` 的 7 个文件 107 例（`test_prefetch_adaptive` / `test_yield_adaptive` /
+  `test_control_pool` / `test_blob_batch` / `test_cache_persist` / `test_train_core_split` / `test_notebook_runtime`）；
+  **真机五条读数未取 ⟹ 本条的收益结论尚未成立**（未决行见 `docs/nn.progress.md` §3.1）。
+
+
+---
+
+> **第三轮归档（2026-10-11）**：`DECISIONS.md` 第四次瘦身把**仍带成篇正文、且正文 >6 非空行**的 **1** 条决策全文按主题落到本节（上一轮：三次瘦身切 >12 的 192 条 = 本节「第二轮归档」）。家族谱系**续上一张表**：沿用旧字母 = 同一族（链上含第一~三轮成员，全文在本节内），新族从本档下一个字母续编；只归类连线，结论引原文。`DECISIONS.md` 索引行末尾指针 = `docs/nn/remote-transport.md` §32「决策正文归档」· 锚 `### §<id>`。
+
+**家族谱系（续上一张表，先后为时间序）**
+
+- **家族 D｜hub 回灌 / 模式切换 / 离线接管**（8 条，2026-09-19～10-07）：`§2026-09-19-goalnn-offline-training-mode` → `§2026-09-26-hub-mode-restore-enabled-only` → `§2026-10-03-goalnn-auto-offline-handoff` → `§2026-10-03-goalnn-auto-offline-handoff-t6` → `§2026-10-03-goalnn-switch-mode-drops-jobs` → `§2026-10-03-goalnn-offline-seize` → `§2026-10-05-goalnn-offline-online-status-switch` → `§2026-10-07-offline-busy-gate-anchor`
+  - 末条决定（原文节录）：三处，全是换判据、不加机制。① `_busy_locked` 的交接窗口锚从 `claimed_at` 换成**本次……
+
+**家族 D — hub 回灌 / 模式切换 / 离线接管（续）**
+
+### §2026-09-19-goalnn-offline-training-mode（2026-09-19，离线训练模式：启动选在线/离线 + 云端整段执行 + 补传归位）
+> 决策 `DECISIONS.md` §2026-09-19-goalnn-offline-training-mode。归档 2026-10-11（第三轮归档）。
+
+- **背景**（用户口径 2026-09-19）：「启动课程训练时，需指定 在线/离线 模式，缺省在线。在线模式下，使用 rollout 集群，每个 it 都需向云端 worker 传语料。离线模式下，支持下载任务包（课程配置、代码），上传到云端 worker 后自动跑完课程；也支持带特别标识的云端 worker 在线领取。写一个 `battle.offline.ipynb` 用于在云端执行离线训练任务；ipynb 里设置一个选项，是否实时把训练结果回传到 hub，不实时回传则任务完成后统一打包让用户手动下载后导入；ipynb 执行时先尝试连接 hub，能连通就从 hub 获取离线任务包，不能连通则等待用户手动上传。」
+- **决定**："在线/离线"是**启动时的模式选项**（缺省在线），落成**课程级** rl-config 键 + hub 该课的模式：① 模式 → 键的换算只有**一处**（`dashboard/src/stack/specs.ts::trainModeKnobs`）：离线 ⇒ `courses.<课>.{rollout_src:'run', run_iters:-1}`（声明 + 段长），在线 ⇒ 撤掉离线标记（段长必删，课程级 `run` 也删，但**不**顺手清别的覆盖）；② 离线启动同时把该课 hub 模式置 offline（整段 job 只交给**带标** worker）；③ 「能领离线课」= worker **自报能力**（`X-Battle-Offline: 1`，`--offline`），不是课程绑定——带标 worker 仍领在线课；④ 补传的**归位键** = hub 在 `/jobs/next` 里下发的课程键（领活路径）或 `--hub-course`（全离线包路径，由 notebook 的 `CFG.course` 给），空 = 单课程 hub（此时不带这个键）。
+- **为什么模式不写全局 `rl.rollout_src`**：那是所有课共用的默认面——用户在弹窗里只选了**这一门课**，落进全局就等于把全部课程一起拖进离线。故离线只写课程级键；`run` 也**绝不**进全局（`preset.ts` 用 `trainModeKnobs` 算出的全局面：算出 `run` ⇒ 置空不写）。
+- **为什么在线要"撤标记"而不是只写新值**：`rollout_src:'run'` 与 `run_iters` 是**一对**；只留 `run` 不给段长在训练侧是配置错误（响亮拒跑），只删 `run` 留段长则是半状态。删段长 + 删 `run`（保留别的课程级覆盖，如显式写过的 `node`）才是"切回在线"。
+- **为什么能力头不放在 worker 白名单/课程绑定上**：用户口径是「带**特别标识**的云端 worker 在线领取」，而 2026-09-19 R4 刚把「课程与 worker 节点正交」定案——按课程绑定会立刻回退那条。能力声明（"我能自己跑完整段"）也正好是判错方向明确的那种：低估只少一个 worker 领离线课（看得见：队列不降），高估会让只会逐轮的 worker 领走整段 job 并卡在那里（看不见）。
+- **补传必须带课程键（本轮修的存量 bug）**：hub 的 `/offline/artifact` 要在多门课里定位这条腿（`locate_offline_course`），而补传体里原来**没有**可用的课程身份——`manifest.course_name` 是课程文件的 `name` 字段（`bc-c4-v3` 的 name 是 `bc-c4-v3-distill`），与 hub 侧的课程键（`<traj>/<课>/` 目录名）不是一回事。后果：**多课程 hub 下每一条补传都被 400「无法归属课程」拒掉**，节点侧补传**整体停用**（体是自己造的，重试不会变对）——训练照常，但控制台上段内进度永远是空的。修法是**生产者带上归位键**（不是 hub 猜）：领活路径由 hub 在 `/jobs/next` 下发（它本来就发了 `course`，只是没人透传下去），全离线包路径由 `--hub-course` 给。
+- **否决项**：① 让 hub 在"体里没课程"时猜一门（单课程 fallback）——否，补传落到错课程上那条曲线**看起来完全正常**，只有事后对账才发现，比拒收危险得多；② 用 `manifest.course_name` 当归位键——否，与 hub 的课程键不是一回事（见上）；③ 让离线课也参与竞速广播——否，整段 job 广播 = 让每台带标 worker 各跑一遍完整课程；④ 给控制台另开一个「离线模式」开关与 R3-2 的在线/离线开关并存——否，同一件事两个旋钮必然漂开，R3-2 那个开关保留为运行期微调，启动模式是它的**初始值**。
+- **违反后果**：把离线档的 `run` 写进全局 `rl.rollout_src` ⇒ 全部课程静默变离线；补传不带课程键 ⇒ 多课程 hub 下控制台永远看不到段内进度（且只有节点日志里一行 400）；按课程绑定离线 worker ⇒ 回退 R4 的"课程与节点正交"。
+- **落地**：python —— `remote/protocol.py`（`OFFLINE_TASK_PACK_PATH` / `OFFLINE_CAP_HEADER` / `OFFLINE_CAP_VALUE` / `has_offline_capability`）· `remote/hub_server.py`（`claim_next(offline_ok=)` + 离线课永不竞速、`/admin/offline`、`/offline/task-pack`、`offline_progress()`、交领日志）· `remote/worker.py`（`poll_job(offline_ok=)` / `worker_loop` / `--offline` / 把 `/jobs/next` 的 `course` 透进 `run_plan_job`）· `remote/offline_deliver.py`（`course` 归位键，逐轮体与段末摘要都带）· `remote/run_loop.py`（`hub_course` 三跳透传 + `--hub-course`）· `remote/offline_boot.py` + `ipynb/battle.offline.ipynb`（取包三分支 / 实时回传开关 / 交付物打包）· `rl/{cli,loop_steps,loop_round,loop_round_steps}.py`（`--rollout-src run` + 段长解析）。控制台 —— 启动弹窗「训练模式 在线/离线」+ 课程级键与 hub 模式一起下发；总览行显示离线段内进度（`/admin/offline`，超 1h 无新产物变醒目）。
+- **回归**：nn 侧 `tests/{test_offline_task_pack,test_offline_boot,test_offline_notebook,test_worker_offline_cap,test_offline_deliver,test_multi_course_hub,test_run_segment,test_loop_round}.py` + e2e `e2e/test_offline_training_e2e.py`（真 hub 进程：整段 job 发布 → 普通 worker 领不到 / 带标领得到 → 真 `OfflineDeliverer` 逐轮补传 → `/admin/offline` 读面 → 取包端点 200/404/401/越界）；控制台 `dashboard/tests/train-mode-offline.test.ts`（模式→键换算表 + 落盘 + 入口接线 + 读面解析）+ 总览面板离线段断言。
+
 ## 附：本文件旧编号对照（拆分前 `docs/nn.progress.md` 的 § 号）
 
 旧 §18→§1 · 旧 §19→§2 · 旧 §20→§3 · 旧 §24→§4 · 旧 §39→§5 · 旧 §56→§6 · 旧 §58→§7 · 旧 §59→§8 · 旧 §60→§9 · 旧 §61→§10 · 旧 §62→§11 · 旧 §63→§12 · 旧 §70→§13 · 旧 §69→§14 · 旧 §71→§15 · 旧 §72→§16 · 旧 §74→§17 · 旧 §75→§18 · 旧 §92→§19 · 旧 §94→§20 · 旧 §104→§21 · 旧 §105→§22 · 旧 §109→§23 · 旧 §119→§24 · 旧 §129→§25 · 旧 §130→§26 · 旧 §137→§27 · 旧 §127→§28 · 旧 §128→§29 · 旧 §129→§30 · 旧 §130→§31

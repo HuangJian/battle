@@ -2580,6 +2580,552 @@ KERNEL32/api-ms-win/ucrtbase/VCRUNTIME；有 llvm 时再断言 `llvm-nm -u` 空 
 
 <!-- OLD-NUMBER-MAP: 自动生成，勿手改 -->
 
+
+---
+
+> **第二轮归档（2026-10-11）**：`DECISIONS.md` 第三次瘦身把 **2026-09-24 起、正文 >12 非空行**的 **15** 条决策全文按主题落到本节（第一轮 2026-09-23 见上文）。家族分组只归类、只连线，结论与理由一律引原文；`DECISIONS.md` 索引行末尾的指针 = `docs/nn/runtime-opt.md` §13「决策正文归档」· 锚 `### §<id>`。
+
+**家族谱系（同一问题的先后进展按主题归并，先后为时间序）**
+
+- **A｜长驻池：同质化与真就绪**（8 条，2026-09-25～10-07）：`§2026-09-25-local-rollout-serve-pool` → `§2026-09-28-goalnn-persist-prewarm-breaker` → `§2026-09-28-goalnn-persist-homogeneous-serve` → `§2026-09-28-goalnn-local-serve-pool-homogeneous` → `§2026-10-04-goalnn-sampler-workers-physical-cores` → `§2026-10-04-goalnn-sampler-idle-reap-and-task-timeout-fix` → `§2026-10-04-goalnn-cpu-slots-small-full` → `§2026-10-07-goalnn-serve-pool-readiness`
+  - 末条决定（原文节录）：判据唯一化 = `w.ready.is_set() and not w.dead`（`_acquire` **只发放**真就绪的）；……
+- **B｜引擎池 / IO 上界 / 分关采样**（6 条，2026-10-02～10-08）：`§2026-10-02-goalnn-engine-pool-midround-pin` → `§2026-10-02-goalnn-eval-final-round-and-dropped` → `§2026-10-06-goalnn-rollout-io-ceiling` → `§2026-10-06-goalnn-round-end-scan-ceiling` → `§2026-10-07-rollout-stage-balance` → `§2026-10-08-goalnn-rollout-local-scratch`
+  - 末条决定（原文节录）：新 `common/scratch.py`（L0 叶子层）提供落点链（`NN_ROLLOUT_SCRATCH` > `/dev/shm` > `/tmp` >……
+- **C｜节点单实例互斥**（1 条，2026-09-29）：`§2026-09-29-goalnn-single-instance-guard`
+  - 末条决定（原文节录）：「一个 node = 一个监听实例」是 codeHash 门的前提，必须由 agent 自己保证。起听**之前**做一次……
+
+**家族 A — 长驻池：同质化与真就绪**
+
+### §2026-09-25-local-rollout-serve-pool（2026-09-25，本机腿入池：trainer 自己的两条本机腿接 `--serve` 长驻池）
+> 决策 `DECISIONS.md` §2026-09-25-local-rollout-serve-pool。归档 2026-10-11（第二轮瘦身）。
+
+**来历**：用户问「local 节点的 bun 进程是 persist 的吗？如果不是，要改！」。追证结论：**不是**——
+`rl/queue_local.py` 的两条本机腿（无可用节点时的整轮 `run_rollout` / dispatcher 本机槽的
+`run_local_rollout`）都是**逐局 `Popen`**，而长驻池（`docs/nn/runtime-opt.md` §22）当时只接在
+节点侧 rollout 与云机离线 eval 上。本机腿的局往往更短（x20-state-init 一局 ≈250 样本 vs 标准局
+≈1290），固定开销占比反而更高；而 state_init 轮的唯一可跑腿正是 `run_rollout`。
+
+**决定**：① 要不要建池由**真 argv**（`build_rollout_cmd` 为第一个 pair 拼出的那份）决定，
+`make_local_pool` 只转发给 `serve_pool.make_pool` 的白名单——脚本不在名单里（goal / intent 两种
+RL 模式）⇒ None，本轮与本改动前**逐字节相同**（不再抄一份「哪个模式用哪个导出器」的判断）；
+② 池宽度 = 本机槽位数，生命周期 = 一轮采集 / 一次 `dispatcher.run()`；
+③ 单局硬顶 `LOCAL_GAME_TIMEOUT_SEC=1800`——本机口径一直是「不限」（本机卡住的是自己的终端），
+这个数只给池一个「死 worker 最终能被收掉」的兜底，**刻意不加 5s 硬顶**；
+④ 回退与熔断完整复用节点侧那一份（池拿不准就地回退逐局 `Popen`，只慢不错）；
+⑤ `dispatcher.run()` 拆成 `run()`（只管 try/finally 收池 + 打 `summary()`）+ `_run()`：`_run` 有多条
+提前 return，池必须在**每一条**出口收掉（否则每轮留下 `local_slots` 个常驻 bun）；
+⑥ e2e 层用 **autouse 夹具**关池（该层 hermetic，不许起真 bun）。
+
+**被否决**：自建一份常驻进程池（= 第二份协议，必漂）· 把 `local_slots=0` 当「纯本机」开关用
+（并发配额 ≠ 派发模式，会让配额调参改变采集分布）· 给本机腿也上节点侧那个 5s 硬顶（本机 8 并发单局
+p99 已 16.8s，超订更慢 ⇒ 成批变成「kill worker + 回退一次性」，正是 `docs/nn/runtime-opt.md`
+§23 的回退放大回路）·
+在 `e2e/conftest.py` **模块级** `os.environ` 关池（门禁是 `pytest tests/ e2e/` 一次进程——
+实测把 `tests/` 三个真 bun 池用例一并关红）。
+
+**违反后果**：池里留跨局状态（不重建 World）⇒ 账本写「中段起跑」而样本来自别的世界 ·
+池不收 ⇒ 每轮留一批常驻 bun 等 stdin · 给本机腿加 5s 硬顶 ⇒ 回退放大回路（runtime-opt §23）·
+e2e 真起 bun ⇒ hermetic 层失约且门禁变慢 · 抄一份「哪个模式用哪个导出器」⇒ 新导出器入池时两边漂。
+
+—— 全文（改了什么 / 等价性证据 / 真机 A/B 待办）→ `docs/nn/runtime-opt.md` §26 · 锚 `## §26` ·
+同源条目 `§2026-09-25-goalnn-cloud-cpu-ledger`（池的熔断/背压/核数夹取定义在本条）·
+`§2026-09-25-state-init-snapshot`（起始分布是池化最容易被突破的一处：restore 换世界）
+
+### §2026-09-28-goalnn-persist-prewarm-breaker（2026-09-28，a95 贡献量 1/10 归因：池启动预热 + 熔断收窄为「只停补位」）
+> 决策 `DECISIONS.md` §2026-09-28-goalnn-persist-prewarm-breaker。归档 2026-10-11（第二轮瘦身）。
+
+**现场**：a95（Android/Termux/proot，SM7250，rl-config concurrency 6）rollout 贡献 ≤ mac 的 1/10。
+真机取证（adb 上机）：轮参与率 **567/5119**（`ping failed — excluded` 2029 次 + 半路回线 174 次）、
+同轮份额 **3.9% vs mac 35.1%**、单局服务时长 med **9.1s vs mac 1.1s**；而**引擎与 CPU 都不是原因**
+（`engine=bun` + `BENCH-ARM native` 6.47ms、8 核在线无节流、无 swap 参与、单局独立跑 1.6–1.9s、user≈real）。
+
+**根因**：**每批首批必付 N 次冷启**。6 路**真并发**（独立 curl 进程）经 agent 实测：**冷池 31.6s/局**
+（6 个 spawn 互踩、拉开 25s）vs **热池 6 局共 9–11s ≈ 1.6s/局**。冷启成本 = bun + 整图 TS transpile
++ JIT + native/权重装载，而节点每轮（尤其掉线回线后）都是冷池。
+
+**三处落地**（`tools/agent/persist-pool.ts` 纯策略 + sampler-agent 接线）：
+① **启动预热**：按盘上最近用过的权重桶 kind 预 spawn `workers` 个池位，主腿吃满 `workers-(其它腿数)`、
+其它腿各 1（池上限是 `workers` 且一波任务几乎总是同一 kind，摊平会让主腿撞上限退回一次性）；`--no-prewarm` 关。
+② **熔断收窄为「只停补位」**：`runViaPersistWorker` 改三态，**只有「worker 挂但一次性跑通」才记连败**；
+`busy`（池满 / 停补位冷却）是背压不记；熔断不再 `persistEnabled=false`（暖 worker 继续服务），
+冷却 `PERSIST_REARM_MS=60s` 后放一次探针（半开）。**与云端池同规**
+（§2026-09-25-goalnn-cloud-cpu-ledger、§2026-09-25-goalnn-rollout-reap-wedge ④），
+后者已把「熔断=停用整池」明确列为被否决项。
+
+**被否决**：靠调低 concurrency 治（实测 6 路稳态够快，降并发只会更闲）· 靠 `--no-persist` 治
+（每局一次性在慢机上更贵：6 局 29–34s/局）· 预热平均摊给各 kind（见①）· 半开探针失败再升格惩罚
+（只重计时）· 把池满当失败（旧实现这条 + 任务级错误一起把池 3 连打死）。
+
+③ **预热必须在 bind 之前**（同日第三轮上机追加，同一条目）：第一版是「先 bind 再后台铺 worker」，
+上机复验暴露它把「首批冷」换成了「上线即失联」：`listening on` → `persist prewarm` 隔 **51s**，其间
+`/v1/ping` 连续 **8.00s 超时**（`--no-prewarm` 对照组 ping 全程 2–8ms）。机理直测：a95/proot 上
+**每一次 fork 都把父进程事件循环占死 ~7s**，与子进程无关——`spawn('/bin/true')` 也要 **7.1s**
+（`Bun.spawn` 7.06s、绝对路径 7.0s），而 `bun -e '1'` 自身启动只要 34ms；7 个槽位连发 = 全程失联 ~50s。
+协调器 `node_ping(timeout=3s)` ⇒ 这 50s 里的探针必被判 `ping failed — excluded`，**即账本 2029 次的
+同一机制**。故改为「bind 之前 await、逐个 spawn、等 `__SERVE_READY__` 再铺下一个」，带单槽 60s /
+整体 180s 预算。修后同套探针：预热日志在前、4s 后 bind，上线即 `persistPoolSize=7 persistReady=7`，
+ping 2–25ms，首批 6 路 rollout **WALL 8.3s ≈ 1.39s/局**。代价：a95 上线时间 ~26s → ~95s（但这段时间
+旧形态本来也要付：上线后失联 50s + 首批全冷）。
+
+**违反后果**：熔断写成停用整池 ⇒ 在最挤的时刻把每一局换成冷启动（a95 实测慢 20×）· 不预热 ⇒
+首批永远冷（轮内份额 1/9）· 把池满/任务级错误记成失败 ⇒ 一条缺参数的请求就能永久关掉节点最快路径 ·
+**先 bind 再预热 ⇒ 对着协调器的 3s 探针失踪 ~50s（比不预热还糟）**。
+
+④ **任务级错误不再动 worker**（同日第四版）：`__SERVE_ERR__` 只说明**这一局**错了——serve-loop 捕的是
+`main` 抛的异常、捕完继续收下一行，worker 本身是好的；旧写法就地 recycle ⇒ 连发 5 条缺 `--lives-override`
+的 rollout 把池 7 打亏到 2、每条还白付一次冷启。改为：worker 报这一局错 + 一次性**也只 rc≠0** ⇒ 任务/数据
+问题，池无责、**worker 留用**（只记一笔 `taskErr`，状态不变）；worker 报错而一次性同 argv **却跑通** ⇒
+两路结论不一致（serve 与一次性在 argv / 环境上起了分歧）= 池这一路可疑 ⇒ 回收那个 worker + 记连败；
+worker 进程死 / 无产物 / 超时 ⇒ 照旧回收。上机复验：`C after` = `persistPoolSize=7 persistReady=7`
+（改前 2），日志零条 `persist worker closed`，坏任务 4.8–5.8s/条（改前 7.0–7.9s）。
+
+⑤ **权重 POST 后的补位预热**（同日第五版）：启动预热的主腿是「盘上 mtime 最新的 kind」——那只是「上一代
+跑过什么」；真正知道这一波用什么的是协调器的权重 POST（`x-kind`）。改为 `POST /v1/weights` 里
+`queuePersistTopUp(kind)`，把点名的 kind 当主腿重算同一个 `prewarmEntryPlan`（新增第三参 `primaryKind`，
+不参与新鲜度窗过滤）并**把池换到位**：只回收「超出计划且空闲」的 worker（`retireSurplusPlan`，busy 的
+一个都不动 = 不丢局），再逐个 spawn。串行队列 + 先让出一拍——POST 的响应不等 spawn（同拍 spawn 会把本机
+POST 拖到 7.7s，实测 115ms）。同时治了两个病：① 新节点（盘上无权重，启动计划为空）首批永远冷；
+② 老节点猜错腿时池满 ⇒ 这一波每一局都退回一次性 spawn。a95 实测（3 路 eval 真并发）：补位前
+`rollout=6 eval=1` → **3.1s/局**；POST `x-kind=eval` 后 `rollout=1 eval=6` → **1.55s/局**，5 条回收印记
+全是 `was busy=false`。
+
+**待办**：换腿会退役空闲 worker（a95 一次 ~39s），**rollout / eval 轮次交替频繁**时理论上会来回切
+（本轮未量、未做节流）。
+另记一条老行为（本轮只记录不改）：sync 路径上失败任务仍回 HTTP 200（错误走 `controller.error`，
+客户端只能看 body 截断）——探针别拿 `%{http_code}` 当健康信号。
+—— 全文（真机读数表 / 探针清单）→ `docs/nn/runtime-opt.md` §27
+
+### §2026-09-28-goalnn-persist-homogeneous-serve（2026-09-28，长驻池改**同质进程**：单入口 + 每任务 mode token，删掉整套「腿」策略）
+> 决策 `DECISIONS.md` §2026-09-28-goalnn-persist-homogeneous-serve。归档 2026-10-11（第二轮瘦身）。
+
+**问题**（用户提出）：池按导出器分「腿」（rollout 一类、eval 一类……），于是预热得**猜腿**
+（按盘上权重 mtime）、猜错腿的那一波每局都退回一次性 spawn（a95 实测 **3.1s/局** vs 对腿 **1.39–1.55s/局**），
+换腿还要退役空闲 worker 再补满（一次 **~39s**）。而用户的问题切中要害：**eval / rollout 都是无状态外壳，
+为什么不能复用同一个 bun 进程？** 查证 ⇒ 拦路的三件事**都与状态无关**，「分家」是历史包袱：
+
+* 「腿」在物理上就是「哪个 entry 文件」——worker spawn 时烧死 `bun <exporter>.ts --serve`，池的 key =
+  `argv[0]`，任务只送 `args.slice(1)`（**不含 entry**）⇒ 一个 worker 只能跑那一个导出器；
+* 两个导出器都只是 `runServe(main)` 的**无状态外壳**（每局新建 World；`grep '^let |new Map|new Set'`
+  在两个文件里**一个都没有**；eval 的 import 表已含 `GodAIInput`/`IntentExecutor`/`GoalExecutor`/`danger-metrics`）；
+* 原始分家理由（「别动 `export-rl-rollout.ts`，它在 codeHash 红线里」）**已过期**：`codehash-files.txt`
+  现在把四个导出器 + `serve-loop.ts` 全收进去了（eval 自己也注明「2026-08-31 起本文件入集」）。
+
+**决策**：池改成**同质进程**——`PERSIST_SERVE_ENTRY = 'tools/sim/serve-any.ts'`，一个 worker 按每行第一个
+元素（`rollout` / `eval` / `goal` / `intent`，即 mode token）在进程内分派到对应导出器的 `main`
+（`serve-loop.ts` 一行未改；未知/缺失 mode **抛**，不静默跑默认网格——分派错了不再有进程边界挡着）。
+agent 侧「用哪个导出器」从 **spawn 时的 argv** 变成 **每行的 token**（`persistModeFor(entryTs)`，
+表外条目如 BC ⇒ `null` ⇒ 一次性 spawn），挑 worker 只按「**空闲**」。**删掉**：`prewarmEntryPlan`
+（mtime 主腿）、`retireSurplusPlan`（腾位）、`queuePersistTopUp` + `POST /v1/weights` 钩子（补位换腿）、
+池 worker 的 `key` 字段——预热退化成「铺 `workers` 个 `serve-any`」。**机制被删掉，不是又加一层节流。**
+
+**证据**：
+* 本地 `tests/serve-any.test.ts`：① `PERSIST_MODE_BY_ENTRY` 值域 == `SERVE_MODES` 键集（两侧任何一边加
+  导出器都红）；② **同一进程**交替 `eval` → `goal` → 坏 mode → `eval`，每局容器与一次性调用**逐字节一致**
+  （除墙钟 `elapsedSec`），坏 mode 报 `__SERVE_ERR__` 后 worker 不倒；③ `persistModeFor` 对 BC 给 `null`。
+  加源级钉子（池只 spawn 同质入口 ×2 处、送 `[mode, ...args.slice(1)]`、旧腿部策略不许回来）。
+* a95 真机（同机 `workers 6`）：`persist prewarm: 6/6 worker(s) ready — tools/sim/serve-any.ts (47461ms)`
+  → 4s 后 `listening`；进程表 `serve-any --serve`=**6**、任一导出器入口=**0**；首批 6 路 rollout WALL **8.57s**
+  ≈ **1.43s/局**；**紧接着** 3 路 eval（**无任何 POST**）WALL **5.06s** ≈ **1.69s/局**；任务级错误 ×3 后池
+  `6/6` 不动、`persistFailStreak=0`、`persistStopped=false`；全程 `spawned`（预热之外）/`top-up`/停补位 = 0 条，
+  `agent_errors=3`（=3 条故意坏任务，其余 11 局全成）。本地门禁 **2244 pass / 3 skip / 0 fail（219 files）**。
+
+**代价（已记账）**：rollout 执行路径多一个 entry ⇒ `tools/sim/serve-any.ts` 已入 `codehash-files.txt`
+（否则改分派语义不触发节点升级 ⇒ 节点间静默分歧）并进 `NODE_BUNDLE_ENTRIES`（否则 node 引擎机器上
+「一次性走 node 产物、池 worker 走 bun 源码」两条引擎混用）。丢掉「worker 物理隔离」这条边界。
+
+**被否决**：① **保持异构、把上限解耦**（池容量抬到 `2×workers`，两腿各留满宽）——改动更小，但「腿错配」
+与「上线后换腿」这类问题仍在，且常驻进程翻倍（a95 8 worker ≈ 304MB ⇒ 12–14 个 ≈ 500MB）；同质化是**删代码**
+而不是加容量。② 给换腿加节流（治标：仍在猜腿）。③ 保留 `POST /v1/weights` 补位——同质后它无事可做。
+
+**违反后果**：再按 kind/导出器给池分种类 ⇒ 预热又得猜（猜错整批退回一次性 + 换腿退役重补），
+且这类错配**在账本上表现为节点变慢**（不是报错），最难发现 · 把 mode token 分派成「静默兜底默认网格」
+⇒ 整批数据静默错（故未知 mode 一律抛）· 同质入口不进 codehash 清单 ⇒ 改分派语义不触发升级、
+节点间行为漂移（本仓最敏感的面：准入靠 codehash）。
+
+**顺带（同一条目，上机过程抓到的真缺口）**：`prewarmPersistPool` 新增 `PREWARM_DRY_LIMIT=2` ——
+连着两个 worker 到不了 READY 就**中止预热**并走一次性兜底。上机实测（推错版本的 exporter 引了设备上不存在的
+模块）：每个 worker 活 ~7.5s 就 `code=1`，重试把 **180s** 预算耗光，而这段时间**端口还没开**（既没上线、
+也没预热）；加限制后 **14–15s** 就放行。
+—— 全文（读数表 / 上机两个坑 / 判例清单）→ `docs/nn/runtime-opt.md` §27.10
+
+### §2026-09-28-goalnn-local-serve-pool-homogeneous（2026-09-28，Python 侧长驻池也同质：单入口 + 每任务 mode token，门槛与池的形状解耦）
+> 决策 `DECISIONS.md` §2026-09-28-goalnn-local-serve-pool-homogeneous。归档 2026-10-11（第二轮瘦身）。
+
+**问题**（用户点名）：TS 侧 agent 池已改成同质入口（`tools/sim/serve-any.ts` + 每行 mode token，
+§2026-09-28-goalnn-persist-homogeneous-serve），而 Python 侧那份池（`remote/serve_pool.py`，
+服务三条腿：节点 `iter_rollout`、本机 `rl/queue_local`、云机离线 eval）**还停留在旧形状**：
+池的身份就是导出器——建池时烧死一个脚本（`bun <exporter>.ts --serve`），每条任务还要
+`owns(argv[0])` 对一次脚本；于是「腿」这个概念在 Python 侧继续活着，「哪条腿能进池」与
+「池是哪种 worker」被绑成同一件事。
+
+**决策**：
+① **入口固定** —— 池一律起 `tools/sim/serve-any.ts --serve`（`SERVE_ANY_SCRIPT`，与 TS 侧
+`PERSIST_SERVE_ENTRY` 同值）；送进 stdin 的行 = `[mode token, ...该导出器的 argv]`，token 由
+`common/manifest.serve_mode_for(argv[0])` 推出（`SERVE_MODE_BY_SCRIPT` = TS
+`PERSIST_MODE_BY_ENTRY` 的 Python 镜像，值域 = `serve-any.ts::SERVE_MODES` 的键集）。
+`owns()` 退化成 `mode_for()`：**池认不认得这个导出器**（仍按每条任务再过一遍门，池不认识 ⇒
+`not-ours` ⇒ 调用方一次性路径）。
+② **门槛与形状解耦** —— `make_pool(bun, ts_dir, workers, log, *, for_script=…)`：`for_script`
+是「**本轮要池化的是哪条腿**」，不是「池是哪种 worker」。三个建池点（`rl/queue_local.make_local_pool`、
+`remote/iter_rollout._make_pool`、`remote/offline_eval.run_cloud_eval`）跟着改；iter 保留
+「整轮只能一个脚本」——准入是**按轮**判的，不是池的能力限制。
+③ **准入门槛保持现状**（用户明确选择）：`SERVE_CAPABLE_SCRIPTS` 仍是
+`{export-rl-rollout.ts, export-eval-game.ts}` ⇒ **本机 goal/intent 轮继续逐局 spawn**。要放开
+只需往那个 frozenset 加一行（`serve_mode_for` 已经认这两个脚本），池侧零改动。
+
+**证据**：送 stdin 的行逐字核对（新桩 `_STUB_ECHO` 把收到的行落盘 ⇒
+`["rollout", ...argv[1:]]`，脚本路径不得进去）· 池入口恒为 `SERVE_ANY_SCRIPT`（两条腿同一形状）·
+门槛仍按真名单（goal/intent 不建池、`NN_SERVE_POOL=0` 不建池）· 脚本→token 表四个真导出器 +
+路径容错 · **跨语言同源**（TS 侧 `tests/serve-any.test.ts` 读 `nn-training/common/manifest.py`
+逐条对拍：常量定义 + token 值）。桩的接法随之变：新增 `_install_entry()` 把同一个 python 桩写到
+生产入口路径 `<ts_root>/tools/sim/serve-any.ts`，端到端用例（`run_iter_rollout` 那族）因此
+不需要任何注入；直接建 `ServePool` 的用例用 `entry=` 注入 + autouse 夹具把 `stub_*` 放行两道门
+（真脚本名仍走真表）。
+读数：`pytest tests/ e2e/` **3328 passed / 1 skipped**，`ruff check .` 全绿。
+
+**被否决**：① 顺手把本机 eval 腿（`EvalDispatcher` / 批评估的本机槽）也建池（今天只有云机离线
+eval 有池）—— 范围更大、与本次「机制同质化」不同题，留作独立决策。② 顺手放开 goal/intent
+（同质化后它们在结构上已经可以进池）—— 用户点名保持现状，避免把「机制改造」与「把两种模式
+推上生产池」混成一次改动。③ 保留「池按脚本建」而只把 `serve-any` 当一个特殊脚本 —— 那等于
+两套形状并存，迟早要再同质化一次。
+
+**违反后果**：再在 Python 侧按导出器建池 ⇒ 「腿」复活（谁进池、池是什么，重新绑成一件事）·
+`serve_mode_for` 与 `PERSIST_MODE_BY_ENTRY` 漂移 ⇒ worker 当场 `unknown mode`（响亮，但等到
+上机才知道；故有跨语言对拍钉子）· 把 `for_script` 又当成池的身份 ⇒ 同一轮混 mode 时又要建多个池。
+
+—— 全文（判例表 / 读数 / 桩接法）→ `docs/nn/runtime-opt.md` §28
+
+### §2026-10-04-goalnn-sampler-workers-physical-cores（2026-10-04，sampler `--workers` 缺省改**物理核**：池常驻内存封顶减半）
+> 决策 `DECISIONS.md` §2026-10-04-goalnn-sampler-workers-physical-cores。归档 2026-10-11（第二轮瘦身）。
+
+- **背景（内存盘点，本机 live）**：sampler-agent 主进程 ~54MB（26.5h / 13.6 万局稳定，内部状态全部有界）；
+  长驻池 worker **74–100MB/个**（bun + 全图 + native 卷积库/权重装载；wasm 仅 attestation 参考/回退）。
+  池上限 = `--workers`，旧缺省 =
+  `effectiveCores()` **逻辑核**（本机 8c/16t ⇒ 16，且只涨不回缩）⇒ 最坏常驻 ~1.2GB。
+  用户 2026-10-04 指令：「`--workers` 缺省改为物理核」。
+- **决定**：`physicalCores()`（`tools/lib/cores.ts`：min(真物理核, cgroup 配额, 亲和掩码)，Windows 走
+  pwsh CIM 记忆化——与 §2026-10-03 门禁/本地池口径同源）为 `sampler-agent` 的**唯一核数口径**：
+  `const CPUS = physicalCores()`，`workers` 缺省 = `CPUS`；`/v1/ping`/`/v1/status` 上报的 `cpus` 同值
+  （**同日追加指令**：上报也改物理核——无 `concurrency` 配置的节点按 cpus 派工回落，与并发门同口径）。
+  **并发门与池上限只有 `workers` 一个**，需要更高/更低并发时显式 `--workers N`。
+- **被否决/同日修订**：① 改 `effectiveCores()` 本身（会连训练运行时的 rollout/eval 槽位一起改——
+  另一消费域，沿用 §2026-10-03 否决 ②，仍否）；② **原「上报 cpus 保持逻辑核」被同日用户指令推翻**
+  ——改为 `cpus` 也按物理核（否则无 `concurrency` 配置的节点派工 2× 超订 + 503 重试）。
+- **违反后果**：按逻辑核预铺/放行池 ⇒ 常驻内存翻倍（HT 不承担额外的重型进程）；把上报 cpus 与并发门
+  混成一个口径 ⇒ 节点派工与实际接单能力出现静默差（503 busy 重试）。
+- **落点**：`tools/agent/sampler-agent.ts`（import / 缺省 / help 与注释）· 源级钉子
+  `tests/agent/persist-pool.test.ts` · 手册 `tools/agent/agent-setup.md` §2；盘点与口径
+  `docs/nn/runtime-opt.md` §31（§23.5/§23.6 同日注记）。
+- **指针**：全文 `docs/nn/runtime-opt.md` §31；同批机制的回收/定时器条目见下。
+
+### §2026-10-04-goalnn-sampler-idle-reap-and-task-timeout-fix（2026-10-04，sampler 池：空闲回收 + 600s 超时定时器误杀修复）
+> 决策 `DECISIONS.md` §2026-10-04-goalnn-sampler-idle-reap-and-task-timeout-fix。归档 2026-10-11（第二轮瘦身）。
+
+- **背景（同日内存盘点续）**：池「只涨不回缩」——按需长到 `workers` 上限后即使负载回落也不释放；
+  且 live 日志每 ~10 分钟一批 `persist worker closed ... SIGTERM (was busy=true)` + 秒速重生。代码追证：
+  `runViaPersistWorker` 的 600s 定时器任务完成后**不 clearTimeout**，旧定时器撞上新任务时按「此刻有没有
+  `pending`」判超时 ⇒ 误杀健康 worker（在飞局弃去走冷启动兜底、内存 churn、误触「连败 3 次 → 停补位」）。
+  用户同日指令：「做空闲回收（floor + 长阈值）」+「修 clearTimeout」。
+- **决定**：
+  ① **空闲回收**：`PERSIST_IDLE_MS = 30min`（长阈值；`--pool-idle-ms 0` 关）× `PERSIST_POOL_FLOOR = 4`
+     （`--pool-floor`；被 `workers` 夹取）。纯计划 `reapPlan`（只收空闲 ≥ 阈值、绝不碰在飞、先收最久空闲、
+     收后不小于 floor）住 `persist-pool.ts`；agent 60s 节拍接线（`unref`）。回收 = SIGTERM + 摘池，
+     下次缺位按需再 spawn——用一次冷启换长闲时 ~75–100MB/个常驻；floor 保常见波次零冷启。
+  ② **超时定时器**：`persist-pool.armTaskTimeout`（可撤销句柄 + `unref`），`runViaPersistWorker` 在
+     三态结算（ok/taskErr/dead）与两个早退（stdin 缺失 / 写失败）后一律 `cancel()`；早退同时清 `pending`。
+- **被否决**：① 回收也收忙 worker（在飞局作废——绝不允许）；② floor=0 允许收空（下一局无条件冷启）；
+  ③ 阈值收短到分钟级（热路径首批被无谓冷启动拖慢；长阈值 + floor 才能「只在长闲时省内存」）；
+  ④ 只把 600s 调大不修 clearTimeout（误杀窗口只是推迟，语义仍是「旧定时器管新任务」）。
+- **违反后果**：收忙 worker ⇒ 局作废 + 池熔断误触；收过 floor / 阈值太短 ⇒ 热路径成批冷启（正是
+  §27 冷池 31.6s/局 的机制）；定时器不再可撤销 ⇒ 每 ~10min 一次全池误杀回来。
+- **落点**：`tools/agent/persist-pool.ts`（reapPlan / armTaskTimeout / 常量）· `tools/agent/sampler-agent.ts`
+  （CLI `--pool-idle-ms`/`--pool-floor`、`reapIdleWorkers` + 节拍、任务定时器接线、/v1/status 增
+  `persistFloor`/`persistIdleMs`）· 用例 `tests/agent/persist-pool.test.ts`（reapPlan 4 例 + 定时器 1 例 +
+  源级钉子 2 例）· 手册 `tools/agent/agent-setup.md`；盘点与口径 `docs/nn/runtime-opt.md` §31。
+- **指针**：全文 `docs/nn/runtime-opt.md` §31。
+
+### §2026-10-04-goalnn-cpu-slots-small-full（2026-10-04，并发口径小机器校准：CPU ≤ 4 核全给）
+> 决策 `DECISIONS.md` §2026-10-04-goalnn-cpu-slots-small-full。归档 2026-10-11（第二轮瘦身）。
+
+- **口径（用户逐字）**：「rollout worker 现在为 max(cores−2, cores×0.8)，我希望改成如果 cpu
+  少于等于 4 核，则使用全部 cores」。
+- **决定**：`common/platform_utils.cpu_worker_slots()`（rollout 与 eval 的**唯一口径**）新增
+  `CPU_ALL_SLOTS_CORES = 4`：`n ≤ 4 ⇒ n`（全给）；否则照旧 `max(n − CPU_RESERVE, floor(n×0.8))`。
+  效果：Colab TPU（cgroup 配额 4）⇒ **4**（不再是 3）；3/2/1 核 ⇒ 各自全给；5 ⇒ 4；
+  8 ⇒ 6、16 ⇒ 14、24 ⇒ 22、96 ⇒ 94 不变。
+- **被否决**：① 只改 rollout 不改 eval——否：唯一口径（交替语义，2026-09-22 立）必须同源，
+  两处各写一份就是下一次误读；② 给小机器另立一套公式——否：同一个函数里一个阈值即可，
+  多一条公式多一个分歧面。
+- **落点**：`nn-training/common/platform_utils.py`（常量 + 公式 + docstring）· 口径文案同步
+  `remote/plan_run` / `remote/run_loop`（help 原文还停在预留 4 的旧公式，一并修正）/
+  `worker/iter_rollout` / `remote/offline_boot` / `remote/plan_handoff` ·
+  `ipynb/rollout.cloudflared.ipynb`（内联回退）· `ipynb/battle.offline.ipynb`（配置表两行 + CFG 注释）。
+- **回归**：`tests/common/test_platform_utils_cores.py::test_cpu_worker_slots_gives_all_cores_on_small_machines`
+  （1/2/3/4 ⇒ 全给；5 ⇒ 4；8 ⇒ 6；96 ⇒ 94）· `tests/remote/test_offline_eval_cloud.py`
+  口径表 `(4, 3)` → `(4, 4)`，另加 `(5, 4)`。
+- **指针**：全文 `docs/nn/runtime-opt.md` §30（更新旗标挂在同文件 §7）·
+  `docs/nn/remote-transport.md` §60 旗标。
+
+### §2026-10-07-goalnn-serve-pool-readiness（2026-10-07，长驻池「假就绪」+ 重试路径裸文件 IO：真就绪判据 + 有界清理；清理超界改判「交整轮」）
+> 决策 `DECISIONS.md` §2026-10-07-goalnn-serve-pool-readiness。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：Kaggle 离线课 `x21-psh-b` it253（job `031e17e61777d09c`）一轮 **355s**（正常 32s）：
+  `94/94 就绪` 是假满（真含义 = 94 个进程没退出）⇒ 假就绪 worker 被当暖的发出去 ⇒ 5s/20s 超时回退一次性 ⇒
+  第二次尝试卡在重试路径上**无上界**的 `_clean_attempt`（rglob+rmtree）里 ⇒ 44 条线程各自吃满 155s。
+  计划 `plan/rollout-serve-pool-readiness.plan.md`（v1 → 评审 `plan/rollout-serve-pool-readiness.review-hy.md`
+  两处 P0 判据 + 七条 P1 → v2 修订；本条目 = v2 的落地）。
+- **决定（P0-1）**：判据唯一化 = `w.ready.is_set() and not w.dead`（`_acquire` **只发放**真就绪的）；
+  冷启动**分批**（`SPAWN_BATCH_SIZE=16`，批间串行、deadline 整池共用）；**未就绪不杀**（采纳评审备选 (h)）——
+  留在池里标 booting（`unready` 计数），`ready` 一亮点就自动可发放（杀掉 = 这批冷启动白付 + 补位再付一次）；
+  零真就绪但有一批在冷启动 ⇒ **不退池**，只有 `unready == 0`（一个都没起出来）才关池走一次性。
+- **决定（P0-2）**：`retry_line` **前置**（顺序即判据：「重试过的局 0 个」是那行被清理卡住的假象）+
+  `_clean_attempt` 套上界（新常量 `CLEAN_CEILING_SEC=5.0`，住 `common/game_watch.py`）；**超界 ⇒ 不就地重跑**
+  （评审 P0-1）：被放弃的删除者晚到时会删掉新写者刚写的同一批路径（`--out`/shard 名都没变）⇒「目录齐、obs 截断」
+  的静默错数据 ⇒ 归入机器级停滞（`UnreapableChildError`）交整轮重投。预算从 slack 出：
+  `3×(2×20+5)+2×5 = 145 ≤ 155` ⇒ **`game_ceiling_sec` 公式不动**（`tests/common/test_game_watch.py` 一字不改）。
+- **两条链语义（已核，写进 plan）**：重投**都**在新写者开写前整目录清场 —— hub `kind=iter` 重领与自主段
+  `plan_run._run_with_retries` → `run_job` → **同一个** `download._ensure_payload`，且清场在 `preloaded`（payload_zip）
+  来源上**同样执行** ⇒ 评审担心的「同目录裸重写」不成立。残留（不当成已修）：清场自身无上界；被放弃的删除者晚于
+  清场恢复仍可能删新文件；`Popen` **永不返回**那一档拿不到 pid（`subprocess` 固有形状）。
+- **决定（P1-1，卫生项）**：`call_bounded` 只弃线程、不给子进程处置 —— 被放弃的尝试现持随调用链走的
+  `abandoned` 标记（不用模块级墓碑：同 label 在新一轮是新尝试，全局表会误伤）；`_run_one_game` 在**进函数**
+  与 **`Popen` 返回后**两处查 ⇒ 就地处决刚起的进程 + 不产出（覆盖评审点名的 exec 握手窗口）。
+- **诊断**：池行 `N/M 真就绪（另 K 个仍在冷启动…）`；`summary()` 与轮报 `serve_pool` 带 `unready=`；熔断行带真就绪占比。
+  慢节点上 `fallback` 上升是**预期**（不再拿假就绪顶数），不是回归。
+- **归因修正（评审 P1-3/P1-7）**：①「44 个进程继续吃 IO/继续写」在本轮**不成立**（线程卡在 rmtree、手里没子进程；
+  池里超时的 worker 已被 `_drop` 杀掉）⇒ 弃线自杀降级为卫生项；② `spawned 恒 94` 的两个解释都与阈值无关
+  ⇒ **不动熔断阈值**、只加诊断。
+- **验收（真机，见 `docs/nn.progress.md` §3.3 #23）**：① 真就绪行（`N < M` 是预期）；② `unready=` 有值；
+  ③「单局超界」= 0；④ **逐局重试行**能出现（轮末 `重试过的局 N 个` **不是**判据：它只统计已结算局，
+  整轮重投会把它重置为 1）；⑤ 轮级墙钟 / `spawned` 不回归（变差 ⇒ 先撤分批、只留真就绪判据）。
+- **落地**：`worker/serve_pool.py`（判据 + 分批 + `unready`）· `worker/iter_rollout.py`（`retry_line` 前置 + 有界清理
+  + 超界上抛 + 弃线自杀 + 池行）· `common/game_watch.py`（`CLEAN_CEILING_SEC` + `clean_ceiling_line`）·
+  单测 `tests/worker/test_remote_serve_pool.py`（真就绪两面 / 分批时序 / 补位不杀 / 零就绪不退池）·
+  `tests/remote/test_remote_iter.py`（清理超界=机器级 + 弃线自清 ×2）。
+- **门禁**：nn python gate **3795 passed / 15 skipped**（ruff + mypy + tests/+e2e/）；根 `bun run check`。
+- **落点**：全文 → `docs/nn/runtime-opt.md` §33（按主题图：长驻池 / 单局看门狗 / 一局的墙钟上界归运行时档；
+  plan v2 原写 engineering §66，已按索引 §2 的归属修正）；计划 → `plan/rollout-serve-pool-readiness.plan.md`（v2）。
+
+
+**家族 B — 引擎池 / IO 上界 / 分关采样**
+
+### §2026-10-02-goalnn-engine-pool-midround-pin（2026-10-02，引擎缓存上限不再钉死 5 + 轮内不许抽引擎 + `_node_rollout` 初值）
+> 决策 `DECISIONS.md` §2026-10-02-goalnn-engine-pool-midround-pin。归档 2026-10-11（第二轮瘦身）。
+
+- **背景（事故）**：7 门课同时开课（h4-hurt-{c0,f75,f150} · h4-encl-{c0,f75,f150} · x20-advanced），
+  而 `EnginePool` 数量上限是死值 `DEFAULT_CACHE_COURSES = 5` ⇒ 按 LRU 互逐。被逐的课下一拍
+  `EnginePool.get()` **重建一个全新 `TrainingLoop`**，而 supervisor 的 `CourseQueue.tasks` 已走到
+  `ppo`/`cleanup` ⇒ 重建引擎缺轮内属性 `_node_rollout`（它只在 `step_course_iter` 里赋值，
+  `__init__` 从未初值）⇒ `AttributeError` ⇒ 该课每秒重启一次、一轮都跑不完。
+  实测 `tmp/h4-hurt-f75/training_log.jsonl` = **1076 条 `run_start` / 1073 条 `iter_error` / 0 条
+  `iteration`**（h4-hurt-f150 同形）。
+- **决定（P0，止血）**：`loop_core.TrainingLoop.__init__` 补 `self._node_rollout: bool = False`；
+  `loop_round_steps` 的两处裸读（`step_ppo` / `step_cleanup`）改 `getattr(..., False)` 兜底。
+  初值 `False` = 本地轮：即便读到早值也只是把采集判成本地，不改变采集行为。
+  **不变量**：引擎被重建后必须能安全续跑（与上限怎么调无关）。
+- **决定（P1，驱逐语义）**：`EnginePool.pinned`（新，注入式判据，保持本类纯逻辑）；候选为空的
+  ⇒ 不驱逐 + 响亮记一行（宁可超预算也不中途抽栈）。判据 = `CourseQueue.mid_round`（新字段，
+  本轮已动过手）—— **不能**用 `tasks` 非空：`_finish_round` 会立刻为下一轮重新规划，两者形状相同，
+  用它等于永久禁止驱逐。这补的是本类 docstring 早就写着的那句「绝不驱逐正在用的引擎」
+  （此前 `keep` 只护住「本次被取的那一门」）。
+  连带：`test_serve_bc.test_bc_round_is_not_republished_when_the_engine_is_evicted` 的**触发方式**
+  改为显式关钉住（该用例验的是「重建后认领而非重发」，与「何时驱逐」正交）。
+- **决定（P2，上限从哪来）**：`serve(cache_courses=0)` = **自动** `max(DEFAULT_CACHE_COURSES, 开课数)`；
+  显式正值原样尊重（e2e/单测要靠它构造驱逐）但越界时响亮告警；自动抬升也打一行。
+  理由：真约束是**字节顶**（每课栈 MB 级，256MB ≈ 130 课，`scripts/measure_checkpoint_rss.py`），
+  数量顶在这里没有保护价值；而「开课数」是人手点的操作面事实。
+- **被否决**（都记录备选）：① 只把 5 改大 —— 不修 P1，下次字节顶触发照样崩，且「文档说可配、
+  代码不认」继续存在；② 上限设无限 —— 丢掉「越界要可见」这个信号（RSS 实测表就是为它做的）；
+  ③ 重建时保留旧引擎的轮内状态 —— 等于持久化 E 类轮内瞬态，本文件已明确否决过。
+- **文档口径更正**：`rl.checkpointCacheCourses` / `checkpointCacheMb` **从未被任何生产代码读取**
+  （唯一调用点 `run_rl_cluster --serve` 不传参，也无对应 CLI flag）⇒ 本文件 §2026-09-18-goalnn-r2-loop-task-queue
+  第四问与 `docs/nn/training-stack.md` 里「可配」的说法作废，改以本条为准（自动 = 开课数；
+  要显式上限只能改调用方传参）。**接线该配置键**留作后续（需跨 rl-config schema + launch 透传）。
+- **落点**：`trainer/loop_core.py`（初值）· `trainer/loop_round_steps.py`（两处 getattr）·
+  `worker/engine_pool.py`（`pinned` / `_is_pinned` / `_log_once` / `_evict`）·
+  `worker/loop_scheduler.py`（`CourseQueue.mid_round` + 三处置位、两处清零）·
+  `trainer/loop_serve.py`（`_pinned_mid_round` + P2 自动上限）· 回归
+  `tests/worker/test_engine_pool.py`（3 例）· `tests/trainer/test_loop_park.py`（P0 1 例）·
+  `tests/trainer/test_serve_wiring.py`（P1 1 例 + P2 1 例）· 调整 `tests/trainer/test_serve_bc.py`（1 例触发方式）。
+
+**指针**：实况账本 `tmp/h4-hurt-f75/training_log.jsonl` · 相关 plan `plan/course-pill-precision.plan.md`
+（同源事故的展示面：pill 的 `已收官` 与节点「贡献 0」另有独立缺陷，另行处理）。
+
+### §2026-10-02-goalnn-eval-final-round-and-dropped（2026-10-02，收官轮 eval 缺失 + dropped 局静默丢失）
+> 决策 `DECISIONS.md` §2026-10-02-goalnn-eval-final-round-and-dropped。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：h4-aim-k25 真机产物显示 ① it40（收官轮）训练期间 eval 零局——多课程 serve 的收官
+  `finish_course` 没有 drain，而延迟派发只到 it-1 ⇒ 最后一轮权重永远没有 eval 路径；② it0 缺 8 局、
+  it25 缺 2 局——`seen`（认领）在 `record()` 落盘之前计数且异常逃逸，缺口既不补派也不带原因
+  （plan/eval-final-round-and-dropped §1–§2）。
+- **备选与否决**：把 `seen.add` 直接下移到 `record()` 之后 —— 否：tail-race 副本可在原件 record
+  进行中结算（去重全看 `seen`），下移后同 (stage,seed) 记两行、wins/n 双计（W0 fanout 用例可证）；
+  「同 wver 旧轮并入本轮 pending」补旧轮 —— 否：`wver = sha256(权重字节)` 每轮变，结构性无效；
+  「dropped 口径留给读方兜」—— 否：口径必须单一（谁喂公式只有一处）。
+- **决定**：`finish_course(it, *, drain=True, block=True)` 收编收官 eval drain（serve 的 RL 传
+  `block=False` 不冻其它课；BC 另一份实现按 kind 分派、不带 kwargs）；claim 集（`seen`，位置不动）
+  与 landed 集拆分——`_settle_complete` 与 `settle_eval_summary` 只认**落盘**（参数 `seen`→`landed`，
+  `dropped` 公式一字未动，语义=结算→落盘）；`record()` 失败本线程重试 `EVAL_RECORD_RETRY_MAX` +
+  `record-failed` meta + WARN，仍失败计入缺口；summary 新增 `missing`（有界 20，原因
+  record-failed/node-failed/undispatched）；收官 drain 按归档权重**逐轮**补（不再只 cand[-1]）。
+- **违反后果**：把 `seen` 下移 ⇒ fanout 双计（账本行与胜率分母漂移）；给 BC 的 `finish_course`
+  传 kwargs ⇒ TypeError 带崩 serve；serve 用 `block=True` ⇒ 冻住其它课（plan N4）。
+- **指针**：计划 `plan/eval-final-round-and-dropped.plan.md` · 全文 → `docs/nn/engineering.md` §61 ·
+  回归 `tests/trainer/test_finish_course_drains_eval.py` · `tests/trainer/test_eval_dispatch_resilience.py`
+  （2026-10-02 节）。
+
+### §2026-10-06-goalnn-rollout-io-ceiling（2026-10-06，云机离线 rollout 第三次「整轮卡死十几分钟」：一局有了自己的墙钟上界，不可取消的阻塞不再把人质扣到整轮）
+> 决策 `DECISIONS.md` §2026-10-06-goalnn-rollout-io-ceiling。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：用户真机日志（Kaggle 离线轮 `x21-psh-a`）——§24 的有界回收/整轮重投/停滞点名三件套都在，
+  熔断行之后仍是每 120s 一条「整轮停滞：… 还有 55 局在飞」、一局都不结算，十几分钟不动；
+  **没有**一条「整轮重投」行，且「在飞」的数字一直不变 = 那 55 条线程谁也不返回。
+- **根因**：轮内重投的**唯一入口**是「某个 future 抛了 `UnreapableChildError`」；而一局的路径上有一批
+  **无法从 Python 里取消**的阻塞点（挂住的挂载点上的 `mkdir`/`open`/`write`/`rmtree`，以及
+  `Popen` 等子进程 exec 成功的那一手 `os.read`）——它们既不返回也不抛 ⇒ future 永不结算 ⇒
+  轮循环的 `wait()` 永远收不齐 ⇒ 永远出不了 `while inflight` ⇒ 护栏一次也触发不了。
+  「整轮停滞」那行只负责说，不管处置（拿不到 future 的结局）。⚠ 与 §24 的分工：那条修的是
+  「**子进程**收不了尸」，本条修的是「**调用线程自己**根本没走到有界回收那一步」。
+- **决定**：① 新增 `common.platform_utils.call_bounded(fn, timeout)`：真活跑在一条 **daemon** 线程里，
+  调用线程只在预算内等，超界返回 `(False, None)` 且**绝不 join**（`concurrent.futures` 的线程不是
+  daemon，解释器退出时会 join ⇒ 卡住的线程会把「进程退出」也一起按死，故不能用它兜这一层）；
+  `fn` 的异常在**调用方线程**里原样重抛（调用点 `except` 语义不变）。② 新增
+  `game_watch.GAME_IO_SLACK_SEC` + `game_ceiling_sec(base, explicit)` = `GAME_MAX_ATTEMPTS ×
+  (2 × 最宽尝试硬顶 + KILL_REAP_SEC) + 余量`（「2 ×」= 池回退那份）+ `ceiling_line()`。
+  ③ rollout 腿：轮循环提交 `_run_one_game_bounded`（超界 ⇒ `UnreapableChildError`，与「收不了尸」
+  同一条处置：**不就地重跑** + 清半截产出 + 整轮重投只补没产出的局）；`_clean_attempt` 也走
+  `call_bounded`（删不动就响亮一行照常重投）。④ eval 腿同一口径（`ex.map` 是同一个死结）。
+  ⑤ 轮账/重投文案改「没产出（收不了尸/超界）」。
+- **备选与否决**：① 轮循环 `wait()` 到点就放弃 future（放弃 future ≠ 停线程，且
+  `ThreadPoolExecutor.__exit__` 会 join 它们 ⇒ 只是把「卡在游戏线程」换成「卡在解释器退出」）；
+  ② 调大 5s 硬顶/就绪上限（卡住的那一步在那些闸**之后**）；③ 超界后原地重跑（两个写者写同一份
+  shard ⇒ 静默错数据）；④ 超界当「这一轮的确定性失败」扔出去（把机器的病记在内容头上 ⇒ hub 终局
+  ⇒ 停腿 ⇒ 反手停云机，与 §24/§25 口径冲突）；⑤ 超界即重启进程（丢 PPO 状态与整轮产出，代价远大于
+  重投那几局；留作「重投一直不降」时的下一档）。
+- **违反后果**：任何人再把「一局的整条链路」放回**没有上界**的等上面 ⇒ 十几分钟整轮静默会原样回来，
+  且日志里只会重复那行已经不再具有处置权的「整轮停滞」。
+- **落点**：`nn-training/common/{platform_utils,game_watch}.py` · `nn-training/worker/iter_rollout.py` ·
+  `nn-training/remote/offline_eval.py` · 测试：`nn-training/tests/{common/test_platform_utils_proc,
+  common/test_game_watch,remote/test_remote_iter,remote/test_offline_eval_cloud}.py`。
+- **指针**：全文（现场读数 / 不可取消阻塞点清单 / 下次真机该看的五个读数）→ `docs/nn/runtime-opt.md` §32。
+
+### §2026-10-06-goalnn-round-end-scan-ceiling（2026-10-06，轮末扫盘也有上界：主线程上的全量盘 IO 不再让整轮对日志静默）
+> 决策 `DECISIONS.md` §2026-10-06-goalnn-round-end-scan-ceiling。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：`§2026-10-06-goalnn-rollout-io-ceiling` 的同日收尾（当时 §32.4 ⑤ 就点名了下一个位置）。
+  `verify_shards` / `collect_reports` / `collect_shard_manifests` 在**主线程**上做全量文件 IO
+  （rglob 扫 shard、逐局读 `manifest.json`/`_rl_report.json`，`data_fp` 还要哈希每个 shard 的内容）
+  ——挂住的挂载点上它们**一样不返回也不抛**，而那里**连「整轮停滞」都没有**（那行只在轮循环里打）
+  ⇒ 整轮对日志完全静默（比游戏线程那一档更难查：连「还有几局在飞」都没有）。
+- **决定**：① 新增 `common/game_watch.SCAN_CEILING_SEC = 60.0`（**单列的第三个数**：扫盘没有子进程/
+  重试/写盘 ⇒ 不能沿 `game_ceiling_sec`，那个含尝试次数与回收预算，会大到让挂死的扫盘也过关；
+  正常一轮扫盘亚秒级 ⇒ 60s 是「机器挂了」不是「盘慢」）+ `scan_ceiling_line()`；
+  ② `worker/iter_rollout._scan_bounded` 把三步各套一层 `call_bounded`，超界 ⇒ `UnreapableChildError`
+  （本轮产物结不了算 ⇒ 还租约 + 立即重领重投；不报失败、云机不停）；
+  ③ **异常分类不许被上界改掉**：`verify_shards` 的 `ProtocolError`（实产集 ≠ 声明集）由 `call_bounded`
+  原样重抛 —— 确定性拒收不能被读成「机器卡住」（那是把内容的错记在机器头上）；`combine_reports`
+  是纯 CPU 聚合，不包。
+- **备选与否决**：① 复用 `game_ceiling_sec`（≈155s 起，对「扫一遍几百个小 JSON」太宽，等于没闸）；
+  ② 只要 `SCAN_CEILING_SEC` 报一行、不处置（那就是 §24.5 ④ 那种「说了但不动」的形态，正是本次事故的
+  成因）；③ 把超界当 `ProtocolError`（确定性拒收）上抛（会触发 `report_job_failure` ⇒ hub 终局 ⇒ 停腿
+  ⇒ 反手停云机，与 §24/§25 口径冲突）。
+- **落点**：`nn-training/common/game_watch.py` · `nn-training/worker/iter_rollout.py` ·
+  测试：`nn-training/tests/{common/test_game_watch,remote/test_remote_iter}.py`。
+- **指针**：`docs/nn/runtime-opt.md` §32.5（含「先红」取证：A/B 工作树上旧形态被 60s 外墙钟 kill）。
+
+### §2026-10-07-rollout-stage-balance（2026-10-07，分关采样平衡：est 上界初批 + 有界多批补差；不改身份，事件可见化）
+> 决策 `DECISIONS.md` §2026-10-07-rollout-stage-balance。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：动态采集的**全离线腿**（`kind=run`）一轮只跑一批，局数按**全局** est 反解 ⇒ 每关同一个局数，
+  而达标线是**分关** quota。x21-psh-b it168 真机实测：缺 4405 样本、同时丢 3333 样本（关间 samples/局 差 1.75×）。
+  计划 `plan/rollout-stage-balance.plan.md`（v1 立案 → 评审 `plan/rollout-stage-balance.review-hy.md`
+  四条 P0 + 六条 P1 → v2 修订）；交付 = 规则 `per-stage-v3`。
+- **决定（两条链共用一套数学）**：① 首批按**分关** `est_hi = ceil(est_s × 1.15)` 反解（取上界 ⇒ 欠采小）；
+  ② 节点侧**有界多批补差**（≤3 补差批 ⇒ ≤4 次 `run_iter_rollout`；每批用**实测均值**重估，末批 `×0.85`
+  偏保守——缺口不可恢复、浪费可恢复）；③ 分关局数硬顶 `4 × ceil(quota/est_s)`（旧的**全局** est 口径会让
+  低 est 关「配额未满就触顶」，而 DoD 把触顶当合格路径 ⇒ 静默短采）；④ 缺口是**硬指标**、浪费是**软指标**：
+  触 cap / 批数用尽仍有缺口 ⇒ 轮报可见 + WARN，不静默。
+- **常量冻结（真机 142 轮 per-game，bootstrap 2×10⁴ 轮）**：`DEFAULT_EST_HI_FACTOR=1.15`（首批过采 10.6%）、
+  `DEFAULT_TOPUP_MAX_BATCHES=3`、`DEFAULT_LAST_BATCH_LO_FACTOR=0.85`。口径结果：P(本轮有缺口)
+  **91.1% → 3.0%**（今天 → 本计划）、E[局数/轮] 157.8 → 162.0（+2.7%）、E[浪费] ≈ 2056 样本（≈17% 配额，只烧节点时间）。
+- **否决与备选（评审 P0，逐条有现场数据）**：① **单批补差 + 末批实测均值**（P(缺口) 71.6%，与 DoD 互斥）；
+  ② **放宽 `verify_shards` 为闭集**（`data_fp` 在云机两条链上都是**回显** ⇒ 那是净放松；改为「补差批各带自己的
+  spec/`data_fp`」= 两次 `run_iter_rollout`）；③ **冷启动用课程声明 est + 无历史不派批**（回归：147 vs 真机 338.6，
+  首波 84 局/关；且无历史 ⇒ 永不派批 = 全冷死锁）；④ **只在 `kind=iter` 上做**（该链 `rollout_src=node` ×
+  `target_transitions>0` 被 `trainer/loop_remote_drive.py` 硬禁，打在死路上）⇒ 范围 = 本机连续配额链 + 全离线 `kind=run`。
+- **身份**：分关分配与 est 同类（预算/运行参数）⇒ **不进** `corpus_identity_fp`、**不 bump** `VOLUME_RULE`（用户拍板），
+  在训课程不拒收、不重开。代价：hub 重启后云机腿每关局数会变（§15.5 意义上的断点）⇒ 用**可见化**兜：本机链
+  iteration 事件带 `volume_alloc_rule` / `volume_stage_stats`（additive，旧行 None），云机腿轮报带
+  `volumeTopup{rule,batches,est_hi_factor,collected/games/shortfall_by_stage,wasted_samples,capped_stages}`。
+- **落地**：`worker/volume_alloc.py`（纯函数 + 常量 + 同源校验）· `worker/iter_topup.py`（节点侧补差：子目录
+  `job_dir/topup{k}/` 隔离 + 全局 `--out` 续号 + **同关**取 argv 模板）· `worker/rollout_argv.py`（`retarget_argv`
+  从 `worker/plan.py`(L4) **下沉**成 L0 叶子——L2 的补差模块 import L4 是上向边，而 L5 的 `remote/worker.py`
+  顶层 import 补差模块）· `worker/volume_waves.py`（分关字段 + 同源校验；秩 L0→L2）· `worker/plan.py` ·
+  `common/manifest.py`（`volume` 进白名单）· `remote/worker.py` · `trainer/loop_{volume,export,steps,core}.py`。
+- **门禁**：nn python gate 全绿（ruff + mypy + tests/ + e2e/）；根 `bun run check` 2418 pass / 0 fail。
+- **落点**：全文 → `docs/nn/training-stack.md` §30；单测 → `nn-training/tests/worker/test_{volume_alloc,iter_topup}.py`（含跨重启逐批 byte 相同）。
+
+### §2026-10-08-goalnn-rollout-local-scratch（2026-10-08，rollout/eval 热路径 IO 落节点本地盘：共用一套 scratch，回落即今天的行为；立案 plan/rollout-local-scratch）
+> 决策 `DECISIONS.md` §2026-10-08-goalnn-rollout-local-scratch。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：云机 rollout 一轮 85 个 bun **同时**把 TS 运行时树（读）· 每局 shard（写）· 权重（读）
+  压在 `/kaggle/working`（网络挂载点）上；本机同样 85 并发从不生病（它写本地盘 `tmp/`）
+  ⇒ 病在「并发 × 网络挂载点」。eval 腿（94 并发 / 200 局 / 与下一轮 PPO 并行）读的是**同一棵树**。
+- **备选与否决**：① 只写 `/dev/shm`（用户原话的「内存」）——否（Docker 默认 64MB，一轮需 170–280MB），
+  降为候选链第 2 档；② 整轮跑完再一次性搬回——否（峰值占满本地盘 + 盘坏要等 85 局跑完才知道）⇒ 流式；
+  ③ 起后台 drain 线程——否（主线程在 `wait()` 循环里本就串行，多一套队列与锁只换来跨线程回传 stuck）；
+  ④ 只搬产出、TS 树留网络盘——否（它是**每进程读一遍**且文件数最多，治不干净）；
+  ⑤ 把 `run/` 整体搬 `/tmp`——否（`run/` 是产物目录 = 跨会话续跑的锚点）；
+  ⑥ 把 eval 的逐局账本也搬 scratch——否（`settle_eval_summary` 的聚合读面是**文件**，且它是 cell 死后
+  唯一的续跑凭据，而换掉的只有 open 的目标）⇒ 账本留在产物目录；⑦ 硬指定 `/tmp`（不测速度）——否（无取证）。
+- **决定**：新 `common/scratch.py`（L0 叶子层）提供落点链（`NN_ROLLOUT_SCRATCH` > `/dev/shm` > `/tmp` >
+  **`None`**；容量**与速度**两闸）+ 作业私有布局（`r/`、`eval/`）+ 内容寻址的共用 TS 家
+  （`nn-rollout-ts-<sha>`）+ 闸内原子 drain；`worker/iter_rollout` 与 `remote/plan_handoff` 分别在
+  **装载期**换根、**结算一局搬回一局**（eval 轮末清）；**回退档 = 逐字今天的行为**（不搬 / 不 drain /
+  不换根），协议与 `data_fp` 一个字节不改。三条写死的判据：暂存在 job 目录**之外**（`scan_shard_dirs`
+  是 rglob、`data_fp` 只读 manifest 三项 ⇒ 半截拷贝拦不住）· 确定性 errno（`ENOSPC`/`EROFS`/`EACCES`…）
+  响亮上抛、**不进无界重投** · **安装票**（锁内复核 + `os.replace`）让被放弃的 copier 永远装不进去。
+- **违反后果**：暂存放回 job 目录 ⇒「目录齐、obs 截断」静默错一局；被放弃的 copier 装旧数据 ⇒
+  跨轮静默错数据；账本搬 scratch ⇒ summary 欠计 + cell 一死整轮重评；往不比 job 目录快的盘换根 ⇒
+  零收益 + 多两条失败面。
+- **测试**：`tests/remote/test_rollout_scratch.py`（30 例；四处反探针逐条转红）·
+  `tests/remote/test_remote_iter.py` **一个字不改**全绿（协议零改动的验收点）· `bun run pygate` /
+  `bun run check` 绿。—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/runtime-opt.md` §34
+
+
+**家族 C — 节点单实例互斥**
+
+### §2026-09-29-goalnn-single-instance-guard（2026-09-29，一个 node id 只准有一个 agent 在听：互斥在应用层，不靠内核 EADDRINUSE）
+> 决策 `DECISIONS.md` §2026-09-29-goalnn-single-instance-guard。归档 2026-10-11（第二轮瘦身）。
+
+**决策**：「一个 node = 一个监听实例」是 codeHash 门的前提，必须由 agent 自己保证。起听**之前**做一次
+互斥判定（`tools/agent/single-instance.ts` 纯函数，判定表见全文）：**HTTP 探活 `/v1/status` 优先于 pid
+锁文件**；`<WORK_DIR>/agent.lock`（`tmp/dist-agent/agent.lock`）用 `fs` 的 `'wx'` 独占创建作唯一互斥
+原语（同时冷启动只有一个赢家），且锁在**预热之前**就抢。缺省 **fail-closed：拒起**（`exit(2)` + 一行
+指路日志：既有实例的 `pid`/`codeHash`/`bootId`/`uptime` + 怎么停它）；接管只认两个显式入口——
+`--takeover`、或 `/v1/restart` 交接时由父进程注入的 `SAMPLER_HANDOFF=1`（+父的 bootId；child 只准接管
+**自己的父进程**）。`/v1/status` 与 `/v1/ping` 加法新增 `pid`/`bootId`/`instanceGuard`（旧字段逐字不变）。
+
+**为什么**（h3-geo / x20-geo it1 云端 `grad` 5 连炸）：`serveWithRetry` 为重启链在 Linux 开了
+`SO_REUSEPORT`（TIME_WAIT 期间即时重绑），副作用是**第二个实例绑同一端口也静默成功**——EADDRINUSE
+这条护栏被拆掉了。a98 上两个 agent 并存 ⇒ 一轮 192 局被内核按 4 元组哈希分到两个代码版本 ⇒ 旧版本
+（metrics 45 列）shard 进 payload、云 worker 是 v9 ⇒ 5 轮连炸、整门课 aborted；同时 `/v1/restart` 可能
+重启错那个实例、`codeHash` 门变成抽签。Termux/proot 无豁免（proot 只伪造 `getuid()` 视图，内核看到的
+仍是同一个 Termux app UID ⇒ 同 euid 约束天然满足）。
+
+**被否决**：① 删 `reusePort`（TIME_WAIT 那条腿会退化成 120s 重试 / 崩——内核那条路是重启链的底座，
+不能拿来当互斥）· ② 只靠 pid 文件当判据（pid 只在交接路径写、且会被系统复用；`reusePort` 下 bind 必
+成功 ⇒ 没有「真的有人在服务」的判据）· ③ 缺省自动杀旧实例（共享 Termux/proot 环境里杀错进程代价高；
+要接管就显式说）· ④ 「换个端口 / 不带 `reusePort` 再试」当兜底（把「同 node 两版本」变成「同 node 两
+端口」，门与账本照样失效）。
+
+**违反后果**：退回「第二个实例静默共存」⇒ `metrics_version` 混血、`grad` 连炸、整门课 aborted（发布端
+的行宽版本门只拦得住「已进 payload 的旧版本」，拦不住「一个 node 两个版本」这个更上游的事实）；把
+`'wx'` 换成「先 stat 再 write」⇒ 同时冷启动的两个实例双双通过判定。
+
+—— 全文（现场 / 三平台对照 / 判定表 / 交接标记 / 观测字段 / 真机排查配方 / 本机复验读数）
+→ `docs/nn/runtime-opt.md` §29
+
 ## 附：本文件旧编号对照（拆分前 `docs/nn.progress.md` 的 § 号）
 
 旧 §66→§1 · 旧 §95→§2 · 旧 §124→§3 · 旧 §125→§4 · 旧 §126→§5 · 旧 §127→§6 · 旧 §131→§7 · 旧 §136→§8 · 旧 §140→§9 · 旧 §141→§10 · 旧 §142→§11 · 旧 §143→§12 · 旧 §144→§14 · 旧 §145→§15

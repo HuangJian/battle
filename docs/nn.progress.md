@@ -40,6 +40,29 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 > 正文 >10 行的决策全文按主题搬进这些文档（共 105 条进本目录，2 条进 `docs/decisions/details/`）。
 > 该节锚点是 `### §<DECISIONS 编号>`，与上面的 `## §N` 进度节**不同一套号**；上表「节数」
 > 只数 NN 进度节，不含这个归档节。`DECISIONS.md` 的索引行末尾写明了每条正文落在哪一节的哪一锚点。
+>
+> **第三轮瘦身（2026-10-11，`DECISIONS.md` §2026-10-11-decisions-slim-round3）**：把 2026-09-24 起、
+> 正文 >12 非空行的 **192** 条按同一口径搬进下列归档节，**并在节顶新增「家族谱系」**——同一问题的
+> 先后进展按主题归并成 A/B/C… 家族（时间序谱系链 + 末条决定原文节录），**只归类不改写**。
+> 找一条决策的全文：先看 `DECISIONS.md` 的索引行 → 走本表 → 在归档节里按 `### §<id>` 锚点落位。
+>
+> | 主题档 | 归档节 | 第三轮新增 |
+> |---|---|---|
+> | `docs/nn/engineering.md` | §20 | 79 条（分层/共享原语 · S4 神模块拆分 · S5 拆刀 · 六包重组 · 门禁与测试 · metrics 行） |
+> | `docs/nn/remote-transport.md` | §32 | 40 条（角色路由 · 离线包 · hub 回灌与模式切换 · 租约派发 · 补传腿 · 集群快照） |
+> | `docs/nn/console.md` | §11 | 18 条（节点统计 · 告警坞 · 请求路径与内存 · 回放导出与趋势图） |
+> | `docs/nn/training-stack.md` | §25 | 15 条（rl-config 边界 · 止损块归位 · state_init · 事件门 · 配对裁定 · K 通道） |
+> | `docs/nn/experiments.md` | §33 | 23 条（x20 系列 · h4 Wave 1/2 · 塑形杠杆 · aim/E 腿 · psh · K5/KR10 加冕） |
+> | `docs/nn/runtime-opt.md` | §13 | 15 条（长驻池同质化 · 引擎池与 IO 上界 · 节点单实例互斥） |
+> | `docs/nn/tpu-perf.md` | §9 | 2 条（Colab 核数口径 · sympy 导入守卫） |
+>
+> **第三轮归档（2026-10-11 = 第四次瘦身，`DECISIONS.md` §2026-10-11-decisions-slim-round4）**：阈值降到
+> 「**仍带成篇正文（无 `—— 全文` 指针）且正文 >6 非空行**」，本轮 **37** 条下沉（35 条 + 两条瘦身记录条），
+> 4 678 → 4 479 行；家族谱系**续上一张表**（沿用旧字母 = 同一族，链上含第一~三轮成员）。
+> 落点：`engineering` §20 **7**（+ 续族 N/Q/R）· `experiments` §33 **19**（+ 续族 A/E/F/G/H）·
+> `training-stack` §25 **7**（+ 续族 D/F/J/K/L/M）· `console` §11 **3**（+ 续族 A/J/K）·
+> `remote-transport` §32 **1**（续族 D）；`runtime-opt` / `tpu-perf` 本轮无新增。
+> 本轮之后 `DECISIONS.md` **已无成篇正文**（凡长条目必带指针）。
 
 **相邻文档（本轮未动）**：`docs/nn-diagnosis-methodology.md`（诊断流程纪律）、
 `docs/nn-diagnosis-toolkit.md`（诊断脚本源码快照）、`docs/nn.progress.intent.md`（意图头）、

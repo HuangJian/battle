@@ -2463,6 +2463,747 @@ SystemExit（`--run-iters<0 需要课程声明 iters——没有终点就不叫�
 
 <!-- OLD-NUMBER-MAP: 自动生成，勿手改 -->
 
+
+---
+
+> **第二轮归档（2026-10-11）**：`DECISIONS.md` 第三次瘦身把 **2026-09-24 起、正文 >12 非空行**的 **15** 条决策全文按主题落到本节（第一轮 2026-09-23 见上文）。家族分组只归类、只连线，结论与理由一律引原文；`DECISIONS.md` 索引行末尾的指针 = `docs/nn/training-stack.md` §25「决策正文归档」· 锚 `### §<id>`。
+
+**家族谱系（同一问题的先后进展按主题归并，先后为时间序）**
+
+- **A｜rl-config 职责边界**（2 条，2026-09-26）：`§2026-09-26-rl-config-scope` → `§2026-09-26-rl-config-b-class`
+  - 末条决定（原文节录）：`--matrix` / `--drop-b-class` 增 `--scope {live,all}`；……
+- **B｜止损块归位课程文件**（2 条，2026-10-02）：`§2026-10-02-goalnn-burn-rule-in-course-file` → `§2026-10-02-goalnn-burn-rule-cut2`
+  - 末条决定（原文节录）：① 删 `legacy_burn_mode/overrides`、`legacy_paired_kill_overrides/self_kill/enabled`……
+- **C｜训练模式热切换与启动恢复**（2 条，2026-09-24～10-05）：`§2026-09-24-goalnn-train-mode-hot-switch` → `§2026-10-05-course-startup-recover`
+  - 末条决定（原文节录）：「跳过」从**终身黑名单**改成**带判据指纹的待重试表**：……
+- **D｜起始分布注入（state_init）**（2 条，2026-09-25）：`§2026-09-25-state-init-course-key` → `§2026-09-25-state-init-snapshot`
+  - 末条决定（原文节录）：① 起始分布 = `cloneWorld` 快照（`tools/sim/build-state-init-bank.ts` 产物，人类**真正到达过**的世界），……
+- **E｜事件门契约（r2）**（1 条，2026-09-27）：`§2026-09-27-goalnn-r2-event-gate`
+  - 末条决定（原文节录）：（三项，一次定死）：……
+- **F｜配对止损参照物**（2 条，2026-09-25～09-30）：`§2026-09-25-clutch-null-kill` → `§2026-09-30-goalnn-kickstart-burn-paired`
+  - 末条决定（原文节录）：参照物两档。`baseline` = 旧口径（本腿 `it<=0` 末条）；`paired` = Δ = 本臂 − **对端同 it**……
+- **G｜门禁停机平台级开关**（1 条，2026-10-01）：`§2026-10-01-goalnn-gate-halt-platform-level`
+  - 末条决定（原文节录）：（用户 2026-09-25 口径：「`gate-halt-mode` 应是平台级而非课程级，有人盯盘时切为提示，离开时切停机」）：……
+- **H｜节点门 bootId 一致性**（1 条，2026-09-29）：`§2026-09-29-goalnn-node-bootid-gate`
+  - 末条决定（原文节录）：（用户裁定，采纳 `plan/sampler-single-instance.plan.md` §8-Q2 的**备选**而非其原推荐）：训练侧……
+- **I｜it0 基线污染（评估腿）**（1 条，2026-09-25）：`§2026-09-25-evala-baseline-bc`
+  - 末条决定（原文节录）：x20-dodge-l1/L3 的 `eval_log` it0 各混入 200 局后期权重读数（L1 混 it43、L3 混 it51），……
+- **J｜决策周期 K 通道**（1 条，2026-10-07）：`§2026-10-07-k5-decision-k-channel`
+  - 末条决定（原文节录）：**口径修订（覆盖 `§2026-10-07-k5-filing` 原文"margin10"，全案以 plan v2 为准）**：守卫统一……
+
+**家族 A — rl-config 职责边界**
+
+### §2026-09-26-rl-config-scope（2026-09-26，`rl-config.json` 职责边界：只留「别处无处安放」，删配置不删代码）
+> 决策 `DECISIONS.md` §2026-09-26-rl-config-scope。归档 2026-10-11（第二轮瘦身）。
+
+**触发（用户 2026-09-25/26）**：「已经在其它地方配置过的数据就不该再往里填；`intent_rl` 已废弃，
+后期重启也要配成现在 x 系列一样」→「intent/goal、`stream`/`double_buffer`/`precollect_early`
+**只删配置、不删代码**」。
+
+**决定**：`nn-training/rl-config.json` 只保留五类里的 A（机器/环境级）、C（调度策略）、D（每课
+机器侧旋钮活课）；B（课程文件已有同名键的全局缺省）只留必要兜底；E（废弃/死键）删。
+**新键该写哪**：机器事实 → rl-config；「怎么训」的超参/奖励/关卡/门 → `curricula/<课>.jsonc`。
+
+**本次删除（8 个点号路径，含代码读点）**：`intent_rl`（整块 29 键）、`policy.upgradeBranch`
+（**连 `rl/dispatch.py` 的读点一并去掉**——只删键不删读点，2026-08-30「残留旧分支名 reset 全部
+节点」的坑就还在）、`policy.minDiskFreeMB`（零消费者）、`policy.streamKlCapIntent` /
+`policy.streamWaveGamesIntent`（intent 专属）、`rl.stream` / `rl.double_buffer` / `rl.precollect_early`
+（单一 PPO 路径下 `validate_args` 恒置 0 / 只在 `double_buffer` 开时被读 ⇒ 填了也不生效）。
+
+**代码保留**（用户裁决）：`ppo/intent.py`、`ppo/goal.py`、`rl/modes.py` 的 `intent_rl(legacy)` 回退、
+`rl/eval_m1.py` 与 m1-eval 派发链、`stream`/`double_buffer`/`precollect_early` 的读取点**都不动**
+——重启时复用，不从 git 历史重补。intent/goal 入口仍冻结（`validate_args` 拒启），重启前须先解冻。
+
+**防再长草**：新增 `nn-training/rl_config.schema.json`（键白名单数据）+ `rl_config_schema.py`
+（**只告警不拒**，`run_rl.py` 启动时把未知/已退役键点出来）；清洗工具
+`nn-training/tools/rl_config_clean.py`（dry-run/`--apply` 先备份 sha 校验/`--matrix`/脱敏）；
+顺手修 `tools/agent/agent-setup.md` 里把磁盘阈值当成 rl-config 键的指路。
+
+**备选与否决**：① 连 `ppo/intent.py`、`ppo/goal.py` 一起删——否（用户裁决：删配置不删代码）；
+② 顺手去掉 `rl/modes.py` 的 legacy 回退与改 `e2e/test_run_rl_m1.py` 断言——否（同上）；
+③ 一次性真删（B 类全删、零缺省）——否（会让历史课程无法复现，漏声明时静默落 argparse 默认）；
+④ 未知键硬拒开训——否（用户裁决 O3：只告警不拒）。
+
+**违反后果**：把「怎么训」的超参写回 rl-config = 造第二事实源（用户原则针对的正是这一类）；
+不删 `policy.upgradeBranch` 的读点 = 下次有人手填非空值就再 reset 一遍全部节点。全文 →
+`docs/nn/rl-config.md` §1 · 计划 → `plan/rl-config-cleanup.plan.md`。
+
+### §2026-09-26-rl-config-b-class（2026-09-26，B 类兜底键删除：范围取「全部课程」超集 + `workers` 归机器级）
+> 决策 `DECISIONS.md` §2026-09-26-rl-config-b-class。归档 2026-10-11（第二轮瘦身）。
+
+**触发（用户 2026-09-26）**：「在训练机跑 `rl_config_clean.py --matrix`，按全绿结果删掉多余 B 类兜底键」。
+
+**前置事实**：训练机（= 本机，hub / sampler / trainer 都活在这个工作区）上操作员已于 17:49 把最后
+两门在训课停掉（`x20-steady-cont` / `x20-dodge-l3d2`；控制台日志 `已停课 …（已删开课标记）`）
+⇒ `live`（`training-enabled.txt`）集为**空**，plan §3.2 / §8-O1 的常规判据出不了结论
+（`is_green` 对空集恒 False）。
+
+**决定 1 — 判据范围改用「全部课程」超集**：`--matrix` / `--drop-b-class` 增 `--scope {live,all}`；
+`all` = `curricula/*.jsonc` 全部课程（本机 108 门）。理由：B 类兜底的**风险面**是「任何课程没声明该键
+时落到 rl-config 的值」，所以「全部课程都不靠它」是**更强**的证据（全绿于 `all` ⇒ 全绿于 `live`，
+反之不然）；在训集为空时它是唯一能出结论的范围。**本次按 `all` 删 `rl.difficulty` / `rl.max_ticks`**
+——两者 108/108 显式声明（44 课程文件 + 64 关卡注入），且唯一消费者 `rl/eval_a_once.py:273-274`
+的兜底 `or 12000` / `or "hard"` 与被删值**逐字同值** ⇒ 零行为变化。
+
+**决定 2 — `workers` 与 `local_slots` 同归机器级**（`tools/rl_config_clean.py::MACHINE_KEYS`）：
+二者在 `--scope all` 下判「全绿」（108/108 课程都写了 `workers`），但 rl-config 里这条是**裸机读数**：
+`dashboard/src/core/slots.ts::bareCapacity` = `max(rl.workers, rl.local_slots)`，
+`rl/config.py::apply_course_machine_overrides` 也把 `rl.{workers,local_slots}` 当本机配额缺省。
+删 `workers` ⇒ `Number(undefined ?? 0)` = 0 ⇒ 容量塌成 0、`checkCapacity` 把每门课报成超量（假红）。
+这是 plan §3.2-4 对 `local_slots` 豁免的推广。
+
+**保留兜底（非全绿）**：`mb`（9 门 BC/demo 课没写）、`seed_rotate`（4 门）、`keep_iters`（106 门）、
+`eval_window_sec` / `total_stages` / `rotate_stages` / `seed`（各 108 门）等一律**不删**——
+plan §8-O1 已否决「零缺省」。
+
+**顺手修的 bug（同一路径）**：`tools/rl_config_clean.py::load_jsonc` 此前是 `strip_comments` +
+`json.loads`，**漏了去尾逗号** ⇒ 实测 108 个课程文件里 88 个、25 个关卡文件**全部**读不进，
+`--matrix` 一遇在训课程就 `JSONDecodeError`；更危险的是若哪天调用点吞掉异常，「读不进来」会被
+读成「课程没声明该键」= 静默删兜底。改为产品同源 `rl.jsonc.loads`（= `strip_comments` →
+`_drop_trailing_commas` → `json.loads`）。
+
+**备选与否决**：① 只用 `live` 范围、本次什么都不删——否（在训集空是操作员的即时状态，不是「无课程」；
+空集下不删等于把「召回训练机跑矩阵」的目的作废）；② 按「4 门 dodge 课」（course-archive §1.1 的
+基线在训集）范围删——否（会把 `mb` / `seed_rotate` / `lr` / `epochs` / `gamma` / `lam` 一起删掉，
+而 9 门 BC/demo 课正靠 `rl.mb` 兜底 ⇒ 历史课程行为漂移，正是 §8-O1 否决的形态）；
+③ 连 `workers` 一起删——否（机器容量读数，见决定 2）；④ 现场补写 `training-enabled.txt` 造一个 live 集
+——否（伪造开课标记 = 越权改控制台拥有的状态文件，AGENTS 明禁）。
+
+**违反后果**：把 `live` 当唯一范围 ⇒ 全停课时工具永久无法收敛；删 `rl.workers` ⇒ 控制台并发校验假红。
+全文 → `docs/nn/rl-config.md` §1.4b。
+
+**评审补正（2026-09-26 晚，对 `12187fa4` + `9fd0834c` 两个提交）**：另一 agent 逐条核过后，以下四处**改了实现**：
+
+1. **「与控制台冒烟共用一份」的说法作废**（`rl_config_schema.py` docstring / `rl_config.schema.json`
+   `_doc` / `run_rl.py` 注释三处）：`dashboard/src/**` 对该 JSON **零引用**，`rlConfigSmoke` 仍只查
+   port/token/nodes ⇒ plan §3.4/E8 的「冒烟面板也点出假键」**未达成**（只达成启动日志那一半）。
+   改 dashboard 时再接线，那时才恢复「共用一份」的措辞。
+2. **脱敏收敛成一条清单，且不给「打印原文」的口子**：`rl_config_clean.py` 的
+   `_SECRET_PATHS=("rl.remote_token","rl.remote_hub_url")` 与 `desensitize()` 实际只脱
+   token/authKey **不一致** ⇒ 改为 `SECRET_KEYS=("remote_token","authKey")`（打印面与 diff 面
+   共用一份）；同时把误导性的 `--no-redact` 改成诚实的 `--no-preview`。**否决**「按名字实现成
+   打印原文」：plan §1.5 红线 1 说任何输出（含本地排障）都不得带出凭据 ⇒ 那就**不存在**这条路径。
+3. **升级分支的坑在签名层面关死**：`dist_common.upgrade_branch_or(explicit)` ⇒
+   `current_upgrade_branch()`（无参）。读点已验证删除，但「显式值优先于锁存」这个**语义**还留在
+   签名里 ⇒ 顺手写一行 `or` 就能把 2026-08-30 的坑复发。拿掉参数后，复发必须改签名（并改
+   `tests/tools/test_dist_upgrade_cli.py::test_upgrade_branch_has_no_explicit_override_path` 的断言）=
+   一次有意识的决定。备选：保留函数不动——否（评审正确指出那是不可达死分支）。
+4. **接线补钉子**：`check_rl_config` 有单测，但 `run_rl.py` 那三行「读配置 → 打告警」此前无人盯
+   ⇒ 新增 `tests/worker/test_rl_config_schema.py::test_run_rl_logs_the_advisory_and_still_starts`
+   （子进程 oracle，同 `test_serve_wiring` 手法）：假键 ⇒ 启动日志出现告警行且**照常起训**。
+
+**控制台死开关的处置（2026-09-26 用户裁决）**：`stream` / `double_buffer` / `precollect_early`
+三个开关**保留在界面上，但标灰 + 写清「当前不生效」**——否决「摘掉开关」与「只留文档」两档：
+`TrainLaunchModal.tsx::INERT_TOGGLES` 清单驱动渲染，`disabled` **常闭**、`note` 就写「当前不生效」，
+且显示值改成 rl-config 的当前值（**不再**读写 localStorage 偏好——灰着的开关显示成「开」会被读成
+「它开着且有效」）；`preset.ts::setMode` 的回写白名单**保留**这三键（解冻 intent/多路时直接复用）。
+守卫：`dashboard/tests/web-train-launch-wiring.test.ts`（呈现 / 常闭 / 不再写回 / 白名单保留四处）。
+
+
+**家族 B — 止损块归位课程文件**
+
+### §2026-10-02-goalnn-burn-rule-in-course-file（2026-10-02，止损块进课程文件：`kickstart_burn`/`paired_kill` 从 rl-config 迁入 `curricula/*.jsonc`，块不进 `corpus_fp`）
+> 决策 `DECISIONS.md` §2026-10-02-goalnn-burn-rule-in-course-file。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：结果面止损（干烧熔断 / 配对中点杀臂）的参照物与阈值住 `rl-config.json`（机器本地、
+  不进 git）——换机器/新克隆静默回落 `baseline`（回测假阳性 49.3% vs paired 0.47%，~105×）；
+  kickstart 家族被劈成两半（ref/init 在课程、burn 在 rl-config）。旧注释的否决理由「课程文件
+  参与 course_fp 血缘（D14）」**把 `course_fp` 当成了 `corpus_fp`**：D14 判 `corpus_fp`，止损是判据不是语料。
+- **决定**：`biz/course_spec.py` 加 `KickstartBurnBlock`/`PairedKillBlock`（解析期强校验，脏值拒课）；
+  5 个读函数改「课程块优先 + `legacy_*` 兼容回落」；`RESTART_ONLY_FIELDS` 加两键（不进 `HOT_FIELDS`）；
+  `corpus_identity_fp` payload 不加两键；判据本体 `burn_verdict`/`paired_kill_verdict` **逐字不动**；
+  控制台 `burnThresholds` 同源（课程块 > rl-config > 常量）。h4-aim-{k10,k25} 落块、h4-aim-c0 写
+  `paired_kill:{enabled:false}`；h4-hurt/h4-encl 四臂与 x20-clutch 两门暂留 rl-config 兼容回落（第二刀迁）。
+- **被否决**：① 直接删 rl-config 读面（迁移期弄丢现有两条腿的止损，必须双读兜底）；
+  ② 块进 `HOT_FIELDS`（判读窗口中途换口径 = 换实验）。
+- **落点**：`nn-training/biz/{course_spec,hot_reload,corpus_fp}.py` ·
+  `worker/{kickstart_burn,paired_kill,loop_guards_leg}.py` · `curricula/h4-aim-{c0,k10,k25}.jsonc` ·
+  `dashboard/src/stack/kickstart-receipt.ts` · 测试 `tests/biz/test_h4_aim_courses.py`（新建）等。
+
+**指针**：全文 `docs/nn/engineering.md` §59 · plan `plan/burn-rule-in-course-file.plan.md`
+（含评审 `-review-bf.md`）· 回测 `nn-training/tools/backtest-burn-rule.py`。
+
+### §2026-10-02-goalnn-burn-rule-cut2（2026-10-02，止损块第二刀：删 rl-config 回落读面 + 六处迁移 + 存量清理）
+> 决策 `DECISIONS.md` §2026-10-02-goalnn-burn-rule-cut2。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：`§2026-10-02-goalnn-burn-rule-in-course-file` 第一刀留了双读兜底（课程块优先 + `legacy_*`
+  回落 rl-config）。六个使用者（h4-hurt×2 + h4-encl×2 + x20-clutch 两门；h4-aim×2 已于第一刀迁）
+  现已全部收官且都有课程块 ⇒ 回落读面已无活用户；留一把「机器本地还能改止损」的回落口 = 预注册
+  的止损仍可能被本地值盖掉（块优先也挡不住旧值漂移误导读面）。
+- **决定**：① 删 `legacy_burn_mode/overrides`、`legacy_paired_kill_overrides/self_kill/enabled`
+  六个回落读函数；`burn_mode/burn_overrides`/`paired_kill_*` 五函数去 `fallback` 参数（块缺席 =
+  模块常量）；`loop_guards_leg` 两个守卫去 `dist_cfg` 参数（`course_key_of` 唯一用处消失）。
+  判据本体 `burn_verdict`/`paired_kill_verdict` 逐字不动。② 迁移六处块（值逐字复制）：h4-hurt-{f75,f150}
+  → `{mode:paired,peer:h4-hurt-c0}`、h4-encl-{f75,f150} → `{mode:paired,peer:h4-encl-c0}`、
+  x20-clutch → `paired_kill:{enabled:true}`、x20-clutch-null → `paired_kill:{self_kill:false}`；
+  六处头注「见 rl-config」改指本文件块。③ 控制台 `burnThresholds(course)` 去 `cfg`、`CourseConf`
+  删字段；两键进 `LEGACY_COURSE_KEYS`。④ 存量清理：新 `pruneNoiseCourses()`（停课清理同一条分档
+  扫全库：纯 `rollout_src:'local'` 删 / 空壳整条删 / 无读者旧键删；显式 node/auto/run 不动；幂等
+  无变化不写盘），2026-10-02 实跑 92 项（48 → 4 门，只剩显式 run 档；备份
+  `rl-config.json.bak.20261002-224412`）。
+- **门槛③如实记录**：plan §9 P1 的「≥1 次会话在无 rl-config 键的环境跑满并确认止损生效」**未即时
+  满足**——六个使用者已全部收官、当前无在跑的处理臂；删除安全性由「无生产读者 + 课程块齐全 +
+  块缺席回模块常量（与旧回落同值）」承担，③降级为后续第一条带止损的新腿自然验证。
+- **被否决**：① 保留 `fallback` 参数只删 `legacy_*`（留一把空口子 = 第二事实源迟早回来）；② 先不迁
+  x20-clutch 两门（已收官；块进课程文件是归档/复现的预注册，不是只为在跑的腿）。
+- **落点**：`nn-training/worker/{kickstart_burn,paired_kill,loop_guards_leg}.py` ·
+  `trainer/loop_round_steps.py` · `curricula/h4-hurt-*`/`h4-encl-*`/`x20-clutch*` ·
+  `dashboard/src/stack/{course-knobs,kickstart-receipt}.ts` · `dashboard/src/core/types.ts` ·
+  测试 `tests/biz/test_burn_blocks_in_courses.py`（新建）等。
+
+**指针**：全文 `docs/nn/engineering.md` §60（前刀 §59）· plan `plan/burn-rule-in-course-file.plan.md` §9 P1。
+
+
+**家族 C — 训练模式热切换与启动恢复**
+
+### §2026-09-24-goalnn-train-mode-hot-switch（2026-09-24，plan/train-mode-hot-switch.plan.md 主体 L1 + L3.2）
+> 决策 `DECISIONS.md` §2026-09-24-goalnn-train-mode-hot-switch。归档 2026-10-11（第二轮瘦身）。
+
+**「在线/离线」收敛成唯一那颗开关**：`setCourseMode` ① 先落本机训练配置（唯一写面
+`actions/train-mode.ts::applyTrainModeToConfig`，域换算仍走 `stack/specs.ts::trainModeKnobs`）
+② 再推 hub 镜像。用户 2026-09-24 报障「离线课切回在线后 Kaggle 仍因缺 bun 拒单」的根因就是
+只翻了后一半：`courses.<课>.rollout_src=run` 没撤 ⇒ 下一段照样派 `kind=run`。
+**写面边界**：`pushCourseMode`（只推 hub + 落意图，开课/停课/回灌共用）绝不写配置；`setCourseMode`
+（那颗开关）写；`restoreCourseModes`（回灌）绝不写 —— `pushHubMode` 本来就是循环调 `setCourseMode`
+的，不拆会让**开课重复写盘 1–3 次**、并把**停课**误翻成「整段上云」。
+**L3.2**：worker 在**零下载**处（结果复用块之后、payload/code/ts_code 之前）做 bun 能力自检
+（`kind in (iter, run)` ∧ 非 echo）——现状是 3.42MB / 12.1s 全白传才 `REJECTED`；异常类型与
+重试策略不变（复用既有的 `ProtocolError` ⇒ 确定性拒绝链）。
+**生效时机**：段边界，不是「下一轮」——`run_iters<0` 时一段覆盖到课程末，训练侧阻塞在 8h 段等待里
+⇒ 已在飞的段不抢占（**明确不做**），回执/文档写明最坏情形并指向「停课/暂停」。
+**node 往返**：`offline` 覆写 `rollout_src` 会吞掉显式选的 `node` ⇒ 切离线前记进
+`console-state.courseRolloutSrc`（只记 `node`/`auto`），切回在线时恢复。
+**第三源可见性**：`modeDrift` 增 `configRun`（`stateView.courseRolloutSrc` 逐课下发）——
+「hub 与意图都在线、配置仍是 run」这种半状态在**非当前课程**的行上也看得见。
+**被否决**：① 让 `course-mode.ts` import `course-lifecycle.ts`（反向 import 成环）⇒ 新开
+`train-mode.ts`；② 把配置写入放进 `pushHubMode`/`setCourseMode` 共用体（= 开课重复写盘 + 停课误译）；
+③ 自检放在 `normalize_manifest` 紧后面（会把「已算完、只差重传」的 job 按 bun 拒掉）；
+④ 把 `opts.rolloutSrc` 也过一遍 `trainModeKnobs`（`run` 会被换成本机 `local` = 行为漂移）。
+**违反后果**：再出现「开关只翻半场」⇒ 用户报障原地复发；「离线」被当成「只停派发」（真正含义是
+**整段上云**）⇒ 运维以为自己停派发了而本机仍在本机采样。
+—— 全文（背景 / 事实链 / 设计 / 判据）→ `docs/nn/console.md §15` + `docs/nn/remote-transport.md §37`（零下载自检）
+
+### §2026-10-05-course-startup-recover（2026-10-05，课程配置错被整课跳过：判据变即自动重试 + 只读 `blocked` 判据）
+> 决策 `DECISIONS.md` §2026-10-05-course-startup-recover。归档 2026-10-11（第二轮瘦身）。
+
+- **背景（用户报障）**：`x20-adv3-open-r2` 的课程文件自相矛盾（`kickstart_init>0` ∧ `kickstart_ref=false`）
+  ⇒ 启动期 SystemExit、整课被共享 trainer 跳过；人改好文件 + 控制台「停→开」后日志零变化——唯一出路
+  是重启 trainer（会打断所有并行课程）。实证：07:47 跳过 → 07:51 重启仍跳过 → 改文件无变化 →
+  08:06 停→开无变化 → 08:10 重启 serve 后才开课（`tmp/trainer-cluster.log`）。
+- **决定（P0 复活通道）**：「跳过」从**终身黑名单**改成**带判据指纹的待重试表**：
+  `ServeReport.skipped_at[course] = {kind: 来源分类, fp: 判据快照}`；每拍（既有 discovery 空转拍，
+  不新增节拍）由纯函数 `reopenable_skipped` 比对——课程文件身份（mtime_ns+size）/ 开课标记 mtime /
+  按课程锁签名（释放/换主/持有者死）/ 账本 mtime，**按跳过来源取事实**（config / lock / enqueue）。
+  判据变了 ⇒ 撤销记账 + 重走开课入队；一步级 SystemExit 那族走**第二条通道**（重置队列 + `_enqueue`，
+  **保留 runtime/引擎**——重建 runtime = C-0 无限 RETRY 前科）。判据没变 ⇒ 不重试、不刷日志（`:851`
+  注释的原意保住）。用户「停→开」（标记 mtime 变新）也是复活信号。**不动** `kickstart_init` 的
+  restart-only 分类（那是给**已在跑**的课的规矩；本条治的是「压根没开成的课」——正交）。
+- **决定（P1 只读判据）**：`openable {ok, reason}`（`worker/course_args.py::course_openable`——与
+  `open_course` **同一条校验链**、零副作用）+ `waiting.kind='blocked'`（新增一格；优先级
+  finished > inflight > collect > blocked > idle > ready，仅 `pending>0` 时报）⇒ 控制台不再把起不来的课
+  报成「无外部等待，下一步 …」。控制台：`WAIT_KINDS`/`WAIT_TITLES`/pill（红）/告警坞第 8 类
+  （err；按课过滤；ack 身份 = reason 原文 ⇒ 改了但没修好会再弹；**不提供**恢复按钮——恢复是改文件）。
+- **边界（明说）**：判据是「**配置不可开课**」不是「serve 此刻跳过了它」（在跑的课被改坏也会红、
+  trainer 没起也会红）；serve 级 `--mode` 与 BC 链不在覆盖面；rl-config/env/权重类不过指纹
+  （改课程文件不会触发复活）；复活发生在**全局空转拍**，不承诺零延迟。
+- **被否决**：① 恢复需人重启（用户裁决不可接受——会打断并行课程）；② 定时无条件重试（每秒 pydantic
+  校验 + 可能建 runtime，只为等一个可能不来的修改）；③ 复活走重建 runtime（C-0 前科）；
+  ④ 把 `kickstart_init` 变成 hot 字段（把「没开成的课的重试」与「已在跑的课的 restart-only 口径」
+  混为一谈——两者正交，改错会破坏实验口径）；⑤ **serve 侧落一份 skipped 状态文件**给控制台读
+  （F4 的实现选型）：新增产物 + 第二个真相源（serve 写、控制台读），而只读面要回答的「起不起得来」
+  已由与开课链同源的 `openable` 单点说清——判据面文案已不写死 serve 侧事实，无需再养一份状态。
+- **违反后果**：用 `course_fp`（sha）当指纹 ⇒ 每拍哈希；对已在跑的课重建 runtime ⇒ 无限 RETRY；
+  文案写死「serve 已跳过」⇒ 在跑/停机场景说谎；`blocked` 复用 `idle` ⇒ 停机中的课与起不来的课又
+  长得一模一样（本次事故「分不清」的翻版）。
+- **落点**：`nn-training/trainer/loop_serve.py`（`skipped_at` / `_skip_fingerprint` / `reopenable_skipped` /
+  `_revive_skipped` / `_revive_aborted`）· `worker/course_args.py`（新，校验链抽中立模块，serve 与只读视图
+  同源 import）· `trainer/loop_plan.py`（`WAIT_BLOCKED` / `course_openable`）· `trainer/run_rl_cluster.py`
+  （每行 `openable`）· 用例 `tests/trainer/test_serve_skipped_retry.py`（9：判据三类 + 三条回归防线 +
+  双课对照）· `tests/trainer/test_course_openable.py`（6）· 控制台 `dashboard/src/web/view/loop-queue.ts` /
+  `alerts.ts` / `interaction.ts` / `theme.css` · 计划 `plan/course-startup-recover.plan.md`。
+- **指针**：全文 `docs/nn/training-stack.md` §29（训练侧）· `docs/nn/console.md` §30（控制台读面）·
+  计划 `plan/course-startup-recover.plan.md`。
+
+
+**家族 D — 起始分布注入（state_init）**
+
+### §2026-09-25-state-init-course-key（2026-09-25，课程键 `state_init` 进 CourseConfig）
+> 决策 `DECISIONS.md` §2026-09-25-state-init-course-key。归档 2026-10-11（第二轮瘦身）。
+
+> _(本条的 `rebase_counters` 字段与「中段交棒」措辞已在同日被 §2026-09-25-state-init-snapshot 修订：
+> 起始分布改为**快照注入**，`rebase_counters` 删除。本条只保留「课程键怎么进配置层」那部分。)_
+
+**来历**：`curricula/x20-state-init.jsonc`（rollout 起始分布 = 人类 demo 中段起跑，plan 六腿六负
+后的第七条攻击面）起草时就带着 `state_init` 块，而 `CourseConfig` 是 `extra="forbid"` ⇒ 那个文件
+**长期加载失败**，连带 `tests/biz/test_reward_golden.py::test_jsonc_courses_load`（遍历 `curricula/*.jsonc`）
+成为门禁唯一那条红。plan `plan/x20-state-init.plan.md` P2 = 把这个键映射进配置层。
+
+**变更**：① `StateInitBlock`（`rl/config.py`）：`bank/cut_from/cut_to/cut_step/rotate_cuts`
+全可选 + v1 缺省，`extra=forbid`，切点自相矛盾（`cut_from<0` / `cut_to>0` /
+`cut_step<1`）在校验期拒；② `CourseConfig.state_init: StateInitBlock | None = None`（缺席 = 标准
+开局，老课程逐字节不变）；③ `flat_overrides` 把整块转成 **dict** 交出去（不进 mapping 那张标量表）；
+④ 「声明了就必须能跑」的自洽检查住 **`apply_course`（启动期）**：`bank` 空、或不在盘上（cwd /
+仓库根 / nn-training 三种基准都认，`resolve_state_init_bank`）⇒ `SystemExit`（响亮，不静默退回
+标准开局——那等于换了一个实验，而账本还以为跑的是中段起跑）。
+
+**被否决**：把 bank 存在性检查放进 `load_course`（`load_course` 只读课程文件本身；在那儿读盘会让
+**任何**遍历课程的调用方被一个未落地的产物打红——就是这次那条门禁红）· 把 pydantic 模型对象原样
+传进 `args`（`echo_config` 对非标量做 `json.dumps` ⇒ 当场炸；P3 的 `build_rollout_cmd` 也只要
+JSON 数据）· 允许 `cut_to > 0`（绝对上界：得先读银行 manifest 知道局长，v1 只支持相对局尾）·
+`bank` 缺失时静默关掉 state_init（映射漏了/数据缺了都表现为「静默失效」，`ent_break` 前科）。
+
+**违反后果**：新增课程键不映射 `flat_overrides` ⇒ 训练静默按缺省跑（`ent_break` 前科：`0.25` 从未
+落地）· 在 `load_course` 里做产物存在性检查 ⇒ 起草中的课程文件把全体遍历课程的用例打红 ·
+块内乱写键被静默忽略（`extra=forbid` 是这一层的唯一防线）。
+—— 全文（P2 落地记录 / 银行内容校验为何留 P0-P3）→ `plan/x20-state-init.plan.md` P2
+
+### §2026-09-25-state-init-snapshot（2026-09-25，rollout 起始分布 = 人类中段**世界快照**注入）
+> 决策 `DECISIONS.md` §2026-09-25-state-init-snapshot。归档 2026-10-11（第二轮瘦身）。
+
+**来历**：六条价格腿全阴性后的第七条攻击面 = 只换 rollout 的起始**状态分布**、不动任何价格项
+（plan/x20-state-init.plan.md）。首版设计是「人类**磁带**（逐 tick 输入）headless 快进 T tick
+后交棒」；评审发现六个阻断级问题，其中四条全部源自「用**输入**去重建**状态**」：B2 人类 idle
+（20–30% 帧）在动作空间里表达不了（`ScriptedInput` 的 move=0 = 继续走）、B5 快进段内可能先死、
+B6 交棒点不在决策边界上、B1 重建出的不是人类那个状态且**无外部证据**可对。改为**直接注入状态**。
+
+**决定（后来者极容易做错，故入册）**
+① 起始分布 = `cloneWorld` 快照（`tools/sim/build-state-init-bank.ts` 产物，人类**真正到达过**的世界），
+不是人类输入的产物。资产全是现成机制（`ReplayInput` + `cloneWorld`/`restoreWorld` +
+`worldTickHash`），不新造格式、不新造解码器。
+② **状态来自人类，未来来自本局抽到的 seed**：restore → 核 tickHash → `world.rng.reseed(seed)` →
+重施 CLI/关卡权威值。故 `(stage,seed)` 种子流逐轮照旧轮换（§15.1 真满足、判决段配对干净），
+而起始状态集合 = 银行 972 个切点（池小 ⇒ V 头记忆化风险，已在 plan §5 预注册读数）。
+③ **不做 rebase**：奖励 = Φ 的差分，对「继承的进度」天然不付钱；计数器列保持**游戏真值**，
+`initCounters`/`initSnapshot`/`initTick` additive-only 进 shard manifest 供分析侧自行 rebase。
+④ **v1 只在本机采集**，执法点在**两处**：ⓐ `dispatch.RolloutDispatcher.run()` **入口的派发闸门**——
+开了 `state_init` 的轮只要还剩一个可行远端节点就 `SystemExit`，否则零派发、整轮交本机腿
+（`run_rollout`）；`local_slots` **不是**这个开关（它只是并发配额，主循环照旧向 pool 派发）。
+ⓑ `node_side=True` 的三条 argv 路径（`build_rollout_cmd` / `iter_job.build_iter_spec` /
+`plan.template_argv`）在**发布前** `SystemExit`。两处都要：老导出器**静默忽略未知 flag**，云节点
+cwd = job 目录 ⇒ 「云上跑标准开局、账本写中段起跑」是最贵的错，宁可不发。
+**代价（2026-09-25 实付）**：首版只有 ⓑ，而主循环走的是 ⓐ 的 volume 路（`fetch_task` 拼任务参数
+**没有**快照项）⇒ 三条护栏一条没触发 = 混语料（pool 标准局）+ 缺 `initTick` 的 shard 被全剔 =
+无限波次，烧掉 **51.9 万 transitions** 才发现；教训 = 护栏写在 **argv 构造点**对 volume 路天生无效，
+派发模式必须在**派发入口**定。
+**被否决**：把 `local_slots` 当「纯本机」开关用（它语义只是并发配额，会让配额调参意外改采集分布）·
+只在 `fetch_task` 侧补 `node_side` 拒（闸门仍在上游派发之后，且节点侧调用点不止一处）。
+⑤ **shard 侧护栏**：缺正整数 `initTick` 的 shard 在**六个 funnel** 一律不计入（`_scan_shards` /
+`completed_pairs` / `settled_stage_totals` / `resumed_manifests` / `iter_shard_dirs` /
+`verify_and_land`），判据函数单点 = `rl.resume.shard_state_init_ok`；开关只从 `args.state_init` 派生。
+⑥ **起始分布进语料身份**（`corpus_identity_fp`，仅激活时，bank 只算文件名）：决定「一个样本从哪个
+世界开始」与 `seed_rotate`/`mode` 同类 ⇒ 课程中途加/删/改 `state_init` 时旧 shard 在四个 funnel
+全被 D14 自动排除，零额外参数。
+⑦ 保真门是**外部**证据（plan §2 M4）：切点取 `hashInterval` 整数倍 ⇒ 每个快照都能与录像记录链
+逐点对账（P0 已 2916/2916 全对）；采集侧每局 restore 后再自检一次，不符 = 该局响亮失败。
+
+**被否决**：① 磁带 FF（B2 idle 不可表达 / B5 快进段内会死 / B6 边界 / 无外部证据）·
+② 「用 demo 那一局的 seed 复现」（踩 §15.1「第 it 轮 (stage,seed) 不得与更早轮重复」= 重磨固定集，
+且训练 seed 集与 414000 判决段本体重合）· ③ 在 TS 侧 rebase 计数器（对奖励是恒等变换，却让
+`metrics.kills` 与 manifest 真值分叉）· ④ 云侧顺手做 blob 搬运（用 `node_side` 响亮拒换时间；
+规格留 P2.5，届时必须同时动 `_RETARGET_FLAGS` 与 plan 自检）· ⑤ bank **内容**进语料身份（要读盘 + 
+节点上不一定有该文件 ⇒ hub/节点指纹分叉，整份 job 误拒）。
+
+**违反后果**：把 `--init-snapshot` 放上云而不做 blob 通道 ⇒ 云上跑标准开局、账本写中段起跑 ·
+护栏只设在 argv 构造点、不管派发入口 ⇒ 主循环的 volume 路整条绕开（51.9 万 transitions 事故）·
+在 `reseed` **之后**核 tickHash ⇒ 外部证据变成恒假/恒真 · 交棒点不在 `K` 边界 ⇒ 首个决策前 K−1
+tick 由「上一帧残留动作」驱动 · 课程中途删 `state_init` 还复用旧 shard ⇒ 两种起始分布混训。
+—— 全文（六条评审处置表 / P0 实测读数 / 单局 smoke 读数 / P2.5 规格）→ `plan/x20-state-init.plan.md`
+§2 / §3 / §6 · 前身条目 `§2026-09-25-state-init-course-key`
+
+
+**家族 E — 事件门契约（r2）**
+
+### §2026-09-27-goalnn-r2-event-gate（2026-09-27，x2 事件门契约：γ 保 per-step + 交棒首段禁事件 + Δt≥3）
+> 决策 `DECISIONS.md` §2026-09-27-goalnn-r2-event-gate。归档 2026-10-11（第二轮瘦身）。
+
+**来历**：新纪元 R2 包（`plan/new-era-stop.plan.md §6 R2`）给 x2 rung 预注册「事件驱动决策」——
+决策门从「均匀 K」扩成「均匀 K ∪ threat-ONSET 沿（+最小间隔闸）」，落地前有三件**不能就近表达**
+的裁决：折扣语义、与 state-init 起始分布的共存、决策间隔上界（hy P0-3/P0-6 指出的三条）。
+实施记录与基线数字在同 plan 的「R2 实施记录」节。
+
+**决定**（三项，一次定死）：
+① **γ 保持 per-step**（`nn-training/rl/config.py:974` γ=0.995），**不**切半 MDP `γ^Δt`。换算声明：
+   视界 = 200 决策步 × avg-Δt；事件门实测（x20-noexplore it99 × ladder-c20 四局）
+   avg-Δt = **9.79–9.94** tick ⇒ 视界 **1958–1988** tick（相对均匀 2000 漂移 **−0.6%…−2.1%**）；
+   最小间隔闸 minGap=3 给出硬下界 600 tick（实测未逼近，minDt ∈ {3,4}）。事件密度若因 K 收紧/
+   电平化而显著上升，**重议**本条（`np_core.py::gamma_step = gamma ** dt` 已具备半 MDP 能力）。
+② **state-init 共存 = 方案 i**：银行切点规则**不变**（仍 `t % K == 0`），交棒 tick 恒是决策 tick
+   （决策流首个候选恒放行），且**交棒后第一个 K 段禁 threat 事件**——快照只存当前态、不存
+   `prevThreat` 历史，交棒瞬间的「首次入带」是伪造 onset。**不重出银行、不改切点规格**。
+③ **Δt ≥ 3 是全门不变式**（含均匀边界）：事件后 1–2 tick 的 `t % K == 0` 边界会被跳过
+   ——这是事件模式唯一会改「均匀子集」的路径，无事件的局逐字节不变（HEAD A/B 实测）。
+   门读数（n / events / avg-Δt / min-Δt / max-Δt）落 shard manifest 与 `_eval_report.json`，
+   **仅 `--decision-events` 时写**（缺省调用逐字节不变）。
+
+**被否决**：首版就上 `γ^Δt`（同刀两个自变量，x2 相对 x1 的边际不可归因，hy P0-4）；
+重出 state-init 银行（无理由的语料轮次，§15.1/§15.5）；把 threat **电平**写进谓词
+（持续期每 tick 成立 ⇒ Δt=1 ⇒ 部署 6Hz→60Hz + 视界塌缩，hy P0-3）；给 BC label 导出器
+顺带开事件（那是新语料轮次 + 与 x1 的 BC 教师口径分叉，属 x2 排产决定，不在 R2）。
+
+**违反后果**：改折扣语义 ⇒ 必须新实验（新 `--out`/`--traj` + 新 DECISIONS，§15.5），
+不得与 x1/x2 的读数混算；把电平/无条件事件写进 `decisionDue` ⇒ 部署侧前向频率与视界同时失控。
+
+**落点**：`src/nn/decision-gate.ts`（唯一实现 + 读数）· `src/nn/obs-encoder.ts::decisionTick`
+（`condition === 4`，可选 `prevThreat`）· 五处决策门（`policy-input` / `export-rl-rollout` /
+`export-eval-game` / `export-nn-replays` / `record-games-video`）+ `divergence-probe` 全改调
+`decisionDue` · `build-state-init-bank.ts` 共存契约 · 测试 `tests/nn/decision-gate.test.ts`、`tests/sim/eval-game-parity.test.ts`、`tests/state-init.test.ts`
+
+
+**家族 F — 配对止损参照物**
+
+### §2026-09-25-clutch-null-kill（2026-09-25，paired-kill 杀错臂 + 重启键坏，两处修）
+> 决策 `DECISIONS.md` §2026-09-25-clutch-null-kill。归档 2026-10-11（第二轮瘦身）。
+
+**来历**：C-0（`x20-clutch-null`）22:08 死在 it46，账本 `gate_verdict: paired-kill 连续 2 点
+< −3pp`；用户控制台重开课（22:15 marker 重写）毫无反应。两处都是代码与课程文件不一致：
+
+- **杀错臂**：两份课程文件只授权**单向**杀（差值 < −3pp ⇒ 杀 Cw，本腿证伪）；`rl/paired_kill.py`
+  实现却是**对称自杀**（Δ=本臂−对端，谁落后谁死）。C-0 落后（it40 −3.75pp / it45 −6.00pp）
+  恰等于 C-w 领先 +3.75/+6.0pp——正是加权要证明的——规则却杀了对照。对照一死，终点 verdict
+  （414000 配对 McNemar 要两条臂）即不可能。且 firing 在 ~2.9h，课程写的是 6h 中点、
+  日常"只看趋势不判决"。
+- **重启键坏**：`loop_serve.py` 重扫只认"不在 `runtimes` 里"的课；收官课永在 `runtimes` 里 ⇒
+  控制台停→开（marker 重写）永远没人执行。唯一的旧路是重启整个 serve 进程（打断健康腿）。
+
+**决定**：① `courses.<课>.paired_kill.self_kill`（rl-config 执行面，缺席/写坏=True，即现状；
+  只有显式 `false` 才关）：命中时判据照算、streak 照落账，只是不停车（`loop_guards._paired_kill`
+  在落账后、云端停机前return False）。C-0 经控制台设 `false`（rl-config 是 live 配置，不进库）。
+  ② serve 重扫：`reopened_parked`（纯函数：队列已终 + 落过收官副作用 + marker mtime 新于入队
+  记录）⇒ **只重置队列、复用原 runtime 与热引擎**（重走 open 会建 runner=None 的新 runtime，
+  池里旧引擎还在，`ensure_ready` 只对引擎不对 runner ⇒ 每轮断言失败进无限 RETRY，测试抓获）+
+  rounds_done 累计带过去；`_settle_rounds` 的旧文案同步改（"停→开后自动重新入队"）。
+  ③ 复活顺序写死：先设开关 → 再重启 serve（新进程才读新代码）→ C-0 从 it47 指针续跑；
+  streak 从账本重算（尾部仍 2/2）但开关已关 ⇒ 只记录不杀；it50 新 eval 点定去留。
+
+**被否决**：把对称改单向改默认（已有课程行为突变；开关缺席=现状）· 复活重建 runtime/引擎
+（丢 runner 无限 RETRY + 白付 torch 重建）· 重启键修成"只要 marker 在就重入队"
+（分不清"一直开着"与"停→开"，正常收官的课会被反复拉起）· 单课另起进程跑 C-0
+（与共享 trainer 抢同一 traj，lifecycle 明令禁止的双调度器）。
+
+**违反后果**：对照臂被杀 ⇒ 终点配对 verdict 永不可判（McNemar 要两臂同 seed 800 局）·
+收官课重开课无响应 ⇒ 唯一复活路是重启 serve（打断健康腿）· 复选用新 runtime ⇒ 无限 RETRY
+幽灵轮（账本有入队、无产出）。
+
+### §2026-09-30-goalnn-kickstart-burn-paired（2026-09-30，止损参照物改为同网格配对差；`auto` 缺省 = 对已配对课的行为变更）
+> 决策 `DECISIONS.md` §2026-09-30-goalnn-kickstart-burn-paired。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：Wave 1 判无效（§2026-09-30-h4-lane-wave1-verdict）——A2 的 ABORT 查实为**假阳性**：旧
+  `kickstart_burn` 的参照物是**本腿自己的 it0 基线**，而控制臂 a0（零奖励 = 真零效应）自身漂移到位
+  （逐点 pattern `..TT.T.` ⇒ 峰值 streak 2，只差 1 点被自己的规则杀掉）。参照物会飘 ⇒ 任何腿都可能
+  被自己的起点误杀，与效应无关。
+- **决定**：参照物两档。`baseline` = 旧口径（本腿 `it<=0` 末条）；`paired` = Δ = 本臂 − **对端同 it**
+  读数（pp），尾部连续 `points` 点 Δ < −`margin_pp` ⇒ 触发。常量不变（`BURN_POINTS=3` /
+  `BURN_MARGIN_PP=5.0` / `METRIC=winRate`）——只换参照物 = 最小改动。
+- **接线**：`rl/kickstart_burn.py` 增 `MODE_BASELINE/PAIRED/AUTO` + `burn_mode()`；`burn_verdict(peer_rows=…)`
+  非 None 时**整段委托** `rl/paired_kill.py::paired_kill_verdict`（Δ 判据只留一份，不写第二实现）；
+  `BurnVerdict` 增 `mode/delta_pp/peer`（带缺省 ⇒ 既有五元位置构造不变）；事件 `write_kickstart_burn`
+  同步落三字段。`loop_guards_leg.py::_burn_paired_rows` 前提闸同 `_paired_kill`（`declared_paired_seed`
+  + 对端账本末条 `run_start.rotateSeed` 同 V）；**对端不唯一不猜 ⇒ 回退 baseline 并只 WARN 一次**。
+- **★ 行为变更**：`mode=auto` 是**缺省值**；现 `rl-config.json` 已被配对的课（`x20-clutch` 等）**没有任何
+  `kickstart_burn` 覆盖** ⇒ 下次开训会**静默**从 baseline 切到 paired 参照物。有意（正是要修假阳性），
+  但读旧日志须知道两档口径不同。
+- **回测证据**（可复算：`nn-training/tools/backtest-burn-rule.py`，语料 `tmp/h4-lane-{a0,a1,a2}/eval_log.jsonl`）：
+  - 旧规则实测：a0 峰值 streak 2 / a1 1 / **a2 3 ⇒ 触发**（即那条被误杀的腿）⇒ 三腿假阳性 1/3。
+  - 新规则实测：a1 vs a0 峰值 0；a2 vs a0 Δ = (+0.00, −5.50, +5.00, −5.50) 峰值 1 ⇒ **两臂都不触发**。
+  - MC 20000 次（每点 200 局二项噪声，7 点 it5..35）：N1 无漂移 旧 **0.0050%** / 新 **0.3100%**；
+    N2 共享漂移（两臂共享对照臂实测轨迹）旧 **49.3350%** / 新 **0.4650%**（**低 106×**）⇒ 假阳性来自
+    「参照物会飘」而非抽样噪声。阈值 grid 复测：现常量 (5pp,3点) 在 N2 下 FP = **0.56%**，比旧规则
+    低 **88×**，且全 grid 三腿实际触发均 [False, False]。
+  - **代价明买明卖**：无漂移下新规则略差（0.005% → 0.31%），因配对差抽样方差更大
+    （σ_Δ = √2·σ ≈ 3.48pp vs 单臂 2.46pp）。
+- **被否决备选**：① 只调常量（margin 3→8 / points 3→4）——参照物漂移仍在，且会拖死真效应；
+  ② 止损改硬失败（crash）——丢掉「停训但留证据」的诊断价值；③ 要求 `kl`/`entropy` 同时异常才触发——
+  无回测支撑，判据复杂化一倍；④ 为 burn 单写 Δ 判据——与 `paired_kill` 两套实现会分叉。
+- **未决（用户拍板）**：控制臂漂移处置 · 是否按 lane 项占回报 5% 重锚（新实验 §15.5）· Wave 2 几何选择。
+
+
+**家族 G — 门禁停机平台级开关**
+
+### §2026-10-01-goalnn-gate-halt-platform-level（2026-10-01，门禁停机模式升为平台级单开关：`tmp/gate-halt.json` 意图 + 回执；课程级三写面退役）
+> 决策 `DECISIONS.md` §2026-10-01-goalnn-gate-halt-platform-level。归档 2026-10-11（第二轮瘦身）。
+
+**决策**（用户 2026-09-25 口径：「`gate-halt-mode` 应是平台级而非课程级，有人盯盘时切为提示，离开时切停机」）：
+「门禁触发时停不停」从课程级散装旋钮升成**平台级单开关**——`tmp/gate-halt.json`（控制台写、
+supervisor 每轮判定读）+ `tmp/gate-halt.applied.json` 回执（逐课 `effective_mode` / `source`）；
+`notify` 可带 `until`（2/4/8h/不限，缺省 8h），**到点由读时求值自动回落 halt**（不需要任何进程定时翻牌）。
+
+**为什么**：它回答的是「**有没有人在盯盘**」——操作员此刻的状态，不是某门课的属性。课程级三写面
+（每课 argv `--gate-halt-mode` / `courses.<课>.gate_halt_mode` / `<traj>/gate-halt-mode.txt`）外加隐藏第四面
+（`rl.gate_halt_mode`）造成两类事故：① **配对腿漂**（2026-09-25 现场 `x20-dodge-l3` 写了 `notify` 而 `l1` 没有
+⇒ 同一实验一腿停、一腿只提示，序列可比性受损）；② UI 摆在平台位置、语义却是课程级。
+
+**两个裁决点**（评审发现初稿自相矛盾 / 落点被分层守卫拦）：
+
+* **O4 优先级 = 平台文件 > CLI `--gate-halt-mode` > 缺省 `halt`**；CLI 只兜底「文件不存在」。
+  备选「CLI 优先（单课例外临时用 CLI）」被否决：那会让控制台写出的意图被历史命令行静默盖掉，
+  「一处切、全局生效」当场失效。
+* **O5 模块落点 = `nn-training/worker/gate_halt.py`**（L0：只 stdlib + `common.log`）。备选
+  `biz/gate_halt.py` 被否决：刀 6 后 `biz/` 的定位是「只留游戏业务」（12 模块），训练控制面住进去是
+  类别错误；`trainer/` 则会被 `tests/test_layering.py` 的 `TRAINER_ORCHESTRATION` 快照拦下
+  （每模块必须可达 `remote|worker`）。代价是显式的：`tests/helpers/remote_dag.py::LAYERS` 登记一行
+  （ownership，不是罚款）。
+
+**保守方向（不可回退）**：任何「读不到」都回落 `halt`，**绝不回落到 notify**；文件**存在但坏**
+（非法 JSON / 非法 mode / `until` 非数字）⇒ `halt` + 告警，且**不许被旧 CLI 值接管**。
+
+**被否决的备选（逐处）**：① 残留 `<traj>/gate-halt-mode.txt` 首次迁移成平台值——会把**一门课**的值
+升格成全平台，违背「平台级是人显式切的」⇒ 取「忽略 + 首次告警 + 控制台提示可删」。② 把开关做成
+rl-config 键——它每进程启动才读一次，而平台开关要**每轮热读**（且 rl-config 承载密钥、写面重）。
+③ 离线腿「也能 notify」——今天云机侧没有读点（读点只在 supervisor），不为此改 hub 下发链路；
+取 `NN_GATE_HALT_LEG=offline` 短路 + `source=default` 日志兜底。④ 顺手重构 `trainer/loop_control.py`
+（同构范式）——不动：它有自己的契约与用例，同构不等于同体。
+
+**为什么值得记**（AGENTS §6.3）：① 有被否决备选（上面四条）；② **未来会重犯**——「把操作员的
+此刻状态写成课程属性」是同族错误的温床（下一处可能是：谁在盯盘 / 这条腿要不要停 / 是否在维护窗口），
+判据是「这个值描述的是**课**，还是人/机群？」；③ 不能就近表达：契约、优先级、读时求值、两侧原子写、
+离线腿口径跨 python/TS 两棵树。
+
+**指针**：全文 `docs/nn/training-stack.md` §27（训练侧）+ `docs/nn/console.md` §21（控制台侧）·
+计划 `gate-halt-platform-level.plan.md`（**未跟踪**，不入库）· 实现 `nn-training/worker/gate_halt.py` ·
+`trainer/loop_guards.py::_gate_halt_mode`（唯一读点，移 hub 短路之前）· `worker/cli.py`（`default=None`）·
+`trainer/loop_serve.py`（白名单摘除）· `rl_config.schema.json`（`rl.gate_halt_mode` 挪 retired）·
+`dashboard/src/stack/gate-halt.ts` · `core/paths.ts` · `server/api/route.ts` · `web/view/gate-halt.ts` ·
+测试 `nn-training/tests/worker/test_gate_halt.py` · `dashboard/tests/gate-halt-platform.test.ts`。
+落账门禁：nn 子集绿（gate_halt 19 例 + 守卫族：意图 / 分层 / 护栏）· dashboard 1245/0 + typecheck · 三份 bundle 过。
+
+
+**家族 H — 节点门 bootId 一致性**
+
+### §2026-09-29-goalnn-node-bootid-gate（2026-09-29，节点门多一道「本轮 bootId 一致」：训练侧用 ping 的 pid/bootId 判 stale 并排除）
+> 决策 `DECISIONS.md` §2026-09-29-goalnn-node-bootid-gate。归档 2026-10-11（第二轮瘦身）。
+
+**决策**（用户裁定，采纳 `plan/sampler-single-instance.plan.md` §8-Q2 的**备选**而非其原推荐）：训练侧
+节点门在 codeHash/bun 之外多一条「**本轮 bootId 一致**」——新模块 `nn-training/rl/node_identity.py`
+（纯逻辑 + 进程内小账本，零依赖）按 `round_key(腿, 采集单元 id)`（`rollout:it42` / `eval:it42.eval` /
+`batch:run.b7u3`）在**本轮**第一次 ping 时钉住该节点的 `bootId`（只钉一次，不一致后不改写 ⇒ 重复 ping
+原因幂等），之后同键 ping 不同 ⇒ 本轮**排除**该节点：rollout 准入与回场（`rl/dispatch.py` /
+`rl/queue_local.py`，两处共用同一个键）· A-eval 准入（`rl/eval_dispatch.py`）· B/C 回场
+（`rl/batch_runner.py::_UnitLanes.bringup`，复用 `given_up` 以保住「全部通道已放弃 ⇒ 收摊」的退出条件）。
+**只上报 + 排除，绝不下发 `/v1/restart`**（两个进程同时服务不是重启一个能修好的事）。
+
+**为什么**：① a98（2026-09-29）一台机器两个 agent 同听 8443，一轮 192 局被内核按 4 元组哈希分给两个
+代码版本 ⇒ 45 列旧 shard 混进 payload ⇒ 云 worker `grad` 5 连炸、整门课 aborted；② agent 侧的应用层互斥
+（`tools/agent/single-instance.ts`，本次同批上线）是**节点自证**，本门是**客户端观测**的第二道；
+③ 与 codeHash 门相比它**更早**（不需等一个代码版本差异，同一份代码的进程换代也看得见），且在同端口双
+进程下 codeHash 门是**抽签**（同一轮 ping 落在哪个进程上看 4 元组哈希），而 bootId 变化正是这个缺陷的指纹。
+
+**被否决**：① plan 原推荐「先只记进 `dist-agent-meta.jsonl` 供归因、不加门」（用户改判：要更早止损）·
+② **全局**（跨轮）钉：一次正常升级/重启就换 bootId ⇒ 会把「重启前后的一轮」误伤；按轮钉把影响面限在
+触发变化的那一轮、下一轮自动回场（代价：轮中途重启的节点本轮不再被用——已接受并写进文档）·
+③ 把这条塞进纯函数 `node_gate_reason`（判据需要**状态/账本**，纯函数不许长状态）·
+④ mismatch 时顺手重启/升级节点（§1.4-2「不自动杀旧」同理）。
+
+**违反后果**：对新 agent 以外也生效（对旧 agent 不 fail-open）⇒ 升级波期间把还没升级的节点整批排除；
+拿 bootId 当**跨轮**判据 ⇒ 每次正常升级都白搭一轮；把这条判据换成「看 ping 命中哪个进程」（不做账本）⇒
+它在只 ping 一次的腿上永远不会响（判据名存实亡）。
+
+—— 全文（判据 / 四个消费面 / 已知代价 / 接线守卫与测试 / 门禁读数）→ `docs/nn/training-stack.md` §26
+（agent 侧契约与真机配方 → `docs/nn/runtime-opt.md` §29）
+
+
+**家族 I — it0 基线污染（评估腿）**
+
+### §2026-09-25-evala-baseline-bc（2026-09-25，it0 基线污染修复）
+> 决策 `DECISIONS.md` §2026-09-25-evala-baseline-bc。归档 2026-10-11（第二轮瘦身）。
+
+**背景**：x20-dodge-l1/L3 的 `eval_log` it0 各混入 200 局后期权重读数（L1 混 it43、L3 混 it51），
+基线 low 被带偏 6pp（L1 it0 34.0 真值应为 40.0）。门控 verdict 不受影响（独立段），日常分析已更正。
+
+**根因（三段链）**：① `rl/eval_a_once.py --baseline` 缺省取 live `out`
+（`tmp/<课>/weights.json`，每轮被训练覆盖）；② 幂等早退判据是 `iter=0 ∧ 同 wver`，
+权重变了就不命中；③ 离线开课/重启自动补派基线（`shouldAutoBaseline`）⇒ 补派瞬间读到
+新权重，照跑并写进 it0 槽。触发两次：L1 在 10:42 重启（it43 当时最新）、L3 在 15:45
+重启（it51 当时最新）。下游放大：`kickstart-receipt` 取最后一条 it0 行当基线，控制台
+基线显示同步被带偏。
+
+**变更**：`--baseline` 缺省改取课程 `bc`（起点冻结权重，归档文件永不变）；`resolve_eval_ckpt`
+抽成单一事实来源函数；bc 缺席响亮拒（不拿 out 顶）；日志/TS 注释同步改口。
+`--ckpt` 显式永远优先；wver 幂等保留（bc 换了会自然重评）。
+
+**被否决**：① **iter=0 槽写过一次就永久锁死** —— 杀掉合法场景（课程 bc 换了要重评基线）；
+② **补派时传归档 ckpt 快照** —— 调用方（控制台开课）不知道归档布局，知识放错了地方，
+权重归属是训练侧课程文件的事实，就该 python 侧从课程文件取。
+
+**回归**：`nn-training/tests/trainer/test_eval_a_once.py`（bc 缺省 ×2：取 bc 断言 + 重启后早退不写别轮
+wver；旧钉死 live-out 的用例已按新语义改写）+ `test_baseline_eval.py` 全绿。
+—— 全文即本条 · 档案 `docs/nn/engineering.md` §25
+
+
+**家族 J — 决策周期 K 通道**
+
+### §2026-10-07-k5-decision-k-channel（2026-10-07，K→5 案 v2 评审修订 + 决策周期 K 通道全链落地 + 两课备好）
+> 决策 `DECISIONS.md` §2026-10-07-k5-decision-k-channel。归档 2026-10-11（第二轮瘦身）。
+
+- **背景**：`plan/k5-rhythm.plan.md` 评审（2026-10-07）发现 2 P0 + 3 P1：守卫口径三处不一（表 margin10 /
+  注释 margin_pp 100 / filing"margin10"）；评估 K 未预注册且全链无通道（K5 臂会被 OOD 按 10 拍评估）；
+  est 未按 K 重标定（K=5 沿用 147 ⇒ 每轮 2× 产样、一半被逐关配额裁废）；"K5>K10 ⇒ 稀释假说成立"归因过强；
+  K 机制事实（旋钮已在 `src/nn/decision-gate.ts`，缺的是通道）。用户指令：处理评审 → 更新文档 → 按文档自主开发/测试/审查/签入。
+- **口径修订（覆盖 `§2026-10-07-k5-filing` 原文"margin10"，全案以 plan v2 为准）**：守卫统一
+  `{mode: baseline, margin_pp: 100}`（等效关，用户"熔断全关"指令；floor=基线−100pp 永不触发）；K5 臂
+  `est 294`（=1470 ticks ÷ K=5）；评估 K **按各自臂**（K5@5、K10@10；终判显式 `--decision-k 5`）；
+  结论措辞 = "节奏**总效应**"（两臂同带 9 维 ⇒ 测不到"列收益被兑现"交互；判该交互的唯一后继 = K5 下重做 A/A0，另案）；
+  γ/λ 逐字不动 ⇒ tick 视野随 K 减半（固有耦合，登记不补偿）。
+- **决定（K 通道）**：课程键 `decision_k`（默认 10；**仅 ≠10 激活**——老课程命令/URL/指纹逐字节不变）
+  → `--decision-k` 贯通 rollout 链（`worker/cmd`）+ eval 链（`eval_local` / `dispatch` / `eval_dispatch` /
+  `batch_runner` / `offline_eval` / `eval-course-ckpt` spec）→ wire `decisionK`（agent URL + taskKey `:k<N>` 后缀 +
+  轮询同配方）→ 节点能力位 `decisionKSupport`（旧 agent fail-closed，绝不静默跑 K=10 混批）→ shard manifest
+  `k` 记有效值；corpus_fp 仅非默认值进 payload。半格几何结论：玩家 1.05px/tick ⇒ 决策间隔位移 K=10→10.5px /
+  K=5→5.25px（非 16px 格宽整数倍）⇒ 属 K 固有副作用，登记不修（原"半格对齐"词无定义，按此原始几何量落定）。
+- **顺带修复（实现中发现）**：`common/distribution._poll_result` 轮询 URL 缺 `decisionEvents`/`decisionK`
+  分量（提交键有 `:de1`、轮询键没有）⇒ 事件课程的 async 竞速副本必 404；一并补进。
+- **实测取证**：同 seed/stage 冒烟——shard manifest `k=5/nSamples=300` 对 `k=10/nSamples=150`（2× 决策密度）；
+  eval 报告 `decisions` 160 vs 80；坏值 `--decision-k abc` 三端响亮拒（rollout throw / eval exit2 / agent 400）。
+- **两课**：`nn-training/curricula/x21-psh-k5.jsonc` / `x21-psh-k10.jsonc`——同起点（B0-it290，五份副本
+  sha `2A658C67…3B6C` 逐字节同源，含 in-use 备份）/ 同流 20261013（预查空）/ 同预算 150 iter / 同守卫；
+  唯一差别 = K（派生白名单对账通过：`backup_dir/backup_prefix/bc/decision_k/est/name/out/traj`）。**开课待人工（控制台）**。
+- **落点**：plan/k5-rhythm.plan.md（v2）· 全文 → `docs/nn/training-stack.md` §31（索引 `docs/nn.progress.md`）·
+  单测 `nn-training/tests/worker/test_decision_k.py` + `tests/{nn/decision-gate,agent/decision-events-taskkey,dist-node-gate}.test.ts`。
+- **违反后果**：绕能力位给旧 agent 派 K≠10（静默 K=10 混批）；评估 K 留默认（拿 10 拍评 5 拍 policy）；
+  est 不重标定（2× 产样一半裁废）——三者任一都让"唯一差别=K"对账失效。
+
+
+---
+
+> **第三轮归档（2026-10-11）**：`DECISIONS.md` 第四次瘦身把**仍带成篇正文、且正文 >6 非空行**的 **7** 条决策全文按主题落到本节（上一轮：三次瘦身切 >12 的 192 条 = 本节「第二轮归档」）。家族谱系**续上一张表**：沿用旧字母 = 同一族（链上含第一~三轮成员，全文在本节内），新族从本档下一个字母续编；只归类连线，结论引原文。`DECISIONS.md` 索引行末尾指针 = `docs/nn/training-stack.md` §25「决策正文归档」· 锚 `### §<id>`。
+
+**家族谱系（续上一张表，先后为时间序）**
+
+- **家族 D｜起始分布注入（state_init）**（3 条，2026-09-25）：`§2026-09-25-state-init-course-key` → `§2026-09-25-state-init-snapshot` → `§2026-09-25-state-init-routing`
+  - 末条决定（原文节录）：`state_init` 开 ⇒ 整轮直接交纯本机 `run_rollout`、向 pool 零派发，跟节点健康度无关……
+- **家族 F｜配对止损参照物**（3 条，2026-09-25～09-30）：`§2026-09-25-clutch-null-kill` → `§2026-09-26-paired-kill-opt-in` → `§2026-09-30-goalnn-kickstart-burn-paired`
+  - 末条决定（原文节录）：参照物两档。`baseline` = 旧口径（本腿 `it<=0` 末条）；`paired` = Δ = 本臂 − **对端同 it**……
+- **家族 J｜决策周期 K 通道**（2 条，2026-09-26～10-07）：`§2026-09-26-goalnn-stop-k-is-training-side` → `§2026-10-07-k5-decision-k-channel`
+  - 末条决定（原文节录）：**口径修订（覆盖 `§2026-10-07-k5-filing` 原文"margin10"，全案以 plan v2 为准）**：守卫统一……
+- **家族 K｜B 案边界：非 MDP 变更 · RNG 不进 shard**（2 条，2026-09-26）：`§2026-09-26-goalnn-stop-mdp-no-change` → `§2026-09-26-goalnn-stop-rng-principle`
+  - 末条决定（原文节录）：**特权观测一律不进 shard / 不进 obs**。判据①进 shard = 格式变更（`OBS_SCHEMA_MAJOR`……
+- **家族 L｜云端多卡默认（DataParallel）**（1 条，2026-09-13）：`§2026-09-13-multi-gpu-default`
+  - 末条决定（原文节录）：battle-rl.ipynb 单 cell 的 `use_multi_gpu` 默认 **True**——云端 2+ GPU 时……
+- **家族 M｜门必须配平凡基线**（1 条，2026-09-28）：`§2026-09-28-goalnn-gate-baseline-8`
+  - 末条决定（原文节录）：一切行为门（plan 课程/探针的通过线）在 pin 数字的同时，必须 pin 一个……
+
+**家族 D — 起始分布注入（state_init）（续）**
+
+### §2026-09-25-state-init-routing（2026-09-25，起始分布派发：改路由不改放行名单）
+> 决策 `DECISIONS.md` §2026-09-25-state-init-routing。归档 2026-10-11（第三轮归档）。
+
+**来历**：c4d42a04 的派发闸门（有可行远端节点就 `SystemExit`）把 51.9 万混语料变成了 6 秒
+响亮拒，但 v1 因此构造性不可跑（self 也算节点，pool 健康时永远被拒；"只留本机"的自救指南
+是错的——只留 self 照样 abort）。另一条路"放行 local 节点"错层：`fetch_task` 协议没有快照项，
+放行≠给快照， self 经节点协议跑的还是标准开局。
+
+**决定**：`state_init` 开 ⇒ 整轮直接交纯本机 `run_rollout`、向 pool 零派发，跟节点健康度无关
+（`dispatch.run()` 入口，替代旧闸门；旧测试①按新契约改写）。additive-only 照旧。
+
+**被否决**：按"本地与否"放行名单（缺 flag 的局照样进 pool，护栏全剔=无限波次重演，且无响铃）·
+保留闸门等人下线节点（出路不存在，课程永远停车）。
+
+**违反后果**：向 pool 派发一局 ⇒ 该局标准开局 + 护栏剔除 + 波次凑不齐（无限波次）。
+
+
+**家族 F — 配对止损参照物（续）**
+
+### §2026-09-26-paired-kill-opt-in（2026-09-26，配对杀臂默认关火）
+> 决策 `DECISIONS.md` §2026-09-26-paired-kill-opt-in。归档 2026-10-11（第三轮归档）。
+
+**来历**：`§2026-09-25-clutch-null-kill` 的对称自杀修了对照臂，但"谁该被比"没修——
+state-init 出生 11 轮即被杀：拿它的 it5/it10 日常（12.0%/11.5%）去比**已归档** L1 的
+it5/it10（16.0%/15.5%），连跪两点 −4pp。两腿同 V（1789876303）只是门派同源（全屋种子流），
+不是配对实验；L1 当天已判负归档，拿它当"对端"比出"落后"是必然。
+
+**决定**：`courses.<课>.paired_kill.enabled` 显式 `true` 才判（缺席/写坏=False；关了的守卫
+连 streak 落账都不写）。C-w 设 `enabled: true`（课程要的中点杀臂仍在）+ C-0 保持
+`self_kill: false`（只记录不停车）；其余一切腿（state-init/L1d2/L2a/L2b…）缺席=不判——
+未来同 V 的活腿之间也不会交叉开火。
+
+**被否决**：只给"归档腿"加存活判断（治标：未来两条活腿同 V 照样互杀；且"归档"无机器定义）·
+守卫内写死白名单（课程对名单进代码，换一批腿改一次；执行面策略住 rl-config 已有先例）。
+
+**违反后果**：默认开火 ⇒ 任何新腿出生即被拉去跟历史最强点比，连跪即死（state-init it11）。
+
+
+**家族 J — 决策周期 K 通道（续）**
+
+### §2026-09-26-goalnn-stop-k-is-training-side（2026-09-26，K=10 决策门周期属训练侧：可动）
+> 决策 `DECISIONS.md` §2026-09-26-goalnn-stop-k-is-training-side。归档 2026-10-11（第三轮归档）。
+
+**来历**：新纪元首刀（`plan/new-era-stop.plan.md`）反复出现「K 要不要收紧」的悬案——AGENTS §0.2
+规定**任务侧**（命数/敌数/关卡形态/终局标准/物理冷却）不可动，而 K 是 NN 输入侧的决策周期
+（盲 hold 的长度），既非规则也非关卡。
+
+**决定**：**K 是训练侧可动参数**。改 K 只改「策略每隔多少 tick 重新观察一次」，不改任务的胜负
+条件与单位 ⇒ 收紧 K（如 10→5）属于训练侧调参，不触发 §0.2 禁令，也不需要新关卡/新任务口径。
+首腿保持 K=10（Phase -1 实测：人类非冰面停段中位 9 tick ≥ K/2，相容），收紧留作 x2 rung 期权。
+
+**被否决**：把 K 归为任务侧（会让「10 tick 盲 hold」这个已确诊病灶永远不可修，与诊断②矛盾）；
+首刀就收紧 K（与 STOP 单变量声明冲突，hy P0-4）。
+
+
+**家族 K — B 案边界：非 MDP 变更 · RNG 不进 shard（续）**
+
+### §2026-09-26-goalnn-stop-mdp-no-change（2026-09-26，B案不构成 MDP 变更声明）
+> 决策 `DECISIONS.md` §2026-09-26-goalnn-stop-mdp-no-change。归档 2026-10-11（第三轮归档）。
+
+**来历**：B案把 move index 0 从「保持朝向」改为 **STOP**——动作空间的**语义**变了，需要明确
+声明它算不算 MDP 变更（会不会波及 state-init bank / 决策门 / divergence-probe）。
+
+**决定**：**B案不是 MDP 变更**。状态空间、转移、奖励、K=10 的均匀决策边界全部未动；变的只是
+「同一个动作索引代表哪个物理命令」，而该映射在仿真里本来就存在（`moveDir=null ⇒ moving=false`）。
+⇒ 决策门 5 处（`t%K`）、divergence-probe、state-init bank 的 `t%K==0` 切点**全部无需改**
+（Phase 0 #4「天然一致即验收」）。真正的 MDP 变更（threat-onset 事件化 / 半 MDP γ^Δt）**defer
+到 x2 rung**，届时按 R2 包重新预注册。
+
+**被否决**：把动作语义翻转也算 MDP 变更（会误导后续把所有基于 K 的装置重算——它们依赖「决策
+边界」而非「索引含义」）；顺带做事件化（等于首刀变多变量，hy P0-4 / glm P0-3）。
+
+**违反后果**：混为一谈 ⇒ 无谓重出 bank / 改决策门，且掩盖真正的 MDP 变更（事件化）根本没做。
+
+### §2026-09-26-goalnn-stop-rng-principle（2026-09-26，RNG/特权观测不进 shard：原则存档）
+> 决策 `DECISIONS.md` §2026-09-26-goalnn-stop-rng-principle。归档 2026-10-11（第三轮归档）。
+
+**来历**：新纪元讨论中反复提出「给 critic/actor 特权观测」（RNG 状态、敌开火倒计时、tick 堆、
+事件堆栈）以降低信用分配难度。评审指出这会改 shard 格式并使既有 value 读数整体偏移。
+
+**决定**：**特权观测一律不进 shard / 不进 obs**。判据①进 shard = 格式变更（`OBS_SCHEMA_MAJOR`
+bump + 全量重转），且会让已训 value 头的输出量纲漂移（旧 checkpoint 不可比）；②敌开火倒计时
+等本就是**超人信息**——人类看不到，进了就破坏「以人类熟练玩家为难度唯一口径」（§0.2）。RNG 只走
+`world.rng`（AGENTS §2.3），不进观测。需要时以**训练侧**手段解决（GAE λ / value 头 / 事件化）。
+
+**被否决**：把 RNG state 塞进 shard（格式 + value 偏移双代价）；观测侧加倒计时列（超人信息出局）。
+
+
+**家族 L — 云端多卡默认（DataParallel）（续）**
+
+### §2026-09-13-multi-gpu-default（2026-09-13，云端多卡默认启用 DataParallel：PPO + BC；用户指令）
+> 决策 `DECISIONS.md` §2026-09-13-multi-gpu-default。归档 2026-10-11（第三轮归档）。
+
+- **决策**：battle-rl.ipynb 单 cell 的 `use_multi_gpu` 默认 **True**——云端 2+ GPU 时
+  PPO 与 BC 都真跑多卡（PPO 走 worker 既有 DP 分支；BC 由 bc.py 新增 `_resolve_bc_device`
+  + `_bc_raw` 支撑）。opt-out 保留：要与历史单卡 run 逐位 A/B 的腿把
+  `use_multi_gpu` 改 `False`（或 device 显式 "cuda"）。
+- **拒绝的替代方案**：维持 opt-in 默认 False——用户指令「双/多卡时训练跑在双/多卡上」
+  直接否决「第二张卡闲置」；改为 opt-out 后，逐位可比性从默认诉求降级为显式诉求
+  （等价于把「新实验臂」的判断权交给操作员的显式开关）。
+- **边界**：单卡机器行为零变化；TPU 拒收链不变（bc 任务 tpu/xla 仍 ProtocolError）；
+  DP 激活时 worker/bc.py 双侧响亮日志「梯度归约顺序变化，与单卡 run 不可逐位比」；
+  DP state_dict 的 "module." 前缀防线 = bc.py `_bc_raw` + worker 既有 raw_model 模式。
+
+
+**家族 M — 门必须配平凡基线（续）**
+
+### §2026-09-28-goalnn-gate-baseline-8（2026-09-28，门必须配平凡基线）
+> 决策 `DECISIONS.md` §2026-09-28-goalnn-gate-baseline-8。归档 2026-10-11（第三轮归档）。
+
+- **背景**：wait-gate 的 F1≥0.60 门被一行“重复上一步”（F1≈0.69–0.72）击穿——
+  门立了半年（plan §3 同款写法），从没人问过平凡基线是多少。
+- **备选与否决**：“门数字面合理即可” —— 否；合理数字可能全是粘性/多数类/同义反复
+  （本案三样占全：粘性 a=0.689、多数类、s22 后果变量）。
+- **决定**：一切行为门（plan 课程/探针的通过线）在 pin 数字的同时，必须 pin 一个
+  同口径平凡基线（重复上一步/多数类常数/单特征，共位计算），门过线且**显著超基线**
+  才算过；泄漏消融（去后果变量重跑）是 P0 第一道门。
+- **违反后果**：门成了同义反复的毕业典礼——模型学到粘性，账本记成功劳，下一腿在
+  沙子上继续盖。
+- 全文 → `docs/nn/experiments.md` §58。
+
 ## 附：本文件旧编号对照（拆分前 `docs/nn.progress.md` 的 § 号）
 
 旧 §23→§1 · 旧 §26→§2 · 旧 §36→§3 · 旧 §37→§4 · 旧 §38→§5 · 旧 §43→§6 · 旧 §44→§7 · 旧 §45→§8 · 旧 §48→§9 · 旧 §76→§10 · 旧 §77→§11 · 旧 §78→§12 · 旧 §79→§13 · 旧 §80→§14 · 旧 §81→§15 · 旧 §83→§16 · 旧 §84→§17 · 旧 §85→§18 · 旧 §86→§19 · 旧 §89→§20 · 旧 §90→§21 · 旧 §108→§22 · 旧 §118→§23 · 旧 §120→§24
