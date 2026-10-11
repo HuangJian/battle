@@ -13,7 +13,6 @@
 
 from __future__ import annotations
 
-import argparse
 import importlib.util
 import json
 import sys
@@ -29,6 +28,7 @@ _HERE = Path(__file__).resolve()
 _ROOT = _HERE.parents[2]
 _NN = _ROOT / "nn-training"
 sys.path.insert(0, str(_NN))
+from common.cli import house_parser, run_main
 
 _spec = importlib.util.spec_from_file_location("spatial_probe_mod", _HERE.parent / "spatial-probe.py")
 assert _spec is not None and _spec.loader is not None
@@ -128,7 +128,7 @@ def cv_probe(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument("--dump", default="tmp/spatial-probe/hu150")
     ap.add_argument("--readings", default="")
     ap.add_argument("--seed", type=int, default=20261005)
@@ -191,4 +191,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

@@ -40,6 +40,7 @@ import threading
 import time
 from pathlib import Path
 
+from common.cli import house_parser, run_main
 from remote.artifacts import atomic_write_json
 from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
@@ -159,7 +160,7 @@ def _write_status(path: Path, d: OfflineDeliverer, *, ctl: CtlReader, last_ctl_a
 
 
 def build_argparser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(
+    ap = house_parser(
         prog="remote.deliver_worker",
         description="产物补传腿的独立子进程（由 remote.offline_deliver.DelivererProcess 拉起）",
     )
@@ -303,4 +304,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run_main(main)

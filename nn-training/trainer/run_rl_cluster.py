@@ -29,24 +29,20 @@ TTL 缓存）：改 `--json` 的字段名/语义 = 改控制台，两边必须�
 
 from __future__ import annotations
 
-import argparse
 import contextlib
 import json
 import os
 import sys
 from types import SimpleNamespace
 
-# 2026-09-30（刀 7）：本入口从 nn-training/ 顶层搬进 trainer/ —— 脚本目录不再是
-# nn-training。脚本目录 trainer/ 会被自动插到 sys.path[0]，而它有自己的 queue.py，会遮蔽
-# stdlib `queue`（concurrent.futures 导入即循环炸，见 trainer/eval_a_once.py）⇒ 先摘掉
-# 脚本目录项，再把 nn-training 根放回。
+# 2026-09-30（刀 7）：本入口从 nn-training/ 顶层搬进 trainer/ ⇒ HERE（nn-training 根）上溯 2 层。
+# 2026-10-11（S1）：原先还要摘掉脚本目录项，防脚本目录里的 `queue.py` 遮蔽 stdlib `queue`；该模块已
+# 改名 `trainer/dispatch_queue.py`（plan/nn-training-reuse-and-deps.plan.md §S1），scrub 删除。
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-while _SCRIPT_DIR in sys.path:
-    sys.path.remove(_SCRIPT_DIR)
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 
+from common.cli import house_parser, run_main
 from trainer.loop_plan import (
     course_is_held,
     course_kind,
@@ -191,7 +187,7 @@ def main(argv: list[str] | None = None) -> int:
     from common.platform_utils import force_utf8_stdio
 
     force_utf8_stdio()
-    ap = argparse.ArgumentParser(description="单进程多课程训练调度器（R2c-1：只读计划视图）")
+    ap = house_parser(description="单进程多课程训练调度器（R2c-1：只读计划视图）")
     ap.add_argument("--traj-root", default="tmp", help="课程 traj 根（每课 = <root>/<课>）")
     ap.add_argument("--courses", default="", help="逗号分隔；空 = 扫 --traj-root 自动发现")
     ap.add_argument("--json", action="store_true", help="输出 JSON（控制台/CI 消费）")
@@ -376,4 +372,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_main(main)

@@ -70,6 +70,13 @@ MOVED_NAMES = {
     # 门面（`worker/config.py`）同批转发。
     "DEAD_COURSE_KEYS",
     "dead_key_warnings",
+    # 2026-10-11 增 1：`is_custom_stages` 的唯一实现（plan/nn-training-reuse-and-deps §S3）
+    # —— `CourseConfig` 与 `worker/bc_config.BcCourseConfig` 共用。名字同样**没搬过家**，
+    # 但本表 = 「course_spec 的模块面闭集」⇒ 一并登记，门面（`worker/config.py`）同批转发。
+    "CustomStagesMixin",
+    # 2026-10-11 增 1：读块助手（`_block_dict` ×2 收敛，plan/nn-training-reuse-and-deps §S3）。
+    # 两句同名转发仍在 `worker/{kickstart_burn,paired_kill}`（规则两条，只共用读块）。
+    "block_dict",
 }
 
 ALLOWED_IMPORTS = {
@@ -141,6 +148,23 @@ def test_cross_face_call_is_function_local_not_top_level() -> None:
     tops = _top_level_imports(NEW_FILE)
     hit = sorted(tops & TOP_LEVEL_BANNED)
     assert hit == [], f"顶层出现了成环 import：{hit}（跨课门校验必须是函数内延迟）"
+
+
+def test_block_dict_accepts_models_and_dicts_and_rejects_junk() -> None:
+    """读块助手的契约（两条止损规则共用它）：dict 原样 · pydantic 块 `model_dump()` · 其余 → `None`。"""
+    import worker.kickstart_burn as kb
+    import worker.paired_kill as pk
+    from worker.config import KickstartBurnBlock
+
+    assert kb._block_dict is spec_mod.block_dict
+    assert pk._block_dict is spec_mod.block_dict
+    d = {"margin_pp": 3.0}
+    assert spec_mod.block_dict(d) is d  # dict 原样返回（不拷贝）
+    dumped = spec_mod.block_dict(KickstartBurnBlock(margin_pp=3.0))
+    assert dumped is not None and dumped["margin_pp"] == 3.0  # 块 -> dict 原样透传（含未指定字段的 None）
+    assert set(dumped) == set(KickstartBurnBlock.model_fields)
+    assert spec_mod.block_dict(None) is None
+    assert spec_mod.block_dict(7) is None
 
 
 def test_course_facade_forwards_every_moved_name() -> None:

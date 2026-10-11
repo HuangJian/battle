@@ -14,6 +14,7 @@ import json
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from common.http_respond import respond_json
 from common.protocol import WIRE_JOB_MAGIC, normalize_manifest, unpack_job_v2
 
 PAYLOAD = b"PK\x03\x04fake-payload-bytes"
@@ -75,13 +76,9 @@ class FakeWorker:
             def log_message(self, fmt: str, *args) -> None:  # 静默
                 pass
 
-            def _json(self, obj: dict, status: int = 200) -> None:
-                body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-                self.send_response(status)
-                self.send_header("Content-Type", "application/json")
-                self.send_header("Content-Length", str(len(body)))
-                self.end_headers()
-                self.wfile.write(body)
+            # 假 worker 必须是真 worker **逐字节**的镜像 ⇒ 用同一个实现
+            # （common/http_respond.py），而不是再抄一份。
+            _json = respond_json
 
             def do_GET(self) -> None:
                 path = self.path.split("?", 1)[0]

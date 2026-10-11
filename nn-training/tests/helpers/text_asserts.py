@@ -60,11 +60,12 @@
 
 from __future__ import annotations
 
-import argparse
 import ast
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+
+from common.cli import house_parser, run_main
 
 #: 扫描面（相对 `--root`）：门禁 `pytest tests/ e2e/` 的同一批文件。
 SCAN_DIRS: tuple[str, ...] = ("tests", "e2e")
@@ -488,7 +489,7 @@ def totals(root: Path) -> tuple[int, int, dict[str, tuple[int, int]]]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="文本断言计数（口径见模块头）")
+    ap = house_parser(description="文本断言计数（口径见模块头）")
     ap.add_argument("--root", default=str(Path(__file__).resolve().parents[2]))
     ap.add_argument("--json", default=None, help="把逐文件明细写到该路径")
     ap.add_argument("--top", type=int, default=20, help="按条数打印前 N 个文件")
@@ -541,4 +542,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_main(main)

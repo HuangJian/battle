@@ -6,7 +6,7 @@ from pathlib import Path
 
 # 以下五个名字是本模块的**公共 re-export 面**（原为本地定义，2026-09-23 收敛到唯一实现）。
 # 调用方（`trainer/batch_runner.py` / `trainer/eval_dispatch.py` / `trainer/rollout_phase.py` / e2e）与
-# 既有测试都从 `trainer.queue` 取这些名字 ⇒ 名字留在原位，定义只留一份。
+# 既有测试都从 `trainer.dispatch_queue` 取这些名字 ⇒ 名字留在原位，定义只留一份。
 #   · bun_version / mm  → `common.proc`（版本探测与 major.minor 比对）
 #   · _record_agent_meta → `biz.agent_meta`（dist-agent-meta.jsonl 的唯一写面）
 from common.proc import bun_version as _bun_version

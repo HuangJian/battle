@@ -34,6 +34,7 @@ import torch.nn as nn
 if _ilu.find_spec("common") is None:
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent.parent))
 
+from common.cli import house_parser, run_main
 from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 from worker.models.student import StudentNet
 
@@ -131,6 +132,26 @@ def export_intent_weights(model: IntentNet, out_path: str) -> None:
     save_weights_json(model, out_path, extra_meta={"intentHead": True})
 
 
+def build_intent_model(meta: dict, params: dict) -> IntentNet:
+    """从 `meta["arch"]` + 权重 dict 建一个 **eval 态** IntentNet。
+
+    `strict=False`：容忍 value/enemy/anchor 头缺失或形状差异（意图评估只需主干 + intent_head）。
+
+    2026-10-11（plan/nn-training-reuse-and-deps §S3）：`worker/scripts/{eval_intent_m5,gen_self_inj}`
+    两个脚本各持一份逐字节相同的 `build_model` ⇒ 收敛到这里（构造属于模型自己的模块）。
+    """
+    arch = meta.get("arch", {})
+    model = IntentNet(
+        inject=True,
+        h=arch.get("h", 64),
+        d=arch.get("d", 8),
+        head_hidden=arch.get("head_hidden", 128),
+    )
+    model.load_state_dict(params, strict=False)
+    model.eval()
+    return model
+
+
 def load_intent_weights(model: IntentNet, weights_path: str) -> None:
     """加载导出 JSON（主干部分缺失时——例如 transfer 只给主干——也接受，仅校验
     存在的键 shape 一致；heads 必须齐全）。"""
@@ -158,9 +179,8 @@ def load_intent_weights(model: IntentNet, weights_path: str) -> None:
 
 
 def main() -> None:
-    import argparse
 
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument(
         "--golden", metavar="OUT", help="P3-4 golden 导出：固定权重+输入 → 期望三头 logits JSON"
     )
@@ -243,4 +263,4 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

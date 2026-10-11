@@ -23,7 +23,7 @@ Windows = cp936），而子进程吐的是 UTF-8 字节 ⇒ 解码在 `subproces
 
 ## 2. `bun_version`：版本探测的两种历史口径
 
-训练机侧（`trainer/queue.py`、`trainer/dispatch.py`）要的是「拿不到就 `?`」，节点侧
+训练机侧（`trainer/dispatch_queue.py`、`trainer/dispatch.py`）要的是「拿不到就 `?`」，节点侧
 （`worker/iter_rollout.py`）要的是「拿不到就空串」（自检行里空串 = 没装上）。
 两种口径都合法，但**实现**只该有一份 ⇒ 这里收 `fallback` 参数，调用方保留自己的
 1 参签名做薄包装（同时保住测试的 `monkeypatch.setattr(mod, "bun_version", ...)` 接缝）。
@@ -94,7 +94,7 @@ def bun_version(
 
     `require_zero`：非零退出码是否也算「探测失败」。**这不是旋钮，是两个调用点的
     既有差异**，刻意保留而不是「统一」掉（统一会静默改行为）：
-      * 训练机侧（`trainer/queue.py` / `trainer/dispatch.py`）历史实现不看退出码 ⇒ 默认 False；
+      * 训练机侧（`trainer/dispatch_queue.py` / `trainer/dispatch.py`）历史实现不看退出码 ⇒ 默认 False；
       * 节点侧自检（`worker/iter_rollout.py`）历史实现 `returncode == 0` 才认 ⇒ 传 True。
     两条路径的差异窗口是「bun 存在、退出码非 0、却打印了版本串」——现实中不存在，
     但把它写成一个参数比写在注释里可靠。

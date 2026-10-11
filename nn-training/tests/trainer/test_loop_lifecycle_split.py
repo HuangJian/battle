@@ -118,7 +118,7 @@ TOP_IMPORTS = frozenset(
         "trainer.loop_guards",
         "worker.loop_round",
         "trainer.loop_steps",
-        "trainer.queue",
+        "trainer.dispatch_queue",
         "worker.resume",
         "trainer.rollout_phase",
         "worker.train_ledger",

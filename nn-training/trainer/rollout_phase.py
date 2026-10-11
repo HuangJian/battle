@@ -20,9 +20,9 @@ from pathlib import Path
 
 from common.log import log
 from trainer.collect_only import precollect_snapshot_wver, spawn_collect_next
+from trainer.dispatch_queue import RUN_ID, local_slots_max_of, run_rollout, run_rollout_queue
 from trainer.eval_dispatch import dispatch_eval_bg
 from trainer.eval_m1 import dispatch_eval_bg_m1
-from trainer.queue import RUN_ID, local_slots_max_of, run_rollout, run_rollout_queue
 from trainer.stream import run_rollout_stream
 from worker.resume import completed_pairs, state_init_enabled
 

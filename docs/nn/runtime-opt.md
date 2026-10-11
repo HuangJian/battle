@@ -1914,7 +1914,7 @@ summary 落账全部与 in-loop 同一份实现 —— 手动行与 in-loop 行�
   权重解析按 `traj/it*/_eval_frozen_weights*.json` 找，同址才有得找）；本机局目录收工即清。
 - 本机 gate **立即置位**：手动评估不在训练的 PPO 窗口里，没有要让位的对象
   （不置位 = 本机槽位一路空等到 deadline）。
-- ⚠ 一个必须先摘掉的坑：`trainer/queue.py` 遮蔽 stdlib `queue`（脚本目录被插进 `sys.path[0]`），
+- ⚠ 一个必须先摘掉的坑：`trainer/dispatch_queue.py` 遮蔽 stdlib `queue`（脚本目录被插进 `sys.path[0]`），
   而节点派发要走 `common.distribution.ping_nodes_parallel` / `post_weights_parallel` 的
   `concurrent.futures`（内部 `import queue`）⇒ **导入派发器之前必须先 scrub 脚本目录**，
   否则一 ping 就炸（旧实现从不派发，所以这个坑从没暴露过；同 `eval_replays_once.py`）。

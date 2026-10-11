@@ -50,7 +50,7 @@ from trainer.batch_plan import (
     node_supports_decision_k,
 )
 from trainer.batch_store import BatchStore, data_root
-from trainer.queue import _record_agent_meta, bun_version
+from trainer.dispatch_queue import _record_agent_meta, bun_version
 
 # 尾竞速：与 A 层（trainer/eval_dispatch）**同一机制**（纯函数在 trainer/queue_local 单源）。
 from trainer.queue_local import (

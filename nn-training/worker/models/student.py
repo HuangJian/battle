@@ -51,7 +51,9 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from common.cli import house_parser
 from common.schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
+from worker.models._common import param_count as param_count
 
 DEFAULT_H = 64
 DEFAULT_D = 8
@@ -286,10 +288,6 @@ class PPOStudent(StudentNet):
         )
 
 
-def param_count(model: nn.Module) -> int:
-    return sum(int(p.numel()) for p in model.parameters())
-
-
 def export_student_golden(
     path: str,
     h: int = DEFAULT_H,
@@ -359,9 +357,8 @@ def export_student_golden(
 
 
 if __name__ == "__main__":
-    import argparse
 
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument(
         "--golden", metavar="OUT", help="PPOStudent golden 导出：固定权重+输入 → move/fire/value logits JSON"
     )

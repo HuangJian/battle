@@ -6,6 +6,7 @@ import json
 import secrets
 from pathlib import Path
 
+from common.cli import run_main
 from worker.terminal_stats import terminal_stats
 
 REPO = Path(__file__).resolve().parents[3]  # 仓库根（2026-09-08 双 tmp 统一：tmp/ 在仓库根）
@@ -174,4 +175,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

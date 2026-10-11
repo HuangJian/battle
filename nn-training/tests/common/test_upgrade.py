@@ -22,6 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import urlparse
 
+from common.cli import run_main
 from common.platform_utils import rmtree_best_effort
 
 # 仓库根 battle2（tests/ 上溯 3 层，与 trainer/queue_local.py 同约定）——bun 侧脚本在
@@ -708,4 +709,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

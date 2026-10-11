@@ -30,7 +30,6 @@ CLI（控制台调用；stdout 末行是机器可读的 `DELIVER_IMPORT_JSON={..
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
@@ -39,6 +38,7 @@ import sys
 import zipfile
 from pathlib import Path
 
+from common.cli import house_parser, run_main
 from common.protocol import ProtocolError
 
 # 产物账本行 → 课程账本行的搬运**只在 remote.artifacts 实现一份**（人工导入与实时补传共用）：
@@ -428,7 +428,7 @@ def write_run_complete_for_run(
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="导入训练产物 zip（deliver-<课程>.zip）")
+    ap = house_parser(description="导入训练产物 zip（deliver-<课程>.zip）")
     ap.add_argument("--zip", help="产物 zip 路径（不跑 `--end-it-reached` 时必填）")
     ap.add_argument("--dest", required=True, help="落地根目录（每个 run 一个子目录）")
     ap.add_argument("--course", default="", help="控制台当前课程（对账文件名；可空）")
@@ -466,4 +466,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run_main(main)

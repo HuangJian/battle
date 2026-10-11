@@ -41,7 +41,7 @@ from threading import Lock
 from typing import Any
 
 from common import net_http
-from common.logutil import log_line
+from common.logutil import tag_logger
 from common.protocol import (
     AUTH_HEADER,
     BLOB_NAMES,
@@ -76,9 +76,7 @@ from common.protocol import (
 DEFAULT_PUSH_CONFIG = Path(__file__).resolve().parents[1] / "rl-config.json"
 
 
-def _log_default(msg: str) -> None:
-    """默认日志（tag=`hub-push`）——行格式见 `common.logutil`（`clock=time` 保可注入）。"""
-    log_line("hub-push", msg, clock=time)
+_log_default = tag_logger("hub-push", lambda: time)
 
 
 def _http(

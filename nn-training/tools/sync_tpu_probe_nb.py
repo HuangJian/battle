@@ -13,9 +13,14 @@ drift 由 `tests/tools/test_tpu_probe_notebook.py` 在 python-gate 常驻拦截�
 
 from __future__ import annotations
 
-import argparse
 import json
+import sys
 from pathlib import Path
+
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.cli import house_parser, run_main
 
 NN_ROOT = Path(__file__).resolve().parent.parent
 SCRIPT_PATH = NN_ROOT / "tools" / "tpu-probe.py"
@@ -65,10 +70,10 @@ def sync(check_only: bool) -> int:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="把 tools/tpu-probe.py 同步进 ipynb/tpu-probe.ipynb")
+    parser = house_parser(description="把 tools/tpu-probe.py 同步进 ipynb/tpu-probe.ipynb")
     parser.add_argument("--check", action="store_true", help="只检查漂移，不写回；漂移时 exit 1")
     return sync(parser.parse_args().check)
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_main(main)

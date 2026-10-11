@@ -57,7 +57,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from common import net_http
-from common.logutil import log_line
+from common.logutil import tag_logger
 from common.protocol import (
     AUTH_HEADER,
     OFFLINE_ARTIFACT_BODY_MAX,
@@ -92,9 +92,7 @@ DRAIN_MAX_PASSES = 256
 #: 为什么需要：`_repost` 是持久集 ⇒ 一个永远投不出去的轮次（文件被删/盘抖动/解析炸）会在每次
 #: 唤醒时重抛一次、并让整趟 `_push_backlog` 中止 —— 既不响亮也不收敛（2026-10-07 补，见 plan §10.6-1）。
 POST_FAILURE_LIMIT = 3
-def _log_default(msg: str) -> None:
-    """默认日志（tag=`deliver`）——行格式见 `common.logutil`（`clock=time` 保可注入）。"""
-    log_line("deliver", msg, clock=time)
+_log_default = tag_logger("deliver", lambda: time)
 
 
 def _cpu_seconds() -> float:

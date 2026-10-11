@@ -29,7 +29,6 @@ QoS 降质），不是代码路径 —— 所以它必须可重跑、同一台�
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
@@ -47,6 +46,7 @@ ROOT = Path(__file__).resolve().parent.parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from common.cli import house_parser
 from hub.server import _JobStore, make_server
 
 #: 探针客户端一律**不走环境代理**。
@@ -243,7 +243,7 @@ def _run_leg(label: str, base: str, token: str, rounds: int, payload: bytes) -> 
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="M1 隧道协议 A/B 探针（本机闭环）")
+    ap = house_parser(description="M1 隧道协议 A/B 探针（本机闭环）")
     ap.add_argument("--legs", default="quic,http2", help="逗号分隔的协议腿（quic,http2）+ 可选 loopback")
     ap.add_argument("--rounds", type=int, default=DEFAULT_ROUNDS)
     ap.add_argument("--bytes", type=int, default=PROBE_BYTES)

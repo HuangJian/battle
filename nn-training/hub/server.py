@@ -40,6 +40,8 @@ hub/auth.py                                   _AuthGuard + _is_loopback（第十
 
 from __future__ import annotations
 
+from common.cli import run_main
+
 # ── 门面（**全部**是自别名 re-export，按模块路径排序 —— 分组说明在下面每行末尾的注释里）。
 #
 # 四组来源：
@@ -142,4 +144,4 @@ __all__ = [
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

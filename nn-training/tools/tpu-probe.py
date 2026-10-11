@@ -47,16 +47,21 @@
 
 from __future__ import annotations
 
-import argparse
 import os
 import sys
 import time
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.cli import house_parser, run_main
 
 # ---------------------------------------------------------------- 常量（= common/schema.py）
 BOARD = 26
@@ -659,7 +664,7 @@ def bench_case(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument("--device", default="tpu", choices=["tpu", "cuda", "cuda-dp", "cpu"])
     ap.add_argument("--chunks", type=int, default=CHUNKS)
     ap.add_argument("--epochs", type=int, default=EPOCHS)
@@ -868,4 +873,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

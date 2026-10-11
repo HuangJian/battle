@@ -299,12 +299,13 @@ LAYERS: dict[str, int] = {
     "worker.kickstart_burn": 1,
     "worker.loop_tasks": 0,
     "worker.metrics_stats": 0,
-    "worker.models.core": 0,
     "worker.models.rl_model": 0,
     "worker.modes": 0,
     "worker.node_identity": 0,
     "worker.paired_kill": 0,
-    "worker.ppo.np_core": 0,
+    #: 2026-10-11（S3）：三个流式 backend（`np_core`/`goal`/`intent`）共用的**装载骨架**
+    #: （`episode_from_shard`）——只 import numpy ⇒ 秩 0。
+    "worker.ppo._episode": 0,
     "worker.ppo.trainer": 0,
     "worker.reports": 0,
     "worker.resume": 0,
@@ -319,7 +320,12 @@ LAYERS: dict[str, int] = {
     "worker.train.bc_core": 0,
     "worker.train.device": 0,
     "worker.train.loop_util": 0,
-    "worker.volume_quota": 0,
+    #: 2026-10-11（S3）：模型族共用小面（`param_count`）——只 import torch ⇒ 秩 0。
+    "worker.models._common": 0,
+    #: 2026-10-11（S3）：`volume_*` 三兄弟共用的最小数学层（`ceil_div` / `games_total`）——
+    #: 只 import stdlib ⇒ 秩 0。**三个调用方因此各升一层**（0→1 / 1→2 / 2→3，见下三节；
+    #: 层号是拓扑秩，加一条仓内依赖就必须重排）。
+    "worker.volume_math": 0,
     "worker.workdir_sweep": 0,
     # L1（14 个）
     "worker.cli": 1,
@@ -331,12 +337,18 @@ LAYERS: dict[str, int] = {
     "worker.loop_guards_trip": 1,
     "worker.loop_round": 1,
     "worker.loop_scheduler": 1,
-    "worker.ppo.common": 1,
+    # 模型族的入口（`NNPolicy`）：2026-10-11（S3）起顶层多一条 `worker.models._common`(L0)
+    # （`param_count` 的唯一实现）⇒ 从 L0 升为 **L1**。
+    "worker.models.core": 1,
+    # 2026-10-11（S3）：`np_core` 升到 L1（它现在靠 `worker.ppo._episode`(L0)）⇒ common 随之为 **L2**。
+    "worker.ppo.common": 2,
     "worker.train_ledger": 1,
-    # 分关采样分配纯函数（2026-10-07，plan/rollout-stage-balance §3）：只靠 L0 的
-    # `worker.volume_quota.target_per_stage`（无 IO/无 torch）⇒ 秩 1。
-    "worker.volume_alloc": 1,
+    # 配额感知连续采集（2026-10-11 S3）：顶层靠 `worker.volume_math`(L0) ⇒ 秩 1。
+    "worker.volume_quota": 1,
     # L2（13 个）
+    # 分关采样分配纯函数（2026-10-07，plan/rollout-stage-balance §3）：靠 `worker.volume_quota`(L1)
+    # 的 `target_per_stage` 与 `worker.volume_math`(L0) ⇒ 2026-10-11 S3 起秩 2。
+    "worker.volume_alloc": 2,
     "worker.bc_config": 2,
     # ★ 2026-10-05（plan/course-startup-recover）：课程解析/校验链从 loop_serve 抽出——顶层只
     # 用 `worker.modes`(L0) 与 `common.*`，函数内延迟用 `worker.cli`/`worker.config`(L1) ⇒ 秩 2。
@@ -344,23 +356,27 @@ LAYERS: dict[str, int] = {
     "worker.bc_eval": 2,
     "worker.eval_replays_once": 2,
     "worker.gate_judges": 2,
-    # 动态采集的计划块（初波构造 / `volume_block` / 同源校验）：2026-10-07 起它的分关公式
-    # 从 `worker.volume_alloc`(L1) 取（`est_hi` / `alloc_games_by_stage` / `validate_*`——
-    # **一份公式，不抄第二份**）⇒ 从 L0 升到 **L2**（1 + max(deps)）。唯一账本内读者
-    # `worker.plan`(L4) 仍在它上面。
-    "worker.volume_waves": 2,
-    # 节点侧**有界多批补差**（2026-10-07，plan/rollout-stage-balance §4.4）：顶层靠
-    # `worker.volume_alloc`(L1)，函数内延迟靠 `worker.iter_rollout`(L1)/`worker.reports`(L0)
-    # ⇒ 秩 2。⚠ 它**不得** import `worker.plan`(L4)：唯一的顶层读者 `remote/worker.py` 是
-    # L5（只能向下指）而 L5 → L2 才是向下边；本次为此把 `retarget_argv` 下沉到 L0。
-    "worker.iter_topup": 2,
     "worker.models.student": 2,
+    # 2026-10-11（S3）：`load_episode_from_shard` 的骨架提到 `worker.ppo._episode`(L0)
+    # （np-core 不再自含那两行）⇒ 从 L0 升为 **L1**。
+    "worker.ppo.np_core": 1,
     "worker.paired": 2,
     "worker.scripts.eval_bridge": 2,
     "worker.scripts.regen_reward_golden": 2,
     "worker.scripts.regen_v7_ts_oracle": 2,
     "worker.state_init": 2,
     # L3（6 个）
+    # 动态采集的计划块（初波构造 / `volume_block` / 同源校验）：2026-10-07 起它的分关公式
+    # 从 `worker.volume_alloc` 取（`est_hi` / `alloc_games_by_stage` / `validate_*`——
+    # **一份公式，不抄第二份**）；2026-10-11 S3：alloc 升到 L2 ⇒ 本模块 **L3**。
+    # 唯一账本内读者 `worker.plan`(L4) 仍在它上面。
+    "worker.volume_waves": 3,
+    # 节点侧**有界多批补差**（2026-10-07，plan/rollout-stage-balance §4.4）：顶层靠
+    # `worker.volume_alloc`(L2) 与 `worker.volume_math`(L0)，函数内延迟靠
+    # `worker.iter_rollout` / `worker.reports` ⇒ 2026-10-11 S3 起秩 3。
+    # ⚠ 它**不得** import `worker.plan`(L4)：唯一的顶层读者 `remote/worker.py` 是 L5
+    # （只能向下指）而 L5 → L3 才是向下边；为此把 `retarget_argv` 下沉到 L0。
+    "worker.iter_topup": 3,
     "worker.cmd": 3,
     "worker.gate_check": 3,
     "worker.models.goal_net": 3,

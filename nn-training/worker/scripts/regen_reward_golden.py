@@ -25,6 +25,7 @@ if str(ROOT) not in sys.path:
 import numpy as np
 
 from biz.reward_library import METRICS_DIM, METRICS_VERSION, build_reward_fn
+from common.cli import run_main
 from worker.config import load_course
 
 GOLDEN_DIR = ROOT / "tests" / "golden"
@@ -94,4 +95,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

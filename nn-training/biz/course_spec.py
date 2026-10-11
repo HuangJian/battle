@@ -19,11 +19,29 @@ from __future__ import annotations
 
 import json
 import math
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from biz.reward_library import OUTCOMES
+
+
+class CustomStagesMixin:
+    """「`stages` 是列表 = 自定义关」的**唯一实现**（2026-10-11，plan/nn-training-reuse-and-deps §S3）。
+
+    `CourseConfig`（本文件）与 `BcCourseConfig`（`worker/bc_config.py`）各持逐字节相同的一份
+    ⇒ 两处各升一层依赖不如一处定义（R4：不得有第二份实现）。
+
+    ⚠ `if TYPE_CHECKING` 里的注解**只给 mypy 看**：pydantic v2 会把基类的**运行时**注解收成字段
+    （实测：不带 TYPE_CHECKING 时 `model_fields` 会多出 `stages`），所以运行时一个字都不留。
+    """
+
+    if TYPE_CHECKING:
+        stages: Any
+
+    @property
+    def is_custom_stages(self) -> bool:
+        return isinstance(self.stages, list)
 
 # ================================================================== 课程配置
 #
@@ -702,7 +720,26 @@ class PairedKillBlock(BaseModel):
         return _points_or_raise(v)
 
 
-class CourseConfig(BaseModel):
+def block_dict(block: Any) -> dict | None:
+    """课程止损块 → 普通 dict；None/坏值 → None（认 dict 与 pydantic 块两种形态）。
+
+    读面消费 `args` 上的**启动物化快照**（`flat_overrides` 以 `model_dump()` 落成 dict =
+    restart-only 的冻结面）。
+
+    2026-10-11（plan/nn-training-reuse-and-deps §S3）：`worker/kickstart_burn` 与
+    `worker/paired_kill` 各持一份**逐字节相同**的实现 ⇒ 收敛到这里（两份都留 `_block_dict`
+    转发名）。两条**规则**仍是两条（一条看结果、一条看配对差 Δ），本函数只管「把块读成 dict」。
+    """
+    if isinstance(block, dict):
+        return block
+    dump = getattr(block, "model_dump", None)
+    if callable(dump):
+        dumped = dump()
+        return dumped if isinstance(dumped, dict) else None
+    return None
+
+
+class CourseConfig(BaseModel, CustomStagesMixin):
     """课程配置文件（`nn-training/curricula/*.jsonc`）。
 
     顶层键 1:1 映射 argparse dest；`stages` / `reward` / `ppo_schedule` 为嵌套块。
@@ -889,10 +926,6 @@ class CourseConfig(BaseModel):
     eval_every: int = 1
 
     # ------------------------------------------------------------ 派生
-
-    @property
-    def is_custom_stages(self) -> bool:
-        return isinstance(self.stages, list)
 
     @property
     def stage_ids(self) -> list[int]:

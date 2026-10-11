@@ -8,7 +8,7 @@
 取回相位用 `_push_fetch`（直推腿）；`TrainingRemoteDrive` 继承本模块。
 
 本模块的**延迟 import** 刻意逐方法自带（`_remote_ppo_publish` 里的 `remote.hub_client` /
-`biz.config` / `biz.reward_library` / `trainer.queue` / `remote.bundle`；`_remote_ppo_land` 里的
+`biz.config` / `biz.reward_library` / `trainer.dispatch_queue` / `remote.bundle`；`_remote_ppo_land` 里的
 `remote.hub_client` / `trainer.collect_only`）——它们各自服务一段，合成一份清单会重新长出拆相前的形状。
 """
 
@@ -264,7 +264,7 @@ class TrainingRemoteJob(TrainingRemotePush):
             self._code_sha256 = _sha
             self._code_zip_path = _zip
         # code.zip 已包含当前源码快照（含未提交修改），无需 git commit-pin 检查。
-        from trainer.queue import RUN_ID
+        from trainer.dispatch_queue import RUN_ID
 
         run_id = RUN_ID
         ckpt_remote_path = Path(args.traj) / f"it{it - 1}" / "ppo_ckpt_remote"

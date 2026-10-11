@@ -82,7 +82,7 @@ RUNNER_IMPORTS = {
     # （运行器那行仍在：`run_local_eval_game` 是本机槽位的执行面）。
     "worker.eval_yield",
     "common.log",
-    "trainer.queue",
+    "trainer.dispatch_queue",
     "trainer.queue_local",
 }
 

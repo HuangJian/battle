@@ -16,7 +16,6 @@
 
 from __future__ import annotations
 
-import argparse
 import csv
 import gzip
 import io
@@ -26,6 +25,11 @@ import sys
 from collections.abc import Callable, Iterable, Sequence
 from pathlib import Path
 from typing import Any
+
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.cli import house_parser, run_main
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 UNKNOWN = "未知"
@@ -242,7 +246,7 @@ def _parse_iters(raw: str | None) -> list[int] | None:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(
+    ap = house_parser(
         prog="python tools/course_compare.py",
         description="两条腿按绝对 it 点对齐的对照表（活体或封存目录皆可）",
     )
@@ -270,4 +274,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover
-    sys.exit(main())
+    run_main(main)

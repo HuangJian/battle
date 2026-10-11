@@ -28,6 +28,7 @@ import numpy as np
 import numpy.typing as npt
 import torch
 
+from common.cli import run_main
 from common.schema import OBS_CHANNELS, SCALAR_DIM
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -111,7 +112,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)
 
 
 def test_backend_params_match_config() -> None:

@@ -8,12 +8,16 @@ Pure stdlib so it can run in CI before torch is installed.
 """
 from __future__ import annotations
 
-import argparse
 import hashlib
 import re
 import sys
 from datetime import datetime
 from pathlib import Path
+
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.cli import house_parser, run_main
 
 DEFAULT_KEEP = 3
 META_SUFFIX = ".meta.json"
@@ -144,7 +148,7 @@ def update_md(root: Path) -> int:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = house_parser(description=__doc__)
     ap.add_argument("--keep", type=int, default=DEFAULT_KEEP,
                     help=f"latest K files to retain per family (default {DEFAULT_KEEP})")
     ap.add_argument("--dir", default="weights", help="weights directory")
@@ -165,4 +169,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

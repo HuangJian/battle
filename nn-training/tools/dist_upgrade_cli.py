@@ -58,6 +58,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import common.distribution
+from common.cli import run_main
 
 
 def _fail(msg: str) -> int:
@@ -253,4 +254,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_main(main)

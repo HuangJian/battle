@@ -1687,7 +1687,7 @@ R2a/R2b/R2c 把单进程调度器造出来了，但**没人看得见它**：`tra
   不一致（理论不该发生）在 manifest 里诚实标记，不静默；单次导出上限 400 局；
   replay 文件名 stage 段 = 原始 --stage id（自定义关 2000+ 非映射前 loadIndex）+1
   （buildReplayFilename 1-based 显示口径），python 映射时减回。
-- **教训入册**：nn-training 内脚本目录 rl/ 会遮蔽 stdlib `queue`（trainer/queue.py）——
+- **教训入册**：nn-training 内脚本目录 rl/ 会遮蔽 stdlib `queue`（trainer/dispatch_queue.py）——
   顶层 `from concurrent.futures import ...` 必须在移除 sys.path 脚本目录项之后
   （eval_replays_once.py 头部 scrub，实测循环 import 崩）。
 - **同日注记（用户裁定）**：交付形态改为**逐文件**——不打 tar.gz；完成后每局一个

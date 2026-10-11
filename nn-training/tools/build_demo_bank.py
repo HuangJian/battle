@@ -10,17 +10,22 @@ Same encodings as rollout chunks (ObsEncoder v4：POLICY_EXTRA 随样本走).
 """
 from __future__ import annotations
 
-import argparse
 import hashlib
+import sys
 from pathlib import Path
 
 import numpy as np
+
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.cli import house_parser, run_main
 
 NN_ROOT = Path(__file__).resolve().parent.parent  # nn-training/ (script lives in tools/)
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument("--corpus", default=str(NN_ROOT / "data" / "human-x20-corpus"))
     ap.add_argument("--out", default=str(NN_ROOT / "data" / "human-x20-corpus" / "demo_bank.npz"))
     args = ap.parse_args()
@@ -59,4 +64,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

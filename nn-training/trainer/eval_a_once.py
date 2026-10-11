@@ -42,14 +42,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "nn-training"))
-# 脚本目录 trainer/ 会被自动插到 sys.path[0]，其 queue.py 遮蔽 stdlib queue ——
-# `concurrent.futures` 内部 `import queue` 即循环炸（实测）。本脚本现在**要派发到节点**
-# （common.distribution.ping_nodes_parallel / post_weights_parallel 走 concurrent.futures），
-# 所以必须在导入派发器之前先把脚本目录项摘掉；trainer.* 的导入走上面的 nn-training 入口，
-# 语义不变（同 eval_replays_once.py）。
-_SCRIPT_DIR = str(Path(__file__).resolve().parent)
-while _SCRIPT_DIR in sys.path:
-    sys.path.remove(_SCRIPT_DIR)
+from common.cli import house_parser, run_main
+
+# 2026-10-11（S1）：原先这里要摘掉脚本目录项，防脚本目录里的 `queue.py` 遮蔽 stdlib `queue`；
+# 该模块已改名 `trainer/dispatch_queue.py`（plan/nn-training-reuse-and-deps.plan.md §S1），
+# 遮蔽消失，scrub 一并删除。trainer.* 的导入走上面的 nn-training 入口，语义不变。
 
 
 def _read_summary(eval_jsonl: Path, key16: str, it: int) -> dict | None:
@@ -179,7 +176,7 @@ def resolve_eval_ckpt(ckpt_arg: str, ns, baseline: bool) -> str:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Run one A-layer clean eval for a course ckpt")
+    ap = house_parser(description="Run one A-layer clean eval for a course ckpt")
     ap.add_argument("--course", required=True)
     ap.add_argument(
         "--ckpt",
@@ -348,4 +345,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_main(main)

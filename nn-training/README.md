@@ -32,7 +32,10 @@ nn-training/
 │   ├── proc.py              #    run_capture（显式 utf-8 + errors=replace）/ bun_version / POPEN_NO_WINDOW
 │   ├── fs.py                #    原子写 / JSONL 追加 / tar 安全解包
 │   ├── text.py              #    exc_tail（异常尾部同口径截取）
-│   ├── logutil.py           #    default_log（统一带时间戳 log 工厂）
+│   ├── logutil.py           #    log_line / stamp / tag_logger（统一带时间戳 log 工厂；tag_logger 收时钟**取值函数**以保假钟可注入）
+│   ├── stats.py             #    num_or_none（观测字段数值化口径：bool / 非数值 → None）
+│   ├── http_respond.py      #    respond_json（裸 HTTP 的 JSON 响应形状唯一实现：hub 与节点 worker 同源）
+│   ├── cli.py               #    house_parser（全仓 ArgumentParser 唯一构造点）+ run_main（None→0/int→该码/Ctrl-C→130）
 │   ├── errors.py            #    失败类型族（每条继承线 = 一个处置分支）
 │   ├── wire_codec.py        #    v1 gzip+base64 / v2 裸二进制编解码
 │   ├── job_identity.py      #    幂等键 / job_id / 撞名守卫
@@ -70,8 +73,10 @@ nn-training/
 │   │                        #      纯 stdlib + common.log ⇒ 账本 L0；读点住 trainer/loop_guards.py）
 │   ├── models/              #    【模型包】core（NNPolicy，BC 基座）· student（PPOStudent，P1.5 蒸馏）
 │   │                        #      · rl_model（ResNet-11 教师网；**死文件**）· intent_net · goal_net
+│   │                        #      · _common（param_count 唯一实现）· intent_net.build_intent_model（构造器共用）
 │   ├── ppo/                 #    【PPO 包】engine（ppo_update / build_ppo）· common（GAE / masked_logsoftmax）
 │   │                        #      · intent / goal 适配（变步长 GAE）· bench（吞吐基准）
+│   │                        #      · _episode（三个 backend 共用的装载骨架；numpy-only）
 │   ├── data/                #    【数据包】dataset（mirrorX 在线增强）· npyio（shard 读写）· weights_io
 │   │                        #      · mirror · shard_split · weights_meta
 │   ├── train/               #    【训练器脚本】bc.py（masked CE + value MC）· goal_bc.py · intent_probe.py
@@ -102,7 +107,9 @@ nn-training/
 ├── trainer/                 # 【训练编排 L4】驱动 rollout/eval/远端腿——只剩会碰传输层的那一层
 │                            #   2026-09-30 刀 4：纯逻辑整族已搬进 biz/ ⇒ 本包**只有**编排
 │                            #   2026-09-30 刀 5：整包改名 rl/ → trainer/（成员一个没变，37 个）
-│   ├── queue.py             #    派发队列：race-tier / dup / pick（远端节点 + 本地槽位）
+│   ├── dispatch_queue.py    #    派发队列：race-tier / dup / pick（远端节点 + 本地槽位）；
+│   │                        #      原名 queue.py，2026-10-11 改名 —— 它曾把 stdlib `queue` 遮住，
+│   │                        #      逼出 8 处 `sys.path.remove` scrub（plan/nn-training-reuse-and-deps §S1）
 │   ├── stream.py            #    流式迭代：wave_params + 软降档（采集与 PPO 波次重叠）
 │   ├── eval_dispatch.py     #    评估轮派发（per-tick 贪心局 + eval_log 对账）
 │   ├── eval_m1.py           #    M1 评估协议（intent/goal 干净评估 + Δ 止损）
@@ -144,6 +151,7 @@ nn-training/
 │   ├── smoke_test.py        #    torch 冒烟（真跑一轮小训练，读 val loss）
 │   ├── weights_prune.py     #    权重文件归档轮转（保留最近 K 份，自动更新 WEIGHTS.md）
 │   ├── dist_upgrade_cli.py  #    节点升级指令的一次性入口（供 tools/sim/*.ts 复用训练循环的守卫）
+│   ├── reuse_audit.py       #    复用账本：逐字节重复 / AST 结构克隆 / 同名 ≥3 处（`--json`；守卫 tests/test_reuse_ledger.py）
 │   └── plot_training.py     #    train.log 快速取证（无外部依赖）
 │
 ├── tmp/                     # 训练产物（已 .gitignore）

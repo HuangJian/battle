@@ -26,7 +26,7 @@ from typing import Any
 
 import common.distribution
 from common.log import log
-from trainer.queue import RUN_ID
+from trainer.dispatch_queue import RUN_ID
 
 
 class TrainingBaseline:

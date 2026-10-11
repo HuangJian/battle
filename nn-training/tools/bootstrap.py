@@ -21,7 +21,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import platform
@@ -33,6 +32,11 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.cli import house_parser, run_main
 
 # 2026-09-30（刀 7）：本脚本从 nn-training/ 顶层搬进 tools/。`HERE` = **nn-training 根**
 # （`.venv` / `.venv/machine-profile.json` 都住那儿，语义一字未变）⇒ 上溯层数 +1。
@@ -399,7 +403,7 @@ def cache_cross_fs_warning() -> str | None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="nn-training 环境 bootstrap")
+    ap = house_parser(description="nn-training 环境 bootstrap")
     ap.add_argument("--check", action="store_true", help="只体检，不改任何东西")
     ap.add_argument("--recreate", action="store_true", help="强制重建 venv")
     ap.add_argument("--variant", choices=sorted(VARIANT_GROUPS), help="跳过探测，显式指定变体")
@@ -555,4 +559,4 @@ def venv_python_exists_but_broken(vpy: Path) -> bool:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run_main(main)

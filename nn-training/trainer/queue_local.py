@@ -1,6 +1,6 @@
 """queue_local —— 纯本地 rollout（单机线程池路径）。
 
-从 trainer/queue.py 拆出（2026-09-02）：run_rollout 只依赖本机并发（ThreadPoolExecutor
+从 trainer/dispatch_queue.py 拆出（2026-09-02）：run_rollout 只依赖本机并发（ThreadPoolExecutor
 spawn bun 子进程），无分布式状态——独立成模块便于单测与职责分离。
 
 **长驻池（2026-09-25）**：本机腿原先**每局** `Popen` 一个 bun——每局重付进程启动 + 模块

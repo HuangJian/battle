@@ -9,7 +9,7 @@
   * 本机份额：`policy.evalLocalSlots`（缺省 `eval_yield.EVAL_LOCAL_SLOTS_DEFAULT`）；
     机器级配置链（`rl.local_slots`）由调用方 TS 侧 `dist-node-gate.configLocalSlots`
     解析后以 `spec.localSlots` 显式传入 —— 本文件**不重读** rl-config 的槽位语义
-  * 队列与尾竞速：`trainer/queue.py`
+  * 队列与尾竞速：`trainer/dispatch_queue.py`
 
 TS 侧曾把这些又实现了一遍（探测/重试/rescan/停用/本机槽位），既漂移又漏护栏。
 本文件只做**入口翻译**：把「课程文件 + 多权重 + 种子段 + 局数」翻成 B 层的
@@ -26,7 +26,6 @@ JSONL。节点的活全部交给 `BatchEvalRunner`。
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import shutil
@@ -35,15 +34,12 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-# 2026-09-30（刀 7）：入口从 nn-training/ 顶层搬进 trainer/。这里要防的坑**一字未变**
-# （脚本目录 trainer/ 有自己的 queue.py，遮蔽 stdlib `queue` ⇒ concurrent.futures 导入即
-# 爆循环导入），换的只是解法：按惯用法先摘掉脚本目录项，再把 nn-training 根放回
-# （同 trainer/eval_a_once.py）。仓库根 = 本文件上溯 2 层。
+# 2026-09-30（刀 7）：入口从 nn-training/ 顶层搬进 trainer/ ⇒ 仓库根 = 本文件上溯 2 层。
+# 2026-10-11（S1）：原先还要摘掉脚本目录项，防脚本目录里的 `queue.py` 遮蔽 stdlib `queue`；该模块
+# 已改名 `trainer/dispatch_queue.py`（plan/nn-training-reuse-and-deps.plan.md §S1），scrub 删除。
 ROOT = Path(__file__).resolve().parents[2]
-_SCRIPT_DIR = Path(__file__).resolve().parent
-while str(_SCRIPT_DIR) in sys.path:
-    sys.path.remove(str(_SCRIPT_DIR))
 sys.path.insert(0, str(ROOT / "nn-training"))
+from common.cli import house_parser, run_main
 
 # 本入口的 stdout 是**调用方的产物通道**（`--out` 缺省时 eval-course-ckpt 的行就走
 # stdout），而训练栈的 `biz.log.log()` 按设计写 stdout（run_rl 的日志流）。整体改道
@@ -234,7 +230,7 @@ def _to_tool_row(row: dict, meta: dict, n_stages: int, seed0: int, games: int) -
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="one-shot course eval (reuses BatchEvalRunner)")
+    ap = house_parser(description="one-shot course eval (reuses BatchEvalRunner)")
     ap.add_argument("--spec", required=True, help="JSON spec（TS 侧生成）")
     a = ap.parse_args()
     spec = json.loads(Path(a.spec).read_text(encoding="utf-8"))
@@ -250,7 +246,7 @@ def main() -> int:
     import common.distribution
     from common.jsonc import load as jsonc_load
     from trainer.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner, data_root
-    from trainer.queue import RUN_ID
+    from trainer.dispatch_queue import RUN_ID
 
     course_path = str(spec["course"])
     course = jsonc_load(course_path)
@@ -388,4 +384,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_main(main)

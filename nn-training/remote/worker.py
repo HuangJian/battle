@@ -35,7 +35,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -44,6 +43,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from common.cli import house_parser, run_main
 from common.log_bundle import LogBundle
 from common.protocol import (
     ROLE_OFFLINE,
@@ -1073,7 +1073,7 @@ def worker_loop(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="remote PPO worker (cloud, stateless)")
+    ap = house_parser(description="remote PPO worker (cloud, stateless)")
     ap.add_argument(
         "--poll",
         required=True,
@@ -1200,4 +1200,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

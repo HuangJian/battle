@@ -90,7 +90,16 @@
 | `byId` 事件字段删除 | 保留。`simulation-runner` 取证工具在消费它。 | zcode P1 |
 | `applyPowerUp` switch → 派发表 | 维持。switch 本身就是派发表，形态合理。 | zcode 复核 |
 | 大文件机械搬移（无测试网领域） | 先补特征测试再动手（高返工率）。 | zcode 教训 3 |
+| `num_or_none` 同名 5 处 | 只收编**逐字节相同**的两份（`gate_inputs._num` 接受 bool ⇒ 不收）。同名 ≠ 同物。 | nn 复用审计 |
+| `quantile_nearest_rank` 同名 3 处（`_pct`/`_pct`/`_q`） | 不合并——秩/插值/空集返回与量纲各异，合并必改输出。 | nn 复用审计 |
+| pydantic 块形状 ×3（`course_spec`/`bc_config`/`config`） | 不合并——字段集/谓词/诊断消息各异，共享的只是 pydantic 调用形式。 | nn 复用审计 |
+| `_init_weights`×3 / `arch` 基类形状 | 不合并——三条是**不同的初始化策略**，改即改训练行为（属新实验，不得当重构顺手做）。 | nn 复用审计 |
+| `kickstart_burn` ⇄ `paired_kill` 止损块 | 两条**独立规则**（看结果 vs 看配对差），只共用读块助手。 | nn 复用审计 |
+| 账本 clone / 逐字节重复计数 | 是机械命中（AST 形状相似度）的**下界**，不是欠账判决；**不得为凑 DoD 数字合并语义不同的实现**。 | nn 复用审计 |
 
+> **NN 训练侧复用审计（2026-10-11，`plan/nn-training-reuse-and-deps.plan.md`）**：上表末六行的依据 =
+> `docs/nn/reuse-audit.md`（§口径差 · §同名清单）+ 该 plan §S2 / §S3 的逐条实测结论。
+>
 > **重构计划文件保留约定**：重构计划文件（如 `plan/refactor.agy.md` / `plan/refactor.trae.md`）除非其内容已并入本文件，否则保留在仓库内，不得删除；其否决结论以本文件 § 编号或上方「勿重提清单」作持久落点。（`refactor.zcode.md` 已删、仅留历史于本文件与 refactor.trae.md 顶部，未来引用一律改指 `refactor.trae.md`。）
 
 ---
@@ -4478,3 +4487,28 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   共 **37** 条正文下沉进 5 个主题档的「**第三轮归档**」块（接各档上一张「第二轮归档」表：
   eng 7 · con 3 · ts 7 · rt 1 · exp 19），索引行压成……
 —— 全文（背景 / 备选与否决 / 证据 / 后果）→ `docs/nn/engineering.md` §20「决策正文归档」· 锚 `### §2026-10-11-decisions-slim-round4`
+
+## §2026-10-11-goalnn-no-httpx-dep（2026-10-11，**不引入** `httpx`（T1）；plan/nn-training-reuse-and-deps §5.2）
+
+- **决定**（用户最终裁决 2026-10-11；新运行时依赖属 AGENTS §6.5 点名须问人的四类）：**不引入** `httpx`。
+  曾一度按「形态 B」落地过（硬依赖 + 云机侧补装：`remote/runtime_deps.ensure_runtime_deps()` 在
+  `code.zip` 落地**之后**于 `platform_net_env()` 里 `pip install`）；**同日复核利弊后撤回并全部移除**：
+  `pyproject.toml` 依赖回到 `numpy` / `pydantic`（+ torch 变体），`uv.lock` 回到 **89 包**，
+  `remote/runtime_deps.py` / 新守卫 `tests/remote/test_runtime_deps.py` / 宿主接线
+  （`notebook_runtime.run_notebook` · `run_loop.main`）/ `tests/helpers/remote_dag.py::LAYERS` 条目**全删**。
+- **★ 不替换的论证（留存，勿重提）**：① 控制面连接池**已经**由 `remote/control_pool.py`
+  （L0、纯 stdlib、默认开 `REMOTE_CONTROL_POOL=1`、已接进 `remote/http.py::_request`）提供
+  ⇒ httpx 的池化收益**上界 = 它已覆盖的那部分**（引入即与它重复）；② bulk（payload/code/blob/result）
+  **不得池化**——「换连接 = 重抽一次签」是抗慢链路的唯一手段，httpx 只能 per-request client
+  ⇒ 相对 urllib **零收益**；③ 定制传输语义（idle 45s / total 300s 双超时 + 进度回调 + 首块重抽
+  `WireSlowError` + bulk pace 让路 + 回环 / Colab 代理判据 + attempts / preempts / rerolls 三套预算）
+  **无法用 httpx 默认表达**，替换 = 重写热路径 ⇒ 静默漂移风险（本仓 6 次「搬家静默废掉守卫」前科；
+  且 68 个测试文件靠 `urllib.request.urlopen` / `_opener` / `_request` 的 DI 缝）；④ 云机安装与
+  `remote/bundle.py`「云机不必联网」口径冲突、`httpx` 拖 7 个 wheel。全文 → plan §5.1–§5.3。
+- **顺带修掉并保留的既有缺陷**：`pyproject.toml` 的 `torch-rocm` / `torch-xpu` 互斥变体原来只给 triton
+  条目带了 `sys_platform == 'linux'`，`torch` 本身裸着 ⇒ Windows split 仍会解析 `torch==2.7.1+xpu`
+  再被它拖去要 `pytorch-triton-xpu==3.3.1`（该 explicit index 只服务被钉住的包）⇒ **任何触发重新解析的
+  改动都会让 `uv lock` 直接失败**。已把 marker 补到 `torch` 本身（两个变体都改），与本项**独立保留**
+  （`uv lock` 每次重解析都依赖它）。
+- **R1 / R2 不变**：`common/` 仍 stdlib-only；三个引导模块仍零依赖。
+—— 全文（背景 / 备选与否决 / 证据 / 后果）→ `plan/nn-training-reuse-and-deps.plan.md` §5.1 · §5.2 · §5.3

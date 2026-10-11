@@ -42,6 +42,7 @@ from biz.course_resolve import CURRICULA_DIR
 from common.log import close_course_sinks, log, open_course_sink, prefix_scope
 from common.platform_utils import force_utf8_stdio
 from common.proc import run_capture
+from trainer.dispatch_queue import REPO_ROOT
 from trainer.loop_control import ControlApplier, read_control
 from trainer.loop_plan import (
     COURSE_ENABLE_MARKER,
@@ -54,7 +55,6 @@ from trainer.loop_plan import (
     round_tasks_for,
 )
 from trainer.loop_runner import ROUND_KIND, LoopRunner
-from trainer.queue import REPO_ROOT
 from worker.course_args import (
     COURSE_MACHINE_OVERRIDE_KEYS as COURSE_MACHINE_OVERRIDE_KEYS,
 )

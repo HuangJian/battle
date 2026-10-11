@@ -56,7 +56,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from common.log import log
-from trainer.queue import REPO_ROOT
+from trainer.dispatch_queue import REPO_ROOT
 
 #: 控制文件默认位置（repo 根 `tmp/`——训练机与控制台共享的工作区）。
 DEFAULT_CONTROL_PATH = str(REPO_ROOT / "tmp" / "loop-control.json")

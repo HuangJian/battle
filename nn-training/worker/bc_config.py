@@ -24,6 +24,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, field_validator
 
+from biz.course_spec import CustomStagesMixin
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CURRICULA_DIR = Path(__file__).resolve().parent.parent / "curricula"
 LEVELS_DIR = Path(__file__).resolve().parent.parent / "levels"
@@ -141,7 +143,7 @@ class BcTrainBlock(BaseModel):
         return v
 
 
-class BcCourseConfig(BaseModel):
+class BcCourseConfig(BaseModel, CustomStagesMixin):
     """BC 课程配置文件（`nn-training/curricula/<name>.bc.jsonc`）。"""
 
     model_config = ConfigDict(extra="forbid")
@@ -183,10 +185,6 @@ class BcCourseConfig(BaseModel):
     backup_prefix: str = ""
 
     # ------------------------------------------------------------ 派生
-
-    @property
-    def is_custom_stages(self) -> bool:
-        return isinstance(self.stages, list)
 
     @property
     def stage_ids(self) -> list[int]:

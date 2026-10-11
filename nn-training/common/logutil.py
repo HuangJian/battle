@@ -22,9 +22,10 @@ from __future__ import annotations
 
 import sys
 import time
+from collections.abc import Callable
 from typing import Any, Protocol
 
-__all__ = ["Clock", "log_line", "stamp"]
+__all__ = ["Clock", "log_line", "stamp", "tag_logger"]
 
 
 class Clock(Protocol):
@@ -49,3 +50,18 @@ def log_line(tag: str, msg: str, *, clock: Clock = time, stream: Any = None) -> 
     云机会话里「进度行每分钟一句」会攒成一大块——那正是这些日志存在的意义。
     """
     print(f"{stamp(clock)} [{tag}] {msg}", flush=True, file=stream or sys.stdout)
+
+
+def tag_logger(tag: str, clock: Callable[[], Clock]) -> Callable[[str], None]:
+    """固定 tag 的日志出口工厂（`remote/*` 的 `_log_default` 共 4 份）。
+
+    ⚠ `clock` 是**取值函数**（调用点写 `lambda: time`），不是时钟对象：每次调用都重读
+    **该模块自己的** `time` 引用，`monkeypatch.setattr(mod, "time", 假钟)` 才拦得到。
+    若这里收 `Clock` 对象（import 期绑死），那些注入会**静默失效**——假钟一失效，
+    断言时间戳的用例会变成「一直在看真钟」，却仍然绿。
+    """
+
+    def _emit(msg: str) -> None:
+        log_line(tag, msg, clock=clock())
+
+    return _emit

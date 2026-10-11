@@ -16,7 +16,7 @@ L4  trainer/（刀 5 前的 rl/） · hub/ · 根入口（trainer/run_rl.py / tr
 ## 为什么只剩编排（2026-09-30 刀 4，家名于刀 5 改成 trainer）
 
 本包曾同时住着两种东西：**纯逻辑**（课程 / 奖励 / 门 / 账本 / 配额 —— 不碰传输层）与**编排**
-（本包现存的这些）。同名同包让依赖方向读不出来：`trainer/queue.py`（编排，import `remote`）与
+（本包现存的这些）。同名同包让依赖方向读不出来：`trainer/dispatch_queue.py`（编排，import `remote`）与
 同一包里的 `course.py`（纯逻辑，只碰 stdlib）看上去是同一层。刀 4 按**机械判据**把它们分开：
 
 ```text

@@ -11,7 +11,8 @@ M2 真云只换 `--poll` 的 URL。
 
 from __future__ import annotations
 
+from common.cli import run_main
 from remote.worker import main
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

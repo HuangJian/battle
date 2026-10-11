@@ -55,7 +55,7 @@ L4  hub/ · trainer/                          （hub 服务端 / 本机训练编
 两次「下沉」的共同理由 = **断开包级循环**：
 
 * `protocol.py` / `game_watch.py` 原在 `remote/` 下，但 `rl/` 要 import 它们 ⇒ 与
-  `remote/ → rl/` 构成包级循环（当时靠 `trainer/queue.py` 一处函数内延迟 import 维持表面平静）；
+  `remote/ → rl/` 构成包级循环（当时靠 `trainer/dispatch_queue.py` 一处函数内延迟 import 维持表面平静）；
 * `net_http.py` / `_instance_lock.py` / `_port_guard.py` 原在 `remote/` 下，却同时被 `hub/`
   与根入口（两个不同层级）引用 —— 它们是 stdlib-only 原语，坐在底层最自然。
   后两个同时**去掉了文件名里的下划线私有前缀**（`common/instance_lock.py` /
@@ -75,6 +75,9 @@ L4  hub/ · trainer/                          （hub 服务端 / 本机训练编
 | `common.fs` | `atomic_write_bytes` / `atomic_write_json` / `append_jsonl` / `extract_tar_bytes` |
 | `common.text` | `exc_tail`（异常 traceback 尾段） |
 | `common.logutil` | `log_line` / `stamp`（带时间戳的行格式） |
+| `common.stats` | **观测字段数值化口径**（`num_or_none`：bool / 非数值 → `None`）——`worker/loop_guards_trip` 与 `worker/train_ledger` 的唯一实现（S2，2026-10-11） |
+| `common.cli` | **入口约定**（`house_parser`：全仓 `ArgumentParser` 唯一构造点 · `run_main`：`None→0` / `int→该码` / `Ctrl-C→130`）——用户裁定「一次性全迁 + `--help`/退出码非契约，**只保 flags 语义**」（S2，2026-10-11；实测 54 个构造点 + 62 个出口，flags 面 diff 0） |
+| `common.http_respond` | **JSON 响应形状**（`respond_json`：头部顺序 / UTF-8 / `ensure_ascii=False` / 长度按字节）——`hub/http_face` 与 `remote/worker_server` 的唯一实现；`remote/push_bootstrap`（code.zip 之前的内联态）**故意不 import 它**（S2，2026-10-11） |
 | `common.protocol` | 远端 PPO/BC 作业**线协议**（manifest 校验 / job 身份 / payload 打包 / `data_fp` / 结果信封 / `coef_active`）——原 `remote/protocol.py`；失败类型与线格式已下沉（见下两行），留 `X as X` 门面 |
 | `common.errors` | **失败类型族**（`ProtocolError` / `RetryableError` / `UnreapableChildError` / `JobCancelledError` / `JobFailedError` / `CodeChangedError`）——每条继承线 = 一个处置分支。**零依赖叶子**（S5 第六刀） |
 | `common.wire_codec` | **传输编码 / 线格式**（v1 gzip+base64 编解码 + v2 裸二进制 `BRV2`/`BRJ2`）。依赖 = stdlib + `common.errors`（S5 第六刀） |

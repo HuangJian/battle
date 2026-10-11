@@ -25,7 +25,7 @@ from pathlib import Path
 
 import common.distribution
 from common.jsonc import load as jsonc_load
-from trainer.queue import mm
+from trainer.dispatch_queue import mm
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 

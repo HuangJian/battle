@@ -26,7 +26,6 @@ run_rl 原样续跑，语义不变）。
 
 from __future__ import annotations
 
-import argparse
 import os
 import sys
 from pathlib import Path
@@ -35,6 +34,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from common.cli import house_parser, run_main
 from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # v3：dummy 前向形状随 schema 常量
 from worker.data.weights_io import save_weights_json
 from worker.ppo.engine import build_ppo
@@ -48,7 +48,7 @@ HEADS = ("move_head.weight", "fire_head.weight")
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument("--out", default="tmp/scratch-init/weights.json")
     ap.add_argument("--seed", type=int, default=7)
     args = ap.parse_args()
@@ -94,4 +94,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

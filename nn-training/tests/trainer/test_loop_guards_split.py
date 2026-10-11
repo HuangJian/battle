@@ -128,8 +128,11 @@ BASES: dict[str, tuple[str, ...]] = {
 }
 
 #: 模块级助手 → 唯一消费它的新家（跟着唯一使用者搬，不留在根）。
+#: ⚠ 2026-10-11（plan/nn-training-reuse-and-deps §S2）：`_num_or_none` **已不在本族**——
+#: 它与 `worker/train_ledger._num` 逐字节相同 ⇒ 提到 `common/stats.num_or_none`，
+#: 两个调用方各留一个**转发名**（`from common.stats import num_or_none as …`）。
+#: 所以本表只收「本族内部」的助手；它的唯一性与转发由 `tests/common/test_stats.py` 钉。
 HELPERS: dict[str, str] = {
-    "_num_or_none": "loop_guards_trip.py",
     "_is_nonfinite": "loop_guards_trip.py",
     "_gate_startup_notes": "loop_guards_gate.py",
 }
@@ -201,7 +204,11 @@ TOP_IMPORTS: dict[str, frozenset[str]] = {
             "worker.loop_guards_trip",
         }
     ),
-    "loop_guards_trip.py": frozenset({"worker.breaker", "worker.events", "common.log", "worker.stop_loss"}),
+    # 2026-10-11（plan/nn-training-reuse-and-deps §S2）：`_num_or_none` 提到 `common/stats`
+    # （与 `worker/train_ledger._num` 逐字节相同）⇒ 顶层 import 面多一条 `common.stats`。
+    "loop_guards_trip.py": frozenset(
+        {"worker.breaker", "worker.events", "common.log", "common.stats", "worker.stop_loss"}
+    ),
     "loop_guards_leg.py": frozenset(
         {
             "worker.events",

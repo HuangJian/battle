@@ -13,7 +13,7 @@ import numpy as np
 import common.distribution
 from common.log import log
 from common.text import exc_tail
-from trainer.queue import local_slots_max_of, run_rollout_queue
+from trainer.dispatch_queue import local_slots_max_of, run_rollout_queue
 from worker.resume import _scan_shards, completed_pairs, state_init_enabled
 
 

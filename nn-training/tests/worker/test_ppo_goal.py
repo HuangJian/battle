@@ -23,6 +23,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from common.cli import run_main
 from common.schema import OBS_CHANNELS, SCALAR_DIM
 
 REPO = Path(__file__).resolve().parents[2]
@@ -240,4 +241,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

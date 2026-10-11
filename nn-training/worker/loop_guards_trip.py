@@ -19,6 +19,7 @@ import math
 from typing import Any
 
 from common.log import log
+from common.stats import num_or_none as _num_or_none
 from worker.breaker import (
     ENT_BREAK,
     ENT_BREAK_CONSEC,
@@ -31,13 +32,6 @@ from worker.breaker import (
 )
 from worker.events import write_circuit_break, write_gate_verdict, write_stop_loss
 from worker.stop_loss import eval_sigma, stop_loss_hit
-
-
-def _num_or_none(v: Any) -> float | None:
-    """数值化（bool / 非数值 → None）——**只用于观测字段落账**，绝不参与判定。"""
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
-        return None
-    return float(v)
 
 
 def _is_nonfinite(v: Any) -> bool:

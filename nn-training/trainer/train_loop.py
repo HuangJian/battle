@@ -61,12 +61,8 @@ import time
 # 2026-09-30（刀 7）：本入口从 nn-training/ 顶层搬进 trainer/。`HERE` 的语义仍是
 # **nn-training 根**（锁文件、默认 data/weights 目录都相对它）⇒ 上溯层数 1 → 2。
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-# 脚本目录 trainer/ 会被自动插到 sys.path[0]，其 queue.py 遮蔽 stdlib `queue`
-# （concurrent.futures 导入即循环炸，见 trainer/eval_a_once.py）⇒ 摘掉它，再把
-# nn-training 根放回。
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-while _SCRIPT_DIR in sys.path:
-    sys.path.remove(_SCRIPT_DIR)
+# 2026-10-11（S1）：原先这里要摘掉脚本目录项，防脚本目录里的 `queue.py` 遮蔽 stdlib `queue`；该模块
+# 已改名 `trainer/dispatch_queue.py`（plan/nn-training-reuse-and-deps.plan.md §S1），scrub 删除。
 if HERE not in sys.path:
     sys.path.insert(0, HERE)
 # Import train() IN-PROCESS. Because train_loop already holds a single-instance
@@ -75,6 +71,7 @@ if HERE not in sys.path:
 #
 # 2026-09-26：`train.bc` 顶层 import torch，改为**调用点延迟 import**——于是本模块的
 # CLI / 参数解析 / 轮次规划（纯函数）不再把 torch 拖进测试路径（「顶层零 torch」规矩）。
+from common.cli import house_parser, run_main
 from worker.train.loop_util import (
     SPIN_WARN_S,
     _emit,
@@ -108,7 +105,7 @@ def main() -> None:
     from common.platform_utils import force_utf8_stdio
 
     force_utf8_stdio()
-    ap = argparse.ArgumentParser(description="Continuous multi-round BC training")
+    ap = house_parser(description="Continuous multi-round BC training")
     ap.add_argument("--data-dir", default=DEFAULT_DATA)
     ap.add_argument("--weights-dir", default=DEFAULT_WEIGHTS)
     ap.add_argument("--rounds", type=int, default=0, help="0 = run indefinitely")
@@ -309,4 +306,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

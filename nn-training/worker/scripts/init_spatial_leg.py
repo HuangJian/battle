@@ -27,12 +27,16 @@ spatialTower 标志；A0 档 = 旧架构标志）+ `warmstart_missing` 入 meta�
 
 from __future__ import annotations
 
-import argparse
 import importlib.util as _ilu
 import json
 import sys
 from pathlib import Path
 from typing import Any
+
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from common.cli import house_parser, run_main
 
 if _ilu.find_spec("common") is None:
     sys.path.insert(0, str(Path(__file__).resolve().parents[2]))  # nn-training/（common 的家）
@@ -91,7 +95,7 @@ def convert(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument("--from", dest="src", required=True, help="起点权重（hu150 系，v3 schema）")
     ap.add_argument("--to", dest="dst", required=True, help="输出起点权重路径")
     ap.add_argument("--policy-extra", action="store_true", help="腿 A 档（头 137）")
@@ -128,4 +132,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

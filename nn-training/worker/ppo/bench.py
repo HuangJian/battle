@@ -10,7 +10,6 @@
 输出：json 一行（chunks / ppo_sec / chunk_time / kl / entropy），追加 tmp/thru-bench.jsonl。
 """
 
-import argparse
 import json
 import os
 import sys
@@ -26,6 +25,7 @@ import numpy as np
 import torch
 
 import worker.ppo.engine as ppo_mod
+from common.cli import house_parser, run_main
 from worker.data.weights_io import load_state_into
 
 
@@ -38,7 +38,7 @@ def collect_shard_dirs(root: str):
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument("--shards", required=True, help="traj 目录（如 tmp/s3-cap2/it3）")
     ap.add_argument("--weights", required=True)
     ap.add_argument("--mb", type=int, default=512)
@@ -103,4 +103,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

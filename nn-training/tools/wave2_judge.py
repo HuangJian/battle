@@ -35,6 +35,7 @@ NN_ROOT = Path(__file__).resolve().parent.parent
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
 
+from common.cli import run_main
 from worker.kickstart_burn import BURN_MARGIN_PP
 
 
@@ -512,4 +513,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run_main(main)

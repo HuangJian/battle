@@ -27,7 +27,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import shutil
@@ -36,15 +35,12 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-# 2026-09-30（刀 7）：入口从 nn-training/ 顶层搬进 trainer/。这里要防的坑**一字未变**
-# （脚本目录 trainer/ 进 sys.path[0] 会把 trainer/queue.py 认成 stdlib `queue` ⇒
-# concurrent.futures 导入即炸），换的只是解法：按惯用法先摘掉脚本目录项，再把
-# nn-training 根放回（同 trainer/eval_a_once.py）。仓库根 = 本文件上溯 2 层。
+# 2026-09-30（刀 7）：入口从 nn-training/ 顶层搬进 trainer/ ⇒ 仓库根 = 本文件上溯 2 层。
+# 2026-10-11（S1）：原先还要摘掉脚本目录项，防脚本目录里的 `queue.py` 遮蔽 stdlib `queue`；该模块
+# 已改名 `trainer/dispatch_queue.py`（plan/nn-training-reuse-and-deps.plan.md §S1），scrub 删除。
 ROOT = Path(__file__).resolve().parents[2]
-_SCRIPT_DIR = Path(__file__).resolve().parent
-while str(_SCRIPT_DIR) in sys.path:
-    sys.path.remove(str(_SCRIPT_DIR))
 sys.path.insert(0, str(ROOT / "nn-training"))
+from common.cli import house_parser, run_main
 
 # 本入口的 stdout 是**调用方的产物通道**（`tools/sim/m1-eval.ts` 的 JSON 报告就写在
 # stdout，`trainer/eval_m1.py` 解析它取 perGame），而训练栈的 `biz.log.log()` 按设计写 stdout
@@ -127,7 +123,7 @@ def to_m1_row(row: dict) -> dict:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="one-shot m1 eval (reuses BatchEvalRunner)")
+    ap = house_parser(description="one-shot m1 eval (reuses BatchEvalRunner)")
     ap.add_argument("--spec", required=True, help="JSON spec（TS 侧生成）")
     a = ap.parse_args()
     spec = json.loads(Path(a.spec).read_text(encoding="utf-8"))
@@ -144,7 +140,7 @@ def main() -> int:
 
     import common.distribution
     from trainer.batch_eval import ONESHOT_EVAL_KIND, BatchEvalRunner
-    from trainer.queue import RUN_ID
+    from trainer.dispatch_queue import RUN_ID
 
     units = plan_units(spec)
     if not units:
@@ -255,4 +251,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_main(main)

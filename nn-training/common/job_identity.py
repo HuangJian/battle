@@ -34,7 +34,7 @@ def idempotency_key(manifest: dict) -> tuple:
 
     ★ `course_fp` 是 2026-09-24 加的（plan/job-identity-collision.plan.md）：原来的四个
     分量在**单进程多课程**（`--serve` 共享 trainer）下会**跨课程全同** —— runId 是进程级
-    （`trainer/queue.py::RUN_ID`）、`init_weights_fp` 同 warm-start、`data_fp` 只哈希
+    （`trainer/dispatch_queue.py::RUN_ID`）、`init_weights_fp` 同 warm-start、`data_fp` 只哈希
     (shard 目录名, wver, stage, seed) 而 per-stage seed 与课程无关、`it` 同轮 ⇒ 两门课
     发布出**同一个 job_id**，hub 的 per-job 路由取「第一个匹配」⇒ 两个 trainer 读到同一份
     结果，各自落进自己的 `args.out`（静默污染，且让下一轮 `init_weights_fp` 继续相同 ⇒ 自持）。

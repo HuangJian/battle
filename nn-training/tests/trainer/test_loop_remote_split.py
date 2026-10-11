@@ -191,7 +191,7 @@ DELAYED_IMPORTS: dict[str, frozenset[str]] = {
             "remote.push_client",
             "trainer.collect_only",
             "worker.config",
-            "trainer.queue",
+            "trainer.dispatch_queue",
             "worker.resume",
             "biz.reward_library",
         }

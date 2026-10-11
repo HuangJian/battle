@@ -45,7 +45,7 @@ from typing import Any
 # （`tests/remote/test_plan_handoff_split.py` 白名单逐条对账），写成点分名才能让白名单说清
 # 「用的是哪个 common 模块」。
 import common.scratch as scratch
-from common.logutil import log_line
+from common.logutil import tag_logger
 from common.platform_utils import cpu_worker_slots
 from common.protocol import (
     BLOB_DEMO,
@@ -88,13 +88,7 @@ TS_CODE_ZIP_NAME = "ts_code.zip"
 EVAL_ALTERNATE_WAIT_SEC = 300.0
 
 
-def _log_default(msg: str) -> None:
-    """默认日志（tag=`run`）。行格式的唯一来源是 `common.logutil`。
-
-    `clock=time` 是显式传的：本模块的 `time` 引用可被测试重绑（假钟注入），
-    若改成让 logutil 自己抓 `time.strftime`，那些注入就失效了。
-    """
-    log_line("run", msg, clock=time)
+_log_default = tag_logger("run", lambda: time)
 
 
 # ------------------------------------------------------------------ 计划交接

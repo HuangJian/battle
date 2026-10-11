@@ -39,11 +39,16 @@
 
 from __future__ import annotations
 
-import argparse
 import json
+import sys
 import time
 from pathlib import Path
 from typing import Any
+
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.cli import house_parser, run_main
 
 NN_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ARENA = NN_ROOT / "levels" / "arena4.jsonc"
@@ -418,7 +423,7 @@ def preflight(out_levels: Path, out_courses: Path) -> list[str]:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="I3 阶梯工厂：生成 c01..c20 关卡/课程/计划")
+    ap = house_parser(description="I3 阶梯工厂：生成 c01..c20 关卡/课程/计划")
     ap.add_argument("--out-levels", type=Path, default=DEFAULT_OUT_LEVELS)
     ap.add_argument("--out-courses", type=Path, default=DEFAULT_OUT_COURSES)
     ap.add_argument("--plan", type=Path, default=DEFAULT_PLAN)
@@ -439,4 +444,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

@@ -22,7 +22,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import sys
 import time
@@ -40,6 +39,7 @@ _NN = _ROOT / "nn-training"
 if str(_NN) not in sys.path:
     sys.path.insert(0, str(_NN))
 
+from common.cli import house_parser, run_main
 from common.schema import BOARD
 from worker.data.weights_io import load_weights_json
 from worker.models.student import PPOStudent
@@ -240,7 +240,7 @@ def tower_features(model: TowerProbe, bufa: np.ndarray, batch: int = 128) -> np.
 # ---------------- 主流程 ----------------
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument("--dump", default="tmp/spatial-probe/hu150")
     ap.add_argument("--out", default="")
     ap.add_argument("--seed", type=int, default=20261005)
@@ -474,4 +474,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

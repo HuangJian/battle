@@ -24,7 +24,6 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import shutil
@@ -32,6 +31,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.cli import house_parser, run_main
 
 #: 本次清洗要删的点号路径（plan §3.1 + §0.5.1）。**只删这里列出的键。**
 DELETE_PATHS: tuple[str, ...] = (
@@ -383,7 +387,7 @@ def build_matrix(cfg: dict[str, Any], courses: list[str]) -> list[str]:
 # ------------------------------------------------------------------ CLI
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="清洗 rl-config.json（默认 dry-run，零写盘）")
+    ap = house_parser(description="清洗 rl-config.json（默认 dry-run，零写盘）")
     ap.add_argument("--config", default="", help="rl-config 路径（缺省走 BCITY_RL_CONFIG / 仓里那份）")
     ap.add_argument("--apply", action="store_true", help="真删（先备份 + sha 回读校验）")
     ap.add_argument(
@@ -478,4 +482,4 @@ if __name__ == "__main__":  # pragma: no cover
     _NN_DIR = Path(__file__).resolve().parent.parent
     if str(_NN_DIR) not in sys.path:
         sys.path.insert(0, str(_NN_DIR))
-    raise SystemExit(main())
+    run_main(main)

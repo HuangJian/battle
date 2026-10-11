@@ -24,13 +24,17 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.cli import house_parser, run_main
 
 #: 段名（`payload=` / `code.zip ` / `合计=` …）：字母开头，允许 `_ : . - @`（如 `blob:opt`、`task-9.zip`）。
 SEG_RE = re.compile(r"([A-Za-z][\w:.@-]*)=([\d.]+)MB/([\d.]+)s\((\d+)KB/s\)")
@@ -427,7 +431,7 @@ def _expand(paths: list[str]) -> list[Path]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="把 wire 传输账聚成 p50/p90 与坏签比例")
+    ap = house_parser(description="把 wire 传输账聚成 p50/p90 与坏签比例")
     ap.add_argument("paths", nargs="+", help="日志文件或目录（目录取全部 *.log）")
     ap.add_argument("--json", action="store_true", help="输出 JSON（供后续脚本/看板消费）")
     args = ap.parse_args(argv)
@@ -474,4 +478,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_main(main)

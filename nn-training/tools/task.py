@@ -19,7 +19,6 @@ Targets:
 
 from __future__ import annotations
 
-import argparse
 import os
 import re
 import subprocess
@@ -31,6 +30,7 @@ from pathlib import Path
 # /`-m pytest` 以 nn-training 为根 ⇒ 先把 nn-training 根放回 sys.path。
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from common.cli import house_parser, run_main
 from common.platform_utils import physical_cores, rmtree_best_effort
 
 #: `HERE` 的语义不变（nn-training 根：pyproject.toml / .venv / 子脚本都相对它）⇒ 上溯 +1。
@@ -273,7 +273,7 @@ TARGETS = {
 
 def main() -> None:
     global EXTRA_ARGS
-    parser = argparse.ArgumentParser(description="nn-training task runner")
+    parser = house_parser(description="nn-training task runner")
     parser.add_argument("target", choices=list(TARGETS), help="task to run")
     args, extra = parser.parse_known_args()
     if extra and args.target != "setup":
@@ -283,4 +283,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

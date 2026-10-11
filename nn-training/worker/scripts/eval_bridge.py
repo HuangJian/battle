@@ -37,7 +37,6 @@ if _ilu.find_spec("common") is None:
 
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent.parent))
 
-import argparse
 import json
 import os
 import sys
@@ -46,6 +45,7 @@ import numpy as np
 import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common.cli import house_parser, run_main
 from common.schema import FIRE_DIM, MOVE_DIM
 from worker.data.npyio import load_dataset
 from worker.data.weights_io import latest_weights_path, load_state_into
@@ -99,7 +99,7 @@ def emit_bun_cmd(weights_path: str) -> str:
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument(
         "--weights",
         default=None,
@@ -140,4 +140,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

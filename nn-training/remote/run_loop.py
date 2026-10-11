@@ -24,7 +24,6 @@
 
 from __future__ import annotations
 
-import argparse
 import json
 import shutil
 import sys
@@ -32,6 +31,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+from common.cli import house_parser, run_main
 from common.protocol import ProtocolError, RetryableError, normalize_manifest
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
 from remote.plan_run import (
@@ -383,7 +383,7 @@ def _read_secret_file(path: str, flag: str) -> str:
 
 def main(argv: list[str] | None = None) -> int:
     """`python -m remote.run_loop --artifacts <dir>`：产物目录即任务，续跑到计划末尾。"""
-    ap = argparse.ArgumentParser(description="自主段运行（产物目录是唯一输入；不需要 hub）")
+    ap = house_parser(description="自主段运行（产物目录是唯一输入；不需要 hub）")
     ap.add_argument(
         "--bundle",
         default="",
@@ -534,4 +534,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run_main(main)

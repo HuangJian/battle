@@ -35,7 +35,7 @@ import remote.artifacts
 import remote.bundle
 import remote.hub_client
 import remote.run_loop
-import trainer.queue
+import trainer.dispatch_queue
 import trainer.stream
 import worker.agent_meta
 import worker.bc_ledger
@@ -154,10 +154,10 @@ def test_bun_version_and_exc_tail_and_atomic_write_have_single_definition() -> N
     # 默认值（训练机侧 timeout=10/fallback="?"、节点侧 timeout=30/fallback=""/require_zero），
     # 同时保住 1 参签名与 monkeypatch 接缝。再多一份实现就红。
     # ⚠ 顺序 = `_defs_of` 的**路径排序**（不是重要性）：2026-09-30 刀 3 把 `iter_rollout`
-    # 从 `remote/` 搬到 `worker/` ⇒ 它从 `trainer/queue.py` 的**前面**排到后面。
+    # 从 `remote/` 搬到 `worker/` ⇒ 它从 `trainer/dispatch_queue.py` 的**前面**排到后面。
     assert _defs_of("bun_version") == [
         "common/proc.py",
-        "trainer/queue.py",
+        "trainer/dispatch_queue.py",
         "worker/iter_rollout.py",
     ]
     assert _defs_of("exc_tail") == ["common/text.py"]
@@ -168,10 +168,10 @@ def test_bun_version_and_exc_tail_and_atomic_write_have_single_definition() -> N
 
 def test_delegating_call_sites_keep_their_public_names() -> None:
     """收敛的是**定义**，不是名字：历史调用点与测试的 monkeypatch 接缝必须还在。"""
-    # trainer.queue 是公共 re-export 面（batch_eval / eval_dispatch / e2e 从这里取）
-    assert trainer.queue.bun_version("definitely-not-a-real-bun-binary") == "?"
-    assert trainer.queue.mm("1.2.3") == "1.2"
-    assert trainer.queue._record_agent_meta is worker.agent_meta.record_agent_meta
+    # trainer.dispatch_queue 是公共 re-export 面（batch_eval / eval_dispatch / e2e 从这里取）
+    assert trainer.dispatch_queue.bun_version("definitely-not-a-real-bun-binary") == "?"
+    assert trainer.dispatch_queue.mm("1.2.3") == "1.2"
+    assert trainer.dispatch_queue._record_agent_meta is worker.agent_meta.record_agent_meta
     # 私有别名仍在各自模块命名空间里（monkeypatch.setattr(mod, "bun_version", ...) 依赖它）
     assert callable(worker.iter_rollout.bun_version)
     assert callable(remote.hub_client._sha256_file)

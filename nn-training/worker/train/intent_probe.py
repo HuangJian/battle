@@ -16,7 +16,6 @@ train/val 按【局（shard）】切分——同局相邻帧不跨集，防时�
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -25,6 +24,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from common.cli import house_parser, run_main
 from worker.models.intent_net import IntentNet, export_intent_weights
 from worker.models.student import DEFAULT_D, DEFAULT_H
 
@@ -143,7 +143,7 @@ def quota_sample_priority(
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument(
         "--data",
         nargs="+",
@@ -406,4 +406,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

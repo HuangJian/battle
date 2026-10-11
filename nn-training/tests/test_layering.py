@@ -39,7 +39,7 @@ L4  trainer/（编排层 + 六个入口：trainer/run_rl.py … trainer/eval_m1_
 ## 为什么需要守卫
 
 本仓的包级循环曾经就是这么长出来的：`rl/`（今 `trainer/`）有 10 个文件 import `remote/*`，
-`remote/` 有 8 个文件 import `rl/*`，靠 `trainer/queue.py` 里一处**函数内延迟 import** 换来表面的平静——那种平静
+`remote/` 有 8 个文件 import `rl/*`，靠 `trainer/dispatch_queue.py` 里一处**函数内延迟 import** 换来表面的平静——那种平静
 下一次改动就会破。2026-09-23 把纯逻辑的 `protocol` / `game_watch` 下沉到 `common/`、并把
 TS 导出器路径收进 `common/protocol.py`（`EVAL_SCRIPT`）之后，**`trainer`（当日还叫 `rl`）↔
 `remote` 的模块级环消失了**（本文件由闭环断言守着）。
@@ -129,7 +129,7 @@ UPPER_PACKAGES = ("remote", "hub", "worker", "trainer")
 #: 同日（S4 第二十刀）：`loop_core` 收尾拆出三簇——实测只有两簇“经 rl 传递可达”：
 #: `loop_iter_dir`（拿 `trainer.collect_only` 的 `precollect_snapshot_wver`）· `loop_dispatch`（拿
 #: `trainer.rollout_phase` 的 `dispatch_rollout_phase`）；**`loop_baseline` 反而回到纯逻辑**（它只拿
-#: `common.distribution` / `common.log` / `trainer.queue.RUN_ID`，三者都不达 remote）⇒ 只登记前两个。
+#: `common.distribution` / `common.log` / `trainer.dispatch_queue.RUN_ID`，三者都不达 remote）⇒ 只登记前两个。
 #: 同日（S4 第二十一刀）：`loop_steps` 拆出 `loop_export`（产物出包 4 方法的混入），它拿
 #: `remote.hub_client.pack_ts_code_zip`（`_ensure_ts_code` 里**延迟** import——本快照的 AST 也看
 #: 函数内 import）⇒ 同样先红、再登记（第六次）。
@@ -141,7 +141,7 @@ UPPER_PACKAGES = ("remote", "hub", "worker", "trainer")
 #: 改直 `import worker.serve_pool`（DECISIONS `§2026-09-23-goalnn-layering-common-sink` 早已把
 #: `serve_pool` 列为 rl 允许的 remote 目标），于是它们成为**直接**编排成员；而 `batch_*` 执行面 /
 #: `eval_*` / `stream` / `queue` / `loop_baseline`·`loop_control`·`loop_eval` 只是**经 rl 传递可达**
-#: （`trainer.queue` → `trainer.dispatch` → remote 这条链把归集器与批执行面一并拽进来）⇒ 同样先红、再登记。
+#: （`trainer.dispatch_queue` → `trainer.dispatch` → remote 这条链把归集器与批执行面一并拽进来）⇒ 同样先红、再登记。
 #: 这是一次**特征**（本机长驻池）而非拆分的连带登记，故单列一行说明形状。
 #: 2026-09-27（S5 第四刀）：`bc_loop` 拆出 `bc_ingest`（BC job 回传消费：轮询会话/指标·eval 入账
 #: + 节奏常量）——它沿用「`_request` 函数内 import」的口径（测试打的就是那个点）⇒ 直接编排成员，
@@ -168,6 +168,10 @@ TRAINER_ORCHESTRATION = frozenset(
         "bc_loop",
         "collect_only",
         "dispatch",
+        #: 2026-10-11（S1，plan/nn-training-reuse-and-deps.plan.md）：`queue.py` → `dispatch_queue.py`
+        #: —— 旧名遮蔽 stdlib `queue`，逼着 8 个入口脚本各带一段 `sys.path.remove` scrub；
+        #: 改名后 scrub 全删（本快照按**基名**登记，改名即改这里一格）。
+        "dispatch_queue",
         "eval_a_once",
         "eval_course_once",
         "eval_dispatch",
@@ -199,7 +203,6 @@ TRAINER_ORCHESTRATION = frozenset(
         "loop_steps",
         "loop_transport",
         "loop_volume",
-        "queue",
         "queue_local",
         "rollout_phase",
         "run_bc",

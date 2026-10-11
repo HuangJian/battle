@@ -104,7 +104,7 @@ PLAN_IMPORTS = {
     "pathlib",
     "common.distribution",
     "common.jsonc",
-    "trainer.queue",
+    "trainer.dispatch_queue",
 }
 
 #: 批规划模块里**不许出现**的名字（锁 / 台账 / 执行器 / 进程生命周期）。

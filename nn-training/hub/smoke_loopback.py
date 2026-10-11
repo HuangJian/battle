@@ -22,7 +22,6 @@
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -32,13 +31,12 @@ import sys
 import time
 from pathlib import Path
 
-from common.platform_utils import rmtree_best_effort
-
 ROOT = Path(__file__).resolve().parent.parent  # nn-training/
 REPO = ROOT.parent  # git 根
 sys.path.insert(0, str(ROOT))
-
 from biz.reward_library import METRICS_VERSION
+from common.cli import house_parser, run_main
+from common.platform_utils import rmtree_best_effort
 from common.protocol import find_payload
 from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # v3：合成语料形状随 schema
 from hub.server import _JobStore, make_server
@@ -125,7 +123,7 @@ def _write_synthetic_shard(
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="remote PPO loopback smoke (M0d/M1)")
+    ap = house_parser(description="remote PPO loopback smoke (M0d/M1)")
     ap.add_argument("--work", default="tmp/remote-smoke", help="冒烟工作目录（仓库内，gitignore）")
     ap.add_argument("--token", default="smoke-token")
     ap.add_argument("--epochs", type=int, default=2, help="云 worker PPO epochs（小值提速）")
@@ -374,4 +372,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run_main(main)

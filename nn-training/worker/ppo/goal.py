@@ -40,7 +40,6 @@ if _ilu.find_spec("common") is None:
 
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent.parent))
 
-import argparse
 import os
 import time
 
@@ -49,8 +48,10 @@ import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 
+from common.cli import house_parser, run_main
 from common.schema import BOARD
 from worker.models.goal_net import GoalNet, export_goal_weights, load_goal_weights
+from worker.ppo._episode import episode_from_shard
 from worker.ppo.common import (
     _ppo_load,
     _ppo_save,
@@ -185,28 +186,24 @@ def compute_gae_variable(
 
 def load_episode_from_shard(dirpath: str) -> dict | None:
     """流式 backend 接口（trainer/stream.py）：goal shard → 可训练 episode（adv/ret 未归一）。"""
-    d = load_goal_shard(dirpath)
-    N = d["obs"].shape[0]
-    if N == 0:
-        return None
-    adv, ret = compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"])
-    ep = {
-        "obs": d["obs"],
-        "scalars": d["scalars"],
-        "inject": d["inject"],
-        "a_goal": d["a_goal"],
-        "lp_goal": d["lp_goal"],
-        "value": d["value"],
-        "adv": adv.astype(np.float32),
-        "ret": ret.astype(np.float32),
-        "goal_mask": d["goal_mask"],
-        "dt": d["dt"],
-        "engage": d["engage"],
-    }
-    for k in ("engage_label",):
-        if k in d:
-            ep[k] = d[k]
-    return ep
+    return episode_from_shard(
+        load_goal_shard(dirpath),
+        lambda d: compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"]),
+        fields=(
+            "obs",
+            "scalars",
+            "inject",
+            "a_goal",
+            "lp_goal",
+            "value",
+            "adv",  # 占位：GAE 现算
+            "ret",
+            "goal_mask",
+            "dt",
+            "engage",
+        ),
+        optional=("engage_label",),
+    )
 
 
 def load_episodes_goal(data_root: str, normalize_adv: bool = True) -> list[dict]:
@@ -416,7 +413,7 @@ load_episodes = load_episodes_goal
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument("--init-from", type=str, default=None, help="goal-BC weights (init mode)")
     ap.add_argument("--resume", type=str, default=None, help="RL goal weights (update mode)")
     ap.add_argument("--data", type=str, default=None, help="goal trajectory shard root (update)")
@@ -499,4 +496,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

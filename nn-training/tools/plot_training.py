@@ -11,10 +11,14 @@ Run from nn-training/:
 """
 from __future__ import annotations
 
-import argparse
 import re
 import sys
 from pathlib import Path
+
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.cli import house_parser, run_main
 
 DEFAULT_LOG = "worker.train.log"
 ROUND_RE = re.compile(r"=== ROUND (\d+) ===")
@@ -118,11 +122,11 @@ def main(log: Path, top_n: int | None, alert_kl: float) -> None:
 
 
 if __name__ == "__main__":
-    ap = argparse.ArgumentParser(description=__doc__)
+    ap = house_parser(description=__doc__)
     ap.add_argument("log", nargs="?", default=DEFAULT_LOG, help="path to train.log")
     ap.add_argument("--rounds", type=int, default=None,
                     help="show only last N rounds")
     ap.add_argument("--alert-kl", type=float, default=0.15,
                     help="flag any round with kl >= this threshold")
     args = ap.parse_args()
-    main(Path(args.log), args.rounds, args.alert_kl)
+    run_main(lambda: main(Path(args.log), args.rounds, args.alert_kl))

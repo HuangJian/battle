@@ -922,7 +922,7 @@ DECISIONS → `DECISIONS.md §2026-10-07-offline-busy-gate-anchor`。
    （`remote/job_round.py::_hb_loop`，每 `HEARTBEAT_SEC=60s`）⇒ 主线程卡死（D 状态 / 挂住的挂载点
    ——§2026-10-06 那两条同族事故）时租约被无限续，这份活**谁都领不到**；
 3. 也没有出口：`cancel_unsettled_jobs` 明确**不撤在飞**（2026-10-03 用户裁决「不管在算的，只管没领的」）；
-4. 于是唯一解法是训练侧重启 —— `trainer/queue.py::RUN_ID = secrets.token_hex(8)` 每进程随机 ⇒ 同一轮
+4. 于是唯一解法是训练侧重启 —— `trainer/dispatch_queue.py::RUN_ID = secrets.token_hex(8)` 每进程随机 ⇒ 同一轮
    重发布换一个 **job_id**（`common/job_identity.py`），新身份自然可领。「重启 trainer 才行」不是巧合。
    设计里其实早有那张表：`job_priority`（`STRAGGLER_SEC=180s` 起 = 掉队救援 `high` / claimed = `medium` /
    ready = `low`）与 `claim(mode="backup")` 机制都保留着（§30 的 P3「竞速**判定**退役、机制保留」），
@@ -2422,7 +2422,7 @@ plan：`plan/job-identity-collision.plan.md`（含一次独立评审的 M1–M5 
 ② **两份 manifest 只差课程身份**：`course_fp`/`corpus_fp`/`payload_sha256`/`course`/`reward_formula`
 全不同，而 **`runId`/`it`/`init_weights_fp`/`data_fp` 逐字相同**。四个分量为什么全同：
 
-- `runId` 是**进程级**（`trainer/queue.py::RUN_ID`）——单 hub 多课程（`--serve` 共享 trainer）后两门课同源；
+- `runId` 是**进程级**（`trainer/dispatch_queue.py::RUN_ID`）——单 hub 多课程（`--serve` 共享 trainer）后两门课同源；
 - `init_weights_fp`：两门课同一份 warm-start；
 - `data_fp`：只哈希 `(shard 目录名, wver, stage, seed)`，而 per-stage seed 与课程无关；
 - `it`：同一轮。
@@ -3156,7 +3156,7 @@ rolloutSec/ppoSec 均真实。⇒ 「重复导入」是支持的（同 run_id �
 * 一个真坑（ruff 抓的）：多课程重构后 `build_run_argv` 里的 `course` 变量已删但引用还在
   （F821）——`--hub-course` 会带空串/直接炸；同处还修了 `RUF034` 的恒假三元。
 * `remote/offline_eval` 参与 `sys.path` 时的 stdlib `queue` 遮蔽风险：本模块**不用** `queue`，
-  用 `deque`+`Event` 手写单飞（`trainer/queue.py` 会遮蔽 stdlib，历史上已踩过一次）。
+  用 `deque`+`Event` 手写单飞（`trainer/dispatch_queue.py` 会遮蔽 stdlib，历史上已踩过一次）。
 * 测试：`tests/remote/test_offline_eval_cloud.py`（口径/执行/并行/采纳）、`tests/hub/test_offline_resume_anchor.py`
   （hub 选轮 + 端点 + 补传并账）、`tests/remote/test_offline_eval_wiring.py`（装配/收线/argv/拉取/导入合并/多课程）。
   门禁：`nn-python-gate`（ruff+mypy+pytest 2065 用例）39s 绿、`bun run check` 38s 绿。
@@ -4589,7 +4589,7 @@ F4/DECISIONS §339 修复（ENT 改相对崩塌语义 + ent_peak 基线继承，
   （it3=7、it4=3、it5=4、it6=4、it7=3、it8=2、it10=1、it11=1；it9 本地-only=0），
   两份 obs sha **不同**（同 seed 同 wver 本应逐字节同——指向跨节点 agent 版本差，
   参数 AGENTS §16.6）。机制高度疑似 tail fan-out 竞速的迟到副本：败者已被拒绝
-  结算却仍写盘共存（`trainer/queue.py` `docs/nn/legacy.md` §21 修的是误回队，未管盘上残留）。
+  结算却仍写盘共存（`trainer/dispatch_queue.py` `docs/nn/legacy.md` §21 修的是误回队，未管盘上残留）。
 - 发布端 `remote/hub_client.pack_payload` 对重复 arcname 写 zip → zipfile
   UserWarning 刷屏；worker `unpack_payload` extractall 同名后者胜（排序保证 wNN
   在后）→ 实训只吃 150 个唯一 dir 的一份拷贝，**无双计**，但 payload 虚胖、
@@ -7324,7 +7324,7 @@ ruff + mypy 全量绿。
 **背景**：Kaggle 新 worker 起来后 `no job yet` 刷了一两分钟，重启 trainer 才领到活。机制链：空闲 worker 的
 候选只有可领取池（`hub/store_ledger.py::claimable_job_ids`，**排除活租约**）；而「活租约」由**独立心跳线程**
 续租（`remote/job_round.py::_hb_loop`）⇒ 持有人主线程卡死（D 状态 / 挂住的挂载点）时那份活对所有人隐身，
-且没有出口（`cancel_unsettled_jobs` 不撤在飞）。唯一解法是重启 trainer —— `trainer/queue.py::RUN_ID` 每进程
+且没有出口（`cancel_unsettled_jobs` 不撤在飞）。唯一解法是重启 trainer —— `trainer/dispatch_queue.py::RUN_ID` 每进程
 随机 ⇒ 同一轮重发布换个 `job_id`，新身份自然可领。设计里那张表（`job_priority` 的 high/medium/low）与
 `claim(mode="backup")` 机制都保留着（§2026-09-22-goalnn-race-retired-priority-only：删判定、留机制），
 但 **pull 线从没接上**（只有 push 腿用；`acquire_job` 硬写 exclusive、`peek` 永不返回在飞 job）。

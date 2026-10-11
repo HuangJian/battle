@@ -27,6 +27,8 @@ from __future__ import annotations
 
 from typing import Any, NamedTuple
 
+from biz.course_spec import block_dict as _block_dict
+
 #: 连续多少个**对齐**评估点 Δ 都低于阈值才杀臂（执行面常量；课程文件 `paired_kill.points` 优先，
 #: 块缺席 = 本常量——2026-10-02 迁移 + 第二刀，见模块头）。
 PAIRED_KILL_POINTS = 2
@@ -122,19 +124,7 @@ def paired_kill_verdict(
     return PairedKillVerdict(False, streak, delta_pp, it, o, p, True, "")
 
 
-def _block_dict(block: Any) -> dict | None:
-    """课程止损块 → 普通 dict；None/坏值 → None（认 dict 与 pydantic 块两种形态）。
-
-    读面消费 `args` 上的**启动物化快照**（`flat_overrides` 以 `model_dump()` 落成 dict =
-    restart-only 的冻结面）。
-    """
-    if isinstance(block, dict):
-        return block
-    dump = getattr(block, "model_dump", None)
-    if callable(dump):
-        dumped = dump()
-        return dumped if isinstance(dumped, dict) else None
-    return None
+#: 2026-10-11（S3）：读块助手提到 `biz.course_spec.block_dict`（与 `kickstart_burn` 逐字节相同）。
 
 
 def paired_kill_overrides(block: Any) -> tuple[float, int]:

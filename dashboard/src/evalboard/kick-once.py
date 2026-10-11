@@ -27,7 +27,7 @@ from trainer.batch_eval import (  # noqa: E402
 )
 from common.log import log  # noqa: E402
 import common.distribution  # noqa: E402
-from trainer.queue import RUN_ID  # noqa: E402
+from trainer.dispatch_queue import RUN_ID  # noqa: E402
 
 
 def main() -> int:

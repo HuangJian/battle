@@ -8,14 +8,14 @@ rl-config 的 nodes 条目（gpu_push: true）。实现全部在 remote/worker_s
 
 from __future__ import annotations
 
-import argparse
 from pathlib import Path
 
+from common.cli import house_parser, run_main
 from remote.worker_server import serve_forever
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="remote PPO worker server (push mode, cloud GPU)")
+    ap = house_parser(description="remote PPO worker server (push mode, cloud GPU)")
     ap.add_argument("--port", type=int, default=8790)
     ap.add_argument("--token", default="", help="Bearer token（与 HUB 共享密钥）")
     ap.add_argument("--token-file", default="", help="从文件读取 token（避免进程列表泄露，H10）")
@@ -50,4 +50,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

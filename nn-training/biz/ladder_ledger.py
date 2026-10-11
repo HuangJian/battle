@@ -26,13 +26,13 @@ CLI（runbook 消费）：
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import time
 from pathlib import Path
 from typing import Any
 
+from common.cli import house_parser, run_main
 from common.platform_utils import force_utf8_stdio
 
 NN_ROOT = Path(__file__).resolve().parent.parent
@@ -95,7 +95,7 @@ def main() -> None:
     # stdout/stderr 变 None（test_ladder_ledger 直接 TypeError）。契约见
     # tests/subproc_util.py docstring：**每个 CLI 入口**都要调，不只是被捕获的那些。
     force_utf8_stdio()
-    ap = argparse.ArgumentParser(description="I5 阶梯台账 CLI（runbook 消费）")
+    ap = house_parser(description="I5 阶梯台账 CLI（runbook 消费）")
     ap.add_argument("cmd", choices=("show", "hypothesis", "escalate", "graduate", "disk"))
     ap.add_argument("--level", required=True)
     ap.add_argument("--text", default="")
@@ -161,4 +161,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

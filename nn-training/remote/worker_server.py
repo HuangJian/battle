@@ -36,6 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
+from common.http_respond import respond_json
 from common.instance_lock import (
     acquire_instance_lock,
     default_instance_lock_path,
@@ -305,13 +306,10 @@ def make_worker_server(
             auth = self.headers.get(AUTH_HEADER, "")
             return secrets.compare_digest(auth, f"Bearer {token}")
 
-        def _json(self, obj: dict, status: int = 200) -> None:
-            body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-            self.send_response(status)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+        # 与 hub 侧同一响应形状（common/http_respond.py）：头部顺序 / UTF-8 /
+        # ensure_ascii=False / 长度算法一旦漂移就是跨端解不开。别名 = 方法，
+        # `self._json(obj, status)` 调用点零改动。
+        _json = respond_json
 
         def log_message(self, fmt: str, *args) -> None:  # 静默默认访问日志
             pass

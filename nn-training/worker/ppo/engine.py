@@ -41,7 +41,6 @@ if _ilu.find_spec("common") is None:
 
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent.parent))
 
-import argparse
 import os
 import time
 from typing import Any
@@ -51,6 +50,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from common.cli import house_parser, run_main
 from common.log_bundle import LogBundle
 from common.schema import FIRE_DIM, MOVE_DIM
 from worker.data.weights_io import load_weights_json, save_weights_json
@@ -647,7 +647,7 @@ update = ppo_update
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument(
         "--init-from", type=str, default=None, help="BC weights to warm-start from (init mode)"
     )
@@ -748,4 +748,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

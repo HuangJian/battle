@@ -69,6 +69,7 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
+from common.http_respond import respond_json
 from common.protocol import (
     ADMIN_WORKER_PREFETCH_PATH,
     AUTH_HEADER,
@@ -284,13 +285,10 @@ class HubHandler(
             flush=True,
         )
 
-    def _json(self, obj: object, status: int = 200) -> None:
-        body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
+    # 响应形状（头部顺序 / UTF-8 / ensure_ascii=False / 长度算法）= 线协议的一部分：
+    # 与节点侧 worker_server 共用同一个实现（common/http_respond.py）。类属性别名 =
+    # 方法绑定语义与普通 def 相同，`self._json(obj, status)` 的所有调用点零改动。
+    _json = respond_json
 
     def _bytes(
         self,

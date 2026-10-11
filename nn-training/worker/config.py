@@ -89,6 +89,9 @@ from biz.course_spec import (
     CourseConfig as CourseConfig,
 )
 from biz.course_spec import (
+    CustomStagesMixin as CustomStagesMixin,
+)
+from biz.course_spec import (
     GateRule as GateRule,
 )
 from biz.course_spec import (
@@ -138,6 +141,9 @@ from biz.course_spec import (
 )
 from biz.course_spec import (
     _points_or_raise as _points_or_raise,
+)
+from biz.course_spec import (
+    block_dict as block_dict,
 )
 from biz.course_spec import (
     dead_key_warnings as dead_key_warnings,

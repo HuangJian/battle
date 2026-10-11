@@ -41,6 +41,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from common.cli import house_parser, run_main
 from common.platform_utils import force_utf8_stdio
 from worker.eval_local import rotor_offset
 
@@ -484,7 +485,7 @@ def evaluate(
 
 
 def build_cli() -> argparse.ArgumentParser:
-    p = argparse.ArgumentParser(
+    p = house_parser(
         prog="worker.gate_check",
         description="课程结束门 dry-run / 崩溃恢复重放（判决只写 stdout，零写盘）",
     )
@@ -619,4 +620,4 @@ def _rotation_notes(rows: Sequence[Mapping[str, Any]]) -> list[str]:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_main(main)

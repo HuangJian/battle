@@ -15,39 +15,28 @@ self-feed 输入分布，收敛 gap。成本 = 一次模型推理（CPU 秒级/�
 
 from __future__ import annotations
 
-import argparse
 import os
 
 import numpy as np
 import torch
 
+from common.cli import house_parser, run_main
 from worker.data.weights_io import load_weights_json
-from worker.models.intent_net import IntentNet
+from worker.models.intent_net import build_intent_model
 
 D_MAX = 300.0
 
 
-def build_model(meta: dict, params: dict) -> IntentNet:
-    arch = meta.get("arch", {})
-    model = IntentNet(
-        inject=True,
-        h=arch.get("h", 64),
-        d=arch.get("d", 8),
-        head_hidden=arch.get("head_hidden", 128),
-    )
-    model.load_state_dict(params, strict=False)
-    model.eval()
-    return model
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument("--data", nargs="+", required=True, help="shards 根（多根合并）")
     ap.add_argument("--weights", required=True, help="已导出意图权重 JSON")
     args = ap.parse_args()
 
     meta, params = load_weights_json(args.weights)
-    model = build_model(meta, params)
+    model = build_intent_model(meta, params)
 
     shards = []
     for root in args.data:
@@ -101,4 +90,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

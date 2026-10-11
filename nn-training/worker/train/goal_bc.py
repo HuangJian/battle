@@ -23,7 +23,6 @@ shard（export-counterfactual-goals.ts 产出）：
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import time
@@ -32,6 +31,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from common.cli import house_parser, run_main
 from worker.models.goal_net import GoalNet, export_goal_weights, load_goal_weights
 from worker.ppo.common import discover_shards, log
 
@@ -115,7 +115,7 @@ def load_episodes(data_root: str, window: int) -> list[dict]:
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument("--data", type=str, required=True, help="cf-goals shard root")
     ap.add_argument("--out", type=str, required=True)
     ap.add_argument(
@@ -248,4 +248,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

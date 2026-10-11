@@ -32,20 +32,19 @@ manifest 的 sha256 一律算**解压后的原字节**（否则换机重压 ⇒ 
 
 from __future__ import annotations
 
-import argparse
 import gzip
 import json
 import lzma
 import os
 import re
 import shutil
-import sys
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from common.cli import house_parser, run_main
 from common.hashing import sha256_bytes, sha256_file  # re-export：唯一实现在 common/hashing.py
 from common.platform_utils import rmtree_best_effort
 
@@ -838,7 +837,7 @@ def _build_archive_md(course: str, rep: ArchiveReport, manifest: dict[str, Any])
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(
+    ap = house_parser(
         prog="python -m biz.course_archive",
         description="课程封存：把已停课程从 tmp/<课>/ 搬成只读档案（默认 --dry-run）",
     )
@@ -897,4 +896,4 @@ def main(argv: Sequence[str] | None = None) -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover
-    sys.exit(main())
+    run_main(main)

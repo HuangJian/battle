@@ -51,6 +51,7 @@ from __future__ import annotations
 
 from typing import Any, NamedTuple
 
+from biz.course_spec import block_dict as _block_dict
 from worker.paired_kill import paired_kill_verdict
 
 #: 连续多少个评估点仍低于基线才停腿（执行面常量；课程文件 `kickstart_burn.points` 优先，
@@ -197,19 +198,8 @@ def burn_verdict(
     return BurnVerdict(False, streak, base, last, "")
 
 
-def _block_dict(block: Any) -> dict | None:
-    """课程止损块 → 普通 dict；None/坏值 → None。
-
-    读面消费 `args` 上的**启动物化快照**（`flat_overrides` 以 `model_dump()` 落成 dict =
-    restart-only 的冻结面）；这里认 dict 与 pydantic 块两种形态——单测可直接喂模型。
-    """
-    if isinstance(block, dict):
-        return block
-    dump = getattr(block, "model_dump", None)
-    if callable(dump):
-        dumped = dump()
-        return dumped if isinstance(dumped, dict) else None
-    return None
+#: 2026-10-11（S3）：读块助手提到 `biz.course_spec.block_dict`（与 `paired_kill` 逐字节相同）。
+# 规则本身仍是两条（本模块看结果、`paired_kill` 看配对差），只共用「把块读成 dict」。
 
 
 def burn_mode(block: Any) -> tuple[str, str]:

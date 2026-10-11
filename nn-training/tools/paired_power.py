@@ -27,6 +27,11 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.cli import run_main
+
 ROOT = Path(__file__).resolve().parent.parent.parent
 NN_ROOT = Path(__file__).resolve().parent.parent
 if str(NN_ROOT) not in sys.path:
@@ -952,4 +957,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run_main(main)

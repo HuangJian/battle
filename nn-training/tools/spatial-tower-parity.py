@@ -13,7 +13,6 @@ TS 侧（`src/nn/spatial-tower.ts`）消费该 fixture 做逐值对账（容差 
 
 from __future__ import annotations
 
-import argparse
 import base64
 import json
 import sys
@@ -25,6 +24,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # nn-training/
+from common.cli import house_parser, run_main
 
 BOARD = 26
 IN_CH = 64
@@ -38,7 +38,7 @@ def b64f32(arr: np.ndarray) -> str:
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument("--out", default="tests/fixtures/spatial-tower-golden.json")
     ap.add_argument("--seed", type=int, default=20261005)
     args = ap.parse_args()
@@ -85,4 +85,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

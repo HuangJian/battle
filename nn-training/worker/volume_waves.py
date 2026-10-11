@@ -59,6 +59,8 @@ import numpy as np
 # 2026-09-30：常量随语料身份下沉 `biz/corpus_fp.py`（`corpus_identity_fp` 要用它，
 # 而本模块搬进 worker/ ⇒ 反向 import 是向下边 ✓）。名字保留 ⇒ 调用点不变。
 from biz.corpus_fp import VOLUME_RULE_V1 as VOLUME_RULE_V1
+from worker.volume_math import GamesByStageMixin
+from worker.volume_math import ceil_div as _ceil_div
 
 #: 每轮每关波次数上限（防长尾抖动：补波收益递减，3 波够抹平 est 偏差）。
 #: ⚠ 3 波只够抹平「est 偏差」，不够抹平「est 量纲错」——量纲错是 10×，
@@ -91,11 +93,6 @@ _SEED_SPACE = 2**30
 STOP_QUOTA_MET = "quota_met"  # 配额达成
 STOP_GAME_CAP = "game_cap"  # 触 max_games_per_stage 硬顶（配额未满，需响亮日志）
 STOP_WAVE_CAP = "wave_cap"  # 触波次上限（配额未满）
-
-
-def _ceil_div(a: int, b: int) -> int:
-    """正整数向上取整除法（b>0）。"""
-    return -(-a // b)
 
 
 def parse_stages_arg(raw: str) -> list[int]:
@@ -221,7 +218,7 @@ def terminate(
 
 
 @dataclass(frozen=True)
-class TopUpPlan:
+class TopUpPlan(GamesByStageMixin):
     """一次补波计划（`plan_topup` 的产出；空 `games_by_stage` = 本轮不再补波）。"""
 
     #: 本次要跑的波序号（0-based；初波 = 0，由调用方在首派后传 1 进来补波）。
@@ -234,10 +231,6 @@ class TopUpPlan:
     shortfall: dict[int, int] = field(default_factory=dict)
     #: 任一关因硬顶停且配额未满（调用方响亮日志 + iteration 事件打标）。
     capped: bool = False
-
-    @property
-    def games_total(self) -> int:
-        return sum(self.games_by_stage.values())
 
 
 def plan_topup(

@@ -42,6 +42,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from common.cli import house_parser, run_main
+
 HERE = Path(__file__).resolve().parent
 NN_ROOT = HERE.parent
 REPO_ROOT = NN_ROOT.parent
@@ -408,7 +413,7 @@ def main(argv: list[str] | None = None) -> int:
     from common.platform_utils import force_utf8_stdio
 
     force_utf8_stdio()
-    ap = argparse.ArgumentParser(description="单进程 N 课的 torch 栈 RSS 实测（R2c-3 余项）")
+    ap = house_parser(description="单进程 N 课的 torch 栈 RSS 实测（R2c-3 余项）")
     ap.add_argument("--course", default="", help="单门课（可重复取不同课程混跑）")
     ap.add_argument("--courses", default="", help="逗号分隔的课程名（循环取用）")
     ap.add_argument("--modes", default="", help="逗号分隔：按各 mode 的默认架构测（per-tick,intent,goal）")
@@ -450,4 +455,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_main(main)

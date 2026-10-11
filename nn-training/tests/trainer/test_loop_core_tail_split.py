@@ -138,7 +138,7 @@ SLOT_READERS = {
 
 #: 顶层 import 闭集（非 stdlib）：本模块不许长出重依赖。
 TOP_IMPORTS = {
-    "trainer/loop_baseline.py": frozenset({"common.distribution", "common.log", "trainer.queue"}),
+    "trainer/loop_baseline.py": frozenset({"common.distribution", "common.log", "trainer.dispatch_queue"}),
     "trainer/loop_iter_dir.py": frozenset(
         {"common.distribution", "common.platform_utils", "trainer.collect_only", "common.log", "worker.resume"}
     ),

@@ -43,6 +43,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from common.cli import house_parser
 from common.log import log
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 from remote.code_snapshot import current_code_zip_path, published_code_zip
@@ -53,7 +54,7 @@ from remote.hub_client import (
     publish_job,
     verify_and_land_bc,
 )
-from trainer.queue import REPO_ROOT
+from trainer.dispatch_queue import REPO_ROOT
 from worker.archive import backup_weights
 from worker.bc_config import (
     BC_SUFFIX,
@@ -749,7 +750,7 @@ def bc_argparser(
     description: str = "BC training orchestrator (云-HUB-LAN)",
 ) -> argparse.ArgumentParser:
     """BC 课程的参数表（**唯一一份**：`trainer/run_bc.py` 的 CLI 与 supervisor 的开课都走它）。"""
-    ap = argparse.ArgumentParser(description=description)
+    ap = house_parser(description=description)
     ap.add_argument("--course", required=True, help="BC 课程（curricula/<name>.bc.jsonc）")
     ap.add_argument(
         "--remote", action="store_true", help="发布到共享 hub（pull 模式，云机 poll 领取）"

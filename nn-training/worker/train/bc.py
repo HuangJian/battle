@@ -34,7 +34,6 @@ if _ilu.find_spec("common") is None:
 
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent.parent))
 
-import argparse
 import datetime
 import math
 import os
@@ -54,6 +53,7 @@ import torch.nn.functional as F
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from common.cli import house_parser, run_main
 from common.schema import OBS_SCHEMA_MAJOR
 from worker.data.dataset import make_loaders
 from worker.data.weights_io import load_state_into, save_weights_json
@@ -503,7 +503,7 @@ def _safe_copy(src: str, dst: str) -> None:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="BC/distillation trainer for NN Player AI")
+    ap = house_parser(description="BC/distillation trainer for NN Player AI")
     ap.add_argument("--data-dir", required=True, help="directory of exported npy shards")
     ap.add_argument(
         "--arch",
@@ -566,4 +566,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

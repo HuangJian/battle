@@ -28,7 +28,6 @@ sha256 + 字节数，导入时**逐件对账**（包要过 Kaggle dataset / Driv
 
 from __future__ import annotations
 
-import argparse
 import json
 import shutil
 import sys
@@ -36,6 +35,7 @@ import time
 import zipfile
 from pathlib import Path
 
+from common.cli import house_parser, run_main
 from common.protocol import (
     BLOB_DEMO,
     BLOB_OPT,
@@ -415,7 +415,7 @@ def main(argv: list[str] | None = None) -> int:
     导出侧不在这里：任务的 manifest 必须由**训练侧**（课程/超参/血缘的解析者）生成，
     拿一个不含 args 的 CLI 去重造它等于造第二份真相——导出是 trainer 的 `--export-bundle`。
     """
-    ap = argparse.ArgumentParser(description="battle2 全离线任务包（导入）")
+    ap = house_parser(description="battle2 全离线任务包（导入）")
     sub = ap.add_subparsers(dest="cmd", required=True)
     imp = sub.add_parser("import", help="把任务包铺成可直接续跑的产物目录")
     imp.add_argument("zip", help="任务包 zip")
@@ -443,4 +443,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run_main(main)

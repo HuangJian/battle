@@ -11,7 +11,6 @@ monitor / resume 全在这里。与 battle-bc.ipynb 的多 cell 版本等价，�
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import re
@@ -21,6 +20,11 @@ import sys
 import time
 import zipfile
 from pathlib import Path
+
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.cli import house_parser, run_main
 
 
 def log(msg: str) -> None:
@@ -278,7 +282,7 @@ def run_training(
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="Colab BC 训练驱动")
+    p = house_parser(description="Colab BC 训练驱动")
     p.add_argument("--run-tag", required=True)
     p.add_argument("--course", required=True)
     p.add_argument("--corpus-zip", required=True)
@@ -320,4 +324,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    run_main(main)

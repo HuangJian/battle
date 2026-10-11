@@ -202,7 +202,8 @@ def test_the_main_block_still_reaches_the_real_main() -> None:
     guard = [n for n in _tree("hub/server.py").body if isinstance(n, ast.If)]
     assert len(guard) == 1, guard
     assert ast.unparse(guard[0].test) == "__name__ == '__main__'"
-    assert [ast.unparse(s) for s in guard[0].body] == ["main()"]
+    # 出口走 common/cli.run_main（2026-10-11 全迁：`--help`/退出码非契约，只保 flags 语义）
+    assert [ast.unparse(s) for s in guard[0].body] == ["run_main(main)"]
 
 
 # ───────────────────────── ② 门面：对象恒等 + 闭集 ─────────────────────────

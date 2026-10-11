@@ -24,6 +24,7 @@ import numpy as np
 # 前置的必须是 **nn-training 根**（上溯 2 层），不是脚本目录。tools/ 里没有与 stdlib
 # 同名的模块（无 queue.py），所以不需要摘目录项。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common.cli import run_main
 from common.schema import (
     BOARD,
     FIRE_DIM,
@@ -132,4 +133,4 @@ def __arg_proxy(data_dir: str, out: str):
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

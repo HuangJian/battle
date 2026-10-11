@@ -23,7 +23,6 @@ main()            argparse（单课程 / 多课程 / --discover / --push）→ �
 
 from __future__ import annotations
 
-import argparse
 import atexit
 import sys
 import time
@@ -32,6 +31,7 @@ from pathlib import Path
 from threading import Thread
 
 # 单实例锁 / 端口守卫（2026-09-17 双实例事故的两道闸）：与调度面无关，纯进程生命周期。
+from common.cli import house_parser
 from common.instance_lock import (
     acquire_instance_lock,
     default_instance_lock_path,
@@ -107,7 +107,7 @@ def make_server(
     return Server()
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="hub-server: remote PPO job queue (stdlib)")
+    ap = house_parser(description="hub-server: remote PPO job queue (stdlib)")
     ap.add_argument("--port", type=int, default=8787)
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--token", default="", help="Bearer token（云 worker 与训练主循环共享）")

@@ -31,14 +31,11 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "nn-training"))
-# 脚本目录 biz/ 会被自动插到 sys.path[0]，其 queue.py 遮蔽 stdlib queue——
-# concurrent.futures 内部 `import queue` 即循环炸（实测）。先移除脚本目录项，
-# 再导入 concurrent.futures；rl.* 的导入走上面的 nn-training 入口，语义不变。
-_SCRIPT_DIR = str(Path(__file__).resolve().parent)
-while _SCRIPT_DIR in sys.path:
-    sys.path.remove(_SCRIPT_DIR)
+# 2026-10-11（S1）：原先这里要摘掉脚本目录项，防脚本目录里的 `queue.py` 遮蔽 stdlib `queue`；该模块
+# 已改名 `trainer/dispatch_queue.py`（plan/nn-training-reuse-and-deps.plan.md §S1），scrub 删除。
+from concurrent.futures import ThreadPoolExecutor
 
-from concurrent.futures import ThreadPoolExecutor  # 必须在 scrub 之后
+from common.cli import house_parser, run_main
 
 _FILENAME_RE = re.compile(r"-s(\d+)-[a-z]+-l\d+-t\d+-seed(\d+)\.replay$")
 
@@ -360,7 +357,7 @@ def _export(args: argparse.Namespace, manifest_path: Path) -> int:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Export deterministic sim replays for in-loop eval games")
+    ap = house_parser(description="Export deterministic sim replays for in-loop eval games")
     ap.add_argument("--course", required=True)
     ap.add_argument("--iter", type=int, required=True)
     ap.add_argument("--wver", required=True, help="eval 账本 key16（sha256 权重指纹前 16 位）")
@@ -395,4 +392,4 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_main(main)

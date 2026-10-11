@@ -36,8 +36,14 @@ from __future__ import annotations
 
 import argparse
 import re
+import sys
 from collections import defaultdict
 from pathlib import Path
+
+# 入口脚本自举（脚本模式下 sys.path[0] 是脚本目录，仓内模块要放回 nn-training 根）。
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from common.cli import house_parser, run_main
 
 #: `--durations=0` 的行形态：`0.42s call     tests/test_x.py::test_y`
 _LINE = re.compile(r"^\s*([0-9.]+)s\s+(call|setup|teardown)\s+(\S+)\s*$")
@@ -123,7 +129,7 @@ def cmd_ab(args: argparse.Namespace) -> int:
 
 
 def build_parser() -> argparse.ArgumentParser:
-    ap = argparse.ArgumentParser(
+    ap = house_parser(
         description="多份 pytest --durations 日志的 min 汇总 / 对账（见模块头）"
     )
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -159,4 +165,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    run_main(main)

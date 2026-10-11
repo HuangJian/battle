@@ -23,6 +23,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from biz.reward_library import METRIC_INDEX, METRICS_DIM
+from common.cli import run_main
 from common.proc import run_capture
 
 GOLDEN_DIR = ROOT / "tests" / "golden"
@@ -114,4 +115,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

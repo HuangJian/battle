@@ -35,6 +35,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 / 课程管理页 / 指标表抗轮转抄录 / **回放导出按评估轮选（§32）** / **池历史大流按变化重建（§33）** / **空置内存真凶：logTail 整文件读（§34）** / **v2 词表与钮：接管是唯一真源（§35）** / **self 节点低盘告警：预警档与拒收地板是两件事（§36）** | 36 |
 | [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处）· **节点单实例互斥**（§29）· **一局的墙钟上界**（§32）· **长驻池真就绪 + 有界清理**（§33）· **热路径 IO 换节点本地盘（rollout/eval 共用一套 scratch）**（§34） | 33 |
 | [`docs/nn/tpu-perf.md`](nn/tpu-perf.md) | TPU / XLA：设备实测 · 单步耗诊断 · 编译缓存 · PPO 吞吐 | 9 |
+| [`docs/nn/reuse-audit.md`](nn/reuse-audit.md) | **复用账本（S0，2026-10-11）**：跨模块重复实现清单（逐字节 / 结构克隆 / 同名散落）+ 三类处置判据（A 提到 `common/` · B 域内共用 · C 库替代 / R2 结构性豁免）+ 复跑法与基线守卫（**工具说明 + 现行水位**，不是逐条历史；出题见 `plan/nn-training-reuse-and-deps.plan.md`） | — |
 
 > **另：每篇多了一个 `决策正文归档` 节（2026-09-23）**。`DECISIONS.md` 同日瘦身，把那批
 > 正文 >10 行的决策全文按主题搬进这些文档（共 105 条进本目录，2 条进 `docs/decisions/details/`）。

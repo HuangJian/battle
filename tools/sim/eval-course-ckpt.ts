@@ -7,7 +7,7 @@
  *   * **本地与分布式都由 Python 引擎跑**：`nn-training/trainer/eval_course_once.py` →
  *     `trainer.batch_eval.BatchEvalRunner`。节点门 / ping / 退避重试 / 失败连击停用 /
  *     权重下发 / wver(409) / 本机份额 / 队列尾竞速，全部是训练栈里长期实战的
- *     那一份（`common.distribution.fetch_task`、`post_weights_parallel`、`trainer/queue.py`）。
+ *     那一份（`common.distribution.fetch_task`、`post_weights_parallel`、`trainer/dispatch_queue.py`）。
  *     TS 侧**不再**复制任何节点通信逻辑（旧实现探测/重试/rescan/停用/本机槽位
  *     各写一份，既漂移又漏护栏，已删除）。
  *   * 本文件只做四件事：解析参数 → 写 spec → 经 `nn-py-safe.sh` 调 Python →

@@ -1645,7 +1645,7 @@ assert len(files) > 100, f"扫描面只有 {len(files)} 个文件——包被搬
 （`biz/archive.py` / `eval_local.py` / `eval_replays_once.py` 的 `parents[2]` 注释：文件自己住在 `biz/`，
 裸目录规则只会给 `trainer/`）② **跨层声明**（`biz/resume.py`「不 import 任何 `rl/*`」、`worker/models/rl_model.py`
 「不得被 `rl/ppo/remote` import」、`common/__init__.py` 的禁 import 名单：这里的 `rl/` 是「上层业务面」的统称，
-今天要写全 `trainer/*` / `biz/*`）③ **拼写事故**（`eval_course_once.py` 里 `rn-training/trainer/queue.py`，
+今天要写全 `trainer/*` / `biz/*`）③ **拼写事故**（`eval_course_once.py` 里 `rn-training/trainer/dispatch_queue.py`，
 早前某次 sed 吃了 `n`）④ 碰撞名 `stream` 的**模块口径**（只出现在 `rl/stream.…` 这种路径里，裸目录规则能安全吃下；
 只有点分形 `rl.stream` 才是配置键）。
 
@@ -1727,7 +1727,7 @@ RL_ORCHESTRATION = 「rl 中直接或经 rl 内部传递可达 remote|worker 的
 | dashboard | typecheck 过 + **1225 pass / 0 fail**（+ 新增 4 例 dashboard 守卫） |
 | 审计器 | `tmp/reorg_audit.py` 三源扫描：向上边 **0** · 同层未授权 **0** · 对端互 import **0**（biz 66 / trainer 37） |
 | 纯搬对账 | `tmp/cut4_verify_move.py`（把四刀改名全逆后比**非空行多重集**）：64 个模块 **0 个不等** —— 四刀谁都没增删改一行代码，只换了名字与 import 顺序 |
-| 反探针 | 搬回 `rl/` ⇒ 机械守卫红；`biz` 里 `import trainer.queue` ⇒ 两条切线守卫红；删族里一个文件 ⇒ 解析器 **FileNotFoundError**（响亮）；dashboard spawn 路径改回 `rl/` ⇒ 新守卫红 |
+| 反探针 | 搬回 `rl/` ⇒ 机械守卫红；`biz` 里 `import trainer.dispatch_queue` ⇒ 两条切线守卫红；删族里一个文件 ⇒ 解析器 **FileNotFoundError**（响亮）；dashboard spawn 路径改回 `rl/` ⇒ 新守卫红 |
 
 ### 五个坑（都是「测试绿也会静默瞎掉」那一类）
 
@@ -5621,7 +5621,7 @@ B2 会让它们进 `BatchStore`；现在搬进去 = 下一刀还得再搬一次�
 - `batch_plan` 不 import 旧家（守卫按 **AST** 钉：`Attribute` / `Name` 里不得出现 `batch_eval`——
   文本搜会命中 docstring 里那句合法的「既有 `from trainer.batch_eval import plan_units` 一行不改」，
   这是 S20 就记下的教训）；
-- 顶层 import 闭集 `{__future__, hashlib, json, os, pathlib, common.distribution, common.jsonc, trainer.queue}`
+- 顶层 import 闭集 `{__future__, hashlib, json, os, pathlib, common.distribution, common.jsonc, trainer.dispatch_queue}`
   （多一个也红）；
 - **分层快照未红**：`batch_plan` 经 `rl` 传递不达 remote ⇒ 不登记（与 S23 一样，**不红也是信息**）。
 
@@ -5819,7 +5819,7 @@ nn 门禁 **2586 → 2608 passed / 3 skipped**（ruff + mypy 绿，442 源文件
 
 #### ★ 本刀题眼：注入点是**模块全局**，搬家就改址
 
-执行器的依赖注入靠模块全局（`from trainer.queue import bun_version` 等），所以
+执行器的依赖注入靠模块全局（`from trainer.dispatch_queue import bun_version` 等），所以
 `monkeypatch.setattr("trainer.batch_eval.X", …)` 搬到新家后**不再生效** —— 名字还在旧家（门面
 也会 import `log` 自用），但没人在读它。两处按路径读源码的守卫同理。**改址清单（本刀正文）**：
 
@@ -5861,7 +5861,7 @@ nn 门禁 **2586 → 2608 passed / 3 skipped**（ruff + mypy 绿，442 源文件
 
 #### provenance
 
-`biz/agent_meta.py`（干净评估派发的调用者路径）· `trainer/queue.py`（两处 `bun_version` 消费者）·
+`biz/agent_meta.py`（干净评估派发的调用者路径）· `trainer/dispatch_queue.py`（两处 `bun_version` 消费者）·
 `biz/eval_local.py`（`BatchEvalRunner._run.record` 的**符号名**引用）·
 `dashboard/src/evalboard/runner.ts`（执行侧 Python 路径）。
 **刻意不动**：`common/distribution.py` / `tests/worker/test_dual_track_eval.py` / `docs/evalboard-phase0-census.md`
@@ -6214,7 +6214,7 @@ HTTP 面（`hub/http_face.py` L5）与引导链（`hub/boot.py` L6）分开，�
 ### 循环的现场
 
 S1 结束时测到：`rl/` 有 **10 个文件** import `remote/*`，`remote/` 有 **8 个文件** import `rl/*`
-—— 双向。当年靠 `trainer/queue.py` 里一处**函数内延迟 import** 维持「能跑」：延迟 import 把失败
+—— 双向。当年靠 `trainer/dispatch_queue.py` 里一处**函数内延迟 import** 维持「能跑」：延迟 import 把失败
 从 import 期推到调用期，于是环在启动时看不出来。这就是本仓记过的「延迟 import 掩盖循环」先例。
 
 先做**判据**再动手（否则只是把环换个地方）：AST 扫全部 import 节点（含函数内），量出两件事——
@@ -9931,7 +9931,7 @@ spawn 路径 · `dashboard/src/evalboard/kick-once.py` 的 `from biz.log` → `c
 
 **三条前提随搬家重算**（本刀真正的技术含量 —— 前两条**只在真机启动时现形**，单测天然看不见）：
 ① **脚本模式下 `sys.path[0]` = 脚本目录**（不再 nn-training）⇒ 六个入口各自前置「摘掉脚本目录项 + 放回 nn-training
-根」：`trainer/queue.py` 会遮蔽 stdlib `queue`，`concurrent.futures` 一导入就循环炸（惯用法抄 `trainer/eval_a_once.py`）；
+根」：`trainer/dispatch_queue.py` 会遮蔽 stdlib `queue`，`concurrent.futures` 一导入就循环炸（惯用法抄 `trainer/eval_a_once.py`）；
 ② **`Path(__file__)` 上溯层数 +1**：`HERE` / `NN_ROOT` / `ROOT` 的**语义**不变（nn-training 根 / 仓根），只改推导；
 ③ **启动器**：`--script` 一直是「`nn-training/` 下的相对路径」（`resolveTrainScript` 只拒绝对路径/盘符/`..`），
 故写成 `trainer/run_rl.py`；`LEGACY_ALIAS` 里 `'train_rl.py'` 的值同步改。

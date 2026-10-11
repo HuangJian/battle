@@ -28,6 +28,7 @@ import sys
 
 # v3：形状常量单一事实来源（nn-training/common/schema.py），本脚本 nn-training/scripts/ 下。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from common.cli import run_main
 from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 
 EXPECT = {
@@ -180,4 +181,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

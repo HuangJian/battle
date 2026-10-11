@@ -30,11 +30,10 @@
 
 from __future__ import annotations
 
-import argparse
 import json
-import sys
 from pathlib import Path
 
+from common.cli import house_parser, run_main
 from hub.server import _JobStore
 
 # `_weights_archive_root` 随归档那段一起搬进了离线段混入（S4：`hub_server` 收口成门面后
@@ -108,7 +107,7 @@ def _archived_names(it: int) -> set[str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description="补做已落地回传轮的课程侧落位（一次性修复）")
+    ap = house_parser(description="补做已落地回传轮的课程侧落位（一次性修复）")
     ap.add_argument("--traj-root", default="tmp", help="训练轨迹根（缺省 tmp）")
     ap.add_argument(
         "--course",
@@ -138,4 +137,4 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":  # pragma: no cover
-    sys.exit(main())
+    run_main(main)

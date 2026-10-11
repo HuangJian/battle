@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 
 # 核数口径的唯一实现（容器配额/亲和掩码 > `os.cpu_count()`）：`--workers` 的缺省值就靠它。
+from common.cli import house_parser
 from common.platform_utils import effective_cores
 from worker.breaker import (
     ENT_BREAK,
@@ -35,7 +36,7 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     # 抄了就会漂，而 help 说的必须就是代码做的事）。函数内 import：本模块顶层不拉重物。
     from common import game_watch
 
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     # ===== RL 入口整合（DECISIONS §307）：三模式后端 =====
     ap.add_argument(
         "--mode",

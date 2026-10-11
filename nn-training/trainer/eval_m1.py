@@ -26,7 +26,7 @@ from common.log import log
 
 # Windows：spawn 子进程（bun 评估）时用 CREATE_NO_WINDOW，避免黑控制台窗口抢焦点。
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from trainer.queue import REPO_ROOT
+from trainer.dispatch_queue import REPO_ROOT
 
 
 def parse_m1_eval_report(text: str) -> dict:

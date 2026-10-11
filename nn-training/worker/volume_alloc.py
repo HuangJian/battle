@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 
+from worker.volume_math import ceil_div as _ceil_div
 from worker.volume_quota import target_per_stage
 
 #: 分配规则版本（进 iteration 事件 / 云机轮报的 provenance；**不进** `corpus_identity_fp`——
@@ -41,10 +42,6 @@ DEFAULT_TOPUP_MAX_BATCHES = 3
 
 #: 末批（`batches_left == 1`）的 est 折扣：缺口不可恢复、浪费可恢复 ⇒ 末批故意偏保守。
 DEFAULT_LAST_BATCH_LO_FACTOR = 0.85
-
-
-def _ceil_div(a: int, b: int) -> int:
-    return -(-int(a) // int(b))
 
 
 def _scale(x: int, factor: float) -> tuple[int, int]:

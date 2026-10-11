@@ -1,4 +1,4 @@
-"""RolloutDispatcher —— 中央队列调度（2026-09-02 从 trainer/queue.py 类化）。"""
+"""RolloutDispatcher —— 中央队列调度（2026-09-02 从 trainer/dispatch_queue.py 类化）。"""
 
 from __future__ import annotations
 
@@ -83,7 +83,7 @@ def _ensure_games(m: dict) -> dict:
 
 # 版本探测 / major.minor 比对 / 节点采样账本 —— 唯一实现见 `common.proc` 与
 # `biz.agent_meta`（本处 re-export：本模块内的调用点与测试的 monkeypatch 接缝都不变）。
-# 历史：本模块与 `trainer/queue.py` 各有一份字形相同的三件套（bun_version / mm /
+# 历史：本模块与 `trainer/dispatch_queue.py` 各有一份字形相同的三件套（bun_version / mm /
 # _record_agent_meta），差别只在哪一份先被谁 import——两份注释都在解释同一件事。
 bun_version = _bun_version
 mm = _mm

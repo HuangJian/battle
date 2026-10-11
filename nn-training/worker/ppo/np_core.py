@@ -23,6 +23,7 @@ import numpy as np
 import numpy.typing as npt
 
 from common.log import log
+from worker.ppo._episode import episode_from_shard
 
 # numpy 的 RandomState.get_state() 存根把 legacy 默认标成 False（→ dict），但 numpy 2.x
 # 实测返回的是 legacy 元组。显式传 legacy=True 并断言元组形态，双层保险。
@@ -709,23 +710,22 @@ def load_episode_from_shard(dirpath: str, gamma: float = GAMMA, lam: float = LAM
     ppo_intent.load_episode_from_shard 同签名——run_rollout_stream 以 backend 参数
     复用同一套流式基础设施（工程化共享，勿在 stream 内复制第二份加载逻辑）。
     """
-    d = load_shard(dirpath)
-    N = d["obs"].shape[0]
-    if N == 0:
-        return None
-    adv, ret = compute_gae(d["reward"], d["value"], d["done"], gamma, lam)
-    return {
-        "obs": d["obs"],
-        "scalars": d["scalars"],
-        "a_move": d["a_move"],
-        "a_fire": d["a_fire"],
-        "lp_move": d["lp_move"],
-        "lp_fire": d["lp_fire"],
-        "value": d["value"],
-        "adv": adv.astype(np.float32),
-        "ret": ret.astype(np.float32),
-        "mask": d["mask"],
-    }
+    return episode_from_shard(
+        load_shard(dirpath),
+        lambda d: compute_gae(d["reward"], d["value"], d["done"], gamma, lam),
+        fields=(
+            "obs",
+            "scalars",
+            "a_move",
+            "a_fire",
+            "lp_move",
+            "lp_fire",
+            "value",
+            "adv",  # 占位：GAE 现算
+            "ret",
+            "mask",
+        ),
+    )
 
 
 def load_episodes(

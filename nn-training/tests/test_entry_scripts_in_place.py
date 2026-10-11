@@ -7,8 +7,11 @@
   ① `from common.… import …` 这类仓内顶层导入全部找不到（脚本起不来）；
   ② `trainer/` 里那个 `queue.py` 会遮蔽 stdlib `queue` —— `concurrent.futures` 一导入就
      循环炸（`trainer/eval_a_once.py` 早在 2026-09 就踩过，惯用法写在它文件头）。
+     ⚠ 2026-10-11（S1，plan/nn-training-reuse-and-deps.plan.md）：② 的**根因已消**——
+     `trainer/queue.py` 改名 `trainer/dispatch_queue.py`，8 处「摘掉脚本目录项」的 scrub 全删；
+     本条守卫的职责不变（① 仍在）：入口必须能**以脚本方式**起得来。
 
-修法是每个入口前置「摘掉脚本目录项 + 放回 nn-training 根」。本文件把「修好了」变成可执行
+修法是每个入口前置「放回 nn-training 根」（② 已无需 scrub）。本文件把「修好了」变成可执行
 断言：**每个入口都以「脚本方式」真起一次**（`python <path> --help` / `python -m <mod>
 --help`），退出码 0 且无 Traceback。单元测试里没有人这样起过它们（用例都用
 `importlib`/`-c` 加载模块，`sys.path[0]` 不是脚本目录），所以这条是唯一能挡住「搬了家但
@@ -60,7 +63,7 @@ def test_nn_training_top_level_has_no_entry_scripts() -> None:
 
 
 def test_file_entries_run_as_scripts_from_the_repo_root() -> None:
-    """`python nn-training/<入口> --help` 必须起得来（脚本目录遮蔽 stdlib 的坑就死在这里）。"""
+    """`python nn-training/<入口> --help` 必须起得来（脚本模式下 sys.path[0] 是脚本目录）。"""
     missing = [e for e in FILE_ENTRIES if not (NN_ROOT / e).is_file()]
     assert missing == [], f"入口不在约定位置：{missing}"
     for rel in FILE_ENTRIES:

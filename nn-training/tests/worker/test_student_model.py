@@ -21,6 +21,7 @@ import torch
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from common.cli import run_main
 from common.schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
 from worker.models.student import (
     DEFAULT_D,
@@ -146,5 +147,5 @@ def test_stem_input_normalization_folded() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)
     test_stem_input_normalization_folded()

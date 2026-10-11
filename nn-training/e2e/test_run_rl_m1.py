@@ -14,6 +14,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO))
 
+from common.cli import run_main
 from trainer import run_rl
 from trainer.eval_m1 import CLEAN_EVAL_MAX_RETRY, parse_m1_eval_report, run_clean_eval
 
@@ -281,7 +282,7 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)
 
 
 def test_update_kwargs_kickstart_zerowarmup() -> None:

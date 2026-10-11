@@ -37,7 +37,6 @@ if _ilu.find_spec("common") is None:
 
     _sys.path.insert(0, str(_Path(__file__).resolve().parent.parent.parent))
 
-import argparse
 import os
 import time
 
@@ -46,9 +45,11 @@ import numpy.typing as npt
 import torch
 import torch.nn.functional as F
 
+from common.cli import house_parser, run_main
 from worker.models.intent_net import IntentNet, export_intent_weights, load_intent_weights
 
 # 共享 PPO 基础设施（ppo_common.py；行为与旧内联实现逐字节一致，见其模块 doc）。
+from worker.ppo._episode import episode_from_shard
 from worker.ppo.common import (
     _ppo_load,
     _ppo_save,
@@ -155,23 +156,22 @@ def load_episode_from_shard(dirpath: str) -> dict | None:
 
     与 ppo.load_episode_from_shard 同签名——run_rollout_stream 以 backend 参数复用
     同一套流式基础设施（意图步变步长 GAE + inject/dt 字段）。"""
-    d = load_intent_shard(dirpath)
-    N = d["obs"].shape[0]
-    if N == 0:
-        return None
-    adv, ret = compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"])
-    return {
-        "obs": d["obs"],
-        "scalars": d["scalars"],
-        "inject": d["inject"],
-        "a_intent": d["a_intent"],
-        "lp_intent": d["lp_intent"],
-        "value": d["value"],
-        "adv": adv.astype(np.float32),
-        "ret": ret.astype(np.float32),
-        "mask": d["mask"],
-        "dt": d["dt"],
-    }
+    return episode_from_shard(
+        load_intent_shard(dirpath),
+        lambda d: compute_gae_variable(d["reward"], d["value"], d["done"], d["dt"]),
+        fields=(
+            "obs",
+            "scalars",
+            "inject",
+            "a_intent",
+            "lp_intent",
+            "value",
+            "adv",  # 占位：GAE 现算
+            "ret",
+            "mask",
+            "dt",
+        ),
+    )
 
 
 def load_episodes_intent(data_root: str, normalize_adv: bool = True) -> list[dict]:
@@ -375,7 +375,7 @@ load_episodes = load_episodes_intent
 
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument("--init-from", type=str, default=None, help="B′/BC intent weights (init mode)")
     ap.add_argument("--resume", type=str, default=None, help="RL intent weights (update mode)")
     ap.add_argument("--data", type=str, default=None, help="intent trajectory shard root (update)")
@@ -469,4 +469,4 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

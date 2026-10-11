@@ -21,7 +21,6 @@ eval_intent_m5.py — M5 gate 四必报项评估（plan/Intent-Policy-NN-Plan.md
 
 from __future__ import annotations
 
-import argparse
 import json
 import os
 import sys
@@ -29,8 +28,9 @@ import sys
 import numpy as np
 import torch
 
+from common.cli import house_parser, run_main
 from worker.data.weights_io import load_weights_json
-from worker.models.intent_net import IntentNet
+from worker.models.intent_net import build_intent_model
 
 INTENT_IDS = [
     "INTERCEPT",
@@ -85,22 +85,10 @@ def shift_prev(seq: np.ndarray, k: int) -> np.ndarray:
     return prev
 
 
-def build_model(meta: dict, params: dict) -> IntentNet:
-    arch = meta.get("arch", {})
-    model = IntentNet(
-        inject=True,
-        h=arch.get("h", 64),
-        d=arch.get("d", 8),
-        head_hidden=arch.get("head_hidden", 128),
-    )
-    # strict=False：容忍 value/enemy/anchor 头缺失/形状差异（intent 评估只需主干 + intent_head）。
-    model.load_state_dict(params, strict=False)
-    model.eval()
-    return model
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument("--data", nargs="+", required=True, help="shards 根（与训练同，多根合并）")
     ap.add_argument("--weights", required=True, help="已导出的意图权重 JSON（intent_net 导出格式）")
     ap.add_argument("--out", required=True)
@@ -129,7 +117,7 @@ def main() -> None:
     )
 
     meta, params = load_weights_json(args.weights)
-    model = build_model(meta, params)
+    model = build_intent_model(meta, params)
 
     # 累加器
     conf_teach = np.zeros((8, 8), dtype=np.int64)  # teacher-feed 全量 8×8
@@ -297,4 +285,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

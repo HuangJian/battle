@@ -29,7 +29,7 @@ _eval_covered ← _drain_pending_eval ──────────────
    （`_log_report` 写 `_eval_thread`、`_record_iteration` 读 `_eval_join_sec`）**经继承**可见
    ——它们被逐条写死在 `CROSS_MODULE_HANDS` 里，将来要动必须显式改这张表；
 5. 顶层 import 面**闭合**（本模块不许长出重依赖）；DI 目标（`trainer.eval_dispatch` / `biz.eval_yield`
-   / `trainer.queue` / `biz.archive`）**只许在方法体内延迟 import**——测试一直 patch 那些实现模块
+   / `trainer.dispatch_queue` / `biz.archive`）**只许在方法体内延迟 import**——测试一直 patch 那些实现模块
    （`biz.eval_local` 于 S5 第十二刀换成 `biz.eval_yield`：让位/份额判据搬出了运行器）；
 6. **★ 两条功能性**：跨模块的流式交棒（`_log_report` → `_join_eval` → `_eval_tail` 落在**同一个
    实例**上）· 占位**响亮失败**（MRO 被改坏时不静默返回 falsy 把 eval 全关掉）。
@@ -87,7 +87,7 @@ TOP_LEVEL_ALLOWED = {
 }
 
 #: DI 目标：只许**方法体内**延迟 import（测试 patch 的是这些实现模块）。
-DI_MODULES = ("trainer.eval_dispatch", "worker.eval_yield", "trainer.queue", "worker.archive")
+DI_MODULES = ("trainer.eval_dispatch", "worker.eval_yield", "trainer.dispatch_queue", "worker.archive")
 
 
 def _tree(path: Path) -> ast.Module:

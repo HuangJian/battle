@@ -34,6 +34,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from common.stats import num_or_none as _num
 from worker.breaker import (
     ENT_BREAK,
     ENT_BREAK_CONSEC,
@@ -105,12 +106,6 @@ class VerdictRow:
     verdict: str
     decider: str
     released_kinds: tuple[str, ...]
-
-
-def _num(v: Any) -> float | None:
-    if isinstance(v, bool) or not isinstance(v, (int, float)):
-        return None
-    return float(v)
 
 
 def _ts_to_epoch(ts: Any) -> float | None:

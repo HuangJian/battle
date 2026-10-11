@@ -35,20 +35,16 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from common.logutil import log_line
+from common.logutil import tag_logger
 from common.pid_probe import pid_alive
 from common.proc import run_capture
 
 # cell 端 /code 引导（fetch+unpack+sys.path）已完成；本模块只管运行时。
 
 
-def _log_default(msg: str) -> None:
-    """默认日志（tag=`battle-rl`）——行格式见 `common.logutil`（`clock=time` 保可注入）。
-
-    ⚠ `tests/remote/test_notebook_runtime.py` 用 `monkeypatch.setattr(nbr, "time", clock)`
-    注入假钟 ⇒ 必须把本模块的 `time` 传进去，不能让 logutil 自己取全局 `time`。
-    """
-    log_line("battle-rl", msg, clock=time)
+#: 2026-10-11（plan/nn-training-reuse-and-deps §S2）：4 份同形 `_log_default` 收敛为工厂；
+#: `lambda: time` 保留「每次重读本模块 `time`」的注入缝（7 处假钟用例钉着）。
+_log_default = tag_logger("battle-rl", lambda: time)
 
 
 def _hub_open(req: Any, timeout: float = 15) -> Any:

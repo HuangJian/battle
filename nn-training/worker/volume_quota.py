@@ -34,6 +34,9 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from worker.volume_math import GamesByStageMixin
+from worker.volume_math import ceil_div as _ceil_div
+
 #: 连续配额规则版本（进 corpus 血缘；改分配/种子语义 =  bump + 新实验）。
 VOLUME_RULE_V2 = 2
 
@@ -50,10 +53,6 @@ DEFAULT_GAME_CAP_MULT = 4
 STOP_QUOTA_MET = "quota_met"
 STOP_GAME_CAP = "game_cap"
 STOP_BATCH_CAP = "batch_cap"
-
-
-def _ceil_div(a: int, b: int) -> int:
-    return -(-int(a) // int(b))
 
 
 def target_per_stage(target_transitions: int, n_stages: int) -> int:
@@ -128,7 +127,7 @@ def allocate_stage_games(
 
 
 @dataclass(frozen=True)
-class ContinuousPlan:
+class ContinuousPlan(GamesByStageMixin):
     """一小批连续采集计划。空 `games_by_stage` = 本轮不再派。"""
 
     games_by_stage: dict[int, int] = field(default_factory=dict)
@@ -136,10 +135,6 @@ class ContinuousPlan:
     shortfall: dict[int, int] = field(default_factory=dict)
     projected_shortfall: dict[int, int] = field(default_factory=dict)
     capped: bool = False
-
-    @property
-    def games_total(self) -> int:
-        return sum(self.games_by_stage.values())
 
 
 def plan_continuous_batch(

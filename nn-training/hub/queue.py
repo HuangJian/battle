@@ -98,7 +98,7 @@ class _HubQueue(
     本类负责三件跨课程的事：
 
       ① **路由**：任意 `/jobs/{id}/...` 先按 job_id 找归属课程。job_id 的幂等键含
-         `runId`，而 runId 是每进程随机的 8 字节 hex（`trainer/queue.py::RUN_ID`）⇒ 跨课程
+         `runId`，而 runId 是每进程随机的 8 字节 hex（`trainer/dispatch_queue.py::RUN_ID`）⇒ 跨课程
          天然不撞；判据 = 「哪个课程的 job 目录里真有它」，命中即入缓存（一次 fs 探测）。
       ② **队形**：每课程一条 FIFO（`claimable_job_ids` 本来就是发布序）；派发时
          **跨课程轮转**（`protocol.rotation_order`）—— 否则一门积压 20 轮的课会把

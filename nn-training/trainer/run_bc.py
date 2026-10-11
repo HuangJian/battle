@@ -32,18 +32,18 @@ import os
 import sys
 from pathlib import Path
 
-# 2026-09-30（刀 7）：同 trainer/run_rl.py —— 入口进 trainer/ 后先摘掉脚本目录项（其 queue.py 遮蔽
-# stdlib `queue`），再把 nn-training 根放回（见 trainer/eval_a_once.py 的完整说明）。
+# 2026-09-30（刀 7）：入口进 trainer/ 后把 nn-training 根（= 脚本目录的父目录）放回 sys.path。
+# 2026-10-11（S1）：原先还要摘掉脚本目录项，防脚本目录里的 `queue.py` 遮蔽 stdlib `queue`；该模块已
+# 改名 `trainer/dispatch_queue.py`（plan/nn-training-reuse-and-deps.plan.md §S1），scrub 删除。
 _SCRIPT_DIR = Path(__file__).resolve().parent
-while str(_SCRIPT_DIR) in sys.path:
-    sys.path.remove(str(_SCRIPT_DIR))
 sys.path.insert(0, str(_SCRIPT_DIR.parent))
 
+from common.cli import run_main
 from common.log import log
 from common.platform_utils import force_utf8_stdio
 from common.proc import run_capture
 from trainer.bc_loop import BcLoop, bc_argparser, resolve_bc_runtime
-from trainer.queue import REPO_ROOT
+from trainer.dispatch_queue import REPO_ROOT
 from worker.archive import ensure_current_branch_pushed
 from worker.train.loop_util import acquire_lock, cleanup_lock, course_lock_path
 
@@ -111,4 +111,4 @@ def main(argv: list[str] | None = None) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

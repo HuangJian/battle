@@ -19,7 +19,7 @@ from typing import Any
 
 import common.distribution
 from common.log import log
-from trainer.queue import _record_agent_meta, bun_version, mm
+from trainer.dispatch_queue import _record_agent_meta, bun_version, mm
 from trainer.queue_local import pick_race_target, register_inflight
 from worker import node_identity
 

@@ -41,6 +41,7 @@ import torch
 import torch.nn as nn
 
 from common.schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
+from worker.models._common import param_count as param_count
 
 DEFAULT_CONV_CH = (32, 48, 64)
 DEFAULT_HEAD_HIDDEN = 64
@@ -127,10 +128,6 @@ class NNPolicy(nn.Module):
             torch.softmax(m, dim=-1),
             torch.softmax(f, dim=-1),
         )
-
-
-def param_count(model: nn.Module) -> int:
-    return sum(int(p.numel()) for p in model.parameters())
 
 
 if __name__ == "__main__":

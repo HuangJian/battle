@@ -37,7 +37,7 @@ stream 报告里的 eval 线程句柄 pop 进 `_eval_thread`（R4：jsonl 写回
 ## DI seam：本模块**没有**新的 patch 点
 
 本簇对外的依赖全是**方法体内的延迟 import**（`trainer.eval_dispatch` / `biz.eval_yield` /
-`trainer.queue` / `biz.archive`），测试也一直 patch 那些**实现模块**（`monkeypatch.setattr(ed,
+`trainer.dispatch_queue` / `biz.archive`），测试也一直 patch 那些**实现模块**（`monkeypatch.setattr(ed,
 "dispatch_eval_bg", ...)`）⇒ 方法搬家不改变任何注入点。反过来，对 `trainer.loop_steps.*` 的那些
 注入**本来就是空操作**（这些名字从来没住在那儿）。唯一按路径读源码的守卫在
 `tests/trainer/test_eval_a_once.py`，已随本刀重定向到本文件。
@@ -221,12 +221,12 @@ class TrainingEval:
         空窗，wall 不变。未覆盖的对局由派发内幂等续跑；全覆盖即空转返回。
         仅 per-tick（intent/goal 走 m1 路径，it0 基线走独立流，均不动）。
         """
+        from trainer.dispatch_queue import RUN_ID
         from trainer.eval_dispatch import (
             dispatch_eval_bg,
             find_archive_weights,
             select_delayed_eval_it,
         )
-        from trainer.queue import RUN_ID
 
         args = self.args
         # 本轮采集刚落幕（rollout 收官）= 上一轮 eval 尾巴的自然收拢点：先收拢，再派新轮。
@@ -304,8 +304,8 @@ class TrainingEval:
         `block=False`（serve 收官，G2/N4）：整串逐轮派发放进一个后台 daemon 线程，
         本方法立即返回——run_complete 只保证 drain **已派发**，不保证已结算。
         """
+        from trainer.dispatch_queue import RUN_ID
         from trainer.eval_dispatch import dispatch_eval_bg
-        from trainer.queue import RUN_ID
 
         args = self.args
         # 收官前先把在飞尾巴清账（同理：只观测/清账，不站等）。

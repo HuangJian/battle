@@ -7,18 +7,16 @@ import sys
 import time
 from pathlib import Path
 
-# 2026-09-30（刀 7）：本入口从 nn-training/ 顶层搬进 trainer/。两条既有前提随之失效，
-# 这里是唯一的修复点：
-#   ① 脚本目录 trainer/ 会被自动插到 sys.path[0] —— 它有自己的 queue.py，会遮蔽 stdlib
-#      `queue`（concurrent.futures 导入即循环炸；完整说明见 trainer/eval_a_once.py）
-#      ⇒ 先摘掉脚本目录项，再把 nn-training 根放回，仓内顶层导入语义不变；
-#   ② `Path(__file__).parent` 的语义（原来是 nn-training 根）改成 `parents[1]`——
-#      只在下文两处（chdir 到仓根 / 锁目录），各自写明为什么。
+# 2026-09-30（刀 7）：本入口从 nn-training/ 顶层搬进 trainer/。既有前提随之失效，这里是
+# 唯一的修复点：把 nn-training 根（= 脚本目录的父目录）放回 sys.path，仓内顶层导入语义不变。
+# `Path(__file__).parent` 的语义（原来是 nn-training 根）改成 `parents[1]`——只在下文两处
+# （chdir 到仓根 / 锁目录），各自写明为什么。
+# 2026-10-11（S1）：原先还要摘掉脚本目录项，防脚本目录里的 `queue.py` 遮蔽 stdlib `queue`；该模块
+# 已改名 `trainer/dispatch_queue.py`（plan/nn-training-reuse-and-deps.plan.md §S1），scrub 删除。
 _SCRIPT_DIR = Path(__file__).resolve().parent
-while str(_SCRIPT_DIR) in sys.path:
-    sys.path.remove(str(_SCRIPT_DIR))
 sys.path.insert(0, str(_SCRIPT_DIR.parent))
 
+from common.cli import run_main
 from common.log import Tee as _Tee
 from common.log import log
 from common.pid_probe import pid_alive as _pid_alive_impl
@@ -26,7 +24,7 @@ from common.platform_utils import force_utf8_stdio
 from common.proc import run_capture
 from common.protocol import COURSE_ENABLE_MARKER, coef_active
 from trainer.collect_only import run_collect_only
-from trainer.queue import (  # noqa: F401 — run_rollout_queue re-exported for tests
+from trainer.dispatch_queue import (  # noqa: F401 — run_rollout_queue re-exported for tests
     REPO_ROOT,
     run_rollout_queue,
 )
@@ -430,4 +428,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)

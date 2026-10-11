@@ -63,9 +63,9 @@ from typing import Any
 import common.distribution
 from biz.course import resolve_rotate_seed
 from common.log import log
+from trainer.dispatch_queue import REPO_ROOT, RUN_ID
 from trainer.loop_guards import TrainingGuards
 from trainer.loop_steps import kickstart_coef
-from trainer.queue import REPO_ROOT, RUN_ID
 from trainer.rollout_phase import join_precollect_child
 from worker.breaker import CIRCUIT_EXIT_CODE
 from worker.events import write_run_complete, write_run_start

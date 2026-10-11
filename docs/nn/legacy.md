@@ -33,7 +33,7 @@
 ## §21 tail fan-out 反向竞速修复 + 三节点就绪验证（2026-08-27）
 
 ### 21.1 背景
-rollout 尾部分发（`nn-training/trainer/queue.py` v3.7 tail fan-out）在末段把尾部任务重复派发
+rollout 尾部分发（`nn-training/trainer/dispatch_queue.py` v3.7 tail fan-out）在末段把尾部任务重复派发
 竞速取先返回。此前只修了「fan-out 副本迟到被 duplicate 拒收后误回队」的一面（主副本
 已 settled → inflight key 被删 → 副本落入正常失败分支 → 无限循环）。单节点 20 局测试
 暴露**反向竞速**：fan-out 副本抢先结算、**主副本**（`fanout_copy=False`）迟到被判
@@ -93,7 +93,7 @@ PASS gate）。**ε=0.3 过猛**——自喂注入把重防御类（RETURN_DEFEN
 回 ~68-70%），或仅对非 HUNT 类做 SS 注入。
 
 ### 21.6 v3.9 动态节点发现（用户需求 2026-08-27）
-跑批中途上线的 agent 也能贡献算力：rollout（`trainer/queue.py`）与 m1-eval
+跑批中途上线的 agent 也能贡献算力：rollout（`trainer/dispatch_queue.py`）与 m1-eval
 （`tools/sim/m1-eval.ts` runHybrid）都加了周期 agent 发现。
 
 - **rollout**：rescan 线程周期（policy `agentRescanSec`，默认 120s）ping 配置里未在跑的
@@ -410,7 +410,7 @@ trainer/run_rl.py 从 ~1700 行瘦身为 ~500 行入口（CLI + 迭代主循环 
 编排逻辑抽取至 `rl/`：course（课程纯函数）/ queue（中央队列+本地回退）/
 stream（流式波次）/ eval_dispatch（干净评估）/ resume（断点对账）/
 reports（聚合）/ breaker（F4 纯逻辑）/ log。入口必须留在顶层——启动器只接受
-裸 .py 文件名；`trainer/queue.py` 自算 REPO_ROOT（parents[2]）。run_rl 保留全部
+裸 .py 文件名；`trainer/dispatch_queue.py` 自算 REPO_ROOT（parents[2]）。run_rl 保留全部
 re-export，旧引用路径不破。
 
 ### 13.2 可测试性抽取与潜在缺陷修复

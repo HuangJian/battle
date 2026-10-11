@@ -48,6 +48,7 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__fi
 import torch
 import torch.nn as nn
 
+from common.cli import house_parser, run_main
 from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM
 from worker.models.student import StudentNet, coord_channels
 
@@ -163,9 +164,8 @@ def load_goal_weights(model: GoalNet, weights_path: str) -> None:
 
 
 def main() -> None:
-    import argparse
 
-    ap = argparse.ArgumentParser()
+    ap = house_parser()
     ap.add_argument(
         "--golden", metavar="OUT", help="T7 golden 导出：固定权重+输入 → 期望头 logits JSON"
     )
@@ -242,4 +242,4 @@ def export_golden(path: str, h: int, d: int, seed: int) -> None:
 
 
 if __name__ == "__main__":
-    main()
+    run_main(main)
