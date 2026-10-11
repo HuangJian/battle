@@ -226,10 +226,11 @@ def acquire_instance_lock(
     *force*=True：**显式接管**（操作员 `--force` / 运维重启）——不问身份直接删掉现有锁再重取，
     调用方已确认「该跑的那个不在」。
 
-    *announce*（2026-10-11）：拒启/接管那几句话要不要打印。缺省 True（启动守卫该响）；
-    **False 给「抢不到就改走别的路」的调用方**（如 `remote/code_snapshot` 的抢锚：它抢不到
-    就有界等待后自打，打印一句「拒绝启动」是误导）。锁文件**创建失败**的 WARN 不受它管辖
-    （那是「没做串行化」的告警，什么时候都不该静默）。
+    *announce*（2026-10-11）：**只管「拒启」那两句**（`partial` / 已有活实例 / 抢锁失败）。
+    缺省 True（启动守卫该响）；**False 给「抢不到就改走别的路」的调用方**（如
+    `remote/code_snapshot` 的抢锚：它抢不到就有界等待后自打，打印一句「拒绝启动」是误导）。
+    **接管陈旧锁 / 放掉 PID 复用 / 创建失败的 WARN 不受它管辖**——那是「我拿到了锁」与
+    「本次没做串行化」的事实，什么时候都该看得见（消音会把现场的可观测性一并拿掉）。
     """
     markers = (marker,) if isinstance(marker, str) else tuple(marker)
 
@@ -282,16 +283,18 @@ def acquire_instance_lock(
                     f"锁文件 {lock_path}；确认该进程已死后删除锁文件并重试。"
                 )
                 return False
-            _say(
+            print(
                 f"[{tag}] 锁持有人 PID {holder} 不是本程序（命令行: {cmd[:_CMD_CLIP]}；"
                 f"指纹 {list(markers)}）——判为 PID 复用，接管陈旧锁 {lock_path}"
-                f"（原 start_ts={holder_ts}）"
+                f"（原 start_ts={holder_ts}）",
+                flush=True,
             )
         else:
             note = f"PID {holder}" if holder is not None else "已残缺不可解析"
-            _say(
+            print(
                 f"[{tag}] 陈旧锁（持有人 {note} 已不存在）——接管 {lock_path}"
-                + (f"（原 exe={holder_exe}）" if holder_exe else "")
+                + (f"（原 exe={holder_exe}）" if holder_exe else ""),
+                flush=True,
             )
         try:
             os.remove(lock_path)
