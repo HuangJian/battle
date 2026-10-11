@@ -8,7 +8,7 @@
 
 ---
 
-## §35 rollout 热路径三刀：scratch 探针有上界 · 补差批按机器宽度铺满 · 轮级 `RoundContext`（2026-10-11）
+## §35 rollout 热路径四刀：scratch 探针有上界 · 补差批按机器宽度铺满 · 轮级 `RoundContext` · **取消搬回**（2026-10-11）
 
 > 起因（`plan/rollout-topup-fastpath.plan.md`，评审 `plan/rollout-topup-fastpath.review-bf.md`）：
 > Kaggle 自主 worker（96 核 / 94 槽）上**同一轮内相邻两批天差地别** —— it34 补差1（18 局）3.35s、
@@ -78,18 +78,48 @@
 * 副作用：`plan §3.7`（补差批池宽）被本节**吸收**——补差批根本不建池了，而「批内并发 = 批内局数」
   不是损失（15 局最多 15 路并行）。
 
-### 35.4 未落地（下一刀；前置判据已写进 plan）
+### 35.4 取消搬回（用户第 1 条；含评审 P0-1/P0-3）
 
-§3.4 轮末扫盘分组 · **§3.5 取消搬回**。
+滚到现在这句才是真句：**产出就住在节点本地盘上，不再搬回 job 目录**。搬回在 §34 当年是必要的
+（节点自己的 PPO 读 `job_dir`），但它同时是「每局一次拷贝 + 一次对账 + 每批一次清盘」的源头。
+
+* **读取根由产出方给出**（评审 P0-1）：`iter_info["shards_root"]` = **轮产出根**（换根档 = 轮 scratch
+  目录，回退档 = 真 job 目录），`remote/train_core.ppo_shards_root(job_dir, iter_info)` 消费它
+  （空串/缺键/`iter_info is None` 逐字回落 `job_dir`）。**漏了这一步 = 读 0 局语料静默训空**。
+* **批产出根镜像进轮目录**：补差批各有 `topup{k}/` ⇒ 批的产出根 = 轮 scratch 目录下镜像真 job 目录
+  相对位置的子目录（`scratch.batch_layout` / `batch_rel`，越界响亮 `ProtocolError`）。
+  于是「单一读取根 + 递归扫」同时成立，且**每批实产 == 每批声明**的逐位判据仍然成立。
+* **轮初清场 + 轮末回收**：产出住在这里 ⇒ ① 首批判定换根后先清一次轮 scratch 目录（上轮/上次尝试的
+  残留会被轮末对账当成实产）；② 回收移到**全 job 收尾、PPO 之后**（`RoundContext.cleanup()`，
+  `remote/worker.py` 的 `finally`）——PPO 读完才清，ts 家不在这个目录里。
+* **容量判据按整轮算**（评审 P0-3）：`_round_need_bytes` = 单批局数 × (1 + `volume.topup.max_batches`)
+  × per_game。产出不再搬走 ⇒ 峰值 = Σ批（只按单批算会在轮中途 ENOSPC，而缺盘本该在**进这一轮之前**
+  就回退档）。偏严的估算，偏严的失败方向是「回退原地」（今天的行为，安全）。
+* **结算判据简化 + 发现前移**（代价）：F7「搬不回去的局不算结算」随搬回消失，结算 = 「跑局 future
+  正常返回」；「结了算却没产出」的发现从**搬回那一刻**退到**轮末逐位对账**（实产集 ≠ 声明集 ⇒
+  响亮 `ProtocolError`）——失败不静默，但**变晚**。
+* 搬回原语（`scratch.drain_tree` / `InstallGate` / `drop_drain_stage`）保留但**已无生产用点**（模块头已标注）。
+* 守卫：`tests/remote/test_train_core_shards_root.py`（新）、`tests/remote/test_round_ctx.py`（批镜像 +
+  两批同一个 `shards_root` + `cleanup()`）、`tests/remote/test_rollout_scratch.py`（产出在 scratch 且
+  轮末**不再清**、job 目录零产出副本、轮容量预算、结算=future 返回 + 空局轮末响亮）。
+
+### 35.5 未落地（下一刀；前置判据已写进 plan）
+
+§3.4 轮末扫盘分组（依赖 ctx 累积 `batch_specs`）。
 ⚠ §3.5 有一处**已定案但未实现**的连通项：节点自己的 PPO 读的是 `job_dir`
 （`remote/train_core.py:526` `shards_root = str(job_dir)`）⇒ 搬回是**承重段**；取消它必须同时把
 `shards_root` 指向 scratch 的 exec 根（评审 P0-1 的修法已写进 §2.2-S6 / §3.5 动作表）。
 
-DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`。
+DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`（①–④）。
 
 ---
 
 ## §34 热路径 IO 换节点本地盘：rollout / eval 两条腿的 TS 树 · 每局产出 · 权重落 scratch（2026-10-08）
+
+> ⚠ **2026-10-11 更新（只加指针、不改正文）**：下面关于「搬回（drain）」的时序与判据
+> （§34.3 的 1/2/3 三条 + 「搬回的时序」）**已被 §35.4 取消**：产出入住节点本地盘的轮 scratch 目录、
+> 不再搬回 job 目录，节点自己的 PPO 改读 `shards_root`。那一段仍成立的部分 = 换根本身（TS 树 /
+> 每局产出 / 权重的落点）与三条硬约束作为**原语**的形态（原语保留、当前无生产用点）。
 
 > 起因（plan/rollout-local-scratch）：云机 rollout 一轮 85 个 bun **同时**打 `/kaggle/working`
 > （Kaggle 的持久化网络挂载点）—— 读的是同一棵 TS 运行时树（traverse + dlopen `.so` + 读 stage json）、
@@ -161,7 +191,7 @@ eval 腿的病**不在写量**（200 × 3.4KB ≈ 680KB），在：① 94 路冷
 
 * 实现：`common/scratch.py`（新，L0 叶子层；不落 `remote/job_fs.py` 是因为 `worker → remote` 是
   `tests/remote/test_job_fs_split.py` 钉死的禁向）· `worker/iter_rollout.py`（exec 根 + 流式搬回 +
-  轮账 `产出落点=`/`搬回=N 局/失败 M 局`）· `remote/plan_handoff._eval_job_builder`（eval 三样）·
+  轮账 `产出落点=`/`搬回=N 局/失败 M 局`——⚠ **轮账里的 `搬回=` 已随 §35.4 删除**）· `remote/plan_handoff._eval_job_builder`（eval 三样）·
   `remote/job_fs.prune_job_dirs`（豁免暂存根）· `common/game_watch.DRAIN_CEILING_SEC = 30.0`。
 * 单测：`tests/remote/test_rollout_scratch.py`（30 例：落点链两道闸 / env 不可写响亮失败 / 布局与清理
   只动自己那份 / 原子安装 / drain 跨设备与校验 / 致命 errno / 安装票 / 暂存不可见 / 换根档真跑 +

@@ -993,7 +993,11 @@ def test_run_iter_rollout_with_stub_bun(tmp_path: Path, monkeypatch) -> None:
     assert rep["elapsedSec"] >= 0.0
     assert out["bun_version"] == "9.9.9-stub"
     assert len(out["game_secs"]) == 2
-    # 每局日志与报告都落盘（诊断口径与本机 rollout 同形）
+    # 每局日志与报告都落盘（诊断口径与本机 rollout 同形）。
+    # ⚠ 这条形状**只属于回退档**（产出住真 job 目录）：通用用例走回退档靠 `conftest.py::_scratch_off`
+    #   把候选链钉空（见 `test_rollout_scratch.py::test_generic_tests_pin_the_fallback_path`）；
+    #   换根档的同一件事（产出在 scratch；§3.5 取消搬回后不再回 job 目录）由
+    #   `test_rollout_scratch.py` 自己守。
     assert (job_dir / "w0" / "rollout.log").exists()
     assert json.loads((job_dir / "w0" / "_rl_report.json").read_text())["games"] == 1
 

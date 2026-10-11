@@ -620,6 +620,36 @@ def _run_one_game_bounded(
     return cast(tuple[float, int], res)
 
 
+def topup_batch_budget(spec: dict) -> int:
+    """本轮**最多**还会补几批（`volume.topup.max_batches`；没配就 0）。
+
+    只用于落点闸的**容量预算**（见 `_round_need_bytes`）——不是补差的驱动逻辑（那在
+    `worker/iter_topup.py`：真正跑几批由缺口解算逐批决定）。找不到/不合法一律返回 0
+    （保守：与旧行为“只按首批算”一致，不因一个畸形字段把整轮推去回退档）。
+    """
+    vol = spec.get("volume")
+    topup = vol.get("topup") if isinstance(vol, dict) else None
+    raw: object = topup.get("max_batches") if isinstance(topup, dict) else None
+    if not isinstance(raw, (int, float, str)):
+        return 0  # 没配 / 畸形（含 bool 之外的任何东西都不当批数）
+    try:
+        return max(0, int(raw))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _round_need_bytes(spec: dict, games: int) -> float:
+    """整轮 scratch 容量预算（评审 P0-3）：**判据必须按轮算，不能只按单批**。
+
+    因为 §3.5 取消搬回后产出**留在本地盘**：轮内峰值 = 首批 + 各补差批的产出之和
+    （不再是「搬一局走一局 ⇒ 峰值 = 单批」）。只用单批算 ⇒ 缺盘时会在轮中途 ENOSPC
+    （写盘失败 → 逐局重试 → 机器级停滞重投），而缺盘本该在**进入这一轮之前**就回退档。
+    估算 = `单批局数 × (1 + 最多补差批数)`，再乘上 `per_game`（本身已是实测的 ~3× 上界）
+    ⇒ 偏严的估算；偏严的失败方向是「回退原地」（今天的行为，安全）。
+    """
+    return scratch.need_bytes_for(max(1, int(games)) * (1 + topup_batch_budget(spec)))
+
+
 def _scan_bounded(what: str, fn: Any, log, *, where: str) -> Any:
     """轮末扫盘的**有上界的等**（`verify_shards` / `collect_reports` / `collect_shard_manifests`）。
 
@@ -786,10 +816,13 @@ class RoundContext:
     ——别让 94 个常驻 bun 陪 PPO 吃内存。
     """
 
-    #: scratch 根（探针结论；`None` = 回退档：不换根 / 不搬 / 不 drain）。
-    root: Path | None = None
+    #: **轮级** scratch 布局（探针结论；`None` = 回退档：不换根 / 产出住真 job 目录）。
+    #: 批级布局由它镜像而来：`batch_layout(layout, batch_rel(轮 job 目录, 批 job 目录))`。
+    layout: scratch.ScratchLayout | None = None
     #: TS 树在 scratch 的家（按名寻址 ⇒ 跨批同一份）；`None` = 本轮未换根。
     ts_home: Path | None = None
+    #: 轮的真实 job 目录（首批那个；补差批是它下面的 `topup{k}/`）。
+    job_dir: Path | None = None
     #: 长驻池（生命周期 = 轮）。
     pool: Any = None
     #: 轮级池宽（= 首批实际用过的那个数；补差批的满铺器拿它当 `width`）。
@@ -799,11 +832,36 @@ class RoundContext:
     #: 探针耗时（读数用）。
     probe_sec: float = 0.0
 
+    @property
+    def root(self) -> Path | None:
+        """scratch 介质根（`None` = 回退档）。"""
+        return None if self.layout is None else self.layout.root
+
     def close(self) -> None:
-        """收掉本 ctx 拥有的长驻池（幂等）。**不**动 scratch 上的产出（那是 §3.5 的事）。"""
+        """收掉本 ctx 拥有的长驻池（幂等）。**不**动 scratch 上的产出。"""
         pool, self.pool = self.pool, None
         if pool is not None:
             pool.close()
+
+    def cleanup(self, log=lambda msg: None) -> None:
+        """轮末回收本地盘占用（**PPO 之后**叫；幂等、尽力而为、绝不抛）。
+
+        取消搬回（§3.5）后产出就住在轮 scratch 目录里（PPO 要读它）⇒ 清理从「每批 `finally`」
+        前移到「全 job 收尾、PPO 之后」：清**本轮的** scratch 目录（ts 家不在里面、永不清）。
+        有上界（`DRAIN_CEILING_SEC`）：挂住的挂载点清不动就留着（下一轮同名会重建），不阻塞收尾。
+        """
+        if self.layout is None:
+            return
+        ok, _ = call_bounded(
+            partial(scratch.clear_dir, self.layout.job),
+            float(game_watch.DRAIN_CEILING_SEC),
+            name="scratch-cleanup",
+        )
+        if not ok:
+            log(
+                f"WARN rollout scratch 轮末没清完（{game_watch.DRAIN_CEILING_SEC:g}s 内没返回）："
+                f"{self.layout.job}——本地盘占着就占着（下一轮同名会重建），不阻塞收尾"
+            )
 
 
 def run_iter_rollout(
@@ -882,12 +940,14 @@ def run_iter_rollout(
         )
     rb.add("bun", f"{bun} ({ver or '?'})")
     # ---- 热路径落点（plan/rollout-local-scratch §2 P0-1/P0-2）----
-    # 三样热数据（TS 树的读、每局 shard 的写、权重的读）全在网络挂载点上 ⇒ 换到节点本地盘，
-    # 结算一局搬回一局（P0-3）。换不过去就**逐字**走今天的行为（不搬、不 drain、不换根）。
+    # 三样热数据（TS 树的读、每局 shard 的写、权重的读）全在网络挂载点上 ⇒ 换到节点本地盘。
+    # 换不过去就**逐字**走今天的行为（不换根）。
+    # ★ 2026-10-11（§3.5）：**产出不再搬回** —— 换根档的 shard 就住在轮 scratch 目录里，
+    #   节点自己的 PPO 读同一个根（`shards_root`）；回退档的 produce 根就是真 job 目录。
     exec_jd = jd
     s_layout: scratch.ScratchLayout | None = None
-    gate = scratch.InstallGate()
-    need = scratch.need_bytes_for(len(argvs))
+    # 整轮预算（不是单批）：产出不再搬走 ⇒ 峰值 = 首批 + 补差批之和（评审 P0-3）。
+    need = _round_need_bytes(spec, len(argvs))
     rctx = ctx if ctx is not None else RoundContext()
     if not rctx.resolved:
         rctx.workers = workers  # 轮级池宽：首批实际用过的那个数（补差批的满铺器拿它当 width）
@@ -897,7 +957,10 @@ def run_iter_rollout(
     # 挂载点既不返回也不抛），而它当时跑在下面两个 `call_bounded` **之外**。超界 ⇒ **逐字回退档**
     # （不换根/不搬/不 drain），并响亮记一笔 + 进 `probe_probe` 读数——它是「盘抖动」的直接读数。
     if not rctx.resolved:
+        rctx.job_dir = Path(jd)  # 轮 = 首批那个 job 目录（补差批是它下面的子目录）
+        rctx.resolved = True
         _root: Path | None = None
+        _layout: scratch.ScratchLayout | None = None
         if argvs:
             _probe_t0 = time.time()
             _ok_probe, _probe_res = call_bounded(
@@ -907,8 +970,9 @@ def run_iter_rollout(
             )
             rctx.probe_sec = round(time.time() - _probe_t0, 3)
             if _ok_probe:
-                # `ScratchLayout | None`（闸没过 = `None` = 回退档）；ctx 只留**根**
-                # （批级布局由每批自己 `layout_for(root, jd)` 推）。
+                # `ScratchLayout | None`（闸没过 = `None` = 回退档）；ctx 只留**轮级布局**，
+                # 批级布局由它镜像推（`batch_layout` + `batch_rel`）。
+                _layout = _probe_res
                 _root = None if _probe_res is None else _probe_res.root
                 rb.add(
                     "probe_probe",
@@ -939,11 +1003,28 @@ def run_iter_rollout(
                     "WARN rollout 本地盘换根失败（TS 树装不过去或超界）"
                     "——本轮回落原地（逐字走今天的行为：不搬、不 drain、不换根）"
                 )
-        rctx.root = _root
-        rctx.resolved = True
-    # ---- 批级：本批的 scratch 布局 + **权重镜像**（每批一个 exec 根 ⇒ 镜像必须各自就位）----
-    if rctx.root is not None:
-        s_layout = scratch.layout_for(rctx.root, jd)
+        if _root is not None and _layout is not None:
+            # ★ 轮初清场（§3.5 的必配）：产出现在**就住在**轮 scratch 目录里，而上一次尝试/上一轮
+            #   可能在同一 job 目录下留过内容（崩溃/中断）—— 不清就会被轮末的逐位对账当成实产
+            #（响亮拒收一整轮，且重试也不自愈）。ts 家不在这个目录里（它在 `root` 下按名寻址）⇒ 安全。
+            ok_fresh, _ = call_bounded(
+                partial(scratch.clear_dir, _layout.job),
+                float(game_watch.DRAIN_CEILING_SEC),
+                name="scratch-refresh",
+            )
+            if not ok_fresh:
+                rb.note(
+                    f"WARN rollout scratch 轮初没清完（{game_watch.DRAIN_CEILING_SEC:g}s 内没返回）："
+                    f"{_layout.job}——旧内容可能被轮末对账当成实产（那是响亮拒收，不静默）"
+                )
+        rctx.layout = _layout if _root is not None else None
+    # ---- 批级：本批的 scratch 布局（**镜像轮内相对位置**）+ **权重镜像** ----
+    # 批必须嵌在轮产出根里面（`topup{k}/` ⇒ `<轮 scratch>/topup{k}/`）：否则 PPO 的单一
+    # 读取根扫不到补差批的 shard（`scratch.batch_rel` 在越界时响亮拒绝）。
+    if rctx.layout is not None:
+        s_layout = scratch.batch_layout(
+            rctx.layout, scratch.batch_rel(rctx.job_dir or jd, jd)
+        )
         ok_mirror, mirror_res = call_bounded(
             partial(scratch.mirror_inputs, jd, s_layout.exec_dir, argvs, log=rb.note),
             game_watch.SCAN_CEILING_SEC,
@@ -958,14 +1039,17 @@ def run_iter_rollout(
                 "WARN rollout 本地盘换根失败（权重装不过去或超界）"
                 "——本轮回落原地（逐字走今天的行为：不搬、不 drain、不换根）"
             )
+    # 全轮产出根 = PPO 的**唯一**读取根（§3.5 / 评审 P0-1）：换根档 = 轮 scratch 目录，
+    # 回退档 = 真 job 目录（两种都靠**递归**扫拿到全部批的 shard）。
+    shards_root = Path(rctx.layout.job) if rctx.layout is not None else Path(rctx.job_dir or jd)
     if s_layout is not None:
         rb.add(
             "产出落点",
             f"{s_layout.root}（本地盘；可用 {(scratch.free_bytes(s_layout.root) or 0.0) / 1e9:.1f}GB"
-            f"｜本轮需 {need / 1e6:.0f}MB）——结算一局搬回一局到 job 目录",
+            f"｜整轮需 {need / 1e6:.0f}MB）——产出留在这里，PPO 读轮根 {shards_root}",
         )
     else:
-        rb.add("产出落点", f"{jd}（回退原地＝今天的行为：不搬、不 drain、不换根）")
+        rb.add("产出落点", f"{jd}（回退原地＝今天的行为：不换根，产出住真 job 目录）")
     rb.add("ts_root", tsd)
     rb.note(
         f"单局看门狗：软告警 >{game_watch.SLOW_GAME_WARN_SEC:g}s（正常一局亚秒级），"
@@ -1023,39 +1107,6 @@ def run_iter_rollout(
     ok = False
     round_retries = 0  # 「整轮重投」次数（类：机器级停滞）
     retry_cap = round_retry_max()
-    drained_n = 0
-    drain_failed_n = 0
-
-    def _drain_one(i: int, out_rel: str) -> bool:
-        """结算一局就搬一局（主线程、有界、**闸内**原子安装）。
-
-        三条硬约束见 plan §2 P0-3：暂存在 job 目录之外（F1）· 确定性 errno 响亮上抛（F3）·
-        超界作废安装票（F4）。返回 False ⇒ 本局**不算结算**（与机器级停滞同口径交整轮重投）。
-        """
-        nonlocal drained_n, drain_failed_n
-        label = _game_label(argvs[i])
-        src, dst = Path(exec_jd) / out_rel, jd / out_rel
-        ticket = gate.ticket(out_rel)
-        done, res = call_bounded(
-            partial(scratch.drain_tree, src, dst, ticket=ticket, log=log),
-            float(game_watch.DRAIN_CEILING_SEC),
-            name=f"drain-{label}",
-        )
-        if not done:
-            ticket.cancel()  # ★ 评审 F4：被放弃的 copier 从此装不进去（锁内复核）
-            drain_failed_n += 1
-            log(
-                game_watch.drain_ceiling_line(
-                    "rollout", label, game_watch.DRAIN_CEILING_SEC, str(src)
-                )
-            )
-            return False
-        if not res:
-            drain_failed_n += 1
-            log(game_watch.drain_fail_line("rollout", label, drained_n, drain_failed_n, str(src)))
-            return False
-        drained_n += 1
-        return True
 
     try:
         with ThreadPoolExecutor(max_workers=workers) as ex:
@@ -1126,15 +1177,11 @@ def run_iter_rollout(
                             # 其它在飞的局收完（它们可能只是慢），再由外层重投补它（见循环头）。
                             stuck.append(i)
                         else:
-                            # ★ 换根档：**先搬回再算结算**（评审 F7）——搬不回去的局不算产出，
-                            # 与机器级停滞同口径并入 stuck（下一轮重投补它）。排进度/打点**之前**，
-                            # 所以 hold 判活看到的 settled 数永远是「真落地的」。
-                            if s_layout is not None and not _drain_one(
-                                i, argvs[i][argvs[i].index("--out") + 1]
-                            ):
-                                stuck.append(i)
-                            else:
-                                settled_n += 1
+                            # ★ 2026-10-11（§3.5）：跑局 future 正常返回**就是**结算（不再有搬回这一步）。
+                            # 语义放宽与它的补偿（轮末逐位对账）见 plan §3.5「语义放宽」：
+                            # 旧判据「搬不回去的局不算结算」随搬回一起消失，取而代之的是
+                            # `verify_shards` 的「实产集 == 声明集」——缺一局必响亮（不是静默少一局）。
+                            settled_n += 1
                         # 进度行**按时间**节流（`game_watch.progress_due`，缺省每分钟一句）：原来的
                         # 「每 10 局一句」在高并发轮上是每秒数行 —— 云端离线课的日志就是被它刷屏的
                         # （用户口径 2026-09-23）。最后一句恒打（轮结束的唯一落点）。
@@ -1170,8 +1217,10 @@ def run_iter_rollout(
                     # 主线程绝不能在这里被卡住（那同样会让整轮对日志静默）。有界地放弃它：
                     # 旧写者本身正卡在不可中断的 IO 里，删不动也只能带着半截产出往下走
                     # （下一轮的同名写入会截断它，兜底口径见 `_clean_attempt`）。
+                    # 两个根都扫（§3.5）：换根档半截产出就在 scratch 的产出根下，
+                    # 回退档 `exec_jd == jd` ⇒ 形状与今天逐字相同（`_clean_partial` 自己省那一个参数）。
                     cleaned, _ = call_bounded(
-                        partial(_clean_attempt, jd, argvs[i]),
+                        _clean_partial(jd, exec_jd, argvs[i]),
                         ceiling_sec,
                         name=f"clean-{_game_label(argvs[i])}",
                     )
@@ -1191,23 +1240,8 @@ def run_iter_rollout(
             # 在补差跑完之后、PPO 之前）——本批不收，否则补差批又要重建池。
             if ctx is None:
                 pool.close()
-        if s_layout is not None:
-            # 轮末只清**自己那一份**（评审 F5）：ts 家内容寻址、永不清（跨轮/两腿复用）。
-            ok_clean, _ = call_bounded(
-                partial(scratch.clear_dir, s_layout.exec_dir),
-                float(game_watch.DRAIN_CEILING_SEC),
-                name="scratch-clean",
-            )
-            ok_stage, _ = call_bounded(
-                partial(scratch.drop_drain_stage, jd),
-                float(game_watch.DRAIN_CEILING_SEC),
-                name="scratch-stage",
-            )
-            if not (ok_clean and ok_stage):
-                log(
-                    f"WARN rollout scratch 轮末没清完（{game_watch.DRAIN_CEILING_SEC:g}s 内没返回）："
-                    f"{s_layout.job}——本地盘占着就占着（下一轮同名会重建），不阻塞收尾"
-                )
+        # ★ 2026-10-11（§3.5）：本批**不清** scratch —— 产出就是要留在那里（PPO 要读它）；
+        #   回收移到全 job 收尾、PPO 之后（`RoundContext.cleanup()`，由 `remote/worker.py` 叫）。
         if not ok:
             # 中断也要交代现场（看门狗口径/池计数/已结算到哪一局）——否则「为什么被杀了」
             # 无从归因。重试/慢局那几行已经在抛出前各自打过了。
@@ -1218,12 +1252,17 @@ def run_iter_rollout(
     # ★ 轮末三步都在主线程上做全量文件 IO（rglob + 逐局读 JSON + 内容哈希）：挂住的挂载点上
     # 它们永不返回，而这里没有轮循环、也就没有「整轮停滞」那行能说话 ⇒ 整轮对日志完全静默。
     # 每一步都有自己的上界（`game_watch.SCAN_CEILING_SEC`），超界按机器级停滞上交。
-    where = str(jd)
+    # ★ 扫描根 = **本批的产出根**（§3.5）：换根档 = 本批在 scratch 里的镜像目录，
+    #   回退档 = 真 job 目录（`exec_jd` 在两种档位下都是「本批产出的解析根」）。
+    out_root = Path(exec_jd)
+    where = str(out_root)
     expected_fp = iter_expected_data_fp(spec)
     shard_dirs = _scan_bounded(
-        "verify_shards", lambda: verify_shards(jd, expected_fp), log, where=where
+        "verify_shards", lambda: verify_shards(out_root, expected_fp), log, where=where
     )
-    reports = _scan_bounded("collect_reports", lambda: collect_reports(jd, spec), log, where=where)
+    reports = _scan_bounded(
+        "collect_reports", lambda: collect_reports(out_root, spec), log, where=where
+    )
     # `combine_reports` 是纯 CPU 聚合（不碰盘）：不包（上界只给**不可取消的等**）。
     report = combine_reports(reports)
     per_game = _scan_bounded(
@@ -1250,9 +1289,6 @@ def run_iter_rollout(
     if not report["perGame"]:
         # 四列数据源没了是**要看的**（控制台耗时/击杀/残血/道具会恒空）。
         rb.note("逐局画像 0 行 = 控制台耗时/击杀/残血/道具恒空，查单局 manifest")
-    if s_layout is not None:
-        # 搬回的读数（正常轮 85 成 / 0 败）：它是「本地盘 → job 目录」这一段的唯一记分。
-        rb.add("搬回", f"{drained_n} 局/失败 {drain_failed_n} 局（本地盘 → job 目录，主线程单线程）")
     # 单局耗时分布：<5s 这条线（以及重试次数）要靠每轮的真数据校准，不靠猜。
     # `final_only`：轮末才有，心跳里不该出现半个分布。
     rb.note(
@@ -1272,6 +1308,8 @@ def run_iter_rollout(
         "game_secs": game_secs,
         "bun": bun,
         "workers": workers,
+        # 节点自己的 PPO 装载源（§3.5 / 评审 P0-1）；`None`（老调用方/echo 轮）⇒ 读取方回退 job_dir
+        "shards_root": str(shards_root),
         # 池的诊断计数（不在 report 里：它要过线，节点本地的观测不该改 wire 形状）
         "serve_pool": None
         if pool is None

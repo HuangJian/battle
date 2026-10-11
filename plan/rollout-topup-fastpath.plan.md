@@ -1,7 +1,7 @@
 # Plan: rollout-topup-fastpath — 补差从「每批一个完整 rollout 轮 + 缺口解算」改成「轮内增量 + 按 worker 数满铺 + 取消搬回」
 
 > **状态**：**v4**（2026-10-11 二轮修订；评审 `plan/rollout-topup-fastpath.review-bf.md` 的 P0×3 / P1×4 / P2×4 已并入）。
-> **落地进度见 §10**（本轮已落 §3.1 + §3.2 + §3.3；§3.4/§3.5 是下一刀，其前置判据已写进本文）。路径基准除注明外相对 `nn-training/`。
+> **落地进度见 §10**（本轮已落 §3.1 + §3.2 + §3.3 + **§3.5（含 P0-1/P0-3）**；§3.4 是下一刀，其前置判据已写进本文）。路径基准除注明外相对 `nn-training/`。
 > **触发**：Kaggle TPU 自主 worker（96 核 cgroup 配额 / 94 并行槽）在训课程 `x24-stack5`：
 > 96 核机器上 rollout 稳态应 < 10s，实测大面积 60–111s（**54** 轮里 p50=11.8s、p90=88.9s、max=111.2s；
 > v3 曾写「53 轮」——与 §1.1/§1.11 表的 31+23=54 不符，以逐轮账本为准，见评审 P1-3）。
@@ -344,6 +344,11 @@ it49:  补差1（15 局）= 3.00s     补差2（1 局）= 52.49s
 （上界 `width × max_batches`）⇒ 判据要按全轮需求算（或保留 per-batch 目录、轮末统一回收），
 否则 `/dev/shm` 上会多出一种「轮末对账红」的新失败模式。
 
+> **✅ 落地选择（2026-10-11）**：两半都用了 —— ① 目录仍是**批级**（`batch_layout` 把批镜像到轮 scratch
+> 目录下，每批一个 `r/`），但**轮末统一回收**（`RoundContext.cleanup()`，PPO 之后）；
+> ② 容量判据按**整轮**算（`_round_need_bytes` = 单批局数 × (1 + `volume.topup.max_batches`) × per_game）。
+> 前者保住了「每批实产 == 每批声明」的逐位判据（§3.4 的分组验声明集正是靠它），后者关掉了 P0-3 那条新失败模式。
+
 **(S4) ★ 速度探针必须有上界，且一轮一次。**
 `open_scratch` 整段（含 `probe_write_speed_mbps` ×2 + `_is_writable_dir` + `free_bytes`）
 **必须包进 `call_bounded`**，上界 = **新增常量 `game_watch.PROBE_CEILING_SEC`**（**不复用**
@@ -379,6 +384,10 @@ it49:  补差1（15 局）= 3.00s     补差2（1 局）= 52.49s
 例如 `iter_info["shards_root"] = str(exec_root)`（`exec_root` = 换根档的 `s_layout.exec_dir`、
 回退档的 `job_dir`），`train_core` 用 `iter_info.get("shards_root") or str(job_dir)`——
 `iter_info is None`（非 iter 腿）逐字不变。**并补一条新判据（§4.1）**：换根档下 PPO 装载源 == scratch exec 根。
+
+> **✅ 落地（2026-10-11）**：读取根不是「本批的 exec 根」而是 **轮产出根**（批间恒同：换根档 = 轮 scratch
+> 目录，回退档 = 真 job 目录）——否则补差批的 `shards_root` 会与首批不同，调用方合并时无定义。
+> 落成纯函数 `remote/train_core.ppo_shards_root(job_dir, iter_info)`（空串/缺键/`None` 逐字回落）。
 
 **(S7) 轮末扫盘三连一轮一次，且按批分组验声明集。** 扫盘只在**全轮真正的收尾**做一次，
 扫**全轮**（首批目录 + 各 `topup{k}/`）。⚠ **唯一一处语义扩张**：`verify_shards` 今天是
@@ -609,6 +618,32 @@ def verify_round(batch_specs: list[tuple[Path, dict]]) -> list[Path]:
   **判据没丢，只是从「搬回成功」前移到「轮末对账」**。
 * 轮末对账失败 ⇒ **响亮**（`ProtocolError`，hub 侧拒收）⇒ 不会静默放过。
 
+**落地（2026-10-11 第三刀；与上面动作表不同处 = 实现时才看出来的）**：
+
+* **批的产出根要嵌在轮里**（上面没写，但是落地必需）：取消搬回后 PPO 要**一个**读取根，而补差批
+  各有各的子目录（`topup{k}/`）⇒ 若每批各占 `<根>/nn-rollout-*` 一个目录，就没有共同祖先能把它们
+  包住（`<根>` 是整个本地盘，递归扫会扫到 TS 家与别的会话）。修法：轮 scratch 目录做轮产出根，
+  批的产出根 = 它下面**镜像真 job 目录相对位置**的子目录（`scratch.batch_layout` + `batch_rel`，
+  越界响亮拒绝）——与回退档（产出住在真 job 目录树里）**形状同构**。
+* **轮初清场**（新增，上面没写）：产出就住在轮 scratch 目录里，而上一次尝试/上一轮可能在同一 job
+  目录下留过内容（崩溃/中断）⇒ 不清就会被轮末的逐位对账当成实产（响亮拒收一整轮且重试不自愈）。
+  首批判定换根后、装 TS 树之后清一次（有上界；ts 家不在这个目录里 ⇒ 安全）。
+* **回收点** = `remote/worker.py` 在 `run_training_core` 之后 `rctx.cleanup(log=log)`
+  （`finally`，幂等、不抛、有上界）：清轮 scratch 目录，**PPO 已经读完**。
+* **P0-3 的空间口径一并落**（否则是带病落地）：`open_scratch` 的 `need_bytes` 从「单批局数」改成
+  `_round_need_bytes` = `单批局数 × (1 + volume.topup.max_batches) × per_game`（畸形字段当没配）。
+  偏严的估算；偏严的失败方向是「回退原地」（今天的行为，安全）。
+* **P0-1 的读取根**落成纯函数 `remote/train_core.ppo_shards_root(job_dir, iter_info)`
+  （空串/缺键/`iter_info is None` 逐字回落 `job_dir`）；`iter_info["shards_root"]` 由
+  `iter_rollout` 返回 = **轮**产出根（批间恒同，不看当前批的 jd）。
+* **重投前的半截清理**改成 `_clean_partial(jd, exec_jd, argv)`（两个根都扫）：换根档的产出在半截在
+  scratch，回退档 `exec_jd == jd` ⇒ 形状逐字不变。
+* **搬回原语保留但已无生产调用点**（`scratch.drain_tree` / `InstallGate` / `drop_drain_stage`）：
+  模块头已标注，用例全部保留（它们现在守护的是原语本身）。
+* **判据落点**：`tests/remote/test_round_ctx.py`（批镜像 + 同一个 `shards_root` + `cleanup()`）、
+  `tests/remote/test_rollout_scratch.py`（产出在 scratch 且轮末**不再清**、job 目录零产出副本、
+  轮容量预算、结算=future 返回 + 空局轮末响亮）、`tests/remote/test_train_core_shards_root.py`（新，3 例）。
+
 ### 3.5b 判据迁移表（⚠ **删活守卫必须先过这张表** —— 评审 P1-1）
 
 现状：这三处判据当前**全绿**（本机实测 `bash tools/githook/nn-py-safe.sh -m pytest
@@ -624,6 +659,16 @@ def verify_round(batch_specs: list[tuple[Path, dict]]) -> list[Path]:
 | `batches == 1` / `wasted_samples == 0` / `collected == quota` | `tests/worker/test_iter_topup.py:191-194` | 换成满铺口径：`batches` 按 `width` 算、`wasted_samples > 0` 允许、`collected ≥ quota`（§3.3 同笔改） |
 
 **新增（不是替换）**：换根档下 **PPO 装载源 == scratch exec 根**（评审 P0-1 的专用判据，现无任何用例覆盖）。
+
+**✅ 落地回执（2026-10-11 第三刀，逐行对账）**：
+
+| 行 | 实际落点 |
+|---|---|
+| 1（搬回读数/轮末清/暂存回收） | 删：`搬回` 读数行 + 轮末 `clear_dir`/`drop_drain_stage` + 暂存根豁免只剩原语。新判据 = `test_rollout_reroots_and_keeps_the_produce_in_scratch`（产出在 scratch、轮末**不清**、`scan_shard_dirs(job) == []`） |
+| 2（回退档「没有搬回这一说」） | 逐字保留：`test_rollout_falls_back_byte_for_byte_when_no_candidate`（只把「不搬」改成「产出住真 job 目录 + `shards_root == job_dir`」） |
+| 3（**F7 搬不回去不算结算**） | 删 `_drain_one`；换成 `test_settlement_is_future_return_and_missing_produce_is_loud`：① 进度行到 `N/N`（future 返回即结算）② 空局（rc=0 无产出）⇒ 轮末 `verify_shards` 响亮 `ProtocolError`。⚠ 判据前移的代价已记 DECISIONS |
+| 4（`job_dir/w0/rollout.log`） | 在 `tests/remote/test_remote_iter.py` 那一行旁边写清「只属于回退档 + 谁钉住档位」（该用例本身靠 `conftest._scratch_off` 跑回退档，未改行为） |
+| 5（`batches==1`/`wasted_samples==0`/`collected==quota`） | 已在 §3.3 同笔改完（满铺口径） |
 
 ### 3.6 P1-1 — 结果回传失败时才备份（用户第 1 条后半句）
 
@@ -878,15 +923,15 @@ def verify_round(batch_specs: list[tuple[Path, dict]]) -> list[Path]:
 | §3.1 探针包上界（含新建 `PROBE_CEILING_SEC` + `probe_probe` 读数） | ✅ **本轮已落** | `tests/remote/test_rollout_scratch.py` 新增「超界回退」用例（红→绿）；见 §4.1 |
 | §3.3 满铺器 `spread_games_by_stage`（含 P1-2 的旧口径归置） | ✅ **本轮已落** | `tests/worker/test_spread_games.py`（新）+ `test_iter_topup.py` 按满铺口径改 |
 | §3.2 `RoundContext`（批间复用） | ✅ **本轮已落** | `tests/remote/test_round_ctx.py`（新，3 例）；`remote/worker.py` 首批建 ctx、补差后 `close()`；字段收敛见 §3.2 落地段 |
-| §3.5 取消搬回 | ⬜ 下一刀（**P0-1 连通项已写进 §2.2-S6 / §3.5 动作表**） | 落地时同笔改 `remote/train_core.py:526` |
-| §3.4 轮末扫盘分组 | ⬜ 下一刀（依赖 §3.2 的 `batch_specs` 累积） | 轮级报告装配契约见 §3.4 末注 |
+| §3.5 取消搬回（含 P0-1 读取根 + P0-3 空间口径） | ✅ **本轮已落** | `shards_root` 由产出方给出（`ppo_shards_root`）；批产出根镜像进轮 scratch；轮初清场 + PPO 后 `cleanup()`；判据迁移逐行在 §3.5b 回执 |
+| §3.4 轮末扫盘分组 | ⬜ 下一刀（依赖 §3.2 的 ctx 累积 `batch_specs`） | 轮级报告装配契约见 §3.4 末注 |
 | §3.6 / §3.7 / §3.8 / §3.10 | ⬜ 待取证 / 依赖 §3.2 | §3.8 在 §3.2 后是冗余保险；§3.10 取证不足则降级待立项 |
 
 ### 10.2 记录（AGENTS §4 / §15.5 要求，v3 整篇缺失 ⇒ v4 补齐）
 
 | 记哪 | 写什么 |
 |---|---|
-| `DECISIONS.md` | ①「探针上界另立 `PROBE_CEILING_SEC`」②「补差批铺满、超采丢弃」③「轮级 `RoundContext`：池/探针/TS 树的生命周期 = 轮」④（日后 §3.5 落地时）「取消搬回 + PPO 读取根改写 + F7 判据前移」 |
+| `DECISIONS.md` | ①「探针上界另立 `PROBE_CEILING_SEC`」②「补差批铺满、超采丢弃」③「轮级 `RoundContext`：池/探针/TS 树的生命周期 = 轮」④「取消搬回 + PPO 读取根（P0-1）+ 容量按轮算（P0-3）+ 判据前移」✅ 均已落 |
 | `docs/nn/runtime-opt.md` | §35：探针上界与 `probe_probe` 读数 + 轮级 ctx（池生命周期 = 轮）；§34.x（scratch 落点链）的交叉引用 |
 | `.workbuddy/memory/YYYY-MM-DD.md` | 一行（做了什么 / 坑 / 下一步） |
 | 训练侧纪律 | 满铺器改的是**每轮样本量/更新构成**（不是语料身份/课程/奖励）⇒ 属训练侧；按 §15.5 口径当**新实验**处理：新 `--out`/`--traj`，**不跨改动续跑** |

@@ -625,6 +625,7 @@ def run_job(
     # 是刚跑出来的（payload 里没有 shard），D14 必须看到它们；echo 轮则整个跳过 rollout
     # （回显冒烟不跑任何重计算，只验 payload/code/ts_code 三样传输）。
     iter_info: dict | None = None
+    rctx: RoundContext | None = None  # 轮级资源（kind=iter 非 echo 才有；PPO 之后由它回收 scratch）
     ts_code_bytes = 0
     ts_code_hit = False
     if str(manifest["kind"]) == "iter":
@@ -758,35 +759,42 @@ def run_job(
     # ---- 训练核（2026-09-24）：从算子到产物整段在 `remote/train_core.py`（L4）----
     # 本模块只剩「作业壳」：网络 / 校验 / 分叉 / 上报。核不认识 hub 的作业面，也不 import
     # 本模块（守卫钉住）；它读的模块全局都是**它自己命名空间**的（seam-free，见那边头部）。
-    result, course = run_training_core(
-        base_url,
-        token,
-        jid=jid,
-        job_dir=job_dir,
-        work_dir=work_dir,
-        manifest=manifest,
-        iter_info=iter_info,
-        blob_root=blob_root,
-        payload_bytes=len(raw),
-        payload_dl_sec=payload_dl_sec,
-        unpack_sec=unpack_sec,
-        ts_code_bytes=ts_code_bytes,
-        ts_code_hit=ts_code_hit,
-        device=device,
-        torch_threads=torch_threads,
-        preloaded=preloaded,
-        # opt-blob-diet：五源解析在**壳**里做完（必须早于 rollout），训练核只消费结果。
-        init_w=init_w,
-        weights_src=weights_src,
-        weights_wire_bytes=weights_wire_bytes,
-        blob_hits=blob_hits,
-        blob_miss_bytes=blob_miss_bytes,
-        prep=prep_b,
-        t_prep=t_prep,
-        should_cancel=should_cancel,
-        on_ppo_start=on_ppo_start,
-        log=log,
-    )
+    try:
+        result, course = run_training_core(
+            base_url,
+            token,
+            jid=jid,
+            job_dir=job_dir,
+            work_dir=work_dir,
+            manifest=manifest,
+            iter_info=iter_info,
+            blob_root=blob_root,
+            payload_bytes=len(raw),
+            payload_dl_sec=payload_dl_sec,
+            unpack_sec=unpack_sec,
+            ts_code_bytes=ts_code_bytes,
+            ts_code_hit=ts_code_hit,
+            device=device,
+            torch_threads=torch_threads,
+            preloaded=preloaded,
+            # opt-blob-diet：五源解析在**壳**里做完（必须早于 rollout），训练核只消费结果。
+            init_w=init_w,
+            weights_src=weights_src,
+            weights_wire_bytes=weights_wire_bytes,
+            blob_hits=blob_hits,
+            blob_miss_bytes=blob_miss_bytes,
+            prep=prep_b,
+            t_prep=t_prep,
+            should_cancel=should_cancel,
+            on_ppo_start=on_ppo_start,
+            log=log,
+        )
+    finally:
+        # ★ 2026-10-11（§3.5）：产出不搬回 ⇒ 本地盘回收从「每批 finally」移到**全 job 收尾、PPO 之后**
+        #（PPO 读的就是这份产出）。清本轮 scratch 目录（ts 家不在里面、永不清）；失败也尽力清、
+        # 幂等、不抛（`cleanup` 自带墙钟上界，清不动只 WARN）。
+        if rctx is not None:
+            rctx.cleanup(log=log)
     validate_result(result, manifest, commit_echo_must_match=False)  # 自查
     _persist_result(work_dir, jid, result)
     return result

@@ -126,10 +126,18 @@ def test_round_ctx_reuses_probe_tree_and_pool_across_batches(
     assert len(pools) == 1 and rctx.pool is pools[0], "池不许重建（生命周期 = 轮）"
     assert (pools[0].started, pools[0].closed) == (1, 0), "只冷启动一次，且本批不收（还要给补差批用）"
     assert second["report"]["shards"] == 1
-    # 第二批也换根（共用同一个 scratch 根，但各自批级布局/产出目录）
-    assert (sub / "w0" / "rl_s1_seed1" / "manifest.json").exists()
+    # ★ 批级产出根 = 轮 scratch 目录下**镜像**该批相对位置的那个子目录（§3.5）
+    round_dir = scratch.layout_for(_local_root(tmp_path), job).job
+    assert (round_dir / "topup1" / "r" / "w0" / "rl_s1_seed1" / "manifest.json").exists()
+    assert not (sub / "w0").exists(), "§3.5：产出不许落在真 job 目录"
+    # 两批**同一个**装载根（PPO 只收一个 root；递归扫拿到全部批）——这是 §3.5/P0-1 的承重面
+    assert second["shards_root"] == str(round_dir)
     rctx.close()
     assert pools[0].closed == 1 and rctx.pool is None
+    # 轮末回收（PPO 之后由调用方叫）：清掉轮 scratch 目录，ts 家不动
+    rctx.cleanup()
+    assert not list(round_dir.iterdir()), "轮末由 ctx.cleanup() 回收本地盘占用"
+    assert list(_local_root(tmp_path).glob(f"{scratch.SCRATCH_TS_PREFIX}*")), "ts 家永不清"
 
 
 def test_pool_ownership_moves_to_the_ctx(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -170,3 +178,6 @@ def test_round_ctx_fallback_probes_once_too(tmp_path: Path, monkeypatch: pytest.
     run_iter_rollout(sub, _stub_spec(tmp_path, [(1, 1)]), log=lambda _m: None, ctx=rctx)
     assert counts == {"probe": 1, "tree": 0}, "回退档不装树；探针也只跑一次"
     assert (sub / "w0" / "rl_s1_seed1" / "manifest.json").exists()
+    rctx.cleanup()  # 回退档没有 scratch 要清（幂等且不抛）
+    rctx.cleanup()
+    assert (sub / "w0" / "rl_s1_seed1" / "manifest.json").exists(), "回退档的产出住在真 job 目录里"
