@@ -1,4 +1,5 @@
 // 课程 x27-obs —— value 门控腿（x26-obs it90 诊断的修复腿：冷 critic 新列 35 倍爆炸）。
+// 状态：已结课（2026-10-13 收官；panel 终判 obs-v5 冻结：G0 miss、G5 总账零、C 类四次阴性。结论见尾部结课报告 + docs/nn/experiments.md §85）。
 // 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
 //
 // 立项 → 用户 2026-10-12：直接开干。机制：value 新列零起步（本起点已是纯 0）＋
@@ -33,6 +34,19 @@
 //   · 环境键全在 level（`ladder-c20-lives1`），课程**不重复** `stages` 等键。
 //   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
 //   · §15.5 新实验：新 out/traj + backup 新目录 + opt fresh，不碰 x26 账本。
+//
+// ── 结课报告（2026-10-13 收官；panel 终判 obs-v5 冻结，用户拍板）─────────
+//   跑量：it1–185（末 it186 在飞时结课），rollout/eval 全 settled；遥测断档 it35–75
+//   rms 精确零 41 点（旧 PPO 执行器窗口，grad~21s vs 45s；it40 双门作废）。
+//   机制：value_new_rms 0.004→0.057（it30）→断档→0.215（it76）→0.06 钉住（绳子有效，6× 压制）；
+//   旧列逐位不动；KL 0.010–0.018 全程稳定，无 halt。
+//   panel（it100 ×160 对，同人类/seed）：通关 84/160=52.5%（G0 80% miss）；G5 同对 it0→it100
+//   通关 86→84、杀敌 p=0.503、承伤 p=0.996（总账零）；症状 D01 2×/D05 3×/W07 3×/W08 6×/A07 死平/D08 反向；
+//   D03 追平（进场前 143→99，威胁税功劳）。
+//   接线：policy 双头新列 +1.5–4%（冻住）vs value 0→0.073——行为由 policy 解释，value 遥测无预测力。
+//   结论：C 类四次阴性退场，corr/wallDist 转专场；本腿结课，it300 不跑。基线仍挂 burst-it220。
+//   证据：docs/nn/experiments.md §85 · DECISIONS §2026-10-13-goalnn-x27-frozen ·
+//   tmp/panel-x27obs-{it100,it0}.jsonl · tmp/compare-x27obs-{it100,g5}.txt。
 {
   "version": 5,
   "name": "x27-obs",

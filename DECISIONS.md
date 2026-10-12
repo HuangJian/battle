@@ -5169,3 +5169,48 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 - **落点** → `nn-training/hub/{blob,http_face}.py` · `nn-training/remote/{http,wire,worker,bulk_sched}.py` ·
   `nn-training/tests/hub/test_payload_range.py`（新）· `nn-training/tests/remote/{test_wire_reroll,
   test_body_transfer_guard,test_bulk_sched}.py` —— 全文 → `docs/nn/remote-transport.md §87`
+
+## §2026-10-13-goalnn-x27-frozen（2026-10-13，x27 双腿冻结 + obs-v5 感知增维退场：panel/G5/接线三证据）
+
+- **背景**：x26-obs it90 诊断（冷 critic 新 37 列 35 倍爆炸 → advantage 污染）开的修复双腿
+  （x27-obs ρ=0.001＋x27-noleash 无绳，共享零起 it0），跑到 it185/187：rms 6× 分叉
+  （0.06 vs 0.35）但 kills/胜率零分叉；it40 门早因遥测断档（it34/35–75/77 精确零，旧 PPO 执行器窗口）作废。
+  panel 终判（x27-obs it100 × 160 对）：通关 52.5%（G0 80% miss）；
+  G5 同对 it0→it100 通关 86→84、杀敌 p=0.503、承伤 p=0.996（总账零）；
+  接线测量 policy 双头新列 +1.5–4%（冻住）vs value 0→0.3（天翻地覆）——行为由 policy 解释，value 遥测无预测力。
+- **决定**：D1=obs-v5 系列冻结（C 类先验"三次阴性"+本轮=四次阴性，退场；corr/wallDist 几何类转专场，
+  空旷场无信号 A6 −0.93 为证）；D2=x27 双腿结课（it300 不跑，G0 大考免；x26-obs 主腿同停；
+  x26-tower 另案）；D3=`policy_new_rms` 进常规遥测（与 value 并列；40 轮不动新列即杀线）+ rms 精确零告警；
+  D4=下一发子弹 D01 账单 / W08 顶住二选一短腿（单变量、≤80 轮、it40 行为门、自动 halt，另案，用户拍板）。
+- **备选与否决**：① 跑满 it300 —— 否（52.5% vs 80%，大考必 miss，省 ~8h 双腿算力）；
+  ② 转专场 —— 否（规则：任一 miss 即冻结，三门全过才转场）；③ x27-it100 vs burst-it220 统一战 ——
+  否（冻结方向不配统一战；基线仍挂 burst-it220）；④ 加剂量续命（wThreat×2 等）—— 否（第二变量 +
+  D03 已平证明税生效，再加是换题不是续命，走 D4 短腿）。
+- **后果**：C 类退场、几何类转专场；教训节即本条，全文 → `docs/nn/experiments.md` §85；
+  证据 `tmp/panel-x27obs-{it100,it0}.jsonl` + `tmp/compare-x27obs-{it100,g5}.txt` +
+  `tmp/smart-x27obs-it100.txt` + `tmp/means-x27obs-it100.txt`。
+
+## §2026-10-13-goalnn-x28-d01w08-design（2026-10-13，x27 冻结后双腿：D01-nearSq×1.5 + W08-wBlock×4；panel 门 + 80 轮封顶）
+
+- **背景**：panel 终判（§85）：D03 已平（威胁税功劳）而 D01 2×/D02 3×（"少进会了、躲开不会"）；
+  W08 6× 全场最大 cliff。E2（hurt 叠加）死在 it13 无 verdict、tmp 账本已清——本次不重问 hurt
+  （收尸另案），问 nearSq（D09/D05 家族最贴的现存税）与 wBlock 加量。
+  校准（x27-obs it100 日常 eval n=400，totalEV/局 81.08，killEV 45.80）：
+  nearSq −4.37/局 dense（Pzero=0.00）→ ×1.5（28→42）−6.56/局（≈威胁税量级）；
+  block −0.52/局 dense（Pzero=0.10，中位 8 tick，非 burst 式稀疏病）→ ×1.5 只动总 EV 0.3%
+  （顺势疗法，null 不可读）⇒ 取 ×4（110→440）−2.09/局（≈hurt 税量级）：此剂量下 null =
+  方向死（burst 税级强 null）。precedent：三加压腿 ×1.5 档；x20adv-plus wHurt ×3.06 单步大 bump。
+- **决定**：D1=双腿并行（GPU 交叠白赚）：`x28-d01`（wNearSq 42.0）+ `x28-w08`（wBlock 440.0），
+  起点同为 x27-obs.it100（sha16 `5e6eac2c51c75aad`，165 宽直装），新家族同流 20261022，
+  其余逐键同 x27-obs（含 value_anchor 0.001 继承；公式串逐字等，已脚本对账：每腿仅一键差）。
+  D2=it40 panel 门（160 对，Δ 基准 = 已存 `tmp/panel-x27obs-it100.jsonl`）：
+  d01 腿 panel-D05 ≤65.6（−15%）＋ D09 不反向；w08 腿 panel-W08 ≤14.7（−15%）；
+  双腿 kills≥12.8 护栏＋80 轮封顶＋自动 halt，终点 it80 全表终判、不考 G0。
+  D3=policy_new_rms **只读上报、不判门**（税经旧列起效是正常路径；接线杀线只配扩列腿——
+  收回冻结令里"第一次实战"的判门口径，遥测本身已上线）。
+- **备选与否决**：① wBlock×1.5 —— 否（0.3% total，null 不可读）；② wHurt 加量 —— 否
+  （E2 的未决问题，h4 尸体未收，重问占预算，另案）；③ wThreat 加量 —— 否（D03 已平，
+  加价方向已死，dist 先例）；④ wDmg 加量 —— 否（−2.8pp 实付代价已知）；⑤ W08-episode-mean
+  形态税 —— 否（无列；先补列再定价，另案）；⑥ policy 接线判门 —— 否（见 D3；上报供归因）。
+- **后果**：`course_openable` 双 True；`nn-training/curricula/x28-{d01,w08}.jsonc`；
+  开课走控制台（双腿并行）。E2/E3a 无 verdict 死亡记卫生欠账（tmp 账本已清，weights 停 it13）。
