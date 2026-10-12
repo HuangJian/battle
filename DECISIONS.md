@@ -4796,3 +4796,121 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 —— 全文（冻结规格 §2.1–§2.7 / 实施步骤 S0–S9 / 验收表 A·B / 预注册门 G0·G3·G5 / 评审记录）→
 `plan/obs-v5-vector-gap.plan.md` · 代码落点 → `src/nn/{policy-extra,obs-encoder,infer,danger-metrics}.ts` ·
 `nn-training/common/schema.py` · `nn-training/worker/models/student.py` · `nn-training/worker/scripts/init_spatial_leg.py`
+
+## §2026-10-12-goalnn-x26-obs（2026-10-12，x25 改名 x26-obs＋batch 减半＋奖励复核去死税；§15.5 新实验）
+
+- **背景**：x25-obs-v5 开课前未跑（无沉没账本）。用户同日三令：课程改名 x26-obs、
+  `target_transitions` 49152→24576、按人类语料（§71：62 局窗口配对）＋burst-it220
+  表现（日常 ~0.51／拼池 0.5550–0.5669／kills ~15.1／pDmg 221／maxD120 139 反向）复核 17 项定价。
+- **决定**（D1=改名含全身份：课程文件＋权重目录＋it0 文件＋out/traj/backup 全换 x26，
+  it0 经 mv 改名 sha16 `6f32a17362cbe5ab` 不变，meta 无输出路径故干净；`paired_rotate_seed`
+  沿用 20261020——x25 流从未消费；D2=batch 只动这一键，优化器键全冻结，KL 早飘第一杠杆 =
+  恢复 batch；D3=17 项只动一项：删 `- wBurst*damageBursts`（项参同删，dist 腿先例公式可不带
+  wBurst）——x24 结论①单变量判阴（300 轮零漂移、0.4/局、60% 零局，稀疏税教不动），留着只剩
+  advantage 噪声，塑形负荷 24%→~16%；其余 16 项全留：wDist 留 1.8（dist 腿判死的是加价方向，
+  不是基线）、wMiss/wAcc 留（§71 方向对、blk 手段刚到）、wDmg/wHurt/wThreat 留（人类承伤
+  ~30/千tick vs NN ~150–230 方向对、判的是手段缺）、wBlock 留（罚顶墙推、人类式 STOP 不挨罚）、
+  wEncl/wCorner/wNearSq 留（§71 差距在多敌分档、encl 本就 n≥2 才计）、
+  wPickup/wKill/wHit/wFr×3 留（拾取 1.41 vs 1.28、中段击杀率持平均无定价信号）。
+  D4=G0/G5 阈值一字不动（用户指令出处；禁令②禁拿教师表现定 DoD）；G3 记为已降级
+  （A6 blk 对向 −0.93 命中条件，W07 只报数）。
+- **备选与否决**：① x25 干跑保干净单变量 —— 否（用户令三变量混杂，G 门照判不多 claims）；
+  ② batch 减半顺手调 lr/epochs/mb —— 否（再动是第四变量；KL 盯盘见 §15.4）；③ wBurst 留 0 不删项 ——
+  否（死文本不如删项干净，引擎与 dist 腿已证明无 wBurst 公式合法）；④ 砍基线 wDist=1.8 ——
+  否（未经验证的新方向）；⑤ paired_rotate_seed 换新 —— 否（旧流处女，换了白换）。
+- **后果**：x25 文件／目录／权重名不复存在（git 判改名）；x26 `course_openable=(True,'')`；
+  起点权重仍是 f3a42dd 后代码产物；开课走控制台，起点纪律见课程头注。
+—— 全文 → `nn-training/curricula/x26-obs.jsonc`（头注含 17 项复核表）· 证据 → x24 burst/dist
+结课报告 · `docs/nn/experiments.md` §71 · DECISIONS §2026-10-12-goalnn-burst220-crown
+
+## §2026-10-12-goalnn-x26-batch（2026-10-12，x26-obs 的并行 batch 对照腿；§15.5 新实验）
+
+- **背景**：用户令开一条 x26 并行腿喂饱 GPU worker（课程与节点正交：两条已发布腿 ⇒
+  一腿 CPU rollout 相时另一腿可用 GPU；GPU 数不断言）。x26-obs 把 batch 减半，
+  最大风险是 KL 失稳（§15.4 大批次是 KL 稳定器）。
+- **决定**（D1=并行变量取 batch 全量：`target_transitions` 24576→49152，其余键经脚本
+  逐键对账一字不差——同起点 it0、同流 20261020、同奖励、同优化器、同 eval；D2=同流
+  （x24 burst/dist 共享 x23 流先例，rollout 可比）；D3=it40 硬门 kills ≥12.8
+  （15.1×0.85）＋ it30–40 mean KL ≤0.2（schedule 自带 kl_cap），fail 即杀且控制台挂
+  自动 halt（x24 overrun 空烧 260 轮教训）；终点与 x26-obs 同判 G0/G5/G3＋KL 轨迹对照，
+  接近才加 McNemar 拼池）。
+- **备选与否决**：① 塔腿（leg B）—— 否（plan 明确塔重测另案；value 冷启动是另一个问题，
+  与 batch 险无关）；② 奖励探针腿 —— 否（x26 头注刚定“手段刚到先看生效”，加价自相矛盾）；
+  ③ 探索/curiosity 腿 —— 否（无 crisp 门，证据弱）；④ 顺手调 lr/epochs —— 否（第二变量）。
+- **后果**：本腿是减半决策的保险＋干净 ablation（稳则差值即 batch 效应；24k 飘则 49k 仍
+  交付 obs-v5 答案）；`course_openable=(True,'')`；新 out/traj/backup，不碰 x26-obs 账本。
+—— 全文 → `nn-training/curricula/x26-batch.jsonc`
+
+## §2026-10-12-goalnn-x26-batch-retired（2026-10-12，x26-batch 未开课撤回；§6.4 偏离更正）
+
+- **背景**：上条为 x26-obs 配的并行 batch 对照腿（`x26-batch.jsonc`，已删，未开课）。
+  用户裁决：24k  batch 前课已证充分（h3/h4 家 31 门 24576＋22 门 24000 先例可查）；
+  TPU 高配多采抑噪无碍，GPU 云机训练墙钟翻倍不值。另用户明令：不到转场障碍/基地时候，
+  两阶段不动（提前开专场验证 corr/blk/基地族的想法否决）。
+- **决定**：x26-batch 撤回（文件已 `rm`，从未发布）；x26-obs 单腿跑，batch 不再设对照。
+  ladder 内无第二条需训练验证的 obs 方向（见本条后果）：ladder 可见族（tti/laneE/s39/
+  s30/s31/pickup×3/cornerDist）由 x26-obs 本腿经 G0＋症状面板验证；退化族
+  （corr/blk/wallDist/基地 14 列）在 ladder 内按构造不可验证，留 G0 后专场；W10 残余是
+  记忆问题（prev 已删），由事后 panel 回答，不开腿；归因（策略真用哪几维）是 eval 期
+  ablation 探针，不是课程。
+- **备选与否决**：① 提前开 obstruction 并行腿验证 corr/blk —— 否（用户 veto，两阶段不动）；
+  ② 为喂饱 GPU 硬凑第二腿 —— 否（已由下条 §gpu-overlap-correction 推翻：错的是否决理由，
+  不是结论——见下条）。
+- **后果**：x26 家只剩 x26-obs 一腿；本更正替代上条的“后果”，上条正文保留作史实。
+—— 文件 → 已删 `nn-training/curricula/x26-batch.jsonc`（未入库，无残留）
+
+## §2026-10-12-goalnn-gpu-overlap-correction（2026-10-12，认错：单 GPU 双腿墙钟论错了；§6.4 更正）
+
+- **背景**：上条否决 ② 称“单 GPU 上双腿拉长墙钟”——**错**。用户纠正：PPO 每轮 =
+  CPU 为主的 rollout（仿真＋小批量推理，GPU 基本闲置）与吃满 GPU 的 update 交替；
+  两条 24k 腿交错相位，GPU 常满，**双腿墙钟与单腿基本一致**。我把“GPU 是瓶颈”想成了
+  “双腿分 GPU”，漏了 rollout/GPU 相天然互补这一层。
+- **决定**：① 上条结论（x26-batch 撤回）**维持**，但理由只剩一条：49k 加的是 GPU update
+  相的活（真正的瓶颈），24k 已被 31＋22 门前课证明充分——不是“双腿拉长墙钟”。
+  ② 正确的 GPU 命题是：**第二腿只要 batch 同为 24k，墙钟几乎白赚**——并行腿问题重开，
+  候选只剩 obs-v5 另一半：腿 B（塔，189，ladder 可训、与环境无关；v4 起点
+  `spatial-legB.it0.json`（schema 4、头 151/value 128）本机在库，分段迁移有单测覆盖）。
+  r6 单腿是用户指令，塔腿是否开并行待用户拍板，不擅自写文件。
+- **备选与否决**：见塔腿提案（用户拍板后落本条续）。
+- **后果**：本条推翻上条否决 ② 的理由部分；x26-batch 撤回结论不变。
+—— 证据 → 用户 2026-10-12 原话 · v4 腿 B 起点在库（本机核过形状）
+
+## §2026-10-12-goalnn-x26-tower（2026-10-12，x26 并行架构对照腿：腿 B；override r6 单腿）
+
+- **背景**：GPU 交叠纠正后重开并行问题：24k 定死、ladder 不动、不加价三约束下，
+  唯一剩下的 obs 验证方向 = 腿 B（塔 189，obs-v5 未验证的一半；ladder 可训、与环境
+  无关）。r6 单腿是用户指令，本次用户拍板开并行即 override（ carved 范围 = 仅加腿 B，
+  corr/blk/基地族仍等 G0 后专场，两阶段不动）。
+- **决定**（D1=单变量＝架构＋必需起点：batch/奖励/流/优化器/eval 逐键同 x26-obs，
+  脚本对账零差异；起点 `weights/x26-tower.it0.json` 与 x26-obs **同源 burst220**，
+  经新增 A→B 映射转出（旧 extra9 [128..136]→新 [152..160]，余 180 列重 init）：
+  params 86952（= §2.6 预测值）、missing=[塔四键＋value]、sha16 `520c1b0811439071`、
+  35 个 trunk 共享键与 burst220/x26-obs 三方逐位等（对照只剩 tower 路径＋头新列＋冷 value）、
+  strict 装载已验；D2=it40 硬门 kills ≥12.8＋meanKL ≤0.2＋控制台自动 halt，
+  终点同判 G0/G5/G3＋跨架构对照，接近才拼池；D3=冷 critic 头 40 轮只看 policy/KL/kills，
+  不看 value loss）。
+- **备选与否决**：① 同起点 —— 否（架构不同起点必然不同，这是对照的必需代价）；
+  ② 塔腿不同流 —— 否（x24 burst/dist 共享 x23 流先例，同流 rollout 可比）；
+  ③ 奖励顺手微调 —— 否（第二变量，且与 x26 复核结论矛盾）。
+- **后果**：x26 家两腿（obs 165＋tower 189）同流并进；`course_openable=(True,'')`；
+  新 out/traj/backup，不碰 x26-obs 账本；开课走控制台。
+—— 全文 → `nn-training/curricula/x26-tower.jsonc`
+
+## §2026-10-12-goalnn-leg-a2b-migration（2026-10-12，burst220 可迁腿 B：A→B 映射＋源族自动识别）
+
+- **背景**：用户问 burst220 能否迁 tower。能，但旧表只认 151 宽 v4 腿 B 源；而在库
+  `spatial-legB.it0.json` 的 trunk 系 x21-psh-a（非加冕系）——用它起塔腿，对照混进
+  trunk 血缘。burst220（137 宽腿 A）的新 pf 里只有 extra9 有槽（hidden 无槽）。
+- **决定**（D1=加 `_LEG_A2B_SEGMENTS=((128,152,9),)`：fc 照旧 drop 10，头拷一段，
+  value 不进表（全重 init）；D2=腿 B 源按旧头宽自动识别（151→三段表／137→A2B 表，
+  其他宽响亮拒绝，legacy 128 无槽可对）；D3=塔腿起点重转 burst220 源，
+  旧 spatial 系产物作废（sha `621ee83b…` 退役，从未开课，无残留）。
+  新产物 sha16 `520c1b0811439071`，35 共享键三方逐位等。
+- **备选与否决**：① 沿用 spatial 系起点 —— 否（trunk 非加冕系，对照多一层混杂，而
+  A→B 只多 9 列拷贝＋180 列重 init，代价一样）；② 手工指定源族 flag —— 否（宽即族，
+  自动识别少一个误用面，非法宽照样响亮拒绝）；③ legacy 128 也接 —— 否（hidden 无槽，
+  全重 init 的头会伪装成迁移成功）。
+- **后果**：`init_spatial_leg.py` 支持 137/151 双源（单测 8 例：先红后绿）；
+  x26-tower 头注已同步新源＋新 sha；两腿 trunk 同源，对照收紧。
+—— 落点 → `worker/scripts/init_spatial_leg.py` · `tests/worker/test_init_spatial_leg.py` ·
+`nn-training/curricula/x26-tower.jsonc`
