@@ -37,6 +37,7 @@ import {
   BOARD,
   SCALAR_DIM,
 } from '../../src/nn/obs-encoder'
+import { POLICY_EXTRA_DIM } from '../../src/nn/policy-extra'
 import { writeShard } from '../../src/nn/npy'
 import { writeFileSync, mkdirSync } from 'fs'
 
@@ -153,14 +154,14 @@ function flushShard(acc: Acc, dir: string, manifest: unknown): void {
   const OBS_N = OBS_CHANNELS * BOARD * BOARD
   const obs = new Uint8Array(N * OBS_N)
   const scalars = new Float32Array(N * SCALAR_DIM)
-  const extra = new Float32Array(N * 9)
+  const extra = new Float32Array(N * POLICY_EXTRA_DIM)
   const actions = new Uint8Array(N * 2)
   const masks = new Uint8Array(N * 7)
   const conditions = new Uint8Array(N)
   for (let i = 0; i < N; i++) {
     obs.set(acc.obs[i], i * OBS_N)
     scalars.set(acc.scalars[i], i * SCALAR_DIM)
-    extra.set(acc.extra[i], i * 9)
+    extra.set(acc.extra[i], i * POLICY_EXTRA_DIM)
     actions[i * 2] = acc.actions[i * 2]
     actions[i * 2 + 1] = acc.actions[i * 2 + 1]
     for (let j = 0; j < 7; j++) masks[i * 7 + j] = acc.masks[i * 7 + j]

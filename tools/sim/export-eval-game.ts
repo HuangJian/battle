@@ -73,6 +73,7 @@ import {
   inThreatLane,
   nearestEnemyDistPx,
   playerHpRatio,
+  sampleBasePressure,
   threatLaneExempt,
 } from '../../src/nn/danger-metrics'
 import { createShieldWindow } from '../../src/nn/shield-window'
@@ -138,7 +139,8 @@ import { runServe } from './serve-loop'
 
 const MAX_TICKS = 36000
 const TELEMETRY_SAMPLE_TICKS = 6
-const BASE_PRESSURE_RADIUS = 12
+// BASE_PRESSURE_RADIUS / sampleBasePressure 的定义已搬进 `src/nn/danger-metrics.ts`
+// （obs-v5 P3：观测侧与 telemetry 必须同一份公式）。
 
 /** 受控输入：与 export-rl-rollout.ScriptedInput 同实现（B案：0 = STOP，1..4 = 方向）。 */
 class ScriptedInput {
@@ -339,20 +341,6 @@ function countBaseWall(world: World): number {
 function isSolid(world: World, col: number, row: number): boolean {
   const t = world.tileMap.get(col, row)
   return t === 'brick' || t === 'steel'
-}
-
-function sampleBasePressure(world: World): number {
-  if (!world.tileMap.hasBase()) return 0
-  let worst = 0
-  for (const t of world.tanks) {
-    if (!t.alive || t.spawnTimer > 0) continue
-    const col = Math.floor((t.x + t.w / 2) / CELL)
-    const row = Math.floor((t.y + t.h / 2) / CELL)
-    const dist = Math.abs(col - BASE_POS.col) + Math.abs(row - BASE_POS.row)
-    const p = 1 - dist / BASE_PRESSURE_RADIUS
-    if (p > worst) worst = p
-  }
-  return worst > 0 ? Math.min(1, worst) : 0
 }
 
 interface EvalResult {

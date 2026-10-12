@@ -25,8 +25,8 @@ import numpy as np
 SHARD_FILES = {
     "obs": "obs.npy",  # uint8  (N, OBS_CHANNELS, BOARD, BOARD) — v3: (N, 16, 26, 26)
     "scalars": "scalars.npy",  # float32 (N, SCALAR_DIM) — v3: (N, 30)
-    # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) float32 —— 独立张量。
-    "extra": "extra.npy",  # float32 (N, 9)
+    # v5（plan/obs-v5-vector-gap.plan.md）：POLICY_EXTRA(37) float32 —— 独立张量。
+    "extra": "extra.npy",  # float32 (N, POLICY_EXTRA_DIM)
     "actions": "actions.npy",  # uint8  (N, 2)  [move, fire] (v2: item 头删除)
     "masks": "masks.npy",  # uint8  (N, 7) [move5, fire2], 1=valid
     "conditions": "conditions.npy",  # uint8 (N,) decision condition
@@ -83,7 +83,7 @@ def verify_shard_schema(shard_dir: str, arrays: dict[str, np.ndarray]) -> None:
             f"[npyio] {shard_dir}: scalars 形状 {tuple(sc.shape)} 与当前 schema 不符"
             f"（期望 (N, {SCALAR_DIM})）——请重新导出该 shard"
         )
-    # v4：extra 形状判据（POLICY_EXTRA(9)）；缺文件由 load_shard 的 FileNotFoundError 拦。
+    # v5：extra 形状判据（POLICY_EXTRA(37)）；缺文件由 load_shard 的 FileNotFoundError 拦。
     ex = arrays.get("extra")
     if ex is not None and (ex.ndim != 2 or ex.shape[1] != POLICY_EXTRA_DIM):
         raise ValueError(

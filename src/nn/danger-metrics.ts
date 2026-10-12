@@ -56,11 +56,11 @@
  *
  * 纯函数、零分配、不读 rng、不写 World（AGENTS §2.3 / §14.1–14.2）。
  */
-import { BULLET, CELL, GRID, TANK } from '../constants'
+import { BASE_POS, BULLET, CELL, DIR_VECTORS, GRID, TANK, type Direction } from '../constants'
 import type { Bullet, Tank } from '../types'
 import type { World } from '../game/World'
 import { TileMap } from '../game/TileMap'
-import { BULLET_LANE_MISS, bulletInFrontDist, bulletLaneDist } from '../utils/helpers'
+import { BULLET_LANE_MISS, bulletInFrontDist, bulletLaneDist, snap } from '../utils/helpers'
 import type { ShieldWindow } from './shield-window'
 
 /** 触发半径（格）：**v9 起不再被 `inThreatLane` 使用**；保留给 dodge-l0 镜像与测试。 */
@@ -331,54 +331,102 @@ export function enclWeightTick(world: World): number {
 }
 
 /**
- * 「被包围」共享扫描（不分配对象；一个循环两个读数）：
- *   · `wantWeight = false` ⇒ 返回对齐敌数（`alignedEnemyCount` 语义，逐位不变）；
- *   · `wantWeight = true`  ⇒ 返回 Σ max(0,K_ENCL−d)（n ≥ 2 才非零）。
- * 谓词（19px 带 + 轴向无遮挡 + 已激活 + 存活）本体只此一份。
+ * 对齐扫描（19px 带 + 轴向无遮挡）的**参数化核心**（obs-v5，plan §2.5）。
+ *
+ * 参数语义（唯一读法，别再造第二套）：
+ *   · `cx,cy` = 被瞄目标的**像素中心** —— 对齐判据是固定的 `THREAT_ALIGN_BAND_PX` 中心带；
+ *   · `colLow..rowHigh` = 遮挡 raycast 的**目标体跨格**（玩家＝自身身体格；基地＝2×2 足印）；
+ *   · `tanks` = `world.allTanks` 的**单次取值**（AGENTS §14.6：每 encode 取一次传引用）；
+ *   · `out`（长度 6，调用方复用缓冲；**零分配**）：
+ *       `out[0]` = 对齐且无遮挡的敌车计数、`out[1]` = 距离加权（wantWeight 时）、
+ *       `out[2..5]` = 世界方位 up/down/left/right 的计数（竖直对齐归 up/down，
+ *       横向对齐归 left/right；**Σout[2..5] ≡ out[0]**）。
+ *
+ * 谓词（19px 带 + 轴向无遮挡 + 已激活 + 存活）本体只此一份：玩家族
+ * （`alignedEnemyCount`/`enclWeightTick`）与基地族（`baseThreat*`）、
+ * `laneE*` 全部走这里。
  */
-function alignedEnemyScan(world: World, wantWeight: boolean): number {
-  const p = world.player
-  if (!p || !p.alive) return 0
-  const pcx = p.x + p.w / 2
-  const pcy = p.y + p.h / 2
+export function alignedScan(
+  world: World,
+  cx: number,
+  cy: number,
+  colLow: number,
+  colHigh: number,
+  rowLow: number,
+  rowHigh: number,
+  wantWeight: boolean,
+  out: Float64Array,
+  tanks: readonly Tank[] = world.allTanks,
+): number {
   const tileMap = world.tileMap
-  // 玩家身体的像素精确格跨度（遮挡判据；与 threatLaneSources 同规）。
-  const pColLow = Math.floor(p.x / CELL)
-  const pColHigh = Math.floor((p.x + p.w - 1) / CELL)
-  const pRowLow = Math.floor(p.y / CELL)
-  const pRowHigh = Math.floor((p.y + p.h - 1) / CELL)
+  out[0] = 0
+  out[1] = 0
+  out[2] = 0
+  out[3] = 0
+  out[4] = 0
+  out[5] = 0
   let n = 0
   let w = 0
-  const tanks = world.allTanks
   for (let i = 0; i < tanks.length; i++) {
     const t = tanks[i]
     if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
     const tx = t.x + t.w / 2
     const ty = t.y + t.h / 2
-    const sameCol = Math.abs(tx - pcx) < THREAT_ALIGN_BAND_PX
-    const sameRow = Math.abs(ty - pcy) < THREAT_ALIGN_BAND_PX
+    const sameCol = Math.abs(tx - cx) < THREAT_ALIGN_BAND_PX
+    const sameRow = Math.abs(ty - cy) < THREAT_ALIGN_BAND_PX
     if (!sameCol && !sameRow) continue
+    const srcCol = Math.floor(tx / CELL)
+    const srcRow = Math.floor(ty / CELL)
     const occ = sameCol
-      ? laneOccluded(tileMap, Math.floor(tx / CELL), Math.floor(ty / CELL), true, pRowLow, pRowHigh)
-      : laneOccluded(
-          tileMap,
-          Math.floor(tx / CELL),
-          Math.floor(ty / CELL),
-          false,
-          pColLow,
-          pColHigh,
-        )
+      ? laneOccluded(tileMap, srcCol, srcRow, true, rowLow, rowHigh)
+      : laneOccluded(tileMap, srcCol, srcRow, false, colLow, colHigh)
     if (occ) continue
     n++
+    if (sameCol) {
+      if (ty < cy) out[2]++
+      else out[3]++
+    } else if (tx < cx) {
+      out[4]++
+    } else {
+      out[5]++
+    }
     if (wantWeight) {
       const d = Math.max(
-        Math.abs(Math.floor(tx / CELL) - Math.floor(pcx / CELL)),
-        Math.abs(Math.floor(ty / CELL) - Math.floor(pcy / CELL)),
+        Math.abs(srcCol - Math.floor(cx / CELL)),
+        Math.abs(srcRow - Math.floor(cy / CELL)),
       )
       if (d < K_ENCL) w += K_ENCL - d
     }
   }
-  return wantWeight ? (n >= 2 ? w : 0) : n
+  out[0] = n
+  out[1] = wantWeight ? (n >= 2 ? w : 0) : 0
+  return wantWeight ? out[1] : n
+}
+
+/** 玩家族复用的对齐扫描缓冲（§14.1：热路径不分配）。只做返回值的传手，内容不外传。 */
+const _ALIGNED_SCRATCH = new Float64Array(6)
+
+/**
+ * 「被包围」共享扫描（不分配对象；一个循环两个读数）：
+ *   · `wantWeight = false` ⇒ 返回对齐敌数（`alignedEnemyCount` 语义，逐位不变）；
+ *   · `wantWeight = true`  ⇒ 返回 Σ max(0,K_ENCL−d)（n ≥ 2 才非零）。
+ * obs-v5 起它是 `alignedScan` 的薄封装（玩家自身为锚、自身身体为遮挡终点）。
+ */
+function alignedEnemyScan(world: World, wantWeight: boolean): number {
+  const p = world.player
+  if (!p || !p.alive) return 0
+  // 玩家身体的像素精确格跨度（遮挡判据；与 threatLaneSources 同规）。
+  return alignedScan(
+    world,
+    p.x + p.w / 2,
+    p.y + p.h / 2,
+    Math.floor(p.x / CELL),
+    Math.floor((p.x + p.w - 1) / CELL),
+    Math.floor(p.y / CELL),
+    Math.floor((p.y + p.h - 1) / CELL),
+    wantWeight,
+    _ALIGNED_SCRATCH,
+  )
 }
 
 /**
@@ -406,8 +454,16 @@ export function cornerAnchors(): Array<{ col: number; row: number }> {
 export function cornerWeightTick(world: World): number {
   const p = world.player
   if (!p || !p.alive) return 0
-  const col = Math.floor((p.x + p.w / 2) / CELL)
-  const row = Math.floor((p.y + p.h / 2) / CELL)
+  const d = cornerAnchorDist(Math.floor((p.x + p.w / 2) / CELL), Math.floor((p.y + p.h / 2) / CELL))
+  return d < K_CORNER ? K_CORNER - d : 0
+}
+
+/**
+ * 中心格到四角锚点的**最小切比雪夫距**（格；`cornerAnchors()` 同式派生）。
+ * 抽出来是给 obs-v5 的 `cornerDist` 标量用——同一几何，不给观测侧另建一份公式
+ * （plan §2.5 P3）。零分配（`cornerAnchors()` 会分配 4 个对象，热路径不用它）。
+ */
+export function cornerAnchorDist(col: number, row: number): number {
   const a = CORNER_ANCHOR_MARGIN
   const b = GRID - 4
   let d = Math.max(Math.abs(col - a), Math.abs(row - a))
@@ -417,7 +473,7 @@ export function cornerWeightTick(world: World): number {
   if (dd < d) d = dd
   dd = Math.max(Math.abs(col - a), Math.abs(row - b))
   if (dd < d) d = dd
-  return d < K_CORNER ? K_CORNER - d : 0
+  return d
 }
 
 // ───────────────────────── metrics v11（idx74–75）─────────────────────────
@@ -642,4 +698,170 @@ export function damageClusterStats(
     if (sum > max120) max120 = sum
   }
   return { bursts, max120 }
+}
+
+// ════════════════════════════════════════════════════════════════
+// obs-v5：跨层公式的**唯一归家处**（plan/obs-v5-vector-gap.plan.md §2.5 / P3）
+//
+// 下面两类符号以前散在 `tools/sim/*`（每个导出器一份拷贝）：观测侧在 `src/nn` 里
+// 要么 import 不到（`tools/` 是导入方的下游），要么只能复制第二份 = 几何事实源分叉。
+// 所以：**公式搬进来，工具侧改成 re-export**（既有 import 面一行不改）。
+// ════════════════════════════════════════════════════════════════
+
+/**
+ * 基地威胁半径（格）：`basePressure = max(0, 1 − minDist/本值)`。
+ * 数值与 `tools/sim/rl-reward.ts` 旧值同（12）；telemetry 侧照旧 re-export。
+ */
+export const BASE_PRESSURE_RADIUS = 12
+
+/**
+ * pickupDist 哨兵：无存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
+ * 的 -1 哨兵同构。真实曼哈顿距离恒 ≥0（同格 = 0），-1 不可能与真实值混淆。
+ * 势能侧 Φ 不直接消费哨兵：公式统一 `where(pickupDist < 0, 0, pickupDist)` 归零。
+ */
+export const PICKUP_DIST_SENTINEL = -1
+
+/**
+ * 基地威胁压力（`tools/sim/*` 三处拷贝的**唯一实现**）。
+ *
+ * `enemiesOnly=false`（默认）＝ telemetry 口径，**逐字节不变**：对 `world.tanks`（含玩家）
+ * 取「距 BASE_POS 左上格曼哈顿格距最近」者的 `1 − dist/半径`（截断在 [0,1]）。
+ * `enemiesOnly=true` ＝ 观测口径（s38）：只认 `allegiance==='enemy'` 的车——否则玩家自己
+ * 贴家会把读数顶满，把「基地被逼」读成「我在守家」（plan §2.5）。
+ * 纯函数、零分配。
+ */
+export function sampleBasePressure(world: World, enemiesOnly = false): number {
+  if (!world.tileMap.hasBase()) return 0
+  let worst = 0
+  for (const t of world.tanks) {
+    if (!t.alive || t.spawnTimer > 0) continue
+    if (enemiesOnly && t.allegiance !== 'enemy') continue
+    const col = Math.floor((t.x + t.w / 2) / CELL)
+    const row = Math.floor((t.y + t.h / 2) / CELL)
+    const dist = Math.abs(col - BASE_POS.col) + Math.abs(row - BASE_POS.row)
+    const p = 1 - dist / BASE_PRESSURE_RADIUS
+    if (p > worst) worst = p
+  }
+  return worst > 0 ? Math.min(1, worst) : 0
+}
+
+/**
+ * 当步玩家到最近**存活**拾取的曼哈顿距离（格；metrics v7）。
+ * - 距离口径 = 中心格曼哈顿（`floor((x+w/2)/CELL)`），与 census/telemetry 同构；
+ * - 玩家不在场（`?alive` 为假/无 player）⇒ 哨兵 `PICKUP_DIST_SENTINEL`；
+ * - 无存活拾取 ⇒ 哨兵（公式侧 `where` 归零）。
+ * 热路径（AGENTS §14.1）：零分配 —— 只读迭代 `world.powerUps`，无 filter/map/Set。
+ * 防御性 `pu.alive` 检查：dead 拾取可能在 _cleanup 前残留于数组（与 census 同口径）。
+ */
+export function nearestPickupDist(world: World): number {
+  return nearestPickupCenter(world, _PU_CENTER)
+}
+
+/** `nearestPickupCenter` 的复用缓冲（§14.1）。 */
+const _PU_CENTER = new Float64Array(2)
+
+/**
+ * 最近存活拾取的**中心格曼哈顿距**（格）＋其**像素中心**写进 `out`（长度 2）。
+ *
+ * 抽出来的原因（obs-v5 P3）：观测侧要的不只是距离，还要方向（s33/s34 的单位向量），
+ * 而「哪个拾取算最近」的规则只能有一份——否则距离列与向量列会在换目标的那一拍分叉。
+ * 玩家不在场/已死 ⇒ 哨兵 `PICKUP_DIST_SENTINEL` 且 `out` 写 0（调用方仍须判哨兵）。
+ * 零分配、不读 rng、不写 World。
+ */
+export function nearestPickupCenter(world: World, out: Float64Array): number {
+  const p = world.player
+  out[0] = 0
+  out[1] = 0
+  if (!p || !p.alive) return PICKUP_DIST_SENTINEL
+  const pcx = p.x + p.w / 2
+  const pcy = p.y + p.h / 2
+  const pcol = Math.floor(pcx / CELL)
+  const prow = Math.floor(pcy / CELL)
+  let best = PICKUP_DIST_SENTINEL // -1 兼作「无存活拾取」记号
+  const pus = world.powerUps
+  for (let i = 0; i < pus.length; i++) {
+    const pu = pus[i]
+    if (!pu.alive) continue
+    const cx = pu.x + pu.w / 2
+    const cy = pu.y + pu.h / 2
+    const col = Math.floor(cx / CELL)
+    const row = Math.floor(cy / CELL)
+    const d = Math.abs(col - pcol) + Math.abs(row - prow)
+    if (best < 0 || d < best) {
+      best = d
+      out[0] = cx
+      out[1] = cy
+    }
+  }
+  return best
+}
+
+/** 世界方位码（与 `alignedScan` 的 `out[2..5]` 同序：up/down/left/right）。 */
+export const SIDE_UP = 0
+export const SIDE_DOWN = 1
+export const SIDE_LEFT = 2
+export const SIDE_RIGHT = 3
+
+/**
+ * 基地侧判定（世界方位码，序同 `alignedScan` 的 `out[2..5]`：0=up 1=down 2=left 3=right）。
+ * 规则（plan §2.5 冻结）：先看行（基地上方 ⇒ U；足印下方 ⇒ D），再看列（左 ⇒ L；右 ⇒ R）；
+ * **落在 2×2 足印内 ⇒ -1**（坦克不可能与基地同格，属不可达域，观测侧不计入任何侧）。
+ */
+export function baseSideCode(col: number, row: number): number {
+  if (row < BASE_POS.row) return SIDE_UP
+  if (row > BASE_POS.row + 1) return SIDE_DOWN
+  if (col < BASE_POS.col) return SIDE_LEFT
+  if (col > BASE_POS.col + 1) return SIDE_RIGHT
+  return -1
+}
+
+/** 基地 2×2 足印的像素中心（供 `alignedScan` 做基地族对齐；零分配、无 World 依赖）。 */
+export const BASE_CENTER_X = (BASE_POS.col + 1) * CELL
+export const BASE_CENTER_Y = (BASE_POS.row + 1) * CELL
+
+/**
+ * 沿 `dir` 的**连续可走格数**（上限 `cap`；`corr` 维的几何，plan §2.5）。
+ *
+ * 起点 = `canStep` 同规 `snap`（槽格对齐）；逐格步进 `CELL`，查**目的地** `TANK` 矩形是否
+ * 出界/撞地形；首命中即停。只问**地形**（坦克不算，与 `canStep(…, false)` 同族）——
+ * 一辆挡路敌车在下一拍就会走开，不是走位的结构性约束。
+ *
+ * ⚠ 与 `canStep` 的**扫掠并集**不同（后者为防「贴墙侧向」幽灵重叠而取当前∪目的）：
+ * 坦克不可能合法重叠障碍，故格对齐后两者在 k=1 上一致（A2 的「地形版 canStep 对照」钉它）。
+ * 纯函数、零分配、不读 rng、不写 World。
+ */
+export function corridorCells(world: World, tank: Tank, dir: Direction, cap: number): number {
+  const v = DIR_VECTORS[dir]
+  const gx = snap(tank.x, CELL)
+  const gy = snap(tank.y, CELL)
+  let k = 0
+  for (let i = 1; i <= cap; i++) {
+    const nx = gx + v.dx * CELL * i
+    const ny = gy + v.dy * CELL * i
+    if (!world.isInBounds(nx, ny, TANK, TANK)) break
+    if (world.rectHitsTerrain(nx, ny, TANK, TANK)) break
+    k = i
+  }
+  return k
+}
+
+/**
+ * 玩家中心格沿 `dir` 的首个**阻弹格**距离（px）；一路无阻或出界 ⇒ -1（调用方转 1.5 哨兵）。
+ *
+ * 阻弹 = `TileMap.blocksBullet`（brick/steel/base 挡；水/草/冰过）——与 `laneOccluded`
+ * 用**同一个**谓词。距离按「格序号 × CELL」（第 1 格 = 相邻格 = CELL px）。坦克一律忽略
+ * （子弹穿车不穿墙）。纯函数、零分配。
+ */
+export function firstBulletBlockerPx(world: World, px: number, py: number, dir: Direction): number {
+  const tileMap = world.tileMap
+  const v = DIR_VECTORS[dir]
+  const col0 = Math.floor(px / CELL)
+  const row0 = Math.floor(py / CELL)
+  for (let i = 1; i <= GRID; i++) {
+    const c = col0 + v.dx * i
+    const r = row0 + v.dy * i
+    if (c < 0 || c >= GRID || r < 0 || r >= GRID) return -1
+    if (TileMap.blocksBullet(tileMap.get(c, r))) return i * CELL
+  }
+  return -1
 }

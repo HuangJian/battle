@@ -12,6 +12,7 @@ import { DIFFICULTIES } from '../../src/config/difficulty'
 import { RULES, DEFAULT_RULES } from '../../src/config/rules'
 import { CELL, GRID, BASE_POS, ENEMIES_PER_STAGE, START_LIVES } from '../../src/constants'
 import { RNG } from '../../src/utils/RNG'
+import { sampleBasePressure } from '../../src/nn/danger-metrics'
 import { readFileSync } from 'fs'
 import { computePlayer2SpawnCol } from '../../src/utils/helpers'
 import { paramsHash } from '../lib/stage-spec'
@@ -550,8 +551,8 @@ export interface RunOptions {
 
 /** Base-pressure sampling cadence in ticks (10 Hz at 60 fps). */
 const TELEMETRY_SAMPLE_TICKS = 6
-/** Enemies closer than this (Manhattan cells) contribute base pressure. */
-const BASE_PRESSURE_RADIUS = 12
+// BASE_PRESSURE_RADIUS / sampleBasePressure 的定义已搬进 `src/nn/danger-metrics.ts`
+// （obs-v5 P3：观测侧与 telemetry 必须同一份公式）。
 
 /**
  * The 8 cells that form the classic base protection ring, mirroring
@@ -1390,22 +1391,9 @@ function sampleFrame(world: World, tick: number): FrameMetrics {
  * Stages without a base (curriculum arenas) report 0: there is nothing to
  * pressure, and the scorer drops the dimension rather than crediting safety
  * the AI did not earn.
+ *
+ * obs-v5：实现已搬进 `src/nn/danger-metrics.ts`（本文件顶层 import），此处只留说明。
  */
-function sampleBasePressure(world: World): number {
-  if (!world.tileMap.hasBase()) return 0
-  const baseCol = BASE_POS.col
-  const baseRow = BASE_POS.row
-  let worst = 0
-  for (const t of world.tanks) {
-    if (!t.alive || t.spawnTimer > 0) continue
-    const col = Math.floor((t.x + t.w / 2) / CELL)
-    const row = Math.floor((t.y + t.h / 2) / CELL)
-    const dist = Math.abs(col - baseCol) + Math.abs(row - baseRow)
-    const p = 1 - dist / BASE_PRESSURE_RADIUS
-    if (p > worst) worst = p
-  }
-  return worst > 0 ? Math.min(1, worst) : 0
-}
 
 /**
  * Count enemy bullets on a collision course with the player.

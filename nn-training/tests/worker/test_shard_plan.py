@@ -22,7 +22,7 @@ from pathlib import Path
 
 import numpy as np
 
-from common.schema import OBS_CHANNELS, SCALAR_DIM
+from common.schema import OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -127,8 +127,8 @@ def test_shard_ids_from_load_dataset_match_the_synthetic_shape(tmp_path: Path) -
         arrays: dict[str, np.ndarray] = {
             "obs": rng.integers(0, 256, (FRAMES, OBS_CHANNELS, 26, 26), dtype=np.uint8),
             "scalars": rng.standard_normal((FRAMES, SCALAR_DIM)).astype(np.float32),
-            # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) 随样本走。
-            "extra": rng.random((FRAMES, 9)).astype(np.float32),
+            # v5（plan/obs-v5-vector-gap.plan.md）：POLICY_EXTRA(37) 随样本走。
+            "extra": rng.random((FRAMES, POLICY_EXTRA_DIM)).astype(np.float32),
             "actions": rng.integers(0, 5, (FRAMES, 2), dtype=np.int64),
             "masks": np.ones((FRAMES, 7), dtype=np.float32),
             "conditions": np.zeros(FRAMES, dtype=np.int64),

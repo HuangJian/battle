@@ -93,17 +93,17 @@ class StudentNet(nn.Module):
     CoordConv-ConvMixer-Lite student (plan §4.3), BN-free.
 
     Input:
-      obs:     (B, 16, 26, 26) uint8 — encoder output (v3: 16 channels)
-      scalars: (B, 30) float32  (v3: 30 scalars)
-      extra:   (B, 9) float32   — POLICY_EXTRA（v4；仅 policy_extra=True 时消费）
+      obs:     (B, 16, 26, 26) uint8 — encoder output (v3+: 16 channels)
+      scalars: (B, 40) float32  (v5: 40 scalars；v3 为 30)
+      extra:   (B, 37) float32   — POLICY_EXTRA（v5: 37；仅 policy_extra=True 时消费）
     Output: (move_logits, fire_logits)（v2：双头，item 头已删除）.
 
-    v4（plan/policy-spatial-head.plan.md §3）两档新架构（默认关 = 逐字节旧行为）：
-      · policy_extra=True（腿 A）：走位/开火头输入 = hidden(128) + extra(9) = 137；
-        fc/value 一字不动（critic 输入集不变）。
+    v4（plan/policy-spatial-head.plan.md §3）两档架构（默认关 = legacy）：
+      · policy_extra=True（腿 A）：走位/开火头输入 = hidden(128) + extra(37) = 165；
       · spatial_tower=True（腿 B）：bufA → 1×1 64→8 + ReLU + 4×4 分区均值(128) →
-        FC(128→112)；头输入 = tower(112) + scalars(30) + extra(9) = 151。fc/value 仍
-        消费 pooled+scalars（不动）。
+        FC(128→112)；头输入 = tower(112) + scalars(40) + extra(37) = 189。
+    v5（plan/obs-v5-vector-gap.plan.md §2.6）：上述 165/189 也是 `PPOStudent.value_head`
+    的输入宽度（critic 与策略吃同一份 `pf`）；legacy 档 value 仍是 128 = head_hidden。
     """
 
     def __init__(
@@ -127,8 +127,10 @@ class StudentNet(nn.Module):
         self.policy_extra = bool(policy_extra)
         self.spatial_tower = bool(spatial_tower)
         if self.spatial_tower and not self.policy_extra:
-            # 腿 B 的 151 = tower(112)+scalars(30)+extra(9)；extra 是规格的一部分。
-            raise ValueError("spatial_tower 需要 policy_extra=True（头输入 151 含 extra 9）")
+            # 腿 B 的 189 = tower(112)+scalars(40)+extra(37)；extra 是规格的一部分。
+            raise ValueError(
+                f"spatial_tower 需要 policy_extra=True（头输入含 extra({POLICY_EXTRA_DIM})）"
+            )
 
         self.stem = nn.Conv2d(in_ch + 2, h, 3, padding=1, bias=True)  # +2 coord channels
         self.blocks = nn.ModuleList([ConvMixerBlock(h) for _ in range(d)])
@@ -136,11 +138,7 @@ class StudentNet(nn.Module):
         if self.spatial_tower:
             self.spatial_proj = nn.Conv2d(h, SPATIAL_TOWER_C, 1, bias=True)
             self.spatial_fc = nn.Linear(SPATIAL_TOWER_FEAT, SPATIAL_TOWER_FC_OUT, bias=True)
-            head_in = SPATIAL_TOWER_FC_OUT + scalar_dim + POLICY_EXTRA_DIM
-        elif self.policy_extra:
-            head_in = head_hidden + POLICY_EXTRA_DIM
-        else:
-            head_in = head_hidden
+        head_in = self.policy_input_dim
         self.move_head = nn.Linear(head_in, MOVE_DIM, bias=True)
         self.fire_head = nn.Linear(head_in, FIRE_DIM, bias=True)
 
@@ -153,6 +151,24 @@ class StudentNet(nn.Module):
         # 的根源，plan/python-refactor.md P1-10）。
         with torch.no_grad():
             self.stem.weight.mul_(1.0 / 255.0)
+
+    @property
+    def policy_input_dim(self) -> int:
+        """策略头输入 `pf` 的宽度（obs-v5 起 value 头也吃同一份）。
+
+          · legacy（无 extra、无塔）= `head_hidden`（128）；
+          · 腿 A（policy_extra）= `head_hidden + POLICY_EXTRA_DIM`（128+37=165）；
+          · 腿 B（spatial_tower）= `SPATIAL_TOWER_FC_OUT + scalar_dim + POLICY_EXTRA_DIM`
+            （112+40+37=189）。
+
+        单一来源：`move_head`/`fire_head`（以及 obs-v5 的 `value_head`）全部由本属性派生，
+        不许再在别处写 165/189 字面量（plan §2.6）。
+        """
+        if self.spatial_tower:
+            return SPATIAL_TOWER_FC_OUT + self.scalar_dim + POLICY_EXTRA_DIM
+        if self.policy_extra:
+            return self.head_hidden + POLICY_EXTRA_DIM
+        return self.head_hidden
 
     def _init_weights(self) -> None:
         for m in self.modules():
@@ -202,7 +218,8 @@ class StudentNet(nn.Module):
     def _require_extra(self, extra: torch.Tensor | None) -> torch.Tensor:
         if extra is None:
             raise ValueError(
-                "student: policy_extra=True 的模型必须喂 POLICY_EXTRA(9)（extra=None 会静默用 0）"
+                f"student: policy_extra=True 的模型必须喂 POLICY_EXTRA({POLICY_EXTRA_DIM})"
+                "（extra=None 会静默用 0）"
             )
         return extra.float()
 
@@ -256,7 +273,24 @@ class PPOStudent(StudentNet):
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
-        self.value_head = nn.Linear(self.head_hidden, 1)
+        # obs-v5（plan/obs-v5-vector-gap.plan.md §2.6）：critic 吃与策略头**同一份** `pf`。
+        # 旧稿只吃 `head_hidden`（128）—— critic 与策略不在同一坐标系，正是本 plan 要修的根因
+        # （DECISIONS §2026-10-12-goalnn-obs-v5-critic-superset 已推翻「critic 输入集不动」）。
+        self.value_head = nn.Linear(self.policy_input_dim, 1)
+        self._init_value_head()
+
+    def _init_value_head(self) -> None:
+        """value 头初始化：小尺度 `normal_(0, 0.01)` + 零偏置（plan §2.6）。
+
+        为何不用 `_init_weights` 的 kaiming：obs-v5 的 value 头**新吃 37 列**
+        （extra / scalars 尾巴），而 warm start 会把已训过的前几列拷进来——kaiming 的 √2
+        gain 会把新列抬到与老列同量级，起点上 critic 就被新列的噪声主导。0.01 量级
+        让新列近似「关闭」起步，要不要用交给训练自己学（不预剪，plan §2.6）。
+        转出脚本（`scripts/init_spatial_leg.py`）对**部分列**重用同一尺度。
+        """
+        with torch.no_grad():
+            nn.init.normal_(self.value_head.weight, mean=0.0, std=0.01)
+            nn.init.zeros_(self.value_head.bias)
 
     def forward(
         self, obs: torch.Tensor, scalars: torch.Tensor, extra: torch.Tensor | None = None
@@ -268,7 +302,7 @@ class PPOStudent(StudentNet):
         else:
             h = self.features(obs, scalars)
             pf = self.policy_features(obs, scalars, extra, hidden=h)
-        return self.move_head(pf), self.fire_head(pf), self.value_head(h)
+        return self.move_head(pf), self.fire_head(pf), self.value_head(pf)
 
     @torch.no_grad()
     def predict(
@@ -365,8 +399,10 @@ if __name__ == "__main__":
     ap.add_argument("--h", type=int, default=DEFAULT_H)
     ap.add_argument("--d", type=int, default=DEFAULT_D)
     ap.add_argument("--golden-seed", type=int, default=20260903)
-    ap.add_argument("--policy-extra", action="store_true", help="v4 腿 A 档（头 137）golden")
-    ap.add_argument("--spatial-tower", action="store_true", help="v4 腿 B 档（塔 + 头 151）golden")
+    ap.add_argument("--policy-extra", action="store_true", help="腿 A 档（头 + extra 37 = 165）golden")
+    ap.add_argument(
+        "--spatial-tower", action="store_true", help="腿 B 档（塔 + scalars + extra = 189）golden"
+    )
     args = ap.parse_args()
 
     if args.golden:

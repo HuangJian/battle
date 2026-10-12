@@ -25,7 +25,7 @@ import {
   type FrameLabel,
 } from '../../src/nn/obs-encoder'
 import type { World } from '../../src/game/World'
-import type { Direction } from '../../src/constants'
+import { CELL, type Direction } from '../../src/constants'
 import { placeEnemy, seedWorld } from '../helpers'
 
 // ---- channel cell accessor ----
@@ -103,20 +103,28 @@ function mkWorld(over: Record<string, unknown> = {}): World {
     frenzyStock: 0,
     rewindStock: 0,
     frame: 0,
+    // v5：corridorCells / firstBulletBlockerPx 走真 World 的两个几何谓词——fixture 是裸
+    // 对象 cast，必须显式提供（否则 encode 一碰 corr/blk 就 TypeError）。语义与 World 同：
+    //   ① isInBounds = 4 比较（World.ts 同实现）；
+    //   ② rectHitsTerrain ⇒ true：本 fixture 的 tileMap.get 恒返回 'brick'（挡车地形）
+    //      ⇒ 走廊恒 0（本文件的断言都不看 corr*/blk*）。
+    isInBounds: (x: number, y: number, w: number, h: number): boolean =>
+      x >= 0 && y >= 0 && x + w <= BOARD * CELL && y + h <= BOARD * CELL,
+    rectHitsTerrain: () => true,
     ...over,
   } as unknown as World
 }
 
 describe('obs-encoder dimensions', () => {
-  it('exposes the canonical 16×26×26 obs and 30-dim scalar (v4: +POLICY_EXTRA 9)', () => {
+  it('exposes the canonical 16×26×26 obs and 40-dim scalar (v5: +POLICY_EXTRA 37)', () => {
     expect(OBS_CHANNELS).toBe(16)
     expect(BOARD).toBe(26)
-    expect(SCALAR_DIM).toBe(30)
-    expect(OBS_SCHEMA_MAJOR).toBe(4)
+    expect(SCALAR_DIM as number).toBe(40)
+    expect(OBS_SCHEMA_MAJOR as number).toBe(5)
     const enc = new ObsEncoder()
     expect(enc.obs.length).toBe(16 * 26 * 26)
-    expect(enc.scalars.length).toBe(30)
-    expect(enc.extra.length).toBe(9)
+    expect(enc.scalars.length).toBe(40)
+    expect(enc.extra.length).toBe(37)
   })
 })
 
@@ -394,8 +402,9 @@ describe('ObsEncoder.encode — spatial channels', () => {
     expect(Array.from(enc.scalars)).toEqual(Array.from(sa))
   })
 
-  it('SCALAR_X_INDICES are the relative-direction x-components (15,18) + iceVx (29) (v3)', () => {
-    expect(SCALAR_X_INDICES).toEqual([15, 18, 29])
+  it('SCALAR_X_INDICES are the relative-direction x-components (15,18) + iceVx (29) + pickupRelX (33)', () => {
+    // v3 冻 15/18/29；v5 追加 33（s34 pickupRelY 是 y 分量，不翻）。
+    expect(SCALAR_X_INDICES).toEqual([15, 18, 29, 33])
   })
 
   it('v2 scalar layout: item inventory scalars removed, rest renumbered', () => {

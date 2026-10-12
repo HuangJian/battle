@@ -46,6 +46,7 @@ import {
   SCALAR_DIM,
   SCHEMA_FINGERPRINT,
 } from '../../src/nn/obs-encoder'
+import { POLICY_EXTRA_DIM } from '../../src/nn/policy-extra'
 import { writeNpy } from '../../src/nn/npy'
 import { BASE_PRESSURE_RADIUS } from './rl-reward'
 import { mkdirSync, writeFileSync, readdirSync, readFileSync, statSync } from 'fs'
@@ -284,14 +285,14 @@ function main(): void {
     const N = r.samples.length
     const obs = new Uint8Array(N * OBS_N)
     const scalars = new Float32Array(N * SCALAR_DIM)
-    const extra = new Float32Array(N * 9)
+    const extra = new Float32Array(N * POLICY_EXTRA_DIM)
     const actions = new Uint8Array(N * 2)
     const masks = new Uint8Array(N * MASK_DIM)
     const conditions = new Uint8Array(N)
     r.samples.forEach((s, i) => {
       obs.set(s.obs, i * OBS_N)
       scalars.set(s.scalars, i * SCALAR_DIM)
-      extra.set(s.extra, i * 9)
+      extra.set(s.extra, i * POLICY_EXTRA_DIM)
       actions[i * 2] = s.move
       actions[i * 2 + 1] = s.fire
       for (let j = 0; j < MASK_DIM; j++) masks[i * MASK_DIM + j] = s.masks[j]
@@ -299,7 +300,7 @@ function main(): void {
     })
     writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
     writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
-    writeNpy(`${dir}/extra.npy`, extra, [N, 9], 'f4')
+    writeNpy(`${dir}/extra.npy`, extra, [N, POLICY_EXTRA_DIM], 'f4')
     writeNpy(`${dir}/actions.npy`, actions, [N, 2], 'u1')
     writeNpy(`${dir}/masks.npy`, masks, [N, MASK_DIM], 'u1')
     writeNpy(`${dir}/conditions.npy`, conditions, [N], 'u1')

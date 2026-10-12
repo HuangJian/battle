@@ -4766,3 +4766,33 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   清单读面的两源 fallback（`idx["it"] or plan["start_it"]`），独立可后置。
 —— 全文（现场证据 / 根因 A–D / S1–S9 / 验收门槛 / 评审修订表）→ `plan/offline-start-checkpoint-it-collision.plan.md` ·
 `docs/nn/remote-transport.md` §83 · 评审 → `plan/offline-start-checkpoint-it-collision.review-bf.md`
+
+## §2026-10-12-goalnn-obs-v5-critic-superset（2026-10-12，obs-v5：观测缺口一次补齐，**critic 输入集解禁**（推翻 engineering.md 的既有否决）；plan/obs-v5-vector-gap.plan.md + 首轮代码评审 F1–F10）
+
+- **背景**：策略头缺 28 维「决策时不可从现有观测量推导」的方向量（`POLICY_EXTRA` 9→37）与 10 维
+  标量（`SCALAR_DIM` 30→40），且 critic 只看 GAP 后的 hidden（128），与策略头看到的 `pf` 不是同一份
+  输入——症状映射（D08 必死弹躲开率 0.417 vs 人 0.648、W07 撞墙 111.6 vs 45.4）指向「观测侧缺口」
+  而非奖励定价。唯一拦路的是 `docs/nn/engineering.md` 的否决：「改 `SCALAR_DIM`（30→32）方向（会连带
+  fc/value，否决：违反 critic 输入集不动）」。
+- **决定**（D1=A 单腿一次补齐 / D2=A value 全吃 pf / D3=A 只追加不重编号 / D4=A mirror 双侧同步）：
+  ① **推翻**该否决：critic 输入集**不是**不可动契约——训练侧属 AGENTS §0.2 允许域，且根因正在于
+  critic 盲区（value 看不到 extra ⇒ 优势估计与策略不在同一坐标系）。② `OBS_SCHEMA_MAJOR` 4→5，
+  `POLICY_EXTRA_DIM` 9→37、`SCALAR_DIM` 30→40，**现有 0–8 / 0–29 序号与语义一律不动（只追加）**。
+  ③ value 头与策略头吃**同一份** `pf`（腿 A 165 = hidden 128 + extra 37；腿 B 189 = tower 112 +
+  scalars 40 + extra 37；legacy/intent 不变），无用列不预剪、由优化器自行闲置。④ 跨层公式收敛到
+  `src/nn/danger-metrics.ts`（`sampleBasePressure` 4 处生产拷贝 + `nearestPickupDist` 1 处全搬，
+  工具侧 re-export）——单一几何事实源，禁在 `src/nn` 里复制第二份。
+- **备选与否决**：① 只加 extra、不动 scalars —— 否（s6 同源精确 + `baseRing×3` 方位、s38 精确 +
+  方向族转向是**同一份**基地语义，拆开就只剩半边）；② 保持 value 128（只扩策略头）—— 否（critic 与
+  策略不同坐标系，优势估计会系统性错配，是本次要修的根因之一）；③ 拆 β→α→exp1′ 三腿分步上 ——
+  否（用户 r6 指令回单腿：bump 对 RL 腿无一次性重导成本，分腿只多三份账本）；④ 每维单独 ablation ——
+  否（维度 38 个、样本量不允许；改为「维类三行表 + G1/G2/G4 探索类内归因」的预注册门）。
+- **后果**：`OBS_SCHEMA_MAJOR=5` ⇒ 旧语料/旧权重全废（RL 腿现产，无重导成本；BC 存量在 MAJOR=3
+  时已废）；指纹新增末段第四字段 `EXTRA_MIRROR_NEG`（负号域与 swap 域分家，swap 表达不了取负）；
+  `infer.ts` value 头判据由「长度 == 128+9」改为**按档位**（`intentHeads`→137／`spatialTower`→189／
+  `policyExtra`→165／legacy→128），长度不符 throw——旧档位的静默置零只留给无 value 头的 BC 权重。
+  ⚠ 本条目是施工前置：早稿 plan 引用的 `§2026-10-12-obs-v5-critic-superset` **从未落条**（首轮评审 F1），
+  即「推翻既有否决」当时无授权链；本条目与代码同期落盘，此后引用以本 ID 为准。
+—— 全文（冻结规格 §2.1–§2.7 / 实施步骤 S0–S9 / 验收表 A·B / 预注册门 G0·G3·G5 / 评审记录）→
+`plan/obs-v5-vector-gap.plan.md` · 代码落点 → `src/nn/{policy-extra,obs-encoder,infer,danger-metrics}.ts` ·
+`nn-training/common/schema.py` · `nn-training/worker/models/student.py` · `nn-training/worker/scripts/init_spatial_leg.py`

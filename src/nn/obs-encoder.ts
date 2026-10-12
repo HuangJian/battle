@@ -44,18 +44,26 @@ import {
 import { threatOnsetEdge } from './decision-gate'
 import {
   POLICY_EXTRA_DIM,
-  POLICY_EXTRA_NAMES,
+  POLICY_EXTRA_HIT_NONE,
+  POLICY_EXTRA_MIRROR_NEG,
   POLICY_EXTRA_MIRROR_SWAPS,
+  POLICY_EXTRA_NAMES,
   computePolicyExtra,
 } from './policy-extra'
+import { cornerAnchorDist, nearestPickupCenter, sampleBasePressure } from './danger-metrics'
 
 // ---- Canonical dimensions (mirror nn-training/common/schema.py) ----
 export const OBS_CHANNELS = 16
 export const BOARD = GRID // 26
-export const SCALAR_DIM = 30
+// v5（plan/obs-v5-vector-gap.plan.md，2026-10-12）：30 → 40（s30..s39 追加）。
+// **0–29 的序号与语义一字不动**（只追加）——旧权重/旧语料按 MAJOR 被拒收，不靠重编号兼容。
+export const SCALAR_DIM = 40
 // v4（plan/policy-spatial-head.plan.md §4-S0b，2026-10-05）：新增 POLICY_EXTRA(9) 张量
-// （观测流新增一张量 ⇒ 旧代码读不了）。指纹防语义错位、MAJOR 防版本混跑。
-export const OBS_SCHEMA_MAJOR = 4
+// （观测流新增一张量 ⇒ 旧代码读不了）。
+// v5（plan/obs-v5-vector-gap.plan.md）：POLICY_EXTRA 9→37、SCALAR_DIM 30→40，且
+// critic（value 头）改吃与策略头同一份 `pf` ⇒ 旧权重（value 宽 128）与新 schema 同废。
+// 指纹防语义错位、MAJOR 防版本混跑。
+export const OBS_SCHEMA_MAJOR = 5
 
 // ---- Channel index map (plan §1.1 + obs-schema-v3.plan.md v4.0 §3.2) ----
 export const CH = {
@@ -113,7 +121,8 @@ const DIR_INDEX: Record<Direction, number> = { up: 0, down: 1, left: 2, right: 3
 
 // Scalar indices that flip sign under mirrorX (relative-direction x-components).
 // v3 (OBS_SCHEMA_MAJOR=3): 保留 15/18，新增 29（vx 冰面横向速度，s28 vy 不翻）。
-export const SCALAR_X_INDICES = [15, 18, 29]
+// v5 (OBS_SCHEMA_MAJOR=5): 新增 33（pickupRelX；s34 pickupRelY 是 y 分量，不翻）。
+export const SCALAR_X_INDICES = [15, 18, 29, 33]
 
 /**
  * 标量名序列（**逐字镜像** nn-training/common/schema.py::SCALAR_LAYOUT 的第二元）。
@@ -154,6 +163,17 @@ export const SCALAR_NAMES = [
   'emp',
   'iceVy',
   'iceVx',
+  // ---- v5 新增（obs-v5-vector-gap.plan.md §2.3；只追加，不动前 30 个）----
+  'moving',
+  'myBullets',
+  'pickupDist',
+  'pickupRelX',
+  'pickupRelY',
+  'wallDist',
+  'cornerDist',
+  'baseRelY',
+  'basePressure',
+  'nearestEnemyApproach',
 ] as const
 if (SCALAR_NAMES.length !== SCALAR_DIM) {
   throw new Error(`SCALAR_NAMES must have ${SCALAR_DIM} entries, got ${SCALAR_NAMES.length}`)
@@ -174,6 +194,24 @@ export function bulletSpeedBucket(speedPxPerTick: number): number {
 
 // v3 ch15 生成中敌倒计时分母（SimulationEnemies 置 1000ms）。
 export const SPAWN_COUNTDOWN_MS = 1000
+
+// ---- v5 标量分母/上限（plan §2.3）----
+/** s31 `myBullets` 的计数上限（沿 `MAX_ENEMIES_ALIVE` 的计数类归一惯例）。
+ *  ⚠ 实现时按 S7 探针实测 p99 复核：p99 ≤ 2 则改 /2（plan §2.4 预注册）。 */
+export const MY_BULLETS_CAP = 3
+/** s32 `pickupDist` 归一化分母（格；与 `reward_validation` 的 0–50 值域同源）。 */
+export const PICKUP_DIST_NORM = 50
+/** s35 `wallDist` 归一化分母（格；半场宽 26/2 = 13，中心格读数 ≈12/13）。 */
+export const WALL_DIST_NORM = 13
+/** s36 `cornerDist` 归一化分母（格；四角锚点下的切比雪夫距最大值恰为 10）。 */
+export const CORNER_DIST_NORM = 10
+/** s39 `nearestEnemyApproach` 归一化分母（px/tick；见 `computeNearestEnemyApproach` 尾注）。 */
+export const APPROACH_SPEED_NORM = 3
+
+/** s32–s34 的拾取中心缓冲（§14.1）。 */
+const _pickupCenter = new Float64Array(2)
+/** s7 的层级构成复用缓冲（§14.1：去掉了每 tick 的 `[0,0,0,0,0]` 分配）。 */
+const _tierCounts = [0, 0, 0, 0, 0]
 
 const WAVE_HEAT_TICKS = 600 // K = 600 ticks (10s), plan §1.1 ch13
 /** waveHeat 轮转计数复用缓冲（§14.1：v2 为每次 encode 分配 [0,0,0]）。 */
@@ -389,20 +427,24 @@ export class ObsEncoder {
     const FIELD_DIAG = 26 * CELL * 1.5
 
     // slack / baseDeadline via ThreatBudget (reused, plan §1.2).
+    // obs-v5（§14.1/§14.6）：`world.tanks.filter(...)` 的**每 tick 分配**去掉——
+    // `world.allTanks` 取一次传引用（玩家族/基地族/extra 共用同一份），谓词内联。
+    const allTanks = world.allTanks
     let minKillSlack = Infinity
     let minBaseDeadline = Infinity
-    const enemies = world.tanks.filter(
-      (t) => t.alive && t.allegiance === 'enemy' && t.spawnTimer <= 0,
-    )
-    for (const e of enemies) {
+    let enemyCount = 0
+    for (let i = 0; i < allTanks.length; i++) {
+      const e = allTanks[i]
+      if (!e.alive || e.allegiance !== 'enemy' || e.spawnTimer > 0) continue
+      enemyCount++
       const ka = killAssessmentSlack(world, p, e)
       if (ka.killSlack < minKillSlack) minKillSlack = ka.killSlack
       if (ka.baseDeadline < minBaseDeadline) minBaseDeadline = ka.baseDeadline
     }
-    s[0] = enemies.length === 0 ? 1 : clamp01(minKillSlack / 600)
+    s[0] = enemyCount === 0 ? 1 : clamp01(minKillSlack / 600)
     // 幻影基地修复（卡 A0a）：无基地 ⇒ baseDeadline 标量恒 0（"无基地"= 0，
     // 与 ch5 同语义），不写 ThreatBudget 对不存在基地算出的幽灵值。
-    s[1] = !hasBase ? 0 : enemies.length === 0 ? 1 : clamp01(minBaseDeadline / 600)
+    s[1] = !hasBase ? 0 : enemyCount === 0 ? 1 : clamp01(minBaseDeadline / 600)
 
     // lives / level
     s[2] = clamp01(world.lives / 3)
@@ -443,34 +485,52 @@ export class ObsEncoder {
     s[8] = clamp01(world.spawnQueue.length / Math.max(1, world.enemiesTotal))
 
     // tier composition
-    const tierCounts = [0, 0, 0, 0, 0]
-    for (const e of enemies) {
+    const tierCounts = _tierCounts
+    tierCounts[0] = 0
+    tierCounts[1] = 0
+    tierCounts[2] = 0
+    tierCounts[3] = 0
+    tierCounts[4] = 0
+    for (let i = 0; i < allTanks.length; i++) {
+      const e = allTanks[i]
+      if (!e.alive || e.allegiance !== 'enemy' || e.spawnTimer > 0) continue
       const ti = TIER_INDEX[e.aiState?.level ?? 'none'] ?? 0
       tierCounts[ti]++
     }
-    const denom = Math.max(1, enemies.length)
+    const denom = Math.max(1, enemyCount)
     for (let i = 0; i < 5; i++) s[9 + i] = tierCounts[i] / denom
 
     // nearest enemy relative (dist, dx/dist, dy/dist)
-    const pc = p ? { x: p.x + p.w / 2, y: p.y + p.h / 2 } : null
+    // obs-v5：`pc` 的每 tick 对象分配去掉（纯局部标量）；并顺带记录该敌的 live 速度与
+    // 中心（s39 `nearestEnemyApproach` 与 s14 **同一个敌**：同循环、同 hypot 度量、
+    // `strict <` 首个最小者胜 —— 分离成两趟就会在平局拍上选中不同敌）。
+    const hasPc = p !== null
+    const pcx = p ? p.x + p.w / 2 : 0
+    const pcy = p ? p.y + p.h / 2 : 0
     let nd = Infinity
     let ndx = 0
     let ndy = 0
-    if (pc) {
-      for (const e of enemies) {
+    let nvx = 0
+    let nvy = 0
+    if (hasPc) {
+      for (let i = 0; i < allTanks.length; i++) {
+        const e = allTanks[i]
+        if (!e.alive || e.allegiance !== 'enemy' || e.spawnTimer > 0) continue
         const ex = e.x + e.w / 2
         const ey = e.y + e.h / 2
-        const dx = ex - pc.x
-        const dy = ey - pc.y
+        const dx = ex - pcx
+        const dy = ey - pcy
         const d = Math.hypot(dx, dy)
         if (d < nd) {
           nd = d
           ndx = dx
           ndy = dy
+          nvx = e.vx
+          nvy = e.vy
         }
       }
     }
-    if (pc && nd < Infinity) {
+    if (hasPc && nd < Infinity) {
       s[14] = clamp01(nd / FIELD_DIAG)
       s[15] = ndx / nd
       s[16] = ndy / nd
@@ -487,15 +547,17 @@ export class ObsEncoder {
     } else {
       const bcx = BASE_POS.col * CELL + CELL / 2
       const bcy = BASE_POS.row * CELL + CELL / 2
-      if (pc) {
-        const dx = bcx - pc.x
-        const dy = bcy - pc.y
+      if (hasPc) {
+        const dx = bcx - pcx
+        const dy = bcy - pcy
         const d = Math.hypot(dx, dy) || 1
         s[17] = clamp01(d / FIELD_DIAG)
         s[18] = dx / d
+        s[37] = dy / d // v5：补 s18 缺掉的 y 分量（同一 d，同一分支）
       } else {
         s[17] = 0
         s[18] = 0
+        s[37] = 0
       }
     }
 
@@ -530,6 +592,99 @@ export class ObsEncoder {
       s[28] = 0
       s[29] = 0
     }
+
+    // ---- v5 新增 s30..s39（plan/obs-v5-vector-gap.plan.md §2.3 冻结）----
+
+    // s30 「这一拍在推」：顶墙推 vs STOP 的区分位（冰面滑行反例 ⇒ s28/s29 盖不住，保留）。
+    s[30] = p && p.moving ? 1 : 0
+
+    // s31 玩家本人在飞弹数（`allegiance==='player'`；`'ally'` 是友军弹，不算）。
+    // 武器通道 ch11 把玩家弹与友军弹记成同一 owner 位（owner = allegiance==='enemy' ? 0 : 1）
+    // ⇒ 这一列补的是那张通道的 GAP（appendix A 的 S14 根因）。
+    let myBullets = 0
+    const bullets = world.bullets
+    for (let i = 0; i < bullets.length; i++) {
+      const b = bullets[i]
+      if (b.alive && b.allegiance === 'player') myBullets++
+    }
+    s[31] = Math.min(myBullets, MY_BULLETS_CAP) / MY_BULLETS_CAP
+
+    // s32–s34 拾取三连：距离换算 `!alive?0 : raw<0?1.5:raw/50`（玩家死亡取 0，跟随
+    // extra 的「无玩家全 0」纪律）；向量按**像素中心欧氏**（与 s15/s16 同规）。
+    if (p && p.alive) {
+      const raw = nearestPickupCenter(world, _pickupCenter)
+      s[32] = raw < 0 ? POLICY_EXTRA_HIT_NONE : clamp01(raw / PICKUP_DIST_NORM)
+      if (raw >= 0) {
+        const dx = _pickupCenter[0] - (p.x + p.w / 2)
+        const dy = _pickupCenter[1] - (p.y + p.h / 2)
+        const d = Math.hypot(dx, dy)
+        if (d > 0) {
+          s[33] = dx / d
+          s[34] = dy / d
+        }
+      }
+    } else {
+      s[32] = 0
+      s[33] = 0
+      s[34] = 0
+    }
+
+    // s35/s36 空间余量：到边界格距 /13、到角锚点切比雪夫距 /10（复用 `cornerAnchorDist`，
+    // 与 `cornerWeightTick` 同一份四角几何，不给观测侧另建公式）。
+    if (p) {
+      const c = Math.floor((p.x + p.w / 2) / CELL)
+      const r = Math.floor((p.y + p.h / 2) / CELL)
+      const toEdge = Math.min(c, r, BOARD - 1 - c, BOARD - 1 - r)
+      s[35] = clamp01(toEdge / WALL_DIST_NORM)
+      s[36] = clamp01(cornerAnchorDist(c, r) / CORNER_DIST_NORM)
+    }
+
+    // s38 基地压力：`sampleBasePressure(world, enemiesOnly=true)` —— telemetry 那份公式的
+    // **同一实现**，只多一道敌车过滤（否则玩家自己贴家会把读数顶满，plan §2.5）。
+    s[38] = hasBase ? sampleBasePressure(world, true) : 0
+
+    // s39 最近敌人**径向接近速度**（正 = 朝我来）。分母 3 与 clamp 的说明见模块常量。
+    s[39] = computeNearestEnemyApproach(nd, ndx, ndy, nvx, nvy)
+  }
+}
+
+/**
+ * s39 `nearestEnemyApproach`：`−(V·u)/3`，clamp [−1,1]。
+ *
+ * `u = (E−P)/|E−P|`（单位向量，玩家 → 最近敌）；`V = (vx,vy)` 是该敌的 live 速度（px/tick，
+ * 轴锁 ⇒ 只有一轴非零）。敌军速度恒为正朝向自身移动方向 ⇒ 向玩家逼近时 `V·u < 0`，
+ * 取负后为正。
+ *
+ * 分母 3 是**刻意留余量**（不是满量程归一）：各兵种 live 速度 ≤ 1.25 px/tick
+ * （`config/speed.ts`：basic 1.00 / fast 1.20 / 玩家 3★ 1.25），故读数峰值 ≈0.40——
+ * 换难度或未来提速都不会越界。局限（已知，不加维）：只看最近一个、只看径向
+ * （纯绕侧的切向接近读 0，罕见）。
+ */
+function computeNearestEnemyApproach(
+  nd: number,
+  ndx: number,
+  ndy: number,
+  nvx: number,
+  nvy: number,
+): number {
+  if (!isFinite(nd) || nd === 0) return 0
+  const ux = ndx / nd
+  const uy = ndy / nd
+  const v = -(nvx * ux + nvy * uy) / APPROACH_SPEED_NORM
+  return v < -1 ? -1 : v > 1 ? 1 : v
+}
+
+/**
+ * TS 侧 mirrorX 的 **scalars 半边**（plan §3-S3）：对 `SCALAR_X_INDICES` 的 x 分量取负。
+ *
+ * 与 `nn-training/worker/data/mirror.py::mirror_x` 的第 2 个返回值同表同序；extra 半边是
+ * `policy-extra.ts::mirrorSwap`。两者合起来 = python `mirror_x` 的向量部分。
+ * 原地改写（`scalars` 由调用方拥有）。用途 = A4/A4b 双端对账（生产增广在 python）。
+ */
+export function mirrorScalars(scalars: Float32Array): void {
+  for (let i = 0; i < SCALAR_X_INDICES.length; i++) {
+    const k = SCALAR_X_INDICES[i]
+    scalars[k] = -scalars[k]
   }
 }
 
@@ -713,10 +868,13 @@ export const SCHEMA_FINGERPRINT = fnv1a(
     WAVE_HEAT_TICKS,
     // POLICY_EXTRA 身份（v4，一项）：维度 + 语义名序 + 镜像互换对。
     // 与 common/schema.py `_FINGERPRINT_PARTS` 末项逐字同串（双端指纹测试共锚）。
+    // v5：末段由三字段扩为四字段（`dim|names|swaps|neg`）——取负域与互换域分家，
+    // swap 表达不了「x 分量取负」（plan §2.4 冻结）。
     [
       String(POLICY_EXTRA_DIM),
       POLICY_EXTRA_NAMES.join(','),
       POLICY_EXTRA_MIRROR_SWAPS.map(([a, b]) => `${a}:${b}`).join(','),
+      POLICY_EXTRA_MIRROR_NEG.join(','),
     ].join('|'),
   ].join('|'),
 )

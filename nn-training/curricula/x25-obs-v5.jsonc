@@ -1,0 +1,130 @@
+// 课程 x25-obs-v5 —— obs-v5 观测补齐（POLICY_EXTRA 9→37 / SCALARS 30→40 / value 吃 pf）后的
+// 第一条 ladder 腿。规格来源 = plan/obs-v5-vector-gap.plan.md §3-S8（本文件是该 plan 唯一
+// 留给人的交付物；**开课 = 人在控制台点，agent 不开训**）。
+//
+// 立项 → 用户 2026-10-12 指令：把「决策时不可从现有观测量推导」的缺口一次补齐
+//   （贴脸/敌速/卡位/基地感知向量）。症状→新维映射见 plan 附录 A（D08/D05/D04/D03/W07/W10）。
+//
+// ── 单变量声明（**这是本腿的全部意义**）──────────────────────────────────────
+//   奖励：**逐字**照抄 x24-stack7-burst（含 wBurst=6.0；见下方 reward 块，与
+//   `curricula/x24-stack7-burst.jsonc` 同字符串同 params）。
+//   唯一变量 = 观测集（extra 9→37、scalars 30→40）＋ value 头改吃 pf（128→165）。
+//   ⇒ 与 x24 峰可比；任何奖励改动都会毁掉这条声明（要改价请另起课程）。
+//
+// ── 起点（§2.7 迁移）────────────────────────────────────────────────────────
+//   x24 峰 burst-it220（`x24-stack7-burst.it220.20261012-040859.json`，sha16
+//   `caf9e8749fdad70d`，DECISIONS §2026-10-12-goalnn-burst220-crown）经
+//   `worker/scripts/init_spatial_leg.py --policy-extra --allow-partial-init` 转出：
+//     bash tools/githook/nn-py-safe.sh nn-training/worker/scripts/init_spatial_leg.py \
+//       --from nn-training/weights/x24-stack7-burst/x24-stack7-burst.it220.20261012-040859.json \
+//       --to nn-training/weights/x25-obs-v5/x25-obs-v5.it0.json \
+//       --policy-extra --allow-partial-init
+//   列迁移：fc 拷 94 列；move/fire 拷 137 列（hidden 128 + 旧 extra 9）；value 拷前 128 列；
+//   新列 `normal_(0,0.01)`。转出回执（`warmstart_partial`）必须落 meta 再开课。
+//   ⚠ 架构身份的**单一来源 = 权重文件的 arch**（`policyExtra:true` ⇒ 头 165 / value 165）；
+//   课程文件不写任何架构键。缺标志 ⇒ `build_ppo` 静默建旧架构 ⇒ 头与 extra 张量错位。
+//   ⚠ `nn-training/weights/**/*.json` 在 .gitignore ⇒ 起点权重**不入库**，只拷 backup_dir + 记 sha16。
+//
+// ── 门（plan §5 预注册；阈值出处 = 用户指令，非教师天花板）────────────────────
+//   G0 毕业（主）：ladder 通关率点估计 ≥80% 且 CI 下界 ≥75%（800 局起，池外段；
+//                  地板内加 1600）。过 ⇒ 转专场（障碍＋基地，另起 plan）。
+//   G5 总账（次）：通关率/杀敌任一显著正且另一不显著负（非劣护栏，**不得**替代 G0）。
+//   G3 撞墙（主，B 类）：W07 −30%（CI 上界<0）；A6 |r|>0.8 ⇒ 降级为导航能力判据。
+//   ⚠ G0 只证明「空旷场打到 80%」——corr/blk/wallDist 在空旷场退化共线、基地 14 列恒常量，
+//     三语义留专场重验（plan §1.2）。
+//   起点参照（**只作 Δ 的锚，不判门**）：burst-it220 日常 ~0.51 / 拼池 0.567。
+//
+// ── A6 开销探针（开课前）────────────────────────────────────────────────────
+//   ① encode 端到端＋分维计时＋myBullets p99；② 每局 rollout 墙钟 ≤+5%；③ BC 切片计时；
+//   ④ 三组新维 ladder 方差/相关。超线按砍维序砍：myBullets → wallDist → laneE×4 → tti×4；
+//   **禁砍** corr/blk/pickup×3/cornerDist/基地族/s38/s39。砍维 = 改 schema ⇒ 重走 S1 起。
+//
+// ── 训练设置（与 x24 同配方，可比性优先）─────────────────────────────────────
+//   与 x24-stack7-burst 逐键相同（lr/epochs/mb/normalize_ret/gamma/lam/ppo_schedule/
+//   target_transitions/decision_*/iters/max_hours/eval_*），只换 out/traj/backup/起点/rotSeed。
+//   `workers` 是**机器侧死键**（plan/course-workers-removal），保留只为存量兼容。
+//   进自家流：`paired_rotate_seed` **新 V = 20261020**（开腿前冻结，与 x24 的 20261015 不同流
+//   ——本腿是观测换代，不复用旧流；跨腿比较走 eval 段，不走 train 流）。
+//
+// ── 起点纪律（plan §3-S8 收尾）───────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c20-lives1`：stages/difficulty/max_ticks/player）⇒
+//     课程**不重复**这些键；`stages` 也不写（采样关 = level 的 4 个自定义关 = 2000–2003）。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume
+//     （warm-start 态：`model_build.py` 的 warm_start_normalize 会做 trunk/logit 校准）。
+//   · §15.5 新实验：新 out/traj + backup 新目录 + opt fresh，**不**与 x24 账本续跑。
+{
+  "version": 5,
+  "name": "x25-obs-v5",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected - wBurst*damageBursts",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 28.0,
+      "wBurst": 6.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：burst-it220 → v5 腿 A 迁移产物（sha 见头注；转出脚本 = init_spatial_leg.py）──
+  "bc": "nn-training/weights/x25-obs-v5/x25-obs-v5.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令，与 x24 同）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 300,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 49152,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 自家流（开腿前冻结；与 x24 的 20261015 刻意不同流）。
+  "paired_rotate_seed": 20261020,
+
+  "decision_events": false,
+  // K=10（与 x24 同；K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/x25-obs-v5/weights.json",
+  "traj": "tmp/x25-obs-v5",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x25-obs-v5",
+  "backup_prefix": "x25-obs-v5",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

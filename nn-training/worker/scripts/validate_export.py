@@ -29,11 +29,14 @@ import sys
 # v3：形状常量单一事实来源（nn-training/common/schema.py），本脚本 nn-training/scripts/ 下。
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from common.cli import run_main
-from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM
+from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
 
 EXPECT = {
     "obs.npy": ("<u1", (OBS_CHANNELS, BOARD, BOARD)),
     "scalars.npy": ("<f4", (SCALAR_DIM,)),
+    # obs-v5（plan/obs-v5-vector-gap.plan.md §3-S6）：extra.npy 原先不在表里
+    # ⇒ 9 维旧产物能在本脚本眼下过闸（形状判据缺口）。
+    "extra.npy": ("<f4", (POLICY_EXTRA_DIM,)),
     "actions.npy": ("<u1", (2,)),  # v2: [move, fire]，item 头删除
     "masks.npy": ("<u1", (7,)),  # v2: [move5, fire2]
     "conditions.npy": ("<u1", ()),

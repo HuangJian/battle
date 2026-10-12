@@ -64,6 +64,7 @@ import {
   BOARD,
   SCALAR_DIM,
 } from '../../src/nn/obs-encoder'
+import { POLICY_EXTRA_DIM } from '../../src/nn/policy-extra'
 import {
   isArenaId,
   resolveArenaStage,
@@ -92,6 +93,8 @@ import {
   inThreatLane,
   nearestEnemyDistPx,
   playerHpRatio,
+  sampleBasePressure,
+  nearestPickupDist,
   threatLaneExempt,
 } from '../../src/nn/danger-metrics'
 import { createShieldWindow } from '../../src/nn/shield-window'
@@ -347,7 +350,7 @@ export const METRICS_COLUMN_NAMES: readonly string[] = [
  * 的 -1 哨兵同构。真实曼哈顿距离恒 ≥0（同格 = 0），-1 不可能与真实值混淆。
  * 势能侧 Φ 不直接消费哨兵：公式统一 `where(pickupDist < 0, 0, pickupDist)` 归零。
  */
-export const PICKUP_DIST_SENTINEL = -1
+export { PICKUP_DIST_SENTINEL, nearestPickupDist } from '../../src/nn/danger-metrics'
 /** 分敌种计数的固定顺序（与 export-eval-game.ENEMY_KIND_ORDER 同契约）。 */
 export const ENEMY_KIND_ORDER = ['basic', 'fast', 'power', 'armor'] as const
 
@@ -400,7 +403,8 @@ const RL_LOSS_WEIGHTS: Weights = {
 const RL_SCORE_CONFIG: ScoreConfig = { ...V7_SCORE_CONFIG, lossWeights: RL_LOSS_WEIGHTS }
 // 与 simulation-runner 相同的 telemetry 节拍/半径（对齐的前提）
 const TELEMETRY_SAMPLE_TICKS = 6
-const BASE_PRESSURE_RADIUS = 12
+// BASE_PRESSURE_RADIUS / sampleBasePressure / nearestPickupDist 的定义已搬进
+// `src/nn/danger-metrics.ts`（obs-v5 P3：观测侧与 telemetry 必须同一份公式）。
 
 /** 受控输入：实现 InputLike，把采样动作施加到 World（B案：0 = STOP，1..4 = 方向）。 */
 class ScriptedInput {
@@ -630,24 +634,9 @@ export function applySuffixPatches(rows: number[][], patches: ReadonlyArray<Suff
  * - 无存活拾取（含阵亡玩家）⇒ 哨兵（公式侧 `where` 归零，见课程公式）。
  * 热路径（AGENTS §14.1）：零分配 —— 只读迭代 `world.powerUps`，无 filter/map/Set。
  * 防御性 `pu.alive` 检查：dead 拾取可能在 _cleanup 前残留于数组（与 census 同口径）。
+ *
+ * obs-v5：实现已搬进 `src/nn/danger-metrics.ts`（本文件 re-export），此处只留说明。
  */
-export function nearestPickupDist(world: World): number {
-  const p = world.player
-  if (!p || !p.alive) return PICKUP_DIST_SENTINEL
-  const pcol = Math.floor((p.x + p.w / 2) / CELL)
-  const prow = Math.floor((p.y + p.h / 2) / CELL)
-  let best = PICKUP_DIST_SENTINEL // -1 兼作「无存活拾取」记号
-  const pus = world.powerUps
-  for (let i = 0; i < pus.length; i++) {
-    const pu = pus[i]
-    if (!pu.alive) continue
-    const col = Math.floor((pu.x + pu.w / 2) / CELL)
-    const row = Math.floor((pu.y + pu.h / 2) / CELL)
-    const d = Math.abs(col - pcol) + Math.abs(row - prow)
-    if (best < 0 || d < best) best = d
-  }
-  return best
-}
 
 /**
  * 单行 metrics 快照（列序 = 文件头 `METRICS_DIM` 的 SSOT 实现）。
@@ -738,20 +727,6 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     tel.nearSqSum, // 74 nearSqSum（v11：全敌 Σ(3−d)²；拌入 A）
     tel.postHitLaneTicks, // 75 postHitLaneTicks（v11：热线窗停留 tick；拌入 A）
   ]
-}
-
-function sampleBasePressure(world: World): number {
-  if (!world.tileMap.hasBase()) return 0
-  let worst = 0
-  for (const t of world.tanks) {
-    if (!t.alive || t.spawnTimer > 0) continue
-    const col = Math.floor((t.x + t.w / 2) / CELL)
-    const row = Math.floor((t.y + t.h / 2) / CELL)
-    const dist = Math.abs(col - BASE_POS.col) + Math.abs(row - BASE_POS.row)
-    const p = 1 - dist / BASE_PRESSURE_RADIUS
-    if (p > worst) worst = p
-  }
-  return worst > 0 ? Math.min(1, worst) : 0
 }
 
 // 轻量可复现 PRNG（mulberry32），避免依赖外部 RNG API 差异。
@@ -1767,7 +1742,7 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
   }
   const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
   const scalars = new Float32Array(N * SCALAR_DIM)
-  const extra = new Float32Array(N * 9)
+  const extra = new Float32Array(N * POLICY_EXTRA_DIM)
   const aMove = new Uint8Array(N)
   const aFire = new Uint8Array(N)
   const lpMove = new Float32Array(N)
@@ -1779,7 +1754,7 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
   for (let i = 0; i < N; i++) {
     obs.set(d.obs[i], i * OBS_CHANNELS * BOARD * BOARD)
     scalars.set(d.scalars[i], i * SCALAR_DIM)
-    extra.set(d.extra[i], i * 9)
+    extra.set(d.extra[i], i * POLICY_EXTRA_DIM)
     aMove[i] = d.aMove[i]
     aFire[i] = d.aFire[i]
     lpMove[i] = d.lpMove[i]
@@ -1794,7 +1769,7 @@ export function shardNpyEntries(d: ShardData): Array<{ name: string; data: Buffe
   return [
     { name: 'obs.npy', data: npyBytes(obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1') },
     { name: 'scalars.npy', data: npyBytes(scalars, [N, SCALAR_DIM], 'f4') },
-    { name: 'extra.npy', data: npyBytes(extra, [N, 9], 'f4') },
+    { name: 'extra.npy', data: npyBytes(extra, [N, POLICY_EXTRA_DIM], 'f4') },
     { name: 'a_move.npy', data: npyBytes(aMove, [N], 'u1') },
     { name: 'a_fire.npy', data: npyBytes(aFire, [N], 'u1') },
     { name: 'lp_move.npy', data: npyBytes(lpMove, [N], 'f4') },

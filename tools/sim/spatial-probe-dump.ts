@@ -4,8 +4,8 @@
  *
  * 跑指定权重（默认 hu150）在 ladder 关上的**贪心局**，逐决策点存档：
  *   obs.npy    (N,16,26,26) u1   —— ObsEncoder 原样（probe 侧用它批处理主干前向得 bufA）
- *   scalars.npy(N,30) f4
- *   extra.npy  (N,9) f4          —— POLICY_EXTRA（同时也是 S0′-1/2 的标签源）
+ *   scalars.npy(N,SCALAR_DIM) f4
+ *   extra.npy  (N,POLICY_EXTRA_DIM) f4 —— POLICY_EXTRA（同时也是 S0′-1/2 的标签源）
  *   pooled.npy (N,64) f4         —— TS 主干 GAP 输出（与 torch 侧批处理对账用）
  *   index.npy  (N,3) i8          —— [stageId, seed, tick]
  *   games.jsonl                  —— 每局一行（outcome/ticks/kills/nSamples）

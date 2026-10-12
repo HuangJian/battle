@@ -16,6 +16,7 @@
  */
 
 import { OBS_CHANNELS, BOARD, SCALAR_DIM } from './obs-encoder'
+import { POLICY_EXTRA_DIM } from './policy-extra'
 import { noteFeaturesTs, runStudentFeatures } from './conv/conv'
 import { runStudentConvTs, type ConvTsView } from './conv/conv_ts'
 import {
@@ -35,6 +36,8 @@ export const FIRE_DIM = 2
 /** Default conv channel plan (14 -> 32 -> 48 -> 64). Mirrors model.py. */
 export const CONV_CH = [32, 48, 64] as const
 export const HEAD_HIDDEN = 64
+/** intent/goal 档的注入维（上一意图 one-hot(8) + 持续时长(1)）；value 137 = 128 + 本值。 */
+export const INJECT_DIM = 9
 
 /** Common forward surface shared by the BC model and the distilled student. */
 export interface ModelLike {
@@ -308,9 +311,12 @@ export class StudentModel implements ModelLike {
   private moveB: Float32Array
   private fireW: Float32Array
   private fireB: Float32Array
-  // Per-tick value head [128 -> 1] (PPOStudent): consumes `hidden`, used in forward().
-  private valueW: Float32Array
-  private valueB: Float32Array
+  // Per-tick value head: **吃与策略头同一份 `pf`**（obs-v5，plan §2.6）——宽度随档位：
+  // legacy 128（= hidden）/ 腿 A 165（hidden+extra37）/ 腿 B 189（tower+scalars40+extra37）。
+  // 旧稿的「value 只吃 hidden 128」已由 DECISIONS §2026-10-12-goalnn-obs-v5-critic-superset 推翻，
+  // 因为 critic 与策略不在同一坐标系正是本次要修的根因。
+  private valuePfW: Float32Array | null
+  private valuePfB: Float32Array
   // Intent value head [137 -> 1] (IntentNet with_value, P1-5②): consumes the 137-dim
   // hidden+inject commitment vector, used in intentForward(). M8-only; BC/intent
   // checkpoints without a value head leave this null and valueOut reads 0.
@@ -409,22 +415,49 @@ export class StudentModel implements ModelLike {
     // 137-wide value head (128 hidden + 9 inject) — value must see the
     // commitment state, so intentForward() consumes hiddenInject. The
     // per-tick student value head is 128-wide and stays in forward().
+    // ---- value 头的**档位判据**（obs-v5，plan §2.6）----
+    // 旧稿按「长度 == 128 + 9」一刀切识别 137 槽；obs-v5 起 value 宽度随档位不同，
+    // 必须按档位判 + **长度不符即刻 throw**（静默错档会把「载错权重」读成「value 恒 0」）。
+    //   档位 → 期望宽度：spatialTower 189 / policyExtra 165 / intentHeads 137 /
+    //   legacy 128（goal 路径复用 137 槽但**不带** intentHeads 标志 ⇒ 无标志档兼容 137）。
+    //   带标志的档位**严格**判：leg A（165）不再可能被 137 宽的 v4 权重蒙混进 137 槽。
+    //   pfLen = 128 legacy / 165 腿 A / 189 腿 B —— 与策略头同一份输入。
     const vh = params['value_head.weight']
-    if (vh && vh.length === this.headHidden + 9) {
-      this.valueW137 = vh
-      this.valueB137 = params['value_head.bias'] ?? new Float32Array(1)
-      this.valueW = new Float32Array(0)
-      this.valueB = new Float32Array(1)
-    } else {
-      this.valueW137 = null
-      this.valueB137 = null
-      if (vh) {
-        this.valueW = vh
-        this.valueB = params['value_head.bias'] ?? new Float32Array(1)
+    const vb = params['value_head.bias'] ?? new Float32Array(1)
+    const pfLen = this.spatialTower
+      ? SPATIAL_TOWER_FC_OUT + SCALAR_DIM + POLICY_EXTRA_DIM
+      : this.policyExtra
+        ? this.headHidden + POLICY_EXTRA_DIM
+        : this.headHidden
+    const v137Len = this.headHidden + INJECT_DIM
+    const strict = this.spatialTower || this.policyExtra || intentHeads === true
+    const want = this.spatialTower || this.policyExtra ? pfLen : v137Len
+    this.valueW137 = null
+    this.valueB137 = null
+    this.valuePfW = null
+    this.valuePfB = new Float32Array(1)
+    if (vh && (strict ? vh.length === want : vh.length === pfLen || vh.length === v137Len)) {
+      if (vh.length === v137Len) {
+        this.valueW137 = vh
+        this.valueB137 = vb
       } else {
-        this.valueW = new Float32Array(this.headHidden)
-        this.valueB = new Float32Array(1)
+        this.valuePfW = vh
+        this.valuePfB = vb
       }
+    } else if (vh) {
+      throw new Error(
+        `StudentModel: value_head.width=${vh.length} 与本档不符` +
+          `（期望 ${strict ? want : `${pfLen} 或 ${v137Len}`}）` +
+          `—— 架构标志与权重文件不同源，拒绝静默错档`,
+      )
+    } else {
+      // 无 value 头 = 纯 BC 权重（非 RL）。**这是唯一允许静默置零的档位**，
+      // 且必须在构建期响亮一次（plan §2.6）：运行期不再是静默区。
+      console.warn(
+        '[infer] value_head 缺席 ⇒ valueOut 恒 0（BC 权重档）。' +
+          `arch=${JSON.stringify({ policyExtra: this.policyExtra, spatialTower: this.spatialTower })}` +
+          ` 本档期望宽度 ${pfLen}`,
+      )
     }
     // M4 intent heads: intent_head./enemy_head./anchor_head. on the 137-dim
     // (hidden 128 + inject 9) entry space. Loaded only when intentHeads=true
@@ -494,11 +527,8 @@ export class StudentModel implements ModelLike {
     this.hidden = new Float32Array(this.headHidden)
     this.hiddenInject = new Float32Array(this.headHidden + 9)
     // v4：头输入宽度 —— legacy 128 / 腿 A 137 / 腿 B 151（复用缓冲，零分配）。
-    const headInLen = this.spatialTower
-      ? SPATIAL_TOWER_FC_OUT + SCALAR_DIM + 9
-      : this.policyExtra
-        ? this.headHidden + 9
-        : this.headHidden
+    // v5：extra 9→37 ⇒ 腿 A 165 / 腿 B 189（宽度一律由 schema 常量派生，不写字面量）。
+    const headInLen = pfLen
     this.headIn = new Float32Array(headInLen)
     this.spatialZ = new Float32Array(SPATIAL_TOWER_C * sp)
     this.spatialVec = new Float32Array(SPATIAL_TOWER_FEAT)
@@ -547,7 +577,8 @@ export class StudentModel implements ModelLike {
         this.spatialVec,
         this.spatialOut,
       )
-      if (!extra) throw new Error('StudentModel: spatialTower 模型必须喂 extra(9)')
+      if (!extra)
+        throw new Error(`StudentModel: spatialTower 模型必须喂 extra(${POLICY_EXTRA_DIM})`)
       let o = 0
       this.headIn.set(this.spatialOut, o)
       o += SPATIAL_TOWER_FC_OUT
@@ -556,7 +587,7 @@ export class StudentModel implements ModelLike {
       this.headIn.set(extra, o)
       pf = this.headIn
     } else if (this.policyExtra) {
-      if (!extra) throw new Error('StudentModel: policyExtra 模型必须喂 extra(9)')
+      if (!extra) throw new Error(`StudentModel: policyExtra 模型必须喂 extra(${POLICY_EXTRA_DIM})`)
       this.headIn.set(this.hidden)
       this.headIn.set(extra, this.headHidden)
       pf = this.headIn
@@ -564,10 +595,13 @@ export class StudentModel implements ModelLike {
 
     this.linear(pf, this.moveW, this.moveB, this.moveLogits, MOVE_DIM, pf.length)
     this.linear(pf, this.fireW, this.fireB, this.fireLogits, FIRE_DIM, pf.length)
-    if (this.valueW.length === this.headHidden) {
-      this.linear(this.hidden, this.valueW, this.valueB, this.valueOut, 1, this.headHidden)
+    if (this.valuePfW !== null) {
+      // obs-v5：critic 与策略看到**同一份** pf（legacy 档下 pf === hidden，行为不变）。
+      this.linear(pf, this.valuePfW, this.valuePfB, this.valueOut, 1, pf.length)
     } else {
-      this.valueOut[0] = 0 // no per-tick value head (intent model path)
+      // 无 per-tick value 头（intent/goal 档走 intentForward 的 137 槽；纯 BC 权重档
+      // 在构建期已 warn 过一次）。
+      this.valueOut[0] = 0
     }
   }
 

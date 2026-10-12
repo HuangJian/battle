@@ -7,15 +7,18 @@
     `(sb<<3)+(owner<<2)+(d+1)`——hy E6 指出旧重编码 `newd+1+4` 会把 speedBucket
     清零（50% 样本弹速档恒 0）；owner 判定必须 `rest>=5`（`rest>>2` 在 rest=4 误判）。
 
-v4（plan/policy-spatial-head.plan.md §4-S0b 第 5 条）：POLICY_EXTRA(9) 一并镜像——
-左右两对语义维**互换**（威胁计数 [2]↔[3]、命中距离 [6]↔[7]；前/后与包夹度不变）。
+v4（plan/policy-spatial-head.plan.md §4-S0b 第 5 条）：POLICY_EXTRA 一并镜像——左右
+语义维**互换**（威胁计数 [2]↔[3]、命中距离 [6]↔[7]；前/后与包夹度不变）。
+v5（plan/obs-v5-vector-gap.plan.md §2.2/§2.4）：extra 9→37（换对 9 对）＋新增**取负**维
+`EXTRA_MIRROR_NEG=[32]`（`baseThreatRelX` 的 x 分量）——两表必须同时走，否则镜像语料
+与 TS `mirrorSwap` 不同源（A4b）。
 
 本文件把「mirror 是自洽的双射」变成可执行断言：
   1. 全通道 round-trip：`mirror_x(mirror_x(x)) == x`（方向、标量、extra、标签逐位相等）；
   2. 显式方向表：8 方向 × 敌/我子弹 × 弹速档 × (bonus,tier) 全组合；
   3. speedBucket 翻转前后不变（hy E6）；
   4. 编码唯一性（v3.2 A1/A2）：(bonus,tier,d) 全组合与子弹 32 值无碰撞；
-  5. extra 9 维：8 向翻转 + 包夹度不变（v4）。
+  5. extra 37 维：9 对换对 + 取负维取负 + 包夹度不变（v4/v5）。
 """
 
 from __future__ import annotations
@@ -33,6 +36,7 @@ if str(ROOT) not in sys.path:
 from common.schema import (
     CH,
     DIRECTION_CHANNELS,
+    EXTRA_MIRROR_NEG,
     EXTRA_MIRROR_SWAPS,
     POLICY_EXTRA_DIM,
     SCALAR_DIM,
@@ -192,15 +196,35 @@ def test_roundtrip_player_right_bullet_with_speed_is_exact() -> None:
 
 
 def test_extra_mirror_swaps_left_right_pairs() -> None:
-    """8 向翻转：两对左右语义维互换（[2]↔[3]、[6]↔[7]），其余维逐值不变。"""
-    ex = np.arange(1, POLICY_EXTRA_DIM + 1, dtype=np.float32)  # 1..9，全维唯一
+    """8 向翻转：左右语义维**换对**（9 对，表同 TS `POLICY_EXTRA_MIRROR_SWAPS`）；
+    前/后（0/1）与包夹度（8）不变。**取负维**的整向量逐位对账在相邻用例里。
+    """
+    ex = np.arange(1, POLICY_EXTRA_DIM + 1, dtype=np.float32)  # 1..37，全维唯一
+    _o, _s, _mv, out = mirror_x(_mk_obs(BULLET_CH, 1), _mk_scalars(), 0, ex)
+    for a, b in EXTRA_MIRROR_SWAPS:
+        assert out[a] == ex[b] and out[b] == ex[a], f"第 {a}/{b} 维没换对"
+    # 前/后（0/1）与包夹度（8）不变
+    assert out[0] == ex[0] and out[1] == ex[1] and out[8] == ex[8]
+
+
+def test_extra_mirror_negates_relative_x_and_leaves_rest() -> None:
+    """v5：相对向量的 x 分量（`baseThreatRelX` = `EXTRA_MIRROR_NEG`）**取负**，其余维只换对。
+
+    独立重实现（不调 mirror_x 的内部排序）：先按 swap 表换对，再按 NEG 表取负；
+    两张表都没碰到的维必须**逐位不变**——这正是「swaps 表表达不了符号」的守护点
+    （v4 只有 swaps ⇒ 32 号维会被静默漏掉，镜像语料里 `baseThreatRelX` 符号错）。
+    """
+    ex = np.arange(1, POLICY_EXTRA_DIM + 1, dtype=np.float32)
     _o, _s, _mv, out = mirror_x(_mk_obs(BULLET_CH, 1), _mk_scalars(), 0, ex)
     want = ex.copy()
     for a, b in EXTRA_MIRROR_SWAPS:
         want[a], want[b] = ex[b], ex[a]
+    for i in EXTRA_MIRROR_NEG:
+        want[i] = -ex[i]
     np.testing.assert_array_equal(out, want)
-    # 前/后（0/1）与包夹度（8）不变
-    assert out[0] == ex[0] and out[1] == ex[1] and out[8] == ex[8]
+    touched = {i for pair in EXTRA_MIRROR_SWAPS for i in pair} | set(EXTRA_MIRROR_NEG)
+    for i in sorted(set(range(POLICY_EXTRA_DIM)) - touched):
+        assert out[i] == ex[i], f"第 {i} 维不该被镜像动到"
 
 
 def test_extra_mirror_pincer_invariance() -> None:

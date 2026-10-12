@@ -20,7 +20,9 @@ OBS_SHAPE = (OBS_CHANNELS, BOARD, BOARD)
 # rewind stock, frenzyActive, frenzyShotsLeft) — 24 → 19 (plan AI-No-Items
 # Warmstart M2 ②). SCALAR_X_INDICES renumbered [20,23] → [15,18].
 # v3 (OBS_SCHEMA_MAJOR=3): 19 → 30 (s19..s29，obs-schema-v3.plan.md v4.0 §3.3 定稿)。
-SCALAR_DIM = 30
+# v5 (OBS_SCHEMA_MAJOR=5): 30 → 40 (s30..s39，plan/obs-v5-vector-gap.plan.md §2.3 冻结)。
+#   **0–29 序号/语义一字不动（只追加）**。
+SCALAR_DIM = 40
 
 # ---- Action heads (v2: item head REMOVED — AI 不使用主动道具) ----
 MOVE_DIM = 5  # stop/up/down/left/right (B案: index 0 = STOP)
@@ -43,7 +45,10 @@ MOVE_LABEL_SEMANTICS = "stop0"
 # v4 (plan/policy-spatial-head.plan.md §4 Step 2 S0-b, 2026-10-05)：新增
 # POLICY_EXTRA(9) 张量（观测流新增一张量 ⇒ 旧代码读不了 ⇒ MAJOR 是云端快拒门；
 # 指纹只防语义错位、MAJOR 防版本混跑，两道门管不同的事）。
-OBS_SCHEMA_MAJOR = 4
+# v5 (plan/obs-v5-vector-gap.plan.md, 2026-10-12)：POLICY_EXTRA 9→37、SCALAR_DIM 30→40，
+# 且 critic（value 头）改吃与策略头同一份 `pf` ⇒ 旧权重（value 宽 128）与新 schema 同废。
+# DECISIONS.md §2026-10-12-goalnn-obs-v5-critic-superset（推翻「critic 输入集不动」）。
+OBS_SCHEMA_MAJOR = 5
 
 # ---- Channel index map (plan §1.1 + v3: 14/15) ----
 # 全局规则（hy E1 / dsf A2，实施者必读）：
@@ -105,15 +110,25 @@ DIR_FROM_INDEX = ["up", "down", "left", "right"]
 # ---- Scalar layout (plan §1.2 + v3: 30 floats，定稿 obs-schema-v3.plan.md §3.3) ----
 # Indices that flip sign under mirrorX (relative-direction x-components).
 # v3：15/18 保留，29 = vx 冰面横向速度（s28 vy 不翻）。
-SCALAR_X_INDICES = [15, 18, 29]
+# v5：新增 33（pickupRelX；s34 pickupRelY 是 y 分量，不翻）。
+SCALAR_X_INDICES = [15, 18, 29, 33]
 
-# ---- POLICY_EXTRA 布局（v4，plan/policy-spatial-head.plan.md §3.2 冻结）----
-# 9 维方向直方图（**独立张量**，不进 scalars；去给走位/开火头，critic 输入集不动）：
-#   0..3 前/后/左/右 威胁计数（19px 命中带 + 遮挡），min(n,4)/4；
-#   4..7 前/后/左/右 命中距离 clamp01(px/416)，打不到 ⇒ 1.5 哨兵；
-#   8    包夹度 min(左,右,4)/4。
-# 方位 = 玩家相对（前 = 炮口朝向）。dtype = float32（与 scalars 同族，不是 obs 的 u1 打包）。
-POLICY_EXTRA_DIM = 9
+# ---- POLICY_EXTRA 布局（v4 冻结 0–8；v5 追加 9–36，plan/obs-v5-vector-gap.plan.md §2.2）----
+# 37 维方向直方图（**独立张量**，不进 scalars；去给走位/开火头；v5 起 value 头也吃同一份 pf）：
+#   0..3   前/后/左/右 威胁计数（19px 命中带 + 遮挡），min(n,4)/4；
+#   4..7   前/后/左/右 命中距离 clamp01(px/416)，打不到 ⇒ 1.5 哨兵；
+#   8      包夹度 min(左,右,4)/4；
+#   9..12  各向连续可走地形格数 /8（corridorCells）；
+#   13..16 各向最近逼近无遮挡敌弹 TTI /60，无弹 ⇒ 1.5；
+#   17..20 各向同轴（19px）+ 无遮挡敌数（不要求瞄准）min(n,4)/4；
+#   21..24 各向首个阻弹地形距离 px/416，无阻弹/出界 ⇒ 1.5；
+#   25..27 老家上/左/右逼近敌数 min(n,4)/4（**世界坐标**）；
+#   28..30 老家各侧环墙完好比例（上 /4、左/右 /2）；
+#   31     最近威胁敌到基地 TTI /300，无 ⇒ 1.5；
+#   32..33 该威胁敌相对玩家的单位向量（X 在 mirrorX 下取负）；
+#   34..36 各侧最近敌车曼哈顿格距 /12，无敌 ⇒ 1.5。
+# 方位 = 玩家相对（前 = 炮口朝向）；25–36 是世界坐标族。dtype = float32（与 scalars 同族）。
+POLICY_EXTRA_DIM = 37
 POLICY_EXTRA_LAYOUT = [
     (0, "threatFront"),
     (1, "threatBack"),
@@ -124,6 +139,34 @@ POLICY_EXTRA_LAYOUT = [
     (6, "hitDistLeft"),
     (7, "hitDistRight"),
     (8, "pincer"),
+    (9, "corrF"),
+    (10, "corrB"),
+    (11, "corrL"),
+    (12, "corrR"),
+    (13, "ttiF"),
+    (14, "ttiB"),
+    (15, "ttiL"),
+    (16, "ttiR"),
+    (17, "laneEF"),
+    (18, "laneEB"),
+    (19, "laneEL"),
+    (20, "laneER"),
+    (21, "blkF"),
+    (22, "blkB"),
+    (23, "blkL"),
+    (24, "blkR"),
+    (25, "baseThreatU"),
+    (26, "baseThreatL"),
+    (27, "baseThreatR"),
+    (28, "baseRingU"),
+    (29, "baseRingL"),
+    (30, "baseRingR"),
+    (31, "baseThreatTTI"),
+    (32, "baseThreatRelX"),
+    (33, "baseThreatRelY"),
+    (34, "baseEnemyDistU"),
+    (35, "baseEnemyDistL"),
+    (36, "baseEnemyDistR"),
 ]
 assert len(POLICY_EXTRA_LAYOUT) == POLICY_EXTRA_DIM
 assert sorted(i for i, _ in POLICY_EXTRA_LAYOUT) == list(range(POLICY_EXTRA_DIM))
@@ -131,7 +174,21 @@ assert sorted(i for i, _ in POLICY_EXTRA_LAYOUT) == list(range(POLICY_EXTRA_DIM)
 # mirrorX：左右语义维**互换**（计数/距离的镜像不是取负）。
 # ⚠ 命名：plan §4-S0b 所称 `EXTRA_X_INDICES` 即本表——因这些维语义是「左右互换」而非
 # 标量族的「x 分量取负」，实现为 swap 对。TS 侧 POLICY_EXTRA_MIRROR_SWAPS 逐字同表。
-EXTRA_MIRROR_SWAPS = [(2, 3), (6, 7)]
+EXTRA_MIRROR_SWAPS = [
+    (2, 3),  # 左/右威胁计数
+    (6, 7),  # 左/右命中距离
+    (11, 12),  # corr
+    (15, 16),  # tti
+    (19, 20),  # laneE
+    (23, 24),  # blk
+    (26, 27),  # baseThreat
+    (29, 30),  # baseRing
+    (35, 36),  # baseEnemyDist
+]
+# v5：mirrorX 的**取负**维（相对向量的 x 分量）——swap 表达不了符号，故与上表分家；
+# 指纹末段由此从三字段扩为四字段（`dim|names|swaps|neg`）。
+# 对标量族是 `SCALAR_X_INDICES`（同族不同表）。TS 侧 `POLICY_EXTRA_MIRROR_NEG` 逐字同表。
+EXTRA_MIRROR_NEG = [32]
 
 SCALAR_LAYOUT = [
     (0, "slack"),  # min enemy killSlack, normalized 0..1
@@ -165,6 +222,17 @@ SCALAR_LAYOUT = [
     (27, "emp"),  # clamp01(empTimer / EMP_DURATION_MS)
     (28, "iceVy"),  # vy/speed，[-1,1]（不 clamp01，同 s15/16 惯例）
     (29, "iceVx"),  # vx/speed，[-1,1]（x 分量 ⇒ SCALAR_X_INDICES）
+    # ---- v5 新增（plan/obs-v5-vector-gap.plan.md §2.3）----
+    (30, "moving"),  # player.moving ? 1 : 0（顶墙推 vs STOP 的区分位）
+    (31, "myBullets"),  # 玩家本人在飞弹数 min(n,3)/3（allegiance==='player'）
+    (32, "pickupDist"),  # !alive?0 : raw<0?1.5:raw/50（raw = 中心格曼哈顿，哨兵 -1）
+    (33, "pickupRelX"),  # 到最近拾取的 dx/d（无/死亡 = 0；FLIPS on mirrorX）
+    (34, "pickupRelY"),  # 到最近拾取的 dy/d（无/死亡 = 0）
+    (35, "wallDist"),  # 到边界格距 /13
+    (36, "cornerDist"),  # 到四角锚点切比雪夫距 /10
+    (37, "baseRelY"),  # 到基地 dy/d（补 s18 缺的 y；无基地 = 0）
+    (38, "basePressure"),  # sampleBasePressure(enemiesOnly) 同公式；无基地 = 0
+    (39, "nearestEnemyApproach"),  # 最近敌径向接近速度 −(V·u)/3，clamp[-1,1]
 ]
 assert len(SCALAR_LAYOUT) == SCALAR_DIM
 assert sorted(i for i, _ in SCALAR_LAYOUT) == list(range(SCALAR_DIM))
@@ -222,11 +290,13 @@ _FINGERPRINT_PARTS = [
     str(600),  # WAVE_HEAT_TICKS（TS const，plan §1.1 ch13）
     # POLICY_EXTRA 身份（v4，一项）：维度 + 语义名序 + 镜像互换对。
     # TS 侧同串：`[String(POLICY_EXTRA_DIM), POLICY_EXTRA_NAMES.join(","), SWAPS.map([a,b]=>"a:b").join(",")].join("|")`。
+    # v5：末段由三字段扩为四字段（`dim|names|swaps|neg`）——TS 侧同串。
     "|".join(
         [
             str(POLICY_EXTRA_DIM),
             ",".join(name for _, name in POLICY_EXTRA_LAYOUT),
             ",".join(f"{a}:{b}" for a, b in EXTRA_MIRROR_SWAPS),
+            ",".join(str(i) for i in EXTRA_MIRROR_NEG),
         ]
     ),
 ]

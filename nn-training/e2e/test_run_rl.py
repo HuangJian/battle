@@ -48,7 +48,15 @@ import trainer.dispatch as _rdispatch  # monkeypatch 目标：run_local_rollout 
 from biz.reward_library import METRICS_DIM  # fake shard 与落盘同维（metric v3）
 from common.cli import run_main
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
-from common.schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
+from common.schema import (
+    BOARD,
+    FIRE_DIM,
+    MASK_DIM,
+    MOVE_DIM,
+    OBS_CHANNELS,
+    POLICY_EXTRA_DIM,
+    SCALAR_DIM,
+)
 from tests.subproc_util import run_utf8
 from trainer import run_rl
 from trainer.stream import (
@@ -85,17 +93,19 @@ def _fail_loudly():
 
 
 def test_mirror_scalar_lockstep() -> None:
-    """M2 镜像索引锁步：SCALAR_X_INDICES = [15,18,29]（v2 重编号 [20,23]→[15,18]，
-    之后追加 29=iceVx，见 common/schema.py:94/127）——mirrorX 前后 (obs, scalars, move) 自洽；
-    旧索引 [20,23] 必须不再翻转（防回归）。"""
+    """M2 镜像索引锁步：SCALAR_X_INDICES = [15,18,29,33]（v2 重编号 [20,23]→[15,18]，
+    之后追加 29=iceVx；obs-v5 追加 33=pickupRelX，plan/obs-v5-vector-gap.plan.md §2.3）
+    ——mirrorX 前后 (obs, scalars, move) 自洽；旧索引 [20,23] 必须不再翻转（防回归）。"""
     from common.schema import SCALAR_DIM, SCALAR_X_INDICES
     from worker.data.mirror import mirror_x
 
     # 2026-09-20：本行原写死 [15,18]，schema 追加 29=iceVx 后已过期 —— 因 check() 只聚合
     # 不抛错，它**静默 FAIL 了很长一段时间**（由模块级 _fail_loudly 揭出）。
+    # 2026-10-12（obs-v5）：同一坑再验证一次 —— 追加 33=pickupRelX 后本行必须同步（本次由
+    # nn-python-gate 全量 pytest 抓出，e2e/ 不在平时的子集里）。
     check(
-        SCALAR_X_INDICES == [15, 18, 29],
-        f"SCALAR_X_INDICES == [15,18,29] (got {SCALAR_X_INDICES})",
+        SCALAR_X_INDICES == [15, 18, 29, 33],
+        f"SCALAR_X_INDICES == [15,18,29,33] (got {SCALAR_X_INDICES})",
     )
     n = 26
     # mirror_x expects (C, H, W) — the trailing (1,) batch dim was a historic typo.
@@ -107,6 +117,7 @@ def test_mirror_scalar_lockstep() -> None:
     sc[15] = 0.5  # nearestEnemyRelX → 翻转
     sc[18] = -0.25  # nearestBaseRelX → 翻转
     sc[29] = 0.3  # iceVx（x 分量）→ 翻转
+    sc[33] = -0.4  # pickupRelX（v5 追加的 x 分量）→ 翻转
     sc[20] = 0.7  # 旧索引必须已是死位（不再参与翻转）
     sc[23] = 0.7
     obs2, sc2, mv2, ex2 = mirror_x(obs, sc, 3)  # left (3) → right (4)
@@ -115,6 +126,7 @@ def test_mirror_scalar_lockstep() -> None:
     check(abs(sc2[15] - (-0.5)) < 1e-6, "scalar[15] flips sign under mirrorX")
     check(abs(sc2[18] - 0.25) < 1e-6, "scalar[18] flips sign under mirrorX")
     check(abs(sc2[29] - (-0.3)) < 1e-6, "scalar[29] (iceVx) flips sign under mirrorX")
+    check(abs(sc2[33] - 0.4) < 1e-6, "scalar[33] (pickupRelX) flips sign under mirrorX")
     check(abs(sc2[20] - 0.7) < 1e-6, "legacy scalar[20] is now a dead slot (no flip)")
     check(abs(sc2[23] - 0.7) < 1e-6, "legacy scalar[23] is now a dead slot (no flip)")
 
@@ -246,7 +258,7 @@ def _synth_payload(n: int = 30) -> dict[str, np.ndarray]:
         "obs": rng.integers(0, 256, (n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8),
         "scalars": f32((n, SCALAR_DIM)),
         # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9)。
-        "extra": f32((n, 9)),
+        "extra": f32((n, POLICY_EXTRA_DIM)),
         "a_move": i64(MOVE_DIM),
         "a_fire": i64(FIRE_DIM),
         "lp_move": -np.abs(f32(n)) - 0.05,
@@ -499,10 +511,10 @@ def _stub_local_rollout(
     si, sd = task
     out_dir = Path(traj_dir) / f"w{idx}" / f"rl_s{si}_seed{sd}"
     out_dir.mkdir(parents=True, exist_ok=True)
-    # 写最小 obs.npy（30 steps × 14 channels × 26×26 零数组）和 manifest.json
+    # 写最小 obs.npy（30 steps × OBS_CHANNELS × 26×26 零数组）和 manifest.json
     np.save(str(out_dir / "obs.npy"), np.zeros((30, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8))
     np.save(str(out_dir / "scalars.npy"), np.zeros((30, SCALAR_DIM), dtype=np.float32))
-    np.save(str(out_dir / "extra.npy"), np.zeros((30, 9), dtype=np.float32))  # v4
+    np.save(str(out_dir / "extra.npy"), np.zeros((30, POLICY_EXTRA_DIM), dtype=np.float32))
     for arr_name in ("a_move", "a_fire", "lp_move", "lp_fire", "value", "done", "mask"):
         arr = _synth_payload(30).get(arr_name)
         if arr is not None:

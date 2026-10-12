@@ -50,7 +50,15 @@ if str(ROOT) not in sys.path:
 import common.distribution
 from biz.reward_library import METRICS_DIM
 from common.platform_utils import rmtree_best_effort
-from common.schema import BOARD, FIRE_DIM, MASK_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
+from common.schema import (
+    BOARD,
+    FIRE_DIM,
+    MASK_DIM,
+    MOVE_DIM,
+    OBS_CHANNELS,
+    POLICY_EXTRA_DIM,
+    SCALAR_DIM,
+)
 from trainer.loop_core import TrainingLoop
 
 #: 假节点的 ping 门（与 dispatch.bun_version / compute_code_hash 同源）。
@@ -66,8 +74,8 @@ def _synth_payload(n: int) -> dict[str, np.ndarray]:
     return {
         "obs": rng.integers(0, 256, (n, OBS_CHANNELS, BOARD, BOARD), dtype=np.uint8),
         "scalars": rng.standard_normal((n, SCALAR_DIM)).astype(np.float32),
-        # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) 随样本走。
-        "extra": rng.random((n, 9)).astype(np.float32),
+        # v5（plan/obs-v5-vector-gap.plan.md）：POLICY_EXTRA(37) 随样本走。
+        "extra": rng.random((n, POLICY_EXTRA_DIM)).astype(np.float32),
         "a_move": rng.integers(0, MOVE_DIM, n).astype(np.int64),
         "a_fire": rng.integers(0, FIRE_DIM, n).astype(np.int64),
         "lp_move": -np.abs(rng.standard_normal(n)).astype(np.float32) - 0.05,

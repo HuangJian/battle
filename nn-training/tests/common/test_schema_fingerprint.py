@@ -17,6 +17,7 @@ import numpy as np
 
 from common.schema import (
     BOARD,
+    EXTRA_MIRROR_NEG,
     EXTRA_MIRROR_SWAPS,
     OBS_CHANNELS,
     OBS_SCHEMA_MAJOR,
@@ -33,7 +34,8 @@ from common.schema import (
 BOARD_ANCHOR = 26
 
 # 必须与 src/nn/obs-encoder.ts::SCHEMA_FINGERPRINT 逐字相同（两边单测共锚）。
-FINGERPRINT = "9bd651e3"
+# v5（plan/obs-v5-vector-gap.plan.md）：MAJOR 4→5、40 scalars、37 extra、指纹末段四字段。
+FINGERPRINT = "db55afb2"
 
 # 必须与 src/nn/obs-encoder.ts::SCALAR_NAMES 逐字同序（双端共锚）。只钉维度挡不住
 # 「交换两个标量含义」——语义序列进指纹后这类漏同步才现形。
@@ -68,6 +70,16 @@ SCALAR_LAYOUT_NAMES = [
     "emp",
     "iceVy",
     "iceVx",
+    "moving",
+    "myBullets",
+    "pickupDist",
+    "pickupRelX",
+    "pickupRelY",
+    "wallDist",
+    "cornerDist",
+    "baseRelY",
+    "basePressure",
+    "nearestEnemyApproach",
 ]
 
 
@@ -76,12 +88,12 @@ def test_fingerprint_matches_ts_anchor() -> None:
 
 
 def test_fingerprint_companion_constants() -> None:
-    """配套常量与指纹同版（v4：16ch / 30sc / X=[15,18,29] / extra 9）。"""
-    assert OBS_SCHEMA_MAJOR == 4
+    """配套常量与指纹同版（v5：16ch / 40sc / X=[15,18,29,33] / extra 37）。"""
+    assert OBS_SCHEMA_MAJOR == 5
     assert OBS_CHANNELS == 16
-    assert SCALAR_DIM == 30
-    assert list(SCALAR_X_INDICES) == [15, 18, 29]
-    assert POLICY_EXTRA_DIM == 9
+    assert SCALAR_DIM == 40
+    assert list(SCALAR_X_INDICES) == [15, 18, 29, 33]
+    assert POLICY_EXTRA_DIM == 37
 
 
 def test_policy_extra_layout_names_match_ts_anchor() -> None:
@@ -99,8 +111,49 @@ def test_policy_extra_layout_names_match_ts_anchor() -> None:
         "hitDistLeft",
         "hitDistRight",
         "pincer",
+        "corrF",
+        "corrB",
+        "corrL",
+        "corrR",
+        "ttiF",
+        "ttiB",
+        "ttiL",
+        "ttiR",
+        "laneEF",
+        "laneEB",
+        "laneEL",
+        "laneER",
+        "blkF",
+        "blkB",
+        "blkL",
+        "blkR",
+        "baseThreatU",
+        "baseThreatL",
+        "baseThreatR",
+        "baseRingU",
+        "baseRingL",
+        "baseRingR",
+        "baseThreatTTI",
+        "baseThreatRelX",
+        "baseThreatRelY",
+        "baseEnemyDistU",
+        "baseEnemyDistL",
+        "baseEnemyDistR",
     ]
-    assert [tuple(p) for p in EXTRA_MIRROR_SWAPS] == [(2, 3), (6, 7)]
+    # v5：swap 九对（计数/距离族 + 世界坐标的基地 L/R 族）。
+    assert [tuple(p) for p in EXTRA_MIRROR_SWAPS] == [
+        (2, 3),
+        (6, 7),
+        (11, 12),
+        (15, 16),
+        (19, 20),
+        (23, 24),
+        (26, 27),
+        (29, 30),
+        (35, 36),
+    ]
+    # v5：取负域与互换域分家（x 分量取负不是 exchange）。
+    assert list(EXTRA_MIRROR_NEG) == [32]
 
 
 def test_scalar_layout_names_match_ts_anchor() -> None:

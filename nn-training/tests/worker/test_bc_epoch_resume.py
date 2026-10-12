@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from common.schema import OBS_CHANNELS, SCALAR_DIM
+from common.schema import OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
 
 ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
@@ -45,8 +45,8 @@ def _make_corpus(tmp_path: Path, n: int = 16) -> Path:
     arrays: dict[str, np.ndarray] = {
         "obs": rng.integers(0, 256, (n, OBS_CHANNELS, 26, 26), dtype=np.uint8),
         "scalars": rng.standard_normal((n, SCALAR_DIM)).astype(np.float32),
-        # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) 随样本走。
-        "extra": rng.random((n, 9)).astype(np.float32),
+        # v5（plan/obs-v5-vector-gap.plan.md）：POLICY_EXTRA(37) 随样本走。
+        "extra": rng.random((n, POLICY_EXTRA_DIM)).astype(np.float32),
         # move ∈ 0..4；fire ∈ 0..1（FIRE_DIM=2——随机 0..4 会让 masked CE 目标越界）
         "actions": np.stack(
             [rng.integers(0, 5, n), rng.integers(0, 2, n)], axis=1

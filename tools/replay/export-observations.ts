@@ -50,6 +50,7 @@ import {
   BOARD,
   SCALAR_DIM,
 } from '../../src/nn/obs-encoder'
+import { POLICY_EXTRA_DIM } from '../../src/nn/policy-extra'
 import { writeNpy } from '../../src/nn/npy'
 import { mkdirSync, writeFileSync, readdirSync, readFileSync } from 'fs'
 import { basename } from 'path'
@@ -409,7 +410,7 @@ export function flushShard(
   // 字面量 14，编码器升 v3 后每局 obs.set 越界；scalars 早已是 SCALAR_DIM）。
   const obs = new Uint8Array(N * OBS_CHANNELS * BOARD * BOARD)
   const scalars = new Float32Array(N * SCALAR_DIM)
-  const extra = new Float32Array(N * 9)
+  const extra = new Float32Array(N * POLICY_EXTRA_DIM)
   const actions = new Uint8Array(N * 2)
   const masks = new Uint8Array(N * MASK_DIM)
   const conditions = new Uint8Array(N)
@@ -418,7 +419,7 @@ export function flushShard(
   for (let i = 0; i < N; i++) {
     obs.set(acc.obs[i], i * OBS_CHANNELS * BOARD * BOARD)
     scalars.set(acc.scalars[i], i * SCALAR_DIM)
-    extra.set(acc.extra[i], i * 9)
+    extra.set(acc.extra[i], i * POLICY_EXTRA_DIM)
     actions[i * 2] = acc.actions[i * 2]
     actions[i * 2 + 1] = acc.actions[i * 2 + 1]
     for (let j = 0; j < MASK_DIM; j++) masks[i * MASK_DIM + j] = acc.masks[i * MASK_DIM + j]
@@ -437,7 +438,7 @@ export function flushShard(
   mkdirSync(dir, { recursive: true })
   writeNpy(`${dir}/obs.npy`, obs, [N, OBS_CHANNELS, BOARD, BOARD], 'u1')
   writeNpy(`${dir}/scalars.npy`, scalars, [N, SCALAR_DIM], 'f4')
-  writeNpy(`${dir}/extra.npy`, extra, [N, 9], 'f4')
+  writeNpy(`${dir}/extra.npy`, extra, [N, POLICY_EXTRA_DIM], 'f4')
   writeNpy(`${dir}/actions.npy`, actions, [N, 2], 'u1')
   writeNpy(`${dir}/masks.npy`, masks, [N, MASK_DIM], 'u1')
   writeNpy(`${dir}/conditions.npy`, conditions, [N], 'u1')

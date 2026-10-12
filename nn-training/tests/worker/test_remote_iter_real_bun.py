@@ -11,9 +11,12 @@ shard 与本地 bun rollout 逐字节一致（data_fp 相等是必要不充分�
 自身的确定性，那由本仓既有的 determinism 纪律守着）。
 
 ⚠ 为什么不在 `e2e/` 下：那一层的契约是 **hermetic**（`e2e/conftest.py` 明写「不需要
-bun / 真节点 / weights fixture」）——本文件需要真 bun + 真权重，放进 e2e 会让
-「e2e 是自足层」这个说法失真。故留在 tests/ 层并显式 skip（缺 bun / 缺权重即跳过，
-CI 上不会红）。
+bun / 真节点 / weights fixture」）——本文件需要真 bun，放进 e2e 会让「e2e 是自足层」
+这个说法失真。故留在 tests/ 层并显式 skip（缺 bun 即跳过，CI 上不会红）。
+
+权重来自**仓内** v5 腿 A golden fixture（`tests/fixtures/student-golden-extra.json`）：
+不再去 `weights/` 找本地权重——那是 .gitignore 的本机状态（且 obs-v5 之后 v4 及更早
+档位的权重会被 `infer.ts` 的档位判据**响亮拒收**，拿它当夹具 = 换台机器就整文件失败）。
 """
 
 from __future__ import annotations
@@ -47,30 +50,34 @@ from worker.iter_rollout import run_iter_rollout
 REPO_ROOT = ROOT.parent
 #: 每局 tick 上限——验收只要「采到 shard 并逐位可比」，不要长局（本文件要秒级跑完）。
 MAX_TICKS = 120
-#: 优先用的权重（形状最新、最可能被 exporter 直接吃下）；找不到就跳过本文件。
-_WEIGHT_CANDIDATES = (
-    "weights/bc-c4-v3/bc-c4-v3.it1.20260914-103830.json",
-    "weights/bc-c4/bc-c4.it1.20260913-161311.json",
-)
+#: 权重夹具：仓内 v5 腿 A golden（h64/d8，policy_extra=true，value [1,165]）。
+GOLDEN = REPO_ROOT / "tests/fixtures/student-golden-extra.json"
 
 
-def _find_weights() -> Path | None:
-    for rel in _WEIGHT_CANDIDATES:
-        p = ROOT / rel
-        if p.exists():
-            return p
-    # 兜底：weights/ 下任意一个 json（版本不明也无妨——两边用的是同一份）
-    for p in sorted((ROOT / "weights").glob("*/*.json")):
-        return p
-    return None
+def _write_weights(dst: Path) -> None:
+    """把 golden fixture 写成 exporter 吃的 weights JSON（arch 由 fixture 头部派生）。"""
+    g = json.loads(GOLDEN.read_text(encoding="utf-8"))
+    dst.write_text(
+        json.dumps(
+            {
+                "arch": {
+                    "kind": "student",
+                    "h": g["h"],
+                    "d": g["d"],
+                    "policyExtra": True,
+                },
+                "params": g["params"],
+            }
+        ),
+        encoding="utf-8",
+    )
 
 
 BUN = shutil.which("bun")
-WEIGHTS = _find_weights()
 
 pytestmark = pytest.mark.skipif(
-    BUN is None or WEIGHTS is None,
-    reason="需要真 bun 与一份真实权重（本仓 weights/*/；缺失即跳过）",
+    BUN is None or not GOLDEN.exists(),
+    reason="需要真 bun 与仓内 golden 权重夹具（tests/fixtures/student-golden-extra.json）",
 )
 
 
@@ -121,7 +128,6 @@ def _shard_files(d: Path) -> dict[str, bytes]:
 
 
 def test_node_runner_shards_byte_identical_to_direct_run(tmp_path: Path) -> None:
-    assert WEIGHTS is not None
     spec = validate_rollout_spec(
         build_iter_spec(_rollout_args(), [(0, 0)], wver="WVER" * 16, workers=1, hub_bun=str(BUN))
     )
@@ -149,7 +155,7 @@ def test_node_runner_shards_byte_identical_to_direct_run(tmp_path: Path) -> None
     dir_b = tmp_path / "viarunner"
     for d in (dir_a, dir_b):
         d.mkdir(parents=True)
-        shutil.copyfile(WEIGHTS, d / "init_weights.json")
+        _write_weights(d / "init_weights.json")
 
     # A：直跑（等价于「本机 rollout」）——cwd = TS 根，job 侧路径绝化（与节点侧同一规则）
     # run_utf8：裸 text=True 在 zh-CN Windows 按 cp936 解码 bun 的 UTF-8 stdout，

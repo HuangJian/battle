@@ -23,6 +23,7 @@ import numpy as np
 import numpy.typing as npt
 
 from common.log import log
+from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
 from worker.ppo._episode import episode_from_shard
 
 # numpy 的 RandomState.get_state() 存根把 legacy 默认标成 False（→ dict），但 numpy 2.x
@@ -66,16 +67,31 @@ def discover_shards(root: str, need: Sequence[str]) -> list[str]:
     return sorted(out)
 
 def load_shard_fields(
-    dirpath: str, spec: dict[str, tuple[str, npt.DTypeLike]]
+    dirpath: str,
+    spec: dict[str, tuple[str, npt.DTypeLike]],
+    shapes: dict[str, tuple[int, ...]] | None = None,
 ) -> dict[str, np.ndarray]:
     """Load a shard by field spec {key: (filename, dtype)} with zero-copy astype.
 
     `dtype` 用 np.uint8/np.float32/np.int64；astype(..., copy=False) 在 dtype 已
     符合时零拷贝（obs 每轮 ~550MB，无谓拷贝纯烧内存带宽）。
+
+    `shapes`（obs-v5 A9）：每字段的**非批次维**期望形状（首维 = N，随 shard 变）——
+    只查 dtype 挡不住「旧 schema 语料混装」：9 维 `extra.npy` 会被当 37 维静默读进来，
+    错位到训练完才发作。不符即 `ValueError`（响亮，不静默）。
     """
     out: dict[str, np.ndarray] = {}
     for key, (fname, dtype) in spec.items():
-        out[key] = np.load(os.path.join(dirpath, fname)).astype(dtype, copy=False)
+        arr = np.load(os.path.join(dirpath, fname)).astype(dtype, copy=False)
+        exp = (shapes or {}).get(key)
+        if exp is not None and tuple(arr.shape[1:]) != tuple(exp):
+            got = tuple(arr.shape[1:])
+            raise ValueError(
+                f"{fname} 形状 {tuple(arr.shape)}（非批次维 {got}）与 schema 不符"
+                f"（期望 {tuple(exp)}；{dirpath}）——旧 schema 语料/旧导出器产物混装，"
+                "禁止静默错位（obs-v5 A9 形状判据）"
+            )
+        out[key] = arr
     return out
 
 # ---------------- checkpoint (epoch-granularity, RNG-preserving) ----------------
@@ -616,10 +632,20 @@ LAM = 0.95
 # plan/rl-training-config.md §4.2：per-tick shard 的 reward 由 TS 落盘改为 Python
 # 公式引擎计算——TS 只落 `metrics.npy`（[N+1,21] f8：N 个决策快照 + 1 个终局快照），
 # 加载器读 holder（biz.reward_context）的 RewardFn 按配置公式算 reward。
+#: RL shard 的**schema 形状判据**（obs-v5 A9）：只列与 schema 同源的张量。
+#: 首维 = N（随 shard 变）⇒ 只比非批次维。旧 MAJOR 的产物在这里被响亮拒收，
+#: 而不是等到 forward 报一个看不懂的维度错（或更糟：静默错位）。
+_RL_SHARD_SHAPES: dict[str, tuple[int, ...]] = {
+    "obs": (OBS_CHANNELS, BOARD, BOARD),
+    "scalars": (SCALAR_DIM,),
+    "extra": (POLICY_EXTRA_DIM,),
+}
+
 _RL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
     "obs": ("obs.npy", np.uint8),
     "scalars": ("scalars.npy", np.float32),
-    # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA(9) f4。
+    # v4（plan/policy-spatial-head.plan.md S0-b）：POLICY_EXTRA f4；
+    # obs-v5：9 → 37（形状判据 `_RL_SHARD_SHAPES` 盯着）。
     "extra": ("extra.npy", np.float32),
     "a_move": ("a_move.npy", np.int64),
     "a_fire": ("a_fire.npy", np.int64),
@@ -642,7 +668,7 @@ def load_shard(dirpath: str) -> dict[str, np.ndarray]:
     无 holder（reward_fn None）时**响亮报错**——旧 reward.npy 直读路径已随
     TS 落盘改版删除（历史 run 需在公式引擎下重采，plan §4.2 / §12-2）。
     """
-    d = load_shard_fields(dirpath, _RL_SHARD_SPEC)
+    d = load_shard_fields(dirpath, _RL_SHARD_SPEC, _RL_SHARD_SHAPES)
     metrics = d.pop("metrics")  # [N+1,21]
     n_obs = int(d["obs"].shape[0])
     if metrics.shape[0] != n_obs + 1:

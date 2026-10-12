@@ -23,7 +23,13 @@ from __future__ import annotations
 
 import numpy as np
 
-from common.schema import CH, DIRECTION_CHANNELS, EXTRA_MIRROR_SWAPS, SCALAR_X_INDICES
+from common.schema import (
+    CH,
+    DIRECTION_CHANNELS,
+    EXTRA_MIRROR_NEG,
+    EXTRA_MIRROR_SWAPS,
+    SCALAR_X_INDICES,
+)
 
 _MOVE_FLIP = np.array([0, 1, 2, 4, 3], dtype=np.int64)  # none,up,down,left<->right
 
@@ -101,9 +107,12 @@ def mirror_x(
 ):
     """Return (obs', scalars', move_label', extra') for a left-right reflection.
 
-    v4（plan/policy-spatial-head.plan.md §4-S0b）：`extra`（POLICY_EXTRA(9)）一并镜像——
-    **左右两对语义维互换**（前/后与包夹度不变）：威胁计数 [2]↔[3]、命中距离 [6]↔[7]。
+    v4（plan/policy-spatial-head.plan.md §4-S0b）：`extra`（POLICY_EXTRA）一并镜像——
+    **左右语义维互换**（前/后与包夹度不变）：威胁计数 [2]↔[3]、命中距离 [6]↔[7]……
     计数/距离的镜像是互换而非取负（与 SCALAR_X_INDICES 的符号取反不同族）。
+    v5（plan/obs-v5-vector-gap.plan.md §2.2/§2.4）：**相对向量的 x 分量还要取负**
+    （`EXTRA_MIRROR_NEG = [32]` = `baseThreatRelX`）——swap 表表达不了符号，两表必须**都**走；
+    漏掉 NEG 会让镜像语料的 `baseThreatRelX` 符号错，且与 TS `mirrorSwap` 不同源（A4b）。
     `extra=None`（旧调用/无 extra 语料）⇒ 第 4 返回值同为 None。
     """
     obs = obs.copy()
@@ -118,4 +127,7 @@ def mirror_x(
         extra_out = np.array(extra, copy=True)
         for a, b in EXTRA_MIRROR_SWAPS:
             extra_out[a], extra_out[b] = extra[b], extra[a]
+        # 顺序无关（NEG 维不在 swap 表里）：取负写在换对之后只是保持与 TS mirrorSwap 同序。
+        for i in EXTRA_MIRROR_NEG:
+            extra_out[i] = -extra_out[i]
     return obs, scalars, int(_MOVE_FLIP[move_label]), extra_out

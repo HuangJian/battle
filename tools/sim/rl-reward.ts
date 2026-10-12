@@ -19,7 +19,7 @@ import {
   type DimensionKey,
   type Weights,
 } from '../eval/godai-score'
-import { BASE_POS, CELL } from '../../src/constants'
+import { BASE_POS } from '../../src/constants'
 import type { World } from '../../src/game/World'
 
 export const REWARD_SCALE = 10 // 与 export-rl-rollout 相同
@@ -38,7 +38,10 @@ export const RL_LOSS_WEIGHTS: Weights = {
 }
 
 export const TELEMETRY_SAMPLE_TICKS = 6
-export const BASE_PRESSURE_RADIUS = 12 // 与 export-rl-rollout 同半径
+// obs-v5（plan/obs-v5-vector-gap.plan.md §2.5 / P3）：`BASE_PRESSURE_RADIUS` 与
+// `sampleBasePressure` 的定义**搬进** `src/nn/danger-metrics.ts`（观测侧要同一份公式），
+// 此处只 re-export ⇒ 既有 import 点（export-godai-labels / export-observations）不动。
+export { BASE_PRESSURE_RADIUS, sampleBasePressure } from '../../src/nn/danger-metrics'
 
 export interface PhiCounters {
   enemyTotal: number
@@ -83,20 +86,6 @@ export function countBaseWall(world: World): number {
     if (isSolid(world, bc + 2, row)) n++
   }
   return n
-}
-
-export function sampleBasePressure(world: World): number {
-  if (!world.tileMap.hasBase()) return 0
-  let worst = 0
-  for (const t of world.tanks) {
-    if (!t.alive || t.spawnTimer > 0) continue
-    const col = Math.floor((t.x + t.w / 2) / CELL)
-    const row = Math.floor((t.y + t.h / 2) / CELL)
-    const dist = Math.abs(col - BASE_POS.col) + Math.abs(row - BASE_POS.row)
-    const p = 1 - dist / BASE_PRESSURE_RADIUS
-    if (p > worst) worst = p
-  }
-  return worst > 0 ? Math.min(1, worst) : 0
 }
 
 /** 当前计数器下 losses 带部分质量（权重重分配规则镜像 godai-score.weightedQuality）。 */
