@@ -1,5 +1,9 @@
 """tests/test_lock_reentrancy.py — 静态守卫：**非可重入锁的临界区不许可达同一把锁**（2026-10-09）。
 
+⚠ 本用例的**耗时预算**（不是判据）有过一次假红，改前先读：`test_no_rerun_...` 上方的注释 +
+`docs/nn/engineering.md` §77（纯 CPU 扫描不得配比 per-test 口径更紧的 `time_budget` ——
+2026-10-12 就是被 15s 预算判了一次假红；同一条铁律已写进 `nn-training/conftest.py` 头部）。
+
 ## 背景（一次真事故，docs/nn/remote-transport.md §74）
 
 `remote/deliver_proc.py::DelivererProcess._append` 持 `threading.Lock()` 调 `_ensure_alive()`，
@@ -751,7 +755,22 @@ def test_checker_sees_mixin_locks_across_files() -> None:
     assert len(both.problems) == 1, f"跨组同名锁被当成同一把（错杀）：{both.problems}"
 
 
-@pytest.mark.time_budget(15)  # 全仓静态解析（612 模块 / 209 个锁点）：单跑 2.6s，门禁 8 worker 下 ~5s
+# 不设 `time_budget` 标记（2026-10-12 撤销原来的 15s）——本用例是**纯 CPU 静态扫描**，
+# 而 per-test 预算的口径（`nn-training/conftest.py`：>5s 警告 / **>30s 报错**）是专为
+# 「被本机负载抢 CPU 的正常用例」留的余量（2026-09-26 由 10s 抬到 30s 就是这个理由）⇒
+# 15s 比该口径**更紧**，负载一高就假红。
+#   2026-10-12 事故（并发负载红）：40 个满载 burner ⇒ 本用例 **16.26s > 15s 判失败**
+#   （pre-commit 门禁那条「与改动无关的 test_lock_reentrancy 红」就是它；单跑与全量
+#   门禁都绿，只有负载够高才红）。
+#   实测（本机 16 逻辑核 / 8 物理核；`_repo_report` 内部只解析，无空闲等待）：
+#     安静单跑 2.9~6.9s（4 连跑 6.41/6.15/6.18/2.88 —— 安静时也有 ~2× 抖动；
+#     内部 = 读 0.1s + 预筛 0.3s + 解析/索引/判据 4.8s）
+#     24 burners 12.2s · **40 burners 16.3s ⇒ 判失败**
+#   标记旁那句「单跑 2.6s / 门禁 8 worker 下 ~5s」是 2026-09 的数字：扫描面后来长到
+#   655 文件（265 个被预筛跳过 / 390 个进索引 / 214 个受管辖锁点）⇒ 该预算只剩 ~2.2× 余量。
+# 判据（`sites` 下界 + 0 问题）一字未动；真正的退化仍由断言与 `--timeout=60`/用例 兜。
+# 备选与否决（为什么不是抬到 60 / 优化扫描 / 改 CPU 时间口径）：`docs/nn/engineering.md` §77。
+# 铁律（全仓）：CPU 密集用例不得配比 per-test 口径更紧的 `time_budget` —— 见 `conftest.py` 头部。
 def test_no_rerun_of_an_owned_lock_through_the_critical_section() -> None:
     """全仓硬判据：非可重入锁的临界区里，不许可达「也拿同一把锁」的函数。"""
     rep = _repo_report()

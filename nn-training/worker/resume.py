@@ -77,6 +77,7 @@ def walk_shard_dirs(root: Path, *, with_manifest: bool = False) -> list[Path]:
         out.append(Path(dirpath))
     return out
 
+
 # P2-2（2026-09-02）：_scan_shards 目录签名缓存。run_rl 的轮询热路径每 2 秒调一次
 # completed_pairs——旧实现每次都 rglob 全树 + 逐个 JSON 解析（140 局 ≈ 25 万次
 # 文件读）。目录签名 = 全部 rl_s*_seed* 目录的 (相对路径, mtime) 元组：新增 shard
@@ -247,8 +248,12 @@ def trailing_samples_per_game(jsonl_path: Path, window: int = 5, fallback: int =
 
     决策可 replay 的基础（plan §2.3.1）：est 是 jsonl 历史的**纯函数**（同一份 jsonl
     ⇒ 同一 est），重启后重算一致，不靠 WAL 重放。games 口径 = Σ outcomes（掉局也
-    占一局——它确实花了墙钟）；无可用历史 → `fallback`（课程声明的首轮估计）；
-    两者都缺 → 响亮 ValueError，绝不静默拿一个假值去反解局数。
+    占一局——它确实花了墙钟）；无可用历史 → `fallback`（调用方给的兜底估计）；
+    两者都缺 → **`0` = 无估计**，绝不静默拿一个假值去反解局数。
+
+    ★ 2026-10-12（plan/rollout-estfree-worksteal §4.1）：est 已从**课程/CLI 面退场**，
+    只剩「盘上历史派生量」这一个身份 ⇒ 首轮无历史是**正常状态**，不再是错误：返回
+    `0`，调用方必须显式走「不猜」档（满铺 / 初批每关 1 局），不许拿 0 去当分母。
     """
     rows: list[tuple[int, int]] = []  # (games, samples)
     try:
@@ -280,10 +285,8 @@ def trailing_samples_per_game(jsonl_path: Path, window: int = 5, fallback: int =
         return max(1, round(total_samples / total_games))
     if fallback > 0:
         return int(fallback)
-    raise ValueError(
-        "trailing_samples_per_game: 无 iteration 历史且未给 est_samples_per_game 兜底——"
-        "动态采集无法反解局数（检查课程 target_transitions/est_samples_per_game 配对）"
-    )
+    # 无历史 ⇒ **无估计**（0）：调用方走「不猜」档（plan/rollout-estfree-worksteal §4.1）。
+    return 0
 
 
 def trailing_stage_samples_per_game(
@@ -297,6 +300,8 @@ def trailing_stage_samples_per_game(
 
     扫 `traj_root/it*` 下最近 `window_iters` 个仍有 manifest 的轮目录，
     对每个 stage 聚合 `ΣnSamples/Σgames`；无数据的关回退 `fallback`（通常=全局 est）。
+    `fallback ≤ 0` 合法（= **无估计**）：该关返回 `0`，调用方按「不猜」档处理
+    （plan/rollout-estfree-worksteal §4.1）——**不许**在这里把它抬成 1（那会反解出巨大批）。
     量纲与 `settled_stage_totals` 同：只认 nSamples/totalSamples，不读 ticks。
     """
     from collections import defaultdict
@@ -334,11 +339,14 @@ def trailing_stage_samples_per_game(
             games[int(st)] += 1
             samples[int(st)] += int(n)
     out: dict[int, int] = {}
-    fb = max(1, int(fallback))
+    fb = max(0, int(fallback))
     for st in stage_set:
         g = games.get(st, 0)
         s = samples.get(st, 0)
-        out[st] = max(1, round(s / g)) if g > 0 and s > 0 else fb
+        if g > 0 and s > 0:
+            out[st] = max(1, round(s / g))
+        else:
+            out[st] = fb  # 0 = 无估计（首轮冷启动）
     return out
 
 

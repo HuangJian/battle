@@ -193,20 +193,16 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "（已结算 shard 的 nSamples 之和，分关达标线 = ceil(/关数)）；"
         "0 = 关闭，走 --seed-rotate 固定局数旧语义",
     )
-    ap.add_argument(
-        # 2026-09-15 T9：旧名 --est-ticks-per-game 是 10× 量纲错（ticks 填进 samples
-        # 分母），改名后无兼容别名——旧名会在 argparse 层直接报错（响亮优于静默）。
-        "--est-samples-per-game",
-        type=int,
-        default=_d("est_samples_per_game", 0),
-        help="局均 samples 估计（--target-transitions > 0 时必填，单位与 nSamples 一致"
-        "= 局均 ticks / K）：首轮反解局数用，之后由 jsonl 的 trailing samples 均值覆盖",
-    )
+    # ⚠ `--est-*` 已退役（2026-10-12，plan/rollout-estfree-worksteal §4.2 E3）：局均 samples
+    # 不再是输入，只由**盘上历史**派生（`worker.resume.trailing_*`）；首轮无历史 = 无估计 ⇒
+    # 「不猜」档（本机按宽度满铺 / 云机初批每关 1 局）。旧名 `--est-ticks-per-game`（10× 量纲错）
+    # 自 2026-09-15 T9 起就无兼容别名 ⇒ 两个名字现在都在 argparse 层响亮报错。
     ap.add_argument(
         "--max-games-per-stage",
         type=int,
         default=_d("max_games_per_stage", 0),
-        help="单关单轮局数硬顶（0 = 默认规则 初波 G0 × 4）；触顶 = 停采 + 响亮日志",
+        help="单关单轮局数硬顶（0 = 有估计时 初波 G0 × 4；无估计时不设默认顶）；"
+        "触顶 = 停采 + 响亮日志",
     )
     ap.add_argument(
         "--rotate-stages",
@@ -443,7 +439,7 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         "作废本轮并干净退出；it 不前进、不写 iteration 事件",
     )
     # ★ 2026-10-01（plan/gate-halt-platform-level）：门禁停机模式是**平台级**的
-    #（`tmp/gate-halt.json`，控制台写、训练侧每轮判定读）。这里只留「临时覆盖」参数，
+    # （`tmp/gate-halt.json`，控制台写、训练侧每轮判定读）。这里只留「临时覆盖」参数，
     # 且 default=None —— **绝不能**在 argparse 层读平台文件：那样每进程只读一次，
     # 控制台热切就失效了（热切的关键就在于读点每轮都在 `loop_guards` 里现读）。
     ap.add_argument(

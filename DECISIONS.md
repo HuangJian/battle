@@ -4942,3 +4942,32 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 —— 落点 → `nn-training/remote/{prefetch,download,job_round,worker,train_core}.py` ·
 `nn-training/tests/remote/{test_soft_hold_prefetch,test_prefetch_adaptive,test_download_split,test_job_fs_split}.py` ·
 `nn-training/tests/test_source_text_assert_budget.py`（基线 1445）
+
+## §2026-10-12-goalnn-est-samples-retire（2026-10-12，`est_samples_per_game` 从课程/CLI 面退场：只留盘上派生量 + 无历史不猜）
+
+- **背景**：`est_samples_per_game`（局均 samples）被做成了**课程必填字段 + 硬门禁 + CLI flag**，而运行期
+  真正起作用的是 `trailing_samples_per_game`（盘上历史）——声明值只在**首轮无历史**时兜底。一个「兜底
+  估计」扛起了三处结构重量（门禁 / 初批反解 / 局数硬顶），并逼课程作者写一个伪精度数
+  （97 份课程写了它；x20 系全是 147 —— 同环境不同腿抄同一个数）。
+- **决定**（`plan/rollout-estfree-worksteal.plan.md` v2 §4.2 E1–E6；切片 P0-a 已落地）：
+  - **旋钮退场**：字段降**死键**（`DEAD_COURSE_KEYS`，开课侧一行告警）；删门禁 `_check_volume_keys`；
+    删 `flat_overrides` 映射；删 CLI `--est-samples-per-game`；`rl_config.schema.json` 的
+    `rl.est_samples_per_game` 移入 `retired`（原在 `rl` 白名单）。
+  - **派生量保留**：局均 samples 只由 `worker.resume.trailing_*` 派生；`0` = **无估计**（不再是错误）。
+  - **无历史不猜**：本机连续路径首小批走 est-free 满铺
+    `spread_games_by_stage(width = local_slots → workers → 关数)`，下一批起用**本轮自己**的已结算局
+    自校准；云机计划初批钉 `G_s = 1`（`est = 0` 成为合法块值），缺口交给满铺补差批
+    （`DEFAULT_TOPUP_MAX_BATCHES_UNKNOWN = 64` 作防跑飞上界）；wave 补波无估计则响亮拒绝（不猜）。
+  - **有估计时逐字不变**（在跑腿零影响，有回归钉子）。
+- **备选与否决**：① 删 `est_samples_per_game` 字段 —— 否（`CourseConfig` 是 `extra="forbid"` ⇒ 存量
+  97 份课程全拒启）；② 剃掉课程文件里的键 —— 否（`course_fp` = 课程文件字节，为一死键抖 D14 血缘不划算
+  —— 同 2026-10-09 `workers` 先例）；③ 云机初批改「= 机器宽度」—— 否（初批局数进 `argv_template`，
+  发布期硬断言「条数 == 该轮对集局数」；width 只有节点运行期才有 ⇒ 破计划契约 / `pairs_fp`）；
+  ④ 无历史时沿用某个默认 est —— 否（那就是伪精度本身，且会静默改采集量）。
+- **后果**：新课不再需要 est；首轮冷启动从「按声明值反解」变成「按宽度满铺 + 自校准」⇒ 按 §15.5 当
+  **新实验**（fresh `--out`/`--traj`，不跨改动续跑）；`VOLUME_RULE_V1` **不** bump（与 2026-10-12 满铺器
+  先例一致：批构成属训练侧），`seed_rotate` 门控另算（真身份变更，另切片）。后续切片 = no-progress 守卫 /
+  B1 批屏障读数 / 拉取式 feeder（决策入 WAL）。
+—— 证据 → `nn-training/tests/worker/test_rollout_volume.py`（冷启动 3 例 + 死键判据）·
+`nn-training/e2e/test_volume_e2e.py`（10 例判据不变，夹具改「自建 jsonl 历史」）·
+门禁 `bun run pygate` 4234 passed / 1 skipped

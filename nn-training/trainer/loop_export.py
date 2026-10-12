@@ -103,14 +103,18 @@ class TrainingExport:
         而云机没有本地集群那种实时补救机制——一轮一个 job，PPO 在 job 里跑完）。
 
         两个口径细节：
-          * **est 用当前估计**（trailing 均值，回退课程声明值）——与 `_volume_est_samples`
+          * **est 用当前估计**（trailing 均值，**盘上历史派生**）——与 `_volume_est_samples`
             同函数同 window，所以计划里的 G0 就是**导出那一刻**本地循环会用的那个数；节点
             没有 hub 的 jsonl，est 只能被钉在计划里（这也是「同一计划跨机器逐字节一致」的
             前提：现算会让两侧解出不同的语料指纹）。
+            ★ 2026-10-12（plan/rollout-estfree-worksteal §4.1）：**课程/CLI 的声明值已退场**
+            ⇒ 无历史（首轮）时 est = **0 = 无估计**，计划钉 `G_s = 1`（不猜）；缺口与
+            「批 = 机器宽度」全交给 `iter_topup` 的 est-free 满铺补差批。
           * **mode 门与 `_per_stage_quota` 同源**：`target_transitions` 只对 per-tick 有意义
             ⇒ 非 per-tick 返 None（= 老口径，逐字节不变）。
 
-        `--stages` 缺失/不可解析、est ≤ 0 一律**响亮退出**：静默降级回老口径正是要防的事。
+        `--stages` 缺失/不可解析一律**响亮退出**：静默降级回老口径正是要防的事。
+        （est 为 0 **不再**是错误：那是「首轮无历史」的正常状态，计划里钉 0 = 每关 1 局。）
         """
         args = self.args
         if str(getattr(args, "mode", "")) != "per-tick":
@@ -120,13 +124,9 @@ class TrainingExport:
         from worker.resume import trailing_samples_per_game, trailing_stage_samples_per_game
         from worker.volume_waves import parse_stages_arg, volume_block
 
-        declared = int(getattr(args, "est_samples_per_game", 0) or 0)
         jsonl = getattr(self, "_jsonl_path", None)
-        est = (
-            int(trailing_samples_per_game(jsonl, window=5, fallback=declared) or declared)
-            if jsonl
-            else declared
-        )
+        # est = **盘上历史派生量**（课程/CLI 的声明值已退场，2026-10-12）；0 = 无估计。
+        est = int(trailing_samples_per_game(jsonl, window=5) or 0) if jsonl else 0
         # 分关 est（2026-10-07，plan/rollout-stage-balance §4.3）：与本地链
         # `_volume_stage_ests_map` **同函数同窗口**（window=3、fallback=全局 est），
         # 所以计划里的 `G_s` 就是导出那一刻本地循环会用的那套反解。
@@ -237,8 +237,7 @@ class TrainingExport:
         bak_dir = str(getattr(args, "backup_dir", "") or "") or None
         bak = backup_weights(args.out, it, prefix=bak_prefix, backup_dir=bak_dir)
         log(
-            f"[run_rl] ppo it{it}: weights already landed by the claimed worker "
-            f"(D12) -> {args.out}"
+            f"[run_rl] ppo it{it}: weights already landed by the claimed worker (D12) -> {args.out}"
         )
         if bak:
             log(f"[run_rl] weights archived -> {bak}")

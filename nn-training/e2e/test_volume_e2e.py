@@ -321,9 +321,12 @@ class _Loop:
             # 的账本（键 `(kind, wver)`）——全仓库的哑权重若都是 `{"stub": true}`，后一个用例
             # 就会走 “kept / skip POST”（docs/nn/engineering.md §13；门禁里那条随机 flake 的根）。
             out.write_text(json.dumps({"stub": True, "case": tmp.name}), encoding="utf-8")
+        # ⚠ `est_samples_per_game` **不在** args 里（2026-10-12，plan/rollout-estfree-worksteal）：
+        # 它是课程死键、已退出 CLI/flat_overrides。本夹具要一个确定的 est，就自建**盘上历史**
+        # （见下面写 jsonl 的那段）——这同时是一条反探针：哪个读者还敢读 args 上的老键，
+        # 这里的 est 就会是 0（无估计）⇒ 冷启动满铺 ⇒ 下面所有「初波 G0 局」的断言立刻红。
         self.args = types.SimpleNamespace(
             target_transitions=target,
-            est_samples_per_game=est,
             max_games_per_stage=max_games_per_stage,
             stages=stages,
             seeds="0-1",
@@ -351,6 +354,14 @@ class _Loop:
         self._rotate_seed = rotate_seed
         self._traj_root = traj
         self._jsonl_path = traj / "training_log.jsonl"
+        # est 的唯一来源（2026-10-12）：`worker.resume.trailing_samples_per_game` 读 jsonl 的
+        # iteration 行（samples/games）。这里直接造一行，使 trailing == 用例要的 est。
+        traj.mkdir(parents=True, exist_ok=True)
+        self._jsonl_path.write_text(
+            json.dumps({"event": "iteration", "samples": int(est), "outcomes": {"timeout": 1}})
+            + "\n",
+            encoding="utf-8",
+        )
         self._traj_dir = traj / f"it{it}"
         self._traj_dir.mkdir(parents=True, exist_ok=True)
         self._report: dict = {

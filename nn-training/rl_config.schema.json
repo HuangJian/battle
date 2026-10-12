@@ -55,7 +55,6 @@
       "ent_break_consec",
       "ent_break_max_winrate",
       "err_log",
-      "est_samples_per_game",
       "eval_at",
       "eval_every",
       "eval_seeds",
@@ -94,6 +93,7 @@
   },
   "freeform": ["nodes", "courses", "rl.remote_hubs"],
   "retired": {
+    "rl.est_samples_per_game": "旋钮退场（2026-10-12 / plan/rollout-estfree-worksteal）：局均 samples 不再是课程/CLI 输入，改由盘上历史派生（worker.resume.trailing_*）；首轮无历史 = 无估计 ⇒ 按宽度满铺 / 初批每关 1 局。填了不生效。",
     "intent_rl": "已下线（2026-09-26）：intent/goal 入口冻结（单一 PPO 路径）+ 单一 hub；需要重启时照 x 系列把配置写进 curricula/*.jsonc，并先解冻 mode 入口。",
     "policy.upgradeBranch": "已废弃（残留旧分支名曾把全部节点 reset，2026-08-30 事故）：节点升级分支永远锁训练机当前分支，填任何非空值只会盖掉锁存。",
     "policy.minDiskFreeMB": "零消费者（磁盘余量检查在 TS 侧 sampler-agent，不是 rl-config 键）。",

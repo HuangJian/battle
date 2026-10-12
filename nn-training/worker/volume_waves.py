@@ -138,14 +138,13 @@ def initial_games(target_transitions: int, n_stages: int, est_samples_per_game: 
     """初波每关局数 `G0 = max(1, ceil(target / n_stages / est))`（计划 §2.2.1）。
 
     `est_samples_per_game` = **samples/局**（= 局均 ticks / K；见文件头量纲节），
-    与 `target_transitions` 同单位。≤ 0 响亮报错——配额反解没有估计值就是静默乱采
-    （配置校验在 CourseConfig 层已经拦一次，这里再拦是为了纯函数自洽）。
+    与 `target_transitions` 同单位。**`≤ 0` = 无估计**（est 已从课程/CLI 面退场，首轮无历史）
+    ⇒ 返回 **1 局/关**（不猜）：缺口交给 est-free 的满铺补差批
+    （plan/rollout-estfree-worksteal §4.1 冷启动表）。
     **est 不被钳到任何下限**（2026-09-15 回退 P2-b；理由见文件头那段长注释）。
     """
     if est_samples_per_game <= 0:
-        raise ValueError(
-            f"initial_games 需要 est_samples_per_game ≥ 1，得到 {est_samples_per_game}"
-        )
+        return 1
     return max(
         1,
         _ceil_div(
@@ -442,8 +441,10 @@ def volume_block(
     齐全：缺显式 `--stages`（分关配额的分母）或 est ≤ 0 一律**响亮报错**——静默降级成
     老口径会让云机的采集量与目标脱钩，正是这个块存在要防的事。
 
-    `est_samples_per_game` 由调用方给（hub 侧给的是**当前** trailing 估计，回退课程声明值）
+    `est_samples_per_game` 由调用方给（hub 侧给的是**当前盘上历史派生**的 trailing 估计）
     ——与 `trainer/loop_volume._volume_est_samples` 同口径，两侧反解出同一个 G0。
+    **`0` = 无估计**（首轮无历史）**合法**：`games_per_stage = 1`（不猜），补差批数上界换成
+    `DEFAULT_TOPUP_MAX_BATCHES_UNKNOWN`（plan/rollout-estfree-worksteal §4.1）。
 
     `ests_by_stage`（2026-10-07，plan/rollout-stage-balance §4.3）非空 ⇒ 追加**分关**字段：
     `est_s_by_stage` / `games_per_stage_by_stage`（按 `est_hi = ceil(est×factor)` 反解）/
@@ -460,12 +461,11 @@ def volume_block(
             "（缺它就只能静默按固定关集猜，采集量必然与目标不符）"
         )
     stages = parse_stages_arg(raw)
-    est = int(est_samples_per_game or getattr(args, "est_samples_per_game", 0) or 0)
-    if est <= 0:
-        raise ValueError(
-            "动态采集需要 est_samples_per_game（samples/局，≥1）才能反解局数"
-            "——课程声明里没有它就请显式给"
-        )
+    # est 已从课程/CLI 面退场（2026-10-12）：**不再**读 `args.est_samples_per_game` 兜底；
+    # 调用方给的 trailing 估计就是唯一输入，0 = 无估计（不猜档）。
+    est = int(est_samples_per_game or 0)
+    if est < 0:
+        raise ValueError(f"动态采集的 est_samples_per_game 不得为负（0 = 无估计），收到 {est}")
     block: dict = {
         "target_transitions": target,
         "est_samples_per_game": est,
@@ -478,11 +478,13 @@ def volume_block(
             DEFAULT_EST_HI_FACTOR,
             DEFAULT_LAST_BATCH_LO_FACTOR,
             DEFAULT_TOPUP_MAX_BATCHES,
+            DEFAULT_TOPUP_MAX_BATCHES_UNKNOWN,
             alloc_games_by_stage,
             est_hi,
         )
 
         factor = float(DEFAULT_EST_HI_FACTOR if est_hi_factor is None else est_hi_factor)
+        # 缺关的 est 回退全局 est（可能是 0 = 无估计 ⇒ 该关 1 局，见 alloc_games_by_stage）。
         est_s = {int(s): int(ests_by_stage.get(int(s), 0) or est) for s in stages}
         block["est_s_by_stage"] = est_s
         block["est_hi_factor"] = factor
@@ -496,7 +498,10 @@ def volume_block(
         }
         block["topup"] = {
             "enabled": True,
-            "max_batches": int(DEFAULT_TOPUP_MAX_BATCHES),
+            # 无估计 ⇒ 初批只有每关 1 局，缺口全靠满铺批填 ⇒ 上界换成防跑飞的绝对值。
+            "max_batches": int(
+                DEFAULT_TOPUP_MAX_BATCHES if est > 0 else DEFAULT_TOPUP_MAX_BATCHES_UNKNOWN
+            ),
             "last_lo_factor": float(DEFAULT_LAST_BATCH_LO_FACTOR),
             "max_games_per_stage": int(getattr(args, "max_games_per_stage", 0) or 0),
             **dict(topup or {}),
@@ -531,12 +536,18 @@ def validate_volume_block(block: object) -> dict:
     missing = [k for k in VOLUME_BLOCK_FIELDS if k not in block]
     if missing:
         raise ValueError(f"volume 缺字段: {missing}")
-    for k in ("target_transitions", "est_samples_per_game", "games_per_stage", "per_stage_quota"):
+    for k in ("target_transitions", "games_per_stage", "per_stage_quota"):
         v = block[k]
         if isinstance(v, bool) or not isinstance(v, int):
             raise ValueError(f"volume.{k} 必须是整数，收到 {v!r}")
         if v <= 0:
             raise ValueError(f"volume.{k} 必须 ≥ 1，收到 {v!r}")
+    # est：0 合法 = **无估计**（首轮无历史）⇒ `games_per_stage == 1`（不猜档）；负数是畸形。
+    raw_est = block["est_samples_per_game"]
+    if isinstance(raw_est, bool) or not isinstance(raw_est, int) or raw_est < 0:
+        raise ValueError(
+            f"volume.est_samples_per_game 必须是非负整数（0 = 无估计），收到 {raw_est!r}"
+        )
     stages_raw = block["stages"]
     if not isinstance(stages_raw, list) or not stages_raw:
         raise ValueError(f"volume.stages 必须是非空数组，收到 {stages_raw!r}")
@@ -557,7 +568,7 @@ def validate_volume_block(block: object) -> dict:
     if want_g0 != int(block["games_per_stage"]):
         raise ValueError(
             f"volume.games_per_stage={block['games_per_stage']} 与"
-            f"ceil(达标线/est)={want_g0} 不符（局数反解两侧必须同源）"
+            f" ceil(达标线/est)={want_g0} 不符（局数反解两侧必须同源；est=0 ⇒ 1）"
         )
     if "games_per_stage_by_stage" in block or "est_s_by_stage" in block or "topup" in block:
         from worker.volume_alloc import validate_volume_block_ext
