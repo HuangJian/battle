@@ -4914,6 +4914,25 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   x26-tower 头注已同步新源＋新 sha；两腿 trunk 同源，对照收紧。
 —— 落点 → `worker/scripts/init_spatial_leg.py` · `tests/worker/test_init_spatial_leg.py` ·
 `nn-training/curricula/x26-tower.jsonc`
+
+## §2026-10-12-goalnn-x26-double-kill（2026-10-12，it206 双杀：obs 检查线挂＋tower 平台）
+
+- **背景**：it206 同局（seed 全同）复核。obs：it130–150 均值 0.473≥0.41（①过，回到
+  crown 带）／value 新列 rms 0.30→0.36 仍膨胀（②挂）／KL·entropy 稳（③过）；
+  205 轮零净增益（0.50 带，G0 差 30pp，x24 先例 300 轮 +5pp）。机制：冷 critic 持续
+  拟合新维噪声（旧列 drift 仅 0.03），§2.6“无用则学小”在 value 头被证伪，
+  advantage 污染→暖策略游走。tower：0→0.25/10.77 健康爬升后 it160 起平台
+  （0.21–0.31）；it40 kills 门（12.8）对冷启动误标（实测 8.57），不执行；
+  跨架构 A >> B，塔可训、无优越信号。
+- **决定**（用户拍板）：双杀（obs 按预注册“②挂即杀”fail-fast；tower 平台＋G0 无望，
+  省 95 轮 GPU）。停腿人在控制台执行。修法不存在热补丁（改训练语义 = 新实验），
+  重开设计另起（方向：value 新列门控／暖机纪律，正对本次机制）。
+- **备选与否决**：① obs 跑满 300 —— 否（x24 overrun 教训；205 轮零增益＋机制进行中，
+  赌后段 peak 证据弱）；② tower 留到 300 —— 否（平台 45 轮＋远离 G0，曲线信息已收敛，
+  省 GPU 给重开）；③ 热修 value 头续跑 —— 否（§15.5：改语义即新账本，无续跑）。
+- **后果**：x26 家两腿结课（未毕业）；obs-v5 的 ladder 答案 = 新维 ladder 无可测分红
+  ＋冷 critic 噪声拟合机制；塔答案 = 可训但慢、无优越信号。重开前置：value 门控设计。
+—— 证据 → `tmp/x26-{obs,tower}/eval_log.jsonl`（seed 全同复核）· 权重对比 it0→it94/it207
 ## §2026-10-12-goalnn-prefetch-stage-unpack（2026-10-12，把「解包」从关键路径搬到上一轮 PPO 上：预取线程解包 + 单点搬入 + 形状分派；plan/prefetch-stage-unpack + 首轮评审 P0-1..P2-6）
 
 - **背景**：`§80`（aistudio 传输硬化）之后那台机器上链路**不再是病灶**（`in=` 0–3s、`out` 已与 PPO
@@ -4971,3 +4990,33 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 —— 证据 → `nn-training/tests/worker/test_rollout_volume.py`（冷启动 3 例 + 死键判据）·
 `nn-training/e2e/test_volume_e2e.py`（10 例判据不变，夹具改「自建 jsonl 历史」）·
 门禁 `bun run pygate` 4234 passed / 1 skipped
+
+## §2026-10-12-goalnn-value-gating（2026-10-12，x26-obs it90 诊断的修复：value 门控＋x27 双腿）
+
+- **背景**：x26-obs it90 同局实衰（wr 0.535→0.40），机制 = 冷 critic 吃 pf 后在新 37 列上
+  35 倍爆炸（0.0086→0.30）拟合噪声 → advantage 污染 → 暖策略游走；旧列 drift 仅 0.015。
+  plan §2.6“无用则学小”在 value 头被证伪。优化器是裸 Adam（零 decay、单组），新列
+  wild 生长无任何东西拦。x26 双杀后重开（用户令直接开干）。
+- **决定**（D1=零起步：`init_spatial_leg` 加 `drop0` 模式，value 新列纯 0——0.01 噪声起步
+  正是爆炸源；policy/fc 尾照旧随机的（良性 2–4x）；D2=后步乘性收缩 `w *= (1-ρ)`，
+  只拴 `value_anchor_slices()` 列片（腿 A [128,165)／塔整头／legacy 空），clip+step 之
+  后 ⇒ 不吃 clip 配额、不进 Adam 矩、不读 RNG（ckpt 精确复现）；ρ = 课程键
+  `value_anchor`（0.0 = 关，缺席走 getattr 缺省；0.001 首猜：w=0.05 处收缩 5e-5/步 ≥
+  实测漂移 3e-5/步；**不进** corpus_identity_fp，优化器语义前科同款）；
+  D3=监控 `value_new_rms` 无条件记录（对照腿 ρ=0 权重恒等但照样看见膨胀），四白名单
+  透传（engine stats→train_core→worker→loop_transport→events 行）；
+  D4=双腿：x27-obs（ρ=0.001）＋ x27-noleash（缺键，单变量 = 加不加绳），共享同一份零起
+  it0（sha16 `103afabb6eedd175`，trunk 与 burst220 逐位等）；新家族流 20261021
+  （x26 流被死腿消费过段）；it40 双门（obs：kills≥12.8＋rms≤0.05／noleash：rms>0.15
+  且 kills<13.5 即确证杀腿），G0/G5/G3 照判）。
+- **备选与否决**：① 梯度内加 anchor（loss 里加 L2 项）—— 否（进 clip 配额、进 Adam 矩，
+  语义浑浊；后步收缩可预测、可测）；② param group 式 decay —— 否（优化器只认整张量，
+  新 37 列切不出来，只能手写片操作）；③ policy 新列同拴 —— 否（2–4x 良性，第二变量，
+  留 makerspace）；④ freeze-then-release —— 否（释放门 defaultdict 新超参，重机制备用）；
+  ⑤ ρ 网格搜索 —— 否（无预算；ρ=0.001 首猜＋rms 监控 20 轮内见分晓，调参即新实验）。
+- **后果**：`course_openable` 双 True；单变量脚本对账零差异（除 `value_anchor` 一键）；
+  开课走控制台。修法 lineage：本条是 it90 诊断的执行，无热补丁（§15.5）。
+—— 落点 → `worker/models/student.py::value_anchor_slices` ·
+`worker/ppo/engine.py::apply_value_anchor_pull` · `biz/course_spec.py::value_anchor` ·
+`worker/scripts/init_spatial_leg.py::drop0` · `nn-training/curricula/x27-{obs,noleash}.jsonc` ·
+单测 `tests/worker/test_value_anchor{,_course}.py`（先红后绿 17+69+44 例）
