@@ -512,8 +512,8 @@ describe('POLICY_EXTRA：方位语义（玩家相对）', () => {
     const { cx, cy } = center(w)
     const out = compute(w)
     // 空场：计数 0、距离全 1.5、包夹 0
-    expect([...out.slice(0, 4)]).toEqual([0, 0, 0, 0])
-    expect([...out.slice(4, 8)]).toEqual([1.5, 1.5, 1.5, 1.5])
+    expect(Array.from(out.subarray(0, 4))).toEqual([0, 0, 0, 0])
+    expect(Array.from(out.subarray(4, 8))).toEqual([1.5, 1.5, 1.5, 1.5])
     expect(out[8]).toBe(0)
     // 正上方朝下走近战弹 ⇒ 前
     pushBullet(w, cx, cy - 3 * CELL, 'down')
@@ -882,12 +882,13 @@ describe('POLICY_EXTRA：对拍与纯函数', () => {
   })
 
   it('无玩家 / 玩家死亡 ⇒ 37 维全 0（不含 1.5 哨兵）', () => {
+    const zero = Array.from({ length: POLICY_EXTRA_DIM }, () => 0)
     const empty = seedWorld(31)
-    expect([...compute(empty)]).toEqual(new Array(POLICY_EXTRA_DIM).fill(0))
+    expect(Array.from(compute(empty))).toEqual(zero)
     const w = worldWithPlayer(32)
     placeEnemy(w, 12, 19, 'basic', 'down') // 有基地威胁也照样全 0
     w.player!.alive = false
-    expect([...compute(w)]).toEqual(new Array(POLICY_EXTRA_DIM).fill(0))
+    expect(Array.from(compute(w))).toEqual(zero)
   })
 
   it('哨兵语义可分：1.5 = 「有玩家但该向无目标」，0 = 「无玩家」（两者不混淆）', () => {
