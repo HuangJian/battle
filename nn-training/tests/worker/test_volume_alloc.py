@@ -73,11 +73,16 @@ def test_est_hi_is_exact(est: int, want: int) -> None:
     assert est_hi(est) == want
 
 
-@pytest.mark.parametrize("bad", [0, -3])
-def test_est_hi_refuses_nonpositive_est(bad: int) -> None:
-    """没有估计值就是乱采——响亮报错，不静默兜底。"""
-    with pytest.raises(ValueError, match="est"):
-        est_hi(bad)
+@pytest.mark.parametrize("none", [0, -3])
+def test_est_hi_zero_means_no_estimate(none: int) -> None:
+    """★ 2026-10-12（plan/rollout-estfree-worksteal §4.1）：`est ≤ 0` = **无估计**（首轮无历史），
+    不是错误——但必须是**显式的 0**，绝不被静默抬成某个假估计（反探针③）。
+
+    这条原本是「没有估计值就是乱采 ⇒ 响亮报错」。改成 0 语义是因为：est 已从课程/CLI 面退场
+    （只剩盘上派生量），首轮无历史是**正常状态**；拦它 = 拦一个正常状态，还会逼课程写假精度数。
+    仍然响亮的是**下游**：0 往下游传成「每关 1 局」与「不设默认硬顶」。
+    """
+    assert est_hi(none) == 0
     with pytest.raises(ValueError, match="factor"):
         est_hi(100, factor=0)
 
@@ -120,12 +125,25 @@ def test_alloc_cross_stage_independent() -> None:
 
 
 def test_alloc_never_zero_and_refuses_missing_est() -> None:
-    """局数 ≥1（0 局 = 这一关整轮不采，静默缺额）；缺 est 响亮报错。"""
+    """局数 ≥1（0 局 = 这一关整轮不采，静默缺额）；缺 key 响亮报错（那是 bug，不是无估计）。"""
     assert alloc_games_by_stage([2000], TARGET, ests_hi={2000: 10**9}) == {2000: 1}
     with pytest.raises(ValueError, match="est_hi"):
         alloc_games_by_stage(STAGES, TARGET, ests_hi={2000: 400})
     with pytest.raises(ValueError, match="stage"):
         alloc_games_by_stage([], TARGET, ests_hi={})
+
+
+def test_alloc_no_estimate_is_one_game_per_stage() -> None:
+    """★ 冷启动（无估计）：`est_hi == 0` ⇒ **每关 1 局**（不猜），负缺口靠满铺补差批填。
+
+    与「缺 key」的区别：`0` 是**语义值**（无估计），缺 key 是 bug ⇒ 抛错。两者都在这里钉住。
+    """
+    assert alloc_games_by_stage(STAGES, TARGET, ests_hi={s: 0 for s in STAGES}) == {
+        s: 1 for s in STAGES
+    }
+    # 混合：有估计的关照旧反解，无估计的关 1 局（逐关独立，互不借额度）
+    mixed = alloc_games_by_stage(STAGES, TARGET, ests_hi={2000: 400, 2001: 0, 2002: 400, 2003: 0})
+    assert mixed == {2000: 31, 2001: 1, 2002: 31, 2003: 1}
 
 
 # ────────────────────────── 3. 补差批 ──────────────────────────
@@ -261,6 +279,22 @@ def test_default_game_caps_follow_per_stage_est() -> None:
     assert default_game_caps(STAGES, TARGET, ests={s: 400 for s in STAGES}, explicit=99) == {
         s: 99 for s in STAGES
     }
+
+
+def test_default_game_caps_skip_stages_without_estimate() -> None:
+    """★ 无估计（首轮冷启动）的关**不设**默认硬顶（缺席 = 无顶）。
+
+    为什么：没有估计就不猜一个顶（猜小了 = 静默短采，猜大了 = 白烧）。此时「别再派了」由显式
+    `max_games_per_stage` 与（切片 P0-b）的 no-progress 守卫承担——两个消费者都认缺席。
+    """
+    caps = default_game_caps(STAGES, TARGET, ests={2000: 422, 2001: 0, 2002: 310, 2003: 0})
+    assert set(caps) == {2000, 2002}
+    assert caps == {2000: 4 * 30, 2002: 4 * 40}
+    # 全关无估计 ⇒ 空表（无顶）；显式值仍然优先（操作员的硬省不许被冷启动吞掉）
+    assert default_game_caps(STAGES, TARGET, ests={s: 0 for s in STAGES}) == {}
+    assert default_game_caps(
+        STAGES, TARGET, ests={s: 0 for s in STAGES}, explicit=12
+    ) == {s: 12 for s in STAGES}
 
 
 # ────────────────────────── 5. 运行时块：形状 + 同源 ──────────────────────────

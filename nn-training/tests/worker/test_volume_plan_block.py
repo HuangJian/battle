@@ -114,8 +114,12 @@ def test_volume_block_matches_quota_math() -> None:
 
 def test_volume_block_is_stage_order_insensitive() -> None:
     """`--stages` 的书写顺序不影响任何一局的种子（`wave_pairs` 内部按 stage 升序）。"""
-    a = volume_block(_args(**{**X20, "stages": "2002,2000"}))
-    b = volume_block(_args(**{**X20, "stages": "2000,2002"}))
+    a = volume_block(
+        _args(**{**X20, "stages": "2002,2000"}), est_samples_per_game=X20["est_samples_per_game"]
+    )
+    b = volume_block(
+        _args(**{**X20, "stages": "2000,2002"}), est_samples_per_game=X20["est_samples_per_game"]
+    )
     assert a is not None and b is not None
     assert a["stages"] == [2002, 2000]  # 忠于 args 的书写顺序（不悄悄重排）
     assert a["games_per_stage"] == b["games_per_stage"]
@@ -128,13 +132,53 @@ def test_volume_block_is_stage_order_insensitive() -> None:
     "over, frag",
     [
         ({"stages": ""}, "--stages"),
-        ({"est_samples_per_game": 0}, "est_samples_per_game"),
     ],
 )
 def test_volume_block_refuses_incomplete_knobs(over: dict, frag: str) -> None:
-    """缺关集/缺估计值 ⇒ 响亮报错（静默降级 = 采集量与目标脱钩，正是要防的事）。"""
+    """缺关集 ⇒ 响亮报错（静默降级 = 采集量与目标脱钩，正是要防的事）。
+
+    ⚠ 「缺估计值」**不再**是错误（2026-10-12）：est 已成盘上派生量，无历史 = `0` = 无估计，
+    计划里钉 `G_s = 1`（不猜档，见下一条用例）。
+    """
     with pytest.raises(ValueError, match=frag):
-        volume_block(_args(**{**X20, **over}))
+        volume_block(_args(**{**X20, **over}), est_samples_per_game=X20["est_samples_per_game"])
+
+
+def test_volume_block_no_estimate_pins_one_game_per_stage() -> None:
+    """★ 冷启动（无估计）：计划钉 `G_s = 1` + 补差批数上界换防跑飞档；分关字段同样每关 1 局。
+
+    这是 plan/rollout-estfree-worksteal §4.1 冷启动表的可执行形式：**不猜**，缺口交给 est-free
+    的满铺补差批（云机侧 `iter_topup.spread_games_by_stage`）。
+    """
+    from worker.volume_alloc import (
+        DEFAULT_TOPUP_MAX_BATCHES,
+        DEFAULT_TOPUP_MAX_BATCHES_UNKNOWN,
+    )
+
+    blk = volume_block(_args(**X20), est_samples_per_game=0, ests_by_stage={s: 0 for s in X20_STAGES})
+    assert blk is not None
+    assert blk["est_samples_per_game"] == 0
+    assert blk["games_per_stage"] == 1
+    assert blk["games_per_stage_by_stage"] == {s: 1 for s in X20_STAGES}
+    assert blk["topup"]["max_batches"] == DEFAULT_TOPUP_MAX_BATCHES_UNKNOWN
+    assert validate_volume_block(blk) == blk  # 0 = 无估计 是**合法**块（两侧同源仍成立）
+    # 有估计时上界照旧（不被冷启动档顺手改掉）
+    keys_blk = volume_block(
+        _args(**X20),
+        est_samples_per_game=X20["est_samples_per_game"],
+        ests_by_stage={s: X20["est_samples_per_game"] for s in X20_STAGES},
+    )
+    assert keys_blk is not None and keys_blk["topup"]["max_batches"] == DEFAULT_TOPUP_MAX_BATCHES
+
+
+def test_volume_block_ignores_the_dead_course_key() -> None:
+    """★ 反探针⑤：课程键 `est_samples_per_game` **已死** —— 就算 args 上还带着它，块也必须当
+    无估计处理（否则「课程写一个数就能改采集量」会静默复活，而它已不再进 `flat_overrides`）。
+    """
+    blk = volume_block(_args(target_transitions=48000, stages="2000-2003", est_samples_per_game=147))
+    assert blk is not None
+    assert blk["est_samples_per_game"] == 0
+    assert blk["games_per_stage"] == 1
 
 
 @pytest.mark.parametrize(
@@ -149,7 +193,7 @@ def test_volume_block_refuses_incomplete_knobs(over: dict, frag: str) -> None:
 )
 def test_validate_volume_block_rejects_drift(patch: dict) -> None:
     """手改过的块（数字与公式不符 / 空关集 / bool）一律拒收。"""
-    blk = volume_block(_args(**X20))
+    blk = volume_block(_args(**X20), est_samples_per_game=X20["est_samples_per_game"])
     assert blk is not None
     with pytest.raises(ValueError):
         validate_volume_block({**blk, **patch})
@@ -193,7 +237,7 @@ def test_initial_wave_pairs_keys_by_it_and_stage() -> None:
 def test_plan_carries_volume_and_replays_initial_wave() -> None:
     """计划带上块以后：逐轮对集 == 初波前缀，且过 dump/load 往返（节点看的是 JSON）。"""
     args = _args(**X20)
-    blk = volume_block(args)
+    blk = volume_block(args, est_samples_per_game=X20["est_samples_per_game"])
     plan = build_plan(args, it=3, iters_total=9, rotate_seed=4242, volume=blk, log=lambda _m: None)
     assert plan["volume"] == blk
     for it in planned_iters(plan):
@@ -219,7 +263,12 @@ def test_check_plan_against_args_catches_target_drift() -> None:
     """发布期自检：换一门课/改目标 ⇒ 计划重放对集与 args 重解不一致，拒发。"""
     args = _args(**X20)
     plan = build_plan(
-        args, it=3, iters_total=6, rotate_seed=4242, volume=volume_block(args), log=lambda _m: None
+        args,
+        it=3,
+        iters_total=6,
+        rotate_seed=4242,
+        volume=volume_block(args, est_samples_per_game=X20["est_samples_per_game"]),
+        log=lambda _m: None,
     )
     check_plan_against_args(args, plan)  # 一致 ⇒ 静默通过
 
@@ -242,7 +291,7 @@ def test_validate_plan_rejects_tampered_volume() -> None:
                 it=1,
                 iters_total=3,
                 rotate_seed=7,
-                volume=volume_block(args),
+                volume=volume_block(args, est_samples_per_game=X20["est_samples_per_game"]),
                 log=lambda _m: None,
             )
         ).decode("utf-8")
@@ -278,7 +327,7 @@ def test_iteration_manifest_carries_per_stage_quota(tmp_path: Path) -> None:
         it=0,
         iters_total=2,
         rotate_seed=4242,
-        volume=volume_block(args),
+        volume=volume_block(args, est_samples_per_game=X20["est_samples_per_game"]),
         log=lambda _m: None,
     )
     manifest = normalize_manifest(

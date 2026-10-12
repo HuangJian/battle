@@ -43,6 +43,7 @@ class CustomStagesMixin:
     def is_custom_stages(self) -> bool:
         return isinstance(self.stages, list)
 
+
 # ================================================================== 课程配置
 #
 # `--course <name>` —— 课程 = 启动参数 + 关卡布局 + 奖励公式的单一事实来源
@@ -769,16 +770,11 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             raise ValueError("动态采集键非法（≥0；0 = 关闭/默认规则）")
         return v
 
-    @model_validator(mode="after")
-    def _check_volume_keys(self) -> CourseConfig:
-        """`target_transitions > 0` 必须带局均 **samples** 估计（D1：反解没有估计值 = 乱采）。"""
-        if self.target_transitions > 0 and self.est_samples_per_game <= 0:
-            raise ValueError(
-                "target_transitions > 0 时必须给 est_samples_per_game（≥1，单位=samples/局"
-                "= 局均 ticks / K）——配额反解初波局数需要与账本同单位的估计"
-                "（旧键名 est_ticks_per_game 是 10× 量纲错，2026-09-15 T9 改名）"
-            )
-        return self
+    # ⚠ 2026-10-12（plan/rollout-estfree-worksteal §4.2 E1）：原 `_check_volume_keys`
+    # 门禁（`target_transitions > 0` 必须带 `est_samples_per_game ≥ 1`）**已删**。
+    # 为什么：est 从「课程必填旋钮」退场成「盘上历史派生量」（trailing），首轮无历史
+    # 时它本来就是**无估计**（= 0）⇒ 仍拦就是拦一个正常状态（且逼课程写一个假精度数）。
+    # 无估计时的行为由消费端显式定义：「不猜」档（本机按宽度满铺 / 云机初批每关 1 局）。
 
     @field_validator("stages", mode="before")
     @classmethod
@@ -806,11 +802,14 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     #: 0 = 关闭：走 seed_rotate 固定局数旧语义，`biz/volume_waves.py` 一个函数都不被调用。
     #: 进 corpus_identity_fp（量纲变更 = 采样参数变更，与 seed_rotate 同待遇）。
     target_transitions: int = 0
-    #: 局均 **samples** 估计（= 局均 ticks / K；首轮/无历史时反解局数用；之后由
-    #: trailing 均值覆盖）。与 `target_transitions` 同单位 = 已结算 shard 的 nSamples。
-    #: `target_transitions > 0` 时必填——配额反解没有估计值就是静默乱采（响亮报错）。
-    #: ⚠ 旧键名 `est_ticks_per_game`（ticks 填进 samples 分母 = 10× 误采，评审复算
-    #: 「兑现 37% 触顶」）已停用；extra="forbid" ⇒ 照写旧键会启动期响亮报错。
+    #: ⚠ **死键**（2026-10-12，plan/rollout-estfree-worksteal）：局均 samples 不再由课程
+    #: 声明——它退场成**盘上历史派生量**（`worker.resume.trailing_*`），首轮无历史就是「无
+    #: 估计」（不猜档），不再是必填、也不再进 `flat_overrides`（读面已删，见 `DEAD_COURSE_KEYS`）。
+    #: 字段**永久保留** = 存量课程文件（`grep -l curricula/` 97 份写了它）在 `extra="forbid"`
+    #: 下仍能解析；删字段 = 全部拒启，剃课程键 = 抖 `course_fp`（课程文件字节，先例：
+    #: 2026-10-09 `workers`）。与 `target_transitions` 同单位 = 已结算 shard 的 nSamples。
+    #: ⚠ 更旧的名字 `est_ticks_per_game`（ticks 填进 samples 分母 = 10× 误采）从来不是字段，
+    #: extra="forbid" ⇒ 照写它在启动期就响亮报错。
     est_samples_per_game: int = 0
     #: 单关单轮局数硬顶（0 = 默认规则：初波 G0 × DEFAULT_GAME_CAP_MULT）。
     #: 防短局 pathological 下局数爆炸；触顶 = 配额未满但停采 + 响亮日志。
@@ -1047,9 +1046,10 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             "seed_rotate": "seed_rotate",
             # 配对 rotateSeed：课程键 → argparse dest（§2；漏映射 = 静默失效，ent_break 前科）
             "paired_rotate_seed": "rotate_seed",
-            # 动态采集三键（缺席 = 老行为：args 走 rl-config/argparse 默认值 0）
+            # 动态采集键（缺席 = 老行为：args 走 rl-config/argparse 默认值 0）
+            # ⚠ `est_samples_per_game` **刻意不在表里**（2026-10-12）：它已死键化，不再进 args。
+            # 漏映射即静默失效是历史前科（ent_break / paired_rotate_seed）——这里是**故意**删。
             "target_transitions": "target_transitions",
-            "est_samples_per_game": "est_samples_per_game",
             "max_games_per_stage": "max_games_per_stage",
             "seeds": "seeds",
             "dodge": "dodge",
@@ -1147,6 +1147,10 @@ DEAD_COURSE_KEYS: dict[str, str] = {
     "workers": (
         "[course] 课程里的 workers 已无读者：并发由机器侧决定"
         "（rl-config rl.workers / courses.<课>.workers / 节点核数）"
+    ),
+    "est_samples_per_game": (
+        "[course] 课程里的 est_samples_per_game 已无读者：局均 samples 由盘上历史派生"
+        "（首轮无历史 = 无估计 ⇒ 按宽度满铺 / 初批每关 1 局），不再需要课程声明"
     ),
 }
 

@@ -56,7 +56,14 @@ def test_retired_keys_are_flagged_with_a_reason() -> None:
             "streamKlCapIntent": 0.5,
             "streamWaveGamesIntent": 200,
         },
-        "rl": {"stream": 0, "double_buffer": 0, "precollect_early": 0, "gate_halt_mode": "notify"},
+        "rl": {
+            "stream": 0,
+            "double_buffer": 0,
+            "precollect_early": 0,
+            "gate_halt_mode": "notify",
+            # 2026-10-12：est 退场成盘上派生量 ⇒ rl 段填它不生效（只告警不拒）。
+            "est_samples_per_game": 147,
+        },
     }
     out = " | ".join(S.check_rl_config(cfg))
     for dotted in (
@@ -70,6 +77,8 @@ def test_retired_keys_are_flagged_with_a_reason() -> None:
         "rl.precollect_early",
         # 2026-10-01：门禁停机模式升平台级（tmp/gate-halt.json）——课程级/rl 键都不再被读。
         "rl.gate_halt_mode",
+        # 2026-10-12：局均 samples 改由盘上历史派生（首轮无历史 = 无估计 ⇒ 不猜）。
+        "rl.est_samples_per_game",
     ):
         assert dotted in out, f"{dotted} 未被点出"
     assert out.count("已退役") == len(S.retired_keys())

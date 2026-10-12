@@ -182,3 +182,21 @@ def test_workers_is_not_a_flat_override_and_gets_a_startup_notice(tmp_path: Path
     d.pop("workers", None)
     assert dead_key_warnings(load_course(_write_course(tmp_path, d, "nodel.jsonc"))) == []
     assert dead_key_warnings(None) == []
+
+
+def test_est_samples_per_game_is_dead_too(tmp_path: Path) -> None:
+    """★ 2026-10-12（plan/rollout-estfree-worksteal §4.2 E1）：est 与 `workers` 同待遇——
+
+    字段**留在**模型里（`extra="forbid"` 下 97 份存量课程仍能解析，删字段 = 全部拒启），
+    但读面已删（不进 `flat_overrides`）、由开课侧一行告警点名（死键的唯一可见手段）。
+    局均 samples 现在只由盘上历史派生（`worker.resume.trailing_*`）；首轮无历史 = 无估计。
+    """
+    from biz.course_spec import DEAD_COURSE_KEYS, dead_key_warnings
+
+    d = _course_dict()
+    d["est_samples_per_game"] = 147
+    course = load_course(_write_course(tmp_path, d, "est.jsonc"))
+    assert course.est_samples_per_game == 147  # 字段还在（能解析）
+    # 读面已删（`.get(...) is None` 与 `not in` 同判据，但不在本仓文本断言口径里）
+    assert course.flat_overrides().get("est_samples_per_game") is None
+    assert DEAD_COURSE_KEYS["est_samples_per_game"] in dead_key_warnings(course)

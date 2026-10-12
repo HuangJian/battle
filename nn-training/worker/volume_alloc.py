@@ -44,6 +44,13 @@ DEFAULT_TOPUP_MAX_BATCHES = 3
 #: 末批（`batches_left == 1`）的 est 折扣：缺口不可恢复、浪费可恢复 ⇒ 末批故意偏保守。
 DEFAULT_LAST_BATCH_LO_FACTOR = 0.85
 
+#: **无估计**（首轮冷启动：est 已从课程/CLI 面退场，盘上又没有历史）时的补差批数上界。
+#: 初批只有「每关 1 局」（`alloc_games_by_stage` 的不猜档），缺口全靠满铺批填 ⇒ 常规的
+#: `DEFAULT_TOPUP_MAX_BATCHES`（3，按「首批已反解到位、只需补残余」标定）不够；这里给的
+#: 是一个**防跑飞**的绝对值（循环本身在 eligible 空时自然退出，见 `spread_games_by_stage`）。
+#: 2026-10-12（plan/rollout-estfree-worksteal §4.1 冷启动表）。
+DEFAULT_TOPUP_MAX_BATCHES_UNKNOWN = 64
+
 
 def _scale(x: int, factor: float) -> tuple[int, int]:
     """`(x × factor × 1000, 1000)`——**定点化**，避免二进制浮点把「恰好整数的界」抬一档。
@@ -56,9 +63,15 @@ def _scale(x: int, factor: float) -> tuple[int, int]:
 
 
 def est_hi(est: int, *, factor: float = DEFAULT_EST_HI_FACTOR) -> int:
-    """`est` 的上界估计 `ceil(est × factor)`（≤0 一律响亮报错：没有估计值就是乱采）。"""
+    """`est` 的上界估计 `ceil(est × factor)`；`est ≤ 0` ⇒ **`0` = 无估计**（不是错误）。
+
+    2026-10-12（plan/rollout-estfree-worksteal §4.1）：est 已从**课程/CLI 面退场**，只剩
+    「盘上历史派生量」一个身份 ⇒ 首轮无历史时它是 `0`。`0` 是**语义值**，往下游传成
+    「每关 1 局」（`alloc_games_by_stage`）与「不设默认硬顶」（`default_game_caps`）；
+    **绝不**在这里被静默抬成某个假估计（反探针③：无历史时又猜了一个 est）。
+    """
     if int(est) <= 0:
-        raise ValueError(f"est_hi 需要 est ≥ 1，得到 {est!r}")
+        return 0
     if float(factor) <= 0:
         raise ValueError(f"est_hi 需要 factor > 0，得到 {factor!r}")
     num, den = _scale(int(est), factor)
@@ -71,17 +84,21 @@ def alloc_games_by_stage(
     *,
     ests_hi: Mapping[int, int],
 ) -> dict[int, int]:
-    """首批：`G_s = max(1, ceil(quota / est_hi_s))`（**逐关独立**，跨关不借额度）。"""
+    """首批：`G_s = max(1, ceil(quota / est_hi_s))`（**逐关独立**，跨关不借额度）。
+
+    `est_hi_s ≤ 0` = **无估计**（首轮冷启动）⇒ 该关 **1 局**（不猜；缺口交给满铺补差批，
+    见 plan/rollout-estfree-worksteal §4.1）。**缺 key** 仍是响亮错误（那是 bug，不是无估计）。
+    """
     stage_list = [int(s) for s in stages]
     if not stage_list:
         raise ValueError("alloc_games_by_stage 需要至少一个 stage")
     quota = target_per_stage(int(target_transitions), len(stage_list))
     out: dict[int, int] = {}
     for stage in stage_list:
-        hi = int(ests_hi.get(stage, 0) or 0)
-        if hi <= 0:
+        if stage not in ests_hi:
             raise ValueError(f"alloc_games_by_stage 缺 stage {stage} 的 est_hi（收到 {ests_hi!r}）")
-        out[stage] = max(1, _ceil_div(quota, hi))
+        hi = int(ests_hi.get(stage, 0) or 0)
+        out[stage] = 1 if hi <= 0 else max(1, _ceil_div(quota, hi))  # hi ≤ 0 = 无估计 ⇒ 不猜
     return out
 
 
@@ -276,7 +293,11 @@ def default_game_caps(
     explicit: int = 0,
     mult: int = 4,
 ) -> dict[int, int]:
-    """逐关局数硬顶：`explicit > 0` 时全关同值；否则 `mult × ceil(quota / est_s)`。
+    """逐关局数硬顶：`explicit > 0` 时全关同值；否则 `mult × ceil(quota / est_s)`（**有估计**的关）。
+
+    `est_s ≤ 0`（首轮冷启动、无估计）⇒ 该关**不设**默认顶（不出现在结果里 = 无顶）：
+    没有估计就不猜一个顶（plan/rollout-estfree-worksteal §4.1）。此时「别再派了」由
+    显式 `max_games_per_stage` 与（切片 P0-b）的 no-progress 守卫承担。
 
     ★ 与 `volume_quota.default_game_cap` 的分工：那个是**单一 est** 的旧口径（本机链历史上
     用全局 est 算 cap），本函数是**分关**版——低 est 的关需要更多局，用全局 est 会让它
@@ -294,7 +315,7 @@ def default_game_caps(
     for stage in stage_list:
         est = int(ests.get(stage, 0) or 0)
         if est <= 0:
-            raise ValueError(f"default_game_caps 缺 stage {stage} 的 est（收到 {ests!r}）")
+            continue  # 无估计 ⇒ 不设默认顶（缺席 = 无顶，两个消费者都认缺席）
         out[stage] = max(1, _ceil_div(quota, est) * int(mult))
     return out
 
@@ -322,9 +343,13 @@ def validate_volume_block_ext(block: object, *, require_runtime: bool = False) -
     missing = [k for k in required if k not in block]
     if missing:
         raise ValueError(f"volume 缺字段: {missing}")
-    int_keys = ("target_transitions", "per_stage_quota", "it", "rotate_seed") if require_runtime else (
-        "target_transitions",
-        "per_stage_quota",
+    int_keys = (
+        ("target_transitions", "per_stage_quota", "it", "rotate_seed")
+        if require_runtime
+        else (
+            "target_transitions",
+            "per_stage_quota",
+        )
     )
     for k in int_keys:
         v = block[k]
@@ -343,8 +368,11 @@ def validate_volume_block_ext(block: object, *, require_runtime: bool = False) -
     if not isinstance(raw_ests, dict):
         raise ValueError(f"volume.est_s_by_stage 必须是对象，收到 {raw_ests!r}")
     for k, v in raw_ests.items():
-        if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
-            raise ValueError(f"volume.est_s_by_stage[{k!r}] 必须是正整数，收到 {v!r}")
+        # 0 = 无估计（首轮冷启动）⇒ 该关 `G_s = 1`（与 `alloc_games_by_stage` 的不猜档同源）。
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            raise ValueError(
+                f"volume.est_s_by_stage[{k!r}] 必须是非负整数（0 = 无估计），收到 {v!r}"
+            )
         ests[int(k)] = int(v)
     missing_ests = [s for s in stages if s not in ests]
     if missing_ests:

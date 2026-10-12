@@ -64,6 +64,22 @@ from worker.reports import combine_reports
 from worker.resume import settled_stage_totals, trailing_samples_per_game
 
 
+def _learned_samples_per_game(samples: int, games: int) -> int:
+    """**本轮自己**已结算的局 → 局均 samples（自校准；`0` = 还学不到/不可用）。
+
+    为什么需要它（plan/rollout-estfree-worksteal §4.1）：est 已从课程/CLI 面退场，首轮连
+    历史都没有 ⇒ 第一小批只能「不猜」（按宽度满铺），而**这一批本身就是最好的标定源**：
+    下一批起 `collected/games` 就是盘上事实，不需要任何估计。
+
+    口径与 `worker.resume.trailing_samples_per_game` 同：只认已结算 shard 的 `nSamples`
+    与**占过名额的局数**（掉局零样本 ⇒ samples=0 ⇒ 返回 0，让调用方继续「不猜」而不是
+    拿一个被瞬时掉局拖低的数去反解局数）。纯函数，无 IO。
+    """
+    g = int(games)
+    s = int(samples)
+    return max(1, round(s / g)) if g > 0 and s > 0 else 0
+
+
 class TrainingVolume:
     """动态采集（按样本量）编排 mixin：初波/补波/连续配额 → 派发 → 报告合并 → WAL。
 
@@ -172,14 +188,17 @@ class TrainingVolume:
         return stages
 
     def _volume_est_samples(self) -> int:
-        """局均 **samples** 估计：jsonl 的 trailing 均值（可 replay），无历史落课程声明值。
+        """局均 **samples** 估计：jsonl 的 trailing 均值（可 replay）；**无历史 ⇒ `0`（无估计）**。
+
+        2026-10-12（plan/rollout-estfree-worksteal §4.1）：课程/CLI 的声明值已退场 —— est
+        只剩「盘上历史派生量」一个身份，首轮无历史是**正常状态**（调用方走「不猜」档：按
+        宽度满铺 / 初批每关 1 局），绝不再拿一个假估计去反解局数。
 
         量纲（2026-09-15 T9）：samples（jsonl 的 `samples` 字段 = nSamples 之和），
         **不是 ticks**——后者差 K 倍（x3 实测 samples/ticks≈0.1007），会让第二轮起
         采量偏离 10×（旧 `trailing_ticks_per_game` 就是这条 bug 的一半）。
         """
-        declared = int(getattr(self.args, "est_samples_per_game", 0) or 0)
-        return trailing_samples_per_game(self._jsonl_path, window=5, fallback=declared)
+        return trailing_samples_per_game(self._jsonl_path, window=5)
 
     def _iteration_pairs(self, it: int) -> list[tuple[int, int]]:
         """本轮对局表：动态采集串行路径**不预排初波**（连续配额实时派发）；其余 build_pairs。
@@ -222,7 +241,7 @@ class TrainingVolume:
         from worker.volume_waves import parse_stages_arg
 
         stages = self._volume_stages()
-        fallback = int(self._volume_est or self._volume_est_samples() or 1)
+        fallback = int(self._volume_est or self._volume_est_samples() or 0)  # 0 = 无估计（首轮）
         raw = str(getattr(self.args, "stages", "") or "")
         try:
             stages = parse_stages_arg(raw) if raw else stages
@@ -306,6 +325,14 @@ class TrainingVolume:
             log("[volume] 流式路径 v1 不补波（保持老语义）——本轮只按初波结算，配额缺口不在本轮补齐")
             return
         if int(getattr(args, "collect_only", 0) or 0):
+            return
+        if int(self._volume_est or 0) <= 0:
+            # 无历史 ⇒ 无局均估计：**不猜**（plan/rollout-estfree-worksteal §4.1）。本波路径本来
+            # 就已被连续配额取代（VOLUME_RULE_V2）；这里响亮拒绝而不是拿一个假值去解缺口方程。
+            log(
+                "[volume] wave 补波：无局均估计（首轮无历史）⇒ 不猜、不补波"
+                "（连续配额路径会按宽度满铺）"
+            )
             return
         import common.distribution
         from worker.volume_waves import (
@@ -447,7 +474,11 @@ class TrainingVolume:
             return
         import common.distribution
         from worker.resume import settled_stage_totals
-        from worker.volume_alloc import VOLUME_ALLOC_RULE, default_game_caps
+        from worker.volume_alloc import (
+            VOLUME_ALLOC_RULE,
+            default_game_caps,
+            spread_games_by_stage,
+        )
         from worker.volume_quota import (
             DEFAULT_MAX_BATCHES,
             continuous_pairs,
@@ -458,7 +489,7 @@ class TrainingVolume:
         stages = self._volume_stages()
         target = int(args.target_transitions)
         quota = target_per_stage(target, len(stages))
-        est_global = int(self._volume_est or self._volume_est_samples() or 1)
+        est_global = int(self._volume_est or self._volume_est_samples() or 0)  # 0 = 无估计（首轮）
         est_s = self._volume_stage_ests_map()
         self._volume_stage_ests = est_s
         # 硬顶**分关**（2026-10-07，plan/rollout-stage-balance §4.2）：课程显式
@@ -467,6 +498,13 @@ class TrainingVolume:
         game_cap = int(getattr(args, "max_games_per_stage", 0) or 0)
         stage_caps = default_game_caps(stages, target, ests=est_s, explicit=game_cap)
         max_batches = int(getattr(args, "volume_max_batches", 0) or DEFAULT_MAX_BATCHES)
+        # 冷启动满铺的「宽度」（plan §4.1）：= 本轮能同时跑的局数上限。顺序 = 本机直跑槽位 →
+        # 机器 workers → 关数（退化：每关 1 局）。取不到也**不猜 est** —— 宁可批小（多一个屏障）。
+        width = (
+            int(getattr(args, "local_slots", 0) or 0)
+            or int(getattr(args, "workers", 0) or 0)
+            or len(stages)
+        )
         course_fp = self._course_fp
         corpus_fp = self._corpus_fp
         extra_wver = self._extra_wver
@@ -489,36 +527,71 @@ class TrainingVolume:
             games_done = {s: int(totals.get(s, (0, 0))[0]) for s in stages}
             # 同步 dispatch：批间无在飞；批内调度器自己竞速。软停用批前账本。
             inflight = {s: 0 for s in stages}
-            plan = plan_continuous_batch(
-                stages=stages,
-                collected=collected,
-                inflight=inflight,
-                target_transitions=target,
-                ests=est_s,
-                games_done=games_done,
-                game_cap=0,
-                fallback_est=est_global,
-                game_cap_by_stage=stage_caps,
+            # 局均估计（plan/rollout-estfree-worksteal §4.1）：① 前几轮的**盘上历史**（est_s）；
+            # ② **本轮自己**已结算的局（自校准 —— 冷启动第一小批之后就有值了）。
+            # 两者都拿不到（首轮第一小批）⇒ **不猜**：按宽度满铺一把（est-free），下一批起重校准。
+            est_s_now = {
+                s: int(est_s.get(s, 0) or 0)
+                or _learned_samples_per_game(collected.get(s, 0), games_done.get(s, 0))
+                for s in stages
+            }
+            est_now = int(est_global or 0) or _learned_samples_per_game(
+                sum(collected.values()), sum(games_done.values())
             )
-            if not plan.games_by_stage:
+            if est_now > 0:
+                plan = plan_continuous_batch(
+                    stages=stages,
+                    collected=collected,
+                    inflight=inflight,
+                    target_transitions=target,
+                    ests=est_s_now,
+                    games_done=games_done,
+                    game_cap=0,
+                    fallback_est=est_now,
+                    game_cap_by_stage=stage_caps,
+                )
+                plan_g = dict(plan.games_by_stage)
+                short_note = {
+                    s: plan.shortfall.get(s, 0) for s in stages if plan.shortfall.get(s, 0)
+                }
+                plan_capped = bool(plan.capped)
+                est_src = "trailing"
+            else:
+                # 无估计（首轮无历史）⇒ 「不猜」档：与云机补差**同一个** est-free 原语满铺。
+                plan_g = spread_games_by_stage(
+                    stages=stages,
+                    collected=collected,
+                    games_done=games_done,
+                    target_transitions=target,
+                    game_caps=stage_caps,
+                    width=width,
+                )
+                short_note = {
+                    s: quota - int(collected.get(s, 0))
+                    for s in stages
+                    if int(collected.get(s, 0)) < quota
+                }
+                plan_capped = False
+                est_src = "cold-start"
+            if not plan_g:
                 break
-            pairs = continuous_pairs(
-                self._rotate_seed, it, plan.games_by_stage, start_idx
-            )
-            for s, n in plan.games_by_stage.items():
+            pairs = continuous_pairs(self._rotate_seed, it, plan_g, start_idx)
+            for s, n in plan_g.items():
                 start_idx[s] = start_idx.get(s, 0) + int(n)
             self._volume_waves += 1
-            short_note = {s: plan.shortfall.get(s, 0) for s in stages if plan.shortfall.get(s, 0)}
             log(
                 f"[volume] it{it}: batch{self._volume_waves} "
-                f"games={plan.games_by_stage}（差额 {short_note} "
-                f"est_s={ {s: est_s.get(s) for s in plan.games_by_stage} }）"
+                f"games={plan_g}（差额 {short_note} "
+                f"est_s={ {s: est_s_now.get(s) for s in plan_g} } src={est_src}"
+                + (
+                    f"，无历史 ⇒ 按宽度 {width} 满铺（不猜 est））"
+                    if est_src == "cold-start"
+                    else "）"
+                )
             )
             wave_report = self._dispatch_volume_wave(it, pairs, dist_cfg)
-            combined = (
-                wave_report if combined is None else combine_reports([combined, wave_report])
-            )
-            if plan.capped:
+            combined = wave_report if combined is None else combine_reports([combined, wave_report])
+            if plan_capped:
                 self._volume_capped = True
 
         wver = common.distribution.weights_fingerprint(args.out)

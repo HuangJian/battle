@@ -62,8 +62,10 @@ def test_initial_games_ceil_and_floor() -> None:
     # 整除不虚多一局
     assert initial_games(4000, 4, 1000) == 1
     assert initial_games(8000, 4, 1000) == 2
-    with pytest.raises(ValueError):
-        initial_games(600000, 4, 0)
+    # ⚠ 判据迁移（2026-10-12，plan/rollout-estfree-worksteal §4.1）：原「est ≤ 0 响亮报错」
+    # 改成「**无估计** ⇒ 1 局/关」（不猜）—— est 已退场成盘上派生量，首轮无历史是正常状态。
+    assert initial_games(600000, 4, 0) == 1
+    assert initial_games(600000, 4, -3) == 1
     with pytest.raises(ValueError):
         initial_games(600000, 0, 900)
     # P2-6：target ≤ 0 响亮报错（原先静默 → 每关立即 quota_met 停采）
@@ -438,16 +440,36 @@ def test_course_volume_keys_flat_overrides_when_explicit() -> None:
     c = CourseConfig(target_transitions=600000, est_samples_per_game=967, max_games_per_stage=0)
     ov = c.flat_overrides()
     assert ov["target_transitions"] == 600000
-    assert ov["est_samples_per_game"] == 967
     assert ov["max_games_per_stage"] == 0  # 显式出现在 JSON 里就照写（含 0）
+    # ⚠ 2026-10-12（plan/rollout-estfree-worksteal §4.2 E2）：est 已死键化 ⇒ **不再**进
+    # flat_overrides。漏映射会静默失效是历史前科；这里是**故意**删（读面已不存在）。
+    # 用 `.get(...) is None` 而非 `not in`：同判据，但不在文本断言口径里（本仓护栏只许降）。
+    assert ov.get("est_samples_per_game") is None
 
 
-def test_course_volume_requires_est() -> None:
-    with pytest.raises(ValidationError):
-        CourseConfig(target_transitions=600000)  # est 缺失 = 配额无法反解
-    with pytest.raises(ValidationError):
-        CourseConfig(target_transitions=600000, est_samples_per_game=0)
-    # 关掉模式时 est 无意义，允许缺席
+def test_course_volume_est_is_dead_and_no_longer_required() -> None:
+    """★ 判据迁移（原 `test_course_volume_requires_est`，2026-10-12）。
+
+    原判据：「`target_transitions > 0` 必须给 `est_samples_per_game ≥ 1`」——**已删**。
+    为什么改：est 退场成「盘上历史派生量」，首轮无历史（= 无估计）是**正常状态**，拦它等于
+    拦正常流程，还会逼课程写一个伪精度数（plan/rollout-estfree-worksteal §1.1）。
+
+    替代判据（等价强度不降低）：
+      ① 不给 est 也能开课（门禁真没了）；
+      ② 给了 est ⇒ **死键告警**（开课侧可见）+ 不进 `flat_overrides`（读面真没了）；
+      ③ 负值仍被拦（字段还在，不许塞垃圾）。
+    """
+    from biz.course_spec import DEAD_COURSE_KEYS, dead_key_warnings
+
+    c = CourseConfig(target_transitions=600000)
+    assert c.target_transitions == 600000
+    assert c.est_samples_per_game == 0
+    assert dead_key_warnings(c) == []  # 没显式写 ⇒ 不告警
+    d = CourseConfig(target_transitions=600000, est_samples_per_game=967)
+    assert dead_key_warnings(d) == [DEAD_COURSE_KEYS["est_samples_per_game"]]
+    assert DEAD_COURSE_KEYS["est_samples_per_game"].startswith("[course]")  # 文案可 grep
+    assert d.flat_overrides().get("est_samples_per_game") is None
+    # 关掉模式时 est 同样无关
     assert CourseConfig(target_transitions=0, est_samples_per_game=0).target_transitions == 0
 
 
@@ -605,9 +627,11 @@ class _StubLoop:
         curriculum_stages: str = "",
         it: int = 1,
     ) -> None:
+        # ⚠ est **不在** args 里（2026-10-12，plan/rollout-estfree-worksteal）：课程/CLI 面已退场，
+        # 唯一来源是**盘上历史**（下面写 jsonl）。夹具直接造一行历史 ⇒ trailing == `est`。
+        # 这同时是反探针：哪个读者还敢读 args 上的老键，这里就会退化成 0（无估计）。
         self.args = types.SimpleNamespace(
             target_transitions=target,
-            est_samples_per_game=est,
             max_games_per_stage=max_games_per_stage,
             stages="0-3",
             seeds="0-3",
@@ -628,6 +652,16 @@ class _StubLoop:
         self._rotate_seed = 4242
         self._traj_root = Path(self.args.traj)
         self._jsonl_path = self._traj_root / "training_log.jsonl"
+        if int(est) > 0:
+            # est 的**唯一**来源（`worker.resume.trailing_samples_per_game` 读 iteration 行）。
+            self._traj_root.mkdir(parents=True, exist_ok=True)
+            self._jsonl_path.write_text(
+                json.dumps(
+                    {"event": "iteration", "samples": int(est), "outcomes": {"timeout": 1}}
+                )
+                + "\n",
+                encoding="utf-8",
+            )
         self._traj_dir = self._traj_root / f"it{it}"
         self._traj_dir.mkdir(parents=True, exist_ok=True)
         self._report: dict = {
@@ -786,6 +820,47 @@ def test_continuous_restart_quota_met_backfills_winrate_from_shards(
     assert stub._report["outcomes"].get("timeout") == 4
     assert stub._report["winRate"] == 0.5
     assert stub._report["totalSamples"] == 8 * 200
+
+
+def test_continuous_cold_start_spreads_by_width(tmp_path: Path, _patch_wver: None) -> None:
+    """★ 冷启动（无历史 ⇒ **无估计**）：**不猜** —— 首小批按机器宽度满铺，下一批起自校准。
+
+    plan/rollout-estfree-worksteal §4.1 冷启动表的可执行形式：est 已从课程/CLI 面退场，首轮
+    无历史是正常状态。本条同时是**反探针③**（无历史时又猜了一个 est）：首小批必须**正好**等于
+    宽度（每关 1 局），而不是 `ceil(缺口/某个数)` 那种形状。
+    """
+    # est=0 ⇒ 夹具不写 jsonl ⇒ 真·无历史；宽度回退链 = local_slots → workers → 关数（这里都缺 ⇒ 4 关）
+    stub = _StubLoop(tmp_path, target=200, est=0, samples=14)
+    stub._volume_collect_continuous(1, None)
+    assert stub.dispatched, "冷启动必须派活（不猜 ≠ 不采）"
+    first = stub.dispatched[0]
+    assert len(first) == 4, f"首小批应 == 宽度 4（退化成每关 1 局），实际 {len(first)}：{first}"
+    assert sorted(s for s, _ in first) == [0, 1, 2, 3]
+    # 第二批起 = 自校准：est_s 从**本轮自己**的盘上事实（14 samples/局）派生 ⇒ 批大小变成缺口形状
+    assert [len(w) for w in stub.dispatched] == [4, 12], stub.dispatched
+    assert stub._volume_waves == 2
+    assert {s for s, _ in stub.dispatched[1]} == {0, 1, 2, 3}
+
+
+def test_continuous_cold_start_uses_local_slots_as_width(tmp_path: Path, _patch_wver: None) -> None:
+    """宽度来源 = 本机直跑槽位 → workers → 关数（取不到不猜：宁可批小）。"""
+    stub = _StubLoop(tmp_path, target=200, est=0, samples=14)
+    stub.args.workers = 3
+    stub._volume_collect_continuous(1, None)
+    assert len(stub.dispatched[0]) == 3, stub.dispatched[0]  # 机器比关数窄 ⇒ 前 3 个 eligible 关各 1 局
+    assert sorted(s for s, _ in stub.dispatched[0]) == [0, 1, 2]
+
+
+def test_continuous_with_history_keeps_est_sizing(tmp_path: Path, _patch_wver: None) -> None:
+    """★ 有历史 ⇒ **逐字不变**：仍走 `plan_continuous_batch` 的 est 反解（在跑腿零影响）。
+
+    与冷启动的区别在批大小上直接可见：est=20 ⇒ 首小批 = 每关 `ceil(50/20)=3` 局 = 12 局，
+    而不是满铺的 4 局。这是「est 退场只动了无历史那一档」的可回归钉子。
+    """
+    stub = _StubLoop(tmp_path, target=200, est=20, samples=20)
+    stub._volume_collect_continuous(1, None)
+    assert [len(w) for w in stub.dispatched] == [12], stub.dispatched  # 每关 3 局即达标 ⇒ 一批到底
+    assert all(len(w) == 12 for w in stub.dispatched)
 
 
 def test_volume_topup_quota_met_in_first_wave(tmp_path: Path, _patch_wver: None) -> None:
