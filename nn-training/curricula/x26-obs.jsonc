@@ -1,0 +1,158 @@
+// 课程 x26-obs —— obs-v5 观测补齐后的第一条 ladder 腿（由 x25-obs-v5 未开课改名而来）。
+// 规格来源 = plan/obs-v5-vector-gap.plan.md §3-S8（本文件是该 plan 唯一
+// 留给人的交付物；**开课 = 人在控制台点，agent 不开训**）。
+//
+// 立项 → 用户 2026-10-12 指令：把「决策时不可从现有观测量推导」的缺口一次补齐
+//   （贴脸/敌速/卡位/基地感知向量）。症状→新维映射见 plan 附录 A（D08/D05/D04/D03/W07/W10）。
+//   用户同日追加：课程改名 x26-obs、`target_transitions` 减半、按人类语料＋it220 表现复核奖励。
+//
+// ── 变量声明（相对 x24-stack7-burst 改三样，诚实记账）─────────────────────────
+//   ① 观测集（extra 9→37、scalars 30→40）＋ value 头改吃 pf（128→165）；
+//   ② `target_transitions` 49152 → 24576（减半；优化器其余键一律不动）；
+//   ③ 奖励去死税一项：删 `- wBurst*damageBursts`（wBurst 6.0→0 落地为删项，见下节复核）。
+//   ⇒ x25 设想的「干净观测单变量比较」已被 ②③ 取代（用户令，开课前未跑，无沉没账本）；
+//   x26 与 x24 峰的比较是三变量混杂，G0/G5/G3 照判，不多 claims。
+//   相对 x25（未开课）：只差 ②③；obs/schema/起点/mirror/A6 结论全继承。
+//
+// ── 奖励复核（2026-10-12，用户令；证据见行内，不动 G0 阈值）────────────────────
+//   删 wBurst：x24 结论①单变量判阴——300 轮目标零漂移，damageBursts 均值 0.4/局、
+//   ~60% 局为零，稀疏事件税教不动高频躲避（与 S3 死于 K3 稀疏线同构）。留着只剩
+//   advantage 噪声（塑形负荷 24%→~16%），删项删参（dist 腿先例：公式可不带 wBurst）。
+//   留 wDist=1.8：dist 腿判死的是**加价方向**（1.8→2.5 无结构性转移，不再以任何剂量复测），
+//   不是基线 1.8；砍基线是未经验证的新方向，不动。
+//   留 wMiss/wAcc（0.158/15.3）：人类命中 0.78 vs NN ~0.58、多喷 30–100%（§71），方向对；
+//   手段刚到（blk×4/myBullets 可见了），先看手段生效再谈加价。
+//   留 wDmg/wHurt/wThreat（0.03/110/80）：人类承伤 ~30/千tick vs NN ~150–230，方向对；
+//   pDmg/maxD120 在 x24 纹丝不动判的是手段缺（tti×4 刚补上），不是价格错。
+//   留 wBlock=110：罚的是「顶墙推」（idle−STOP），人类式 33% 无输入停多走 STOP 不挨罚；
+//   s30+corr 手段刚到，不动。
+//   留 wEncl/wCorner/wNearSq（8.6/55/28）：人类被包围差距全在多敌分档，enclWeight 本就
+//   n≥2 才计（§71 读法①同构）；不动。
+//   留 wPickup/wApproach（3.0/0.008）＋ wKill/wHit（3.0/0.6）＋ wFr×3（2/2/3）：人类 vs NN
+//   拾取 1.41 vs 1.28 持平、中段击杀率持平（oldparams：gap 全是“活得短”），无定价信号，不动。
+//
+// ── 起点（§2.7 迁移；x26 沿用 x25 已转出的 it0，改名仅 mv，字节不变）─────────
+//   x24 峰 burst-it220（`x24-stack7-burst.it220.20261012-040859.json`，sha16
+//   `caf9e8749fdad70d`，DECISIONS §2026-10-12-goalnn-burst220-crown）经
+//   `worker/scripts/init_spatial_leg.py --policy-extra --allow-partial-init` 转出
+//   （f3a42dd 后代码；转时 --to 为 x25 路径，实测命令见 memory 2026-10-12）：
+//     bash tools/githook/nn-py-safe.sh nn-training/worker/scripts/init_spatial_leg.py \
+//       --from nn-training/weights/x24-stack7-burst/x24-stack7-burst.it220.20261012-040859.json \
+//       --to nn-training/weights/x26-obs/x26-obs.it0.json \
+//       --policy-extra --allow-partial-init
+//   列迁移：fc 拷 94 列；move/fire 拷 137 列（hidden 128 + 旧 extra 9）；value 拷前 128 列；
+//   新列 `normal_(0,0.01)` 逐元素独立（f3a42dd 修过广播 bug，跨行不全等已验）。
+//   转出回执：params 71792（= plan §2.7 腿 A 预测值）、`warmstart_missing=[]`、
+//   `warmstart_partial` 四张、schema_major 5；产物 sha16 `6f32a17362cbe5ab`
+//   （改名前后同值，mv 不碰字节；meta 内无输出路径，改名干净）。
+//   ⚠ 架构身份的**单一来源 = 权重文件的 arch**（`policyExtra:true` ⇒ 头 165 / value 165）；
+//   课程文件不写任何架构键。缺标志 ⇒ `build_ppo` 静默建旧架构 ⇒ 头与 extra 张量错位。
+//   ⚠ `nn-training/weights/**/*.json` 在 .gitignore ⇒ 起点权重**不入库**，只拷 backup_dir + 记 sha16。
+//
+// ── 门（plan §5 预注册；阈值出处 = 用户指令，非教师天花板）────────────────────
+//   G0 毕业（主）：ladder 通关率点估计 ≥80% 且 CI 下界 ≥75%（800 局起，池外段；
+//                  地板内加 1600）。过 ⇒ 转专场（障碍＋基地，另起 plan）。
+//   G5 总账（次）：通关率/杀敌任一显著正且另一不显著负（非劣护栏，**不得**替代 G0）。
+//   G3 导航能力判据（A6 已命中降级条件：blk 对向 −0.93，空旷场结构性共线；W07 只报数，
+//   不再当 B 类独立归因；plan §5 r11）。
+//   ⚠ G0 只证明「空旷场打到 80%」——corr/blk/wallDist 在空旷场退化共线、基地 14 列恒常量，
+//     三语义留专场重验（plan §1.2）。
+//   起点参照（**只作 Δ 的锚，不判门**）：burst-it220 日常 ~0.51 / 拼池 0.567。
+//
+// ── A6 开销探针（已落地 f837ead2，cap 2 已实现）─────────────────────────────
+//   ① encode +2.8%（extra 家族 0.44→1.44µs）/ myBullets p99=1 ⇒ cap 已取 /2；
+//   ② rollout 墙钟 +1.2%（≤+5% 线）；③ BC 切片未做（本机无 BC 语料，留人）；
+//   ④ 相关命中 G3 降级条件（见上）。砍维序保留：myBullets → wallDist → laneE×4 → tti×4；
+//   **禁砍** corr/blk/pickup×3/cornerDist/基地族/s38/s39。砍维 = 改 schema ⇒ 重走 S1 起。
+//
+// ── 训练设置（x24 配方只动 batch；优化器键全冻结）────────────────────────────
+//   `target_transitions` 49152 → **24576**（用户令减半；余下 lr/epochs/mb/normalize_ret/
+//   gamma/lam/ppo_schedule/decision_*/iters/max_hours/eval_* 一字不动——再动就是第四变量）。
+//   含义：~167 局/iter、300 iter 共 ~7.4M transitions，墙钟约减半；batch 是 KL 稳定器
+//   （§15.5/§15.4），每 update 必读 kl/entropy/value/gnorm，KL 早飘的第一杠杆 = 恢复 batch，
+//   不调别的（单杠杆纪律）。
+//   `workers` 是**机器侧死键**（plan/course-workers-removal），保留只为存量兼容。
+//   进自家流：`paired_rotate_seed` **20261020 不变**（x25 冻结后从未开课，流是处女流；
+//   与 x24 的 20261015 不同流——观测换代不复用旧流；跨腿比较走 eval 段，不走 train 流）。
+//
+// ── 起点纪律（plan §3-S8 收尾）───────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c20-lives1`：stages/difficulty/max_ticks/player）⇒
+//     课程**不重复**这些键；`stages` 也不写（采样关 = level 的 4 个自定义关 = 2000–2003）。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume
+//     （warm-start 态：`model_build.py` 的 warm_start_normalize 会做 trunk/logit 校准）。
+//   · §15.5 新实验：新 out/traj + backup 新目录 + opt fresh，**不**与 x24 账本续跑。
+{
+  "version": 5,
+  "name": "x26-obs",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 28.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：burst-it220 → v5 腿 A 迁移产物（x26 沿用，改名仅 mv；sha 见头注）──
+  "bc": "nn-training/weights/x26-obs/x26-obs.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令，与 x24 同）：margin_pp 100 = 等效关。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 300,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 自家流（开腿前冻结；与 x24 的 20261015 刻意不同流）。
+  "paired_rotate_seed": 20261020,
+
+  "decision_events": false,
+  // K=10（与 x24 同；K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/x26-obs/weights.json",
+  "traj": "tmp/x26-obs",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x26-obs",
+  "backup_prefix": "x26-obs",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

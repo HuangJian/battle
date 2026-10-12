@@ -1,0 +1,127 @@
+// 课程 x26-tower —— x26-obs 的并行架构对照腿：腿 B（空间塔，头 189）。
+// 规格来源 = 本头注＋plan/obs-v5-vector-gap.plan.md §2.6–§2.7（agent 只给文件，
+// **开课 = 人在控制台点**）。
+//
+// 立项 → 用户 2026-10-12：单 GPU 双 24k 腿墙钟≈单腿（GPU 交叠纠正），第二腿验证
+//   obs-v5 另一半（腿 B 在 ladder 可训、与环境无关；r6 单腿指令由本次用户拍板 override）。
+//   corr/blk/基地族仍等 G0 后专场（两阶段不动）。
+//
+// ── 单变量声明（相对 x26-obs 只差架构；trunk 同源，对照收紧）───────────────
+//   腿 B：tower 112＋scalars 40＋extra 37 ＝ 头 189，value 同吃 pf（189）；
+//   起点是另一份 it0（burst220 经 A→B 映射，见下节）——架构不同起点必然不同，但两腿
+//   trunk（stem/blocks/全部偏置/fc 前 94 列，共 35 键）与 burst220 **逐位等**，差异只剩
+//   tower 路径＋头新列＋冷 value。对照比“各自 lineage”干净一个量级。
+//   除此之外 batch/奖励/流/优化器/eval 逐键同 x26-obs（已脚本对账）。
+//   本腿回答：塔有没有用（跨架构对照），不是第二份 ladder 答案。
+//
+// ── 起点（A→B 映射：旧 extra9 一段拷＋其余全重 init；value 冷启动已知）────────
+//   与 x26-obs **同一源** burst-it220（`caf9e8749fdad70d`）经
+//   `--policy-extra --spatial-tower --allow-partial-init` 转出（源族按旧头宽自动识别，
+//   137 = 腿 A，见 `init_spatial_leg.py::_LEG_A2B_SEGMENTS`）：
+//     bash tools/githook/nn-py-safe.sh nn-training/worker/scripts/init_spatial_leg.py \
+//       --from nn-training/weights/x24-stack7-burst/x24-stack7-burst.it220.20261012-040859.json \
+//       --to nn-training/weights/x26-tower/x26-tower.it0.json \
+//       --policy-extra --spatial-tower --allow-partial-init
+//   旧 extra9 [128..136] → 新 extra 0–8 [152..160] 逐位等（hidden 在新 pf 无槽）；
+//   tower 112＋新 s30–39 [142..151]＋新 extra 9–36 [161..188] 共 180 列重 init；
+//   fc 拷 94＋init 10；value [1,128]→[1,189] **全重 init**（旧吃 h、新吃 tower 起头的 pf）。
+//   转出回执：params 86952（= §2.6 腿 B 预测值）、missing=[塔四键＋value]（塔是架构缺失，
+//   value 是换形未迁）、partial=[fc＋两头]、schema_major 5；产物 sha16 `520c1b0811439071`；
+//   旧列逐位等＋新列跨行差异＋strict 装载已验（memory 2026-10-12）。
+//   ⚠ 冷 critic：早期 value loss 高是预期的，判腿看 policy/KL/kills，不看 value loss。
+//   ⚠ 架构身份单一来源 = 权重 arch（`spatialTower:true` ⇒ 头/value 189）。
+//
+// ── 门（本腿判据＋终点跨架构合判）───────────────────────────────────────────
+//   it40 硬门：kills ≥12.8（ladder 锚 15.1×0.85，架构不该把杀崩了）＋ it30–40 mean KL
+//   ≤0.2（schedule 自带 kl_cap）。fail ⇒ **杀腿**＋控制台自动 halt（x24 overrun 教训）。
+//   终点：与 x26-obs 同判 G0（主）/G5（次）/G3（导航能力）＋跨架构对照（同流同 eval 可比）；
+//   接近才加 McNemar 拼池，不接近不加戏。
+//   起点参照（只作 Δ 的锚）：与 x26-obs 同源（burst220），对照锚 = x26-obs 同期读数。
+//
+// ── 盯盘（§15.4）───────────────────────────────────────────────────────────
+//   每 update 必读 kl/entropy/value/gnorm；kills −15% 即掐。value loss 高开局属正常
+//   （冷 critic），只盯 policy KL＋kills。
+//
+// ── 训练设置（x26-obs 逐键相同，只换架构起点与账本路径）──────────────────────
+//   batch 24576（与 x26-obs 同；24k 前课已证充分，不加量）。`workers` 机器侧死键保留。
+//   进自家流：`paired_rotate_seed` 20261020（家族同流，x24 burst/dist 共享 x23 流先例）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c20-lives1`），课程**不重复** `stages` 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj + backup 新目录 + opt fresh，不碰 x26-obs 账本。
+{
+  "version": 5,
+  "name": "x26-tower",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 28.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：v5 腿 B 迁移产物（分段映射＋value 冷启动；sha 见头注）──
+  "bc": "nn-training/weights/x26-tower/x26-tower.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令，与 x24/x26-obs 同）：margin_pp 100 = 等效关；it40 门熔断由控制台挂。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 300,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "est_samples_per_game": 147,
+  "seed_rotate": 150,
+  // 家族同流（与 x26-obs 同 20261020）。
+  "paired_rotate_seed": 20261020,
+
+  "decision_events": false,
+  // K=10（与 x24/x26-obs 同；K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/x26-tower/weights.json",
+  "traj": "tmp/x26-tower",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x26-tower",
+  "backup_prefix": "x26-tower",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
