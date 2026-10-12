@@ -1,4 +1,6 @@
 // 课程 x26-tower —— x26-obs 的并行架构对照腿：腿 B（空间塔，头 189）。
+//
+// 状态：已结课（2026-10-12 收官；it206 双杀，用户拍板。结论见尾部结课报告）。
 // 规格来源 = 本头注＋plan/obs-v5-vector-gap.plan.md §2.6–§2.7（agent 只给文件，
 // **开课 = 人在控制台点**）。
 //
@@ -50,6 +52,17 @@
 //   · 环境键全在 level（`ladder-c20-lives1`），课程**不重复** `stages` 等键。
 //   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
 //   · §15.5 新实验：新 out/traj + backup 新目录 + opt fresh，不碰 x26-obs 账本。
+//
+// ── 结课报告（2026-10-12 收官；it206 双杀，用户拍板，DECISIONS double-kill）───
+//   跑量：rollout it1–205（halted 0/dropped 0；job_rejected＋lease-orphan-reaped 各一，
+//   infra 侧噪声，未伤记账）；eval it0–205 共 42 点 16600 局（it0 200 局＋41×400 局）。
+//   终点：0/0 → 末点 it205 0.2525/10.77，末 3 均 0.25/10.48，pooled 0.155±0.0055/9.05±0.10；
+//   it160 后 0.21–0.31 平台。KL 0.008–0.017、entropy 1.33→0.90 全程健康。
+//   门：it40 kills 8.57 < 12.8——门对冷启动误标（起点 0/0，要求 12.8 无道理），不执行，
+//   改判曲线；G0 远。跨架构 A（0.50/14.1）>> B（0.25/10.8）。
+//   结论：塔可训（零起单调爬升 160 轮），但慢、无优越信号；pDmg 240–268 高位（杀多了
+//   挨打多，暴露管理未跟上，意料内）。
+//   证据：tmp/x26-tower/eval_log.jsonl＋training_log.jsonl＋末权重 it205。
 {
   "version": 5,
   "name": "x26-tower",

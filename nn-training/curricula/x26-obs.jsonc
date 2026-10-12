@@ -1,4 +1,6 @@
 // 课程 x26-obs —— obs-v5 观测补齐后的第一条 ladder 腿（由 x25-obs-v5 未开课改名而来）。
+//
+// 状态：已结课（2026-10-12 收官；it206 双杀，用户拍板。结论见尾部结课报告）。
 // 规格来源 = plan/obs-v5-vector-gap.plan.md §3-S8（本文件是该 plan 唯一
 // 留给人的交付物；**开课 = 人在控制台点，agent 不开训**）。
 //
@@ -81,6 +83,20 @@
 //   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume
 //     （warm-start 态：`model_build.py` 的 warm_start_normalize 会做 trunk/logit 校准）。
 //   · §15.5 新实验：新 out/traj + backup 新目录 + opt fresh，**不**与 x24 账本续跑。
+//
+// ── 结课报告（2026-10-12 收官；it206 双杀，用户拍板，DECISIONS double-kill）───
+//   跑量：rollout it1–207 零事故（halted 0/dropped 0）；eval it0–205 共 42 点 16600 局
+//   （it0 200 局＋41×400 局，同 400 局 seed 全同，可比）。
+//   终点：末点 it205 0.4975/14.13，末 3 均 0.5125/14.32，pooled 0.4804±0.0076/13.83±0.10；
+//   起点 it0 0.535/14.49。净 −3.75pp/−0.36（起点 n=200，SE 内持平 ⇒ 零净增益）。
+//   门：G0 远（80% 差 30pp，x24 先例 300 轮 +5pp）；it150 检查线②挂（value 新列 rms
+//   0.30→0.36 仍膨胀）即杀；KL 0.011–0.019、entropy 0.57–0.68 全程健康，无塌。
+//   结论①（机制）：冷 critic 新 37 列 rms 0.0086→0.36（35x→42x），旧列 drift 仅 0.03；
+//   plan §2.6“无用则学小”在 value 头被证伪（policy/fc 新列仅 2–7x，benign）。
+//   轨迹 = 创伤（it90 0.40）→部分恢复（it95–125 回 0.545 带）→平台，无分红。
+//   结论②（obs-v5 ladder 答案）：新维 ladder 零可测分红；pDmg 持平，burst/maxD120
+//   小幅走坏（无 burst 税，预期内）；tower 对照腿见 x26-tower 头注。
+//   证据：tmp/x26-obs/eval_log.jsonl＋training_log.jsonl＋末权重 it207。
 {
   "version": 5,
   "name": "x26-obs",
