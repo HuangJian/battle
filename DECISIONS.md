@@ -4702,6 +4702,30 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 - **后果**：课程文件状态行 → 已结课；停训由人在控制台执行（agent 不开/停训）。
 —— 全文 → `nn-training/curricula/x24-stack{5,6}.jsonc` 尾部结课报告
 
+## §2026-10-12-goalnn-burst220-crown（2026-10-12，burst-it220 弑君+卫冕加冕 + stack7 双腿结课）
+
+- **背景**：stack7 双腿 it300 收官。burst 腿 it40 门 1/2（burst↑ fail / kills pass），
+  overrun 至 300，终点目标指标零漂移（burst pooled 0.488 斜率≈0）；dist 腿 it40 门
+  panel 双 fail（A06 0.6000→0.6017 / A07 0.2168→0.2075），overrun 至 300，终点仍反向
+  （A06 +0.018 / A07 −0.012，中位）。两腿日常三峰各三（burst：it220/it80/it265；
+  dist：it215/it265/it60，SE 内皆持平）。
+- **决定**：① burst-it220 加冕现役最优（用户裁定）：弑君战 1600 对 0.5550 vs s4-it180
+  0.4913（+6.38pp，χ²cc 12.14，p≈0.0005，两段同向，kills +0.83）+ 卫冕战 1600 对
+  0.5669 vs dist 三峰（−6.00pp 显著胜 it215 / −3.81pp marginal 胜 it60 / −1.25pp 平
+  it265），四战未尝败绩，跨四新段复现 ~0.56；② stack7 双腿结课归档：burst 税判阴
+  （稀疏税教不动）、dist 远杀补贴路线退场（稀疏病证实，不再复测）；后继基线改挂
+  burst-it220（sha16 `caf9e8749fdad70d`）。
+- **备选与否决**：① 跑 vs fore-it335 统一战 —— 否（用户令不跑；王位按直接对战序列改挂，
+  fore-it335 的 414xxx 系读数保留作史实，§84"再议"关闭）；② it265（对 burst 平局）
+  列加冕候选 —— 否（平局无挑战资格）；③ dist 腿拼池 vs s4 —— 否（panel 已判死方向，
+  拼池只复述 null）；④ 两腿门后 overrun 的 260 轮追认有效 —— 否（记为程序瑕疵，下次
+  门配自动 halt）。
+- **后果**：两课程文件状态行 → 已结课 + 尾部结课报告；现役最优链挂到 burst-it220；
+  王位统一战不再欠账。
+—— 全文 → `nn-training/curricula/x24-stack7-{burst,dist}.jsonc` 尾部结课报告 ·
+  证据 `tmp/burst-crown-4166|4174/rows.jsonl` + `tmp/dist-crown-4152|4156/rows.jsonl` +
+  `tmp/panel-dist-{it0,it40,it300}.jsonl`
+
 ## §2026-10-12-goalnn-offline-start-checkpoint（2026-10-12，离线腿起点 checkpoint 的 `it` 错位：起点单源化 + 播种先于补传腿 + 补传 409 冲突闸；plan/offline-start-checkpoint-it-collision + 首轮评审 F1–F6）
 
 - **背景**：x24-stack5 事故（2026-10-11）——自主 worker 领课后 **it1 的真训练结果永不到 hub**：
