@@ -217,6 +217,60 @@ def test_leg_b_segmented_migration(tmp_path: Path) -> None:
     load_state_into(model, str(dst))
 
 
+def test_leg_a_to_b_migration_extra9_segment(tmp_path: Path) -> None:
+    """⑦ 腿 A 源（头 137）→ 腿 B：旧 extra9 拷进新 [152:161]，其余全重 init。
+
+    新 pf `[tower 0–111 | s40 112–151 | extra37 152–188]` 里旧头只有 extra9 有对应槽
+    （hidden 128 在新 pf 无槽）；fc 照旧拷 94；value 无前缀、全重 init（仍在 missing）。
+    """
+    torch.manual_seed(14)
+    src = _truncate_tail(
+        _saved(tmp_path / "legA2B-v4.json", PPOStudent(policy_extra=True)),
+        {"fc.weight": 94, "move_head.weight": 137, "fire_head.weight": 137, "value_head.weight": 128},
+    )
+    dst = tmp_path / "legA2B-v5.json"
+    info = convert(
+        str(src), str(dst), policy_extra=True, spatial_tower=True, legacy_arch=False, seed=8
+    )
+    assert sorted(info["warmstart_missing"]) == [
+        "spatial_fc.bias",
+        "spatial_fc.weight",
+        "spatial_proj.bias",
+        "spatial_proj.weight",
+        "value_head.weight",
+    ]  # 腿 A 源本就没有塔：塔四键是架构缺失（构造 seed 随机 init），value 是换形未迁
+    assert info["warmstart_partial"] == ["fc.weight", "fire_head.weight", "move_head.weight"]
+    old = load_weights_json(str(src), allow_legacy_schema=True)[1]
+    new = load_weights_json(str(dst))[1]
+    assert torch.equal(new["fc.weight"][:, :94], old["fc.weight"][:, :94])
+    for name in ("move_head.weight", "fire_head.weight"):
+        # 唯一有对应槽的旧列：extra9 [128:137] → [152:161] 逐位等
+        assert torch.equal(new[name][:, 152:161], old[name][:, 128:137]), f"{name} extra9 段不是逐位等"
+        # 其余 180 列全重 init：量级对＋跨行有差异
+        rest = torch.cat([new[name][:, :152], new[name][:, 161:]], dim=1)
+        assert rest.shape[1] == 180
+        assert float(rest.abs().max()) <= 0.05, f"{name} 新列量级过大"
+        assert not torch.equal(rest, rest[0:1].expand_as(rest)), f"{name} 新列跨行全同"
+    assert new["value_head.weight"].shape[1] == 189
+    assert float(new["value_head.weight"].abs().max()) <= 0.05
+    model = build_ppo(str(dst))
+    assert model.spatial_tower is True
+    load_state_into(model, str(dst))
+
+
+def test_leg_b_from_legacy_source_is_refused(tmp_path: Path) -> None:
+    """腿 B 源必须是 151（v4 腿 B）或 137（v4 腿 A）宽——legacy 系（128）响亮拒绝。"""
+    src = _legacy_source(tmp_path)  # 头 128：hidden 有槽对不上（新 pf 无 hidden 槽）
+    with pytest.raises(SystemExit):
+        convert(
+            str(src),
+            str(tmp_path / "x.json"),
+            policy_extra=True,
+            spatial_tower=True,
+            legacy_arch=False,
+        )
+
+
 def test_migration_rejects_unexpected_shape(tmp_path: Path) -> None:
     """⑥ 形状既非同行、也非合法「宽−n/分段」⇒ 响亮拒绝（不静默错位）。"""
     torch.manual_seed(13)

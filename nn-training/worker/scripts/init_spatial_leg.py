@@ -28,15 +28,17 @@ obs-v5（plan/obs-v5-vector-gap.plan.md §2.7）：起点宽了 —— pf 137→
 ⚠ warm-start 是**显式开关**（`--allow-partial-init`）：不写就拒绝旧 schema 权重
 （strict/部署态），防静默随机初始化（plan §4-S0c 三态表）。
 
-用法（必须走 nn-py-safe.sh；下例即 x25 的起始腿：x24 峰 burst-it220 → v5 腿 A）：
+用法（必须走 nn-py-safe.sh；下例即 x26 的起始腿：x24 峰 burst-it220 → v5 腿 A）：
   bash tools/githook/nn-py-safe.sh nn-training/worker/scripts/init_spatial_leg.py \
     --from nn-training/weights/x24-stack7-burst/x24-stack7-burst.it220.*.json \
-    --to nn-training/weights/x25-obs-v5/x25-obs-v5.it0.json \
+    --to nn-training/weights/x26-obs/x26-obs.it0.json \
     --policy-extra --allow-partial-init
 
   · 源必须是同族旧档：腿 A 要求 v4 **policy_extra** 系（头 137 = hidden 128 + 旧 extra 9，
     value 128）——legacy 系（头 128、无 extra 列）会被响亮拒绝；腿 B 要求 v4 腿 B 系
-    （头 151 = tower 112 + scalars 30 + 旧 extra 9，value 128）。偏移表只认这两种宽度，
+    （头 151 = tower 112 + scalars 30 + 旧 extra 9，value 128）**或 v4 腿 A 系**
+    （头 137：只拷 extra9 → 新 [152..160]，hidden 在新 pf 无槽，其余全重 init；
+    源族按旧头宽自动识别，137/151 之外一律拒绝）。偏移表只认这些宽度，
     不是任意旧 schema 都能吃；
   · 腿 B 加 --spatial-tower（头 189）；A0 对照组用 --legacy-arch 代替两者（A0 源才用 v3 hu150 系）.
 """
@@ -90,6 +92,15 @@ _MIGRATION_LEG_B: dict[str, tuple[str, Any]] = {
     "fc.weight": ("drop", _SCALAR_DELTA),
     "move_head.weight": ("segments", _LEG_B_SEGMENTS),
     "fire_head.weight": ("segments", _LEG_B_SEGMENTS),
+}
+# 腿 A 源（头 137 = `[hidden 0–127 | extra 128–136]`）→ 腿 B（189）：
+# 只有 extra9 有对应槽（新 extra 0–8 = [152..160]）；hidden 在新 pf 无槽（新 pf 以
+# tower 开头），tower/scalars/新 extra 180 列全重 init。value 同腿 B：无前缀，全重 init。
+_LEG_A2B_SEGMENTS: tuple[tuple[int, int, int], ...] = ((128, 152, 9),)
+_MIGRATION_LEG_A2B: dict[str, tuple[str, Any]] = {
+    "fc.weight": ("drop", _SCALAR_DELTA),
+    "move_head.weight": ("segments", _LEG_A2B_SEGMENTS),
+    "fire_head.weight": ("segments", _LEG_A2B_SEGMENTS),
 }
 
 
@@ -190,8 +201,24 @@ def convert(
     model = PPOStudent(policy_extra=policy_extra, spatial_tower=spatial_tower)
     not_loaded = load_state_into(model, src, allow_legacy_schema=True)
     # obs-v5 列迁移（§2.7）：换形张量不是「缺失」，而是「拷旧列 + 新列 0.01 初始化」。
-    table = _MIGRATION_LEG_B if spatial_tower else _MIGRATION_LEG_A if policy_extra else _MIGRATION_LEGACY
+    # 腿 B 的源按旧头宽自动识别（宽即族 identity）：151 = v4 腿 B（三段）/ 137 = v4 腿 A
+    # （extra9 一段）；其他宽（legacy 128 等）响亮拒绝——hidden 在新 pf 无槽，静默全重 init
+    # 会伪装成“迁移成功”。识别在读数之后、迁移之前，判据只看形状，不看文件名。
     _, params = load_weights_json(src, allow_legacy_schema=True)
+    if spatial_tower:
+        old_head = params.get("move_head.weight")
+        old_cols = old_head.shape[1] if old_head is not None and old_head.ndim == 2 else -1
+        if old_cols == 151:
+            table = _MIGRATION_LEG_B
+        elif old_cols == 137:
+            table = _MIGRATION_LEG_A2B
+        else:
+            raise SystemExit(
+                f"拒绝：腿 B 源 move_head 宽 {old_cols} ≠ 151（v4 腿 B）/ 137（v4 腿 A）"
+                "（hidden 在新 pf 无槽，不接受其他族）"
+            )
+    else:
+        table = _MIGRATION_LEG_A if policy_extra else _MIGRATION_LEGACY
     gen = torch.Generator().manual_seed(seed)  # 与模型 init 分开 ⇒ 新列可复现
     partial = _migrate_columns(model, params, table=table, gen=gen)
     not_loaded = [k for k in not_loaded if k not in partial]
@@ -223,7 +250,7 @@ def convert(
 
 def main() -> None:
     ap = house_parser()
-    ap.add_argument("--from", dest="src", required=True, help="起点权重（腿 A 要 v4 policy_extra 系，腿 B 要 v4 腿 B 系，A0 要 v3 hu150 系）")
+    ap.add_argument("--from", dest="src", required=True, help="起点权重（腿 A 要 v4 policy_extra 系，腿 B 要 v4 腿B/腿A 系，A0 要 v3 hu150 系）")
     ap.add_argument("--to", dest="dst", required=True, help="输出起点权重路径")
     ap.add_argument("--policy-extra", action="store_true", help="腿 A 档（头 165）")
     ap.add_argument("--spatial-tower", action="store_true", help="腿 B 档（塔 + 头 189）")
