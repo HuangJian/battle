@@ -34,9 +34,11 @@ obs-v5（plan/obs-v5-vector-gap.plan.md §2.7）：起点宽了 —— pf 137→
     --to nn-training/weights/x25-obs-v5/x25-obs-v5.it0.json \
     --policy-extra --allow-partial-init
 
-  · 源可以是任何「旧 schema」权重：v3 的 hu150 系（legacy 头 128）或 v4 的 leg A 腿
-    （头 137 = hidden 128 + 旧 extra 9，value 128）——两种都靠**偏移表**而不是绝对宽识别；
-  · 腿 B 加 --spatial-tower（头 189）；A0 对照组用 --legacy-arch 代替两者。
+  · 源必须是同族旧档：腿 A 要求 v4 **policy_extra** 系（头 137 = hidden 128 + 旧 extra 9，
+    value 128）——legacy 系（头 128、无 extra 列）会被响亮拒绝；腿 B 要求 v4 腿 B 系
+    （头 151 = tower 112 + scalars 30 + 旧 extra 9，value 128）。偏移表只认这两种宽度，
+    不是任意旧 schema 都能吃；
+  · 腿 B 加 --spatial-tower（头 189）；A0 对照组用 --legacy-arch 代替两者（A0 源才用 v3 hu150 系）.
 """
 
 from __future__ import annotations
@@ -142,7 +144,14 @@ def _migrate_columns(
                     fresh[:, dst_start : dst_start + count] = old[:, src_start : src_start + count]
                     keep[dst_start : dst_start + count] = True
             idx = torch.nonzero(~keep, as_tuple=False).flatten()
-            fresh[:, idx] = torch.randn(len(idx), generator=gen, dtype=fresh.dtype) * 0.01
+            # 逐元素独立随机：形状必须是 (rows, k)——1 维 `randn(k)` 会广播成全行全同
+            #（rank-1，对称性没打破；value 头只有 1 行才不受影响）。
+            fresh[:, idx] = (
+                torch.randn(
+                    (new.shape[0], len(idx)), generator=gen, dtype=fresh.dtype, device=new.device
+                )
+                * 0.01
+            )
             new.copy_(fresh)
         done[name] = {
             "old_cols": old_cols,
@@ -214,7 +223,7 @@ def convert(
 
 def main() -> None:
     ap = house_parser()
-    ap.add_argument("--from", dest="src", required=True, help="起点权重（hu150 系，v3 schema）")
+    ap.add_argument("--from", dest="src", required=True, help="起点权重（腿 A 要 v4 policy_extra 系，腿 B 要 v4 腿 B 系，A0 要 v3 hu150 系）")
     ap.add_argument("--to", dest="dst", required=True, help="输出起点权重路径")
     ap.add_argument("--policy-extra", action="store_true", help="腿 A 档（头 165）")
     ap.add_argument("--spatial-tower", action="store_true", help="腿 B 档（塔 + 头 189）")

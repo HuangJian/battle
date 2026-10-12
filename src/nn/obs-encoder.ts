@@ -544,6 +544,7 @@ export class ObsEncoder {
     if (!hasBase) {
       s[17] = 0
       s[18] = 0
+      s[37] = 0 // 与有基地分支同值：s37 是 s18 的 y 分量，无基地时同样归 0（不依赖 encode() 的 fill）
     } else {
       const bcx = BASE_POS.col * CELL + CELL / 2
       const bcy = BASE_POS.row * CELL + CELL / 2

@@ -158,6 +158,10 @@ def test_leg_a_column_migration_old_cols_bit_exact(tmp_path: Path) -> None:
         assert tail.shape[1] > 0
         assert float(tail.abs().max()) <= 0.05, f"{name} 新列量级过大：{float(tail.abs().max())}"
         assert float(tail.std()) <= 0.02, f"{name} 新列 std 过大：{float(tail.std())}"
+        if tail.shape[0] > 1:
+            # 新列必须逐元素独立随机：广播式 `randn(k)` 会让所有行全同（rank-1），
+            # 对称性没打破。首行展开后必须与全片不等（固定 seed 下确定性判据）。
+            assert not torch.equal(tail, tail[0:1].expand_as(tail)), f"{name} 新列跨行全同（广播 init）"
     # 非迁移张量：全量逐位等（「非新增列路径一致」）
     for name in ("stem.weight", "blocks.0.dw.weight", "fc.bias", "value_head.bias"):
         assert torch.equal(new[name], old[name]), f"{name} 不应动"
@@ -202,6 +206,8 @@ def test_leg_b_segmented_migration(tmp_path: Path) -> None:
         for lo, hi in ((142, 152), (161, 189)):
             seg = new[name][:, lo:hi]
             assert float(seg.abs().max()) <= 0.05, f"{name}[{lo}:{hi}] 量级过大"
+            # 同上：多行张量的新段必须跨行有差异（广播 init 会全行全同）
+            assert not torch.equal(seg, seg[0:1].expand_as(seg)), f"{name}[{lo}:{hi}] 新段跨行全同"
     # value 头：新档 189 宽、整张都是 0.01 尺度（`_init_value_head`），没被迁移污染
     assert new["value_head.weight"].shape[1] == 189
     assert float(new["value_head.weight"].abs().max()) <= 0.05
