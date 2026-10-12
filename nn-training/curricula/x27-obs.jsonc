@@ -1,0 +1,112 @@
+// 课程 x27-obs —— value 门控腿（x26-obs it90 诊断的修复腿：冷 critic 新列 35 倍爆炸）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 用户 2026-10-12：直接开干。机制：value 新列零起步（本起点已是纯 0）＋
+//   训练期牵引 `w *= (1-ρ)`（ρ = `value_anchor` = 0.001）；旧列逐位不动。
+//   噪声方向天天变、合力≈0，被绳子拉回；真信号同向攒劲，挣脱长大。
+//
+// ── 单变量声明（相对 x26-obs 改两样：起点零值化＋优化器加绳）────────────────
+//   ① 起点：同源 burst220，同一 leg-A 路径重转，仅 value 新 37 列由 0.01 随机改纯 0
+//      （产物 sha16 `103afabb6eedd175`；trunk 35 共享键与 burst220 逐位等）；
+//   ② 优化器：`value_anchor: 0.001`（新列片 [128,165) 后步收缩；ρ=0.001 时 w=0.05 处
+//      收缩 5e-5/步 ≥ it90 实测漂移 3e-5/步；旧列/Adam 矩/ckpt 语义全不动）。
+//   obs/schema/奖励（已去 burst）/batch 24k/流族/优化器余键/eval 全同 x26-obs。
+//   G0/G5/G3 照判（阈值不动）。
+//
+// ── 门（本腿判据；阈值算法见行内）───────────────────────────────────────────
+//   it40 硬门：kills ≥12.8（ladder 锚 15.1×0.85）＋ `value_new_rms` ≤0.05
+//   （it90 爆炸到 0.30；健康应 ≤0.05，零起步加绳子双保险）。
+//   任一 fail ⇒ **杀腿**＋控制台自动 halt（x24/x26 overrun 教训）。
+//   终点：G0（主）/G5（次）/G3（导航能力）＋ `value_new_rms` 轨迹（绳子是否全程兜住）。
+//   起点参照（只作 Δ 的锚）：burst220 日常 ~0.51 / 拼池 0.567；x26-obs it90 0.40 作反例锚。
+//
+// ── 盯盘（§15.4＋新遥测）────────────────────────────────────────────────────
+//   每 update 必读 kl/entropy/value/gnorm **＋ value_new_rms**（训练日志已接线，
+//   三条白名单透传）；rms 三连涨超 0.1 ⇒ 人工掐（不等 it40）；kills −15% 即掐。
+//
+// ── 训练设置（x26-obs 逐键相同，只换起点/账本/流/门控键）──────────────────────
+//   batch 24576（24k 已证充分，不加量）。`workers` 机器侧死键保留。
+//   新家族流：`paired_rotate_seed` **20261021**（x26 的 20261020 已被死腿消费过段，
+//   新家族新流；跨腿比较走 eval 段）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c20-lives1`），课程**不重复** `stages` 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj + backup 新目录 + opt fresh，不碰 x26 账本。
+{
+  "version": 5,
+  "name": "x27-obs",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 28.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：burst220 → 腿 A（value 新列纯 0；sha 见头注）──
+  "bc": "nn-training/weights/x27-obs/x27-obs.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关；it40 门熔断由控制台挂。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（0.0 = 关；本腿 0.001，有绳）。
+  "value_anchor": 0.001,
+
+  "iters": 300,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "seed_rotate": 150,
+  // 新家族流（见头注）。
+  "paired_rotate_seed": 20261021,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/x27-obs/weights.json",
+  "traj": "tmp/x27-obs",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x27-obs",
+  "backup_prefix": "x27-obs",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

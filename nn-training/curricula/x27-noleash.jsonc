@@ -1,0 +1,103 @@
+// 课程 x27-noleash —— x27-obs 的无绳对照腿：同零起点，不加牵引。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 用户 2026-10-12：并行验证“绳子有没有用”。两腿共享同一份零起 it0，
+//   唯一变量 = 优化器加不加绳（本腿缺席 `value_anchor` ⇒ 0.0 ⇒ 后步收缩整段跳过，
+//   与无此功能数学恒等，单测钉住；监控 `value_new_rms` 照读）。
+//
+// ── 单变量声明（相对 x27-obs 只差一键）──────────────────────────────────────
+//   缺 `value_anchor` 键，其余逐键相同（已脚本对账）。本腿回答：零起步 alone 够不够
+//   （若本腿同样不炸＋kills 不崩 ⇒ 绳子多余，纪律退化为纯零起步；若本腿复现爆炸＋
+//   下滑 ⇒ 绳子是 load-bearing，机制确证）。
+//
+// ── 门（本腿是机制确证腿，门即判决）─────────────────────────────────────────
+//   it40 判决门：`value_new_rms` > 0.15 **且** kills < 13.5 ⇒ 机制复现，确证，杀腿
+//   （证据到手，不烧后 260 轮；x27-obs 继续跑）。若 rms 全程 ≤0.05 ⇒ 有意思，
+//   继续跑（绳子必要性重开讨论）。kills −15% 即掐（通用于两腿）。
+//   起点参照：x26-obs it90（rms 0.30＋0.40/12.79）作“无绳＋噪声起步”的反例锚；
+//   本腿是“无绳＋零起步”，差的就是起步。
+//
+// ── 盯盘 ────────────────────────────────────────────────────────────────────
+//   每 update 必读 `value_new_rms`（对照腿监控同样接线）；与 x27-obs 同屏对照。
+//
+// ── 训练设置（x27-obs 逐键相同，只换账本路径；`value_anchor` 缺席）────────────
+//   batch 24576。`workers` 机器侧死键保留。家族同流 20261021（与 x27-obs 同流，
+//   rollout 可比；x24 burst/dist 共享 x23 流先例）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 与 x27-obs 同一份 it0（同起点是腿间可比的前提，不重转）。
+//   · §15.5 新实验：新 out/traj + backup 新目录 + opt fresh，不碰 x27-obs 账本。
+{
+  "version": 5,
+  "name": "x27-noleash",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 28.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：与 x27-obs 同一份 it0（sha 见 x27-obs 头注）──
+  "bc": "nn-training/weights/x27-obs/x27-obs.it0.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关；it40 判决门由控制台挂。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  "iters": 300,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "seed_rotate": 150,
+  // 家族同流（与 x27-obs 同 20261021）。
+  "paired_rotate_seed": 20261021,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/x27-noleash/weights.json",
+  "traj": "tmp/x27-noleash",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x27-noleash",
+  "backup_prefix": "x27-noleash",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
