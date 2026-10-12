@@ -5061,3 +5061,45 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 （子进程读 env） · `remote/offline_deliver.py`（body + `WORKER_NAME_ENV`） ·
 `dashboard/src/server/contribution.ts::readPpoAttribution` + `offlineIdentity`
 —— 全文 → `docs/nn/console.md §37`；计划 → `plan/offline-leg-ppo-attribution.plan.md`
+
+## §2026-10-12-prefetch-stage-budget-revert（2026-10-12，撤销 prefetch staged 的 256MiB 字节闸：它从没生效过，还把整档关掉了；实机读数证伪 plan/prefetch-stage-unpack 的 P1-2 与 D4）
+
+- **背景**：D4（`§2026-10-12-goalnn-prefetch-stage-unpack`）给 staged 解包产物设了「单份上界 + 总预算
+  256MiB」，超界 ⇒ 删 `.tmp`、保留 zip、一行日志。落地当天 colab 真机日志连打
+  `解包 325.7MB / 299.6MB 超 staged 预算 256MB —— 退回字节形状`：本会话 **3/3** 次预取全部回退。
+- **实测**（= plan §2.5 一直在等的那个读数）：3,049,376 B → **325.7MB**（≈112×，70 shard）；
+  2,564,244 B → **299.6MB**（≈122×，66 shard）。即现行课程的 payload 解包后**每份**都是 300–330MB，
+  256MiB 一进门就超 ⇒ staged 路径 100% 不生效。plan §7 判据①要求的 `解包 aMB → bMB / k shard / t s`
+  在日志里**零次出现**，job 准备行照旧写 `解包=1.1s → 70 shard（CPU，不含传输）`⇒ 解包仍在关键路径，
+  命中轮只省下载（3MB/3.6s）。而这个常数的来源是「比 `job_fs.py:56` 的 c6b 280MB 小一点」——
+  plan §2.5 明写「plan 不给数字、先量再定」且警告那 280MB 是**另一门课**、不能外推。
+- **决定（D-revert）**：删掉 `PREFETCH_STAGED_BUDGET_BYTES_DEFAULT` 与解包时的单份否决。
+  盘上的量改由 **条数 × 实测体积**约束：条数 = 配置整数（`PrefetchStore.staged_max`，缺省
+  = 预取槽位数 `PREFETCH_DEPTH_DEFAULT`；`worker.py` 传 `max(prefetch_depth, prefetch_unpack)`），
+  体积**只记账**（`_tree_bytes` → `meta.json` / `stats()`）。单位取**槽位**而不是每轮解包份数：
+  解包份数是被 `pick_candidates(held=…)` 去重后的前 N 份（上一轮 staged 的还在册就被跳过 ⇒ 每轮
+  新解一份、条数跨轮累加），要限的正是这个累加面。（第一版写成 `= prefetch_unpack`（1），当场被
+  既有用例 `test_prefetch_adaptive.py::test_a_staged_hit_counts_the_same_in_the_white_bytes_ledger`
+  打红：「两份 staged 共存」是既有口径。）
+  `prune` 同步改写：staged 超条数**只丢最旧的 staged**，绝不拿 zip 候选偿债。zip 那本账
+  （64MB / 按最旧丢 / 仅剩一份也保留）**逐字未动**。
+- **备选与否决**：① 只把常数抬到 512MiB —— 否：留着的是一个「来源是猜、迟早再被同一门课碾过」的阈值，
+  而体积本来就在同一函数里量得到；② 保机制不动、只在启动器里 `--prefetch-unpack 0` 撤档 —— 否：
+  那等于承认 P1 白做，且留一个「看着开着、实际全是回退」的中间态，后续每次读数都会假归因；
+  ③ 退役整条 staged 路径 —— 否：真机前身读数是解包 1.8–4.3s/轮（首包 11.8s，294 shard 那门），
+  值一个旋钮，缺陷只在闸门。
+- **三条被撤销的支撑理由**（记下来免得下次再被同一条说服）：①「体积未知所以要上界」——体积就在否决
+  语句上一行的 `_tree_bytes(tmp)` 里，拿没量过的数去否决刚量到的数是把测量结果丢掉；
+  ②「它同时是总预算」——`unpack_n=1` ⇒ staged 至多 1 条 ⇒ 「总预算」半边**不可达**，剩下那条 veto
+  的唯一效果是让 `prune` 的「全池按最旧丢」坏分支永不触发（自证循环）；③「否则 280MB 课程会合法留盘」
+  ——退回 zip 后同一份字节仍在**必走路径**上解包进 `job_dir`（`remote/download.py::_ensure_payload`，
+  **零体积检查**）而 `JOB_DIR_KEEP=2` 让它合法长驻，staged 的搬入是 `rename` 不是复制 ⇒ 那道闸
+  **不保护磁盘**，只决定 300MB 落在哪个目录；真正的磁盘大头（2×~300MB job 目录 + 256MB code cache）
+  从头到尾不在它管辖内。
+- **后果**：staged 路径首次真正生效（判据①终于有读数）；盘上 staged 占用 ≤ `staged_max` × 实测体积
+  （缺省 3 × ~330MB ≈ 1GB，且每有主即被 `take` 掉 ⇒ 健康会话恒定 0–1 份；搬入时 `rename` 不复制）。回退档 `--prefetch-unpack 0` 语义不变（无 staged 条目时
+  `prune` 的 staged 分支恒不触发）。剩余待办不变：**真机量**（`other=` 是否真降 ≥2s、CPU 是否挤 PPO）。
+- **落点** → `nn-training/remote/prefetch.py`（常数 / `__init__` / `_unpack_into` / `prune` / `stats` 注释） ·
+  `nn-training/remote/worker.py`（`PrefetchStore(..., staged_max=max(prefetch_depth, prefetch_unpack))`） ·
+  `nn-training/tests/remote/test_soft_hold_prefetch.py`（删「超上界退回」用例 → 换「体积不设闸只记账」+
+  「staged 超条数只丢最旧 staged」；文本断言 FORM 基线不变 1445）—— 全文 → `docs/nn/remote-transport.md §85`

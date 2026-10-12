@@ -54,11 +54,31 @@ PREFETCH_DIR_NAME = "prefetch"
 #: **PPO 32–35s** ⇒ 白解包的成本被这条闸限在「每轮最多 N 份」；命中的那份按 `rotation_order`
 #: 通常就是 head。
 PREFETCH_UNPACK_DEFAULT = 1
-#: staged（解包产物）的**总**字节预算——与 zip 账**分开**算（`PREFETCH_BUDGET_BYTES_DEFAULT`
-#: 那本账只管压缩字节）。解包后体积是压缩后的几倍到几十倍，真机读数定这个数（plan §2.5）；
-#: 它同时是**单份上界**：解包后超过它的那份直接退回 zip 形状——否则一份 280MB 级课程
-#: （`remote/job_fs.py:56`）会在「仅剩一份也保留」下**合法地**留在盘上。
-PREFETCH_STAGED_BUDGET_BYTES_DEFAULT = 256 * 1024 * 1024
+#: staged（解包产物）在册**条数**上限的缺省值 = `PREFETCH_DEPTH_DEFAULT`（预取槽位数）。
+#: 单位为什么是「槽位」而不是「每轮解包份数（`PREFETCH_UNPACK_DEFAULT`）」：解包份数是被
+#: `pick_candidates(held=…)` **去重后**的前 N 份 —— 上一轮 staged 的那份还在册时它会被跳过，
+#: 于是每轮都新解一份，条数会跨轮累加；真正要限的就是这个累加面，而它天然的单位是「我们愿意
+#: 同时持有几个候选」（= depth）。按 depth 限 ⇒ 稳态 ≤depth 份 staged（缺省 3 × ~330MB ≈ 1GB，
+#: 且有主之后各轮被 take 掉，健康会话实际恒定 0–1 份）；超出的按最旧丢（`prune`）。
+#: 下限由调用方给（`worker.py` 传 `max(prefetch_depth, prefetch_unpack)`）。
+#:
+#: ★ 2026-10-12 撤销字节常数 `PREFETCH_STAGED_BUDGET_BYTES_DEFAULT = 256MiB`（旧注释把它
+#: 同时当「总预算」与「单份上界」用）。撤销的实证：现行课程 payload 3MB → 解包 300–330MB，
+#: **实测膨胀 ~110×**（真机日志 `解包 325.7MB / 299.6MB 超 staged 预算 256MB`），256MiB
+#: 一进门就超 ⇒ staged 路径 **100%** 退回字节形状 = 该档位等于没开（plan §7 判据 1 要求的
+#: `解包 aMB → bMB / k shard / t s` 那行一次都没出现过，job 准备行照旧写着 `解包=1.1s`）。
+#: 旧注释给的三条支撑全不成立：
+#:   ①「解包后体积未知，先量再定」—— 体积就在同一函数里量得到（`_tree_bytes(tmp)`，在
+#:      否决之前那一行）⇒ 拿一个从未量过的常数去否决刚量到的真数是把测量结果丢掉；
+#:   ②「它同时是总预算」—— `unpack_n = 1` ⇒ staged 至多 1 条 ⇒ 「总预算」那半边**不可达**，
+#:      真正干活的只有单份否决；而否决权的唯一效果是让 `prune` 那条混账淘汰分支永不触发
+#:      （自证循环：为了掩护一个坏分支而关掉一整条特性）；
+#:   ③「否则 280MB 级课程会合法留在盘上」—— 退回 zip 之后同一份字节仍在**必走路径**上被
+#:      解包进 `job_dir`（`remote/download.py::_ensure_payload`，**零体积检查**），而
+#:      `JOB_DIR_KEEP = 2`（`remote/job_fs.py:61`）让它合法长驻；staged 的搬入是 `rename`
+#:      不是复制 ⇒ 那道闸**不保护磁盘**，只决定那 300MB 落在哪个目录。真正的磁盘大头
+#:      （2×~300MB job 目录 + 256MB code cache）从头到尾不在它的管辖内。
+#: ⇒ 盘上的量 = **条数 × 实测体积**：条数是配置整数，体积每轮都打进日志，两者都不需要猜。
 
 # ── 会话级自停（plan/aistudio-transfer-hardening §3.1）─────────────────────────
 #: 下结论前的最小下载份数。**只需 2**：真正兜住误杀的是下面那道白传门槛（健康预取的白传
@@ -114,13 +134,15 @@ class PrefetchStore:
         work_dir: Path,
         *,
         budget_bytes: int = PREFETCH_BUDGET_BYTES_DEFAULT,
-        staged_budget_bytes: int = PREFETCH_STAGED_BUDGET_BYTES_DEFAULT,
+        staged_max: int = PREFETCH_DEPTH_DEFAULT,
         clock: Callable[[], float] = time.time,
         log: Any = None,
     ) -> None:
         self.root = Path(work_dir) / PREFETCH_DIR_NAME
         self.budget_bytes = int(budget_bytes)
-        self.staged_budget_bytes = int(staged_budget_bytes)
+        #: staged 在册**条数**上限 —— **不是字节预算**（撤销理由见 `PREFETCH_DEPTH_DEFAULT`
+        #: 上面那段长注）。缺省 = 预取槽位数；体积只记账（`stats()["staged_bytes"]`）。
+        self.staged_max = max(0, int(staged_max))
         self._clock = clock
         self._log = log
         self._lock = threading.Lock()
@@ -211,11 +233,15 @@ class PrefetchStore:
     def _unpack_into(
         self, d: Path, jid: str, payload: bytes, zip_path: Path
     ) -> tuple[bool, int, float]:
-        """把暂存的 zip 解成 `shards/`、**删掉 zip**；失败/超上界 ⇒ 保留 zip 退回字节形状。
+        """把暂存的 zip 解成 `shards/`、**删掉 zip**；失败 ⇒ 保留 zip 退回字节形状。
 
         返回 `(staged, staged_bytes, unpack_sec)`。异常一律就地降级（预取失败不是失败；
         也绝不进 `ProtocolError`/`report_job_failure`）。解包产物的完整性由 `unpack_payload`
         自己的空包断言 + `tmp → shards` 原子改名兑住（半成品永远是 `.tmp`）。
+
+        **没有体积闸**（2026-10-12 撤掉 256MiB 单份上界，理由见 `PREFETCH_UNPACK_DEFAULT`
+        上面那段长注）：解包后体积只**记账**（返回 `staged_bytes` → `meta.json` / `stats()`），
+        不进任何否决判据。盘上的量由「条数上限（`staged_max`）× 实测体积」约束。
         """
         from common.payload import unpack_payload
 
@@ -227,14 +253,6 @@ class PrefetchStore:
             _unused, shard_dirs = unpack_payload(zip_path, tmp)
             unpack_sec = round(self._clock() - t0, 3)
             nbytes = _tree_bytes(tmp)
-            if nbytes > self.staged_budget_bytes:
-                # 单份上界：宁可退回字节形状，也不把一份超预算的解包产物留在盘上。
-                self._rmtree(tmp)
-                self._log_line(
-                    f"prefetch {jid[:8]}: 解包 {nbytes / 1048576:.1f}MB 超 staged 预算 "
-                    f"{self.staged_budget_bytes // 1048576}MB —— 退回字节形状（保留 payload.zip）"
-                )
-                return False, 0, 0.0
             tmp.rename(d / "shards")  # 原子：提交点在这里，之前都叫 .tmp
             try:
                 zip_path.unlink()  # `shards/` 就是唯一那份（不再多留一份压缩副本）
@@ -435,11 +453,16 @@ class PrefetchStore:
     # ---------------------------------------------------------------- 预算
 
     def prune(self) -> int:
-        """① 清孤儿（`.tmp` 半成品 / 不在册的残壳）；② 超预算 ⇒ 按 `updated_at` 丢**最旧**的候选。
+        """① 清孤儿（`.tmp` 半成品 / 不在册的残壳）；② 超量 ⇒ 丢**最旧**的候选。
 
-        两本账（plan §2.3）：zip 条目按压缩字节（`budget_bytes`，旧账 64MB，语义不变），
-        staged 条目按解包后字节（`staged_budget_bytes`）。**保留最后一份**的既有权衡照旧；
-        staged 侧因 `store()` 有单份上界，永不触发「最后一份还超限」。
+        两本账（plan §2.3；2026-10-12 修订）：zip 条目按压缩字节（`budget_bytes`，旧账 64MB，
+        语义与「保留最后一份」口径逐字不变），staged 条目只按**条数**（`staged_max` = 每轮
+        最多解包的份数，见 `PREFETCH_UNPACK_DEFAULT` 上的长注——字节预算已撤销）。
+
+        staged 超条数时**只丢最旧的 staged 条目**，不拿 zip 候选偿债：两者量纲差 ~100×
+        （3MB 压缩 vs 300MB 解包），混在一处比大小必然误杀健康的候选。旧实现是「全池按最旧
+        丢」，且因单份上界而**永不可达**——撤销上界后若照旧混账，一条超体积的 staged 条目会
+        把整池 zip 候选逐个吃掉仍不达标。所以这两条分派必须分开写。
         """
         dropped = self._sweep_orphans()
         while True:
@@ -447,28 +470,29 @@ class PrefetchStore:
                 payload_total = sum(
                     int(it["bytes"]) for it in self._items.values() if not it.get("staged")
                 )
-                staged_total = sum(
-                    int(it.get("staged_bytes") or 0)
-                    for it in self._items.values()
-                    if it.get("staged")
+                staged = sorted(
+                    ((jid, it) for jid, it in self._items.items() if it.get("staged")),
+                    key=lambda kv: float(kv[1]["at"]),
                 )
                 over_payload = payload_total > self.budget_bytes
-                over_staged = staged_total > self.staged_budget_bytes
-                if (not over_payload and not over_staged) or len(self._items) <= 1:
-                    if over_payload or over_staged:
-                        self._log_line(
-                            f"prefetch: 超预算（zip {payload_total}/{self.budget_bytes} · "
-                            f"staged {staged_total}/{self.staged_budget_bytes} bytes）"
-                            "且仅剩一份——保留"
-                        )
+                over_staged = len(staged) > self.staged_max
+                if not over_payload and not over_staged:
                     return dropped
-                oldest = min(self._items.items(), key=lambda kv: float(kv[1]["at"]))[0]
-            self.drop(oldest)
+                if over_staged:
+                    victim, why = staged[0][0], f"staged 条数 {len(staged)}/{self.staged_max}"
+                elif len(self._items) > 1:
+                    victim = min(self._items.items(), key=lambda kv: float(kv[1]["at"]))[0]
+                    why = f"zip {payload_total}/{self.budget_bytes} bytes"
+                else:
+                    # 仅剩一份（staged 侧不可能走到这里：超条数 ⇒ 至少 2 条）——保留。
+                    self._log_line(
+                        f"prefetch: 超预算（zip {payload_total}/{self.budget_bytes} bytes）"
+                        "且仅剩一份——保留"
+                    )
+                    return dropped
+            self.drop(victim)
             dropped += 1
-            self._log_line(
-                f"prefetch {oldest[:8]}: 丢弃（超预算：zip {self.budget_bytes // 1048576}MB / "
-                f"staged {self.staged_budget_bytes // 1048576}MB，按最旧先丢）"
-            )
+            self._log_line(f"prefetch {victim[:8]}: 丢弃（超量：{why}，按最旧先丢）")
 
     def _sweep_orphans(self) -> int:
         """清 `prefetch/` 下的**孤儿**：`.tmp` 半成品、以及既不在 `_items` 也不在 `_handoff` 的残壳。
@@ -523,7 +547,8 @@ class PrefetchStore:
                 "white_bytes": max(0, self.downloaded_bytes - self.taken_bytes)
                 + self._preempt_wasted,
                 "preempt_wasted": self._preempt_wasted,
-                # staged 观测（plan §2.5 的读数源）：份数与解包后总字节（定预算用）。
+                # staged 观测（plan §2.5 的读数源）：份数与解包后总字节。**纯读数**——
+                # 撤销字节预算后它们只用来回答「解包后到底占多少」，不进任何淘汰判据。
                 "staged": sum(1 for it in self._items.values() if it.get("staged")),
                 "staged_bytes": sum(
                     int(it.get("staged_bytes") or 0)
@@ -543,7 +568,8 @@ def _tree_bytes(p: Path) -> int:
     """目录字节数（best-effort：读不到的项按 0 计，绝不让预取因 I/O 抛）。
 
     与 `remote/download.py::_dir_bytes` 同口径（那边服务 prune 的预算账）；这里量的是
-    解包产物，用来对「单份上界」与 staged 预算负责。
+    解包产物，只作**读数**（落 `meta.json` / `stats()`）—— 2026-10-12 起不再参与任何否决
+    （旧「单份上界」已撤，理由见 `PREFETCH_UNPACK_DEFAULT` 上的长注）。
     """
     total = 0
     try:

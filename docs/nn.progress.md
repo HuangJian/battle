@@ -1182,3 +1182,21 @@ DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`（⑤）
 DECISIONS → `DECISIONS.md §2026-10-12-goalnn-offline-leg-ppo-attribution`；全文 → `docs/nn/console.md` §37（§23 留指针）；
 门禁 → nn python gate **4261 passed / 10 skipped**（ruff + mypy + tests/+e2e/）· 根 `bun run check`
 **2559 pass / 3 skip / 0 fail** · dashboard typecheck 绿 + **1569 pass / 0 fail** · `bun run build` ✓。
+
+**2026-10-12（八）**：**撤销** prefetch staged 的 256MiB 字节闸 —— 它从没生效过，还把整档关掉了（实机读数）。
+（六）落地当天 colab 真机日志连打 `解包 325.7MB / 299.6MB 超 staged 预算 256MB —— 退回字节形状`：
+本会话 **3/3** 次预取全部回退。实测膨胀 = **112×/122×**（3,049,376 B → 325.7MB，70 shard；2,564,244 B →
+299.6MB，66 shard）⇒ 现行课程每份都 300–330MB，256MiB 一进门就超 ⇒ plan §7 判据①要求的那行
+`解包 aMB → bMB / k shard / t s` **零次出现**，job 准备行照旧 `解包=1.1s → 70 shard` ⇒ 解包仍在关键路径，
+命中轮只省下载（3MB/3.6s）。而这个常数的来源只是「比 `job_fs.py:56` 的 c6b 280MB 小一点」——plan §2.5
+明写「不给数字、先量再定」且警告那 280MB 是**另一门课**不能外推。三条支撑理由全不成立：① 体积就在否决
+语句上一行的 `_tree_bytes(tmp)` 里量得到（拿没量过的数否决刚量到的真数）② `unpack_n=1` ⇒ staged 至多
+1 条 ⇒ 常数的「总预算」半边不可达，剩下那条 veto 的唯一效果是让 `prune` 的「全池按最旧丢」坏分支永不触发
+③ 退回 zip 后同一份字节仍在**必走路径**上解包进 `job_dir`（`_ensure_payload`，**零体积检查**）且
+`JOB_DIR_KEEP=2` 让它合法长驻，而 staged 搬入是 `rename` 不是复制 ⇒ 那道闸不保护磁盘、只决定 300MB 落在
+哪个目录。改法：删常数与单份否决，盘上量改由 **条数 × 实测体积** 约束（`PrefetchStore.staged_max` =
+**预取槽位数**（缺省 3；`worker.py` 传 `max(prefetch_depth, prefetch_unpack)` —— 单位取槽位不取解包
+份数：后者被 `held()` 去重后每轮新解一份、跨轮累加；第一版写成 = 解包份数当场被既有用例打红），
+体积只记账进 `meta.json`/`stats()`）；`prune` 的 staged 超条数**只丢最旧 staged**，
+绝不拿 zip 候选偿债；zip 那本账（64MB/最旧先丢/仅剩一份也保留）逐字未动。FORM 基线不变（1445：删 1 加 1）。
+DECISIONS → `§2026-10-12-prefetch-stage-budget-revert`；全文 → `docs/nn/remote-transport.md` §85（§84 相应条目已划线）。

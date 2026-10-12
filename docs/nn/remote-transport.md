@@ -6,6 +6,65 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §85 撤销 prefetch staged 的 256MiB 字节闸：那条闸从没生效过，还把整档关掉了（2026-10-12，实机读数）
+
+**触发**（colab 真机 log，2026-10-12）：§84 落地当天，prefetch 行连续打出
+
+```
+prefetch 8ce76034: 解包 325.7MB 超 staged 预算 256MB —— 退回字节形状（保留 payload.zip）
+prefetch 94d22f5d: 解包 299.6MB 超 staged 预算 256MB —— 退回字节形状（保留 payload.zip）
+```
+
+**读数**（这份数据 plan §2.5 一直在等，等到了）：
+
+| payload（压缩） | 解包后 | 膨胀比 | 结果 |
+|---|---|---|---|
+| 3,049,376 B | 325.7 MB（70 shard，~4.9MB/shard） | **≈112×** | 退回 zip |
+| 2,564,244 B | 299.6 MB（66 shard） | **≈122×** | 退回 zip |
+
+本会话 **3/3** 次预取全部退回 ⇒ §84 的 P1（预取解包）**一次也没生效**：plan §7 判据①要求的
+`解包 aMB → bMB / k shard / t s` 在日志里**零次出现**，取而代之的是 job 准备行里的
+`解包=1.1s → 70 shard（CPU，不含传输）` ⇒ 解包仍留在关键路径，命中轮只省了下载（3MB/3.6s）。
+`PREFETCH_STAGED_BUDGET_BYTES_DEFAULT = 256MiB` 为什么是这个数：它没有任何依据 —— plan §2.5 明写
+「plan 不给数字、先量再定」，并警告不能用 `job_fs.py:56` 的 c6b 单 job ≈280MB 外推（**另一门课**）；
+但 `plan:369` 的评审回执还是取了「比 280MB 小一点」的 256MiB，而 DECISIONS:4960 的剩余待办
+（「解包后体积常数 —— 真机量」）一直挂着没取数。
+
+**撤销的三条支撑理由（一条都不成立）**：
+
+1. 「解包后体积未知 ⇒ 需要单份上界」——体积**就在同一个函数里量得到**（`prefetch.py::_unpack_into`
+   的 `_tree_bytes(tmp)`，就在否决语句的上一行）⇒ 拿一个从未量过的常数去否决刚量到的真数，
+   是把测量结果丢掉，不是设上界。
+2. 「它同时是 staged 总预算」——`unpack_n` 缺省 = 1 ⇒ staged 在册**至多 1 条** ⇒ 常数的
+   「总预算」那半边**永不可达**；真正干活的只有单份否决，而它的唯一效果是让 `prune` 那条
+   「全池按最旧丢」的混账淘汰分支永不触发 —— 为一个坏分支而关掉一整条特性（自证循环）。
+3. 「否则 280MB 级课程会合法留在盘上」——退回 zip 之后同一份字节仍在**必走路径**上被解包进
+   `job_dir`（`remote/download.py::_ensure_payload`，**零体积检查**；该模块唯一的体积上限
+   `CODE_CACHE_MAX_BYTES` 只管 `code.zip`），而 `JOB_DIR_KEEP = 2` 让它合法长驻；staged 的搬入
+   是 `rename` 不是复制 ⇒ 那道闸**不保护磁盘**，只决定那 300MB 落在哪个目录。真正的磁盘大头
+   （2×~300MB job 目录 + 256MB code cache）从头到尾不在它的管辖内。
+
+**决定（D-revert）**：删掉字节闸与 `PREFETCH_STAGED_BUDGET_BYTES_DEFAULT`。盘上的量改由
+**条数 × 实测体积**约束 —— **条数是配置整数**（`PrefetchStore.staged_max`，缺省 = 预取槽位数
+`PREFETCH_DEPTH_DEFAULT`；`worker.py` 传 `max(prefetch_depth, prefetch_unpack)`），**体积只记账**
+（`_tree_bytes` → `meta.json` / `stats()`）。单位为什么是**槽位**而不是每轮解包份数：解包份数是被
+`pick_candidates(held=…)` **去重后**的前 N 份 —— 上一轮 staged 的那份还在册时它会被跳过，于是每轮
+新解一份、条数跨轮累加；要限的正是这个累加面，它的天然单位就是「愿意同时持有几个候选」。（第一版
+把上限写成 `= prefetch_unpack`（1），当场被既有用例打红：两份 staged 共存是既有口径，见
+`test_prefetch_adaptive.py::test_a_staged_hit_counts_the_same_in_the_white_bytes_ledger`。）
+`prune` 同步改写：staged 超条数**只丢最旧的 staged 条目**，绝不拿 zip 候选偿债（两者量纲差 ~100×
+—— 3MB 压缩 vs 300MB 解包 —— 混在一处比大小必然误杀；旧实现靠那条已撤销的上界才「永不可达」）。
+zip 那本账（64MB、按最旧丢、仅剩一份也保留）**逐字未动**。
+
+**判据（真机，下一轮取数）**：prefetch 行出现 `解包 aMB → bMB / k shard / t s`（= 判据①终于有读数），
+且该 job 的准备行 `解包=` 掉到 ~0.0–0.1s；`other=` 比 `--prefetch-unpack 0` 的相邻会话低 ≥2s。
+不达标 ⇒ `--prefetch-unpack 0`（**真**旧行为），此时 `prefetch/` 只剩 zip（~3MB）。
+
+**落点**：`nn-training/remote/prefetch.py`（常数 / `__init__` / `_unpack_into` / `prune` / `stats` 注释）·
+`nn-training/remote/worker.py`（`PrefetchStore(..., staged_max=max(prefetch_depth, prefetch_unpack))`）·
+`tests/remote/test_soft_hold_prefetch.py`（删「超上界退回」用例，换成「体积不设闸只记账」+
+「staged 超条数只丢最旧 staged」）。文本断言 FORM 基线不变（1445：删 1 加 1）。
+
 ## §84 预取顺手解包：把「解包」从关键路径搬到上一轮 PPO 上（2026-10-12，plan/prefetch-stage-unpack）
 
 **触发**（aistudio 真机 log，2026-10-12）：§80 砍完传输税之后，`in=` 已降到 0–3s、`out` 与 PPO 重叠、
@@ -39,11 +98,13 @@
 ### 落点 / 旋钮
 
 - `--prefetch-unpack N`（缺省 **1**）：只解 peek 顺序的**前 N 份**（风险闸：白解包的 CPU 被限在「每轮最多 N 份」）。
-- `PREFETCH_STAGED_BUDGET_BYTES_DEFAULT = 256MiB`：staged **单份上界 + 总预算**（与 zip 那本 64MB 账分开算）。
+- ~~`PREFETCH_STAGED_BUDGET_BYTES_DEFAULT = 256MiB`：staged **单份上界 + 总预算**（与 zip 那本 64MB 账分开算）。
   单份上界必须存在：`job_fs.py` 那个「仅剩一份也保留」的既有规则会让一份 280MB 级课程**合法地**留在盘上。
-  真机读数（`解包 aMB → bMB / k shard / t s`）落地后再定这个常数。
-- 解包产物用 `shards.tmp → shards` **原子改名**提交（半成品永远是 `.tmp`）；解包失败/超上界都**只降级不报错**
-  （预取失败不是失败，绝不进 `ProtocolError`）。
+  真机读数（`解包 aMB → bMB / k shard / t s`）落地后再定这个常数。~~
+  **⚠ 2026-10-12 撤销，见 §85**：这个数从没依据、也从没生效（每份实解 300–330MB > 256MiB ⇒ 100% 回退）。
+  现状 = staged 只按**条数**（`staged_max` = 预取槽位数，缺省 3），体积只记账。
+- 解包产物用 `shards.tmp → shards` **原子改名**提交（半成品永远是 `.tmp`）；解包失败**只降级不报错**
+  （预取失败不是失败，绝不进 `ProtocolError`）。~~「超上界」那半条降级路径已随 §85 撤销。~~
 - `PayloadLanded.payload_bytes: bytes` → **`payload_nbytes: int`** + 新字段 `staged`（staged 路径上**没有字节**，
   旧字段名会让人以为能 `len()`；worker 两处 wire 账只读长度）。
 - staged 形状**没有字节级 sha 复校**（没有字节）⇒ 完整性链 = store 的 peek sha 校 + job_round 的
@@ -61,7 +122,8 @@
 ### 测试 / 回归闸
 
 `tests/remote/test_soft_hold_prefetch.py`（+2 大组）：staged 落盘形状与 meta、`take()` 不碰 job 目录、
-`release_handoff` 收孤儿、`prune` 清 `.tmp`/残壳、双预算两本账、解包失败与超上界降级、
+`release_handoff` 收孤儿、`prune` 清 `.tmp`/残壳、双预算两本账（**§85 起：zip 账按字节、staged 账按条数**）、
+解包失败降级（~~超上界降级~~ 已随 §85 撤销）、
 worker_loop 端到端交棒、**`_result.json` 复用先于搬入**（P0-3 的行为闸）；
 `tests/remote/test_prefetch_adaptive.py`：staged/zip 在自停账上等价、形状分派、`unpack_n=0` 只解 head；
 `tests/remote/test_download_split.py`：三分支 + `_scan_shard_dirs` 与解包器**等价性对照** + `payload_nbytes` 口径；

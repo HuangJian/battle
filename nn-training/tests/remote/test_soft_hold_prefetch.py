@@ -6,7 +6,9 @@
   ① **无租约**：候选来自 `peek`（无副作用），下载走 P2 通道（可被打断），worker 死亡 =
      本地暂存蒸发、hub 零残留。本文件里用「`store` 全程不碰 hub」来钉。
   ② **暂存 + 让路**：payload 的**唯一**副本就在 `prefetch/<jid>/`（`payload.zip`，或解好的
-     `shards/`）；总量有**写死的预算**（zip 与 staged 两本账），超限按 `updated_at` 丢最旧。
+     `shards/`）；两本账**量纲不同**：zip 按压缩字节（写死的 64MB，超限按 `updated_at` 丢最旧、
+     仅剩一份也保留），staged 只按**条数**（`staged_max` = 每轮解包份数；2026-10-12 撤销
+     256MiB 字节闸，理由见 `remote/prefetch.py::PREFETCH_UNPACK_DEFAULT` 上的长注）。
      ⚠ 曾经还往 `blob_cache/<payload_sha>` 写一份“内容寻址副本”——那份**全仓无读点**，
      2026-10-12 已删（plan/prefetch-stage-unpack §3）。
   ③ **`prefetch/` 必须在 `prune_job_dirs` 豁免名单里**：`blob_cache` 漏过一次名单，
@@ -270,36 +272,52 @@ def test_unpack_failure_falls_back_to_bytes_without_raising(tmp_path: Path) -> N
     assert got is not None and got["payload_zip"] == p, "退回字节形状后照旧要能命中"
 
 
-def test_a_stage_over_the_single_entry_cap_falls_back_to_bytes(tmp_path: Path) -> None:
-    """单份上界（评审 P1-2）：解包后超 staged 预算 ⇒ 退回 zip。
+def test_a_stage_is_never_vetoed_by_size_and_only_accounted(tmp_path: Path) -> None:
+    """★ 2026-10-12：解包产物体积**不设闸**（撤销 256MiB 单份上界）——只记账。
 
-    没有这条上界，一份 280MB 级课程（`job_fs.py:56`）会在「仅剩一份也保留」下**合法**超预算。
+    旧实现在这里是一条「解包后超 staged 预算 ⇒ 退回 zip」的分支（`staged_budget_bytes=1`
+    就能触发）。现场读数把那条分支证伪了：现行课程 payload 3MB → 解包 **300–330MB**
+    （实测膨胀 ~110×）而闸是 256MiB ⇒ **每份都超**、staged 路径 100% 回退 = 该档位等于没开
+    （真机日志 `解包 325.7MB / 299.6MB 超 staged 预算 256MB`）。
+
+    撤销后的判据只有两条：形状照旧是 staged（且**与 zip 那本账无关**——所以这里故意把 zip
+    预算给到 1 字节），体积落 `meta.json` / `stats()` 当读数。
     """
-    store = PrefetchStore(tmp_path, staged_budget_bytes=1)
-    logs: list[str] = []
-    store._log = logs.append
+    store = PrefetchStore(tmp_path, budget_bytes=1)
     p = _packed_payload(tmp_path / "p1")
     assert store.store(JID, p, _summary(p), unpack=True) is True
     d = tmp_path / PREFETCH_DIR_NAME / JID
-    assert (d / "payload.zip").exists() and not (d / "shards").exists()
-    assert any("超 staged 预算" in m for m in logs), logs
+    assert (d / "shards").is_dir() and not (d / "payload.zip").exists()
+    meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+    assert meta["staged"] is True and meta["staged_bytes"] > 0, "体积没记账"
+    assert store.held() == {JID}, "staged 条目被 zip 账误杀（两本账必须分开）"
+    st = store.stats()
+    assert st["staged"] == 1 and st["staged_bytes"] == meta["staged_bytes"]
+    got = store.take(JID)
+    assert got is not None and "staged_dir" in got, "撤销体积闸后 staged 形状没交付"
 
 
-def test_the_two_budgets_are_accounted_separately(tmp_path: Path) -> None:
-    """zip 账与 staged 账**各算各的**（旧账 64MB 的语义不变；staged 条目不该被它误杀）。"""
-    jid_a, jid_b = "a" * 16, "b" * 16
-    p1 = _packed_payload(tmp_path / "p1", tag="1")
-    p2 = _packed_payload(tmp_path / "p2", tag="2")
-    s = PrefetchStore(tmp_path / "w", budget_bytes=1, staged_budget_bytes=1 << 30)
-    assert s.store(jid_a, p1, _summary(p1, jid_a), unpack=True) is True
-    assert s.held() == {jid_a}, "staged 条目被 zip 账误杀"
-    one = s.stats()["staged_bytes"]
-    s.staged_budget_bytes = one  # 第二份进来就超 staged 账
-    assert s.store(jid_b, p2, _summary(p2, jid_b), unpack=True) is True
-    assert s.held() == {jid_b}, "staged 账超限没丢最旧"
-    # zip 形状仍走 zip 账：单份超预算 ⇒ 既有「仅剩一份也保留」口径不变
-    s2 = PrefetchStore(tmp_path / "w2", budget_bytes=1, staged_budget_bytes=1 << 30)
-    assert s2.store(jid_a, p1, _summary(p1, jid_a)) is True
+def test_staged_overage_drops_only_the_oldest_stage(tmp_path: Path) -> None:
+    """staged 超**条数**（`staged_max`）⇒ 只丢最旧的 staged，**不拿 zip 候选偿债**。
+
+    两者量纲差 ~100×（3MB 压缩 vs 300MB 解包）：混在一处按「全池最旧」丢，一条 staged 超量
+    会把健康的 zip 候选逐个吃掉仍不达标（旧实现靠那条已撤销的单份上界才「永不可达」）。
+    """
+    jid_z, jid_a, jid_b = "z" * 16, "a" * 16, "b" * 16
+    pz = _packed_payload(tmp_path / "pz", tag="z")
+    pa = _packed_payload(tmp_path / "pa", tag="a")
+    pb = _packed_payload(tmp_path / "pb", tag="b")
+    clock = [0.0]
+    s = PrefetchStore(tmp_path / "w", staged_max=1, clock=lambda: clock[0])
+    assert s.store(jid_z, pz, _summary(pz, jid_z)) is True  # zip 形状，且是池子里最旧的一份
+    clock[0] = 1.0
+    assert s.store(jid_a, pa, _summary(pa, jid_a), unpack=True) is True
+    clock[0] = 2.0
+    assert s.store(jid_b, pb, _summary(pb, jid_b), unpack=True) is True
+    assert s.held() == {jid_z, jid_b}, "超条数丢错了对象（zip 候选被偿债 / staged 没丢最旧）"
+    # zip 账口径逐字不变：单份超预算 ⇒ 既有「仅剩一份也保留」照旧
+    s2 = PrefetchStore(tmp_path / "w2", budget_bytes=1)
+    assert s2.store(jid_a, pa, _summary(pa, jid_a)) is True
     assert s2.held() == {jid_a}
 
 

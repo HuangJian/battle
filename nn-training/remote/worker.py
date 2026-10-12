@@ -958,7 +958,15 @@ def worker_loop(
             if multi:
                 part_dir.mkdir(parents=True, exist_ok=True)
             if prefetch_depth > 0 and hi not in pf_stores:
-                pf_stores[hi] = PrefetchStore(part_dir, log=log)
+                # staged 条数上限 = **槽位数**（2026-10-12：撤销 256MiB 字节闸，见
+                # `prefetch.PREFETCH_DEPTH_DEFAULT` 上的长注——「盘上的量 = 条数 × 实测体积」，
+                # 条数是配置整数、体积每轮都在日志里，都不需要猜）。下限取 unpack_n：解包
+                # 旋钮开到比 depth 大时，允许留的 staged 副本不该反而变少。
+                pf_stores[hi] = PrefetchStore(
+                    part_dir,
+                    log=log,
+                    staged_max=max(prefetch_depth, prefetch_unpack),
+                )
                 # 建 store 时先扫一遍：清上一会话遗留的残壳 / 崩溃孤儿（`prefetch/` 在
                 # `prune_job_dirs` 豁免名单里，否则它们永远没人收；plan §2.3）。
                 pf_stores[hi].prune()
