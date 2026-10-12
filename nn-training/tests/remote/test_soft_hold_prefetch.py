@@ -93,13 +93,20 @@ def test_take_rejects_a_tampered_copy(tmp_path: Path) -> None:
     assert store.stats()["hits"] == 0
 
 
-def test_payload_lands_in_content_addressed_cache(tmp_path: Path) -> None:
-    """字节同时落 `blob_cache/<sha>`（内容寻址）：重领/多候选用同一份空间，不复制第二遍。"""
+def test_payload_is_staged_once_and_never_copied_into_blob_cache(tmp_path: Path) -> None:
+    """暂存区那一份就是唯一那份：**不写** `blob_cache/<payload_sha>`（plan/prefetch-stage-unpack §3）。
+
+    内容寻址那一层只服务 `opt/init/ref/demo`（`_resolve_blob` 只查那四个名字的 sha），payload 的
+    sha **从不被查** ⇒ 旧行为每 job 往最慢的盘上白写 2.5–2.7MB（首包 6.8MB）且永远没人读。
+    """
     store = PrefetchStore(tmp_path)
     p = _payload(512)
-    store.store(JID, p, _summary(p))
+    assert store.store(JID, p, _summary(p)) is True
     sha = hashlib.sha256(p).hexdigest()
-    assert (tmp_path / "blob_cache" / sha).read_bytes() == p
+    assert (tmp_path / PREFETCH_DIR_NAME / JID / "payload.zip").read_bytes() == p, (
+        "暂存副本必须逐字节完整（命中路径零网络就靠它）"
+    )
+    assert not (tmp_path / "blob_cache" / sha).exists(), "payload 又被写进 blob_cache（纯写税，没人读）"
 
 
 def test_drop_removes_held_copy(tmp_path: Path) -> None:

@@ -946,9 +946,7 @@ def worker_loop(
             if multi:
                 part_dir.mkdir(parents=True, exist_ok=True)
             if prefetch_depth > 0 and hi not in pf_stores:
-                pf_stores[hi] = PrefetchStore(
-                    part_dir, log=log, blob_root=shared_code_cache.parent / "blob_cache"
-                )
+                pf_stores[hi] = PrefetchStore(part_dir, log=log)
             pf_store = pf_stores.get(hi)
             try:
                 _polls_since_log += 1

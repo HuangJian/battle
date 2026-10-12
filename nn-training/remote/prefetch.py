@@ -12,9 +12,11 @@
 1. **软持有 = 无租约**：候选来自 `GET /jobs/peek`（无副作用、不动游标），下载走**低优 P2 通道**
    （可被高优/控制面当场打断）。所以 worker 死亡 = 本地暂存蒸发，hub 侧零残留——这是选软持有
    而非「预认领」的主要原因（预认领会在 hub 上留下要过期的租约与毒包计账）。
-2. **只存引用 + 让路**：payload 落**内容寻址**的 `blob_cache`（按 `payload_sha256`），暂存区只留
-   `{job_id → blob_sha + manifest 摘要}`，**不复制字节**；总量有硬预算，超限按 `updated_at` 丢最旧。
-   预取目录必须进 `prune_job_dirs` 豁免名单（否则每轮被当旧 job 删掉——`blob_cache` 已经栽过一次）。
+2. **暂存 + 让路**：payload 的**唯一**副本就在暂存区（`prefetch/<jid>/`）——内容寻址那一层
+   （`blob_cache`）只服务 `opt/init/ref/demo` 四类 blob，**payload 不进**（`payload_sha256` 从不被查，
+   写进去也没人读：2026-10-12 删掉那笔纯写税，plan/prefetch-stage-unpack §3）。总量有硬预算，
+   超限按 `updated_at` 丢最旧。预取目录必须进 `prune_job_dirs` 豁免名单（否则每轮被当旧 job
+   删掉——`blob_cache` 已经栽过一次）。
 3. **不撤销 minimize-payload 的瘦身**：预取**只走 `download_payload` 这一条路**（§4.1 的
    omit 协商落在那个函数里，落地后预取自动继承）。绝不在预取路径里另写一个「整包 GET」。
 
@@ -90,11 +92,10 @@ def prefetch_worth_it(
 
 
 class PrefetchStore:
-    """预取暂存区：`work_dir/prefetch/<jid>/` = `payload.zip` + `meta.json`（纯磁盘，无租约）。
+    """预取暂存区：`work_dir/prefetch/<jid>/` = `payload.zip`（或解好的 `shards/`）+ `meta.json`
 
-    内容寻址那一层（`blob_cache`）由 `remote/worker.py::_cache_blob` 维护；本类的 `meta.json`
-    记 `blob_sha` 作为**引用**，下载落盘时同时写内容寻址副本，于是同一份 payload 被多个
-    候选/重领复用时只占一份空间。
+    （纯磁盘，无租约）。内容寻址那一层（`blob_cache`）**不参与**（见模块头 §2）：本类只在自己
+    的暂存目录里放一份，`take()` 取走即删。
     """
 
     def __init__(
@@ -104,13 +105,11 @@ class PrefetchStore:
         budget_bytes: int = PREFETCH_BUDGET_BYTES_DEFAULT,
         clock: Callable[[], float] = time.time,
         log: Any = None,
-        blob_root: Path | None = None,
     ) -> None:
         self.root = Path(work_dir) / PREFETCH_DIR_NAME
         self.budget_bytes = int(budget_bytes)
         self._clock = clock
         self._log = log
-        self.blob_root = Path(blob_root) if blob_root is not None else Path(work_dir) / "blob_cache"
         self._lock = threading.Lock()
         self._items: dict[str, dict] = {}  # jid -> {sha, bytes, at, manifest}
         #: **正在下载**的候选（jid -> {summary, at}）——只为观测面存在（plan/dashboard-ppo-live-rows）：
@@ -154,7 +153,6 @@ class PrefetchStore:
             ),
             encoding="utf-8",
         )
-        self._cache_blob(sha, payload)
         with self._lock:
             self._items[jid] = {
                 "sha": sha,
@@ -169,16 +167,6 @@ class PrefetchStore:
         self.downloaded_bytes += len(payload)
         self.prune()
         return True
-
-    def _cache_blob(self, sha: str, payload: bytes) -> None:
-        """同一份字节写进内容寻址目录（跨候选/重领复用，命中即省一次下载）。"""
-        try:
-            self.blob_root.mkdir(parents=True, exist_ok=True)
-            p = self.blob_root / sha
-            if not p.exists():
-                p.write_bytes(payload)
-        except OSError as e:  # 只读盘/空间不足：暂存副本仍是完整的，预取不受影响
-            self._log_line(f"prefetch: blob_cache 写入失败（{type(e).__name__}）——继续用暂存副本")
 
     # ---------------------------------------------------------------- 读
 
