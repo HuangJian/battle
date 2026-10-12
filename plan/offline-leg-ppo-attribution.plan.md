@@ -290,12 +290,6 @@ all(b.get("lease_token") == ...)` 那类是**单字段**断言，加字段不会
   ④ 与既有 `job_completed` 混合 ⇒ 各自计数正确、`machineOf` 归并生效（同名的 job 腿与 offline 腿合成一行）；
   ⑤ 它**不**出现在采样组（role 隔离，WC-plan §4.1b 不许破）；
   ⑥ 单位口径：同课 3 条 `offline_artifact` ⇒ `totalDone` +3（1 条 = 1 job 等价）。
-- **dashboard 侧**（`dashboard/tests/worker-contribution.test.ts`，`machineOf` 与聚合口径都住这里）：
-  ① 一条 `offline_artifact` 带 `worker_name=kaggle-c` ⇒ 计入 PPO 组、份额分母 +1；
-  ② 只有 `worker`（claim 身份）⇒ 显示该身份（`machineOf` 恒等，无冒号）；
-  ③ 两者都无 ⇒ `(未登记)`，**不吞掉该轮**；
-  ④ 与既有 `job_completed` 混合 ⇒ 各自计数正确、`machineOf` 归并生效；
-  ⑤ 它**不**出现在采样组（role 隔离，WC-plan §4.1b 不许破）。
 
 ## 6. 门禁（§9，全绿才算交付）
 
