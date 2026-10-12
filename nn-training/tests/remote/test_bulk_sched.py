@@ -609,3 +609,20 @@ def test_stats_has_dod_fields():
         "control_waiting",
     ):
         assert k in st, f"stats() 缺 {k}"
+
+
+def test_control_can_skip_the_p0_latency_sample() -> None:
+    """`control(sample=False)`：仍然计入「控制面在途」（让路照旧生效），但**不进 P0 延迟分位表**。
+
+    ★ 2026-10-12（plan/transfer-jitter-tolerance C）：那张分位表是 `yield_worth_it()` 判
+    「让路买不回来 ⇒ 关掉让路」的输入，而它的前提是「P0 从不排队 ⇒ 尾部只能来自链路本身」。
+    一次**我们主动放宽了死线**的等待必须排除在外，否则放宽死线只会让自停判据更早关掉让路（自伤）。
+    """
+    clk = _FakeClock()
+    s = _sched(clock=clk)
+    with s.control(label="/jobs/x/status"):
+        assert s.control_active() is True
+    n1 = int(s.stats()["p0_count"])
+    with s.control(label="/jobs/x/status", sample=False):
+        assert s.control_active() is True, "sample=False 只影响分位表，不该影响在途标记"
+    assert int(s.stats()["p0_count"]) == n1, "sample=False 还是进了分位表"

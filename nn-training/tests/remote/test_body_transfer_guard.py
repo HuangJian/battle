@@ -23,6 +23,7 @@ import sys
 import threading
 import time
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -269,3 +270,101 @@ def test_hub_small_send_has_no_completion_noise(tmp_path, capfd) -> None:
     finally:
         srv.shutdown()
         srv.server_close()
+
+
+# ──────────────── 上传让路（2026-10-12，plan/transfer-jitter-tolerance B） ────────────────
+
+
+def test_paced_upload_slices_the_body_and_yields_between_pieces() -> None:
+    """★ 大 body 上传要**分片 + 片间让路**：`_paced_body` 是那条让路点的唯一实现。
+
+    病根：result POST 的 body 原先由 urllib **一次 sendall** ⇒ 整个上传窗口里 bulk 侧零让路
+    点，控制面小包只能硬等（真机：21.6s 的上传窗口内 `acquire failed` 12s 超时）。
+    """
+    data = b"x" * (http_mod.BODY_CHUNK * 2 + 10)
+    calls: list[int] = []
+
+    def pace() -> float:
+        calls.append(1)
+        return 0.0
+
+    got = b"".join(http_mod._paced_body(data, pace))
+    assert got == data, "分片拼不回原 body"
+    assert len(calls) == 3, f"片间让路次数不对（应 = 片数）：{len(calls)}"
+
+
+def test_big_upload_carries_an_explicit_content_length(monkeypatch) -> None:
+    """分片迭代器**必须显式带 `Content-Length`**：否则 `http.client` 改用 chunked 编码，而 hub
+    只认 Content-Length（它会一直等满声明的字节数）。
+
+    这条是「用了迭代器但没设长度」那类静默失败的**唯一**拦路判据（真链路上表现为 job 卡死）。
+    """
+    seen: dict = {}
+
+    class _Resp:
+        status = 200
+
+        def read(self) -> bytes:
+            return b"ok"
+
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *_a: object) -> Literal[False]:
+            return False
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            seen["cl"] = req.get_header("Content-length")
+            seen["body"] = req.data
+            return _Resp()
+
+    monkeypatch.setattr(http_mod, "_get_opener", lambda: _Opener())
+    data = b"y" * (http_mod.BODY_CHUNK + 1)
+    status, _body = http_mod._request(
+        "http://hub.invalid",
+        "tok",
+        "/jobs/x/result",
+        timeout=5.0,
+        data=data,
+        method="POST",
+        pace=lambda: 0.0,
+    )
+    assert status == 200
+    assert seen["cl"] == str(len(data)), f"没显式给 Content-Length：{seen['cl']}"
+    assert not isinstance(seen["body"], (bytes, bytearray)), "body 没交成分片迭代器"
+
+
+def test_small_upload_keeps_the_byte_body(monkeypatch) -> None:
+    """小 body（≤ 一块）**不包装**：逐字保持改造前的行为（省一次生成器，也让 fake 好写）。"""
+    seen: dict = {}
+
+    class _Resp:
+        status = 200
+
+        def read(self) -> bytes:
+            return b"ok"
+
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *_a: object) -> Literal[False]:
+            return False
+
+    class _Opener:
+        def open(self, req, timeout=None):
+            seen["body"] = req.data
+            return _Resp()
+
+    monkeypatch.setattr(http_mod, "_get_opener", lambda: _Opener())
+    data = b"y" * 128
+    http_mod._request(
+        "http://hub.invalid",
+        "tok",
+        "/jobs/x/result",
+        timeout=5.0,
+        data=data,
+        method="POST",
+        pace=lambda: 0.0,
+    )
+    assert isinstance(seen["body"], (bytes, bytearray)) and bytes(seen["body"]) == data

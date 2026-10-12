@@ -77,6 +77,7 @@ from remote.wire import (
     _wire_add,
     _wire_note_preempt,
     _wire_note_reroll,
+    _wire_note_resend,
     _wire_note_wait,
 )
 
@@ -85,10 +86,12 @@ __all__ = [
     "BODY_IDLE_TIMEOUT_SEC",
     "BODY_PROGRESS_MIN_SEC",
     "BODY_TOTAL_TIMEOUT_SEC",
+    "CONTROL_TIMEOUT_BULK_FACTOR",
     "_POLL_WARN_AT",
     "_get_opener",
     "_get_with_retry",
     "_opener",
+    "_paced_body",
     "_read_body",
     "_request",
     "_sched_headers",
@@ -96,6 +99,12 @@ __all__ = [
 ]
 
 # ------------------------------------------------------------------ HTTP 客户端
+
+#: 控制面死线在 **bulk 在飞**时的放宽倍数（2026-10-12，抖动容忍 C）。
+#: 6s × 2 = 12s 的旧行为在「bulk 占着链路」时是必死判据（真机：两次超时都落在 bulk 窗口内），
+#: 放宽到 12s 让那一次有机会排队完成；配套 `_tries=1` ⇒ 最坏阻塞与旧行为持平。
+#: ⚠ 放宽的那一次**不进 P0 延迟分位表**（`bulk_sched.control(sample=False)`），理由见那里。
+CONTROL_TIMEOUT_BULK_FACTOR = 2.0
 
 #: 显式 ProxyHandler（Colab userspace 模式下 urlopen() 不读 HTTP_PROXY 环境变量，2026-09-16 实测）
 _opener: urllib.request.OpenerDirector | None = None
@@ -146,6 +155,7 @@ def _read_body(
     progress: Any = None,
     allow_reroll: bool = False,
     pace: Any = None,
+    offset: int = 0,
 ) -> bytes:
     """分块读 body：报进度 + **停滞/超预算即抛**（异常正文带已收字节数与原因）。
 
@@ -161,14 +171,20 @@ def _read_body(
     单个 3s 窗口的瞬时速率必然误判（真机：首块 79KB/s ⇒ 重抽 ⇒ 换连接后 51KB/s，白扔 256KB）。
     浪费上界仍是**有界**的（判满就收兵），不给「整份重传」开口子。
 
+    `offset`（2026-10-12，Range 断点续传）：本段在**整份文件**里的起点（206 续传时 > 0）。
+    三个口径分开：① 进度与「共 N」用**累计**（`offset + 本段已收`，人看的是整体进度）；
+    ② 完整性判据只比本段声明的 `Content-Length`（累计口径会把续传误判成截断）；
+    ③ 速率与「预计剩余」用**本段**（前缀不是这一次传的，算进去会虚高）。
+
     停滞异常必须**有正文**：上游 `_get_with_retry` 只把 `repr(e)` 写进日志，裸
     `TimeoutError()` 打出来是 `TimeoutError()`——等于没写（2026-09-20 事故现场）。
     """
-    total = 0
+    seg_len = 0
     try:
-        total = int(resp.headers.get("Content-Length") or 0)
+        seg_len = int(resp.headers.get("Content-Length") or 0)
     except Exception:  # 非标准响应 / 假响应（测试）没有 headers
-        total = 0
+        seg_len = 0
+    total = offset + seg_len  # 累计口径（进度行 / 剩余秒数用它）
     buf = bytearray()
     t0 = time.time()
     last = t0
@@ -186,17 +202,19 @@ def _read_body(
             block = resp.read(BODY_CHUNK)
         except (TimeoutError, OSError) as e:
             raise TimeoutError(
-                f"body 停滞：{idle_timeout:.0f}s 内没有新字节（已收 {len(buf)} bytes"
+                f"body 停滞：{idle_timeout:.0f}s 内没有新字节（已收 {offset + len(buf)} bytes"
                 + (f" / 共 {total}" if total else "")
                 + "）——隧道或代理侧的问题，重试"
             ) from e
         if not block:
-            if total and len(buf) < total:
+            if seg_len and len(buf) < seg_len:
                 # ★ 2026-10-03（与引导期护栏同一处缺陷的孪生修复）：`http.client` 对
                 #   `read(amt)` 的提前 EOF **故意不抛** IncompleteRead（兼容）⇒ 旧行为把半截
                 #   body 当成功返回。收满声明长度才算成功；否则当瞬时失败（上层退避重取）。
+                #   ⚠ 判据用**本段**声明长度（`seg_len`）而不是累计口径 `total`：续传时
+                #   `offset>0`，拿累计口径比会把每一条正常的 206 都误判成「被截断」。
                 raise TimeoutError(
-                    f"body 提前结束（连接被截断）：已收 {len(buf)} bytes / 共 {total}"
+                    f"body 提前结束（连接被截断）：已收 {offset + len(buf)} bytes / 共 {total}"
                     "——隧道或代理侧的问题，重试"
                 )
             return bytes(buf)
@@ -209,23 +227,27 @@ def _read_body(
             # 开口子（plan §7.2 的硬要求）。
             # 净值 = 墙钟 − 让路：让路不是链路的错，否则「停满 5s 预算」会让
             # 256KB/5s ≈ 51KB/s 恒低于阈值 ⇒ 每次下载都白扔一块重抽（现场 100%）。
+            # ⚠ 速率/剩余按**本段**算（`seg_len`）：前缀不是这一次传的，算进去会虚高。
             should, rate, remain = _reroll_decision(
-                len(buf), total, max(0.0, now - t0 - t_yield)
+                len(buf), seg_len, max(0.0, now - t0 - t_yield)
             )
             if rate > 0.0:  # rate == 0 ⇒ 样本还太小、没下结论（不计数、不判定）
                 probes += 1
                 slow_streak = slow_streak + 1 if should else 0
                 if probes >= WIRE_REROLL_PROBES and slow_streak >= WIRE_REROLL_PROBES:
-                    raise WireSlowError(len(buf), rate, remain)
+                    # 累计口径 + 本段字节：调用方据此续传（`partial`）与记账（`bytes_read`）。
+                    raise WireSlowError(
+                        offset + len(buf), rate, remain, partial=bytes(buf)
+                    )
         if total_timeout is not None and now - t0 > total_timeout:
             raise TimeoutError(
-                f"body 超时：总耗时 > {total_timeout:.0f}s（已收 {len(buf)} bytes"
+                f"body 超时：总耗时 > {total_timeout:.0f}s（已收 {offset + len(buf)} bytes"
                 + (f" / 共 {total}" if total else "")
                 + "）——链路太慢，重试"
             )
         if progress is not None and now - last >= BODY_PROGRESS_MIN_SEC:
             last = now
-            progress(len(buf), total, now - t0)
+            progress(offset + len(buf), total, now - t0)
 
 
 #: "base_url:status" -> 上次告警墙钟（节流：非 200 时每分钟最多一条，别刷屏）
@@ -292,6 +314,23 @@ def _warn_non_200(
     )
 
 
+def _paced_body(data: bytes, pace: Any) -> Any:
+    """把上传 body 交成**分片迭代器**：每片之间调一次 `pace()`（2026-10-12，抖动容忍 B）。
+
+    为什么用迭代器而不是自己写 socket：urllib 的**代理装配**（CONNECT 隧道 / 绝对 URI）不想
+    重写一遍；而 `http.client.send()` 对可迭代对象本来就是一拍一片 `sendall`。前提是**显式给
+    `Content-Length`** —— `http.client._set_content_length` 对"算不出长度的可迭代对象"会改用
+    `Transfer-Encoding: chunked`，而 hub 只认 Content-Length（它会一直等满声明的字节）。
+    """
+    view = memoryview(data)
+    for i in range(0, len(view), BODY_CHUNK):
+        yield bytes(view[i : i + BODY_CHUNK])
+        # 片**之后**让路：暂停发生在下一片之前 = 把这一小段带宽让给控制面小包。
+        # P1 不会被抢断（`check_preempted` 只对 P2 抛），所以这里不接 `BulkPreemptError`。
+        if pace is not None:
+            pace()
+
+
 def _request(
     base_url: str,
     token: str,
@@ -305,6 +344,7 @@ def _request(
     total_timeout: float | None = None,
     allow_reroll: bool = False,
     pace: Any = None,
+    range_start: int = 0,
 ) -> tuple[int, bytes]:
     """单发 GET/POST。缺省（不给 `idle_timeout`/`progress`）行为与改造前逐字节相同。
 
@@ -318,18 +358,46 @@ def _request(
 
     `allow_reroll=True`（幂等 GET 的大 body）时，首块就慢得离谱就抛 `WireSlowError`
     交上层换连接重抽（调用方 = `_get_with_retry`，它负责计数与结束条件）。
+
+    `range_start > 0`（2026-10-12，Range 断点续传）⇒ 带 `Range: bytes=N-`，并在服务端回 **206**
+    时把 `offset=N` 交给 `_read_body`（三个口径要对齐，见那里）；回 **200** 时按 `offset=0` 读
+    （它忽略了 Range ⇒ 这一份是从头传的整份）。**上传也让路**：`data` 大且给了 `pace` 就交成
+    分片迭代器（`_paced_body`）。
     """
+    hdr_extra = dict(headers or {})
+    if range_start > 0:
+        hdr_extra["Range"] = f"bytes={int(range_start)}-"
+    body: Any = data
+    if data is not None and pace is not None and len(data) > BODY_CHUNK:
+        # 上传让路（B）：`pace` 原先只接在下载侧（`_read_body`），result POST 的 body 由 urllib
+        # 一次 sendall ⇒ 整个上传窗口里 bulk 侧**零让路点**，控制面小包只能硬等（真机：21.6s 的
+        # 上传窗口内 acquire 12s 超时）。显式 Content-Length 见 `_paced_body` 的注释。
+        hdr_extra["Content-Length"] = str(len(data))
+        body = _paced_body(data, pace)
     url = f"{base_url.rstrip('/')}{path}"
     req = urllib.request.Request(
         url,
-        data=data,
-        headers={AUTH_HEADER: f"Bearer {token}", **(headers or {})},
+        data=body,
+        headers={AUTH_HEADER: f"Bearer {token}", **hdr_extra},
         method=method,
     )
     stream = idle_timeout is not None or progress is not None
     sock_timeout = idle_timeout if idle_timeout is not None else timeout
+    _is_ctl = control_path(path) and not stream
+    # C（2026-10-12，抖动容忍）：**有 bulk 在飞 ⇒ 控制面必然排队**，固定 6s 死线在这类链路上是
+    # 必死判据（真机：acquire 12s 超时 + 5s 退避 ≈ 17s 空转，两次都落在 bulk 窗口内）。放宽 =
+    # 让这次请求有机会**排在 bulk 之后完成**，省掉整轮重试；配套把尝试次数收成 1，使最坏阻塞
+    # 时长与旧行为持平（旧 = 6s×2，新 = 12s×1）。
+    # ⚠ 这类请求**不进 P0 延迟分位表**（`sample=False`）：那张表是 `yield_worth_it()` 判「让路
+    # 买不回来 ⇒ 关掉让路」的输入，前提是「P0 从不排队 ⇒ 尾部只能来自链路本身」；把一次
+    # **我们允许它慢**的等待记进去，只会让自停判据更早关掉让路（自伤）。
+    _widened = bool(_is_ctl and _BULK.inflight() > 0)
+    if _widened:
+        sock_timeout = sock_timeout * CONTROL_TIMEOUT_BULK_FACTOR
     # 控制面标记（P0）：命中即让 bulk 在分片间隙让路；控制面自己**不进** bulk 队列。
-    ctl = _BULK.control(label=path) if control_path(path) else nullcontext()
+    ctl = (
+        _BULK.control(label=path, sample=not _widened) if control_path(path) else nullcontext()
+    )
     # B2：控制面走连接池（省每请求一次 TLS 握手 / 建连）。**三个条件同时成立**才走池：
     #   ① 池开着；② 这条是控制面（`control_path`）；③ **非回环**（本机 hub 走 net_http.urlopen，
     #   绕代理是它的既有语义，不能改）。bulk（大 body）永远不进池。
@@ -342,7 +410,8 @@ def _request(
     )
     # B3：控制面**短预算 + 立刻换连接重抽一次**（plan §3.5）。只给幂等的控制面小请求
     # （无 body 下载那一套），且**不退避**——退避就是接着干等，与「把 30s 切成 6s×N」相反。
-    _tries = CONTROL_ATTEMPTS if (control_path(path) and not stream) else 1
+    # `_widened` 时只发一次：那条请求已经拿到 2× 死线，再来一次会把最坏阻塞翻倍。
+    _tries = CONTROL_ATTEMPTS if (_is_ctl and not _widened) else 1
     _last: BaseException | None = None
     with ctl:
         for _t in range(_tries):
@@ -351,15 +420,18 @@ def _request(
                     return _control_pool_request(
                         url,
                         method=method or ("POST" if data is not None else "GET"),
-                        headers={AUTH_HEADER: f"Bearer {token}", **(headers or {})},
+                        headers={AUTH_HEADER: f"Bearer {token}", **hdr_extra},
                         data=data,
                         timeout=sock_timeout,
                     )
                 # 回环（本机 hub）绕开代理；非回环走进程内的显式 ProxyHandler（Colab 实测需要）。
                 open_fn = net_http.urlopen if net_http.is_loopback(url) else _get_opener().open
                 with open_fn(req, timeout=sock_timeout) as resp:
-                    if not stream or resp.status != 200:
+                    if not stream or resp.status not in (200, 206):
                         return resp.status, resp.read()
+                    # 206 ⇒ 服务端**接受**了 Range（本段起点 = 请求的 range_start）；
+                    # 200 ⇒ 它忽略了 Range（旧 hub / 中间代理剥头）⇒ 这一份是从 0 传的整份，
+                    #        必须按 offset=0 读，否则进度/剩余/完整性三个口径全错。
                     return resp.status, _read_body(
                         resp,
                         idle_timeout=sock_timeout,
@@ -367,6 +439,7 @@ def _request(
                         progress=progress,
                         allow_reroll=allow_reroll,
                         pace=pace,
+                        offset=int(range_start) if resp.status == 206 else 0,
                     )
             except urllib.error.HTTPError as e:
                 return e.code, e.read()
@@ -442,6 +515,9 @@ def _get_with_retry(
     reroll_ok = reroll
     #: 上一次重抽前的实测速率（判「换连接到底有没有变好」；第一抽没有对比对象，允许抽）。
     prev_rate = 0.0
+    #: **跨尝试累积**的字节（2026-10-12，Range 断点续传）：`WireSlowError.partial` 并进来，
+    #: 下次请求带 `Range: bytes=<offset>-` 接着传 —— 断连不再把已收的那截扔掉。
+    parts = bytearray()
     # ★ 2026-10-04（x20-adv-acc 现场）：base_url 为空 = **确定性配置错误**，重试不会变好 ——
     #   旧行为是 urllib 抛 `ValueError: unknown url type: '/jobs/…/blob?name=opt'`，被当成
     #   瞬时抖动退避重试 3 次（白等 6s+，日志还引导不到根因）。最常见来源：自主段/离线段的
@@ -478,6 +554,7 @@ def _get_with_retry(
                         total_timeout=total_timeout,
                         allow_reroll=allow_reroll,
                         pace=_bulk_pace(_tok, bulk_prio),
+                        range_start=len(parts),
                     )
                 finally:
                     # S3d：本次排队归到**本 jid** 的账（失败/被挤走的排队也要记——那是真花掉的时间）。
@@ -509,12 +586,15 @@ def _get_with_retry(
             raise
         except WireSlowError as e:
             rerolls += 1
-            _wire_note_reroll(wire_jid, e.bytes_read)
+            # 续传（2026-10-12）：这一截**不作废**——并进累积缓冲，下次带 `Range` 接着传。
+            # 所以 `wasted` 记 0（真作废只可能来自「服务端忽略 Range」，由 `_wire_note_resend` 记）。
+            parts += e.partial
+            _wire_note_reroll(wire_jid, 0)
             floor = _min_rate()
             log(
                 f"wire: re-roll #{rerolls}/{WIRE_REROLL_MAX} {wire_seg or path}: "
                 f"实测 {e.rate / 1024:.0f} KB/s < 阈值 {floor / 1024:.0f} KB/s"
-                f"（按此速率剩余 {e.remain_sec:.0f}s）——断开重发（已收 {e.bytes_read} bytes 作废）"
+                f"（按此速率剩余 {e.remain_sec:.0f}s）——断开续传（续传起点 {len(parts)} bytes）"
             )
             # 无收益即停（2026-10-12，抖动是常态）：换一条连接还是这个速率 ⇒ **不是坏签，是链路
             # 整体降速**。再抽只是把一整块（256KB）一遍遍扔掉 —— 真机证据：重抽前后 79 → 51 KB/s，
@@ -531,7 +611,21 @@ def _get_with_retry(
             continue  # 立即换连接重抽（不退避）
         except Exception as e:  # 网络层抖动（URLError/timeout/reset）
             status, body = None, repr(e).encode()
-        if status == 200:
+        if status == 206:
+            # 续传的尾巴（服务端接受了 `Range`）⇒ 拼上去就是整份。
+            parts += body
+        elif status == 200:
+            if parts:
+                # 带了 `Range` 却回 200 = 服务端**忽略了 Range**（旧 hub / 中间代理剥头）⇒
+                # 这一份是从 0 传的整份，之前那截真的白传了：如实记账（只记浪费，不加重抽次数）。
+                _wire_note_resend(wire_jid, len(parts))
+                log(
+                    f"wire: {wire_seg or path} 服务端不支持 Range（回 200）"
+                    f"——已收 {len(parts)} bytes 作废，本次从头传"
+                )
+                parts = bytearray()
+            parts = bytearray(body)
+        if status in (200, 206):
             # 两个口径分开（2026-09-25）：
             #   `elapsed`（墙钟，含排队）⇒ 只喂 `_note_rate`（保守侧，不抬高 `_min_rate`）；
             #   段账用**纯传输**秒数 —— 否则与 hub 侧「响应发送完成 … in Xs」无法对账
@@ -540,7 +634,7 @@ def _get_with_retry(
             _wire_add(wire_jid, wire_seg, len(body), time.time() - t_xfer)
             if elapsed > 0:
                 _note_rate(len(body) / elapsed, len(body))
-            return body
+            return bytes(parts)
         if status is not None and 400 <= status < 500:
             raise ProtocolError(f"{path} failed: HTTP {status}")
         last = (

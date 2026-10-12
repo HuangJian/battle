@@ -140,35 +140,42 @@ def test_min_rate_never_drops_below_the_absolute_floor() -> None:
 
 
 def _rerolling_request(monkeypatch, waste_bytes: int = 256 * 1024, *, improving: bool = True):
-    """假 `_request`：**只在允许重抽时**抛 `WireSlowError`，否则返回 body。
+    """假 `_request`：允许重抽时抛 `WireSlowError`（**带 `partial`**，模拟支持 Range 的服务端），
+    否则把**剩下的那一段**当 206 回给调用方。
 
-    返回 `(calls, body)`；`calls` 记录每次的 `allow_reroll`，用来钉「重抽的开放面」。
+    返回 `(calls, total_bytes)`；`calls` 记录每次的 `allow_reroll`，用来钉「重抽的开放面」。
 
     `improving=True`（缺省）让每次重抽的实测速率**更高**（3× 递增）——这样「重抽上限」那条
     用例不会被 2026-10-12 的「**无收益即停**」提前截断：两条是不同的判据，必须能分别钉住。
+
+    ★ 2026-10-12（Range 断点续传）：夹具改成「断连时交出 `partial`、重来时回 206 尾巴」，
+    于是重抽**不再作废字节**（`wasted` 恒 0）；「服务端忽略 Range ⇒ 如实记账」由单独用例钉住。
     """
     calls: list[bool] = []
-    body = b"z" * 300_000
+    total = 1_200_000
     n = {"k": 0}
 
     def fake(base_url: str, token: str, path: str, **kw):
         allow = bool(kw.get("allow_reroll", False))
         calls.append(allow)
+        start = int(kw.get("range_start") or 0)
         if allow:
             n["k"] += 1
             rate = 6.4 * 1024 * (3 ** (n["k"] - 1)) if improving else 6.4 * 1024
-            raise worker_mod.WireSlowError(waste_bytes, rate, 1180.0)
-        return 200, body
+            raise worker_mod.WireSlowError(
+                start + waste_bytes, rate, 1180.0, partial=b"z" * waste_bytes
+            )
+        return (206 if start else 200), b"z" * (total - start)
 
     # 注入点 = `remote.http`：`_get_with_retry` 已搬进 http（S4 第五步），它在本模块命名空间
     # 解析 `_request` ⇒ patch `worker` 会静默失效（patch 后调**宿主**函数的仍是 `worker`）。
     monkeypatch.setattr(http_mod, "_request", fake)
-    return calls, body
+    return calls, total
 
 
 def test_rerolls_then_succeeds_and_records_the_waste(monkeypatch) -> None:
-    """慢签 ⇒ 重抽 ⇒ 拿到 body；且**作废字节与次数都进账**（坏签比例靠它统计）。"""
-    calls, body = _rerolling_request(monkeypatch)
+    """慢签 ⇒ 重抽**续传** ⇒ 拿到整份；次数进账，而 `wasted` 为 0（断连那截没扔）。"""
+    calls, total = _rerolling_request(monkeypatch)
     lines: list[str] = []
     out = worker_mod._get_with_retry(
         "http://hub",
@@ -181,20 +188,58 @@ def test_rerolls_then_succeeds_and_records_the_waste(monkeypatch) -> None:
         wire_seg="payload",
         reroll=True,
     )
-    assert out == body
+    assert len(out) == total, f"续传没拼成整份：{len(out)}"
     assert calls == [True, True, False]  # 最后一次尝试不重抽 ⇒ 必然传完
     assert sum("wire: re-roll" in ln for ln in lines) == 2
     assert any("6 KB/s < 阈值" in ln for ln in lines)  # 日志里有速率与阈值（可诊断）
 
     worker_mod._wire_flush("j1", lines.append)
     summary = lines[-1]
-    assert "payload=0.29MB/" in summary
-    assert "reroll=2(wasted 0.50MB)" in summary  # 2 × 256 KB
+    # 段账记的是**最后一段**（206 那截 = 1.2MB − 2×256KB）
+    assert "payload=0.64MB/" in summary, summary  # 最后一段 = 1.2MB − 2×256KB
+    # ★ 2026-10-12：续传 ⇒ 断连读到的字节**不作废**
+    assert "reroll=2(wasted 0.00MB)" in summary, summary
+
+
+def test_a_server_that_ignores_range_is_accounted_as_waste(monkeypatch) -> None:
+    """★ 服务端**忽略 Range**（回 200）⇒ 那截真白传了：如实记 `wasted`。
+
+    别把「续传成功」当默认：旧 hub / 中间代理剥掉 `Range` 时，我们拿到的是一份从头传的整份，
+    前缀确实传了两遍 —— 记账必须能从日志里看出来，否则「抖动期到底白扔了多少」永远算不出来。
+    """
+    total = 400_000
+    calls: list[int] = []
+
+    def fake(base_url: str, token: str, path: str, **kw):
+        calls.append(int(kw.get("range_start") or 0))
+        if len(calls) == 1:
+            raise worker_mod.WireSlowError(100_000, 6.4 * 1024, 1180.0, partial=b"z" * 100_000)
+        return 200, b"q" * total  # 旧 hub：Range 被忽略
+
+    monkeypatch.setattr(http_mod, "_request", fake)
+    lines: list[str] = []
+    out = worker_mod._get_with_retry(
+        "http://hub",
+        "t",
+        "/jobs/j6/payload",
+        timeout=300.0,
+        attempts=3,
+        log=lines.append,
+        wire_jid="j6",
+        wire_seg="payload",
+        reroll=True,
+    )
+    assert calls == [0, 100_000], f"重抽没带续传起点：{calls}"
+    assert out == b"q" * total, "服务端给了整份就按整份返回"
+    # 判据读**账本本身**（不看渲染出来的日志措辞）：次数 1、浪费 100KB（那截真传了两遍）。
+    bucket = wire_mod._WIRE["j6"]
+    assert bucket["rerolls"] == 1, bucket
+    assert bucket["wasted"] == 100_000, bucket
 
 
 def test_reroll_is_capped_and_the_last_attempt_always_transfers(monkeypatch) -> None:
     """`attempts` 给再多，重抽也不超过 `WIRE_REROLL_MAX`；之后必有一次「硬传」。"""
-    calls, body = _rerolling_request(monkeypatch)
+    calls, total = _rerolling_request(monkeypatch)
     lines: list[str] = []
     out = worker_mod._get_with_retry(
         "http://hub",
@@ -207,12 +252,12 @@ def test_reroll_is_capped_and_the_last_attempt_always_transfers(monkeypatch) -> 
         wire_seg="payload",
         reroll=True,
     )
-    assert out == body
+    assert len(out) == total, f"续传没拼成整份：{len(out)}"
     assert calls.count(True) == worker_mod.WIRE_REROLL_MAX == 3
     assert calls[-1] is False
 
     worker_mod._wire_flush("j2", lines.append)
-    assert "reroll=3(wasted 0.75MB)" in lines[-1]
+    assert "reroll=3(wasted 0.00MB)" in lines[-1]  # 续传：一次都没白扔
 
 
 def test_a_reroll_that_does_not_improve_stops_rerolling(monkeypatch) -> None:
@@ -224,7 +269,7 @@ def test_a_reroll_that_does_not_improve_stops_rerolling(monkeypatch) -> None:
     判据只看**行为**（抽几次、有没有传完）：那句「重抽无收益」的日志是给操作员看的说明，
     本用例不拿它当判据（文本断言预算只许降）。
     """
-    calls, body = _rerolling_request(monkeypatch, improving=False)
+    calls, total = _rerolling_request(monkeypatch, improving=False)
     out = worker_mod._get_with_retry(
         "http://hub",
         "t",
@@ -236,7 +281,7 @@ def test_a_reroll_that_does_not_improve_stops_rerolling(monkeypatch) -> None:
         wire_seg="payload",
         reroll=True,
     )
-    assert out == body, "停抽之后必须老实传完"
+    assert len(out) == total, f"停抽之后必须老实传完：{len(out)}"
     assert calls == [True, True, False], f"无收益没停手：{calls}"
 
 
@@ -269,12 +314,12 @@ def test_reference_rate_decays_after_repeated_slow_samples() -> None:
 
 def test_reroll_disabled_path_is_untouched(monkeypatch) -> None:
     """`reroll=False`（缺省）⇒ **一次都不抛**、行为与改造前一致（旧调用面零变化）。"""
-    calls, body = _rerolling_request(monkeypatch)
+    calls, total = _rerolling_request(monkeypatch)
     out = worker_mod._get_with_retry(
         "http://hub", "t", "/jobs/j3/code", timeout=60.0, attempts=3, log=lambda _m: None
     )
-    assert out == body
-    assert calls == [False]
+    assert len(out) == total
+    assert calls == [False], "关掉重抽就不该带 range（range_start 也不必带）"
 
 
 def test_exhausted_rerolls_still_fail_loudly(monkeypatch) -> None:

@@ -30,6 +30,37 @@ from common.protocol import (
 )
 
 
+def parse_range(raw: str | None, total: int) -> tuple[int, int] | None:
+    """解析 `Range: bytes=N-` / `bytes=N-M` → `(start, end)`（**含两端**，HTTP 语义）。
+
+    返回 `None` = 「不带 Range 或不可满足」⇒ 调用方按**整份 200** 服务（这是 RFC 允许的：
+    服务器可以忽略 Range）。只支持单区间——本仓唯一的客户端是自家 worker，它只发
+    `bytes=N-`。**纯函数**：这是本仓第一条 Range 支持，判据必须能被单测直接钉住。
+
+    为什么不返回 416：`start >= total` 时回 416 更"正确"，但客户端那边只会当成一次瞬时失败
+    去退避重试（它没有「从头再来」的分支）；回整份 200 是**可续**的语义，且与旧 hub 行为一致。
+    """
+    if not raw:
+        return None
+    spec = str(raw).strip()
+    if not spec.lower().startswith("bytes="):
+        return None
+    spec = spec[len("bytes=") :].strip()
+    if "," in spec:  # 多区间：不支持（忽略 ⇒ 整份）
+        return None
+    if "-" not in spec:
+        return None
+    start_s, _, end_s = spec.partition("-")
+    try:
+        start = int(start_s) if start_s.strip() else 0
+        end = int(end_s) if end_s.strip() else total - 1
+    except ValueError:
+        return None
+    if start < 0 or total <= 0 or start >= total:
+        return None
+    return start, min(end, total - 1)
+
+
 class BlobRoutes:
     """blob 路由 mixin（`HubHandler(…, BlobRoutes, BaseHTTPRequestHandler)`）。"""
 
@@ -53,6 +84,14 @@ class BlobRoutes:
 
     # ---- GET /jobs/{id}/payload ----
     def _get_payload(self) -> None:
+        """递 payload；**支持 `Range: bytes=N-` 断点续传**（2026-10-12，plan/transfer-jitter-tolerance A）。
+
+        病根：worker 的低速重抽是"丢掉已收、从零重来"（真机每次白扔 256KB + 一次建连）。hub 侧
+        给一个 206 之后，重抽的代价趋零 —— 抖动是常态，重试的代价必须接近 0。
+        `Accept-Ranges: bytes` 由 `_bytes` 无条件带上（那个头是「本端点支持续传」的**声明**，
+        客户端据此决定要不要在重抽时带 `Range`）。计账仍按**实际服务出去的字节**记
+        （`record_payload_sent`），续传时它自然小于文件长度 —— 那正是省下来的量。
+        """
         jid = self._job_or_404()
         if jid is None:
             return
@@ -61,9 +100,23 @@ class BlobRoutes:
             self._json({"error": "no payload"}, 404)
             return
         data = p.read_bytes()
-        # M0 统一计量：传输层实测（服务出去的 payload 字节）——iteration 事件对账用。
-        self.hub.record_payload_sent(jid, len(data))
-        self._bytes(data)
+        span = parse_range(self.headers.get("Range"), len(data))
+        if span is None:
+            # M0 统一计量：传输层实测（服务出去的 payload 字节）——iteration 事件对账用。
+            self.hub.record_payload_sent(jid, len(data))
+            self._bytes(data)
+            return
+        start, end = span
+        body = data[start : end + 1]
+        self.hub.record_payload_sent(jid, len(body))
+        self._bytes(
+            body,
+            status=206,
+            extra_headers={
+                "Content-Range": f"bytes {start}-{end}/{len(data)}",
+                "Accept-Ranges": "bytes",
+            },
+        )
 
 
     # ---- GET /jobs/{id}/code ----

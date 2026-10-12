@@ -5136,3 +5136,36 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 - **落点** → `nn-training/remote/{wire,http,worker}.py` ·
   `nn-training/tests/remote/{test_wire_reroll,test_worker_state_contract}.py`
   （FORM 文本断言基线**不变** 1445：新用例全用行为判据）—— 全文 → `docs/nn/remote-transport.md §86`
+
+## §2026-10-12-transfer-jitter-tolerance-abc（2026-10-12，plan A/B/C 落地：payload 的 Range 断点续传 · 上传让路点 · 控制面死线与 P0 指标解耦）
+
+- **背景**：§2026-10-12-transfer-jitter-tolerance 只治了「判据误报」与「无收益还抽」，把三件结构性
+  的事留在 `plan/transfer-jitter-tolerance.plan.md`（A→B→C）。本条是那三项的落地：**抖动是常态
+  ⇒ 重试的代价必须趋近 0、控制面不许在任何窗口里裸奔**。
+- **A（Range 断点续传）**：hub `GET /jobs/{id}/payload` 认 `Range: bytes=N-` ⇒ `206` +
+  `Content-Range`，`_bytes` 无条件带 `Accept-Ranges: bytes`，起点不可满足 ⇒ **回落整份 200**（不是
+  416：客户端没有「从头再来」的分支，416 会被它当成瞬时失败去退避重试）。worker 侧 `_get_with_retry`
+  把 `WireSlowError.partial` 并进跨尝试累积缓冲、下次带 `Range`；**三个口径分开**（进度/共 N 用
+  累计、完整性只比本段 `Content-Length`、速率与剩余用本段）。
+  记账口径随之改：一次重抽**不再**默认记 `wasted`（那一截被续用），只有「服务端忽略 Range」才记
+  （新函数 `_wire_note_resend`：**只加 wasted、不加重抽次数**——次数与浪费是两个事实）。
+  兼容：worker 先升（老 hub 回 200 ⇒ 走「忽略」那条＝今天的行为）；hub 先升（老 worker 不带 Range
+  ⇒ 一直整份）⇒ 不需要同时升。
+- **B（上传让路点）**：`pace` 原先只接在 `_read_body`，result POST 的 body 由 urllib 一次 sendall
+  ⇒ 整个上传窗口零让路点。做法**不动代理装配**：把 body 交成**分片生成器** + **显式 `Content-Length`**
+  （⚠ 不给长度时 `http.client` 会改用 chunked，而 hub 只认 Content-Length），片间调 `pace()`。
+  `post_result` 早就传了 `pace=_bulk_pace(…)`（`job_lifecycle.py:590`）⇒ 调用点零改动。
+  备选与否决：自己用 `http.client` 写上传（要重做 CONNECT 隧道/绝对 URI 的代理装配，`control_pool`
+  那份是控制面专用且有护栏）—— 否，收益相同而风险高一个量级。
+- **C（控制面死线）**：**先解耦指标再放宽**。控制面请求的墙钟同时喂 `bulk_sched._p0_ms`，而
+  `yield_worth_it()`（`YIELD_GIVEUP_P95_MS=10_000`）用它判「让路买不回来 ⇒ 降 never」，前提是
+  「P0 从不排队」⇒ 把「我们允许它慢」的等待记进去只会更早关掉让路（自伤）。做法：`control(sample=False)`
+  仍计入在途/让路、但不进分位表；`_request` 在 `control_path ∧ 非流式 ∧ 有 bulk 在飞` 时放宽
+  `CONTROL_TIMEOUT_BULK_FACTOR=2.0` 倍并把尝试次数收成 1 ⇒ **最坏阻塞与旧行为持平**（旧 6s×2，新 12s×1）。
+- **后果**：抖动下的重抽不再给链路加税（`wasted` 恒 0）；上传窗口内控制面不再裸奔；控制面死线自适应
+  而 P0 自停判据不受污染。**接口新增**（都 additive）：`parse_range` · `_bytes(extra_headers=)` ·
+  `WireSlowError(partial=)` · `_wire_note_resend` · `_paced_body` · `control(sample=)` ·
+  `CONTROL_TIMEOUT_BULK_FACTOR`。
+- **落点** → `nn-training/hub/{blob,http_face}.py` · `nn-training/remote/{http,wire,worker,bulk_sched}.py` ·
+  `nn-training/tests/hub/test_payload_range.py`（新）· `nn-training/tests/remote/{test_wire_reroll,
+  test_body_transfer_guard,test_bulk_sched}.py` —— 全文 → `docs/nn/remote-transport.md §87`

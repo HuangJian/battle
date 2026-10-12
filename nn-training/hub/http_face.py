@@ -297,6 +297,7 @@ class HubHandler(
         status: int = 200,
         ctype: str = "application/octet-stream",
         filename: str = "",
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
         """发送整块 body：大 body **分片 + 有界**，且完成/停滞各有一行日志。
 
@@ -305,10 +306,19 @@ class HubHandler(
         的访问行被高频静默规则吃掉 ⇒ 两端日志同时沉默（唯一的现象是「卡住」）。
         现在：分片写（每片独立超时）⇒ 停滞 ≤SEND_TIMEOUT_SEC 内被断掉并**响亮打印**
         已发字节数；≥SEND_LOG_MIN_BYTES 的 body 完成时也打一行（可对账传输时长/速率）。
+
+        `extra_headers`（2026-10-12，Range 断点续传）：额外响应头（`Content-Range` 等），
+        由 `/jobs/{id}/payload` 的 206 分支带上。
         """
         self.send_response(status)
         self.send_header("Content-Type", ctype)
         self.send_header("Content-Length", str(len(data)))
+        # 「本端点支持 Range 续传」的**声明**（2026-10-12）：`/payload` 的 206 分支靠它让客户端
+        # 敢在重抽时带 `Range`。无条件带上——头就几十字节，但没了它客户端只能靠"试一次看回 200
+        # 还是 206"来发现，那是把探测塞进数据面。
+        self.send_header("Accept-Ranges", "bytes")
+        for _k, _v in (extra_headers or {}).items():
+            self.send_header(_k, _v)
         if filename:
             # 习惯文件名（下载时手一按就是这个名字，不必再改名）
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')

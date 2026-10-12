@@ -61,6 +61,7 @@ __all__ = [
     "_wire_hit",
     "_wire_note_preempt",
     "_wire_note_reroll",
+    "_wire_note_resend",
     "_wire_note_wait",
     "_wire_start",
     "_wire_time",
@@ -243,9 +244,15 @@ class WireSlowError(Exception):
 
     带正文（已收字节数 / 速率 / 预计剩余）——与裸 `TimeoutError()` 的教训同规：日志里必须
     能读出「为什么断」，否则运维只看到「又重试了」。
+
+    `partial`（2026-10-12，Range 断点续传）：这次尝试**实际读到的字节**。重抽时调用方把它并进
+    累积缓冲、下一次请求带 `Range: bytes=<已收>-` 续传 ⇒ 断连不再从头来过（`bytes_read` 因此
+    是**累计**口径 = 前缀 + `len(partial)`，`offset=0` 时与旧语义逐字相同）。
     """
 
-    def __init__(self, bytes_read: int, rate: float, remain_sec: float) -> None:
+    def __init__(
+        self, bytes_read: int, rate: float, remain_sec: float, *, partial: bytes = b""
+    ) -> None:
         super().__init__(
             f"慢连接：实测 {rate / 1024:.0f} KB/s（已收 {bytes_read} bytes，"
             f"按此速率剩余 {remain_sec:.0f}s）"
@@ -253,6 +260,7 @@ class WireSlowError(Exception):
         self.bytes_read = bytes_read
         self.rate = rate
         self.remain_sec = remain_sec
+        self.partial = partial
 
 
 def _wire_bucket(jid: str) -> dict:
@@ -318,12 +326,29 @@ def _wire_hit(jid: str, seg: str, why: str = "cache") -> None:
 
 
 def _wire_note_reroll(jid: str, wasted: int) -> None:
-    """记一次重抽（及其作废字节）——坏签比例就靠它统计。"""
+    """记一次重抽（及其作废字节）——坏签比例就靠它统计。
+
+    ⚠ 2026-10-12 起 `wasted=0` 是**常态**（Range 断点续传：断连那次读到的字节被续用，不作废）。
+    「真作废」的字节由 `_wire_note_resend` 单独记（服务端忽略 Range 时才发生）。
+    """
     if not jid:
         return
     w = _wire_bucket(jid)
     w["rerolls"] += 1
     w["wasted"] += int(wasted)
+
+
+def _wire_note_resend(jid: str, nbytes: int) -> None:
+    """记「这段字节**真传了两遍**」（只进 `wasted`，不记重抽次数）。
+
+    触发条件只有一个（2026-10-12，Range 断点续传）：我们带了 `Range` 头、服务端却回 200
+    （旧 hub / 中间代理把 Range 剥了）⇒ 前缀必须重传。与 `_wire_note_reroll` 分开是因为
+    **次数与浪费是两个事实**：一次重抽可能零浪费（续传成功），而一次「忽略 Range」的重传
+    不额外增加重抽次数。
+    """
+    if not jid or int(nbytes) <= 0:
+        return
+    _wire_bucket(jid)["wasted"] += int(nbytes)
 
 
 def _wire_note_wait(jid: str, seg: str, sec: float) -> None:

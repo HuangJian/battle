@@ -383,6 +383,9 @@ from remote.wire import (
     _wire_note_reroll as _wire_note_reroll,
 )
 from remote.wire import (
+    _wire_note_resend as _wire_note_resend,
+)
+from remote.wire import (
     _wire_note_wait as _wire_note_wait,
 )
 from remote.wire import (

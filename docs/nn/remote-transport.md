@@ -6,6 +6,68 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §87 plan A/B/C 落地：Range 断点续传 · 上传让路点 · 控制面死线与 P0 指标解耦（2026-10-12）
+
+§86 只治了「判据误报」与「无收益还抽」，把三件**结构性**的事留在了 `plan/transfer-jitter-tolerance.plan.md`
+（A→B→C）。本节是那三项的落地记录。
+
+### A · payload GET 的 Range 断点续传（重抽的代价从 256KB 降到 0）
+
+| 面 | 改动 | 落点 |
+|---|---|---|
+| hub | `/jobs/{id}/payload` 认 `Range: bytes=N-` ⇒ **206** + `Content-Range: bytes N-(len-1)/len`；`_bytes` 无条件带 `Accept-Ranges: bytes`；起点不可满足 ⇒ **回落整份 200**（不是 416） | `hub/blob.py::parse_range/_get_payload` · `hub/http_face.py::_bytes` |
+| worker | 重抽时把已读字节并进累积缓冲、下次请求带 `Range`；服务端回 **206** 就拼起来（`parts`），回 **200** = 它忽略了 Range ⇒ 按整份重来并**如实记 wasted** | `remote/http.py::_request/_read_body/_get_with_retry` · `remote/wire.py::WireSlowError.partial` · 新 `_wire_note_resend` |
+
+**三个口径必须分开**（`_read_body(offset=…)` 的注释是权威）：① 进度与「共 N」用**累计**（人看的
+是整体进度）；② 完整性判据只比**本段**声明的 `Content-Length`（累计口径会把每条正常的 206 都误判成
+「被截断」）；③ 速率与「预计剩余」用**本段**（前缀不是这次传的，算进去会虚高）。
+
+**记账口径的变化**：一次重抽**不再**默认记 `wasted`（断连那截被续用）；只有「服务端忽略 Range」
+才记（新函数 `_wire_note_resend`，**只加 wasted、不加重抽次数** —— 次数与浪费是两个事实）。
+判据：真机重抽轮的 `wire` 行应出现 `reroll=N(wasted 0.00MB)`。
+
+**兼容**：worker 先升（老 hub 回 200 ⇒ 走「忽略 Range」那条，行为=今天）；hub 先升（老 worker 不带
+`Range` ⇒ 一直走整份 200）。两边都不需要同时升。
+
+### B · 上传的让路点（result POST 不再是「零让路窗口」）
+
+`pace` 原先只接在下载侧（`_read_body`），result POST 的 body 由 urllib **一次 sendall** ⇒ 整个上传
+窗口里 bulk 侧零让路点（真机：21.6s 上传窗口内 `acquire failed` 12s 超时）。
+
+做法（**不动代理装配**）：把 body 交成分片**生成器**（`_paced_body`）+ **显式 `Content-Length`**，
+让 urllib/`http.client` 一拍一片 `sendall`，片间调 `pace()`。⚠ 关键陷阱：**不给 Content-Length 时
+`http.client` 会改用 `Transfer-Encoding: chunked`，而 hub 只认 Content-Length**（它会一直等满声明
+的字节）—— `test_big_upload_carries_an_explicit_content_length` 就是这条的唯一拦路判据。
+`post_result` 早就在传 `pace=_bulk_pace(_tok, BULK_P1_CRITICAL)`（`job_lifecycle.py:590`），
+所以**调用点零改动**。≤一块的小 body 不包装（逐字旧行为）。
+
+### C · 控制面死线自适应 —— 先把 P0 指标解耦，再放宽
+
+**病**：`CONTROL_TIMEOUT_SEC=6.0` × `CONTROL_ATTEMPTS=2` 在「bulk 占着链路」时是必死判据。
+
+**为什么不能只放宽**（本轮的前置发现）：控制面请求的**墙钟**同时喂 `bulk_sched._p0_ms`，而
+`yield_worth_it()`（阈值 `YIELD_GIVEUP_P95_MS=10_000`）用它的 p95 判「让路买不回来 ⇒ 降为 never」，
+其前提是「P0 从不排队 ⇒ 尾部只能来自链路本身」⇒ 把「我们**允许**它慢」的等待记进去，只会让自停
+判据**更早关掉让路**（自伤）。
+
+**做法**：`bulk_sched.control(sample=False)` —— 仍然计入在途（让路照旧生效），但**不进**分位表；
+`_request` 在 `control_path ∧ 非流式 ∧ _BULK.inflight()>0` 时把死线放宽 `CONTROL_TIMEOUT_BULK_FACTOR=2.0`
+倍，并把尝试次数收成 1 ⇒ **最坏阻塞与旧行为持平**（旧 6s×2，新 12s×1），但这一次有机会排队完成。
+
+### 判据（真机，下一轮取数）
+
+① 重抽轮 `wire` 行 `wasted` 恒 0（`reroll=N(wasted 0.00MB)`）；
+② 上传期间不再出现 `acquire failed: The read operation timed out`；
+③ `p0_p95` 不因放宽而抬升（放宽的那些样本被排除在分位表之外）；
+④ hub 侧 `record_payload_sent` 的累积值 < 文件长度 × 轮数（续传省下来的量）。
+
+### 测试
+
+`tests/hub/test_payload_range.py`（新：`parse_range` 表 + 206/200 两条分派 + 计账按实际字节）·
+`tests/remote/test_wire_reroll.py`（夹具改成「带 `partial` + 回 206」的 Range 服务端；新增「忽略
+Range 如实记账」）· `tests/remote/test_body_transfer_guard.py`（+3：分片让路 / 显式 Content-Length /
+小 body 不包装）· `tests/remote/test_bulk_sched.py`（+1：`sample=False` 不进分位表）。
+
 ## §86 抖动是常态：给「坏签判据」加迟滞与衰减，并让重抽抽了没用就停手（2026-10-12）
 
 **触发**（kaggle ppo worker 真机 log，2026-10-12，用户口径原话：**「网络抖动，是很常见的事情！」**）：

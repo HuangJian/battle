@@ -353,6 +353,7 @@ class _Probe(hs.HubHandler):
 
     calls_json: list[tuple[object, int]]
     calls_bytes: list[bytes]
+    calls_headers: list[dict[str, str]]
     ok: bool
 
     def __new__(cls, path: str, hub: Any = None) -> _Probe:
@@ -363,6 +364,7 @@ class _Probe(hs.HubHandler):
         self.hub = hub
         self.calls_json = []
         self.calls_bytes = []
+        self.calls_headers = []
         self.ok = True
         return self
 
@@ -378,8 +380,12 @@ class _Probe(hs.HubHandler):
         status: int = 200,
         ctype: str = "application/octet-stream",
         filename: str = "",
+        extra_headers: dict[str, str] | None = None,
     ) -> None:
+        # `extra_headers`（2026-10-12，Range 断点续传）：签名必须与父类**逐字一致**，否则 mypy
+        # 报 override 不兼容；这里额外收一份供断言用（`calls_bytes` 保持旧口径不动）。
         self.calls_bytes.append(data)
+        self.calls_headers.append(dict(extra_headers or {}))
 
     def _auth_ok(self) -> bool:
         return self.ok

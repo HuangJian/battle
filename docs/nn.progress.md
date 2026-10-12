@@ -1220,3 +1220,25 @@ C 控制面死线自适应（**直接放宽会自伤**：控制面墙钟同时�
 （`YIELD_GIVEUP_P95_MS=10_000`）判「让路买不回来 ⇒ 降 never」⇒ 放宽反而更早关掉让路；先解耦指标）。
 DECISIONS → `§2026-10-12-transfer-jitter-tolerance`；全文 → `docs/nn/remote-transport.md` §86；
 计划 → `plan/transfer-jitter-tolerance.plan.md`。
+
+**2026-10-12（十）**：抖动容忍 A/B/C 落地 —— **payload Range 断点续传 · 上传让路点 · 控制面死线与 P0 指标解耦**。
+**A**（重抽代价从 256KB 降到 0）：hub `/jobs/{id}/payload` 认 `Range: bytes=N-` ⇒ `206` + `Content-Range`，
+`_bytes` 无条件带 `Accept-Ranges: bytes`，起点不可满足 ⇒ **回落整份 200**（不是 416：客户端没有「从头再来」
+的分支，416 会被它当瞬时失败去退避重试）；worker 把 `WireSlowError.partial` 并进跨尝试累积缓冲、下次带
+`Range`；**三个口径分开**（进度/共 N 用累计 · 完整性只比本段 Content-Length · 速率/剩余用本段）。
+记账：重抽**不再**默认记 wasted（那截被续用），只有「服务端忽略 Range」才记（新 `_wire_note_resend`，
+只加 wasted 不加重抽次数）。兼容两向：worker 先升（老 hub 回 200 ⇒ 走「忽略」＝今天行为）· hub 先升
+（老 worker 不带 Range ⇒ 一直整份）。
+**B**（上传不再是「零让路窗口」）：`pace` 原先只接在 `_read_body`，result POST 由 urllib 一次 sendall
+⇒ 21.6s 上传窗口里控制面裸奔（真机 acquire 12s 超时正在其中）。做法**不动代理装配**：body 交成**分片
+生成器** + **显式 Content-Length**（⚠ 不给长度时 http.client 改用 chunked，而 hub 只认 Content-Length），
+片间调 `pace()`；`post_result` 早就传了 pace（`job_lifecycle.py:590`）⇒ 调用点零改动。
+**C**：**先解耦指标再放宽** —— 控制面墙钟同时喂 `bulk_sched._p0_ms`，而 `yield_worth_it()`
+（`YIELD_GIVEUP_P95_MS=10_000`）用它判「让路买不回来 ⇒ 降 never」；把「我们允许它慢」的等待记进去只会
+更早关掉让路（自伤）。⇒ `control(sample=False)` 不进分位表 + 有 bulk 在飞时死线放宽 2× 且尝试次数收成 1
+（最坏阻塞与旧行为持平：旧 6s×2，新 12s×1）。
+判据（真机下一轮）：重抽轮 `wasted` 恒 0 · 上传期不再 `acquire failed` · `p0_p95` 不因放宽抬升 ·
+hub `record_payload_sent` 累积 < 文件长 × 轮数。测试：新 `tests/hub/test_payload_range.py`（parse_range 表 +
+206/200 分派 + 计账按实际字节）· `test_wire_reroll`（夹具改成带 partial 的 Range 服务端 + 忽略 Range 如实记账）·
+`test_body_transfer_guard`（+3）· `test_bulk_sched`（+1）。DECISIONS → `§2026-10-12-transfer-jitter-tolerance-abc`；
+全文 → `docs/nn/remote-transport.md` §87。

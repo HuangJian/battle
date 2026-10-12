@@ -280,7 +280,7 @@ class BulkScheduler:
     # ------------------------------------------------------------------ 控制面
 
     @contextmanager
-    def control(self, *, label: str = "") -> Iterator[None]:
+    def control(self, *, label: str = "", sample: bool = True) -> Iterator[None]:
         """标记一段**控制面**请求（不进 bulk 队列，只用来让 bulk 让路）。
 
         独立连接由 `urllib` 天然保证（每次请求新开 connection）；本上下文只做两件事：
@@ -293,6 +293,11 @@ class BulkScheduler:
 
         `_control_waiting` 与 `_control` 在同一对语句里 ±1（不是独立的时间概念）；它只作
         `slot()` 里 P2 门禁的读数。
+
+        `sample=False`（2026-10-12）：**记账但不进 P0 延迟分位表**。给「主动放宽了死线」的
+        那类请求用 —— 那个分位表是 `yield_worth_it()` 判「让路买不回来 ⇒ 关掉让路」的输入，
+        而它成立的前提是「P0 从不排队 ⇒ 尾部只能来自链路本身」。把一次**我们允许它慢**的
+        等待记进去，会让自停判据更早关掉让路（自伤）。
         """
         with self._lock:
             self._control += 1
@@ -310,9 +315,10 @@ class BulkScheduler:
                     self._control_starts.remove(t0)  # 同刻重复时间戳删哪个都等价
                 except ValueError:
                     pass
-                self._p0_ms.append(ms)
-                if len(self._p0_ms) > 512:  # 有界：只留最近一段（P0 延迟的 p95 判据）
-                    del self._p0_ms[: len(self._p0_ms) - 512]
+                if sample:
+                    self._p0_ms.append(ms)
+                    if len(self._p0_ms) > 512:  # 有界：只留最近一段（P0 延迟的 p95 判据）
+                        del self._p0_ms[: len(self._p0_ms) - 512]
 
     def control_active(self) -> bool:
         with self._lock:
