@@ -189,6 +189,8 @@ def run_training_core(
     """
     prep_b = LogBundle(log) if prep is None else prep
     # ---- 课程上下文：快照全文 → CourseConfig → reward_fn（D1/D6/D13） ----
+    # E1 同规（plan/prefetch-stage-unpack §5）：准备段的剩余时间要能分锅，这一段也计时。
+    t_course = time.time()
     import numpy as np
 
     course_text = manifest["course"]
@@ -214,6 +216,7 @@ def run_training_core(
         metrics_version=int(manifest["metrics_version"]),
         identity={"course": course.name, "formula_hash": manifest["formula_hash"]},
     )
+    prep_b.add("课程", f"{time.time() - t_course:.1f}s（load_course+reward）")
 
     # ---- 延迟导入 torch / ppo 后端（B7 同款；本模块顶层零 torch） ----
     import torch
@@ -236,9 +239,11 @@ def run_training_core(
     #   64/8/128，那是「建了错的模型却照跑」（§3.3-2）。
     # 标注为 torch.nn.Module（而非推断出的 PPOStudent）：多卡分支要把 model 换成
     # DataParallel，且下游 save_weights_json / load_state_into 收的就是 Module。
+    t_build = time.time()
     model: torch.nn.Module = ppo_engine.build_ppo(
         str(init_w) if (init_w is not None and init_w.exists()) else None
     )
+    prep_b.add("建模型", f"{time.time() - t_build:.1f}s（build_ppo）")
     # 设备解析（2026-09-10 TPU 接力）：--device tpu/xla 走 torch_xla 的 xla_device()，
     # 而不是 torch.device("xla")——后者在部分 torch_xla 版本上拿不到带序号的设备句柄。
     # torch_xla 只在真的选了 TPU 时才 import（未装 torch_xla 的机器行为不变）。
@@ -389,7 +394,7 @@ def run_training_core(
             # device_t 在 XLA 上会走 torch.load 的设备 hook，跨 runtime 不稳）。
             opt.load_state_dict(torch.load(opt_dir / "opt.pt", map_location="cpu"))
             opt_restore_sec = round(time.time() - t_opt, 3)
-            prep_b.add("opt", f"从 opt_init（{opt_src}）恢复（Adam 动量延续，D5）")
+            prep_b.add("opt", f"从 opt_init（{opt_src}）恢复 {opt_restore_sec:.1f}s（Adam 动量延续，D5）")
         else:
             # 首轮/无 tar：从 init 权重 warm-start（payload / init blob / blobs 下载）
             if init_w is None or not init_w.exists():
@@ -399,10 +404,13 @@ def run_training_core(
                     f"；init_weights_fp={str(manifest['init_weights_fp'])[:12]}…"
                     " —— 拒收（不许静默 warm-start，D5）"
                 )
+            t_warm = time.time()
             load_state_into(model, str(init_w))
             model.to(device_t)
             opt = torch.optim.Adam(model.parameters(), lr=float(manifest["lr"]))
-            prep_b.add("opt", "无 opt_init，从 init_weights warm-start + 新 Adam")
+            prep_b.add(
+                "opt", f"无 opt_init，从 init_weights warm-start {time.time() - t_warm:.1f}s + 新 Adam"
+            )
     except ProtocolError:
         raise  # 上游已判定的确定性失败（缺 blob / 缺 init 权重）原样上抛
     except Exception as e:
@@ -470,6 +478,7 @@ def run_training_core(
         # ★ §4.2：ref 装载同属 restore——ref 与 policy 的架构/形状不合会在每一份字节上
         # 重演（而它只会被写成一行云机日志，训练侧看到的是超时）。
         try:
+            t_ref = time.time()
             ref_model = ppo_engine.build_ppo(str(ref_path))
             load_state_into(ref_model, str(ref_path))
             for p in ref_model.parameters():
@@ -478,6 +487,7 @@ def run_training_core(
             ref_model.to(device_t)
             if use_dp:
                 ref_model = torch.nn.DataParallel(ref_model)
+            prep_b.add("ref", f"{time.time() - t_ref:.1f}s（build+load）")
             log(f"job {jid}: kickstart ref 已加载（BC 冻结 master，kl={kick_kl}）")
         except ProtocolError:
             raise

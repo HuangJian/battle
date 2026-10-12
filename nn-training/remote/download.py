@@ -845,7 +845,12 @@ def _ensure_code(
             log(f"job {jid}: {_line}")
     # A3：容量上限（含本轮刚落地的那一份）。放在**落地之后**——新件 mtime 最新，不会被自己
     # 的 prune 挑中；放在之前则可能在旧件还没超预算时白扫一遍。
+    # E1 同规（plan/prefetch-stage-unpack §5/P3）：`prune_caches` 纯命中轮也照扫，它的墙钟要能读出来
+    # ——「这棵树到底多大」与「值不值得加门禁」都只能从这一行读数判（无 bundle 时不打，行为零变化）。
+    t_prune = time.time()
     prune_caches(code_root.parent, log=log)
+    if bundle is not None:
+        bundle.add("cache prune", f"{time.time() - t_prune:.2f}s")
     return CodeLanded(code_root=code_root, code_cache_dir=cache_dir, blob_root=blob_root)
 
 
@@ -917,5 +922,8 @@ def _ensure_ts_code(
     else:
         log(f"job {jid}: {_line}")
     # A3：容量上限（`_ensure_code` 那条路径也会扫一遍，这里补上「只跑 kind=iter 的会话」）。
+    t_prune = time.time()
     prune_caches(ts_root.parent, log=log)
+    if bundle is not None:
+        bundle.add("cache prune", f"{time.time() - t_prune:.2f}s")
     return cache, len(raw), False
