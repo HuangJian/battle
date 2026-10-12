@@ -341,6 +341,8 @@ class TrainingRemoteJob(TrainingRemotePush):
             demo_bank_bytes=demo_raw,
             demo_bc_coef=demo_coef,
             demo_per_mb=demo_per_mb,
+            # value 门控牵引（x26-obs it90 诊断；缺席 = 0.0 = 关）。
+            value_anchor=float(getattr(args, "value_anchor", 0.0) or 0.0),
             shuffle=True,
             schedule_raw=course.ppo_schedule_dicts(),
             # 严格样本量配额（target_transitions 路线）：与 _serial_ppo 同一个来源，

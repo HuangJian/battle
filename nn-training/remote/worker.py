@@ -752,6 +752,7 @@ def run_job(
                 "kl": 0.0,
                 "kickstart": 0.0,
                 "mean_ret": 0.0,
+                "value_new_rms": 0.0,
                 "steps": 0,
                 "chunks": 0,
             },

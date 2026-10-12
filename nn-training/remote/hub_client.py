@@ -762,6 +762,8 @@ def publish_job(
     demo_bank_bytes: bytes | None = None,
     demo_bc_coef: float = 0.0,
     demo_per_mb: int = 0,
+    # value 门控牵引率 ρ（x26-obs it90 诊断；0.0 = 关，老行为逐字节不变）。
+    value_anchor: float = 0.0,
     shuffle: bool = True,
     schedule_raw: list | None = None,
     # 严格样本量配额（target_transitions 路线）：训练侧逐关只收前 ceil(target/关数) 步。
@@ -920,6 +922,7 @@ def publish_job(
         "ref_bytes": len(ref_raw) if use_ref_blob else 0,
         "demo_sha": demo_sha if use_demo_blob else "",
         "demo_bc_coef": float(demo_bc_coef),
+        "value_anchor": float(value_anchor),
         "demo_per_mb": int(demo_per_mb),
         "slim": bool(slim),
         "data_fp": fp,

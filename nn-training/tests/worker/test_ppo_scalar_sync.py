@@ -7,8 +7,10 @@
   1. **数值逐位不变**：`sync_scalars` 每个返回值 == 逐项 `float(t.item())`，
      含 float64 / 混合 dtype（栈会被提升到公共 dtype，不得截断）；
   2. **真的只有一次同步**：`torch.Tensor.tolist` 调用次数 == 1（这是本次改动的全部意义）；
-  3. **三后端 stats 键集不变**：per-tick 8 键、intent 6 键、goal 7 键，且 intent/goal
+  3. **三后端 stats 键集不变**：per-tick 10 键、intent 6 键、goal 7 键，且 intent/goal
      的 warmup 短路仍是精确 0.0（原先短路成 Python float，现改为 0 维零张量）。
+     per-tick 第 10 键 `value_new_rms`（x26-obs it90 诊断的门控遥测）：加键是故意的，
+     静默加键才是要防的——本测试就是那道门。
 """
 
 from __future__ import annotations
@@ -39,6 +41,8 @@ ENGINE_KEYS = {
     "mean_ret",
     "mean_adv",
     "gnorm",
+    # x26-obs it90 诊断的门控遥测（`apply_value_anchor_pull` 的返回值；ρ=0 时恒读数）。
+    "value_new_rms",
 }
 
 
@@ -117,7 +121,8 @@ def _chunks(n_chunks: int = 3, b: int = 8, seed: int = 0) -> list[dict]:
 
 
 def test_engine_stats_keys_unchanged() -> None:
-    """per-tick 后端聚合键集不得因批量化而变化。"""
+    """per-tick 后端聚合键集不得因批量化而变化（加键走本文件的显式清单，
+    x26-obs it90 的 `value_new_rms` 即如此落地）。"""
     np.random.seed(3)
     torch.manual_seed(3)
     model = PPOStudent(h=8, d=1)

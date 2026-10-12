@@ -261,6 +261,11 @@ def dispatch_rollout_phase(
                         "backend": ppo_backend,
                         "update_kwargs": {"kl_coef": float(args._kl_coef)},
                     }
+                    # value 门控牵引（x26-obs it90 诊断；缺席 = 0.0 = 关。
+                    # intent/goal 分支走 update_kwargs() 函数链，不经这里，不受影响）。
+                    _stream_kwargs["update_kwargs"]["value_anchor"] = float(
+                        getattr(args, "value_anchor", 0.0) or 0.0
+                    )
             report = run_rollout_stream(
                 bun,
                 args.out,

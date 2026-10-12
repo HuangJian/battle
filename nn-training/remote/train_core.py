@@ -610,6 +610,8 @@ def run_training_core(
             demo_bank=demo_bank,
             demo_bc_coef=demo_coef,
             demo_per_mb=demo_per_mb,
+            # value 门控牵引（x26-obs it90 诊断；缺席 = 0.0 = 关，老行为逐字节不变）。
+            value_anchor=float(manifest.get("value_anchor", 0.0) or 0.0),
             # ★ 取消接线（R2-5）：今天这条调用**没有**传它——不传则取消延迟永远是
             # 「跑完才响应」。训练侧那条（`trainer/stream.py`）传的是双缓冲预采回调，
             # 与这里不是同一个调用点，别去动那一条。
@@ -679,6 +681,8 @@ def run_training_core(
             "kickstart": float(agg.get("kickstart", 0.0)),
             "demo_bc": float(agg.get("demo_bc", 0.0)),
             "mean_ret": float(agg.get("mean_ret", 0.0)),
+            # value 门控遥测（x26-obs it90 诊断；同 kickstart additive）。
+            "value_new_rms": float(agg.get("value_new_rms", 0.0) or 0.0),
             # mb 对齐（2026-09-23）后 = **实际训练**的步数（≤池子，差尾部 n%mb）。
             # 池子总量另有 transitions_collected 一栏，不靠这里兼职。
             "steps": int(sum(c["obs"].shape[0] for c in chunks)),

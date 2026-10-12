@@ -840,6 +840,16 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             raise ValueError(f"decision_k={v!r} 必须 ≥1（决策周期；10 = 历史默认）")
         return v
 
+    @field_validator("value_anchor", mode="before")
+    @classmethod
+    def _value_anchor_before(cls, v: Any) -> Any:
+        """脏值拒课：bool 不算数，负数拒绝（牵引绳不能反向；0.0 = 关）。"""
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            raise ValueError(f"value_anchor={v!r} 必须是 number（牵引率；0.0 = 关）")
+        if float(v) < 0:
+            raise ValueError(f"value_anchor={v!r} 必须 ≥0（牵引率；0.0 = 关）")
+        return v
+
     #: rollout **起始分布**（plan/x20-state-init.plan.md）：人类 demo 磁带中段交棒。
     #: 缺席 = 标准开局（老课程逐字节不变）。开训前置（银行 manifest 在盘上）由
     #: `apply_course` 在启动期校验——`load_course` 不多读盘（它只读课程文件本身）。
@@ -888,6 +898,12 @@ class CourseConfig(BaseModel, CustomStagesMixin):
     demo_bc_coef: float = 0.0
     #: 每 PPO minibatch 步抽的 demo 样本数（np RNG，ckpt 精确复现）；0 = 关闭。
     demo_per_mb: int = 0
+    #: value 门控牵引率 ρ（x26-obs it90 诊断）：每训练步对 value 新列片做
+    #: `w *= (1-ρ)` 后步收缩；0.0 = 关闭（老行为逐字节不变）。
+    #: 量级锚：it90 诊断新列漂移约 3e-5/步（0.0086→0.30/94轮）；ρ=1e-3 时
+    #: w=0.05 处的收缩 5e-5/步 ≥ 漂移，真信号（持续同向梯度）仍能长大。
+    #: **不进** `corpus_identity_fp`（优化器语义，kickstart_init/demo 前科同款）。
+    value_anchor: float = 0.0
     gamma: float = 0.995
     lam: float = 0.95
     clip_eps: float | None = None
@@ -1069,6 +1085,9 @@ class CourseConfig(BaseModel, CustomStagesMixin):
             "demo_bank": "demo_bank",
             "demo_bc_coef": "demo_bc_coef",
             "demo_per_mb": "demo_per_mb",
+            # value 门控牵引率（缺席 = 老行为：args 走 getattr 缺省 0.0 = 关；
+            # 漏映射 = 静默失效，ent_break 前科）。
+            "value_anchor": "value_anchor",
             # 缰绳初值 kk(1)：课程键 → argparse dest（异名；漏映射 = 静默失效，ent_break 前科）
             "kickstart_init": "kickstart_kl",
             "warmup_iters": "warmup_iters",

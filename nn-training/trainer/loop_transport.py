@@ -534,6 +534,8 @@ def _remote_forward_agg(agg: dict) -> dict:
         "kickstart": float(agg.get("kickstart", 0.0) or 0.0),
         # demo 混 batch 遥测（同 kickstart additive；旧 worker 无此键 → 0.0）。
         "demo_bc": float(agg.get("demo_bc", 0.0) or 0.0),
+        # value 门控遥测（x26-obs it90 诊断；同上 additive）。
+        "value_new_rms": float(agg.get("value_new_rms", 0.0) or 0.0),
     }
 
 

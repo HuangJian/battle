@@ -92,6 +92,24 @@ def test_remote_forward_agg_old_worker_defaults() -> None:
     assert out["kl"] == 0.4
 
 
+def test_remote_forward_agg_carries_value_new_rms() -> None:
+    """value 门控遥测（x26-obs it90 诊断）：云 worker agg 的 `value_new_rms` 必须
+    透传——否则新列膨胀在训练侧全盲，重演 it90 到 it94 才发现 35 倍爆炸。
+    旧 worker 无此键 → 0.0 兜底（vk1 同款 additive）。"""
+    agg = {
+        "policy": -0.0023,
+        "value": 0.4604,
+        "entropy": 0.3479,
+        "kl": 0.00496,
+        "mean_ret": 0.0016,
+        "kickstart": 0.0,
+        "value_new_rms": 0.3015,
+    }
+    out = _remote_forward_agg(agg)
+    assert out["value_new_rms"] == pytest.approx(0.3015)
+    assert _remote_forward_agg({"kl": 0.4})["value_new_rms"] == 0.0
+
+
 def test_kickstart_warn_kind() -> None:
     """x2-start it31 误报回归：系数衰减到期后的 agg kickstart=0 是预期行为，
     不得判 warn（只在系数仍活跃却无遥测时告警 worker 未执行缰绳）。"""

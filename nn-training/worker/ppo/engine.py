@@ -175,6 +175,33 @@ def _demo_masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tens
     return per.mean()
 
 
+def apply_value_anchor_pull(model: Any, rho: float) -> float:
+    """value 新列的后步乘性收缩 `w *= (1-ρ)`（x26-obs it90 诊断的门控实现）。
+
+    机制：冷 critic 吃 pf 后在新列上 35 倍爆炸（0.0086→0.30）拟合噪声 →
+    advantage 污染 → 暖策略游走。收缩只拴 `value_anchor_slices()` 的列片
+    （旧列逐位不动）。返回新列片 rms（`value_new_rms` 监控的源；空片返回 0.0）——
+    ρ≤0 时**只读数不收缩**（对照腿 anchor=0：权重逐位不动、监控照样看见膨胀，
+    前者是 ablation 有效的前提，后者是“无绳腿炸了能发现”的前提）。
+    `no_grad` 下操作：不读 RNG（ckpt 断点续跑精确复现），不碰 Adam 矩（只动权重本身）。
+    """
+    slices: list[tuple[int, int]] = (
+        model.value_anchor_slices() if hasattr(model, "value_anchor_slices") else []
+    )
+    vh = getattr(model, "value_head", None)
+    if vh is None or not hasattr(vh, "weight") or not slices:
+        return 0.0
+    with torch.no_grad():
+        w = vh.weight
+        if rho > 0.0:
+            pull = 1.0 - float(rho)
+            for lo, hi in slices:
+                w[:, lo:hi].mul_(pull)
+        parts = [w[:, lo:hi].reshape(-1) for lo, hi in slices]
+        rms = float(torch.cat(parts).pow(2).mean().sqrt()) if parts else 0.0
+    return rms
+
+
 def ppo_update(
     model,
     opt,
@@ -192,6 +219,7 @@ def ppo_update(
     demo_per_mb: int = 0,
     progress: LogBundle | None = None,
     progress_head: str = "[ppo] PPO",
+    value_anchor: float = 0.0,
 ):
     """chunks: list of minibatch dicts (obs (B,14,26,26) / scalars (B,24) / ...).
 
@@ -451,6 +479,10 @@ def ppo_update(
             loss.backward()
             gn = nn.utils.clip_grad_norm_(model.parameters(), MAX_GRAD_NORM)
             optimizer_step(opt, device)
+            # value 门控牵引（x26-obs it90 诊断）：冷 critic 在新列上拟合噪声 →
+            # advantage 污染。ρ>0 才收缩（=0 时只读数：对照腿数学恒等＋监控不盲）；
+            # 位置在 clip+step 之后 ⇒ 收缩不吃 clip 配额、不进 Adam 矩。
+            value_new_rms = apply_value_anchor_pull(model, value_anchor)
 
             with torch.no_grad():
                 # 一次同步取全部 8 个标量。原实现逐项取 8 次 = CUDA 上 8 次全设备
@@ -468,6 +500,9 @@ def ppo_update(
                             "mean_ret": ret.mean(),
                             "mean_adv": adv.mean(),
                             "gnorm": gn,
+                            "value_new_rms": torch.as_tensor(
+                                value_new_rms, dtype=torch.float32, device=device
+                            ),
                         }
                     )
                 )
@@ -635,6 +670,7 @@ def ppo_update(
             "demo_bc": 0.0,
             "gnorm": 0.0,
             "mean_ret": 0.0,
+            "value_new_rms": 0.0,
         }
     agg = aggregate_stats(stats, list(stats[0].keys()))
     return agg

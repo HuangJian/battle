@@ -170,6 +170,23 @@ class StudentNet(nn.Module):
             return self.head_hidden + POLICY_EXTRA_DIM
         return self.head_hidden
 
+    def value_anchor_slices(self) -> list[tuple[int, int]]:
+        """value 头里 v5 新列的列区间（门控牵引只拴这些列）。
+
+        x26-obs it90 诊断：冷 critic 吃 pf 后在新列上 35 倍爆炸（0.0086→0.30），
+        advantage 污染→暖策略游走；旧列 drift 仅 0.015。
+          · 腿 A：value 165 列里 critic 从没见过 extra ⇒ [128,165) 全拴
+            （含迁移来的 extra9 旧列——对 critic 而言位置也是新的）；
+          · 腿 B：整头相对旧 128 无前缀 ⇒ 全拴；
+          · legacy：value 全是旧 hidden ⇒ 空（不碰）。
+        区间一律由 arch 派生，不写字面量（与 `policy_input_dim` 同纪律）。
+        """
+        if self.spatial_tower:
+            return [(0, self.policy_input_dim)]
+        if self.policy_extra:
+            return [(self.head_hidden, self.policy_input_dim)]
+        return []
+
     def _init_weights(self) -> None:
         for m in self.modules():
             if isinstance(m, (nn.Conv2d, nn.Linear)):
