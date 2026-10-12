@@ -15,6 +15,10 @@
   · 报错 30s   → `NN_TEST_FAIL_S`（`--test-fail-s`）
   · 个别用例确需更长 → 显式 `@pytest.mark.time_budget(seconds)`（**必须**在标记里
     写理由，见 pyproject markers 说明）。预算按「call 阶段」计（不含 fixture/收集）。
+  · **CPU 密集用例不得配比本口径更紧的 `time_budget`**（2026-10-12 铁律）：预算抓的是
+    **不占 CPU 的空等**，而纯扫描/纯计算的墙钟随本机负载漂 ~2.5×（实例：全仓锁重入扫描
+    安静 6.2~6.9s、40 个忙循环下 16.26s）——配 15s 之类的紧预算只会制造负载假红。
+    现场与实测阶梯 → `docs/nn/engineering.md` §77。
 
 定位到根 conftest（而不是只放 tests/）是因为门禁跑 `pytest tests/ e2e/`：两层都要
 被同一条规则覆盖。实现用 `pytest_runtest_makereport` 改写 outcome —— 超预算的用例
