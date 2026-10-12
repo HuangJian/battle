@@ -6,6 +6,60 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §86 抖动是常态：给「坏签判据」加迟滞与衰减，并让重抽抽了没用就停手（2026-10-12）
+
+**触发**（kaggle ppo worker 真机 log，2026-10-12，用户口径原话：**「网络抖动，是很常见的事情！」**）：
+同一会话内链路 3 秒内从 **3,089 KB/s** 掉到 **79 / 51 KB/s**（随后 2.4MB payload 用 16s 传完，
+150KB/s）。三条"错误"全是**防线把常态当异常**的结果，而不是链路故障：
+
+```
+14:24:55  wire: re-roll #1/3 payload: 实测 79 KB/s < 阈值 772 KB/s（按此速率剩余 26s）
+          ——断开重发（已收 262144 bytes 作废）
+14:25:03  payload 下载中 0.25 MB / 2.30 MB (10%) 用时 5s（51 KB/s）   ← 重抽后更慢
+14:24:44  acquire failed: The read operation timed out — retry in 5.0s
+14:25:06  prefetch 上报失败（TimeoutError … control_pool.py:139 conn.getresponse()）
+```
+
+### 三条机理（都不是"网不好"）
+
+1. **参照速率是会话高水位、只升不降**：`_min_rate() = max(80KB/s, _BEST_RATE/4)`
+   （`remote/wire.py`），而 `_note_rate` 只抬不降 ⇒ 一次 3MB/s 的幸运样本把门槛钉在
+   **772KB/s**（= 3,089/4），此后任何正常回落都被判成坏签。**有噪声的输入 + 无迟滞的阈值 =
+   必然误报**。
+2. **误报的动作是"丢弃已收、从零重来"**：重抽的账单是**一整块 256KB + 一次建连**，而 hub 侧
+   **完全没有 Range 支持**（`nn-training/hub/` 里 grep `Range|206|Content-Range` 零命中）。
+   抖动下重试是常态 ⇒ 重试的代价必须趋近 0，现在是 256KB/次。真机证据：重抽前后 79 → 51 KB/s，
+   **抽了更差，却还会照预算继续抽**。
+3. **控制面与 bulk 的失败代价会叠加**：`CONTROL_TIMEOUT_SEC = 6.0` × `CONTROL_ATTEMPTS = 2`
+   = 12s，然后 `worker.py` 再 `time.sleep(poll_sec)` 5s ⇒ 一次抖动换来 ~17s 空转。而
+   `control_pool.py` 的设计注释明写「**失败不退避**」——**实现比设计多赔 5s**。
+   两次超时**2/2 都落在 bulk 在飞窗口内**（上传 21.6s / 下载 18s）：上传的写体没有让路点
+   （`pace` 只接在 `_read_body`，`http.py:349` 的 urllib 一次 sendall），下载侧的总让路预算是
+   **单条传输 5s**（`worker.py` 装配）⇒ 长慢传输后半段控制面只能硬等。
+
+### 本轮落地（四条，全部有测试钉住）
+
+| # | 改动 | 落点 |
+|---|---|---|
+| 1 | **参照速率带迟滞与衰减**：更好即抬（恢复瞬时），连续 `WIRE_RATE_STALE_SAMPLES=2` 个非更好样本起，每多一个慢样本乘 `WIRE_RATE_DECAY=0.5`，直到落回 `WIRE_MIN_RATE` 地板 | `remote/wire.py::_note_rate/_ref_rate` |
+| 2 | **探针迟滞**：连续 `WIRE_REROLL_PROBES=2` 个点都慢才断连（原先只判首块一次）；浪费上界从一块变两点，**仍然有界** | `remote/http.py::_read_body` |
+| 3 | **重抽无收益即停**：换连接后的速率没有比上一次高 `WIRE_REROLL_GAIN=1.25` 倍 ⇒ 判定为链路整体降速，停止重抽、按当前速率传完 | `remote/http.py::_get_with_retry` |
+| 4 | **控制面首败不退避**：连败计数 `_acquire_fails`，首败立即重试、连败才退避（12s 已经等过了，再睡 5s 是把抖动放大） | `remote/worker.py::worker_loop` |
+
+判据口径：`WIRE_MIN_RATE = 80KB/s` 地板与 §22 的坏签重抽本体**都没删**（那有实测依据：
+13.5 KB/s 的连接，3 秒后另一条 ≥120 KB/s）；本批只加**迟滞**与**收益判据**。文本断言 FORM 基线
+不变（1445：新用例一律用行为判据——抽几次 / 有没有传完——不拿日志措辞当判据）。
+
+### 明确留到 plan 的三项（`plan/transfer-jitter-tolerance.plan.md`）
+
+- **A · payload GET 的 Range 断点续传**（收益最大）：让重抽的 `wasted` 恒为 0。**前置**：先定
+  `payload_sha256` 的校验口径（完整字节 vs 分片）。
+- **B · 上传的让路点**：result POST 的写体零让路能力 ⇒ 上传窗口内控制面裸奔。难点是代理装配
+  （urllib 现在是替我们做 proxy 的），动它之前先补 parity 用例。
+- **C · 控制面死线自适应**：**不能直接放宽** —— 控制面请求的墙钟同时喂 `bulk_sched._p0_ms`，而
+  `yield_worth_it()`（`YIELD_GIVEUP_P95_MS = 10_000`）用它的 p95 判「让路买不回来 ⇒ 降为
+  never」⇒ 放宽死线会抬高 p95、**反而更早关掉让路**（自伤）。前置：先把指标口径与"放宽后的等待"解耦。
+
 ## §85 撤销 prefetch staged 的 256MiB 字节闸：那条闸从没生效过，还把整档关掉了（2026-10-12，实机读数）
 
 **触发**（colab 真机 log，2026-10-12）：§84 落地当天，prefetch 行连续打出

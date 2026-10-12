@@ -1200,3 +1200,23 @@ DECISIONS → `DECISIONS.md §2026-10-12-goalnn-offline-leg-ppo-attribution`；�
 体积只记账进 `meta.json`/`stats()`）；`prune` 的 staged 超条数**只丢最旧 staged**，
 绝不拿 zip 候选偿债；zip 那本账（64MB/最旧先丢/仅剩一份也保留）逐字未动。FORM 基线不变（1445：删 1 加 1）。
 DECISIONS → `§2026-10-12-prefetch-stage-budget-revert`；全文 → `docs/nn/remote-transport.md` §85（§84 相应条目已划线）。
+
+**2026-10-12（九）**：**抖动是常态** —— 给「坏签判据」加迟滞+衰减，重抽抽了没用就停手（用户口径原话）。
+（kaggle ppo worker 真机 log）同一会话内链路 3 秒内 **3,089 KB/s → 79/51 KB/s**，三条"错误"全是防线
+把常态当异常：① 参照速率是**会话高水位只升不降**（`_min_rate = max(80KB/s, _BEST_RATE/4)`），一次走运把
+门槛钉在 **772KB/s**（=3089/4），此后任何正常回落都判坏签；② 误报的动作是**丢弃已收从零重来**（hub 侧
+grep `Range|206|Content-Range` **零命中** ⇒ 无断点续传）⇒ 每次白扔 **256KB + 一次建连**，而真机上重抽
+前后 **79 → 51 KB/s**（越抽越差）却还照预算抽；③ 控制面 6s×2（`CONTROL_TIMEOUT_SEC` ×
+`CONTROL_ATTEMPTS`）+ `worker.py` 再睡 5s ⇒ 一次抖动 **~17s 空转**，而 `control_pool` 注释明写「失败
+不退避」= 实现比设计多赔 5s；两次超时 **2/2 落在 bulk 在飞窗口**内（上传 21.6s / 下载 18s）。
+落地四条（全有测试）：① `_note_rate` **迟滞+衰减**（`WIRE_RATE_STALE_SAMPLES=2`、`WIRE_RATE_DECAY=0.5`：
+更好即抬、连续慢才衰减到地板；单点慢仍不覆盖既有契约）② `_read_body` 探针 **连续 2 点慢才断连**
+（`WIRE_REROLL_PROBES=2`，浪费上界从一块变两点、仍有界）③ `_get_with_retry` **重抽无收益即停**
+（`WIRE_REROLL_GAIN=1.25`）④ `worker_loop` **首败不退避**（`_acquire_fails` 连败才 sleep）。
+`WIRE_MIN_RATE` 地板与 §22 坏签重抽本体**都没删**（有实测依据）；FORM 基线**不变** 1445（新用例全用
+行为判据）；模块级状态清点 +1（`wire._stale_samples`）。**留到 plan**（顺序 A→B→C）：A payload GET 的
+Range 断点续传（让 wasted 恒为 0；前置：定 sha 校验口径）· B 上传让路点（body 零让路，难点代理装配）·
+C 控制面死线自适应（**直接放宽会自伤**：控制面墙钟同时喂 `_p0_ms`，而 `yield_worth_it` 用其 p95
+（`YIELD_GIVEUP_P95_MS=10_000`）判「让路买不回来 ⇒ 降 never」⇒ 放宽反而更早关掉让路；先解耦指标）。
+DECISIONS → `§2026-10-12-transfer-jitter-tolerance`；全文 → `docs/nn/remote-transport.md` §86；
+计划 → `plan/transfer-jitter-tolerance.plan.md`。

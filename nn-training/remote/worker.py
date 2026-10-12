@@ -306,7 +306,10 @@ from remote.train_core import (
 
 # 传输账 / 低速重抽 / bulk 节流（S4 拆分 → `remote/wire.py`）。这里是**显式转发**：
 # 状态与实现同住 `wire`，避免模块全局在拆分后变成两份账（见 `remote/wire.py` 头部）。
-# `_BEST_RATE` 是重绑式的会话标量 —— 它的注入点是 `remote.wire._BEST_RATE`。
+# `_BEST_RATE` / `_stale_samples` 是重绑式的会话标量（判据参照 + 它的迟滞计数）——
+# **注入点是 `remote.wire` 的那两个名字**；这里的转发名只保证 `vars(worker)` 里查得到
+# （`test_worker_state_contract::test_state_names_are_addressable_on_the_worker_module`），
+# 重绑它无效（int 不可变）。
 from remote.wire import (
     _BEST_RATE as _BEST_RATE,
 )
@@ -354,6 +357,9 @@ from remote.wire import (
 )
 from remote.wire import (
     _reroll_decision as _reroll_decision,
+)
+from remote.wire import (
+    _stale_samples as _stale_samples,
 )
 from remote.wire import (
     _wire_add as _wire_add,
@@ -926,6 +932,10 @@ def worker_loop(
     _last_alive_log = time.time()
     _polls_since_log = 0
     _polls_since_accept = 0
+    #: 连续 acquire 失败次数（iii-2，2026-10-12）：控制面一次超时常常就是链路抖动，**首败不退避**
+    #: —— 12s 超时已经等过了，再睡一个 poll_sec 等于把自己的抖动放大成 17s 空转（真机：`acquire
+    #: failed` 之后 `retry in 5.0s`）。连败才退避：那时才像 hub 真出问题，退避要挡住热循环。
+    _acquire_fails = 0
     # 多 hub 轮询（P3b §3.8）：None/空 → 单 hub（默认行为零变化）；多 hub round-robin。
     hubs = [u for u in (hub_urls or [base_url]) if u]
     if not hubs:
@@ -987,10 +997,16 @@ def worker_loop(
                     log=log,
                 )
             except Exception as e:
-                log(f"acquire failed: {e} — retry in {poll_sec}s")
-                time.sleep(poll_sec)
+                _acquire_fails += 1
+                # iii-2：首败**立即重试**（见 `_acquire_fails` 的注释）；连败才退避。
+                wait_s = 0.0 if _acquire_fails < 2 else poll_sec
+                tail = "立即重试" if wait_s <= 0.0 else f"retry in {wait_s}s"
+                log(f"acquire failed: {e} — {tail}（连续 {_acquire_fails} 次）")
+                if wait_s > 0.0:
+                    time.sleep(wait_s)
                 hi = (hi + 1) % len(hubs)
                 continue
+            _acquire_fails = 0  # 控制面通了（无论有没有活）：连败计数归零
             got_halt = isinstance(job, dict) and job.get("halt") is True
             if got_halt and not halt_seen.get(hi):
                 # §386：停机命令随任务同发——先尝试真停机（Colab unassign）；

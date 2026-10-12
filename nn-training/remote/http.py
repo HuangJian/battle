@@ -66,7 +66,9 @@ from remote.control_pool import (
 from remote.wire import (
     _BULK,
     WIRE_PREEMPT_MAX,
+    WIRE_REROLL_GAIN,
     WIRE_REROLL_MAX,
+    WIRE_REROLL_PROBES,
     WireSlowError,
     _bulk_pace,
     _min_rate,
@@ -155,6 +157,10 @@ def _read_body(
     `净值 elapsed = 墙钟 − Σ让路`（让路不是链路的错，不该把预取判成坏签）；
     **总超时与进度行仍按墙钟**（它们回答的是「这份传了多久」，含暂停才是诚实的）。
 
+    迟滞（2026-10-12）：重抽判据要**连续 `WIRE_REROLL_PROBES` 个点都慢**才断连 —— 抖动是常态，
+    单个 3s 窗口的瞬时速率必然误判（真机：首块 79KB/s ⇒ 重抽 ⇒ 换连接后 51KB/s，白扔 256KB）。
+    浪费上界仍是**有界**的（判满就收兵），不给「整份重传」开口子。
+
     停滞异常必须**有正文**：上游 `_get_with_retry` 只把 `repr(e)` 写进日志，裸
     `TimeoutError()` 打出来是 `TimeoutError()`——等于没写（2026-09-20 事故现场）。
     """
@@ -166,7 +172,8 @@ def _read_body(
     buf = bytearray()
     t0 = time.time()
     last = t0
-    probed = False
+    probes = 0  # 已判的**有效**慢点样本数（迟滞：连续 N 点都慢才认定坏签）
+    slow_streak = 0  # 连续判慢的点数（一个不慢的点即清零）
     t_yield = 0.0  # 让路累计（秒）：只喂速率判据，墙钟超时/进度仍用 now - t0
     while True:
         if pace is not None:
@@ -195,17 +202,21 @@ def _read_body(
             return bytes(buf)
         buf += block
         now = time.time()
-        if allow_reroll and not probed:
-            # 只在**首块**判一次（probed 一次性）：这样每次重抽的浪费 ≤ 一块（BODY_CHUNK），
-            # 绝不会退化成「再整份重传一遍」（plan §7.2 的硬要求）。
-            probed = True
+        if allow_reroll and probes < WIRE_REROLL_PROBES:
+            # 迟滞（2026-10-12）：判**连续 `WIRE_REROLL_PROBES` 个点**、全慢才断连重抽。
+            # 原先是「首块判一次」（probed 一次性）——抖动下单个 3s 窗口的瞬时速率必然误判。
+            # 浪费上界仍是**有界**的：判满 `WIRE_REROLL_PROBES` 点就收兵，绝不给「整份重传」
+            # 开口子（plan §7.2 的硬要求）。
             # 净值 = 墙钟 − 让路：让路不是链路的错，否则「停满 5s 预算」会让
             # 256KB/5s ≈ 51KB/s 恒低于阈值 ⇒ 每次下载都白扔一块重抽（现场 100%）。
             should, rate, remain = _reroll_decision(
                 len(buf), total, max(0.0, now - t0 - t_yield)
             )
-            if should:
-                raise WireSlowError(len(buf), rate, remain)
+            if rate > 0.0:  # rate == 0 ⇒ 样本还太小、没下结论（不计数、不判定）
+                probes += 1
+                slow_streak = slow_streak + 1 if should else 0
+                if probes >= WIRE_REROLL_PROBES and slow_streak >= WIRE_REROLL_PROBES:
+                    raise WireSlowError(len(buf), rate, remain)
         if total_timeout is not None and now - t0 > total_timeout:
             raise TimeoutError(
                 f"body 超时：总耗时 > {total_timeout:.0f}s（已收 {len(buf)} bytes"
@@ -427,6 +438,10 @@ def _get_with_retry(
     rerolls = 0
     preempts = 0  # 被 P1 挤走的次数（P2 专属）：独立预算，不消耗 attempts
     attempt = 1
+    #: 重抽开关（2026-10-12）：一次「抽了没用」即永久关闭（本函数内）。见下面的 `WireSlowError`。
+    reroll_ok = reroll
+    #: 上一次重抽前的实测速率（判「换连接到底有没有变好」；第一抽没有对比对象，允许抽）。
+    prev_rate = 0.0
     # ★ 2026-10-04（x20-adv-acc 现场）：base_url 为空 = **确定性配置错误**，重试不会变好 ——
     #   旧行为是 urllib 抛 `ValueError: unknown url type: '/jobs/…/blob?name=opt'`，被当成
     #   瞬时抖动退避重试 3 次（白等 6s+，日志还引导不到根因）。最常见来源：自主段/离线段的
@@ -443,7 +458,7 @@ def _get_with_retry(
     while attempt <= attempts:  # 用 while 而非 for：挤走时要**原地**重排，不推进 attempt
         # 重抽只在前几次尝试上开放：**最后一次必然老老实实传完**（否则慢链路就变成
         # 「永远下不完」——6 KB/s 的坏签确实存在，重抽是赌，不能把赌注全压在赌上）。
-        allow_reroll = reroll and attempt < attempts and rerolls < WIRE_REROLL_MAX
+        allow_reroll = reroll_ok and attempt < attempts and rerolls < WIRE_REROLL_MAX
         t_req = time.time()  # 本次尝试的**墙钟**（含排队）：只喂 `_note_rate`（保守侧）
         t_xfer = t_req  # 进槽后重取：段账只算**真实传输**（排队归调度账 `wait=`）
         try:
@@ -501,6 +516,17 @@ def _get_with_retry(
                 f"实测 {e.rate / 1024:.0f} KB/s < 阈值 {floor / 1024:.0f} KB/s"
                 f"（按此速率剩余 {e.remain_sec:.0f}s）——断开重发（已收 {e.bytes_read} bytes 作废）"
             )
+            # 无收益即停（2026-10-12，抖动是常态）：换一条连接还是这个速率 ⇒ **不是坏签，是链路
+            # 整体降速**。再抽只是把一整块（256KB）一遍遍扔掉 —— 真机证据：重抽前后 79 → 51 KB/s，
+            # 越抽越差，而每次重抽白扔 256KB + 一次建连。判据只能放在这里（`_reroll_decision` 手里
+            # 只有单次样本，没有「上一次」）。⚠ 只关**本函数内**的重抽，不触碰全局状态。
+            if prev_rate > 0.0 and e.rate < prev_rate * WIRE_REROLL_GAIN:
+                reroll_ok = False
+                log(
+                    f"wire: 重抽无收益（{prev_rate / 1024:.0f} → {e.rate / 1024:.0f} KB/s）"
+                    "——判定为链路整体降速而非坏签，停止重抽，按当前速率传完"
+                )
+            prev_rate = max(prev_rate, e.rate)
             attempt += 1  # 重抽仍消耗 attempts（与 for 版逐字等价：continue 会推进）
             continue  # 立即换连接重抽（不退避）
         except Exception as e:  # 网络层抖动（URLError/timeout/reset）

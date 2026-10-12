@@ -139,19 +139,25 @@ def test_min_rate_never_drops_below_the_absolute_floor() -> None:
 # ──────────────── ③④ 重抽循环：有界、最后一次不重抽、浪费有界 ────────────────
 
 
-def _rerolling_request(monkeypatch, waste_bytes: int = 256 * 1024):
+def _rerolling_request(monkeypatch, waste_bytes: int = 256 * 1024, *, improving: bool = True):
     """假 `_request`：**只在允许重抽时**抛 `WireSlowError`，否则返回 body。
 
     返回 `(calls, body)`；`calls` 记录每次的 `allow_reroll`，用来钉「重抽的开放面」。
+
+    `improving=True`（缺省）让每次重抽的实测速率**更高**（3× 递增）——这样「重抽上限」那条
+    用例不会被 2026-10-12 的「**无收益即停**」提前截断：两条是不同的判据，必须能分别钉住。
     """
     calls: list[bool] = []
     body = b"z" * 300_000
+    n = {"k": 0}
 
     def fake(base_url: str, token: str, path: str, **kw):
         allow = bool(kw.get("allow_reroll", False))
         calls.append(allow)
         if allow:
-            raise worker_mod.WireSlowError(waste_bytes, 6.4 * 1024, 1180.0)
+            n["k"] += 1
+            rate = 6.4 * 1024 * (3 ** (n["k"] - 1)) if improving else 6.4 * 1024
+            raise worker_mod.WireSlowError(waste_bytes, rate, 1180.0)
         return 200, body
 
     # 注入点 = `remote.http`：`_get_with_retry` 已搬进 http（S4 第五步），它在本模块命名空间
@@ -209,6 +215,58 @@ def test_reroll_is_capped_and_the_last_attempt_always_transfers(monkeypatch) -> 
     assert "reroll=3(wasted 0.75MB)" in lines[-1]
 
 
+def test_a_reroll_that_does_not_improve_stops_rerolling(monkeypatch) -> None:
+    """★ 2026-10-12（抖动是常态）：重抽**没变好**就停手，按当前速率传完。
+
+    真机证据：重抽前后 79 → 51 KB/s（越抽越差），每次白扔 256KB + 一次建连。第一条重抽没有
+    对比对象（允许抽），第二条起要求速率至少提高 `WIRE_REROLL_GAIN` 倍，否则不再抽。
+
+    判据只看**行为**（抽几次、有没有传完）：那句「重抽无收益」的日志是给操作员看的说明，
+    本用例不拿它当判据（文本断言预算只许降）。
+    """
+    calls, body = _rerolling_request(monkeypatch, improving=False)
+    out = worker_mod._get_with_retry(
+        "http://hub",
+        "t",
+        "/jobs/j5/payload",
+        timeout=300.0,
+        attempts=8,
+        log=lambda _m: None,
+        wire_jid="j5",
+        wire_seg="payload",
+        reroll=True,
+    )
+    assert out == body, "停抽之后必须老实传完"
+    assert calls == [True, True, False], f"无收益没停手：{calls}"
+
+
+def test_reference_rate_decays_after_repeated_slow_samples() -> None:
+    """★ 2026-10-12：参照速率不再钉死在会话最高水位（真机：一次 3,089KB/s ⇒ 门槛 772KB/s）。
+
+    规则：更好即抬（**恢复是瞬时的**）；**连续** `WIRE_RATE_STALE_SAMPLES` 个非更好样本起，
+    参照每多一个慢样本乘一次 `WIRE_RATE_DECAY`，直到落回 `WIRE_MIN_RATE` 地板。
+    单个慢样本仍不覆盖更好值（既有契约，见 `test_note_rate_is_session_stateful_and_reproducible`）。
+    """
+    mb = 1024 * 1024
+    wire_mod._BEST_RATE = 0.0
+    worker_mod._note_rate(3 * mb, 4 * mb)
+    assert abs(wire_mod._BEST_RATE - 3 * mb) < 1.0
+
+    worker_mod._note_rate(150 * 1024, 4 * mb)  # 第 1 个慢样本：迟滞内，参照不动
+    assert abs(wire_mod._BEST_RATE - 3 * mb) < 1.0
+    assert worker_mod._min_rate() == pytest.approx(3 * mb / 4)  # 旧语义下这一条就是 772KB/s
+
+    worker_mod._note_rate(150 * 1024, 4 * mb)  # 第 2 个：开始衰减
+    assert abs(wire_mod._BEST_RATE - 3 * mb * wire_mod.WIRE_RATE_DECAY) < 1.0
+
+    for _ in range(6):
+        worker_mod._note_rate(80 * 1024, 4 * mb)
+    assert worker_mod._min_rate() == worker_mod.WIRE_MIN_RATE, "持续慢之后门槛没落回地板"
+
+    worker_mod._note_rate(3 * mb, 4 * mb)  # 链路恢复 ⇒ 参照瞬时回到新高（不惩罚恢复）
+    assert abs(wire_mod._BEST_RATE - 3 * mb) < 1.0
+
+
 def test_reroll_disabled_path_is_untouched(monkeypatch) -> None:
     """`reroll=False`（缺省）⇒ **一次都不抛**、行为与改造前一致（旧调用面零变化）。"""
     calls, body = _rerolling_request(monkeypatch)
@@ -240,13 +298,18 @@ def test_exhausted_rerolls_still_fail_loudly(monkeypatch) -> None:
         )
 
 
-def test_read_body_probes_only_its_first_chunk(monkeypatch) -> None:
-    """判据**只跑一次**（首块）⇒ 重抽的浪费 ≤ 一块，绝不会退化成「再整份传一遍」。"""
+def test_read_body_probes_at_most_the_hysteresis_points(monkeypatch) -> None:
+    """判据只跑**不超过 `WIRE_REROLL_PROBES` 个点** ⇒ 重抽的浪费有界（绝不「再整份传一遍」）。
+
+    ★ 2026-10-12（迟滞）：原先只判首块一次（`probed` 一次性）；抖动下单个 3s 窗口的瞬时速率
+    必然误判，所以改成「连续 `WIRE_REROLL_PROBES` 点都慢才断连」。浪费上界从一块变成 N 块，
+    但仍然有界 —— 判满就收兵。判点数**必须**等于常量（多一个点就是上界漂了）。
+    """
     seen: list[tuple[int, int, float]] = []
 
     def spy(got: int, total: int, elapsed: float, **kw):
         seen.append((got, total, elapsed))
-        return True, 6.4 * 1024, 1180.0  # 第一次就判「该重抽」
+        return True, 6.4 * 1024, 1180.0  # 每个点都判「该重抽」
 
     # 同上：`_read_body` 在 `remote.http` 里解析 `_reroll_decision`。
     monkeypatch.setattr(http_mod, "_reroll_decision", spy)
@@ -255,8 +318,22 @@ def test_read_body_probes_only_its_first_chunk(monkeypatch) -> None:
         worker_mod._read_body(
             resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True
         )
-    assert len(seen) == 1
-    assert seen[0][0] == 256  # 首块就裁定
+    assert len(seen) == wire_mod.WIRE_REROLL_PROBES, f"判点数没被迟滞限住：{seen}"
+
+
+def test_a_single_slow_probe_does_not_break_the_connection(monkeypatch) -> None:
+    """★ 迟滞的另一半：**单点慢不算坏签**（抖动常态）——第二点不慢就照传完。
+
+    现场就是这一种：第一块 79KB/s 判了「该重抽」，而重抽换来的是 51KB/s。一个 3 秒窗口的
+    瞬时速率在抖动链路上不构成证据。
+    """
+    seq = iter([(True, 6.4 * 1024, 1180.0), (False, 400 * 1024, 2.0)])
+    monkeypatch.setattr(http_mod, "_reroll_decision", lambda *a, **k: next(seq))
+    resp = _FakeResp([b"x" * 256, b"y" * 256, b"z" * 256], total=768)
+    out = worker_mod._read_body(
+        resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True
+    )
+    assert len(out) == 768, "单点慢就把连接断了（抖动下必然误判）"
 
 
 def test_read_body_fast_draw_returns_the_whole_body() -> None:
@@ -432,7 +509,11 @@ def test_preempt_error_carries_the_bytes_already_read() -> None:
 
 
 def test_reroll_probe_still_fires_when_the_link_is_really_slow(monkeypatch) -> None:
-    """净值 ≠ 万灵药：**真**慢（没有让路可扣）仍必须重抽（别把支路修死）。"""
+    """净值 ≠ 万灵药：**真**慢（没有让路可扣）仍必须重抽（别把支路修死）。
+
+    ★ 2026-10-12（迟滞）：断连要**连续 `WIRE_REROLL_PROBES` 个点都慢** ⇒ 夹具必须给够块
+    （原来只给一块，那是「判首块一次」时代的形状）。
+    """
     seen: list[float] = []
 
     def spy(got: int, total: int, elapsed: float, **kw):
@@ -440,12 +521,12 @@ def test_reroll_probe_still_fires_when_the_link_is_really_slow(monkeypatch) -> N
         return True, 6.4 * 1024, 1180.0  # 判「该重抽」
 
     monkeypatch.setattr(http_mod, "_reroll_decision", spy)
-    resp = _FakeResp([b"x" * (256 * 1024)], total=8 * MB)
+    resp = _FakeResp([b"x" * (256 * 1024), b"y" * (256 * 1024)], total=8 * MB)
     with pytest.raises(worker_mod.WireSlowError):
         worker_mod._read_body(
             resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True, pace=lambda: 0.0
         )
-    assert seen and seen[0] >= 0.0
+    assert len(seen) == wire_mod.WIRE_REROLL_PROBES, f"真慢却没判满迟滞点数：{seen}"
 
 
 def test_preempt_retries_do_not_consume_attempts(monkeypatch) -> None:

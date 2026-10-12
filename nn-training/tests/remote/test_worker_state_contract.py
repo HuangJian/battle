@@ -15,6 +15,7 @@
 |---|---|---|---|---|
 | `_ACTIVE_CODE_SHA` | `str \\\\| None`（会话代码指纹） | `worker` | `run_job`（`global`） | 间接（`test_remote_hotswap` 测异常语义） |
 | `_BEST_RATE` | float（`global _BEST_RATE`） | `wire` | `_note_rate` | **是**（`test_wire_reroll` 重置它） |
+| `_stale_samples` | int（`global _stale_samples`，与上者同一次 `_note_rate` 写） | `wire` | `_note_rate` | 间接（`_BEST_RATE` 归零后它不可能误触发：见 `wire._note_rate`） |
 | `_WIRE` | `dict[str, dict]`（每 job 传输账） | `wire` | `_wire_bucket` / `_wire_flush` | **是**（多文件直接 `.clear()` 并断言封顶） |
 | `_BULK` | `BulkScheduler()` **实例** | `wire` | `set_bulk_log` / `pace` / `slot` / `control` / `reset` | **是**（直接 `.reset()` / `.inflight()`） |
 | `_opener` | 懒建单例（`global _opener`） | `http` | `_get_opener` | 否 |
@@ -61,7 +62,11 @@ OWNER_FILES = {"worker": WORKER, "wire": WIRE, "http": HTTP}
 #: 顶层**可变容器字面量**绑定（拆走或新增都必须改这里——这是有意的手工清单）。
 OWNER_CONTAINERS = {"worker": set(), "wire": {"_WIRE"}, "http": {"_POLL_WARN_AT"}}
 #: 函数内以 `global` **重绑**的脚本单例（懒建 / 会话级标量）。
-OWNER_GLOBAL_REBOUND = {"worker": {"_ACTIVE_CODE_SHA"}, "wire": {"_BEST_RATE"}, "http": {"_opener"}}
+OWNER_GLOBAL_REBOUND = {
+    "worker": {"_ACTIVE_CODE_SHA"},
+    "wire": {"_BEST_RATE", "_stale_samples"},
+    "http": {"_opener"},
+}
 #: 顶层构造的**有状态对象**实例（这里是调度器）。
 OWNER_INSTANCES = {"worker": set(), "wire": {"_BULK"}, "http": set()}
 #: 结构性豁免：独立引导模块里**同名但不同物**的变量。

@@ -1,8 +1,9 @@
 """remote/wire.py — worker 的**传输账 / 低速重抽 / bulk 节流**（S4 拆分，2026-09-23）。
 
 从 `remote/worker.py` 整簇搬出来的**无类**关注点：`WIRE_*` 阈值 · 每 job 传输账（`_WIRE`）·
-本会话最好速率（`_BEST_RATE`）· bulk 单通道调度器（`_BULK`），以及 `_wire_*` /
-`_note_rate` / `_min_rate` / `_reroll_decision` / `set_bulk_log` / `_bulk_pace`。
+判据的参照速率（`_BEST_RATE`，**近期水平**语义：更好即抬、连续慢按 `WIRE_RATE_DECAY` 衰减，
+见 `_note_rate` / `_ref_rate`）· bulk 单通道调度器（`_BULK`），以及 `_wire_*` / `_note_rate` /
+`_min_rate` / `_ref_rate` / `_reroll_decision` / `set_bulk_log` / `_bulk_pace`。
 
 ## 为什么**状态随簇搬迁**（而不是留宿主让本模块 import）
 
@@ -36,9 +37,13 @@ __all__ = [
     "WIRE_PREEMPT_MAX",
     "WIRE_PROBE_BYTES",
     "WIRE_PROBE_SEC",
+    "WIRE_RATE_DECAY",
     "WIRE_RATE_SAMPLE_MIN_BYTES",
+    "WIRE_RATE_STALE_SAMPLES",
     "WIRE_REROLL_BUDGET_SEC",
+    "WIRE_REROLL_GAIN",
     "WIRE_REROLL_MAX",
+    "WIRE_REROLL_PROBES",
     "_BEST_RATE",
     "_BULK",
     "_WIRE",
@@ -46,7 +51,9 @@ __all__ = [
     "_bulk_pace",
     "_min_rate",
     "_note_rate",
+    "_ref_rate",
     "_reroll_decision",
+    "_stale_samples",
     "_wire_add",
     "_wire_block",
     "_wire_bucket",
@@ -101,6 +108,10 @@ WIRE_PROBE_SEC = 3.0
 WIRE_REROLL_BUDGET_SEC = 20.0
 #: 单次下载的重抽上限（**只给幂等 GET**；POST result 永不重抽）。
 WIRE_REROLL_MAX = 3
+#: 重抽的**收益门槛**（2026-10-12）：换连接后的实测速率没有比上一次高这么多倍 ⇒ 判「不是坏签，
+#: 是链路整体降速」，**停止重抽**、按当前速率老实传完。真机证据：重抽前后 79 → 51 KB/s
+#: （越抽越差），而每次重抽白扔一整块（256KB）+ 一次建连。抖动是常态 ⇒ 必须给"抽了没用"留出口。
+WIRE_REROLL_GAIN = 1.25
 #: 单次**预取下载**（P2）被 P1 挤走后的重排上限（2026-09-25）：挤走不是失败，
 #: **不消耗** `attempts`。它只管抢占；坏签重抽仍归 `WIRE_REROLL_MAX`，两者独立。
 WIRE_PREEMPT_MAX = 6
@@ -112,8 +123,36 @@ WIRE_RATE_SAMPLE_MIN_BYTES = 256 * 1024
 #: 溢出会按最旧丢，那一刻丢掉的是一整行阶段账（静默的读数损失）。
 WIRE_MAX_JOBS = 8
 
-#: 本会话已观测到的最好大 body 速率（bytes/s）——相对判据的参照。
+#: 参照速率的**衰减**（2026-10-12，抖动是常态）。旧语义是**会话高水位、只升不降** ⇒ 一次
+#: 3MB/s 的幸运样本把门槛钉在 772KB/s（真机日志：`阈值 772 KB/s`），此后链路正常的回落
+#: （50–150KB/s）**每一次**都被判成坏签 ⇒ 每次下载白扔 256KB + 一次重连，而重抽没换来任何
+#: 恢复（79 → 51 KB/s）。有噪声的输入 + 无迟滞的阈值 = 必然误报。
+#:
+#: 规则：连续 `WIRE_RATE_STALE_SAMPLES` 个**非更好**的大 body 样本之后，参照每多一个慢样本
+#: 就乘一次 `WIRE_RATE_DECAY`；一旦出现更好的样本立刻回到新高（恢复是瞬时的）。
+#: ⚠ 为什么用**样本计数**而不是「读时按时间过期」：既有注入点只有 `_BEST_RATE` 这一个标量
+#: （`test_wire_reroll` 的 autouse 夹具就靠 `wire._BEST_RATE = 0.0` 清场），任何时刻戳都会在
+#: 同进程的用例之间串味；样本计数在标量归零后不可能误触发（见 `_note_rate` 的注释）。
+WIRE_RATE_STALE_SAMPLES = 2
+#: 每多一个连续的非更好样本，参照乘它（0.5 ⇒ 约 4 个慢样本落到地板附近；恢复仍是瞬时的）。
+#: 取值是判断题：太小会把「一次慢样本」当趋势，太大则一次走运又钉住一整场。0.5 + 迟滞 2 的
+#: 组合在真机那种「3MB/s ⇒ 50–150KB/s」的台阶上，约 1 分钟回到地板。
+WIRE_RATE_DECAY = 0.5
+
+#: 判据的参照速率（bytes/s）。**只升不降**由 `_note_rate` 保证；下降由衰减规则负责。
+#: 注入点 = 本模块的 `_BEST_RATE`（`remote.worker._BEST_RATE` 只是转发名，重绑它无效）。
 _BEST_RATE = 0.0
+
+#: 连续「非更好」样本的计数（`_note_rate` 用 `global` 重绑；`_BEST_RATE` 归零后它无害——
+#: 标量为 0 时第一个样本必然算「更好」，计数当场归零）。@ 见 `test_worker_state_contract` 的
+#: 模块级状态清点表。
+_stale_samples = 0
+
+#: 重抽前要**连续判满几个慢点**（迟滞，2026-10-12）。原先只判首块一次：抖动下单个 3 秒窗口
+#: 的瞬时速率必然误判（真机：第一块 79KB/s ⇒ 断连重抽 ⇒ 换连接后 51KB/s，白扔 256KB）。
+#: 两点把误判率压到平方级，代价是重抽前最多多读一块（`BODY_CHUNK` = 256KB）——相对它要救的
+#: 「按此速率剩余 26s」可以忽略。⚠ 上界仍是**有界**的：判满就收兵，绝不给「整份重传」开口子。
+WIRE_REROLL_PROBES = 2
 
 #: 每 job 的传输账：jid -> {segs: {段名: [bytes, sec]}, hits: {段名: 说明},
 #: wasted: 重抽作废字节, rerolls: 次数, sched0: 建账时的调度器快照}。
@@ -147,15 +186,32 @@ def _bulk_pace(token: int, prio: str) -> Any:
 
 
 def _note_rate(rate: float, nbytes: int) -> None:
-    """记下本会话的**大 body** 最好速率（相对判据的参照）。"""
-    global _BEST_RATE
-    if nbytes >= WIRE_RATE_SAMPLE_MIN_BYTES and rate > _BEST_RATE:
-        _BEST_RATE = rate
+    """记下大 body 速率；更好 ⇒ 抬参照（瞬时恢复）；连续慢 ⇒ 按 `WIRE_RATE_DECAY` **衰减**参照。
+
+    契约（有用例钉死）：小 body 不采样；**单个**更慢的样本不覆盖更好值（由
+    `WIRE_RATE_STALE_SAMPLES` 的迟滞保住）——所以 `test_note_rate_is_session_stateful_and_reproducible`
+    那种「500 然后 100」的序列仍然读到 500。衰减只在**连续**慢样本之后发生，见 `WIRE_RATE_DECAY`。
+    """
+    global _BEST_RATE, _stale_samples
+    if nbytes < WIRE_RATE_SAMPLE_MIN_BYTES:
+        return
+    if rate > _BEST_RATE:
+        _BEST_RATE = float(rate)
+        _stale_samples = 0
+        return
+    _stale_samples += 1
+    if _stale_samples >= WIRE_RATE_STALE_SAMPLES:
+        _BEST_RATE = max(float(rate), _BEST_RATE * WIRE_RATE_DECAY)
+
+
+def _ref_rate() -> float:
+    """判据的参照速率 = `_BEST_RATE`（现在的语义是「近期水平」，不是会话高水位）。"""
+    return _BEST_RATE if _BEST_RATE > 0.0 else 0.0
 
 
 def _min_rate() -> float:
-    """坏签判据 = max(`WIRE_MIN_RATE`, 本会话最好速率 / 4)——只在「明显偏离」时动手。"""
-    return max(WIRE_MIN_RATE, _BEST_RATE / 4.0)
+    """坏签判据 = max(`WIRE_MIN_RATE`, 参照速率 / 4)——只在「明显偏离**近期**水平」时动手。"""
+    return max(WIRE_MIN_RATE, _ref_rate() / 4.0)
 
 
 def _reroll_decision(

@@ -5103,3 +5103,36 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   `nn-training/remote/worker.py`（`PrefetchStore(..., staged_max=max(prefetch_depth, prefetch_unpack))`） ·
   `nn-training/tests/remote/test_soft_hold_prefetch.py`（删「超上界退回」用例 → 换「体积不设闸只记账」+
   「staged 超条数只丢最旧 staged」；文本断言 FORM 基线不变 1445）—— 全文 → `docs/nn/remote-transport.md §85`
+
+## §2026-10-12-transfer-jitter-tolerance（2026-10-12，抖动是常态：坏签判据加迟滞+衰减、重抽无收益即停、控制面首败不退避；plan/transfer-jitter-tolerance）
+
+- **背景**：kaggle ppo worker 真机 log，用户口径「网络抖动，是很常见的事情！」。同一会话内链路
+  3 秒内 3,089 KB/s → 79/51 KB/s，而三条"错误"全是防线把常态当异常：① 参照速率是**会话高水位、
+  只升不降**（`wire._min_rate = max(80KB/s, _BEST_RATE/4)`），一次走运把门槛钉在 772KB/s，此后
+  任何正常回落都判坏签；② 误报的动作是**丢弃已收从零重来**（hub 侧完全无 Range 支持：hub/ 里
+  grep `Range|206|Content-Range` 零命中）⇒ 每次重抽白扔 256KB + 建连，而真机上重抽前后
+  79 → 51 KB/s（越抽越差）；③ 控制面 6s×2（`job_lifecycle.CONTROL_TIMEOUT_SEC` ×
+  `control_pool.CONTROL_ATTEMPTS`）+ `worker.py` 再睡 5s ⇒ 一次抖动 ~17s 空转，而 `control_pool`
+  的设计注释明写「失败不退避」——**实现比设计多赔 5s**。两次控制面超时 2/2 落在 bulk 在飞窗口内。
+- **决定（四条）**：① `wire._note_rate` 加**迟滞+衰减**（`WIRE_RATE_STALE_SAMPLES=2`、
+  `WIRE_RATE_DECAY=0.5`：更好即抬、连续慢才衰减，直到落回地板）；② `_read_body` 探针改
+  **连续 `WIRE_REROLL_PROBES=2` 个点都慢才断连**（原先只判首块）；③ `_get_with_retry` 加
+  **重抽无收益即停**（`WIRE_REROLL_GAIN=1.25`：换连接没变好 ⇒ 判链路整体降速，停抽、按当前速率传完）；
+  ④ `worker_loop` **首败不退避**（连败计数 `_acquire_fails`，连败才 sleep）。
+- **备选与否决**：① 删掉坏签重抽/取消 `WIRE_MIN_RATE` 地板 —— 否：§22 有实测依据（13.5KB/s 的连接，
+  3 秒后另一条 ≥120KB/s），本批只加迟滞与收益判据；② 用「读时按时间过期」做参照衰减 —— 否：
+  既有注入点只有 `_BEST_RATE` 一个标量（`test_wire_reroll` 的 autouse 夹具就靠 `wire._BEST_RATE = 0.0`
+  清场），任何时刻戳都会在同进程用例间串味 ⇒ 改用**样本计数**（标量归零后不可能误触发）；
+  ③ 直接把控制面死线放宽到 12s+ —— **否（本轮发现的自伤）**：控制面请求的墙钟同时喂
+  `bulk_sched._p0_ms`，而 `yield_worth_it()`（阈值 `YIELD_GIVEUP_P95_MS=10_000`）用它的 p95 判
+  「让路买不回来 ⇒ 降为 never」⇒ 放宽会抬高 p95、反而更早关掉让路。先解耦指标再谈放宽（plan C）。
+- **后果**：抖动期不再每次下载都误判重抽（连续 2 个慢样本后门槛开始衰减，约 1 分钟落回地板；恢复瞬时）；
+  单点慢不再断连；一次"抽了没用"即止（最坏从 3 次 × 256KB 降到 2 次）；acquire 一次失败省掉 5s 空转。
+  模块级状态清点 +1（`wire._stale_samples`，`test_worker_state_contract` 的清单已同步）。
+- **留到 plan**（`plan/transfer-jitter-tolerance.plan.md`，顺序 A→B→C）：**A** payload GET 的
+  Range 断点续传（让 `wasted` 恒为 0；前置：定 `payload_sha256` 的校验口径）· **B** 上传的让路点
+  （result POST 的 body 现在是 urllib 一次 sendall，零让路；难点是代理装配，须先补 parity 用例）·
+  **C** 控制面死线自适应（前置：`_p0_ms` 口径与"放宽后的等待"解耦）。
+- **落点** → `nn-training/remote/{wire,http,worker}.py` ·
+  `nn-training/tests/remote/{test_wire_reroll,test_worker_state_contract}.py`
+  （FORM 文本断言基线**不变** 1445：新用例全用行为判据）—— 全文 → `docs/nn/remote-transport.md §86`
