@@ -197,8 +197,9 @@ export const SPAWN_COUNTDOWN_MS = 1000
 
 // ---- v5 标量分母/上限（plan §2.3）----
 /** s31 `myBullets` 的计数上限（沿 `MAX_ENEMIES_ALIVE` 的计数类归一惯例）。
- *  ⚠ 实现时按 S7 探针实测 p99 复核：p99 ≤ 2 则改 /2（plan §2.4 预注册）。 */
-export const MY_BULLETS_CAP = 3
+ *  ⚠ 3 → 2：S7 探针实测（plan §3-S7 ①）两个策略口径的 p99 均 = 1（≤ 2）⇒ 按 §2.4 的
+ *  预注册规则取 /2（0/1/2 满量程；/3 会留一个几乎读不到的 1.0 档）。改回去等于让探针白跑。 */
+export const MY_BULLETS_CAP = 2
 /** s32 `pickupDist` 归一化分母（格；与 `reward_validation` 的 0–50 值域同源）。 */
 export const PICKUP_DIST_NORM = 50
 /** s35 `wallDist` 归一化分母（格；半场宽 26/2 = 13，中心格读数 ≈12/13）。 */

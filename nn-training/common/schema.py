@@ -224,7 +224,7 @@ SCALAR_LAYOUT = [
     (29, "iceVx"),  # vx/speed，[-1,1]（x 分量 ⇒ SCALAR_X_INDICES）
     # ---- v5 新增（plan/obs-v5-vector-gap.plan.md §2.3）----
     (30, "moving"),  # player.moving ? 1 : 0（顶墙推 vs STOP 的区分位）
-    (31, "myBullets"),  # 玩家本人在飞弹数 min(n,3)/3（allegiance==='player'）
+    (31, "myBullets"),  # 玩家本人在飞弹数 min(n,2)/2（allegiance==='player'；S7 p99=1 ⇒ /2）
     (32, "pickupDist"),  # !alive?0 : raw<0?1.5:raw/50（raw = 中心格曼哈顿，哨兵 -1）
     (33, "pickupRelX"),  # 到最近拾取的 dx/d（无/死亡 = 0；FLIPS on mirrorX）
     (34, "pickupRelY"),  # 到最近拾取的 dy/d（无/死亡 = 0）

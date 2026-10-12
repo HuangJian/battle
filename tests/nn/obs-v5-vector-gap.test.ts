@@ -375,20 +375,18 @@ describe('A8：逐维 golden（s30/s31/s35/s36/s39）', () => {
     expect(encode(w).scalars[30]).toBe(1)
   })
 
-  it('s31 myBullets：只数玩家阵营弹（友军弹不算），cap 3', () => {
+  it('s31 myBullets：只数玩家阵营弹（友军弹不算），cap 2（S7 实测 p99=1 ⇒ §2.4 取 /2）', () => {
     const w = openWorld(48)
     const p = w.player!
     const cx = p.x + p.w / 2
     const cy = p.y + p.h / 2
-    for (let i = 0; i < 2; i++) {
-      w.bullets.push(makeBullet({ x: cx, y: cy - (i + 1) * CELL, dir: 'up', allegiance: 'player' }))
-    }
+    w.bullets.push(makeBullet({ x: cx, y: cy - CELL, dir: 'up', allegiance: 'player' }))
     w.bullets.push(makeBullet({ x: cx, y: cy + CELL, dir: 'down', allegiance: 'ally' }))
-    expect(encode(w).scalars[31]).toBeCloseTo(2 / 3, 6)
-    for (let i = 0; i < 3; i++) {
-      w.bullets.push(makeBullet({ x: cx, y: cy - (i + 3) * CELL, dir: 'up', allegiance: 'player' }))
+    expect(encode(w).scalars[31]).toBeCloseTo(1 / 2, 6) // 友军弹不算
+    for (let i = 0; i < 2; i++) {
+      w.bullets.push(makeBullet({ x: cx, y: cy - (i + 2) * CELL, dir: 'up', allegiance: 'player' }))
     }
-    expect(encode(w).scalars[31]).toBe(1) // 5 颗 ⇒ cap 3 截断
+    expect(encode(w).scalars[31]).toBe(1) // 3 颗 ⇒ cap 2 截断
   })
 
   it('s35 wallDist：到边界格距 /13（用中心格）；s36 cornerDist：四角锚点最小切比雪夫 /10', () => {
