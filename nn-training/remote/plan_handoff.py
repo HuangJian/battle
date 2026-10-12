@@ -65,6 +65,7 @@ from remote.artifacts import (
 )
 from remote.bundle import CODE_NAME as BUNDLE_CODE_NAME
 from remote.deliver_proc import DelivererLike, make_deliverer
+from remote.job_lifecycle import worker_tag
 from remote.offline_deliver import DRAIN_FLUSH_SEC
 from worker.plan import plan_pairs_fp, planned_iters, validate_plan
 
@@ -390,6 +391,16 @@ def open_run_context(
                     run_id=store.run_id,
                     artifacts_dir=store.root,
                     course=hub_course,
+                    # 可读名（`kaggle-o`）= dashboard 节点贡献统计里 PPO 组的列名
+                    # （plan/offline-leg-ppo-attribution）。**为什么在这里算**：`worker_tag` 住
+                    # `remote/job_lifecycle`(L3)，而 `deliver_proc`(L2) / `offline_deliver`(L1) 都在
+                    # 它下面（本仓层号是 `tests/test_remote_dag.py` 逐条对账的）—— 那两个自己去算
+                    # 就是向上依赖。本函数(L5) 是唯一装配点，两条入口（`run_loop` / `plan_run`）都过它。
+                    # `offline=True` ⇒ `<env>-o`（本机 = `local`）：自主腿走的**就是**离线链路。
+                    # 代价：这个参数表达式**先于** `make_deliverer` 返回 None 的判定求值（没有
+                    # hub 时白探一次）。值得：它只是两个 `importlib` 判据（`common/env_probe`，
+                    # 无 I/O、同参同值，`plan_handoff` 面向的是一次段启动而非热路径）。
+                    worker_name=worker_tag(offline=True, hub_url=hub_url),
                     # 控制/状态文件的落点（只有子进程模式用）：`work_dir` **跨会话复用**，
                     # 所以文件名必须带会话身份（见 `DelivererProcess._new_state_path`）。
                     work_dir=work_dir,

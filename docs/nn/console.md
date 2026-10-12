@@ -13,6 +13,45 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §37 节点贡献统计的 PPO 组收下自主腿：`offline_artifact` + 两个身份字段（plan/offline-leg-ppo-attribution，2026-10-12）
+
+**触发**（用户 2026-10-12 报障）：「kaggle 自主 worker 今天完成了 600 轮 ppo 任务，却不显示在
+ dashboard 页面的节点贡献统计数据里。」
+
+**为什么之前不显示**（三处断链，缺一不可）：
+
+| # | 断在哪 | 事实 |
+|---|---|---|
+| **A** | hub 落 `offline_artifact` 账本行时**不写身份** | `hub/store_offline.py` 的两处落点（`<run>/metrics.jsonl` 与课程账本）都没有 worker 字段 |
+| **B** | 自主腿与队列腿是**两套命名** | 自主腿：`{HOSTNAME}-{uuid8}`（`.worker-id`，**进程身份**）；队列腿：`<env>-<link>`（`worker_tag()`，**可读名**）。hub 侧只有前者 ⇒ 变不出可读名 |
+| **C** | dashboard 的 PPO 读面**只认 `job_*`** | `readPpoAttribution` 的 `if (typeof jid !== 'string') continue` 把没有 `job_id` 的行整行丢掉（offline 行根本没有 job_id） |
+
+**决定**（口径先定死）：
+
+| 项 | 口径 |
+|---|---|
+| **两个身份字段，永不合并** | `worker` = claim 身份（客户端自报优先，否则**本课 hold 镜像**兜底；**不判活性**——只回答「这轮是谁推的」）· `worker_name` = **可读名**（只有客户端自报这一条来源） |
+| **可读名 = `kaggle-o`** | `worker_tag(offline=True, hub_url=…)` = `<env>-o`（本机 `local`）——**用户裁决 2026-10-12**：自主腿走的**就是**离线链路。`kaggle-c` 是同一台盘队列腿的名字 ⇒ 面板上两行是**故意**的（链路不同，不并） |
+| **单位口径** | **1 条 `offline_artifact` = 1 个 job 等价单位**（队列腿 1 job = 1 轮 it）；与采样侧 `readOfflineLegs` 的剔除是一加一减，**不是**重复计数 |
+| **缺身份** | 两键皆缺 ⇒ 键**整个缺席**（不写空串/null） ⇒ 渲染 `(未登记)`（既有口径，**不发明新占位符**） |
+| **历史** | 用户裁决**不修**：602 行（两课各 301 条）原样留在 `(未登记)`，不从 hub 日志回填、不回溯改写 |
+
+**落点**：`hub/store_offline.py::_artifact_identity`（新键排在 `**(row if isinstance(row, dict) else {})`
+展开**之后** = 客户端给的字节不许冒名） · `remote/plan_handoff.py::open_run_context`（算名字——
+`worker_tag` 是 L3，而 `offline_deliver`(L1)/`deliver_proc`(L2) 在它下面，自己算就是向上依赖） ·
+`remote/deliver_proc.py`（工厂 + 进程代理 + **`process` 模式那条子进程一跳**：`NN_WORKER_NAME` env） ·
+`remote/deliver_worker.py`（真发体的那个进程读 env） · `remote/offline_deliver.py`（body） ·
+`dashboard/src/server/contribution.ts`（`readPpoAttribution` + `offlineIdentity`）。
+
+**测试**：`tests/hub/test_offline_backfeed.py`（两处落点 / 自报优先 / hold 兜底 / 无 hold 缺席 /
+`row` 不许冒名 / 类型噪声）· `tests/remote/test_offline_deliver{,async,proc}.py`（体 · 拉起面的 env ·
+**真子进程端到端**）· `tests/test_remote_dag.py`（新边 `plan_handoff`→`job_lifecycle` 仍严格向下）·
+`dashboard/tests/worker-contribution.test.ts`。
+
+**指针**：DECISIONS `§2026-10-12-goalnn-offline-leg-ppo-attribution` · plan `plan/offline-leg-ppo-attribution.plan.md` ·
+上游口径 `§2026-10-06-goalnn-offline-leg-sampling-exclusion`（本条补的正是它欠的前半句）·
+本节提到的面板两组/角色隔离语义见 §23。
+
 ## §36 self 节点低盘告警：预警档（4096）与拒收地板（2048）是两件事（plan/self-node-disk-alert，2026-10-09）
 
 **触发**：2026-10-08 self 节点 1h41m（08:13–09:55）不参与 rollout/eval，全程控制台**零告警**——
@@ -545,6 +584,9 @@ DECISIONS `§2026-10-03-goalnn-dashboard-alert-dock-global`。
 * **PPO 侧**「哪个云端 worker 完成了几个 job」在任何账本里都不存在——`job_completed` 由**训练侧**写
   （`remote/hub_client.py::mark_job_completed`，字段只有 `{event, job_id, ts}`），身份只在 **hub 承接结果
   那一刻**可得 ⇒ W2 把归属定格进账本（契约见 `docs/nn/remote-transport.md` §55）。
+  ★ **2026-10-12 补第三条腿（自主腿）**：自主盘领整段任务包、不走 job 队列 ⇒ 它完成的轮在 hub 账本里是
+  `offline_artifact`（自带两个身份字段：claim 身份 + 可读名 `kaggle-o`）——见 **§37**（本节是 2026-10-02 的
+  现场记录，不就地重写）。
 
 **语义裁决**（用户 2026-10-02 已裁决；口径先定死）：
 

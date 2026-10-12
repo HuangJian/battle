@@ -30,6 +30,7 @@ from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
     DRAIN_TICK_SEC,
     HUB_LEASE_ENV,
+    WORKER_NAME_ENV,
     OfflineDeliverer,
     _log_default,
 )
@@ -61,6 +62,12 @@ class DelivererLike(Protocol):
     #: 本份产物在 hub 里的归位键（多课程 hub 必需；两个实现都有，调用方直接读）。
     @property
     def course(self) -> str: ...
+
+    #: 可读名（`kaggle-o`）= dashboard 节点贡献统计里 PPO 组的列名
+    #: （plan/offline-leg-ppo-attribution）：**两个实现都带**（空串 = 体里不带那个键），
+    #: 所以它属于共同接口 —— 谁新加一个实现，都要把装配点算好的名字带上。
+    @property
+    def worker_name(self) -> str: ...
 
     def start(self) -> None: ...
 
@@ -112,6 +119,10 @@ class DelivererProcess:
         #: 本课租约 token（★M1b/P1-1：随补传体上报，推进 hub 侧的活动起点）。走 env
         #: 传给子进程（`HUB_LEASE_ENV`），**不进 argv**。空 = 不带。
         hub_lease: str = "",
+        #: 可读 worker 名（`kaggle-o`）= dashboard PPO 组的列名（plan/offline-leg-ppo-attribution）。
+        #: 同理**只走 env**（`WORKER_NAME_ENV`）传给真正 POST 的那个子进程 —— 缺这一跳，
+        #: 名字就只活在父侧（而父侧一个体都不发）= 与没实现同效。空 = 体里不带那个键。
+        worker_name: str = "",
         #: 控制/状态文件的落点（缺省 = 产物目录下的 `work/`，与 `run_loop` 的老缺省一致）。
         work_dir: str | Path | None = None,
         ctl_path: str | Path | None = None,
@@ -128,6 +139,7 @@ class DelivererProcess:
         self.root = Path(artifacts_dir)
         self.course = str(course or "").strip()
         self.hub_lease = str(hub_lease or "").strip()
+        self.worker_name = str(worker_name or "").strip()
         self.work_dir = (
             Path(work_dir)
             if work_dir is not None
@@ -238,6 +250,9 @@ class DelivererProcess:
         # 租约 token 同理只走 env（★M1b/P1-1）：空值不塞，免得子进程拿到一个空串当 token。
         if self.hub_lease:
             env[HUB_LEASE_ENV] = self.hub_lease
+        # 可读名（plan/offline-leg-ppo-attribution）：同上，空值不塞（体里那个键该整个缺席）。
+        if self.worker_name:
+            env[WORKER_NAME_ENV] = self.worker_name
         self._boot = threading.Event()
         try:
             proc = subprocess.Popen(
@@ -371,6 +386,7 @@ class DelivererProcess:
             artifacts_dir=self.root,
             course=self.course,
             hub_lease=self.hub_lease,
+            worker_name=self.worker_name,
             background=True,
             log=self.log,
         )
@@ -584,6 +600,8 @@ def make_deliverer(
     course: str = "",
     #: 本课租约 token（★M1b/P1-1：可缺——缺了补传照落，只是不推进活动起点）。
     hub_lease: str = "",
+    #: 可读 worker 名（`kaggle-o`）—— 面板列名（plan/offline-leg-ppo-attribution）；空 = 不带那个键。
+    worker_name: str = "",
     #: 控制/状态文件的落点（只有进程模式用；缺省 = 产物目录下的 `work/`）。
     work_dir: str | Path | None = None,
     #: `""` = 自动（`$NN_DELIVER_MODE` > `"process"`，见模块常量）；
@@ -622,6 +640,7 @@ def make_deliverer(
             artifacts_dir=artifacts_dir,
             course=course,
             hub_lease=hub_lease,
+            worker_name=worker_name,
             work_dir=work_dir,
             log=log,
         )
@@ -632,6 +651,7 @@ def make_deliverer(
         artifacts_dir=artifacts_dir,
         course=course,
         hub_lease=hub_lease,
+        worker_name=worker_name,
         background=background if kind == "thread" else False,
         log=log,
     )

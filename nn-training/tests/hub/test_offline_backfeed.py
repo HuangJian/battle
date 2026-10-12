@@ -292,3 +292,141 @@ def test_unreadable_pack_keeps_the_old_seal_behaviour(tmp_path: Path) -> None:
         assert doc.get("completed_sealed") is True, doc
     finally:
         srv.shutdown()
+
+
+# ────── ④ 归属身份：这一轮是谁推的（plan/offline-leg-ppo-attribution，2026-10-12） ──────
+#
+# 账本行原本**一个身份字段都没有** ⇒ dashboard 的 PPO 组看不到自主腿完成的轮（用户 2026-10-12
+# 报障：「kaggle 自主 worker 今天完成了 600 轮 ppo 任务，却不显示在节点贡献统计里」）。两个键分工
+# 不同，**别合成一个**：
+#   · `worker` = claim 身份（`{HOSTNAME}-{uuid8}`）—— 客户端自报优先，hub 侧 hold 镜像兜底；
+#   · `worker_name` = **可读名**（`kaggle-o`）—— 面板列名，只有客户端自报这一条来源。
+# 两处落点（`<run>/metrics.jsonl` 与课程账本）**都要带**：只改一处 = 面板照样空 / 复盘对不上。
+
+W1 = b'{"format":"nn-weights-json","params":{"w":1}}'
+
+
+def _rows_of(tmp_path: Path, run_id: str) -> tuple[dict, dict]:
+    """一轮补传的**两处落点**：① `<run>/metrics.jsonl`（人工复盘面）② 课程账本（dashboard 读面）。"""
+
+    def last(p: Path) -> dict:
+        text = p.read_text(encoding="utf-8")
+        parsed: list[dict] = [json.loads(x) for x in text.splitlines() if x.strip()]
+        rows = [r for r in parsed if r.get("event") == "offline_artifact"]
+        assert rows, f"{p} 里没有 offline_artifact 行"
+        return rows[-1]
+
+    return (
+        last(tmp_path / COURSE / "remote-jobs" / "offline" / run_id / "metrics.jsonl"),
+        last(tmp_path / COURSE / "training_log.jsonl"),
+    )
+
+
+def test_artifact_rows_carry_the_readable_name_in_both_places(tmp_path: Path) -> None:
+    """`worker_name` 逐字落**两处**；没有 hold 时 `worker` 键**整个缺席**（不是空串 —— 见下条）。"""
+    (tmp_path / COURSE).mkdir(parents=True, exist_ok=True)
+    base, _hub, srv = _boot(tmp_path)
+    try:
+        body = _round_body(3, W1, run_id="seg-n") | {"worker_name": "kaggle-o"}
+        st, doc = _post(base, OFFLINE_ARTIFACT_PATH, body)
+        assert st == 200 and doc.get("status") == "accepted", doc
+    finally:
+        srv.shutdown()
+    mirror, ledger = _rows_of(tmp_path, "seg-n")
+    for row in (mirror, ledger):
+        assert row["worker_name"] == "kaggle-o", row
+        assert row["it"] == 3, row
+        assert row.keys().isdisjoint({"worker"}), f"无 hold ⇒ claim 身份应当缺席：{row}"
+
+
+def test_self_reported_worker_wins_over_the_hold_mirror(tmp_path: Path) -> None:
+    """自报的 claim 身份**优先**：hold 兜底只补空缺、不覆盖（正常路径不依赖 hub 内存状态）。"""
+    (tmp_path / COURSE).mkdir(parents=True, exist_ok=True)
+    base, hub, srv = _boot(tmp_path)
+    try:
+        hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
+        body = _round_body(4, W1, run_id="seg-c") | {
+            "worker": "3908d414c3ca-217c4984",
+            "worker_name": "kaggle-o",
+        }
+        st, doc = _post(base, OFFLINE_ARTIFACT_PATH, body)
+        assert st == 200 and doc.get("status") == "accepted", doc
+    finally:
+        srv.shutdown()
+    mirror, ledger = _rows_of(tmp_path, "seg-c")
+    for row in (mirror, ledger):
+        assert row["worker"] == "3908d414c3ca-217c4984", row
+        assert row["worker_name"] == "kaggle-o", row
+
+
+def test_worker_falls_back_to_the_live_hold_but_never_fills_the_name(tmp_path: Path) -> None:
+    """两条反着钉：**有 hold** 时 claim 身份从镜像兜底；而可读名**绝不**拿它去填。
+
+    填了就是面板上多一个 `cloud-1` 假列名（那是进程身份，不是 `kaggle-o` 那族可读名）。
+    末段是「无 hold」的另一半：hold 清掉后重传，键又整个消失（不是留着上一次的值）。
+    """
+    (tmp_path / COURSE).mkdir(parents=True, exist_ok=True)
+    base, hub, srv = _boot(tmp_path)
+    try:
+        hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
+        body = _round_body(5, W1, run_id="seg-h") | {"worker_name": "kaggle-o"}
+        st, doc = _post(base, OFFLINE_ARTIFACT_PATH, body)
+        assert st == 200 and doc.get("status") == "accepted", doc
+        mirror, ledger = _rows_of(tmp_path, "seg-h")
+        for row in (mirror, ledger):
+            assert row["worker"] == "cloud-1", row
+            assert row["worker_name"] == "kaggle-o", row
+        # hold 清了（release）⇒ 下一轮不再有 claim 身份，只有自报的可读名
+        hub.note_release(COURSE)
+        body = _round_body(6, W1, run_id="seg-h") | {"worker_name": "kaggle-o"}
+        st, doc = _post(base, OFFLINE_ARTIFACT_PATH, body)
+        assert st == 200 and doc.get("status") == "accepted", doc
+        mirror, ledger = _rows_of(tmp_path, "seg-h")
+        for row in (mirror, ledger):
+            assert row.keys().isdisjoint({"worker"}), f"hold 已清 ⇒ 不得留下旧的 claim：{row}"
+            assert row["worker_name"] == "kaggle-o", row
+    finally:
+        srv.shutdown()
+
+
+def test_a_client_cannot_spoof_the_identity_through_row(tmp_path: Path) -> None:
+    """`row` 是**客户端给的字节**：它里面的 `worker` / `worker_name` 不得冒名顶替 hub 的认定。
+
+    钉 `store_offline` 新键的**位置**（排在 `**(row if …)` 之后）；写在前面的后果是任何持有 token
+    的腿都能把归属写到别人名下（面板是给人做决定的，赃数据比没数据更坏）。
+    """
+    (tmp_path / COURSE).mkdir(parents=True, exist_ok=True)
+    base, hub, srv = _boot(tmp_path)
+    try:
+        hub.note_hold(COURSE, worker_id="cloud-1", token="tok-1")
+        fp = hashlib.sha256(W1).hexdigest()
+        body = _round_body(7, W1, run_id="seg-s") | {
+            "worker_name": "kaggle-o",
+            "row": {"it": 7, "weights_fp": fp, "worker": "evil", "worker_name": "evil"},
+        }
+        st, doc = _post(base, OFFLINE_ARTIFACT_PATH, body)
+        assert st == 200 and doc.get("status") == "accepted", doc
+    finally:
+        srv.shutdown()
+    mirror, ledger = _rows_of(tmp_path, "seg-s")
+    for row in (mirror, ledger):
+        assert row["worker"] == "cloud-1", row
+        assert row["worker_name"] == "kaggle-o", row
+
+
+def test_non_string_identity_fields_are_treated_as_absent(tmp_path: Path) -> None:
+    """体是**远端来的字节**：`worker_name=123` / `worker={}` ⇒ 当没给（键缺席）。
+
+    一个 dict 落进账本会把 dashboard 的读面打红，而那不是本任务要修的东西 —— 入口就该挡住。
+    """
+    (tmp_path / COURSE).mkdir(parents=True, exist_ok=True)
+    base, _hub, srv = _boot(tmp_path)
+    try:
+        body = _round_body(8, W1, run_id="seg-t") | {"worker_name": 123, "worker": {}}
+        st, doc = _post(base, OFFLINE_ARTIFACT_PATH, body)
+        assert st == 200 and doc.get("status") == "accepted", doc
+    finally:
+        srv.shutdown()
+    mirror, ledger = _rows_of(tmp_path, "seg-t")
+    for row in (mirror, ledger):
+        assert row.keys().isdisjoint({"worker_name", "worker"}), row

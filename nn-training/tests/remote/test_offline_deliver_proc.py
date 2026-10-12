@@ -216,6 +216,38 @@ def test_process_mode_pushes_the_backlog_and_exits_cleanly(tmp_path: Path, hub: 
     assert any("补传" in m for m in st.logs), f"子进程的日志必须被逐行转发上来：{st.logs}"
 
 
+def test_worker_name_reaches_the_child_and_the_body(tmp_path: Path, hub: _HubStub) -> None:
+    """端到端（真子进程 + 真 HTTP）：可读名经 env 走进去，再落进**每一份**补传体。
+
+    ★ F2 的另一半，**不可省**：三种模式里 `process` 是缺省，而真正 POST 的是被拉起的子进程
+    —— 名字只算在父侧 / 只存在于构造参数里等于没算（父侧一个体都不发）。
+    """
+    st = _State(tmp_path, hub, worker_name="kaggle-o")
+    d = st.d
+    d.start()
+    try:
+        assert _wait_until(lambda: len(hub.artifact_bodies()) == 3), f"三轮回传没推完：{st.logs}"
+        assert all(b.get("worker_name") == "kaggle-o" for b in hub.artifact_bodies()), (
+            hub.artifact_bodies()
+        )
+    finally:
+        d.close(timeout=20.0)
+
+
+def test_no_worker_name_means_no_key_at_all(tmp_path: Path, hub: _HubStub) -> None:
+    """没给可读名 ⇒ 体里**不带**这个键（不是空串）：hub 把「带没带」当判据。"""
+    st = _State(tmp_path, hub)
+    d = st.d
+    d.start()
+    try:
+        assert _wait_until(lambda: len(hub.artifact_bodies()) == 3), f"三轮回传没推完：{st.logs}"
+        assert all(b.keys().isdisjoint({"worker_name"}) for b in hub.artifact_bodies()), (
+            hub.artifact_bodies()
+        )
+    finally:
+        d.close(timeout=20.0)
+
+
 def test_close_is_bounded_when_the_child_hangs_in_http(
     tmp_path: Path, hub: _HubStub, monkeypatch: pytest.MonkeyPatch
 ) -> None:

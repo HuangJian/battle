@@ -1794,6 +1794,10 @@ mode 翻 + `offline-dispatch.json` 落盘 → 放包 → claim 200 → 段末摘
 
 **读侧**（dashboard `server/contribution.ts`）：逐课账本**只读尾部** 4000 行；`job_completed` 按 `job_id`
 join `job_result_accepted` 取 worker；`job_rejected` 单列。**不裁剪账本**（保留期 = plan §9-P3 开放问题）。
+★ **2026-10-12 第三条腿**：自主盘（offline leg）领整段任务包、**不走 job 队列** ⇒ 它跑完的轮在账本里是
+`offline_artifact`（没有 `job_id`，hub 落盘时带 `worker`=claim 身份与 `worker_name`=可读名 `kaggle-o`）——
+收下它的读面改动与口径（1 条 = 1 个 job 等价单位）→ `docs/nn/console.md §37`（本节是 2026-10-02 的现场记录，
+不就地重写）。
 
 **回归**：`nn-training/tests/hub/test_worker_attribution.py` 5 例（承接带「那一刻」身份 / 早退 409 带身份 /
 `store_result` 失败带身份 / push 腿 `push:` 前缀 / `post_result` 请求头），走真 HTTP hub 面；

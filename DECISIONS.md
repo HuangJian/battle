@@ -5020,3 +5020,44 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 `worker/ppo/engine.py::apply_value_anchor_pull` · `biz/course_spec.py::value_anchor` ·
 `worker/scripts/init_spatial_leg.py::drop0` · `nn-training/curricula/x27-{obs,noleash}.jsonc` ·
 单测 `tests/worker/test_value_anchor{,_course}.py`（先红后绿 17+69+44 例）
+
+## §2026-10-12-goalnn-offline-leg-ppo-attribution（2026-10-12，自主腿跑完的轮计进 dashboard 的 PPO 组：两个身份字段 + 1 条 = 1 job 等价；plan/offline-leg-ppo-attribution）
+
+- **背景**（用户 2026-10-12 报障）：「kaggle 自主 worker 今天完成了 600 轮 ppo 任务，却不显示在
+  dashboard 的节点贡献统计里」。三处断链：① hub 落 `offline_artifact` 账本行时**不写任何身份**
+  （`store_offline.py` 的两处落点都没有）；② 自主腿的进程身份（`{HOSTNAME}-{uuid8}`）与队列腿的
+  **可读名**（`<env>-<link>`）是两套命名，hub 侧变不出可读名；③ dashboard 的 PPO 读面只认 `job_*`
+  三类事件，且 `if (typeof jid !== 'string') continue` 把没有 `job_id` 的行整行丢掉。
+  这是 `§2026-10-06-goalnn-offline-leg-sampling-exclusion` 那条例外的**前半句欠账**
+  （「offline worker 完成的轮算节点 PPO 贡献」——当时只实现了「不算采样贡献」那半）。
+- **决定**：D1 = 账本行落**两个**键，分工不同、**永不合并**：`worker` = claim 身份（客户端自报
+  优先，否则用**本课 hold 镜像** `store.hold_meta["worker_id"]` 兜底——补传天然发生在
+  claim→release 之间；这里**不判活性**：只回答「这轮是谁推的」，不回答「hold 还活着吗」）；
+  `worker_name` = **可读名**（`kaggle-o`），**只有客户端自报这一条来源**（拿 claim 身份去填 =
+  面板多一行 `3908d414c3ca-…` 假列名）。两者皆缺 ⇒ 键**整个缺席**（不写空串/null）⇒ 既有
+  `(未登记)` 口径。D2 = 可读名 = `worker_tag(offline=True, hub_url=…)` = `<env>-o`（本机 `local`，
+  **用户裁决 2026-10-12**，取代初稿的 `kaggle-c`）：自主腿走的**就是**离线链路，名字照链路写；
+  `kaggle-c` 是同一台盘的队列腿（cloudflared）的名字 ⇒ 面板上**两行**是故意的（链路不同，不并）。
+  D3 = 计算点住 `plan_handoff.open_run_context`（`worker_tag` 是 L3，而 `offline_deliver`(L1) /
+  `deliver_proc`(L2) 在它下面 ⇒ 只能由 L5 的装配点算，且**与 `run_loop` 同一份代码快照**）。
+  D4 = **单位口径：1 条 `offline_artifact` = 1 个 job 等价单位**（队列腿 1 job = 1 轮 it）；
+  与 `pool-history.readOfflineLegs`（采样侧剔除同一批 it）是一加一减，**不是**重复计数。
+  D5 = 历史 602 行**不修**（用户裁决：hold 已清 ⇒ 拿不回身份）：行原样留在 `(未登记)`，
+  不从 hub 日志人工回填、不回溯改写。
+- **备选与否决**：① dashboard 去读 hub 的 `/admin/offline` progress —— 否（progress 无身份，
+  且是第二事实源）；② 把 claim 身份直接换成 `worker_tag()` —— 否（撞名：同 env 的两台盘会并错行；
+  且破 `.worker-id` 的跨会话持久语义，离线盘续领靠它认 `mine`）；③ 只改 dashboard 把 602 行
+  显示成 `(未登记)` —— 否（用户要的是**归到 Kaggle 这台**，份额不归人无法定位「哪台在干活」）；
+  ④ 让引导侧（`offline_boot`）把 claim 身份经 argv/env 下传 —— 否（**版本偏斜**：`offline_boot`
+  每次会话从 GitHub raw 刷新，而 `run_loop`/`plan_handoff` 来自 `code.zip` 快照 ⇒ 新引导器撞旧
+  快照 = argparse 崩或静默退化）。
+- **后果**：新的 `offline_artifact` 行带 `worker`（claim 身份）+ `worker_name`（`kaggle-o`）；
+  dashboard 节点贡献统计的 PPO 组按 `machineOf` 归并后逐轮计入（`kaggle-o` 无冒号 ⇒ 恒等）；
+  采样组**一个字节不变**（角色隔离 WC-plan §4.1b）。
+—— 落点 → `hub/store_offline.py::_artifact_identity`（两处落点：`<run>/metrics.jsonl` 与课程账本；
+新键排在 `**(row if isinstance(row, dict) else {})` **之后** = 客户端不许冒名） ·
+`remote/plan_handoff.py::open_run_context`（算名字） · `remote/deliver_proc.py`（`make_deliverer` /
+`DelivererProcess` / `_degrade` / `_spawn` 的 `NN_WORKER_NAME` env） · `remote/deliver_worker.py`
+（子进程读 env） · `remote/offline_deliver.py`（body + `WORKER_NAME_ENV`） ·
+`dashboard/src/server/contribution.ts::readPpoAttribution` + `offlineIdentity`
+—— 全文 → `docs/nn/console.md §37`；计划 → `plan/offline-leg-ppo-attribution.plan.md`

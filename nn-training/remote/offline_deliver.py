@@ -136,6 +136,10 @@ class OfflineDeliverer:
         artifacts_dir: str | Path,
         course: str = "",
         hub_lease: str = "",
+        #: **可读名**（`kaggle-o`）= 面板上的列名（plan/offline-leg-ppo-attribution）。与 `hub_lease`
+        #: 不同，它**不参与任何判定**，只是「这轮是谁推的」的人读面；空 = 体里不带那个键。
+        #: 名字在**构造期**由调用方算（见 `WORKER_NAME_ENV`）：本模块在 `worker_tag` 所在层下面。
+        worker_name: str = "",
         timeout: float = HTTP_TIMEOUT_SEC,
         probe_ttl: float = PROBE_TTL_SEC,
         sync_cap: int = SYNC_CAP,
@@ -169,6 +173,7 @@ class OfflineDeliverer:
         #: 起点」的凭据（★P1-1）。**空值不是错误**：补传照落（镜像/归档/账本），只是 hub
         #: 不把这一轮当成「当前进度」——旧端/手动腿的旧行为因此逐字保留。
         self.hub_lease = str(hub_lease or "").strip()
+        self.worker_name = str(worker_name or "").strip()
         self.timeout = float(timeout)
         self.probe_ttl = float(probe_ttl)
         self.sync_cap = int(sync_cap)
@@ -874,6 +879,10 @@ class OfflineDeliverer:
             body["course"] = self.course
         if self.hub_lease:
             body["lease_token"] = self.hub_lease
+        # 可读名（`kaggle-o`）：dashboard 节点贡献统计的 PPO 组拿它当列名（hub 收下这一轮时
+        # 把它记进账本的 `offline_artifact` 行）。**缺省不带键**（与 `course`/`lease_token` 同纪律）。
+        if self.worker_name:
+            body["worker_name"] = self.worker_name
         raw = json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
         if len(raw) > OFFLINE_ARTIFACT_BODY_MAX:
             return self._reject_round(
@@ -1064,6 +1073,12 @@ DELIVERED_NAME = OFFLINE_DELIVERED_NAME
 #: 租约 token 传给**子进程**用的 env 名（★M1b/P1-1「送信端」）：与 `BATTLE_HUB_TOKEN` 同一条
 #: 规矩——**只走 env**，argv 会出现在 `/proc/<pid>/cmdline` 上（全机可读）。空 = 不带。
 HUB_LEASE_ENV = "BATTLE_HUB_LEASE"
+
+#: 可读 worker 名（`kaggle-o`）传给**子进程**用的 env 名：同上，**只走 env**（argv 全机可读）。
+#: 谁算的：装配点 `remote/plan_handoff.open_run_context`（`worker_tag(offline=True, hub_url=…)`）——
+#: 本模块与 `deliver_proc` 都在 `job_lifecycle`(L3) **下面**，自己算就是向上依赖。
+#: 空 = 不带（体里那个键整个缺席，不是空串：hub 把「带没带」当判据）。
+WORKER_NAME_ENV = "NN_WORKER_NAME"
 
 
 def _err_text(resp: bytes, max_chars: int = 300) -> str:

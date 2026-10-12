@@ -790,6 +790,54 @@ def test_make_deliverer_passes_the_course_through() -> None:
     assert d is not None and d.course == "c4"
 
 
+# ────────────── 归属身份：可读名（plan/offline-leg-ppo-attribution，2026-10-12） ──────────────
+#
+# dashboard 的 PPO 组按补传体里的身份列行；可读名（`kaggle-o`）**只有客户端自报**这一条
+# 来源（hub 侧只有 claim 身份 `{HOSTNAME}-{uuid8}`，变不出 env/link）。
+
+def test_deliverer_carries_the_readable_worker_name_when_it_has_one(tmp_path: Path) -> None:
+    """可读名随**每一轮**的体上报；没给时**连键都不带**（不是空串）。
+
+    与 `course` / `lease_token` 同一条纪律：读方把「带没带」当判据 —— 空串会把「没身份」
+    写成「有身份 = 空」，而 dashboard 那边就只能把两种情形混成一行。
+    """
+    seen: list[dict] = []
+
+    def opener(url: str, data: bytes, headers: dict, timeout: float) -> tuple[int, bytes]:
+        if url.endswith("/offline/artifact"):
+            seen.append(json.loads(data.decode("utf-8")))
+        return 200, b"{}"
+
+    root = _make_artifacts(tmp_path / "art")
+    named = _deliverer("http://hub", root, opener=opener, worker_name="kaggle-o")
+    assert named.sync() == 3
+    assert len(seen) == 3 and all(b.get("worker_name") == "kaggle-o" for b in seen)
+    seen.clear()
+    plain = _deliverer("http://hub", _make_artifacts(tmp_path / "art2"), opener=opener)
+    assert plain.sync() == 3
+    assert len(seen) == 3 and all(b.keys().isdisjoint({"worker_name"}) for b in seen)
+
+
+def test_make_deliverer_passes_the_worker_name_through() -> None:
+    """工厂两种模式都要透传（错过工厂 = 参数在构造链上静默丢掉，与没实现同效）。
+
+    `process` 那一跳（父→子的 env）另有两层证：拉起面的 env 在
+    `test_offline_deliver_async.py`，真子进程的体在 `test_offline_deliver_proc.py`。
+    """
+    from remote.deliver_proc import make_deliverer
+
+    for mode in ("thread", "sync"):
+        d = make_deliverer(
+            hub_url="http://hub",
+            hub_token="t",
+            run_id=RUN,
+            artifacts_dir="x",
+            worker_name="kaggle-o",
+            mode=mode,
+        )
+        assert d is not None and d.worker_name == "kaggle-o", mode
+
+
 def test_deliverer_carries_the_lease_token_only_when_it_has_one(tmp_path: Path) -> None:
     """★M1b / P1-1：体里带 `lease_token` ⇒ hub 才让这一轮**推进活动起点**。
 

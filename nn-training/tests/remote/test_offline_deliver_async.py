@@ -418,6 +418,55 @@ def test_process_mode_passes_the_token_by_env_never_by_argv(
     }
 
 
+def test_process_mode_passes_the_worker_name_by_env_never_by_argv(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """可读名只在 **env** 里（argv 在 `/proc/<pid>/cmdline` 上全机可读 —— 与 token 同一纪律）。
+
+    ★ F2 的正身一半：`process` 是**缺省**模式，而真正 POST 的是被拉起的子进程 ⇒ 名字不过这一跳
+    就等于没算（父侧一个体都不发）。端到端那一半在 `test_offline_deliver_proc.py`。
+    """
+    seen: dict = {}
+
+    def fake_popen(argv, *a, **kw):  # type: ignore[no-untyped-def]
+        seen["argv"] = [str(x) for x in argv]
+        seen["env"] = dict(kw.get("env") or {})
+        return _FakeProc()
+
+    monkeypatch.setattr(subprocess, "Popen", fake_popen)
+    d = DelivererProcess(
+        base_url="http://127.0.0.1:1",
+        token="tok",
+        run_id=RUN,
+        artifacts_dir=tmp_path / "art",
+        work_dir=tmp_path / "work",
+        worker_name="kaggle-o",
+        log=lambda _m: None,
+    )
+    d.start()
+    try:
+        assert seen, "没走到 Popen（进程模式没起来）"
+        assert seen["env"].get("NN_WORKER_NAME") == "kaggle-o", "可读名必须随环境进子进程"
+        assert all(a != "kaggle-o" for a in seen["argv"]), "可读名不该出现在 argv 里"
+    finally:
+        d.close(timeout=0.0)
+    # 没给名 ⇒ 连那个 env 都不该塞（空串会把「没身份」伪装成「有身份 = 空」）
+    seen.clear()
+    plain = DelivererProcess(
+        base_url="http://127.0.0.1:1",
+        token="tok",
+        run_id=RUN,
+        artifacts_dir=tmp_path / "art2",
+        work_dir=tmp_path / "work2",
+        log=lambda _m: None,
+    )
+    plain.start()
+    try:
+        assert seen and seen["env"].keys().isdisjoint({"NN_WORKER_NAME"})
+    finally:
+        plain.close(timeout=0.0)
+
+
 def test_make_deliverer_defaults_to_process_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

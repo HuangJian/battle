@@ -46,6 +46,7 @@ from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
     DRAIN_TICK_SEC,
     HUB_LEASE_ENV,
+    WORKER_NAME_ENV,
     OfflineDeliverer,
 )
 
@@ -193,6 +194,9 @@ def main(argv: list[str] | None = None) -> int:
     token = (os.environ.get("BATTLE_HUB_TOKEN") or "").strip()
     # 租约 token 同走 env（★M1b/P1-1；父侧 `deliver_proc.HUB_LEASE_ENV` 塞的）。
     lease = (os.environ.get(HUB_LEASE_ENV) or "").strip()
+    # 可读名同走 env（plan/offline-leg-ppo-attribution；父侧 `deliver_proc.WORKER_NAME_ENV` 塞的）。
+    # **本进程才是真正发体的那个**（`process` 是缺省模式）——名字只算在父侧就等于没算。
+    worker_name = (os.environ.get(WORKER_NAME_ENV) or "").strip()
     ctl = CtlReader(args.ctl, args.ctl_offset)
     status_path = Path(args.status)
     d = OfflineDeliverer(
@@ -202,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
         artifacts_dir=args.artifacts,
         course=args.course,
         hub_lease=lease,
+        worker_name=worker_name,
         # 子进程里没有「训练线程」可并行 —— 它就是那条腿，同步语义即正确语义。
         background=False,
         log=_log,

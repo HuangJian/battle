@@ -73,6 +73,44 @@ def _write_bytes(path: Path, data: bytes) -> None:
     atomic_write_bytes(path, data)
 
 
+def _token_of(raw: object) -> str:
+    """远端来的「身份字段」只认**非空 `str`**（其它类型一律当没给）。
+
+    体是远端来的字节：一个 dict/`int` 落进账本就会把 dashboard 的读面打红，而那不是本任务要修的
+    东西 —— 入口该挡住（与 `sanitize_run_id` 同一条思路：先验证，再落盘）。
+    """
+    return raw.strip() if isinstance(raw, str) else ""
+
+
+def _artifact_identity(body: dict, hold_meta: dict[str, Any] | None) -> dict[str, str]:
+    """这一轮补传的**归属身份**（两个键，分工不同，别合成一个）——plan/offline-leg-ppo-attribution。
+
+    为什么要它：账本行原本**一个身份字段都没有** ⇒ dashboard 的 PPO 组看不见自主腿完成的轮
+    （用户 2026-10-12 报障：「kaggle 自主 worker 完成了 600 轮 ppo 任务，却不显示在节点贡献统计里」）。
+
+      * `worker` = **claim 身份**（`{HOSTNAME}-{uuid8}`，`offline_boot.worker_id_of`）：客户端自报优先，
+        否则用**本课 hold 镜像**（`hold_meta`）兜底——补传天然发生在 claim→release 之间，那正是它的
+        窗口。这里**不判活性**：不回答「hold 还活着吗」（那是派发闸 `hold_blocked` 的活），
+        只回答「这轮是谁推的」；
+      * `worker_name` = **可读名**（`kaggle-o`，面板列名）：**只有客户端自报**这一条来源——
+        别拿 claim 身份去填（填了面板就多一行 `3908d414c3ca-…` 假列名）。
+
+    调用点：`store_offline_artifact` 的**两处落点**（`<run>/metrics.jsonl` 与课程账本）都要带；
+    在 metrics 行里还必须排在 `**row` **之后**（`row` 是客户端给的字节，位置就是「谁说了算」）。
+
+    两者都没有 ⇒ **该键整个缺席**（不写空串、不写 `null`、不编）：读方按既有 `(未登记)` 口径渲染。
+    老行不回填、不猜（hold 已清 ⇒ 历史轮拿不回身份）。
+    """
+    out: dict[str, str] = {}
+    name = _token_of(body.get("worker_name"))
+    if name:
+        out["worker_name"] = name
+    who = _token_of(body.get("worker")) or _token_of((hold_meta or {}).get("worker_id"))
+    if who:
+        out["worker"] = who
+    return out
+
+
 class OfflineRoundsMixin:
     """域混入：见模块头部。"""
 
@@ -84,6 +122,9 @@ class OfflineRoundsMixin:
     #: 构造身份：组合类 `__init__` 直接声明
     job_root: Path
     jsonl_path: Path
+    #: 本课程的 hold 镜像（`LeaseMixin` 声明、`_HubQueue._sync_hold` 推）：补传行的 claim 身份
+    #: 兜底来源（plan/offline-leg-ppo-attribution §3-A）——只读，**不写**（写者仍是 `_HubQueue`）。
+    hold_meta: dict[str, Any]
     #: 兄弟簇 `store_ledger` 的方法（补传产物要与 job 账本**分家**落自己那本，但仍走同一套追加原语）
     _append_ledger: Any
 
@@ -272,6 +313,9 @@ class OfflineRoundsMixin:
                             "weights_fp": got,
                             "opt_bytes": len(opt),
                             **(row if isinstance(row, dict) else {}),
+                            # ★ 归属身份排在 `**row` **之后**：那是**位置判据**（客户端给的字节不许
+                            #   冒名顶替 hub 的认定），别顺手挪到上面去。
+                            **_artifact_identity(body, self.hold_meta),
                             "ts": self._now(),
                         },
                         ensure_ascii=False,
@@ -284,6 +328,7 @@ class OfflineRoundsMixin:
                     "run_id": run_id,
                     "it": int(it),
                     "weights_fp": got,
+                    **_artifact_identity(body, self.hold_meta),
                     "ts": self._now(),
                 }
             )

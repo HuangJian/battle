@@ -86,6 +86,12 @@ ALLOWED_IMPORTS = {
     "remote.artifacts",
     "remote.bundle",
     "remote.deliver_proc",
+    # 2026-10-12（plan/offline-leg-ppo-attribution）：装配点要算**可读 worker 名**
+    # （`worker_tag(offline=True, hub_url=…)` = `kaggle-o`，dashboard 节点贡献统计 PPO 组的列名）。
+    # 它住 `remote.job_lifecycle`（**L3**）：只能在 L5 的这个装配点算 —— `deliver_proc`(L2) /
+    # `offline_deliver`(L1) 自己 import 它就是向上依赖（层号账本 `tests/test_remote_dag.py`）。
+    # 与 deliver_proc 同一条理由：加白名单前先量过方向。
+    "remote.job_lifecycle",
     "remote.offline_deliver",
     "remote.offline_eval",
     "worker.plan",

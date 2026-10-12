@@ -4,7 +4,9 @@
  *    · **采样**：`aggregateNodeHistory()`（跨流窗口聚合）⊕ `projectWindow`/`projectCourseBreakdown`；
  *    · **PPO**：逐课 `tmp/<课>/training_log.jsonl` 尾部事件——
  *      `job_completed`（训练侧写，无身份）**按 job_id join** `job_result_accepted`
- *      （hub 承接结果那一刻写，带 worker；plan W2）得归属；`job_rejected` 即「晚到·白算」。
+ *      （hub 承接结果那一刻写，带 worker；plan W2）得归属；`job_rejected` 即「晚到·白算」；
+ *      **自主腿**（`offline_artifact`，没有 job_id，hub 落盘时带身份）自成一条，
+ *      单位 = 1 条 1 个 job 等价单位（plan/offline-leg-ppo-attribution）。
  *      hub 的 `_JobStore.jsonl_path` 就是同一份课程账本 ⇒ 两行天然同册，不新建账本（N4）。
  *
  *  缓存纪律（§1.3）：**不新增第二个缓存层**——PPO 事件读用进程内 memo（仿 `aggMemo`：
@@ -89,6 +91,18 @@ function eventMs(ts: unknown): number | null {
   return typeof ts === 'number' && Number.isFinite(ts) ? ts * 1000 : null
 }
 
+/** 补传行（`offline_artifact`）的归属身份：**可读名**（`kaggle-o`）→ claim 身份 → `''`。
+ *
+ *  两个键分工不同（见 `nn-training/hub/store_offline._artifact_identity`）：`worker_name` 只有客户端
+ *  自报这一条来源（hub 侧只有 claim 身份，变不出 env/link），`worker` 是 claim 身份（hub 侧 hold
+ *  镜像兜底）。`''` 交给**既有**的 `(未登记)` 口径渲染（`WorkerContribution.tsx`），不另起占位符。 */
+function offlineIdentity(e: { worker_name?: unknown; worker?: unknown }): string {
+  for (const v of [e.worker_name, e.worker]) {
+    if (typeof v === 'string' && v) return v
+  }
+  return ''
+}
+
 /** 读 PPO 归属事件（memo：指纹相同复用；指纹变了距上次计算不足 `minMs` 也复用）。
  *
  *  ★ 2026-10-03（plan/dashboard-reload-perf R3）：**memo 判定在读取之前** —— 旧实现先
@@ -112,14 +126,33 @@ export function readPpoAttribution(nowMs: number = Date.now(), minMs = PPO_MEMO_
     const done: Array<{ jid: string; ms: number }> = []
     for (const line of lines) {
       if (!line.trim()) continue
-      let e: { event?: unknown; job_id?: unknown; worker?: unknown; ts?: unknown }
+      let e: {
+        event?: unknown
+        job_id?: unknown
+        worker?: unknown
+        worker_name?: unknown
+        ts?: unknown
+      }
       try {
         e = JSON.parse(line) as typeof e
       } catch {
         continue
       }
       const jid = e.job_id
-      if (typeof jid !== 'string') continue
+      if (typeof jid !== 'string') {
+        // ★ 自主腿（offline leg，plan/offline-leg-ppo-attribution）：`offline_artifact` 不是 job 队列的
+        //   一环（没有 `job_id`）⇒ 原先被这里整行丢掉，而它**就是**「自主盘跑完的那一轮」。
+        //   单位口径 = **1 条 = 1 个 job 等价单位**（队列腿 1 job = 1 轮 it）⇒ 两课 602 条 = 602。
+        //   ⚠ 与 `pool-history.readOfflineLegs`（采样侧把同一批 it 剔除）是**一加一减**，不是重复
+        //   计数：2026-10-06 的口径原意就是「offline 完成的轮算节点 PPO 贡献、不算 rollout/eval 贡献」。
+        if (e.event === 'offline_artifact') {
+          const ms = eventMs(e.ts)
+          if (ms != null) {
+            events.push({ course: f.course, worker: offlineIdentity(e), ms, kind: 'done' })
+          }
+        }
+        continue
+      }
       if (e.event === 'job_result_accepted') {
         accepted.set(jid, typeof e.worker === 'string' ? e.worker : '')
       } else if (e.event === 'job_completed') {

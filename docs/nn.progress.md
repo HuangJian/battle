@@ -1163,3 +1163,22 @@ DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`（⑤）
 判据（真机，用户跑）：命中轮 `other=` 降 ≥2s · `ppo=` 与本 job `解包=` 不劣化 >5% · `blob_cache` 无 payload sha。
 文本断言护栏抬 FORM 一格（1442→**1445**，+3 = 三条降级路径的**日志行**，同批 4 条字典成员判据已改写成
 `set(...) == {…}`）。全文 → `docs/nn/remote-transport.md` §84。
+
+**2026-10-12（七）**：自主腿（offline leg）跑完的轮计进 dashboard 的 PPO 组（plan/offline-leg-ppo-attribution；
+首轮评审 F1–F6 已并入，用户裁决 = 可读名用 `kaggle-o` + 历史**不修**）。
+用户报障「kaggle 自主 worker 今天完成了 600 轮 ppo 任务，却未显示在节点贡献统计里」⇒ 三处断链：
+① hub 落 `offline_artifact` 账本行时**不写任何身份**（两处落点都没有）；② 自主腿的进程身份
+（`{HOSTNAME}-{uuid8}`）与队列腿的**可读名**（`<env>-<link>`）是两套命名，hub 侧变不出可读名；
+③ dashboard 的 PPO 读面只认 `job_*`，且 `if (typeof jid !== 'string') continue` 把没有 `job_id` 的行整行丢掉。
+落地：账本行加**两个永不合并**的键（`worker` = claim 身份，客户端自报优先、本课 hold 镜像兜底；
+`worker_name` = 可读名，只有自报一条来源；两键皆缺 ⇒ **整个缺席** ⇒ 既有 `(未登记)`；新键排在
+`**(row if isinstance(row, dict) else {})` 展开**之后** = 客户端不许拿 `row` 冒名）；可读名 =
+`worker_tag(offline=True, …)` = **`kaggle-o`**（`kaggle-c` 是同一台盘的队列腿，面板上两行是故意的）；
+计算点住 `plan_handoff.open_run_context`（L3 的 `worker_tag` 不能在 L1/L2 里 import），再经
+`make_deliverer` → `DelivererProcess` → **子进程 env**（`NN_WORKER_NAME`；`process` 是缺省模式，真发体的
+是子进程，缺这一跳名字只活在父侧）→ body；dashboard 的 `readPpoAttribution` 在 `jid` 判据**之前**分流这条腿
+（**1 条 = 1 个 job 等价单位**，与采样侧 `readOfflineLegs` 的剔除一加一减，不是重复计数）。
+历史 602 行（两课各 301）**用户裁决不修**（hold 已清 ⇒ 拿不回身份），原样留在 `(未登记)`。
+DECISIONS → `DECISIONS.md §2026-10-12-goalnn-offline-leg-ppo-attribution`；全文 → `docs/nn/console.md` §37（§23 留指针）；
+门禁 → nn python gate **4261 passed / 10 skipped**（ruff + mypy + tests/+e2e/）· 根 `bun run check`
+**2559 pass / 3 skip / 0 fail** · dashboard typecheck 绿 + **1569 pass / 0 fail** · `bun run build` ✓。

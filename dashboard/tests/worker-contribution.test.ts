@@ -352,6 +352,87 @@ describe('server/contribution PPO 归属（job_completed join job_result_accepte
       expect(view.matrix.ppoRows.find((r) => r.worker === 'cloudA')!.cells[0]!.done).toBe(1)
     })
   })
+
+  it('自主腿（offline_artifact）计入 PPO 组：可读名 > claim 身份 > 「(未登记)」，不进采样组', () => {
+    // plan/offline-leg-ppo-attribution（2026-10-12 用户报障）：自主盘跑完的每一轮在 hub 账本里
+    // 是一条 `offline_artifact`（**没有 `job_id`** ⇒ 原先被 job 腿那个 `continue` 整行丢掉）。
+    // 单位口径 = **1 条 = 1 个 job 等价单位**（队列腿 1 job = 1 轮 it）。
+    const now = Date.now()
+    const ts = (now - 60_000) / 1000
+    withPoolRoot([], (root) => {
+      mkdirSync(join(root, 'k25'), { recursive: true })
+      writeFileSync(
+        join(root, 'k25', 'training_log.jsonl'),
+        [
+          // ① 可读名（hub 侧 `worker_name`）：面板列名就是它（`kaggle-o` = 离线链路那个可读名）
+          JSON.stringify({
+            event: 'offline_artifact',
+            run_id: 'r1',
+            it: 1,
+            worker: '3908d414c3ca-217c4984',
+            worker_name: 'kaggle-o',
+            ts,
+          }),
+          // ② 只有 claim 身份（旧端 / 手动补传）⇒ 显示 claim 身份；`:pid` 走 machineOf 归并
+          JSON.stringify({
+            event: 'offline_artifact',
+            run_id: 'r1',
+            it: 2,
+            worker: 'host-abc:1234',
+            ts: ts + 1,
+          }),
+          // ③ 两个都没有（历史 602 行就是这个形状）⇒ 空身份 ⇒「(未登记)」，但**不吞掉这一轮**
+          JSON.stringify({ event: 'offline_artifact', run_id: 'r1', it: 3, ts: ts + 2 }),
+          // ④ 与既有 job 腿混合：各自计数、归并生效（同名/同机器合成一行）
+          JSON.stringify({
+            event: 'job_result_accepted',
+            job_id: 'j1',
+            worker: 'kaggle-o',
+            ts: ts + 3,
+          }),
+          JSON.stringify({ event: 'job_completed', job_id: 'j1', ts: ts + 4 }),
+          JSON.stringify({
+            event: 'job_result_accepted',
+            job_id: 'j2',
+            worker: 'host-abc:9999',
+            ts: ts + 5,
+          }),
+          JSON.stringify({ event: 'job_completed', job_id: 'j2', ts: ts + 6 }),
+        ].join('\n') + '\n',
+        'utf8',
+      )
+      const agg = readPpoAttribution(now, 0)
+      const done = agg.events.filter((e) => e.kind === 'done')
+      expect(done).toHaveLength(5) // 3 条自主腿 + 2 条 job 腿
+      expect(done.filter((e) => e.worker === 'kaggle-o')).toHaveLength(2)
+      expect(done.filter((e) => e.worker === 'host-abc:1234')).toHaveLength(1)
+      expect(done.filter((e) => e.worker === '')).toHaveLength(1)
+      expect(new Set(done.map((e) => e.course))).toEqual(new Set(['k25']))
+
+      const stub: HistoryAggregate = {
+        byDay: new Map(),
+        byCourse: new Map(),
+        rolling: new Map(),
+        rollingTruncated: new Set(),
+        sources: [],
+        epochMs: 0,
+        lastContrib: new Map(),
+        latestRound: null,
+      }
+      const view = buildContributionView(stub, resolveWindow('today', now, 0))
+      expect(view.ppo.rows.find((r) => r.worker === 'kaggle-o')!.done).toBe(2)
+      // `host-abc:1234`（自主腿）与 `host-abc:9999`（job 腿）归并成同一行
+      expect(view.ppo.rows.find((r) => r.worker === 'host-abc')!.done).toBe(2)
+      expect(view.ppo.rows.find((r) => r.worker === '')!.done).toBe(1)
+      expect(view.ppo.totalDone).toBe(5)
+      expect(view.ppo.rows.find((r) => r.worker === '')!.share).toBeCloseTo(0.2)
+      // 课程矩阵：kaggle-o 在 k25 有 2 个完成
+      expect(view.matrix.ppoRows.find((r) => r.worker === 'kaggle-o')!.cells[0]!.done).toBe(2)
+      // 角色隔离（WC-plan §4.1b）：自主腿绝不进采样组
+      expect(view.sampling.rows.map((r) => r.id)).toEqual([])
+      expect(view.matrix.samplingRows.map((r) => r.id)).toEqual([])
+    })
+  })
 })
 
 // ────────────────────────── ④ SSR（full / compact / NodePills 接入） ──────────────────────────
