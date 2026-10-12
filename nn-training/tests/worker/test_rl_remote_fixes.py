@@ -110,6 +110,26 @@ def test_remote_forward_agg_carries_value_new_rms() -> None:
     assert _remote_forward_agg({"kl": 0.4})["value_new_rms"] == 0.0
 
 
+def test_remote_forward_agg_carries_policy_new_rms() -> None:
+    """policy 接线遥测（x27 冻结判决 §2026-10-13-goalnn-x27-frozen）：云 worker agg 的
+    `policy_new_rms` 必须透传——否则 policy 头冻没冻住在训练侧全盲，重演 x27
+    “表盘分叉、棋盘没分叉”还得事后翻 checkpoint。旧 worker 无此键 → 0.0 兜底
+    （value 同款 additive；精确零连击另有告警欠账）。"""
+    agg = {
+        "policy": -0.0023,
+        "value": 0.4604,
+        "entropy": 0.3479,
+        "kl": 0.00496,
+        "mean_ret": 0.0016,
+        "kickstart": 0.0,
+        "value_new_rms": 0.3015,
+        "policy_new_rms": 0.2714,
+    }
+    out = _remote_forward_agg(agg)
+    assert out["policy_new_rms"] == pytest.approx(0.2714)
+    assert _remote_forward_agg({"kl": 0.4})["policy_new_rms"] == 0.0
+
+
 def test_kickstart_warn_kind() -> None:
     """x2-start it31 误报回归：系数衰减到期后的 agg kickstart=0 是预期行为，
     不得判 warn（只在系数仍活跃却无遥测时告警 worker 未执行缰绳）。"""

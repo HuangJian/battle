@@ -683,6 +683,9 @@ def run_training_core(
             "mean_ret": float(agg.get("mean_ret", 0.0)),
             # value 门控遥测（x26-obs it90 诊断；同 kickstart additive）。
             "value_new_rms": float(agg.get("value_new_rms", 0.0) or 0.0),
+            # policy 接线遥测（x27 冻结判决 §2026-10-13-goalnn-x27-frozen：行为由 policy 解释；
+            # 同上 additive；旧 worker 无此键 → 0.0，精确零连击另有告警欠账）。
+            "policy_new_rms": float(agg.get("policy_new_rms", 0.0) or 0.0),
             # mb 对齐（2026-09-23）后 = **实际训练**的步数（≤池子，差尾部 n%mb）。
             # 池子总量另有 transitions_collected 一栏，不靠这里兼职。
             "steps": int(sum(c["obs"].shape[0] for c in chunks)),

@@ -1,0 +1,120 @@
+// 课程 x28-w08 —— 顶住税强剂量腿（wBlock 110→440，×4；x27 panel 终判的后继双腿之一）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 用户 2026-10-13：x27 冻结后双腿并行（D01+W08）。panel verdict（§85）：
+//   W08 顶住均长 17.3 vs 人 3.0（6×，cliff −0.971 全场最大）；W07 3.3×；W11 反向
+//   （机碰得少、顶得久）——"罚碰不如罚顶住"精确实证。wBlock 税形态正是顶住
+//   （(idle−stop)：想动没动；故意 STOP 不罚），覆盖无问题，分量不够。
+//
+// ── 单变量声明（相对 x27-obs 只动一键：wBlock 110.0→440.0）────────────────────
+//   其余逐键相同（含 value_anchor 0.001 继承，非变量；起点 x27-obs.it100 同源）。
+//   剂量取 ×4 而非 ×1.5 的理由（预注册）：wBlock 现 EV 仅 −0.52/局（0.64%，dense，
+//   Pzero=0.10，中位 8 tick——非 burst 式稀疏病）；×1.5 只动总 EV 0.3%（顺势疗法，
+//   null 了也分不清剂量不够还是方向死）。×4 → −2.09/局（2.6%，≈hurt 税 −3.01 量级）：
+//   此剂量下 null = 方向死（burst 税级强 null）；动了 = 税有效。precedent：
+//   x20adv-plus wHurt 25.3→77.5（×3.06）、wCorner ×2.5–5.7 都是单步大 bump。
+//   W08-episode-mean 形态税不动（无列；先补列再定价，另案）。
+//   EV 校准（x27-obs it100 日常 eval n=400）：killEV 45.80，block −0.52 → −2.09。
+//
+// ── 门（it40 硬门；panel 口径）────────────────────────────────────────────────
+//   it40 行：以本腿 it40 权重跑 160 对局 panel（命令见下），
+//   Δ 基准 = 本腿 it0-panel（= tmp/panel-x27obs-it100.jsonl，已存）。
+//   主：panel-W08（episode 均长）均值 ≤14.7（基线 17.302，−15%）；
+//   护栏：日常 kills ≥12.8（−15% 即掐通用于两腿；STOP 本身不罚，W01 崩了护栏会叫）；
+//   上报（不判门）：policy_new_rms（理由同 d01 腿）。
+//   主线 fail ⇒ **杀腿**＋控制台 halt（40 轮只烧一轮 panel + 2 分钟 resim，不是 300 轮）。
+//   80 轮封顶（iters 80），终点 it80 panel 全表终判，不考 G0。
+//   panel 命令：bun tmp/gap2-panel-v11.ts nn <本腿it40权重> tmp/gap2-pairs.json tmp/panel-x28-w08-it40.jsonl
+//   对照：bun tmp/gap2-compare.ts tmp/probe-human-v11.jsonl tmp/panel-x28-w08-it40.jsonl x28-w08-it40
+//
+// ── 盯盘（§15.4＋ distortion 护栏）────────────────────────────────────────────
+//   每 update 必读 kl/entropy/value/gnorm ＋ value_new_rms/policy_new_rms；
+//   强剂量 distortion 护栏：kills −15% 即掐、KL 早飘看 batch（已冻，不动）；
+//   wBlock 只罚想动没动，故意 STOP/开火/拾取全不连带，行为税只此一家加量。
+//
+// ── 训练设置（x27-obs 逐键相同，只换下述键）───────────────────────────────────
+//   batch 24576。`workers` 机器侧死键保留。
+//   新家族流：`paired_rotate_seed` **20261022**（与 x28-d01 同流，rollout 可比）。
+//   起点 it0 = x27-obs.it100（sha16 `5e6eac2c51c75aad`，165 宽同构，直装）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c20-lives1`），课程**不重复** `stages` 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj + backup 新目录 + opt fresh，不碰 x27 账本。
+{
+  "version": 5,
+  "name": "x28-w08",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 440.0,
+      "wNearSq": 28.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：x27-obs.it100（panel 峰；sha 见头注）──
+  "bc": "nn-training/weights/x27-obs/x27-obs.it100.20261013-002001.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关；it40 门熔断由控制台挂。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（继承 x27-obs，非变量；0.0 = 关）。
+  "value_anchor": 0.001,
+
+  "iters": 80,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "seed_rotate": 150,
+  // 新家族流（见头注；与 x28-d01 同流）。
+  "paired_rotate_seed": 20261022,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/x28-w08/weights.json",
+  "traj": "tmp/x28-w08",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/x28-w08",
+  "backup_prefix": "x28-w08",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

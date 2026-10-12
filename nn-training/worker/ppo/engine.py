@@ -202,6 +202,32 @@ def apply_value_anchor_pull(model: Any, rho: float) -> float:
     return rms
 
 
+def policy_new_rms_of(model: Any) -> float:
+    """policy 双头（move/fire）在新列上的 rms（x27 冻结判决：行为由 policy 解释）。
+
+    机制：x27-obs it100 panel 显示 value 新列 0→0.073（有绳）/ 0→0.305（没绳）天翻地覆、
+    而 policy 双头新列只漂 +1.5–4%（旧列同量级）→ 行为零分叉由 policy 冻结解释，
+    `value_new_rms` 对行为无预测力。复用 `value_anchor_slices()` 的列片
+    （三头吃同一份 pf，新列是输入属性不是 value 属性）；**纯只读、无 ρ 参数**
+    （policy 同拴在 §2026-10-12-goalnn-value-gating 已否决：2–4x 良性、第二变量）。
+    缺片/缺头返回 0.0（legacy/旧 worker 恒 0——⚠ 精确 0.0 连击 = 旧 worker 味，
+    见 §2026-10-13-goalnn-x27-frozen D3 的精确零告警欠账）。`no_grad` 下只读权重。
+    """
+    slices: list[tuple[int, int]] = (
+        model.value_anchor_slices() if hasattr(model, "value_anchor_slices") else []
+    )
+    heads = [
+        h
+        for h in (getattr(model, "move_head", None), getattr(model, "fire_head", None))
+        if h is not None and hasattr(h, "weight")
+    ]
+    if not slices or not heads:
+        return 0.0
+    with torch.no_grad():
+        parts = [h.weight[:, lo:hi].reshape(-1) for h in heads for lo, hi in slices]
+        return float(torch.cat(parts).pow(2).mean().sqrt()) if parts else 0.0
+
+
 def ppo_update(
     model,
     opt,
@@ -483,6 +509,10 @@ def ppo_update(
             # advantage 污染。ρ>0 才收缩（=0 时只读数：对照腿数学恒等＋监控不盲）；
             # 位置在 clip+step 之后 ⇒ 收缩不吃 clip 配额、不进 Adam 矩。
             value_new_rms = apply_value_anchor_pull(model, value_anchor)
+            # policy 接线遥测（x27 冻结判决）：行为由 policy 双头解释——读数无条件
+            # （ρ 无关；policy 同拴已否决）。进同一份 sync_scalars 字典 ⇒ 不新增
+            # 设备同步（单测 test_ppo_scalar_sync 钉住"一次同步"+显式键集）。
+            policy_new_rms = policy_new_rms_of(model)
 
             with torch.no_grad():
                 # 一次同步取全部 8 个标量。原实现逐项取 8 次 = CUDA 上 8 次全设备
@@ -502,6 +532,9 @@ def ppo_update(
                             "gnorm": gn,
                             "value_new_rms": torch.as_tensor(
                                 value_new_rms, dtype=torch.float32, device=device
+                            ),
+                            "policy_new_rms": torch.as_tensor(
+                                policy_new_rms, dtype=torch.float32, device=device
                             ),
                         }
                     )
@@ -671,6 +704,7 @@ def ppo_update(
             "gnorm": 0.0,
             "mean_ret": 0.0,
             "value_new_rms": 0.0,
+            "policy_new_rms": 0.0,
         }
     agg = aggregate_stats(stats, list(stats[0].keys()))
     return agg

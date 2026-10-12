@@ -7,9 +7,10 @@
   1. **数值逐位不变**：`sync_scalars` 每个返回值 == 逐项 `float(t.item())`，
      含 float64 / 混合 dtype（栈会被提升到公共 dtype，不得截断）；
   2. **真的只有一次同步**：`torch.Tensor.tolist` 调用次数 == 1（这是本次改动的全部意义）；
-  3. **三后端 stats 键集不变**：per-tick 10 键、intent 6 键、goal 7 键，且 intent/goal
+  3. **三后端 stats 键集不变**：per-tick 11 键、intent 6 键、goal 7 键，且 intent/goal
      的 warmup 短路仍是精确 0.0（原先短路成 Python float，现改为 0 维零张量）。
-     per-tick 第 10 键 `value_new_rms`（x26-obs it90 诊断的门控遥测）：加键是故意的，
+     per-tick 第 10 键 `value_new_rms`（x26-obs it90 诊断的门控遥测）与第 11 键
+     `policy_new_rms`（x27 冻结判决的接线遥测）：加键是故意的，
      静默加键才是要防的——本测试就是那道门。
 """
 
@@ -43,6 +44,8 @@ ENGINE_KEYS = {
     "gnorm",
     # x26-obs it90 诊断的门控遥测（`apply_value_anchor_pull` 的返回值；ρ=0 时恒读数）。
     "value_new_rms",
+    # x27 冻结判决的接线遥测（`policy_new_rms_of` 的返回值；纯只读、无 ρ 参数）。
+    "policy_new_rms",
 }
 
 

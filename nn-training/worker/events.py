@@ -228,6 +228,8 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
             "demo_bc": (agg.get("demo_bc") if agg else None),
             # value 门控遥测（x26-obs it90 诊断；同上 additive）。
             "value_new_rms": (agg.get("value_new_rms") if agg else None),
+            # policy 接线遥测（x27 冻结判决 §2026-10-13-goalnn-x27-frozen；同上 additive）。
+            "policy_new_rms": (agg.get("policy_new_rms") if agg else None),
             "lr": args.lr,
             # 动态采集（plan/dynamic-rollout-volume §2.4.3）：本轮配额与已结算量；
             # 未开该模式的课程为 None（additive，旧行无此键）。
