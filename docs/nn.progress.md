@@ -27,7 +27,7 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 文档 | 覆盖 | 节数 |
 |---|---|---|
 | [`docs/nn/legacy.md`](nn/legacy.md) | **早期谱系归档**（2026-08-18 ~ 08-29）：v1/v2 student、P1.5 蒸馏、BC 热启动、无道具纪元、第一代 RL 流水线 —— 已被 goal-space 取代，只作史实与教训 | 22 |
-| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / **在飞活的备份副本**（§68） / **自主 worker 收工即停（§70）** / **补传腿忙等修复 + 独立进程（§69）** / **一拖一闸两次自锁（§71）** / **派发模型重构：课程无模式 + 接管 + BC 独占（§72）** / **claim 的进度锚以响应时刻为准（§73）** / **补传腿 `_append` 自锁死：重启重述重入不可重入锁（§74）** / **kind=iter 并发 `workers: 0` = 节点自定 + 课程侧 `workers` 死键（§76）** / **重启不重放已消费的 final：判据要与可判定的证据对齐（§77）** / **采样节点自动注册：hub 成为 `rl-config.json` 的第二写者（§78）** / **集群代码快照：`code.zip` / `ts_code.zip` 打包时机上移到会话启动 + 控制台包过期判据换锚 + 组件卡 sha 徽章 + 逃生开关（§79）** / **aistudio 传输硬化：预取自停 / 让路自停 / 持久缓存根 + 控制面连接池与 6s 预算 + 批量 blob（§80）** / **回传失败时备份那一份线上体（§81）** / **停腿课复活：ABORTED 可复活 + 复活卫生 + 拒收作废 + `/admin/cancel-job`（§82）** / **离线腿起点 checkpoint 的 `it` 错位：起点单源化 + 播种先于补传腿 + 补传 409 冲突闸（§83）** | 83 |
+| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / **在飞活的备份副本**（§68） / **自主 worker 收工即停（§70）** / **补传腿忙等修复 + 独立进程（§69）** / **一拖一闸两次自锁（§71）** / **派发模型重构：课程无模式 + 接管 + BC 独占（§72）** / **claim 的进度锚以响应时刻为准（§73）** / **补传腿 `_append` 自锁死：重启重述重入不可重入锁（§74）** / **kind=iter 并发 `workers: 0` = 节点自定 + 课程侧 `workers` 死键（§76）** / **重启不重放已消费的 final：判据要与可判定的证据对齐（§77）** / **采样节点自动注册：hub 成为 `rl-config.json` 的第二写者（§78）** / **集群代码快照：`code.zip` / `ts_code.zip` 打包时机上移到会话启动 + 控制台包过期判据换锚 + 组件卡 sha 徽章 + 逃生开关（§79）** / **aistudio 传输硬化：预取自停 / 让路自停 / 持久缓存根 + 控制面连接池与 6s 预算 + 批量 blob（§80）** / **回传失败时备份那一份线上体（§81）** / **停腿课复活：ABORTED 可复活 + 复活卫生 + 拒收作废 + `/admin/cancel-job`（§82）** / **离线腿起点 checkpoint 的 `it` 错位：起点单源化 + 播种先于补传腿 + 补传 409 冲突闸（§83）** / **预取顺手解包：解包搬出关键路径（staged 交接 + 单点搬入）+ 删 payload 级 blob 死写 + 准备段计时补齐（§84）** | 84 |
 | [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart · **节点门的 bootId 一致性**（§26）· **分关采样平衡（§30）** · **决策周期 K 通道（§31）** | 26 |
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
 | [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** · **六包重组（刀 1–6）** · **门禁 fail-fast**（§63） · **测试不得碰在跑的控制台**（§64） · **测试不得写生产状态（门禁意图 / 循环控制 / EvalBoard / 权重归档）**（§65） · **it0 基线 eval「从未派出」缺口：收工自报 + 缺口三分 + 基线自带门**（§66） · **eval 腿任务缺课程血缘：兄弟课程评估局在节点 resultCache 互串**（§67） · **pytest 私有提交 642MB→159MB：BLAS 内线程封顶**（§68） · **scratch 换根档由速度探针决定：通用用例钉死回退档**（§69） · **锁重入守卫扩容：方法内/闭包锁 + 组合组（hub store 混入）+ 全仓审计**（§70） · **测试债清理：口径先于数字（`text_asserts` / 退役单点 / 三条护栏）**（§71） · **pytest 最慢用例第二轮：第三条 HTTP 缝 + 三处全仓扫描的口径内提速**（§72） · **metrics v11：热线族 2 列（idx74–75）+ 探针杀列 + 跨链 parity 判据改判**（§73） · **两条满载 flake 的根因：hub 备份腿 TOCTOU + instance_lock 写入窗口**（§74） · **锁收敛（四处→唯一原语）+ 派发器一拍一次自有状态快照**（§75） · **publish/serve 预算 flake 根因：`collision_rows` 把共享 basetemp 当兄弟面扫**（§76） | 43 |
@@ -1147,3 +1147,19 @@ DECISIONS → `DECISIONS.md §2026-10-11-goalnn-rollout-topup-fastpath`（⑤）
 ⚠ 已知边界（明写未做）：同 job 重领会清场重建 job 目录 ⇒ 备份是**恢复窗口**不是档案；`drain()` 超时那一档
 不写备份；云机/离线腿没有把 `backup/` 带回本机的通道。
 全文 → `docs/nn/remote-transport.md` §81。
+
+**2026-10-12（六）**：预取**顺手解包** —— 把「解包」从关键路径搬到上一轮的 PPO 窗口上（plan/prefetch-stage-unpack）。
+病根：软持有预取（§80 前身）只把**下载**叠到上一轮，**解包**仍在关键路径（1.8–4.3s/轮、首包 11.8s；
+换算随 bytes/shard 走：2.48MB/68 shard=26ms、2.70MB/294 shard=11ms）。三刀：**P0** 准备段计时补齐
+（课程/建模型/载权重+opt restore/kickstart ref/cache prune；⚠「装载」早就有，旧稿当缺口是错的）·
+**P2** 删预取对 payload 的 blob_cache **死写**（全仓零读点；每 job 少写 2.5–2.7MB 到最慢那块盘）·
+**P1** `store(unpack=True)` 解成 `shards/`（`shards.tmp → shards` 原子改名、删掉 zip），`take()` **只交路径**
+（`staged_dir` 形状并列旧 `payload_zip`），**搬入唯一一次**在 `_ensure_payload`。
+三条设计要点全部来自评审：① 搬入点必须晚于 `run_job` 的 `_result.json` 复用检查（提前搬 = 删掉「算完只差
+重传」的缓存、静默重烧一轮 PPO），孤儿由 `release_handoff()` + `prune()` 清残壳兜；② `has()`/`take()`
+**形状分派**（只认 `shards/` 会把 `--prefetch-unpack 0` 打成 0 命中）；③ **P3⁽³⁾ 不做** —— `_CACHE_DIRTY`
+被 `_cache_produced_weights`（每轮真写新 sha）废掉，零收益，先量 `cache prune` 再说。
+旋钮 `--prefetch-unpack N`（缺省 1，0=真旧行为）+ staged 单份上界/总预算 256MiB（与 zip 的 64MB 账分开）。
+判据（真机，用户跑）：命中轮 `other=` 降 ≥2s · `ppo=` 与本 job `解包=` 不劣化 >5% · `blob_cache` 无 payload sha。
+文本断言护栏抬 FORM 一格（1442→**1445**，+3 = 三条降级路径的**日志行**，同批 4 条字典成员判据已改写成
+`set(...) == {…}`）。全文 → `docs/nn/remote-transport.md` §84。

@@ -16,6 +16,7 @@
 | 2026-10-10 新增 `tests/remote/test_rollout_node_notebook.py`（抬 SOURCE 一格） | 1435 条 | **1091 条** |
 | 2026-10-11 aistudio 传输硬化新增 5 个用例文件（抬 FORM 一格，+6） | **1441 条** | 1091 条 |
 | 2026-10-11 探针上界（`plan/rollout-topup-fastpath.plan.md` §3.1；抬 FORM 一格，+1） | **1442 条** | 1091 条 |
+| 2026-10-12 预取解包（`plan/prefetch-stage-unpack.plan.md`；抬 FORM 一格，+3） | **1445 条** | 1091 条 |
 
 降 53 条全是本次删掉的用例（T1 的 6 条账本门端到端、T3 的 2 条 legacy 重复点）带走的。
 
@@ -42,8 +43,16 @@ cell 文本与 `remote/rollout_node.py` 的源码 —— 「cell 能不能 `comp
 **2026-10-11 抬 FORM 一格的账**（`plan/rollout-topup-fastpath.plan.md` §3.1 探针上界；+1，SOURCE 未动）：
 新增两个用例的四条判据已全部改成**行为断言**（墙钟上界、候选盘上有没有 `nn-rollout-*`、产出在不在
 `job_dir`），只剩**一条**：探针超界时那句「WARN 探针超界 … + 轮报 `probe_probe` 读数」。它只能看文本
-——这一行的**交付物就是日志本身**（操作员的现场读数：这一轮到底探没探、是不是在等盘；`LogBundle`
-只往日志出，没有结构化出口 ⇒ 无法用返回值/状态表达）。同族先例 = 上面 aistudio 那 6 条。
+——这一行的**交付物就是日志本身**（操作员的现场读数：这一轮到底探没探、是不是在等盘；`LogBundle` 只往日志出，没有结构化出口 ⇒ 无法用返回值/状态表达）。同族先例 = 上面 aistudio 那 6 条。
+
+**2026-10-12 抬 FORM 一格的账**（`plan/prefetch-stage-unpack.plan.md`；+3，SOURCE 未动）：
+本 plan 新增三类**降级路径**（`store(unpack=True)` 解包失败、解包产物超单份上界、staged 暂存不在位
+⇒ 回退关键下载），plan §9「不静默」要求这三条各打一行 —— 那一行**就是**交付物（操作员唯一的现场
+读数：这一轮为什么没吃到预取）。行为面在同族用例里另有用例钉住（`staged is False`、`payload.zip`
+回到盘上、`take()` 仍能命中、照旧走关键下载），但「有没有响」只有日志面能判。
+⚠ 同一批新用例里**能改的都改了**：4 条字典成员判据（`"staged_dir" in got` 族）已换成
+`set(got) == {…}` / `get(...) is None` / 真值判据（零文本命中），所以这一格是 3 而不是 7。
+
 """
 
 from __future__ import annotations
@@ -55,8 +64,9 @@ from tests.helpers import text_asserts as TA
 ROOT = Path(__file__).resolve().parents[1]
 
 #: 形态口径基线（2026-10-09 T1/T3/T2 删除后实测 = 1435；清理前 = 1488；
-#: 2026-10-11 aistudio 传输硬化抬到 1441；同日探针上界抬到 1442 —— 两笔理由都见模块头）。
-BASELINE_FORM = 1442
+#: 2026-10-11 aistudio 传输硬化抬到 1441；同日探针上界抬到 1442；2026-10-12 预取解包抬到 1445
+#: —— 三笔理由都见模块头）。
+BASELINE_FORM = 1445
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091，理由见模块头）。
 BASELINE_SRC = 1091
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。

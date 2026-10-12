@@ -121,7 +121,10 @@ def test_job_dir_keep_default_is_wired_to_the_constant() -> None:
     assert sig.parameters["keep"].default == job_fs_mod.JOB_DIR_KEEP == 2
     src = (ROOT / "remote" / "download.py").read_text(encoding="utf-8")
     # 2026-09-25（并入 origin）后多了一个 `bundle=`：清场的日志行攒进 prep bundle（日志节食）。
-    assert src.count("prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log, bundle=bundle)") == 1
+    # 2026-10-12（plan/prefetch-stage-unpack）后**两个**调用点，都在本文件、同一行文本：
+    # 字节路径的清场重建、与 staged 搬入（预取已解好、只 rename）——两条都不许少（漏一条
+    # = 那条路径上旧 job 目录不轮转；JOB_DIR_KEEP 的语义在两条路上都是同一个）。
+    assert src.count("prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log, bundle=bundle)") == 2
     worker_src = WORKER_FILE.read_text(encoding="utf-8")
     assert "prune_job_dirs(" not in worker_src, (
         "worker.py 里又冒出 prune_job_dirs 调用点了——清场归物料落地（remote/download.py）"

@@ -103,6 +103,41 @@ def test_white_bytes_is_downloaded_minus_taken_plus_preempt(tmp_path: Path) -> N
     assert s.stats()["white_bytes"] == len(_PAY) + 256 * 1024
 
 
+def _packed(root: Path, tag: str = "a") -> bytes:
+    """造一份**真**归档（tar.xz）——staged 形状的用例必须真解包（随机字节只会走回退）。"""
+    from common.payload import pack_payload
+
+    src = root / f"src_{tag}"
+    d = src / "w0"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / "manifest.json").write_text(f'{{"tag": "{tag}"}}', encoding="utf-8")
+    out = src / "payload.tar.xz"
+    pack_payload([str(d)], {"it": 1}, out)
+    return out.read_bytes()
+
+
+def test_a_staged_hit_counts_the_same_in_the_white_bytes_ledger(tmp_path: Path) -> None:
+    """staged 命中与 zip 命中在自停账上**等价**（plan §2.3：白解包必然伴随白传 ⇒ 口径不改）。
+
+    `taken_bytes` 记的是**压缩字节**（下过网的那份），所以白传 = 没被 take 的那几份——
+    解没解包不影响这三个读数（`prefetch_worth_it` 仍只读它们）。
+    """
+    s = PrefetchStore(tmp_path)
+    p = _packed(tmp_path, "w")
+    s.store("j1", p, _summary(p, "j1"), unpack=True)
+    s.store("j2", p, _summary(p, "j2"), unpack=True)
+    assert s.stats()["staged"] == 2
+    assert s.stats()["white_bytes"] == 2 * len(p), "两份都没被 take ⇒ 全白传（解包不算另一码账）"
+
+    got = s.take("j1")
+    assert got is not None and Path(str(got.get("staged_dir") or "")).is_dir()
+    assert s.stats()["hits"] == 1
+    assert s.stats()["white_bytes"] == len(p)
+    assert prefetch_worth_it(
+        prefetched=2, taken=1, white_bytes=len(p)
+    ), "被 take 过的那份不该再算白传"
+
+
 def test_take_of_an_unknown_jid_does_not_inflate_white_bytes(tmp_path: Path) -> None:
     """**核心防误杀**：「claim 到的 job ≠ 预取候选」是正常事件，不该被算成白传。
 

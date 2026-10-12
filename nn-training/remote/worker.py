@@ -292,6 +292,7 @@ from remote.job_lifecycle import (
 from remote.job_round import run_one_round
 from remote.prefetch import (
     PREFETCH_DEPTH_DEFAULT,
+    PREFETCH_UNPACK_DEFAULT,
     PrefetchStore,
 )
 from remote.result_upload import (
@@ -513,11 +514,18 @@ def run_job(
     landed = _ensure_payload(
         base_url, token, jid, manifest, work_dir, preloaded=preloaded, log=log, bundle=prep_b
     )
-    raw = landed.payload_bytes
     job_dir = landed.job_dir
     shard_dirs = landed.shard_dirs
     payload_dl_sec, unpack_sec = landed.dl_sec, landed.unpack_sec
-    prep_b.add("解包", f"{unpack_sec:.1f}s → {len(shard_dirs)} shard（CPU，不含传输）")
+    payload_nbytes = landed.payload_nbytes
+    # 解包这半场的读数照打（别写 0.0——那是诊断读数）；staged 时注明它**不在关键路径上**，
+    # 关键路径的诚实性由 wall 保证（`other = wall − in − out − ppo`，解包已不在 wall 里）。
+    prep_b.add(
+        "解包",
+        f"{unpack_sec:.1f}s（预取时已完成，不在关键路径）→ {len(shard_dirs)} shard"
+        if landed.staged
+        else f"{unpack_sec:.1f}s → {len(shard_dirs)} shard（CPU，不含传输）",
+    )
     # `code_cache_dir` 是 run_job 的**入参**（共享根提示），落地后换成 per-sha 目录。
     code = _ensure_code(
         base_url,
@@ -752,7 +760,7 @@ def run_job(
             "smoke": True,
         }
         result["wire"] = _wire_block(
-            payload_bytes=len(raw),
+            payload_bytes=payload_nbytes,
             payload_dl_sec=payload_dl_sec,
             unpack_sec=unpack_sec,
         )
@@ -777,7 +785,7 @@ def run_job(
             manifest=manifest,
             iter_info=iter_info,
             blob_root=blob_root,
-            payload_bytes=len(raw),
+            payload_bytes=payload_nbytes,
             payload_dl_sec=payload_dl_sec,
             unpack_sec=unpack_sec,
             ts_code_bytes=ts_code_bytes,
@@ -867,6 +875,9 @@ def worker_loop(
     role: str = ROLE_ONLINE,
     # 软持有预取深度（P2，2026-09-22）：0 = 关预取（只调度不预取，§7 的回退档）
     prefetch_depth: int = PREFETCH_DEPTH_DEFAULT,
+    # 预取解包份数（plan/prefetch-stage-unpack §2.3）：peek 前 N 份顺手解好；0 = 只存字节
+    # （= 改造前的旧行为，回退档）。与 `prefetch_depth` 独立：深度管「预取几份」，这个管「解几份」。
+    prefetch_unpack: int = PREFETCH_UNPACK_DEFAULT,
     # bulk 让路策略（plan/transfer-residual W1）：auto（缺省）/ always（旧语义逃生口）/ never。
     bulk_yield: str = "auto",
     # 结果回传模式（P2.5，2026-09-22）：async = 回传**不占关键路径**（缺省）；sync = 旧行为
@@ -947,6 +958,9 @@ def worker_loop(
                 part_dir.mkdir(parents=True, exist_ok=True)
             if prefetch_depth > 0 and hi not in pf_stores:
                 pf_stores[hi] = PrefetchStore(part_dir, log=log)
+                # 建 store 时先扫一遍：清上一会话遗留的残壳 / 崩溃孤儿（`prefetch/` 在
+                # `prune_job_dirs` 豁免名单里，否则它们永远没人收；plan §2.3）。
+                pf_stores[hi].prune()
             pf_store = pf_stores.get(hi)
             try:
                 _polls_since_log += 1
@@ -1027,6 +1041,7 @@ def worker_loop(
                 # 否则带标 worker 会在归属闸（`_JobStore._claim_locked`）上自锁。
                 role=role,
                 prefetch_depth=prefetch_depth,
+                prefetch_unpack=prefetch_unpack,
                 uploader=uploader,
                 # ★ 注入点：宿主在**调用点**读 `run_job` 这个值 ⇒ patch `remote.worker.run_job`
                 #   仍生效（引用即接缝）；漏传 = 调用当场 TypeError，无兜底。
@@ -1142,6 +1157,14 @@ def main() -> None:
         default=PREFETCH_DEPTH_DEFAULT,
         help=f"软持有预取深度（0=关；缺省 {PREFETCH_DEPTH_DEFAULT}）",
     )
+    # 预取解包（plan/prefetch-stage-unpack §2.3）：前 N 份在预取线程里解好（把解包从关键路径
+    # 搬到上一轮的 PPO 窗口上）；0 = 只存字节（= 改造前的旧行为，回退档）。
+    ap.add_argument(
+        "--prefetch-unpack",
+        type=int,
+        default=PREFETCH_UNPACK_DEFAULT,
+        help=f"预取顺手解包前 N 份（0=只存字节/旧行为；缺省 {PREFETCH_UNPACK_DEFAULT}）",
+    )
     # bulk 让路策略（plan/transfer-residual W1）：auto=条件让路（缺省）；always=旧语义（逃生口）；
     # never=永不让路（极端臂，量「让路到底买到了什么」）。
     ap.add_argument(
@@ -1206,6 +1229,7 @@ def main() -> None:
             hub_urls=hub_urls,
             role=ROLE_OFFLINE if args.offline else ROLE_ONLINE,
             prefetch_depth=args.prefetch_depth,
+            prefetch_unpack=args.prefetch_unpack,
             bulk_yield=args.bulk_yield,
             result_upload=args.result_upload,
             cache_dir=Path(args.cache_dir) if args.cache_dir else None,

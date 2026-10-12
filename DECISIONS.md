@@ -4914,3 +4914,31 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   x26-tower 头注已同步新源＋新 sha；两腿 trunk 同源，对照收紧。
 —— 落点 → `worker/scripts/init_spatial_leg.py` · `tests/worker/test_init_spatial_leg.py` ·
 `nn-training/curricula/x26-tower.jsonc`
+## §2026-10-12-goalnn-prefetch-stage-unpack（2026-10-12，把「解包」从关键路径搬到上一轮 PPO 上：预取线程解包 + 单点搬入 + 形状分派；plan/prefetch-stage-unpack + 首轮评审 P0-1..P2-6）
+
+- **背景**：`§80`（aistudio 传输硬化）之后那台机器上链路**不再是病灶**（`in=` 0–3s、`out` 已与 PPO
+  重叠、`p0_p95` 1.9s）——剩下 PPO 32–35s（75–85%）与本地准备 3–13s。准备段里最大的一块是**解包**
+  （1.8–4.3s/轮、首包 11.8s；换算随 bytes/shard 走：2.48MB/68 shard = 26ms、2.70MB/294 shard = 11ms）。
+  病根：软持有预取（`§64`）只把**下载**叠到上一轮，**解包**仍在关键路径。
+- **决定**：D1 = **预取线程解包**（`PrefetchStore.store(..., unpack=False)` 缺省**不解**，
+  填充器只解 peek 顺序前 N 份、`--prefetch-unpack N` 缺省 1）；D2 = **搬入只在
+  `_ensure_payload` 发生一次**（`take()` 只交出 `staged_dir` 并记 `_handoff`）；D3 = **形状分派**
+  （`has()`/`take()` 同认 `shards/` 与 `payload.zip`）；D4 = staged **单份上界 256MiB + 独立预算账**
+  （超界删 `.tmp`、保留 zip、一行日志）；D5 = P3⑶「`_CACHE_DIRTY` 门」**不做**，只保留 P0 的
+  `cache prune` 计时；D6 = 删预取对 payload 的 **blob_cache 死写**（全仓零读点）。
+- **备选与否决**：① 形态 B（本 job 后台线程解包、join 在 `load_episodes` 前）—— 否：重叠窗口只有
+  0–2s（被 D14 与 `load_episodes` 夹住），却要搬 D14 的位置 = 静默回归入口；② `take(jid, dest)`
+  自己搬入 —— 否（评审 P0-1/P0-3）：目标目录与 `_ensure_payload` 的 `job_dir` 同源，会删掉刚搬进来的
+  shards，且早于 `run_job` 的 `_result.json` 复用检查 ⇒ 把「算完只差重传」的 job 打回重算（静默白烧
+  一轮 PPO）；③ `has()` 只认 `shards/` —— 否：`--prefetch-unpack 0` 会变成 0 命中，§7 三条判据的
+  回退档成空头支票（「关掉旋钮」实际关掉的是预取本身）；④ 给 staged 加廉价指纹 —— 否：残余窗口
+  （落盘后被外力改）与今天 `job_dir` 里那份解包产物面对的是同一个窗口，而今天它也没有复校 ⇒ 记在案
+  不加复杂度；D6 的另一面「保留一份 payload 副本给别的腿」也否决：`take()` 读的是暂存副本，
+  payload 的 sha 从不被 `_resolve_blob`/`resolve_blobs_batch` 查（键只有 `opt/init/ref/demo`）。
+- **后果**：每 job 的压缩字节写盘 3 份 → 1 份；命中轮的解包不在关键路径上（实测收益待真机读数，
+  判据：`other=` 降 ≥2s 且 `ppo=`/本 job `解包=` 不劣化 >5%）。回退档 `--prefetch-unpack 0`
+  = 旧行为逐字（既有 `take()` 用例一行未改即是证据）。文本断言护栏抬 FORM 一格（1442 → 1445）。
+  剩余待办：解包后体积常数、最优 N、CPU 挤占 —— 真机量。
+—— 落点 → `nn-training/remote/{prefetch,download,job_round,worker,train_core}.py` ·
+`nn-training/tests/remote/{test_soft_hold_prefetch,test_prefetch_adaptive,test_download_split,test_job_fs_split}.py` ·
+`nn-training/tests/test_source_text_assert_budget.py`（基线 1445）

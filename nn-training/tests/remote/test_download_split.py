@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import json
 import sys
 from pathlib import Path
 
@@ -346,3 +347,122 @@ def test_progress_logger_still_has_exactly_two_production_copies() -> None:
         and "_progress_logger" in _defined(path)
     )
     assert found == ["remote/download.py", "remote/tailscale_boot.py"], found
+
+
+# ─────────────── 第十三刀：staged 快路径（plan/prefetch-stage-unpack §2.2/§2.6） ───────────────
+#
+# 预取线程把 payload 解好、`take()` 只交路径，**搬入**在这里（`_ensure_payload`）做唯一一次
+# （晚于 `run_job` 的 `_result.json` 复用检查 —— 评审 P0-3）。三条判据：staged 命中不下载
+# 不解包、暂存不在时**就地回退**关键下载、`payload_nbytes` 与字节路径的 `len()` 同口径。
+
+
+def _packed(root: Path, *, shards: int = 1, tag: str = "a") -> bytes:
+    """造一份**真**归档（tar.xz）：shard 目录带 `manifest.json` + 根级 `init_weights.json`。"""
+    from common.payload import pack_payload
+
+    src = root / f"src_{tag}"
+    dirs: list[Path] = []
+    for i in range(shards):
+        d = src / f"w{i}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "manifest.json").write_text(json.dumps({"tag": tag}), encoding="utf-8")
+        (d / "ep.bin").write_text(tag, encoding="utf-8")
+        dirs.append(d)
+    init = src / "init_weights.json"
+    init.write_text(json.dumps({"tag": tag}), encoding="utf-8")
+    out = src / "payload.tar.xz"
+    pack_payload([str(d) for d in dirs], {"it": 1}, out, extra_files=[init])
+    return out.read_bytes()
+
+
+def test_staged_payload_is_adopted_without_download_or_unpack(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """staged 命中：**不下载、不写 payload、不解包**，只把已解好的那份搬进 `job_dir`。"""
+    staged = tmp_path / "prefetch" / "j1" / "shards"
+    (staged / "w0").mkdir(parents=True)
+    (staged / "w0" / "manifest.json").write_text("{}", encoding="utf-8")
+    (staged / "init_weights.json").write_text("{}", encoding="utf-8")
+
+    def _boom(*_a: object, **_k: object) -> bytes:
+        raise AssertionError("staged 路径不该再下载/解包")
+
+    monkeypatch.setattr(download_mod, "download_payload", _boom)
+    monkeypatch.setattr(download_mod, "unpack_payload_or_fail", _boom)
+    landed = download_mod._ensure_payload(
+        "http://hub",
+        "t",
+        "j1",
+        {"payload_sha256": "x" * 64},
+        tmp_path,
+        preloaded={"staged_dir": str(staged), "payload_nbytes": 4242, "unpack_sec": 3.3},
+        log=lambda _m: None,
+    )
+    assert landed.staged is True
+    assert landed.payload_nbytes == 4242 and landed.dl_sec == 0.0 and landed.unpack_sec == 3.3
+    assert landed.job_dir == tmp_path / "j1"
+    assert (landed.job_dir / "init_weights.json").exists(), "根级文件必须随搬入一起到位"
+    assert not (landed.job_dir / "payload.tar.xz").exists(), "staged 路径不写 payload"
+    assert landed.shard_dirs == [str(landed.job_dir / "w0")]
+
+
+def test_staged_payload_missing_falls_back_to_the_critical_download(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """暂存不在（被清/prune 掉了）⇒ 一行日志 + **就地回退**关键下载（预取不是任务）。"""
+    packed = _packed(tmp_path, tag="fb")
+    monkeypatch.setattr(download_mod, "download_payload", lambda *a, **k: packed)
+    logs: list[str] = []
+    landed = download_mod._ensure_payload(
+        "http://hub",
+        "t",
+        "j2",
+        {"payload_sha256": hashlib.sha256(packed).hexdigest()},
+        tmp_path,
+        preloaded={
+            "staged_dir": str(tmp_path / "gone" / "shards"),
+            "payload_nbytes": 1,
+            "unpack_sec": 1.0,
+        },
+        log=logs.append,
+    )
+    assert landed.staged is False and landed.payload_nbytes == len(packed)
+    assert (landed.job_dir / "payload.tar.xz").exists(), "回退后必须走字节路径（写 payload + 解包）"
+    assert any("回退关键下载" in m for m in logs), logs
+
+
+def test_payload_nbytes_equals_the_byte_length_on_the_byte_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """字节路径的 `payload_nbytes` == `len(raw)`（改名不许改口径；worker 的 wire 账读它）。"""
+    packed = _packed(tmp_path, tag="nb")
+    monkeypatch.setattr(download_mod, "download_payload", lambda *a, **k: packed)
+    landed = download_mod._ensure_payload(
+        "http://hub",
+        "t",
+        "j3",
+        {"payload_sha256": hashlib.sha256(packed).hexdigest()},
+        tmp_path,
+        preloaded=None,
+        log=lambda _m: None,
+    )
+    assert landed.staged is False and landed.payload_nbytes == len(packed)
+
+
+def test_scan_shard_dirs_matches_the_unpacker(tmp_path: Path) -> None:
+    """`_scan_shard_dirs` 与 `common.payload.unpack_payload` 的 shard 判别同口径（等价性对照）。
+
+    两处扫盘（解包器一次、staged 搬入后一次）必须给出同一份名单——否则 D14/装载会在
+    staged 路径上看到另一组 shard。
+    """
+    from common.payload import unpack_payload
+
+    packed = _packed(tmp_path, shards=2, tag="eq")
+    zpath = tmp_path / "eq.tar.xz"
+    zpath.write_bytes(packed)
+    dest = tmp_path / "unpacked"
+    dest.mkdir()
+    _manifest, shard_dirs = unpack_payload(zpath, dest)
+    scanned = download_mod._scan_shard_dirs(dest)
+    assert [Path(p).name for p in scanned] == [Path(p).name for p in shard_dirs]
+    assert len(scanned) == 2, "对照没测到东西（shard 名单为空）"

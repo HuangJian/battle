@@ -654,18 +654,82 @@ def _resolve_weights(
 class PayloadLanded(NamedTuple):
     """payload 落地的结果（物料三兄弟之一，另两个见 `_ensure_code` / `_ensure_ts_code`）。
 
-    * `payload_bytes` —— 原始字节（调用方要拿 `len()` 记传输账，不重读文件）。
+    * `payload_nbytes` —— 原始字节**数**（调用方拿它记传输账，不重读文件）。⚠ 不是字节本身：
+      staged 路径（预取已解好）上根本没有字节——旧字段名 `payload_bytes` 会让人以为能 `len()`。
     * `job_dir` —— 本 job 的工作目录（**已清场重建**：上一轮的 shard / 产物一律不留）。
     * `shard_dirs` —— 解包出的 shard 目录（D14 血缘校验与训练链都要）。
-    * `dl_sec` —— 取到字节的墙钟（push 携带时为 `0.0`：字节没走网络，这段账归 hub）。
-    * `unpack_sec` —— 解包墙钟（M0 统一计量的另一段）。
+    * `dl_sec` —— 取到字节的墙钟（push 携带 / 预取命中时为 `0.0`：本轮没走网络）。
+    * `unpack_sec` —— 解包墙钟（M0 统一计量的另一段）；`staged` 时它是**预取时**的读数。
+    * `staged` —— 本次是「预取已解好、只搬入」（plan/prefetch-stage-unpack §2.2）。
     """
 
-    payload_bytes: bytes
+    payload_nbytes: int
     job_dir: Path
     shard_dirs: list[Any]
     dl_sec: float
     unpack_sec: float
+    staged: bool = False
+
+
+def _scan_shard_dirs(dest: Path) -> list[str]:
+    """扫出解包产物里的 shard 目录（子目录里有 `manifest.json` 的那些）。
+
+    **与 `common.payload.unpack_payload` 的判据同口径**——staged 路径没有归档可解，只能扫盘；
+    两边必须一起改（等价性由 `tests/remote/test_download_split.py` 的对照用例钉住）。
+    """
+    try:
+        return [
+            str(p) for p in sorted(dest.iterdir()) if p.is_dir() and (p / "manifest.json").exists()
+        ]
+    except OSError:
+        return []
+
+
+def _adopt_staged(
+    staged: Path,
+    *,
+    jid: str,
+    work_dir: Path,
+    preloaded: dict,
+    log,
+    bundle: Any,
+) -> PayloadLanded | None:
+    """把预取解好的那份**原子搬入** `job_dir`（全链路唯一一次搬入，plan §2.2）。
+
+    调用点在 `_ensure_payload` 里 ⇒ 必然晚于 `run_job` 的 `_result.json` 复用检查（评审 P0-3：
+    提前搬会把「算完只差重传」的缓存删掉）。失败（目录不在 / rename 失败）⇒ 一行日志 + None，
+    由调用方**就地回退**关键下载（预取失败不是失败）。
+    """
+    job_dir = work_dir / jid
+    nbytes = int(preloaded.get("payload_nbytes") or 0)
+    unpack_sec = float(preloaded.get("unpack_sec") or 0.0)
+    try:
+        if not staged.is_dir():
+            log(f"job {jid}: 预取暂存已不在（{staged}）——回退关键下载")
+            return None
+        if job_dir.exists():
+            from common.platform_utils import rmtree_best_effort
+
+            rmtree_best_effort(job_dir)
+        staged.rename(job_dir)  # 同 fs 原子：要么整份在位，要么还留在预取暂存
+    except OSError as e:
+        log(f"job {jid}: 预取暂存搬入失败（{type(e).__name__}: {e}）——回退关键下载")
+        return None
+    # 磁盘：本 job 之后最多留 JOB_DIR_KEEP 个目录（与字节路径同一个口径）
+    prune_job_dirs(work_dir, JOB_DIR_KEEP, log=log, bundle=bundle)
+    shard_dirs = _scan_shard_dirs(job_dir)
+    if bundle is not None:
+        bundle.add("payload", f"预取命中（{nbytes} bytes，解包已就绪，未写 payload）")
+    else:
+        log(f"job {jid}: payload from prefetch ({nbytes} bytes, unpacked)")
+    return PayloadLanded(
+        payload_nbytes=nbytes,
+        job_dir=job_dir,
+        shard_dirs=shard_dirs,
+        dl_sec=0.0,
+        unpack_sec=unpack_sec,
+        staged=True,
+    )
 
 
 class CodeLanded(NamedTuple):
@@ -713,6 +777,16 @@ def _ensure_payload(
     参数走显式传递（`base_url` / `token` / `jid` / `manifest` / `work_dir` + `preloaded`）：
     本模块**不认识** worker 的作业状态，也不知道有几个 hub（那都是宿主的事）。
     """
+    # ---- staged 快路径（预取已解好）：只搬入，不写 payload、不解包（plan §2.2）----
+    # 搬不动/不在位 ⇒ `_adopt_staged` 已经打了响的那一行，这里**就地回退**下面的关键下载
+    # （预取是提前量不是任务：回退的代价是重下一遍，不是失败）。
+    _staged = str((preloaded or {}).get("staged_dir") or "")
+    if _staged:
+        _adopted = _adopt_staged(
+            Path(_staged), jid=jid, work_dir=work_dir, preloaded=preloaded or {}, log=log, bundle=bundle
+        )
+        if _adopted is not None:
+            return _adopted
     # M0 统一计量：payload 大小与拿到它的墙钟（push = 随 POST body 抵达，下载耗时归 hub；
     # pull = 真下载时间）。其余拆分（unpack/opt_restore/grad）各自包在下面。
     t_dl = time.time()
@@ -753,7 +827,7 @@ def _ensure_payload(
     _unused_manifest, shard_dirs = unpack_payload_or_fail(zip_path, job_dir)
     unpack_sec = round(time.time() - t_unpack, 3)
     return PayloadLanded(
-        payload_bytes=raw,
+        payload_nbytes=len(raw),
         job_dir=job_dir,
         shard_dirs=shard_dirs,
         dl_sec=payload_dl_sec,

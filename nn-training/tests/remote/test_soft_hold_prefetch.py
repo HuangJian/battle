@@ -5,8 +5,10 @@
 
   ① **无租约**：候选来自 `peek`（无副作用），下载走 P2 通道（可被打断），worker 死亡 =
      本地暂存蒸发、hub 零残留。本文件里用「`store` 全程不碰 hub」来钉。
-  ② **只存引用 + 让路**：payload 落内容寻址 `blob_cache`，暂存只留一份引用与摘要；
-     总量有**写死的预算**，超限按 `updated_at` 丢最旧。
+  ② **暂存 + 让路**：payload 的**唯一**副本就在 `prefetch/<jid>/`（`payload.zip`，或解好的
+     `shards/`）；总量有**写死的预算**（zip 与 staged 两本账），超限按 `updated_at` 丢最旧。
+     ⚠ 曾经还往 `blob_cache/<payload_sha>` 写一份“内容寻址副本”——那份**全仓无读点**，
+     2026-10-12 已删（plan/prefetch-stage-unpack §3）。
   ③ **`prefetch/` 必须在 `prune_job_dirs` 豁免名单里**：`blob_cache` 漏过一次名单，
      现象是「缓存永远未命中」而看起来像协议没生效（2026-09-17 事故）。
   ④ **命中即零下载开算**：`worker_loop` 把暂存副本接进 `run_job(preloaded=…)`——这条接缝
@@ -32,6 +34,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+import remote.download as DL
 import remote.http as http_mod
 import remote.job_lifecycle as JL
 import remote.job_round as JR
@@ -57,6 +60,61 @@ def _summary(payload: bytes, jid: str = JID) -> dict:
         "payload_bytes": len(payload),
         "payload_sha256": hashlib.sha256(payload).hexdigest(),
     }
+
+
+def _packed_payload(root: Path, *, shards: int = 2, tag: str = "a") -> bytes:
+    """造一份**真** payload（tar.xz）：`shards` 个带 `manifest.json` 的 shard 目录 + 根级 extra。
+
+    解包路径（`store(unpack=True)`）要真归档——随机字节只能走到“解包失败回退”那一条。
+    `tag` 保证两次调用的字节不同（tar 的 mtime 只有秒级精度）。
+    """
+    from common.payload import pack_payload
+
+    src = root / "src_payload"
+    dirs: list[Path] = []
+    for i in range(shards):
+        d = src / f"w{i}"
+        d.mkdir(parents=True, exist_ok=True)
+        (d / "manifest.json").write_text(json.dumps({"course_fp": "f" * 64, "tag": tag}), encoding="utf-8")
+        (d / "ep.json").write_text(json.dumps({"tag": tag}), encoding="utf-8")
+        dirs.append(d)
+    init = src / "init_weights.json"
+    init.write_text(json.dumps({"tag": tag}), encoding="utf-8")
+    out = src / "packed.tar.xz"
+    pack_payload([str(d) for d in dirs], {"it": 1}, out, extra_files=[init])
+    return out.read_bytes()
+
+
+def _ppo_manifest(jid: str = JID) -> dict:
+    """最小合法 manifest（与 `tests/remote/test_worker_bun_precheck.py::_manifest` 同形状）。"""
+    from common.protocol import normalize_manifest
+
+    return normalize_manifest(
+        {
+            "proto": 1,
+            "kind": "ppo",
+            "runId": "run-reuse",
+            "it": 1,
+            "job_id": jid,
+            "commit": "c" * 40,
+            "code_sha256": "z" * 64,
+            "course": "// course jsonc\n{}",
+            "course_fp": "f" * 64,
+            "reward_formula": "score",
+            "formula_hash": "h" * 40,
+            "metrics_version": 1,
+            "gamma": 0.995,
+            "lam": 0.95,
+            "mode": "per-tick",
+            "seed": "s" * 64,
+            "epochs": 1,
+            "mb": 8,
+            "lr": 3e-4,
+            "init_weights_fp": "w" * 64,
+            "data_fp": "d" * 64,
+            "payload_sha256": "p" * 64,
+        }
+    )
 
 
 # ───────────────────────────── ① 暂存语义 ─────────────────────────────
@@ -109,6 +167,142 @@ def test_payload_is_staged_once_and_never_copied_into_blob_cache(tmp_path: Path)
     assert not (tmp_path / "blob_cache" / sha).exists(), "payload 又被写进 blob_cache（纯写税，没人读）"
 
 
+# ───────── ①b staged：预取线程解包（plan/prefetch-stage-unpack §2.3/§2.6） ─────────
+
+
+def test_staged_store_keeps_only_the_unpacked_copy(tmp_path: Path) -> None:
+    """`store(unpack=True)` 后：`shards/` 在、`payload.zip` **不在**、meta 记 staged 三件读数。"""
+    store = PrefetchStore(tmp_path)
+    p = _packed_payload(tmp_path / "p1")
+    assert store.store(JID, p, _summary(p), unpack=True) is True
+    d = tmp_path / PREFETCH_DIR_NAME / JID
+    assert (d / "shards").is_dir(), "解包产物没落盘"
+    assert not (d / "payload.zip").exists(), "解包成功后不该再留一份压缩副本"
+    meta = json.loads((d / "meta.json").read_text(encoding="utf-8"))
+    assert meta["staged"] is True and meta["staged_bytes"] > 0
+    assert meta["unpack_sec"] >= 0.0
+    st = store.stats()
+    assert st["staged"] == 1 and st["staged_bytes"] == meta["staged_bytes"]
+    assert store.has(JID) is True
+
+
+def test_take_staged_hands_over_the_path_without_touching_the_job_dir(tmp_path: Path) -> None:
+    """`take()` 只交路径 + 记账：**不碰 job 目录**（评审 P0-3），`release_handoff` 才收尾。"""
+    store = PrefetchStore(tmp_path)
+    p = _packed_payload(tmp_path / "p1")
+    store.store(JID, p, _summary(p), unpack=True)
+    job_dir = tmp_path / JID  # 同 work_dir 下的 job 目录（生产里就是它）
+    job_dir.mkdir(parents=True)
+    (job_dir / "_result.json").write_text("{}", encoding="utf-8")
+
+    got = store.take(JID)
+    assert got is not None and set(got) >= {"staged_dir", "payload_nbytes", "unpack_sec", "blob_sha"}
+    assert got.get("payload_zip") is None, f"staged 形状不该带字节：{sorted(got)}"
+    assert got["payload_nbytes"] == len(p)
+    assert got["blob_sha"] == hashlib.sha256(p).hexdigest()
+    assert Path(got["staged_dir"]).is_dir(), "staged 目录得留着（搬入由 _ensure_payload 做）"
+    assert (job_dir / "_result.json").exists(), "take() 碰了 job 目录（复用缓存会被吃掉）"
+    assert store.has(JID) is False and store.stats()["hits"] == 1
+    assert store.stats()["handoff"] == 1, "交棒的暂存没记账（孤儿就没人收了）"
+
+    store.release_handoff()
+    assert not (tmp_path / PREFETCH_DIR_NAME / JID).exists(), "未搬走的暂存没被收尾"
+    assert store.stats()["handoff"] == 0
+
+
+def test_a_successful_adoption_leaves_no_residual_shell(tmp_path: Path) -> None:
+    """搬入**成功**（`shards/` 被 rename 走）⇒ `prefetch/<jid>/` 的余壳也要收掉（评审 P2-3）。
+
+    余壳只剩 `meta.json`：`take()` 已把它从 `_items` 摘了、`release_handoff` 又摘了 `_handoff`
+    ⇒ 不清就按命中次数无界堆积，而预算账（只看 `_items`）看不见它。
+    """
+    store = PrefetchStore(tmp_path)
+    p = _packed_payload(tmp_path / "p1")
+    store.store(JID, p, _summary(p), unpack=True)
+    got = store.take(JID)
+    assert got is not None
+    dst = tmp_path / JID
+    Path(got["staged_dir"]).rename(dst)  # = `_ensure_payload` 的搬入（同 fs rename）
+
+    store.release_handoff()
+    assert not (tmp_path / PREFETCH_DIR_NAME / JID).exists(), "搬入成功后余壳没被清（会按命中次数堆积）"
+    assert any(dst.iterdir()), "收尾把搬进 job 目录的那份连坐了"
+    assert store.stats()["handoff"] == 0
+
+
+def test_a_stage_that_fails_the_checksum_is_dropped_with_its_note(tmp_path: Path) -> None:
+    """sha 不符 ⇒ 丢弃 + **连交棒的暂存一起清**（否则它以孤儿形式留在盘上）。"""
+    store = PrefetchStore(tmp_path)
+    p = _packed_payload(tmp_path / "p1")
+    store.store(JID, p, _summary(p), unpack=True)
+    store._items[JID]["sha"] = "0" * 64  # 模拟 meta 里的 sha 与摘要不符
+    assert store.take(JID) is None
+    assert store.stats()["hits"] == 0 and store.stats()["handoff"] == 0
+    assert not (tmp_path / PREFETCH_DIR_NAME / JID).exists()
+
+
+def test_prune_keeps_a_handed_off_stage_but_sweeps_the_orphans(tmp_path: Path) -> None:
+    """`prune()`：交棒/在册的不动；`.tmp` 崩溃残留与不在册的残壳要清（跨会话遗留只有这里收）。"""
+    store = PrefetchStore(tmp_path)
+    p = _packed_payload(tmp_path / "p1")
+    store.store(JID, p, _summary(p), unpack=True)
+    assert store.take(JID) is not None  # 交棒（搬入还没发生）
+    root = tmp_path / PREFETCH_DIR_NAME
+    (root / JID / "shards.tmp").mkdir(parents=True, exist_ok=True)  # 崩溃残留
+    (root / "deadbeefdeadbeef" / "shards").mkdir(parents=True, exist_ok=True)  # 上一会话的残壳
+    assert store.prune() >= 2
+    assert not (root / JID / "shards.tmp").exists(), "崩溃残留的 .tmp 没清"
+    assert not (root / "deadbeefdeadbeef").exists(), "不在册的残壳没清"
+    assert Path(store._handoff[JID]).is_dir(), "交棒的那份被 prune 扫掉了（搬入会失败）"
+
+
+def test_unpack_failure_falls_back_to_bytes_without_raising(tmp_path: Path) -> None:
+    """解包失败（坏字节）⇒ 保留 zip、照旧入库、不抛（预取失败不是失败）。"""
+    store = PrefetchStore(tmp_path)
+    logs: list[str] = []
+    store._log = logs.append
+    p = _payload(4096, b"z")
+    assert store.store(JID, p, _summary(p), unpack=True) is True
+    d = tmp_path / PREFETCH_DIR_NAME / JID
+    assert (d / "payload.zip").read_bytes() == p and not (d / "shards").exists()
+    assert any("解包失败" in m for m in logs), logs
+    got = store.take(JID)
+    assert got is not None and got["payload_zip"] == p, "退回字节形状后照旧要能命中"
+
+
+def test_a_stage_over_the_single_entry_cap_falls_back_to_bytes(tmp_path: Path) -> None:
+    """单份上界（评审 P1-2）：解包后超 staged 预算 ⇒ 退回 zip。
+
+    没有这条上界，一份 280MB 级课程（`job_fs.py:56`）会在「仅剩一份也保留」下**合法**超预算。
+    """
+    store = PrefetchStore(tmp_path, staged_budget_bytes=1)
+    logs: list[str] = []
+    store._log = logs.append
+    p = _packed_payload(tmp_path / "p1")
+    assert store.store(JID, p, _summary(p), unpack=True) is True
+    d = tmp_path / PREFETCH_DIR_NAME / JID
+    assert (d / "payload.zip").exists() and not (d / "shards").exists()
+    assert any("超 staged 预算" in m for m in logs), logs
+
+
+def test_the_two_budgets_are_accounted_separately(tmp_path: Path) -> None:
+    """zip 账与 staged 账**各算各的**（旧账 64MB 的语义不变；staged 条目不该被它误杀）。"""
+    jid_a, jid_b = "a" * 16, "b" * 16
+    p1 = _packed_payload(tmp_path / "p1", tag="1")
+    p2 = _packed_payload(tmp_path / "p2", tag="2")
+    s = PrefetchStore(tmp_path / "w", budget_bytes=1, staged_budget_bytes=1 << 30)
+    assert s.store(jid_a, p1, _summary(p1, jid_a), unpack=True) is True
+    assert s.held() == {jid_a}, "staged 条目被 zip 账误杀"
+    one = s.stats()["staged_bytes"]
+    s.staged_budget_bytes = one  # 第二份进来就超 staged 账
+    assert s.store(jid_b, p2, _summary(p2, jid_b), unpack=True) is True
+    assert s.held() == {jid_b}, "staged 账超限没丢最旧"
+    # zip 形状仍走 zip 账：单份超预算 ⇒ 既有「仅剩一份也保留」口径不变
+    s2 = PrefetchStore(tmp_path / "w2", budget_bytes=1, staged_budget_bytes=1 << 30)
+    assert s2.store(jid_a, p1, _summary(p1, jid_a)) is True
+    assert s2.held() == {jid_a}
+
+
 def test_drop_removes_held_copy(tmp_path: Path) -> None:
     """`none`/claim 失败/被降级 ⇒ 丢副本（软持有丢弃不是失败，也不回 hub）。"""
     store = PrefetchStore(tmp_path)
@@ -155,6 +349,46 @@ def test_pick_candidates_skips_held_and_skip_sets_and_caps_depth() -> None:
     assert [c["job_id"] for c in got] == ["b" * 16]
 
 
+def test_the_filler_unpacks_only_the_first_n_candidates(tmp_path: Path, monkeypatch) -> None:
+    """`unpack_n`（`--prefetch-unpack`）= peek 顺序里的**前 N 份**（plan §2.3 的风险闸）。
+
+    N=1：head 解包就绪，其余仍是字节形状；N=0：全字节（= 改造前的旧行为）。
+    真下真解（真 store + 真 tar.xz），不走假 store。
+    """
+    ja, jb, jc = "a" * 16, "b" * 16, "c" * 16
+    payloads = {ja: _packed_payload(tmp_path / "pa", tag="a"),
+                jb: _packed_payload(tmp_path / "pb", tag="b"),
+                jc: _packed_payload(tmp_path / "pc", tag="c")}
+    monkeypatch.setattr(JR, "PREFETCH_ROUND_SEC", 0.01)
+    monkeypatch.setattr(JR, "report_prefetch", lambda *a, **k: False)
+    monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: ([_summary(payloads[j], j) for j in (ja, jb, jc)], False))
+    monkeypatch.setattr(JR, "download_payload", lambda _b, _t, jid, **k: payloads[jid])
+    store = PrefetchStore(tmp_path / "w")
+    stop = threading.Event()
+    t = threading.Thread(
+        target=JR._prefetch_fill,
+        args=("http://hub", "tok", store, stop),
+        kwargs={"depth": 3, "unpack_n": 1, "log": lambda _m: None},
+        daemon=True,
+    )
+    t.start()
+    deadline = time.time() + 10
+    while store.held() != {ja, jb, jc} and time.time() < deadline:
+        # sleep-ok: 轮询步长（等的是「三份都下好了」这个状态，10s 只当挂起兜底）
+        time.sleep(0.01)
+    stop.set()
+    t.join(10)
+    assert store.held() == {ja, jb, jc}, "填充器没把三份都下完"
+    root = store.root
+    assert (root / ja / "shards").is_dir(), "head 没解包（N=1 的第一份该解）"
+    assert not (root / ja / "payload.zip").exists()
+    for jid in (jb, jc):
+        assert (root / jid / "payload.zip").exists() and not (root / jid / "shards").exists(), (
+            f"第 2/3 份不该进 stage（N=1 的上界）：{jid}"
+        )
+    assert store.stats()["staged"] == 1
+
+
 def test_prune_job_dirs_keeps_the_prefetch_dir(tmp_path: Path) -> None:
     """`prefetch/` 必须在 prune 豁免名单里——否则每轮被当旧 job 删掉，预取永远不命中。"""
     store = PrefetchStore(tmp_path)
@@ -175,9 +409,12 @@ def test_prune_job_dirs_keeps_the_prefetch_dir(tmp_path: Path) -> None:
 class _FakeStore(PrefetchStore):
     def __init__(self, tmp_path: Path) -> None:
         super().__init__(tmp_path, budget_bytes=1 << 20)
+        #: 填充器**要求**解包的那几份（只记意图：真解包由真 store 的用例钉）
+        self.unpack_seen: dict[str, bool] = {}
 
-    def store(self, jid: str, payload: bytes, summary: dict) -> bool:
-        # 填充器用例不关心磁盘，只关心「谁被下载、以什么优先级、结果有没有被吞」
+    def store(self, jid: str, payload: bytes, summary: dict, *, unpack: bool = False) -> bool:
+        # 填充器用例不关心磁盘，只关心「谁被下载、以什么优先级、要不要解包、结果有没有被吞」
+        self.unpack_seen[jid] = unpack
         self._items[jid] = {"sha": "x", "bytes": len(payload), "at": 0.0, "summary": summary}
         return True
 
@@ -696,3 +933,106 @@ def test_report_prefetch_is_best_effort_and_never_raises(monkeypatch) -> None:
     logs.clear()
     assert JL.report_prefetch("http://hub", "tok", snap, log=logs.append) is False
     assert any("上报失败" in m for m in logs), logs
+
+
+# ─────── ④b worker_loop 交棒 staged＋复用优先（plan §2.2/§2.4；评审 P0-3）───────
+
+
+def test_worker_loop_hands_over_a_stage_and_cleans_it_at_job_end(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """缺省档（`--prefetch-unpack 1`）：命中交给 `run_job` 的是 `staged_dir` 形状、盘上已解好；
+    **没被搬走**的（假 run_job 不消费）由 job 收尾的 `release_handoff()` 收干净。"""
+    j1, j2 = "1" * 16, "2" * 16
+    packed = _packed_payload(tmp_path / "p2", tag="2")
+    manifests = {
+        j1: {"job_id": j1, "payload_sha256": "x" * 64, "course_fp": "f" * 64},
+        j2: {
+            "job_id": j2,
+            "payload_sha256": hashlib.sha256(packed).hexdigest(),
+            "course_fp": "f" * 64,
+        },
+    }
+    seen: list[dict] = []
+    calls = {"n": 0}
+
+    def _acquire(base_url, token, **kw):
+        calls["n"] += 1
+        if calls["n"] > 2:  # 两个 job 都跑完：让循环靠 max_idle_sec 自己收尾
+            return None
+        jid = j1 if calls["n"] == 1 else j2
+        return {"job_id": jid, "manifest": manifests[jid], "status": "ok", "lease_token": ""}
+
+    def _run_job(base_url, token, job, **kw):
+        if job["job_id"] == j2:
+            pl = dict(kw.get("preloaded") or {})
+            seen.append(pl)
+            assert set(pl) == {"staged_dir", "payload_nbytes", "unpack_sec"}, f"形状不对：{pl}"
+            assert Path(pl["staged_dir"]).is_dir(), f"交棒的暂存不在盘上：{pl}"
+        if job["job_id"] == j1:  # 第一个 job 跑的时候，把第二个 job 解包预取进来
+            store.store(j2, packed, _summary(packed, j2), unpack=True)
+        return {"job_id": job["job_id"]}
+
+    monkeypatch.setattr(W, "acquire_job", _acquire)
+    monkeypatch.setattr(W, "run_job", _run_job)
+    monkeypatch.setattr(W, "post_result", lambda *a, **k: 200)
+    monkeypatch.setattr(JR, "peek_jobs", lambda *a, **k: ([], False))
+    monkeypatch.setattr(JR, "start_cancel_watcher", lambda *a, **k: None)
+    monkeypatch.setattr(JR, "job_ready", lambda *a, **k: None)
+    monkeypatch.setattr(JR, "report_prefetch", lambda *a, **k: False)
+    monkeypatch.setattr(W, "_release_cloud_machine", lambda *a, **k: None)
+    store = PrefetchStore(tmp_path)
+    real_init = PrefetchStore.__init__
+
+    def _init(self, work_dir, **kw):
+        real_init(self, work_dir, **kw)
+        self._items = store._items  # 让 worker_loop 造的那个 store 用我们的账本
+        self.root = store.root
+
+    monkeypatch.setattr(PrefetchStore, "__init__", _init)
+    logs: list[str] = []
+    n = W.worker_loop(
+        "http://hub",
+        "tok",
+        work_dir=tmp_path,
+        poll_sec=0.05,
+        max_idle_sec=0.3,
+        prefetch_unpack=1,
+        log=logs.append,
+    )
+    assert n == 2, f"应当跑完两个 job：n={n} {logs}"
+    assert seen and seen[0].get("staged_dir"), f"staged 形状没交给 run_job：{seen}"
+    assert not (tmp_path / PREFETCH_DIR_NAME / j2).exists(), (
+        "job 收尾没清掉没被搬走的暂存（孤儿会跨会话堆积）"
+    )
+
+
+def test_a_handed_off_stage_never_eats_the_cached_result(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """★ 评审 P0-3：搬入点必须在 `_result.json` 复用检查**之后**（住在 `_ensure_payload`）。
+
+    搬入若发生在 `take()`（job 轮开头）而不是 `_ensure_payload`，这个用例会红：job 目录被
+    rmtree ⇒ 复用缓存没了 ⇒ 走全流程重算（静默白烧一整轮 PPO）——那正是 `JOB_DIR_KEEP=2`
+    与「回传失败后重领同 job」幂等路径存在的理由。
+    """
+    cached = {"job_id": JID, "kind": "ppo", "echo": False}
+    job_dir = tmp_path / JID
+    job_dir.mkdir(parents=True)
+    (job_dir / "_result.json").write_text(json.dumps(cached), encoding="utf-8")
+    staged = tmp_path / PREFETCH_DIR_NAME / JID / "shards"
+    (staged / "w0").mkdir(parents=True)
+    (staged / "w0" / "manifest.json").write_text("{}", encoding="utf-8")
+
+    monkeypatch.setattr(W, "validate_result", lambda *_a, **_k: None)
+    monkeypatch.setattr(DL, "download_payload", lambda *_a, **_k: pytest.fail("复用路径不该下载"))
+    got = W.run_job(
+        "http://hub",
+        "tok",
+        {"job_id": JID, "manifest": _ppo_manifest()},
+        work_dir=tmp_path,
+        preloaded={"staged_dir": str(staged), "payload_nbytes": 123, "unpack_sec": 0.4},
+    )
+    assert got == cached
+    assert (job_dir / "_result.json").exists(), "搬入把 `_result.json` 吃掉了（复用路径失效）"
+    assert staged.is_dir(), "复用路径下暂存也不该被搬走（收尾由 job_round 的 release_handoff 做）"

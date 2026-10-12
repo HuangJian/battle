@@ -6,6 +6,72 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §84 预取顺手解包：把「解包」从关键路径搬到上一轮 PPO 上（2026-10-12，plan/prefetch-stage-unpack）
+
+**触发**（aistudio 真机 log，2026-10-12）：§80 砍完传输税之后，`in=` 已降到 0–3s、`out` 与 PPO 重叠、
+`p0_p95` 1.9s ⇒ 链路**不再是病灶**。剩下两个口袋：**PPO 32–35s（75–85%）** 与 **本地准备 3–13s**；
+其中最大的一块是**解包**（1.8–4.3s/轮，首包 11.8s = 6.76MB / 168 shard，70ms/shard 含进程内首次冷启）。
+
+**病根**：软持有预取（P2，§64）只把「下载」叠到了上一轮的 PPO 上，**「解包」这半场仍在关键路径**
+（`job_round.py` 只下不解、`download.py::_ensure_payload` 里才解）。换算关系是**随 bytes/shard 走**、
+不是随文件数：2.48MB/68 shard = 26ms，2.70MB/294 shard = 11ms。
+
+### 三刀
+
+| 档 | 改动 | 收益 |
+|---|---|---|
+| **P0** | 准备段计时补齐：课程解析 / 建模型 / 载权重与 opt restore / kickstart ref / **cache prune**（`train_core` + `download`） | 不是省时间，是**选型前提**：一行 `准备完成` 能读出各段分布（⚠ 「装载」早就有了，旧稿把它当缺口是错的） |
+| **P2** | 删掉预取对 payload 的 **blob_cache 副本**（纯死写） | 每 job 少写 2.5–2.7MB 到最慢的那块盘（首包 6.8MB），压缩字节写盘 3 份 → 2 份 |
+| **P1** | `store(unpack=True)` 在预取线程里解好 ⇒ `take()` 只交 `staged_dir`，**搬入唯一一次**（在 `_ensure_payload`） | 命中被 take 的那份，解包已不在关键路径 ⟹ 稳态 `other=` 应降 ≈ 解包那一段（2–4s） |
+
+### 关键设计（三条都是评审纠出来的）
+
+1. **搬入点唯一且后置**：`take()` **不碰 job 目录**（只把暂存路径交出来 + 记 `_handoff`），搬入只发生在
+   `_ensure_payload`，而它晚于 `run_job` 的 `_result.json` **复用检查** —— 否则「算完只差重传」的缓存会被
+   `rmtree` 吃掉、静默重烧一整轮 PPO（`JOB_DIR_KEEP=2` 与重领幂等路径正是为它存在的）。
+   孤儿由 `release_handoff()`（`run_one_round` 的 `finally`）+ `prune()` 的清残壳两层兜。
+2. **形状分派**：`has()`/`take()` 同时认 `shards/` 与 `payload.zip`；`store()` 的**默认是「不解包」**
+   （`unpack=False` = 旧行为逐字）⇒ `--prefetch-unpack 0` 是**真**回退档（只认 `shards/` 会把这一档打成 0 命中）。
+3. **P3 不做**：旧稿「`_CACHE_DIRTY` 标志 ⇒ 纯命中轮不扫缓存树」被事实废掉 —— `_cache_produced_weights`
+   与产物 opt tar **每轮都真写新 sha** ⇒ 标志恒真 ⇒ 照旧每轮全扫（零收益）。真要做只剩「体量门」，
+   先量到 `cache prune ≥0.15s/job` 再谈（量级重算后更可能只有 10–60ms）。
+
+### 落点 / 旋钮
+
+- `--prefetch-unpack N`（缺省 **1**）：只解 peek 顺序的**前 N 份**（风险闸：白解包的 CPU 被限在「每轮最多 N 份」）。
+- `PREFETCH_STAGED_BUDGET_BYTES_DEFAULT = 256MiB`：staged **单份上界 + 总预算**（与 zip 那本 64MB 账分开算）。
+  单份上界必须存在：`job_fs.py` 那个「仅剩一份也保留」的既有规则会让一份 280MB 级课程**合法地**留在盘上。
+  真机读数（`解包 aMB → bMB / k shard / t s`）落地后再定这个常数。
+- 解包产物用 `shards.tmp → shards` **原子改名**提交（半成品永远是 `.tmp`）；解包失败/超上界都**只降级不报错**
+  （预取失败不是失败，绝不进 `ProtocolError`）。
+- `PayloadLanded.payload_bytes: bytes` → **`payload_nbytes: int`** + 新字段 `staged`（staged 路径上**没有字节**，
+  旧字段名会让人以为能 `len()`；worker 两处 wire 账只读长度）。
+- staged 形状**没有字节级 sha 复校**（没有字节）⇒ 完整性链 = store 的 peek sha 校 + job_round 的
+  claim manifest sha 校 + 原子改名 + D14 血缘；残余风险（落盘后被外力改）与今天 `job_dir` 里那份相同，**记在案**。
+
+### 判据 / 回退
+
+真机（用户跑，agent 不起训练）：≥6 个 job 的 `准备完成` 行 + prefetch 行 + wire 行。
+① 预取行出现 `解包 aMB → bMB / k shard / t s` 且该 job 的准备行标「预取时已完成」；
+② 稳态 `other=` 比对照轮（`--prefetch-unpack 0` 的相邻会话）**低 ≥2s**；
+③ 同期 `ppo=` 与本 job 的 `解包=` **不劣化 >5%**（单线程 lzma 会抢 CPU —— 这是本 plan 的主要风险）；
+④ `blob_cache/` 下没有 payload sha、压缩字节写盘 3 份 → 1 份。
+任一条不达标 ⇒ `--prefetch-unpack 0`（**真**旧行为）。
+
+### 测试 / 回归闸
+
+`tests/remote/test_soft_hold_prefetch.py`（+2 大组）：staged 落盘形状与 meta、`take()` 不碰 job 目录、
+`release_handoff` 收孤儿、`prune` 清 `.tmp`/残壳、双预算两本账、解包失败与超上界降级、
+worker_loop 端到端交棒、**`_result.json` 复用先于搬入**（P0-3 的行为闸）；
+`tests/remote/test_prefetch_adaptive.py`：staged/zip 在自停账上等价、形状分派、`unpack_n=0` 只解 head；
+`tests/remote/test_download_split.py`：三分支 + `_scan_shard_dirs` 与解包器**等价性对照** + `payload_nbytes` 口径；
+`tests/remote/test_job_fs_split.py`：`prune_job_dirs` 调用点数（搬入路径不许漏）。
+⚠ 文本断言护栏抬 FORM 一格（1442 → **1445**，+3）：三条**降级路径的日志行**（解包失败 / 超上界 / 暂存不在
+⇒ 回退关键下载）——plan §9「不静默」要求的那一行**就是**交付物；同批 4 条字典成员判据已改写成
+`set(...) == {…}` / `get(...) is None`（零文本命中）。理由写在 `tests/test_source_text_assert_budget.py` 模块头。
+
+---
+
 ## §83 离线腿起点 checkpoint 的 `it` 错位：起点单源化 + 播种先于补传 + 补传 409 冲突闸（2026-10-12，plan/offline-start-checkpoint-it-collision）
 
 **触发**（x24-stack5 事故，2026-10-11）：自主 worker 领课之后，**it1 的真训练结果永不到 hub**。

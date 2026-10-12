@@ -73,6 +73,7 @@ from remote.job_lifecycle import (
 )
 from remote.prefetch import (
     PREFETCH_DEPTH_DEFAULT,
+    PREFETCH_UNPACK_DEFAULT,
     PrefetchStore,
     pick_candidates,
     prefetch_worth_it,
@@ -141,6 +142,7 @@ def _prefetch_fill(
     worker_id: str = "",
     role: str = ROLE_ONLINE,
     depth: int = PREFETCH_DEPTH_DEFAULT,
+    unpack_n: int = PREFETCH_UNPACK_DEFAULT,
     skip: set[str] | None = None,
     log: Any = None,
 ) -> None:
@@ -155,6 +157,10 @@ def _prefetch_fill(
         **绝不**进 `ProtocolError`/`report_job_failure`（否则网络抖动会被报成节点故障）。
       · 预取只走 `download_payload` 一条路：minimize-payload 的 omit 协商落在那个函数里，
         预取落地后**自动继承**；在这里另写一个「整包 GET」就是把已瘦身的部分又吹回去。
+
+    解包（plan/prefetch-stage-unpack §2.3）：peek 顺序里的**前 `unpack_n` 份**顺手解好
+    （`store(unpack=True)`）——这半场今天是关键路径（`download.py:753`），而这里的窗口是
+    上一轮的 PPO（32–35s）。`unpack_n=0` = 只存字节 = 改造前的旧行为（回退档）。
     """
     skip = skip or set()
     log = log or (lambda _m: None)
@@ -197,7 +203,7 @@ def _prefetch_fill(
             continue
         cands = list(peeked[0]) if peeked else []
         picked = pick_candidates(cands, held=store.held(), skip=skip, depth=depth)
-        for cand in picked:
+        for i, cand in enumerate(picked):
             if stop.is_set():
                 break
             jid = str(cand["job_id"])
@@ -226,8 +232,15 @@ def _prefetch_fill(
                 # 成功与**每一条**失败路径都摘掉「正在下载」（`end` 幂等）——不靠各分支自觉，
                 # 否则失败的那份会永远挂在面板上装成「还在下」。
                 store.end(jid)
-            if store.store(jid, payload, cand):
-                log(f"prefetch {jid[:8]}: 已预取 {len(payload)} bytes（软持有，无租约）")
+            # 前 N 份顺手解包（`unpack=False` 的那几份保持旧字节形状；plan §2.3 的风险闸）。
+            # 日志带**档位 + 命中索引**（plan §2.4 的档位读数，评审 P2-1）：§7-2 的「−2s」要归因到
+            # 「命中的就是被解的那几份」，没有索引这一列，收益与白解包分不开。
+            want_unpack = i < int(unpack_n)
+            if store.store(jid, payload, cand, unpack=want_unpack):
+                log(
+                    f"prefetch {jid[:8]}: 已预取 {len(payload)} bytes「第 {i + 1}/{len(picked)} 份，"
+                    f"{'解包就绪' if want_unpack else '只存字节'}」（软持有，无租约）"
+                )
         # 预取状态上报（plan/dashboard-ppo-live-rows）：规范化形状没变就不发 HTTP
         # （常态 0 命中/0 下载 ⇒ 一个进程生命周期只发首轮那一笔）。
         snap = store.snapshot()
@@ -282,6 +295,7 @@ def run_one_round(
     restart_argv: list[str] | None,
     role: str = ROLE_ONLINE,
     prefetch_depth: int,
+    prefetch_unpack: int = PREFETCH_UNPACK_DEFAULT,
     uploader: ResultUploader,
     run_job_fn: Callable[..., dict],
     log: Callable[[str], None],
@@ -292,7 +306,7 @@ def run_one_round(
 
       · 作业身份 —— `job` · `part_dir` · `code_cache_dir` · `pf_store` · `polls_since_accept`；
       · 传输/身份 —— `base_url` · `token` · `worker_id`；
-      · 训练旋钮 —— `device` · `torch_threads` · `echo` · `role` · `prefetch_depth`；
+      · 训练旋钮 —— `device` · `torch_threads` · `echo` · `role` · `prefetch_depth` · `prefetch_unpack`；
       · 上报与生命周期 —— `restart_argv`（热替换）· `uploader` · `log`；
       · **注入点** —— `run_job_fn`（不能反向 import `worker`）。
 
@@ -330,13 +344,23 @@ def run_one_round(
         got = pf_store.take(jid)
         want_sha = str((job.get("manifest") or {}).get("payload_sha256") or "")
         if got is not None and (not want_sha or str(got.get("blob_sha")) == want_sha):
-            preloaded = {"payload_zip": got["payload_zip"]}
+            # 两种形状分派（plan §2.2）：staged ⇒ **只交路径**，搬入在 `_ensure_payload`
+            # （它晚于 `run_job` 的 `_result.json` 复用检查——在这里动 job 目录会把那份缓存删掉）。
+            if "staged_dir" in got:
+                preloaded = {
+                    "staged_dir": str(got["staged_dir"]),
+                    "payload_nbytes": int(got["payload_nbytes"]),
+                    "unpack_sec": float(got["unpack_sec"]),
+                }
+            else:
+                preloaded = {"payload_zip": got["payload_zip"]}
             # S3e：命中在这一刻才算数（零下载开算）——**不能在 `_ensure_payload` 的 preloaded
             # 分支打点：那条分支同样服务 push 腿，会把 push 标成预取命中。
             _wire_hit(jid, "payload", "prefetch")
         elif got is not None:
             # 暂存副本与 claim 到的这份不是同一字节（hub 换过 job）：丢弃，走关键下载。
             log(f"job {jid}: 预取副本 sha 与 claim manifest 不符——丢弃走关键下载")
+            pf_store.drop(jid)  # staged 形状的暂存目录也要一起清（drop 连 _handoff 一起清）
         pf_thread = threading.Thread(
             target=_prefetch_fill,
             args=(base_url, token, pf_store, _pf_stop),
@@ -344,6 +368,7 @@ def run_one_round(
                 "worker_id": worker_id,
                 "role": role,
                 "depth": prefetch_depth,
+                "unpack_n": prefetch_unpack,
                 "skip": {jid},
                 "log": log,
             },
@@ -512,6 +537,10 @@ def run_one_round(
         # 取消环必须每 job 都收（否则一个 job 一个常驻线程，长跑 worker 会漏线程）
         _watch_stop.set()
         _hb_stop.set()
+        # 预取暂存：`take()` 交棒、搬入在 `_ensure_payload` —— 早退路径（结果复用/bun 自检
+        # 失败/取消/热替换/异常）上那份还没被搬走，就地清掉（幂等；搬成功时是空操作）。
+        if pf_store is not None:
+            pf_store.release_handoff()
         # 预取填充线程同理：job 结束即停（它最多再跑一轮下载，join 有超时兜底）。
         _pf_stop.set()
         if pf_thread is not None:
