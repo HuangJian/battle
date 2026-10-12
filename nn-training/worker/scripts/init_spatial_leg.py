@@ -86,7 +86,9 @@ _MIGRATION_LEG_A: dict[str, tuple[str, Any]] = {
     "fc.weight": ("drop", _SCALAR_DELTA),
     "move_head.weight": ("drop", _EXTRA_DELTA),  # hidden+extra：137 → 165
     "fire_head.weight": ("drop", _EXTRA_DELTA),
-    "value_head.weight": ("drop", POLICY_EXTRA_DIM),  # 旧只吃 hidden 128 ⇒ 拷新头前 128 列
+    # value 只拷前 128 列（旧只吃 hidden，语义仍是 hidden），新 37 列纯 0（门控纪律，
+    # x26-obs it90 诊断：0.01 噪声起步是 35 倍爆炸的源头，零起步＋训练期牵引）。
+    "value_head.weight": ("drop0", POLICY_EXTRA_DIM),
 }
 _MIGRATION_LEG_B: dict[str, tuple[str, Any]] = {
     "fc.weight": ("drop", _SCALAR_DELTA),
@@ -111,10 +113,15 @@ def _migrate_columns(
     table: dict[str, tuple[str, Any]],
     gen: Any,
 ) -> dict[str, dict[str, Any]]:
-    """按冻结表把旧列拷进新张量、新列 `normal_(0,0.01)` 重初始化（原地改 `model`）。
+    """按冻结表把旧列拷进新张量、新列重初始化（原地改 `model`）。
 
+    模式：
+      · ("drop", n) —— 拷前 `宽−n` 列，新列 `normal_(0,0.01)`；
+      · ("drop0", n) —— 拷前 `宽−n` 列，新列**纯 0**（value 门控纪律：零起步＋训练期
+        牵引；噪声起步正是 x26-obs it90 诊断的 35 倍爆炸源）；
+      · ("segments", 表) —— 逐段搬运，新列 `normal_(0,0.01)`。
     · 同类同形（`old.shape == new.shape`）⇒ 跳过：loader 已整块装载，不是「部分迁移」；
-    · 形状不符（既不是同形、也不是「宽−n / 分段」两张合法形态）⇒ **响亮拒绝**
+    · 形状不符（既不是同形、也不是合法形态）⇒ **响亮拒绝**
       （静默跳过 = 旧 extra 灌进 scalars 那类错位，评审 F2）。
     返回 {张量名: {old_cols, mode, segments}} 供 meta 记账（`warmstart_partial`）。
     """
@@ -135,7 +142,7 @@ def _migrate_columns(
         with torch.no_grad():
             fresh = new.clone()
             keep = torch.zeros(new.shape[1], dtype=torch.bool)
-            if mode == "drop":
+            if mode in ("drop", "drop0"):
                 old_cols = new.shape[1] - int(spec)
                 if old.shape[1] != old_cols:
                     raise SystemExit(
@@ -155,14 +162,17 @@ def _migrate_columns(
                     fresh[:, dst_start : dst_start + count] = old[:, src_start : src_start + count]
                     keep[dst_start : dst_start + count] = True
             idx = torch.nonzero(~keep, as_tuple=False).flatten()
-            # 逐元素独立随机：形状必须是 (rows, k)——1 维 `randn(k)` 会广播成全行全同
-            #（rank-1，对称性没打破；value 头只有 1 行才不受影响）。
-            fresh[:, idx] = (
-                torch.randn(
-                    (new.shape[0], len(idx)), generator=gen, dtype=fresh.dtype, device=new.device
+            if mode == "drop0":
+                fresh[:, idx] = 0.0
+            else:
+                # 逐元素独立随机：形状必须是 (rows, k)——1 维 `randn(k)` 会广播成全行全同
+                #（rank-1，对称性没打破；value 头只有 1 行才不受影响）。
+                fresh[:, idx] = (
+                    torch.randn(
+                        (new.shape[0], len(idx)), generator=gen, dtype=fresh.dtype, device=new.device
+                    )
+                    * 0.01
                 )
-                * 0.01
-            )
             new.copy_(fresh)
         done[name] = {
             "old_cols": old_cols,

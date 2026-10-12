@@ -151,7 +151,6 @@ def test_leg_a_column_migration_old_cols_bit_exact(tmp_path: Path) -> None:
         ("fc.weight", 94),
         ("move_head.weight", 137),
         ("fire_head.weight", 137),
-        ("value_head.weight", 128),
     ):
         assert torch.equal(new[name][:, :keep], old[name]), f"{name} 旧列不是逐位等"
         tail = new[name][:, keep:]
@@ -162,6 +161,12 @@ def test_leg_a_column_migration_old_cols_bit_exact(tmp_path: Path) -> None:
             # 新列必须逐元素独立随机：广播式 `randn(k)` 会让所有行全同（rank-1），
             # 对称性没打破。首行展开后必须与全片不等（固定 seed 下确定性判据）。
             assert not torch.equal(tail, tail[0:1].expand_as(tail)), f"{name} 新列跨行全同（广播 init）"
+    # value 新列是纯 0（门控纪律：零起步＋训练期牵引，见 test_value_anchor.py）——
+    # 旧 128 列逐位等，新 37 列逐位零（不是 0.01 随机）。
+    assert torch.equal(new["value_head.weight"][:, :128], old["value_head.weight"])
+    assert torch.equal(
+        new["value_head.weight"][:, 128:], torch.zeros_like(new["value_head.weight"][:, 128:])
+    ), "value 新列必须是纯 0（drop0），噪声起步正是 it90 诊断的 35 倍爆炸源"
     # 非迁移张量：全量逐位等（「非新增列路径一致」）
     for name in ("stem.weight", "blocks.0.dw.weight", "fc.bias", "value_head.bias"):
         assert torch.equal(new[name], old[name]), f"{name} 不应动"
