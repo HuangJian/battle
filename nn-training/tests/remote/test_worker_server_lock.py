@@ -92,7 +92,7 @@ def test_simultaneous_worker_starts_leave_exactly_one(tmp_path: Path) -> None:
     """
     lock = tmp_path / ".worker_server.lock"
 
-    def scenario(port: int) -> tuple[int, int, list[tuple[subprocess.Popen, Path]]]:
+    def scenario(port: int) -> tuple[int, list[tuple[subprocess.Popen, Path]]]:
         argv = _argv(port, lock, tmp_path)
         procs: list[tuple[subprocess.Popen, Path]] = []
         for i in range(3):
@@ -104,29 +104,41 @@ def test_simultaneous_worker_starts_leave_exactly_one(tmp_path: Path) -> None:
                         log,
                     )
                 )
-        deadline = time.time() + 40
-        alive = len(procs)
-        while time.time() < deadline:
-            alive = sum(1 for p, _ in procs if p.poll() is None)
-            if alive <= 1:
-                break
-            # sleep-ok: 轮询步长（等的是「其余进程已退」这个状态，deadline 只当挂起兜底）
-            time.sleep(0.3)
-        if alive == 0:
-            outs = "; ".join(_tail(lg) for _, lg in procs)
-            if port_race_seen([outs]):  # 端口被外人抢走（守卫拒启/裸 EADDRINUSE）⇒ 场景作废，换端口重跑
-                raise PortStolenError(outs)
-            raise AssertionError(f"三启全灭——锁/端口守卫把唯一实例也拒了: {outs}")
-        return port, alive, procs
+        try:
+            # 等「其余进程已退」这个**状态**（判据 = poll()），deadline 只当挂起兜底。
+            deadline = time.time() + 40
+            alive = len(procs)
+            while time.time() < deadline:
+                alive = sum(1 for p, _ in procs if p.poll() is None)
+                if alive <= 1:
+                    break
+                # sleep-ok: 轮询步长（等的是「其余进程已退」这个状态，deadline 只当挂起兜底）
+                time.sleep(0.3)
+            if alive != 1:
+                raise _scenario_verdict(
+                    procs,
+                    f"必须恰好一个实例存活，实际 {alive}（静默双监听机会）"
+                    if alive > 1
+                    else "三启全灭——锁/端口守卫把唯一实例也拒了",
+                )
+            # ★ 2026-10-13（与 test_instance_lock 同族同修）：把**存活进程**交给就绪等待——
+            # 它死在端口竞态（探测 → bind 之间被别的 xdist worker 抢走）就立刻返回 False，
+            # 由 `_scenario_verdict` 归类为「场景作废」换端口重跑，而不是空烧满预算再误报。
+            survivor = next(p for p, _ in procs if p.poll() is None)
+            if not _wait_ready(port, lock, survivor, None):
+                raise _scenario_verdict(procs, "存活的那个必须真的在服务")
+            assert all(p.returncode != 0 for p, _ in procs if p.poll() is not None)
+            return port, procs
+        except BaseException:
+            # 场景作废 / 断言失败：**就地收尸** —— 重试不能带着上一轮的持有者跑
+            # （残留的锁持有者会把下一次尝试全部拒启，于是一路红到重试耗尽）。
+            for p, _ in procs:
+                _kill(p)
+            raise
 
-    port, alive, procs = retry_on_port_stolen(scenario)
-    try:
-        assert alive == 1, f"必须恰好一个实例存活，实际 {alive}（静默双监听机会）"
-        assert _wait_ready(port, lock, None, None), "存活的那个必须真的在服务"
-        assert all(p.returncode != 0 for p, _ in procs if p.poll() is not None)
-    finally:
-        for p, _ in procs:
-            _kill(p)
+    port, procs = retry_on_port_stolen(scenario)
+    for p, _ in procs:  # 成功路径：这一刻还活着的那个（唯一实例）由这里收尸
+        _kill(p)
 
 
 # ────────────────────────── 辅助 ──────────────────────────
@@ -194,6 +206,22 @@ def _tail(log: Path, lines: int = 8) -> str:
         return "\n".join(log.read_text(encoding="utf-8", errors="replace").splitlines()[-lines:])
     except OSError:
         return f"<无法读取 {log}>"
+
+
+def _scenario_verdict(
+    procs: list[tuple[subprocess.Popen, Path]], why: str
+) -> Exception:
+    """「三启」场景的判词（与 `tests/common/test_instance_lock.py` 同形）。
+
+    端口在探测后被外人抢走（守卫拒启文案 / 裸 `EADDRINUSE`，`port_race_seen()` 两张脸都认）
+    ⇒ 场景作废，换端口重跑；非端口死法（真 bug）照旧响亮失败并附日志尾巴。`lines` 取 40：
+    `Address already in use` 常被 traceback 压在 `_tail` 缺省行数之外。
+    """
+    outs = [_tail(lg, 40) for _, lg in procs]
+    blob = "\n".join(outs)
+    if port_race_seen(outs):
+        return PortStolenError(f"{why} —— 端口在探测后被外人抢走（场景作废，换端口重跑）：{blob}")
+    return AssertionError(f"{why} —— 三启日志：{blob}")
 
 
 if __name__ == "__main__":
