@@ -500,6 +500,9 @@ BOOT_MIN_RATE = 80 * 1024.0
 #: 判据所需的最小观测：样本太小不下结论（免得拿 2 KB 判一条链路）。
 BOOT_PROBE_BYTES = 128 * 1024
 BOOT_PROBE_SEC = 3.0
+#: **连续多少个慢窗口**才断（迟滞，2026-10-13）——与 worker 侧的 `WIRE_REROLL_PROBES`
+#: **同值同义**（两个值各自钉在一侧的单测里）：单窗抖动 / 重连后的 TCP 慢启动不该触发换连接。
+BOOT_REROLL_PROBES = 2
 #: 按当前速率**预计剩余**超过它才值得折腾（快跑完了就不动——重抽也有建连成本）。
 BOOT_REROLL_BUDGET_SEC = 20.0
 #: 单次下载的重抽上限（只给幂等 GET）；**最后一次尝试永不重抽**（慢链路不会变成「永远下不完」）。
@@ -532,18 +535,26 @@ def _reroll_decision(
     budget_sec: float = BOOT_REROLL_BUDGET_SEC,
     probe_bytes: int = BOOT_PROBE_BYTES,
     probe_sec: float = BOOT_PROBE_SEC,
+    remaining: int | None = None,
 ) -> tuple[bool, float, float]:
     """是否该断开重抽 → `(决定, 实测速率, 按此速率的预计剩余秒数)`。
 
     **纯函数**：判据只有一处实现（改阈值只改这里），也就能被单测直接钉住。
+
+    `remaining`（2026-10-13，与 worker 侧同口径）：**窗口口径**的入口 —— 调用方按时间窗采样时
+    `got`/`elapsed` 只是这一窗内的量，「还差多少收完」必须由调用方显式给；缺省 = 累计口径
+    （`total - got`），与旧行为逐字相同。
     """
-    if total <= 0 or got <= 0 or got >= total:
-        return False, 0.0, 0.0  # 长度未知 / 已收完 / 零字节：都不判
+    if total <= 0 or got <= 0:
+        return False, 0.0, 0.0  # 长度未知 / 零字节：都不判
+    left = (total - got) if remaining is None else int(remaining)
+    if remaining is None and got >= total:
+        return False, 0.0, 0.0  # 已收完（累计口径）：不赌
     if elapsed < probe_sec and got < probe_bytes:
         return False, 0.0, 0.0  # 样本太小，不下结论
     rate = got / elapsed if elapsed > 0 else float("inf")
     floor = _min_rate() if floor_rate is None else floor_rate
-    remain_sec = (total - got) / rate if rate > 0 else float("inf")
+    remain_sec = left / rate if rate > 0 else float("inf")
     return (rate < floor and remain_sec > budget_sec), rate, remain_sec
 
 
@@ -595,6 +606,20 @@ def _progress_logger(label: str, log: Any):
     return _report
 
 
+def _recv_some(resp: Any, limit: int) -> bytes:
+    """**至多一次底层 `recv`** 的读（= `HTTPResponse.read1` 语义；2026-10-13，M1）。
+
+    与 worker 侧 `remote/http.py::_recv_some` **同一条缺陷的孪生修复**：定长 `read(amt)`
+    会循环 `recv` 直到凑满 `amt` ⇒ 隧道只要每 < `idle_timeout` 吐 1 字节，45 s 空闲判据
+    就永不触发（引导期的 code.zip / 任务包走的是同一条隧道）。
+
+    回退分支只服务**测试替身**（只实现 `read` 的假响应）：真 `HTTPResponse` 一定有 `read1`。
+    """
+    read1 = getattr(resp, "read1", None)
+    block: bytes = read1(limit) if read1 is not None else resp.read(limit)
+    return block
+
+
 def _read_body(
     resp: Any,
     *,
@@ -603,7 +628,12 @@ def _read_body(
     progress: Any = None,
     allow_reroll: bool = False,
 ) -> bytes:
-    """分块读 body：报进度 + **停滞/超预算即抛**（异常正文带已收字节数与原因）。"""
+    """分块读 body：报进度 + **停滞/超预算即抛**（异常正文带已收字节数与原因）。
+
+    2026-10-13（与 worker 侧同口径）：① 读走 `_recv_some`（`read1`）——定长读让空闲判据
+    结构上永不触发；② 低速判据改成**时间窗采样 + 连续 `BOOT_REROLL_PROBES` 窗迟滞**
+    （旧形状：每块一次 + `probed` 一次性，首块一到就定终身）。
+    """
     total = 0
     try:
         total = int(resp.headers.get("Content-Length") or 0)
@@ -612,10 +642,12 @@ def _read_body(
     buf = bytearray()
     t0 = time.time()
     last = t0
-    probed = False
+    win_t0 = t0  # 上一窗结束时刻
+    win_got = 0  # 上一窗结束时的已收字节
+    slow_streak = 0
     while True:
         try:
-            block = resp.read(BOOT_CHUNK)
+            block = _recv_some(resp, BOOT_CHUNK)
         except (TimeoutError, OSError) as e:
             raise BootBodyError(
                 f"body 停滞（{idle_timeout:.0f}s 内没有新字节）",
@@ -636,13 +668,22 @@ def _read_body(
             return bytes(buf)
         buf += block
         now = time.time()
-        if allow_reroll and not probed:
-            # 只在**首块**判一次（probed 一次性）：每次重抽的浪费 ≤ 一块，
-            # 绝不会退化成「再整份重传一遍」。
-            probed = True
-            should, rate, remain = _reroll_decision(len(buf), total, now - t0)
+        if allow_reroll and now - win_t0 >= BOOT_PROBE_SEC:
+            should, rate, remain = _reroll_decision(
+                len(buf) - win_got,
+                total,
+                now - win_t0,
+                # 窗宽与判据同一把尺（`probe_sec` 是判据自己的「样本够大」门）
+                probe_sec=BOOT_PROBE_SEC,
+                remaining=(total - len(buf)) if total else 0,
+            )
+            win_t0, win_got = now, len(buf)
             if should:
-                raise BootSlowError(len(buf), total, now - t0, rate, remain)
+                slow_streak += 1
+                if slow_streak >= BOOT_REROLL_PROBES:
+                    raise BootSlowError(len(buf), total, now - t0, rate, remain)
+            else:
+                slow_streak = 0
         if total_timeout is not None and now - t0 > total_timeout:
             raise BootBodyError(
                 f"body 超预算（>{total_timeout:.0f}s）", len(buf), total, now - t0

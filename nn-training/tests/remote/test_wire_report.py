@@ -246,6 +246,8 @@ def test_writer_and_reader_agree_on_the_phase_format() -> None:
     W._wire_add(jid, "payload", 3 * MB, 300.0)  # T_in
     W._wire_add(jid, "result", MB, 4.0)  # T_out
     W._wire_time(jid, "ppo", 610.0)  # T_ppo
+    # T_fail（R6/M4，2026-10-13）：失败的尝试也要进阶段行——否则它只会以「other 巨大」出现。
+    W._wire_note_failed(jid, 262144, 300.0)
     lines: list[str] = []
     W._wire_flush(jid, lines.append)
     W._WIRE.clear()
@@ -255,11 +257,13 @@ def test_writer_and_reader_agree_on_the_phase_format() -> None:
     assert row["in_sec"] == pytest.approx(300.0)
     assert row["out_sec"] == pytest.approx(4.0)
     assert row["ppo_sec"] == pytest.approx(610.0)
-    # `wall` ≥ 各阶段之和（写方保证）：本用例里实测墙钟几乎为 0，所以它就取 914.0，
-    # `other` 被夹到 0——否则分母小于各部分之和会把占比算成荒谬值。
-    assert row["wall_sec"] == pytest.approx(914.0, abs=0.5)
+    assert row["failed_sec"] == pytest.approx(300.0)
+    # `wall` ≥ 各阶段之和（写方保证）：本用例里实测墙钟几乎为 0，所以它取各段之和
+    # （in+out+ppo+failed = 1214），`other` 被夹到 0——否则分母小于各部分之和会把占比算成荒谬值。
+    assert row["wall_sec"] == pytest.approx(1214.0, abs=0.5)
     assert row["other_sec"] == 0.0
-    assert row["in_pct"] == pytest.approx(32.8, abs=0.2)
+    assert row["in_pct"] == pytest.approx(24.7, abs=0.2)
+    assert row["failed_pct"] == pytest.approx(24.7, abs=0.2)
 
 
 def test_main_reads_files_and_dir(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
@@ -330,6 +334,18 @@ def test_async_upload_marks_out_as_overlapped_not_on_the_critical_path() -> None
     assert async_["other_sec"] == 0.0
     # 判据可读：关键路径上只剩 in + ppo + other（回传不再算在分母里）。
     assert async_["wall_sec"] == pytest.approx(90.0 - 25.0, abs=0.5)
+
+
+def test_old_logs_without_failed_still_aggregate() -> None:
+    """旧 worker 的阶段行（没有 `failed=`，2026-10-13 之前）不得整段变空——缺省当 0。
+
+    这条与 `test_old_logs_without_overlap_still_aggregate` 同规：新字段一律**可选**，
+    否则新旧日志混在一个目录里时，旧行会静默从基线表里消失。
+    """
+    row = wr.summarize_phases(wr.parse_phases([PHASE_LINE]))
+    assert row["jobs"] == 1
+    assert row["failed_sec"] == 0.0
+    assert row["wall_sec"] == pytest.approx(1000.0)
 
 
 def test_old_logs_without_overlap_still_aggregate() -> None:

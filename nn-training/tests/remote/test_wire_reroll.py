@@ -64,7 +64,10 @@ def _clean_wire_state():
 
 
 class _FakeResp:
-    """假响应：逐块吐数据（供 `_read_body` 用；headers 给 Content-Length）。"""
+    """假响应：逐块吐数据（供 `_read_body` 用；headers 给 Content-Length）。
+
+    只实现 `read` —— 它同时也是「`_recv_some` 的存在性回退」这条路径的替身（M1）。
+    """
 
     def __init__(self, chunks: list[bytes], total: int):
         self._chunks = list(chunks)
@@ -73,6 +76,37 @@ class _FakeResp:
 
     def read(self, _n: int) -> bytes:
         return self._chunks.pop(0) if self._chunks else b""
+
+
+class _WindowedResp:
+    """`read1` 形状的假响应（M1）：每次只吐 `size` 字节；`read` 故意抛（别再退回定长读）。"""
+
+    def __init__(self, chunks: int, size: int, total: int | None = None):
+        self.chunks = chunks
+        self.size = size
+        self.headers = {"Content-Length": str(total if total is not None else chunks * size)}
+        self.status = 200
+
+    def read1(self, _n: int) -> bytes:
+        if self.chunks <= 0:
+            return b""
+        self.chunks -= 1
+        return b"x" * self.size
+
+    def read(self, _n: int) -> bytes:
+        raise AssertionError("body 读回到了定长 read（M1：必须走 read1）")
+
+
+class _FakeClock:
+    """确定性墙钟（判据按时间窗采样 ⇒ 测试必须能控时）。"""
+
+    def __init__(self, start: float = 1000.0, step: float = 1.0) -> None:
+        self.now = start
+        self.step = step
+
+    def __call__(self) -> float:
+        self.now += self.step
+        return self.now
 
 
 # ────────────────────────────── ① 判据（纯函数） ──────────────────────────────
@@ -343,42 +377,55 @@ def test_exhausted_rerolls_still_fail_loudly(monkeypatch) -> None:
         )
 
 
-def test_read_body_probes_at_most_the_hysteresis_points(monkeypatch) -> None:
-    """判据只跑**不超过 `WIRE_REROLL_PROBES` 个点** ⇒ 重抽的浪费有界（绝不「再整份传一遍」）。
+def test_read_body_samples_by_time_window_and_needs_two_slow_windows(monkeypatch) -> None:
+    """★ 2026-10-13 取代 `test_read_body_probes_only_its_first_chunk`。
 
-    ★ 2026-10-12（迟滞）：原先只判首块一次（`probed` 一次性）；抖动下单个 3s 窗口的瞬时速率
-    必然误判，所以改成「连续 `WIRE_REROLL_PROBES` 点都慢才断连」。浪费上界从一块变成 N 块，
-    但仍然有界 —— 判满就收兵。判点数**必须**等于常量（多一个点就是上界漂了）。
+    旧不变式是「判据只在首块跑一次 ⇒ 重抽浪费 ≤ 一块」。它在两条链路上都失效：
+
+      · 慢链路：样本要等**一块**（块不返回就没有样本）⇒ 现场那块花了 300 s；
+      · 快链路：首块太小 ⇒ 判一次 `should=False` 就把标记永久置上（现场 343.5 s 的行）。
+
+    新不变式：**按时间窗采样 + 连续两窗慢才断** ⇒ 浪费的上界变成「≤ 连续 2 窗」，
+    而判据不再被第一个样本关掉（下面第 1、2 次判「快」就是这条的回归）。
     """
-    seen: list[tuple[int, int, float]] = []
+    monkeypatch.setattr(http_mod, "WIRE_PROBE_SEC", 1.0)
+    monkeypatch.setattr(http_mod, "WIRE_REROLL_PROBES", 2)
+    monkeypatch.setattr(http_mod.time, "time", _FakeClock(step=1.0))
+    seen: list[tuple[int, int, float, dict]] = []
+    verdicts = iter([False, False, True, True])
 
     def spy(got: int, total: int, elapsed: float, **kw):
-        seen.append((got, total, elapsed))
-        return True, 6.4 * 1024, 1180.0  # 每个点都判「该重抽」
+        seen.append((got, total, elapsed, kw))
+        return next(verdicts, False), 6.4 * 1024, 1180.0
 
     # 同上：`_read_body` 在 `remote.http` 里解析 `_reroll_decision`。
     monkeypatch.setattr(http_mod, "_reroll_decision", spy)
-    resp = _FakeResp([b"x" * 256, b"y" * 256, b"z" * 256], total=768)
+    resp = _WindowedResp(chunks=8, size=256)
     with pytest.raises(worker_mod.WireSlowError):
-        worker_mod._read_body(
-            resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True
-        )
-    assert len(seen) == wire_mod.WIRE_REROLL_PROBES, f"判点数没被迟滞限住：{seen}"
+        worker_mod._read_body(resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True)
+    assert len(seen) == 4, f"快窗把判据关掉了（只判了 {len(seen)} 次）"
+    assert seen[0][0] == 256  # 样品是**窗内**字节：每窗一块
+    assert seen[0][3]["remaining"] == 2048 - 256  # 真实剩余显式传入（不是 total - 窗内字节）
 
 
-def test_a_single_slow_probe_does_not_break_the_connection(monkeypatch) -> None:
-    """★ 迟滞的另一半：**单点慢不算坏签**（抖动常态）——第二点不慢就照传完。
+def test_reroll_decision_supports_a_window_sample() -> None:
+    """窗口口径（M2）：`got/elapsed` 是窗内的量，`remaining` 是**真实剩余**。
 
-    现场就是这一种：第一块 79KB/s 判了「该重抽」，而重抽换来的是 51KB/s。一个 3 秒窗口的
-    瞬时速率在抖动链路上不构成证据。
+    同 `(got, total, elapsed)` 两个结论不同 ⇒ 读到的一定是 `remaining`（而不是 `total - got`）。
+    缺省（不给 `remaining`）逐字保留旧行为（上面的纯函数用例就是它的回归）。
     """
-    seq = iter([(True, 6.4 * 1024, 1180.0), (False, 400 * 1024, 2.0)])
-    monkeypatch.setattr(http_mod, "_reroll_decision", lambda *a, **k: next(seq))
-    resp = _FakeResp([b"x" * 256, b"y" * 256, b"z" * 256], total=768)
-    out = worker_mod._read_body(
-        resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True
+    slow_then_leftover = worker_mod._reroll_decision(
+        15 * 1024, 100 * 1024, 3.0, min_rate=80 * 1024, remaining=400 * 1024
     )
-    assert len(out) == 768, "单点慢就把连接断了（抖动下必然误判）"
+    assert slow_then_leftover[0] is True and slow_then_leftover[2] == pytest.approx(80.0)
+    nearly_done = worker_mod._reroll_decision(
+        15 * 1024, 100 * 1024, 3.0, min_rate=80 * 1024, remaining=10 * 1024
+    )
+    assert nearly_done[0] is False and nearly_done[2] == pytest.approx(2.0)
+    leftover_done = worker_mod._reroll_decision(
+        15 * 1024, 100 * 1024, 3.0, min_rate=80 * 1024, remaining=0
+    )
+    assert leftover_done[0] is False and leftover_done[2] == 0.0  # 已收完：不赌
 
 
 def test_read_body_fast_draw_returns_the_whole_body() -> None:
@@ -410,6 +457,93 @@ def test_wire_flush_line_shape() -> None:
     # 已清：同一 jid 再 flush 一次不会多出一行（账是「一次性」的）
     worker_mod._wire_flush("j5", lines.append)
     assert len(lines) == 1
+
+
+def test_failed_attempts_are_accounted_in_the_wire_line(monkeypatch) -> None:
+    """★ R6/M4：**失败的尝试**也要进账 —— 否则现场 `other=343.7s` 是黑箱（那 300s 归不了因）。
+
+    口径三件事：`failed.sec` 只算**传输段**（排队归 `wait=`）；失败字节从异常自带的
+    `got` 读（M3）；`wall` 的 max() 把 failed 算进去（否则守恒式恒真而无信息）。
+    """
+    body = b"z" * 4096
+    calls: list[int] = []
+    # `http_mod.time` 就是 time 模块 ⇒ 给退避打桩会把夹具自己的耗时一起打没，故先存一份真身。
+    real_sleep = time.sleep
+
+    def fake(base_url: str, token: str, path: str, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            err = http_mod.BodyTimeoutError(
+                "body 超时：总耗时 > 300s（已收 262144 bytes / 共 2608740）——链路太慢，重试",
+                b"x" * 262144,  # M3：异常自带已收字节（半截仍作废：无 Range，见 R3）
+                2608740,
+            )
+            # sleep-ok: 夹具模拟的「失败尝试」本身：它必须占掉一段可测墙钟，账里才看得见
+            real_sleep(0.05)
+            raise err
+        return 200, body
+
+    monkeypatch.setattr(http_mod, "_request", fake)
+    monkeypatch.setattr(http_mod.time, "sleep", lambda _s: None)  # 退避不真等
+    lines: list[str] = []
+    out = worker_mod._get_with_retry(
+        "http://hub",
+        "t",
+        "/jobs/j9/payload",
+        timeout=300.0,
+        attempts=2,
+        log=lines.append,
+        wire_jid="j9",
+        wire_seg="payload",
+    )
+    assert out == body
+    worker_mod._wire_flush("j9", lines.append)
+    line = lines[-1]
+    m = re.search(r"failed=([\d.]+)s/([\d.]+)MB\(n=(\d+)\)", line)
+    assert m, line
+    assert m.group(2) == "0.25" and m.group(3) == "1"  # 262144 B = 0.25MB，就一次
+    ph = re.search(
+        r"phases in=([\d.]+)s out=([\d.]+)s ppo=([\d.]+)s failed=([\d.]+)s "
+        r"other=([\d.]+)s wall=([\d.]+)s",
+        line,
+    )
+    assert ph, line
+    in_s, out_s, ppo_s, failed_s, other_s, wall_s = (float(x) for x in ph.groups())
+    assert failed_s >= 0.04, line  # 那 0.05s 真的进了账（不是只写了个 0）
+    assert abs((in_s + out_s + ppo_s + failed_s + other_s) - wall_s) <= 0.06, line
+
+
+def test_preempted_prefetch_attempts_are_accounted_too(monkeypatch) -> None:
+    """被 P1 挤走也算一次**未成功**的尝试：`preempt=` 报字节、`failed=` 报时间（口径不混）。"""
+    body = b"z" * 4096
+    calls: list[int] = []
+
+    def fake(base_url: str, token: str, path: str, **kw):
+        calls.append(1)
+        if len(calls) == 1:
+            err = BulkPreemptError("定期预取被高优 bulk 挤走：丢半截，稍后重下（payload 幂等）")
+            err.bytes_read = 128 * 1024
+            raise err
+        return 200, body
+
+    monkeypatch.setattr(http_mod, "_request", fake)
+    lines: list[str] = []
+    out = worker_mod._get_with_retry(
+        "http://hub",
+        "t",
+        "/jobs/pre/payload",
+        timeout=300.0,
+        attempts=3,
+        log=lines.append,
+        wire_jid="pre",
+        wire_seg="payload",
+        bulk_prio=BULK_P2_PREFETCH,
+    )
+    assert out == body
+    worker_mod._wire_flush("pre", lines.append)
+    line = lines[-1]
+    assert re.search(r"preempt=1\(wasted 0\.12MB\)", line), line
+    assert re.search(r"failed=[\d.]+s/0\.12MB\(n=1\)", line), line
 
 
 def test_wire_buckets_are_capped() -> None:
@@ -484,7 +618,12 @@ def test_post_result_never_rerolls_but_is_accounted(monkeypatch) -> None:
 
 
 def test_reroll_probe_uses_the_net_elapsed(monkeypatch) -> None:
-    """速率判据拿到的 `elapsed` = **墙钟 − Σ让路**（让路不是链路的错）。"""
+    """速率判据拿到的 `elapsed` = **墙钟 − Σ让路**（让路不是链路的错）。
+
+    2026-10-13 起判据按**时间窗**采样（窗宽与判据看同一把尺 = `WIRE_PROBE_SEC`，这里压到 0.3s），
+    时钟换成确定性假钟：**墙钟走 1.0s，其中 0.3s 是让路 ⇒ 判据只该看到 0.7s**。
+    相对判据（2026-09-26）：绝对上界在满载下是假红，只看「扣没扣」。
+    """
     seen: list[float] = []
 
     def spy(got: int, total: int, elapsed: float, **kw):
@@ -494,32 +633,21 @@ def test_reroll_probe_uses_the_net_elapsed(monkeypatch) -> None:
     # patch 面：`_read_body` 的 global 解析在 `remote.http`（S4 第五步拆分）——
     # patch `remote.worker` 的名字只改转发名，改动不了 http 里的解析（静默空操作）。
     monkeypatch.setattr(http_mod, "_reroll_decision", spy)
+    monkeypatch.setattr(http_mod, "WIRE_PROBE_SEC", 0.3)
+    monkeypatch.setattr(http_mod.time, "time", _FakeClock(step=1.0))
     calls = {"n": 0}
 
-    # 让路时长 1.0 → 0.3（2026-09-29，§43）：判据是**相对**的（`wall - seen[0]` 必须约等于
-    # 让路时长 ⇒ 净值扣掉了它），1.0 只是「大到看得出来」；0.3 下阈值 0.15 仍与「没扣」
-    # （= 0）拉开 2×，而扣账是 impl 自己返回的数（确定性，不看机器脸色）。
     def pace() -> float:
         calls["n"] += 1
-        if calls["n"] > 1:  # 只有首块前那一次真让路（后两次别把用例拖慢）
-            return 0.0
-        # sleep-ok: 夹具模拟的工作量：一次停满 0.3s 的让路（不是同步手段）
-        time.sleep(0.3)
-        return 0.3
+        return 0.3 if calls["n"] == 1 else 0.0  # 只有首块前那一次让路
 
     resp = _FakeResp([b"x" * (256 * 1024)], total=256 * 1024)  # 声明=实收（本用例只测净值判据）
-    t0 = time.time()
     out = worker_mod._read_body(
         resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True, pace=pace
     )
-    wall = time.time() - t0
     assert len(out) == 256 * 1024
-    assert wall >= 0.3, "夹具没真让路（探针没被测到）"
-    assert len(seen) == 1, f"首块只该判一次：{seen}"
-    # **相对判据**（2026-09-26）：净值必须比墙钟小掉那次让路（0.3s）——满载时线程被剥夺
-    # 2.6s 会让净值一起涨（实测 elapsed=2.611 / wall=3.61），绝对上界（原 `seen[0] < 0.5`）
-    # 在负载下是假红；「让路被扣掉了」只看 seen[0] 是否明显小于 wall（没扣 ⇒ 两者≈相等）。
-    assert wall - seen[0] >= 0.15, f"让路时间没被扣掉：elapsed={seen[0]:.3f}（墙钟 ≈{wall:.2f}）"
+    assert len(seen) == 1, f"这一窗只该判一次：{seen}"
+    assert seen[0] == pytest.approx(0.7), "让路时间没被扣掉（净值 ≠ 墙钟 − Σ让路）"
 
 
 def test_net_elapsed_does_not_extend_the_wall_clock_timeout() -> None:
@@ -556,8 +684,7 @@ def test_preempt_error_carries_the_bytes_already_read() -> None:
 def test_reroll_probe_still_fires_when_the_link_is_really_slow(monkeypatch) -> None:
     """净值 ≠ 万灵药：**真**慢（没有让路可扣）仍必须重抽（别把支路修死）。
 
-    ★ 2026-10-12（迟滞）：断连要**连续 `WIRE_REROLL_PROBES` 个点都慢** ⇒ 夹具必须给够块
-    （原来只给一块，那是「判首块一次」时代的形状）。
+    2026-10-13：迟滞要**连续两窗**慢 ⇒ 两块各开一窗，第二窗动手（作废 = 两块）。
     """
     seen: list[float] = []
 
@@ -566,12 +693,15 @@ def test_reroll_probe_still_fires_when_the_link_is_really_slow(monkeypatch) -> N
         return True, 6.4 * 1024, 1180.0  # 判「该重抽」
 
     monkeypatch.setattr(http_mod, "_reroll_decision", spy)
+    monkeypatch.setattr(http_mod, "WIRE_PROBE_SEC", 1.0)
+    monkeypatch.setattr(http_mod.time, "time", _FakeClock(step=1.0))
     resp = _FakeResp([b"x" * (256 * 1024), b"y" * (256 * 1024)], total=8 * MB)
-    with pytest.raises(worker_mod.WireSlowError):
+    with pytest.raises(worker_mod.WireSlowError) as ei:
         worker_mod._read_body(
             resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True, pace=lambda: 0.0
         )
-    assert len(seen) == wire_mod.WIRE_REROLL_PROBES, f"真慢却没判满迟滞点数：{seen}"
+    assert len(seen) == 2 and seen[0] >= 0.0
+    assert ei.value.bytes_read == 512 * 1024  # 两窗判慢那一刻收到的两块
 
 
 def test_preempt_retries_do_not_consume_attempts(monkeypatch) -> None:
