@@ -5312,3 +5312,22 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
   课程/关卡相关 · `tests/remote/test_code_snapshot.py` = **388 passed / 6 skipped**。
   全文 → `docs/nn/training-stack.md` §33。
 
+## §2026-10-13-goalnn-x28-it40-verdict（2026-10-13，x28 双腿 it40 双杀：D05 死 null＋W08×4 强 null；40 轮止损生效）
+
+- **背景**：设计条 §2026-10-13-goalnn-x28-d01w08-design 的 it40 panel 门（160 对，
+  Δ 基准 = 已存 it0-panel；panel-resim ~3min/腿）。双腿训练全程健康（KL 0.010–0.019，
+  无 halt；policy-rms +0.7%/+0.6% 上报，不判门）。
+- **决定**：D1=d01 腿杀（主 D05 均值 −1.1%、同对中位 p=0.818 死 null，门线 ≤65.6 未到；
+  次 D09 p=0.093 方向对、不显著；D01 同对 p=0.042 **显著恶化**、通关 84→73——
+  税动姿态（D09/A05/A06 齐朝远）不动目标伤总账，不加量）；
+  D2=w08 腿杀（主 W08 +10% 反向、同对 p=0.136 null，门线 ≤14.7 未到；
+  杀敌率 p=0.039 **显著恶化**；×4 强 null = 方向死，不加量；后继 episode 列先行）；
+  D3=双腿结课归档（40 轮止损生效：门判只烧一轮 panel，无 overrun）；
+  D4=D05 直球另案（hurt 叠加/E2 收尸，用户拍板；脱离税弱备选）。
+- **备选与否决**：① nearSq 加到 ×3 —— 否（×1.5 已咬住姿态，D05 脱钩与剂量无关；
+  加量只多伤总账）；② wBlock 加到 ×8 —— 否（×4 已是预注册强 null，再加是换题不是续命）；
+  ③ 跑满 80 —— 否（门后 40 轮 = stack7 式空烧，门禁即为此设）；④ D09 marginal 转正续跑 ——
+  否（p=0.093 非显著，且 D01 反向恶化）。
+- **后果**：全文 → `docs/nn/experiments.md` §86；课程文件状态＋尾部判决已写回；
+  证据 `tmp/panel-x28-{d01,w08}-it40.jsonl` + `tmp/compare-x28-{d01,w08}-{it40,delta}.txt`。
+

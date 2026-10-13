@@ -1,4 +1,5 @@
 // 课程 x28-w08 —— 顶住税强剂量腿（wBlock 110→440，×4；x27 panel 终判的后继双腿之一）。
+// 状态：已结课（2026-10-13 收官；it40 主线 fail 双杀：W08 +10% 反向 p=0.136。结论见尾部判决 + docs/nn/experiments.md §86）。
 // 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
 //
 // 立项 → 用户 2026-10-13：x27 冻结后双腿并行（D01+W08）。panel verdict（§85）：
@@ -41,6 +42,16 @@
 //   · 环境键全在 level（`ladder-c20-lives1`），课程**不重复** `stages` 等键。
 //   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
 //   · §15.5 新实验：新 out/traj + backup 新目录 + opt fresh，不碰 x27 账本。
+//
+// ── it40 判决（2026-10-13；主线 fail，双杀；用户拍板）─────────
+//   跑量：it1–41；KL 全程健康，无 halt。
+//   主 W08：17.302→19.089（+10% 反向），同对 p=0.136 null——门线 ≤14.7 未到。
+//   ×4 强剂量下 burst 级强 null：顶住时长对此税无弹性（dense 非稀疏 Pzero=0.10；
+//   不是剂量问题，不是稀疏病）。护栏 kills 13.96 通过，但 panel 杀敌率 p=0.039 显著恶化——
+//   税伤杀敌、不动墙。D05/D01/W07 全 null（p=0.80/0.85/0.71）。
+//   结论：方向死（按此定价）；不加量（×4 已是强 null）。后继 = episode 列先行
+//   （先补列再定价，工程案），不开腿。policy-rms +0.6% 上报。
+//   证据：tmp/panel-x28-w08-it40.jsonl · tmp/compare-x28-w08-{it40,delta}.txt · §86。
 {
   "version": 5,
   "name": "x28-w08",
