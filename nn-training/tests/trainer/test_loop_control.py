@@ -26,10 +26,16 @@ from trainer.loop_control import (
     Control,
     ControlApplier,
     applied_path,
+    consume_redo,
     control_path,
     parse_control,
+    parse_redo,
     read_control,
+    read_redo,
+    read_redo_applied,
+    redo_path,
     write_applied,
+    write_redo_applied,
 )
 
 
@@ -335,3 +341,78 @@ def test_apply_on_an_empty_scheduler_is_harmless() -> None:
     sup = FakeSup()
 
     assert ControlApplier().apply(sup, parse_control({"paused": ["c5"]})) == []
+
+
+# ────────────────────────── ★M3「重发本轮 PPO」意图（plan/ppo-job-lifecycle-ownership §4） ──
+#
+# 与暂停/恢复同一套「意图文件 + 幂等回执」通道，但去重键不同：这份意图的 `at` 是**动作
+# 的去重键**（同一份意图只执行一次）。控制台半边在 `dashboard/tests/redo-ppo.test.ts`。
+
+def test_parse_redo_shape_matrix() -> None:
+    """形状：`it`/`at` 可缺省（0）；非对象 / 非整数 / 非数字 ⇒ 空 + 原因（保守：宁可不动作）。"""
+    assert parse_redo({"version": 1, "it": 12, "at": 1.5}) == parse_redo(
+        {"it": 12, "at": 1.5}
+    )
+    intent = parse_redo({"it": 12, "at": 1.5})
+    assert (intent.found, intent.it, intent.at, intent.error) == (True, 12, 1.5, "")
+
+    assert parse_redo([]).error == "redo 意图根不是对象"
+    assert parse_redo({"it": "x"}).error == "redo.it 不是整数"
+    assert parse_redo({"at": "x"}).error == "redo.at 不是数字"
+    # `it` 缺省 = 0（当前轮）；`at` 缺省 = 0（read_redo 会退回文件 mtime）。
+    empty = parse_redo({})
+    assert (empty.found, empty.it, empty.at) == (True, 0, 0.0)
+
+
+def test_read_redo_falls_back_to_mtime_when_at_is_missing(tmp_path: Path) -> None:
+    """手写 `{"it":188}` 也得能用：`at` 缺省 ⇒ 拿文件 mtime 当去重键（改一次文件 = 新意图）。"""
+    assert read_redo(tmp_path).found is False
+    p = redo_path(tmp_path)
+    p.write_text(json.dumps({"it": 188}), encoding="utf-8")
+    intent = read_redo(tmp_path)
+    assert intent.found and intent.it == 188
+    assert intent.at == pytest.approx(p.stat().st_mtime)
+    # 坏文件：永不抛（读侧保守，训练侧只记一行）。
+    p.write_text("{ not json", encoding="utf-8")
+    bad = read_redo(tmp_path)
+    assert bad.found is False and bad.error
+
+
+def test_consume_redo_is_idempotent_per_at(tmp_path: Path) -> None:
+    """★ 去重键 = `at`：同一份意图只执行一次；刷新 `at` = 再来一次。"""
+    p = redo_path(tmp_path)
+    p.write_text(json.dumps({"it": 0, "at": 100.0}), encoding="utf-8")
+
+    intent, err = consume_redo(tmp_path, 7)
+    assert err == "" and intent is not None and intent.at == 100.0
+    assert write_redo_applied(tmp_path, it=7, at=intent.at) == ""
+    assert read_redo_applied(tmp_path) == (7, 100.0)
+    # 同一份意图：已消费 ⇒ 不再返回（否则 `_remote_ppo_step` 每拍都会再撤一次刚重发的活）。
+    assert consume_redo(tmp_path, 7) == (None, "")
+    # 刷新 at ⇒ 新意图。
+    p.write_text(json.dumps({"it": 0, "at": 101.0}), encoding="utf-8")
+    again, _ = consume_redo(tmp_path, 7)
+    assert again is not None and again.at == 101.0
+
+
+def test_consume_redo_waits_for_the_targeted_iter(tmp_path: Path) -> None:
+    """正数 `it` 只对那一轮生效（不抢跑到别的轮）；`it<=0` = 当前轮，任何轮都命中。"""
+    p = redo_path(tmp_path)
+    p.write_text(json.dumps({"it": 9, "at": 100.0}), encoding="utf-8")
+    assert consume_redo(tmp_path, 7) == (None, "")  # 还没轮到
+    intent, _ = consume_redo(tmp_path, 9)
+    assert intent is not None  # 对上了
+    p.write_text(json.dumps({"it": -1, "at": 200.0}), encoding="utf-8")
+    assert consume_redo(tmp_path, 3)[0] is not None  # it<=0 ⇒ 当前轮
+
+
+def test_read_redo_applied_tolerates_garbage(tmp_path: Path) -> None:
+    """回执读面：缺/坏 ⇒ `(0, 0.0)`（永不抛——它只服务于「读到没有」的展示与去重）。"""
+    assert read_redo_applied(tmp_path) == (0, 0.0)
+    ap = tmp_path / "redo-ppo.applied.json"
+    ap.write_text(json.dumps({"it": "x", "at": None}), encoding="utf-8")
+    assert read_redo_applied(tmp_path) == (0, 0.0)
+    ap.write_text("[1,2]", encoding="utf-8")
+    assert read_redo_applied(tmp_path) == (0, 0.0)
+    ap.write_text(json.dumps({"it": 3, "at": 2.5}), encoding="utf-8")
+    assert read_redo_applied(tmp_path) == (3, 2.5)

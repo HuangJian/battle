@@ -33,7 +33,7 @@ import atexit
 import os
 import shutil
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -611,6 +611,57 @@ def reopened_parked(
     return out
 
 
+#: 「开关不一致」报警的两类（值即去重键的一部分）。
+SWITCH_MISMATCH_NO_MARKER = "no-marker"
+SWITCH_MISMATCH_PAUSED = "paused"
+
+
+def switch_mismatch_warnings(
+    running: Iterable[str],
+    paused: Iterable[str],
+    marker_present: Callable[[str], bool],
+    *,
+    warned: set[str],
+) -> list[str]:
+    """★M4 弱版（plan/ppo-job-lifecycle-ownership §5）：把开关对不上账喊出来——**零行为变更**。
+
+    两类不一致：
+      * `no-marker`：本地在跑这门课，但开课标记不在——hub 不会给它派新活
+        （2026-09-20 的派发闸），而本机还在推进；06:17 现场「serve 说在跑、hub 说未开课」
+        的那一半（另一半是时间线，取证后再定强版）。
+      * `paused`：标记在、课也已开，但被控制台暂停——hub 照旧派发，而本机不 probe
+        （`runnable()` 假）⇒ 新活/在飞都可能白算。
+
+    去重纪律与 `ControlApplier` 的「只在变化时产出日志」同口径：每个 `(课, 类型)` 只喊
+    一次；恢复一致后自动从 `warned` 摘名（再犯再喊）。纯函数（`marker_present` 注入），
+    可单测；调用方只负责把返回的行走日志。
+    """
+    live: set[str] = set()
+    running_set = set(running)
+    for course in sorted(running_set):
+        if not marker_present(course):
+            live.add(f"{course}:{SWITCH_MISMATCH_NO_MARKER}")
+    for course in sorted(set(paused) & running_set):
+        if marker_present(course):
+            live.add(f"{course}:{SWITCH_MISMATCH_PAUSED}")
+    out: list[str] = []
+    for key in sorted(live - warned):
+        course, kind = key.split(":", 1)
+        if kind == SWITCH_MISMATCH_NO_MARKER:
+            out.append(
+                f"[serve] WARN 开关不一致: {course} 在本地调度中，但开课标记不在"
+                "——hub 不会派发新活（标记由控制台「开课/停课」维护）"
+            )
+        else:
+            out.append(
+                f"[serve] WARN 开关不一致: {course} 有开课标记但已暂停"
+                "——hub 仍会派发，在飞/新活可能白算"
+            )
+    warned.clear()
+    warned.update(live)
+    return out
+
+
 def _open_courses(
     names: list[str],
     runtimes: dict[str, CourseRuntime],
@@ -883,11 +934,23 @@ def serve(
     )
 
     done_hooked: set[str] = set()
+    #: ★M4 弱版：开关不一致的已喊记账（恢复一致后自动摘名——再犯再喊）。
+    switch_warned: set[str] = set()
     control = ControlApplier()
     try:
         while True:
             # 控制面先于推进：暂停的那门课本拍就不会被选到（意图 → 调度，无中间态）。
-            control.apply(sup, read_control(control_file), path=control_file)
+            ctl = read_control(control_file)
+            control.apply(sup, ctl, path=control_file)
+            # ★M4 弱版（plan/ppo-job-lifecycle-ownership §5）：只喊不改——本地「在跑/暂停」
+            # 与「开课标记」对不上账就一行可 grep 的 WARN（06:17 两边各自自洽的现场）。
+            for _line in switch_mismatch_warnings(
+                sup.courses.keys(),
+                ctl.paused,
+                lambda c: course_enabled(course_traj(traj_root, c)),
+                warned=switch_warned,
+            ):
+                log(_line)
             trace = sup.step()
             if trace is not None:
                 report.steps += 1

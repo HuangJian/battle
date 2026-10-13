@@ -202,6 +202,140 @@ def read_control(path: str | None = None, *, now: float | None = None) -> Contro
     return parse_control(raw, now=now)
 
 
+# ============================================================ M3「重发本轮 PPO」意图
+# （plan/ppo-job-lifecycle-ownership §4）
+#
+# 为什么沿用 `loop-control.json` 这套「意图文件 + 幂等回执」：控制台要能对**单门课**下
+# 「丢弃当前 PPO job、用当前 code 重派」的命令，而训练进程不提供 HTTP 服务（同上：多一个
+# 端口/鉴权/故障域）。意图按课落盘（`tmp/<course>/redo-ppo.json`），回执写回同目录
+# （`redo-ppo.applied.json`，带 pid/at），控制台/人靠它分辨「读到没有」。
+#
+# 去重键 = 意图的 `at`（回执里原样记）：同一份意图只被执行一次（`_remote_ppo_step` 每拍
+# 都读；没有去重就会把刚重发的活反复再撤）。刷新 `at` = 再来一次。
+
+#: 重发意图文件名（控台写、训练侧读；按课落盘）。
+REDO_NAME = "redo-ppo.json"
+#: 重发回执文件名（训练侧写、控台/人读）。
+REDO_APPLIED_NAME = "redo-ppo.applied.json"
+
+
+@dataclass(frozen=True)
+class RedoIntent:
+    """一次「重发本轮 PPO」意图的快照（`found=False` = 没有/坏文件，绝不误触）。
+
+    `it` ≤ 0 或缺省 = 对**当前轮**生效；正数 = 只对那一轮生效（还没轮到就原地等，不抢跑）。
+    `at` = 去重键（控制台写入时给；缺失时退回文件 mtime——手写意图也能用）。
+    """
+
+    it: int = 0
+    at: float = 0.0
+    found: bool = False
+    error: str = ""
+
+
+def redo_path(traj_dir: str | os.PathLike[str]) -> Path:
+    """某课的重发意图路径（课程级：`tmp/<course>/redo-ppo.json`）。"""
+    return Path(traj_dir) / REDO_NAME
+
+
+def redo_applied_path(traj_dir: str | os.PathLike[str]) -> Path:
+    """某课的重发回执路径（与意图同目录）。"""
+    return Path(traj_dir) / REDO_APPLIED_NAME
+
+
+def parse_redo(raw: object) -> RedoIntent:
+    """解析重发意图（纯函数；形状不对 ⇒ 空 + 错误文案——保守：宁可不动作）。"""
+    if not isinstance(raw, dict):
+        return RedoIntent(error="redo 意图根不是对象")
+    try:
+        it = int(raw.get("it", 0) or 0)
+    except (TypeError, ValueError):
+        return RedoIntent(error="redo.it 不是整数")
+    try:
+        at = float(raw.get("at", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return RedoIntent(error="redo.at 不是数字")
+    return RedoIntent(it=it, at=at, found=True)
+
+
+def read_redo(traj_dir: str | os.PathLike[str]) -> RedoIntent:
+    """读某课的重发意图（**永不抛**；文件不存在/坏 ⇒ 空意图 + 原因）。
+
+    `at` 缺失（手写 `{"it":188}`）⇒ 退回文件 mtime 当去重键：改一次文件 = 新意图。
+    """
+    p = redo_path(traj_dir)
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return RedoIntent()
+    except (OSError, ValueError) as e:
+        return RedoIntent(error=f"redo 意图读失败（{type(e).__name__}: {e}）")
+    intent = parse_redo(raw)
+    if intent.error or not intent.found or intent.at > 0.0:
+        return intent
+    try:
+        return RedoIntent(it=intent.it, at=p.stat().st_mtime, found=True)
+    except OSError:
+        return intent
+
+
+def write_redo_applied(traj_dir: str | os.PathLike[str], *, it: int, at: float) -> str:
+    """原子写重发回执（tmp + replace）。返回错误文案（空 = 成功）——回执失败**不影响训练**。
+
+    形状与 `loop-control.applied.json` 同族：`pid` 供存活核对、`at` = **被消费的意图时间戳**
+    （去重键原样回写）、`ts` = 写入时刻。
+    """
+    p = redo_applied_path(traj_dir)
+    body = json.dumps(
+        {"version": 1, "it": int(it), "at": float(at), "pid": os.getpid(), "ts": time.time()},
+        ensure_ascii=False,
+    )
+    tmp = p.with_name(f".{p.name}.{os.getpid()}.tmp")
+    try:
+        tmp.write_text(body, encoding="utf-8")
+        os.replace(tmp, p)  # 同目录替换：读侧要么读到旧的、要么读到新的，永不读到半个
+        return ""
+    except OSError as e:
+        return f"{type(e).__name__}: {e}"
+
+
+def read_redo_applied(traj_dir: str | os.PathLike[str]) -> tuple[int, float]:
+    """读回执的 `(it, at)`（缺/坏 ⇒ `(0, 0.0)`）——某个意图是否已被消费的判据。"""
+    p = redo_applied_path(traj_dir)
+    try:
+        raw = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0, 0.0
+    if not isinstance(raw, dict):
+        return 0, 0.0
+    try:
+        return int(raw.get("it", 0) or 0), float(raw.get("at", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        return 0, 0.0
+
+
+def consume_redo(
+    traj_dir: str | os.PathLike[str], it: int
+) -> tuple[RedoIntent | None, str]:
+    """把某课的重发意图消费成一次动作（幂等）。
+
+    返回 `(intent, error)`：`intent` 非 None = **本次该执行**（调用方随后必须
+    `write_redo_applied` 落去重键）；None = 没有意图 / 还没轮到这一轮 / 同一份意图
+    已经消费过。`error` 非空 = 文件坏（调用方负责记一行、保守不动作）。
+    """
+    intent = read_redo(traj_dir)
+    if intent.error:
+        return None, intent.error
+    if not intent.found:
+        return None, ""
+    if intent.it > 0 and intent.it != int(it):
+        return None, ""
+    _a_it, a_at = read_redo_applied(traj_dir)
+    if a_at > 0.0 and abs(a_at - intent.at) < 1e-9:
+        return None, ""  # 同一份意图已消费（回执即去重键）
+    return intent, ""
+
+
 class ControlApplier:
     """把控制意图施加到调度器上，并**只在变化时**产出日志（轮询友好）+ 写回执。"""
 

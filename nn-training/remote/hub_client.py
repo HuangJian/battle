@@ -1251,6 +1251,107 @@ def cancel_stale_jobs(jsonl_path: str | Path, it: int, keep_job_id: str) -> int:
     return n
 
 
+def reap_job_dir(
+    job_root: str | Path,
+    jid: str,
+    *,
+    run_id: str = "",
+    it: int | None = None,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+) -> bool:
+    """**带护栏**删除一个 job 目录（M1/M2/M3 共用；防误删本身就是新的事故源）。
+
+    护栏（任一不符 ⇒ 拒删 + WARN，返回 False）：
+      1. `<job_root>/<jid>/` 在盘；
+      2. `manifest.json` 在盘且 `job_id == jid`（不是别人的目录/半发布残留）；
+      3. `run_id` 非空 ⇒ `manifest.runId == run_id`（账本行的 runId——防「账本与目录错位」，
+         这正是 2026-10-13 事故里人工 rm 误删新 job 的形状）；
+      4. `it` 非 None ⇒ `manifest.it == it`（同上）。
+
+    删除走 `rmtree_best_effort`：失败（占用/权限）只记日志，**永不抛**。
+    """
+    jd = Path(job_root) / jid
+    if not jd.is_dir():
+        return False
+    try:
+        man = json.loads((jd / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log(f"WARN: {jd} 无 manifest.json/损坏——拒绝删除（护栏）")
+        return False
+    if not isinstance(man, dict) or str(man.get("job_id") or "") != jid:
+        log(f"WARN: {jd} 的 manifest.job_id 与目录名不符——拒绝删除（护栏）")
+        return False
+    if run_id and str(man.get("runId") or "") != run_id:
+        log(
+            f"WARN: {jd} 的 manifest.runId={man.get('runId')!r} 与账本 {run_id!r} 不符"
+            "——拒绝删除（护栏）"
+        )
+        return False
+    if it is not None and man.get("it") != it:
+        log(f"WARN: {jd} 的 manifest.it={man.get('it')!r} 与账本 {it!r} 不符——拒绝删除（护栏）")
+        return False
+    rmtree_best_effort(jd, ignore_errors=True)
+    return True
+
+
+def cancel_jobs_of_previous_runs(
+    jsonl_path: str | Path,
+    job_root: str | Path,
+    run_id: str,
+    *,
+    hub_url: str = "",
+    hub_token: str = "",
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+) -> list[str]:
+    """M2：把**上一个 runId** 留在本课账本里的 pending job 整体作废，并兑现到磁盘。
+
+    与 `cancel_stale_jobs` 的分工：那条按 `it <=` 在**发布新活那一刻**清滞后项；这条按
+    **runId** 在**腿启动时**清上一代（与 it 无关）——“重启了就该从头再来”的唯一实现。
+    `RUN_ID` 是进程级常量（`trainer/dispatch_queue.py`），serve 一进程多课共享：
+    同进程内停/开课**不**触发，这是有意语义（那是 M3「重发本轮」的活）。
+
+    每个命中 jid：
+      ① 写 `job_cancelled`（幂等净态门；唯一事实源，hub 认领闸按净态对账）；
+      ② best-effort `POST /admin/unfreeze`（冻结只住 hub 内存；不清 ⇒ 同 jid 重发死）；
+      ③ best-effort `POST /admin/cancel-job`：404（未知）/脱网容忍；**409 = 在飞不撤**
+         （2026-10-03 用户裁决）——账本已作废，目录留给在算的 worker 回传；
+      ④ 过护栏删目录（`reap_job_dir`：manifest 的 job_id/runId/it 与账本行一致才删）。
+
+    返回被清理的 jid 列表。**永不抛**给调用方——清不掉不能阻断开关课。
+    """
+    from remote.hub_http import ADMIN_CANCEL_INFLIGHT, admin_cancel_job, unfreeze_job
+    from worker.bc_ledger import scan_jobs
+
+    pending, _done, terminal = scan_jobs(jsonl_path)
+    out: list[str] = []
+    for jid, row in sorted(pending.items()):
+        if jid in terminal:
+            continue  # 已有终局事件（收口/作废）——净态不是 pending，不碰（保守）
+        row_run = str(row.get("runId") or "")
+        if not row_run or row_run == run_id:
+            continue  # 缺 runId 的历史行 / 本轮自己的活：不碰
+        row_it = row.get("it") if isinstance(row.get("it"), int) else None
+        # ① 账本作废（幂等）
+        cancel_job(
+            jsonl_path,
+            jid,
+            reason=f"上一 runId {row_run[:8]}… 遗留（腿启动清理）",
+            it=row_it,
+        )
+        # ②/③ hub 侧最好努力（不可达/在飞都容忍）
+        unfreeze_job(hub_url, hub_token, jid, log=log)
+        if admin_cancel_job(hub_url, hub_token, jid, log=log) == ADMIN_CANCEL_INFLIGHT:
+            log(f"上一 runId 的 job {jid} 在飞（hub 409 不撤）——账本已作废，目录保留给回传")
+            out.append(jid)
+            continue
+        # ④ 护栏删除
+        reap_job_dir(job_root, jid, run_id=row_run, it=row_it, log=log)
+        out.append(jid)
+    if out:
+        log(f"启动清理：作废上一 runId 的 {len(out)} 份残留 job（与 it 无关）")
+    return out
+
+
 def cancel_job(
     jsonl_path: str | Path, job_id: str, *, reason: str = "", it: int | None = None
 ) -> bool:

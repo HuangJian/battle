@@ -26,6 +26,8 @@
  *                    ——接管是 hub 的 hold 事实，开课弹窗只保留 rollout 位置这一把活旋钮
  *    auto-offline-handoff  hub 反向调用：自动交接只导任务包（★M4；旧 `course-mode.ts`
  *                    的意图表/三颗钮/回灌随课程去模式化一起删除）
+ *    redo-ppo         ★M3「重发本轮 PPO」意图（`tmp/<课>/redo-ppo.json` + 回执；
+ *                    只写意图文件，训练进程下一拍撤单并重发同 jid——不重启整条腿）
  */
 
 // ── facade 再导出（原 actions.ts 第 22 行的转发；调用方零改动）──
@@ -39,6 +41,7 @@ export * from './auto-offline-handoff'
 export * from './poison'
 export * from './course-lifecycle'
 export * from './loop-control'
+export * from './redo-ppo'
 export * from './labels'
 export * from './start'
 export * from './stop'

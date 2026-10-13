@@ -431,6 +431,26 @@ function RowOps({
           {pause.label}
         </button>
       ) : null}
+      {/* ★M3（plan/ppo-job-lifecycle-ownership §4）：「重发本轮 PPO」——只写意图文件
+          （`tmp/<课>/redo-ppo.json`），训练进程下一拍撤当前 job 并**用同一 jid** 重发；
+          不碰进程、不必重启整条腿（此前只有「重启 trainer」或「手动 rm 目录」两条路，
+          后者正是 2026-10-13 事故的入口）。只在课程处于本地调度中（`pause` 非空 = 有
+          在跑的轮）时画——没有在跑的轮，意图也无人消费。 */}
+      {pause ? (
+        <button
+          type="button"
+          className="tc-btn tc-btn--sm"
+          aria-label={`重发本轮 PPO ${r.course}`}
+          title={
+            '丢弃当前 PPO job，用当前 code 在下一拍重派（同 jid 复活）：控制台只写一份意图文件，' +
+            '训练进程每拍读一次（幂等，按 at 去重）。撤单时若那份活已在云机上跑（hub 409），' +
+            '**不硬杀**——账本照写、目录留给回传，本机不再等它。'
+          }
+          onClick={() => void onAction('redoPpo', { course: r.course })}
+        >
+          重发 PPO
+        </button>
+      ) : null}
       {/* ★M4：旧的三颗模式钮（切离线/切换成在线/交还自动池）随「课程不再分在线/离线」退役——
           人唯一能干预接管的地方是「强制解除接管」（`release_hold=1`：立墓碑 + 清 hold ⇒
           本机下一轮恢复采样、协作派发立即恢复、新自主盘可当场 claim）。与矩阵同行同一判据

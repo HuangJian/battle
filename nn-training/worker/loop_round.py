@@ -146,8 +146,17 @@ class RemotePpoJob:
     #: 等结果预算（发布时算定：同一份 job 的超时不该因为「谁先问了一句」而变）。
     timeout_sec: float = 0.0
     #: 发布起点的墙钟（`_ppo_sec` 往返口径的分母）与打包墙钟（wire 读数）。
+    #: ★M1（plan/ppo-job-lifecycle-ownership §2）：`t_ppo` 同时就是 lost 看门狗的
+    #: 「发布时刻」——不另加 `published_at` 字段（一个事实一个字段）。
     t_ppo: float = 0.0
     pack_sec: float = 0.0
+    #: M1 看门狗（纯内存，不进 wire）：hub 侧第一次答「不认识这个 jid」的墙钟
+    #: （0 = 表未起；连续 ≥ LOST_GRACE_SEC 判 lost）。
+    lost_since: float = 0.0
+    #: M1 看门狗：上一次 `/jobs/{id}/status` 探询的墙钟（节流；0 = 还没问过）。
+    last_lost_probe: float = 0.0
+    #: M1：细粒度路径上一次「在等什么」打点的墙钟（0 = 还没打过）。
+    last_wait_report: float = 0.0
     kick_on: bool = False
     kick_kl: float = 0.0
     #: 整轮上云规格（非空 = 节点侧采集）。

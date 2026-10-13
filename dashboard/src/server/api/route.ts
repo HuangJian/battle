@@ -13,6 +13,7 @@ import {
   jobIdError,
   markCloudHaltRecovered,
   openCourse,
+  redoPpo,
   registerPushWorker,
   releaseCourseHold,
   reloadPushWorkers,
@@ -378,6 +379,13 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
       case 'setCoursePaused':
         return okResp(
           setCoursePaused(bodyStr(body, 'course'), body.paused !== false, loopControlPath()),
+        )
+      // ---- ★M3「重发本轮 PPO」意图（plan/ppo-job-lifecycle-ownership §4）：写
+      // `tmp/<课>/redo-ppo.json`，训练进程每拍读（幂等，按 at 去重）——只写意图文件，
+      // 不碰进程、不碰 hub（与 setCoursePaused 同一通道纪律）。`it` 缺省 0 = 当前轮。
+      case 'redoPpo':
+        return okResp(
+          redoPpo(bodyStr(body, 'course'), body.it === undefined ? 0 : Number(body.it) || 0),
         )
       case 'removePushWorker':
         return okResp(await removePushWorker(bodyStr(body, 'id')))

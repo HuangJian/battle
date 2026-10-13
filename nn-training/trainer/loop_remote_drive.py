@@ -27,7 +27,15 @@ from trainer.loop_remote_fail import TrainingRemoteFail
 from trainer.loop_remote_job import TrainingRemoteJob
 from trainer.loop_transport import fatal_remote_http, remote_retryable_exceptions
 from worker.events import write_gate_verdict
-from worker.loop_round import RoundContext, StepResult, wait_for
+from worker.loop_round import RemotePpoJob, RoundContext, StepResult, wait_for
+
+#: ★M1（plan/ppo-job-lifecycle-ownership §2）看门狗：两次 `/jobs/{id}/status` 探询的最小
+#: 间隔（秒）——节流，防把 hub 变成新的轮询热点。
+LOST_PROBE_SEC = 30.0
+#: ★M1 看门狗：hub 侧持续答「不认识这个 jid」多久才判 lost（秒）。
+#: 宽限期**必须**给：`publish` 到 hub 扫到目录之间有秒级窗口（`hub/queue_discover.py`），
+#: 不给宽限会把正常排队误判成丢失。检测上界 = 宽限 + 2×探针节拍（≈120s）。
+LOST_GRACE_SEC = 60.0
 
 
 class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
@@ -38,6 +46,8 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
     # `_leg_abort` / `_remote_fail` 由基类声明（同一个对象的契约分片）。
     _report: dict
     _rollout_sec: float
+    #: M3（plan/ppo-job-lifecycle-ownership §4）：重发意图的「坏文件只喊一次」去重（空 = 无错）。
+    _redo_err_note: str
     #: M3：本轮节点侧采集墙钟；None = 本轮不在节点采集（本地轮）。必须在这里声明类型
     #: ——只在 _remote_iter 里赋值会被 mypy 推成 float，子类的 `float | None` 就冲突。
     _node_rollout_sec: float | None
@@ -57,6 +67,10 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
         """
         it = ctx.it
         sess = ctx.remote
+        # ★M3：重发本轮意图先消费（每拍读一次；命中 ⇒ 撤单 + 丢 sess ⇒ 本拍走正常发布路径）。
+        if sess is not None and self._maybe_consume_redo(sess, it):
+            sess = None
+            ctx.remote = None
         if sess is None:
             try:
                 sess = self._remote_ppo_publish(it)
@@ -73,6 +87,11 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
             return None
         if result is None:
             if ctx.resumable:
+                if self._remote_ppo_lost(sess, it):
+                    # 已判 lost 并撤单：丢掉这条会话——下一拍 `ctx.remote` 为空 ⇒ 走正常
+                    # 发布路径重发**同一 jid**（幂等键不含 code/时间，重发就是同一份活的复活）。
+                    ctx.remote = None
+                    return wait_for(f"等远端 PPO 重发（job {sess.jid} 已在 hub 侧丢失，已撤单）")
                 # ★ 让位点：job 已经发布，只是还没回。本机没在替它干活（云机在跑）
                 # ⇒ 票还掉，机器让给别的课（`hold=False` 见 `LoopRunner`）。
                 return wait_for(f"等远端 PPO 回传（job {sess.jid}）")
@@ -99,6 +118,151 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
         ctx.remote = None
         self._remote_fail = 0
         return None
+
+    # ------------------------------------------------------- M1 看门狗 / M3 重发（2026-10-13）
+
+    def _remote_wait_report(self, sess: RemotePpoJob, now: float) -> None:
+        """细粒度路径的「在等什么」打点（与 `wait_job` 共用同一个 `_wait_state_note`）。
+
+        节流按墙钟：每 `WAIT_REPORT_SEC` 一行（常量与 `wait_job` 同一份，不各写一份节拍）。
+        它是这条路径**唯一**的现场可见性——细粒度路径没有超时兜底，零打点的后果就是
+        2026-10-13 事故里的「安静地挂 22 分钟」。观测失败永不影响等待语义
+        （`_wait_state_note` 自身 best-effort）。
+        """
+        from remote.hub_http import WAIT_REPORT_SEC, _wait_state_note
+
+        base = sess.last_wait_report or sess.t_ppo
+        if now - base < WAIT_REPORT_SEC:
+            return
+        sess.last_wait_report = now
+        waited = now - sess.t_ppo
+        if sess.transport == "hub":
+            line = _wait_state_note(sess.hub_url, sess.hub_token, sess.jid, waited)
+        else:
+            # push 腿的状态端点在节点上、路径不同（`/job/{jid}/status`）——本刀不猜它的形状，
+            # 只报「在等谁、等了多久」。TODO(push)：补节点侧状态问询（同 M1 的判据表）。
+            line = f"job {sess.jid} 等待节点回传（transport=push）（已等 {waited:.0f}s）"
+        log("[run_rl] " + line)
+
+    def _remote_ppo_lost(self, sess: RemotePpoJob, it: int) -> bool:
+        """M1 看门狗：让位期间把「这份 job 还能不能回来」问出一个答案。
+
+        返回 True = **已判 lost 并撤单**（调用方不再等旧 jid；下一拍正常发布路径重发同 jid）。
+        返回 False = 还在等（含：hub 还不认识它但没超宽限 / hub 不可达 / hub 说在跑或排队）。
+
+        判据（唯一实现；分类表见 plan §2(a)）：
+          * `/jobs/{id}/status` **404** = hub 侧不存在这个 jid ⇒ 起表/续表 `lost_since`；
+          * `200`（pending/leased/done/failed/frozen 任意）= hub 认识 ⇒ 清表；
+          * 异常 / 其它状态码 = 网络问题 ⇒ **不动表、更不判 lost**（判错的代价是一次完整重发）。
+        """
+        now = time.time()
+        self._remote_wait_report(sess, now)
+        if sess.transport != "hub":
+            # push 腿（直推节点）的状态面是 `push_client.poll_result`（另一个端点）——本刀只在
+            # hub 路径（含 hub 中介推送）生效。TODO(push)：补等价判据（别假装覆盖）。
+            return False
+        if now - sess.last_lost_probe < LOST_PROBE_SEC:
+            return False
+        sess.last_lost_probe = now
+        from remote.hub_http import JOB_ALIVE, JOB_UNKNOWN, job_liveness
+
+        st = job_liveness(sess.probe_base_url, sess.probe_token, sess.jid)
+        if st == JOB_ALIVE:
+            if sess.lost_since:
+                log(f"[run_rl] it{it}: job {sess.jid} 恢复可见（hub 侧又认识它）——撤销丢失观察")
+                sess.lost_since = 0.0
+            return False
+        if st != JOB_UNKNOWN:
+            # unreachable：不动表（也不清）——网络抖动不是丢失；但**绝不**据此判 lost。
+            return False
+        if not sess.lost_since:
+            sess.lost_since = now
+            log(
+                f"[run_rl] it{it}: job {sess.jid} 在 hub 侧不存在（status 404）——进入 "
+                f"{LOST_GRACE_SEC:.0f}s 宽限观察（多为刚发布/刚重启的秒级窗口）"
+            )
+            return False
+        waited = now - sess.lost_since
+        if waited < LOST_GRACE_SEC:
+            return False
+        # 判 lost：撤单 + 丢会话 ⇒ 下一拍重发同一 jid（同幂等键 = 同一份活复活，
+        # hub 认领闸按账本净态放行）。连败预算复用 `_bump_remote_fail`（3 次 ABORT，不新造阈值）。
+        self._cancel_remote_job(sess, it=it, reason=f"hub 侧不存在（lost 持续 {waited:.0f}s）")
+        self._bump_remote_fail(it, f"job {sess.jid} 在 hub 侧丢失（持续 {waited:.0f}s）")
+        log(
+            f"[run_rl] it{it}: job {sess.jid} 在 hub 侧已不存在（lost 持续 {waited:.0f}s）"
+            "— 已撤单；下一拍重发同 jid"
+        )
+        return True
+
+    def _maybe_consume_redo(self, sess: RemotePpoJob, it: int) -> bool:
+        """M3：消费「重发本轮 PPO」意图（幂等）。返回 True = 已撤单（调用方丢 `ctx.remote`）。
+
+        意图文件 `tmp/<course>/redo-ppo.json`（控制台写；形状/回执契约见 `trainer/loop_control.py`）：
+        命中且 `it` 与当前轮一致（或未限定）⇒ 撤当前 sess、写回执；**按 `at` 去重**——同一份
+        意图只执行一次（否则 `_remote_ppo_step` 每拍都会再撤一次刚重发的活，变成无限重发）。
+        坏文件只喊一次（按错误文案去重），宁可不动作。
+        """
+        # 课程级路径（`tmp/<course>/redo-ppo.json`）——**不是** `_traj_dir`（那是本轮
+        # `it<N>/`），意图文件按课存在、跨轮存活。
+        traj = getattr(self, "_traj_root", None)
+        if traj is None:
+            return False
+        from trainer.loop_control import consume_redo, write_redo_applied
+
+        intent, err = consume_redo(traj, it)
+        if err:
+            if err != self._redo_err_note:
+                self._redo_err_note = err
+                log(f"[run_rl] 忽略重发意图（保守：不动作）：{err}")
+            return False
+        if intent is None:
+            return False
+        self._cancel_remote_job(sess, it=it, reason="控制台重发本轮 PPO")
+        werr = write_redo_applied(traj, it=it, at=intent.at)
+        if werr:
+            log(f"[run_rl] WARN 重发回执写入失败（不影响训练）：{werr}")
+        log(f"[run_rl] it{it}: 控制台要求重发本轮 PPO——已撤单 job {sess.jid}；本拍重发同 jid")
+        return True
+
+    def _cancel_remote_job(self, sess: RemotePpoJob, *, it: int, reason: str) -> None:
+        """撤单一条已发布的远端 job（M1 lost / M3 redo 共用）——**不硬杀在飞**。
+
+        ① 写账本 `job_cancelled`（幂等净态门；唯一事实源，hub 的认领闸按净态对账）；
+        ② best-effort `POST /admin/unfreeze`（冻结只住 hub 进程内存；不清 ⇒ 同 jid 重发后
+           `/result` 立刻 410 PoisonFrozen——「自愈」变「停腿」）；
+        ③ best-effort `POST /admin/cancel-job`：404（未知/已不在池）/409（**在飞，hub 不撤**，
+           2026-10-03 用户裁决）都容忍——**409/不可达时不删目录**（在算的 worker 回传要落进
+           它；结果回来若 commit 不符会被三重校验响亮拒收，是既有语义），其余档位过护栏
+           (`reap_job_dir`：manifest 的 job_id/runId/it 与账本一致才删) 清场。
+        任何一步失败都只降级为「只写账本」，绝不阻断训练主链。
+        """
+        from remote.hub_client import cancel_job, reap_job_dir
+        from remote.hub_http import (
+            ADMIN_CANCEL_INFLIGHT,
+            ADMIN_CANCEL_UNREACHABLE,
+            admin_cancel_job,
+            unfreeze_job,
+        )
+
+        cancel_job(self._jsonl_path, sess.jid, reason=reason, it=it)
+        unfreeze_job(sess.hub_url, sess.hub_token, sess.jid, log=log)
+        verdict = admin_cancel_job(sess.hub_url, sess.hub_token, sess.jid, log=log)
+        if verdict in (ADMIN_CANCEL_INFLIGHT, ADMIN_CANCEL_UNREACHABLE):
+            if verdict == ADMIN_CANCEL_UNREACHABLE:
+                log(
+                    f"[run_rl] it{it}: job {sess.jid} 人工作废未送达（hub 不可达）——"
+                    "只写账本降级、目录保留"
+                )
+            return
+        man_it = sess.manifest.get("it")
+        reap_job_dir(
+            sess.job_root,
+            sess.jid,
+            run_id=str(sess.manifest.get("runId") or ""),
+            it=int(man_it) if isinstance(man_it, int) else None,
+            log=log,
+        )
 
     def _remote_iter(self, it: int, pairs: list[tuple[int, int]]) -> None:
         """M3：**整轮上云**（kind=iter）——节点跑 rollout + PPO，hub 只发规格、收结果。

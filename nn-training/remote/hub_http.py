@@ -263,7 +263,10 @@ def _job_failed_from_body(jid: str, body: bytes) -> JobFailedError:
 #: 等待期「饥饿响亮」的默认节流（秒）：每 N 秒把「在等什么」写一行（见 `wait_job`）。
 #: 理由（plan/accident.plan.md §3）：零 worker 时训练侧原先只有超时一条路——job 被反复
 #: 派发/过期 3.5 小时而日志安静如常。等着可以，**安静地等**不行。
-WAIT_REPORT_SEC = 300.0
+#: ★2026-10-13（plan/ppo-job-lifecycle-ownership §2）：300 → 120——细粒度路径现在也用它
+#: （`loop_remote_drive._remote_wait_report`），而那条路没有超时兜底，打点就是唯一的现场
+#: 可见性；两条路共用本常量，不各写一份节拍。
+WAIT_REPORT_SEC = 120.0
 
 
 #: 非阻塞探针的三态（`probe_job_result` 的 `state`）。
@@ -338,6 +341,121 @@ def poll_job(
     单进程调度器的让位判据就靠它（R2c-3）：**问一句就走**——不等、不睡、不轮询。
     """
     return probe_job_result(base_url, token, jid, timeout=timeout).result
+
+
+#: `job_liveness` 的三态（M1 看门狗专用；**不是**三态里那个 404≡pending 的探针语义）。
+JOB_ALIVE = "alive"  # hub 认识这个 jid（任意 state：pending/leased/done/failed/frozen）
+JOB_UNKNOWN = "unknown"  # hub 侧不存在这个 jid（404——目录被删 / 课程不认识它）
+JOB_UNREACHABLE = "unreachable"  # 没答上来（网络/5xx/其它）：**不许**据此判丢失
+
+
+def job_liveness(
+    base_url: str, token: str, jid: str, *, timeout: float = PROBE_TIMEOUT_SEC
+) -> str:
+    """「这个 jid 在 hub 侧还在不在」——**只读、无副作用**（M1 看门狗的唯一判据）。
+
+    为什么走 `/status` 而不是 `/result`：结果端点的 404 是「还没回」的正常等待语义
+    （`probe_job_result`，hub 与节点两条链共用，不许动）；而 `/status` 对未知 jid 明确
+    回 **404**（`hub/result.py::_get_status` 的 manifest 检查 + `_job_or_404` 的哨兵路径，
+    `hub/queue_observe.py::_job_dir`），200 则表示「hub 认识它」（pending/leased/done/…
+    任意 state 都算认识）。分类写死成三态，**异常/其它状态码绝不等于丢失**——网络抖动
+    不是 lost（判错的代价是一次完整的重发+重算）。
+
+    超时与 `poll_job` 同档（`PROBE_TIMEOUT_SEC`）：它也会被单进程调度器同步调用，
+    「问一句就走」的纪律一样适用。
+    """
+    try:
+        status, _body = _request(base_url, token, f"/jobs/{jid}/status", timeout=timeout)
+    except Exception:  # 网络层（隧道抖动/DNS/连接拒绝）——不是「它没了」
+        return JOB_UNREACHABLE
+    if status == 200:
+        return JOB_ALIVE
+    if status == 404:
+        return JOB_UNKNOWN
+    return JOB_UNREACHABLE
+
+
+def unfreeze_job(
+    base_url: str,
+    token: str,
+    jid: str,
+    *,
+    timeout: float = 15.0,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+) -> bool:
+    """best-effort 解冻一个被熔断的 job（`POST /admin/unfreeze?job_id=`）。
+
+    为什么撤单重发（M1/M2/M3）都要顺带调它：`_frozen`（§4.1 毒包熔断）**只住 hub 进程
+    内存**（`hub/store_leases.py`），训练侧清不了文件；不清 ⇒ 同 jid 重发后 `/result`
+    立刻 410 PoisonFrozen ⇒ 探针抛 `JobFailedError` ⇒ 确定性失败停腿——「自愈」变成
+    「杀手」。
+
+    返回 True = hub 确认解冻（或本来就没有可解冻的）。404（未知 job）/409（未冻结）
+    都不算错误面，安静返回 False；**永不抛**（解冻失败不阻断任何主链）。
+    """
+    if not base_url or not jid:
+        return False
+    try:
+        status, body = _request(
+            base_url,
+            token,
+            f"/admin/unfreeze?job_id={urllib.parse.quote(jid)}",
+            timeout=timeout,
+            method="POST",
+        )
+    except Exception as e:
+        log(f"job {jid} 解冻请求未送达（{type(e).__name__}）——继续（重发可能吃 410）")
+        return False
+    if status == 200:
+        return True
+    if status in (404, 409):
+        return False  # 未知/未冻结——都不是错误面
+    log(f"job {jid} 解冻被拒：HTTP {status}: {body[:200].decode('utf-8', 'replace')}")
+    return False
+
+
+#: `admin_cancel_job` 的四态（与 `job_liveness` 同款：可判别的字符串，不靠异常）。
+ADMIN_CANCEL_DONE = "cancelled"  # hub 已作废（账本 job_cancelled；已从可领池移除）
+ADMIN_CANCEL_INFLIGHT = "inflight"  # 在飞：hub 硬拒（409）——调用方**不得**删目录
+ADMIN_CANCEL_UNKNOWN = "unknown"  # 404：hub 不认识/已不在池（重发视角下等价于「可清场」）
+ADMIN_CANCEL_UNREACHABLE = "unreachable"  # 网络/非预期状态码：只降级，别当结论
+
+
+def admin_cancel_job(
+    base_url: str,
+    token: str,
+    jid: str,
+    *,
+    timeout: float = 15.0,
+    log=lambda msg: print(f"[{time.strftime('%H:%M:%S')}] [hub] {msg}", flush=True),
+) -> str:
+    """best-effort 人工作废（`POST /admin/cancel-job?job_id=`）——**只对未被认领的 job 生效**。
+
+    三态语义从 hub 侧原样搬运（`hub/admin.py::_admin_cancel_job`）：200 = 已作废；
+    409 = **在飞，hub 不撤**（2026-10-03 用户裁决「不管在算的，只管没领的」）——此时
+    调用方**不得删目录**：在算的 worker 回传要落进它；404 = 未知/已不在池。
+    网络失败一律 `unreachable`（降级，不作任何结论）。**永不抛**。
+    """
+    if not base_url or not jid:
+        return ADMIN_CANCEL_UNREACHABLE
+    try:
+        status, body = _request(
+            base_url,
+            token,
+            f"/admin/cancel-job?job_id={urllib.parse.quote(jid)}",
+            timeout=timeout,
+            method="POST",
+        )
+    except Exception:
+        return ADMIN_CANCEL_UNREACHABLE
+    if status == 200:
+        return ADMIN_CANCEL_DONE
+    if status == 409:
+        return ADMIN_CANCEL_INFLIGHT
+    if status == 404:
+        return ADMIN_CANCEL_UNKNOWN
+    log(f"job {jid} 人工作废被拒：HTTP {status}: {body[:200].decode('utf-8', 'replace')}")
+    return ADMIN_CANCEL_UNREACHABLE
 
 
 def _wait_state_note(base_url: str, token: str, jid: str, waited: float) -> str:

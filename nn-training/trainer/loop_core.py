@@ -155,6 +155,29 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         self._save_weights_json: Any = None
         self._traj_root = Path(args.traj)
         self._jsonl_path: Path = self._traj_root / "training_log.jsonl"
+        #: M3（plan/ppo-job-lifecycle-ownership §4）：重发意图的「坏文件只喊一次」去重。
+        self._redo_err_note = ""
+        # M2（plan/ppo-job-lifecycle-ownership §3）：腿启动 = 上一代 runId 的活整体作废
+        # （写账本 + 兑现到磁盘）。**只在这里**发生（不是发布时）——publish 前的
+        # `cancel_stale_jobs` 仍是兜底。任何失败都只降级，绝不阻断开课。
+        try:
+            from remote.hub_client import cancel_jobs_of_previous_runs
+            from trainer.dispatch_queue import RUN_ID
+
+            _job_root = Path(
+                getattr(args, "remote_job_root", "") or (self._traj_root / "remote-jobs")
+            )
+            if _job_root.exists():
+                cancel_jobs_of_previous_runs(
+                    self._jsonl_path,
+                    _job_root,
+                    RUN_ID,
+                    hub_url=str(getattr(args, "remote_hub_url", "") or ""),
+                    hub_token=str(getattr(args, "remote_token", "") or ""),
+                    log=log,
+                )
+        except Exception as e:  # 清理失败不能阻断开关课（下一拍/下一进程还有机会）
+            log(f"[run_rl] WARN 启动清理上一 runId 残留未完成（不影响开课）：{type(e).__name__}: {e}")
         self._rotate_seed = 0
         # 动态采集（plan/dynamic-rollout-volume）：None = 本轮课程未开该模式，
         # 事件字段随之留空（additive，旧行无此键）；开启时 = 目标/已结算 transitions。

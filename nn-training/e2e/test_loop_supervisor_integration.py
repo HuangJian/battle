@@ -711,3 +711,89 @@ def test_step_mode_writes_the_same_ledger_shape_as_round_mode(tmp_path: Path) ->
     # 读面对比：细粒度队列的完成痕迹是**每一步**（13 条），轮粒度只有 1 条
     assert len(sup.courses["step-c"].completed) == 13
     assert len(sup.courses["round-c"].completed) == 1
+
+
+# ------------------------------ 5) ★M3：重发本轮 PPO（意图 ⇒ 撤单 + 同 jid 重发 ⇒ 照常落位）
+
+def test_redo_intent_cancels_and_republishes_the_same_jid(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★M3（plan/ppo-job-lifecycle-ownership §4）端到端：等远端 PPO 时写一份重发意图 ⇒
+
+    ① 账本记一条 `job_cancelled`（撤单事实，幂等净态门）；
+    ② 下一拍用**同一 jid** 重新发布（幂等键不含 code/时间 ⇒ 同一份活复活，不是第二份）；
+    ③ 回执落盘（`at` = 被消费的意图时间戳；控制台靠它分辨「读到没有」）；
+    ④ 回传后照常落位结算（同 jid 复活的那份活完整跑完，账本出现 it1）。
+
+    hub 面（解冻/作废）在本用例里被替成假件：它们是 best-effort 的网络腿，这里判的是
+    「撤单与重发在**真驱动**里的顺序与身份」。整条链走真 `_remote_ppo_step` / 真 `_maybe_consume_redo`。
+    """
+    import json
+
+    import remote.hub_http as hub_http
+    from worker.loop_round import RemotePpoJob
+
+    monkeypatch.setattr(hub_http, "unfreeze_job", lambda *a, **kw: False)
+    monkeypatch.setattr(
+        hub_http, "admin_cancel_job", lambda *a, **kw: hub_http.ADMIN_CANCEL_UNKNOWN
+    )
+    # 观測面（看门狗/打点）也一律不碰网络：本用例判的是撤单与重发的顺序与身份，
+    # 不是 hub 可达性；真网络尝试在 `hub.invalid` 上要等 DNS 超时（非封闭且拖慢门禁）。
+    monkeypatch.setattr(hub_http, "job_liveness", lambda *a, **kw: hub_http.JOB_ALIVE)
+
+    clock = {"t": 1000.0}
+    ready = {"a": False}
+    a = _make_loop(tmp_path, "a", iters=1, remote=True)
+    _install_fake_remote(a, "a", ready)
+
+    published: list[str] = []
+    real_publish = a._remote_ppo_publish  # type: ignore[attr-defined]
+    ledger = tmp_path / "a" / "training_log.jsonl"
+
+    def publish(it: int) -> RemotePpoJob:
+        sess = real_publish(it)
+        published.append(sess.jid)
+        # 真 `publish_job` 的账本面：同 jid 重发**无条件**再追一条 `job_pending`
+        # （「撤单后复活」在账本里就是「pending 晚于 cancelled」——hub 认领闸按净态对账）。
+        with open(ledger, "a", encoding="utf-8") as f:
+            f.write(json.dumps({"event": "job_pending", "job_id": sess.jid, "it": it}) + "\n")
+        return sess
+
+    _stub(a, "_remote_ppo_publish", publish)
+    _stub(a, "_remote_wait_report", lambda sess, now: None)
+    runners = _step_runners({"a": a}, 1, clock)
+    sup = Supervisor(
+        executor=lambda task, q: runners[q.course].executor(task, q),
+        planner=lambda c, it, q: runners[c].planner(c, it, q),
+        capacities={"local_rollout": 1, "local_ppo": 1, "eval_local": 1},
+        now=lambda: clock["t"],
+    )
+    sup.add_course("a", 1)
+    _drive(sup, max_steps=200)
+
+    assert published == ["job-a-1"]  # 已发布、未就绪 ⇒ 让位在 ppo 步
+    assert sup.courses["a"].state == "waiting"
+    assert _ledger_iters(tmp_path / "a") == []
+
+    # 控制台写意图（形状与 `dashboard/src/server/actions/redo-ppo.ts` 逐字同）
+    (tmp_path / "a" / "redo-ppo.json").write_text(
+        json.dumps({"version": 1, "it": 0, "at": 4242.5}), encoding="utf-8"
+    )
+    clock["t"] += 16.0  # 越过 WAIT 的 resume_at（poll_interval=15s）
+    _drive(sup, max_steps=200)
+
+    # ① 撤单事实进账本；② 同 jid 重发（账本净态回到 pending —— 复活）；③ 回执落盘
+    job_rows = [e for e, _ in _ledger_shape(tmp_path / "a") if e.startswith("job_")]
+    assert job_rows == ["job_pending", "job_cancelled", "job_pending"], job_rows
+    assert published == ["job-a-1", "job-a-1"], published
+    receipt = json.loads((tmp_path / "a" / "redo-ppo.applied.json").read_text(encoding="utf-8"))
+    assert receipt["at"] == 4242.5 and receipt["it"] == 1
+    assert sup.courses["a"].inflight["a:it1:ppo"]["jid"] == "job-a-1"  # 仍在等，等的是同一份活
+    assert _ledger_iters(tmp_path / "a") == []
+
+    # ④ 回传 ⇒ 同一份活完整落位（账本出现 it1）
+    ready["a"] = True
+    clock["t"] += 16.0
+    _drive(sup, max_steps=200)
+    assert _ledger_iters(tmp_path / "a") == [1]
+    assert sup.snapshot()["courses"]["a"]["state"] == "done"

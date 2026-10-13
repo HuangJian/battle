@@ -220,7 +220,19 @@ TOP_IMPORTS: dict[str, frozenset[str]] = {
         }
     ),
     "loop_guards_gate.py": frozenset({"worker.events", "worker.gate_check", "common.log"}),
-    "loop_guards_sweep.py": frozenset({"common.platform_utils", "common.log", "worker.workdir_sweep"}),
+    # 2026-10-13（plan/ppo-job-lifecycle-ownership §6，M5）：无 result 的**终局残留**
+    # （`fail.json` / 账本已作废）也过同一道 keep_iters 闸 ⇒ 顶层多两条：失败件名走
+    # `common.protocol`（单一来源），账本 fold 走 `worker.bc_ledger`（训练侧唯一实现，
+    # 不在这里重写一份「谁是终局」的判据）。两条都是**叶子**方向，不成环。
+    "loop_guards_sweep.py": frozenset(
+        {
+            "common.platform_utils",
+            "common.log",
+            "common.protocol",
+            "worker.bc_ledger",
+            "worker.workdir_sweep",
+        }
+    ),
 }
 
 #: 允许的 stdlib 顶层 import（闭集的一部分）。
@@ -845,3 +857,88 @@ def test_wall_clock_is_only_used_by_the_budget_guard() -> None:
         "loop_guards_gate.py::_budget_hard_cut",
         "loop_guards_gate.py::_gate",
     ]
+
+
+def test_sweep_removes_terminal_leftovers_but_keeps_open_ones(tmp_path: Path) -> None:
+    """★M5（plan/ppo-job-lifecycle-ownership §6）：无 result 的**终局残留**也过 keep_iters 闸。
+
+    判据与既有轮转**同一道闸**（不建 `.archive` 第二份配额）：
+      * 有 result 且过窗 ⇒ 删（既有行为）；
+      * `fail.json`（节点已报确定性失败）或账本净态 = `job_cancelled` 且过窗 ⇒ 删（本刀新增）；
+      * 未过窗（`it > cutoff`）⇒ 留；
+      * 账本仍 pending 的 ⇒ 留（**hub 侧冻结的也走这条**：冻结只住 hub 内存，盘上/账本上
+        它仍是 pending ⇒ 天然不删——「停下来问人」的东西不许被自动清理顺手带走）。
+    它们正是「人看到就想手动 rm」的那一堆，而手动 rm 是 2026-10-13 事故的入口。
+    """
+    from worker.loop_guards_sweep import TrainingGuardsSweep
+
+    job_root = tmp_path / "remote-jobs"
+    jsonl = tmp_path / "training_log.jsonl"
+    (tmp_path / "it5").mkdir()
+
+    def _job(jid: str, it: int, *, result: bool = False, fail: bool = False) -> Path:
+        jd = job_root / jid
+        jd.mkdir(parents=True)
+        (jd / "manifest.json").write_text(
+            json.dumps({"job_id": jid, "it": it}), encoding="utf-8"
+        )
+        if result:
+            (jd / "result").mkdir()
+            (jd / "result" / "result.json").write_text("{}", encoding="utf-8")
+        if fail:
+            (jd / "fail.json").write_text("{}", encoding="utf-8")
+        return jd
+
+    done = _job("jjjj", 3, result=True)  # 已收口且过窗 ⇒ 删（既有行为）
+    failed = _job("ffff", 3, fail=True)  # 失败残留 ⇒ 删（M5）
+    cancelled = _job("cccc", 3)  # 已作废（账本）⇒ 删（M5）
+    fresh = _job("nnnn", 5, fail=True)  # 过窗闸不过 ⇒ 留
+    open_ = _job("oooo", 3)  # 账本仍是 pending（含 hub 冻结的形态）⇒ 留
+    jsonl.write_text(
+        "".join(
+            json.dumps(r) + "\n"
+            for r in [
+                {"event": "job_pending", "job_id": "cccc", "it": 3, "ts": 1.0},
+                {
+                    "event": "job_cancelled",
+                    "job_id": "cccc",
+                    "it": 3,
+                    "reason": "lost",
+                    "ts": 2.0,
+                },
+                {"event": "job_pending", "job_id": "oooo", "it": 3, "ts": 3.0},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    obj = _obj(
+        args=_base_args(keep_iters=1, remote_job_root=str(job_root)),
+        _traj_root=tmp_path,
+        _traj_dir=tmp_path / "it5",
+        _jsonl_path=jsonl,
+    )
+    TrainingGuardsSweep._rotate_cleanup(obj, 5)  # type: ignore[arg-type]
+    assert not done.exists() and not failed.exists() and not cancelled.exists()
+    assert fresh.exists() and open_.exists()
+
+
+def test_sweep_still_cleans_failed_leftovers_when_the_ledger_is_unreadable(
+    tmp_path: Path,
+) -> None:
+    """账本读不到 ⇒ **只清失败件**（保守：宁可不删），且绝不因此抛错阻断训练。"""
+    from worker.loop_guards_sweep import TrainingGuardsSweep
+
+    job_root = tmp_path / "remote-jobs"
+    (tmp_path / "it5").mkdir()
+    jd = job_root / "ffff"
+    jd.mkdir(parents=True)
+    (jd / "manifest.json").write_text(json.dumps({"job_id": "ffff", "it": 3}), encoding="utf-8")
+    (jd / "fail.json").write_text("{}", encoding="utf-8")
+    obj = _obj(
+        args=_base_args(keep_iters=1, remote_job_root=str(job_root)),
+        _traj_root=tmp_path,
+        _traj_dir=tmp_path / "it5",
+        # 没有 `_jsonl_path`（rig 里刻意缺失）：只有失败件有盘上标记 ⇒ 只能清它。
+    )
+    TrainingGuardsSweep._rotate_cleanup(obj, 5)  # type: ignore[arg-type]
+    assert not jd.exists()

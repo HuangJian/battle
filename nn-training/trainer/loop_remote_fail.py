@@ -91,11 +91,18 @@ class TrainingRemoteFail:
             self._leg_abort = True
             return True
         # 只对**可重试**失败计账（确定性失败在上面两档已提前 return——它们不消耗配额）。
+        self._bump_remote_fail(it, f"{type(e).__name__}: {str(e)[:200]}")
+        return True
+
+    def _bump_remote_fail(self, it: int, what: str) -> bool:
+        """连败预算的**唯一**实现（远端失败与「job 丢失」共用）。
+
+        返回 True = 已达停腿阈值（已写 ABORT 判决）；False = 还差几拍。
+        ★M1（plan/ppo-job-lifecycle-ownership §2）：看门狗判 lost 也走这里——「3 连败停腿」
+        只有一个阈值、一份判决，不再新造 `LOST_REPUBLISH_MAX` 那种第二条命。
+        """
         self._remote_fail += 1
-        log(
-            f"[run_rl] remote ppo it{it} FAILED ({type(e).__name__}: {str(e)[:200]}) — "
-            f"consecutive={self._remote_fail}"
-        )
+        log(f"[run_rl] remote ppo it{it} FAILED ({what}) — consecutive={self._remote_fail}")
         # ★ 单一 PPO 路径（2026-09-21 §3）：**没有**就地降级——连败 3 次即 ABORT 停腿。
         # loop 自己不具计算能力；想要本机算，操作员在控制台起本机 worker（与云机同一认领
         # 协议），而不是训练进程偷偷把 job 算在自己身上（C 腿事故的根）。
@@ -109,4 +116,5 @@ class TrainingRemoteFail:
             )
             log(f"[run_rl] GATE ABORT it{it}: 远端不可用（无本机降级）——停腿")
             self._leg_abort = True
-        return True
+            return True
+        return False

@@ -13,6 +13,8 @@ from typing import Any
 
 from common.log import log
 from common.platform_utils import rmtree_best_effort
+from common.protocol import FAIL_NAME
+from worker.bc_ledger import scan_jobs
 from worker.workdir_sweep import sweep_failed_wave_dirs
 
 
@@ -51,6 +53,17 @@ class TrainingGuardsSweep:
             )
             if job_root.exists():
                 cutoff = it - args.keep_iters
+                # ★M5（plan/ppo-job-lifecycle-ownership §6）：无 result 的**终局残留**
+                # （确定性失败 / 已作废）也过同一道 keep_iters 闸——它们是「人看到就想
+                # 手动 rm」的那一堆，而手动 rm 正是 2026-10-13 事故的入口。
+                # 账本判据走 `worker.bc_ledger.scan_jobs`（训练侧唯一 fold），读不到就该轮
+                # 只清失败件（保守：宁可不删）。冻结（`_frozen`）**不在此列**——它代表
+                # 「停下来问人」，盘上没有它的标记，这里天然碰不到。
+                cancelled: set[str] = set()
+                jsonl = getattr(self, "_jsonl_path", None)
+                if jsonl is not None:
+                    _pending, _done, _terminal = scan_jobs(jsonl)
+                    cancelled = _terminal - _done
                 for jd in job_root.iterdir():
                     if not jd.is_dir():
                         continue
@@ -62,9 +75,13 @@ class TrainingGuardsSweep:
                     except (OSError, ValueError):
                         continue
                     jit = mm.get("it")
-                    if not isinstance(jit, int):
+                    if not isinstance(jit, int) or jit > cutoff:
                         continue
-                    if jit <= cutoff and (jd / "result" / "result.json").exists():
+                    if (jd / "result" / "result.json").exists():
+                        # 已收口：过窗即删（既有行为）
+                        rmtree_best_effort(jd, ignore_errors=True)
+                    elif (jd / FAIL_NAME).exists() or jd.name in cancelled:
+                        # 无 result 的终局残留：同一配额清理（不造 .archive 第二份配额）
                         rmtree_best_effort(jd, ignore_errors=True)
             # §374 同步（2026-09-08）：本地采样波次目录收敛——本轮已全部结算（无在飞
             # 子进程），清失败/废弃局的孤儿 w* 目录（无 _rl_report.json：部分 shard +

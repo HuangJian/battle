@@ -6,6 +6,127 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §89 PPO job 生命周期收口：lost 可判 · 重启按 runId 作废 · 重发入口 · 残留自动清理（2026-10-13，plan/ppo-job-lifecycle-ownership）
+
+**触发**：2026-10-13 06:17–06:45 事故（x27-noleash）——人工 `rm` 掉刚发布的 job 目录 ⇒
+细粒度腿**静默挂死 28 分钟**（`/result` 的 404 ≡ pending；没有超时、没有重发、没有一行日志）。
+根因一句话：**发布出去的 job 没有所有者**（`publish_job()` 把目录一写就撒手）。
+
+本刀把这条链补成闭环：**可观测（lost 可判）→ 有预算（等待有主）→ 可撤（重启/人都能显式撤）
+→ 可重发（不必重启进程）**。五段按落地顺序（M1 → M2 → M3 → M5 → M4），每段一个判据、一份测试。
+
+### M1 lost 可判 + 看门狗自愈（`trainer/loop_remote_drive.py` · `remote/hub_http.py`）
+
+* **判据 = `/jobs/{id}/status` 的 404**（未知 jid 现成 404：`hub/result.py::_get_status` 的
+  manifest 检查 + `queue_observe._job_dir` 哨兵路径）⇒ **hub 一行未改**。第一轮评审 F1 已核过：
+  原提案的 `state=unknown`（改 `queue_observe.job_status` 内部调度摘要）对 HTTP 面是 no-op，
+  把 404 改 200 反而是状态码契约变更（波及 `_wait_state_note` / `wait_job` / 控制台）。
+* 三态分类写死在 `hub_http.job_liveness`（唯一实现）：**404 ⇒ unknown**（起表 `lost_since`）·
+  **200 ⇒ alive**（任意 state 都算「hub 认识」⇒ 清表）· **其它/异常/超时 ⇒ unreachable**
+  （**不动表**）。判错一档的代价：误判 lost = 一次完整重发 + 重算；该撤不撤 = 继续挂。
+* 节流 `LOST_PROBE_SEC=30`（探测挂在**每次让位**上，不节流就行成 hub 新轮询热点）；
+  宽限 `LOST_GRACE_SEC=60`（`publish` → hub 扫到目录之间有秒级窗口）；**检测上界 = 宽限 +
+  2×拍 ≈ 120s**（DoD 按上界写，不按「60s 内」）。
+* 判 lost 的动作 = **一条流程**（M2/M3 共用同一组原语）：① 账本 `job_cancelled`（幂等净态门）
+  → ② best-effort `POST /admin/unfreeze`（冻结只住 hub **进程内存**，文件面清不掉；不清 ⇒
+  同 jid 重发后 `/result` 立刻 410 ⇒「自愈」变「停腿」）→ ③ best-effort `POST /admin/cancel-job`
+  （**404/409 一律容忍**：409 = 在飞，hub 不撤 ⇒ **不删目录**，留给在算的 worker 回传）
+  → ④ 过护栏删目录 → ⑤ 丢 `ctx.remote` ⇒ **下一拍重发同一 jid**。
+* 重发为**同 jid**：幂等键 `(runId, course_fp, it, init_weights_fp, data_fp)` 不含 code/时间
+  ⇒ 同一份活复活；账本多一条**复活** `job_pending`（晚于 `job_cancelled`），hub 认领闸按
+  净态对账放行——这是六轮 F1 的既有机制，不新增第二事实源。
+* 连败预算**复用** `_bump_remote_fail`（抽自 `_handle_remote_failure` 尾段；3 连败 ABORT 停腿）
+  ——**不新增** `LOST_REPUBLISH_MAX` 第二条命（评审：一个阈值、一份判决）。
+* 等待打点：细粒度路径每 `WAIT_REPORT_SEC`（**300 → 120**，与 `wait_job` 共用同一常量）
+  打一行 `_wait_state_note`。这条路径没有超时兜底，打点就是唯一的现场可见性——
+  06:17 事故的「安静」正是它的缺席。
+* 时间账不新增字段：`t_ppo`（发布墙钟）同时就是看门狗的「发布时刻」（一个事实一个字段）。
+
+**已知不对称（明写在代码 TODO 里，不假装覆盖）**：`transport="push"`（直推节点）的状态面是
+`push_client.poll_result`（另一端点、另一套 404 语义）⇒ 本刀只在 hub 路径生效。
+
+### M2 重启 = 按 runId 整体作废并兑现到磁盘（`hub_client.cancel_jobs_of_previous_runs`）
+
+旧行为：`cancel_stale_jobs` 只取消 `it <= 当前`、**只在发新活那一刻**跑、**不删目录**……
+三重后果：盘上残留逼人 `rm`（**事故入口**）；重启→首次 publish 之间有 11 秒窗口旧活仍可领；
+「重启了就从头再来」从未被实现。
+
+新行为：腿启动时（`TrainingLoop.__init__`，单课 `run_rl` 与 serve 开课/引擎重建两条路都过这里）
+扫本课账本，取**净态仍为 pending 且 `runId != 当前`** 的 jid（**取消 `it <=` 限定**）：
+账本 `job_cancelled` → 解冻（best-effort）→ `admin/cancel-job`（409 在飞 ⇒ 保留目录）→
+**带护栏删目录**。
+
+* **护栏 `reap_job_dir`（M1/M2/M3 共用一份）**：目录在盘 ∧ `manifest.json` 在盘 ∧
+  `job_id == jid` ∧ `runId == 账本行 runId` ∧ `it == 账本行 it`——任一不符 ⇒ 拒删 + WARN。
+  不校验就删是**新**的事故源，而它要防的正是「账本与目录错位」这一形状（06:17 人工 rm 误删新 job）。
+* `RUN_ID` 是**进程级**常量（`trainer/dispatch_queue.py`，serve 一进程多课共享）⇒ 同进程内
+  停/开课**不**触发（那正是 M3 的活）；缺 `runId` 的历史行/歧义归属一律不碰（`queue_scope` 的
+  「歧义绝不猜」口径）。
+* 失败面：hub 不可达 ⇒ 只降级（账本照写、目录照删），**永不抛**——清不掉不能阻断开课。
+
+### M3 「重发本轮 PPO」意图（`trainer/loop_control.py` + `loop_remote_drive._maybe_consume_redo` + 控制台）
+
+为什么不新造通道：控制台与训练进程之间**已有**一套「意图文件 + 幂等回执」
+（`tmp/loop-control.json` 的暂停/恢复，用户 2026-09-18 定案：不为此在训练进程里再挂 HTTP 服务）。
+本刀沿用它的形状：意图 `tmp/<课>/redo-ppo.json` `{version,it,at}`（控制台写）、回执
+`tmp/<课>/redo-ppo.applied.json` `{version,it,at,pid,ts}`（训练进程写；`pid` 存活核对 + `at`
+回显被消费的去重键 = 「读到没有」的唯一依据）。
+
+* **去重键 = `at`**：训练侧每拍读一次；同一份意图只执行一次（没有它就会**每一拍**再撤一次刚
+  重发的活 = 无限重发，比不修更坏）。刷新 `at` = 再来一次；手写意图缺 `at` ⇒ 退回文件 mtime。
+* `it <= 0` = 对**当前轮**生效；正数 `it` 只对那一轮生效（对不上就原地等，不抢跑）。
+  控制台**不回填**面板行上的 `iter`（那是最后一条 iteration 事件 = 上一轮；回填一个落后的
+  数字只会让意图永远等不到 ⇒ 按钮「点了没反应」）——**缺省 `it=0`**。
+* 命中 ⇒ 撤当前 sess（同 M1 的撤单流程）⇒ 丢 `ctx.remote` ⇒ 本拍走正常发布路径 **同 jid** 重发。
+  与 2026-10-03「在飞不撤」裁决不冲突：本刀不硬杀在算的租约，只是不再等它。
+* 坏文件只喊一次（按错误文案去重），宁可不动作（保守方向与 `ControlApplier` 同口径）。
+* 控制台：`dashboard/src/server/actions/redo-ppo.ts`（`redoPpo`）+ `api/route.ts` 的 `redoPpo`
+  动作 + 课程行按钮「重发 PPO」（只在本地调度中画）。动作只写意图文件，**不碰进程、不碰 hub**。
+
+### M5 无主残留目录的自动清理（**扩展** `_rotate_cleanup`，`worker/loop_guards_sweep.py`）
+
+`remote-jobs/` 并非「只增不减」——已完成 job 已由 `keep_iters` 轮转删除；真正只增不减的是
+**没有 result 的残留**（取消的、`fail.json` 的、旧 runId 的），正是「人看到就想清」的那一堆
+（也是本次事故的误删对象）。**同一道闸**（不建 `.archive` 第二份配额）：
+`it <= it-keep_iters` ∧ 无 result ∧（`fail.json` 在 ∨ 账本净态 = `job_cancelled`）⇒ 删。
+未过窗的、账本读不到的、仍 pending 的（**hub 侧冻结的也走这条**：冻结只住 hub 内存 ⇒ 盘上/账本上
+它仍是 pending）一律保留。
+
+### M4 弱版：开关对不上账时一行可 grep 的 WARN（`trainer/loop_serve.py`）
+
+06:17 现场「serve 说已开课在跑、hub 说未开课不派发」的取证结论（评审 F6，写死在案）：
+**两边读的是同一个标记文件**，06:17 的分歧是**时间线**，不是两套判据——所以本刀**零行为变更**，
+只把两类不一致喊出来（`switch_mismatch_warnings`，纯函数）：
+
+* `no-marker`：本地在跑但开课标记不在 ⇒ `hub 不会派发新活`；
+* `paused`：标记在、也在跑，但被控制台暂停 ⇒ `hub 仍会派发，在飞/新活可能白算`。
+
+去重口径与 `ControlApplier` 的「只在变化时产出日志」同源：每个 `(课, 类型)` 只喊一次，
+恢复一致后自动摘名（**再犯再喊**）。强版（openCourse/stopCourse 双写、派发强制读标记）**不做**
+——它与 `reopened_parked` / `_no_marker_warned` 的既有语义要对过再定，且取证还欠 markdown mtime 对齐。
+
+### 边界（不许顺手改）与已知欠账
+
+* **任务侧一个字不动**（命数/敌数/max_ticks/课程奖励）；**不改 PPO 竞速机制**（多 worker 竞速 /
+  备份副本 / fanout race）；**不新增第二事实源**（撤销/完成仍以账本净态 + 目录为准，
+  `store_ledger` 的折叠口径是唯一实现）；**不动 `probe_job_result`**（404≡pending 是三条链共用的语义）。
+* 已知欠账：① push 腿看门狗（同上）；② M4 取证的现场时间线对齐（markdown mtime + 控制台账本
+  + `hub-server.out` / `trainer-cluster.log` 两侧时间戳）尚未做——那需要现场日志，agent 不碰 `tmp/` 现场；
+  ③ 真机复验（`rm -rf tmp/<课>/remote-jobs/<当前 jid>` ⇒ ≤ 宽限 + 两拍内自动重发）由用户手工执行。
+
+### 验证（本次）
+
+* 新增：`tests/trainer/test_ppo_watchdog.py`（M1：重发同 jid / alive 清表 / unreachable 不重发 /
+  节流 / push 不碰 / 3 连败 ABORT / 等待打点 / 复活行重新可领）· `tests/trainer/test_ppo_redo.py`
+  （M3 消费语义）· `tests/trainer/test_loop_serve_switches.py`（M4 纯函数）·
+  `tests/remote/test_hub_liveness_cancel.py`（`job_liveness` 三态 · `unfreeze_job` ·
+  `admin_cancel_job` 四态 · URL 转义）· `tests/remote/test_cancel_previous_runs.py`（M2 + 护栏）。
+* 扩充：`tests/trainer/test_loop_guards_split.py`（M5 两个用例 + 顶层 import 面申报）·
+  `tests/trainer/test_loop_control.py`（redo 意图/回执矩阵）· `dashboard/tests/redo-ppo.test.ts`（控制台半边）。
+* 端到端（M3 的 DoD#3）：`e2e/test_loop_supervisor_integration.py::test_redo_intent_cancels_and_republishes_the_same_jid`
+  ——真驱动（不替 `_remote_ppo_step`）里：等远端 PPO 时写一份意图 ⇒ 账本 `job_pending → job_cancelled →
+  job_pending`（复活）、发布两次**同一 jid**、回执落盘、回传后照常结算 it1。
+
 ## §88 C1 `code.zip` 按角色裁剪：量法换成「入口 import 闭包」，2.796 MB → 1.221 MB（2026-10-13）
 
 §80 的「未做 / 未取 ⑤」欠的账。当时的门槛是「要先量一次冷启动里真正被 `import` 的模块占包体多少」——
