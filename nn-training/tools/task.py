@@ -31,7 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from common.cli import house_parser, run_main
-from common.platform_utils import physical_cores, rmtree_best_effort
+from common.platform_utils import POPEN_NO_WINDOW, physical_cores, rmtree_best_effort
 
 #: `HERE` 的语义不变（nn-training 根：pyproject.toml / .venv / 子脚本都相对它）⇒ 上溯 +1。
 HERE = Path(__file__).resolve().parents[1]
@@ -77,7 +77,9 @@ def clean_env() -> dict[str, str]:
 def run(cmd: list[str], *, check: bool = False, env: dict[str, str] | None = None) -> int:
     """Run a command, print it, return exit code."""
     print(f"[task] {' '.join(cmd)}", flush=True)
-    result = subprocess.run(cmd, env=env)
+    # Windows：控制台窗口要藏（`POPEN_NO_WINDOW`）——本脚本常被**没有控制台**的父进程
+    # （门禁 hook / agent / IDE 后台任务）拉起，裸 spawn 会让每个子步骤弹一块黑窗。
+    result = subprocess.run(cmd, env=env, **POPEN_NO_WINDOW)
     if check and result.returncode != 0:
         sys.exit(result.returncode)
     return result.returncode
@@ -92,7 +94,7 @@ def run_parallel(cmds: list[list[str]], *, env: dict[str, str] | None = None) ->
     jobs: list[tuple[list[str], subprocess.Popen[bytes]]] = []
     for c in cmds:
         print(f"[task] (parallel) {' '.join(c)}", flush=True)
-        jobs.append((c, subprocess.Popen(c, env=env)))
+        jobs.append((c, subprocess.Popen(c, env=env, **POPEN_NO_WINDOW)))
     done = [False] * len(jobs)
     while not all(done):
         for i, (_, p) in enumerate(jobs):
@@ -115,7 +117,11 @@ def run_parallel(cmds: list[list[str]], *, env: dict[str, str] | None = None) ->
 def _terminate_tree(p: subprocess.Popen[bytes]) -> None:
     """终止进程；Windows 用 taskkill /T 连子进程树（仅 fail-fast 清理用）。"""
     if os.name == "nt":
-        subprocess.run(["taskkill", "/F", "/T", "/PID", str(p.pid)], capture_output=True)
+        subprocess.run(
+            ["taskkill", "/F", "/T", "/PID", str(p.pid)],
+            capture_output=True,
+            **POPEN_NO_WINDOW,
+        )
     else:
         p.kill()
 

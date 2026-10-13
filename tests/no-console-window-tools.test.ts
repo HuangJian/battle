@@ -29,11 +29,6 @@ import { join } from 'node:path'
 const TOOLS = join(import.meta.dir, '..', 'tools')
 const CALL = /(?<![\w.$])(?:Bun\.)?(?:spawn|spawnSync|execFileSync|execSync|exec)\s*\(/g
 
-/** 已知豁免（**逐条带理由，不是通配**）：注入式 runner 的**调用点**——`windowsHide` 加在
- *  默认实现里（`deps.spawn ?? (argv, input, cwd) => Bun.spawnSync({ windowsHide: true, … })`），
- *  调用点只是把参数递给它，第 4 个参数会被忽略。 */
-const EXEMPT: string[] = ['opts.repoRoot']
-
 function walk(dir: string, out: string[]): string[] {
   for (const ent of readdirSync(dir, { withFileTypes: true })) {
     const p = join(dir, ent.name)
@@ -43,43 +38,135 @@ function walk(dir: string, out: string[]): string[] {
   return out
 }
 
-/** 剥注释与字符串字面量（等长空格替换 ⇒ 偏移/行号不变）。 */
+/** 剥注释与字符串字面量（等长空格替换 ⇒ 偏移/行号不变）。
+ *
+ *  ⚠ **模板字面量的 `${…}` 插值按代码继续处理**（2026-10-13 实测漏洞：`say(`bun :
+ *  ${spawnSync(BUN, …)}`)` 这种把调用塞进插值的写法，整体剥掉会让守门**静默放过**——
+ *  `perf-cmp-rollout` 的两处版本探针就是这么漏的）。字符串字面量的**内容**与注释一律
+ *  换成空格（`level-gen` 的报错文案里那句 `spawn (` 因此不算违规）。
+ */
 function stripCommentsAndStrings(src: string): string {
   const out: string[] = []
+  //: 帧栈：`template`（模板字面量文本）/ `interp`（`${…}` 里的代码，`depth` = 花括号深度）。
+  //: ⚠ 插值结束时**只弹 interp 帧**，模板帧要留到反引号 —— 第一版在这里踩过坑：弹早了，
+  //: 同一个模板里的**后续文本**会被当成代码，`level-gen` 文案里的 `spawn (` 因此变成假阳性。
+  const stack: Array<{ kind: 'template' | 'interp'; depth: number }> = []
+  let mode: 'code' | 'template' | 'line' | 'block' | 'sq' | 'dq' = 'code'
   let i = 0
+  const put = (text: string, keep: boolean): void => {
+    out.push(keep ? text : text.replace(/[^\n]/g, ' '))
+  }
   while (i < src.length) {
     const c = src[i]!
     const next = src[i + 1] ?? ''
+    if (mode === 'line') {
+      if (c === '\n') {
+        out.push('\n')
+        mode = 'code'
+      } else put(c, false)
+      i++
+      continue
+    }
+    if (mode === 'block') {
+      if (c === '*' && next === '/') {
+        put('*/', false)
+        i += 2
+        mode = 'code'
+        continue
+      }
+      put(c, false)
+      i++
+      continue
+    }
+    if (mode === 'sq' || mode === 'dq') {
+      const quote = mode === 'sq' ? "'" : '"'
+      if (c === '\\') {
+        put(src.slice(i, i + 2), false)
+        i += 2
+        continue
+      }
+      if (c === quote) {
+        out.push(quote)
+        i++
+        mode = 'code'
+        continue
+      }
+      put(c, false)
+      i++
+      continue
+    }
+    if (mode === 'template') {
+      if (c === '\\') {
+        put(src.slice(i, i + 2), false)
+        i += 2
+        continue
+      }
+      if (c === '`') {
+        out.push('`')
+        stack.pop()
+        i++
+        mode = 'code'
+        continue
+      }
+      if (c === '$' && next === '{') {
+        out.push('${')
+        stack.push({ kind: 'interp', depth: 0 })
+        i += 2
+        mode = 'code'
+        continue
+      }
+      put(c, false)
+      i++
+      continue
+    }
+    // mode === 'code'
     if (c === '/' && next === '/') {
-      const j = src.indexOf('\n', i)
-      const end = j < 0 ? src.length : j
-      out.push(src.slice(i, end).replace(/[^\n]/g, ' '))
-      i = end
+      mode = 'line'
+      i += 2
       continue
     }
     if (c === '/' && next === '*') {
-      const j = src.indexOf('*/', i + 2)
-      const end = j < 0 ? src.length : j + 2
-      out.push(src.slice(i, end).replace(/[^\n]/g, ' '))
-      i = end
+      mode = 'block'
+      i += 2
       continue
     }
-    if (c === '"' || c === "'" || c === '`') {
-      const quote = c
-      const start = i
+    if (c === '"') {
+      out.push('"')
       i++
-      while (i < src.length) {
-        if (src[i] === '\\') {
-          i += 2
-          continue
-        }
-        if (src[i] === quote) {
-          i++
-          break
-        }
+      mode = 'dq'
+      continue
+    }
+    if (c === "'") {
+      out.push("'")
+      i++
+      mode = 'sq'
+      continue
+    }
+    if (c === '`') {
+      out.push('`')
+      stack.push({ kind: 'template', depth: 0 })
+      i++
+      mode = 'template'
+      continue
+    }
+    const frame = stack[stack.length - 1]
+    if (c === '{' && frame?.kind === 'interp') {
+      frame.depth++
+      out.push('{')
+      i++
+      continue
+    }
+    if (c === '}' && frame?.kind === 'interp') {
+      if (frame.depth === 0) {
+        stack.pop()
+        out.push('}')
         i++
+        mode = 'template'
+        continue
       }
-      out.push(src[start] + src.slice(start + 1, i - 1).replace(/[^\n]/g, ' ') + (src[i - 1] ?? ''))
+      frame.depth--
+      out.push('}')
+      i++
       continue
     }
     out.push(c)
@@ -102,33 +189,65 @@ function callSpan(src: string, openParen: number): string | null {
   return null
 }
 
+/** 扫描一段源码，返回缺 `windowsHide` 的调用（`label:行号  实参`）。 */
+function scanForOffenders(raw: string, label: string): { offenders: string[]; calls: number } {
+  const src = stripCommentsAndStrings(raw)
+  const offenders: string[] = []
+  let calls = 0
+  for (const m of src.matchAll(CALL)) {
+    const at = m.index ?? 0
+    const span = callSpan(src, at + m[0].length - 1)
+    if (span === null) continue
+    if (span.slice(1, -1).trim() === '') continue // `()`：声明或空调用
+    const after = src[at + m[0].length + span.length - 1] ?? ''
+    if (after === ':' || after === '{') continue // 方法/函数声明
+    if (EXEMPT.some((e) => span.includes(e))) continue
+    calls++
+    if (span.includes('windowsHide')) continue
+    const line = src.slice(0, at).split('\n').length
+    offenders.push(`${label}:${line}  [${m[0].trim()}] ${span.replace(/\s+/g, ' ').slice(0, 100)}`)
+  }
+  return { offenders, calls }
+}
+
+/** 扫描器自检夹具：四种**必须**抓到的形态 + 三种**必须**放过的形态。
+ *
+ *  为什么要有它（2026-10-13 实测）：早先版本用「扫到的调用数 > 20」当下限，那是个魔数，
+ *  而且它**真的漏过**——模板字面量 `${…}` 插值里的调用被整体剥掉，`perf-cmp-rollout` 的
+ *  两处版本探针就这样静默过关。夹具把判据钉死在**行为**上，与仓库里有多少调用无关。 */
+const FIXTURE = [
+  "// 注释里的 spawn('x', []) 不算", // 1 行注释
+  "const ok = spawnSync('bun', ['--version'], { windowsHide: true, stdio: 'inherit' })", // 2 带旗标 → 放过
+  "const bad = spawnSync('git', ['show'], { encoding: 'utf8' })", // 3 ★ 缺旗标
+  'say(`node: ${spawnSync(NODE_BIN, [\u0027--version\u0027], { encoding: \u0027utf8\u0027 })} ok`)', // 4 ★ 模板插值里缺旗标
+  "exec('wmic cpu get LoadPercentage', { encoding: 'utf8' }, (e, o) => {})", // 5 ★ 缺旗标
+  '  private spawn(): Worker { return w }', // 6 方法声明 → 放过
+  'errors.push(`Enemy spawn (1,2) not reachable`)', // 7 文案里的 `spawn (` → 放过
+].join('\n')
+
+/** 已知豁免（**逐条带理由，不是通配**）：注入式 runner 的**调用点**——`windowsHide` 加在
+ *  默认实现里（`deps.spawn ?? (argv, input, cwd) => Bun.spawnSync({ windowsHide: true, … })`），
+ *  调用点只是把参数递给它，第 4 个参数会被忽略。 */
+const EXEMPT: string[] = ['opts.repoRoot']
+
 describe('Windows 子进程不许弹黑窗（tools/**）', () => {
+  it('扫描器自检：四种病灶抓到、三种非病灶放过（含模板插值）', () => {
+    const { offenders } = scanForOffenders(FIXTURE, 'fx')
+    expect(offenders.map((o) => Number.parseInt(o.split(':')[1] ?? '', 10))).toEqual([3, 4, 5])
+  })
+
   it('tools/** 的每个子进程调用都显式带 windowsHide', () => {
     const files = walk(TOOLS, [])
     expect(files.length).toBeGreaterThan(100) // 扫描面没空（搬迁/改名后要立刻红）
     const offenders: string[] = []
     let calls = 0
     for (const abs of files) {
-      const raw = readFileSync(abs, 'utf8')
-      const src = stripCommentsAndStrings(raw)
-      for (const m of src.matchAll(CALL)) {
-        const at = m.index ?? 0
-        const span = callSpan(src, at + m[0].length - 1)
-        if (span === null) continue
-        if (span.slice(1, -1).trim() === '') continue // `()`：声明或空调用
-        const after = src[at + m[0].length + span.length - 1] ?? ''
-        if (after === ':' || after === '{') continue // 方法/函数声明
-        if (EXEMPT.some((e) => span.includes(e))) continue
-        calls++
-        if (span.includes('windowsHide')) continue
-        const line = src.slice(0, at).split('\n').length
-        offenders.push(
-          `${abs.slice(TOOLS.length + 1).replace(/\\/g, '/')}:${line}  ` +
-            span.replace(/\s+/g, ' ').slice(0, 110),
-        )
-      }
+      const rel = abs.slice(TOOLS.length + 1).replace(/\\/g, '/')
+      const r = scanForOffenders(readFileSync(abs, 'utf8'), rel)
+      offenders.push(...r.offenders)
+      calls += r.calls
     }
-    expect(calls).toBeGreaterThan(20) // 正则失效（换 API/改语法）时别静默通过
+    expect(calls).toBeGreaterThan(5) // 扫描面明显塌掉（换 API/改语法）时别静默通过
     expect(offenders).toEqual([])
   })
 })

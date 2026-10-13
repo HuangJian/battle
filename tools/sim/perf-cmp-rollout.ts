@@ -116,10 +116,12 @@ if (NODE_BIN) {
   const m = /^v(\d+)\./.exec(v.stdout ?? '')
   if (v.status === 0 && m && Number(m[1]) >= 22) NODE_OK = true
 }
-say(`bun : ${spawnSync(BUN, ['--version'], { encoding: 'utf8' }).stdout?.trim() ?? '?'}`)
+say(
+  `bun : ${spawnSync(BUN, ['--version'], { windowsHide: true, encoding: 'utf8' }).stdout?.trim() ?? '?'}`,
+)
 if (NODE_OK)
   say(
-    `node: ${spawnSync(NODE_BIN!, ['--version'], { encoding: 'utf8' }).stdout?.trim()}（≥22，参与对比）`,
+    `node: ${spawnSync(NODE_BIN!, ['--version'], { windowsHide: true, encoding: 'utf8' }).stdout?.trim()}（≥22，参与对比）`,
   )
 else say('⚠ node 缺失或 <22 → node 组跳过（可用 --node-bin 指定）')
 say(`并行分片: ${PARALLEL}（物理核探测=${PHYS_CORES}）`)
