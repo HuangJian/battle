@@ -102,7 +102,7 @@ export async function killPidTree(pid: number): Promise<boolean> {
       if (!pidAlive(pid)) return true
     } else {
       const pgid = Number.parseInt(
-        Bun.spawnSync(['ps', '-o', 'pgid=', '-p', String(pid)])
+        Bun.spawnSync(['ps', '-o', 'pgid=', '-p', String(pid)], { windowsHide: true })
           .stdout.toString()
           .trim(),
         10,

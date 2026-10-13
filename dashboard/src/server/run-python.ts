@@ -119,6 +119,10 @@ function capture(
     const child = spawn(opts.python, tail, {
       cwd: NN_TRAINING,
       env: { ...process.env, ...opts.env },
+      // node 的 spawn 缺省 windowsHide:false ⇒ 父进程没有控制台时子进程自建一个黑窗；
+      // 这一路跑的是「要结果的短任务」（导入 zip / 只读调度器视图），调用频繁到用户
+      // 肉眼可见闪窗。与 core/proc.ts::spawnBg 同规。
+      windowsHide: true,
     })
     const out: Buffer[] = []
     const err: Buffer[] = []

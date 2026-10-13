@@ -18,7 +18,7 @@ export async function exportBackup(dataRoot: string, outDir: string): Promise<st
   if (!existsSync(dataRoot)) throw new Error(`数据根不存在: ${dataRoot}`)
   mkdirSync(outDir, { recursive: true })
   const dest = path.join(outDir, backupName())
-  const proc = Bun.spawnSync(['zip', '-qr', dest, '.'], { cwd: dataRoot })
+  const proc = Bun.spawnSync(['zip', '-qr', dest, '.'], { cwd: dataRoot, windowsHide: true })
   if (proc.exitCode !== 0) {
     throw new Error(`zip 导出失败 rc=${proc.exitCode}: ${proc.stderr.toString().slice(-300)}`)
   }

@@ -62,6 +62,9 @@ export function venvTorchReady(): boolean {
     env: { ...process.env, ...(sitePackages ? { PYTHONPATH: sitePackages } : {}) },
     stdout: 'ignore',
     stderr: 'ignore',
+    // windowsHide：本探测是**秒级进程**，裸起就是一次黑色控制台闪窗（控制台点「启动」
+    // 时 ensureVenv/build 链多次命中）。本仓 Windows 子进程纪律见 core/proc.ts。
+    windowsHide: true,
   })
   return r.exitCode === 0
 }
@@ -94,6 +97,8 @@ export function ensureVenv(): boolean {
     env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
     stdout: 'inherit',
     stderr: 'inherit',
+    // windowsHide 不影响 stdout/stderr 继承（句柄照传），只杜绝子进程自建控制台窗口。
+    windowsHide: true,
   })
   if (r.exitCode !== 0) {
     fail(`tools/bootstrap.py 失败（退出码 ${r.exitCode}）。看上方输出。`)

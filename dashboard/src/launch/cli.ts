@@ -214,7 +214,7 @@ function listPythonProcesses(): ProcCmdline[] {
           'ProcessId,CommandLine',
           '/format:csv',
         ],
-        { stdout: 'pipe', stderr: 'ignore' },
+        { stdout: 'pipe', stderr: 'ignore', windowsHide: true },
       )
       for (const line of r.stdout.toString().split(/\r?\n/)) {
         // CSV: Node,CommandLine,ProcessId
@@ -486,6 +486,8 @@ export function launchTraining(opts: TrainOptions): TrainLaunchResult {
       env: { ...process.env, ...env },
       stdout: 'pipe',
       stderr: 'ignore',
+      // 秒级探针：无 windowsHide 就是一次黑窗闪（CLI 由控制台/后台拉起时必现）。
+      windowsHide: true,
     })
     return r.stdout.toString().trim() || '?'
   })()
@@ -546,6 +548,9 @@ export function launchTraining(opts: TrainOptions): TrainLaunchResult {
     stdout: 'inherit',
     stderr: 'inherit',
     stdin: 'inherit',
+    // 前台模式：python 继承本 CLI 的 stdio（Ctrl-C 照样直达），但它不需要自己的一块
+    // 控制台——不加这一行，在无控制台的父环境下每个前台训练都会先闪一个黑窗。
+    windowsHide: true,
   })
   return { exitCode: proc.exitCode ?? 1, cmd, env }
 }

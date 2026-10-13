@@ -33,7 +33,12 @@ import { computeCodeHash, engineEpochFromCodeHash } from '../../../tools/agent/c
 /** 训练机 git_commit（纯观测字段；拿不到传 'nogit'）。 */
 export function gitCommit(repoRoot: string): string {
   try {
-    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd: repoRoot, encoding: 'utf8' }).trim()
+    return execFileSync('git', ['rev-parse', 'HEAD'], {
+      cwd: repoRoot,
+      encoding: 'utf8',
+      // git 是秒退进程：控制台无控制台父环境下不留心就是一次黑窗闪。
+      windowsHide: true,
+    }).trim()
   } catch {
     return 'nogit'
   }

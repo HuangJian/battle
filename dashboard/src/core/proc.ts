@@ -55,7 +55,11 @@ export function spawnBg(
 export function portOwnerPids(port: number): number[] {
   try {
     if (process.platform === 'win32') {
-      const out = Bun.spawnSync(['netstat', '-ano']).stdout.toString()
+      // windowsHide 必须显式给：本函数在**每次启动/停止组件**（reclaimPort / 兜底清场）
+      // 都被调用，少一个 flag 就是「控制台点一下启动，闪几个黑色 cmd 窗」（netstat 秒退
+      // ⇒ 一闪而过）。控制台进程常以无控制台的形态被拉起（agent/后台），此时子进程
+      // 默认会自建控制台窗口 —— 与 spawnBg 同规（本仓 Windows 子进程纪律）。
+      const out = Bun.spawnSync(['netstat', '-ano'], { windowsHide: true }).stdout.toString()
       const pids = new Set<number>()
       for (const line of out.split('\n')) {
         if (!line.includes('LISTENING')) continue
@@ -68,7 +72,9 @@ export function portOwnerPids(port: number): number[] {
       }
       return [...pids]
     }
-    const out = Bun.spawnSync(['lsof', '-t', `-i:${port}`, '-s', 'TCP:LISTEN']).stdout.toString()
+    const out = Bun.spawnSync(['lsof', '-t', `-i:${port}`, '-s', 'TCP:LISTEN'], {
+      windowsHide: true,
+    }).stdout.toString()
     return [
       ...new Set(
         out
