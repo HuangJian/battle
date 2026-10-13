@@ -50,7 +50,7 @@ for (const s of SCENES) {
         `--repeat=${REPEAT}`,
         ...(LOW_QUALITY ? ['--low-quality'] : []),
       ],
-      { cwd: root, encoding: 'utf8' },
+      { windowsHide: true, cwd: root, encoding: 'utf8' },
     )
     if (res.status !== 0) {
       console.error(`[render-bench-all] ${s}@dpr${dpr} FAILED (exit ${res.status})`)

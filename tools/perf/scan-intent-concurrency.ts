@@ -40,7 +40,7 @@ for (const w of workersList) {
       '--out',
       `tmp/m1_scan_w${w}.html`,
     ],
-    { stdio: 'pipe', encoding: 'utf8' },
+    { windowsHide: true, stdio: 'pipe', encoding: 'utf8' },
   )
   const sec = (Date.now() - t0) / 1000
   const out = r.stderr + '\n' + r.stdout

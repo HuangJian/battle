@@ -131,6 +131,7 @@ if (size > 1) {
       const childSeed = seeds[i]
       const args = [...childArgs, '--seed', String(childSeed)]
       const proc = Bun.spawn({
+        windowsHide: true,
         cmd: args,
         stdout: 'pipe',
         stderr: 'inherit', // replay-write notices etc. pass through

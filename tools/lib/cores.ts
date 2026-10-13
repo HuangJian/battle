@@ -173,7 +173,11 @@ function detectHostPhysicalCores(): number | null {
   try {
     if (process.platform === 'darwin') {
       return num(
-        spawnSync('sysctl', ['-n', 'hw.physicalcpu'], { encoding: 'utf8', timeout: 5_000 }).stdout,
+        spawnSync('sysctl', ['-n', 'hw.physicalcpu'], {
+          windowsHide: true,
+          encoding: 'utf8',
+          timeout: 5_000,
+        }).stdout,
       )
     }
     if (process.platform === 'win32') {

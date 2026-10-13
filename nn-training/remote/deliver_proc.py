@@ -25,6 +25,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import IO, Protocol
 
+from common.platform_utils import POPEN_NO_WINDOW
 from common.protocol import sanitize_run_id
 from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
@@ -266,6 +267,9 @@ class DelivererProcess:
                 encoding="utf-8",
                 errors="replace",
                 bufsize=1,
+                # Windows：父进程（detached 的训练组件/云机 worker）多半没有控制台 ⇒
+                # 裸 spawn 会给子进程新建一块**可见**控制台窗口（2026-10-13 用户报障）。
+                **POPEN_NO_WINDOW,
             )
         except Exception as e:
             return f"Popen 失败（{type(e).__name__}: {e}）"

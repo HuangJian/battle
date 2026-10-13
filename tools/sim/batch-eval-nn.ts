@@ -237,6 +237,7 @@ Options:
           ]
 
           const proc = spawn(process.argv[0], cli, {
+            windowsHide: true,
             cwd: repoRoot,
             stdio: ['ignore', 'pipe', 'pipe'],
           })

@@ -77,7 +77,11 @@ function say(m: string): void {
 }
 
 function git(ref: string, args: string[]): Buffer {
-  const r = spawnSync('git', [ref, ...args], { cwd: ROOT, maxBuffer: 64 * 1024 * 1024 })
+  const r = spawnSync('git', [ref, ...args], {
+    windowsHide: true,
+    cwd: ROOT,
+    maxBuffer: 64 * 1024 * 1024,
+  })
   if (r.status !== 0) {
     console.error(`git ${ref} ${args.join(' ')} failed: ${String(r.stderr)}`)
     process.exit(2)
@@ -91,6 +95,7 @@ function refFor(p: string, what: string): string {
   const env = process.env.CONV_AB_OLD_REF
   if (env) return env
   const r = spawnSync('git', ['log', '--diff-filter=AM', '-1', '--format=%H', '--', p], {
+    windowsHide: true,
     cwd: ROOT,
     encoding: 'utf8',
   })
@@ -293,6 +298,7 @@ function loadNewWasm(): WasmSide {
 
 function loadOldWasm(): WasmSide | null {
   const r = spawnSync('git', ['show', `${REF_WASM}:${OLD_WASM}`], {
+    windowsHide: true,
     cwd: ROOT,
     maxBuffer: 64 * 1024 * 1024,
   })

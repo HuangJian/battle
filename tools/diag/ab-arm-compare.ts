@@ -97,10 +97,7 @@ async function main() {
           '--max-ticks',
           '12000',
         ],
-        {
-          stdio: ['ignore', 'pipe', 'pipe'],
-          shell: true,
-        },
+        { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], shell: true },
       )
       let out = ''
       proc.stdout.on('data', (d: Buffer) => {

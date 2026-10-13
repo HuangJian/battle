@@ -82,6 +82,7 @@ from common.instance_lock import (
     release_instance_lock,
 )
 from common.pid_probe import pid_alive
+from common.proc import run_capture
 from common.protocol import TS_CODE_NAME
 from remote.hub_client import pack_code_zip, pack_ts_code_zip
 
@@ -506,23 +507,26 @@ def _pack_and_publish(
 
 
 def _git_head(repo_root: str | Path | None) -> str:
-    """`git HEAD`（**仅信息性**：快照含未提交修改，不作任何判据）。读不到 ⇒ 空串。"""
+    """`git HEAD`（**仅信息性**：快照含未提交修改，不作任何判据）。读不到 ⇒ 空串。
+
+    ⚠ 走 `common.proc.run_capture`（自带 `POPEN_NO_WINDOW`）：本函数在**打包快照时**调
+    （每次 `ensure` 都会走，含 trainer/hub 启动那一刻），而 git 是 console 子系统程序——
+    父进程（detached 的训练组件）没有控制台时，裸 spawn 就会新建一块**可见**控制台窗口
+    （2026-10-13 用户报障「启动 trainer/hub 闪黑窗」的三处之一，另两处在
+    `common/instance_lock.py::_win_cmdline_*`）。
+    """
     import subprocess
 
     root = Path(repo_root) if repo_root is not None else _repo_root_default()
     try:
-        r = subprocess.run(
-            ["git", "rev-parse", "--short", "HEAD"],
-            cwd=str(root),
-            capture_output=True,
-            timeout=5,
-            check=False,
+        r = run_capture(
+            ["git", "rev-parse", "--short", "HEAD"], cwd=str(root), timeout=5
         )
     except (OSError, subprocess.SubprocessError):
         return ""
     if r.returncode != 0:
         return ""
-    return r.stdout.decode("utf-8", "replace").strip()
+    return (r.stdout or "").strip()
 
 
 def published_code_zip(

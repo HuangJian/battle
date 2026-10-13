@@ -36,7 +36,7 @@ REPO = ROOT.parent  # git 根
 sys.path.insert(0, str(ROOT))
 from biz.reward_library import METRICS_VERSION
 from common.cli import house_parser, run_main
-from common.platform_utils import rmtree_best_effort
+from common.platform_utils import POPEN_NO_WINDOW, rmtree_best_effort
 from common.protocol import find_payload
 from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM  # 合成语料形状随 schema
 from hub.server import _JobStore, make_server
@@ -272,7 +272,7 @@ def main() -> int:
 
         t0 = time.time()
         log(f"it{rd} starting cloud worker: {' '.join(worker_cmd)}")
-        rc = subprocess.run(worker_cmd, cwd=str(ROOT), env=worker_env, timeout=600)
+        rc = subprocess.run(worker_cmd, cwd=str(ROOT), env=worker_env, timeout=600, **POPEN_NO_WINDOW)
         if rc.returncode != 0:
             log(f"FATAL: cloud worker exited rc={rc.returncode} (it{rd})")
             return 1

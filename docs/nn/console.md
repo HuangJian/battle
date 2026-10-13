@@ -3615,6 +3615,42 @@ lastContrib）、`server/api/pool.ts` + `snapshot-cache.ts`（两个消费者）
   （干活 / 排队的两种回执都按 ok 保 busy；「读数自动回填」口径收进服务端那一句话）。
 - **违反后果**：把排队挪回前端、或忙时静默丢单 ⇒ 刷新即丢队、两面板各排一份，单槽事实漂出服务端。
 
+### §2026-10-13-console-no-black-window（2026-10-13，用户两次报障：「启动 trainer/hub 时，有几个命令行黑窗一闪而过」→ 修完仍剩三个）
+
+- **背景 / 机制（本机实测，环境无关判据）**：黑窗**不是**组件自己弹的 —— `spawnBg` 一直带
+  `detached + windowsHide`。真规则是**传递性**的：
+
+  | 父进程的控制台 | 子进程 spawn | 子进程拿到的控制台 |
+  |---|---|---|
+  | 有（继承隐藏 console） | 裸 spawn | 继承 ⇒ 无新窗口 |
+  | **无控制台**（`windowsHide`/`detached` 出来的进程都是这种） | 裸 spawn | **Windows 给它新建一块可见控制台 ⇒ 黑窗** |
+  | 无控制台 | `windowsHide: true` | 无控制台（`GetConsoleWindow()=0`） |
+
+  判据 = 子进程自报 `GetConsoleWindow()` + `IsWindowVisible()`（「conhost 计数」**区分不了**
+  隐藏/可见，别再用它）。⇒ 训练组件（detached 起出来的）再往下生的**孙子进程**照样弹窗。
+
+- **三处真身**（逐条对得上 `tmp/trainer-cluster.log` 启动那 30 秒）：`remote/code_snapshot._git_head`
+  的 `git rev-parse`（打包快照，启动必走）· `common/instance_lock._win_cmdline_cim` 的 `pwsh`
+  （锚核验，`ensure` 会调两次：先比指纹、再写元数据；`_win_cmdline_wmic` 同病）·
+  `tools/lib/node-upgrade` 默认 runner 的 `git`（`resolveUpgradeBranch`）。全部补 `POPEN_NO_WINDOW`
+  / `windowsHide: true`。同类漏网一并补：`hub/smoke_loopback`、`hub/tunnel_ab_probe`、
+  `remote/{deliver_proc,worker_proc}`、`tools/**` 19 个文件 29 处（含 `tools/sim/eval-course-ckpt`、
+  `tools/sim/m1-eval` 那条 `bash` 与 `sim-pool` 的 `wmic`/`pwsh` 负载探测）。
+
+- **为什么不能只查直连子进程**：`windowsHide` 的语义是「**没有控制台**」（不是「有但隐藏」），
+  所以每个父进程都得自己带旗标 —— 链上任何一环漏了都会弹窗，`tools/**` 这种「被 python 起、
+  又被门禁起」的公用工具是重灾区。
+
+- **守门（两个扫描面，缺一不可）**：`dashboard/tests/no-console-window.test.ts`（`dashboard/src/**`）
+  + `tests/no-console-window-tools.test.ts`（`tools/**`）。都是**文本层**扫描：剥注释与字符串字面量 →
+  括号配平取实参 → 缺 `windowsHide` 即红。已知豁免逐条列在用例里（`opts.repoRoot` = 注入式
+  runner 的调用点，旗标加在默认实现里）。
+
+- **违反后果**：新写的 spawn 漏 `windowsHide`（或 `subprocess.*` 漏 `POPEN_NO_WINDOW`）⇒ 在无控制台的
+  父进程下每个子进程弹一块黑窗抢焦点；⚠ 另一条纪律：`bun run format`（裸 `oxfmt`）是**全仓**格式化，
+  会把 `curricula/*.jsonc`、`tests/fixtures/*.json`、`tests/golden/*.json` 一起重排（实测 `reward_golden.json`
+  一次少 15 万行）——**只对 staged 文件跑，或改完立即 `git restore` 非本次文件**。
+
 ## 附：本文件旧编号对照（拆分前 `docs/nn.progress.md` 的 § 号）
 
 旧 §28→§1 · 旧 §29→§2 · 旧 §64→§3 · 旧 §73→§4 · 旧 §82→§5 · 旧 §87→§6 · 旧 §88→§7 · 旧 §91→§8 · 旧 §122→§9 · 旧 §138→§10

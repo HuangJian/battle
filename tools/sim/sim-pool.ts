@@ -57,32 +57,36 @@ function cpuLoadUnix(): number {
 }
 function cpuLoadWin32(): Promise<number> {
   return new Promise((resolve) => {
-    exec('wmic cpu get LoadPercentage', { encoding: 'utf8', timeout: 3000 }, (err, out) => {
-      if (!err && out) {
-        const vals = out
-          .split(/\r?\n/)
-          .map((s) => parseInt(s.trim(), 10))
-          .filter((n) => Number.isInteger(n) && n >= 0 && n <= 100)
-        if (vals.length) {
-          resolve(Math.round(vals.reduce((a, b) => a + b, 0) / vals.length))
-          return
-        }
-      }
-      exec(
-        'pwsh -NoProfile -Command "(Get-CimInstance Win32_Processor | ForEach-Object { $_.LoadPercentage } | Where-Object { $_ -ne $null } | Measure-Object -Average).Average"',
-        { encoding: 'utf8', timeout: 6000 },
-        (err2, out2) => {
-          if (!err2 && out2) {
-            const n = parseInt(out2.trim(), 10)
-            if (Number.isInteger(n) && n >= 0 && n <= 100) {
-              resolve(n)
-              return
-            }
+    exec(
+      'wmic cpu get LoadPercentage',
+      { windowsHide: true, encoding: 'utf8', timeout: 3000 },
+      (err, out) => {
+        if (!err && out) {
+          const vals = out
+            .split(/\r?\n/)
+            .map((s) => parseInt(s.trim(), 10))
+            .filter((n) => Number.isInteger(n) && n >= 0 && n <= 100)
+          if (vals.length) {
+            resolve(Math.round(vals.reduce((a, b) => a + b, 0) / vals.length))
+            return
           }
-          resolve(-1)
-        },
-      )
-    })
+        }
+        exec(
+          'pwsh -NoProfile -Command "(Get-CimInstance Win32_Processor | ForEach-Object { $_.LoadPercentage } | Where-Object { $_ -ne $null } | Measure-Object -Average).Average"',
+          { windowsHide: true, encoding: 'utf8', timeout: 6000 },
+          (err2, out2) => {
+            if (!err2 && out2) {
+              const n = parseInt(out2.trim(), 10)
+              if (Number.isInteger(n) && n >= 0 && n <= 100) {
+                resolve(n)
+                return
+              }
+            }
+            resolve(-1)
+          },
+        )
+      },
+    )
   })
 }
 export function sampleCpuLoad(): Promise<number> {

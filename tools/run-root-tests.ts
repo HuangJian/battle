@@ -24,5 +24,5 @@ const args = [
   ...process.argv.slice(2),
 ]
 console.log(`[gate] bun ${args.join(' ')}`)
-const r = spawnSync('bun', args, { stdio: 'inherit' })
+const r = spawnSync('bun', args, { windowsHide: true, stdio: 'inherit' })
 process.exit(r.status ?? 1)

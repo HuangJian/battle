@@ -47,6 +47,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.cli import house_parser, run_main
+from common.platform_utils import POPEN_NO_WINDOW
 from hub.server import _JobStore, make_server
 
 #: 探针客户端一律**不走环境代理**。
@@ -122,7 +123,9 @@ def _start_tunnel(bin_path: str, hub_port: int, protocol: str, logfile: Path) ->
         "--logfile",
         str(logfile),
     ]
-    return subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    return subprocess.Popen(
+        cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **POPEN_NO_WINDOW
+    )
 
 
 def _wait_url(logfile: Path, proc: subprocess.Popen, deadline: float) -> str:

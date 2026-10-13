@@ -108,11 +108,11 @@ function enginePairs(): Array<[string, string]> {
 // node ≥22 探测
 let NODE_OK = false
 if (!NODE_BIN) {
-  const r = spawnSync('node', ['--version'], { encoding: 'utf8' })
+  const r = spawnSync('node', ['--version'], { windowsHide: true, encoding: 'utf8' })
   if (r.status === 0 && r.stdout) NODE_BIN = 'node'
 }
 if (NODE_BIN) {
-  const v = spawnSync(NODE_BIN, ['--version'], { encoding: 'utf8' })
+  const v = spawnSync(NODE_BIN, ['--version'], { windowsHide: true, encoding: 'utf8' })
   const m = /^v(\d+)\./.exec(v.stdout ?? '')
   if (v.status === 0 && m && Number(m[1]) >= 22) NODE_OK = true
 }
@@ -171,7 +171,7 @@ say('打包 exporter（同一 bundle 供两种引擎跑，内核经 wasm/ 目录
   const r = spawnSync(
     BUN,
     ['build', 'tools/sim/export-rl-rollout.ts', '--target=node', `--outfile=${BUNDLE}`],
-    { encoding: 'utf8' },
+    { windowsHide: true, encoding: 'utf8' },
   )
   if (r.status !== 0) die(`打包失败：${(r.stderr ?? '').slice(-400)}`)
 }
@@ -194,7 +194,7 @@ if (!NO_OLD) {
     ]
     let incompatible = ''
     for (const [ref, p] of cands) {
-      const g = spawnSync('git', ['show', `${ref}:${p}`], { encoding: 'buffer' })
+      const g = spawnSync('git', ['show', `${ref}:${p}`], { windowsHide: true, encoding: 'buffer' })
       if (g.status !== 0 || !g.stdout?.length) continue
       writeFileSync(OLD_PATH, g.stdout)
       if (shaOf(OLD_PATH) === KERNEL_NEW_SHA) continue
@@ -319,7 +319,7 @@ function runOneGame(
       '--wver',
       'cmp',
     ],
-    { encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
+    { windowsHide: true, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024 },
   )
   if (r.status !== 0) {
     say(
@@ -378,7 +378,7 @@ async function runGridParallel(
           '--wver',
           'cmp',
         ],
-        { stdio: ['ignore', 'pipe', 'pipe'] },
+        { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'] },
       )
       let tail = ''
       child.stdout.on('data', (c: Buffer) => (tail = (tail + c.toString('utf8')).slice(-2000)))

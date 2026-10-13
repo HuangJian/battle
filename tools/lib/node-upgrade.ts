@@ -205,7 +205,7 @@ export function resolveUpgradeBranch(repoRoot: string, deps: UpgradeDeps = {}): 
   const run =
     deps.spawn ??
     ((argv: string[], input: string, cwd: string) => {
-      const p = Bun.spawnSync({ cmd: argv, cwd, stdin: Buffer.from(input) })
+      const p = Bun.spawnSync({ windowsHide: true, cmd: argv, cwd, stdin: Buffer.from(input) })
       return {
         exitCode: p.exitCode,
         stdout: p.stdout?.toString() ?? '',
@@ -245,7 +245,7 @@ export function requestNodeUpgrades(
   const spawn =
     deps.spawn ??
     ((argv: string[], input: string, cwd: string) => {
-      const p = Bun.spawnSync({ cmd: argv, cwd, stdin: Buffer.from(input) })
+      const p = Bun.spawnSync({ windowsHide: true, cmd: argv, cwd, stdin: Buffer.from(input) })
       return {
         exitCode: p.exitCode,
         stdout: p.stdout?.toString() ?? '',

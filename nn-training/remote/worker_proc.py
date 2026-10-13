@@ -31,6 +31,18 @@ import time
 from pathlib import Path
 from typing import Any
 
+#: Windows：隐藏子进程的控制台窗口。**本模块必须纯 stdlib（L0 秩，见 `test_train_core_split
+#: ::test_worker_proc_is_pure_stdlib`）**，故**不能** import `common.platform_utils.POPEN_NO_WINDOW`
+#: —— 这里是那一份的**逐字镜像**（2026-10-13）。两边同时改：改这里要顺手看一眼那边。
+#:
+#: 为什么必须有（用户报障「启动 trainer/hub 闪黑窗」，本机实测）：监督器自己没有控制台
+#: （它是 `spawnBg` detached / `CREATE_NO_WINDOW` 起出来的），而 Windows 会给「无控制台的
+#: 父进程 + 未带旗标的 console 子进程」**新建一块可见控制台窗口** ⇒ 每次热替换重拉子进程
+#: （`supervise_worker` 的循环）都会弹一个。
+_POPEN_NO_WINDOW: dict[str, Any] = {}
+if sys.platform == "win32":
+    _POPEN_NO_WINDOW = {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)}
+
 #: 热替换退出码：worker 子进程代码变更时以该码退出，**监督器**（supervise_worker /
 #: 新版 main()）收到后用同一套参数重新拉起子进程（fresh 进程 → sys.modules 必然为空
 #: → 新代码生效）。不用 0（=正常完成）：处理失败/退出原因必须可区分。
@@ -101,6 +113,9 @@ def supervise_worker(
             text=True,
             encoding="utf-8",
             errors="replace",
+            # Windows：监督器（本机 local-worker 组件）自己没有控制台 ⇒ 裸 spawn 的重拉子进程
+            # 会各弹一块**可见**控制台窗口（2026-10-13 用户报障）。见 `_POPEN_NO_WINDOW`。
+            **_POPEN_NO_WINDOW,
         )
         try:
             child_out = proc.stdout

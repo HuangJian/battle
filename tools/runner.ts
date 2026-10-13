@@ -28,6 +28,7 @@ export async function spawnCapture(
 ): Promise<{ code: number; output: string }> {
   return new Promise((res) => {
     const child = spawn(cmd, args, {
+      windowsHide: true,
       cwd,
       env: ENV,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -63,7 +64,7 @@ export async function spawnCapture(
 export function gitChangedFiles(cwd: string): string[] {
   try {
     const run = (args: string[]): string[] =>
-      execFileSync('git', args, { cwd, encoding: 'utf8' })
+      execFileSync('git', args, { windowsHide: true, cwd, encoding: 'utf8' })
         .split('\n')
         .map((s) => s.trim())
         .filter(Boolean)

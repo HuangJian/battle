@@ -360,6 +360,7 @@ function parseLog(): {
 function pythonProcCount(): number | null {
   try {
     const out = execSync('tasklist /FI "IMAGENAME eq python.exe" /NH', {
+      windowsHide: true,
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
     })

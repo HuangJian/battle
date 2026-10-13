@@ -812,6 +812,7 @@ async function main(): Promise<void> {
 
   // 走官方解释器包装（AGENTS §5：nn python 一律经 nn-py-safe.sh）
   const proc = spawnSync('bash', [PY_SAFE, PY_ENTRY, '--spec', specPath], {
+    windowsHide: true,
     cwd: REPO_ROOT,
     stdio: ['ignore', 'inherit', 'inherit'],
   })

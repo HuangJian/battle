@@ -894,6 +894,7 @@ async function runPythonDist(
   )
   // 同步等待（spawnSync）：Python 的日志直接进 stderr，stdout 留给本工具的 JSON 报告。
   const proc = spawnSync('bash', [PY_SAFE, PY_ENTRY, '--spec', specPath], {
+    windowsHide: true,
     cwd: REPO_ROOT,
     stdio: ['ignore', 'inherit', 'inherit'],
   })

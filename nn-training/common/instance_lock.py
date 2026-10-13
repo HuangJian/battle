@@ -57,6 +57,7 @@ import sys
 import time
 
 from common.pid_probe import pid_alive
+from common.proc import run_capture
 
 __all__ = [
     "acquire_instance_lock",
@@ -93,19 +94,24 @@ def _win_cmdline_wmic(pid: int) -> str | None:
     ⚠ **Win11 24H2 起 `wmic` 已被移除**（2026-09-17 本机实测：`which wmic` 找不到、
     `System32/wbem/WMIC.exe` 不存在）⇒ 本函数在新机上必然返回 None，真实现是
     `_win_cmdline_cim`。保留它是因为还有一批未打该补丁的机器/云机镜像只认 wmic。
+
+    ⚠ 走 `common.proc.run_capture` 而不是裸 `subprocess.run`（2026-10-13 用户报障「启动
+    trainer/hub 闪黑窗」）：本函数只被**无控制台**的父进程调用（trainer / hub / 云机 worker
+    都是 `spawnBg` / `CREATE_NO_WINDOW` 出来的），而 Windows 会给「无控制台的父进程 + 未带
+    旗标的 console 子进程」**新建一块可见控制台窗口** ⇒ 每次启动都闪一下。`run_capture`
+    自带 `POPEN_NO_WINDOW`（且返回值类型钉死为 `CompletedProcess[str]`，避开
+    `warn_return_any`）。
     """
     import subprocess
 
     try:
-        r = subprocess.run(
+        r = run_capture(
             ["wmic", "process", "where", f"processid={pid}", "get", "CommandLine", "/value"],
-            capture_output=True,
             timeout=5,
-            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
-    for line in r.stdout.decode("utf-8", "replace").splitlines():
+    for line in (r.stdout or "").splitlines():
         if line.startswith("CommandLine="):
             return line[len("CommandLine=") :].strip() or None
     return None
@@ -120,11 +126,15 @@ def _win_cmdline_cim(pid: int) -> str | None:
     确认后删锁，也不静默双监听）。
 
     与 `tools/sim/sim-pool.ts` 的 wmic→PowerShell 回落同一取舍（那边也是 Win11 被移除）。
+
+    ⚠ 同 `_win_cmdline_wmic`：走 `common.proc.run_capture`（自带 `POPEN_NO_WINDOW`）——本机实测
+    这一发 pwsh 是「启动 trainer/hub 闪黑窗」里最显眼的一个（`ensure_cluster_snapshot` 的锚
+    核验会调它两次：先比对指纹、再写元数据）。
     """
     import subprocess
 
     try:
-        r = subprocess.run(
+        r = run_capture(
             [
                 "pwsh",
                 "-NoProfile",
@@ -132,15 +142,13 @@ def _win_cmdline_cim(pid: int) -> str | None:
                 "-Command",
                 f"(Get-CimInstance Win32_Process -Filter 'ProcessId={pid}').CommandLine",
             ],
-            capture_output=True,
             timeout=10,
-            check=False,
         )
     except (OSError, subprocess.SubprocessError):
         return None
     if r.returncode != 0:
         return None
-    return r.stdout.decode("utf-8", "replace").strip() or None
+    return (r.stdout or "").strip() or None
 
 
 def proc_cmdline(pid: int) -> str | None:

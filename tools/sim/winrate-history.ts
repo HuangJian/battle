@@ -65,7 +65,7 @@ export interface WinrateSnapshot extends WinrateResults {
 /** Best-effort git provenance; returns undefined outside a repo. */
 export function gitInfo(): GitInfo | undefined {
   const run = (cmd: string) =>
-    execSync(cmd, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
+    execSync(cmd, { windowsHide: true, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] })
   try {
     return {
       commit: run('git rev-parse --short HEAD').trim(),

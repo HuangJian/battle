@@ -154,6 +154,7 @@ export function allTestFiles(cwd: string): string[] {
   const collect = (raw: string[]): string[] => raw.filter(isRootSuiteTestPath)
   try {
     const out = execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard'], {
+      windowsHide: true,
       cwd,
       encoding: 'utf8',
     })

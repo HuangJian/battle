@@ -48,6 +48,7 @@ const OLD_SRC = 'src/nn/native/conv_feats_native.c'
 
 function gitShow(refFile: string): string {
   const r = spawnSync('git', ['show', refFile], {
+    windowsHide: true,
     cwd: ROOT,
     encoding: 'utf8',
     maxBuffer: 64 << 20,

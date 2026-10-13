@@ -251,7 +251,12 @@ export function runRound(
     policy,
   ]
   for (const w of weights) args.push('--weights', `${w.label}=${w.path}`)
-  const proc = Bun.spawnSync(['bun', ...args], { cwd: REPO_ROOT, stdout: 'pipe', stderr: 'pipe' })
+  const proc = Bun.spawnSync(['bun', ...args], {
+    windowsHide: true,
+    cwd: REPO_ROOT,
+    stdout: 'pipe',
+    stderr: 'pipe',
+  })
   if (proc.exitCode !== 0) {
     throw new Error(
       `eval-course-ckpt failed: ${new TextDecoder().decode(proc.stderr).slice(0, 500)}`,
