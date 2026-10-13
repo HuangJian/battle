@@ -24,8 +24,12 @@ from tests.helpers import cli_surface
 #:     调用点数（把定义点之类的非调用行也算了进去）⇒ 门禁恒红，2026-10-11 按真数订正；
 #:   · 出口 62 = 含当天补齐的 `hub/tunnel_ab_probe.py`（它的旧出口包在 `try:` 里，
 #:     旧版扫描只看 `__main__` 顶层语句，整块漏过）。
-MIN_HOUSE_CTOR_CALLS = 53
-MIN_HOUSE_EXIT_CALLS = 62
+#: ⚠ **2026-10-13 各降 1（53→52 · 62→61）**：唯一原因是 `biz/ladder_factory.py` 退役
+#: （`docs/nn/training-stack.md` §33）—— 它是同时走 house 构造点 + house 出口的一个 CLI
+#: 入口，两个计数各少 1。这是「有意的退役」而非回退：真正防回退的是下面两条
+#: `bare_parser_sites` / `old_style_exit_sites` 判据（仍为空）。
+MIN_HOUSE_CTOR_CALLS = 52
+MIN_HOUSE_EXIT_CALLS = 61
 
 
 # ───────────────────────────── 出口语义（新契约） ─────────────────────────────

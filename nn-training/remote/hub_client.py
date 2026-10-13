@@ -521,8 +521,12 @@ def pack_code_zip(
 
     包含：所有 .py + .jsonc 文件（递归）。
     排除：`tmp/` `weights/` `__pycache__/` `tests/` `rl-config.json`，
+    **角色裁剪名单**（`e2e` `hub` `ladder` `curricula` `tools` `trainer` + 根 `conftest.py`，
+    见下方 `_exclude_dirs` 的逐条判据），
     **以及任何以 `.` 开头的目录**（`.venv` / `.venv310bak` / `.mypy_cache` /
     `.ruff_cache` / `.pytest_cache` / `.git` … —— 一网打尽，不靠逐个列举）。
+
+    ★ `levels/` **刻意不在排除名单里**（硬依赖，排掉 131/181 门课直接 FileNotFoundError）。
 
     返回 zip 字节 sha256。
     """
@@ -538,8 +542,37 @@ def pack_code_zip(
         "weights",
         "__pycache__",
         "tests",
+        # ── 角色裁剪（C1，2026-10-13）────────────────────────────────────────────
+        # 判据 = 从 20 个云端节点入口（`remote.offline_boot` / `remote.run_loop` /
+        # `remote.worker*` / `remote.train_core` / `worker.iter_rollout` …）做 import 闭包，
+        # 只落到 `biz` / `common` / `remote` / `worker` 四个顶层包。下面这些**一次都没命中**
+        # （`remote/` `worker/` `common/` 里 `from hub` / `from trainer` 也是零）。
+        #   `e2e`       —— pytest 端到端用例（＋它自己的 conftest）
+        #   `hub`       —— hub 服务端，只在本机跑
+        #   `ladder`    —— 阶梯账本 + 计划（本机 `biz/ladder_*` 读）
+        #   `curricula` —— 课程库（1.5 MB 原始 / 719 KB 压缩，全包最大单项）。云端加载的是
+        #                  **随包下发的课程快照**（`remote/train_core.py:196-201` 把
+        #                  `manifest["course"]` 写进 `job_dir/course.jsonc` 再 `load_course`）。
+        #                  唯一残留依赖 = 课程 `gates` 里按名引用另一门课
+        #                  （`biz/course_spec.py:448-450 _resolve_courses` → `CURRICULA_DIR`）；
+        #                  全量 181 门实测只有退役的 `c6b-margin` 一门踩到。
+        #   `tools`     —— 本机运维脚本（唯一引用 `remote/colab_bc.py:81` 是本机启动器）
+        #   `trainer`   —— 本机训练循环；云端用 `remote/run_loop.py` **顶替**它
+        #                  （`remote/bundle.py:342`「不需要 hub、不需要仓」）
+        # ⚠ `levels` **不在**这里：课程里的 `"level"` 引用在云端加载时经
+        #   `biz/course_resolve.load_course:84-111` → `resolve_level` → `LEVELS_DIR`，
+        #   排掉 131/181 门课在 `train_core` 里 FileNotFoundError（实测，含现行 x20 线）。
+        #   它只有 15 KB 压缩，为它冒险不划算。
+        "e2e",
+        "hub",
+        "ladder",
+        "curricula",
+        "tools",
+        "trainer",
     }
-    _exclude_files = {"rl-config.json"}
+    # 根 `conftest.py` 只被 pytest 加载（`tests/` 早已排除，但根目录那份不住任何被排除的
+    # 目录里 ⇒ 之前一直白进包）。`e2e/conftest.py` 随 `e2e/` 整棵走。
+    _exclude_files = {"rl-config.json", "conftest.py"}
 
     n_files = 0
     with zipfile.ZipFile(zip_path_p, "w", zipfile.ZIP_DEFLATED) as z:

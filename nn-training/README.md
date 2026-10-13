@@ -97,10 +97,12 @@ nn-training/
 ├── biz/                     # 【游戏业务 L1】只放和**游戏**（关卡/课程/奖励）相关的东西；零传输层依赖
 │                            #   2026-09-30 刀 4：从 rl/ 出包（判据 = 编排树快照的补集，64 个模块）
 │                            #   2026-09-30 刀 6：训练侧 52 个搬去 worker/ ⇒ 本包只剩 **12** 个游戏业务模块
+│                            #   2026-10-13：`ladder_factory` 退役（它只生成已删的 20 门 ladder 课 + 20 个
+│                            #   关卡 + ladder/plan.jsonc）⇒ 本包 **11** 个模块
 │                            #   契约与模块表 → biz/__init__.py
 │   ├── course*.py           #    课程：配对与课程（course）· 类面（course_spec）· 查找（course_resolve）· 封存（course_archive）
 │   ├── reward_*.py          #    奖励公式引擎（reward_library）+ 内置势函数 + 校验 + 加载期 holder
-│   ├── ladder_*.py          #    阶梯：账本（ladder_ledger）· 工厂（ladder_factory）
+│   ├── ladder_ledger.py     #    阶梯身份台账（20 级阶梯 + 经典 35 关一张表）；工厂（ladder_factory）2026-10-13 退役
 │   ├── corpus_fp.py         #    语料身份指纹（corpus_identity_fp + 规则版本常量；刀 6 从 config 下沉 —— 身份属游戏域）
 │   └── hot_reload.py        #    课程热重载判决（same / apply / rejected：身份变了整单拒）
 │

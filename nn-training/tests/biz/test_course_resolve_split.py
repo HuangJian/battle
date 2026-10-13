@@ -199,3 +199,26 @@ def test_resolve_state_init_bank_accepts_three_bases(tmp_path, monkeypatch) -> N
     assert resolve_mod.resolve_state_init_bank("worker/data/manifest.json") is not None
     assert resolve_mod.resolve_state_init_bank("") is None
     assert resolve_mod.resolve_state_init_bank("no/such/file.json") is None
+
+
+# ── 关卡单源锁（2026-10-13 从 `tests/biz/test_ladder_factory.py` 迁来）──────────────
+#
+# 为什么搬到这里：原宿主 `test_ladder_factory.py` 随 `biz/ladder_factory.py` 一并退役
+# （该工厂只生成刚删掉的 20 门 ladder 课 + 20 个关卡 + `ladder/plan.jsonc`，唯一消费者
+# 就是它自己的测试）。本条判据**不依赖工厂** —— 它钉的是 `levels/` 的盘面事实，与本文件
+# 的 `LEVELS_DIR` 主题同族，故落在本文件；这也避免一条已登记的契约静默消失
+# （`docs/nn/test-contract-map.md` 把它登记为 T2b「行为/结构断言」）。
+
+
+def test_arena_retired_single_source() -> None:
+    """关卡单源锁：arena2/arena3 已退役删除（B 案后续：ladder-c02/c03 为唯一
+    count=2/3 关卡定义）。等价性证据留 git 历史 + DECISIONS
+    §2026-09-15-goalnn-xn-absorb；本测试防有人把 pilot 文件复活造成二次分叉。
+    （例外：arena2-acbc 是偏科子集关，无工厂等价物，保留。）
+
+    ⚠ 2026-10-13：曾经唯一的**自动**复活源（`biz/ladder_factory.py` 的 c01–c03 生成模板）
+    已退役 ⇒ 现在只剩「手工把文件放回来」这一种触发路径，判据本身不变。
+    """
+    assert not (ROOT / "levels" / "arena2.jsonc").exists()
+    assert not (ROOT / "levels" / "arena3.jsonc").exists()
+    assert (ROOT / "levels" / "arena2-acbc.jsonc").exists()

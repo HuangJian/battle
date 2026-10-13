@@ -110,7 +110,6 @@ biz/<mod>.py  ⇔  <mod> ∈ rl/*.py − RL_ORCHESTRATION
 | | `node_identity` | 「同 node 的 bootId 与本轮账本不一致 ⇒ 本轮排除」的训练侧判据 |
 | | `engine_pool` | 单进程多课程共享的 torch 引擎持有者（R2c-3 前置） |
 | | `model_build` | `build_model`：BC warm-start / RL resume / A4 归一校准 |
-| | `ladder_factory` | 阶梯工厂（c01..c20 关卡 + 课程 + 计划台账，数据不是代码） |
 """
 
 from __future__ import annotations
