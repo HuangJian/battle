@@ -7,6 +7,107 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §33 `biz/ladder_factory.py` 退役：它只是刚删掉的 ladder 模板库的生成器（2026-10-13）
+
+**用户提问（2026-10-13）**：`biz/ladder_factory.py` 干啥用的？只为生成 level 文件的话，也删掉吧。
+**核查结论：是，删。** 它是 I3「阶梯工厂（数据不是代码，§2.4）」的**一次性生成器**，产物恰好就是
+§32 刚删掉的那三族：
+
+| 产物 | 现状 / 性质 |
+|---|---|
+| `levels/ladder-cNN.jsonc`（20） | §32 已删 13、留 7（别的课在用） |
+| `curricula/ladder-cNN.jsonc`（20） | §32 已全删 |
+| `ladder/plan.jsonc`（I5 LEDGER 初稿） | 它是工厂的**输出**（`generate(plan_path=…) → write_jsonc`），**不是输入** |
+
+**输入侧只有一样**：`levels/arena4.jsonc`（几何源 `DEFAULT_ARENA`）+ 一堆钉死的常量
+（`max_ticks = 600×count + 900`、`wChip = 4.5/承伤基数`、lives tier、腿矩阵）。
+**消费者只有一个**：它自己的测试 `tests/biz/test_ladder_factory.py`；`worker/kickstart_burn.py:13`
+只在 docstring 里引它的 I2 结论，不构成依赖。
+
+**决定**：删 `biz/ladder_factory.py`（447 行）+ `tests/biz/test_ladder_factory.py`（269 行）。
+其中**唯一不依赖工厂的那条判据迁走**：`test_arena_retired_single_source`（arena2/arena3 不许复活、
+arena2-acbc 必须在）→ `tests/biz/test_course_resolve_split.py:213`（同族主题 = 关卡解析面的盘面事实；
+也避免一条**已登记的契约**静默消失 —— `docs/nn/test-contract-map.md` 把它登记为 T2b）。
+
+**★ 更正 §32 的一处事实错误（方向写反了）**：§32 原文写「工厂**从** `ladder/plan.jsonc` 生成 …」
+—— 反了，`plan.jsonc` 是工厂的**输出**。于是 §32 那条"会重犯的坑"（跑一次 generate 静默复活 20 门死课）
+**随工厂一起消失**：这条路径不再存在。
+
+**`ladder/plan.jsonc` 一并删（用户 2026-10-13 拍板）**：工厂的第三个产物，删工厂后即成**孤儿**
+（全仓 grep：无写入者；读取者 0 —— dashboard / `tools/sim/*` / `biz/ladder_ledger.py` 读的都是同目录的
+**`LEDGER.jsonc`**，那是另一个活文件，保留）。且它的内容列着 20 个已不存在的关卡 ⇒ 留着是误导。
+删后 `nn-training/ladder/` 只剩 `LEDGER.jsonc` + `reports/teacher-probe.json`（后者由
+`tools/sim/teacher-probe.ts` 写）。
+
+**顺带清掉的引用**：`biz/__init__.py` 的模块表那行 · `nn-training/README.md` 的 `biz/` 树
+（「本包 12 个模块」→ **11**）· `docs/nn/test-contract-map.md` 的测试路径。
+**故意不动的**：`curricula/x2|x3|x4|x5|x6-rebirth.jsonc` 与 `x20-snowball.jsonc` 注释里引
+`biz/ladder_factory.py:228` 当"先例" —— **课程文件字节 = `course_fp`**，改一个注释字就换指纹，
+正在跑的腿（x28-d01 / x28-w08）要按 D14 对账 ⇒ 一律不碰（死引用留档）。`worker/kickstart_burn.py:13`
+的 docstring 同理（它只记 I2 结论的出处，判据不依赖该文件存在）。
+
+**踩到的两条护栏（诚实记一笔）**：
+
+1. `tests/test_layering.py:428` 的 `len(biz) + len(worker) >= 66` 是**下界**：实测改前 73、改后 72，
+   仍过 ⇒ 无需改（那个数早就松了；顺带说明它并不像 docstring 写的那样"钉死 64"）。
+2. `tests/test_source_text_assert_budget.py` **红了**（`1092 > 1091`）。真因**不是**本次删除，而是
+   **上一批 code.zip 裁剪**那轮我在 `test_hub_client_code_zip.py` 里新加的两条断言 —— 口径 B 的
+   `.py` 门把「**zip 成员名**里的 `*.py` 路径」误判成源码文本断言（该护栏 docstring 自己承认这道门
+   是文本级的、会误伤路径字符串）。修法**不是抬基线**（护栏明令「不许直接改数字」）：收件名单经
+   `_expected_members()` 转一手、被裁目录改用**不含 `.py`** 的 `TRIM_TOPS` 目录集 ⇒ 该文件 B 由 2 降 0。
+   复测全仓 **A/B = 1437/1090**（双基线 1445/1091 之内；删掉 `test_ladder_factory.py` 的 8 条 A
+   也把水位顺带降了一格）。
+
+**验证**：`tests/test_layering.py` · `tests/test_source_text_assert_budget.py` · `tests/biz` ·
+`tests/tools` · `tests/worker/test_course_level.py` · `tests/trainer/test_verdict_corpus.py` ·
+`tests/remote/test_hub_client_code_zip.py` · `tests/remote/test_code_snapshot.py`
+= **388 passed / 6 skipped**（skip 全是 `test_forkdist` 的 Windows 分支）。
+
+---
+## §32 ladder 模板库裁剪：删掉「只有 ladder 自己引用」的 20 门课 + 13 个关卡（2026-10-13）
+
+**用户指令（2026-10-13）**：`curricula/` 下 `ladder-cNN.jsonc` 全部移除；它们引用的 `levels/*.jsonc`
+**如果没被其它课程引用**，一并移除。（本节的判据就是这句话的字面实现。）
+
+**判据 = 只按课程引用**（`curricula/*.jsonc` 的 `"level"` 字段）。顺序很重要：**先删课，再重算关卡的存活引用**
+（否则 c01–c07 会被自己那门课误判成"还有人用"）。脚本一次性算出两批（`tmp/ladder_trim_plan.py`）。
+
+**删（33 个文件）**：
+
+| 批次 | 内容 | 理由 |
+|---|---|---|
+| 课程 20 个 | `curricula/ladder-c01..c20.jsonc` | 用户点名全删 |
+| 关卡 13 个 | `levels/ladder-c08..c20.jsonc` | 删课后引用数归 **0**（c01–c07 各有 3/3/11/20/6/1/1 门别的课在用） |
+
+**留（不被本次波及）**：`levels/ladder-c01..c07`（上表右列）· `levels/ladder-c20-lives1.jsonc`
+（**66 门**课在用 —— 现行 x20 全线）· `levels/ladder-c20-lives1-powered.jsonc`（`x20-powered`）·
+`levels/arena2-acbc / arena4 / arena6`（`x2-acbc` / 3 门 BC / `c6-dmgfix`）。
+
+**★ 会重犯的坑（2026-10-13 **更正 + 已随工厂退役消化**，见 §33）**：~~`biz/ladder_factory.py` 从
+`ladder/plan.jsonc`（仍在，且仍列着 20 级）生成 `levels/ladder-cNN.jsonc` 和 `curricula/ladder-cNN.jsonc`，
+跑一次 `lf.generate()` 就把这 20 门"死课"复活~~ —— **方向写反了**：`ladder/plan.jsonc` 是工厂的**输出**，
+不是输入；而该工厂本身已在同一天退役（§33）⇒ 这条"静默复活 20 门死课"的路径**已经不存在**。
+（保留原注：工厂测试全程在 `tmp_path` 上自产自销，从不写真仓库。）
+
+**不用动的两处（已核，别顺手清）**：
+- `ladder/LEDGER.jsonc` 的 `levels` 键 = `ladder-c01..c07` + `x2` / `x2-acbc` / `x3`（10 个），**没有 c08+**
+  ⇒ 与本次删除无关；`biz/ladder_ledger.py` 也不校验键对应的关卡文件是否存在（它只记 teacher 探针与 disk_bytes）。
+- `rl-config.json` 的 `courses` 块只有 `x21-psh-k5` / `x28-d01` / `x28-w08`，**无 ladder 课程** ⇒ 无孤儿配置。
+
+**⚠ 一处自我更正（2026-10-13 同日）**：先前本节写「`levels/obstruction.jsonc` 是全仓零引用的关卡，
+比 c08–c20 更死」—— **错了，别删**。它**不是**死文件，而是**阶段二「障碍/基地专场」的预备关卡**：
+`plan/obs-v5-vector-gap.plan.md:95`「第二阶段障碍/基地专场（G0 过后另起账本）：obstruction（＋基地
+tile (6,12)，lives 1）」、`:364`「G0 过 ⇒ 专场（课程 obstruction＋基地，B1–B4）」。现在没有课程引用它
+是因为**两阶段纪律**（`DECISIONS.md:4858`：提前开 obstruction 并行腿被用户 veto）—— 判据是
+「**计划中的引用**」而不是「今天的引用」。⇒ 教训：判"零引用"时 grep 的搜索面必须含 `plan/` 与
+`DECISIONS.md`（本次第一次只按课程 + 代码扫，漏掉了计划面）。
+
+**验证**：`tests/biz/` + `tests/tools/` 全量 **354 passed / 6 skipped**（skip 全是 `test_forkdist`
+的 Windows 分支）；另跑课程/关卡相关 12 个文件 **162 passed**（含 `test_reward_golden.py::test_jsonc_courses_load`
+—— 它遍历真 `curricula/*.jsonc`，只要求 ≥5 个，删后仍 161 个）。
+**恢复**：这些文件都已跟踪 ⇒ `git checkout -- <路径>` 可取回。
+
+---
 ## §31 决策周期 K 通道：课程 `decision_k` 全链落地（2026-10-07，plan/k5-rhythm）
 
 **病**：决策门 `t % K === 0` 的 K 有单一实现（`src/nn/decision-gate.ts` + 8 处调用点），但**没有通道**——
@@ -1838,6 +1939,11 @@ C 预算测量路径（iters/eval_*/out 等，随时可改）。
   c04 2510/+31% · c05 2720/+43% · c06 2776/+62% · c07 3381/+51% · c10 3677/+88% · c14 4823/+93%，
   逐点零超时；**上界不缩**（12900 ≥ 原式 12000）。单一实现 = `biz/ladder_factory.max_ticks_for()`，
   由 `nn-training/tests/biz/test_ladder_factory.py` 钉死。
+
+  ⚠ **2026-10-13 更正**：`biz/ladder_factory.py` 已退役（§33）⇒ 这个"单一实现"与它的测试都**不在了**。
+  公式 `max_ticks = 600×count + 900` 本身**不受影响**（上面这段文字就是它的规范），现在只以**字面值**
+  活在已生成的关卡文件里（`levels/ladder-c01..c07`、`ladder-c20-lives1*`）；要再生成新关卡时
+  从 git 历史取回工厂（`git show HEAD:nn-training/biz/ladder_factory.py`）。
 - **违反后果**：低 count 端截断会把可赢局记成超时 ⇒ 门（pooled 400 ≥80%）构造性不可达，或超时率被
   误读成能力信号去调训练侧；终局标准反复改则 §6「现线证据沿用」与跨级/跨版本可比性失效。
 

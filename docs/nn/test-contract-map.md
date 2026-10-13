@@ -44,7 +44,7 @@
 | `tests/hub/test_auto_handoff.py:815` | mode actions 回 400 | HTTP 行为 |
 | `tests/hub/test_multi_course_hub.py:556` | mode POST 已退役（400） | HTTP 行为 |
 | `tests/common/test_offline_task_queue.py:1087` | `resolve` 忽略 retired mode keys（该文件 `read_text(` = 0） | 纯行为 |
-| `tests/remote/test_job_identity_collision.py:293` / `tests/hub/test_jobs_next_retired.py:87` / `tests/biz/test_ladder_factory.py:201` | single-course legacy 语义 / `legacy_shape` 不再产出 / arena2-3 已删的单源锁 | 行为/结构断言 |
+| `tests/remote/test_job_identity_collision.py:293` / `tests/hub/test_jobs_next_retired.py:87` / `tests/biz/test_course_resolve_split.py:213` | single-course legacy 语义 / `legacy_shape` 不再产出 / arena2-3 已删的单源锁 | 行为/结构断言（第三条 2026-10-13 从 `test_ladder_factory.py:201` 迁来 —— 宿主文件随 `biz/ladder_factory.py` 退役，见 `docs/nn/training-stack.md` §32） |
 
 **区域性墓碑**（保留在原地的第三类，进不了清单）：`tests/hub/test_role_routing.py:243`
 `assert "self.parked" not in gate` —— `parked` 在别处仍是好名字，它只能在 `role_blocked` 那段源码里消失；

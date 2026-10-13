@@ -6,6 +6,66 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §88 C1 `code.zip` 按角色裁剪：量法换成「入口 import 闭包」，2.796 MB → 1.221 MB（2026-10-13）
+
+§80 的「未做 / 未取 ⑤」欠的账。当时的门槛是「要先量一次冷启动里真正被 `import` 的模块占包体多少」——
+本节的量法就是这句话的字面实现：**从云端节点的入口做 import 闭包**，闭包之外的目录整棵可排。
+
+### 判据（可复跑的静态证据）
+
+入口取 20 个（`remote.offline_boot` / `remote.plan_run` / `remote.run_loop` / `remote.worker` /
+`remote.remote_worker` / `remote.remote_worker_serve` / `remote.worker_server` / `remote.worker_proc` /
+`remote.train_core` / `remote.notebook_boot` / `remote.notebook_runtime` / `remote.rollout_node` /
+`remote.bc_job` / `remote.offline_deliver` / `remote.offline_eval` / `remote.result_upload` /
+`remote.push_bootstrap` / `worker.iter_rollout` / `worker.iter_job` / `worker.cli` / `worker.cmd`），
+按 `ast` 抓全部 import（含函数内延迟导入）做 BFS。
+
+**闭包只落到 `biz` / `common` / `remote` / `worker` 四个顶层包**。旁证：
+`remote/` `worker/` `common/` 里 `from hub` / `from trainer` / `from tools` / `from e2e` **零命中**
+（只有三处 docstring 提及）；`remote/bundle.py:342` 早就写着云机续跑「不需要 hub、不需要仓」。
+
+### 排除表（`remote/hub_client.py::pack_code_zip` 的 `_exclude_dirs` / `_exclude_files`）
+
+| 排除 | 压缩后 | 判据 |
+|---|---|---|
+| `curricula/` | 719 KB | 云端加载的是**随包下发的课程快照**（`remote/train_core.py:196-201` 把 `manifest["course"]` 写进 `job_dir/course.jsonc` 再 `load_course`）。全包最大单项。 |
+| `trainer/` | 360 KB | 云端用 `remote/run_loop.py` **顶替**它；本机训练循环。 |
+| `hub/` | 215 KB | hub 服务端只在本机跑。 |
+| `e2e/` | 138 KB | pytest 端到端用例（＋它自己的 `conftest.py`）。 |
+| `tools/` | 135 KB | 本机运维脚本；唯一引用 `remote/colab_bc.py:81` 是**本机启动器**（cwd = 本仓）。 |
+| `ladder/` | 2.6 KB | 阶梯账本 + 计划，本机 `biz/ladder_*` 读。 |
+| 根 `conftest.py` | 6.7 KB | 只被 pytest 加载（`tests/` 早已排除，但根目录那份不住任何被排除的目录里 ⇒ 之前一直白进包）。 |
+
+**2.796 MB → 1.221 MB（214 文件，−56%）**，闭包恰好 = `{biz 13, common 31, levels 26, remote 41, worker 103}`。
+
+### ★ `levels/` 不许排（唯一的反例，也是本条最容易被"顺手"搞错的地方）
+
+课程文件里的 `"level": "<名>"` 引用**没有**被内联进快照：`trainer/bc_loop.py:695-696`
+（`course_bytes.decode()`）、`remote/bundle.py:167-169` 都是原文入包。云端 `train_core.py:201`
+的 `load_course(job_dir/course.jsonc)` 于是会走
+`biz/course_resolve.load_course:84-111` → `resolve_level` → **`LEVELS_DIR/*.jsonc`**。
+
+把 `LEVELS_DIR` 指向空目录实测（全 181 门课程）：**137 失败，新增 131 个 `FileNotFoundError`**，
+含现行 x20 线（`curricula/x20-floor.jsonc` → `level: ladder-c20-lives1`）。
+而 `levels/` 只有 26 文件 / 70 KB 原始 / **15 KB 压缩** —— 为 15 KB 冒 131 门课的风险不划算。
+
+**残余依赖（已知、可接受）**：`curricula/` 在云端只剩一条窄路径 —— 课程 `gates` 里**按名引用另一门课**
+（`biz/course_spec.py:448-450 _resolve_courses` → `resolve_course` → `CURRICULA_DIR`）。
+全 181 门实测只有退役的 `c6b-margin` 一门踩到；将来若有课程这么写，会在云端 `load_course` 响亮
+报 `FileNotFoundError`（不是静默）。
+
+### 验证
+
+- `tests/remote/test_hub_client_code_zip.py`：`KEEP` 改成**精确集合相等**（含 `levels/arena6.jsonc`
+  —— 硬依赖反回归），新增 `ROLE_TRIMMED` 逐条断言 + `test_role_trim_drops_local_only_dirs_but_keeps_levels`；
+  点目录那两条原样保留。27 passed（含 `test_code_snapshot.py` 与 `test_common_layer` 的 common 包用例）。
+- 真仓跑一遍 `pack_code_zip`：`code.zip: 214 files, 1220660 bytes`，无 `e2e/hub/ladder/curricula/tools/trainer`
+  泄漏、`levels/` 26 个全在、根 `conftest.py` 不在。
+- ⚠ **`hub/smoke_loopback.py` 不是这条改动的哨兵**：它给假云机设了 `PYTHONPATH=ROOT`
+  （`:202`），所以即使包里少模块也照样 import 成功 ⇒ 「冒烟绿」不等于「裁剪没排错」。
+
+---
+
 ## §87 plan A/B/C 落地：Range 断点续传 · 上传让路点 · 控制面死线与 P0 指标解耦（2026-10-12）
 
 §86 只治了「判据误报」与「无收益还抽」，把三件**结构性**的事留在了 `plan/transfer-jitter-tolerance.plan.md`
@@ -575,7 +635,8 @@ serve、不重建引擎）；毒 job 有账本终局与人工把手；复活判�
 preempt 的 0.25MB，救不回来；门槛未变）。③ **更高压 payload** 不做（preset 3→6 已量：体积只
 −2.6~−3.0%、打包 +6.2s，换 0.08s 传输 = 净亏）。④ **第二 bulk 通道 / 分块并行下载**不做（违反
 「同一时刻仅 1 条 bulk」硬不变量；若要动，先单变量实测确认不会重现「两侧同时沉默」再谈）。
-⑤ **C1 `code.zip` 按角色裁剪** 未做（要先量一次冷启动里真正被 `import` 的模块占包体多少）。
+⑤ ~~**C1 `code.zip` 按角色裁剪** 未做（要先量一次冷启动里真正被 `import` 的模块占包体多少）。~~
+**已做（2026-10-13）→ §88**：量法取「从云端入口做 import 闭包」，实测 2.796 MB → 1.221 MB。
 
 ---
 
