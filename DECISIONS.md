@@ -5331,3 +5331,323 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 - **后果**：全文 → `docs/nn/experiments.md` §86；课程文件状态＋尾部判决已写回；
   证据 `tmp/panel-x28-{d01,w08}-it40.jsonl` + `tmp/compare-x28-{d01,w08}-{it40,delta}.txt`。
 
+## §2026-10-13-goalnn-y1-restart（2026-10-13，新纪元 y 系列第一课：c01 从零爬梯；单腿；出生全税＋0 伤门）
+
+- **背景**：x27 冻结（policy 冻住）＋x28 双杀（税动姿态不动 D05）后，用户令随机权重从头爬梯。
+   chasing 问题：c01-04 无税时代（~6 周）埋下站桩对换（D05/D09/D01 同一套经济学）；
+  tower 带 trunk 205 轮到 0.25、x1 起跑线 c01 仅 4% ⇒ rush 稀疏烧钱；rush＋重税 = 恐惧陷阱
+  （x1 原话）；tower 出局（obs-v5-B 已冻结＋ladder 无几何信号＋家在专场）；165 宽保留不退 137。
+- **决定**：D1=单腿 `y1`（level ladder-c01；起点 `weights/y1/scratch-init.json`，
+  `init_scratch_weights.py` 加 `--policy-extra`（建 165 档，缺省行为不变）＋
+  `--zero-value-new`（D1 同款纯 0 value 新列；sha16 `1211d2f9a9f0c7d5`；policy ~0.001，
+  value 新精确 0）；kickstart 关；value_anchor 0.001 出生安全件；双 rms 活线，
+  policy 读数反转（scratch 出生 flat=没学，长大=接线）。
+  D2=出生价格逐字继承 x27-obs（17 项全税 c01 全开；x28 死剂量不带入；回溯/E2 不带入，另案）；
+  D3=it40 硬门（D01≤it0×0.5＋kills≥it0×4〈it0<0.5 改≥2.0〉，pass 不判门；fail 即杀）＋
+  it80 晋升门（D01≤it0×0.3＋pass≥50% ⇒ y2）；终点 it80，不考 G0；新流 20261023；
+  ent_break 0.25（scratch 防熵塌）；eval 4×100（c01 短局便宜）。
+- **备选与否决**：① 直冲 c20 —— 否（稀疏＋恐惧陷阱，见背景）；② tower 并行 —— 否（见背景三条）；
+  ③ 退回 137 宽 —— 否（死列无害＋单形状＋leash，零收益开分叉）；④ 回溯进出生包 ——
+  否（缺列，block 出生；列落地即在 plastic lineage 上审判）；⑤ 朴素 kaiming ——
+  否（x1 自锁事故；必须走脚本＋断言）；⑥ panel tripwire —— 否（c01 无人类 panel 对；
+  日常 eval 足够；panel 随 c20 到达）。
+- **后果**：`course_openable` True；`nn-training/curricula/y1.jsonc`＋起点权重文件；
+  开课走控制台。旧纪元基线（burst-it220）保留作史，不再续跑。
+
+## §2026-10-13-goalnn-y1simple-control（2026-10-13，y1 的并行价格体系对照：x1 极简复刻，同起点同流）
+
+- **背景**：y1 出生即开 17 项全税——这套两个月攒的价格体系是必需还是包袱（恐惧陷阱），
+  y1 单腿答不了。x1-rebirth-a2 用极简价干到 100%/0 伤的先例让这题真有悬念
+  （用户拍板双腿并行）。无绳对照不配（x27 已答：零起点仍炸 0.35）；tower 不配（已判死）。
+- **决定**：D1=`y1-simple`（reward 逐字 x1：公式＋参数＋terminal −5/−3；
+  其余逐键同 y1：**字面同一份 scratch it0**、同流 20261023、同 level/iters/优化器/K/eval、
+  kickstart 关、anchor 0.001）；D2=门与 y1 同门同基线（it40 D01≤it0×50%＋kills≥it0×4，
+  it80 晋升；两腿各判）；D3=双分支预注册：simple 持平/赢 ⇒ 17 项是包袱（出生包减负）；
+  simple 莽化（D01 不降）⇒ 成熟税必要实锤；y1 恐惧化（kills 不起＋D01 极低）⇒ 税太狠减负。
+- **备选与否决**：① E2 式 hurt 叠加当对照 —— 否（答的是另一题；D05 直球已排队，先停手令下冻结）；
+  ② ent_break 对照 —— 否（ trivial，不值一腿）；③ panel 门 —— 否（c01 无人类 panel 对，同 y1）。
+- **后果**：`course_openable` True；`nn-training/curricula/y1-simple.jsonc`；
+  开课走控制台（与 y1 双腿并行）。
+
+## §2026-10-13-goalnn-y1-it40-verdict（2026-10-13，y1 it40 门 fail＋it42 熵熔断 ABORT；死因探索死亡，价格无罪）
+
+- **背景**：设计条 §2026-10-13-goalnn-y1-restart 的 it40 门（D01≤it0×50%＋kills≥0.5）。
+  y1 跑到 it42：D01 主线 1.3 通过；kills 0.345 < 0.5 **fail**——greedy 峰 it5–it40
+  八连 eval 400/400 逐局逐字同（wver 八变），熵 1.81→0.17，梯度死（pol −0.0002/KL 0.0003）。
+  系统独立见证：it42 `circuit_break`（entropy≤0.25 连 8 轮）→ ABORT → run_complete；
+  熔断器按设计工作（8 连发慢引信；`worker/loop_guards_trip.py`），非漏映射。
+  simple 腿 it38 存活（熵 1.65，R~0.14）：同 138 峰 it30 到达（400/400 与 y1 逐字同——
+  c01 贪心吸引子唯一），税加速发现 6×（it5 vs it30），也加速收敛。
+- **决定**：D1=y1 本配置杀（门 fail＋熔断双判决；跑满 80 无意义）；D2=病因定为**探索死亡**，
+  出生价格无罪（D01 −99%＋138 clears＋开火不塌三条出罪）；D3=y1-simple 不动（门待其 it40，
+  熵活着，仍有展开可能）；D4=entropy-rescue 另案（y1-it30 fork＋探索压力，用户拍板；
+  档在峰已找到＋熵 alive 处干预，不去停尸房）。
+- **备选与否决**：① 跑满 80 —— 否（梯度已死，stack7 式空烧）；② 改读 rollout 门 ——
+  否（事后换表，门禁即为此设；rollout/日常 eval 口径差异已记）；③ simple 同杀 ——
+  否（熵活＋门未到，无罪推定）；④ 原地加熵续跑（不断腿改参）—— 否（§15.5 不跨改动续跑；
+  走 D4 新腿）。
+- **后果**：全文 → `docs/nn/experiments.md` §87；y1 课程文件状态＋双判决已写回；
+  证据 training_log（it42 circuit_break 行）＋八连 eval＋双 rms 轨迹。
+
+## §2026-10-13-goalnn-y1long-design（2026-10-13，y1/y1-simple it40 timeout 强税续跑：terminal timeout −12.0；自杀 tripwire 预注册）
+
+- **背景**：用户令不磨了，timeout 放大 4 倍。基线三方 400/400 逐字同（y1-it40＝simple-it35＝
+  simple-it40；138 通关＋262 timeout＋0 gameover）。y1 熵塌（赌反差解冻），simple 熵 alive
+  （测税效应）；双腿对照看起点状态的影响。−12 口径 = simple 既有 −3.0 的 ×4，两腿同价。
+- **决定**：D1=`y1-long`（y1.it40起点，sha16 `56344888e8974f3a`；terminal {}→{timeout −12.0}，
+  余同 y1）；D2=`y1-long-simple`（simple.it40起点，sha16 `01c0cd679a99eb79`；
+  timeout −3.0→−12.0，余同 y1-simple）；D3=四门（timeout≤180＋kills≥138＋
+  gameover>10 即杀＋KL/熵掐），iters 40 封顶；D4=同流 20261023（continuation 可比）。
+- **备选与否决**：① 死亡共价（timeout＋lives 同加）—— 否（第二变量；自杀由 tripwire 判，
+  出现即"诱导自杀" verdict 另案）；② timeout ×2 —— 否（用户定 4x；且 −6 力度相对反差 15 不够看）；
+  ③ timeout 时长/采样加权解读 —— 否（无此语义也无机器；−12 终局价是唯一自然读法）；
+  ④ episode  oversample —— 否（无机器）；⑤ simple 不同流 —— 否（双腿 rollout 可比，x24 先例）。
+- **后果**：`course_openable` 双 True；`nn-training/curricula/y1-long{,-simple}.jsonc`；
+  开课走控制台（simple 先停）。y1 已死于熔断，无需动。
+
+## §2026-10-13-goalnn-y1long-maxticks（2026-10-13，timeout×4 落关卡 fork：ladder-c01-long 6000；上条 terminal 设计作废）
+
+- **背景**：上条 terminal-tax 设计已落未开，用户纠正"改 max_ticks 1500"（关卡文件，非激励）。
+  三层核查：① 课程侧 override **死路**（`load_course` 四键冲突 raise＋x4/x5 课头"课程侧禁止重写"；
+  lives 例外是 player 子字段通道，max_ticks 无标量豁免；内联 stages 也无此键）；
+  ② max-ticks-rule（God 200 局/级：c01 胜局最大 1121，+34%，判据≥1.25×）⇒ 1500 有出处，
+  6000 = 5.36× 判据外，属任务侧破例（§0.2），用户 override 已批；
+  ③ 人类基线安然（God c01 439 拍 ≪1500，从不见上限；人类 panel 全是 c20）。
+  代价清单：c01-NN 读数断代（与 1500-horizon 腿不可比，已声明）；rollout ~2.6× 变慢
+  （65% 长局；transitions 定额下单轮局数减少）；D01/死亡新变量（4× 暴露/开火）配 watch；
+  simple 必须先停（跑中污染门后 it41+ 空烧；其门 fail 未判一并结）。
+- **决定**：D1=fork（`levels/ladder-c01-long.jsonc`：与标准逐字节同，唯 name＋max_ticks 两处差；
+  标准 c01 不动 ⇒ rule/test/human/旧读数/codezip-set 全安；删 fork 即回退，引用响亮报错）；
+  D2=双腿改 fork-level、奖励还原（y1-long terminal 回 {}，simple-long timeout 回 −3.0；
+  单变量 = level 一键）；D3=四门（timeout≤180＋kills≥138＋gameover>10 即杀＋D01/墙钟 watch），
+  iters 40；D4=simple 判（门 fail by letter＋extension 未批＋被 fork 取代 → 停；
+  lineage 由 y1-long-simple 续，熵 alive 遗产不断）；D5=同流 20261023。
+- **备选与否决**：① 直接改标准文件 —— 否（rule＋teacher-probe 1500＋human 三处全动；simple 跑中污染）；
+  ② 上条 terminal 设计执行 —— 否（用户纠正为准；自杀 math 随设计作废，**本文保留备查，不删文**）；
+  ③ 等人类 c01 实测样本 —— 否（God 439 代理证据已够判安全；人采 20 局可日后补，不 block）；
+  ④ simple 续跑到 80 —— 否（门 fail＋被取代； Theorems 已死，simple 的慢磨问题由 long-simple 继承）。
+- **后果**：`course_openable` 双 True（fork level 生效）；关卡 fork＋双腿文件（已对账）；
+  开课走控制台（simple 先停）。旧 c01-NN 读数（y1/y1-simple 1500-horizon）封存作史。
+
+## §2026-10-13-goalnn-y2-prep（2026-10-13，爬梯第二档 y2 预备：c02-long fork＋继承 y1 setup；bc 待 simple.it80，安全锁）
+
+- **背景**：用户令提前准备 y2（继承 y1，改 c02，max_ticks 同到 6000）。c02 结构
+  （levels/ladder-c02.jsonc）：6 关（ab/ac/ad/bc/bd/cd 双兵混编），count=2（kills 上限 2.0），
+  规则 max_ticks 2100，hard，1 命。y1.it42 熵死无晋升资格（门不过不晋升）⇒ 起点只能是
+  simple 线；simple 在 it52 卡住 20+ 分钟无 iteration 行（停滞？控制台查；y2 等 simple.it80）。
+- **决定**：D1=fork（`levels/ladder-c02-long.jsonc`：脚本双断言通道，与标准逐字节同，
+  唯 name＋max_ticks 6000 两处差；规则值→6000 = 2.86×，override 沿上条）；
+  D2=`y2.jsonc`（奖励逐字 y1；level c02-long；eval 2000-2005×70；iters 80/max 24；
+  it40 门 D01≤it0×50%＋kills≥1.0（上限 2.0 之半）＋pass 参考；it80 晋升 D01≤30%＋pass≥50% ⇒ y3）；
+  D3=bc 待回填安全锁：`y1-simple.it80.TBD.json`（不存在 ⇒ 靠 openable 拦？**拦不住**——
+  `course_openable` 不查 bc 存在性（已实测 True）。防线 = 本头注＋控制台指令（bc 未填不开）＋
+  缺失 bc 在 seeding/packaging 侧按全仓惯例响亮失败（kickstart 缺 bc 即 SystemExit 同族）；
+  openable 查 bc 列为 P2 工程欠账（本轮不动 trainer，他人地盘）；
+  scratch 占位被否决（静默错跑比响亮失败坏）；simple.it80 落账后回填精确文件名＋sha 再开）；
+  D4=同流 20261023（continuation）。
+- **备选与否决**：① y1.it42 当爹 —— 否（熵死权重上山，违晋升纪律）；② scratch 当爹 ——
+  否（断爬梯连续性；c01 防御白学；另 simple 线活着时不用）；③ y1-simple 最新 it52 当爹 ——
+  否（门看 it80，五十二不是 verdict 点；等落账）；④ c02-long max_ticks 照规则 2100 ——
+  否（用户令 6000；与 c01-long 同等待遇，断代声明同理）；⑤ simple 不等直接开 y2 ——
+  否（无爹开课＝bc 缺失裸奔，锁死）。
+- **后果**：关卡 fork＋`nn-training/curricula/y2.jsonc`（parse＋公式逐字＋openable True〈bc 未查〉）；
+  开课条件：simple.it80 落账＋回填＋用户点开课。在此之前 y2 是 locked 预备件。
+
+## §2026-10-13-goalnn-long-stale-worker（2026-10-13，y1-long 双腿跑在旧码执行器：双 rms 恒 0＋it1 头重置＋绳子疑似未装；x27 断档确认）
+
+- **背景**：用户问 eval 恒 66%＋y1-long 熵低＋苟是否免费。查得：① eval 66%＝it0 瞬时任务效应
+  （138→264/136，全图齐涨，零训练）＋其后冻结（400/400×3，跨腿亦同）；② 熵：y1-long 0.167
+  未解冻（KL 0.0007，反差未生效），simple-long 1.55 alive；③ 苟：timeout 局 threat/hurt/danger
+  ≈0、nearSq 266（−1.24/局）、开火 106 发——免费且在试（miss 非躲），wTick 暂不动
+  （第二变量；x4 曾有 0.01，kitchen-sink 静默丢，无 verdict；timeout 局先看任务变现）。
+  另抓到本条：双腿训练遥测 vrms/prms 恒 0.0000（9 轮）。
+- **判定（执行器，非训练）**：零值＋grad~24s（vs 正常 ~45s）＝x27 断档同签名；
+  job 归属：longs 全 kaggle-c（11/10），x28/simple 全 aistudio-c（42/52）——**按 worker 分毫不差**。
+  checkpoint 直算铁证：y1-long.it1 move/fire 新列 0.049/0.060（相对 y1.it40 的 0.271/1.104
+  断崖；旧列行为连续：it0→it5 400/400 同）＝旧架构 worker 静默部分加载（旧列 carried＋新列
+  fresh-kaiming）；it1→it9 value-new 0.035→0.066、simple-long 0.080→0.149→0.166
+  （8 轮 +87%，x26 区还有 ~8 轮）＝**绳子未装**（leash 同 0.001 在旧码不存在）。
+  x27 it35–75 断档（零值＋21s）同案确认（彼时 obs 无绳跑 40 轮，it76 0.215  spike 即出狱读数）。
+- **决定**：D1=腿不重启（it0 基线真权重所测＋行为连续；重开=第二次重置，更大混杂）；
+  D2=遥测盲区 analytic 补位（本条直算方法；每门必读 checkpoint，不读日志 0.0）＋
+  tripwire（任一腿 value-new >0.20 即人工掐，不等 it40）；D3=刷码重派走 hub lane
+  （kaggle-c 刷到含 telemetry＋anchor 的 code，腿热迁无权重断点——165 对 165 直装；
+  回迁自动把 0.166 拉回，x27 已证 pullback；transport lane  ownership，不在本条动手）；
+  D4=门重校准（§6.4：原线 ≤180/≥138 已被任务本身在 it0 击穿→改 it0-fork 基准
+  timeout≤110/kills≥264，两腿头注已改）。
+- **备选与否决**：① 当 stale 没事继续盲跑 —— 否（x26 区 8 轮即到，无监控无绳＝裸奔）；
+  ② 重开双腿 —— 否（D1；it0 基线有效＋行为连续，重开丢任务效应基线）；③ 立刻加 wTick ——
+  否（任务变现先行；timeout 局在试（106 发）不在躲，wTick 罚 miss 恐致自杀/恐惧，另案排队）。
+- **后果**：本条＋双腿头注门/注记已写；hub lane 待刷码（kaggle-c）；analytic tripwire 由盯盘执行。
+
+## §2026-10-13-goalnn-kaggle-stale-process（2026-10-13，kaggle-c 是没重启过的长寿进程：trainer/hub 重启不管 worker；修法＝重启 worker 不是刷 hub）
+
+- **背景**：用户报"y1-long 开课前刚重启过 trainer 和 hub"。归属全集：y1/y1-simple/x28
+  全 aistudio-c（42/52/42，全活遥测）；longs 全 kaggle-c（11/10，全零＋重置）。
+  ⇒ 重启范围 = hub（重打包 code.zip ✓新）＋trainer（本地环 ✓新），**不含 worker 进程**；
+  kaggle-c 是带着史前代码（早于 telemetry，更早于 obs-v5 165 档——legacy 部分加载
+  即 it1 头重置）活到现在的长寿进程；aistudio-c 是新/刷过的（对照干净）。
+  次级可能（hub 会话启动后 kaggle-c 未重取包：不断连 resume／anchor 未变／发包静默回退）
+  不必先分——修法一致，修完用"rms 活＋grad 回 45s＋不断头"三判据验收，分得清。
+- **决定**：D1=修法改为**重启 kaggle-c worker 进程**（新鲜加载当前码：rms＋leash＋165 档
+  一次齐；165 对 165 直装无断点；回迁 pullback 已证）；hub 重打包**不需重做**
+  （包已新，旧的是进程不是包）；D2=重启前腿不动（analytic 监控＋>0.20 tripwire 继续；
+  切忌在旧进程上重开腿——再 dispatch 一次就是第二次重置）；D3=验收三判据
+  （下几轮 vrms/prms 非零＋grad~45s＋checkpoint 头连续），任一不过转 hub 缓存排查
+  （transport lane）；D4=此前的"刷码"措辞更正为"刷进程"，hub lane 待办改派。
+- **备选与否决**：① 再重启 hub/trainer —— 否（包和环已新，病灶在 worker 进程，无效操作）；
+  ② 推 GitHub —— 否（kaggle-c 是队列腿走 hub 包，不走 GitHub raw；且本仓永不 push，人推另议）；
+  ③ 腿迁回 aistudio-c 跑 —— 否（aistudio 在跑 simple；跨 worker 迁腿改派发，动静大于重启本机进程；
+  kaggle-c 重启后自愈， jetsam 不需要）。
+- **后果**：待用户/owner 重启 kaggle-c；验收由盯盘执行（下一轮迭代即见分晓）。
+
+## §2026-10-13-goalnn-cache-not-process（2026-10-13，更正上条：kaggle-c 是开课后新起的，旧的是缓存不是进程；修法＝清缓存＋simple-long tripwire 掐停）
+
+- **背景**：用户纠正时序（kaggle-c 开课后才启动）＋ push-gap 实测（origin 仅落后 1 笔
+  guard 单测 ⇒ GitHub-raw 陈旧说死）⇒ 上条"长寿进程"判定错，§6.4 更正：
+  **旧的是持久缓存（或 pack），不是进程**——新进程＋旧码（早于 telemetry、无 anchor、
+  legacy 档）＝取包/缓存命中了史前字节。重启进程本身已被证伪（刚重启完还是旧码）。
+- **决定**：D1=修法改为**清 kaggle-c 持久缓存**（删缓存根／版本锚升级二选一，hub/worker lane；
+  重启进程单做无效——事实已证）；D2=y1-long-simple **tripwire 掐停**（checkpoint 直算
+  it18 value-new 0.2167 > 0.20，x26 区 ~4 轮即到；控制台 halt；课程文件 verdict 已写回；
+  无门 verdict，lineage 冻结；复活条件＝执行器修好后另开新腿）；D3=y1-long 继续跑＋盯
+  （it18 0.1022 未过线；analytic 每门直算）；D4=验收三判据不变（rms 活＋grad~45s＋不断头），
+  判据对象从"重启后"改到"清缓存后"。
+- **备选与否决**：① simple-long 跑到 it40 门 —— 否（tripwire 先于门触发是设计本意；
+  0.2167 无绳奔 0.30，门前必爆）；② 腿迁 aistudio —— 否（同上条；且 simple 占着）；
+  ③ 推 GitHub 更新 workers —— 否（origin 仅差 1 笔；队列腿不走 raw；本仓不 push）。
+- **后果**：待用户/owner 清 kaggle-c 缓存（或 hub 侧版本锚升级）；simple-long 已判掐停待执行；
+  analytic tripwire 转守 y1-long 单腿。
+
+## §2026-10-13-goalnn-rescind-halt（2026-10-13，收回 simple-long 掐停令：0.20 线无依据＋死亡是探索税；改症状门）
+
+- **背景**：用户追问"为什么 halt"＋"懵逼了"后重查：① 0.20 线无机制依据——x27-noleash
+  0.348 无崩溃在先（我自己的证据），0.2167 在已证安全区内；② 线性漂移（+0.008/轮，
+  到 0.30 需 ~11 轮），此前"4 轮即到" arithmetic 两处算错；③ 零崩溃症状（greedy 冻结≠
+  游走；熵 1.6/KL/value/rollout 全活；eval 零死亡）。
+  死亡分析（it20–31）：simple rollout 死 30–50/轮平稳无上行 vs eval 死 0/400 vs
+  y1-long 熵塌腿仅 0–2 死——**死的是采样（探索税 −5 买单中），不是 argmax 崩溃**；
+  高熵采样的必然代价，非进行性崩溃（x26 式：胜率掉＋游走，两条全无）。
+  另：simple-long.it31 value-new 0.3019（x26 的数！）仍零症状——level 线（哪怕 x26 数）
+  不预测崩溃，机制（游走）才预测；y1-long.it20 KL spike 0.58 单轮已恢复（熵随后回升）。
+- **决定**：D1=掐停令收回（腿没停过，无需 resume；课程文件状态＋verdict 已改回在跑）；
+  D2=tripwire 改症状门（greedy 翻转转坏／rollout 进行性崩／熵死／value>0.35 超全部先例），
+  现全未触发；D3=0.20 数值线作废（教训：tripwire 阈值须有机制或先例依据，不得拍脑袋；
+  本次三证据 amend：noleash-0.348＋线性外推＋零症状）。
+- **备选与否决**：① 维持掐停（守 tripwire 字面）—— 否（字面已证无据；杀唯一活腿，错杀成本
+  大于误放成本——误放有症状门四重兜底）；② 提线到 0.30 继续数值门 —— 否（0.30 同样无
+  崩溃预测力，noleash 反例在先；数值门整体降级为参考，症状门上位）。
+- **后果**：双腿继续跑；analytic 直算每门必读；本条为掐停令的正式撤销（§6.4）。
+
+## §2026-10-13-goalnn-task-revert-rerun（2026-10-13，timeout 恢复 1500＋y 系课程全删＋y1 按优先级配方重开＋y1k 对照；c01 诊断：dist 彩票 67%）
+
+- **背景**：用户令：① c01 优先级（贴脸＞挨打＞瞄准＞动静＞杀快）；② ladder-c01-long 删、
+  timeout 恢复 1500；③ y 系课程全删；④ 随机权重（新种子）重开 y1＋优先级配方；
+  ⑤ 并行 1–2 腿。c01-1500 诊断（y1.it40 eval n=400）：dist +5.8 占总 EV **67%**
+  （彩票；A07 死方向），kill 仅 12%，防线税 ≈0，stuck 中位 958（clear 488/timeout 1237），
+  拾取全家 400 局零记录，encl 恒 0。y1-long 系（fork＋terminal-tax 设计＋§y1long-maxticks／
+  §y1long-design 两条）随 fork 删除终结——timeout 变现结论（it0 138→264）保留作史，
+  腿 verdict 以任务死亡计，不以门计；y2-prep（等 simple.it80）随 y2 文件删除终结
+  （c02-long 保留，simple.it80 TBD 作废）。
+- **决定**：D1=清场（y1/y1-simple/y1-long×2/y2 五课程文件删〈未跟踪，我的〉＋fork 删
+  〈halt 后〉＋tmp/y1* 运行态清 〈halt 后〉；weights/ 归档不动；已halt确认后执行）；
+  D2=y1 重开（新 scratch seed 8，sha `5445bdd0f04d6762`；优先级配方 11 项＋terminal {}：
+  删 encl/pickup/approach/fr×3/dist（死/彩票，有证），加 wStuck 0.002（deadzone300/cap900），
+  wNearSq 28→84 ×3（P1 第一税；−0.6≈killEV 60%，恐惧线内），余全留；
+  terminal pair 不引入（y1 无，minimal diff；死亡/超时显价另案））；
+  D3=y1k 对照（x27 配方逐字＋同 s8＋同流 20261024；答"配方束效应＋旧 y1 死因运气/配方"）；
+  D4=门（it40 D01≤50%＋kills≥0.5＋y1-stuck↓30%/y1k-stuck读＋fear-watch shots/D01＋policy上报；
+  it80 晋升 D01≤30%＋pass≥50% ⇒ y2-重写）；D5=新流 20261024（新家族）；
+  scratch 同 s8（165 宽；policy ~0.001；value 新精确 0）。
+- **备选与否决**：① wAcc 下调（13.6 vs kill 2，看似头重）—— 否（未判坏；P3 量级已平价；
+  动它加变量）；② wWin/wTick/wShot 引入（P5 速度/开火价）—— 否（y1 无，minimal diff；
+  速度由 kills 携带；wShot 另案排队）；③ corner/threat 同删（读数 0）—— 否
+  （行为难辨 ambiguous 留用；删 load-bearing 比留噪声贵）；④ c02-long 同删 ——
+  否（用户只点 c01-long；y2-future 可能用；孤儿状态已注记）；⑤ tmp 不清沿用 ——
+  否（旧账本 resume 陷阱；清场是开课前置）。
+- **后果**：`course_openable` 双 True（s8 存在）；`nn-training/curricula/y1.jsonc`＋`y1k.jsonc`；
+  开课条件：三腿 halt 确认＋tmp/y1* 清＋fork 删（agent 执行）后，用户点开课。
+  long 系 weights（y1.it40/simple.it40）保留作史；y1-v1 归档（`weights/y1`→`weights/y1-v1`，待执行）。
+
+## §2026-10-13-goalnn-y1f-design（2026-10-13，y1f phase-1 先开火腿：y1 删贴脸/火线两税＋加 explore 0.2，a2 边际抄法；优化器冻结）
+
+- **背景**：y1.it80/y1k.it80 双收官双 fail（kills 0.015/0.333<0.5，stuck 1499/978>451，
+  pass 1.5%/33%<50%，无 y2；D01 双双 −98% 地板）。y1 贪心坐穿：cells 恒 1（400 局从没离开出生格，
+  scratch 11–32）、stuck 1499、shots~0；it50–70 只在 2001 抽搐（5–17 clears，同批种子）。
+  用户令 phase-1：先跑起来开起火来，贴脸/火线税暂免，杀敌后再学走位闪避；参考 x1-rebirth-a2
+  （it46 100%/0伤：①排序≠行为 ②真实语料标定 ③杠杆是边际比走>坐；`x1-rebirth-a2.jsonc` 头注＋§88）。
+- **决定**：D1=`y1f`（y1 逐字＋删 wNearSq 84/wThreat 80＋加 wExplore 0.2；同 s8（sha `5445bdd0f04d6762`）、
+  同流 20261024、同 level/iters/batch/优化器/K/eval、kickstart 关、anchor 0.001；terminal {} 不动）；
+  D2=门（it40 shots≥10＋cells≥5＋kills≥0.3，D01 只读 watch（线＝it0 77.9），fear-watch shots 塌杀，
+  it5 前 analytic 直算复核双 rms；fail⇒杀腿）；D3=it80 kills≥0.5＋shots≥10＋cells≥5 ⇒ y2-phase2
+  （加回 near+threat，explore 回落）；D4=新 out/traj（tmp/y1f）＋backup 新目录（weights/y1f），§15.5。
+- **备选与否决**：① 纯删两税不加 explore —— 否（stuck 木棍 −1.8 已证不够：y1 顶着它坐穿 50 轮；
+  需胡萝卜，a2 抄法）；② 连 wHurt/wMiss 同删 —— 否（用户只点两税；hurt 是残余闪避信号、
+  miss（−3.1/局）是下一嫌疑，留作 phase-1b 变量）；③ 照搬 a2 位移包（kl 0.02/lr 5e-4/epochs 6）——
+  否（x1 死于位移太小 KL 0.0029，y1 位移充分方向错〈熵照掉、mode 坐 park〉；优化器冻结保单变量束）；
+  ④ 照搬 a2 六项公式（含 wWin/terminal −5/−2）—— 否（换终局＋换公式＝多变量；死亡/超时显价另案）；
+  ⑤ 从 y1k.it80 热启动 —— 否（继承 turret-mode，断 paired 可比；必须同 s8 测配方效应）；
+  ⑥ wExplore 取 0.3 —— 否（scratch-proxy 成本 −0.22/格已悲观〈含死亡〉，0.2 贴线＋stuck 兜底已使
+  走 −1.03＞坐 −1.70；phase-2 再 taper）。
+- **后果**：`nn-training/curricula/y1f.jsonc`（load＋编译＋对账绿，证据 `tmp/y1f-ev-check.py`）；
+  全文 → `docs/nn/experiments.md` §88；开课条件：用户在控制台点开课（agent 不得启动训练）。
+
+## §2026-10-13-goalnn-y1d-design（2026-10-13，y1d 纯删对照腿：与 y1f 只差 wExplore，测胡萝卜必需性）
+
+- **背景**：y1f 落盘（§2026-10-13-goalnn-y1f-design）后用户令补比较腿。y1f 头注 EV 预告的诚实细节：
+  历史行上 y1f 与纯删纸面 margin 几乎逐字同（+0.67 vs +0.68；cells 恒 1 ⇒ explore 两边各 +0.2 常数），
+  explore 效应只能在真位移兑现，纸算不可判 ⇒ 真跑一条。
+- **决定**：D1=`y1d`（y1f 逐字＋删 wExplore 一项；相对 y1＝删 near/threat；同 s8/流 20261024/
+  优化器/K/门；新 out/traj tmp/y1d＋backup weights/y1d，§15.5）；D2=门与 y1f 一字同
+  （shots≥10＋cells≥5＋kills≥0.3，D01 watch，fear-watch，it5 analytic 直算；fail⇒杀腿）；
+  it80 同线（胜者 base 进 y2-phase2）；D3=双分支预注册（y1f 赢⇒胡萝卜必需；y1d 持平/赢⇒
+  免税已够＋explore 多余，phase-2 drop；双 fail⇒另有主犯另案）。
+- **备选与否决**：① 不开对照、单跑 y1f —— 否（纸面 margin 相同，胡萝卜效应无证据，
+  单腿答不了"必需性"；双腿并行成本 y1/y1k 已验证可承受）；② 对照腿顺手降 wMiss ——
+  否（加变量；miss 是 phase-1b 排队变量，等 it40 先看）；③ 对照用不同流/起点 ——
+  否（断 paired；三向同 s8 同流是最紧配对）。
+- **后果**：`nn-training/curricula/y1d.jsonc`（load＋编译＋双 diff 绿，证据 `tmp/y1d-ev-check.py`）；
+  全文 → `docs/nn/experiments.md` §89；开课条件：用户在控制台点开课（可与 y1f 并行，agent 不得启动训练）。
+
+
+## §2026-10-13-ppo-job-lifecycle-ownership（2026-10-13，PPO job 生命周期收口：lost 可判／重启按 runId 作废／重发入口／残留自动清理）
+
+- **背景**：2026-10-13 06:17–06:45 事故（x27-noleash）——人工 `rm` 掉**刚发布**的 job 目录
+  ⇒ 细粒度腿静默挂死 28 分钟（`/jobs/{id}/result` 的 404 ≡ pending；细粒度路径无超时、无重发、
+  无一行日志）。根因：`publish_job()` 把目录一写就撒手，**发布出去的 job 没有所有者**；
+  唯一的「清理工具」是人的 `rm`，而 `rm` 会误伤刚发布的那一份。全文 →
+  `docs/nn/remote-transport.md` §89；现场证据 → `.workbuddy/memory/2026-10-13.md`。
+- **决定**（plan/ppo-job-lifecycle-ownership，五段按 M1→M2→M3→M5→M4 落地）：
+  D1 **M1 lost 可判 + 看门狗自愈**：判据 = `/jobs/{id}/status` 的 404（未知 jid 现成 404 ⇒
+  **hub 一行不改**）；三态 `job_liveness`（404 unknown 起表 / 200 alive 清表 / 其它·异常 不动表）；
+  节流 30s + 宽限 60s（检测上界 ≈120s）；判 lost ⇒ 账本 `job_cancelled` + best-effort 解冻与
+  `/admin/cancel-job`（**409 在飞不撤、不删目录**）+ 丢会话 ⇒ **下一拍重发同一 jid**；
+  连败预算复用既有 `_bump_remote_fail`（3 连败 ABORT，**不新造第二阈值**）；等待打点 300→120s。
+  D2 **M2 重启 = 按 runId 整体作废并兑现到磁盘**（`cancel_jobs_of_previous_runs`，腿启动时跑，
+  与 `it` 无关；删除过 `reap_job_dir` 护栏：manifest 的 job_id/runId/it 与账本一致才删）。
+  D3 **M3 重发入口**：沿用既有「意图文件 + 幂等回执」通道（`tmp/<课>/redo-ppo.json` +
+  `.applied.json`），去重键 = 意图 `at`；控制台只写意图、**不碰进程不碰 hub**；
+  控制台缺省 `it=0`（对当前轮——面板行上的 iter 落后于在飞轮，回填它会让按钮静默失效）。
+  D4 **M5 无主残留自动清理**：**扩展** `_rotate_cleanup` 的同一道 `keep_iters` 闸
+  （无 result ∧（fail.json ∨ 账本已作废）），不建第二份配额；冻结/未过窗/账本读不到一律保留。
+  D5 **M4 只做弱版**：开关不一致打一行可 grep 的 WARN（按 `(课,类型)` 去重、恢复即摘名），
+  **零行为变更**；强版（双写/派发强制读标记）待取证。
+- **备选与否决**：① 改 hub 的 404→200 或加 `state=unknown` —— 否（评审 F1：未知 jid 走不到
+  内部调度摘要，对 HTTP 面是 no-op；改状态码是契约变更，波及 `wait_job`/控制台）；
+  ② 改 `probe_job_result` 的 404≡pending —— 否（hub 与节点两条链共用同一份状态码分类）；
+  ③ 以「本地 job_root 目录存在性」判 lost —— 否（答不了「目录在但 hub 不认识」）；
+  ④ 新增 `LOST_REPUBLISH_MAX` 独立阈值 —— 否（一个阈值一份判决，x3-step 事故的教训）；
+  ⑤ 重发换新 jid —— 否（幂等键不含 code/时间 ⇒ 同 jid 即同一份活复活；换 jid 会白烧一次重算）；
+  ⑥ 硬杀在飞（撕租约）—— 否（2026-10-03 用户裁决「不管在算的，只管没领的」）；
+  ⑦ M3 改 `pause/resume` 语义来清在飞会话 —— 否（暂停是调度意图，不是撤单）。
+- **后果**：代码落点 `remote/hub_http.py`（`job_liveness`/`unfreeze_job`/`admin_cancel_job`）·
+  `remote/hub_client.py`（`cancel_jobs_of_previous_runs`/`reap_job_dir`）· `worker/loop_round.py`
+  （`RemotePpoJob` 三个纯内存字段）· `trainer/loop_remote_drive.py`（看门狗 + M3 消费）·
+  `trainer/loop_remote_fail.py`（`_bump_remote_fail` 抽取）· `trainer/loop_control.py`（redo 意图/回执）·
+  `trainer/loop_core.py`（M2 启动钩子）· `worker/loop_guards_sweep.py`（M5）· `trainer/loop_serve.py`（M4 弱版）·
+  `dashboard/src/server/actions/redo-ppo.ts` + `api/route.ts` + `web/app/panels/CourseAdmin.tsx`（M3 控制台）。
+  测试：`tests/trainer/test_ppo_watchdog.py` / `test_ppo_redo.py` / `test_loop_serve_switches.py` /
+  `test_loop_control.py`（扩充）/ `test_loop_guards_split.py`（扩充）·
+  `tests/remote/test_hub_liveness_cancel.py` / `test_cancel_previous_runs.py` · `dashboard/tests/redo-ppo.test.ts`。
+  **已知欠账**：push 腿（直推节点）看门狗留 TODO（状态面是另一端点）；M4 强版待现场时间线取证；
+  真机复验（删在飞 job 目录 ⇒ ≤120s 自动重发）由用户手工执行。
