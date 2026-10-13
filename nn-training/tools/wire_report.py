@@ -55,13 +55,17 @@ REROLL_RE = re.compile(
 )
 #: hub 侧发送完成行：`响应发送完成 /jobs/x/payload 3486200 bytes in 321.8s`
 HUB_RE = re.compile(r"响应发送完成 (\S+) (\d+) bytes in ([\d.]+)s")
-#: 阶段占比行（2026-09-22，P0.5 基线）：`phases in=…s out=…s ppo=…s other=…s wall=…s`。
-#: 由 `remote/worker.py::_wire_flush` 写在每 job 摘要行**尾部**（同一条 `wire` 行里）。
-#: 行尾的 `overlap=`（P2.5 异步回传，2026-09-22）**可选**：旧 worker 的日志没有它，
-#: 缺省当 0（= 回传当时就在关键路径里）——旧日志必须照样能聚合。
+#: 阶段占比行（2026-09-22，P0.5 基线）：
+#: `phases in=…s out=…s ppo=…s [failed=…s] other=…s wall=…s [overlap=…s]`。
+#: 由 `remote/wire.py::_wire_flush` 写在每 job 摘要行**尾部**（同一条 `wire` 行里）。
+#: 行尾的 `overlap=`（P2.5 异步回传，2026-09-22）与 `failed=`（R6/M4，2026-10-13）都是
+#: **可选**组：旧 worker 的日志没有它们（那时回传在关键路径里 / 失败尝试不入账）⇒ 缺省当 0，
+#: 旧日志必须照样能聚合（丢行会让基线表静默变空，而空表会被读成「没数据」）。
 PHASE_RE = re.compile(
-    r"phases in=([\d.]+)s out=([\d.]+)s ppo=([\d.]+)s other=([\d.]+)s wall=([\d.]+)s"
-    r"(?: overlap=([\d.]+)s)?"
+    r"phases in=(?P<in>[\d.]+)s out=(?P<out>[\d.]+)s ppo=(?P<ppo>[\d.]+)s"
+    r"(?: failed=(?P<failed>[\d.]+)s)?"
+    r" other=(?P<other>[\d.]+)s wall=(?P<wall>[\d.]+)s"
+    r"(?: overlap=(?P<overlap>[\d.]+)s)?"
 )
 #: 调度账（2026-10-02，plan/transfer-residual W0）：`wait=…s/yield=…/p0_p95=…ms[/p0_p50=…ms]`。
 #: 行尾的 `p0_p50=` **可选**（2026-10-02 之前写的日志没有它）——缺省当缺席，不丢行。
@@ -161,13 +165,24 @@ class PhaseSums:
     #: T_out 里**与下一份 job 并发**的那部分（P2.5 异步回传）——**不占**关键路径。
     #: 旧 worker 的日志没有这个字段 ⇒ 恒 0（那时回传确实在关键路径里）。
     out_overlap_sec: float = 0.0
+    #: T_fail：**失败的尝试**的传输墙钟（R6/M4，2026-10-13）——它此前是 `other` 这个残值里的
+    #: 黑箱（现场 `other=343.7s` 里那 300 s 归不了因）。旧 worker 的日志没有它 ⇒ 恒 0。
+    failed_sec: float = 0.0
     in_share: list[float] = field(default_factory=list)  # 每 job 的 in/wall（%）
     out_share: list[float] = field(default_factory=list)
     ppo_share: list[float] = field(default_factory=list)
     other_share: list[float] = field(default_factory=list)
+    failed_share: list[float] = field(default_factory=list)
 
     def add(
-        self, tin: float, tout: float, ppo: float, other: float, wall: float, overlap: float = 0.0
+        self,
+        tin: float,
+        tout: float,
+        ppo: float,
+        other: float,
+        wall: float,
+        overlap: float = 0.0,
+        failed: float = 0.0,
     ) -> None:
         self.jobs += 1
         self.in_sec += tin
@@ -176,24 +191,37 @@ class PhaseSums:
         self.other_sec += other
         self.wall_sec += wall
         self.out_overlap_sec += overlap
+        self.failed_sec += failed
         if wall > 0:
             self.in_share.append(100.0 * tin / wall)
             self.out_share.append(100.0 * tout / wall)
             self.ppo_share.append(100.0 * ppo / wall)
             self.other_share.append(100.0 * other / wall)
+            self.failed_share.append(100.0 * failed / wall)
 
 
 def parse_phases(lines: list[str]) -> PhaseSums:
     """抽出 `phases …` 行 → `PhaseSums`（纯函数，无 IO）。
 
-    行尾的 `overlap=` 是可选组：旧日志命中不了它（`None`）⇒ 当 0（= 那时回传确实在
-    关键路径里）。把 `None` 当 0 而不是丢行——丢行会让旧日志整段变成「无数据」。
+    行尾的 `overlap=` 与 `failed=` 都是可选组：旧日志命中不了它们（`None`）⇒ 当 0
+    （= 那时回传确实在关键路径里 / 失败尝试不入账）。把 `None` 当 0 而不是丢行——
+    丢行会让旧日志整段变成「无数据」。命名组（而不是位置组）：新字段只会插进中间
+    （`failed` 就在 `ppo` 与 `other` 之间），位置一旦错位是**静默**的数错，命名组错位会 KeyError。
     """
     sums = PhaseSums()
     for line in lines:
         m = PHASE_RE.search(line)
         if m:
-            sums.add(*(float(g) if g is not None else 0.0 for g in m.groups()))
+            g = {k: (float(v) if v is not None else 0.0) for k, v in m.groupdict().items()}
+            sums.add(
+                tin=g["in"],
+                tout=g["out"],
+                ppo=g["ppo"],
+                other=g["other"],
+                wall=g["wall"],
+                overlap=g["overlap"],
+                failed=g["failed"],
+            )
     return sums
 
 
@@ -292,21 +320,25 @@ def summarize_phases(sums: PhaseSums) -> dict:
         "out_sec": round(sums.out_sec, 1),
         "ppo_sec": round(sums.ppo_sec, 1),
         "other_sec": round(sums.other_sec, 1),
+        "failed_sec": round(sums.failed_sec, 1),
         "in_pct": _pct(sums.in_sec),
         "out_pct": _pct(sums.out_sec),
         "out_overlap_sec": round(sums.out_overlap_sec, 1),
         "out_overlap_pct": _pct(sums.out_overlap_sec),
         "ppo_pct": _pct(sums.ppo_sec),
         "other_pct": _pct(sums.other_sec),
+        "failed_pct": _pct(sums.failed_sec),
         "in_pct_p50": _q(sums.in_share, 0.5),
         "in_pct_p90": _q(sums.in_share, 0.9),
         "ppo_pct_p50": _q(sums.ppo_share, 0.5),
         "other_pct_p50": _q(sums.other_share, 0.5),
+        "failed_pct_p50": _q(sums.failed_share, 0.5),
         "_per_job": {
             "in": sums.in_share,
             "out": sums.out_share,
             "ppo": sums.ppo_share,
             "other": sums.other_share,
+            "failed": sums.failed_share,
         },
     }
 
@@ -326,6 +358,8 @@ def render_phases(row: dict) -> str:
         f"  T_out = {row['out_sec']:>8}s ({row['out_pct']:>5}%)",
         f"  T_ppo = {row['ppo_sec']:>8}s ({row['ppo_pct']:>5}%)  每 job p50={_f(row['ppo_pct_p50'])}%",
         f"  other = {row['other_sec']:>8}s ({row['other_pct']:>5}%)  每 job p50={_f(row['other_pct_p50'])}%",
+        f"  T_fail= {row.get('failed_sec', 0.0):>8}s ({row.get('failed_pct', 0.0):>5}%)"
+        "  ← 失败的尝试（超时/瞬时错/重抽/被挤走）花掉的传输墙钟，不是任何一段成功传输",
         f"  回传重叠 = {row.get('out_overlap_sec', 0.0):>7}s ({row.get('out_overlap_pct', 0.0):>5}%)"
         + (
             "  ← 与下一份 job 并发，**不占关键路径**"

@@ -203,6 +203,12 @@ def _prefetch_fill(
             continue
         cands = list(peeked[0]) if peeked else []
         picked = pick_candidates(cands, held=store.held(), skip=skip, depth=depth)
+        if picked:
+            # R8/M7（2026-10-13，plan/body-transfer-guard-v2 §4-M7）：`wall` 从**开始请求第一份**
+            # 起算 —— 否则排队那几分钟既不进 `wall` 也不进 phases，读账时 `wait=` 与 `wall=`
+            # 割裂（现场 P2：`wait=290.1s` 而 `wall=2.6s`）。空轮**不**标：预取常态是 0 候选，
+            # 每轮多一行零信息的 wire 行就是刷屏（2026-10-06 用户令删过同类噪声）。
+            _wire_start(PREFETCH_WIRE_ID)
         for i, cand in enumerate(picked):
             if stop.is_set():
                 break

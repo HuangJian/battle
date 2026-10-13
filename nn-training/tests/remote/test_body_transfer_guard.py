@@ -368,3 +368,228 @@ def test_small_upload_keeps_the_byte_body(monkeypatch) -> None:
         pace=lambda: 0.0,
     )
     assert isinstance(seen["body"], (bytes, bytearray)) and bytes(seen["body"]) == data
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# M1/M2/M3（2026-10-13，plan/body-transfer-guard-v2.plan.md）
+#
+# 现场：2,608,740 B 的 payload 下了 343.5 s，而 3 分钟后同一条链路 947 KB/s。根因是**读数粒度**：
+# `resp.read(256KB)` 是**定长读**（循环 `recv` 凑满 256KB 才返回）⇒ 隧道只要每 <45s 吐 1 字节，
+# 它既不返回也不超时，`BODY_IDLE_TIMEOUT_SEC=45` **永不触发**；而重抽判据的**唯一一次**采样
+# 又被绑在这块上，且首块一到就永久置位（`probed`）。
+#
+# 下面三条钉住修法：① 收字节口改 `read1`（至多一次 `recv`）；② 判据按**时间窗**采样、
+# **连续两窗**慢才断；③ 超时异常带已收字节（账里要能归因）。
+# ════════════════════════════════════════════════════════════════════════════
+
+
+def _drip_http_server(count: int, gap: float):
+    """本机 HTTP 服务：在 `gap` 秒的间隔里每次只吐 1 字节（共 `count` 字节）。
+
+    这是「慢但不停」的确定性复刻（不是停滞：任何单次 `recv` 都没超时）。
+    返回 `(server, url)`；调用方负责 `shutdown()/server_close()`。
+    """
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    class _Drip(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_GET(self) -> None:
+            self.send_response(200)
+            self.send_header("Content-Length", str(count))
+            self.end_headers()
+            for _ in range(count):
+                try:
+                    self.wfile.write(b"x")
+                    self.wfile.flush()  # 逐字节落线 = 每 <gap 一次 recv 就有数据
+                except OSError:  # 客户端已断开（用例结束）：正常收场
+                    return
+                # sleep-ok: 夹具模拟的「慢链路」本身：滴流的间隔就是被测语义
+                time.sleep(gap)
+
+        def log_message(self, *_a) -> None:
+            pass
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Drip)
+    srv.daemon_threads = True
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    return srv, f"http://127.0.0.1:{srv.server_address[1]}/payload"
+
+
+class _DripResp:
+    """`read1` 形状的假响应：每次只吐 `size` 字节（= 一次 `recv`）。
+
+    `read` 故意抛 —— 定长读是本次事故的根因，守卫再走回去必须当场炸出来。
+    """
+
+    def __init__(self, chunks: int, size: int = 1024, total: int | None = None):
+        self.chunks = chunks
+        self.size = size
+        self.headers = {"Content-Length": str(total if total is not None else chunks * size)}
+        self.status = 200
+
+    def read1(self, _n: int) -> bytes:
+        if self.chunks <= 0:
+            return b""
+        self.chunks -= 1
+        return b"x" * self.size
+
+    def read(self, _n: int) -> bytes:
+        raise AssertionError("body 读回到了定长 read（M1：必须走 read1）")
+
+
+class _FakeClock:
+    """确定性墙钟：每次调用前进 `step` 秒。
+
+    判据按**时间窗**采样 ⇒ 测试不能靠真等（块是瞬间到的，真时钟下窗永远不开）。
+    """
+
+    def __init__(self, start: float = 1000.0, step: float = 1.0) -> None:
+        self.now = start
+        self.step = step
+
+    def __call__(self) -> float:
+        self.now += self.step
+        return self.now
+
+
+def _stub_decision(monkeypatch, verdicts: list[bool]) -> list[tuple]:
+    """把 `_reroll_decision` 换成按顺序出牌的替身；返回它每次收到的参数（供断言窗口径）。"""
+    seen: list[tuple] = []
+    it = iter(verdicts)
+
+    def fake(got: int, total: int, elapsed: float, **kw: object):
+        seen.append((got, total, elapsed, kw))
+        return next(it, False), 6.4 * 1024, 1180.0
+
+    monkeypatch.setattr(http_mod, "_reroll_decision", fake)
+    return seen
+
+
+def test_recv_some_prefers_read1_and_keeps_read_only_doubles_usable() -> None:
+    """M1：真响应走 `read1`；只实现 `read` 的测试替身仍可用（回退不改字节流）。"""
+    assert http_mod._recv_some(_DripResp(chunks=1, size=8), 4096) == b"x" * 8
+
+    class _ReadOnly:
+        def read(self, _n: int) -> bytes:
+            return b"y" * 3
+
+    assert http_mod._recv_some(_ReadOnly(), 4096) == b"y" * 3
+
+
+def test_recv_some_does_not_wait_for_the_full_amount() -> None:
+    """★ M1 的判据（真 socket）：`read1` 至多一次 `recv` ⇒ 服务端滴一点，客户端就回头一次。
+
+    4 字节 / 每 0.15s 一滴 ⇒ 定长 `read(4)` 要 ~0.6s 才返回；`_recv_some` 的第一次调用
+    必须在**前两滴之内**返回（0.45s 是 3× 间隔的松上界），否则「读粒度」还是块粒度。
+    """
+    import urllib.request
+
+    count, gap = 4, 0.15
+    srv, url = _drip_http_server(count, gap)
+    try:
+        req = urllib.request.Request(url)
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
+            t0 = time.time()
+            first = http_mod._recv_some(resp, count)
+            dt_first = time.time() - t0
+            got = first
+            while len(got) < count:
+                block = http_mod._recv_some(resp, count)
+                if not block:
+                    break
+                got += block
+        # timing-ok: 夹具模拟（上界 = 夹具自己配置的滴流间隔 ×3，量的是「有没有等满整份 body」）
+        assert dt_first < 3 * gap, f"第一次返回用了 {dt_first:.2f}s（= 等满了整份 body）"
+        assert got == b"x" * count  # 分多次读，字节流仍然一致（parity）
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_guard_fires_inside_two_idle_timeouts_on_a_dripping_link(monkeypatch) -> None:
+    """★ 本次 DoD：链路**慢但不停**（每 0.1s 1 字节）时判据必须动手。
+
+    现状：定长读凑不满一块 ⇒ 空闲判据结构上永不触发，一路烧到 `total_timeout`。
+    修后：判据按时间窗（压到 0.3s）+ 连续 2 窗迟滞 ⇒ 在 2×空闲超时内抛出。
+    """
+    import urllib.request
+
+    monkeypatch.setattr(http_mod, "WIRE_PROBE_SEC", 0.3)
+    monkeypatch.setattr(http_mod, "WIRE_REROLL_PROBES", 2)
+    count, gap, idle = 1000, 0.1, 1.0
+    srv, url = _drip_http_server(count, gap)
+    try:
+        req = urllib.request.Request(url)
+        t0 = time.time()
+        with (
+            urllib.request.urlopen(req, timeout=idle) as resp,
+            pytest.raises(worker_mod.WireSlowError) as ei,
+        ):
+            http_mod._read_body(resp, idle_timeout=idle, total_timeout=30.0, allow_reroll=True)
+        dt = time.time() - t0
+        # timing-ok: 相对判据（上界由场景推出：2 × 空闲超时，不是绝对墙钟常数）
+        assert dt <= 2 * idle + 0.5, f"判据没在 2×空闲超时内动手（用了 {dt:.2f}s）"
+        assert ei.value.bytes_read >= 1
+        assert ei.value.remain_sec > worker_mod.WIRE_REROLL_BUDGET_SEC
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_read_body_needs_two_consecutive_slow_windows(monkeypatch) -> None:
+    """★ R2′：判据按**时间窗**采样，且要**连续两窗**都慢才断。
+
+    序列「快、快、快、慢、慢」：现状（一次性首块 + 首块一到就置位）在第 1 次就永久关掉自己
+    （现场那条 343.5 s 的行就是这么来的）；新实现必须走到**第 5 窗**才动手。
+    """
+    monkeypatch.setattr(http_mod, "WIRE_PROBE_SEC", 1.0)
+    monkeypatch.setattr(http_mod, "WIRE_REROLL_PROBES", 2)
+    clock = _FakeClock(step=1.0)
+    monkeypatch.setattr(http_mod.time, "time", clock)
+    seen = _stub_decision(monkeypatch, [False, False, False, True, True])
+    resp = _DripResp(chunks=8, size=1024)
+    with pytest.raises(worker_mod.WireSlowError) as ei:
+        worker_mod._read_body(resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True)
+    assert len(seen) == 5, f"快窗把判据关掉了（只判了 {len(seen)} 次）"
+    # 样本是**窗内**字节（不是累计），且真实剩余显式传入
+    assert [s[0] for s in seen] == [1024] * 5
+    assert all(s[3].get("remaining", 0) > 0 for s in seen)
+    # 作废的只有「到第二窗判慢」那一刻收到的字节
+    assert ei.value.bytes_read == 5 * 1024
+
+
+def test_a_single_slow_window_does_not_reroll(monkeypatch) -> None:
+    """迟滞的反面：一个窗口的坑（抖动 / 重连后的 TCP 慢启动）不该触发换连接。"""
+    monkeypatch.setattr(http_mod, "WIRE_PROBE_SEC", 1.0)
+    monkeypatch.setattr(http_mod, "WIRE_REROLL_PROBES", 2)
+    monkeypatch.setattr(http_mod.time, "time", _FakeClock(step=1.0))
+    seen = _stub_decision(monkeypatch, [True, False, True, False])  # 从不连续两窗慢
+    resp = _DripResp(chunks=10, size=1024)
+    out = worker_mod._read_body(resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True)
+    assert len(out) == 10 * 1024
+    assert len(seen) >= 3, f"判据又只跑了一次就关（{len(seen)} 次）"
+
+
+def test_timeout_error_carries_the_bytes_already_received() -> None:
+    """M3/R3：超时与停滞抛的异常必须能读出「已收多少」（失败账与日志都要用它）。
+
+    类型挂在 `TimeoutError` 之下（既有的捕获面不变），载荷是 `got/partial/total`。
+    """
+    with pytest.raises(http_mod.BodyTimeoutError) as ei:
+        worker_mod._read_body(
+            _FakeResp([b"x" * 700], headers={"Content-Length": "1000"}),
+            idle_timeout=45.0,
+            total_timeout=-1.0,
+        )
+    assert ei.value.got == 700 and ei.value.total == 1000
+    assert ei.value.partial == b"x" * 700
+    assert isinstance(ei.value, TimeoutError), "既有按 TimeoutError 捕获的调用面不许破"
+
+    with pytest.raises(http_mod.BodyTimeoutError) as ei2:
+        worker_mod._read_body(
+            _FakeResp([b"x" * 300, TimeoutError()], headers={"Content-Length": "1000"}),
+            idle_timeout=45.0,
+            total_timeout=None,
+        )
+    assert ei2.value.got == 300 and len(ei2.value.partial) == 300

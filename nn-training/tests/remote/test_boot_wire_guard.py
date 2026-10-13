@@ -205,13 +205,43 @@ def test_truncated_draw_is_retried_in_the_same_fetch(monkeypatch) -> None:
 
 # ────────────────────── ③ 有界重抽：换连接、不重复整传 ──────────────────────
 #
-# 判据挂**墙钟**（实测速率 = 已收字节 / 耗时），所以测试不能靠「投喂很多块」模拟慢签
-# （块是瞬间到的 ⇒ 速率无限大）。改为把判据换成受控替身：这既确定，又恰好能钉
-# 「每次尝试只判首块」这件事（替身被调用几次 = 判了几次）。
+# 判据挂**时间窗**（窗内字节 / 窗内秒数），所以测试既不能靠「投喂很多块」模拟慢签
+# （块瞬间到 ⇒ 速率无限大），也不能靠真等（窗宽 3s）。两件都靠注入：判据换受控替身、
+# 时钟换确定性假钟（步长 = 窗宽 ⇒ 每块恰好一窗）。替身被调用几次 = 判了几次，
+# 它正是「判据有没有被第一个样本关掉」的判据（2026-10-13 的 R2′）。
+
+
+class _FakeClock:
+    """确定性墙钟：每次调用前进 `step` 秒。"""
+
+    def __init__(self, start: float = 1000.0, step: float = 1.0) -> None:
+        self.now = start
+        self.step = step
+
+    def __call__(self) -> float:
+        self.now += self.step
+        return self.now
+
+
+class _WindowedResp(_FakeResp):
+    """`read1` 形状的假响应（M1）：每次只吐 `size` 字节；`read` 故意抛。"""
+
+    def __init__(self, chunks: int, size: int, total: int | None = None):
+        super().__init__([b"x" * size] * chunks, total if total is not None else chunks * size)
+        self.size = size
+
+    def read1(self, _n: int) -> bytes:
+        return super().read(_n)
+
+    def read(self, _n: int) -> bytes:
+        raise AssertionError("引导期护栏读回到了定长 read（M1：必须走 read1）")
 
 
 def _stub_decision(monkeypatch, verdicts: list[bool]) -> dict:
-    """把 `_reroll_decision` 换成按顺序出牌的替身，返回 `{"calls": n}`。"""
+    """判据替身（按顺序出牌）+ 假钟 + 窗宽压到 1s；返回 `{"calls": n}`。"""
+    monkeypatch.setattr(ts, "BOOT_PROBE_SEC", 1.0)
+    monkeypatch.setattr(ts, "BOOT_REROLL_PROBES", 2)
+    monkeypatch.setattr(ts.time, "time", _FakeClock(step=1.0))
     state = {"calls": 0}
 
     def fake(got: int, total: int, elapsed: float, **_kw: object):
@@ -224,10 +254,14 @@ def _stub_decision(monkeypatch, verdicts: list[bool]) -> dict:
 
 
 def test_slow_draw_is_rerolled_then_succeeds(monkeypatch) -> None:
-    """坏签 ⇒ 断开重发 ⇒ 换到好签后成功；次数与作废字节都进账（坏签比例靠它统计）。"""
-    state = _stub_decision(monkeypatch, [True, False])
-    slow = _FakeResp([b"x" * (128 * 1024), b"y" * (128 * 1024)], total=4 * MB)
-    good = _FakeResp([b"z" * (256 * 1024), b"w" * (256 * 1024)], total=512 * 1024)
+    """坏签 ⇒ 断开重发 ⇒ 换到好签后成功；次数与作废字节都进账（坏签比例靠它统计）。
+
+    2026-10-13 起判据要**连续两窗**都慢才断（迟滞）⇒ 每次尝试判 2 次，作废的是
+    「第二窗判慢」那一刻收到的字节（不是首块，也不是整份）。
+    """
+    state = _stub_decision(monkeypatch, [True, True, False, False])
+    slow = _WindowedResp(chunks=3, size=128 * 1024, total=4 * MB)
+    good = _WindowedResp(chunks=2, size=256 * 1024, total=512 * 1024)
     opener = _FakeOpener([slow, good])
     lines: list[str] = []
 
@@ -235,14 +269,13 @@ def test_slow_draw_is_rerolled_then_succeeds(monkeypatch) -> None:
         "http://hub/code", log=lines.append, label="code.zip", opener=opener, attempts=3
     )
 
-    assert body == b"z" * (256 * 1024) + b"w" * (256 * 1024)
+    assert body == b"x" * (512 * 1024)
     assert opener.calls == 2  # 第一次坏签被断开，第二次拿全
-    assert state["calls"] == 2  # 每次尝试各判一次
+    assert state["calls"] == 4  # 每次尝试两窗（迟滞）；好签那次也照样在判（没被关掉）
     assert sum(1 for ln in lines if "wire: re-roll #1/3 code.zip" in ln) == 1
-    # 作废的只有**首块**（128 KB），不是整份：判据只在首块跑一次
-    assert any("已收 131072 bytes 作废" in ln for ln in lines)
-    done = [ln for ln in lines if ln.startswith("wire: code.zip ")][-1]
-    assert "attempts=2" in done and "rerolls=1" in done
+    assert any("已收 262144 bytes 作废" in ln for ln in lines)
+    done = [ln for ln in lines if ln.startswith("wire: code.zip ")]
+    assert done and "attempts=2" in done[-1] and "rerolls=1" in done[-1]
 
 
 def test_reroll_is_capped_and_the_last_attempt_always_transfers(monkeypatch) -> None:
@@ -254,10 +287,10 @@ def test_reroll_is_capped_and_the_last_attempt_always_transfers(monkeypatch) -> 
     good = b"z" * (256 * 1024)
     opener = _FakeOpener(
         [
-            _FakeResp([b"x" * (128 * 1024)], total=4 * MB),
-            _FakeResp([b"x" * (128 * 1024)], total=4 * MB),
-            _FakeResp([b"x" * (128 * 1024)], total=4 * MB),
-            _FakeResp([good], total=len(good)),
+            _WindowedResp(chunks=2, size=128 * 1024, total=4 * MB),
+            _WindowedResp(chunks=2, size=128 * 1024, total=4 * MB),
+            _WindowedResp(chunks=2, size=128 * 1024, total=4 * MB),
+            _FakeResp([good], total=len(good)),  # 最后一次：连判都不判（allow_reroll=False）
         ]
     )
     lines: list[str] = []
@@ -268,10 +301,36 @@ def test_reroll_is_capped_and_the_last_attempt_always_transfers(monkeypatch) -> 
 
     assert body == good
     assert opener.calls == ts.BOOT_REROLL_MAX + 1  # 3 次重抽 + 1 次硬传
-    assert state["calls"] == ts.BOOT_REROLL_MAX  # 最后一次连判都不判
+    assert state["calls"] == 2 * ts.BOOT_REROLL_MAX
     assert sum(1 for ln in lines if "wire: re-roll" in ln) == ts.BOOT_REROLL_MAX
-    done = [ln for ln in lines if ln.startswith("wire: code.zip ")][-1]
-    assert "attempts=4" in done and f"rerolls={ts.BOOT_REROLL_MAX}" in done
+    done = [ln for ln in lines if ln.startswith("wire: code.zip ")]
+    assert done and "attempts=4" in done[-1] and f"rerolls={ts.BOOT_REROLL_MAX}" in done[-1]
+
+
+def test_boot_read_body_uses_read1_not_the_fixed_length_read() -> None:
+    """M1（引导侧孪生）：`read` 会当场抛 ⇒ 读到 body 就证明走的是 `read1`。"""
+    resp = _WindowedResp(chunks=2, size=1024, total=2 * 1024)
+    assert ts._read_body(resp, idle_timeout=45.0, total_timeout=None) == b"x" * 2048
+
+
+def test_guard_needs_two_consecutive_slow_windows(monkeypatch) -> None:
+    """★ R2′（引导侧孪生）：按时间窗采样 + 连续两窗慢才断；**快窗不会关掉判据**。"""
+    state = _stub_decision(monkeypatch, [False, False, False, True, True])
+    resp = _WindowedResp(chunks=8, size=1024, total=8 * 1024)
+    with pytest.raises(ts.BootSlowError) as ei:
+        ts._read_body(resp, idle_timeout=45.0, total_timeout=300.0, allow_reroll=True)
+    assert state["calls"] == 5, f"快窗把判据关掉了（只判了 {state['calls']} 次）"
+    assert ei.value.bytes_read == 5 * 1024
+
+
+def test_decision_supports_a_window_sample() -> None:
+    """窗口口径（M2）：`remaining` 显式给真实剩余；缺省逐字保留旧行为。"""
+    slow = ts._reroll_decision(
+        15 * 1024, 100 * 1024, 3.0, floor_rate=80 * 1024, remaining=400 * 1024
+    )
+    assert slow[0] is True and slow[2] == pytest.approx(80.0)
+    done = ts._reroll_decision(15 * 1024, 100 * 1024, 3.0, floor_rate=80 * 1024, remaining=0)
+    assert done[0] is False and done[2] == 0.0  # 已收完：不赌
 
 
 def test_stall_is_retried_within_the_same_fetch(monkeypatch: pytest.MonkeyPatch) -> None:

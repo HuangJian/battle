@@ -165,6 +165,24 @@ push 锁 / batch claim 锁，五个调用点）· `trainer/run_rl._acquire_run_r
 （写入窗口拒启 ∧ 够久仍接管；判据全**行为**——文本断言预算不允许新增）。两条曾偶发红的用例 + 相关 4 个文件
 **× 10 轮 @8 核满载**全绿；`bun run pygate` **4162 passed / 1 skipped**。
 
+**补记（2026-10-13，残余根因 —— 写入窗口之外还有一条测试侧归类漏洞）**：窗口修掉之后该用例在全量门禁里仍偶发红
+一次。复核结论不在锁上：胜者拿到锁 → `ensure_port_free` 探测端口（此刻空闲）→ `ensure_cluster_snapshot`
+（`code.zip` 打包；子进程日志实测 `code.zip: 200 files, 1213082 bytes`）→ `make_server` bind ——
+**探测与 bind 之间隔着一整段快照**，端口在这段里被别的 xdist worker 抢走时胜者带 `Address already in use` 退出；
+而两个落败者早已退，`alive == 1` 成立 ⇒ `_wait_ready(port, lock, None, None)` 空烧满 30s 预算，把「端口被抢」
+误报成「存活的那个必须真的在服务」（与本节开头「失败**全部**落在这一行、从未落在 `alive == 1`」一致）。
+**判据**：该用例正常耗时 **0.56s**（`--durations`）⇒ 命中 30s 预算的不可能是「慢」，只能是「死了」。
+
+**修**（测试侧，两个孪生一起：`tests/common/test_instance_lock.py` + `tests/remote/test_worker_server_lock.py`）：
+① 把**存活进程**交给 `_wait_ready`（`proc.poll()` 一死即返回，秒级而不是等满 30s）；
+② 就绪失败与 `alive != 1` 统一走新增的 `_scenario_verdict()` —— 日志里有端口竞态痕迹（`port_race_seen()`
+两张脸）⇒ `PortStolenError` 换端口重跑，否则响亮断言**并附三份日志尾巴**（旧形状失败时不带任何日志，现场查不动）；
+③ 失败路径**就地收尸**（否则重试会带着上一轮的锁持有者跑，一路红到重试耗尽）。新增
+`test_scenario_verdict_separates_a_port_race_from_a_real_bug` 钉住两张判词（真窗口卡在探测与 bind 之间，
+起不了确定性复现 ⇒ 用夹具日志；两个孪生测试文件同形）。
+**验证**：临时把存活进程就地杀掉 ⇒ 失败从 30s 降到 **~1.0s** 且消息带上三份日志（临时改，已回退）；
+`bash tools/githook/nn-python-gate.sh` 连续 **4 轮**绿（4279 passed / 1 skipped）。
+
 ## §73 metrics v11：热线族 **2 列**（idx74–75；dim 74→76）+ 事件加 `bulletOwnerId` + 探针**杀列**（pickupProxMax 未签入）（2026-10-10，plan/metrics-v11-hotlane.plan.md）
 
 - **交付**：`METRICS_DIM 74→76`、`METRICS_VERSION 10→11`（TS `tools/sim/export-rl-rollout.ts` +

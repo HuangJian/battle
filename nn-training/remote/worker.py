@@ -344,6 +344,9 @@ from remote.wire import (
     WIRE_REROLL_MAX as WIRE_REROLL_MAX,
 )
 from remote.wire import (
+    WIRE_REROLL_PROBES as WIRE_REROLL_PROBES,
+)
+from remote.wire import (
     WireSlowError as WireSlowError,
 )
 from remote.wire import (
@@ -375,6 +378,9 @@ from remote.wire import (
 )
 from remote.wire import (
     _wire_hit as _wire_hit,
+)
+from remote.wire import (
+    _wire_note_failed as _wire_note_failed,
 )
 from remote.wire import (
     _wire_note_preempt as _wire_note_preempt,

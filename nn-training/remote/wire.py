@@ -59,6 +59,7 @@ __all__ = [
     "_wire_bucket",
     "_wire_flush",
     "_wire_hit",
+    "_wire_note_failed",
     "_wire_note_preempt",
     "_wire_note_reroll",
     "_wire_note_resend",
@@ -105,6 +106,13 @@ WIRE_MIN_RATE = 80 * 1024.0
 #: 判据所需的最小观测：样本太小不下结论。
 WIRE_PROBE_BYTES = 128 * 1024
 WIRE_PROBE_SEC = 3.0
+#: **连续多少个慢窗口**才断（迟滞，2026-10-13，plan/body-transfer-guard-v2 §4-M2）。
+#:
+#: 为什么不是 1（一个窗口就断）：链路是 **44× 双峰**（`plan/minimize-payload.plan.md` §4.0），
+#: 单个 3 s 窗口的坑是常态；而每次换连接后**第一个窗口天然慢**（TCP 慢启动：RTT 爬坡 +
+#: 拥塞窗口起点小）——一个窗口就断等于「每次重连都自我判死刑」。给第二个窗口一次机会，
+#: 代价是决策点多花一个窗（≈3 s），换掉的是大量无谓重连。
+WIRE_REROLL_PROBES = 2
 #: 按当前速率**预计剩余**超过它才值得折腾（快跑完了就不动）。
 WIRE_REROLL_BUDGET_SEC = 20.0
 #: 单次下载的重抽上限（**只给幂等 GET**；POST result 永不重抽）。
@@ -224,18 +232,27 @@ def _reroll_decision(
     budget_sec: float = WIRE_REROLL_BUDGET_SEC,
     probe_bytes: int = WIRE_PROBE_BYTES,
     probe_sec: float = WIRE_PROBE_SEC,
+    remaining: int | None = None,
 ) -> tuple[bool, float, float]:
     """是否该断开重抽 → `(决定, 实测速率, 按此速率的预计剩余秒数)`。
 
     **纯函数**：判据只有一处实现（改阈值只改这里），也就能被单测直接钉住。
+
+    `remaining`（2026-10-13，plan/body-transfer-guard-v2 §4-M2）：**窗口口径**的入口。
+    调用方按时间窗采样时，`got`/`elapsed` 只是**这一窗**内的量，而「还差多少收完」
+    必须由调用方显式给（它知道全程累计）。缺省 = `total - got`，即**累计口径**，
+    与旧行为逐字相同（`got >= total` 时照旧不判）。
     """
-    if total <= 0 or got <= 0 or got >= total:
-        return False, 0.0, 0.0  # 长度未知 / 已收完 / 零字节：都不判
+    if total <= 0 or got <= 0:
+        return False, 0.0, 0.0  # 长度未知 / 零字节：都不判
+    left = (total - got) if remaining is None else int(remaining)
+    if remaining is None and got >= total:
+        return False, 0.0, 0.0  # 已收完（累计口径）：不赌
     if elapsed < probe_sec and got < probe_bytes:
         return False, 0.0, 0.0  # 样本太小，不下结论
     rate = got / elapsed if elapsed > 0 else float("inf")
     floor = _min_rate() if min_rate is None else min_rate
-    remain_sec = (total - got) / rate if rate > 0 else float("inf")
+    remain_sec = left / rate if rate > 0 else float("inf")
     return (rate < floor and remain_sec > budget_sec), rate, remain_sec
 
 
@@ -275,6 +292,10 @@ def _wire_bucket(jid: str) -> dict:
             "times": {},  # 只有秒数的段（`ppo`）：阶段占比要用
             "wasted": 0,
             "rerolls": 0,
+            #: 未成功结束的尝试（失败 / 重抽 / 被挤走）的**传输墙钟**与已收字节（R6）。
+            #: 为什么必须有：失败尝试此前**不进任何账**，于是现场 `other=343.7s` 里那 300 s
+            #: 是残值黑箱（P0.5 的「GPU 空转」归不了因）。
+            "failed": {"sec": 0.0, "bytes": 0, "n": 0},
             # 被 P1 挤走作废的字节（挤走不占 `wasted`：那是重抽的账，两者口径不同）。
             "preempt_wasted": 0,
             "preempts": 0,
@@ -374,6 +395,24 @@ def _wire_totals(jid: str) -> tuple[int, int]:
     return total, int(w.get("preempt_wasted", 0))
 
 
+def _wire_note_failed(jid: str, nbytes: int, sec: float) -> None:
+    """记一次**未成功的尝试**：它的传输墙钟与已收字节（R6，2026-10-13）。
+
+    与隔壁两笔账的口径划分（**不许相加成一个数**）：
+      · `failed` = 尝试没成功（超时 / 瞬时网络错 / 重抽 / 被挤走）——这里记**时间**；
+      · `wasted` = 重抽作废的**字节**（`_wire_note_reroll`）；
+      · `preempt_wasted` = 被 P1 挤走作废的**字节**（`_wire_note_preempt`）。
+    秒数只算**传输段**（`_get_with_retry` 传 `now - t_xfer`），排队归 `wait=`——
+    否则同一段时间会在「排队」与「失败」两个口径里各记一次。
+    """
+    if not jid:
+        return
+    f = _wire_bucket(jid)["failed"]
+    f["sec"] = float(f["sec"]) + float(max(0.0, sec))
+    f["bytes"] = int(f["bytes"]) + int(max(0, nbytes))
+    f["n"] = int(f["n"]) + 1
+
+
 def _wire_note_preempt(jid: str, wasted: int) -> None:
     """记一次**被 P1 挤走**（及其作废字节）——否则预取的真实成本在账上恒等于 0。
 
@@ -416,6 +455,14 @@ def _wire_flush(jid: str, log, *, wall_end: float | None = None) -> None:
         parts.append(f"reroll={w['rerolls']}(wasted {w['wasted'] / mb:.2f}MB)")
     if w["preempts"]:  # 只在真被挤走时打（别给正常路径每行加噪）
         parts.append(f"preempt={w['preempts']}(wasted {w['preempt_wasted'] / mb:.2f}MB)")
+    failed = w.get("failed") or {"sec": 0.0, "bytes": 0, "n": 0}
+    failed_sec = float(failed.get("sec", 0.0))
+    if failed.get("n"):
+        # R6（2026-10-13）：失败的尝试也要看得见——否则现场那 300 s 只会以「other 巨大」的形式
+        # 出现，读账的人归不了因。
+        parts.append(
+            f"failed={failed_sec:.1f}s/{int(failed.get('bytes', 0)) / mb:.2f}MB(n={failed['n']})"
+        )
     # 调度账（§2.2/P0）：本 job 期间在 bulk 队列上等了多久、让路几次、控制面往返多快。
     # `p0_rt_ms_p95` 是**会话级**读数（分位数不能做增量），其余按 job 起点快照取差。
     s0 = w.get("sched0") or {}
@@ -447,13 +494,17 @@ def _wire_flush(jid: str, log, *, wall_end: float | None = None) -> None:
     # `wall` 取「实测墙钟」与「各阶段之和」的较大者：阶段是**已测量的区间**，
     # 墙钟不可能比它们之和小（时钟粒度/人工拼接会给出略小的读数），而一个比
     # 各阶段之和还小的分母会把占比算成荒谬值（读表的人会以为自己在看噪声）。
-    wall = max(crit_end - float(w.get("t0") or crit_end), in_sec + crit_out + ppo_sec)
-    other = max(wall - in_sec - crit_out - ppo_sec, 0.0)
+    # `failed` 进 `max()`：它同样是**已测量的区间**（失败尝试的传输墙钟），墙钟不可能比它小；
+    # 不进就会让守恒式恒真而无信息（`other` 把失败时间吃掉，仍旧看不出「300 s 花在哪」）。
+    phase_sum = in_sec + crit_out + ppo_sec + failed_sec
+    wall = max(crit_end - float(w.get("t0") or crit_end), phase_sum)
+    other = max(wall - phase_sum, 0.0)
     rate_all = tot_b / tot_s / 1024.0 if tot_s > 0 else 0.0
     log(
         f"job {jid}: wire "
         + " ".join(parts)
         + f" 合计={tot_b / mb:.2f}MB/{tot_s:.1f}s({rate_all:.0f}KB/s)"
         + f" phases in={in_sec:.1f}s out={out_sec:.1f}s ppo={ppo_sec:.1f}s"
+        f" failed={failed_sec:.1f}s"
         f" other={other:.1f}s wall={wall:.1f}s overlap={overlap:.1f}s"
     )

@@ -233,6 +233,57 @@ def test_preempt_waste_survives_the_per_round_wire_flush() -> None:
     assert s.stats()["preempt_wasted"] == 1024 * 1024, "会话累计，不是「只留本轮」"
 
 
+# ───────────────── ⑤ 预取账的起点：wall 从「开始请求」起算（R8/M7）─────────────────
+
+
+def _one_round_prefetch(monkeypatch, store, cands: list[dict]) -> list[str]:
+    """只跑一轮预取，返回调用顺序事件表。
+
+    空候选 ⇒ 在 `peek` 里 `stop.set()`（没有下载可等）；有候选 ⇒ 第一份下完就 `stop.set()`
+    （`_prefetch_fill` 的循环在下一圈开头读它）。
+    """
+    stop = threading.Event()
+    events: list[str] = []
+    monkeypatch.setattr(JR, "PREFETCH_ROUND_SEC", 0.01)
+    monkeypatch.setattr(JR, "report_prefetch", lambda *a, **k: False)
+    monkeypatch.setattr(JR, "_wire_start", lambda jid: events.append(f"start:{jid}"))
+
+    def _peek(*_a, **_k):
+        if not cands:
+            stop.set()
+        return (cands, False)
+
+    monkeypatch.setattr(JR, "peek_jobs", _peek)
+
+    def _dl(*_a, **_k):
+        events.append("download")
+        stop.set()
+        return _PAY
+
+    monkeypatch.setattr(JR, "download_payload", _dl)
+    JR._prefetch_fill("http://hub", "tok", store, stop, depth=1, log=lambda _m: None)
+    return events
+
+
+def test_prefetch_round_starts_the_wire_clock_before_downloading(tmp_path, monkeypatch) -> None:
+    """★ R8/M7：预取轮的 `wall` 必须从「开始请求第一份」起算。
+
+    漏了它，排队那几分钟既不进 `wall` 也不进 phases ⇒ 读账时 `wait=` 与 `wall=` 割裂
+    （现场 P2：`wait=290.1s` 而 `wall=2.6s`，正是这个形状）。
+    """
+    jid = "j" * 16
+    events = _one_round_prefetch(monkeypatch, PrefetchStore(tmp_path), [_summary(_PAY, jid)])
+    assert events[:2] == [f"start:{JR.PREFETCH_WIRE_ID}", "download"], events
+
+
+def test_prefetch_round_without_candidates_does_not_start_a_wire_clock(
+    tmp_path, monkeypatch
+) -> None:
+    """空轮不建账：预取常态是 0 候选，每轮多一行零信息的 `wire` 行就是刷屏。"""
+    events = _one_round_prefetch(monkeypatch, PrefetchStore(tmp_path), [])
+    assert events == [], events
+
+
 def test_the_gate_reads_the_three_readings_the_store_exposes(monkeypatch) -> None:
     """装配点读的是 `stats()` 那三个键：**把 stats() 打空** ⇒ 装配点必然 `KeyError` 冒出来。
 

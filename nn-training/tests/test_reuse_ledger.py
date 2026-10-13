@@ -50,7 +50,16 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: | 2026-10-11 S2（`common.http_respond`：`_json` ×2 → **类属性别名**，不留第二份 `def`） | **12** | 17 | **80** |
 #: | 2026-10-11 W7（`plan/aborted-course-revival`：`cancel_job` = store 核心 + 门面转发 +
 #:   Protocol 声明——与 `unfreeze` 同款的**合法同名面**，不是抄了一份实现） | 12 | 17 | **81** |
-BASELINE_EXACT = 12
+#: | 2026-10-13 传输护栏 v2（`plan/body-transfer-guard-v2.plan.md` M1）| **13** | 17 | 81 |
+#:
+#: **2026-10-13 抬 exact 一格的账**（`_recv_some` 在 `remote/http.py` 与 `remote/tailscale_boot.py`
+#: 各一份；+1 组，clone 与同名未动）：这不是「懒得抽共用模块」，而是那**两处必须如此**——
+#: `remote/tailscale_boot.py` 是**单文件自包含**的（`tests/test_remote_dag.py:195` 钉死它连延迟
+#: import 都不许有：它是最早被拉起的那一个，且三个 notebook 是从 GitHub raw **单独拉这一个文件**），
+#: 所以共用的落点只能是 stdlib ⇒ 这里的孪生是结构性的，与本仓 `_reroll_decision` / `_read_body` /
+#: `_wire` 护栏同族。⚠ 同一处缺陷的孪生修复**必须两侧同改**，两侧单测各自钉住同一组数字；
+#: 抬这一格是一次有意的欠债（待 boot 的单文件契约解除才可能收回），不是为了省事。
+BASELINE_EXACT = 13
 BASELINE_CLONE = 17
 BASELINE_SAME_NAME_GE3 = 81
 

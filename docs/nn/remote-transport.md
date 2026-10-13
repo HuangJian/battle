@@ -6,7 +6,7 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
-## §89 PPO job 生命周期收口：lost 可判 · 重启按 runId 作废 · 重发入口 · 残留自动清理（2026-10-13，plan/ppo-job-lifecycle-ownership）
+## §90 PPO job 生命周期收口：lost 可判 · 重启按 runId 作废 · 重发入口 · 残留自动清理（2026-10-13，plan/ppo-job-lifecycle-ownership）
 
 **触发**：2026-10-13 06:17–06:45 事故（x27-noleash）——人工 `rm` 掉刚发布的 job 目录 ⇒
 细粒度腿**静默挂死 28 分钟**（`/result` 的 404 ≡ pending；没有超时、没有重发、没有一行日志）。
@@ -126,6 +126,126 @@
 * 端到端（M3 的 DoD#3）：`e2e/test_loop_supervisor_integration.py::test_redo_intent_cancels_and_republishes_the_same_jid`
   ——真驱动（不替 `_remote_ppo_step`）里：等远端 PPO 时写一份意图 ⇒ 账本 `job_pending → job_cancelled →
   job_pending`（复活）、发布两次**同一 jid**、回执落盘、回传后照常结算 it1。
+
+## §89 传输护栏 v2：定长读废掉空闲判据（`read1`）+ 时间窗采样与 2 窗迟滞 + 失败尝试入账（2026-10-13，plan/body-transfer-guard-v2 + 首轮评审 R1–R8）
+
+> **合并说明（2026-10-13 rebase → `origin/goal-nn`）**：本条原写于 `3c603ba9`（当时本文件最大 §84、
+> 无 Range）；目标基线已先落地 §2026-10-12-transfer-jitter-tolerance 与 plan A/B/C（**payload Range
+> 断点续传**、上传让路点、控制面死线）。故下文里「HEAD 无 Range」「不引入停抽」两条**前提在合并基线
+> 已不成立**。本次合并口径 = **保留上游的 Range / `WIRE_REROLL_GAIN` / 速率衰减 / 让路基建**，在其上
+> 补本条的 `read1`（M1）+ 时间窗采样与 2 窗迟滞（M2，**取代**上游 §86 的「每块一点」采样：累计口径会把
+> 「快开后再降速」当好签定论）+ `BodyTimeoutError`（M3）+ `failed=` 入账（M4，重抽尝试按**本段**字节计，
+> 避免带 Range 时跨尝试重复）+ M7。作废的备选⑦（不引入停抽）随之取消；「半截仍作废」改为
+> 「Range 续传，仅当服务端忽略 Range 才真作废（`_wire_note_resend`）」。
+
+**触发**（真机 log，2026-10-12/13；**原始 log 未入仓**，本条只记代码侧结论）：一个 job 的传输账
+`合计 1.31MB/343.5s`，`other=343.7s` 独吞关键路径；同一 job 只有一行
+`body 超时：总耗时 > 300s（已收 786432 bytes）——链路太慢，重试`，而**链路不慢**
+（同日其它 job 1.2–7.9MB/1.4–16.1s）。
+
+### R1（真因）：`resp.read(amt)` 的**定长**语义把 45 s 空闲判据整个废掉
+
+`http.client.HTTPResponse.read(amt)` 不是「读一次」，而是**循环 `recv` 直到凑满 `amt` 或 EOF**；
+socket 超时是**每一次 `recv`** 的超时 ⇒ 隧道只要每 < `idle_timeout` 吐 1 个字节，它既不返回也不超时，
+`body 停滞` 判据**结构上永不触发**，只剩墙钟闸（`BODY_TOTAL_TIMEOUT_SEC = 300`）兜底 —— 这正是
+现场那条 343.5 s 的形状。本机滴流 socket 实测（脚本已删，形状抄进用例）：
+
+| 场景 | `resp.read(256KB)`（旧） | `resp.read1(256KB)`（新） |
+|---|---|---|
+| 每 0.3 s 吐 1 字节（间隙 < timeout=0.5s） | **2.11 s 后一次性返回**（4× timeout），空闲判据一次没响 | 9 次调用逐块返回 |
+| 单次真停 1.0 s（> timeout） | 1.96 s 后抛 `TimeoutError`，**已收的 3 字节丢了** | 1.11 s 后抛，**已拿到 3 字节** |
+
+### R2′：**一次性采样**在两条链路上都失效（v1 稿的 R2 + R8 合并）
+
+旧形状 = 「只在首块判一次」（`probed` 一次性）。慢链路上这一块的采样时间要等满一整块（256KB @ 873B/s
+≈ 300 s）；而只修 M1 之后首块又**太小**（`read1` 首返可能只有几十字节）⇒ 判据拿一个不足样本下
+`should=False` 就**永久关掉自己**。探针 2（假响应 + 真 `_read_body`）四形状实跑：
+
+| 输入形状 | `allow_reroll` | 实测 | 含义 |
+|---|---|---|---|
+| 一块 256KB 耗 4 s（64KB/s < 80KB/s 地板） | True | `WireSlowError @4.00s` | 旧决策点 = **一整块的时间** |
+| 同上 | False（最后一次尝试） | `TimeoutError @4.00s`「已收 262144」 | 只剩墙钟闸（R4） |
+| **首块 0.05 s、其后每块 4 s** | True | `TimeoutError @4.05s`「已收 524288」 | ★ 现场那条行**可复现**：唯一一次采样被首块用掉 ⇒ 判据永久关闭 |
+| 每次 `recv` 只还 4 KB（read1 语义） | True | `TimeoutError @3.01s`（判据一次没响） | ★ **只修 M1 会更糟** |
+
+### 三刀
+
+| 刀 | 改动 | 收益 |
+|---|---|---|
+| **M1** | 新增**唯一的收字节口** `_recv_some(resp, limit)`（= `read1` 语义），`remote/http.py` 与 `remote/tailscale_boot.py` 两处 `_read_body` 同改 | 空闲判据恢复语义（「45 s 真的没有新字节」才触发）；采样点从「每 256KB」变「每 recv」，为 M2 供料 |
+| **M2** | 采样按**净时间窗**（`win_elapsed ≥ WIRE_PROBE_SEC = 3s`，净值 = 墙钟 − Σ让路）触发，不再用一次性标记；**连续 `WIRE_REROLL_PROBES = 2` 个慢窗**才断 | 慢链路不必等满一块；单窗抖动 / 重连后 TCP 慢启动不误判；每次重抽的浪费上界从「≤1 块 256KB」改为「≤2 窗」 |
+| **M3 + M4 + M7** | `TimeoutError` 带已收字节；失败的尝试入 wire 账（`failed=`）；prefetch 轮开始请求第一份时 `_wire_start` | 现场「other 343.7s 里那 300 s」从残值黑箱变成可归因读数 |
+
+### 关键设计（评审纠出来的五处）
+
+1. **`read1` 只有一个口子**：`_recv_some` 的回退分支（`getattr(resp, "read1", None)` 为 None 才用
+   `read`）只服务**测试替身**；真 `HTTPResponse` 恒有 `read1`（py3.3+）。防「测试绿而生产没修」靠
+   **parity 用例**：真 `HTTPResponse` 走的是 `read1`（不是静默回退），同一条假响应上
+   `read(amt)` / `read1` 拼出的字节序列一致。
+2. **两侧孪生是结构性的，不许抽共用模块**：`remote/tailscale_boot.py` 是**单文件自包含**的
+   （`tests/test_remote_dag.py` 钉死它连延迟 import 都不许有：它最早被拉起，且三个 notebook 从
+   GitHub raw **单独拉这一个文件**）⇒ `_recv_some` / `_reroll_decision` / `_read_body` 的孪生
+   只能留在两处，**必须同改**，两侧单测各自钉**同一组数字**。这一格记在
+   `tests/test_reuse_ledger.py` 的 `BASELINE_EXACT = 13`（有意欠债，见该文件注释）。
+3. **迟滞不是 1 而是 2**：链路是 **44× 双峰**（`plan/minimize-payload.plan.md` §4.0），单个 3 s 窗的
+   坑是常态；更关键的是**换连接后的第一个窗天然慢**（TCP 慢启动：RTT 爬坡 + 拥塞窗口起点小）
+   ⇒ 一窗就断等于「每次重连都自我判死刑」。代价是多花一个窗（≈3 s）才决策。
+4. **`_reroll_decision` 只加一个关键字**：`remaining: int | None = None`。缺省 = `total - got`
+   = **旧的累计口径，逐字不变**（既有纯函数用例一条断言都没改）；窗口口径必须由调用方显式给
+   「还差多少收完」（窗内 `got` 不是全程进度）。窗宽与判据的 `probe_sec` 读**同一个常量**：
+   否则将来调窗宽会让判据静默失灵。
+5. **失败账的口径划分（不许相加成一个数）**：`failed` = 尝试**没成功**（超时 / 瞬时网络错 /
+   重抽 / 被 P1 挤走）的**传输墙钟**（不含排队，排队归 `wait=`）；`wasted` = 重抽作废的**字节**；
+   `preempt_wasted` = 被挤走作废的**字节**。`failed.sec` **进** phases 行也**进** `wall` 的 `max()`
+   （不进则守恒式恒真而无信息）；`_wire_totals`（预取摘要读它）**不含** failed。**4xx 不入账**：
+   鉴权/归属/队列拒绝是**确定性的答案**，不是传输失败。
+
+### 口径红线（M3 的「只做可读性」）
+
+`BodyTimeoutError(TimeoutError)` 挂 `partial: bytes` / `got` / `total`，**只**为让上游读出「这一截收了多少」。
+⚠ HEAD 无 Range 续传（本文件 §51［plan §8 三条开放问题］的**立项门槛没动**）⇒ 半截字节**仍然作废**，异常文案与日志
+不许出现「续传起点」字样；也**不**把超时挪进重抽路径（重抽是「幂等 GET + 换连接」，超时是
+「退避重试」）。
+
+### 落点 / 旋钮
+
+- 代码：`remote/http.py`（`BodyTimeoutError` / `_recv_some` / `_read_body` 窗采样 / `_get_with_retry`
+  的 `_wire_note_failed`）· `remote/tailscale_boot.py`（孪生三处）· `remote/wire.py`
+  （`WIRE_REROLL_PROBES` / `_reroll_decision(remaining=)` / bucket `failed` / `_wire_note_failed` /
+  `_wire_flush`）· `remote/job_round.py`（M7 一行）· `remote/worker.py`（重导出两个新符号）·
+  `tools/wire_report.py`（phases 行解析 + 聚合 + `T_fail` 渲染）。
+- 新旋钮：`WIRE_REROLL_PROBES = 2`（worker 侧）/ `BOOT_REROLL_PROBES = 2`（引导侧），**同值同义**；
+  调回 `1` = 退回「单窗即断」（`read1` 保留）。
+- 日志形状：`… job j1: wire payload=… reroll=1(wasted 0.50MB) failed=300.0s/0.75MB(n=1) wait=…
+  … phases in=2.1s out=0.0s ppo=27.6s failed=300.0s other=43.7s wall=373.3s overlap=0.0s`。
+
+### 测试与门禁（2026-10-13 实测）
+
+新增/改写 15 例（**先在未改动代码上确认红**，AGENTS §7）：`tests/remote/test_body_transfer_guard.py`
+（read1 parity / 不等满定量 / ≤2×idle 内动手 / 两连慢窗才断 / 单慢窗不断 / 超时带字节）·
+`tests/remote/test_wire_reroll.py`（时间窗采样 + 两连窗 / `remaining` 窗口口径 / `failed` 入账 /
+被挤走也入账）· `tests/remote/test_boot_wire_guard.py`（引导侧孪生同数字 + read1 回归）·
+`tests/remote/test_prefetch_adaptive.py`（M7 正反面）· `tests/remote/test_wire_report.py`（新字段 +
+**旧日志无 `failed=` 照样聚合**）。改写既有判据两处（显式，不静默删）：
+`test_read_body_probes_only_its_first_chunk`（「一次 ⇒ ≤1 块」→「≤2 窗」）与
+`test_slow_draw_is_rerolled_then_succeeds`（作废量改窗口径）；
+`test_reroll_is_capped_and_the_last_attempt_always_transfers` **未动**（R4 本轮不改）。
+门禁 `bash tools/githook/nn-python-gate.sh` **绿**（ruff + mypy + pytest `tests/` + `e2e/`，41s）。
+
+### 本轮明确不做（记录，不是遗漏）
+
+- **R4**：最后一次尝试（`attempt == attempts` 或 `rerolls` 用尽）必然硬传 —— 有 Range 之前这是对的
+  （慢链路不该变成「永远下不完」），现场那次 ≈304 s 属它。
+- **R5**：单通道（`--bulk-conns 1` 现场）把 P1 的病态长占变成 P2 的连带损失 —— 属调度面，另开刀。
+- **R7**：失败样本不进 `_note_rate` ⇒ 阈值只被「好签」抬高（参照只抬不降）。只挪调用点是空操作，
+  真做需新常量（衰减）或新语义（失败样本可下调参照）+ 真机读数。
+- **反向约束**：**不引入**「重抽无收益即停」型判据 —— 在无 Range 的当下重抽的浪费是**实打实**的
+  （半截作废），任何「重抽成本趋零」的论证都必须先把 Range 落地（本文件 §51 的门槛：
+  单会话 Σwasted ≥ 一份 payload 或单次预取作废 ≥2MB 才立项，`plan/transfer-residual.plan.md` §8）。
+- **真机复测未取**：本条收益（现场 343.5 s → 推演 ≈20 s）是**单次现场反推 + 缩放探针**，不是分布；
+  任何 A/B 必须**配对 + ≥10 job + 报 p50/p90**（链路 44× 双峰），且需下次真机 log 复核。
+
+---
 
 ## §88 C1 `code.zip` 按角色裁剪：量法换成「入口 import 闭包」，2.796 MB → 1.221 MB（2026-10-13）
 

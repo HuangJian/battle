@@ -66,6 +66,7 @@ from remote.control_pool import (
 from remote.wire import (
     _BULK,
     WIRE_PREEMPT_MAX,
+    WIRE_PROBE_SEC,
     WIRE_REROLL_GAIN,
     WIRE_REROLL_MAX,
     WIRE_REROLL_PROBES,
@@ -75,6 +76,7 @@ from remote.wire import (
     _note_rate,
     _reroll_decision,
     _wire_add,
+    _wire_note_failed,
     _wire_note_preempt,
     _wire_note_reroll,
     _wire_note_resend,
@@ -88,11 +90,13 @@ __all__ = [
     "BODY_TOTAL_TIMEOUT_SEC",
     "CONTROL_TIMEOUT_BULK_FACTOR",
     "_POLL_WARN_AT",
+    "BodyTimeoutError",
     "_get_opener",
     "_get_with_retry",
     "_opener",
     "_paced_body",
     "_read_body",
+    "_recv_some",
     "_request",
     "_sched_headers",
     "_warn_non_200",
@@ -147,6 +151,44 @@ BODY_PROGRESS_MIN_SEC = 5.0
 BODY_CHUNK = 256 * 1024
 
 
+class BodyTimeoutError(TimeoutError):
+    """带正文 + **结构化已收字节**的 body 异常（M3，2026-10-13）。
+
+    `got` / `partial` / `total` 是给上游用的：失败尝试的账（wire 行的 `failed=`）要能读出
+    「这一截收了多少」，而不是只拿到一个 `repr(e)`。
+
+    ⚠ 没有 Range 续传（`docs/nn/remote-transport.md:1970` 仍是「先量后裁，未立项」）
+    ⇒ 这截字节**仍然作废**，日志与文案不许写「续传起点」。
+
+    挂在 `TimeoutError` 之下（而不是新造一族异常）：调用方与既有用例一律按
+    `TimeoutError` 捕（那是一条已经存在 5 年的契约面）。
+    """
+
+    def __init__(self, msg: str, partial: bytes, total: int) -> None:
+        super().__init__(msg)
+        self.partial = partial
+        self.got = len(partial)
+        self.total = total
+
+
+def _recv_some(resp: Any, limit: int) -> bytes:
+    """**至多一次底层 `recv`** 的读（= `HTTPResponse.read1` 语义；2026-10-13，M1）。
+
+    为什么不能再用 `resp.read(limit)`：`http.client` 的 `read(amt)` 是**循环 `recv` 直到凑满
+    `amt` 或 EOF**，而 socket 超时是**每一次 `recv`** 的超时 ⇒ 隧道只要每 < `idle_timeout`
+    吐 1 个字节，它既不返回也不超时，45 s 空闲判据**结构上永不触发**（现场：300 s 只凑满 1 块，
+    而那一块也被丢掉）。`read1` 把「一次 recv」暴露给调用方，于是：① 空闲判据恢复语义；
+    ② 速率判据能在**时间窗**上采样（M2），不再被块边界绑架。
+
+    回退分支只服务**测试替身**（只实现 `read` 的假响应）：真 `HTTPResponse`（py3.3+）一定有
+    `read1` ⇒ 生产路径不会静默退回定长读（`tests/remote/test_body_transfer_guard.py` 有一条
+    real-socket parity 用例钉它）。
+    """
+    read1 = getattr(resp, "read1", None)
+    block: bytes = read1(limit) if read1 is not None else resp.read(limit)
+    return block
+
+
 def _read_body(
     resp: Any,
     *,
@@ -167,8 +209,10 @@ def _read_body(
     `净值 elapsed = 墙钟 − Σ让路`（让路不是链路的错，不该把预取判成坏签）；
     **总超时与进度行仍按墙钟**（它们回答的是「这份传了多久」，含暂停才是诚实的）。
 
-    迟滞（2026-10-12）：重抽判据要**连续 `WIRE_REROLL_PROBES` 个点都慢**才断连 —— 抖动是常态，
-    单个 3s 窗口的瞬时速率必然误判（真机：首块 79KB/s ⇒ 重抽 ⇒ 换连接后 51KB/s，白扔 256KB）。
+    迟滞（2026-10-12 / 2026-10-13）：重抽判据按**净时间窗**（`WIRE_PROBE_SEC`）采样，且要
+    **连续 `WIRE_REROLL_PROBES` 个窗都慢**才断连 —— 抖动是常态，单个 3s 窗的瞬时速率必然
+    误判（真机：首块 79KB/s ⇒ 重抽 ⇒ 换连接后 51KB/s，白扔 256KB）；「一次性 / 累计口径」
+    在「快开后再降速」的链路上会把首块的好签相位当定论（现场那条 343.5 s 的行）。
     浪费上界仍是**有界**的（判满就收兵），不给「整份重传」开口子。
 
     `offset`（2026-10-12，Range 断点续传）：本段在**整份文件**里的起点（206 续传时 > 0）。
@@ -178,6 +222,13 @@ def _read_body(
 
     停滞异常必须**有正文**：上游 `_get_with_retry` 只把 `repr(e)` 写进日志，裸
     `TimeoutError()` 打出来是 `TimeoutError()`——等于没写（2026-09-20 事故现场）。
+
+    2026-10-13（plan/body-transfer-guard-v2 §4，两处口径）：
+      ① 读走 `_recv_some`（`read1`，M1）：定长读让空闲判据结构上永不触发（见该函数）；
+      ② 低速判据改成**时间窗采样 + 连续 N 窗迟滞**（M2，`WIRE_PROBE_SEC` /
+         `WIRE_REROLL_PROBES`）：旧形状（每块一次 + `probed` 一次性）在两条链路上都失效
+         ——慢链路上样本要等一整块（≈300 s），`read1` 之后首块又太小 ⇒ 判一次
+         `should=False` 就永久关掉自己（现场那条 343.5 s 的行就是这个形状）。
     """
     seg_len = 0
     try:
@@ -188,9 +239,11 @@ def _read_body(
     buf = bytearray()
     t0 = time.time()
     last = t0
-    probes = 0  # 已判的**有效**慢点样本数（迟滞：连续 N 点都慢才认定坏签）
-    slow_streak = 0  # 连续判慢的点数（一个不慢的点即清零）
     t_yield = 0.0  # 让路累计（秒）：只喂速率判据，墙钟超时/进度仍用 now - t0
+    # 观测窗（M2）：窗宽 ≥ `WIRE_PROBE_SEC`（**净值**：让路不算链路的错），窗内字节另计。
+    win_net0 = t0  # 上一窗结束时的净值时刻
+    win_got = 0  # 上一窗结束时的已收字节
+    slow_streak = 0  # 连续多少个慢窗（迟滞本体；单窗不判，见 WIRE_REROLL_PROBES）
     while True:
         if pace is not None:
             try:
@@ -199,12 +252,14 @@ def _read_body(
                 e.bytes_read = len(buf)  # 被挤走的半截要入账（否则预取成本恒等于 0）
                 raise
         try:
-            block = resp.read(BODY_CHUNK)
+            block = _recv_some(resp, BODY_CHUNK)
         except (TimeoutError, OSError) as e:
-            raise TimeoutError(
+            raise BodyTimeoutError(
                 f"body 停滞：{idle_timeout:.0f}s 内没有新字节（已收 {offset + len(buf)} bytes"
                 + (f" / 共 {total}" if total else "")
-                + "）——隧道或代理侧的问题，重试"
+                + "）——隧道或代理侧的问题，重试",
+                bytes(buf),
+                total,
             ) from e
         if not block:
             if seg_len and len(buf) < seg_len:
@@ -213,37 +268,47 @@ def _read_body(
                 #   body 当成功返回。收满声明长度才算成功；否则当瞬时失败（上层退避重取）。
                 #   ⚠ 判据用**本段**声明长度（`seg_len`）而不是累计口径 `total`：续传时
                 #   `offset>0`，拿累计口径比会把每一条正常的 206 都误判成「被截断」。
-                raise TimeoutError(
+                raise BodyTimeoutError(
                     f"body 提前结束（连接被截断）：已收 {offset + len(buf)} bytes / 共 {total}"
-                    "——隧道或代理侧的问题，重试"
+                    "——隧道或代理侧的问题，重试",
+                    bytes(buf),
+                    total,
                 )
             return bytes(buf)
         buf += block
         now = time.time()
-        if allow_reroll and probes < WIRE_REROLL_PROBES:
-            # 迟滞（2026-10-12）：判**连续 `WIRE_REROLL_PROBES` 个点**、全慢才断连重抽。
-            # 原先是「首块判一次」（probed 一次性）——抖动下单个 3s 窗口的瞬时速率必然误判。
-            # 浪费上界仍是**有界**的：判满 `WIRE_REROLL_PROBES` 点就收兵，绝不给「整份重传」
-            # 开口子（plan §7.2 的硬要求）。
-            # 净值 = 墙钟 − 让路：让路不是链路的错，否则「停满 5s 预算」会让
-            # 256KB/5s ≈ 51KB/s 恒低于阈值 ⇒ 每次下载都白扔一块重抽（现场 100%）。
-            # ⚠ 速率/剩余按**本段**算（`seg_len`）：前缀不是这一次传的，算进去会虚高。
-            should, rate, remain = _reroll_decision(
-                len(buf), seg_len, max(0.0, now - t0 - t_yield)
-            )
-            if rate > 0.0:  # rate == 0 ⇒ 样本还太小、没下结论（不计数、不判定）
-                probes += 1
-                slow_streak = slow_streak + 1 if should else 0
-                if probes >= WIRE_REROLL_PROBES and slow_streak >= WIRE_REROLL_PROBES:
-                    # 累计口径 + 本段字节：调用方据此续传（`partial`）与记账（`bytes_read`）。
-                    raise WireSlowError(
-                        offset + len(buf), rate, remain, partial=bytes(buf)
-                    )
+        if allow_reroll:
+            # 净值 = 墙钟 − 让路：让路不是链路的错，否则「停满让路预算」会被判成坏签。
+            # 采样按**净时间窗**（M2）：窗内字节与净值秒是判据的输入，不再被块边界（定长读）绑架。
+            net_now = max(0.0, now - t_yield)
+            win_elapsed = net_now - win_net0
+            if win_elapsed >= WIRE_PROBE_SEC:
+                should, rate, remain = _reroll_decision(
+                    len(buf) - win_got,
+                    total,
+                    win_elapsed,
+                    # 窗宽与判据用同一把尺（`probe_sec` 是判据自己的「样本够大」门）：
+                    # 窗已证明「至少等了这么久」⇒ 两处必须读同一个常量，否则调窗宽时判据会静默失灵。
+                    probe_sec=WIRE_PROBE_SEC,
+                    remaining=(total - len(buf)) if total else 0,
+                )
+                win_net0, win_got = net_now, len(buf)
+                if should:
+                    slow_streak += 1
+                    if slow_streak >= WIRE_REROLL_PROBES:
+                        # 累计口径（`offset + len(buf)`）+ 本段字节（`partial`）：调用方据此续传与记账。
+                        raise WireSlowError(
+                            offset + len(buf), rate, remain, partial=bytes(buf)
+                        )
+                else:
+                    slow_streak = 0
         if total_timeout is not None and now - t0 > total_timeout:
-            raise TimeoutError(
+            raise BodyTimeoutError(
                 f"body 超时：总耗时 > {total_timeout:.0f}s（已收 {offset + len(buf)} bytes"
                 + (f" / 共 {total}" if total else "")
-                + "）——链路太慢，重试"
+                + "）——链路太慢，重试",
+                bytes(buf),
+                total,
             )
         if progress is not None and now - last >= BODY_PROGRESS_MIN_SEC:
             last = now
@@ -537,6 +602,7 @@ def _get_with_retry(
         allow_reroll = reroll_ok and attempt < attempts and rerolls < WIRE_REROLL_MAX
         t_req = time.time()  # 本次尝试的**墙钟**（含排队）：只喂 `_note_rate`（保守侧）
         t_xfer = t_req  # 进槽后重取：段账只算**真实传输**（排队归调度账 `wait=`）
+        got = 0  # 本次尝试已收字节（M3：网络层异常自带 `.got` 时才非零）
         try:
             # label 带优先级（S3a/W0）：现场日志里 `bulk payload/P1` 与 `bulk payload/P2` 一眼可分
             #（否则「排队 3.9s」到底压在关键下载还是无害预取上，结构上判不出来）。
@@ -561,6 +627,10 @@ def _get_with_retry(
                     _wire_note_wait(wire_jid, wire_seg, _BULK.take_wait(_tok))
         except BulkPreemptError as e:
             _wire_note_preempt(wire_jid, int(getattr(e, "bytes_read", 0) or 0))
+            # R6：被挤走也是一次**未成功**的尝试 —— 时间也要进账（字节由 preempt= 单独报）。
+            _wire_note_failed(
+                wire_jid, int(getattr(e, "bytes_read", 0) or 0), time.time() - t_xfer
+            )
             preempts += 1
             if bulk_prio == BULK_P2_PREFETCH:
                 # 挤走不是失败：重排有独立预算，**不消耗 attempts**。耗尽时抛的仍是
@@ -590,6 +660,10 @@ def _get_with_retry(
             # 所以 `wasted` 记 0（真作废只可能来自「服务端忽略 Range」，由 `_wire_note_resend` 记）。
             parts += e.partial
             _wire_note_reroll(wire_jid, 0)
+            # R6（2026-10-13）：重抽也是「未成功的一次」——花掉的**时间**归 failed=（作废的**字节**
+            # 由 reroll= 报，续传口径下恒 0）。字节用**本段**（`partial`）而非累计 `bytes_read`：
+            # 带 Range 时累计口径会把前几次尝试的字节重复计入。
+            _wire_note_failed(wire_jid, len(e.partial), time.time() - t_xfer)
             floor = _min_rate()
             log(
                 f"wire: re-roll #{rerolls}/{WIRE_REROLL_MAX} {wire_seg or path}: "
@@ -611,6 +685,8 @@ def _get_with_retry(
             continue  # 立即换连接重抽（不退避）
         except Exception as e:  # 网络层抖动（URLError/timeout/reset）
             status, body = None, repr(e).encode()
+            # M3/R6：`_read_body` 抛的超时带已收字节（`.got`）——失败账要能读出它。
+            got = int(getattr(e, "got", 0) or 0)
         if status == 206:
             # 续传的尾巴（服务端接受了 `Range`）⇒ 拼上去就是整份。
             parts += body
@@ -636,7 +712,13 @@ def _get_with_retry(
                 _note_rate(len(body) / elapsed, len(body))
             return bytes(parts)
         if status is not None and 400 <= status < 500:
+            # 4xx 是**确定性的答案**（鉴权/归属/队列拒绝），不是传输失败 —— 不进 failed 账。
             raise ProtocolError(f"{path} failed: HTTP {status}")
+        # R6（2026-10-13）：这一次尝试没成功（瞬时网络错 / 非 200）——它的**传输墙钟**与已收
+        # 字节进账。不入账的话，现场那 300 s 只会以「other 巨大」的形式出现（P0.5 归不了因）。
+        _wire_note_failed(
+            wire_jid, len(body) if status is not None else got, time.time() - t_xfer
+        )
         last = (
             f"HTTP {status}" if status is not None else repr(body.decode("utf-8", "replace")[:120])
         )
