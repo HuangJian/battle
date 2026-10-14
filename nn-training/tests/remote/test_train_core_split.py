@@ -242,6 +242,7 @@ def test_the_core_touches_only_downward_clusters() -> None:
         "remote.download",
         "remote.job_fs",
         "remote.job_lifecycle",
+        "remote.opt_delta",
         "remote.wire",
     ], tops
 
@@ -411,6 +412,31 @@ def test_ref_enters_the_batch_only_while_kick_is_on() -> None:
         BLOB_REF: "b" * 64
     }
     assert core_mod.blob_wanted({"opt_sha": "", "ref_sha": "b" * 64}, kick_kl=0.0) == {}
+
+
+def _named_calls(node: ast.AST) -> set[str]:
+    """子树里所有调用的名字（裸名取 `id`、属性取 `attr`）—— 结构判据，与措辞无关。"""
+    return {
+        n.func.id if isinstance(n.func, ast.Name) else getattr(n.func, "attr", "")
+        for n in ast.walk(node)
+        if isinstance(n, ast.Call)
+    }
+
+
+def test_delta_form_branch_keeps_the_local_f32_copy() -> None:
+    """R3（M4）：形态位命中 ⇒ 回传 delta 容器；但本机那份 f32 全量**照样**进 blob_cache/身份映射。
+
+    全链要真 torch + 真课程（不在单测里跑，同本文件口径）⇒ 这里用 AST 钉产物段的三件事：
+    ① 形态位过唯一口径 `opt_fmt_of`（它自己的三档读法是 `test_opt_delta.py` 里的**行为**用例）；
+    ② `pack_opt_delta`（回传字节）与 `pack_opt_tar`（**本机 f32 全量**：身份映射与 blob_cache 的输入）
+       **两个**都在这一段里 —— 只调前者 = 下一轮起点降质（转 delta 回不到原链）；只调后者 = 回传没瘦。
+    ③ `record_pending`（身份映射的 pending）也在同一段：M0 与 R3 必须共处一个函数，否则
+       「本机权威副本」与「回传形态」两天各说一套。
+    """
+    called = _named_calls(_func(CORE_FILE, CORE_FN))
+    assert {"opt_fmt_of", "pack_opt_delta", "pack_opt_tar", "record_pending"} <= called, (
+        f"训练核产物段没接全 delta 形态：{sorted(called)}"
+    )
 
 
 def test_the_kick_gate_is_a_pure_read_of_the_manifest() -> None:

@@ -32,6 +32,8 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # 只在类型面（运行时由 wire_diet 分支内延迟 import）
     from remote.payload_slim import ShardSlim
 
+# R3/M4：opt 回传的形态（`manifest.opt_fmt`）与 delta 容器（L0）。
+import remote.opt_delta as opt_delta
 from common.fs import append_jsonl, extract_tar_bytes
 from common.hashing import sha256_bytes, sha256_file
 from common.platform_utils import rmtree_best_effort
@@ -958,6 +960,11 @@ def publish_job(
     _prev = _previous_job_id(job_root_p, run_id, course_fp, it)
     if _prev:
         m["opt_from"] = _prev
+    # ---- R3（M4）：opt 回传的**形态位**（2026-10-14，plan/wire-diet.plan.md §3 R3 / §12）----
+    # 有 base（`use_opt_blob` = 真能发 delta）才写；否则**不添键** —— 对外发布路径的 manifest
+    # 逐字节不变（与 `payload_fmt` 同纪律）。发布端写下、验收端就是它（兼容矩阵 §4，缺键 = 旧形态）。
+    if use_opt_blob:
+        m["opt_fmt"] = opt_delta.OPT_DELTA_FMT
     m["kind"] = kind
     m["seed"] = job_seed(run_id, it, init_weights_fp)
     if course_name:
@@ -1110,6 +1117,46 @@ def _opt_tar_bytes(ckpt_remote_dir: str | Path | None) -> bytes:
     if tar_path.exists():
         return tar_path.read_bytes()
     names = [n for n in ("model.pt", "opt.pt") if (d / n).exists()]
+    return _pack_tar_from_dir(d, names)
+
+
+def _land_opt_delta(opt_blob: bytes, *, traj_dir: str | Path, it: int, ckpt_dir: Path, log) -> bytes:
+    """R3（M4）的 opt 落地：delta 容器 → **重建** → 写 `ckpt_dir/opt.pt` → 押回权威 tar 字节。
+
+    基准 = 上一轮 landed 的那份（`it{it-1}/ppo_ckpt_remote/opt.pt` —— 就是本轮 `opt_sha` 打的 tar）。
+    `base_sha` 与**本机发出去的那份**相等 = **exact** 档（worker 下的是我们的 blob）；不等 =
+    **identity** 档（worker 用自己那份 f32 副本当基准 ⇒ hub 无权对账，只记一行判别；plan §12）。
+
+    响亮拒收（**绝不**把 delta 当权重落盘）：缺 base / 缺 torch / 容器坏 / 结构不符 —— 全抛。
+    返回的字节就是**权威字节**：调用方把它写成 sibling `.tar`，下一轮 publish 的 `opt_sha` 由它算。
+    """
+    import torch
+
+    base_dir = Path(traj_dir) / f"it{it - 1}" / "ppo_ckpt_remote"
+    base_p = base_dir / "opt.pt"
+    if not base_p.exists():
+        raise HubClientError(
+            f"opt 形态位={opt_delta.OPT_DELTA_FMT!r} 但 base 不在（{base_p}：上一轮 landed "
+            "ckpt 被 prune / 换了 traj 目录）——拒收；重发旧形态或关掉 --wire-diet"
+        )
+    reported = opt_delta.base_sha_of(opt_blob)
+    published = sha256_bytes(_opt_tar_bytes(base_dir))
+    log(
+        f"opt delta 落地：base_sha={'exact' if reported == published else 'identity'} 档"
+        f"（容器 {reported[:12]}… / 本机 {published[:12]}…）"
+    )
+    rebuilt = opt_delta.apply_opt_delta(torch.load(base_p, map_location="cpu"), opt_blob)
+    torch.save(rebuilt, ckpt_dir / "opt.pt")
+    return _pack_tar_from_dir(ckpt_dir, ["opt.pt"])
+
+
+def _pack_tar_from_dir(d: Path, names: list[str]) -> bytes:
+    """目录 → tar bytes（`names` 顺序即成员顺序）；空列表 = `b""`。
+
+    两个调用点：① `_opt_tar_bytes` 的**重打**退路（历史 run / 冷启动）；② R3 的 delta 落地
+    ——重建成 `opt.pt` 后由它押出**权威字节**（下一轮 publish 的 `opt_sha` 就是这几字节）。
+    实现只此一处，免得两条路各自演化出不同的成员顺序。
+    """
     if not names:
         return b""
     import io
@@ -1405,10 +1452,18 @@ def verify_and_land(
     wver = _sha256_file(str(out_p))
     log(f"weights landed -> {out_weights} ({len(wj)} bytes, wver={wver[:12]}…)")
     # 落盘 opt tar（D5：Adam 动量随 job 往返）
-    opt_tar = decode_opt_tar(str(result["opt_tar_b64"]))
     ckpt_dir = Path(traj_dir) / f"it{it}" / "ppo_ckpt_remote"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    _extract_tar(opt_tar, ckpt_dir)
+    opt_tar = decode_opt_tar(str(result["opt_tar_b64"]))
+    # ---- R3（M4）：形态位命中 ⇒ hub 侧**重建**（缺键 = 旧形态逐字节不变）----
+    # 基准 = 上一轮 landed 的那份（`it{it-1}/ppo_ckpt_remote/opt.pt`，就是本轮 `opt_sha` 打的 tar）。
+    # `base_sha` 与**本机发出去的那份**相等 = exact 档（worker 下的是我们的 blob）；不等 = identity 档
+    # （worker 用自己那份 f32 副本当基准 —— hub 无权对账，只记一行判别；plan §12）。
+    # 缺 base / 缺 torch / 结构不符 ⇒ `apply_opt_delta` 抛出去（**绝不**把 delta 当权重落盘）。
+    if opt_delta.opt_fmt_of(manifest) == opt_delta.OPT_DELTA_FMT:
+        opt_tar = _land_opt_delta(opt_tar, traj_dir=traj_dir, it=it, ckpt_dir=ckpt_dir, log=log)
+    else:
+        _extract_tar(opt_tar, ckpt_dir)
     # M2：把**原始回传字节**落盘（sibling `.tar`）——下一轮 publish 的 opt_sha 必须
     # 由原样字节算出，才能等于云 worker blob_cache 的键（重打 tar 会 sha 漂移 ⇒ 每轮
     # 未命中 ⇒ 1.19MB 白传回来）。写失败不阻断落位（只是退回重打路径）。

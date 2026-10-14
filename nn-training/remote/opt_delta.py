@@ -45,6 +45,8 @@ __all__ = [
     "OPT_DELTA_FMT",
     "OPT_DELTA_MAGIC",
     "apply_opt_delta",
+    "base_sha_of",
+    "opt_fmt_of",
     "pack_opt_delta",
 ]
 
@@ -54,6 +56,19 @@ OPT_DELTA_MAGIC = b"BOD1"
 OPT_DELTA_FMT = "delta-f16"
 #: 参与 delta 的 dtype（其余一律 `exact`）——刻意只认浮点：整数张量做差再量化会改语义。
 _DELTA_DTYPES = frozenset({"float16", "float32", "float64", "bfloat16"})
+
+
+def opt_fmt_of(manifest: Any) -> str:
+    """manifest 的**形态位读法**（发布端写、worker 与 hub 都照它分叉的唯一口径）。
+
+    命中（= `OPT_DELTA_FMT`）⇒ 回传/落地的都是 delta 容器；否则（含缺键、旧值、非映射）= 旧形态
+    （整份 tar，逐字节旧行为）。**键名与合法值只有这一处** —— 两侧各自 `== "delta-f16"` 的话，
+    改形态时要改三处，漏一处就是「发布端写了、某一侧没读懂」的静默分叉。
+    """
+    if not isinstance(manifest, dict):
+        return ""
+    got = str(manifest.get("opt_fmt") or "")
+    return got if got == OPT_DELTA_FMT else ""
 
 
 def _torch():
@@ -135,6 +150,25 @@ def pack_opt_delta(base: dict, new: dict, *, base_sha: str) -> bytes:
         separators=(",", ":"),
     ).encode("utf-8")
     return OPT_DELTA_MAGIC + struct.pack(">I", len(hdr)) + hdr + b"".join(blobs)
+
+
+def base_sha_of(raw: bytes) -> str:
+    """容器头里的 `base_sha`（**只读头**，不解 delta 体）；读不动 ⇒ 空串。
+
+    hub 侧的**档位读数**（plan §12）：与 manifest 的 `opt_sha` 相等 = exact 档（worker 下的是我们
+    发出去的 blob）；不等 = identity 档（worker 用自己那份 f32 副本当基准 —— hub 无权对账，
+    只能记一行判别）。
+    """
+    off = len(OPT_DELTA_MAGIC)
+    if not raw.startswith(OPT_DELTA_MAGIC) or len(raw) < off + 4:
+        return ""
+    (hdr_len,) = struct.unpack(">I", raw[off : off + 4])
+    off += 4
+    try:
+        hdr = json.loads(raw[off : off + hdr_len].decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    return str(hdr.get("base_sha") or "")
 
 
 def apply_opt_delta(base: dict, raw: bytes, *, expect_base_sha: str = "") -> dict:

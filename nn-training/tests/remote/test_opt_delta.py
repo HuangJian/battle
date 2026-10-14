@@ -135,6 +135,21 @@ def test_apply_refuses_structure_mismatch_and_body_damage() -> None:
         od.apply_opt_delta(base, forged)
 
 
+def test_opt_fmt_of_is_the_single_read_point() -> None:
+    """形态位读法（发布端写、两侧读的**唯一**口径）：只有恰好等于 `OPT_DELTA_FMT` 才算命中。
+
+    两侧各自 `== "delta-f16"` 的风险是「改形态时漏改一处 ⇒ 发布端写了但某一侧没读懂」——
+    那是静默分叉（worker 发整份 tar、hub 当 delta 重建），所以这里把三档都钉住：命中 / 缺键 /
+    旧值或脏值一律回**旧形态**（不报错、不猜）。
+    """
+    assert od.opt_fmt_of({"opt_fmt": od.OPT_DELTA_FMT}) == od.OPT_DELTA_FMT
+    assert od.opt_fmt_of({}) == ""
+    assert od.opt_fmt_of({"opt_fmt": None}) == ""
+    assert od.opt_fmt_of({"opt_fmt": "delta-i16"}) == ""
+    assert od.opt_fmt_of({"opt_fmt": "delta-f16 "}) == "", "多余空白不算命中（只认逐字相等）"
+    assert od.opt_fmt_of(None) == ""
+
+
 def test_missing_torch_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     """⑥ 缺 torch ⇒ 响亮拒收（M4 硬约束②；不许静默把 delta 当权重落盘）。"""
     base, new = _state(1), _state(2)

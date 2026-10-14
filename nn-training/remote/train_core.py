@@ -38,6 +38,7 @@ from pathlib import Path
 from typing import Any
 
 import remote.course_cache as course_cache
+import remote.opt_delta as opt_delta
 from common.log_bundle import LogBundle
 from common.protocol import (
     BLOB_DEMO,
@@ -678,11 +679,30 @@ def run_training_core(
     _cache_produced_weights(blob_root, wj_raw, log)
     ckpt_dir = job_dir / "ppo_final"
     _ppo_save(str(ckpt_dir), raw_model, opt, int(manifest["epochs"]))
+    # 本机那份 f32 全量（身份映射与 blob_cache 都吃它）；R3 下它**不再是**回传字节本身
     opt_tar_raw = pack_opt_tar(ckpt_dir)
-    opt_tar_b64 = encode_opt_tar(opt_tar_raw)
     # M2 B3：把刚产出的 raw opt tar 写进 blob_cache（键 = sha256）——下一轮 hub 的
     # opt_sha 由 verify_and_land 落盘的同一份原始字节算出，故同会话内 100% 命中。
     _cache_blob(blob_root, hashlib.sha256(opt_tar_raw).hexdigest(), opt_tar_raw, log)
+    # ---- R3（M4）：形态位命中 ⇒ 回传 **delta 容器**（基准 = 本轮**实际载入**的那份 opt）----
+    # 基准字节 = `opt_raw`（上面解析出来的那份：exact 档 = hub 发的 blob；identity 档 = 本机
+    # 自己那条 f32 链）⇒ `base_sha` 就是「我拿哪份当基准」的记录（hub 侧的档位读数）。
+    # 本机那份 f32 全量**照样**写 blob_cache/身份映射（下一轮的起点就是它）。
+    opt_sent_raw = opt_tar_raw
+    if opt_delta.opt_fmt_of(manifest) == opt_delta.OPT_DELTA_FMT:
+        if not opt_raw:
+            raise ProtocolError(
+                "形态位是 delta 但本轮没有 base opt（manifest.opt_init/opt_sha 为空）——拒发"
+            )
+        from worker.ppo.common import _to_cpu_state  # torch 面：延迟 import（顶层零 torch）
+
+        base_state = _to_cpu_state(torch.load(opt_dir / "opt.pt", map_location="cpu"))
+        opt_sent_raw = opt_delta.pack_opt_delta(
+            base_state,
+            _to_cpu_state(opt.state_dict()),
+            base_sha=hashlib.sha256(opt_raw).hexdigest(),
+        )
+    opt_tar_b64 = encode_opt_tar(opt_sent_raw)
     # ---- R0（M0）：记下「本机跑出的这份产物在哪」→ 身份映射的 **pending** ----
     # 只记 sha+字节数（两份副本本来就在 `blob_cache` 里，**不**复制字节）。它此时**还不算**
     # 可用起点：要等回传受理（`job_round` 的 settled 回调）才 `confirm` 升成 `latest`——

@@ -45,6 +45,17 @@ cell 文本与 `remote/rollout_node.py` 的源码 —— 「cell 能不能 `comp
 `job_dir`），只剩**一条**：探针超界时那句「WARN 探针超界 … + 轮报 `probe_probe` 读数」。它只能看文本
 ——这一行的**交付物就是日志本身**（操作员的现场读数：这一轮到底探没探、是不是在等盘；`LogBundle` 只往日志出，没有结构化出口 ⇒ 无法用返回值/状态表达）。同族先例 = 上面 aistudio 那 6 条。
 
+**2026-10-14 抬 SOURCE 一格的账**（`plan/wire-diet.plan.md` §12 切片 2；+1，FORM 未动）：
+R3/M4 把 opt 回传改成 **delta 容器**，而「哪个形态位 + 哪几个调用**同处产物段**」是这一刀的
+**接口面**：`run_training_core` 的产物段必须同时调 `opt_fmt_of`（形态位唯一口径）· `pack_opt_delta`
+（回传字节）· `pack_opt_tar`（**本机 f32 全量**：身份映射与 blob_cache 的输入）· `record_pending`。
+漏掉后两者里的任一个都是「M0 的本机权威副本断链 / 回传没瘦」，而这两条都**没有可调用的运行时
+入口**（跑 `run_training_core` 要真 torch + 真课程）—— 行为面已能测的部分全部在行为面测了：
+容器往返/决定性/拒收在 `tests/remote/test_opt_delta.py`（含 `opt_fmt_of` 三档读法）、hub 侧重建在
+`tests/remote/test_opt_delta_land.py`（真 torch：重建误差界 + 权威 tar 成员表 + 缺 base 抛）
+—— 两边零文本判据。剩下的这一条 = 单文件内的 `_named_calls(...)` 集合判据（与措辞无关，
+不按文本子串），按本条同族先例记在这里。
+
 **2026-10-12 抬 FORM 一格的账**（`plan/prefetch-stage-unpack.plan.md`；+3，SOURCE 未动）：
 本 plan 新增三类**降级路径**（`store(unpack=True)` 解包失败、解包产物超单份上界、staged 暂存不在位
 ⇒ 回退关键下载），plan §9「不静默」要求这三条各打一行 —— 那一行**就是**交付物（操作员唯一的现场
@@ -67,8 +78,9 @@ ROOT = Path(__file__).resolve().parents[1]
 #: 2026-10-11 aistudio 传输硬化抬到 1441；同日探针上界抬到 1442；2026-10-12 预取解包抬到 1445
 #: —— 三笔理由都见模块头）。
 BASELINE_FORM = 1445
-#: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091，理由见模块头）。
-BASELINE_SRC = 1091
+#: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
+#: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092 —— 两笔理由都见模块头）。
+BASELINE_SRC = 1092
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。
 SANITY_FLOOR = (400, 200)
 
