@@ -91,9 +91,14 @@ _DELIVERABLE_NAMES = (
     "net_artifacts_dir",
     "local_root_path",
     "resolve_local_root",
+    "artifact_need_bytes",
+    "ARTIFACT_BYTES_PER_ROUND",
+    "SEGMENT_ROUNDS_DEFAULT",
+    "ARTIFACT_MIN_FREE_RATIO",
     "backup_ready",
     "install_backup",
     "WEIGHTS_NAME",
+    "OPT_TAR_NAME",
     "LOCAL_ROOT_ENV",
     "DEFAULT_LOCAL_PARENT",
     "LOCAL_ROOT_NAME",
@@ -1483,7 +1488,11 @@ def run_one_course(
     # 而不是 `resolve_artifact_dir` 的默认分支（那条在生产路径上从不被求值）。网络侧产物根
     # 只喂 C1 备份与 B4 交付面 —— 补传全成功的一段，它一个字节都不写。
     net = Path(deliverable.net_artifacts_dir(cfg, course, multi=multi))
-    dest, dest_why = deliverable.resolve_local_root(ccfg, course, multi=multi)
+    # `rounds` 只喂 B2 的容量判据（`resolve_local_root` 的 `artifact_need_bytes`）：本段的轮数
+    # 上限就是 `CFG.max_iters`（下面 `build_run_argv` 把它当 `--max-iters` 用），取不到 ⇒ 缺省段长。
+    dest, dest_why = deliverable.resolve_local_root(
+        ccfg, course, multi=multi, rounds=int(ccfg.get("max_iters") or 0)
+    )
     if dest_why:
         # 拍板-2：取不到本地盘就回落网络盘 + **响亮一行**（不改成响亮失败：产物根没有第二处落脚）
         log(f"WARN 本地产物根不可用（{dest_why}）⇒ 本段产物回落网络盘：{dest}")

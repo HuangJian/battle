@@ -707,6 +707,63 @@ def test_usable_local_root_gets_no_reason_and_is_created(tmp_path: Path) -> None
     assert got.is_dir(), "判据过 = 目录已被建出来（探针的文件与目录一起验）"
 
 
+# ──────────────── 持久面容量判据 B2（plan/offline-local-disk-first §3.2/§8） ────────────────
+
+
+def test_artifact_budget_scales_with_the_segment_length() -> None:
+    """B2 的算式：轮数 × 每轮估算 × 余量比值；取不到轮数 ⇒ 缺省段长（**不猜负数**）。"""
+    need = deliverable_mod.artifact_need_bytes
+    assert need(0) == need(deliverable_mod.SEGMENT_ROUNDS_DEFAULT)
+    assert need(-5) == need(deliverable_mod.SEGMENT_ROUNDS_DEFAULT)
+    assert need(200) == pytest.approx(2 * need(100))
+    assert need(100) == pytest.approx(
+        deliverable_mod.ARTIFACT_BYTES_PER_ROUND * 100 * deliverable_mod.ARTIFACT_MIN_FREE_RATIO
+    )
+
+
+def test_local_disk_too_small_for_the_segment_falls_back_to_the_net_side(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ B2：本地盘装不下**这一段的产物** ⇒ 回落网络侧产物根，成因里带 free/need。
+
+    「装不下」而不是「写不进」：产物根落本地盘之后段中盘满没有等价逃生门（scratch 两个候选盘
+    各有自己的容量闸），所以这一判据必须在**开段前**做——`_free_bytes` 是它的注入缝（真盘读数
+    在这里不可能凑出「刚好装不下」）。
+    """
+    monkeypatch.setattr(deliverable_mod, "_free_bytes", lambda _p: 100_000_000.0)  # 100MB
+    cfg = {"course": "c5-gae", "work_dir": str(tmp_path / "w"), "local_root": str(tmp_path / "local")}
+    got, why = offline_boot.resolve_local_root(cfg, "c5-gae", multi=False, rounds=100)
+    assert got == offline_boot.net_artifacts_dir(cfg, "c5-gae", multi=False)
+    assert "容量不够" in why and "free=100MB" in why and "need=600MB" in why, why
+    # 判据走的是「先探针、后容量」（容量读不到一个不存在的路径），所以目录本身在，但必须**空**
+    assert list((tmp_path / "local").iterdir()) == [], "回落了就不该在本地根留下探针文件"
+
+
+def test_a_longer_segment_needs_more_room(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`CFG.max_iters` 是本段轮数的权威（`run_one_course` 把它递给 `rounds`）：同一个盘上
+    长段被推去网络盘、短段留在本地盘——「段长进了判据」的可观测面。"""
+    local = tmp_path / "local"
+    cfg = {"course": "c5-gae", "work_dir": str(tmp_path / "w"), "local_root": str(local)}
+    monkeypatch.setattr(deliverable_mod, "_free_bytes", lambda _p: 5_000_000_000.0)  # 5GB
+    got, why = offline_boot.resolve_local_root(cfg, "c5-gae", multi=False, rounds=100)
+    assert (got, why) == (local, "")
+    got_long, why_long = offline_boot.resolve_local_root(cfg, "c5-gae", multi=False, rounds=5000)
+    assert (got_long, bool(why_long)) == (tmp_path / "w" / "run", True)
+
+
+def test_run_one_course_falls_back_and_says_so_when_the_disk_is_too_small(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """端到端：容量不够 ⇒ `--artifacts` 指网络侧产物根 + 一行 WARN（拍板-2 的响亮口径）。"""
+    monkeypatch.setattr(deliverable_mod, "_free_bytes", lambda _p: 100_000_000.0)
+    logs: list[str] = []
+    argv, _calls = _run_course(tmp_path, monkeypatch, pack=None, log_sink=logs)
+    assert argv[:2] == ["--artifacts", str(tmp_path / "w" / "run")]
+    # 「回落 + **响亮一行**」的交付物就是那一行字（拍板-2）：判据由 free/need 两个读数承载
+    warn = next(line for line in logs if "本地产物根不可用" in line)
+    assert "free=100MB" in warn and "need=600MB" in warn, warn
+
+
 def test_run_one_course_writes_the_artifacts_to_the_local_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """★ 拍板-1 的**生效点**（评审 P0-1）：`--artifacts` 指本地产物根，网络侧一个字节都不写。"""
     local = _local(tmp_path)

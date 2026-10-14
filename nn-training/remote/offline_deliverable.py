@@ -35,6 +35,9 @@ STATE_NAME = "state.json"
 PLAN_NAME = "plan.json"
 MANIFEST_NAME = "manifest.json"
 WEIGHTS_NAME = "weights.json"
+#: 每轮 Adam 动量的文件名（与 `remote/artifacts.py::ArtifactStore.opt_path` 的末段逐字相同；测试守）
+#: ——备份抽屉的**对账**要它：只比对权重会把「重跑过的同一轮」误判成已备份。
+OPT_TAR_NAME = "opt.tar"
 #: 本地产物根的覆盖开关（`CFG.local_root` 同义）：`NN_LOCAL_ROOT`。
 LOCAL_ROOT_ENV = "NN_LOCAL_ROOT"
 #: 本地产物根的缺省位置：`<父目录>/battle2-offline/<课>`。`/tmp` 在云机上是节点本地盘
@@ -43,6 +46,16 @@ LOCAL_ROOT_ENV = "NN_LOCAL_ROOT"
 DEFAULT_LOCAL_PARENT = "/tmp"
 #: 本地产物根在父目录下的名字（人眼辨识；与 scratch 的 `nn-rollout-*` 分开）。
 LOCAL_ROOT_NAME = "battle2-offline"
+#: 段内产物预算（持久面容量判据，2026-10-14 B2）：**每轮产物落在盘上的估算字节**（未压缩）。
+#: 依据 = `docs/nn/remote-transport.md` 的每轮上行实测 760,658 B（**gz 后**：`weights.json` 281,782
+#: + opt tar 477,988），而产物目录里存的是**未压缩**的同一份内容、外加一个 `LATEST.zip` 副本
+#: ⇒ 取 gz 量的 ~4× 作地板。它是**地板不是判决**（计划 §5 末段：真机取证之后按读数改这里）。
+ARTIFACT_BYTES_PER_ROUND = 4_000_000
+#: 取不到轮数时的段长缺省（现场观察：离线一段 = 100 轮，日志里的 `it0 → it100`）；
+#: `CFG.max_iters` 给了就用它（那是本段的权威终点）。
+SEGMENT_ROUNDS_DEFAULT = 100
+#: 容量余量比值（与 `common/scratch.SCRATCH_MIN_FREE_RATIO` 同口径：**只乘一次**）。
+ARTIFACT_MIN_FREE_RATIO = 1.5
 #: 网络侧**备份抽屉**名：`<网络产物根>/backup/`。⚠ **不得**以 `it-` 开头也不得叫 `it-*` ——
 #: `ArtifactStore.finalize` / `_refresh_latest` 按顶层 `it-*` 扫轮次，撞上就会把备份打进交付物。
 BACKUP_DIR_NAME = "backup"
@@ -134,11 +147,38 @@ def local_root_path(cfg: dict, course: str, *, multi: bool) -> Path:
     return base if (explicit and not multi) else base / course
 
 
-def _why_unusable(root: Path) -> str:
+def artifact_need_bytes(rounds: int) -> float:
+    """段内产物预算的**判据值**（本地盘的 free 必须 ≥ 它）：轮数 × 每轮估算 × 余量比值。
+
+    `rounds <= 0`（取不到计划）⇒ `SEGMENT_ROUNDS_DEFAULT`。⚠ 这只算**产物累积**这一项：
+    轮内峰值（scratch 的整轮预算）由 scratch 自己的容量闸按候选盘算（`common/scratch.
+    resolve_scratch_root`），两条腿**共用 `/tmp` 时两者相加**，而轮内峰值只有 rollout 腿
+    求得到（`worker/iter_rollout._round_need_bytes`：要 spec/槽位/批数）⇒ 在开段这一刻
+    算不出、也不该猜（猜大了会把好机器推去网络盘，猜小了等于没判）。缺的那一半由
+    「段中盘满响亮 + 换根续跑」兜（`remote/plan_run._checkpoint`，DoD-14）。
+    """
+    n = int(rounds)
+    return float(ARTIFACT_BYTES_PER_ROUND) * (n if n > 0 else SEGMENT_ROUNDS_DEFAULT) * ARTIFACT_MIN_FREE_RATIO
+
+
+def _free_bytes(path: Path) -> float | None:
+    """`path` 所在设备的可用字节；读不到（路径消失/`statvfs` 不可用）⇒ `None`（**不抛**）。
+
+    独立成函数是为了给用例一个**注入缝**：容量判据只能靠真实盘读数，而用例必须能确定性地
+    造出「盘满」（先例 = `common/scratch.free_bytes`，那边同样是可 patch 的一层薄壳）。
+    """
+    try:
+        return float(shutil.disk_usage(path).free)
+    except OSError:
+        return None
+
+
+def _why_unusable(root: Path, need_bytes: float = 0.0) -> str:
     """`""` = 可用；否则一句成因（**不抛**：产物根没有第二处落脚，这个判据只用来改落点）。
 
-    判据 = 拍板-2 的两条：**能 mkdir** 与**能写一个探针文件**（写不进就会在训练中途炸在半路上，
-    而那时已经没有「换根」的余地了——在这里当场判，才能响亮地说一句「本段产物落网络盘」）。
+    判据 = 拍板-2 的两条 + B2 的容量一条：**能 mkdir** · **能写一个探针文件** ·
+    **free ≥ `need_bytes`**（写不进/装不下都会在训练中途炸在半路上，而那时已经没有「换根」
+    的余地了——在这里当场判，才能响亮地说一句「本段产物落网络盘」）。
     """
     probe = root / f".nn-local-probe-{os.getpid()}"
     try:
@@ -147,18 +187,32 @@ def _why_unusable(root: Path) -> str:
         probe.unlink(missing_ok=True)
     except OSError as e:
         return f"{type(e).__name__}: {e}"
+    if need_bytes > 0:
+        free = _free_bytes(root)
+        if free is None:
+            return f"容量读不到（{root}）"
+        if free < float(need_bytes):
+            return (
+                f"容量不够：free={free / 1e6:.0f}MB < need={float(need_bytes) / 1e6:.0f}MB"
+                f"（段内产物预算 = {ARTIFACT_BYTES_PER_ROUND / 1e6:.0f}MB/轮 × 轮数"
+                f" × {ARTIFACT_MIN_FREE_RATIO:g}）"
+            )
     return ""
 
 
-def resolve_local_root(cfg: dict, course: str, *, multi: bool) -> tuple[Path, str]:
+def resolve_local_root(cfg: dict, course: str, *, multi: bool, rounds: int = 0) -> tuple[Path, str]:
     """`(本段产物根, 成因)`；本地盘取不到 ⇒ **回落网络侧产物根**（成因非空，调用方响亮一行）。
 
     方向是拍板-2（「本地盘取不到 ⇒ 回落网络盘 + 响亮一行」，不改成响亮失败）：产物根没有第二处
     落脚，拒跑比换个地方跑更糟。⚠ 与 scratch 的 env 语义**相反**（那里显式不可写 = 响亮失败，
     因为那时操作员以为在测 scratch 而实际在跑原地）——这里是「跑完」优先。
+
+    `rounds` = 本段的轮数（`CFG.max_iters`；0 = 取不到 ⇒ 缺省段长），只喂 B2 的容量判据：
+    产物根落了本地盘就**没有第二条命**（段中盘满 = ENOSPC 砸在训练中途），所以开段前要判
+    「这台机的本地盘装得下这一段的产物」——装不下 ⇒ 回落网络根，一行说清 free/need。
     """
     root = local_root_path(cfg, course, multi=multi)
-    why = _why_unusable(root)
+    why = _why_unusable(root, artifact_need_bytes(rounds))
     if why:
         return net_artifacts_dir(cfg, course, multi=multi), f"{root}：{why}"
     return root, ""

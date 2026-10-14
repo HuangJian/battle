@@ -51,6 +51,7 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: | 2026-10-11 W7（`plan/aborted-course-revival`：`cancel_job` = store 核心 + 门面转发 +
 #:   Protocol 声明——与 `unfreeze` 同款的**合法同名面**，不是抄了一份实现） | 12 | 17 | **81** |
 #: | 2026-10-13 传输护栏 v2（`plan/body-transfer-guard-v2.plan.md` M1）| **13** | 17 | 81 |
+#: | 2026-10-14 离线本地盘 B2（`plan/offline-local-disk-first.plan.md`；`_free_bytes` ↔ `free_bytes`）| **14** | 17 | 81 |
 #:
 #: **2026-10-13 抬 exact 一格的账**（`_recv_some` 在 `remote/http.py` 与 `remote/tailscale_boot.py`
 #: 各一份；+1 组，clone 与同名未动）：这不是「懒得抽共用模块」，而是那**两处必须如此**——
@@ -59,7 +60,15 @@ _EXPECTED_EXEMPT_STEMS = frozenset(
 #: 所以共用的落点只能是 stdlib ⇒ 这里的孪生是结构性的，与本仓 `_reroll_decision` / `_read_body` /
 #: `_wire` 护栏同族。⚠ 同一处缺陷的孪生修复**必须两侧同改**，两侧单测各自钉住同一组数字；
 #: 抬这一格是一次有意的欠债（待 boot 的单文件契约解除才可能收回），不是为了省事。
-BASELINE_EXACT = 13
+#: **2026-10-14 抬 exact 一格的账**（B2：`remote/offline_deliverable._free_bytes` ↔
+#: `common/scratch.free_bytes`，+1 组，clone 与同名未动）：与上一条同族 —— 这是**结构性孪生**，
+#: 不是「再拄一份」。`remote/offline_deliverable.py` 是**standalone 兄弟文件**：notebook 从 GitHub raw
+#: 单独拉它，拿包之前 `common/` 根本不在（该契约由 `tests/remote/test_offline_deliverable_split.py`
+#: 的 import 闭集用例守着——“只许 stdlib”）。所以共用的落点只能是 stdlib，而那四行就是
+#: `float(shutil.disk_usage(path).free)` + `except OSError: return None`。
+#: ⚠ 两处需要**同改**：那四行是「盘满 = 成因行」的判据面，一侧改了另一侧要跟上（本仓对这类双生
+#: 常量的手法 = 孪生常量对账用例 + 这行账）。抬这一格是有意的欠债（待 boot/交付面的单文件契约解除）。
+BASELINE_EXACT = 14
 BASELINE_CLONE = 17
 BASELINE_SAME_NAME_GE3 = 81
 

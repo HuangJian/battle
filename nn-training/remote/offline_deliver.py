@@ -60,6 +60,7 @@ from pathlib import Path
 
 from common import net_http
 from common.game_watch import DRAIN_CEILING_SEC
+from common.hashing import sha256_file
 from common.logutil import tag_logger
 from common.platform_utils import call_bounded
 from common.protocol import (
@@ -79,7 +80,14 @@ from common.protocol import (
 # ⚠ 抽屉目录名（`backup`）不在本模块拼 —— 它由调用方（`open_run_context`）解析后递进来，
 # 免得这里再抄一份；命名硬约束见 `remote/artifacts.BACKUP_DIR_NAME`。
 from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes
-from remote.offline_deliverable import ALL_ZIP, MANIFEST_NAME, PLAN_NAME, STATE_NAME
+from remote.offline_deliverable import (
+    ALL_ZIP,
+    MANIFEST_NAME,
+    OPT_TAR_NAME,
+    PLAN_NAME,
+    STATE_NAME,
+    WEIGHTS_NAME,
+)
 
 #: 探活结果的缓存秒数（训练一轮动辄几分钟，没必要每轮都探两次：`sync()` 前探一次即可，
 #: 只读的 `/ping` 也便宜——但 hub 不可达时每次 `urlopen` 都要等超时，才是真成本）。
@@ -120,6 +128,31 @@ def _tree_bytes(path: Path) -> int:
         except OSError:
             continue
     return total
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    """两个文件**字节相同**吗（sha256 对账）；任一读不到 ⇒ `False`（当不一致处理）。"""
+    try:
+        return a.is_file() and b.is_file() and sha256_file(a) == sha256_file(b)
+    except OSError:
+        return False
+
+
+def _round_matches(src: Path, dst: Path) -> bool:
+    """抽屉里那一轮与本机产物是**同一份字节**吗（幂等判据的实质）。
+
+    ⚠ 只判「存在」是不够的（plan §3.4 的原话是「已存在**且对账一致** ⇒ 跳过」）：本机的同一轮
+    可能被**重跑**过（中途崩了之后从更早的锚点接上，同一个 `it` 又落一次、字节不同），那时
+    抽屉里那份是旧的 —— 恢复腿会把它当成「这一轮」铺回去，而看起来完全正常。
+
+    对账两件：`weights.json`（这一轮的产物身份）与 `opt.tar`（Adam 动量，恢复后接着跑就靠它）；
+    `opt.tar` 本机没有时按「一致」算（不拿一个不存在的文件当差异 —— 起点快照那一轮就可能没它）。
+    """
+    if not _same_file(src / WEIGHTS_NAME, dst / WEIGHTS_NAME):
+        return False
+    if not (src / OPT_TAR_NAME).is_file():
+        return True
+    return _same_file(src / OPT_TAR_NAME, dst / OPT_TAR_NAME)
 
 
 def _cpu_seconds() -> float:
@@ -706,8 +739,12 @@ class OfflineDeliverer:
             # 目录名的**唯一口径**是 `ArtifactStore.dir_for`（`it-<03d>`）：自己拼 `it-1` 会
             # 找一个不存在的源目录（实测：三轮全报 0 字节失败，而抽屉里空空如也）。
             dst = root / f"{ArtifactStore.IT_PREFIX}{int(it):03d}"
+            if dst.is_dir() and _round_matches(self.root / f"{ArtifactStore.IT_PREFIX}{int(it):03d}", dst):
+                continue  # 幂等：这一轮已经备份过且**字节一致**（重跑不重复写）
             if dst.is_dir():
-                continue  # 幂等：这一轮已经备份过（重跑不重复写）
+                # 对账不一致 ⇒ 本机的这一轮被重跑过：撤掉重装，否则恢复腿会把旧字节当成「这一轮」
+                self.log(f"备份 it{it}：抽屉里那份与本机字节不符（本机这一轮被重跑过）⇒ 重写")
+                shutil.rmtree(dst, ignore_errors=True)
             ok, n = call_bounded(
                 partial(
                     self._copy_backup_round,

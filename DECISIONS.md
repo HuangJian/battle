@@ -6169,3 +6169,47 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   人点名」时被碰；文本断言基线 1462 → 1466（四条响亮行的账见模块头）。
 - **诚实账**：B2（持久面容量判据）与 `docs/nn/remote-transport.md` 的离线版（§81 同族）仍未落。
 - **全文** → `plan/offline-local-disk-first.plan.md` §3.4 · `docs/nn/runtime-opt.md` §36。
+
+## §2026-10-14-goalnn-offline-local-disk-first-d（同日收尾：**持久面容量判据** B2 + 备份**对账** C3 + 离线版档案）
+
+- **上位**：前三条（A 腿 = 删探针 · B1/C2 = 两个根 + 恢复腿 · C1/B4 = 备份写方 + 段末交付面）。
+  本条把上一条「诚实账」里那两笔（B2 与离线版文档）落下，并补上 §3.4 自己写明的「对账」那一半。
+- **定案**：
+  ① **B2 持久面容量判据**（`remote/offline_deliverable.py`）：开段前判
+     `free(本地根所在设备) ≥ ARTIFACT_BYTES_PER_ROUND(4MB/轮) × 轮数 × 1.5`，`rounds` 由
+     `offline_boot.run_one_course` 从 `CFG.max_iters` 递进来（取不到 ⇒ `SEGMENT_ROUNDS_DEFAULT`=100，
+     现场观测的段长）。不过 ⇒ 与「写不进」同一条出口：**回落网络侧产物根 + 一行带 `free=…MB < need=…MB`**。
+     判据住交付面（不是 plan §4 表里写的 `common/scratch.py` / `remote/plan_handoff.py`）——因为 B1 之后
+     **产物根的生效点在 `offline_deliverable.resolve_local_root`**，`plan_handoff` 只收显式 `--artifacts`；
+     判据写在「谁决定落点」那里，才不会被绕过。
+  ② **轮内峰值**（4MB/轮之外的第二项）**没有并进这条判据**：它要 spec/槽位/批数，只有 rollout 腿求得到
+     （`worker/iter_rollout._round_need_bytes`），由 scratch 自己的容量闸按**候选盘**算。两条腿共用 `/tmp`
+     时两项相加而「合起来超了」没人在开段前判 ⇒ 由 ③ 兜（这也是如实记账，不是漏项）。
+  ③ **段中盘满响亮**（DoD-14，`remote/plan_run._checkpoint`）：产物写的 `OSError` 当场记一行
+     `WARN: 产物落盘失败（…）—产物根=<path>｜…换根续跑`，再转成 `ProtocolError`（`run_loop` 的失败支路：
+     非零退出 + `[run] 失败`，**不会**走到 `finalize` 的成功口径 = 段末不谎报成功）；`state.json` 仍是上一轮
+     （`checkpoint` 写序「先产物后状态」）⇒ 续跑锚点不受影响。`ValueError`（产物字节坏了）**不**并进来：
+     那类由 `_weight_bytes` 在进 try 之前抛，归因是「结果不可用」而不是「盘写不下去」。
+  ④ **C3 对账**：`backup_pending` 的幂等从「抽屉里有这个目录 ⇒ 跳过」收紧成「**字节一致**才跳过」
+     （对账 `weights.json` + `opt.tar`；不一致 ⇒ 撤掉重装并记一行）。理由：本机同一轮可能被**重跑**过，
+     旧字节留在抽屉里会被恢复腿当成「这一轮」铺回去（看起来完全正常）。新增孪生常量
+     `offline_deliverable.OPT_TAR_NAME`（与 `ArtifactStore.opt_path` 末段对账）。
+  ⑤ **备份/恢复原语不共享 `common/scratch.install_tree`（C3 的形态变更）**：抽屉要被 `it-*` 视图扫
+     （`install_backup` 的 `glob("it-*")`），而 `install_tree` 的临时目录名是 `<name>.tmp-<pid>` ⇒ 崩后残留的
+     `it-005.tmp-1234` 会被当成一个**轮次**恢复；恢复腿又住在 standalone 兄弟文件里（拿不到 `common/`）。
+     ⇒ 抽屉侧保留自己的 `.` 前缀临时名（原语各一份是**有理由的**，不是重复）。
+  ⑥ **离线版档案**：`docs/nn/remote-transport.md` **§95**（= §81 的离线版）——四个落点的常态表 ·
+     日志该/不该出现什么 · 现场四步判读 · 诚实账（`/tmp` 本地介质仍未取证 · 4MB/轮是地板估算 ·
+     备份不抗网络盘挂掉）。
+- **被否决备选**：① 把 B2 判据写进 `common/scratch.py`（它不知道产物根，等于让每个 scratch 调用方各传一次；
+  而真正决定落点的地方就在交付面）；② 把轮内峰值猜一个 GB 级常数并进判据（猜大了把好机器推去网络盘，
+  猜小了等于没判——真机取证之前不猜）；③ 段中盘满让它裸抛 `OSError`（traceback 里有 `.tmp` 路径，但归因难、
+  看起来像崩溃，且没有「已收轮次不受影响」这句话）；④ 幂等只判「存在」（会把重跑过的旧字节永久留在抽屉里）；
+  ⑤ 为「原语唯一」把 `install_tree` 的临时名改成点前缀（会动 scratch 侧既有契约，收益只是少一份实现）。
+- **后果**：开段前的三条判据（能写 · 装得下 · 段长算得准）齐了；段中盘满不再是「看起来像崩溃」；抽屉里的
+  每一轮都与本机字节相符；离线链路第一次有一份**运维读法**档案。文本断言基线 1466 → 1469（三条响亮行的账
+  见 `tests/test_source_text_assert_budget.py` 模块头）。
+- **诚实账**：① `/tmp` 是节点本地介质、4MB/轮的取值**都要真机读数**（不由 agent 跑训练腿）；② 备份不抗
+  网络盘挂掉；③ 轮内峰值与产物预算**共用 `/tmp` 时的合判**没做（见 ②③）。
+- **全文** → `plan/offline-local-disk-first.plan.md` §3.1/§3.2/§3.4/§8 · `docs/nn/remote-transport.md` §95 ·
+  `docs/nn/runtime-opt.md` §36。

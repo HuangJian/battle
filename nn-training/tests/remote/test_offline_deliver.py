@@ -159,6 +159,35 @@ def test_backup_writes_pending_rounds_and_is_idempotent(tmp_path: Path) -> None:
     assert (drawer / "it-001" / "weights.json").stat().st_mtime_ns == before
 
 
+def test_backup_rewrites_a_round_whose_bytes_changed(tmp_path: Path) -> None:
+    """★ C3 对账：抽屉里那一轮与本机**字节不符** ⇒ 重写（幂等只对「一致」那一种成立）。
+
+    §3.4 的原话是「已存在**且对账一致** ⇒ 跳过」：只判「存在」会把「本机这一轮被重跑过」的
+    旧字节永久留在抽屉里，而恢复腿会把它当成「这一轮」铺回去——看起来完全正常。
+    两件对账（`weights.json` 与 `opt.tar`）各自都算数。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2))
+    drawer = tmp_path / "net" / "backup"
+    d = _deliverer("", root, backup_root=drawer)
+    assert d.backup_pending() == 2
+    stale = (drawer / "it-002" / "weights.json").read_bytes()
+    # 本机第二轮被重跑（同一个 it、不同字节）：权重与 opt 都换掉
+    (root / "it-002" / "weights.json").write_bytes(json.dumps({"it": 2, "w": 99.0}).encode("utf-8"))
+    (root / "it-002" / "opt.tar").write_bytes(b"opt-2-new")
+    assert d.backup_pending() == 1, "只该重写对不上的那一轮"
+    now = (drawer / "it-002" / "weights.json").read_bytes()
+    assert now == (root / "it-002" / "weights.json").read_bytes() and now != stale
+    assert (drawer / "it-002" / "opt.tar").read_bytes() == b"opt-2-new"
+    # 再跑一遍：字节已一致 ⇒ 不再重写
+    before = (drawer / "it-002" / "weights.json").stat().st_mtime_ns
+    assert d.backup_pending() == 0
+    assert (drawer / "it-002" / "weights.json").stat().st_mtime_ns == before
+    # 只动 `opt.tar`（权重没变）⇒ 也算对不上：Adam 动量的字节是恢复后接着跑的前提
+    (root / "it-002" / "opt.tar").write_bytes(b"opt-2-newer")
+    assert d.backup_pending() == 1
+    assert (drawer / "it-002" / "opt.tar").read_bytes() == b"opt-2-newer"
+
+
 def test_backup_writes_nothing_when_everything_was_delivered(tmp_path: Path) -> None:
     """★ DoD-6（反探针）：补传全成功的一段 ⇒ 网络侧抽屉**连目录都不建**（常态零写入）。"""
     base, _store, srv, th = _boot_server(tmp_path)

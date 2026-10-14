@@ -790,3 +790,39 @@ def test_segment_reports_round_boundaries_to_the_progress_hook(
     # 轮边界是**强制**的（顶开时间节流）：打点层那一侧才做节流，上报口只报事实
     assert all(kw.get("force") is True for k, kw in seen if k != "retry"), seen
     assert [kw.get("it") for k, kw in seen if k == "round-start"] == list(rounds)
+
+
+def test_checkpoint_write_failure_is_loud_and_stops_the_segment(tmp_path: Path) -> None:
+    """★ B2 / DoD-14：段中盘满（产物根写失败）必须**响亮**且**不许像成功**。
+
+    产物根落本地盘之后，这是唯一**没有等价逃生门**的失败（scratch 的两个候选盘各有容量闸 +
+    回退档，产物根没有）。裸抛 `OSError` 的问题不是「不响亮」，而是**归因**：日志里既没有
+    「产物根」这个可以换的东西、也没说「已收轮次不受影响」。所以这一段把它转成 `ProtocolError`
+    （`run_loop` 的失败支路：非零退出 + 一行 `[run] 失败`，**不会**走到 `finalize` 的成功口径）。
+
+    造错不用 chmod（与 root 身份无关）：产物根的父路径是个**文件** ⇒ `mkdir(parents=True)` 抛
+    `NotADirectoryError`（真 `OSError`，与 ENOSPC 同族地被这一层接住）。
+    """
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_bytes(b"x")
+    lines: list[str] = []
+    sent: list[int] = []
+    art = blocker / "art"
+    m = _manifest(it=3)
+    ctx = SimpleNamespace(
+        store=ArtifactStore(art, run_id="r", log=lines.append),
+        log=lines.append,
+        deliver_round=lambda it: sent.append(it),
+    )
+    with pytest.raises(ProtocolError) as ei:
+        plan_run_mod._checkpoint(
+            ctx,  # type: ignore[arg-type]  # 只用到 store/log/deliver_round（真 RunContext 要 torch）
+            3,
+            _iter_shaped_result(m, weights=b"w" * 8, opt=b"o" * 4, win=0.5),
+            wall_sec=1.0,
+        )
+    assert isinstance(ei.value.__cause__, OSError), "真因要留在 `__cause__` 里（不是新造一条无源错误）"
+    # 交付物就是那一行 WARN：产物根（可换的东西）+ 换根修法（否则只看到 traceback，人得自己拼）
+    warn = next(line for line in lines if line.startswith("WARN"))
+    assert "产物根=" in warn and "换根续跑" in warn, warn
+    assert sent == [], "没落盘就不许补传（`deliver_round` 排在 checkpoint 之后）"

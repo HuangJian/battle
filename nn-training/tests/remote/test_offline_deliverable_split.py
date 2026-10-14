@@ -46,9 +46,15 @@ MOVED_NAMES = {
     "net_artifacts_dir",
     "local_root_path",
     "resolve_local_root",
+    # ★ 2026-10-14 B2：持久面容量判据的常量与算式（产物根的判据面，与两个根同源）
+    "artifact_need_bytes",
+    "ARTIFACT_BYTES_PER_ROUND",
+    "SEGMENT_ROUNDS_DEFAULT",
+    "ARTIFACT_MIN_FREE_RATIO",
     "backup_ready",
     "install_backup",
     "WEIGHTS_NAME",
+    "OPT_TAR_NAME",
     "LOCAL_ROOT_ENV",
     "DEFAULT_LOCAL_PARENT",
     "LOCAL_ROOT_NAME",
@@ -136,6 +142,9 @@ def test_twin_constants_match_the_artifacts_contract(tmp_path: Path) -> None:
     store = ArtifactStore(tmp_path, run_id="r", log=lambda _m: None)
     assert store.weights_path(0).name == deliverable_mod.WEIGHTS_NAME, (
         "`WEIGHTS_NAME` 与 `ArtifactStore.weights_path()` 的末段逐字相同"
+    )
+    assert store.opt_path(0).name == deliverable_mod.OPT_TAR_NAME, (
+        "`OPT_TAR_NAME` 与 `ArtifactStore.opt_path()` 的末段逐字相同（备份对账靠它）"
     )
     for name in ("STATE_NAME", "PLAN_NAME", "MANIFEST_NAME"):
         assert getattr(deliverable_mod, name) == getattr(boot_mod, name), (

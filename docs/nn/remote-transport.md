@@ -6,6 +6,76 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §95 离线段的两条命：本地盘优先的产物根 + 网络盘 `backup/` 备份抽屉与恢复腿（2026-10-14，`plan/offline-local-disk-first.plan.md` · 决策 `DECISIONS.md` §2026-10-14-goalnn-offline-local-disk-first{-b,-c,-d}）
+
+**触发**：云机自主 worker `y5-hit` 02:48:49 → 02:51:08 **卡 139s**（整轮零日志、cpu 只 +0.91s）：
+`_layout()` 里那条「网络盘测速探针」+ eval 腿的五处裸调用把训练主循环按在坏挂载点上。修法分四批落地
+（A 腿删探针 / eval 包上界 + `submit` 后移 → B 腿两个根 + 恢复腿 → C 腿备份写方 + 段末交付面 →
+B2 持久面容量判据），设计正文在 plan，本节只留**运维读法**（= §81 的离线版）。
+
+### 落点与常态读数（一段跑完，网络盘上应该有什么）
+
+| 面 | 落点 | 常态（补传全成功） |
+|---|---|---|
+| scratch 热数据（TS 树 / 逐局 shard / 权重副本） | `/dev/shm` > `/tmp`（都是本地介质；`NN_ROLLOUT_SCRATCH=off` = 强制回退档） | 本地盘 |
+| 产物根（`it-NNN/` · `metrics.jsonl` · `state.json` · `plan.json` · `manifest.json` · `artifacts.zip`） | `/tmp/battle2-offline[-<课>]`（`NN_LOCAL_ROOT` / `CFG.local_root` 覆盖） | 本地盘 |
+| 下载缓存 / job 目录 / 任务包 / `hub.token` | `<download_dir>/battle-offline/<课>`（= 网络侧根，**不搬**） | 只在取包与首拷 TS 树时被碰 |
+| 备份抽屉 | `<网络产物根>/backup/`（`it-NNN/` + 三件锚点 + `artifacts.zip`） | **连目录都不存在** |
+
+一段的日志里该出现：`产物根: …（本地盘）｜网络侧只作备份/交付面: …` · 逐轮
+`落点=本地:<path>｜建布局 x.xxs` · `[eval-cloud] itN 落点=…｜建布局 x.xxs` · （只在有欠账时）
+`备份=N 轮待投（本轮新写 …｜字节 …｜失败 …）`。**不该**再出现：`probe_probe=`（探针已删）、
+以及任何**没有上界**的网络盘等待（rollout 腿装 TS 树仍是**有界**的 `SCAN_CEILING_SEC`=60s）。
+
+### 判据与三条纪律（为什么这样切）
+
+* **续跑真值 = hub 已收轮次 ∪ 网络盘 `backup/`**（`ArtifactStore` 文档头的口径）。本地盘只有
+  容器生命周期（用户口径接受「机器挂了产出全丢」）⇒ 产物落本地**必须**配恢复腿，否则是静默删掉续跑能力。
+* **备份判据 = `pending()`**（磁盘上有、`delivered.json` 账本里没有）= 「回传失败」的**持久化**定义，
+  不引入新状态源。时机 = 每轮观测 + 段末 `close()` 强制 sweep；**进程模式由父侧扫**
+  （子进程可能是导出那一刻的老快照，新键它不认 ⇒ 会静默不备）。
+* **对账才叫幂等**（C3）：抽屉里同一轮**字节一致** ⇒ 跳过；不一致（本机这一轮被重跑过）⇒ 撤掉重装。
+  对账两件 = `weights.json` **+** `opt.tar`（后者是恢复后接着跑的 Adam 动量）；只判「存在」会让旧字节
+  永久留在抽屉里，而恢复腿会把它当成「这一轮」铺回去（看起来完全正常）。
+* **开段前的容量判据**（B2）：`free(本地根所在设备) ≥ 4MB/轮 × 轮数（`CFG.max_iters`，取不到 = 100）× 1.5`；
+  不过 ⇒ 回落网络侧产物根 + 一行带 `free=…MB < need=…MB` 的成因（拍板-2 的响亮口径）。
+  ⚠ **轮内峰值没有并进这条判据**（如实记）：那一项要 spec/槽位/批数，只有 rollout 腿求得到
+  （`worker/iter_rollout._round_need_bytes`），由 scratch 自己的容量闸按候选盘算；两条腿共用 `/tmp` 时
+  两者相加，而「合起来超了」由下一条兜。
+* **段中盘满响亮**（DoD-14）：`remote/plan_run._checkpoint` 把产物写的 `OSError` 转成 `ProtocolError`
+  （非零退出 + 一行 `[run] 失败`，**不会**走到 `finalize` 的成功口径），日志给 `产物根=<path>` 与换根修法。
+  `state.json` 仍是上一轮的 `last_it`（写序是「先产物后状态」）⇒ 续跑锚点照样成立。
+* **交付面两条读面都跟产物根走**：段末 `package_deliverable` **只在**（有欠账 / 无 hub / 人显式给了
+  `CFG.download_dir`）时落交付档；中途 `package_partial`（notebook cell）读本地根、落 `download_dir`
+  （人点了才付这块钱）。
+* **不共享 `common/scratch.install_tree`**（C3 的形态变更，理由）：抽屉会被 `it-*` 视图扫
+  （`install_backup` 的 `glob("it-*")`），而 `install_tree` 的临时目录名是 `<name>.tmp-<pid>` —— 一个
+  崩过之后留下的 `it-005.tmp-1234` 会被当成一个**轮次**恢复；抽屉侧因此用自己的 `.` 前缀临时名。
+  恢复腿住在 standalone 兄弟文件里（拿不到 `common/`），也只能自带原语。
+
+### 现场怎么判断「这一段怎么了」
+
+1. 网络侧目录**不存在** ⇒ 补传全成功：产物在本地根，交付档没打（日志里有那行说明）。
+2. 网络侧只有 `backup/` ⇒ 有轮次没送出去：`ls backup/it-*` 就是欠账清单；抽屉自己是一份
+   **能反向恢复**的产物（三件锚点 + `artifacts.zip`）。
+3. 本地根空、而 `backup/` 三件齐 ⇒ 下个会话开段时自动 `从网络盘备份恢复 itN`（本地**非空绝不覆盖**）。
+4. `WARN: 产物落盘失败（…）…产物根=<path>` ⇒ 段中盘满：换 `NN_LOCAL_ROOT` / `--artifacts` 指大盘重开，
+   hub 已收轮次不受影响（续跑锚点 = 上一轮）。
+
+### 诚实账（未取证项，别当成已证）
+
+* 「`/tmp` 在 Kaggle 上是**本地介质**」仍是**承重假设**：要真机读数（`落点=` 与首轮 `建布局` 耗时）才能定案。
+  本段位**不由 agent 跑训练腿**，读数交用户（plan §5 末段）。
+* `ARTIFACT_BYTES_PER_ROUND`（4MB/轮 = 每轮上行实测 760,658 B 的 ~4×）是**地板估算**，真机取证后按读数改常量。
+* 备份**不抗网络盘本身挂掉**：它跑在补传线程里、逐件 `call_bounded(DRAIN_CEILING_SEC)` 有界、失败只 WARN；
+  那一段的出路退回「人登机器搬」。
+
+**守卫**：`tests/remote/test_offline_deliver.py`（抽屉写方 + 对账幂等）· `tests/remote/test_offline_deliver_proc.py`
+（父侧扫）· `tests/remote/test_offline_local_first.py`（两个根 / 恢复腿 / 容量回落）·
+`tests/remote/test_offline_boot.py`（段末交付面三档）· `tests/remote/test_run_loop.py`（段中盘满响亮）。
+
+---
+
 ## §94 wire-diet 两档读数：`exact` / `identity` 怎么看（2026-10-14，`plan/wire-diet.plan.md` §12/§13 · 决策 `DECISIONS.md` §2026-10-14-goalnn-wire-diet-m3-weights-delta 与 §2026-10-14-goalnn-wire-diet-m4-hub-torch）
 
 R3（opt delta，§12）与 R1（权重 delta，§13）落地后，**回传字节可降质、本机权威副本不降质**；两条腿的

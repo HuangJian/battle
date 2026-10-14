@@ -289,9 +289,29 @@ def _checkpoint(ctx: RunContext, it: int, result: dict, *, wall_sec: float, phas
         chunks=int(agg.get("chunks", 0) or 0),
         extra={"phase": phase} if phase != "train" else None,
     )
-    entry = ctx.store.checkpoint(
-        it, weights_json=_weight_bytes(result), opt_tar=_opt_bytes_from_result(result), row=row
-    )
+    # 字节先取到外面（`_weight_bytes` / `_opt_bytes_from_result` 对坏载荷抛 `ValueError`——那是
+    # 「结果不可用」，不是「盘写不下去」，两者不能混成同一条归因）。
+    w_bytes = _weight_bytes(result)
+    opt_bytes = _opt_bytes_from_result(result)
+    try:
+        entry = ctx.store.checkpoint(it, weights_json=w_bytes, opt_tar=opt_bytes, row=row)
+    except OSError as e:
+        # ★ 2026-10-14（`plan/offline-local-disk-first` B2 / DoD-14）：产物根落本地盘之后，
+        #   段中盘满（ENOSPC）是**唯一没有等价逃生门**的失败（scratch 那两个候选盘各有自己的
+        #   容量闸与回退档，产物根没有）。裸抛 OSError 的问题不是「不响亮」（traceback 里确实有
+        #   `.tmp` 路径），而是**归因难 + 看起来像崩溃**：日志里既没有「产物根」这个可换的东西，
+        #   也没说「已收轮次不受影响、换根就能续」。这里当场把三者说清，再转成 `ProtocolError`
+        #   ——让它走 `run_loop` 的失败支路（非零退出 + 一行 `[run] 失败`），**不会**碰到
+        #   `finalize` 的成功口径（即段末不谎报成功）；`state.json` 仍是上一轮的 last_it
+        #   （`checkpoint` 的写序是「先产物后状态」）⇒ 续跑锚点照样成立。
+        ctx.log(
+            f"WARN: 产物落盘失败（{type(e).__name__}: {e}）——本段就此停下；产物根={ctx.store.root}"
+            f"｜已收轮次不受影响（续跑锚点仍是上一轮），换根续跑：`NN_LOCAL_ROOT` / `--artifacts`"
+            " 指一个可写、装得下的盘"
+        )
+        raise ProtocolError(
+            f"产物根写失败（{ctx.store.root}）：{type(e).__name__}: {e}——本段已停下，未落盘的轮不算数"
+        ) from e
     ctx.log(
         f"it{it} 落盘：kl={agg.get('kl')} mean_ret={agg.get('mean_ret')} "
         f"winRate={(report or {}).get('winRate')} wall={row['wall_sec']}s → {ctx.store.dir_for(it)}"

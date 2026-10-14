@@ -1615,9 +1615,12 @@ class _StubDeliverable:
         return self.net_root(cfg, course, multi=multi) / "run"
 
     def resolve_local_root(
-        self, cfg: dict, course: str, *, multi: bool = False
+        self, cfg: dict, course: str, *, multi: bool = False, rounds: int = 0
     ) -> tuple[Path, str]:
-        """本地产物根：显式 `local_root` > `<work_dir>/local`（**桩自己的临时落点**，不走真缺省 `/tmp`）。"""
+        """本地产物根：显式 `local_root` > `<work_dir>/local`（**桩自己的临时落点**，不走真缺省 `/tmp`）。
+
+        `rounds`（B2 的段长，真实现拿它算容量）**被忽略**：桩的落点是个临时目录，不判容量。
+        """
         explicit = str(cfg.get("local_root") or "").strip()
         root = Path(explicit) if explicit else Path(str(cfg.get("work_dir") or ".")) / "local"
         root.mkdir(parents=True, exist_ok=True)
