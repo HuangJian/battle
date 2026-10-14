@@ -8,7 +8,11 @@
   ③ **真的变小**：容器 ≤ 整份 `torch.save` 的 60%（M4 的全部理由，plan §3 R3 实测 467 KB → 95 KB）；
   ④ **基准不符 ⇒ 拒收**：`base_sha` 对不上说明本机那份不是它的 base（换机/错轮/被 prune）；
   ⑤ **结构不一致 / 体损伤 ⇒ 拒收**：少项、多项、截断、尾部余料、魔数坏、`ofmt` 不认；
-  ⑥ **缺 torch ⇒ 响亮拒收**：M4 硬约束②——绝不静默降级（那会把 delta 当权重落盘）。
+  ⑥ **缺 torch ⇒ 响亮拒收**：M4 硬约束②——绝不静默降级（那会把 delta 当权重落盘）；
+  ⑦ **真 Adam 的 0-dim `step`**：`_state()` 夹具把 `step` 写成 `(1,)`，真 Adam 写的是
+     `torch.tensor(0.0)`（**0-dim**）⇒ 差这一格就漏掉 2026-10-14 云机事故
+     （`self.dim() cannot be 0 to view Half as Byte`，`_raw_bytes` 的 `view(uint8)`）。
+     真形状只能从**真优化器**里取 ⇒ `_two_real_adam_states()` 那一族用例。
 
 摊平规则在用例里**独立重实现**（`_leaf_map`）：判据要能被另一份实现复现，不能靠被测模块
 自己证明自己（AGENTS §8：codec/数据优先独立重实现对账）。
@@ -16,6 +20,7 @@
 
 from __future__ import annotations
 
+import copy
 import io
 import json
 import sys
@@ -157,3 +162,91 @@ def test_missing_torch_is_loud(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "torch", None)
     with pytest.raises(ProtocolError):
         od.apply_opt_delta(base, raw)
+
+
+# ═══════════════════ ⑦ 真 Adam 的 0-dim `step`（2026-10-14 云机事故） ═══════════════════
+
+
+def _two_real_adam_states() -> tuple[dict, dict]:
+    """真优化器的两份 `opt.state_dict()`（base = 走 3 步后，new = 再走 3 步后）。
+
+    刻意**不用**本文件的 `_state()` 夹具：那把 `step` 写成 `torch.tensor([7.0 + pid])`
+    （shape `(1,)`），而 `torch.optim.Adam` 写的是 `torch.tensor(0.0)`（shape `()`，
+    `torch/optim/adam.py` 的 `state["step"]`）—— 差这一格，夹具就永远测不出真实形状，
+    于是打包端的 `view(uint8)` 对 0-dim 张量直接抛错而用例全绿（云机实测事故）。
+    """
+    torch.manual_seed(0)
+    net = torch.nn.Linear(3, 2)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    x = torch.randn(4, 3)
+
+    def one_step() -> None:
+        opt.zero_grad()
+        net(x).pow(2).mean().backward()
+        opt.step()
+
+    for _ in range(3):
+        one_step()
+    base = copy.deepcopy(opt.state_dict())
+    for _ in range(3):
+        one_step()
+    return base, copy.deepcopy(opt.state_dict())
+
+
+def test_real_adam_zero_dim_step_packs_and_stays_exact() -> None:
+    """⑦-a 真状态（含 0-dim `step`）能打包 + 往返：`step` 逐值精确、动量在 f16 界内。"""
+    base, new = _two_real_adam_states()
+    pid = next(iter(new["state"]))
+    assert new["state"][pid]["step"].dim() == 0, (
+        "真 Adam 的 step 是 0-dim；这条红了说明 torch 换了形状，本族用例要跟着改"
+    )
+    got = od.apply_opt_delta(base, _pack(base, new), expect_base_sha=BASE_SHA)
+    want_leaves, got_leaves = _leaf_map(new), _leaf_map(got)
+    assert sorted(want_leaves) == sorted(got_leaves), "结构（路径集合）必须逐字相同"
+    worst = 0.0
+    for path, want in want_leaves.items():
+        have = got_leaves[path]
+        if not torch.is_tensor(want):
+            assert have == want, f"{path} 必须逐值精确"
+            continue
+        assert torch.is_tensor(have), f"{path} 张量性必须保持"
+        assert have.dim() == want.dim(), f"{path} 维度必须保持（0-dim 不许被拍平）"
+        if path.endswith("step"):
+            assert torch.equal(have, want), f"{path} 必须逐值精确（0-dim 标量不许量化）"
+            continue
+        worst = max(worst, float((have.float() - want.float()).abs().max()))
+    assert worst <= 6e-4, f"动量往返误差 {worst} 超出 f16 界"
+
+
+def test_zero_dim_step_is_declared_exact_in_the_container() -> None:
+    """⑦-b 0-dim `step` 必须在**容器里**自述 `exact`——f16 量化会改 step 的语义。
+
+    判据落在**容器字节**上（解头看 items），不是读被测源码：`_DELTA_DTYPES` 只排整数张量，
+    而真 Adam 的 `step` 是 **float32**（0-dim）⇒ 只靠 dtype 分叉会把它送进量化分支。
+    """
+    base, new = _two_real_adam_states()
+    raw = _pack(base, new)
+    hdr_len = int.from_bytes(raw[4:8], "big")
+    hdr = json.loads(raw[8 : 8 + hdr_len].decode("utf-8"))
+    steps = [it for it in hdr["items"] if str(it["path"]).endswith(".step")]
+    assert steps, "每个参数的 step 都必须在容器里有一项"
+    assert {it["kind"] for it in steps} == {"exact"}, "step 是 0-dim 标量：量化即改语义"
+    assert {tuple(it["shape"]) for it in steps} == {()}, "step 的形状必须是 0-dim"
+
+
+def test_rebuilt_state_loads_into_a_fresh_adam() -> None:
+    """⑦-c D5 续链：hub 重建出来的 state_dict 必须能被**新 Adam** 装载（下一轮的入口）。
+
+    上一轮终态 → `torch.save` → hub 侧 `apply_opt_delta` → 下一轮 worker
+    `opt.load_state_dict(torch.load(...))`（`remote/train_core.py` 的 restore 段）。
+    0-dim 的 `step` 若在这一步退化（拍平 / dtype 抖动），续链就静默废了。
+    """
+    base, new = _two_real_adam_states()
+    got = od.apply_opt_delta(base, _pack(base, new), expect_base_sha=BASE_SHA)
+    net = torch.nn.Linear(3, 2)
+    opt = torch.optim.Adam(net.parameters(), lr=1e-3)
+    opt.load_state_dict(got)
+    pid = next(iter(got["state"]))
+    step = opt.state_dict()["state"][pid]["step"]
+    assert step.dim() == 0
+    assert torch.equal(step, new["state"][pid]["step"])

@@ -14,7 +14,9 @@ header = {"ofmt": OPT_DELTA_FMT, "base_sha": <64hex 或 "">, "items": [item, …
 * `delta-f16`：逐元素 `(new − base)` 存成 f16 —— 量化施加在**增量**上（|Δ| 小），实测绝对
   max 5.43e-5 / 相对 |opt| 4.7e-5（plan §3 R3）；「base 恒为**本轮载入的那一份**」是残差不
   逐轮累积的前提（两档语义与其偏差口径见 plan §12）；
-* `exact`：原样搬字节（Adam `step` 等**非连续量**：量化会改语义）；
+* `exact`：原样搬字节（Adam `step` 等**非连续量**：量化会改语义）。**0-dim 标量一律走这一档**
+  —— 真 Adam 的 `step` 是 `torch.tensor(0.0)`（**float32 + 0-dim**），只按 dtype 分叉会漏掉它
+  （2026-10-14 云机事故：`self.dim() cannot be 0 to view Half as Byte`，`_raw_bytes` 见下）；
 * `json`：标量/列表（`param_groups` 的 lr/betas…）内联在头里，逐值精确。
 
 ★ 形态**自述**在头里（`ofmt`），且 `apply_opt_delta` 只认 `delta-f16`：旧端（只认整份 tar）拿到容器
@@ -79,6 +81,8 @@ OPT_DELTA_MAGIC = b"BOD1"
 #: 形态自述值（manifest 的 `opt_fmt` 用同一个字面量）。
 OPT_DELTA_FMT = "delta-f16"
 #: 参与 delta 的 dtype（其余一律 `exact`）——刻意只认浮点：整数张量做差再量化会改语义。
+#: ⚠ 光看 dtype 不够（2026-10-14）：**0-dim 的浮点标量也必须 `exact`** —— Adam 的 `step`
+#: 是 float32，量化它是改语义。dtype 门 + `dim() > 0` 两条合起来才是完整判据（在 `pack_opt_delta`）。
 _DELTA_DTYPES = frozenset({"float16", "float32", "float64", "bfloat16"})
 
 
@@ -119,8 +123,16 @@ def _opt_items(obj: Any, prefix: str = "") -> list[tuple[str, Any]]:
 
 
 def _raw_bytes(t, tensor: Any) -> bytes:
-    """张量 → 连续原始字节（`view(uint8)` 对全部 dtype 都成立，含 bfloat16）。"""
-    return bytes(tensor.detach().contiguous().view(t.uint8).numpy().tobytes())
+    """张量 → 连续原始字节（`view(uint8)` 对全部 dtype 都成立，含 bfloat16）。
+
+    ★ `reshape(-1)` **不可省**（2026-10-14 云机事故，`tests/remote/test_opt_delta.py` ⑦ 族）：
+    `Tensor.view(dtype)` 对 **0-dim** 张量直接抛 `self.dim() cannot be 0 to view Half as Byte`
+    —— 而真 Adam 的 `step` 就是 `torch.tensor(0.0)`（**0-dim**，`torch/optim/adam.py` 的
+    `state["step"]`）。两个分支（`delta-f16` / `exact`）都调本函数 ⇒ 只改分支判据救不了。
+    先摊平成 1-dim 再 `view`：dtype 重解释的语义逐字不变（**形状由容器头里的 `shape` 负责**，
+    读端 `reshape(shape)` 原样还原成 0-dim）。形状不丢，读数不变。
+    """
+    return bytes(tensor.detach().contiguous().reshape(-1).view(t.uint8).numpy().tobytes())
 
 
 def pack_opt_delta(base: dict, new: dict, *, base_sha: str) -> bytes:
@@ -152,14 +164,20 @@ def pack_opt_delta(base: dict, new: dict, *, base_sha: str) -> bytes:
             continue
         dtype = str(leaf.dtype).replace("torch.", "")
         shape = [int(x) for x in leaf.shape]
-        if dtype in _DELTA_DTYPES and tuple(b.shape) == tuple(leaf.shape):
+        # `leaf.dim() > 0` 是同一条合约的第二半（2026-10-14）：`_DELTA_DTYPES` 只排**整数**
+        # 张量，而 Adam 的 `step` 是 **float32 且 0-dim** ⇒ 光按 dtype 分叉会把它送进量化分支
+        # （本模块头部第 17 行与 `tests/remote/test_opt_delta.py` ⑦-b 都要求它走 `exact`：
+        # 量化 step 是**改语义**，不是量化误差）。0-dim ⇒ 一律原样搬字节。
+        if dtype in _DELTA_DTYPES and leaf.dim() > 0 and tuple(b.shape) == tuple(leaf.shape):
             raw = _raw_bytes(t, (leaf.float() - b.float()).to(t.float16))
             items.append(
                 {"path": path, "kind": "delta-f16", "dtype": "float16", "shape": shape,
                  "nbytes": len(raw)}
             )
         else:
-            # `step`（与非同形/非浮点张量）：原样搬字节 —— 非连续量量化会改语义。
+            # `step`（0-dim 标量 / 非同形 / 非浮点张量）：原样搬字节 —— 非连续量量化会改语义。
+            # 真 Adam 的 `step` 落在**这一支**（float32 但 0-dim，见上面的判据），
+            # `_raw_bytes` 的 `reshape(-1)` 也是为它准备的。
             raw = _raw_bytes(t, leaf)
             items.append(
                 {"path": path, "kind": "exact", "dtype": dtype, "shape": shape,
