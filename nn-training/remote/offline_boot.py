@@ -1648,7 +1648,25 @@ def run_one_course(
             if progress is not None:
                 progress["outcome"] = outcome
 
-    got = deliverable.package_deliverable(dest, course, deliverable.download_dir(ccfg), log)
+    # ── 段末交付面（★ 2026-10-14 B4 / 评审 P0-2 + 拍板-3）─────────────────────────────
+    # 常态（补传全成功）**不许**把一个大 zip 拷到慢挂点上 —— 那正是本计划要移除的那类等待。
+    # 只有三种情形才落交付档：① **没有 hub**（纯手工递送：产物只在本地根，交付档是唯一动线）；
+    # ② 网络侧**有备份抽屉**（= 有轮次没送出去，人需要一份能导入控制台的包）；③ 人显式点了
+    # `download_dir`（那块钱由人主动付）。
+    drawer = Path(net) / deliverable.BACKUP_DIR_NAME
+    explicit_dl = bool(str(ccfg.get("download_dir") or "").strip())
+    if hub and not explicit_dl and not drawer.exists():
+        log(
+            f"本段产物在本地根 {dest}（补传全成功 ⇒ 没有交付档）；要一份能导入控制台的 zip，"
+            "点 notebook 底部那个「中途取回」cell（或显式给 CFG.download_dir）"
+        )
+        got = None
+    else:
+        if not hub:
+            log(f"本段无 hub（纯手工递送）：产物只在本地根 {dest}，会话结束即失——仍落一次交付物")
+        elif drawer.exists():
+            log(f"网络侧有备份抽屉（{drawer}）⇒ 收尾仍打一份交付物（那些轮次没能回传）")
+        got = deliverable.package_deliverable(dest, course, deliverable.download_dir(ccfg), log)
     if hub:
         log(
             "轮次已尽力回传给 hub（控制台按课程账户看进度）；"

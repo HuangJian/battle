@@ -49,15 +49,19 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import threading
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 
 from common import net_http
+from common.game_watch import DRAIN_CEILING_SEC
 from common.logutil import tag_logger
+from common.platform_utils import call_bounded
 from common.protocol import (
     AUTH_HEADER,
     OFFLINE_ARTIFACT_BODY_MAX,
@@ -69,7 +73,13 @@ from common.protocol import (
     encode_weights_json,
     sanitize_run_id,
 )
+
+# 备份抽屉的名字/字节面（三件锚点 + 全量包）与恢复腿**同一份实现**：
+# `remote/offline_deliverable.py` 是 standalone（顶层只 import stdlib）⇒ 不会反向依赖本模块。
+# ⚠ 抽屉目录名（`backup`）不在本模块拼 —— 它由调用方（`open_run_context`）解析后递进来，
+# 免得这里再抄一份；命名硬约束见 `remote/artifacts.BACKUP_DIR_NAME`。
 from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes
+from remote.offline_deliverable import ALL_ZIP, MANIFEST_NAME, PLAN_NAME, STATE_NAME
 
 #: 探活结果的缓存秒数（训练一轮动辄几分钟，没必要每轮都探两次：`sync()` 前探一次即可，
 #: 只读的 `/ping` 也便宜——但 hub 不可达时每次 `urlopen` 都要等超时，才是真成本）。
@@ -88,11 +98,28 @@ DRAIN_FLUSH_SEC = 90.0
 DRAIN_TICK_SEC = 0.5
 #: 一次 drain 里 `sync()` 的最多轮数（纯防御：`pending()` 单调收敛，正常远到不了）。
 DRAIN_MAX_PASSES = 256
+#: 备份抽屉的**开闸门槛**：只有「磁盘上有、账本里没有」的轮次才写网络盘（拍板-3）。
+#: 0 轮待投 ⇒ **一个字节都不写**（拍板-1 的全部意义：常态路径上网络盘出现 0 次）。
+#: ⚠ 抽屉不得以 `it-` 开头（见 `remote/artifacts.BACKUP_DIR_NAME`）。
+BACKUP_ANCHOR_NAMES: tuple[str, ...] = (ALL_ZIP, MANIFEST_NAME, PLAN_NAME, STATE_NAME)
+
 #: 同一轮**连续**投递异常多少次之后把它当内容问题（记进 `_rejected` 并销账）。
 #: 为什么需要：`_repost` 是持久集 ⇒ 一个永远投不出去的轮次（文件被删/盘抖动/解析炸）会在每次
 #: 唤醒时重抛一次、并让整趟 `_push_backlog` 中止 —— 既不响亮也不收敛（2026-10-07 补，见 plan §10.6-1）。
 POST_FAILURE_LIMIT = 3
 _log_default = tag_logger("deliver", lambda: time)
+
+
+def _tree_bytes(path: Path) -> int:
+    """一棵小目录的字节数（备份统计用；拿不到就 0——读数不该把备份拖红）。"""
+    total = 0
+    for p in Path(path).rglob("*"):
+        try:
+            if p.is_file():
+                total += p.stat().st_size
+        except OSError:
+            continue
+    return total
 
 
 def _cpu_seconds() -> float:
@@ -140,6 +167,9 @@ class OfflineDeliverer:
         #: 不同，它**不参与任何判定**，只是「这轮是谁推的」的人读面；空 = 体里不带那个键。
         #: 名字在**构造期**由调用方算（见 `WORKER_NAME_ENV`）：本模块在 `worker_tag` 所在层下面。
         worker_name: str = "",
+        #: 网络侧**备份抽屉**的落点（`<网络产物根>/backup`；空 = 不做备份 —— 纯离线腿 / 老调用方）。
+        #: 拍板-3：**回传失败的那些轮**才写这里（每轮观测 + 段末 sweep，幂等、有界、绝不抛）。
+        backup_root: str | Path | None = None,
         timeout: float = HTTP_TIMEOUT_SEC,
         probe_ttl: float = PROBE_TTL_SEC,
         sync_cap: int = SYNC_CAP,
@@ -174,6 +204,9 @@ class OfflineDeliverer:
         #: 不把这一轮当成「当前进度」——旧端/手动腿的旧行为因此逐字保留。
         self.hub_lease = str(hub_lease or "").strip()
         self.worker_name = str(worker_name or "").strip()
+        self.backup_root = Path(backup_root) if backup_root else None
+        #: 本会话的备份统计（只读面/日志用）：`(轮次, 字节, 失败)`。
+        self._backup_stat: tuple[int, int, int] = (0, 0, 0)
         self.timeout = float(timeout)
         self.probe_ttl = float(probe_ttl)
         self.sync_cap = int(sync_cap)
@@ -307,6 +340,8 @@ class OfflineDeliverer:
             self._cv.notify_all()
         # join 给内部预算之外的一点余量（线程要在自己那一侧判 deadline 并收尾）
         self._thread.join(timeout=budget + 5.0)
+        # 段末**强制 sweep**（拍板-3 ②）：线程可能已在收线路上返回，而它是最后一次备份机会。
+        self.backup_pending()
         self._report_close()
 
     def _report_close(self) -> None:
@@ -378,17 +413,20 @@ class OfflineDeliverer:
                 self._idle_spins += 1
 
     def _push_backlog(self, deadline: float, force_probe: bool = False) -> int:
-        """把积压尽量推完（每次 `sync()` 最多 sync_cap 轮，直到推空/推不动/超预算）。"""
+        """把积压尽量推完（每次 `sync()` 最多 sync_cap 轮，直到推空/推不动/超预算），
+        然后**观测一次账本**决定要不要把没送出去的轮次备进抽屉（拍板-3 的每轮那一档）。"""
         total = 0
         for _ in range(DRAIN_MAX_PASSES):
             n = self._sync(force_probe=force_probe and total == 0)
             if n <= 0:
-                return total
+                break
             total += n
             if deadline and self._now() >= deadline:
-                return total
+                break
             if not self.pending():
-                return total
+                break
+        # 备份跑在自己的有界里（它不属「推积压」的预算）：推不完/推不动都要把账本看一遍
+        self._guard(self.backup_pending)
         return total
 
     def _log_diag(self, kind: str) -> None:
@@ -631,6 +669,110 @@ class OfflineDeliverer:
                 out.append(it)
         return out
 
+    # ------------------------------------------------------------ 备份抽屉（拍板-3）
+
+    def backup_pending(self) -> int:
+        """把「磁盘上有、账本里没有」的轮次各备份一份到网络侧抽屉；返回本轮**新写**的轮数。
+
+        为什么是这条判据（`pending()`）：它就是「回传失败」的**持久化**定义（重启会话照样成立），
+        不需要新状态源。
+
+        三条纪律（逐字沿用 `remote/job_fs` 的备份腿先例，`plan/offline-local-disk-first` §3.4）：
+          * **绝不抛**（写不成只 WARN；抽屉坏了不能反过来把补传腿或训练拖住）；
+          * **不改 job 状态**（hub 不知道抽屉存在）；
+          * **有界**（逐件 `call_bounded(DRAIN_CEILING_SEC)`：抽屉也可能挂在同一个坏挂载点上，
+            而它跑在补传线程里 —— 绝不能反过来把段末挂住）；
+          * **幂等**（已存在的轮次目录直接跳过：重跑不重复写；锚点每次重写一份小的）。
+
+        常态零写入：`pending()` 空 ⇒ 这个函数**连目录都不建**。
+        """
+        if self.backup_root is None:
+            return 0
+        try:
+            rounds = self.pending()
+        except Exception as e:  # 判据面坏了也只记一笔
+            self._throttled_log("backup-pending", f"备份跳过：算不出待投轮次（{e}）")
+            return 0
+        if not rounds:
+            return 0
+        root = Path(self.backup_root)
+        made = bytes_ = failed = 0
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            self._throttled_log("backup-root", f"备份跳过：抽屉建不出来（{root}：{e}）")
+            return 0
+        for it in rounds:
+            # 目录名的**唯一口径**是 `ArtifactStore.dir_for`（`it-<03d>`）：自己拼 `it-1` 会
+            # 找一个不存在的源目录（实测：三轮全报 0 字节失败，而抽屉里空空如也）。
+            dst = root / f"{ArtifactStore.IT_PREFIX}{int(it):03d}"
+            if dst.is_dir():
+                continue  # 幂等：这一轮已经备份过（重跑不重复写）
+            ok, n = call_bounded(
+                partial(
+                    self._copy_backup_round,
+                    src=self.root / f"{ArtifactStore.IT_PREFIX}{int(it):03d}",
+                    dst=dst,
+                ),
+                float(DRAIN_CEILING_SEC),
+                name="deliver-backup",
+            )
+            if not ok or not n:
+                failed += 1
+                self.log(
+                    f"WARN 备份 it{it} 失败或超界（>{float(DRAIN_CEILING_SEC):g}s）——"
+                    "这一轮仍只在本地产物目录里（下一拍再试）"
+                )
+                continue
+            made += 1
+            bytes_ += int(n)
+        if made:
+            # 锚点/交付包：让抽屉自己就是一份**能反向恢复**的产物（恢复腿的判据 = 三件 + 权重）
+            for name in BACKUP_ANCHOR_NAMES:
+                src = self.root / name
+                if not src.is_file():
+                    continue
+                ok, n = call_bounded(
+                    partial(self._copy_backup_file, src=src, dst=root / name),
+                    float(DRAIN_CEILING_SEC),
+                    name="deliver-backup-anchor",
+                )
+                if not ok or not n:
+                    failed += 1
+                else:
+                    bytes_ += int(n)
+        self._backup_stat = (made, bytes_, failed)
+        self.log(
+            f"备份={len(rounds)} 轮待投（本轮新写 {made}｜字节 {bytes_}｜失败 {failed}）"
+            f"｜抽屉 {root}"
+        )
+        return made
+
+    def _copy_backup_round(self, *, src: Path, dst: Path) -> int:
+        """拷一轮到抽屉（先 `dst.tmp-<pid>` 再 `os.replace`：半截绝不进抽屉）；返回字节数。"""
+        tmp = dst.with_name(f".{dst.name}.tmp-{os.getpid()}")
+        try:
+            if tmp.exists():
+                shutil.rmtree(tmp, ignore_errors=True)
+            shutil.copytree(src, tmp)
+            os.replace(tmp, dst)
+        except OSError:
+            shutil.rmtree(tmp, ignore_errors=True)
+            return 0
+        return _tree_bytes(dst)
+
+    def _copy_backup_file(self, *, src: Path, dst: Path) -> int:
+        tmp = dst.with_name(f".{dst.name}.tmp-{os.getpid()}")
+        try:
+            shutil.copy2(src, tmp)
+            os.replace(tmp, dst)
+        except OSError:
+            return 0
+        try:
+            return int(dst.stat().st_size)
+        except OSError:
+            return 0
+
     def _manifest(self) -> dict:
         """产物目录里的 manifest 快照（血缘字段随每次投递带上；读失败 → 空）。"""
         if self._manifest_cache is None:
@@ -691,12 +833,17 @@ class OfflineDeliverer:
 
         `force_probe` = 绕过探活的**负结果 TTL**：段末 / 子进程收线时用——那是最后一次机会，
         不能被上一次失败静默吞掉（否则整段最该送出去的那几轮会“什么都没做”地结束）。
+
+        同步模式（`background=False`）的 `submit_round` 走这里 ⇒ 备份观测也在这里（与后台腿
+        `_push_backlog` 同口径；两处都只调 `backup_pending`，幂等）。
         """
         try:
-            return self._sync(force_probe=force_probe)
+            n = self._sync(force_probe=force_probe)
         except Exception as e:  # 兜底：补传的任何意外都不得波及训练
             self.log(f"补传异常（忽略，训练继续）：{type(e).__name__}: {e}")
-            return 0
+            n = 0
+        self.backup_pending()
+        return n
 
     def submit_eval_round(self, it: int) -> None:
         """云机评估落账后请求**重投**这一轮（幂等；非后台模式 = 空操作，见 `mark_repost`）。

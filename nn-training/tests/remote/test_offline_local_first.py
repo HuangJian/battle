@@ -512,8 +512,13 @@ def _run_course(
     cfg: dict | None = None,
     pack: Path | None = None,
     obtain_kwargs: dict | None = None,
+    hub: str = "",
+    log_sink: list[str] | None = None,
 ) -> tuple[list[str], list[tuple[str, bool]]]:
-    """跑一次 `run_one_course`（run_loop 注入 + 代码/TS 用 stub），返回 (argv, 调用记录)。"""
+    """跑一次 `run_one_course`（run_loop 注入 + 代码/TS 用 stub），返回 (argv, 调用记录)。
+
+    `hub` 非空 ⇒ 假装探得到 hub（段末交付面/备份那几条判据需要它）；`log_sink` 收日志。
+    """
     calls: list[tuple[str, bool]] = []
 
     def fake_obtain(cfg2, creds, log, work, stop=None, **kw):
@@ -527,7 +532,9 @@ def _run_course(
         calls.append(("ensure_ts_tree", True))
 
     monkeypatch.setattr(offline_boot, "obtain_pack", fake_obtain)
-    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg2, creds: [])
+    monkeypatch.setattr(offline_boot, "hub_candidates", lambda cfg2, creds: ([hub] if hub else []))
+    monkeypatch.setattr(offline_boot, "probe_hub", lambda *a, **kw: True)
+    monkeypatch.setattr(offline_boot, "fetch_resume", lambda *a, **kw: None)  # 别真发 HTTP
     monkeypatch.setattr(offline_boot, "ensure_code", fake_code)
     monkeypatch.setattr(offline_boot, "ensure_ts_tree", fake_ts)
     seen: list[str] = []
@@ -544,8 +551,9 @@ def _run_course(
         "live_backfeed": False,
         **(cfg or {}),
     }
+    logs = log_sink if log_sink is not None else []
     rc = offline_boot.run_one_course(
-        base, {}, _quiet, None, course="c5-gae", multi=False, run_loop_main=fake_run_loop
+        base, {}, logs.append, None, course="c5-gae", multi=False, run_loop_main=fake_run_loop
     )
     assert rc == 0
     return seen, calls
@@ -775,6 +783,82 @@ def test_install_backup_is_self_consistent(tmp_path: Path) -> None:
             "it-4",
         ]
     ), sorted(p.name for p in dest.iterdir())
+
+
+# ─────────────────── 段末交付面（B4，`plan/offline-local-disk-first` §3.4）───────────────────
+
+
+def _stub_download_dir(monkeypatch: pytest.MonkeyPatch, out: Path) -> None:
+    """把交付物的下载落点换成 tmp（缺省是 cwd / Kaggle 的 `/kaggle/working`）。"""
+    monkeypatch.setattr(offline_boot._load_deliverable(), "download_dir", lambda _cfg: out)
+
+
+def test_segment_end_skips_the_delivery_zip_when_backfeed_was_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 拍板-1/3（B4）：补传全成功（无备份抽屉）+ 人没显式点 `download_dir` ⇒
+
+    **不**把一个大 zip 拷到慢挂点上（那正是本计划要移除的那类等待），只说清产物在本地根。"""
+    local = _local(tmp_path)
+    _artifacts(local)
+    (local / "artifacts.zip").write_bytes(b"full")
+    out = tmp_path / "out"
+    _stub_download_dir(monkeypatch, out)
+    logs: list[str] = []
+    _run_course(tmp_path, monkeypatch, hub="http://hub", log_sink=logs)
+    assert not (out / "deliver-c5-gae.zip").exists(), "常态不该落交付档"
+    assert any("没有交付档" in m and str(local) in m for m in logs), logs
+
+
+def test_segment_end_writes_the_delivery_zip_when_the_drawer_has_rounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """有轮次没能回传（网络侧抽屉在）⇒ 收尾仍打一份**能导入控制台**的交付档。"""
+    local = _local(tmp_path)
+    _artifacts(local)
+    (local / "artifacts.zip").write_bytes(b"full")
+    drawer = tmp_path / "w" / "run" / "backup"
+    drawer.mkdir(parents=True, exist_ok=True)
+    out = tmp_path / "out"
+    _stub_download_dir(monkeypatch, out)
+    logs: list[str] = []
+    _run_course(tmp_path, monkeypatch, hub="http://hub", log_sink=logs)
+    assert (out / "deliver-c5-gae.zip").read_bytes() == b"full"
+    assert any("有备份抽屉" in m for m in logs), logs
+
+
+def test_segment_end_without_hub_always_writes_the_delivery_zip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ DoD-12：**没有 hub**（`--no-deliver`）= 纯手工递送 —— 交付档是唯一动线，无条件落。"""
+    local = _local(tmp_path)
+    _artifacts(local)
+    (local / "artifacts.zip").write_bytes(b"full")
+    out = tmp_path / "out"
+    _stub_download_dir(monkeypatch, out)
+    logs: list[str] = []
+    _run_course(tmp_path, monkeypatch, log_sink=logs)
+    assert (out / "deliver-c5-gae.zip").exists()
+    assert any("本段无 hub" in m for m in logs), logs
+
+
+def test_segment_end_explicit_download_dir_wins(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """人显式给了 `CFG.download_dir` ⇒ 那块钱由人主动付（照样打档，即便补传全成功）。"""
+    local = _local(tmp_path)
+    _artifacts(local)
+    (local / "artifacts.zip").write_bytes(b"full")
+    out = tmp_path / "out"
+    logs: list[str] = []
+    _run_course(
+        tmp_path,
+        monkeypatch,
+        cfg={"download_dir": str(out)},
+        hub="http://hub",
+        log_sink=logs,
+    )
+    assert (out / "deliver-c5-gae.zip").exists()
 
 
 # ────────────────────────── obtain_pack(optional=True) ──────────────────────────

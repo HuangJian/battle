@@ -69,10 +69,19 @@
     且网络侧不存在/恢复后本机优先/本地非空不覆盖/备份缺权重不算齐/`install_backup` 自身一致）·
     `tests/remote/test_offline_boot.py`（`package_partial` 三例改读本地根）· `e2e`（首跑：产物目录
     在本地根存在且 `--bundle` 路径不变）。
-* **还没落地的那半**（`plan/offline-local-disk-first` §3.4 = C1/B4 腿）：网络盘 `backup/` 的**写方**
-  （每轮观测 pending + 段末 sweep）与**交付面的判据**（段末只有「有 pending/备份轮 / 无 hub /
-  `download_dir` 显式」时才落网络盘）。在那之前：产物已回归本地盘，而「回传失败 ⇒ 备份」仍是空的 ——
-  恢复腿的读方已就位（等写方）。
+* ★ **网络盘 `backup/` 的写方 + 段末交付面（同日 C1/B4 腿落地）**：
+  · `remote/offline_deliver.backup_pending()`：判据 = `pending()`（磁盘上有、`delivered.json` 里没有）
+    —— 「回传失败」的持久化定义。**常态零写入**（零欠账连抽屉目录都不建）；每轮观测（后台腿
+    `_push_backlog` 末尾 / 同步腿 `sync()` 末尾）+ 段末强制 sweep（`close()`）；幂等、逐件有界
+    （`call_bounded(DRAIN_CEILING_SEC)`）、绝不抛、不改 job 状态。**进程模式由父侧扫**
+    （子进程可能是导出那一刻的老快照，新键它不认 ⇒ 静默不备比不实现更糟）。
+  · 段末交付档（`deliver-<课>.zip`）改成**有条件**：只有 ① 无 hub（纯手工递送）② 网络侧**有备份抽屉**
+    ③ 人显式给了 `download_dir` 才落；否则只打一行「产物在本地根…（补传全成功 ⇒ 没有交付档）」
+    —— 一次段末大 zip 拷到慢挂点，正是本计划要移除的那类等待。
+  · 至此「网络盘在常态路径上出现 **0 次**，且只在回传失败时出现 **1 次**」两个方向都成立（除
+    「首次 TS 树拷贝」与「下载缓存/job 目录」这两笔本就不变的网络 IO）。
+* **仍未落地**（`plan/offline-local-disk-first` 的尾巴）：B2（持久面容量判据：本地 free ≥ 段内产物预算）
+  与 `docs/nn/remote-transport.md` 的离线版（§81 同族）。
 
 ---
 

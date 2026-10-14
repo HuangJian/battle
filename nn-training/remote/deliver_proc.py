@@ -91,6 +91,9 @@ class DelivererLike(Protocol):
 
     def pending(self) -> list[int]: ...
 
+    #: 把「没送出去」的轮次备进网络侧抽屉（拍板-3）；返回本轮新写的轮数。
+    def backup_pending(self) -> int: ...
+
 
 class DelivererProcess:
     """补传腿的**独立进程**代理（父侧；与 `OfflineDeliverer` 同接口，见 `DelivererLike`）。
@@ -124,6 +127,11 @@ class DelivererProcess:
         #: 同理**只走 env**（`WORKER_NAME_ENV`）传给真正 POST 的那个子进程 —— 缺这一跳，
         #: 名字就只活在父侧（而父侧一个体都不发）= 与没实现同效。空 = 体里不带那个键。
         worker_name: str = "",
+        #: 网络侧**备份抽屉**的落点（拍板-3）：**父侧**扫（用只读镜像算 pending）。
+        #: 刻意**不走 env 交给子进程**：在飞的 `code.zip` 是导出那一刻的快照，老子进程不认这个键
+        #: 会静默不备（而父侧自己扫就与子进程新旧无关）；缺点是这一笔 IO 回到训练进程所在的机器
+        #: —— 它在有界里（`DRAIN_CEILING_SEC`/件）、幂等、且只在**有轮次没送出去**时发生。
+        backup_root: str | Path | None = None,
         #: 控制/状态文件的落点（缺省 = 产物目录下的 `work/`，与 `run_loop` 的老缺省一致）。
         work_dir: str | Path | None = None,
         ctl_path: str | Path | None = None,
@@ -141,6 +149,7 @@ class DelivererProcess:
         self.course = str(course or "").strip()
         self.hub_lease = str(hub_lease or "").strip()
         self.worker_name = str(worker_name or "").strip()
+        self.backup_root = Path(backup_root) if backup_root else None
         self.work_dir = (
             Path(work_dir)
             if work_dir is not None
@@ -404,6 +413,9 @@ class DelivererProcess:
         if fb is not None:
             fb.submit_round(it)
             return
+        # 每轮观测一次账本（拍板-3 ①）：**先观测再入队** —— 上一轮已经过了一个交付窗口，
+        # 此刻还 pending 的才是真欠账（否则会把「刚入队、马上就推上去」的轮次也备一份）。
+        self.backup_pending()
         self._append({"round": int(it)})
 
     def submit_eval_round(self, it: int) -> None:
@@ -463,6 +475,8 @@ class DelivererProcess:
         if fb is not None:
             fb.close(timeout)
             return
+        # 段末**强制 sweep**（拍板-3 ②）：这是最后一次备份机会（子进程可能已经收线）。
+        self.backup_pending()
         proc = self._proc
         if proc is None or self._ctl is None:
             return
@@ -499,9 +513,32 @@ class DelivererProcess:
                 artifacts_dir=self.root,
                 course=self.course,
                 background=False,
+                # ⚠ 镜像**不**带日志：它只该回答 `pending()`/`status()`（旧口径：子进程是
+                # `delivered.json` 的唯一写者）。备份那一笔要说话 ⇒ 走下面 `_backup()` 的专用镜像。
                 log=lambda _m: None,
             )
         return self._mirror_obj
+
+    def backup_pending(self) -> int:
+        """父侧备份（**只读产物 + 只写抽屉**，与子进程零共享）。
+
+        为什么在父侧做（而不是让子进程做）：子进程可能是**老快照**（导出那一刻的 code.zip）
+        ——新键它不认，静默不备比不实现更糟；而父侧的 `pending()` 用的是同一份账本文件，
+        判据逐字相同。代价 = 这一笔 IO 在训练进程所在的机器上（有界、幂等、只在有欠账时发生）。
+        """
+        fb = self._fallback
+        if fb is not None:
+            return fb.backup_pending()
+        if self.backup_root is None:
+            return 0
+        try:
+            mirror = self._reading()
+            mirror.backup_root = Path(self.backup_root)
+            mirror.log = self.log
+            return int(mirror.backup_pending())
+        except Exception as e:  # 备份绝不抛（它本就是第二份拷贝）
+            self.log(f"WARN 备份腿异常（忽略）：{type(e).__name__}: {e}")
+            return 0
 
     def _reading(self) -> OfflineDeliverer:
         """只读镜像 + **刷新账本**（见 `OfflineDeliverer.refresh_from_ledger` 的为什么）。"""
@@ -606,6 +643,8 @@ def make_deliverer(
     hub_lease: str = "",
     #: 可读 worker 名（`kaggle-o`）—— 面板列名（plan/offline-leg-ppo-attribution）；空 = 不带那个键。
     worker_name: str = "",
+    #: 网络侧**备份抽屉**的落点（`<网络产物根>/backup`；空 = 不做备份）。两种模式都收。
+    backup_root: str | Path | None = None,
     #: 控制/状态文件的落点（只有进程模式用；缺省 = 产物目录下的 `work/`）。
     work_dir: str | Path | None = None,
     #: `""` = 自动（`$NN_DELIVER_MODE` > `"process"`，见模块常量）；
@@ -645,6 +684,7 @@ def make_deliverer(
             course=course,
             hub_lease=hub_lease,
             worker_name=worker_name,
+            backup_root=backup_root,
             work_dir=work_dir,
             log=log,
         )
@@ -656,6 +696,7 @@ def make_deliverer(
         course=course,
         hub_lease=hub_lease,
         worker_name=worker_name,
+        backup_root=backup_root,
         background=background if kind == "thread" else False,
         log=log,
     )

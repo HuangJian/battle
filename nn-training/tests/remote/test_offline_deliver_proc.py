@@ -403,3 +403,35 @@ def test_boot_failure_degrades_to_thread_mode_and_still_delivers(
     assert d.pending() == [], "线程兜底也要把积压推完"
 
 
+
+def test_process_parent_sweeps_the_backup_drawer(tmp_path: Path) -> None:
+    """★ 拍板-3 ①（`plan/offline-local-disk-first` §3.4 C1）：备份由**父侧**扫，幂等。
+
+    为什么在父侧：子进程可能是**老快照**（导出那一刻的 `code.zip`），新键它不认 ⇒ 静默不备；
+    而 `pending()` 的判据（磁盘有 − 账本无）两处逐字相同，父侧自己扫与子进程新旧无关。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2))
+    drawer = tmp_path / "net" / "backup"
+    d = DelivererProcess(
+        base_url="http://127.0.0.1:9/",
+        token=TOKEN,
+        run_id=RUN,
+        artifacts_dir=root,
+        work_dir=tmp_path / "work",
+        backup_root=drawer,
+        log=lambda _m: None,
+    )
+    assert d.backup_pending() == 2, "没起子进程也能扫（只读账本 + 写抽屉）"
+    assert (drawer / "it-001" / "weights.json").is_file()
+    assert (drawer / "it-002" / "opt.tar").is_file()
+    assert d.backup_pending() == 0, "幂等：已备的轮次不重写"
+    # 没配抽屉（纯离线腿 / 老调用方）⇒ 空操作
+    plain = DelivererProcess(
+        base_url="http://127.0.0.1:9/",
+        token=TOKEN,
+        run_id=RUN,
+        artifacts_dir=root,
+        work_dir=tmp_path / "work2",
+        log=lambda _m: None,
+    )
+    assert plain.backup_pending() == 0

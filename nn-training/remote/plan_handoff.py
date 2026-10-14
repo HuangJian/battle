@@ -422,6 +422,9 @@ def open_run_context(
                     work_dir=work_dir,
                     # 本课租约 token（★M1b/P1-1「送信端」）：补传体据此推进 hub 侧活动起点。
                     hub_lease=hub_lease,
+                    # 网络侧**备份抽屉**（拍板-3）：产物没能回传成功的轮次写这里。
+                    # 落点 = 上面 `resolve_backup_root` 的产物（生产路径 = `<网络产物根>/backup`）。
+                    backup_root=backup,
                     log=log,
                 )
                 if deliver

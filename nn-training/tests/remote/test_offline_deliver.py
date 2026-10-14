@@ -141,6 +141,60 @@ def test_sync_pushes_backlog_lands_on_hub_and_does_not_touch_job_pool(tmp_path: 
         th.join(timeout=5)
 
 
+# ───────────── 备份抽屉（拍板-3，`plan/offline-local-disk-first` §3.4 C1）─────────────
+
+
+def test_backup_writes_pending_rounds_and_is_idempotent(tmp_path: Path) -> None:
+    """待投轮次 ⇒ 进抽屉（轮次目录 + 锚点/全量包），且**重跑不重写**（幂等）。"""
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2, 3))
+    drawer = tmp_path / "net" / "backup"
+    d = _deliverer("", root, backup_root=drawer)  # base 空 ⇒ 推不出去 ⇒ 三全都 pending
+    assert d.backup_pending() == 3
+    for it in (1, 2, 3):
+        assert (drawer / f"it-{it:03d}" / "weights.json").is_file()
+    assert (drawer / "manifest.json").is_file(), "锚点（抽屉自己就是一份能反向恢复的产物）"
+    # 幂等：再跑一遍不重复写（拿 mtime 当「写没写」的判据）
+    before = (drawer / "it-001" / "weights.json").stat().st_mtime_ns
+    assert d.backup_pending() == 0
+    assert (drawer / "it-001" / "weights.json").stat().st_mtime_ns == before
+
+
+def test_backup_writes_nothing_when_everything_was_delivered(tmp_path: Path) -> None:
+    """★ DoD-6（反探针）：补传全成功的一段 ⇒ 网络侧抽屉**连目录都不建**（常态零写入）。"""
+    base, _store, srv, th = _boot_server(tmp_path)
+    try:
+        root = _make_artifacts(tmp_path / "art")
+        drawer = tmp_path / "net" / "backup"
+        d = _deliverer(base, root, backup_root=drawer)
+        assert d.sync() == 3  # 全推上去 ⇒ pending 空
+        assert d.backup_pending() == 0
+        assert not drawer.exists(), "全成功的一段不该碰网络盘"
+    finally:
+        srv.shutdown()
+        th.join(timeout=5)
+
+
+def test_backup_failure_is_only_a_warning(tmp_path: Path) -> None:
+    """★ DoD-8 的一半：抽屉建不出来（父路径是个文件）⇒ 只记一笔、**不抛**（备份是第二份拷贝）。"""
+    root = _make_artifacts(tmp_path / "art")
+    blocker = tmp_path / "blocked"
+    blocker.write_bytes(b"x")
+    logs: list[str] = []
+    d = OfflineDeliverer(
+        base_url="", token="", run_id=RUN, artifacts_dir=root, backup_root=blocker / "backup",
+        log=logs.append,
+    )
+    assert d.backup_pending() == 0
+    assert any("备份跳过" in m for m in logs), logs
+
+
+def test_no_drawer_configured_means_no_backup(tmp_path: Path) -> None:
+    """没给 `backup_root`（纯离线腿 / 老调用方）⇒ 这个函数是空操作。"""
+    root = _make_artifacts(tmp_path / "art")
+    assert _deliverer("", root).backup_pending() == 0
+    assert list(tmp_path.glob("**/backup")) == []
+
+
 def test_delivered_ledger_makes_redelivery_restart_safe(tmp_path: Path) -> None:
     """`delivered.json` 是唯一记账：**新会话**带着同一个目录接上时不重传已投递的轮次。"""
     base, store, srv, th = _boot_server(tmp_path)
