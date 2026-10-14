@@ -31,23 +31,47 @@ header = {"ofmt": OPT_DELTA_FMT, "base_sha": <64hex 或 "">, "items": [item, …
 
 torch **惰性**且缺了**响亮拒收**（M4 硬约束②）：拿不到 torch 就没法重建 ⇒ 拒收该形态并回退整份
 blob，绝不静默降级。
+
+## hub 侧的**落地**（`opt_tar_bytes` / `pack_tar_from_dir` / `land_opt_delta`，2026-10-14）
+
+它们本来住 `remote/hub_client.py`，撞了 1000 行 LOC 预算后按「独立所有者（wire-diet）+ 独立触发
+条件（形态位命中）」整块下沉。**住这里而不是新开一个模块**：新模块只要 import 本模块（或
+`weights_delta`）就会变成 L1，而 `hub_client` 已经站在 L1 —— `hub_client → 新模块(L1)` 是同层边
+（DAG 要求**严格**向下）⇒ 只能把 `hub_client` 抬到 L2，连带 9 个上位模块（`code_snapshot` 与整个
+`hub.*` 链一路 +1）。而本模块是 **L0 叶子**（只依赖 stdlib + `common.errors`），所以落地函数住这里
+最省事：**格式的所有者同时也管自己那份文件的落盘**。
+
+⇒ 由此得到一条纪律：**本模块的拒收一律 `ProtocolError`**（包括「base 不在」这一档）—— 本模块
+不得 import `remote.hub_http`（那会把秩抬到 L1）。两个异常在重试分类上等价
+（`trainer/loop_transport.remote_retryable_exceptions()` 同时收两者），而「拿不到 base」与
+「容器坏」本来就是同一族：都是「这份 result 解读不了」。
 """
 
 from __future__ import annotations
 
+import io
 import json
 import struct
+import tarfile
+from functools import partial
+from pathlib import Path
 from typing import Any
 
 from common.errors import ProtocolError
+from common.hashing import sha256_bytes
+from common.wire_codec import container_base_sha, fmt_bit
 
 __all__ = [
     "OPT_DELTA_FMT",
     "OPT_DELTA_MAGIC",
     "apply_opt_delta",
     "base_sha_of",
+    "is_container",
+    "land_opt_delta",
     "opt_fmt_of",
+    "opt_tar_bytes",
     "pack_opt_delta",
+    "pack_tar_from_dir",
 ]
 
 #: 容器魔数（旧端拿到它先撞这个，不会把 delta 当权重落盘）。
@@ -58,17 +82,15 @@ OPT_DELTA_FMT = "delta-f16"
 _DELTA_DTYPES = frozenset({"float16", "float32", "float64", "bfloat16"})
 
 
-def opt_fmt_of(manifest: Any) -> str:
-    """manifest 的**形态位读法**（发布端写、worker 与 hub 都照它分叉的唯一口径）。
-
-    命中（= `OPT_DELTA_FMT`）⇒ 回传/落地的都是 delta 容器；否则（含缺键、旧值、非映射）= 旧形态
-    （整份 tar，逐字节旧行为）。**键名与合法值只有这一处** —— 两侧各自 `== "delta-f16"` 的话，
-    改形态时要改三处，漏一处就是「发布端写了、某一侧没读懂」的静默分叉。
-    """
-    if not isinstance(manifest, dict):
-        return ""
-    got = str(manifest.get("opt_fmt") or "")
-    return got if got == OPT_DELTA_FMT else ""
+#: manifest 的**形态位读法**（发布端写、worker 与 hub 都照它分叉的唯一口径）：命中（= `OPT_DELTA_FMT`）
+#: ⇒ 回传/落地的都是 delta 容器；否则（含缺键、旧值、非映射）= 旧形态（整份 tar，逐字节旧行为）。
+#: 读法本体在 `common.wire_codec.fmt_bit`（**与 R1 的权重 delta 共用一处**：两族容器只差一个值，
+#: 各写一份 def 就是同一份判据两处实现 ⇒ 改一处漏一处即静默分叉）；这里只钉「本族用哪个键、哪个值」。
+opt_fmt_of = partial(fmt_bit, key="opt_fmt", want=OPT_DELTA_FMT)
+#: 容器头里的 `base_sha`（**只读头**，不解 delta 体；读不动 ⇒ 空串）：hub 侧的**档位读数**
+#: （plan §12）—— 与 manifest 的 `opt_sha` 相等 = exact 档；不等 = identity 档（worker 用自己那份
+#: f32 副本当基准，hub 无权对账，只能记一行判别）。读法本体同样在 `common.wire_codec`。
+base_sha_of = partial(container_base_sha, magic=OPT_DELTA_MAGIC)
 
 
 def _torch():
@@ -152,23 +174,14 @@ def pack_opt_delta(base: dict, new: dict, *, base_sha: str) -> bytes:
     return OPT_DELTA_MAGIC + struct.pack(">I", len(hdr)) + hdr + b"".join(blobs)
 
 
-def base_sha_of(raw: bytes) -> str:
-    """容器头里的 `base_sha`（**只读头**，不解 delta 体）；读不动 ⇒ 空串。
+def is_container(raw: bytes) -> bool:
+    """这份回传字节**是不是** delta 容器（只看魔数）——验收端的分派判据。
 
-    hub 侧的**档位读数**（plan §12）：与 manifest 的 `opt_sha` 相等 = exact 档（worker 下的是我们
-    发出去的 blob）；不等 = identity 档（worker 用自己那份 f32 副本当基准 —— hub 无权对账，
-    只能记一行判别）。
+    是容器 ⇒ 重建；不是 ⇒ 按旧形态（整份 tar）落盘，响亮记一行。理由与 `weights_delta`
+    同条：发布端与节点代可能错位，旧代节点的 job 不该全废，而「是不是容器」逐字节可判
+    ——真正的容器坏掉（截断/头坏/结构不符）仍然**拒收**。
     """
-    off = len(OPT_DELTA_MAGIC)
-    if not raw.startswith(OPT_DELTA_MAGIC) or len(raw) < off + 4:
-        return ""
-    (hdr_len,) = struct.unpack(">I", raw[off : off + 4])
-    off += 4
-    try:
-        hdr = json.loads(raw[off : off + hdr_len].decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        return ""
-    return str(hdr.get("base_sha") or "")
+    return raw.startswith(OPT_DELTA_MAGIC)
 
 
 def apply_opt_delta(base: dict, raw: bytes, *, expect_base_sha: str = "") -> dict:
@@ -257,3 +270,95 @@ def apply_opt_delta(base: dict, raw: bytes, *, expect_base_sha: str = "") -> dic
     if not isinstance(out, dict):
         raise ProtocolError("delta 基准不是映射（state_dict 应为 dict）——拒收")
     return out
+
+
+def pack_tar_from_dir(d: Path, names: list[str]) -> bytes:
+    """目录 → tar bytes（`names` 顺序即成员顺序）；空列表 = `b""`。
+
+    两个调用点：① `opt_tar_bytes` 的**重打**退路（历史 run / 冷启动）；② `land_opt_delta`
+    ——重建成 `opt.pt` 后由它押出**权威字节**（下一轮 publish 的 `opt_sha` 就是这几字节）。
+    实现只此一处，免得两条路各自演化出不同的成员顺序。
+    """
+    if not names:
+        return b""
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:") as tfb:
+        for n in names:
+            tfb.add(d / n, arcname=n)
+    return buf.getvalue()
+
+
+def opt_tar_bytes(ckpt_remote_dir: str | Path | None) -> bytes:
+    """上轮 ppo_ckpt_remote → raw tar bytes（D5）；空 = b""。
+
+    H5（review-hy）：不打 state.json（numpy RNG 无人读，worker 按 per-job 种子重播）。
+
+    M2：**优先读 `<ckpt>/../ppo_ckpt_remote.tar`**（`verify_and_land` 落盘的**原始回传字节**）。
+    只有原样字节的 sha256 才与云 worker 本地 blob_cache 的键一致 —— 重打 tar 会因 uid/gid/mtime
+    规范化差异导致 sha 漂移、每轮都缓存未命中（1.19MB 白传回来）。历史 run / 冷启动无该文件 →
+    从目录重打（可能未命中，走 blob 传一次）。
+
+    ★ 2026-09-24（opt-blob-diet，§4）：新形状的 tar **只装 `opt.pt`**（`worker.pack_opt_tar`）
+    且**优先路径**读的就是那个原样字节，所以稳态下这里恒为 opt-only。而**下面的回退分支刻意保留
+    `("model.pt", "opt.pt")` 旧形状**——它只在历史 run / 冷启动（盘上没有 `.tar`）时走到，那时目录
+    里通常有改造前写下的 `model.pt`：让 worker 走 W4 的 legacy 路径最安全。代价只是这个重打 tar 的
+    sha 与 worker 的 blob_cache 键不同 ⇒ 多付一次下载（罕见事件）。**这是有意的兼容退路，不是漏改**
+    （评审 F6）。
+    """
+    if not ckpt_remote_dir:
+        return b""
+    d = Path(ckpt_remote_dir)
+    tar_path = d.parent / (d.name + ".tar")
+    if tar_path.exists():
+        return tar_path.read_bytes()
+    names = [n for n in ("model.pt", "opt.pt") if (d / n).exists()]
+    return pack_tar_from_dir(d, names)
+
+
+def land_opt_delta(
+    opt_blob: bytes, *, traj_dir: str | Path, it: int, ckpt_dir: Path, extract, log
+) -> bytes:
+    """hub 侧的 opt 落地：delta 容器 → **重建** → 写 `ckpt_dir/opt.pt` → 押回权威 tar 字节。
+
+    基准 = 上一轮 landed 的那份（`it{it-1}/ppo_ckpt_remote/opt.pt` —— 就是本轮 `opt_sha` 打的 tar）。
+    `base_sha` 与**本机发出去的那份**相等 = **exact** 档（worker 下的是我们的 blob）；不等 =
+    **identity** 档（worker 用自己那份 f32 副本当基准 ⇒ hub 无权对账，只记一行判别；plan §12）。
+
+    分派：不是容器（旧 worker / 冒烟回显的空 tar）⇒ 按**旧形态**解包到 `ckpt_dir`。注入 tar 工具
+    而不是让本模块 import `remote.job_fs`（那会把秩抬到 L1）：调用方传 `extract` 进来。
+
+    响亮拒收（**绝不**把 delta 当权重落盘）：缺 base / 缺 torch / 容器坏 / 结构不符 —— 全抛。
+    返回的字节就是**权威字节**：调用方把它写成 sibling `.tar`，下一轮 publish 的 `opt_sha` 由它算。
+    """
+    if not is_container(opt_blob):
+        log(
+            "WARN: 形态位是 opt delta 但回传的不是 BOD1 容器（旧 worker / 冒烟回显？）——按旧形态解包"
+        )
+        try:
+            extract(opt_blob, ckpt_dir)
+        except (tarfile.TarError, OSError, EOFError, ValueError) as e:
+            # 名实不符且解包也不行 = 确定性坏件。**必须**转成 `ProtocolError`：tarfile 的
+            # 原生异常不在 `remote_retryable_exceptions()` 里，泄出去会落到 loop_core 的
+            # 通用兜底（连败即杀进程）——那是 2026-09-16 事故的形状。
+            raise ProtocolError(
+                f"形态位说 opt delta、回传的既不是 BOD1 容器也不是合法 tar（{e}）——拒收"
+            ) from None
+        return opt_blob
+    import torch
+
+    base_dir = Path(traj_dir) / f"it{it - 1}" / "ppo_ckpt_remote"
+    base_p = base_dir / "opt.pt"
+    if not base_p.exists():
+        raise ProtocolError(
+            f"opt 形态位={OPT_DELTA_FMT!r} 但 base 不在（{base_p}：上一轮 landed ckpt 被 prune / "
+            "换了 traj 目录）——拒收；重发旧形态或关掉 --wire-diet"
+        )
+    reported = base_sha_of(opt_blob)
+    published = sha256_bytes(opt_tar_bytes(base_dir))
+    log(
+        f"opt delta 落地：base_sha={'exact' if reported == published else 'identity'} 档"
+        f"（容器 {reported[:12]}… / 本机 {published[:12]}…）"
+    )
+    rebuilt = apply_opt_delta(torch.load(base_p, map_location="cpu"), opt_blob)
+    torch.save(rebuilt, ckpt_dir / "opt.pt")
+    return pack_tar_from_dir(ckpt_dir, ["opt.pt"])

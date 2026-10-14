@@ -30,7 +30,7 @@ if str(ROOT) not in sys.path:
 
 from common.errors import ProtocolError
 from remote import opt_delta as od
-from remote.hub_client import HubClientError, _land_opt_delta
+from remote.hub_client import _extract_tar, _land_opt_delta
 
 
 def _state(seed: int, *, n: int = 2, elems: int = 64) -> dict:
@@ -79,7 +79,9 @@ def test_land_rebuilds_new_state_and_returns_authority_tar(tmp_path: Path) -> No
     blob = od.pack_opt_delta(base, new, base_sha="a" * 64)
     out = traj / "it1" / "ppo_ckpt_remote"
     out.mkdir(parents=True, exist_ok=True)
-    tar = _land_opt_delta(blob, traj_dir=traj, it=1, ckpt_dir=out, log=_quiet)
+    tar = _land_opt_delta(
+        blob, traj_dir=traj, it=1, ckpt_dir=out, extract=_extract_tar, log=_quiet
+    )
     got = torch.load(out / "opt.pt", map_location="cpu")
     want_leaves, got_leaves = _leaf_map(new), _leaf_map(got)
     assert sorted(want_leaves) == sorted(got_leaves)
@@ -101,12 +103,18 @@ def test_land_rebuilds_new_state_and_returns_authority_tar(tmp_path: Path) -> No
 
 
 def test_land_refuses_without_base(tmp_path: Path) -> None:
-    """① base 不在（prune / 换 traj）⇒ `HubClientError` —— 绝不把 delta 当权重落盘。"""
+    """① base 不在（prune / 换 traj）⇒ `ProtocolError` —— 绝不把 delta 当权重落盘。
+
+    异常族在 `remote/delta_land` 里统一（拿不到 base = 解读不了这份 result，与容器坏同一族），
+    并由该模块的 L0 位置约束（同族两个异常的重试分类等价，理由见模块头）。
+    """
     base, new = _state(1), _state(2)
     traj = tmp_path / "traj"
     blob = od.pack_opt_delta(base, new, base_sha="a" * 64)
-    with pytest.raises(HubClientError):
-        _land_opt_delta(blob, traj_dir=traj, it=1, ckpt_dir=traj / "it1", log=_quiet)
+    with pytest.raises(ProtocolError):
+        _land_opt_delta(
+            blob, traj_dir=traj, it=1, ckpt_dir=traj / "it1", extract=_extract_tar, log=_quiet
+        )
 
 
 def test_land_propagates_broken_container(tmp_path: Path) -> None:
@@ -116,11 +124,47 @@ def test_land_propagates_broken_container(tmp_path: Path) -> None:
     _write_base(traj, 0, base)
     blob = od.pack_opt_delta(base, new, base_sha="a" * 64)
     with pytest.raises(ProtocolError):
-        _land_opt_delta(b"XXXX" + blob[4:], traj_dir=traj, it=1, ckpt_dir=traj / "it1", log=_quiet)
+        _land_opt_delta(
+            b"XXXX" + blob[4:], traj_dir=traj, it=1, ckpt_dir=traj / "it1", extract=_extract_tar, log=_quiet
+        )
     thin = _state(9, n=1)
     _write_base(traj, 2, thin)  # 换一份「少一组参数」的 base ⇒ 结构闸拦下
     with pytest.raises(ProtocolError):
-        _land_opt_delta(blob, traj_dir=traj, it=3, ckpt_dir=traj / "it3", log=_quiet)
+        _land_opt_delta(
+            blob, traj_dir=traj, it=3, ckpt_dir=traj / "it3", extract=_extract_tar, log=_quiet
+        )
+
+
+def test_land_dispatches_on_the_magic_not_the_bit(tmp_path: Path) -> None:
+    """名实不符那一档：形态位写的是 delta，但回传的不是 BOD1 容器 ⇒ 按**旧形态**解包 + 记一行。
+
+    容忍的理由与 `weights_delta` 同条（发布端与节点代可能错位）；这里额外钉住**异常分类**：
+    名实不符**且解包也失败**必须转成 `ProtocolError`（tarfile 原生异常不在重试白名单里，
+    泄出去会落到 loop_core 的通用兜底 —— 2026-09-16 事故的形状）。
+    """
+    out = tmp_path / "it1" / "ppo_ckpt_remote"
+    out.mkdir(parents=True, exist_ok=True)
+    calls: list[tuple[bytes, Path]] = []
+    lines: list[str] = []
+
+    def _fake_extract(blob: bytes, dest: Path) -> None:
+        calls.append((blob, dest))
+
+    blob = b"not a container"
+    got = _land_opt_delta(
+        blob, traj_dir=tmp_path, it=1, ckpt_dir=out, extract=_fake_extract, log=lines.append
+    )
+    assert got is blob or got == blob, "旧形态必须原样交回去（不重建）"
+    assert calls == [(blob, out)], "旧形态走解包腿，目标目录 = ckpt_dir"
+    assert lines, "名实不符必须留一行日志（不静默降级）"
+
+    def _broken(_blob: bytes, _dest: Path) -> None:
+        raise tarfile.ReadError("truncated")
+
+    with pytest.raises(ProtocolError):
+        _land_opt_delta(
+            blob, traj_dir=tmp_path, it=1, ckpt_dir=out, extract=_broken, log=lines.append
+        )
 
 
 def _publish(tmp_path: Path, *, it: int = 1, ckpt_dir: Path | None = None, slim: bool = True) -> dict:

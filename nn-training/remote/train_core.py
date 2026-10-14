@@ -39,6 +39,7 @@ from typing import Any
 
 import remote.course_cache as course_cache
 import remote.opt_delta as opt_delta
+import remote.weights_delta as weights_delta
 from common.log_bundle import LogBundle
 from common.protocol import (
     BLOB_DEMO,
@@ -677,6 +678,21 @@ def run_training_core(
     # **每轮必 miss** ⇒ 上行省 268,996 B 而下行多付 379,114 B = **净亏 110 KB/轮**（评审 F1）。
     wj_raw = wj_path.read_bytes()
     _cache_produced_weights(blob_root, wj_raw, log)
+    # ---- R1（M3）：形态位命中 ⇒ 回传 **权重 delta 容器**（不吐 torch：JSON + numpy）----
+    # 基准 = 本轮**实际载入**的那份 init 权重（`init_w` = 解析出来的那个文件；身份命中时它
+    # 就是本机那份 f32 全量）。`base_sha` = 它的 sha256 ⇒ hub 侧就是 exact/identity 两档的
+    # 判别读数（exact 档与 manifest 的 `init_weights_fp` 相等，可逐字节对账）。
+    # 本机那份 JSON 原样（`wj_raw`）**照样**写 blob_cache/身份映射（下一轮的起点就是它）。
+    wj_sent_raw = wj_raw
+    if weights_delta.w_fmt_of(manifest) == weights_delta.W_DELTA_FMT:
+        if init_w is None or not init_w.exists():
+            raise ProtocolError(
+                "形态位是权重 delta 但本轮没有 base 权重（init_weights.json 不在）——拒发"
+            )
+        base_w = init_w.read_bytes()
+        wj_sent_raw = weights_delta.pack_weights_delta(
+            base_w, wj_raw, base_sha=hashlib.sha256(base_w).hexdigest()
+        )
     ckpt_dir = job_dir / "ppo_final"
     _ppo_save(str(ckpt_dir), raw_model, opt, int(manifest["epochs"]))
     # 本机那份 f32 全量（身份映射与 blob_cache 都吃它）；R3 下它**不再是**回传字节本身
@@ -722,8 +738,9 @@ def run_training_core(
         "job_id": jid,
         "data_fp": manifest["data_fp"],
         "init_weights_fp": manifest["init_weights_fp"],
-        # 回传的 weights_json 用的就是被缓存的那份字节（同字节 ⇒ 同 sha，别中途再读一次盘）
-        "weights_json": encode_weights_json(wj_raw),
+        # 回传的 weights_json：旧形态用的是被缓存的那份字节（同字节 ⇒ 同 sha，别中途再读一次盘）；
+        # R1 形态位命中时这里是 delta 容器（本机那份全量仍是 `wj_raw`，见上面产物段）。
+        "weights_json": encode_weights_json(wj_sent_raw),
         "opt_tar_b64": opt_tar_b64,
         "agg": {
             "policy": float(agg.get("policy", 0.0)),

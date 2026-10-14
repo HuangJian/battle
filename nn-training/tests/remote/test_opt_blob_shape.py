@@ -323,8 +323,10 @@ def test_run_job_product_section_caches_weights() -> None:
     assert "_cache_produced_weights(blob_root, wj_raw, log)" in src
     # 且 opt tar 那一行仍在（两者同规、同一理由）
     assert "hashlib.sha256(opt_tar_raw).hexdigest()" in src
-    # 回传的 weights_json 用的就是被缓存的那份字节（同字节 ⇒ 同 sha，别中途再读一次盘）
-    assert '"weights_json": encode_weights_json(wj_raw),' in src
+    # 回传的 weights_json 用的是产物段算出来的那份（同字节 ⇒ 同 sha，别中途再读一次盘）：
+    # 旧形态下 `wj_sent_raw = wj_raw`（逐字节旧行为），R1/M3 形态位命中时它是 **delta 容器**
+    # ——而**本机那份全量 `wj_raw` 照样进 blob_cache/身份映射**（上面两行就是它的铺）。
+    assert '"weights_json": encode_weights_json(wj_sent_raw),' in src
 
 
 # ------------------------------------------------------------------ 6) 节点缺 blob 判据

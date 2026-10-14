@@ -179,6 +179,7 @@ LAYERS: dict[str, int] = {
     # import stdlib + `common.errors`（叶子）⇒ **L0**；torch 惰性（**不住 `common/`** —— 那两条层
     # 守卫连函数内 `import torch` 也算「碰上层」，理由见模块头）。
     "remote.opt_delta": 0,
+    "remote.weights_delta": 0,
     "remote.hub_client": 1,
     # 2026-10-10（plan/cluster-code-snapshot）：集群代码快照——会话级 `code.zip` 锚点。
     # 它只 import `remote.hub_client`(L1) 的 `pack_code_zip` + `common.*` ⇒ 拓扑秩 1 + 1 = **L2**；

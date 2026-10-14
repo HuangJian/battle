@@ -9,6 +9,10 @@
 * **v2 裸二进制线格式**：`pack_result_v2` / `unpack_result_v2`（`BRV2`）与 `pack_job_v2` /
   `unpack_job_v2`（`BRJ2`）。布局固定 = `MAGIC(5) | uint32 BE header_len | header_json | blob…`；
   省掉 base64 的 33%。解析端把结果**还原成 v1 的字符串形态** ⇒ 下游零改动。
+* **delta 容器的共用读法**：`fmt_bit`（manifest 形态位：命中才认新形态）· `container_base_sha`
+  （只读头拿基准指纹 ⇒ exact/identity 两档读数）。两个**同族容器**（`BOD1` opt / `BWD1` 权重，
+  见 `remote/opt_delta` 与 `remote/weights_delta`）共用同一套框法与读法；形态常量与容器本体
+  归各自模块所有。
 
 **为什么单独成家**：这是「字节 ↔ 对象」的**格式**面，与 manifest/角色的**语义**校验（留在
 `protocol`）是两件事；读完一个模块就该知道所有的线上字节形态。依赖面 = stdlib（`base64` /
@@ -192,6 +196,44 @@ def unpack_result_v2(body: bytes) -> dict:
     if off != len(body):
         raise ProtocolError(f"v2 体尾部有 {len(body) - off} 字节多余数据")
     return head
+
+
+# ---- delta 容器（`BOD1` / `BWD1`）的**共用读法**（2026-10-14，plan/wire-diet §12/§13）----
+# R3（opt delta）与 R1（权重 delta）是两个**同族容器**：`MAGIC(4) | uint32 BE header_len |
+# header_json | blob…`（与上面 `BRV2`/`BRJ2` 同一套框法）。形态位读法与「只读头拿 base_sha」
+# 若各写一份，就是同一份判据两处实现 —— 改一处漏一处即静默分叉（worker 发新形态、hub 按旧
+# 形态解）。⇒ 读法只此一处；形态常量（`OPT_DELTA_FMT`/`W_DELTA_FMT` 与两个魔数）仍归各自的
+# 容器模块所有 —— 谁改形态、谁改一个值，`import` 一眼可见。
+def fmt_bit(manifest: object, *, key: str, want: str) -> str:
+    """manifest 的**形态位读法**：逐字等于 `want` 才返回值，否则 `""`（= 旧形态）。
+
+    缺键 / 旧值 / 脏值 / 非映射一律回 `""` ⇒ 调用方「命中才走新形态，否则逐字节旧行为」。
+    """
+    if not isinstance(manifest, dict):
+        return ""
+    got = str(manifest.get(key) or "")
+    return got if got == want else ""
+
+
+def container_base_sha(raw: bytes, *, magic: bytes) -> str:
+    """「`magic` + uint32 BE 头长 + header_json + 载荷」这种容器头里的 `base_sha`（**只读头**）。
+
+    读不动（没魔数 / 截断 / 头不是 JSON 对象）⇒ `""`。hub 侧的**档位读数**：与 manifest 里的
+    指纹相等 = exact 档（worker 下的是我们发出去的那份字节）；不等 = identity 档（worker 用
+    自己那份权威副本当基准 ⇒ 无权对账，只记一行判别）。
+    """
+    off = len(magic)
+    if not raw.startswith(magic) or len(raw) < off + 4:
+        return ""
+    (hdr_len,) = struct.unpack(">I", raw[off : off + 4])
+    off += 4
+    try:
+        hdr = json.loads(raw[off : off + hdr_len].decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return ""
+    if not isinstance(hdr, dict):
+        return ""
+    return str(hdr.get("base_sha") or "")
 
 
 def _pack_wire(raw: bytes) -> str:

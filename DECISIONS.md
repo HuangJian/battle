@@ -5701,6 +5701,154 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后绿）；门禁
 `bash tools/githook/nn-python-gate.sh` 绿（4275 passed / 1 skipped）
 
+## §2026-10-13-goalnn-y1h-design（2026-10-13，y1h A线调税腿：y1f只去wHurt，测挨打税是否按头）
+
+- **背景**：y1f/y1d it20 双坐塔（cells 恒 1），开火 21.68 没问题——按住的是腿不是枪。hurt 在 turret 行
+  隐身（≈−0.06），前瞻里"动而挨打"＝110 重税；wDmg 0.03 留（a2 单杯兜得住 0.877 伤的先例）。
+  用户令 A/B 两路都备好、后面并行。
+- **决定**：D1=`y1h`（y1f 单变量删 wHurt；同 s8/流 20261024/优化器/K/门；新 out/traj tmp/y1h＋
+  backup weights/y1h，§15.5）；D2=门与 y1f 一字同（shots≥10＋cells≥5＋kills≥0.3，D01 watch，
+  fear-watch，it5 analytic；fail⇒杀腿）；it80 同线 ⇒ y2-phase2；
+  D3=readout（y1h 动⇒hurt 是手；三腿不动⇒主犯另有，phase-1c）。
+- **备选与否决**：① 连 wMiss 同删 —— 否（开火没问题，miss 不背腿的锅；加变量，phase-1b 排队）；
+  ② explore 加量代替去 hurt —— 否（x20 反向激励旧账下胡萝卜侧已够 0.2；先松绑，phase-1c 排队）；
+  ③ 不同流/起点 —— 否（断 paired；四向同 s8 同流）。
+- **后果**：`nn-training/curricula/y1h.jsonc`（load＋编译＋对账绿，证据 `tmp/y1ha-ev-check.py`）；
+  全文 → `docs/nn/experiments.md` §90；开课人点（并行容量人定）。
+
+## §2026-10-13-goalnn-y1a-design（2026-10-13，y1a B线BC迁移腿：a2.it45为师＋y1f配方＋缰绳）
+
+- **背景**：Plan B（用户令）：y1f/y1d it20 坐塔后备——把会动的冠军搬过来。师傅 a2.it45
+  （`weights/x1-rebirth-a2/x1-rebirth-a2.it45.20260917-214757.json`，sha16 `b21c13c899dc70bb`；
+  档案 eval 1.0/cells 12.5/shots 3.18/dmg 0.877）。架构账：师傅 schema 3（头 128 无 extra）
+  vs 现行 5（头 165）⇒ bc 直指被 schema 门响亮拒绝；`load_state_into` 的部分装载只认同 schema 族。
+- **决定**：D1=`y1a`（配方 y1f 逐字，变量只剩起点技能；bc 指转换产物
+  `weights/y1a/a2it45-warmstart-v5.json`〈**待生成**，命令在头注：init_spatial_leg.py --legacy-arch，
+  a2 头宽对得上 v3-hu150 系〉；kickstart_ref=true＋init 0.1，warmup 0；新 out/traj tmp/y1a＋
+  backup weights/y1a，§15.5）；D2=冠军门（以本腿 it0 基线为准：kills≥0.8＋cells≥8＋D01≤5.0，
+  shots 只读；fear＝双塌；it5 analytic；fail⇒杀腿）；it80 kills≥0.8＋pass≥80% ⇒ y2-phase2；
+  D3=开课前置（产物存在＋warmstart_missing 已审计，缺一不开）。
+- **备选与否决**：① bc 直指旧文件 —— 否（schema 门 fail fast；只有转换路）；② 不用缰绳 ——
+  否（新列 fresh＋新奖励，首轮 KL 必 spike；M3/x24 缰绳先例）；③ 用 it46 不用 it45 ——
+  否（it45 是档案 eval-1.0 verdict 点；换点加变量）；④ 配方用 a2 原版六项 —— 否（那是"a2 续跑"
+  不是 phase-1；本腿测"phase-1 经济＋冠军技能"，归因死于技能侧、证配方看 y1f/y1d/y1h）。
+- **后果**：`nn-training/curricula/y1a.jsonc`（配方/缰绳/前置态校验绿，证据 `tmp/y1ha-ev-check.py`）；
+  全文 → `docs/nn/experiments.md` §91；转换＋开课都是人点（agent 不得启动训练）。
+
+## §2026-10-13-goalnn-y1fd-it40-verdict（2026-10-13，y1f/y1d it40：y1f 三挂杀、y1d 偏离续命、explore 零效应、y1h 开）
+
+- **背景**：y1f it40（shots 0/cells 1.0/kills 0，0/400 开火，it25–40 坐穿）三线全挂＋恐惧塌；
+  y1d it40（shots 7.82/cells 1.0/kills 0.325，130 clears，394/400 开火，rollout 83/win 0.395）。
+  y1a 早报：it1 KL 0.037→it2–4 0.004（缰绳按住跨架构冲击），rollout 0.996，熵 1.01。
+- **决定**：D1=y1f **杀**（无异议）；D2=y1d **§6.4 偏离续到 it60**（字面挂两条，但唯一活口＋rollout 最好＋
+  kills 过＋shots 降伴随 kills 守＝效率化非恐惧；改判线 it60：shots<5 或 kills<0.3 即杀，
+  cells 仍 1 则与 y1h 会师 phase-1c）；D3=y1h **现在开**（cells 双挂＋y1f 全挂＝预注册触发条件）；
+  D4=y1a 不动（等 it5 eval 首检＋analytic）。
+- **备选与否决**：① y1d 按字面杀 —— 否（杀最后活口保门面；门是手段，留希望是目的；偏离已记本条）；
+  ② y1f 续命 —— 否（三挂＋恐惧塌＋y1 同死法，无可辩）；③ 现在判 explore 有害 —— 否（无实锤；
+  taper/drop 候选，等 y1h）；④ y1a 加课 —— 否（it5 首检前不动冠军）。
+- **后果**：杀/续/开全是人点（控制台）；全文 → `docs/nn/experiments.md` §92；
+  ⚠ 五条腿 analytic 直算零次——接线解释全盲，y1a 最急（缰绳 unverified）。
+
+## §2026-10-13-goalnn-y1a-it5-hold（2026-10-13，y1a it5 满分保持＋analytic 关闭接线盲：三腿零三种死法）
+
+- **背景**：y1a it5 eval 400/400（kills 1.0/cells 19.9/D01 3.18，冠军门全过 margin 大；
+  D01＋75%/dmg＋66% watch，ticks 495→431 杀更快）。训练 KL 0.037→0.004–0.007（缰绳按住），熵 1.01。
+  头注 mandate（it5 前直算）到期。
+- **决定**：D1=y1a **续**（守住，无动作，等 it10 看 D01 趋势）；D2=接线盲关闭：直算证 y1a 结构性零
+  （legacy 空片；缰绳看 KL）＋y1f/y1d 新列真动（policy 0.099/0.074、value 0.287/0.212；
+  账本零系上报链误报，以直算为准）；D3=y1f 死因追加 lead（value 0.287≈x26 无绳爆炸位 0.30＋
+  熵反升 0.83→1.05，advantage 污染嫌疑；phase-1c 候选，不单独立项）。
+- **备选与否决**：① 因 D01＋75% 干预 —— 否（线内且杀更快；it10 再看）；② 重查 y1/y1k 历史零 ——
+  否（旧账，新法不追）；③ 给 y1a 加 value 绳 —— 否（legacy 空片无绳可拴；缰绳就是 kickstart）。
+- **后果**：证据 `tmp/y1a-rms-analytic.py`（绿）；全文 → `docs/nn/experiments.md` §93；y1a 等 it10。
+
+## §2026-10-13-goalnn-tax-start-rung（2026-10-13，x2–x6 加冕迁新网普查：c04 发病，y4 为第一加税级）
+
+- **背景**（用户令）：x 系无数轮把贴脸/火线傻站养成绝症才重开 y 系；a2 迁移守住 100% 证明旧成果可搬。
+  六冠（x2.it15/x3.it153/x4.it45/x5r.it35/x5a.it155/x6.it45，全 schema 3 头 128）经
+  init_spatial_leg --legacy-arch 转新网（41/42 原位、missing 空，`tmp/mig-audit.py` 绿），
+  各在自家 rung eval（700 局 55s；c01 复用 y1a it0）。
+- **决定**：D1=**y4（c04）为第一加税级**（胜率 95→76 悬崖＋D01 翻倍＋连击翻 3 倍＋转化层全点火，
+  c04–06 n=50 下 19pp 实）；D2=y2/y3 沿 phase-1 经济（免 near/threat；97%/95% 不值得冒恐惧）；
+  D3=税形为**带血的税**（post-hit near/bursts/max120/while-low，v10/v11 现成列），否决无差别贴脸税
+  （c01 nearSq 最高却 0 伤，一刀切连干净近身一起杀）；D4=剂量开 y4 时用 c04 真实行标定。
+- **备选与否决**：① c02（D01 63.5）即加税 —— 否（胜率高＋连击低；若 y2 相对 x2-migrated 退化再议）；
+  ② c06（敌最多）加税 —— 否（82% 反高于 c04/05，病在 c04 不在 c06）；③ 只测 x5-rebirth 弃 x5a ——
+  否（x5a 的 bursts/postHit 软化是 approach 税形唯一的 endpoint 级证据，留作 y4 税形参考）；
+  ④ 现在写 y4 文件 —— 否（y1 phase-1 未收官；判决先行，文件等 y2/y3 落子）。
+- **后果**：行 `tmp/mig-eval/rows-*.jsonl`（复用）；权重 `nn-training/weights/x{2,3,4,5r,5a,6}-mig/`；
+  全文 → `docs/nn/experiments.md` §94；y4 文件待 phase-1 收官后按本条开。
+
+## §2026-10-13-goalnn-y45-design（2026-10-13，y4/y5 加税腿：x4/x5r 为师＋x27 逐字，300 轮人工盯盘无熔断）
+
+- **背景**（用户令）：§94 判 y4 第一加税级后，用户点名配方 x27-obs 逐字、iters 300、人工盯盘不设熔断、
+  问能否并行。§94 尾巴"等 phase-1 收官"被本令取代（提前开 y4/y5，phase-1 与加税并行）。
+- **决定**：D1=y4（c04＋x4-mig，sha `770b14b9e3d431a4`）＋y5（c05＋x5r-mig，sha `b17614921b32ff15`；
+  不用 x5a：机制探针、主端点死，不当师傅）；配方/terminal/scheme/优化器/K 与 x27-obs 全逐字；
+  kickstart 缰绳＋burn{baseline,100} 等效关＋ent_break 0；iters 300/max_hours 48/workers 8；
+  eval 本 rung（"2000" 单关×100，y 口径）；D2=盯盘表（it40/100/200 对基线：y4 3.56/170/76%，
+  y5 4.40/139/78%；kills−15%/pass−10pp/D01 翻倍/KL>0.03×3/rms 非零 ⇒ 人工掐；§15.4 每次 update
+  人读 kl/entropy/value/gnorm＋rms）；D3=§15.5 新账本双份（tmp/y4＋y5，backup weights/y4＋y5）；
+  D4=**并行就绪**（零共享状态；容量人定）。
+- **备选与否决**：① 用 x5a 当师傅 —— 否（机制探针不当师傅；过关冠是 rebirth 系）；
+  ② eval_games 50 照 x27 —— 否（单关 rung 取 100 保分辨率；700 局 55s 实测成本可忽略）；
+  ③ max_hours 24 照 x27 —— 否（长 tick rung，48 纯 ceiling 偏离）；④ stream 沿 x27 的 20261021 ——
+  否（y 系用 20261024，rung 不同本就无串扰）；⑤ 带血税形（§94 原推荐）—— 否（本单用户令为准，
+  偏离已记本条；pickup 死列 phase-2 清理候选）；⑥ 自动门 —— 否（用户令人工盯盘，人就是熔断器）。
+- **后果**：`nn-training/curricula/y4.jsonc`＋`y5.jsonc`（load＋编译＋逐字 diff 绿，
+  证据 `tmp/y45-ev-check.py`）；全文 → `docs/nn/experiments.md` §95；开课人点（可并行，agent 不得启动训练）。
+
+## §2026-10-14-wire-diet-transport（2026-10-14，payload/result 传输瘦身：**回传字节可降质，本机计算的 opt 保持 f32**）
+
+- **背景**（用户令 + 实测）：code.zip 已瘦身且可缓存（一次性收益吃完），剩大头是每轮不同的 payload
+  下行与 result 上行；家宽晚高峰掉到几十 KB/s，传输 ~6 s → >100 s。实测基线（真实 job
+  `tmp/y1f/remote-jobs/7d94ec31dfd45dcb`，it42，190 shard + 相邻四轮 blob）：命中态每轮
+  **2,480,178 B**（payload 1,724,704 + 上行 weights 288,205 + opt 467,269）。
+  payload 解包 296 MB → 1.70 MB，xz 后占比 scalars 40.1% / metrics(f64) 31.8% / obs(u8) 20.8% /
+  manifest×190 8.6%；`metrics.npy` 是 reward 的唯一输入（`worker/ppo/np_core.py:672/693`）**不能删**。
+- **决定**：D1=**P1**——`metrics.npy` 改为打包端按课程公式算好 `reward.npy` 再发（**无损**，−27%；
+  payload 头带 `{metrics_version, formula_fp}`，不符即 `ProtocolError`）；
+  D2=**P2**——`scalars/extra/lp_*` 存 f16（加载端 `astype(copy=False)` 零改），**`value` 保持 f32**
+  （它进 GAE 的 δ 再被 adv_norm 放大，只值 3.3%，风险不对称）；
+  D3=**R1**——result 权重改传 delta int16+单 scale（288,205 → 87,546；量化误差/每轮真实更新 = 1.44e-4）；
+  D4=**R3**——opt 回传 `Δopt` f16（467,269 → 95,055），**本机计算用的 opt 保持 f32 全量**；
+  D5=**R0 是 R3 的硬前置**——新增 `course_cache/<course_fp>/latest.json` 把「hub 权威字节 sha」与
+  「本机高精度副本」解耦，否则降质会让内容寻址缓存键失配 ⇒ 每轮多下 614 KB（比省下的还亏）。
+- **红线**（用户 2026-10-14 裁决）：撤销 `plan/minimize-payload.plan.md:53 §1.3-1` 的
+  「opt.pt 不得量化/降质」，**但仅限回传字节**；本机计算/落盘那份必须 f32 全量。
+  判据 = 云机 PPO worker 并行度通常为 1，回传的 opt 本就缓存在云机 ⇒ 传输侧降质不进计算。
+  hub 侧 `B_n = B_{n-1} + Q(A_n−A_{n-1})` 有**线性累积**（4.7e-5/轮，80 轮 ≈0.38%），
+  但该存档只在**换机接续**时被用到一次 ⇒ 不跨机累积，可接受。
+- **备选与否决**（全部有实测，别重开）：① xz preset 3→6 —— 否（−3% 但 +3.5 s CPU，净亏）；
+  ② byte-shuffle 后压缩 —— 否（抽样**变胖 13.5%**）；③ opt 状态存 **f16** —— 否（更新量 L2 相对偏差
+  **3.96e+3**，`exp_avg_sq` 溢出 f16 值域；opt 只能 bf16 或 delta-f16）；④ value 转 f16 —— 否（见 D2）；
+  ⑤ metrics f64→f32 —— 否（只 −6.6%，尾数噪声仍在）；⑥ scalars int16 单/逐列 scale —— 否（比 f16 大）；
+  ⑦ 190 份 manifest 合并 —— 否（−0.6% 却要改 shard manifest 读取面）；⑧ zstd —— 否（新依赖，需另论证）；
+  ⑨ R2（opt 存 bf16，零累积、实现更简）—— **不采用但保留为 R3 失败时的退路**（上行多 127 KB/轮）。
+- **后果**：全文 → `plan/wire-diet.plan.md`（方案/顺序/兼容矩阵/DoD）+ `reports/wire-diet-2026-10-14.md`
+  （数据汇总）；可重跑证据 `tmp/wire-audit{,2,3,4,5,6}.py` 与同名 `.txt`。
+  目标：每轮 2,480,178 → **1,118,691 B（−55%）**，晚高峰 30 KB/s 下 ~83 s → ~37 s。
+  ⚠ 用户已选「先写 plan 再实施」⇒ 本条**只记裁决，未动代码**；
+  M3/M4 上线后必须跑 ≥20 轮 `kl/policy/entropy/winRate` 对照确认无分叉。
+
+## §2026-10-13-goalnn-y5hit-design（2026-10-13，y5-hit 命中腿：y5.it300 为师＋wMiss 加压＋删 dist 彩票）
+
+- **背景**（用户令）：y5.it300 shots/kill 5.8→7.3 恶化，要求加练命中；目标继续少暴露、提命中率；
+  x27-obs 时 NN 命中已和人类相当（不动 wAcc）。诊断：+6.73 发里 +6.13 脱靶（miss +52%），
+  开火距离 +36%；bricks 恒 0。gap 配对模式没跑成（无 human c05＋eval 行缺 panel 列），框架＋配对 z 代替。
+- **决定**：D1=`y5-hit`（y5.it300，sha `092ea1b13ebf9763`，legacy 同代直连，kickstart 关，opt fresh；
+  wMiss 0.158→0.35〈边际 −0.05→−0.17〉＋删 wDist〈彩票排雷〉；wAcc/wHit/暴露全家 HOLD；
+  iters 100/max 12/eval 单关×100/同流 20261024；新 out/traj＋backup，§15.5）；
+  D2=门（it40 hitRate≥0.45＋shots/kill≤6.0；护栏 kills≥3.5/D01≤85；fail⇒杀）；
+  it100 双线 ⇒ 收官。
+- **备选与否决**：① 加 wAcc —— 否（human parity＋别加准头，既定结论）；② 加 wHit ——
+  否（火力无辜；加价诱 spray）；③ 连暴露侧同调 —— 否（用户令保持少暴露）；④ iters 300 ——
+  否（短腿精修 100，可延）；⑤ A02/A06/A08 定向税 —— 否（eval 行不可读，panel-only；
+  先看 wMiss/dist 双杠杆，不加新列）。
+- **后果**：`nn-training/curricula/y5-hit.jsonc`（校验 `tmp/y5hit-ev-check.py` 绿）；
+  全文 → `docs/nn/experiments.md` §97；开课人点（agent 不得启动训练）。
+
 ## §2026-10-14-goalnn-wire-diet-m1m2（2026-10-14，wire-diet 落地 M1+M2：打包端先算 reward ＋ 字段 f16，**缺省关**）
 
 - **背景**：§2026-10-14-wire-diet-transport 只记裁决、未动代码（用户令「先写 plan 再实施」）。
@@ -5796,3 +5944,70 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **后果**：M4 落地时 hub 侧多一条运行时依赖（依赖清单 + 文档同 commit）；M4 的收益（−372 KB/轮）与
   「hub 引入 torch」的运维成本一起记账。前置 = M0（`§2026-10-14-goalnn-wire-diet-m0`）。
   全文 → `plan/wire-diet.plan.md` §3 R3 / §11 · `docs/nn.progress.md` 开放问题 #31。
+
+## §2026-10-14-goalnn-offline-segment-restart（2026-10-14，「停课 → 改大 iters → 开课 ⇒ 云机领到续段」：三处断点一次修掉）
+
+- **来源**：用户 2026-10-14 报障（y5-hit 设 iters 100 收官 → 手改 500 想续跑 → 云机**一直不领任务**；
+  重启课程 / 重启 trainer+hub / 手动删包重导都无效）+ 用户拍板期望行为 = **「手工停课，调大课程 iters
+  参数，再开课后，自主 worker 能继续领到该课程续跑」**。plan → `plan/offline-segment-restart.plan.md`；
+  现场全账 → `docs/nn/remote-transport.md` §93 + `.workbuddy/memory/2026-10-14.md`。
+- **三条判据**（本次立）：
+  ① **J1 续段收包**（云机判定表收紧）：`local_first = 三件齐 ∧ ¬force_pack ∧ ¬(包.plan.start_it ==
+     本机.last_it ∧ 包.plan.end_it > 本机.end_it)`。加长段成立 ⇒ **收包的计划**（`ArtifactStore.start`
+     换段 ⇒ 新 state `last_it = plan.start_it` ⇒ `plan_run` 的 `todo` 正好是 `last_it+1 … 新 end_it`，
+     **一条旧轮都不重跑**）；其余一切情形逐字维持本机优先。**局部推翻** `§2026-09-24-goalnn-offline-local-first`
+     的「三件齐 ⇒ 恒本机优先」——它把「包会把进度往回拖」与「包是本机进度的加长段」当成了同一件事。
+  ② **J2 锚点端点归位**：续跑锚点的**字节**只认 `/offline/resume/blob`（元信息走 `/offline/resume`）；
+     hub 的元信息端点收到 `?name=` ⇒ **响亮 400** 并指路（静默忽略正是这个缺陷活了整整一天的原因）。
+  ③ **J3 开课保新鲜**：开课只在「盘上已有包 ∧ 已被消化（权重/代码比包新）」时重打；**缺包不预造**
+     （★M4 口径不变，无包那条腿走 claim 触发的自动交接）；失败不连坐开课。
+- **为什么必须修**：「跑满」闸锚在**包 zip 的 sha256** 上（`hub/queue_offline.py:1036`），而改 iters /
+  停课 / 重开课 / 重启 trainer+hub **一个都不碰包**；重导本身又是**需求侧**触发的（要 claim 成功），
+  `completed` 又把 claim 挡死 ⇒ 「没有需求就没有导包、没有导包就永远 completed」的**死锁**。
+  实测：人手动点「导出任务包」立刻解（新包 sha ≠ 旧章 ⇒ 读面 `ready/claimable=true`）。
+  另有一处**静默 100% 失效**：云机取锚点字节时把 `&it=&name=` 接在元信息 URL 上 ⇒ 每次拿回 55KB
+  元信息 JSON ⇒ 指纹闸判「传输损坏」丢弃 ⇒ 锚点从未被采纳（本次无害，但那条腿等于死代码）。
+- **被否决的备选**：hub 把「包已过期」纳入 `completed` 判据（云机会拿被消化的包按旧起点跑，把进度
+  往回拖）· hub 在 `GET /offline/tasks` 里顺手触发重导（该端点的**零副作用**是写死的不变式）·
+  控制台在**收官完成时**自动重导（会抹掉「已收官」这个生命周期状态，且每门课跑满都烧一次分钟级导出）·
+  删掉 `local_first`（旧包会让本机已跑的轮次**重跑**，正是 §2026-09-24 要防的）· 依赖
+  `CFG.force_pack=true` 让人手改 notebook（保留为**显式**逃生阀，语义不变）。
+- **残留缺口（本次不修，plan §7 已列）**：① 课**一直开着**（不走停/开）而人只改了 iters ⇒ 死锁仍在
+  （仍需手动点「导出任务包」）；② 云机**同一会话内**已服务过同名包 sha ⇒ 不再领（`offline_boot.py:1766`，
+  防自激的必要闸；本次靠换包 sha 自然绕过）；③ 锚点只服务 hub 认定的那一轮，不补全区间。
+- **门禁**：`tests/remote` + `tests/hub` + `tests/common` 全量 **1941 passed / 1 skipped** · ruff 全量过 ·
+  dashboard `typecheck` + **1587 passed** · 根 `bun run check` **2561 passed / 3 skipped**。两处新判据都
+  做过**先红后绿**反证（把判据退回修复前，用例必红；锚点 URL 反证与 hub 日志逐字一致）。
+  全文 → `docs/nn/remote-transport.md` §93 · `plan/offline-segment-restart.plan.md`。
+## §2026-10-14-goalnn-wire-diet-m3-weights-delta（2026-10-14，R1：权重回传走 int16 单 scale delta；hub **不**引入 torch）
+
+- **背景**：`plan/wire-diet.plan.md` §3 R1 —— result 上行的大头是 `weights_json`（gzip 后实测 288,205 B），
+  回传 `Δ = W_new − W_base` 的 int16 量化可降到 **87,546 B**；base 恒为**本轮下发的 init 权重**
+  （双方按 `init_weights_fp` 内容寻址同一份）⇒ 残差 = 本轮量化误差、**不累积**。
+- **定案 1（单 scale）**：全模型共享一个 `scale = max|Δ| / 32767`。**否决**逐张量/逐参数 scale：
+  ① plan 的 1.44e-4 相对 RMS 是在单 scale 下量的，换口径要重测；② 42 个 scale 加进头里（~700 B）会
+  吃掉小模型上的收益；③ 误差（RMS 3.0e-7）已比每轮真实更新幅度（RMS 2.1e-3）小两个数量级 —— 再降
+  一个数量级换不来任何东西。**后人若想「顺手加 scale」，必须先重测并改这一条。**
+- **定案 2（R1 不吃 torch，与 §10-2 的「hub 引入 torch」无关）**：权重的线上字节是 `nn-weights-json`
+  （`save_weights_json` 写、TS 运行时也读），每个参数是 `{shape, data:<f32 LE base64>}` ⇒ 解析/量化/
+  重建全在 `json` + `base64` + `numpy` 里完成（numpy 在 hub 侧本来就有：`remote/payload_slim.py`）。
+  §10-2 那次「hub 装 torch」的显式决策**只管 R3/M4**（opt 是 tar + 真张量）。
+- **定案 3（重建产物 = 权威字节，两档与 §12 同构）**：hub 落盘的是**重建**出来的 JSON（只替换
+  `params[*].data`，其余键与**键序**原样带回、`indent=2` 与写端同形）⇒ `init_weights_fp = sha256(落盘
+  字节)` 的算法一字不改；它与 worker 本机那份 f32 全量**必然不同 sha**，命中判据是 M0 的身份映射。
+  `base_sha` 与 hub 那份 init 字节相等 = **exact 档**（逐字节对账）；不等 = **identity 档**（worker 用
+  自己那条链当基准 ⇒ 只能靠身份闸 + 结构闸，偏差 ≈ 一轮量化误差的随机游走）。
+- **被否决备选**：① 逐张量 scale（见定案 1）；② 在**绝对**权重上量化（同 §3 否决表里 opt 状态 f16
+  那条灾难）；③ hub 侧只存 delta 不解码（下一轮 base 无从重建 ⇒ 链断）；④ 让 hub 为了 R1 引入 torch
+  （定案 2：结构性不需要）。
+- **补记（同日，落地时两处收紧；plan §13 定案 6/7）**：① **拒收面再加一格** —— 「魔数被改坏、头却
+  自述 delta」的字节一律拒收（`_container_shaped`）：宽容档只留给「根本不是容器」的旧形态字节
+  （旧 worker / 冒烟回显），改坏的容器当权重落盘是最坏的那一格（身子是 int16 载荷 ⇒ 静默污染链）。
+  ② **读法去重**：`fmt_bit` / `container_base_sha` 下沉 `common.wire_codec`，两族容器只留 `partial` 别名
+  —— 新开一个共用模块会让两个 L0 叶子一起升到 L1、连坐 `hub_client` 与 9 个上位模块（同 §13 定案 5）；
+  复用账本结构克隆 18 → 16。
+- **后果**：R1 与 R3 共用同一套「形态位 + 容器自述 + 两档判别 + 缺 base 拒发」的纪律，形态位键
+  分别为 `manifest.w_fmt` / `manifest.opt_fmt`；开关仍 `--wire-diet 0`，等 §6 的真机 A/B 通过才翻 1。
+  全文 → `plan/wire-diet.plan.md` §3 R1 / §13 · `docs/nn/remote-transport.md` §94 · 代码
+  `remote/weights_delta.py`。
+

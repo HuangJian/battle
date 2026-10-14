@@ -6,6 +6,119 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §94 wire-diet 两档读数：`exact` / `identity` 怎么看（2026-10-14，`plan/wire-diet.plan.md` §12/§13 · 决策 `DECISIONS.md` §2026-10-14-goalnn-wire-diet-m3-weights-delta 与 §2026-10-14-goalnn-wire-diet-m4-hub-torch）
+
+R3（opt delta，§12）与 R1（权重 delta，§13）落地后，**回传字节可降质、本机权威副本不降质**；两条腿的
+落盘产物都是 hub 侧的**重建值**（⇒ 权威字节 = 重建产物，下一轮的 `opt_sha`/`init_weights_fp` 由它算）。
+hub 每次都以**自己那份 landed 基准**重建 ⇒ 量化误差**不累积**（`B_n = B_{n-1} + Q(A_n − A_{n-1})`）。
+
+**形态位（缺键 = 旧形态，逐字节旧行为）**：发布端写 `manifest.w_fmt=delta-i16` / `manifest.opt_fmt=delta-f16`
+（仅在真的有 init/opt 字节、且 `--wire-diet` 打开时）；worker 与 hub 都只走唯一口径
+`common.wire_codec.fmt_bit`（命中才认新形态）。容器自带魔数（`BWD1` / `BOD1`）⇒ 旧端拿到容器先撞魔数，
+不会把 delta 当权重/opt 落盘。
+
+**两档判别**：容器头里的 `base_sha`（只读头，`common.wire_codec.container_base_sha`）= worker **实际
+载入**的那份基准的 sha256。落地时各打一行：
+
+```
+weights delta 落地：base_sha=exact|identity 档（容器 <12hex>… / 本机 <12hex>…）
+opt delta 落地：base_sha=exact|identity 档（容器 <12hex>… / 本机 <12hex>…）
+```
+
+| 档 | 读法 | hub 能不能对账 | 偏差量级 |
+|---|---|---|---|
+| **exact** | 容器 `base_sha` == hub 本机那条字节的 sha（`init_weights_fp` / 上一轮 landed `opt`） | 能：`apply_*_delta(expect_base_sha=…)` 逐字节对账，不符即拒 | 一轮量化误差（权重相对 RMS 1.44e-4；opt 实测 max 5.43e-5） |
+| **identity** | 不等：worker 用**自己那条链**的副本当基准（M0 身份映射命中 ⇒ `_resolve_weights` 的本地源；§92） | 不能：只能靠身份闸 + 结构闸（键集/形状/载荷长度） | 仍是量化误差量级，但落在**两条链之间**的差上（随机游走，不放大） |
+
+**绝不放行的三档（一律 `ProtocolError`，绝不静默降级）**：① 容器坏（截断 / 头不是 JSON / `wfmt`/`ofmt`
+不认 / 项集合或载荷长度与基准不符）；② **魔数被改坏、头却自述 delta**（`_container_shaped` —— 身子是
+delta 载荷，当权重落盘即静默污染链）；③ 缺 base（worker 侧「拒发」、hub 侧「拒收」：上一轮 landed ckpt
+被 prune / 换了 traj 目录 / `init_weights.json` 不在）。
+**唯一宽容的一档**：**不是容器**（旧 worker / 冒烟回显送来的整份 JSON / tar）⇒ 按旧形态**原样**落盘 +
+一行 WARN（发布端与节点代可能错位，旧代节点不该让整条腿的 job 全废）。
+
+**刻度**：开关仍 `--wire-diet 0`，等 `plan/wire-diet.plan.md` §6 的真机 A/B（≥20 轮对照，查分叉）通过
+才翻 1。两档的**计数**（这一轮到底走的哪档）从日志行 grep `base_sha=identity` 即可复算。
+
+---
+
+## §93 续段重启：停课 → 改大 iters → 开课 ⇒ 云机领到**续段**（2026-10-14，`plan/offline-segment-restart.plan.md` · 决策 `DECISIONS.md` §2026-10-14-goalnn-offline-segment-restart）
+
+**用户报障**（2026-10-14）：y5-hit 设 iters=100 收官，手改 iters=500 想续跑，云机**一直不领任务**
+（20 次轮询全是 `y5-hit[completed；…；包过期]`），重启课程 / 重启 trainer+hub / 手动删包重导
+「都试过了没效果」。用户拍板期望行为 = **「手工停课，调大课程 iters 参数，再开课后，自主 worker
+能继续领到该课程续跑」**。
+
+这条链上有**三处独立断点**（都只在「没有人主动点『导出任务包』」时暴露），本次一并修：
+
+### 断点① 「跑满」闸没有出口（hub 侧，**死锁**）
+
+判据是 `completed_pack_sha == sha256(当前包 zip)`（`hub/queue_offline.py:1024-1041`），由云机自报
+`end_it_reached` 盖章（`hub/offline.py:374-378`）。**全仓没有任何写点会把 `completed_pack_sha` 清成
+`""`** ⇒ 唯一的解封途径 = 换包（sha 变 / 包不在时 `pack_sha==""` 放行）。而导包是**需求侧**触发的
+（★M4：缺包/过期包 ⇒ claim ⇒ `pending_export` ⇒ `/api/autoOfflineHandoff`）——`completed` 挡住 claim
+⇒ 没有需求 ⇒ 没有导包 ⇒ **死锁**。实测：人手动点「导出任务包」立刻解（新包 sha ≠ 旧章 ⇒ 读面
+`ready/claimable=true`）。
+
+**修法**（`dashboard/src/server/actions/auto-offline-handoff.ts::ensureFreshTaskBundle` +
+`course-lifecycle.ts::openCourse` 接线）：**开课顺手保新鲜** —— 盘上那份包**已被消化**（权重/代码比
+包新）⇒ 作废 + 重导。开课 = 人对「下一段」唯一的显式表态；这一刻本机权重必然比旧包新（云端/本机的
+轮次已并回 `weights.json`）⇒ 规则表 ④' 必然命中 ⇒ 新包 sha ≠ 旧章 ⇒ 闸自动开。
+★ **缺包不预造**（★M4 口径保留：无包时云机 claim 走自动交接那条腿）；★ 失败不连坐开课。
+
+### 断点② 云机「本机优先」不认续段（**决定性**）
+
+`remote/offline_boot.py` 判定表：产物目录三件齐 ⇒ `local_first=True` ⇒ **刻意不从包导入
+plan/manifest**（包只当 code/TS 备源）⇒ 拿**旧段**计划跑 ⇒ `plan_run.py:477-486`「本机段落已完成」
+立刻 noop。现场：包是 `plan start_it=100 / end_it=500`，云机日志却是
+`续跑起点 it100（计划 it0 → it100）`。
+
+**修法**（判据 **J1**，纯函数 `pack_extends_local`）：
+`local_first = 三件齐 ∧ ¬force_pack ∧ ¬包是本机进度的加长段`，其中
+**加长段 ⟺ `包.plan.start_it == 本机.last_it` ∧ `包.plan.end_it > 本机.end_it`**
+（包侧起点从**包内 `plan.json`** 读，不用 `task.json` 的 `it` − 1 那条算术）。
+两条真的时候收包只会**往后接**：`ArtifactStore.start` 换段 ⇒ 新 state `last_it = plan.start_it` ⇒
+`plan_run` 的 `todo = [it for it in planned_range() if it > last_it]` 正好是续跑，**一条旧轮都不重跑**。
+其余一切情形（回退段 / 等长段 / 更长段 / 读不到 plan）**逐字维持本机优先**。
+这是对 `DECISIONS §2026-09-24-goalnn-offline-local-first` 的**局部推翻**（判据收紧，不是删掉）。
+`describe_local_vs_pack(..., adopt=)` 把「收包」这一档也打进日志（静默换段与静默**不收**包一样难查）。
+
+### 断点③ 续跑锚点在云机侧 100% 失效（接口写岔 + 静默）
+
+`remote/offline_boot.py::fetch_resume` 建的是**元信息** URL `…/offline/resume?course=<课>`，把
+`&it=N&name=<件>` **接在同一条 URL** 上去取三个件的**字节**；而 hub 按**路径等值**分派
+（`hub/http_face.py:425/427`）⇒ `it`/`name` 被整个忽略 ⇒ 每次拿回那段 55KB 元信息 JSON ⇒
+`run_loop.py:274-280` 的指纹闸判「传输损坏」丢弃 ⇒ **锚点从未被采纳过**。
+
+实测（本机 hub，两条 URL 逐字对照）：
+
+| 请求 | 状态 | 字节 | sha256 |
+|---|---|---|---|
+| `/offline/resume?course=y5-hit&it=100&name=weights.json` | 200 | 55150 | `fa8d94e1…`（= 云机日志的「实得」） |
+| `/offline/resume/blob?course=y5-hit&it=100&name=weights.json` | 200 | 385943 | `e5f54d92…`（= 云机日志的「声明」） |
+
+**修法**（判据 **J2**）：字节腿改走 `OFFLINE_RESUME_BLOB_PATH`（`common/protocol.py:622`；云机侧
+`offline_boot.py` 刻意不 import `common`/`remote` ⇒ 自拄字面量 + **常量对账用例**）；
+hub 的元信息端点收到 `?name=` ⇒ **响亮 400** 并指路 blob 路径（静默忽略正是这个缺陷活了整整一天
+的原因；老客户端的最终行为与事故前逐字相同，只是现在看得见）。
+
+### 用例缺口与守卫（为什么能活一整天）
+
+- hub 侧有端点用例（`tests/hub/test_offline_resume_anchor.py:182` 用的就是 blob 路径），
+  但**客户端侧没有一条断言 URL 形状**（`tests/remote/test_offline_eval_wiring.py` 的假 HTTP
+  只判 `"name=" in url`）⇒ 写岔没人拦。本次两条 URL 都钉死 + 常量对账。
+- 判定表用例（`tests/remote/test_offline_local_first.py`）：续段收包 / 等长不收 / 回退不收 /
+  **包无 plan 不收** / `force_pack` 仍优先，五档逐条。两者都做过**先红后绿**反证
+  （把判据退回修复前，用例必红）。
+
+### 残留缺口（**未修**，见 plan §7）
+
+① 课**一直开着**（不走停/开）而人只改了 iters ⇒ 死锁仍在（控制台在收官时自动重导会把「已收官」
+这个生命周期状态抹掉，且每门课跑满都烧一次分钟级导出 ⇒ 留作下一个决定）；
+② 云机**同一会话内**已服务过同名包 sha ⇒ 不再领（`offline_boot.py:1766`，防自激的必要闸）——
+本次靠「换包 sha」自然绕过；
+③ 锚点只服务 hub 认定的那**一轮**（最新同轮齐全），不补全区间。
+
 ## §92 wire-diet 落地 M0（R0）：本机权威副本的**身份映射**（`course_cache`）+ `manifest.opt_from`（2026-10-14，`plan/wire-diet.plan.md` §3 R0 / §11 · 决策 `DECISIONS.md` §2026-10-14-goalnn-wire-diet-m0）
 
 **触发**：R1（权重 delta i16）/ R3（opt delta f16）让 hub 的**权威字节**从「回传的原始字节」变成
