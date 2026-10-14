@@ -37,6 +37,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import remote.course_cache as course_cache
 from common.log_bundle import LogBundle
 from common.protocol import (
     BLOB_DEMO,
@@ -338,18 +339,35 @@ def run_training_core(
     )
     # `blob_hits` / `blob_miss_bytes` 的值由入参传来（init 那一手账在作业壳的权重解析处建）
     # —— 本模块只在它上面累加 opt/ref/demo，最后一次性交给 `_wire_block`。
-    opt_raw, opt_hit, opt_src = _resolved(
-        jid=jid,
-        name=BLOB_OPT,
-        sha=opt_sha,
-        inline_b64=str(manifest.get("opt_init", "") or ""),
-        base_url=base_url,
-        token=token,
+    # ---- R0（M0）：opt 也先试**身份**命中（本机 f32 全量副本，零字节、零降质）----
+    # 判据全在 `course_cache.hit`；不成立就直接落回下面的内容寻址路径（逐字节旧行为）。
+    _local = course_cache.hit(
+        cache_root=course_cache.cache_root_of(blob_root),
         blob_root=blob_root,
-        preloaded=preloaded,
-        batch=_batch,
+        course_fp=str(manifest.get("course_fp", "") or ""),
+        opt_from=str(manifest.get("opt_from", "") or ""),
+        expect_it=int(manifest.get("it", 0) or 0) - 1,
         log=log,
     )
+    if _local is not None:
+        opt_raw, opt_hit, opt_src = _local["opt"], True, "course_cache"
+        log(
+            f"job {jid}: opt 身份命中（course_cache）——本机 f32 副本，零字节"
+            "（hub 权威链的延续点，由回传受理时确认）"
+        )
+    else:
+        opt_raw, opt_hit, opt_src = _resolved(
+            jid=jid,
+            name=BLOB_OPT,
+            sha=opt_sha,
+            inline_b64=str(manifest.get("opt_init", "") or ""),
+            base_url=base_url,
+            token=token,
+            blob_root=blob_root,
+            preloaded=preloaded,
+            batch=_batch,
+            log=log,
+        )
     if opt_hit and opt_src == "cache":
         blob_hits += 1
     if opt_src == "download":
@@ -665,6 +683,20 @@ def run_training_core(
     # M2 B3：把刚产出的 raw opt tar 写进 blob_cache（键 = sha256）——下一轮 hub 的
     # opt_sha 由 verify_and_land 落盘的同一份原始字节算出，故同会话内 100% 命中。
     _cache_blob(blob_root, hashlib.sha256(opt_tar_raw).hexdigest(), opt_tar_raw, log)
+    # ---- R0（M0）：记下「本机跑出的这份产物在哪」→ 身份映射的 **pending** ----
+    # 只记 sha+字节数（两份副本本来就在 `blob_cache` 里，**不**复制字节）。它此时**还不算**
+    # 可用起点：要等回传受理（`job_round` 的 settled 回调）才 `confirm` 升成 `latest`——
+    # 输了竞速的那台也算出过一份产物，把它的链当 hub 权威链的延续点会静默分叉。
+    course_cache.record_pending(
+        course_cache.cache_root_of(blob_root),
+        str(manifest.get("course_fp", "") or ""),
+        job_id=jid,
+        it=int(manifest.get("it", 0) or 0),
+        run_id=str(manifest.get("runId", "") or ""),
+        weights=(hashlib.sha256(wj_raw).hexdigest(), len(wj_raw)),
+        opt=(hashlib.sha256(opt_tar_raw).hexdigest(), len(opt_tar_raw)),
+        log=log,
+    )
 
     result = {
         "job_id": jid,

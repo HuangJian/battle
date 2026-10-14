@@ -143,7 +143,12 @@ def prune_job_dirs(
             for d in work_dir.iterdir()
             if d.is_dir()
             and not d.name.endswith(DRAIN_STAGE_SUFFIX)
-            and d.name not in ("code_cache", "blob_cache", "ts_code_cache", PREFETCH_DIR_NAME)
+            # `course_cache`（R0/M0，2026-10-14）：**身份映射**（+ 它引用的那两份本机 f32 副本）
+            # 是**状态**不是缓存——给了 `--cache-dir` 时它不在本函数视野里（住持久根），
+            # 没给时它落在 work_dir ⇒ 不豁免就会被当旧 job 目录删掉（与 2026-09-17
+            # `blob_cache` 漏项同型：现象看起来像“协议没生效”）。
+            and d.name
+            not in ("code_cache", "blob_cache", "ts_code_cache", "course_cache", PREFETCH_DIR_NAME)
         ]
     except OSError:
         return 0

@@ -620,6 +620,10 @@ def run_job(
     init_w, weights_src, weights_wire_bytes = _resolve_weights(
         job_dir=job_dir,
         init_weights_fp=str(manifest["init_weights_fp"]),
+        # R0（M0）：本机 f32 副本的身份命中面（旧 hub 无 `opt_from` ⇒ 空串 ⇒ 不试）
+        course_fp=str(manifest.get("course_fp", "") or ""),
+        opt_from=str(manifest.get("opt_from", "") or ""),
+        it=int(manifest.get("it", 0) or 0),
         blob_root=blob_root,
         jid=jid,
         base_url=base_url,
@@ -628,7 +632,7 @@ def run_job(
         log=log,
     )
     prep_b.add("blob 解析", f"{time.time() - t_blob:.1f}s src={weights_src}")
-    if weights_src == "cache":
+    if weights_src in ("cache", "course_cache"):
         blob_hits += 1
     elif weights_src == "download":
         blob_miss_bytes += weights_wire_bytes
@@ -1063,6 +1067,8 @@ def worker_loop(
                 part_dir=part_dir,
                 # 多 hub 才分区 code_cache；`multi` 是宿主概念，本模块不收（见 job_round 文档）
                 code_cache_dir=_code_cache_arg,
+                # R0（M0）：身份映射根（`--cache-dir` 或 work_dir，与 `blob_root.parent` 同源）
+                cache_root=_cache_root,
                 pf_store=pf_store,
                 polls_since_accept=_polls_since_accept,
                 worker_id=worker_id,

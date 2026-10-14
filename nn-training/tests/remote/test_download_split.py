@@ -70,6 +70,7 @@ LANDING_NAMES = ("_ensure_payload", "_ensure_code", "_ensure_ts_code")
 ALLOWED_IMPORTS = {
     "common.protocol",
     "remote.bulk_sched",
+    "remote.course_cache",
     "remote.http",
     "remote.job_fs",
     "remote.wire",

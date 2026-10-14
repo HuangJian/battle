@@ -270,6 +270,36 @@ def iter_shard_dirs(
     return dirs
 
 
+def _previous_job_id(job_root: Path, run_id: str, course_fp: str, it: int) -> str:
+    """同一 run/课程的**上一轮** job_id（R0 的 `opt_from` 来源）；扫不到 ⇒ 空串。
+
+    扫 `job_root/*/manifest.json`：job 目录按 job_id 命名、`prune_job_dirs` 默认 keep=2 ⇒
+    上一轮那份几乎总在（不在就退回内容寻址，**不**猜）。判据取 (runId, course_fp, it−1)——
+    就是幂等键去掉那两个“每轮必变”的分量；`course_fp` 必须在，否则多课程单进程下会把
+    别的课程的上一轮当成本课的起点。
+    """
+    if it <= 0 or not str(course_fp or "") or not str(run_id or ""):
+        return ""
+    try:
+        dirs = sorted(p for p in job_root.iterdir() if p.is_dir())
+    except OSError:
+        return ""
+    for d in dirs:
+        try:
+            mm = json.loads((d / "manifest.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        if not isinstance(mm, dict):
+            continue
+        if (
+            str(mm.get("runId") or "") == str(run_id)
+            and str(mm.get("course_fp") or "") == str(course_fp)
+            and int(mm.get("it") or -1) == int(it) - 1
+        ):
+            return str(mm.get("job_id") or d.name)
+    return ""
+
+
 def _shard_metrics_version(d: Path) -> int | None:
     """shard manifest 声明的 `metrics_version`；读不到/非整数一律 `None` = 视为不符。
 
@@ -919,6 +949,15 @@ def publish_job(
         m["metrics_version"] = metrics_version
         m["gamma"] = gamma
         m["lam"] = lam
+    # ---- R0（M0，plan/wire-diet.plan.md §3 R0）：把「上一轮是哪个 job」写进 manifest ----
+    # 判据在 worker 侧（`remote/course_cache`）：`manifest.opt_from == 本机 latest.job_id`
+    # ⇒ 本机那份 f32 全量副本就是**权威链的延续点**（零字节、零降质），否则回退内容寻址。
+    # 为什么由**这里**写而不是让 worker 自己推「it−1 邻接」：身份映射的键就是 job_id，
+    # 让读取端再推一遍 = 第二份真相。扫不到（首轮 / 上一轮已 prune / 换机重开）⇒ **不添键**
+    # （旧端忽略未知键，但没有键才是“回退内容寻址”的准确表述）。
+    _prev = _previous_job_id(job_root_p, run_id, course_fp, it)
+    if _prev:
+        m["opt_from"] = _prev
     m["kind"] = kind
     m["seed"] = job_seed(run_id, it, init_weights_fp)
     if course_name:
@@ -1373,6 +1412,11 @@ def verify_and_land(
     # M2：把**原始回传字节**落盘（sibling `.tar`）——下一轮 publish 的 opt_sha 必须
     # 由原样字节算出，才能等于云 worker blob_cache 的键（重打 tar 会 sha 漂移 ⇒ 每轮
     # 未命中 ⇒ 1.19MB 白传回来）。写失败不阻断落位（只是退回重打路径）。
+    # ⚠ R0/M0（2026-10-14，plan/wire-diet.plan.md §3 R0）先定口径：R1/R3 落地后权威字节
+    # 不再是「回传来的原始字节」，而是 hub 的**重建产物**（`B_n = B_{n-1} + Q(A_n − B_{n-1})`）
+    # ——它与 worker 本机那份 f32 全量**必然不同 sha** ⇒ 「sha 相等」作为命中判据退役，
+    # 接手的是 `remote/course_cache` 的**身份映射**（`manifest.opt_from` 对上本机 `latest`）
+    # + 命中自校（sha+size 逐字节验 blob）。今天（R1/R3 未上）本行行为逐字节不变。
     try:
         (ckpt_dir.parent / "ppo_ckpt_remote.tar").write_bytes(opt_tar)
     except OSError as e:

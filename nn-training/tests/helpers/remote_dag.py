@@ -171,6 +171,10 @@ LAYERS: dict[str, int] = {
     # 它的秩抬到 2（np_core 是 L1），于是 hub_client(L1) 站在它上面就违规；常量因此下沉到
     # `common/shard.py`（两边都够得着的唯一定义处）。
     "remote.payload_slim": 0,
+    # R0/M0：本机权威副本的**身份映射**（2026-10-14，plan/wire-diet.plan.md §3 R0）。只 import
+    # stdlib（json/hashlib/os/time/pathlib）——刻意不碰 `common.*`/`worker.*` 以外的东西，
+    # 也不 import `remote.*` ⇒ **L0**（写它的 `download`(L3)/`train_core`(L4) 都在它上面）。
+    "remote.course_cache": 0,
     "remote.hub_client": 1,
     # 2026-10-10（plan/cluster-code-snapshot）：集群代码快照——会话级 `code.zip` 锚点。
     # 它只 import `remote.hub_client`(L1) 的 `pack_code_zip` + `common.*` ⇒ 拓扑秩 1 + 1 = **L2**；

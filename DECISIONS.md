@@ -5740,3 +5740,59 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `bash tools/githook/nn-python-gate.sh` 绿（ruff + mypy + pytest `tests/ e2e/` 全量）。
   全文 → `docs/nn/remote-transport.md` §91 · `plan/wire-diet.plan.md` §10。
   ⚠ **真机 A/B 未取 ⇒ 开关保持 0**（回退档 = 置 0）；M0/M3/M4 一个没碰（`docs/nn.progress.md` 第 29/31 行）。
+
+## §2026-10-14-goalnn-wire-diet-m0（2026-10-14，wire-diet 落地 M0/R0：`course_cache` 身份映射 + `manifest.opt_from`）
+
+- **背景**：R1/R3 让 hub 的**权威字节**从「回传的原始字节」变成「重建产物」⇒ 与 worker 本机那份 f32
+  全量**必然不同 sha** ⇒ 内容寻址缓存（键 = 权威字节 sha）逐轮失配，净账为负（R1 省 200,659 B /
+  多付 387,540 B 下行；R3 省 372,214 / 多付 614,400）⇒ **M0 是 M3/M4 的硬前置**（`plan/wire-diet.plan.md` §5）。
+- **决定**：
+  ① 身份映射住**持久根** `<cache_root>/course_cache/<course_fp>/{pending,latest}.json`，命中判据是
+     **身份**（`manifest.opt_from == latest.job_id`）不是字节；新可选键 `opt_from` 由**发布端**写
+     （`hub_client._previous_job_id` 扫同 run/课程的 it−1 job 目录；扫不到 ⇒ **不添键**）；读取端**不**
+     自己推「it−1 邻接」——那会多出第二份真相。
+  ② **pending → confirm**：产物落盘只写 `pending`；`post_result` **200 受理**才升 `latest`；**403/409**
+     ⇒ **作废**；其余（含 `None`）不动。理由：竞速里**输了的那台也跑出过一份产物**，而 hub 的权威链
+     是从**赢家**那份重建的 —— 少了这一步，输家下一轮会拿**自己那条链**当起点 = **静默分叉**。
+  ③ 命中自校 = 两份本机副本（weights / opt）**存在 + 字节数 + sha256**；字节本体**复用 `blob_cache`**，
+     **不**复制第二份（plan 草图的 `*_local_path` 因此不采用：复制 = 同一份字节两处真相，且新目录不进
+     `prune_caches` 的容量预算 ⇒ 无界）。
+  ④ 失效即回退：身份不符 / 被 prune / 坏件 / 换机 / 旧 hub 无 `opt_from` ⇒ 逐字节落回既有内容寻址路径
+     （安全性不变）；`prune_job_dirs` 豁免名单加 `course_cache`（同 2026-09-17 `blob_cache` 漏项同型）。
+  ⑤ 状态码判据**单点在 `course_cache.settle`**，`job_round` 的 settled 回调只转述结论。
+- **备选与否决**：① plan 草图的「本机副本另落 `*_local_path`」——否（两处真相 + 不进容量预算）；
+  ② 「产物落盘即算可用起点」——否（竞速输家静默分叉，见 ②）；③ 读取端自己推 it−1 邻接——否（第二份
+  真相；换机/重发下邻接不保证同链）；④ 409 也照 200 处置——否（分不清自己重试还是别人赢，按最严处置，
+  最坏只少省一次字节）；⑤ 映射落 `work_dir` 而非持久根——否（会话级 ⇒ 跨会话收益 0；已由
+  `cache_root_of(blob_root)` 反推持久根）。
+- **后果**：`remote/course_cache.py`（新，L0，只 stdlib）· 接线 `download._resolve_weights`（init 命中）
+  / `train_core`（opt 命中 + 产物段 `record_pending`）/ `job_round._on_settled` / `hub_client.publish_job`
+  （`opt_from`）/ `job_fs.prune_job_dirs`（豁免）· `hub_client` 那处「原样字节落盘（重打 tar 会 sha 漂移）」
+  的护栏注释同 commit 改写为「R1/R3 之后权威字节 = 重建产物 ⇒ 判据换成身份映射 + 命中自校」。用例 **18 例**
+  （`tests/remote/test_course_cache.py`）+ `remote_dag` LAYERS 登记 + 三条拆分白名单各一条新边；
+  `bash tools/githook/nn-python-gate.sh` 全量绿。代码**惰性**：R1/R3 未上 ⇒ 对外行为逐字节一致。
+  全文 → `docs/nn/remote-transport.md` §92 · `plan/wire-diet.plan.md` §11。
+
+## §2026-10-14-goalnn-wire-diet-m4-hub-torch（2026-10-14，用户裁决：M4/R3 的重建走 (a)「hub 引入 torch」，回传 opt delta f16）
+
+- **背景**：M4（R3）要在 hub 侧把 `Δopt` 与 base 相加重建 `B_n`；今天 hub 只做原样字节透传（不解码 tar
+  里的张量）⇒「hub 进程装不装 torch」是 `plan/wire-diet.plan.md` §7-2 / §10-2 挂起的**显式决策**
+  （AGENTS §6.5：新运行时依赖属「必须问人」四类之一）。
+- **裁决（用户 2026-10-14）**：**选 (a) hub 引入 torch**，按 §3 R3 走 **delta f16**
+  （`Δopt = opt_new − B_{n-1}`，hub `B_n = B_{n-1} + Δ`）。本机计算用的 opt 保持 **f32 全量**（训练质量
+  不受影响；误差只落在 hub 存档，且**不逐轮累积** —— 残差 = 本轮量化误差 ≈4.7e-5 相对；换机接续时它
+  成为新链的起点，不放大）。
+- **落地硬约束**（本条目立即生效）：
+  ① torch 在 hub 侧**延迟 import**（只在 delta 重建路径；hub 冷启动与「无 delta」的路径不得因此变慢）；
+  ② hub 缺 torch / 版本不符 ⇒ **不得静默降级**：拿不到 base 就没法重建 ⇒ 拒收该形态并响亮记一行、
+     回退整份 blob（**绝不**把 delta 当权重落盘 —— 那正是本 plan 兼容矩阵 §4 要挡的方向）；
+  ③ 形态**自述**在 blob header（`{"ofmt":"delta-f16"}`），缺键 = 旧形态（旧端忽略未知键）；
+  ④ 验收含**重建决定性**用例（同 delta + 同 base 两遍 ⇒ 同字节）与一轮端到端：worker 本机 f32 链与 hub
+     重建链的差 ≈ 一轮量化误差量级。
+- **备选与否决**：① **R2**（opt 存 bf16 绝对态：误差恒 0.19%、零累积、不动协议结构）——**未否决**：
+  作为 R3 重建链自测失败时的**回退档**（`plan/wire-diet.plan.md` §3 R2 原文）；② worker 回传 f32 全量
+  （无重建）——否（上行 +372 KB/轮，正是本 plan 要砍的）；③ hub 只存 delta 不解码——否（下一轮 base
+  无从重建 ⇒ 链断）。
+- **后果**：M4 落地时 hub 侧多一条运行时依赖（依赖清单 + 文档同 commit）；M4 的收益（−372 KB/轮）与
+  「hub 引入 torch」的运维成本一起记账。前置 = M0（`§2026-10-14-goalnn-wire-diet-m0`）。
+  全文 → `plan/wire-diet.plan.md` §3 R3 / §11 · `docs/nn.progress.md` 开放问题 #31。

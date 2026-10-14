@@ -46,6 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+import remote.course_cache as course_cache
 from common.protocol import (
     CLAIM_MODE_BACKUP,
     HEARTBEAT_SEC,
@@ -295,6 +296,9 @@ def run_one_round(
     pf_store: PrefetchStore | None,
     polls_since_accept: int,
     worker_id: str,
+    #: R0（M0）身份映射的根（= `--cache-dir` 或 work_dir，与 `blob_root.parent` 同源）。
+    #: None ⇒ 不确认/不作废（只跑测试/旧调用方的形状），逐字节旧行为。
+    cache_root: Path | None = None,
     device: str,
     torch_threads: int,
     echo: bool,
@@ -449,6 +453,17 @@ def run_one_round(
             settle_result(_j, _out, _t, uploader=uploader, log=log)
             if not _out.ok:
                 backup_failed_result(part_dir, _j, result, it=job_it, log=log)
+            # ---- R0（M0）：身份映射的**受理确认/作废**（2026-10-14，plan/wire-diet.plan.md §3 R0）----
+            # 只有「本份被 hub 受理」才能把本机这份产物当成 hub 权威链的延续点——
+            # 200/403/409/其它的判据与理由单点在 `course_cache.settle`（本行只转述结论）。
+            if cache_root is not None:
+                course_cache.settle(
+                    cache_root,
+                    str(job.get("course_fp") or ""),
+                    _j,
+                    status=_out.status,
+                    log=log,
+                )
 
         uploader.submit(
             UploadTask(

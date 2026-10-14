@@ -54,6 +54,7 @@ import time
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import remote.course_cache as course_cache
 from common.protocol import (
     BLOB_INIT,
     BLOB_OPT,
@@ -581,6 +582,11 @@ def _resolve_weights(
     base_url: str,
     token: str,
     preloaded: dict | None,
+    #: R0（M0）身份面：本 job 的 `course_fp` 与 `manifest.opt_from`（缺省空 ⇒ 不试身份命中，
+    #: 逐字节旧行为——旧调用方/旧 hub 无此两键）。
+    course_fp: str = "",
+    opt_from: str = "",
+    it: int | None = None,
     log,
 ) -> tuple[Path | None, str, int]:
     """解析本轮的初始权重 → `(path | None, src, wire_bytes)`。
@@ -591,6 +597,10 @@ def _resolve_weights(
 
     plan/opt-blob-diet.plan.md §3.2 的五源优先级（先到先用）：
 
+      **R0 身份命中**（wire-diet M0，`plan/wire-diet.plan.md` §3 R0）：本机那份 f32 全量副本就是
+         hub 权威链的延续点（`manifest.opt_from` 对上本机 `latest.json`，自校通过）⇒ 零字节、
+         **零降质**。它优先于 W0：payload 里那份是 hub 的（后来可能是 delta 重建的）字节，而本机
+         这份是 fp32 原样。身份不成立 / 副本被 prune / 自校不过 ⇒ 直接落回下面五源。
       W0 `job_dir/init_weights.json`（payload 随包带走：离线腿/bundle/冒烟/非 slim/旧 hub）
       W1 `blob_cache/<init_weights_fp>`（稳态命中，零字节 —— **靠调用方产物段缓存
          自己产出的权重**：hub 下一轮的 `init_weights_fp` = `sha256(args.out)` = 同一份字节）
@@ -608,6 +618,22 @@ def _resolve_weights(
     """
     path = job_dir / "init_weights.json"
     fp = str(init_weights_fp or "")
+    # ---- R0 身份命中（先于 W0：零字节 + 零降质；判据全在 `course_cache.hit`）----
+    if str(opt_from or "") and str(course_fp or ""):
+        local = course_cache.hit(
+            cache_root=course_cache.cache_root_of(blob_root),
+            blob_root=blob_root,
+            course_fp=str(course_fp),
+            opt_from=str(opt_from),
+            expect_it=(int(it) - 1) if it is not None else None,
+            log=log,
+        )
+        if local is not None:
+            path.write_bytes(local["weights"])
+            # 零字节命中也要进传输账（与 code/ts_code 同规；`why` 让摘要能区分是身份命中）
+            _wire_hit(jid, "init:local", "course_cache")
+            log(f"job {jid}: init 身份命中（course_cache/{str(course_fp)[:8]}…）——本机 f32 副本，零字节")
+            return path, "course_cache", 0
     if fp in _SENTINEL_INIT_FP or not is_content_sha(fp):
         if path.exists():
             return path, "payload", 0

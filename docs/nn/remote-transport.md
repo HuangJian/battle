@@ -6,6 +6,54 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §92 wire-diet 落地 M0（R0）：本机权威副本的**身份映射**（`course_cache`）+ `manifest.opt_from`（2026-10-14，`plan/wire-diet.plan.md` §3 R0 / §11 · 决策 `DECISIONS.md` §2026-10-14-goalnn-wire-diet-m0）
+
+**触发**：R1（权重 delta i16）/ R3（opt delta f16）让 hub 的**权威字节**从「回传的原始字节」变成
+「重建产物」——与 worker 本机那份 f32 全量**必然不同 sha** ⇒ 内容寻址缓存（键 = 权威字节 sha）逐轮
+失配，净账是**负的**（R1 省 200,659 B 上行 / 多付 387,540 B 下行；R3 省 372,214 / 多付 614,400）
+⇒ **没有 M0，M3/M4 不能上**（plan §5 把 M0 记成两者的硬前置）。本次落地 M0，代码是**惰性**的
+（R1/R3 未上 ⇒ 对外行为与今天逐字节一致）。
+
+**做了什么**
+
+- 新模块 `remote/course_cache.py`（**L0**，只 stdlib）：住**持久根**
+  `<cache_root>/course_cache/<course_fp>/{pending.json,latest.json}`，`record_pending → confirm →
+  hit / invalidate`；命中自校 = 两份本机副本存在 + 字节数 + sha256。**字节本体不复制** —— 就是
+  `blob_cache/<sha>` 里的那两份（`train_core` 的产物段本来就把它们写进去：weights 见
+  `_cache_produced_weights`、opt 见 `_cache_blob`）。
+- 接线四处：① `download._resolve_weights`（init）与 `train_core.run_training_core`（opt）**先试身份
+  命中**（零字节、零降质；身份不成立 ⇒ 逐字节落回既有内容寻址/五源路径）；② `job_round._on_settled`
+  → `course_cache.settle`；③ `hub_client.publish_job` 写 `manifest["opt_from"]`；
+  ④ `job_fs.prune_job_dirs` 豁免名单（与 2026-09-17 `blob_cache` 漏项同型：没给 `--cache-dir` 时映射
+  落在 `work_dir` ⇒ 不豁免就会被当旧 job 目录删掉）。
+- 发布端扫 job 目录（`hub_client._previous_job_id`）而不是让读取端推「it−1 邻接」：身份映射的键就是
+  `job_id`，读取端再推一遍 = **第二份真相**；判据含 `course_fp`（多课程单进程否则串链）；扫不到
+  （首轮 / 上一轮已 prune / 换机重开）⇒ **不添键**（旧端忽略未知键，但「没有键」才是「回退内容寻址」
+  的准确表述）。
+- 记账：`wire.hits` 新增 `init:local` 归因位（与 code/ts_code 同格）。
+- 用例 **18 例**（`tests/remote/test_course_cache.py`：命中 / 身份不符 / 自校失败（prune 挤掉 / 坏件）/
+  输了竞速作废 / pending 不算命中 / 课程分区 / 写失败只丢优化 + 接线：`settle` 状态映射 · 发布端
+  `opt_from` 的课程与 run 分区 · 解析端命中与回退 · prune 豁免）；`tests/helpers/remote_dag.py` 登记
+  `remote.course_cache: 0`，三条拆分守卫白名单各登记一条新边。
+
+**★ 头号陷阱（实施期新发现，plan 没写死）**：**输了竞速的那台也跑出过一份产物**，而 hub 的权威链是从
+**赢家**那份重建的 ⇒ 若「写完就算可用起点」，这台机器下一轮会拿**自己那条链**当起点 = **静默分叉**
+（日志一切正常，只有 hub 那条链越偏越远）。所以映射做成 **pending → confirm**：产物落盘只写
+`pending.json`；`post_result` **200 受理**才升 `latest.json`；**403/409** ⇒ `invalidate` 清掉
+（409 分不清是自己重试还是别人赢，按最严处置 —— 最坏只是少省一次字节）；其余（含 `None` = 回传没
+送达）⇒ **不动**：`pending` 留着无害（命中判据是 `latest`），当下作废它反而有风险（备份/半离线尾巴
+可能稍后把这份送上去）。
+
+**与 plan v2 的偏差**：plan §3 R0 的 `latest.json` 草图是 `weights_local_path` / `opt_local_path`
+（本机 f32 副本另落一处）；实施改成**只记 `(sha, bytes)`、字节复用 `blob_cache`** —— 另落一份等于
+同一份字节有两处真相，且新目录不进 `prune_caches` 的容量预算 ⇒ 无界。这是本文件里唯一一处「与 plan
+不同的字段名」，读实施时以代码为准。
+
+**未取读数**：M0 单独**无字节收益**（前置项）——它的价值要等 M3/M4 的值出来才能量（届时报「身份命中
+率」与「省下的下行字节」）。M5（节点侧 `cache_dir`）决定它**跨会话**是否还有效：没给 `--cache-dir` 时
+映射住会话级 `--out` 下（跨会话收益 = 0），而那条配置在节点/平台侧、不在仓库里 ⇒ 动作是**取证**
+（`docs/nn.progress.md` 开放问题 #27 ③），不由 agent 猜路径。
+
 ## §91 wire-diet 落地（M1+M2）：打包端先算 reward + 字段 f16（2026-10-14，`plan/wire-diet.plan.md` v2 · 评审 `plan/wire-diet.review-bf.md`）
 
 **触发**：家宽晚高峰链路掉到几十 KB/s，一轮 payload 下行 1.72 MB + 上行 0.76 MB ⇒ 传输 >100 s。

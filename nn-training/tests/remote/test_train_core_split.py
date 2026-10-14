@@ -238,6 +238,7 @@ def test_the_core_touches_only_downward_clusters() -> None:
     """它依赖的业务簇是既定的那几个（多一个就说明又搬漏/搬多了）。"""
     tops = sorted(m for m in _top_imports(CORE_FILE) if m.startswith("remote."))
     assert tops == [
+        "remote.course_cache",
         "remote.download",
         "remote.job_fs",
         "remote.job_lifecycle",

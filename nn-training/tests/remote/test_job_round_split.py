@@ -93,6 +93,7 @@ ALIVE_TEXT = "polling hub"
 ALLOWED_PROJECT_IMPORTS = {
     "common.protocol",
     "remote.bulk_sched",
+    "remote.course_cache",
     "remote.download",
     "remote.job_fs",
     "remote.job_lifecycle",
