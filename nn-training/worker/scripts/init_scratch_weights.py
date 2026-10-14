@@ -35,8 +35,14 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from common.cli import house_parser, run_main
-from common.schema import BOARD, OBS_CHANNELS, SCALAR_DIM  # v3：dummy 前向形状随 schema 常量
+from common.schema import (  # v3：dummy 前向形状随 schema 常量
+    BOARD,
+    OBS_CHANNELS,
+    POLICY_EXTRA_DIM,
+    SCALAR_DIM,
+)
 from worker.data.weights_io import save_weights_json
+from worker.models.student import PPOStudent
 from worker.ppo.engine import build_ppo
 
 TRUNK_SCALE = 0.1
@@ -51,6 +57,14 @@ def main() -> None:
     ap = house_parser()
     ap.add_argument("--out", default="tmp/scratch-init/weights.json")
     ap.add_argument("--seed", type=int, default=7)
+    # y1 新纪元（2026-10-13）：腿 A 165 宽从零（build_ppo(None) 只建 legacy 128 档）。
+    # 缺省全关 = x1 行为逐字不变。
+    ap.add_argument("--policy-extra", action="store_true",
+                    help="腿 A 档：直接建 PPOStudent(policy_extra=True)（头 165），再同刻度缩放")
+    # D1（§2026-10-12-goalnn-value-gating）同款：0.01 量级噪声起步正是爆炸源——
+    # value 新列纯 0（只碰 value_anchor_slices() 列片；policy/旧列不动）。
+    ap.add_argument("--zero-value-new", action="store_true",
+                    help="value 新列纯 0（有片才动；legacy 空片 = 无操作）")
     args = ap.parse_args()
     # 2026-09-08 双 tmp 统一：相对 --out 锚定仓库根（scripts/ 上溯 3 层），
     # 不再落到 nn-training/tmp。
@@ -60,7 +74,7 @@ def main() -> None:
     args.out = str(out)
 
     torch.manual_seed(args.seed)
-    model = build_ppo(None)
+    model = PPOStudent(policy_extra=True) if args.policy_extra else build_ppo(None)
 
     with torch.no_grad():
         for n, p in model.named_parameters():
@@ -70,6 +84,11 @@ def main() -> None:
                 p.mul_(HEAD_SCALE)
             elif n.startswith("value_head."):
                 p.mul_(VALUE_SCALE)
+        if args.zero_value_new and hasattr(model, "value_anchor_slices"):
+            vh = getattr(model, "value_head", None)
+            if vh is not None and hasattr(vh, "weight"):
+                for lo, hi in model.value_anchor_slices():
+                    vh.weight[:, lo:hi].zero_()
 
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
     save_weights_json(model, args.out)
@@ -77,13 +96,17 @@ def main() -> None:
     # 自检（零 obs 前向）：logits 必须近均匀、value 必须与回报同量级。
     obs = torch.zeros(1, OBS_CHANNELS, BOARD, BOARD, dtype=torch.uint8)
     sc = torch.zeros(1, SCALAR_DIM)
+    # 腿 A 自检喂全零 extra（只探 init 尺度，不探语义；_require_extra 禁 None 防静默）。
+    ex = torch.zeros(1, POLICY_EXTRA_DIM) if args.policy_extra else None
     with torch.no_grad():
-        mv, fr, val = model(obs, sc)
+        mv, fr, val = model(obs, sc, ex)
     mmax = float(mv.abs().max())
     fmax = float(fr.abs().max())
     vmax = float(val.abs().max())
     print(
-        f"[init_scratch] saved {args.out} (trunk×{TRUNK_SCALE} heads×{HEAD_SCALE} value×{VALUE_SCALE})"
+        f"[init_scratch] saved {args.out} (trunk×{TRUNK_SCALE} heads×{HEAD_SCALE} value×{VALUE_SCALE}"
+        f" arch={'legA-165' if args.policy_extra else 'legacy'}"
+        f"{' value-new-zero' if args.zero_value_new else ''})"
     )
     print(
         f"[init_scratch] |move_logits|max={mmax:.4f} |fire_logits|max={fmax:.4f} |value|={vmax:.4f}"

@@ -9,6 +9,429 @@
 
 ---
 
+## §111 y5-pos/y5-hit/y5-far 结课报告落盘（2026-10-13）
+
+- y5-pos（杀 it260）：72→49 clears、kills 2.75→2.20（双连破＋−16%＋腰斩出带，无异议）；
+  hitRate 0.783→0.890 至死守住（漂移死非爆炸死）；s2000 切片健康横盘史见 §106。
+- y5-hit（跑超 500，非杀）：hitRate 0.396→0.836、kills 守住、it100 恐惧塌后收回；
+  tmp 日志用户已清，数以 §96/102 归档为准（panel＋501 备份在）。
+- y5-far（杀 it218）：213 峰→it75 KL 爆→双死→it215 尸体（s2000 同塌）；near×2 定案。
+- 三文件尾部结课报告节落盘（规格头不动，load 复验绿）。决策 DECISIONS §2026-10-13-goalnn-y5legs-close。
+
+---
+
+## §110 y5-term 终局腿设计冻结：wWin＋5.0/timeout−5.0，苟免费实锤开价（2026-10-13）
+
+- **剂量**（y5-near.it25 真实行）：clear +23.20 vs timeout +23.41（超时比通关还赚）vs
+  gameover −12.38。wWin +5.0（a2 同值，killEV 40%）⇒ clear ≈28.2；terminal timeout −5.0
+  （同比）⇒ timeout ≈18.4，gap ≈10。自杀检查：timeout 仍高 gameover 30 点 ⇒ 不设 lives 税；
+  clearTick 列存在（v5 idx30），形状照抄 a2。
+- **设计**（相对现 y5-near：只加终局两项；用户调过的 iters500/混合eval/seed缺席/max12 原样照抄，
+  不动）：起点 y5-pos.it215（与 y5-near 同起点，隔离终局效应；sha `f69385b3…`）；
+  kickstart 关，opt fresh。双分支：timeout↓＋clears↑⇒有效；平/升⇒税无效；
+  gameover 反超 timeout⇒加 lives 税（watch 项）。
+- **门**（y5-near 四线＋终端线 it40 timeout≤15%＋clears 不掉）；终点五线（cap 500）。
+  课程 `nn-training/curricula/y5-term.jsonc`（校验绿）· 决策 DECISIONS §2026-10-13-goalnn-y5term-design。
+  **与 y5-near 并行就绪，人点**。
+
+---
+
+## §109 y5-pos 杀：it250 起双连破 kills 线＋rollout 腰斩，漂移式死亡（2026-10-13）
+
+- **触发**（注册线全响）：eval kills 3.55→3.02→2.98（it245/250/255，<3.5 双连破）＋
+  y 系 watch kills −16%（3.55→2.98，掐线 −15%）＋rollout win 0.55→0.24（10 轮腰斩）＋
+  dead 9→25（3 倍）＋cells 59→45＋shots 10.6→9.2（fear 线 8 在望）。
+  clears 177→100。hitRate 0.88 守住/D01 61/KL 平/熵 0.8——**漂移式死亡**（y1 形），
+  非爆炸式（y5-far 形，无 spike）：瞄准系统活着，整局产出漏气。
+- **与 dip 的区别**：it129–144 dip 从未双连破 kills 线＋win 没出过 0.43–0.8 振荡带；
+  本次 win 0.239 已出带＋it256 还在掉。振荡≠漏气，漏气即杀，"塌了别等"。
+- ** lineage 安全**：y5-near 已开（it27，win 0.68、eval kills 4.14–4.35、hitRate 0.78–0.83 全守，
+  全超垂死父腿）——y5-pos.it215 峰已在 y5-near 接住，杀父无可惜；it215 文件本就永存。
+  y5-near near×1.5 至今无恐惧（shots ~14 稳），剂量判决待 it40。
+- 决策：**杀 y5-pos（人点 halt）**。链 DECISIONS §2026-10-13-goalnn-y5pos-kill。
+
+---
+
+## §108 y5-near 跟混合 eval＋y5-hit 日志归档确认（2026-10-13）
+
+- **y5-near 改混合**（用户令）：eval "2000"×200 → "2000-2003"×50，与现 y5-pos 同口径；
+  除名义/起点/near×1.5/iters150/max12 外与现 y5-pos 全键逐字同（校验绿）。
+  门读 headline（混合逐行可比），s2000 切片为 c05 真值附读。开课仍待人点。
+- **y5-hit 日志**：tmp/y5-hit 系用户清理，确认归档。§96–102 trajectory 数封存（只读不用作新判据）；
+  panel 证据（`tmp/panel-c05-*`＋pairs＋fork）＋500 权重备份在，真需复算可重跑。
+  决策 DECISIONS §2026-10-13-goalnn-y5near-mixed-eval。
+
+---
+
+## §107 更正：y5-far/y5-pos 系用户手动编辑（混合 eval 是设计，不是污染）（2026-10-13）
+
+- **收回 §106 定性**：y5-far/y5-pos 的 "2000-2003"×50、iters、seed_rotate 缺席，皆用户手动编辑结果，
+  以用户为准。"污染/篡改"改称**混合 eval 设计**（100 c05＋300 arena）；"改回单关"建议（§106 D2）**撤销**。
+- **继续有效的数字**（与作者无关）：y5-far s2000-only 塌（40/20/1/0，dead verdict 不变）；
+  y5-pos s2000-only 健康横盘（66→67 clears，kills/hitRate 全平）；y4 全程干净；y5-near 未动。
+  s2000-only 重读法继续有效（分析切片）。
+- **澄清归属**：seed_rotate 缺席——y5-far/y5-pos 系用户编辑结果；y4/y5 系我原始遗漏（done legs，只记不改）。
+  口径差：y5-near（动态 rotation）vs y5-pos（固定局数旧语义）——rollout 数跨腿不可比，
+  eval（固定局）可比。y5-near 保持我的版本。
+- 决策 DECISIONS §2026-10-13-goalnn-eval-authorship-correction。
+
+---
+
+## §106 eval 污染审计：y5-far/y5-pos 混入 arena 局，s2000-only 重判（2026-10-13）
+
+- **发现**：y5-far/y5-pos 现文件 eval "2000-2003"×50（c05 单关 rung，2001+ 无 stageJson ⇒
+  远端走 ARENA 解析；纯本地同参必 crash，已实证 `stage.tiles` null）。铁证：s2000–2003 同 seed
+  不同局 ⇒ 非同关；2001+ 实为 arena 局（5 敌，ticks 2–3k）。
+- **重判（s2000-only，真 c05）**：y5-far 塌成立（s2000 clears 40/20/1/0，it75 起 stuck 800+，
+  verdict 不变反更干净）；y5-pos **由"成长"修正为"健康横盘"**（s2000：it40 66/4.23 →
+  it215 67/4.19 全平；nearSq 184→152/encl 148→128 慢漂；72→281 的涨全是 arena 侧的）。
+  §105 健康判有效（没塌），成长判收回。
+- **另两颗雷**：① 我漏抄 `seed_rotate`（y4/y5/y5-far/y5-pos 四份；y5-near 有）：rollout 走旧固定局数语义，
+  eval verdict 不受影响；在跑腿不动它（改即 corpus 变，热加载拒），未来腿已带。
+  ② tmp/y5-hit 整目录消失（§96–103 trajectory 部分只剩归档数；panel 证据＋500 权重备份在，
+  可重跑复算）。③ y4（s2000×100 全程）＋y5-near（未动，"2000"×200）干净。
+- **处置**：运行腿一律不动；此后 verdict 全按 s2000 过滤读；改配的事等人令。
+- 决策 DECISIONS §2026-10-13-goalnn-eval-contamination-audit。
+
+---
+
+## §105 y5-far 恐惧塌＋y5-pos 健康：near×2 too hot 实锤，站位胜（2026-10-13）
+
+- **y5-far 死亡解剖**（教科书式）：it20 峰（213 clears，税初上无恙）→ it55–70 衰（191→70，
+  shots 12.9→9.1）→ it68 rollout win 跌破 0.2 → **it75：KL 0.47 spike＋pol 0.17＋熵反升至 1.0**
+  ＋eval 1 clear/shots 0.3（悬崖）→ it76+ 双死（rollout win 0.006、dead ~160；贪心 0 clears/
+  shots~0/stuck→3000/cells→1.0）。爆后塌，非熔断式阴干；采样贪心同死（y1 是采样独活）。
+  it40 已挂 3/4（hitRate 0.783✅，nearSq 142/kills 2.96/encl 143 全❌）。**杀＋立刻 halt**
+  （it218 还在 win 0.006 空烧）。
+- **y5-pos 健康**：it218 win 0.743/clear 81/dead 19，熵 0.735/KL 0.027 全程无 spike；
+  eval clears 72→281（70%）、kills→4.23、hitRate 0.72–0.84 守住、D01 104→66；
+  it40→it215 nearSq 183→144（−21%）、encl 160→123（−23%）——慢但全向好。
+  it40 字面挂 3/4（hitRate 差 0.002、near/encl 未到线）⇒ **§6.4 偏离续跑**（唯一活口＋端点涨＋
+  税在动；重判点 it300/自然收官）。
+- **paired verdict**（§104 分支二命中）：站位胜、直接死——near×2（73% killEV）75 轮杀死冠军，
+  y1 恐惧机制在 ×2 剂量复现；corner×2/threat×1.5 安全且全向好。§94"拒无差别贴脸税"再添一证：
+  税在 c05 有效的是站位形。
+- 证据双账本全量行。决策 DECISIONS §2026-10-13-goalnn-y5far-verdict。
+
+---
+
+## §104 y5-far/y5-pos 防近腿设计冻结：直接双税 vs 站位税（2026-10-13）
+
+- **剂量**（y5-hit.it500 真实行，n=200）：near 已交 −4.37/局（killEV 37%）仍挡不住＋
+  encl −1.23/局（10% 太轻）⇒ y5-far near×2（−8.7，73%）＋encl×2（−2.5，21%）＝+5.6/局；
+  corner −2.72＋threat −4.01 ⇒ y5-pos corner×2＋threat×1.5＝+4.7/局（同量级）。
+  73% 逼近 y1 冻结线——冠军底子＋threat 不动＋fail-fast 护栏兜底；fear-watch 沿 y1f 语言。
+  附带纠错：y5-hit2 漏抄 seed_rotate（我的 bug，全键 diff 补回 150；校验脚本从此全键覆盖）。
+- **门**（双腿一字同，paired）：hitRate≥0.75＋nearSq/千≤110＋kills≥3.5＋encl/千≤100；
+  D01≤85/fear（shots<8＋kills<3.5）护栏；fail⇒杀。终点四线 ⇒ 收官（cap 500）。
+  起点 y5-hit.it500（sha `961bacde…`，同代直连）；y5-hit2 改名 y5-far（未开课）。
+- **双分支**：y5-far 动而 y5-pos 平⇒直接有效；反之⇒站位更安全（near×2 too hot）；
+  双动⇒看剂量；双不动⇒pin 别处。课程 `y5-far.jsonc`＋`y5-pos.jsonc`
+  （校验 `tmp/y5far-ev-check.py` 绿）· 决策 DECISIONS §2026-10-13-goalnn-y5far-design。
+  **双腿并行就绪，人点**。
+
+---
+
+## §103 y5-hit it470 人类开局配对：命中反超人类，剩 tempo＋近重＋3 夭折（2026-10-13）
+
+- **做法**（用户令）：c05 fork `--upto-kills=2` 行（§100 同形）＋人类 74 replay 同 74 seeds 三角配对
+  （≥2 杀入对：人 74/74，it470 71/74）。证据 `tmp/panel-c05it470-opening.json`。
+- **人 vs it470**（配对）：hitRate +0.048★（中位 0.833/0.800，**反超**）、对准 +0.021 ns（0.651/0.642，
+  **打平**）；shots ns（同弹量）、hits +0.54★；距离 −0.99★（4.19/5.17，更近）、近射 +0.29★、
+  远射 −0.13★、移动开火 +0.19★（1.00 全动）；2杀慢 +527★ticks（1228/699）。
+  **it300 vs it470**：shots −12.1★换 hits +0.0（守住）、hitRate +0.51★、对准 +0.40★、距离 −2.33★——
+  命中束逐字兑现（spray 砍半＋对准拉回＋逼近）。
+- **读法**：§99 条件分支命中"A04↓＋A02↑⇒纪律杠杆生效"⇒ **phase-1c wAcc 不触发**（对准回到人类位，
+  加准头无物可加）。瞄准结课：开局命中超人类。剩余 gap 全在瞄准之外：tempo（+527）、
+  近重（+0.29，dist 删矫枉过正嫌疑，watch）、可靠性（3/74 夭折 vs 0）。下一腿方向＝走位/tempo，不是命中。
+- full-game 旁证：it470 80 clears/kills 4.44/D01 59.9（最优点）。compare＋smart 链见
+  `tmp/compare-h-it470open.txt`＋`tmp/smart-h-it470open.txt`。
+
+---
+
+## §102 y5-hit 长跑 verdict＋y5-hit2 接力：命中 0.40→0.84，it100 恐惧塌后收回（2026-10-13）
+
+- **长跑**（盘后）：y5-hit 被展到 iters 0（不限）/max 24/eval 400（谁改的已是现文件事实，代码为准），
+  跑到 it500+：hitRate 0.396→0.836（+111%）、kills 4.15→3.96（守住）、clears 73→62%；
+  中经 **it100 恐惧塌**（17 clears/shots 10.7，hitRate 反冲 0.75）后收回，it200 起 0.66–0.89 横盘。
+  命中束生效（A04 瞎打税＋删 dist），恐惧事件已过——wMiss 加压伴随一次可恢复的塌，剂量未过头证据。
+- **接力**：`y5-hit2`＝y5-hit 现文件逐字（配方/门/iters0/max24/eval400/优化器/K/流全同），
+  只换名义键＋起点 y5-hit.it500（sha `961bacde…`，同代直连，opt fresh）；§15.5 新账本。
+  门线 hitRate 0.45 在基座 0.836 下是 floor（防塌不设顶）；kills≥3.5/D01≤85 仍是活线。
+- 课程 `nn-training/curricula/y5-hit2.jsonc`（校验绿）· 决策 DECISIONS §2026-10-13-goalnn-y5hit2-design。
+  **开课人点**。
+
+---
+
+## §101 y4 it300 收官：连击真降★、贴脸 near4 真降★，无稀释，终点平、命中崩同款（2026-10-13）
+
+- **门外收官**（同 100 seeds 配对）：clears 78→84（McNemar ns）、kills +0.12 ns；
+  盯盘三线全没触发（kills＋3.4%、pass＋6pp、D01 76.9→52.6 反降），300 跑满合法。
+- **连击率**：0.36→0.17/局（−53%，paired z=−2.59★）；/千 −0.256★。**真降**（y5 只是 ns）。
+- **贴脸率**：nearSq −42.5（z=−1.92，p≈0.055，差一口气）；near4 −102.8（z=−2.71★）；
+  /千双★。ticks +114 **ns**（+8%）⇒ 无 y5 式稀释，rate 显著＝真行为变化。
+- **同款副作用**：hitRate 0.485→0.403（−0.085★，与 y5 的 −0.10 同模）、shots +4.78★、
+  shots/kill 5.78→**6.91**（y5：7.3，同病）；dmg −28★。
+- **读法**：c04 上水槽动了病灶（连击/近身/承伤三★真降）但没变现终点（胜/杀 ns）＋命中税照交
+  （−0.085★）。§94 加税级 verdict 兑现一半：税在 c04 有效（y5 在 c05 只有稀释），
+  但水槽形态同时让命中放血 ⇒ 后续：c04 版 hit 腿（y5-hit 同款命中束）排队，y4 文件不动。
+- 证据 `tmp/y4/eval_log.jsonl`（it0/it300 同 seeds）。盯盘结论：三线合法，无掐。
+
+---
+
+## §100 开局–第2杀配对：同 seed 三角（人/NNit0/NNit300），开火纪律崩、可靠性差 15%（2026-10-13）
+
+- **做法**（用户令）：c05 fork 加 `--upto-kills` 截断（两分支同形状，v11 不动；行即开局窗口聚合，
+  ticks≈第 K 杀时刻）。人类 c20 replay 74 份（有 seed 子集，全 MISMATCH 0）＋ NN c05 it0/it300
+  同 74 seeds 三角配对（≥2 杀才入对：人 74/74，it0 62/74，it300 64/74）。
+  证据 `tmp/panel-h-opening.json`＋`tmp/panel-c05it{0,300}-opening.json`。
+- **人 vs it300**（配对）：2杀慢 +500★ticks、shots +12.6★换 hits +0.56★、hitRate −0.47★、
+  对准 −0.39★、距离 +1.36★、近射 −0.12★、远射 +0.22★、移动开火 −0.18★。
+  **it0 vs it300**：慢 +525★、shots +8.3★换 hits +1.1★、hitRate −0.12★、对准 −0.13★、
+  距离 +1.35★、近射 −0.38★、远射 +0.27★、移动开火 −0.34★。
+  人 vs it0（基线病）：同 pace（ticks ns）下已多打 +5.4★、少中 −0.37★、对准 −0.25★、近冲 +0.30★——
+  基座开局就病，训练把它从"近快瞎"治成"远慢瞎"。
+- **可靠性 gap**：人 74/74 到 2 杀，NN it0 62/74、it300 64/74（~15% 开局夭折，人类 0）。
+  y5-hit 新增 readout：**夭折率必须降**（it40 <2杀局占比 vs it300 的 10/74）。
+- **剂量**：y5-hit 文件不动。wMiss↑ 正对 spray（+8.3 发换 +1.1 中）；删 dist 正对远漂（+1.35）；
+  wAcc HOLD（对准 −0.39 是纪律崩不是弹道崩，A09/A14 ns 仍成立）；A02＋夭折率 双主 readout，
+  phase-1c 触发沿 §99（A04↓而 A02 平 ⇒ 加 wAcc）。
+
+---
+
+## §99 人类配对跑通了：c20 人类开局即 c05 开局（并发 4 封顶），A02 对准塌是最大 gap（2026-10-13）
+
+- **前置更正**（§98 "跑不成"作废）：用户指正并发封顶，经查 `MAX_ENEMIES_ALIVE = 4`（`src/constants.ts:61`），
+  单人两边同 cap；又对文件：grid/出生/敌出生/队列内容顺序/难度/命数逐字节同（forces 同长 20，
+  "队列长度"相同，差的是总数 20 vs 5＋max_ticks）。c05 即 c20 前缀 ⇒ 开局–首杀可比。
+  链：`tmp/gap2-compare.ts`＋`gap-text-table.ts --smart` 全链跑通（compare 配对 0 对，分布级 cliff＋p）。
+- **人 vs 机（it300）A 轴**：A01 0.796/0.396＋A02 0.697/**0.333**＋A04 3.7/**10.2**（cliff 皆≈1.0，
+  全场最大 gap 三席之二）＋A07 0.333/0.426＋A13 434/**803**；A05 5.42/5.84（小）、
+  A06/A08 打平（0.38/0.36、0.74/0.73）、A09/A14 ns。**x27 parity 前提在 c05 不成立**
+  （那是 c20 冠军的事；本腿人是机的两倍）。
+- **三段弧**（人→it0→it300）：A01 0.80/0.50/0.40＋A02 0.70/0.40/0.33（单调塌，几乎解释全部命中差）；
+  A05 5.42/**4.99**/5.84（it0 比人还近！远漂是 it0→it300 的事，人坐中间）；
+  A06 0.38/**0.63**/0.36、A08 0.75/**1.00**/0.73（it0 近战全动 rusher，it300 退回人类位）；
+  A13 434/411/803（it0 打平，it300 崩）。⇒ **近≠准**：距离解释不了 gap，对准解释一切。
+- **剂量终判**（y5-hit 已 file，微调 readout 不加变量）：wMiss↑↔A04（主犯，3.7→9.0→10.2 单调恶化）；
+  删 dist 降级为无害清理（人坐中间，近漂≠病因；c01 彩票前科保留）；wAcc 继续 HOLD——但 parity 前提已死，
+  改以 **A02 为主 readout**：it40 A04↓＋A02↑⇒纪律杠杆生效；**A04↓而 A02 平⇒加 wAcc（phase-1c 预注册，
+  对准价值杠杆）**。
+- 证据 `tmp/compare-h-c20-c05it{0,300}.txt`＋`tmp/smart-h-c20-c05it{0,300}.txt`＋
+  `tmp/panel-c05-it{0,300}.jsonl`。人类 c05 replay 仍无（c20 代理有效，专采集另议）。
+
+---
+
+## §98 y5-hit 剂量复核：c05 panel 配对确认双杠杆，wAcc 继续 HOLD（2026-10-13）
+
+- **人类配对状态**：全仓无人类 ladder 数据（人类语料只有 c20：corpus/shards/panels/replays；
+  probe-human 皆 c20；`gap2-panel human` 要 .replay，ladder 一份没有）⇒ 用户要的"人类开局–首杀配对"
+  跑不成。替代：c05 panel fork（`tmp/gap2-panel-c05.ts`＝v11 逐字拷贝，仅改关卡/单关映射/tick 上界 3900，
+  v11 原文件不动）＋ y5.it0/it300 同 100 seeds NN-vs-NN 配对（panel 与训练 eval 对账：clears 69=69、
+  hitRate 0.492/0.494，driver 一致）。
+- **A 轴配对**（it0→it300，全 ★ 除盲射/每中伤）：A01 −0.099＋A02 对准率 −0.109＋A03 对准开火 −1.93/千
+  ＋A04 未对准 ＋1.13/千＋A05 距离 ＋0.94 格＋A06 近射 −0.26＋A07 远射 ＋0.18＋A08 站定 ＋0.27
+  （移动开火 −0.27）＋A13 首杀 ＋415 ticks；A09/A14 ns。崩的是**开火纪律**（未对准↑＋远↑＋站定↑＋
+  首杀晚），不是弹道技能（盲射/每中伤 ns）。
+- **剂量结论**：y5-hit 双杠杆确认——wMiss↑ 正对 A04（瞎打税）、删 dist 正对 A05/A07（远漂）；
+  wAcc 继续 HOLD（A02 塌是纪律问题，A09/A14 证明弹道没坏；加准头＝给已会的东西双倍付钱）。
+  y5-hit it40 看：A04↓＋A02↑（二阶）＋A13 回落；若 A02 不动而命中回升⇒纯距离效应，dist 删立功。
+- 证据 `tmp/panel-c05-it{0,300}.jsonl`＋pairs · fork `tmp/gap2-panel-c05.ts`（v11 不动）。
+  人类 c05 replay 出现之日，重跑 human mode＋`--smart`。
+
+---
+
+## §97 y5-hit 命中腿设计冻结：wMiss 加压＋删 dist 彩票（2026-10-13）
+
+- **诊断**（y5 eval it0 vs it300，同 100 seeds）：shots +6.73/局里 +6.13 是脱靶（miss +52%，
+  hits +0.29）；开火距离 2.91→3.95 格（远处瞎打）；bricks 恒 0。gap-text-table 配对模式没跑成
+  （human c05 panel 不存在＋eval 行缺 panel 列；用 A 轴框架＋配对 z 代替，已披露）。
+- **调束**：wMiss 0.158→**0.35**（spray-shot 边际 EV +0.046−0.612×wMiss，现行 −0.05 压不住安全溢价，
+  ×2.2 到 −0.17；watch D01–shots 联动）；删 wDist（彩票排雷，c01 67%EV＋NOTES 远射奖没反应）；
+  HOLD wAcc（human parity，别加准头）/wHit（火力无辜）/暴露全家（少暴露保持）。
+- **门**（it40）：hitRate≥0.45＋shots/kill≤6.0；护栏 kills≥3.5（恐惧杀）/D01≤85（暴露杀）；
+  fail⇒杀。终点 it100：hitRate≥0.45＋kills≥4.0 ⇒ 收官。起点 y5.it300（sha `092ea1b1…`，
+  legacy 同代直连，kickstart 关，opt fresh）；iters 100/max 12；eval 本 rung 单关×100。
+- 课程 `nn-training/curricula/y5-hit.jsonc`（校验 `tmp/y5hit-ev-check.py` 绿）·
+  决策 DECISIONS §2026-10-13-goalnn-y5hit-design。**开课人点**。
+
+---
+
+## §96 y5 it300 收官：终点零效应，水槽买的是谨慎不是本事（2026-10-13）
+
+- **门外收官**（100 局同 seed 配对）：clears 69→73（McNemar ns）、kills 4.04→4.15（ns）、
+  dmg raw ns；训练健康（熵 ~0.7 平、KL ~0.014 稳、rollout 0.55→0.66），300 跑满。
+- **连击率**：0.55→0.40/局（−27%，paired z=−1.68，p≈0.09 **ns**，差一点）；/千tick −46%★
+  主要靠分母；全程 0.23–0.55 bouncing 无趋势 ⇒ **连击没真动**。
+- **贴脸率**：nearSq 466→364/局（−22%，z=−2.79★ 真动一点）；near4 812→756（−7%，ns 没动）⇒
+  其 /千tick 显著（−42%/−31%）几乎全是分母稀释。⇒ **贴脸动了一点，近身时间没动**。
+- **稀释的来源**（行为真相）：ticks +536（+34%，z=5.8）、stuck 88→241（2.7×）、cells −16%、
+  shots +29% 而 kills 平 ⇒ shots/kill 5.8→7.3 **效率反降**。税教会的是"慢＋少暴露＋多开火"，
+  不是"赢＋杀"。x27-c20 的 G5 总账零在 c05 复现。
+- **前瞻**：y4 同配方，大概率同命运——y4 盯盘加一条失败形状：ticks 膨胀＋shots/kill 恶化而
+  胜/杀不动 ⇒ 掐，不等 300。rms 全程盲（it1–5 零、之后键缺席；y5 没做 analytic）。
+- 证据 `tmp/y5/eval_log.jsonl`（it0/it300 同 100 seeds）· 决策链 §94/§95。
+
+---
+
+## §95 y4/y5 加税腿设计冻结：x4/x5r 为师＋x27 水槽逐字，300 轮人工盯盘（2026-10-13）
+
+- **设计**（相对 x27-obs：只换 level/起点/账本/eval/流；配方/优化器/K 全逐字）：y4＝c04＋x4-mig
+  （sha `770b14b9…`），y5＝c05＋x5r-mig（sha `b1761492…`，不用 x5a：机制探针不当师傅）；
+  kickstart 缰绳＋burn 等效关＋ent 0（用户令人工盯盘，人就是熔断器）；iters 300/max 48/workers 8；
+  eval 本 rung 单关×100；legacy-arch（rms 结构性零预期，看 KL）。
+- **§6.4 偏离**：§94 要带血的税，本腿 x27 水槽逐字（raw near28/threat80/dist 彩票/pickup 系）——
+  用户令为准；冠军耐接触＋缰绳兜底；pickup 死列 phase-2 清理候选。
+- **盯盘表**（无自动门；§15.4 每次 update 人读 kl/entropy/value/gnorm＋rms）：it40/100/200 对基线
+  （y4: 3.56/170/76%；y5: 4.40/139/78%）；kills−15%/pass−10pp/D01 翻倍/KL>0.03×3/rms 非零 ⇒ 人工掐。
+- 课程 `nn-training/curricula/y4.jsonc`＋`y5.jsonc`（校验 `tmp/y45-ev-check.py` 绿）·
+  决策 DECISIONS §2026-10-13-goalnn-y45-design。**双腿并行就绪，人点**。
+
+---
+
+## §94 x2–x6 加冕迁移普查：在 c04 发病，y4 为第一加税级（2026-10-13）
+
+- **做法**：x2/x3/x4/x5r/x5a/x6 六冠（schema 3 头 128，全与 a2 同族）经 init_spatial_leg --legacy-arch
+  转新网（签名与 y1a 一字同：41/42 原位、仅 fc 换形、missing 空；证据 `tmp/mig-audit.py`），
+  各在自家 rung 跑 eval（c02 300/c03 200/c04–06 各 50＋x5a 50，共 700 局，55s 零失败；
+  driver `tmp/mig-eval/drive.ts`，行 `tmp/mig-eval/rows-*.jsonl`；c01 行复用 y1a it0 400 局）。
+- **五维**（胜率/击杀率/承伤D01/贴脸/连击）：c01 100%/1.00/1.8/321/0.00 → c02 97%/0.98/63.5/260/0.20 →
+  c03 95%/0.96/95.1/197/0.17 → **c04 76%/0.89/170.3/273/0.54** → c05r 78%/0.88/138.6/317/0.66 →
+  c06 82%/0.90/121.4/273/0.64。转化层同步点火（c03→c04）：postHitLane 2.7→9.3、
+  maxDmg120 61→135、dmgWhileLow 14.9→57.2；x1 全零对照。
+- **关键形状**：贴脸量不分级（c01 321 最高却 0 伤）——病不是"贴"，是"贴→挨打→连击"的转化；
+  c04+ 近身量与 c01 同级，D01 70–95 倍＋连击 3 倍＋。x5a vs x5r：胜率同（76/78），
+  bursts 0.38/0.66＋postHit 4.4/5.7＋ticks 快 200——approach 塑形软化转化但没变现终点
+  （与其纪元 verdict"机制成、主端点死"互验）。
+- **判决**：**y4（c04）为第一加税级**；y2（c02）/y3（c03）沿 phase-1 经济（免 near/threat，
+  97%/95% 不值得为它冒恐惧）。税形：**带血的税**（post-hit near/bursts/max120/while-low，
+  v10/v11 现成列，零新工程），**不是**无差别贴脸税（会连 a2 式干净近身一起杀）。
+  剂量开 y4 时用 c04 真实行标定（a2 ②）。caveats：c04–06 n=50（±6pp；19pp 悬崖实）；
+  迁移行是 reference 非配对基线（种子/深度不同；x4 80.4→76、x6 ~60→82 量级互验无转换损伤）。
+- 决策 DECISIONS §2026-10-13-goalnn-tax-start-rung。
+
+---
+
+## §93 y1a it5 守住＋接线盲结了：冠军满分保持，直算证明三腿零的死法各不同（2026-10-13）
+
+- **门**（冠军线，400 局）：kills 1.0≥0.8✅/cells 19.88≥8✅/D01 3.18≤5.0✅，400/400 clears。
+  漂移 watch：D01 1.82→3.18（＋75%，线内）、dmg 0.80→1.33、cells 22.4→19.9、shots 8.47→7.33、
+  ticks 495→431（杀更快了）。margin 巨大，it10 再看 D01 趋势。
+- **直算**（`tmp/y1a-rms-analytic.py` 绿，头注 mandate 关闭）：y1a legacy 空片 ⇒ 结构性双 0
+  （日志 0≠旧码；缰绳看 KL：0.037→0.004 按住）；y1f/y1d 切片 [(128,165)] 非空，
+  checkpoint 新列 policy 0.099/0.074、value 0.287/0.212——**账本 0.0 系上报链误报**，
+  新列真动过。附带 lead：y1f value 0.287 ≈ x26 无绳爆炸位（0.30）＋熵反升 0.83→1.05 ⇒
+  y1f 之死可能有 advantage 污染成分（单测钉的正是这条）；y1d 0.212＋熵正常下降。
+  五条腿盲全清（y1/y1k 历史零用旧账，不追）。
+- y1a 不动（等 it10）；y1f 已杀；y1d 续到 it60；y1h 待开。证据直算脚本＋`tmp/y1a/eval_log.jsonl`。
+
+---
+
+## §92 y1f/y1d it40 verdict：y1f 塌杀、y1d 续命、胡萝卜零效应、y1h 开（2026-10-13）
+
+- **门**（it40，400 局）：y1f shots 0❌/cells 1.0❌/kills 0❌（0/400 开火，it25–40 坐穿，恐惧塌）⇒ **杀**；
+  y1d shots 7.82❌（差 2.2，394/400 在开火）/cells 1.0❌/kills 0.325✅（130 clears，2001 强 66/2003 弱 2 结构同 y1k）/
+  D01 0.70✅/fear 未塌。y1d 按字面挂两条，但它是四条 scratch 唯一活口＋rollout 最好
+  （83 clears/win 0.395 三连涨）＋kills 踩线过＋shots 下降伴随 kills 守住（效率化，不是恐惧；
+  a2 同款：22.8→3.18 发）⇒ **§6.4 偏离：续到 it60**，改判线（shots<5 或 kills<0.3 即杀）。
+- **explore verdict**（§89 双分支）：位移上**零效应**——两腿 cells it5–40 全程 1.0，无分离；
+  存活上 y1d 活（130）y1f 死（0）⇒ 免税已够方向对；explore 有害**无实锤**（更可信：stochastic 入坑＋
+  hurt/miss 恐惧；park 在 explore 下 −1.6 vs −1.8 更舒服，可能是 y1f 没爬出来的微因）。
+  结论：phase-2 explore 进 taper/drop 候选，**先等 y1h 测 hurt**（y1h 动⇒pin 是 hurt，explore 更该 drop）。
+- **y1h 触发**：cells 双挂＋y1f 全挂 ⇒ 条件满足，**现在开**（人点）。
+- **y1a 早报**：it1 KL 0.037 spike（预言的跨架构冲击）→ it2–4 回 0.004（缰绳按住）；rollout 0.996；
+  熵 1.01 几乎没掉；eval 首检待 it5。⚠ prms it1–4 全 0——**五条腿了，analytic 直算一次没做过**，
+  缰绳是否真拴着（value-new 接线）仍是盲的；y1a 是最急的一条。
+- 证据 `tmp/y1{f,d}/eval_log.jsonl`＋training_log · 决策 DECISIONS §2026-10-13-goalnn-y1fd-it40-verdict。
+
+---
+
+## §91 y1a B线BC迁移腿设计冻结：a2.it45为师＋y1f配方（2026-10-13）
+
+- **架构账**：师傅 schema 3（头 128：move/fire/value 全吃 hidden）vs 现行 5（头 165）⇒
+  bc 直指旧文件被 schema 门**响亮拒绝**；路线＝`init_spatial_leg.py --legacy-arch` 列迁移
+  （a2 头宽 ≈ v3-hu150 系，对得上；旧列原位拷＋新列重 init），产物
+  `weights/y1a/a2it45-warmstart-v5.json`（**待生成**）＋warmstart_missing 审计，缺一不开。
+- **设计**：配方 y1f **逐字**（变量只剩起点技能；y1a vs y1f＝技能效应；**归因死于此**）；
+  kickstart_ref=true＋init 0.1（跨架构 KL 冲击，M3/x24 先例）；语义白送（师傅 ticks 227/
+  dmg 0.877 在 y1f 下天然合规：stuck 够不上 deadzone、无 near 税）。
+- **门**（冠军底子，以本腿 it0 基线为准，括号＝档案值）：kills≥0.8（1.0）＋cells≥8（12.5）＋
+  D01≤5.0（0.877）；shots 上报只读（3.18 高效）；fear＝kills/cells 双塌；it5 analytic 照旧；
+  fail⇒杀腿。it80 kills≥0.8＋pass≥80% ⇒ y2-phase2。
+- 课程 `nn-training/curricula/y1a.jsonc`（配方/缰绳/前置态已校验，证据 `tmp/y1ha-ev-check.py`）·
+  决策 `DECISIONS.md` §2026-10-13-goalnn-y1a-design。**转换＋开课都是人点**。
+
+---
+
+## §90 y1h A线调税腿设计冻结：y1f只去wHurt（2026-10-13）
+
+- **为什么是 hurt**：y1f/y1d it20 开火没问题（shots 21.68），按住的是腿不是枪。hurt 在 turret 行
+  ≈−0.06（隐身），前瞻里"动而挨打"＝110×hurtWeight/ticks 重税；wDmg 0.03 留
+  （a2 证过单杯兜得住 0.877 伤）。EV 预告：走 −0.97＞坐 −1.66，margin +0.69≈y1f/y1d——
+  效应全在前瞻，纸算看不见，真跑见。
+- **设计**（y1f 单变量删 1 项）：其余四向逐字同（s8/流 20261024/优化器/K/门）。
+  readout：y1h 动而 y1f/y1d 不动 ⇒ hurt 是按头的手；三腿都不动 ⇒ 主犯另有（miss？motor？phase-1c）。
+- 门与 y1f/y1d 一字同（shots≥10＋cells≥5＋kills≥0.3，D01 watch，fear-watch，it5 analytic，fail⇒杀）。
+  it80 同线 ⇒ y2-phase2。
+- 课程 `nn-training/curricula/y1h.jsonc`（load＋编译＋对账绿，证据 `tmp/y1ha-ev-check.py`）·
+  决策 `DECISIONS.md` §2026-10-13-goalnn-y1h-design。**开课＝人在控制台点**。
+
+---
+
+## §89 y1d 纯删对照腿设计冻结：与 y1f 只差 wExplore 有无（2026-10-13）
+
+- **为什么开**：y1f 头注 EV 预告里有个诚实但不舒服的细节——历史行上 y1f（走 −1.03/坐 −1.70）
+  与纯删（走 −1.23/坐 −1.90）纸面 margin 几乎逐字同（+0.67 vs +0.68），因为历史行 cells 恒 1，
+  explore 在两边各 +0.2 常数。explore 的效应只能在**真位移**上兑现，纸算看不见 ⇒ 必须真跑一条。
+- **设计**（y1f 逐字＋删 wExplore 一项；相对 y1＝删 near/threat）：其余三向逐字同
+  （s8/流 20261024/优化器/K/门）。本腿独测"无恐惧＋无胡萝卜"下木棍 alone 行不行
+  （y1 顶 −1.8 坐穿时有 near×3 在场，不干净）。
+- **双分支**：y1f 赢（动＋杀）⇒ 胡萝卜必需，stick-alone 不够；本腿持平/赢 ⇒ 免税已够＋
+  explore 多余（x20 反向激励坐实，phase-2 drop explore）；双 fail ⇒ 另有主犯（miss？motor？另案）。
+- 课程 `nn-training/curricula/y1d.jsonc`（load＋编译＋双 diff 绿，证据 `tmp/y1d-ev-check.py`）·
+  决策 `DECISIONS.md` §2026-10-13-goalnn-y1d-design。**开课＝人在控制台点**（可与 y1f 并行）。
+
+---
+
+## §88 y1f phase-1 先开火腿设计冻结：删贴脸/火线两税＋explore 0.2（2026-10-13）
+
+- **背景**（y1/y1k it80 双收官双 fail）：kills 0.015/0.333（门 0.5 双挂）、stuck 1499/978
+  （门 451 双挂）、pass 1.5%/33%（晋升 50% 双挂）；D01 双双 −98% 地板。y1 贪心坐穿 50 轮：
+  cells 恒 1（从没离开出生格）、stuck 1499、shots~0，it50–70 只在 2001 抽搐 5–17 局；
+  y1k 冻在 it5 峰 80 轮。用户令 phase-1：先跑起来开起火来，贴脸/火线税暂免，
+  杀敌后再学走位闪避；参考 a2（§11 三条方法论：排序≠行为、真实语料标定、边际比走>坐）。
+- **设计**（相对 y1 单变量束：删 2 加 1，优化器/K/起点/流全冻）：删 wNearSq 84（恐惧主犯；
+  parked 照交 −0.93/局，罚站没躲掉）＋ wThreat 80（phase-2 加回）；加 wExplore 0.2（a2 同值；
+  scratch-proxy 边际成本 ≈−0.22/格，悲观口径含死亡，0.2 贴线＋stuck −1.8 兜底）。
+  EV 复算（新公式跑 y1 真实行）：走 −1.03 ＞ 坐 −1.70 ✓ margin +0.67。terminal {} 不动；
+  wHurt/wMiss 留作 phase-1b 变量（下一嫌疑）。a2 位移包不采用：x1 死于位移太小，
+  y1 位移充分方向错，修经济不修步长。
+- **门**：it40 shots≥10＋cells≥5＋kills≥0.3（D01 只读 watch，watch 线＝it0 77.9）；
+  fear-watch（shots < it0×0.8）塌即杀；**it5 前 checkpoint analytic 直算复核双 rms**
+  （y 系 80 轮日志恒 0 盲跑教训，直算不活＝执行器旧码，先修码）；fail⇒杀腿。
+  it80 kills≥0.5＋shots≥10＋cells≥5 ⇒ y2-phase2（加回 near+threat，explore 回落）。
+- **对照**：同 s8/sha、同流 20261024（paired；先例 y1-long 同流）。y1f vs y1＝束效应，
+  y1f vs y1k＝去恐惧＋explore 能否解锁位移/杀敌。
+- 课程 `nn-training/curricula/y1f.jsonc`（load＋编译＋对账绿，证据 `tmp/y1f-ev-check.py`）·
+  决策 `DECISIONS.md` §2026-10-13-goalnn-y1f-design。**开课＝人在控制台点**。
+
+---
+
+## §87 y1 it40 门 fail＋it42 熵熔断 ABORT：贪心峰冻结 400/400×8，死因探索死亡（2026-10-13）
+
+- **门**：D01 1.3 通过；kills 0.345 < 0.5 **fail**。greedy 峰 it5–it40 八连 eval
+  400/400 逐局逐字同（wver 八变）；熵 1.81→0.17；pol −0.0002/KL 0.0003（梯度死）。
+- **熔断**：it42 `circuit_break`（entropy≤0.25 连 8 轮，now 0.164）→ ABORT → run_complete；
+  熔断器按设计（慢引信），非漏映射。门 fail＋熔断双判决，本配置杀。
+- **病因非价格**：D01 −99%＋138 clears＋开火 23→22（无恐惧）三条出罪出生税；
+  simple 同峰 it30 到（400/400 逐字同，c01 贪心吸引子唯一）、熵 1.69 未塌——
+  税加速发现 6×（it5 vs it30），也加速收敛（速度的代价）。policy-rms 20×（0.0025→0.05）
+  接线中；value-rms plateau ~0.06 后被绳拉回。
+- **后继**：entropy-rescue 另案（y1-it30 fork，峰已找到＋熵 0.27 alive 处干预）；
+  simple 不动待其 it40。决策 `DECISIONS.md` §2026-10-13-goalnn-y1-it40-verdict。
+
+---
+
 ## §86 x28 双腿 it40 双杀：nearSq 动姿态不动 D05（p=0.818）＋ wBlock×4 强 null（W08 反向 p=0.136）（2026-10-13）
 
 - **d01 腿**（wNearSq 28→42）：主 D05 均值 77.165→76.338（−1.1%），同对中位 p=0.818 死 null，

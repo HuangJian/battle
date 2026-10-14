@@ -1,0 +1,121 @@
+// 课程 y5-pos —— y5-far 的并行比较腿：走位税（corner×2＋threat×1.5），近/包围税不动。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；**可与 y5-far 并行同开**）。
+//
+// 立项 → 用户 2026-10-13：y5-far（直接税 near×2/encl×2）之外，用另一套激励验证——
+//   站位税（corner 蹲角＋threat 火线暴露），答"直接 vs 站位哪套能防近/防包又不打破命中"。
+//   剂量（同 corpus）：corner 已交 −2.72/局（23%）→×2（−5.4，46%）；threat 已交 −4.01/局
+//   （34%）→×1.5（−6.0，51%）＝+4.7/局（≈y5-far 的 +5.6/局量级）。threat 加压有恐惧风险
+//   （y1 P2 语），冠军底子＋fail-fast 护栏兜底；fear-watch 同 y5-far。
+//
+// ── 单变量声明（相对 y5-far：只换税对；其余逐字）────────────────────────────────
+//   调 wCorner 55→**110**＋wThreat 80→**120**；wNearSq 28/wEncl 8.6 留（y5-hit 原值）。
+//   配方 rest/门/起点/优化器/K/流/账本键（除名义）全与 y5-far 逐字同。
+//   双分支：y5-far 动（near/encl↓＋命中守）而本腿平 ⇒ 直接税有效，站位税无效；
+//   本腿动而 y5-far 破命中 ⇒ 站位更安全，直接 too hot（near×2 恐惧）；
+//   双动 ⇒ 机制都有效，看剂量；双不动 ⇒ pin 在别处（hurt/miss 已高？motor？）。
+//
+// ── 门（与 y5-far 一字同；paired）──────────────────────────────────────────────
+//   主：hitRate ≥ 0.75；主2：nearSq/千tick ≤ 110；次：kills ≥ 3.5；次2：encl/千tick ≤ 100；
+//   D01 ≤ 85 护栏；fear-watch：shots/局 < 8 且 kills < 3.5 即恐惧塌，杀；
+//   上报：policy_new_rms（legacy 结构性零预期）＋it5 analytic 照旧；fail ⇒ **杀腿**。
+//   终点：四线全过 ⇒ 收官（iters 500 为 cap）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   起点：y5-hit.it500（`weights/y5-hit/y5-hit.it500.20261014-134145.json`，
+//   sha16 `961bacde390cbf02`；同代直连，kickstart 关，opt fresh）。
+//   anchor 0.001（legacy 空片，无害）；ent_break 0.25；batch 24576；优化器/K 冻结。
+//   iters 500，max_hours 24，workers 8，eval 本 rung（"2000" 单关×200）。
+//   ⚠ 前提：tmp/y5-pos 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c05`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y5-pos）+ backup 新目录（nn-training/weights/y5-pos）+ opt fresh。
+{
+  "version": 5,
+  "name": "y5-pos",
+  "mode": "per-tick",
+  "level": "ladder-c05",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 28.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y5-hit.it500（sha 见头注；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y5-hit/y5-hit.it500.20261014-134145.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流。
+  "paired_rotate_seed": 20261024,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y5-pos/weights.json",
+  "traj": "tmp/y5-pos",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/y5-pos",
+  "backup_prefix": "y5-pos",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 结课报告（2026-10-13；it260 杀，非跑满；混合 eval，注意口径）
+// ══════════════════════════════════════════════════════════════════════════
+// 起点 y5-hit.it500（sha `961bacde…`；同代直连，kickstart 关，opt fresh）。
+// it0（n=200）→ it260（n=400）：clears 72→49（36%→12%）、kills 2.75→2.20、
+//   hitRate 0.783→0.890（涨！）、shots 10.2→7.1（fear 线 8 已破）、D01 104.1→52.2（跌）、
+//   stuck 390→822、cells 61→33。
+// 弧线：it40 189 → it215 281（混合 headline；s2000 切片 66→67 横盘，涨全是 arena 侧）→
+//   it245 转折（177）→ it250 破 kills 线（116/3.02）→ it260 地板（49/2.20，shots 破 fear 线）。
+// 训练：win 0.356→0.279（中 0.79 峰），熵 ~0.8 平（无熔断），KL ~0.02–0.03 平（it68 0.108 单点已收回）。
+// 判决：漂移式死亡（§109），门（kills<3.5 双连破＋y 系 −16%＋腰斩出带）全响，无异议杀。
+//   瞄准系统至死守住（hitRate 0.89）——死的是整局产出。
+// 后继：lineage 由 y5-near（it215 峰分支）继承；it215 文件永存。本文件冻结。
+// 证据：docs/nn/experiments.md §104（立项）/§105（健康）/§106（混合审计）/§109（杀）·
+//   tmp/y5-pos/eval_log.jsonl（混合行；c05 真值读 s2000 切片）。

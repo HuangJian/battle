@@ -1,0 +1,123 @@
+// 课程 y5 —— c05 第二加税腿：x5 冠军为师＋x27-obs 厨房水槽配方（用户令），iters 300，人工盯盘无熔断。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；**可与 y4 并行同开**）。
+//
+// 立项 → 用户 2026-10-13：§94 普查 c05 78%/D01 139/bursts 0.66（病在 c04 起，c05 同病区）；
+//   配方点名 x27-obs 逐字；300 轮；人工盯盘不设熔断。
+//   §6.4 偏离说明（同 y4）：§94 推荐"带血的税"，本腿用 x27 水槽逐字——**用户令为准**；
+//   x5 用 **x5r 不用 x5a**（过关冠用 rebirth 系；approach 系是机制探针、主端点死，不适合当师傅）。
+//
+// ── 单变量声明（相对 x27-obs：只换 level/起点/账本/eval/流；配方/优化器/K 全逐字）─
+//   level ladder-c05（单关 count 5，max_ticks 3900，hard 1 命；环境键全在 level，
+//   课程**不重复** stages 等键；eval stage ID＝2000 本 rung 单关）。
+//   起点 x5r-mig 转换产物（`weights/x5r-mig/x5-rebirth.it35-warmstart-v5.json`，
+//   sha16 `b17614921b32ff15`；legacy-arch 头 128，同 y1a——rms 结构性零预期，看 KL/缰绳；
+//   41/42 原位审计过，`tmp/mig-audit.py`）。
+//   kickstart_ref=true＋init 0.1（跨代缰绳）；burn {baseline,100}＝等效关；
+//   ent_break 0（用户令：人工盯盘，**人就是熔断器**）。
+//   同流 20261024（y 系）；max_hours 48（纯 ceiling）；eval 本 rung（"2000" 单关×100/轮）。
+//   iters 300，workers 8，batch 24576；优化器/K 冻结（x27 逐字）。
+//
+// ── 盯盘表（无自动门；§15.4 每次 update 必读 kl/entropy/value/gnorm＋rms）────────
+//   it40/100/200 对 migrated 基线（x5r：kills 4.40 / D01 139 / pass 78%）：
+//   kills 掉 >15% 或 pass 掉 >10pp 或 D01 翻倍（>278）⇒ 人工掐；
+//   KL >0.03 连 3 轮 ⇒ 掐；rms 非零 ⇒ 立刻掐查（legacy 恒零预期，非零即强信号）。
+//   终点：跑满 300 或人掐。不考 G0。
+//   ⚠ 前提：tmp/y5 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y5）+ backup 新目录（nn-training/weights/y5）+ opt fresh。
+{
+  "version": 5,
+  "name": "y5",
+  "mode": "per-tick",
+  "level": "ladder-c05",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 28.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：x5r-mig 转换产物（sha 见头注；缰绳开）──
+  "bc": "nn-training/weights/x5r-mig/x5-rebirth.it35-warmstart-v5.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关；盯盘掐闸在人手里。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（0.0 = 关；x27 逐字 0.001；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 300,
+  "max_hours": 48,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（见头注）。
+  "paired_rotate_seed": 20261024,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y5/weights.json",
+  "traj": "tmp/y5",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/y5",
+  "backup_prefix": "y5",
+
+  "eval_stages": "2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 结课报告（2026-10-13；跑满 300 cap，非杀；y1 系已删，本系列自 y4 起）
+// ══════════════════════════════════════════════════════════════════════════
+// 起点 x5r-mig（x5-rebirth.it35 转换，sha `b1761492…`；legacy-arch，如 y1a）。
+// it0 vs it300（同 100 seeds，c05 单关）：clears 69→73（McNemar ns）、kills 4.04→4.15（ns）、
+//   dmg raw ns；连击 0.55→0.40（−27%，z=−1.68 ns 没真动）；nearSq 466→364（−22%★）、
+//   near4 812→756（−7% ns）；ticks 1557→2094（+34%★★★，稀释源）、stuck 88→241（2.7×）、
+//   cells 70.9→59.3（−16%）、shots 23.5→30.3（+29%）、shots/kill 5.8→7.3（反降）、
+//   hitRate 0.494→0.396（−0.10）。
+// 训练健康：win 0.554→0.657，熵 0.780→0.735（平），KL 0.1165→0.0143（均 0.0151；it1 高点
+//   系跨代起点冲击）；rms 全程盲（it1–5 零后键缺席，未做 analytic）。
+// 盯盘三线全程合法（kills＋2.7%、pass＋4pp、D01 85.3→60.1 反降），无掐。
+// 判决：水槽买谨慎不买本事（慢＋少暴露＋多开火，胜/杀 ns；x27-c20 G5 零效应复现）。
+// 后继：y5-hit（命中 0.40→0.84，已结课）→ y5-hit2 改名 y5-far（塌，待 halt）→ y5-pos
+//   （it260 垂死，杀令已下待执行）→ y5-near（it34 进行中）→ y5-term（待开）；本文件冻结。
+// 证据：docs/nn/experiments.md §94（立项）/§96（收官分析）· tmp/y5/eval_log.jsonl。
+//   ⚠ tmp/y5-hit 日志已由用户清理（§96–103 数封存；panel＋500 权重在）。
