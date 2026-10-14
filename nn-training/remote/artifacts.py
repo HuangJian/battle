@@ -2,11 +2,16 @@
 
 为什么有这个模块：`kind=run` 的语义是「hub 只在交接时必需，此后云机自主」。而云端
 （Kaggle / Colab）**不是一个可信的持久存储**——会话到点即断（Kaggle 9/12h）、机器随时
-会被回收。所以自主段唯一的交付面就是**本机产物目录**：
+会被回收。所以自主段唯一的交付面就是**产物目录**：
 
+  ★ 2026-10-14（`plan/offline-local-disk-first` §3.2，用户拍板-1）：这个目录默认落在
+  **节点本地盘**（`<本地根>/battle2-offline[-<课>]`，本地根 = `NN_LOCAL_ROOT` ∨ `/tmp`），
+  而**不再**是网络盘。网络盘退到两个角色：**交付面**（`deliver-<课>.zip` 的下载落点）与
+  **备份抽屉**（`<网络产物根>/backup/`，只装回传失败的那些轮）。生效点是
+  `remote/offline_boot` 的 `--artifacts`（它指的是本地根），**不是**本模块的默认分支。
   * Kaggle：`/kaggle/working/<run>/`（官方的 output 目录，Save Version 即打包下载）；
   * Colab：`/content/drive/MyDrive/<run>/`（挂 Drive 时，跨会话存活），否则 `<cwd>`；
-  * 其它：`--artifacts` 显式指定（本机演练 / 自建节点）。
+  * 其它：`--artifacts` 显式指定（本机演练 / 自建节点）——生产路径走的就是这一支。
 
 布局（每轮一份不可变快照 + 一个追加式账本）：
 
@@ -23,7 +28,17 @@
                            写——重启后靠它接着补，而不是重传已投递的轮次）
 
 **中断即有效**：每一步先写临时文件再原子改名，且 state.json 永远指向「已完整落盘的
-最后一轮」。会话被 kill 也只丢正在跑的那一轮——新会话用同一个目录再跑一次即可续上。
+最后一轮」。会话被 kill 也只丢正在跑的那一轮——**只要那个卷还在**，新会话用同一个目录
+再跑一次即可续上。
+
+★ **续跑真值的完整口径**（2026-10-14，§3.2/§3.5 改口径 —— 旧文「新会话用同一个目录再跑
+一次即可续上」在产物落本地盘之后会误导人）：
+
+    可续跑性 = hub 已收轮次　∪　**网络盘备份抽屉**（`backup/`）
+
+  本地盘（`/tmp`）**不抗容器回收**：本地产物在本段会话内是权威（同会话重跑 = 从最后一轮接上），
+  而跨会话的凭据是上面并起来的那一份。恢复腿（`offline_boot.restore_from_backup`）在
+  「本地三件不齐 ∧ 备份齐」时把它反向铺回本地根（优先级：本地根 > hub 锚点 > 备份）。
 """
 
 from __future__ import annotations
@@ -61,6 +76,13 @@ def is_colab(env: Mapping[str, str] | None = None, *, exists=os.path.isdir) -> b
     return exists("/content") and not exists("/kaggle/working")
 
 
+#: 网络侧**备份抽屉**名（与 `remote/offline_deliverable.py::BACKUP_DIR_NAME` 逐字相同；测试守）。
+#: ⚠ **不得**以 `it-` 开头：`ArtifactStore.finalize` / `_refresh_latest` 按顶层 `it-*` 扫轮次
+#: （`self.root.glob("it-*")`），叫 `it-backup` 之类就会把备份打进交付物。
+#: 与 `remote/job_fs.RESULT_BACKUP_DIR`（= 单个 job 的线上体备份）**同名不同义**，别合并。
+BACKUP_DIR_NAME = "backup"
+
+
 def resolve_artifact_dir(
     explicit: str | Path | None,
     *,
@@ -69,12 +91,18 @@ def resolve_artifact_dir(
     env: Mapping[str, str] | None = None,
     exists=os.path.isdir,
 ) -> Path:
-    """产物根目录（显式 > 环境变量 > Kaggle > Colab(Drive 优先) > 工作目录）。
+    """产物根目录（显式 > 环境变量 > **本地盘** > Kaggle > Colab(Drive 优先) > 工作目录）。
 
-    顺序刻意如此：**显式永远赢**（自建节点/本机演练），其次是 Kaggle（官方 output 目录
-    是唯一能一键下载的位置），最后才是 Colab 的 Drive（挂载可能失败——那时退回
-    `/content`，人用 `files.download` 拿）。
-    """
+   顺序刻意如此：**显式永远赢**（自建节点/本机演练），其次 `BATTLE_ARTIFACT_DIR`，再次
+    **节点本地盘**（2026-10-14，`plan/offline-local-disk-first` §3.2：产物默认落本地盘，
+    网络盘只在回传失败时作备份），之后才是 Kaggle（官方 output 目录是唯一能一键下载的位置），
+   最后是 Colab 的 Drive（挂载可能失败——那时退回 `/content`，人用 `files.download` 拿）。
+
+   ⚠ **本函数的默认分支不是拍板-1 的生效点**（评审 P0-1）：生产路径上恒有**显式**
+   `--artifacts`（`remote/offline_boot.build_run_argv` 无条件传），而显式永远赢 ⇒ 本地优先
+   这一档只是「无显式」时的**兜底**（唯一走默认分支的 `kind=run` 节点腿已退休，见
+   `remote/worker.py`）。生效点在 `offline_deliverable.resolve_local_root`（拆两个根）。
+   """
     e = os.environ if env is None else env
     if explicit:
         return Path(explicit).expanduser()
@@ -82,6 +110,9 @@ def resolve_artifact_dir(
     if from_env:
         return Path(from_env).expanduser()
     tag = f"battle2-{run_id}" if run_id else "battle2-run"
+    local_parent = (e.get("NN_LOCAL_ROOT") or "").strip() or "/tmp"
+    if exists(local_parent):
+        return Path(local_parent).expanduser() / tag
     if is_kaggle(e, exists=exists):
         return Path("/kaggle/working") / tag
     if is_colab(e, exists=exists):
@@ -90,6 +121,38 @@ def resolve_artifact_dir(
             return drive / tag
         return Path("/content") / tag
     return Path(work_dir) / "artifacts" / tag
+
+
+def resolve_backup_root(
+    explicit: str | Path | None,
+    *,
+    run_id: str,
+    work_dir: str | Path,
+    env: Mapping[str, str] | None = None,
+    exists=os.path.isdir,
+) -> Path:
+    """**备份抽屉的父目录**（显式 > `BATTLE_BACKUP_DIR` > Kaggle/Colab 平台分支 > `<work_dir>/backup`）。
+
+    它必须是**网络侧**（人不在云机上，机器挂了本地盘一起没）：这就是它不能用
+    `resolve_artifact_dir` 的原因（后者已本地优先）。生产路径上由
+    `remote/offline_boot` 显式传（= `<网络产物根>/backup`），这里同样只是兜底。
+    名与 `remote/job_fs.RESULT_BACKUP_DIR`（单 job 的线上体）分开：本抽屉装的是
+    「没回传成功的**轮次产物**」（见 `plan/offline-local-disk-first` §3.4）。
+    """
+    e = os.environ if env is None else env
+    if explicit:
+        return Path(explicit).expanduser()
+    from_env = (e.get("BATTLE_BACKUP_DIR") or "").strip()
+    if from_env:
+        return Path(from_env).expanduser()
+    tag = f"battle2-{run_id}" if run_id else "battle2-run"
+    if is_kaggle(e, exists=exists):
+        return Path("/kaggle/working") / tag / BACKUP_DIR_NAME
+    if is_colab(e, exists=exists):
+        drive = Path("/content/drive/MyDrive")
+        base = drive if exists(str(drive)) else Path("/content")
+        return base / tag / BACKUP_DIR_NAME
+    return Path(work_dir) / BACKUP_DIR_NAME / tag
 
 
 # 原子写 / JSON 原子写 —— 唯一实现见 `common.fs`（re-export；同包调用点与测试不变）。
@@ -105,6 +168,9 @@ class ArtifactStore:
 
     实例不持有任何「未落盘」的关键状态：`state.json` 是唯一的续跑真值，每次 checkpoint
     都原子刷新——进程随时可以死，卷上永远是一个**自洽**的目录。
+
+    ⚠ 那个「卷」默认是**节点本地盘**（2026-10-14）：它不抗容器回收 ⇒ 跨会话的可续跑性 =
+    hub 已收轮次 ∪ 网络盘备份抽屉（模块头「续跑真值的完整口径」）。
     """
 
     #: 逐轮权重/opt 的子目录名前缀（字典序即轮次序，便于人肉翻看）。

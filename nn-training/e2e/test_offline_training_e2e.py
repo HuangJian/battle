@@ -522,12 +522,15 @@ def test_a_fresh_run_lays_down_code_and_ts_tree_before_the_loop(
     """
     pack = _real_pack(tmp_path, C_OFF, monkeypatch)
     work = tmp_path / "work"
+    # 产物根（★ 2026-10-14）：默认落**节点本地盘** ⇒ 用例显式钉住它（缺省的 `/tmp/battle2-offline/<课>`
+    # 是跨用例共享的位置，不能拿它当判据）。网络侧 `work/run` 常态下一个字节都不写。
+    dest_root = tmp_path / "local"
     argv_seen: list[list[str]] = []
     dest_existed: list[bool] = []
 
     def fake_loop(argv: list[str]) -> int:
         argv_seen.append(list(argv))
-        dest_existed.append((work / "run").is_dir())
+        dest_existed.append(dest_root.is_dir())
         return 0
 
     # 代码解包到临时目录（生产缺省是 `/tmp/worker-code`：本用例不该往机器上真写那个路径）。
@@ -540,6 +543,7 @@ def test_a_fresh_run_lays_down_code_and_ts_tree_before_the_loop(
     cfg = {
         "course": C_OFF,
         "work_dir": str(work),
+        "local_root": str(dest_root),
         "download_dir": str(tmp_path / "out"),
         "device": "cpu",
         "live_backfeed": False,
@@ -553,7 +557,7 @@ def test_a_fresh_run_lays_down_code_and_ts_tree_before_the_loop(
     assert rc == 0, logs
     assert dest_existed == [True], f"run_loop 起来时产物目录必须已存在；日志：{logs}"
     argv = argv_seen[0]
-    dest = work / "run"
+    dest = dest_root
     assert (dest / TS_CODE_NAME).is_file(), logs
     assert (dest / offline_boot.TS_TREE_NAME / "tools" / "sim" / "export-eval-game.ts").is_file()
     assert "--bundle" in argv and str(pack) in argv, argv

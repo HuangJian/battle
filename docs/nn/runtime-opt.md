@@ -16,7 +16,7 @@
 > §2026-10-14-goalnn-offline-local-disk-first。
 > 现场（云机 `y5-hit`，02:48:49 → 02:51:08）：**139s 静默**——`轮次补传检查` 的 `ticks 5→6` 而 `cpu 只 +0.91s`
 > （纯阻塞 IO），同一轮 rollout 腿刚报过 `probe_probe=超界回退｜5s 内没返回`，缺口末尾才打出 `_layout()` 的
-> 唯一一行；eval 本体只用了 2.0s。
+> 正常支路唯一一行；eval 本体只用了 2.0s。
 
 * **为什么「上界」治不了它**（§35.1 的解法被推翻的理由）：`call_bounded` 是「可放弃的等」**不是熔断**
   （被放弃的线程是 daemon：不杀、不 join）⇒ 5s 上界买到的是「5s + **一条仍在写 8MB+fsync 的残留线程**」，
@@ -47,8 +47,32 @@
   `tests/remote/test_round_ctx.py`（落点解析一轮一次）· `tests/remote/test_offline_eval_cloud.py`（thunk 后移）。
   文本断言基线抬一格（1457 → 1460 = 新增 5 条读数行 − 删 2 条旧读数行，账在
   `tests/test_source_text_assert_budget.py` 模块头）。
-* **本节的后续腿（尚未落地）**：产物根落本地 + 网络盘 `backup/` + 反向恢复（`plan/offline-local-disk-first`
-  §3.2/§3.4/§3.5 = B/C 腿）—— 落地后本节续写，届时「网络盘只在回传失败时出现 0 次或 1 次」才成立。
+* ★ **两个根 + 恢复腿（同日 B1/C2 腿落地）**：
+  · **热面**（scratch，`common/scratch`）：`/dev/shm` > `/tmp`，随时可重建（§34 的壳）；
+  · **持久面**（产物根）：默认 **节点本地盘** —— `<NN_LOCAL_ROOT ∨ /tmp>/battle2-offline[-<课>]`
+    （`remote/offline_deliverable.resolve_local_root`，显式 `CFG.local_root` 也可；不可写/不可建 ⇒
+    **回落网络侧产物根 + 响亮一行**，不改成响亮失败：产物根没有第二处落脚）。落地形态：
+    `course_work_dir` 拆成 `net_root`（下载缓存/job 目录/包/token）与 `net_artifacts_dir`
+    （= 今天的 `work/run`，**常态零写入**），`run_one_course` 的 `dest` 与 `--artifacts` 改指本地根；
+    `remote/artifacts.resolve_artifact_dir` 的「本地优先」**只是兜底**（生产路径恒有显式 `--artifacts`），
+    新增 `resolve_backup_root`（备份必须是网络侧）；`--backup-root` 从 `offline_boot` 递到 `run_loop`
+    （落点 = `<网络产物根>/backup`，**名字不许带 `it-` 前缀** —— 那是交付包的轮次视图）。
+  · **恢复腿**（没有它「产物落本地」= 静默删掉续跑能力）：`offline_boot.restore_from_backup`
+    —— 本地三件不齐 ∧ 备份齐（三件 + `it-<last_it>/weights.json`）⇒ 原子反向铺回本地根（逐件
+    `os.replace`，三件锚点最后才进 ⇒ 「三件齐」判据不会在途中短暂成立），本地非空**一个字都不动**；
+    优先级 = **本地根 > hub 锚点（`--resume-dir`，run_loop 自己会丢旧锚点）> 网络 `backup/`**。
+  · **口径改写**（不是顺带）：`ArtifactStore` 模块头/类 docstring 的「新会话用同一个目录再跑一次
+    即可续上」 ⇒ **可续跑性 = hub 已收轮次 ∪ 网络盘 `backup/`**（`/tmp` 不抗容器回收）；
+    `package_partial`（会话中途、人点的 cell）改读**本地根**（否则它会在产物搬走之后响亮地说
+    「目录为空」，把人拿产物的路整条断掉）。
+  · 守卫：`tests/remote/test_offline_local_first.py`（缺省落点/显式优先/回落成因/`--artifacts` 指本地
+    且网络侧不存在/恢复后本机优先/本地非空不覆盖/备份缺权重不算齐/`install_backup` 自身一致）·
+    `tests/remote/test_offline_boot.py`（`package_partial` 三例改读本地根）· `e2e`（首跑：产物目录
+    在本地根存在且 `--bundle` 路径不变）。
+* **还没落地的那半**（`plan/offline-local-disk-first` §3.4 = C1/B4 腿）：网络盘 `backup/` 的**写方**
+  （每轮观测 pending + 段末 sweep）与**交付面的判据**（段末只有「有 pending/备份轮 / 无 hub /
+  `download_dir` 显式」时才落网络盘）。在那之前：产物已回归本地盘，而「回传失败 ⇒ 备份」仍是空的 ——
+  恢复腿的读方已就位（等写方）。
 
 ---
 

@@ -160,6 +160,9 @@ def run_standalone(
     #: 本课租约 token（`--hub-lease-file`；见 `OfflineDeliverer.hub_lease`）。空 = 不声称
     #: 持有 ⇒ hub 侧不推进活动起点（P1-1），但补传照落。
     hub_lease: str = "",
+    #: 网络侧**备份抽屉**（`--backup-root`）：产物没能回传成功的轮写这里
+    #: （消费方 = `remote/offline_deliver.py` 的备份腿）。空 = 不做备份（纯离线腿 / 老调用方）。
+    backup_root: str | Path | None = None,
     deliver: bool = True,
     run_job_fn: Callable[..., dict] | None = None,
     log: Callable[[str], None] = _log_default,
@@ -216,6 +219,7 @@ def run_standalone(
         hub_token=hub_token,
         hub_course=hub_course,
         hub_lease=hub_lease,
+        backup_root=backup_root,
         deliver=deliver,
         run_job_fn=run_job_fn or _real_run_job,  # 入口侧的注入：CLI 缺省 = 真 worker
         log=log,
@@ -470,6 +474,14 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="hub 给的续跑锚点目录（含 resume.json + it-NNN/{weights.json,opt.tar,row.json}）",
     )
+    ap.add_argument(
+        "--backup-root",
+        default="",
+        help=(
+            "网络侧备份抽屉（产物没能回传成功的那些轮写这里；空 = 不做备份）。"
+            "典型值 = `<网络产物根>/backup`，由 remote/offline_boot 传（见 plan/offline-local-disk-first §3.4）"
+        ),
+    )
     args = ap.parse_args(argv)
     if not args.artifacts and not args.bundle:
         print("[run] 需要 --artifacts 或 --bundle 之一", file=sys.stderr, flush=True)
@@ -520,6 +532,7 @@ def main(argv: list[str] | None = None) -> int:
             hub_token=hub_token,
             hub_course=args.hub_course,
             hub_lease=hub_lease,
+            backup_root=Path(args.backup_root) if args.backup_root else None,
             deliver=not args.no_deliver,
         )
     except (ProtocolError, RetryableError) as e:

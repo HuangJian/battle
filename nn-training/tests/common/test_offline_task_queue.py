@@ -1604,6 +1604,29 @@ class _StubDeliverable:
         root = Path(str(cfg.get("work_dir") or "."))
         return root / course if multi else root
 
+    # ── 两个根（★ 2026-10-14，`plan/offline-local-disk-first` §3.2）：桩保持最小，语义照抄真实现 ──
+    #: 备份抽屉名（真实现里与 `remote/artifacts.BACKUP_DIR_NAME` 逐字相同）。
+    BACKUP_DIR_NAME = "backup"
+
+    def net_root(self, cfg: dict, course: str, *, multi: bool = False) -> Path:
+        return self.course_work_dir(cfg, course, multi=multi)
+
+    def net_artifacts_dir(self, cfg: dict, course: str, *, multi: bool = False) -> Path:
+        return self.net_root(cfg, course, multi=multi) / "run"
+
+    def resolve_local_root(
+        self, cfg: dict, course: str, *, multi: bool = False
+    ) -> tuple[Path, str]:
+        """本地产物根：显式 `local_root` > `<work_dir>/local`（**桩自己的临时落点**，不走真缺省 `/tmp`）。"""
+        explicit = str(cfg.get("local_root") or "").strip()
+        root = Path(explicit) if explicit else Path(str(cfg.get("work_dir") or ".")) / "local"
+        root.mkdir(parents=True, exist_ok=True)
+        return root, ""
+
+    def backup_ready(self, backup_root: Path) -> dict | None:
+        """桩里没有备份抽屉 ⇒ 恒「不齐」（这些用例只钉打点层的接线顺序）。"""
+        return None
+
     def package_deliverable(self, dest: Path, course: str, download_dir: Path, log: Any) -> None:
         """交付物打包（本用例不关心产物；`run_one_course` 的尾巴要它存在）。"""
         return None

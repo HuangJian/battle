@@ -85,6 +85,19 @@ _DELIVERABLE_NAMES = (
     "courses_of",
     "_split_course_names",
     "course_work_dir",
+    # ★ 2026-10-14（`plan/offline-local-disk-first` §3.2）：两个根 + 恢复腿的原语住交付面模块
+    # （standalone：产物根的判据与包名/三件名同源，不跨文件各写一份）。
+    "net_root",
+    "net_artifacts_dir",
+    "local_root_path",
+    "resolve_local_root",
+    "backup_ready",
+    "install_backup",
+    "WEIGHTS_NAME",
+    "LOCAL_ROOT_ENV",
+    "DEFAULT_LOCAL_PARENT",
+    "LOCAL_ROOT_NAME",
+    "BACKUP_DIR_NAME",
     "download_dir",
     "package_deliverable",
     "_partial_last_it",
@@ -411,6 +424,44 @@ def _read_json_file(p: Path) -> dict | None:
     except (OSError, ValueError):
         return None
     return loaded if isinstance(loaded, dict) else None
+
+
+def restore_from_backup(dest: str | Path, backup_root: str | Path, log: Callable[[str], None]) -> dict | None:
+    """恢复腿：本地产物**三件不齐** ∧ 网络盘备份**三件齐** ⇒ 从备份反向恢复到本地根。
+
+    ★ 2026-10-14（`plan/offline-local-disk-first` §3.5 / 评审 P1-3）：这是「产物落本地盘」的
+    **配套必要条件** —— 没有它，「产物落本地 + cell 死」= 段进度静默归零（`local_first` 判据永远
+    不成立 ⇒ 会去重新取包开段）。
+
+    **优先级 = 本地根 > hub 锚点 > 网络 `backup/`**（§3.5 的表）：
+      · 本地**已有**三件 ⇒ 一个字都不动（本地更新是常态，备份是恢复窗口）——这是「本地根」那一档；
+      · 本地空、备份齐 ⇒ 恢复（**hub 锚点那一档不必在这里分先后**：恢复完 `--resume-dir`
+        照旧递给 `run_loop`，它自己会「不新于产物当前进度就丢弃」——两条路都过「同轮齐全」判据）；
+      · 两边都不齐 ⇒ `None`，交给今天的行为（取包起跑）。
+
+    ⚠ 恢复过来的只有**产物面**（三件 + 轮次 + 全量包）：`code.zip` / TS 树不在备份里
+    （计划 §3.4 的抽屉只装这些）⇒ 恢复后的会话仍要靠任务包或 hub `/code` 拿工具态
+    （那是 `ensure_code` 的既有顺序，不是新的失败面）。
+    """
+    local = local_artifacts(dest)
+    if local is not None:
+        log(f"本地产物齐全（it{local['last_it']}）—— 不看网络盘备份（恢复只在本地空时发生）")
+        return local
+    deliverable = _load_deliverable()
+    ready = deliverable.backup_ready(backup_root)
+    if ready is None:
+        log(f"本地产物空（{dest}），网络盘备份也不齐（{backup_root}）——按老规矩取包起跑")
+        return None
+    log(f"本地产物空，网络盘备份齐（it{ready['last_it']}）⇒ 反向恢复到本地根（{backup_root} → {dest}）")
+    if not deliverable.install_backup(backup_root, Path(dest), log):
+        log(f"WARN 从备份恢复到本地根失败（{backup_root} → {dest}）—— 按老规矩重来（不拿半截当产物）")
+        return None
+    after = local_artifacts(dest)
+    if after is None:
+        log(f"WARN 恢复后本地产物仍不齐（{dest}）—— 按老规矩重来")
+        return None
+    log(f"已从网络盘备份恢复 it{after['last_it']}（三件齐全、权重在位）: {dest}")
+    return after
 
 
 def local_artifacts(dest: str | Path) -> dict | None:
@@ -1332,6 +1383,7 @@ def build_run_argv(
     *,
     local_first: bool = False,
     lease_file: str = "",
+    backup_root: str | Path | None = None,
 ) -> list[str]:
     """run_loop 的 argv（纯函数，便于单测钉住回传/评估/锚点三组开关的形状）。
 
@@ -1376,6 +1428,10 @@ def build_run_argv(
     # 续跑锚点（hub 递回的最新「同轮齐全」轮次）：有它就从那儿接，没有就从包自带起点。
     if resume_dir and Path(resume_dir).is_dir():
         argv += ["--resume-dir", str(resume_dir)]
+    # 网络侧备份抽屉（★ 2026-10-14，plan/offline-local-disk-first §3.4 C1）：产物落本地盘之后，
+    # 「这一轮的产物没能回传给 hub」是**唯一**该写网络盘的时机（每轮观测 + 段末 sweep）。
+    if backup_root:
+        argv += ["--backup-root", str(backup_root)]
     if bool(cfg.get("live_backfeed", True)) and hub and token_file:
         argv += ["--hub-url", hub, "--hub-token-file", token_file]
         # 补传的**归位键**（多课程 hub 必需）：`CFG.course` 就是控制台里那门课的名字，
@@ -1415,12 +1471,27 @@ def run_one_course(
     `progress` 非空时，本段结束会把打点层给出的**租约结局**写进去（`{"outcome": …}`，
     ★M3：`revoked` ⇒ 本会话别再领这一课）；不传就是纯观测腿。
     """
-    work = _load_deliverable().course_work_dir(cfg, course, multi=multi)
-    work.mkdir(parents=True, exist_ok=True)
-    log(f"工作目录: {work}")
+    deliverable = _load_deliverable()
     # 本课自己的 cfg：`course` 恒是**单个字符串**（下游放包路径/交付物名/`--hub-course`
     # 都按它拼；传原样的列表会拼出 "['a', 'b']" 这种目录名）。
     ccfg = {**cfg, "course": course}
+    work = deliverable.net_root(cfg, course, multi=multi)
+    work.mkdir(parents=True, exist_ok=True)
+    log(f"工作目录（网络侧：下载缓存/任务包/job 目录）: {work}")
+    # ── 两个根（★ 2026-10-14，`plan/offline-local-disk-first` §3.2 / 评审 P0-1）────────────
+    # 拍板-1 的**生效点在这里**：产物的落点由 `--artifacts` 决定（`offline_boot` 无条件传），
+    # 而不是 `resolve_artifact_dir` 的默认分支（那条在生产路径上从不被求值）。网络侧产物根
+    # 只喂 C1 备份与 B4 交付面 —— 补传全成功的一段，它一个字节都不写。
+    net = Path(deliverable.net_artifacts_dir(cfg, course, multi=multi))
+    dest, dest_why = deliverable.resolve_local_root(ccfg, course, multi=multi)
+    if dest_why:
+        # 拍板-2：取不到本地盘就回落网络盘 + **响亮一行**（不改成响亮失败：产物根没有第二处落脚）
+        log(f"WARN 本地产物根不可用（{dest_why}）⇒ 本段产物回落网络盘：{dest}")
+    else:
+        log(f"产物根: {dest}（本地盘）｜网络侧只作备份/交付面: {net}")
+    if Path(dest) != net:
+        # 恢复腿必须在下面 `local_artifacts(dest)` **之前**：它决定「本机优先还是取包起跑」。
+        restore_from_backup(dest, net / deliverable.BACKUP_DIR_NAME, log)
 
     # ── 本机优先：产物目录三件齐全 ⇒ 不让包改写这一段的计划/清单（plan §3 判定表）──
     #    ★ 2026-10-14 收紧（plan/offline-segment-restart §2-J1）：**包是本机进度的加长段时收包**。
@@ -1430,7 +1501,6 @@ def run_one_course(
     # 为什么决策住在这里（而不是 `run_loop`/`bundle`）：notebook 每次会话都从 GitHub raw
     # 刷新本文件，而 `remote.run_loop`/`remote.bundle` 来自**代码快照**（= 本机优先要保护的
     # 那份，可能很旧）——把新参数传给旧快照只会 argparse 崩或静默退化（评审 F1）。
-    dest = work / "run"
     local = local_artifacts(dest)
     explicit_zip = str(ccfg.get("task_zip") or "").strip()
     force_pack = bool(ccfg.get("force_pack", False)) or bool(explicit_zip)
@@ -1549,7 +1619,17 @@ def run_one_course(
         log("实时回传关闭（CFG.live_backfeed=False）—— 跑完统一打包，手动下载导入")
 
     argv = build_run_argv(
-        ccfg, pack, dest, hub, tok_file, resume_dir, local_first=local_first, lease_file=lease_file
+        ccfg,
+        pack,
+        dest,
+        hub,
+        tok_file,
+        resume_dir,
+        local_first=local_first,
+        lease_file=lease_file,
+        # 备份抽屉（C1）的落点：网络侧产物根下。没有 hub 时这条腿不存在（补传账本都没有）
+        # ⇒ 传了也只是个路径，不写任何东西。
+        backup_root=net / deliverable.BACKUP_DIR_NAME,
     )
     log("开始训练：python -m remote.run_loop " + " ".join(_redact(argv)))
     # ★M3 / Q2：把轮内打点层挂上（只在这时候才可能：hub 可达 ∧ 领到租约）——快照侧的完成
@@ -1568,7 +1648,6 @@ def run_one_course(
             if progress is not None:
                 progress["outcome"] = outcome
 
-    deliverable = _load_deliverable()
     got = deliverable.package_deliverable(dest, course, deliverable.download_dir(ccfg), log)
     if hub:
         log(

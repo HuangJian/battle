@@ -34,12 +34,25 @@ BOOT_FILE = ROOT / "remote" / "offline_boot.py"
 DELIVERABLE_FILE = ROOT / "remote" / "offline_deliverable.py"
 NOTEBOOK = ROOT / "ipynb" / "battle.offline.ipynb"
 
-#: 交付面 13 名（8 函数 + 4 常量 + 1 私有正则）——搬运名集合的单一事实。
+#: 交付面名集合的单一事实（S5 第十四刀的 13 名 + 2026-10-14 两个根/备份面/恢复原语那一批）。
 MOVED_NAMES = {
     "requested_courses",
     "courses_of",
     "_split_course_names",
     "course_work_dir",
+    # ★ 2026-10-14（plan/offline-local-disk-first §3.2）：两个根 + 备份抽屉的名字/原语也在交付面 ——
+    # 它们的判据与包名/三件名同源（同一份产物目录契约），拆到别处就又变成两份各写一遍。
+    "net_root",
+    "net_artifacts_dir",
+    "local_root_path",
+    "resolve_local_root",
+    "backup_ready",
+    "install_backup",
+    "WEIGHTS_NAME",
+    "LOCAL_ROOT_ENV",
+    "DEFAULT_LOCAL_PARENT",
+    "LOCAL_ROOT_NAME",
+    "BACKUP_DIR_NAME",
     "download_dir",
     "package_deliverable",
     "_partial_last_it",
@@ -52,7 +65,17 @@ MOVED_NAMES = {
 }
 
 #: 新模块的允许 import 面（**闭集**）：standalone 兄弟文件 —— 只许 stdlib。
-ALLOWED_IMPORTS = {"__future__", "collections.abc", "json", "os", "pathlib", "re", "zipfile"}
+#: `shutil` 是 2026-10-14 加的（恢复腿要 `copytree`/`rmtree`）：库面不变，仍全是 stdlib。
+ALLOWED_IMPORTS = {
+    "__future__",
+    "collections.abc",
+    "json",
+    "os",
+    "pathlib",
+    "re",
+    "shutil",
+    "zipfile",
+}
 
 
 def _quiet(_msg: str) -> None:
@@ -90,11 +113,34 @@ def _imports(path: Path) -> set[str]:
 
 
 def test_moved_names_are_defined_only_in_the_new_home() -> None:
-    """13 名只在 `offline_deliverable.py` 里实现；原家不得再出现定义/常量赋值。"""
+    """交付面的这些名只在 `offline_deliverable.py` 里实现；原家不得再出现定义/常量赋值。"""
     missing = sorted(MOVED_NAMES - _defined(DELIVERABLE_FILE))
     assert missing == [], f"新家缺这些名字：{missing}"
     moved_back = sorted(MOVED_NAMES & _defined(BOOT_FILE))
     assert moved_back == [], f"交付面名字又在 offline_boot 里实现：{moved_back}"
+
+
+def test_twin_constants_match_the_artifacts_contract(tmp_path: Path) -> None:
+    """三件名/包名是**拄的一份**（两个模块各定义一份，靠这条用例对账）。
+
+    为什么不合并（已经“共享”）就完事：`offline_deliverable` 是 standalone（顶层不许 import 仓内），
+    `offline_boot` 同理 ⇒ “单一来源”只能是**契约 + 用例**（先例 = `ALL_ZIP`/`LATEST_ZIP`）。
+    """
+    from remote.artifacts import ArtifactStore
+
+    for name in ("STATE_NAME", "PLAN_NAME", "MANIFEST_NAME", "ALL_ZIP", "LATEST_ZIP"):
+        assert getattr(deliverable_mod, name) == getattr(ArtifactStore, name), (
+            f"{name} 与 `ArtifactStore.{name}` 逐字相同（产物目录契约）"
+        )
+    # `weights.json` 在 `ArtifactStore` 里是写在 `weights_path()` 里的字面量（没有同名常量）
+    store = ArtifactStore(tmp_path, run_id="r", log=lambda _m: None)
+    assert store.weights_path(0).name == deliverable_mod.WEIGHTS_NAME, (
+        "`WEIGHTS_NAME` 与 `ArtifactStore.weights_path()` 的末段逐字相同"
+    )
+    for name in ("STATE_NAME", "PLAN_NAME", "MANIFEST_NAME"):
+        assert getattr(deliverable_mod, name) == getattr(boot_mod, name), (
+            f"{name} 与 `offline_boot.{name}` 逐字相同（同一份产物目录契约）"
+        )
 
 
 # ─────────────────────── ② 依赖面闭集（standalone） ───────────────────────

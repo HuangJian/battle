@@ -62,6 +62,7 @@ from common.protocol import (
 from remote.artifacts import (
     ArtifactStore,
     resolve_artifact_dir,
+    resolve_backup_root,
     sha256_bytes,
     sha256_file,
 )
@@ -179,6 +180,9 @@ class RunContext:
         manifest: dict,
         store: ArtifactStore,
         work_dir: Path,
+        #: 网络侧备份抽屉（产物没能回传成功的轮写这里；见 `remote/offline_deliver.backup_pending`）。
+        #: 由 `open_run_context` 经 `resolve_backup_root` 解析（生产路径 = `<网络产物根>/backup`）。
+        backup_root: Path | None = None,
         device: Any = "cpu",
         torch_threads: int = 0,
         code_cache_dir: Path | None = None,
@@ -214,6 +218,7 @@ class RunContext:
     ) -> None:
         self.plan = plan
         self.plan_sha256 = plan_sha256
+        self.backup_root = backup_root
         self.manifest = manifest
         self.store = store
         self.work_dir = Path(work_dir)
@@ -334,6 +339,9 @@ def open_run_context(
     hub_course: str = "",
     #: 本课租约 token（P1-1：补传体里的 `lease_token`；空 = 补传照落但不推进活动起点）。
     hub_lease: str = "",
+    #: 网络侧**备份抽屉**（`--backup-root`）：产物没能回传成功的轮写这里。
+    #: 空 = 按 `resolve_backup_root` 的兜底链推（生产路径上由 `offline_boot` 显式传）。
+    backup_root: str | Path | None = None,
     deliver: bool = True,
     #: 换实现不该动调用方（`DelivererProcess` 与本进程内线程版同接口，见 `DelivererLike`）。
     deliverer: DelivererLike | None = None,
@@ -351,6 +359,11 @@ def open_run_context(
     root = resolve_artifact_dir(
         artifacts_dir, run_id=str(manifest.get("runId", "")), work_dir=work_dir
     )
+    # 备份抽屉的落点（★ 2026-10-14，§3.4 C1）：与产物根**分开解析** —— 产物已默认本地盘，
+    # 而备份必须是网络侧（人不在云机上；机器挂了本地盘一起没）。
+    backup = resolve_backup_root(
+        backup_root, run_id=str(manifest.get("runId", "")), work_dir=work_dir
+    )
     store = ArtifactStore(root, run_id=str(manifest.get("runId", "")), log=log)
     state = store.start(plan, manifest, plan_sha256=plan_sha256)
     ctx = RunContext(
@@ -359,6 +372,7 @@ def open_run_context(
         manifest=manifest,
         store=store,
         work_dir=work_dir,
+        backup_root=backup,
         device=device,
         torch_threads=torch_threads,
         code_cache_dir=code_cache_dir,

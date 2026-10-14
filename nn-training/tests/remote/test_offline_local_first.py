@@ -20,6 +20,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
 import sys
 import urllib.error
 import zipfile
@@ -27,6 +28,7 @@ from pathlib import Path
 
 import pytest
 
+import remote.offline_deliverable as deliverable_mod
 from remote import offline_boot
 
 
@@ -141,6 +143,27 @@ def _artifacts(
     with zipfile.ZipFile(io.BytesIO(ts)) as z:
         z.extractall(dest / offline_boot.TS_TREE_NAME)
     return dest
+
+
+def _local(tmp_path: Path) -> Path:
+    """本段**产物根**（★ 2026-10-14）：产物已默认落**节点本地盘**，所以用例一律把它**显式**钉在这里。
+
+    为什么不省这一步：缺省值是真 `/tmp/battle2-offline/<课>` —— 那是跨用例共享的位置，
+    前一个用例的产物会让后一个用例的 `local_artifacts()` 意外命中（分支听天由命）。
+    """
+    return tmp_path / "local"
+
+
+def _round(dest: Path, it: int) -> Path:
+    """给一份产物目录补上「那一轮的权重」（`it-<it>/weights.json`）——
+
+    `local_artifacts` 不看它（只要三件），而**恢复腿的判据看**（备份只有三件 JSON、没有权重 ⇒
+    恢复过来也接不上）。这里手写而不走 `ArtifactStore`：备份侧那份来源可能是别人写的。
+    """
+    d = dest / f"it-{it}"
+    d.mkdir(parents=True, exist_ok=True)
+    (d / deliverable_mod.WEIGHTS_NAME).write_text('{"w":1}', encoding="utf-8")
+    return d
 
 
 # ────────────────────────── 常量对账（另一份抄写） ──────────────────────────
@@ -444,7 +467,7 @@ def test_ensure_ts_tree_fills_a_dest_that_does_not_exist_yet(tmp_path: Path) -> 
     树也铺好（否则 `run_standalone` 的 `ensure_ts_cache_layout` 找不到运行时）。
     """
     pack = _pack(tmp_path / "d" / "task-c5-gae.zip", ts=TS_A)
-    dest = tmp_path / "w" / "run"
+    dest = _local(tmp_path)
     assert not dest.exists(), "本用例的前提：全新一跑（产物目录还没有）"
     offline_boot.ensure_ts_tree(pack, _quiet, dest=dest)
     assert (dest / offline_boot.TS_CODE_NAME).read_bytes() == TS_A
@@ -515,6 +538,8 @@ def _run_course(
     base = {
         "course": "c5-gae",
         "work_dir": str(tmp_path / "w"),
+        # 产物根显式钉住（缺省是真 `/tmp` ⇒ 跨用例互相看得见对方的产物；见 `_local`）
+        "local_root": str(_local(tmp_path)),
         "device": "cpu",
         "live_backfeed": False,
         **(cfg or {}),
@@ -529,7 +554,7 @@ def _run_course(
 def test_run_one_course_local_first_never_imports_the_pack(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    dest = _artifacts(tmp_path / "w" / "run")
+    dest = _artifacts(_local(tmp_path))
     assert dest.is_dir()
     pack = _pack(tmp_path / "d" / "task-c5-gae.zip", code=CODE_A, index={"it": 1, "end_it": 9})
     argv, calls = _run_course(tmp_path, monkeypatch, pack=pack)
@@ -542,9 +567,9 @@ def test_run_one_course_local_first_runs_without_any_pack(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """G1 的硬判据：取不到包（optional ⇒ None）也照样起跑。"""
-    _artifacts(tmp_path / "w" / "run")
+    _artifacts(_local(tmp_path))
     argv, calls = _run_course(tmp_path, monkeypatch, pack=None)
-    assert argv[:2] == ["--artifacts", str(tmp_path / "w" / "run")]
+    assert argv[:2] == ["--artifacts", str(_local(tmp_path))]
     assert "--bundle" not in argv
 
 
@@ -552,7 +577,7 @@ def test_run_one_course_force_pack_takes_the_legacy_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`CFG.force_pack=true` = 显式老行为：包覆盖本机计划/清单（走 `--bundle`）。"""
-    _artifacts(tmp_path / "w" / "run")
+    _artifacts(_local(tmp_path))
     pack = _pack(tmp_path / "d" / "task-c5-gae.zip", code=CODE_A)
     argv, calls = _run_course(tmp_path, monkeypatch, cfg={"force_pack": True}, pack=pack)
     assert argv[:2] == ["--bundle", str(pack)]
@@ -563,7 +588,7 @@ def test_run_one_course_explicit_task_zip_also_forces_the_pack(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`CFG.task_zip` 与 `force_pack` 同义（用户显式指了一个包 ⇒ 就是它）。"""
-    _artifacts(tmp_path / "w" / "run")
+    _artifacts(_local(tmp_path))
     pack = _pack(tmp_path / "d" / "task-c5-gae.zip", code=CODE_A)
     argv, _calls = _run_course(
         tmp_path, monkeypatch, cfg={"task_zip": str(pack)}, pack=pack
@@ -577,7 +602,7 @@ def test_run_one_course_adopts_a_pack_that_extends_the_local_segment(
     """★ 2026-10-14 现场（plan/offline-segment-restart §5-DoD）：本机段跑满 it100，
     人在控制台把 iters 改大并重导 ⇒ 包是 it100→it500 ⇒ **收包**（走 `--bundle`），
     不再拿旧段计划跑成 `noop`。"""
-    dest = _artifacts(tmp_path / "w" / "run", last_it=100, start_it=0, end_it=100)
+    dest = _artifacts(_local(tmp_path), last_it=100, start_it=0, end_it=100)
     pack = _pack(
         tmp_path / "d" / "task-c5-gae.zip",
         index={"it": 101, "end_it": 500},
@@ -593,7 +618,7 @@ def test_run_one_course_keeps_local_first_for_a_pack_that_does_not_extend(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """起点更早的包（旧包 / 会让本机轮次重跑）⇒ 一个字都不换段：判定表只松这两条。"""
-    _artifacts(tmp_path / "w" / "run", last_it=100, start_it=0, end_it=100)
+    _artifacts(_local(tmp_path), last_it=100, start_it=0, end_it=100)
     pack = _pack(
         tmp_path / "d" / "task-c5-gae.zip",
         index={"it": 1, "end_it": 100},
@@ -601,25 +626,25 @@ def test_run_one_course_keeps_local_first_for_a_pack_that_does_not_extend(
     )
     argv, _calls = _run_course(tmp_path, monkeypatch, pack=pack)
     assert "--bundle" not in argv, argv
-    assert argv[:2] == ["--artifacts", str(tmp_path / "w" / "run")]
+    assert argv[:2] == ["--artifacts", str(_local(tmp_path))]
 
 
 def test_run_one_course_keeps_local_first_when_the_pack_has_no_plan(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """包读不出计划 ⇒ 保守不收（`read_pack_plan` 的空 dict 走的就是这一支）。"""
-    _artifacts(tmp_path / "w" / "run", last_it=100, start_it=0, end_it=100)
+    _artifacts(_local(tmp_path), last_it=100, start_it=0, end_it=100)
     pack = _pack(tmp_path / "d" / "task-c5-gae.zip", index={"it": 101, "end_it": 500})
     argv, _calls = _run_course(tmp_path, monkeypatch, pack=pack)
     assert "--bundle" not in argv, argv
-    assert argv[:2] == ["--artifacts", str(tmp_path / "w" / "run")]
+    assert argv[:2] == ["--artifacts", str(_local(tmp_path))]
 
 
 def test_run_one_course_refuses_a_half_broken_dest(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """有 `state.json` 而缺计划/清单：让包补齐会重置本机进度 ⇒ 响亮拒（列出两条出路）。"""
-    dest = _artifacts(tmp_path / "w" / "run", with_plan=False)
+    dest = _artifacts(_local(tmp_path), with_plan=False)
     (dest / offline_boot.PLAN_NAME).unlink(missing_ok=True)
     with pytest.raises(SystemExit) as ei:
         _run_course(tmp_path, monkeypatch, pack=_pack(tmp_path / "d" / "t.zip"))
@@ -631,9 +656,125 @@ def test_run_one_course_pure_offline_does_not_name_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`live_backfeed=False`（或够不着 hub）时 `tok_file` 曾经从未赋值 ⇒ NameError。"""
-    _artifacts(tmp_path / "w" / "run")
+    _artifacts(_local(tmp_path))
     argv, _calls = _run_course(tmp_path, monkeypatch, cfg={"live_backfeed": False})
     assert "--no-deliver" in argv
+
+
+# ──────────────── 两个根 + 恢复腿（plan/offline-local-disk-first §3.2/§3.5） ────────────────
+
+
+def test_local_root_default_lands_on_the_node_local_disk(monkeypatch: pytest.MonkeyPatch) -> None:
+    """缺省落点 = 节点**本地盘**：`/tmp/battle2-offline/<课>`（拍板-1）。"""
+    monkeypatch.delenv(offline_boot.LOCAL_ROOT_ENV, raising=False)
+    want = Path(offline_boot.DEFAULT_LOCAL_PARENT) / offline_boot.LOCAL_ROOT_NAME / "c5-gae"
+    assert offline_boot.local_root_path({"course": "c5-gae"}, "c5-gae", multi=False) == want
+    # 多课：再加一层课程名（两门课共用一个产物根 = 第二门接错课的续跑点）
+    assert offline_boot.local_root_path({}, "c6-gae", multi=True) == want.parent / "c6-gae"
+
+
+def test_local_root_env_wins_even_for_a_single_course(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """显式（env / `CFG.local_root`）> 缺省；单课**不再**加课程层（操作员说了算）。"""
+    monkeypatch.setenv(offline_boot.LOCAL_ROOT_ENV, str(tmp_path / "explicit"))
+    assert offline_boot.local_root_path({}, "c5-gae", multi=False) == tmp_path / "explicit"
+    assert offline_boot.local_root_path({}, "c5-gae", multi=True) == tmp_path / "explicit" / "c5-gae"
+
+
+def test_unusable_local_root_falls_back_to_the_net_side_with_a_reason(tmp_path: Path) -> None:
+    """★ 拍板-2：本地盘取不到 ⇒ **回落网络侧产物根 + 成因**（不改成响亮失败 —— 产物根没有第二处落脚）。
+
+    这里用「本地根的父路径是个文件」造出真实的 `mkdir` 失败（不抛、不用 chmod，与 root 身份无关）。"""
+    blocker = tmp_path / "not-a-dir"
+    blocker.write_bytes(b"x")
+    cfg = {"course": "c5-gae", "work_dir": str(tmp_path / "w"), "local_root": str(blocker / "sub")}
+    got, why = offline_boot.resolve_local_root(cfg, "c5-gae", multi=False)
+    assert got == offline_boot.net_artifacts_dir(cfg, "c5-gae", multi=False) == tmp_path / "w" / "run"
+    assert "NotADirectoryError" in why and str(blocker / "sub") in why, why
+
+
+def test_usable_local_root_gets_no_reason_and_is_created(tmp_path: Path) -> None:
+    cfg = {"course": "c5-gae", "work_dir": str(tmp_path / "w"), "local_root": str(tmp_path / "local")}
+    got, why = offline_boot.resolve_local_root(cfg, "c5-gae", multi=False)
+    assert (got, why) == (tmp_path / "local", "")
+    assert got.is_dir(), "判据过 = 目录已被建出来（探针的文件与目录一起验）"
+
+
+def test_run_one_course_writes_the_artifacts_to_the_local_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """★ 拍板-1 的**生效点**（评审 P0-1）：`--artifacts` 指本地产物根，网络侧一个字节都不写。"""
+    local = _local(tmp_path)
+    _artifacts(local)
+    argv, calls = _run_course(tmp_path, monkeypatch, pack=None)
+    assert argv[:2] == ["--artifacts", str(local)]
+    # 备份抽屉的落点要递给 run_loop（C1 的消费方）；`index()` 找不到就 ValueError —— 不必再断言在场
+    assert argv[argv.index("--backup-root") + 1] == str(tmp_path / "w" / "run" / "backup")
+    assert not (tmp_path / "w" / "run").exists(), "补传全成功的一段：网络侧产物根不该存在"
+    assert ("obtain_pack", True) in calls  # 本机优先（产物在本地根里被认出来了）
+
+
+def test_backup_restores_an_empty_local_root_then_runs_local_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ DoD-9：本地空 + 备份齐 ⇒ 反向恢复到本地根，**并且恢复之后就走本机优先**。
+
+    没有这条，`--artifacts` 搬本地盘就等于把「cell 死后续跑」静默删掉（评审 P1-3 的配套）。"""
+    local = _local(tmp_path)
+    backup = tmp_path / "w" / "run" / "backup"
+    _artifacts(backup, last_it=3)  # 备份抽屉：三件齐全
+    _round(backup, 3)  # + 那一轮的权重（`backup_ready` 的实质判据）
+    assert offline_boot.local_artifacts(local) is None, "前提：本地空"
+    argv, calls = _run_course(tmp_path, monkeypatch, pack=None)
+    assert argv[:2] == ["--artifacts", str(local)]
+    assert argv.count("--bundle") == 0, f"恢复之后本机有完整段落 ⇒ 不是取包起跑：{argv}"
+    restored = offline_boot.local_artifacts(local)
+    assert restored is not None and restored["last_it"] == 3, restored
+    assert (local / "it-3" / "weights.json").is_file(), "那一轮的权重也要在（跑了才能接着跑）"
+    assert not (local / f".restore-{os.getpid()}").exists(), "暂存不许留在落点里"
+    assert ("obtain_pack", True) in calls, "恢复 ⇒ 本机优先：取包必须是 optional"
+
+
+def test_backup_never_overwrites_a_local_segment(tmp_path: Path) -> None:
+    """★ DoD-9 的另一半：本地**不是空**时一个字都不动（本地更新是常态，备份只是恢复窗口）。"""
+    local = _local(tmp_path)
+    _artifacts(local, last_it=5)
+    backup = tmp_path / "w" / "run" / "backup"
+    _artifacts(backup, last_it=9)
+    _round(backup, 9)
+    logs: list[str] = []
+    got = offline_boot.restore_from_backup(local, backup, logs.append)
+    assert got is not None and got["last_it"] == 5, got
+    assert not (local / "it-9").exists(), "备份里的新轮次不许覆盖本地"
+    assert json.loads((local / offline_boot.STATE_NAME).read_text(encoding="utf-8"))["last_it"] == 5
+    assert any("不看网络盘备份" in m for m in logs), logs
+
+
+def test_backup_incomplete_is_not_a_restore_source(tmp_path: Path) -> None:
+    """备份只有三件 JSON、没有那一轮的权重 ⇒ **不算齐**（恢复过来也跑不了）。"""
+    local = _local(tmp_path)
+    backup = tmp_path / "w" / "run" / "backup"
+    _artifacts(backup, last_it=3)
+    assert offline_boot.restore_from_backup(local, backup, _quiet) is None, "缺权重 ⇒ 不算齐"
+    assert not (local / offline_boot.STATE_NAME).exists(), "不齐 ⇒ 不搬"
+
+
+def test_install_backup_is_self_consistent(tmp_path: Path) -> None:
+    """字节面：`install_backup` 把三件 + 轮次 + 全量包搬过去，**暂存目录不留**。"""
+    backup = tmp_path / "b"
+    dest = tmp_path / "d"
+    _artifacts(backup, last_it=4)
+    _round(backup, 4)
+    (backup / offline_boot.ALL_ZIP).write_bytes(b"full")
+    assert deliverable_mod.install_backup(backup, dest, _quiet) is True
+    assert offline_boot.local_artifacts(dest) is not None
+    assert (dest / offline_boot.ALL_ZIP).read_bytes() == b"full"
+    assert sorted(p.name for p in dest.iterdir()) == sorted(
+        [
+            offline_boot.STATE_NAME,
+            offline_boot.PLAN_NAME,
+            offline_boot.MANIFEST_NAME,
+            offline_boot.ALL_ZIP,
+            "it-4",
+        ]
+    ), sorted(p.name for p in dest.iterdir())
 
 
 # ────────────────────────── obtain_pack(optional=True) ──────────────────────────

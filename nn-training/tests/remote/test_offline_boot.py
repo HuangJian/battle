@@ -704,12 +704,22 @@ def _store_with_latest(art: Path, it: int = 1) -> Path:
 
 
 def test_package_partial_copies_the_latest_pack_under_the_console_name(tmp_path: Path) -> None:
-    """跑到一半：把 `LATEST.zip` 复制成 `deliver-<课>.zip`（控制台导入靠文件名对账课程）。"""
+    """跑到一半：把 `LATEST.zip` 复制成 `deliver-<课>.zip`（控制台导入靠文件名对账课程）。
+
+    ⚠ 2026-10-14：产物根已是**本地产物根**（`plan/offline-local-disk-first` §3.2 / 评审 P0-2）
+    —— 用例把 `local_root` 显式钉住；`work/run`（网络侧）常态下一个字节都没有。
+    """
     work = tmp_path / "w"
-    latest = _store_with_latest(work / "run", it=3)
+    local = tmp_path / "local"
+    latest = _store_with_latest(local, it=3)
     logs: list[str] = []
     made = offline_boot.package_partial(
-        {"course": "c5-gae", "work_dir": str(work), "download_dir": str(tmp_path / "out")},
+        {
+            "course": "c5-gae",
+            "work_dir": str(work),
+            "local_root": str(local),
+            "download_dir": str(tmp_path / "out"),
+        },
         logs.append,
     )
     assert made == [tmp_path / "out" / "deliver-c5-gae.zip"]
@@ -721,10 +731,17 @@ def test_package_partial_copies_the_latest_pack_under_the_console_name(tmp_path:
 def test_package_partial_prefers_the_full_pack_when_it_exists(tmp_path: Path) -> None:
     """跑完（或干净停机）之后：`artifacts.zip` 更全 ⇒ 优先它，而不是最新一轮小包。"""
     work = tmp_path / "w"
-    _store_with_latest(work / "run", it=2)
-    (work / "run" / offline_boot.ALL_ZIP).write_bytes(b"full-pack")
+    local = tmp_path / "local"
+    _store_with_latest(local, it=2)
+    (local / offline_boot.ALL_ZIP).write_bytes(b"full-pack")
     made = offline_boot.package_partial(
-        {"course": "c5-gae", "work_dir": str(work), "download_dir": str(tmp_path / "out")}, quiet
+        {
+            "course": "c5-gae",
+            "work_dir": str(work),
+            "local_root": str(local),
+            "download_dir": str(tmp_path / "out"),
+        },
+        quiet,
     )
     assert made and made[0].read_bytes() == b"full-pack"
 
@@ -732,21 +749,36 @@ def test_package_partial_prefers_the_full_pack_when_it_exists(tmp_path: Path) ->
 def test_package_partial_is_a_noop_and_says_why_when_there_is_nothing(tmp_path: Path) -> None:
     """第一轮 checkpoint 之前没东西可打 —— 说清是哪个目录空，不抛、不造空包。"""
     logs: list[str] = []
+    local = tmp_path / "local"
     made = offline_boot.package_partial(
-        {"course": "c5-gae", "work_dir": str(tmp_path / "w"), "download_dir": str(tmp_path / "out")},
+        {
+            "course": "c5-gae",
+            "work_dir": str(tmp_path / "w"),
+            "local_root": str(local),
+            "download_dir": str(tmp_path / "out"),
+        },
         logs.append,
     )
     assert made == [] and not (tmp_path / "out").exists()
-    assert any("没有可打包的产物" in m and "run" in m for m in logs), logs
+    # 空的是**本地产物根**（消息里要能一眼看出是哪个目录）
+    assert any("没有可打包的产物" in m and str(local) in m for m in logs), logs
 
 
 def test_package_partial_walks_the_course_queue(tmp_path: Path) -> None:
     """多课程：每门课各自一份包；没有产物的那门只报一句（不挡别的课）。"""
     dl = tmp_path / "dl"
-    _store_with_latest(dl / "battle-offline" / "c5-gae" / "run", it=1)
+    # 多课：本地产物根也按课分层（`resolve_local_root` 的 multi 档）——这里用 `NN_LOCAL_ROOT` 那档，
+    # 于是每门课 = `<本地根>/<课>`，与网络侧的 `course_work_dir` 同形。
+    (tmp_path / "lroot").mkdir(parents=True, exist_ok=True)
+    _store_with_latest(tmp_path / "lroot" / "c5-gae", it=1)
     logs: list[str] = []
     made = offline_boot.package_partial(
-        {"course": ["c5-gae", "c6-gae"], "download_dir": str(dl)}, logs.append
+        {
+            "course": ["c5-gae", "c6-gae"],
+            "download_dir": str(dl),
+            "local_root": str(tmp_path / "lroot"),
+        },
+        logs.append,
     )
     assert [p.name for p in made] == ["deliver-c5-gae.zip"]
     assert any("c6-gae" in m and "没有可打包的产物" in m for m in logs), logs

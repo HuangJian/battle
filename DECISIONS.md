@@ -6106,3 +6106,36 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   A 腿单独成立的部分：**训练主循环上不再有任何一次「由网络盘测速决定」的等待**。
 - **全文** → `plan/offline-local-disk-first.plan.md`（v2）+ 评审 `plan/offline-local-disk-first.review-bf.md`
   （处理结果 §11）· 技术档案 → `docs/nn/runtime-opt.md` §36。
+
+## §2026-10-14-goalnn-offline-local-disk-first-b（同日续：**产物根落本地盘** + 网络盘 `backup/` + 恢复腿）
+
+- **上位**：上一条（A 腿 = 删探针）的 §3.2/§3.5；评审 P0-1（拍板-1 指错了开关）与 P1-3（恢复优先级）。
+- **定案**：
+  ① **产物根默认 = 节点本地盘**：`<NN_LOCAL_ROOT ∨ /tmp>/battle2-offline[-<课>]`（`resolve_local_root`，
+  显式 `CFG.local_root` 同义）；**不可写/不可建 ⇒ 回落网络侧产物根 + 响亮一行**（拍板-2：产物根没有
+  第二处落脚，拒跑比换个地方跑更糟 —— 与 scratch 的 env 语义相反，那里显式不可写 = 响亮失败）。
+  ② **生效点是 `--artifacts`**（评审 P0-1）：`course_work_dir` 拆成 `net_root`（下载缓存/包/job 目录/
+  `hub.token`）与 `net_artifacts_dir`（= 今天的 `work/run`）；`run_one_course` 的 `dest`/`--artifacts`
+  改指本地根，网络侧**常态零写入**。`resolve_artifact_dir` 的「本地优先」**只作兜底**（生产路径恒有
+  显式 `--artifacts`；唯一走默认分支的 `kind=run` 腿已退休）。
+  ③ **备份抽屉 = `<网络产物根>/backup`**（`--backup-root` 由此递到 `run_loop`；新 `resolve_backup_root`
+  只作兜底）。⚠ 命名硬约束：**不得**以 `it-` 开头 —— `ArtifactStore.finalize/_refresh_latest` 按顶层
+  `it-*` 扫轮次，撞上就把备份打进交付物（与 `job_fs.RESULT_BACKUP_DIR` 同名不同义）。
+  ④ **恢复腿**（「产物落本地」的必要配套；没有它 cell 一死 = 段进度静默归零）：`restore_from_backup`
+  —— 本地三件不齐 ∧ 备份齐（三件 + `it-<last_it>/weights.json`）⇒ 原子反向铺回本地根（逐件
+  `os.replace`、三件锚点最后才进），本地非空⇒**一个字都不动**；优先级 = **本地根 > hub 锚点 > 备份**
+  （hub 那一档不必在这里分先后：`--resume-dir` 照旧递给 `run_loop`，它自己按「不新于当前进度就丢」处理）。
+  ⑤ **口径改写**：`ArtifactStore` 的「新会话用同一个目录再跑一次即可续上」⇒ **可续跑性 = hub 已收轮次
+  ∪ 网络盘 `backup/`**；`package_partial`（会话中途、人点的 cell）改读**本地根**。
+- **被否决备选**：① 只改 `resolve_artifact_dir`（评审 P0-1 的事实：产物一个字节都不会搬；默认分支在生产
+  路径上不被求值）；② 把 `work_dir` 一起搬本地盘（那是下载缓存 + job 目录 —— 搬它等于把网络流量换成
+  重下载，与本计划反向）；③ 产物根用 `/dev/shm`（那是 scratch 的家：RAM 一回收就什么都没了，而产物契约
+  是「进程随时可以死，卷上永远自洽」）；④ 本地不可用就**响亮失败**（拍板-2 否决：安全方向是「宁可慢也跑完」）；
+  ⑤ 恢复腿与 B1 分两批落（本仓纪律：两者必须同批 —— 否则「产物落本地」会静默吃掉续跑能力）。
+- **后果**：`docs/nn/runtime-opt.md` §36 续写（两个根 + 恢复腿 + 还没落的那半）· `artifacts.py` 模块头/
+  `ArtifactStore` docstring 改口径 · notebook 主文案改（中途取包 cell 指本地根）· 文本断言基线 1460 → 1462
+  （两条落点/恢复读数行的账见模块头）· 用例把 `local_root` **显式钉住**（缺省 `/tmp/...` 是跨用例共享位置）。
+- **诚实账（本条目仍只覆盖 B1/C2）**：网络盘 `backup/` 的**写方**（每轮观测 pending + 段末 sweep）与
+  段末交付面的新判据（C1/B4）**还没落** ⇒ 「回传失败 ⇒ 备份」目前没有写方；恢复腿的读方已就位等它。
+  在那之前「网络盘在常态路径上出现 0 次」成立（产物面），但「出现 1 次」那一半还不存在。
+- **全文** → `plan/offline-local-disk-first.plan.md` §3.2/§3.5 · `docs/nn/runtime-opt.md` §36。

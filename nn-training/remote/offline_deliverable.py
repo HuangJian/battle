@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -28,6 +29,23 @@ from pathlib import Path
 #: 产物目录里的两个包名（与 `remote/artifacts.py::ArtifactStore` 逐字相同；测试守）。
 ALL_ZIP = "artifacts.zip"
 LATEST_ZIP = "LATEST.zip"
+#: 产物目录的三件「续跑真值」+ 每轮权重名（与 `remote/offline_boot.py` / `remote/artifacts.py`
+#: 逐字相同；测试守 —— 同 `ALL_ZIP` 那条孪生对账关系）。
+STATE_NAME = "state.json"
+PLAN_NAME = "plan.json"
+MANIFEST_NAME = "manifest.json"
+WEIGHTS_NAME = "weights.json"
+#: 本地产物根的覆盖开关（`CFG.local_root` 同义）：`NN_LOCAL_ROOT`。
+LOCAL_ROOT_ENV = "NN_LOCAL_ROOT"
+#: 本地产物根的缺省位置：`<父目录>/battle2-offline/<课>`。`/tmp` 在云机上是节点本地盘
+#: （本计划的承重假设；真机读数见 `docs/nn/runtime-opt.md` §36 的未取证项）。
+#: **不用 `/dev/shm`**：那是 scratch 的家（RAM，进程没了就没了），而产物要能扑过进程退出。
+DEFAULT_LOCAL_PARENT = "/tmp"
+#: 本地产物根在父目录下的名字（人眼辨识；与 scratch 的 `nn-rollout-*` 分开）。
+LOCAL_ROOT_NAME = "battle2-offline"
+#: 网络侧**备份抽屉**名：`<网络产物根>/backup/`。⚠ **不得**以 `it-` 开头也不得叫 `it-*` ——
+#: `ArtifactStore.finalize` / `_refresh_latest` 按顶层 `it-*` 扫轮次，撞上就会把备份打进交付物。
+BACKUP_DIR_NAME = "backup"
 #: 中途取回的优先顺序：全量包（已收尾）优先，其次最新一轮小包（跑到一半）。
 PARTIAL_CANDIDATES = (ALL_ZIP, LATEST_ZIP)
 #: `LATEST.zip` 里那行元信息（名字写死在 `remote/artifacts.py::_refresh_latest`）。
@@ -88,8 +106,69 @@ def _split_course_names(text: str) -> list[str]:
     return [p for p in re.split(r"[,\s]+", str(text).strip()) if p]
 
 
+def net_root(cfg: dict, course: str, *, multi: bool) -> Path:
+    """**网络侧根**（= 今天的 `course_work_dir`）：下载缓存 / job 目录 / 任务包 / `hub.token` 住这儿。
+
+    2026-10-14（`plan/offline-local-disk-first` §3.2）：产物根搬本地盘之后，本根**不搬**
+    —— 它装的是下载缓存（256MB 上限）与 job 目录（keep-2），搬它只是把「网络流量」换成「重下载」。
+    """
+    return course_work_dir(cfg, course, multi=multi)
+
+
+def net_artifacts_dir(cfg: dict, course: str, *, multi: bool) -> Path:
+    """**网络侧产物根**（= 今天的 `dest`）：备份抽屉与交付面的落点。
+
+    常态（补传全成功）下它一个字节都不写 —— 这正是拍板-1 的意义（见 §3.4 的正/反探针）。
+    """
+    return net_root(cfg, course, multi=multi) / "run"
+
+
+def local_root_path(cfg: dict, course: str, *, multi: bool) -> Path:
+    """**本地产物根**的路径（纯函数，不碰磁盘）：`CFG.local_root` / `NN_LOCAL_ROOT` > 缺省 `/tmp` 下。
+
+    显式给了就不再加课程层（单课）——多课时**必须**加，否则两门课共用一个产物根（第二门课的
+    `run_loop` 会把第一门的产物当自己的续跑点，权重接错课且看起来完全正常——与 `course_work_dir` 同一条）。
+    """
+    explicit = str(cfg.get("local_root") or "").strip() or os.environ.get(LOCAL_ROOT_ENV, "").strip()
+    base = Path(explicit).expanduser() if explicit else Path(DEFAULT_LOCAL_PARENT) / LOCAL_ROOT_NAME
+    return base if (explicit and not multi) else base / course
+
+
+def _why_unusable(root: Path) -> str:
+    """`""` = 可用；否则一句成因（**不抛**：产物根没有第二处落脚，这个判据只用来改落点）。
+
+    判据 = 拍板-2 的两条：**能 mkdir** 与**能写一个探针文件**（写不进就会在训练中途炸在半路上，
+    而那时已经没有「换根」的余地了——在这里当场判，才能响亮地说一句「本段产物落网络盘」）。
+    """
+    probe = root / f".nn-local-probe-{os.getpid()}"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        probe.write_bytes(b"")
+        probe.unlink(missing_ok=True)
+    except OSError as e:
+        return f"{type(e).__name__}: {e}"
+    return ""
+
+
+def resolve_local_root(cfg: dict, course: str, *, multi: bool) -> tuple[Path, str]:
+    """`(本段产物根, 成因)`；本地盘取不到 ⇒ **回落网络侧产物根**（成因非空，调用方响亮一行）。
+
+    方向是拍板-2（「本地盘取不到 ⇒ 回落网络盘 + 响亮一行」，不改成响亮失败）：产物根没有第二处
+    落脚，拒跑比换个地方跑更糟。⚠ 与 scratch 的 env 语义**相反**（那里显式不可写 = 响亮失败，
+    因为那时操作员以为在测 scratch 而实际在跑原地）——这里是「跑完」优先。
+    """
+    root = local_root_path(cfg, course, multi=multi)
+    why = _why_unusable(root)
+    if why:
+        return net_artifacts_dir(cfg, course, multi=multi), f"{root}：{why}"
+    return root, ""
+
+
 def course_work_dir(cfg: dict, course: str, *, multi: bool) -> Path:
     """该课的临时工作目录（包/产物/hub.token 都在这儿）。
+
+    ⚠ 2026-10-14：**产物**已不在这个棵里（产物根 = `resolve_local_root` 的本地盘）；
+    本函数 = `net_root`（保留旧名：既有调用方/用例拿它当「工作目录」，而工作目录的语义没变）。
 
     单课与今日**逐字相同**（缺省 `<download_dir>/battle-offline/<课>`；显式 `work_dir`
     原样用）；多课时即使给了显式 `work_dir` 也**再套一层课程名**——否则两门课共用
@@ -163,6 +242,77 @@ def _partial_last_it(art: Path, src: Path) -> str:
     return "-"
 
 
+def backup_ready(backup_root: Path) -> dict | None:
+    """备份抽屉是不是一份**完整**的产物（`last_it` + 三件 + 那一轮的权重），否则 `None`。
+
+    与 `remote/offline_boot.py::local_artifacts` 同一套判据（三件都要、`last_it` 必须是 int），
+    另加一条：`it-<last_it>/weights.json` 要在位 —— 因为恢复之后下一件事就是拿那份权重接着跑，
+    它是「能不能补上续跑点」的实质判据（只有三件 JSON、却没有权重，恢复过来也是不能跑的）。
+    """
+    root = Path(backup_root)
+    st = _anchor_json(root / STATE_NAME)
+    plan = _anchor_json(root / PLAN_NAME)
+    man = _anchor_json(root / MANIFEST_NAME)
+    last_it = (st or {}).get("last_it")
+    if st is None or plan is None or man is None:
+        return None
+    if not isinstance(last_it, int) or isinstance(last_it, bool):
+        return None
+    if not (root / f"it-{last_it}" / WEIGHTS_NAME).is_file():
+        return None
+    return {"root": root, "last_it": last_it, "run_id": str(st.get("run_id", "") or "")}
+
+
+def _anchor_json(p: Path) -> dict | None:
+    """读一个**锚点** json（三件；缺失/损坏/非对象 → None）：判据**绝不因半截文件炸**。
+
+    名字不叫 `_read_json`：那是 `remote/course_cache.py` / `remote/deliver_zip.py` 已有的名字，
+    本模块再定义一份就把它推到「同名散落 ≥3 模块」（`tests/test_reuse_ledger.py` 的护栏）。
+    """
+    try:
+        loaded = json.loads(Path(p).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    return loaded if isinstance(loaded, dict) else None
+
+
+def install_backup(backup_root: Path, dest: Path, log: Callable[[str], None]) -> bool:
+    """把备份抽屉**原子反向铺进** `dest`（恢复腿的字节面）；失败 ⇒ `False`（调用方响亮一行）。
+
+    原子性怎么得到的：先整树拷进 `dest/.restore-<pid>/`（同一文件系统 ⇒ `os.replace` 是原子的），
+    再**逐件** `os.replace` 就位，而**三件锚点最后**才进 —— 于是「三件齐」这个判据绝不会在恢复途中
+    短暂成立（正好赶上那一瞬的子进程不会把半截当产物）。目录名以 `.` 开头 ⇒ 不会被 `it-*` 视图扫到。
+
+    `dest` 里已有的同名轮次先 `rmtree`（本地是「三件不齐」才走到这里，残留的 `it-NNN/` 可能是上一次
+    半途而废的恢复）。失败时暂存删掉，**落点保持原样**（绝不把半截留在落点里）。
+    """
+    src_root, dst = Path(backup_root), Path(dest)
+    staging = dst / f".restore-{os.getpid()}"
+    try:
+        if staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        staging.mkdir(parents=True, exist_ok=True)
+        rounds = sorted(src_root.glob("it-*"))
+        for d in rounds:
+            shutil.copytree(d, staging / d.name)
+        for name in (STATE_NAME, PLAN_NAME, MANIFEST_NAME):
+            shutil.copy2(src_root / name, staging / name)
+        if (src_root / ALL_ZIP).is_file():
+            shutil.copy2(src_root / ALL_ZIP, staging / ALL_ZIP)
+        for d in sorted(staging.glob("it-*")):
+            shutil.rmtree(dst / d.name, ignore_errors=True)
+            os.replace(d, dst / d.name)
+        for name in (STATE_NAME, PLAN_NAME, MANIFEST_NAME, ALL_ZIP):
+            if (staging / name).exists():
+                os.replace(staging / name, dst / name)
+    except OSError as e:
+        log(f"WARN 备份恢复写到一半失败（{type(e).__name__}: {e}）—— 落点保持原样（半截已在暂存里）")
+        shutil.rmtree(staging, ignore_errors=True)
+        return False
+    shutil.rmtree(staging, ignore_errors=True)
+    return True
+
+
 def package_partial(
     cfg: dict,
     log: Callable[[str], None],
@@ -187,14 +337,18 @@ def package_partial(
     **只读 + 复制**：不动产物、不训练、不碰网络。找不到产物就**响亮说明**是哪个目录为空
     （第一轮 checkpoint 之前本来就没东西）并返回空列表，绝不因拿不到包而抛。
     跑完全程时打的同名包是**全量**的（`package_deliverable`）——中途包被它覆盖是预期。
+
+    ⚠ 产物根 = **本地产物根**（2026-10-14，评审 P0-2）：它是**人点了才跑**的 cell，这块钱由人主动付
+    （与段末 `package_deliverable` 不同：那一支常态**不许**碰网络盘）。
     """
     names = list(courses) if courses else courses_of(cfg)
     multi = len(names) > 1
     out_dir = download_dir(cfg)
     made: list[Path] = []
     for course in names:
-        work = course_work_dir(cfg, course, multi=multi)
-        art = work / "run"
+        # 产物根 = 本地产物根（§3.2；本地不可用 ⇒ 自动回落网络侧产物根，与训练段同一判据）——
+        # 继续读老的 `work/run` 会在这个 cell 上响亮地说「目录为空」，把人拿产物的路整条断掉（评审 P0-2）。
+        art, _why = resolve_local_root(cfg, course, multi=multi)
         src = next((art / n for n in PARTIAL_CANDIDATES if (art / n).exists()), None)
         if src is None:
             log(
