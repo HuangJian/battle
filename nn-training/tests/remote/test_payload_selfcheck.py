@@ -12,6 +12,10 @@
   ③ 不通过 ⇒ **显式扰动重打**（不扰动就逐字节相同，旧判在同一份字节上永远为真、重打闭环不收敛）；
   ④ 重打**有次数上限**（`PAYLOAD_SELFCHECK_ATTEMPTS`），触顶**响亮放弃**（`ProtocolError`，
      不发布），而不是无限重打。
+
+2026-10-14：被测面随 LOC 预算拆到 `remote.payload_pack`（原住 `remote.hub_client`，见那里
+的”为什么要搬“）——所以本文件拦的是 `payload_pack.*`（包括 `monkeypatch` 替身打包器的目标，
+那必须与真实查找点同一命名空间）。
 """
 
 from __future__ import annotations
@@ -30,7 +34,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.protocol import PAYLOAD_NAME, PAYLOAD_PERTURB_NAME, ProtocolError
-from remote import hub_client
+from remote import payload_pack
 
 # ------------------------------------------------------------------ 夹具
 
@@ -74,13 +78,13 @@ def test_appended_zip_tail_really_misjudges_old_heuristic_but_not_reader(tmp_pat
     shard = _write_shard(tmp_path)
     payload = tmp_path / "job" / PAYLOAD_NAME
     payload.parent.mkdir()
-    hub_client.pack_payload([shard], {}, payload)
+    payload_pack.pack_payload([shard], {}, payload)
     _append_zip_tail(payload)
 
-    assert hub_client._old_heuristic_misjudges(payload) is True, (
+    assert payload_pack._old_heuristic_misjudges(payload) is True, (
         "夹具失效：尾随 zip 字节没让旧判别误报（那本用例就证明不了分叉）"
     )
-    ok, why = hub_client._payload_reader_selfcheck(payload, [shard], [])
+    ok, why = payload_pack._payload_reader_selfcheck(payload, [shard], [])
     assert ok is True, why  # 新 reader 走「先 tar 后 zip」，这份字节一切正常
     assert _hidden_dir_members(payload)  # 归档结构确实还在
 
@@ -90,12 +94,12 @@ def test_probe_still_uses_the_old_heuristic(tmp_path: Path) -> None:
     real_zip = tmp_path / "legacy.zip"
     with zipfile.ZipFile(real_zip, "w") as z:
         z.writestr("a.txt", b"a")
-    assert hub_client._old_heuristic_misjudges(real_zip) is True
+    assert payload_pack._old_heuristic_misjudges(real_zip) is True
 
     shard = _write_shard(tmp_path)
     plain = tmp_path / "plain.tar.xz"
-    hub_client.pack_payload([shard], {}, plain)
-    assert hub_client._old_heuristic_misjudges(plain) is False
+    payload_pack.pack_payload([shard], {}, plain)
+    assert payload_pack._old_heuristic_misjudges(plain) is False
 
 
 # ------------------------------------------------------------------ ① reader 全链自检
@@ -109,7 +113,7 @@ def test_good_payload_passes_and_is_left_unperturbed(tmp_path: Path) -> None:
     payload.parent.mkdir()
     msgs: list[str] = []
 
-    sha = hub_client.pack_payload_zip([shard], [extra], payload, {}, log=msgs.append)
+    sha = payload_pack.pack_payload_zip([shard], [extra], payload, {}, log=msgs.append)
 
     assert sha == hashlib.sha256(payload.read_bytes()).hexdigest(), "返回的 sha 必须是落盘字节的"
     names = _hidden_dir_members(payload)
@@ -117,7 +121,7 @@ def test_good_payload_passes_and_is_left_unperturbed(tmp_path: Path) -> None:
     assert extra.name in names
     assert msgs == [], f"一次通过不该有任何自检日志：{msgs}"
     assert not (payload.parent / ".selfcheck").exists(), "试解目录必须清干净"
-    assert hub_client._payload_reader_selfcheck(payload, [shard], [extra]) == (True, "")
+    assert payload_pack._payload_reader_selfcheck(payload, [shard], [extra]) == (True, "")
 
 
 def test_selfcheck_rejects_content_mismatch_and_garbage(tmp_path: Path) -> None:
@@ -125,23 +129,23 @@ def test_selfcheck_rejects_content_mismatch_and_garbage(tmp_path: Path) -> None:
     b = _write_shard(tmp_path, "rl_s0_seed2")
     payload = tmp_path / "job" / PAYLOAD_NAME
     payload.parent.mkdir()
-    hub_client.pack_payload([a], {}, payload)
+    payload_pack.pack_payload([a], {}, payload)
 
     # 打包输入比归档内容多一个 shard ⇒ 产物对不上（不是「能不能打开」的问题）
-    ok, why = hub_client._payload_reader_selfcheck(payload, [a, b], [])
+    ok, why = payload_pack._payload_reader_selfcheck(payload, [a, b], [])
     assert ok is False and "不符" in why and b.name in why, why
 
     # 根本不是容器 ⇒ reader 全链试解失败
     bad = tmp_path / "job2" / PAYLOAD_NAME
     bad.parent.mkdir()
     bad.write_bytes(b"definitely-not-a-container")
-    ok2, why2 = hub_client._payload_reader_selfcheck(bad, [], [])
+    ok2, why2 = payload_pack._payload_reader_selfcheck(bad, [], [])
     assert ok2 is False and "reader 全链试解失败" in why2, why2
 
     # 归档里少了本该带的额外文件也要抓到（存在的文件才算「本该带」——打包器就是按 is_file 决定）
     extra = tmp_path / "init_weights.json"
     extra.write_text("{}", encoding="utf-8")
-    ok3, why3 = hub_client._payload_reader_selfcheck(payload, [a], [extra])
+    ok3, why3 = payload_pack._payload_reader_selfcheck(payload, [a], [extra])
     assert ok3 is False and "缺额外文件" in why3, why3
     assert not (payload.parent / ".selfcheck").exists(), "失败路径同样要清掉试解目录"
 
@@ -159,7 +163,12 @@ def _stub_packer(
     """
     calls: list[bytes | None] = []
 
-    def pack(shard_dirs, manifest, out_path, *, extra_files=None, perturb=None):
+    def pack(
+        shard_dirs, manifest, out_path, *, extra_files=None, perturb=None, member_bytes=None,
+        shard_extra=None,
+    ):
+        # 形参必须与 `common.payload.pack_payload` **逐名对齐**（本仓「接口双向一致」纪律）：
+        # 生产侧加一个形参而这里不收，就是一条只在重打路径上炸的哑弹（2026-10-14 实测）。
         calls.append(perturb)
         first = len(calls) == 1
         out = Path(out_path)
@@ -168,7 +177,13 @@ def _stub_packer(
             out.write_bytes(b"garbage-no-container")
             return hashlib.sha256(out.read_bytes()).hexdigest()
         sha = real(
-            shard_dirs, manifest, out_path, extra_files=list(extra_files or []), perturb=perturb
+            shard_dirs,
+            manifest,
+            out_path,
+            extra_files=list(extra_files or []),
+            perturb=perturb,
+            member_bytes=member_bytes,
+            shard_extra=shard_extra,
         )
         if (first and misjudge_first) or always_misjudge:
             _append_zip_tail(out)
@@ -183,20 +198,20 @@ def test_misjudged_payload_triggers_perturbed_repack(tmp_path: Path, monkeypatch
     shard = _write_shard(tmp_path)
     payload = tmp_path / "job" / PAYLOAD_NAME
     payload.parent.mkdir()
-    real = hub_client.pack_payload
+    real = payload_pack.pack_payload
     pack, calls = _stub_packer(real, tmp_path, misjudge_first=True, always_misjudge=False)
-    monkeypatch.setattr(hub_client, "pack_payload", pack)
+    monkeypatch.setattr(payload_pack, "pack_payload", pack)
     msgs: list[str] = []
 
-    sha = hub_client.pack_payload_zip([shard], [], payload, {}, log=msgs.append)
+    sha = payload_pack.pack_payload_zip([shard], [], payload, {}, log=msgs.append)
 
     assert len(calls) == 2, f"应恰好重打一次，实得 {len(calls)} 次"
     assert calls == [None, b"repack-2"], f"重打必须**显式扰动**字节：{calls}"
     assert sha == hashlib.sha256(payload.read_bytes()).hexdigest()
     names = _hidden_dir_members(payload)
     assert PAYLOAD_PERTURB_NAME in names, "重打后的归档里必须留下扰动标记（可审计）"
-    assert hub_client._old_heuristic_misjudges(payload) is False, "重打后旧判别必须为假"
-    assert hub_client._payload_reader_selfcheck(payload, [shard], []) == (True, "")
+    assert payload_pack._old_heuristic_misjudges(payload) is False, "重打后旧判别必须为假"
+    assert payload_pack._payload_reader_selfcheck(payload, [shard], []) == (True, "")
     assert any("第 1/3 次" in m and "误判" in m for m in msgs), msgs
     assert any("第 2 次通过" in m for m in msgs), msgs
 
@@ -207,16 +222,16 @@ def test_reader_selfcheck_failure_also_repacks(tmp_path: Path, monkeypatch) -> N
     payload = tmp_path / "job" / PAYLOAD_NAME
     payload.parent.mkdir()
     pack, calls = _stub_packer(
-        hub_client.pack_payload, tmp_path, misjudge_first=False, always_misjudge=False, garbage_first=True
+        payload_pack.pack_payload, tmp_path, misjudge_first=False, always_misjudge=False, garbage_first=True
     )
-    monkeypatch.setattr(hub_client, "pack_payload", pack)
+    monkeypatch.setattr(payload_pack, "pack_payload", pack)
     msgs: list[str] = []
 
-    sha = hub_client.pack_payload_zip([shard], [], payload, {}, log=msgs.append)
+    sha = payload_pack.pack_payload_zip([shard], [], payload, {}, log=msgs.append)
 
     assert len(calls) == 2
     assert sha == hashlib.sha256(payload.read_bytes()).hexdigest()
-    assert hub_client._payload_reader_selfcheck(payload, [shard], []) == (True, "")
+    assert payload_pack._payload_reader_selfcheck(payload, [shard], []) == (True, "")
     assert any("reader 全链试解失败" in m for m in msgs), msgs
 
 
@@ -226,15 +241,15 @@ def test_attempt_cap_gives_up_loudly_with_distinct_bytes(tmp_path: Path, monkeyp
     payload = tmp_path / "job" / PAYLOAD_NAME
     payload.parent.mkdir()
     pack, calls = _stub_packer(
-        hub_client.pack_payload, tmp_path, misjudge_first=False, always_misjudge=True
+        payload_pack.pack_payload, tmp_path, misjudge_first=False, always_misjudge=True
     )
-    monkeypatch.setattr(hub_client, "pack_payload", pack)
+    monkeypatch.setattr(payload_pack, "pack_payload", pack)
     msgs: list[str] = []
 
     with pytest.raises(ProtocolError) as ei:
-        hub_client.pack_payload_zip([shard], [], payload, {}, log=msgs.append)
+        payload_pack.pack_payload_zip([shard], [], payload, {}, log=msgs.append)
 
-    n = hub_client.PAYLOAD_SELFCHECK_ATTEMPTS
+    n = payload_pack.PAYLOAD_SELFCHECK_ATTEMPTS
     assert n == 3, "上限变了就同步改本用例的措辞（这里是「三次」的语义钉子）"
     assert len(calls) == n, f"必须恰好重打 {n} 次（不许无限重打），实得 {len(calls)}"
     assert calls[0] is None and all(c is not None for c in calls[1:]), calls

@@ -51,7 +51,11 @@ def _fake_shard(n: int, stage: int) -> dict:
 def _load(monkeypatch: pytest.MonkeyPatch, shards: list[tuple[int, int]], *, quota: int,
           bundle: LogBundle | None, logs: list[str]) -> list[dict]:
     """用假 shard 表驱动 `load_episodes_common`（与 `test_ppo_quota._collect` 同口径）。"""
-    monkeypatch.setattr(C, "discover_shards", lambda root, need: list(range(len(shards))))
+    # 形参与本模块的 `discover_shards` **逐名对齐**（`need_any` = wire-diet 的奖励面「或」判据）：
+    # 少收一个形参 = 测试假绿，而生产侧已经在走那条分支。
+    monkeypatch.setattr(
+        C, "discover_shards", lambda root, need, need_any=(): list(range(len(shards)))
+    )
     monkeypatch.setattr(C, "log", logs.append)
 
     def loader(sd):  # 无注解 = 与 `test_ppo_quota._collect` 同口径（mypy 视作 Callable[..., Any]）

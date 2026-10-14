@@ -66,6 +66,40 @@ BC_SHARD_FILES = (
 BC_COLLECTOR = "BC-GOD"
 
 
+# ---------------- wire-diet：per-tick RL shard 的传输形态（2026-10-14，plan/wire-diet.plan.md §3）
+# 与上面三份清单并存的原因：那三份是**落盘**口径（节点采完写进 traj 目录的形态），这里是
+# **payload 里传出去的**形态（打包端可选瘦身后的形态）。两者只差两个面：奖励从哪来、哪些字段降精度。
+#
+# ⚠ 住 `common/` 而不是读取端（`worker.ppo.np_core`）：**两个所有者**都要逐字一致的名字 ——
+# 写端 `remote.payload_slim`（hub 侧，**不得** import `worker.*`，否则 DAG 层号要连坐）与
+# 读端 `worker.ppo.np_core`。所以名字只能有一处定义，而唯一两边都够得着的地方就是这里。
+#
+# `plan/rl-training-config.md` §4.2：per-tick shard 的 reward 原由 TS 落盘改成读取端按公式算
+# （TS 只落 `metrics.npy`，[N+1,76] f8：N 个决策快照 + 1 个终局快照）。**若只有** `reward.npy`
+# （打包端已算好，wire-diet §3 P1）⇒ 读端走无 metrics 的字段表 + 血缘校验，见
+# `worker.ppo.np_core.load_shard` / `_reward_from_npy`。
+METRICS_NAME = "metrics.npy"
+#: 打包端算好的奖励（f32，形状 (N,)，dtype 与读取端 `astype(f32, copy=False)` 对齐）。
+REWARD_NAME = "reward.npy"
+#: `reward.npy` 必须带的**血缘声明**（每 shard 一份，~100 B）。奖励在**别处**算，「it 用错」
+#: 在数值上与正常 reward 无从区分 —— 只有这份 meta 抓得到（评审 P1-4）。
+REWARD_META_NAME = "reward_meta.json"
+#: `reward.npy` 的内容口径版本（算式/落盘 dtype 变化时 +1；与 `metrics_version` 正交）。
+#: 读端**必须**校验：节点的 code.zip 可能比 hub 旧/新，版本不符的奖励数值上无从分辨。
+REWARD_VERSION = 1
+
+#: 奖励面的两条合法形态（`discover_shards` 的 `need_any`：obs **且** 二者之一）。
+RL_REWARD_FILES: tuple[str, ...] = (METRICS_NAME, REWARD_NAME)
+
+#: wire-diet §3 P2：**允许**降精度传输（f32 → f16）的 per-tick RL 字段。
+#: 入选判据（实测 `tmp/wire-audit6.txt` §3）：绝对误差上界 ≤1e-3 且都是 O(1) 输入。
+#: ⛔ `value` **不在表内** —— 它是 GAE 基线，误差经 `δ_t = r + γV' − V` → GAE → `adv_norm`
+#: 放大，而只省 3.3%（55,868 B）：收益小、风险不对称。
+#: 加字段/改名时：这里 + `plan/wire-diet.plan.md` §3 P2 的误差实测表**必须**同 commit 改
+#: （`tests/remote/test_payload_slim.py` 拿本表与读端的 `_RL_SHARD_SPEC` 对账）。
+RL_F16_FIELDS: tuple[str, ...] = ("scalars", "extra", "lp_move", "lp_fire")
+
+
 # ---------------- 结果校验（先验后落盘的红线所在） ----------------
 def _shard_files_for(manifest: dict) -> tuple:
     """BC 语料 shard（collector=BC-GOD）用 BC_SHARD_FILES；意图 RL shard（collector=

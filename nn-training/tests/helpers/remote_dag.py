@@ -161,6 +161,16 @@ LAYERS: dict[str, int] = {
     # 依赖面 = `common.protocol` + `net_http`(L0，延迟) ⇒ **L1**；`hub_client` 转而站在它
     # 上面（顶层边）⇒ 从 L1 升到 **L2**。
     "remote.hub_http": 0,
+    # 发布端 payload 封装（2026-10-14，plan/wire-diet.plan.md §3）：从 `hub_client` 整块搬出的
+    # `pack_payload_zip` + 两条自检 + 重打上限。只 import `common.*`/stdlib/`common.payload`
+    # 的类型 ⇒ **L0**；`hub_client` 站在它上面仍是 L1（若把它搞成 import `remote.payload_slim`，
+    # 它的秩会升到 1 ⇒ hub_client 被迫升到 2 ⇒ code_snapshot 那串全要连坐重排）。
+    "remote.payload_pack": 0,
+    # wire-diet 的字节瘦身实现（同一 plan）：**只** import `common.*` + `numpy` +
+    # `biz.reward_library` ⇒ **L0**。⚠ 它曾 import `worker.ppo.np_core` 拿文件名常量 —— 那会把
+    # 它的秩抬到 2（np_core 是 L1），于是 hub_client(L1) 站在它上面就违规；常量因此下沉到
+    # `common/shard.py`（两边都够得着的唯一定义处）。
+    "remote.payload_slim": 0,
     "remote.hub_client": 1,
     # 2026-10-10（plan/cluster-code-snapshot）：集群代码快照——会话级 `code.zip` 锚点。
     # 它只 import `remote.hub_client`(L1) 的 `pack_code_zip` + `common.*` ⇒ 拓扑秩 1 + 1 = **L2**；

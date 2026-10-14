@@ -29,7 +29,7 @@ import io
 import json
 import tarfile
 import zipfile
-from collections.abc import Sequence
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Literal
 
@@ -67,6 +67,25 @@ PAYLOAD_PERTURB_NAME = "payload.perturb"
 #    就别做」。同批真数据另证 B1/B2/B4：同一批 job 原盘 payload 2,045,276/2,034,536/
 #    2,074,996 B → 仅打 shard 后 1,198,096/1,187,392/1,227,432 B（**−41.4%/−41.6%/−40.8%**）。
 PAYLOAD_XZ_PRESET: Literal[3] = 3
+
+
+#: 「这个成员**不要**进归档」的哨兵（与 `bytes` / `None` 分列：`None` = 原样保留）。
+#: 为什么要有第三种结局：wire-diet（`plan/wire-diet.plan.md` §3 P1）要**丢掉** metrics.npy、
+#: **替换** scalars.npy 之类的字段、其余原样——把三种压成两个返回值，调用方就得再传一份
+#: 「要丢谁」的名单，那就是第二个真相。
+class _DropMember:
+    __slots__ = ()
+
+    def __repr__(self) -> str:  # pragma: no cover - 只为日志/断言可读
+        return "DROP_MEMBER"
+
+
+#: `pack_payload(member_bytes=…)` 的返回值之一：丢弃该成员（见 `_DropMember`）。
+DROP_MEMBER = _DropMember()
+
+#: `member_bytes` 的返回类型：替换字节 / 原样（None）/ 丢弃（`DROP_MEMBER`）。
+MemberBytes = bytes | None | _DropMember
+
 
 def find_payload(job_dir: str | Path) -> Path | None:
     """定位 job 目录下的 payload（优先新名 tar.xz，回退旧名 zip）——新旧互通。"""
@@ -134,6 +153,8 @@ def pack_payload(
     *,
     extra_files: Sequence[str | Path] | None = None,
     perturb: bytes | None = None,
+    member_bytes: Callable[[Path, str], MemberBytes] | None = None,
+    shard_extra: Callable[[Path], Mapping[str, bytes]] | None = None,
 ) -> str:
     """把 shard 目录（npy + manifest.json）打成 **tar.xz**，写 `out_path`。
 
@@ -148,6 +169,19 @@ def pack_payload(
 
     `perturb`（§4.6，2026-09-21）：非 None 时把这段字节以 `PAYLOAD_PERTURB_NAME` 写进
     归档根——发布端自检要求重打时用它**显式扰动**字节（确定性打包下唯一的换字节手段）。
+
+    `member_bytes`（wire-diet，2026-10-14）：**成员级字节变换**的入口，逐 shard 成员文件调用
+    `member_bytes(shard_dir, filename)`，返回值三种：`bytes` = 用这段字节替换该成员（走
+    `_add_bytes`，`TarInfo` 的 mtime/uid/gid 取缺省 ⇒ **打包仍决定性**）· `DROP_MEMBER` = 该成员
+    不进归档 · `None` = 原样保留（仍走 `tf.add`，成员头照旧记源文件 mtime）。
+    **不覆盖** `extra_files`（根级额外文件，如 init_weights.json）——变换面刻意只到 shard 成员。
+
+    `shard_extra`（wire-diet，2026-10-14）：**每 shard 目录新加的成员**（`{文件名: 字节}`，
+    arcname 由本函数加上 shard 目录名前缀、按名排序写入）。现实需要来自 P1：`reward.npy` /
+    `reward_meta.json` 在源目录里**不存在**，逐文件回调（只对它看到的磁盘成员调用）造不出来。
+    与磁盘成员**同名**即 `ProtocolError` —— 重复 arcname 由解包顺序决定训练吃哪份（偶然语义，
+    与发布端「同名 shard 去重」同一条不变量）。
+    缺省两个都是 None = 逐字节旧行为（`member_bytes is None` 时一行都没多走）。
     """
     zpath = Path(out_path)
     zpath.parent.mkdir(parents=True, exist_ok=True)
@@ -157,11 +191,35 @@ def pack_payload(
             p = Path(d)
             if not p.is_dir():
                 raise ProtocolError(f"pack_payload: shard 目录不存在 {p}")
+            seen: set[str] = set()
             for f in sorted(p.iterdir()):
-                if f.is_file():
-                    tf.add(f, arcname=f"{p.name}/{f.name}")
+                if not f.is_file():
+                    continue
+                arc = f"{p.name}/{f.name}"
+                if member_bytes is None:
+                    tf.add(f, arcname=arc)
+                    seen.add(f.name)
+                    continue
+                got = member_bytes(p, f.name)
+                # 三种结局按类型分派（不用 `is DROP_MEMBER` 比较：那是值比较，`isinstance` 才让
+                # 类型检查器也把 `got` 缩到 bytes——`bytes(DROP_MEMBER)` 是能编译但荒谬的一路）。
+                if isinstance(got, _DropMember):
+                    continue
+                seen.add(f.name)
+                if got is None:
+                    tf.add(f, arcname=arc)
+                else:
+                    _add_bytes(tf, arc, got)
+            for xname, xdata in sorted((shard_extra(p) if shard_extra else {}).items()):
+                if xname in seen:
+                    raise ProtocolError(
+                        f"pack_payload: shard {p.name} 的额外成员 {xname} 与盘上成员同名"
+                        "——重复 arcname 会由解包顺序决定训练吃哪份（偶然语义），拒绝打包"
+                    )
+                _add_bytes(tf, f"{p.name}/{xname}", bytes(xdata))
         # 额外文件（落归档**根**：init_weights.json / plan.json 等按名取用）。
-        # 2026-09-17：从 hub_client.pack_payload_zip 合并进来——原来两个打包器
+        # 2026-09-17：从 `hub_client.pack_payload_zip` 合并进来（2026-10-14 起那份住在
+        # `remote.payload_pack`）——原来两个打包器
         # （一个带 extra 一个不带）各自维护 tar.xz 口径，半离线段又需要一个带
         # extra 的，第三个副本毫无道理：统一到这里，hub 侧那个改为转调。
         for xf in extra_files or ():

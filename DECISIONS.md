@@ -5700,3 +5700,43 @@ blob_cache；合成轮只声明「本地可兑现」的 opt sha）
 —— 回归 → `nn-training/tests/remote/{test_body_transfer_guard,test_wire_reroll,test_boot_wire_guard,
 test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后绿）；门禁
 `bash tools/githook/nn-python-gate.sh` 绿（4275 passed / 1 skipped）
+
+## §2026-10-14-goalnn-wire-diet-m1m2（2026-10-14，wire-diet 落地 M1+M2：打包端先算 reward ＋ 字段 f16，**缺省关**）
+
+- **背景**：§2026-10-14-wire-diet-transport 只记裁决、未动代码（用户令「先写 plan 再实施」）。
+  本轮按 `plan/wire-diet.plan.md` v2（含评审 `plan/wire-diet.review-bf.md` 的 P0/P1 修订）落地
+  M1（P1 打包端算 reward）＋ M2（P2 训练输入字段 f16）；开关 `--wire-diet`（`rl.wire_diet`）
+  **缺省 0 = 逐字节旧行为**（真机 A/B 没取到读数之前不翻）。
+- **决定**（§8-D1/D4/D5/D6 的执行，外加两处实施期推导）：
+  ① P1 用**显式** `reward_spec` + `it`，**不读**模块级 holder（`biz.reward_context`）——打包点
+     不止训练进程一处（hub 重发 / `smoke_loopback` / `plan_run`），那些进程里 holder 缺省
+     `it=1, reward_fn=None` ⇒ 读 holder 会**静默**按 it=1 算错整轮奖励（评审 P1-4）；
+     每 shard 落 `reward_meta.json`，读端**必须**校验四栏（见②）；缺 spec ⇒ 不做 P1、照旧带 metrics。
+  ② 读端多补一道门 **`reward_version`**（评审只点了 it / metrics_version / formula_hash）：节点的
+     code.zip 与 hub 不同代时，两版算式产出的 reward 在数值与形状上都无从分辨 —— bump 过的
+     版本号是唯一能看见代际差的暴露面。四条任一不符 ⇒ `ProtocolError`（内容决定性，不重认领）。
+  ③ P2 只用**内存**字节变换（`pack_payload` 成员回调 + `_add_bytes`）：落临时 f16 文件会把新
+     mtime 写进 tar 头 ⇒ 同一份内容每打一次 `payload_sha256` 都漂，而 sha 是校验锚、
+     `PAYLOAD_PERTURB_NAME` 的存在也以「打包决定性」为前提。
+  ④ 常量（文件名 / 版本 / f16 字段表）住 **`common/shard.py`**：写端在 hub 侧（**不得** import
+     `worker.*`），读端在 `worker.ppo.np_core` ⇒ 住 common 才是两侧真一致（实施期把 v2 的
+     「名字住读取端」改掉）。
+- **备选与否决**：① 读 holder 拿 reward 参数 —— 否（重发路径静默错算，评审 P1-4）；
+  ② `value` 一并转 f16 —— 否（GAE 基线，误差经 δ→GAE→`adv_norm` 放大，只省 3.3%，风险不对称）；
+  ③ 变换落临时文件再打包 —— 否（破坏打包决定性 ⇒ sha 与扰动闭环同时失效）；
+  ④ 常量住读取端由写端 import —— 否（DAG 层号连坐：`payload_slim` 抬到 L2 ⇒ `hub_client` 要升
+     L3 ⇒ `code_snapshot` 那串全得重排）；⑤ 把 `hub_client` 压到 999 行不拆 —— 否（LOC 预算的
+     正解是拆，不是贴边；贴边等于下一次改动必红）。
+- **后果**：代码 `remote/payload_slim.py`（新）· `remote/payload_pack.py`（新，见下）·
+  `common/payload.pack_payload`（成员回调钩子）· `common/shard.py`（常量下沉）·
+  `worker/ppo/np_core.py`（奖励双形态 + 四道门 + `need_any` 发现判据）· 接线
+  `hub_client.publish_job` / `trainer/loop_remote_job` / `worker/cli.py`（开关 + `wire.wire_diet`
+  归因位）。用例 23 例（`tests/remote/test_payload_slim.py` · `tests/worker/test_reward_npy_shard.py`）；
+  真数据等价探针 `tmp/wire-audit7.py`（reward 逐元素相同 `max|Δ|=0.0`，f16 四字段绝对误差 ≤1e-3）。
+  **顺带一刀**：`hub_client` 993 行 + 本改动必越 LOC 预算（<1000，`tests/test_python_loc_budget.py`）
+  ⇒ 按「独立所有者 + 独立触发条件」把发布端 payload 封装（`pack_payload_zip` + 两条自检 + 重打上限）
+  整块搬到 `remote/payload_pack.py`（只 import `common.*` ⇒ 拓扑秩 L0，`hub_client` 仍 L1，
+  DAG 层号无连坐；账本两条新条目见 `tests/helpers/remote_dag.py`）。门禁：
+  `bash tools/githook/nn-python-gate.sh` 绿（ruff + mypy + pytest `tests/ e2e/` 全量）。
+  全文 → `docs/nn/remote-transport.md` §91 · `plan/wire-diet.plan.md` §10。
+  ⚠ **真机 A/B 未取 ⇒ 开关保持 0**（回退档 = 置 0）；M0/M3/M4 一个没碰（`docs/nn.progress.md` 第 29/31 行）。

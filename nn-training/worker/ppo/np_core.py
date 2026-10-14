@@ -22,8 +22,21 @@ from typing import Any, cast
 import numpy as np
 import numpy.typing as npt
 
+from common.errors import ProtocolError
 from common.log import log
 from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
+
+# wire-diet §3：奖励面的文件名 / 版本 / f16 字段表住 `common/`（写端 `remote.payload_slim`
+# 也要逐字一致，而 hub 侧不得 import `worker.*`）——这里只 import，**不再**另定一份。
+# `RL_F16_FIELDS`（f16 字段表）本端不用：它是**写端**的策略，只在
+# `tests/remote/test_payload_slim.py` 里与 `_RL_SHARD_SPEC` 对账。
+from common.shard import (
+    METRICS_NAME,
+    REWARD_META_NAME,
+    REWARD_NAME,
+    REWARD_VERSION,
+    RL_REWARD_FILES,
+)
 from worker.ppo._episode import episode_from_shard
 
 # numpy 的 RandomState.get_state() 存根把 legacy 默认标成 False（→ dict），但 numpy 2.x
@@ -58,11 +71,19 @@ def compute_gae(
     return adv, ret
 
 # ---------------- shard discovery / loading ----------------
-def discover_shards(root: str, need: Sequence[str]) -> list[str]:
-    """Find all dirs under `root` containing every marker file in `need`."""
+def discover_shards(
+    root: str, need: Sequence[str], need_any: Sequence[str] = ()
+) -> list[str]:
+    """Find all dirs under `root` containing every marker file in `need` (**and** ≥1 of
+    `need_any` when that is non-empty).
+
+    `need_any`（wire-diet，2026-10-14）：奖励面有两条合法形态 —— `metrics.npy`（本机按公式算）
+    或 `reward.npy`（打包端算好，`plan/wire-diet.plan.md` §3 P1）。判据只在这一处：多写一个
+    扫描函数就是第二份真相（`discover_rl_shards` 与 `load_episodes_common` 都走这里）。
+    """
     out: list[str] = []
     for dirpath, _dirs, files in os.walk(root):
-        if all(f in files for f in need):
+        if all(f in files for f in need) and (not need_any or any(f in files for f in need_any)):
             out.append(dirpath)
     return sorted(out)
 
@@ -75,6 +96,8 @@ def load_shard_fields(
 
     `dtype` 用 np.uint8/np.float32/np.int64；astype(..., copy=False) 在 dtype 已
     符合时零拷贝（obs 每轮 ~550MB，无谓拷贝纯烧内存带宽）。
+    ★ 也正因为这一句，wire-diet P2 把 `float32` 字段**存成 f16** 时加载端一行不改
+      （np.load 出 f16 → astype(f32) 是真转换，`shapes` 形状判据与 dtype 判据各管一段）。
 
     `shapes`（obs-v5 A9）：每字段的**非批次维**期望形状（首维 = N，随 shard 变）——
     只查 dtype 挡不住「旧 schema 语料混装」：9 维 `extra.npy` 会被当 37 维静默读进来，
@@ -513,6 +536,9 @@ def load_episodes_common(
     label: str,
     shard_kind: str,
     need_files: Sequence[str],
+    #: 奖励面的「或」判据（wire-diet §3 P1）：per-tick RL 是 metrics.npy **或** reward.npy。
+    #: 缺省空 = 逐字节旧行为（intent/goal/BC 调用点不传）。
+    need_any_files: Sequence[str] = (),
     shard_loader: Callable[[str], dict[str, np.ndarray]],
     gae: Callable[[dict[str, np.ndarray]], tuple[np.ndarray, np.ndarray]],
     gae_name: str,
@@ -530,7 +556,7 @@ def load_episodes_common(
       * adv 全局归一（mean 0 / std 1）；normalize_ret=True 时 ret 同步归一
         （intent 的 value 头目标，ppo 不归）。
     """
-    shards = discover_shards(data_root, need_files)
+    shards = discover_shards(data_root, need_files, need_any=need_any_files)
     if not shards:
         raise SystemExit(f"[{label}] no {shard_kind} shards found under {data_root}")
     # ★ 2026-09-24（日志节食）：这四行是「装载阶段」的读数集合，传给 bundle 时攒进调用方
@@ -629,9 +655,15 @@ LAM = 0.95
 # ---------------- RL shard 装载（per-tick / 2026-09-26 从 ppo/engine.py 搬来） ----------------
 # ---------------- trajectory loading ----------------
 # RL shard 字段表：{key: (filename, dtype)} —— 与旧 load_shard 逐字段一致（copy=False 零拷贝）。
-# plan/rl-training-config.md §4.2：per-tick shard 的 reward 由 TS 落盘改为 Python
-# 公式引擎计算——TS 只落 `metrics.npy`（[N+1,21] f8：N 个决策快照 + 1 个终局快照），
-# 加载器读 holder（biz.reward_context）的 RewardFn 按配置公式算 reward。
+# plan/rl-training-config.md §4.2：per-tick shard 的 reward 由 TS 落盘改为 Python 公式引擎
+# 计算（TS 只落 `metrics.npy`，[N+1,76] f8：N 个决策快照 + 1 个终局快照），加载器读 holder
+# （biz.reward_context）的 RewardFn 按配置公式算 reward。**若只有** `reward.npy`（打包端已算，
+# `plan/wire-diet.plan.md` §3 P1）⇒ 走 `_RL_SHARD_SPEC_REWARD`（本表去掉 metrics），
+# 判据见 `load_shard` / `_reward_from_npy`。
+#
+# wire-diet 的名字常量（METRICS_NAME / REWARD_NAME / REWARD_META_NAME / REWARD_VERSION /
+# RL_REWARD_FILES / RL_F16_FIELDS）住 `common.shard`——本文件只 import 使用（理由见那里的注释）。
+
 #: RL shard 的**schema 形状判据**（obs-v5 A9）：只列与 schema 同源的张量。
 #: 首维 = N（随 shard 变）⇒ 只比非批次维。旧 MAJOR 的产物在这里被响亮拒收，
 #: 而不是等到 forward 报一个看不懂的维度错（或更糟：静默错位）。
@@ -652,36 +684,52 @@ _RL_SHARD_SPEC: dict[str, tuple[str, npt.DTypeLike]] = {
     "lp_move": ("lp_move.npy", np.float32),
     "lp_fire": ("lp_fire.npy", np.float32),
     "value": ("value.npy", np.float32),
-    "metrics": ("metrics.npy", np.float64),
+    "metrics": (METRICS_NAME, np.float64),
     "done": ("done.npy", np.int64),
     "mask": ("mask.npy", np.int64),
 }
 
+#: 只有 `reward.npy`（打包端算好）的 shard 用的字段表 —— 由 `_RL_SHARD_SPEC` **派生**，
+#: 不抄第二份字段名单（wire-diet §3 P1）。
+_RL_SHARD_SPEC_REWARD: dict[str, tuple[str, npt.DTypeLike]] = {
+    k: v for k, v in _RL_SHARD_SPEC.items() if k != "metrics"
+}
+
 
 def discover_rl_shards(root: str) -> list[str]:
-    return discover_shards(root, ("metrics.npy", "obs.npy"))
+    return discover_shards(root, ("obs.npy",), need_any=RL_REWARD_FILES)
 
 
 def load_shard(dirpath: str) -> dict[str, np.ndarray]:
-    """读 shard 字段 + manifest → `reward` 由公式引擎按 metrics 算（N 样本）。
+    """读 shard 字段 + manifest → `reward`（N 样本）。
 
-    无 holder（reward_fn None）时**响亮报错**——旧 reward.npy 直读路径已随
-    TS 落盘改版删除（历史 run 需在公式引擎下重采，plan §4.2 / §12-2）。
+    两条奖励来源（wire-diet，2026-10-14，§3 P1）：
+      * 盘上有 `metrics.npy` ⇒ **公式引擎按 metrics 算**（历史路径，逐字节不变；无 holder
+        （reward_fn None）时**响亮报错**）；
+      * 只有 `reward.npy` ⇒ 打包端（hub）已算好，本端只**校验血缘**
+        （`reward_meta.json` 的 it / metrics_version / formula_hash vs holder）后直读。
+        校验不是可选项：奖励在别处算，`it` 用错在数值上与正常 reward 无从区分 —— 只有 meta
+        里记的「实际用过的 it/版本/指纹」抓得到（评审 P1-4）。
     """
-    d = load_shard_fields(dirpath, _RL_SHARD_SPEC, _RL_SHARD_SHAPES)
-    metrics = d.pop("metrics")  # [N+1,21]
-    n_obs = int(d["obs"].shape[0])
-    if metrics.shape[0] != n_obs + 1:
-        raise ValueError(
-            f"metrics 行数 {metrics.shape[0]} != nSamples+1={n_obs + 1}（{dirpath}）——"
-            "指标行失配（决策行 + 终局行），shard 损坏或格式不符"
-        )
     manifest: dict = {}
     mp = os.path.join(dirpath, "manifest.json")
     if os.path.exists(mp):
         with open(mp, encoding="utf-8") as f:
             manifest = json.load(f)
-    d["reward"] = _reward_from_metrics(metrics, manifest, dirpath)
+    has_metrics = os.path.exists(os.path.join(dirpath, METRICS_NAME))
+    spec = _RL_SHARD_SPEC if has_metrics else _RL_SHARD_SPEC_REWARD
+    d = load_shard_fields(dirpath, spec, _RL_SHARD_SHAPES)
+    n_obs = int(d["obs"].shape[0])
+    if has_metrics:
+        metrics = d.pop("metrics")  # [N+1,76]
+        if metrics.shape[0] != n_obs + 1:
+            raise ValueError(
+                f"metrics 行数 {metrics.shape[0]} != nSamples+1={n_obs + 1}（{dirpath}）——"
+                "指标行失配（决策行 + 终局行），shard 损坏或格式不符"
+            )
+        d["reward"] = _reward_from_metrics(metrics, manifest, dirpath)
+    else:
+        d["reward"] = _reward_from_npy(dirpath, n_obs)
     # stage：供 load_episodes_common 的**逐关**配额（target_transitions 路线）分组。
     # 它不进 episode 字段集（load_episodes_common 显式排除 "stage"），也不是 GAE 输入；
     # 0 维数组 ⇒ trim_shard_arrays 不会截它。manifest 缺该键时取 -1（所有 shard 归一组，
@@ -727,6 +775,76 @@ def _reward_from_metrics(metrics: np.ndarray, manifest: dict, dirpath: str) -> n
     outcome = str(manifest.get("outcome", "timeout"))
     score = float(manifest.get("score", 0.0))
     r = ctx.reward_fn(m, outcome, score, ctx.it)
+    return np.asarray(r, dtype=np.float32)
+
+
+def _reward_from_npy(dirpath: str, n_obs: int) -> np.ndarray:
+    """直读打包端算好的 `reward.npy` + **校验** `reward_meta.json`（wire-diet §3 P1）。
+
+    四条判据（任一不符 ⇒ `ProtocolError`：内容决定性，同一份字节重领永不治愈）：
+      ① `reward_version` == 本仓的 `REWARD_VERSION`（**奖励口径版本**：节点的 code.zip 可能比
+         hub 旧/新，两版算式产出的 reward 在数值与形状上都无从分辨）；
+      ② `it` == 本轮 holder 的 it（holder 由 job manifest 设，见 `remote/train_core.py`）——
+         这条是「打包端读错 ambient holder / 重发换了 it」的唯一暴露面；
+      ③ `metrics_version` == holder 的期望版本（产出端导出器版本）；
+      ④ `formula_hash`：两侧都有值时必须相等（奖励血缘不同 = 另一套公式的数值）。
+    形状与非有限值再各一道兜底（进 GAE 之前拦住）。
+    """
+    from biz.reward_context import current as _ctx_current
+
+    meta_p = os.path.join(dirpath, REWARD_META_NAME)
+    if not os.path.exists(meta_p):
+        raise ProtocolError(
+            f"{REWARD_NAME} 缺伴随的 {REWARD_META_NAME}（{dirpath}）——打包端未声明奖励血缘，"
+            "拒绝直读（无从判定它是哪一轮/哪套公式算的）"
+        )
+    try:
+        with open(meta_p, encoding="utf-8") as f:
+            meta = json.load(f)
+    except (OSError, ValueError) as e:
+        raise ProtocolError(f"{REWARD_META_NAME} 不可读（{dirpath}）: {e}") from e
+    got_rv = int(meta.get("reward_version", -1))
+    if got_rv != REWARD_VERSION:
+        raise ProtocolError(
+            f"reward 的 reward_version={got_rv} != 本端 {REWARD_VERSION}（{dirpath}）——"
+            "打包端与本端的奖励口径不同（节点 code.zip 与 hub 不同代），禁止直读"
+        )
+    ctx = _ctx_current()
+    want_it = int(ctx.it)
+    got_it = int(meta.get("it", -1))
+    if got_it != want_it:
+        raise ProtocolError(
+            f"reward 的 it={got_it} != 本轮 it={want_it}（{dirpath}）——打包端与本轮迭代号不一致"
+            "（读错 holder / 重发换了 it），整轮奖励会被错算，拒绝直读"
+        )
+    want_mver = int(ctx.metrics_version)
+    got_mver = int(meta.get("metrics_version", -1))
+    if got_mver != want_mver:
+        raise ProtocolError(
+            f"reward 的 metrics_version={got_mver} != 期望 {want_mver}（{dirpath}）——"
+            "产出端与读取端公式版本不同，禁止静默错读"
+        )
+    want_fh = str((ctx.identity or {}).get("formula_hash") or "")
+    got_fh = str(meta.get("formula_hash") or "")
+    if want_fh and not got_fh:
+        # 本端知道本轮公式指纹，而打包端没声明 ⇒ 无从比对（“空 = 不查”是一个静默洞）。
+        raise ProtocolError(
+            f"reward 未声明 formula_hash（{dirpath}）——本端期望 {want_fh[:12]}…，无法判定血缘，"
+            "拒绝直读（打包端本应由 build_slim 从 reward_spec 现取）"
+        )
+    if want_fh and got_fh != want_fh:
+        raise ProtocolError(
+            f"reward 的 formula_hash={got_fh[:12]}… != 本轮 {want_fh[:12]}…（{dirpath}）——"
+            "奖励血缘不同（两套公式的数值）"
+        )
+    r = np.load(os.path.join(dirpath, REWARD_NAME))
+    if r.ndim != 1 or r.shape[0] != int(n_obs):
+        raise ValueError(
+            f"reward.npy 形状 {tuple(r.shape)} != (nSamples={n_obs},)（{dirpath}）——"
+            "行数与 obs 失配（打包端与本端算的不是同一份）"
+        )
+    if not bool(np.all(np.isfinite(r))):
+        raise ProtocolError(f"reward.npy 含非有限值（{dirpath}）——奖励已污染，拒绝进 GAE")
     return np.asarray(r, dtype=np.float32)
 
 
@@ -778,7 +896,8 @@ def load_episodes(
         data_root,
         label="ppo",
         shard_kind="RL",
-        need_files=("metrics.npy", "obs.npy"),
+        need_files=("obs.npy",),
+        need_any_files=RL_REWARD_FILES,
         shard_loader=load_shard,
         gae=lambda d: compute_gae(d["reward"], d["value"], d["done"], gamma, lam),
         gae_name="GAE",

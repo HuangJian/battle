@@ -6,6 +6,68 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §91 wire-diet 落地（M1+M2）：打包端先算 reward + 字段 f16（2026-10-14，`plan/wire-diet.plan.md` v2 · 评审 `plan/wire-diet.review-bf.md`）
+
+**触发**：家宽晚高峰链路掉到几十 KB/s，一轮 payload 下行 1.72 MB + 上行 0.76 MB ⇒ 传输 >100 s。
+v2（评审后修订）把方案拆成 M0–M7；本次落地 **M1+M2**，开关 `--wire-diet`（`rl.wire_diet`）
+**缺省 0 = 逐字节旧行为**。
+
+**做了什么**
+
+- `common/payload.pack_payload` 新增两个**可选**钩子：`member_bytes(shard_dir, filename)`
+  （替换字节 / 原样（None）/ 丢弃（`DROP_MEMBER`））与 `shard_extra(shard_dir)`（每 shard 新成员；
+  与盘上成员同名即 `ProtocolError`）。缺省 None ⇒ 旧路径一行都没多走
+  （「no-op 钩子 vs 不传钩子逐字节相同」有用例钉着）。
+- **落地时撞上门禁，顺带拆了一刀**（两处，都已在 `tests/helpers/remote_dag.py` 登记层号）：
+  ① `remote/hub_client.py` 已 993 行（LOC 预算 < 1000，`tests/test_python_loc_budget.py`）⇒
+  把「发布端 payload 封装」整块搬到 `remote/payload_pack.py`（`pack_payload_zip` + 两条自检 +
+  重打上限；只 import `common.*` ⇒ **L0**，hub_client 仍是 L1，无连坐）；
+  ② 文件名/版本/f16 字段表起初定义在读端 `worker.ppo.np_core`（L1），而写端 `remote.payload_slim`
+  不得 import `worker.*`（否则它的秩被抬到 2、hub_client 就得升 3，`code_snapshot` 那串全要重排）
+  ⇒ 常量下沉到 `common/shard.py`（**两端都够得着的唯一定义处**）。这条同时收窄了评审里
+  「常量住读取端」的写法：**住 common** 才是两侧真一致。
+- `remote/payload_slim.py`（新，**唯一实现**）：
+  P1 = 用**显式** `reward_spec` + `it` 在打包端把 `metrics.npy` 算成 `reward.npy`（丢掉 metrics）
+  ＋ `reward_meta.json`（`it` / `metrics_version` / `formula_hash`）；
+  P2 = `scalars` / `extra` / `lp_move` / `lp_fire` 存 f16（`RL_F16_FIELDS` 单一来源；
+  `value` 明确不在表内 = GAE 基线）。变换**只在内存**完成 ⇒ 打包仍决定性
+  （逐成员回调 + `_add_bytes`；落临时 f16 文件会把新 mtime 写进 tar 头 ⇒ sha 每打一次都漂）。
+- 节点侧（`worker/ppo/np_core.py`）：`load_shard` 两条奖励来源 —— 盘上有 `metrics.npy` 就走老路径
+  （逐字节不变），**只有** `reward.npy` 就校验 meta 后直读（**reward_version** / it /
+  metrics_version / formula_hash 任一不符 ⇒ `ProtocolError`，内容决定性）；
+  `discover_shards(need_any=…)` / `discover_rl_shards` 同时认两种形态。
+  四道门里 **`reward_version` 是补的**（评审只点了 it/版本/指纹）：节点的 code.zip 可能比 hub
+  旧/新，两版算式产出的 reward 在数值与形状上都无从分辨 —— 而这是**唯一**能看见代际差的那道门。
+- `remote/hub_client._shard_metrics_version` 那条「发布端只读声明、不碰 metrics.npy」的注释已改写：
+  wire-diet 打开后 P1 会真读 metrics.npy（plan §2-6 要求同 commit 改，本 commit 就是那个 commit）。
+
+**判据（实测/用例）**
+
+- **真值等价**（`tmp/wire-audit7.py`，真 payload 抽 3 shard）：新路径 reward 与旧路径**逐元素相同**
+  （`max|Δ| = 0.0`），且 `course spec.identity() == manifest.formula_hash` ✓。
+- **f16 真值误差**（绝对，判据 ≤1e-3）：scalars 2.436e-4 · extra 2.254e-4 · lp_move 9.708e-4 ·
+  lp_fire 4.668e-4 —— 四个字段在**真值域**上都过了（v1 的误差表缺 lp_fire，本次补量）。
+- 新用例 23 例（`tests/remote/test_payload_slim.py` 12 · `tests/worker/test_reward_npy_shard.py` 11）；
+  另修 3 处**镜像签名**的测试替身（`pack_payload` 钩子 2 个形参 + `discover_shards` 的 `need_any`）
+  —— 替身少收形参就是只在重打路径上炸的哑弹；自检那组用例改拦 `remote.payload_pack.*`
+  （`monkeypatch` 的目标必须与真实查找点同一命名空间）。
+- **门禁**：`bash tools/githook/nn-python-gate.sh` 绿（ruff + mypy + pytest `tests/ e2e/` 全量）。
+  途中被三条存量护栏拦过，都已按“修根因”处理而不是消音：LOC 预算（⇒ 上述拆分）、
+  `remote_dag` 层号（⇒ 两个 L0 条目 + 常量下沉）、复用账本的同名基线（`ShardSlim.summary`
+  ⇒ 改名 `fmt_line`，那是**只许降**的计数，不能抬）。
+- 与 hub 本地 shard / 血缘无关：`data_fp` 只取 shard 的 `(name, wver, stage, seed)`
+  （`common/manifest.py`）⇒ D12/D14 判据不动；`metrics_stats` 也不受影响（它读**训练侧**本地
+  traj 目录，节点 rollout 那一支本就跳过）—— 评审里「节点侧诊断降级」的担心据此作废。
+
+**未取读数 / 回退**
+
+- **真机 A/B 未取**（配对 ≥10 job，比 p50/p90）：**在此之前 `--wire-diet` 保持 0**。
+  回退档 = 开关置 0（逐字节旧行为）；`payload_fmt` 只在真的改了字节时才进 manifest。
+- 未做：M0（`course_cache` 身份映射）· M3/M4（权重 / opt delta，依赖 M0；M4 还要 hub 能解码
+  torch 张量）· M5/M6（节点侧 `cache_dir` 取证 + inventory 观测）。
+
+---
+
 ## §90 PPO job 生命周期收口：lost 可判 · 重启按 runId 作废 · 重发入口 · 残留自动清理（2026-10-13，plan/ppo-job-lifecycle-ownership）
 
 **触发**：2026-10-13 06:17–06:45 事故（x27-noleash）——人工 `rm` 掉刚发布的 job 目录 ⇒

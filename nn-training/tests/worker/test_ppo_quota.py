@@ -52,7 +52,10 @@ def _collect(monkeypatch, shards: list[tuple[int, int]], quota: int):
     `zip(episodes, shards)` 位置对齐**（一旦配额满丢了 shard，位置就全错；
     本文件恰好有这种用例）。
     """
-    monkeypatch.setattr(C, "discover_shards", lambda root, need: list(range(len(shards))))
+    # `need_any` 与生产签名逐名对齐（wire-diet 的奖励面「或」判据）——stub 少收形参就是假绿。
+    monkeypatch.setattr(
+        C, "discover_shards", lambda root, need, need_any=(): list(range(len(shards)))
+    )
     seen: list[int] = []
     meta: list[tuple[int, int]] = []  # (stage, kept_N)，与 episodes 一一对应
 
