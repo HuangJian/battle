@@ -19,10 +19,15 @@ import io
 import json
 import os
 import tarfile
+import time
 from pathlib import Path
 from typing import Any
 
 __all__ = ["append_jsonl", "atomic_write_bytes", "atomic_write_json", "extract_tar_bytes"]
+
+#: `os.replace` 撞「目标被别的句柄占着」（Windows）时的**有界重试**参数；见 `atomic_write_bytes`。
+ATOMIC_REPLACE_ATTEMPTS = 6
+ATOMIC_REPLACE_BACKOFF_SEC = 0.02
 
 
 def atomic_write_bytes(path: Path | str, data: bytes) -> None:
@@ -30,12 +35,26 @@ def atomic_write_bytes(path: Path | str, data: bytes) -> None:
 
     `os.replace` 在同一文件系统内是原子的；`tmp` 与目标同目录（同 fs）是前提，
     所以这里用 `with_name` 而不是系统临时目录。
+
+    ★ **Windows：撞读者句柄时要有界重试（2026-10-14 满载 flake）**——`os.replace`
+    （`MoveFileEx` 的 REPLACE_EXISTING）要求目标**没有别的打开句柄**，而 Python 的 `open()`
+    不共享删除权 ⇒ **正在读**这个文件的一方会让它抛 `PermissionError(13)`。本仓是常态：
+    补传账本 `delivered.json` 由子进程写、父侧/测试**轮询读**（状态面同理）。读侧只持有
+    几微秒，但满载下窗口会被撞上（实测：写侧 `_save_ledger` 因此失败 ⇒ `deliver_result`
+    把异常吞成「没送达」⇒ `result_done` 永远落不了盘）。退避重试几次即可，读侧一松手就成。
     """
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
     tmp = p.with_name(p.name + ".tmp")
     tmp.write_bytes(data)
-    os.replace(tmp, p)
+    for attempt in range(ATOMIC_REPLACE_ATTEMPTS):
+        try:
+            os.replace(tmp, p)
+            return
+        except PermissionError:  # Windows：目标被别的句柄占着（读侧还没松手）
+            if attempt == ATOMIC_REPLACE_ATTEMPTS - 1:
+                raise
+            time.sleep(ATOMIC_REPLACE_BACKOFF_SEC * (attempt + 1))
 
 
 def atomic_write_json(path: Path | str, obj: Any, *, indent: int = 1) -> None:

@@ -20,6 +20,8 @@ import json
 import re
 import subprocess
 import sys
+import threading
+import time
 from functools import cache
 from pathlib import Path
 
@@ -270,6 +272,43 @@ def test_atomic_write_json_replaces_and_append_jsonl_appends(tmp_path: Path) -> 
         common.fs.append_jsonl(ledger, {"i": i, "note": "中文"})
     rows = [json.loads(x) for x in ledger.read_text(encoding="utf-8").splitlines()]
     assert rows == [{"i": 0, "note": "中文"}, {"i": 1, "note": "中文"}, {"i": 2, "note": "中文"}]
+
+
+def test_atomic_write_retries_past_a_reader_holding_the_target(tmp_path: Path) -> None:
+    """★ Windows：目标被**别的句柄**打开时 `os.replace` 抛 `PermissionError` ⇒ 写侧必须**有界重试**。
+
+    `os.replace`（`MoveFileEx` 的 REPLACE_EXISTING）要求目标没有别的打开句柄；而 Python 的
+    `open()` 不共享删除权 ⇒ **正在读**这个文件的一方会让写侧的 replace 失败。本仓是常态：
+    补传账本 `delivered.json` 由**子进程**写、父侧/测试**轮询读**（状态面同理）。读侧只持有
+    几微秒，但满载下窗口会被撞上——2026-10-14 门禁里它有两个面：读侧 `open()` 撞改名窗口抛
+    `PermissionError`（`tests/remote/test_offline_deliver_proc.py` 的 `_State.ledger`，已修），
+    以及写侧 `os.replace` 撞读者句柄抛（这里，靠重试兜住）。
+
+    Linux 的 rename 原子换 fd、不认句柄 ⇒ 本用例在那边恒绿（只当 Windows 回归守卫）。
+    """
+    target = tmp_path / "state.json"
+    common.fs.atomic_write_json(target, {"old": True})
+    holder = target.open("rb")  # 持着读句柄 = 「轮询读者正拿着这个文件」
+    errs: list[Exception] = []
+    done = threading.Event()
+
+    def _writer() -> None:
+        try:
+            common.fs.atomic_write_json(target, {"a": 1})
+        except Exception as e:  # 收起来交给主线程断言（线程里抛会被吞）
+            errs.append(e)
+        finally:
+            done.set()
+
+    t = threading.Thread(target=_writer)
+    t.start()
+    # sleep-ok: 夹具模拟 —— 让写侧先撞上「目标被占着」，再松手
+    time.sleep(0.05)
+    holder.close()
+    assert done.wait(timeout=5.0), "写侧卡住了（没退避重试）"
+    t.join(timeout=5.0)
+    assert not errs, f"目标被读句柄占过 ⇒ 写侧必须有界重试，不该直接抛：{errs!r}"
+    assert json.loads(target.read_text(encoding="utf-8")) == {"a": 1}
 
 
 def test_agent_meta_is_best_effort_and_uses_the_shared_writer(tmp_path: Path) -> None:

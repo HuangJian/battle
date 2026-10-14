@@ -35,6 +35,7 @@ if str(ROOT) not in sys.path:
 
 from common.protocol import AUTH_HEADER, OFFLINE_ARTIFACT_PATH, OFFLINE_RESULT_PATH
 from remote import deliver_proc as dp
+from remote.artifacts import atomic_write_json
 from remote.deliver_proc import DelivererProcess
 from tests.remote.test_offline_deliver import RUN, _make_artifacts  # type: ignore
 
@@ -170,11 +171,18 @@ class _State:
         )
 
     def ledger(self) -> dict:
-        """读账本；**还没落盘时算空账本** —— 重启那几条判据要 poll 它，而子进程第一次落盘之前
-        这个文件并不存在（把「还没写」当异常会让 poll 变成竞态）。"""
+        """读账本；**没读到时算空账本** —— 重启那几条判据要 poll 它，而「没读到」有两种：
+
+          * 子进程第一次落盘之前这个文件并不存在（`FileNotFoundError`）；
+          * 账本的写者是**子进程**（`atomic_write_json` = 写 `*.tmp` 再 `os.replace`）⇒ Windows 上
+            `open()` 会撞上改名窗口抛 `PermissionError(13)`（Linux 的 rename 原子换 fd、没这一档）。
+
+        两者都是「这一拍没读到」≡「还没落盘」，不能用异常把 poll 变成竞态 —— 生产侧的三个读面
+        （`deliver_proc._result_done_from_disk` / `unsent_reposts` / `_child_status`）同吞
+        `(OSError, ValueError)`，这里与它们对齐（2026-10-14 满载 flake 的修复点）。"""
         try:
             data = json.loads((self.root / "delivered.json").read_text(encoding="utf-8"))
-        except FileNotFoundError:
+        except (OSError, ValueError):
             return {}
         return data if isinstance(data, dict) else {}
 
@@ -403,7 +411,6 @@ def test_boot_failure_degrades_to_thread_mode_and_still_delivers(
     assert d.pending() == [], "线程兜底也要把积压推完"
 
 
-
 def test_process_parent_sweeps_the_backup_drawer(tmp_path: Path) -> None:
     """★ 拍板-3 ①（`plan/offline-local-disk-first` §3.4 C1）：备份由**父侧**扫，幂等。
 
@@ -435,3 +442,41 @@ def test_process_parent_sweeps_the_backup_drawer(tmp_path: Path) -> None:
         log=lambda _m: None,
     )
     assert plain.backup_pending() == 0
+
+
+def test_ledger_reader_tolerates_atomic_rewrite_race(tmp_path: Path, hub: _HubStub) -> None:
+    """账本读面必须容忍「写者正在原子改名」——2026-10-14 满载 flake 的**确定复现面**。
+
+    账本的写者是**子进程**（`atomic_write_json` = 写 `*.tmp` 再 `os.replace`）；父侧/本文件
+    在轮询里读它。Windows 上 `open()` 撞上 `os.replace` 的窗口会抛 `PermissionError(13)`
+    （Linux 的 rename 原子换 fd，看不到这一档）。生产侧的三个读面——`deliver_proc.
+    _result_done_from_disk` / `unsent_reposts` / `_child_status`——**都吞 `(OSError, ValueError)`**
+    （「这一拍没读到」≡「还没落盘」）；只有本文件的 `_State.ledger()` 只吞 `FileNotFoundError`
+    ⇒ 满载门禁里它以 `PermissionError` 红（实测 2026-10-14，同一用例连续两轮各红一次）。
+    """
+    root = tmp_path / "art"
+    root.mkdir(parents=True, exist_ok=True)
+    stop = threading.Event()
+
+    def _writer() -> None:
+        while not stop.is_set():
+            atomic_write_json(
+                root / "delivered.json",
+                {"run_id": RUN, "artifacts": [1, 2, 3], "result_done": True},
+            )
+
+    st = _State(tmp_path, hub)  # 只借它的 `ledger()`（写者与它同目录，正是被测的那条路）
+    t = threading.Thread(target=_writer, daemon=True)
+    t.start()
+    seen = False
+    try:
+        for _ in range(8000):
+            data = st.ledger()  # 不得抛：读竞态 ≡ 「这一拍没读到」
+            if data.get("result_done"):
+                seen = True
+                break
+    finally:
+        stop.set()
+        t.join(timeout=5.0)
+    assert seen, "写者一直在写，读面必须至少读到一次完整内容"
+
