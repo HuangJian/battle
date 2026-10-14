@@ -45,6 +45,11 @@ v2（评审后修订）把方案拆成 M0–M7；本次落地 **M1+M2**，开关
 
 - **真值等价**（`tmp/wire-audit7.py`，真 payload 抽 3 shard）：新路径 reward 与旧路径**逐元素相同**
   （`max|Δ| = 0.0`），且 `course spec.identity() == manifest.formula_hash` ✓。
+- **接口面**（`tmp/wire-audit8.py`）：真走两遍 `publish_job`（`wire_diet` 0/1）——
+  归档成员集分岔（off：metrics.npy / on：reward.npy + reward_meta.json，f16 四字段、value 仍 f32）、
+  `payload_fmt` 只在 on 档出现（off 档无该键）、两档都能被 `load_shard` 按四道门读出且 reward
+  `max|Δ| = 0`。⚠ 该探针的合成 shard 很小（N=16，obs 痏子占大头）⇒ 体积比只 **−5.9%**，
+  不代表真实轮次的 −27%（后者见 §1 的 190 shard 实测）。
 - **f16 真值误差**（绝对，判据 ≤1e-3）：scalars 2.436e-4 · extra 2.254e-4 · lp_move 9.708e-4 ·
   lp_fire 4.668e-4 —— 四个字段在**真值域**上都过了（v1 的误差表缺 lp_fire，本次补量）。
 - 新用例 23 例（`tests/remote/test_payload_slim.py` 12 · `tests/worker/test_reward_npy_shard.py` 11）；
