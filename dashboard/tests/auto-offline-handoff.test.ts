@@ -50,6 +50,7 @@ import {
   autoBundleDecision,
   autoOfflineHandoff,
   codeDimensionStale,
+  ensureFreshTaskBundle,
 } from '../src/server/actions/auto-offline-handoff'
 import {
   CODE_EXCLUDE_DIRS,
@@ -309,6 +310,60 @@ describe('autoOfflineHandoff 的接线（假盘；不起子进程）', () => {
     expect(src).not.toContain('writeCourseConfigForOpen')
     expect(src).not.toContain('saveConsoleState')
     expect(src).not.toContain('/admin/courses')
+  })
+})
+
+// ────────── ensureFreshTaskBundle：开课顺手保新鲜（plan/offline-segment-restart §3.3） ──────────
+
+describe('ensureFreshTaskBundle（开课那一刻换掉已被消化的包）', () => {
+  it('盘上还没有包 ⇒ 不导、**不预造**（★M4：包只为真实提出需求的云机而造）', () => {
+    const r = ensureFreshTaskBundle('__ahand-never-exported__')
+    expect(r.started).toBe(false)
+    expect(r.note).toContain('不预造')
+    expect(r.note).toContain('自动交接')
+  })
+
+  it('空课程名 ⇒ 不导（保新鲜是按课做的）', () => {
+    expect(ensureFreshTaskBundle('  ').started).toBe(false)
+  })
+
+  it('已有新鲜包 ⇒ 不导、包没被挪走、指路「要重打请点导出任务包」', () => {
+    const p = seedPack(WITH_PACK)
+    try {
+      const r = ensureFreshTaskBundle(WITH_PACK)
+      expect(r.started).toBe(false)
+      expect(r.note).toContain('已有任务包')
+      expect(existsSync(p)).toBe(true)
+      expect(existsSync(stalePackDir(WITH_PACK))).toBe(false)
+    } finally {
+      rmSync(tmpCourseDir(WITH_PACK), { recursive: true, force: true })
+    }
+  })
+
+  it('逃生阀置位 ⇒ 不导（既有套件的兼容路径：用例不该起真子进程）', () => {
+    process.env.BCITY_NO_AUTO_TASK_BUNDLE = '1'
+    seedStalePack(NO_WEIGHTS)
+    try {
+      const r = ensureFreshTaskBundle(NO_WEIGHTS)
+      expect(r.started).toBe(false)
+      expect(r.note).toContain('逃生阀')
+    } finally {
+      rmSync(tmpCourseDir(NO_WEIGHTS), { recursive: true, force: true })
+    }
+  })
+
+  it('源码哨兵：缺包早退**在**决定之前；started 分支真的调 launchTaskBundleExport', () => {
+    // 「决定说导、动作却没导」是最隐蔽的失败态（回执会撒谎）；「缺包也预造」则违反 ★M4。
+    const src = readFileSync(
+      path.join(REPO_ROOT, 'dashboard/src/server/actions/auto-offline-handoff.ts'),
+      'utf-8',
+    )
+    const body = src.slice(src.indexOf('export function ensureFreshTaskBundle'))
+    const early = body.indexOf('if (!taskBundleInfo(c).exists)')
+    expect(early).toBeGreaterThan(-1)
+    expect(early).toBeLessThan(body.indexOf('autoBundleDecision('))
+    expect(body).toContain('if (!bundle.started) return bundle')
+    expect(body).toContain('launchTaskBundleExport(c)')
   })
 })
 

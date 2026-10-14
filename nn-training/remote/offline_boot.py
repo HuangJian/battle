@@ -151,6 +151,16 @@ OFFLINE_CLAIM_PATH = "/offline/claim"
 OFFLINE_HEARTBEAT_PATH = "/offline/heartbeat"
 OFFLINE_RELEASE_PATH = "/offline/release"
 OFFLINE_PROGRESS_PATH = "/offline/progress"
+#: **续跑锚点两条端点**（与 `common/protocol.py::OFFLINE_RESUME_PATH` /
+#: `OFFLINE_RESUME_BLOB_PATH` 逐字相同；对账用例 `tests/common/test_offline_task_queue.py`）：
+#: 前者递元信息（`it`/指纹/来源），后者递那一轮的**字节**
+#: （`?it=N&name=weights.json|opt.tar|row.json`）。
+#: ★ 2026-10-14 事故（plan/offline-segment-restart §1.3）：三件的字节曾经也从**元信息**那条取 ——
+#: hub 按**路径等值**分派（`hub/http_face.py:425/427`），`?it=&name=` 被整个忽略 ⇒ 每次拿回那段
+#: 55KB 元信息 JSON ⇒ `run_loop` 的指纹闸判「传输损坏」丢弃 ⇒ **锚点在云机侧 100% 失效**且不报错。
+#: 两条路径必须分开写；hub 那边另加了「元信息路径带 `name=` ⇒ 400」的响亮门。
+OFFLINE_RESUME_PATH = "/offline/resume"
+OFFLINE_RESUME_BLOB_PATH = "/offline/resume/blob"
 OFFLINE_QUEUE_VERSION = 1
 OFFLINE_LEASE_TTL_SEC = 900
 #: **派发协议版本**（★M1b / plan/worker-type-dispatch-model §1.5.2-P0-4）：claim 必须带
@@ -296,6 +306,23 @@ def read_pack_index(zip_path: str | Path) -> dict:
     return idx
 
 
+def read_pack_plan(zip_path: str | Path) -> dict:
+    """读任务包里的 `plan.json`（读不到 / 不是 dict ⇒ `{}`，**永不抛**）。
+
+    为什么需要它（2026-10-14，plan/offline-segment-restart §2-J1）：「包是不是本机进度的
+    **加长段**」要用包自己的 `start_it`/`end_it`——而且必须是**与 `run_loop`/`ArtifactStore`
+    将要用的同一份字节**。索引（`task.json`）里的 `it` 是「下一轮」= `start_it + 1`，
+    拿它减一是**另一条**算术，等于多一处能错的地方（差一格就会把合法续段判成「不是续段」）。
+    读不到 ⇒ 调用方按「不收包」处理（保守方向 = 本机优先，一个字都不变）。
+    """
+    try:
+        with zipfile.ZipFile(Path(zip_path)) as zf:
+            plan = json.loads(zf.read(PLAN_NAME).decode("utf-8"))
+    except (KeyError, OSError, ValueError, zipfile.BadZipFile):
+        return {}
+    return plan if isinstance(plan, dict) else {}
+
+
 def course_from_pack_name(path: str | Path) -> str:
     """从 `task-<课>.zip` 里取出 `<课>`（不符合习惯命名 → 空串，不猜）。
 
@@ -412,23 +439,61 @@ def local_artifacts(dest: str | Path) -> dict | None:
     }
 
 
+def pack_extends_local(local: dict, plan: dict) -> bool:
+    """包是不是**本机进度的加长段**（纯函数；plan/offline-segment-restart §2-J1）。
+
+    两条都成立才算：
+
+      · `plan.start_it == local.last_it` —— **同一起点**。收包不会把本机已有的轮次往回拖
+        （`start_it < last_it` = 回退重跑），也不会把本机没跑的那几轮抹掉
+        （`start_it > last_it` = 直接从云机消失）。
+      · `plan.end_it > local.end_it` —— **终点加长**。等长或更短 ⇒ 没有「新段」可言。
+
+    ★ 这是对 `DECISIONS §2026-09-24-goalnn-offline-local-first`（本机优先）的**局部推翻**：
+    那条要防的是「让包**重跑**本机已跑的轮次」，而这两条真的时候收包只会**往后接**——
+    `ArtifactStore.start` 换段 ⇒ 新 state 的 `last_it = plan.start_it` ⇒ `plan_run` 的
+    `todo = [it for it in planned_range() if it > last_it]` 正好是 `last_it+1 … 新 end_it`，
+    一条旧轮都不重跑。判据**只在这两条上松口**，其余一切情形仍然本机优先。
+    """
+    try:
+        local_last = int(local["last_it"])
+        local_end = int(local["end_it"])
+        pack_start = int(plan["start_it"])
+        pack_end = int(plan["end_it"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    return pack_start == local_last and pack_end > local_end
+
+
 def _sha12(text: object) -> str:
     s = str(text or "")
     return s[:12] if s else "-"
 
 
-def describe_local_vs_pack(local: dict, idx: dict) -> str:
-    """G2 的对照行（本机 vs 包）：同段/异段一眼可辨 —— **绝不许静默换段**。"""
+def describe_local_vs_pack(local: dict, idx: dict, *, adopt: bool = False) -> str:
+    """G2 的对照行（本机 vs 包）：同段/异段一眼可辨 —— **绝不许静默换段**。
+
+    ★ 2026-10-14（plan/offline-segment-restart §2-J1）：`adopt=True` = 包是本机进度的**加长段**，
+    这一行必须把「收包」和它的边界（一条旧轮都不重跑）说出来 —— 静默换段与静默**不收**包一样难查。
+    """
     same_plan = bool(local.get("plan_sha256")) and local["plan_sha256"] == str(
         idx.get("plan_sha256", "") or ""
     )
     head = "包与本机计划一致（同一段）" if same_plan else "★ 包与本机不是同一段"
+    tail = (
+        "——**收包**：包是本机进度的加长段（起点 it{last} 不变，终点 it{end} → it{pack_end}），"
+        "本机已有的轮次一条不重跑".format(
+            last=local["last_it"], end=local["end_it"], pack_end=idx.get("end_it")
+        )
+        if adopt
+        else "——本机优先：**不**用包改写计划/清单（要换段请清空产物目录，或置 CFG.force_pack=true）"
+    )
     return (
         f"{head}：本机 it{local['last_it']}"
         f"（计划 it{local['start_it']}→it{local['end_it']}，plan_sha12={_sha12(local['plan_sha256'])}）"
         f" vs 包 it{idx.get('it')}→it{idx.get('end_it')}"
         f"（commit {_sha12(idx.get('commit'))}，plan_sha12={_sha12(idx.get('plan_sha256'))}）"
-        "——本机优先：**不**用包改写计划/清单（要换段请清空产物目录，或置 CFG.force_pack=true）"
+        f"{tail}"
     )
 
 
@@ -644,7 +709,7 @@ def fetch_resume(
     任何失败都**不影响训练**（安静回 None，日志里留一行原因）：锚点只是「少跑几轮」的
     优化，包自带的起点永远能跑。
     """
-    url = f"{hub.rstrip('/')}/offline/resume?course={urllib.parse.quote(course)}"
+    url = f"{hub.rstrip('/')}{OFFLINE_RESUME_PATH}?course={urllib.parse.quote(course)}"
     try:
         req = urllib.request.Request(url, headers=_headers(token))
         with _build_opener().open(req, timeout=timeout) as resp:
@@ -663,8 +728,14 @@ def fetch_resume(
         return None
     ac_dir = dest_dir / f"it-{it:03d}"
     ac_dir.mkdir(parents=True, exist_ok=True)
+    # ★ 字节走 `.../resume/blob`，**不是**上面那条元信息 URL（2026-10-14 事故，见常量处注释）：
+    # hub 的 GET 分派按**路径等值**，`?it=&name=` 加在元信息路径上会被整个忽略 ⇒ 拿回来的是
+    # 那段元信息 JSON，`run_loop` 的指纹闸当场判「传输损坏」⇒ 锚点永远用不上。
+    blob_url = (
+        f"{hub.rstrip('/')}{OFFLINE_RESUME_BLOB_PATH}?course={urllib.parse.quote(course)}"
+    )
     for name in ("weights.json", "opt.tar", "row.json"):
-        q = f"{url}&it={it}&name={urllib.parse.quote(name)}"
+        q = f"{blob_url}&it={it}&name={urllib.parse.quote(name)}"
         try:
             req = urllib.request.Request(q, headers=_headers(token))
             with _build_opener().open(req, timeout=timeout) as resp:
@@ -1159,6 +1230,10 @@ def run_one_course(
     ccfg = {**cfg, "course": course}
 
     # ── 本机优先：产物目录三件齐全 ⇒ 不让包改写这一段的计划/清单（plan §3 判定表）──
+    #    ★ 2026-10-14 收紧（plan/offline-segment-restart §2-J1）：**包是本机进度的加长段时收包**。
+    #    人在控制台「停课 → 改大 iters → 开课」= 明确要下一段，而控制台那一步会把包重打一份
+    #    ⇒ 这里看到的就是「起点 = 本机 last_it、终点更长」。不收它，云机会拿旧段的计划跑成
+    #    「本机段落已完成」的 noop（本次现场：`续跑起点 it100（计划 it0 → it100）`）。
     # 为什么决策住在这里（而不是 `run_loop`/`bundle`）：notebook 每次会话都从 GitHub raw
     # 刷新本文件，而 `remote.run_loop`/`remote.bundle` 来自**代码快照**（= 本机优先要保护的
     # 那份，可能很旧）——把新参数传给旧快照只会 argparse 崩或静默退化（评审 F1）。
@@ -1175,18 +1250,18 @@ def run_one_course(
             "  ① 想接着本机进度跑：把缺的件找回来（上一轮的产物/备份）；\n"
             f"  ② 想用包从头跑：清空 {dest}（或换 CFG.work_dir）后重跑本 cell。"
         )
-    local_first = local is not None and not force_pack
     if local is not None and force_pack:
         log(
             f"CFG.{'task_zip' if explicit_zip else 'force_pack'} 显式指定 ⇒ 用包覆盖本机计划/清单"
             f"（本机 it{local['last_it']}，计划 it{local['start_it']}→it{local['end_it']}）"
         )
 
-    if local_first and local is not None:  # `local_first` 蕴含它非空；写出来给类型收窄
+    # 本机有产物（且人没显式点名包）⇒ 取包**不等待**：它是判据的输入，不是起点。
+    has_local = local is not None and not force_pack
+    if has_local and local is not None:  # 写出来给类型收窄
         log(
             f"本机已有产物 it{local['last_it']}（计划 it{local['start_it']} → it{local['end_it']}，"
-            f"run={local['run_id'] or '-'}）⇒ 本机优先：不从包里导入 plan/manifest；"
-            "包只当代码/TS 的备源"
+            f"run={local['run_id'] or '-'}）——取包只为判一件事：它是不是本机进度的加长段"
         )
         pack = obtain_pack(
             ccfg, creds, log, work, stop=keepalive_stop, optional=True, lease=lease
@@ -1197,6 +1272,16 @@ def run_one_course(
         if local is None:
             log(f"本机没有可续跑的产物（{dest}）——按老规矩取包起跑")
         pack = obtain_pack(ccfg, creds, log, work, stop=keepalive_stop, lease=lease)
+
+    adopt = False
+    if has_local and pack is not None and local is not None:
+        adopt = pack_extends_local(local, read_pack_plan(pack))
+    local_first = has_local and not adopt
+    if adopt and local is not None:
+        log(
+            f"包是本机进度的**加长段**（同起点 it{local['last_it']}、终点更长）⇒ 收包："
+            "换段只往后接，本机已有的轮次一条不重跑"
+        )
 
     idx: dict = {}
     if pack is not None:
@@ -1213,7 +1298,7 @@ def run_one_course(
                 "否则去控制台导正确那门课的包"
             )
         if local is not None:
-            log(describe_local_vs_pack(local, idx))
+            log(describe_local_vs_pack(local, idx, adopt=adopt))
     if local_first and local is not None and local["last_it"] >= local["end_it"]:
         log(
             f"本机段落已完成（it{local['last_it']} ≥ end_it{local['end_it']}）——"

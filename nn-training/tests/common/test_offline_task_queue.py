@@ -403,6 +403,11 @@ def test_module_constants_track_protocol() -> None:
     assert offline_boot.OFFLINE_CLAIM_PATH == protocol.OFFLINE_CLAIM_PATH
     assert offline_boot.OFFLINE_HEARTBEAT_PATH == protocol.OFFLINE_HEARTBEAT_PATH
     assert offline_boot.OFFLINE_RELEASE_PATH == protocol.OFFLINE_RELEASE_PATH
+    # ★ 2026-10-14（plan/offline-segment-restart §1.3）：续跑锚点有**两条**端点（元信息 / 字节），
+    # 而且 hub 按**路径等值**分派 ⇒ 字节取错路径时 `?it=&name=` 被静默忽略、指纹闸判「传输损坏」
+    # ⇒ 锚点在云机侧 100% 失效。两条都钉住（缺一条这个缺陷就能再长回来）。
+    assert offline_boot.OFFLINE_RESUME_PATH == protocol.OFFLINE_RESUME_PATH
+    assert offline_boot.OFFLINE_RESUME_BLOB_PATH == protocol.OFFLINE_RESUME_BLOB_PATH
     assert offline_boot.OFFLINE_QUEUE_VERSION == protocol.OFFLINE_QUEUE_VERSION
     assert offline_boot.OFFLINE_LEASE_TTL_SEC == protocol.OFFLINE_LEASE_TTL_SEC
 

@@ -382,6 +382,14 @@ def test_fetch_resume_pulls_all_three_parts_or_gives_up(
     assert offline_boot.fetch_resume("https://h", "t", COURSE, tmp_path / "r", logs.append) is None
     assert any("放弃该锚点" in m for m in logs)
     assert len(seen) == 3 and "name=weights.json" in seen[1]
+    # ★ 2026-10-14 事故（plan/offline-segment-restart §1.3）：三件的**字节**必须走 `.../resume/blob`。
+    # hub 按**路径等值**分派（`hub/http_face.py:425/427`），把 `?it=&name=` 加在元信息那条路径上会
+    # 被整个忽略 ⇒ 每次拿回 55KB 元信息 JSON ⇒ `run_loop` 的指纹闸判「传输损坏」⇒ **锚点在云机侧
+    # 100% 失效**（一直静默退回包自带起点）。当年这条缺口没有用例 ⇒ 这里钉死两条 URL 的形状。
+    assert seen[0] == f"https://h{offline_boot.OFFLINE_RESUME_PATH}?course={COURSE}"
+    for u, name in zip(seen[1:], ("weights.json", "opt.tar"), strict=True):
+        assert u.startswith(f"https://h{offline_boot.OFFLINE_RESUME_BLOB_PATH}?course={COURSE}&"), u
+        assert u.endswith(f"&it=7&name={name}"), u
 
     # 顺利路径：三件落盘 + resume.json（含来源，供 run_loop 采纳时打日志）
     def ok_open(req: object, timeout: float = 0) -> _Resp:

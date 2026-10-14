@@ -154,6 +154,55 @@ export function autoBundleDecision(f: AutoBundleFacts): AutoBundleResult {
   }
 }
 
+/** 规则表的**输入事实**（唯一一处读盘；两个调用方共用 ⇒ 判据不会各读一份而漂开）。 */
+function bundleFacts(course: string): AutoBundleFacts {
+  return {
+    valve: Boolean(process.env.BCITY_NO_AUTO_TASK_BUNDLE),
+    busy: busy.has(TASK_BUNDLE_BUSY_KEY),
+    guardReason: exportGuard(course),
+    pack: taskBundleInfo(course),
+    // ★ 2026-10-04：这条路的课**正在（或刚在）训练**——盘上的旧包会把云机拖回旧起点
+    //   （离线腿的续跑锚点看不见本机在线轮）；代码维度见 `codeFreshness()`（2026-10-10
+    //   plan/cluster-code-snapshot：快照口径优先，mtime 只在快照不可知时兜底）。
+    weightsMtimeMs: weightsMtimeMs(course),
+    code: codeFreshness(course),
+  }
+}
+
+/** **开课顺手保新鲜**（plan/offline-segment-restart §3.3，2026-10-14）：盘上那份包**已被消化**
+ *  （权重/代码比包新）⇒ 作废 + 重导；**缺包不预造**；失败不抛。
+ *
+ *  为什么必须有它：「跑满」闸锚在**包 zip 的 sha256** 上（`hub/queue_offline.py:1036`），而
+ *  改 iters / 停课 / 重开课 / 重启 trainer+hub **一个都不碰包** ⇒ 人「停课 → 改大 iters →
+ *  开课」之后云机仍看到 `completed`；而重导是**需求侧**触发的（要 claim 成功/取包），
+ *  `completed` 又把 claim 挡死 ⇒ 「没有需求就没有导包，没有导包就永远 completed」的死锁
+ *  （2026-10-14 现场：y5-hit 20 次轮询全被挡，人手动点「导出任务包」才解）。开课 = 人对
+ *  「下一段」唯一的显式表态，就在这一刻把包换成新段 —— 新 sha ≠ 旧章 ⇒ 闸自动开。
+ *
+ *  ★ **缺包不预造**：★M4 定「包只为真实提出需求的云机而造」。无包时云机 claim 会走
+ *  `pending_export` ⇒ `autoOfflineHandoff`（hub 的自动交接）那条腿一个字不改；这里是**另一条**腿。
+ *  ★ 失败不连坐：导包起不来不能把开课判失败（开课已经在盘上成立了），只如实回一行。
+ */
+export function ensureFreshTaskBundle(course: string): AutoBundleResult {
+  const c = String(course ?? '').trim()
+  if (!c) return { started: false, note: '需要课程（保新鲜是按课做的）' }
+  if (!taskBundleInfo(c).exists) {
+    return {
+      started: false,
+      note: '盘上还没有任务包——**不预造**（云机 claim 时会走自动交接导一次）',
+    }
+  }
+  const bundle = autoBundleDecision(bundleFacts(c))
+  if (!bundle.started) return bundle
+  const launched = launchTaskBundleExport(c)
+  return launched.ok
+    ? { started: true, note: [bundle.note, launched.message].filter(Boolean).join('；') }
+    : {
+        started: false,
+        note: `${bundle.note}；导出未能启动（${launched.message}）——云机会等新包直到停滞告警`,
+      }
+}
+
 /** **自动交接**（hub → 控制台的反向调用；plan §1.6-F1 定案 = 只导包）。
  *
  *  hub 侧调用点：`GET /offline/task-pack` 缺包自愈（`_task_pack_miss_gate`）与 claim 遇缺包
@@ -171,17 +220,7 @@ export async function autoOfflineHandoff(course: string): Promise<ActionResult> 
   }
   const valve = Boolean(process.env.BCITY_NO_AUTO_TASK_BUNDLE)
   const guardReason = exportGuard(c)
-  let bundle = autoBundleDecision({
-    valve,
-    busy: busy.has(TASK_BUNDLE_BUSY_KEY),
-    guardReason,
-    pack: taskBundleInfo(c),
-    // ★ 2026-10-04：这条路的课**正在（或刚在）训练**——盘上的旧包会把云机拖回旧起点
-    //   （离线腿的续跑锚点看不见本机在线轮）；代码维度见 `codeFreshness()`（2026-10-10
-    //   plan/cluster-code-snapshot：快照口径优先，mtime 只在快照不可知时兜底）。
-    weightsMtimeMs: weightsMtimeMs(c),
-    code: codeFreshness(c),
-  })
+  const bundle = autoBundleDecision(bundleFacts(c))
   const head = `${c} 自动交接：云机已认领（hub 的 pending_export）——控制台只负责把任务包导出来`
   if (bundle.started) {
     const launched = launchTaskBundleExport(c)

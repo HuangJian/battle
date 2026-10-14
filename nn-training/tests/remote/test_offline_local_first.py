@@ -62,14 +62,27 @@ PACK_INDEX = {
 }
 
 
-def _pack(path: Path, *, code: bytes = CODE_A, ts: bytes | None = TS_A, index: dict | None = None) -> Path:
-    """一个够用的任务包（索引 + code.zip [+ ts_code.zip]）——成员名走真常量。"""
+def _pack(
+    path: Path,
+    *,
+    code: bytes = CODE_A,
+    ts: bytes | None = TS_A,
+    index: dict | None = None,
+    plan: dict | None = None,
+) -> Path:
+    """一个够用的任务包（索引 + code.zip [+ ts_code.zip] [+ plan.json]）——成员名走真常量。
+
+    `plan` 只在「包是不是本机进度的加长段」那组用例里给（`pack_extends_local` 读它）：
+    缺 `plan.json` 的包 ⇒ 判定为「不收包」= 本机优先，这是**刻意保留的保守默认**。
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w") as z:
         z.writestr(offline_boot.BUNDLE_INDEX, json.dumps({**PACK_INDEX, **(index or {})}))
         z.writestr(offline_boot.CODE_NAME, code)
         if ts is not None:
             z.writestr(offline_boot.TS_CODE_NAME, ts)
+        if plan is not None:
+            z.writestr(offline_boot.PLAN_NAME, json.dumps(plan))
     return path
 
 
@@ -155,6 +168,49 @@ def test_describe_local_vs_pack_flags_a_different_segment() -> None:
     diff = offline_boot.describe_local_vs_pack(local, {"it": 1, "end_it": 40, "plan_sha256": "b" * 64})
     assert "不是同一段" in diff, "异段必须响亮标注（不许静默换段）"
     assert "it7" in diff and "it40" in diff
+
+
+# ──────────── 续段判据（2026-10-14，plan/offline-segment-restart §2-J1） ────────────
+
+
+def test_pack_extends_local_needs_same_start_and_a_longer_end() -> None:
+    """纯函数判定表：**同起点 ∧ 更长终点** 才收包；其余一律维持本机优先。"""
+    local = {"last_it": 100, "start_it": 0, "end_it": 100}
+    # 收：起点不退回、终点加长 —— 这正是「停课 → 改大 iters → 开课」在盘上的指纹
+    assert offline_boot.pack_extends_local(local, {"start_it": 100, "end_it": 500}) is True
+    # 不收：终点等长（没有「新段」可言）
+    assert offline_boot.pack_extends_local(local, {"start_it": 100, "end_it": 100}) is False
+    # 不收：终点更短
+    assert offline_boot.pack_extends_local(local, {"start_it": 100, "end_it": 50}) is False
+    # 不收：起点更早 ⇒ 会让本机已跑的轮次**重跑**
+    assert offline_boot.pack_extends_local(local, {"start_it": 0, "end_it": 500}) is False
+    # 不收：起点更晚 ⇒ 本机中间那几轮直接从云机消失
+    assert offline_boot.pack_extends_local(local, {"start_it": 150, "end_it": 500}) is False
+    # 不收：读不到计划（空 / 缺键 / 坏值 / 本机侧缺件）——保守方向 = 现状
+    assert offline_boot.pack_extends_local(local, {}) is False
+    assert offline_boot.pack_extends_local(local, {"start_it": None, "end_it": 500}) is False
+    assert offline_boot.pack_extends_local({}, {"start_it": 0, "end_it": 1}) is False
+
+
+def test_read_pack_plan_reads_the_plan_and_never_raises(tmp_path: Path) -> None:
+    """包内的 `plan.json` 是权威起点/终点（与 `run_loop` 将要用的是同一份字节）；读不到 ⇒ `{}`。"""
+    pack = _pack(tmp_path / "d" / "task-c5-gae.zip", plan={"start_it": 100, "end_it": 500})
+    assert offline_boot.read_pack_plan(pack) == {"start_it": 100, "end_it": 500}
+    assert offline_boot.read_pack_plan(_pack(tmp_path / "e" / "task-c5-gae.zip")) == {}
+    not_zip = tmp_path / "f.zip"
+    not_zip.write_bytes(b"not a zip")
+    assert offline_boot.read_pack_plan(not_zip) == {}
+    assert offline_boot.read_pack_plan(tmp_path / "missing.zip") == {}
+
+
+def test_describe_local_vs_pack_says_it_adopts() -> None:
+    """收包这一档也必须在那一行里说出来（静默换段与静默**不收**包一样难查）。"""
+    local = {"last_it": 100, "start_it": 0, "end_it": 100, "plan_sha256": "a" * 64}
+    idx = {"it": 101, "end_it": 500, "plan_sha256": "b" * 64}
+    line = offline_boot.describe_local_vs_pack(local, idx, adopt=True)
+    assert "收包" in line and "一条不重跑" in line and "本机优先" not in line
+    # 缺省（不收包）逐字维持旧文案
+    assert "本机优先" in offline_boot.describe_local_vs_pack(local, idx)
 
 
 # ────────────────────────── argv：本机优先不带 --bundle ──────────────────────────
@@ -384,6 +440,50 @@ def test_run_one_course_explicit_task_zip_also_forces_the_pack(
         tmp_path, monkeypatch, cfg={"task_zip": str(pack)}, pack=pack
     )
     assert argv[:2] == ["--bundle", str(pack)]
+
+
+def test_run_one_course_adopts_a_pack_that_extends_the_local_segment(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 2026-10-14 现场（plan/offline-segment-restart §5-DoD）：本机段跑满 it100，
+    人在控制台把 iters 改大并重导 ⇒ 包是 it100→it500 ⇒ **收包**（走 `--bundle`），
+    不再拿旧段计划跑成 `noop`。"""
+    dest = _artifacts(tmp_path / "w" / "run", last_it=100, start_it=0, end_it=100)
+    pack = _pack(
+        tmp_path / "d" / "task-c5-gae.zip",
+        index={"it": 101, "end_it": 500},
+        plan={"start_it": 100, "end_it": 500},
+    )
+    argv, calls = _run_course(tmp_path, monkeypatch, pack=pack)
+    assert argv[:2] == ["--bundle", str(pack)], argv
+    assert ("obtain_pack", True) in calls, "本机有产物 ⇒ 取包仍是不等待的那种（判据的输入）"
+    assert str(dest) in argv, "产物目录照旧给出去（接续点与缓存还在那儿）"
+
+
+def test_run_one_course_keeps_local_first_for_a_pack_that_does_not_extend(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """起点更早的包（旧包 / 会让本机轮次重跑）⇒ 一个字都不换段：判定表只松这两条。"""
+    _artifacts(tmp_path / "w" / "run", last_it=100, start_it=0, end_it=100)
+    pack = _pack(
+        tmp_path / "d" / "task-c5-gae.zip",
+        index={"it": 1, "end_it": 100},
+        plan={"start_it": 0, "end_it": 100},
+    )
+    argv, _calls = _run_course(tmp_path, monkeypatch, pack=pack)
+    assert "--bundle" not in argv, argv
+    assert argv[:2] == ["--artifacts", str(tmp_path / "w" / "run")]
+
+
+def test_run_one_course_keeps_local_first_when_the_pack_has_no_plan(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """包读不出计划 ⇒ 保守不收（`read_pack_plan` 的空 dict 走的就是这一支）。"""
+    _artifacts(tmp_path / "w" / "run", last_it=100, start_it=0, end_it=100)
+    pack = _pack(tmp_path / "d" / "task-c5-gae.zip", index={"it": 101, "end_it": 500})
+    argv, _calls = _run_course(tmp_path, monkeypatch, pack=pack)
+    assert "--bundle" not in argv, argv
+    assert argv[:2] == ["--artifacts", str(tmp_path / "w" / "run")]
 
 
 def test_run_one_course_refuses_a_half_broken_dest(

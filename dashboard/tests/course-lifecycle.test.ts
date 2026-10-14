@@ -61,6 +61,7 @@ import {
   stopCourse,
 } from '../src/server/actions/course-lifecycle'
 import { COURSE_ENABLE_MARKER } from '../src/stack/courses'
+import { REPO_ROOT } from '../src/core/paths'
 import { pruneNoiseCourses } from '../src/stack/course-knobs'
 import { readLoopControl, setCoursePaused } from '../src/server/actions/loop-control'
 import * as actions from '../src/server/actions'
@@ -167,6 +168,17 @@ describe('openCourse：把「这门课存在且可被调度」写到盘上', () 
     expect(existsSync(path.join(TRAJ, COURSE, 'training_log.jsonl'))).toBe(true)
     expect(existsSync(path.join(TRAJ, COURSE, 'remote-jobs'))).toBe(true)
     expect(r.detail!.join('\n')).toContain('remote-jobs')
+  })
+
+  it('★ 2026-10-14：回执带任务包那一行 —— 无包 ⇒ 说清「不预造」（★M4）', async () => {
+    // plan/offline-segment-restart §3.3：开课顺手把**已被消化**的包换掉（否则云机被 hub 的
+    // 「跑满」闸挡死，而重导是需求侧触发的 ⇒ 死锁）。无包时**不预造**，只如实回一行。
+    // 本套件的两门课盘上都没有任务包（`tmp/<课>/task-<课>.zip`）⇒ 走的就是「不预造」这一支。
+    expect(existsSync(path.join(REPO_ROOT, 'tmp', COURSE, `task-${COURSE}.zip`))).toBe(false)
+    const r = await openCourse(COURSE)
+    const detail = r.detail!.join('\n')
+    expect(detail).toContain('任务包：')
+    expect(detail).toContain('不预造')
   })
 
   it('写**开课标记**（在训判据：有账本 ≠ 在训——历史课全都有账本）', async () => {

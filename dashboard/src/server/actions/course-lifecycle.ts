@@ -46,6 +46,7 @@ import { pairedSeedReceipt } from '../../stack/paired-seed-receipt'
 import { remoteExecutionFace } from '../../stack/push-config'
 import { hubCandidates, hubReleaseCourseHold } from '../../stack/hub-admin'
 import { readLoopControl, setCoursePaused } from './loop-control'
+import { ensureFreshTaskBundle } from './auto-offline-handoff'
 import { loopControlPath } from '../../core/paths'
 import { ActionError, ActionResult, done, guard, release } from './result'
 import { runRlLockHolder } from './labels'
@@ -324,13 +325,23 @@ export async function openCourse(course: string, opts: OpenCourseOpts = {}): Pro
     const pruned = pruneLegacyCourseKnobs(cfg)
     const knobs = writeCourseConfigForOpen(c, opts)
     const resume = setCoursePaused(c, false)
+    const prepared = prepareCourseForOpen(c, seedPath)
+    // ★ 2026-10-14（plan/offline-segment-restart §3.3）：**开课顺手保任务包新鲜**。
+    //   开课 = 人对「下一段」唯一的显式表态；而「跑满（completed）」闸锚在**包 zip 的
+    //   sha256** 上（`hub/queue_offline.py:1036`），改 iters / 停课 / 重开课 / 重启 trainer+hub
+    //   一个都不碰包 ⇒ 不换包，云机就永远被 `completed` 挡在门外（而重导本身又是需求侧触发的
+    //   ——要 claim 成功，于是死锁）。这里把「已被消化」的那份包换掉 ⇒ 新 sha ≠ 旧章 ⇒ 闸自动开。
+    //   ⚠ 缺包**不预造**（★M4：包只为真实提出需求的云机而造，那条腿走 claim 触发的自动交接）；
+    //   ⚠ 失败不连坐开课（开课已在盘上成立）——只如实进回执。
+    const bundle = ensureFreshTaskBundle(c)
     const notes = [
       ...knobs.notes,
       ...(pruned.removed.length > 0
         ? [`已清理 legacy 传输配置 ${pruned.removed.length} 项（课程与 worker 节点正交）`]
         : []),
       `暂停意图：${resume.ok ? resume.message : `未改动（${resume.message}）`}`,
-      ...prepareCourseForOpen(c, seedPath).notes,
+      ...prepared.notes,
+      `任务包：${bundle.note}`,
       // §5.3 起点-基线对照行（plan/accident.plan.md）：C 事故里「本腿恢复的权重已经在 bc
       // 权重那一档、却拿满额锚去拉」这个事实，开课前盘上就有——放在回执里，操作员点开课时
       // 直接看见。与训练侧 `loop_lifecycle._kickstart_baseline_row` 同源同数（同一份账本、

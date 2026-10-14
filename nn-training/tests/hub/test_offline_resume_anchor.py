@@ -196,6 +196,13 @@ def test_resume_endpoints_serve_meta_then_the_whitelisted_blobs(tmp_path: Path) 
         # 未知课程 ⇒ 404；未鉴权 ⇒ 401
         assert _get(base, f"{OFFLINE_RESUME_PATH}?course=nope")[0] == 404
         assert _get(base, f"{OFFLINE_RESUME_PATH}?course={COURSE}", token=None)[0] == 401
+        # ★ 2026-10-14（plan/offline-segment-restart §1.3）：`name=` 加在**元信息**路径上曾被静默
+        # 忽略（拿回元信息 JSON 当权重 ⇒ 云机判「传输损坏」⇒ 锚点 100% 失效且不报错）。必须响亮
+        # 400 并指路 blob 路径 —— 这条门就是那个缺陷的告警器。
+        st_name, body_name = _get(
+            base, f"{OFFLINE_RESUME_PATH}?course={COURSE}&it=3&name=weights.json"
+        )
+        assert st_name == 400 and b"resume/blob" in body_name, (st_name, body_name[:200])
     finally:
         srv.shutdown()
 

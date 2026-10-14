@@ -31,6 +31,7 @@ from common.protocol import (
     OFFLINE_QUEUE_VERSION,
     OFFLINE_RESULT_BODY_MAX,
     OFFLINE_RESUME_BLOB_NAMES,
+    OFFLINE_RESUME_BLOB_PATH,
     PLAN_NAME,
     ProtocolError,
 )
@@ -198,6 +199,24 @@ class OfflineRoutes:
         course = self._query_course()
         if not course:
             self._json({"error": "需要 ?course=<课>"}, 400)
+            return
+        # ★ 2026-10-14 事故（静默 100% 失效，plan/offline-segment-restart §1.3）：GET 分派按
+        # **路径等值**（`http_face.py:425/427`），所以 `?it=N&name=<件>` 加在本端点上会被**整个
+        # 忽略**——而老客户端（`offline_boot.fetch_resume`）正是把锚点三件的字节也从这条路径取，
+        # 每次拿回这段元信息 JSON，写进产物目录后由 `run_loop` 的指纹闸判「传输损坏」丢弃 ⇒
+        # 锚点从来没生效过，且**不报错**。不再静默容忍：给 `name` 就响亮 400 指路
+        # （老客户端的最终行为与事故前逐字相同——锚点不可用、退回包自带起点——只是现在看得见）。
+        qs = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        if (qs.get("name") or [""])[0].strip():
+            self._json(
+                {
+                    "error": f"字节请走 {OFFLINE_RESUME_BLOB_PATH}?course=<课>&it=N&name=<件>"
+                    "——本端点只递元信息，it/name 会被忽略（取错会把元信息当权重）",
+                    "blob_path": OFFLINE_RESUME_BLOB_PATH,
+                    "course": course,
+                },
+                400,
+            )
             return
         try:
             anchor = self.hub.resume_anchor(course)
