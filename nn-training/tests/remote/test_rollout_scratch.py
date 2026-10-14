@@ -2,8 +2,10 @@
 
 覆盖（逐条对着 plan §6 的验收面，编号 = `plan/rollout-local-scratch.review-bf.md` 的 F 号）：
 
-  * **落点链**（P0-1）：容量 + **速度**两道闸、逐候选下探、全不过 ⇒ `None`（回退档）；
-    env 显式指定无条件生效、**不可写则响亮失败**（F9）；`need` 不含余量比值（F8②）。
+  * **落点链**（P0-1；**速度闸已于 2026-10-14 删除** —— `plan/offline-local-disk-first` §3.1）：
+    **容量一道闸** + 逐候选下探、全不过 ⇒ `None`（回退档）；env 显式指定无条件生效、
+    **不可写则响亮失败**（F9）、`off` 一族 = 强制回退档（A2 逃生门）；`need` 不含余量比值（F8②）；
+    且**解析全程不碰 job 目录**（139s 现场那笔「在网络盘上先测一遍速」已不存在）。
   * **布局**（F5）：目录名带作业 hash ⇒ 同机多会话互不误删；TS 家**内容寻址**（两腿/跨轮共用）。
   * **原子安装**（R9）：临时目录 + 改名 ⇒ 并发拷同一个 sha 不会看见半截树；已在 ⇒ 复用。
   * **搬回**（F1/F3/F4）：暂存在 job 目录**之外**（`scan_shard_dirs` 看不见半截拷贝）；
@@ -15,8 +17,9 @@
   * **R1**：`_clean_attempt` 两个根都扫、两个根之外一个不删；回退档的调用形状不变。
   * **eval 腿**（P0-5）：TS 树/权重/每局 `game_dir` 换到本地盘，而**逐局账本不动**（F2）。
   * **prune**（F1）：搬回暂存根不被 `prune_job_dirs` 算成一个 job 目录。
-  * **probe 上界**（`plan/rollout-topup-fastpath.plan.md` §3.1）：探针超 `PROBE_CEILING_SEC` ⇒
-    回退档 + 响亮一行 + `probe_probe` 读数，**整轮不挂住**；上界内 ⇒ 照旧换根。
+  * **落点读数**（取代 `plan/rollout-topup-fastpath.plan.md` §3.1 的 `probe_probe`）：轮报带
+    `落点=本地:<path>` ∨ `落点=网络(回退原地｜成因=…)｜建布局 x.xxs`；探针与它的上界已删 ⇒
+    落点段只剩本地盘操作（`plan/offline-local-disk-first` §3.3 A3）。
 
 真 bun + 真 exporter 的逐位对拍在 `e2e/`（本文件不依赖 bun；也不写 8MB 探针）。
 """
@@ -83,21 +86,6 @@ def _local_root(tmp_path: Path) -> Path:
     return root
 
 
-def _fast_probe(
-    monkeypatch: pytest.MonkeyPatch, *, speed: float = 4096.0, base_speed: float = 64.0
-) -> None:
-    """把探针换成常数（用例绝不真写 8MB；判据是「读数怎么用」，不是盘多快）。
-
-    建模：`_local_root()` 造出来的那个假本地盘快、其余（job 目录/产物目录）慢 —— 速度闸
-    因此会放行（F6 的判据本身由专门用例守着）。
-    """
-
-    def probe(p: Path, **kw: object) -> float:
-        return speed if "local-disk" in Path(p).parts else base_speed
-
-    monkeypatch.setattr(scratch, "probe_write_speed_mbps", probe)
-
-
 def _watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
     """假 bun（本进程 python）+ 快轮询（生产 0.5s）。"""
     monkeypatch.setattr(game_watch, "GAME_POLL_SEC", 0.05)
@@ -143,7 +131,6 @@ def _job_dir(tmp_path: Path, *, with_weights: bool = True) -> Path:
 def _only_candidate(monkeypatch: pytest.MonkeyPatch, root: Path) -> None:
     """候选链只留一个假本地盘（真 POSIX 候选在 Windows/CI 上不可控）。"""
     monkeypatch.setattr(scratch, "SCRATCH_CANDIDATES", (str(root),))
-    _fast_probe(monkeypatch)
 
 
 def _half_shard(root: Path, stage: int = 0, seed: int = 0) -> Path:
@@ -158,11 +145,11 @@ def _half_shard(root: Path, stage: int = 0, seed: int = 0) -> Path:
 # ------------------------------------------------------------ 落点链（P0-1）
 
 
-def test_resolve_takes_the_first_candidate_that_passes_both_gates(
+def test_resolve_takes_the_first_candidate_that_passes_the_capacity_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """候选链是优先级：第一个过**容量闸**的就要用（速度闸已删 ⇒ 只剩这一道）。"""
     first, second = _local_root(tmp_path) / "a", _local_root(tmp_path) / "b"
-    _fast_probe(monkeypatch)
     got = scratch.resolve_scratch_root(
         tmp_path / "job", need_bytes=1, candidates=(str(first), str(second))
     )
@@ -179,43 +166,37 @@ def test_resolve_skips_a_candidate_that_is_too_small(
     monkeypatch.setattr(
         scratch, "free_bytes", lambda p: 10.0 if Path(p) == tiny else 10.0**9
     )
-    _fast_probe(monkeypatch)
     got = scratch.resolve_scratch_root(
         tmp_path / "job", need_bytes=1_000_000, candidates=(str(tiny), str(roomy))
     )
     assert got == roomy
 
 
-def test_resolve_requires_a_real_speedup_over_the_job_dir(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """F6：候选不比 job 目录快 `SCRATCH_PROBE_MIN_SPEEDUP` 倍 ⇒ **回落**（宁可原地跑）。
+def test_resolve_never_touches_the_job_root(tmp_path: Path) -> None:
+    """★ 139s 的反探针（`plan/offline-local-disk-first` §3.1 A1 / 评审 P0-3）：
 
-    这条闸存在的理由就是「Kaggle 的 /tmp 可能也在同一块慢后端上」⇒ 那时换根是零收益
-    而失败面照旧。
+    落点解析**不许在 job 目录（= 网络盘）上写任何东西** —— 速度闸连同它的 8MB 探针已删。
+    判据不看符号名（那是「删掉删除即红」的形状），只看**行为**：解析前后 job 目录的内容与
+    它的哨兵文件 mtime 零变化（旧实现会在这里留下 `.nn-scratch-probe-<pid>` 那一笔写 + fsync）。
     """
-    cand = _local_root(tmp_path) / "slow"
+    cand = _local_root(tmp_path) / "ok"
     cand.mkdir()
-    calls: list[Path] = []
+    job = tmp_path / "job"
+    job.mkdir()
+    sentinel = job / "keep.txt"
+    sentinel.write_text("x", encoding="utf-8")
+    before = (sorted(p.name for p in job.iterdir()), sentinel.stat().st_mtime_ns)
 
-    def probe(p: Path, **kw: object) -> float:
-        calls.append(Path(p))
-        return 100.0 if Path(p).parent == tmp_path else 110.0  # job 目录 100、候选 110（1.1×）
+    got = scratch.resolve_scratch_root(
+        job, need_bytes=1, candidates=(str(cand),), log=lambda _m: None
+    )
 
-    monkeypatch.setattr(scratch, "probe_write_speed_mbps", probe)
-    assert (
-        scratch.resolve_scratch_root(
-            tmp_path / "job", need_bytes=1, candidates=(str(cand),), log=lambda _m: None
-        )
-        is None
-    ), "不显著快就该回退"
-    assert calls, "速度闸必须真的测过（否则它是个摆设）"
+    assert got == cand
+    after = (sorted(p.name for p in job.iterdir()), sentinel.stat().st_mtime_ns)
+    assert after == before, "落点解析在 job 目录（网络盘）上留下了东西"
 
 
-def test_resolve_falls_back_to_none_when_nothing_qualifies(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _fast_probe(monkeypatch)
+def test_resolve_falls_back_to_none_when_nothing_qualifies(tmp_path: Path) -> None:
     assert (
         scratch.resolve_scratch_root(tmp_path / "job", need_bytes=1, candidates=()) is None
     ), "没有可用候选 ⇒ None（调用方逐字走今天的行为）"
@@ -227,16 +208,36 @@ def test_generic_tests_pin_the_fallback_path(tmp_path: Path) -> None:
     现场：安静时 /dev/shm 只比 job 目录快 ~2.6×（回落，绿）；`bun run pygate` 8 worker 满载时
     同一台机器测出 ≥5×（换根）⇒「假导出器把 shard 平铺在 `--out` 之外」的那批用例转红。
     钉住它的就是根 conftest 的 autouse `_scratch_off`（本用例是那条钉子的回归守卫）。
-    同时钉住「没候选就**连基准探针都不跑**」：回退档不该为一次注定 None 的决策写 8MB。
+    同时钉住「没候选就立刻回落」：一份注定 None 的决策不该付任何 IO。
     """
     assert scratch.SCRATCH_CANDIDATES == (), "缺 pin：见 nn-training/conftest.py::_scratch_off"
 
-    def boom(*a: object, **kw: object) -> float:
-        raise AssertionError("回退档不该跑探针（runtime-opt §34.2：连候选探针都不跑）")
-
     job = tmp_path / "job"
     job.mkdir()
-    assert scratch.resolve_scratch_root(job, need_bytes=1, probe=boom) is None
+    assert scratch.resolve_scratch_root(job, need_bytes=1) is None
+    assert list(job.iterdir()) == [], "回退档不该在 job 目录里留东西"
+
+
+def test_env_off_forces_the_fallback_hatch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ A2（§3.1 / DoD 11）：`NN_ROLLOUT_SCRATCH=off` ⇒ **强制回退档**，且**不建 `off` 目录**。
+
+    回归（`§1.5` 的既有缺陷）：此前 `off` 被当成路径 ⇒ 在 cwd 下建一个叫 `off` 的目录并当
+    scratch 根用（而文档把它写成「回退原地」的一键逃生门，见
+    `plan/rollout-topup-fastpath.plan.md:939` 的「回退」列）。
+    """
+    monkeypatch.chdir(tmp_path)  # 「cwd 下有没有冒出 off/」要被判据看见
+    local = _local_root(tmp_path)
+    monkeypatch.setenv(scratch.SCRATCH_ENV, "off")
+    msgs: list[str] = []
+    got = scratch.resolve_scratch_root(
+        tmp_path / "job", need_bytes=1, candidates=(str(local),), log=msgs.append
+    )
+    assert got is None, "off ⇒ 回退档（候选链整条跳过）"
+    assert not (tmp_path / "off").exists(), "off 不是路径：不许在 cwd 下建目录"
+    assert any("强制回退档" in m for m in msgs), msgs
+    assert not list(local.iterdir()), "off 档连候选都不碰（不建目录、不探针）"
 
 
 def test_round_capacity_budget_covers_the_topup_batches(
@@ -332,11 +333,10 @@ def test_cold_start_capacity_budget_matches_the_topup_default() -> None:
 def test_env_override_wins_even_with_no_candidates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """操作员显式指定 ⇒ 无条件用它（连速度闸都不纠正：那是他的决定）。"""
+    """操作员显式指定 ⇒ 无条件用它（连候选链都不看：那是他的决定）。"""
     forced = _local_root(tmp_path) / "forced"
     forced.mkdir()
     monkeypatch.setenv(scratch.SCRATCH_ENV, str(forced))
-    monkeypatch.setattr(scratch, "probe_write_speed_mbps", lambda p, **kw: 0.0)
     got = scratch.resolve_scratch_root(tmp_path / "job", need_bytes=1, candidates=())
     assert got == forced
 
@@ -623,74 +623,31 @@ def test_rollout_falls_back_byte_for_byte_when_no_candidate(
     assert not list(tmp_path.glob(f"{scratch.SCRATCH_DIR_PREFIX}*")), "回退档不建 scratch"
 
 
-def test_rollout_probe_over_the_ceiling_falls_back_without_hanging(
+def test_rollout_reports_the_landing_point_and_keeps_the_scratch_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """探针超界 ⇒ 走回退档（不换根/不搬），**整轮不挂住**，并留一条 `probe_probe` 读数。
+    """★ A3 的正面判据：换根档的轮报带**落点读数**（取代 `probe_probe`），且不多付一笔探测。
 
-    回归（2026-10-11，`plan/rollout-topup-fastpath.plan.md` §1.11 / 评审 P0-2）：`open_scratch`
-    整段是 rollout 热路径上**唯一没有上界**的一步——`probe_write_speed_mbps` 只有 `except OSError`，
-    而它跑在 `install_tree`/`mirror_inputs` 的 `call_bounded` **之外**。网络盘抖到 0.2 MB/s ⇒
-    一次 8MB 写 + fsync 就是几十秒，而这笔等待**每批付一次**（现场：1 局的补差批 48.9s）。
-    """
-    _watchdog(monkeypatch)
-    local = _local_root(tmp_path)
-    monkeypatch.setattr(game_watch, "PROBE_CEILING_SEC", 0.3)
-    monkeypatch.setattr(scratch, "SCRATCH_CANDIDATES", (str(local),))
-
-    def slow_probe(p: Path, **kw: object) -> float:
-        # 被模拟对象（探针）自己的耗时：8MB 写 + fsync 在网络盘抖时就是几十秒；
-        # 假本地盘仍"快" ⇒ 速度闸本该放行。睡的不是「等对方先跑」。
-        time.sleep(2.0)  # sleep-ok: 夹具模拟的工作量：盘抖时的探针耗时（非同步手段）
-        return 4096.0 if "local-disk" in Path(p).parts else 64.0
-
-    monkeypatch.setattr(scratch, "probe_write_speed_mbps", slow_probe)
-    job = _job_dir(tmp_path)
-    msgs: list[str] = []
-    t0 = time.time()
-    out = run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0)]), log=msgs.append)
-    elapsed = time.time() - t0
-
-    # 判据就是被测的那条上界本身：超界必须在上界内返回；0.3s×5 只留夹具开销，紧是设计
-    # ——未包上界时实测 4.09s，正是它要抓的那一类回归。
-    assert elapsed < 1.5, f"探针超界必须在上界内返回（实测 {elapsed:.2f}s，上界 0.3s）"  # timing-ok: 契约上界（=被测的 0.3s 上界×5）
-    assert out["report"]["shards"] == 1
-    # 回退档：产出照旧落在 job 目录（逐字今天的行为：不换根/不搬/drain）
-    assert (job / "w0" / "rl_s0_seed0" / "manifest.json").exists()
-    # 行为判据（不看措辞）：换根档会在候选盘上留 `nn-rollout-*`（TS 家 + 作业私有目录）
-    assert not list(local.glob(f"{scratch.SCRATCH_DIR_PREFIX}*")), "超界必须逐字走回退档（不换根）"
-    assert not scratch.drain_stage_root(job).exists()
-    # 响亮 + 可查的读数（同一条轮报行）：这行**就是**操作员接口本身，没有结构化出口
-    #（plan v4 §3.9 的 `probe_probe`；口径 A 抬一格的账见 test_source_text_assert_budget.py）。
-    assert any("探针超界" in m and "probe_probe" in m and "超界回退" in m for m in msgs), msgs
-
-
-def test_rollout_probe_within_the_ceiling_keeps_the_scratch_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """上界只在**真超**时才降档：慢而能返回（假探针 10ms/次）⇒ 照旧换根，读数记下探测耗时。
-
-    这是「上界不是一键关掉 scratch」的守卫（合上一条读：过界 ⇒ 回退，界内 ⇒ 照旧）。
+    与旧「界内 ⇒ 照旧换根」用例等价的那一半（候选可用 ⇒ 真换根、产出落本地盘、装载根 =
+    轮目录）保留；新增的唯一一条是读数：`落点=本地:<路径>｜建布局 x.xxs`。
     """
     _watchdog(monkeypatch)
     local = _local_root(tmp_path)
     monkeypatch.setattr(scratch, "SCRATCH_CANDIDATES", (str(local),))
-
-    def slow_but_ok(p: Path, **kw: object) -> float:
-        # 探针的非零耗时：证明「界内也真的探过」，不是跳过探针。
-        time.sleep(0.01)  # sleep-ok: 夹具模拟的工作量：探针的非零耗时
-        return 4096.0 if "local-disk" in Path(p).parts else 64.0
-
-    monkeypatch.setattr(scratch, "probe_write_speed_mbps", slow_but_ok)
     job = _job_dir(tmp_path)
     msgs: list[str] = []
     out = run_iter_rollout(job, _stub_spec(tmp_path, [(0, 0)]), log=msgs.append)
 
     # 行为判据：换根真的发生了（候选盘上有 scratch 家），且产出落在本地盘（§3.5：不搬回）
-    assert list(local.glob(f"{scratch.SCRATCH_DIR_PREFIX}*")), "界内 ⇒ 照旧换根（探针没被一键关掉）"
+    assert list(local.glob(f"{scratch.SCRATCH_DIR_PREFIX}*")), "候选可用 ⇒ 换根"
     layout = scratch.layout_for(local, job)
     assert (layout.exec_dir / "w0" / "rl_s0_seed0" / "manifest.json").exists()
     assert out["shards_root"] == str(layout.job)
+    # 读数（操作员接口）：本地落点 + 建布局耗时，一条轮报行
+    landed = [m for m in msgs if "落点=" in m]
+    assert landed, msgs
+    assert any("落点=本地:" in m and str(local) in m and "建布局" in m for m in landed), landed
+    assert not any("probe_probe" in m for m in msgs), "旧读数键必须消失"
 
 
 def test_settlement_is_future_return_and_missing_produce_is_loud(
@@ -828,7 +785,50 @@ def test_eval_builder_moves_ts_weights_and_games_to_scratch(
     )
     # F2：**账本不动**（`settle_eval_summary` 的聚合读面是文件，且那是 cell 死后续跑的凭据）
     assert Path(job["eval_jsonl"]) == ctx.store.root / ArtifactStore.EVAL_LOG_NAME
-    assert any("本地盘" in m for m in msgs), msgs
+    # A4 的读数（取代旧的「云机评估热路径换到本地盘」那一行）：落点 + 建布局耗时
+    landed = [m for m in msgs if "落点=" in m]
+    assert landed and all("落点=本地:" in m and "建布局" in m for m in landed), msgs
+
+
+def test_eval_builder_falls_back_when_a_step_exceeds_its_ceiling(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ A4 / DoD-4（镜像旧「探针超界」用例）：落点段任一步超界 ⇒ **本段**回退原地 + 响亮一行。
+
+    判定不看措辞：① 三条路径全是「今天的」（不换根）；② **后续轮不再等** —— 超界一次就
+    把本段降档（`state["layout"] = None`），不是每轮各付一遍注定等满的上界；③ 有一条 WARN。
+    """
+    from remote.plan_handoff import _eval_job_builder
+
+    local = _local_root(tmp_path)
+    _only_candidate(monkeypatch, local)
+    monkeypatch.setattr(game_watch, "DRAIN_CEILING_SEC", 0.3)
+
+    def slow_install(*a: Any, **kw: Any) -> bool:
+        # 夹具模拟「坏盘上既不返回也不抛」的那一笔写；睡的不是「等对方先跑」。
+        time.sleep(2.0)  # sleep-ok: 夹具模拟的工作量
+        return True
+
+    monkeypatch.setattr(scratch, "install_file", slow_install)
+    ctx = _eval_ctx(tmp_path)
+    msgs: list[str] = []
+    ctx.log = msgs.append
+    build = _eval_job_builder(cast(Any, ctx), _eval_plan())
+    t0 = time.time()
+    job = build(3)
+    first = time.time() - t0
+    # 判据就是被测的那条上界本身（未包上界时这里实测 2s+）
+    assert first < 1.5, f"超界必须在上界内返回（实测 {first:.2f}s）"  # timing-ok: 契约上界（0.3s×5）
+    assert Path(job["weights_path"]) == ctx.store.weights_path(3), "超界 ⇒ 逐字回退档（不换根）"
+    assert Path(job["work_dir"]) == ctx.work_dir / "eval-work"
+    assert Path(job["ts_root"]) == ctx.ts_tree_dir
+    assert any("超界或失败" in m for m in msgs), msgs
+    # 第二次：本段已降档 ⇒ 不再进落点段（不许每轮再等一遍）
+    t1 = time.time()
+    job4 = build(4)
+    second = time.time() - t1
+    assert second < 0.5, f"降档后不许每轮再等（实测 {second:.3f}s）"  # timing-ok: 契约（降档即零落点 IO）
+    assert Path(job4["weights_path"]) == ctx.store.weights_path(4)
 
 
 def test_eval_builder_falls_back_and_keeps_the_ledger(

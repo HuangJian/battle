@@ -10,10 +10,14 @@
 
 * `resolve_scratch_root()` —— 候选链 `NN_ROLLOUT_SCRATCH`（env，显式） > `/dev/shm` > `/tmp`
   > **`None`**（= 调用方**逐字**走今天的行为：不搬、不 drain、不换根 —— 评审 F9）。
-  判据两条：**容量**（free ≥ need × 比值；`need` 本身不含比值 —— 只乘一次，评审 F8②）与
-  **速度**（顺序写 + fsync 粗测；不比 job 目录显著快就不用手 —— 评审 F6：Kaggle 的 `/tmp`
-  是否真是本地介质在仓内无取证，宁可回退也不制造「零收益 + 多两条失败模式」）。
-  env 给了但不可写 ⇒ **响亮失败**（不静默回落：操作员以为在测 scratch 是最坏的形状）。
+  判据**只有容量一条**（free ≥ need × 比值；`need` 本身不含比值 —— 只乘一次，评审 F8②）。
+  ⚠ **速度闸已删**（2026-10-14，`plan/offline-local-disk-first` §3.1 + 评审 P0-3）：F6 那条闸的
+  参照值必须**在网络盘（job 目录）上现场测**（旧 `probe_write_speed_mbps`：8MB 顺序写 + fsync），
+  于是它是整条路径上唯一必须碰坏挂载点、又唯一没有上界的一步（现场：139s 静默、零日志）。
+  「测出来不够快就回落」的收益 < 每次都在网络盘上写一遍的成本 ⇒ 直接假定本地快（拍板-1）;
+  「`/tmp` 在 Kaggle 上是不是本地介质」改由落点读数 + 首轮墙钟取证（`docs/nn/runtime-opt.md` §34.2 原话=无取证）。
+  env 给了但不可写 ⇒ **响亮失败**（不静默回落：操作员以为在测 scratch 是最坏的形状）；
+  env 给 `off` 一族（见 `SCRATCH_OFF_VALUES`）⇒ **强制回退档**（不建目录、不探针）。
 * `ScratchLayout` —— `<根>/nn-rollout-<作业名>-<hash8(作业根)>/`，**按作业标识命名**（评审 F5：
   同机多会话不互删），内部 `r/`（rollout 的 job 相对镜像）与 `eval/`（云机评估的 game 目录）
   互不相干、各清各的。TS 家**不在**作业目录里：它按 TS 目录名寻址（`ts_home()`），两条腿/跨轮共用一份。
@@ -41,16 +45,15 @@ import hashlib
 import os
 import shutil
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 
 from common.platform_utils import rmtree_best_effort
 from common.protocol import ProtocolError
 
-#: 操作员显式指定落点（最高优先；给了就用，不再纠正速度/容量 —— 操作员说了算）。
+#: 操作员显式指定落点（最高优先；给了就用，不再纠正容量 —— 操作员说了算）。
 #: ⚠ 给了但不可写 ⇒ **响亮失败**（见 `resolve_scratch_root`）：静默回落会让操作员
-#: 以为在测 scratch、其实在跑原地（评审 F9）。
+#: 以为在测 scratch、其实在跑原地（评审 F9）。取 `off` 一族（见 `SCRATCH_OFF_VALUES`）= 强制回退档。
 SCRATCH_ENV = "NN_ROLLOUT_SCRATCH"
 #: 作业 scratch 目录前缀（人眼辨识用；清理只动**自己那一份**，名字里带作业 hash）。
 SCRATCH_DIR_PREFIX = "nn-rollout-"
@@ -58,10 +61,10 @@ SCRATCH_DIR_PREFIX = "nn-rollout-"
 SCRATCH_TS_PREFIX = "nn-rollout-ts-"
 #: 容量余量比值（**只乘一次**：`need` 是原始估算，判据在 `resolve_scratch_root` 里乘）。
 SCRATCH_MIN_FREE_RATIO = 1.5
-#: 落点至少要比 job 目录快这么多倍才值得换（评审 F6；测不出速度 ⇒ 不设闸）。
-SCRATCH_PROBE_MIN_SPEEDUP = 5.0
-#: 速度探针的写入量（顺序写 + fsync）。每轮一次：健康挂载点上亚秒级，换「不把零收益当收益」。
-SCRATCH_PROBE_BYTES = 8 * 1024 * 1024
+#: `SCRATCH_ENV` 的**回退档**取值（大小写不敏感）：显式要求「不换根」。给 2026-10-11
+#: `plan/rollout-topup-fastpath` §8 回退列的 `NN_ROLLOUT_SCRATCH=off` 补上真语义——此前它被当成
+#: 路径 ⇒ 在 cwd 下建一个叫 `off` 的目录并当 scratch 根用（`plan/offline-local-disk-first` §1.5）。
+SCRATCH_OFF_VALUES = frozenset({"off", "none", "0", "false", "no"})
 #: 首轮缺省的单局产出估算（实测 obs.npy 2.0–3.3 MB，取 ~3× 当上界）。
 #: ⚠ 评审 F8①：「上一轮实测 p90」在仓内**没有生产者**（轮报告只有墙钟）⇒ 先用缺省，实测生产者留 P1。
 SCRATCH_EST_DEFAULT_BYTES = 8 * 1024 * 1024
@@ -198,32 +201,6 @@ def free_bytes(path: Path) -> float | None:
         return None
 
 
-def probe_write_speed_mbps(root: Path, *, bytes_: int = SCRATCH_PROBE_BYTES) -> float | None:
-    """顺序写 + fsync + 回读的粗测（MB/s）；任何失败 ⇒ `None`（不设闸，不抛）。"""
-    probe = Path(root) / f".nn-scratch-probe-{os.getpid()}"
-    chunk = b"\0" * (1 << 20)
-    n = max(1, int(bytes_) // len(chunk))
-    t0 = time.time()
-    try:
-        with open(probe, "wb") as f:
-            for _ in range(n):
-                f.write(chunk)
-            f.flush()
-            os.fsync(f.fileno())
-        dt = max(1e-6, time.time() - t0)
-        with open(probe, "rb") as f:
-            while f.read(1 << 20):
-                pass
-    except OSError:
-        return None
-    finally:
-        try:
-            probe.unlink(missing_ok=True)
-        except OSError:
-            pass
-    return (n * len(chunk) / (1024 * 1024)) / dt
-
-
 def _is_writable_dir(path: Path) -> bool:
     """能不能在它下面写文件（`mkdir -p` 后试写一个探针；失败 ⇒ False，不抛）。"""
     try:
@@ -242,14 +219,18 @@ def resolve_scratch_root(
     need_bytes: float,
     candidates: tuple[str, ...] | None = None,
     log=lambda msg: None,
-    probe=None,
 ) -> Path | None:
-    """挑一个节点本地盘落点；全不够/不够快 ⇒ `None`（调用方**逐字**走今天的行为）。
+    """挑一个节点本地盘落点；全不够 ⇒ `None`（调用方**逐字**走今天的行为）。
 
-    `probe` 可注入（`root -> MB/s | None`），用例因此不必真写 8MB。
+    判据只有**容量**一条（速度闸已删，理由见模块头）；`job_root` 只用于布局命名 ——
+    它上面**不再写任何探针**：「先量一遍网络盘」这件事本身就是 139s 现场。
     """
     env = os.environ.get(SCRATCH_ENV, "").strip()
     if env:
+        if env.lower() in SCRATCH_OFF_VALUES:
+            # 逃生门（坏盘现场）：显式要求不换根 ⇒ 跳过候选链，**不建目录、不写探针**（§3.1 A2）。
+            log(f"{SCRATCH_ENV}={env} ⇒ 强制回退档（不换根、不建目录、不探针）")
+            return None
         p = Path(env)
         if not _is_writable_dir(p):
             raise ProtocolError(
@@ -259,12 +240,8 @@ def resolve_scratch_root(
         return p
     cands = SCRATCH_CANDIDATES if candidates is None else tuple(candidates)
     if not cands:
-        # 没有候选 ⇒ 立刻回落：**连 job 目录的基准探针都不跑**（runtime-opt §34.2 对回退档的
-        # 承诺原话）。非 POSIX 的缺省链、测试里钉死回退档的通用用例都走这里——每轮白写
-        # 8MB + fsync 买不到任何决策（2026-10-09；探针读数还随负载漂移，见根 conftest）。
+        # 没有候选 ⇒ 立刻回落（非 POSIX 的缺省链、测试里钉死回退档的通用用例都走这里）。
         return None
-    measure = probe or probe_write_speed_mbps
-    base_speed = measure(Path(job_root))
     for name in cands:
         cand = Path(name)
         if not _is_writable_dir(cand):
@@ -275,14 +252,6 @@ def resolve_scratch_root(
                 f"scratch 候选 {cand} 容量不够：free={0.0 if free is None else free / 1e6:.0f}MB"
                 f" < need×{SCRATCH_MIN_FREE_RATIO:g}="
                 f"{float(need_bytes) * SCRATCH_MIN_FREE_RATIO / 1e6:.0f}MB"
-            )
-            continue
-        speed = measure(cand)
-        if base_speed and speed and speed < base_speed * SCRATCH_PROBE_MIN_SPEEDUP:
-            log(
-                f"scratch 候选 {cand} 不比 job 目录快（{speed:.0f} vs {base_speed:.0f} MB/s"
-                f" < {SCRATCH_PROBE_MIN_SPEEDUP:g}×）——不用它（评审 F6：宁可原地跑，"
-                "也不制造「零收益 + 多两条失败模式」）"
             )
             continue
         return cand
@@ -301,11 +270,10 @@ def open_scratch(
     need_bytes: float,
     candidates: tuple[str, ...] | None = None,
     log=lambda msg: None,
-    probe=None,
 ) -> ScratchLayout | None:
     """解析根 + 装配布局；`None` = 回退原地（调用方逐字走今天的行为）。"""
     root = resolve_scratch_root(
-        Path(job_root), need_bytes=need_bytes, candidates=candidates, log=log, probe=probe
+        Path(job_root), need_bytes=need_bytes, candidates=candidates, log=log
     )
     return None if root is None else layout_for(root, Path(job_root))
 

@@ -187,7 +187,8 @@ class CloudEvalRunner:
 
     与 in-loop（`EvalDispatcher` + `_sweep_eval_tail`）同一条纪律：
 
-      ① **提交即返回**——`submit(it)` 只把这一轮的评估丢给后台线程，rollout/PPO 照常跑；
+      ① **提交即返回**——`submit(it)` 只入队（连装配都在后台线程求值，见 `_pending` 的注释），
+         rollout/PPO 照常跑；
          eval 局是 bun 子进程（CPU），PPO 在 GPU 上，两者本来就不抢同一个资源；
          **但 rollout 局也在 CPU 上** ⇒ 调用方提交后有界等本轮收线（`run_loop`
          `EVAL_ALTERNATE_WAIT_SEC`）——否则两条腿同时各开满一份，2× 超订就把单局墙钟推过
@@ -220,7 +221,10 @@ class CloudEvalRunner:
         self.drain_timeout_sec = float(drain_timeout_sec)
         self.handoff_wait_sec = float(handoff_wait_sec)
         self._lock = threading.Lock()
-        self._pending: tuple[int, dict] | None = None
+        #: 待跑的那一轮 = `(it, thunk)`。⚠ 第二个元素是**零参可调用**（求值推迟到后台线程）
+        #: —— 2026-10-14 D1（`plan/offline-local-disk-first` §3.3）：装配（`self._build`）
+        #: 原本在**调用线程**（= 训练主循环）上现算，挂死就等于把训练循环按死。
+        self._pending: tuple[int, Any] | None = None
         self._current: int | None = None
         self._wake = threading.Event()
         self._idle = threading.Event()
@@ -270,7 +274,11 @@ class CloudEvalRunner:
                     "（不把 PPO 按在等待上；下次到点再说）"
                 )
                 return False
-            self._pending = (int(it), dict(self._build(int(it))))
+            # ★ 只入队、不求值（D1）：`_build`（落点解析 + 当轮权重的逐字节拷贝）在后台线程跑。
+            # 安全性：调用点是 `plan_run._maybe_cloud_eval`（在 `_checkpoint` **之后**）⇒ 那一刻
+            # `it-NNN/weights.json` 已原子落盘，延后取路径读到的仍是同一份不可变字节（`wver` 不变）。
+            _it = int(it)
+            self._pending = (_it, lambda: dict(self._build(_it)))
             self._idle.clear()
         self._ensure_thread()
         self._wake.set()
@@ -324,7 +332,9 @@ class CloudEvalRunner:
                     self._current = job[0]
             if job is not None:
                 try:
-                    result = run_cloud_eval(**job[1])
+                    # 装配也在**本线程**求值（D1）；`_build` 抛的异常与 `run_cloud_eval` 同一档处理。
+                    params = job[1]() if callable(job[1]) else job[1]
+                    result = run_cloud_eval(**params)
                     self.results.append(result)
                     if self._on_round_done is not None:
                         try:

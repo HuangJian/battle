@@ -889,10 +889,10 @@ class RoundContext:
     pool: Any = None
     #: 轮级**槽位**（= 本机能同时跑的局数上限；补差批的满铺器拿它当 `width`，池宽也按它）。
     workers: int = 0
-    #: 首批是否已完成解析（探针 / TS 树）；补差批看到 `True` 就跳过那一整段。
+    #: 首批是否已完成解析（落点 / TS 树）；补差批看到 `True` 就跳过那一整段。
     resolved: bool = False
-    #: 探针耗时（读数用）。
-    probe_sec: float = 0.0
+    #: 落点段耗时（读数用；旧名 `probe_sec` —— 探针已删，2026-10-14）。
+    setup_sec: float = 0.0
 
     @property
     def root(self) -> Path | None:
@@ -1021,42 +1021,42 @@ def run_iter_rollout(
     if not rctx.resolved:
         rctx.workers = slots  # 轮级槽位：补差批的满铺器拿它当 width；池宽也按它（A1/A2）
     # ---- 首批：解析**轮级**资源（探针 → TS 树）；补差批整段跳过（plan §3.2）----
-    # 探针段**必须**有上界（2026-10-11，plan/rollout-topup-fastpath §3.1）：`open_scratch` 整段是
-    # 这条热路径上**唯一**没有上界的一步（`probe_write_speed_mbps` 只有 `except OSError`，挂住的
-    # 挂载点既不返回也不抛），而它当时跑在下面两个 `call_bounded` **之外**。超界 ⇒ **逐字回退档**
-    # （不换根/不搬/不 drain），并响亮记一笔 + 进 `probe_probe` 读数——它是「盘抖动」的直接读数。
+    # 落点段**不再包上界**（2026-10-14，`plan/offline-local-disk-first` §3.3 A3 / 评审 P0-3）：
+    # 网络盘测速探针（`probe_write_speed_mbps`：8MB 顺序写 + fsync，参照值必须打在 job 目录上）
+    # 已删 ⇒ `open_scratch` 整段只剩**本地盘**操作（mkdir/写探针/unlink/statvfs），
+    # 「挂住的挂载点」这个物理来源消失（现场：139s 静默、整轮零日志）。
+    # ⚠ 别把它包回 `call_bounded`：那里超界**不杀线程**（`common/platform_utils.call_bounded` 只弃），
+    # 坏轮上留下的是「一条仍在写 8MB 的残留线程 + 一次注定等满的等待」，比裸调更糟。
     if not rctx.resolved:
         rctx.job_dir = Path(jd)  # 轮 = 首批那个 job 目录（补差批是它下面的子目录）
         rctx.resolved = True
         _root: Path | None = None
         _layout: scratch.ScratchLayout | None = None
         if argvs:
-            _probe_t0 = time.time()
-            _ok_probe, _probe_res = call_bounded(
-                partial(scratch.open_scratch, jd, need_bytes=need, log=rb.note),
-                float(game_watch.PROBE_CEILING_SEC),
-                name="scratch-probe",
+            # 回退档的**成因**要进读数（§3.6）：把 `open_scratch` 的说明行同时收一份下来
+            # （`off` 一族 / 不可写 / 容量不够 free=… < need×1.5=…）——「上一次坏轮到底死在哪」
+            # 不能再靠人拼时间戳（那是 139s 现场最大的遗憾）。
+            _why: list[str] = []
+
+            def _scratch_note(msg: str) -> None:
+                _why.append(str(msg))
+                rb.note(msg)
+
+            _setup_t0 = time.time()
+            # `ScratchLayout | None`（容量闸没过 = `None` = 回退档）；ctx 只留**轮级布局**，
+            # 批级布局由它镜像推（`batch_layout` + `batch_rel`）。
+            _layout = scratch.open_scratch(jd, need_bytes=need, log=_scratch_note)
+            rctx.setup_sec = round(time.time() - _setup_t0, 3)
+            _root = None if _layout is None else _layout.root
+            rb.add(
+                "落点",
+                (
+                    f"本地:{_root}"
+                    if _root is not None
+                    else f"网络(回退原地｜成因={_why[-1] if _why else '无候选'}）"
+                )
+                + f"｜建布局 {rctx.setup_sec:.2f}s",
             )
-            rctx.probe_sec = round(time.time() - _probe_t0, 3)
-            if _ok_probe:
-                # `ScratchLayout | None`（闸没过 = `None` = 回退档）；ctx 只留**轮级布局**，
-                # 批级布局由它镜像推（`batch_layout` + `batch_rel`）。
-                _layout = _probe_res
-                _root = None if _probe_res is None else _probe_res.root
-                rb.add(
-                    "probe_probe",
-                    f"{'换根' if _root is not None else '原地'}｜探测 {rctx.probe_sec:.2f}s"
-                    f"｜上界 {float(game_watch.PROBE_CEILING_SEC):g}s",
-                )
-            else:
-                rb.add(
-                    "probe_probe",
-                    f"超界回退｜{float(game_watch.PROBE_CEILING_SEC):g}s 内没返回（盘抖的直接读数）",
-                )
-                rb.note(
-                    f"WARN rollout scratch 探针超界（{float(game_watch.PROBE_CEILING_SEC):g}s 内没返回）"
-                    "——本轮回落原地（网络盘）；这是**盘抖动的直接读数**，不是失败"
-                )
         if _root is not None:
             ts_new = scratch.ts_home(_root, tsd.name)
             ok_tree, tree_res = call_bounded(

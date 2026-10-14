@@ -6035,3 +6035,74 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **后果**：缺省行为变为「M1+M2+M3+M4 全开」；`plan/wire-diet.plan.md` §6 那条 DoD 降级为**事后观测**清单
   （五组数的取法见 §14 末条 / `docs/nn/remote-transport.md` §94），§14 存同一条账。
 - **全文** → `plan/wire-diet.plan.md` §6 / §14 · `docs/nn/remote-transport.md` §94 · `docs/nn/rl-config.md` §1.1。
+
+## §2026-10-14-goalnn-offline-code-authority-and-width（2026-10-14，离线：工具态以包为权威 + 满铺宽度修退化）
+
+- **现场**（y5-hit2 云机 [2/2]，一手日志）：① 冷启动「64 批 × 1 局补差」—— 96 核里只有 1 核干活
+  （`满铺 width=1` + `serve_pool: spawned=1`），缺口 `{2000: 11644}` 数学上补不平（宽度 1 ⇒ 最多 64 局）；
+  ② 训练前 `ImportError: cannot import name 'METRICS_NAME' from 'common.shard'` —— 本机 `code.zip` 是半提交
+  工作树的**混血快照**（np_core 已改 / shard 未改），而它「旧但自洽」⇒ 选码门槛（对本机 manifest 自证）
+  让它**必赢**包里那份好代码；坏代码直到 `remote/train_core` 才爆 ⇒ rollout 全白跑、账本无行。
+- **定案**：① **「满铺宽度」只有一个语义 = 本机槽位**（`cpu_worker_slots()` 经 `with_rollout_workers` 写进
+  `spec["workers"]`，与并发同过一套夹取）：补差批宽 / 长驻池宽 / 整轮容量估算基准三处一律取它；**禁止**
+  再拿「上一批跑了几局 / 首批 argv 条数」当预算（那是**结果**）。② **`code.zip` / `ts_code.zip` 是工具态**
+  （可重建、与进度无关）⇒ 权威序 = **任务包 → hub `/code` → 本机产物**（最后兜底 + 响亮 WARN）；旧序
+  （本机优先）只保留给**进度态**（plan/state/权重/shard）。选码门槛分档写死：包里有码就必须等于索引背书
+  `code_sha256`（不符 = 包坏 ⇒ 硬拒），没背书（老包）⇒ 收下 + WARN；hub/本机档**接受为新权威**。
+  ③ **换码是一次事务**：字节写回 `<dest>/code.zip` + 原子改写段级 `manifest.json` 的 `code_sha256`
+  （ts 同），旧值进日志对照行。④ 候选**先过导入哨兵**（`common.shard` / `worker.ppo.np_core` / `remote.run_loop`，
+  torch-free，有界子进程），失败分 `env`（缺第三方 ⇒ 放行 + WARN）与 `code`（本仓模块不自洽 ⇒ 换候选 / 拒跑）。
+  ⑤ 打包端写 `code_meta.jsonc`（`commit`/`dirty`/`dirty_files`/`import_ok`）—— **无挥发字段**（固定时间戳）：
+  脏树在**导出那一刻**就 WARN，而不是等云机跑到 `train_core`。
+- **推翻的半条先例**：`§2026-09-24-goalnn-offline-local-first` 的「代码/TS 跟着产物走」对**工具态**失效
+  （其对**进度态**的效力不变）；同一条线在 `§2026-10-14-goalnn-offline-segment-restart`（J1 续段）已经
+  松过一次口，本条是把同一件事补到「不换段但换码」的情形。
+- **被否决备选**：① 选包里的码但不回写 manifest 的 sha（评审 P0-1：下游 `download._ensure_code`/`_ensure_ts_code`
+  会报「传输损坏」，或命中旧 `code_cache/<sha>` **静默跑旧码**）；② 比较「新旧」选代码（云机没有仓，无法定序；
+  问题不是谁新而是谁权威）；③ 打包端硬拒脏树（用户边改边跑：改成 `dirty` 可见 + 哨兵早失败 + 消费端决策）；
+  ④ 哨兵收 `worker.ppo.common`（顶层 `import torch` ⇒ 无 torch 机器把环境缺件误判成候选坏、全候选被误杀）；
+  ⑤ 补差批宽度按缺口/est 逐批反解（`plan/rollout-topup-fastpath` §1.7 已否决：批越补越小、固定开销占比趋 100%）；
+  ⑥ 把首批就按机器宽度铺（`volume_block` 是 hub 组装/节点重放两侧共用的语料契约，导出机不知道云机核数）。
+- **后果**：已导出的任务包**无需重导**（宽度在节点侧生效）；`code.zip` 多一个成员 ⇒ **一次性** sha 变更
+  （之后同源码仍同 sha：固定时间戳 + 无挥发字段）；boot/轮日志里「槽位 = 批宽 = 池宽」三个数应相等，
+  `serve_pool: spawned` ≥ `min(槽位, 局数)`。
+- **全文** → `plan/offline-code-authority-and-width.plan.md`（实施契约 + §4.9 回填）· 评审/处理结果 →
+  `plan/offline-code-authority-and-width.review-bf.md`。
+
+## §2026-10-14-goalnn-offline-local-disk-first（2026-10-14，离线/rollout：**删掉网络盘测速探针** + eval 腿包上界 + `submit` 装配后移）
+
+- **现场**（云机 `y5-hit` 自主 worker，一手日志）：02:48:49 → 02:51:08 **139s 静默**——`轮次补传检查` 的
+  `ticks 5→6` 而 `cpu 只 +0.91s`（纯阻塞 IO，正常轮 +19~23s）；缺口末尾才打出 eval 腿 `_layout()` 的唯一一行，
+  而 eval 本体只用 2.0s。同一轮 rollout 腿刚报过 `probe_probe=超界回退｜5s 内没返回`。
+- **定案（A 腿，本次落地）**：
+  ① **删掉网络盘测速探针**——`common/scratch` 的 `probe_write_speed_mbps`（8MB 顺序写 + fsync + 回读）、
+  `SCRATCH_PROBE_BYTES`、`SCRATCH_PROBE_MIN_SPEEDUP`（速度闸 F6）、`probe=` 注入缝，以及
+  `common/game_watch.PROBE_CEILING_SEC`（`plan/rollout-topup-fastpath` §3.1 的 5s 上界）。落点判据**只剩容量**
+  一条（`free ≥ need × 1.5`）；`job_root` 只用于**命名**，其上一字节都不写。
+  ② **rollout 落点段改回裸调**（只有本地盘操作 ⇒ 无上界也有界），`probe_probe` 读数换成
+  `落点=本地:<path>｜建布局 x.xxs` ∨ `落点=网络(回退原地｜成因=…)`；`install_tree`/`mirror_inputs` 的
+  `call_bounded(SCAN_CEILING_SEC)` 保留（真网络 IO）。
+  ③ **eval 腿五处裸调用一律包上界**（`install_tree`→60s；`clear_dir`×2/`install_file`→`DRAIN_CEILING_SEC`），
+  超界/失败 ⇒ **本段**降档回退原地 + 响亮一行，并补上落点/建布局读数（此前**零读数**）。
+  ④ **`CloudEvalRunner.submit()` 只入队 thunk**：`_build`（落点解析 + 逐字节拷权重）挪进后台 `_loop` 求值
+  ⇒ 装配挂死只拖 eval 自己，不拖训练主循环（安全性 = 调用点在 `_checkpoint` 之后，权重已原子落盘）。
+  ⑤ **`NN_ROLLOUT_SCRATCH=off`（同族 `none/0/false/no`）⇒ 强制回退档**（跳过候选链、不建目录、不探针）：
+  此前它被当成路径 ⇒ 在 cwd 下建一个叫 `off` 的目录并当 scratch 根用（文档承诺的一键回退是坏的）。
+- **被否决备选**：① **保留探针但给它包上界**（= §35.1 已落地的方案）——`call_bounded` 是「可放弃的等」
+  不是熔断（弃掉的 daemon 线程不杀不 join）⇒ 买到的是「等满 5s + **一条仍在写 8MB+fsync 的残留线程**」，
+  而残留线程继续压同一个挂载点；② **给探针加缓存**（`rollout-topup-fastpath` §3.8 的未落地项）：省掉的是
+  「重复测」，而这里要省的是「**不再测**」；③ **把 eval 腿的裸调也交给 `submit` 的 thunk 就算完**：装配挪走
+  了，但缺的**上界与读数**仍在（坏盘上它照样挂在后台线程里、日志里照样零读数）；④ **把 `off` 当成路径的
+  现状保留**（不改）：逃生门是坏的比没有更糟——操作员以为已经回退，实际在 cwd 下跑了 scratch。
+- **推翻的半条先例**：`plan/rollout-topup-fastpath.plan.md` §3.1/§0(4) 的「探针包上界」（→ 删探针）；
+  `docs/nn/runtime-opt.md` §34.2 的速度闸 F6（→ 删闸，改由落点读数 + 首轮墙钟取证）。
+  **不推翻**：§3.2–§3.5（满铺 / 轮级 `RoundContext` / 取消搬回）全部保留。
+- **后果**：`docs/nn/runtime-opt.md` 新增 §36 + §35.1/§34.2 指针；文本断言基线抬一格 1457 → 1460
+  （账在该模块头：新增 5 条读数行 − 删 2 条旧读数行）· 「重投计划」的盘抖动读数键从 `probe_probe` 改为
+  `落点` · 逃生门 `NN_ROLLOUT_SCRATCH=off` 有真语义 · 好轮墙钟收益 ≈ 0（探针 0.009–0.015s），
+  收益全在**坏轮**（139s → 本地闸 + ≤60s 后台上界）。
+- **诚实账（本条目只覆盖 A 腿）**：产物根**还没**搬本地盘、网络 `backup/` 与反向恢复腿也**还没**落
+  ⇒ 「网络盘在常态路径上出现 0 次」这句话目前**不成立**（B/C 腿见 `plan/offline-local-disk-first` §3.2/§3.4/§3.5）。
+  A 腿单独成立的部分：**训练主循环上不再有任何一次「由网络盘测速决定」的等待**。
+- **全文** → `plan/offline-local-disk-first.plan.md`（v2）+ 评审 `plan/offline-local-disk-first.review-bf.md`
+  （处理结果 §11）· 技术档案 → `docs/nn/runtime-opt.md` §36。

@@ -10,8 +10,8 @@
 | 项 | 值 | 凭什么 |
 |---|---|---|
 | 计数口径（唯一） | `nn-training/tests/helpers/text_asserts.py` | 代码即定义（口径 A 形态 / 口径 B 生产源码面） |
-| 口径 A（形态，含 capsys 子串断言） | **1441** 条 / 231 文件 | 2026-10-09 实测 1435（清理前 1488）；**2026-10-11 抬一格 +6**：aistudio 传输硬化新增 5 个用例文件里的**日志行**子串断言（日志行就是交付物：可观测地关 + 写明重试次数）——理由见 `tests/test_source_text_assert_budget.py` 模块头 |
-| 口径 B（生产源码面，T5 删除面） | **1091** 条 / 106 文件 | 同上（清理前 1084；**2026-10-10 抬一格**：新 notebook 接线守卫 +9 —— 理由见 `tests/test_source_text_assert_budget.py` 模块头；`docs/nn/engineering.md` §71 里那张表保留当时值 1082；**是下界**，见模块头口径边界） |
+| 口径 A（形态，含 capsys 子串断言） | **1460** 条 / 235 文件 | 2026-10-09 实测 1435（清理前 1488）；2026-10-11 抬一格 +6（aistudio 传输硬化）；2026-10-12 抬到 1445（预取解包）；**2026-10-14 抬到 1460**（离线 A/B 腿 1457 + 离线本地盘 A 腿 +5 读数行 − 2 旧读数行）—— 每笔理由见 `tests/test_source_text_assert_budget.py` 模块头（**那里的两个常量是唯一现行值**，本表只作历史水位） |
+| 口径 B（生产源码面，T5 删除面） | **1092** 条 / 106 文件 | 同上（清理前 1084；2026-10-10 抬一格 +9：新 notebook 接线守卫；**2026-10-14 抬一格 +1**：wire-diet M4 切片 2 的产物段结构守卫 —— 理由见模块头；`docs/nn/engineering.md` §71 里那张表保留当时值 1082；**是下界**，见模块头口径边界） |
 | 护栏 | `nn-training/tests/test_source_text_assert_budget.py` | 只许降不许升 + 计数下界自检 |
 | 重跑 | `bash tools/githook/nn-py-safe.sh -m tests.helpers.text_asserts --scope source` | 逐文件行号清单 |
 | 全量基线（`-n 6` 本机） | 3963 passed / 15 skipped / 76.3s | `tmp/pytest-tmp/step0-pytest.log` |

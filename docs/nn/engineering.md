@@ -535,6 +535,11 @@ nn 门禁 `nn-python-gate.sh` 全绿（ruff + mypy + pytest）；本机全量 **
 
 ## §69 门禁红：scratch 换根档由**速度探针**决定 ⇒ 同一份用例随机器/负载换分支（2026-10-09）
 
+> ⚠ **本节的那条非确定性来源已消失**（2026-10-14，`plan/offline-local-disk-first` → `runtime-opt.md` §36）：
+> 速度探针（连同它的 5× 闸与 `PROBE_CEILING_SEC`）**已删**，换根档只由容量闸决定 ⇒ 不再随机器/负载换分支。
+> 「测试要钉住分支而不是听天由命」的结论**照样成立**（本节的修法保留：`scratch.SCRATCH_CANDIDATES` /
+> 显式 env 钉档），只是这一条现场不再可复现。
+
 ### 一句话
 
 `bun run pygate` 红在 `tests/remote/test_remote_iter.py::test_run_iter_rollout_with_stub_bun`

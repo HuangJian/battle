@@ -582,6 +582,38 @@ def test_submit_does_not_block_ppo(monkeypatch: pytest.MonkeyPatch) -> None:
     assert runner.results == [{"ran": True, "it": 3}]
 
 
+def test_submit_defers_the_job_build_to_the_background_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """★ D1（`plan/offline-local-disk-first` §3.3 A4 / 评审 P0-3）：`submit()` **不在调用线程**求值 `_build`。
+
+    现场（2026-10-14 y5-hit，139s 静默）：`submit` 里那句 `dict(self._build(it))` 跑在**训练主循环**
+    线程上，而 `_build` 会做落点解析 + 逐字节拷当轮权重——网络盘一挂，整轮零日志地等下去。
+    判据：注入一个睡 1s 的 build ⇒ `submit()` 的墙钟仍是毫秒级；那一秒由后台线程付。
+    """
+    built = threading.Event()
+    release = threading.Event()
+
+    def slow_build(it: int) -> dict:
+        built.set()
+        release.wait(5)
+        return {"it": it}
+
+    monkeypatch.setattr(offline_eval, "run_cloud_eval", lambda **job: {"ran": True, **job})
+    logs, log = _logs()
+    runner = CloudEvalRunner(slow_build, log=log)
+    t0 = time.time()
+    assert runner.submit(5)
+    submit_sec = time.time() - t0
+    # timing-ok: 契约上界（提交即返回；装配挪到后台就是契约本体）
+    assert submit_sec < 0.1, f"装配又回到调用线程了：submit 阻塞 {submit_sec:.2f}s"
+    release.set()
+    assert built.wait(5), "后台线程没开始装配"
+    assert runner.drain(timeout=5.0) is True
+    # 结果穿透 = 后台线程真的把 thunk 求了值（`_build` 抛的话这里不会有结果）
+    assert runner.results == [{"ran": True, "it": 5}], logs
+
+
 def test_drain_is_bounded_and_reports_overrun(monkeypatch: pytest.MonkeyPatch) -> None:
     """段末收线是**有界**的：跑不完就记一笔 WARN 返回 False（不无限挂住进程）。"""
     release = threading.Event()

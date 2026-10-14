@@ -71,11 +71,17 @@ ALLOWED_IMPORTS = {
     "__future__",
     "collections.abc",
     "dataclasses",
+    "functools",
     "json",
     "pathlib",
     "shutil",
     "time",
     "typing",
+    # 2026-10-14（plan/offline-local-disk-first §3.3 A4）：云机评估腿的落点段一律包上界
+    # （`call_bounded` 自 `common.platform_utils`，白名单里已有）。上界常量的**单一来源**是
+    # `common.game_watch`（L0：只依赖 stdlib + platform_utils）——与 rollout 腿同口径，
+    # 不许在本地再写两个数。`functools` 只为 `partial`（stdlib）。
+    "common.game_watch",
     "common.logutil",
     "common.protocol",
     "common.platform_utils",

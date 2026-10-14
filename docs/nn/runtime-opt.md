@@ -8,6 +8,50 @@
 
 ---
 
+## §36 落点链再砍一刀：**删掉网络盘测速探针** —— 默认本地盘，网络盘只在回传失败时出现（2026-10-14）
+
+> ⚠ **本节推翻 §35.1（探针上界）与 §34.2 的速度闸（评审 F6）**。上游：`plan/offline-local-disk-first.plan.md`
+> （v2，2026-10-14）+ 评审 `plan/offline-local-disk-first.review-bf.md`；用户当日三条拍板（① 默认写本地盘、
+> ② **全腿**（含产物目录）本地盘、③ 只在回传失败时备份网络盘）；落地记录 → `DECISIONS.md`
+> §2026-10-14-goalnn-offline-local-disk-first。
+> 现场（云机 `y5-hit`，02:48:49 → 02:51:08）：**139s 静默**——`轮次补传检查` 的 `ticks 5→6` 而 `cpu 只 +0.91s`
+> （纯阻塞 IO），同一轮 rollout 腿刚报过 `probe_probe=超界回退｜5s 内没返回`，缺口末尾才打出 `_layout()` 的
+> 唯一一行；eval 本体只用了 2.0s。
+
+* **为什么「上界」治不了它**（§35.1 的解法被推翻的理由）：`call_bounded` 是「可放弃的等」**不是熔断**
+  （被放弃的线程是 daemon：不杀、不 join）⇒ 5s 上界买到的是「5s + **一条仍在写 8MB+fsync 的残留线程**」，
+  而残留线程继续压同一个挂载点。真正的问题是**这笔等根本不该存在**：网络盘的速度不是我们需要的决策输入。
+* **删掉的东西**（生产路径上不再有任何对网络盘的测速调用）：`common/scratch.probe_write_speed_mbps`
+  （8MB 顺序写 + fsync + 回读）· `SCRATCH_PROBE_BYTES` · `SCRATCH_PROBE_MIN_SPEEDUP`（F6 速度闸）·
+  `resolve_scratch_root`/`open_scratch` 的 `probe=` 注入缝 · `common/game_watch.PROBE_CEILING_SEC`（§35.1 的
+  5s 上界）。判据只剩**容量**一条（`free ≥ need × 1.5`，`need` 不含比值）。**代价（明写）**：不再证明
+  本地比网络快，直接假定它快（拍板-1 就是这个假定）；「`/tmp` 是不是本地介质」（§34.2 原话 = 仓内无取证）
+  改由落点读数 + 首轮墙钟取证。
+* **rollout 腿**（`worker/iter_rollout.py`）：落点段从 `call_bounded(open_scratch, PROBE_CEILING_SEC)` 改回
+  **裸调**——剩下的只有本地盘操作（mkdir / 写探针 / unlink / statvfs），「挂住的挂载点」这个物理来源消失。
+  `install_tree`/`mirror_inputs` 仍是真网络 IO ⇒ **保留** `call_bounded(SCAN_CEILING_SEC=60s)`。轮报读数
+  `probe_probe` → **`落点=本地:<path>｜建布局 x.xxs`** ∨ `落点=网络(回退原地｜成因=…)｜建布局 x.xxs`
+  （成因取自 `open_scratch` 的说明行：`off` 一族 / 不可写 / `free=… < need=…`）。
+* **eval 腿**（`remote/plan_handoff._eval_job_builder`）：五处裸调用一律包上界、与 rollout 腿同口径
+  （`install_tree`→`SCAN_CEILING_SEC`；`clear_dir`×2 / `install_file`→`DRAIN_CEILING_SEC`），任一步超界/失败
+  ⇒ **本段**降档回退原地（`state["layout"]=None`：不再每轮各付一次注定等满的上界）+ 响亮一行；并补上
+  `[eval-cloud] 落点=…｜建布局 x.xxs` 读数（此前该腿**零读数**，现场因此只能靠时间戳推断）。
+* **`submit()` 的装配后移**（`remote/offline_eval.CloudEvalRunner`）：`submit(it)` 只入队一个 thunk，
+  `dict(self._build(it))` 挪进后台 `_loop` 里求值 ⇒ 装配的任何挂死只拖 eval 自己，不再拖训练循环。
+  安全性 = 调用点在 `_checkpoint` **之后**（`it-NNN/weights.json` 已原子落盘，`wver` 不变、账本可配对）。
+* **逃生门补真语义**：`NN_ROLLOUT_SCRATCH=off`（同族 `none/0/false/no`，大小写不敏感）⇒ **强制回退档**
+  （跳过整条候选链、不建目录、不探针）。此前它被当成路径 ⇒ 在 cwd 下建一个叫 `off` 的目录并当 scratch 根用
+  （文档承诺的一键回退是坏的）。
+* 守卫：`tests/remote/test_rollout_scratch.py`（落点解析在 job 目录上**零写入**的哨兵 mtime 对账 · `off` 档不建目录 ·
+  落点读数 · eval 腿超界降档的墙钟上界 + 回退档三件读数 · 注入慢 build 后 `submit()` 仍 < 0.1s）·
+  `tests/remote/test_round_ctx.py`（落点解析一轮一次）· `tests/remote/test_offline_eval_cloud.py`（thunk 后移）。
+  文本断言基线抬一格（1457 → 1460 = 新增 5 条读数行 − 删 2 条旧读数行，账在
+  `tests/test_source_text_assert_budget.py` 模块头）。
+* **本节的后续腿（尚未落地）**：产物根落本地 + 网络盘 `backup/` + 反向恢复（`plan/offline-local-disk-first`
+  §3.2/§3.4/§3.5 = B/C 腿）—— 落地后本节续写，届时「网络盘只在回传失败时出现 0 次或 1 次」才成立。
+
+---
+
 ## §35 rollout 热路径四刀：scratch 探针有上界 · 补差批按机器宽度铺满 · 轮级 `RoundContext` · **取消搬回**（2026-10-11）
 
 > 起因（`plan/rollout-topup-fastpath.plan.md`，评审 `plan/rollout-topup-fastpath.review-bf.md`）：
@@ -16,6 +60,10 @@
 > 两条根因性质不同（一个是**无界的等**，一个是**批粒度口径**），所以是两刀。
 
 ### 35.1 探针上界（真根因）
+
+> ⚠ **本节已被推翻**（2026-10-14，`plan/offline-local-disk-first` §3.1 → 本文件 §36）：探针**连同这个上界**
+> 整个删了 —— 上界买到的是「等满 5s + 一条仍在写 8MB 的残留线程」，而「网络盘测速」本身就不该存在。
+> 下文保留为历史判断的记录（当时的取舍可读），**不要再把探针接回去**。
 
 `worker/iter_rollout.py` 的落点解析 `scratch.open_scratch(jd, …)` 是这条热路径上**唯一没有上界**
 的一步：`probe_write_speed_mbps` 只有 `except OSError`（挂住的挂载点既不返回也不抛），而它跑在
@@ -166,6 +214,9 @@ eval 腿的病**不在写量**（200 × 3.4KB ≈ 680KB），在：① 94 路冷
 * **为什么量速度**（评审 F6）：「`/tmp` 是本地盘、IOPS 高一到两个数量级」在仓内无取证；
   若 Kaggle 的 `/tmp` 也在同一块慢后端上，本 plan 收益为 0 而 drain/清理/拷贝三条失败面照旧
   ⇒ **测出来不够快就回落**（宁可原地跑）。
+  ⚠ **这条闸已删**（2026-10-14，本文件 §36 / `plan/offline-local-disk-first` §3.1）：参照值必须在**网络盘
+  （job 目录）上现场测**（每轮一次 8MB + fsync），于是它是整条路径上唯一必须碰坏挂载点、又唯一没有上界的
+  一步；「/tmp 是否真是本地介质」改由落点读数 + 首轮墙钟取证。
 * **为什么不用 `/dev/shm`**：Docker/Kaggle 默认 64MB，85 局需 170–280MB ⇒ 由容量闸弹掉；
   它仍是候选链第 2 档（TPU/大内存实例上可能真够）。
 * **布局**：作业私有目录 `<根>/nn-rollout-<作业名>-<hash8(作业根绝对路径)>/`（**同机多会话互不误删**，
