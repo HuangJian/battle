@@ -68,6 +68,23 @@ def test_rl_argparser_wires_the_single_decision_knob() -> None:
     assert ap2.parse_args([]).remote_transport == "pull"
 
 
+def test_wire_diet_defaults_on_and_stays_rollbackable() -> None:
+    """★ 2026-10-14 用户令「不需要 A/B，全部启用」：缺省就是 **1**（DECISIONS
+    §2026-10-14-goalnn-wire-diet-enable-all），而回退旋钮 `rl.wire_diet: 0` 必须还在。
+
+    为什么值得一条用例：缺省值是「全部启用」这道的**唯一实现点**，有人把它拨回 0 时
+    现象是「字节默默变多」（而不是报错）—— 这条红线只能靠这里钉住。
+    """
+    ap = build_argparser("per-tick", {})
+    assert ap.parse_args([]).wire_diet == 1
+    # 一次性回退：rl-config 写 0 ⇒ 逐字节旧行为；命令行显式传参覆盖配置。
+    assert build_argparser("per-tick", {"wire_diet": 0}).parse_args([]).wire_diet == 0
+    assert ap.parse_args(["--wire-diet", "0"]).wire_diet == 0
+    assert build_argparser("per-tick", {}).parse_args(["--wire-diet", "1"]).wire_diet == 1
+    with pytest.raises(SystemExit):
+        ap.parse_args(["--wire-diet", "2"])
+
+
 # ────────────────────────── hub 中介推送（resolve_hub_push） ──────────────────────────
 
 

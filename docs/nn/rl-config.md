@@ -58,7 +58,8 @@
 
 | 类 | 判据 | 处置 | 例 |
 |---|---|---|---|
-| **A 机器/环境级** | 值描述**这台机器/这条链路**，课程文件天然表达不了 | 留 | `rl.hub_port` `agent_port` `remote_token` `remote_hub_url` `remote_hubs` `cf_protocol` `cf_edge_ip` `slim` `torch_threads` `nodes[]` · **`rl.local_slots` / `rl.workers`**（本机并发配额，见 §1.4b） |
+| **A 机器/环境级** | 值描述**这台机器/这条链路**，课程文件天然表达不了 | 留 | `rl.hub_port` `agent_port` `remote_token` `remote_hub_url` `remote_hubs` `cf_protocol` `cf_edge_ip` `slim` `wire_diet` `torch_threads` `nodes[]` · **`rl.local_slots` / `rl.workers`**（本机并发配额，见 §1.4b）。
+**`rl.wire_diet`**（2026-10-14 新增登记）：wire-diet 的后退旋钮 —— 缺省/不写 = **开**（用户令「全部启用」），写 0 = 逐字节旧行为（打包端不先算 reward、字段不存 f16）；只影响传输副本，不影响本机训练与 eval。 |
 | **B 全局缺省** | 课程文件 schema **有同名键**，这里只是「课程没写时的兜底」 | 只留必要兜底；**范围内全绿的删掉**（判据与执行见 §1.4b） | `rl.mb` `seed_rotate` `keep_iters` `eval_window_sec` |
 | **C 调度策略** | 「怎么派活」而非「怎么训」的阈值 | 留 | `policy.taskTimeoutSec` `taskFetchTimeoutSec` `queueWindowSec` `statusTimeoutSec` `nodeFailStreak` `streamKlCap` |
 | **D 每课机器侧** | 控制台开课/热切的写面；per-course 最具体 | 留活课、删停课 | `courses.<课>.{rollout_src,run_iters}`（2026-10-02 第二刀后：止损两键已随腿入库、不属 D 类，见 §3） |

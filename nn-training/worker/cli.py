@@ -518,12 +518,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
     ap.add_argument(
         "--wire-diet",
         type=int,
-        default=_d("wire_diet", 0),
+        # **默认 1**（2026-10-14 用户令「不需要 A/B，全部启用」，DECISIONS
+        # §2026-10-14-goalnn-wire-diet-enable-all）：plan §6 的真机 A/B 还**没跑**就翻。
+        # 回退旋钮 = rl-config 的 `rl.wire_diet: 0`（已登记进 `rl_config.schema.json`）。
+        default=_d("wire_diet", 1),
         choices=(0, 1),
         help="payload 字节瘦身（plan/wire-diet §3 M1+M2）：1=打包端先算 reward（不带"
-        " metrics.npy）+ 训练输入字段存 f16；**0=默认，逐字节旧行为**。翻 1 的前置 ="
-        " plan §6 的真机 A/B（配对 ≥10 job，比 p50/p90）；取值进 iteration 事件的"
-        " wire.wire_diet（A/B 归因用）",
+        " metrics.npy）+ 训练输入字段存 f16；**1=默认**，0=逐字节旧行为（回退旋钮："
+        "rl-config 的 rl.wire_diet）。取值进 iteration 事件的 wire.wire_diet（归因用）",
     )
     # M3（2026-09-17，plan/remote-wire-remediation §5.2）：rollout 上云开关。
     # local = 历史行为（hub 采样本机产 shard，整轮口径逐字节不变）；

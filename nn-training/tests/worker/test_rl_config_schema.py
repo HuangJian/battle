@@ -92,6 +92,16 @@ def test_unknown_keys_warn_but_never_raise() -> None:
     assert any("mystery" in line for line in out)
 
 
+def test_wire_diet_is_a_first_class_rl_knob() -> None:
+    """`rl.wire_diet` 已登记白名单 —— 它是「全部启用」（2026-10-14 用户令）的**回退旋钮**。
+
+    没登记的话写 `rl.wire_diet: 0` 会被当未知键只告警（能用但看着像写错），而回退那天正是
+    最不该猜测的时刻。
+    """
+    assert "wire_diet" in S.allowed_keys("rl")
+    assert S.check_rl_config({"rl": {"wire_diet": 0}}) == []
+
+
 def test_freeform_sections_are_not_drilled() -> None:
     cfg = {
         "nodes": [{"id": "a", "authKey": "k", "whatever_field": 1}],

@@ -43,6 +43,7 @@
       "cf_protocol",
       "cf_edge_ip",
       "slim",
+      "wire_diet",
       "rollout_src",
       "remote_transport",
       "remote_job_root",

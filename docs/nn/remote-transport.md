@@ -37,8 +37,18 @@ delta 载荷，当权重落盘即静默污染链）；③ 缺 base（worker 侧�
 **唯一宽容的一档**：**不是容器**（旧 worker / 冒烟回显送来的整份 JSON / tar）⇒ 按旧形态**原样**落盘 +
 一行 WARN（发布端与节点代可能错位，旧代节点不该让整条腿的 job 全废）。
 
-**刻度**：开关仍 `--wire-diet 0`，等 `plan/wire-diet.plan.md` §6 的真机 A/B（≥20 轮对照，查分叉）通过
-才翻 1。两档的**计数**（这一轮到底走的哪档）从日志行 grep `base_sha=identity` 即可复算。
+**刻度（2026-10-14 起：全部启用，无 A/B）**：用户令「不需要 A/B，全部启用」⇒ `--wire-diet` 缺省翻 1
+（`plan/wire-diet.plan.md` §6 的真机 A/B 至今**未跑**，风险自担；决策 `DECISIONS.md`
+§2026-10-14-goalnn-wire-diet-enable-all）。两个**回退旋钮**（都不改代码、只改 rl-config）：
+
+| 想关掉 | 旋钮 | 一并关掉的 |
+|---|---|---|
+| M1+M2（reward 前置 + 字段 f16） | `rl.wire_diet: 0` | 只这一项 |
+| M2 的内容寻址 blob + **R1/R3 的 delta 形态位** | `rl.slim: 0` | opt/ref/init/demo 全走内联 base64（上行回到 ~4.4 MB） |
+
+R1/R3 的形态位挂在 `use_init_blob` / `use_opt_blob`（= `slim AND 有字节`）上 ⇒ **缺省早已是「开」**
+（自 M4 切片 2 / M3 落地那个 commit 起），本次翻的只是 M1/M2 那一档。两档的**计数**（这一轮到底走的哪档）
+从日志行 grep `base_sha=identity` 即可复算。
 
 ---
 

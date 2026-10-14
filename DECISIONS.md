@@ -6011,3 +6011,27 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   全文 → `plan/wire-diet.plan.md` §3 R1 / §13 · `docs/nn/remote-transport.md` §94 · 代码
   `remote/weights_delta.py`。
 
+
+## §2026-10-14-goalnn-wire-diet-enable-all（2026-10-14，用户令：**不跑 A/B，wire-diet 缺省全部启用**）
+
+- **原话**：「不需要 A/B，全部启用！！！」（承接 `plan/wire-diet.plan.md` §6 的「A/B 通过前 `--wire-diet`
+  保持 0」；同一会话里最后一轮 M3/R1 刚落地）。
+- **定案**：① `worker/cli` 的 `--wire-diet` 缺省 `_d("wire_diet", 0)` → **1**（M1 打包端先算 reward +
+  M2 训练输入字段 f16 从此缺省开）；`trainer/loop_remote_job` 两处 `getattr(args, …, 0)` 兜底同步改 1；
+  ② `rl_config.schema.json` 的 `rl` 键表登记 `wire_diet` ⇒ 它从「未知键（只告警）」升为**一等回退旋钮**
+  （`rl.wire_diet: 0` = 逐字节旧行为），`docs/nn/rl-config.md §1.1` 的 A 类行同步登记。
+- **一个必须说清的账**：**R1/R3（M3/M4）的形态位早已是「开」** —— `manifest.w_fmt` / `manifest.opt_fmt`
+  的门是 `use_init_blob` / `use_opt_blob`（= `slim AND 有字节`），而 `rl.slim` 缺省 1（2026-09-24 opt-blob-diet
+  起）⇒ 本次翻的只是 M1+M2 那一档。要真正回到「逐字节旧行为」需 **两个**旋钮一起关
+  （`rl.wire_diet: 0` + `rl.slim: 0`；后者代价 = 上行回 ~4.4 MB，opt/ref/init/demo 全走内联 base64）。
+- **风险自担（无 A/B 就上线，写清以便复查）**：① R1/R3 的净收益依赖 M0 身份映射**命中**，未命中的 ~5% job
+  每轮反而多付 ~1 MB 下行（`plan/wire-diet.plan.md` §3 R0 的账）；② identity 档下 hub 只能靠身份闸 +
+  结构闸，链上偏差是量化误差量级的随机游走 —— 现在**没有**「两条曲线无偏离」这份证据；③ f16 只改传输副本
+  （本机 shard 仍 f32、`data_fp` 不变）。
+- **被否决备选**：① 仍先跑 A/B 再翻（用户明确否决：要的是省下那段时间）；② 只把课程配置里的
+  `rl.wire_diet` 设 1 而不改缺省（否决：新课程/新机器会悄悄退回旧行为，缺省才是一次性决断）；
+  ③ 把 R1/R3 的形态位从 `slim` 改挂 `wire_diet`（否决：会改动已落地的门语义、动到 M3/M4 的既有用例面，
+  与「全部启用」无关）。
+- **后果**：缺省行为变为「M1+M2+M3+M4 全开」；`plan/wire-diet.plan.md` §6 那条 DoD 降级为**事后观测**清单
+  （五组数的取法见 §14 末条 / `docs/nn/remote-transport.md` §94），§14 存同一条账。
+- **全文** → `plan/wire-diet.plan.md` §6 / §14 · `docs/nn/remote-transport.md` §94 · `docs/nn/rl-config.md` §1.1。

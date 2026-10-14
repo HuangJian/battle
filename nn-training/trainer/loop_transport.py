@@ -511,8 +511,8 @@ def _wire_from_result(
         "protocol": c.get("protocol"),
         "edge_ip": c.get("edge_ip"),
         "slim": c.get("slim"),
-        # wire-diet（plan/wire-diet.plan.md）开关：缺省 0 = 逐字节旧行为；A/B 归因用。
-        # 旧行无此键（additive），读取侧按 None 处置。
+        # wire-diet（plan/wire-diet.plan.md）开关：缺省 1（2026-10-14 用户令全部启用）；
+        # 归因用。旧行无此键（additive），读取侧按 None 处置。
         "wire_diet": c.get("wire_diet"),
         "rollout_src": c.get("rollout_src"),
         # worker 侧拆分原样挂上（观测用；plan §2.2 未把它写进 hub 字典，但两半
