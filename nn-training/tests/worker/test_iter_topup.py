@@ -270,17 +270,54 @@ def test_topup_batches_do_not_rescan_the_same_manifests(
     assert scans["n"] == 1, "除了首批基线，补差批不该再扫盘读同一批 manifest"
 
 
-def test_width_source_chain_is_explicit_then_spec_then_argv() -> None:
-    """补差批的宽度来路（plan §3.3）：首批**实际用过**的 workers → `spec["workers"]` → argv 条数。
+def test_width_source_chain_is_slot_then_spec_then_argv() -> None:
+    """补差批的宽度来路（plan A1）：**轮级槽位** → `spec["workers"]` → argv 条数（退化档）。
 
-    三者都拿不到 ⇒ `0`（调用方据此**不补差**）——批大小直接决定批次级固定开销摊在几局上，
-    猜一个宽度就是拿墙钟赌（宁可不补）。
+    ★ `explicit` 的语义 = 本机能同时跑的局数上限（`iter_info["slots"]`），**不是**首批实际用过
+    的 workers——后者会把「下一批铺多少局」上界成「本批有几局」（现场 64 批 × 1 局）。
+    三者都拿不到 ⇒ `(0, "none")`（调用方据此**不补差**）——批大小直接决定批次级固定开销摊在
+    几局上，猜一个宽度就是拿墙钟赌（宁可不补）。
     """
     spec = {"argv": [["x"], ["y"], ["z"]]}
-    assert _resolve_width(7, spec) == 7  # 调用方给的（首批实际 workers）优先
-    assert _resolve_width(0, {**spec, "workers": 4}) == 4
-    assert _resolve_width(None, {**spec, "workers": 0}) == 3  # 首批 argv 条数
-    assert _resolve_width(None, {"argv": []}) == 0  # 拿不到 ⇒ 不猜
+    assert _resolve_width(7, spec) == (7, "slot")  # 调用方给的（轮级槽位）优先
+    assert _resolve_width(0, {**spec, "workers": 4}) == (4, "spec")
+    assert _resolve_width(None, {**spec, "workers": 0}) == (3, "argv")  # 退化档
+    assert _resolve_width(None, {"argv": []}) == (0, "none")  # 拿不到 ⇒ 不猜
+
+
+def test_argv_width_degradation_is_loud(tmp_path: Path) -> None:
+    """退化到 argv 档**不许静默**（A4/P3）：`topup_rollout` 必须打 `WARN … 宽度退化`。
+
+    这条 WARN 是「下次一眼看出退化」的哨兵：现场日志里 `满铺 width=1` 本身不带任何归因。
+    """
+    job = tmp_path / "job"
+    job.mkdir()
+    (job / "init_weights.json").write_text("{}", encoding="utf-8")
+    spec = _plan_and_spec(job)
+    spec["workers"] = 0  # 节点侧覆盖/取不到 ⇒ 只能回退 argv 档（退化）
+    msgs: list[str] = []
+    run = _FakeRunner()
+    info1 = run(job, spec, ts_dir=job)
+    extra = topup_rollout(
+        job_dir=job, spec=spec, shard_dirs=list(info1["shard_dirs"]), run_fn=run, log=msgs.append
+    )
+    assert extra is not None
+    assert any("宽度退化" in m for m in msgs), msgs
+    # 而槽位档不打退化 WARN（显式给了 width = 槽位就是正常路）；批日志报槽位值
+    msgs2: list[str] = []
+    run2 = _FakeRunner()
+    info2 = run2(job, spec, ts_dir=job)
+    extra2 = topup_rollout(
+        job_dir=job,
+        spec=spec,
+        shard_dirs=list(info2["shard_dirs"]),
+        run_fn=run2,
+        log=msgs2.append,
+        width=4,
+    )
+    assert extra2 is not None
+    assert not any("宽度退化" in m for m in msgs2), msgs2
+    assert any("满铺 width=4" in m and "槽位=4" in m for m in msgs2), msgs2
 
 
 def test_topup_is_off_without_volume_block(tmp_path: Path) -> None:

@@ -41,9 +41,11 @@ from worker.iter_rollout import RoundContext, run_iter_rollout
 class _FakePool:
     """池的替身：只记「建了几次 / 收了几次」（不启 bun）。"""
 
-    def __init__(self) -> None:
+    def __init__(self, width: int = 1) -> None:
         self.started = 0
         self.closed = 0
+        #: A2 的重建判据要读它（真池 = `serve_pool.ServePool.max_workers`）
+        self.max_workers = max(1, int(width))
         # 下面几个是 `pool.summary()` / `serve_pool` 读数行要的属性（值与用例无关）
         self.served = 0
         self.spawned = 0
@@ -194,6 +196,65 @@ def test_a_failing_batch_leaves_the_pool_for_the_owner(
     assert rctx.pool is pool and pool.closed == 0, "抛出时池还在 ctx 上（等调用方收）"
     rctx.close()
     assert pool.closed == 1
+
+
+def test_pool_is_built_at_the_round_slot_width_for_topup_rounds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2：补差轮里首批可能只有 1 局，池宽必须按**轮级槽位**建。
+
+    否则（旧形状）1 宽的暖池服务不了接下来的宽批：除 1 局外全部一次性 spawn，且很快就把
+    `breaker_after = max(4, 1//4)` 拉到熔断（停补位）——A1 的收益当场归零。
+    """
+    _watchdog(monkeypatch)
+    _only_candidate(monkeypatch, _local_root(tmp_path))
+    monkeypatch.setattr(iter_rollout, "cpu_worker_slots", lambda cores=None: 4)
+    monkeypatch.setattr(iter_rollout, "workers_cap", lambda: 0)
+    widths: list[int] = []
+
+    def make_pool(bun: Any, tsd: Any, argvs: Any, workers: int, log: Any) -> _FakePool:
+        widths.append(int(workers))
+        return _FakePool(width=int(workers))
+
+    monkeypatch.setattr(iter_rollout, "_make_pool", make_pool)
+    spec = _stub_spec(tmp_path, [(0, 0)])  # 首批 1 局
+    spec["workers"] = 0  # 节点自定 ⇒ 槽位 = cpu_worker_slots() = 4
+    spec["volume"] = {"topup": {"max_batches": 3}}
+    rctx = RoundContext()
+    run_iter_rollout(_job_dir(tmp_path), spec, log=lambda _m: None, ctx=rctx)
+    assert widths == [4], f"补差轮的池要按槽位建（首批只有 1 局）：{widths}"
+    assert rctx.workers == 4
+
+
+def test_narrow_pool_is_rebuilt_to_the_round_slot(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2 的保险丝：上游遗留的窄池（`max_workers < 本批想要的宽`）⇒ 关旧建新。"""
+    _watchdog(monkeypatch)
+    _only_candidate(monkeypatch, _local_root(tmp_path))
+    monkeypatch.setattr(iter_rollout, "workers_cap", lambda: 0)
+    monkeypatch.setattr(iter_rollout, "cpu_worker_slots", lambda cores=None: 8)
+    narrow = _FakePool(width=1)
+    wide = _FakePool(width=8)
+    built: list[_FakePool] = []
+
+    def make_pool(*a: Any, **kw: Any) -> _FakePool:
+        built.append(wide)
+        return wide
+
+    monkeypatch.setattr(iter_rollout, "_make_pool", make_pool)
+    job = _job_dir(tmp_path)
+    rctx = RoundContext()
+    rctx.resolved = True  # 轮级资源已解析（本例只关心池）
+    rctx.workers = 8
+    rctx.job_dir = job
+    rctx.pool = narrow
+    spec = _stub_spec(tmp_path, [(0, 0)])
+    spec["workers"] = 8
+    spec["volume"] = {"topup": {"max_batches": 3}}
+    run_iter_rollout(job, spec, log=lambda _m: None, ctx=rctx)
+    assert narrow.closed == 1, "窄池必须被收掉（不能把它留给宽批）"
+    assert built == [wide] and rctx.pool is wide
 
 
 def test_round_ctx_fallback_probes_once_too(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

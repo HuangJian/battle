@@ -39,8 +39,13 @@ PACK_INDEX = {
 
 
 def _code_zip(py: str = "MARKER = 1\n") -> bytes:
+    """一个**能过导入哨兵**的最小代码树（B3 之后候选要先 import 得动；判据见
+    `tests/remote/test_code_sentinel.py`）；`remote/_marker.py` 就是给用例读回内容的标记件。"""
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("common/shard.py", 'METRICS_NAME = "m"\n')
+        z.writestr("worker/ppo/np_core.py", "from common.shard import METRICS_NAME\n")
+        z.writestr("remote/run_loop.py", "MARKER = 'run_loop'\n")
         z.writestr("remote/_marker.py", py)
     return buf.getvalue()
 

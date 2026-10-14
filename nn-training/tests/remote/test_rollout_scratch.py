@@ -273,6 +273,62 @@ def test_round_capacity_budget_covers_the_topup_batches(
     assert seen["need"] == scratch.need_bytes_for(1), "畸形字段 ⇒ 当成没配（不把整轮推去回退档）"
 
 
+def test_round_capacity_budget_uses_the_round_slot_not_the_first_batch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A3：基准 = **满铺批宽**（槽位），批数预算分档：est 可求 ⇒ 按需；est=0 ⇒ 有界。
+
+    现场形状：首批 1 局、槽位 94、max_batches 64、est=0。旧估算 `1 × (1+64) = 65 局`；
+    而基准若直接乘 `(1+64)`（= 6110 局）会把整轮推去回退档（真包快回找不到）。
+    """
+    _watchdog(monkeypatch)
+    seen: dict[str, float] = {}
+
+    def fake_open(job_root: object, *, need_bytes: float, log: object = None) -> None:
+        seen["need"] = float(need_bytes)
+        return None  # 回退档（本例只关心“要了多少容量”）
+
+    monkeypatch.setattr(scratch, "open_scratch", fake_open)
+    monkeypatch.setattr(iter_rollout, "workers_cap", lambda: 0)
+
+    # ① 冷启动（est=0、无历史）⇒ 有界盘预算 = 首批 + 常规补差批数（3）
+    cold = tmp_path / "cold"
+    cold.mkdir()
+    spec = _stub_spec(tmp_path, [(2000, 1)])
+    spec["workers"] = 94
+    spec["volume"] = {
+        "topup": {"max_batches": 64},
+        "per_stage_quota": 24000,
+        "est_s_by_stage": {2000: 0},
+    }
+    run_iter_rollout(cold, spec, log=lambda _m: None)
+    assert seen["need"] == scratch.need_bytes_for(94 * (1 + 3)), seen
+
+    # ② est 可求（190 samples/局 ⇒ 待补 ≈ 127 局 ⇒ 2 批）⇒ 94 × 3，不是 94 × 65
+    est = tmp_path / "est"
+    est.mkdir()
+    spec2 = _stub_spec(tmp_path, [(2000, 1)])
+    spec2["workers"] = 94
+    spec2["volume"] = {
+        "topup": {"max_batches": 64},
+        "per_stage_quota": 24000,
+        "est_s_by_stage": {2000: 190},
+    }
+    run_iter_rollout(est, spec2, log=lambda _m: None)
+    assert seen["need"] == scratch.need_bytes_for(94 * (1 + 2)), seen
+
+
+def test_cold_start_capacity_budget_matches_the_topup_default() -> None:
+    """跨层常量对账（`offline_boot` 的先例：复制一份 + 测试钉逐字相同）。
+
+    `worker.iter_rollout`(L1) 不能 import `worker.volume_alloc`(L2)（`test_remote_dag` 禁上向
+    边），而 A3 的冷启动盘预算就取「常规补差批数」⇒ 两边锻死：漂了立刻红。
+    """
+    from worker.volume_alloc import DEFAULT_TOPUP_MAX_BATCHES
+
+    assert iter_rollout.COLD_START_CAPACITY_BATCHES == DEFAULT_TOPUP_MAX_BATCHES
+
+
 def test_env_override_wins_even_with_no_candidates(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

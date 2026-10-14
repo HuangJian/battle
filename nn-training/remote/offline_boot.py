@@ -60,6 +60,8 @@ import io
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import threading
 import time
@@ -69,7 +71,7 @@ import urllib.parse
 import urllib.request
 import uuid
 import zipfile
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -131,7 +133,7 @@ CODE_DIR = "/tmp/worker-code"
 #: （磁盘已是新版、`sys.modules` 里还是 08:09 那版，于是「看着新的、跑着旧的」）。
 #: notebook 打 `getattr(offline_boot, "BOOT_SELF", "<missing>")`，旧模块会显示 `<missing>`。
 #: **改本文件时把末位 +1**（纯人读约定，没有代码读它做判断）。
-BOOT_SELF = "boot-2026-10-08a"
+BOOT_SELF = "boot-2026-10-14a"
 
 #: 产物目录的三件「续跑真值」（与 `remote/artifacts.py::ArtifactStore` 逐字相同；测试守）。
 #: 三件齐全 = 本机有可续跑的产物（plan/offline-rerun-local-first §3 的判据）。
@@ -963,33 +965,214 @@ def _pack_member(pack: Path | None, name: str) -> bytes | None:
         return None
 
 
-def _code_candidates(
-    pack: Path | None, dest: Path | None, hub: str, token: str, log: Callable[[str], None]
-) -> list[tuple[str, bytes]]:
-    """代码候选（按优先级）：产物目录 → 任务包 → hub 的共享 `GET /code`（与课程无关的兜底）。"""
-    out: list[tuple[str, bytes]] = []
-    if dest is not None and (dest / CODE_NAME).is_file():
+# ── 代码 / TS 就位（工具态取权威源 + 导入哨兵 + 换码事务；plan/offline-code-authority-and-width）──
+#
+# 三件事住在这里，顺序就是判据：
+#   ① 候选序 = **任务包 → hub `/code` → 本机产物**（惰性：hub 只在包缺件时才取）；
+#   ② 每个候选解出来先过**导入哨兵**（混血树在训练之前就被拦下，不等 train_core）；
+#   ③ 选定即**换码事务**：字节写回产物目录 + 原子改写段级 manifest 的那把 sha。
+
+#: 导入哨兵的清单 / 超时 / 本仓顶层包（与 `common/code_sentinel.py` 逐字相同，用例对账）。
+#: 为什么这里**内联一份**同形实现（而不是延迟 import 仓库里那份）：本模块是自包含引导模块，
+#: 而哨兵要判的正是**候选树自己** —— 判据不能交给被审对象（老包还没有 `common/code_sentinel.py`；
+#: 且 `common/proc.py` 的「谁不能用本包」明写本模块不许依赖 `common`）。
+_SENTINEL_MODULES: tuple[str, ...] = ("common.shard", "worker.ppo.np_core", "remote.run_loop")
+_SENTINEL_TIMEOUT_SEC = 60.0
+_SENTINEL_REPO_TOPS: tuple[str, ...] = ("biz", "common", "remote", "worker")
+#: 子进程正文：逐个 import，失败时把**分类**打成一行 JSON（父进程只解析它，不从 stderr 猜）。
+#: `kind="env"`（缺第三方：numpy/torch…）与 `kind="code"`（本仓模块坏了）必须分开 —— 前者放行
+#: （换候选也换不来一个 numpy），后者换候选 / 拒跑。
+_SENTINEL_SCRIPT = (
+    "import importlib, json, os, sys, traceback\n"
+    "mods = [m for m in os.environ.get('BCITY_SENTINEL_MODULES', '').split(',') if m]\n"
+    "tops = {t for t in os.environ.get('BCITY_SENTINEL_REPO_TOPS', '').split(',') if t}\n"
+    "for m in mods:\n"
+    "    try:\n"
+    "        importlib.import_module(m)\n"
+    "    except BaseException as e:\n"
+    "        tb = traceback.format_exc().strip().splitlines()[-4:]\n"
+    "        is_mnf = isinstance(e, ModuleNotFoundError)\n"
+    "        miss = str(getattr(e, 'name', '') or '').split('.')[0] if is_mnf else ''\n"
+    "        kind = 'env' if (miss and miss not in tops) else 'code'\n"
+    "        sys.stdout.write(json.dumps({'ok': False, 'kind': kind, 'missing': miss,\n"
+    "                                     'exc': type(e).__name__, 'at': m, 'tb': tb}) + '\\n')\n"
+    "        raise SystemExit(3)\n"
+    "sys.stdout.write(json.dumps({'ok': True}) + '\\n')\n"
+)
+
+
+def _run_import_sentinel(code_dir: Path) -> tuple[bool, str, str]:
+    """在**有界子进程**里逐个 import `_SENTINEL_MODULES` ⇒ `(ok, kind, detail)`。
+
+    `PYTHONPATH=<code_dir>`、`cwd=<code_dir>`；`kind` 只在 `ok=False` 时有意义（`env` / `code`）。
+    为什么必须是子进程：① 隔离 —— 引导端 `sys.modules` 里可能已经装了别的版本的仓库模块，
+    进程内 import 量的是**那份**、不是候选树；② 有界 —— `timeout=` 能连树杀，进程内 import
+    没有取消手段。`detail` 是给人读的一手证据（`encoding` 显式 UTF-8：本模块不许依赖 `common`，
+    就地写全，见 `common/proc.py` 的模块 docstring）。
+    """
+    env = dict(os.environ)
+    prev = env.get("PYTHONPATH") or ""
+    env["PYTHONPATH"] = str(code_dir) + ((os.pathsep + prev) if prev else "")
+    env["BCITY_SENTINEL_MODULES"] = ",".join(_SENTINEL_MODULES)
+    env["BCITY_SENTINEL_REPO_TOPS"] = ",".join(_SENTINEL_REPO_TOPS)
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", _SENTINEL_SCRIPT],
+            cwd=str(code_dir),
+            env=env,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_SENTINEL_TIMEOUT_SEC,
+        )
+    except subprocess.TimeoutExpired:
+        # 挂住 ⇒ 这份树不能信任（换候选），**不是**环境缺件
+        return False, "code", f"哨兵超时（>{_SENTINEL_TIMEOUT_SEC}s）"
+    except OSError as e:
+        # 起不了子进程 = 环境问题：换候选也换不来一个可用的解释器
+        return False, "env", f"起不了哨兵子进程（{type(e).__name__}: {e}）"
+    res = _last_json_object(proc.stdout or "")
+    if proc.returncode == 0 and res.get("ok"):
+        return True, "", ""
+    tail = (proc.stderr or proc.stdout or "").strip().splitlines()[-6:]
+    if res:
+        kind = "env" if res.get("kind") == "env" else "code"
+        miss = str(res.get("missing") or "")
+        detail = f"{res.get('exc', '?')} @ {res.get('at', '?')}" + (f"（缺 {miss}）" if miss else "")
+        tb = res.get("tb")
+        if isinstance(tb, list) and tb:
+            detail += "｜" + " / ".join(str(x) for x in tb)
+        elif tail:
+            detail += "｜" + " / ".join(tail)
+        return False, kind, detail
+    return False, "code", "｜".join(tail) or f"exit={proc.returncode}"
+
+
+def _last_json_object(stdout: str) -> dict:
+    """子进程 stdout 里最后一个 JSON 对象（读不到 ⇒ 空 dict）。"""
+    for s in reversed(stdout.splitlines()):
+        s = s.strip()
+        if not s.startswith("{"):
+            continue
         try:
-            out.append((f"本机产物 {dest / CODE_NAME}", (dest / CODE_NAME).read_bytes()))
-        except OSError as e:
-            log(f"读本机 {CODE_NAME} 失败（{e}）——跳过它")
-    raw = _pack_member(pack, CODE_NAME)
-    if raw is not None:
-        out.append((f"任务包 {pack}", raw))
+            got = json.loads(s)
+        except ValueError:
+            continue
+        if isinstance(got, dict):
+            return got
+    return {}
+
+
+def _probe_candidate(code_root: Path, data: bytes) -> tuple[bool, str, str]:
+    """把候选解到 `code_root`（**先解到旁路 `.cand` 再换名**：半截树不冒充代码树）并过哨兵。
+
+    `(ok, kind, detail)` 见 `_run_import_sentinel`；解不开（坏 zip）算 `code` 类失败 —— 与
+    「哨兵不过」同一条路：换下一个候选，而不是把 traceback 摔在用户脸上。
+    """
+    cand = code_root.with_name(code_root.name + ".cand")
+    shutil.rmtree(cand, ignore_errors=True)
+    shutil.rmtree(code_root, ignore_errors=True)
+    cand.mkdir(parents=True, exist_ok=True)
+    try:
+        with zipfile.ZipFile(io.BytesIO(data)) as z:
+            z.extractall(cand)
+    except (OSError, zipfile.BadZipFile) as e:
+        shutil.rmtree(cand, ignore_errors=True)
+        return False, "code", f"解不开（{type(e).__name__}: {e}）"
+    cand.rename(code_root)
+    return _run_import_sentinel(code_root)
+
+
+def _pack_code_sha(idx: dict) -> str:
+    """包索引为 `code.zip` 背书的 sha：`code_sha256` → 退化 `parts["code.zip"].sha256` → `""`。"""
+    got = str(idx.get("code_sha256") or "")
+    if got:
+        return got
+    parts = idx.get("parts")
+    rec = parts.get(CODE_NAME) if isinstance(parts, dict) else None
+    return str(rec.get("sha256") or "") if isinstance(rec, dict) else ""
+
+
+def _code_stream(
+    pack: Path | None,
+    root: Path | None,
+    hub: str,
+    token: str,
+    idx: dict,
+    log: Callable[[str], None],
+) -> Iterator[tuple[str, bytes, str]]:
+    """代码候选流（**惰性**）——`(来源, 字节, 索引背书 sha)`，按权威序：
+
+      ① 任务包里的 `code.zip`（**权威源**；`expect` = 索引里那把 sha，空 = 老包没背书）；
+      ② hub 的共享 `GET /code`（包里没有代码时才取；这一支**成为本段的新权威**）；
+      ③ 本机产物 `<dest>/code.zip`（**最后兜底**，响亮 WARN —— 工具态本该以包为准）。
+
+    惰性是有意的：旧实现是**急切**构造整张候选表 ⇒ 每个会话都白拉一次 hub 的 1.19MB 再丢掉。
+    """
+    if pack is not None:
+        raw = _pack_member(pack, CODE_NAME)
+        if raw is not None:
+            yield f"任务包 {pack}", raw, _pack_code_sha(idx)
     if hub and token:
         try:
             got = _fetch_guarded(
-                hub.rstrip("/") + "/code",
-                _headers(token),
-                log,
-                "code.zip",
-                PACK_TIMEOUT,
+                hub.rstrip("/") + "/code", _headers(token), log, "code.zip", PACK_TIMEOUT
             )
         except Exception as e:
             log(f"hub 取共享代码失败（{type(e).__name__}: {e}）——跳过它")
         else:
-            out.append((f"hub {hub}/code", got))
-    return out
+            yield f"hub {hub}/code", got, ""
+    if root is not None and (root / CODE_NAME).is_file():
+        try:
+            live = (root / CODE_NAME).read_bytes()
+        except OSError as e:
+            log(f"读本机 {CODE_NAME} 失败（{e}）——跳过它")
+            return
+        log(
+            f"WARN: 用本机产物的 {CODE_NAME} 兜底（工具态本该以任务包为准 —— 这份可能过时）"
+        )
+        yield f"本机产物 {root / CODE_NAME}", live, ""
+
+
+def _sync_manifest_sha(
+    root: Path, key: str, got: str, src: str, log: Callable[[str], None]
+) -> None:
+    """把 `<root>/manifest.json` 的 `key` 改写成 `got`（**原子**；旧值进对照行）。
+
+    段级 manifest 不是「不可动的账」：`ArtifactStore.start` 每个会话本来就重写这段快照
+    （`remote/artifacts.py`），而下游 `remote/download._ensure_code` / `_ensure_ts_code` 按它
+    键 `code_cache/<sha>/` 缓存并**逐字节对账** ⇒ 代码/TS 换了源就必须连它一起换，否则要么
+    报「传输损坏」（cache miss），要么命中旧 cache **静默跑旧代码**（比报错更难查）。
+    还没有 manifest（首次跑）⇒ 不动：`ArtifactStore.start` 稍后写的那份本来就是按当前代码来的。
+    """
+    if (root / MANIFEST_NAME).is_file():
+        cur = _local_sha(root, MANIFEST_NAME, key)
+    else:
+        return
+    if cur == got:
+        return
+    doc = _read_json_file(root / MANIFEST_NAME)
+    if doc is None:
+        return
+    doc[key] = got
+    path = root / MANIFEST_NAME
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=1), encoding="utf-8")
+    os.replace(tmp, path)
+    log(f"段契约已改写: {MANIFEST_NAME} 的 {key} {_sha12(cur)} → {_sha12(got)}（来源 {src}）")
+
+
+def _install_code(root: Path | None, data: bytes, src: str, log: Callable[[str], None]) -> None:
+    """换码事务：字节写回 `<root>/code.zip` + 改写 manifest 的 `code_sha256`（见 `ensure_code`）。"""
+    if root is None:
+        return
+    root.mkdir(parents=True, exist_ok=True)
+    got = hashlib.sha256(data).hexdigest()
+    live = root / CODE_NAME
+    live_sha = hashlib.sha256(live.read_bytes()).hexdigest() if live.is_file() else ""
+    if live_sha != got:
+        live.write_bytes(data)
+    _sync_manifest_sha(root, "code_sha256", got, src, log)
 
 
 def ensure_code(
@@ -1001,100 +1184,110 @@ def ensure_code(
     hub: str = "",
     token: str = "",
 ) -> Path:
-    """把**与本机产物同 commit** 的 `code.zip` 解到 `code_dir` 并插进 `sys.path`。
+    """把本轮该跑的 `code.zip` 解到 `code_dir` 并插进 `sys.path`：**工具态取权威源**。
 
-    优先级（plan/offline-rerun-local-first §4.1 第 4 条）：产物目录 `<dest>/code.zip` →
-    任务包里的 `code.zip` → hub 的共享 `GET /code`。期望 sha = `<dest>/manifest.json` 的
-    `code_sha256`（读不到就不设门），**逐候选用 sha 选中**——绝不静默换代码：
+    候选序 = 任务包 → hub `/code` → 本机产物（plan/offline-code-authority-and-width B1，
+    2026-10-14 改序）。`code.zip` 是**可重建的工具态**：权威源 = 本次 claim 的任务包（索引里
+    `code_sha256` / `parts[…].sha256` 就是它的背书），其次 hub，**本机缓存只作最后兜底**。
+    旧序（本机优先）会让一份「旧但自洽」的本机快照必然打败包里的新代码 —— 现场正是如此：
+    本机 `worker/ppo/np_core.py` 已改、本机 `common/shard.py` 未改 ⇒ 直到训练前
+    `import worker.ppo.engine` 才爆 `ImportError: cannot import name 'METRICS_NAME'`，
+    而包里那份好代码连看都没看。**进度态**（plan/state/权重/shard）不受本函数影响。
 
-      * 全部对不上 ⇒ `SystemExit`，**不写任何东西**（两条出路：`CFG.task_zip` 指对同 commit
-        的包，或清空 `dest` 从头跑）；
-      * 选中的那份 ≠ 现盘 `<dest>/code.zip` ⇒ **用同 sha 副本修复**它：`run_loop` 读的是产物
-        目录那份（`_read_opt_file(root, "code.zip")`），不修就会在 worker 侧报「传输损坏」
-        ——一条指向错误原因的报错（评审 F4）。
+    写死的两条判据：
+
+      * 包里那份 sha ≠ 索引背书 ⇒ **硬拒**（包坏了；绝不静默降级到旧代码）；
+      * 每个候选先过**导入哨兵**：`code` 类失败 ⇒ 换下一个（混血树在训练前就被拦下）；
+        `env` 类失败（缺第三方）⇒ **放行 + WARN**（换候选也换不来一个 numpy）。
+       全无可用 ⇒ `SystemExit`，**不写任何东西**。
+
+    选定即执行**换码事务**（见 `_install_code`）：不回写 `<dest>/manifest.json` 的
+    `code_sha256`，下游 `download._ensure_code` 会以「传输损坏」拒收或静默跑旧码。
     """
     root = Path(dest) if dest is not None else None
-    want = _local_sha(root, MANIFEST_NAME, "code_sha256") if root is not None else ""
-    cands = _code_candidates(pack, root, hub, token, log)
-    if not cands:
-        raise SystemExit(
-            "[offline] 没有可用的 code.zip：本机产物目录 / 任务包 / hub 共享代码三处都没有"
-            f"（产物目录 {root if root is not None else '(未给)'}）——去控制台导一次包并填 CFG.task_zip"
-        )
+    idx = read_pack_index(pack) if pack is not None else {}
+    code_root = Path(code_dir)
+    tried: list[str] = []
     picked_src, picked = "", b""
-    why: list[str] = []
-    for src, data in cands:
+    for src, data, expect in _code_stream(pack, root, hub, token, idx, log):
         got = hashlib.sha256(data).hexdigest()
-        if not want or got == want:
+        if expect and got != expect:
+            raise SystemExit(
+                "[offline] 任务包里的 code.zip 与索引对不上（包坏了；绝不静默降级）：\n"
+                f"  实到 sha12={_sha12(got)} ≠ 索引背书 {_sha12(expect)}\n"
+                "  出路：在控制台**重新导出**任务包，或换一个包（CFG.task_zip）"
+            )
+        ok, kind, detail = _probe_candidate(code_root, data)
+        if ok:
             picked_src, picked = src, data
             break
-        why.append(f"{src}: sha12={got[:12]}… ≠ 产物 manifest 的 {want[:12]}…")
+        if kind == "env":
+            log(f"哨兵未判定（环境缺件，换候选也换不来）——放行 {src}: {detail}")
+            picked_src, picked = src, data
+            break
+        log(f"WARN: 候选 {src} 过不了导入哨兵（代码树内部不自洽）——换下一个：{detail}")
+        tried.append(f"{src}: {detail}")
     if not picked:
+        shutil.rmtree(code_root, ignore_errors=True)
         raise SystemExit(
-            "[offline] 代码与本机产物对不上（绝不静默换代码、也不覆盖）：\n  "
-            + "\n  ".join(why)
-            + f"\n  两条出路：① CFG.task_zip 指对**同 commit** 的任务包；② 清空重跑 {root}"
+            "[offline] 没有可用的 code.zip：任务包 / hub 共享代码 / 本机产物三处都没有"
+            f"（产物目录 {root if root is not None else '(未给)'}）——去控制台导一次包并填 CFG.task_zip"
+            + (("\n  " + "\n  ".join(tried)) if tried else "")
         )
-    code_root = Path(code_dir)
-    code_root.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(io.BytesIO(picked)) as z:
-        z.extractall(code_root)
     if str(code_root) not in sys.path:
         sys.path.insert(0, str(code_root))
-    log(
-        f"代码就位: {code_root}（{len(picked)} bytes, "
-        f"sha12={hashlib.sha256(picked).hexdigest()[:12]}，来源 {picked_src}）"
-    )
-    if root is not None and want:
-        live = root / CODE_NAME
-        live_sha = hashlib.sha256(live.read_bytes()).hexdigest() if live.is_file() else ""
-        if live_sha != want:
-            live.write_bytes(picked)  # manifest 背书的那份（不是"另一个版本"）
-            log(f"产物目录的 {CODE_NAME} 已按 manifest 修复（{_sha12(live_sha)} → {_sha12(want)}）")
+    got12 = _sha12(hashlib.sha256(picked).hexdigest())
+    log(f"代码就位: {code_root}（{len(picked)} bytes, sha12={got12}，来源 {picked_src}）")
+    _install_code(root, picked, picked_src, log)
     return code_root
 
 
 def ensure_ts_tree(pack: Path | None, log: Callable[[str], None], *, dest: str | Path) -> None:
     """把 TS 运行时树布置到产物目录（`<dest>/ts_code/` + `<dest>/ts_code.zip`）。
 
-    已有 `ts_code/` ⇒ **直接用**（`run_standalone` 的 `ensure_ts_cache_layout(root, …)` 兜到
-    它，幂等）；缺了才从包里补，而且补的字节必须与 `<dest>/manifest.json` 的
-    `ts_code_sha256` 相符——否则就是「本机 manifest + 包里的 TS」的混血：rollout 行为与权重
-    血统不符，读数看起来完全正常，只有 sha 能揭穿（评审 F4）。
+    权威序与 `code.zip` 同（B1/P2）：**包里的 `ts_code.zip` 是权威源**，本机那份只在包缺件
+    时用。与权威源同字节 ⇒ 直接复用现有树（不重解，幂等）；不同 ⇒ 重铺树 + 把 manifest 的
+    `ts_code_sha256` 改写成权威值（旧值进对照行）——下游 `download._ensure_ts_code` 按那把 sha
+    键缓存/对账，不回写就报「传输损坏」，或旧 cache 命中静默跑旧 TS（rollout 与权重血统不符，
+    读数看起来完全正常，只有 sha 能揭穿，评审 F4）。
+
+    两处都没有 ⇒ 只 WARN（`run_standalone` 的 `ensure_ts_cache_layout` 也许还能兜到别处的树）。
     """
     root = Path(dest)
-    if (root / TS_TREE_NAME).is_dir():
-        log(f"TS 运行时用本机产物里的 {TS_TREE_NAME}/（不重解）")
-        return
     raw = _pack_member(pack, TS_CODE_NAME)
+    src = f"任务包 {pack}" if raw is not None else ""
     if raw is None and (root / TS_CODE_NAME).is_file():
-        raw = (root / TS_CODE_NAME).read_bytes()
+        try:
+            raw, src = (root / TS_CODE_NAME).read_bytes(), f"本机产物 {root / TS_CODE_NAME}"
+        except OSError as e:
+            log(f"读本机 {TS_CODE_NAME} 失败（{e}）——当作没有")
     if raw is None:
+        if (root / TS_TREE_NAME).is_dir():
+            log(f"TS 运行时用本机产物里的 {TS_TREE_NAME}/（不重解）")
+            return
         log(
             f"WARN: 没有 TS 运行时（{root}/{TS_TREE_NAME} 与 {TS_CODE_NAME} 都缺）——"
             "rollout 起不来；把上一段的 ts_code/ 一起带过来，或给一个含它的包"
         )
         return
-    want = _local_sha(root, MANIFEST_NAME, "ts_code_sha256")
     got = hashlib.sha256(raw).hexdigest()
-    if want and got != want:
-        raise SystemExit(
-            "[offline] TS 运行时与本机产物对不上（包里的 ts_code.zip sha12="
-            f"{got[:12]}… ≠ manifest 的 {want[:12]}…）——拒跑：混血会让 rollout 与权重血统不符。"
-            f"\n  两条出路：① CFG.task_zip 指对**同 commit** 的任务包；② 清空重跑 {root}"
-        )
-    # ★ 2026-09-25 现场回归：**首次跑**时产物目录还不存在（它本来是 `run_loop`/`import_bundle`
-    #   建的），而这里要往里写 `ts_code.zip` ⇒ 必须先把它建出来。不建的后果是**未捕获**的
-    #   `FileNotFoundError: <dest>/ts_code.zip`，整个 cell 死在「代码就位」之后（用户实测报障）。
-    #   为什么不用「等 bundle 导入来铺」：本机优先那条腿**不导入包**（argv 不带 `--bundle`），
-    #   TS 树只能由这里铺；两条腿共用一个函数，就在函数里把目录准备好。
-    root.mkdir(parents=True, exist_ok=True)
-    (root / TS_CODE_NAME).write_bytes(raw)
-    tree = root / TS_TREE_NAME
-    tree.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(io.BytesIO(raw)) as z:
-        z.extractall(tree)
-    log(f"TS 运行时已就位: {tree}（{len(raw)} bytes, sha12={got[:12]}）")
+    live = root / TS_CODE_NAME
+    live_sha = hashlib.sha256(live.read_bytes()).hexdigest() if live.is_file() else ""
+    if live_sha == got and (root / TS_TREE_NAME).is_dir():
+        log(f"TS 运行时与权威源同字节（{src}，sha12={_sha12(got)}）——复用本机 {TS_TREE_NAME}/")
+    else:
+        # ★ 2026-09-25 现场回归：**首次跑**时产物目录还不存在（它本来是 `run_loop`/`import_bundle`
+        #   建的），而这里要往里写 `ts_code.zip` ⇒ 必须先把它建出来（否则未捕获的
+        #   `FileNotFoundError: <dest>/ts_code.zip`，整个 cell 死在「代码就位」之后）。
+        root.mkdir(parents=True, exist_ok=True)
+        live.write_bytes(raw)
+        tree = root / TS_TREE_NAME
+        shutil.rmtree(tree, ignore_errors=True)
+        tree.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(io.BytesIO(raw)) as z:
+            z.extractall(tree)
+        log(f"TS 运行时已就位: {tree}（{len(raw)} bytes, sha12={_sha12(got)}，来源 {src}）")
+    _sync_manifest_sha(root, "ts_code_sha256", got, src, log)
 
 
 def write_token_file(dest_dir: Path, token: str) -> str:

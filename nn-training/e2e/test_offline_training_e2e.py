@@ -477,6 +477,11 @@ def _real_pack(
     (src / INIT_WEIGHTS_NAME).write_bytes(b'{"format":"nn-weights-json","params":{"w":1}}')
     code_zip = src / bundle_mod.CODE_NAME
     with zipfile.ZipFile(code_zip, "w") as z:
+        # 代码树要**过导入哨兵**（B3）⇒ 三个哨兵模块都得在，且互相自洽（详见
+        # `tests/remote/test_code_sentinel.py`）；`remote/_marker.py` 只是给人读的标记。
+        z.writestr("common/shard.py", 'METRICS_NAME = "m"\n')
+        z.writestr("worker/ppo/np_core.py", "from common.shard import METRICS_NAME\n")
+        z.writestr("remote/run_loop.py", "MARKER = 'run_loop'\n")
         z.writestr("remote/_marker.py", "VALUE = 'e2e'\n")
     with zipfile.ZipFile(src / TS_CODE_NAME, "w") as z:
         z.writestr("tools/sim/export-eval-game.ts", "// e2e\n")

@@ -638,16 +638,66 @@ def topup_batch_budget(spec: dict) -> int:
         return 0
 
 
-def _round_need_bytes(spec: dict, games: int) -> float:
-    """整轮 scratch 容量预算（评审 P0-3）：**判据必须按轮算，不能只按单批**。
+#: 冷启动（est=0）时的**有界盘预算**：首批 + 常规补差批数（= `worker.volume_alloc
+#: .DEFAULT_TOPUP_MAX_BATCHES`）。**不是 est**：不参与任何局数反解；它是「按槽位铺满后一轮
+#: 大概会产多少批」的容量上限。
+#: ⚠ 这里留一份而不 import：本模块 L1、`worker.volume_alloc` L2（DAG 用例禁上向边）——
+#: 与 `remote/offline_boot.py` 那份常量同一条纪律（跨层复制 + 测试钉逐字相同）。
+COLD_START_CAPACITY_BATCHES = 3
+
+
+def _useful_round_games(spec: dict) -> int:
+    """整轮「还要跑多少局」的上界估计（A3 的「待补局数」）：`Σ_s ⌈quota_s / est_s⌉`。
+
+    任一 `est_s ≤ 0`（首轮冷启动、无历史）⇒ **返回 0 = 不可求**（不猜：estfree 纪律）。
+    量纲与 `worker/volume_alloc.py` 同：`quota`/`est` 都是**已结算 shard 的 `nSamples`**。
+    """
+    vol = spec.get("volume")
+    if not isinstance(vol, dict):
+        return 0
+    ests = vol.get("est_s_by_stage")
+    quota = vol.get("per_stage_quota")
+    if isinstance(quota, bool) or not isinstance(quota, int) or quota <= 0:
+        return 0
+    if not isinstance(ests, dict) or not ests:
+        return 0
+    total = 0
+    for v in ests.values():
+        if isinstance(v, bool) or not isinstance(v, int) or v <= 0:
+            return 0  # 无估计 ⇒ 整轮不可求
+        total += -(-int(quota) // int(v))
+    return total
+
+
+def _round_need_bytes(spec: dict, games: int, *, slots: int = 0) -> float:
+    """整轮 scratch 容量预算（评审 P0-3；基准 = **满铺批宽**，A3）：**判据按轮算，不按单批**。
 
     因为 §3.5 取消搬回后产出**留在本地盘**：轮内峰值 = 首批 + 各补差批的产出之和
     （不再是「搬一局走一局 ⇒ 峰值 = 单批」）。只用单批算 ⇒ 缺盘时会在轮中途 ENOSPC
     （写盘失败 → 逐局重试 → 机器级停滞重投），而缺盘本该在**进入这一轮之前**就回退档。
-    估算 = `单批局数 × (1 + 最多补差批数)`，再乘上 `per_game`（本身已是实测的 ~3× 上界）
-    ⇒ 偏严的估算；偏严的失败方向是「回退原地」（今天的行为，安全）。
+
+    基准为什么不是 `games`（= 首批局数）：补差批按**槽位**铺满（A1），首批可能只有 1 局 ——
+    用 `1 × (1 + 64) = 65 局` 去估一个实际要跑 (~1+94×N) 局的轮就是那条「容量门假装过了」的
+    老形状。批数预算分两档（都能从 spec 求，不猜 est）：
+
+      * **est 可求**（`_useful_round_games > 0`）⇒ `1 + min(max_batches, ⌈待补/批宽⌉)`：
+        避免「槽位 × (1+max_batches)」（= 6110 局）那种假上界把整轮推去回退档；
+      * **est=0（冷启动）**⇒ `1 + min(max_batches, DEFAULT_TOPUP_MAX_BATCHES)`：有界**盘预算**
+        （它不是 est：不参与任何局数反解）。冷启动 4 批 × 94 局 ≈ 3.0GB，而 `per_game` 估算
+        本身 ≈ 实测量的 3 倍（`common/scratch.py::SCRATCH_EST_DEFAULT_BYTES`）⇒ 真实占用远在判据下。
     """
-    return scratch.need_bytes_for(max(1, int(games)) * (1 + topup_batch_budget(spec)))
+    max_batches = topup_batch_budget(spec)
+    per_batch = max(1, int(games), int(slots))
+    pending = _useful_round_games(spec)
+    if max_batches <= 0:
+        budget = 1
+    elif pending > 0:
+        need_batches = -(-max(0, pending - int(games)) // per_batch)
+        budget = 1 + min(max_batches, need_batches)
+    else:
+        budget = 1 + min(max_batches, int(COLD_START_CAPACITY_BATCHES))
+    base_games = per_batch if budget > 1 else max(1, int(games))
+    return scratch.need_bytes_for(base_games * budget)
 
 
 def _scan_bounded(what: str, fn: Any, log, *, where: str) -> Any:
@@ -799,6 +849,18 @@ def _make_pool(
     return serve_pool.make_pool(bun, ts_dir, workers, log, for_script=argvs[0][0])
 
 
+def _pool_width(spec: dict, workers: int, slots: int) -> int:
+    """建池宽度（A2）：有补差 ⇒ **轮级槽位**；无补差 ⇒ 本批并发（逐字旧行为）。
+
+    为什么不一律槽位：无补差的轮（在线 kind=iter / 小轮）局数就是并发，按槽位起一堆暖进程
+    只白占内存（池的收益只在「批子比机器宽」时存在）；而补差轮的首批可能只有 1 局，池宽必须
+    按接下来的批宽（槽位）建，否则 94 局抢 1 宽暖池（现场 `spawned=1` 的另一半）。
+    """
+    if int(slots or 0) > int(workers or 0) and topup_batch_budget(spec) > 0:
+        return int(slots)
+    return max(1, int(workers))
+
+
 @dataclass
 class RoundContext:
     """一轮 job 的**轮级**资源：首批解析一次，补差批复用（`plan/rollout-topup-fastpath` §3.2）。
@@ -825,7 +887,7 @@ class RoundContext:
     job_dir: Path | None = None
     #: 长驻池（生命周期 = 轮）。
     pool: Any = None
-    #: 轮级池宽（= 首批实际用过的那个数；补差批的满铺器拿它当 `width`）。
+    #: 轮级**槽位**（= 本机能同时跑的局数上限；补差批的满铺器拿它当 `width`，池宽也按它）。
     workers: int = 0
     #: 首批是否已完成解析（探针 / TS 树）；补差批看到 `True` 就跳过那一整段。
     resolved: bool = False
@@ -896,14 +958,16 @@ def run_iter_rollout(
     # 为什么不能沿用 `or 1`：那会把 auto 读成 1（96 核机器上从 94 掉到 1）。
     requested_workers = int(spec.get("workers") or 0)
     cap = workers_cap() or MAX_WORKERS  # 0 = 显式不夹 ⇒ 这里退化成 MAX_WORKERS
-    if requested_workers > 0:
-        workers = max(1, min(requested_workers, len(argvs), MAX_WORKERS, cap))
-    else:
-        # 自定档：基数是**本机核数口径**——不能拿上面的 `cap` 当基数（env=「不夹」时
-        # 它会塌成 MAX_WORKERS=256，那是给显式值放行用的，不该变成自定的基数）。
-        # env 正整数档仍是上限（`min(base, cap)`），见 test 里的两组断言。
-        base = cpu_worker_slots() or MAX_WORKERS
-        workers = max(1, min(base, cap, len(argvs), MAX_WORKERS))
+    # ★ A1/A2（plan/offline-code-authority-and-width）：**轮级槽位** = 本机能同时跑的局数上限。
+    #   它是**预算**（补差批铺多少局 / 池建多宽），**不吃 `len(argvs)`** —— 首批可能只有 1 局，
+    #   但接下来的补差批是「槽位」局一批；把「本批有几局」当宽度就是那条退化链的起点
+    #   （现场：`满铺 width=1` + `spawned=1`）。口径与并发同一套夹取。
+    # 自定档的基数是**本机核数口径**——不能拿 `cap` 当基数（env=「不夹」时它会塌成
+    # MAX_WORKERS=256，那是给显式值放行用的，不该变成自定的基数）。
+    _base = requested_workers if requested_workers > 0 else (cpu_worker_slots() or MAX_WORKERS)
+    slots = max(1, min(_base, MAX_WORKERS, cap))
+    # 本批并发 = 槽位与局数的较小者（与改造前逐字等价：旧式 = min(请求/核数, …, len(argvs))）。
+    workers = max(1, min(slots, len(argvs)))
     # 首次尝试的硬顶：plan 给了正数就完全按它；**0/缺省就是节点兜底** `DEFAULT_GAME_TIMEOUT_SEC`
     # （旧口径「0 = 不限」= 卡住的局可以永远等下去；本机历史行为不能当云机的安全策略）。
     requested = float(spec.get("game_timeout_sec") or 0.0)
@@ -938,6 +1002,10 @@ def run_iter_rollout(
             f"{requested_workers}→{workers}（跑这一轮的机器核数：{cores_note()}，"
             f"并行槽上限 {cap}｜{ENV_WORKERS_CAP}=0 可关）",
         )
+    if slots != workers:
+        # A4/P3：**槽位 ≠ 本批并发**（本批局数比机器窄）⇒ 报出来。补差轮的批宽与池宽都按
+        # 槽位走（A1/A2）：少了这一行，「批次退化」又变成一个下游无从归因的口径分叉。
+        rb.add("槽位", f"{slots}（本机能同时跑的局数上限；本批并发 {workers} = 局数所限）")
     rb.add("bun", f"{bun} ({ver or '?'})")
     # ---- 热路径落点（plan/rollout-local-scratch §2 P0-1/P0-2）----
     # 三样热数据（TS 树的读、每局 shard 的写、权重的读）全在网络挂载点上 ⇒ 换到节点本地盘。
@@ -947,10 +1015,11 @@ def run_iter_rollout(
     exec_jd = jd
     s_layout: scratch.ScratchLayout | None = None
     # 整轮预算（不是单批）：产出不再搬走 ⇒ 峰值 = 首批 + 补差批之和（评审 P0-3）。
-    need = _round_need_bytes(spec, len(argvs))
+    # 基准 = 满铺批宽（A3）：补差批按**槽位**铺，首批可能只有 1 局。
+    need = _round_need_bytes(spec, len(argvs), slots=slots)
     rctx = ctx if ctx is not None else RoundContext()
     if not rctx.resolved:
-        rctx.workers = workers  # 轮级池宽：首批实际用过的那个数（补差批的满铺器拿它当 width）
+        rctx.workers = slots  # 轮级槽位：补差批的满铺器拿它当 width；池宽也按它（A1/A2）
     # ---- 首批：解析**轮级**资源（探针 → TS 树）；补差批整段跳过（plan §3.2）----
     # 探针段**必须**有上界（2026-10-11，plan/rollout-topup-fastpath §3.1）：`open_scratch` 整段是
     # 这条热路径上**唯一**没有上界的一步（`probe_write_speed_mbps` 只有 `except OSError`，挂住的
@@ -1074,9 +1143,19 @@ def run_iter_rollout(
     #   ⚠ 建不起来（`make_pool` 返回 None = 开关关/脚本不在准入名单，或 `start()` 0 就绪）时
     #   **不缓存** ⇒ 下一批允许再试（有意：冷启动失败多为瞬态；确定性拒绝重试也只是常数级判断）。
     pool = rctx.pool
+    #: 本批想要的池宽（A2）：有补差 ⇒ 轮级槽位；无补差 ⇒ 本批并发（逐字旧行为）。
+    pool_width = _pool_width(spec, workers, rctx.workers)
+    _pool_w = None if pool is None else getattr(pool, "max_workers", None)
+    if pool is not None and _pool_w is not None and int(_pool_w or 0) < pool_width:
+        # A2：窄池遗留（首批小批建出来的）⇒ 关旧建新。不换的话本批「槽位」条 argv 会去抢一个
+        # 1 宽的暖池 ⇒ 除 1 局外全部一次性 spawn，还可能把 `breaker_after = max(4, 1//4)`
+        # 拉到熔断（停补位）——A1 的收益当场归零。
+        pool.close()
+        rctx.pool = None
+        pool = None
     _pool_fresh = pool is None
     if _pool_fresh:
-        pool = _make_pool(bun, tsd, argvs, workers, log)
+        pool = _make_pool(bun, tsd, argvs, pool_width, log)
         rctx.pool = pool
     if _pool_fresh and pool is not None:
         ready_n = pool.start()
@@ -1085,7 +1164,7 @@ def run_iter_rollout(
             # 「进程没退出」，于是 94/94 那种假满）。`unready` = 这次还在冷启动、被**留下**的个数
             # （不杀：杀掉 = 这批冷启动白付 + 补位再付一次；就绪后自动可发放）。
             rb.note(
-                f"长驻 worker 池：{ready_n}/{workers} 真就绪"
+                f"长驻 worker 池：{ready_n}/{pool.max_workers} 真就绪（池宽 = 轮级槽位/批宽）"
                 + (f"（另 {pool.unready} 个仍在冷启动，就绪即入池）" if pool.unready else "")
                 + f"（{argvs[0][0]}）——逐局进程启动/权重解析只付一次，"
                 "单局失败自动回退一次性 spawn"
@@ -1094,7 +1173,7 @@ def run_iter_rollout(
             # 零真就绪但有一批在冷启动 ⇒ **不退池**（P0-1 不杀）：那批就绪后随轮入池；现在关池
             # 等于把它们全扔掉、余下局每局重付一次冷启动（旧形态的放大器之一）。
             rb.note(
-                f"长驻 worker 池：0/{workers} 真就绪（{pool.unready} 个仍在冷启动，就绪即入池）"
+                f"长驻 worker 池：0/{pool.max_workers} 真就绪（{pool.unready} 个仍在冷启动，就绪即入池）"
                 "——本波先走一次性 spawn（就绪一个省一次冷启动）"
             )
         else:
@@ -1308,6 +1387,8 @@ def run_iter_rollout(
         "game_secs": game_secs,
         "bun": bun,
         "workers": workers,
+        #: 轮级槽位（A1/A2）：补差批宽度与池宽的口径；`workers` 只是本批并发（可能被局数夹小）。
+        "slots": slots,
         # 节点自己的 PPO 装载源（§3.5 / 评审 P0-1）；`None`（老调用方/echo 轮）⇒ 读取方回退 job_dir
         "shards_root": str(shards_root),
         # 池的诊断计数（不在 report 里：它要过线，节点本地的观测不该改 wire 形状）

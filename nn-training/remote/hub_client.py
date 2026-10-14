@@ -37,6 +37,7 @@ if TYPE_CHECKING:  # 只在类型面（运行时由 wire_diet 分支内延迟 im
 # hub 的 import 闭包，让 hub-server 在没装三方包的环境里启动即退（2026-10-14 事故）。它们只在**用它们
 # 的那几个函数内**局部 import（`publish_job` / `_pack_opt_init` / `verify_and_land`）；判据 =
 # `tests/remote/test_hub_import_graph.py`（进程级：hub 闭包不得含这两个模块）。
+from common.code_sentinel import CODE_META_NAME, code_tree_provenance
 from common.fs import append_jsonl, extract_tar_bytes
 from common.hashing import sha256_bytes, sha256_file
 from common.platform_utils import rmtree_best_effort
@@ -439,6 +440,10 @@ def pack_code_zip(
 
     ★ `levels/` **刻意不在排除名单里**（硬依赖，排掉 131/181 门课直接 FileNotFoundError）。
 
+    ★ 2026-10-14（plan/offline-code-authority-and-width B2）：包里多一个 `code_meta.jsonc`
+    （`CODE_META_NAME`：`commit` / `dirty` / `dirty_files` / `import_ok`）——**只由树内容唯一决定**
+    的字段 + 同一套固定时间戳 ⇒ 「同源码同 sha」这条不变量不受影响（有用例钉）。
+
     返回 zip 字节 sha256。
     """
     import zipfile
@@ -519,6 +524,13 @@ def pack_code_zip(
                 zi.external_attr = 0o644 << 16
                 z.writestr(zi, f.read_bytes())
                 n_files += 1
+        # provenance（B2）：固定时间戳 + 内容唯一决定的字段（见 `code_tree_provenance`）。
+        meta = zipfile.ZipInfo(CODE_META_NAME, date_time=(1980, 1, 1, 0, 0, 0))
+        meta.compress_type = zipfile.ZIP_DEFLATED
+        meta.external_attr = 0o644 << 16
+        z.writestr(meta, json.dumps(code_tree_provenance(nn_root_p, log), ensure_ascii=False,
+                                    sort_keys=True, indent=1))
+        n_files += 1
     # 清理 dirnames 修改后残留的记录（不出现在 zip 中，已正确跳过）
     sha = _sha256_bytes(zip_path_p.read_bytes())
     if log:

@@ -45,8 +45,28 @@ def _zip_bytes(name: str, text: str) -> bytes:
     return buf.getvalue()
 
 
-CODE_A = _zip_bytes("remote/_marker.py", "VALUE = 'A'\n")
-CODE_B = _zip_bytes("remote/_marker.py", "VALUE = 'B'\n")
+def _mini_code(value: str, *, shard_has_metrics: bool = True) -> bytes:
+    """一个**能过导入哨兵**的最小代码树（三个哨兵模块都在、且互相自洽）。
+
+    为什么不能再用「单个 `remote/_marker.py`」当候选（B3 之后）：候选要先过导入哨兵，缺
+    `common.shard` 会被判「代码树内部不自洽」而换下一个 —— 那正是要钉的行为，不是要绕开的。
+    `shard_has_metrics=False` = **混血树**（np_core 已经 import 那个名字 / shard 还没定义它）。
+    """
+    files = {
+        "common/shard.py": 'METRICS_NAME = "m"\n' if shard_has_metrics else "OTHER = 1\n",
+        "worker/ppo/np_core.py": "from common.shard import METRICS_NAME\n",
+        "remote/run_loop.py": "MARKER = 'run_loop'\n",
+        "remote/_marker.py": f"VALUE = {value!r}\n",
+    }
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        for name, text in files.items():
+            z.writestr(name, text)
+    return buf.getvalue()
+
+
+CODE_A = _mini_code("A")
+CODE_B = _mini_code("B")
 TS_A = _zip_bytes("tools/sim/export-eval-game.ts", "// A\n")
 TS_B = _zip_bytes("tools/sim/export-eval-game.ts", "// B\n")
 
@@ -65,7 +85,7 @@ PACK_INDEX = {
 def _pack(
     path: Path,
     *,
-    code: bytes = CODE_A,
+    code: bytes | None = CODE_A,
     ts: bytes | None = TS_A,
     index: dict | None = None,
     plan: dict | None = None,
@@ -78,7 +98,8 @@ def _pack(
     path.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(path, "w") as z:
         z.writestr(offline_boot.BUNDLE_INDEX, json.dumps({**PACK_INDEX, **(index or {})}))
-        z.writestr(offline_boot.CODE_NAME, code)
+        if code is not None:  # `code=None` = 包缺代码（老包 / 只带计划的那类）
+            z.writestr(offline_boot.CODE_NAME, code)
         if ts is not None:
             z.writestr(offline_boot.TS_CODE_NAME, ts)
         if plan is not None:
@@ -233,51 +254,48 @@ def test_build_run_argv_local_first_drops_the_bundle(tmp_path: Path) -> None:
     assert legacy[:4] == ["--bundle", str(tmp_path / "t.zip"), "--artifacts", str(dest)]
 
 
-# ────────────────────────── 代码/TS 跟着产物走 ──────────────────────────
+# ────────────────────────── 代码/TS 就位：权威源 + 哨兵 + 换码事务 ──────────────────────────
+#
+# B 腿改序（plan/offline-code-authority-and-width，2026-10-14）：`code.zip` / `ts_code.zip` 是
+# **工具态**（可重建、与进度无关）⇒ 权威源 = 任务包，其次 hub `/code`，本机缓存只作最后兜底。
+# 旧序（本机优先）会让「旧但自洽」的本机快照必然打败包里的新代码 —— 现场就是这么跑出
+# `ImportError: cannot import name 'METRICS_NAME'`（本机 np_core 已改 / 本机 shard 未改，
+# 而包里那份好代码连看都没看）。judge 与事务都在 `ensure_code` 里，这一节逐条钉住。
 
 
 def _code_dir(tmp_path: Path) -> str:
     return str(tmp_path / "code")
 
 
-def test_ensure_code_prefers_the_artifacts_copy(tmp_path: Path) -> None:
-    """产物目录里那份与 manifest 相符 ⇒ 用它（包是**备源**，不抢）。"""
+def test_ensure_code_takes_the_pack_and_writes_the_segment_contract(tmp_path: Path) -> None:
+    """★ 权威序：包里有代码、本机是旧的那份 ⇒ **用包**，并把段契约的 sha 改写过去。
+
+    不回写 `manifest.json` 的 `code_sha256` ⇒ 下游 `download._ensure_code` 按旧 sha 键缓存：
+    cache miss 报「传输损坏」（指向错误原因），cache hit **静默跑旧代码**（评审 P0-1）。
+    """
     dest = _artifacts(tmp_path / "run", code=CODE_A)
-    pack = _pack(tmp_path / "d" / "task-c5-gae.zip", code=CODE_B)  # 包是另一个 commit
+    pack = _pack(tmp_path / "d" / "task-c5-gae.zip", code=CODE_B)
     logs: list[str] = []
     try:
         got = offline_boot.ensure_code(pack, logs.append, _code_dir(tmp_path), dest=dest)
-        assert (Path(got) / "remote" / "_marker.py").read_text(encoding="utf-8") == "VALUE = 'A'\n"
-        assert any("本机产物" in m for m in logs), logs
+        assert (Path(got) / "remote" / "_marker.py").read_text(encoding="utf-8") == "VALUE = 'B'\n"
+        assert (dest / offline_boot.CODE_NAME).read_bytes() == CODE_B, "选中谁就要写回产物目录"
+        man = json.loads((dest / offline_boot.MANIFEST_NAME).read_text(encoding="utf-8"))
+        assert man["code_sha256"] == _sha(CODE_B), "段契约必须跟着代码走"
+        # 只留 DoD#3 那条读数行（旧 sha12 → 新 sha12 的对照：操作员一眼看出「换了哪份」）
+        assert any("段契约已改写" in m and _sha(CODE_A)[:12] in m for m in logs), logs
     finally:
         sys.path[:] = [p for p in sys.path if p != _code_dir(tmp_path)]
 
 
-def test_ensure_code_falls_back_to_the_pack_and_repairs_the_artifacts(tmp_path: Path) -> None:
-    """产物目录那份**坏了**（与 manifest 不符）⇒ 用包里同 sha 的副本修复它。
-
-    为什么必须修：`run_loop` 读的是产物目录那份（`_read_opt_file(root, "code.zip")`），
-    不修就会在 worker 侧报「传输损坏」——一条指向错误原因的报错。
-    """
-    dest = _artifacts(tmp_path / "run", code=CODE_A)
-    pack = _pack(tmp_path / "d" / "task-c5-gae.zip", code=CODE_A)
-    (dest / offline_boot.CODE_NAME).write_bytes(CODE_B)  # 现盘坏了
-    logs: list[str] = []
-    try:
-        offline_boot.ensure_code(pack, logs.append, _code_dir(tmp_path), dest=dest)
-        assert (dest / offline_boot.CODE_NAME).read_bytes() == CODE_A
-        assert any("修复" in m for m in logs), logs
-    finally:
-        sys.path[:] = [p for p in sys.path if p != _code_dir(tmp_path)]
-
-
-def test_ensure_code_refuses_and_writes_nothing_when_no_candidate_matches(
+def test_ensure_code_refuses_a_pack_that_contradicts_the_index(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """全部候选都对不上 ⇒ 响亮拒且**不写任何东西**（spy：`extractall` 一次都没被调用）。"""
+    """包里的字节与索引背书不符（包坏了）⇒ **硬拒且不解包**（绝不静默降级到旧代码）。"""
     dest = _artifacts(tmp_path / "run", code=CODE_A)
-    (dest / offline_boot.CODE_NAME).write_bytes(CODE_B)  # 本机那份也不符
-    pack = _pack(tmp_path / "d" / "task-c5-gae.zip", code=_zip_bytes("remote/_m.py", "VALUE = 'C'\n"))
+    pack = _pack(
+        tmp_path / "d" / "task-c5-gae.zip", code=CODE_B, index={"code_sha256": _sha(CODE_A)}
+    )
     calls: list[str] = []
 
     class _SpyZip(zipfile.ZipFile):
@@ -290,9 +308,22 @@ def test_ensure_code_refuses_and_writes_nothing_when_no_candidate_matches(
     with pytest.raises(SystemExit) as ei:
         offline_boot.ensure_code(pack, _quiet, code_dir, dest=dest)
     msg = str(ei.value.code)
-    assert "对不上" in msg and "task_zip" in msg and "清空重跑" in msg, msg
-    assert calls == [], "拒不匹配的代码时不得解包（不写 CODE_DIR）"
+    assert "对不上" in msg and "重新导出" in msg and "task_zip" in msg, msg
+    assert calls == [], "拒坏包时不得解包（不写 CODE_DIR）"
     assert not Path(code_dir).exists()
+    assert (dest / offline_boot.CODE_NAME).read_bytes() == CODE_A, "本机那份一个字节都不许动"
+
+
+def test_ensure_code_uses_the_local_copy_only_as_a_last_resort(tmp_path: Path) -> None:
+    """没有任何权威源（无包 + 无 hub）⇒ 本机兜底，而且**响亮**（工具态本该以包为准）。"""
+    dest = _artifacts(tmp_path / "run", code=CODE_A)
+    logs: list[str] = []
+    try:
+        got = offline_boot.ensure_code(None, logs.append, _code_dir(tmp_path), dest=dest)
+        assert (Path(got) / "remote" / "_marker.py").read_text(encoding="utf-8") == "VALUE = 'A'\n"
+        assert any("兜底" in m and "WARN" in m for m in logs), logs
+    finally:
+        sys.path[:] = [p for p in sys.path if p != _code_dir(tmp_path)]
 
 
 def test_ensure_code_says_so_when_there_is_no_source_at_all(tmp_path: Path) -> None:
@@ -301,12 +332,94 @@ def test_ensure_code_says_so_when_there_is_no_source_at_all(tmp_path: Path) -> N
     assert "没有可用的 code.zip" in str(ei.value.code)
 
 
+def test_ensure_code_skips_a_mixed_blood_candidate_and_uses_the_next_one(tmp_path: Path) -> None:
+    """★ 哨兵的硬判据：包里的树**内部不自洽**（np_core 已改 / shard 未改）⇒ 训练之前就换候选。
+
+    这就是 2026-10-14 现场那个 `METRICS_NAME` 的形状 —— 判据必须出现在**候选循环里**，
+    而不是等云机跑到 `train_core` 里 `import worker.ppo.engine` 才炸（那时 rollout 全白跑）。
+    """
+    dest = _artifacts(tmp_path / "run", code=CODE_A)  # 本机那份是自洽的
+    pack = _pack(tmp_path / "d" / "task-c5-gae.zip", code=_mini_code("C", shard_has_metrics=False))
+    logs: list[str] = []
+    try:
+        got = offline_boot.ensure_code(pack, logs.append, _code_dir(tmp_path), dest=dest)
+        assert (Path(got) / "remote" / "_marker.py").read_text(encoding="utf-8") == "VALUE = 'A'\n"
+        joined = "\n".join(logs)
+        assert "过不了导入哨兵" in joined and "METRICS_NAME" in joined, logs
+        man = json.loads((dest / offline_boot.MANIFEST_NAME).read_text(encoding="utf-8"))
+        assert man["code_sha256"] == _sha(CODE_A), "本机 sha 本来就对 ⇒ 事务不该多写一行"
+    finally:
+        sys.path[:] = [p for p in sys.path if p != _code_dir(tmp_path)]
+
+
+def test_ensure_code_lets_an_env_missing_candidate_through(tmp_path: Path) -> None:
+    """缺**第三方**（numpy/…）= 环境缺件，不是代码坏 ⇒ 放行 + WARN（换候选也换不来一个 numpy）。"""
+    buf = io.BytesIO()
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr("common/shard.py", 'METRICS_NAME = "m"\n')
+        z.writestr("worker/ppo/np_core.py", "import bcity_no_such_third_party\n")
+        z.writestr("remote/run_loop.py", "MARKER = 1\n")
+        z.writestr("remote/_marker.py", "VALUE = 'E'\n")
+    pack = _pack(tmp_path / "d" / "task-c5-gae.zip", code=buf.getvalue())
+    logs: list[str] = []
+    code_dir = _code_dir(tmp_path)
+    try:
+        got = offline_boot.ensure_code(pack, logs.append, code_dir, dest=tmp_path / "run")
+        assert (Path(got) / "remote" / "_marker.py").read_text(encoding="utf-8") == "VALUE = 'E'\n"
+        assert any("环境缺件" in m for m in logs), logs
+    finally:
+        sys.path[:] = [p for p in sys.path if p != code_dir]
+
+
+def test_hub_code_is_fetched_only_when_the_pack_has_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 惰性：包里有代码 ⇒ 一个字节都不去 hub 取（旧实现是**急切**构造，每会话白拉 1.19MB）。"""
+    dest = _artifacts(tmp_path / "run", code=CODE_A)
+    pack = _pack(tmp_path / "d" / "task-c5-gae.zip", code=CODE_B)
+    fetched: list[str] = []
+
+    def fake_fetch(url: str, *a: object, **k: object) -> bytes:
+        fetched.append(url)
+        return CODE_A
+
+    monkeypatch.setattr(offline_boot, "_fetch_guarded", fake_fetch)
+    code_dir = _code_dir(tmp_path)
+    try:
+        offline_boot.ensure_code(pack, _quiet, code_dir, dest=dest, hub="http://hub", token="t")
+        assert fetched == [], "包里有代码 ⇒ 不该碰 hub"
+    finally:
+        sys.path[:] = [p for p in sys.path if p != code_dir]
+
+
+def test_hub_code_becomes_the_authority_when_the_pack_has_none(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """包缺件（老包）⇒ 用 hub 那份，**并把它写成这一段的权威**（产物目录 + manifest）。"""
+    dest = _artifacts(tmp_path / "run", code=CODE_B)
+    pack = _pack(tmp_path / "d" / "task-c5-gae.zip", code=None)
+    monkeypatch.setattr(offline_boot, "_fetch_guarded", lambda *a, **k: CODE_A)
+    logs: list[str] = []
+    code_dir = _code_dir(tmp_path)
+    try:
+        got = offline_boot.ensure_code(
+            pack, logs.append, code_dir, dest=dest, hub="http://hub", token="t"
+        )
+        assert (Path(got) / "remote" / "_marker.py").read_text(encoding="utf-8") == "VALUE = 'A'\n"
+        assert (dest / offline_boot.CODE_NAME).read_bytes() == CODE_A
+        man = json.loads((dest / offline_boot.MANIFEST_NAME).read_text(encoding="utf-8"))
+        assert man["code_sha256"] == _sha(CODE_A) != _sha(CODE_B)
+    finally:
+        sys.path[:] = [p for p in sys.path if p != code_dir]
+
+
+# ────────────────────────── TS 运行时：同一套权威序 ──────────────────────────
+
+
 def test_ensure_ts_tree_uses_the_artifacts_tree_without_unpacking(tmp_path: Path) -> None:
     dest = _artifacts(tmp_path / "run")
     (dest / offline_boot.TS_CODE_NAME).unlink()  # 只有树、没有 zip：照样直接用它
-    logs: list[str] = []
-    offline_boot.ensure_ts_tree(None, logs.append, dest=dest)
-    assert any("不重解" in m for m in logs), logs
+    offline_boot.ensure_ts_tree(None, _quiet, dest=dest)
     assert not (dest / offline_boot.TS_CODE_NAME).exists(), "已有的树不该被重解覆盖"
 
 
@@ -338,17 +451,33 @@ def test_ensure_ts_tree_fills_a_dest_that_does_not_exist_yet(tmp_path: Path) -> 
     assert (dest / offline_boot.TS_TREE_NAME / "tools" / "sim" / "export-eval-game.ts").is_file()
 
 
-def test_ensure_ts_tree_refuses_a_mismatched_pack(tmp_path: Path) -> None:
-    """「本机 manifest + 包里的 TS」= 混血（rollout 与权重血统不符）⇒ 拒跑。"""
+def test_ensure_ts_tree_takes_the_pack_ts_and_rewrites_the_segment_sha(tmp_path: Path) -> None:
+    """★ 权威序对 ts 同样成立（B1「ts 同」）：包里的 TS 是权威 ⇒ 重铺 + 改写 `ts_code_sha256`。
+
+    不回写 ⇒ 下游 `download._ensure_ts_code` 按旧 sha 键缓存/对账：报「传输损坏」，或旧 cache
+    命中**静默跑旧 TS**（rollout 与权重血统不符，读数看起来完全正常，只有 sha 能揭穿）。
+    """
     dest = _artifacts(tmp_path / "run", ts=TS_A)
-    import shutil
-
-    shutil.rmtree(dest / offline_boot.TS_TREE_NAME)
-    (dest / offline_boot.TS_CODE_NAME).unlink()
     pack = _pack(tmp_path / "d" / "task-c5-gae.zip", ts=TS_B)
-    with pytest.raises(SystemExit, match="TS 运行时与本机产物对不上"):
-        offline_boot.ensure_ts_tree(pack, _quiet, dest=dest)
+    logs: list[str] = []
+    offline_boot.ensure_ts_tree(pack, logs.append, dest=dest)
+    assert (dest / offline_boot.TS_CODE_NAME).read_bytes() == TS_B
+    assert (dest / offline_boot.TS_TREE_NAME / "tools" / "sim" / "export-eval-game.ts").is_file()
+    man = json.loads((dest / offline_boot.MANIFEST_NAME).read_text(encoding="utf-8"))
+    assert man["ts_code_sha256"] == _sha(TS_B)
+    assert any("段契约已改写" in m and "ts_code_sha256" in m for m in logs), logs
+    # ↑ 格式与 code 腿同一条：DoD#3 的对照行必须**点名是哪个键**换的（ts 与 code 分开）
 
+
+def test_ensure_ts_tree_reuses_when_the_pack_matches_the_local_bytes(tmp_path: Path) -> None:
+    """同字节 ⇒ 复用现有树（重铺会把盘上的树整个抹掉重来；幂等才是对的行为）。"""
+    dest = _artifacts(tmp_path / "run", ts=TS_A)
+    marker = dest / offline_boot.TS_TREE_NAME / "sentinel.txt"
+    marker.write_text("keep\n", encoding="utf-8")
+    offline_boot.ensure_ts_tree(
+        _pack(tmp_path / "d" / "task-c5-gae.zip", ts=TS_A), _quiet, dest=dest
+    )
+    assert marker.read_text(encoding="utf-8") == "keep\n", "同字节 ⇒ 不该重解"
 
 # ────────────────────────── run_one_course：判定表 ──────────────────────────
 

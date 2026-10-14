@@ -695,9 +695,11 @@ def run_job(
                     shard_dirs=shard_dirs,
                     ts_dir=_ts_dir,
                     log=log,
-                    # 补差批按**首批实际用过的**宽度铺满（plan/rollout-topup-fastpath §3.3）：
-                    # 缺口方程会把批越补越小，而批次级固定开销与批内局数无关。
-                    width=int(iter_info.get("workers") or 0),
+                    # 补差批按**轮级槽位**铺满（plan/offline-code-authority-and-width A1）：
+                    # `iter_info["slots"]` = 本机能同时跑的局数上限（不吃首批 argv 条数）。
+                    # 旧写法传首批实际 workers ⇒ 首批 1 局时「下一批铺多少局」被上界成 1
+                    # （现场：64 批 × 1 局、`满铺 width=1`）。缺口方程那套已在 §1.7 否决。
+                    width=int(iter_info.get("slots") or 0),
                     # 复用首批的轮级资源（探针结论 / TS 树家 / 长驻池）
                     ctx=rctx,
                 )

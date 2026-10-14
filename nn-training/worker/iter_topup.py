@@ -85,21 +85,24 @@ def _out_base(argv: list[list[str]], fallback: int) -> int:
     return max(int(fallback), top + 1)
 
 
-def _resolve_width(explicit: int | None, spec: dict) -> int:
-    """补差批的目标局数（机器宽度）：调用方给的（首批**实际用过**的 workers）优先。
+def _resolve_width(explicit: int | None, spec: dict) -> tuple[int, str]:
+    """补差批的目标局数（满铺宽度）与它的来路：`(局数, 来路)`，来路 ∈ `slot/spec/argv/none`。
 
-    回退链 = `explicit` → `spec["workers"]`（>0）→ 首批 `argv` 条数；都拿不到 ⇒ `0`
-    （调用方据此**不补差**）——宁可不补，也不猜宽度：批大小直接决定批次级固定开销摊在几局上
-    （`plan/rollout-topup-fastpath` §1.7）。
+    ★ A1（plan/offline-code-authority-and-width）：`explicit` 的语义 = **轮级槽位**（本机能同时
+    跑的局数上限，调用方从 `iter_info["slots"]` 拿）——**不是**首批实际用过的 workers：
+    那会把「下一批该铺多少局」上界成「本批有几局」（现场首批 argv 只有 1 条 ⇒ 64 批 × 1 局）。
+    回退链 = `explicit` → `spec["workers"]`（>0）→ 首批 `argv` 条数（`"argv"` = **退化档**：
+    消费点必须响亮 WARN，别静默）；都拿不到 ⇒ `(0, "none")`（调用方据此不补差：宁可不补，也不猜）。
     """
-    for cand in (explicit, spec.get("workers")):
+    for src, cand in (("slot", explicit), ("spec", spec.get("workers"))):
         try:
             n = int(cand or 0)
         except (TypeError, ValueError):
             n = 0
         if n > 0:
-            return n
-    return len(list(spec.get("argv") or []))
+            return n, src
+    n = len(list(spec.get("argv") or []))
+    return (n, "argv") if n > 0 else (0, "none")
 
 
 def next_batch_spec(
@@ -193,10 +196,9 @@ def topup_rollout(
     自己新产的批落在 `job_dir/topup{k}/` 并向返回值里追加，绝不重扫首批目录。
     `run_fn` 注入时为单测用（默认 = `worker.iter_rollout.run_iter_rollout`）。
 
-    `width` = 补差批的**目标局数**（= 机器 worker 宽度，plan/rollout-topup-fastpath §3.3）：
-    调用方（`remote/worker.py`）传**首批实际用的** `iter_info["workers"]`（已夹过核数/上限）；
-    取不到时的回退链 = `spec["workers"]`（>0）→ 首批 `argv` 条数——**都拿不到就不补差**
-    （宁可不补，也不猜一个宽度：批大小直接决定墙钟）。
+    `width` = 补差批的**轮级槽位**（= 本机能同时跑的局数上限）：调用方（`remote/worker.py`）传
+    `iter_info["slots"]`（已夹过核数/上限，A1）。取不到时的回退链 = `spec["workers"]`（>0）→
+    首批 `argv` 条数（**退化档，消费点在下方响亮 WARN**）——都拿不到就不补差（宁可不补，也不猜）。
 
     `ctx` = 首批的 `iter_rollout.RoundContext`（plan §3.2）：补差批复用轮级资源（落点探针结论 /
     TS 树家 / **长驻池**）——传 `None` 时补差批就各自重建一遍壳子（逐字今天，慢但不坏）。
@@ -244,10 +246,18 @@ def topup_rollout(
     )
     rotate_seed = int(vol["rotate_seed"])
     it = int(vol["it"])
-    batch_width = _resolve_width(width, spec)
+    batch_width, width_src = _resolve_width(width, spec)
     if batch_width <= 0:
         log(f"WARN it{it} 补差批拿不到机器宽度（workers/argv 都为空）——本轮不补差（不猜宽度）")
         return None
+    if width_src == "argv":
+        # P3/A4：退化必须可见——argv 条数是**结果**不是预算（A1 的那条退化链的入口）。
+        log(
+            f"WARN it{it} 补差批宽度退化：拿不到槽位（调用方 width 与 spec.workers 都为空）"
+            f"——按首批 argv 条数 {batch_width} 铺满；这是结果不是预算，补差批数会被拖大"
+            "（查 remote/worker.py 的 iter_info['slots'] 与节点侧 with_rollout_workers）"
+        )
+    slot_txt = str(batch_width) if width_src in ("slot", "spec") else "-"
     collected, games = _totals(shard_dirs)
     out_base = _out_base(list(spec["argv"]), len(spec["argv"]))
     new_dirs: list[str] = []
@@ -289,7 +299,7 @@ def topup_rollout(
         shutil.copyfile(src_w, sub / INIT_WEIGHTS_NAME)
         log(
             f"it{it} 补差批 {batches}/{max_batches}: {len(spec2['argv'])} 局"
-            f"（满铺 width={batch_width} → {sub.name}/，games={plan_g}，cap={caps}，est_s={ests}）"
+            f"（满铺 width={batch_width} → {sub.name}/，槽位={slot_txt}，games={plan_g}，cap={caps}，est_s={ests}）"
         )
         info = run(sub, spec2, ts_dir=ts_dir, log=log, ctx=ctx)
         dirs_b = [str(d) for d in info["shard_dirs"]]
