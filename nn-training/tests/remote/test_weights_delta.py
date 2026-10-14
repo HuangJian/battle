@@ -15,7 +15,9 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import struct
+import subprocess
 import sys
 from pathlib import Path
 
@@ -219,3 +221,61 @@ def test_base_sha_of_reads_only_the_header() -> None:
     hdr_len = int.from_bytes(raw[4:8], "big")
     assert wd.base_sha_of(raw[: 8 + hdr_len]) == BASE_SHA
     assert wd.base_sha_of(b"nope") == ""
+
+
+# ───────────────────── ⑤ 顶层不吃重依赖（2026-10-14 实机事故：hub 起不来） ─────────────────────
+#
+# hub 的 import 图里有本模块（`hub.queue → hub.queue_observe → remote.code_snapshot →
+# remote.hub_client`），而 hub 进程的 PYTHONPATH 只带 `nn-training/`（三方包在 venv 的
+# site-packages）⇒ 顶层 `import numpy` 等于**整个 hub 起不来**（实机：`ModuleNotFoundError:
+# No module named 'numpy'`，hub-server 退出）。本模块因此**顶层零三方依赖**（`_np()` 惰性取），
+# 缺了只在使用点响亮拒收。
+#
+# ⚠ 2026-10-14 续修：`hub_client` 连**顶层 import 本模块**也取消了（收进函数体）——于是 hub 的
+# import 闭包根本不碰本模块/`remote.opt_delta`。那条更强的判据（进程级）在
+# `tests/remote/test_hub_import_graph.py`；本文件的子进程用例保留，钉「本模块顶层不吃 numpy」。
+# 判据只能起独立解释器跑（进程内 `sys.modules` 已被本文件的 import 污染）。
+
+#: 子进程里跑（本进程的 `sys.modules` 早被本文件的 import 污染）。
+#: 判据全在**子进程内部**用断言表达，父进程只看**退出码** —— 不把交付物挂在输出文本上。
+_BLOCK_NUMPY = """import sys
+sys.modules['numpy'] = None
+import hub.queue  # hub → remote.code_snapshot → remote.hub_client（事故现场那条链）
+from remote import weights_delta as wd
+assert (wd.W_DELTA_FMT, wd.is_container(b'BWD1')) == ('delta-i16', True)
+assert wd.w_fmt_of({'w_fmt': 'delta-i16'}) == 'delta-i16'  # 形态位读法纯 stdlib，照常可用
+"""
+
+_NUMPY_MISSING_IS_LOUD = """import sys
+sys.modules['numpy'] = None
+from common.errors import ProtocolError
+from remote import weights_delta as wd
+try:
+    wd.f32_b64([1.0])
+except ProtocolError as e:
+    assert 'numpy' in str(e), e  # 响亮且指名原因
+except Exception as e:  # 任何别的异常 = 拒收面失控
+    raise SystemExit(f'wrong exception: {e!r}')
+else:
+    raise SystemExit('silent')
+"""
+
+
+def _run_without_numpy(code: str) -> subprocess.CompletedProcess[str]:
+    """只挂 `nn-training/`（三方包不在 sys.path 上）= hub 进程实际拿到的环境。"""
+    env = {**os.environ, "PYTHONPATH": str(ROOT)}
+    return subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, env=env, timeout=120
+    )
+
+
+def test_hub_import_graph_needs_no_numpy() -> None:
+    """★ hub 的 import 图在**没有 numpy** 的解释器里也必须完好（2026-10-14 事故的复现用例）。"""
+    r = _run_without_numpy(_BLOCK_NUMPY)
+    assert r.returncode == 0, r.stderr
+
+
+def test_numeric_paths_reject_loudly_without_numpy() -> None:
+    """缺 numpy ⇒ 使用点**响亮**拒绝（绝不静默把 delta 当权重落盘），顶层仍可 import。"""
+    r = _run_without_numpy(_NUMPY_MISSING_IS_LOUD)
+    assert r.returncode == 0, r.stderr

@@ -147,6 +147,10 @@ export function hubServerSpec(cfg: RlConfig): ProcSpec {
     // cwd 钉死 REPO_ROOT：入口是包路径（`-m hub.server`）靠 PYTHONPATH，
     // 而它内部的默认路径/日志相对 cwd；控制台以 dashboard/ 为 cwd 启动时不能漂。
     cwd: REPO_ROOT,
+    // ★ hub 进程**不需要** venv 的 site-packages（2026-10-14）：reward 由 trainer 在打包端算、
+    // delta 重建由 trainer 落位时做 —— hub 只借 `remote.code_snapshot → remote.hub_client` 里的
+    // `pack_code_zip`，而两个吃 numpy/torch 的容器模块只在 hub_client 的**函数体内**局部 import
+    // ⇒ 不在 hub 的 import 闭包里。判据 = `nn-training/tests/remote/test_hub_import_graph.py`（进程级）。
     env: { PYTHONPATH: NN_TRAINING },
     // 共享实例 ⇒ 日志也唯一（不再 per-course；与 api 侧 resolver 两半同步）
     log: path.join(LOG_DIR, 'hub-server.out'),

@@ -31,9 +31,12 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:  # 只在类型面（运行时由 wire_diet 分支内延迟 import）
     from remote.payload_slim import ShardSlim
 
-# R3/M4：opt 回传的形态（`manifest.opt_fmt`）与 delta 容器（L0）；R1/M3：权重同理（`manifest.w_fmt`）。
-import remote.opt_delta as opt_delta
-import remote.weights_delta as weights_delta
+# ★ R3/M4 / R1/M3 的两个 delta 容器（`remote.opt_delta` / `remote.weights_delta`）**不在本模块顶层
+# import**：hub 进程（`hub.queue_observe → remote.code_snapshot → 本模块`）只借本模块的
+# `pack_code_zip`/`pack_ts_code_zip`，而那两个容器模块吃 **numpy/torch** —— 顶层 import 会把它们拖进
+# hub 的 import 闭包，让 hub-server 在没装三方包的环境里启动即退（2026-10-14 事故）。它们只在**用它们
+# 的那几个函数内**局部 import（`publish_job` / `_pack_opt_init` / `verify_and_land`）；判据 =
+# `tests/remote/test_hub_import_graph.py`（进程级：hub 闭包不得含这两个模块）。
 from common.fs import append_jsonl, extract_tar_bytes
 from common.hashing import sha256_bytes, sha256_file
 from common.platform_utils import rmtree_best_effort
@@ -66,12 +69,9 @@ from common.protocol import (
 )
 
 # delta 落地（重建 + 押回权威字节）已并入**各自的容器模块**（2026-10-14，1000 行 LOC 预算）——
-# 名字留门面（与 `pack_payload_zip` 同规）。住容器模块而不是新开一个：新模块只要 import 它们
-# 就是 L1，与本模块同层（DAG 要求严格向下）⇒ 9 个上位模块要一路抬层（理由见 opt_delta 模块头）。
-_land_opt_delta = opt_delta.land_opt_delta
-_land_weights_delta = weights_delta.land_weights_delta
-_opt_tar_bytes = opt_delta.opt_tar_bytes
-
+# 这里**不再留名字门面**（那要求顶层 import 它们，正好把 hub 拖回 numpy/torch；见上面的注释）。
+# 调用点一律走函数内局部 import；测试也从容器模块直接 import（与 `pack_payload_zip` 的 `X as X`
+# 门面不同：后者只依赖 stdlib + `common.*`，留在顶层对 hub 的闭包无害）。
 # 发布端 payload 封装已下沉 `remote.payload_pack`（2026-10-14）：实现搬家、名字留门面。
 from remote.payload_pack import pack_payload_zip as pack_payload_zip
 from worker.resume import shard_state_init_ok, walk_shard_dirs
@@ -772,6 +772,10 @@ def publish_job(
     + rollout.wver）算——节点跑完后对实产目录复算，两侧同函数，相等 ⇔ 实产集 ==
     声明集（计划 §5.5①）。
     """
+    # R3/M4 / R1/M3：形态位常量与 blob 重打**只在真正发布时**需要 ⇒ 局部 import（理由见模块头）。
+    import remote.opt_delta as opt_delta
+    import remote.weights_delta as weights_delta
+
     job_root_p = Path(job_root)
     kind = str(kind or "ppo")
     schedule_raw = schedule_raw if schedule_raw is not None else []
@@ -804,7 +808,7 @@ def publish_job(
     #    BC 无 warm-start → 恒 "bc" 占位）
     init_weights_fp = _sha256_file(init_weights_path) if init_weights_path else "bc"
     # 3) opt/ref 内容寻址（M2 B3）：raw 字节 sha256；未开瘦身则内联 base64（旧口径）
-    opt_raw = _opt_tar_bytes(ckpt_remote_dir)
+    opt_raw = opt_delta.opt_tar_bytes(ckpt_remote_dir)
     opt_sha = _sha256_bytes(opt_raw) if opt_raw else ""
     use_opt_blob = bool(slim and opt_sha)
     ref_raw = b""
@@ -1111,7 +1115,9 @@ def publish_job(
 
 def _pack_opt_init(ckpt_remote_dir: str | Path | None) -> str:
     """上轮 ppo_ckpt_remote → **plain base64** tar（旧内联口径，slim=false 逐字节回退）。"""
-    raw = _opt_tar_bytes(ckpt_remote_dir)
+    import remote.opt_delta as opt_delta  # 局部 import：见模块头（hub 顶层不吃三方依赖）
+
+    raw = opt_delta.opt_tar_bytes(ckpt_remote_dir)
     return base64.b64encode(raw).decode("ascii") if raw else ""
 
 
@@ -1354,6 +1360,10 @@ def verify_and_land(
     所以这里的第 2 项从「本地重算」变成「两边都是声明集」：节点能回传成功结果本身就
     蕴含了实产集相符（协议层不可绕）；§5.5① 的逐位对拍是离线验收，不是这条链的守卫。
     """
+    # R3/M4 / R1/M3：delta 重建（吃 numpy/torch）只在**落位时**需要 ⇒ 局部 import（理由见模块头）。
+    import remote.opt_delta as opt_delta
+    import remote.weights_delta as weights_delta
+
     m = normalize_manifest(manifest)
     if result["init_weights_fp"] != _sha256_file(init_weights_path):
         raise TripleCheckError("三重校验失败: init_weights_fp 不匹配（云起点 ≠ 当前 args.out）——拒收")
@@ -1391,7 +1401,7 @@ def verify_and_land(
     # 不等 = identity 档（worker 用自己那份 f32 副本当基准 —— 靠身份闸 + 结构闸，plan §12）。
     # 缺 base / 容器坏 / 结构不符 ⇒ 抛出去（**绝不**把 delta 当权重落盘）。
     if weights_delta.w_fmt_of(manifest) == weights_delta.W_DELTA_FMT:
-        wj = _land_weights_delta(wj, base_path=init_weights_path, log=log)
+        wj = weights_delta.land_weights_delta(wj, base_path=init_weights_path, log=log)
     out_p = Path(out_weights)
     out_p.parent.mkdir(parents=True, exist_ok=True)
     tmp = out_p.with_suffix(out_p.suffix + ".remote.tmp")
@@ -1412,7 +1422,7 @@ def verify_and_land(
     # 送来的整份 tar 在这里按旧形态解包（响亮一行），真容器坏掉仍拒收；`extract` 注入 `_extract_tar`
     # 是为了不让 L0 的容器模块 import 本模块的邻居。
     if opt_delta.opt_fmt_of(manifest) == opt_delta.OPT_DELTA_FMT:
-        opt_tar = _land_opt_delta(
+        opt_tar = opt_delta.land_opt_delta(
             opt_tar, traj_dir=traj_dir, it=it, ckpt_dir=ckpt_dir, extract=_extract_tar, log=log
         )
     else:

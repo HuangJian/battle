@@ -2,7 +2,8 @@
 
 钉住两件事（各对应一条「没有它会静默出错」）：
 
-  ① **hub 侧重建落地**（`hub_client._land_weights_delta`）：delta 容器 + 本机那份 init 权重 ⇒ 新的
+  ① **hub 侧重建落地**（`weights_delta.land_weights_delta`，`hub_client` 在 `verify_and_land` 里局部
+     调它）：delta 容器 + 本机那份 init 权重 ⇒ 新的
      weights_json 字节；**exact** 档（容器 `base_sha` == 本机字节的 sha）逐字节对账基准，
      **identity** 档（worker 用自己那份 f32 副本当基准）也照常重建在**本机**那条链上 —— 两档都要
      能在日志里分开报，但行为面只有「重建结果」这一件可断言；缺 base / 容器坏 / 结构不符一律抛
@@ -33,7 +34,7 @@ if str(ROOT) not in sys.path:
 
 from common.errors import ProtocolError
 from remote import weights_delta as wd
-from remote.hub_client import _land_weights_delta
+from remote.weights_delta import land_weights_delta as _land_weights_delta
 
 SHAPES = {"conv.w": (6, 3, 3, 3), "fc.b": (16,), "head.w": (16, 165)}
 

@@ -17,7 +17,16 @@ header = {"wfmt": W_DELTA_FMT, "base_sha": <64hex 或 "">, "scale": <float>,
 **为什么不吃 torch**：权重的线上字节是 `nn-weights-json`（`worker/data/weights_io.save_weights_json` 写，
 TS 运行时也读它）—— 每个参数是 `{"shape": […], "data": "<f32 LE 的 base64>"}` ⇒ 解析/量化/重建全在
 `json` + `base64` + `numpy` 里做完，**hub 不需要 torch**（与 R3/M4 的 opt delta 正相反，那边是 tar+张量）。
-顶层只 import stdlib + numpy ⇒ 拓扑秩 **L0**。
+
+★ **numpy 也必须是惰性的（2026-10-14 实机事故）**：本模块被 `remote/hub_client` 在**模块顶层**拉进
+hub 的 import 图（`hub.queue → hub.queue_observe → remote.code_snapshot → remote.hub_client`）——
+而 hub 进程的 PYTHONPATH 只带 `nn-training/`（三方包在 venv 的 site-packages 里，不自动可见）⇒
+顶层 `import numpy` = **整个 hub 起不来**（ModuleNotFoundError，实际发生过）。所以 numpy 走 `_np()`，
+与 `opt_delta._torch()` 同规：**顶层零三方依赖，缺了也只在使用点响亮拒收**。
+（⚠ 这条同时纠正了本 plan §13 定案 2 的旧说法「numpy 在 hub 侧本来就有」：那是错的 ——
+`remote/payload_slim` 虽然吃 numpy，但它只在**打包端**（trainer/节点进程）被延迟 import，
+hub 从来没读过它。）
+顶层只 import stdlib + `common.*` ⇒ 拓扑秩 **L0**。
 
 **重建产物即权威字节**（与 R3 同口径）：hub 落盘的 `out_weights` 是**重建**出来的 JSON，`init_weights_fp`
 = `sha256(落盘字节)` 的算法一字不改；它与 worker 本机那份 f32 全量**必然不同 sha** ⇒ 命中判据是 M0 的
@@ -42,9 +51,10 @@ import json
 import struct
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any, cast
 
-import numpy as np
+if TYPE_CHECKING:  # 只在类型面（运行时靠 `_np()` 惰性取，见模块头 ★）
+    import numpy as np
 
 from common.errors import ProtocolError
 from common.hashing import sha256_bytes
@@ -70,6 +80,20 @@ W_DELTA_FMT = "delta-i16"
 _Q_MAX = 32767
 
 
+def _np() -> Any:
+    """惰性取 numpy（**顶层零三方依赖**是 hub 侧硬规；理由见模块头 ★）。
+
+    缺 ⇒ **响亮**（`ProtocolError`）——绝不静默降级把 delta 当整份权重落盘。
+    """
+    try:
+        import numpy
+    except ImportError as e:  # pragma: no cover - 只有 hub 那种极简环境才走到
+        raise ProtocolError(
+            f"权重 delta 需要 numpy（{e}）——拒收该形态，不得静默当权重落盘"
+        ) from None
+    return numpy
+
+
 #: manifest 的**形态位读法**（发布端写、worker 与 hub 都照它分叉的唯一口径）：命中（= `W_DELTA_FMT`）
 #: ⇒ 回传/落地的都是权重 delta 容器；否则（含缺键、旧值、非映射）= 旧形态（整份 JSON，逐字节旧行为）。
 #: 读法本体在 `common.wire_codec.fmt_bit`（与 R3 的 opt delta **共用一处**：两族容器只差一个值，
@@ -90,6 +114,7 @@ def _load(blob: bytes, what: str) -> dict:
 
 def _f32(entry: Any, where: str) -> np.ndarray:
     """`{"shape": […], "data": "<b64 f32 LE>"}` → f32 数组（长度/形状不符即响亮拒收）。"""
+    npy = _np()
     if not isinstance(entry, dict) or not isinstance(entry.get("shape"), list):
         raise ProtocolError(f"{where} 不是 {{shape, data}} 形状——拒收")
     shape = [int(x) for x in entry["shape"]]
@@ -102,23 +127,27 @@ def _f32(entry: Any, where: str) -> np.ndarray:
         n *= x
     if len(raw) != n * 4:
         raise ProtocolError(f"{where} 的 data {len(raw)} 字节 != {n} 个 f32（形状 {shape}）——拒收")
-    return np.frombuffer(raw, dtype="<f4").reshape(shape)
+    # `cast` 的类型参数是**运行时求值的实参** ⇒ 必须是字符串（`np` 只是 TYPE_CHECKING 名字）。
+    return cast("np.ndarray", npy.frombuffer(raw, dtype="<f4").reshape(shape))
 
 
-def f32_b64(arr: np.ndarray) -> str:
+def f32_b64(arr: Any) -> str:
     """f32 小端数组 → base64（**线上形态**的那一步编码；`weights_io` 写端同款）。
 
     公开而不是私有：工具侧（`tools/spatial-tower-parity.py` 的 golden 生成）要对同一种线上形态
     编码，自己再抄一份就是「同一份实现两份」（`tools/reuse_audit.py` 的逐字节重复组）。
     """
-    return base64.b64encode(np.ascontiguousarray(arr, dtype="<f4").tobytes()).decode("ascii")
+    npy = _np()
+    raw = bytes(npy.ascontiguousarray(arr, dtype="<f4").tobytes())
+    return base64.b64encode(raw).decode("ascii")
 
 
 def _quantized(delta: np.ndarray, scale: float) -> bytes:
     """Δ → int16 小端字节（`round` 用的是 numpy 的银行家舍入，两侧同规则、决定性）。"""
-    q = np.rint(delta.astype(np.float64) / scale)
-    q = np.clip(q, -_Q_MAX, _Q_MAX).astype("<i2")
-    return q.tobytes()
+    npy = _np()
+    q = npy.rint(delta.astype(npy.float64) / scale)
+    q = npy.clip(q, -_Q_MAX, _Q_MAX).astype("<i2")
+    return cast(bytes, q.tobytes())
 
 
 def pack_weights_delta(base_json: bytes, new_json: bytes, *, base_sha: str) -> bytes:
@@ -130,6 +159,7 @@ def pack_weights_delta(base_json: bytes, new_json: bytes, *, base_sha: str) -> b
 
     结构缺口一律 `ProtocolError`（**拒发**，不猜基准）：params 集合/形状/dtype 任一对不上。
     """
+    npy = _np()
     base, new = _load(base_json, "base 权重"), _load(new_json, "new 权重")
     bp, params_new = base["params"], new["params"]
     missing = sorted(set(bp) - set(params_new))
@@ -146,7 +176,7 @@ def pack_weights_delta(base_json: bytes, new_json: bytes, *, base_sha: str) -> b
         if b.shape != n0.shape:
             raise ProtocolError(f"weights delta：{name} 形状 {b.shape} != {n0.shape}——拒发")
         deltas.append(n0 - b)
-    maxabs = max((float(np.abs(d).max()) for d in deltas), default=0.0)
+    maxabs = max((float(npy.abs(d).max()) for d in deltas), default=0.0)
     # 全零 Δ（训练没动权重 / 极小模型）⇒ scale 退 1.0、q 全 0：重建**逐值等于** base。
     scale = (maxabs / _Q_MAX) if maxabs > 0 else 1.0
     blobs = [_quantized(d, scale) for d in deltas]
@@ -268,6 +298,7 @@ def apply_weights_delta(base_json: bytes, raw: bytes, *, expect_base_sha: str = 
     if scale <= 0:
         raise ProtocolError(f"weights delta：scale={scale} 非正——拒收")
     base = _load(base_json, "base 权重")
+    npy = _np()
     bp = base["params"]
     rebuilt: dict[str, Any] = {}
     for item in items:
@@ -284,11 +315,11 @@ def apply_weights_delta(base_json: bytes, raw: bytes, *, expect_base_sha: str = 
             raise ProtocolError(f"weights delta：{name} 形状与基准不符——拒收")
         if nbytes != b.size * 2:
             raise ProtocolError(f"weights delta：{name} 载荷 {nbytes} 字节 != {b.size} 个 int16")
-        q = np.frombuffer(blob, dtype="<i2").reshape(b.shape)
+        q = npy.frombuffer(blob, dtype="<i2").reshape(b.shape)
         # 全程 fp32 运算（两侧同一表达式 ⇒ 决定性）。
         rebuilt[name] = {
             "shape": list(item["shape"]),
-            "data": f32_b64(b + q.astype(np.float32) * np.float32(scale)),
+            "data": f32_b64(b + q.astype(npy.float32) * npy.float32(scale)),
         }
     if off != len(raw):
         raise ProtocolError(f"weights delta 载荷尾部有 {len(raw) - off} 字节多余数据")

@@ -2,7 +2,8 @@
 
 钉住两件事（各对应一条「没有它会静默出错」）：
 
-  ① **hub 侧重建落地**（`hub_client._land_opt_delta`）：delta 容器 + 上一轮 landed 的 base ⇒ 写
+  ① **hub 侧重建落地**（`opt_delta.land_opt_delta`，`hub_client` 在 `verify_and_land` 里局部调它）：
+     delta 容器 + 上一轮 landed 的 base ⇒ 写
      `ckpt_dir/opt.pt` 并押回**权威 tar 字节**（下一轮 publish 的 `opt_sha` 由它算，只装 `opt.pt`）；
      重建结果 = 新状态在 f16 界内；**缺 base / 容器坏 / 结构不符一律抛**（绝不把 delta 当权重落盘）；
   ② **发布端形态位**（`publish_job`）：`slim` + 真有 opt base ⇒ 写 `manifest.opt_fmt`；没有 base ⇒
@@ -30,7 +31,8 @@ if str(ROOT) not in sys.path:
 
 from common.errors import ProtocolError
 from remote import opt_delta as od
-from remote.hub_client import _extract_tar, _land_opt_delta
+from remote.hub_client import _extract_tar
+from remote.opt_delta import land_opt_delta as _land_opt_delta
 
 
 def _state(seed: int, *, n: int = 2, elems: int = 64) -> dict:

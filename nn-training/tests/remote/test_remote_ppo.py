@@ -1045,7 +1045,8 @@ def test_publish_job_slim_blob_and_payload_diet(tmp_path: Path) -> None:
     """M2：slim=True → payload 去冗余文件；opt/ref 只留 sha；blob 落盘（pull 端点源）。"""
     import tarfile as _tar
 
-    from remote.hub_client import _opt_tar_bytes, publish_job
+    from remote.hub_client import publish_job
+    from remote.opt_delta import opt_tar_bytes as _opt_tar_bytes
 
     shard_dir = tmp_path / "rl_s1_seed10"
     _write_shard(shard_dir, 1, 10)
@@ -1113,7 +1114,8 @@ def test_publish_job_slim_off_restores_legacy_inline(tmp_path: Path) -> None:
     manifest 无 opt_sha/ref_sha（逐字节旧行为）。"""
     import tarfile as _tar
 
-    from remote.hub_client import _opt_tar_bytes, publish_job
+    from remote.hub_client import publish_job
+    from remote.opt_delta import opt_tar_bytes as _opt_tar_bytes
 
     shard_dir = tmp_path / "rl_s1_seed10"
     _write_shard(shard_dir, 1, 10)
