@@ -6006,6 +6006,19 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   ② **读法去重**：`fmt_bit` / `container_base_sha` 下沉 `common.wire_codec`，两族容器只留 `partial` 别名
   —— 新开一个共用模块会让两个 L0 叶子一起升到 L1、连坐 `hub_client` 与 9 个上位模块（同 §13 定案 5）；
   复用账本结构克隆 18 → 16。
+- **补记 2（同日，实机事故：hub-server 启动即退）**：M3 落地后 hub 进程挂 —— `remote/weights_delta` 的
+  **顶层 `import numpy`**，而它是被 `remote/hub_client` 在**模块顶层**拉进 hub import 图的
+  （`hub.queue → hub.queue_observe → remote.code_snapshot → remote.hub_client`）。两个独立缺陷叠在一起：
+  ① **本片的错**：违反本仓「remote 子模块顶层零三方依赖（hub 侧免重依赖）」的规矩（§13 定案 1 里那句
+  「numpy 在 hub 侧本来就有」是错的 —— `remote/payload_slim` 只在**打包端**被延迟 import，hub 从不读它）；
+  ⇒ numpy 改**惰性**（`_np()`，同 `opt_delta._torch()`：顶层零三方依赖、缺了只在使用点响亮拒收）；
+  ② **潜藏的错（先于本片）**：uv 造的 venv 没有 `executable=` 行 ⇒ `resolveVenvPython()` 解析出的是**基础
+  解释器**（uv 跳板真身），而 `dashboard/src/stack/specs.ts` 的 hub-server spec 只挂 `PYTHONPATH: NN_TRAINING`
+  ⇒ hub 进程**一个三方包都看不到**（numpy/torch 皆无），M4 决策 (a)「hub 引入 torch」在这台机上不成立；
+  ⇒ spec 改为 site-packages + `nn-training/`（与 `launch/cli.ts` / `server/run-python.ts` 同规）。
+  复现用例：`tests/remote/test_weights_delta.py::test_hub_import_graph_needs_no_numpy` /
+  `::test_numeric_paths_reject_loudly_without_numpy`；spec 侧回归钉在
+  `dashboard/tests/hub-server-push-arg.test.ts`；全文 → `docs/nn/remote-transport.md` §95。
 - **后果**：R1 与 R3 共用同一套「形态位 + 容器自述 + 两档判别 + 缺 base 拒发」的纪律，形态位键
   分别为 `manifest.w_fmt` / `manifest.opt_fmt`；开关仍 `--wire-diet 0`，等 §6 的真机 A/B 通过才翻 1。
   全文 → `plan/wire-diet.plan.md` §3 R1 / §13 · `docs/nn/remote-transport.md` §94 · 代码
@@ -6328,3 +6341,170 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   实施改用「与包同目录」这条更根上的口径。评审的另两条（全员演成功 · 写点在进程退出层）成立，已按原评审实施。
 - **全文** → `plan/offline-open-ended-iters-and-loud-export.plan.md` §3.3 · 评审
   `plan/offline-open-ended-iters-and-loud-export.review-bf.md`（含勘误节）。
+## §2026-10-14-goalnn-wire-diet-hub-unplugged（2026-10-14，hub 与 numpy/torch 解耦：delta 容器只在 trainer 侧被消费）
+
+- **背景**：`§2026-10-14-goalnn-wire-diet-m4-hub-torch` 选了 (a)「hub 引入 torch」，把 torch 摆进了
+  **hub 进程**；随后 2026-10-14 实机事故（`remote.hub_client` 顶层 `import numpy` ⇒ hub-server 启动即退，
+  `ModuleNotFoundError`）暴露了一件事：**这条依赖从来不是「hub 要算」，而是 import 图连坐**。
+- **事实（核过代码）**：reward 由 **trainer** 在打包端算（`publish_job` → `remote.payload_slim`）；
+  delta 重建由 **trainer** 落位时做（`verify_and_land` → `opt_delta` / `weights_delta` 的 `land_*`）。
+  生产 `hub/` 里**零处**调用 `publish_job` / `verify_and_land`——只有 `hub/smoke_loopback.py`（回环冒烟
+  脚本，非 hub-server）跑全链。hub 之所以碰它们，只因 `hub.queue_observe(L3) → remote.code_snapshot(L2)`
+  借了 `pack_code_zip`/`pack_ts_code_zip`，而 `code_snapshot → remote.hub_client(L1)` 又在**顶层**
+  import 了两个容器模块（`weights_delta` 吃 numpy、`opt_delta` 吃 torch）。
+- **决定**：**D1** hub_client 取消顶层 import 两个容器模块（收进 `publish_job` / `_pack_opt_init` /
+  `verify_and_land` 的函数体，取值点内联）⇒ hub 的 import 闭包从此**不含** `remote.weights_delta` /
+  `remote.opt_delta`；**D2** 撤 `dashboard/src/stack/specs.ts` 给 hub 挂 venv site-packages 的补丁（hub
+  不再需要三方包，只留一条指向判据的注释）；**D3** 判据 = 进程级
+  `tests/remote/test_hub_import_graph.py`（只挂 `nn-training/` + 悬空 numpy/torch ⇒ `import hub.server`
+  必须成功，且闭包不含那两个模块；先红后绿）；**D4** 修正 §m4-hub-torch 的措辞：torch/numpy 只住
+  **trainer**，两个容器模块是 **L0 叶子**，由 trainer 延迟消费。
+- **备选与否决**：① 把 `pack_code_zip`/`pack_ts_code_zip` 拆到 stdlib 叶子、让 `code_snapshot` 完全不进
+  `hub_client`（结构性彻底断开）—— 否**本次不做**（要新模块 + `remote_dag` LAYERS + 三条拆分守卫 + LOC
+  预算重排；D1 已达成「hub 闭包零三方依赖」这个目标）· 留作后续「B」；② 用模块 `__getattr__` 令
+  `hub_client._land_*` 别名惰性可见以保住测试里的旧名字 —— 否（PEP 562 的隐式魔法，AGENTS §13「simple
+  beats clever」）；改为测试直接从容器模块 import（3 个文件）；③ 保留 specs.ts 补丁「以防万一」—— 否
+  （闭包已证零三方依赖；补丁让 hub 能 import 任意三方包，反而掩盖边界）。
+- **后果**：hub 可在**只有 `nn-training/`**（无 venv site-packages）的环境里起来；`remote.hub_client` 顶层
+  少两条边，DAG 层号不变（两容器仍 L0、hub_client 仍 L1）。全文 → `plan/wire-diet.plan.md` §13（该处
+  2026-10-14 的 ⚠ 更正里「hub 能跑 torch」一句按本条作废）。
+
+## §2026-10-13-goalnn-y5hit2-design（2026-10-13，y5-hit2 接力腿：y5-hit 现文件逐字＋起点换 it500）
+
+- **背景**（用户令）：复制 y5-hit 为 y5-hit2，bc 用 y5-hit.it500，其它不变。y5-hit 盘后状态：
+  hitRate 0.396→0.836、kills 守住、中经 it100 恐惧塌（17 clears）后收回；现文件已被展成
+  iters 0/max 24/eval 400（代码为准，纠过一次 100/12/100 的过期假设）。
+- **决定**：D1=`y5-hit2`（y5-hit 现文件逐字，差集仅名义键＋起点 it500〈sha `961bacde390cbf02`，
+  同代直连，opt fresh〉；§15.5 新账本 tmp/y5-hit2＋backup weights/y5-hit2）；
+  D2=门沿用（hitRate 0.45 成 floor，kills≥3.5/D01≤85 活线；fail⇒杀）。
+- **备选与否决**：① 按我最初设计的 100/12/100 写 —— 否（现文件 0/24/400 是执行中的事实，
+  "不变"指相对现状；已纠）；② 换配方/加变量 —— 否（纯接力，无新变量）；③ 用 it500 前的峰点 ——
+  否（用户点名 it500；末端横盘，无更优点）。
+- **后果**：`nn-training/curricula/y5-hit2.jsonc`（逐字 diff 绿）；全文 → `docs/nn/experiments.md` §102；
+  开课人点（agent 不得启动训练）。
+
+## §2026-10-13-goalnn-y5far-design（2026-10-13，y5-far/y5-pos 防近腿：直接双税 vs 站位税，保命中）
+
+- **背景**（用户令）：y5-hit.it470 开局 near4 0.667（人类 0.345，2 倍）但命中反超，要求保命中防贴脸/包围；
+  y5-hit2 改名 y5-far（未开课无账本）；另设一条并行比较腿验其它激励。剂量见 §104（near −4.37/encl −1.23
+  现状；corner −2.72/threat −4.01 现状）。
+- **决定**：D1=`y5-far`（near×2＋encl×2；起点 it500 sha `961bacde…`；seed_rotate 补回 150〈复制 bug〉；
+  staging 500/24/200 沿用；新账本 tmp/y5-far＋backup weights/y5-far，§15.5）；
+  D2=`y5-pos`（corner×2＋threat×1.5，near/encl 留原值；其余与 y5-far 逐字同；新账本 §15.5）；
+  D3=门双腿一字同（hitRate≥0.75＋nearSq≤110/千＋kills≥3.5＋encl≤100/千；D01≤85/fear 护栏；fail⇒杀）；
+  D4=双分支预注册（far 动↔直接有效；pos 动↔站位更安全；双动看剂量；双不动另案）；
+  D5=并行就绪（零共享，容量人定）。
+- **备选与否决**：① near×3（y1 量级）—— 否（73% 已逼冻结线，冠军底子也别一次加满；×2＋护栏先行）；
+  ② threat 不动（只加 corner）—— 否（包围蕴含火线暴露，threat×1.5 与 corner 同向，束内 paired）；
+  ③ dist 加回拉远 —— 否（刚删的彩票，不走回头路；远＝另一种极端）；④ hurt 加码 ——
+  否（phase-1b 排队的是去 hurt（y1h），反向操作等 y1h 先判）。
+- **后果**：`y5-far.jsonc`＋`y5-pos.jsonc`（全键 diff 绿，证据 `tmp/y5far-ev-check.py`）；
+  全文 → `docs/nn/experiments.md` §104；开课人点（可并行，agent 不得启动训练）。
+
+## §2026-10-13-goalnn-y5far-verdict（2026-10-13，y5-far 恐惧塌杀＋y5-pos 偏离续跑：near×2 too hot 实锤）
+
+- **背景**：y5-far（near×2/encl×2）it20 峰 213 clears → it68 rollout win 破 0.2 → it75 KL 0.47
+  spike＋eval 悬崖（1 clear）→ it76+ 双死（win 0.006；贪心 stuck→3000/cells→1/shots→0）；
+  it40 已挂 3/4。y5-pos（corner×2/threat×1.5）it218 win 0.743，eval 72→281 clears，
+  kills→4.23，hitRate 守住，D01 104→66，near/encl −21%/−23%；it40 字面挂 3/4（hitRate 差 0.002）。
+- **决定**：D1=y5-far **杀＋立刻 halt**（it218 空烧中）；D2=y5-pos **§6.4 偏离续跑**
+  （字面挂线但唯一活口＋端点涨＋税在动；重判 it300/自然收官）；D3=paired 判：
+  站位胜、直接死（near×2 73% killEV 75 轮杀冠军；y1 机制 ×2 复现；§94 再添一证）。
+- **备选与否决**：① y5-pos 按字面杀 —— 否（杀健康腿保门面；偏离已记）；② y5-far 抢救（降税续跑）——
+  否（§15.5 不跨改动续跑；双死无可救，教训入库即可）；③ near×1.5 重开一腿 ——
+  否（y5-pos 站位线已走通，不分散算力；剂量曲线以后如需再议）。
+- **后果**：杀/续全是人点（控制台；y5-far 先 halt 停烧）；全文 → `docs/nn/experiments.md` §105。
+
+## §2026-10-13-goalnn-eval-contamination-audit（2026-10-13，y5-far/y5-pos eval 混入 arena 局＋我漏 seed_rotate＋tmp/y5-hit 消失）
+
+- **背景**：备 y5-near 全键 diff 时发现：y5-far/y5-pos 现文件 eval "2000-2003"×50（我落盘的是单关），
+  且四份我经手文件漏 `seed_rotate`（y4/y5/y5-far/y5-pos；y5-near 有）。另 tmp/y5-hit 整目录消失。
+- **查明**：① 2001+ 无 stageJson ⇒ 纯本地直跑必 crash（实证 `stage.tiles` null），远端走 ARENA 解析 ⇒
+  y5-far/y5-pos eval＝100 c05＋300 arena；同 seed 跨 ID 不同局为铁证。② seed_rotate 缺席＝rollout
+  旧固定局数语义，只伤采样效率，不伤 eval verdict；且 seed_rotate 进 corpus fp，**在跑腿加不得**
+  （加即 corpus 变，热加载拒）。③ eval 改回单关**允许热应用**（corpus_fp 明示排除 eval_*，
+  属判据/预算类，下一 iter 生效，不断腿）——已核对 `biz/corpus_fp.py:26-70` 与热加载分类学。
+- **决定**：D1=verdict 全部按 s2000 重读（y5-far 塌成立更干净；y5-pos 由成长修正为健康横盘，
+  §105 部分收回，记 §106）；D2=**建议把 y5-pos eval 改回单关**（"2000"×200，与 y5-near 同深，
+  热应用不断腿；改配人点，改后行自动纯洁）；seed_rotate 在跑腿**不动**（corpus 拒收）；
+  D3=y5-near 保持干净单关（未动，“2000”×200＋seed_rotate 在）；D4=tmp/y5-hit 之死暂记（panel＋
+  权重在，可重算；§96–103 数已归档）；D5=校验脚本从此全键覆盖（已在 y5far/y5hit2 两案执行）。
+- **备选与否决**：① 现在把 y5-pos eval 改回单关 —— 否（corpus 拒收会断腿；不断序列比纯洁重要，
+  过滤读等价）；② 重写 §105 —— 否（只增不改；收回记 §106）；③ 补跑 y5-hit 恢复 log ——
+  否（500 权重＋panel 都在，真要用时再算，不预烧）。
+- **后果**：全文 → `docs/nn/experiments.md` §106；三个待人令见正文问题。
+
+## §2026-10-13-goalnn-eval-authorship-correction（2026-10-13，用户手动编辑为准：混合 eval 是设计，§106 定性收回）
+
+- **背景**：用户明示 y5-pos/far 课程文件系其手动编辑、以其为准。§106 把 "2000-2003" 定性为污染
+  是错的——它是用户的混合 eval 设计（100 c05＋300 arena）。"改回单关"建议（旧 D2）撤销。
+- **决定**：D1=§106 定性收回（改称混合设计；s2000-only 数字与重读法继续有效，记 §107）；
+  D2=y5-far/y5-pos 文件冻结（不再提改配；y5-far 塌 verdict、y5-pos 健康横盘 verdict 不受影响）；
+  D3=归属澄清（seed_rotate 缺席：y5-far/y5-pos 系用户编辑；y4/y5 系我原始遗漏，done legs 只记）；
+  D4=y5-near 保持我的版本（干净单关＋seed_rotate；与 y5-pos rollout 口径差已披露，eval 可比）。
+- **备选与否决**：① 重写 §106 —— 否（只增不改；收回记 §107）；② y5-near 跟随改混合 eval ——
+  否（未开腿，干净单关对 near 判决最锐；待人令见问题）。
+- **后果**：全文 → `docs/nn/experiments.md` §107；y5-near eval 口径待人令（见正文问题）。
+
+## §2026-10-13-goalnn-y5near-mixed-eval（2026-10-13，y5-near 跟混合 eval＋y5-hit 日志归档确认）
+
+- **背景**（用户令×2）：① y5-near eval 跟混合设计（"2000-2003"×50）；② tmp/y5-hit 系用户清理的。
+- **决定**：D1=y5-near eval 改混合（除名义/起点/near×1.5/iters150/max12 外与现 y5-pos 全键逐字同，
+  校验绿）；门读 headline，s2000 为真值附读。D2=y5-hit 日志归档确认（§96–102 数封存为只读；
+  panel＋500 权重在，可重算）。D3=y5-near 开课仍待人点。
+- **备选与否决**：① y5-near 保持干净单关 —— 否（用户令跟随；headline 逐行可比的价值大于纯洁，
+  s2000 切片保留真值）；② 恢复 tmp/y5-hit —— 否（用户清的；权重＋panel 足够）。
+- **后果**：全文 → `docs/nn/experiments.md` §108；开课人点。
+
+## §2026-10-13-goalnn-y5pos-kill（2026-10-13，y5-pos 杀：it250 双连破 kills 线＋腰斩，漂移式死亡）
+
+- **背景**：it245→255 eval kills 3.55→3.02→2.98（<3.5 双连破）＋kills −16%（y 系掐线 −15%）＋
+  rollout win 0.55→0.24（10 轮）＋dead 9→25＋cells 59→45＋shots→9.2；hitRate 0.88/D01 61/
+  KL/熵全稳——漂移死非爆炸死。it129 dip 史作对照（未破线＋带内振荡，已收回；本次出带＋加速）。
+- **决定**：D1=y5-pos **杀（人点 halt）**；D2=y5-near 为 lineage（it27 健康，kills 4.14–4.35 全超父腿，
+  near×1.5 无恐惧，剂量判待 it40）；D3=y5-pos.it215 文件永存（后悔药：任何时点可重开分支）。
+- **备选与否决**：① 等 it260 确认 —— 否（三线齐响＋出带加速，等即看血；"塌了别等"成文纪律）；
+  ② 降税抢救续跑 —— 否（§15.5；漂移死救不回，y1 前例）；③ 连 y5-near 同杀 ——
+  否（子腿健康且超父，株连无据）。
+- **后果**：halt 人点；全文 → `docs/nn/experiments.md` §109。
+
+## §2026-10-13-goalnn-y5term-design（2026-10-13，y5-term 终局腿：y5-near 加 wWin＋5.0/timeout−5.0）
+
+- **背景**（用户令）：以 y5-near 为基础加过关奖和超时税；其它（用户调过的 iters500/混合eval/
+  seed缺席/max12）不动；BC 仍用 y5-pos.it215。剂量：y5-near.it25 clear +23.20 vs timeout +23.41
+  （苟免费实锤）vs gameover −12.38；wWin +5.0（a2 同值同比）⇒ clear ≈28.2；timeout −5.0 ⇒ ≈18.4；
+  自杀检查 30 点 margin ⇒ 不设 lives 税（倒挂即加，watch）。
+- **决定**：D1=`y5-term`（现 y5-near 逐字＋wWin 项/键＋terminal{timeout −5.0}；起点 it215
+ （sha `f69385b36a1bcd11`，与 y5-near 同起点隔离终局效应）；kickstart 关，opt fresh；
+  新账本 tmp/y5-term＋backup weights/y5-term，§15.5）；D2=门（y5-near 四线＋终端线 it40
+  timeout≤15%＋clears 不掉；fail⇒杀）；终点五线（cap 500）。
+- **备选与否决**：① 加 lives 税 —— 否（margin 30 点，倒挂是 watch 项不是预设）；② wWin 按 killEV
+  全额（+12）—— 否（a2 同比 40% 已够拉开 10 点 gap；终局大额＝方差炸弹）；③ 用 y5-near 后期权重
+  当起点 —— 否（用户点名 it215；同起点才隔离终局效应）；④ 顺手把 seed_rotate 补回 ——
+  否（用户调过的不动；y5-near 现状无它，逐字优先）。
+- **后果**：`nn-training/curricula/y5-term.jsonc`（逐字 diff 绿）；全文 → `docs/nn/experiments.md` §110；
+  与 y5-near 并行就绪，人点（agent 不得启动训练）。
+
+## §2026-10-13-goalnn-y45-close（2026-10-13，y4/y5 结课报告落盘：跑满非杀；y1 系删除系列自 y4 起）
+
+- **背景**（用户令）：y1 课程全删（y1/y1k/y1f/y1d/y1h/y1a.jsonc 已删；其 tmp 停在 it5/43/40/3，
+  皆 halt 态，无在跑腿丢文件）；本系列自 y4 起；给已停 y4/y5 写结课报告。
+- **决定**：D1=y4/y5 文件各追加尾部结课报告节（规格头不动；load 复验绿）：
+  y4（病灶动终点平命中税）/y5（买谨慎不买本事），数与 §101/§96 一致；
+  D2=在跑腿状态确认（y5-near it34 win 0.540 续跑中；y5-pos it260 垂死待 halt；y5-far it218 空烧待 halt）；
+  D3=y4/y5 文件冻结（结课后不动）。
+- **备选与否决**：① 报告写进头注 —— 否（规格头冻结，尾部追加零风险）；② 顺手 halt 在跑腿 ——
+  否（halt 是人点；只报状态不动手）；③ 补 y1 系结课报告 —— 否（用户删了即归档意愿，不追）。
+- **后果**：全文 → 两课程文件尾部节；y5-far/y5-pos halt 仍待人点。
+
+## §2026-10-13-goalnn-y5legs-close（2026-10-13，y5-pos/y5-hit/y5-far 结课报告落盘）
+
+- **背景**（用户令）：已停三腿写结课报告。y5-pos it260（杀令已下，仍在烧需 halt）、
+  y5-hit 超 500（非杀，跑满）、y5-far it218（杀令已下，空烧中）。
+- **决定**：D1=三文件各追加尾部结课报告节（规格头不动；load 复验绿）：
+  y5-pos（漂移死，hitRate 至死守住；混合口径+s2000 注）/y5-hit（命中 0.40→0.84＋恐惧可恢复；
+  tmp 已清，数以归档为准）/y5-far（爆后塌，s2000 同塌）；D2=终局数更新
+  （y5-pos.it260：49 clears/kills 2.20/shots 7.1 破 fear 线——杀令再确认；y5-far.it215 尸体确认）。
+- **备选与否决**：① 报告写头注 —— 否（规格冻结，尾部零风险）；② 等 halt 后再写 ——
+  否（数已定，halt 是独立人动作）；③ 恢复 tmp/y5-hit —— 否（用户清的；已归档）。
+- **后果**：全文 → 三文件尾部节＋`docs/nn/experiments.md` §111；halt 仍待人点。

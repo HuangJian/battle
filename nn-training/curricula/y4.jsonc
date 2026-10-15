@@ -1,0 +1,124 @@
+// 课程 y4 —— c04 第一加税腿：x4 冠军为师＋x27-obs 厨房水槽配方（用户令），iters 300，人工盯盘无熔断。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；**可与 y5 并行同开**）。
+//
+// 立项 → 用户 2026-10-13：§94 普查判 c04 发病（胜率 95→76＋D01 翻倍＋连击×3＋转化层点火），
+//   y4 为第一加税级；配方点名 x27-obs 逐字；300 轮；人工盯盘不设熔断。
+//   §6.4 偏离说明（相对 §94）：§94 推荐"带血的税"，本腿用 x27 水槽逐字（含 raw near28/
+//   threat80/dist 1.8 彩票/pickup 系）——**用户令为准**，不静默偏离；冠军底子耐接触
+//   （x4-migrated 76%/D01 170 照样打）＋kickstart 缰绳兜底。pickup 系 c01 曾 400 局零记录，
+//   c04 若同样零拾取即确认死列（phase-2 清理候选，不在本腿动）。
+//
+// ── 单变量声明（相对 x27-obs：只换 level/起点/账本/eval/流；配方/优化器/K 全逐字）─
+//   level ladder-c04（单关 count 4，max_ticks 3300，hard 1 命；环境键全在 level，
+//   课程**不重复** stages 等键；eval stage ID＝2000 本 rung 单关）。
+//   起点 x4-mig 转换产物（`weights/x4-mig/x4-rebirth.it45-warmstart-v5.json`，
+//   sha16 `770b14b9e3d431a4`；legacy-arch 头 128，同 y1a——rms 结构性零预期，看 KL/缰绳；
+//   41/42 原位审计过，`tmp/mig-audit.py`）。
+//   kickstart_ref=true＋init 0.1（跨代缰绳；M3/x24/y1a 先例）；
+//   burn {baseline,100}＝等效关；ent_break 0（用户令：人工盯盘，**人就是熔断器**）。
+//   同流 20261024（y 系；x27 的 20261021 不用，偏离已记）；max_hours 48（x27 的 24 不用，
+//   长 tick rung 的纯 ceiling 偏离）；eval 本 rung（"2000" 单关×100/轮，y 口径；x27 的 2000-2003 不用）。
+//   iters 300，workers 8，batch 24576；优化器/K 冻结（x27 逐字：lr 3e-4/epochs 4/mb 1024/kl 0.05+cap 0.2/K=10）。
+//
+// ── 盯盘表（无自动门；§15.4 每次 update 必读 kl/entropy/value/gnorm＋rms）────────
+//   it40/100/200 对 migrated 基线（x4：kills 3.56 / D01 170 / pass 76%）：
+//   kills 掉 >15% 或 pass 掉 >10pp 或 D01 翻倍（>340）⇒ 人工掐（y1f 教训：塌了别等）；
+//   KL >0.03 连 3 轮 ⇒ 掐；rms 非零 ⇒ 立刻掐查（legacy 空片恒零预期，非零即权重族错乱强信号）。
+//   终点：跑满 300 或人掐。不考 G0。
+//   ⚠ 前提：tmp/y4 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y4）+ backup 新目录（nn-training/weights/y4）+ opt fresh。
+{
+  "version": 5,
+  "name": "y4",
+  "mode": "per-tick",
+  "level": "ladder-c04",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 28.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：x4-mig 转换产物（sha 见头注；缰绳开）──
+  "bc": "nn-training/weights/x4-mig/x4-rebirth.it45-warmstart-v5.json",
+  "kickstart_ref": true,
+  "kickstart_init": 0.1,
+  // 熔断全关（用户指令）：margin_pp 100 = 等效关；盯盘掐闸在人手里。
+  "kickstart_burn": { "mode": "baseline", "margin_pp": 100 },
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（0.0 = 关；x27 逐字 0.001；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 300,
+  "max_hours": 48,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（见头注；x27 的 20261021 不用）。
+  "paired_rotate_seed": 20261024,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y4/weights.json",
+  "traj": "tmp/y4",
+  "ent_break": 0,
+  "backup_dir": "nn-training/weights/y4",
+  "backup_prefix": "y4",
+
+  "eval_stages": "2000",
+  "eval_games_per_stage": 100,
+  "eval_every": 5
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 结课报告（2026-10-13；跑满 300 cap，非杀；y1 系已删，本系列自 y4 起）
+// ══════════════════════════════════════════════════════════════════════════
+// 起点 x4-mig（x4-rebirth.it45 转换，sha `770b14b9e3d431a4`；legacy-arch，如 y1a）。
+// it0 vs it300（同 100 seeds，c04 单关）：clears 78→84（McNemar ns）、kills 3.49→3.61（ns）；
+//   连击 0.36→0.17（−53%★）、nearSq 312→269（p≈0.055）、near4 645→542（−16%★）、
+//   dmg 107.8→79.7（−26%★，D01 76.9→52.6）；ticks 1401→1515（+8% ns，无稀释）、
+//   stuck 132→145（平）、cells 66.6→60.3、shots 20.2→24.9。
+//   同款副作用：hitRate 0.485→0.403（−0.085★）、shots/kill 5.78→6.91（y5：7.3 同病）。
+// 训练健康：win 0.806→0.874，熵 0.655→0.556（无熔断），KL 0.0485→0.0153（均 0.0153；
+//   it1 高点系跨代起点冲击，无 spike 事件）；rms 键 it1 后缺席（遥测断流，只记不判）。
+// 盯盘三线（kills−15%/pass−10pp/D01 翻倍）全程合法，无掐。
+// 判决：病灶动（连击/近身/承伤真降）终点平（胜/杀 ns）命中税（§94 加税级兑现一半）。
+// 后继：c04 版 hit 腿排队（y5-hit 同款命中束）；本文件冻结（结课后不动）。
+// 证据：docs/nn/experiments.md §94（立项）/§101（收官分析）· tmp/y4/eval_log.jsonl。

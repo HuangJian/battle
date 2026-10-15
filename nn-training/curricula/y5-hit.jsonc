@@ -1,0 +1,126 @@
+// 课程 y5-hit —— 命中腿：y5.it300 为师＋命中束（wMiss 加压＋删 dist 彩票），c05，iters 100。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 用户 2026-10-13：y5.it300 shots/kill 5.8→7.3 恶化，要求加练命中；目标继续少暴露、
+//   提命中率；x27-obs 时 NN 命中已和人类相当（故不动 wAcc）。
+//   诊断（y5 eval it0 vs it300，同 100 seeds）：shots +6.73/局里 +6.13 是脱靶（miss +52%，
+//   hits 只 +0.29），开火距离 2.91→3.95 格（远处瞎打）；bricks 恒 0。
+//   gap-text-table 框架映射（A 轴既定结论）：A01 不加准头（机更准＋human parity，wAcc 15.3 HOLD）；
+//   A04 未对准开火 eval 行不可读（无 alignedShots，panel-only，盲点已记）；A05/A07 远漂＋
+//   dist 彩票（c01 67%EV 有证＋NOTES 远射奖没反应）⇒ 删；A03 量不是问题但边际全是 miss。
+//   配对模式没跑成：human c05 panel 不存在＋eval 行缺 panel 列（aliveTicks/dmgTotal/shots/hits…），
+//   故用框架＋配对 z 检验代替（means 已披露），不是瞎调。
+//
+// ── 命中束（相对 y5＝x27-obs：调 1、排雷 1；暴露侧全留）────────────────────────
+//   调 wMiss 0.158→**0.35**：spray-shot 边际 EV＝+0.046−0.612×wMiss（y5.it300 真实行：
+//   边际 +6.73 发换 +0.29 中），现行 −0.05 已为负但压不住安全溢价，×2.2 到 −0.17 让瞎打
+//   明确亏；watch：若 shots 不降反看 D01–shots 联动（安全溢价超价即下一嫌疑错了）。
+//   删 wDist（1.8 彩票，删项不留 0；c01 67%EV 有证，y1 删项先例）：去远射奖，逼近射。
+//   HOLD：wAcc（human parity）/wHit（火力无辜）/暴露全家（hurt/threat/near/block/corner/
+//   stuck/dmg——少暴露保持，一字不动）。
+//
+// ── 门（it40 硬门；只考命中，杀/暴露为护栏）───────────────────────────────────
+//   主：aimHitRate ≥ 0.45（it300 0.388，it0 0.494；回到 it0 线＋超）；
+//   次：shots/kill ≤ 6.0（it300 7.3，it0 5.8；往回走）；
+//   护栏 kills ≥ 3.5（掉下即恐惧塌，杀）；D01 ≤ 85（it0 线；超即把暴露捡回来，杀）；
+//   上报：policy_new_rms（legacy 结构性零预期，看 KL）＋it5 analytic 照旧；
+//   主/次/护栏任一 fail ⇒ **杀腿**。终点 it100：hitRate≥0.45＋kills≥4.0 ⇒ 收官。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   起点：y5.it300（`weights/y5/y5.it300.20261014-093451.json`，sha16 `092ea1b13ebf9763`；
+//   legacy-arch schema 5，同代直连，kickstart 关，opt fresh §15.5）。
+//   anchor 0.001（legacy 空片，无害）；ent_break 0.25（出生安全件）；batch 24576；优化器/K 冻结。
+//   同流 **20261024**（y 系）。iters 100，max_hours 12，workers 8，eval 本 rung（"2000" 单关×100）。
+//   ⚠ 前提：tmp/y5-hit 不存在（§15.5 新 out/traj＋本条 DECISIONS）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c05`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y5-hit）+ backup 新目录（nn-training/weights/y5-hit）+ opt fresh。
+{
+  "version": 5,
+  "name": "y5-hit",
+  "mode": "per-tick",
+  "level": "ladder-c05",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 28.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y5.it300（sha 见头注；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y5/y5.it300.20261014-093451.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 0,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  "seed_rotate": 150,
+  // y 系流。
+  "paired_rotate_seed": 20261024,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y5-hit/weights.json",
+  "traj": "tmp/y5-hit",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/y5-hit",
+  "backup_prefix": "y5-hit",
+
+  "eval_stages": "2000",
+  "eval_games_per_stage": 400,
+  "eval_every": 5
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 结课报告（2026-10-13；跑超 500，非杀；单关干净 eval）
+// ══════════════════════════════════════════════════════════════════════════
+// 起点 y5.it300（sha `092ea1b1…`；同代直连，kickstart 关，opt fresh）。
+// it0（n=100）→ it500（n=200）：clears 73→124（73%→62%）、kills 4.15→3.96（守住）、
+//   hitRate 0.396→0.836（+111%）、shots 30.3→13.3、D01 75.0→69.9。
+// 中经 it100 恐惧塌（17 clears/shots 10.7，hitRate 反冲 0.75）后收回，it200 起 0.66–0.89 横盘。
+// 判决：命中束生效（wMiss↔spray、删 dist↔远漂；人类开局配对：开局命中反超人类，§103）；
+//   恐惧事件可恢复（剂量未过头证据）。设计门（hitRate≥0.45 等）早成 floor。
+// 后继：y5-hit2 改名 y5-far（塌）→ y5-pos（杀）→ y5-near（进行中）→ y5-term（待开）；本文件冻结。
+// 证据：docs/nn/experiments.md §97（立项）/§98/§99/§100/§103（配对链）/§102（长跑）。
+//   ⚠ tmp/y5-hit 已由用户清理，trajectory 数以归档为准；panel（`tmp/panel-c05-*`）＋
+//   501 权重备份在，可重跑复算。eval 本 rung 单关干净（"2000"，无污染）。

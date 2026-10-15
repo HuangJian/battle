@@ -1,0 +1,119 @@
+// 课程 y5-far —— 防近腿：y5-hit.it500 为师＋near×2/encl×2 直接双税（用户令；y5-hit2 改名，未开课）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；**可与 y5-pos 并行同开**）。
+//
+// 立项 → 用户 2026-10-13：y5-hit.it500 开局 near4 0.667（人类 0.345，2 倍）但命中反超人类，
+//   要求"保命中的同时防贴脸和被包围"。y5-hit2 改名至此（未开课无账本，改名干净）＋调激励。
+//   剂量（y5-hit.it500 真实行，n=200）：near 已交 −4.37/局（killEV 37%）仍挡不住近身，
+//   encl 只交 −1.23/局（10%，太轻）；near 28→56（−8.7，73%）＋encl 8.6→17.2（−2.5，21%）＝
+//   +5.6/局。73% 逼近 y1 冻结线（60%）——冠军底子＋threat 不动＋fail-fast 护栏兜底，敢走这一步；
+//   fear-watch 沿用 y1f 语言（shots 塌＋kills 掉即恐惧，杀）。
+//   附带纠错：y5-hit2 漏抄了 `seed_rotate`（我的 bug，校验没覆盖全键；本腿补回 150）。
+//   台账值沿用 staging 现状（iters 500/max 24/eval 200，y5-hit2 未开课前的用户 staging，照抄不议）。
+//
+// ── 单变量束（相对 y5-hit：调 2 项；其余逐字）──────────────────────────────────
+//   调 wNearSq 28→**56**（直接税；近身有利可图就得有牙）；调 wEncl 8.6→**17.2**（包围税跟上）。
+//   HOLD：wMiss 0.35（命中税继续）/wAcc（parity）/wHit/暴露 rest（hurt/threat/block/corner/dmg）。
+//   terminal {} 不动。
+//
+// ── 门（it40 硬门；保命中＋防近＋防包围）───────────────────────────────────────
+//   主：hitRate ≥ 0.75（it500 0.836；守住）；主2：nearSq/千tick ≤ 110（it500 156，−30%）；
+//   次：kills ≥ 3.5（it500 3.96；断即破，杀）；次2：encl/千tick ≤ 100（it500 143，−30%）；
+//   D01 ≤ 85 护栏（超即把暴露捡回来，杀）；fear-watch：shots/局 < 8 且 kills < 3.5 即恐惧塌，杀；
+//   上报：policy_new_rms（legacy 结构性零预期）＋it5 analytic 照旧；fail ⇒ **杀腿**。
+//   终点：四线全过 ⇒ 收官（iters 500 为 cap）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   起点：y5-hit.it500（`weights/y5-hit/y5-hit.it500.20261014-134145.json`，
+//   sha16 `961bacde390cbf02`；同代直连，kickstart 关，opt fresh）。
+//   anchor 0.001（legacy 空片，无害）；ent_break 0.25；batch 24576；优化器/K 冻结。
+//   iters 500，max_hours 24，workers 8，eval 本 rung（"2000" 单关×200）。
+//   ⚠ 前提：tmp/y5-far 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c05`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y5-far）+ backup 新目录（nn-training/weights/y5-far）+ opt fresh。
+{
+  "version": 5,
+  "name": "y5-far",
+  "mode": "per-tick",
+  "level": "ladder-c05",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wHurt": 110.0,
+      "wEncl": 17.2,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 56.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y5-hit.it500（sha 见头注；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y5-hit/y5-hit.it500.20261014-134145.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流。
+  "paired_rotate_seed": 20261024,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y5-far/weights.json",
+  "traj": "tmp/y5-far",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/y5-far",
+  "backup_prefix": "y5-far",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ══════════════════════════════════════════════════════════════════════════
+// 结课报告（2026-10-13；it218 杀，恐惧塌；混合 eval，s2000 真值见下）
+// ══════════════════════════════════════════════════════════════════════════
+// 起点 y5-hit.it500（sha `961bacde…`；同代直连，kickstart 关，opt fresh）。
+// it0（n=200：72 clears/kills 2.75）→ it20 峰（213）→ it68 win 破 0.2 → it75 KL 0.47 spike＋
+//   eval 悬崖（1 clear）→ it76+ 双死 → it215 尸体（0 clears/kills 0.00/shots 0.0/stuck 3051/cells 1.0）。
+//   s2000-only 同塌（40/20/1/0），verdict 与混合口径无关。it40 已挂 3/4。
+// 训练：熵先反升 1.0 再塌（爆后塌，非阴干）；KL 平时 0.02–0.03。
+// 判决：near×2（73% killEV）75 轮杀死冠军——y1 恐惧机制 ×2 复现（§104 分支二命中，站位胜直接死）。
+// 后继：无（死胡同； doctrine：站位税 only）。本文件冻结。
+// 证据：docs/nn/experiments.md §104（立项）/§105（验尸）· tmp/y5-far/eval_log.jsonl（混合行）。

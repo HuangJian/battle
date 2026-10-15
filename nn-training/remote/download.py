@@ -738,6 +738,19 @@ def _adopt_staged(
 
             rmtree_best_effort(job_dir)
         staged.rename(job_dir)  # 同 fs 原子：要么整份在位，要么还留在预取暂存
+        # ★ 2026-10-15（真机事故，worker 连炸 3 次 `FileNotFoundError: init_weights.json`）：
+        #   `rename` **不刷新**被移动目录的 mtime —— 这里拿到的是「预取解包那一刻」
+        #   （`prefetch._unpack_into` 的 `tmp.rename(shards)`），而下面那句
+        #   `prune_job_dirs(keep=2)` 按 mtime 丢最旧、工作区里别的 job 目录的 mtime 又被收尾
+        #   写入（`_persist_result` 落 `<job_dir>/_result.json`）抬到"刚刚"
+        #   ⇒ **当前这份正在处理的 job 目录反而是最旧的，被自己当场删掉**。
+        #   后果是静默的：本函数照常返回 `landed`、`shard_dirs` 静默变成 `[]`，直到
+        #   `_resolve_weights` 写 `job_dir/init_weights.json` 才响亮抛 `FileNotFoundError`
+        #   （Errno 2）⇒ 被 `job_round` 当瞬态 ⇒ job 回池重领 ⇒ 每 ~4 分钟复现一次。
+        #   抬到 now 之后，"最近用过"才在 mtime 上成立：keep=2 保留的正是**当前这份 + 上一个**
+        #   （后者是"回传失败后重领同 job"幂等路径要的 `_result.json`）。
+        #   字节路径无此问题（`job_dir.mkdir()` 的 mtime 本就是 now）——两条路径的唯一差别。
+        _touch(job_dir)
     except OSError as e:
         log(f"job {jid}: 预取暂存搬入失败（{type(e).__name__}: {e}）——回退关键下载")
         return None
