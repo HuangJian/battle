@@ -1,0 +1,114 @@
+// 课程 y5-near —— near 剂量探针：y5-pos.it215 为师＋wNearSq ×1.5（用户令并行腿）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；**与 y5-pos 并行**）。
+//
+// 立项 → 用户 2026-10-13：判读 y5-pos.it215（hitRate 0.779✅/nearSq 144❌/kills 4.23✅/encl 123❌，
+//   D01 66.4✅；corner −68%/threat −38%/encl −38% 达标在望，near −25% 最慢）后，补一条并行腿收最后 −24%。
+//   剂量（it215 真实行）：near 账单 ≈−4.0/局（killEV 32%）；×1.5 → −6.1（48%），
+//   低于 y1 冻结线（60%）和 y5-far 死亡线（73%）。完成剂量阶梯：pos ×1.0（活）/ 本腿 ×1.5（？）/
+//   far ×2.0（死）——near 在 c05 的剂量反应曲线一次收齐。
+//
+// ── 单变量声明（相对 y5-pos：只调 wNearSq；其余逐字）────────────────────────────
+//   调 wNearSq 28→**42**；encl/corner/threat/HOLD（动得好好的不动）；命中束/暴露 rest 全 HOLD。
+//   起点 y5-pos.it215（`weights/y5-pos/y5-pos.it215.20261014-200008.json`，
+//   sha16 `f69385b36a1bcd11`；同代同架构直连，kickstart 关，opt fresh §15.5）。
+//   双分支：本腿 near 先到 110 且命中守住 ⇒ ×1.5 安全有效（ doctrine 收）；
+//   本腿 wobble（shots↓/kills↓）⇒ ×1.5 too hot，near 上限＝×1.0，曲线关闭（1.0 活/1.5 热/2.0 死）；
+//   同速 ⇒ near 边际不敏感，另找 pin（motor？）。
+//
+// ── 门（与 y5-pos 一字同；paired）──────────────────────────────────────────────
+//   主：hitRate ≥ 0.75；主2：nearSq/千tick ≤ 110；次：kills ≥ 3.5；次2：encl/千tick ≤ 100；
+//   D01 ≤ 85 护栏；fear-watch：shots/局 < 8 且 kills < 3.5 即恐惧塌，杀；
+//   门读 headline（混合 eval，与 y5-pos 同口径逐行可比）；s2000 切片为 c05 真值附读。
+//   上报：policy_new_rms（legacy 结构性零预期）＋it5 analytic 照旧；fail ⇒ **杀腿**。
+//   早期 readout：it240（25 轮）near 速度 vs y5-pos 同窗口——快且稳则续，wobble 则杀，不等远端。
+//   终点：四线全过 ⇒ 收官（iters 150 为 cap）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   anchor 0.001（legacy 空片，无害）；ent_break 0.25；batch 24576；优化器/K 冻结。
+//   iters 150，max_hours 12，workers 8，eval 混合（"2000-2003"×50，用户混合设计，
+//   与 y5-pos 同口径；c05 真值读 s2000 切片）。
+//   ⚠ 前提：tmp/y5-near 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c05`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y5-near）+ backup 新目录（nn-training/weights/y5-near）+ opt fresh。
+{
+  "version": 5,
+  "name": "y5-near",
+  "mode": "per-tick",
+  "level": "ladder-c05",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 42.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y5-pos.it215（sha 见头注；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y5-pos/y5-pos.it215.20261014-200008.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 12,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流。
+  "paired_rotate_seed": 20261024,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y5-near/weights.json",
+  "traj": "tmp/y5-near",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/y5-near",
+  "backup_prefix": "y5-near",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 结课报告（2026-10-15，用户令 halt；规格头冻结，本节只读）──
+//   终点 eval it210（400 局）：win 0.700/clears 280/kills 4.33/timeout 15.0%/gameover 60；
+//   headline 0.838/109/4.33/100（near 差 1 回落）。终点权重 y5-near.it211.20261015-070730.json（永存）。
+//   verdict：交卷腿——near×1.5 安全有效（四线全过×8，it120–135 四连过），剂量阶梯×1.0活/×1.5活/×2.0死；
+//   A/B/C 起点供给者（it190 冠＋it200 近冠）；lineage 由 crown/pace 继承。
+//   证据 tmp/y5-near/eval_log.jsonl。

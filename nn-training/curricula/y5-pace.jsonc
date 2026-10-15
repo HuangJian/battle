@@ -1,0 +1,121 @@
+// 课程 y5-pace —— 终局腿B：y5-crown 逐字＋过关奖 flat→速度梯度（用户令，与A并行）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；与 y5-crown 同期同起点同种子）。
+//
+// 立项 → 用户 2026-10-15：A/B 并行上（A 收敛对照，B 终局梯度实验；near 停，term 留作 flat 税参照）。
+//   前情：y5-term 证终局 flat 税治苟有效（timeout 21.7%→个位数、clears 46%→77–85%），
+//   代价是站位税被稀释（encl 零过）；残余 timeout 画像＝差 1–2 杀＋stuck 2 倍——flat 价不分快慢，
+//   梯度价正对它。起点用 near.it190（与 A 同起点，A/B paired 隔离终局形状效应；
+//   不从 term 起——B 回答的是"梯度 vs 无终局价"，flat vs 梯度由 term 当参照组回答）。
+//   起点与 A 同为 near.it200（§6.4 注记同 crown：3/4 近冠，用户令）。
+//   剂量（it190 通关局均 tick ≈2450，clearTick 均值约 2200）：形状
+//   `where(clearTick>=0, (3900-clearTick)/1400, 0)`，wWin **5.0 HOLD** ⇒ 均值局 ≈1.21×5＝6.07
+//   （vs flat 5.0，+21% 可接受）；快 1200→9.64/慢 3500→1.43，梯度拉开；terminal timeout **−5.0 HOLD**
+//   （不加码，加码是第二个变量，留给 B2）；不设 lives 税（C 的，watch 触发再议）。
+//   clearTick 列存在（v5 idx30；敌人首次全灭 tick，−1＝未清场）；公式仅用已入库列，无新列。
+//
+// ── 单变量声明（相对 y5-crown：只加终局两项梯度版；其余逐字，含退火表）────────────
+//   加 wWin 项＋键（梯度形）＋ terminal timeout −5.0；起点/优化器退火/K/流/eval/种子全逐字
+//   （iters 350/max 48 是预算 cap 不是变量；paired_rotate_seed 与 A 同值＝paired）。
+//   概念单变量＝"终局价"（precedent：y5-term 相对 y5-near 亦以"终局两项"单变量立项）。
+//   双分支：it240（+40）timeout ≤ 8% 且 clears 率 ≥ it200 基线 77.75% ⇒ 梯度有效；
+//   timeout 平/升 ⇒ 形状错，杀（B2 另案）；gameover 均值反超 timeout ⇒ 自杀激励，补 lives 税（watch）。
+//
+// ── 门（y5-crown 四线＋终端线）─────────────────────────────────────────────────
+//   主：hitRate ≥ 0.75；主2：nearSq/千tick ≤ 110；次：kills ≥ 3.5；次2：encl/千tick ≤ 100；
+//   终端线：it240 timeout 局占比 ≤ 8%（it200 基线 10.0%）且 clears 率 ≥ 77.75%，fail ⇒ **杀腿**；
+//   D01 ≤ 85 护栏；fear-watch 照旧；fail ⇒ **杀腿**。
+//   上报：policy_new_rms（legacy 结构性零预期）＋it5 analytic 照旧。
+//   终点：五线全过 ⇒ 收官（iters 350 为 cap；梯度需愈合期，对照 term 用了 ~50 轮才进状态）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   anchor 0.001（legacy 空片，无害）；ent_break 0.25；batch 24576；优化器/K 冻结（与 A 同表）。
+//   iters 350，max_hours 48，workers 8，eval 混合（"2000-2003"×50，与 A 同口径逐行可比）。
+//   ⚠ 前提：tmp/y5-pace 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c05`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y5-pace）+ backup 新目录（nn-training/weights/y5-pace）+ opt fresh。
+{
+  "version": 5,
+  "name": "y5-pace",
+  "mode": "per-tick",
+  "level": "ladder-c05",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wWin*where(clearTick>=0, (3900-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wWin": 5.0,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 42.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {
+      "timeout": -5.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y5-near.it200（sha 见 crown 头注；与 A 同起点，kickstart 关）──
+  "bc": "nn-training/weights/y5-near/y5-near.it200.20261015-033727.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 350,
+  "max_hours": 48,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（与 y5-crown 同值＝paired；与 near/term 的 20261024 不同防记忆化）。
+  "paired_rotate_seed": 20261101,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y5-pace/weights.json",
+  "traj": "tmp/y5-pace",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/y5-pace",
+  "backup_prefix": "y5-pace",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 结课报告（2026-10-15，用户令 halt；规格头冻结，本节只读）──
+//   终点 eval it180（400 局）：win 0.9275/clears 371/kills 4.80/timeout 1.25%/gameover 24；
+//   headline 0.859/107/4.80/100（四线全过，encl 掐线）。终点权重
+//   y5-pace.it180.20261015-200200.json（永存；峰 it160 0.9475 零夭折另存）。
+//   verdict：梯度腿——速度梯度治 timeout（4%→1.25%）但站位被稀释（encl 擦线）；2003 黑洞特异。
+//   证据 tmp/y5-pace/eval_log.jsonl。

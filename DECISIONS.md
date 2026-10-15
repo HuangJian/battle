@@ -6735,3 +6735,52 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   旧三腿处置建议：term 使命完成可 halt（195→260 大振荡＋站位全残）；crown/pace 继续跑。
 - **后果**：三文件已落盘；§15.5 新 out/traj/backup＋opt fresh；开课三连点人来
   （先核对 tmp/y5-{encl,early,flank} 不存在）。
+
+## §2026-10-15-goalnn-y5bdh-design（2026-10-15，flank.it80 三接续：back/dist/hide 补两病根）
+
+- **背景**（用户令）：病根二（贴脸 30%/包围 10%＋侧 0.68/背 0.21，跨场同病）；起点 flank.it80
+  （win 0.9375/near 111 差 1/kills 4.85/B3 0.1937/A3 3.517/killEV 14.55；三腿共享新种子 20270101）。
+- **决定**：D1=三新课（全键 diff 绿；iters 500/max 24 用户令）：
+  `y5-back`（wBackHits 0.4→1.0［16%］＋wSideHits 0.2［11%，per-hit 5:1］＋wHit 0.6→0.2
+  ［51%→17% 保底］；wAcc 81% 最大头用户没点不动；门 B3＋命耗≤3%）；
+  `y5-dist`（wDist 0.6［15%，x20 形状/f 先例］＋wNearSq 42→48［37%，死亡谷边缘＋wobble 线］
+  ＋wEncl 8.6→12.9［×1.5 退半步，×2 在 encl 腿垂死］；门 A3 anti-lottery＋wobble＋命耗≤3%）；
+  `y5-hide`（公式不动；wThreat 120→150［29%］＋wHurt 110→150［8%］；门 threat/hurt readout
+  ＋命耗≤3%＋自杀 watch timeout≤4%）。
+- **备选与否决**：① wDist 用 enemyDist 采样列 —— 否（分布无数据，盲定价；用 x20 aimHitDistSum 形状）；
+  ② near/encl 跟 flank 线（42/8.6）不动 —— 否（用户令调高；near 进死亡谷边缘已配 wobble 线，
+  encl 用×1.5 不跟×2）；③ threat/hurt 顶满（180/200）—— 否（刚性税首剂不顶满，看 +40 动不动）；
+  ④ wAcc 动 —— 否（用户没点；81% 最大头另案）。
+- **前科披露**（头注内）：y5-hit 删 wDist 彩票史（1.8＋远射奖没反应；本次生存语境≠命中语境，
+  anti-lottery 门配齐）；B5 farHits 双零奖空气风险（A3 动为生效判据）；encl×2 垂死（dist 退半步）；
+  near×2 死刑（dist 配 wobble 线）。"yt-hide"系用户笔误，正名 y5-hide。
+- **后果**：三文件已落盘；§15.5 新 out/traj/backup＋opt fresh；开课三连点人来。
+  欠账：early-kill＋B3 无效＋encl-kill 三条待补（与本条同批落盘时一并记——本次一并记入：
+  early 按门双 fail⇒杀已 halt；B3 首剂 0.4 无效（0.192→0.186）；encl it105 0.690 确认死亡，
+  ×2 too hot，§6.4 收回"续至 cap"建议）。
+
+## §2026-10-15-goalnn-y5bdh-nofuse（2026-10-15，新三课熔断全拆）
+
+- **背景**（用户令）：y5-back/dist/hide 不设任何熔断。核查：三文件本就没有
+  kickstart_burn/paired_kill/gates 块；唯一自动件是继承来的 `ent_break 0.25`
+ （F4 ENT 熔断阈值；0.25 照抄亲爹 flank，亲爹照抄 pace……逐代继承无人过问）。
+- **决定**：三文件 `ent_break 0.25→0.0`（熵 ≤0 永不成立）＋补
+  `ent_break_max_winrate 0.0`（winRate ≥0 恒成立→守卫短路，F4 ENT 永不触发）双保险；
+  头注同步。门（fail⇒杀）是人判标准，保留——熔断指自动执行，不指门。
+- **备选与否决**：① 只改其中一键 —— 否（单键各有极端反例，双键正交兜底，多两行少一桩事故）；
+  ② ent_break_consec 调大代替 —— 否（动预算不如动阈值，语义脏）。
+- **后果**：三文件已改（JSON 解析绿）；kl-break/stop-loss 不在课程文件作用域
+  （控制台/全局默认，真要全关得动控制台，本次不动）。未来新腿：ent_break 不许再无脑继承，
+  要么显式 0.0/0.0（无熔断），要么写明阈值理由。
+
+## §2026-10-15-goalnn-y5close-batch（2026-10-15，y5 七腿结课报告＋toll 删除）
+
+- **背景**（用户令）：y5 七腿全停（near/term/crown/pace 批量 halt；encl/early 门杀；flank cap 收官）。
+- **决定**：D1=七文件各追加尾部结课报告节（规格头不动；load 复验绿）：
+  near（交卷＋A/B/C 起点供给）/term（flat 税形象＋大振荡）/crown（四线全过＋c06 起点 it195）/
+  pace（梯度＋峰 0.9475）/encl（×2 too hot 门杀）/early（开局税死门杀）/flank（稳定冠＋B3 无效）；
+  D2=删 `nn-training/curricula/y5-toll.jsonc`（未开课、无 tmp、无权重；plain rm，非 git rm）。
+- **备选与否决**：① 报告写头注 —— 否（规格冻结，尾部零风险，y45-close 口径）；② toll 留档 ——
+  否（用户令删；设计思想由 pace+lives 对照需求保留在 bdh 条，文件本身未产生证据，删无可惜）；
+  ③ 动权重/tmp —— 否（只动课程文件；权重永存，tmp 是证据）。
+- **后果**：七文件 load 绿；toll 无残留；在跑只剩 y5-back/dist/hide（新三课，用户令无熔断）。

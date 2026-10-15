@@ -1,0 +1,120 @@
+// 课程 y5-early —— crown 接续腿：crown.it175 为师＋开局承伤税（用户令三腿各补最缺）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 用户 2026-10-15：crown175（win 0.925/四线全过 0.856/86/4.85/82，gameover 13/400＝3.25%）
+//   死局特异：开局 600 拍承伤 12 倍（27 vs 2.3）＋danger 4.1 倍＋首杀慢 24%（pace 死局开局 0 伤，
+//   开局税对 pace 无效，故 crown 特异，不与 pace 同药）。且 crown 死因漂移过
+//   （it125 死局开局 0 伤→it175 开局 27 伤），门里写漂移条款。
+//   剂量（h5a-earlydmg 同值先例，不动 wDmg）：`− wEarlyDmg*dmgFirst600`，wEarlyDmg **0.06**
+//   （开局一枪 6.0；死局 27 伤 ≈ −1.6/局，活局 ≈ −0.1，可忽略）。
+//   起点 crown.it175（`weights/y5-crown/y5-crown.it175.20261015-193354.json`，
+//   sha16 `9e7fa8e22d613947`；同代直连，kickstart 关，opt fresh §15.5；选 175 不选最新 180
+//   ——175 是冠（0.925）＋已剖析，起点要冠）。
+//   基线（it175 实测 400 局）：headline 四线全过；win 0.925/clears 370/timeout 4.25%/
+//   gameover 3.25%；s2000 切片 0.852/4.90/84/91。
+//
+// ── 单变量声明（相对 y5-crown：只加开局税一项；其余逐字，含退火表）────────────────
+//   公式尾部追加 `- wEarlyDmg*dmgFirst600`（h5a 放置先例）＋键 wEarlyDmg 0.06；
+//   退火表/K/流/eval/种子（与 flank/encl 共享 20261201）全逐字（iters 120/max 24 是预算 cap 非变量）。
+//   双分支：+20 E1（dmgFirst600 均值）降 30%+ 且 +40 仍在 ⇒ 开局税有效；
+//   E1 分离消失（死局开局重回 0 伤而死中盘）⇒ 死因漂移，杀（E 腿使命结束，不追漂移）。
+//
+// ── 门（y5-crown 四线＋命耗线＋E1 readout）──────────────────────────────────────
+//   主：hitRate ≥ 0.75；主2：nearSq/千tick ≤ 110；次：kills ≥ 3.5；次2：encl/千tick ≤ 100；
+//   命耗线：+40 gameover 局占比 ≤ 2%（基线 3.25%），fail ⇒ **杀腿**；
+//   反 watch：+40 timeout 局占比 ≤ 6%（基线 4.25%），超 ⇒ 为避战而苟，**杀腿**；
+//   D01 ≤ 85 护栏；fear-watch 照旧；fail ⇒ **杀腿**。
+//   门读 headline；s2000 切片附读。上报 policy_new_rms＋it5 analytic 照旧。
+//   终点：四线＋命耗线全过 ⇒ 收官（iters 120 为 cap）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   anchor 0.001（legacy 空片，无害）；ent_break 0.25；batch 24576；优化器/K 冻结（与 crown 同表）。
+//   iters 120，max_hours 24，workers 8，eval 混合（"2000-2003"×50，同口径逐行可比）。
+//   ⚠ 前提：tmp/y5-early 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c05`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`（课程轮从 1 起，与 bc 轮号无关）；
+//     `bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y5-early）+ backup 新目录（nn-training/weights/y5-early）+ opt fresh。
+{
+  "version": 5,
+  "name": "y5-early",
+  "mode": "per-tick",
+  "level": "ladder-c05",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected - wEarlyDmg*dmgFirst600",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 42.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wEarlyDmg": 0.06
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y5-crown.it175（sha 见头注；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y5-crown/y5-crown.it175.20261015-193354.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 120,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（新种子，与 20261024/20261101 不同防记忆化；与 y5-encl/y5-flank 共享＝三路可比）。
+  "paired_rotate_seed": 20261201,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y5-early/weights.json",
+  "traj": "tmp/y5-early",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/y5-early",
+  "backup_prefix": "y5-early",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 结课报告（2026-10-15，门杀 halt；规格头冻结，本节只读）──
+//   终点 eval it65（400 局）：win 0.760/clears 304/kills 4.57/timeout 16.75%/gameover 29；
+//   headline 0.896/90/4.57/92（四线空过）。终点权重 y5-early.it67.20261015-220727.json。
+//   verdict：门杀（命耗线＋反 watch 双 fail）；开局税死：E1 3.0→6.2 反升＋timeout 4%→17%，
+//   变量有毒亲爹（crown）无罪。
+//   证据 tmp/y5-early/eval_log.jsonl。

@@ -1,0 +1,116 @@
+// 课程 y5-term —— 终局腿：y5-near 现文件逐字＋过关奖 wWin＋超时税 terminal（用户令）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；**与 y5-near 并行**）。
+//
+// 立项 → 用户 2026-10-13：以 y5-near 为基础加过关奖和超时税；其它设置用户调过不动；
+//   BC 仍用 `weights/y5-pos/y5-pos.it215.20261014-200008.json`（与 y5-near 同起点，隔离终局效应）。
+//   剂量（y5-near.it25 真实行，400 局）：clear +23.20 vs timeout +23.41（**超时比通关还赚**，苟免费实锤）
+//   vs gameover −12.38。wWin **+5.0**（a2 同值；killEV 12.6 之 40%，a2 同比）⇒ clear ≈28.2；
+//   terminal timeout **−5.0**（同比 40%）⇒ timeout ≈18.4，gap ≈10；自杀检查：gameover −12.4 下
+//   timeout 仍高 30 点 ⇒ **不设 lives 税**（用户只点两项；若 it40 两均值倒挂再加，watch 已记）。
+//   clearTick 列存在（v5 idx30），公式形状照抄 a2（`wWin*where(clearTick>=0, 1, 0)`）。
+//
+// ── 单变量声明（相对现 y5-near：只加终局两项；其余逐字不动）──────────────────────
+//   加 wWin 项＋键；terminal {}→{timeout −5.0}；其余配方/门/起点/优化器/K/流/台账惯例全逐字
+//   （iters 500/max 12/eval 混合×50/seed_rotate 缺席——用户现状，原样照抄，不动）。
+//   起点 y5-pos.it215（sha16 `f69385b36a1bcd11`；同 y5-near；同代直连，kickstart 关，opt fresh §15.5）。
+//   双分支：it40 timeout 占比↓＋clears↑ ⇒ 终局价有效；timeout 占比平/升 ⇒ 税无效（剂量或形状错）；
+//   gameover 均值反超 timeout ⇒ 自杀激励，立刻加 lives 税（watch 触发项）。
+//
+// ── 门（y5-near 四线＋终端线）──────────────────────────────────────────────────
+//   主：hitRate ≥ 0.75；主2：nearSq/千tick ≤ 110；次：kills ≥ 3.5；次2：encl/千tick ≤ 100；
+//   终端线：it40 timeout 局占比 ≤ 15%（基线 21%）且 clears 不掉，fail ⇒ **杀腿**；
+//   D01 ≤ 85 护栏；fear-watch 照旧；fail ⇒ **杀腿**。
+//   上报：policy_new_rms（legacy 结构性零预期）＋it5 analytic 照旧。
+//   终点：五线全过 ⇒ 收官（iters 500 为 cap）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   anchor 0.001（legacy 空片，无害）；ent_break 0.25；batch 24576；优化器/K 冻结。
+//   iters 500，max_hours 12，workers 8，eval 混合（"2000-2003"×50，用户现状照抄）。
+//   ⚠ 前提：tmp/y5-term 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c05`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y5-term）+ backup 新目录（nn-training/weights/y5-term）+ opt fresh。
+{
+  "version": 5,
+  "name": "y5-term",
+  "mode": "per-tick",
+  "level": "ladder-c05",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wWin*where(clearTick>=0, 1, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wWin": 5.0,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 42.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {
+      "timeout": -5.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y5-pos.it215（sha 见头注；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y5-pos/y5-pos.it215.20261014-200008.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 48,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（y5-near 现状：seed_rotate 缺席，用户调过，原样照抄）。
+  "paired_rotate_seed": 20261024,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y5-term/weights.json",
+  "traj": "tmp/y5-term",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/y5-term",
+  "backup_prefix": "y5-term",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 结课报告（2026-10-15，用户令 halt；规格头冻结，本节只读）──
+//   终点 eval it305（400 局）：win 0.900/clears 360/kills 4.72/timeout 1.5%/gameover 34；
+//   headline 0.768/110/4.72/100。终点权重 y5-term.it306.20261015-195205.json（永存）。
+//   verdict：flat 终局税形象腿——timeout 21.7%→杀绝（1%），clears 46%→77–90%；代价站位全残
+//   （encl 零过）＋it195 后大振荡（0.90→0.63→0.90）；参照组使命完成。
+//   证据 tmp/y5-term/eval_log.jsonl。

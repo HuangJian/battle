@@ -1,0 +1,117 @@
+// 课程 y5-encl —— term 接续腿：term.it300 为师＋wEncl ×2（用户令三腿各补最缺）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 用户 2026-10-15：term300（win 0.900/timeout 0.75% 杀绝，但 near 122/encl 109 全残，
+//   gameover 37/400＝9.25%）——encl 门 34 轮零过（最好 103），全场最轻的税（8.6）对 2 倍富集，
+//   剂量不足是唯一解释。gameover 归 toll 线（已备），本腿只回答站位。
+//   剂量（y5-hit.it500 真实行 encl −1.23/局；y5-far 同×2 先例）：−2.5/局 ≈ killEV 21%，
+//   远低于 y1 冻结线（60%）。起点 term.it300（`weights/y5-term/y5-term.it300.20261015-194220.json`，
+//   sha16 `b793b4d3c41e5f44`；同代直连，kickstart 关，opt fresh §15.5）。
+//   基线（it300 实测 400 局）：headline hitRate 0.800✅/nearSq 122❌/kills 4.69✅/encl 109❌
+//   win 0.900/clears 360/timeout 0.75%；s2000 切片 0.832/4.82/126/111。
+//
+// ── 单变量声明（相对 y5-term：只调 wEncl；其余逐字）────────────────────────────
+//   调 wEncl 8.6→**17.2**；flat wWin/timeout −5/命中束/暴露 rest/优化器单段/K/流/eval 全 HOLD。
+//   双分支：+40 encl 先到 100 且 kills 不掉 ⇒ 加压有效；encl 平＋timeout 反升 ⇒ 保守致苟，杀。
+//
+// ── 门（与 term 一字同；paired）────────────────────────────────────────────────
+//   主：hitRate ≥ 0.75；主2：nearSq/千tick ≤ 110；次：kills ≥ 3.5；次2：encl/千tick ≤ 100；
+//   命耗线：+40 gameover 局占比 ≤ 6%（基线 9.25%），fail ⇒ **杀腿**；
+//   反 watch：+40 timeout 局占比 ≤ 5%（基线 0.75%），超 ⇒ 为避战而苟，**杀腿**；
+//   D01 ≤ 85 护栏；fear-watch 照旧；fail ⇒ **杀腿**。
+//   门读 headline（混合 eval，与 term 同口径逐行可比）；s2000 切片为 c05 真值附读。
+//   上报：policy_new_rms（legacy 结构性零预期）＋it5 analytic 照旧。
+//   终点：四线＋命耗线全过 ⇒ 收官（iters 150 为 cap）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   anchor 0.001（legacy 空片，无害）；ent_break 0.25；batch 24576；优化器/K 冻结。
+//   iters 150，max_hours 24，workers 8，eval 混合（"2000-2003"×50，与 term 同口径）。
+//   ⚠ 前提：tmp/y5-encl 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c05`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`（课程轮从 1 起，与 bc 轮号无关）；
+//     `bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y5-encl）+ backup 新目录（nn-training/weights/y5-encl）+ opt fresh。
+{
+  "version": 5,
+  "name": "y5-encl",
+  "mode": "per-tick",
+  "level": "ladder-c05",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wWin*where(clearTick>=0, 1, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wWin": 5.0,
+      "wHurt": 110.0,
+      "wEncl": 17.2,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 42.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {
+      "timeout": -5.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y5-term.it300（sha 见头注；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y5-term/y5-term.it300.20261015-194220.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 150,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "kl_coef": 0.05, "lr": 0.0003, "kl_cap": 0.2 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（新种子，与 20261024/20261101 不同防记忆化；与 y5-early/y5-flank 共享＝三路可比）。
+  "paired_rotate_seed": 20261201,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y5-encl/weights.json",
+  "traj": "tmp/y5-encl",
+  "ent_break": 0.25,
+  "backup_dir": "nn-training/weights/y5-encl",
+  "backup_prefix": "y5-encl",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 结课报告（2026-10-15，门杀 halt；规格头冻结，本节只读）──
+//   终点 eval it115（400 局）：win 0.7125/clears 285/kills 4.35/timeout 14.5%/gameover 58；
+//   headline 0.899/102/4.35/109（encl 反弹）。终点权重 y5-encl.it115.20261015-230830.json。
+//   verdict：门杀（命耗线＋反 watch 双 fail，it95 后五连跌＋it105 0.690 确认死，rollout 同步死）；
+//   encl×2 too hot 定案（it40 回光返照不算数）；剂量阶梯 ×1.0 活/×2.0 死。
+//   证据 tmp/y5-encl/eval_log.jsonl。
