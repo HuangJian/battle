@@ -27,6 +27,7 @@ from typing import Any
 
 import common.distribution
 from common.log import log
+from common.protocol import RUN_MAX_ITERS_HARD_CAP
 from trainer.loop_baseline import TrainingBaseline
 from trainer.loop_dispatch import TrainingDispatch
 from trainer.loop_hold import course_held
@@ -276,9 +277,14 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         if getattr(args, "export_bundle", ""):
             # 全离线导出：本轮**不训练**——把 it..it+n-1 打成可上传云机的任务包后退出。
             if ctx.seg == 0:
+                # ★ 2026-10-15（J1，P1-1）：这条闸管的是**段长**（`--run-iters`），不是课程
+                #   `iters`，所以 J1 之后**依然有效**（无限课也得说清一段多长）。
+                #   文案随 J1 改：`<0` 在课程无限时不再意为「直到课程末尾」而是「**一段**
+                #   （≤硬上界）」。
                 raise SystemExit(
                     "[run_rl] --export-bundle 需要 --run-iters 说明整段长度"
-                    "（>0 = N 轮；<0 = 到课程末尾）"
+                    "（>0 = N 轮；<0 = 一段"
+                    f"（≤ {RUN_MAX_ITERS_HARD_CAP} 轮））"
                 )
             self._export_offline_bundle(it, ctx.pairs, ctx.seg)
         if ctx.collect_mode == COLLECT_HELD:

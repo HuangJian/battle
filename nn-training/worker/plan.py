@@ -196,6 +196,16 @@ def build_plan(
     `max_iters`：本次最多自主跑几轮（0 = 跑到课程预算 `iters_total`）。`end_it` 取二者
     交集，并受 `RUN_MAX_ITERS_HARD_CAP` 钳制（手写/损坏的计划不许把节点按在机上一整天）。
 
+    ★ 2026-10-15（plan/offline-open-ended-iters-and-loud-export §3.1，J1）：`iters_total <= 0`
+    = **课程无限**（不是「没终点」）——`worker/cli.py` 的 `--iters` help 原文就是
+    `0 = infinite (stop via --max-hours or Ctrl-C)`，`loop_lifecycle` 的
+    `while args.iters <= 0 or it < args.iters` 同一口径；旧代码却把它当「预算=0」拒发
+    （`end_it=0` ⇒ “没有可自主跑的轮次”），于是「无限」在离线包里**不可表达**。
+    这一支改为发**开区间段**：`end_it = it + 段长`（段长 = `max_iters>0` ? `max_iters` :
+    硬上界），`open_ended=True`，而 `iters_total` **保持 0 原值**（= 无终点）。
+    段长仍受硬上界钳制（拒导那条 `end_it - it > cap` 两个分支共用）；
+    有限模式的算术**逐字节不变**（`open_ended=False`）。
+
     `volume`：动态采集块（`biz/volume_waves.volume_block(args)` 的产出；None = 老口径）。
     带上它以后，节点重放出的对集不再是 `build_pairs` 的固定局数，而是**按
     `target_transitions` 反解的初波**（与本地集群同函数、同种子）——这是「云端采样量与
@@ -209,7 +219,15 @@ def build_plan(
     """
     it = int(it)
     iters_total = int(iters_total)
-    end_it = iters_total if int(max_iters or 0) <= 0 else min(iters_total, it + int(max_iters))
+    span = int(max_iters or 0)
+    open_ended = iters_total <= 0
+    if open_ended:
+        # 开区间段（J1）：终点由**段长**定，不是课程预算（0 = 无限，没有预算可交集）。
+        # 缺省段长 = 硬上界本身（= 段长上界）；给了正 max_iters 就是它，噪声由下面那条
+        # `end_it - it > cap` 拦（与有限模式同一条）。
+        end_it = it + (span if span > 0 else RUN_MAX_ITERS_HARD_CAP)
+    else:
+        end_it = iters_total if span <= 0 else min(iters_total, it + span)
     if end_it <= it:
         raise ProtocolError(
             f"build_plan: it={it} 之后没有可自主跑的轮次（iters_total={iters_total}，"
@@ -224,6 +242,9 @@ def build_plan(
         "start_it": it,
         "end_it": end_it,
         "iters_total": iters_total,
+        # ★ 开区间段标志（J1）：只对 `iters_total<=0` 成立（`validate_plan` 会收紧拒假的）。
+        #   进 `plan_fp` ⇒ 新键 = 新身份（这正是段滚动要的「必换包」）。
+        "open_ended": open_ended,
         "rotate_seed": int(rotate_seed),
         "pair_args": pair_args(args),
         "node_label": str(node_label),
@@ -307,7 +328,18 @@ def validate_plan(plan: object) -> dict:
         raise ProtocolError(
             f"计划区间非法: start_it={plan['start_it']} end_it={plan['end_it']}（无可跑的轮次）"
         )
-    if plan["iters_total"] < plan["end_it"]:
+    # ★ 开区间段的豁免**带收紧**（2026-10-15，P1-7）：豁免面只许刚好盖住「课程无限」，
+    #   否则一份 `open_ended=true ∧ iters_total=2000 ∧ end_it=2500` 的（写错/伪造）计划
+    #   能越过课程预算——而那正是这条校验存在的理由。
+    raw_open = plan.get("open_ended", False)
+    if not isinstance(raw_open, bool):
+        raise ProtocolError(f"计划 open_ended 必须是布尔，收到 {raw_open!r}")
+    if raw_open and plan["iters_total"] > 0:
+        raise ProtocolError(
+            f"计划 open_ended=true 但课程预算 iters_total={plan['iters_total']}>0"
+            "（开区间段只对无限课程 iters_total<=0 成立）"
+        )
+    if not raw_open and plan["iters_total"] < plan["end_it"]:
         raise ProtocolError(
             f"计划 end_it={plan['end_it']} 超出课程预算 iters_total={plan['iters_total']}"
         )

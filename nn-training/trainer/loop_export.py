@@ -49,6 +49,7 @@ from typing import Any
 
 import common.distribution
 from common.log import log
+from common.protocol import RUN_MAX_ITERS_HARD_CAP
 from worker.archive import backup_weights
 from worker.modes import _MODE_BACKUP_PREFIX
 
@@ -169,15 +170,21 @@ class TrainingExport:
         `max_iters = n`（不是 n-1：这里没有「job 自己那一轮」要扣）。
 
         没跑过任何一轮（`args.out` 无权重）就拒导——包里没有起点的任务等于没任务。
+
+        ★ 2026-10-15（J1）：课程 `iters<=0` = **无限** ⇒ 不再拒导，改为发**开区间段**
+        （`plan.open_ended=true`，终点 = 段长）。有限模式的算术与包内容逐字节不变。
         """
         args = self.args
         # ★ 2026-09-21（§3）：原先这里拒绝「非 remote」——`--ppo` 删除后该判据恒真、会把
         #   整条导出路径误拒。单一 PPO 路径下「PPO 在节点上跑」是唯一形态，导出天然成立。
         iters_total = int(getattr(args, "iters", 0) or 0)
         if iters_total <= 0:
-            raise SystemExit(
-                "[run_rl] --export-bundle 需要课程声明 iters（包里的计划必须有终点——「跑到哪停」"
-                "是任务定义的一部分，不能靠云机猜）"
+            # ★ 2026-10-15（J1）：课程无限 ⇒ **放行**，导出**开区间段**（终点 = 段长，不是课程预算）。
+            #   v1 在这里 `raise SystemExit`，正是现场「离线包不支持 iters 0」的拒因之一。
+            #   响亮打一行（放行但改变默认段长，不能静默）。
+            log(
+                "[run_rl] 课程声明 iters<=0（无限）——导出**开区间段**：终点由段长定"
+                f"（--run-iters >0 = N 轮；缺省 = 硬上界 {RUN_MAX_ITERS_HARD_CAP} 轮）"
             )
         if it <= 1 and not common.distribution.weights_fingerprint(args.out):
             raise SystemExit(

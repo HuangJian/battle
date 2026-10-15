@@ -284,8 +284,79 @@ def test_export_refusal_rejects_a_course_that_already_reached_iters() -> None:
     assert export_refusal(export_path="tmp/x/task-x.zip", iters_total=150, start_it=1) == ""
     # 非导出路（普通训练）不看这条判据
     assert export_refusal(export_path="", iters_total=150, start_it=9999) == ""
-    # 缺终点（iters<=0）走与轮内那条同口径的文案
-    assert "必须有终点" in export_refusal(export_path="tmp/x/task-x.zip", iters_total=0, start_it=1)
+    # ★ 2026-10-15（J1，plan/offline-open-ended-iters-and-loud-export §3.1）：课程 `iters<=0`
+    #   = **无限**（`--iters` help 原文 `0 = infinite`）⇒ **不再是拒因**（包里改发**开区间段**，
+    #   终点 = 段长）。旧口径（`"必须有终点" in msg`）正是用户 2026-10-14 报障的第一条。
+    assert export_refusal(export_path="tmp/x/task-x.zip", iters_total=0, start_it=1) == ""
+    assert export_refusal(export_path="tmp/x/task-x.zip", iters_total=-1, start_it=1) == ""
+
+
+def test_infinite_course_exports_an_open_ended_segment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """J1（plan/offline-open-ended-iters-and-loud-export §3.1）：无限课**能**导出开区间段。
+
+    现场（2026-10-14 用户报障）：y5-hit2 设 `"iters": 0` 想无限长跑，点导出只得到
+    `--export-bundle 需要课程声明 iters`（两道 `SystemExit`）；改成 2000 又撞硬上界 500。
+    这一条钉住三处闸的新口径（放行）+ 包里的计划形状（开区间段），
+    并**反向**钉住「无剩余轮次」那道闸不因 J1 松掉。
+    """
+    import trainer.loop_export as lx
+    import trainer.loop_round_steps as lrs
+    from trainer.loop_export import TrainingExport
+    from trainer.loop_lifecycle import export_refusal
+
+    # ① 启动期闸（`loop_lifecycle.export_refusal`）：无限 ⇒ 放行
+    assert export_refusal(export_path="tmp/x/task-x.zip", iters_total=0, start_it=1) == ""
+    # ② 轮内闸（`loop_export._export_offline_bundle`）：无限 ⇒ 不再 `raise SystemExit`，而是
+    #    响亮打一行再往下走。计划形状在 `tests/worker/test_plan.py` 钉；这里只钉「控制流不再
+    #    死在那道闸上」——用哨兵异常证明真的走到了 `build_plan`（旧代码在它之前就秒退）。
+    class _ReachedPlanError(Exception):
+        """哨兵：走到 `build_plan` = 过了「无限课」那道闸。"""
+
+    lines: list[str] = []
+    monkeypatch.setattr(lx, "log", lines.append)
+    seen: list[dict] = []
+
+    def _fake_build_plan(*_a: object, **kw: object) -> dict:
+        seen.append(kw)
+        raise _ReachedPlanError
+
+    monkeypatch.setattr("worker.plan.build_plan", _fake_build_plan)
+    monkeypatch.setattr("worker.iter_job.build_iter_spec", lambda *a, **kw: {"k": 1})
+    monkeypatch.setattr(lx.common.distribution, "weights_fingerprint", lambda _o: "w" * 64)
+    steps_x = _bare_steps()
+    steps_x.args.iters = 0
+    steps_x.args.out = "w.json"  # 起点权重（指纹函数已被替身，不真读盘）
+    steps_x._volume_plan_block = lambda: None
+    steps_x._rotate_seed = 1
+    # `_bare_steps()` 是**裸** `RoundSteps`（MRO 没拼）：`_export_offline_bundle` 住
+    # `TrainingExport` ⇒ 按未绑定函数调（组合根才是生产形态）。
+    with pytest.raises(_ReachedPlanError):
+        TrainingExport._export_offline_bundle(steps_x, 1, [], -1)
+    assert [kw["iters_total"] for kw in seen] == [0], seen
+    # 放行不等于静默：段长默认值与含义变了，必须留一行给操作员
+    assert any("开区间段" in ln for ln in lines), lines
+    # ③ 第三个闸（`step_course_iter` 里的 `ctx.seg == 0`）只对**没声明段长**的拒：
+    #   无限课也得说清一段多长（它管的是 `--run-iters`，不是课程 iters ⇒ J1 后依然有效）。
+    monkeypatch.setattr(lrs.common.distribution, "load_dist_config", lambda: {})
+    monkeypatch.setattr(lrs, "course_held", lambda _args, **_kw: False)
+    steps = _bare_steps()
+    steps.args.export_bundle = "tools.task.zip"
+    steps.args.run_iters = 0  # 没声明段长
+    exported: list[tuple] = []
+    steps._export_offline_bundle = lambda *a: exported.append(a)
+    with pytest.raises(SystemExit):
+        steps.step_course_iter(RoundContext(it=1, pairs=[]))
+    assert exported == []
+    # ④ 声明了段长（`-1` = 一段）⇒ 交给导出腿，不再是拒
+    steps2 = _bare_steps()
+    steps2.args.export_bundle = "tools.task.zip"
+    steps2.args.run_iters = -1  # 控制台导出腿用的就是它
+    got: list[tuple] = []
+    steps2._export_offline_bundle = lambda *a: got.append(a)
+    assert steps2.step_course_iter(RoundContext(it=1, pairs=[])) is None
+    assert got != [], "声明了段长就必须走到导出腿"
 
 
 def test_held_course_never_reaches_the_collect_step() -> None:

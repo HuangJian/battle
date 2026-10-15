@@ -255,30 +255,32 @@ def export_refusal(*, export_path: str, iters_total: int, start_it: int) -> str:
     """`--export-bundle` 的**启动期**拒因（纯函数；`""` = 可以导）。
 
     ★ 2026-10-07（现场：离线 worker 领不到 x21-psh-k5/k10，hub 的「导包中」永远挂着）：
-    导出分支只住在 `step_course_iter`（`trainer/loop_round_steps.py:264-271`），而它是**轮内**
+    导出分支只住在 `step_course_iter`（`trainer/loop_round_steps.py:276-282`），而它是**轮内**
     的一步——课已经跑到 `it{iters}` 之后，`run()` 的 `while` 一次都不进（入口条件
     `it < args.iters` 不成立），于是进程**一条「全离线导出」都不打**，直接 `ALL DONE` +
     收官 drain（`loop_lifecycle.py:369-380`）。现场代价：hub 反复触发导出（节流后仍三次），
     每次只换来一场 ~1 小时的逐检查点 eval，任务包永远不出现；云机那侧看到的是
     「k5 正在交接（导包中）」，而 hub 的「一拖一」闸就靠这条假交接把别的课一起锁死。
 
-    判据与 `_export_offline_bundle` 的两条既有拒导同源（那条住轮内、这里住启动期）：
-    `iters<=0` ⇒ 包里没有终点（那条在 `trainer/loop_export.py:169-173` 报）；
-    `start_it > iters` ⇒ 包里**没有剩余轮次**（新增：`plan.start_it = it-1 = iters` ⇒
+    判据与 `_export_offline_bundle` 的既有拒导同源（那条住轮内、这里住启动期）：
+    `start_it > iters` ⇒ 包里**没有剩余轮次**（`plan.start_it = it-1 = iters` ⇒
     `planned_iters` 为空）。空计划的任务包比没有更坏：云机会把它当活领走、跑 0 轮。
+    ★ 2026-10-15（J1，plan/offline-open-ended-iters-and-loud-export §3.1）：`iters<=0`
+    （课程**无限**）**不再是拒因**——包里改发**开区间段**，终点由段长（`--run-iters` /
+    `run_iters`，缺省 = 硬上界）定，见 `worker/plan.build_plan`。
 
-    不拒的两种情况照旧：非导出路（`export_path` 空）、以及还有轮次可跑。
+    不拒的三种情况照旧：非导出路（`export_path` 空）、课程无限（`iters<=0`，J1 起）、
+    以及还有轮次可跑。
     """
     if not str(export_path or ""):
         return ""
     total = int(iters_total or 0)
     first = int(start_it or 0)
     if total <= 0:
-        # 与轮内那条同口径（`--export-bundle` 必须有终点）；这里先响亮拦下，免得等一轮。
-        return (
-            "[run_rl] --export-bundle 需要课程声明 iters（包里的计划必须有终点——"
-            "「跑到哪停」是任务定义的一部分，不能靠云机猜）"
-        )
+        # ★ 2026-10-15（J1）：课程 iters<=0 = **无限**（`--iters` help 原文 `0 = infinite`）
+        #   ⇒ **不再是拒因**。包里的计划改发**开区间段**（终点 = 段长），所以「必须有终点」
+        #   那句老话只对「课程有预算」那一半成立：无预算的课，终点由段长说，仍不靠云机猜。
+        return ""
     if first > total:
         return (
             f"[run_rl] --export-bundle：这门课已经跑到 it{first - 1}"

@@ -6213,3 +6213,46 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   网络盘挂掉；③ 轮内峰值与产物预算**共用 `/tmp` 时的合判**没做（见 ②③）。
 - **全文** → `plan/offline-local-disk-first.plan.md` §3.1/§3.2/§3.4/§8 · `docs/nn/remote-transport.md` §95 ·
   `docs/nn/runtime-opt.md` §36。
+
+## §2026-10-15-goalnn-offline-open-ended-segment（2026-10-15，离线包支持无限轮：课程 `iters<=0` = 无限 ⇒ 发**开区间段**）
+
+- **来源**：用户 2026-10-14 报障两次（「hub 导出 y5-hit / y5-hit2 的任务包一直失败」→「y5-hit2 改成
+  `"iters": 2000` 还是失败！」）+ 用户口径 **「① 离线包应支持 iters 0（无限轮）；② 导出离线包失败应
+  响亮报错」**。plan → `plan/offline-open-ended-iters-and-loud-export.plan.md`（v2，已并入评审
+  `plan/offline-open-ended-iters-and-loud-export.review-bf.md`；两份都在 `plan/` 下且是**未跟踪 md**）。
+- **现场（本条目只盖 J1 这一半）**：同一门课三次尝试、三个拒因，共因是「把课程预算 `iters` 直接当成计划的
+  **唯一**终点」：`iters=0` 撞两道 `SystemExit`（`trainer/loop_lifecycle.py:276` 启动期 +
+  `trainer/loop_export.py:177` 轮内）；`iters=2000` 撞 `worker/plan.py:218` 的
+  `RUN_MAX_ITERS_HARD_CAP=500`；`validate_plan`（`:310`）**即使**前两条放开也会拒（任何 `end_it>0` 对
+  `iters_total=0` 都判「超出课程预算」）⇒ 「无限」在协议层**不可表达**。
+- **定案（J1）**：**`iters_total <= 0` = 无限**——这不是新概念：`worker/cli.py` 的 `--iters` help 原文就是
+  `0 = infinite (stop via --max-hours or Ctrl-C)`，`trainer/loop_lifecycle.py:370` 的
+  `while args.iters <= 0 or it < args.iters` 同一口径；旧代码只是**导出侧不认**它。
+  导出的包改成**开区间段**：`end_it = it + 段长`（段长 = `max_iters>0` ? `max_iters` : 硬上界），
+  `plan.open_ended = true`，**`iters_total` 保持 0 原值**（改成段末会让云机把段末当成课末）。
+  三处导出闸放行（启动期 / 轮内 / `step_course_iter` 的段长闸**文案**：`<0` 在无限课时是「一段」而不是
+  「直到课程末尾」）；硬上界**值不动**（500），角色从「拒导闸」变成「段长」。
+- **豁免带收紧（评审 P1-7）**：`open_ended` 只在 `iters_total <= 0` 时免查「`end_it` 不得越过课程预算」；
+  否则一份 `open_ended=true ∧ iters_total=2000 ∧ end_it=2500` 的（写错/伪造）计划能越过课程预算——
+  而那正是该校验存在的理由。`open_ended` 非布尔也拒（未知字段是忽略，已声明字段就得合法）。
+- **被否决备选**：① 抬 `RUN_MAX_ITERS_HARD_CAP` 到 2000+（无限**不可**靠抬阈值表达——2000 之后还有 5000，
+  且拆掉「防手写/损坏计划把节点按一整天」的闸）；② 计划不设 `end_it`（哨兵 ∞）（违「计划的终点是任务
+  定义的一部分」；墙钟跨机不可复现；`planned_iters` 需要有限区间才能逐轮派发）；③ `iters=0` 只导**单轮**包、
+  靠 hub 反复续（那不是无限轮，是把人手动停课换成机器高频重复；每次导出含 code-snapshot + push）；
+  ④ 云机**自延长**段（`end_it_reached` 永不触发 ⇒ hub 永不盖章 ⇒ 另一节点能把同一份包再跑一遍，`served`
+  闸跨会话也不挡）；⑤ hub 侧构造下一段计划（新节点会拿到与 `start_it` 不匹配的权重 ⇒ **静默错血缘**）。
+- **后果与边界**：`plan_fp` / `plan_sha256` 是**规范化 JSON 的 sha（不排除任何字段）**⇒ 新键 `open_ended`
+  改变计划身份：**对校验向后兼容（未知字段忽略），对身份面不透明**（这正是段滚动要的「必换包」）。
+  有限模式的算术与包内容**逐字节不变**（`open_ended=False`）。**段末自动滚（J2）与「导出失败响亮」
+  （J3/J4）尚未落地**，见 plan §4 动作表（B0/C/D 腿）；在那之前「无限轮」是**半自动**——段末仍需人导入
+  产物 + 重新导出（plan §3.2.1 已定案承重腿 = hub→控制台自动回灌，选型②③被否）。
+- **门禁**：`bash tools/githook/nn-python-gate.sh` 绿（ruff + mypy 672 文件 + pytest **4454 passed / 1 skipped**，
+  47s）。文本断言基线**净 0**（新增 1 条「开区间段」响亮行 − 删 1 条旧「必须有终点」判据 ⇒ 不动基线）。
+  `tests/trainer/test_loop_export_split.py` 的顶层 import 闭集**登记一格** `+common.protocol`：硬上界那个数
+  只能从**同一个常量**读，抄一份进本模块就是自己拆「预判与真闸不许漂」（同 plan §3.4 的对账口径）。
+  用例：`tests/worker/test_plan.py`（开区间段形状 + 有限模式逐字节不变 + 豁免收紧三档）·
+  `tests/trainer/test_offline_leg_retired.py`（三处闸：无限课**真的**走到 `build_plan`（哨兵异常）·
+  段长 > 硬上界仍拒 · 「无剩余轮次」那道闸没被 J1 松开）· `tests/trainer/test_loop_export_split.py`
+  （无起点权重仍是响亮 `SystemExit`）。
+- **全文** → `plan/offline-open-ended-iters-and-loud-export.plan.md` §3.1/§3.4 · 评审
+  `plan/offline-open-ended-iters-and-loud-export.review-bf.md` · 前序 `docs/nn/remote-transport.md` §93。

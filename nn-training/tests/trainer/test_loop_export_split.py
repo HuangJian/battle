@@ -101,7 +101,13 @@ SLOT_HANDS: dict[str, tuple[str, ...]] = {
 }
 
 #: 顶层 import 闭集（非 stdlib；本模块不许长出重依赖）。
-TOP_IMPORTS = frozenset({"common.distribution", "worker.archive", "common.log", "worker.modes"})
+#: ★ 2026-10-15 登记一格 `common.protocol`（`plan/offline-open-ended-iters-and-loud-export` §3.1 J1）：
+#: 无限课那道的响亮行要报**硬上界**到底是多少，而那个数只能从**同一个常量**读——再抄一份
+#: 到本模块就等于把「预判与真闸不许漂」的那一条（同 plan §3.4「同口径对账」）自己拆了。
+#: `common.*` 是 L0，不构成反向边（`FORBIDDEN_IMPORTS` 一个不沾）。
+TOP_IMPORTS = frozenset(
+    {"common.distribution", "worker.archive", "common.log", "worker.modes", "common.protocol"}
+)
 STDLIB_IMPORTS = frozenset({"pathlib", "typing"})
 
 #: 反向边（禁）：成环或把叶子拉回编排上游。
@@ -480,22 +486,28 @@ def test_export_weights_runs_and_log_seam_lands_here(monkeypatch, tmp_path) -> N
     assert old_seen == [], "打 trainer.loop_steps.log 竟收到了——seam 的落点不对"
 
 
-def test_export_offline_bundle_fails_loud_without_iters(tmp_path) -> None:
-    """★ `_export_offline_bundle` 的响亮门真跑：课程没声明 iters ⇒ `SystemExit`（不猜终点）。
+def test_export_offline_bundle_fails_loud_without_start_weights(tmp_path, monkeypatch) -> None:
+    """★ `_export_offline_bundle` 剩下的那道响亮门真跑：**没有起点权重** ⇒ `SystemExit`。
 
-    为什么测这道门而不测「无起点权重」那道：后者第一刀就落到
-    `common.distribution.weights_fingerprint(args.out)`——**文件不存在时它响亮 `FileNotFoundError`**
-    （不是返回 falsy），所以「无起点权重」在盘上根本走不到（既有行为，本刀不动它）；
-    而 iters 这道门在第 **一** 行，是真正能断言的响亮退出。
+    ★ 2026-10-15（J1，`plan/offline-open-ended-iters-and-loud-export` §3.1）：课程 `iters<=0`
+    **不再是**拒因（无限课改发**开区间段**；那条新口径钉在
+    `tests/trainer/test_offline_leg_retired.py::test_infinite_course_exports_an_open_ended_segment`
+    ——用哨兵异常证明控制流真的走到了 `build_plan`），所以本用例改钉同函数里**另一道**真能断言
+    的响亮退出：包里没有起点的任务等于没任务。
+
+    指纹替成「读不到」：真盘上文件缺失时它是**响亮** `FileNotFoundError`（不是返回 falsy）⇒
+    那道门在生产盘上永远走不到，替身才让它回落到同一条 SystemExit。
     """
+    import trainer.loop_export as lx
     from trainer.loop_export import TrainingExport
 
-    obj = _stub(out=str(tmp_path / "w.json"), iters=0)
+    monkeypatch.setattr(lx.common.distribution, "weights_fingerprint", lambda _p: "")
+    obj = _stub(out=str(tmp_path / "w.json"), iters=3)
     obj._rotate_seed = 0
     obj.bun = "bun"
     try:
         cast(Any, TrainingExport._export_offline_bundle)(obj, 1, [(1, 1)], 2)
     except SystemExit as e:
-        assert "iters" in str(e), e
+        assert "没有起点权重" in str(e), e
     else:  # pragma: no cover - 失败分支
         raise AssertionError("没有响亮退出")

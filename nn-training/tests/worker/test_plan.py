@@ -28,11 +28,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from biz.course import build_pairs
-from common.protocol import ProtocolError
+from common.protocol import RUN_MAX_ITERS_HARD_CAP, ProtocolError
 from worker.plan import (
     argv_fp,
     build_plan,
     check_plan_against_args,
+    dump_plan,
     iter_spec,
     pairs_for,
     pairs_fp,
@@ -235,6 +236,77 @@ def test_plan_shape_and_clamps() -> None:
     with pytest.raises(ProtocolError) as ei:
         build_plan(args, it=10, iters_total=10, rotate_seed=1, log=lambda _m: None)
     assert "没有可自主跑的轮次" in str(ei.value)
+
+
+def test_infinite_course_plan_is_an_open_ended_segment() -> None:
+    """J1（`plan/offline-open-ended-iters-and-loud-export` §3.1）：`iters_total<=0` = **无限**。
+
+    旧代码把「无限」硬塞进「有限预算」的模子里（`end_it = iters_total` ⇒ `end_it=0` ⇒
+    “没有可自主跑的轮次” 拒发）⇒「离线包支持 iters 0」在**协议层不可表达**（用户
+    2026-10-14 报障的第一条）。新口径：本段是**开区间段**，终点由**段长**定，
+    `iters_total` 保持 `0` 原值（否则云机会把段末当成课末）。
+    """
+    args = _args()
+    plan = build_plan(args, it=0, iters_total=0, rotate_seed=1, log=lambda _m: None)
+    assert plan["open_ended"] is True
+    assert plan["iters_total"] == 0
+    assert plan["end_it"] == RUN_MAX_ITERS_HARD_CAP
+    assert len(planned_iters(plan)) == RUN_MAX_ITERS_HARD_CAP
+    assert validate_plan(json.loads(json.dumps(plan)))["open_ended"] is True
+    # 段长可降（`--run-iters 10`）：仍是开区间，终点 = it + 10
+    short = build_plan(args, it=7, iters_total=0, rotate_seed=1, max_iters=10, log=lambda _m: None)
+    assert (short["start_it"], short["end_it"], short["open_ended"]) == (7, 17, True)
+    # 段长 > 硬上界仍拒（这条闸两个分支共用：抬阀值不是表达无限轮的手法）
+    with pytest.raises(ProtocolError, match="硬上界"):
+        build_plan(
+            args,
+            it=0,
+            iters_total=0,
+            rotate_seed=1,
+            max_iters=RUN_MAX_ITERS_HARD_CAP + 1,
+            log=lambda _m: None,
+        )
+    # 负数预算与 0 同义（“无限”的另一种写法）
+    neg = build_plan(args, it=3, iters_total=-5, rotate_seed=1, log=lambda _m: None)
+    assert (neg["open_ended"], neg["end_it"], neg["iters_total"]) == (True, 3 + RUN_MAX_ITERS_HARD_CAP, -5)
+
+
+def test_finite_course_plan_is_unchanged_and_not_open_ended() -> None:
+    """有限模式**逐字节不变**（J1 是分支加宽，不是重写）：同参两遍同字节 + 新键恒 `False`。"""
+    args = _args()
+    a = build_plan(args, it=2, iters_total=10, rotate_seed=1, max_iters=3, log=lambda _m: None)
+    b = build_plan(args, it=2, iters_total=10, rotate_seed=1, max_iters=3, log=lambda _m: None)
+    assert dump_plan(a) == dump_plan(b)
+    assert a["open_ended"] is False
+    assert (a["start_it"], a["end_it"], a["iters_total"]) == (2, 5, 10)
+    # `max_iters=0` 在有限课仍然是「跑到课程末尾」
+    whole = build_plan(args, it=2, iters_total=10, rotate_seed=1, log=lambda _m: None)
+    assert (whole["end_it"], whole["open_ended"]) == (10, False)
+
+
+def test_validate_plan_open_ended_exemption_is_tight() -> None:
+    """P1-7（评审）：豁免面**只许刚好盖住“课程无限”**——否则它就是一道后门。
+
+    v1 的设计是「`open_ended` 就不查预算」，于是 `open_ended=true ∧ iters_total=2000 ∧
+    end_it=2500` 的（写错/伪造）计划能越过课程预算——而那正是这条校验存在的理由。
+    """
+    args = _args()
+    finite = build_plan(args, it=1, iters_total=4, rotate_seed=1, log=lambda _m: None)
+    # 旧计划（无 `open_ended`）照旧拒 —— 向后兼容的那一半
+    legacy = {k: v for k, v in finite.items() if k != "open_ended"}
+    with pytest.raises(ProtocolError, match="超出课程预算"):
+        validate_plan({**legacy, "end_it": 99})
+    # 伪造：`open_ended=true` 但课程有预算 ⇒ 拒
+    with pytest.raises(ProtocolError, match="open_ended=true 但课程预算"):
+        validate_plan({**finite, "open_ended": True, "end_it": 99})
+    # 类型错也拒（未知字段是忽略，已声明字段就得合法）
+    with pytest.raises(ProtocolError, match="open_ended 必须是布尔"):
+        validate_plan({**finite, "open_ended": "yes"})
+    # 真开区间段（无限课）照旧过，且预算仍不得被越过（段长那条闸另管）
+    inf = build_plan(args, it=0, iters_total=0, rotate_seed=1, log=lambda _m: None)
+    validate_plan({**inf, "end_it": 100})
+    with pytest.raises(ProtocolError, match="硬上界"):
+        validate_plan({**inf, "end_it": RUN_MAX_ITERS_HARD_CAP + 1})
 
 
 def test_validate_plan_rejects_malformed() -> None:
