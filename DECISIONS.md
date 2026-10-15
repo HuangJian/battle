@@ -6019,6 +6019,10 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   复现用例：`tests/remote/test_weights_delta.py::test_hub_import_graph_needs_no_numpy` /
   `::test_numeric_paths_reject_loudly_without_numpy`；spec 侧回归钉在
   `dashboard/tests/hub-server-push-arg.test.ts`；全文 → `docs/nn/remote-transport.md` §95。
+  （2026-10-15 合并勘误：这个「全文」指针**无对应节** —— `git grep` 全树（含 `origin/goal-nn`）只在
+  `remote/opt_delta.py` / `dashboard/src/**` 找到本补记 2 的**代码**，**没有任何一节写过这段事故正文**；
+  且本篇 §95 现为「离线段的两条命」、§96 为「staged 预取搬入抬 mtime」，都不是这段内容。
+  要补正文得另起一节，别照这个号去跳。）
 - **后果**：R1 与 R3 共用同一套「形态位 + 容器自述 + 两档判别 + 缺 base 拒发」的纪律，形态位键
   分别为 `manifest.w_fmt` / `manifest.opt_fmt`；开关仍 `--wire-diet 0`，等 §6 的真机 A/B 通过才翻 1。
   全文 → `plan/wire-diet.plan.md` §3 R1 / §13 · `docs/nn/remote-transport.md` §94 · 代码
