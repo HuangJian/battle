@@ -6784,3 +6784,32 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   否（用户令删；设计思想由 pace+lives 对照需求保留在 bdh 条，文件本身未产生证据，删无可惜）；
   ③ 动权重/tmp —— 否（只动课程文件；权重永存，tmp 是证据）。
 - **后果**：七文件 load 绿；toll 无残留；在跑只剩 y5-back/dist/hide（新三课，用户令无熔断）。
+
+## §2026-10-16-goalnn-cloud-eval-lands-delta（云机 eval 腿的读侧落地 + `wver` 同源）
+
+- **背景**（用户报障）：云机 `y5-back` it60 的 `[eval-cloud]` 400 局每局
+  `JSON Parse error: Unexpected identifier "BWD1"`，`serve-pool` fallback=23 触发熔断 ⇒
+  整轮 `served=0`；同一份权重走 rollout 腿完全正常（fallback=0）。
+- **根因**：离线段逐轮回传走 R1 ⇒ 产物里 `it-NNN/weights.json` 装的就是 int16 delta 容器
+  （现场日志自证：整份 385 943 B / store 本体 delta 145 737 B）。rollout 腿在
+  `plan_run.py:174` 先 `standard_weights_copy` 再装载，**eval 腿没有这一步**
+  （`plan_handoff._eval_job_builder.build` 原样交出 ⇒ `offline_eval.py:540` ⇒
+  `tools/sim/export-eval-game.ts:1418` 的 `JSON.parse` 撞魔数）。性质 =
+  `docs/nn/remote-transport.md` §98 的接线点名单漏了第三条（eval 腿）。
+  次生：`wver`（字节 sha256）算在容器上 ⇒ 与本机/节点评的同一 W(it) 配不上对
+  （现场同一轮两个指纹：rollout `22bb69c74abb…` vs eval `e8aa57e46473…`）。
+- **决定**：D1=装配点落地（`_land_weights` ∶ `standard_weights_copy` 到旁路缓存
+  `.weights-standard/`，产物本体保持 delta ⇒ deliver 字节/hub 判据/账本指纹不动；scratch 拷整份）；
+  D2=**落地早于算 `wver`**（`build` 交的就是落地件 ⇒ 与本机/节点同源，账本恢复可配对）；
+  D3=缺基准（基准逐字节找不到）⇒ 接住 `ProtocolError`、记一行、交回空路径、本轮不评
+  （评估是旁路：`run_cloud_eval` 按「权重不在盘上」早退，不抛、不拖训练）。
+- **备选与否决**：① 改在 `run_cloud_eval`（消费点）落地 —— 否（走 scratch 时 path 在 /dev/shm，
+  `delta_files.search_roots` 只扫 `path.parent`/`parent.parent` ⇒ 基准扫不到 store，还得额外传
+  `extra_roots`，落地件也落回 /tmp）；② 两处都加 —— 否（幂等但同一件事两份实现、日志两行，
+  违反最小修复；代价是 `run_cloud_eval` 的手动/测试直调入口没有兜底，已知取舍）；
+  ③ 让 hub 落位时改名 —— 否（§98 定案「hub 无责」，消费者自己判断，未结项沿用）。
+- **后果**：`plan_handoff` 的 import 闭集白名单 +1 `remote.weights_standard`（L1→L5 向下，
+  `tests/test_remote_dag.py` 绿）；新增 2 格用例（`test_offline_eval_wiring.py`），
+  三文件 39 用例 + ruff/mypy 绿；全文 `docs/nn/remote-transport.md` §101。
+  两件待知会：① 改的是云机侧 python，在跑的段走 code cache ⇒ 换段/换机才生效；
+  ② `wver` 变了 ⇒ 云机此前按容器 sha 落账的行会重评一次（那些读数本就废）。

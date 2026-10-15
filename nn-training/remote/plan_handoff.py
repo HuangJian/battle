@@ -49,6 +49,7 @@ import common.game_watch as game_watch
 import common.scratch as scratch
 import remote.delta_files as delta_files
 import remote.opt_standard as opt_standard
+import remote.weights_standard as weights_standard
 from common.logutil import tag_logger
 from common.platform_utils import call_bounded, cpu_worker_slots
 from common.protocol import (
@@ -900,7 +901,9 @@ def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], dict]:
     """`it` → `run_cloud_eval` 的关键字参数（**提交时才求值**：权重路径按当轮算）。
 
     权重用 `it-NNN/weights.json` 而不是任何「活指针」：那是这一轮不可变且已在盘上的
-    W(it)，`wver` 因此与本地/节点评同一份权重时逐位相同（账本可配对）。
+    W(it)，`wver` 因此与本地/节点评同一份权重时逐位相同（账本可配对）——**前提是它先被
+    落地成整份**（`_land_weights`）：离线段那份文件里装的是 delta 容器，而 `wver` 是字节的
+    sha256，拿容器算就与本地/节点评的同一 W(it) 配不上对。
 
     ★ 2026-10-08（plan/rollout-local-scratch §2 P0-5）：**三样热数据换到节点本地盘**
     （TS 运行时树 / 当轮权重 / 每局 `game_dir`）—— 94 路冷启动读同一棵树、200 次
@@ -977,12 +980,34 @@ def _eval_job_builder(ctx: RunContext, ep: Any) -> Callable[[int], dict]:
         state["layout"] = layout
         return layout
 
+    def _land_weights(it: int) -> Path:
+        """本轮评估要用的权重 = **整份**（store 里那份可能是 delta 容器）。空路径 = 本轮不评。
+
+        ★ 2026-10-16（云机 eval 整轮 `JSON Parse error: Unexpected identifier "BWD1"` 的根因，
+        `docs/nn/remote-transport.md` §101）：离线段逐轮回传走 R1 —— `it-NNN/weights.json` 里
+        装的是 int16 delta 容器（`BWD1`，`remote/weights_delta`），hub 原样落位。TS 导出器是
+        `JSON.parse` 的（`tools/sim/export-eval-game.ts:1418`）⇒ 每局都撞在魔数上（rc=1），
+        serve-pool 回退到熔断阈值后整轮 0 读数。rollout 腿在 `plan_run._run_iteration` 里
+        **先落地再装载**，eval 腿此前没这一步（§98 的接线点名单漏了这一处）。
+
+        用**旁路缓存**（`standard_weights_copy`）：产物本体保持 delta ⇒ deliver 腿发送的字节、
+        hub 侧 duplicate/conflict 判据、账本指纹**全都不变**，而这里拿到的是能直接装载的整份
+        ——也顺带让 `wver`（字节 sha256）与本机/节点评的同一 W(it) 真正逐位相同。
+        基准逐字节找不到 ⇒ 记一行并交回空路径（评估是旁路：缺基准只丢这一轮读数，不拖训练）。
+        """
+        raw = ctx.store.weights_path(it)
+        try:
+            return weights_standard.standard_weights_copy(raw, ctx.store.root, log=ctx.log)
+        except ProtocolError as e:
+            ctx.log(f"WARN 云机评估 it{it} 的权重是 delta 容器且基准不在本机（{e}）——本轮不评")
+            return Path("")
+
     def build(it: int) -> dict:
         layout = _layout()
-        weights = ctx.store.weights_path(int(it))
+        weights = _land_weights(int(it))
         ts_root = ctx.ts_tree_dir or ""
         work_dir = ctx.work_dir / "eval-work"
-        if layout is not None:
+        if layout is not None and str(weights):
             # 上一轮的 game 目录/权重当场回收（占用有界；轮与轮串行 ⇒ 不会删到在跑的）。
             # ★ A4：这三处也包上界；任一步超界/失败 ⇒ **本段**降级到回退原地
             # （`state["layout"] = None`：不再每轮各付一次注定等满的上界），并响亮一行。

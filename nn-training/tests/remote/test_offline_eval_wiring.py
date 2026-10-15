@@ -35,7 +35,8 @@ from common.game_watch import DEFAULT_GAME_TIMEOUT_SEC
 from common.platform_utils import cpu_worker_slots
 from hub.server import _HubQueue, _JobStore
 from remote import offline_boot, offline_eval
-from remote.artifacts import ArtifactStore
+from remote import weights_delta as wd
+from remote.artifacts import ArtifactStore, sha256_bytes
 from remote.run_loop import (
     _close_eval,
     _maybe_cloud_eval,
@@ -64,6 +65,28 @@ def _course(**over: object) -> SimpleNamespace:
     }
     base.update(over)
     return SimpleNamespace(**base)
+
+
+def _wjson(seed: int) -> bytes:
+    """最小合法 `nn-weights-json`（一个参数）：够 delta 打包/重建走完整条链。"""
+    import base64
+
+    import numpy as np
+
+    arr = (np.linspace(0.0, 1.0, 4, dtype="<f4") + float(seed)).astype("<f4")
+    return json.dumps(
+        {
+            "format": "nn-weights-json",
+            "version": 1,
+            "arch": {"hidden": 8},
+            "params": {
+                "w": {
+                    "shape": [4],
+                    "data": base64.b64encode(arr.tobytes()).decode("ascii"),
+                }
+            },
+        }
+    ).encode("utf-8")
 
 
 # ─────────────────────────── 云机评估的装配 / 提交 / 收线 ───────────────────────────
@@ -136,6 +159,82 @@ def test_cloud_eval_is_wired_as_a_background_runner(
         assert all("缺省" not in m for m in logs)
         # 该轮的权重快照是**不可变**的 it-NNN/weights.json（不是活指针）
         assert Path(str(calls[0]["weights_path"])).name == "weights.json"
+    finally:
+        _close_eval(ctx)
+
+
+def test_cloud_eval_weights_are_landed_before_the_exporter_parses_them(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """离线段 `it-NNN/weights.json` 装的是 delta 容器 ⇒ 交出去的必须是**整份**。
+
+    现场（2026-10-16 云机 y5-back it60）：eval 腿把容器原样交给 TS 导出器 ⇒ 400 局每局
+    `JSON Parse error: Unexpected identifier "BWD1"`（`tools/sim/export-eval-game.ts:1418`,
+    rc=1），serve-pool 回退 23 次触发熔断，整轮 served=0；同一份权重走 rollout 腿却没事——
+    它在 `plan_run._run_iteration` 里先 `standard_weights_copy` 再装载，eval 腿此前没这一步。
+
+    顺带钉住 `wver`：它是权重**字节**的 sha256，拿容器算就与本机/节点评的同一 W(it) 配不上对。
+    """
+    calls: list[dict] = []
+
+    def fake(**job: object) -> dict:
+        calls.append(dict(job))
+        return {"ran": True, "it": job["it"]}
+
+    monkeypatch.setattr(offline_eval, "run_cloud_eval", fake)
+    ctx, _logs = _run_ctx(tmp_path, eval_on_cloud=True, course=_course())
+    store = ctx.store.root
+    base = _wjson(1)
+    (store / "it-001").mkdir(parents=True, exist_ok=True)
+    (store / "it-001" / "weights.json").write_bytes(base)  # 基准：上一轮的整份
+    delta = wd.pack_weights_delta(base, _wjson(2), base_sha=sha256_bytes(base))
+    (store / "it-002").mkdir(parents=True, exist_ok=True)
+    (store / "it-002" / "weights.json").write_bytes(delta)
+    try:
+        _setup_cloud_eval(ctx)
+        _maybe_cloud_eval(ctx, 2)
+        assert ctx.eval_runner.wait_idle(10.0), "后台线程没跑完"
+        assert len(calls) == 1, calls
+        got = Path(str(calls[0]["weights_path"])).read_bytes()
+        # TS 侧是 `JSON.parse` 的：撞魔数 = rc=1 = 这一局废掉
+        assert not got.startswith(b"BWD1"), "交出去的仍是 delta 容器——整轮都会报 BWD1"
+        assert json.loads(got.decode("utf-8"))["params"], "不是能装载的整份"
+        assert sha256_bytes(got) != sha256_bytes(delta), "wver 必须算在整份上（否则账本配不上对）"
+        # 落地件走**旁路缓存** ⇒ 产物本体保持 delta（deliver 腿字节 / hub 判据 / 账本指纹全不动）
+        assert (store / "it-002" / "weights.json").read_bytes() == delta
+    finally:
+        _close_eval(ctx)
+
+
+def test_cloud_eval_skips_the_round_when_the_delta_base_is_missing(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """容器且基准不在本机 ⇒ **本轮不评**（响亮记一行，不抛、不拖训练）。
+
+    `standard_weights_copy` 找不到基准会 `ProtocolError`（绝不猜基准：落错 = 形状对、数值错）；
+    评估是旁路 ⇒ 它只值一行 WARN 加这一轮缺读数，不能把整段按死在这一格上。
+    """
+    calls: list[dict] = []
+
+    def fake(**job: object) -> dict:
+        calls.append(dict(job))
+        return {"ran": True, "it": job["it"]}
+
+    monkeypatch.setattr(offline_eval, "run_cloud_eval", fake)
+    ctx, _logs = _run_ctx(tmp_path, eval_on_cloud=True, course=_course())
+    store = ctx.store.root
+    orphan = wd.pack_weights_delta(_wjson(1), _wjson(2), base_sha=sha256_bytes(_wjson(1)))
+    (store / "it-002").mkdir(parents=True, exist_ok=True)
+    (store / "it-002" / "weights.json").write_bytes(orphan)  # 基准 nowhere
+    try:
+        _setup_cloud_eval(ctx)
+        _maybe_cloud_eval(ctx, 2)
+        assert ctx.eval_runner.wait_idle(10.0), "后台线程没跑完"
+        assert len(calls) == 1, calls
+        # 空路径 =「没有权重可评」：`run_cloud_eval` 按「权重不在盘上」早退（绝不喂容器给 TS）。
+        # 判据停在**行为**上（交出去的到底是什么），不验日志文案——空路径只可能来自缺基准那一档
+        # （正常档一定交出整份），行为面已唯一确定分支；`logs` 留着只为排障时看得到现场。
+        assert calls[0]["weights_path"] == Path(""), f"落不了地就别把容器交出去：{calls[0]}"
     finally:
         _close_eval(ctx)
 

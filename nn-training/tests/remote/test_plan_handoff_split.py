@@ -109,6 +109,13 @@ ALLOWED_IMPORTS = {
     # `remote.opt_standard` 是 **L1**（只依赖 `remote.opt_delta`(L0) + `common.*` 叶子）⇒ 本模块
     # 站 L5，边严格向下（层号账本 `tests/test_remote_dag.py`）。
     "remote.opt_standard",
+    # 2026-10-16（云机 eval 整轮报 `Unexpected identifier "BWD1"`，`docs/nn/remote-transport.md`
+    # §101）：评估腿的权重在交给 TS 导出器之前要先**落地成整份**（离线段 `it-NNN/weights.json`
+    # 里装的是 delta 容器，`JSON.parse` 撞魔数 ⇒ 每局 rc=1）。落地与 rollout 腿同一份实现
+    # （`standard_weights_copy`），产物本体保持 delta ⇒ deliver 腿字节/hub 判据/账本指纹不动。
+    # `remote.weights_standard` 是 **L1**（只依赖 `remote.weights_delta`(L0) + `remote.delta_files`(L0)
+    # + `common.*` 叶子）⇒ 本模块站 L5，边严格向下（层号账本 `tests/test_remote_dag.py`）。
+    "remote.weights_standard",
     "remote.offline_deliver",
     "remote.offline_eval",
     "worker.plan",

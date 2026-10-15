@@ -6,6 +6,70 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §101 云机 **eval 腿**漏了读侧落地：400 局每局 `Unexpected identifier "BWD1"`（2026-10-16 用户报障 · 决策 `DECISIONS.md` §2026-10-16-goalnn-cloud-eval-lands-delta）
+
+**用户报障**（2026-10-16，云机 `y5-back` it60）：`[eval-cloud]` 开评 400 局，逐局回退一次性
+spawn 并报 `JSON Parse error: Unexpected identifier "BWD1"`，随即
+`[serve-pool] 熔断：本轮停掉补位（fallback=23 ≥ 阈值23；served=0 spawned=94 killed=22）`
+⇒ **整轮 0 读数**。同一份权重走 rollout 腿却一切正常（`serve_pool: served=190 … fallback=0`）。
+
+### 事故链
+
+离线段逐轮回传走 R1（int16 delta 容器 `BWD1`），hub 原样落位 ⇒ 产物里 `it-NNN/weights.json`
+**就是容器**。现场日志自己的证词（`[run] [weights] 云机侧整份副本` 那一行）：整份 385 943 B，
+而「store 本体保持 delta **145 737 B** 供 deliver 腿」。
+
+两条腿的差别只有一行：
+
+| 腿 | 装载前的处理 | 结果 |
+|---|---|---|
+| rollout | `plan_run.py:174` `weights_standard.standard_weights_copy(weights, ctx.store.root)` | ✅ |
+| eval | `plan_handoff._eval_job_builder.build` 原样交出 `ctx.store.weights_path(it)` | ❌ 每局 rc=1 |
+
+eval 那条路径一路没落地：`build` → `offline_eval.py:421` `wpath = Path(weights_path)` →
+`:540` `run_local_eval_game(bun_bin, str(wpath), …)` → `tools/sim/export-eval-game.ts:1418`
+`main()` ⇒ `JSON.parse` 撞魔数（每条重试日志里的 `export-eval-game.ts:1418:8`）。
+
+⇒ 性质是 **§98「接线点（一处漏掉就是一条腿继续报 BWD1）」漏了第三条**：那张名单列了本机
+trainer 各推权重点 + 云机 `download._resolve_weights` / `plan_run._run_iteration`，**没有 eval 腿**。
+
+### 次生：`wver` 也算错了
+
+`wver` = 权重**字节**的 sha256（`offline_eval.py:423-428`）。拿容器算 ⇒ 云机评的 W(it) 与本机/
+节点评的同一 W(it) **配不上对**（本机 `eval_course_once.weight_key16` 是先落地再算）。现场同一轮
+两个指纹：rollout `wver=22bb69c74abb…`（整份）vs eval `wver=e8aa57e46473…`（容器）——
+`offline_eval` 模块头注承诺的「账本可配对」在离线段上就是被这一条破掉的。
+
+### 定案（用户 2026-10-16 拍板：装配点落地）
+
+1. **落地在装配点**：`_eval_job_builder._land_weights` 调
+   `weights_standard.standard_weights_copy(raw, ctx.store.root)`——与 rollout 腿逐字同款，
+   产物本体保持 delta（deliver 腿字节 / hub duplicate-conflict 判据 / 账本指纹全不动），
+   整份只进旁路缓存 `<store>/.weights-standard/<sha16>.json`；scratch 拷走的是整份（/dev/shm）。
+2. **落地必须早于算 `wver`**：`build` 返回的就是落地件 ⇒ `run_cloud_eval` 的 `sha256_file` 自然
+   算在整份上，与本机/节点同源。
+3. **缺基准 ⇒ 本轮不评**：`ProtocolError` 就地接住（记一行 `基准不在本机`），交回空路径，
+   `run_cloud_eval` 按「权重不在盘上」早退。评估是旁路，不许把整段按死在这一格上。
+
+**否决的备选**：① **在 `run_cloud_eval` 里落地**（消费点）—— 走 scratch 时 `path` 在 `/dev/shm`，
+而 `delta_files.search_roots`（`delta_files.py:157-161`）只扫 `path.parent` / `path.parent.parent`
+⇒ 基准根本扫不到 store，还得额外传 `extra_roots`，落地件也落回 `/tmp` 而不是 `/dev/shm`；
+② **两处都加** —— 幂等（整份只读 4 字节）但同一件事写两份、日志两行，按「最小修复」否掉
+（`run_cloud_eval` 的手动/测试直调入口因此**没有**兜底，这条是已知取舍）。
+
+### 验证与遗留
+
+* 用例（`tests/remote/test_offline_eval_wiring.py`）：容器 + 基准在位 ⇒ 交出去的是整份
+  （`JSON.parse` 通得过）、`wver` ≠ 容器 sha、产物本体仍逐字节是 delta；容器 + 基准不在 ⇒
+  空路径 + 一行 WARN。三文件 39 用例绿，`ruff`/`mypy` 绿（白名单 +1 `remote.weights_standard`，
+  层号账本 `tests/test_remote_dag.py` 绿）。
+* ⚠ **在跑的段不会自动吃到**：改的是云机侧 python，云机代码走 payload/code cache
+  （现场 `code=cache 命中 8bb1f0d2246a…`）⇒ 要等换段/换机重新下发代码包。
+* ⚠ **`wver` 变了**：云机此前按容器 sha 落账的行与新 `wver` 对不上 ⇒ 那几轮会重评一次
+  （那些读数本来就是废的）。
+* 未结（沿用 §98 末）：hub 侧名字仍按原样（`weights.json` 里装的是容器字节）；opt 那一半
+  在云机链的落地（§99 未结②）；**全新机器接续离线段**的锚点形态（§98 未结③）。
+
 ## §100 回传 delta 的 **hub 侧就地落地**：口径反转 + `stage` 注入 + 只发整份的锚点（2026-10-15，用户口径改判 · 决策 `DECISIONS.md` §2026-10-15-goalnn-hub-lands-delta · 现场补落 `tools/hub_delta_sweep.py`）
 
 §98/§99 把 delta 事故修在**读侧**，并且把「hub 收到就落地/改名」记成了**被否决的备选①**
