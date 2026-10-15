@@ -136,6 +136,15 @@ def prune_job_dirs(
     （`<job_dir>__drain__/`，住 job 目录**隔壁**所以不在真 job 目录里）也在本函数视野里。
     不豁免它就会被算成一个 job 目录，把 keep-2 窗口挤掉一个真 job（而那个的 `_result.json`
     正是「回传失败后重领同 job」幂等路径要用的）⇒ 按后缀豁免。
+
+    ★★ 2026-10-15（真机事故）：**保序键是目录 mtime ⇒ 它同时是一条调用方契约**。
+    「最近用过」必须体现在 mtime 上，否则**调用方正在处理的那个目录会被自己删掉**。
+    踩过的那次：`remote/download.py::_adopt_staged` 用 `staged.rename(job_dir)` 搬入预取产物，
+    而 `rename` 不刷新 mtime（停在预取解包那一刻），工作区里别的 job 目录又都被收尾写入
+    （`_persist_result` 落 `<job_dir>/_result.json`）抬到了"刚刚" ⇒ 当前这份最旧、被当场删。
+    ⇒ **任何搬入/复用一个 job 目录的调用点，都必须让它 mtime = now 再来这里**
+    （download.py 里就是那样做的；字节路径靠 `mkdir` 天然满足）。回归：
+    `tests/remote/test_download_split.py::test_staged_adopt_refreshes_mtime_so_prune_cannot_evict_the_current_job_dir`。
     """
     try:
         dirs = [

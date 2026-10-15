@@ -432,6 +432,59 @@ def test_staged_payload_missing_falls_back_to_the_critical_download(
     assert any("回退关键下载" in m for m in logs), logs
 
 
+def test_staged_adopt_refreshes_mtime_so_prune_cannot_evict_the_current_job_dir(
+    tmp_path: Path,
+) -> None:
+    """★ 2026-10-15 事故（真机 worker 连炸 3 次 `FileNotFoundError: init_weights.json`）。
+
+    机理：`staged.rename(job_dir)` **保留被移动目录的 mtime**（= 预取解包那一刻，
+    `remote/prefetch.py` 的 `tmp.rename(d / "shards")`），而紧跟的 `prune_job_dirs(keep=2)`
+    按 mtime 丢最旧 —— 工作区里别的 job 目录的 mtime 都被收尾写入（`_persist_result` 落
+    `<job_dir>/_result.json`）抬到了"刚刚"，于是**当前正在处理的这一份反而是最旧的**，
+    被自己当场删掉。之后 `_resolve_weights` 写 `job_dir/init_weights.json` 时父目录已不存在
+    ⇒ `FileNotFoundError`（`Errno 2`，路径正是文件本身）。
+
+    这条路径的**静默性**是它最贵的地方：`_adopt_staged` 照样返回 `landed`，
+    `shard_dirs` 悄悄变成 `[]`，直到后面写权重才响亮——所以判据钉在"搬入后目录必须还在"。
+
+    触发条件 = 「预取 → claim」的间隔里，另外两个 job 目录的 mtime 被抬高过（实测出事的
+    那份间隔 53s/53s/87s，而健康命中只有 1–3s）。
+    """
+    import os
+    import time
+
+    # 两个"上一个 job"：mtime 抬到现在（真机由 `<job_dir>/_result.json` 收尾写入抬高）。
+    for name in ("aaaa1111", "bbbb2222"):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "_result.json").write_text("{}", encoding="utf-8")
+        os.utime(d, None)
+
+    # 预取解包产物：mtime 停在 10 分钟前（模拟预取时刻，rename 不会刷新它）。
+    jid = "cccc3333"
+    staged = tmp_path / "prefetch" / jid / "shards"
+    (staged / "w0").mkdir(parents=True)
+    (staged / "w0" / "manifest.json").write_text("{}", encoding="utf-8")
+    before = time.time() - 600
+    os.utime(staged, (before, before))
+
+    landed = download_mod._adopt_staged(
+        staged,
+        jid=jid,
+        work_dir=tmp_path,
+        preloaded={"payload_nbytes": 1, "unpack_sec": 0.1},
+        log=lambda _m: None,
+        bundle=None,
+    )
+    assert landed is not None
+    job_dir = tmp_path / jid
+    assert job_dir.is_dir(), "staged 搬入的 job 目录被自己的 prune 删了（rename 后没抬 mtime）"
+    assert landed.shard_dirs == [str(job_dir / "w0")]
+    # 搬入必须把 mtime 抬到**预取时刻之后**（`prune_job_dirs` 的保序键靠它认「最近用过」）。
+    # 相对判据：比的是"预取那一刻"这个本地读数，不是墙钟绝对值 ⇒ 不赌机器快慢。
+    assert job_dir.stat().st_mtime > before
+
+
 def test_payload_nbytes_equals_the_byte_length_on_the_byte_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

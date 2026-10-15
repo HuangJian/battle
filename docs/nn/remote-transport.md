@@ -6,6 +6,42 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §95 staged 预取搬入必须抬 mtime：`prune_job_dirs` 把**正在处理**的 job 目录删了自己（2026-10-15，真机事故 · 用户报障）
+
+**现象**（aistudio 云机 worker）：同一个 job 反复
+`FAILED: FileNotFoundError: [Errno 2] No such file or directory: '/tmp/remote-worker/<jid>/init_weights.json' — will re-poll (idempotent)`，
+每 ~4 分钟一次、同一 jid 三次（07:16 / 07:19 / 07:24），永不收敛——形状与 §4 毒包事故同型：
+**状态决定性失败落进瞬态分支**（`job_round.py` 的 `except Exception` ⇒ 回池 ⇒ 再被预取同一份）。
+
+**根因**：`_adopt_staged` 搬入预取产物用 `staged.rename(job_dir)`，而 **rename 不刷新被移动目录的 mtime**
+（= `prefetch._unpack_into` 里 `tmp.rename(d / "shards")` 那一刻）；紧跟的
+`prune_job_dirs(work_dir, JOB_DIR_KEEP)` 按 mtime 丢 `dirs[keep:]`，而工作区里**别的** job 目录的 mtime
+都被收尾写入抬高过（`_persist_result` 落 `<job_dir>/_result.json`，`worker.run_job` 尾部）
+⇒ **当前这份正在处理的目录反而最旧，被自己当场删掉**。随后 `_resolve_weights` 写
+`job_dir/init_weights.json` 时父目录已不存在 ⇒ `FileNotFoundError`（报错路径正是文件本身，`Path.write_bytes` 形态）。
+
+**为什么难发现**：删是静默的——`_adopt_staged` 照常返回 `landed`、`_scan_shard_dirs` 对不存在的目录返回 `[]`
+（`shard_dirs` 变 0 无人吭声），失败在**下一段**（写权重）才响亮，而那一层又被归成瞬态。
+触发条件 =「预取 → claim 的间隔里另外两个 job 目录被用过」：实测出事那份间隔 53s/53s/87s，
+而健康命中只有 1–3s（乱序派发 / 降级后重领）。
+
+**两条落地路径的唯一差别**：字节路径 `job_dir.mkdir(parents=True)` ⇒ mtime = now，永不中招；
+staged 路径 mtime 停在预取时刻 ⇒ 中招。
+
+**修法**：`_adopt_staged` 在 `rename` 之后、`prune_job_dirs` 之前 `_touch(job_dir)`（`remote/download.py`，一行）；
+并把「保序键是 mtime ⇒ 调用方搬入/复用一个 job 目录后必须让它 mtime = now」写进 `job_fs.prune_job_dirs` 的 docstring（调用方契约）。
+回归：`tests/remote/test_download_split.py::test_staged_adopt_refreshes_mtime_so_prune_cannot_evict_the_current_job_dir`
+（造两个 mtime=now 的 job 目录 + 一个 mtime 停在 10 分钟前的 staged 目录 ⇒ 断言搬入后本目录仍存活）。
+
+**被否决的备选**：用户问「预取时直接解压到目标目录行不行」——**不行，而且修不掉这个 bug**（mtime 还是解包那一刻）。
+另有三条不可替代的理由：① `job_dir` 的**名字本身是契约**（`_scan_shard_dirs` 扫它的直接子目录、
+rollout argv 是相对它的 `--weights init_weights.json`）⇒ 半成品必须靠原子 rename 才不可见；
+② 预取是**无租约的软持有候选**（peek 无副作用、可被抢占/丢弃），未认领的候选直解就会留下孤儿 job 目录，
+把 `JOB_DIR_KEEP=2` 的 `_result.json` 幂等窗口挤爆（2026-09-17 `blob_cache` 事故的同型）；
+③ `_ensure_payload` 的「清场在解包之前」是唯一清场点，绕开它 = 两条落地路径各有一个「谁清 job 目录」的答案。
+
+---
+
 ## §94 wire-diet 两档读数：`exact` / `identity` 怎么看（2026-10-14，`plan/wire-diet.plan.md` §12/§13 · 决策 `DECISIONS.md` §2026-10-14-goalnn-wire-diet-m3-weights-delta 与 §2026-10-14-goalnn-wire-diet-m4-hub-torch）
 
 R3（opt delta，§12）与 R1（权重 delta，§13）落地后，**回传字节可降质、本机权威副本不降质**；两条腿的
