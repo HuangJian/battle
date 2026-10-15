@@ -13,6 +13,46 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §38 收官原因进横幅：`run_complete.cause/detail` +「说人话 + 指引按原因分叉」（plan/run-complete-cause-banner，2026-10-15）
+
+**三次现场**（同一天，`tmp/y5-term`）：① 17:13 因 `max_hours: 12` 到顶收官 —— 真原因只写在**上一行**
+`gate_verdict`（`STOP`，`max_hours 12.0h 到顶（轮级硬断）`），横幅只有模板文案「正常收官（it238/500）」，
+而固定指引还劝「改大 iters」（用户照做，白挨一轮）；② 17:21 又收官一次，**账本/日志里没有任何判决**
+—— 真因是「收官后重开」热复用 runner、陈旧 `finished=True` 让 `LoopRunner.planner` 第一行
+`return []`（决策 `DECISIONS.md` §2026-10-15-goalnn-serve-revive-clears-runner-finished）；
+③ 当时唯一的出路是**重启 trainer**（用户原话：「重启 trainer/hub 后，再重启课程就好了」）。
+
+**用户口径**：横幅/悬停/矩阵必须**标明具体原因**（说人话），且**续跑指引与原因匹配**。
+
+**落地（两侧 + 文案）**：
+
+* **写侧（唯一真相）**：`run_complete` 新增两个**可选**键 —— `cause`（ASCII 枚举：`iters` / `max_hours` /
+  `course_gate` / `breaker` / `stop_loss` / `kickstart_burn` / `paired_kill` / `leg_abort` / `unknown`，
+  与 `gate_verdict` 同口径）+ `detail`（人话短句，带数字）。**唯一写点** = 各停车判据自身
+  （`loop_guards_trip`（熔断/止损）· `loop_guards_leg`（干烧/配对杀臂）· `loop_guards_gate`（I2 停腿/
+  预算硬断）· `_leg_abort` 的唯一读点 `loop_round_steps`）；**唯一读点** = `loop_lifecycle.finish_course`
+  （读一次即清；空 ⇒ 跑满记 `iters`、无限课程记 `unknown` —— **绝不编原因**）。`reason` 尾部追加
+  `：<detail>`，**旧词头与旧尾串逐字不变**（手工 grep 与老读面不受影响）。
+* **读侧**：`server/api/loop-complete.ts` 透传 `cause/detail`；**老账本**（无这两个键）退一步看**恰好
+  上一行**的 `gate_verdict(STOP)` ⇒ 归到 `max_hours`，并把内部术语原文**改写成说人话**
+  （`12.0h 到顶（轮级硬断）` → `墙钟 12h 预算到顶（预算从课程首启累计，重启不续命）`）。
+  两行都没有 ⇒ 不带 cause，文案逐字回落原文（宁缺不编；只认上一行、只认 STOP，不扫历史）。
+* **文案单源**：`web/view/course-status.ts::describeRunComplete()` —— pill/矩阵与告警坞共用同一句；
+  **指引按原因分叉**（只有 `iters` 才说「改大 iters」；`max_hours` 说「改 max_hours 且预算跨重启累计」；
+  熔断/止损/干烧/配对杀臂说「先看对应读数，别只调 iters」；`leg_abort` 说「查远端日志与 token/隧道」）。
+  屏上不得出现内部词（`gate_verdict`/`decider`/`ROUND_STOP`/「轮级硬断」）。
+
+**门禁（本次全绿）**：`dashboard`: `bun run typecheck` + `bun run test`（**1593 pass**）+ 三份 bundle 重建
+（`bun dashboard/src/server/build.ts`：app/log/eval ok）· 根项目 `bun run check`（**2561 pass** / 3 skip）·
+nn 侧受影响全量（`tests/worker` + `tests/trainer` + dag/reuse/layering/LOC/production-isolation）
+**1914 pass** + `ruff check .` + `mypy .`（682 files）。用例新增：`server-api-loop-complete.test.ts`
+四格（新账本透传 / 枚举外的 cause 当没有 / 老账本上一行兜底并改写 / ABORT·非判决·空 ⇒ 不带）·
+`training-pills.test.ts` + `web-course-status.test.ts`（`max_hours` 不许再劝「改大 iters」，且 `itX/Y` 仍在）·
+`test_loop_park.py`（三格 cause 组装：判据写了原因 / 跑满 / 无限课程 `unknown` + 可选键 schema）。
+
+**未结**：`cause` 是新键 ⇒ **老账本只能靠上一行兜底**，且只覆盖 `max_hours` 一种（当时唯一会带原因的
+判决）；段末（半离线 J2 未落地）那条轴不在 `run_complete` 里（见 `docs/nn.progress.md` §32）。
+
 ## §37 节点贡献统计的 PPO 组收下自主腿：`offline_artifact` + 两个身份字段（plan/offline-leg-ppo-attribution，2026-10-12）
 
 **触发**（用户 2026-10-12 报障）：「kaggle 自主 worker 今天完成了 600 轮 ppo 任务，却不显示在

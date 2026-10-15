@@ -38,7 +38,7 @@ import { alertAckKey, cloudHaltAckKey, visibleCloudHalts } from './interaction'
 // 与 pill 的「排队·无人取」说的是同一件事（有活、没人认领）；「卡住」是另一类（有持有者但
 // 无进度）。两处各起一个名字 = 迟早漂开，所以词只在 `course-status.ts` 定义一次。
 import type { LoopQueueRow } from './loop-queue'
-import { NO_TAKER_LABEL, PARKED_RESUME_ADVICE, STUCK_LABEL } from './course-status'
+import { NO_TAKER_LABEL, STUCK_LABEL, describeRunComplete } from './course-status'
 
 /** 告警严重度（排序即这个顺序；`history` = 已恢复/已完成这类留痕）。 */
 export type AlertSeverity = 'err' | 'warn' | 'info' | 'history'
@@ -284,22 +284,26 @@ function loopCompleteAlerts(input: AlertInput): AlertItem[] {
       ackKey: alertAckKey('loop-complete', course, done.at),
     }))
     .filter(({ ackKey }) => !input.acks.includes(ackKey))
-    .map(({ course, done, ackKey }) =>
-      withCopy(
+    .map(({ course, done, ackKey }) => {
+      // 文案单源（`course-status.ts::describeRunComplete`）：原因说人话 + 指引按原因分叉。
+      // ★2026-10-15 之前这里直接用 `done.reason`（模板文案「正常收官（itX/Y）」）⇒ 用户看不出
+      // 为什么收官，而固定指引还劝「改大 iters」（对 max_hours 场景是错的，白挨一轮）。
+      const copy = describeRunComplete(done)
+      return withCopy(
         {
           id: `loop-complete:${course}`,
           severity: 'history',
           icon: '✅',
-          title: `${course ? `课程 ${course} ` : ''}训练已完成（${done.reason}）`,
-          // 与 pill 的停车态同句（`course-status.ts::PARKED_RESUME_ADVICE`）——同一盘上事实
-          // 在两个 widget 上说话，文案只能一份。
-          detail: PARKED_RESUME_ADVICE,
+          title: `${course ? `课程 ${course} ` : ''}训练已完成（${copy.reason}）`,
+          // 与 pill 的停车态同句（同一个 `describeRunComplete`）——同一盘上事实在两个 widget
+          // 上说话，文案只能一份。
+          detail: copy.advice,
           role: 'status',
           actions: [{ kind: 'ack', label: '知道了', ackKey }],
         },
         course,
-      ),
-    )
+      )
+    })
 }
 
 /** PPO 排队·无人取超时（红条）：盘上 `claimed` 不存在且目录龄 >5min ⇒ 云端 worker 可能断连。

@@ -165,6 +165,22 @@ describe('coursePills：把队列事实翻译成一行 pill', () => {
     const p = view.coursePills({ ...base, loopCompletes: { 'x21-psh-b': parked } })[0]!
     expect(p).toMatchObject({ course: 'x21-psh-b', it: 17, status: '已收官', tone: 'gray' })
     expect(p.title).toContain('it16/150') // 收官原因原文进悬停（与告警坞同句）
+    // ★2026-10-15（plan/run-complete-cause-banner §5 DoD）：**原因说人话 + 指引按原因分叉**。
+    // 现场：max_hours 到顶那次，横幅让用户「改大 iters」——而真正的闸是 max_hours，白挨一轮。
+    const budget = {
+      at: '2026-10-15 17:21:00',
+      reason: '正常收官（it239/500）：墙钟 12h 预算到顶，本地停采、云机已停机',
+      iters: 500,
+      it: 239,
+      cause: 'max_hours' as const,
+      detail: '墙钟 12h 预算到顶（从课程首启累计 19.5h）',
+    }
+    const p2 = view.coursePills({ ...base, loopCompletes: { 'x21-psh-b': budget } })[0]!
+    expect(p2.status).toBe('已收官')
+    expect(p2.title).toContain('预算到顶') // 原因说人话
+    expect(p2.title).toContain('it239/500') // 轮次仍在（既有断言口径不丢）
+    expect(p2.title).toContain('max_hours') // 该动的配置键要点名
+    expect(p2.title).not.toContain('改大 iters') // 指引与原因匹配（那一句只留给 iters 跑满）
     // 训练侧行缺失（只读读面不可用）也不影响终态：停车态是账本上的盘上事实。
     const noRow = view.coursePills({
       ...base,

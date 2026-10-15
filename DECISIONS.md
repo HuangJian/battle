@@ -6656,3 +6656,82 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   「旁路缓存是候选根」+ opt「互为候选的容器不递归到死」· `test_init_no_retransfer` 加「同 job 目录
   重入」· `test_offline_backfeed` 加「落地失败过的那轮重传要自愈」「旧数据同字节重传 = duplicate」）；
   agent 侧门禁：受影响子集 292 → **298 passed**、`ruff check .` / `mypy .`（682 files）绿。
+
+## §2026-10-15-goalnn-serve-revive-clears-runner-finished（2026-10-15，「收官后重开」不复位 runner 的收工态 ⇒ 假收官）
+
+- **背景**（用户两次报障，第二次在改大 `max_hours` 之后）：`tmp/y5-term` 17:13 因 `max_hours` 真收官
+  （账本有 `gate_verdict STOP`）→ 17:17:53 控制台「停止→开课」→ 17:18:25 serve 走「收官后重开」
+  通道（`reopened_parked` → `_revive_hygiene` → `_enqueue`，日志原话「引擎热复用」）→ 17:18:40
+  正常跑完 it239（本机 rollout + 远端 PPO + 归档）→ 17:20:28 `round_done` 指针 it240 → **17:21:00
+  又收官一次**，且账本/日志里**没有任何判决**（无 `gate_verdict`、无熔断/止损日志），只有
+  `loop_serve._settle_rounds` 的「已收官（2 轮，指针 it240）」。
+- **根因**：`_revive_hygiene` 只清**引擎**的判决态（`_leg_abort`/`_remote_fail`/`_consec_fail`）与
+  `runner.contexts`，**刻意不清** `runner.finished`（旧注释：「真硬边界/预算的语义……重开一门真收官的课
+  不在本刀范围」）。而 `LoopRunner.planner` 的**第一行**就是 `if self.finished: return []`
+  （`trainer/loop_runner.py:125-126`，**静默、无日志、无原因**）⇒ 队列被判 `QUEUE_DONE` ⇒
+  `_settle_rounds` 再走一遍收官副作用（`run_complete` 横幅「正常收官」+ 云机 PAUSE + 本地停采 + 停车）。
+  那一轮之所以还是跑成了，是因为重开的初始队列由 `plan_course` 直接填（不经 `runner.planner`）——
+  队列一空，收工态立刻生效。**只有重启 trainer（新 runner）才能恢复**，这正是用户观察到的"重启就好了"。
+- **决定**：① `_revive_hygiene` 清 `runner.finished=False` / `finish_reason=""`（重开 = 人的续跑意图）；
+  ② `_settle_rounds` 的「已收官」日志追加「｜收工判据：<`finish_reason`>」，让收工原因**永不再静默**。
+- **备选与否决**：① 只加日志不改行为（重启是可用绕法）—— 否（每次 停→开 白挨一轮，且与
+  `loop_lifecycle.py:512-515` 亲自给用户的「改大 iters/配置后 停→开 继续」指引矛盾）；
+  ② 把清点放进 `_enqueue` 而不是 `_revive_hygiene` —— 否（`_revive_hygiene` 就是「复活前清判决态」的
+  唯一入口，已有引擎三件；放两处必然分叉）；③ 保留 `finished` 而改 `planner` 按盘重算 —— 否
+  （`finished` 只是内存加速器；清掉后第一次问 planner 会按盘上预算/账本重推一次，等价且改动更小。
+  真跑满的课被重开 ⇒ 白问一拍后立刻再置 True）。
+- **后果**：`nn-training/tests/trainer/test_serve_aborted_revival.py` 两格（旧「有意不动」断言按新语义改写
+  + 新增 `test_revive_hygiene_makes_the_reopened_course_actually_work_again`，钉「重开后 planner 真的
+  还派 13 步」）；`tests/trainer/` 636 passed · ruff/mypy 绿。**未结**：`finish_reason` 仍是**内存态**
+  （跨进程不可回放）⇒ 把它落到 `run_complete.cause` 并让控制台横幅说人话的事，仍归
+  `plan/run-complete-cause-banner.plan.md`（本次新增的那行日志就是它要的仪器）。
+
+## §2026-10-15-goalnn-run-complete-cause（2026-10-15，收官原因落账 + 横幅说人话：「改大 iters」只留给 iters 跑满）
+
+- **背景**（用户两次报障 + 一次指令）：同日 `tmp/y5-term` 两次收官的屏上都只有模板文案「正常收官
+  （itX/Y）」：① 17:13 真原因是 `max_hours: 12` 到顶 —— 它只写在**上一行** `gate_verdict` 里；
+  ② 17:21 是假收官（热复用 runner 的陈旧 `finished`，原因只在内存）；两次伴随的固定指引都劝
+  「改大 iters」，而①真正的闸是 `max_hours`（用户照做白挨一轮）。用户指令：「把课程收官的具体原因在
+  dashboard 横幅里标明（说人话）」+「把 plan 实现掉」（`plan/run-complete-cause-banner.plan.md`）。
+- **决定**：① **写侧**：`run_complete` 追加两个**可选**键 `cause`（ASCII 枚举，与 `gate_verdict` 同口径：
+  `iters`/`max_hours`/`course_gate`/`breaker`/`stop_loss`/`kickstart_burn`/`paired_kill`/`leg_abort`/
+  `unknown`）与 `detail`（人话短句、带数字）；**唯一写点** = 各停车判据自身（熔断/止损/干烧/配对杀臂/
+  I2 停腿/预算硬断 + `_leg_abort` 的唯一读点兜底），**唯一读点** = `loop_lifecycle.finish_course`
+  （读一次即清；空 ⇒ 跑满记 `iters`、无限课程记 `unknown`）；`reason` 只**尾部追加**详情，旧词头与
+  旧尾串逐字不变。② **读侧**：`loop-complete.ts` 透传两键；老账本退一步看**恰好上一行**的
+  `gate_verdict(STOP)` ⇒ 归 `max_hours` 并把术语原文**改写成说人话**；两行都没有 ⇒ 不带 cause、
+  文案逐字回落。③ **文案单源** `course-status.ts::describeRunComplete()`（pill/矩阵与告警坞共用），
+  **指引按原因分叉**：只有 `iters` 才说「改大 iters」；`max_hours` 说「改 max_hours，且预算按课程首启
+  累计、重启不续命」。
+- **备选与否决**：① 只在 trainer 侧改 `reason` 文案（不落结构化键）—— 否（存量已收官的轮次不自愈，
+  且读侧要解析中文自由文本才能分叉指引）；② 只在读侧反推（不写键）—— 否（账本本体继续误导 `grep`
+  的人，且原因要靠解析中文）；③ 读侧往上**找**最近的判决行（不限上一行）—— 否（把「只看尾行」变成
+  「扫历史」，成本与误报面都涨；上一行不是判决 ⇒ 回落不带原因）；④ `cause` 写中文 —— 否（它要跨读取器
+  对账，人话放 `detail`）；⑤ 把「预算到顶就自动续期」也做了 —— 否（那是**预算语义**问题，`first_run_start_ts`
+  跨重启累计是刻意的防「重启续命」，不在本刀）。
+- **后果**：nn 侧 `tests/trainer` + `tests/worker` + 守门 **1922 pass**、ruff/mypy 绿；dashboard 侧
+  `typecheck` + `bun test` **1593 pass** + 三份 bundle 重建、根 `bun run check` **2561 pass**；
+  用例：`test_loop_park.py`（三格 cause 组装 + 可选键 schema）· `server-api-loop-complete.test.ts` 四格 ·
+  `training-pills.test.ts` / `web-course-status.test.ts`（`max_hours` 不许再劝「改大 iters」）。
+  全文 → `docs/nn/console.md` §38。**未结**：老账本只能靠「上一行」兜底且只覆盖 `max_hours` 一种；
+  段末（半离线 J2）那条轴仍不在 `run_complete` 里。
+
+## §2026-10-15-goalnn-y5follow3-design（2026-10-15，三腿接续：encl/early/flank 各补最缺）
+
+- **背景**（用户令）：term300/crown175/pace160 死活对照排名＋分腿发现（E1 开局税 crown 12x
+  vs pace 死局 0 伤；W7 蹲死 pace 3.1x vs crown 反向；encl 三腿 1.6–1.8x 稳定）。
+- **决定**：D1=三新课（全键 diff 绿；共享新种子 20261201，三路可比；起点核对沿标准口径）：
+  `y5-encl`（term300 起：wEncl 8.6→17.2 一项，y5-far 剂量先例；门：encl＋命耗≤6%＋反watch
+  timeout≤5%，cap 150）；`y5-early`（crown175 起：＋wEarlyDmg 0.06×dmgFirst600 一项，
+  h5a 剂量/放置先例；门：四线＋命耗≤2%＋E1 漂移条款，cap 120）；
+  `y5-flank`（pace160 起：＋wBackHits 0.4×backHits 一项，v9#45 列存在，侧击不奖；
+  首剂 ~8% killEV；门：四线＋命耗≤2.5%＋B3 readout，cap 120）。
+- **备选与否决**：① 三腿同加 encl —— 否（encl 只给最缺的 term；crown/pace 各有特异药）；
+  ② pace 加 corner —— 否（重税刚性风险＋crown 反向，蹲死亚型先聚类）；③ postHit 定价 ——
+  否（人类分离度未回）；④ 拾取加码 —— 否（时序配对先行）；⑤ toll 提前开 ——
+  否（开课门 pace gameover≥10% 字面未触发 4%，排队）。
+- **口径订正**（§6.4）：§y5ab-reseed consequences 写的"开课核对 manifest.it == 201"错了——
+  课程轮从 1 起（crown/pace 实开即如此，bc 轮号无关）；本批三文件头注已用标准口径。
+  旧三腿处置建议：term 使命完成可 halt（195→260 大振荡＋站位全残）；crown/pace 继续跑。
+- **后果**：三文件已落盘；§15.5 新 out/traj/backup＋opt fresh；开课三连点人来
+  （先核对 tmp/y5-{encl,early,flank} 不存在）。

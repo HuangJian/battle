@@ -766,13 +766,27 @@ def _revive_hygiene(rt: CourseRuntime | None) -> None:
     清的是**判决态**，不是训练进度：权重/账本/指针都不动；`_setup` 重建的进程重启
     本来就不继承这些，复活是同一语义的进程内版。
 
-    **不动** `runner.finished`：它只可能来自真硬边界/预算（ROUND_STOP / 预算耗尽），
-    属另一语义（重开一门真收官的课不在本刀范围）——写在这里防误加。
+    ★ 2026-10-15（y5-term 假收官事故）：**`runner.finished` 也清**（原先刻意留着，代价见下）。
+    它留着的代价是「收官 → 停课 → 开课」这条最自然的续跑通道会**假收官**：热复用的 runner 带着
+    上次的 `finished=True` ⇒ `LoopRunner.planner` 第一行 `return []`（静默、无原因）⇒ 队列 DONE ⇒
+    `_settle_rounds` 再走一遍收官副作用（`run_complete`「正常收官」横幅 + 停车）。现场 2026-10-15
+    17:13 因 max_hours 真收官 → 17:17:53 停止→开课 → 17:18:40 正常跑完 it239 → 队列一空 ⇒
+    17:21:00 又收官一次（账本/日志里没有任何判决，只有重启 trainer 才能恢复）。
+    清它是安全的：`finished` 只是内存加速器，盘上预算（`budget_exhausted`）与账本
+    （`iteration_recorded`）都能重算 ⇒ 真跑满的课清掉后被问一次立刻再置 True（白问一拍）。
     """
     if rt is None:
         return
     engine = rt.engine
-    for attr, value in (("_leg_abort", False), ("_remote_fail", 0), ("_consec_fail", 0)):
+    for attr, value in (
+        ("_leg_abort", False),
+        ("_remote_fail", 0),
+        ("_consec_fail", 0),
+        # 收工原因（2026-10-15）：与 `runner.finished` 同一条理由——重开 = 人的续跑意图，
+        # 上一次的收工原因不得顶着下一段的 `run_complete.cause`。
+        ("_stop_cause", ""),
+        ("_stop_detail", ""),
+    ):
         if hasattr(engine, attr):
             setattr(engine, attr, value)
     runner = rt.runner
@@ -780,6 +794,11 @@ def _revive_hygiene(rt: CourseRuntime | None) -> None:
         # 丢弃**保留的远端会话**（`_remote_ppo_step` 在落位失败时不清的那种）：
         # 下一次 ppo 重新发布/规划，不再重落同一份结果。
         runner.contexts.pop(rt.course, None)
+        # 收工态（见 docstring）：重开 = 人的续跑意图 ⇒ 必须清，否则 planner 永远返回空表。
+        if hasattr(runner, "finished"):
+            runner.finished = False
+        if hasattr(runner, "finish_reason"):
+            runner.finish_reason = ""
 
 
 def _revive_aborted(
@@ -1146,9 +1165,14 @@ def _settle_rounds(
                 rt.engine.finish_course(
                     max(int(q.next_it) - 1, 0), drain=True, block=False
                 )
+        # ★ 2026-10-15：把**收工判据**打进这行日志（`LoopRunner.finish_reason`：`iters=N 跑满` /
+        #   `itN 已按账本结算` / `全离线任务包已导出` / `硬边界停车（门/熔断/止损/预算）` /
+        #   `smoke-void`）。没有它，一次收官在盘上只剩「正常收官（itX/Y）」这句模板文案：2026-10-15
+        #   的假收官（热复用 runner 的陈旧 `finished`）就是这样查了两轮才定位。
+        _why = str(getattr(getattr(rt, "runner", None), "finish_reason", "") or "运行未报判据")
         log(
-            f"[serve] 课程 {course} 已收官（{q.rounds_done} 轮，指针 it{q.next_it}）——"
-            "控制台停→开后自动重新入队（开课标记 mtime 更新即重开信号）"
+            f"[serve] 课程 {course} 已收官（{q.rounds_done} 轮，指针 it{q.next_it}）｜收工判据：{_why}"
+            "——控制台停→开后自动重新入队（开课标记 mtime 更新即重开信号）"
         )
         bc_rt = getattr(rt, "bc", None)
         bc_course = getattr(bc_rt, "course", None)

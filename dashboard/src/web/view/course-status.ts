@@ -17,7 +17,7 @@
  *  本模块只放类型与纯函数（无 IO、无 node:、无 Bun）。
  */
 
-import type { LoopComplete } from './console-types'
+import type { LoopComplete, RunCompleteCause } from './console-types'
 import type { CourseOverviewRow, ReadStaleView } from './course-overview'
 import type { CoursePillTone, LoopQueueRow } from './loop-queue'
 
@@ -31,6 +31,54 @@ export const PILL_STUCK_SEC = 300
  *  ——否则「pill 说改大 iters、告警坞说别的」又是同屏两种说法。 */
 export const PARKED_RESUME_ADVICE =
   '本地已停止采集，云机已停机省配额，进程停车等待重启。改大 iters 后经「停止→启动」继续。'
+
+/** ★2026-10-15（plan/run-complete-cause-banner §3.4）：**收官说人话**的唯一文案源。
+ *
+ *  背景（用户两次报障）：横幅只显示 `run_complete.reason` 的模板文案「正常收官（itX/Y）」
+ *  ——第一次真原因是 `max_hours` 预算到顶（在上一行 `gate_verdict` 里），第二次是假收官
+ *  （原因只在 trainer 内存里）。两次屏上都看不出「为什么」，而那句固定指引
+ *  （`PARKED_RESUME_ADVICE`「改大 iters」）对 `max_hours` 场景**是错的**（白挨一轮）。
+ *
+ *  本函数是 pill/矩阵（`courseStatus` 的 done 档）与告警坞（`alerts.ts`）**共用**的那一份
+ *  文案——同一条盘上事实只许有一句（同 `PARKED_RESUME_ADVICE` 的既有纪律）。三条红线：
+ *  ① **不许出现内部词**（`gate_verdict`/`decider`/`ROUND_STOP`/「轮级硬断」）；
+ *  ② **指引必须与原因匹配**（只有 `iters` 才说「改大 iters」）；
+ *  ③ 老账本 / 认不出原因 ⇒ `reason` **逐字回落**原文（宁缺不编，见 plan §2 判据 2）。
+ */
+export function describeRunComplete(done: LoopComplete): { reason: string; advice: string } {
+  const cause = done.cause
+  if (!cause) return { reason: done.reason, advice: PARKED_RESUME_ADVICE }
+  const head = (done.detail ?? '').trim() || CAUSE_TEXT[cause]
+  const span = done.it != null && done.iters > 0 ? `（it${done.it}/${done.iters}）` : ''
+  return { reason: `${head}${span}`, advice: CAUSE_ADVICE[cause] }
+}
+
+/** 无 `detail` 时的一句话（有 detail 就照 detail，它是当场算的、带数字的）。 */
+const CAUSE_TEXT: Record<RunCompleteCause, string> = {
+  iters: '跑满声明的轮数',
+  max_hours: '墙钟预算到顶',
+  course_gate: '课程门判停',
+  breaker: 'F4 熔断（KL/熵跑飞）',
+  stop_loss: '止损（干净评估连降两轮）',
+  kickstart_burn: '干烧回锚（连续低于起点）',
+  paired_kill: '配对中点杀臂（本臂落后对照臂）',
+  leg_abort: '远端 PPO 不可用且本机禁用降级',
+  unknown: '收工（原因未记录）',
+}
+
+/** 续跑指引：**按原因分叉**——照抄一条给所有原因就是把 2026-10-15 那个坑再犯一次。 */
+const CAUSE_ADVICE: Record<RunCompleteCause, string> = {
+  iters: PARKED_RESUME_ADVICE,
+  max_hours:
+    '预算按「课程首启」累计、**重启不会续命**：把课程 max_hours 调大后经「停止→启动」继续（只改 iters 没用）。',
+  course_gate: '看训练日志的 GATE 行（门未过的项与差值）再决定这腿要不要继续。',
+  breaker: '先看 KL/熵读数再决定，别只调 iters。',
+  stop_loss: '先看干净评估曲线（Δ 与 σ）再决定，别只调 iters。',
+  kickstart_burn: '先看本腿 vs 起点的评估曲线再决定，别只调 iters。',
+  paired_kill: '先看与对照臂的配对差再决定，别只调 iters。',
+  leg_abort: '查远端 PPO 日志与 token/隧道：本机没有降级档，远端不可用即停腿。',
+  unknown: PARKED_RESUME_ADVICE,
+}
 
 /** 「有活、**没人在飞**」这一类的**唯一词**（pill 与告警坞共用；2026-10-02 口径对齐，plan §6）：
  *  盘上的 `detectPpoQueueStall`（≥5min 无认领的红条）说的就是**同一件事**——两处不得各起
@@ -305,12 +353,13 @@ export function courseStatus(input: CourseStatusInput): CourseStatus {
   //    完赛态必须用**停课**清，直接重开不清）。
   if (input.loopComplete) {
     const done = input.loopComplete
+    const copy = describeRunComplete(done)
     return statusOf(
       input,
       'done',
       '已收官',
       'gray',
-      `训练已完成（${done.reason}）。${PARKED_RESUME_ADVICE}`,
+      `训练已完成（${copy.reason}）。${copy.advice}`,
       'loop',
       // 终态不参与 hub 冲突升级（矩阵会把 `hub-unregistered` 前置成「在训 · hub 未注册」——
       // 而课已停车，那个词只是在谎报算力在烧）。

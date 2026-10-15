@@ -54,6 +54,10 @@ class TrainingGuardsTrip:
     _tripped: Any
     _prev_entropy: Any
     _stop_loss_streak: int
+    #: 收工原因（2026-10-15）：本簇命中即写，`loop_lifecycle.finish_course` 读它落
+    #: `run_complete.cause/detail`（初值在 `TrainingLoop.__init__`）。
+    _stop_cause: str
+    _stop_detail: str
     #: 共享 sink：写入账本后并入 `LedgerView`（真实现住组合根 `trainer/loop_guards.py`）。
     _ledger_apply: Any
 
@@ -98,6 +102,8 @@ class TrainingGuardsTrip:
             write_circuit_break(
                 self._jsonl_path, it, self._tripped, agg, kl_streak, ent_streak, self._report, args
             )
+            # 收工原因（2026-10-15）：`run_complete.cause` 的唯一来源就在这些命中点。
+            self._stop_cause, self._stop_detail = "breaker", f"F4 熔断：{self._tripped}"
             # ds-P1-1：熔断同写 ABORT 判决——lattice 的 ABORT 项不能只有人工
             # override 一条路，否则 notebook/执行面在真正的崩塌场景读不到判决。
             self._ledger_apply(
@@ -167,5 +173,6 @@ class TrainingGuardsTrip:
                 f"<= {args.stop_loss_delta:+.4f} (显著: Δ≤−2σ) × 2 轮 — stop-loss"
             )
             log(f"STOP-LOSS CONFIRMED: {stop_reason}")
+            self._stop_cause, self._stop_detail = "stop_loss", stop_reason
             return True
         return False

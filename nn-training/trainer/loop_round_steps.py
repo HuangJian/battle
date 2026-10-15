@@ -97,6 +97,10 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
     _course_fp: Any
     _last_dist_cfg: Any
     _collect_child: Any
+    #: 收工原因（★2026-10-15）：本文件是 `_leg_abort` 的唯一读点 ⇒ 在这里兜底记因
+    #: （`self._stop_cause or "leg_abort"`，先到先得）；初值在组合根 `TrainingLoop.__init__`。
+    _stop_cause: Any
+    _stop_detail: Any
     _hot_reload_course: Any
     _course_iter: Any
     # 随基类继承而来、**不**在这里声明为 `Any` 的那些（声明会遮住基类实现，mypy 也会报不兼容）：
@@ -410,6 +414,12 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
                 return res  # 让位（或停车）
         if self._leg_abort:
             log(f"[run_rl] leg ABORTED at it{it}（远端不可用且禁用降级）")
+            # 收工原因（2026-10-15）：`_leg_abort` 的实现面散在四处（远端连败 3 次 / 两条
+            # 不可重试 HTTP / 上云 node 轮），**唯一读点**就在这里 ⇒ 在这一处兜底记因。
+            # `or` = 先到先得：I2（课程门软判决）已经在 `_apply_verdict` 里写过更具体的原因，
+            # 不被这里的兜底盖掉。
+            self._stop_cause = self._stop_cause or "leg_abort"
+            self._stop_detail = self._stop_detail or "远端 PPO 不可用且本机禁用降级——停腿"
             return finish(ROUND_STOP)
         return None
 

@@ -43,6 +43,10 @@ class TrainingGuardsLeg:
     _jsonl_path: Any
     _burn_streak: int
     _pair_kill_streak: int
+    #: 收工原因（2026-10-15）：本簇两条停腿路径（干烧回锚 / 配对杀臂）命中即写，
+    #: `loop_lifecycle.finish_course` 读它落 `run_complete.cause/detail`。
+    _stop_cause: str
+    _stop_detail: str
     #: 「配对模式解析不出唯一对端」那声警告只喊一次（本簇自己赋值，用 getattr 兜缺省）。
     _burn_fallback_logged: bool
     #: 共享 sink（真实现住组合根 `trainer/loop_guards.py`）：账本视图增量 / 判决 → 云机达令。
@@ -203,6 +207,7 @@ class TrainingGuardsLeg:
                 decider="loop",
             )
         )
+        self._stop_cause, self._stop_detail = "kickstart_burn", f"干烧回锚：{v.reason}"
         return True
 
     def _paired_kill(self, it: int) -> bool:
@@ -305,4 +310,5 @@ class TrainingGuardsLeg:
                 self._jsonl_path, it, "ABORT", f"paired-kill: {reason}", decider="loop"
             )
         )
+        self._stop_cause, self._stop_detail = "paired_kill", f"配对中点杀臂：{reason}"
         return True

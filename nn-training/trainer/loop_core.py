@@ -135,6 +135,14 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         self._spawned_early = False
         self._agg = None
         self._tripped = None
+        #: 「这一轮为什么收工」的唯一记录（`run_complete.cause/detail` 的来源，2026-10-15）。
+        #: **唯一写点** = 各停车判据自身（`_breaker` / `_stop_loss` / `_kickstart_burn` /
+        #: `_paired_kill` / `_gate` 的 I2 停腿 / `_budget_hard_cut`），**唯一读点** =
+        #: `loop_lifecycle.finish_course`。空 ⇒ 按「跑满声明轮数」兜底；无限课程 ⇒ `unknown`
+        #: （绝不编原因）。每轮只会有一个判据命中（`step_guards` 命中即 `finish(ROUND_STOP)`），
+        #: 所以是普通赋值、不需要「先到先得」的判定。
+        self._stop_cause = ""
+        self._stop_detail = ""
         self._prev_entropy = None
         self._consec_fail = 0
         self._kl_streak = 0

@@ -336,6 +336,10 @@ class TrainingLifecycle:
     _soft_remediate_count: Any
     _start_it: Any
     _state_init: Any
+    #: 收工原因（★2026-10-15，plan/run-complete-cause-banner 写侧）：各停车判据写、本类的
+    #: `finish_course` 读一次即清；初值在组合根 `TrainingLoop.__init__`。
+    _stop_cause: Any
+    _stop_detail: Any
     _stop_loss_streak: Any
     _total: Any
     _train_samples_total: Any
@@ -504,9 +508,23 @@ class TrainingLifecycle:
         #    block=True（等结算再进停车循环）。
         if drain:
             self._drain_pending_eval(block=block)
-        reason = f"正常收官（it{it}/{total}），本地停采、云机已停机"
+        # ★ 2026-10-15（用户口径「横幅要说人话」）：把**收工原因**一起写进账本。
+        #   来源 = 各停车判据写下的 `self._stop_cause/detail`（`loop_core.__init__` 初值）。
+        #   空 ⇒ 只剩两种情况：① 正常跑满 `iters`（`while` 条件退出，没有任何判据）；
+        #   ② 无限课程（`iters<=0`）从来不会因为"跑满"到这里 ⇒ 记 `unknown`（**绝不编原因**）。
+        #   `reason` 尾部追加 `：<detail>`，保持旧词头与旧尾串逐字不变（手工 grep 与老读面
+        #   不受影响：`正常收官（it238/500）` 仍是前缀）。
+        cause = str(getattr(self, "_stop_cause", "") or "")
+        detail = str(getattr(self, "_stop_detail", "") or "")
+        if not cause:
+            cause, detail = ("iters", "跑满声明的轮数") if int(args.iters or 0) > 0 else ("unknown", "")
+        self._stop_cause, self._stop_detail = "", ""  # 读一次即清（重启/重开不得复用旧因）
+        suffix = f"：{detail}" if detail else ""
+        reason = f"正常收官（it{it}/{total}）{suffix}，本地停采、云机已停机"
         try:
-            write_run_complete(self._jsonl_path, it, int(args.iters or 0), reason)
+            write_run_complete(
+                self._jsonl_path, it, int(args.iters or 0), reason, cause=cause, detail=detail
+            )
         except OSError as e:
             log(f"[run_rl] 停车：run_complete 落账失败（{e}）— 仅横幅派生缺失，继续停车")
         log(
@@ -689,6 +707,10 @@ class TrainingLifecycle:
                 "（I2 停腿判据读账本，重启不洗白）"
             )
         self._tripped = None
+        # 收工原因随进程内状态复位（`_setup()` = 引擎重建/重启 ⇒ 上一次的收工原因作废；
+        # 不然「本段跑满」会顶着上一段的 `max_hours` 写进 `run_complete.cause`）。
+        self._stop_cause = ""
+        self._stop_detail = ""
         # it 断点续跑：--start-it 显式，否则自动 = 账本最后完成迭代 + 1
         start_it = args.start_it if args.start_it is not None else self._ledger.next_it
         if start_it > 1:

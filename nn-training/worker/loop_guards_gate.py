@@ -61,6 +61,10 @@ class TrainingGuardsGate:
     _min_train_warned: bool
     _soft_remediate_count: int
     _leg_abort: bool
+    #: 收工原因（2026-10-15）：本簇两条停腿路径（`_budget_hard_cut` / I2 REMEDIATE-STOP）
+    #: 命中即写，`loop_lifecycle.finish_course` 读它落 `run_complete.cause/detail`。
+    _stop_cause: str
+    _stop_detail: str
     #: 共享 sink（真实现住组合根 `trainer/loop_guards.py`）：账本视图增量 / 判决 → 云机达令。
     _ledger_apply: Any
     _sync_cloud_halt: Any
@@ -250,6 +254,11 @@ class TrainingGuardsGate:
                     f"[run_rl] I2 REMEDIATE-STOP it{it}: 软判决 ×{self._soft_remediate_count} "
                     f"≥ {limit} —— 停腿（gate_remediate_stop_after）"
                 )
+                self._stop_cause = "course_gate"
+                self._stop_detail = (
+                    f"课程门软判决 REMEDIATE 已 {self._soft_remediate_count} 次（≥{limit}）"
+                    "——边际收益枯竭，停腿（I2）"
+                )
                 self._leg_abort = True
                 return True
         return False
@@ -273,6 +282,12 @@ class TrainingGuardsGate:
         log(
             f"[run_rl] max_hours {args.max_hours}h 到顶（轮级硬断）it{it} "
             f"— wall {elapsed:.0f}s"
+        )
+        # 收工原因（2026-10-15）：detail 自带数字（预算与实际累计），屏上要说得清
+        # 「为什么 12h 到了、为什么重启不续命」——预算基线是**课程首启**（`first_run_start_ts`）。
+        self._stop_cause = "max_hours"
+        self._stop_detail = (
+            f"墙钟 {float(args.max_hours)}h 预算到顶（从课程首启累计 {elapsed / 3600:.1f}h）"
         )
         try:
             write_gate_verdict(

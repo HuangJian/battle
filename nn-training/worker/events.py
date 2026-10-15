@@ -344,21 +344,33 @@ def write_circuit_break(
     )
 
 
-def write_run_complete(jsonl_path: Path, it: int, iters: int, reason: str) -> None:
+def write_run_complete(
+    jsonl_path: Path, it: int, iters: int, reason: str, *, cause: str = "", detail: str = ""
+) -> None:
     """run_complete 事件：主循环正常收官（ALL DONE）→ 停车不断进程前的最后落账。
 
     2026-09-12 用户定案：跑满后进程不再退出，而是本地停采 + 云停机 + 停车等待
     重启。本事件是 console「已完成」横幅的派生源（账本尾行即本事件 ⇒ 横幅展示；
     resume 后新 run_start/iteration 事件自然顶掉它 ⇒ 横幅消失）。读盘面只认已知
     事件名（iteration/run_start/gate_verdict/…），新事件名对旧读者透明、无影响。
+
+    ★ 2026-10-15（用户口径：「收官原因要说人话」）：新增两个**可选**键 ——
+    `cause`（ASCII 枚举：`iters`/`max_hours`/`course_gate`/`breaker`/`stop_loss`/
+    `kickstart_burn`/`paired_kill`/`leg_abort`/`unknown`，与 `gate_verdict` 同口径）与
+    `detail`（人话短句，可带数字）。**只在给了才写** ⇒ 老调用方（BC 腿）与老读面零变化。
+    背景：2026-10-15 同一天两次收官（一次真原因 `max_hours`、一次假收官）在屏上都只显示
+    「正常收官（itX/Y）」——原因要么只在内存（`LoopRunner.finish_reason`）、要么只在上一行
+    `gate_verdict` 里。`plan/run-complete-cause-banner.plan.md` 的写侧就是这两键。
     """
-    write_event(
-        jsonl_path,
-        {
-            "event": "run_complete",
-            "iter": it,
-            "iters": iters,
-            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
-            "reason": reason,
-        },
-    )
+    event: dict[str, object] = {
+        "event": "run_complete",
+        "iter": it,
+        "iters": iters,
+        "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "reason": reason,
+    }
+    if cause:
+        event["cause"] = str(cause)
+    if detail:
+        event["detail"] = str(detail)
+    write_event(jsonl_path, event)

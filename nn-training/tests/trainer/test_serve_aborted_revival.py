@@ -403,10 +403,19 @@ def test_step_fingerprint_tracks_ledger_mtime(
 def test_revive_hygiene_clears_leg_state_and_only_this_course_context() -> None:
     """W3 纯函数面：清 `_leg_abort`/`_remote_fail`/`_consec_fail`、只 pop 本课 ctx、空件不炸。
 
-    **不动** `runner.finished`（真硬边界/预算的语义，另一个谓词）——写在这防误加。
+    ★ 2026-10-15（y5-term 假收官事故）：**`runner.finished` 也清**。它原先刻意留着（"真硬边界/
+    预算的语义"），代价是「收官 → 停课 → 开课」这条最自然的续跑通道**假收官**：热复用的 runner
+    还带着上次的 `finished=True` ⇒ `planner` 第一行就 `return []`（**无日志、无判决、无原因**）
+    ⇒ 队列 DONE ⇒ `_settle_rounds` 再走一遍收官副作用（`run_complete` 横幅「正常收官」+ 停车）。
+    现场：`tmp/y5-term` 17:13 因 max_hours 收官（真判决）→ 17:17:53 停止→开课 → 17:18:40 正常跑完
+    it239 → 队列一空 ⇒ 17:21:00 又收官一次；只有**重启 trainer** 才恢复。
+    清它是安全的：`finished` 是内存加速器，盘上预算（`budget_exhausted`）与账本（`iteration_recorded`）
+    都能重算 —— 真跑满的课清掉后第一次问 planner 立刻再置 True，只是白问一拍。
     """
     engine = SimpleNamespace(_leg_abort=True, _remote_fail=3, _consec_fail=5)
-    runner = SimpleNamespace(contexts={"bad": object(), "other": object()}, finished=True)
+    runner = SimpleNamespace(
+        contexts={"bad": object(), "other": object()}, finished=True, finish_reason="硬边界停车"
+    )
     rt: Any = SimpleNamespace(course="bad", engine=engine, runner=runner)
 
     loop_serve._revive_hygiene(rt)
@@ -415,10 +424,45 @@ def test_revive_hygiene_clears_leg_state_and_only_this_course_context() -> None:
     assert engine._remote_fail == 0
     assert engine._consec_fail == 0
     assert sorted(runner.contexts) == ["other"]  # 只 pop 本课 ctx；别的课不动
-    assert runner.finished is True  # 有意不动
+    assert runner.finished is False  # ★ 2026-10-15：重开 = 人的续跑意图，收工态必须清
+    assert runner.finish_reason == ""
     # 空件（引擎还没建 / 无 runner / rt 缺失）不得炸。
     loop_serve._revive_hygiene(None)
     empty_rt: Any = SimpleNamespace(course="c", engine=None, runner=None)
     loop_serve._revive_hygiene(empty_rt)
     cold_rt: Any = SimpleNamespace(course="c", engine=object(), runner=None)
     loop_serve._revive_hygiene(cold_rt)
+
+
+def test_revive_hygiene_makes_the_reopened_course_actually_work_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 2026-10-15（y5-term 假收官事故）：卫生之后，**同一个 runner** 真的还能派活。
+
+    这是上面那条纯函数断言的**行为面**：`LoopRunner.planner` 的第一行是
+    `if self.finished: return []` ⇒ 假收官的全部机理就在那一行（静默、无原因、无判决）。
+    """
+    from trainer.loop_runner import LoopRunner
+    from worker.loop_scheduler import CourseQueue
+    from worker.loop_tasks import RoundFacts, round_tasks
+
+    monkeypatch.setattr(train_ledger, "load_ledger", lambda *_a, **_k: _Ledger(next_it=10))
+    runner = LoopRunner(
+        loop=SimpleNamespace(args=SimpleNamespace(traj=str(tmp_path))),
+        course="c",
+        iters=500,
+        step_mode=True,
+        facts_fn=lambda c, it: RoundFacts(it=it),
+    )
+    runner.finished = True
+    runner.finish_reason = "硬边界停车（门/熔断/止损/预算）"
+    rt: Any = SimpleNamespace(course="c", engine=SimpleNamespace(), runner=runner)
+    queue = CourseQueue(course="c", next_it=10)
+
+    assert runner.planner("c", 10, queue) == []  # 收工态：一条待办都不派（假收官的入口）
+
+    loop_serve._revive_hygiene(rt)
+
+    tasks = runner.planner("c", 10, queue)
+    assert len(tasks) == len(round_tasks("c", 10)) > 0, "重开后的课必须真的还能干活"
+

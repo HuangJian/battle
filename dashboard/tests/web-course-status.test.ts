@@ -190,6 +190,36 @@ describe('courseStatus：pill 与矩阵状态列同源（R4-a）', () => {
     expect(matrixStatus(ov, lq, true, { loopComplete: done }).text).toBe('已收官')
   })
 
+  it('★2026-10-15：收官原因说人话 + 指引按原因分叉（pill 与矩阵同句，见 plan/run-complete-cause-banner）', () => {
+    // 现场两次：① max_hours 12h 到顶（真原因在上一行 gate_verdict 里）；② 假收官（热复用 runner
+    // 的陈旧收工态）。两次屏上都只写「正常收官（itX/Y）」，且固定指引劝「改大 iters」——错。
+    const lq = lqRow({ course: 'p2', state: 'ready' })
+    const done = {
+      at: '2026-10-15 17:21:00',
+      reason: '正常收官（it239/500）：墙钟 12h 预算到顶，本地停采、云机已停机',
+      iters: 500,
+      it: 239,
+      cause: 'max_hours' as const,
+      detail: '墙钟 12h 预算到顶（从课程首启累计 19.5h）',
+    }
+    const pill = coursePills({
+      courses: ['p2'],
+      rows: [lq],
+      trainerRunning: true,
+      loopCompletes: { p2: done },
+    })[0]!
+    expect(pill.status).toBe('已收官')
+    expect(pill.title).toContain('预算到顶')
+    expect(pill.title).toContain('max_hours')
+    expect(pill.title).not.toContain('改大 iters')
+    // 矩阵同句（同一 `describeRunComplete`）：状态词不变，悬停同一份文案。
+    const m = matrixStatus(ovRow({ course: 'p2', training: true }), lq, true, {
+      loopComplete: done,
+    })
+    expect(m.text).toBe('已收官')
+    expect(m.title ?? '').toContain('预算到顶')
+  })
+
   it('★ 暂停：pill 与矩阵同词「已暂停」（此前矩阵状态列仍说「在训」）', () => {
     const lq = lqRow({ course: 'p', pausedIntent: true, pauseApplied: true })
     const ov = ovRow({ course: 'p', training: true })

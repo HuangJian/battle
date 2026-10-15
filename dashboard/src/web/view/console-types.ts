@@ -188,10 +188,45 @@ export interface MetricsView {
 }
 
 /** 训练正常完成停车态（账本 run_complete 事件派生，api.ts 填充）。 */
+/** 收官原因（★2026-10-15，plan/run-complete-cause-banner）：**ASCII 枚举**，与 nn 侧
+ *  `worker/events.write_run_complete` 的 `cause` 同表（`plan/run-complete-cause-banner.plan.md` §3.1）。
+ *
+ *  为什么是枚举而不是中文：它要跨读取器对账（今后可能被告警路由/统计消费）；人话在 `detail` 里。
+ *  ⚠ 两边各一份字面量（TS / Python 无法互 import）⇒ 新增一格必须同时改两处，并由各自用例钉住。 */
+export type RunCompleteCause =
+  | 'iters' // 跑满声明的轮数（唯一「正常」的收工）
+  | 'max_hours' // G5 墙钟预算到顶（基线 = 课程首启，跨重启累计）
+  | 'course_gate' // 课程门判停（I2 提示类门 REMEDIATE 累计到阈值）
+  | 'breaker' // F4 熔断（KL/熵/NaN）
+  | 'stop_loss' // 止损（Δ ≤ −2σ 连续两轮）
+  | 'kickstart_burn' // §5 干烧回锚
+  | 'paired_kill' // 配对中点杀臂
+  | 'leg_abort' // 远端 PPO 不可用/连败且本机禁用降级
+  | 'unknown' // 认不出（无限课程收工、或老账本缺原因）
+
+/** `RunCompleteCause` 的**运行时**取值表（读面校验用；顺序即上面文档顺序）。 */
+export const RUN_COMPLETE_CAUSES = [
+  'iters',
+  'max_hours',
+  'course_gate',
+  'breaker',
+  'stop_loss',
+  'kickstart_burn',
+  'paired_kill',
+  'leg_abort',
+  'unknown',
+] as const
+
 export interface LoopComplete {
   at: string
   reason: string
   iters: number
+  /** 收工那一轮（账本 `run_complete.iter`）；老夹具可能没有 ⇒ 可选。 */
+  it?: number
+  /** 收工原因枚举（`run_complete.cause`；2026-10-15 之前的账本没有 ⇒ 空 ⇒ 读面回落 `reason` 原文）。 */
+  cause?: RunCompleteCause
+  /** 原因的人话短句（`run_complete.detail`，可带数字）。 */
+  detail?: string
 }
 
 /** 集群代码快照的**展示投影**（plan/cluster-code-snapshot 的 P2）。

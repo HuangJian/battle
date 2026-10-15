@@ -43,6 +43,74 @@ describe('console/api.loopCompleteFromLedgerTail（正常完成停车横幅派�
     expect(api.loopCompleteFromLedgerTail([])).toBeNull()
     expect(api.loopCompleteFromLedgerTail(['[run_rl] boot...'])).toBeNull()
   })
+
+  // ───────── ★2026-10-15（plan/run-complete-cause-banner §3.3）：原因从哪来 ─────────
+
+  it('★ 尾行带 cause/detail（新账本）⇒ 原样透传，且带上收工那一轮', () => {
+    const v = api.loopCompleteFromLedgerTail([
+      JSON.stringify({
+        event: 'run_complete',
+        iter: 239,
+        iters: 500,
+        time: '2026-10-15 17:21:00',
+        reason: '正常收官（it239/500）：墙钟 12h 预算到顶，本地停采、云机已停机',
+        cause: 'max_hours',
+        detail: '墙钟 12h 预算到顶（从课程首启累计 19.5h）',
+      }),
+    ])
+    expect(v).toMatchObject({
+      cause: 'max_hours',
+      detail: '墙钟 12h 预算到顶（从课程首启累计 19.5h）',
+      it: 239,
+      iters: 500,
+    })
+  })
+
+  it('★ 枚举外的 cause ⇒ 当没有（不许把野字符串当成原因上屏）', () => {
+    const v = api.loopCompleteFromLedgerTail([
+      JSON.stringify({ event: 'run_complete', iter: 1, iters: 1, reason: 'x', cause: 'whatever' }),
+    ])
+    expect(v!.cause).toBeUndefined()
+  })
+
+  it('★ 老账本（尾行无 cause）+ 上一行是 STOP 判决 ⇒ 归到 max_hours 并**改写成说人话**', () => {
+    // 现场形状（`tmp/y5-term` 2026-10-15 17:13）：gate_verdict 的 reason 是内部术语，
+    // 直接上屏违反 plan §5 DoD ⇒ 认出来但重写；hours 从原文里取。
+    const v = api.loopCompleteFromLedgerTail([
+      JSON.stringify({
+        event: 'gate_verdict',
+        iter: 238,
+        verdict: 'STOP',
+        reason: 'max_hours 12.0h 到顶（轮级硬断）',
+        decider: 'loop',
+      }),
+      JSON.stringify({
+        event: 'run_complete',
+        iter: 238,
+        iters: 500,
+        time: '2026-10-15 17:13:14',
+        reason: '正常收官（it238/500），本地停采、云机已停机',
+      }),
+    ])
+    expect(v!.cause).toBe('max_hours')
+    expect(v!.detail).toContain('12h')
+    expect(v!.detail).not.toContain('轮级硬断') // 内部术语不上屏
+  })
+
+  it('★ 上一行是 ABORT / 非判决 / 什么都没有 ⇒ 不带 cause（宁缺不编）', () => {
+    const tail = complete('正常收官（it80/80），本地停采、云机已停机')
+    expect(
+      api.loopCompleteFromLedgerTail([
+        JSON.stringify({ event: 'gate_verdict', verdict: 'ABORT', reason: 'circuit-break: kl' }),
+        tail,
+      ])!.cause,
+    ).toBeUndefined()
+    expect(
+      api.loopCompleteFromLedgerTail([JSON.stringify({ event: 'iteration', iter: 80 }), tail])!
+        .cause,
+    ).toBeUndefined()
+    expect(api.loopCompleteFromLedgerTail([tail])!.cause).toBeUndefined()
+  })
 })
 
 describe('console/api.collectLoopCompletes（多课收官聚合；2026-10-03 plan/dashboard-banner-global §4.1）', () => {
