@@ -137,6 +137,19 @@ plan §11 同步记了这条偏差。
 回落落点改成 `== net_artifacts_dir` · 错误类型改成 `pytest.raises(ProtocolError)` + `__cause__` 是 `OSError`
 · 不补传改成 `sent == []`（当时 `_checkpoint` 排在 checkpoint 之后）—— 所以这一格是 **+3** 而不是 +6。
 
+**2026-10-15 抬 FORM 一格的账**（`plan/offline-open-ended-iters-and-loud-export.plan.md` §3.3 J3（导出成败
+的权威落点）；形态 1469 → **1470** = +1，SOURCE 未动）：这一条断言的是 hub **递给云机的那行字**
+（`trigger_note`，409 正文里的 `# 已经在导包，但**上次导出失败**：<原因>`）——而那行字**就是**这条腿的
+交付物（用户 2026-10-14 报障第二条：「导出离线包失败应响亮报错」；旧读面里每一方都在演「成功」，
+失败原因只留在日志末行、没有任何一方读它）。为什么不改成行为断言：同一用例里已经钉了
+`give_up` / `export_failed` / 「只问过一次控制台」/ 缓存的 `failed_reason`（全是非文本判据），
+但那些都盖不住「**缓存对了而读面没带上**」这种回归——而它正是要修的那个缺陷。
+
+⚠ 同批能改的都改了：python 侧那条「异常原样上抛」从 `"…" in str(e)` 改成 `str(e) == msg`（全等，
+不计口径 A）；hub 侧另两条（`failed` 分支的原因、旧失败不得入读面）分别换成
+`auto_handoff_failure(...) == (…, …)` 与 `export_failed is False` 两个纯数据断言 ——
+所以这一格是 **+1** 而不是 +4。
+
 **同一格里的另一笔（不是本次改动的账）**：抬格前实测 HEAD `1cca709c` **已是 1449**（≠ 1445）——
 10-12 基线之后新加的用例文件（`tests/trainer/test_loop_serve_switches.py` 3 · `tests/remote/test_payload_slim.py` 1 ·
 `tests/trainer/test_ppo_watchdog.py` 1，另一处 −1）没跟着抬基线。本次一并显性化（1445 + 4 + 8 = 1457），
@@ -159,8 +172,9 @@ ROOT = Path(__file__).resolve().parents[1]
 #: 2026-10-14 离线本地盘 B1 腿抬到 1462（两个根 + 恢复腿的 2 条读数行；理由见模块头）
 #: 2026-10-14 离线本地盘 C1/B4 腿抬到 1466（备份/交付面的 4 条响亮行；理由见模块头）
 #: 2026-10-14 离线本地盘 B2 腿抬到 1469（容量判据/段中盘满的 3 条响亮行；理由见模块头）
+#: 2026-10-15 离线 J3 腿抬到 1470（hub 递给云机的那行 `trigger_note`；理由见模块头）
 #: —— 每笔理由都见模块头）。
-BASELINE_FORM = 1469
+BASELINE_FORM = 1470
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092 —— 两笔理由都见模块头）。
 BASELINE_SRC = 1092

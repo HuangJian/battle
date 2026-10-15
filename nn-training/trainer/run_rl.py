@@ -393,11 +393,21 @@ def main() -> None:
     )
 
     # ===== 主循环（trainer/loop.py::run_training）=====
+    # ★ 2026-10-15（J3，plan/offline-open-ended-iters-and-loud-export §3.3）：导出腿的**成败**
+    #   在**进程退出层**落一个权威点（`tmp/<课>/export-status.json`）：控制台起的是
+    #   detached 子进程（拿不到退出码），且控制台重启后它仍在跑 ⇒ 控制台的内存状态不可靠，
+    #   落盘是唯一跨重启的锚。非导出腿一字不写；**成功也写**。
+    #   包住 `run_training` 才盖得住三条真实路径：启动期 `export_refusal`（SystemExit）·
+    #   轮内 `build_plan` 的 `ProtocolError`（走 `round_failure` 同轮重试 5 次后退）· 成功。
+    #   （更早的启动期拒因——课程未开课 / `--course` 与 CLI 冲突——在它之前，不进这个文件；
+    #   那条路靠控制台的 `tailFailureReason` 读日志尾兜底。）
+    from remote.bundle import export_status_guard
     from trainer.loop import run_training
 
     # ★ 2026-09-21（§3 单一 PPO 路径）：训练进程不建本机 PPO 后端（hub 免 torch，D2）——
     # 传 None；PPO 由 hub 队列上认领到的 worker 执行（本机 worker = 控制台起的同一协议）。
-    run_training(args, None, bun, update_kwargs)
+    with export_status_guard(args):
+        run_training(args, None, bun, update_kwargs)
 
 
 if __name__ == "__main__":

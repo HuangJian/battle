@@ -39,7 +39,12 @@ import {
   startLadder,
   stopLadder,
 } from '../eval-board'
-import { launchTaskBundleExport, taskBundleInfo } from '../bundles'
+import {
+  exportStatusLine,
+  launchTaskBundleExport,
+  readTaskBundleStatus,
+  taskBundleInfo,
+} from '../bundles'
 import { runRunPythonAsyncModule } from '../run-python'
 import { launchEvalA } from '../eval-a-run'
 import { ALL_COMPONENTS } from './component-meta'
@@ -70,7 +75,7 @@ export function errResp(message: string, status: number): Response {
 }
 
 /** 读接口（不是决策）：高频轮询/回读不能往决策日志里刷行。 */
-const READONLY_ACTIONS = new Set(['getGateHaltMode'])
+const READONLY_ACTIONS = new Set(['getGateHaltMode', 'taskBundleStatus'])
 
 /** **视图态动作**：改的是「操作员在看哪门课」或一次只读回读——不碰任何组件/节点/队列事实。
  *
@@ -82,7 +87,13 @@ const READONLY_ACTIONS = new Set(['getGateHaltMode'])
  *
  *  `getGateHaltMode` 同列：它是客户端每次切课时顺带的只读回读（POST 只是传输方式），
  *  返回一个标志文件的文本，快照里根本不含它。 */
-export const VIEW_ONLY_ACTIONS: ReadonlySet<string> = new Set(['setCourse', 'getGateHaltMode'])
+export const VIEW_ONLY_ACTIONS: ReadonlySet<string> = new Set([
+  'setCourse',
+  'getGateHaltMode',
+  // ★ 2026-10-15（J3，plan/offline-open-ended-iters-and-loud-export §3.3）：导出成败的**只读**回读。
+  //   hub 在 `pending_export` 窗口里问它决定「还要不要重试」；面板用它显示红字。零副作用。
+  'taskBundleStatus',
+])
 
 /** 动作是否要作废快照缓存（server.ts 的调用判据；见 `VIEW_ONLY_ACTIONS`）。
  *  纯函数，便于门禁用例直接钉住（不再靠「server.ts 里那一行还在不在」）。 */
@@ -484,16 +495,49 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         if (!r.ok) return errResp(r.message, 409)
         return okResp({
           ok: true,
-          message: r.message,
+          // ★ 2026-10-15（J3）：回执只承诺**已启动**（成败待定）——这句话以前是「任务包导出已启动」
+          //   而下面写着「产物将落在 …」，而导出是 detached 子进程（拿不到退出码）⇒ 失败时那句
+          //   「产物将落在 …」是**假承诺**（现场：面板说成功、盘上没有包）。权威成败在
+          //   `tmp/<课>/export-status.json`（python 退出层写，`readTaskBundleStatus` 读）。
+          message: `${r.message}——成败待定，看下方状态一行`,
           detail: [
             // 旧包作废是**这条腿的语义**（导出 = 重新打一份带当前代码的包），面板必须说出来：
             // 否则「重启后云机拉不到包」会被当成故障，而它是刻意等的。
             ...(r.invalidated
               ? ['旧任务包已作废（代码可能已变）——导出完成前云机取不到包（/offline/task-pack 404）']
               : []),
-            `产物将落在 ${taskBundleInfo(ctx.course).path}`,
+            `启动时的意图：产物将落在 ${taskBundleInfo(ctx.course).path}`,
+            exportStatusLine(ctx.course),
           ],
         })
+      }
+      case 'taskBundleStatus': {
+        // 导出成败的**只读**回读（零副作用）：权威落点就是 python 在退出层原子写的那份旁挂件
+        // （`remote/bundle.py::write_export_status`；plan/offline-open-ended-iters-and-loud-export §3.3 J3）。
+        //
+        // 为什么要有这个端点：hub 的 `give_up` 与束末告警以前完全不知道「导出失败」，只能演成
+        // 「一直在试」（而重试上界又是**进程内**记忆，重启即清零）⇒ 它必须能问到那份第一手事实。
+        if (!ctx.course) return errResp('缺少 course', 400)
+        const status = readTaskBundleStatus(ctx.course)
+        return new Response(
+          JSON.stringify({
+            ok: true,
+            message: exportStatusLine(ctx.course),
+            // `status` 为 `null` = **不可知**（还没跑完 / 被 kill / 旧版本）——不是成功。
+            status:
+              status === null
+                ? null
+                : {
+                    ok: status.ok,
+                    exitCode: status.exitCode,
+                    reason: status.reason,
+                    at: status.at,
+                    iters: status.iters,
+                    runIters: status.runIters,
+                  },
+          }),
+          { status: 200, headers: { 'Content-Type': 'application/json; charset=utf-8' } },
+        )
       }
       case 'archiveCourse': {
         // 课程封存（plan/course-archive.plan.md）：把**已停**课程从 `tmp/<课>/` 搬成只读档案

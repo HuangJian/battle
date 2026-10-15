@@ -6256,3 +6256,75 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   （无起点权重仍是响亮 `SystemExit`）。
 - **全文** → `plan/offline-open-ended-iters-and-loud-export.plan.md` §3.1/§3.4 · 评审
   `plan/offline-open-ended-iters-and-loud-export.review-bf.md` · 前序 `docs/nn/remote-transport.md` §93。
+
+## §2026-10-15-goalnn-offline-export-status（2026-10-15，导出**成败**有权威落点：python 退出层写 `export-status.json`，控制台与 hub 都读它）
+
+- **来源**：用户 2026-10-14 报障第二条 **「导出离线包失败应响亮报错」**。plan →
+  `plan/offline-open-ended-iters-and-loud-export.plan.md` §3.3（J3）· 评审
+  `plan/offline-open-ended-iters-and-loud-export.review-bf.md`（P0-4 + P1-5/P1-6；本条**含一处评审勘误**，
+  见最后一节）。
+- **静默的机理（为什么要落到盘上）**：控制台起导出是 **detached 子进程**
+  （`core/proc.ts` 的 `detached + unref`，`:43`/`:48`）⇒ **拿不到退出码**；控制台重启后子进程仍在跑 ⇒
+  控制台的内存状态不可靠。于是每一方都在演「成功」：面板说「产物将落在 …」、hub 的自动交接拿 `ok:true`、
+  hub 的触发账本只判 HTTP 码、束末告警只会说 `pending-export`。**失败证据只留在
+  `tmp/<课>/export-bundle.log` 的末行，没有任何一方读它**（代价：每次触发白烧一次 code-snapshot +
+  一次 `git push`）。
+- **定案（落点与写点）**：
+  ① 落点 = **与包同目录**（`tmp/<课>/export-status.json`）。python 侧
+     `remote/bundle.py::export_status_path(Path(out).parent)`（`out` = `--export-bundle` 的取值），
+     TS 侧 `path.dirname(taskBundlePath(course))` ⇒ **包搬到别处也不会分家**；名字与魔数
+     （`EXPORT_STATUS_NAME`/`EXPORT_STATUS_MAGIC` ↔ `taskBundleStatusFileName`/`taskBundleStatusMagic`）
+     读 python 源逐字对账（同 `BUNDLE_META_SUFFIX` 的手法）。
+  ② 写点 = **进程退出层**（`trainer/run_rl.py` 的 `with export_status_guard(args):`）——**不是**包住那两处
+     `raise SystemExit`：轮内的 `ProtocolError`（撞硬上界 / 空计划）走 `round_failure` ⇒ 落 `iter_error`
+     + **同轮重试 5 次**（每次退避 30s）才退，包住 `raise` 会漏掉那条**真实**失败路径
+     （「每次进程都秒退」只对启动期拒成立）。**每次尝试覆盖写**（末次即真值）+ 临时文件 + `replace`。
+  ③ **成功也写**（`ok:true` + `exit_code:0`）：只写失败的话，「文件不在」就同时意味着「失败了」与
+     「还没跑完」。**`null`（没写过）= 不可知，不是成功**——这个三态是这条腿的全部要害。
+  ④ `reason` 是**第一手**的（写它的人就是那个进程手上的异常原文）；控制台那条读**日志尾**的
+     `tailFailureReason`（`exit-watchdog.ts:211-236`）降为**找不到状态文件时**的兜底（被 kill / OOM）。
+     两处各司其职，不叠第二份口径。
+  ⑤ 旁挂件**不配把主腿拖红**：`write_export_status` 写不下返回 `None`、不抛；异常一律继续上抛
+     （`SystemExit` 的 code 按解释器口径记：`0`/`int`/`None→0`/其它→1）。
+- **读面（谁读它）**：控制台 `GET /api/taskBundleInfo` 的 5s 轮询多带 `statusLine` + `status`（不另起通道）；
+  面板在课程行上亮红徽标「上次导出失败 · <原因>」；`POST /api/taskBundleStatus` 是**只读**动作
+  （`READONLY_ACTIONS` + `VIEW_ONLY_ACTIONS`，零副作用）供 hub 问；回执语义从「产物将落在 …」
+  改成「**成败待定**」（那句在失败时是假承诺）。
+- **hub 侧：不再盲重试（P1-6 的收口）**：`hub/task_pack.console_export_status()` 只读回读；
+  `poll_console_export_status()` 在**导包窗**里（云机每 ~60s 重试 claim 那条路）**限频 60s** 问一次，
+  且**只认「新」失败**（那份状态的 `at` 不早于我们上一次触发——否则它属于上一轮，拿它归罪这一轮是栽赃）。
+  已知失败 ⇒ `auto_handoff_decision` 直接回 **`failed`**（409 带 `give_up=true` + `export_failed=true` +
+  真因），窗口 `TASK_BUNDLE_FAILURE_WINDOW_SEC=900`；**窗口锚是那份状态的写入时刻（持久）**，不是进程内
+  计数——触发账本会被 `reset_auto_handoff_triggers` 在「换主 ∨ 超窗」时清零，所以「3 次用完就 give_up」
+  在时间轴上不成立，现场正是这么演成「一直在失败」的。**不可知不是失败**：控制台不可达 / 旧版本 ⇒
+  结论一字不变（只负责「知道失败时少烧资源」）。
+- **被否决备选**：① 只让控制台读**日志尾**（`tailFailureReason`）——控制台重启即失去活进程日志，而 hub
+  根本读不到；② 控制台在 `watchExportExit` 里「失败就自动重试」——静态拒因重试一万次也一样，
+  动态失败应**响亮上报**；③ 把状态塞进 `/api/state`（那是高频大 payload，而这是按需一问）；
+  ④ 让 hub 在 claim 的**临界区**里同步等控制台（`pending_export` 不占闸正是为了不冻住所有盘——
+  本次把回读放在已经做网络调用的那一支，并限频 + 有界超时）；⑤ 把「已知失败」写进 `stale_reason`
+  （那是**另一个东西**：包起点 sha vs 活动权重；本次新增字段 `export_failed`，不挤别人的语义）。
+- **未覆盖的边界（诚实账）**：① 比 `run_training` 更早的启动期拒因（课程未开课 / `--course` 与 CLI 冲突）
+  **不进**这个文件——那条路靠控制台的 `tailFailureReason` 读日志尾兜底；② 被 SIGKILL/OOM 的导出不会写；
+  ③ 状态文件是**最后一次尝试**的事实（不是历史）：反复失败只留最后一条原因；④ 面板红徽标与
+  `statusLine` 只在 `taskBundleInfo` 轮询里上屏（5s），不推送。
+- **门禁**：`bash tools/githook/nn-python-gate.sh` 绿（ruff + mypy 673 文件 + pytest **4465 passed / 1 skipped**）·
+  `cd dashboard && bun run typecheck && bun run test` 绿（**1588 passed / 0 fail**）·
+  `bun dashboard/src/server/build.ts` 三份 bundle 过。文本断言基线 1469 → **1470**（+1 = hub 递给云机的那行
+  `trigger_note`；理由见 `tests/test_source_text_assert_budget.py` 模块头，同批能改的都改成了行为断言）。
+  用例：`tests/remote/test_export_status.py`（8 例：非导出腿一字不写 · 成功也写 · 第一手原因 + 异常原样上抛 ·
+  `SystemExit` 四种 code · 轮内 `ProtocolError` 也落盘 · 覆盖写 + 无 `.tmp` 残留 · 写不下只降级）·
+  `tests/hub/test_auto_handoff.py`（+3：控制台报失败 ⇒ 不再盲重试 + 真因进读面 + 限频 ·
+  旧失败与不可知**不归罪** · `failed` 窗口过期与清零）·
+  `dashboard/tests/auto-offline-handoff.test.ts`（+两段：三态读面 · 名字/魔数/落点跨语言对账）。
+- **顺手修的一处**（**与本次改动无关的既有红**，见勘误）：同文件里「排除表与 `pack_code_zip` 对账」
+  用的是写死的 `py.slice(i, i + 3000)` 窗口，而 `eb26884b`（2026-10-14）把该函数 docstring 加长后
+  排除名单被推到 3000 字之外 ⇒ **HEAD 上这条用例本来就是红的**。改成「整个函数体」（到下一个顶层
+  `def`）——覆盖面只增不减，也不会再因注释变长而假红。
+- **勘误（评审 P0-4 的第一条是错的）**：评审说「落点在 `courseLogDir()` 而不在 `tmp/<课>/`」——
+  实测 `core/paths.ts:33` 的 `LOG_DIR = REPO_ROOT/tmp`，`stack/specs.ts:30-32` 的 `courseLogDir`
+  = `path.join(LOG_DIR, course)` ⇒ **同一个目录**。v1 原稿的 `tmp/<课>/` 本来就对；
+  已把勘误追加进评审文件（`plan/offline-open-ended-iters-and-loud-export.review-bf.md` 末节），
+  实施改用「与包同目录」这条更根上的口径。评审的另两条（全员演成功 · 写点在进程退出层）成立，已按原评审实施。
+- **全文** → `plan/offline-open-ended-iters-and-loud-export.plan.md` §3.3 · 评审
+  `plan/offline-open-ended-iters-and-loud-export.review-bf.md`（含勘误节）。

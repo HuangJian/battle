@@ -50,6 +50,7 @@ from common.protocol import (
     OFFLINE_TASKS_PATH,
 )
 from hub import offline as offline_mod
+from hub import task_pack as task_pack_mod
 from hub.queue_offline import (
     auto_claimable,
     dispatch_record_default,
@@ -144,6 +145,33 @@ def _stub_auto_handoff(monkeypatch, result: tuple[bool, str] = (True, "ok")) -> 
     return calls
 
 
+def _stub_console_export_status(
+    monkeypatch,
+    *,
+    unknown: bool = True,
+    ok: bool = False,
+    reason: str = "",
+    at_now: bool = True,
+    at: float = 0.0,
+) -> list[str]:
+    """打桩**网络**那一层（`hub.task_pack.console_export_status`）。
+
+    只打这一层：限频 / 「只认新失败」/ 记账那半是**真实逻辑**，用例要盖它（plan §3.3）。
+    `at` 缺省取**调用时刻**（= 晚于上一次触发 ⇒ 这份失败算这一轮的）；要造「上一轮的失败」
+    就传 `at_now=False, at=<很小的数>`。
+    """
+    calls: list[str] = []
+
+    def fake(course: str, log=None, timeout=None):
+        calls.append(course)
+        if unknown:
+            return {"unknown": True}
+        return {"ok": ok, "reason": reason, "at": (time.time() if at_now else at)}
+
+    monkeypatch.setattr(task_pack_mod, "console_export_status", fake)
+    return calls
+
+
 @pytest.fixture(autouse=True)
 def _clean_trigger_books(monkeypatch):
     """每个用例都从「控制台可达 + 触发账本干净」起步。
@@ -156,6 +184,10 @@ def _clean_trigger_books(monkeypatch):
     from hub.task_pack import reset_auto_handoff_triggers
 
     _stub_auto_handoff(monkeypatch)
+    # ★ 2026-10-15（J3）：**控制台导出状态的只读回读**也要打桩——导包窗里云机每 ~60s 重试一次
+    #   claim，那条路会去问控制台「上次导出成没成」；真发 HTTP 会打到开发机上正在跑的控制台
+    #   （:8900）。需要自定义结论的用例自己再调 `_stub_console_export_status(...)`。
+    _stub_console_export_status(monkeypatch, unknown=True)
     reset_auto_handoff_triggers()
     yield
     reset_auto_handoff_triggers()
@@ -470,6 +502,94 @@ def test_claim_without_pack_records_pending_export_and_triggers_export(
     st2, raw2 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     assert st2 == 409 and _json(raw2)["triggered"] is False
     assert calls == ["c5-gae"]
+
+
+def test_console_export_failure_stops_the_blind_retries(tmp_path: Path, monkeypatch) -> None:
+    """★ J3（`plan/offline-open-ended-iters-and-loud-export` §3.3）：控制台说「上次导出失败」⇒
+    hub **不再盲重试**，并把**第一手原因**写进读面。
+
+    现场（2026-10-14 用户报障第二条）：导出每次都失败，而 hub 的 `give_up` 与读面**完全不知道**
+    「导出失败」，只能演成「一直在试」（重试上界又是进程内记忆，重启即清零 ⇒ 看起来永远在失败）。
+    """
+    from hub.task_pack import auto_handoff_failure
+
+    _stub_auto_handoff(monkeypatch)
+    asked = _stub_console_export_status(
+        monkeypatch,
+        unknown=False,
+        ok=False,
+        reason="SystemExit: [run_rl] --export-bundle 需要 --run-iters 说明整段长度",
+    )
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    url = f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1"
+    # ① 第一次：正常触发导包
+    assert _json(_req(base, url, method="POST")[1])["triggered"] is True
+    # ② 第二次（节流窗内）：问一次控制台 ⇒ 看到**新**失败，原因进 line
+    b2 = _json(_req(base, url, method="POST")[1])
+    assert b2["triggered"] is False
+    assert "--run-iters" in b2["trigger_note"], b2
+    # ③ 第三次：已知失败 ⇒ 直接 `failed`（不再触发），`give_up` 与 `export_failed` 一起递给云机
+    b3 = _json(_req(base, url, method="POST")[1])
+    assert (b3["give_up"], b3["export_failed"]) == (True, True), b3
+    assert auto_handoff_failure("c5-gae")[0] == (
+        "SystemExit: [run_rl] --export-bundle 需要 --run-iters 说明整段长度"
+    )
+    # 限频：整段里只向控制台问过一次（导出是分钟级，每 60s 一次没有意义）
+    assert asked == ["c5-gae"], asked
+
+
+def test_stale_failure_and_unknown_status_never_change_the_verdict(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """两条**不归罪**的口径：上一轮的失败文件（`at` 早于本次触发）与不可知（没写过状态 / 不可达）。
+
+    为什么必须分开（同 P0-1 那族坑）：拿上一轮的失败去归罪这一轮 = 误伤；把「不可知」当失败
+    = 把「正在跑」读成「坏了」（旧读面正是把两者折叠在一起的）。
+    """
+    from hub.task_pack import auto_handoff_failure
+
+    _stub_auto_handoff(monkeypatch)
+    asked = _stub_console_export_status(
+        monkeypatch, unknown=False, ok=False, reason="上一轮留下的失败", at_now=False, at=1.0
+    )
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    url = f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1"
+    assert _json(_req(base, url, method="POST")[1])["triggered"] is True
+    b2 = _json(_req(base, url, method="POST")[1])
+    assert b2["export_failed"] is False, b2
+    # 未记账（「不可知」与「上一轮的失败」都不该进读面）
+    assert auto_handoff_failure("c5-gae") == ("", 0.0)
+    assert asked == ["c5-gae"]
+
+
+def test_auto_handoff_decision_failed_window_expires() -> None:
+    """`failed` 的窗口锚是**那份状态的写入时刻**（持久），不是进程内计数（重启即清零）。
+
+    窗口过 ⇒ 回到正常档（允许再试一次）；这正是「试满 3 次就 give_up」做不到的事
+    （`reset_auto_handoff_triggers` 在换主/超窗时清零 ⇒ 每 900s 又能重试）——evaluating P1-6。
+    """
+    from hub.task_pack import (
+        TASK_BUNDLE_FAILURE_WINDOW_SEC,
+        auto_handoff_decision,
+        note_auto_handoff_failure,
+        note_auto_handoff_trigger,
+        reset_auto_handoff_triggers,
+    )
+
+    reset_auto_handoff_triggers()
+    try:
+        now = time.time()
+        note_auto_handoff_trigger("c5-x", now=now)
+        note_auto_handoff_failure("c5-x", "boom", now)
+        assert auto_handoff_decision("c5-x", now=now + 1) == "failed"
+        assert auto_handoff_decision("c5-x", now=now + TASK_BUNDLE_FAILURE_WINDOW_SEC + 1) == "trigger"
+        # 包出现 / 换主清零 ⇒ 失败记录一并清掉（新事实优先）
+        reset_auto_handoff_triggers("c5-x")
+        assert auto_handoff_decision("c5-x", now=now + 1) == "trigger"
+    finally:
+        reset_auto_handoff_triggers()
 
 
 def test_claim_without_pack_degrades_when_console_unreachable(

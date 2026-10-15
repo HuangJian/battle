@@ -29,10 +29,13 @@ sha256 + 字节数，导入时**逐件对账**（包要过 Kaggle dataset / Driv
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 import zipfile
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Any
 
 from common.cli import house_parser, run_main
 from common.protocol import (
@@ -59,6 +62,21 @@ BUNDLE_PROTO = 1
 BUNDLE_META_SUFFIX = ".meta.json"
 BUNDLE_META_MAGIC = "battle2-task-bundle-meta"
 BUNDLE_META_PROTO = 1
+
+#: 导出**成败状态**的落点名（与包**同目录**：`tmp/<课>/export-status.json`）。
+#:
+#: 为什么必须有它（2026-10-15，`plan/offline-open-ended-iters-and-loud-export` §3.3，J3）：
+#: 控制台起导出是 **detached 子进程**（`core/proc.ts` 的 `detached + unref`）⇒ 拿不到退出码；
+#: 而且控制台重启后子进程仍在跑 ⇒ **控制台的内存状态不可靠**。落盘是唯一跨重启的锚：
+#: 导出失败时每一方都不该再演成「成功」（现场：面板说「产物将落在 …」、hub 说「已触发」、
+#: 束末告警只说 `pending-export`）。
+#:
+#: 与 `BUNDLE_META_SUFFIX` 同一族契约：**跨语言**（控制台 `bundles/export.ts::taskBundleStatusPath`
+#: 按同一条规则拼，`dashboard/tests/auto-offline-handoff.test.ts` 读本文件对账）、**旁挂**
+#: （`import_bundle` 不认它、也不受它影响）。
+EXPORT_STATUS_NAME = "export-status.json"
+EXPORT_STATUS_MAGIC = "battle2-export-status"
+EXPORT_STATUS_PROTO = 1
 #: 包内固定件名（与产物目录布局一致：导入后就是可直接续跑的产物目录）。
 CODE_NAME = "code.zip"
 TS_TREE_NAME = "ts_code"
@@ -233,6 +251,105 @@ def _write_bundle_meta(out: Path, index: dict) -> None:
             tmp.unlink()
         except OSError:
             pass
+
+
+def export_status_path(pack_dir: str | Path) -> Path:
+    """导出状态文件的落点：**与包同目录**（`tmp/<课>/export-status.json`）。"""
+    return Path(pack_dir) / EXPORT_STATUS_NAME
+
+
+def write_export_status(
+    pack_dir: str | Path,
+    *,
+    ok: bool,
+    exit_code: int,
+    reason: str = "",
+    course: str = "",
+    iters: int = 0,
+    run_iters: int = 0,
+    pid: int = 0,
+    pack: str = "",
+) -> Path | None:
+    """原子写导出状态（临时文件 + `replace`）。**绝不抛**（同 `_write_bundle_meta`）：
+    写不下只降级（「文件不在」= 不可知，不是成功）。
+    """
+    status = {
+        "magic": EXPORT_STATUS_MAGIC,
+        "proto": EXPORT_STATUS_PROTO,
+        "ok": bool(ok),
+        "exit_code": int(exit_code),
+        # `reason` 是**第一手**的：写这条状态的人就是那个进程，它手上的异常比自己日志的尾巴准。
+        # 控制台的 `tailFailureReason`（读日志尾）只当**找不到状态文件时**的兜底（被 kill / OOM）。
+        "reason": str(reason)[:600],
+        "course": str(course),
+        "iters": int(iters),
+        "run_iters": int(run_iters),
+        "pid": int(pid),
+        "pack": str(pack),
+        "at": time.time(),
+    }
+    side = export_status_path(pack_dir)
+    tmp = side.with_name(side.name + ".tmp")
+    try:
+        side.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(status, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(side)
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        return None
+    return side
+
+
+def _exit_code_of(exc: BaseException | None) -> int:
+    """这次导出的退出码：无异常 = 0；`SystemExit` 取它自己的 code；其余 = 1。"""
+    if exc is None:
+        return 0
+    if isinstance(exc, SystemExit):
+        code = exc.code
+        if code is None:
+            return 0
+        return code if isinstance(code, int) else 1
+    return 1
+
+
+@contextmanager
+def export_status_guard(args: Any, *, pack_path: str | Path | None = None):
+    """`--export-bundle` 的**进程退出层**守卫：把这次导出的成败原子写到 `export-status.json`。
+
+    非导出腿**一字不写**（普通 run_rl 不产出这个文件）；**成功也写**（否则「没写」与「还没跑完」
+    不可分）。
+
+    为什么必须在**进程退出层**而不是包住那两处 `raise SystemExit`：轮内的 `ProtocolError`
+    （撞硬上界 / 空计划）走 `round_failure` ⇒ 落 `iter_error` + **同轮重试 5 次**（每次退避 30s）
+    才退出；包住 `raise` 会漏掉这条真实的失败路径（「每次进程都秒退」只对启动期拒成立）。
+
+    降级口径：状态写不下不影响导出本身（旁挂件不配把主腿拖红）；异常一律**继续上抛**。
+    """
+    out = str(pack_path if pack_path is not None else getattr(args, "export_bundle", "") or "")
+    if not out:
+        yield
+        return
+    exc: BaseException | None = None
+    try:
+        yield
+    except BaseException as e:  # 含 SystemExit（基类是 BaseException）：退出层要如实落盘
+        exc = e
+        raise
+    finally:
+        write_export_status(
+            Path(out).parent,
+            ok=exc is None,
+            exit_code=_exit_code_of(exc),
+            reason="" if exc is None else f"{type(exc).__name__}: {exc}",
+            course=str(getattr(args, "course_name", "") or ""),
+            iters=int(getattr(args, "iters", 0) or 0),
+            run_iters=int(getattr(args, "run_iters", 0) or 0),
+            pid=os.getpid(),
+            pack=out,
+        )
 
 
 def _readme(index: dict) -> str:

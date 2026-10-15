@@ -26,3 +26,14 @@ export const bundleMetaSuffix = '.meta.json'
 
 /** 旁挂元数据的魔数（对不上就当它不存在——不猜、不迁移）。 */
 export const bundleMetaMagic = 'battle2-task-bundle-meta'
+
+/** 导出**成败状态**旁挂件的魔数（python：`remote/bundle.py::EXPORT_STATUS_MAGIC`）。
+ *
+ *  为什么需要它（2026-10-15，plan/offline-open-ended-iters-and-loud-export §3.3 J3）：
+ *  导出是 **detached 子进程**（控制台拿不到退出码），而旧读面上每一方都在演「成功」
+ *  （面板说「产物将落在 …」、hub 说「已触发」、束末告警只说 `pending-export`）——
+ *  一个由**那个进程自己**写的旁挂件是唯一跨重启的权威锚。魔数对不上就当它不存在。 */
+export const taskBundleStatusMagic = 'battle2-export-status'
+
+/** 状态文件的名字（python：`remote/bundle.py::EXPORT_STATUS_NAME`）。 */
+export const taskBundleStatusFileName = 'export-status.json'

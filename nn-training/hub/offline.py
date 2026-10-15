@@ -51,10 +51,12 @@ from hub.task_pack import (
     _file_sha256,
     _hub_log,
     auto_handoff_decision,
+    auto_handoff_failure,
     decide_task_pack,
     note_auto_handoff_trigger,
     pack_index_meta,
     pack_index_part_sha,
+    poll_console_export_status,
     reset_auto_handoff_triggers,
     reset_task_pack_miss_triggers,
     reset_task_pack_triggers,
@@ -760,6 +762,10 @@ class OfflineRoutes:
         if not self.hub.course_open(course):
             return ""
         decision = auto_handoff_decision(course)
+        if decision == "failed":
+            # ★ 2026-10-15（J3）：**已知失败** ⇒ 把真因说出来（不再让人猜「导出失败？」）。
+            reason, _at = auto_handoff_failure(course)
+            return f"上次导出任务包**失败**（{reason}）——控制台修好后再点「导出任务包」"
         if decision == "throttled":
             return "控制台核对任务包新鲜度：本窗口已触发过（节流中，完成后云机会取到新包）"
         if decision != "trigger":
@@ -820,6 +826,16 @@ class OfflineRoutes:
             )
         elif decision == "throttled":
             note = "已经在导包了（节流窗内不重复触发）"
+            # ★ 2026-10-15（J3，plan/offline-open-ended-iters-and-loud-export §3.3）：
+            #   这个分支正是导包窗里「云机每 ~60s 重试一次 claim」那条路——是**唯一**
+            #   周期性经过这里的地方，所以「问一次控制台：上次到底成没成」安在这。
+            #   限频 + 只认新失败（见 `poll_console_export_status`）：不可达/不可知不改变结论。
+            seen = poll_console_export_status(course)
+            if seen:
+                note = f"已经在导包，但**上次导出失败了**：{seen}——控制台修好后再点「导出任务包」"
+        elif decision == "failed":
+            reason, _at = auto_handoff_failure(course)
+            note = f"上次导出**失败**：{reason}——本窗口不再重试（控制台修好后再点「导出任务包」）"
         else:
             note = "连续触发导包仍没有包——请到控制台检查这门课的自动交接（导出失败？）"
         self._json(
@@ -828,7 +844,10 @@ class OfflineRoutes:
                 "course": course,
                 "pending_export": True,
                 "triggered": decision == "trigger",
-                "give_up": decision == "give_up",
+                # `give_up` 与 **已知失败**同义（都对云机说「别再等这一轮了」）；
+                # 区别只在 reason 从哪来：前者是「试满次数」，后者是**导出进程自己写的失败原因**。
+                "give_up": decision in ("give_up", "failed"),
+                "export_failed": decision == "failed",
                 "retry_after": TASK_AUTO_HANDOFF_RETRY_SEC,
                 "trigger_note": note,
             },

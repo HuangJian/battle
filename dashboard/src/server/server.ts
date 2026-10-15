@@ -92,7 +92,13 @@ import {
 } from './api'
 import { restartSpecFor } from './actions'
 import { runningStaleCode } from '../core/reload'
-import { handleDeliverUpload, taskBundleDownloadResponse, taskBundleInfo } from './bundles'
+import {
+  exportStatusLine,
+  handleDeliverUpload,
+  readTaskBundleStatus,
+  taskBundleDownloadResponse,
+  taskBundleInfo,
+} from './bundles'
 import { runExitCheck } from './exit-watchdog'
 import { OFFLINE_EVAL_BACKFILL_INTERVAL_MS, runOfflineEvalBackfill } from './offline-eval-backfill'
 import { ensureBundle, type BundleTarget } from './build'
@@ -504,6 +510,7 @@ async function main(): Promise<void> {
           const course = url.searchParams.get('course') || viewCourse || ''
           if (!course) return json({ ok: false, message: '缺少 course' }, 400)
           const info = taskBundleInfo(course)
+          const st = readTaskBundleStatus(course)
           return json({
             ok: true,
             exists: info.exists,
@@ -511,6 +518,10 @@ async function main(): Promise<void> {
             bytes: info.bytes,
             mtimeMs: info.mtimeMs,
             log: path.relative(REPO_ROOT, info.log).replace(/\\/g, '/'),
+            // ★ 2026-10-15（J3）：把上次导出的**成败**一起递出去（同一条 5s 轮询，不另起通道）。
+            //   三态必须分开：`status === null` = 不可知（还没跑完 / 被 kill），**不是**成功。
+            statusLine: exportStatusLine(course),
+            status: st && { ok: st.ok, reason: st.reason, at: st.at },
           })
         }
         // 任务包下载（`content-disposition: task-<课程>.zip`）

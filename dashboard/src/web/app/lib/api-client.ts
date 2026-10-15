@@ -165,6 +165,17 @@ export async function fetchEvalReplayJob(course = ''): Promise<EvalReplayJobView
 
 // ────────────────────────── 任务包导出 / 产物导入 ──────────────────────────
 
+/** 上次导出的成败（`export-status.json` 的三态投影；`null` = **不可知**，不是成功）。
+ *
+ *  ★ 2026-10-15（J3，plan/offline-open-ended-iters-and-loud-export §3.3）：导出是 detached
+ *  子进程（面板拿不到退出码）⇒ 成败只能从 python 在退出层写的那份旁挂件读。
+ *  **不可知**与**成功**必须是两个值：旧面板把两者都显示成「没问题」。 */
+export interface TaskBundleExportStatus {
+  ok: boolean
+  reason: string
+  at: number
+}
+
 /** 任务包产出态（`GET /api/taskBundleInfo`）：面板靠它判断「能不能下载」。 */
 export interface TaskBundleInfo {
   exists: boolean
@@ -172,18 +183,31 @@ export interface TaskBundleInfo {
   bytes: number
   mtimeMs: number
   log: string
+  /** 人读的一行状态（含三态）；没有状态文件时也给出那句「不可知」。 */
+  statusLine: string
+  /** 结构化状态；`null` = 不可知。 */
+  status: TaskBundleExportStatus | null
 }
 
 export async function fetchTaskBundleInfo(course: string): Promise<TaskBundleInfo> {
   const r = await fetch(`/api/taskBundleInfo?course=${encodeURIComponent(course)}`)
   if (!r.ok) throw new Error(`/api/taskBundleInfo HTTP ${r.status}`)
   const d = (await r.json()) as Record<string, unknown>
+  const st = (d.status ?? null) as Record<string, unknown> | null
   return {
     exists: d.exists === true,
     name: typeof d.name === 'string' ? d.name : '',
     bytes: typeof d.bytes === 'number' ? d.bytes : 0,
     mtimeMs: typeof d.mtimeMs === 'number' ? d.mtimeMs : 0,
     log: typeof d.log === 'string' ? d.log : '',
+    statusLine: typeof d.statusLine === 'string' ? d.statusLine : '',
+    status: st
+      ? {
+          ok: st.ok === true,
+          reason: typeof st.reason === 'string' ? st.reason : '',
+          at: typeof st.at === 'number' ? st.at : 0,
+        }
+      : null,
   }
 }
 

@@ -207,11 +207,28 @@ _TASK_PACK_MISS_TRIGGERS: dict[str, dict[str, float]] = {}
 #: **自动交接**（claim 无包 ⇒ 翻 mode + 请控制台写 rl-config + 导包）用第三本账
 #: （2026-10-03，plan/auto-offline-handoff §3.1a/§3.1c）：云机的每次 claim 重试都会再问一次
 #: ⇒ 用节流 + 上界给云机一个明确的 `give_up`，避免「导出失败 → 无限 15s 轮询」。
-_TASK_AUTO_HANDOFF_TRIGGERS: dict[str, dict[str, float]] = {}
+#:
+#: ★ 2026-10-15（J3）：**值域从纯 float 扩到 `float | str`** —— 这本账现在还要缓存
+#: 「已知的导出失败原因」（`failed_reason`，给读面用）。它**不是**判据（判据是那份
+#: `export-status.json` 与它的 `at`）；只是免得每次 claim 都去问一遍控制台。
+_TASK_AUTO_HANDOFF_TRIGGERS: dict[str, dict[str, float | str]] = {}
 #: 两次自动交接触发的最小间隔（秒）。
 TASK_AUTO_HANDOFF_THROTTLE_SEC = 600.0
 #: 自动课 claim 遇缺包时、云机下一次重试的建议间隔（秒）——导出是分钟级，60s 量级查一次即可。
 TASK_AUTO_HANDOFF_RETRY_SEC = 60.0
+#: 控制台「导出成败」的**只读**动作路径（hub → 控制台；2026-10-15，J3 §3.3）。
+TASK_BUNDLE_STATUS_CONSOLE_PATH = "/api/taskBundleStatus"
+#: 已知一次**导出失败**之后，hub 多久内不再重复触发（秒；与导包窗同量级）。
+#:
+#: 为什么必须挂在这条**持久**证据上（评审 P1-6）：触发账本是**进程内**记忆，而
+#: `reset_auto_handoff_triggers` 在「换主 ∨ 超窗」时清零（`hub/queue_offline.py:1007`）
+#: ⇒「3 次用完就 give_up」在时间轴上不成立（每 900s 新窗口又能重试一次）——现场就演成
+#: 「一直在失败」（而失败确实在重复，只是没人知道）。窗口锚 = 那份状态的**写入时刻**
+#: （跨 hub 重启、与账本是否清零无关）。
+TASK_BUNDLE_FAILURE_WINDOW_SEC = 900.0
+#: 同一个导包窗口内，向控制台问状态的**最小间隔**（秒）：云机每 ~60s 重试一次 claim，
+#: 不限频就会每次去问一遍（而导出本身是分钟级的）。
+TASK_BUNDLE_STATUS_POLL_SEC = 60.0
 #: 连续触发上界：到顶仍无包 ⇒ 409 带 `give_up=true`（云机放弃该课，继续下一门）。
 TASK_AUTO_HANDOFF_TRIGGER_LIMIT = 3
 _TASK_PACK_LOCK = Lock()
@@ -435,13 +452,105 @@ def trigger_task_bundle_export(course: str, log=_hub_log) -> tuple[bool, str]:
     return True, "ok"
 
 
+def note_auto_handoff_failure(course: str, reason: str, at: float) -> None:
+    """记一次**已知的**导出失败（原因 + 那份状态的写入时刻）。
+
+    进程内只是缓存，**判据的权威在控制台那份 `export-status.json`**（它跨 hub 重启）；
+    这里存下来只是为了不必每次 claim 都去问一遍。
+    """
+    with _TASK_PACK_LOCK:
+        st = _TASK_AUTO_HANDOFF_TRIGGERS.setdefault(course, {"count": 0.0, "last": 0.0})
+        st["failed_at"] = float(at)
+        st["failed_reason"] = str(reason)[:400]
+
+
+def auto_handoff_failure(course: str) -> tuple[str, float]:
+    """读「已知的导出失败」`(原因, 写入时刻)`；没有 ⇒ `("", 0.0)`。"""
+    with _TASK_PACK_LOCK:
+        st = _TASK_AUTO_HANDOFF_TRIGGERS.get(course) or {}
+    return str(st.get("failed_reason", "")), float(st.get("failed_at", 0.0))
+
+
+def console_export_status(
+    course: str, *, log=_hub_log, timeout: float = TASK_PACK_TRIGGER_TIMEOUT_SEC
+) -> dict:
+    """问控制台「上次导出成没成」（**只读**动作，零副作用）。
+
+    返回 `{"unknown": True}`（不可知）/ `{"ok": bool, "reason": str, "at": float}`。
+    **不可知不是失败**：没写过状态（正在跑 / 被 kill / 旧版本）/ 控制台不可达 ⇒ 只回 unknown；
+    这条腿只负责「**知道**失败时少烧资源」，不负责把未知当失败。
+    """
+    base = os.environ.get(CONSOLE_URL_ENV, "").strip() or DEFAULT_CONSOLE_URL
+    body = json.dumps({"course": course}, ensure_ascii=False).encode("utf-8")
+    req = urllib.request.Request(
+        base.rstrip("/") + TASK_BUNDLE_STATUS_CONSOLE_PATH,
+        data=body,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with _net_urlopen(req, timeout=timeout) as resp:
+            parsed = json.loads(resp.read().decode("utf-8") or "{}")
+    except Exception as e:
+        log(f"export-status {course}: 控制台不可达/不接受（{type(e).__name__}）——视为不可知")
+        return {"unknown": True}
+    st = parsed.get("status") if isinstance(parsed, dict) else None
+    if not isinstance(st, dict):
+        # `status: null` = 还没写过状态文件（正在跑 / 被 kill / 旧版本）——不可知，**不是成功**。
+        return {"unknown": True}
+    return {
+        "ok": bool(st.get("ok")),
+        "reason": str(st.get("reason") or ""),
+        "at": float(st.get("at") or 0.0),
+    }
+
+
+def poll_console_export_status(
+    course: str, *, now: float | None = None, log=_hub_log
+) -> str:
+    """在「谁在导包」的窗口里问一次控制台：**限频** + **只认新失败**。
+
+    返回**新观察到的**失败原因（空 = 没新失败 / 不可知 / 被限频）。
+
+    「新」的判据 = 那份状态的写入时刻**不早于**我们上一次触发（`last`）——否则它属于上一轮
+    导出，拿它去归罪这一轮就是栽赃（与 P0-1 的「回灌腿」同族：时间锚写错，判据就会误伤）。
+    """
+    now = time.time() if now is None else float(now)
+    with _TASK_PACK_LOCK:
+        st = _TASK_AUTO_HANDOFF_TRIGGERS.get(course)
+        if st is None:
+            return ""  # 没触发过就没这条腿（读接口不该凭空向外发请求）
+        last = float(st.get("last", 0.0))
+        polled = float(st.get("polled_at", 0.0))
+        if polled and now - polled < TASK_BUNDLE_STATUS_POLL_SEC:
+            return ""
+        st["polled_at"] = now
+    got = console_export_status(course, log=log)
+    if got.get("unknown") or got.get("ok"):
+        return ""
+    at = float(got.get("at") or 0.0)
+    if at < last:
+        return ""  # 上一轮的失败：不归罪这一轮
+    reason = str(got.get("reason") or "导出进程失败（控制台日志末行有原因）")
+    note_auto_handoff_failure(course, reason, at)
+    log(f"export-status {course}: 控制台报**导出失败**：{reason}")
+    return reason
+
+
 def auto_handoff_decision(course: str, *, now: float | None = None) -> str:
-    """自动交接该不该再触发控制台（**纯函数**）：`trigger` / `throttled` / `give_up`。"""
+    """自动交接该不该再触发控制台（**纯函数**）：
+    `trigger` / `throttled` / `give_up` / `failed`（已知导出失败，窗口内不再重试）。"""
     now = time.time() if now is None else float(now)
     with _TASK_PACK_LOCK:
         st = _TASK_AUTO_HANDOFF_TRIGGERS.get(course)
         count = int(float(st.get("count", 0.0))) if st else 0
         last = float(st.get("last", 0.0)) if st else 0.0
+        failed_at = float(st.get("failed_at", 0.0)) if st else 0.0
+    # ★ 2026-10-15（J3）：**已知失败**优先于计数 —— 再触发一万次也还是同一个静态拒因
+    #   （iters / 上界 / 无起点权重），而每次触发都会烧一次 code-snapshot 与一次 git push。
+    #   窗口锚是那份状态的写入时刻（持久），不是进程内计数（重启即清零）。
+    if failed_at and now - failed_at < TASK_BUNDLE_FAILURE_WINDOW_SEC:
+        return "failed"
     if count >= TASK_AUTO_HANDOFF_TRIGGER_LIMIT:
         return "give_up"
     if last and now - last < TASK_AUTO_HANDOFF_THROTTLE_SEC:

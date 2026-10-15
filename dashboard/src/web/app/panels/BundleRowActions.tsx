@@ -133,6 +133,14 @@ export function BundleRowActions({ course }: BundleRowActionsProps) {
       >
         {busy === 'export' ? '导出中…' : '导出任务包'}
       </button>
+      {info?.status && !info.status.ok ? (
+        // ★ 2026-10-15（J3，plan/offline-open-ended-iters-and-loud-export §3.3）：**上次导出失败**
+        //   必须在行上看得见。旧读面里每一方都在演「成功」（面板说「产物将落在 …」、
+        //   hub 说「已触发」），而失败证据只留在日志末行、没有任何一方读它。
+        <span className="tc-badge tc-badge--r" title={info.statusLine || info.status.reason}>
+          上次导出失败 · {info.status.reason || '见日志'}
+        </span>
+      ) : null}
       {info?.exists ? (
         <span className="tc-mx__bundleinfo" title={`${fmtBytes(info.bytes)} · ${info.log ?? ''}`}>
           <span className="tc-caption">{fmtBytes(info.bytes)}</span>

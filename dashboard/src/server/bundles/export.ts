@@ -21,7 +21,12 @@ import {
 } from 'fs'
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
-import { bundleMetaMagic, bundleMetaSuffix } from './marks'
+import {
+  bundleMetaMagic,
+  bundleMetaSuffix,
+  taskBundleStatusFileName,
+  taskBundleStatusMagic,
+} from './marks'
 import { pidAlive, sleep } from '../../core/net'
 import { courseLogDir } from '../../stack/specs'
 import { busy, release } from '../actions/result'
@@ -56,6 +61,81 @@ export function taskBundleLogPath(course: string): string {
  */
 export function taskBundleMetaPath(course: string): string {
   return `${taskBundlePath(course)}${bundleMetaSuffix}`
+}
+
+/** 导出**成败状态**的旁挂件名与落点（与包**同目录**：`tmp/<课程>/export-status.json`）。
+ *
+ *  跨语言契约：python 侧 `remote/bundle.py::EXPORT_STATUS_NAME` / `export_status_path()`
+ *  （同一个进程在**退出层**原子写：临时文件 + `replace`）；`tests/auto-offline-handoff.test.ts`
+ *  读 python 源对账（与 `BUNDLE_META_SUFFIX` 同一手法），防两边写岔。
+ *
+ *  为什么必须由 python 侧落盘（2026-10-15，plan/offline-open-ended-iters-and-loud-export §3.3 J3）：
+ *  导出是 **detached 子进程**（`core/proc.ts` 的 `detached + unref`）⇒ 控制台**拿不到退出码**；
+ *  且控制台重启后子进程仍在跑 ⇒ 内存状态不可靠。落盘是唯一跨重启的锚。
+ *
+ *  落点用 `path.dirname(taskBundlePath(course))` 而不是自己拼 `tmp/<课>/`：与 python 的
+ *  `Path(out).parent`（`out` = `--export-bundle` 的取值）**同源**，包搬到别处时不会分家。
+ */
+export function taskBundleStatusPath(course: string): string {
+  return path.join(path.dirname(taskBundlePath(course)), taskBundleStatusFileName)
+}
+
+/** 状态文件的形状（python 写全量，控制台只读这几项）。 */
+export interface TaskBundleStatus {
+  /** `true` = 这次导出真的产出了包；`false` = 失败（`reason` 就是原因）。 */
+  ok: boolean
+  exitCode: number
+  /** **第一手**的原因（写它的人就是那个进程）。控制台的 `tailFailureReason` 只当没有状态文件时的兜底。 */
+  reason: string
+  /** 写入时刻（epoch 秒）：hub 用它当「不再重试」的窗口锚（进程内计数会随重启清零）。 */
+  at: number
+  iters: number
+  runIters: number
+  pid: number
+}
+
+/** 读导出状态（没有 / 坏 JSON / 魔数不符 ⇒ `null`，**永不抛**）。
+ *
+ *  `null` = **不可知**（还没跑完 / 被 kill / 旧版本），不是成功——调用方必须把这两件事分开说。
+ */
+export function readTaskBundleStatus(course: string): TaskBundleStatus | null {
+  let raw: string
+  try {
+    raw = readFileSync(taskBundleStatusPath(course), 'utf-8')
+  } catch {
+    return null
+  }
+  try {
+    const parsed: unknown = JSON.parse(raw)
+    if (!parsed || typeof parsed !== 'object') return null
+    const j = parsed as Record<string, unknown>
+    if (j.magic !== taskBundleStatusMagic) return null
+    return {
+      ok: j.ok === true,
+      exitCode: Number(j.exit_code ?? 0) || 0,
+      reason: String(j.reason ?? '').slice(0, 600),
+      at: Number(j.at ?? 0) || 0,
+      iters: Number(j.iters ?? 0) || 0,
+      runIters: Number(j.run_iters ?? 0) || 0,
+      pid: Number(j.pid ?? 0) || 0,
+    }
+  } catch {
+    return null
+  }
+}
+
+/** 一行**可读**的导出状态（面板与 hub 共用同一句口径）。
+ *
+ *  三态必须分开说：`null` = **不可知**（不是成功）。这是「失败要响亮」那条口径的落点
+ *  ——旧读面在失败时每一方都在演「成功」（面板说「产物将落在 …」、hub 说「已触发」）。
+ */
+export function exportStatusLine(course: string): string {
+  const status = readTaskBundleStatus(course)
+  if (!status) return '导出状态：尚无记录（还没跑完 / 被 kill / 旧版本）——不可知，不等于成功'
+  const when = status.at > 0 ? new Date(status.at * 1000).toLocaleString() : '时间未知'
+  return status.ok
+    ? `上次导出成功（exit ${status.exitCode}，课程 iters=${status.iters}，${when}）`
+    : `上次导出失败：${status.reason || `exit ${status.exitCode}`}（${when}）`
 }
 
 /** 旁挂元数据的形状（只有判据要的字段；python 写全量，控制台只读这几项）。 */

@@ -58,6 +58,8 @@ import {
   CODE_SNAPSHOT_MAGIC,
   CODE_SNAPSHOT_PROTO,
   bundleMetaMagic,
+  taskBundleStatusMagic,
+  taskBundleStatusFileName,
   codeSnapshotDir,
   codeSnapshotMetaPath,
   newestCodeMtimeMs,
@@ -68,6 +70,9 @@ import {
   taskBundleMeta,
   taskBundleMetaPath,
   taskBundlePath,
+  readTaskBundleStatus,
+  exportStatusLine,
+  taskBundleStatusPath,
 } from '../src/server/bundles'
 
 /** 假课程名：进的是仓 `tmp/` 之下，必须一眼看出是测试残留（收尾删整目录）。 */
@@ -385,7 +390,17 @@ describe('代码新鲜度扫描（与 python 打包器逐名对账）', () => {
     const py = readFileSync(path.join(REPO_ROOT, 'nn-training/remote/hub_client.py'), 'utf-8')
     const i = py.indexOf('def pack_code_zip')
     expect(i).toBeGreaterThan(0)
-    const body = py.slice(i, i + 3000) // 打包器的规则区（含「包含/排除」注释与名单）
+    // 区间 = **整个函数体**（到下一个顶层 `def` / `async def`），不是一个写死的字数窗口。
+    //
+    // ★ 2026-10-15 修（原先写 `py.slice(i, i + 3000)`，并注为「规则区」）：窗口是一条**会过期**
+    //   的锚——`eb26884b`（2026-10-14 离线宽度/代码权威腿）把该函数的 docstring 加长后，
+    //   排除名单被推到 3000 字之外，这条用例在 HEAD 上**已经是红的**（与本次改动无关）；
+    //   而它实际想判的是「这两个名单能在打包器的**规则区**里逐个找到」——那是整个函数体的事，
+    //   不是某 3000 个字的事。改后判据更强（覆盖面只增不减），也不再会因注释变长而假红。
+    const rest = py.slice(i)
+    const end = rest.slice(1).search(/\n(?:async )?def /)
+    const body = end < 0 ? rest : rest.slice(0, end + 1)
+    expect(body).toContain('def pack_code_zip')
     for (const name of [...CODE_EXCLUDE_DIRS, ...CODE_EXCLUDE_FILES]) {
       expect(body).toContain(`"${name}"`)
     }
@@ -521,6 +536,64 @@ describe('集群快照读取 / 旁挂元数据', () => {
     }
   })
 
+  it('导出状态三态：没有文件 = 不可知（**不是**成功）；失败带第一手原因', () => {
+    // 为什么三态必须是三个值（2026-10-15，J3）：旧读面把「还没跑完」「被 kill」「失败」
+    // 全折进同一个「没什么好看的」——于是失败看起来与成功无别。
+    const wipe = (): void => rmSync(taskBundleStatusPath(WITH_PACK), { force: true })
+    mkdirSync(tmpCourseDir(WITH_PACK), { recursive: true }) // 假课目录（收尾随 FAKE_COURSES 一起删）
+    wipe()
+    // ① 不可知
+    expect(readTaskBundleStatus(WITH_PACK)).toBeNull()
+    expect(exportStatusLine(WITH_PACK)).toContain('不可知')
+    try {
+      // ② 失败（原因就是那个进程手上的异常原文）
+      writeFileSync(
+        taskBundleStatusPath(WITH_PACK),
+        JSON.stringify({
+          magic: 'battle2-export-status',
+          proto: 1,
+          ok: false,
+          exit_code: 1,
+          reason: 'SystemExit: [run_rl] --export-bundle 需要 --run-iters 说明整段长度',
+          iters: 0,
+          run_iters: 0,
+          pid: 4242,
+          at: 1_800_000_000,
+        }),
+        'utf-8',
+      )
+      const st = readTaskBundleStatus(WITH_PACK)
+      expect(st?.ok).toBe(false)
+      expect(st?.exitCode).toBe(1)
+      expect(st?.reason).toContain('--run-iters')
+      expect(exportStatusLine(WITH_PACK)).toContain('上次导出失败')
+      // 魔数不符 ⇒ 当它不存在（不猜、不迁移）——半写的/别的工具产的文件不得当成真状态
+      writeFileSync(
+        taskBundleStatusPath(WITH_PACK),
+        JSON.stringify({ magic: 'other', ok: true }),
+        'utf-8',
+      )
+      expect(readTaskBundleStatus(WITH_PACK)).toBeNull()
+      // ③ 成功
+      writeFileSync(
+        taskBundleStatusPath(WITH_PACK),
+        JSON.stringify({
+          magic: 'battle2-export-status',
+          ok: true,
+          exit_code: 0,
+          reason: '',
+          at: 1_800_000_000,
+          iters: 0,
+        }),
+        'utf-8',
+      )
+      expect(readTaskBundleStatus(WITH_PACK)?.ok).toBe(true)
+      expect(exportStatusLine(WITH_PACK)).toContain('上次导出成功')
+    } finally {
+      wipe()
+    }
+  })
+
   it('跨语言契约：后缀/魔数与 `remote/bundle.py` 同表（读 python 源对账）', () => {
     const py = readFileSync(path.join(REPO_ROOT, 'nn-training/remote/bundle.py'), 'utf-8')
     expect(py).toContain('BUNDLE_META_SUFFIX = ".meta.json"')
@@ -528,6 +601,17 @@ describe('集群快照读取 / 旁挂元数据', () => {
     // 落点规则必须是「包路径 + 后缀」（两边都得能从包路径推出旁挂件路径）
     expect(py).toContain('def bundle_meta_path')
     expect(py).toContain('Path(str(out_zip) + BUNDLE_META_SUFFIX)')
+    // 导出**成败状态**旁挂件（2026-10-15，plan/offline-open-ended-iters-and-loud-export §3.3 J3）：
+    // 导出是 detached 子进程（控制台拿不到退出码）⇒ 成败只能由那个进程自己落盘。
+    expect(py).toContain('EXPORT_STATUS_NAME = "export-status.json"')
+    expect(py).toContain('EXPORT_STATUS_MAGIC = "battle2-export-status"')
+    expect(py).toContain('def export_status_path')
+    expect(taskBundleStatusFileName).toBe('export-status.json')
+    expect(taskBundleStatusMagic).toBe('battle2-export-status')
+    // 落点必须与 python 同源（python: `export_status_path(Path(out).parent)`；这里是包的同目录）
+    expect(taskBundleStatusPath(WITH_PACK)).toBe(
+      path.join(path.dirname(taskBundlePath(WITH_PACK)), 'export-status.json'),
+    )
     // 控制台的「当前快照 sha」读的是同一份元数据（python: code_snapshot.SNAPSHOT_MAGIC）
     const csSrc = readFileSync(path.join(REPO_ROOT, 'nn-training/remote/code_snapshot.py'), 'utf-8')
     expect(csSrc).toContain('SNAPSHOT_MAGIC = "battle2-code-snapshot"')
