@@ -6,6 +6,100 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §96 离线包的**无限轮**与导出**成败**：开区间段 + `export-status.json`（2026-10-15，`plan/offline-open-ended-iters-and-loud-export.plan.md` v2 · 评审 `plan/offline-open-ended-iters-and-loud-export.review-bf.md`（含勘误） · 决策 `DECISIONS.md` §2026-10-15-goalnn-offline-open-ended-segment 与 §2026-10-15-goalnn-offline-export-status）
+
+**用户报障**（2026-10-14，两条）：「hub 导出 y5-hit / y5-hit2 的任务包一直失败」→「y5-hit2 改成
+`"iters": 2000` 还是失败！」。用户口径 = **「① 离线包应支持 iters 0（无限轮）；② 导出离线包失败
+应响亮报错」**。同门课三次尝试、**四个**拒因（第三个是 `--run-iters` 的段长闸），共因是「把课程预算
+`iters` 直接当成计划的**唯一**终点」。
+
+### ① 无限轮 = 开区间段（J1，已落地）
+
+`iters <= 0 = 无限` **不是新概念**：`worker/cli.py` 的 `--iters` help 原文就是
+`0 = infinite (stop via --max-hours or Ctrl-C)`，`loop_lifecycle.py:372` 的
+`while args.iters <= 0 or it < args.iters` 同一口径 —— 旧代码只是**导出侧不认**它。
+
+定案：包变成**开区间段** —— `end_it = it + 段长`（段长 = `max_iters>0` ? `max_iters` : 硬上界 500）、
+`plan.open_ended = true`，而 **`plan.iters_total` 保持 0 原值**（把它改写成段末，云机就会把**段末当课末**）。
+三处导出闸放行（启动期 `loop_lifecycle.export_refusal` / 轮内 `loop_export._export_offline_bundle` /
+`loop_round_steps` 的**段长**闸——第三条管的是 `--run-iters`，J1 之后**仍然有效**）。
+硬上界 `RUN_MAX_ITERS_HARD_CAP=500` **值不动**，角色从「拒导闸」变成「段长」。
+
+豁免**带收紧**：`open_ended` 只在 `iters_total <= 0` 时免查「`end_it` 不得越过课程预算」——否则
+一份 `open_ended=true ∧ iters_total=2000 ∧ end_it=2500` 的（写错/伪造的）计划能越过课程预算。
+
+⚠ **新键会改身份**：`plan_fp` / `plan_sha256` 是**规范化 JSON 的 sha（不排除任何字段）**⇒ 对**校验**
+向后兼容（未知字段忽略），对**身份面不透明**。这正是段滚动要的「必换包」。有限模式的算术与包内容
+**逐字节不变**。
+
+现场读法：包内 `plan.json` 看到 `open_ended: true` + `iters_total: 0` ⇒ 本段是开区间段；
+日志会出现 `[run_rl] 课程声明 iters<=0（无限）——导出**开区间段**：终点由段长定`。
+
+### ② 导出成败的权威落点（J3，已落地）
+
+**为什么要落到盘上**：控制台起导出是 **detached 子进程**（`dashboard/src/core/proc.ts` 的 `spawnBg`：`detached: true` `:45` + `proc.unref()` `:50`）
+⇒ **拿不到退出码**；控制台重启后子进程仍在跑 ⇒ 内存状态不可靠。于是每一方都在演「成功」：
+面板说「产物将落在 …」、hub 的自动交接拿 `ok:true`、hub 的触发账本只判 HTTP 码、束末告警只会说
+`pending-export` —— 而失败证据只留在 `tmp/<课>/export-bundle.log` 的末行，**没有任何一方读它**
+（代价：每次触发白烧一次 code-snapshot + 一次 `git push`）。
+
+**落点与写点**（`tmp/<课>/export-status.json`）：
+
+| 面 | 口径 |
+|---|---|
+| 落点 | **与包同目录**（python `Path(out).parent` ↔ TS `path.dirname(taskBundlePath(课))`）；名字/魔数逐字对账（`EXPORT_STATUS_NAME`/`EXPORT_STATUS_MAGIC` ↔ `taskBundleStatusFileName`/`taskBundleStatusMagic`） |
+| 写点 | **进程退出层**（`trainer/run_rl.py` 的 `with export_status_guard(args):`）——**不是**包住那两处 `raise SystemExit`：轮内的 `ProtocolError` 要同轮重试 5 次（~150s）才退，包住 `raise` 会漏掉那条**真实**失败路径 |
+| 写法 | 每次尝试**覆盖写** + 临时文件 + `replace`（末次即真值）；**成功也写**；写不下只降级（返回 `None`、不抛） |
+| `reason` | **第一手**（那个进程手上的异常原文）；控制台读日志尾的 `tailFailureReason` 降为「找不到状态文件」（被 kill / OOM）时的兜底 |
+
+**三态是全部要害**：`status === null`（没写过）= **不可知，不是成功**。读面：
+`GET /api/taskBundleInfo` 的 5s 轮询多带 `statusLine` + `status`（不另起通道）；课程行上亮红徽标
+「上次导出失败 · <原因>」；`POST /api/taskBundleStatus` 是**只读**动作（`READONLY_ACTIONS` +
+`VIEW_ONLY_ACTIONS`）供 hub 问；导出回执从「产物将落在 …」改成「**成败待定**」。
+
+**hub 侧：不再盲重试**。`poll_console_export_status()` 在**导包窗**里（云机每 ~60s 重试 claim 那条路）
+**限频 60s** 问一次，且**只认「新」失败**（那份状态的 `at` 不早于我们上一次触发——否则它属于上一轮，
+拿它归罪这一轮是栽赃）。已知失败 ⇒ `auto_handoff_decision` 直接回 **`failed`**，409 带
+`give_up=true` + `export_failed=true` + **真因**，窗口 `TASK_BUNDLE_FAILURE_WINDOW_SEC=900`；
+**窗口锚是那份状态的写入时刻（持久）**，不是进程内计数——触发账本会被 `reset_auto_handoff_triggers`
+在「换主 ∨ 超窗」时清零，所以「3 次用完就 give_up」在时间轴上不成立，现场正是这么演成「一直在失败」的。
+**不可知不是失败**：控制台不可达 / 旧版本 ⇒ 结论一字不变。
+
+**现场四步读法**（人问「这门课的包到底怎么了」时）：
+1. 面板课程行：红徽标「上次导出失败 · <原因>」⇒ 看 `<原因>`；没徽标但也没包 ⇒ 看 `tmp/<课>/export-status.json`
+   在不在（**不在 = 不可知**：还没跑完 / 被 kill / 旧版本）；
+2. 那份 JSON 的 `ok` / `exit_code` / `reason` / `iters` / `run_iters`：`ok:false` 就是**导出进程自己
+   写的失败原因**（不是猜的）；
+3. 日志 `tmp/<课>/export-bundle.log` 末行（`tailFailureReason` 的兜底口径）；
+4. hub 侧：`/offline/claim` 的 409 正文 `trigger_note` / `export_failed` ——**云机看到的就是这一行**。
+
+**守卫**：`tests/worker/test_plan.py`（开区间段 / 有限模式逐字节不变 / 豁免收紧三档）·
+`tests/trainer/test_offline_leg_retired.py`（三处导出闸放行）· `tests/trainer/test_loop_export_split.py`
+（轮内闸）· `tests/remote/test_export_status.py`（写面 / 三态 / 覆盖写）·
+`dashboard/tests/auto-offline-handoff.test.ts`（hub 限频 60s + 只认新失败 + 不可知不是失败）。
+
+### 尚未落地（另一半，见 plan §4 的 B/D 腿）
+
+- **J2（段末自动滚）**：段末判据必须是**三态**（无限 / 有限且触及预算 / 有限部分段），不是
+  「`end_it_reached ∧ not open_ended`」；盖章**照旧**（`completed_pack_sha` 是「这份包别再发了」的唯一机制），
+  由**事件驱动**出下一段。**承重腿 = 回灌**（下一段的 `plan.start_it` 只能等于**导出机**的 `last_it`，
+  而本机账本今天只有**人手动「导入产物」**一条前进通道）。在此之前「无限轮」是**半自动**：段末仍需
+  人导入产物 + 重新导出。
+- **J4（静态拒因前置）**：把「无剩余轮次 / 轮数 > 硬上界」这类不需要真导出就能判的门搬到控制台侧
+  （点下去那一刻就拒，不 spawn、不烧 code-snapshot、不 push）。依赖 J1（已满足），但要先重建 ★M4 删掉的
+  `declaredCourseIters()`（D14 口径）。
+
+### 诚实账
+
+- 比 `run_training` 更早的启动期拒因（课程未开课 / `--course` 与 CLI 冲突）**不进**状态文件 —— 那条路
+  靠 `tailFailureReason` 读日志尾兜底；被 SIGKILL/OOM 的导出不会写；状态文件是**最后一次尝试**的事实
+  （反复失败只留最后一条原因）。
+- 评审 P0-4 的「落点写错」那条**是错的**（实测 `LOG_DIR = REPO_ROOT/tmp` ⇒ `courseLogDir(课)` 就是
+  `tmp/<课>/`，v1 原稿本来就对）；勘误已追加进评审文件末节。
+- **顺手修了一处既有红**：`test/auto-offline-handoff` 的「排除表与 `pack_code_zip` 对账」用写死的
+  `py.slice(i, i + 3000)` 窗口，`eb26884b` 把 docstring 加长后排除名单已在窗口外 ⇒ **HEAD 上那条用例
+  本来就是红的**（与本次改动无关）。改成「整个函数体」，覆盖面只增不减。
+
 ## §95 离线段的两条命：本地盘优先的产物根 + 网络盘 `backup/` 备份抽屉与恢复腿（2026-10-14，`plan/offline-local-disk-first.plan.md` · 决策 `DECISIONS.md` §2026-10-14-goalnn-offline-local-disk-first{-b,-c,-d}）
 
 **触发**：云机自主 worker `y5-hit` 02:48:49 → 02:51:08 **卡 139s**（整轮零日志、cpu 只 +0.91s）：
