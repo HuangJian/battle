@@ -88,14 +88,19 @@ def _post(base: str, path: str, body: dict) -> tuple[int, bytes]:
 
 
 def _round(dir_: Path, it: int, *, parts: tuple[str, ...] = ("weights.json", "opt.tar", "row.json")) -> Path:
-    """造一轮产物（三件齐全；`parts` 用来故意缺件）。"""
+    """造一轮产物（三件齐全；`parts` 用来故意缺件、或换成压缩版名 `weights.delta`/`opt.delta`）。"""
     d = dir_ / f"it-{it:03d}"
     d.mkdir(parents=True, exist_ok=True)
     blob = f'{{"w":{it}}}'.encode()
     if "weights.json" in parts:
         (d / "weights.json").write_bytes(blob)
+    if "weights.delta" in parts:  # 压缩版：头 4 字节是容器魔数（读侧据此判形）
+        blob = b"BWD1" + f'{{"w":{it}}}'.encode()
+        (d / "weights.delta").write_bytes(blob)
     if "opt.tar" in parts:
         (d / "opt.tar").write_bytes(b"opt")
+    if "opt.delta" in parts:
+        (d / "opt.delta").write_bytes(b"BOD1opt")
     if "row.json" in parts:
         import hashlib
 
@@ -190,8 +195,12 @@ def test_resume_endpoints_serve_meta_then_the_whitelisted_blobs(tmp_path: Path) 
         # 白名单：不许借名读别的文件（路径穿越在这里被断掉）
         st_bad, _ = _get(base, f"{OFFLINE_RESUME_BLOB_PATH}?course={COURSE}&it=3&name=../../etc/passwd")
         assert st_bad == 400
-        # 不是当前锚点的 it ⇒ 409（响亮：锚点可能已被更新的轮次取代）
-        st_old, body_old = _get(base, f"{OFFLINE_RESUME_BLOB_PATH}?course={COURSE}&it=2&name=weights.json")
+        # 不是当前锚点的 it ⇒ 409（响亮：锚点可能已被更新的轮次取代）——
+        # ★ 2026-10-15 用户口径：锚点**只发整份**，端点也不再服务「链上更早的轮」（delta 只在
+        #   「回传进程 + hub 落地器」之间流转，hub 树里剩下的就是整份）。
+        st_old, body_old = _get(
+            base, f"{OFFLINE_RESUME_BLOB_PATH}?course={COURSE}&it=2&name=weights.json"
+        )
         assert st_old == 409 and b"anchor_it" in body_old
         # 未知课程 ⇒ 404；未鉴权 ⇒ 401
         assert _get(base, f"{OFFLINE_RESUME_PATH}?course=nope")[0] == 404
@@ -203,6 +212,55 @@ def test_resume_endpoints_serve_meta_then_the_whitelisted_blobs(tmp_path: Path) 
             base, f"{OFFLINE_RESUME_PATH}?course={COURSE}&it=3&name=weights.json"
         )
         assert st_name == 400 and b"resume/blob" in body_name, (st_name, body_name[:200])
+    finally:
+        srv.shutdown()
+
+
+def test_resume_anchor_skips_rounds_that_are_still_delta_containers(tmp_path: Path) -> None:
+    """★ 2026-10-15（用户口径）：锚点**只发整份** —— 还是容器的轮次退到更早的整份轮。
+
+    为什么：delta 只在「回传进程 + hub 落地器」之间流转（hub 受理时就地重建），客户机没有
+    链可解 ⇒ 把一份 `.delta` 当锚点交回去，只会让它在 PPO 之前 `JSON.parse` 报 `BWD1`。
+    还是容器的轮次 = 「hub 落地失败过」（基准不在 hub 侧）——交给人工/清扫工具，不往云机递。
+    """
+    base, hub, srv = _boot(tmp_path)
+    try:
+        run = tmp_path / COURSE / "remote-jobs" / "offline" / "run-a"
+        _round(run, 1)  # 整份轮（可当锚点）
+        _round(run, 2, parts=("weights.delta", "opt.delta", "row.json"))  # 容器轮
+        anchor = hub.resume_anchor(COURSE)
+        assert anchor is not None and anchor["it"] == 1, anchor
+        assert anchor["files"] == {
+            "weights": "weights.json",
+            "opt": "opt.tar",
+            "row": "row.json",
+        }
+        # 递出去的整份：指纹 = 它自己的字节地址（客户端拿它判传输损坏）
+        import hashlib
+
+        raw = (run / "it-001" / "weights.json").read_bytes()
+        assert anchor["weights_fp"] == hashlib.sha256(raw).hexdigest()
+        status, meta_raw = _get(base, f"{OFFLINE_RESUME_PATH}?course={COURSE}")
+        assert status == 200
+        assert json.loads(meta_raw.decode("utf-8"))["resume"]["it"] == 1
+        # 只有整份轮能被递给端点（容器轮既不是锚点 ⇒ 409）
+        st_ok, body_ok = _get(
+            base, f"{OFFLINE_RESUME_BLOB_PATH}?course={COURSE}&it=1&name=weights.json"
+        )
+        assert st_ok == 200 and body_ok == raw
+        st_d, _ = _get(base, f"{OFFLINE_RESUME_BLOB_PATH}?course={COURSE}&it=2&name=weights.delta")
+        assert st_d == 400  # 白名单只有整份三件：`.delta` 在入口就被拒（连拿都拿不到）
+    finally:
+        srv.shutdown()
+
+
+def test_resume_anchor_is_none_when_every_round_is_a_delta_container(tmp_path: Path) -> None:
+    """整棵树只剩容器（旧数据、还没清扫）⇒ 没有可交回的进度（退回包自带起点，响亮）。"""
+    base, hub, srv = _boot(tmp_path)
+    try:
+        run = tmp_path / COURSE / "remote-jobs" / "offline" / "run-a"
+        _round(run, 5, parts=("weights.delta", "opt.delta", "row.json"))
+        assert hub.resume_anchor(COURSE) is None
     finally:
         srv.shutdown()
 

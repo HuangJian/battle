@@ -31,6 +31,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import remote.delta_files as delta_files
 from common.cli import house_parser, run_main
 from common.protocol import ProtocolError, RetryableError, normalize_manifest
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
@@ -248,6 +249,11 @@ def apply_resume_overlay(ctx: RunContext, resume_dir: str | Path | None) -> int:
     存在只是「Adam 动量归零」的小代价，但把它当成续跑锚点会与「同轮齐全」的语义不符
     （用户 2026-09-22 口径：必须同轮齐全，否则退到更早轮）。
 
+    **拿到的就是整份**（2026-10-15 用户口径：delta 只活在「回传进程 + hub 落地器」之间）：
+    hub 受理回传时就地落地（`hub/deltas.py`），锚点也只交整份轮次。这里仍**两态找件**：
+    `*.delta` 是「hub 侧落地失败过」的旧数据，认出来就当场响亮拒绝（把容器写进产物目录
+    只会让下一轮在 PPO 之前 `JSON.parse` 报 `BWD1`）。
+
     守卫（任一不满足就**忽略锚点并响亮记一笔**，绝不因此让整段跑不起来）：
       * `resume.json` 里权重指纹与实际字节相符（传输损坏不得进产物目录）；
       * 锚点轮比产物当前的 `last_it` **更新**（更旧/同轮 = 没东西可接）；
@@ -267,22 +273,41 @@ def apply_resume_overlay(ctx: RunContext, resume_dir: str | Path | None) -> int:
     except (OSError, ValueError, KeyError, TypeError) as e:
         ctx.log(f"续跑锚点元信息不可读（{type(e).__name__}: {e}）——忽略")
         return 0
-    src_w = d / f"{ArtifactStore.IT_PREFIX}{it:03d}" / "weights.json"
-    src_opt = d / f"{ArtifactStore.IT_PREFIX}{it:03d}" / "opt.tar"
-    src_row = d / f"{ArtifactStore.IT_PREFIX}{it:03d}" / "row.json"
-    if not src_w.is_file():
-        ctx.log(f"续跑锚点 it{it} 缺权重文件（{src_w}）——忽略")
+    rdir = d / f"{ArtifactStore.IT_PREFIX}{it:03d}"
+    row_p = rdir / "row.json"
+    # 两态找件（`weights.json`/`weights.delta`、`opt.tar`/`opt.delta`）：hub 现在只交整份
+    # （`weights.json`），`.delta` 是"落地失败"的旧数据——两态都看一眼才能把它认出来并响亮拒绝，
+    # 而不是把一份解不开的字节当权重写进产物目录。
+    declared = {want_fp} if want_fp else set()
+    wfiles = [p for p in (rdir / n for n in delta_files.variants("weights.json")) if p.is_file()]
+    if not wfiles:
+        ctx.log(f"续跑锚点 it{it} 缺权重文件（{rdir}/weights[.delta]）——忽略")
         return 0
+    src_w = next((p for p in wfiles if sha256_file(p) in declared), None) or wfiles[0]
     got_fp = sha256_file(src_w)
-    if want_fp and got_fp != want_fp:
+    if declared and got_fp not in declared:
         ctx.log(
-            f"续跑锚点 it{it} 权重指纹不符（声明 {want_fp[:16]}… 实得 {got_fp[:16]}…）"
+            f"续跑锚点 it{it} 权重指纹不符（声明 {sorted(declared)[0][:16]}… 实得 {got_fp[:16]}…）"
             "——忽略（传输损坏）"
         )
         return 0
+    src_opt = delta_files.find_existing(rdir, "opt.tar")
+    if delta_files.any_container_file(src_w):
+        # 只见于「hub 侧落地失败过」的旧数据：delta 只活在「回传进程 + hub 落地器」之间，
+        # 客户机没有链可解 ⇒ 把容器写进产物目录只会让下一轮在 PPO 之前死。响亮放弃这个锚点。
+        ctx.log(
+            f"续跑锚点 it{it} 的权重还是 delta 容器（hub 侧落地失败过的旧数据）"
+            "——忽略该锚点（退回包自带起点）"
+        )
+        return 0
+    w_bytes = src_w.read_bytes()
+    landed_fp = sha256_bytes(w_bytes)
     st = ctx.store.read_state() or {}
     cur = int(st.get("last_it", ctx.plan["start_it"]))
-    same = ctx.store.weights_path(it).is_file() and sha256_file(ctx.store.weights_path(it)) == got_fp
+    same = (
+        ctx.store.weights_path(it).is_file()
+        and sha256_file(ctx.store.weights_path(it)) == landed_fp
+    )
     if cur >= it:
         # `same` 时就是幂等重入（会话重启又领到同一个锚点）——不是异常，安静跳过。
         ctx.log(
@@ -292,21 +317,28 @@ def apply_resume_overlay(ctx: RunContext, resume_dir: str | Path | None) -> int:
             + ("" if same else "；若这不是预期，检查 hub 侧锚点与产物目录是否同一课程")
         )
         return 0
-    if same and src_opt.is_file():
+    if same and src_opt is not None:
         ctx.log(f"续跑锚点 it{it} 的权重已在产物里（指纹相同）——只补状态")
     row: dict | None = None
-    if src_row.is_file():
+    if row_p.is_file():
         try:
-            loaded = json.loads(src_row.read_text(encoding="utf-8"))
+            loaded = json.loads(row_p.read_text(encoding="utf-8"))
             row = loaded if isinstance(loaded, dict) else None
         except (OSError, ValueError):
             row = None
     opt_raw = b""
-    if src_opt.is_file():
-        opt_raw = src_opt.read_bytes()
+    if src_opt is not None:
+        if delta_files.any_container_file(src_opt):
+            # 同上（旧数据）：整份 tar 缺席 ⇒ 只丢动量，不动权重。
+            ctx.log(
+                f"WARN: 续跑锚点 it{it} 的 opt 还是 delta 容器（hub 侧落地失败过的旧数据）"
+                "——Adam 动量从头（其余照常）"
+            )
+        else:
+            opt_raw = src_opt.read_bytes()
     if not opt_raw:
         ctx.log(f"WARN: 续跑锚点 it{it} 没有 opt.tar——Adam 动量从头（其余照常）")
-    ctx.store.checkpoint(it, weights_json=src_w.read_bytes(), opt_tar=opt_raw, row=row)
+    ctx.store.checkpoint(it, weights_json=w_bytes, opt_tar=opt_raw, row=row)
     # ★ 2026-10-04：锚点的 opt 字节只落进产物目录还不算数——合成轮（`plan_run._run_iteration`
     #   的 `run_job("", "")`）解析 opt 时只认 `blob_cache/<sha>`（cache / preloaded / download），
     #   留在 `it-{n}/opt.tar` 就是每轮 miss ⇒ 向空 base_url 发 GET（unknown url type，整段失败）。

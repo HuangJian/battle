@@ -27,8 +27,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-#: 本文件的父目录的上一级 = `nn-training/`（子进程的全部可见面）。
-ROOT = Path(__file__).resolve().parents[1]
+#: 子进程的全部可见面 = `nn-training/`（`parents[2]`：本文件在 `nn-training/tests/remote/` 下）。
+#: ⚠ 不能写 `parents[1]`：那是 `nn-training/tests/`，而它下面也有一个 `tests/hub/` 包 ⇒ PYTHONPATH
+#: 会把真 `hub` 遮住，子进程报「No module named 'hub.server'」（测试恒红，与 hub 的 import 图无关）。
+ROOT = Path(__file__).resolve().parents[2]
 
 #: 子进程里跑：把重依赖悬空，再拉整个 hub 入口（hub → boot → http_face → queue →
 #: queue_observe → code_snapshot → hub_client 这条真实链）。

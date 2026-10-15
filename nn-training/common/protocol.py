@@ -616,11 +616,16 @@ OFFLINE_DELIVERED_NAME = "delivered.json"
 OFFLINE_TASK_PACK_PATH = "/offline/task-pack"
 #: 续跑锚点端点（hub → 云机，2026-09-22）：任务包是导出那一刻的快照，而云机的中断/重领
 #: 发生在它之后——重领时 hub 手里可能有更新的（自回传的或人工导入的）**同轮齐全**轮次。
-#: `GET /offline/resume?course=<课>` 递元信息（it / 指纹 / 来源 / 指标行）；
-#: `GET /offline/resume/blob?course=<课>&it=N&name=weights.json|opt.tar|row.json` 递字节。
+#: `GET /offline/resume?course=<课>` 递元信息（it / 指纹 / 来源 / 指标行 + `files` = 实际文件名）；
+#: `GET /offline/resume/blob?course=<课>&it=N&name=<件>` 递字节——**只服务当前锚点那一轮**，
+#: 且**只发整份**：delta 只活在「回传进程 + hub 落地器」之间（`hub/deltas.py` 受理时就地重建），
+#: hub 树里剩下的都是落地后的整份，`resume_anchor` 也只挑整份轮；还是容器的那些轮是「hub 侧
+#: 落地失败」的痕迹（`*.delta` 是回溯面）⇒ 既不交回也不派发，端点白名单里**没有** `.delta` 变体。
+#: ⚠ 客户端要「换机接续」时是拿 hub 报的 `files` 取件（老 hub 无该键 ⇒ 按两个候选名各试一次，
+#: 见 `remote/offline_boot._RESUME_PART_NAMES`），客户端自己**不做**任何重建/凑链。
 OFFLINE_RESUME_PATH = "/offline/resume"
 OFFLINE_RESUME_BLOB_PATH = "/offline/resume/blob"
-#: 锚点字节端点允许的文件名（白名单：拒路径穿越与「借名读别的文件」）。
+#: 锚点「三件」的**整份名**（白名单：拒路径穿越与「借名读别的文件」；`row.json` 只有这一种名字）。
 OFFLINE_RESUME_BLOB_NAMES = ("weights.json", "opt.tar", "row.json")
 
 #: 离线**任务清单 + 领取租约**（hub → 云机，2026-09-25，`plan/offline-task-discovery.plan.md`）：

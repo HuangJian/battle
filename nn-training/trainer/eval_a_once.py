@@ -43,6 +43,7 @@ from pathlib import Path
 REPO = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO / "nn-training"))
 from common.cli import house_parser, run_main
+from remote import weights_standard
 
 # 2026-10-11（S1）：原先这里要摘掉脚本目录项，防脚本目录里的 `queue.py` 遮蔽 stdlib `queue`；
 # 该模块已改名 `trainer/dispatch_queue.py`（plan/nn-training-reuse-and-deps.plan.md §S1），
@@ -258,6 +259,10 @@ def main() -> int:
     if not ckpt.exists():
         log(f"[evalA] ckpt 不存在: {ckpt}")
         return 2
+    # ★ 2026-10-15：本脚本把权重交给 **TS runner**（`buildModelFromText(readFileSync(path))`）——
+    #   离线腿的 delta 容器会让它 `JSON.parse` 报 `Unexpected identifier "BWD1"`（用户现场），
+    #   而且容器不能算 file 指纹（wver 要进任务 argv）。读侧就地落地成整份（幂等）。
+    weights_standard.ensure_standard_weights(ckpt, log=log)
 
     # 分派配置：与主循环同一份 rl-config.json（节点池 / policy）。
     cfg = dict(common.distribution.load_dist_config() or {})

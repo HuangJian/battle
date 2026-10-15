@@ -39,6 +39,7 @@ from typing import Any
 
 import remote.course_cache as course_cache
 import remote.opt_delta as opt_delta
+import remote.opt_standard as opt_standard
 import remote.weights_delta as weights_delta
 from common.log_bundle import LogBundle
 from common.protocol import (
@@ -379,6 +380,20 @@ def run_training_core(
             f"job {jid}: opt_sha={opt_sha[:12]}… 存在但 blob 不可得——拒收"
             "（不许静默退回 warm-start，D5）"
         )
+    if opt_raw and opt_delta.is_container(opt_raw):
+        # ★ 2026-10-15（离线 opt delta 的**消费者界面**）：形态位命中时回传的是 BOD1 容器
+        #   （离线腿逐轮原样回传、hub 原样落位）——hub 侧落地（`land_opt_delta`）只是 published
+        #   腿那一半；喂进 `unpack_opt_tar` 就是 `ReadError: invalid header`（现场 it-237 复现）。
+        #   这里在装载之前落成整份：基准优先取本机内容寻址缓存（上一轮自己那份整份 / 上一轮的
+        #   落地件，键就是 `base_sha`），其次 job 目录里的 `opt.tar`。找不到基准就**响亮拒**
+        #   （拿错动量 = 形状对、数值错的静默降质，比拒收危险）。
+        opt_raw = opt_standard.land_opt_bytes(
+            opt_raw,
+            blob_roots=(blob_root,),
+            extra_roots=(job_dir, Path(job_dir).parent),
+            log=log,
+        )
+        log(f"job {jid}: opt init 是 BOD1 容器 ⇒ 本机读侧落地成整份后再装载")
     opt = None
     opt_restore_sec = 0.0
     # ★ §4.2（2026-09-21）：restore 段的崩溃归确定性失败（带 traceback 摘要）——
@@ -693,6 +708,13 @@ def run_training_core(
         wj_sent_raw = weights_delta.pack_weights_delta(
             base_w, wj_raw, base_sha=hashlib.sha256(base_w).hexdigest()
         )
+        # ★ 2026-10-15（用户口径）：**发出去的那份字节也要留在本机**（键 = sha256(delta)）。
+        #   hub 侧下一轮/下一段的 `init_weights_fp` 就是它原样存下来的这份 delta 的 sha ⇒
+        #   这台机器再领到「以自己回传的 delta 为 init」的任务时，W1 直接命中本地缓存
+        #   （**零字节日下传输**，不再把这份 delta 从 hub 拉回来，随后由读侧落地成整份）。
+        #   与 `_cache_produced_weights`（那份是本机 f32 全量）并列：两条都留 ⇒ 不论 hub 声明的
+        #   地址是「整份」还是「delta」，本机都不会重传自己已经持有的字节。
+        _cache_blob(blob_root, hashlib.sha256(wj_sent_raw).hexdigest(), wj_sent_raw, log)
     ckpt_dir = job_dir / "ppo_final"
     _ppo_save(str(ckpt_dir), raw_model, opt, int(manifest["epochs"]))
     # 本机那份 f32 全量（身份映射与 blob_cache 都吃它）；R3 下它**不再是**回传字节本身

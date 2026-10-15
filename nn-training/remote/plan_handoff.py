@@ -47,6 +47,8 @@ from typing import Any
 # 「用的是哪个 common 模块」。
 import common.game_watch as game_watch
 import common.scratch as scratch
+import remote.delta_files as delta_files
+import remote.opt_standard as opt_standard
 from common.logutil import tag_logger
 from common.platform_utils import call_bounded, cpu_worker_slots
 from common.protocol import (
@@ -648,8 +650,10 @@ def _seed_start_checkpoint(ctx: RunContext, *, job_dir: Path, start_it: int, las
             # 旧实现靠 `import_bundle` 顺手复制到 `it-{manifest.it}`（错的那一格）+ 本函数从
             # `manifest.opt_init`/`opt_sha` 取，两路都不覆盖包根这份；“起点单源化”删掉那条复制后
             # 它就成了唯一落点 —— 漏了它 = **云上 Adam 黍黍归零**（一个静默的精度回归）。
-            cand = Path(job_dir) / "opt.tar"
-            if cand.exists():
+            # 两态都认（`opt.tar`/`opt.delta`）：包根那份可能来自一条**离线段**的导出
+            # （逐轮回传的就是 `BOD1` 容器 ⇒ 名字跟着内容走成 `.delta`）。
+            cand = delta_files.find_existing(job_dir, "opt.tar")
+            if cand is not None:
                 opt = cand.read_bytes()
         # 不记账本（row=None）：起点不是一轮训练。写进去会多出一条无 agg/report 的行，
         # 而「账本一行 = 一轮」是它给人看曲线的唯一契约（详见 ArtifactStore.checkpoint）。
@@ -694,12 +698,13 @@ def _seed_opt_blob_cache(
     got_sha = ""
     raw = b""
     src_used: Path | None = None
-    cands = (
-        Path(store_opt),
-        Path(job_dir) / "opt.tar",
-        Path(job_dir).parent / "opt.tar",
-        blob_path(job_dir, BLOB_OPT),
-    )
+    cands: list[Path] = [Path(store_opt)]
+    for root in (Path(job_dir), Path(job_dir).parent):
+        # 两态都认：包根/兄弟 job 目录里那份可能是 `opt.delta`（名字跟着内容走）
+        p = delta_files.find_existing(root, "opt.tar")
+        if p is not None:
+            cands.append(p)
+    cands.append(blob_path(job_dir, BLOB_OPT))
     for c in cands:
         try:
             b = c.read_bytes()
@@ -710,6 +715,19 @@ def _seed_opt_blob_cache(
             break
     if not raw:
         return ""
+    # ★ 2026-10-15（离线 opt delta 的读侧落地，与 `weights_standard` 同口径）：副本/锚点里的那份
+    #   可能是 **BOD1 容器**（离线腿逐轮原样回传的就是它）⇒ **先落成整份**再算 sha 与种子：
+    #   否则「起点动量」被种子成一个解不开的容器，声明的地址也与本机实际装载的字节对不上
+    #   （消费者当场 `ReadError: invalid header`，而离线段没有下载通道可退）。
+    raw = opt_standard.land_opt_bytes(
+        raw,
+        path=src_used,
+        blob_roots=_blob_roots_of(work_dir),
+        extra_roots=(Path(store_opt).parent.parent, Path(job_dir)),
+        work_dir=work_dir,
+        log=log,
+    )
+    got_sha = sha256_bytes(raw)
     want = str(manifest.get("opt_sha", "") or "")
     if want and got_sha != want:
         log(
@@ -735,8 +753,22 @@ def _seed_opt_blob_cache(
 
 
 def _stored_opt_sha(ctx: RunContext, it: int) -> str:
+    """产物里那一轮的 opt 地址 —— **可兑现的**那个（`landed_opt_sha`：先落地 + 种子再声明）。
+
+    为什么不能直接算文件的 sha：离线腿回传的产物本体是 BOD1 容器 ⇒ 那是个「解不开的地址」
+    （`train_core` 只认 `blob_cache/<sha>`，而这里会声明容器自己的 sha）。本机链上找不到基准时
+    **响亮记一行**并置空：本段按无动量跑（Adam 从头），绝不幽灵声明一个拿不到的 sha。
+    """
     p = ctx.store.opt_path(it)
-    return sha256_file(p) if p.exists() else ""
+    if not p.exists():
+        return ""
+    try:
+        return opt_standard.landed_opt_sha(
+            p, ctx.store.root, blob_roots=_blob_roots(ctx), log=ctx.log
+        )
+    except ProtocolError as e:
+        ctx.log(f"WARN: it{it} 的 opt 是 delta 容器且本机找不到基准（{e}）——本段按无动量跑")
+        return ""
 
 
 def _opt_bytes_from_manifest(ctx: RunContext) -> bytes:
@@ -765,6 +797,15 @@ def _blob_roots(ctx: RunContext) -> list[Path]:
         roots.append(Path(ctx.code_cache_dir).parent / "blob_cache")
     roots.append(ctx.work_dir / "blob_cache")
     return roots
+
+
+def _blob_roots_of(work_dir: str | Path) -> list[Path]:
+    """没有 `ctx` 时的同一份候选根判据（`_seed_opt_blob_cache` / `_seed_ref_blob_cache` 这些
+    只拿得到 `work_dir` 的调用点用；顺序与 `_blob_roots` 一致）。"""
+    wd = Path(work_dir)
+    # 顺序 = **已知好用**的那个在前：`seed_opt_blob` 写第一个能写的根，写错地方等于声明一个
+    # 解析不到的地址（`seed_opt_blob_cache` 一直都在 `work_dir/blob_cache` 写，那里就是权威）。
+    return [wd / "blob_cache", wd / "code_cache" / "blob_cache"]
 
 
 def _carry_ts_tree(ctx: RunContext, *, ts_code_cache_dir: Path | None, ts_tree: Path | None) -> None:

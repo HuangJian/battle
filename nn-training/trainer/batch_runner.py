@@ -41,6 +41,7 @@ from typing import NamedTuple
 
 import common.distribution
 from common.log import log
+from remote import weights_standard
 from trainer.batch_plan import (
     batch_iter_id,
     is_transient_error,
@@ -247,10 +248,13 @@ class BatchEvalRunner:
             if not self.rl_path:
                 log("[batcheval] nn unit without weights — skipped")
                 return {"settled": 0, "total": 0, "dropped": 0}
+            # ★ 2026-10-15：指纹与推给节点的字节都必须是**整份** —— 离线腿回传的 delta 容器
+            #   （hub 原样落位）会让本机指纹与节点 cache 键对不上，且节点侧 `JSON.parse` 直接
+            #   报 `BWD1`。`read_standard` = 读侧落地 + 读字节（幂等；整份只读 4 字节）——
+            #   两件事都落在**读盘之后**，所以指纹必须算在它后面。
+            weights_bytes = weights_standard.read_standard(self.rl_path)
             wver = common.distribution.weights_fingerprint(self.rl_path)
             key16 = wver[:16]
-            with open(self.rl_path, "rb") as f:
-                weights_bytes = f.read()
         iter_base = batch_iter_id(self.run_id, str(self.batch.get("batch_id")))
         iter_id = f"{iter_base}u{self.unit_idx}"
         kind = self.kind

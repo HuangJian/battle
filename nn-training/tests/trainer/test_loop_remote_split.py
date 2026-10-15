@@ -153,6 +153,10 @@ TOP_IMPORTS: dict[str, frozenset[str]] = {
     "loop_remote_push.py": frozenset(
         {"common.protocol", "remote.push_client", "common.log", "worker.loop_round", "trainer.loop_transport"}
     ),
+    # ★ 2026-10-15 登记一格 `remote`（离线 delta 事故）：发布出去的 init 权重必须是**整份**
+    # —— delta 容器（`BWD1`，离线腿逐轮回传、hub 原样落位）会被云机当权重装载（`JSON.parse`
+    # 报 `Unexpected identifier "BWD1"`）也收不到有意义的 `init_weights_fp`。落地调用是
+    # `remote/weights_standard.ensure_standard_weights`（幂等；整份只读 4 字节）。
     "loop_remote_job.py": frozenset(
         {
             "common.protocol",
@@ -160,6 +164,7 @@ TOP_IMPORTS: dict[str, frozenset[str]] = {
             "trainer.loop_remote_push",
             "worker.loop_round",
             "trainer.loop_transport",
+            "remote",
         }
     ),
     "loop_remote_fail.py": frozenset(

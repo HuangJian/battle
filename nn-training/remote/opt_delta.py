@@ -74,6 +74,7 @@ __all__ = [
     "opt_tar_bytes",
     "pack_opt_delta",
     "pack_tar_from_dir",
+    "rebuilt_opt_tar",
 ]
 
 #: 容器魔数（旧端拿到它先撞这个，不会把 delta 当权重落盘）。
@@ -290,6 +291,31 @@ def apply_opt_delta(base: dict, raw: bytes, *, expect_base_sha: str = "") -> dic
     return out
 
 
+def rebuilt_opt_tar(container: bytes, base: dict, *, out_dir: str | Path) -> bytes:
+    """`base`（**上一轮实际装载的** state_dict）+ `BOD1` 容器 ⇒ 整份 tar 字节（`opt.pt` 单件）。
+
+    **这是重建的唯一实现**：两侧共用一份 ——
+
+      * hub 侧落地（`land_opt_delta`，published 腿的回传受理）：base 从上一轮 landed 的
+        `it{n-1}/ppo_ckpt_remote/opt.pt` 读；
+      * 云机/本机**读侧**落地（`remote.opt_standard`，离线段自己下一轮的 init）：base 从本机
+        产物链上的那份整份 tar 解出。
+
+    `out_dir` 既收 `opt.pt`（下一轮的基准目录，hub 侧就靠它），又决定返回 tar 的成员元数据
+    ——同一份输入两次调用的字节可能因 mtime 不同而相异，**权威性由调用方落盘的那份说话**
+    （`base_sha` 只对**输入**逐字节对账，不对输出）。
+    """
+    import torch
+
+    if not is_container(container):
+        raise ProtocolError("rebuilt_opt_tar 只接 BOD1 容器（整份 tar 走原路解包）——拒收")
+    d = Path(out_dir)
+    d.mkdir(parents=True, exist_ok=True)
+    rebuilt = apply_opt_delta(base, container)
+    torch.save(rebuilt, d / "opt.pt")
+    return pack_tar_from_dir(d, ["opt.pt"])
+
+
 def pack_tar_from_dir(d: Path, names: list[str]) -> bytes:
     """目录 → tar bytes（`names` 顺序即成员顺序）；空列表 = `b""`。
 
@@ -377,6 +403,6 @@ def land_opt_delta(
         f"opt delta 落地：base_sha={'exact' if reported == published else 'identity'} 档"
         f"（容器 {reported[:12]}… / 本机 {published[:12]}…）"
     )
-    rebuilt = apply_opt_delta(torch.load(base_p, map_location="cpu"), opt_blob)
-    torch.save(rebuilt, ckpt_dir / "opt.pt")
-    return pack_tar_from_dir(ckpt_dir, ["opt.pt"])
+    return rebuilt_opt_tar(
+        opt_blob, torch.load(base_p, map_location="cpu"), out_dir=ckpt_dir
+    )

@@ -28,6 +28,7 @@ from typing import Any
 import common.distribution
 from common.log import log
 from common.protocol import RUN_MAX_ITERS_HARD_CAP
+from remote import weights_standard
 from trainer.loop_baseline import TrainingBaseline
 from trainer.loop_dispatch import TrainingDispatch
 from trainer.loop_hold import course_held
@@ -201,6 +202,12 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
 
     def step_prepare_iter(self, ctx: RoundContext) -> StepResult | None:
         """本轮目录就位（断点感知：已有同 wver 完整 shard 则保留续跑，否则清空重建）。"""
+        # ★ 2026-10-15（离线 delta 事故的读侧落地）：本轮的**第一件事实**是权重指纹
+        #   （下一行 `_prepare_iter_dir` 就按它判 resume），所以落地必须坐在它前面 ——
+        #   活动权重指针可能刚被离线腿写进一份 delta 容器（hub 只做原样落位），此后整轮的
+        #   wver / 推给 sampler 的字节 / 本机 PPO 装载 / 发布给 hub 的 init 都吃这一个文件。
+        #   幂等且便宜：整份只读 4 字节（稳态等于零额外 IO）。
+        weights_standard.ensure_standard_weights(self.args.out, log=log)
         self._traj_dir = self._traj_root / f"it{ctx.it}"
         self._prepare_iter_dir(ctx.it)
         return None

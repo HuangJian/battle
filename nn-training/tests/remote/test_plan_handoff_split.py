@@ -92,12 +92,23 @@ ALLOWED_IMPORTS = {
     "remote.artifacts",
     "remote.bundle",
     "remote.deliver_proc",
+    # 2026-10-15（离线 delta 事故的后缀约定）：交接面找三件时**名字随内容走**
+    # （`weights.json`/`weights.delta`、`opt.tar`/`opt.delta`）⇒ 一律走 `find_existing` 两态找件，
+    # 不自己拼名字（拼了就会在“名字跟着内容”的树上找不着）。它是 **L0**（顶层只 import stdlib）
+    # ⇒ 本模块站 L5，边严格向下（层号账本 `tests/test_remote_dag.py`）。
+    "remote.delta_files",
     # 2026-10-12（plan/offline-leg-ppo-attribution）：装配点要算**可读 worker 名**
     # （`worker_tag(offline=True, hub_url=…)` = `kaggle-o`，dashboard 节点贡献统计 PPO 组的列名）。
     # 它住 `remote.job_lifecycle`（**L3**）：只能在 L5 的这个装配点算 —— `deliver_proc`(L2) /
     # `offline_deliver`(L1) 自己 import 它就是向上依赖（层号账本 `tests/test_remote_dag.py`）。
     # 与 deliver_proc 同一条理由：加白名单前先量过方向。
     "remote.job_lifecycle",
+    # 2026-10-15（离线 opt delta 的读侧落地，与 `weights_standard` 同一条口径）：交接面的两个
+    # 播种点（`_seed_opt_blob_cache` / `_stored_opt_sha`）手里那份可能是 **BOD1 容器**（现场
+    # `tmp/y5-term` it-237）——不落地就种出一个解不开的容器、声明一个拿不到的地址。
+    # `remote.opt_standard` 是 **L1**（只依赖 `remote.opt_delta`(L0) + `common.*` 叶子）⇒ 本模块
+    # 站 L5，边严格向下（层号账本 `tests/test_remote_dag.py`）。
+    "remote.opt_standard",
     "remote.offline_deliver",
     "remote.offline_eval",
     "worker.plan",

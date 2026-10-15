@@ -17,6 +17,7 @@ from common.platform_utils import rmtree_best_effort
 # 本地对局子进程的无窗口 spawn 由 `trainer.queue_local` 负责（Windows 下不弹黑色 cmd 抢焦点）。
 from common.proc import bun_version as _bun_version
 from common.proc import version_mm as _mm
+from remote import weights_standard
 from trainer.queue_local import (
     make_local_pool,
     pick_race_target,
@@ -384,6 +385,10 @@ class RolloutDispatcher:
             wkind = "intent"
         else:
             wkind = "rollout"
+        # ★ 2026-10-15：推给节点的字节必须是**整份** nn-weights-json —— 离线腿逐轮回传的是
+        #   delta 容器（`BWD1`），hub 原样落位 ⇒ 指针可能正指向容器；节点侧 `JSON.parse` 会报
+        #   `Unexpected identifier "BWD1"`。读侧落地（幂等；整份只读 4 字节）。
+        weights_standard.ensure_standard_weights(rl_path, log=log)
         with open(rl_path, "rb") as f:
             weights_bytes = f.read()
         reuse, need = common.distribution.partition_weights_nodes(nodes, wver, kind=wkind)

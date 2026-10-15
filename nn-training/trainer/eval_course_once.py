@@ -81,9 +81,17 @@ def weight_key16(w: dict) -> str:
     """
     import common.distribution
 
+    # ⚠ 本文件是**文件入口**（`sys.path` 的 nn-training 项在上面那行之后才插）⇒ `remote.*`
+    #   只能函数内延迟 import（顶层 import 会在「当脚本跑」时 ModuleNotFoundError，
+    #   `tests/test_entry_scripts_in_place.py` 当场抓）。
+    from remote import weights_standard
+
     path = str(w.get("path") or "")
     if not path:
         return f"god-{common.distribution.compute_engine_epoch()[:12]}"
+    # ★ 2026-10-15：指纹必须算在**整份**上——离线腿回传的 delta 容器（hub 原样落位）会让这里
+    #   的 key16 与 `batch_runner` 读侧落地后算出的 wver 分叉（行身份/元数据跟着错位）。
+    weights_standard.ensure_standard_weights(path)
     return common.distribution.weights_fingerprint(path)[:16]
 
 

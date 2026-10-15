@@ -697,7 +697,11 @@ def test_unusable_local_root_falls_back_to_the_net_side_with_a_reason(tmp_path: 
     cfg = {"course": "c5-gae", "work_dir": str(tmp_path / "w"), "local_root": str(blocker / "sub")}
     got, why = offline_boot.resolve_local_root(cfg, "c5-gae", multi=False)
     assert got == offline_boot.net_artifacts_dir(cfg, "c5-gae", multi=False) == tmp_path / "w" / "run"
-    assert "NotADirectoryError" in why and str(blocker / "sub") in why, why
+    # 成因里的异常名**是平台的真话**（`_why_unusable` 直接写 `type(e).__name__`）：POSIX 的
+    # `mkdir("<文件>/sub")` 报 `NotADirectoryError`；Windows 的 `Path.mkdir(parents=True)` 先试
+    # 父路径、报 `FileExistsError`（WinError 183）。两者都是「这段路径根本不是目录」⇒ 都算合格
+    # （2026-10-15 校正：原断言只认 POSIX 名，在 Windows 上恒红——HEAD 的干净 worktree 同样复现）。
+    assert ("NotADirectoryError" in why or "FileExistsError" in why) and str(blocker / "sub") in why, why
 
 
 def test_usable_local_root_gets_no_reason_and_is_created(tmp_path: Path) -> None:

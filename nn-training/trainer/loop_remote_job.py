@@ -21,6 +21,7 @@ from typing import Any
 
 from common.log import log
 from common.protocol import coef_active
+from remote import weights_standard
 from trainer.loop_remote_push import TrainingRemotePush
 from trainer.loop_transport import (
     BundleExportedError,
@@ -309,6 +310,10 @@ class TrainingRemoteJob(TrainingRemotePush):
         if rollout_spec:
             # M3：TS 运行时 zip（一次打包，缓存在 self 上——sha 不变就不重打）。
             self._ensure_ts_code(job_root, log=log)
+        # ★ 2026-10-15：发布出去的 init 必须是**整份**——`publish_job` 用它算
+        #   `init_weights_fp`（= 云机下一轮 init 的内容地址）并把它当 init blob 上传；
+        #   离线腿的 delta 容器会被云机当权重装载（`JSON.parse` 报 BWD1）且算不出有意义的地址。
+        weights_standard.ensure_standard_weights(args.out, log=log)
         manifest = publish_job(
             job_root=job_root,
             jsonl_path=str(self._jsonl_path),
@@ -499,6 +504,13 @@ class TrainingRemoteJob(TrainingRemotePush):
         from worker.resume import state_init_enabled
 
         try:
+            # ★ 2026-10-15：三重校验第 1 条是 `result.init_weights_fp == sha256_file(args.out)`
+            #   （fencing：云起点 = 我们发布出去的那份）。回传的 `weights_json` 在形态位命中时是
+            #   **delta 容器**（离线腿原样回传、hub 原样落位 ⇒ `args.out` 也可能已经是容器，
+            #   指纹必然对不上）⇒ 校验之前先读侧落地成整份：让这条对账比在同形字节上，本轮与下一轮
+            #   的活动指针也不再带着容器。基准不在本机时会**响亮**抛（那是要人看的数据问题，
+            #   不是能静默把容器当权重用的场景）。
+            weights_standard.ensure_standard_weights(args.out, log=log)
             verify_and_land(
                 result,
                 sess.manifest,

@@ -243,6 +243,9 @@ def test_the_core_touches_only_downward_clusters() -> None:
         "remote.job_fs",
         "remote.job_lifecycle",
         "remote.opt_delta",
+        # 2026-10-15（离线 opt delta 的读侧落地）：restore 段拿到的 `opt_init`/blob 也可能是
+        # BOD1 容器（现场 it-237）⇒ 装载前落地成整份。L1 模块，站在本核（L4）下面。
+        "remote.opt_standard",
         "remote.weights_delta",
         "remote.wire",
     ], tops

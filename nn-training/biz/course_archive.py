@@ -203,13 +203,20 @@ def classify(rel: str, size: int, *, keep_shards: bool, key_iters: set[int]) -> 
         # ★ offline 段是 **L0'**，不是 L2：`weights.json` 不必留（逐轮权重已在
         # nn-training/weights/<课>/，实测 301 份 ↔ tmp 301 轮一一对应），`opt.tar` 是
         # Adam 动量（tmp 独有的部分）⇒ 只留关键轮；`row.json` 全留。
+        # 后缀跟着内容走（2026-10-15）：压缩版叫 `weights.delta`/`opt.delta` ⇒ 分类必须
+        # **两种名字都认**（只认整份名会把压缩版全落到「L0'-run: 留」那一档：不删错东西，
+        # 但去重口径当场失效，而 `.delta` 本来就在归档里有一份）。
+        # ⚠ 名字写字面量、**不** import `remote.delta_files`：那是上层包面（`remote/`），
+        # 而本层（`biz/` = L1）必须零引用（`tests/test_layering.py`）。名字的权威口径在那边
+        # （`variants()`，与本文下面的 `_L0_ROOT` 一样是本地字面量）；真漂开了的后果只是它们
+        # 落回保守的「留」那一档 —— 方向是安全的。
         m = _OFFLINE_IT_RE.match(rel)
         if m is not None:
             it_n = int(m.group(2))
             name = m.group(3)
-            if name == "weights.json":
+            if name in ("weights.json", "weights.delta"):
                 return ArchiveOp(rel, "delete", "L0'-dup-weights", False, size)
-            if name == "opt.tar":
+            if name in ("opt.tar", "opt.delta"):
                 if it_n in key_iters:
                     return ArchiveOp(rel, "keep", "L0'-opt-key", False, size)
                 return ArchiveOp(rel, "delete", "L0'-opt-nonkey", False, size)

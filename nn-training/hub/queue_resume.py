@@ -20,7 +20,13 @@
 
 ## 依赖方向
 
-`queue_resume → {common.protocol, hub.store}`（向下）。**唯一一处 `rl` 引用**
+`queue_resume → {common.protocol, hub.store, hub.deltas, remote.delta_files}`（向下）。
+2026-10-15 新增的后两个是同一件事的两半（用户口径「hub 收到 delta 就地落地」+「锚点只发整份」）：
+形态判据/名字约定在 L0 的 `remote.delta_files`，就地重建在 L2 的 `hub.deltas`（它是**注入**给
+`hub.store_offline` 的落地器 —— 那个叶子不得自己 import，否则整个 hub 栈涨一层）。两者都在
+本模块之下（最深 `hub.store` L2）⇒ 本模块秩仍是 1 + 2 = **L3**。
+
+**唯一一处 `rl` 引用**
 （`merge_eval_rows` 里的 `from biz.eval_rows import append_eval_rows`）是**延迟** import，
 且是本簇原样搬过来的——`hub_server` 里它本来就在函数体内（`assert_remote_module` 的
 「传输/落盘层 L2-pure」那条口径因此对它不适用，守卫按「延迟 + 只此一处」正面钉住）。
@@ -33,13 +39,18 @@
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 from pathlib import Path
 
+import remote.delta_files as delta_files
 from common.protocol import ProtocolError, sanitize_run_id
+from hub import deltas as hub_deltas
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
+from hub.store_offline import Stager, _round_is_complete
+from hub.task_pack import _hub_log
 
 
 class QueueResumeMixin(QueuePeer):
@@ -100,7 +111,9 @@ class QueueResumeMixin(QueuePeer):
                     it = int(it_dir.name[3:])
                 except ValueError:
                     continue
-                if not all((it_dir / n).is_file() for n in _JobStore.RESUME_PARTS):
+                # 权重/动量的名字随形态走（`weights.json`/`weights.delta`、`opt.tar`/`opt.delta`，
+                # 2026-10-15 后缀约定）⇒ 齐全判据两种名字都认（与 hub 落位端同一份实现）。
+                if not _round_is_complete(it_dir):
                     continue
                 out.append(
                     {"it": int(it), "run_id": run_dir.name, "source": "import", "dir": it_dir}
@@ -157,18 +170,38 @@ class QueueResumeMixin(QueuePeer):
                 row = json.loads((d / "row.json").read_text(encoding="utf-8"))
             except (OSError, ValueError):
                 row = {}
-            wfp = str((row or {}).get("weights_fp", "") or "")
-            if not wfp:
-                try:
-                    wfp = hashlib.sha256((d / "weights.json").read_bytes()).hexdigest()
-                except OSError:
-                    wfp = ""
+            w_file = delta_files.find_existing(d, "weights.json")
+            o_file = delta_files.find_existing(d, "opt.tar")
+            if w_file is None or o_file is None:
+                # 来源扫描已判过齐全；这里是「同轮齐全」的兜底（`resume_anchor` 也会被别的
+                # 调用点直接用，判据得自带）——不齐就退到更早轮，绝不用它凑数。
+                continue
+            # ★ 2026-10-15（用户口径：**锚点只发整份**）：还是 delta 容器的那一轮不能交出去——
+            #   云机侧没有链（delta 只在「回传进程 + hub 落地器」之间流转），拿回去也解不开，
+            #   反而会把一个容器写进产物目录。这种轮只能是「hub 落地失败过」的（基准不在 hub
+            #   侧）⇒ 退到更早那轮整份，而不是把问题传给云机。
+            if delta_files.any_container_file(w_file) or delta_files.any_container_file(o_file):
+                print(
+                    f"[hub-server] 续跑锚点跳过 {course or '-'} it{int(it)}：权重/动量还是 delta 容器"
+                    "（hub 侧落地失败过）——退到更早的整份轮",
+                    flush=True,
+                )
+                continue
+            try:
+                # 递出去那份文件的字节地址（就是**整份**的地址）：客户端「传输损坏」那道闸
+                # 比的就是它。hub 落地之后它就是云机下一轮 init 的内容地址。
+                shipped_fp = hashlib.sha256(w_file.read_bytes()).hexdigest()
+            except OSError:
+                continue
             return {
                 "course": course,
                 "it": int(it),
                 "run_id": str(best["run_id"]),
                 "source": str(best["source"]),
-                "weights_fp": wfp,
+                "weights_fp": shipped_fp,
+                #: 递出去的**实际文件名**（hub 树里名字跟着内容走；整份 = `weights.json`）。
+                #: 客户端照它取字节；老 hub 没有这个键 ⇒ 客户端按两个候选名各试一次。
+                "files": {"weights": w_file.name, "opt": o_file.name, "row": "row.json"},
                 "opt_bytes": int(row.get("opt_bytes", 0) or 0),
                 "metrics": row if isinstance(row, dict) else {},
                 "_dir": str(d),
@@ -299,9 +332,41 @@ class QueueResumeMixin(QueuePeer):
         return None
 
     def store_offline_artifact(
-        self, course: str, body: dict, *, advance_active: bool = True
+        self,
+        course: str,
+        body: dict,
+        *,
+        advance_active: bool = True,
+        stage: Stager | None = None,
     ) -> dict:
-        return self._stores[course].store_offline_artifact(body, advance_active=advance_active)
+        """补传受理的**唯一漏斗**：先就地落地（delta → 整份），再让 store 落盘。
+
+        ★ 2026-10-15（用户口径）：回传的可能是 int16 delta 容器（`BWD1`/`BOD1`）⇒ hub **收到就
+        在 hub 进程里重建为整份**；delta 只活在「回传进程 + 这里」之间，此后 hub 树（回传树/
+        镜像/归档/活动指针/锚点）里一律是整份，派发侧永远只发整份。
+
+        为什么落地器在这里**注入**（而不是 `hub/store_offline` 自己 import）：那是 L1 叶子，
+        import `hub/deltas`(L2) 会把它顶到 L3 而整个 hub 栈跟着涨一层（层号 = 拓扑秩，
+        `tests/test_remote_dag.py`）；而「先重建、再记账」本来就是这个受理边界的职责。
+        本模块是 L3（`remote.delta_files` L0 / `hub.deltas` L2 都在下面）⇒ 边严格向下。
+
+        `stage` 与 store 侧**同签名**（`test_hub_queue_split` 钉「门面只多一个 course」）：
+        缺省 `None` ⇒ 用本课程树现搭一个（`_offline_stager`），显式给了就用给的（测试/特殊场景）。
+        """
+        store = self._stores[course]
+        if stage is None:
+            # 缺省落地器：绑好**本课程**的基准搜索根。`<traj>/<课>` 是课程树的契约形状
+            # （里面就有 `remote-jobs/` 与 `training_log.jsonl`——`remote.delta_files.traj_of`
+            # 靠这两个锚认它）；`course` 给了就用它当课名（单课程模式课程名是空串 ⇒ 退到目录名，
+            # 与两个落地器的 `_resolve_course` 同一口径）。
+            course_dir = store.jsonl_path.parent
+            stage = functools.partial(
+                hub_deltas.land_into_stage,
+                traj=course_dir,
+                course=course or course_dir.name,
+                log=_hub_log,
+            )
+        return store.store_offline_artifact(body, advance_active=advance_active, stage=stage)
 
     def store_offline_result(self, course: str, body: dict) -> dict:
         return self._stores[course].store_offline_result(body)

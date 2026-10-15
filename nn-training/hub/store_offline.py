@@ -11,8 +11,12 @@
 
 ## 依赖方向
 
-`store_offline → {common.protocol, common.fs, remote.artifacts}`（向下）；跨域调用只有
-`self._append_ledger`（住 `store_ledger`）。**不 import 任何兄弟混入**。
+`store_offline → {common.protocol, common.fs, remote.artifacts, remote.delta_files}`（向下）；
+跨域调用只有 `self._append_ledger`（住 `store_ledger`）。**不 import 任何兄弟混入**。
+
+回传 delta 的**就地落地**（`stage`）也**不 import**：落地器是接收边界（`hub/queue_resume`）注入的
+—— 本模块是 L1 叶子（层号 = 拓扑秩，`tests/test_remote_dag.py`），import L2 的 `hub.deltas`
+会把它顶到 L3 而整个 hub 栈跟着涨一层。`remote.delta_files`(L0) 只用来判形/定名，合法。
 
 ## 随簇搬来的 `_write_bytes`
 
@@ -25,14 +29,27 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
+from collections.abc import Callable
 from pathlib import Path
 from threading import Lock
 from typing import Any
 
+import remote.delta_files as delta_files
 from common.fs import atomic_write_bytes
 from common.protocol import ProtocolError, decode_opt_tar, decode_weights_json, sanitize_run_id
-from remote.artifacts import ArtifactStore, ledger_row_from_metrics
+from remote.artifacts import (
+    WEIGHTS_ARCHIVE_ROOT as WEIGHTS_ARCHIVE_ROOT,
+)
+from remote.artifacts import (
+    WEIGHTS_ARCHIVE_ROOT_ENV as WEIGHTS_ARCHIVE_ROOT_ENV,
+)
+from remote.artifacts import (
+    ArtifactStore,
+    ledger_row_from_metrics,
+)
+from remote.artifacts import (
+    weights_archive_root as _weights_archive_root,
+)
 
 #: 仓库根 —— 课程配置与权重归档的相对路径基准。
 #: 2026-09-30（刀 1，hub 出包）：本模块从 `nn-training/remote/hub/store_offline.py` 搬到
@@ -40,28 +57,41 @@ from remote.artifacts import ArtifactStore, ledger_row_from_metrics
 #: 这是个静默类错误：层数是错的，但代码不报错，只是 REPO_ROOT 指到了仓库的**父目录**
 #: （工装用例 `tests/hub/test_multi_course_hub.py::test_backup_target_follows_the_course_config` 当场抓住）。
 REPO_ROOT = Path(__file__).resolve().parents[2]
-#: 权重归档根（`nn-training/weights/`；即 `biz.archive.backup_weights` 的缺省目录）。
-WEIGHTS_ARCHIVE_ROOT = REPO_ROOT / "nn-training" / "weights"
-#: 归档根的**测试隔离开关**（2026-09-23）：设了就改用它。为什么必须有：回传轮会往归档根写
-#: `<课>.it<N>.<时间戳>.json`，而工装用例不得往真归档目录撒文件——那些文件会被控制台的
-#: evalA 权重选择器（`eval-board/ckpts.ts` 扫 `nn-training/weights/<leg>/`）当成真训练轮次
-#: 列出来。env 形态（而不是只留可 patch 的模块常量）是因为 e2e 那条是真子进程
-#: （`e2e/test_offline_training_e2e.py` 拉 `hub.server`），patch 传不进去。
-WEIGHTS_ARCHIVE_ROOT_ENV = "BCITY_WEIGHTS_ARCHIVE_ROOT"
-
-
-def _weights_archive_root() -> Path:
-    """当前归档根（`BCITY_WEIGHTS_ARCHIVE_ROOT` 优先，缺省 `nn-training/weights`）。
-
-    **调用时读** env（不是 import 时算一次）——这样测试能在同一进程里 monkeypatch，
-    也让这条路径与 `remote/game_watch` 的看门狗常量同样“只读一份绑定”。
-    """
-    raw = os.environ.get(WEIGHTS_ARCHIVE_ROOT_ENV, "")
-    return Path(raw) if raw else WEIGHTS_ARCHIVE_ROOT
+#: 权重归档根/开关与取用入口（`_weights_archive_root`）的**唯一定义**已下沉到 `remote.artifacts`
+#: （2026-10-15 去重）：本模块与 `remote.weights_standard` 曾各留一份逐字节相同的实现 ——
+#: reuse 账本当场红，而两者都够得着的最低层就是那个 L0 产物模块。名字一律 `import ... as ...`
+#: 门面（同对象、同 patch 语义）：`tests/test_production_isolation.py` 读常量，
+#: `hub/backfill_offline.py` 与 `hub/store_offline` 自己的两处调用点读函数。
 
 
 #: 课程配置目录（`nn-training/curricula/<课>.jsonc`）——归档 prefix/dir 的单一事实来源。
 CURRICULA_DIR = REPO_ROOT / "nn-training" / "curricula"
+
+#: 落地器的形状：`{"weights"|"opt": 原始字节} → {"weights.json"/"opt.tar": 整份字节，
+#: "landed": {件: 状态}, "note": 失败原因}`。实现住 `hub/deltas.land_into_stage`（L2），
+#: 由**接收边界**（`hub/queue_resume`）注入 —— 本模块不 import 它，理由见
+#: `store_offline_artifact` 的 `stage` 段。
+Stager = Callable[[dict[str, bytes]], dict]
+
+
+def _round_is_complete(it_dir: Path) -> bool:
+    """回传轮是不是**三件齐全**（两种名字都认；`row.json` 只有一种名字）。
+
+    权重/动量那两件的名字**跟着内容走**（`weights.json`/`weights.delta`、`opt.tar`/`opt.delta`，
+    2026-10-15 后缀约定）⇒ 一律走 `remote.delta_files.find_existing`（两种名字都认），
+    不自己拼名字。本函数是 hub 受理回传时的判据，也是补做工具（`hub/backfill_offline`）
+    与续跑锚点（`hub/queue_resume`）的那一份**同一实现**。
+    """
+    return (
+        delta_files.find_existing(it_dir, "weights.json") is not None
+        and delta_files.find_existing(it_dir, "opt.tar") is not None
+        and (it_dir / "row.json").is_file()
+    )
+
+
+def _archived(bdir: Path, prefix: str, it: int) -> bool:
+    """该轮的归档名（两种后缀）在不在（归档只写一次的判据）。"""
+    return bool(sorted(bdir.glob(f"{prefix}.it{it}.*")))
 
 
 def _write_bytes(path: Path, data: bytes) -> None:
@@ -71,6 +101,38 @@ def _write_bytes(path: Path, data: bytes) -> None:
     同源；本仓那次去重的记录在 `common/fs.py` 头部）。
     """
     atomic_write_bytes(path, data)
+
+
+def _same_bytes(path: Path, blob: bytes) -> bool:
+    """文件与字节是否逐字节相同（**先比 size 再读**：幂等重传是常态，不给它每次多读 ~380KB）。"""
+    try:
+        return path.stat().st_size == len(blob) and path.read_bytes() == blob
+    except OSError:
+        return False
+
+
+def _heal_round(it_dir: Path, to_write: dict[str, bytes], *, w_full: bytes, wj: bytes) -> list[str]:
+    """幂等命中时把「形态没到位」的名字补上，返回真写了哪些（空 = 本来就齐）。
+
+    两种必须治的形状（2026-10-15）：① 第一次落地失败 ⇒ 盘上只有 `weights.delta`（原件保留）；
+    ② 旧数据 ⇒ 容器占着 `weights.json` 这个名字（`tmp/y5-term` 的形状）。补完这轮就能当锚点
+    （`resume_anchor` 只挑整份轮），而不是等人跑清扫工具。
+
+    两条红线：
+      * **绝不把容器写进 `weights.json`**（那是「可装载权重」这个身份的载体）——落地失败时
+        `w_full is wj`，整份那格直接跳过；
+      * **绝不覆盖不同字节**（不同字节在调用方那一步已经判成 conflict）——只写内容不同的那些；
+        原件字节一个不丢（容器旁存 `.delta`，两版都留）。
+    """
+    wrote: list[str] = []
+    for name, blob in to_write.items():
+        if name == "weights.json" and w_full == wj:
+            continue
+        if _same_bytes(it_dir / name, blob):
+            continue
+        _write_bytes(it_dir / name, blob)
+        wrote.append(name)
+    return wrote
 
 
 def _token_of(raw: object) -> str:
@@ -144,6 +206,9 @@ class OfflineRoundsMixin:
     OFFLINE_RESULT_NAME = "result.json"
 
     #: 续跑锚点必须**同轮齐全**的三件（用户 2026-09-22 口径：缺一件就退到更早轮）。
+    #: ⚠ 权重/动量这**两件的名字随形态走**（`weights.json`/`weights.delta`、`opt.tar`/`opt.delta`，
+    #: 2026-10-15 后缀约定）⇒ 齐全判据一律走 `remote.delta_files.find_existing`（两种名字都认），
+    #: 本元组只留着表达「哪三件」（`row.json` 只有一种名字）。
     RESUME_PARTS: tuple[str, ...] = ("weights.json", "opt.tar", "row.json")
 
     #: 回传轮的**交付镜像**目录名（`<traj>/deliver/<run_id>/it-NNN/`）。`deliver/` 此前只有
@@ -177,7 +242,7 @@ class OfflineRoundsMixin:
                     it = int(it_dir.name[3:])
                 except ValueError:
                     continue
-                if not all((it_dir / n).is_file() for n in self.RESUME_PARTS):
+                if not _round_is_complete(it_dir):
                     continue
                 out[it] = {"run_id": run_dir.name, "dir": str(it_dir)}
         return out
@@ -186,8 +251,16 @@ class OfflineRoundsMixin:
         """补传落位目录。`run_id` 来自远端 ⇒ 必须先过 `sanitize_run_id`（它会是目录名）。"""
         return self.job_root / self.OFFLINE_DIR / sanitize_run_id(run_id)
 
-    def store_offline_artifact(self, body: dict, *, advance_active: bool = True) -> dict:
+    def store_offline_artifact(
+        self, body: dict, *, advance_active: bool = True, stage: Stager | None = None
+    ) -> dict:
         """落一轮补传产物，返回 {"status": "accepted"|"duplicate", "it": n, "run_id": r}。
+
+        `stage`（★ 2026-10-15 用户口径：hub 收到 delta 就**就地重建为整份**）——由**接收边界**
+        （`hub/queue_resume.QueueResumeMixin.store_offline_artifact`，L3）注入 `hub.deltas.land_into_stage`：
+        先重建、再记账是接收边界的职责，本模块是 L1 叶子（`tests/helpers/remote_dag.py`：层号 = 拓扑秩），
+        import `hub/deltas`(L2) 会把本模块顶到 L3 而整个 hub 栈跟着涨一层。
+        `stage=None`（单测 / 没有落地器的调用点）⇒ 原件按内容定名原样落盘，不重建。
 
         `advance_active=False`（★P1-7 / R3-f）⇒ 这轮回传**不得推进活动权重**
         （`weights.json`）：旧主（hold 已 stale）或没带对 token 的迟到回传，其终点不是
@@ -202,8 +275,10 @@ class OfflineRoundsMixin:
           * **声明指纹与实际字节相符**——传输损坏（截断/串包）必须在入口拦住，否则一条
             损坏的权重会以「hub 上的产物」身份进入 eval/续跑，而真因在几千行日志之外。
 
-        幂等：`it-NNN/weights.json` 已存在且**字节相同** ⇒ duplicate（**不改写**）。同一轮权重是
-        不可变快照：覆盖它意味着「谁先到」决定了历史，而补传天然会重传（重连、重启续投）。
+        幂等：`it-NNN` 里已经有**同一份字节**的权重（整份 `weights.json` 或原件 `weights.delta`，
+        判据是内容、不是名字）⇒ duplicate。此时**只补**「形态没到位」的那些名字（`_heal_round`：
+        第一次落地失败只剩 `.delta`、旧数据容器占着 `.json`）—— 同一轮权重是不可变快照，补的是
+        同一个内容的另一个名字；**覆盖不同字节仍然是 conflict**（见下）。
 
         ★ 2026-10-11 事故新增：已存在但**字节不同** ⇒ `conflict`（调用方透成 409）。
         事故现场就是这个形状的反面：起点（无账本行）先占了 `it-1`，而真 it1 推上来被判 duplicate
@@ -245,38 +320,76 @@ class OfflineRoundsMixin:
                 opt = decode_opt_tar(opt_raw)
             except Exception:  # opt 损坏不必拒整轮：代价只是「hub 侧续跑 Adam 归零」
                 opt = b""
+        # ★ 2026-10-15（用户口径）：回传的可能是 **delta 容器** ⇒ **在 hub 进程里就地重建为整份**
+        #   ——此后 hub 树里的一切（回传树/镜像/归档/活动指针/锚点）都是整份，派发侧永远只发
+        #   整份（云机已有就不传：`init_weights_fp`/`opt_sha` + 内容寻址 blob_cache 本来就在），
+        #   trainer 与 TS 两端看不到 delta。落地在**暂存目录**里做（`it-NNN/` 那份是不可变快照，
+        #   首写锁定 + 409 冲突那套不许被覆盖）；失败也**不丢字节**：原件照落成 `*.delta`。
+        #   落地器是**注入的**（`stage`，见 docstring）：本模块不 import `hub/deltas`。
+        staged: dict = stage({"weights": wj, "opt": opt}) if stage is not None else {}
+        # 缺席/落地失败 ⇒ 回落到原件（“绝不静默丢字节”），此时 `landed` 会把失败说出来。
+        w_full: bytes = staged.get("weights.json") or wj
+        o_full: bytes = staged.get("opt.tar") or opt
+        landed: dict = staged.get("landed") or {}
+        note = str(staged.get("note") or "")
+        full_fp = hashlib.sha256(w_full).hexdigest()
         with self._lock:
             d = self.offline_run_dir(run_id)
             it_dir = d / f"it-{int(it):03d}"
-            wpath = it_dir / "weights.json"
-            if wpath.exists():
-                # 字节级比对（先比 size 再读：幂等重传是常态，不给它每次多读 ~380KB）。
-                # `_write_bytes` 就是把 `wj` 原样写下 ⇒ 字节相等 ⟺ 同一份不可变快照。
-                try:
-                    same = wpath.stat().st_size == len(wj) and wpath.read_bytes() == wj
-                except OSError:
-                    same = False  # 读不动 = 不敢当幂等（宁可报冲突让人看）
-                if same:
-                    return {"status": "duplicate", "run_id": run_id, "it": int(it)}
-                try:
-                    have = hashlib.sha256(wpath.read_bytes()).hexdigest()
-                except OSError:
-                    have = ""
+            # 两个形态各写各的名字（名字自述形态，两版都留）：整份 → `weights.json`/`opt.tar`，
+            # 原件 → `*.delta`（只在它确实是容器时）。落地失败 ⇒ 只有 `*.delta`（锚点那边会跳过它）。
+            to_write: dict[str, bytes] = {delta_files.named_for("weights.json", w_full): w_full}
+            if delta_files.named_for("weights.json", wj) != delta_files.named_for("weights.json", w_full):
+                to_write[delta_files.named_for("weights.json", wj)] = wj
+            if opt:
+                to_write[delta_files.named_for("opt.tar", o_full)] = o_full
+                if delta_files.named_for("opt.tar", opt) != delta_files.named_for("opt.tar", o_full):
+                    to_write[delta_files.named_for("opt.tar", opt)] = opt
+            have_full = it_dir / "weights.json"
+            have_raw = it_dir / "weights.delta"
+            have: bytes | None = None
+            if have_full.is_file() and not delta_files.any_container_file(have_full):
+                have = have_full.read_bytes()
+            elif have_raw.is_file():
+                have = have_raw.read_bytes()
+            elif have_full.is_file():  # 旧数据：`weights.json` 里装着容器（名字没跟着内容走）
+                have = have_full.read_bytes()
+            if have is not None:
+                # 幂等/冲突判据 = **同一轮的权威字节**：整份先到、或原件先到，都算命中。
+                # ★ 2026-10-15 修：旧口径在「原件命中」上加了个 `not weights.json.is_file()` 的
+                #   条件 ⇒ 旧数据（`.json` 里装容器）**同一份字节**重传会被判 conflict 409，
+                #   而客户端把 409 当硬拒（`remote/offline_deliver._reject_round`）⇒ 一轮正确产物
+                #   永久出局。丢包/超时重传是常态（下面那段注释就是这么写的），不能这么判。
+                if have in (w_full, wj):
+                    healed = _heal_round(it_dir, to_write, w_full=w_full, wj=wj)
+                    if healed:
+                        print(
+                            f"[hub-server] 补传 it{int(it)} 幂等命中：补落 {'、'.join(healed)}"
+                            "（内容同源，原件旁存）",
+                            flush=True,
+                        )
+                    return {
+                        "status": "duplicate",
+                        "run_id": run_id,
+                        "it": int(it),
+                        "landed": landed,
+                        "healed": healed,
+                    }
                 return {
                     "status": "conflict",
                     "run_id": run_id,
                     "it": int(it),
-                    "have_fp": have,
-                    "got_fp": got,
+                    "have_fp": hashlib.sha256(have).hexdigest(),
+                    "got_fp": full_fp,
                     "error": (
                         f"补传冲突 it{int(it)}：hub 已有**不同**字节的权重"
-                        f"（hub {have[:12]}… 本次 {got[:12]}…）——不覆盖、需人裁决"
+                        f"（hub {hashlib.sha256(have).hexdigest()[:12]}… 本次 {full_fp[:12]}…）"
+                        "——不覆盖、需人裁决"
                     ),
                 }
             it_dir.mkdir(parents=True, exist_ok=True)
-            _write_bytes(it_dir / "weights.json", wj)
-            if opt:
-                _write_bytes(it_dir / "opt.tar", opt)
+            for name, blob in to_write.items():
+                _write_bytes(it_dir / name, blob)
             _write_bytes(
                 it_dir / "row.json",
                 json.dumps(
@@ -311,6 +424,7 @@ class OfflineRoundsMixin:
                             "run_id": run_id,
                             "it": int(it),
                             "weights_fp": got,
+                            "landed_fp": full_fp,
                             "opt_bytes": len(opt),
                             **(row if isinstance(row, dict) else {}),
                             # ★ 归属身份排在 `**row` **之后**：那是**位置判据**（客户端给的字节不许
@@ -328,20 +442,37 @@ class OfflineRoundsMixin:
                     "run_id": run_id,
                     "it": int(it),
                     "weights_fp": got,
+                    # hub 手上那份（**落地后的整份**）的地址：与 `weights_fp`（回传原件）分开记——
+                    # 读方按"我能不能直接用它"选地址时看这一个。
+                    "landed_fp": full_fp,
                     **_artifact_identity(body, self.hold_meta),
                     "ts": self._now(),
                 }
             )
             self._land_round_metrics(row, run_id=run_id, it=int(it))
+            # 镜像/活动指针/归档一律用**落地后的整份**（那三处是给人/控制台/TS 读的）。
             self._land_offline_round_extras(
                 it=int(it),
                 run_id=run_id,
-                weights_json=wj,
-                opt=opt,
+                weights_json=w_full,
+                opt=o_full,
                 row=row,
                 advance_active=advance_active,
             )
-        return {"status": "accepted", "run_id": run_id, "it": int(it)}
+        if note:
+            print(
+                f"[hub-server] 回传 it{int(it)} 未落地为整份（原件保留，锚点会跳过它）"
+                f"：{note}",
+                flush=True,
+            )
+        return {
+            "status": "accepted",
+            "run_id": run_id,
+            "it": int(it),
+            "landed": landed,
+            "raw_fp": got,
+            "weights_fp": full_fp,
+        }
 
     def _land_round_metrics(self, row: object, *, run_id: str, it: int) -> None:
         """把这一轮的度量搬进**课程侧**（实时回传也能让控制台指标表动起来）。
@@ -488,11 +619,13 @@ class OfflineRoundsMixin:
         # ① 交付镜像（幂等：已存在即不重写；与导入腿同路径同文件名 ⇒ 两腿同构）
         mirror = traj / self.DELIVER_DIR / run_id / f"it-{int(it):03d}"
         try:
-            if not (mirror / "weights.json").exists():
+            if delta_files.find_existing(mirror, "weights.json") is None:
                 mirror.mkdir(parents=True, exist_ok=True)
-                _write_bytes(mirror / "weights.json", weights_json)
+                _write_bytes(
+                    mirror / delta_files.named_for("weights.json", weights_json), weights_json
+                )
                 if opt:
-                    _write_bytes(mirror / "opt.tar", opt)
+                    _write_bytes(mirror / delta_files.named_for("opt.tar", opt), opt)
                 _write_bytes(mirror / "row.json", row_bytes)
         except OSError as e:
             print(f"[hub-server] 补传 it{it} 交付镜像失败（忽略）：{e}", flush=True)
@@ -531,11 +664,18 @@ class OfflineRoundsMixin:
             # 幂等：这一轮的归档已在就不再写。归档名带时间戳（同轮重跑用改名区分），任其重写
             # 会让归档目录堆积同轮副本；而本轮的权重是不可变快照（存储层拒绝覆写），所以
             # “已在”就是全部要告诉我们的信息。
-            if sorted(Path(bdir).glob(f"{prefix}.it{int(it)}.*.json")):
+            # 后缀跟着内容走（2026-10-15）：压缩版 → `.delta` ⇒ 控制台 evalA 的 iter 选择器
+            # （只扫 `*.json`）不会再列出一份解不开的容器；两种名字都算“已在”。
+            wname = delta_files.named_for("weights.json", weights_json)
+            if _archived(Path(bdir), prefix, int(it)):
                 print(f"[hub-server] 补传 it{it} 归档已在（跳过重复）", flush=True)
             else:
                 dst = backup_weights(
-                    str(it_dir / "weights.json"), int(it), prefix=prefix, backup_dir=bdir
+                    str(it_dir / wname),
+                    int(it),
+                    prefix=prefix,
+                    backup_dir=bdir,
+                    suffix=Path(wname).suffix,
                 )
                 print(
                     f"[hub-server] 补传 it{it} 权重已归档 → {dst}"

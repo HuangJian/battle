@@ -58,6 +58,11 @@ from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 
+# 备份抽屉的名字/字节面（三件锚点 + 全量包）与恢复腿**同一份实现**：
+# `remote/offline_deliverable.py` 是 standalone（顶层只 import stdlib）⇒ 不会反向依赖本模块。
+# ⚠ 抽屉目录名（`backup`）不在本模块拼 —— 它由调用方（`open_run_context`）解析后递进来，
+# 免得这里再抄一份；命名硬约束见 `remote/artifacts.BACKUP_DIR_NAME`。
+import remote.delta_files as delta_files
 from common import net_http
 from common.game_watch import DRAIN_CEILING_SEC
 from common.hashing import sha256_file
@@ -74,11 +79,6 @@ from common.protocol import (
     encode_weights_json,
     sanitize_run_id,
 )
-
-# 备份抽屉的名字/字节面（三件锚点 + 全量包）与恢复腿**同一份实现**：
-# `remote/offline_deliverable.py` 是 standalone（顶层只 import stdlib）⇒ 不会反向依赖本模块。
-# ⚠ 抽屉目录名（`backup`）不在本模块拼 —— 它由调用方（`open_run_context`）解析后递进来，
-# 免得这里再抄一份；命名硬约束见 `remote/artifacts.BACKUP_DIR_NAME`。
 from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes
 from remote.offline_deliverable import (
     ALL_ZIP,
@@ -698,7 +698,9 @@ class OfflineDeliverer:
                     "（起点/半截写入）——不上行",
                 )
                 continue
-            if (d / "weights.json").exists():
+            # 名字两态都认（`weights.json`/`weights.delta`，2026-10-15 后缀约定）：产物目录里的
+            # 那一份可能是压缩版（离线腿回传的就是容器，`remote.delta_files.named_for` 按内容定名）。
+            if delta_files.find_existing(d, "weights.json") is not None:
                 out.append(it)
         return out
 

@@ -74,6 +74,11 @@ RUNNER_IMPORTS = {
     # `bringup` 的回场口消费它。`from worker import node_identity` 的顶层名就是**裸包
     # `worker`**（2026-09-30 刀 6 前它在 `biz/`，刀 4 前写作 `from rl import node_identity`）。
     "worker",
+    # 2026-10-15 登记（离线 delta 事故）：nn 腿读盘前先做**读侧落地**
+    # （`remote/weights_standard.read_standard` —— 活动权重可能是离线腿回传的 delta 容器
+    # `BWD1`，hub 原样落位；容器会让本机指纹与节点 cache 键对不上、节点侧 `JSON.parse` 直接报
+    # `Unexpected identifier "BWD1"`）。顶层名是**裸包 `remote`**。
+    "remote",
     "trainer.batch_plan",
     "trainer.batch_store",
     "worker.eval_local",

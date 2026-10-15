@@ -55,6 +55,7 @@ from pathlib import Path
 from typing import Any, NamedTuple
 
 import remote.course_cache as course_cache
+import remote.weights_standard as weights_standard
 from common.protocol import (
     BLOB_INIT,
     BLOB_OPT,
@@ -573,6 +574,25 @@ _SENTINEL_INIT_FP: tuple[str, ...] = ("", "bc")
 WEIGHT_SOURCES: tuple[str, ...] = ("payload", "cache", "preloaded", "download", "legacy_tar")
 
 
+def _is_landed_twin(path: Path, fp: str) -> bool:
+    """`path` 是不是「同一份 init 已经就地落过地」的那份：身子不是容器 + 旁存 `.delta` 的 sha == `fp`。
+
+    为什么需要它（2026-10-15，与读侧落地同一刀）：落地是**就地**改写 `job_dir/init_weights.json`
+    （下游 rollout argv 与 `build_ppo` 都按这个**名字**取件），而声明的 `init_weights_fp` 仍是
+    **容器**的 sha ⇒ 同一个 job 目录**第二次**进来时，W0 那道「payload 与 fp 逐字节相符」的闸
+    必然判不符，然后把一份**已经可用**的整份删掉重取（真走过网的还白付一次 ~380KB 下行；
+    hub 拿不到那一刻更是把一轮本可跑的活干死）。判据用落地器写下的旁存件
+    （`weights_standard.ensure_standard_weights`：`init_weights.delta` = 本轮那份容器，逐字节）。
+    """
+    if weights_standard.is_delta_weights_file(path):
+        return False
+    aside = weights_standard.sibling(path, weights_standard.DELTA_SUFFIX)
+    try:
+        return aside.is_file() and hashlib.sha256(aside.read_bytes()).hexdigest() == fp
+    except OSError:
+        return False
+
+
 def _resolve_weights(
     *,
     job_dir: Path,
@@ -615,9 +635,30 @@ def _resolve_weights(
 
     `init_weights_fp` 是哨兵（`""`/`"bc"`，即 BC job 或全新 run 首轮）：**零网络请求** ——
     payload 有就照用，没有就返回 `none`（§3.2 的 64-hex 规则）。
+
+    ★ 2026-10-15（离线 delta 事故的**读侧**修复面）：五源里任何一源给出的字节都可能是 **delta 容器**
+    （`BWD1`）——离线腿把逐轮 delta 原样回传，hub 只做原样搬运，于是下一轮的 init 也可能长这样
+    （容器头 `base_sha` 指的就是本机那条链上的上一份）。**返回前一律落地成整份**（
+    `weights_standard.ensure_standard_weights`，基准逐字节对上才落；整份只读 4 字节 ⇒ 稳态零成本）：
+      * 下游两处硬需求：`--weights init_weights.json`（rollout argv）与 `build_ppo` 读 arch ——
+        容器喂进去就是 `JSON.parse` 报 `Unexpected identifier "BWD1"`（用户 2026-10-15 现场）；
+      * 传输账不动：落地是本机计算，`wire_bytes` 仍只统计真走过网络的字节；
+      * 落地件**没有**换 key：`manifest.init_weights_fp`（= hub 声明的字节地址）原样回显
+        （`worker.run_job` 回显的是 manifest 字段，不是重算文件 sha）⇒ fencing 对账不受影响；
+      * 但**同一个 job 目录第二次进来**时 W0 会看到「文件 sha ≠ 声明的 fp」（文件已被就地落成
+        整份）——那不是坏字节，是**我们自己落的**（判据 `_is_landed_twin`：旁存 `.delta` 的 sha
+        == fp）。没有这一条就会误报「损坏」并把一份可用整份删掉重取。
     """
     path = job_dir / "init_weights.json"
     fp = str(init_weights_fp or "")
+
+    def _landed(src: str, wire: int) -> tuple[Path, str, int]:
+        """把 `path` 落地成整份后返回（是整份则原样返回，零成本）。"""
+        if path.is_file() and weights_standard.is_delta_weights_file(path):
+            weights_standard.ensure_standard_weights(path, blob_root=blob_root, log=log)
+            log(f"job {jid}: init 是 delta 容器 ⇒ 本机就地落地成整份（基准逐字节对上）")
+        return path, src, wire
+
     # ---- R0 身份命中（先于 W0：零字节 + 零降质；判据全在 `course_cache.hit`）----
     if str(opt_from or "") and str(course_fp or ""):
         local = course_cache.hit(
@@ -633,15 +674,17 @@ def _resolve_weights(
             # 零字节命中也要进传输账（与 code/ts_code 同规；`why` 让摘要能区分是身份命中）
             _wire_hit(jid, "init:local", "course_cache")
             log(f"job {jid}: init 身份命中（course_cache/{str(course_fp)[:8]}…）——本机 f32 副本，零字节")
-            return path, "course_cache", 0
+            return _landed("course_cache", 0)
     if fp in _SENTINEL_INIT_FP or not is_content_sha(fp):
         if path.exists():
-            return path, "payload", 0
+            return _landed("payload", 0)
         return None, "none", 0
     # ---- W0：payload 内那份（随包可离线跑）—— **照样校 sha**（§3.2 / 评审 F4）----
     if path.exists():
         raw = path.read_bytes()
         if hashlib.sha256(raw).hexdigest() == fp:
+            return _landed("payload", 0)
+        if _is_landed_twin(path, fp):  # 上一轮就地落地过的那份（同一个 job 目录重入）
             return path, "payload", 0
         # 坏字节：作废这份 + 记一行 + 回源（绝不用坏字节，也绝不静默）
         log(f"job {jid}: payload 内 init_weights.json 与 init_weights_fp 不符 —— 作废，改走 blob")
@@ -674,7 +717,7 @@ def _resolve_weights(
     resolved = "cache" if (hit and src == "cache") else src
     if resolved != "cache":
         log(f"job {jid}: init 权重来源 src={resolved}（{len(raw)} bytes，fp={fp[:12]}…）")
-    return path, resolved, (len(raw) if resolved == "download" else 0)
+    return _landed(resolved, (len(raw) if resolved == "download" else 0))
 
 
 class PayloadLanded(NamedTuple):

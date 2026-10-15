@@ -105,8 +105,20 @@ SLOT_HANDS: dict[str, tuple[str, ...]] = {
 #: 无限课那道的响亮行要报**硬上界**到底是多少，而那个数只能从**同一个常量**读——再抄一份
 #: 到本模块就等于把「预判与真闸不许漂」的那一条（同 plan §3.4「同口径对账」）自己拆了。
 #: `common.*` 是 L0，不构成反向边（`FORBIDDEN_IMPORTS` 一个不沾）。
+#: ★ 2026-10-15 登记一格 `remote`（离线 delta 事故）：包的**起点权重**取自 `args.out`，而
+#: 离线腿逐轮回传的是 delta 容器（`BWD1`，hub 原样落位）—— 云机要把它当权重装载，容器会让
+#: 整段在 PPO 之前 `JSON.parse` 报 `Unexpected identifier "BWD1"`。落地调用是
+#: `remote/weights_standard.ensure_standard_weights`（幂等；整份只读 4 字节）。顶层名是
+#: **裸包 `remote`**（`from remote import weights_standard`）；`FORBIDDEN_IMPORTS` 一个不沾。
 TOP_IMPORTS = frozenset(
-    {"common.distribution", "worker.archive", "common.log", "worker.modes", "common.protocol"}
+    {
+        "common.distribution",
+        "worker.archive",
+        "common.log",
+        "worker.modes",
+        "common.protocol",
+        "remote",
+    }
 )
 STDLIB_IMPORTS = frozenset({"pathlib", "typing"})
 

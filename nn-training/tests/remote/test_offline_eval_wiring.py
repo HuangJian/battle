@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import sys
 import time
+import urllib.parse
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -373,21 +374,22 @@ def test_fetch_resume_pulls_all_three_parts_or_gives_up(
         seen.append(url)
         if "name=" not in url:
             return _Resp(json.dumps(meta).encode("utf-8"))
-        if "name=opt.tar" in url:
-            raise RuntimeError("boom")  # 第二件拿不到 ⇒ 整个锚点作废
+        # 动量那件**两个形态**都拿不到 ⇒ 整个锚点作废（只缺一个形态时下一个候选名会顶上）。
+        if "name=opt.tar" in url or "name=opt.delta" in url:
+            raise RuntimeError("boom")
         return _Resp(b'{"w":7}')
 
     monkeypatch.setattr(offline_boot, "_build_opener", lambda: SimpleNamespace(open=fake_open))
     logs: list[str] = []
     assert offline_boot.fetch_resume("https://h", "t", COURSE, tmp_path / "r", logs.append) is None
     assert any("放弃该锚点" in m for m in logs)
-    assert len(seen) == 3 and "name=weights.json" in seen[1]
+    assert len(seen) == 4 and "name=weights.json" in seen[1]
     # ★ 2026-10-14 事故（plan/offline-segment-restart §1.3）：三件的**字节**必须走 `.../resume/blob`。
     # hub 按**路径等值**分派（`hub/http_face.py:425/427`），把 `?it=&name=` 加在元信息那条路径上会
     # 被整个忽略 ⇒ 每次拿回 55KB 元信息 JSON ⇒ `run_loop` 的指纹闸判「传输损坏」⇒ **锚点在云机侧
     # 100% 失效**（一直静默退回包自带起点）。当年这条缺口没有用例 ⇒ 这里钉死两条 URL 的形状。
     assert seen[0] == f"https://h{offline_boot.OFFLINE_RESUME_PATH}?course={COURSE}"
-    for u, name in zip(seen[1:], ("weights.json", "opt.tar"), strict=True):
+    for u, name in zip(seen[1:], ("weights.json", "opt.tar", "opt.delta"), strict=True):
         assert u.startswith(f"https://h{offline_boot.OFFLINE_RESUME_BLOB_PATH}?course={COURSE}&"), u
         assert u.endswith(f"&it=7&name={name}"), u
 
@@ -412,6 +414,98 @@ def test_fetch_resume_pulls_all_three_parts_or_gives_up(
         lambda: SimpleNamespace(open=lambda req, timeout=0: _Resp(b'{"course": "c", "resume": null}')),
     )
     assert offline_boot.fetch_resume("https://h", "t", COURSE, tmp_path / "none", logs.append) is None
+
+
+def _fake_hub(
+    meta: dict, *, bodies: dict[str, bytes], fail: tuple[str, ...] = ()
+) -> SimpleNamespace:
+    """造一个只认三条 URL 形状的假 hub（`name=`/`it=` 从查询串里读）。
+
+    `bodies` 的键 = `"<it>:<name>"`（缺键 ⇒ 404 风格的 RuntimeError，与 `_resume_blob` 的容错路径一致）。
+    """
+
+    class _Resp:
+        def __init__(self, body: bytes) -> None:
+            self._body = body
+
+        def read(self) -> bytes:
+            return self._body
+
+        def __enter__(self) -> _Resp:
+            return self
+
+        def __exit__(self, *_a: object) -> None:
+            return None
+
+    def open_(req: object, timeout: float = 0) -> _Resp:
+        url = getattr(req, "full_url", "")
+        if "name=" not in url:
+            return _Resp(json.dumps(meta).encode("utf-8"))
+        q = urllib.parse.parse_qs(urllib.parse.urlparse(url).query)
+        key = f"{q['it'][0]}:{q['name'][0]}"
+        if key in fail or key not in bodies:
+            raise RuntimeError(f"404-ish: {key}")
+        return _Resp(bodies[key])
+
+    return SimpleNamespace(open=open_)
+
+
+def test_fetch_resume_follows_the_names_the_hub_advertises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """hub 在 meta 里报**实际文件名**（`files`）⇒ 客户端照它取（不拿另一个名白撞一次）。
+
+    为什么要有这个键：hub 树里名字跟着内容走（整份 `weights.json` / 旧数据的 `weights.delta`）；
+    客户端固定写死一种名字，遇上另一种就是 404 ⇒ 整个锚点静默失效。落盘也照 hub 给的名字
+    （`run_loop` 那边两态都认）。这里用整份名（2026-10-15 用户口径：hub 只交整份）。
+    """
+    meta = {
+        "course": COURSE,
+        "resume": {
+            "it": 7,
+            "run_id": "run-a",
+            "source": "backfeed",
+            "weights_fp": "a" * 64,
+            "files": {"weights": "weights.json", "opt": "opt.tar", "row": "row.json"},
+        },
+    }
+    seen: list[str] = []
+    fake = _fake_hub(
+        meta,
+        bodies={
+            "7:weights.json": b'{"w":7}',
+            "7:opt.tar": b"x",
+            "7:row.json": b"{}",
+        },
+    )
+    inner = fake.open
+
+    def open_(req: object, timeout: float = 0) -> object:
+        seen.append(getattr(req, "full_url", ""))
+        return inner(req, timeout)
+
+    monkeypatch.setattr(offline_boot, "_build_opener", lambda: SimpleNamespace(open=open_))
+    logs: list[str] = []
+    got = offline_boot.fetch_resume("https://h", "t", COURSE, tmp_path / "r", logs.append)
+    assert got == tmp_path / "r"
+    assert (got / "it-007" / "weights.json").read_bytes() == b'{"w":7}'
+    assert (got / "it-007" / "opt.tar").exists()
+    names = [urllib.parse.parse_qs(urllib.parse.urlparse(u).query).get("name", [""])[0] for u in seen]
+    assert names[1:4] == ["weights.json", "opt.tar", "row.json"], names  # [0] = 元信息那条
+
+    # 旧 hub 没报 `files`（或者只留下 `*.delta`）⇒ 两个候选名各试一次，拿到就停。
+    meta2 = {"course": COURSE, "resume": {"it": 7, "run_id": "run-a", "weights_fp": ""}}
+    fake2 = _fake_hub(
+        meta2,
+        bodies={"7:weights.delta": b"BWD1-legacy", "7:opt.tar": b"x", "7:row.json": b"{}"},
+    )
+    monkeypatch.setattr(
+        offline_boot, "_build_opener", lambda: SimpleNamespace(open=fake2.open)
+    )
+    got2 = offline_boot.fetch_resume("https://h", "t", COURSE, tmp_path / "r2", logs.append)
+    assert got2 == tmp_path / "r2"
+    assert (got2 / "it-007" / "weights.delta").read_bytes() == b"BWD1-legacy"
+
 
 
 # ─────────────────────────── 人工导入那条回程 ───────────────────────────

@@ -14,8 +14,10 @@
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
+import struct
 import sys
 import threading
 import urllib.error
@@ -35,6 +37,7 @@ from common.protocol import (
     COURSE_ENABLE_MARKER,
     OFFLINE_ARTIFACT_PATH,
     OFFLINE_RESULT_PATH,
+    encode_opt_tar,
     encode_weights_json,
 )
 from hub.server import _HubQueue, _JobStore, make_server
@@ -83,10 +86,10 @@ def _post(base: str, path: str, body: dict) -> tuple[int, dict]:
     return status, loaded if isinstance(loaded, dict) else {}
 
 
-def _round_body(it: int, weights: bytes, *, run_id: str) -> dict:
+def _round_body(it: int, weights: bytes, *, run_id: str, opt: bytes = b"") -> dict:
     """一轮补传体的最小形状（weights + 逐轮行；指纹两侧一致，先过入口校验）。"""
     fp = hashlib.sha256(weights).hexdigest()
-    return {
+    body: dict = {
         "course": COURSE,
         "run_id": run_id,
         "it": it,
@@ -94,6 +97,170 @@ def _round_body(it: int, weights: bytes, *, run_id: str) -> dict:
         "weights_fp": fp,
         "row": {"it": it, "weights_fp": fp},
     }
+    if opt:
+        body["opt_tar_b64"] = encode_opt_tar(opt)
+    return body
+
+
+def _weights_json(params: dict[str, list[float]]) -> bytes:
+    """一份真形状的 `nn-weights-json`（params = `{名字: f32 列表}`）。"""
+    out: dict[str, dict[str, object]] = {}
+    for name, vals in params.items():
+        out[name] = {
+            "shape": [len(vals)],
+            "data": base64.b64encode(struct.pack(f"<{len(vals)}f", *vals)).decode("ascii"),
+        }
+    return json.dumps({"format": "nn-weights-json", "params": out}).encode("utf-8")
+
+
+def test_backfeed_lands_delta_containers_into_full_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """★ 2026-10-15（用户口径）：hub 收到 delta **就地重建为整份**（hub 树里再没有容器）。
+
+    口径原话：*只有 hub 和回传进程知道有 delta 这玩意儿* —— 云机按形态位回传压缩版，hub 受理
+    时当场落地（`hub/deltas.py`），此后回传树/交付镜像/活动指针/归档全是整份，派发侧永远只发整份
+    （云机已有就不传 = 既有指纹 + blob_cache）。
+
+    覆盖三条：① 落地成功（回传树 = `weights.json` 整份 + `weights.delta` 原件、活动指针与镜像
+    也是整份、应答里报 `landed`）；② **基准不在 hub 侧** ⇒ 原件保留 + `failed`（不静默、不丢字节）；
+    ③ 那种轮次不能当锚点交回云机（`resume_anchor` 跳过它）。
+    """
+    from remote.weights_delta import pack_weights_delta
+
+    base = _weights_json({"stem.weight": [0.1, 0.2, 0.3]})
+    new = _weights_json({"stem.weight": [0.5, -0.2, 0.9]})
+    container = pack_weights_delta(base, new, base_sha=hashlib.sha256(base).hexdigest())
+    assert container[:4] == b"BWD1"
+
+    base_url, hub, srv = _boot(tmp_path)
+    try:
+        # 基准 = 上一轮的整份（hub 自己发出去/刚落地的那份）：按产物链的形状摆在 it-001
+        prev = tmp_path / COURSE / "remote-jobs" / "offline" / "run-a" / "it-001"
+        prev.mkdir(parents=True, exist_ok=True)
+        (prev / "weights.json").write_bytes(base)
+        st, res = _post(
+            base_url,
+            OFFLINE_ARTIFACT_PATH,
+            _round_body(2, container, run_id="run-a", opt=b"opt"),
+        )
+        assert st == 200 and res.get("status") == "accepted", (st, res)
+        assert res.get("landed", {}).get("weights") == "landed", res
+
+        it2 = tmp_path / COURSE / "remote-jobs" / "offline" / "run-a" / "it-002"
+        full = (it2 / "weights.json").read_bytes()
+        assert json.loads(full.decode("utf-8"))["params"]["stem.weight"]["shape"] == [3]
+        assert (it2 / "weights.delta").read_bytes() == container, "原件两版都留（名字自述形态）"
+        # 活动指针与交付镜像也是**整份**（它们是给本机循环/控制台/TS 读的）
+        ptr = tmp_path / COURSE / "weights.json"
+        assert ptr.is_file() and ptr.read_bytes() == full
+        mirror = tmp_path / COURSE / "deliver" / "run-a" / "it-002" / "weights.json"
+        assert mirror.read_bytes() == full
+        # 账本行分开记：`weights_fp` = 回传原件，`landed_fp` = hub 手上那份整份
+        rows = [
+            json.loads(x)
+            for x in (tmp_path / COURSE / "remote-jobs" / "offline" / "run-a" / "metrics.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if x.strip()
+        ]
+        row = [r for r in rows if r.get("it") == 2][-1]
+        assert row["weights_fp"] == hashlib.sha256(container).hexdigest()
+        assert row["landed_fp"] == hashlib.sha256(full).hexdigest()
+        # 锚点交回云机的就是那份整份
+        anchor = hub.resume_anchor(COURSE)
+        assert anchor is not None and anchor["it"] == 2 and anchor["files"]["weights"] == "weights.json"
+
+        # ② 基准不在 hub 侧（没有 it-003 能靠的上一轮）⇒ failed + 原件保留
+        nowhere = _weights_json({"stem.weight": [9.0, 9.0, 9.0]})
+        orphan = pack_weights_delta(nowhere, new, base_sha=hashlib.sha256(nowhere).hexdigest())
+        st2, res2 = _post(
+            base_url,
+            OFFLINE_ARTIFACT_PATH,
+            _round_body(9, orphan, run_id="run-a", opt=b"opt"),
+        )
+        assert st2 == 200 and res2.get("status") == "accepted", (st2, res2)
+        assert res2.get("landed", {}).get("weights") == "failed", res2
+        it9 = tmp_path / COURSE / "remote-jobs" / "offline" / "run-a" / "it-009"
+        assert (it9 / "weights.delta").read_bytes() == orphan
+        assert not (it9 / "weights.json").is_file()
+        # ③ 还是容器的轮次不能当锚点（云机没有链可解）
+        assert hub.resume_anchor(COURSE)["it"] == 2  # type: ignore[index]
+    finally:
+        srv.shutdown()
+
+
+def _container_pair() -> tuple[bytes, bytes]:
+    """`(基准整份, delta 容器)` —— 闭环用的一对（容器头指向那份基准）。"""
+    from remote.weights_delta import pack_weights_delta
+
+    base = _weights_json({"stem.weight": [0.1, 0.2, 0.3]})
+    new = _weights_json({"stem.weight": [0.5, -0.2, 0.9]})
+    return base, pack_weights_delta(base, new, base_sha=hashlib.sha256(base).hexdigest())
+
+
+def test_repeat_after_a_failed_landing_heals_the_round(tmp_path: Path) -> None:
+    """落地失败过的那一轮，重传时必须**补落整份**（duplicate + 自愈），而不是干说一句幂等。
+
+    形状：第一次回传时基准还不在 hub 侧 ⇒ 只落 `weights.delta`（原件保留，锚点跳过它，见上一格）。
+    基准随后到位（换机续传/前一轮晚到）再传同一轮 ⇒ 若只回 duplicate 不落整份，那一轮**永远**
+    当不了锚点（`resume_anchor` 会一直跳过），只能人工跑清扫工具。
+    """
+    base, container = _container_pair()
+    base_url, hub, srv = _boot(tmp_path)
+    try:
+        body = _round_body(2, container, run_id="run-a", opt=b"opt")
+        st, res = _post(base_url, OFFLINE_ARTIFACT_PATH, body)
+        assert st == 200 and res.get("landed", {}).get("weights") == "failed", (st, res)
+        it2 = tmp_path / COURSE / "remote-jobs" / "offline" / "run-a" / "it-002"
+        assert not (it2 / "weights.json").is_file()
+
+        prev = tmp_path / COURSE / "remote-jobs" / "offline" / "run-a" / "it-001"
+        prev.mkdir(parents=True, exist_ok=True)
+        (prev / "weights.json").write_bytes(base)  # 基准晚到
+
+        st2, res2 = _post(base_url, OFFLINE_ARTIFACT_PATH, body)
+        assert st2 == 200 and res2.get("status") == "duplicate", (st2, res2)
+        assert res2.get("landed", {}).get("weights") == "landed", res2
+        full = (it2 / "weights.json").read_bytes()
+        assert json.loads(full.decode("utf-8"))["params"]["stem.weight"]["shape"] == [3]
+        assert (it2 / "weights.delta").read_bytes() == container
+        assert hub.resume_anchor(COURSE)["it"] == 2  # type: ignore[index]
+    finally:
+        srv.shutdown()
+
+
+def test_legacy_container_round_repeat_is_duplicate_not_conflict(tmp_path: Path) -> None:
+    """旧数据（`weights.json` 里装着容器）同一份字节重传 ⇒ **duplicate**（顺手补落整份），不是 409。
+
+    旧 hub 把容器原样写进 `weights.json`（名字没跟着内容走），而那正是现场 `tmp/y5-term` 的形状。
+    丢包/超时重传=常态（`store_offline_artifact` 自己的注释就是这么写的），客户端又把 409 当硬拒
+    （`remote/offline_deliver._reject_round`）⇒ 「字节完全相同」被判成「不同字节、需人裁决」会把
+    一轮正确产物永久挡在门外。
+    """
+    base, container = _container_pair()
+    base_url, hub, srv = _boot(tmp_path)
+    try:
+        prev = tmp_path / COURSE / "remote-jobs" / "offline" / "run-a" / "it-001"
+        prev.mkdir(parents=True, exist_ok=True)
+        (prev / "weights.json").write_bytes(base)
+        legacy = tmp_path / COURSE / "remote-jobs" / "offline" / "run-a" / "it-002"
+        legacy.mkdir(parents=True)
+        (legacy / "weights.json").write_bytes(container)  # ← 旧形状：`.json` 里是容器
+        (legacy / "opt.tar").write_bytes(b"opt")
+        (legacy / "row.json").write_text("{}", encoding="utf-8")
+
+        st, res = _post(
+            base_url,
+            OFFLINE_ARTIFACT_PATH,
+            _round_body(2, container, run_id="run-a", opt=b"opt"),
+        )
+        assert st == 200 and res.get("status") == "duplicate", (st, res)
+        assert not (legacy / "weights.json").read_bytes().startswith(b"BWD1"), "自愈：就地补落整份"
+        assert (legacy / "weights.delta").read_bytes() == container, "原件旁存（两版都留）"
+        assert hub.resume_anchor(COURSE)["it"] == 2  # type: ignore[index]
+    finally:
+        srv.shutdown()
 
 
 def _export_pack(tmp_path: Path, *, run_id: str, plan: bytes, monkeypatch) -> Path:

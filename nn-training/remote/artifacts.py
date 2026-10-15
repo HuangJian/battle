@@ -54,6 +54,30 @@ from typing import Any
 from common.fs import atomic_write_bytes, atomic_write_json
 from common.hashing import sha256_bytes, sha256_file  # re-export：调用点与测试不变
 
+#: 仓库根（`nn-training/remote/artifacts.py` 上溯两层）。
+REPO_ROOT = Path(__file__).resolve().parents[2]
+#: 权重归档根（`nn-training/weights/`；即 `biz.archive.backup_weights` 的缺省目录）。
+#: **唯一定义处**（2026-10-15 去重）：回传落归档的 `hub.store_offline` 与读侧落地的
+#: `remote.weights_standard` 都站在它上面 —— 之前两处各留一份副本，各自定义 `_archive_root` /
+#: `_weights_archive_root`（逐字节重复，reuse 账本当场红）；两者都够得着的**最低层**
+#: 就是这里（L0 产物模块，双方本来就在它上面）。
+WEIGHTS_ARCHIVE_ROOT = REPO_ROOT / "nn-training" / "weights"
+#: 归档根的**测试隔离开关**（2026-09-23）：设了就改用它。为什么必须有：回传轮会往归档根写
+#: `<课>.it<N>.<时间戳>.json`，而工装用例不得往真归档目录撒文件——那些文件会被控制台的
+#: evalA 权重选择器（`eval-board/ckpts.ts` 扫 `nn-training/weights/<leg>/`）当成真训练轮次
+#: 列出来。env 形态（而不是只留可 patch 的模块常量）是因为 e2e 那条是真子进程
+#: （`e2e/test_offline_training_e2e.py` 拉 `hub.server`），patch 传不进去。
+WEIGHTS_ARCHIVE_ROOT_ENV = "BCITY_WEIGHTS_ARCHIVE_ROOT"
+
+
+def weights_archive_root() -> Path:
+    """当前归档根（`BCITY_WEIGHTS_ARCHIVE_ROOT` 优先，缺省 `nn-training/weights`）。
+
+    **调用时读** env（不是 import 时算一次）——这样测试能在同一进程里 monkeypatch。
+    """
+    raw = os.environ.get(WEIGHTS_ARCHIVE_ROOT_ENV, "")
+    return Path(raw) if raw else WEIGHTS_ARCHIVE_ROOT
+
 # 本模块此前自留一份 `sha256_file` / `sha256_bytes`，注释理由是「不依赖 common.distribution 的
 # 导入，纯 stdlib（云端产物目录也可能被单独搬运）」。诉求成立，落点换成 `common.hashing`
 # ——它同样是纯 stdlib，且全仓只有一份定义（`wver` / init 指纹 / blob 键的「同字节同

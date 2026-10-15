@@ -33,16 +33,13 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import remote.delta_files as delta_files
 from common.cli import house_parser, run_main
 from hub.server import _JobStore
 
 # `_weights_archive_root` 随归档那段一起搬进了离线段混入（S4：`hub_server` 收口成门面后
 # 自己不再有实现）——它读的仍是同一个 env，而 `_JobStore` 从门面取（名字是契约）。
-from hub.store_offline import _weights_archive_root
-
-#: 记录三件齐全的判据（与 `_JobStore.RESUME_PARTS` 同源：缺 opt 就是动量归零、缺 row 就是
-#: 曲线少一行 —— 两者都是"看起来能跑但读数少一截"）。
-_PARTS = _JobStore.RESUME_PARTS
+from hub.store_offline import _round_is_complete, _weights_archive_root
 
 
 def backfill_course(traj_root: Path, course: str, *, log=print) -> dict:
@@ -64,7 +61,11 @@ def backfill_course(traj_root: Path, course: str, *, log=print) -> dict:
                 it = int(it_dir.name[3:])
             except ValueError:
                 continue
-            if all((it_dir / n).is_file() for n in _PARTS):
+            # 齐不齐的判据与 hub 受理回传时**共用一份实现**（`_round_is_complete`：权重/动量
+            # 两个后缀都认，名字由 `remote.delta_files.named_for` 按内容定）。自己写
+            # `all((it_dir / n).is_file() …)` 会把压缩版轮次（`weights.delta`/`opt.delta`）
+            # 全跳过：补做“成功”了但一轮也没补（静默）。
+            if _round_is_complete(it_dir):
                 rounds.append((it, it_dir))
     counts = {"rounds": 0, "mirrored": 0, "archived": 0, "skipped": 0}
     if not rounds:
@@ -75,11 +76,15 @@ def backfill_course(traj_root: Path, course: str, *, log=print) -> dict:
         run_id = it_dir.parent.name
         before = _archived_names(it)
         try:
+            w_file = delta_files.find_existing(it_dir, "weights.json")
+            o_file = delta_files.find_existing(it_dir, "opt.tar")
+            if w_file is None:  # `_round_is_complete` 上面已判齐全；这行只为收窄类型（不会命中）
+                continue
             store._land_offline_round_extras(
                 it=it,
                 run_id=run_id,
-                weights_json=(it_dir / "weights.json").read_bytes(),
-                opt=(it_dir / "opt.tar").read_bytes() if (it_dir / "opt.tar").is_file() else b"",
+                weights_json=w_file.read_bytes(),
+                opt=(o_file.read_bytes() if o_file is not None else b""),
                 row=json.loads((it_dir / "row.json").read_text(encoding="utf-8")),
             )
         except (OSError, ValueError) as e:

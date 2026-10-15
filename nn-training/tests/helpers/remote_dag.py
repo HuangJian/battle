@@ -180,12 +180,31 @@ LAYERS: dict[str, int] = {
     # 守卫连函数内 `import torch` 也算「碰上层」，理由见模块头）。
     "remote.opt_delta": 0,
     "remote.weights_delta": 0,
+    # 两份**读侧落地器**（`weights_standard` / `opt_standard`）的共用零件（2026-10-15）：
+    # 魔数判形 / 兄弟名 / traj 认根 / 候选扫描——抽出来之前两处各留一份逐字节相同的实现，
+    # 复用账本当场多出 4 组。顶层只 import stdlib（连 `common.*` 都不碰）⇒ **L0**。
+    "remote.delta_files": 0,
+    # 读侧自动落地（2026-10-15，离线 delta 事故）：delta 容器 → 整份 nn-weights-json。
+    # 只 import `common.errors` / `common.fs`（叶子）+ `remote.weights_delta`(L0) ⇒ **L1**；
+    # 读者是 `remote.download`(L3，init 五源返回前落地) 与 `trainer.*`（推权重前落地）。
+    "remote.weights_standard": 1,
+    # opt 那一半的同款读侧落地（2026-10-15，同一场事故：`tmp/y5-term` it-237 的 opt.tar 头 4 字节
+    # 就是 BOD1，消费者解包 `ReadError: invalid header`）。只 import `common.errors` / `common.fs`
+    # （叶子）+ `remote.opt_delta`(L0) ⇒ **L1**；读者是 `remote.plan_run`(L6/`_run_iteration`)、
+    # `remote.plan_handoff`(L5/起点播种) 与 `remote.train_core`(restore 段) —— 边一律严格向下。
+    "remote.opt_standard": 1,
     "remote.hub_client": 1,
     # 2026-10-10（plan/cluster-code-snapshot）：集群代码快照——会话级 `code.zip` 锚点。
     # 它只 import `remote.hub_client`(L1) 的 `pack_code_zip` + `common.*` ⇒ 拓扑秩 1 + 1 = **L2**；
     # 消费侧（`hub.queue_observe` / `trainer.*`）都在它上面，边一律严格向下。
     "remote.code_snapshot": 2,
     "hub.store_offline": 1,
+    # 回传 delta 的 **hub 侧就地落地**（2026-10-15 用户口径：delta 只活在「回传进程 + hub 落地器」
+    # 之间，hub 收到就地重建为整份，派发侧永远只发整份）。顶层只 import `remote.delta_files`(L0)
+    # 与 stdlib；两个落地器（`remote.weights_standard` / `remote.opt_standard`，均 L1）是**函数体内
+    # 惰性 import**（hub 的启动闭包不得拉 numpy/torch —— `test_hub_import_graph`；由控制台用 venv
+    # python 起 hub-server，运行期本来就有）。层号按最深依赖算 = 1 + 1 ⇒ **L2**。
+    "hub.deltas": 2,
     # `_JobStore` 组合类（S4 第十五刀）：第十四刀把六个域混入拆到 `hub/store_*.py`，本刀把组合类
     # 本身也从 `hub_server` 搬出来 —— 不是对称好看，而是 `_HubQueue` 的课程表域要**构造** store、
     # `_store_of` 要**注解**它，而 `hub/*` 不得 import `hub_server`（成环）。

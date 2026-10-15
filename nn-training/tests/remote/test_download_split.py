@@ -73,6 +73,10 @@ ALLOWED_IMPORTS = {
     "remote.course_cache",
     "remote.http",
     "remote.job_fs",
+    # 2026-10-15（离线 delta 事故）：`_resolve_weights` 返回前把 delta 容器落地成整份
+    # （`remote.weights_standard`，L1：只靠 `common.*` + `remote.weights_delta`）。
+    # 方向仍是向下（download 是 L3）——允许清单放行的是**层**，不是「随便多一个依赖」。
+    "remote.weights_standard",
     "remote.wire",
 }
 

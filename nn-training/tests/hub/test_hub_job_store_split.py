@@ -227,7 +227,18 @@ ALLOWED_IMPORTS = {
     "hub.store_scheduling": {"common.protocol"},
     "hub.store_leases": {"common.protocol"},
     "hub.store_results": {"common.protocol"},
-    "hub.store_offline": {"common.fs", "common.protocol", "remote.artifacts"},
+    # `remote.delta_files`（2026-10-15）：回传轮的权重/动量**名字随形态走**
+    # （`weights.json`/`weights.delta`）⇒ 齐全判据与落盘定名要走它的 `find_existing`/`named_for`。
+    # 它是 **L0**（顶层只 import stdlib，连 `common.*` 都不碰）⇒ 本簇仍是 L1，边向下。
+    # ⚠ 就地落地器（`hub.deltas`，L2）**不在**这里：它是**注入**进 `store_offline_artifact` 的
+    #   `stage`（调用方 `hub/queue_resume` 给）—— import 它会把本叶子顶到 L3 而整个 hub 栈跟着
+    #   涨一层（层号 = 拓扑秩，`tests/test_remote_dag.py`）。
+    "hub.store_offline": {
+        "common.fs",
+        "common.protocol",
+        "remote.artifacts",
+        "remote.delta_files",
+    },
 }
 
 #: ★ 点名登记：允许碰哪些**纯逻辑** `biz` 模块（缺省空 = 一个都不许）。
@@ -580,6 +591,9 @@ def test_the_offline_writer_moved_with_its_only_caller() -> None:
         )
 
     # 9 = 原有 5 处（自回传产物）+ 并入 origin 的 4 处（交付镜像 it-NNN 三件 + 活动权重指针）
+    #     − 1（2026-10-15 后缀约定：权重/动量那处两形态各写各的名字，两个显式调用并成一个
+    #     `for name, blob in to_write.items()` 循环）
+    #     + 1（2026-10-15 幂等自愈：`_heal_round` 给「形态没到位」的名字补落，同一份内容）
     assert _calls(HUB_DIR / "store_offline.py") == 9, "离线簇的 _write_bytes 调用点变了"
     for other in DOMAINS:
         if other != "store_offline":

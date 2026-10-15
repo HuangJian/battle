@@ -31,6 +31,9 @@ ALL_ZIP = "artifacts.zip"
 LATEST_ZIP = "LATEST.zip"
 #: 产物目录的三件「续跑真值」+ 每轮权重名（与 `remote/offline_boot.py` / `remote/artifacts.py`
 #: 逐字相同；测试守 —— 同 `ALL_ZIP` 那条孪生对账关系）。
+#: ⚠ 这两个名字是**写入侧**的规范名（`ArtifactStore.checkpoint` 与导出器都用它）；读侧一律
+#: 两态都认（`weights.json`/`weights.delta`、`opt.tar`/`opt.delta`，2026-10-15 后缀约定，
+#: 判据与展开在 `remote.delta_files.variants`）——hub 树/人工导入的包里，名字跟着**内容**走。
 STATE_NAME = "state.json"
 PLAN_NAME = "plan.json"
 MANIFEST_NAME = "manifest.json"

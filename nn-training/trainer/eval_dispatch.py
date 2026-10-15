@@ -19,6 +19,7 @@ from typing import Any
 
 import common.distribution
 from common.log import log
+from remote import weights_standard
 from trainer.dispatch_queue import _record_agent_meta, bun_version, mm
 from trainer.queue_local import pick_race_target, register_inflight
 from worker import node_identity
@@ -866,6 +867,9 @@ class EvalDispatcher:
                 log("[eval] no eval-capable node — local-only eval this round")
 
             # 幂等下发（节点通常已持有 → kept 短路径；agent 重启过则补发）——并行
+            # ★ 2026-10-15：与 rollout 腿同一口径——推之前先把 delta 容器落地成整份
+            #   （评估节点自己也 `JSON.parse` 这个文件）。
+            weights_standard.ensure_standard_weights(rl_path, log=log)
             with open(rl_path, "rb") as f:
                 weights_bytes = f.read()
             nodes_ok = (

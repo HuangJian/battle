@@ -4,7 +4,7 @@
 
     GET  /offline/task-pack         整段任务包 `task-<课>.zip`（云机连上 hub 就先取包）
     GET  /offline/resume            续跑锚点元信息（`resume: null` 是**正常应答**，不是 404）
-    GET  /offline/resume/blob       锚点轮次的字节（三道门：鉴权 → 名字白名单 → 就是当前锚点）
+    GET  /offline/resume/blob       锚点轮次的字节（鉴权 → 名字白名单 → 就是当前锚点；**只发整份**）
     POST /offline/artifact          逐轮产物补传（按 (run_id, it) 幂等、首写锁定）
     POST /offline/result            段末摘要（覆盖写：它是「这条腿到哪了」的最新答案）
 
@@ -72,6 +72,11 @@ _ADVANCE_SKIP_TEXT = {
     "hold_stale": "持有人的进度已静默超阈（stale）——迟到回传不夺回起点",
     "hold_token": "租约 token 不符（不是本课当前持有人）",
 }
+
+# 递字节端点允许的文件名 = 锚点三件（`OFFLINE_RESUME_BLOB_NAMES`），不再另立一个别名：
+# ★ 2026-10-15（用户口径）锚点**只发整份** —— hub 受理回传时已就地落地（`hub/deltas.py`），
+# `resume_anchor` 也只会选整份轮次 ⇒ 不需要 `.delta` 变体（那些是「落地失败」的痕迹，
+# 既不交回也不派发）。
 
 
 class OfflineRoutes:
@@ -241,10 +246,14 @@ class OfflineRoutes:
 
 
     def _get_offline_resume_blob(self) -> None:
-        """`GET /offline/resume/blob?course=<课>&it=N&name=<件>`：递锚点轮次的字节。
+        """`GET /offline/resume/blob?course=<课>&it=N&name=<件>`：递锚点轮次的字节（**只发整份**）。
 
         三道门：鉴权 → `name` 白名单（`OFFLINE_RESUME_BLOB_NAMES`）→ 「该 it 就是当前锚点」
         （只服务锚点本身，不接受任意 it/任意路径——这里不是通用文件服务）。
+
+        为什么只发整份（2026-10-15 用户口径）：delta 只活在「回传进程 + hub 落地器」之间，
+        hub 树里剩下的都是落地后的整份；`resume_anchor` 也只选整份轮次（还是容器的轮次是
+        「落地失败」的痕迹，交给人工/清扫工具，不往云机递）。
         """
         if not self._auth_ok():
             return
@@ -265,7 +274,16 @@ class OfflineRoutes:
                 400,
             )
             return
-        anchor = self.hub.resume_anchor(course)
+        try:
+            anchor = self.hub.resume_anchor(course)
+        except ProtocolError as e:
+            self._json({"error": str(e), "course": course}, 400)
+            return
+        except KeyError:
+            self._json(
+                {"error": f"未知课程 {course}", "course": course, "known": self.hub.courses()}, 404
+            )
+            return
         if anchor is None or int(anchor["it"]) != it:
             self._json(
                 {
@@ -278,6 +296,9 @@ class OfflineRoutes:
             )
             return
         p = Path(str(anchor["_dir"])) / name
+        if not p.is_file():  # 锚点目录里本该有这件（`_round_is_complete` 判过）——缺了就是盘上出了事
+            self._json({"error": f"锚点轮缺少 {name}", "path": str(p)}, 500)
+            return
         try:
             data = p.read_bytes()
         except OSError as e:

@@ -46,7 +46,7 @@ import `hub.store`（L2）⇒ 本模块升到 **L3** ⇒ 七个混入各自 ≥*
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from common.protocol import (
     CLAIM_MODE_EXCLUSIVE,
@@ -166,8 +166,11 @@ class QueuePeer(Protocol):
     def last_heartbeat_ago(self, job_id: str) -> float | None: ...
     def append_ledger(self, job_id: str, event: dict) -> None: ...
     def locate_offline_course(self, body: dict, query_course: str = "") -> str | None: ...
+    # `stage`（2026-10-15）＝注入给 `hub.store_offline` 的**就地落地器**（delta → 整份）：
+    # 缺省 `None` ⇒ 门面自己按本课程树现搭一个。store 侧同签名（门面只多一个 `course`）。
+    # 类型写 `Any`：本文件只靠 `common.protocol`（L1 声明面），不许 import `hub.store_offline`。
     def store_offline_artifact(
-        self, course: str, body: dict, *, advance_active: bool = True
+        self, course: str, body: dict, *, advance_active: bool = True, stage: Any = None
     ) -> dict: ...
     def store_offline_result(self, course: str, body: dict) -> dict: ...
 

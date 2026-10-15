@@ -38,11 +38,11 @@ import sys
 import zipfile
 from pathlib import Path
 
-from common.cli import house_parser, run_main
-from common.protocol import ProtocolError
-
 # 产物账本行 → 课程账本行的搬运**只在 remote.artifacts 实现一份**（人工导入与实时补传共用）：
 # 两份翻译必然漂开，而「两腿同字段」正是那张表存在的意义。
+import remote.delta_files as delta_files
+from common.cli import house_parser, run_main
+from common.protocol import ProtocolError
 from remote.artifacts import ArtifactStore, ledger_row_from_metrics
 from remote.bundle import BUNDLE_INDEX, safe_extract_zip
 
@@ -72,7 +72,12 @@ def course_from_filename(zip_path: str | Path) -> str:
 
 
 def _scan_iters(root: Path) -> list[int]:
-    """产物目录里的轮次（`it-NNN/weights.json` 存在者，升序）。"""
+    """产物目录里的轮次（`it-NNN/weights.json` **或它的压缩版** `weights.delta` 存在者，升序）。
+
+    两态都认（2026-10-15 后缀约定）：名字跟着内容走，而人工导入的包可能来自一条
+    **离线段**（逐轮回传的就是 `BWD1` 容器 ⇒ 包里那件可能叫 `weights.delta`）。
+    只认 `.json` 会把整段产物判成「不是训练产物 zip」（而包里明明有东西）。
+    """
     out: list[int] = []
     for d in sorted(root.glob(f"{ArtifactStore.IT_PREFIX}*")):
         if not d.is_dir():
@@ -80,7 +85,7 @@ def _scan_iters(root: Path) -> list[int]:
         name = d.name[len(ArtifactStore.IT_PREFIX) :]
         if not name.isdigit():
             continue
-        if (d / "weights.json").exists():
+        if delta_files.find_existing(d, "weights.json") is not None:
             out.append(int(name))
     return out
 
@@ -164,7 +169,8 @@ def import_deliver_zip(
         iters = _scan_iters(base)  # 门②：形状
         if not iters:
             raise ProtocolError(
-                f"这个包里没有 {ArtifactStore.IT_PREFIX}NNN/weights.json——不是训练产物 zip"
+                f"这个包里没有 {ArtifactStore.IT_PREFIX}NNN/weights.json（或压缩版 "
+                "weights.delta）——不是训练产物 zip"
                 f"（包内顶层: {sorted(p.name for p in list(base.iterdir())[:8])}）"
             )
         st = _read_json(base / ArtifactStore.STATE_NAME)
@@ -184,7 +190,9 @@ def import_deliver_zip(
     except Exception:
         shutil.rmtree(work, ignore_errors=True)
         raise
-    final_ckpt = final / f"{ArtifactStore.IT_PREFIX}{last_it:03d}" / "weights.json"
+    final_ckpt = delta_files.find_existing(
+        final / f"{ArtifactStore.IT_PREFIX}{last_it:03d}", "weights.json"
+    ) or (final / f"{ArtifactStore.IT_PREFIX}{last_it:03d}" / "weights.json")
     log(
         f"[deliver] 导入完成：{final}（{len(iters)} 轮，it{iters[0]} → it{last_it}，"
         f"状态 {st.get('state') or '?'}）"

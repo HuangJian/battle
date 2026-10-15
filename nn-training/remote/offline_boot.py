@@ -764,6 +764,11 @@ def fetch_resume(
     它把那一轮采纳进产物目录、从之后接着跑（用户口径：必须**同轮齐全**，否则退到更早轮
     ——所以这里只认 hub 给的那一轮，不在客户端自己扫描/凑件）。
 
+    **拿到的就是整份**（2026-10-15 用户口径）：delta 只活在「回传进程 + hub 落地器」之间
+    ——hub 受理回传时就地把压缩版重建为整份（`hub/deltas.py`），锚点也只交整份轮次；
+    所以这里只是按 hub 报的实际文件名把三件取回来（`files`；老 hub 没这个键 ⇒ 两个候选名
+    各试一次），客户端不做任何重建/凑链。
+
     任何失败都**不影响训练**（安静回 None，日志里留一行原因）：锚点只是「少跑几轮」的
     优化，包自带的起点永远能跑。
     """
@@ -792,15 +797,28 @@ def fetch_resume(
     blob_url = (
         f"{hub.rstrip('/')}{OFFLINE_RESUME_BLOB_PATH}?course={urllib.parse.quote(course)}"
     )
-    for name in ("weights.json", "opt.tar", "row.json"):
-        q = f"{blob_url}&it={it}&name={urllib.parse.quote(name)}"
-        try:
-            req = urllib.request.Request(q, headers=_headers(token))
-            with _build_opener().open(req, timeout=timeout) as resp:
-                (ac_dir / name).write_bytes(resp.read())
-        except Exception as e:
-            # 三件不齐 = 这个锚点不可用（不是「少一件也能跑」）：静默退回包自带起点。
-            log(f"取续跑锚点件 {name} 失败（{type(e).__name__}: {e}）——放弃该锚点")
+    # 件名：hub 在 meta 里报**实际文件名**（`files`，名字跟着内容走）；老 hub 没有这个键 ⇒
+    # 两个候选名各试一次（整份名优先，与 `remote.delta_files.variants` 同序）。
+    adv = resume.get("files") if isinstance(resume.get("files"), dict) else {}
+    got: dict[str, str] = {}
+    for part, cands in _RESUME_PART_NAMES.items():
+        want = str(adv.get(part) or "")  # type: ignore[union-attr]
+        names = (want, *(n for n in cands if n != want)) if want else cands
+        for name in names:
+            q = f"{blob_url}&it={it}&name={urllib.parse.quote(name)}"
+            try:
+                req = urllib.request.Request(q, headers=_headers(token))
+                with _build_opener().open(req, timeout=timeout) as resp:
+                    data = resp.read()
+            except Exception as e:
+                log(f"取续跑锚点件 {name} 失败（{type(e).__name__}: {e}）")
+                continue
+            (ac_dir / name).write_bytes(data)
+            got[part] = name
+            break
+        else:
+            # 三件不齐 = 这个锚点不可用（不是「少一件也能跑」）：退回包自带起点。
+            log(f"取续跑锚点件 {part}（{'/'.join(names)}）一个都没取到——放弃该锚点")
             return None
     (dest_dir / "resume.json").write_text(
         json.dumps({**resume, "fetched_at": time.strftime("%Y-%m-%d %H:%M:%S")},
@@ -809,9 +827,19 @@ def fetch_resume(
     )
     log(
         f"续跑锚点就位：it{it}（来源 {resume.get('source')}，run={resume.get('run_id')}，"
-        f"wfp={str(resume.get('weights_fp'))[:12]}…）——本段从它之后继续"
+        f"{got.get('weights')}/{got.get('opt')}，wfp={str(resume.get('weights_fp'))[:12]}…）"
+        "——本段从它之后继续"
     )
     return dest_dir
+
+
+#: 锚点三件的**件名 → 候选文件名**（`remote.delta_files.variants` 的口径在此留一份：本模块
+#: 顶层不得 import `remote.*`）。`row.json` 只有一种名字（它是账本行，不是权重/动量）。
+_RESUME_PART_NAMES: dict[str, tuple[str, ...]] = {
+    "weights": ("weights.json", "weights.delta"),
+    "opt": ("opt.tar", "opt.delta"),
+    "row": ("row.json",),
+}
 
 
 # ── 拿包：hub 与手动两条源，一个等待循环 ───────────────────────────────────

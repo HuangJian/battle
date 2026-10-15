@@ -38,6 +38,8 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import remote.opt_standard as opt_standard
+import remote.weights_standard as weights_standard
 from common import progress_hook
 from common.log_bundle import LogBundle
 from common.platform_utils import (
@@ -163,7 +165,35 @@ def _run_iteration(ctx: RunContext, it: int, *, prev_it: int) -> dict:
     weights = ctx.store.weights_path(prev_it)
     if not weights.exists():
         raise ProtocolError(f"第 {it} 轮的 init 权重不在产物里: {weights}（产物被删/状态损坏？）")
+    # ★ 2026-10-15（离线 delta 事故的**本机链**面）：产物里那份就是**我们回传给 hub 的** delta
+    #   容器（hub 原样收发）。它既是「上一轮的结果」也是「本轮的 init」⇒ 装载与打包前先在本机
+    #   落地成整份；用**旁路缓存**（`standard_weights_copy`）而不是就地改 —— 产物本体保持 delta，
+    #   deliver 腿发送的字节、hub 侧 duplicate/conflict 判据、账本指纹***全都不变***，而本轮拿到的
+    #   是可直接装载的整份。基准从本机产物链里逐字节找（找不到即响亮拒，不猜）。
+    #   这条路径本身就是「不重传」：Init 用本机自己的字节重建，**零字节日下传输**。
+    weights = weights_standard.standard_weights_copy(weights, ctx.store.root, log=ctx.log)
     init_fp = sha256_file(weights)
+    # ★ 2026-10-15（离线 opt delta 的读侧落地，与上面 weights 同一条口径）：产物里的
+    #   `it-N/opt.tar` 就是**我们回传出去的** BOD1 容器（现场 `tmp/y5-term` 的 it-237，300945B，
+    #   头 4 字节 = BOD1；消费者一解包就是 `ReadError: invalid header`）。它既是「上一轮的结果」
+    #   也是「本轮的 init」⇒ 整份落成旁路缓存（`.opt-standard/`，产物本体保持容器给 deliver 腿），
+    #   并**种子进内容寻址缓存**后再声明 `opt_sha` —— 声明什么就必须拿到什么（`train_core` 只认
+    #   `blob_cache/<sha>`，而离线段没有下载通道）。下一轮的落地基准也随之是这份整份（链上一步，
+    #   而它在缓存里 = O(1) 命中）。找不到基准 ⇒ 响亮记一行、本段按**无动量**跑（与
+    #   `plan_handoff._stored_opt_sha` 同口径：动量是可选件，首轮本来就没有 ⇒ 不让整段死在 init）。
+    #   ⚠ **不**退回 `ctx.last_opt_sha`（那是上一个调用在下面 `:279` 写下的「回传出去的那份
+    #   delta 自己的 sha」）—— 那正是一个**拿不到的地址**（容器解不开、离线段也没有下载通道），
+    #   声明它 = 把这次要修的形态又从后门放回来。
+    try:
+        ctx.last_opt_sha = opt_standard.landed_opt_sha(
+            ctx.store.opt_path(prev_it),
+            ctx.store.root,
+            blob_roots=_blob_roots(ctx),
+            log=ctx.log,
+        )
+    except ProtocolError as e:
+        ctx.log(f"WARN: it{prev_it} 的 opt 是 delta 容器且本机找不到基准（{e}）——本段按无动量跑")
+        ctx.last_opt_sha = ""
     pairs = pairs_for(ctx.plan, it)
     spec = iter_spec(ctx.plan, it, pairs, wver=init_fp, course=ctx.course)
     spec = with_rollout_workers(spec, int(ctx.rollout_workers or 0))

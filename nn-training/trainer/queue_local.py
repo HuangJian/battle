@@ -23,6 +23,7 @@ import common.distribution
 from common import game_watch  # 进度行节流口径与节点侧 rollout 共用一份（`progress_due`）
 from common.log import log
 from common.platform_utils import POPEN_NO_WINDOW as _POPEN_NO_WINDOW
+from remote import weights_standard
 
 # 进度行节流口径与节点侧 rollout 共用一份（`progress_due`，见 `common.game_watch`）；
 # serve_pool = 节点侧同一份长驻池（`worker/serve_pool.py`）。
@@ -110,6 +111,9 @@ def run_rollout(bun: str, rl_path: str, traj_dir: Path, pairs: list[tuple[int, i
 
     # 吞吐 T4：双缓冲复用前提——本地 shard 也必须写 wver（与 run_rollout_queue 的
     # local slot 对齐），否则主进程下一轮 completed_pairs 不命中、预采产物作废。
+    # ★ 2026-10-15：本机 rollout 子进程（含长驻池）直接 `--weights` 读这个文件，
+    #   delta 容器会让它 `JSON.parse` 报 BWD1；指纹也必须算在整份上。
+    weights_standard.ensure_standard_weights(rl_path, log=log)
     wver = common.distribution.weights_fingerprint(rl_path)
     workers = max(1, min(args.workers, len(pairs)))
     pool = make_local_pool(

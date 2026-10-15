@@ -6512,3 +6512,147 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **备选与否决**：① 报告写头注 —— 否（规格冻结，尾部零风险）；② 等 halt 后再写 ——
   否（数已定，halt 是独立人动作）；③ 恢复 tmp/y5-hit —— 否（用户清的；已归档）。
 - **后果**：全文 → 三文件尾部节＋`docs/nn/experiments.md` §111；halt 仍待人点。
+
+## §2026-10-15-goalnn-offline-delta-readside（2026-10-15，离线 delta 权重：读侧落地 + 两版后缀 + 不重传）
+
+- **背景**（用户报障）：半/全离线段（`kind=run`）的逐轮回传走 R1 —— 权重是 **int16 delta 容器**
+  （`BWD1`）；hub 只做原样收发 ⇒ 容器被逐字节落进活动指针 `tmp/<课>/weights.json`、回传树、
+  deliver 镜像与 `nn-training/weights/<课>/` 归档。本机消费者（trainer 推给 sampler 节点、本机
+  PPO 装载、TS eval runner）只认整份 `nn-weights-json` ⇒ 每个节点 `JSON.parse` 报
+  `Unexpected identifier "BWD1"`；云机下一轮的 init 也成了容器（现场 `tmp/y5-term`，五份同字节
+  `sha 5826ea351d59b4a4`，基准 `d4b63457…` 在位）。
+- **决定**（用户三条口径逐条落地）：D1=**hub 不变**、**消费者自己判断** —— 读之前调
+  `remote/weights_standard.ensure_standard_weights`（就地落地；幂等，整份只读 4 字节；
+  **转一次一直复用**）；D2=**两版都保留、后缀区分**：整份 `.json`、delta `.delta`，同目录同主名
+  成对，内容才是权威（`BWD1` 魔数）；D3=**基准只认精确命中**（内容寻址缓存 / 同目录兄弟 / traj 树 /
+  归档 / 链式递归；找不到**响亮拒** `ProtocolError` + 修法，绝不猜基准）；D4=**已经持有就不再传**：
+  生产者把整份与 delta 都写进 `blob_cache`（后者新增），云机每轮 init 用自己产物链的落地件
+  （`standard_weights_copy`：整份进旁路缓存，产物本体保持 delta ⇒ deliver 腿与 hub 侧判据不变）。
+- **备选与否决**：① hub 落地（收到容器就转换/改名）—— 否（用户口径 hub 无责；且会动到 hub 的
+  指纹/冲突判据面）；② 就地修复现场（把指针/归档/镜像都换成整份）—— 否（那些字节同时是 hub 侧
+  duplicate/conflict 与账本指纹的输入，就地改会让「续跑锚点被忽略」「重投判冲突」悄悄失效）；
+  ③ 本地做 identity 档（没有精确基准就按本机链凑）—— 否（本机没有 hub 那层身份闸，落错基准 =
+  形状对、数值错的静默降质）；④ 让 `.delta` 也进归档/面板扫描面 —— 否（面板按 `*.json` 扫，
+  delta 不该被当成可装载权重列出来）。
+- **后果**：新增 `remote/weights_standard.py`（+ `tests/remote/test_weights_standard.py` 9 格、
+  `tests/remote/test_init_no_retransfer.py` 4 格「已持有 ⇒ 零传输」含反证）；接线：trainer 每轮入口
+  （`loop_round_steps.step_prepare_iter`，早于 wver）+ 各推权重点（`dispatch`/`eval_dispatch`/
+  `queue_local`/`batch_runner`/`eval_course_once`）+ `eval_a_once`（TS 交接）+ 发布/导出
+  （`loop_remote_job`/`loop_export`）+ 云机（`plan_run._run_iteration`）+ 任务面
+  （`download._resolve_weights` 五源返回前）+ `train_core`（发出去的 delta 也入本地缓存）；
+  `hub/store_offline` 的归档根实现与 `remote/artifacts` 合并（reuse 账本曾报重复组 +1）。
+  全文 → `docs/nn/remote-transport.md` §98。**未结**（下一刀）：hub 侧落位名字仍按原样（其
+  `weights.json` 里是 delta 字节）· 云机 **opt 链**同口径落地 · 全新机器接续线段的锚点形态。
+
+## §2026-10-15-goalnn-offline-opt-delta-readside（2026-10-15，离线 delta 的 opt 那一半：读侧落地 + `opt.tar`/`opt.delta` 成对）
+
+- **背景**（§2026-10-15-goalnn-offline-delta-readside 的续刀，同一场事故）：同一条离线段
+  （`kind=run`）的**动量**也是 delta 回传的（R3/M4，`BOD1`，`remote/opt_delta`），而上一刀只把
+  `weights_standard` 接进了消费者 —— **opt 那一半当时没修**。现场
+  （`tmp/y5-term/remote-jobs/offline/c2ad414cd2ced1dd/it-237/opt.tar`）：头 4 字节 `BOD1`、
+  300 945 B、`base_sha=15bea9c1…`；喂给消费者（`extract_tar_bytes` = `unpack_opt_tar` 的唯一实现）
+  当场 `ReadError: invalid header`，而基准就在本机（`tmp/y5-term/it236/ppo_ckpt_remote.tar` +
+  两个 job 目录的 `blob.opt` 逐字节命中）。hub 侧**有**落地（`land_opt_delta`）但那只是
+  **published 腿**的回传受理；离线段没有 ⇒ 那台机器**自己下一轮**的 init 就是容器，整轮死在
+  restore，且 `manifest.opt_sha` 还指向一个**本机缓存里没有**的地址（离线腿无下载通道）。
+- **决定**（与权重那一刀**逐条同口径**，用户 2026-10-15 三条不另起新规）：D1=**读侧落地**
+  （`remote/opt_standard`：`BOD1` → 整份 tar；幂等；**转一次一直复用**，缓存键 = 容器 sha16）；
+  D2=**两版都留、后缀区分**：整份 `opt.tar`、容器 `opt.delta`，同主名成对，**内容才是权威**
+  （魔数判形，`partial(delta_files.container_file, …)`）；D3=**基准只认逐字节精确命中**
+  （`blob_cache/<base_sha>` O(1) 快路 → 同目录兄弟 → 兄弟轮目录 → traj 树（含
+  `it*/ppo_ckpt_remote.tar`）→ 额外根；候选自己是容器时递归落地再比 sha），找不到 ⇒ `ProtocolError`
+  + 两条修法（**绝不猜基准**：拿错动量 = 形状对、数值错的静默降质）；D4=**声明什么就必须拿到什么**
+  （`landed_opt_sha` = 落地 → **种子进内容寻址缓存** → 返回整份 sha；`train_core` 只认
+  `blob_cache/<sha>` 而离线段没有下载通道 ⇒ 不种子 = 声明一个拿不到的地址；种子过的那份又是下一轮
+  落地基准的 O(1) 快路）。
+- **备选与否决**：① 让 hub 在离线段也落地（收到容器就重建）—— 否（用户口径 hub 无责；hub 侧还要
+  有基准与 torch/numpy，而级联的基准在链根，跨机常常不在）；② 把容器的基准改成「段起点整份」
+  （任何一轮都能一步落地）—— 否（delta 会随漂移变大，正是 R3 要省的字节）；③ 消费者解不开时
+  **静默退回 warm-start**（无动量）—— 否（D5：动量归零是精度回归，必须响亮）；④ 每个消费者各写
+  一份重建 —— 否（复用账本会红：抽成 `opt_delta.rebuilt_opt_tar`，hub 与读侧**共用同一份**）。
+- **后果**：新增 `remote/opt_standard.py` + `remote/delta_files.py`（**L0** 共用零件：魔数判形 /
+  兄弟名 / traj 认根 / 候选扫描；不抽的话 `weights_standard` 与 `opt_standard` 会各留一份逐字节
+  相同的实现 ⇒ 复用账本 14 → 18 组）+ `opt_delta.rebuilt_opt_tar`（**重建的唯一实现**：hub
+  `land_opt_delta` 与读侧共用，差别只在 base 从哪来）；接线：`plan_run._run_iteration`（自己下一轮
+  的 init）· `plan_handoff._seed_opt_blob_cache` / `_stored_opt_sha`（起点播种与声明）·
+  `train_core` restore 段（消费者界面：容器先落地再装载，找不到基准**响亮拒**）；用例
+  `tests/remote/test_opt_standard.py`（7 格，含**修复前的复现**：容器解不开 / 落地件解得出）+
+  护栏同步（层号账本 `remote.delta_files` L0 / `remote.opt_standard` L1、`test_plan_handoff_split`
+  白名单、`test_train_core_split` 依赖闭集）。现场验证（拷贝，不动原文件）：300 945 B → 604 160 B，
+  `torch.load` 成功（42 组状态、`step=22752.0`、`lr=3e-4`），产物本体逐字节不动。全文 →
+  `docs/nn/remote-transport.md` §99。**未结**（下一刀）：hub 侧落位名字仍按原样（要按后缀区分得让
+  hub 读 manifest 的 `w_fmt`/`opt_fmt`）· **全新机器接续离线段**的锚点形态（`resume_anchor` 给的是
+  hub 存的那份 delta ⇒ 换机首段需要先有整份；现在是响亮拒 + WARN）· 发布腿从「离线跑过的段」续跑
+  时 `opt_init` 的动量来源（hub 侧没有 ckpt 目录 ⇒ 更倾向「无动量」而不是报错）。
+
+## §2026-10-15-goalnn-hub-lands-delta（2026-10-15，回传 delta 的 **hub 侧就地落地**：口径反转 + `stage` 注入）
+
+- **背景**：§2026-10-15-goalnn-offline-delta-readside 与 §…-opt-delta-readside 把「hub 无责、
+  消费者自己判断」修在读侧（用户当时三条口径），并把「hub 收到就落地/改名」记成**被否决的备选①**。
+  用户 2026-10-15 下午**改判**：「**只有 hub 和回传进程知道有 delta 这玩意儿**」—— delta 只活在
+  「回传进程 + hub 落地器」之间，hub 收到就地在 hub 进程里重建为整份，此后 hub 树（回传树 / 交付
+  镜像 / 活动权重指针 / 归档 / 续跑锚点）里一律整份，派发侧永远只发整份。读侧那两刀**不撤**
+  （老树、人工导入的包、云机自己的产物链仍碰得到容器），本刀让**新回传不再产生容器**。
+- **决定**：D1=落地器住 `hub/deltas.py`（**L2**）：`land_round`（按目录落地，失败**保留原件** +
+  响亮）· `land_into_stage`（受理路径：先在暂存目录重建，再走首写锁定/409 那套），两个落地器
+  （`remote.weights_standard`/`opt_standard`，L1）**函数体内惰性 import**（hub-server 的启动闭包
+  不得拉 numpy/torch）；D2=**注入而不是 import** —— `hub/store_offline`（L1 叶子）收
+  `stage=None` 参数，由接收边界 `hub/queue_resume`（L3）注入 `partial(land_into_stage, …)`
+  （store 自己 import `hub.deltas` 会把整个 hub 栈顶高一层：层号 = 拓扑秩，
+  `tests/test_remote_dag.py`；而「先重建、再记账」本来就是受理边界的职责）；D3=**名字跟着内容走**
+  （整份 `weights.json`/`opt.tar`、原件 `*.delta`，两版都留）；幂等/冲突判据一律比**整份**，账本
+  新增 `landed_fp`（与 `weights_fp` = 回传原件分开）；D4=**锚点只发整份**（还是容器的轮次跳过 +
+  响亮一行），应答新增 `files`（递出的实际文件名），`weights_fp` 改成**递出文件的 sha**
+  （原读 `row.json` 的自报指纹 = 容器的 sha，落地后就过期 ⇒ 客户端的「传输损坏」闸会弃用好锚点）；
+  D5=**盘上的旧容器补落**：新增 `tools/hub_delta_sweep.py`（缺省 dry-run、`--apply` 才写、
+  **只落地不删**）—— 「落不了才删那些轮」降级为兜底。
+- **备选与否决**：① 让 `hub/store_offline` 自己 import `hub.deltas` —— 否（L1 叶子 import L2 ⇒
+  整个 hub 栈涨一层：`store` L3、`queue_*` L4、`http_face` L6、`server` L8，账本与文档连带重排）；
+  ② 把落地放到 store 的调用方路由（`hub/offline.py`，L3）—— 否（要在 store 之外重做一遍 base64
+  解码，而 `stage` 参数只有一处调用点，注入更窄）；③ 落不了就地删掉那些 delta 轮 —— 否
+  （删不可逆；只在**基准真的缺失**时才需要人工决定，工具响亮报出并保持原样）。
+- **后果**：新增 `hub/deltas.py`（L2，账本登记）· `tests/hub/test_offline_backfeed.py` 新增一格
+  （真 HTTP 走完三态：落地成功 / 缺基准保留原件 / 容器轮不当锚点）· `tests/remote/test_delta_files.py`
+  （新：魔数对账 + L0 只 import stdlib + 名字与候选根）· `tools/hub_delta_sweep.py`；
+  `remote/delta_files.any_container_file` 把四处重复的「任一族判据」收成一份；
+  `hub/backfill_offline`/`queue_resume` 共用 `_round_is_complete`（两态名字）。现场
+  （`tmp/y5-term`）已用工具补落六处（四份整份逐字节相同 sha `5741f71b65dc2207…`，`.delta` 兄弟
+  留作回溯面）。全文 → `docs/nn/remote-transport.md` §100。**未结**：① 在跑的 hub/trainer 需重启
+  才吃到本刀（现场两进程起于代码改动前）；② 归档里 `y5-hit2.it1.<ts>.json` 那一份基准已不在本机
+  ⇒ 工具响亮报出、保持原样，删否待人裁。
+
+## §2026-10-15-goalnn-delta-review-hardening（2026-10-15，暂存区复核后的六处加固）
+
+- **背景**：§2026-10-15-goalnn-offline-delta-readside / §…-opt-delta-readside / §…-hub-lands-delta
+  三刀在提交前复核时抓到六处（明细与现场 → `docs/nn/remote-transport.md` §100「评审加固」表）。
+  其中两处是**行为回归**：① `hub/store_offline` 的幂等判据挂着 `not weights.json.is_file()` ⇒ 旧数据
+  （`.json` 里装容器——现场 `tmp/y5-term` 的形状）**同一份字节**重传被判 `conflict 409`，而客户端把
+  409 当硬拒（`remote/offline_deliver._reject_round`）⇒ 丢包/超时重传（常态）会把一轮正确产物永久
+  挡在门外；② 读侧落地**就地**改写 `job_dir/init_weights.json`，而 `init_weights_fp` 仍是容器的 sha
+  ⇒ 同一个 job 目录**第二次**进来 W0 那道「逐字节相符」的闸必然判「坏字节 —— 作废改走 blob」
+  （删掉一份可用整份、真走过网的还白付一次 ~380KB 下行），与 `_resolve_weights` 自己那句
+  「fencing 对账不受影响」直接矛盾。
+- **决定**：① 幂等判据只认**内容**（`have == w_full or have == wj`），命中时 `_heal_round` 把
+  「形态没到位」的名字补上（落地失败只剩 `.delta`、旧数据容器占着 `.json`）——补完那轮能当锚点，
+  原件照旧旁存 `.delta`（两版都留、字节一个不丢）；覆盖**不同**字节仍是 conflict（不动）；
+  ② 新增 `remote/download._is_landed_twin`（旁存 `.delta` 的 sha == 声明的 fp ⇒ 那是我们自己落的），
+  W0 命中即用；③ `remote/opt_standard` 的防环真的传下去（`depth`/`seen` 原先只出现在形参里，
+  `_MAX_CHAIN` 不可达 ⇒ 成环抛 `RecursionError`，调用方的 `except ProtocolError` 拦不住）；
+  ④ 两个落地器的搜索面各加一格 `.weights-standard/*.json` / `.opt-standard/*.tar`（云机侧旁路缓存
+  里的落地件**逐字节就是下一轮的 base**；链根会被 `biz/course_archive` 的「转存后删」清掉）；
+  ⑤ `plan_run` 不再退回 `ctx.last_opt_sha`（那是回传出去那份 delta 自己的 sha = 拿不到的地址），
+  找不到基准 ⇒ WARN + 无动量（与 `plan_handoff._stored_opt_sha` 同口径）；
+  ⑥ `land_round` 的 `note` 累积 · `common/protocol.py` 那段与实现相反的注释（白名单**没有** `.delta`
+  变体、`it` 仍是锚点轮）· `delta_files` 头注释的 import 面 · `_standard_bytes` 的死参。
+- **备选与否决**：① 让 duplicate 分支干说一句幂等、自愈交给清扫工具 —— 否（`tools/hub_delta_sweep.py`
+  是**人手动**跑的，而这条路径每轮都可能走到；补落动的只是同一内容的另一个名字，不碰不可变快照语义）；
+  ② 落地件另起名字（`init_weights.standard.json`）以保住 W0 的内容地址语义 —— 否（rollout argv 与
+  `build_ppo` 都按 `init_weights.json` 这个**名字**取件，改名 = 多处读点跟着改）；③ 给训练腿入口的
+  落地加 try/except 降级 —— 否（拿错/猜基准 = 形状对、数值错的静默降质；见下面「有意的后果」）。
+- **有意的后果**（写进 §100）：读侧落地接在**每轮入口**且**不吞异常** ⇒ 盘上那份容器找不到基准时
+  `ProtocolError` 冒出、**整段训练腿当场停**。修法是让基准回到候选根（上一轮整份 / 归档 /
+  `tools/hub_delta_sweep.py`），不是降级跑。唯一降级口径是未落地的 **opt**（动量）。
+- **后果**：六处全部补了「先红后绿」的用例（`test_weights_standard` / `test_opt_standard` 各加
+  「旁路缓存是候选根」+ opt「互为候选的容器不递归到死」· `test_init_no_retransfer` 加「同 job 目录
+  重入」· `test_offline_backfeed` 加「落地失败过的那轮重传要自愈」「旧数据同字节重传 = duplicate」）；
+  agent 侧门禁：受影响子集 292 → **298 passed**、`ruff check .` / `mypy .`（682 files）绿。

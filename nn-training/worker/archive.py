@@ -28,7 +28,11 @@ WEIGHTS_BACKUP_KEEP = 20  # 仅作手动 prune（tools/weights_prune.py）的参
 
 
 def backup_weights(
-    weights_path: str, it: int, prefix: str = "rl-weights", backup_dir: str | None = None
+    weights_path: str,
+    it: int,
+    prefix: str = "rl-weights",
+    backup_dir: str | None = None,
+    suffix: str = ".json",
 ) -> str | None:
     """Archive the just-written RL weights into nn-training/weights/.
 
@@ -39,6 +43,11 @@ def backup_weights(
     相对路径按仓库根解析（课程值形如 "nn-training/weights/<course>"，与
     TrainingLoop 的 cwd 无关）；None = 默认 WEIGHTS_BACKUP_DIR。
 
+    `suffix`：归档名的后缀（2026-10-15，后缀约定）。**缺省 `.json` = 逐字节旧行为**；
+    回传腿落**压缩版**时传 `.delta`（`remote.delta_files.named_for` 定的名）—— 归档是给人/控制台
+    扫的存储副本，名字必须自述形态（否则 `eval-board` 的 iter 选择器会把一份解不开的容器当可
+    装载权重列出来）。只改名字：**归档字节一个不改**（它是那一轮的不可变快照）。
+
     Returns the archive destination path, or None on any (non-fatal) IO error.
     """
     try:
@@ -46,7 +55,7 @@ def backup_weights(
         if not bdir.is_absolute():
             bdir = REPO_ROOT / bdir
         bdir.mkdir(parents=True, exist_ok=True)
-        dst = bdir / f"{prefix}.it{it}.{time.strftime('%Y%m%d-%H%M%S')}.json"
+        dst = bdir / f"{prefix}.it{it}.{time.strftime('%Y%m%d-%H%M%S')}{suffix}"
         shutil.copyfile(weights_path, dst)
         return str(dst)
     except OSError as e:

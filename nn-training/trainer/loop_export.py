@@ -50,6 +50,7 @@ from typing import Any
 import common.distribution
 from common.log import log
 from common.protocol import RUN_MAX_ITERS_HARD_CAP
+from remote import weights_standard
 from worker.archive import backup_weights
 from worker.modes import _MODE_BACKUP_PREFIX
 
@@ -186,6 +187,9 @@ class TrainingExport:
                 "[run_rl] 课程声明 iters<=0（无限）——导出**开区间段**：终点由段长定"
                 f"（--run-iters >0 = N 轮；缺省 = 硬上界 {RUN_MAX_ITERS_HARD_CAP} 轮）"
             )
+        # ★ 2026-10-15：包的起点（`init_weights.json`）与 `wver` 都取自 `args.out` —— 云机要把它
+        #   当权重装载（`JSON.parse`），delta 容器会让整段在 PPO 之前死；读侧先落地（幂等）。
+        weights_standard.ensure_standard_weights(args.out, log=log)
         if it <= 1 and not common.distribution.weights_fingerprint(args.out):
             raise SystemExit(
                 f"[run_rl] --export-bundle: 没有起点权重（{args.out}）——先跑至少一轮，"
