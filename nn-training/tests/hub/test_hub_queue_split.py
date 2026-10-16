@@ -135,11 +135,14 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "_sync_hold",
             "_note_ambiguous",
             "ambiguous_jids",
+            # 2026-10-17（plan/hub-server-memory-slim L3）：课程表可淘汰（`add_course` 的反面）。
+            "drop_course",
         ),
     ),
     "queue_discover": (
         discover_mix.QueueDiscoverMixin,
-        ("discover", "_serves_course", "_course_dir_live"),
+        # 2026-10-17（L3）：`_drop_dead_courses` = 扫描时顺带淘汰（课程表只增不减的另一半）。
+        ("discover", "_serves_course", "_course_dir_live", "_drop_dead_courses"),
     ),
     "queue_auth": (
         auth_mix.QueueAuthMixin,
@@ -208,6 +211,8 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             # 写入面只碰 `_worker_prefetch`（纯观测），读面做 TTL 过滤 + jid→(course, it) 解析。
             "note_worker_prefetch",
             "worker_prefetch_readout",
+            # 2026-10-17（plan/hub-server-memory-slim L3）：常驻表规模读数（`/admin/mem`）。
+            "mem_readout",
         ),
     ),
     "queue_offline": (
@@ -349,13 +354,15 @@ AUTH_GUARD_FIELDS = frozenset({"_auth_blocked_until", "_auth_fail"})
 STATE_WRITERS: dict[str, frozenset[str]] = {
     "_auth_blocked_until": frozenset({"_adopt_solo"}),
     "_auth_fail": frozenset({"_adopt_solo"}),
-    "_cursor": frozenset({"__init__", "claim_job", "claim_next"}),
+    # 2026-10-17（L3）：`drop_course` 摘课时要把四个旁表一起清（`_cursor` 若指向被摘的课，
+    # 下一个轮转起点就是个空壳）⇒ 它是第五个写者。
+    "_cursor": frozenset({"__init__", "claim_job", "claim_next", "drop_course"}),
     "_discover_fresh": frozenset({"__init__"}),
     "_discover_last": frozenset({"__init__", "discover"}),
     "_discover_root": frozenset({"__init__"}),
     "_halt_default": frozenset({"__init__", "_adopt_solo", "set_halt"}),
-    "_halts": frozenset({"__init__", "set_halt"}),
-    "_locate_cache": frozenset({"__init__", "course_of"}),
+    "_halts": frozenset({"__init__", "set_halt", "drop_course"}),
+    "_locate_cache": frozenset({"__init__", "course_of", "drop_course"}),
     #: ★M4b：模式表 `_modes` 随「课程无模式」删除；只剩启动参数的模式段标记（只读）。
     "_mode_ignored": frozenset({"__init__"}),
     #: 派发状态（课程 → 记录）：`dispatch_record` 首次载入时就地缓存（写），`_dispatch_update` 改，
@@ -363,7 +370,7 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     #: 只认盘上那份的 `updated_at`）。
     "_dispatch": frozenset({"__init__", "dispatch_record", "_dispatch_update", "note_progress"}),
     "_dispatch_lock": frozenset({"__init__"}),
-    "_no_marker_warned": frozenset({"__init__", "_serves_course"}),
+    "_no_marker_warned": frozenset({"__init__", "_serves_course", "drop_course"}),
     "_ambiguous": frozenset({"__init__", "_note_ambiguous"}),
     "_disk_lock": frozenset({"__init__"}),
     "_lease_lock": frozenset({"__init__"}),
@@ -384,11 +391,11 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     #: （`note_worker_prefetch` 整体换记录），锁只被 `__init__` 建。
     "_worker_prefetch": frozenset({"__init__", "note_worker_prefetch"}),
     "_pf_lock": frozenset({"__init__"}),
-    "_order": frozenset({"__init__", "add_course"}),
+    "_order": frozenset({"__init__", "add_course", "drop_course"}),
     #: 多课程预取窗口（2026-10-02，plan/course-pill-precision §4.1）：写点只有启动与 peek。
-    "_peeked": frozenset({"__init__", "peek_jobs"}),
+    "_peeked": frozenset({"__init__", "peek_jobs", "drop_course"}),
     "_solo": frozenset({"__init__", "_adopt_solo"}),
-    "_stores": frozenset({"__init__", "add_course"}),
+    "_stores": frozenset({"__init__", "add_course", "drop_course"}),
     "_workers": frozenset({"__init__", "_adopt_solo"}),
 }
 
@@ -514,7 +521,9 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # ★M5（Q5）：+4（`job_kind` 的 hub 转发 / `worker_holds` / `worker_bc_drain` /
     # `_drain_blocked`——drain 互斥的两半都要全课程视图）⇒ 114 + 4；
     # 2026-10-11 W7（plan/aborted-course-revival）：+1（`cancel_job` 门面转发）⇒ 121。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 121, len(DOMAIN_METHODS)
+    # 2026-10-17（plan/hub-server-memory-slim L3）：+3（`mem_readout` / `drop_course` /
+    # `_drop_dead_courses`）⇒ 124。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 124, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -524,7 +533,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 121, len(seen)
+    assert len(seen) == 124, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -842,7 +851,7 @@ def test_the_state_writer_table_matches_reality() -> None:
     }
     # `_cursor` 是唯一的**跨簇写**（`claim_next`/`claim_job` 都在 `queue_claims`）：
     # 它是「轮转起点」，只有真正拿到活的那一方才推进（R2-C2）——离开这张表就能看出来。
-    assert STATE_WRITERS["_cursor"] == {"__init__", "claim_job", "claim_next"}
+    assert STATE_WRITERS["_cursor"] == {"__init__", "claim_job", "claim_next", "drop_course"}
 
 
 def test_only_the_composed_init_declares_state_with_values() -> None:

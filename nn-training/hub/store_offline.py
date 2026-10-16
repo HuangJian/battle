@@ -35,7 +35,8 @@ from threading import Lock
 from typing import Any
 
 import remote.delta_files as delta_files
-from common.fs import atomic_write_bytes
+from common.fs import atomic_write_bytes, same_bytes
+from common.hashing import sha256_file
 from common.protocol import ProtocolError, decode_opt_tar, decode_weights_json, sanitize_run_id
 from remote.artifacts import (
     WEIGHTS_ARCHIVE_ROOT as WEIGHTS_ARCHIVE_ROOT,
@@ -104,11 +105,12 @@ def _write_bytes(path: Path, data: bytes) -> None:
 
 
 def _same_bytes(path: Path, blob: bytes) -> bool:
-    """文件与字节是否逐字节相同（**先比 size 再读**：幂等重传是常态，不给它每次多读 ~380KB）。"""
-    try:
-        return path.stat().st_size == len(blob) and path.read_bytes() == blob
-    except OSError:
-        return False
+    """文件与字节是否逐字节相同（**先比 size，再分块比**：幂等重传是常态）。
+
+    2026-10-17（plan/hub-server-memory-slim L2）：实现搬到 `common.fs.same_bytes` ——
+    「整份入内存只为比一下」是 hub 6.2GB RSS 的次要峰值源，分块后峰值 = 一块。
+    """
+    return same_bytes(path, blob)
 
 
 def _heal_round(it_dir: Path, to_write: dict[str, bytes], *, w_full: bytes, wj: bytes) -> list[str]:
@@ -347,20 +349,22 @@ class OfflineRoundsMixin:
                     to_write[delta_files.named_for("opt.tar", opt)] = opt
             have_full = it_dir / "weights.json"
             have_raw = it_dir / "weights.delta"
-            have: bytes | None = None
+            # ★ 2026-10-17：只记**路径**不读字节（`have in (w_full, wj)` 改成分块比对，
+            # 冲突时才整份算一次哈希——那本来就是稀有路径；判据逐字不变）。
+            have_path: Path | None = None
             if have_full.is_file() and not delta_files.any_container_file(have_full):
-                have = have_full.read_bytes()
+                have_path = have_full
             elif have_raw.is_file():
-                have = have_raw.read_bytes()
+                have_path = have_raw
             elif have_full.is_file():  # 旧数据：`weights.json` 里装着容器（名字没跟着内容走）
-                have = have_full.read_bytes()
-            if have is not None:
+                have_path = have_full
+            if have_path is not None:
                 # 幂等/冲突判据 = **同一轮的权威字节**：整份先到、或原件先到，都算命中。
                 # ★ 2026-10-15 修：旧口径在「原件命中」上加了个 `not weights.json.is_file()` 的
                 #   条件 ⇒ 旧数据（`.json` 里装容器）**同一份字节**重传会被判 conflict 409，
                 #   而客户端把 409 当硬拒（`remote/offline_deliver._reject_round`）⇒ 一轮正确产物
                 #   永久出局。丢包/超时重传是常态（下面那段注释就是这么写的），不能这么判。
-                if have in (w_full, wj):
+                if same_bytes(have_path, w_full) or same_bytes(have_path, wj):
                     healed = _heal_round(it_dir, to_write, w_full=w_full, wj=wj)
                     if healed:
                         print(
@@ -375,15 +379,17 @@ class OfflineRoundsMixin:
                         "landed": landed,
                         "healed": healed,
                     }
+                # 冲突是**稀有路径**（要人裁决）⇒ 这里才读文件算哈希，且分块算（L2）。
+                have_fp = sha256_file(have_path)
                 return {
                     "status": "conflict",
                     "run_id": run_id,
                     "it": int(it),
-                    "have_fp": hashlib.sha256(have).hexdigest(),
+                    "have_fp": have_fp,
                     "got_fp": full_fp,
                     "error": (
                         f"补传冲突 it{int(it)}：hub 已有**不同**字节的权重"
-                        f"（hub {hashlib.sha256(have).hexdigest()[:12]}… 本次 {full_fp[:12]}…）"
+                        f"（hub {have_fp[:12]}… 本次 {full_fp[:12]}…）"
                         "——不覆盖、需人裁决"
                     ),
                 }

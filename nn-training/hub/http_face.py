@@ -66,6 +66,7 @@ import ipaddress
 import json
 import time
 import urllib.parse
+from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -291,28 +292,31 @@ class HubHandler(
     # 方法绑定语义与普通 def 相同，`self._json(obj, status)` 的所有调用点零改动。
     _json = respond_json
 
-    def _bytes(
+    # ───────────── 响应体：三种喂法，一条传输语义（2026-10-17 L1） ─────────────
+    #
+    # 旧形状只有 `_bytes(bytes)` 一条路 ⇒ 「递一个盘上的文件」必须先把整个文件
+    # `read_bytes()` 成一份等长的 bytes（Range 续传还要再切一份）。一次递送的峰值随文件
+    # 大小线性增长，而 CPython/Windows 堆在释放后并不归还 ⇒ hub 连跑 35h 后 RSS 停在
+    # 6.2GB（peak 7.7GB），且打 320MB 探针 RSS 零增长（堆里全是空洞，不再向 OS 要也不还）
+    # ——见 `plan/hub-server-memory-slim.plan.md` §2。
+    #
+    # 现在 `_bytes`（内存里的 bytes）/ `_bytes_file`（盘上文件的一段）/ `_bytes_files`
+    # （多件分帧）共用 `_send_headers` + `_send_body`：**峰值恒 = 一块**（≤SEND_CHUNK），
+    # 与文件/body 总长无关。传输语义（超时 / 停滞日志 / 完成日志 / Accept-Ranges）只有一份。
+
+    def _send_headers(
         self,
-        data: bytes,
+        total: int,
+        *,
         status: int = 200,
         ctype: str = "application/octet-stream",
         filename: str = "",
         extra_headers: dict[str, str] | None = None,
     ) -> None:
-        """发送整块 body：大 body **分片 + 有界**，且完成/停滞各有一行日志。
-
-        2026-09-20 事故（云机领到 job 后几分钟零输出）的 hub 侧半边：`wfile.write()`
-        没有超时，对端半开时阻塞**永不返回** ⇒ 客户端永远拿不到 payload，而 `/payload`
-        的访问行被高频静默规则吃掉 ⇒ 两端日志同时沉默（唯一的现象是「卡住」）。
-        现在：分片写（每片独立超时）⇒ 停滞 ≤SEND_TIMEOUT_SEC 内被断掉并**响亮打印**
-        已发字节数；≥SEND_LOG_MIN_BYTES 的 body 完成时也打一行（可对账传输时长/速率）。
-
-        `extra_headers`（2026-10-12，Range 断点续传）：额外响应头（`Content-Range` 等），
-        由 `/jobs/{id}/payload` 的 206 分支带上。
-        """
+        """三种喂法共用的响应头（`Content-Length` 必须先算出来 —— 流式也要先声明总长）。"""
         self.send_response(status)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(total))
         # 「本端点支持 Range 续传」的**声明**（2026-10-12）：`/payload` 的 206 分支靠它让客户端
         # 敢在重抽时带 `Range`。无条件带上——头就几十字节，但没了它客户端只能靠"试一次看回 200
         # 还是 206"来发现，那是把探测塞进数据面。
@@ -323,21 +327,45 @@ class HubHandler(
             # 习惯文件名（下载时手一按就是这个名字，不必再改名）
             self.send_header("Content-Disposition", f'attachment; filename="{filename}"')
         self.end_headers()
-        path = self.path.split("?", 1)[0]
-        total = len(data)
+
+    def _send_body(
+        self,
+        chunks: Iterator[bytes | memoryview],
+        total: int,
+        *,
+        path_hint: str = "",
+    ) -> None:
+        """把一串 ≤SEND_CHUNK 的块写进响应体；**停滞 ≤SEND_TIMEOUT_SEC 就被断掉**。
+
+        2026-09-20 事故（云机领到 job 后几分钟零输出）的 hub 侧半边：`wfile.write()`
+        没有超时，对端半开时阻塞**永不返回** ⇒ 客户端永远拿不到 payload，而 `/payload`
+        的访问行被高频静默规则吃掉 ⇒ 两端日志同时沉默（唯一的现象是「卡住」）。
+        现在：分片写（每片独立超时）⇒ 停滞时**响亮打印**已发字节数；
+        ≥SEND_LOG_MIN_BYTES 的 body 完成时也打一行（可对账传输时长/速率）。
+        """
+        path = path_hint or self.path.split("?", 1)[0]
         sent = 0
         t0 = time.time()
         stalled = False
         try:
             self.connection.settimeout(SEND_TIMEOUT_SEC)
-            view = memoryview(data)
-            while sent < total:
-                n = self.wfile.write(view[sent : sent + SEND_CHUNK])
-                if n is None:  # 缓冲写（wbufsize > 0）：视作整片已收
-                    n = min(SEND_CHUNK, total - sent)
-                if n <= 0:  # 0 = 对端不再接收（半开）——不能空转
-                    raise TimeoutError("write 返回 0——对端不再接收")
-                sent += n
+            for chunk in chunks:
+                if not chunk:
+                    continue
+                # `memoryview` 切片是**零复制**（`bytes` 切片会再拷一份 ⇒ 峰值 ×2，
+                # 那 512KB 正是本函数在 1MB 递送上第一次被测到的峰值）。
+                view = memoryview(chunk)
+                off = 0
+                left = len(view)
+                while left > 0:
+                    n = self.wfile.write(view[off : off + left])
+                    if n is None:  # 缓冲写（wbufsize > 0）：视作整片已收
+                        n = left
+                    if n <= 0:  # 0 = 对端不再接收（半开）——不能空转
+                        raise TimeoutError("write 返回 0——对端不再接收")
+                    off += n
+                    left -= n
+                    sent += n
         except OSError as e:
             stalled = True
             print(
@@ -357,6 +385,112 @@ class HubHandler(
                 f"{sent} bytes in {time.time() - t0:.1f}s",
                 flush=True,
             )
+
+    def _bytes(
+        self,
+        data: bytes,
+        status: int = 200,
+        ctype: str = "application/octet-stream",
+        filename: str = "",
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
+        """发送**已在内存里**的整块 body（小 JSON / 探针填充这类；大文件走 `_bytes_file`）。
+
+        分片只是为了让 `_send_body` 的超时**每片**生效（一次大 write 只有整体超时），
+        不解决"这份 bytes 已经占着内存"的问题——那个问题由 `_bytes_file` 从源头避免。
+        """
+        total = len(data)
+        self._send_headers(
+            total, status=status, ctype=ctype, filename=filename, extra_headers=extra_headers
+        )
+        view = memoryview(data)
+        self._send_body(
+            (view[i : i + SEND_CHUNK] for i in range(0, total, SEND_CHUNK)),
+            total,
+        )
+
+    def _bytes_file(
+        self,
+        path: Path,
+        status: int = 200,
+        ctype: str = "application/octet-stream",
+        filename: str = "",
+        *,
+        extra_headers: dict[str, str] | None = None,
+        start: int = 0,
+        end: int | None = None,
+    ) -> None:
+        """递盘上文件的 `[start, end]`（**含两端**；`end=None` = 到文件尾），**边读边写**。
+
+        为什么必须有它：任务包 / payload / blob 都是几十 MB 量级，旧形状每递一次就要一份
+        等长的 bytes（Range 续传还要再切一份 ⇒ 峰值 ×2），那正是 hub 35h 6.2GB 的机制。
+        现在峰值 = SEND_CHUNK，与文件大小**无关**。
+        """
+        size = path.stat().st_size
+        lo = max(0, int(start))
+        hi = size - 1 if end is None else min(int(end), size - 1)
+        total = max(0, hi - lo + 1)
+        self._send_headers(
+            total, status=status, ctype=ctype, filename=filename, extra_headers=extra_headers
+        )
+
+        def chunks() -> Iterator[memoryview]:
+            if total <= 0:
+                return
+            # ★ 一块**复用到底**（`bytearray` + `readinto`）：若每块 `f.read()` 一个新 bytes，
+            # 生成器 yield 之后旧块还被循环变量持有 ⇒ 新旧两块同时活着，峰值恒 = 2×SEND_CHUNK。
+            buf = bytearray(SEND_CHUNK)
+            view = memoryview(buf)
+            with open(path, "rb", buffering=0) as f:
+                f.seek(lo)
+                left = total
+                while left > 0:
+                    n = f.readinto(view[: min(SEND_CHUNK, left)])
+                    if not n:
+                        break  # 文件在统计与读取之间被截短：按实发计（Content-Length 已声明）
+                    left -= n
+                    yield view[:n]
+
+        self._send_body(chunks(), total)
+
+    def _bytes_files(
+        self,
+        entries: list[tuple[str, Path]],
+        *,
+        status: int = 200,
+        ctype: str = "application/octet-stream",
+        filename: str = "",
+        extra_headers: dict[str, str] | None = None,
+    ) -> None:
+        """递**多件**文件的分帧体（`name\\nlen\\n` + raw），逐件流式；峰值 = 一块。
+
+        blob 批量端点（`?name=init,ref,opt`）用：旧实现先把每件 `read_bytes()` 再
+        `b"".join(parts)` ⇒ 峰值 ≈ 2× 三件之和，现在只有 SEND_CHUNK。
+        """
+        sizes: list[int] = []
+        total = 0
+        for name, p in entries:
+            sz = p.stat().st_size
+            sizes.append(sz)
+            total += len(name.encode("utf-8")) + 1 + len(str(sz).encode("ascii")) + 1 + sz
+        self._send_headers(
+            total, status=status, ctype=ctype, filename=filename, extra_headers=extra_headers
+        )
+
+        buf = bytearray(SEND_CHUNK)
+        view = memoryview(buf)
+
+        def chunks() -> Iterator[bytes | memoryview]:
+            for (name, p), _sz in zip(entries, sizes, strict=True):
+                yield name.encode("utf-8") + b"\n" + str(_sz).encode("ascii") + b"\n"
+                with open(p, "rb", buffering=0) as f:
+                    while True:
+                        n = f.readinto(view)
+                        if not n:
+                            break
+                        yield view[:n]
+
+        self._send_body(chunks(), total)
 
     def _job_id(self) -> str | None:
         """从路径 /jobs/{id}/... 取 job_id；非法 404。"""
@@ -404,6 +538,8 @@ class HubHandler(
                 self._admin_halt(False, self._query_course())
             elif path == "/admin/workers/status":
                 self._admin_status()
+            elif path == "/admin/mem":
+                self._admin_mem()
             elif path == "/admin/queue":
                 self._admin_queue()
             elif path == "/admin/push-workers":
@@ -568,7 +704,8 @@ class HubHandler(
         if not p.exists():
             self._json({"error": missing}, 404)
             return
-        self._bytes(p.read_bytes())
+        # 流式（2026-10-17 L1）：旧实现 `read_bytes()` 整份入内存（code/ts_code/blob 都走这里）。
+        self._bytes_file(p)
 
     def _read_raw_body(self) -> bytes | None:
         """按 `Content-Length` 读满请求体；读不到 → 400 并返回 None。

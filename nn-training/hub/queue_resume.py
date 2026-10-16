@@ -40,11 +40,11 @@
 from __future__ import annotations
 
 import functools
-import hashlib
 import json
 from pathlib import Path
 
 import remote.delta_files as delta_files
+from common.hashing import sha256_file
 from common.protocol import ProtocolError, sanitize_run_id
 from hub import deltas as hub_deltas
 from hub.queue_peer import QueuePeer
@@ -190,7 +190,8 @@ class QueueResumeMixin(QueuePeer):
             try:
                 # 递出去那份文件的字节地址（就是**整份**的地址）：客户端「传输损坏」那道闸
                 # 比的就是它。hub 落地之后它就是云机下一轮 init 的内容地址。
-                shipped_fp = hashlib.sha256(w_file.read_bytes()).hexdigest()
+                # ★ 分块哈希（2026-10-17 L2）：旧实现整份 `read_bytes()` 只为算一个 sha256。
+                shipped_fp = sha256_file(w_file)
             except OSError:
                 continue
             return {

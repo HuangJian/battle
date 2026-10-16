@@ -32,6 +32,26 @@ from typing import Any
 
 from common.protocol import FAIL_NAME, PAYLOAD_NAME, find_payload
 
+#: 账本增量读的分块（字节）。只影响 IO 粒度，不影响解析结果（见 `_read_ledger_from`）。
+LEDGER_READ_CHUNK = 64 * 1024
+
+#: 账本里**参与折叠**的三种事件（其余行读了就丢——`_unfinished_pending` 等的唯一筛子）。
+LEDGER_EVENTS = ("job_pending", "job_completed", "job_cancelled")
+
+
+def _ledger_event(raw: bytes) -> dict | None:
+    """一行账本 → 事件 dict（不是这三种事件 / 空行 / 坏 JSON ⇒ None）。"""
+    line = raw.strip()
+    if not line:
+        return None
+    try:
+        e = json.loads(line.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if isinstance(e, dict) and e.get("event") in LEDGER_EVENTS:
+        return e
+    return None
+
 
 class LedgerMixin:
     """域混入：见模块头部。"""
@@ -74,6 +94,11 @@ class LedgerMixin:
     def _init_ledger(self) -> None:
         #: 账本增量读缓存（H6）：文件 size -> 已解析事件列表
         self._ledger_cache: tuple[int, list[dict]] = (0, [])
+        #: ★ H6 的**另一半**（2026-10-17，plan/hub-server-memory-slim L3）：已解析到的**字节位**。
+        #: 只有 size 才知道"变没变"，而只有 offset 才知道"从哪读"——旧实现缺这一半，于是
+        #: size 一变就**全文重解析**（一轮一行 ⇒ 长跑时每拍 O(账本)，hub 35h 累计 74713s CPU
+        #: 有一半是这个）。末尾的半截行不算进 offset（写者可能正在追加）。
+        self._ledger_off: int = 0
         #: 本进程内已作废的 job（`cancel_unsettled_jobs` 填）。**只是认领闸的即时缓存，
         #: 不是事实源**——事实源是账本里的 `job_cancelled`（`claimable_job_ids` 从它重算）。
         #: 有它才挡得住「worker 拿着作废前 peek 到的 jid 来 claim」这个秒级窗口。
@@ -89,28 +114,53 @@ class LedgerMixin:
     def _read_ledger(self) -> list[dict]:
         if not self.jsonl_path.exists():
             self._ledger_cache = (0, [])
+            self._ledger_off = 0
             return []
         size = self.jsonl_path.stat().st_size
         cached_size, cached = self._ledger_cache
-        if cached_size == size:
+        if cached_size == size and self._ledger_off == size:
             return list(cached)  # 未变化：零 IO 复用
+        # ★ 真增量：能续着上次的字节位读就只**读新增**（判据 = 文件只变长且上次解析到了头）；
+        # 否则（文件被截短/重写/首次）退回全量。
         out: list[dict] = []
+        off = 0
+        if cached_size == size or (size > cached_size and 0 < self._ledger_off <= size):
+            out = list(cached)
+            off = self._ledger_off
         try:
-            with open(self.jsonl_path, encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        e = json.loads(line)
-                    except ValueError:
-                        continue
-                    if e.get("event") in ("job_pending", "job_completed", "job_cancelled"):
-                        out.append(e)
+            off = self._read_ledger_from(out, off)
         except OSError:
             return list(cached)
+        # 半截行（写者正在追加）不计入 offset ⇒ 下次从它前面接着读，不重解也不漏解。
+        self._ledger_off = off
         self._ledger_cache = (size, out)
         return list(out)
+
+    def _read_ledger_from(self, out: list[dict], off: int) -> int:
+        """从 `off` 起解析到 EOF，追加进 `out`；返回**新的**已解析字节位。
+
+        二进制 + 手动分行的三个理由：① 只有二进制才能 `seek(off)` 做增量（文本模式的
+        `tell()` 在 UTF-8 多字节边界上不可靠，也不该拿来当"读了多少字节"用）；
+        ② 按块读 ⇒ 峰值 = 一块（旧实现逐行迭代，文本层缓冲把整个文件拉进来的形状类似）；
+        ③ 半截行必须留到下回，不能"读进来就解析"——写者正在追加时那行只有一半。
+        """
+        tail = b""
+        pos = off
+        with open(self.jsonl_path, "rb") as f:
+            if off:
+                f.seek(off)
+            while True:
+                chunk = f.read(LEDGER_READ_CHUNK)
+                if not chunk:
+                    break
+                pos += len(chunk)
+                parts = (tail + chunk).split(b"\n")
+                tail = parts.pop()  # 最后一段未以 \n 结尾 ⇒ 半截行，留给下次
+                for raw in parts:
+                    e = _ledger_event(raw)
+                    if e is not None:
+                        out.append(e)
+        return pos - len(tail)
 
     def _append_ledger(self, event: dict) -> None:
         self.jsonl_path.parent.mkdir(parents=True, exist_ok=True)

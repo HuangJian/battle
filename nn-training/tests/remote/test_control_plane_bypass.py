@@ -40,6 +40,11 @@ JID = "j" * 16
 _BULK_BODY = b"x" * (W.BODY_CHUNK * 2)
 _CHUNK_GAP_SEC = 0.04
 
+#: 条件让路用例要求的最少控制面样本数（中位数要有意义，3 是下限）。
+MIN_SAMPLES = 3
+#: 让路用例里「bulk 反复下载」的轮数上限（窗口由采样是否够决定，这只是挂起兜底）。
+_BULK_MAX_ROUNDS = 5
+
 
 def _median(xs: list[float]) -> float:
     """样本中位（上中位）。
@@ -220,15 +225,24 @@ def test_control_plane_stays_fast_under_conditional_yield(hub: str):
     errs: list[BaseException] = []
     bulk_done = threading.Event()
     control_window = threading.Event()
+    #: ★ 2026-10-17（flake 修）：**窗口长度交给「采样够不够」决定**。
+    #: 病根：单份 512KB 在本机 ~0.1s 就下完，而满载时一次 peek 要 ~60ms（GIL + 每请求新连接）
+    #: ⇒ 窗口只够 2 次采样，`len(lat) >= 3` 就红在机器负载上（不是旁路失效）。
+    #: 判据**不放宽**（`MIN_SAMPLES` 仍是 3）：样本没够之前 bulk 继续下一份 —— 「bulk 在途」
+    #: 的语义不变，只是把窗口长度从「猜一个体量」换成「等被观测的那件事成立」。
+    enough = threading.Event()
     prev = W._BULK.configure_yield(after_sec=0.2, total_budget_sec=5.0)
     try:
 
         def bulk() -> None:
             control_window.wait(15.0)
             try:
-                W.download_payload(
-                    hub, TOKEN, JID, bulk_prio=BULK_P1_CRITICAL, log=lambda _m: None
-                )
+                for _round in range(_BULK_MAX_ROUNDS):
+                    W.download_payload(
+                        hub, TOKEN, JID, bulk_prio=BULK_P1_CRITICAL, log=lambda _m: None
+                    )
+                    if enough.is_set():
+                        break
             except BaseException as e:  # 测试线程：原样留给主线程断言
                 errs.append(e)
             finally:
@@ -248,6 +262,8 @@ def test_control_plane_stays_fast_under_conditional_yield(hub: str):
                         errs.append(e)
                         return
                     lat.append(time.time() - t0)
+                    if len(lat) >= MIN_SAMPLES:
+                        enough.set()  # 采够 ⇒ 告诉 bulk 可以收工（它每轮后查一次）
                     # sleep-ok: 轮询步长（采样节奏，不是同步手段）
                     time.sleep(0.01)
 
@@ -259,7 +275,7 @@ def test_control_plane_stays_fast_under_conditional_yield(hub: str):
         W._BULK.configure_yield(after_sec=prev[0], total_budget_sec=prev[1])
     assert not errs, f"传输出错：{errs!r}"
     assert bulk_done.is_set(), "bulk 下载没在条件让路窗口内结束"
-    assert len(lat) >= 3, f"控制面问询次数太少，测不出结论：{len(lat)}"
+    assert len(lat) >= MIN_SAMPLES, f"控制面问询次数太少，测不出结论：{len(lat)}"
     med = _median(lat)
     assert med < 1.0, f"条件让路下控制面往返中位 {med * 1000:.0f}ms > 1s（旁路失效）"
     # timing-ok: 上界兜底（单样本只挡挂起/整体拖死，一次离群不算旁路失效）

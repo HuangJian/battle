@@ -23,11 +23,24 @@ import time
 from pathlib import Path
 from typing import Any
 
-__all__ = ["append_jsonl", "atomic_write_bytes", "atomic_write_json", "extract_tar_bytes"]
+__all__ = [
+    "append_jsonl",
+    "atomic_write_bytes",
+    "atomic_write_json",
+    "extract_tar_bytes",
+    "same_bytes",
+]
 
 #: `os.replace` 撞「目标被别的句柄占着」（Windows）时的**有界重试**参数；见 `atomic_write_bytes`。
 ATOMIC_REPLACE_ATTEMPTS = 6
 ATOMIC_REPLACE_BACKOFF_SEC = 0.02
+
+#: 流式比较 / 哈希的分块（字节）。
+#:
+#: 2026-10-17（plan/hub-server-memory-slim L2）：`path.read_bytes()` 这种「整份入内存只为比
+#: 一下 / 算个哈希」是 hub 6.2GB RSS 的次要峰值源（权重文件几十 MB，补传时每次一发）。
+#: 分块之后峰值 = 一块，与文件大小无关。
+STREAM_CHUNK = 64 * 1024
 
 
 def atomic_write_bytes(path: Path | str, data: bytes) -> None:
@@ -83,3 +96,33 @@ def extract_tar_bytes(tar_bytes: bytes, dest: Path | str) -> None:
             tf.extractall(d, filter="data")
         except TypeError:  # Python < 3.12
             tf.extractall(d)
+
+
+def same_bytes(path: Path | str, data: bytes) -> bool:
+    """文件与字节是否逐字节相同；**先比 size 再分块比**（峰值 = 一块，不是整份）。
+
+    2026-10-17（plan/hub-server-memory-slim L2）：替掉 `path.read_bytes() == blob` 那一族。
+    幂等重传是常态（补传权重每次都走这道判据），「先比 size」那一半照旧保留——它让
+    绝大多数命中**一个字节都不读**。文件不可读（被并发删掉）⇒ `False`（与旧实现同：
+    旧实现 `OSError` 也吞掉）。
+    """
+    p = Path(path)
+    try:
+        if p.stat().st_size != len(data):
+            return False
+    except OSError:
+        return False
+    view = memoryview(data)
+    try:
+        with open(p, "rb", buffering=0) as f:
+            off = 0
+            while off < len(view):
+                chunk = f.read(min(STREAM_CHUNK, len(view) - off))
+                if not chunk:
+                    return False  # 文件在两次 stat 之间被截短
+                if view[off : off + len(chunk)] != chunk:
+                    return False
+                off += len(chunk)
+    except OSError:
+        return False
+    return True

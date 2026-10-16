@@ -34,7 +34,7 @@ HubHandler(AdminRoutes, ScheduleRoutes, ResultRoutes, BlobRoutes, OfflineRoutes,
 | `_job_body(cap, known=…)` | 上者 + 读小 JSON 体 | 4 |
 | `_lease_token()` | `X-Lease-Token` / `lease-token` 双写法 | 5 |
 | `_serve_path(p, missing=…)` | 定位 → 不存在就 404 说清原因 → `_bytes` | 4 |
-| `_read_raw_body()` | 按 Content-Length 读满（上限留给调用方） | 3 |
+| `_read_raw_body()` | 按 Content-Length 读满（上限留给调用方） | 3 → **2**（2026-10-17：`/result` 改走 `_read_capped_body`，见下） |
 
 ## 本文件钉住的东西
 
@@ -121,7 +121,10 @@ SHARED_HELPERS = {
     "_job_body": 4,
     "_lease_token": 4,
     "_serve_path": 4,
-    "_read_raw_body": 3,
+    # 2026-10-17（plan/hub-server-memory-slim L2）：`POST /jobs/{id}/result` 从无界读
+    # 改成 `_read_capped_body(RESULT_BODY_MAX)` ⇒ 本助手的调用点 3 → 2。它仍为
+    # `/fail` 与 `/bc-epoch` 服务（那两条各有自己的界，判完再读是它们的语义）。
+    "_read_raw_body": 2,
 }
 
 #: 混入里**不许**再出现的内联形状 → （正则式子串, 该走哪个助手）。
@@ -386,6 +389,31 @@ class _Probe(hs.HubHandler):
         # 报 override 不兼容；这里额外收一份供断言用（`calls_bytes` 保持旧口径不动）。
         self.calls_bytes.append(data)
         self.calls_headers.append(dict(extra_headers or {}))
+
+    def _bytes_file(
+        self,
+        path: Path,
+        status: int = 200,
+        ctype: str = "application/octet-stream",
+        filename: str = "",
+        *,
+        extra_headers: dict[str, str] | None = None,
+        start: int = 0,
+        end: int | None = None,
+    ) -> None:
+        """`_serve_path` 2026-10-17 起走流式（plan/hub-server-memory-slim L1）。
+
+        本探针没有 socket ⇒ 按区间读出来转调上面那份 `_bytes`（**写出去这层仍然只此一份**）。
+        流式本身的判据（分块 / 峰值 / 区间字节）由 `tests/hub/test_hub_stream_send.py`
+        打**真实实现**钉住，不在这里重写一遍。
+        """
+        size = path.stat().st_size
+        lo = max(0, int(start))
+        hi = size - 1 if end is None else min(int(end), size - 1)
+        with open(path, "rb") as f:
+            f.seek(lo)
+            data = f.read(max(0, hi - lo + 1))
+        self._bytes(data, status, ctype, filename, extra_headers=extra_headers)
 
     def _auth_ok(self) -> bool:
         return self.ok

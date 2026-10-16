@@ -273,6 +273,21 @@ class _FakeHandler(BlobRoutes):
         self.codes.append(200)
         self.payloads.append(p.read_bytes())
 
+    def _bytes_files(self, entries: list[tuple[str, Path]]) -> None:
+        """`_serve_blob_batch` 2026-10-17 起走流式（plan/hub-server-memory-slim L1）。
+
+        替身没有 socket ⇒ 按帧拼出来转调 `_bytes`（**写出去这层仍只此一份**）。
+        流式本身（分块 / 峰值 / 字节等价）由 `tests/hub/test_hub_stream_send.py`
+        打**真实实现**钉住，不在这里重写一遍。
+        """
+        parts = []
+        for name, p in entries:
+            raw = p.read_bytes()
+            parts.append(
+                name.encode("utf-8") + b"\n" + str(len(raw)).encode("ascii") + b"\n" + raw
+            )
+        self._bytes(b"".join(parts))
+
 
 def _seed(root: Path, **names: bytes) -> None:
     jd = root / "j1"

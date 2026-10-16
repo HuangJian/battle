@@ -30,6 +30,7 @@ re-export（没有别的读者）。
 from __future__ import annotations
 
 import json
+import os
 import random
 import re
 import time
@@ -50,6 +51,60 @@ NET_PROBE_MAX = 16 * 1024 * 1024
 #: /admin/worker-prefetch 请求体上限（plan/dashboard-ppo-live-rows）：体里只有 worker id 与
 #: 两组 jid 列表（16 字节 × 预取深度）—— 64KB 已宽裕两个数量级，超限 413 而不是读进内存。
 WORKER_PREFETCH_BODY_MAX = 64 * 1024
+
+
+def rss_bytes() -> int:
+    """本进程 RSS（字节）；**读不到 ⇒ 0**（观测面不许因为平台差异把端点打挂）。
+
+    纯 stdlib：Windows 走 `psapi.GetProcessMemoryInfo`，POSIX 读 `/proc/self/statm`
+    （第 2 个字段 = 常驻页数）。不引 psutil——hub 的 import 闭包只许标准库
+    （`tests/remote/test_hub_import_graph.py` 钉着这条）。
+    """
+    try:
+        if os.name == "nt":  # pragma: no cover - 平台分支（Windows 侧由真机读数验证）
+            import ctypes
+
+            class _PMC(ctypes.Structure):
+                _fields_ = [
+                    ("cb", ctypes.c_ulong),
+                    ("PageFaultCount", ctypes.c_ulong),
+                    ("PeakWorkingSetSize", ctypes.c_size_t),
+                    ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t),
+                    ("PeakPagefileUsage", ctypes.c_size_t),
+                ]
+
+            pmc = _PMC()
+            pmc.cb = ctypes.sizeof(_PMC)
+            psapi = ctypes.windll.psapi  # type: ignore[attr-defined]
+            kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
+            # ★ 必须显式声明签名：不声明时 `GetCurrentProcess()` 的返回值按 c_int 传
+            # （= -1），`GetProcessMemoryInfo` 会失败 ⇒ 读数恒 0（观测面最坏的形状：
+            # 一个数恒为 0 的"读数"会被当成证据）。
+            psapi.GetProcessMemoryInfo.restype = ctypes.c_bool
+            psapi.GetProcessMemoryInfo.argtypes = [
+                ctypes.c_void_p,
+                ctypes.c_void_p,
+                ctypes.c_ulong,
+            ]
+            ok = psapi.GetProcessMemoryInfo(
+                ctypes.c_void_p(kernel32.GetCurrentProcess()),
+                ctypes.byref(pmc),
+                pmc.cb,
+            )
+            return int(pmc.WorkingSetSize) if ok else 0
+        with open("/proc/self/statm", encoding="utf-8") as f:  # pragma: no cover
+            pages = int(f.read().split()[1])
+        # `os.sysconf` 只在 POSIX 上（`typeshed` 按平台标注）⇒ 显式 `int()` 包住，
+        # 别让 `Any` 顺着 return 溜出去（`mypy --strict` 的 no-any-return）。
+        page_size = int(os.sysconf("SC_PAGE_SIZE"))  # type: ignore[attr-defined]
+        return pages * page_size
+    except Exception:
+        return 0
 #: 确定性填充块（固定种子，绝不用随机——同一 bytes=N 每次必须逐字节相同，
 #: 这样隧道 A/B 的差异只可能来自协议，不可能来自载荷）。
 #:
@@ -195,6 +250,18 @@ class AdminRoutes:
         course = self._query_course()
         halt = self.hub.halt_of(course) if course else self.hub.all_halted()
         self._json({"halt": halt}, 200)
+
+    # ---- GET /admin/mem（2026-10-17，plan/hub-server-memory-slim L3） ----
+    def _admin_mem(self) -> None:
+        """进程内存 + 常驻表规模的**只读**读数（纯观测，不进任何判据）。
+
+        为什么要这个端点：hub 跑到 6.2GB 那次的排障全程靠任务管理器 + 猜——「活状态有多少」
+        只能靠 `/admin/queue` 逐课看 `pending_n`，而**内存里躺着什么**没有任何读数。常驻
+        之后 `GET /admin/mem` 一次就能回答「是不是又棘轮了 / 是哪张表在涨」。
+        """
+        if not self._auth_ok():
+            return
+        self._json({"mem": self.hub.mem_readout(), "rss_bytes": rss_bytes()}, 200)
 
     # ---- 多课程观测面（2026-09-18）：/admin/queue + /admin/courses ----
     def _admin_queue(self) -> None:

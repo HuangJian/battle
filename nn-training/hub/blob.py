@@ -20,6 +20,7 @@ from __future__ import annotations
 import urllib.parse
 from email.message import Message
 from io import BufferedIOBase
+from pathlib import Path
 from typing import Any
 
 from common.protocol import (
@@ -76,6 +77,8 @@ class BlobRoutes:
     # 由组合类提供（实现都在 `hub.server.HubHandler`）——混入只声明类型。
     _auth_ok: Any
     _bytes: Any
+    _bytes_file: Any
+    _bytes_files: Any
     _job_or_404: Any
     _json: Any
     _serve_path: Any
@@ -99,21 +102,25 @@ class BlobRoutes:
         if p is None:
             self._json({"error": "no payload"}, 404)
             return
-        data = p.read_bytes()
-        span = parse_range(self.headers.get("Range"), len(data))
+        # ★ 流式（2026-10-17 L1）：旧实现先 `read_bytes()` 整份、Range 分支再切一份
+        # `data[start:end+1]` ⇒ 峰值 = 2× payload。现在两种分支都从盘上按区间读，
+        # 峰值 = SEND_CHUNK（与 payload 大小无关）。
+        size = p.stat().st_size
+        span = parse_range(self.headers.get("Range"), size)
         if span is None:
             # M0 统一计量：传输层实测（服务出去的 payload 字节）——iteration 事件对账用。
-            self.hub.record_payload_sent(jid, len(data))
-            self._bytes(data)
+            self.hub.record_payload_sent(jid, size)
+            self._bytes_file(p)
             return
         start, end = span
-        body = data[start : end + 1]
-        self.hub.record_payload_sent(jid, len(body))
-        self._bytes(
-            body,
+        self.hub.record_payload_sent(jid, end - start + 1)
+        self._bytes_file(
+            p,
             status=206,
+            start=start,
+            end=end,
             extra_headers={
-                "Content-Range": f"bytes {start}-{end}/{len(data)}",
+                "Content-Range": f"bytes {start}-{end}/{size}",
                 "Accept-Ranges": "bytes",
             },
         )
@@ -169,7 +176,9 @@ class BlobRoutes:
         内容寻址、缺一件就响亮失败（`_resolve_blob`）。半份响应会让调用方把「部分成功」
         误读成「全部拿到」，那是静默 warm-start 那一类事故的形状。
         """
-        parts: list[bytes] = []
+        # 先定位**全部**件（任一件不可得就整笔失败，语义不变），再一次性流式递出。
+        # ★ 旧实现逐件 `read_bytes()` 后 `b"".join(parts)` ⇒ 峰值 ≈ 2× 三件之和（2026-10-17 L1）。
+        entries: list[tuple[str, Path]] = []
         for n in names:
             try:
                 bp = blob_path(self.hub._job_dir(jid), n)
@@ -179,9 +188,8 @@ class BlobRoutes:
             if not bp.exists():
                 self._json({"error": f"no blob {n}"}, 404)
                 return
-            raw = bp.read_bytes()
-            parts.append(n.encode("utf-8") + b"\n" + str(len(raw)).encode("ascii") + b"\n" + raw)
-        self._bytes(b"".join(parts))
+            entries.append((n, bp))
+        self._bytes_files(entries)
 
 
     # ---- GET /code（共享 code.zip，colab bootstrap 用） ----

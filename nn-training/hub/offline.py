@@ -98,6 +98,7 @@ class OfflineRoutes:
     # 由组合类提供（实现都在 `hub/http_face.py::HubHandler`）——混入只声明类型。
     _auth_ok: Any
     _bytes: Any
+    _bytes_file: Any
     _json: Any
     _log_reject: Any
     _query_course: Any
@@ -182,16 +183,18 @@ class OfflineRoutes:
         # 包就在盘上（新鲜，或过期到上界后降级照发）⇒ **缺包账本清零**：下次真缺包能重新触发。
         reset_task_pack_miss_triggers(course)
         try:
-            data = p.read_bytes()
+            # ★ 流式（2026-10-17 L1）：任务包是 hub 递过的**最大单件**，旧实现整份入内存
+            # （一次取包 = 一份等长的 bytes，几十~几百 MB）——hub 6.2GB RSS 的第一峰值源。
+            size = p.stat().st_size
         except OSError as e:
             self._json({"error": f"读任务包失败: {e}", "course": course}, 500)
             return
         print(
             f"[{time.strftime('%H:%M:%S')}] [hub-server] task-pack -> {p.name} "
-            f"({len(data)} bytes)",
+            f"({size} bytes)",
             flush=True,
         )
-        self._bytes(data, 200, "application/zip", filename=p.name)
+        self._bytes_file(p, 200, "application/zip", filename=p.name)
 
 
     def _get_offline_resume(self) -> None:
@@ -303,13 +306,9 @@ class OfflineRoutes:
         if not p.is_file():  # 锚点目录里本该有这件（`_round_is_complete` 判过）——缺了就是盘上出了事
             self._json({"error": f"锚点轮缺少 {name}", "path": str(p)}, 500)
             return
-        try:
-            data = p.read_bytes()
-        except OSError as e:
-            self._json({"error": f"读锚点件失败: {e}", "path": str(p)}, 500)
-            return
         ctype = "application/json" if name.endswith(".json") else "application/octet-stream"
-        self._bytes(data, 200, ctype, filename=f"it-{it:03d}-{name}")
+        # ★ 流式（2026-10-17 L1）：锚点件是 weights/opt（几十 MB），旧实现整份入内存。
+        self._bytes_file(p, 200, ctype, filename=f"it-{it:03d}-{name}")
 
 
     def _post_offline_artifact(self) -> None:

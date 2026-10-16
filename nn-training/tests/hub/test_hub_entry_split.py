@@ -145,8 +145,12 @@ FORBIDDEN_ENTRY_IMPORTS = (
     "remote.push_dispatch",
 )
 
-#: `SEND_TIMEOUT_SEC` 的**唯一读者**：`HubHandler._bytes`（它决定 patch 要写在哪）。
-SEND_TIMEOUT_READER = ("hub/http_face.py", "HubHandler", "_bytes")
+#: `SEND_TIMEOUT_SEC` 的**唯一读者**：`HubHandler._send_body`（它决定 patch 要写在哪）。
+#:
+#: 2026-10-17（plan/hub-server-memory-slim L1）：三种喂法（`_bytes` / `_bytes_file` /
+#: `_bytes_files`）的写循环收成 `_send_body` 这一份 ⇒ 超时读点从 `_bytes` 搬到 `_send_body`。
+#: 判据本身没变（"读点只有一个，且是裸名字"），只是它现在指的那个方法换了。
+SEND_TIMEOUT_READER = ("hub/http_face.py", "HubHandler", "_send_body")
 
 
 def _tree(rel: str) -> ast.Module:

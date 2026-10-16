@@ -7112,3 +7112,34 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **后果**：`tmp-clean` 的删除目标从「整个 run root」变成「刨掉资产后的各块」（无资产时仍是**一次
   `rmtree`**，与旧行为逐字节一致）；文本断言基线 FORM 1470 → **1480**（+10 操作员读数行 −6 已改成
   非文本判据，逐笔分摊写在 `tests/test_source_text_assert_budget.py` 模块头）。
+
+## §2026-10-17-goalnn-hub-memory-slim（hub 递送流式化 + result 有界 + 账本真增量 + 课程表可淘汰 + /admin/mem）
+
+- **来源**：`plan/hub-server-memory-slim.plan.md`（L1/L2/L3）+ 事故现场：hub（`python -m hub.server`
+  --port 8787 --traj-root tmp --discover）连跑 35h 后 **WS 6.24GB / priv 10.04GB / peak 7.71GB**，
+  而活状态实测全空（7 门课 · `pending_n=0` · 三份账本合计 81KB · 线程 64/句柄 656 正常）。
+  确证实验：打 20 次 16MB net-probe（320MB）⇒ RSS **零增长** ⇒ 堆已被撑到高位且不再向 OS 要/还
+  ⇒ 真因是**历史峰值被堆锁住（棘轮）**，峰值来自「整个文件 `read_bytes()` 成 bytes 再递出去」。
+- **L1 递送流式化**：`hub/http_face.py` 抽出 `_send_headers` + `_send_body`（传输语义只此一份），
+  三种喂法 `_bytes`（内存 bytes）/ `_bytes_file`（盘上区间，`readinto` 复用一块 ⇒ 峰值恒 = SEND_CHUNK）
+  / `_bytes_files`（多件分帧）。改造点：`_serve_path` · `/payload`（Range 分支不再切第二份）·
+  blob 批量（不再 `join`）· `/offline/task-pack` · 锚点件。字节流与旧实现**逐字节等价**。
+- **L2 大块读收口**：`common.fs.same_bytes`（分块比较，替掉 `read_bytes() == blob`）·
+  `sha256` 一律走 `common.hashing.sha256_file`（**不新造**，它本来就是分块的唯一实现）·
+  `POST /jobs/{id}/result` 从**无界** `_read_raw_body()` 改成 `_read_capped_body(RESULT_BODY_MAX=64MB)`
+  ——取值依据：实测 `result.json` 最大 260KB（6 份样本）⇒ ~250× 余量；复核方法写在常量注释里
+  （量账本里 `record_result_recv` 的 p99，别只看盘上剩下的）。
+- **L3 常驻侧 + CPU**：`_read_ledger` 补上 H6 缺的那一半 `_ledger_off`（记住已解析字节位 ⇒ 只**读新增**；
+  半截行留在 offset 外；文件被截短自动退回全量）——旧实现只在「size 未变」时省 IO，一变就全文重解析，
+  长跑每拍 O(账本)，hub 35h 累计 74713s CPU 有一半是这个。`discover` 补 `drop_course`
+  （课程表原先**只增不减**）：判据只认「**课程目录没了**」，且**在飞（内存租约）/ 有人接管不摘**；
+  新增 `GET /admin/mem`（RSS + 逐课账本行数 + 六张常驻表规模）。
+- **备选与否决**：① 用 psutil 读内存 —— 否（hub 的 import 闭包只许标准库，
+  `tests/remote/test_hub_import_graph.py` 钉着）；② 「停课（删开课标记）也摘表」—— **否**（停课后
+  控制台要看得见、云机要能取包、人要能导段，摘表只带来 404；派发已由 `_serves_course` 挡住）；
+  ③ 淘汰判据加「超 fresh 窗口」—— 否（卡住的课会被误当死课）；④ 水位自重启（plan L4）—— **暂不做**
+  （先有 L1–L3，否则是拿重启掩盖；真机判据 = 改完 1 小时后 `/admin/mem` 的 rss 仍 ≤150MB）。
+- **后果**：递送路径的峰值从「文件等长（Range ×2）」降到「≤256KB」；账本读从 O(账本) 降到 O(新增)；
+  课程表可淘汰 ⇒ tmp 被清之后内存里的账本不再永久驻留。守卫随之更新（成员数 121→124、
+  `_init_ledger` 字段 +`_ledger_off`、`_read_raw_body` 调用点 3→2、`SEND_TIMEOUT` 读点 `_bytes`→`_send_body`、
+  `store_offline` 白名单 +`common.hashing`）。
