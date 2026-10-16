@@ -44,7 +44,7 @@ function splitLogBytes(buf: Uint8Array): string[] {
  *  于是每拍读 ~80MB 并裂成行数组（实测单次 `componentViews` = **2348ms / heapΔ 94.9MB /
  *  rssΔ 260.9MB**），只为了取最后 5 行。256KB 足以容纳任何正常日志的最后 5 行（需要单行 >51KB
  *  才会截到）——不设更小是为了对「长行日志」保持语义余量。 */
-const LOG_TAIL_BYTES = 256 * 1024
+export const LOG_TAIL_BYTES = 256 * 1024
 
 export function logTail(nnRel: string, n = 5): string[] {
   const abs = path.isAbsolute(nnRel) ? nnRel : path.join(REPO_ROOT, 'nn-training', nnRel)

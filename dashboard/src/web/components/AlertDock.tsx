@@ -56,20 +56,33 @@ export function AlertDock({
           </span>
           {a.actions.length > 0 ? (
             <span className="tc-dock__acts">
-              {a.actions.map((act) => (
-                <button
-                  key={act.label}
-                  type="button"
-                  className={`tc-btn tc-btn--sm${act.primary ? ' tc-btn--primary' : ''}`}
-                  title={act.title}
-                  onClick={() => {
-                    if (act.kind === 'ack') onAck(act.ackKey ?? '')
-                    else if (act.act) void onAct(act.act, act.body ?? {})
-                  }}
-                >
-                  {act.label}
-                </button>
-              ))}
+              {a.actions.map((act) =>
+                // `link` = **纯导航**：真 `<a href>`（可中键/右键新开标签），**不挂 onClick**
+                // —— 所以它必须排在下面那个 else-if **之前**（那里的门是 `act.act`，不是 kind）。
+                act.kind === 'link' ? (
+                  <a
+                    key={act.label}
+                    className={`tc-btn tc-btn--sm${act.primary ? ' tc-btn--primary' : ''}`}
+                    href={act.href ?? '/errors'}
+                    title={act.title}
+                  >
+                    {act.label}
+                  </a>
+                ) : (
+                  <button
+                    key={act.label}
+                    type="button"
+                    className={`tc-btn tc-btn--sm${act.primary ? ' tc-btn--primary' : ''}`}
+                    title={act.title}
+                    onClick={() => {
+                      if (act.kind === 'ack') onAck(act.ackKey ?? '')
+                      else if (act.act) void onAct(act.act, act.body ?? {})
+                    }}
+                  >
+                    {act.label}
+                  </button>
+                ),
+              )}
             </span>
           ) : null}
         </div>

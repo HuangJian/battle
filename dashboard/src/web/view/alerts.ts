@@ -37,6 +37,7 @@ import { alertAckKey, cloudHaltAckKey, visibleCloudHalts } from './interaction'
 // 与 pill **同一个词**（2026-10-02 口径对齐，plan/course-pill-precision §6）：告警坞的 PPO 红条
 // 与 pill 的「排队·无人取」说的是同一件事（有活、没人认领）；「卡住」是另一类（有持有者但
 // 无进度）。两处各起一个名字 = 迟早漂开，所以词只在 `course-status.ts` 定义一次。
+import type { ErrorSummaryView } from './error-types'
 import type { LoopQueueRow } from './loop-queue'
 import { NO_TAKER_LABEL, STUCK_LABEL, describeRunComplete } from './course-status'
 
@@ -57,8 +58,13 @@ export const ALERT_DOCK_DEFAULT_VISIBLE = 2
  *  - `resume`：真去调 API 改训练状态（横幅上的「立即恢复」）；
  *  - `ack`：只写本地已读（「知道了」），不碰服务端。 */
 export interface AlertAction {
-  kind: 'resume' | 'ack'
+  /** `link` 是**纯导航（无副作用）**的唯一一格（2026-10-16，plan/component-error-registry §4.5）：
+   *  渲染成真 `<a href>`（可中键/右键新开标签），**绝不**挂 `onClick` —— 所以它不能与
+   *  `resume`（真去改训练状态）混成一个 kind。 */
+  kind: 'resume' | 'ack' | 'link'
   label: string
+  /** `kind='link'`：目标页（同源站内路径，如 `/errors`）。 */
+  href?: string
   /** `kind='resume'`：API 动作名 + body。 */
   act?: string
   body?: Record<string, unknown>
@@ -142,6 +148,11 @@ export interface AlertInput {
    *  （2026-10-05，plan/course-startup-recover §3.3/§4.3）。`null`/缺省 = 读面不可用
    *  （旧控制台 / python 读失败）：什么都不画，**不编**「起不来」。 */
   loopQueueRows?: LoopQueueRow[] | null
+  /** 组件错误登记表的**轻量投影**（`ConsoleStateView.errors`；plan/component-error-registry §4.5）。
+   *
+   *  `null`/缺省 = 旧服务端（没有 `/api/errors`）或本拍登记表不可用 ⇒ **不出汇总条、不编 N**
+   *  （与 `selfDisk` 同口径：不可知 ≠ 没问题）。 */
+  errors?: ErrorSummaryView | null
   /** 本机磁盘水位（`ConsoleStateView.selfDisk`；plan/self-node-disk-alert）。
    *
    *  `null`/缺省 = 旧 agent 没报 / self 行没探到 ⇒ **不出条目、不推算**（不可知 ≠ ok）。
@@ -166,6 +177,7 @@ export function buildAlerts(input: AlertInput): AlertItem[] {
     ...offlineStallAlerts(input),
     ...courseEditAlerts(input),
     ...courseStartupAlerts(input),
+    ...componentErrorAlerts(input),
     ...readOnlyAlerts(input),
   ]
 }
@@ -204,6 +216,59 @@ function selfDiskAlerts(input: AlertInput): AlertItem[] {
           '处置：清 nn-training/tmp 下陈旧课程分片（节点统计抽屉里有本机盘余量读数）。',
         role: 'alert',
         actions: [{ kind: 'ack', label: '知道了', ackKey }],
+      },
+      '',
+    ),
+  ]
+}
+
+/** 相对时间（汇总条标题里的「最近 …」）。**传 `now` 进来**——纯函数不许读墙钟，否则单测没法钉。 */
+function relAgo(now: number, at: number): string {
+  const s = Math.max(0, Math.round((now - at) / 1000))
+  if (s < 60) return '刚刚'
+  if (s < 3600) return `${Math.floor(s / 60)} 分钟前`
+  if (s < 86_400) return `${Math.floor(s / 3600)} 小时前`
+  return `${Math.floor(s / 86_400)} 天前`
+}
+
+/** 第 9 类：组件错误登记表的**汇总条**（plan/component-error-registry §4.5，G6）。
+ *
+ *  只出 **0 或 1 条**（逐条在 `/errors` 页）：坞默认只展开 2 条，一条汇总比 N 条逐条更可读，
+ *  而「同类出现几次」这个事实只有汇总能表达。
+ *
+ *  为什么未 ack 数在**客户端**算：服务端不知道浏览器 ack 了什么（`acks` 住 localStorage，
+ *  与 `selfDiskAlerts` 同构）⇒ 投影必须逐条带 `fp`/`severity`/`firstAt`；`detail` 长文本不进
+ *  这个投影（只住 `/api/errors`），所以汇总条的「依据」行只有一行摘要。 */
+function componentErrorAlerts(input: AlertInput): AlertItem[] {
+  const view = input.errors
+  if (!view || view.items.length === 0) return []
+  const pending = view.items.filter(
+    (it) => !input.acks.includes(alertAckKey('component-error', it.fp, String(it.firstAt))),
+  )
+  if (pending.length === 0) return []
+  // 汇总条自己的身份：eventId = **最新未 ack 错误的出现时刻** ⇒ 新错误进来必重弹（§4.7）。
+  const latest = pending.reduce((a, b) => (a.firstAt >= b.firstAt ? a : b))
+  const ackKey = alertAckKey('component-errors', 'all', String(latest.firstAt))
+  if (input.acks.includes(ackKey)) return []
+  const bySource = new Map<string, number>()
+  for (const p of pending) bySource.set(p.source, (bySource.get(p.source) ?? 0) + 1)
+  const dist = [...bySource.entries()].map(([s, n]) => `${s}:${n}`).join('，')
+  const truncated = view.truncated ? '（列表已截断，完整清单看详情页）' : ''
+  return [
+    withCopy(
+      {
+        id: 'component-errors',
+        severity: pending.some((p) => p.severity === 'err') ? 'err' : 'warn',
+        icon: '🧯',
+        title: `组件报错：${pending.length} 条未处理（最近 ${relAgo(input.now, latest.lastAt)}）`,
+        detail:
+          `来源分布：${dist}；最近一条：${latest.component} — ${latest.message}${truncated}。` +
+          '逐条的 traceback/上下文与 ack 在详情页。',
+        role: 'alert',
+        actions: [
+          { kind: 'link', href: '/errors', label: '查看详情', primary: true },
+          { kind: 'ack', label: '知道了', ackKey },
+        ],
       },
       '',
     ),

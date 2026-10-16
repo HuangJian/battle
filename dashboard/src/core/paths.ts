@@ -51,6 +51,16 @@ export const START_LOG_DIR = path.join(LOG_DIR, 'training-start')
 /** 监控页热加载元数据文件（变更检测哨兵，实义为最后实际变更时间戳）。 */
 export const MONITOR_TOUCH = path.join(START_LOG_DIR, 'monitor-touch.json')
 
+/** 组件错误登记表的**账本**（append-only JSONL；plan/component-error-registry §4.4）。
+ *
+ *  单测以 `BCITY_ERROR_LEDGER` 重定向到临时文件——**否则跑测试会把指纹写进操作员真账本**
+ *  （污染读面，且「同 fp 只落一行」的用例会互相影响，测试顺序一变就飘）。默认行为零变化，
+ *  故**惰性**取值：本文件里每一个会被用例碰的路径都是这个形状（`:38 tmpLogsDir` / `:61
+ *  consoleLogPath` / `:78 loopControlPath` / `:97 gateHaltPath` …）。 */
+export function errorLedgerPath(): string {
+  return process.env.BCITY_ERROR_LEDGER ?? path.join(LOG_DIR, 'component-errors.jsonl')
+}
+
 /** 控制台**会话日志**（组件级决策：启/停/重启/判死/开课/停课…）。
  *
  *  与 `launch/cli.ts` 的 `initLog('train-cli')`（每次运行一个新文件）分工不同：控制台是

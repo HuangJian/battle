@@ -30,7 +30,7 @@ export type PageKey = 'overview' | 'metrics' | 'nodes' | 'wire' | 'courses'
  *
  *  用途分工：路由判定只用 `PageKey`（窄的，保证 `bootstrapPage` 不可能返回独立页）；
  *  元信息查询与外壳渲染用 `AnyPageKey`（宽的）。 */
-export type AnyPageKey = PageKey | 'eval' | 'log'
+export type AnyPageKey = PageKey | 'eval' | 'log' | 'errors'
 
 /** 侧栏分组 id（渲染顺序 = 数组顺序）。 */
 export type NavGroupId = 'monitor' | 'control' | 'infra'
@@ -113,6 +113,14 @@ export const PAGES: Readonly<Record<AnyPageKey, PageMeta>> = {
     desc: '这个组件刚才到底报了什么？',
     path: '/log',
   },
+  // 组件错误登记表（2026-10-16，plan/component-error-registry §4.6）：第 3 个独立页 /
+  // 第 4 份 bundle（照 /log 范式：服务端整页服务、不参与本 bundle 路由）。
+  errors: {
+    key: 'errors',
+    title: '错误',
+    desc: '现在有哪些错、同类出现几次、谁还没处理？',
+    path: '/errors',
+  },
 }
 
 /** 默认页面（未知/空路径的落点）。 */
@@ -187,6 +195,15 @@ export const NAV_ITEMS: readonly NavItem[] = [
     group: 'infra',
     kind: 'route',
     page: 'wire',
+  },
+  {
+    id: 'errors',
+    label: '错误',
+    href: '/errors',
+    title: '组件错误登记表（独立页）：来源/组件/次数/未处理 + traceback 与 ack',
+    icon: '⚑',
+    group: 'infra',
+    kind: 'link',
   },
   {
     id: 'log',

@@ -1,6 +1,7 @@
 /** console-types.ts — 控制台整页视图类型（组件 / 节点 / 模式 / 指标 / 整页快照）与展示辅助。 */
 import { ParallelOverviewView, PushWorkerRegistryView } from './course-overview'
 import { ContributionBrief, PpoWorkerLiveView } from './contribution'
+import { ErrorSummaryView } from './error-types'
 import { LoopQueueView } from './loop-queue'
 import { IterRow, PairedReferee } from './metric-types'
 import { PhaseInfo } from './phase'
@@ -378,6 +379,13 @@ export interface ConsoleStateView {
   localNode?: NodeLocalView | null
   /** push 执行面（机群级；2026-09-19 起不再按课程）：登记节点 + hub_push + 逐节点探活。 */
   pushFleet?: PushFleetProbe | null
+  /** **组件错误登记表的轻量投影**（plan/component-error-registry §4.5：告警坞第 9 个条目函数的取数面）。
+   *
+   *  取数面 = 服务端登记表的 **SWR 缓存值**（`error-registry.ts`）—— `/api/state` 路径**不**触发
+   *  任何探测（R1 结构闸 / 非目标 N9）；`null`/缺省 = 旧服务端或本拍不可用 ⇒ **不出汇总条、不编 N**。
+   *  **不含 `detail`**（长文本只走 `/api/errors`）：未 ack 数要用**客户端的 acks** 过滤后才能算，
+   *  所以必须逐条带 `fp` + `severity`。 */
+  errors?: ErrorSummaryView | null
   /** **本机（self 节点）磁盘水位**（plan/self-node-disk-alert：告警坞第 8 个条目函数的取数面）。
    *
    *  取数面 = 机群级 `FleetProbes.nodes` 的 self 行（`/v1/ping` 顺带带回来的磁盘事实）——

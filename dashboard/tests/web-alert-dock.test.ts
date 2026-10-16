@@ -30,6 +30,8 @@ import {
   type AlertInput,
   type AlertItem,
   type DiskFactsView,
+  type ErrorListItem,
+  type ErrorSummaryView,
 } from '../src/web/view'
 
 /** 一件都不告警的基线输入（每条用例只改它关心的那一项）。 */
@@ -65,6 +67,29 @@ const item = (id: string, severity: AlertItem['severity']): AlertItem => ({
   role: 'status',
   actions: [],
   copyText: id,
+})
+
+/** 组件错误登记表的**轻量投影**夹具（`ConsoleStateView.errors`；plan/component-error-registry §4.5）。
+ *
+ *  投影**必须逐条**带 `fp` + `severity` + `firstAt`：未 ack 数要用**客户端的 acks** 过滤后才算得出
+ *  （服务端不知道浏览器 ack 了什么）——所以这里造的不是一个数字而是一张清单。 */
+const errorSummary = (over: Partial<ErrorListItem> = {}, truncated = false): ErrorSummaryView => ({
+  items: [
+    {
+      fp: 'fp0',
+      source: 'local-log',
+      component: 'trainingLoop',
+      scope: 'c5-gae',
+      severity: 'err',
+      firstAt: 1_700_000_000_000,
+      lastAt: 1_700_000_060_000,
+      count: 3,
+      message: 'RuntimeError: 缺 BC 参考',
+      ref: { kind: 'log', target: 'trainingLoop' },
+      ...over,
+    },
+  ],
+  truncated,
 })
 
 describe('buildAlerts：七类告警各自成条目，原文不丢', () => {
@@ -432,11 +457,14 @@ describe('全局收官 + 全条目可关闭可复制（2026-10-03 plan/dashboard
     ],
     courseEdit: { verdict: 'rejected', fields: ['reward'], at: '2026-10-03 10:00:00' },
     selfDisk: disk({ level: 'critical', freeMB: 1212 }),
+    // 第 9 类：组件错误登记表汇总条（2026-10-16，plan/component-error-registry）。
+    errors: errorSummary(),
     readOnly: true,
   })
 
   // 停机「已恢复」与「停机中」互斥（同一课同一时刻只有一态），不能塞进同一份输入；
-  // 其余每类都已在 allOn 里（含本机磁盘，plan/self-node-disk-alert）。两份输入拼起来 = 八类 / 十条全覆。
+  // 其余每类都已在 allOn 里（含本机磁盘，plan/self-node-disk-alert；组件错误，plan/component-error-registry）。
+  // 两份输入拼起来 = 九类 / 十一条全覆。
   const recovered = (): AlertInput => ({
     ...clean,
     cloudHalts: {
@@ -515,6 +543,8 @@ describe('全局收官 + 全条目可关闭可复制（2026-10-03 plan/dashboard
         ],
       },
       { ...clean, courseEdit: { verdict: 'rejected', fields: ['reward'], at: 'T' } },
+      // 第 9 例（2026-10-16，plan/component-error-registry §5 W0）：不补的话新类没有 ack 往返覆盖。
+      { ...clean, errors: errorSummary() },
     ]
     for (const inp of cases) {
       const items = buildAlerts(inp)
@@ -533,10 +563,17 @@ describe('全局收官 + 全条目可关闭可复制（2026-10-03 plan/dashboard
     expect(items[0]!.actions[1]!.ackKey).toBe('halted|c1|T1')
   })
 
-  it('G6：关闭只在本地（ack 是唯一新增出口；没有一个条目新增 act）', () => {
+  it('G6：关闭只在本地（ack 是唯一新增出口；除纯导航的 link 外，没有条目新增 act）', () => {
     for (const a of allItems()) {
       for (const act of a.actions) {
         if (act.kind === 'ack') continue
+        // `link`（2026-10-16，plan/component-error-registry §4.5）是**纯导航、无副作用**的那一格：
+        // 它必须有 href，且**绝不允许**带 act —— 否则坞里会凭空多出一个能改训练状态的动作。
+        if (act.kind === 'link') {
+          expect(act.href).toBeTruthy()
+          expect(act.act).toBeUndefined()
+          continue
+        }
         // 既有 resume 动作的 act 名只允许是既有 2 个（不新增服务端消警路径）
         expect(act.act).toBeTruthy()
         expect(['cloud-resume', 'releaseCourseHold']).toContain(act.act!)
@@ -671,6 +708,32 @@ describe('AlertDock SSR 结构', () => {
     ])
     expect(html).toContain('tc-btn tc-btn--sm tc-btn--primary')
     expect(html).toContain('>立即恢复</button>')
+    expect(html).toContain('>知道了</button>')
+  })
+
+  it("★ kind='link' 渲染成真 `<a href>`，**不是** `<button>`（纯导航，不挂 onClick）", () => {
+    // 为什么要断言形状：SSR 会把事件处理器整个丢掉（见本文件末尾的测试盲区注），所以
+    // 「点了 link 会不会误触 onAct」在无 DOM 夹具时拦不住；能拦的是「它根本不是一个按钮」
+    // —— 真链接才能中键/右键新开标签，也不会走 `act.act` 那条服务端动作分支。
+    const html = renderDock([
+      {
+        id: 'component-errors',
+        severity: 'err',
+        icon: '🧯',
+        title: 't',
+        detail: 'd',
+        role: 'alert',
+        copyText: 't\nd\n（条目 component-errors · 严重度 err）',
+        actions: [
+          { kind: 'link', href: '/errors', label: '查看详情', primary: true },
+          { kind: 'ack', label: '知道了', ackKey: 'k' },
+        ],
+      },
+    ])
+    expect(html).toContain('href="/errors">查看详情</a>')
+    expect(html).toContain('class="tc-btn tc-btn--sm tc-btn--primary"')
+    expect(html).not.toContain('>查看详情</button>')
+    // ack 仍是一个真按钮（两类动作的渲染分支没被 link 抢掉）
     expect(html).toContain('>知道了</button>')
   })
 
@@ -823,6 +886,92 @@ describe('本机磁盘水位（plan/self-node-disk-alert：告警坞新一类）
       selfDisk: disk({ level: 'critical', freeMB: 1212 }),
     })
     expect(items.map((a) => a.id)).toEqual(['self-disk-critical', 'halt-c1'])
+  })
+})
+
+describe('组件错误登记表汇总条（2026-10-16，plan/component-error-registry §4.5：告警坞第 9 类）', () => {
+  it('无错误 / 读面缺省 / null ⇒ 零条（旧服务端与「本拍不可用」都不编 N）', () => {
+    expect(buildAlerts({ ...clean, errors: { items: [], truncated: false } })).toEqual([])
+    expect(buildAlerts({ ...clean, errors: null })).toEqual([])
+    expect(buildAlerts(clean)).toEqual([])
+  })
+
+  it('有未 ack 的错误 ⇒ **恰好一条**汇总条：结论带 N + 来源分布 + link「查看详情」 + 「知道了」', () => {
+    const items = buildAlerts({ ...clean, errors: errorSummary() })
+    expect(items.length).toBe(1) // ★ 0 或 1 条：逐条清单是 /errors 的事，坞里不堆 N 条
+    const a = items[0]!
+    expect(a.id).toBe('component-errors')
+    expect(a.severity).toBe('err')
+    expect(a.role).toBe('alert')
+    expect(a.title).toContain('1 条未处理')
+    expect(a.detail).toContain('local-log:1')
+    expect(a.detail).toContain('trainingLoop')
+    expect(a.actions.map((x) => x.kind)).toEqual(['link', 'ack'])
+    expect(a.actions[0]!.href).toBe('/errors')
+  })
+
+  it('汇总条**只报数**：多层错误折成一条，severity 取最高档（有 err 就是 err）', () => {
+    const two = errorSummary()
+    two.items.push({
+      ...two.items[0]!,
+      fp: 'fp1',
+      source: 'worker-report',
+      component: 'offline-worker',
+      severity: 'warn',
+      firstAt: 1_700_000_010_000,
+      message: 'UnreapableChildError',
+    })
+    const items = buildAlerts({ ...clean, errors: two })
+    expect(items.length).toBe(1)
+    expect(items[0]!.title).toContain('2 条未处理')
+    expect(items[0]!.severity).toBe('err')
+    expect(items[0]!.detail).toContain('worker-report:1')
+  })
+
+  it('★ 投影被截断 ⇒ 依据行提示去详情页（不假装「就这么多」）', () => {
+    const a = buildAlerts({ ...clean, errors: errorSummary({}, true) })[0]!
+    expect(a.detail).toContain('列表已截断')
+  })
+
+  it('★ ack 汇总条 ⇒ 它自己消失；但它**不代**逐条 ack（键是两回事，§4.5 分工写死）', () => {
+    const first = buildAlerts({ ...clean, errors: errorSummary() })
+    const summaryKey = first[0]!.actions.find((x) => x.kind === 'ack')!.ackKey!
+    expect(buildAlerts({ ...clean, errors: errorSummary(), acks: [summaryKey] })).toEqual([])
+    // 逐条 ack 的键是 `component-error|<fp>|<episode firstAt>`，与汇总条的键**不是同一个**：
+    // 所以「知道了」只关汇总条，详情页里那一条仍然算未处理（不会静默吃掉）。
+    const rowKey = 'component-error|fp0|1700000000000'
+    expect(summaryKey).not.toBe(rowKey)
+    expect(buildAlerts({ ...clean, errors: errorSummary(), acks: [rowKey] })).toEqual([])
+  })
+
+  it('★ 出现 ⇒ ack ⇒ 消失一拍（新 firstAt）⇒ 再出现 ⇒ **必重弹**（G8；固定键会被只增不减的 acks 永久吃掉）', () => {
+    const first = buildAlerts({ ...clean, errors: errorSummary() })
+    const key1 = first[0]!.actions.find((x) => x.kind === 'ack')!.ackKey!
+    // 同一 fingerprint、新的 episode（消失过一拍 ⇒ `firstAt` 被重置）⇒ 新键、重新弹
+    const again = buildAlerts({
+      ...clean,
+      errors: errorSummary({ firstAt: 1_700_000_500_000 }),
+      acks: [key1],
+    })
+    expect(again.length).toBe(1)
+    expect(again[0]!.actions.find((x) => x.kind === 'ack')!.ackKey).not.toBe(key1)
+    // 持续存在（firstAt 不变）⇒ 不重弹（不能每拍打断一次）
+    expect(buildAlerts({ ...clean, errors: errorSummary(), acks: [key1] })).toEqual([])
+  })
+
+  it('逐条全部 ack（详情页「全部已读」的后果）⇒ 汇总条也不出', () => {
+    const rowKey = 'component-error|fp0|1700000000000'
+    expect(buildAlerts({ ...clean, errors: errorSummary(), acks: [rowKey] })).toEqual([])
+  })
+
+  it('条目真的进坞（SSR：结论 + 依据两行都在 DOM 里，link 是真链接）', () => {
+    const items = buildAlerts({ ...clean, errors: errorSummary() })
+    const html = renderToString(
+      h(AlertDock, { items, onAct: () => undefined, onAck: () => undefined }),
+    )
+    expect(html).toContain('组件报错：1 条未处理')
+    expect(html).toContain('href="/errors">查看详情</a>')
+    expect(html).toContain('>知道了</button>')
   })
 })
 

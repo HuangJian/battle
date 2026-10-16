@@ -23,6 +23,7 @@ import {
   type OfflineAdminView,
   type PushWorkerView,
   type OfflineRunView,
+  type WorkerErrorReport,
   parseHubQueue,
   parseOfflineAdmin,
 } from '../web/view'
@@ -94,6 +95,51 @@ export async function hubOfflineAdmin(
   token: string,
 ): Promise<OfflineAdminView | null> {
   return parseOfflineAdmin(await hubGet(`${url}/admin/offline`, token, HUB_PROBE_TIMEOUT_MS))
+}
+
+/** `GET /admin/errors?since=<秒>` 的增量读面（plan/component-error-registry §4.3-S3b）：
+ *  云机的**纯观测**上报（E4/E5：机器级停滞 / 瞬时失败 / 离线段失败）；hub 侧只是 TTL ring。
+ *
+ *  与其它 hub 读面同规：hub 不可达/旧 hub 404 **一律 null**（登记表那一条腿当拍空跑，不编事实）。
+ *  `since` = 上次游标（秒），0 = 拿 ring 里的全部（ring 自己按 `WORKER_ERROR_TTL_SEC` 有界）。 */
+export async function hubWorkerErrors(
+  url: string,
+  token: string,
+  since: number,
+): Promise<WorkerErrorReport[] | null> {
+  const body = await hubGet(
+    `${url}/admin/errors?since=${Math.max(0, Math.floor(since))}`,
+    token,
+    HUB_PROBE_TIMEOUT_MS,
+  )
+  return parseWorkerErrors(body)
+}
+
+/** 上报体归一化（**只认有归属、有 reason 的那些** —— 与 hub 端点 400 的判据同源）：
+ *  读面是观测面，一个坏条目不该把整张登记表带成 500。 */
+export function parseWorkerErrors(body: unknown): WorkerErrorReport[] | null {
+  if (!body || typeof body !== 'object') return null
+  const raw = (body as Record<string, unknown>).errors
+  if (!Array.isArray(raw)) return null
+  const out: WorkerErrorReport[] = []
+  for (const r of raw) {
+    if (!r || typeof r !== 'object') continue
+    const rec = r as Record<string, unknown>
+    const worker = typeof rec.worker === 'string' ? rec.worker : ''
+    const reason = typeof rec.reason === 'string' ? rec.reason : ''
+    if (!worker || !reason) continue
+    out.push({
+      worker,
+      reason,
+      component: typeof rec.component === 'string' ? rec.component : '',
+      course: typeof rec.course === 'string' ? rec.course : '',
+      job_id: typeof rec.job_id === 'string' ? rec.job_id : '',
+      severity: typeof rec.severity === 'string' ? rec.severity : '',
+      detail: typeof rec.detail === 'string' ? rec.detail : '',
+      ts: typeof rec.ts === 'number' ? rec.ts : 0,
+    })
+  }
+  return out
 }
 
 /** 只取逐课进度的薄壳（旧读面：overview / 课程行；hub 不可达 → null）。 */

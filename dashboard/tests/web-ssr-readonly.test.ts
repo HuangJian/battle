@@ -45,6 +45,10 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
       // 本机磁盘水位同理（plan/self-node-disk-alert / 评审 F11）：它取的是 `buildStateView()`
       // 的**活状态**——本机盘一旦跌破预警档，坞里就多一条 err/warn，这条只读用例会跟着红/绿。
       selfDisk: null,
+      // 组件错误登记表同理（2026-10-16，plan/component-error-registry §4.5）：`errors` 读的是
+      // 服务端登记表的**活状态**——本机任何一个组件（或云机上报）一出错，坞里就多一条 err，
+      // 这条只读用例跟着红/绿。夹具必须把「无错误」造成事实（同 selfDisk 那条判据）。
+      errors: null,
     }
     const html = render.renderConsolePage({ ...clean, readOnly: true })
     // 只读可见面（docs/dashboard-redesign.md §5.4）：

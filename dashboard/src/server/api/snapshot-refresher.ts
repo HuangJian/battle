@@ -17,6 +17,7 @@ import { loadConsoleState } from '../actions'
 import { readIterMetrics } from '../iters'
 import { loadConfigSafe } from './config'
 import { discoverCourses, effectiveCourse } from './courses'
+import { ERROR_SCAN_INTERVAL_MS, refreshErrorRegistry } from './error-registry'
 import { getHubAdmin, refreshHubAdmin } from './overview'
 import { refreshLoopQueue } from './loop-queue'
 import { refreshPoolViews } from './pool'
@@ -204,4 +205,11 @@ export function startSnapshotRefresher(intervalMs: number = SNAPSHOT_REFRESH_MS)
   void harvestTrainingCourseActuals()
   const th = setInterval(() => void harvestTrainingCourseActuals(), METRICS_HARVEST_MS)
   th.unref?.()
+  // 组件错误巡检（2026-10-16，plan/component-error-registry §4.2）：**第三条独立节拍**。
+  // 为什么独立：它读盘（各组件日志尾）与探 hub（腿 C），与「节点 ping / 共享 hub 探测」
+  // 那 1.2–2.5s 的预算不共享；而 `/api/state` 路径**一次都不许**碰它（N9 / R1 结构闸）——
+  // 登记表是 SWR 缓存值，两个读面（`state-view.ts` 与 `/api/errors`）都只走 `getErrorRegistry()`。
+  void refreshErrorRegistry()
+  const te = setInterval(() => void refreshErrorRegistry(), ERROR_SCAN_INTERVAL_MS)
+  te.unref?.()
 }

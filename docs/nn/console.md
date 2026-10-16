@@ -13,6 +13,65 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §39 组件错误登记表：五处散落的错误收进一张表 + 首页入口 + `/errors` 详情页（plan/component-error-registry，2026-10-16）
+
+**现场（本节的由来）**：TrainingLoop 缺 BC 参考 ⇒ boot 崩溃，而**只有翻日志才知道原因**——进程不在、退出看护只记
+「退出」、错误内容零出口。同类缺口一共有五处（本机组件日志尾 / hub 的 `fail.json` / 账本 `job_failed` / 节点
+`lastError` / 退出看护），**没有任何一处能回答「现在有哪些错、同类出现几次、谁还没处理」**。
+
+**形状（唯一一张表）**：`ErrorEvent`（`fp, source, component, scope, severity, firstAt, lastAt, count, message,
+ detail, ref`）。类型住 `src/web/view/error-types.ts`（零 import），计算住 `src/server/api/error-{fingerprint,scan,
+registry}.ts`：
+
+| 腿 | 来源 | 闸（巡检是后台热路径，三腿都要过） |
+|---|---|---|
+| A 本机组件 | 组件日志尾 `LOG_ERR_RE` 判色 | 每 `课程\|组件` 日志文件 `size:mtime` 签名：未变 ⇒ 零读盘且**复用上一拍事件**（丢弃会把「日志没动但有错」读成「错误消失了」） |
+| B hub job | `<课>/remote-jobs/<jid>/fail.json` 的 `detail` | 已见 jid 集合（`fail.json` 首写胜出 ⇒ 每个 jid 只读一次） |
+| C 云机上报 | hub `GET /admin/errors?since=` | 只在自己的 **10s 独立节拍**上探（`snapshot-refresher`），`/api/state` 路径零探测 |
+| D 节点 | 池视图行的 `lastError` | 读既有 SWR 缓存（不重复扫、不新增探测） |
+
+**三条定死的判据**（都是「不定死就会以看似合理的写法做错」那类）：
+
+1. **`fp` 不含 `scope`**：指纹 = `shortHash(source | component | normalize(message))`，`normalize` 去 hex / 数字序列 /
+   时刻 / `tmp/` 之前的绝对路径前缀。不归一 ⇒ 「`it=17` 失败」与「`it=18` 失败」是两条，一次连续失败刷出几十行；
+   把课名算进指纹 ⇒ 同一条错在 10 门课上变 10 条（`scope` 改取**最近一次命中**的那个课名）。
+2. **两个时刻必须分开**：账本 `firstSeenAt`（**不可变**，只做「见过」的种子，决定要不要 append）vs 内存 episode
+   `firstAt`（**可重置**：某拍没扫到 ⇒ episode 结束，重现时置为当时时刻，是 **ack 身份**）。混用会让账本里的已知 fp
+   复发时既不 append 又不改 `firstAt` ⇒ **一次「知道了」永久静音**。`count` 也在这层定规：腿 A 每拍读到的是窗口内
+   **绝对读数**，所以 episode 内取 `max`（单调不减），**不跨拍累加**（累加会在文件没变时虚涨）。
+3. **腿 A 的 `detail` 是整块**：命中行 + 向上到上一个带 `[HH:MM:SS]` 前缀的行为止（那行才是 `LOG_ERR_RE` 唯一命中的
+   一行，`Traceback` 头与 `File ...` 行都在它之上）。只搬那一行 = 「只有翻日志才知道原因」原样保留。上限 4000 字符
+   （与 `hub/http_face.py::_clip` 同量），超限取块首 20 行 + `…（已截断）`。
+
+**首页入口与详情页**：首页 = 告警坞**第 9 类汇总条目**（0 或 1 条：逐条清单是详情页的事）；为此 `AlertAction.kind`
+闭集放宽出唯一一个**无副作用**的 `'link'`（渲染成真 `<a href>`、**不挂 `onClick`**，可中键/右键新开标签）。
+详情页 `/errors` 是**第 3 个独立页 / 第 4 份 bundle**（照 `/log` 范式：服务端整页服务 + 不参与主 bundle 路由 +
+只读面照渲 —— 只读的边界是**动作**，不是读面）。`detail` **不进** `/api/state`（3s）与 `/api/errors`（4s）的投影，
+展开某一行时才 `GET /api/errors?fp=` 懒取（一页几十条 × 4000 字符不该每 4s 全量搬一遍）。
+ack 分工写死：首页汇总条的「知道了」**只关它自己**，逐条 ack + 「全部标记已读」在详情页（两者键不同，所以前者不会替
+后者静默结案）。
+
+**账本**：`tmp/component-errors.jsonl`（append-only，只在**新 `fp` 首次出现**时落一行 ⇒ 有界、可 grep，不是出现次数）。
+路径走 `core/paths.ts::errorLedgerPath()`（`BCITY_ERROR_LEDGER` 可重定向）——与 `tmpLogsDir()` / `consoleLogPath()` /
+`loopControlPath()` 同规：**否则跑测试会把指纹写进操作员真账本**（2026-10-16 实测：不设这一条，用例第一次跑就落到真盘上）。
+
+**门禁与坑**：
+
+- `link` 动作是「真链接」不是「按钮」：SSR 断言钉形状（`href="/errors">查看详情</a>` 且不出现 `>查看详情</button>`）。
+  原因：`preact-render-to-string` 丢掉全部事件处理器，冒烟拦不住「点 link 误触 `onAct`」；能拦的是「它根本不是按钮」。
+- **`node:` 对象键的第二次事故**（第一次见 §1443 那条）：`errors-app.tsx` 里 `{ node: '节点' }` 让 `errors.js` 构建期红
+  （禁词闸 `FORBIDDEN /node:/`）。**给键加引号没用** —— 转译器会把合法的标识符键去引号，产物仍是 `node: "节点"`；
+  改成 `new Map([['node', '节点'], …])` 收场。任何「来源/角色 → 中文」的映射表都别再写对象字面量。
+- `/errors` 的侧栏项让 `tests/web-view-routes.test.ts` 的 link href 白名单（原先硬编码 `startsWith('/eval') ||
+  startsWith('/log/')`）变红 —— 那条断言不是在守契约，只是在数「有几个独立页」⇒ 改成**数据驱动**：href 必须落在一个
+  「不在 route 面的 `PAGES` 键」的规范路径上。新增独立页从此只改 `routes.ts` 一处。
+- 夹具纪律（沿用 `/api/state` 那条 F11 口径）：`web-ssr-readonly.test.ts` 的只读夹具必须把 `errors: null` 也造成事实
+  —— `errors` 读的是**活状态**，本机任一组件一出错，坞里就多一条 err，那条只读用例会跟着红/绿。
+
+**未落地**：云机侧两条腿（E3 用既有 410 通道把 `traceback` 带回家 / E4-E5 走 `POST /admin/worker-error`）在 plan §5 里
+属 **P 批次**（`nn-training/**` ⇒ 翻训练 code zip，要单独窗口），本条只记 D 批次。决策：
+`DECISIONS.md` §2026-10-16-goalnn-component-error-registry。
+
 ## §38 收官原因进横幅：`run_complete.cause/detail` +「说人话 + 指引按原因分叉」（plan/run-complete-cause-banner，2026-10-15）
 
 **三次现场**（同一天，`tmp/y5-term`）：① 17:13 因 `max_hours: 12` 到顶收官 —— 真原因只写在**上一行**

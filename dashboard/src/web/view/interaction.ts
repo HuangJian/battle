@@ -42,6 +42,14 @@ export type AlertAckKind =
   // 档位内不重复打断、换档/复发必重弹（持续态且会复发 ⇒ 键里两个成分都要；纯档位键会被
   // 只增不减的 `TC_ALERT_ACKS` 永久吃掉）。
   | 'self-disk'
+  // 组件错误登记表（2026-10-16，plan/component-error-registry §4.7）：**两个 kind，别合并** ——
+  //   `component-error` = `/errors` 页的逐条 ack（subject = `fp`，eventId = **内存 episode 的
+  //   `firstAt`** ⇒ 消失后复发必重弹）；`component-errors` = 首页**汇总条**本身（subject = 'all'，
+  //   eventId = 最新未 ack 错误的时刻 ⇒ 新错误进来必重弹）。
+  //   用固定键 / 纯账本键会把第二次同因事件吃掉（F3）。注：本类型是**闭集** ——
+  //   传新 kind 给 `alertAckKey` 会直接 TS 编译红，这就是它的守门方式。
+  | 'component-error'
+  | 'component-errors'
 
 export function alertAckKey(kind: AlertAckKind, subject: string, eventId: string): string {
   return `${kind}|${subject}|${eventId}`

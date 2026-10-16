@@ -105,11 +105,13 @@ import { ensureBundle, type BundleTarget } from './build'
 import { livePageCss } from './theme-css'
 import {
   renderConsolePage,
+  renderErrorsPage,
   renderEvalNoticePage,
   renderEvalPage,
   renderLogPage,
 } from '../web/render'
 import { pageForPath } from '../web/view'
+import { errorRegistryScannedAt, findErrorEvent, getErrorSummary } from './api'
 import type { Component, ProcSpec, RegistryEntry } from '../core/types'
 
 interface ServeOpts {
@@ -488,6 +490,40 @@ async function main(): Promise<void> {
                 lines,
                 course: viewCourse || undefined,
               },
+              { css: livePageCss() },
+            ),
+            { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
+          )
+        }
+        // 组件错误登记表（plan/component-error-registry §4.6）：两个**纯读**入口。
+        //   `/api/errors`        → 列表投影（每 4s 轮询）+ `?fp=` 的单条 detail（展开时懒取）
+        //   `/errors`（SSR）     → 独立页（第 4 份 bundle，照 /log 范式）
+        // ★ 两条都只读登记表的 **SWR 缓存值**（`getErrorRegistry()`）——探测只在
+        //   `snapshot-refresher` 的 10s 节拍上，请求路径零网络（N9 / R1 结构闸）。
+        if (req.method === 'GET' && url.pathname === '/api/errors') {
+          const fp = url.searchParams.get('fp')
+          if (fp) {
+            const ev = findErrorEvent(fp)
+            if (!ev)
+              return json({ ok: false, message: '未知 fp（已被清理或不在本拍登记表里）' }, 404)
+            return json({
+              fp: ev.fp,
+              component: ev.component,
+              message: ev.message,
+              detail: ev.detail,
+              ref: ev.ref,
+            })
+          }
+          const summary = getErrorSummary()
+          return json({ items: summary.items, cursor: errorRegistryScannedAt() })
+        }
+        if (req.method === 'GET' && url.pathname === '/errors') {
+          const summary = getErrorSummary()
+          const scannedAt = errorRegistryScannedAt()
+          return new Response(
+            renderErrorsPage(
+              { items: summary.items, scannedAt },
+              { readOnly: !loopback, scannedAt },
               { css: livePageCss() },
             ),
             { headers: { 'Content-Type': 'text/html; charset=utf-8' } },
