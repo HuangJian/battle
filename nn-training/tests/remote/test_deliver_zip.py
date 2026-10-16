@@ -534,6 +534,76 @@ def test_course_from_filename_ignores_the_at_annotation() -> None:
     assert course_from_filename("deliver-@seg1.zip") == ""  # 课程段空 ⇒ 不猜
 
 
+def _write_meta(z: zipfile.ZipFile, **over: object) -> None:
+    meta = {
+        "magic": "battle2-deliver-meta",
+        "course": "x1-demo",
+        "run_id": "run-meta-1",
+        "it_from": 1,
+        "it_to": 2,
+        "generated_at": "2026-10-17T00:00:00+00:00",
+        "source": "pending",
+    }
+    meta.update(over)
+    z.writestr("IMPORT_META.json", json.dumps(meta))
+
+
+def test_import_reads_the_package_meta_and_reports_it(tmp_path: Path) -> None:
+    """包内自述（§5.2/§6.2-2）：一键包带的 `IMPORT_META.json` 要读得出来、上得了屏。
+
+    另外它还是 `state.json` 缺/没 run_id 时**次优**的 run 名来源（比按文件名猜准确）。
+    """
+    src = _make_artifact_zip(tmp_path, iters=(1, 2))
+    z = tmp_path / "deliver-x1-demo.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for n in zipfile.ZipFile(src).namelist():
+            zf.writestr(n, zipfile.ZipFile(src).read(n))
+        _write_meta(zf)
+    got = import_deliver_zip(z, tmp_path / "deliver", course="x1-demo")
+    assert (got["package_course"], got["package_source"]) == ("x1-demo", "pending")
+    by = {c["id"]: c for c in got["checks"]}
+    # 判据按**结构化字段**（DECISIONS 定案三的口径：控制台/用例按数据判，不挂措辞）：
+    # 「这一包是待回传那个源」就是 `package_source` 这个读数字，不是那句 detail 的措辞。
+    assert by["meta"]["ok"] is True and by["meta"]["package_course"] == "x1-demo"
+    assert by["meta"]["package_source"] == "pending"
+
+
+def test_import_rejects_a_package_whose_meta_names_another_course(tmp_path: Path) -> None:
+    """★ 门④（§6.2-2-③）：包自述的课 ≠ 本次导入的课 ⇒ **拒收、不猜**（改名包）。
+
+    这条与「文件名对账」互补：文件名可以改对，包内自述改不了（它是打包那一刻写的）。
+    """
+    src = _make_artifact_zip(tmp_path, iters=(1, 2))
+    z = tmp_path / "deliver-x1-demo.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for n in zipfile.ZipFile(src).namelist():
+            zf.writestr(n, zipfile.ZipFile(src).read(n))
+        _write_meta(zf, course="x9-other")
+    with pytest.raises(ProtocolError) as ei:
+        import_deliver_zip(z, tmp_path / "deliver", course="x1-demo")
+    msg = str(ei.value)
+    assert "x9-other" in msg and "x1-demo" in msg, msg
+    assert "切到 x9-other 再导" in msg, "要给动作而不只是报错"
+    # 拒收 = **不落位**（`dest_root` 这一级是既有的、任何一道门之前就建的空目录）
+    assert list((tmp_path / "deliver").iterdir()) == [], "拒收 ⇒ 一个轮次目录都不建"
+
+
+def test_import_ignores_an_unknown_meta_magic_but_says_so(tmp_path: Path) -> None:
+    """magic 不认识 ⇒ **当它不存在**（不拿一份来路不明的自述去对账），但体检里看得见。"""
+    src = _make_artifact_zip(tmp_path, iters=(1, 2))
+    z = tmp_path / "deliver-x1-demo.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        for n in zipfile.ZipFile(src).namelist():
+            zf.writestr(n, zipfile.ZipFile(src).read(n))
+        _write_meta(zf, magic="something-else", course="x9-other")
+    got = import_deliver_zip(z, tmp_path / "deliver", course="x1-demo")  # 不拒收
+    assert got["package_course"] == ""
+    by = {c["id"]: c for c in got["checks"]}
+    # 结构化判据：「当它不存在」= 体检行不过且两段读数字都空（那句 detail 只是它的说法）。
+    assert by["meta"]["ok"] is False
+    assert (by["meta"]["package_course"], by["meta"]["package_source"]) == ("", "")
+
+
 def test_import_reports_a_green_checklist(tmp_path: Path) -> None:
     """DoD-5c：成功路径上也有体检报告（全绿 + 轮次数 + 末轮 + 是否半段）。"""
     src = _make_artifact_zip(tmp_path, iters=(1, 2, 3))
@@ -549,6 +619,7 @@ def test_import_reports_a_green_checklist(tmp_path: Path) -> None:
         "state-fp",
         "anchors",
         "body-limit",
+        "meta",
     ]
     by = {c["id"]: c for c in got["checks"]}
     assert by["shape"]["detail"] == "it1 → it3（3 轮）"
@@ -556,6 +627,8 @@ def test_import_reports_a_green_checklist(tmp_path: Path) -> None:
     assert by["rows-fp"]["no_rows"] == [] and by["rows-fp"]["bad_fp"] == []
     assert by["state"]["state_last_it"] == 3 and by["state"]["package_last_it"] == 3
     assert by["anchors"]["missing"] == []
+    # `IMPORT_META.json`：手工/老包没有它 ⇒ 这一项**不算不过**（只是没有那条证据）
+    assert by["meta"]["ok"] is True and by["meta"]["package_course"] == ""
 
 
 def test_import_checklist_reports_breaks_without_blocking_the_import(tmp_path: Path) -> None:

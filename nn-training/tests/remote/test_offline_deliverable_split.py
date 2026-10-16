@@ -63,10 +63,21 @@ MOVED_NAMES = {
     "package_deliverable",
     "_partial_last_it",
     "package_partial",
+    # ★ 2026-10-17（plan/offline-backfeed-resilience §5）：一键打包（两态）+ 包内元信息。
+    "package_pending",
+    "deliver_meta",
+    "deliver_pack_name",
+    "write_deliver_zip",
     "ALL_ZIP",
     "LATEST_ZIP",
     "PARTIAL_CANDIDATES",
     "LATEST_ROW_NAME",
+    "IT_PREFIX",
+    "METRICS_NAME",
+    "EVAL_LOG_NAME",
+    "WEIGHTS_ALT_NAME",
+    "IMPORT_META_NAME",
+    "IMPORT_META_MAGIC",
     "_COURSE_NAME_RE",
 }
 
@@ -75,6 +86,7 @@ MOVED_NAMES = {
 ALLOWED_IMPORTS = {
     "__future__",
     "collections.abc",
+    "datetime",  # 2026-10-17：`IMPORT_META.generated_at`（打包那一刻的事实）
     "json",
     "os",
     "pathlib",
@@ -134,7 +146,16 @@ def test_twin_constants_match_the_artifacts_contract(tmp_path: Path) -> None:
     """
     from remote.artifacts import ArtifactStore
 
-    for name in ("STATE_NAME", "PLAN_NAME", "MANIFEST_NAME", "ALL_ZIP", "LATEST_ZIP"):
+    for name in (
+        "STATE_NAME",
+        "PLAN_NAME",
+        "MANIFEST_NAME",
+        "ALL_ZIP",
+        "LATEST_ZIP",
+        "IT_PREFIX",
+        "METRICS_NAME",
+        "EVAL_LOG_NAME",
+    ):
         assert getattr(deliverable_mod, name) == getattr(ArtifactStore, name), (
             f"{name} 与 `ArtifactStore.{name}` 逐字相同（产物目录契约）"
         )
@@ -264,8 +285,11 @@ def test_notebook_fetches_and_pops_the_sibling() -> None:
 
 def test_pack_cell_fallback_fetches_the_pair() -> None:
     cells = _code_cells()
-    pack = next(t for t in cells if "package_partial" in t)
+    pack = next(t for t in cells if "package_pending" in t)
     assert 'for _name in ("offline_boot.py", "offline_deliverable.py"):' in pack, (
         "取回格的 raw 兜底要成对抓（只抓 offline_boot.py 会让交付面缺兄弟文件）"
     )
-    assert "_ob.package_partial(CFG, _log)" in pack, "取回格仍走 runtime 的 package_partial（单一实现）"
+    assert "_ob.package_pending(CFG, _log)" in pack, "取回格仍走 runtime 的 package_pending（单一实现）"
+    # ⚠ 旧入口 `package_partial` 仍在（老 notebook / 老调用方），但**不再**是底部那格的入口：
+    # 它只挑一个包（现场 27 轮只拿到一轮），而这一格要的是整段（plan §5.2）。
+    assert "package_partial" not in pack, "取回格不该再挑单包（那正是本片要修的形状）"

@@ -8,6 +8,8 @@
     python tools/tmp-clean.py                # dry-run：列出将删除内容与可回收空间
     python tools/tmp-clean.py --apply        # 实际删除
     python tools/tmp-clean.py --keep-runs 3 --keep-days 14 --apply   # 覆盖默认策略
+    # `--keep-runs 0 --keep-days 0`（零保留）只用于 dry-run / 用例断言；--apply 需要 --force
+    #   ——实测事故：1907 项 / 38GB 一次抹掉，见 refuses_zero_retention 的注释。
 
 保留策略（分类器 = 目录内是否有 it<N> 子目录 → 运行目录；否则按名字分类）：
   - 缓存（.uv-cache / .ruff-cache / .mypy-cache）：一律可删（可再生，重复下载即可）。
@@ -17,6 +19,11 @@
   - 运行目录（含 it<N> 子目录的 traj 根，如 p3-vk1/ p4-fast/）：保留最近 --keep-runs
     个（按目录内最新文件 mtime 排序）+ 最近 --keep-days 天内有写入的——正在写的运行
     必然新鲜，天然豁免。
+  - **长期资产豁免**（2026-10-17，plan/offline-backfeed-resilience §7-3）：要删的目录里若有
+    `deliver/`，只删它的**兄弟**，绝不删它——`tmp/<课程>/deliver/<run_id>/` 是导入/回灌
+    落下的**课程产物目录**（课程的长期资产，不是临时物；课停之后正是它最值钱的时候）。
+    ⚠ 这门课一旦停训，`training_running()` 的闸就放开了，而 `tmp/<课程>/` 是个 run root
+    （内含 `it<N>/`）⇒ 正是「课已停、人正在导入」这个窗口里最容易误删。
   - 永不触碰：dist-agent（sampler-agent 自管理，§374）、git-repair-backup（git 事故
     安全备份）、training-start（训练控制台账本 console-state/registry/monitor）。
   - 运行检测：nn-training/.run_rl.lock 的 holder 存活时，跳过运行目录收敛并告警
@@ -44,6 +51,8 @@ LOG_SUFFIXES = (".log", ".out", ".err", ".txt", ".jsonl")
 CACHE_NAMES = {".uv-cache", ".ruff-cache", ".mypy-cache"}
 # 永不触碰（各自有主）：agent 工作目录自管理；git 事故备份；控制台账本/状态
 PROTECTED = {"dist-agent", "git-repair-backup", "training-start"}
+# 长期资产（§7-3）：收到删除判决的目录里，这些子目录**原样留下**（只收它的兄弟）
+LONG_TERM_KEEP = ("deliver",)
 RUN_IT_RE = r"it\d+"
 
 
@@ -124,13 +133,82 @@ def _is_run_root(p: Path) -> bool:
         return False
 
 
+def _tree_has_asset(d: Path) -> bool:
+    """这棵子树（**任意深度**）里有长期资产（`deliver/`）吗。散文件 → False。"""
+    if not d.is_dir():
+        return False
+    for _root, dirs, _files in os.walk(d):
+        if any(n in LONG_TERM_KEEP for n in dirs):
+            return True
+    return False
+
+
+def _deletion_targets(d: Path) -> list[Path]:
+    """目录收敛的**实际**删除目标：自己（整棵子树无资产）或刨掉资产后的各块。
+
+    为什么要拆到子项这一层（§7-3）：`rmtree(整个 traj 根)` 会把 `tmp/<课程>/deliver/` 一起
+    带走——那是导入落下的课程产物目录，删了就是**不可再生的读数消失**（hub 上的那份是另一
+    条腿的副本，且只到末段）。收它的兄弟（`it<N>/`、日志）就恢复了「临时物该清、资产留下」
+    的分界，而删除动作仍是同一种（rmtree / unlink，见 `main`）。
+
+    ⚠ **递归到资产所在那一层**（2026-10-17 实测教训）：只刨一层不够——`tmp/__probe__/x1/`
+    这种多一层嵌套会让「删整个 `tmp/__probe__/x1/`」把里面的 `deliver/` 连坐删掉。
+    含资产的分支逐层下降，不含资产的兄弟**整块删**（不把 rmtree 拆成几千次 unlink）。
+
+    读不了目录（权限/已消失）→ 退回整目录：收敛脚本不因一个读不开的目录改变判决。
+    """
+    if not _tree_has_asset(d):
+        return [d]  # 没有资产要留 ⇒ 一次 rmtree 删干净（与旧行为逐字节一致）
+    try:
+        kids = list(d.iterdir())
+    except OSError:
+        return [d]
+    out: list[Path] = []
+    for c in kids:
+        if c.name in LONG_TERM_KEEP:
+            continue
+        out.extend(_deletion_targets(c) if c.is_dir() else [c])
+    return out
+
+
+def refuses_zero_retention(keep_runs: int, keep_days: float, apply: bool, force: bool) -> bool:
+    """「零保留 + --apply」= 把 tmp/ 整片抹掉（`rmtree` **不进回收站**，不可逆）⇒ 拒绝执行。
+
+    为什么需要这条闸（2026-10-17，事故真实发生过）：`--keep-runs 0 --keep-days 0 --apply`
+    不是任何人**有意**要的策略（它的语义是「连刚写的都删」），却是一次不小心传错参数的
+    默认结果——实测把仓库 tmp/ 下 1907 项、38GB（含各课本地 `it<N>/` 与账本）一次抹掉，
+    而 tmp/ 不是版本控制的，没有第二种副本可恢复。零保留作为**dry-run 的断言工具**仍然
+    合法（用例就是这么用的）⇒ 只闸 `--apply`，且留 `--force` 给人明写意图。
+    """
+    return bool(apply) and keep_runs <= 0 and keep_days <= 0 and not force
+
+
+def _target_size(p: Path) -> int:
+    """删除目标的字节数（目录走 `_dir_size`，散文件走 stat）。"""
+    try:
+        return _dir_size(p) if p.is_dir() else p.stat().st_size
+    except OSError:
+        return 0
+
+
 def plan(
-    now: float, keep_runs: int, keep_days: float, tmp_dir: Path = TMP
+    now: float,
+    keep_runs: int,
+    keep_days: float,
+    tmp_dir: Path | None = None,
+    running: bool | None = None,
 ) -> tuple[list[tuple[Path, str, int]], dict[str, int]]:
     """返回 (计划删除列表, 统计)。每项 = (路径, 原因, 大小字节)。
 
-    tmp_dir 可注入（单测用）；默认仓库根 tmp/。
+    tmp_dir 可注入（单测/探针用）；缺省 = 仓库根 tmp/。
+    `running` 同样是**测试接缝**：缺省按 `.run_rl.lock` 现推（生产语义）——注入是为了让
+    「课已停 + 早于保留窗」这个窗口可判（否则用例的结果取决于跑测试时本机有没有在训练）。
+
+    ⚠ **`tmp_dir` 的缺省不写成 `= TMP`**（2026-10-17 实测教训）：默认参数在**函数定义时**
+    绑定，于是「加载模块后改 `mod.TMP` 再调 主流程」这种注入**根本不生效**——探针自以为
+    在临时目录上跑，实际在真 tmp/ 上跑（后果见 `refuses_zero_retention` 的注释）。
     """
+    tmp_dir = TMP if tmp_dir is None else tmp_dir
     cut = now - keep_days * 86400
     to_delete: list[tuple[Path, str, int]] = []
     stats: dict[str, int] = {"cache": 0, "log": 0, "tempdir": 0, "run": 0}
@@ -155,13 +233,14 @@ def plan(
         temp_dirs = [d for d in others if not _is_run_root(d)]
 
         # 运行目录：按最后写入降序，保留最新 keep_runs + keep_days 内新鲜的
-        if not training_running():
+        if not (training_running() if running is None else running):
             ranked = sorted(
                 ((_last_write(d), d) for d in run_roots), key=lambda x: x[0], reverse=True
             )
             for mtime, d in ranked[keep_runs:]:
                 if mtime < cut:
-                    to_delete.append((d, "run>keep_runs", _dir_size(d)))
+                    for t in _deletion_targets(d):
+                        to_delete.append((t, "run>keep_runs", _target_size(t)))
                     stats["run"] += 1
         else:
             sys.stderr.write("[tmp-clean] training active (run_rl.lock alive) - run dirs skipped\n")
@@ -170,7 +249,10 @@ def plan(
         for d in temp_dirs:
             mtime = _last_write(d)
             if mtime < cut:
-                to_delete.append((d, "tempdir>keep_days", _dir_size(d)))
+                # 同一套豁免：只落过 `deliver/` 的课程目录（本地没跑过训练 ⇒ 不算 run root）
+                # 同样是长期资产——旧行为会在 keep_days 之后把它整个删掉（§7-1③）。
+                for t in _deletion_targets(d):
+                    to_delete.append((t, "tempdir>keep_days", _target_size(t)))
                 stats["tempdir"] += 1
     return to_delete, stats
 
@@ -180,7 +262,21 @@ def main() -> int:
     ap.add_argument("--apply", action="store_true", help="真正删除（缺省只 dry-run）")
     ap.add_argument("--keep-runs", type=int, default=3, help="保留最近 N 个运行目录（默认 3）")
     ap.add_argument("--keep-days", type=float, default=14.0, help="日志/临时目录/运行目录新鲜阈值天数（默认 14）")
+    ap.add_argument(
+        "--force",
+        action="store_true",
+        help="确认「零保留 + --apply」的整片抹除（不可逆；dry-run 不需要它）",
+    )
     args = ap.parse_args()
+
+    # 零保留 + --apply ⇒ 拒绝（dry-run 仍可用它做断言）：见 refuses_zero_retention 的事故注释。
+    if refuses_zero_retention(args.keep_runs, args.keep_days, args.apply, args.force):
+        print(
+            "[tmp-clean] 拒绝执行：--keep-runs 0 --keep-days 0 --apply 会把 tmp/ **整片**抹掉\n"
+            "             （含各课本地 it<N>/ 与账本；rmtree 不进回收站，不可恢复）。\n"
+            "             要看计划就去掉 --apply；确实要抹掉再加 --force。"
+        )
+        return 2
 
     if not TMP.is_dir():
         print(f"[tmp-clean] {TMP} missing - nothing to do")

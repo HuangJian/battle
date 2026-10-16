@@ -107,10 +107,23 @@ _DELIVERABLE_NAMES = (
     "package_deliverable",
     "_partial_last_it",
     "package_partial",
+    # ★ 2026-10-17（`plan/offline-backfeed-resilience` §5 / 期望 4）：一键打包待回传产物
+    # （两态判据表）+ 包内元信息 `IMPORT_META.json`。notebook 底部那格从 `package_partial`
+    # （只有一个包）改走它（整段 + 读数）。
+    "package_pending",
+    "deliver_meta",
+    "deliver_pack_name",
+    "write_deliver_zip",
     "ALL_ZIP",
     "LATEST_ZIP",
     "PARTIAL_CANDIDATES",
     "LATEST_ROW_NAME",
+    "IT_PREFIX",
+    "METRICS_NAME",
+    "EVAL_LOG_NAME",
+    "WEIGHTS_ALT_NAME",
+    "IMPORT_META_NAME",
+    "IMPORT_META_MAGIC",
     "_COURSE_NAME_RE",
 )
 

@@ -20,7 +20,11 @@ output / Colab Drive 下载下来，文件名习惯是 `deliver-<课程>.zip`）
      要**明确指出拿错了**——那句错误信息值一次排障；
   3. **课程名对账（可选）**：文件名 `deliver-<课程>.zip` 里的课程与控制台当前课程
      不一致就拒收——把 A 课跑出来的产物导进 B 课并评估，得到的读数看起来完全正常，
-     这是最贵的一种错。
+     这是最贵的一种错；
+  4. **包内自述对账（2026-10-17，plan §5.2/§6.2-2）**：包里有 `IMPORT_META.json` 时
+     （一键包/导出包会带），它的 `course` 与本次导入的课程不一致也拒收（改名戴上去的包）。
+     缺这份自述 = 没有这条证据（老包/手打包照收），magic 不认识则**当它不存在**并与体检里
+     记一项。
 
 CLI（控制台调用；stdout 末行是机器可读的 `DELIVER_IMPORT_JSON={...}`）：
 
@@ -45,6 +49,10 @@ from common.cli import house_parser, run_main
 from common.protocol import ProtocolError
 from remote.artifacts import ArtifactStore, ledger_row_from_metrics, sha256_file
 from remote.bundle import BUNDLE_INDEX, safe_extract_zip
+
+#: 包内元信息的名字/魔数从**唯一实现**处取（`remote/offline_deliverable` = standalone 交付面，
+#: 它写的、这里读的必须是同一串；不各写一份常量 —— 2026-10-17，plan §5.2/§6.2-2）。
+from remote.offline_deliverable import IMPORT_META_MAGIC, IMPORT_META_NAME
 
 #: 机器可读结果的标记（控制台按它切 stdout 的末行；前面的人读日志随便打）。
 IMPORT_JSON_MARK = "DELIVER_IMPORT_JSON="
@@ -84,6 +92,8 @@ def _package_checks(
     names: int,
     size: int,
     partial: bool,
+    meta: dict,
+    meta_raw: dict,
 ) -> list[dict]:
     """包的**体检报告**（plan §6.2-1 / DoD-5c）：一行一项 `{id, ok, detail}`。
 
@@ -200,6 +210,24 @@ def _package_checks(
         "id": "body-limit",
         "ok": 0 < size <= ZIP_MAX_BYTES,
         "detail": f"{size / 1048576:.1f}MB",
+    })
+    # 包内自述（§5.2 的 `IMPORT_META.json`）：课程/run/来源 —— 一键包与导出包才有，
+    # 老包/手打包没有它 ⇒ 那一项**不算不过**（只是没有这条证据，对账退回文件名那条路）。
+    out.append({
+        "id": "meta",
+        "ok": bool(meta) or not meta_raw,
+        "package_course": str(meta.get("course") or ""),
+        "package_source": str(meta.get("source") or ""),
+        "detail": (
+            f"课程={meta.get('course') or '?'}·run={meta.get('run_id') or '?'}·"
+            f"来源={meta.get('source') or '?'}·it{meta.get('it_from')}→it{meta.get('it_to')}"
+            if meta
+            else (
+                "包内没有 IMPORT_META.json（老包/手打包）——按文件名与控制台课程对账"
+                if not meta_raw
+                else f"IMPORT_META.json 的 magic（{meta_raw.get('magic') or '?'}）不认识——当它不存在"
+            )
+        ),
     })
     return out
 
@@ -430,7 +458,20 @@ def import_deliver_zip(
                 f"（包内顶层: {sorted(p.name for p in list(base.iterdir())[:8])}）"
             )
         st = _read_json(base / ArtifactStore.STATE_NAME)
-        run_id = str(st.get("run_id") or run_id)
+        # 包内自述（§5.2 / §6.2-2）：一键包会带 `IMPORT_META.json`。它**不是**权威（`state.json`
+        # 仍是 run_id 的权威，而课程由 `--course` 与文件名对账），但它能拦下两种静默错：
+        #   ① 包自述的课 ≠ 本次导入的课（有人改名了）⇒ 当场拒，不猜（见下）；
+        #   ② `state.json` 缺失/没 run_id 时，包自述的 run 名至少比「按文件名猜」准确。
+        meta_raw = _read_json(base / IMPORT_META_NAME) if (base / IMPORT_META_NAME).is_file() else {}
+        meta = meta_raw if str(meta_raw.get("magic") or "") == IMPORT_META_MAGIC else {}
+        pkg_course = str(meta.get("course") or "")
+        if course and pkg_course and pkg_course != course:
+            raise ProtocolError(
+                f"包内自述的课程（{pkg_course}，{IMPORT_META_NAME}）与本次导入的课程（{course}）"
+                "不一致——拿 A 课的权重去评 B 课的语料，读数会看起来完全正常。"
+                f"要么切到 {pkg_course} 再导，要么把文件名/控制台课程都改到 {pkg_course}"
+            )
+        run_id = str(st.get("run_id") or meta.get("run_id") or run_id)
         # state.json 里的 run_id 才是权威：与目录名（= 文件名猜的）不一致就落到它那个目录，
         # 否则同一个 run 的产物会分裂成两个目录（后一次导入又建一个）。
         if run_id != final.name:
@@ -446,7 +487,16 @@ def import_deliver_zip(
         n_rows = _merge_carried_metric_rows(base, dest_root, run_id=final.name, log=log)
         # 体检在 `base` 还在盘上时做（读的是**包**里的字节：导入目录已被 merge 污染）。
         partial = int(st.get("last_it") or 0) > pkg_iters[-1]
-        checks = _package_checks(base, pkg_iters, st, names=len(names), size=size, partial=partial)
+        checks = _package_checks(
+            base,
+            pkg_iters,
+            st,
+            names=len(names),
+            size=size,
+            partial=partial,
+            meta=meta,
+            meta_raw=meta_raw,
+        )
     finally:
         # 中转目录只用于解压，**永远不残留**（也不再有「改名成功/失败」这个中间态）。
         shutil.rmtree(work, ignore_errors=True)
@@ -494,6 +544,11 @@ def import_deliver_zip(
         "healed_files": int(landed["healed_files"]),
         "course": course,
         "course_in_name": name_course,
+        # 包内自述（§6.2-2）：控制台据此提醒「包自述的课 ≠ 当前课」（**不静默切课**）——
+        # 与课程不一致的包在前面已经被拦下，这里只是把**同一份事实**回传上屏。
+        "package_course": pkg_course,
+        "package_run_id": str(meta.get("run_id") or ""),
+        "package_source": str(meta.get("source") or ""),
         "state": str(st.get("state") or ""),
         "rows": len(iters),
         "eval_rows": n_eval,

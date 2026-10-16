@@ -7063,3 +7063,52 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `__init__` 里建好就是那个调用点上静默不备份）；`_drawer_for_write()` 取调用时的 `self.log` 同理。
   方法名 `write` → `backup_rounds`（避免与 `common.log`/`worker.train.loop_util` 的同名面凑成 ≥3 模块，
   `tests/test_reuse_ledger.py` 当场会红）。
+
+## §2026-10-17-goalnn-backfeed-e-f-g-h-close（E/F/G/H 四片收口：判据化重试与删除 · 一键包 · 报错表 · 停课导入）
+
+- **来源**：`plan/offline-backfeed-resilience.plan.md` §4（E）· §5（F）· §6.2（G）· §7（H）
+  + `plan/offline-backfeed-resilience.review-bf.md`（F1/F2/F4/F9/F10/F11）。
+- **E（§4 自愈重试 + 租约重领 + 判据化删除）**：不新增机制，把 tick 内已有的「试」收紧并记住 ——
+  ① 探活负缓存从 60s 收到 **15s**（`PROBE_FAIL_TTL_SEC`，封顶仍 ≤60s，别把平坦重试换成退避）；
+  ② `next_try_sec`/`last_error`/`retry_n` 进 `status()`（**给人看，不做退避判决**）；
+  ③ `_disable`（401/403）加**冷却复活**（`DISABLE_COOLDOWN_SEC`，到点清 reason + 重探活）；
+  ④ 409 `expired`/`taken` ⇒ 补传腿照落（hub 侧本无租约门）+ 打点腿**重新 claim**（`_reclaim_lease`）
+  —— `revoked` 不动（那是人的意志）；⑤ 抽屉删除 = **回传成功（`POST 200 → _save_ledger()`）才删**，
+  `delivered.json` 不可信 ⇒ 一拍不删；`BACKUP_KEEP_ROUNDS`/`BACKUP_KEEP_HOURS` 接口留而默认 0。
+- **E 的孤儿口径（F4 落地选择）**：账本是 run 级、抽屉是课级 ⇒ 换 run_id 后老段轮次在新账本里**无证据**
+  ⇒ 走**内容对账**（本地有同一份字节 = 可重建的冗余 ⇒ 可删），剩下真孤儿**保留并计数**
+  （`backup_orphans`）——「不许默默不删」两条口径各一条用例（DoD-3e）。备选「孤儿一律不删」被否：
+  抽屉只涨不落，而它能被内容对账证明可重建。
+- **F（§5 一键包）**：新增 `package_pending(cfg, log, *, courses=None)`，判据表四行（本地根齐 → 全量+三件+
+  两账本 / 只有抽屉齐 → 抽屉全量 / 已收官 → `artifacts.zip` 直接复制 / 两边都不齐 → 响亮报缺哪一件、返回空表、
+  绝不抛）；包内加 `IMPORT_META.json`（`magic/课程/run/it_from/it_to/generated_at/source`），
+  历史名 `deliver-<课>@<run>-it<N>.zip` —— 与既有 `package_deliverable` 共用判据函数（不留第二份带账本的口径）。
+- **G（§6.2 报错表 / 自动识课 / 留证保留）**：`import.ts` 的失败收口加一张**现象 → 人话 + 出路**表
+  （句柄占住 / 目标已存在 / 非 zip / 拿错包 / 形状 / 课名冲突 / 盘满 / 超时 / 兜底），`detail` 一律带
+  「挂在的门 + 出路 + 末尾八行 + **日志绝对路径**」，铁律 = 结论句里不出现裸 `WinError`/`Traceback`；
+  留证目录保最近 3 份（删时响亮一行）。**§6.2-2 自动识课的定案改判**：`IMPORT_META.json` 已落地 ⇒
+  优先级 `IMPORT_META.course` > `state.run_id` > `manifest.course_fp` > 文件名，冲突**不猜**（python 侧
+  拒收并给两个课名 + 动作），控制台**不静默切课**、只把「包内自述：课程/run/来源」上屏
+  （上一轮取「只报错 + 指引」的那个前置条件已消失，扩展上一条 `§2026-10-16-goalnn-import-checklist-and-name`）。
+- **H（§7 停课导入）**：导入**全程不看**开课标记/在不在训（写进 docstring + 用例）；唯一与课状态有关的一步
+  只是 T6 段末横幅转交，拿不到 hub 摘要就**不转交且说出来**（`bannerNote = 段末横幅未落账：hub 不可达`）。
+  为此 `fetchHubOfflineResults` 的返回体从「摘要或 null」改成 **`{results, hubUp}`**（「hub 不可达」与
+  「hub 活着但没这一段」是两件事，挤进一个 null 就只能编一个原因）。
+- **H 配套（F9 落地选择①）：`tmp/<课>/deliver/` 是课程的长期资产**。`tools/tmp-clean.py` 只收它的**兄弟**
+  （`LONG_TERM_KEEP`，递归到资产所在那一层）；备选②（把长期资产移出 `tmp/`）被否 —— 那要改导入/回灌/
+  控制台三处路径口径，而豁免在收敛侧一处即可，且危险窗（课已停、`training_running()` 闸放开、人正在导入）
+  正是 `tmp/<课程>/` 被判成 run root 时。导入/回灌的 docstring 同步写明这条语义。
+- **同批加的闸（事故驱动的，非 plan 项）**：`refuses_zero_retention()` —— `--keep-runs 0 --keep-days 0 --apply`
+  拒绝执行（要 `--force`）。**事故**：2026-10-17 一次探针用 `mod.TMP = <临Dir>` 注入，而 `plan` 的
+  `tmp_dir` 默认参数在**定义时**绑定 ⇒ 探针实际在**真 tmp/** 上跑了一趟 `--apply`，1907 项 / 38GB
+  （各课本地 `it<N>/`、账本、日志）一次抹掉且**不可恢复**（`rmtree` 不进回收站；唯一幸存的是三个
+  `PROTECTED` 顶层，以及**本次豁免的 `deliver/`**—— §7-3 的豁免在真实数据上当场自证）。两处据此修死：
+  ① `plan(tmp_dir=None)` 改调用时解析（默认参数陷阱）；② 零保留 + `--apply` 需 `--force`；
+  ③ 用例改按**目标集合全等**判（不再是否定式子串），并新增「资产在更深一层也要保住」的用例。
+- **备选与否决**：指数退避（15s→300s）—— 否（对「抖动 60s 后恢复」这个主场景是降级；若将来要，只能
+  限定为**日志节流**）· 抽屉删除加保留窗口 8 轮/24h —— 用户 2026-10-16 已否（回传成功即删）·
+  新增 `courseFromPackage=1` 请求字段让控制台按包内课程导 —— 否（`IMPORT_META` 落地后 python 侧已有
+  权威对账口，多一个会被误用的开关不如把冲突说清楚）· 把长期资产移出 `tmp/` —— 见上。
+- **后果**：`tmp-clean` 的删除目标从「整个 run root」变成「刨掉资产后的各块」（无资产时仍是**一次
+  `rmtree`**，与旧行为逐字节一致）；文本断言基线 FORM 1470 → **1480**（+10 操作员读数行 −6 已改成
+  非文本判据，逐笔分摊写在 `tests/test_source_text_assert_budget.py` 模块头）。

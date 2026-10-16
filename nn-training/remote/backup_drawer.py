@@ -61,6 +61,30 @@ BACKUP_ANCHOR_NAMES: tuple[str, ...] = (
 #: `run_id`/`last_it`，`deliver_zip.py:155-176`）⇒ 那四件保持每拍重写。
 BACKUP_CHANGE_ONLY_NAMES: tuple[str, ...] = (ArtifactStore.METRICS_NAME, ArtifactStore.EVAL_LOG_NAME)
 
+#: 删除的**滞回**（D3 定案「回传成功即删」，所以两个默认都是 0 = 不保留）。
+#: 为什么把接口留着：真要出现「hub 收了又丢」的事故，先把事故记一条 DECISIONS，再打开这两个——
+#: 那时它们就是「只留最近 N 轮 / 只留最近 H 小时」的回退手段，不用再改一次接口。
+BACKUP_KEEP_ROUNDS = 0
+BACKUP_KEEP_HOURS = 0.0
+
+
+@dataclass(frozen=True)
+class PruneReadings:
+    """一次**抽屉清理**的读数（判据化删除，D3）。
+
+    `pruned` = 真删掉的轮数（`delivered` = 凭「hub 已确认」删的，`local_dup` = 凭「本地有同一份字节」
+    删的孤儿）；`failed` = 删不了的（下拍再试）；`orphans` = **没删的**孤儿数（本会话账本里没有证据
+    且本地也没有同一份 ⇒ 保留 + 计数，**绝不默默不删**）；`skipped` = 这一趟根本不删的原因
+    （非空 = 账本不可读——那是唯一的硬门槛）。
+    """
+
+    pruned: int = 0
+    delivered: int = 0
+    local_dup: int = 0
+    failed: int = 0
+    orphans: int = 0
+    skipped: str = ""
+
 
 @dataclass(frozen=True)
 class DrawerReadings:
@@ -152,10 +176,120 @@ class BackupDrawer:
         #: （无害，反而把上个会话末尾追加的行带过去）。
         self._anchor_sig: dict[str, tuple[int, int]] = {}
         self._last = DrawerReadings()
+        #: 上一次清理的读数（`status()` 读它）。
+        self._prune_last = PruneReadings()
 
     def readings(self) -> DrawerReadings:
         """最近一次写盘的读数（`status()` 读它 —— 零 IO）。"""
         return self._last
+
+    def prune_delivered(
+        self,
+        *,
+        confirmed: set[int],
+        local_rounds: set[int],
+        ledger_ok: bool,
+        keep_rounds: int = BACKUP_KEEP_ROUNDS,
+        keep_hours: float = BACKUP_KEEP_HOURS,
+        now: float = 0.0,
+    ) -> PruneReadings:
+        """把**已确认送达**的轮次从抽屉里删掉（D3：回传成功即删；不加保留窗口）。
+
+        两个证据，缺一不可：
+
+          * `it in confirmed`：hub 收过（`_delivered` 里只有 200/201 才进；写账本**先于**删除）；
+          * `ledger_ok`：**账本可读**。它是唯一的硬门槛 —— `delivered.json` 丢了/坏了时本会话
+            一份确认都没有（`_load_ledger` 返回空），而抽屉是**跨会话的唯一第二副本**（`/tmp` 一关
+            就只剩它）⇒ 宁可全留着，也不拿「读不出来」当「没送达」。
+
+        孤儿（`it not in confirmed`）——账本是 **run 级**、抽屉是 **课级**（续段换 run_id 后老段遗留
+        的轮次在新账本里没有任何证据）：
+
+          * 本地源盘上有**同一份字节**（`local_rounds` 命中且逐件对账一致）⇒ 删（它是可重建的冗余）；
+          * 否则**保留 + 计数**（`orphans`）——这是「抽屉是别的 run / 别的机器的第二副本」的形状，
+            删它就是永久丢一份。
+
+        `keep_rounds` / `keep_hours`（默认都 0）是滞回接口：>0 时只删「最新 N 轮之外 / 早于 H 小时」
+        的；真出现「hub 收了又丢」的现场再打开（那时先记一条 DECISIONS）。
+        **永不抛**：逐件有界，失败只记数（下一拍再试）。
+        """
+        prev_orphans = self._prune_last.orphans
+        if not ledger_ok:
+            return PruneReadings(skipped="账本不可读（缺 delivered.json 或它坏了）——本轮不删")
+        try:
+            if not self.root.is_dir():
+                return self._prune_last
+            dirs = [d for d in self.root.glob(f"{ArtifactStore.IT_PREFIX}*") if d.is_dir()]
+        except OSError:
+            return self._prune_last
+
+        def _num(d: Path) -> int:
+            name = d.name[len(ArtifactStore.IT_PREFIX) :]
+            return int(name) if name.isdigit() else -1
+
+        dirs = sorted((d for d in dirs if _num(d) >= 0), key=_num)
+        keep_n = max(0, int(keep_rounds))
+        young = float(keep_hours) * 3600.0
+        pruned = failed = orphans = by_delivered = by_local = 0
+        for i, d in enumerate(dirs):
+            it = _num(d)
+            if keep_n and i >= len(dirs) - keep_n:
+                continue  # 滞回：最近 N 轮留在抽屉里
+            src = self.source / d.name
+            if young > 0.0 and now > 0.0:
+                m = 0.0
+                for p in (src, d):
+                    try:
+                        m = max(m, float(p.stat().st_mtime))
+                    except OSError:
+                        continue
+                if m and now - m < young:
+                    continue  # 滞回：刚备不久的先留着
+            if it in confirmed:
+                why = "delivered"
+            elif it in local_rounds and src.is_dir() and _round_matches(src, d):
+                why = "local"
+            else:
+                orphans += 1
+                self.throttled(
+                    f"orphan:{it}",
+                    f"抽屉孤儿 it{it}：本会话账本里没有它的送达证据，本地也没有同一份 —— 保留"
+                    "（删它就是永久丢一份；换过 run_id / 别的机器留下的都长这样）",
+                )
+                continue
+            try:
+                # `call_bounded` 会把 `fn` 的异常**原样重抛**（它的契约）⇒ 收在这里：删不掉只
+                # 是一笔 WARN，下一拍再试（Windows 上被句柄占住是最常见的形状）。
+                ok, _n = call_bounded(
+                    partial(shutil.rmtree, d, ignore_errors=False),
+                    float(DRAIN_CEILING_SEC),
+                    name="deliver-backup-prune",
+                )
+            except OSError:
+                ok = False
+            if not ok or d.exists():
+                failed += 1
+                self.log(f"WARN 抽屉清理 it{it} 失败（{why}）——下一拍再试")
+                continue
+            pruned += 1
+            if why == "delivered":
+                by_delivered += 1
+            else:
+                by_local += 1
+        self._prune_last = PruneReadings(
+            pruned=pruned,
+            delivered=by_delivered,
+            local_dup=by_local,
+            failed=failed,
+            orphans=orphans,
+        )
+        if pruned or failed or orphans != prev_orphans:
+            # 一行一个拍就够：孤儿**数变了**才再响一次（`throttled` 也拦不住累积计数）。
+            self.log(
+                f"抽屉清理：删 {pruned} 轮（已送达 {by_delivered}｜本地同份 {by_local}）"
+                f"｜失败 {failed}｜孤儿保留 {orphans}｜抽屉 {self.root}"
+            )
+        return self._prune_last
 
     def backup_rounds(self, rounds: Sequence[int]) -> DrawerReadings:
         """把这几轮各备份一份（+ 锚点），返回本次读数。**不抛**：失败只记进读数与日志。

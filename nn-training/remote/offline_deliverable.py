@@ -24,6 +24,7 @@ import re
 import shutil
 import zipfile
 from collections.abc import Callable
+from datetime import datetime, timezone
 from pathlib import Path
 
 #: 产物目录里的两个包名（与 `remote/artifacts.py::ArtifactStore` 逐字相同；测试守）。
@@ -66,6 +67,20 @@ BACKUP_DIR_NAME = "backup"
 PARTIAL_CANDIDATES = (ALL_ZIP, LATEST_ZIP)
 #: `LATEST.zip` 里那行元信息（名字写死在 `remote/artifacts.py::_refresh_latest`）。
 LATEST_ROW_NAME = "metrics_row.json"
+#: 轮次目录前缀 + 两账本名（与 `remote/artifacts.py::ArtifactStore` 逐字相同；测试守）
+#: ——一键打包（`package_pending`）要按它们扫轮次、把读数一起装进包。
+IT_PREFIX = "it-"
+METRICS_NAME = "metrics.jsonl"
+EVAL_LOG_NAME = "eval_log.jsonl"
+#: 权重的**压缩版**名（2026-10-15 后缀约定：名字跟着内容走；判据与展开在 `remote.delta_files`）。
+#: 本模块是 standalone（不能 import 它）⇒ 只认这两个名字，一处写清。
+WEIGHTS_ALT_NAME = "weights.delta"
+#: 包内元信息（§5.2 / §6.2-2）：`IMPORT_META.json`。导入侧靠它**自动识别**课程/run/来源，
+#: 不用再猜（文件名可能被改过，而包里这份是打包那一刻的事实）。
+#: 字段固定 `{magic, course, run_id, it_from, it_to, generated_at, source}`；`source` ∈
+#: `pending`（本地产物根）/ `drawer`（网络盘抽屉）/ `artifacts`（收官全量包的副本）。
+IMPORT_META_NAME = "IMPORT_META.json"
+IMPORT_META_MAGIC = "battle2-deliver-meta"
 
 
 #: 课程名的合法形状（与 `course_from_pack_name` 同一条口径：它是目录名/文件名，不是自由文本）。
@@ -315,9 +330,20 @@ def backup_ready(backup_root: Path) -> dict | None:
         return None
     if not isinstance(last_it, int) or isinstance(last_it, bool):
         return None
-    if not (root / f"it-{last_it}" / WEIGHTS_NAME).is_file():
+    if not any((root / name / WEIGHTS_NAME).is_file() for name in _round_names(last_it)):
         return None
     return {"root": root, "last_it": last_it, "run_id": str(st.get("run_id", "") or "")}
+
+
+def _round_names(it: int) -> tuple[str, str]:
+    """那一轮的两种目录名：**规范（补零）优先**，兼容不补零的那种。
+
+    2026-10-17 修：这里以前只认 `it-<N>`（不补零），而**真抽屉**（`remote/backup_drawer`）与
+    `ArtifactStore.dir_for` 写的都是 `it-<03d>` —— 于是 `backup_ready()` 对真抽屉永远返回 `None`，
+    而它正是恢复腿（`offline_boot.obtain_pack`）与一键打包第 2 行的门槛 ⇒ 后果是「本地盘被回收后
+    明明抽屉里有一整段，却仍去取包重跑」。两种名字都认：补零是规范，不补零是旧 fixture/手写抽屉的形状。
+    """
+    return (f"{IT_PREFIX}{int(it):03d}", f"{IT_PREFIX}{int(it)}")
 
 
 def _anchor_json(p: Path) -> dict | None:
@@ -434,5 +460,200 @@ def package_partial(
         log(
             "[pack] 下一步：把上面的 zip 下载到本机 → 控制台「导入产物」上传（中途包与跑完时的 "
             "deliver-<课>.zip 同名同形，导入后自动起 A 层评估）"
+        )
+    return made
+
+
+def _pack_rounds(root: Path) -> list[tuple[int, Path]]:
+    """`(it, 目录)` 升序：产物根里**带权重**的轮次（两态都认：`weights.json`/`weights.delta`）。
+
+    判据与 `remote/deliver_zip._scan_iters` 同源（那边校验导入的包，这边打出去的包）：
+    「有轮次」= 有目录 ∧ 目录名是数字 ∧ 里面有那份权重 —— 只认目录名会把半截写入也装进包里。
+    **不抛**：拿不到就返回已扫到的那些（打包是人慌了才点的路，不能因为一个 IO 就炸）。
+    """
+    out: list[tuple[int, Path]] = []
+    try:
+        dirs = sorted(Path(root).glob(f"{IT_PREFIX}*"))
+    except OSError:
+        return out
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        name = d.name[len(IT_PREFIX) :]
+        if not name.isdigit():
+            continue
+        if not ((d / WEIGHTS_NAME).is_file() or (d / WEIGHTS_ALT_NAME).is_file()):
+            continue
+        out.append((int(name), d))
+    return out
+
+
+def _safe_label(text: str, max_len: int = 48) -> str:
+    """一段文本 → 能进文件名的标签（run_id 可能带 `/`、`:`、空格；控制台靠 `@` 前那段对课程）。"""
+    return re.sub(r"[^A-Za-z0-9._-]+", "-", str(text)).strip("-._")[:max_len]
+
+
+def deliver_meta(src_root: Path, *, course: str, source: str, rounds: list[tuple[int, Path]]) -> dict:
+    """`IMPORT_META.json` 的内容（包内自述，与文件名无关）。
+
+    `run_id` 取 `state.json.run_id` > `manifest.json.runId`（两个都是既有写入侧的规范名）；
+    取不到就空串 —— **不猜**：导入侧看到空串就走它原有的文件名/课程对账那条路。
+    """
+    st = _anchor_json(Path(src_root) / STATE_NAME) or {}
+    man = _anchor_json(Path(src_root) / MANIFEST_NAME) or {}
+    its = [it for it, _d in rounds]
+    return {
+        "magic": IMPORT_META_MAGIC,
+        "course": str(course or ""),
+        "run_id": str(st.get("run_id") or man.get("runId") or ""),
+        "it_from": min(its) if its else None,
+        "it_to": max(its) if its else None,
+        "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source": str(source),
+    }
+
+
+def deliver_pack_name(course: str, meta: dict) -> str:
+    """一键包的落地名（D4：允许 `@<run>-it<N>` 附注名）。
+
+    为什么中途包不叫 `deliver-<课>.zip`：这格是**跨会话、可多次**跑的下撤门（DoD-4a 就是
+    「杀掉进程、只留抽屉后再打一份」）——固定名会把上一次那份盖掉，而两次的内容并不相同。
+    附注名把「哪一段 run、到哪一轮」写进文件名，控制台按 `@` **前**那段对课程（§6.2-3）
+    ⇒ 既保住了对账，又不丢历史。收官那支仍叫 `deliver-<课>.zip`（`package_deliverable`，与老习惯逐字相同）。
+    取不到 run/it 时回落到固定名（宁可覆盖，也不要一个猜出来的名字）。
+    """
+    name = _safe_label(meta.get("run_id") or "")
+    it = meta.get("it_to")
+    if course and name and isinstance(it, int) and not isinstance(it, bool):
+        return f"deliver-{course}@{name}-it{it}.zip"
+    return f"deliver-{course}.zip" if course else "deliver.zip"
+
+
+def write_deliver_zip(
+    src_root: Path, dest: Path, *, course: str, source: str, log: Callable[[str], None]
+) -> bool:
+    """把一份产物根打成**可导入**的 zip：轮次 + 存在的锚点（三件 + 两账本）+ `IMPORT_META.json`。
+
+    为什么从这里得（而不是 `shutil.make_archive` 整棵）：产物根里还有 `LATEST.zip`、历史包这些
+    **派生件** —— 装进去只是把体积翻倍（控制台要的只是轮次 + 读数 + 三件）。
+    先写 `.tmp-<pid>` 再 `os.replace`：半截包绝不落到人能下载的名字上。**永不抛**（失败一句人话）。
+    """
+    rounds = _pack_rounds(src_root)
+    if not rounds:
+        log(f"[pack] {src_root} 里没有带权重的 {IT_PREFIX}*/ —— 不造空包")
+        return False
+    meta = deliver_meta(src_root, course=course, source=source, rounds=rounds)
+    tmp = Path(dest).with_name(f".{Path(dest).name}.tmp-{os.getpid()}")
+    try:
+        Path(dest).parent.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+            z.writestr(IMPORT_META_NAME, json.dumps(meta, ensure_ascii=False, indent=2))
+            for name in (STATE_NAME, PLAN_NAME, MANIFEST_NAME, METRICS_NAME, EVAL_LOG_NAME):
+                p = Path(src_root) / name
+                if p.is_file():
+                    z.write(p, name)
+            for _it, d in rounds:
+                for f in sorted(d.rglob("*")):
+                    if f.is_file():
+                        z.write(f, str(Path(d.name) / f.relative_to(d)))
+        os.replace(tmp, dest)
+    except (OSError, ValueError) as e:
+        log(f"[pack] 打包失败（{type(e).__name__}: {e}）—— {src_root}")
+        try:
+            tmp.unlink(missing_ok=True)
+        except OSError:
+            pass
+        return False
+    return True
+
+
+def package_pending(
+    cfg: dict,
+    log: Callable[[str], None],
+    *,
+    courses: list[str] | None = None,
+) -> list[Path]:
+    """一键打包**待回传产物**（两态判据表，plan §5.2）：本地产物根齐 ⇒ 打它；只有抽屉齐 ⇒ 打抽屉。
+
+    与 `package_partial` 的差别（为什么另立一个入口而不是改它）：那个只挑**一个**包
+    （`artifacts.zip` 优先，否则最新一轮的 `LATEST.zip`）——那对「跑到一半、只想看一眼」够用，
+    但现场要 27 轮 / 200 轮时**拿不到整体**（只能手工 zip 抽屉）。这里打的是**整段**：
+    全部轮次 + 存在的锚点（三件 + 两账本）+ `IMPORT_META.json`。
+
+    判据表（逐条对应 plan §5.2；**按优先级**）：
+
+      1. `artifacts.zip` 在 ⇒ 直接复制它（**不重打**；走 `package_deliverable`，与段末那一支
+         同一个函数，`source=artifacts`）；
+      2. 本地产物根有带权重的轮次 ⇒ 打本地根全量（`source=pending`）；
+      3. 本地产物根没有、网络盘抽屉是一份**完整**产物（`backup_ready`：三件 + 末轮权重）⇒
+         打抽屉全量（`source=drawer`）；
+      4. 两边都不齐 ⇒ **响亮说明**哪个目录缺哪一件，返回空列表（绝不抛，也不造空包）。
+
+    落点 = `download_dir(cfg)`（Kaggle `/kaggle/working`、Colab `/content`、否则 cwd）。
+    命名：中途包 `deliver-<课>@<run>-it<N>.zip`（多 run 不互盖），收官包 `deliver-<课>.zip`
+    —— 见 `deliver_pack_name`。控制台按 `@` **前**那段对课程（`deliver-<课>@…` 与 `deliver-<课>.zip`
+    两处同规则）。
+
+    DoD-4c（轮次数对账）：包内轮次数 = 本地产物根里**带权重的全部轮次** = 已投轮数 + `pending()`
+    （`pending` 的定义就是「磁盘有、账本无」）。
+
+    ⚠ 本函数只读 + 复制 + 打包：不动产物、不训练、不碰 hub。清单模式（`CFG.course` 空）打不了包
+    —— 那是**明确的一行话**，不是静默空跑：产物根按课程分，没有课名就不知道该打哪一棵。
+    """
+    names = list(courses) if courses else requested_courses(cfg)
+    if not names:
+        log(
+            "[pack] CFG.course 是空的（按 hub /offline/tasks 清单跑）—— 一键打包要按课程找产物根，"
+            "这一格打不出包。要么把课名填回 CFG.course，要么显式点名："
+            "package_pending(CFG, _log, courses=['<课>'])"
+        )
+        return []
+    multi = len(names) > 1
+    out_dir = download_dir(cfg)
+    made: list[Path] = []
+    for course in names:
+        local, why = resolve_local_root(cfg, course, multi=multi)
+        drawer = net_root(cfg, course, multi=multi) / BACKUP_DIR_NAME
+        if why:
+            log(f"[pack] {course}: 本地产物根取不到（{why}）—— 转找网络盘抽屉 {drawer}")
+        # ① 已完整收官：复制那份全量包（同一个函数 = 段末那一支，别留两份判据）
+        if (local / ALL_ZIP).is_file():
+            full = package_deliverable(local, course, out_dir, log)
+            if full is not None:
+                made.append(full)
+                continue
+        # ② / ③：本地根全量 > 抽屉全量（本地那份是同一段的最新字节，抽屉只是它的第二副本）
+        local_rounds = _pack_rounds(local)
+        drawer_ready = backup_ready(drawer)
+        if local_rounds:
+            src_root, source, rounds = local, "pending", local_rounds
+        elif drawer_ready is not None:
+            src_root, source = drawer, "drawer"
+            rounds = _pack_rounds(drawer)
+            log(
+                f"[pack] {course}: 本地产物根没有带权重的轮次（{local}）—— 用网络盘抽屉 "
+                f"（含到 it{drawer_ready['last_it']}）"
+            )
+        else:
+            # ④ 两边都不齐：说清是哪个目录、缺哪一件（不造空包、不抛）
+            log(
+                f"[pack] {course}: 两边都没有可打包的产物 —— 本地产物根 {local} 里没有带权重的 "
+                f"{IT_PREFIX}*/；抽屉 {drawer} 也不是一份完整产物（要 {STATE_NAME}/"
+                f"{PLAN_NAME}/{MANIFEST_NAME} 三件 + 末轮那份权重，缺一即不认）。"
+                "第一轮 checkpoint 之前、以及「本地与备份都没落过轮」时就是这样"
+            )
+            continue
+        meta = deliver_meta(src_root, course=course, source=source, rounds=rounds)
+        dest = out_dir / deliver_pack_name(course, meta)
+        if write_deliver_zip(src_root, dest, course=course, source=source, log=log):
+            made.append(dest)
+            log(
+                f"[pack] {course}: {dest}（{dest.stat().st_size} bytes，{len(rounds)} 轮 "
+                f"it{meta['it_from']}→it{meta['it_to']}，来源 {source}，run={meta['run_id'] or '-'}）"
+            )
+    if made:
+        log(
+            "[pack] 下一步：把上面的 zip 下载到本机 → 控制台「导入产物」上传"
+            "（中途包 deliver-<课>@<run>-it<N>.zip 与收官包 deliver-<课>.zip 是同一条导入路径）"
         )
     return made

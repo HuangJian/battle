@@ -45,6 +45,7 @@ from common.protocol import (
 from remote.offline_deliver import (
     DISABLE_COOLDOWN_SEC,
     PROBE_FAIL_TTL_SEC,
+    PROBE_TTL_SEC,
     REJECTED_MAX_TRIES,
     REJECTED_RESET_KEY,
     REJECTED_TTL_SEC,
@@ -1316,6 +1317,224 @@ def test_reset_rejected_refuses_another_runs_ledger(tmp_path: Path) -> None:
     assert reset_rejected(root, run_id=RUN, it=2, log=_quiet) == 0
     data = json.loads((root / OFFLINE_DELIVERED_NAME).read_text(encoding="utf-8"))
     assert [r["it"] for r in data["rejected"]] == [2]
+
+
+# ══════ 抽屉的判据化删除 + 重试可观测面（D3，plan §4.2-1/3）══════
+
+
+def _drawer_rounds(drawer: Path) -> list[str]:
+    return sorted(d.name for d in drawer.glob("it-*") if d.is_dir())
+
+
+def test_drawer_prunes_confirmed_rounds_after_they_land(tmp_path: Path) -> None:
+    """DoD-3c：`POST 200 → _save_ledger() → 才允许删` —— 回传成功的轮次从抽屉里消失。
+
+    顺序就是这个用例的全部：`_delivered` 只在 200/201 时追加（且先落账本），而清理只读它。
+    """
+    base, _store, srv, th = _boot_server(tmp_path)
+    try:
+        root = _make_artifacts(tmp_path / "art", iters=(1, 2))
+        drawer = tmp_path / "net" / "backup"
+        d = _deliverer(base, root, backup_root=drawer)
+        assert d.backup_pending() == 2, "先推不出去的那一拍：两轮进抽屉"
+        assert _drawer_rounds(drawer) == ["it-001", "it-002"]
+        assert d.sync() == 2, "hub 通了就都推上去"
+        assert d.status()["backup_pruned"] == 2, "已确认送达 ⇒ 抽屉里那两轮该删掉"
+        assert _drawer_rounds(drawer) == []
+        assert (root / "it-001" / "weights.json").is_file(), "删的只是抽屉那一份（本地产物不动）"
+        # 锚点留着（抽屉仍是一份能吃的产物根；它们不按轮次删）。本 fixture 只有这两件
+        # （`_make_artifacts` 不写 `state.json`）——所以断言只盯着**源里真有的**那几件。
+        assert (drawer / "manifest.json").is_file() and (drawer / "metrics.jsonl").is_file()
+    finally:
+        srv.shutdown()
+        th.join(timeout=5)
+
+
+def test_drawer_never_prunes_when_the_ledger_is_unreadable(tmp_path: Path) -> None:
+    """★ DoD-3c 反探针：`delivered.json` 坏了 ⇒ **一个字节都不删**。
+
+    抽屉是**跨会话的唯一第二副本**（`/tmp` 一关就只剩它）⇒ 删它必须同时有「hub 收过」与「账本
+    记得」两个证据；读不出来就是没证据（`_load_ledger` 返回空 ⇒ `_ledger_readable` 仍为假）。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2))
+    drawer = tmp_path / "net" / "backup"
+    d = _deliverer("", root, backup_root=drawer)
+    assert d.backup_pending() == 2
+    # 账本被破坏（半截写入 / 人手动改坏）——同时把这一份标记成「已投递」（内存里）
+    (root / OFFLINE_DELIVERED_NAME).write_text("{坏的 json", encoding="utf-8")
+    d2 = _deliverer("", root, backup_root=drawer)
+    assert d2._ledger_readable is False
+    d2._delivered.add(1)
+    d2._prune_forced = True
+    assert d2.backup_pending() == 0
+    assert _drawer_rounds(drawer) == ["it-001", "it-002"], "账本不可读 ⇒ 一个都不许删"
+    assert "账本不可读" in str(d2.status()["prune_skipped"])
+
+
+def test_drawer_keeps_orphans_and_counts_them(tmp_path: Path) -> None:
+    """★ DoD-3e：换过 run_id / 别的机器留下的轮次（账本无证据且本地无同份）⇒ **保留 + 计数**。
+
+    账本是 **run 级**、抽屉是 **课级** ⇒ 续段换 run_id 后老段遗留的轮次在新账本里没有任何证据。
+    删它就是把「唯一第二副本」永久丢掉；不删就必须可见（`backup_orphans`）——不许默默不删。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    drawer = tmp_path / "net" / "backup"
+    d = _deliverer("", root, backup_root=drawer)
+    assert d.backup_pending() == 1
+    # 老段遗留：抽屉里多出两轮（本地已没有那份）
+    for it in (7, 8):
+        (drawer / f"it-{it:03d}").mkdir()
+        (drawer / f"it-{it:03d}" / "weights.json").write_bytes(b"old")
+    (root / OFFLINE_DELIVERED_NAME).write_text(
+        json.dumps({"run_id": RUN, "artifacts": [1]}), encoding="utf-8"
+    )
+    d2 = _deliverer("", root, backup_root=drawer)
+    d2._prune_forced = True
+    assert d2.backup_pending() == 0
+    assert _drawer_rounds(drawer) == ["it-007", "it-008"], "孤儿保留"
+    st = d2.status()
+    assert (st["backup_pruned"], st["backup_orphans"]) == (1, 2), "已送达的 it1 删掉 + 两个孤儿进计数"
+
+
+def test_drawer_prunes_an_orphan_only_when_the_local_copy_matches(tmp_path: Path) -> None:
+    """DoD-3e 的另一半：本地有**同一份字节** ⇒ 那是可重建的冗余 ⇒ 可删。
+
+    「本地在」不够（要逐件对账）：本机同一轮被重跑过时本地那份已经不同了，把那时的孤儿删掉
+    没什么损失，但把**字节不同**的抽屉份当成「本地有」就会把唯一的旧副本删掉。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    drawer = tmp_path / "net" / "backup"
+    d = _deliverer("", root, backup_root=drawer)
+    assert d.backup_pending() == 1
+    (root / OFFLINE_DELIVERED_NAME).write_text(
+        json.dumps({"run_id": RUN, "artifacts": []}), encoding="utf-8"
+    )  # 账本**可读**但这一轮没有送达证据
+    d2 = _deliverer("", root, backup_root=drawer)
+    d2._prune_forced = True
+    assert d2.backup_pending() == 0
+    assert _drawer_rounds(drawer) == [], "本地逐件与抽屉一致 ⇒ 可删"
+    assert d2.status()["backup_pruned"] == 1
+
+
+def test_drawer_prune_failure_is_only_a_warning(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """删不掉只 WARN（下拍再试）—— 抽屉是第二副本，删不动绝不能把补传腿拖住或弄抛。"""
+    import remote.backup_drawer as bd
+
+    root = _make_artifacts(tmp_path / "art", iters=(1,))
+    drawer = tmp_path / "net" / "backup"
+    d = _deliverer("", root, backup_root=drawer)
+    assert d.backup_pending() == 1
+    msgs: list[str] = []
+    d.log = msgs.append
+    (root / OFFLINE_DELIVERED_NAME).write_text(
+        json.dumps({"run_id": RUN, "artifacts": [1]}), encoding="utf-8"
+    )
+    d2 = _deliverer("", root, backup_root=drawer)
+    d2.log = msgs.append
+
+    def _boom(*_a: object, **_kw: object) -> None:
+        raise OSError("占住了")
+
+    monkeypatch.setattr(bd.shutil, "rmtree", _boom)
+    d2._prune_forced = True
+    assert d2.backup_pending() == 0  # 不抛
+    assert _drawer_rounds(drawer) == ["it-001"]
+    assert d2.status()["prune_failed"] == 1
+    assert any("抽屉清理 it1 失败" in m for m in msgs), msgs
+
+
+def test_status_reports_the_retry_face(tmp_path: Path) -> None:
+    """plan §4.2-1：`retry_n`/`last_error`/`next_try_sec` 进 `status()`（给人看，不做退避判决）。"""
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2))
+    clock = [1000.0]
+    op = _CountingOpener(0, b"")  # 0 = 连不上
+    d = _deliverer("http://hub.invalid", root, opener=op, now_fn=lambda: clock[0])
+    assert d.sync() == 0
+    st = d.status()
+    assert st["retry_n"] == 1 and st["last_error"]
+    assert 0.0 < st["next_try_sec"] <= PROBE_FAIL_TTL_SEC, st
+    assert d.sync() == 0
+    assert d.status()["retry_n"] == 2, "连续失败要累加（人一眼看出「一直在试、一直没成」）"
+
+
+def test_network_recovers_within_the_short_fail_ttl_without_new_rounds(tmp_path: Path) -> None:
+    """★ DoD-3a：拔网 → 恢复（不投入新轮）⇒ 从**最早**待投 it 起补齐。
+
+    反探针在下面：把这个短负缓存改回平坦的 60s（`probe_ttl` 的默认档）⇒ **同一段代码就不该补**，
+    于是这条用例真的在量那个常量（而不是「跑一遍就行」）。
+    """
+    root = _make_artifacts(tmp_path / "art", iters=(1, 2, 3))
+    drawer = tmp_path / "net" / "backup"
+    clock = [1000.0]
+    box = {"up": False}
+    posted: list[int] = []
+
+    def op(url: str, data: bytes, headers: dict, timeout: float):
+        if not box["up"]:
+            raise OSError("网络抖了")
+        if url.endswith("/ping"):
+            return 200, b"{}"
+        posted.append(int(json.loads(data.decode("utf-8"))["it"]))
+        return 200, b"{}"
+
+    d = _deliverer("http://hub.invalid", root, opener=op, backup_root=drawer, now_fn=lambda: clock[0])
+    assert d.sync() == 0, "拔网 ⇒ 一轮都没推出去"
+    assert d.status()["next_try_sec"] <= PROBE_FAIL_TTL_SEC
+    clock[0] += PROBE_FAIL_TTL_SEC + 0.1  # 只推进假时钟：**一个新手都不投**
+    box["up"] = True
+    assert d.sync() == 3, "隧道回来 ⇒ 无需新轮就把积压补齐"
+    assert posted == [1, 2, 3], "从最早的待投 it 开始（顺序 = `pending()` 升序）"
+    assert d.pending() == [] and d.status()["retry_n"] == 0
+    assert _drawer_rounds(drawer) == [], "补齐后抽屉同步清空（同一拍内）"
+
+    # 反探针：把失败负缓存拉长到 60s（= 旧的平坦口径）⇒ 同一个 20s 的窗口里它**不该**再出门。
+    root2 = _make_artifacts(tmp_path / "art2", iters=(1, 2, 3))
+    clock2 = [1000.0]
+    box2 = {"up": False}
+
+    def op2(url: str, data: bytes, headers: dict, timeout: float):
+        if not box2["up"]:
+            raise OSError("网络抖了")
+        if url.endswith("/ping"):
+            return 200, b"{}"
+        return 200, b"{}"
+
+    # 把**失败**负缓存扳回旧的平坦口径（60s）：同一条代码路径下，20s 的窗口就补不动了
+    # ⇒ 这条用例真的挂在 `PROBE_FAIL_TTL_SEC`（那个默认档）上，而不是「跑一遍就行」。
+    d2 = _deliverer(
+        "http://hub.invalid",
+        root2,
+        opener=op2,
+        probe_ttl=PROBE_TTL_SEC,
+        probe_fail_ttl=PROBE_TTL_SEC,
+        now_fn=lambda: clock2[0],
+    )
+    assert d2.sync() == 0
+    box2["up"] = True
+    clock2[0] += PROBE_FAIL_TTL_SEC + 0.1
+    assert d2.sync() == 0, "探活窗未过 ⇒ 一轮也不出门（反探针：判据真的挂在那个常量上）"
+    clock2[0] += PROBE_TTL_SEC
+    assert d2.sync() == 3, "窗过才补"
+
+
+def test_a_stale_lease_still_lands_the_artifact(tmp_path: Path) -> None:
+    """DoD-3b（补传腿那一半）：租约过期/被抢 ⇒ **照落**，只是不推进活动起点。
+
+    `/offline/artifact` 本来就没有租约门（hub/offline.py）——本用例把它钉住：带一个没人认识
+    的 lease 推上去，产物必须到达（现场「租约失效 ⇒ 整段不传」的另一半成因在这里）。
+    """
+    base, store, srv, th = _boot_server(tmp_path)
+    try:
+        root = _make_artifacts(tmp_path / "art", iters=(1,))
+        d = _deliverer(base, root, hub_lease="lease-nobody-has")
+        assert d.sync() == 1
+        run_dir = store.offline_run_dir(RUN)
+        assert (run_dir / "it-001" / "weights.json").read_bytes() == (
+            root / "it-001" / "weights.json"
+        ).read_bytes()
+    finally:
+        srv.shutdown()
+        th.join(timeout=5)
 
 
 def test_reset_rejected_cli_is_usable(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
