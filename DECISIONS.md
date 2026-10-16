@@ -6813,3 +6813,40 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   三文件 39 用例 + ruff/mypy 绿；全文 `docs/nn/remote-transport.md` §101。
   两件待知会：① 改的是云机侧 python，在跑的段走 code cache ⇒ 换段/换机才生效；
   ② `wver` 变了 ⇒ 云机此前按容器 sha 落账的行会重评一次（那些读数本就废）。
+
+## §2026-10-15-goalnn-y20open-design（2026-10-15，转场 y20 三腿：dist/stack/obs）
+
+- **背景**（用户令）：立即转场 y20（c05 磨到头：dist it270 0.9525；中期目标 c20 90%）。
+  关卡 `ladder-c20-lives1`（用户写 ladder-c20，按全场惯例取 lives1）；起点 y5-dist.it270
+  （sha16 `65ec5b9224028b35`）；三腿共享新种子 20270201；iters 300/max 48（c20 局慢，
+  用户未指定，先定后议）。
+- **决定**：D1=三新课（全键 diff 绿）：
+  `y20-dist`（y5-dist 配方逐字复刻：wDist 0.6/near 48/encl 12.9/梯度 wWin/timeout −5）；
+  `y20-stack`（dist 底＋back 三键［wBackHits 1.0/wSideHits 0.2/wHit 0.2］＋hurt 150；
+  wThreat 120 HOLD 回退 hide 的 150——D03 人 87 vs 机 51，threat 总量税误伤人类"进"；
+  wEncl 12.9/wDist 0.6/wNearSq 48 HOLD——A06/A05-A07 人类证据＋W03 既定注）；
+  `y20-obs`（x27-obs 配方零差复刻；优化器换 y 系退火；kickstart 关［同架构直连，
+  x27 的 kickstart 是跨架构专需］）。
+- **备选与否决**：① stack 照抄 hide 150 threat —— 否（D03 人类证据，回退 120；罚"待"足量）；
+  ② stack encl 回退 8.6（W03 人 122.9>机 95.1）—— 否（W03 既定注＋dist 支撑有效，维持）；
+  ③ wDist 加码（A05/A07 人类偏远）—— 否（A3 不动之谜未解，维持 0.6＋readout）；
+  ④ y20-obs 沿 x27 单段优化器 —— 否（起点已收敛，退火对；奖励复刻不动优化器）。
+- **前科披露**：x27-obs 已结课冻结（C 类四次阴性＋G0 miss，§85）——本次 c20 新场＋dist 起点
+  重测（非同语境复跑），门配杀线；同样总账零 ⇒ 判死确认不再重测。y20 门全暂定线
+  （锚 dist-190 c20 0.616/15.87；it0 基线偏离超 10% 按比例换算）。
+- **后果**：三文件已落盘；§15.5 新 out/traj/backup＋opt fresh；开课三连点人来。
+
+## §2026-10-16-goalnn-y5bdh-close（2026-10-16，y5-back/dist/hide 三腿结课）
+
+- **背景**（用户令）：y5 三腿（back/dist/hide）全停。
+- **决定**：三文件各追加尾部结课报告节（规格头不动；load 复验绿）：
+  back（变量无效确认：B3 0.1937→0.1874 反降，前判"倾向杀"升级；终点 0.93/四线全靠站位＋命中）/
+  dist（迟到但到：A3 3.517→3.674＋win 峰 0.9525 ⇒ anti-lottery"有效"命中，收回 wDist 无效前判；
+  near/encl 双大胜；纯本机 400 局 settled）/
+  hide（全场峰 0.9597/422 局补局 settled：threat −18%/hurtW −16% 维持；gameover 3.55%，
+  命耗线 3% 差 0.55pp 诚实注记；A3 一字不动预期内）。
+- **备选与否决**：① back 按"倾向"再续 —— 否（B3 反降＋全程未超基线，确认无效）；
+  ② dist kills 行缺失重跑 —— 否（win/clears/终点权重齐，kills 缺一行不影响 verdict）；
+  ③ hide 命耗线 3.55% 判 fail —— 否（差 0.55pp＋峰值＋税维持，收官不认 fail，注记）。
+- **后果**：y5 全系列结课（近/远/冠/速/包/早/翼＋back/dist/hide 共 10 腿，均有尾部报告）；
+  在跑只剩 y20 三腿。
