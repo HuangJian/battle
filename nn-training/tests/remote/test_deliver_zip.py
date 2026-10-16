@@ -14,6 +14,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 import zipfile
 from pathlib import Path
@@ -49,9 +50,15 @@ def _make_artifact_zip(
     state="complete",
     row: dict | None = None,
     eval_rows: list[dict] | None = None,
+    salt: bytes = b"",
+    tag: str = "demo",
 ) -> Path:
-    """用 `ArtifactStore` 亲手打一份真产物 zip（形状与云机产出的逐字段一致）。"""
-    root = tmp_path / "art-src"
+    """用 `ArtifactStore` 亲手打一份真产物 zip（形状与云机产出的逐字段一致）。
+
+    `salt` / `tag`：同一个 run 的**第二份**包要用不同的 tag（不会与第一份撞落点/文件名），
+    salt 用来造「同名轮但字节不同」的那一档（D5 的先到者为准）。
+    """
+    root = tmp_path / f"art-src-{tag}"
     store = ArtifactStore(root, run_id=run_id)
     store.start(
         {"start_it": iters[0] - 1, "end_it": iters[-1], "iters_total": iters[-1], "pairs": {}},
@@ -60,7 +67,7 @@ def _make_artifact_zip(
     for it in iters:
         store.checkpoint(
             it,
-            weights_json=_weights(it),
+            weights_json=_weights(it) + salt,
             opt_tar=b"opt-%d" % it,
             row=row or {"agg": {"kl": 0.01}, "wall_sec": 1.0},
         )
@@ -69,7 +76,7 @@ def _make_artifact_zip(
             "\n".join(json.dumps(r) for r in eval_rows) + "\n", encoding="utf-8"
         )
     store.finalize(state=state, summary={"last_it": iters[-1]})
-    out = tmp_path / "deliver-demo.zip"
+    out = tmp_path / f"deliver-{tag}.zip"
     out.write_bytes((root / ArtifactStore.ALL_ZIP).read_bytes())
     return out
 
@@ -89,18 +96,22 @@ def test_import_discovers_iters_and_points_at_the_last_ckpt(tmp_path: Path) -> N
     assert not list(dest.parent.glob("*.tmp-*"))  # 不留半截壳
 
 
-def test_reimport_same_run_does_not_stack_directories(tmp_path: Path) -> None:
-    """重导同一个 run（云机重跑一遍再交回来）⇒ 目录被替换，不是并列两份。"""
+def test_reimport_same_run_merges_into_one_directory(tmp_path: Path) -> None:
+    """重导同一个 run（云机重跑一遍再交回来）⇒ 逐轮并进**同一个**目录，不是并列两份。
+
+    新语义（plan §8.2-1 / D5）：已有的轮**不重写**（先到者为准），只补缺的轮与缺的件。
+    """
     z = _make_artifact_zip(tmp_path, iters=(1, 2))
     dest = tmp_path / "deliver"
     first = import_deliver_zip(z, dest)
-    (Path(first["dir"]) / "STALE.txt").write_text("旧的一份", encoding="utf-8")
-    z2 = _make_artifact_zip(tmp_path, iters=(1, 2, 3, 4))
+    z2 = _make_artifact_zip(tmp_path, iters=(1, 2, 3, 4), tag="second")
     second = import_deliver_zip(z2, dest)
     assert second["dir"] == first["dir"]
     assert second["iters"] == [1, 2, 3, 4]
-    assert not (Path(second["dir"]) / "STALE.txt").exists()
     assert [p.name for p in dest.iterdir()] == ["x1-demo"]
+    # 零冲突 ∧ 新包自述更靠后 ⇒ state.json 采纳新的（自述与盘上事实一致）
+    st = json.loads((Path(second["dir"]) / "state.json").read_text(encoding="utf-8"))
+    assert st["last_it"] == 4
 
 
 # ────────────────── 导入 ⇒ 课程账本（控制台「各轮指标表」的唯一数据源） ──────────────────
@@ -536,6 +547,132 @@ def test_cli_transfer_flag_writes_run_complete(
     out = capsys.readouterr().out.strip().splitlines()[-1]
     payload = json.loads(out[len(IMPORT_JSON_MARK) :])
     assert payload["written"] is True and payload["it"] == 3 and payload["iters"] == 3
+
+
+# ────────────────── 落位语义：去 rename + it 级先到者为准（plan §8.2 / §9-12）──────────────────
+# 现场（reports/y20-dist2-offline-backfeed-20261016.md §3.8）：Windows 上「解到 <dest>/<run>.tmp-pid
+# 再整体改名」100% WinError 5（`tmp/**` 里的目录被监视器按序挂句柄）⇒ 落位改成
+# 「逐轮 merge + 整目录零 rename」：不再有任何目录改名/替换，且已有的轮不重写（D5）。
+
+
+def _no_directory_moves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把**对目录**的 rename/replace 打成 `PermissionError`（模拟 Windows 的 WinError 5）。
+
+    只拦「源或目标是目录」的那一种：文件级的原子写不在本 case 的语义里——现场失败的正是
+    `base.rename(final)`（`deliver_zip.py:187`）那种**目录整体改名**。
+    """
+    real_rename, real_replace = os.rename, os.replace
+
+    def guard(fn):
+        def wrapper(src, dst, *a, **kw):
+            if Path(src).is_dir() or Path(dst).is_dir():
+                raise PermissionError(5, "Access is denied（模拟被占住的目录）", str(src))
+            return fn(src, dst, *a, **kw)
+
+        return wrapper
+
+    monkeypatch.setattr(os, "rename", guard(real_rename))
+    monkeypatch.setattr(os, "replace", guard(real_replace))
+
+
+def test_import_never_moves_a_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """导入**不得依赖目录改名**（本机 WinError 5 的根因）——拦掉就应当照常导成功。"""
+    z = _make_artifact_zip(tmp_path, iters=(1, 2, 3))
+    _no_directory_moves(monkeypatch)
+    got = import_deliver_zip(z, tmp_path / "deliver")
+    assert got["iters"] == [1, 2, 3] and got["last_it"] == 3
+    assert (Path(got["dir"]) / "it-003" / "weights.json").read_bytes() == _weights(3)
+    assert not list((tmp_path / "deliver").glob("*.tmp-*"))  # 中转目录不残留
+
+
+def test_second_package_keeps_the_first_bytes_and_adds_only_new_rounds(tmp_path: Path) -> None:
+    """DoD-7a：同名轮先到者为准——盘上 it2..3 仍是 A 的字节，it4..5 来自 B。"""
+    dest = tmp_path / "deliver"
+    a = _make_artifact_zip(tmp_path, iters=(1, 2, 3), tag="a")
+    first = import_deliver_zip(a, dest)
+    b = _make_artifact_zip(tmp_path, iters=(2, 3, 4, 5), tag="b", salt=b"-B")
+    second = import_deliver_zip(b, dest)
+    assert second["dir"] == first["dir"]
+    assert second["iters"] == [1, 2, 3, 4, 5]
+    assert second["kept_rounds"] == 2 and second["skipped_rounds"] == 2
+    # 先到的那两份字节一字未改；新的两轮来自后到的包
+    assert (Path(second["dir"]) / "it-002" / "weights.json").read_bytes() == _weights(2)
+    assert (Path(second["dir"]) / "it-005" / "weights.json").read_bytes() == _weights(5) + b"-B"
+    # 有冲突 ⇒ **不**采纳新包的 state.json（否则它会指向被跳过的轮）
+    st = json.loads((Path(second["dir"]) / "state.json").read_text(encoding="utf-8"))
+    assert st["last_it"] == 3
+
+
+def test_reimport_is_idempotent_and_writes_no_ledger_row(tmp_path: Path) -> None:
+    """DoD-7b：重复导同一个包 ⇒ 幂等（不多写轮次、不多写账本行）。"""
+    dest = tmp_path / "demo" / "deliver"
+    z = _make_artifact_zip(tmp_path, iters=(1, 2))
+    import_deliver_zip(z, dest, course="demo")
+    ledger = tmp_path / "demo" / "training_log.jsonl"
+    before = ledger.read_bytes()
+    again = import_deliver_zip(z, dest, course="demo")
+    assert again["kept_rounds"] == 0 and again["skipped_rounds"] == 0
+    assert again["healed_files"] == 0
+    assert ledger.read_bytes() == before
+    assert _ledger_iters(ledger) == [1, 2]
+
+
+def test_a_round_that_lost_a_file_is_healed_on_reimport(tmp_path: Path) -> None:
+    """F6：已存在但**缺件**的轮要补齐（旧回灌腿是「存在即整轮跳过」⇒ 永不愈合）。"""
+    z = _make_artifact_zip(tmp_path, iters=(1, 2))
+    got = import_deliver_zip(z, tmp_path / "deliver")
+    opt = Path(got["dir"]) / "it-002" / "opt.tar"
+    opt.unlink()
+    again = import_deliver_zip(z, tmp_path / "deliver")
+    assert opt.read_bytes() == b"opt-2"
+    assert again["kept_rounds"] == 0 and again["healed_files"] >= 1
+
+
+def test_readings_from_a_later_import_still_reach_the_course_ledger(tmp_path: Path) -> None:
+    """读数 additive：`final/metrics.jsonl` 停在上一次的水位时，**新包**的轮次照样进课程账本。
+
+    否则第二次导入的曲线（控制台「各轮指标表」）会静默缺失——而权重都在盘上。
+    """
+    dest = tmp_path / "demo" / "deliver"
+    # 不传 course：文件名里的课程对账是另一条用例的事（这里的标签只用于区分两份包）
+    import_deliver_zip(_make_artifact_zip(tmp_path, iters=(1, 2), tag="a"), dest)
+    import_deliver_zip(_make_artifact_zip(tmp_path, iters=(3, 4), tag="b"), dest)
+    assert _ledger_iters(tmp_path / "demo" / "training_log.jsonl") == [1, 2, 3, 4]
+
+
+def test_replace_flag_overwrites_with_the_late_package(tmp_path: Path) -> None:
+    """DoD-7c：`replace=True` 是人工裁决的逃生门，行为 = 旧覆盖语义（只覆盖**该轮的件**）。"""
+    dest = tmp_path / "deliver"
+    import_deliver_zip(_make_artifact_zip(tmp_path, iters=(1, 2), tag="a"), dest)
+    b = _make_artifact_zip(tmp_path, iters=(1, 2), tag="b", salt=b"-B")
+    got = import_deliver_zip(b, dest, replace=True)
+    assert got["skipped_rounds"] == 0
+    assert (Path(got["dir"]) / "it-001" / "weights.json").read_bytes() == _weights(1) + b"-B"
+
+
+def test_import_from_run_reports_the_same_landing_counts(tmp_path: Path) -> None:
+    """回灌腿与导入腿**同一份判据**（F6）：同样的计数、同样会补缺件。"""
+    src = _hub_received_run(tmp_path, iters=(1, 2))
+    dest = tmp_path / "deliver"
+    got = import_from_run(src, dest, run_id="seg-1")
+    assert got["kept_rounds"] == 2 and got["skipped_rounds"] == 0
+    (dest / "seg-1" / "it-001" / "opt.tar").unlink()
+    again = import_from_run(src, dest, run_id="seg-1")
+    assert again["healed_files"] >= 1
+    assert (dest / "seg-1" / "it-001" / "opt.tar").read_bytes() == b"opt-1"
+
+
+def test_cli_replace_flag_is_accepted(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    """逃生门要在 CLI 上真的可达（人工裁决时人跑的就是这条命令）。"""
+    dest = tmp_path / "deliver"
+    import_deliver_zip(_make_artifact_zip(tmp_path, iters=(1, 2), tag="a"), dest)
+    b = _make_artifact_zip(tmp_path, iters=(1, 2), tag="b", salt=b"-B")
+    rc = main(["--zip", str(b), "--dest", str(dest), "--replace", "--json-only"])
+    assert rc == 0
+    out = capsys.readouterr().out.strip().splitlines()[-1]
+    payload = json.loads(out[len(IMPORT_JSON_MARK) :])
+    assert payload["skipped_rounds"] == 0
+    assert (dest / "x1-demo" / "it-001" / "weights.json").read_bytes() == _weights(1) + b"-B"
 
 
 def test_cli_transfer_without_run_id_is_rejected(

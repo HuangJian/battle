@@ -6928,3 +6928,45 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   既有闸同批改：`web-view-routes.test.ts` 的 link href 白名单改为**数据驱动**（原先硬编码 `/eval|/log/` ⇒ 加第 3 个独立页必红）、
   `web-ssr-readonly.test.ts` 夹具补 `errors: null`（沿用 selfDisk F11 那条「夹具必须把无告警造成事实」的口径）。
   技术正文 `docs/nn/console.md` §39；**未落地**：P1/P2 两条云机腿 + 真机端到端（见 plan §5/§6 的批次划分）。
+
+## §2026-10-16-goalnn-deliver-import-placement（产物导入落位：去掉目录改名，改逐轮 merge —— 解 Windows `WinError 5` 必败）
+
+- **来源**：`plan/offline-backfeed-resilience.plan.md` §8.2/§9-12（§10 的 **A+B** 两片）· 现场
+  `reports/y20-dist2-offline-backfeed-20261016.md` §3.8 · 评审 `plan/offline-backfeed-resilience.review-bf.md`
+  F6/F11（根因措辞与顺序证据）。
+- **定案一（去目录改名）**：`import_deliver_zip` 不再「解到 `<dest>/<run>.tmp-<pid>` 再整体 `rename`」——
+  Windows 的 `MoveFile` 要求源目录**整树无句柄**，而仓库常驻进程/监视器会给 `tmp/**` 下新建的目录**按序**挂句柄
+  （探针实测：前 31 个子目录改名成功、从 it-151 起必败；等 90s / 0.5s×60 退避 / `os.replace` 全无效）
+  ⇒ 改为逐件写盘，**全程不出现目录改名/替换**。中转目录仍只用于**解压**，`finally` 里必删。
+- **定案二（「不留半截」的接手方式）**：单轮内**权重最后拷**——半截轮对 `_scan_iters`（只认 `weights.*`）
+  不可见，下一次导入会把它补齐。旧代码靠「原子改名」拿到的性质由这个顺序接手，**不引入新的完整性标记字段**。
+- **定案三（读数源 = 包）**：`metrics.jsonl`/`eval_log.jsonl` 的并账从**包**里读（`_merge_carried_*` 的
+  `src_root` + 显式 `run_id`），不是从导入后的目录读——逐轮 merge 后 `final/metrics.jsonl` 可能停在上一次
+  导入的水位（只读它会让后到的包的曲线静默进不了课程账本）。
+- **备选与否决**：① `os.replace` 代替 `os.rename` —— 否（对目录语义同样 `WinError 5`，实测）；
+  ② 落位仍用改名、只在失败时 `copytree` 兜底 —— 否（两条路径两种语义，而失败在本机是 100%，不是边角）；
+  ③ 「先把持句柄的常驻进程停掉再导入」 —— 否（未定位到是谁；代价大于收益）。
+- **后果**：`remote/deliver_zip.py` 新增 `_same_bytes`/`_round_files`/`_land_rounds`/`_land_anchors`；
+  `tests/remote/test_deliver_zip.py` 用**反探针**钉住（把对目录的 `rename`/`replace` 打成 `PermissionError`
+  ——拦掉也必须照常导成功）。**未落地**：控制台用户可见的报错表（plan §6.2-4，G 片）。
+
+## §2026-10-16-goalnn-deliver-first-write-wins-import（本地导入/回灌同规：同名轮先到者为准 + 缺件愈合 + `--replace` 逃生门）
+
+- **来源**：同上（plan §8.2/§8.3 的 **D5**；评审 F6：`import_from_run` 当时是「存在即整轮跳过」的
+  **第二条路径**，与导入腿的「先 rmtree 再落」语义相反）。
+- **定案一（一份判据）**：导入腿与回灌腿共用一个 `_land_rounds`：缺件 ⇒ 拷（**愈合**）、同字节 ⇒ duplicate、
+  异字节 ⇒ **保留盘上先到的那一份** + 响亮一行 + `skipped_rounds`。口径对齐 hub 的
+  `store_offline_artifact`（duplicate / `_heal_round`）——hub 侧早就是内容判据，本地侧今天是相反的。
+- **定案二（锚点先到者为准，`state.json` 例外）**：`state/plan/manifest/artifacts.zip/两账本` 缺件才拷；
+  `state.json` 当「新包自述 `last_it` 更靠后 ∧ 本次零冲突」时采纳——否则它的 `last_it`/`last_weights_fp`
+  会指向被跳过的轮（自述与盘上事实不符比陈旧更贵）。
+- **定案三（返回体）**：`iters/last_it/ckpt` = **盘上真实**（合并后；`ckpt` 必须真实存在，控制台拿它跑 evalA），
+  新增 `package_iters`/`package_last_it`/`kept_rounds`/`skipped_rounds`/`healed_files`（additive，老读方忽略）。
+- **备选与否决**：① 默认覆盖（= 今天的语义）—— 否（同名轮是不可变快照，2026-10-11 的同一条口径：响比静默好）；
+  ② 「异字节跳过」做成静默 —— 否（人裁决要有入口 ⇒ `--replace`）；③ 把 `delivered.json` 的 `artifacts` 元素
+  类型改成 dict 以记 `confirmed_at` —— 本次未动，但**明令禁止**（老读方 `isinstance(it,int)` 会静默丢掉全部
+  已投递记账 ⇒ 全量重投 + 抽屉永不删；要加就加**并列键**，见 plan §4.2-3）。
+- **后果**：`--zip` 新增 `--replace`；`tests/remote/test_deliver_zip.py` 新增 9 条（DoD-7a/b/c + 缺件愈合 +
+  读数 additive + CLI 逃生门），既有「重导同名 run」用例改写为新语义（逐轮 merge，不再整目录替换）；
+  nn python 门禁全绿（ruff+mypy+pytest tests/ e2e/：4535 passed / 10 skipped）。
+  **未落地**：控制台 message 里的「新增 X 轮、跳过 Y 轮」（plan §8.2-4，G 片）与 §4 的删除/自愈面。
