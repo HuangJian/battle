@@ -31,6 +31,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import zipfile
 from collections.abc import Callable
 from http.server import ThreadingHTTPServer
 from pathlib import Path
@@ -1030,6 +1031,162 @@ def test_result_end_it_reached_marks_completed_and_is_served(tmp_path: Path) -> 
     assert hub.completion_blocked("c5-gae", sha) is True
     st3, raw3 = _req(base, f"{OFFLINE_CLAIM_PATH}?proto=2&course=c5-gae&worker=w1", method="POST")
     assert st3 == 409 and _json(raw3)["completed"] is True, raw3[:200]
+
+
+# ─────────────────── J2：段末三态（封课 vs 滚下一段） ───────────────────
+#
+# plan/offline-open-ended-iters-and-loud-export §3.2.2/§3.2.3：
+#   * 段末**照旧盖章**（`completed_pack_sha` = 「这份包别再发了」的唯一机制，不动它）；
+#   * 事先**主动触发**一次下一段导出（与 claim 无关 ⇒ 解掉 completed 死锁）；
+#   * 只有**课末**（`course`）不发下一段；未知也不发（宁可少滚一次，不白烧一次导出）。
+
+
+def _pack_with_plan(tmp_path: Path, course: str, plan: dict) -> Path:
+    """写一份**真 zip** 的包（含 `plan.json`）—— hub 的反推兜底读的就是它。"""
+    d = tmp_path / course
+    d.mkdir(parents=True, exist_ok=True)
+    p = d / f"task-{course}.zip"
+    with zipfile.ZipFile(p, "w") as zf:
+        zf.writestr("plan.json", json.dumps(plan))
+    return p
+
+
+def _post_segment_end(
+    base: str, course: str, *, run_id: str, it_end: int, kind: str | None
+) -> tuple[int, dict]:
+    body: dict = {
+        "course": course,
+        "run_id": run_id,
+        "it_end": it_end,
+        "state": "complete",
+        "end_it_reached": True,
+    }
+    if kind is not None:
+        body["seg_end_kind"] = kind
+    st, raw = _post_json(base, OFFLINE_RESULT_PATH, body)
+    return st, _json(raw)
+
+
+def _sealed_and_claimable(tmp_path: Path, hub: _HubQueue, course: str) -> tuple[bool, bool]:
+    from hub.task_pack import _file_sha256
+
+    sha = _file_sha256(tmp_path / course / f"task-{course}.zip")
+    row = next(r for r in hub.offline_tasks() if r["course"] == course)
+    return hub.completion_blocked(course, sha), bool(row["claimable"])
+
+
+def test_open_segment_end_seals_and_triggers_the_next_segment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """J2 正例：无限课的段末（`open`）⇒ 盖章（不可再领）∧ 触发下一段。
+
+    三件一起钉：① 盖章照旧；② 触发了一次（`calls`）；③ 读面带出三态（控制台凭它决定
+    要不要转交 `run_complete`——每一段都亮「已完成」就是漏了这个键）。
+    """
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _pack_with_plan(
+        tmp_path,
+        "c5-gae",
+        {"start_it": 0, "end_it": 500, "iters_total": 0, "open_ended": True},
+    )
+    calls = _stub_auto_handoff(monkeypatch)
+    st, doc = _post_segment_end(base, "c5-gae", run_id="seg-open-1", it_end=500, kind="open")
+    assert st == 200 and doc["completed_sealed"] is True, doc
+    assert doc["seg_end_kind"] == "open", doc
+    assert calls == ["c5-gae"], "段末必须主动请控制台出下一段（与 claim 无关）"
+    sealed, claimable = _sealed_and_claimable(tmp_path, hub, "c5-gae")
+    assert sealed is True and claimable is False, "这份包不得再被第二个节点领走"
+    st2, raw2 = _req(base, "/admin/offline")
+    rec = _json(raw2)["results"]["c5-gae"]["seg-open-1"]
+    assert rec["seg_end_kind"] == "open" and rec["end_it_reached"] is True
+
+
+def test_course_end_seals_without_triggering_a_next_segment(tmp_path: Path, monkeypatch) -> None:
+    """J2 反例（课末）：`course` ⇒ 照旧盖章但**不发**下一段（课跑完了，没有下一段）。"""
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _pack_with_plan(
+        tmp_path,
+        "c5-gae",
+        {"start_it": 0, "end_it": 10, "iters_total": 10, "open_ended": False},
+    )
+    calls = _stub_auto_handoff(monkeypatch)
+    st, doc = _post_segment_end(base, "c5-gae", run_id="seg-last", it_end=10, kind="course")
+    assert st == 200 and doc["completed_sealed"] is True and doc["seg_end_kind"] == "course"
+    assert calls == []
+
+
+def test_partial_finite_segment_triggers_the_next_segment(tmp_path: Path, monkeypatch) -> None:
+    """J2 第三格（P0-3）：有限课程被 `--run-iters` 截短的一段 = **段末**，不是课末。
+
+    v1 的「`end_it_reached` ∧ 非开区间 ⇒ 课末」会把这一格误判成课末 ⇒ 课被提前封死
+    （而它本该续下一段——今天的人手动续段路径也是这一格）。
+    """
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _pack_with_plan(
+        tmp_path,
+        "c5-gae",
+        {"start_it": 0, "end_it": 5, "iters_total": 10, "open_ended": False},
+    )
+    calls = _stub_auto_handoff(monkeypatch)
+    st, doc = _post_segment_end(base, "c5-gae", run_id="seg-part", it_end=5, kind="segment")
+    assert st == 200 and doc["seg_end_kind"] == "segment", doc
+    assert calls == ["c5-gae"]
+
+
+def test_missing_segment_kind_falls_back_to_the_pack_plan(tmp_path: Path, monkeypatch) -> None:
+    """P1-8 兜底：老快照子进程不认新键 ⇒ hub 从**包里的 `plan.json`** 反推三态。
+
+    为什么不接受「没自报就当课末」：那会让无限课的段末永远滚不起来；也不接受「没自报就
+    当段末」：课末会白烧一次导出（而每次触发 = 一次 code-snapshot + 一次 git push）。
+    包里那份计划与云机读的是同一份只读事实 ⇒ 反推不造第二份事实源。
+    """
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _pack_with_plan(
+        tmp_path,
+        "c5-gae",
+        {"start_it": 0, "end_it": 500, "iters_total": 0, "open_ended": True},
+    )
+    calls = _stub_auto_handoff(monkeypatch)
+    st, doc = _post_segment_end(base, "c5-gae", run_id="seg-old", it_end=500, kind=None)
+    assert st == 200 and doc["completed_sealed"] is True, doc
+    assert doc["seg_end_kind"] == "open", doc  # 反推出的那一格
+    assert calls == ["c5-gae"]
+
+
+def test_unknown_kind_with_unreadable_pack_does_not_trigger(tmp_path: Path, monkeypatch) -> None:
+    """反探针：包里的计划也读不到（不是真 zip）⇒ **不触发**（宁可少滚一次）。"""
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _pack(tmp_path, "c5-gae", b"PK-not-a-real-zip")
+    calls = _stub_auto_handoff(monkeypatch)
+    st, doc = _post_segment_end(base, "c5-gae", run_id="seg-unknown", it_end=500, kind=None)
+    assert st == 200 and doc["seg_end_kind"] == "", doc
+    assert calls == []
+
+
+def test_a_known_export_failure_blocks_the_next_segment_trigger(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """J3 Ⓞ J2 的交点：已知导出失败（窗口锚 = 那份状态的写入时刻）⇒ 段末这条腿也不重试。
+
+    否则段末会绕过「失败就不烧快照」的纪律（而它是**新**建的那条触发路）。
+    """
+    base, hub, _srv = _boot(tmp_path)
+    _course(tmp_path, hub, "c5-gae")
+    _pack_with_plan(
+        tmp_path,
+        "c5-gae",
+        {"start_it": 0, "end_it": 500, "iters_total": 0, "open_ended": True},
+    )
+    calls = _stub_auto_handoff(monkeypatch)
+    task_pack_mod.note_auto_handoff_failure("c5-gae", "静态拒因：轮数 > 硬上界", time.time())
+    st, doc = _post_segment_end(base, "c5-gae", run_id="seg-open-2", it_end=500, kind="open")
+    assert st == 200 and doc["completed_sealed"] is True, doc
+    assert calls == [], "已知导出失败还在窗口内 ⇒ 不重复触发"
 
 
 def test_result_without_end_flag_does_not_mark_completed(tmp_path: Path) -> None:

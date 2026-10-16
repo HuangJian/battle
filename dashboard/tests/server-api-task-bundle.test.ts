@@ -30,7 +30,11 @@ import {
   parseDeliverImportJson,
   handleDeliverUpload,
   validateDeliverUpload,
+  backfillHubRun,
   endItReachedForRun,
+  landedHubRuns,
+  segmentNotCourseEnd,
+  segEndKindForRun,
   writeRunCompleteWithPython,
   type DeliverImportPayload,
   type DeliverUploadDeps,
@@ -38,6 +42,7 @@ import {
 } from '../src/server/bundles'
 import {
   exportGuardReason,
+  RUN_MAX_ITERS_HARD_CAP,
   invalidateTaskBundle,
   latestStalePack,
   launchTaskBundleExport,
@@ -109,6 +114,54 @@ describe('任务包导出', () => {
     expect(exportGuardReason({ weightsExists: true })).toBeNull()
     const noW = exportGuardReason({ weightsExists: false })
     expect(noW).toContain('weights.json')
+  })
+
+  // ────────────────────── J4（D1）：静态拒因在 spawn 之前判 ──────────────────────
+
+  it('J4 静态预判：无剩余轮次 / 轮数 > 硬上界 都**在点击那一刻**被拒（不 spawn、不烧快照）', () => {
+    // 现场（2026-10-14 用户报障）：`iters=2000` 点下去 → spawn → 烧一次 code-snapshot +
+    // 一次 git push + 约 150s 的轮内重试，最后才在日志里报「拒发」。静态判据把这三笔代价
+    // 换成即时拒绝（真闸仍在 python 侧，预判只能多拦、不得放行一份必然失败的任务）。
+    expect(
+      exportGuardReason({ weightsExists: true, declaredIters: 2000, lastCompletedIt: 0 }),
+    ).toContain('硬上界')
+    expect(
+      exportGuardReason({ weightsExists: true, declaredIters: 10, lastCompletedIt: 10 }),
+    ).toContain('没有剩余轮次')
+    expect(
+      exportGuardReason({ weightsExists: true, declaredIters: 10, lastCompletedIt: 11 }),
+    ).toContain('没有剩余轮次')
+    // 边界：恰剩一格不拒（锚点= `last_completed`，与 python 的 `it-1` 同一班，差一就漏掉一轮）
+    expect(
+      exportGuardReason({ weightsExists: true, declaredIters: 10, lastCompletedIt: 9 }),
+    ).toBeNull()
+    expect(
+      exportGuardReason({ weightsExists: true, declaredIters: 501, lastCompletedIt: 0 }),
+    ).toContain('硬上界')
+    expect(
+      exportGuardReason({ weightsExists: true, declaredIters: 501, lastCompletedIt: 1 }),
+    ).toBeNull()
+  })
+
+  it('J4 静态预判：课程无限（iters<=0）与「不可知」都**不拒**（J1 后无限是合法的一档）', () => {
+    expect(
+      exportGuardReason({ weightsExists: true, declaredIters: 0, lastCompletedIt: 9999 }),
+    ).toBeNull()
+    expect(
+      exportGuardReason({ weightsExists: true, declaredIters: -1, lastCompletedIt: 9999 }),
+    ).toBeNull()
+    // 课程文件读不到 / 没声明 ⇒ 不可知，不判（旧课程与 BC 课程的兼容面）
+    expect(
+      exportGuardReason({ weightsExists: true, declaredIters: null, lastCompletedIt: 0 }),
+    ).toBeNull()
+    expect(exportGuardReason({ weightsExists: true })).toBeNull()
+  })
+
+  it('跨语言常量对账：TS 的段长上界 == python 的 RUN_MAX_ITERS_HARD_CAP', () => {
+    // 两边漂开 = 「控制台说能导、真闸拒发」（或者反过来：预放行一份必然失败的任务）。
+    // 与 CODE_EXCLUDE_DIRS 对账 pack_code_zip 同一手法：读 python 源逐字对。
+    const py = readFileSync(path.join(REPO_ROOT, 'nn-training/common/manifest.py'), 'utf8')
+    expect(py).toContain(`RUN_MAX_ITERS_HARD_CAP = ${RUN_MAX_ITERS_HARD_CAP}`)
   })
 
   it('旧任务包作废：挪进 stale-packs（不是删除），盘上原路径不再有包可递', () => {
@@ -394,7 +447,7 @@ describe('产物导入', () => {
       'x',
       deps({
         offlineResults: async () => ({
-          r1: { itEnd: 4, state: 'complete', endItReached: true, receivedAt: 1 },
+          r1: { itEnd: 4, state: 'complete', endItReached: true, segEndKind: '', receivedAt: 1 },
         }),
         writeRunComplete: async (course: string, runId: string) => {
           calls.push({ course, runId })
@@ -412,11 +465,20 @@ describe('产物导入', () => {
 
   it('半段 / 未跑满 / run_id 不匹配 ⇒ 不转交（不调第二趟 python，横幅不亮）', async () => {
     const shapes: Array<
-      Record<string, { itEnd: number; state: string; endItReached: boolean; receivedAt: number }>
+      Record<
+        string,
+        {
+          itEnd: number
+          state: string
+          endItReached: boolean
+          segEndKind: string
+          receivedAt: number
+        }
+      >
     > = [
-      { r1: { itEnd: 4, state: 'budget', endItReached: false, receivedAt: 1 } }, // 云机没跑满
-      { r1: { itEnd: 2, state: 'complete', endItReached: true, receivedAt: 1 } }, // 半段导入（末轮号对不上）
-      { other: { itEnd: 4, state: 'complete', endItReached: true, receivedAt: 1 } }, // run_id 不匹配
+      { r1: { itEnd: 4, state: 'budget', endItReached: false, segEndKind: '', receivedAt: 1 } }, // 云机没跑满
+      { r1: { itEnd: 2, state: 'complete', endItReached: true, segEndKind: '', receivedAt: 1 } }, // 半段导入
+      { other: { itEnd: 4, state: 'complete', endItReached: true, segEndKind: '', receivedAt: 1 } }, // run_id 不匹配
     ]
     let calls = 0
     for (const hub of shapes) {
@@ -459,7 +521,7 @@ describe('产物导入', () => {
       'x',
       deps({
         offlineResults: async () => ({
-          r1: { itEnd: 4, state: 'complete', endItReached: true, receivedAt: 1 },
+          r1: { itEnd: 4, state: 'complete', endItReached: true, segEndKind: '', receivedAt: 1 },
         }),
         writeRunComplete: async () => ({ ok: false, message: '完成横幅未落账（boom）' }),
       }),
@@ -473,12 +535,155 @@ describe('产物导入', () => {
 
   it('判据是纯函数：三个条件缺一不可（单测钉住，不靠 HTTP 链路）', () => {
     const payload = { run_id: 'r1', last_it: 4 }
-    const ok = { r1: { itEnd: 4, state: 'complete', endItReached: true, receivedAt: 0 } }
+    const ok = {
+      r1: { itEnd: 4, state: 'complete', endItReached: true, segEndKind: '', receivedAt: 0 },
+    }
     expect(endItReachedForRun(payload, ok)).toBe(true)
     expect(endItReachedForRun(payload, null)).toBe(false)
     expect(endItReachedForRun(payload, { r1: { ...ok.r1, endItReached: false } })).toBe(false)
     expect(endItReachedForRun(payload, { r1: { ...ok.r1, itEnd: 3 } })).toBe(false)
     expect(endItReachedForRun(payload, { other: ok.r1 })).toBe(false)
+  })
+
+  // ──────────── J2（P1-3）：无限课/部分段的「本段完成」不得冒充课末 ────────────
+
+  const segResult = (kind: string) => ({
+    r1: { itEnd: 4, state: 'complete', endItReached: true, segEndKind: kind, receivedAt: 1 },
+  })
+
+  it('无限课的段末（open）⇒ **不**转交 run_complete，另报「本段完成」（O5 灰横幅不得每段都亮）', async () => {
+    let calls = 0
+    const r = await upload(
+      `deliver-${COURSE}.zip`,
+      'x',
+      deps({
+        offlineResults: async () => segResult('open'),
+        writeRunComplete: async () => {
+          calls += 1
+          return { ok: true, message: '不该被调用' }
+        },
+      }),
+    )
+    const body = (await r.json()) as Record<string, unknown>
+    expect(body.endItReached).toBe(true)
+    expect(body.segmentComplete).toBe(true)
+    expect(body.runComplete).toBe(false)
+    expect(String(body.message)).toContain('本段完成')
+    expect(String(body.message)).toContain('开区间段')
+    expect(calls).toBe(0)
+  })
+
+  it('有限课被截短的一段（segment）⇒ 同样不转交（它不是课末）', async () => {
+    const r = await upload(
+      `deliver-${COURSE}.zip`,
+      'x',
+      deps({
+        offlineResults: async () => segResult('segment'),
+        writeRunComplete: async () => ({ ok: true, message: '不该被调用' }),
+      }),
+    )
+    const body = (await r.json()) as Record<string, unknown>
+    expect(body.segmentComplete).toBe(true)
+    expect(body.runComplete).toBe(false)
+  })
+
+  it('旧 hub / 旧云机（没有 seg_end_kind）⇒ 照旧转交（不可知 ≠ 抑制）', async () => {
+    // 兼容口径：字段缺席 = 「不可知」，按旧行为转交 —— 否则真课末会因为一次版本错位
+    // 静默少打一次「已完成」横幅（而那是 O5 的唯一可见面）。
+    let calls = 0
+    const r = await upload(
+      `deliver-${COURSE}.zip`,
+      'x',
+      deps({
+        offlineResults: async () => ({
+          r1: { itEnd: 4, state: 'complete', endItReached: true, segEndKind: '', receivedAt: 1 },
+        }),
+        writeRunComplete: async () => {
+          calls += 1
+          return { ok: true, message: '已完成（run_complete 已落账）' }
+        },
+      }),
+    )
+    const body = (await r.json()) as Record<string, unknown>
+    expect(body.segmentComplete).toBe(false)
+    expect(body.runComplete).toBe(true)
+    expect(calls).toBe(1)
+  })
+
+  it('三态纯函数：只有 open/segment 算「不是课末」', () => {
+    expect(segmentNotCourseEnd('open')).toBe(true)
+    expect(segmentNotCourseEnd('segment')).toBe(true)
+    expect(segmentNotCourseEnd('course')).toBe(false)
+    expect(segmentNotCourseEnd('')).toBe(false) // 不可知 ⇒ 按旧行为
+    const hits = { r1: segResult('open').r1 }
+    expect(segEndKindForRun({ run_id: 'r1' }, hits)).toBe('open')
+    expect(segEndKindForRun({ run_id: 'nope' }, hits)).toBe('')
+    expect(segEndKindForRun({ run_id: 'r1' }, null)).toBe('')
+  })
+
+  // ──────────── B0 回灌腿：hub 已收 run → 本机账本 ────────────
+
+  it('B0：从 <traj>/deliver 或 remote-jobs/offline 取段末产物，argv 交给 python 导入器', async () => {
+    delete process.env.BCITY_NO_AUTO_TASK_BUNDLE
+    const course = '__backfill-course__'
+    const runDir = path.join(REPO_ROOT, 'tmp', course, 'remote-jobs', 'offline', 'seg-1')
+    try {
+      mkdirSync(path.join(runDir, 'it-003'), { recursive: true })
+      writeFileSync(path.join(runDir, 'it-003', 'weights.json'), '{}')
+      expect(landedHubRuns(course).map((x) => [x.runId, x.lastIt])).toEqual([['seg-1', 3]])
+      const seen: string[][] = []
+      const runner = ((_m: string, args: string[]) => {
+        seen.push(args)
+        return {
+          code: 0,
+          stdout:
+            `${deliverImportJsonMark}{"run_id":"seg-1","iters":[1,2,3],"last_it":3,` +
+            '"imported":true}',
+          stderr: '',
+          timeout: false,
+        }
+      }) as unknown as DeliverZipRunner
+      const r = await backfillHubRun(course, runner)
+      expect(r.ok).toBe(true)
+      expect(r.note).toContain('已回灌')
+      expect(seen[0]).toEqual([
+        '--from-run',
+        runDir,
+        '--run-id',
+        'seg-1',
+        '--dest',
+        deliverImportRoot(course),
+        '--course',
+        course,
+      ])
+    } finally {
+      rmSync(path.join(REPO_ROOT, 'tmp', course), { recursive: true, force: true })
+    }
+  })
+
+  it('B0：没有落地产物 ⇒ 不跑 python（ran=false 不是失败）；已到段末 ⇒ 「无需回灌」', async () => {
+    delete process.env.BCITY_NO_AUTO_TASK_BUNDLE
+    const quiet = await backfillHubRun('__no-landed-runs-course__', (() => {
+      throw new Error('不该被调用')
+    }) as unknown as DeliverZipRunner)
+    expect(quiet).toEqual({ ok: true, ran: false, note: '' })
+    const course = '__backfill-idempotent__'
+    const runDir = path.join(REPO_ROOT, 'tmp', course, 'deliver', 'seg-9')
+    try {
+      mkdirSync(path.join(runDir, 'it-050'), { recursive: true })
+      writeFileSync(path.join(runDir, 'it-050', 'weights.json'), '{}')
+      const runner = (() => ({
+        code: 0,
+        stdout: `${deliverImportJsonMark}{"run_id":"seg-9","iters":[45,50],"last_it":50,"imported":false,"reason":"本机账本已到 it50"}`,
+        stderr: '',
+        timeout: false,
+      })) as unknown as DeliverZipRunner
+      const r = await backfillHubRun(course, runner)
+      expect(r.ok).toBe(true)
+      expect(r.note).toContain('无需回灌')
+    } finally {
+      rmSync(path.join(REPO_ROOT, 'tmp', course), { recursive: true, force: true })
+    }
   })
 
   it('writeRunCompleteWithPython：第二趟 argv 形状（不重新解包 zip）', async () => {

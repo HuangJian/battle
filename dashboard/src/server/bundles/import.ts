@@ -13,7 +13,7 @@
  *  在 python 一侧（zip-slip / 形状 / 课程对账）。这里只额外挡两件明显的事：非 .zip、超大。
  */
 
-import { existsSync, mkdirSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, writeFileSync } from 'fs'
 import { writeFile } from 'fs/promises'
 import path from 'path'
 import { loadConfig } from '../../core/config'
@@ -136,6 +136,24 @@ export function endItReachedForRun(
   return rec?.endItReached === true && rec.itEnd === payload.last_it
 }
 
+/** 该 run 的段末种类（`open` / `course` / `segment`；`''` = 不可知）。纯函数。 */
+export function segEndKindForRun(
+  payload: Pick<DeliverImportPayload, 'run_id'>,
+  hubResults: Record<string, OfflineResultView> | null | undefined,
+): string {
+  return hubResults?.[payload.run_id]?.segEndKind ?? ''
+}
+
+/** 段末种类是不是「**不是课末**」（`open` = 无限课的一段；`segment` = 有限课程被截短的一段）。
+ *
+ *  这三态的分界是评审 P1-3 点名的那一格：无限课**每一段**都 `end_it_reached`，若照旧转交
+ *  `run_complete`，控制台就会“每段亮一次已完成”（而课根本没完）。降级口径：`''`（旧 hub /
+ *  旧云机 / 非段末）= **不可知** ⇒ 按旧行为转交，不静默少打一次真课末的横幅。
+ */
+export function segmentNotCourseEnd(kind: string): boolean {
+  return kind === 'open' || kind === 'segment'
+}
+
 /** 第二趟 python：为已导入的 run 落 `run_complete`（**不**重新解包 zip）。
  *
  *  账本的唯一写者是 python（`worker/events.py::write_run_complete`）；控制台只把判决
@@ -171,6 +189,132 @@ export async function writeRunCompleteWithPython(
   if (r.code === 0) return { ok: true, message: '已完成（run_complete 已落账，灰横幅下一拍上屏）' }
   const line = lastLine(r.stderr) || lastLine(r.stdout) || `exit ${r.code}`
   return { ok: false, message: `完成横幅未落账（${line}）——产物已导入，可在矩阵上手动确认` }
+}
+
+// ───────────────────── B0：回灌腿（hub 已收 run → 本机账本） ─────────────────────
+//
+// 为什么必须在控制台这一侧（plan/offline-open-ended-iters-and-loud-export §3.2.1 定案①）：
+// 「无限轮」的下一段包**只能从本机账本起**（`plan.start_it = 本机 last_it`），而云机跑完那
+// 一段时控制台不在场（产物在 hub 手里）——没有回灌，段末之后本机账本/指标停在段起点。
+//
+// 取件源：hub 把每轮回传都镜像到 `<traj>/deliver/<run_id>/`（`hub/store_offline` ①），
+// 补传原件在 `<traj>/remote-jobs/offline/<run_id>/`（hub 自己的落点）——两者同形状，
+// 所以两个根都扫，去重取末轮号最大的那份（= 刚跑完的那一段）。
+
+export interface LandedRun {
+  runId: string
+  dir: string
+  /** 最大 `it-NNN`。 */
+  lastIt: number
+}
+
+/** 本课**已落地的 run 目录**（交付镜像 + 补传原件；按末轮号升序，同 run 只留末轮号大的那份）。 */
+export function landedHubRuns(course: string): LandedRun[] {
+  const traj = path.join(REPO_ROOT, 'tmp', course)
+  const roots = [path.join(traj, 'deliver'), path.join(traj, 'remote-jobs', 'offline')]
+  const best = new Map<string, LandedRun>()
+  for (const root of roots) {
+    let names: string[]
+    try {
+      names = readdirSync(root)
+    } catch {
+      continue // 这一半还没落过东西（常态）
+    }
+    for (const name of names) {
+      const dir = path.join(root, name)
+      let lastIt = 0
+      try {
+        for (const sub of readdirSync(dir)) {
+          const m = /^it-(\d+)$/.exec(sub)
+          if (m) lastIt = Math.max(lastIt, Number(m[1]))
+        }
+      } catch {
+        continue
+      }
+      if (lastIt <= 0) continue
+      const prev = best.get(name)
+      if (!prev || lastIt > prev.lastIt) best.set(name, { runId: name, dir, lastIt })
+    }
+  }
+  return [...best.values()].sort((a, b) => a.lastIt - b.lastIt)
+}
+
+/** 回灌的结果（`ran=false` = 没有可取的段末产物，不是失败）。 */
+export interface BackfillResult {
+  ok: boolean
+  ran: boolean
+  note: string
+}
+
+/** **段末回灌**（B0）：「hub 已收的末段产物 → 本机账本/指标」。幂等由 python 侧保证。
+ *
+ *  调用点：`autoOfflineHandoff`（hub 在段末事件里主动触发的那一次）——**先回灌、后判包**：
+ *  回灌推进了本机账本/权重，规则表才认得出「包已过期 ⇒ 该重导」（否则它只说「已有任务包，
+ *  云机可直接取」——而那份包正是刚跑完的旧段）。
+ *
+ *  失败不连坐：回灌起不来只显一行，导出腿照走（无回灌的后果是「下一段仍从旧起点」——
+ *  那是退化，不是故障；退化的可见面就是这条 note）。
+ */
+export async function backfillHubRun(
+  course: string,
+  runner: DeliverZipRunner = runRunPythonAsyncModule,
+): Promise<BackfillResult> {
+  if (process.env.BCITY_NO_AUTO_TASK_BUNDLE)
+    return { ok: true, ran: false, note: '（逃生阀：未回灌段末产物）' }
+  const runs = landedHubRuns(course)
+  if (!runs.length) return { ok: true, ran: false, note: '' }
+  const best = runs[runs.length - 1]
+  let r: RunPythonResult
+  try {
+    r = await runner('remote.deliver_zip', [
+      '--from-run',
+      best.dir,
+      '--run-id',
+      best.runId,
+      '--dest',
+      deliverImportRoot(course),
+      '--course',
+      course,
+    ])
+  } catch (e) {
+    return {
+      ok: false,
+      ran: false,
+      note: `段末回灌未能启动（${e instanceof Error ? e.message : String(e)}）`,
+    }
+  }
+  try {
+    writeFileSync(
+      deliverImportLogPath(course),
+      `$ python -m remote.deliver_zip --from-run ${best.dir} --run-id ${best.runId} --dest ${deliverImportRoot(course)} --course ${course}\n` +
+        `[回灌 exit ${r.code}${r.timeout ? ' TIMEOUT' : ''}]\n${r.stdout}\n${r.stderr}`,
+      { encoding: 'utf-8', flag: 'a' },
+    )
+  } catch {
+    /* 留档失败不影响回灌结果 */
+  }
+  const payload = parseDeliverImportJson(r.stdout) as
+    | (DeliverImportPayload & { imported?: boolean; reason?: string })
+    | null
+  if (r.timeout)
+    return { ok: false, ran: true, note: `段末回灌超时（${best.runId}）——产物仍在盘上，可手动导入` }
+  if (r.code !== 0 || !payload)
+    return {
+      ok: false,
+      ran: true,
+      note: `段末回灌失败（${best.runId}）：${lastLine(r.stderr) || lastLine(r.stdout) || `exit ${r.code}`}`,
+    }
+  if (payload.imported === false)
+    return {
+      ok: true,
+      ran: true,
+      note: `段末产物无需回灌（${payload.reason || `本机已到 it${payload.last_it}`}）`,
+    }
+  return {
+    ok: true,
+    ran: true,
+    note: `已回灌段末产物 ${payload.run_id}（it${payload.iters[0]} → it${payload.last_it}）——本机账本已推进`,
+  }
 }
 
 export interface DeliverImportResult {
@@ -355,18 +499,32 @@ export async function handleDeliverUpload(
     const payload = imported.payload
     // ★ T6（plan/auto-offline-handoff §3.6）：完成态转交。判决在这里（run_id 对齐 ∧ 自报
     //   跑满 ∧ 末轮号一致——半段导入不亮横幅），落账在 python（账本唯一写者）。
+    //   ★ J2（2026-10-16，P1-3）：**只有课末才转交**——无限课的每一段都自报 `end_it_reached`，
+    //   照旧转交就是「每段亮一次已完成」（O5 的灰横幅/停车态，而课还要跑很多段）。
     let endItReached = false
+    let segEndKind = ''
     let bannerNote = ''
     let runCompleteOk = false
+    let hubResults: Record<string, OfflineResultView> | null = null
     try {
-      endItReached = endItReachedForRun(payload, await deps.offlineResults(course))
+      hubResults = await deps.offlineResults(course)
+      endItReached = endItReachedForRun(payload, hubResults)
     } catch {
       endItReached = false // hub 观测面坏了 = 无从判决 ⇒ 不转交（不是「没跑满」）
     }
-    if (endItReached) {
+    segEndKind = endItReached ? segEndKindForRun(payload, hubResults) : ''
+    const segmentOnly = segmentNotCourseEnd(segEndKind)
+    if (endItReached && !segmentOnly) {
       const wr = await deps.writeRunComplete(course, payload.run_id)
       runCompleteOk = wr.ok
       bannerNote = wr.message
+    } else if (segmentOnly) {
+      // 「本段完成」另立一个读数（不转交 run_complete）：它是段末滚动腿的可见面——
+      // 人看得到「这段跑完了、下一段由 hub 的段末事件滚」，而课的完成态没被误亮。
+      bannerNote =
+        segEndKind === 'open'
+          ? '本段完成（开区间段）——课程未到尾，不亮「已完成」；下一段由段末事件自动滚'
+          : '本段完成（有限课程被截短的一段）——课未到尾，不亮「已完成」'
     }
     const ev = launchPostImportEval(course, payload, deps)
     return jsonResp(
@@ -379,6 +537,8 @@ export async function handleDeliverUpload(
         ],
         import: payload,
         endItReached,
+        segEndKind,
+        segmentComplete: segmentOnly,
         runComplete: runCompleteOk,
         evalStarted: ev.ok,
       },

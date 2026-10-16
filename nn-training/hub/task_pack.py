@@ -345,6 +345,46 @@ def pack_index_meta(pack_path: Path) -> dict:
     }
 
 
+#: 段末三态（J2，`plan/offline-open-ended-iters-and-loud-export` §3.2.3）：与云机侧
+#: `remote.plan_run.SEG_END_*` 逐字同值。hub 只消费不判决，所以这里的字面量就是契约。
+SEG_END_OPEN = "open"
+SEG_END_COURSE = "course"
+SEG_END_SEGMENT = "segment"
+
+
+def pack_seg_end_kind(pack_path: Path) -> str:
+    """从包的 `plan.json` **只读**推出「这一段跑满时算哪种段末」（三态；反推兜底）。
+
+    为什么 hub 侧还要会算（评审 P1-8）：三态是 v2 新增字段，而它在父/子进程之间走控制文件
+    协议 —— **在飞的 `code.zip` 是导出那一刻的快照**，老子进程不认新键 ⇒ 云机自报里那个键
+    静默缺席。那正是「同一件事两份事实源」的经典形态，而包里就有一份**只读**的权威
+    （`plan.json` 的 `open_ended` / `iters_total` / `end_it`，与云机读的是同一份）——
+    拿它当缺席时的兜底，比把段末当课末（或反之）便宜得多。
+
+    判据与 `remote.plan_run._seg_end_kind` 逐字同源：`open_ended` ⇒ `open`；
+    `end_it >= iters_total`（有限）⇒ `course`；其余 ⇒ `segment`。
+    包不在 / 解不开 / 没有 plan ⇒ `""`（**不可知**，调用方按旧行为处理）。
+    """
+    try:
+        with zipfile.ZipFile(pack_path) as zf:
+            plan = json.loads(zf.read(PLAN_NAME).decode("utf-8"))
+    except Exception:
+        return ""
+    if not isinstance(plan, dict):
+        return ""
+    if plan.get("open_ended") is True:
+        return SEG_END_OPEN
+    raw_total = plan.get("iters_total")
+    total = int(raw_total) if isinstance(raw_total, (int, float)) and not isinstance(raw_total, bool) else 0
+    raw_end = plan.get("end_it")
+    end_it = int(raw_end) if isinstance(raw_end, (int, float)) and not isinstance(raw_end, bool) else 0
+    if total > 0 and end_it >= total:
+        return SEG_END_COURSE
+    if end_it > 0:
+        return SEG_END_SEGMENT
+    return ""
+
+
 def task_state(*, pack_exists: bool, stale: bool, held: bool) -> str:
     """一门课在清单里的状态（纯函数，总表可单测）：前者优先。
 

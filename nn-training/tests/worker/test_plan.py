@@ -271,6 +271,54 @@ def test_infinite_course_plan_is_an_open_ended_segment() -> None:
     assert (neg["open_ended"], neg["end_it"], neg["iters_total"]) == (True, 3 + RUN_MAX_ITERS_HARD_CAP, -5)
 
 
+def test_run_max_iters_lowers_the_segment_cap_only() -> None:
+    """D1（plan §3.1/§3.4）：`--run-max-iters` = 段长上界的**再降档**（只能降不能抬）。
+
+    为什么必须真能降：硬上界 500 ≈ 3 小时 / 96 核 —— 而「这一趟只跑 50 轮就交回来」是导出
+    时的人的决定（节点会话预算是有限的）。它同时是控制台静态预判读的那个常量：两边
+    漂开就是「预判说能导、真闸拒发」。
+    """
+    args = _args()
+    # 开区间段的缺省段长跟着降档走（否则「降了档」只是拒发线更低，而段还是一样的长）
+    plan = build_plan(
+        args, it=4, iters_total=0, rotate_seed=1, max_segment_iters=50, log=lambda _m: None
+    )
+    assert (plan["end_it"], plan["open_ended"]) == (54, True)
+    # 真闸也读同一个生效值：51 轮在降档后拒（在硬上界下本可以过）
+    with pytest.raises(ProtocolError, match="--run-max-iters 已降档"):
+        build_plan(
+            args,
+            it=4,
+            iters_total=0,
+            rotate_seed=1,
+            max_iters=51,
+            max_segment_iters=50,
+            log=lambda _m: None,
+        )
+    # **抬不动**：盯上界的旋钮给一个更大的值也只会被硬上界钳住（抬 = 拆闸，已否决）
+    clipped = build_plan(
+        args,
+        it=0,
+        iters_total=0,
+        rotate_seed=1,
+        max_segment_iters=RUN_MAX_ITERS_HARD_CAP + 500,
+        log=lambda _m: None,
+    )
+    assert clipped["end_it"] == RUN_MAX_ITERS_HARD_CAP
+    # 有限分支同样跟降档走：算术仍按 `max_iters` 与预算取交集（降档只管「上界」，不重定向
+    # 终点），而 `it + 8 = 9` 越过了降档后的 3 ⇒ 拒（旧行为：8 ≤ 500 本可以过）
+    with pytest.raises(ProtocolError, match="--run-max-iters 已降档"):
+        build_plan(
+            args,
+            it=1,
+            iters_total=10,
+            rotate_seed=1,
+            max_iters=8,
+            max_segment_iters=3,
+            log=lambda _m: None,
+        )
+
+
 def test_finite_course_plan_is_unchanged_and_not_open_ended() -> None:
     """有限模式**逐字节不变**（J1 是分支加宽，不是重写）：同参两遍同字节 + 新键恒 `False`。"""
     args = _args()

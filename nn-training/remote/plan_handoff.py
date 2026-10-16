@@ -287,11 +287,14 @@ class RunContext:
         state: str,
         summary: dict | None = None,
         end_it_reached: bool = False,
+        seg_end_kind: str = "",
     ) -> None:
         """段末：补完积压 + 推一份摘要（跑到哪 / 什么状态 / 为什么停）。
 
         后台模式下同样只是入队，由 `close_delivery()` 做**有界** flush。
         `end_it_reached`（T6）：本段是否跑到计划终点（判据在驱动侧 `plan_run._end_it_reached`）。
+        `seg_end_kind`（J2，三态 open/course/segment）：这一段是哪种段末 —— hub 据此决定
+        「封课」还是「滚下一段」（判据在驱动侧 `plan_run._seg_end_kind`，本层只转发）。
         """
         if self.deliverer is None:
             return
@@ -300,6 +303,7 @@ class RunContext:
             state=str(state),
             summary=summary,
             end_it_reached=end_it_reached,
+            seg_end_kind=str(seg_end_kind or ""),
         )
 
     def close_delivery(self, timeout: float = DRAIN_FLUSH_SEC) -> None:

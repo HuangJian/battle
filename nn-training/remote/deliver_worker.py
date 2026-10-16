@@ -46,6 +46,7 @@ from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
     DRAIN_TICK_SEC,
     HUB_LEASE_ENV,
+    SEG_END_KIND_ENV,
     WORKER_NAME_ENV,
     OfflineDeliverer,
 )
@@ -245,6 +246,11 @@ def main(argv: list[str] | None = None) -> int:
                         state=str(final.get("state", "") or ""),
                         summary=summary if isinstance(summary, dict) else None,
                         end_it_reached=bool(final.get("end_it_reached")),
+                        # 段末三态（J2）：**容忍读** —— 控制行里没有这个键（老父侧快照）就
+                        # 看 env 里父侧另带的那份；两处都没有 ⇒ 空串（hub 自己从包里反推）。
+                        seg_end_kind=str(
+                            final.get("seg_end_kind") or os.environ.get(SEG_END_KIND_ENV) or ""
+                        ),
                     )
                 if cmd.get("stop"):
                     stop_budget = max(0.0, min(float(cmd.get("budget") or 0.0), STOP_SECONDS_MAX))

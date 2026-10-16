@@ -42,7 +42,7 @@ from pathlib import Path
 # 两份翻译必然漂开，而「两腿同字段」正是那张表存在的意义。
 import remote.delta_files as delta_files
 from common.cli import house_parser, run_main
-from common.protocol import ProtocolError
+from common.protocol import PLAN_NAME, ProtocolError
 from remote.artifacts import ArtifactStore, ledger_row_from_metrics
 from remote.bundle import BUNDLE_INDEX, safe_extract_zip
 
@@ -218,6 +218,158 @@ def import_deliver_zip(
     }
 
 
+def _ledger_iter_its(ledger: Path) -> set[int]:
+    """课程账本里已有的 `iteration.iter` 集合（读不到 / 半截行 ⇒ 跳过；**永不抛**）。
+
+    为什么单独抽出来（2026-10-16，回灌腿 B0）：导入与**回灌**两条腿都要回答
+    「本机账本里已经有哪些轮」——一份实现它们才不会漂（漏判的代价是重复回调或漏回灌）。
+    """
+    seen: set[int] = set()
+    try:
+        text = ledger.read_text(encoding="utf-8")
+    except OSError:
+        return seen
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            prev = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(prev, dict) or prev.get("event") != "iteration":
+            continue
+        raw = prev.get("iter")
+        if not isinstance(raw, (int, float, str)) or isinstance(raw, bool):
+            continue
+        try:
+            seen.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return seen
+
+
+def import_from_run(
+    run_dir: str | Path,
+    dest_root: str | Path,
+    *,
+    course: str = "",
+    run_id: str = "",
+    log=lambda msg: print(msg, flush=True),
+) -> dict:
+    """**回灌腿**（B0，`plan/offline-open-ended-iters-and-loud-export` §3.2.1 定案①）：
+    把 **hub 已收的那个 run 目录** 导入成控制台可评估的产物记录。
+
+    为什么必须有它：「无限轮」的下一段包只能从**本机账本**起（`plan.start_it = 本机 last_it`），
+    而云机跑完那一段时控制台**不在场**（产物在 hub 手里）—— 没有这条腿，段末之后本机
+    账本/指标停在段起点 ⇒ 规则表判定「包不比权重旧」⇒ 不出下一段（J2 只能半自动）。
+
+    与 `import_deliver_zip` 的差别：**不解 zip**。源就是 hub 落地的那份目录
+    （`<traj>/deliver/<run_id>/` 交付镜像，或 `<traj>/remote-jobs/offline/<run_id>/`
+    的补传原件 —— 两者同形状：`it-NNN/{weights.json|weights.delta,opt,row.json}`）。
+
+    幂等（plan §3.2.1 的「必写」）：
+      * 轮次目录是**不可变快照** ⇒ 只补缺的（已有的一律不重写）；
+      * 账本行按 `it` 去重（与 `import_deliver_zip` 同表同规则）；
+      * 判据「本机账本已到 ≥ 本段末轮」∧「轮次目录已齐」⇒ **不重复导**，
+        回 `{imported: False, ...}`（调用方据此说一句「无需回灌」而不是再烧一遍）。
+    """
+    src = Path(run_dir)
+    if not src.is_dir():
+        raise ProtocolError(f"回灌源目录不存在: {src}")
+    src_iters = _scan_iters(src)
+    if not src_iters:
+        raise ProtocolError(
+            f"回灌源里没有 {ArtifactStore.IT_PREFIX}NNN/weights.json（或压缩版 "
+            f"weights.delta）: {src}"
+        )
+    dest = Path(dest_root)
+    name = re.sub(r"[^A-Za-z0-9._-]", "_", str(run_id or src.name))[:64]
+    if not name:
+        raise ProtocolError(f"回灌的 run 名非法: {run_id!r} / 源目录名 {src.name!r}")
+    final = dest / name
+    dest.mkdir(parents=True, exist_ok=True)
+    # 取件：源不在导入根下（补传原件）⇒ 把**缺的**轮次与顶层旁文件搬进去。轮次是不可变
+    # 快照 ⇒ 已存在的一律不碰（重写只会把「已收的那一份」换成另一份，没有收益）。
+    copied = 0
+    if src.resolve() != final.resolve():
+        final.mkdir(parents=True, exist_ok=True)
+        have = set(_scan_iters(final))
+        for it in src_iters:
+            if it in have:
+                continue
+            s_dir = src / f"{ArtifactStore.IT_PREFIX}{it:03d}"
+            d_dir = final / f"{ArtifactStore.IT_PREFIX}{it:03d}"
+            d_dir.mkdir(parents=True, exist_ok=True)
+            for f in sorted(s_dir.iterdir()):
+                if not f.is_file():
+                    continue
+                shutil.copy2(f, d_dir / f.name)
+            copied += 1
+        for side in (
+            ArtifactStore.STATE_NAME,
+            ArtifactStore.METRICS_NAME,
+            ArtifactStore.EVAL_LOG_NAME,
+            PLAN_NAME,
+            "manifest.json",
+        ):
+            s = src / side
+            if s.is_file() and not (final / side).exists():
+                shutil.copy2(s, final / side)
+        if copied:
+            log(f"[deliver] 回灌取件：{src} → {final}（新增 {copied} 轮，已有轮次不重写）")
+    iters = _scan_iters(final)
+    last_it = max(iters)
+    ledger = dest.parent / "training_log.jsonl"
+    seen_its = _ledger_iter_its(ledger)
+    local_last = max(seen_its) if seen_its else 0
+    if local_last >= last_it and set(iters) <= seen_its:
+        log(
+            f"[deliver] 无需回灌：本机账本已到 it{local_last}（≥ 段末 it{last_it}）"
+            "——空转不烧一次导入"
+        )
+        return {
+            "run_id": final.name,
+            "dir": str(final),
+            "iters": iters,
+            "last_it": last_it,
+            "ckpt": str(final / f"{ArtifactStore.IT_PREFIX}{last_it:03d}" / "weights.json"),
+            "course": course,
+            "state": "",
+            "rows": len(iters),
+            "metric_rows": 0,
+            "eval_rows": 0,
+            "eval_summaries": 0,
+            "imported": False,
+            "reason": f"本机账本已到 it{local_last}（≥ 段末 it{last_it}）",
+            "source_run": str(src),
+        }
+    final_ckpt = delta_files.find_existing(
+        final / f"{ArtifactStore.IT_PREFIX}{last_it:03d}", "weights.json"
+    ) or (final / f"{ArtifactStore.IT_PREFIX}{last_it:03d}" / "weights.json")
+    n_eval, n_eval_sums = _merge_carried_eval_rows(final, dest)
+    n_rows = _merge_carried_metric_rows(final, dest, log=log)
+    log(
+        f"[deliver] 回灌完成：{final}（{len(iters)} 轮，it{iters[0]} → it{last_it}）"
+        f"——本机账本/指标已推进到段末（下一段包从它起）"
+    )
+    return {
+        "run_id": final.name,
+        "dir": str(final),
+        "iters": iters,
+        "last_it": last_it,
+        "ckpt": str(final_ckpt),
+        "course": course,
+        "state": str(_read_json(final / ArtifactStore.STATE_NAME).get("state") or ""),
+        "rows": len(iters),
+        "metric_rows": n_rows,
+        "eval_rows": n_eval,
+        "eval_summaries": n_eval_sums,
+        "imported": True,
+        "reason": "",
+        "source_run": str(src),
+    }
+
+
 def _merge_carried_eval_rows(final: Path, dest_root: Path) -> tuple[int, int]:
     """把产物包里带的云机 A 层评估（逐局行 + summary）并进课程账本，返回
     `(新增逐局行数, 新增 summary 行数)`。
@@ -299,24 +451,8 @@ def _merge_carried_metric_rows(
         ]
         n_pg = write_per_game_files(traj, rows)
         if events:
-            seen: set[int] = set()
-            if dest.exists():
-                for line in dest.read_text(encoding="utf-8").splitlines():
-                    if not line.strip():
-                        continue
-                    try:
-                        prev = json.loads(line)
-                    except ValueError:
-                        continue
-                    if not isinstance(prev, dict) or prev.get("event") != "iteration":
-                        continue
-                    raw_prev_it = prev.get("iter")
-                    if not isinstance(raw_prev_it, (int, float, str)):
-                        continue
-                    try:
-                        seen.add(int(raw_prev_it))
-                    except (TypeError, ValueError):
-                        continue
+            # 账本已有轮次（与回灌腿共用一份实现——两份必然漂，而漂的代价是重复写行）
+            seen = _ledger_iter_its(dest)
             fresh = [ev for ev in events if int(ev["iter"]) not in seen]
             if fresh:
                 dest.parent.mkdir(parents=True, exist_ok=True)
@@ -437,7 +573,14 @@ def write_run_complete_for_run(
 
 def main(argv: list[str] | None = None) -> int:
     ap = house_parser(description="导入训练产物 zip（deliver-<课程>.zip）")
-    ap.add_argument("--zip", help="产物 zip 路径（不跑 `--end-it-reached` 时必填）")
+    ap.add_argument("--zip", help="产物 zip 路径（不跑 `--end-it-reached` / `--from-run` 时必填）")
+    # 回灌腿（B0，2026-10-16，plan/offline-open-ended-iters-and-loud-export §3.2.1）：源不是
+    # 人搬来的 zip，而是 **hub 已收的那个 run 目录**（交付镜像或补传原件）。
+    ap.add_argument(
+        "--from-run",
+        default="",
+        help="（B0 回灌）直接导入一个已落地的 run 目录（hub 已收的产物；不解 zip）",
+    )
     ap.add_argument("--dest", required=True, help="落地根目录（每个 run 一个子目录）")
     ap.add_argument("--course", default="", help="控制台当前课程（对账文件名；可空）")
     ap.add_argument("--json-only", action="store_true", help="只打机器可读那一行")
@@ -461,8 +604,22 @@ def main(argv: list[str] | None = None) -> int:
             return 2
         print(IMPORT_JSON_MARK + json.dumps(got, ensure_ascii=False), flush=True)
         return 0
+    if args.from_run:
+        try:
+            got = import_from_run(
+                args.from_run,
+                args.dest,
+                course=args.course,
+                run_id=args.run_id,
+                log=log,
+            )
+        except ProtocolError as e:
+            print(f"[deliver] 回灌失败：{e}", file=sys.stderr, flush=True)
+            return 2
+        print(IMPORT_JSON_MARK + json.dumps(got, ensure_ascii=False), flush=True)
+        return 0
     if not args.zip:
-        ap.error("--zip 必填（除非 --end-it-reached）")
+        ap.error("--zip 必填（除非 --end-it-reached / --from-run）")
         return 2
     try:
         got = import_deliver_zip(args.zip, args.dest, course=args.course, log=log)

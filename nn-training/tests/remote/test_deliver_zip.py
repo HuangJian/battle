@@ -31,6 +31,7 @@ from remote.deliver_zip import (
     IMPORT_JSON_MARK,
     course_from_filename,
     import_deliver_zip,
+    import_from_run,
     main,
     write_run_complete_for_run,
 )
@@ -361,6 +362,108 @@ def test_course_mismatch_in_filename_is_rejected(tmp_path: Path) -> None:
     with pytest.raises(ProtocolError) as ei:
         import_deliver_zip(z, tmp_path / "deliver", course="x1-rebirth-a2")
     assert "x9-other" in str(ei.value) and "x1-rebirth-a2" in str(ei.value)
+
+
+# ──────────────────── B0 回灌腿：hub 已收的 run 目录 → 本机账本 ────────────────────
+#
+# 为什么单独成组（plan/offline-open-ended-iters-and-loud-export §3.2.1 定案①）：
+# 「无限轮」的下一段包只能从**本机账本**起（`plan.start_it = 本机 last_it`），而云机跑完
+# 那一段时控制台不在场（产物在 hub 手里）—— 这条腿就是那唯一一条「账本前进一步」的通道。
+
+
+def _hub_received_run(tmp_path: Path, *, run_id: str = "seg-1", iters=(1, 2, 3)) -> Path:
+    """造一份**hub 已收**的 run 目录（与 hub 落地布局逐字段同形状）。"""
+    root = tmp_path / "remote-jobs" / "offline" / run_id
+    store = ArtifactStore(root, run_id=run_id)
+    store.start(
+        {"start_it": iters[0] - 1, "end_it": iters[-1], "iters_total": iters[-1], "pairs": {}},
+        {"runId": run_id, "commit": "c" * 40},
+    )
+    for it in iters:
+        store.checkpoint(
+            it,
+            weights_json=_weights(it),
+            opt_tar=b"opt-%d" % it,
+            row={"agg": {"kl": 0.02}, "wall_sec": 1.0},
+        )
+    store.finalize(state="complete", summary={"last_it": iters[-1]})
+    return root
+
+
+def _ledger_iters(ledger: Path) -> list[int]:
+    out: list[int] = []
+    for line in ledger.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        ev = json.loads(line)
+        if isinstance(ev, dict) and ev.get("event") == "iteration":
+            out.append(int(ev["iter"]))
+    return out
+
+
+def test_import_from_run_backfills_the_local_ledger_to_the_segment_end(tmp_path: Path) -> None:
+    """回灌：取件 + 账本推进到段末（DoD-3a 的可自动判据）+ 第二遍幂等。"""
+    src = _hub_received_run(tmp_path)
+    dest = tmp_path / "deliver"
+    got = import_from_run(src, dest, course="c1", run_id="seg-1")
+    assert got["imported"] is True
+    assert got["iters"] == [1, 2, 3] and got["last_it"] == 3
+    # 取件：轮次目录落进导入根（后续读方与人工导入同一形状）
+    assert (dest / "seg-1" / "it-003" / "weights.json").read_bytes() == _weights(3)
+    assert Path(got["ckpt"]).exists()
+    # 账本推进到段末（下一段包的 `start_it` 就从这里起）
+    assert max(_ledger_iters(tmp_path / "training_log.jsonl")) == 3
+    # 幂等（plan §3.2.1 的「必写」）：第二遍直接说无需回灌，不重复合并
+    again = import_from_run(src, dest, course="c1", run_id="seg-1")
+    assert again["imported"] is False
+    assert again["reason"]  # 说清为什么不用导（给人看的一行）
+    assert max(_ledger_iters(tmp_path / "training_log.jsonl")) == 3  # 没多写一行
+
+
+def test_import_from_run_never_rewrites_an_existing_round(tmp_path: Path) -> None:
+    """轮次是**不可变快照**：已存在的那一份一律不碰（重写只会把已收的那份换掉）。"""
+    src = _hub_received_run(tmp_path, iters=(1, 2))
+    dest = tmp_path / "deliver"
+    import_from_run(src, dest, run_id="seg-1")
+    keep = dest / "seg-1" / "it-002" / "weights.json"
+    keep.write_bytes(b"kept")
+    (src / "it-002" / "weights.json").write_bytes(b"other")  # 源里换了字节
+    import_from_run(src, dest, run_id="seg-1")
+    assert keep.read_bytes() == b"kept"
+
+
+def test_import_from_run_rejects_a_directory_without_rounds(tmp_path: Path) -> None:
+    empty = tmp_path / "not-a-run"
+    empty.mkdir(parents=True)
+    with pytest.raises(ProtocolError):
+        import_from_run(empty, tmp_path / "deliver", run_id="seg-1")
+    # 半截目录不留：拒收之后导入根里不该出现这个 run（读方按目录名认 run）
+    assert not (tmp_path / "deliver" / "seg-1").exists()
+
+
+def test_from_run_cli_prints_the_import_handle(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """控制台那条路的 argv 形状：`--from-run <hub 已收目录> --dest … --course … --run-id …`。"""
+    src = _hub_received_run(tmp_path, iters=(4, 5))
+    rc = main(
+        [
+            "--from-run",
+            str(src),
+            "--dest",
+            str(tmp_path / "deliver"),
+            "--course",
+            "c1",
+            "--run-id",
+            "seg-9",
+            "--json-only",
+        ]
+    )
+    assert rc == 0
+    out = capsys.readouterr().out.strip().splitlines()[-1]
+    payload = json.loads(out[len(IMPORT_JSON_MARK) :])
+    assert payload["imported"] is True and payload["run_id"] == "seg-9"
+    assert payload["last_it"] == 5 and (tmp_path / "deliver" / "seg-9").is_dir()
 
 
 def test_course_from_filename_only_accepts_the_convention() -> None:

@@ -522,6 +522,39 @@ def _end_it_reached(plan: dict, *, state: str, it_end: int) -> bool:
     return int(it_end) >= end_it
 
 
+#: 段末三态的取值（`plan/offline-open-ended-iters-and-loud-export` §3.2.3，J2）。
+SEG_END_OPEN = "open"
+SEG_END_COURSE = "course"
+SEG_END_SEGMENT = "segment"
+
+
+def _seg_end_kind(plan: dict, *, state: str, it_end: int) -> str:
+    """本段跑到终点时，这一段的「段末」是哪一种（纯函数；**三态**，J2 §3.2.3）。
+
+    为什么不能只报 `end_it_reached`（v1 的错，评审 P0-3）：`end_it_reached` 只说
+    「计划区间跑完了」，而**计划区间**既可以止于课程预算、也可以是开区间段、还可以是
+    有限课程被段长截短的一段 —— 三种的**下一步完全不同**（封课 / 滚下一段 / 滚下一段）。
+    真判据是「这一段有没有触及课程预算」，它只能从计划里读（`plan` 是唯一事实来源）：
+
+      * `open_ended`（课程 `iters<=0`，J1）⇒ `"open"`：课程没有终点，这是「本段完成」；
+      * `end_it >= iters_total` ⇒ `"course"`：**课末**（封课、不再触发下一段）；
+      * 其余（有限课程 + `--run-iters N` 截短的段）⇒ `"segment"`：段末。
+        ⚠ 这一格**不是**课末 —— v1 的 `end_it_reached ∧ not open_ended` 会把它误判成课末
+        （而它正是 `offline-segment-restart` §93 那条「人手动续段」路径，今天也走这条）。
+
+    没跑到终点（失败 / 预算停）⇒ `""`（**没有段末可言**；与「段末但未知」区分开）。
+    """
+    if not _end_it_reached(plan, state=state, it_end=it_end):
+        return ""
+    if plan.get("open_ended") is True:
+        return SEG_END_OPEN
+    iters_total = int(plan.get("iters_total", 0) or 0)
+    end_it = int(plan.get("end_it", 0) or 0)
+    if iters_total > 0 and end_it >= iters_total:
+        return SEG_END_COURSE
+    return SEG_END_SEGMENT
+
+
 def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
     """从 `start_from` 之后跑到计划末尾（受预算/上限约束），返回合并结果。"""
     todo = [it for it in ctx.planned_range() if it > start_from]
@@ -545,6 +578,7 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
             state="noop",
             summary={"rows": len(ctx.store.rows)},
             end_it_reached=_end_it_reached(ctx.plan, state="noop", it_end=start_from),
+            seg_end_kind=_seg_end_kind(ctx.plan, state="noop", it_end=start_from),
         )
         ctx.close_delivery()
         _close_eval(ctx)
@@ -603,6 +637,7 @@ def _drive(ctx: RunContext, *, session: list[dict], start_from: int) -> dict:
         state=stopped,
         summary=summary,
         end_it_reached=_end_it_reached(ctx.plan, state=stopped, it_end=prev),
+        seg_end_kind=_seg_end_kind(ctx.plan, state=stopped, it_end=prev),
     )
     ctx.close_delivery()
     return _combined(ctx, last_it=prev, session=session, state=stopped)

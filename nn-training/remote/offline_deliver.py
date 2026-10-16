@@ -268,9 +268,10 @@ class OfflineDeliverer:
         self._want_sync = False
         #: 要**重投**的已投递轮次（云机评估落账后补读数；见 `submit_eval_round`）。
         self._repost: set[int] = set()
-        #: 段末三元组 + `end_it_reached`（T6：本段是否跑到计划终点；控制台据此转交
-        #: `run_complete`——hub 只转交不判决，判决在云机这一侧）。
-        self._final: tuple[int, str, dict, bool] | None = None
+        #: 段末三元组 + `end_it_reached` + `seg_end_kind`（T6：本段是否跑到计划终点；
+        #: 控制台据此转交 `run_complete`——hub 只转交不判决，判决在云机这一侧）。
+        #: 第五格 `seg_end_kind`（J2 三态）是 v2 新增：hub 用它区分「本段完成」与「课末」。
+        self._final: tuple[int, str, dict, bool, str] | None = None
         self._stopping = False
         self._drain_until = 0.0
         self._thread: threading.Thread | None = None
@@ -333,9 +334,15 @@ class OfflineDeliverer:
         state: str,
         summary: dict | None = None,
         end_it_reached: bool = False,
+        seg_end_kind: str = "",
     ) -> None:
-        """段末：先推积压，再推段末摘要（非阻塞；段末摘要不可变不了，只能最新有效）。"""
+        """段末：先推积压，再推段末摘要（非阻塞；段末摘要不可变不了，只能最新有效）。
+
+        `seg_end_kind`（J2）：`""` = 非段末 / 未知（旧调用方不传也合法 —— 容忍读那条
+        纪律同样适用于本参数：缺席回落到 hub 的两态旧行为）。
+        """
         self._final_submitted = True
+        kind = str(seg_end_kind or "")
         if not self.background:
             self.sync()
             self.deliver_result(
@@ -343,12 +350,19 @@ class OfflineDeliverer:
                 state=str(state),
                 summary=summary,
                 end_it_reached=end_it_reached,
+                seg_end_kind=kind,
             )
             return
         if self._thread is None:
             return
         with self._cv:
-            self._final = (int(it_end), str(state), dict(summary or {}), bool(end_it_reached))
+            self._final = (
+                int(it_end),
+                str(state),
+                dict(summary or {}),
+                bool(end_it_reached),
+                kind,
+            )
             self._cv.notify_all()
 
     def close(self, timeout: float = DRAIN_FLUSH_SEC) -> None:
@@ -428,13 +442,14 @@ class OfflineDeliverer:
                 self._guard(self._push_backlog, deadline, stopping)
                 self._guard(self._log_diag, "段末" if final is not None else "轮次")
             if final is not None:
-                it_end, state, summary, end_it_reached = final
+                it_end, state, summary, end_it_reached, seg_end_kind = final
                 self._guard(
                     self.deliver_result,
                     it_end=it_end,
                     state=state,
                     summary=summary,
                     end_it_reached=end_it_reached,
+                    seg_end_kind=seg_end_kind,
                 )
             elif stopping:
                 # 收线：本次 flush 已按预算跑完（推不完也走——产物在本地目录里）。
@@ -1158,6 +1173,7 @@ class OfflineDeliverer:
         state: str,
         summary: dict | None = None,
         end_it_reached: bool = False,
+        seg_end_kind: str = "",
     ) -> bool:
         """段末摘要（跑到哪、什么状态、失败原因）。best-effort；**永不抛**。
 
@@ -1166,6 +1182,8 @@ class OfflineDeliverer:
 
         `end_it_reached`（T6）：本段是否跑到计划终点（由调用方 `plan_run._drive` 用
         `_end_it_reached` 判定，只有 `complete`/`noop` 且 `it_end >= plan.end_it` 才是）。
+        `seg_end_kind`（J2，三态 `open`/`course`/`segment`；`""` = 非段末或未知）：hub
+        据此决定封课还是触发下一段（判据在 `plan_run._seg_end_kind`）。
         """
         try:
             if not self.enabled or self.disabled_reason:
@@ -1178,6 +1196,9 @@ class OfflineDeliverer:
                 "it_end": int(it_end),
                 "state": str(state),
                 "end_it_reached": bool(end_it_reached),
+                #: 段末三态（J2）：与 `end_it_reached` 同源同刻，**总是发**（空串 = 非段末/
+                #: 未知）——hub 的固定键集读它，缺席会被读成「旧形状」（容忍读）。
+                "seg_end_kind": str(seg_end_kind or ""),
                 "delivered": len(self._delivered),
                 "summary": dict(summary or {}),
                 "plan_sha256": str(m.get("plan_sha256", "") or ""),
@@ -1265,6 +1286,13 @@ HUB_LEASE_ENV = "BATTLE_HUB_LEASE"
 #: 本模块与 `deliver_proc` 都在 `job_lifecycle`(L3) **下面**，自己算就是向上依赖。
 #: 空 = 不带（体里那个键整个缺席，不是空串：hub 把「带没带」当判据）。
 WORKER_NAME_ENV = "NN_WORKER_NAME"
+
+#: 段末三态（J2，`open`/`course`/`segment`）传给**子进程**用的 env 名。
+#: 为什么另带一份 env（而不只走控制文件那位一行）：段末摘要会在子进程重启后**重述**
+#: （`deliver_proc._ensure_alive`），而那时控制文件里那一行可能已被上一个子进程消费 ——
+#: 重启 spawn 时把父侧记着的那份塞回 env，重启后的子进程才拿得到同一种段末。
+#: 老快照子进程两个都不认 ⇒ hub 侧从包里的 `plan.json` 反推（`pack_seg_end_kind`）。
+SEG_END_KIND_ENV = "NN_SEG_END_KIND"
 
 
 def _err_text(resp: bytes, max_chars: int = 300) -> str:
