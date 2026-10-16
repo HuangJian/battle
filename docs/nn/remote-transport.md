@@ -6,6 +6,64 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §102 离线「无限轮」的**下一半**：段末自动滚（三态判据 + 回灌腿）+ J4 静态拒因前置（2026-10-16，`plan/offline-open-ended-iters-and-loud-export.plan.md` v2 §3.2/§3.4 · 评审 `plan/offline-open-ended-iters-and-loud-export.review-bf.md` 的 P0-1/P0-2/P0-3 + P1-2/P1-3/P1-4/P1-8 · 决策 `DECISIONS.md` §2026-10-16-goalnn-offline-segment-roll）
+
+§97 让「课程无限」第一次**可表达**（`iters<=0` ⇒ 导一份 `open_ended=true` 的 500 轮开区间段），
+但那时段末还是**半自动**：人得先把产物导回来、再点一次导出。本条目补上另外两半：
+
+**① 契约表**（谁定终点 / 谁推进账本 / 谁触发出包 / 失败怎么停 —— 四件事各有唯一主人）：
+
+| 环节 | 唯一主人 | 判据 / 落点 |
+|---|---|---|
+| 定终点 | **导出机**（本机账本） | `plan.start_it = 本机 last_it`（`loop_export` 传 `it-1`）、`end_it = start_it + 500`、`open_ended=true` |
+| 推账本 | **回灌腿**（hub 已收 run → 本机） | `python -m remote.deliver_zip --from-run <hub 已收目录> --dest tmp/<课>/deliver`；幂等三判据见下 |
+| 触发出包 | **hub**（段末事件） | `hub/offline._post_offline_result` → `_trigger_next_segment` → 控制台 `/api/autoOfflineHandoff` |
+| 失败怎么停 | **J3**（§97 已落）+ **J4** | `export-status.json` 的 `at` 当窗口锚（已知失败不再重试）；静态拒因在**点击那一刻**判（不 spawn） |
+
+**② 三态判据**（评审 P0-3；云机从**计划只读**取出，hub 不必解析计划）：
+
+| 情形 | `seg_end_kind` | 段末含义 |
+|---|---|---|
+| 无限课（`open_ended`） | `open` | **段末** ⇒ 盖章 + 触发下一段 |
+| 有限课本段**触及**预算（`end_it >= iters_total`） | `course` | **课末** ⇒ 只盖章、不发下一段 |
+| 有限课本段**未触及**预算（`--run-iters N` 截短） | `segment` | 段末（§93 的人工续段路径今天也走这条） |
+| 没跑到终点（`budget`/`failed`）或计划没有 `end_it` | `""` | 没有段末可言 |
+
+v1 的「`end_it_reached` ∧ 非开区间 ⇒ 课末」会把第三格误判成课末（课当场被封死）——
+那是这条判据存在的全部理由。判据是纯函数：`remote/plan_run._seg_end_kind`（云机侧）·
+`hub/task_pack.pack_seg_end_kind`（hub 侧从包里 `plan.json` **反推**）·
+`dashboard/src/server/bundles/import.ts::segmentNotCourseEnd`（控制台侧），三处同表。
+
+**③ 盖章不动 + 事件驱动**（评审 P0-2）：`completed_pack_sha` 是「这份包别再发了」的**唯一**机制，
+段末**照旧盖章**（`_end_seal_ok` 的 run_id/plan_sha 对账一字未动）；改的只是**触发的时机**：
+段末事件**主动**请控制台出下一段（与 claim 无关 ⇒ 解掉「完成态把 claim 挡死、而重导要有 claim 才有需求」
+的死循环）。反探针：第二个节点不得再领到同一份包（`completion_blocked` 断言在用例里）。
+
+**④ 回灌腿**（评审 P0-1 定案①）：**上报 → 回灌 → 出包**三步的先后固定 ——
+`autoOfflineHandoff` 里**先回灌、再判包**（回灌推进本机账本/权重之后，同一张规则表才从
+「已有任务包，云机可直接取」命中到「包比权重旧 ⇒ 作废重导」）。
+幂等三条：轮次目录**只补缺**（轮次是不可变快照）· 账本行按 `it` 去重（与人工导入同一张翻译表）·
+「本机账本已到 ≥ 段末 ∧ 轮次已齐」⇒ 直接回 `imported:false`（不重复合并）。
+取件源两个根都扫：`<traj>/deliver/<run_id>/`（hub 交付镜像）与 `<traj>/remote-jobs/offline/<run_id>/`
+（补传原件）——同形状，取末轮号最大的那份；老快照子进程不认新键时由 ② 的包内反推兜住。
+
+**⑤ T6 不再每段亮「已完成」**（评审 P1-3）：控制台转交 `run_complete` 的判据从
+「`end_it_reached` ∧ run_id/末轮号对得上」收紧为「**且 `seg_end_kind` 不是 `open`/`segment`**」；
+`""`（旧 hub/旧云机）= 不可知 ⇒ 按旧行为转交（真课末不得因版本错位静默少打一次横幅）。
+段末另立一个读数（导入回执的 `segmentComplete` + 一句「本段完成（开区间段）——下一段由段末事件自动滚」）。
+
+**⑥ J4 静态拒因前置**（评审 P1-4）：`exportGuard` 从「只看起点权重在不在」扩到读
+`curricula/<课>.jsonc` 的 `iters`（`stack/courses.ts::declaredCourseIters`，★M4 删掉的那个读面按
+D14 口径重建）与账本末轮（`lastCompletedIt`）：`剩余 = iters - last_completed`（**与 python 同一锚**：
+启动期 `self._start_it` = `last_completed+1`、轮内 `it-1` = `last_completed`，写错就差一）——
+`<=0` ⇒ 「没有剩余轮次」、`> 500` ⇒ 「> 硬上界」；`iters<=0`（无限）与不可知（课程文件读不到）**不判**。
+另补 `--run-max-iters`（`worker/cli.py`）：`common/manifest.py` 的注释一直说「命令行可用它再降」，
+而全仓没有这个 argparse —— 它**只能降不能抬**（0 = 硬上界），且控制台那份同名常量读 python 源对账。
+
+**⑦ 真机没验的（诚实账）**：DoD-2/3/6 要一段真云机跑满才成立（本机三段无法造：`run_plan_job` 的
+假训练跑不动 500 轮）。条目 32（`docs/nn.progress.md` §3.1）留着这条闭合判据；在此之前
+「无限轮」的**代码面**已闭环，端到端仍按「未验」对待。
+
 ## §101 云机 **eval 腿**漏了读侧落地：400 局每局 `Unexpected identifier "BWD1"`（2026-10-16 用户报障 · 决策 `DECISIONS.md` §2026-10-16-goalnn-cloud-eval-lands-delta）
 
 **用户报障**（2026-10-16，云机 `y5-back` it60）：`[eval-cloud]` 开评 400 局，逐局回退一次性

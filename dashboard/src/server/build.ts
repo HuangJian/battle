@@ -38,6 +38,13 @@ export const BUNDLES: BundleTarget[] = [
     entry: path.join(WEB_DIR, 'app', 'eval-index.tsx'),
     out: path.join(BUNDLE_DIR, 'eval.js'),
   },
+  // 组件错误登记表详情页（2026-10-16，plan/component-error-registry §4.6）：第 **4** 份
+  // bundle —— 与 /log、/eval 同规（独立页各自 bundle，服务端整页服务）。
+  {
+    key: 'errors',
+    entry: path.join(WEB_DIR, 'app', 'errors-index.tsx'),
+    out: path.join(BUNDLE_DIR, 'errors.js'),
+  },
 ]
 
 /** 客户端禁词（分层铁律 R1）：打到 bundle 文本里的服务端能力即违规。 */

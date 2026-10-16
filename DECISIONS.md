@@ -6850,3 +6850,81 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   ③ hide 命耗线 3.55% 判 fail —— 否（差 0.55pp＋峰值＋税维持，收官不认 fail，注记）。
 - **后果**：y5 全系列结课（近/远/冠/速/包/早/翼＋back/dist/hide 共 10 腿，均有尾部报告）；
   在跑只剩 y20 三腿。
+## §2026-10-16-goalnn-offline-segment-roll（离线「无限轮」的下一半：J2 段末自动滚（含回灌腿）+ J4 静态拒因前置）
+
+- **来源**：`plan/offline-open-ended-iters-and-loud-export.plan.md` v2 §3.2/§3.4（B/D 腿）·
+  评审 `plan/offline-open-ended-iters-and-loud-export.review-bf.md`（P0-1/P0-2/P0-3 + P1-2/P1-3/P1-4/P1-8）。
+  §97 落了 J1（`iters<=0` ⇒ 开区间段）与 J3（导出成败权威落点）；本条补的是**下一半** ——
+  段末之后「不用人」以及「点下去之前就说清楚为什么导不了」。
+- **定案一（J2 三态）**：段末判据从两态 `end_it_reached` 扩成三态 `seg_end_kind`：
+  `open`（无限课的段末）/ `course`（课末，封课）/ `segment`（有限课程被 `--run-iters` 截短的一段）。
+  判据由**云机从计划只读取出**（`remote/plan_run._seg_end_kind`），hub 只消费
+  （`hub/task_pack.pack_seg_end_kind` 从包里 `plan.json` **反推**当兜底），控制台按它决定
+  要不要转交 `run_complete`。v1 的「`end_it_reached` ∧ 非开区间 ⇒ 课末」会把第三格误判成课末
+  （课当场被封死），那是这条判据存在的全部理由。
+- **定案二（盖章不动 + 事件驱动）**：`completed_pack_sha` 是「这份包别再发了」的**唯一**机制
+  ⇒ 段末**照旧盖章**（`_end_seal_ok` 的 run_id/plan_sha 对账一字未动），改的是**触发时机**：
+  段末事件在 `hub/offline._post_offline_result` 里主动请控制台出下一段（与 claim 无关 ⇒ 解掉
+  「completed 挡死 claim、而重导要有需求才有包」的死循环）。已知导出失败（J3 的
+  `export-status.json` 窗口锚）在窗口内**不重复触发**（否则这条新腿会绕过「失败就不烧快照」的纪律）；
+  三态**未知**也不触发（宁可少滚一次，不在课末白烧一次导出）。
+- **定案三（回灌腿，评审 P0-1 选型①）**：「上报 → 回灌 → 出包」三步先后固定，
+  `autoOfflineHandoff` **先回灌、再判包**：`python -m remote.deliver_zip --from-run <hub 已收目录>`
+  把段末产物并进本机账本/指标（幂等：轮次只补缺、账本行按 `it` 去重、已到段末 ⇒ `imported:false`）。
+  **不由 hub 构造下一段计划**（否决：要新造授权/合法性口径，且新节点会拿到与 `start_it` 不匹配的权重
+  ⇒ 静默错血缘），也**不接受「保留全手动」**（那 §0 的目标就得照实改成「半自动」）。
+- **定案四（T6 收紧）**：控制台转交 `run_complete` 的判据收紧为「跑满 ∧ run_id/末轮号对得上 ∧
+  `seg_end_kind` 不是 `open`/`segment`」；`""`（旧 hub/旧云机）按旧行为转交。段末另立一个读数
+  （导入回执 `segmentComplete` + 「本段完成（开区间段）——下一段由段末事件自动滚」）。
+- **定案五（J4 静态拒因前置 + `--run-max-iters`）**：`exportGuard` 重建 ★M4 删掉的
+  `declaredCourseIters`（住 `stack/courses.ts`：课程域共享判据的家、不断环；D14 口径 = 只读
+  `curricula/<课>.jsonc`），并读账本末轮：`剩余 = iters - last_completed`（与 python 同一锚：
+  启动期 `self._start_it` = `last_completed+1`、轮内 `it-1` = `last_completed`）⇒
+  `<=0`「没有剩余轮次」· `>500`「> 硬上界」**在点击那一刻**拒（不 spawn、不烧 code-snapshot、不 push）；
+  `iters<=0` 与不可知**不判**。另补 `--run-max-iters`（`common/manifest.py` 的注释一直说它存在，
+  而全仓没有这个 argparse）：**只能降不能抬**，控制台同名常量读 python 源对账。
+- **备选与否决**：① 云机自延长段（跑到 `end_it` 自己 `+= 500`）—— 否（等于「计划不设终点」，
+  且 `end_it_reached` 永不触发 ⇒ hub 永远不盖章 ⇒ 另一个节点能把同一份包再跑一遍）；
+  ② 「不盖章」换「同一 sha 不再服务」—— 否（要多造一条持久判据，而盖章本来就是那条判据）；
+  ③ 抬 `RUN_MAX_ITERS_HARD_CAP` 到 2000+ —— 否（拆掉「防手写/损坏计划把节点按一整天」的闸）；
+  ④ 段末种类**未知**时按段末处理 —— 否（课末会白烧一次导出 = 一次 code-snapshot + 一次 git push）。
+- **后果**：hub 侧 6 格新用例 + 云机三态判定表 9 格 + 回灌腿 4 格（`tests/{hub,remote}`）+
+  控制台 J2/T6/回灌/静态预判/常量对账 8 格（`dashboard/tests/*`）全绿；
+  `docs/nn/remote-transport.md` §102 给出**契约表**（谁定终点 / 谁推进账本 / 谁触发出包 / 失败怎么停）。
+  **真机未验**：DoD-2/3/6 要一段真云机跑满才成立，闭合判据留在 `docs/nn.progress.md` §3.1 条目 32
+  —— 在此之前「无限轮」的代码面闭环，端到端按「未验」对待。
+
+## §2026-10-16-goalnn-component-error-registry（组件错误注册中心：五处散落的错误 → 一张登记表 → 首页入口 + `/errors` 详情页）
+
+- **来源**：`plan/component-error-registry.plan.md` **v3**（用户 2026-10-15 诉求：「让远端 ppo 云机、自主 rollout/eval/ppo
+  云机，本地进程 trainer/hub/cloudflared 的错误日志能够在 dashboard 注册并查看…避免训练各个组件静默失败无人处理」）·
+  评审 `plan/component-error-registry.review-bf.md`（3 P0 + 4 P1 + 5 P2，处置见 plan §12）。本条记的是 **D 批次**
+  （只动 `dashboard/**` ⇒ 不翻训练 code zip、不影响集群 codeHash，可随时回滚）；云机侧的两条腿（E3 走既有 410 通道补
+  `detail` / E4-E5 上报腿 `POST /admin/worker-error`）是 **P 批次，未落地**（要单独窗口，见 plan §7 Rk1）。
+- **定案一（五处 → 一处）**：`ErrorEvent` 是唯一形状（类型住 `web/view/error-types.ts` —— 零 import；计算住
+  `server/api/error-{fingerprint,scan,registry}.ts`）。四条腿各带闸：腿 A 本机组件日志尾 `size:mtime` 签名、
+  腿 B 已见 jid 记忆化（`fail.json` 首写胜出 ⇒ 每个 jid 只读一次）、腿 C 云机上报只在自己的 **10s 独立节拍**上探 hub、
+  腿 D 读既有池视图 SWR 缓存 ⇒ **`/api/state` 请求路径零新增探测零网络**（N9 / R1 结构闸）。
+- **定案二（`fp` 不含 `scope`）**：指纹 = `shortHash(source | component | normalize(message))`（归一去掉 hex / 数字序列 /
+  时刻 / `tmp/` 之前的绝对路径前缀）。`scope`（课名 / job id）进指纹会把同一条错误在 10 门课上折成 10 条 ⇒
+  首页计数虚高、详情页十行同一条 —— 正是要治的刷屏在详情页上的复刻。
+- **定案三（两个时刻分开 · 两个 ack kind）**：账本 `firstSeenAt`（**不可变**，只做「这个 fp 我见过」的种子）vs
+  内存 episode `firstAt`（**可重置**，ack 身份）。ack = `component-error`（逐条：`fp` × 内存 `firstAt`）与
+  `component-errors`（首页汇总条本身：subject `'all'`，eventId = 最新未 ack 错误的时刻）⇒ 持续态不重复打断、
+  **消失后复发必重弹**、新错误进来必重弹。二者混用会让一次「知道了」永久静音（F2/F3 要治的病）。
+- **定案四（账本可重定向）**：`tmp/component-errors.jsonl` 住 `core/paths.ts::errorLedgerPath()`（`BCITY_ERROR_LEDGER`），
+  与 `tmpLogsDir()` / `consoleLogPath()` / `loopControlPath()` 同规（P0-3）—— 否则用例会把指纹写进**操作员真账本**。
+  账本只在「新 `fp` 首次出现」时 append 一行；重启重放它当种子，**不继承** `firstAt`（代价：未消失的错误重弹一次，显式接受）。
+- **定案五（入口与详情页）**：首页 = 告警坞**第 9 类汇总条目**（0 或 1 条，逐条清单是详情页的事），为此把 `AlertAction.kind`
+  闭集放宽出唯一一个**无副作用**的 `'link'`（渲染成真 `<a href>`、**不挂 `onClick`**）；详情页 = **第 3 个独立页 /
+  第 4 份 bundle**（`/errors`，照 `/log` 范式，只读面照渲）；`detail` **不进** 3s/4s 轮询投影，按 `fp` 懒取。
+- **备选与否决**：① 复用 `/jobs/{id}/fail` 收瞬时错误 —— 否（那条腿有「首写胜出 + 只收确定性失败」语义，
+  塞进去会污染训练侧读到的那条失败原因）；② 在 `/jobs/*` 加 `detail` 字段 —— 否（要给取活协议动租约/游标语义面，
+  410 通道是纯加法）；③ 让 `/errors` 进主 bundle —— 否（独立页与 `/log` 同规）；④ 固定 / 纯账本 ack 键 —— 否
+  （只增不减的 `TC_ALERT_ACKS` 会把第二次同因事件永久吃掉）；⑤ 指纹住 `web/view/**` —— 否（`node:crypto` 撞分层禁词闸
+  与三份 bundle 禁词闸，评审 P0-1）；⑥ 把取消 / 热替换也报成错误 —— 否（设计内生命周期，报成错误就是灌噪音，F15）。
+- **后果**：`dashboard/tests/server-api-error-registry.test.ts`（新：P0-1/P0-2/P0-3 三条守门 + G8 跨 episode 试金石）·
+  `web-alert-dock.test.ts` 补第 9 类（含 `link` 渲染分支、汇总条 ack 分工、复现重弹）· `web-ssr-errors-page.test.ts`（新）·
+  既有闸同批改：`web-view-routes.test.ts` 的 link href 白名单改为**数据驱动**（原先硬编码 `/eval|/log/` ⇒ 加第 3 个独立页必红）、
+  `web-ssr-readonly.test.ts` 夹具补 `errors: null`（沿用 selfDisk F11 那条「夹具必须把无告警造成事实」的口径）。
+  技术正文 `docs/nn/console.md` §39；**未落地**：P1/P2 两条云机腿 + 真机端到端（见 plan §5/§6 的批次划分）。

@@ -13,6 +13,7 @@ import { readIterMetrics, readPairedReferee } from '../iters'
 import { readArchived } from './archive'
 import { loadConfigSafe } from './config'
 import { courseFacts, discoverCourses, effectiveCourse } from './courses'
+import { getErrorSummary } from './error-registry'
 import { buildLoopQueueView } from './loop-queue'
 import { buildOverview, buildWorkerRegistry, getHubAdmin, sharedTrainerAlive } from './overview'
 import { detectPpoQueueStall } from './ppo-queue'
@@ -146,6 +147,15 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     ppoWorkerLive = null
     selfDisk = null
   }
+  // 组件错误登记表的**轻量投影**（plan/component-error-registry §4.5，告警坞第 9 类）。
+  // ★ 只读登记表的 **SWR 缓存值**（`error-registry.getErrorSummary()`）——**不在此裸探 hub**
+  //   （探测只在 `snapshot-refresher` 那条独立 10s 节拍上；本段 R1 结构闸：请求路径零网络）。
+  let errors: ConsoleStateView['errors'] = null
+  try {
+    errors = getErrorSummary()
+  } catch {
+    errors = null // 登记表坏掉 ⇒ 不出汇总条（不可知 ≠ 没报错）
+  }
   // 集群代码快照（plan/cluster-code-snapshot 的 P2）：组件卡上贴一枚「本次会话跑的是哪份代码」。
   // 只读元数据（`bundles/snapshot.ts`，永不抛）——读不到 ⇒ null（UI 不画徽章，不假装有一份）。
   // 它是**机群级**事实（与查看哪门课无关），故不进任何按课键控的缓存。
@@ -222,6 +232,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     contributionBrief,
     ppoWorkerLive,
     selfDisk,
+    errors,
     codeSnapshot,
   }
 }

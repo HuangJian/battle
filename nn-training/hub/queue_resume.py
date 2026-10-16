@@ -270,7 +270,9 @@ class QueueResumeMixin(QueuePeer):
         ——而它此前只能看到 `progress`（轮次/mtime），看不到「这段到底跑没跑满」。
 
         容忍坏文件（跳过）：这是观测面，一个写半行的 result.json 不该让 `/admin/offline` 500。
-        只带控制台需要的四个键（不把整份摘要里的 course_fp/commit 泄给面板）。
+        只带控制台需要的五个键（不把整份摘要里的 course_fp/commit 泄给面板）：
+        `seg_end_kind`（J2，三态；`""` = 旧 hub/旧云机）是「本段完成」与「课末」的分界 ——
+        控制台凭它决定是否转交 `run_complete`（无限课每段都亮「已完成」就是漏了这个键）。
         """
         out: dict[str, dict] = {}
         for course in self._order:
@@ -296,6 +298,8 @@ class QueueResumeMixin(QueuePeer):
                     "it_end": it_end,
                     "state": str(rec.get("state", "") or ""),
                     "end_it_reached": rec.get("end_it_reached") is True,
+                    # 段末三态（J2）：旧摘要没这个键 ⇒ 空串（控制台按旧行为转交）。
+                    "seg_end_kind": str(rec.get("seg_end_kind") or ""),
                     "received_at": float(raw_at) if isinstance(raw_at, (int, float)) else 0.0,
                 }
             if runs:

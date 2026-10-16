@@ -225,6 +225,9 @@ class TrainingExport:
             game_timeout_sec=game_timeout,
             budget_sec=float(getattr(args, "run_budget_sec", 0.0) or 0.0),
             volume=self._volume_plan_block(),
+            # 段长上界的再降档（`--run-max-iters`；0 = 硬上界）——与 `common/manifest.py`
+            # 的注释、控制台的静态预判读的是同一件事（D1：两边不得漂）。
+            max_segment_iters=int(getattr(args, "run_max_iters", 0) or 0),
             log=log,
         )
         log(

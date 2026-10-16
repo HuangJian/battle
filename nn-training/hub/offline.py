@@ -44,6 +44,9 @@ from hub.task_pack import (
     _TASK_PACK_LOCK,
     _TASK_PACK_MISS_TRIGGERS,
     _TASK_PACK_TRIGGERS,
+    SEG_END_COURSE,
+    SEG_END_OPEN,
+    SEG_END_SEGMENT,
     TASK_AUTO_HANDOFF_RETRY_SEC,
     TASK_PACK_MISS_TRIGGER_LIMIT,
     TASK_PACK_STALE_THROTTLE_SEC,
@@ -56,6 +59,7 @@ from hub.task_pack import (
     note_auto_handoff_trigger,
     pack_index_meta,
     pack_index_part_sha,
+    pack_seg_end_kind,
     poll_console_export_status,
     reset_auto_handoff_triggers,
     reset_task_pack_miss_triggers,
@@ -424,6 +428,26 @@ class OfflineRoutes:
                         f"（course={course} run={res['run_id']}）：{why}",
                         flush=True,
                     )
+                # ★ J2（plan §3.2.2/§3.2.3，P0-2/P0-3）：**盖章照旧**（上面一步一字不动——
+                #   `completed_pack_sha` 就是「这份包别再发了」的唯一机制），另起一条「滚下一段」
+                #   的腿：段末事件**主动**触发一次控制台出包（与 claim 无关 ⇒ 解掉「completed
+                #   死锁」：没有需求也有包），而**只有课末**（kind=course）才不发下一段。
+                #   自报对不上当前包（旧包/旧会话）⇒ 不触发：那时包已经换过了，不需要下一段。
+                if sealed:
+                    kind = self._seg_end_kind(course, str(res.get("seg_end_kind") or ""))
+                    res["seg_end_kind"] = kind
+                    # 只对**确实不是课末**的两态触发（`open`/`segment`）；`course` 不发下一段；
+                    # **未知**也不发——宁可少滚一次（退回今天的手动续段），也不要在课末白烧一次
+                    # 导出（每次触发 = 一次 code-snapshot + 一次 git push，而课已经跑完了）。
+                    if kind in (SEG_END_OPEN, SEG_END_SEGMENT):
+                        self._trigger_next_segment(course, kind)
+                    else:
+                        print(
+                            f"[{time.strftime('%H:%M:%S')}] [hub-server] "
+                            f"{self._seg_kind_text(kind)}完成（course={course}）"
+                            + ("——不触发下一段" if kind else "——段末种类不可知（旧云机 + 包读不到计划），不触发下一段"),
+                            flush=True,
+                        )
         except (ProtocolError, ValueError, UnicodeDecodeError) as e:
             self._json({"error": f"补传被拒: {e}"}, 400)
             return
@@ -434,6 +458,59 @@ class OfflineRoutes:
             flush=True,
         )
         self._json(res)
+
+    def _seg_end_kind(self, course: str, reported: str) -> str:
+        """段末三态（J2）：优先云机自报，**缺席时从当前包里的计划反推**（P1-8 兜底）。
+
+        为什么要有反推（而不是「没自报就当课末」）：三态是 v2 新键，而它在父/子进程之间走
+        控制文件 —— **在飞的 `code.zip` 是导出那一刻的快照**，老子进程不认新键 ⇒ 自报里
+        那个键静默缺席。若此时按旧行为（不触发），无限课的段末就永远滚不起来（而按课末
+        处理更坏：课被提前封死）。包里 `plan.json` 与云机读的是**同一份**只读事实
+        （`hub.task_pack.pack_seg_end_kind`），拿它当兜底不造第二份事实源。
+        """
+        if reported:
+            return reported
+        try:
+            pack = self.hub.task_pack_path(course)
+        except ProtocolError:
+            return ""
+        if not pack.is_file():
+            return ""
+        return pack_seg_end_kind(pack)
+
+    def _trigger_next_segment(self, course: str, kind: str) -> None:
+        """段末（非课末）⇒ 请控制台出下一段（**事件驱动**，与 claim 无关）。
+
+        与 `task_pack` 那两本触发账共用同一套判据（`auto_handoff_decision`：已知失败 /
+        上界 / 节流）——否则段末这条腿会绕过「导出失败就不再烧快照」的纪律。
+        控制台不可达 ⇒ 只记一行（§「不得在 claim 的临界区里同步等控制台」的反面：这里不是
+        临界区，但也不能因它挂住请求）；半状态由 `stalled` 告警兜住。
+        """
+        decision = auto_handoff_decision(course)
+        if decision != "trigger":
+            print(
+                f"[{time.strftime('%H:%M:%S')}] [hub-server] {self._seg_kind_text(kind)}完成（course={course}）"
+                f"——不触发下一段（{decision}）",
+                flush=True,
+            )
+            return
+        ok, note = trigger_auto_handoff(course)
+        if ok:
+            note_auto_handoff_trigger(course)
+        print(
+            f"[{time.strftime('%H:%M:%S')}] [hub-server] {self._seg_kind_text(kind)}完成"
+            f"（course={course}）——已触发控制台出下一段（{note}）",
+            flush=True,
+        )
+
+    @staticmethod
+    def _seg_kind_text(kind: str) -> str:
+        """段末三态的人读一句话（日志与读面同一口径；`""` = 未知）。"""
+        return {
+            SEG_END_COURSE: "课末",
+            SEG_END_OPEN: "开区间本段",
+            SEG_END_SEGMENT: "本段",
+        }.get(kind, "本段（段末种类未知）")
 
     def _end_seal_ok(self, course: str, body: dict) -> tuple[bool, str]:
         """段末自报能不能给「当前包」盖 completed 章（★P1-7 / R3-f）。只拦**有反证**的情形：

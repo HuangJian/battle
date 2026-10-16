@@ -7,10 +7,13 @@ import { options } from 'preact'
 import { pageCss } from './theme'
 import { App } from './app/app'
 import { EvalApp } from './app/eval-app'
+import { ErrorsApp } from './app/errors-app'
 import { LogApp } from './app/log-app'
 import type {
   ConsoleBootstrap,
   ConsoleStateView,
+  ErrorsPageOptions,
+  ErrorsPagePayload,
   EvalPagePayload,
   LogPageOptions,
   LogPayload,
@@ -126,6 +129,25 @@ export function renderEvalNoticePage(message: string, opts: PageShellOpts = {}):
 
 /** 日志页（/log/<key>，SSR 首帧 + hydrate）。bundle 与 /app.js 同目录：/log.js（§371：旧默认
  *  /app-log.js 与服务端 bundlesByPath（/log.js）不一致 → bundle 404 → 日志页零交互）。 */
+/** 组件错误登记表详情页（`/errors`，独立页 + 第 4 份 bundle；plan/component-error-registry §4.6）。
+ *
+ *  与 `/log`、`/eval` 同规：服务端整页服务、**不参与主 bundle 的客户端路由**。只读（LAN）
+ *  下照常渲染 —— 只读的边界是**动作**，不是读面（ack 只写本地 localStorage）。 */
+export function renderErrorsPage(
+  payload: ErrorsPagePayload,
+  opts: ErrorsPageOptions,
+  shellOpts: PageShellOpts = {},
+): string {
+  const html = renderToString(<ErrorsApp initial={payload} options={opts} />)
+  return shell(
+    '组件错误 — 登记表',
+    html,
+    JSON.stringify({ payload, options: opts }),
+    shellOpts.scriptSrc ?? '/errors.js',
+    shellOpts.css,
+  )
+}
+
 export function renderLogPage(
   payload: LogPayload,
   opts: LogPageOptions,

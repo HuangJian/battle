@@ -12,6 +12,7 @@ import argparse
 
 # 核数口径的唯一实现（容器配额/亲和掩码 > `os.cpu_count()`）：`--workers` 的缺省值就靠它。
 from common.cli import house_parser
+from common.manifest import RUN_MAX_ITERS_HARD_CAP
 from common.platform_utils import effective_cores
 from worker.breaker import (
     ENT_BREAK,
@@ -564,6 +565,18 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         default=_d("run_iters", 0),
         help="导出任务包的段长（--export-bundle 的终点；<0 = 跑到课程末尾）；"
         "0 = 关（本机自己采样，历史行为）",
+    )
+    # 段长上界的**再降档**（2026-10-16，plan/offline-open-ended-iters-and-loud-export §3.1 D1）：
+    # `common/manifest.py` 的注释一直在说「命令行可用 --run-max-iters 再降」，而全仓没有这个
+    # argparse（只有注释与历史 docstring）⇒ 要么补参数、要么改注释。补参数：把节点按在机上
+    # 多久是导出时的人的决定，而硬上界 500 只是防手写/损坏计划的那道闸（**不能抬**）。
+    ap.add_argument(
+        "--run-max-iters",
+        type=int,
+        default=_d("run_max_iters", 0),
+        help=f"导出任务包的段长上界再降档（0 = 用硬上界 {RUN_MAX_ITERS_HARD_CAP}；"
+        ">0 取更小的那个；**只能降不能抬**——硬上界是防手写/损坏计划的闸）；"
+        "同时是控制台静态预判读的那个常量（两边对账，见 dashboard 的同名常量）",
     )
     ap.add_argument(
         "--export-bundle",

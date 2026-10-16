@@ -238,12 +238,35 @@ def test_submit_final_posts_the_segment_result(tmp_path: Path) -> None:
     rec = _Recorder()
     d = _deliverer(root, rec)
     d.start()
-    d.submit_final(it_end=2, state="complete", summary={"last_it": 2}, end_it_reached=True)
+    d.submit_final(
+        it_end=2,
+        state="complete",
+        summary={"last_it": 2},
+        end_it_reached=True,
+        seg_end_kind="open",
+    )
     d.close(timeout=10.0)
     assert rec.posts(OFFLINE_RESULT_PATH) == 1
     assert d.status()["result_done"] is True
     # T6：`end_it_reached` 必须穿过后台队列（tuple 解包漏一格就会静默丢标志）
     assert rec.body_for(OFFLINE_RESULT_PATH)["end_it_reached"] is True
+    # J2：`seg_end_kind` 同样要穿过去（同一个元组多了一格；漏一格 = hub 只能靠包里那行反推）
+    assert rec.body_for(OFFLINE_RESULT_PATH)["seg_end_kind"] == "open"
+
+
+def test_segment_end_kind_defaults_to_empty_and_is_never_a_crash(tmp_path: Path) -> None:
+    """J2 容忍读：不传 `seg_end_kind`（旧调用方/旧代码）⇒ 体里是空串，**不是缺席也不是报错**。
+
+    为什么定这个形状：hub 的固定键集要能稳定读到一格；空串 = 「非段末或未知」⇒ 旧行为。
+    """
+    root = _make_artifacts(tmp_path, iters=(1, 2))
+    rec = _Recorder()
+    d = _deliverer(root, rec)
+    d.start()
+    d.submit_final(it_end=2, state="complete", summary={}, end_it_reached=False)
+    d.close(timeout=10.0)
+    body = rec.body_for(OFFLINE_RESULT_PATH)
+    assert body["seg_end_kind"] == "" and body["end_it_reached"] is False
 
 
 def test_drain_loop_never_spins_without_waiting_or_working(tmp_path: Path) -> None:

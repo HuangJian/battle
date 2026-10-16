@@ -31,6 +31,7 @@ from remote.offline_deliver import (
     DRAIN_FLUSH_SEC,
     DRAIN_TICK_SEC,
     HUB_LEASE_ENV,
+    SEG_END_KIND_ENV,
     WORKER_NAME_ENV,
     OfflineDeliverer,
     _log_default,
@@ -83,6 +84,7 @@ class DelivererLike(Protocol):
         state: str,
         summary: dict | None = None,
         end_it_reached: bool = False,
+        seg_end_kind: str = "",
     ) -> None: ...
 
     def close(self, timeout: float = DRAIN_FLUSH_SEC) -> None: ...
@@ -182,6 +184,9 @@ class DelivererProcess:
         self._restarts = 0
         self._final_submitted = False
         self._final_obj: dict | None = None
+        #: 父侧记着的段末三态（J2）：`_spawn` 时经 env 传给子进程——控制文件那一行是
+        #: 主通道，env 只在「子进程重启且那一行已被消费」时接管（与 `_final_obj` 重述同族）。
+        self._seg_end_kind = ""
         self._mode = "process"
         self._degrade_reason = ""
         self._fallback: OfflineDeliverer | None = None
@@ -263,6 +268,10 @@ class DelivererProcess:
         # 可读名（plan/offline-leg-ppo-attribution）：同上，空值不塞（体里那个键该整个缺席）。
         if self.worker_name:
             env[WORKER_NAME_ENV] = self.worker_name
+        # 段末三态（J2）同理：控制文件是主通道，这里另带一份供**子进程重启**后仍拿得到
+        #（老快照两个都不认 ⇒ hub 从包里的 plan.json 反推，见 `hub.task_pack.pack_seg_end_kind`）。
+        if self._seg_end_kind:
+            env[SEG_END_KIND_ENV] = self._seg_end_kind
         self._boot = threading.Event()
         try:
             proc = subprocess.Popen(
@@ -433,12 +442,25 @@ class DelivererProcess:
         state: str,
         summary: dict | None = None,
         end_it_reached: bool = False,
+        seg_end_kind: str = "",
     ) -> None:
-        """段末摘要（**必须排在 `stop` 之前**送到子进程；收线时若没到会响亮一行）。"""
+        """段末摘要（**必须排在 `stop` 之前**送到子进程；收线时若没到会响亮一行）。
+
+        `seg_end_kind`（J2）：走**控制文件**（新子进程读它）+ **env 兜底**（父侧另带一份，
+        供子进程重启后仍能拿到；见 `_spawn` 的 `SEG_END_KIND_ENV`）。老快照子进程两个都不
+        认 ⇒ 静默丢这个键，而 hub 侧有**反推**兜底（从包里的 `plan.json` 读，见
+        `hub.task_pack.pack_seg_end_kind`）——不会因此丢一段。
+        """
+        kind = str(seg_end_kind or "")
+        self._seg_end_kind = kind
         fb = self._fallback
         if fb is not None:
             fb.submit_final(
-                it_end=it_end, state=state, summary=summary, end_it_reached=end_it_reached
+                it_end=it_end,
+                state=state,
+                summary=summary,
+                end_it_reached=end_it_reached,
+                seg_end_kind=kind,
             )
             return
         self._final_submitted = True
@@ -448,6 +470,7 @@ class DelivererProcess:
                 "state": str(state),
                 "summary": dict(summary or {}),
                 "end_it_reached": bool(end_it_reached),
+                "seg_end_kind": kind,
             }
         }
         self._append(dict(self._final_obj))

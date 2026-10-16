@@ -21,6 +21,7 @@ import {
 } from 'fs'
 import path from 'path'
 import { REPO_ROOT } from '../../core/paths'
+import { declaredCourseIters } from '../../stack/courses'
 import {
   bundleMetaMagic,
   bundleMetaSuffix,
@@ -336,23 +337,107 @@ export function taskBundleInfo(course: string): TaskBundleInfo {
   }
 }
 
+/** 段长的**硬上界**（python 侧 `common/manifest.py::RUN_MAX_ITERS_HARD_CAP` 的同名常量）。
+ *
+ *  跨语言契约：`dashboard/tests/server-api-task-bundle.test.ts` 读 python 源逐字对账
+ *  —— 两边漂开就是「预判说能导、真闸拒绝」（或者反过来：预放行一份必然失败的任务）。
+ *  它从「拒导闸」变成「段长」（J1）后仍有两处读者：`worker/plan.build_plan`（真闸）
+ *  与这里的静态预判（J4）。
+ */
+export const RUN_MAX_ITERS_HARD_CAP = 500
+
 /** 导出前的门（纯函数；返回非空 = 拒启原因）。
  *
  *  ★ 2026-09-22（课程错误隔离 + 随时导出）：**不再以「训练在跑（run_rl 锁被占）」拒导**——
  *  导出是只读快照（run_rl `--export-bundle` 不取 per-course 锁、不推进账本），
  *  开课后随时可导出/重导（离线整段由此可反复以最新进度为起点出包）。
  *  保留的拒绝理由：**没有起点权重**（包里必须有个起点，python 侧同判据）。
+ *
+ *  ★ 2026-10-16（J4，plan/offline-open-ended-iters-and-loud-export §3.4）：补一类
+ *  **不需要真导出就能判**的静态拒因——「无剩余轮次」与「轮数 > 硬上界」。它们原本只在
+ *  python 的启动期/轮内栅里拒（`loop_lifecycle.export_refusal` / `worker/plan.build_plan`），
+ *  而那意味着：点下去 → spawn → 烧一次 code-snapshot + 一次 `git push` + 约 150s 的轮内重试，
+ *  最后才在日志里报一句「拒发」（现场：y5-hit2 三次尝试两次白烧）。
+ *
+ *  判据与 python **同一锚**（评审 P1-4 点名的差一）：
+ *    · 启动期用 `self._start_it`（= `last_completed + 1`，`loop_lifecycle.py:361-367`）；
+ *    · 轮内用 `it - 1`（`loop_export.py:209` 传 `build_plan(it=it-1)`）——两者是**同一个起点**
+ *      的两种写法（`it` = `last_completed + 1`）。所以 TS 侧算 `剩余轮数 = iters - lastCompletedIt`，
+ *      而不是 `iters - (lastCompletedIt + 1)`（后者会多拒掉恰好剩一轮的课）。
+ *
+ *  不可知的输入（`declaredIters` 缺省/null）⇒ **不判**：课程文件读不到/没声明就放行，
+ *  真闸仍在 python 侧（预判只能多拦，不得多放也不得多拦）。
  */
-export function exportGuardReason(arg: { weightsExists: boolean }): string | null {
+export interface ExportGuardFacts {
+  /** 起点权重在不在（`tmp/<课程>/weights.json`）。 */
+  weightsExists: boolean
+  /** 课程文件声明的 `iters`（`stack/courses.ts::declaredCourseIters`）；`null`/缺省 = 不可知。 */
+  declaredIters?: number | null
+  /** 本机已完成的最后一轮（`training_log.jsonl` 的 `iteration.iter` 最大值；0 = 还没有）。 */
+  lastCompletedIt?: number
+}
+
+export function exportGuardReason(arg: ExportGuardFacts): string | null {
   if (!arg.weightsExists)
     return '没有起点权重（tmp/<课程>/weights.json）——先跑至少一轮，包里得有个起点'
+  const iters = arg.declaredIters
+  if (iters === null || iters === undefined) return null
+  if (iters <= 0) return null // J1：课程无限 ⇒ 开区间段（终点 = 段长），不再是拒因
+  const last = Math.max(0, Math.trunc(arg.lastCompletedIt ?? 0))
+  const remaining = iters - last
+  if (remaining <= 0) {
+    return (
+      `课程 iters=${iters} ∧ 本机已跑到 it${last}——**没有剩余轮次**，导出的包会是空的` +
+      '（云机会把它当活领走、跑 0 轮）。要接着跑请把课程的 iters 调大（新的一段）' +
+      '，或改用在线；只想把当前权重交出去，请走「导出权重/产物」'
+    )
+  }
+  if (remaining > RUN_MAX_ITERS_HARD_CAP) {
+    return (
+      `本段要跑 ${remaining} 轮（课程 iters=${iters} − 已跑 it${last}）> 硬上界 ` +
+      `${RUN_MAX_ITERS_HARD_CAP}——拒导（一份手写/损坏的计划不许把云机按一整天）。` +
+      `把课程的 iters 降到 ≤${last + RUN_MAX_ITERS_HARD_CAP}（或给节点降段长）再导`
+    )
+  }
   return null
 }
 
-/** 导出前的门（IO 壳：看权重在不在）。 */
+/** 本机已完成的最后一轮（账本 `tmp/<课程>/training_log.jsonl` 的 `iteration.iter` 最大值）。
+ *
+ *  为什么不用 `iters.ts::readIterMetrics`：那个读面为「各轮指标表」把整行铺开（带缓存），
+ *  而这里只需要一个数——导出预判每点一次就跑一次。读不到 / 坏行 ⇒ 0（不判，不抛）。
+ */
+export function lastCompletedIt(course: string): number {
+  let text: string
+  try {
+    text = readFileSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'), 'utf-8')
+  } catch {
+    return 0
+  }
+  let best = 0
+  for (const line of text.split('\n')) {
+    if (!line.trim()) continue
+    let ev: unknown
+    try {
+      ev = JSON.parse(line)
+    } catch {
+      continue // 半截行（被 kill）：跳过，不毒死判据
+    }
+    if (!ev || typeof ev !== 'object') continue
+    const row = ev as { event?: unknown; iter?: unknown }
+    if (row.event !== 'iteration') continue
+    const n = Number(row.iter)
+    if (Number.isFinite(n) && n > best) best = Math.trunc(n)
+  }
+  return best
+}
+
+/** 导出前的门（IO 壳：看权重在不在 + 课程声明的 iters 与账本已跑到哪）。 */
 export function exportGuard(course: string): string | null {
   return exportGuardReason({
     weightsExists: existsSync(path.join(REPO_ROOT, 'tmp', course, 'weights.json')),
+    declaredIters: declaredCourseIters(course),
+    lastCompletedIt: lastCompletedIt(course),
   })
 }
 

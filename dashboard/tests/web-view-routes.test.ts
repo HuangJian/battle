@@ -216,12 +216,21 @@ describe('NAV_ITEMS / NAV_GROUPS 结构约束（防路由表漂移）', () => {
   })
 
   it('link 项不带 page（独立页不属于本 bundle 的路由表）', () => {
+    // ★ 独立页的名单**数据驱动**（2026-10-16，plan/component-error-registry §5 P1-1）：原先这里
+    //   硬编码 `startsWith('/eval') || startsWith('/log/')` 与 `id === 'eval' ? 'eval' : 'log'`，
+    //   于是「加第 3 个独立页（/errors）」会撞红两个**别的页面**的断言 —— 那条红不是在守契约，
+    //   只是在数「有几个独立页」。判据改为：每个 link 项的 href 必须指向 `PAGES` 里某一个
+    //   **不在 route 面**的页面键（独立页）的规范路径。
+    const independentKeys = (Object.keys(PAGES) as (keyof typeof PAGES)[]).filter(
+      (k) => !NAV_ITEMS.some((n) => n.kind === 'route' && n.page === k),
+    )
     for (const n of NAV_ITEMS.filter((x) => x.kind === 'link')) {
       expect(n.page).toBeUndefined()
-      // /eval 与 /log/<key> 都必须真的在服务端有路由（server.ts）。
-      expect(n.href.startsWith('/eval') || n.href.startsWith('/log/')).toBe(true)
-      // 两个独立页的 href 必须与 PAGES 里的规范路径同源（导航项 ↔ 页面元信息不许各写一份）。
-      const key = n.id === 'eval' ? 'eval' : 'log'
+      // href 必须真的落在某个独立页的规范路径上（= 服务端有路由，见 server.ts）。
+      const key = independentKeys.find((k) => n.href.startsWith(PAGES[k].path))
+      expect(key, `${n.id} 的 href ${n.href} 不对应任何独立页`).toBeDefined()
+      if (!key) continue
+      // 导航项 ↔ 页面元信息不许各写一份（href 与 PAGES 里的规范路径同源）。
       expect(n.href.startsWith(PAGES[key].path)).toBe(true)
     }
   })

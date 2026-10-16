@@ -24,6 +24,7 @@
 import { courseEnabled } from '../../stack/courses'
 import {
   TASK_BUNDLE_BUSY_KEY,
+  backfillHubRun,
   exportGuard,
   launchTaskBundleExport,
   newestCodeMtimeMs,
@@ -209,7 +210,11 @@ export function ensureFreshTaskBundle(course: string): AutoBundleResult {
  *  （`_claim_without_pack`）→ 都经 `task_pack.trigger_auto_handoff()` POST 到这里。
  *  控制台不可达 ⇒ hub 降级为手动（半状态由 `offline_stalled` 告警兜住）。
  */
-export async function autoOfflineHandoff(course: string): Promise<ActionResult> {
+export async function autoOfflineHandoff(
+  course: string,
+  /** 回灌腿的注入点（测试传替身 ⇒ 不起 python；生产缺省就是真跑）。 */
+  deps: { backfill?: typeof backfillHubRun } = {},
+): Promise<ActionResult> {
   const c = String(course ?? '').trim()
   if (!c) return { ok: false, message: '需要 course（hub 的自动交接是按课触发的）' }
   if (!courseEnabled(c)) {
@@ -219,6 +224,12 @@ export async function autoOfflineHandoff(course: string): Promise<ActionResult> 
     }
   }
   const valve = Boolean(process.env.BCITY_NO_AUTO_TASK_BUNDLE)
+  // ★ B0 回灌腿（plan §3.2.1 定案①）：**先回灌、后判包**。
+  //   顺序是承重的：段末那一刻盘上只有**刚跑完那一段**的包（旧 sha），而本机账本停在段起点
+  //   ⇒ 不先回灌的话规则表 ④ 只说「已有任务包，云机可直接取」，于是下一段永远不从段末起。
+  //   回灌推进本机账本/权重之后，同一张规则表自然命中 ④'（包比权重旧 ⇒ 作废重导）。
+  //   幂等由 python 侧保证（轮次目录只补缺、账本行按 it 去重、已到段末 ⇒ 直接说无需回灌）。
+  const backfill = await (deps.backfill ?? backfillHubRun)(c)
   const guardReason = exportGuard(c)
   const bundle = autoBundleDecision(bundleFacts(c))
   const head = `${c} 自动交接：云机已认领（hub 的 pending_export）——控制台只负责把任务包导出来`
@@ -229,6 +240,7 @@ export async function autoOfflineHandoff(course: string): Promise<ActionResult> 
         ok: false,
         message: [
           head,
+          backfill.note,
           `任务包导出未能启动（${launched.message}）——云机会等新包直到停滞告警`,
           '三条出路：TPU 重连 / 手工导入结果包 / 停课',
         ]
@@ -236,12 +248,13 @@ export async function autoOfflineHandoff(course: string): Promise<ActionResult> 
           .join('；'),
       }
     }
-    return { ok: true, message: [head, launched.message].filter(Boolean).join('；') }
+    return { ok: true, message: [head, backfill.note, launched.message].filter(Boolean).join('；') }
   }
   // 没导：规则表说不用导（已有包 / 上一次导出还在跑 / 逃生阀）——都是正常结局；
-  // `guardReason` 非空则是「导不了」（缺起点权重）：那半状态靠 hub 的 stalled 告警兜。
+  // `guardReason` 非空则是「导不了」（静态拒因：缺起点权重 / 无剩余轮次 / 轮数 > 硬上界）：
+  // 那半状态靠 hub 的 stalled 告警与 `export-status.json` 兜。
   return {
     ok: valve || guardReason === null,
-    message: [head, bundle.note].filter(Boolean).join('；'),
+    message: [head, backfill.note, bundle.note].filter(Boolean).join('；'),
   }
 }

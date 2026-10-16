@@ -263,7 +263,8 @@ button.tc-btn--danger {
   border-color: var(--red);
   color: var(--red);
 }
-button.tc-btn--sm {
+button.tc-btn--sm,
+a.tc-btn--sm {
   padding: 2px 8px;
   font-size: var(--fs-sm);
 }
@@ -3761,3 +3762,98 @@ a.tc-btn {
 /* 2026-10-04：PPO 的**逐行列表 + 份额条**（`.tc-contrib-ppolist/-pporow/-ppofoot`）已删 ——
    用户口径「不需要百分比 progress bar，像采样合计一样缩略显示即可」。份额仍在（缩略行的
    价值就是「谁占多少」），去掉的只是进度条与逐行列式排版；两者现在是对称的两行。 */
+
+/* ── 组件错误登记表详情页（/errors；plan/component-error-registry §4.6） ────────────────
+   第 4 份 bundle 的独立页，样式与 `.tc-log` 页同档：外层卡片 + 等宽 detail。
+   只读纪律不涉及样式（只读的边界是动作）。 */
+.tc-errors {
+  padding: var(--sp-4);
+}
+.tc-errors__head {
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-2);
+  margin-bottom: var(--sp-3);
+}
+.tc-errors__title {
+  margin: 0;
+  font-size: var(--fs-lg);
+}
+.tc-errors__sub {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.tc-errors__acts {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  flex-wrap: wrap;
+}
+.tc-errors__filter {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--sp-1);
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.tc-errors__err {
+  color: var(--red);
+  font-size: var(--fs-sm);
+}
+.tc-errors__empty {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}
+.tc-errors__table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--fs-sm);
+}
+.tc-errors__table th {
+  text-align: left;
+  color: var(--muted);
+  font-weight: 500;
+  border-bottom: 1px solid var(--line);
+  padding: var(--sp-1) var(--sp-2);
+}
+.tc-errors__table td {
+  border-bottom: 1px solid var(--border);
+  padding: var(--sp-1) var(--sp-2);
+  vertical-align: top;
+}
+.tc-errors__row {
+  cursor: pointer;
+}
+.tc-errors__row:hover {
+  background: var(--row-hover);
+}
+/* 已确认的行**不淡出**：错误列表的价值是「发生过什么」，淡出会让操作员以为它消失了。 */
+.tc-errors__row--acked td:last-child {
+  color: var(--muted);
+}
+.tc-errors__sev {
+  white-space: nowrap;
+}
+.tc-errors__msg {
+  word-break: break-all;
+}
+.tc-errors__detail-row td {
+  background: var(--gray-bg);
+}
+.tc-errors__detail {
+  margin: 0 0 var(--sp-2);
+  padding: var(--sp-2);
+  max-height: 320px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  font-size: var(--fs-xs);
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: var(--r-1);
+}
+.tc-errors__acked {
+  color: var(--muted);
+  font-size: var(--fs-sm);
+}

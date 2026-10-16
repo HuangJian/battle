@@ -37,6 +37,7 @@ from common.protocol import AUTH_HEADER, OFFLINE_ARTIFACT_PATH, OFFLINE_RESULT_P
 from remote import deliver_proc as dp
 from remote.artifacts import atomic_write_json
 from remote.deliver_proc import DelivererProcess
+from remote.offline_deliver import SEG_END_KIND_ENV
 from tests.remote.test_offline_deliver import RUN, _make_artifacts  # type: ignore
 
 TOKEN = "sekret-proc"
@@ -307,7 +308,11 @@ def test_control_file_is_consumed_incrementally_and_half_lines_survive(
             lambda: int(d._child_status().get("ctl_offset") or 0) >= len(partial), timeout=10.0
         ), f"子进程没读到半行：{st.logs}"
         with ctl.open("ab") as f:
-            f.write(b'lete", "summary": {"last_it": 7}, "end_it_reached": true}}\n')
+            # 段末三态（J2）也走这一行：它是**新键穿控制文件协议**的现场（老快照子进程不认它）
+            f.write(
+                b'lete", "summary": {"last_it": 7}, "end_it_reached": true,'
+                b' "seg_end_kind": "open"}}\n'
+            )
             f.flush()
         assert _wait_until(lambda: len(hub.result_bodies()) == 1, timeout=20.0), (
             f"半行 final 没被拼起来送达：{st.logs}"
@@ -315,8 +320,50 @@ def test_control_file_is_consumed_incrementally_and_half_lines_survive(
         got = hub.result_bodies()[0]
         assert got["it_end"] == 7 and got["end_it_reached"] is True
         assert got["summary"] == {"last_it": 7}
+        assert got["seg_end_kind"] == "open"
     finally:
         d.close(timeout=10.0)
+
+
+def test_old_control_line_without_segment_kind_is_tolerated(
+    tmp_path: Path, hub: _HubStub, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """J2 容忍读 + 父侧兜底：控制行**不带** `seg_end_kind`（老父侧）时看 env（父侧另带那份）。
+
+    两个方向一起钉：
+      * 带 env ⇒ 子进程仍然报出正确的三态（重启后那一行已被消费的场景）；
+      * 都不带 ⇒ 空串（**不是**报错、也不是猜一个值），hub 那边退回从包里反推。
+    """
+    monkeypatch.setenv(SEG_END_KIND_ENV, "segment")
+    st = _State(tmp_path, hub)
+    d = st.d
+    d.start()
+    try:
+        assert _wait_until(lambda: bool(d.status()["ctl"])), st.logs
+        ctl = Path(str(d.status()["ctl"]))
+        # 老形状的一行：只有四格（没有 `seg_end_kind`）
+        with ctl.open("ab") as f:
+            f.write(b'{"final": {"it_end": 3, "state": "complete", "end_it_reached": true}}\n')
+            f.flush()
+        assert _wait_until(lambda: len(hub.result_bodies()) == 1, timeout=20.0), st.logs
+        assert hub.result_bodies()[0]["seg_end_kind"] == "segment", "env 兜底那条路没走"
+    finally:
+        d.close(timeout=10.0)
+    # 两个通道都没有 ⇒ 空串（“未知”，不是“非段末”也不猜）
+    monkeypatch.delenv(SEG_END_KIND_ENV, raising=False)
+    st2 = _State(tmp_path / "b", hub)
+    d2 = st2.d
+    d2.start()
+    try:
+        assert _wait_until(lambda: bool(d2.status()["ctl"])), st2.logs
+        ctl2 = Path(str(d2.status()["ctl"]))
+        with ctl2.open("ab") as f:
+            f.write(b'{"final": {"it_end": 3, "state": "complete", "end_it_reached": true}}\n')
+            f.flush()
+        assert _wait_until(lambda: len(hub.result_bodies()) == 2, timeout=20.0), st2.logs
+        assert hub.result_bodies()[1]["seg_end_kind"] == ""
+    finally:
+        d2.close(timeout=10.0)
 
 
 def test_restart_does_not_replay_consumed_commands(tmp_path: Path, hub: _HubStub) -> None:

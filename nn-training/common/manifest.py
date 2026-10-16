@@ -242,8 +242,13 @@ MANIFEST_RUN_EXTRA: tuple[str, ...] = (*MANIFEST_ITER_EXTRA, "plan_sha256")
 #: 半离线轮写进 shard manifest 的 `node` 标签（与 `node`/`local` 区分：可溯源到
 #: 「这一批局是云端自主段跑的」）。
 RUN_NODE_LABEL = "run"
-#: 计划的**硬上界**（防一份手写/损坏的计划把节点按在机上一整天）。命令行可用
-#: `--run-max-iters` 再降；计划的 end_it 一律按其与 iters_total 的交集钳制。
+#: 计划的**硬上界**（防一份手写/损坏的计划把节点按在机上一整天）。
+#: ★ 2026-10-15/16（J1/J4，plan/offline-open-ended-iters-and-loud-export）：它的角色从
+#: 「拒导闸」变成「**段长**」——课程无限（`iters<=0`）时 `end_it = it + 段长`，而段长
+#: 缺省就是这个值。命令行可用 `--run-max-iters` **再降**（此前本注释说的那个旗标全仓
+#: 没有 argparse，D1 补上了；它**只能降不能抬**）；计划的 end_it 一律按其与 iters_total
+#: 的交集钳制。同值常量必须与控制台静态预判那份一致（`dashboard/src/server/bundles/
+#: export.ts::RUN_MAX_ITERS_HARD_CAP`，两边各有对账用例）。
 RUN_MAX_ITERS_HARD_CAP = 500
 
 def normalize_manifest(m: dict) -> dict:

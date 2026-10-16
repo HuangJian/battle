@@ -385,6 +385,13 @@ export interface OfflineResultView {
   state: string
   /** 云机自报**跑满计划区间**（`end_it_reached`；只有它才是「已完成」）。 */
   endItReached: boolean
+  /** 段末三态（J2，`open`/`course`/`segment`；`''` = 旧 hub/旧云机/非段末）。
+   *
+   *  为什么必须有它（评审 P1-3）：`endItReached` 只说「计划区间跑完了」，而**无限课的每
+   *  一段**都满足它 ⇒ 每段导入都亮一次「已完成」灰横幅（而课根本没完）。转交
+   *  `run_complete` 的判据因此是「`endItReached` ∧ 不是 `open`/`segment`」——
+   *  `''`（不可知）按旧行为转交（旧 hub 与旧云机的组合不得因此静默不打横幅）。 */
+  segEndKind: string
   /** hub 收到这份摘要的时刻（epoch 秒；0 = 旧 hub 不带）。 */
   receivedAt: number
 }
@@ -472,6 +479,8 @@ export function parseOfflineResults(
         itEnd: typeof r.it_end === 'number' && Number.isFinite(r.it_end) ? r.it_end : 0,
         state: typeof r.state === 'string' ? r.state : '',
         endItReached: r.end_it_reached === true,
+        // 段末三态（J2）：缺/非字符串 ⇒ `''`（旧 hub）——判据侧按「不可知 = 旧行为」。
+        segEndKind: typeof r.seg_end_kind === 'string' ? r.seg_end_kind : '',
         receivedAt: num(r.received_at),
       }
     }

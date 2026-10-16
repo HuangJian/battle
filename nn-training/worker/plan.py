@@ -183,6 +183,11 @@ def build_plan(
     node_label: str = RUN_NODE_LABEL,
     template_wver: str = "",
     volume: dict | None = None,
+    #: 段长上界的**再降档**（0 = 用 `RUN_MAX_ITERS_HARD_CAP`；>0 = 取更小的那个）。
+    #: 命令行 `--run-max-iters`（`common/manifest.py` 的注释一直在说这个旋钮，而它此前
+    #: 只有注释没有 argparse——D1 把它补上）。语义是**只能降不能抬**：硬上界是防「手写/
+    #: 损坏的计划把节点按一整天」的那道闸，抬它等于拆闸（本计划 §6 已否决）。
+    max_segment_iters: int = 0,
     log=lambda msg: None,
 ) -> dict:
     """组装计划（hub 侧）。`it` = 计划区间左端点 = **本 job 要跑的上一轮**
@@ -220,12 +225,15 @@ def build_plan(
     it = int(it)
     iters_total = int(iters_total)
     span = int(max_iters or 0)
+    # 段长上界：硬上界与 `--run-max-iters` 的交集（**只减不增**——后者只能把段变短）。
+    raw_cap = int(max_segment_iters or 0)
+    cap = raw_cap if 0 < raw_cap < RUN_MAX_ITERS_HARD_CAP else RUN_MAX_ITERS_HARD_CAP
     open_ended = iters_total <= 0
     if open_ended:
         # 开区间段（J1）：终点由**段长**定，不是课程预算（0 = 无限，没有预算可交集）。
-        # 缺省段长 = 硬上界本身（= 段长上界）；给了正 max_iters 就是它，噪声由下面那条
+        # 缺省段长 = 段长上界本身；给了正 max_iters 就是它，噪声由下面那条
         # `end_it - it > cap` 拦（与有限模式同一条）。
-        end_it = it + (span if span > 0 else RUN_MAX_ITERS_HARD_CAP)
+        end_it = it + (span if span > 0 else cap)
     else:
         end_it = iters_total if span <= 0 else min(iters_total, it + span)
     if end_it <= it:
@@ -233,9 +241,12 @@ def build_plan(
             f"build_plan: it={it} 之后没有可自主跑的轮次（iters_total={iters_total}，"
             f"max_iters={max_iters}）——这种情况应发 kind=iter（单轮）而不是 kind=run"
         )
-    if end_it - it > RUN_MAX_ITERS_HARD_CAP:
+    if end_it - it > cap:
+        # 文案里的「硬上界」是既有用例的锚（既有断言逐字匹配它）；`cap` 是被
+        # `--run-max-iters` 降过档后的**生效值**，两者不同时在后面补一句。
         raise ProtocolError(
-            f"build_plan: 计划覆盖 {end_it - it} 轮 > 硬上界 {RUN_MAX_ITERS_HARD_CAP}——拒发"
+            f"build_plan: 计划覆盖 {end_it - it} 轮 > 硬上界 {cap}——拒发"
+            + ("（--run-max-iters 已降档）" if cap != RUN_MAX_ITERS_HARD_CAP else "")
         )
     plan = {
         "proto": PLAN_PROTO,

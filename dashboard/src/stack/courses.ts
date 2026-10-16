@@ -62,6 +62,39 @@ export function isBcCourse(course: string): boolean {
   }
 }
 
+/** 课程**文件里声明的 `iters`**（`curricula/<课>.jsonc` 的 `iters` 键）。
+ *
+ *  回执：`null` = **不可知**（文件不在 / 解析失败 / 没这个键）——调用方**不判**，绝不把它
+ *  当 0（0 是 J1 之后的合法且不同的一档：课程无限）。
+ *
+ *  为什么重建它（2026-10-16，plan/offline-open-ended-iters-and-loud-export §3.4 D1）：
+ *  `declaredCourseIters()` 在 ★M4 被删（它当时唯一的使用者 = 「离线开课要求 iters>0」那道
+ *  预校验），而 J4 的静态预判（「无剩余轮次 / 轮数 > 硬上界 500」**在点击那一刻**就被拒，
+ *  不 spawn、不烧快照、不 push）必须重新读它。
+ *
+ *  事实来源只能是课程文件（**D14**：机器侧旋钮永不进 curricula、`iters` 永不进 rl-config）
+ *  —— 与 python 侧 `biz/config.py` / `loop_lifecycle.export_refusal` 读的是同一份。
+ *  住本模块（而不是 `actions/course-lifecycle.ts`）的理由与 `COURSE_ENABLE_MARKER` 同一口径：
+ *  课程域共享判据的家、不断环（`actions/course-lifecycle` 已 import `course-mode`，从
+ *  `bundles/export` 反向 import 它会成环）。
+ */
+export function declaredCourseIters(course: string): number | null {
+  const c = String(course ?? '').trim()
+  if (!c) return null
+  for (const name of [`${c}.jsonc`, `${c}.bc.jsonc`]) {
+    let parsed: { iters?: unknown }
+    try {
+      parsed = readJsoncFile(path.join(curriculaDir(), name)) as { iters?: unknown }
+    } catch {
+      continue // 文件不在 / 语法坏：换下一个候选名；都没有 ⇒ null（不判）
+    }
+    const raw = parsed.iters
+    const n = typeof raw === 'number' ? raw : Number(raw)
+    return Number.isFinite(n) ? Math.trunc(n) : null
+  }
+  return null
+}
+
 // ────────────────────────── 开课标记（发现判据的显式闸） ──────────────────────────
 
 /** 「已开课」标记文件名（**必须与 python 侧 `remote/protocol.py::COURSE_ENABLE_MARKER` 同名**）。

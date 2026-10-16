@@ -63,27 +63,14 @@ import {
   type PageKey,
   type RefreshSec,
 } from '../view'
+import { readLocal, writeLocal } from './lib/storage'
 
 export interface AppProps {
   initial: ConsoleBootstrap
 }
 
-function readLocal(key: string): string | null {
-  try {
-    if (typeof localStorage === 'undefined') return null
-    return localStorage.getItem(key)
-  } catch {
-    return null
-  }
-}
-
-function writeLocal(key: string, v: string): void {
-  try {
-    if (typeof localStorage !== 'undefined') localStorage.setItem(key, v)
-  } catch {
-    /* ignore */
-  }
-}
+// `readLocal`/`writeLocal` 已抽到 `lib/storage.ts`（2026-10-16）：`/errors` 页要读写**同一份**
+// `TC_ALERT_ACKS`，两处各写一遍这两行就会漂（症状：「ack 了但红条还在」）。
 
 /** 刷新间隔默认值——必须与 SSR 首帧一致（SSR 无 localStorage，恒为 300）。 */
 const DEFAULT_INTERVAL: RefreshSec = 300
@@ -534,6 +521,9 @@ export function App({ initial }: AppProps) {
             loopQueueRows: stateView?.loopQueue?.rows ?? null,
             // 本机磁盘水位（plan/self-node-disk-alert）：与节点表同源（FleetProbes 的 self 行）。
             selfDisk: stateView?.selfDisk ?? null,
+            // 组件错误登记表的轻量投影（plan/component-error-registry §4.5，第 9 类）：
+            // 未 ack 数与 severity 在**客户端**算（acks 住 localStorage）⇒ 服务端只给逐条投影。
+            errors: stateView?.errors ?? null,
             readOnly,
             roDismissed: roBannerDismissed,
             now: Date.now(),

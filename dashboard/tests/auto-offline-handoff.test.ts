@@ -53,6 +53,7 @@ import {
   ensureFreshTaskBundle,
 } from '../src/server/actions/auto-offline-handoff'
 import {
+  backfillHubRun,
   CODE_EXCLUDE_DIRS,
   CODE_EXCLUDE_FILES,
   CODE_SNAPSHOT_MAGIC,
@@ -282,6 +283,42 @@ describe('autoOfflineHandoff 的接线（假盘；不起子进程）', () => {
       expect(existsSync(p)).toBe(true)
     } finally {
       rmSync(tmpCourseDir(NO_WEIGHTS), { recursive: true, force: true })
+    }
+  })
+
+  it('B0：回灌在**判包之前**跑（否则规则表只会说「已有任务包，云机可直接取」）', async () => {
+    // 顺序是承重的：段末那一刻盘上只有**刚跑完那一段**的旧包，而本机账本停在段起点 ——
+    // 回灌把账本推进到段末之后，同一张规则表才命中 ④'（包比权重旧 ⇒ 作废重导）。
+    seedPack(WITH_PACK)
+    const calls: string[] = []
+    try {
+      const r = await autoOfflineHandoff(WITH_PACK, {
+        backfill: async (course: string) => {
+          calls.push(course)
+          return { ok: true, ran: true, note: '已回灌段末产物 seg-1（it1 → it3）——本机账本已推进' }
+        },
+      })
+      expect(calls).toEqual([WITH_PACK])
+      expect(r.message).toContain('已回灌段末产物')
+    } finally {
+      rmSync(tmpCourseDir(WITH_PACK), { recursive: true, force: true })
+    }
+  })
+
+  it('B0：逃生阀置位 ⇒ 真回灌路径也不起 python（本机预演/用例共用同一个阀）', async () => {
+    process.env.BCITY_NO_AUTO_TASK_BUNDLE = '1'
+    const course = '__ahand-valve-backfill__'
+    const runDir = path.join(REPO_ROOT, 'tmp', course, 'deliver', 'seg-1')
+    try {
+      mkdirSync(path.join(runDir, 'it-003'), { recursive: true })
+      writeFileSync(path.join(runDir, 'it-003', 'weights.json'), '{}', 'utf-8')
+      const r = await backfillHubRun(course, (() => {
+        throw new Error('逃生阀下不该调 python')
+      }) as never)
+      expect(r.ran).toBe(false)
+      expect(r.note).toContain('逃生阀')
+    } finally {
+      rmSync(tmpCourseDir(course), { recursive: true, force: true })
     }
   })
 

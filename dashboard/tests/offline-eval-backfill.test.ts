@@ -100,7 +100,14 @@ function runView(its: number[]): OfflineRunView {
 }
 
 function resultView(over: Partial<OfflineResultView> = {}): OfflineResultView {
-  return { itEnd: 0, state: 'complete', endItReached: false, receivedAt: 0, ...over }
+  return {
+    itEnd: 0,
+    state: 'complete',
+    endItReached: false,
+    segEndKind: '',
+    receivedAt: 0,
+    ...over,
+  }
 }
 
 function adminOf(
