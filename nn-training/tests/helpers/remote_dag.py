@@ -232,22 +232,29 @@ LAYERS: dict[str, int] = {
     # 直接依赖，也是本账本里唯一一条 `remote → worker` 的顶层边。
     "worker.iter_rollout": 1,
     "remote.job_fs": 1,
-    "remote.offline_deliver": 1,
+    # 备份抽屉的**拷贝策略**（2026-10-16，`plan/offline-backfeed-resilience` §3）：从
+    # `offline_deliver` 整块搬出（单文件代码行 ≥ 1000 当场红）。依赖面 = `remote.artifacts`(L0，
+    # `IT_PREFIX`/`METRICS_NAME`/`EVAL_LOG_NAME`) + `remote.offline_deliverable`(L0，锚点名单)
+    # ⇒ 拓扑秩 **L1**。⚠ 代价是诚实的：`offline_deliver` 站在它上面 ⇒ 升到 L2（连带它的两个
+    # 进程模式兄弟）。
+    "remote.backup_drawer": 1,
+    # 补传腿本体（投递/探活/账本）：最深依赖是 `backup_drawer`(L1) ⇒ 拓扑秩 **L2**。
+    "remote.offline_deliver": 2,
     # 补传腿的进程模式（2026-10-07，`plan/offline-deliver-isolation.plan.md` P1）：
     #   * `deliver_proc` = 父侧代理 `DelivererProcess` + 共同接口 + 工厂；
     #   * `deliver_worker` = 子进程入口（`python -m remote.deliver_worker`）。
-    # 两个都只依赖 `offline_deliver`(L1) 与 stdlib ⇒ 拓扑秩 **L2**（2 已被 `offline_eval`/
-    # `http`/`push_dispatch` 占用，故不产生层号空洞）。为什么另立模块而不是塞进
-    # `offline_deliver`：`tests/test_python_loc_budget.py`（单文件代码行 < 1000）当场变红。
+    # 两个都只依赖 `offline_deliver`(L2) 与 stdlib ⇒ 拓扑秩 **L3**（2026-10-16 随抽屉下沉上移
+    # 一层；L3 早已被 `download`/`job_lifecycle` 占用，故不产生层号空洞）。为什么另立模块而不是
+    # 塞进 `offline_deliver`：`tests/test_python_loc_budget.py`（单文件代码行 < 1000）当场变红。
     # ⚠ `deliver_worker` **不是** standalone 引导文件：它住在 `code.zip` 里（由
     # `DelivererProcess` 用 `python -m` 拉起），不得进 `STANDALONE_BOOT_MODULES`。
-    "remote.deliver_proc": 2,
-    "remote.deliver_worker": 2,
+    "remote.deliver_proc": 3,
+    "remote.deliver_worker": 3,
     "remote.offline_eval": 2,
     "remote.wire": 1,
     "remote.http": 2,
     # 半离线交接面（第十三刀）：校验 / 取包播种 / `RunContext` / 评估装配；依赖最深
-    # `offline_deliver`(L1) ⇒ L2。
+    # `offline_deliver`(L2) ⇒ L5（`plan_handoff` 自己还有更深的面：引擎与 hub 侧读面）。
     "remote.plan_handoff": 5,
     "remote.push_client": 1,
     "remote.bc_job": 4,

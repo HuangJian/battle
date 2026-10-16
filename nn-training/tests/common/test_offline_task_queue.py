@@ -1239,12 +1239,20 @@ def test_progress_constants_track_the_wire_and_the_hold_window() -> None:
 
 
 def _pinger(
-    hub: str, lease: str = "lk", *, post: Any = None, interval: float = 3600.0, token: str = "tok"
+    hub: str,
+    lease: str = "lk",
+    *,
+    post: Any = None,
+    interval: float = 3600.0,
+    token: str = "tok",
+    clock: Any = None,
+    reclaim: Any = None,
 ) -> tuple[Any, list[str]]:
-    """装一个打点层（`post` 是假 HTTP；None = 真 `_post_json`/真网络）→ `(detach, log 行)`。"""
+    """装一个打点层（`post`/`clock`/`reclaim` 是注入点；None = 真实现）→ `(detach, log 行)`。"""
     lines: list[str] = []
     detach = offline_boot.install_progress_pinger(
-        hub, token, "c5-gae", lease, lines.append, interval=interval, post=post
+        hub, token, "c5-gae", lease, lines.append, interval=interval, post=post, clock=clock,
+        reclaim=reclaim,
     )
     return detach, lines
 
@@ -1319,8 +1327,13 @@ def test_progress_ping_409_outcomes_stop_pinging() -> None:
         assert any(needle in ln for ln in lines), (want, lines)
 
 
-def test_progress_ping_gives_up_after_the_failure_limit_without_touching_training() -> None:
-    """连不上（HTTP 0）不是什么大事：几拍之后停打点、留一行；训练与租约交给心跳兜。"""
+def test_progress_ping_degrades_after_the_failure_limit_without_touching_training() -> None:
+    """连不上（HTTP 0）不是什么大事：连丢 `PROGRESS_FAIL_LIMIT` 拍 ⇒ **降频**（不再永久哑）。
+
+    2026-10-16（评审 F1/plan §2.2-2）：旧口径是「停打点」；现场形状是抖动盖住 ~1 分钟就把它
+    打死一整段 ⇒ hub 900s 后判 hold stale（权重到了也不推活动起点）。降频窗内一次网都不出，
+    但**到点会自己回来**（下一条用例），段末结局仍是 `unreachable`（= 最后一次没成）。
+    """
     from common import progress_hook
 
     hits: list[int] = []
@@ -1329,14 +1342,95 @@ def test_progress_ping_gives_up_after_the_failure_limit_without_touching_trainin
         hits.append(1)
         return 0, {}
 
-    detach, lines = _pinger("http://hub", post=fake_post, interval=0.0)
+    detach, _lines = _pinger("http://hub", post=fake_post, interval=0.0)
     try:
         for _ in range(offline_boot.PROGRESS_FAIL_LIMIT + 2):
             assert progress_hook.report("iter", done=1, total=3) is False
     finally:
+        # 结局仍是「最后一次没成（unreachable）」——不是「停用」那一档：降频窗过后会自己回来
+        # （下一条用例就是那个回来），所以这里判**次数**与**结局**，不判日志措辞。
         assert detach() == "unreachable"
-    assert len(hits) == offline_boot.PROGRESS_FAIL_LIMIT
-    assert any("停打点" in ln for ln in lines), lines
+    assert len(hits) == offline_boot.PROGRESS_FAIL_LIMIT, "降频窗内不再出门"
+
+
+def test_progress_ping_resumes_after_the_cooldown_and_clears_the_outcome() -> None:
+    """降频窗到点 ⇒ 自动回来；**下一个成功把结局复位**（本段不再报 unreachable）。"""
+    from common import progress_hook
+
+    clock = [1000.0]
+    box = {"code": 0}
+    hits: list[int] = []
+
+    def fake_post(url: str, token: str, log: Any, *, timeout: float = 0.0) -> tuple[int, dict]:
+        hits.append(1)
+        return int(box["code"]), {}
+
+    detach, _lines = _pinger("http://hub", post=fake_post, interval=0.0, clock=lambda: clock[0])
+    try:
+        for _ in range(offline_boot.PROGRESS_FAIL_LIMIT):
+            progress_hook.report("iter", done=1, total=3)
+        assert len(hits) == offline_boot.PROGRESS_FAIL_LIMIT
+        clock[0] += offline_boot.PROGRESS_COOLDOWN_SEC[0] - 1.0
+        assert progress_hook.report("iter", done=2, total=3) is False
+        assert len(hits) == offline_boot.PROGRESS_FAIL_LIMIT, "窗内不出门"
+        # 窗过 + 隧道回来 ⇒ 恢复发报，且结局复位
+        box["code"] = 200
+        clock[0] += 2.0
+        assert progress_hook.report("iter", done=3, total=3) is True
+        assert len(hits) == offline_boot.PROGRESS_FAIL_LIMIT + 1, "窗过 ⇒ 真的又出门了（不只改了结局）"
+    finally:
+        assert detach() == "", "成功过就不该再报 unreachable"
+
+
+def test_progress_ping_reclaims_the_lease_on_409_expired() -> None:
+    """409 `expired`/`taken` ⇒ 重新领租约（`reclaim`）后换 URL 继续报，**不再整段哑**（plan §4.2-2）。"""
+    from common import progress_hook
+
+    seen: list[str] = []
+    box: dict[str, Any] = {"code": 409, "body": {"expired": True}}
+    calls = [0]
+
+    def fake_post(url: str, token: str, log: Any, *, timeout: float = 0.0) -> tuple[int, dict]:
+        seen.append(url)
+        return int(box["code"]), dict(box["body"])
+
+    def fake_reclaim() -> str:
+        calls[0] += 1
+        return "lk2"
+
+    detach, _lines = _pinger(
+        "http://hub", post=fake_post, interval=0.0, reclaim=fake_reclaim
+    )
+    try:
+        assert progress_hook.report("iter", done=1, total=3) is False
+        assert calls[0] == 1, "409 expired ⇒ 领一次"
+        box["code"], box["body"] = 200, {}
+        assert progress_hook.report("iter", done=2, total=3) is True
+    finally:
+        assert detach() == "", "重新领到租约 ⇒ 结局不该是 expired/taken"
+    assert seen[0].endswith("lease=lk") and seen[1].endswith("lease=lk2"), seen
+
+
+def test_progress_ping_still_gives_up_when_reclaim_fails() -> None:
+    """`revoked` 是人的意志；`expired` 而重新领也拿不到 ⇒ 停（但先响亮说清原因）。"""
+    from common import progress_hook
+
+    box: dict[str, Any] = {"code": 409, "body": {"revoked": True}}
+    hits: list[int] = []
+
+    def fake_post(url: str, token: str, log: Any, *, timeout: float = 0.0) -> tuple[int, dict]:
+        hits.append(1)
+        return int(box["code"]), dict(box["body"])
+
+    detach, _lines = _pinger(
+        "http://hub", post=fake_post, interval=0.0, reclaim=lambda: ""
+    )
+    try:
+        assert progress_hook.report("iter", done=1, total=3) is False
+        assert progress_hook.report("iter", done=2, total=3) is False
+    finally:
+        assert detach() == "revoked"
+    assert len(hits) == 1, "revoked ⇒ 一次都不再打扰 hub"
 
 
 def test_progress_pinger_detach_restores_a_previous_registration() -> None:

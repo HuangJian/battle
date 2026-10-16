@@ -6970,3 +6970,96 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   读数 additive + CLI 逃生门），既有「重导同名 run」用例改写为新语义（逐轮 merge，不再整目录替换）；
   nn python 门禁全绿（ruff+mypy+pytest tests/ e2e/：4535 passed / 10 skipped）。
   **未落地**：控制台 message 里的「新增 X 轮、跳过 Y 轮」（plan §8.2-4，G 片）与 §4 的删除/自愈面。
+
+## §2026-10-16-goalnn-offline-legs-revive（两条观测/补传腿都不许「一停到底」）
+
+- **来源**：`plan/offline-backfeed-resilience.plan.md` §2.2-2 / §4.2-1/2（评审 F1/F2）· 现场报告
+  `reports/y20-dist2-offline-backfeed-20261016.md`（「补传 27 轮 0 送达」「进度冻在 it125」）。
+- **定案一（补传腿：401 停用要能复活）**：`_disable` 加 `DISABLE_COOLDOWN_SEC = 600` 冷却 + 到点
+  `_maybe_revive()` 解封并**逼一次真探活**；探活**失败**的负缓存从 60s 收到 `PROBE_FAIL_TTL_SEC = 15`
+  ——「隧道刚回来」这段最该补投的时间不该被一个平坦的 60s 负缓存盖掉。当拍仍不重试（D9 闭锁口径不变）。
+- **定案二（打点腿：连不上 = 降频，不是停）**：连丢 `PROGRESS_FAIL_LIMIT` 拍改进降频窗
+  `PROGRESS_COOLDOWN_SEC = (240, 480, 900)`（封顶），窗过自动再试，**下一个成功复位计数与结局**；
+  段末结局仍是 `unreachable`（= 最后一次没成），只有 `revoked` 真停。
+- **定案三（409 `expired`/`taken` ⇒ 重新领租约）**：`install_progress_pinger(..., reclaim=…)` 交给
+  `offline_boot._reclaim_lease`（同机重领自己的课，hub 侧 `mine` 优先）；领不到才带着原因停。
+- **备选与否决**：① 指数退避到年级 —— 否（F2：抖动窗口按秒算）；② 409 一律停（旧口径）—— 否（现场就是
+  租约 TTL 到期/被抢了一次，而整段动线跟着哑）；③ 401 每轮重试 —— 否（bad token 重试无意义，还会被
+  D9 封 IP）。
+- **后果**：`tests/common/test_offline_task_queue.py` 的 pinger 用例改写（连丢 ⇒ 降频 + 窗过恢复 + reclaim），
+  `tests/remote/test_offline_deliver.py` 加冷却复活用例。**未做（评审 F1 的第 0 步）**：拿云机
+  `[deliver]` 行与 hub `/admin/offline` 读数把「27 轮 0 送达」定性成 C1/C3 还是 C4/C5 —— 在此之前
+  本片是**按覆盖面**设计的修法，不是按定性结果。
+
+## §2026-10-16-goalnn-drawer-carries-ledgers（抽屉带读数账本；账本「变了才拷」；容量读数进 status）
+
+- **来源**：plan §3.2/§3.3（DoD-2a/2b/2c，评审 D8）· §14（抽屉在网络盘上的写放大与配额）。
+- **定案一（抽屉 = 能被直接吃的产物根）**：锚点名单追加 `metrics.jsonl` / `eval_log.jsonl` ——现场
+  「权重能救、读数救不回」（抽屉里只有 `it-NNN/weights.json` + `opt.tar`，导入后曲线与 eval 全空）。
+- **定案二（变化才拷）**：只有这两个账本按 `(size, mtime_ns)` 变化才重拷（判据与 `_ledger_its()` 的缓存
+  失效**逐字同源**）；其余四件仍每拍重写——`state.json` **必须**与轮次同步（`run_id`/`last_it` 是导入/
+  恢复腿的判据）。
+- **定案三（读数由写方量、读方零 IO）**：`drawer_bytes/ledger/round_avg/budget` 进 `status()`，
+  `budget = 待投轮数 × 单轮均字节 + 两账本`（§14 的容量行）；`status()` 每拍被调而抽屉在网络盘上 ⇒
+  绝不在读面 `rglob`。子进程状态面（白名单）同步扩。
+- **备选与否决**：① 每拍全量重写两个账本 —— 否（MB/轮 的网络盘写放大）；② 只拷「首个待投轮之后的尾段」
+  —— 否（要维护一个水位 = 新状态源，而追加型账本的 `(size, mtime_ns)` 已经够准）；③ 在
+  `status()` 里现量抽屉 —— 否（IO 花在展示上）。
+- **后果**：`tests/remote/test_offline_deliver.py` 三条 + e2e 一条（把抽屉当产物根跑 `import_from_run` ⇒
+  曲线读数与 eval 行并入课程账本），`deliver_worker._write_status` 白名单扩 6 个键。
+
+## §2026-10-16-goalnn-rejected-ttl-and-reset（内容拒收不再是永久判决：TTL + 上限 + 人工重置）
+
+- **来源**：plan §15（**D6**）：`rejected` 跨会话按权重指纹认领 ⇒ 一次**误判**（hub 侧 409 被读成内容
+  问题、账本行取错）会让那一轮**永久不再回传**，而权重一直好好地躺在本地盘上。
+- **定案一（年龄面）**：每笔拒收落盘 `at`/`tries`；加载时 `tries ≥ REJECTED_MAX_TRIES(3)` 或
+  `now - at > REJECTED_TTL_SEC(24h)` ⇒ 不认（那一轮回到待投集）。旧账本没有 `at` ⇒ **一律复活**：
+  一条没有年龄的证据不足以支撑「永不再试」，而重试一轮的代价只是再推 ~1.9MB。
+- **定案二（只有拒收的一拍也要落盘）**：`_push_backlog` 的 `skip` 现在也置脏 ⇒ 记录即时落盘。
+  否则「本拍没有成功投递」会让记录只住内存，下一次落盘静默抹掉（连 TTL 都轮不到）。
+- **定案三（人工出口）**：`reset_rejected(根, run_id=…, it=…)`（+ `python -m remote.offline_deliver
+  --artifacts <根> [--it N]`）清掉记录行，并在文件里写**按 it** 的重置水位 `rejected_reset_at`；写方
+  落盘时丢掉水位之下的记录 ⇒ 活着的补传子进程不会把刚清掉的行写回来（水位按 TTL 清，防无限积累）。
+  目录复用时按 `run_id` 拒接（不许拿别的 run 的记录开刀）。
+- **备选与否决**：① 全局水位 —— 否（只重置一环会把**其余**环次的拒收一并放掉）；② 重置只在进程退出后
+  生效 —— 否（段末/长轮期间恰恰最需要）；③ 把 `--reset-rejected` 加在 `deliver_zip` —— 否
+  （`delivered.json` 的路径/指纹/水位口径都住在 `offline_deliver`，另开一处 = 同一语义两份实现）。
+- **后果**：9 条用例（TTL 过期复活 / TTL 内仍跳过 / 记满次数复活 / 旧账本无年龄 / 年龄面计数 / 只有拒收
+  的一拍落盘 / 重置在活会话里不被写回 / 只重置指定轮 / CLI）。
+
+## §2026-10-16-goalnn-import-checklist-and-name（导入：文件名 `@` 附注、落位计数上屏、包体检）
+
+- **来源**：plan §6.2-1/3 + DoD-5a/5c（G 片）· §19（同一语义只留一份实现）。
+- **定案一（文件名放宽）**：`deliver-<课>@<run_id>-it<N>.zip`（§5.2 的导出/一键包留历史名）的**课程段 = 
+  `@` 之前**；python `course_from_filename` 与 ts `validateDeliverUpload` 两处同改（两边各有用例钉住
+  「报错里指到的那门课就是课程段」）。
+- **定案二（包体检是报告不是门）**：`deliver_zip` 返回 `checks: [{id, ok, detail, +结构化字段}]`
+  （entries/shape/continuity/rows-fp/weights/state/state-fp/anchors/body-limit）+ `checks_ok` + `partial`。
+  任何一项不过**都不阻断导入**（先落权重才是这半个功能的主价值）；成功路径上也上屏（DoD-5c）。
+- **定案三（结构化读数与 `detail` 并存）**：`continuity.missing` / `rows-fp.{no_rows,bad_fp}` /
+  `state.{state_last_it,package_last_it}` / `anchors.missing` —— 控制台与用例按**数据**判，不挂措辞
+  （本仓点名过的反模式，见 `tests/helpers/text_asserts.py`）。
+- **定案四（§6.2-2「自动识别课程」取「只报错 + 指引」）**：包内**没有**课程信号（`IMPORT_META.json` 属 F 片
+  未落地；`state.json` 只有 run_id；`manifest.json` 只有 `course_fp`）⇒ 自动识课今天不可达，新增
+  `courseFromPackage=1` 请求字段等于**猜**；现有报错已给两个课名 + 明确动作（切课或改名），`@` 放宽后
+  不再误伤。待 F 片落地 `IMPORT_META.course` 后再按 §6.2-2 的优先级实现（并在 DECISIONS 另记一条）。
+- **后果**：`import.ts` 的结论串带「新增 X 轮、跳过 Y 轮（已有不同字节，先到者为准）」「补齐缺件 N 件」
+  「体检 N/N 全绿 / 未过 …」「**半段**」，`detail` 整屏展开体检 9 行；python 4 条 + ts 3 条用例。
+
+## §2026-10-16-goalnn-backup-drawer-module（抽屉写方单独成家 + 层级账本重排）
+
+- **来源**：`tests/test_python_loc_budget.py`（单文件代码行 < 1000，**只许收紧**）· 
+  `tests/helpers/remote_dag.py`（层号 = 拓扑秩 = `1 + max(依赖)`）。
+- **定案（按「独立所有者 + 独立触发条件」拆）**：抽屉的**拷贝策略**（拷哪些件 / 何时跳 / 失败算什么 /
+  读数）搬进 `remote/backup_drawer.py`（`BackupDrawer` + `BACKUP_ANCHOR_NAMES` + `DrawerReadings`）；
+  `offline_deliver` 只留「算哪些轮次待投」（它的判据）与「读数记进 status」。
+- **层级重排（诚实的代价）**：`remote.backup_drawer` **L1**（靠 L0 的 `artifacts` + `offline_deliverable`）
+  ⇒ `remote.offline_deliver` **L1 → L2**、`remote.deliver_proc`/`deliver_worker` **L2 → L3**（其余不变，
+  层号集合仍稠密）。
+- **备选与否决**：① 抬 LOC 上限 —— 否（用户口径：>1000 行 = 设计问题）；② 让抽屉只 import `common.*`
+  （把产物名搬进 `common/` 当 L0）—— 否（同名常量两处 = 又一份会漂的真相）；③ 把抽屉整块挪进
+  `offline_deliverable`（L0 + 豁免）—— 否（那是 standalone 运输单元，顶层只许 stdlib，混进来会砸引导契约）。
+- **后果**：抽屉写方**惰性建**（`deliver_proc` 的父侧镜像是在构造**之后**才补上 `backup_root`，在
+  `__init__` 里建好就是那个调用点上静默不备份）；`_drawer_for_write()` 取调用时的 `self.log` 同理。
+  方法名 `write` → `backup_rounds`（避免与 `common.log`/`worker.train.loop_util` 的同名面凑成 ≥3 模块，
+  `tests/test_reuse_ledger.py` 当场会红）。

@@ -443,6 +443,45 @@ def test_import_from_run_never_rewrites_an_existing_round(tmp_path: Path) -> Non
     assert keep.read_bytes() == b"kept"
 
 
+def test_a_backup_drawer_is_importable_with_its_ledgers(tmp_path: Path) -> None:
+    """DoD-2b（plan §3.3）：把**抽屉**当产物根导入 ⇒ 曲线读数与 eval 行都能并入课程账本。
+
+    现场（报告 §3.1）：抽屉里只有 `weights`/`opt` ⇒ 权重能救、**读数救不回**（导入后曲线与
+    eval 全空，得靠人从 `/tmp` 抢救）。这里从「真補传器写出来的抽屉」出发跑到导入，
+    钉住整条链：抽屉 → `import_from_run` → 课程账本（`iteration` 行 + eval 逐局行）。
+    """
+    from remote.offline_deliver import OfflineDeliverer
+    from worker.eval_rows import eval_row
+
+    src = _hub_received_run(tmp_path, run_id="seg-1", iters=(1, 2))
+    rows = [
+        eval_row({"dims": {}, "win": True, "score": 90}, it=2, key16="k" * 16, task=(1, 200 + i), node="cloud")
+        for i in range(2)
+    ]
+    (src / "eval_log.jsonl").write_text(
+        "\n".join(json.dumps(r, ensure_ascii=False) for r in rows) + "\n", encoding="utf-8"
+    )
+    drawer = tmp_path / "net" / "backup"
+    d = OfflineDeliverer(
+        base_url="",  # 推不出去 ⇒ 两轮全 pending ⇒ 都进抽屉
+        token="",
+        run_id="seg-1",
+        artifacts_dir=src,
+        backup_root=drawer,
+        log=lambda _m: None,
+    )
+    assert d.backup_pending() == 2
+    assert (drawer / "metrics.jsonl").is_file() and (drawer / "eval_log.jsonl").is_file()
+    dest = tmp_path / "deliver"
+    got = import_from_run(drawer, dest, course="c1", run_id="seg-1")
+    assert got["imported"] is True and got["iters"] == [1, 2]
+    assert got["metric_rows"] == 2, "逐轮读数得随抽屉回来（控制台的各轮指标表只读课程账本）"
+    assert got["eval_rows"] == 2, "eval 逐局行同理（门判据只认课程账本）"
+    assert _ledger_iters(tmp_path / "training_log.jsonl") == [1, 2]
+    ev = (tmp_path / "eval_log.jsonl").read_text(encoding="utf-8")
+    assert ev.count('"event": "eval"') == 2
+
+
 def test_import_from_run_rejects_a_directory_without_rounds(tmp_path: Path) -> None:
     empty = tmp_path / "not-a-run"
     empty.mkdir(parents=True)
@@ -482,6 +521,62 @@ def test_course_from_filename_only_accepts_the_convention() -> None:
     assert course_from_filename("DELIVER-C4.zip") == "C4"
     for odd in ("x1-rebirth-a2.zip", "deliver-x1.tar.gz", "deliver-.zip", "deliver-a/b.zip"):
         assert course_from_filename(odd) == ""
+
+
+def test_course_from_filename_ignores_the_at_annotation() -> None:
+    """导出/一键包的历史名（`deliver-<课>@<run>-it<N>.zip`，§5.2）⇒ 课程段取 `@` **之前**。
+
+    规则与控制台 `validateDeliverUpload` 必须一致（两边同改）：把整个 `@…` 尾巴当课程的话，
+    一份本来正确的包会被判成「别的课的产物」（现场就是这个文件名格式被用来留历史）。
+    """
+    assert course_from_filename("deliver-x1-rebirth-a2@seg-1-it40.zip") == "x1-rebirth-a2"
+    assert course_from_filename("deliver-C4@r3-it7.zip") == "C4"
+    assert course_from_filename("deliver-@seg1.zip") == ""  # 课程段空 ⇒ 不猜
+
+
+def test_import_reports_a_green_checklist(tmp_path: Path) -> None:
+    """DoD-5c：成功路径上也有体检报告（全绿 + 轮次数 + 末轮 + 是否半段）。"""
+    src = _make_artifact_zip(tmp_path, iters=(1, 2, 3))
+    got = import_deliver_zip(src, tmp_path / "deliver")
+    assert got["checks_ok"] is True and got["partial"] is False
+    assert [c["id"] for c in got["checks"]] == [
+        "entries",
+        "shape",
+        "continuity",
+        "rows-fp",
+        "weights",
+        "state",
+        "state-fp",
+        "anchors",
+        "body-limit",
+    ]
+    by = {c["id"]: c for c in got["checks"]}
+    assert by["shape"]["detail"] == "it1 → it3（3 轮）"
+    assert by["continuity"]["missing"] == []
+    assert by["rows-fp"]["no_rows"] == [] and by["rows-fp"]["bad_fp"] == []
+    assert by["state"]["state_last_it"] == 3 and by["state"]["package_last_it"] == 3
+    assert by["anchors"]["missing"] == []
+
+
+def test_import_checklist_reports_breaks_without_blocking_the_import(tmp_path: Path) -> None:
+    """体检是**报告不是门**：缺轮/半段/指纹不符都照导（先落权重才是这一半个功能的主价值）。"""
+    z = tmp_path / "deliver-broken.zip"
+    with zipfile.ZipFile(z, "w") as zf:
+        zf.writestr("it-001/weights.json", _weights(1))
+        zf.writestr("it-003/weights.json", _weights(3))
+        zf.writestr("metrics.jsonl", json.dumps({"it": 1, "weights_fp": "0" * 64}) + "\n")
+        zf.writestr("state.json", json.dumps({"run_id": "br-1", "state": "running", "last_it": 9}))
+    got = import_deliver_zip(z, tmp_path / "deliver")
+    assert got["checks_ok"] is False and got["partial"] is True, "state 自报跑到 it9，包里只到 it3"
+    by = {c["id"]: c for c in got["checks"]}
+    # 按**数据**判（不按那句人话）：措辞一改就红、而改措辞与行为对错无关（见 text_asserts 口径 A）。
+    assert by["continuity"]["missing"] == [2]
+    assert by["rows-fp"]["bad_fp"] == [1] and by["rows-fp"]["no_rows"] == [3]
+    assert by["state"]["state_last_it"] == 9 and by["state"]["package_last_it"] == 3
+    assert by["state-fp"]["ok"] is False
+    assert by["anchors"]["ok"] is False, "手工包没有 manifest/plan — 得看得见"
+    assert by["weights"]["ok"] is True, "两件权重都在场 ⇒ 这一项不该被别的毛病连坐"
+    assert (tmp_path / "deliver" / "br-1" / "it-003" / "weights.json").read_bytes() == _weights(3)
 
 
 def test_state_run_id_wins_over_filename(tmp_path: Path) -> None:

@@ -43,7 +43,7 @@ from pathlib import Path
 import remote.delta_files as delta_files
 from common.cli import house_parser, run_main
 from common.protocol import ProtocolError
-from remote.artifacts import ArtifactStore, ledger_row_from_metrics
+from remote.artifacts import ArtifactStore, ledger_row_from_metrics, sha256_file
 from remote.bundle import BUNDLE_INDEX, safe_extract_zip
 
 #: 机器可读结果的标记（控制台按它切 stdout 的末行；前面的人读日志随便打）。
@@ -67,8 +67,147 @@ def course_from_filename(zip_path: str | Path) -> str:
     if not m:
         return ""
     name = m.group(1).strip()
+    # 课程段 = `@` **之前**那一段（与控制台 `validateDeliverUpload` 同一规则，两处同改）：
+    # 一键包/导出名把留历史用的附注放在 `@` 之后（`deliver-<课>@<run_id>-it<N>.zip`，§5.2）
+    # ——附注**不当课程**，否则「文件名里的课程与控制台不符」会用一段不是课程的文本去对账
+    # （现场 `@<run>-it40` 这一串会把本来正确的包判成「别的课的产物」）。
+    name = name.split("@", 1)[0].strip()
     # 课程名 = 目录名的安全子集（与 dashboard 的 validateCourseName 同精神）
     return name if re.fullmatch(r"[A-Za-z0-9._-]{1,64}", name) else ""
+
+
+def _package_checks(
+    base: Path,
+    pkg_iters: list[int],
+    st: dict,
+    *,
+    names: int,
+    size: int,
+    partial: bool,
+) -> list[dict]:
+    """包的**体检报告**（plan §6.2-1 / DoD-5c）：一行一项 `{id, ok, detail}`。
+
+    为什么值得单独做：门散在四处（形状/课名/撞名/体上限），失败时人只看到最后那一道；
+    而「包能导入」与「包是完整的」是两件事——半段快照、缺轮、行与权重指纹不符、状态文件
+    与末轮不符，都能导入成功但读数不可信（控制台恰好只读那些读数）。
+
+    ⚠ 这是**报告不是门**：任何一项不过都不阻断导入（先落权重是这一半个功能的主价值），
+    所以失败项进 message/detail，而不是抛异常。
+    """
+    out: list[dict] = []
+    iters_ok = bool(pkg_iters)
+    span = f"it{pkg_iters[0]} → it{pkg_iters[-1]}（{len(pkg_iters)} 轮）" if iters_ok else "没有 it-NNN/"
+    out.append({"id": "entries", "ok": names > 0, "detail": f"{names} 个成员"})
+    out.append({"id": "shape", "ok": iters_ok, "detail": span})
+    # 轮次连续性（缺轮 = 那几轮的权重永远回不来，而曲线会看起来「有」那一段）
+    gaps = (
+        [n for n in range(pkg_iters[0], pkg_iters[-1] + 1) if n not in set(pkg_iters)] if iters_ok else []
+    )
+    out.append({
+        "id": "continuity",
+        "ok": not gaps,
+        "detail": "连续" if not gaps else f"缺 {_its_text(gaps)}",
+        # 结构化读数（与 `detail` 并存）：控制台/用例可以按**数据**判，不用去读那句人话
+        # （「判据挂在措辞上」是本仓点名过的反模式，见 `tests/helpers/text_asserts.py`）。
+        "missing": gaps,
+    })
+    # 逐轮账本行 + **权重指纹对账**（行里的 `weights_fp` 就是 `sha256_file(weights)`，
+    # `remote/artifacts.py:348`）：行/权重是两个东西时（续跑重跑同一 it）在这里就看得见。
+    rows: dict[int, str] = {}
+    try:
+        for line in (base / ArtifactStore.METRICS_NAME).read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            try:
+                ev = json.loads(line)
+            except ValueError:
+                continue
+            if isinstance(ev, dict) and isinstance(ev.get("it"), int):
+                rows[int(ev["it"])] = str(ev.get("weights_fp") or "")
+    except OSError:
+        rows = {}
+    bad_fp: list[int] = []
+    no_row: list[int] = []
+    no_w: list[int] = []
+    for it in pkg_iters:
+        if it not in rows:
+            no_row.append(it)
+        w = delta_files.find_existing(base / f"{ArtifactStore.IT_PREFIX}{it:03d}", "weights.json")
+        if w is None:
+            no_w.append(it)
+            continue
+        if rows.get(it) and sha256_file(w) != rows[it]:
+            bad_fp.append(it)
+    out.append({
+        "id": "rows-fp",
+        "ok": not (no_row or bad_fp),
+        "no_rows": no_row,
+        "bad_fp": bad_fp,
+        "detail": (
+            f"{len(pkg_iters) - len(no_row)}/{len(pkg_iters)} 轮有行，指纹相符"
+            if not (no_row or bad_fp)
+            else "; ".join(
+                ([f"缺行 {_its_text(no_row)}"] if no_row else [])
+                + ([f"指纹不符 {_its_text(bad_fp)}"] if bad_fp else [])
+            )
+        ),
+    })
+    out.append({
+        "id": "weights",
+        "ok": not no_w,
+        "missing": no_w,
+        "detail": f"{len(pkg_iters) - len(no_w)}/{len(pkg_iters)} 件权重在场"
+        if iters_ok
+        else "无轮次可查",
+    })
+    state_last = int(st.get("last_it") or 0)
+    out.append({
+        "id": "state",
+        "ok": bool(st.get("run_id")) and state_last == (pkg_iters[-1] if iters_ok else 0),
+        "state_last_it": state_last,
+        "package_last_it": pkg_iters[-1] if iters_ok else 0,
+        "detail": (
+            f"run_id={st.get('run_id') or '?'}·last_it={state_last}"
+            if not partial
+            else f"半段快照：state.last_it={state_last} > 包内末轮"
+            f"{'it' + str(pkg_iters[-1]) if iters_ok else '?'}"
+        ),
+    })
+    last_w = (
+        delta_files.find_existing(base / f"{ArtifactStore.IT_PREFIX}{pkg_iters[-1]:03d}", "weights.json")
+        if iters_ok
+        else None
+    )
+    st_fp = str(st.get("last_weights_fp") or "")
+    fp_ok = bool(st_fp) and last_w is not None and sha256_file(last_w) == st_fp
+    out.append({
+        "id": "state-fp",
+        "ok": fp_ok,
+        "detail": "状态文件的末轮指纹与末轮字节相符" if fp_ok else "状态文件缺指纹/与末轮字节不符",
+    })
+    anchors = [
+        n
+        for n in (ArtifactStore.MANIFEST_NAME, ArtifactStore.PLAN_NAME, ArtifactStore.STATE_NAME)
+        if not (base / n).is_file()
+    ]
+    out.append({
+        "id": "anchors",
+        "ok": not anchors,
+        "missing": anchors,
+        "detail": "manifest/plan/state 齐" if not anchors else f"缺 {'/'.join(anchors)}",
+    })
+    out.append({
+        "id": "body-limit",
+        "ok": 0 < size <= ZIP_MAX_BYTES,
+        "detail": f"{size / 1048576:.1f}MB",
+    })
+    return out
+
+
+def _its_text(its: list[int], cap: int = 8) -> str:
+    """一组轮次号的紧凑写法（体检详情用：`it5,it7`；超过 cap 个就省略尾部）。"""
+    head = ",".join(f"it{n}" for n in its[:cap])
+    return head if len(its) <= cap else f"{head}…（共 {len(its)} 个）"
 
 
 def _scan_iters(root: Path) -> list[int]:
@@ -305,6 +444,9 @@ def import_deliver_zip(
         # 水位，只读它会让这一包的曲线静默进不了课程账本（控制台「各轮指标表」缺行）。
         n_eval, n_eval_sums = _merge_carried_eval_rows(base, dest_root)
         n_rows = _merge_carried_metric_rows(base, dest_root, run_id=final.name, log=log)
+        # 体检在 `base` 还在盘上时做（读的是**包**里的字节：导入目录已被 merge 污染）。
+        partial = int(st.get("last_it") or 0) > pkg_iters[-1]
+        checks = _package_checks(base, pkg_iters, st, names=len(names), size=size, partial=partial)
     finally:
         # 中转目录只用于解压，**永远不残留**（也不再有「改名成功/失败」这个中间态）。
         shutil.rmtree(work, ignore_errors=True)
@@ -326,9 +468,19 @@ def import_deliver_zip(
             "（盘上有更靠后的轮次，先到者为准不清空）⇒ 评估用的是盘上末轮"
         )
     log(f"[deliver] 末轮权重：{final_ckpt}")
+    failed = [c for c in checks if not c["ok"]]
+    log(
+        f"[deliver] 体检：{len(checks) - len(failed)}/{len(checks)} "
+        + ("全绿" if not failed else "未过 " + "·".join(f"{c['id']}（{c['detail']}）" for c in failed))
+    )
     return {
         "run_id": final.name,
         "dir": str(final),
+        # 包体检（§6.2-1 / DoD-5c）：`{id, ok, detail}` 逐项；**报告不是门**（不阻断导入）。
+        "checks": checks,
+        "checks_ok": not failed,
+        #: 半段快照（`state.json` 自报的末轮 > 包内末轮）——控制台顶栏那句「是否半段」的判据。
+        "partial": partial,
         # 盘上真实（合并后）——`ckpt` 必须是盘上存在的那份权重（控制台拿它去跑 evalA）。
         "iters": iters,
         "last_it": last_it,

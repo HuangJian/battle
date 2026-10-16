@@ -155,6 +155,15 @@ def _write_status(path: Path, d: OfflineDeliverer, *, ctl: CtlReader, last_ctl_a
                 "result_done": bool(st.get("result_done")),
                 "ticks": int(st.get("ticks", 0)),
                 "idle_spins": int(st.get("idle_spins", 0)),
+                # 抽屉读数（§3.3 DoD-2c + §14 容量行）：父侧/控制台看得到「备份在不在、还要写多少」。
+                "backed_up": int(st.get("backed_up", 0)),
+                "backup_bytes": int(st.get("backup_bytes", 0)),
+                "backup_failed": int(st.get("backup_failed", 0)),
+                "backup_skipped": int(st.get("backup_skipped", 0)),
+                "drawer_bytes": int(st.get("drawer_bytes", 0)),
+                "drawer_ledger_bytes": int(st.get("drawer_ledger_bytes", 0)),
+                "drawer_round_avg_bytes": int(st.get("drawer_round_avg_bytes", 0)),
+                "drawer_budget_bytes": int(st.get("drawer_budget_bytes", 0)),
             },
         )
     except Exception as e:  # 状态面坏掉不该拖垮补传本身

@@ -244,6 +244,90 @@ describe('产物导入', () => {
     expect(validateDeliverUpload('deliver-x1.tar.gz', COURSE)).toContain('.zip')
   })
 
+  it('导出名的 `@<run>-it<N>` 附注不当课程（同名包留历史）；课程段仍要比对', () => {
+    // 规则两处同一条（python：`deliver_zip.course_from_filename`）——单边改就是静默错位。
+    expect(validateDeliverUpload(`deliver-${COURSE}@seg-1-it40.zip`, COURSE)).toBeNull()
+    const bad = validateDeliverUpload('deliver-other@seg-1-it40.zip', COURSE)
+    expect(bad).toContain('other')
+    expect(bad).not.toContain('seg-1-it40') // 报错里指到的那门课就是课程段（否则人照着切也切不对）
+  })
+
+  it('落位计数写进结论（重导同名 run 时「新增 0 轮」与「导入了 5 轮」不能长得一样）', async () => {
+    const runner = (() => ({
+      code: 0,
+      stdout: `${deliverImportJsonMark}${JSON.stringify({
+        run_id: 'r1',
+        dir: deliverImportRoot(COURSE) + '/r1',
+        iters: [1, 2],
+        last_it: 2,
+        ckpt: deliverImportRoot(COURSE) + '/r1/it-002/weights.json',
+        state: 'complete',
+        rows: 2,
+        course: COURSE,
+        source_zip: '/x/z.zip',
+        bytes: 3,
+        kept_rounds: 1,
+        skipped_rounds: 3,
+        healed_files: 2,
+      })}`,
+      stderr: '',
+      timeout: false,
+    })) as unknown as Parameters<typeof importDeliverZip>[1]
+    const r = await importDeliverZip(
+      { course: COURSE, zipPath: '/x/deliver.zip', ...sandboxPaths() },
+      runner,
+    )
+    expect(r.message).toContain('新增 1 轮、跳过 3 轮')
+    expect(r.message).toContain('先到者为准')
+    expect(r.message).toContain('补齐缺件 2 件')
+  })
+
+  it('体检报告在成功路径上也看得见（全绿 / 未过项 / 半段）', async () => {
+    const make = (checks: Array<{ id: string; ok: boolean; detail: string }>, partial = false) =>
+      (() => ({
+        code: 0,
+        stdout: `${deliverImportJsonMark}${JSON.stringify({
+          run_id: 'r1',
+          dir: deliverImportRoot(COURSE) + '/r1',
+          iters: [1, 2],
+          last_it: 2,
+          ckpt: deliverImportRoot(COURSE) + '/r1/it-002/weights.json',
+          state: 'complete',
+          rows: 2,
+          course: COURSE,
+          source_zip: '/x/z.zip',
+          bytes: 3,
+          checks,
+          checks_ok: checks.every((c) => c.ok),
+          partial,
+        })}`,
+        stderr: '',
+        timeout: false,
+      })) as unknown as Parameters<typeof importDeliverZip>[1]
+    const green = [
+      { id: 'shape', ok: true, detail: 'it1 → it2（2 轮）' },
+      { id: 'continuity', ok: true, detail: '连续' },
+    ]
+    const okRun = await importDeliverZip(
+      { course: COURSE, zipPath: '/x/deliver.zip', ...sandboxPaths() },
+      make(green),
+    )
+    expect(okRun.message).toContain('体检 2/2 全绿')
+    // 未过项要逐项点名（「导进去了但读数不可信」是这张表存在的理由）
+    const badRun = await importDeliverZip(
+      { course: COURSE, zipPath: '/x/deliver.zip', ...sandboxPaths() },
+      make([...green, { id: 'state', ok: false, detail: '半段快照' }], true),
+    )
+    expect(badRun.message).toContain('体检未过：state')
+    expect(badRun.message).toContain('半段')
+    // 整屏展开（面板读 detail）
+    const r = await importDeliverZip(
+      { course: COURSE, zipPath: '/x/deliver.zip', ...sandboxPaths() },
+      make(green),
+    )
+    expect(r.payload?.checks?.length).toBe(2)
+  })
+
   it('解析机器可读结果行（人读日志在前，标记行在末）', () => {
     const payload = {
       run_id: 'r1',

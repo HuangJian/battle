@@ -45,10 +45,14 @@ export function validateDeliverUpload(fileName: string, course: string): string 
   if (!course) return '缺少课程（先在顶部设置课程）'
   // `deliver-<课程>.zip` 是习惯命名；带了前缀就必须与当前课程一致（否则是拿了别的课的产物）
   const m = /^deliver-(.+)\.zip$/i.exec(base)
-  if (m && m[1] !== course)
+  // 课程段 = `@` **之前**那一段（python 侧 `deliver_zip.course_from_filename` 同一规则，两处同改）：
+  // 导出/一键包把留历史用的附注放在 `@` 之后（`deliver-<课>@<run_id>-it<N>.zip`，plan §5.2）
+  // ——附注不是课程，拿它比对会把本来正确的包报成「别的课的产物」。
+  const seg = m ? m[1].split('@')[0] : ''
+  if (m && seg !== course)
     return (
-      `文件名里的课程（${m[1]}）与控制台当前课程（${course}）不一致——` +
-      `切到 ${m[1]} 再导，或把文件名改成 deliver-${course}.zip`
+      `文件名里的课程（${seg}）与控制台当前课程（${course}）不一致——` +
+      `切到 ${seg} 再导，或把文件名改成 deliver-${course}.zip`
     )
   return null
 }
@@ -79,6 +83,23 @@ export interface DeliverImportPayload {
    *  `tmp/<课程>/training_log.jsonl` 的 `iteration` 事件）⇒ python 导入器现在顺手把
    *  产物包的 `metrics.jsonl` 搬进账本，这个数就是搬了几行（0 = 账本里已有/包内没有）。 */
   metric_rows?: number
+  /** 并进课程账本的 eval 逐局行 / summary 行数（云机评估回到本机的唯一载体；0 = 包内没有）。 */
+  eval_rows?: number
+  eval_summaries?: number
+  /** 落位的三个计数（plan §8.2-2：**两条腿共用一份判据**）：新增的轮次数、
+   *  因「已有不同字节」跳过的轮次数（先到者为准）、补齐的缺件数。
+   *
+   *  为什么必须报出来：重导同名 run 时「什么都新增不了」与「导入了 5 轮」在**只报总轮数**
+   *  的旧文案下长得一模一样，而这两件事的处置完全不同（前者要人裁决，后者是常态）。 */
+  kept_rounds?: number
+  skipped_rounds?: number
+  healed_files?: number
+  /** 包体检逐项（plan §6.2-1 / DoD-5c）：`{id, ok, detail}`。**报告不是门**——
+   *  任何一项不过都不阻断导入，所以它只在结论/详情里露面，不进 `ok` 的判据。 */
+  checks?: Array<{ id: string; ok: boolean; detail: string }>
+  checks_ok?: boolean
+  /** 半段快照（`state.json` 自报的末轮 > 包内末轮）：导得了，但读数只到包内那一段。 */
+  partial?: boolean
 }
 
 /** 从 python 的 stdout 里切出机器可读那一行（前面的人读日志一分不丢）。 */
@@ -393,7 +414,24 @@ export async function importDeliverZip(
     message:
       `已导入 ${payload.run_id}（${payload.iters.length} 轮，it${payload.iters[0]} → ` +
       `it${payload.last_it}）` +
-      (payload.metric_rows ? `；逐轮指标 +${payload.metric_rows} 行` : ''),
+      (payload.metric_rows ? `；逐轮指标 +${payload.metric_rows} 行` : '') +
+      // 同名轮先到者为准（plan §8.2-2）：跳过的那些**已有不同字节**，要人才能裁决
+      // （`--replace` 逃生门），所以必须写进结论而不是留在日志里。
+      (payload.skipped_rounds
+        ? `；新增 ${payload.kept_rounds ?? 0} 轮、跳过 ${payload.skipped_rounds} 轮（已有不同字节，先到者为准）`
+        : '') +
+      (payload.healed_files ? `；补齐缺件 ${payload.healed_files} 件` : '') +
+      // 体检结论（DoD-5c：成功路径上也要看得见）：全绿就一句带过，有未过项就逐项点名
+      // ——「导进去了但读数不可信」是这张表存在的全部理由。
+      (payload.checks?.length
+        ? payload.checks_ok
+          ? `；体检 ${payload.checks.length}/${payload.checks.length} 全绿`
+          : `；体检未过：${payload.checks
+              .filter((c) => !c.ok)
+              .map((c) => `${c.id}（${c.detail}）`)
+              .join('、')}`
+        : '') +
+      (payload.partial ? '；**半段**（state 自报的末轮比包内靠后）' : ''),
     payload,
   }
 }
@@ -534,6 +572,8 @@ export async function handleDeliverUpload(
         detail: [
           `产物目录：${path.relative(REPO_ROOT, payload.dir).replace(/\\/g, '/')}`,
           `末轮权重：it${payload.last_it}`,
+          // 包体检整屏展开（§6.2-1：「这张表给用户看」）——否则未过项只能从 message 里猜。
+          ...(payload.checks ?? []).map((c) => `${c.ok ? '✓' : '✗'} ${c.id}：${c.detail}`),
         ],
         import: payload,
         endItReached,
