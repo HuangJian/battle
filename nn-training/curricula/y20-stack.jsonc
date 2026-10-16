@@ -1,0 +1,137 @@
+// 课程 y20-stack —— 转场叠加腿：y5-dist 为底＋back/hide 调整（人类配对校正版，用户令）。
+// 状态：已结课（2026-10-16 超时占比 14% 触发杀线停课；见尾部结课报告）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；与 y20-dist/y20-obs 并行）。
+//
+// 立项 → 用户 2026-10-15：转场 y20，以 y5-dist 为基础叠加 y5-back 与 y5-hide 调整项，
+//   params 按 dist235×人类 160 配对表合理化校正。起点/种子/预算/门同 y20-dist
+//   （起点 y5-dist.it270 sha16 `65ec5b9224028b35`；种子 20270201 三腿共享）。
+//
+// ── 叠加＋校正声明（相对 y20-dist：只加 back 三键＋hurt 一键；其余逐字）──────────
+//   背击组（back 值沿用；panel 无背击列 → 无人类对照，沿用＋B3 readout）：
+//     wBackHits 0.4→**1.0**、新增 wSideHits **0.2**（公式尾部追加）、wHit 0.6→**0.2**
+//     （A01 机 0.751 vs 人 0.790 接近 → 保底成立，不调回）；
+//   威胁组（hide 值校正后只取一半）：wHurt 110→**150**（D01 2.2x＋D07 暴露多 → 支持，保留）；
+//     wThreat 120 **HOLD**（回退 hide 的 150：D03 人 87.0 vs 机 51.0 → 人进危险区更多还全过，
+//     threat 总量税误伤人类"进"，保留 dist 值罚"待"已足量＋D04 gap 佐证）；
+//   其余逐字：wDist 0.6 HOLD（A05 人远 1.3 格＋A07 远射多 75% → 方向佐证；A3 不动由 readout 继续判）；
+//     wNearSq 48 HOLD（A06 近射 0.577 vs 0.377 → 支持）；wEncl 12.9 HOLD
+//     （W03 人 122.9 vs 机 95.1 → 包围多≠该罚是既定注；罚的是脱离慢 D04，维持 dist 值）；
+//     wSideHits 侧占比 1.1x 无分离 → 小奖维持 0.2 不加。
+//   校正净效果：维持为主（威胁组一取一退），A06/W08/D04/D01  receipts 见上。
+//
+// ── 门（y20-dist 三线＋B3/威胁 readout）────────────────────────────────────────
+//   主：+60 win ≥ 0.70；次：kills ≥ 16.5/20；命耗线：+60 gameover 占比 ≤ 30%；
+//   反 watch：timeout 占比 ≤ 5%，超 ⇒ 为避战而苟，**杀腿**；
+//   readout：B3 背击占比↑（it0 校准）＋threat lane↓/hurtW↓（it0 校准），双平 ⇒ 叠加无效，杀；
+//   D01 ≤ 85 护栏（+it0 校准）；fear-watch（c20 量级，+it0 校准）；fail ⇒ **杀腿**。
+//   门读 headline；s2000 切片附读（2000=abcd）。上报 policy_new_rms＋it5 analytic 照旧。
+//   终点：三线全过 ⇒ 收官（iters 300 为 cap）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   anchor 0.001（legacy 空片，无害）；ent_break 0.0＋max_winrate 0.0（熔断全拆，y 系现行惯例）；
+//   batch 24576；优化器/K 冻结（退火表与 y20-dist 同）。
+//   iters 300，max_hours 48，workers 8，eval 混合（"2000-2003"×50，同口径逐行可比）。
+//   ⚠ 前提：tmp/y20-stack 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c20-lives1`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`（课程轮从 1 起，与 bc 轮号无关）；
+//     `bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y20-stack）+ backup 新目录（nn-training/weights/y20-stack）+ opt fresh。
+//
+// ── 结课报告（2026-10-16 停课；超时占比超标触发杀线，用户拍板）──────────────
+//   跑量：第 1 到 205 轮（最后一轮 17:04 被用户掐停；评估到第 200 轮，第 0 轮 200 局其余 400 局；
+//     第 205 轮的评估缺失＝停在了两次评估之间）。
+//   轨迹：第 0 轮胜率 0.595 → 第 20 轮胜率 0.655（本腿历史最高）→ 第 65 轮胜率 0.258、超时占比 9%（第一次崩）
+//     → 第 120 轮胜率 0.278、超时占比 25% → 第 165 轮胜率 0.207、超时占比 43%（全场最深，
+//     获胜局耗时 10009 拍）→ 第 200 轮胜率 0.410、超时占比 14.2%。
+//     三度崩盘又回升，策略熵 0.82~0.92 高位震荡（奖励互相打架策略散掉，不是单点遗忘）。
+//   门（最后一轮 200）：主线胜率 0.410<0.70 不通过；次线杀敌 15.28<16.5 不通过；
+//     命耗尽占比 44.8%>30% 不通过；超时占比 14.2%>5% 不通过（**杀线**）；
+//     承伤指标约 31≤85 通过；恐惧塌缩检查通过（每局开火≥37.7、杀敌≥13.5）。
+//     附加 readout：背击占比没升、危险区停留没降（叠加调整没有证据，杀线之外再记一笔）。
+//   根因：和 dist 腿同源（时间轴失配）再加叠加 debuff：命中奖励从 0.6 砍到 0.2，
+//     每局少约 15 分开火期望；受伤惩罚从 110 加到 150，边际开火变成亏本买卖 ⇒
+//     蹲得比 dist 腿更深（超时峰值 43% 对 23%）。
+//   结论：判死，不再续跑。修复腿 y20-stack2（只动时间轴两处，叠加值原样保留）已开文件。
+//   证据：tmp/y20-stack/{training_log,eval_log}.jsonl · nn-training/weights/y20-stack（最后一轮 205）。
+{
+  "version": 5,
+  "name": "y20-stack",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (3900-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -5.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y5-dist.it270（sha 见 y20-dist 头注；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y5-dist/y5-dist.it270.20261016-102810.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 48,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（新种子；与 y20-dist/y20-obs 共享＝三路可比）。
+  "paired_rotate_seed": 20270201,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y20-stack/weights.json",
+  "traj": "tmp/y20-stack",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y20-stack",
+  "backup_prefix": "y20-stack",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

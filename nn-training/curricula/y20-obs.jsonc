@@ -1,0 +1,135 @@
+// 课程 y20-obs —— 转场复刻腿：y5-dist.it270 为师＋x27-obs 激励函数复刻到 c20（用户令）。
+// 状态：已结课（2026-10-16 以第 300 轮最优权重收官、移交 obs2；见尾部结课报告）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；与 y20-dist/y20-stack 并行）。
+//
+// 立项 → 用户 2026-10-15：转场 y20，复刻 x27-obs 激励函数（配方逐字，level/起点换 c20/dist）。
+//   起点 y5-dist.it270（sha16 `65ec5b9224028b35`；同代现行架构直连，kickstart 关，opt fresh §15.5；
+//   非 x27-obs.it0 —— 旧权重是 obs-v5/老架构，跨架构 bc 被 schema 门响亮拒绝，y1a 前科）。
+//   三腿共享新种子 20270201。优化器走 y 系退火（起点已收敛；奖励复刻 x27，优化器不跟 x27 单段）。
+//   ⚠ 前科披露：x27-obs 已结课冻结（C 类 tti/laneE/s39 四次阴性＋G0 miss，§85；配方见该文件尾部结课报告）。
+//   本次是 c20 新场＋dist-it270 新起点重测（非同语境复跑：起点/场/优化器全不同），门配杀线；
+//   若同样总账零（paired 100 轮 win/kills 双平）⇒ 判死确认，不再重测。
+//   另：x27-obs 的 kickstart_burn margin_pp 100（等效关）＋ent_break 0 ＝ 熔断全关先例，
+//   本腿 ent_break 0.0＋max_winrate 0.0 对齐（y 系现行惯例）；value_anchor 0.001 双账合一
+//   （x27 有绳语义＋y 系出生安全件，同一数值）。
+//
+// ── 复刻声明（相对 x27-obs：只换 level/起点/种子/预算/优化器；奖励逐字）────────────
+//   配方/terminal/scheme 逐字（wDist 1.8/wMiss 0.158/wCorner 55/wThreat 80/wNearSq 28，
+//   无 wWin/terminal、无 wBackHits；killEV 量级 c20 ≈46，f 另算）；
+//   level→`ladder-c20-lives1`；bc→dist-it270；种子→20270201；iters 300/max_hours 48
+//   （c20 局慢，用户未指定，先定后议）；退火表换 y 系表（见上）。
+//
+// ── 门（y20 三线统一；it0 基线条款同 y20-dist）──────────────────────────────────
+//   主：+60 win ≥ 0.70；次：kills ≥ 16.5/20；命耗线：+60 gameover 占比 ≤ 30%；
+//   反 watch：timeout 占比 ≤ 5%，超 ⇒ 为避战而苟，**杀腿**；
+//   D01 ≤ 85 护栏（+it0 校准）；fear-watch（c20 量级，+it0 校准）；fail ⇒ **杀腿**。
+//   门读 headline；s2000 切片附读。上报 policy_new_rms＋it5 analytic 照旧。
+//   终点：三线全过 ⇒ 收官（iters 300 为 cap）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   anchor 0.001；ent_break 0.0＋max_winrate 0.0（熔断全拆）；batch 24576；K=10 冻结。
+//   iters 300，max_hours 48，workers 8，eval 混合（"2000-2003"×50，同口径逐行可比）。
+//   ⚠ 前提：tmp/y20-obs 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c20-lives1`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`（课程轮从 1 起，与 bc 轮号无关）；
+//     `bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y20-obs）+ backup 新目录（nn-training/weights/y20-obs）+ opt fresh。
+//
+// ── 结课报告（2026-10-16 收官移交；三条线差一点没全过，用户拍板）────────────
+//   跑量：第 1 到 317 轮（最后一轮 19:54；每 5 轮评估一次到第 315 轮，第 0 轮 200 局其余 400 局；
+//     全部 64 轮评估超时占比都是 0）。
+//   轨迹：第 0 轮胜率 0.595、平均杀敌 15.78 → 第 120 轮胜率 0.632 → 第 210 轮胜率 0.623
+//     → 第 300 轮胜率 0.685、杀敌 16.57（本腿历史最高，就是选来做 obs2 起点的那个权重）
+//     → 第 315 轮胜率 0.660、杀敌 16.41。获胜局耗时从 6486 拍一路压到约 5200 拍，越学越快；
+//     训练采样胜率最后到 0.66；策略熵钉在 0.65~0.75。
+//   门（第 300 轮）：主线胜率 0.685<0.70（差 0.015）接近通过；次线杀敌 16.57≥16.5 通过（多 0.07）；
+//     命耗尽占比 31.5%>30%（超 1.5 个点）接近通过；超时占比 0% 通过；
+//     承伤指标约 41≤85 通过；恐惧塌缩检查通过（每局开火约 51 次）。
+//     终盘第 315 轮：胜率 0.660、杀敌 16.41、命耗尽 34%、超时 0%。
+//     三条线没全过，但胜率横盘健康、超时是零、耗时趋势向好，所以按"以最优权重移交"收官，不判死。
+//   人机差距（配对 160 局同种子：人类全通，对比机只通 99 局胜率 0.619）：
+//     承伤强度 52.2 对 22.4、挨打后脱离耗时 97.5 对 59.5 拍、
+//     顶墙时长 12.5 对 3.0 拍、贴脸开火占比 0.643 对 0.377；
+//     火力/开火量/危险区停留这些项没有差距或定不了价（明细见 obs2 头注）。
+//   结论：收官，账本冻结；接续腿 y20-obs2（起点＝第 300 轮权重 sha16 `118532c4d19d2902`，
+//     脱离税两处：顶墙惩罚 110→160、贴脸惩罚 28→36）已开文件。
+//     第 301 到 317 轮权重作为 obs2 的备选，不另开课。
+//   证据：tmp/y20-obs/{training_log,eval_log}.jsonl · tmp/panel-y20obs-paired.jsonl ·
+//     nn-training/weights/y20-obs（第 300 轮收官权重＋最后一轮 317）。
+{
+  "version": 5,
+  "name": "y20-obs",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 110.0,
+      "wNearSq": 28.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y5-dist.it270（sha 见头注；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y5-dist/y5-dist.it270.20261016-102810.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（0.001：x27 有绳语义＋y 系出生安全件，双账合一）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 48,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（新种子；与 y20-dist/y20-stack 共享＝三路可比）。
+  "paired_rotate_seed": 20270201,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y20-obs/weights.json",
+  "traj": "tmp/y20-obs",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y20-obs",
+  "backup_prefix": "y20-obs",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
