@@ -23,6 +23,7 @@ import { collectLoopCompletes } from './loop-complete'
 import { readLogTail } from './logs'
 import { readClusterSnapshot } from '../bundles/snapshot'
 import { getFleetProbes, getSlowSnapshot } from './snapshot-refresher'
+import { readDetachedTrainers } from './detached-trainers'
 
 export async function buildStateView(courseOverride?: string): Promise<ConsoleStateView> {
   const cfg = loadConfigSafe()
@@ -201,6 +202,9 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     // push 执行面（机群级）：登记节点 + hub_push（缺省开）+ 逐节点探活——不再按课程键控，
     // 也不再需要「trainer 是否以 push 在跑」这层判断：登记即候选，唯一一条派发路（2026-09-19）。
     pushFleet,
+    // 独立 trainer（escape hatch 自报；plan/single-resident-trainer §1.5）：写侧是 python 准入闸的
+    // 放行分支，这里是**纯读**（不扫锁、不起进程）；`null` = 文件不在/不可读 ⇒ 坞不出条目。
+    detachedTrainers: readDetachedTrainers(),
     modes: {
       stream: Number(cfg.rl.stream ?? 0),
       doubleBuffer: Number(cfg.rl.double_buffer ?? 0),

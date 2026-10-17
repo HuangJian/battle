@@ -983,3 +983,50 @@ describe('组件错误登记表汇总条（2026-10-16，plan/component-error-reg
  * 这里能钉住的只有结构（条目数、类名、角色、折叠按钮的存在与文案）；
  * 交互正确性靠读代码评审。若要补，先引入 DOM 夹具（守零新依赖纪律，不要默默加）。
  */
+
+describe('独立 trainer 横幅（plan/single-resident-trainer §1.5）', () => {
+  /** 写侧（python 准入闸）自报的一条事实；`at` 是 epoch **秒**。 */
+  const detached = {
+    pid: 4242,
+    course: 'c1',
+    at: Math.floor(clean.now / 1000) - 60,
+    entry: 'run_rl',
+    argv: 'trainer/run_rl.py --course c1',
+  }
+
+  it('有事实 ⇒ 1 条 warn；只给 ack（不给杀进程按钮——pid 可能已被复用）', () => {
+    const items = buildAlerts({ ...clean, detachedTrainers: [detached] })
+    expect(items.length).toBe(1)
+    const it0 = items[0]!
+    expect(it0.severity).toBe('warn')
+    expect(it0.role).toBe('status')
+    expect(it0.title).toContain('PID 4242')
+    expect(it0.actions.map((a) => a.kind)).toEqual(['ack'])
+    expect(it0.detail).toContain('--allow-detached-trainer')
+    expect(it0.detail).toContain('run_rl.py')
+  })
+
+  it('null / 空 ⇒ 不出条目（不可知 ≠ 没事）', () => {
+    expect(buildAlerts({ ...clean, detachedTrainers: null })).toEqual([])
+    expect(buildAlerts({ ...clean, detachedTrainers: [] })).toEqual([])
+  })
+
+  it('别的课的事实在本课页不出现（按课过滤；无课程条目只能全局成列）', () => {
+    expect(buildAlerts({ ...clean, detachedTrainers: [{ ...detached, course: 'c2' }] })).toEqual([])
+    expect(buildAlerts({ ...clean, detachedTrainers: [{ ...detached, course: '' }] }).length).toBe(
+      1,
+    )
+  })
+
+  it('ack 后不再弹；同 pid 再起（新 at）必重弹', () => {
+    const items = buildAlerts({ ...clean, detachedTrainers: [detached] })
+    const key = items[0]!.actions.find((a) => a.kind === 'ack')!.ackKey!
+    expect(buildAlerts({ ...clean, detachedTrainers: [detached], acks: [key] })).toEqual([])
+    const again = buildAlerts({
+      ...clean,
+      detachedTrainers: [{ ...detached, at: detached.at + 60 }],
+      acks: [key],
+    })
+    expect(again.length).toBe(1) // 新事件新键
+  })
+})

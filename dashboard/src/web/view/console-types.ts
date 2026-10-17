@@ -340,6 +340,21 @@ export interface CourseFactView {
   lastWriteMs: number | null
 }
 
+/** 单条「独立 trainer」事实（写侧字段见 python `worker/trainer_gate.py::note_detached_trainer`；
+ *  读面（服务端 detached-trainers 模块）只做过滤与投影）。 */
+export interface DetachedTrainerView {
+  /** 独立 trainer 的进程号。 */
+  pid: number
+  /** 课程键（无课程的老调用 = 空串）。 */
+  course: string
+  /** 起于（**epoch 秒**；python `time.time()`——与门禁/心跳那些文件同一种时间基）。 */
+  at: number
+  /** 入口（`run_rl` / `run_bc`）。 */
+  entry: string
+  /** 命令行摘要（一行，已截断）。 */
+  argv: string
+}
+
 export interface ConsoleStateView {
   time: string
   course: string
@@ -386,6 +401,11 @@ export interface ConsoleStateView {
    *  **不含 `detail`**（长文本只走 `/api/errors`）：未 ack 数要用**客户端的 acks** 过滤后才能算，
    *  所以必须逐条带 `fp` + `severity`。 */
   errors?: ErrorSummaryView | null
+  /** **独立 trainer 事实**（plan/single-resident-trainer §1.5；逃生舱 `--allow-detached-trainer`）。
+   *
+   *  取数面 = python 准入闸的放行分支写的 `tmp/trainer-detached.json`（`readDetachedTrainers`
+   *  已按「pid 活 ∧ 24h 内」过滤）。`null`/缺省 = 旧服务端或文件不可读 ⇒ **不出条目、不编**。 */
+  detachedTrainers?: DetachedTrainerView[] | null
   /** **本机（self 节点）磁盘水位**（plan/self-node-disk-alert：告警坞第 8 个条目函数的取数面）。
    *
    *  取数面 = 机群级 `FleetProbes.nodes` 的 self 行（`/v1/ping` 顺带带回来的磁盘事实）——

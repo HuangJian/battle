@@ -50,6 +50,10 @@ export type AlertAckKind =
   //   传新 kind 给 `alertAckKey` 会直接 TS 编译红，这就是它的守门方式。
   | 'component-error'
   | 'component-errors'
+  //   `detached-trainer`（plan/single-resident-trainer §1.5）：逃生舱起的独立 trainer。
+  //   subject = 课程键，eventId = `pid@at` ⇒ **同一条不重复打断**，而「停了再起」是新键
+  //   （必重弹；pid 复用不会把新事件吃掉，因为 at 也在键里）。
+  | 'detached-trainer'
 
 export function alertAckKey(kind: AlertAckKind, subject: string, eventId: string): string {
   return `${kind}|${subject}|${eventId}`

@@ -30,7 +30,12 @@
  *  按课成列，否则「它已经跑完了」在多课场景**不可达**（2026-10-02：k25/k10 相继收官，不切课看不到）。
  */
 
-import type { CloudHaltView, DiskFactsView, LoopComplete } from './console-types'
+import type {
+  CloudHaltView,
+  DetachedTrainerView,
+  DiskFactsView,
+  LoopComplete,
+} from './console-types'
 import type { OfflineLeaseView, OfflineStalledView } from './course-overview'
 import { fmtTs } from './format'
 import { alertAckKey, cloudHaltAckKey, visibleCloudHalts } from './interaction'
@@ -153,6 +158,11 @@ export interface AlertInput {
    *  `null`/缺省 = 旧服务端（没有 `/api/errors`）或本拍登记表不可用 ⇒ **不出汇总条、不编 N**
    *  （与 `selfDisk` 同口径：不可知 ≠ 没问题）。 */
   errors?: ErrorSummaryView | null
+  /** **独立 trainer 事实**（`ConsoleStateView.detachedTrainers`；plan/single-resident-trainer §1.5）。
+   *
+   *  来源 = python 准入闸的逃生舱自报（`--allow-detached-trainer` 放行时会写一笔）；服务端已按
+   *  「pid 活 ∧ 24h 内」过滤。`null`/缺省 = 旧服务端或文件不可读 ⇒ **不出条目**（不可知 ≠ 没事）。 */
+  detachedTrainers?: DetachedTrainerView[] | null
   /** 本机磁盘水位（`ConsoleStateView.selfDisk`；plan/self-node-disk-alert）。
    *
    *  `null`/缺省 = 旧 agent 没报 / self 行没探到 ⇒ **不出条目、不推算**（不可知 ≠ ok）。
@@ -171,6 +181,7 @@ export function buildAlerts(input: AlertInput): AlertItem[] {
     // 磁盘排最前（同严重度内按输入顺序稳定排序）：它和停机同为 `err` 时，坞默认只展开 2 条，
     // 而低盘是**会自己变得更糟**的那一条，不能被折进「还有 N 条」。
     ...selfDiskAlerts(input),
+    ...detachedTrainerAlerts(input),
     ...cloudHaltAlerts(input),
     ...loopCompleteAlerts(input),
     ...ppoStallAlerts(input),
@@ -220,6 +231,46 @@ function selfDiskAlerts(input: AlertInput): AlertItem[] {
       '',
     ),
   ]
+}
+
+/** 第 10 类：**独立 trainer**（plan/single-resident-trainer §1.5）——warn，只给 `ack`。
+ *
+ *  这一条对应的是「常驻写者只允许共享调度器」这条纪律的**破口**：`--allow-detached-trainer`
+ *  放的独立进程与共享 trainer 抢同一批 traj/账本/权重（2026-09-06 双 trainer 事故的同类面）。
+ *
+ *  · 可见范围 = **按课过滤**（瞬时态 + 有动作 ⇒ 与 §4.2 同规）：无课程的老调用没有课程可过滤，
+ *    只能全局成列（否则它在任何课程页都不可见）；
+ *  · 动作只给 `ack`，**不提供杀进程按钮**：pid 可能已被复用（逃生舱进程退出后同一 pid 可能是
+ *    别的进程），点杀是新的误伤面——处置文案把人指到「确认后自己停掉它」。
+ */
+function detachedTrainerAlerts(input: AlertInput): AlertItem[] {
+  const list = input.detachedTrainers
+  if (!list || list.length === 0) return []
+  const out: AlertItem[] = []
+  for (const e of list) {
+    if (e.course && e.course !== input.viewing) continue // 按课过滤（无课程条目只能全局成列）
+    const ackKey = alertAckKey('detached-trainer', e.course || 'nocourse', `${e.pid}@${e.at}`)
+    if (input.acks.includes(ackKey)) continue
+    out.push(
+      withCopy(
+        {
+          id: `detached-trainer-${e.pid}-${e.at}`,
+          severity: 'warn',
+          icon: '🚨',
+          title: `${e.course ? `${e.course} ` : ''}有独立 trainer 在跑（PID ${e.pid}）`,
+          detail:
+            `起于 ${relAgo(input.now, e.at * 1000)}` +
+            (e.argv ? ` · ${e.argv}` : '') +
+            '。常驻训练只允许共享调度器，该进程与它抢同一批 traj/账本/权重 —— 确认后停掉它' +
+            '（它只可能是用 --allow-detached-trainer 起的）。',
+          role: 'status',
+          actions: [{ kind: 'ack', label: '知道了', ackKey }],
+        },
+        e.course,
+      ),
+    )
+  }
+  return out
 }
 
 /** 相对时间（汇总条标题里的「最近 …」）。**传 `now` 进来**——纯函数不许读墙钟，否则单测没法钉。 */
