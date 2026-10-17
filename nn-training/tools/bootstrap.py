@@ -547,7 +547,13 @@ def main() -> int:
             f"⚠ 选了 {variant} 变体，但自检只拿到 cpu 设备 —— "
             f"通常是驱动与 wheel 的 CUDA 版本不匹配。可尝试 --variant cpu 或降级变体。"
         )
-    log("环境就绪。训练： uv run --frozen -u nn-training/trainer/run_rl.py --course <name>")
+    # ★ 2026-10-17（plan/single-resident-trainer §1.2）：这里曾打印「训练： … run_rl.py --course <name>」
+    #   —— 那条命令现在会被准入闸拒（常驻训练只允许共享调度器）。文案必须与实际允许的**同一**条。
+    log(
+        "环境就绪。训练： 常驻 → 控制台（bun run dashboard → 组件卡 TrainingLoop 启动），"
+        "无头 → bun dashboard/src/launch/cli.ts --script trainer/run_rl_cluster.py；"
+        "一次性腿 → --script trainer/run_rl.py --smoke"
+    )
     return 0
 
 

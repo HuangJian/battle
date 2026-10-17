@@ -439,6 +439,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         help="冒烟预演：收到冒烟回显结果（remote_worker --echo）后"
         "作废本轮并干净退出；it 不前进、不写 iteration 事件",
     )
+    # ★ 2026-10-17（plan/single-resident-trainer.plan.md §1，S1）：常驻训练准入闸的**逃生舱**。
+    #   默认不给（拒启消息住 `worker/trainer_gate.py`）；带上它 = 操作员明确知道自己在起一个
+    #   与共享调度器抢同一批 traj/账本/权重的独立 trainer ⇒ 放行 + 醒目告警 + 控制台横幅。
+    ap.add_argument(
+        "--allow-detached-trainer",
+        action="store_true",
+        help="逃生舱：允许本进程跑常驻训练循环（运维排障用；会打印醒目告警并在控制台挂横幅）",
+    )
     # ★ 2026-10-01（plan/gate-halt-platform-level）：门禁停机模式是**平台级**的
     # （`tmp/gate-halt.json`，控制台写、训练侧每轮判定读）。这里只留「临时覆盖」参数，
     # 且 default=None —— **绝不能**在 argparse 层读平台文件：那样每进程只读一次，

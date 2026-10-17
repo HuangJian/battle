@@ -182,7 +182,7 @@ def main() -> None:
     # Anchor cwd to the repo root (parent of nn-training/): all default paths
     # (tmp/student-weights-dagger, tmp/rl-weights, tmp/rl-traj) are repo-root
     # relative. Required for the unified launcher's --detach (dashboard/src/launch/cli.ts), whose
-    # is nn-training/ — same pattern as trainer/train_loop.py's REPO_ROOT.
+    # is nn-training/ — same pattern as every other entry script's REPO_ROOT.
     # 2026-09-30（刀 7）：入口从 nn-training/ 顶层搬进 trainer/ ⇒ 上溯层数 2 → 3
     # （仓根仍是父目录的父目录的父目录）。层数写错 = cwd 停在 nn-training/ ⇒ 上面那些
     # tmp/ 默认路径全部错位。
@@ -271,6 +271,22 @@ def main() -> None:
         _hub_course_key = course_key_from_path(str(getattr(args, "course_path", "") or ""))
     except ValueError as e:
         raise SystemExit(f"[run_rl] {e}") from e
+    # ===== 常驻训练准入闸（S1，plan/single-resident-trainer.plan.md §1）=====
+    # 位置：`--echo-config` 短路之后、**代码快照/单实例锁之前**（不占锁、不白干活就响亮退出）；
+    # 放在课程键推导之后是为了让逃生舱的自报带上课程键——**同一次推导**，不另写第二份 key 逻辑。
+    # `--force` 过不了本闸：它是**锁抢先**（`_acquire_run_rl_lock(force=…)`），与准入是两件事。
+    # 一次性腿（冒烟/导出/预采/echo）不受影响：判据只看「有没有动作」，与 `--course` 无关。
+    from worker.trainer_gate import (
+        announce_escape_hatch,
+        escape_hatch_used,
+        refuse_detached_trainer,
+    )
+
+    _refuse = refuse_detached_trainer(args)
+    if _refuse:
+        raise SystemExit(_refuse)
+    if escape_hatch_used(args):
+        announce_escape_hatch(_hub_course_key, entry="run_rl", log_fn=log)
     # P1-3（2026-09-02）：启动期配置校验（互斥/范围 fail fast——此前这些错误
     # 要等训练中途才暴露）。课程覆盖后校验（课程值是单一事实来源）。
     # stream/double-buffer 的显式传参判定：单一 PPO 路径下两者恒置 0（本机没有 PPO 窗口，

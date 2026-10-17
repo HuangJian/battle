@@ -436,11 +436,15 @@ was folded into them; it had already replaced `nn-training/start-training.{sh,ps
   - `bun dashboard/src/launch/cli.ts --check` — verifies venv+torch and prints the absolute
     torch interpreter path; exit 0 = usable.
   - Print the exact command without running it: `bun dashboard/src/launch/cli.ts --echo --script <name>.py [args]`.
-- The runner is not just `trainer/train_loop.py`: `--script <path>.py [args]` (path relative to
-  `nn-training/`) runs entry runners
-  (`trainer/run_rl.py`, `trainer/train_loop.py`, `tools/smoke_test.py`) or subpackage entries (`worker/train/bc.py --arch student`,
-  `worker/train/goal_bc.py`, `worker/train/intent_probe.py`, `worker/scripts/eval_bridge.py`, `worker/scripts/validate_export.py`, …)
+- `--script <path>.py [args]` (path relative to `nn-training/`) runs entry runners or subpackage
+  entries (`worker/train/bc.py --arch student`, `worker/train/goal_bc.py`,
+  `worker/train/intent_probe.py`, `worker/scripts/eval_bridge.py`, `worker/scripts/validate_export.py`, …)
   through the same venv, so all torch work shares one entry and agents never hit "no torch".
+  ★ 2026-10-17（plan/single-resident-trainer §1）：常驻训练**只允许**
+  `--script trainer/run_rl_cluster.py`（serve，服务所有课程）；per-course `trainer/run_rl.py` / `run_bc.py`
+  直启会被 python 侧准入闸拒（`worker/trainer_gate.py`）——一次性腿例外（`--smoke` /
+  `--export-bundle` / `--collect-only` / `--echo-config`），排障逃生舱 `--allow-detached-trainer`
+  （放行 + 告警 + 控制台横幅）。本地 BC 连续训练入口已退役（同 plan §1.4）。
   Legacy flat names auto-alias to their package home (`train_bc.py` → `worker/train/bc.py`,
   `gen_self_inj.py` → `worker/scripts/gen_self_inj.py`, `train_rl.py` → `trainer/run_rl.py`; DECISIONS §324).
 
