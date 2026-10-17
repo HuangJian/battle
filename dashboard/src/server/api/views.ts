@@ -3,6 +3,7 @@ import { httpOk, pidAlive } from '../../core/net'
 import { componentScope, entryForCourse, loadRegistry, scopeOf } from '../../core/registry'
 import type { Component, RlConfig } from '../../core/types'
 import type { ComponentView, DiskFactsView, NodeView } from '../../web/view'
+import { heartbeatAlive } from '../../core/trainer-heartbeat'
 import { COMPONENT_LABELS, busy, componentBusy } from '../actions'
 import { ALL_COMPONENTS, HEALTHY_PORTS } from './component-meta'
 import { logTail, resolveComponentLog } from './logs'
@@ -80,9 +81,16 @@ export async function computeComponentHealth(
         out.set(key, cloudflaredHealthy(hubOk, tunnelOk))
         return
       }
-      if (key === 'trainingLoop' || key === 'localWorker') {
-        // 存活即健康：trainingLoop 就绪以日志产出为准（iters 指标）；localWorker 是
-        // 出站轮询者（没有 HTTP 端点可探），存活即它在轮询。
+      if (key === 'trainingLoop') {
+        // ★ 2026-10-17（plan/single-resident-trainer §2）：这里从「存活即健康」改成**真实心跳判据**
+        //   ——serve 单线程轮转，卡死时进程还在，旧的写死 true 会让「判得出来」在控制台上不成立。
+        //   `heartbeatAlive()` 内部已含「账本 pid 活 ∧ 心跳不陈旧」（不可知一律不判死）。
+        out.set(key, heartbeatAlive())
+        return
+      }
+      if (key === 'localWorker') {
+        // 存活即健康：localWorker 是出站轮询者（没有 HTTP 端点可探），存活即它在轮询。
+        // （本组件**没有**心跳文件——不要把它一并接上 trainer 的判据。）
         out.set(key, true)
       }
     }),
@@ -109,9 +117,13 @@ export async function componentViews(
     const status: ComponentView['status'] = e ? (alive ? 'running' : 'exited') : 'stopped'
     // 健康只在**在跑**时有意义（停了的组件没有「健康」这回事，陈旧探测不得上屏）。
     let healthy: boolean | null = status === 'running' ? (h.get(key) ?? null) : null
-    if (status === 'running' && (key === 'trainingLoop' || key === 'localWorker')) {
-      // 存活即健康（无 HTTP 端点可探）：**结构**事实，不经探测缓存——
-      // 否则刚启的进程要等一拍才变绿（缓存里还是「那时它不在跑」）。
+    if (status === 'running' && key === 'trainingLoop') {
+      // ★ 2026-10-17（plan/single-resident-trainer §2）：trainingLoop 不再写死 true ——
+      //   它现在有心跳判据（`computeComponentHealth` 同上）；**结构**事实仍现算（不经探测缓存，
+      //   否则刚启的进程要等一拍才变绿：缓存里还是「那时它不在跑」）。localWorker 维持写死 true。
+      healthy = heartbeatAlive()
+    }
+    if (status === 'running' && key === 'localWorker') {
       healthy = true
     }
     // 运行时动态查找（§374）：静态映射 ≠ 实际落盘文件（cloudflared 动态文件名、

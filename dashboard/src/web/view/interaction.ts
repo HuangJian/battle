@@ -54,6 +54,10 @@ export type AlertAckKind =
   //   subject = 课程键，eventId = `pid@at` ⇒ **同一条不重复打断**，而「停了再起」是新键
   //   （必重弹；pid 复用不会把新事件吃掉，因为 at 也在键里）。
   | 'detached-trainer'
+  //   `trainer-stall`（plan/single-resident-trainer §2）：共享 trainer 心跳陈旧。
+  //   subject = `'shared'`（服务所有课，无单课归属），eventId = `pid@ts` ⇒ 同一场卡死不反复
+  //   打断，而「重启后再卡」是新键（ts 变了）⇒ 必重弹。
+  | 'trainer-stall'
 
 export function alertAckKey(kind: AlertAckKind, subject: string, eventId: string): string {
   return `${kind}|${subject}|${eventId}`

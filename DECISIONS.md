@@ -7165,3 +7165,29 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   课程表可淘汰 ⇒ tmp 被清之后内存里的账本不再永久驻留。守卫随之更新（成员数 121→124、
   `_init_ledger` 字段 +`_ledger_off`、`_read_raw_body` 调用点 3→2、`SEND_TIMEOUT` 读点 `_bytes`→`_send_body`、
   `store_offline` 白名单 +`common.hashing`）。
+
+## §2026-10-17-goalnn-single-resident-trainer（常驻写者收成一个 serve：准入闸 + 心跳判死；卡死只告警不自动重启）
+
+- **来源**：`plan/single-resident-trainer.plan.md` §1–§2 + `plan/single-resident-trainer.review-bf.md`
+  （P0-1 消费面 / P0-2 写点覆盖 / P0-3 预采子进程 / P1-F3 env 口 / P1-F6 pid 身份）。
+- **S1 闸（`worker/trainer_gate.py`）**：`trainer/run_rl.py` 背四种角色，而常驻写者只允许
+  `run_rl_cluster.py --serve`；判据 = **没有任何一次性标志** ⇒ 视为常驻 ⇒ 拒启（与 `--course` 无关），
+  拒启消息必给替代（`--force` 是锁抢先、过不了闸）。逃生舱 `--allow-detached-trainer` 放行 +
+  自报 `tmp/trainer-detached.json`（环形 5 条）⇒ 控制台 `warn` 横幅。
+- **S2 写侧取「独立看门狗线程」**（新 `worker/trainer_heartbeat.py`；先例 `worker/eval_heartbeat.py`），
+  不是 plan 首选的「每拍 + 两处 tick」：serve 是**单线程**，一次 `sup.step()` 之内可合法阻塞到 +3600s
+  （预采 join / PPO 让位 / 引擎冷启动），写点挂在拍上会把**健康进程**写成陈旧 ⇒ 误杀。线程每 5s 原子写
+  （`NN_TRAINER_HEARTBEAT` 可重定向），STALE=300s ⇒ 最长合法间隔 < STALE/2。
+- **S2 消费面（定案 B，否决 A 自动重启）**：`healthy` = 账本 pid 活 ∧ 心跳不陈旧；`stale` ⇒ 告警坞一条
+  `err`（`trainer-stall`，指引「组件卡 trainingLoop 停止→启动」），**不自动重启**。理由：① 全仓没有
+  任何组件是自动重启的，为 trainer 单造一类机制要自己回答 pid 复用 / 写盘中途 / in-flight PPO 让位；
+  ② 卡死的是**活**进程，杀掉比晚 5 分钟重启贵（一根 20 分钟 PPO 尾巴被砍 = 重跑一轮）；
+  ③ 恢复路径已存在（`trainingLoop` 在 `COMPONENT_KILL_TREE` 里），只是没人知道要按。**退路**：将来要做
+  自动重启，应是**通用监督器功能**（所有组件同一口径），不是 trainer 专属旁路。
+- **不可知一律不判死（四条，都有用例）**：文件缺失/坏 JSON · `hb.pid ≠ 账本 pid`（冒烟预演占**同一个**
+  `trainingLoop` 槽）· 判据上线前启动的 serve（`HEARTBEAT_SINCE_MS` 一次性兼容窗）· 启动宽限 120s。
+- **被否的备选**：用 `progress_ts` 陈旧触发重启 —— 否（进度不是活性：一个 20 分钟的 PPO 等待会被当成
+  卡死，比卡死更贵）；每拍写心跳 —— 见上；`--force` 当闸的逃生舱 —— 否（锁抢先与准入是两件事，
+  闸在锁之前，混用会让「过了锁」被读成「允许常驻」）。
+- **后果**：`/api/state` 多一个 `trainerHeartbeat`（pid/ts/steps/waiting/逐课 state + verdict，只读盘 ⇒
+  控制台重启不丢）；`specs.ts`/`api/views.ts` 里 `trainingLoop` 的「存活即健康」写死 true 全部换成同一判据。

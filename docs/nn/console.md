@@ -13,6 +13,39 @@
 > 判据与呈现住 `panels/ComponentCards.tsx::codeSnapshotBadge`）。全文与理由见
 > `docs/nn/remote-transport.md §79`（本节不重复）。
 
+## §40 单一常驻 trainer：准入闸 + 心跳判死 + 两条横幅（plan/single-resident-trainer，2026-10-17）
+
+**现场**：`trainer/run_rl.py` 一个人背四种角色（常驻训练 / 冒烟 / 导出 / 预采），而常驻写者只允许
+`run_rl_cluster.py --serve`（一个进程服务所有课程）。per-course 常驻进程与 serve 抢同一批 traj/账本/权重
+（2026-09-06 双 trainer 并行写同一 traj 事故的同类面），还绕过控制台的开课三件套（2026-09-21 事故）。
+更阴的一层：**serve 卡死时进程还在**——`nextExitFailures` 只看 pid 死活，组件卡照绿，全课停摆而没人知道。
+
+**S1（闸 + 自报）**：`worker/trainer_gate.py` 判据 = **没有任何一次性标志** ⇒ 视为常驻 ⇒ 拒启
+（与 `--course` 无关）；拒启消息必给替代——否则操作员只会去找 `--force`，而 `--force` 是锁抢先、
+过不了闸（闸在锁之前）。逃生舱 `--allow-detached-trainer` 放行后**自己报**进
+`tmp/trainer-detached.json`（原子写、环形 5 条、`NN_TRAINER_DETACHED` 可重定向）⇒ 控制台 `warn` 横幅
+（`alerts.ts::detachedTrainerAlerts`，ack 键 `pid × ts`，**不**给杀进程按钮：pid 可能已复用）。
+为什么不做「每拍扫锁」：读锁 pid 判不出身份，核命令行要起 `wmic`/`pwsh`（~0.5s/次 × 185 门课）。
+
+**S2（心跳 + 判死）**：写侧 `worker/trainer_heartbeat.py` = **独立看门狗线程**（先例 `eval_heartbeat.py`），
+每 5s 原子写 `tmp/trainer-heartbeat.json`（env `NN_TRAINER_HEARTBEAT`）。为什么不挂「每拍」：serve 是
+单线程，一次 `sup.step()` 之内可合法阻塞到 +3600s（预采 join / PPO 让位 / 引擎冷启动）——写点挂在拍上
+会把**健康进程**写成陈旧。读侧判据只住一处：`dashboard/src/core/trainer-heartbeat.ts::heartbeatVerdict`
+（`fresh` / `stale` / `unknown`），三处消费（`specs.ts::trainerServeSpec.healthy`、`api/views.ts` 组件健康、
+`/api/state` 的 `trainerHeartbeat`）共用同一判决。
+
+**四条「不判死」**（误杀比漏报贵：杀一个在写盘/等 PPO 的活进程 = 重跑一轮）：文件缺失/坏 JSON ·
+`hb.pid ≠ 账本 pid`（冒烟预演占**同一个** `trainingLoop` 槽）· 判据上线前启动的 serve
+（`HEARTBEAT_SINCE_MS` 一次性兼容窗）· 启动宽限 120s。`stale` ⇒ 告警坞一条 `err`
+（`trainer-stall`，指引「组件卡 trainingLoop 停止→启动」），**不自动重启**——恢复路径（停/启 + 子树清理）
+早就存在，缺的只是「有人知道要按」。
+
+**判据**：`dashboard/tests/trainer-heartbeat.test.ts`（判据真值表 + 真账本/真心跳文件驱动
+`trainerServeSpec.healthy()`）· `web-alert-dock.test.ts`（stale ⇒ 1 条 err、fresh ⇒ 0 条、ack 后不重弹、
+新 ts 必重弹）· `server-api-state-view.test.ts`（两次快照逐字段相同 ⇒ 只读盘、控制台重启不丢）·
+`nn-training/tests/worker/test_trainer_heartbeat.py`（环形/原子/env/写失败不阻断）。
+决策 → `DECISIONS.md §2026-10-17-goalnn-single-resident-trainer`；计划 → `plan/single-resident-trainer.plan.md`。
+
 ## §39 组件错误登记表：五处散落的错误收进一张表 + 首页入口 + `/errors` 详情页（plan/component-error-registry，2026-10-16）
 
 **现场（本节的由来）**：TrainingLoop 缺 BC 参考 ⇒ boot 崩溃，而**只有翻日志才知道原因**——进程不在、退出看护只记

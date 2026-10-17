@@ -523,6 +523,8 @@ export function App({ initial }: AppProps) {
             selfDisk: stateView?.selfDisk ?? null,
             // 独立 trainer（plan/single-resident-trainer §1.5）：逃生舱自报，服务端已过滤。
             detachedTrainers: stateView?.detachedTrainers ?? null,
+            // 共享 trainer 心跳（同 plan §2）：`unknown` 已在服务端吃掉 ⇒ 这里只剩 fresh/stale。
+            trainerHeartbeat: stateView?.trainerHeartbeat ?? null,
             // 组件错误登记表的轻量投影（plan/component-error-registry §4.5，第 9 类）：
             // 未 ack 数与 severity 在**客户端**算（acks 住 localStorage）⇒ 服务端只给逐条投影。
             errors: stateView?.errors ?? null,

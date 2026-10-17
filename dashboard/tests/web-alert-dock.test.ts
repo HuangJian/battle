@@ -1030,3 +1030,46 @@ describe('独立 trainer 横幅（plan/single-resident-trainer §1.5）', () => 
     expect(again.length).toBe(1) // 新事件新键
   })
 })
+
+describe('共享 trainer 卡死横幅（plan/single-resident-trainer §2.2）', () => {
+  const staleHb = {
+    pid: 4242,
+    ts: Math.floor(clean.now / 1000) - 900,
+    steps: 4413,
+    waiting: 3,
+    courses: {},
+    verdict: 'stale' as const,
+    ageSec: 900,
+  }
+
+  it('stale ⇒ 1 条 err（指向「停止→启动」，不给自动重启按钮）', () => {
+    const items = buildAlerts({ ...clean, trainerHeartbeat: staleHb })
+    expect(items.length).toBe(1)
+    const it0 = items[0]!
+    expect(it0.severity).toBe('err')
+    expect(it0.role).toBe('alert')
+    expect(it0.title).toContain('PID 4242')
+    expect(it0.title).toContain('900s')
+    expect(it0.detail).toContain('trainingLoop 停止→启动')
+    expect(it0.actions.map((a) => a.kind)).toEqual(['ack']) // 不做自动重启：杀活进程是新的误伤面
+  })
+
+  it('fresh / null 都不出条目（unknown 已在服务端吃掉；不可知 ≠ 有病）', () => {
+    expect(buildAlerts({ ...clean, trainerHeartbeat: { ...staleHb, verdict: 'fresh' } })).toEqual(
+      [],
+    )
+    expect(buildAlerts({ ...clean, trainerHeartbeat: null })).toEqual([])
+  })
+
+  it('ack 后不再弹；重启后再卡（新 ts）必重弹', () => {
+    const items = buildAlerts({ ...clean, trainerHeartbeat: staleHb })
+    const key = items[0]!.actions.find((a) => a.kind === 'ack')!.ackKey!
+    expect(buildAlerts({ ...clean, trainerHeartbeat: staleHb, acks: [key] })).toEqual([])
+    const again = buildAlerts({
+      ...clean,
+      trainerHeartbeat: { ...staleHb, ts: staleHb.ts + 3600, ageSec: 60 },
+      acks: [key],
+    })
+    expect(again.length).toBe(1)
+  })
+})

@@ -35,6 +35,7 @@ import type {
   DetachedTrainerView,
   DiskFactsView,
   LoopComplete,
+  TrainerHeartbeatView,
 } from './console-types'
 import type { OfflineLeaseView, OfflineStalledView } from './course-overview'
 import { fmtTs } from './format'
@@ -158,6 +159,11 @@ export interface AlertInput {
    *  `null`/缺省 = 旧服务端（没有 `/api/errors`）或本拍登记表不可用 ⇒ **不出汇总条、不编 N**
    *  （与 `selfDisk` 同口径：不可知 ≠ 没问题）。 */
   errors?: ErrorSummaryView | null
+  /** **共享 trainer 心跳**（`ConsoleStateView.trainerHeartbeat`；plan/single-resident-trainer §2）。
+   *
+   *  服务端已经把 `unknown`（文件缺失 / pid 对不上 / 启动宽限 / 旧进程）吃掉了 ⇒ 这里看到的
+   *  `stale` 就是「判据说它卡了」；`null`/缺省 = 不可知 ⇒ **不出条目**。 */
+  trainerHeartbeat?: TrainerHeartbeatView | null
   /** **独立 trainer 事实**（`ConsoleStateView.detachedTrainers`；plan/single-resident-trainer §1.5）。
    *
    *  来源 = python 准入闸的逃生舱自报（`--allow-detached-trainer` 放行时会写一笔）；服务端已按
@@ -181,6 +187,7 @@ export function buildAlerts(input: AlertInput): AlertItem[] {
     // 磁盘排最前（同严重度内按输入顺序稳定排序）：它和停机同为 `err` 时，坞默认只展开 2 条，
     // 而低盘是**会自己变得更糟**的那一条，不能被折进「还有 N 条」。
     ...selfDiskAlerts(input),
+    ...trainerStallAlerts(input),
     ...detachedTrainerAlerts(input),
     ...cloudHaltAlerts(input),
     ...loopCompleteAlerts(input),
@@ -225,6 +232,40 @@ function selfDiskAlerts(input: AlertInput): AlertItem[] {
             : '尚未跌破地板——agent 仍在正常收活；跌破后会对全部作业回 503，' +
               'trainer 连续瞬时失败达阈值即停派 self（rollout 与 eval 两条链路）。') +
           '处置：清 nn-training/tmp 下陈旧课程分片（节点统计抽屉里有本机盘余量读数）。',
+        role: 'alert',
+        actions: [{ kind: 'ack', label: '知道了', ackKey }],
+      },
+      '',
+    ),
+  ]
+}
+
+/** 第 11 类：**共享 trainer 疑似卡死**（plan/single-resident-trainer §2.2）——`err`，只给 `ack`。
+ *
+ *  为什么这条必须存在：S1 关掉 per-course 常驻进程之后，serve 是唯一写者；它卡住时
+ *  旧判据（pid 活着）照绿，**没有任何东西会告诉操作员**「全课停摆」——这条横幅就是那次
+ *  判断的出口（消费面 = 人工「停止→启动」，**不自动重启活进程**：杀一个正在写盘/等 PPO 的
+ *  trainer 比等 5 分钟贵得多，plan §2.2 的裁决 B）。
+ *
+ *  可见范围：共享 trainer 服务**所有**课程（没有单课归属）⇒ 不按课过滤，全局成列。
+ */
+function trainerStallAlerts(input: AlertInput): AlertItem[] {
+  const hb = input.trainerHeartbeat
+  if (!hb || hb.verdict !== 'stale') return []
+  const ackKey = alertAckKey('trainer-stall', 'shared', `${hb.pid}@${hb.ts}`)
+  if (input.acks.includes(ackKey)) return []
+  return [
+    withCopy(
+      {
+        id: `trainer-stall-${hb.pid}`,
+        severity: 'err',
+        icon: '🧊',
+        title: `共享 trainer 疑似卡死（${hb.ageSec}s 无心跳，PID ${hb.pid}）`,
+        detail:
+          `最后一拍心跳 ${hb.ageSec}s 前（判死窗口 300s；写侧每 5s 一拍 ⇒ 正常不应超过十几秒）。` +
+          `${hb.waiting} 门课在等外部时**也会**持续写心跳 —— 心跳停 = 循环没转，` +
+          `最后一次刷新记录 ${hb.steps} 步。处置：组件卡 trainingLoop 停止→启动` +
+          `（重启不丢进度：账本/指针在盘上，serve 按指针续跑）。`,
         role: 'alert',
         actions: [{ kind: 'ack', label: '知道了', ackKey }],
       },

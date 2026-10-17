@@ -24,6 +24,7 @@ import { readLogTail } from './logs'
 import { readClusterSnapshot } from '../bundles/snapshot'
 import { getFleetProbes, getSlowSnapshot } from './snapshot-refresher'
 import { readDetachedTrainers } from './detached-trainers'
+import { resolveTrainerHeartbeat } from '../../core/trainer-heartbeat'
 
 export async function buildStateView(courseOverride?: string): Promise<ConsoleStateView> {
   const cfg = loadConfigSafe()
@@ -205,6 +206,8 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
     // 独立 trainer（escape hatch 自报；plan/single-resident-trainer §1.5）：写侧是 python 准入闸的
     // 放行分支，这里是**纯读**（不扫锁、不起进程）；`null` = 文件不在/不可读 ⇒ 坞不出条目。
     detachedTrainers: readDetachedTrainers(),
+    // 共享 trainer 心跳（plan/single-resident-trainer §2）：`null` = 不可知（不做判断、不上屏）。
+    trainerHeartbeat: resolveTrainerHeartbeat(),
     modes: {
       stream: Number(cfg.rl.stream ?? 0),
       doubleBuffer: Number(cfg.rl.double_buffer ?? 0),
