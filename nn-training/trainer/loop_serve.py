@@ -1066,7 +1066,7 @@ def serve(
                     )
             # 心跳快照：这一拍的步数 + 每课状态。在**主线程**里取（只读 sup.courses），写线程
             # 只做落盘 —— 就不会有「写线程遍历主线程正在改的 dict」那种竞态。
-            heartbeat.update(
+            heartbeat.publish(
                 steps=report.steps,
                 waiting=sum(
                     1 for q in sup.courses.values() if str(getattr(q, "state", "")).startswith("WAIT")
@@ -1099,7 +1099,7 @@ def serve(
         }
         for course, q in sup.courses.items()
     }
-    heartbeat.stop()
+    heartbeat.shutdown()
     if own_pool:
         pool.close()  # 自己建的池：退出前释放全部 torch 栈（注入的池归调用方管）
     report.engines = pool.snapshot()  # 快照在 close 之后：`loaded` 为空、计数器保留

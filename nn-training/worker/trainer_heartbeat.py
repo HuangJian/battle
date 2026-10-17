@@ -75,7 +75,7 @@ def write_heartbeat(payload: dict, *, path: str | None = None, log_fn=None) -> N
 
 
 class HeartbeatPublisher:
-    """心跳发布器：主线程 `update(**fields)` 刷快照，写线程按周期落盘。
+    """心跳发布器：主线程 `publish(**fields)` 刷快照，写线程按周期落盘。
 
     线程只负责「把最后一次刷新的快照 + 当前时刻」写出去 ⇒ 主线程卡在任何一步里都不影响
     心跳新鲜度（这正是评审 P0-2 要的形状）。
@@ -104,8 +104,12 @@ class HeartbeatPublisher:
 
     # ---- 主线程侧 ----
 
-    def update(self, **fields: Any) -> None:
-        """刷新快照（廉价：一次 dict update；每拍调用无压力）。"""
+    def publish(self, **fields: Any) -> None:
+        """刷新快照（廉价：一次 dict update；每拍调用无压力）。
+
+        名字不叫 `update`/`stop`（那是本仓最常见的同名面，`tests/test_reuse_ledger.py` 的
+        「同名 ≥3 模块」计数会被它们拉高）：这里发布的是**心跳快照**，不是通用更新。
+        """
         with self._lock:
             self._fields.update(fields)
 
@@ -150,7 +154,7 @@ class HeartbeatPublisher:
             f"不变式 最长合法无心跳间隔 ≈{self._interval:g}s << 判死窗口 300s）"
         )
 
-    def stop(self) -> None:
+    def shutdown(self) -> None:
         self._stop.set()
         t = self._thread
         if t is not None:

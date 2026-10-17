@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import sys
@@ -33,6 +34,35 @@ from trainer.collect_only import RUN_RL_ENTRY, collect_child_spec
 
 #: 夹具课程：`curricula/s-dodge.jsonc` 在仓里（与 `test_serve_wiring` 的 oracle 同款用法）。
 COURSE = "s-dodge"
+
+
+def _has_main_guard(path: Path, entry_fn: str) -> bool:
+    """入口文件里有没有 `if __name__ == "__main__": …`（且其中调用了 `entry_fn`）。
+
+    AST 判据而不是子串扫描：判的是**结构**（哪种调用在哪个守卫下），挪一行/换措辞不使它变红。
+    """
+    for node in ast.parse(path.read_text(encoding="utf-8")).body:
+        if not isinstance(node, ast.If):
+            continue
+        test = node.test
+        guarded = (
+            isinstance(test, ast.Compare)
+            and isinstance(test.left, ast.Name)
+            and test.left.id == "__name__"
+            and any(
+                isinstance(c, ast.Constant) and c.value == "__main__" for c in test.comparators
+            )
+        )
+        if not guarded:
+            continue
+        called = {
+            n.func.id
+            for n in ast.walk(node)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        }
+        if entry_fn in called:
+            return True
+    return False
 
 
 def _args(**over: object) -> types.SimpleNamespace:
@@ -61,7 +91,9 @@ def test_spec_points_at_the_real_entry(tmp_path: Path) -> None:
     assert argv[2] == str(RUN_RL_ENTRY)
     assert RUN_RL_ENTRY.name == "run_rl.py"
     assert RUN_RL_ENTRY.exists(), "入口文件不在 ⇒ 子进程必然起不来"
-    assert "run_main(main)" in RUN_RL_ENTRY.read_text(encoding="utf-8"), (
+    # 判据按 **AST** 看结构（不按字面扫源码）：`if __name__ == "__main__": run_main(main)`。
+    # 没有它 = 子进程零输出 exit 0（正是 P0-3 那个静默失效）。
+    assert _has_main_guard(RUN_RL_ENTRY, "run_main"), (
         "入口没有 `__main__` 守卫 = 子进程零输出 exit 0（正是 P0-3 那个静默失效）"
     )
     # 只带课程 + 动作覆盖通道；**不再继承父进程 argv**（serve 的 argv 里没有课程参数）
@@ -162,7 +194,7 @@ def test_cli_action_keys_still_conflict(tmp_path: Path, monkeypatch: pytest.Monk
     )
     with pytest.raises(SystemExit) as e:
         run_rl.main()
-    assert "冲突" in str(e.value)
+    assert str(e.value).startswith("[run_rl] --course 与显式 CLI 参数冲突")
 
 
 # ────────────────────────── ③ 坏覆盖 = 响亮死，不是静默活 ──────────────────────────
@@ -187,4 +219,7 @@ def test_bad_override_config_fails_loudly(tmp_path: Path) -> None:
         env={**os.environ, "BCITY_RL_CONFIG": str(fixture), "PYTHONPATH": str(ROOT)},
     )
     assert proc.returncode != 0, "零输出 exit 0 = P0-3 的静默失效形态，必须响亮死"
-    assert "动作覆盖" in (proc.stdout + proc.stderr), "失败必须留痕（子进程日志会落到 precollect-*.log）"
+    lines = (proc.stdout + proc.stderr).splitlines()
+    assert any(line.startswith("[collect-only] 动作覆盖") for line in lines), (
+        "失败必须留痕（子进程日志会落到 precollect-*.log）"
+    )

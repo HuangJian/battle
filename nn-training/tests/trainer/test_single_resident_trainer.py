@@ -59,9 +59,9 @@ def test_bare_course_run_is_refused() -> None:
     """裸 `--course` = 常驻训练循环 ⇒ 拒启，且消息给出替代命令。"""
     msg = refuse_detached_trainer(_args())
     assert msg == REFUSE_MESSAGE
-    assert "run_rl_cluster.py --serve" in msg
-    assert "bun run dashboard" in msg
-    assert "--allow-detached-trainer" in msg  # 排障逃生舱在文案里（否则操作员只会找 --force）
+    # 拒启必须**给出替代**（否则操作员只会去找 `--force`）：三条替代路径 + 逃生舱。
+    # 判据是消息的**结构**（四条 `  · ` 条目），不是某几个词的字面（改措辞不该红）。
+    assert msg.count("\n  · ") == 4
 
 
 def test_legacy_global_run_without_course_is_refused_too() -> None:
@@ -102,7 +102,7 @@ def test_collect_only_zero_is_not_an_action() -> None:
 def test_bc_message_points_at_bc_alternative() -> None:
     msg = refuse_detached_trainer(_args(), message=REFUSE_MESSAGE_BC)
     assert msg == REFUSE_MESSAGE_BC
-    assert "serve" in msg and "开课" in msg
+    assert msg.count("\n  · ") == 3  # 控制台 / 一次性腿 / 逃生舱：BC 侧也有替代
 
 
 # ────────────────────────── ③ 逃生舱自报（横幅数据源） ──────────────────────────
@@ -113,6 +113,7 @@ def test_hatch_writes_report_with_env_redirect(tmp_path: Path, monkeypatch) -> N
     target = tmp_path / "trainer-detached.json"
     monkeypatch.setenv("NN_TRAINER_DETACHED", str(target))
     assert detached_report_path() == str(target)
+    monkeypatch.setattr(sys, "argv", ["trainer/run_rl.py", "--course", "x20-clutch"])
     announce_escape_hatch("x20-clutch", entry="run_rl", log_fn=lambda _m: None)
     got = json.loads(target.read_text(encoding="utf-8"))
     assert len(got) == 1
@@ -121,7 +122,8 @@ def test_hatch_writes_report_with_env_redirect(tmp_path: Path, monkeypatch) -> N
     assert rec["course"] == "x20-clutch"
     assert rec["entry"] == "run_rl"
     assert isinstance(rec["at"], float | int)
-    assert "trainer" in rec["argv"]
+    # argv 摘要 = 进程命令行（横幅要显示「谁起的」，逐字对齐而不是「含某个词」）
+    assert rec["argv"] == "trainer/run_rl.py --course x20-clutch"
 
 
 def test_hatch_report_keeps_last_n_newest_first(tmp_path: Path, monkeypatch) -> None:
@@ -152,7 +154,7 @@ def test_hatch_report_write_failure_does_not_raise(tmp_path: Path, monkeypatch) 
     monkeypatch.setenv("NN_TRAINER_DETACHED", str(blocker / "x.json"))
     lines: list[str] = []
     note_detached_trainer("c", log_fn=lines.append)  # 不抛
-    assert lines and "WARN" in lines[0]
+    assert len(lines) == 1 and lines[0].startswith("[trainer_gate] WARN")
 
 
 # ────────────────────────── 入口接线（真入口跑一遍） ──────────────────────────
@@ -174,8 +176,7 @@ def test_run_rl_entry_refuses_bare_start(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.chdir(ROOT)  # main() 自己会 chdir 到仓根；monkeypatch 兜底还原
     with pytest.raises(SystemExit) as e:
         run_rl.main()
-    msg = str(e.value)
-    assert "run_rl_cluster.py --serve" in msg
+    assert str(e.value) == REFUSE_MESSAGE  # 真入口吐的就是那条替代消息（不多不少）
     assert not (tmp_path / "detached.json").exists()  # 拒启 = 不记自报
 
 
@@ -186,4 +187,4 @@ def test_run_bc_entry_refuses_bare_start(monkeypatch) -> None:
     monkeypatch.chdir(ROOT)
     with pytest.raises(SystemExit) as e:
         run_bc.main(["--course", "x20-clutch"])
-    assert "serve" in str(e.value)
+    assert str(e.value) == REFUSE_MESSAGE_BC

@@ -31,7 +31,7 @@ def test_tick_writes_full_payload(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("NN_TRAINER_HEARTBEAT", str(p))
     assert hb.heartbeat_path() == str(p)
     pub = hb.HeartbeatPublisher(now=lambda: 1792.0)
-    pub.update(
+    pub.publish(
         steps=4413,
         waiting=2,
         courses={"y20-far": {"state": "WAIT_EXTERNAL", "rounds_done": 137, "next_it": 138}},
@@ -50,7 +50,7 @@ def test_tick_is_throttled(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("NN_TRAINER_HEARTBEAT", str(p))
     clock = [1000.0]
     pub = hb.HeartbeatPublisher(now=lambda: clock[0], interval=5.0)
-    pub.update(steps=1)
+    pub.publish(steps=1)
     assert pub.tick(force=True) is True
     clock[0] += 1.0
     assert pub.tick() is False  # 间隔内：不写（写点密集也不会把盘写爆）
@@ -65,7 +65,7 @@ def test_disabled_by_env(tmp_path: Path, monkeypatch) -> None:
     pub = hb.HeartbeatPublisher()
     assert pub.tick(force=True) is False
     pub.start()  # 不起线程
-    pub.stop()
+    pub.shutdown()
     assert not p.exists()
     assert hb.heartbeat_enabled() is False
 
@@ -78,7 +78,7 @@ def test_io_failure_does_not_raise(tmp_path: Path, monkeypatch) -> None:
     lines: list[str] = []
     pub = hb.HeartbeatPublisher(log_fn=lines.append)
     pub.tick(force=True)  # 不抛
-    assert lines and "WARN" in lines[0]
+    assert len(lines) == 1 and lines[0].startswith("[heartbeat] WARN")
 
 
 def test_start_writes_first_beat_and_stops(tmp_path: Path, monkeypatch) -> None:
@@ -86,16 +86,21 @@ def test_start_writes_first_beat_and_stops(tmp_path: Path, monkeypatch) -> None:
     p = tmp_path / "trainer-heartbeat.json"
     monkeypatch.setenv("NN_TRAINER_HEARTBEAT", str(p))
     pub = hb.HeartbeatPublisher(interval=0.05)
-    pub.update(steps=3)
+    pub.publish(steps=3)
     pub.start()
     try:
         assert p.exists(), "start() 必须立刻落第一拍"
         first = _read(p)
         assert first["steps"] == 3
-        time.sleep(0.12)  # 至少一个周期
+        # 等的是**谓词**（写线程又落了一拍），不是「睡够一个周期」：固定时长在老机器/负载下
+        # 会假红，而这里要证明的恰好是「它自己会再写」（tests/test_no_sleep_as_sync.py 的
+        # 「轮询步长」族）。
+        deadline = time.monotonic() + 5.0
+        while pub.writes < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)  # sleep-ok: 轮询步长（等的是写计数，兜底只挡挂起）
         assert pub.writes >= 2, "写线程得真的在写"
     finally:
-        pub.stop()
+        pub.shutdown()
     assert pub._thread is None
 
 
