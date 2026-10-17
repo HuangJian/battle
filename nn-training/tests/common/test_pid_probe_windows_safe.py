@@ -221,7 +221,7 @@ def test_stale_lock_still_cleaned_after_windows_fix(tmp_path: Path) -> None:
     """锁语义不受影响：持有者已死 → 陈旧锁被接管（修复不得把清理能力弄丢）。"""
     from worker.train.loop_util import acquire_lock, cleanup_lock
 
-    lock = str(tmp_path / ".train_loop.course-a.lock")
+    lock = str(tmp_path / ".run_rl.course-a.lock")  # 测的是探测/接管逻辑，与 kind 无关
     Path(lock).write_text(f"{_dead_pid()}|python|0", encoding="utf-8")
     try:
         assert acquire_lock(lock) is True
@@ -234,7 +234,7 @@ def test_pid_zero_lock_is_not_treated_as_live(tmp_path: Path) -> None:
     from worker.train.loop_util import acquire_lock
 
     for bogus in ("0", "-1"):
-        lock = str(tmp_path / f".train_loop.bogus{bogus.replace('-', 'm')}.lock")
+        lock = str(tmp_path / f".run_rl.bogus{bogus.replace('-', 'm')}.lock")
         Path(lock).write_text(f"{bogus}|python|0", encoding="utf-8")
         assert acquire_lock(lock) is True, f"PID {bogus} 的残锁应被清理后接管"
 

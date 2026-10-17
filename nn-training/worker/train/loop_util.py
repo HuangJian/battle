@@ -1,10 +1,15 @@
-"""loop_util —— train_loop 的单调工具（2026-09-02 从 trainer/train_loop.py 拆出）。
+"""loop_util —— 本地训练循环的单调工具（2026-09-02 从当时顶层的 BC 训练入口拆出）。
 
-纯 stdlib 工具（无 torch 依赖，可被 trainer/train_loop.py 在任何 import 顺序下加载）：
-状态行输出（_emit/_ts/_fmt_dur）、epoch 进度 Tee（_TrainTee）、心跳线程、
-单实例锁（PID 文件）、语料自动导出（auto_export_corpus）。trainer/train_loop.py
-保留 torch-thread 预解析 + main() 编排 + 纯函数 re-export（tests 引用
-train_loop._fmt_dur / parse_val_loss_from_output）。
+纯 stdlib 工具（无 torch 依赖，可在任何 import 顺序下加载）：状态行输出
+（_emit/_ts/_fmt_dur）、epoch 进度 Tee（_TrainTee）、心跳线程、单实例锁（PID 文件）、
+语料自动导出（auto_export_corpus）。
+
+★ 2026-10-17（plan/single-resident-trainer §1.4，S1）：唯一使用者 "本地 BC 连续训练入口"
+已随本地 torch 训练腿退役而删除。今天仍被 `run_rl` / `run_bc` / `loop_serve` 用的是
+**锁/课程键**那几个函数（acquire_lock / cleanup_lock / course_lock_path /
+course_key_from_path / validate_course_name）；`_TrainTee` / 心跳线程 / auto_export_corpus /
+_emit 这几个**已无使用者**（核实过：grep 全仓零调用）——去留归 S3 判（不在这里删，
+免与 S1 的删除腿混提）。
 """
 
 from __future__ import annotations
@@ -194,7 +199,7 @@ def validate_course_name(course: str) -> str:
 
 
 def course_lock_path(base_dir: str, course: str, kind: str) -> str:
-    """课程 → 锁文件路径：``.run_rl.<course>.lock`` / ``.train_loop.<course>.lock``。
+    """课程 → 锁文件路径：``.<kind>.<course>.lock``（如 ``.run_rl.s-dodge.lock``）。
 
     course 为空时沿用旧全局文件名（``.run_rl.lock``）——无 ``--course`` 的老调用
     默认行为零变化（plan §0.5-4）。
@@ -218,7 +223,7 @@ def course_key_from_path(course_path: str) -> str:
     return validate_course_name(stem)
 
 
-def acquire_lock(lock_path: str, *, force: bool = False, tag: str = "train_loop") -> bool:
+def acquire_lock(lock_path: str, *, force: bool = False, tag: str = "lock") -> bool:
     """PID 文件单实例锁（**薄壳**——实现唯一住在 `common/instance_lock`；锁文件格式仍是
     ``PID|EXE_PATH|START_TIMESTAMP``，裸 PID 旧文件仍兼容）。
 

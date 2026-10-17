@@ -247,7 +247,9 @@ export function validateCourseName(course: string): string {
   return c
 }
 
-export type LockKind = 'run_rl' | 'train_loop' | 'run_bc' | 'run_cluster'
+// ★ 2026-10-17（plan/single-resident-trainer §1.4）：`train_loop` 已退役（本地 BC 连续训练
+//   入口被删）——锁种类与 `TRAINER_SCRIPT`（launch/cli.ts）必须**同步**，两处是同一张表。
+export type LockKind = 'run_rl' | 'run_bc' | 'run_cluster'
 
 /** per-course 单实例锁名；无课程沿用旧全局文件名（默认行为零变化，plan §0.5-4）。 */
 export function lockName(course: string, kind: LockKind): string {
@@ -266,7 +268,7 @@ export function locksDir(): string {
   return process.env.BCITY_LOCKS_DIR ?? NN_TRAINING
 }
 
-/** 锁文件绝对路径（`locksDir()` 下；run_rl/train_loop 的锁都锚在脚本目录）。 */
+/** 锁文件绝对路径（`locksDir()` 下；run_rl/run_bc 的锁都锚在脚本目录）。 */
 export function lockPathFor(course: string, kind: LockKind): string {
   return path.join(locksDir(), lockName(course, kind))
 }

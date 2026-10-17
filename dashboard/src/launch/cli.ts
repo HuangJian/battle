@@ -4,7 +4,9 @@
  *    - venv+torch 未就绪 → 委派 tools/bootstrap.py（安装逻辑只在 tools/bootstrap.py 一份）；
  *    - torch 线程 env（任何 torch import 之前设置，含 OMP_PROC_BIND §17 定案）；
  *    - --script 解析（根裸名 / 子包路径 / 旧扁平名别名，DECISIONS §324）+ 路径守卫；
- *    - pre-flight：trainer/train_loop.py 锁检查（--force 跳过）；
+ *    - pre-flight：按课程单实例锁检查（run_rl；--force 跳过）——准入的**权威**在 python 侧
+ *      的准入闸（`worker/trainer_gate.py`：常驻训练只允许 `run_rl_cluster.py --serve`），
+ *      这里只是让无头通道早退；
  *    - --kill-previous：按脚本名清杀旧 python 训练进程（Bun 原生实现，替代
  *      pgrep/CIM 双平台分支——见 killPreviousTrainers）；
  *    - 冒烟门禁：启动前跑轻量冒烟（venv torch import + 权重文件契约 + BCV2 回环）；
@@ -66,7 +68,18 @@ export interface TrainOptions {
 
 /** 解析 --script：别名归一 + 路径守卫（相对 nn-training/，拒绝绝对/盘符/越级）。 */
 export function resolveTrainScript(raw: string): string {
-  let s = raw || 'trainer/train_loop.py'
+  // ★ 2026-10-17（plan/single-resident-trainer §1.4）：空 `--script` **不再有默认值**——
+  //   缺省值本身就是「替操作员猜他想跑什么」（旧缺省是已退役的本地 BC 连续训练入口）。
+  //   常驻训练只允许 `trainer/run_rl_cluster.py --serve`（闸在 python 侧
+  //   `worker/trainer_gate.py`；`--force` 是锁抢先，过不了那个闸）。
+  let s = raw || ''
+  if (s === '') {
+    fail(
+      '--script is required：常驻训练 → trainer/run_rl_cluster.py；' +
+        '一次性腿 → trainer/run_rl.py --smoke / --export-bundle <path>',
+    )
+    process.exit(2)
+  }
   if (LEGACY_ALIAS[s]) {
     log(`alias: ${s} -> ${LEGACY_ALIAS[s]} (DECISIONS §324)`)
     s = LEGACY_ALIAS[s]!
@@ -121,18 +134,14 @@ function lockHolderOf(lockPath: string): number | null {
 
 /** pre-flight：**按课程**的实例锁预检——本课已在跑则退出 0（--force 跳过）。
  *
- *  单实例护栏的权威在 python 侧（`trainer/run_rl.py::_acquire_run_rl_lock` /
- *  `trainer/train_loop.py::acquire_lock`）；本函数只是让无头通道早退、不白启 venv。
+ *  单实例护栏的权威在 python 侧（`trainer/run_rl.py::_acquire_run_rl_lock`）；准入的权威也在
+ *  python 侧（`worker/trainer_gate.py` 的准入闸，本函数看不到它）；本函数只是让无头通道早退、
+ *  不白启 venv。
  *  锁名唯一来源 slots.ts::lockName（与 python `train.loop_util::course_lock_path`
  *  同构）。无课程时沿用旧全局锁名（默认行为零变化）。 */
 export function preflightCourseLocks(force: boolean, script: string, course = ''): void {
   if (force) return
-  const kind =
-    script === 'trainer/train_loop.py'
-      ? 'train_loop'
-      : script === 'trainer/run_rl.py'
-        ? 'run_rl'
-        : null
+  const kind = script === 'trainer/run_rl.py' ? 'run_rl' : null
   if (!kind) return
   const name = lockName(course, kind)
   const holder = lockHolderOf(lockPathFor(course, kind))
@@ -283,7 +292,6 @@ export async function killPreviousTrainers(script: string, course = ''): Promise
 export const TRAINER_SCRIPT: Record<LockKind, string> = {
   run_rl: 'trainer/run_rl.py',
   run_bc: 'trainer/run_bc.py',
-  train_loop: 'trainer/train_loop.py',
   // 共享 trainer 的单实例锁（2026-09-19 / R3-5）：一个进程服务**所有**课程。
   // 它的持有者命令行里没有 `--course`（发现模式），故 isTrainerFor(..., course='') 正好匹配。
   run_cluster: 'trainer/run_rl_cluster.py',
@@ -568,7 +576,7 @@ function usage(): void {
   本地 CPU 训练脚本启动器（AGENTS §5.6 "never raw python" 的无头执行通道；
   训练组件的日常 启/停/冒烟/模式 管理走控制台 bun run dashboard）。
 
-  --script <name>.py   训练脚本（相对 nn-training/；缺省 trainer/train_loop.py；旧扁平名自动别名）
+  --script <name>.py   训练脚本（相对 nn-training/；**必填**；旧扁平名自动别名）
   --force              跳过本课单实例锁检查（只接管本课锁，绝不跨课抢占）
   --kill-previous      清杀本课上一轮训练进程（按 (script, --course) 匹配；
                        不带 --course 只杀同样不带课的老进程）
@@ -579,7 +587,7 @@ function usage(): void {
   其余参数原样透传给训练脚本。
 
   多课程并行：请总是带上 --course <name>（锁/日志/traj 均按课程隔离）；
-  不带 --course 的调用沿用旧全局锁 .run_rl.lock / .train_loop.lock。`)
+  不带 --course 的调用沿用旧全局锁 .run_rl.lock。`)
 }
 
 /**
@@ -592,7 +600,7 @@ function usage(): void {
  */
 export function parseCli(argv: string[]): Cli {
   const opts: TrainOptions = {
-    script: 'trainer/train_loop.py',
+    script: '',
     scriptArgs: [],
     force: false,
     killPrevious: false,

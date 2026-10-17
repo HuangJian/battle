@@ -956,6 +956,13 @@ def serve(
     #: ★M4 弱版：开关不一致的已喊记账（恢复一致后自动摘名——再犯再喊）。
     switch_warned: set[str] = set()
     control = ControlApplier()
+    # ★ 2026-10-17（plan/single-resident-trainer §2，S2）：心跳发布器。写侧是**独立线程**
+    #   （评审 P0-2：一次 sup.step() 之内可以合法阻塞到 +3600s，写点挂在「每拍」上会误杀
+    #   健康进程）；主线程只负责每拍刷一次快照。判死/告警在控制台（specs.ts::healthy + 告警坞）。
+    from worker import trainer_heartbeat as hb_mod
+
+    heartbeat = hb_mod.HeartbeatPublisher()
+    heartbeat.start()
     try:
         while True:
             # 控制面先于推进：暂停的那门课本拍就不会被选到（意图 → 调度，无中间态）。
@@ -1057,6 +1064,22 @@ def serve(
                     _enqueue_opened(
                         sup, runtimes, report, _newly, step_mode=step_mode, traj_root=traj_root
                     )
+            # 心跳快照：这一拍的步数 + 每课状态。在**主线程**里取（只读 sup.courses），写线程
+            # 只做落盘 —— 就不会有「写线程遍历主线程正在改的 dict」那种竞态。
+            heartbeat.publish(
+                steps=report.steps,
+                waiting=sum(
+                    1 for q in sup.courses.values() if str(getattr(q, "state", "")).startswith("WAIT")
+                ),
+                courses={
+                    c: {
+                        "state": q.state,
+                        "rounds_done": q.rounds_done,
+                        "next_it": q.next_it,
+                    }
+                    for c, q in sup.courses.items()
+                },
+            )
             if max_seconds and (now() - t0) >= max_seconds:
                 report.stop_reason = "max_seconds"
                 break
@@ -1076,6 +1099,7 @@ def serve(
         }
         for course, q in sup.courses.items()
     }
+    heartbeat.shutdown()
     if own_pool:
         pool.close()  # 自己建的池：退出前释放全部 torch 栈（注入的池归调用方管）
     report.engines = pool.snapshot()  # 快照在 close 之后：`loaded` 为空、计数器保留

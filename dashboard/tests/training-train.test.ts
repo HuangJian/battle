@@ -74,6 +74,24 @@ describe('train script resolution (dashboard/src/launch/cli.ts, DECISIONS §324)
   it('passes through subpackage paths that exist', () => {
     expect(resolveTrainScript('tools/smoke_test.py')).toBe('tools/smoke_test.py')
   })
+  it('空 --script 必填报错（不再替操作员猜；默认值是已退役入口）', () => {
+    let code = 0
+    const origExit = process.exit
+    process.exit = ((c: number) => {
+      code = c
+      throw new Error('exit')
+    }) as typeof process.exit
+    try {
+      resolveTrainScript('')
+      expect.unreachable()
+    } catch {
+      /* expected */
+    } finally {
+      process.exit = origExit
+    }
+    expect(code).toBe(2)
+  })
+
   it('rejects traversal / absolute / drive paths with exit 2', () => {
     for (const bad of ['../evil.py', 'C:\\evil.py', '/abs/evil.py', 'a/../b.py']) {
       let code = 0

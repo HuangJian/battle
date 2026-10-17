@@ -44,6 +44,11 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 > （`note_worker_prefetch` 的写入面 / `worker_prefetch_readout` 的读面——worker 软持有预取
 > 状态上报，**纯观测**：只写一张 TTL 表，不进任何派发判据）⇒ 域成员 **118 → 120**、
 > 实现名 **120 → 122**；状态表 +2（`_worker_prefetch` / `_pf_lock`）。
+>
+> ★ 2026-10-16（plan/component-error-registry §4.3-S3b）：`queue_observe` 再涨 **2** 个成员
+> （`note_worker_error` 的写入面 / `worker_errors` 的读面 —— 云机错误上报的**中继 ring**，
+> 纯观测：只写一张 TTL ring，不进任何派发判据）⇒ 域成员 **121 → 123**、实现名
+> **123 → 125**；状态表 +2（`_worker_errors` / `_we_lock`）。
 
 同一刀还把**两个组合类搬出自己的家**（这是本刀能成立的**使能缝**，不是顺手清洁）：第十四刀只搬了
 `_JobStore` 的六个混入，组合类还在 `hub_server` 里；而 `queue_scope.add_course` 要**构造** store、
@@ -211,6 +216,10 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             # 写入面只碰 `_worker_prefetch`（纯观测），读面做 TTL 过滤 + jid→(course, it) 解析。
             "note_worker_prefetch",
             "worker_prefetch_readout",
+            # 云机错误上报的中继面（2026-10-16，plan/component-error-registry §4.3-S3b）：
+            # 写入面只碰 `_worker_errors`（纯观测 ring），读面做 TTL 过滤 + 增量游标。
+            "note_worker_error",
+            "worker_errors",
             # 2026-10-17（plan/hub-server-memory-slim L3）：常驻表规模读数（`/admin/mem`）。
             "mem_readout",
         ),
@@ -391,6 +400,10 @@ STATE_WRITERS: dict[str, frozenset[str]] = {
     #: （`note_worker_prefetch` 整体换记录），锁只被 `__init__` 建。
     "_worker_prefetch": frozenset({"__init__", "note_worker_prefetch"}),
     "_pf_lock": frozenset({"__init__"}),
+    #: 云机错误上报的中继 ring（2026-10-16，plan/component-error-registry §4.3-S3b）：唯一写者
+    #: 是写入面（`note_worker_error` 追加 + 两条闸的剔除），锁只被 `__init__` 建。
+    "_worker_errors": frozenset({"__init__", "note_worker_error"}),
+    "_we_lock": frozenset({"__init__"}),
     "_order": frozenset({"__init__", "add_course", "drop_course"}),
     #: 多课程预取窗口（2026-10-02，plan/course-pill-precision §4.1）：写点只有启动与 peek。
     "_peeked": frozenset({"__init__", "peek_jobs", "drop_course"}),
@@ -521,9 +534,11 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # ★M5（Q5）：+4（`job_kind` 的 hub 转发 / `worker_holds` / `worker_bc_drain` /
     # `_drain_blocked`——drain 互斥的两半都要全课程视图）⇒ 114 + 4；
     # 2026-10-11 W7（plan/aborted-course-revival）：+1（`cancel_job` 门面转发）⇒ 121。
+    # 2026-10-16（plan/component-error-registry §4.3-S3b）：+2（`note_worker_error` /
+    # `worker_errors` —— 云机错误上报的中继 ring 的写面与读面）⇒ 123。
     # 2026-10-17（plan/hub-server-memory-slim L3）：+3（`mem_readout` / `drop_course` /
     # `_drop_dead_courses`）⇒ 124。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 124, len(DOMAIN_METHODS)
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 126, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -533,7 +548,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 124, len(seen)
+    assert len(seen) == 126, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (

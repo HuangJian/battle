@@ -63,6 +63,17 @@ def main(argv: list[str] | None = None) -> None:
     os.chdir(str(REPO_ROOT))
     args = bc_argparser().parse_args(argv)
 
+    # ===== 常驻训练准入闸（S1，plan/single-resident-trainer.plan.md §1；S3 收口）=====
+    # BC 侧的常驻形态 = 独立跑 `run_bc.py --course X`（阻塞式驱动自己的每轮循环）；它同样与共享
+    # 调度器抢同一批 traj/账本/权重（锁名虽不同，写的是同一份数据）。一次性腿 = `--smoke`。
+    # S3（2026-10-17）起**没有逃生舱**：常驻编排的唯一入口是 `run_rl_cluster.py --serve`
+    # （serve 用 `bc_course_args` + BcLoop 直驱，不走本入口）。
+    from worker.trainer_gate import REFUSE_MESSAGE_BC, refuse_detached_trainer
+
+    _refuse = refuse_detached_trainer(args, message=REFUSE_MESSAGE_BC)
+    if _refuse:
+        raise SystemExit(_refuse)
+
     # ---- git push 串行化（节点代码同步依赖 origin；与 run_rl / serve 同规）----
     push_lock = str(REPO_ROOT / ".git_push.lock")
     if acquire_lock(push_lock, tag="git push"):

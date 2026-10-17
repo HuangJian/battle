@@ -57,8 +57,10 @@ from common.protocol import (
     RetryableError,
     UnreapableChildError,
 )
+from common.text import exc_tail
 from remote.bulk_sched import BULK_P2_PREFETCH, BulkPreemptError
 from remote.download import download_payload
+from remote.error_report import report_error
 from remote.job_fs import backup_failed_result
 from remote.job_lifecycle import (
     _failure_detail,
@@ -113,6 +115,16 @@ PREFETCH_ROUND_SEC = 5.0
 #: ≈1.6s/轮，四轮就把一次「重试到第 4 次」的现场拖过 5s）。「失败不重试」的语义不变
 #: （不写 `ProtocolError`、不动训练），只是把「下一拍」放成「下一分钟」。
 PREFETCH_REPORT_BACKOFF_ROUNDS = 12
+
+
+def _course_of(job: dict) -> str:
+    """作业归属的**课程名**（只给观测腿上屏用；取不到 ⇒ `''`，不编）。
+
+    为什么不拿 `manifest["course"]`：那是**课程文件正文**（jsonc 文本），不是名字——把它当课名
+    发上去，控制台详情页会显示一大段 JSON。取活的返回形状里 `course` 就是课名
+    （`job_lifecycle.acquire_job` 的返回键之一，与旧轮询面逐字段兼容）。
+    """
+    return str(job.get("course") or "").strip()
 
 
 def _flush_prefetch_round(store: PrefetchStore, log: Any) -> None:
@@ -504,10 +516,40 @@ def run_one_round(
             f"job {jid} 机器级停滞（子进程收不了尸）: {e} — release 租约立即重领"
             "重投同一份活（不睡/不报失败/不计毒包，云机不停）"
         )
+        # 观测腿（plan/component-error-registry §4.3-S3b）：**不报 `report_job_failure`**（那会把
+        # 机器的问题记在内容头上 ⇒ hub 落终局 failed ⇒ 训练停腿），但也不能什么都不说——这档
+        # 此前只见于云机日志（2026-09-25 事故最难查的地方）。纯观测、失败即丢、不进任何判据。
+        report_error(
+            base_url,
+            token,
+            reason=f"{type(e).__name__}: {e}",
+            detail=exc_tail(e),
+            component="ppo-worker",
+            course=_course_of(job),
+            job_id=jid,
+            it=job_it,
+            severity="warn",
+            worker_id=worker_id,
+            log=log,
+        )
         release_job(base_url, token, jid, lease_token, log=log)
     except RetryableError as e:
         # 瞬时失败（网络/5xx/传输损坏）：主动还租约立即回池——不再付 30min 过期等待
         log(f"job {jid} 瞬时失败: {e} — release 租约回池，立即可重领")
+        # 观测腿（同上）：连发时它是「这台机器有问题」的唯一信号（本机侧只能看到「活一直在回池」）。
+        report_error(
+            base_url,
+            token,
+            reason=f"{type(e).__name__}: {e}",
+            detail=exc_tail(e),
+            component="ppo-worker",
+            course=_course_of(job),
+            job_id=jid,
+            it=job_it,
+            severity="warn",
+            worker_id=worker_id,
+            log=log,
+        )
         release_job(base_url, token, jid, lease_token, log=log)
     except CodeChangedError as e:
         # 热替换：本进程 sys.modules 是旧代码，继续跑 = 用旧逻辑产出"看着正常"的
@@ -548,6 +590,20 @@ def run_one_round(
         # ★ 2026-09-21（§4）：本分支**只准**装真瞬态。内容决定性失败（解包/校验/
         #   运行时能力缺失）必须在上游就转成 `ProtocolError`（见 unpack_payload_or_fail、
         #   manifest 校验、bun 检测），否则同一份字节会无限重领（事故：40 次 / 3.5h 空转）。
+        # 观测腿（同上）：兜底瞬态此前**零出口**——只有云机日志，而日志随机器一起消失。
+        report_error(
+            base_url,
+            token,
+            reason=f"{type(e).__name__}: {e}",
+            detail=exc_tail(e),
+            component="ppo-worker",
+            course=_course_of(job),
+            job_id=jid,
+            it=job_it,
+            severity="warn",
+            worker_id=worker_id,
+            log=log,
+        )
     finally:
         # 每 job 一行传输账：payload/code/blob/result 的 (bytes, sec) + 零字节命中 + 重抽。
         # P2.5：async 且本 job **已交回传**时**不**在这里 flush —— `out` 的账要等回传

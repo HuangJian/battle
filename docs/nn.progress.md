@@ -27,12 +27,12 @@ AGENTS §5.6 的原口径是「每一条 NN 训练架构变更 / 评估 / 教训
 | 文档 | 覆盖 | 节数 |
 |---|---|---|
 | [`docs/nn/legacy.md`](nn/legacy.md) | **早期谱系归档**（2026-08-18 ~ 08-29）：v1/v2 student、P1.5 蒸馏、BC 热启动、无道具纪元、第一代 RL 流水线 —— 已被 goal-space 取代，只作史实与教训 | 22 |
-| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / **在飞活的备份副本**（§68） / **自主 worker 收工即停（§70）** / **补传腿忙等修复 + 独立进程（§69）** / **一拖一闸两次自锁（§71）** / **派发模型重构：课程无模式 + 接管 + BC 独占（§72）** / **claim 的进度锚以响应时刻为准（§73）** / **补传腿 `_append` 自锁死：重启重述重入不可重入锁（§74）** / **kind=iter 并发 `workers: 0` = 节点自定 + 课程侧 `workers` 死键（§76）** / **重启不重放已消费的 final：判据要与可判定的证据对齐（§77）** / **采样节点自动注册：hub 成为 `rl-config.json` 的第二写者（§78）** / **集群代码快照：`code.zip` / `ts_code.zip` 打包时机上移到会话启动 + 控制台包过期判据换锚 + 组件卡 sha 徽章 + 逃生开关（§79）** / **aistudio 传输硬化：预取自停 / 让路自停 / 持久缓存根 + 控制面连接池与 6s 预算 + 批量 blob（§80）** / **回传失败时备份那一份线上体（§81）** / **停腿课复活：ABORTED 可复活 + 复活卫生 + 拒收作废 + `/admin/cancel-job`（§82）** / **离线腿起点 checkpoint 的 `it` 错位：起点单源化 + 播种先于补传腿 + 补传 409 冲突闸（§83）** / **预取顺手解包：解包搬出关键路径（staged 交接 + 单点搬入）+ 删 payload 级 blob 死写 + 准备段计时补齐（§84）** / **撤销 prefetch staged 的 256MiB 字节闸（§85）** / **抖动是常态：坏签判据加迟滞与衰减 + 重抽无收益即停（§86）** / **plan A/B/C 落地：payload Range 断点续传 + 上传让路点 + 控制面死线（§87）** / **C1 `code.zip` 按角色裁剪：量法换成「入口 import 闭包」，2.796 MB → 1.221 MB（§88）** / **传输护栏 v2：定长读废掉空闲判据（`read1`）+ 时间窗采样与 2 窗迟滞 + 失败尝试入账 `failed=`（§89）** / **PPO job 生命周期收口：lost 可判 · 重启按 runId 作废 · 重发入口 · 残留自动清理（§90）** / **wire-diet 落地 M1+M2：打包端先算 reward + 字段 f16（§91）** / **wire-diet 落地 M0/R0：本机权威副本的身份映射 `course_cache` + `manifest.opt_from`（§92）** / **续段重启：停课→改大 iters→开课 ⇒ 云机领到续段（§93）** / **wire-diet 两档读数 `exact`/`identity` 怎么看（§94）** / **离线段的两条命：本地盘优先的产物根 + 网络盘 `backup/` 抽屉与恢复腿（§95，= §81 的离线版）** / **staged 预取搬入必须抬 mtime：`prune_job_dirs` 把正在处理的 job 目录删了自己（§96）** / **离线包的无限轮与导出成败：开区间段 + `export-status.json` 成败权威落点（§97）** / **云机 eval 腿漏了读侧落地：400 局每局 `BWD1`（§101）** / **离线包的段末自动滚：三态判据 + 回灌腿 + J4 静态拒因前置（§102）** | 98 |
-| [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart · **节点门的 bootId 一致性**（§26）· **分关采样平衡（§30）** · **决策周期 K 通道（§31）** · **ladder 模板库裁剪：删「只有 ladder 自己引用」的 20 门课 + 13 个关卡（§32）** · **`biz/ladder_factory.py` 退役：它只是刚删的 ladder 模板库的生成器（§33）** | 33 |
+| [`docs/nn/remote-transport.md`](nn/remote-transport.md) | hub / worker / 云机 / 隧道 / 离线任务包 / 产物回传 / 优先级调度 / **在飞活的备份副本**（§68） / **自主 worker 收工即停（§70）** / **补传腿忙等修复 + 独立进程（§69）** / **一拖一闸两次自锁（§71）** / **派发模型重构：课程无模式 + 接管 + BC 独占（§72）** / **claim 的进度锚以响应时刻为准（§73）** / **补传腿 `_append` 自锁死：重启重述重入不可重入锁（§74）** / **kind=iter 并发 `workers: 0` = 节点自定 + 课程侧 `workers` 死键（§76）** / **重启不重放已消费的 final：判据要与可判定的证据对齐（§77）** / **采样节点自动注册：hub 成为 `rl-config.json` 的第二写者（§78）** / **集群代码快照：`code.zip` / `ts_code.zip` 打包时机上移到会话启动 + 控制台包过期判据换锚 + 组件卡 sha 徽章 + 逃生开关（§79）** / **aistudio 传输硬化：预取自停 / 让路自停 / 持久缓存根 + 控制面连接池与 6s 预算 + 批量 blob（§80）** / **回传失败时备份那一份线上体（§81）** / **停腿课复活：ABORTED 可复活 + 复活卫生 + 拒收作废 + `/admin/cancel-job`（§82）** / **离线腿起点 checkpoint 的 `it` 错位：起点单源化 + 播种先于补传腿 + 补传 409 冲突闸（§83）** / **预取顺手解包：解包搬出关键路径（staged 交接 + 单点搬入）+ 删 payload 级 blob 死写 + 准备段计时补齐（§84）** / **撤销 prefetch staged 的 256MiB 字节闸（§85）** / **抖动是常态：坏签判据加迟滞与衰减 + 重抽无收益即停（§86）** / **plan A/B/C 落地：payload Range 断点续传 + 上传让路点 + 控制面死线（§87）** / **C1 `code.zip` 按角色裁剪：量法换成「入口 import 闭包」，2.796 MB → 1.221 MB（§88）** / **传输护栏 v2：定长读废掉空闲判据（`read1`）+ 时间窗采样与 2 窗迟滞 + 失败尝试入账 `failed=`（§89）** / **PPO job 生命周期收口：lost 可判 · 重启按 runId 作废 · 重发入口 · 残留自动清理（§90）** / **wire-diet 落地 M1+M2：打包端先算 reward + 字段 f16（§91）** / **wire-diet 落地 M0/R0：本机权威副本的身份映射 `course_cache` + `manifest.opt_from`（§92）** / **续段重启：停课→改大 iters→开课 ⇒ 云机领到续段（§93）** / **wire-diet 两档读数 `exact`/`identity` 怎么看（§94）** / **离线段的两条命：本地盘优先的产物根 + 网络盘 `backup/` 抽屉与恢复腿（§95，= §81 的离线版）** / **staged 预取搬入必须抬 mtime：`prune_job_dirs` 把正在处理的 job 目录删了自己（§96）** / **离线包的无限轮与导出成败：开区间段 + `export-status.json` 成败权威落点（§97）** / **云机 eval 腿漏了读侧落地：400 局每局 `BWD1`（§101）** / **离线包的段末自动滚：三态判据 + 回灌腿 + J4 静态拒因前置（§102）** / **云机错误的回家路：E3 复用既有 410 通道补现场 + E4/E5 上报腿（§103）** | 99 |
+| [`docs/nn/training-stack.md`](nn/training-stack.md) | 训练循环 · 调度器 · supervisor · 课程编排 · 采样配额 · 门禁与停车 · kickstart · **节点门的 bootId 一致性**（§26）· **分关采样平衡（§30）** · **决策周期 K 通道（§31）** · **ladder 模板库裁剪：删「只有 ladder 自己引用」的 20 门课 + 13 个关卡（§32）** · **`biz/ladder_factory.py` 退役：它只是刚删的 ladder 模板库的生成器（§33）** · **入口分家（S3）：`run_rl.py` 收成 CLI 壳 + 一次性腿独立成模块（§34）** | 34 |
 | [`docs/nn/experiments.md`](nn/experiments.md) | 课程腿判决 / 探针 / 负结果归档（含人类探针与 BC-ref 判死） | 32 |
 | [`docs/nn/engineering.md`](nn/engineering.md) | 测试纪律 · 子进程编码契约 · 门禁耗时 · 账本与 metrics schema · 语料指纹 · **共享原语层与分层契约** · **神模块拆分（S4）** · **六包重组（刀 1–6）** · **门禁 fail-fast**（§63） · **测试不得碰在跑的控制台**（§64） · **测试不得写生产状态（门禁意图 / 循环控制 / EvalBoard / 权重归档）**（§65） · **it0 基线 eval「从未派出」缺口：收工自报 + 缺口三分 + 基线自带门**（§66） · **eval 腿任务缺课程血缘：兄弟课程评估局在节点 resultCache 互串**（§67） · **pytest 私有提交 642MB→159MB：BLAS 内线程封顶**（§68） · **scratch 换根档由速度探针决定：通用用例钉死回退档**（§69） · **锁重入守卫扩容：方法内/闭包锁 + 组合组（hub store 混入）+ 全仓审计**（§70） · **测试债清理：口径先于数字（`text_asserts` / 退役单点 / 三条护栏）**（§71） · **pytest 最慢用例第二轮：第三条 HTTP 缝 + 三处全仓扫描的口径内提速**（§72） · **metrics v11：热线族 2 列（idx74–75）+ 探针杀列 + 跨链 parity 判据改判**（§73） · **两条满载 flake 的根因：hub 备份腿 TOCTOU + instance_lock 写入窗口**（§74） · **锁收敛（四处→唯一原语）+ 派发器一拍一次自有状态快照**（§75） · **publish/serve 预算 flake 根因：`collision_rows` 把共享 basetemp 当兄弟面扫**（§76） · **锁重入守卫 15s 预算假红：纯 CPU 全仓扫描不得配比口径更紧的 `time_budget`**（§77） | 44 |
 | [`docs/nn/test-contract-map.md`](nn/test-contract-map.md) | **测试 → 契约归属表**：两个可执行计数口径与其基线（A=1460 形态 / B=1092 生产源码面，2026-10-14 抬一格）· 已填契约（本次动过与 T1–T5 命中文件）· T2b 行为拒绝登记 · T4 本机恒 skip 登记 · 批次 2 工作清单 | 5 |
-| [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 / 课程管理页 / 指标表抗轮转抄录 / **回放导出按评估轮选（§32）** / **池历史大流按变化重建（§33）** / **空置内存真凶：logTail 整文件读（§34）** / **v2 词表与钮：接管是唯一真源（§35）** / **self 节点低盘告警：预警档与拒收地板是两件事（§36）** / **节点贡献统计的 PPO 组收下自主腿（§37）** / **收官原因进横幅（§38）** / **组件错误登记表：五处散落的错误 → 一张表 + 首页入口 + `/errors`（§39）** | 39 |
+| [`docs/nn/console.md`](nn/console.md) | dashboard 侧：组件面 / 调度器视图 / 任务包与产物两条腿 / 回显 / 课程管理页 / 指标表抗轮转抄录 / **回放导出按评估轮选（§32）** / **池历史大流按变化重建（§33）** / **空置内存真凶：logTail 整文件读（§34）** / **v2 词表与钮：接管是唯一真源（§35）** / **self 节点低盘告警：预警档与拒收地板是两件事（§36）** / **节点贡献统计的 PPO 组收下自主腿（§37）** / **收官原因进横幅（§38）** / **组件错误登记表：五处散落的错误 → 一张表 + 首页入口 + `/errors`（§39）** / **单一常驻 trainer：准入闸 + 心跳判死 + 两条横幅（§40）** | 40 |
 | [`docs/nn/runtime-opt.md`](nn/runtime-opt.md) | rollout / eval 运行时：native 内核 · 并发口径 · 派发 · 单局看门狗 · 长驻池（含**同质入口** `serve-any`，TS 侧 + Python 侧两处）· **节点单实例互斥**（§29）· **一局的墙钟上界**（§32）· **长驻池真就绪 + 有界清理**（§33）· **热路径 IO 换节点本地盘（rollout/eval 共用一套 scratch）**（§34）· **rollout 热路径四刀：探针上界 / 补差批满铺 / 轮级 ctx / 取消搬回**（§35）· **落点链再砍一刀：删掉网络盘测速探针 + eval 腿包上界 + `submit` 装配后移（§36）** | 36 |
 | [`docs/nn/tpu-perf.md`](nn/tpu-perf.md) | TPU / XLA：设备实测 · 单步耗诊断 · 编译缓存 · PPO 吞吐 | 9 |
 | [`docs/nn/reuse-audit.md`](nn/reuse-audit.md) | **复用账本（S0，2026-10-11）**：跨模块重复实现清单（逐字节 / 结构克隆 / 同名散落）+ 三类处置判据（A 提到 `common/` · B 域内共用 · C 库替代 / R2 结构性豁免）+ 复跑法与基线守卫（**工具说明 + 现行水位**，不是逐条历史；出题见 `plan/nn-training-reuse-and-deps.plan.md`） | — |
@@ -1249,3 +1249,33 @@ hub `record_payload_sent` 累积 < 文件长 × 轮数。测试：新 `tests/hub
 206/200 分派 + 计账按实际字节）· `test_wire_reroll`（夹具改成带 partial 的 Range 服务端 + 忽略 Range 如实记账）·
 `test_body_transfer_guard`（+3）· `test_bulk_sched`（+1）。DECISIONS → `§2026-10-12-transfer-jitter-tolerance-abc`；
 全文 → `docs/nn/remote-transport.md` §87。
+
+## 2026-10-17 · single-resident-trainer：常驻写者收成一个 serve（准入闸 · 心跳判死 · 两条横幅）
+
+**现场**：`trainer/run_rl.py` 四种角色（常驻 / 冒烟 / 导出 / 预采），而常驻写者只允许
+`run_rl_cluster.py --serve`；per-course 常驻进程与它抢同一批 traj/账本/权重（2026-09-06 事故同类面），
+并绕过控制台开课三件套（2026-09-21 事故）。更阴的一层：**serve 卡死时进程还在**，`nextExitFailures`
+只看 pid 死活 ⇒ 组件卡照绿、全课停摆无人知。
+
+**S1（闸+自报，`86a5fec6` · `b56536df` · `d3e8bff4`）**：`worker/trainer_gate.py` 判据 = 没有任何一次性
+标志 ⇒ 常驻 ⇒ 拒启（与 `--course` 无关）；拒启消息必给替代（`--force` 是锁抢先、过不了闸，两件事）。
+逃生舱 `--allow-detached-trainer` 放行 + 原子写 `tmp/trainer-detached.json`（环形 5 条、env 可重定向）
+⇒ 控制台 `warn` 横幅（ack 键 `pid × ts`，不给杀进程按钮：pid 可能已复用）。不做「每拍扫锁」：读锁 pid
+判不出身份，核命令行要起 `wmic`/`pwsh`（~0.5s/次 × 185 门课）。同批删本地 BC 连续训练入口（用户裁决）。
+
+**P0-3（`f889ca08`）**：预采子进程入口 + **课程之后的动作覆盖通道**——`--collect-only` 动作键豁免，
+否则子进程 argv 在闸/解析里必撞。
+
+**S2（心跳）**：写侧 `worker/trainer_heartbeat.py` = **独立看门狗线程**（先例 `eval_heartbeat.py`），
+每 5s 原子写 `tmp/trainer-heartbeat.json`。**不挂每拍**：serve 单线程一次 `sup.step()` 内可合法阻塞到
++3600s（预采 join / PPO 让位 / 引擎冷启动）⇒ 挂拍写会把健康进程写成陈旧。判据只住一处
+`dashboard/src/core/trainer-heartbeat.ts::heartbeatVerdict`（fresh/stale/unknown），三处消费共用：
+`specs.ts::trainerServeSpec.healthy`（原「存活即健康」）、`api/views.ts` 组件健康（原先写死 true）、
+`/api/state` 的 `trainerHeartbeat`。四条不判死：文件缺失/坏 JSON · `hb.pid ≠ 账本 pid`（冒烟占同槽）·
+判据上线前启动的 serve · 启动宽限 120s。`stale` ⇒ 告警坞 `err`（`trainer-stall`，指引停→启），
+**不自动重启**：卡死的是活进程，杀掉比晚 5 分钟重启贵；将来要做自动重启，应是通用监督器功能。
+
+**门禁**：nn `tests/{worker,trainer,common}` **2231 passed / 1 skipped** · 根 `bun run check`
+**2525 pass / 12 skip / 0 fail** · dashboard typecheck + **1677 pass / 0 fail** · 三份 bundle ✓ ·
+`bun run build` ✓ · ruff ✓。DECISIONS → `§2026-10-17-goalnn-single-resident-trainer`；
+全文 → `docs/nn/console.md` §40；计划 → `plan/single-resident-trainer.plan.md`（S1/S2 验收已勾）。

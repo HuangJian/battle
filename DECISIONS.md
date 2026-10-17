@@ -6896,23 +6896,45 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 
 ## §2026-10-16-goalnn-component-error-registry（组件错误注册中心：五处散落的错误 → 一张登记表 → 首页入口 + `/errors` 详情页）
 
-- **来源**：`plan/component-error-registry.plan.md` **v3**（用户 2026-10-15 诉求：「让远端 ppo 云机、自主 rollout/eval/ppo
+- **来源**：`plan/component-error-registry.plan.md` v3（用户 2026-10-15 诉求：「让远端 ppo 云机、自主 rollout/eval/ppo
   云机，本地进程 trainer/hub/cloudflared 的错误日志能够在 dashboard 注册并查看…避免训练各个组件静默失败无人处理」）·
-  评审 `plan/component-error-registry.review-bf.md`（3 P0 + 4 P1 + 5 P2，处置见 plan §12）。本条记的是 **D 批次**
-  （只动 `dashboard/**` ⇒ 不翻训练 code zip、不影响集群 codeHash，可随时回滚）；云机侧的两条腿（E3 走既有 410 通道补
-  `detail` / E4-E5 上报腿 `POST /admin/worker-error`）是 **P 批次，未落地**（要单独窗口，见 plan §7 Rk1）。
-- **定案一（五处 → 一处）**：`ErrorEvent` 是唯一形状（类型住 `web/view/error-types.ts` —— 零 import；计算住
-  `server/api/error-{fingerprint,scan,registry}.ts`）。四条腿各带闸：腿 A 本机组件日志尾 `size:mtime` 签名、
-  腿 B 已见 jid 记忆化（`fail.json` 首写胜出 ⇒ 每个 jid 只读一次）、腿 C 云机上报只在自己的 **10s 独立节拍**上探 hub、
-  腿 D 读既有池视图 SWR 缓存 ⇒ **`/api/state` 请求路径零新增探测零网络**（N9 / R1 结构闸）。
-- **定案二（`fp` 不含 `scope`）**：指纹 = `shortHash(source | component | normalize(message))`（归一去掉 hex / 数字序列 /
-  时刻 / `tmp/` 之前的绝对路径前缀）。`scope`（课名 / job id）进指纹会把同一条错误在 10 门课上折成 10 条 ⇒
-  首页计数虚高、详情页十行同一条 —— 正是要治的刷屏在详情页上的复刻。
+  评审 `plan/component-error-registry.review-bf.md`（3 P0 + 4 P1 + 5 P2，处置见 plan §12）。**D 批次**（`dashboard/**`）
+  与 **P 批次**（`nn-training/**`：E3 改走既有 410 通道补 `detail` + E4/E5 上报腿）**均已落地** —— P 批次按 §7-Rk1
+  单开窗口：改 `nn-training/**` 会翻训练 code zip，云机 worker 下次校验 `CodeChangedError` ⇒ 退出码 86 自愈重拉一次。
+- **定案一（五处 → 一张表）**：`ErrorEvent` 是唯一形状（类型住 `web/view/error-types.ts` —— 零 import；计算住
+  `server/api/error-{fingerprint,scan,registry}.ts`）。四条腿**各带闸**：腿 A 本机组件日志尾 `size:mtime` 签名、
+  腿 B 已见 jid 记忆化（`fail.json` 首写胜出）、腿 C 云机上报只在自己的 **10s 独立节拍**上探 hub、腿 D 读既有池视图
+  SWR ⇒ **`/api/state` 请求路径零新增探测零网络**（N9 / R1 结构闸）。技术正文：`docs/nn/console.md` §39。
+- **定案二（`fp` 不含 `scope`）**：指纹 = `shortHash(source | component | normalize(message))`（归一去掉 hex / 数字
+  序列 / 时刻 / `tmp/` 之前的绝对路径前缀）。把课名算进指纹会让同一条错误在 10 门课上折成 10 条 ⇒ 首页计数虚高、
+  详情页十行同一条，正是要治的刷屏在详情页上的复刻。
 - **定案三（两个时刻分开 · 两个 ack kind）**：账本 `firstSeenAt`（**不可变**，只做「这个 fp 我见过」的种子）vs
-  内存 episode `firstAt`（**可重置**，ack 身份）。ack = `component-error`（逐条：`fp` × 内存 `firstAt`）与
-  `component-errors`（首页汇总条本身：subject `'all'`，eventId = 最新未 ack 错误的时刻）⇒ 持续态不重复打断、
-  **消失后复发必重弹**、新错误进来必重弹。二者混用会让一次「知道了」永久静音（F2/F3 要治的病）。
+  内存 episode `firstAt`（**可重置**，ack 身份）；ack = `component-error`（逐条：`fp` × 内存 `firstAt`）与
+  `component-errors`（首页汇总条：subject `'all'`，eventId = 最新未 ack 错误的时刻）。二者混用 ⇒ 一次「知道了」
+  永久静音；分开 ⇒ 持续态不重复打断、**消失后复发必重弹**、新错误进来必重弹。
 - **定案四（账本可重定向）**：`tmp/component-errors.jsonl` 住 `core/paths.ts::errorLedgerPath()`（`BCITY_ERROR_LEDGER`），
+  与 `tmpLogsDir()` / `consoleLogPath()` / `loopControlPath()` 同规 —— 否则用例会把指纹写进**操作员真账本**。
+  只在「新 `fp` 首次出现」时 append 一行；重启重放只当种子、**不继承** `firstAt`（代价：未消失的错误重弹一次，显式接受）。
+- **定案五（入口与详情页）**：首页 = 告警坞**第 9 类汇总条目**（0 或 1 条，逐条清单是详情页的事），为此把
+  `AlertAction.kind` 闭集放宽出唯一一个**无副作用**的 `'link'`（渲染成真 `<a href>`、**不挂 `onClick`**）；详情页 =
+  **第 3 个独立页 / 第 4 份 bundle**（`/errors`，照 `/log` 范式，只读面照渲）；`detail` **不进** 3s/4s 轮询投影，按 `fp` 懒取。
+- **定案六（P 批次：云机的两条腿怎么回本机）**：① **E3 复用既有 410 通道**（`set_error(detail=…)` → 410 体
+  `fail_detail` → `remote/push_dispatch.push_failure_record()` 改读，缺字段回退原常量）⇒ **无新端点 / 无新凭据 /
+  无阻塞**；② **E4/E5 走 `POST /admin/worker-error`**（形状照抄 `worker-prefetch`：同一枚 token、缺 `worker`/`reason`
+  ⇒ 400、64KB ⇒ 413；hub 侧只是 TTL 120s + 200 条的**内存环** —— 权威账本只在控制台）；③ 上报走 `remote/error_report.py`
+  的 **daemon 线程 + 2s 超时**：`report_error` **立即返回**、失败即丢、不重试（G9）；④ 读面游标 = **hub 的到达时钟
+  `at`**，不是上报方的事件钟 `ts`（跨机时钟不可比）。上报点只有三个 pull 失败分支 + 离线段失败；**取消 / 热替换 /
+  确定性拒绝一律不报**（设计内生命周期，F15）。技术正文：`docs/nn/remote-transport.md` §103。
+- **备选与否决**：① 复用 `/jobs/{id}/fail` 收瞬时错误 —— 否（那条腿「首写胜出 + 只收确定性失败」，会污染训练侧读到
+  的那条失败原因）；② 在 `/jobs/*` 加 `detail` 字段 —— 否（要给取活协议动租约/游标面，410 通道是纯加法）；
+  ③ 让 `/errors` 进主 bundle —— 否（独立页与 `/log` 同规）；④ 固定 / 纯账本 ack 键 —— 否（只增不减的 `TC_ALERT_ACKS`
+  会把第二次同因事件永久吃掉）；⑤ 指纹住 `web/view/**` —— 否（`node:crypto` 撞分层禁词闸与 bundle 禁词闸，评审 P0-1）；
+  ⑥ 把取消 / 热替换也报成错误 —— 否（设计内生命周期，报成错误就是灌噪音，F15）。
+- **后果**：控制台 `tests/server-api-error-registry.test.ts`（新）· `web-alert-dock.test.ts` 第 9 类 · `web-ssr-errors-page.test.ts`
+  （新）· `web-view-routes.test.ts` 的 link href 白名单改**数据驱动** · `web-ssr-readonly.test.ts` 夹具补 `errors: null`；
+  云机 `nn-training/tests/{hub/test_admin_worker_error,remote/test_error_report,remote/test_worker_server_error_detail}.py`
+  （25 格：含 F15 守门与「1s 慢 hub 仍立即返回」）+ `remote/error_report.py`（新，L0，已入 `tests/helpers/remote_dag.py` 层账）。
+  **未验**：真机端到端（要一段真云机跑满才成立，闭合判据在 `docs/nn.progress.md`）。
   与 `tmpLogsDir()` / `consoleLogPath()` / `loopControlPath()` 同规（P0-3）—— 否则用例会把指纹写进**操作员真账本**。
   账本只在「新 `fp` 首次出现」时 append 一行；重启重放它当种子，**不继承** `firstAt`（代价：未消失的错误重弹一次，显式接受）。
 - **定案五（入口与详情页）**：首页 = 告警坞**第 9 类汇总条目**（0 或 1 条，逐条清单是详情页的事），为此把 `AlertAction.kind`
@@ -7240,3 +7262,53 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   y21-temper2 → 头 20 轮 stem 单点跳≤2 后回写 `docs/nn/experiments.md` §116。
 
 （DECISIONS 尾部 · 全文 → `docs/nn/experiments.md` §116）
+## §2026-10-17-goalnn-single-resident-trainer（常驻写者收成一个 serve：准入闸 + 心跳判死；卡死只告警不自动重启）
+
+- **来源**：`plan/single-resident-trainer.plan.md` §1–§2 + `plan/single-resident-trainer.review-bf.md`
+  （P0-1 消费面 / P0-2 写点覆盖 / P0-3 预采子进程 / P1-F3 env 口 / P1-F6 pid 身份）。
+- **S1 闸（`worker/trainer_gate.py`）**：`trainer/run_rl.py` 背四种角色，而常驻写者只允许
+  `run_rl_cluster.py --serve`；判据 = **没有任何一次性标志** ⇒ 视为常驻 ⇒ 拒启（与 `--course` 无关），
+  拒启消息必给替代（`--force` 是锁抢先、过不了闸）。逃生舱 `--allow-detached-trainer` 放行 +
+  自报 `tmp/trainer-detached.json`（环形 5 条）⇒ 控制台 `warn` 横幅。
+- **S2 写侧取「独立看门狗线程」**（新 `worker/trainer_heartbeat.py`；先例 `worker/eval_heartbeat.py`），
+  不是 plan 首选的「每拍 + 两处 tick」：serve 是**单线程**，一次 `sup.step()` 之内可合法阻塞到 +3600s
+  （预采 join / PPO 让位 / 引擎冷启动），写点挂在拍上会把**健康进程**写成陈旧 ⇒ 误杀。线程每 5s 原子写
+  （`NN_TRAINER_HEARTBEAT` 可重定向），STALE=300s ⇒ 最长合法间隔 < STALE/2。
+- **S2 消费面（定案 B，否决 A 自动重启）**：`healthy` = 账本 pid 活 ∧ 心跳不陈旧；`stale` ⇒ 告警坞一条
+  `err`（`trainer-stall`，指引「组件卡 trainingLoop 停止→启动」），**不自动重启**。理由：① 全仓没有
+  任何组件是自动重启的，为 trainer 单造一类机制要自己回答 pid 复用 / 写盘中途 / in-flight PPO 让位；
+  ② 卡死的是**活**进程，杀掉比晚 5 分钟重启贵（一根 20 分钟 PPO 尾巴被砍 = 重跑一轮）；
+  ③ 恢复路径已存在（`trainingLoop` 在 `COMPONENT_KILL_TREE` 里），只是没人知道要按。**退路**：将来要做
+  自动重启，应是**通用监督器功能**（所有组件同一口径），不是 trainer 专属旁路。
+- **不可知一律不判死（四条，都有用例）**：文件缺失/坏 JSON · `hb.pid ≠ 账本 pid`（冒烟预演占**同一个**
+  `trainingLoop` 槽）· 判据上线前启动的 serve（`HEARTBEAT_SINCE_MS` 一次性兼容窗）· 启动宽限 120s。
+- **被否的备选**：用 `progress_ts` 陈旧触发重启 —— 否（进度不是活性：一个 20 分钟的 PPO 等待会被当成
+  卡死，比卡死更贵）；每拍写心跳 —— 见上；`--force` 当闸的逃生舱 —— 否（锁抢先与准入是两件事，
+  闸在锁之前，混用会让「过了锁」被读成「允许常驻」）。
+- **后果**：`/api/state` 多一个 `trainerHeartbeat`（pid/ts/steps/waiting/逐课 state + verdict，只读盘 ⇒
+  控制台重启不丢）；`specs.ts`/`api/views.ts` 里 `trainingLoop` 的「存活即健康」写死 true 全部换成同一判据。
+
+## §2026-10-17-goalnn-entry-split-s3（入口分家 S3：run_rl 退成 CLI 壳；一次性腿独立成模块；逃生舱退役）
+
+- **来源**：`plan/single-resident-trainer.plan.md` §3（S1/S2 之后的一步）+ 用户裁决 2026-10-17
+  （「S3 拆入口后 `--allow-detached-trainer` 怎么办」⇒ **彻底删掉常驻分支**）。
+- **形态**：`run_rl_cluster.py --serve`（唯一常驻写者）· `run_rl.py`（CLI 壳：解析 → `--echo-config`
+  dump / 分流 / 拒启）· `once_shot.py`（新；冒烟 / 导出 / 预采的唯一实现）· `collect_only.py`
+  （预采执行体，入口仍是 `run_rl.py`）。壳里**没有** `run_training` 调用/import（AST 判据钉住），
+  唯一保留的训练调用点在 `once_shot.py`（冒烟是真跑一轮）。
+- **四条腿的契约逐条保持**（搬运不是重构）：冒烟**取**课锁（真跑一轮，作废点全在收官/权重层，
+  没有「零写 traj」依据 ⇒ §3.1 选项 A）· 导出**不取**锁（只读快照，与 serve 并行是设计目标）
+  且**仍过开课闸**（「停课的课程不能导出」此前由常驻分支顺带守着，§3.3 唯一不能丢的一条）·
+  预采只带 `--course` + `--collect-only-config`（P0-3 的动作覆盖通道）· `--echo-config` 不是腿
+  （解析面 dump，在分流前短路）。锁策略提成纯判据 `takes_course_lock(args)`。
+- **逃生舱退役**：`--allow-detached-trainer` + 自报 `tmp/trainer-detached.json` + 服务端读面
+  `dashboard/src/server/api/detached-trainers.ts` + 告警坞 `detachedTrainerAlerts` 四件一起删。
+  理由：常驻分支删掉后旁路无处可去，横幅数据源会永远为空；留一个「能解析但什么都不做」的旗标
+  比删掉更坏（操作员会以为绕过了闸）。判据随之从「拦住旁路」变成「没有旁路可走」。
+- **被否的备选**：① 保留逃生舱、把常驻实现搬进独立模块 —— 否（那就是把唯一写者的纪律留一个
+  常设破口，而 S1/S2 的前提已成立）；② 保留旗标但只打印「请用 serve」—— 否（假动作比拒绝更坏）；
+  ③ 给 `once_shot.py` 加 `__main__`（plan §3.1 的原始形态）—— 否（会变成第二份 argparse：
+  mode/rl-config/课程覆盖要再写一遍，而预采子进程的命名空间重建正是靠「只有一份解析面」）。
+- **后果**：`run_rl.py` 只剩解析与共享原语（锁助手 / `update_kwargs` 原地不动 —— serve、run_bc
+  与一串护栏用例都 import 它们，评审 P1-F4）；console 侧的 `trainingLoop` 组件与
+  train-smoke / export 两条腿**一字未动**（它们本来就走一次性口）。

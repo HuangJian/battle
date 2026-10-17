@@ -374,3 +374,47 @@ describe('console/api.buildStateView · 请求路径零聚合（reload-perf W1�
     expect(ov).toContain('export function peekHubAdmin()')
   })
 })
+
+describe('console/api.buildStateView — 共享 trainer 心跳（plan/single-resident-trainer §2.4）', () => {
+  it('心跳文件在盘上 ⇒ 每次快照现读（控制台重启不丢：状态不属于控制台内存）', async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'hb-state-'))
+    const reg = path.join(dir, 'registry.json')
+    const hb = path.join(dir, 'trainer-heartbeat.json')
+    writeFileSync(
+      reg,
+      JSON.stringify({
+        trainingLoops: { '': { pid: process.pid, startedAt: Date.now() - 3600_000 } },
+      }),
+    )
+    writeFileSync(
+      hb,
+      JSON.stringify({
+        pid: process.pid,
+        ts: Math.floor(Date.now() / 1000) - 4,
+        steps: 4413,
+        waiting: 2,
+        courses: { c1: { state: 'COLLECT', rounds_done: 137 } },
+      }),
+    )
+    const prevReg = process.env.BCITY_REGISTRY_FILE
+    const prevHb = process.env.BCITY_TRAINER_HEARTBEAT
+    process.env.BCITY_REGISTRY_FILE = reg
+    process.env.BCITY_TRAINER_HEARTBEAT = hb
+    try {
+      const first = await api.buildStateView()
+      expect(first.trainerHeartbeat?.pid).toBe(process.pid)
+      expect(first.trainerHeartbeat?.verdict).toBe('fresh')
+      expect(first.trainerHeartbeat?.steps).toBe(4413)
+      expect(first.trainerHeartbeat?.waiting).toBe(2)
+      expect(first.trainerHeartbeat?.courses.c1?.state).toBe('COLLECT')
+      // 「重启控制台后仍在」= 新一次快照不依赖上一次的内存（只读盘）
+      const second = await api.buildStateView()
+      expect(second.trainerHeartbeat).toEqual(first.trainerHeartbeat)
+    } finally {
+      if (prevReg === undefined) delete process.env.BCITY_REGISTRY_FILE
+      else process.env.BCITY_REGISTRY_FILE = prevReg
+      if (prevHb === undefined) delete process.env.BCITY_TRAINER_HEARTBEAT
+      else process.env.BCITY_TRAINER_HEARTBEAT = prevHb
+    }
+  })
+})

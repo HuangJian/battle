@@ -181,9 +181,9 @@ describe('W1 双课程 spec 隔离', () => {
 
   it('两门课程的锁文件名互不相同（无课程沿用旧文件名，默认行为零变化）', () => {
     expect(lockName('course-a', 'run_rl')).not.toBe(lockName('course-b', 'run_rl'))
-    expect(lockName('course-a', 'train_loop')).not.toBe(lockName('course-b', 'train_loop'))
+    expect(lockName('course-a', 'run_bc')).not.toBe(lockName('course-b', 'run_bc'))
     expect(lockName('', 'run_rl')).toBe('.run_rl.lock')
-    expect(lockName('', 'train_loop')).toBe('.train_loop.lock')
+    expect(lockName('', 'run_bc')).toBe('.run_bc.lock')
   })
 })
 

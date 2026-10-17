@@ -7,6 +7,7 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import common.distribution
@@ -113,6 +114,50 @@ def run_collect_only(args, traj_root, rotate_seed, bun) -> None:
     )
 
 
+#: 预采子进程的入口：`run_rl.py` —— **唯一**拥有 `--collect-only` 语义的那个入口。
+#:
+#: ★ 2026-10-17（plan/single-resident-trainer §7-P0-3）：这里原先写 `os.path.abspath(__file__)`
+#: （= **本模块**），而本模块没有 `__main__` ⇒ 子进程零输出 exit 0 —— 预采静默零产出，而
+#: `precollect_ready` 因「子进程已退出」立刻为真 ⇒ 不卡、也不采（静默失效，最难查的那一种）。
+RUN_RL_ENTRY = Path(__file__).resolve().with_name("run_rl.py")
+
+
+def collect_child_spec(
+    args, snap: str, next_it: int, pre_samples: int, cfg_path: str
+) -> tuple[list[str], dict] | None:
+    """预采子进程的 `(argv, 动作覆盖 JSON)`。**纯函数**（无 I/O，可单测）。
+
+    为什么子进程不再继承父进程的 argv（`*sys.argv[1:]`）：两种父形态里它都是错的 ——
+    ① serve（`run_rl_cluster.py --serve …`）的 argv 里根本没有课程参数，子进程重建不出命名空间；
+    ② 就算父进程是 per-course `run_rl`，课程那些键（`bc`/`iters`）在 `apply_course` 之后会被
+    课程值**覆盖**、显式 CLI 还会被 `course_cli_conflicts` **拒启**（实跑：exit 1，两条冲突）。
+    ⇒ 子进程只带 `--course`（单一事实来源），动作键（collect_only/bc/start_it/precollect_*）
+    走 `--collect-only-config` 这条**课程之后**的通道（`worker/course_args.apply_collect_only_config`）。
+
+    返回 None = 这条腿跑不了：无课程的老调用没有被课程定义的命名空间，拿错快照比不预采更糟。
+    """
+    course = str(getattr(args, "course_path", "") or getattr(args, "course", "") or "")
+    if not course:
+        return None
+    payload = {
+        "collect_only": 1,
+        "bc": snap,
+        "start_it": int(next_it),
+        "precollect_games": int(getattr(args, "precollect_games", 0) or 0),
+        "precollect_samples": int(pre_samples or 0),
+    }
+    argv = [
+        sys.executable,
+        "-u",
+        str(RUN_RL_ENTRY),
+        "--course",
+        course,
+        "--collect-only-config",
+        cfg_path,
+    ]
+    return argv, payload
+
+
 def spawn_collect_next(args, it, snap_src: str | None = None) -> subprocess.Popen | None:
     """吞吐 T4：后台子进程预采 it+1（行为快照）。返回 Popen 或 None。
 
@@ -167,41 +212,65 @@ def spawn_collect_next(args, it, snap_src: str | None = None) -> subprocess.Pope
                 f"fallback to --precollect-games"
             )
 
-    argv = [
-        sys.executable,
-        "-u",
-        os.path.abspath(__file__),
-        *sys.argv[1:],
-        "--collect-only",
-        "1",
-        "--bc",
-        snap,
-        "--start-it",
-        str(next_it),
-        "--iters",
-        "1",
-    ]
-    if pre_samples > 0:
-        argv += ["--precollect-samples", str(pre_samples)]
+    # 动作覆盖的落点：**系统临时目录**（不进仓 `tmp/`：`.json` 不被 `tools/tmp-clean.py` 的
+    # LOG_SUFFIXES 扫，堆在那里没人管；系统 tmp 由 OS 兜底）。路径进 argv ⇒ `ps` 里看得见
+    # 子进程是「预采」而不是「常驻训练」（这对一条曾被误认为常驻写者的腿很重要）。
+    try:
+        tmp_dir = tempfile.mkdtemp(prefix=f"precollect-{next_it}-")
+    except OSError as e:
+        log(f"[double-buffer] precollect config fail: {e} — skip precollect")
+        return None
+    cfg_path = os.path.join(tmp_dir, "collect-only.json")
+    spec = collect_child_spec(args, snap, next_it, pre_samples, cfg_path)
+    if spec is None:
+        log("[double-buffer] no course in args — skip precollect（重建不出子进程命名空间）")
+        _unlink_best_effort(cfg_path)
+        return None
+    argv, payload = spec
+    try:
+        with open(cfg_path, "w", encoding="utf-8") as _f:
+            json.dump(payload, _f, ensure_ascii=False)
+    except OSError as e:
+        log(f"[double-buffer] precollect config fail: {e} — skip precollect")
+        _unlink_best_effort(cfg_path)
+        return None
+    # 子进程的 stdout/stderr **落文件**（不再 DEVNULL）：这条腿曾以「零输出 exit 0」静默失效
+    # 几个月（评审 P0-3）——失败必须留痕。`.log` 在 tmp-clean 的 LOG_SUFFIXES 里，会被扫。
+    log_path = Path(args.traj) / f"precollect-{next_it}.log"
     # ★ 2026-10-17：手写 `0x08000000` 改成走唯一原语（`popen_kwargs` = `POPEN_NO_WINDOW` + 扩展）。
     # 手写魔数的形状正是「别处漏了就复发」的那一种：没有名字可以 grep、没有守卫认得出来。
     try:
-        p = subprocess.Popen(
-            argv,
-            cwd=str(REPO_ROOT),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **popen_kwargs(),
-        )
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(log_path, "ab") as lf:
+            p = subprocess.Popen(
+                argv,
+                cwd=str(REPO_ROOT),
+                stdin=subprocess.DEVNULL,
+                stdout=lf,
+                stderr=subprocess.STDOUT,
+                **popen_kwargs(),
+            )
     except Exception as e:
         log(f"[double-buffer] spawn fail: {e} — skip precollect")
+        _unlink_best_effort(cfg_path)
         return None
     log(
-        f"[double-buffer] precollect it{next_it} spawned pid={p.pid} snapshot={snap}"
-        + (f" (early, src={snap_src})" if snap_src else "")
+        f"[double-buffer] precollect it{next_it} spawned pid={p.pid} snapshot={snap} "
+        f"log={log_path}" + (f" (early, src={snap_src})" if snap_src else "")
     )
     return p
+
+
+def _unlink_best_effort(path: str) -> None:
+    """清掉动作覆盖的临时目录（失败无所谓：系统 tmp 会兜底；这里只为不白堆）。"""
+    try:
+        os.unlink(path)
+    except OSError:
+        pass
+    try:
+        os.rmdir(os.path.dirname(path))
+    except OSError:
+        pass
 
 
 def precollect_snapshot_wver(out_path: str, it: int) -> str | None:

@@ -61,6 +61,15 @@ export function errorLedgerPath(): string {
   return process.env.BCITY_ERROR_LEDGER ?? path.join(LOG_DIR, 'component-errors.jsonl')
 }
 
+/** 共享 trainer（serve）的心跳文件（`tmp/trainer-heartbeat.json`；plan/single-resident-trainer §2）。
+ *
+ *  写侧 = python 的写线程（`worker/trainer_heartbeat.py`，每 5s；env `NN_TRAINER_HEARTBEAT`）；
+ *  读面 = 服务端 `trainer-heartbeat` 模块（判据在那，不在这里）。单测以
+ *  `BCITY_TRAINER_HEARTBEAT` 重定向（**否则用例读到的是真 trainer 的心跳**），故**惰性**取值。 */
+export function trainerHeartbeatPath(): string {
+  return process.env.BCITY_TRAINER_HEARTBEAT ?? path.join(LOG_DIR, 'trainer-heartbeat.json')
+}
+
 /** 控制台**会话日志**（组件级决策：启/停/重启/判死/开课/停课…）。
  *
  *  与 `launch/cli.ts` 的 `initLog('train-cli')`（每次运行一个新文件）分工不同：控制台是

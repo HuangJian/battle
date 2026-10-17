@@ -140,6 +140,10 @@ LAYERS: dict[str, int] = {
     "hub.task_pack": 0,
 
     "remote.result_upload": 0,
+    # 云机错误上报腿（2026-10-16，plan/component-error-registry §4.3-S3b）：只 import
+    # `common.*`（`net_http` / `protocol`）+ stdlib ⇒ **L0**；读者是 `job_round`(L4) 与
+    # `run_loop`(L6) 两个宿主（顶层边，严格向上够不着它 ⇒ 无需改层）。
+    "remote.error_report": 0,
     # 2026-09-30（刀 3）：`serve_pool` / `iter_rollout` 出包到 `worker/` ⇒ 键前缀随之改。
     # ⚠ 它们**不是**「搬走就不必入账」：与 `remote.*` 之间**有边**（`remote.worker` →
     # `worker.iter_rollout`、`remote.offline_eval` → `worker.serve_pool`），所以仍在**同一套**
@@ -365,6 +369,10 @@ LAYERS: dict[str, int] = {
     "worker.train.bc_core": 0,
     "worker.train.device": 0,
     "worker.train.loop_util": 0,
+    # 2026-10-17（plan/single-resident-trainer S1/S2）：常驻训练准入闸（纯判据 + 逃生舱自报）与
+    # trainer 心跳（独立写线程）——只 stdlib + `common.log`/`common.fs` ⇒ **L0**。
+    "worker.trainer_gate": 0,
+    "worker.trainer_heartbeat": 0,
     #: 2026-10-11（S3）：模型族共用小面（`param_count`）——只 import torch ⇒ 秩 0。
     "worker.models._common": 0,
     #: 2026-10-11（S3）：`volume_*` 三兄弟共用的最小数学层（`ceil_div` / `games_total`）——

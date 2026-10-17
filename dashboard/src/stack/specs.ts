@@ -15,6 +15,7 @@ import { agentSentinels, pySentinels } from '../core/sentinels'
 import { sharedHubUrl, sharedHubPort, sharedTunnelMetricsPort } from '../core/slots'
 import { portOwnedBy } from '../core/proc'
 import { resolveVenvPython } from '../core/venv'
+import { heartbeatAlive } from '../core/trainer-heartbeat'
 import { COMPONENT_KILL_TREE } from '../core/types'
 import type {
   CfEdgeIp,
@@ -473,7 +474,11 @@ export function trainerServeSpec(
     //  这一项）。与 localWorker / trainingLoop / BC spec 同规。
     env: { PYTHONPATH: `${venv.sitePackages}${path.delimiter}${NN_TRAINING}` },
     log: path.join(LOG_DIR, 'trainer-cluster.log'),
-    healthy: async () => pidAlive(entryForCourse(loadRegistry(), 'trainingLoop', '')?.pid),
+    // ★ 2026-10-17（plan/single-resident-trainer §2，S2）：判据从「存活即健康」改成
+    //   「存活 ∧ 心跳不陈旧」——serve 是单线程轮转，卡死时进程还在（旧判据照绿）。
+    //   `heartbeatAlive` 里的三条「不判死」：pid 对不上（冒烟预演占同一槽）/ 文件缺失 /
+    //   启动宽限与旧进程（判据上线前启动的 serve）——见 core/trainer-heartbeat.ts。
+    healthy: async () => heartbeatAlive(),
     sentinels: pySentinels(TRAINER_SERVE_ENTRY),
   }
 }

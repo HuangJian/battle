@@ -49,6 +49,16 @@ CREATE_NO_WINDOW = 0x08000000
 _user32 = ctypes.windll.user32  # type: ignore[attr-defined]
 _kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
 
+#: `EnumWindows` 回调的工厂函数。Windows 上必须是 **WINFUNCTYPE**（stdcall；x86 上与
+#: `CFUNCTYPE` 不通用，而 `EnumWindows` 按 stdcall 回调），但 typeshed 的 `ctypes` 只在
+#: win32 分支定义这个名字 —— 门禁在 POSIX 上跑 mypy，裸引用会报 `attr-defined`（2026-10-17
+#: 修）。按 `sys.platform` 取：mypy 会把另一平台的分支判为不可达（`--platform` 语义），
+#: 两边都零错误，也不需要往真代码上贴 `# type: ignore`。
+if sys.platform == "win32":
+    _WNDENUMPROC = ctypes.WINFUNCTYPE
+else:  # 本工具只在 Windows 有意义；POSIX 上仅需可被 mypy / 导入 分析
+    _WNDENUMPROC = ctypes.CFUNCTYPE
+
 T0 = time.time()
 
 
@@ -63,7 +73,7 @@ def console_window() -> int:
 def visible_windows() -> list[tuple[int, str, str, int]]:
     """桌面上**可见**顶层窗口 `[(hwnd, 类名, 标题, pid)]`。"""
     out: list[tuple[int, str, str, int]] = []
-    proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    proc = _WNDENUMPROC(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
     def cb(hwnd: int, _lparam: int) -> bool:
         if _user32.IsWindowVisible(hwnd):

@@ -51,6 +51,9 @@ NET_PROBE_MAX = 16 * 1024 * 1024
 #: /admin/worker-prefetch 请求体上限（plan/dashboard-ppo-live-rows）：体里只有 worker id 与
 #: 两组 jid 列表（16 字节 × 预取深度）—— 64KB 已宽裕两个数量级，超限 413 而不是读进内存。
 WORKER_PREFETCH_BODY_MAX = 64 * 1024
+#: `/admin/worker-error` 请求体上限（plan/component-error-registry §4.3-S3b）：体里是一条错误
+#: 事件（含 `detail` ≤ 4000 字符）+ 几个标识字段——64KB 已宽裕一个数量级，超限 413 而不是读进内存。
+WORKER_ERROR_BODY_MAX = 64 * 1024
 
 
 def rss_bytes() -> int:
@@ -312,6 +315,60 @@ class AdminRoutes:
             return
         self.hub.note_worker_prefetch(worker, body.get("held"), body.get("dl"))
         self._json({"ok": True, "worker": worker}, 200)
+
+    def _post_worker_error(self) -> None:
+        """`POST /admin/worker-error`：云机上报**只在云机**的失败（纯观测，plan §4.3-S3b）。
+
+        body：`{worker, component, course?, job_id?, it?, severity?, reason, detail?, ts?}`。
+        读面 `GET /admin/errors?since=<游标>`（TTL ring，权威账本在控制台）。
+
+        三条口径与 `_post_worker_prefetch` **逐字同规**（那是本条腿的形状来源）：
+          · **缺 `worker` 或 `reason` ⇒ 400**：无归属 / 无原因的上报没有可渲染的行；
+          · 体上限 `WORKER_ERROR_BODY_MAX` ⇒ 413；
+          · 鉴权用与 job 面**同一枚** token，失败即丢（上报方 best-effort 不重试——否则配错
+            token 的盘会被自己的观测腿喂满鉴权计数）。
+        """
+        if not self._auth_ok():
+            return
+        try:
+            n = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            self._json({"error": "Content-Length 非法"}, 400)
+            return
+        if n < 0 or n > WORKER_ERROR_BODY_MAX:
+            self._json({"error": f"请求体越界（0..{WORKER_ERROR_BODY_MAX}），收到 {n}"}, 413)
+            return
+        try:
+            raw = self.rfile.read(n)
+            body = json.loads(raw.decode("utf-8")) if raw else {}
+        except (ValueError, OSError) as e:
+            self._json({"error": f"bad json: {e}"}, 400)
+            return
+        if not isinstance(body, dict):
+            self._json({"error": "体必须是对象"}, 400)
+            return
+        worker = str(body.get("worker") or "").strip()
+        reason = str(body.get("reason") or "").strip()
+        if not worker or not reason:
+            self._json({"error": "需要 worker=<worker_id> 与 reason=<一句话>"}, 400)
+            return
+        rec = self.hub.note_worker_error(body)
+        self._json({"ok": True, "worker": rec.get("worker", worker)}, 200)
+
+    def _admin_errors(self) -> None:
+        """`GET /admin/errors?since=<游标>`：云机错误上报的**增量**读面（只读）。
+
+        与 `/admin/offline`、`/admin/queue` 同规：只读观测，不碰任何调度状态。`since` 是
+        hub 侧到达时钟（秒），缺省 0 = 拿 ring 里的全部（ring 自己按 TTL 有界）。
+        """
+        if not self._auth_ok():
+            return
+        try:
+            raw = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("since") or []
+            since = float(raw[0]) if raw and raw[0] else 0.0
+        except ValueError:
+            since = 0.0  # 写错的游标当「从头拉」：观测面宁可重复上屏，也不静默丢
+        self._json(self.hub.worker_errors(since), 200)
 
     def _admin_offline(self) -> None:
         """`GET /admin/offline`：已收到的离线段进度（只读，逐课程 × 逐 run）。

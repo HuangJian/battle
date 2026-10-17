@@ -340,6 +340,27 @@ export interface CourseFactView {
   lastWriteMs: number | null
 }
 
+/** 共享 trainer（serve）的心跳投影（plan/single-resident-trainer §2；写侧 `worker/trainer_heartbeat.py`）。
+ *
+ *  只两种 verdict 会上屏（`fresh`/`stale`）：`unknown`（文件缺失 / pid 对不上 / 启动宽限 /
+ *  旧进程）在服务端就被吃掉了（不可知 ≠ 有病，也不该在坞里发声）——所以**缺省/null = 不可知**。 */
+export interface TrainerHeartbeatView {
+  /** 写心跳的进程（serve）。 */
+  pid: number
+  /** 最后一拍的时刻（**epoch 秒**，python `time.time()`）。 */
+  ts: number
+  /** 已推进的步数（serve 的 `report.steps`）。 */
+  steps: number
+  /** 正在等外部的课程数（含预采 join / PPO 让位）。 */
+  waiting: number
+  /** 每课状态（state / rounds_done / next_it）。 */
+  courses: Record<string, { state?: string; rounds_done?: number; next_it?: number }>
+  /** `stale` = 疑似卡死（告警坞一条 err）；`fresh` = 正常。 */
+  verdict: 'fresh' | 'stale'
+  /** 最后一拍距今（秒）。 */
+  ageSec: number
+}
+
 export interface ConsoleStateView {
   time: string
   course: string
@@ -386,6 +407,11 @@ export interface ConsoleStateView {
    *  **不含 `detail`**（长文本只走 `/api/errors`）：未 ack 数要用**客户端的 acks** 过滤后才能算，
    *  所以必须逐条带 `fp` + `severity`。 */
   errors?: ErrorSummaryView | null
+  /** **共享 trainer 心跳**（plan/single-resident-trainer §2）。
+   *
+   *  取数面 = `core/trainer-heartbeat.ts`（判据也在那：pid 对不上/文件缺失/启动宽限 ⇒ 不可知，
+   *  直接投影成 null）。`null`/缺省 = 不可知 ⇒ **不出告警、不判死**。 */
+  trainerHeartbeat?: TrainerHeartbeatView | null
   /** **本机（self 节点）磁盘水位**（plan/self-node-disk-alert：告警坞第 8 个条目函数的取数面）。
    *
    *  取数面 = 机群级 `FleetProbes.nodes` 的 self 行（`/v1/ping` 顺带带回来的磁盘事实）——

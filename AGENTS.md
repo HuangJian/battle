@@ -57,7 +57,7 @@ plan 与 MANIFEST 冲突 ⇒ MANIFEST 赢，先记进 DECISIONS 再动手。`doc
 - **Never start the dev server / 开浏览器**验证改动（验证 = 门禁；UI 例外 → details §5.5）。
 - **训练操作唯一入口 = 控制台**（`bun run dashboard` :8900）或同源 API；绕过 = 漏课程开关 / 暂停解禁 / hub 三件套。
 - **训练 backend 无参可调**：PPO 恒为「发布 → 等 worker 认领」；本机算在控制台起本机 worker，零 worker 就等，**永不**就地降级。
-- **起 NN 训练禁裸 `python`**：无头 → `bun dashboard/src/launch/cli.ts --script <x>.py`；日常组件管理 → 控制台。
+- **NN 训练禁裸 `python`**：无头 → `bun dashboard/src/launch/cli.ts --script <x>.py`（常驻=serve；per-course run_rl/run_bc 被闸拒，一次性腿例外）；其余 → 控制台。
 - **NN 训练变更/评估/教训 → `docs/nn/*.md` 顶部**（`## §<该文件当前最大号+1>`；索引 `docs/nn.progress.md`）；改架构前先读该档。
 - **提交走临时消息文件** `git commit -F tmp/<ascii-file>`，完成后 `git log -1 --pretty=fuller` 核对（`-m` 会静默失败）。
 - **未跟踪的 `*.md` 不得 `git add`**（也禁 `git add -A` / `git add .`）；只提交已跟踪的与人点名的那份。

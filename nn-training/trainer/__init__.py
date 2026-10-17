@@ -29,7 +29,7 @@ biz/<mod>.py  ⇔  <旧 rl 树里不属于 TRAINER_ORCHESTRATION 的模块>
 `test_trainer_orchestration_set_is_exactly_the_modules_reaching_remote` 双向钉住
 （往这里丢一个纯逻辑模块、或让某个模块不再碰传输层，都红）。
 
-## 模块（43）
+## 模块（44）
 
 > 2026-09-30（刀 7）：六个**入口脚本**从 `nn-training/` 顶层搬进本包（此前它们只能靠
 > 「与本包并列的根文件」这一形状存在）⇒ `nn-training/` 下如今只剩 `conftest.py`。入口进包后
@@ -40,10 +40,11 @@ biz/<mod>.py  ⇔  <旧 rl 树里不属于 TRAINER_ORCHESTRATION 的模块>
 
 | 簇 | 模块 | 内容 |
 |----|------|------|
-| **入口** | `run_rl` | RL 训练入口（两阶段 argparse / `--mode` 分派；刀 7 前住 `nn-training/` 顶层） |
+| **入口** | `run_rl` | RL 训练入口 = **CLI 壳**（两阶段 argparse / `--mode` 分派 → 分流到
+一次性腿；2026-10-17 S3 起**没有常驻训练分支**；刀 7 前住 `nn-training/` 顶层） |
+| | `once_shot` | **一次性腿的唯一实现**（冒烟 / 导出 / 预采；2026-10-17 S3 从 `run_rl` 拆出） |
 | | `run_bc` | BC 编排器入口薄壳（引擎在 `trainer/bc_loop.py`；刀 7 前住顶层） |
 | | `run_rl_cluster` | 单进程多课程调度器入口（`--serve` / `--json`；刀 7 前住顶层） |
-| | `train_loop` | 单进程 BC 训练入口（轮次驱动 + 锁；刀 7 前住顶层） |
 | | `eval_course_once` · `eval_m1_once` | 一次性评估入口（课程 / m1；刀 7 前住顶层） |
 | | `loop` | `run_training` 入口（薄包装） |
 | | `loop_runner` | 训练主循环的启动/接管面 |

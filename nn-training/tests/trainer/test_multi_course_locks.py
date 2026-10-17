@@ -2,9 +2,9 @@
 
 plan: `plan/multi-course-parallel-training.md`（S1/S2、§1.2、P1c）。
 
-P0 时的现状：`trainer/run_rl.py` / `trainer/train_loop.py` 各持一把**全局**锁
-（`.run_rl.lock` / `.train_loop.lock`），第二门课程直接拒启——多课并行训练的第一道
-硬阻塞（2026-09-06 双 trainer 事故的护栏，护栏本身不能删，只能按课程实例化）。
+P0 时的现状：两个常驻训练入口（`run_rl` 与本地 BC 连续训练入口，后者已于 2026-10-17 退役）
+各持一把**全局**锁（按入口名派生，如 `.run_rl.lock`），第二门课程直接拒启——多课并行训练
+的第一道硬阻塞（2026-09-06 双 trainer 事故的护栏，护栏本身不能删，只能按课程实例化）。
 
 P1c 后：锁文件名按课程派生（`.run_rl.<course>.lock`），无 `--course` 的老调用
 沿用旧文件名（默认行为零变化）；`--force` 只接管**本课**的锁，绝不跨课抢夺。
@@ -23,7 +23,6 @@ NN_ROOT = Path(__file__).resolve().parents[2]
 if str(NN_ROOT) not in sys.path:
     sys.path.insert(0, str(NN_ROOT))
 
-from tests.subproc_util import run_utf8
 from worker.train.loop_util import (
     acquire_lock,
     cleanup_lock,
@@ -78,14 +77,14 @@ def test_course_lock_path_is_course_keyed() -> None:
     assert a != b
     assert a.endswith(".run_rl.s1.lock")
     assert b.endswith(".run_rl.s-dodge.lock")
-    tl = course_lock_path(str(NN_ROOT), "s1", "train_loop")
-    assert tl.endswith(".train_loop.s1.lock")
+    bc = course_lock_path(str(NN_ROOT), "s1", "run_bc")
+    assert bc.endswith(".run_bc.s1.lock")  # kind 泛化维（run_bc 与 run_rl 共用同一派生）
 
 
 def test_no_course_keeps_legacy_lock_name() -> None:
     """无 --course 的老调用沿用旧文件名——默认行为零变化（plan §0.5-4）。"""
     assert course_lock_path(str(NN_ROOT), "", "run_rl").endswith(".run_rl.lock")
-    assert course_lock_path(str(NN_ROOT), "", "train_loop").endswith(".train_loop.lock")
+    assert course_lock_path(str(NN_ROOT), "", "run_bc").endswith(".run_bc.lock")
 
 
 def test_course_name_traversal_rejected() -> None:
@@ -99,21 +98,6 @@ def test_course_name_traversal_rejected() -> None:
     with pytest.raises(ValueError):
         course_lock_path(str(NN_ROOT), "../evil", "run_rl")
     assert validate_course_name("s-dodge_2.b") == "s-dodge_2.b"
-
-
-def test_train_loop_cli_accepts_course_flag() -> None:
-    """CLI 层：`trainer/train_loop.py --course x --help` 可达（P0 时为 unrecognized arguments）。
-
-    没有 `--course` 参数时，CLI 层永远到不了 per-course 锁路径——这条断言就是
-    「参数已接线」的证据（F-B4）。
-    """
-    proc = run_utf8(
-        [sys.executable, str(NN_ROOT / "trainer/train_loop.py"), "--course", "s1", "--help"],
-        cwd=str(NN_ROOT),
-        timeout=180,
-    )
-    assert proc.returncode == 0, proc.stderr[-2000:]
-    assert "--course" in proc.stdout
 
 
 # ────────────────────────── run_rl 锁原语（stale 接管 + 同课拒启，跨平台） ──────────────────────────

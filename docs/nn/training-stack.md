@@ -7,6 +7,58 @@
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
 ---
+## §34 入口分家（S3）：`run_rl.py` 收成 CLI 壳 + 一次性腿独立成模块（2026-10-17，plan/single-resident-trainer §3）
+
+**现场**：`trainer/run_rl.py` 一个人背四种角色 —— 常驻训练循环 / 冒烟预演 / 导出快照 / 预采子进程。
+S1（准入闸）+ S2（心跳判死）把口子堵住之后，**四种角色还挤在一个文件里**：读代码的人要在一屏
+`main()` 里分清「哪几行只在冒烟时跑、哪几行只在导出时跑、哪几行是常驻才有的」，而锁正是被这种
+混杂摸错的（2026-09-06 双 trainer 写同一 traj）。
+
+**目标形态（落地后）**：
+
+```
+trainer/run_rl_cluster.py --serve    常驻调度器（唯一常驻写者）
+trainer/run_rl.py                    CLI 壳：解析 → --echo-config dump / 分流 / 拒启
+trainer/once_shot.py                 一次性腿的唯一实现：冒烟 / 导出 / 预采
+trainer/collect_only.py              预采子进程的执行体（入口仍是 run_rl.py）
+```
+
+**四条腿各自的契约**（搬进 `once_shot.py` 时**逐条保持**，顺手改任何一条都是行为变更）：
+
+| 腿 | 取 `.run_rl.<课>.lock` | 过开课闸 | 说明 |
+|---|---|---|---|
+| `--smoke` | **取** | 不过 | 真跑一轮（collect → publish → echo → 作废）；作废点全在收官/权重层，**没有**「零写 traj」的判据 ⇒ 与 serve 抢 traj 的面还在（§3.1 选项 A） |
+| `--export-bundle` | **不取** | **过** | 只读快照，与 serve 并行是设计目标；「停课的课程不能导出」这条行为此前由常驻分支顺带守着，迁移时**唯一不能丢**的那条（§3.3） |
+| `--collect-only` | 不取 | 不过 | 预采子进程；只带 `--course` + `--collect-only-config`（P0-3 的动作覆盖通道） |
+| `--echo-config` | — | — | 不是腿：它是**解析面**的 dump（对拍 oracle 读 stdout），留在壳里、在分流之前短路 |
+
+锁策略提成**纯判据** `once_shot.takes_course_lock(args)`（可单测），而不是埋在分支里。
+
+**逃生舱退役（用户裁决，2026-10-17）**：S1 曾给 `--allow-detached-trainer` 一条运维旁路（放行 +
+醒目告警 + 自报 `tmp/trainer-detached.json` ⇒ 控制台 `warn` 横幅）。S3 把常驻训练分支从 `run_rl.py`
+删掉之后，那条旁路**无处可去**（横幅数据源会永远为空）⇒ 旗标 / 自报文件 / 服务端读面
+（`server/api/detached-trainers.ts`）/ 告警坞条目四件一起删。S1 的判据随之从「拦住旁路」变成
+「没有旁路可走」：**常驻训练的唯一入口 = `run_rl_cluster.py --serve`**（`--force` 一样过不了，
+它是锁抢先）。
+
+**验收（都是结构判据，不是「某个词没出现」）**：
+
+- `tests/trainer/test_single_resident_trainer.py` 用 **AST** 钉住：`run_rl.py` 的调用/import 集合里
+  没有 `run_training`（`trainer.loop` 也不许 import），而 `once_shot.py` 里**必须有**（冒烟真跑一轮）；
+- 真入口分流：`--smoke` / `--export-bundle` / `--collect-only` 都带同一个 `course_key` 进 `once_shot`
+  （打桩 `run_once_shot` 记录），`--echo-config` 在分流前短路；
+- 锁策略：导出 ⇒ 不取锁、冒烟 ⇒ 取锁（参数化用例）；
+- 预采子进程真跑一遍（`tests/trainer/test_precollect_child.py`，子进程吃 `--collect-only-config`）。
+
+**为什么不给 `once_shot.py` 一个 `__main__`**：那会变成**第二份 argparse**（mode/rl-config/课程
+覆盖全要再写一遍）——两份解析面必然 drift，而预采子进程的命名空间重建正是靠「只有一份解析面」。
+入口仍然是 `run_rl.py`（`collect_only.RUN_RL_ENTRY` 钉着它）。
+
+**落地**：`nn-training/trainer/once_shot.py`（新）· `run_rl.py`（壳）· `worker/trainer_gate.py`
+（trim）· dashboard 侧删 `detachedTrainers` 读面与横幅 · 文档（`agents.details.md` §5 /
+`goal-nn-next.md` A5 配方 / `console.md` §40 该段加退役注记）。
+
+---
 ## §33 `biz/ladder_factory.py` 退役：它只是刚删掉的 ladder 模板库的生成器（2026-10-13）
 
 **用户提问（2026-10-13）**：`biz/ladder_factory.py` 干啥用的？只为生成 level 文件的话，也删掉吧。

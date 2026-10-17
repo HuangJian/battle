@@ -416,6 +416,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         default=0,
         help="内部：仅采集一轮落盘后退出（T4 双缓冲子进程模式；不 PPO/不 eval/不写权重）。",
     )
+    # ★ 2026-10-17（plan/single-resident-trainer §7-P0-3）：预采子进程的动作覆盖通道。
+    #   不能走普通 CLI：`bc`/`iters` 这些键由**课程**定义（apply_course 会覆盖 CLI 值，
+    #   显式 CLI 还会被 course_cli_conflicts 拒启）⇒ 内部动作只能走「课程之后」的通道。
+    ap.add_argument(
+        "--collect-only-config",
+        default="",
+        help="内部：预采子进程的动作覆盖 JSON（在 apply_course 之后施加；见 worker/course_args）。",
+    )
     # ===== 课程配置化（plan/rl-training-config.md §3）：唯一启动入口，无 CLI 逐参覆盖 =====
     ap.add_argument(
         "--course",
@@ -439,6 +447,9 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         help="冒烟预演：收到冒烟回显结果（remote_worker --echo）后"
         "作废本轮并干净退出；it 不前进、不写 iteration 事件",
     )
+    # ★ 2026-10-17（S3，plan/single-resident-trainer.plan.md §3）：曾有的逃生舱
+    #   `--allow-detached-trainer` **已删除** —— run_rl 不再有常驻训练分支，常驻训练的唯一
+    #   入口是 `run_rl_cluster.py --serve`（判据与拒启消息住 `worker/trainer_gate.py`）。
     # ★ 2026-10-01（plan/gate-halt-platform-level）：门禁停机模式是**平台级**的
     # （`tmp/gate-halt.json`，控制台写、训练侧每轮判定读）。这里只留「临时覆盖」参数，
     # 且 default=None —— **绝不能**在 argparse 层读平台文件：那样每进程只读一次，
