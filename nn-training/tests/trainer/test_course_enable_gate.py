@@ -5,8 +5,8 @@
 手写控制台拥有的状态文件（`training-enabled.txt` / `loop-control.json`）。
 
 契约：训练循环**只**认控制台写的开课标记；判据同源 = `trainer.loop_plan.course_enabled`
-（禁第二份"标记存在性检查"）。范围只卡训练循环——`--smoke` 预演、collect-only
-（调用点在其后）、无课程的 legacy 路径都不受影响。
+（禁第二份"标记存在性检查"）。范围（S3 后）：只剩**导出腿**还过它——`--smoke` 预演、
+collect-only（调用点更早）、无课程的 legacy 路径都不受影响。
 """
 
 from __future__ import annotations
@@ -22,7 +22,10 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from common.protocol import COURSE_ENABLE_MARKER
-from trainer.run_rl import _require_course_open
+
+# 2026-10-17（S3，plan/single-resident-trainer §3.3）：判据随一次性腿搬进 `trainer/once_shot.py`
+# —— 导出腿保留这条闸（「停课的课程不能导出」此前由常驻分支顺带守着）。
+from trainer.once_shot import require_course_open
 
 
 def _args(**over: object) -> types.SimpleNamespace:
@@ -34,7 +37,7 @@ def _args(**over: object) -> types.SimpleNamespace:
 
 def test_missing_marker_refuses_startup(tmp_path: Path) -> None:
     with pytest.raises(SystemExit) as e:
-        _require_course_open(_args(), tmp_path)
+        require_course_open(_args(), tmp_path)
     msg = str(e.value)
     assert "未开课" in msg
     assert COURSE_ENABLE_MARKER in msg  # 指路文案带上缺失的那个文件名
@@ -44,14 +47,14 @@ def test_missing_marker_refuses_startup(tmp_path: Path) -> None:
 
 def test_marker_present_allows_startup(tmp_path: Path) -> None:
     (tmp_path / COURSE_ENABLE_MARKER).write_text("", encoding="utf-8")
-    _require_course_open(_args(), tmp_path)  # 不抛即通过
+    require_course_open(_args(), tmp_path)  # 不抛即通过
 
 
 def test_smoke_is_exempt(tmp_path: Path) -> None:
     """冒烟预演不受影响（计划 §1.2 的显式范围）。"""
-    _require_course_open(_args(smoke=True), tmp_path)  # 无标记也不拦
+    require_course_open(_args(smoke=True), tmp_path)  # 无标记也不拦
 
 
 def test_legacy_non_course_path_unchanged(tmp_path: Path) -> None:
     """无课程的老用法逐字节不变（开课标记只存在于课程 traj 目录下）。"""
-    _require_course_open(_args(course_obj=None), tmp_path)
+    require_course_open(_args(course_obj=None), tmp_path)

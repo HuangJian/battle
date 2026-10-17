@@ -203,6 +203,10 @@ TRAINER_ORCHESTRATION = frozenset(
         "loop_steps",
         "loop_transport",
         "loop_volume",
+        #: 2026-10-17（S3，plan/single-resident-trainer §3）：一次性腿（冒烟/导出/预采）从
+        #: `run_rl` 拆到本模块 —— 它顶层拿 `worker.archive`、函数内拿 `remote.code_snapshot`
+        #: / `remote.hub_client`（快照 + 清停机态）⇒ **直接**编排成员（同前先红、再登记）。
+        "once_shot",
         "queue_local",
         "rollout_phase",
         "run_bc",

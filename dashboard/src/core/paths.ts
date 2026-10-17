@@ -61,15 +61,6 @@ export function errorLedgerPath(): string {
   return process.env.BCITY_ERROR_LEDGER ?? path.join(LOG_DIR, 'component-errors.jsonl')
 }
 
-/** 「独立 trainer」自报文件（`tmp/trainer-detached.json`；plan/single-resident-trainer §1.5）。
- *
- *  写侧 = python 准入闸的逃生舱（`worker/trainer_gate.py::note_detached_trainer`，env
- *  `NN_TRAINER_DETACHED`）；读侧是 `server/api/detached-trainers.ts`。单测以
- *  `BCITY_TRAINER_DETACHED` 重定向（**否则用例读到的是操作员真盘上的条目**），故**惰性**取值。 */
-export function trainerDetachedPath(): string {
-  return process.env.BCITY_TRAINER_DETACHED ?? path.join(LOG_DIR, 'trainer-detached.json')
-}
-
 /** 共享 trainer（serve）的心跳文件（`tmp/trainer-heartbeat.json`；plan/single-resident-trainer §2）。
  *
  *  写侧 = python 的写线程（`worker/trainer_heartbeat.py`，每 5s；env `NN_TRAINER_HEARTBEAT`）；

@@ -440,11 +440,12 @@ was folded into them; it had already replaced `nn-training/start-training.{sh,ps
   entries (`worker/train/bc.py --arch student`, `worker/train/goal_bc.py`,
   `worker/train/intent_probe.py`, `worker/scripts/eval_bridge.py`, `worker/scripts/validate_export.py`, …)
   through the same venv, so all torch work shares one entry and agents never hit "no torch".
-  ★ 2026-10-17（plan/single-resident-trainer §1）：常驻训练**只允许**
+  ★ 2026-10-17（plan/single-resident-trainer §1 + §3）：常驻训练**只允许**
   `--script trainer/run_rl_cluster.py`（serve，服务所有课程）；per-course `trainer/run_rl.py` / `run_bc.py`
   直启会被 python 侧准入闸拒（`worker/trainer_gate.py`）——一次性腿例外（`--smoke` /
-  `--export-bundle` / `--collect-only` / `--echo-config`），排障逃生舱 `--allow-detached-trainer`
-  （放行 + 告警 + 控制台横幅）。本地 BC 连续训练入口已退役（同 plan §1.4）。
+  `--export-bundle` / `--collect-only` / `--echo-config`）。**S3 起没有逃生舱**：
+  `run_rl.py` 已删掉常驻训练分支（逃生的 `--allow-detached-trainer` 与它那条控制台横幅一起退役），
+  常驻写者只剩 serve。本地 BC 连续训练入口已退役（同 plan §1.4）。
   Legacy flat names auto-alias to their package home (`train_bc.py` → `worker/train/bc.py`,
   `gen_self_inj.py` → `worker/scripts/gen_self_inj.py`, `train_rl.py` → `trainer/run_rl.py`; DECISIONS §324).
 

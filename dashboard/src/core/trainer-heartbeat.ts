@@ -17,7 +17,7 @@
  *
  *  ⇒ 调用方只需问「verdict 是不是 stale」：`unknown` 一律**不判死**（不可知 ≠ 有病）。
  *
- *  为什么住 `core/`（而同族的 `detached-trainers.ts` 住服务端 api/）：这里不只读，还给出
+ *  为什么住 `core/`：这里不只读，还给出
  *  **判据**——它被 `stack/specs.ts::trainerServeSpec.healthy`（进程健康面）与 `/api/state`
  *  （上屏面）同时消费；住 core 才能让两面共用同一份判决，不绕经服务端。
  */

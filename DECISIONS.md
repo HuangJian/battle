@@ -7191,3 +7191,28 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   闸在锁之前，混用会让「过了锁」被读成「允许常驻」）。
 - **后果**：`/api/state` 多一个 `trainerHeartbeat`（pid/ts/steps/waiting/逐课 state + verdict，只读盘 ⇒
   控制台重启不丢）；`specs.ts`/`api/views.ts` 里 `trainingLoop` 的「存活即健康」写死 true 全部换成同一判据。
+
+## §2026-10-17-goalnn-entry-split-s3（入口分家 S3：run_rl 退成 CLI 壳；一次性腿独立成模块；逃生舱退役）
+
+- **来源**：`plan/single-resident-trainer.plan.md` §3（S1/S2 之后的一步）+ 用户裁决 2026-10-17
+  （「S3 拆入口后 `--allow-detached-trainer` 怎么办」⇒ **彻底删掉常驻分支**）。
+- **形态**：`run_rl_cluster.py --serve`（唯一常驻写者）· `run_rl.py`（CLI 壳：解析 → `--echo-config`
+  dump / 分流 / 拒启）· `once_shot.py`（新；冒烟 / 导出 / 预采的唯一实现）· `collect_only.py`
+  （预采执行体，入口仍是 `run_rl.py`）。壳里**没有** `run_training` 调用/import（AST 判据钉住），
+  唯一保留的训练调用点在 `once_shot.py`（冒烟是真跑一轮）。
+- **四条腿的契约逐条保持**（搬运不是重构）：冒烟**取**课锁（真跑一轮，作废点全在收官/权重层，
+  没有「零写 traj」依据 ⇒ §3.1 选项 A）· 导出**不取**锁（只读快照，与 serve 并行是设计目标）
+  且**仍过开课闸**（「停课的课程不能导出」此前由常驻分支顺带守着，§3.3 唯一不能丢的一条）·
+  预采只带 `--course` + `--collect-only-config`（P0-3 的动作覆盖通道）· `--echo-config` 不是腿
+  （解析面 dump，在分流前短路）。锁策略提成纯判据 `takes_course_lock(args)`。
+- **逃生舱退役**：`--allow-detached-trainer` + 自报 `tmp/trainer-detached.json` + 服务端读面
+  `dashboard/src/server/api/detached-trainers.ts` + 告警坞 `detachedTrainerAlerts` 四件一起删。
+  理由：常驻分支删掉后旁路无处可去，横幅数据源会永远为空；留一个「能解析但什么都不做」的旗标
+  比删掉更坏（操作员会以为绕过了闸）。判据随之从「拦住旁路」变成「没有旁路可走」。
+- **被否的备选**：① 保留逃生舱、把常驻实现搬进独立模块 —— 否（那就是把唯一写者的纪律留一个
+  常设破口，而 S1/S2 的前提已成立）；② 保留旗标但只打印「请用 serve」—— 否（假动作比拒绝更坏）；
+  ③ 给 `once_shot.py` 加 `__main__`（plan §3.1 的原始形态）—— 否（会变成第二份 argparse：
+  mode/rl-config/课程覆盖要再写一遍，而预采子进程的命名空间重建正是靠「只有一份解析面」）。
+- **后果**：`run_rl.py` 只剩解析与共享原语（锁助手 / `update_kwargs` 原地不动 —— serve、run_bc
+  与一串护栏用例都 import 它们，评审 P1-F4）；console 侧的 `trainingLoop` 组件与
+  train-smoke / export 两条腿**一字未动**（它们本来就走一次性口）。

@@ -95,10 +95,12 @@ BONUS 窗口截断的伪负局，不再作为过门依据。DECISIONS §299 已�
   # 臂 W（warm start，已有：tmp/bc-arena/weights.json）
   # 臂 F（纯从零）—— 必须用近均匀 init，不能用默认 kaiming
   python nn-training/init_scratch_weights.py --out tmp/scratch-init/weights.json
-  # ⚠ 2026-10-17（plan/single-resident-trainer §1）：常驻训练已收敛到共享调度器
+  # ⚠ 2026-10-17（plan/single-resident-trainer §1 + §3）：常驻训练已收敛到共享调度器
   #   （`--script trainer/run_rl_cluster.py` + 控制台开课）——下面这条 per-course 直启今天会被
-  #   准入闸拒；要按这配方重跑，加 `--allow-detached-trainer`（会挂控制台横幅）。
-  bun dashboard/src/launch/cli.ts --script trainer/run_rl.py --allow-detached-trainer \
+  #   准入闸拒，且**没有逃生舱**（S3 已删 run_rl 的常驻分支）。要按这配方重跑：把这门课
+  #   写进课程配置、由控制台开课，让 serve 调度；`--bc/--out/--stages …` 那些逐参覆盖
+  #   一律改成课程文件里的值（课程是单一事实来源）。
+  bun dashboard/src/launch/cli.ts --script trainer/run_rl_cluster.py \
     --bc tmp/scratch-init/weights.json --out tmp/a5-scratch2/weights.json \
     --traj tmp/a5-scratch2 --stages 1000-1002 --seed-rotate 50 --max-ticks 1200 \
     --workers 8 --stream 1 --dodge off --reward toy:kill2 \

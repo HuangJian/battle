@@ -757,14 +757,10 @@ def bc_argparser(
     )
     ap.add_argument("--local", action="store_true", help="语料就绪后本机 train/bc.py 训练")
     ap.add_argument("--smoke", action="store_true", help="冒烟：尺寸压缩真一轮，落位即作废")
-    # ★ 2026-10-17（plan/single-resident-trainer.plan.md §1，S1）：常驻 BC 训练准入闸的逃生舱
-    #   （判据/消息与 run_rl 同源：`worker/trainer_gate.py`）。serve 不走本解析器（它用
-    #   `bc_course_args` + BcLoop 直驱），故本闸对共享调度器零影响。
-    ap.add_argument(
-        "--allow-detached-trainer",
-        action="store_true",
-        help="逃生舱：允许 run_bc.py 单课常驻编排（运维排障用；会打印醒目告警并挂横幅）",
-    )
+    # ★ 2026-10-17（S3，plan/single-resident-trainer.plan.md §3）：曾有的逃生舱
+    #   `--allow-detached-trainer` **已删除** —— BC 的常驻编排只由 `run_rl_cluster.py --serve`
+    #   驱动（判据/消息同源：`worker/trainer_gate.py`）。serve 不走本解析器
+    #   （它用 `bc_course_args` + BcLoop 直驱），故本闸对共享调度器零影响。
     ap.add_argument(
         "--wait-sec",
         type=float,

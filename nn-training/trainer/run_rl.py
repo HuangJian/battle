@@ -1,10 +1,29 @@
+"""trainer/run_rl.py — RL 入口 = **CLI 壳**（解析 → 分流）+ 共享训练原语（plan/single-resident-trainer §3，S3）。
+
+## 四种角色现在各在哪
+
+| 角色 | 归宿 |
+|---|---|
+| 常驻训练循环（唯一写者） | `trainer/run_rl_cluster.py --serve` —— **本文件没有常驻分支** |
+| 一次性腿（冒烟 / 导出 / 预采） | `trainer/once_shot.py` |
+| 参数解析 · `--echo-config` dump · 准入拒启 | 本文件（**唯一的解析面**） |
+| 共享原语（单实例锁 / PPO 更新参数 / 日志重定向） | 本文件（serve 与 run_bc 都在用，P1-F4：不许当残留清掉） |
+
+`main()` = 解析 → `--echo-config` 短路 → 一次性腿分流进 `once_shot`；**没有**「什么都不带」的
+活路 —— 那正是常驻训练，S3 后只有 `run_rl_cluster.py --serve` 能跑（拒启消息见
+`worker/trainer_gate.py`）。**唯一保留的训练调用点在 `once_shot.py`**（冒烟是真跑一轮）。
+
+## 为什么锁助手还住这里
+
+`_acquire_run_rl_lock` / `_cleanup_run_rl_lock` / `_runrl_pid_alive` 是**共享原语**而非本入口的
+私货：serve 的集群锁（`trainer/loop_serve.py::acquire_cluster_lock`）、`run_bc.py` 的单实例锁、
+以及一串护栏用例都 import 这三个名字（评审 P1-F4）。S3 拆入口时它们**原地不动**。
+"""
+
 from __future__ import annotations
 
-import atexit
 import os
-import shutil
 import sys
-import time
 from pathlib import Path
 
 # 2026-09-30（刀 7）：本入口从 nn-training/ 顶层搬进 trainer/。既有前提随之失效，这里是
@@ -22,30 +41,22 @@ from common.log import Tee as _Tee
 from common.log import log
 from common.pid_probe import pid_alive as _pid_alive_impl
 from common.platform_utils import force_utf8_stdio
-from common.proc import run_capture
-from common.protocol import COURSE_ENABLE_MARKER, coef_active
-from trainer.collect_only import run_collect_only
+from common.protocol import coef_active
 from trainer.dispatch_queue import (  # noqa: F401 — run_rollout_queue re-exported for tests
     REPO_ROOT,
     run_rollout_queue,
 )
-from worker.archive import ensure_current_branch_pushed
 from worker.cli import build_argparser
 from worker.modes import apply_mode_flags, merged_mode_args, resolve_mode
 from worker.resume import (
     completed_pairs,  # noqa: F401 — re-exported for tests
     last_completed_iter,  # noqa: F401 — re-exported for tests
-    last_rotate_seed,
+    last_rotate_seed,  # noqa: F401 — 轮换 seed 的唯一实现（预采腿用它；e2e/test_run_rl 直读）
     peak_entropy,  # noqa: F401 — F4 ENT 相对崩塌基线回读（§339），re-exported for tests
     resumed_manifests,  # noqa: F401 — re-exported for tests
 )
 from worker.rl_config_schema import check_rl_config
-from worker.train.loop_util import (
-    acquire_lock,
-    cleanup_lock,
-    course_key_from_path,
-    course_lock_path,  # per-course 锁名（plan §1.2）
-)
+from worker.train.loop_util import course_key_from_path
 
 
 def update_kwargs(args, it: int, start_it: int, ref_model) -> dict:
@@ -136,59 +147,13 @@ def _cleanup_run_rl_lock(lock_path: str) -> None:
     release_instance_lock(lock_path)
 
 
-def _require_course_open(args, traj_root: Path) -> None:
-    """开课闸（纯逻辑，可单测）：训练循环只认控制台写的「开课」标记。
+def _parse(args_argv: list[str]):
+    """两阶段解析（阶段一 `--mode`，阶段二 rl-config 默认 + argparse）+ 课程施加。
 
-    ★ 2026-09-21（plan/accident.plan.md §1）：CLI detached 直启会绕过控制台开课流程
-    （漏开课标记 / 暂停意图解禁 / hub 课程模式三件套），并让 agent 去手写控制台拥有的
-    状态文件（`training-enabled.txt` / `loop-control.json`）与控制台写面打架。
-
-    判据**同源调用** `trainer.loop_plan.course_enabled`（= `enabled_courses` 的谓词；标记与
-    traj 目录同址 `<traj>/training-enabled.txt`）——**禁**在这里另写第二份"标记存在性
-    检查"（第二份判据 drift 就是这类事故的老 pattern）。
-
-    ⚠ 落点：`--traj` 是**本课**的 traj 目录（run_rl 直接在那下面写 training_log.jsonl），
-    所以用谓词 `course_enabled(traj)`；**不得** `enabled_courses(traj)`（那会去扫子课程，
-    判据错位）。范围：只卡**训练循环** —— collect-only（调用点在其后）、`--smoke` 预演、
-    无课程（legacy 非课程路径）都不受影响。
+    返回 `(ap, args, course, rl_src, rl_args)`。**只有一份**（旧版把这段摊在 main 里，
+    预采子进程的命名空间重建靠的就是「同一个解析面」）。
     """
-    if getattr(args, "smoke", False):
-        return
-    if getattr(args, "course_obj", None) is None:
-        return  # 非课程路径：老用法逐字节不变（开课标记只存在于课程 traj 目录下）
-    from trainer.loop_plan import course_enabled
-
-    if course_enabled(traj_root):
-        return
-    name = str(getattr(args, "course_name", "") or "?")
-    raise SystemExit(
-        f"[run_rl] 课程 {name!r} 未开课：{Path(traj_root) / COURSE_ENABLE_MARKER} 不存在 ——\n"
-        "  训练只从控制台开课（dashboard → 课程 → 开课），不接受 CLI 直启：\n"
-        "  直启会漏掉开课标记 / 暂停意图解禁 / hub 课程模式三件套。"
-    )
-
-
-def main() -> None:
-    # 子进程字节流恒 UTF-8（压过 PYTHONIOENCODING/PYTHONUTF8/代码页）——validate_args
-    # 等的中文 SystemExit/日志对任何捕获方都是确定编码；配对消费方显式 utf-8 解码。
-    force_utf8_stdio()
-    # I1 快速缓解（hy E4/dsf）：fatal 信号（SIGSEGV/SIGABRT/SIGFPE…）时把 Python 栈
-    # 倾倒到 stderr——随 §16.2 的 run.log 落文件，两起「无堆栈消失」事故不再完全盲区。
-    # OOM killer（SIGKILL）不经过信号处理器——那种死法由 biz/forensics.py 的提交边界
-    # 快照兜底取证（最后一条 forensics = 临终状态）。
-    import faulthandler
-
-    faulthandler.enable()
-    # Anchor cwd to the repo root (parent of nn-training/): all default paths
-    # (tmp/student-weights-dagger, tmp/rl-weights, tmp/rl-traj) are repo-root
-    # relative. Required for the unified launcher's --detach (dashboard/src/launch/cli.ts), whose
-    # is nn-training/ — same pattern as every other entry script's REPO_ROOT.
-    # 2026-09-30（刀 7）：入口从 nn-training/ 顶层搬进 trainer/ ⇒ 上溯层数 2 → 3
-    # （仓根仍是父目录的父目录的父目录）。层数写错 = cwd 停在 nn-training/ ⇒ 上面那些
-    # tmp/ 默认路径全部错位。
-    os.chdir(str(Path(__file__).resolve().parents[2]))
-    # ===== RL 入口整合（DECISIONS §307）：两阶段 argparse，先预解析 --mode/--goal =====
-    mode = resolve_mode(sys.argv[1:])
+    mode = resolve_mode(args_argv)
     # 启动参数默认取自 rl-config.json（单一事实来源；CLI 显式传参覆盖 json 默认）。
     # 查找优先级 rl.<mode> → intent_rl 遗留块（intent/goal 迁移期）→ rl（D2）。
     # 路径的唯一来源是 `biz.config.rl_config_path()`（`BCITY_RL_CONFIG` 可重定向）——与
@@ -198,12 +163,9 @@ def main() -> None:
     _cfg = read_rl_config_file()
     # rl-config 键白名单校验（plan/rl-config-cleanup.plan.md §3.4）：**只告警不拒** ——
     # 拼错/退役的键此前会静默沉睡（`intent_rl` 沉睡到 2026-09-26）；白名单数据住
-    # `rl_config.schema.json`（今天只有这里读它；控制台冒烟接线待做，见
-    # docs/nn/rl-config.md §1.7 —— 评审更正：早先说「与冒烟共用一份」不成立）。
-    # 注意这里**只打日志**：告警不得变成拒启（用户裁决 O3）。
+    # `rl_config.schema.json`（今天只有这里读它）。**只打日志**：告警不得变成拒启（用户裁决 O3）。
     # 注：`check_rl_config` 必须在**模块顶层** import——main() 里已经 `os.chdir` 到仓根，
-    # 此时 `sys.path[0]=''` 已指向仓根，惰性 import 会找不到 `worker.rl_config_schema`
-    # （tests/trainer/test_serve_wiring.py 的 oracle 子进程实测；刀 7 前该模块住 nn-training 顶层）。
+    # 此时 `sys.path[0]=''` 已指向仓根，惰性 import 会找不到 `worker.rl_config_schema`。
     for _adv in check_rl_config(_cfg):
         log(f"[run_rl] rl-config 告警：{_adv}")
     _rl_args, _rl_src = merged_mode_args(_cfg, mode)
@@ -214,12 +176,7 @@ def main() -> None:
     # ===== 课程配置化（plan/rl-training-config.md §3）：唯一启动入口 =====
     # 优先级 课程 > rl-config.json > argparse 默认；无 CLI 逐参覆盖。课程自带
     # 关卡布局/奖励公式/超参 schedule，apply 后由各阶段消费。
-    from worker.config import (
-        apply_course,
-        course_cli_conflicts,
-        course_from_args,
-        echo_config,
-    )
+    from worker.config import apply_course, course_cli_conflicts, course_from_args
 
     course = course_from_args(args)
     if course is not None:
@@ -243,64 +200,68 @@ def main() -> None:
         from worker.course_args import apply_collect_only_config
 
         apply_collect_only_config(args, args.collect_only_config, log_fn=log)
+    return ap, args, course, _rl_src, _rl_args
+
+
+def main() -> None:
+    # 子进程字节流恒 UTF-8（压过 PYTHONIOENCODING/PYTHONUTF8/代码页）——validate_args
+    # 等的中文 SystemExit/日志对任何捕获方都是确定编码；配对消费方显式 utf-8 解码。
+    force_utf8_stdio()
+    # I1 快速缓解（hy E4/dsf）：fatal 信号（SIGSEGV/SIGABRT/SIGFPE…）时把 Python 栈
+    # 倾倒到 stderr——随 §16.2 的 run.log 落文件，两起「无堆栈消失」事故不再完全盲区。
+    # OOM killer（SIGKILL）不经过信号处理器——那种死法由 biz/forensics.py 的提交边界
+    # 快照兜底取证（最后一条 forensics = 临终状态）。
+    import faulthandler
+
+    faulthandler.enable()
+    # Anchor cwd to the repo root (parent of nn-training/): all default paths
+    # (tmp/student-weights-dagger, tmp/rl-weights, tmp/rl-traj) are repo-root
+    # relative. Required for the unified launcher's --detach (dashboard/src/launch/cli.ts), whose
+    # is nn-training/ — same pattern as every other entry script's REPO_ROOT.
+    # 2026-09-30（刀 7）：入口从 nn-training/ 顶层搬进 trainer/ ⇒ 上溯层数 2 → 3
+    # （仓根仍是父目录的父目录的父目录）。层数写错 = cwd 停在 nn-training/ ⇒ 上面那些
+    # tmp/ 默认路径全部错位。
+    os.chdir(str(Path(__file__).resolve().parents[2]))
+    ap, args, course, _rl_src, _rl_args = _parse(sys.argv[1:])
     if getattr(args, "echo_config", False):
+        # 纯 dump 面（对拍 oracle 读它的 stdout）：**在分流之前**短路——`--echo-config`
+        # 不是一条腿，它就是「把解析结果打印出来」。
+        from worker.config import echo_config
+
         echo_config(args, course)
         log("[run_rl] --echo-config done — exit")
         return
     # 死键点名（plan/course-workers-removal §3-S1.5）：**开课侧**一次/门课。放在 echo 短路
-    # **之后**——`--echo-config` 是纯 dump 面（对拍 oracle 读它的 stdout），不该多出别的行。
+    # **之后**——`--echo-config` 是纯 dump 面，不该多出别的行。
     if course is not None:
         from biz.course_spec import dead_key_warnings
 
         for _msg in dead_key_warnings(course):
             log(_msg)
-    # ---- 集群代码快照（2026-10-10 用户指令，plan/cluster-code-snapshot）----
-    # 本入口覆盖两条腿：① `--export-bundle` 导出进程（控制台「切离线」起的）；② 单课程直跑。
-    # 两者都是「会话」的候选锚点：集群活着 ⇒ 锚还在 ⇒ 直接复用（用户口径「导出复用集群快照」）；
-    # 集群全停 ⇒ 本进程成为新锚（重启 = 换代码）。
-    # ★ serve 路径**不经过本文件**（`loop_serve.py` 只借它的锁助手）⇒ 那条腿由
-    #   `run_rl_cluster.py::main` 负责。
-    # 警告不致命（同 hub）：publish 有 per-course 兜底，起不来比一份旧代码严重得多。
-    try:
-        from remote.code_snapshot import ensure_cluster_snapshot
-
-        ensure_cluster_snapshot(
-            anchor_kind="export" if getattr(args, "export_bundle", "") else "run_rl", log=log
-        )
-    except OSError as e:
-        log(f"[run_rl] WARN: 集群代码快照未能建立（{e}）——publish 将回落 per-course 打包")
-    # 课程名（与锁段共用一次推导；非法 stem 在此即响亮拒启）。
+    # 课程名（与分流/锁段共用一次推导；非法 stem 在此即响亮拒启）。
     #
     # ❌ 2026-09-18 删掉了“按课程回填 remote_hubs[<stem>]”那段：hub/隧道已收敛为**单**
     # 实例（一个进程服务所有并行课程、一条隧道指向它），URL 是全局事实 ⇒ 只认单键
-    # `rl.remote_hub_url`（首参数 `--remote-hub-url` 仍可显式压过）。旧的 per-course 键如果
-    # 还被读，就会把训练指向一个**已经不存在的每课隧道**（控制台写的是单键，两边不一致）。
+    # `rl.remote_hub_url`（首参数 `--remote-hub-url` 仍可显式压过）。
     try:
         _hub_course_key = course_key_from_path(str(getattr(args, "course_path", "") or ""))
     except ValueError as e:
         raise SystemExit(f"[run_rl] {e}") from e
-    # ===== 常驻训练准入闸（S1，plan/single-resident-trainer.plan.md §1）=====
-    # 位置：`--echo-config` 短路之后、**代码快照/单实例锁之前**（不占锁、不白干活就响亮退出）；
-    # 放在课程键推导之后是为了让逃生舱的自报带上课程键——**同一次推导**，不另写第二份 key 逻辑。
-    # `--force` 过不了本闸：它是**锁抢先**（`_acquire_run_rl_lock(force=…)`），与准入是两件事。
-    # 一次性腿（冒烟/导出/预采/echo）不受影响：判据只看「有没有动作」，与 `--course` 无关。
-    from worker.trainer_gate import (
-        announce_escape_hatch,
-        escape_hatch_used,
-        refuse_detached_trainer,
-    )
 
-    _refuse = refuse_detached_trainer(args)
-    if _refuse:
-        raise SystemExit(_refuse)
-    if escape_hatch_used(args):
-        announce_escape_hatch(_hub_course_key, entry="run_rl", log_fn=log)
+    # ===== 分流（S3，plan/single-resident-trainer §3）：一次性腿 → once_shot；其余 = 拒启 =====
+    # 判据（纯函数，住 `worker/trainer_gate.py`）：**一个一次性动作都没有** = 本进程想跑常驻
+    # 训练循环 ⇒ 拒启。`--force` 过不了这一关（它是**锁抢先**，与准入是两件事）；也**没有**
+    # 逃生舱——S3 之后常驻训练的唯一入口是 `run_rl_cluster.py --serve`（用户裁决 2026-10-17）。
+    from worker.trainer_gate import REFUSE_MESSAGE, oneshot_action_present
+
+    if not oneshot_action_present(args):
+        raise SystemExit(REFUSE_MESSAGE)
+
     # P1-3（2026-09-02）：启动期配置校验（互斥/范围 fail fast——此前这些错误
     # 要等训练中途才暴露）。课程覆盖后校验（课程值是单一事实来源）。
-    # stream/double-buffer 的显式传参判定：单一 PPO 路径下两者恒置 0（本机没有 PPO 窗口，
-    # 见 `biz/config.py` §3 块），但**显式** `--stream 1` / `--double-buffer 1` 仍要响亮报错
-    # （用户要求的能力已退役 ≠ 参数可以静默失效）⇒ 需区分「显式传参」与「吃 config 默认」。
-    # 存到 args 供 validate_args 消费。
+    # stream/double-buffer 的显式传参判定：单一 PPO 路径下两者恒置 0（本机没有 PPO 窗口），
+    # 但**显式** `--stream 1` / `--double-buffer 1` 仍要响亮报错（用户要求的能力已退役 ≠ 参数
+    # 可以静默失效）⇒ 需区分「显式传参」与「吃 config 默认」。存到 args 供 validate_args 消费。
     _defaults_ns2 = ap.parse_args([])
     args._explicit_stream = int(getattr(args, "stream", 0) or 0) != int(
         getattr(_defaults_ns2, "stream", 0) or 0
@@ -317,121 +278,9 @@ def main() -> None:
     # 生效启动配置落地日志（trust-but-verify：核对 json 默认是否被正确读取）。
     _log_rl_args(_rl_src, _rl_args)
 
-    # 启动前推送当前分支到 origin（远端 agent 靠 git pull 同步——§30 教训）。
-    # 2026-08-30 事故修复（用户指令）：节点的远控升级分支**永远用训练机当前分支**，
-    # 不再读 rl-config 的 upgradeBranch（残留旧战役分支名曾把全部节点 reset 回
-    # 31 个提交前的 intent-ai）。config 键仅作 push 失败时的最后回退。
-    # 并发 push 串行化（plan multi-course-parallel-training P1c F-C5）：.git 是双课
-    # 共享的，双 trainer 同时 `git push` 会顶成 non-fast-forward/锁竞争。repo 级
-    # O_EXCL 锁串行化（与单实例锁同一实现）；拿不到锁 → 响亮日志后跳过本次推送
-    # （节点沿用远端已有分支继续——§30 同步靠"至少一课 push 成功"维持）。
-    # 拒 --no-push 开关：静默不推比显式跳过更难排查。
-    _push_lock = str(REPO_ROOT / ".git_push.lock")
-    if acquire_lock(_push_lock, tag="git push"):
-        try:
-            ensure_current_branch_pushed(REPO_ROOT)  # side-effect: push current branch
-        finally:
-            cleanup_lock(_push_lock)
-    else:
-        log(
-            "[run_rl] WARN: 另一进程正在 git push（.git_push.lock 被占）——跳过本次"
-            "启动前推送，节点沿用远端已有分支；如远端长期无新提交请检查持锁进程"
-        )
-    _current_branch = run_capture(
-        ["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=REPO_ROOT, timeout=30
-    ).stdout.strip()
-    if _current_branch and _current_branch != "HEAD":
-        import common.distribution as _dc
+    from trainer.once_shot import run_once_shot
 
-        _dc.set_upgrade_branch(_current_branch)
-        log(f"[run_rl] node upgrade branch locked to training-machine branch: {_current_branch}")
-
-    bun = shutil.which("bun")
-    if bun is None:
-        raise SystemExit("[run_rl] bun not found on PATH — rollout needs it")
-
-    # ===== 吞吐 T4：collect-only 分支必须在 build_model 之前（子进程无需 torch 模型/权重）=====
-    _traj_root = Path(args.traj)
-    _traj_root.mkdir(parents=True, exist_ok=True)
-    _jpath = _traj_root / "training_log.jsonl"
-    _prs = last_rotate_seed(_jpath)
-    _rseed = _prs if _prs is not None else (args.seed * 1009 + 1 + int(time.time())) % (2**32)
-    if getattr(args, "collect_only", 0):
-        run_collect_only(args, _traj_root, _rseed, bun)
-        log("[run_rl] collect-only done — exit")
-        return
-    # ===== 双缓冲：collect-only 分支结束 =====
-
-    # ===== 开课闸（2026-09-21 事故，plan/accident.plan.md §1）=====
-    # 位置：collect-only 之后（预采子进程不受影响）、单实例锁之前（不占锁就响亮退出）。
-    _require_course_open(args, _traj_root)
-
-    # ===== 单实例锁（2026-09-06 事故：--kill-previous 漏杀 → 双 trainer 并行写同一
-    # traj 7 分钟，it57-59 各被两遍训练/落账）===== 仅训练主循环持锁；collect-only
-    # 预采子进程（spawn_collect_next 的子代）不参与竞争。双开 = 响亮拒启。
-    # 锁按课程实例化（plan multi-course-parallel-training §3.1）：双课各自持锁并行，
-    # 同课双开仍响亮拒启（2026-09-06 双 trainer 并行写同一 traj 事故的护栏不删，
-    # 只是文件按课程命名）；无 --course 的老调用沿用旧全局锁名（默认行为零变化）。
-    # 命名空间键 = 课程文件 stem（`--course s-dodge` → `s-dodge`）：与控制台课程选择/
-    # tmp/<course>/out 路径/TS launcher 的 peekCourse 同一键。课程文件内部的 `name`
-    #（如 s-dodge-mix）只是归属标注（S9 attribution），不进命名空间——否则两边锁
-    # 文件名对不上，preflight 与 kill 全部错位。键在 main 前部已推导（_hub_course_key，
-    # 与 remote_hubs 回填共用一次推导）。
-    try:
-        lock_path = course_lock_path(
-            str(Path(__file__).resolve().parents[1]), _hub_course_key, "run_rl"
-        )
-    except ValueError as e:
-        raise SystemExit(f"[run_rl] {e}") from e
-    if getattr(args, "export_bundle", ""):
-        # ★ 2026-09-22（§course-error-isolation-loud）：`--export-bundle` = **只读快照**
-        # （打 zip：manifest/计划/代码/当前权重；不推进账本、不落新权重——见
-        # `loop_steps._remote_ppo` 的 `export_path` 分支）。因此**不占 per-course 单实例锁**，
-        # 允许「共享 trainer 正在服务该课时随时导出」——锁是「同课两个写者」的护栏，
-        # 导出不是写者。与训练并行时以盘上当前权重/账本为快照（权重/账本落盘都是原子写）。
-        log(
-            f"[run_rl] --export-bundle：只读快照导出，不取 per-course 锁——若共享 trainer "
-            f"正服务本课（{_hub_course_key}），以此为并行快照；导出的包是导出那一刻的进度"
-        )
-    elif not _acquire_run_rl_lock(lock_path, force=bool(getattr(args, "force", False))):
-        raise SystemExit(
-            f"[run_rl] another run_rl is running for this course "
-            f"(holder pid in {lock_path}) — refusing to start; "
-            "kill the holder or pass --force to take over"
-        )
-    else:
-        atexit.register(_cleanup_run_rl_lock, lock_path)
-
-    # ===== 启动即清空 hub 停机态（2026-09-12 it17 复盘）：上轮门判/人工停机残留的
-    # halt 若带进新 run，首轮 PPO job 直接进无人区（训练机空等 30min 超时）。
-    # 只读+幂等 resume，读回确认；失败只告警不阻断（local/push 无 hub 直接短路）。
-    # 注意放锁后：只有真正持锁训练的进程才清，预采子进程/旁观者不动 hub。
-    from remote.hub_client import clear_halt_on_startup
-
-    clear_halt_on_startup(
-        str(getattr(args, "remote_hub_url", "") or ""),
-        str(getattr(args, "remote_token", "") or ""),
-        log=log,
-        # 共享 hub（2026-09-18）：只清**本课**的停机态（清全课程会把并行的其它课一起解停）
-        course=_hub_course_key,
-    )
-
-    # ===== 主循环（trainer/loop.py::run_training）=====
-    # ★ 2026-10-15（J3，plan/offline-open-ended-iters-and-loud-export §3.3）：导出腿的**成败**
-    #   在**进程退出层**落一个权威点（`tmp/<课>/export-status.json`）：控制台起的是
-    #   detached 子进程（拿不到退出码），且控制台重启后它仍在跑 ⇒ 控制台的内存状态不可靠，
-    #   落盘是唯一跨重启的锚。非导出腿一字不写；**成功也写**。
-    #   包住 `run_training` 才盖得住三条真实路径：启动期 `export_refusal`（SystemExit）·
-    #   轮内 `build_plan` 的 `ProtocolError`（走 `round_failure` 同轮重试 5 次后退）· 成功。
-    #   （更早的启动期拒因——课程未开课 / `--course` 与 CLI 冲突——在它之前，不进这个文件；
-    #   那条路靠控制台的 `tailFailureReason` 读日志尾兜底。）
-    from remote.bundle import export_status_guard
-    from trainer.loop import run_training
-
-    # ★ 2026-09-21（§3 单一 PPO 路径）：训练进程不建本机 PPO 后端（hub 免 torch，D2）——
-    # 传 None；PPO 由 hub 队列上认领到的 worker 执行（本机 worker = 控制台起的同一协议）。
-    with export_status_guard(args):
-        run_training(args, None, bun, update_kwargs)
+    run_once_shot(args, course_key=_hub_course_key)
 
 
 if __name__ == "__main__":

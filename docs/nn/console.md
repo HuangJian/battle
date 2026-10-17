@@ -22,10 +22,12 @@
 
 **S1（闸 + 自报）**：`worker/trainer_gate.py` 判据 = **没有任何一次性标志** ⇒ 视为常驻 ⇒ 拒启
 （与 `--course` 无关）；拒启消息必给替代——否则操作员只会去找 `--force`，而 `--force` 是锁抢先、
-过不了闸（闸在锁之前）。逃生舱 `--allow-detached-trainer` 放行后**自己报**进
-`tmp/trainer-detached.json`（原子写、环形 5 条、`NN_TRAINER_DETACHED` 可重定向）⇒ 控制台 `warn` 横幅
-（`alerts.ts::detachedTrainerAlerts`，ack 键 `pid × ts`，**不**给杀进程按钮：pid 可能已复用）。
-为什么不做「每拍扫锁」：读锁 pid 判不出身份，核命令行要起 `wmic`/`pwsh`（~0.5s/次 × 185 门课）。
+过不了闸（闸在锁之前）。~~逃生舱 `--allow-detached-trainer` 放行后**自己报**进
+`tmp/trainer-detached.json` ⇒ 控制台 `warn` 横幅~~ —— **2026-10-17 S3 已退役**：常驻训练分支从
+`run_rl.py` 删掉之后那条旁路无处可去（横幅数据源会永远为空），于是「旗标 + 自报文件 + 读面 + 横幅」
+四件一起删（**不要加回来**：它只会是一条「让操作员以为在跑训练、实际什么也没跑」的假动作）。
+S3 之后 `run_rl.py` = CLI 壳（解析 → 分流到 `trainer/once_shot.py` 的三条一次性腿 / 拒启）。
+为什么当初不做「每拍扫锁」：读锁 pid 判不出身份，核命令行要起 `wmic`/`pwsh`（~0.5s/次 × 185 门课）。
 
 **S2（心跳 + 判死）**：写侧 `worker/trainer_heartbeat.py` = **独立看门狗线程**（先例 `eval_heartbeat.py`），
 每 5s 原子写 `tmp/trainer-heartbeat.json`（env `NN_TRAINER_HEARTBEAT`）。为什么不挂「每拍」：serve 是

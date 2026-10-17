@@ -130,7 +130,9 @@ nn-training/
 │   ├── loop_dispatch.py     #    本轮派发与让位 mixin：采集三路 / A-eval 稀疏化 / EvalBoard 关窗（RoundSteps 的基类，S4 第二十刀）
 │   ├── loop_guards.py       #    训练护栏**组合根**：共享 sink（账本视图增量 + 判决→云机达令，S4 第二十三刀）
 │   │                        #      四簇混入（trip/leg/gate/sweep）住 worker/（刀 4 出包到 biz/，刀 6 随训练栈搬进 worker/）
-│   ├── run_rl.py            #    【RL 入口】三模式 CLI（--mode per-tick/intent/goal）+ 迭代主循环 + 权重归档/熔断（刀 7 从顶层搬入）
+│   ├── run_rl.py            #    【RL 入口 = CLI 壳】三模式 CLI（--mode per-tick/intent/goal）→ 分流到一次性腿；
+│   │                        #      常驻训练分支已于 2026-10-17（S3）删除 —— 常驻只允许 run_rl_cluster.py --serve
+│   ├── once_shot.py         #    一次性腿的唯一实现：冒烟 / 导出 / 预采（2026-10-17 S3 从 run_rl 拆出）
 │   ├── run_bc.py            #    【BC 入口】编排器薄壳（一轮实现只在 trainer/bc_loop.py；刀 7 搬入）
 │   ├── run_rl_cluster.py    #    【多课调度入口】`--serve` 写的一半 / `--json` 读的一半（刀 7 搬入）
 │   ├── eval_course_once.py  #    【一次性评估入口】课程（节点通信在 Python 侧；刀 7 搬入）
@@ -200,6 +202,8 @@ make weights-update-md   # 重新生成 weights/WEIGHTS.md 目录清单
 # ── 训练启动（venv 由 bootstrap 装；常驻训练只允许共享调度器 —— 准入闸见 worker/trainer_gate.py）──
 bun dashboard/src/launch/cli.ts --script trainer/run_rl_cluster.py   # 常驻共享 trainer（唯一常驻写者）
 bun dashboard/src/launch/cli.ts --script trainer/run_rl.py --smoke  # 一次性腿（预演，作废本轮）
+# 一次性腿的另外两条：--export-bundle <path>（不取课锁）· --collect-only N（预采子进程）
+# ⚠ 裸跑 run_rl.py（无一次性动作）= 常驻训练 ⇒ 拒启（S3 起本入口已无常驻分支，没有逃生舱）
 ```
 
 ---
