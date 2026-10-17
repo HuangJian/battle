@@ -1,0 +1,142 @@
+// 课程 y21-temper2 —— 恐惧税退火腿（重开）：国王配方（y20-stack2 逐字）＋wHurt/wThreat 线性退火（用户令）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；本文件是 y21-temper 的修复后重开，独立于兄弟腿）。
+//
+// 重开原因（2026-10-17）：opt delta-f16 下溢 bug（v=0/m≠0 动量炸弹）已修复；前次 y21-temper 现场
+//   保留在 tmp/y21-temper/（it11 KL 2.5432 尖峰、it13 F4 熔断；根因 §115）。本课程规格/seed/起点与
+//   y21-temper 逐字相同；仅实验身份（name/out/traj/backup）改为 *2，避免复用取证现场（§15.5）。
+//
+// 立项 → 用户 2026-10-17：三腿全负、共同副作用松手化（§112）；stack2 自述「走在恐惧边缘」。
+//   前几条方向都在调「半程稳态」，本条调「终态」：早期保留恐惧塑形、末期把税退掉让能力接班
+//   ——「先塑形后退火」范式在 y 系的首测。
+//
+// ── 前科批判吸收（y 系网络结构已换代；x 期/更早裁决只作线索，不作授权）────────
+//   · param_schedule 是引擎现成机制但 y 系从未用过（近期仅 s5/s3 期课程用过；golden/加载测试在）
+//     ⇒ 机制可用性有测试兜底；**行为风险按新实验对待**（§15.5），KL/熵按 §15.4 盯（见 KL watch）。
+//   · x26「wHurt/wThreat 留」裁决同 y21-nohurt 批判段：方向作线索，剂量天花板以 y20 重测为准
+//     （it0 承伤 207/局、42.6/千拍；§112 三腿受击/千拍 +9~13 = 税越加越挨打）。
+//
+// ── 单变量声明（相对 y20-stack2：只加退火表两项；其余逐字）──────────────────
+//   param_schedule：wHurt 150→**15**、wThreat 120→**12**，mode linear、until_iter **150**
+//     （from=现值，it1 起线性退火、it150 达 10% 残值后恒定）。残值保底 10%：不引入与
+//     y21-nohurt 完全重合的端点，留最小排序信号（残值合计 ≈0.8 分/局，总税 8.1 的 10%）。
+//     窗口依据：150 ≈ 30% 课预算——退火前段与各兄弟课程同分布可直接对照；退火后留 ≥350 轮
+//     自由期观察回补（对照 it0 校准：shots 48.8、stop 159、kills 16.98、win 0.685）。
+//   其余逐字 HOLD：公式/params 其余键/背击组/优化器退火表/K/流/eval 全不动
+//     （params 里 wHurt/wThreat 仍写 150/120——schedule 窗口内覆盖，it>150 落 15/12）。
+//   双分支：退火窗后（≥it150）shots/stop/kills/win 向 it0 回补且 hurtW 不爆 ⇒ 「先塑形后退火」
+//     成立；行为不动 ⇒ 恐惧已内化（策略惯性），退火空转，杀；hurtW 爆＋gameover 破线 ⇒
+//     退火=去缰失控，杀。
+//
+// ── 门（y20 三线＋退火窗 readout＋KL watch）──────────────────────────────────
+//   主：+60 win ≥ 0.70；次：kills ≥ 16.5/20；命耗线：+60 gameover 占比 ≤ 30%（基线 31.5%）；
+//   反 watch：timeout 占比 ≤ 5%，超 ⇒ 为避战而苟，**杀腿**（基线 0，零容忍漂移）；
+//   readout（it0 同种子配对；面板 160 局 414xxx＋混合 eval 860xxx 双读）：退火完成点两侧
+//     （it140–160）逐 5 点对照＋退火后段（≥it150）shots/stop/kills/win 相对 it0 水位＋
+//     hurtW/千拍（it0 校准 15.0）走势（税衰减后是否被利用）；
+//   KL watch（专属，§15.4）：退火窗内每轮读 kl/entropy；单点 KL > 0.1（cap）或 entropy 崩
+//     ⇒ 红标——奖励在线变化，稳定器是 batch 24576 不动；
+//   杀速保险：杀敌＋开火量双不掉；D01 ≤ 85 护栏（+it0 校准）；
+//   fear-watch：shots/局 < 16 且 kills < 10 即恐惧塌，杀；
+//   fail ⇒ **杀腿**。门读 headline（混合 eval）；s2000 切片附读。上报 policy_new_rms＋it5 analytic 照旧。
+//   终点：三线全过 ⇒ 收官（iters 500 为 cap，以落盘值为准）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   anchor 0.001（legacy 空片，无害）；ent_break 0.0＋max_winrate 0.0（熔断全拆，y 系现行惯例）；
+//   batch 24576；优化器/K 冻结（退火表与 y20-stack2 同）。
+//   iters 500，max_hours 48，workers 8，eval 混合（"2000-2003"×50，同口径逐行可比）。
+//   ⚠ 前提：tmp/y21-temper2 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c20-lives1`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`（课程轮从 1 起，与 bc 轮号无关）；
+//     `bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y21-temper2）+ backup 新目录（nn-training/weights/y21-temper2）+ opt fresh。
+//   · 种子 20270205（20270204 及之前全用过，§15.1 防记忆化；y21 四腿共享＝四路可比；
+//     本重开沿用同一 seed = 修 bug 后的配对复现，§15.1 的例外理由见 DECISIONS；
+//     与 y20 三腿同起点 stack2-it200 ⇒ 跨代可比）。
+{
+  "version": 5,
+  "name": "y21-temper2",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (8000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "param_schedule": {
+      "wHurt": { "from": 150.0, "to": 15.0, "until_iter": 150, "mode": "linear" },
+      "wThreat": { "from": 120.0, "to": 12.0, "until_iter": 150, "mode": "linear" }
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack2-it200（sha16 1a7821240d3c47b9；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y20-stack2/y20-stack2.it200.pool800.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 48,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（新种子 20270205；与 y21-nohurt、y21-chain、y21-tempo 共享＝四路可比）。
+  "paired_rotate_seed": 20270205,
+
+  "decision_events": false,
+  // K=10（K5 配对 1600 局终判：细节奏杀敌 -1.99、胜率 -10.1pp，K5 训练侧永久关闭，
+  // DECISIONS §2026-10-08-k5-verdict；顶墙中位数约一窗是 hold 的形状，
+  // 长尾 126 窗连推是策略问题，论证见 dist3 头注；故不动 K 只加退火表）。
+  "decision_k": 10,
+
+  "out": "tmp/y21-temper2/weights.json",
+  "traj": "tmp/y21-temper2",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y21-temper2",
+  "backup_prefix": "y21-temper2",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

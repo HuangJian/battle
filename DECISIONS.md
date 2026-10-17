@@ -7143,3 +7143,100 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   课程表可淘汰 ⇒ tmp 被清之后内存里的账本不再永久驻留。守卫随之更新（成员数 121→124、
   `_init_ledger` 字段 +`_ledger_off`、`_read_raw_body` 调用点 3→2、`SEND_TIMEOUT` 读点 `_bytes`→`_send_body`、
   `store_offline` 白名单 +`common.hashing`）。
+
+## §2026-10-17-goalnn-y21-quartet-design（y20 三腿全负后的四个新方向：减法/死亡链/中盘/退火）
+
+- **背景**（用户令 2026-10-17）：y20 三腿（wall/far/escape）中段读out 全负（§112），失败局互查
+  （§113）判明跨腿独立、形状同一 =「正常开局 + 中途崩溃」（败局 4151 拍/kills 8.93 vs 胜局
+  7810/20.00）。三腿全是在国王配方上「再添一项状态存在税」，且共同副作用松手化
+  （stop +50~100‰、shots/kills 掉、win −11~22pp）⇒ 加法方向饱和。用户从候选中点四：
+  减法对照 / 死亡链定价 / 中盘里程碑 / 恐惧税退火，要求各成 y21-xxx 课程、头注写清试验目的。
+- **批判吸收纪律**（用户令）：y 系网络结构已换代——x 期及更早裁决**不作授权、只作线索**；
+  一切标定/可达性用 y20 现役数据重测（tmp/y21-calib*.mjs：it0=stack2-it200 混合 eval 200 局
+  + 三腿末 10 点；数字写进各头注）。
+- **决定**：四个单变量课程，同起点 stack2-it200（sha16 `1a7821240d3c47b9`）、同新种子 20270205
+  （20270204 及之前全用过，§15.1；四路互相可比 + 与 y20 三腿同起点跨代可比）、其余设置逐字比 y20-stack2：
+  · `y21-nohurt` = 删 wHurt 项+参（y1h 从未判决）；分支：四读数任一显著回补 ⇒ 减法成立 /
+    全平 ⇒ hurt 于国王底无边际，减法线止。
+  · `y21-chain` = ＋`- wChain*damageWhileLow`（0.06；重测 98.7/局、P(>0)=0.775、占承伤 47.6%
+    ⇒ 与 x24 wBurst 稀疏判阴的关键差异用 y20 数据重证；增量 ≈5.9 分/局）。
+  · `y21-tempo` = ＋里程碑 edge-trigger 8/12/16 = 6/9/12（x20「空气」裁决不越代继承；
+    y20 重测 P(k≥8)=0.910/败局 0.714 可达；胜-败差分 17.1 分 ≈ 5.7 人头）。
+  · `y21-temper` = param_schedule wHurt 150→15、wThreat 120→12 linear until_iter=150
+    （y 系首用该机制；10% 残值保底、与 nohurt 端点区分；残值 ≈0.8 分/局）。
+  门：四腿同持 y20 三线（win ≥0.70 / kills ≥16.5 / gameover ≤30% + timeout ≤5% 零容忍）
+  + 杀速保险 / D01 ≤85 / fear-watch；各自附专属 readout/watch 与双分支（头注）。
+- **备选与否决**：① 一条腿打包多方向 —— 否（归因不可分，y20 三腿教训 = 单变量才可判）；
+  ② chain 用 damageBursts（x24 同款列）—— 否（y20 重测仍稀疏 0.30/局，密度不达标）；
+  ③ tempo 复用 x20 剂量不重标 —— 否（旧网裁决无授权；以 y20 可达性重标并预注册莽化 watch）；
+  ④ temper 直降到 0 —— 否（与 nohurt 端点重合、丢失最小排序信号；取 10% 残值）；
+  ⑤ 起点用 y20 三腿末权重 —— 否（三腿读out 负、未终判；国王 stack2-it200 是干净最强基线）；
+  ⑥ 四腿沿用 y20 三腿种子 20270204 —— 否（§15.1 防记忆化；新种子 20270205）。
+- **验证**（落盘时已绿）：`tmp/y21-check.py`（单变量隔离逐字对账 + validate_reward + 数值对账：
+  nohurt 删税后 hurt 零效应 / chain 单价精确 −0.06/点 / tempo 台阶 0,+6,0,+9,+12 / temper
+  it1=150→it150=15→恒定、中点 82.95 精确）+ `test_jsonc_courses_load` 绿。
+- **后果**：四文件就绪（`nn-training/curricula/y21-*.jsonc`）；开课 = **人在控制台点**（四连点人定）；
+  §15.5 新 out/traj/backup + opt fresh；终判前不动任何既有腿。
+
+## §2026-10-17-goalnn-y20legs-close（y20-wall/far/escape 三腿停腿结课）
+
+- **背景**：三腿 2026-10-17 06:04–07:03 起跑，用户 12:38–12:40 掐停（wall/far 止于 it211、
+  escape 止于 it181＋it182 停在 pending）。终判依据 = §112 中段配对面板读out（wall 目标未达成＋
+  杀速亮灯；far 距离轴双不动＝空气判据成立；escape 滞留税反向＋杀速双掉＝杀腿双条件成立）
+  ＋§113 失败形状，且三腿全程 eval 峰值均为起点 it0（0.685）——从未超越国王。
+- **决定**：三腿停办；结课报告节回写各自课程文件（状态行 ＋ 跑量/轨迹/readout/判决/遗产/证据）；
+  `docs/nn/experiments.md` §114 汇总；权重冻结 `nn-training/weights/y20-{wall,far,escape}/`
+  （止于 it211/it211/it181）供复核。
+- **备选与否决**：① 让三腿跑到 cap 500 —— 否（判据在 it160–190 已足量，尾段只添算力不添结论；
+  escape 双条件早成立）；② 三腿各再开一步「修正腿」—— 否（目标轴本身死，修正无从修；方向饱和，
+  改从减法/新价格轴走 = y21 四腿）；③ 用三腿末权重做 y21 起点 —— 否（末权重未过起点，非干净基线；
+  y21 已定国王 it200）。
+- **后果**：y20 三腿实验线闭环（全负 ＋ 松手化副作用到停腿未收回：「加状态存在税」判饱和/负）；
+  结课报告 load 复验绿；y21 四腿四连点由人在控制台开（本条目记录时尚未开）。
+
+## §2026-10-17-goalnn-opt-delta-f16-underflow（y21-temper 熔断根因 = opt delta-f16 下溢成 v=0 动量炸弹）
+
+- **背景**：y21-temper it11 KL 2.5432 暴增、policy/value loss 同爆、win 0.689→0.25，it13 触发 F4 熔断（KL≥0.075 三连）。
+- **诊断**（全文/证据 → `docs/nn/experiments.md` §115）：跨机 opt 走 `remote/opt_delta.delta-f16`
+  （`(new−base).to(float16)` 无缩放，~6e-8 以下归零）⇒ 罕见弱特征参数的 `exp_avg_sq` 增量永远被抹平，
+  hub 权威 opt 出现 **v≡0 而 m≠0**（真 Adam 不可能态）⇒ 特征全批零梯度的轮里每步 `lr·m/ε` 几何和 ≈ 1.35e5·m，
+  单轮把单个 stem 权重推 −32.6（实测 m=2.415e-4，`1.5e-4·m/1e-8·9.0=32.6` 精确闭合）。跨腿/跨代同指纹：
+  y20-wall it210 opt 同弹（索引精确命中）、y20 四腿 stem 单点跳>2 共 28/49/20/20 轮。**与恐懼税退火无关**
+  （跳变只在 stem、无退火腿同样中弹）。
+- **决定**：① temper 判「外因致死」，不判退火方向死；② 修复传输下溢（hub 重建后 / worker 装载后对
+  `exp_avg_sq` 消毒设下限，√v_floor≫ε=1e-8；备选 Adam eps 上调作保险），按 §7 先写红测试；③ 修复后以新课程文件
+  重开（y21-temper2 = 新实验，§15.5 新 out/traj + 本条目续记）；④ 在跑三腿继续（修复落地后对其后续轮自动生效），
+  y20 结课判决不改（方向轴判负不因死单元改判）。
+- **备选与否决**：不修直接重开——否（雷区仍在，掷骰子）；从 it10 续跑——否（权威 opt 链已污染、续跑需改课程=新实验，
+  不如干净重开，仅损失 13 轮）；改 opt 传输格式（i16 缩放 / log 域 / 逐张量 scale）——暂缓（属传输大改，先落下限消毒）。
+- **后果**：所有跨机轮的 Adam 动量可信度打问号（本机权威副本也被 f16 重建污染——违反 wire-diet「回传降质、权威不降质」
+  的口径）；修复前开的新腿都可能再抽到雷。
+
+## §2026-10-17-goalnn-opt-underflow-sanitize-and-temper2（opt delta-f16 下溢消毒落地 + y21-temper2 重开）
+
+- **落地**（`plan/opt-delta-f16-underflow-fix.plan.md` v2）：`remote/opt_delta.sanitize_adam_sq` 在
+  worker 装载口（`train_core._load_opt_state`）与重建落地（`apply_opt_delta` post-pass）把
+  `exp_avg_sq` 抬回 `(|m|/K)²`，K=10。传输格式 `BOD1`/`delta-f16` 不动；base 不消毒（两侧逐字相同
+  是 delta 语义前提）。P1 增加可选计数日志，读侧 `rebuilt_opt_tar` 同样受益。
+- **推导修正**：健康态上界不是单步尖峰的 3.16，而是 `(1−β1)/√(1−β2)/√(1−β1²/β2)=7.27`（β1=0.9,
+  β2=0.999）⇒ 健康态 `v≥m²/52.8`；`m²/100` 下限只留 1.9× 余量，仍能对健康态按位 no-op。
+  触发后单步 ≤10·lr；96 步轮和实测 0.0107（v=0 现码 32.601，step=960；step=0 时 bias correction 会到 98.119）。
+- **测试**：T1a 真 Adam step≈960 红→绿；T1b 钉 f16 传输下溢（v 增量 ~2.9e-11 → payload 0）；
+  T2 helper（幂等/7.27 边界/元素计数/非 Adam/amsgrad 跳过）；T3 `_load_opt_state` + AST 接线；
+  P1 日志只断 `len(lines)==1`（不抬源码文本断言预算）。`tests/remote` 1356 绿、`bun run check` 绿。
+- **temper2 重开**：`curricula/y21-temper2.jsonc` = y21-temper 的逐字规格（seed 20270205、起点
+  `1a7821240d3c47b9`），但 `name/out/traj/backup_dir/backup_prefix` 全改 `*2` —— 不能只改课程名/头注，
+  否则复用 `tmp/y21-temper/` 的取证现场。同 seed 与 §15.1 的关系：这是**修 bug 后的配对复现**，
+  不是闭环调参的语料复用（评估→更新环不拿这份语料选点）。
+- **生效/回滚**：P0/P1 都随集群代码快照（按会话冻结）；必须重启当前 snapshot anchor（本次 = hub，
+  `tmp/.code-snapshot/snapshot.json`）才生效。快照打整棵工作区 ⇒ 重启前把无关的
+  `trainer/dispatch.py`/`queue_local.py` 改动隔离/提交，否则三腿续跑会同时换 dispatch 行为。
+- **备选与否决**：改传输格式（i16 缩放/log 域/逐张量 scale）——暂缓（数据面大改；消毒已闭合爆炸）；
+  Adam eps 上调——备选，未做；P0-only——未取（P1 保留给盘上权威件 + 读侧重建两个真实消费者）。
+- **后果**：受影响参数的 v 被钉在 `m²/100`、步长上限 10·lr，负增量也下溢 ⇒ v 只升不降（棘轮）；
+  这是“封顶爆炸”不是“恢复真 Adam 动量”。temper2 与 temper 是“同课程 + 修传输”的对比，不是逐位复制；
+  landed opt 的 `opt_sha` 链自 hub 重启轮起换语义（链内自洽）。修复前开的新腿仍可能带疤痕。
+- **待办（人）**：重启 snapshot anchor → 确认三腿下一轮 P0/P1 消毒行 / KL 不弹 → 控制台开
+  y21-temper2 → 头 20 轮 stem 单点跳≤2 后回写 `docs/nn/experiments.md` §116。
+
+（DECISIONS 尾部 · 全文 → `docs/nn/experiments.md` §116）

@@ -34,6 +34,16 @@ header = {"ofmt": OPT_DELTA_FMT, "base_sha": <64hex 或 "">, "items": [item, …
 torch **惰性**且缺了**响亮拒收**（M4 硬约束②）：拿不到 torch 就没法重建 ⇒ 拒收该形态并回退整份
 blob，绝不静默降级。
 
+## 下溢消毒（2026-10-17，DECISIONS §2026-10-17-goalnn-opt-delta-f16-underflow）
+
+`delta-f16` 会把 `exp_avg_sq` 的小增量（~1e-11）抹成 0，而 `exp_avg` 增量存活 ⇒ 权威 opt 出现
+**v=0 且 m≠0**（真 Adam 不可能态）。该特征零梯度轮每步 `lr·m/ε`，96 步轮和 ~32.6
+（`docs/nn/experiments.md` §115）。`sanitize_adam_sq` 在装入活优化器（`train_core`）与重建落地
+（`apply_opt_delta`）两处把 `exp_avg_sq` 抬回 `(|m|/K)²`（K=10）的安全下限；传输格式不变。
+
+★ **base 不消毒**：回传 delta 的 base 与 `land_opt_delta` 的 base 必须逐字保持原样 ——
+两侧 base 相同是 delta 语义前提。消毒只发生在「装入活优化器」与「写出新权威」两处。
+
 ## hub 侧的**落地**（`opt_tar_bytes` / `pack_tar_from_dir` / `land_opt_delta`，2026-10-14）
 
 它们本来住 `remote/hub_client.py`，撞了 1000 行 LOC 预算后按「独立所有者（wire-diet）+ 独立触发
@@ -55,6 +65,7 @@ import io
 import json
 import struct
 import tarfile
+from collections.abc import Callable
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -64,6 +75,7 @@ from common.hashing import sha256_bytes
 from common.wire_codec import container_base_sha, fmt_bit
 
 __all__ = [
+    "ADAM_SQ_FLOOR_K",
     "OPT_DELTA_FMT",
     "OPT_DELTA_MAGIC",
     "apply_opt_delta",
@@ -75,6 +87,7 @@ __all__ = [
     "pack_opt_delta",
     "pack_tar_from_dir",
     "rebuilt_opt_tar",
+    "sanitize_adam_sq",
 ]
 
 #: 容器魔数（旧端拿到它先撞这个，不会把 delta 当权重落盘）。
@@ -134,6 +147,64 @@ def _raw_bytes(t, tensor: Any) -> bytes:
     读端 `reshape(shape)` 原样还原成 0-dim）。形状不丢，读数不变。
     """
     return bytes(tensor.detach().contiguous().reshape(-1).view(t.uint8).numpy().tobytes())
+
+
+#: `exp_avg_sq` 下溢消毒的下限系数 K（`sanitize_adam_sq` 的唯一调参）。
+ADAM_SQ_FLOOR_K = 10.0
+
+
+def sanitize_adam_sq(state: Any) -> int:
+    """把 Adam 状态里被 f16 delta 下溢抹成 0 的 `exp_avg_sq` 抬回安全下限。
+
+    规则：`exp_avg_sq <- max(exp_avg_sq, (|exp_avg| / K)^2)`，`K = ADAM_SQ_FLOOR_K = 10`。
+    返回被抬高的**元素数**（不是参数组数）；幂等；不碰 `step` / `param_groups`。
+
+    ## 为什么 K=10
+
+    真 Adam 的 `|m|/sqrt(v)` 上界不是单步尖峰的 3.16，而是（β1=0.9, β2=0.999）
+    `(1-β1)/sqrt(1-β2) / sqrt(1-β1^2/β2) = 7.27`（Cauchy-Schwarz；单步尖峰只是它的
+    一个特例）。健康态因此满足 `v >= m^2/52.8`；下限取 `m^2/100` 还比最坏健康态低
+    ~1.9 倍 ⇒ 对健康态按位 no-op，只有真下溢/真污染才会触发。触发后单步 <= K*lr；
+    96 步（m/v 同步衰减）轮和 <= 90*lr ≈ 0.0135（lr=1.5e-4），对比未消毒的 v=0：
+    `9*lr*m/eps = 32.6`（m=2.415e-4）。
+
+    只抬 v、不动 m：m 是（f16 量化后的）真值，v 是被传输抹掉的那一半。
+    amsgrad 的 denominator 用 `max_exp_avg_sq`；当前训练是 plain Adam，helper 显式跳过
+    整个 amsgrad 节点（不 half-fix）；启用 amsgrad 时必须扩展本函数。
+    """
+    t = _torch()
+    found: list[dict] = []
+
+    def collect(node: Any) -> None:
+        if isinstance(node, dict):
+            if "exp_avg" in node and "exp_avg_sq" in node:
+                m = node["exp_avg"]
+                v = node["exp_avg_sq"]
+                if t.is_tensor(m) and t.is_tensor(v) and tuple(m.shape) == tuple(v.shape):
+                    found.append(node)
+                    return
+            for child in node.values():
+                collect(child)
+        elif isinstance(node, (list, tuple)):
+            for child in node:
+                collect(child)
+
+    collect(state)
+    raised = 0
+    for node in found:
+        if node.get("max_exp_avg_sq") is not None:
+            # amsgrad：denominator = max_exp_avg_sq；half-fix exp_avg_sq 会骗人。
+            continue
+        m = node["exp_avg"]
+        v = node["exp_avg_sq"]
+        if v.numel() == 0:
+            continue
+        floor = (m.detach().abs() / ADAM_SQ_FLOOR_K).square()
+        n = int((v.detach() < floor).sum().item())
+        if n:
+            v.copy_(t.maximum(v, floor))
+            raised += n
+    return raised
 
 
 def pack_opt_delta(base: dict, new: dict, *, base_sha: str) -> bytes:
@@ -203,11 +274,20 @@ def is_container(raw: bytes) -> bool:
     return raw.startswith(OPT_DELTA_MAGIC)
 
 
-def apply_opt_delta(base: dict, raw: bytes, *, expect_base_sha: str = "") -> dict:
+def apply_opt_delta(
+    base: dict,
+    raw: bytes,
+    *,
+    expect_base_sha: str = "",
+    log: Callable[[str], None] | None = None,
+) -> dict:
     """hub 侧：delta 容器加回 `base`（本机那份 base opt 的 state_dict）⇒ **新的** state_dict。
 
     调用方拿到后 `opt.load_state_dict(...)`（形状/键与 `base` 逐字相同）。`expect_base_sha` 非空时
     逐字节对账基准（exact 档用；identity 档留空，理由见 plan §12）。
+
+    重建后调用 `sanitize_adam_sq`（f16 下溢消毒）；`log` 非空且抬了项时打一行计数。
+    注意：`apply_opt_delta` 也被读侧落地（`opt_standard`）调用 ⇒ 本函数是 **hub 与读侧共用** 的消毒点。
 
     响亮拒收（**不**静默降级）：缺 torch · 魔数/头/长度不符 · `ofmt` 不认 · `base_sha` 与期望不符 ·
     项结构（path/shape）与 `base` 对不上 · 基准不是映射 · 尾部多余字节。
@@ -288,10 +368,22 @@ def apply_opt_delta(base: dict, raw: bytes, *, expect_base_sha: str = "") -> dic
         raise ProtocolError(f"delta 多出 base 里没有的项：{sorted(declared)[:3]}… —— 拒收")
     if not isinstance(out, dict):
         raise ProtocolError("delta 基准不是映射（state_dict 应为 dict）——拒收")
+    raised = sanitize_adam_sq(out)
+    if raised and log is not None:
+        log(
+            f"opt delta 重建：exp_avg_sq 下溢消毒抬高 {raised} 个元素"
+            "（v=0/m≠0 动量炸弹，DECISIONS §2026-10-17-goalnn-opt-delta-f16-underflow）"
+        )
     return out
 
 
-def rebuilt_opt_tar(container: bytes, base: dict, *, out_dir: str | Path) -> bytes:
+def rebuilt_opt_tar(
+    container: bytes,
+    base: dict,
+    *,
+    out_dir: str | Path,
+    log: Callable[[str], None] | None = None,
+) -> bytes:
     """`base`（**上一轮实际装载的** state_dict）+ `BOD1` 容器 ⇒ 整份 tar 字节（`opt.pt` 单件）。
 
     **这是重建的唯一实现**：两侧共用一份 ——
@@ -304,6 +396,8 @@ def rebuilt_opt_tar(container: bytes, base: dict, *, out_dir: str | Path) -> byt
     `out_dir` 既收 `opt.pt`（下一轮的基准目录，hub 侧就靠它），又决定返回 tar 的成员元数据
     ——同一份输入两次调用的字节可能因 mtime 不同而相异，**权威性由调用方落盘的那份说话**
     （`base_sha` 只对**输入**逐字节对账，不对输出）。
+
+    `log` 透传给 `apply_opt_delta`：下溢消毒抬了项时由调用方决定往哪记一行。
     """
     import torch
 
@@ -311,7 +405,7 @@ def rebuilt_opt_tar(container: bytes, base: dict, *, out_dir: str | Path) -> byt
         raise ProtocolError("rebuilt_opt_tar 只接 BOD1 容器（整份 tar 走原路解包）——拒收")
     d = Path(out_dir)
     d.mkdir(parents=True, exist_ok=True)
-    rebuilt = apply_opt_delta(base, container)
+    rebuilt = apply_opt_delta(base, container, log=log)
     torch.save(rebuilt, d / "opt.pt")
     return pack_tar_from_dir(d, ["opt.pt"])
 
@@ -404,5 +498,5 @@ def land_opt_delta(
         f"（容器 {reported[:12]}… / 本机 {published[:12]}…）"
     )
     return rebuilt_opt_tar(
-        opt_blob, torch.load(base_p, map_location="cpu"), out_dir=ckpt_dir
+        opt_blob, torch.load(base_p, map_location="cpu"), out_dir=ckpt_dir, log=log
     )

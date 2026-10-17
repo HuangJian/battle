@@ -9,6 +9,114 @@
 
 ---
 
+## §116 opt delta-f16 下溢消毒 + y21-temper2 重开（2026-10-17）
+
+- **修复**：`remote/opt_delta.sanitize_adam_sq`（K=10）+ P0 `train_core._load_opt_state` + P1
+  `apply_opt_delta` post-pass；规则 `exp_avg_sq ← max(v, (|m|/10)²)`，返回抬高元素数。
+  健康态上界修正为 **7.27**（不是单步尖峰的 3.16），`m²/100` 仍低于最坏健康态 1.9×；
+  触发后单步 ≤10·lr、96 步轮和实测 **0.0107**（未消毒 **32.601** @ step=960）。base 不消毒
+  （两侧逐字相同是 delta 语义前提）；传输格式 `BOD1`/`delta-f16` 不动。
+- **测试**：`tests/remote/test_opt_delta_sanitize.py` 9 条（T1a/T1b/T2/T3/P1 日志）；地毯
+  `tests/remote` **1356 条全绿**；`bun run check` 绿。T1 先在现码红（32.601185），再改码转绿。
+- **重开规格**：`curricula/y21-temper2.jsonc`，规格/seed 20270205/起点 sha16
+  `1a7821240d3c47b9` 与 y21-temper 逐字相同；实验身份 `name/out/traj/backup_*` 全改 *2
+  （避免复用 `tmp/y21-temper/` 的取证现场）。同 seed = 修 bug 后的配对复现，§15.1 例外理由见 DECISIONS。
+- **生效**：P0/P1 随集群代码快照（按会话冻结）；重启当前 snapshot anchor（本次 hub）后生效。
+  快照含整棵工作区 ⇒ 无关的 `trainer/dispatch.py`/`queue_local.py` 改动要先隔离/提交。
+- **实证（pending）**：三腿下一轮 P0/P1 消毒计数行；KL 无 >0.075 弹跳；temper2 头 20 轮
+  stem 单点跳 ≤2（`tmp/y20-scan-jumps.mjs` 扫 `nn-training/weights/y21-temper2/`）。开课/重启是人的动作。
+- **现场**：`tmp/y21-temper/`（前次熔断 it11–13）；本修复的测试/数据见
+  `tests/remote/test_opt_delta_sanitize.py` 与 `plan/opt-delta-f16-underflow-fix.plan.md` v2。
+
+---
+
+## §115 y21-temper 熔断根因：opt delta-f16 下溢 → v=0 动量炸弹（2026-10-17）
+
+- **症状**：temper it11 KL **2.5432**（其余 it 0.013–0.023），policy loss 0.1001 / value 1.35（常值 ~0.005/0.6）；
+  win 0.689→0.250→0.189；KL≥0.075 三连 → F4 熔断止于 it13（run_complete cause=breaker，熔断器按设计工作）。
+- **权重差分定位**：it10→it11 全体参数总增量 32.97 全在 `stem.weight`；仅 4 个权重 >1（最大 **−32.60**
+  @(oc40,ic15,k2,1)），其余全张量 max|Δ| 0.089 正常；跳变后该位**逐位冻结**（死通道）；it12/13 继续排雷（8982/8985 等、幅度递减）。
+- **根因链**（跨机 opt 走 `delta-f16`，manifest `opt_fmt`；`remote/opt_delta.py:173` `(new−base).to(float16)`，无缩放）：
+  ① |Δ| <~6e-8 的 f16 增量归零；② 罕见弱特征参数（g ≲1.7e-4）的 `exp_avg_sq` 增量永远被抹平 ⇒ hub 权威 opt 里
+  **v≡0 而 m 仍累积**（真 Adam 不可能出现 m≠0/v=0 = 传输污染铁证）；③ 某轮该特征全批零梯度 ⇒ 每步 `lr·(0.9^k·m)/(0+ε)`，
+  96 步几何和 ≈ **1.35e5·m** → 单轮跳 O(0.1–32)。数值闭合：`1.5e-4·2.415e-4/1e-8·9.0 = 32.6` ✓（m 实测 2.415e-4）。
+- **实证**：it11 入机 `blob.opt` stem 的 v=0 参数索引集 = 权重跳变索引集（m 大者跳大）；top-ratio 榜与 it12/13 后续跳变对应。
+- **跨腿/跨代**：y20-wall it210 入机 opt 同弹（idx 9941 m=1.18e-5,v=0 → 预测 1.59 vs 实测 1.24，索引精确命中）；
+  y20-wall/far/escape/stack2 stem 单点跳>2 分别 **28/49/20/20 轮**（最大 18.3）⇒ 该病贯穿 y20 全代；y21 nohurt/chain/tempo
+  同指纹小弹（chain +3.06@it9→10 → 其 KL 0.2255 尖峰、自愈）。
+- **与退火无关**：it11 时 wHurt 仅降 6%（141.85→140.94，≈0.01 分/局量级）；跳变只在 stem、不在 policy/logstd；
+  无退火的三腿同样中弹 ⇒ 恐惧税退火不是原因；temper 只是抽到最大雷（m=2.4e-4）。
+- **处置**：① 修复 = 传输下溢消毒（hub 重建后 / worker 装载后对 `exp_avg_sq` 设下限，√v_floor≫ε=1e-8；备选 Adam eps 上调），
+  按 §7 先写红测试；② 修复后重开 temper（新课程文件=新实验，§15.5 新 out/traj + DECISIONS）；③ 在跑三腿续跑（修复落地对其下一轮自动生效），
+  产出可用但带死单元疤痕；④ y20 结课判决不改（方向轴判负不因死单元改判）。
+- **现场**：tmp/y21-temper/（training_log、it11–13 `remote-jobs/*/blob.opt` 与 result.json）；诊断脚本 tmp/y21-temper-delta.mjs、
+  tmp/y21-temper-offenders.mjs、tmp/y21-opt-inspect2.py、tmp/y20wall-opt.py、tmp/y20-scan-jumps.mjs。
+
+---
+
+## §114 y20-wall/far/escape 结课报告：三腿全停，目标轴全负（2026-10-17）
+
+- **停腿**（用户拍板，2026-10-17 ~12:40）：wall it211、far it211（12:39/12:40 掐停）、escape it181
+  （12:38 掐停，it182 停在 pending）。全程 eval 峰值均为起点 it0（0.685）——三腿从未在混合 eval
+  headline 上超越国王；终判依据 = §112 读out（wall 目标未达成＋杀速亮灯；far 距离轴双不动＝空气
+  判据成立；escape 滞留税反向＋杀速双掉＝杀腿双条件成立）＋§113 形状。
+- **收尾数**（末 10 点）：wall it165–210 win 0.635/kills 16.24/命耗尽 36.5%（stop 268‰ vs it0 159）；
+  far it165–210 win 0.575/15.46/42.4%（stop 351‰，三腿最重）；escape it135–180 win 0.505/14.54/49.1%
+  （D01 53.1 最高）。三腿 timeout ≤0.4%（max_ticks 5/27/59 局）；尾轮熵 0.747/0.753/0.851、
+  尾值 KL 0.013/0.016/0.023 健康——死于判决，不是死于崩溃。
+- **共性**：§112 的松手化副作用到停腿时未收回（stop 仍 ~1.5–2.2× it0、shots 掉、win 低于 it0）；
+  「在国王配方上再添状态存在税」方向判饱和/负。
+- **遗产**：三份权重冻结（nn-training/weights/y20-{wall,far,escape}/，止于 it211/it211/it181）；
+  结课报告节回写三课程文件（状态行＋跑量/轨迹/readout/判决/遗产/证据；load 复验绿）；
+  决策 DECISIONS §2026-10-17-goalnn-y20legs-close；汇总脚本 tmp/y20-close.mjs。
+- **后继**：不回放三腿末权重；y21 四腿（nohurt/chain/tempo/temper）已从国王 stack2-it200 出发
+  （DECISIONS §2026-10-17-goalnn-y21-quartet-design），是这批负结果的直接后续。
+
+---
+
+## §113 y20 三腿失败局互查：跨腿独立、形状同一（2026-10-17）
+
+- **语料**：训练侧 eval 同 it 跨腿同种子（400 键/点）确认可配对；取 125–170 共 10 点 × 400 = 4000 局/腿。
+- **不重复**：跨腿按 key 失败率相关 r = +0.06（wall-far）/−0.03（wall-escape）/+0.01（far-escape）；
+  三腿全败观测 395 局 ≈ 独立乘积期望 371；三腿全过 658 ≈ 期望 652；同 key 上三腿 ≥80% 全败仅 1/800；
+  腿内自相关 P(败|上点败) ≈ 基础失败率（0.44–0.48）⇒ 无固定难 seed、失败近似 i.i.d.。
+- **形状同一（共性）**：三腿全败局 = 正常开局 + 中途崩溃——首杀 tick 与胜局相同（672 vs 676）、
+  局长仅胜局之半（4151 vs 7810）、kills 8.93 vs 20.00、shots 27.8 vs 54.2、每局约 1 死；
+  威胁暴露/千拍 60‰ vs 42.5‰、停/千拍 309‰ vs 230‰ 升高。面板回归集（三腿全败且 it0 胜，
+  n=11）同形状：腿 ~4000 拍/7–9 杀 vs it0 ~7000 拍/16 杀。
+- **阶段偏斜**：全败局集中于 stage 2000（151/395；wall 在其上失败率 62%，其余关 31–40%）；
+  far/escape 各关均匀。腿失败率（同 4000 局）：escape 48.8% > far 44.2% > wall 43.0%。
+- **含义**：没有「坏 seed 反复咬」的证据，方向不该是修固定难局；共享的是「中途死亡链」动力学
+  （高威胁暴露 + 高停顿），与各腿税项无关。产物 `tmp/readout-panels/fail-*.out.txt` +
+  `tmp/fail-{overlap,persist,crossleg,autocorr}.mjs`。
+
+---
+
+## §112 y20-wall/far/escape 中段配对面板读out：三腿目标轴均未改善（2026-10-17）
+
+- **仪器**：`tmp/gap2-panel-c2.ts` 配对面板 160 局（4 关 ×40，seed 414000–414197，与人类探针对同）；
+  it0 校准 = stack2-it200 重跑同板；权重 = wall it190 / far it190 / escape it161。
+  产物 `tmp/readout-panels/`（panel-*.jsonl · readout.out.txt）。
+- **校准对账**：it0 面板 win 0.688（混合 eval 0.685 同向）· W08 13.45 · D04 79.8
+  （= escape 头注校准值，仪器一致）。面板缺 postHitLane/nearSq 列（v11 probe 列只在 c05 fork）
+  ⇒ 此两列走混合 eval 860xxx 代读，方向一致。
+- **wall（W08↓＋B3↑＋威胁↓）**：W08 13.45→11.85（Δ−1.60，z−1.7）方向对但弱；
+  撞墙次数/千拍 +1.27（z+4.0）、威胁 lane +5.2（z+1.6，**反向**）抵消；B3 背击（代读）
+  19.8→21.7% 方向对；**杀速保险亮灯**（shots −4.8 z−2.5、kills −0.87）＋win −11.3pp（z−2.2）。
+  判：目标未达成。
+- **far（近 readout↓＋远 readout↑）**：近**反向**（贴脸开火占比 63.8→66.3% z+2.5；挨打后贴脸
+  +10.6/千拍 z+2.6）；远**平**（开火时敌距 4.163→4.138，z−0.4；远射占比 15.5→14.8%，z−0.9）。
+  预注册「距离轴双不动 = 空气」判据成立。
+- **escape（postHitLane↓＋D04↓）**：postHitLane 代读 2.3→2.5‰ **反向**；D04 79.8→99.6 拍
+  （Δ+18.6，z+1.9）**反向**；挨打后贴脸 +16.0/千拍（z+3.8）反向；杀速双掉（kills −2.59 z−3.9；
+  shots −9.1 z−4.5）⇒ 预注册杀腿双条件成立。
+- **共性副作用**：三腿 stop（无输入）/千拍 +50~100%（面板 z≈10；eval 独立复核 144→218/234/283）、
+  shots 全掉、受击/千拍 +9~13、win −11~−22pp —— 行为整体「松手」化（wBlock 150 为三腿共享项，
+  疑点待验）。
+- 读out ≠ 终判；杀腿/继续由人在控制台拍板。终判（2026-10-17）：三腿全停（用户拍板），结课报告见 §114。
+
+---
+
 ## §111 y5-pos/y5-hit/y5-far 结课报告落盘（2026-10-13）
 
 - y5-pos（杀 it260）：72→49 clears、kills 2.75→2.20（双连破＋−16%＋腰斩出带，无异议）；

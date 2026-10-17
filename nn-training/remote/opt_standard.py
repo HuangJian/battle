@@ -238,7 +238,10 @@ def _landed_bytes_for(
         import torch
 
         landed = opt_delta.rebuilt_opt_tar(
-            container, torch.load(base_p, map_location="cpu"), out_dir=scratch / "out"
+            container,
+            torch.load(base_p, map_location="cpu"),
+            out_dir=scratch / "out",
+            log=log,
         )
         log(
             f"[opt] 读侧落地：容器 {len(container)}B → 整份 {len(landed)}B"

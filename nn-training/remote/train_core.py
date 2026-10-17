@@ -79,6 +79,20 @@ def kick_kl_value(manifest: dict) -> float:
     return kl
 
 
+def _load_opt_state(path: str | Path) -> tuple[Any, int]:
+    """装载 opt 状态，并在 `load_state_dict` 之前做 f16 下溢消毒（P0）。
+
+    返回 `(state, raised)`；`raised` = 被抬高的 `exp_avg_sq` **元素数**。
+    **不回写** `path`：回传 delta 的 base 必须保持原样（产物段会重新从
+    `opt_dir/opt.pt` load 一次当 base）；两侧 base 逐字相同是 delta 语义前提。
+    """
+    import torch
+
+    state = torch.load(path, map_location="cpu")
+    raised = opt_delta.sanitize_adam_sq(state)
+    return state, raised
+
+
 def blob_wanted(manifest: dict, *, kick_kl: float) -> dict[str, str]:
     """本轮**要向 hub 要哪几件** blob（纯函数）→ `{name: sha}`。
 
@@ -427,9 +441,18 @@ def run_training_core(
             # 统一 map_location="cpu"：Optimizer.load_state_dict 会把载入张量 cast 到
             # param 所在设备，所以 XLA/CPU/CUDA 三条路都靠这一句完成搬迁（原先写死
             # device_t 在 XLA 上会走 torch.load 的设备 hook，跨 runtime 不稳）。
-            opt.load_state_dict(torch.load(opt_dir / "opt.pt", map_location="cpu"))
+            # ★ 2026-10-17：先经 `_load_opt_state` 做 f16 下溢消毒，再 load_state_dict；
+            #   它只改内存副本，盘上 `opt_dir/opt.pt` 保持原样（产物段的 delta base 要用它）。
+            opt_state, opt_raised = _load_opt_state(opt_dir / "opt.pt")
+            opt.load_state_dict(opt_state)
             opt_restore_sec = round(time.time() - t_opt, 3)
             prep_b.add("opt", f"从 opt_init（{opt_src}）恢复 {opt_restore_sec:.1f}s（Adam 动量延续，D5）")
+            if opt_raised:
+                prep_b.add(
+                    "opt",
+                    f"下溢消毒：exp_avg_sq 抬高 {opt_raised} 个元素"
+                    "（v=0/m≠0；DECISIONS §2026-10-17-goalnn-opt-delta-f16-underflow）",
+                )
         else:
             # 首轮/无 tar：从 init 权重 warm-start（payload / init blob / blobs 下载）
             if init_w is None or not init_w.exists():
