@@ -38,7 +38,6 @@ FILE_ENTRIES = (
     "trainer/run_rl.py",
     "trainer/run_bc.py",
     "trainer/run_rl_cluster.py",
-    "trainer/train_loop.py",
     "trainer/eval_course_once.py",
     "trainer/eval_m1_once.py",
     "tools/task.py",

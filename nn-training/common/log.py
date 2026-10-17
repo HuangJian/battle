@@ -2,8 +2,8 @@
 
 log():   带时间戳的 stdout 行（run_rl / queue / ppo 共用）。
 Tee:     多流转发（控制台 + 文件）——run_rl._Tee 的通用化（P2-6d，2026-09-02）。
-         train_loop._TrainTee 因带时间戳落盘 + [epoch N/M] 进度解析保留在本地
-         （语义特定，重复度低），如需迁移可从本类继承。
+         带时间戳落盘 + [epoch N/M] 进度解析的那一份（曾住本地 BC 连续训练入口）
+         已随该入口退役；语义特定、重复度低，如需再加可从本类继承。
 
 **R2d 单进程多课程的行路由**（`prefix_scope` / `open_course_sink`）：一个进程服务 N 门课时
 不能再换 `sys.stdout`（两个 Tee 套起来会把每行复制进两份课日志），所以课程归属改成
@@ -112,7 +112,7 @@ class Tee:
     """同时写多个流（控制台 + 文件），供长训日志持久化且终端仍可见。
 
     源自 run_rl_intent（per-tick 模式借此获得 out_log/err_log 落盘能力）。
-    on_line：可选逐行回调（train_loop 用它解析 [epoch N/M] 更新心跳进度）。
+    on_line：可选逐行回调（逐行解析进度行、更新心跳/状态的那类用法）。
     """
 
     def __init__(self, *streams, on_line: Callable[[str], None] | None = None):

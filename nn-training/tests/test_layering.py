@@ -14,7 +14,7 @@ L4  trainer/（编排层 + 六个入口：trainer/run_rl.py … trainer/eval_m1_
 
 > 2026-09-30（刀 4）：`biz/` 从 `rl/` 出包 —— 纯逻辑（64 个模块）与编排分家。
 > 2026-09-30（刀 5）：编排那一半（37 个模块）随整包改名 `rl/` → **`trainer/`**，`rl/` 这个包
-> 2026-09-30（刀 7）：六个**入口脚本**（`run_rl` / `run_bc` / `run_rl_cluster` / `train_loop` /
+> 2026-09-30（刀 7）：六个**入口脚本**（`run_rl` / `run_bc` / `run_rl_cluster` / 本地 BC 连续训练入口 /
 > `eval_course_once` / `eval_m1_once`）从 `nn-training/` 顶层搬进本包 ⇒ 快照 **37 → 43**，
 > 「根入口」这个位置从此不存在（`nn-training/` 下只剩 `conftest.py`）。
 > **从此不存在**。判据仍是那条机械定义，两边都换了家名：
@@ -150,10 +150,10 @@ UPPER_PACKAGES = ("remote", "hub", "worker", "trainer")
 #: 「经包内传递可达」那一步必须跟着改（`d.startswith("trainer.")`），否则固定点会**静默塌成
 #: 「只算直接可达」**：37 个成员里有一批（`batch_*` / `eval_*` / `stream` / `queue` …）正是
 #: 只经这条内部链才达远端的 ⇒ 快照会假性 `shrank`（不是真回纯逻辑）。本刀实测到的就是这个。
-#: ⚠ 2026-09-30（刀 7，入口归位）：`run_rl` / `run_bc` / `run_rl_cluster` / `train_loop` /
-#: `eval_course_once` / `eval_m1_once` 六个**入口脚本**从 `nn-training/` 顶层搬进 `trainer/`
+#: ⚠ 2026-09-30（刀 7，入口归位）：六个**入口脚本**（`run_rl` / `run_bc` / `run_rl_cluster` /
+#: 本地 BC 连续训练入口 / `eval_course_once` / `eval_m1_once`）从 `nn-training/` 顶层搬进 `trainer/`
 #: ⇒ 本快照 +6（37 → 43）。判据没变（「可达 remote|worker」），这六个本来就是**直接**成员：
-#: `run_rl` 延迟 import `remote.push_client` / 顶层 `worker.*`、`run_bc` 与 `train_loop` 顶层
+#: `run_rl` 延迟 import `remote.push_client` / 顶层 `worker.*`、`run_bc` 与本地 BC 入口顶层
 #: `worker.*`、`run_rl_cluster` 顶层 `worker.loop_scheduler`、两个 `eval_*_once` 经 `trainer.*`
 #: 传递达 worker。它们搬进来之前**不在本文件视野里**（本文件只扫 `trainer/`）—— 这正是
 #: `test_trainer_holds_only_orchestration_modules`（集合相等那条）先红的原因：一搬进来，
@@ -209,7 +209,6 @@ TRAINER_ORCHESTRATION = frozenset(
         "run_rl",
         "run_rl_cluster",
         "stream",
-        "train_loop",
     }
 )
 

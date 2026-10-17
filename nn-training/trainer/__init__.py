@@ -43,7 +43,6 @@ biz/<mod>.py  ⇔  <旧 rl 树里不属于 TRAINER_ORCHESTRATION 的模块>
 | **入口** | `run_rl` | RL 训练入口（两阶段 argparse / `--mode` 分派；刀 7 前住 `nn-training/` 顶层） |
 | | `run_bc` | BC 编排器入口薄壳（引擎在 `trainer/bc_loop.py`；刀 7 前住顶层） |
 | | `run_rl_cluster` | 单进程多课程调度器入口（`--serve` / `--json`；刀 7 前住顶层） |
-| | `train_loop` | 单进程 BC 训练入口（轮次驱动 + 锁；刀 7 前住顶层） |
 | | `eval_course_once` · `eval_m1_once` | 一次性评估入口（课程 / m1；刀 7 前住顶层） |
 | | `loop` | `run_training` 入口（薄包装） |
 | | `loop_runner` | 训练主循环的启动/接管面 |

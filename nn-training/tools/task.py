@@ -220,6 +220,8 @@ def target_clean() -> int:
     for log in list(HERE.glob("*.log")) + list((HERE.parent / "tmp").glob("*.log")):
         log.unlink(missing_ok=True)
         cleaned += 1
+    # 「本地 BC 连续训练入口」已退役（plan/single-resident-trainer §1.4）——它的锁文件仍可能
+    # 留在老工作区里，作为**遗留孤儿**继续清（删名不清盘 = 那些机器上永远留着不知来路的锁）。
     for orphan in ["dist-agent-meta.jsonl", "trainer.train_loop.lock"]:
         p = HERE / orphan
         if p.exists():
