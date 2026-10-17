@@ -49,7 +49,7 @@ if str(ROOT) not in sys.path:
 
 import common.distribution
 from biz.reward_library import METRICS_DIM
-from common.platform_utils import rmtree_best_effort
+from common.platform_utils import POPEN_NO_WINDOW, rmtree_best_effort
 from common.schema import (
     BOARD,
     FIRE_DIM,
@@ -198,6 +198,10 @@ class _VolAgent(BaseHTTPRequestHandler):
                         [_BUN, "--version"],
                         capture_output=True,
                         text=True,
+                        # 2026-10-17：本文件常被**无控制台**的父进程跑（`tools/task.py` 的 run()
+                        # 自带旗标 ⇒ e2e 自己也没有控制台）⇒ 这里的 `bun` 不带旗标就会新建一块
+                        # 可见控制台。与 `common.platform_utils.POPEN_NO_WINDOW` 同规。
+                        **POPEN_NO_WINDOW,
                         timeout=30,
                     ).stdout.strip()
                     or "?"

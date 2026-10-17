@@ -12,6 +12,7 @@ from pathlib import Path
 import common.distribution
 from biz.course import build_pairs
 from common.log import log
+from common.platform_utils import popen_kwargs
 from trainer.dispatch_queue import (
     REPO_ROOT,
     RUN_ID,
@@ -182,9 +183,8 @@ def spawn_collect_next(args, it, snap_src: str | None = None) -> subprocess.Pope
     ]
     if pre_samples > 0:
         argv += ["--precollect-samples", str(pre_samples)]
-    kwargs: dict = {}
-    if os.name == "nt":
-        kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+    # ★ 2026-10-17：手写 `0x08000000` 改成走唯一原语（`popen_kwargs` = `POPEN_NO_WINDOW` + 扩展）。
+    # 手写魔数的形状正是「别处漏了就复发」的那一种：没有名字可以 grep、没有守卫认得出来。
     try:
         p = subprocess.Popen(
             argv,
@@ -192,7 +192,7 @@ def spawn_collect_next(args, it, snap_src: str | None = None) -> subprocess.Pope
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
-            **kwargs,
+            **popen_kwargs(),
         )
     except Exception as e:
         log(f"[double-buffer] spawn fail: {e} — skip precollect")

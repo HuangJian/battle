@@ -3750,6 +3750,44 @@ lastContrib）、`server/api/pool.ts` + `snapshot-cache.ts`（两个消费者）
   会把 `curricula/*.jsonc`、`tests/fixtures/*.json`、`tests/golden/*.json` 一起重排（实测 `reward_golden.json`
   一次少 15 万行）——**只对 staged 文件跑，或改完立即 `git restore` 非本次文件**。
 
+### ⚠ §2026-10-17-console-no-black-window-reprobe（**上面那张机制表被实测推翻**，用户第三次报障）
+
+- **用户报障（第三次）**：「启动 hub 时，有一个命令行黑窗闪过。这个问题修过几轮了，想个办法根除！」
+- **复测方法（可复算，`nn-training/tools/console_window.py probe`）**：起一个**确认无控制台**的
+  父进程（`CREATE_NO_WINDOW`；子进程自报 `GetConsoleWindow()==0` 已验证），在里面**逐形态** spawn，
+  同时用 8ms 采样枚举桌面上**可见顶层窗口**（口径同下文的 `GetConsoleWindow()+IsWindowVisible()`，
+  取差集）。窗口存在 100ms 级也能抓到（实测每例 130–188 次采样）。
+- **实测矩阵（本机 Windows 11 / CPython 3.12 / PowerShell 7 / git-for-windows）**：
+
+  | 形态（父进程**无控制台**） | 裸 spawn（不带任何旗标） |
+  |---|---|
+  | `python -c sleep` | **无新窗口** |
+  | `cmd.exe /c` | **无新窗口** |
+  | `shell=True`（走 cmd） | **无新窗口** |
+  | `.bat`（cmd 承载） | **无新窗口** |
+  | `pwsh -Command` | **无新窗口** |
+  | `bun --version` | **无新窗口** |
+  | `git rev-parse`（裸 **与** 带 `CREATE_NO_WINDOW` 两档） | **无新窗口** |
+
+  ⇒ **「无控制台的父进程 + 裸 spawn ⇒ Windows 新建可见控制台」这条不成立**（至少对"可见顶层窗口"
+  这个判据不成立）。`CreateProcess` 的默认是**继承**父的控制台；父没有 ⇒ 子也没有（不会自动新建）。
+  那次 §2026-10-13 的结论很可能是**靠 conhost 进程数**推出来的，而那份材料自己就写着
+  「conhost 计数区分不了隐藏/可见，别再用它」——两份判据打架时以**窗口**为准。
+- **因此**：`1` 「再补一处旗标」这个方向**没有证据支撑**，黑窗另有来源（未定案）。抓现行的工具：
+  `nn-training/tools/console_window.py watch <秒数>` —— 跑着它去点「启动 hub」，它会按**创建瞬间**打印新窗口
+  （类名/标题/pid/宿主进程）与新建进程（含父进程）。定案前不要再按旧机制表补旗标。
+- **本次仍然落地的两件事**（价值独立于上面的结论）：
+  ① `common/code_sentinel.py` 的哨兵子进程从裸 `subprocess.run` 收敛到 `common.proc.run_capture`
+  （唯一捕获原语，旗标在一份实现里）；`remote/offline_boot.py` 的同源副本就地补旗标；
+  `trainer/collect_only.py` 手写的 `0x08000000` 改成 `popen_kwargs()`（手写魔数无人能 grep）。
+  ② **python 侧终于有了结构守卫**：`nn-training/tests/test_no_console_window_py.py`
+  （AST 判据：旗标 / 已知安全包装 / 模块内本地包装递归一层；白名单 = 旗标定义处，豁免 = 云机-only
+  六个文件且逐条写理由）。2026-10-13 那次只补 TS 两个面、python 只补了 6 个文件**没有守卫**，
+  这正是「修过几轮还会犯」的结构形状。
+- **顺带记一笔**：`nn-training/tests/test_no_console_window_matrix.py`（运行期矩阵）**不能**当
+  "链上无漏"的证据 —— 它现在恒绿，因为在无控制台进程里跑本仓的 spawn 入口本来就**不会**产生可见
+  窗口（上表）。它的价值只剩「真机正向证据：代表性入口不产生窗口」，别拿它冒充回归网。
+
 ## 附：本文件旧编号对照（拆分前 `docs/nn.progress.md` 的 § 号）
 
 旧 §28→§1 · 旧 §29→§2 · 旧 §64→§3 · 旧 §73→§4 · 旧 §82→§5 · 旧 §87→§6 · 旧 §88→§7 · 旧 §91→§8 · 旧 §122→§9 · 旧 §138→§10

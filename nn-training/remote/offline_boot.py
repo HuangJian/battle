@@ -1073,6 +1073,12 @@ def _pack_member(pack: Path | None, name: str) -> bytes | None:
 #   ② 每个候选解出来先过**导入哨兵**（混血树在训练之前就被拦下，不等 train_core）；
 #   ③ 选定即**换码事务**：字节写回产物目录 + 原子改写段级 manifest 的那把 sha。
 
+#: Windows 下 spawn 子进程的旗标（`CREATE_NO_WINDOW`）——本模块不许依赖 `common`，就地一份。
+#: 非 Windows = 空 dict（POSIX 上给非零 `creationflags` 会抛 ValueError）。
+_NT_NO_WINDOW: dict[str, Any] = (
+    {"creationflags": 0x08000000} if os.name == "nt" else {}
+)
+
 #: 导入哨兵的清单 / 超时 / 本仓顶层包（与 `common/code_sentinel.py` 逐字相同，用例对账）。
 #: 为什么这里**内联一份**同形实现（而不是延迟 import 仓库里那份）：本模块是自包含引导模块，
 #: 而哨兵要判的正是**候选树自己** —— 判据不能交给被审对象（老包还没有 `common/code_sentinel.py`；
@@ -1125,6 +1131,11 @@ def _run_import_sentinel(code_dir: Path) -> tuple[bool, str, str]:
             encoding="utf-8",
             errors="replace",
             timeout=_SENTINEL_TIMEOUT_SEC,
+            # ★ 2026-10-17：本模块**不许**依赖 `common`（从 GitHub raw 单独拉取）⇒ 就地写旗标
+            # （与 `common/proc.py::run_capture` 同规）。`dict[str, Any]` 是给 mypy 看的：
+            # 具体字面量 dict 会让 `run` 的重载匹配失败（`creationflags` 只接受 int，
+            # 而 dict 展开证明不了 key）。
+            **_NT_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
         # 挂住 ⇒ 这份树不能信任（换候选），**不是**环境缺件
