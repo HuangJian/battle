@@ -385,6 +385,24 @@ async function main(): Promise<void> {
         if (req.method === 'GET' && url.pathname === '/api/poolCounters') {
           return json(poolCountersView())
         }
+        // 内存读数（2026-10-17）：控制台 RSS 在 645↔1104MB 之间锯齿（60s 采样，每 ~10s 一次
+        // +460MB 尖峰后立刻回落）时的**取证口** —— 「1.5GB 的提交里有多少是活对象」这个问题，
+        // 没有它只能靠任务管理器猜（同 hub 那次 `/admin/mem` 的由来）。
+        // 只读；`?gc=1` 额外跑一次**强制 GC**（回答「堆能不能缩」：若 GC 后 heapUsed 大幅下降
+        // 而 RSS 不降 ⇒ 是 JSC 不还页，不是泄漏）。
+        if (req.method === 'GET' && url.pathname === '/api/mem') {
+          const forced = url.searchParams.get('gc') === '1'
+          if (forced) Bun.gc(true)
+          const m = process.memoryUsage()
+          return json({
+            rss: m.rss,
+            heapUsed: m.heapUsed,
+            heapTotal: m.heapTotal,
+            external: m.external,
+            gcForced: forced,
+            pool: poolCountersView(),
+          })
+        }
         if (req.method === 'GET' && url.pathname === '/api/evalboard') {
           const fresh = url.searchParams.get('fresh') === '1'
           // R4（接线 b）：开关关 ⇒ routes 直接给 disabled 形状，不调 buildEvalBoardView。
