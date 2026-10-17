@@ -20,6 +20,7 @@ import { STAGES } from '../../../src/config/stages'
 import { isArenaId, resolveArenaStage } from '../../../src/nn/arena-ladder'
 import { parseJsonc } from '../core/jsonc'
 import { curriculaDir, NN_TRAINING } from '../core/paths'
+import { readChunkLines } from './pool-history'
 
 // ---------------- M0 传输账（iteration 事件的 `wire` 子字典） ----------------
 
@@ -1006,16 +1007,28 @@ export function readEvalRoundOptions(trajDir: string): EvalRoundOption[] {
 
 /** eval 逐局胜负表：iter → `stage:seed` → win（同键重复落账取最后一条）。
  * 配对裁判与逐轮装配共用这一次扫描。 */
-export function readEvalGameWins(trajDir: string): Map<number, Map<string, boolean>> {
+/** `eval_log.jsonl` 逐局胜负表的**指纹 memo**（2026-10-17）。
+ *
+ *  为什么必须有（实测）：一次 `/api/state` 构建里 `readIterMetrics` 与 `readPairedReferee`
+ *  **各调一次**本函数 ⇒ 同一份账本被 `readFileSync` + `split('\n')` 读**两遍**。而账本已经长到
+ *  16MB（三门课合计 42MB：`tmp/y20-{far,wall,escape}/eval_log.jsonl`）⇒ 每次 5s 快照刷新
+ *  产生 +240MB 的堆/外部内存尖峰（`/api/mem` 实测 heapUsed 421→673、external 395→632），
+ *  控制台 RSS 因此在 645MB↔1.7GB 之间跳（priv 不还页）。
+ *
+ *  指纹 = `size:mtimeMs`（追加即失效 ⇒ 语义不变，只是不再"同一趟读两遍"）。 */
+const evalWinsMemo = new Map<string, { fp: string; byIter: Map<number, Map<string, boolean>> }>()
+
+/** 缓存构建（供 `readEvalGameWins`；同文件多处解析 eval_log 的调用点共用一份实现）。 */
+function buildEvalWins(logPath: string): Map<number, Map<string, boolean>> {
   const byIter = new Map<number, Map<string, boolean>>()
-  const logPath = join(trajDir, 'eval_log.jsonl')
   try {
-    if (!existsSync(logPath)) return byIter
-    for (const line of readFileSync(logPath, 'utf8').split(String.fromCharCode(10))) {
-      if (!line.trim()) continue
+    // ★ 分块逐行（`readChunkLines`）：旧实现 `readFileSync(...).split('\n')` 把 16MB 文本裂成
+    // 几十万个字符串（峰值 = 文本 + 行数组 + 每行 JSON 对象）。分块后峰值 = 1MiB 块 + 残片。
+    readChunkLines(logPath, 0, '', (line) => {
+      if (!line.trim()) return
       try {
         const r = JSON.parse(line) as Record<string, unknown>
-        if (r.event !== 'eval') continue
+        if (r.event !== 'eval') return
         const iter = Number(r.iter ?? -1)
         const stage = Number(r.stage)
         const seed = Number(r.seed)
@@ -1025,7 +1038,7 @@ export function readEvalGameWins(trajDir: string): Map<number, Map<string, boole
           !Number.isInteger(stage) ||
           !Number.isInteger(seed)
         ) {
-          continue
+          return
         }
         let m = byIter.get(iter)
         if (!m) {
@@ -1036,10 +1049,26 @@ export function readEvalGameWins(trajDir: string): Map<number, Map<string, boole
       } catch {
         /* skip bad line */
       }
-    }
+    })
   } catch {
     /* unreadable */
   }
+  return byIter
+}
+
+export function readEvalGameWins(trajDir: string): Map<number, Map<string, boolean>> {
+  const logPath = join(trajDir, 'eval_log.jsonl')
+  let fp: string
+  try {
+    const st = statSync(logPath)
+    fp = `${st.size}:${st.mtimeMs}`
+  } catch {
+    return new Map() // 文件不存在/不可读：空表（与旧实现同）
+  }
+  const hit = evalWinsMemo.get(logPath)
+  if (hit && hit.fp === fp) return hit.byIter
+  const byIter = buildEvalWins(logPath)
+  evalWinsMemo.set(logPath, { fp, byIter })
   return byIter
 }
 
