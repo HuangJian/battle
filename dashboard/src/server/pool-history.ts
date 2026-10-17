@@ -830,7 +830,7 @@ const legsCursors = new Map<string, { offset: number; carry: string; anchor: str
  *  `腿集合晚到` 就是这么被我打破的：游标停在旧末尾，重写后的新行一条都读不到，腿集合恒空）。
  *  锚点比的是「**已读区域没被改动**」：追加不动历史字节 ⇒ 命中；重写 ⇒ 失配 ⇒ 归零重读。
  *  代价 = 每次续读一次 64B `readSync`（微秒级）。 */
-function readAnchor(path: string, offset: number): string {
+export function readAnchor(path: string, offset: number): string {
   if (offset <= 0) return ''
   const n = Math.min(64, offset)
   const buf = Buffer.alloc(n)
@@ -1181,6 +1181,7 @@ export function readChunkLines(
   offset: number,
   carry: string,
   onLine: (line: string) => void,
+  tailAsLine = false,
 ): { offset: number; carry: string; bytesRead: number } {
   const CHUNK = 1024 * 1024
   const buf = Buffer.alloc(CHUNK)
@@ -1222,6 +1223,11 @@ export function readChunkLines(
   } catch {
     /* 读失败：保留已消费位置（下一拍重试） */
   }
+  // `tailAsLine`：**全量读**时把「未以换行结尾的最后一段」也当一行交付 —— 旧的
+  // `readFileSync(...).split(String.fromCharCode(10))` 就是这么给的（最后一段即使没有换行，
+  // 也是数组里的一项）。⚠ 增量读**必须**保持默认 false：那时的 tail 是写者还没写完的半行，
+  // 交出去会解析失败、且下一拍拼接后又来一次。carry 仍然照常返回（拼接语义不变）。
+  if (tailAsLine && tail) onLine(tail)
   return { offset: pos, carry: tail, bytesRead }
 }
 

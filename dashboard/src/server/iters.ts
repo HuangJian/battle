@@ -20,7 +20,7 @@ import { STAGES } from '../../../src/config/stages'
 import { isArenaId, resolveArenaStage } from '../../../src/nn/arena-ladder'
 import { parseJsonc } from '../core/jsonc'
 import { curriculaDir, NN_TRAINING } from '../core/paths'
-import { readChunkLines } from './pool-history'
+import { readAnchor, readChunkLines } from './pool-history'
 
 // ---------------- M0 传输账（iteration 事件的 `wire` 子字典） ----------------
 
@@ -644,155 +644,161 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
   const games = new Map<number, Map<string, GameAgg>>()
   try {
     if (!existsSync(logPath)) return out
-    for (const line of readFileSync(logPath, 'utf8').split(String.fromCharCode(10))) {
-      if (!line.trim()) continue
-      try {
-        const r = JSON.parse(line) as Record<string, unknown>
-        const iter = Number(r.iter ?? -1)
-        if (!Number.isInteger(iter) || iter < 0) continue
-        if (r.event === 'eval') {
-          const wver = String(r.wver ?? '')
-          if (!wver) continue
-          let byWver = games.get(iter)
-          if (!byWver) {
-            byWver = new Map()
-            games.set(iter, byWver)
-          }
-          let agg = byWver.get(wver)
-          if (!agg) {
-            agg = {
-              n: 0,
-              ticks: 0,
-              kills: 0,
-              pu: 0,
-              puSpawn: 0,
-              puSpawnN: 0,
-              scoreSum: 0,
-              scoreSqSum: 0,
-              residualSum: 0,
-              residualN: 0,
-              winTicks: 0,
-              winN: 0,
-              lossTicks: 0,
-              lossN: 0,
-              dmg: 0,
-              dmgKills: 0,
-              dmgN: 0,
-              killRateKills: 0,
-              killRateEnemies: 0,
-              killRateN: 0,
-              residualPctSum: 0,
-              residualPctN: 0,
-              startLivesSum: 0,
-              startLivesN: 0,
+    readChunkLines(
+      logPath,
+      0,
+      '',
+      (line) => {
+        if (!line.trim()) return
+        try {
+          const r = JSON.parse(line) as Record<string, unknown>
+          const iter = Number(r.iter ?? -1)
+          if (!Number.isInteger(iter) || iter < 0) return
+          if (r.event === 'eval') {
+            const wver = String(r.wver ?? '')
+            if (!wver) return
+            let byWver = games.get(iter)
+            if (!byWver) {
+              byWver = new Map()
+              games.set(iter, byWver)
             }
-            byWver.set(wver, agg)
-          }
-          const score = Number(r.score ?? 0)
-          agg.n++
-          agg.ticks += Number(r.ticks ?? 0) || 0
-          agg.kills += Number(r.kills ?? 0) || 0
-          agg.pu += Number(r.powerUpsCollected ?? 0) || 0
-          const rowSpawn = puSpawnFromRow(r)
-          if (rowSpawn != null) {
-            agg.puSpawn += rowSpawn
-            agg.puSpawnN++
-          }
-          agg.scoreSum += score
-          agg.scoreSqSum += score * score
-          // 承伤（dmgPerKill 分子）：全样本累计，不区分胜负；**分子分母同口径**——
-          // 只有行内真有 playerDamageTaken 时才把该局计入（同时累计该局 kills），
-          // 否则老课程 eval_log 缺字段会退化成假 0、或分子分母覆盖范围不一致而低估。
-          const pd = Number(r.playerDamageTaken)
-          if (Number.isFinite(pd)) {
-            agg.dmg += pd
-            agg.dmgKills += Number(r.kills ?? 0) || 0
-            agg.dmgN++
-          }
-          // 歼灭率：manifest/eval 行的 enemyTotal，缺则 stage 反查。
-          const stageId = Number(r.stage)
-          const enemyTotal = resolveEnemyTotal(
-            Number.isFinite(stageId) ? stageId : NaN,
-            typeof r.enemyTotal === 'number' ? r.enemyTotal : null,
-            course,
-          )
-          if (enemyTotal != null && enemyTotal > 0) {
-            agg.killRateKills += Number(r.kills ?? 0) || 0
-            agg.killRateEnemies += enemyTotal
-            agg.killRateN++
-          }
-          const sl = Number(r.startLives)
-          if (Number.isFinite(sl) && sl > 0) {
-            agg.startLivesSum += sl
-            agg.startLivesN++
-          }
-          // 残血：仅胜局；(startLives + puGotTank − deaths) × maxHp − playerDamageTaken
-          const won = r.win === true || r.win === 1
-          if (won) {
-            // 胜局耗时：仅胜局累计 ticks（胜局缺 ticks/0 = 数据缺口，不计入分母）。
-            const wt = Number(r.ticks ?? 0) || 0
-            if (wt > 0) {
-              agg.winTicks += wt
-              agg.winN++
+            let agg = byWver.get(wver)
+            if (!agg) {
+              agg = {
+                n: 0,
+                ticks: 0,
+                kills: 0,
+                pu: 0,
+                puSpawn: 0,
+                puSpawnN: 0,
+                scoreSum: 0,
+                scoreSqSum: 0,
+                residualSum: 0,
+                residualN: 0,
+                winTicks: 0,
+                winN: 0,
+                lossTicks: 0,
+                lossN: 0,
+                dmg: 0,
+                dmgKills: 0,
+                dmgN: 0,
+                killRateKills: 0,
+                killRateEnemies: 0,
+                killRateN: 0,
+                residualPctSum: 0,
+                residualPctN: 0,
+                startLivesSum: 0,
+                startLivesN: 0,
+              }
+              byWver.set(wver, agg)
             }
-            const fields = {
-              outcome: 'stage_clear',
-              playerDamageTaken:
-                typeof r.playerDamageTaken === 'number' ? r.playerDamageTaken : undefined,
-              playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
-              puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
-              startLives: Number.isFinite(sl) && sl > 0 ? sl : undefined,
+            const score = Number(r.score ?? 0)
+            agg.n++
+            agg.ticks += Number(r.ticks ?? 0) || 0
+            agg.kills += Number(r.kills ?? 0) || 0
+            agg.pu += Number(r.powerUpsCollected ?? 0) || 0
+            const rowSpawn = puSpawnFromRow(r)
+            if (rowSpawn != null) {
+              agg.puSpawn += rowSpawn
+              agg.puSpawnN++
             }
-            const rh = residualHpFromFields(fields)
-            if (rh !== null) {
-              agg.residualSum += rh
-              agg.residualN++
+            agg.scoreSum += score
+            agg.scoreSqSum += score * score
+            // 承伤（dmgPerKill 分子）：全样本累计，不区分胜负；**分子分母同口径**——
+            // 只有行内真有 playerDamageTaken 时才把该局计入（同时累计该局 kills），
+            // 否则老课程 eval_log 缺字段会退化成假 0、或分子分母覆盖范围不一致而低估。
+            const pd = Number(r.playerDamageTaken)
+            if (Number.isFinite(pd)) {
+              agg.dmg += pd
+              agg.dmgKills += Number(r.kills ?? 0) || 0
+              agg.dmgN++
             }
-            const rp = residualHpPctFromFields(fields)
-            if (rp !== null) {
-              agg.residualPctSum += rp
-              agg.residualPctN++
+            // 歼灭率：manifest/eval 行的 enemyTotal，缺则 stage 反查。
+            const stageId = Number(r.stage)
+            const enemyTotal = resolveEnemyTotal(
+              Number.isFinite(stageId) ? stageId : NaN,
+              typeof r.enemyTotal === 'number' ? r.enemyTotal : null,
+              course,
+            )
+            if (enemyTotal != null && enemyTotal > 0) {
+              agg.killRateKills += Number(r.kills ?? 0) || 0
+              agg.killRateEnemies += enemyTotal
+              agg.killRateN++
             }
-          } else {
-            // 败局耗时：仅败局累计 ticks（败局缺 ticks/0 = 数据缺口，不计入分母）。
-            const lt = Number(r.ticks ?? 0) || 0
-            if (lt > 0) {
-              agg.lossTicks += lt
-              agg.lossN++
+            const sl = Number(r.startLives)
+            if (Number.isFinite(sl) && sl > 0) {
+              agg.startLivesSum += sl
+              agg.startLivesN++
             }
+            // 残血：仅胜局；(startLives + puGotTank − deaths) × maxHp − playerDamageTaken
+            const won = r.win === true || r.win === 1
+            if (won) {
+              // 胜局耗时：仅胜局累计 ticks（胜局缺 ticks/0 = 数据缺口，不计入分母）。
+              const wt = Number(r.ticks ?? 0) || 0
+              if (wt > 0) {
+                agg.winTicks += wt
+                agg.winN++
+              }
+              const fields = {
+                outcome: 'stage_clear',
+                playerDamageTaken:
+                  typeof r.playerDamageTaken === 'number' ? r.playerDamageTaken : undefined,
+                playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
+                puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
+                startLives: Number.isFinite(sl) && sl > 0 ? sl : undefined,
+              }
+              const rh = residualHpFromFields(fields)
+              if (rh !== null) {
+                agg.residualSum += rh
+                agg.residualN++
+              }
+              const rp = residualHpPctFromFields(fields)
+              if (rp !== null) {
+                agg.residualPctSum += rp
+                agg.residualPctN++
+              }
+            } else {
+              // 败局耗时：仅败局累计 ticks（败局缺 ticks/0 = 数据缺口，不计入分母）。
+              const lt = Number(r.ticks ?? 0) || 0
+              if (lt > 0) {
+                agg.lossTicks += lt
+                agg.lossN++
+              }
+            }
+            return
           }
-          continue
+          if (r.event !== 'eval_summary') return
+          out.set(iter, {
+            time: evalStampLocal(String(r.time ?? ''), r.nodes),
+            games: Number(r.games ?? 0),
+            wins: Number(r.wins ?? 0),
+            winRate: typeof r.winRate === 'number' ? r.winRate : null,
+            clears: Number(r.clears ?? 0),
+            clearRate: typeof r.clearRate === 'number' ? r.clearRate : null,
+            dropped: Number(r.dropped ?? 0),
+            sec: Number(r.sec ?? 0),
+            wver: String(r.wver ?? ''),
+            outcomes: (r.outcomes ?? {}) as Record<string, number>,
+            avgTicks: null,
+            avgWinTicks: null,
+            totalKills: null,
+            totalPU: null,
+            totalPUSpawn: null,
+            avgResidualHp: null,
+            avgLossTicks: null,
+            dmgPerKill: null,
+            scoreMean: null,
+            scoreStd: null,
+            anchorWr: typeof r.anchor_wr === 'number' ? r.anchor_wr : null,
+            rotorWr: typeof r.rotor_wr === 'number' ? r.rotor_wr : null,
+            overfitGapPp: typeof r.overfit_gap_pp === 'number' ? r.overfit_gap_pp : null,
+          })
+        } catch {
+          /* skip bad line */
         }
-        if (r.event !== 'eval_summary') continue
-        out.set(iter, {
-          time: evalStampLocal(String(r.time ?? ''), r.nodes),
-          games: Number(r.games ?? 0),
-          wins: Number(r.wins ?? 0),
-          winRate: typeof r.winRate === 'number' ? r.winRate : null,
-          clears: Number(r.clears ?? 0),
-          clearRate: typeof r.clearRate === 'number' ? r.clearRate : null,
-          dropped: Number(r.dropped ?? 0),
-          sec: Number(r.sec ?? 0),
-          wver: String(r.wver ?? ''),
-          outcomes: (r.outcomes ?? {}) as Record<string, number>,
-          avgTicks: null,
-          avgWinTicks: null,
-          totalKills: null,
-          totalPU: null,
-          totalPUSpawn: null,
-          avgResidualHp: null,
-          avgLossTicks: null,
-          dmgPerKill: null,
-          scoreMean: null,
-          scoreStd: null,
-          anchorWr: typeof r.anchor_wr === 'number' ? r.anchor_wr : null,
-          rotorWr: typeof r.rotor_wr === 'number' ? r.rotor_wr : null,
-          overfitGapPp: typeof r.overfit_gap_pp === 'number' ? r.overfit_gap_pp : null,
-        })
-      } catch {
-        /* skip bad line */
-      }
-    }
+      },
+      true,
+    )
     // 合并：每个 summary 只配它自己 wver 的逐局桶。总体 std（÷n）。
     for (const [iter, s] of out) {
       const agg = games.get(iter)?.get(s.wver)
@@ -849,21 +855,27 @@ export function readEvalGames(trajDir: string, iter?: number): EvalGamesData | n
   // 第一趟：summary 按 iter 归并（同 iter 重复 = 补跑后的重复落账，取最后一条）。
   const summaries = new Map<number, { wver: string; time: string }>()
   try {
-    for (const line of readFileSync(logPath, 'utf8').split(String.fromCharCode(10))) {
-      if (!line.trim()) continue
-      try {
-        const r = JSON.parse(line) as Record<string, unknown>
-        if (r.event !== 'eval_summary') continue
-        const iter = Number(r.iter ?? -1)
-        if (!Number.isInteger(iter) || iter < 0) continue
-        summaries.set(iter, {
-          wver: String(r.wver ?? ''),
-          time: evalStampLocal(String(r.time ?? ''), r.nodes),
-        })
-      } catch {
-        /* skip bad line */
-      }
-    }
+    readChunkLines(
+      logPath,
+      0,
+      '',
+      (line) => {
+        if (!line.trim()) return
+        try {
+          const r = JSON.parse(line) as Record<string, unknown>
+          if (r.event !== 'eval_summary') return
+          const iter = Number(r.iter ?? -1)
+          if (!Number.isInteger(iter) || iter < 0) return
+          summaries.set(iter, {
+            wver: String(r.wver ?? ''),
+            time: evalStampLocal(String(r.time ?? ''), r.nodes),
+          })
+        } catch {
+          /* skip bad line */
+        }
+      },
+      true,
+    )
   } catch {
     return null
   }
@@ -885,57 +897,63 @@ export function readEvalGames(trajDir: string, iter?: number): EvalGamesData | n
   const rows = new Map<string, EvalGameRow>()
   const outcomes: Record<string, number> = {}
   try {
-    for (const line of readFileSync(logPath, 'utf8').split(String.fromCharCode(10))) {
-      if (!line.trim()) continue
-      try {
-        const r = JSON.parse(line) as Record<string, unknown>
-        if (r.event !== 'eval' || 'source' in r) continue
-        if (Number(r.iter ?? -1) !== target || String(r.wver ?? '') !== head.wver) continue
-        const stage = Number(r.stage)
-        const seed = Number(r.seed)
-        if (!Number.isInteger(stage) || !Number.isInteger(seed)) continue
-        const outcome = String(r.outcome ?? '')
-        const win = r.win === true || r.win === 1
-        const cleared = r.cleared === true || r.cleared === 1
-        const kills = Number(r.kills ?? 0) || 0
-        const dmgTaken =
-          typeof r.playerDamageTaken === 'number' && Number.isFinite(r.playerDamageTaken)
-            ? r.playerDamageTaken
+    readChunkLines(
+      logPath,
+      0,
+      '',
+      (line) => {
+        if (!line.trim()) return
+        try {
+          const r = JSON.parse(line) as Record<string, unknown>
+          if (r.event !== 'eval' || 'source' in r) return
+          if (Number(r.iter ?? -1) !== target || String(r.wver ?? '') !== head.wver) return
+          const stage = Number(r.stage)
+          const seed = Number(r.seed)
+          if (!Number.isInteger(stage) || !Number.isInteger(seed)) return
+          const outcome = String(r.outcome ?? '')
+          const win = r.win === true || r.win === 1
+          const cleared = r.cleared === true || r.cleared === 1
+          const kills = Number(r.kills ?? 0) || 0
+          const dmgTaken =
+            typeof r.playerDamageTaken === 'number' && Number.isFinite(r.playerDamageTaken)
+              ? r.playerDamageTaken
+              : null
+          // 残血：与 readEvalSummaries 聚合同口径——胜局按 stage_clear 推算
+          // （BONUS 截断胜局 outcome=max_ticks，容量公式同样成立），败局恒 null。
+          const residualHp = win
+            ? residualHpFromFields({
+                outcome: 'stage_clear',
+                playerDamageTaken: dmgTaken ?? undefined,
+                playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
+                puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
+              })
             : null
-        // 残血：与 readEvalSummaries 聚合同口径——胜局按 stage_clear 推算
-        // （BONUS 截断胜局 outcome=max_ticks，容量公式同样成立），败局恒 null。
-        const residualHp = win
-          ? residualHpFromFields({
-              outcome: 'stage_clear',
-              playerDamageTaken: dmgTaken ?? undefined,
-              playerDeaths: typeof r.playerDeaths === 'number' ? r.playerDeaths : undefined,
-              puGotTank: typeof r.puGotTank === 'number' ? r.puGotTank : undefined,
-            })
-          : null
-        rows.set(`${stage}:${seed}`, {
-          stage,
-          seed,
-          stageName: '', // api.buildEvalGamesView 按 stage id 解析（本层不 import src/config）
-          cls: evalGameClass(win, outcome),
-          cleared,
-          outcome,
-          ticks: Number(r.ticks ?? 0) || 0,
-          kills,
-          dmgTaken,
-          dmgPerKill: dmgTaken != null && kills > 0 ? +(dmgTaken / kills).toFixed(1) : null,
-          residualHp,
-          pu: Number(r.powerUpsCollected ?? 0) || 0,
-          score: typeof r.score === 'number' ? r.score : null,
-          node: String(r.node ?? ''),
-          // 逐局行自带 node：云机的行（`node === 'cloud'`）time 也是 UTC 钟 → 逐行判，
-          // 不借 summary 的 nodes（混合节点轮里两种行并存）。
-          time: r.node === 'cloud' ? utcStampToLocal(String(r.time ?? '')) : String(r.time ?? ''),
-        })
-        outcomes[outcome] = (outcomes[outcome] ?? 0) + 1
-      } catch {
-        /* skip bad line */
-      }
-    }
+          rows.set(`${stage}:${seed}`, {
+            stage,
+            seed,
+            stageName: '', // api.buildEvalGamesView 按 stage id 解析（本层不 import src/config）
+            cls: evalGameClass(win, outcome),
+            cleared,
+            outcome,
+            ticks: Number(r.ticks ?? 0) || 0,
+            kills,
+            dmgTaken,
+            dmgPerKill: dmgTaken != null && kills > 0 ? +(dmgTaken / kills).toFixed(1) : null,
+            residualHp,
+            pu: Number(r.powerUpsCollected ?? 0) || 0,
+            score: typeof r.score === 'number' ? r.score : null,
+            node: String(r.node ?? ''),
+            // 逐局行自带 node：云机的行（`node === 'cloud'`）time 也是 UTC 钟 → 逐行判，
+            // 不借 summary 的 nodes（混合节点轮里两种行并存）。
+            time: r.node === 'cloud' ? utcStampToLocal(String(r.time ?? '')) : String(r.time ?? ''),
+          })
+          outcomes[outcome] = (outcomes[outcome] ?? 0) + 1
+        } catch {
+          /* skip bad line */
+        }
+      },
+      true,
+    )
   } catch {
     /* unreadable → 有 summary 无行也照常返回（rows 空，弹窗只显示概要） */
   }
@@ -975,30 +993,37 @@ export function readEvalRoundOptions(trajDir: string): EvalRoundOption[] {
   if (!existsSync(logPath)) return []
   const byIter = new Map<number, EvalRoundOption>()
   try {
-    for (const line of readFileSync(logPath, 'utf8').split(String.fromCharCode(10))) {
-      if (!line.trim()) continue
-      try {
-        const r = JSON.parse(line) as Record<string, unknown>
-        if (r.event !== 'eval_summary') continue
-        const iter = Number(r.iter ?? -1)
-        const wver = String(r.wver ?? '')
-        if (!Number.isInteger(iter) || iter < 0 || !wver) continue
-        const games = typeof r.games === 'number' && Number.isFinite(r.games) ? r.games : null
-        const wins = typeof r.wins === 'number' && Number.isFinite(r.wins) ? r.wins : null
-        const rawWr = typeof r.winRate === 'number' && Number.isFinite(r.winRate) ? r.winRate : null
-        byIter.set(iter, {
-          iter,
-          wver,
-          time: String(r.time ?? ''),
-          games,
-          wins,
-          winRate: rawWr ?? (games != null && games > 0 && wins != null ? wins / games : null),
-          reusedWver: r.reused_wver === true,
-        })
-      } catch {
-        /* skip bad line */
-      }
-    }
+    readChunkLines(
+      logPath,
+      0,
+      '',
+      (line) => {
+        if (!line.trim()) return
+        try {
+          const r = JSON.parse(line) as Record<string, unknown>
+          if (r.event !== 'eval_summary') return
+          const iter = Number(r.iter ?? -1)
+          const wver = String(r.wver ?? '')
+          if (!Number.isInteger(iter) || iter < 0 || !wver) return
+          const games = typeof r.games === 'number' && Number.isFinite(r.games) ? r.games : null
+          const wins = typeof r.wins === 'number' && Number.isFinite(r.wins) ? r.wins : null
+          const rawWr =
+            typeof r.winRate === 'number' && Number.isFinite(r.winRate) ? r.winRate : null
+          byIter.set(iter, {
+            iter,
+            wver,
+            time: String(r.time ?? ''),
+            games,
+            wins,
+            winRate: rawWr ?? (games != null && games > 0 && wins != null ? wins / games : null),
+            reusedWver: r.reused_wver === true,
+          })
+        } catch {
+          /* skip bad line */
+        }
+      },
+      true,
+    )
   } catch {
     return []
   }
@@ -1016,59 +1041,112 @@ export function readEvalRoundOptions(trajDir: string): EvalRoundOption[] {
  *  控制台 RSS 因此在 645MB↔1.7GB 之间跳（priv 不还页）。
  *
  *  指纹 = `size:mtimeMs`（追加即失效 ⇒ 语义不变，只是不再"同一趟读两遍"）。 */
-const evalWinsMemo = new Map<string, { fp: string; byIter: Map<number, Map<string, boolean>> }>()
+const evalWinsMemo = new Map<
+  string,
+  {
+    fp: string
+    byIter: Map<number, Map<string, boolean>>
+    offset: number
+    carry: string
+    anchor: string
+  }
+>()
 
-/** 缓存构建（供 `readEvalGameWins`；同文件多处解析 eval_log 的调用点共用一份实现）。 */
-function buildEvalWins(logPath: string): Map<number, Map<string, boolean>> {
-  const byIter = new Map<number, Map<string, boolean>>()
+/** 增量解析把一个文件里的 eval 行并进 `byIter`；返回新的已读游标位与残片。
+ *
+ *  ★ 2026-10-17：账本是**只追加**的（`append_jsonl`），而每次追加都会让指纹变 ⇒ 旧实现
+ *  「指纹变 ⇒ 全量重读 16MB」在训练中等于**每 5s 读一遍 16MB**（三门课 42MB、逐局一行）。
+ *  增量后只读新增那几行。正确性靠**锚点校验**（`readAnchor`）：追加不动历史字节 ⇒ 命中；
+ *  被重写/截短 ⇒ 失配 ⇒ 调用方归零重读（与 `pool-history.readOfflineLegs` 同一套纪律，
+ *  那一刀的教训：只靠 `size < offset` 判不出"重写后更大"的文件）。 */
+/** 一行 eval 行 → 并进 `byIter`。抽成函数是因为**全量读的末尾残片**也要走同一套解析
+ *  （见 `mergeEvalWins` 末尾那三行注释）—— 两份写法会漂。 */
+function applyEvalWinLine(byIter: Map<number, Map<string, boolean>>, line: string): void {
+  if (!line.trim()) return
+  try {
+    const r = JSON.parse(line) as Record<string, unknown>
+    if (r.event !== 'eval') return
+    const iter = Number(r.iter ?? -1)
+    const stage = Number(r.stage)
+    const seed = Number(r.seed)
+    if (
+      !Number.isInteger(iter) ||
+      iter < 0 ||
+      !Number.isInteger(stage) ||
+      !Number.isInteger(seed)
+    ) {
+      return
+    }
+    let m = byIter.get(iter)
+    if (!m) {
+      m = new Map()
+      byIter.set(iter, m)
+    }
+    m.set(`${stage}:${seed}`, r.win === true || r.win === 1)
+  } catch {
+    /* skip bad line */
+  }
+}
+
+function mergeEvalWins(
+  logPath: string,
+  byIter: Map<number, Map<string, boolean>>,
+  start: number,
+  carry: string,
+): { offset: number; carry: string } {
   try {
     // ★ 分块逐行（`readChunkLines`）：旧实现 `readFileSync(...).split('\n')` 把 16MB 文本裂成
-    // 几十万个字符串（峰值 = 文本 + 行数组 + 每行 JSON 对象）。分块后峰值 = 1MiB 块 + 残片。
-    readChunkLines(logPath, 0, '', (line) => {
-      if (!line.trim()) return
-      try {
-        const r = JSON.parse(line) as Record<string, unknown>
-        if (r.event !== 'eval') return
-        const iter = Number(r.iter ?? -1)
-        const stage = Number(r.stage)
-        const seed = Number(r.seed)
-        if (
-          !Number.isInteger(iter) ||
-          iter < 0 ||
-          !Number.isInteger(stage) ||
-          !Number.isInteger(seed)
-        ) {
-          return
-        }
-        let m = byIter.get(iter)
-        if (!m) {
-          m = new Map()
-          byIter.set(iter, m)
-        }
-        m.set(`${stage}:${seed}`, r.win === true || r.win === 1)
-      } catch {
-        /* skip bad line */
-      }
-    })
+    // 几十万个字符串（峰值 = 文本 + 行数组 + 每行 JSON 对象）。分块后峰值 = 1MiB 块 + 残片；
+    // 且**从 `start` 起读**（账本只追加 ⇒ 通常只剩几行）。
+    // `tailAsLine`：全量读时末尾无换行的最后一行也要交付（旧 `split` 语义）；增量读不交付
+    // （那可能是写者没写完的半行）。
+    const r = readChunkLines(
+      logPath,
+      start,
+      carry,
+      (line) => applyEvalWinLine(byIter, line),
+      start === 0,
+    )
+    return { offset: r.offset, carry: r.carry }
   } catch {
-    /* unreadable */
+    /* unreadable：游标保持不动，下次再试 */
+    return { offset: start, carry }
   }
-  return byIter
 }
 
 export function readEvalGameWins(trajDir: string): Map<number, Map<string, boolean>> {
   const logPath = join(trajDir, 'eval_log.jsonl')
+  let size: number
   let fp: string
   try {
     const st = statSync(logPath)
+    size = st.size
     fp = `${st.size}:${st.mtimeMs}`
   } catch {
     return new Map() // 文件不存在/不可读：空表（与旧实现同）
   }
   const hit = evalWinsMemo.get(logPath)
   if (hit && hit.fp === fp) return hit.byIter
-  const byIter = buildEvalWins(logPath)
-  evalWinsMemo.set(logPath, { fp, byIter })
+  // 增量：能续读就续读（锚点校验），否则归零重读
+  let byIter = hit ? hit.byIter : new Map<number, Map<string, boolean>>()
+  let start = 0
+  let carry = ''
+  if (hit) {
+    if (size >= hit.offset && readAnchor(logPath, hit.offset) === hit.anchor) {
+      start = hit.offset
+      carry = hit.carry
+    } else {
+      byIter = new Map() // 被重写/截短/换文件 ⇒ 全量重来（旧数据不可信）
+    }
+  }
+  const next = mergeEvalWins(logPath, byIter, start, carry)
+  evalWinsMemo.set(logPath, {
+    fp,
+    byIter,
+    offset: next.offset,
+    carry: next.carry,
+    anchor: readAnchor(logPath, next.offset),
+  })
   return byIter
 }
 

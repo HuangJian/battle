@@ -393,6 +393,15 @@ async function main(): Promise<void> {
         if (req.method === 'GET' && url.pathname === '/api/mem') {
           const forced = url.searchParams.get('gc') === '1'
           if (forced) Bun.gc(true)
+          // `?snapshot=1`：写一份 V8 格式的堆快照到 tmp/（用 Chrome DevTools 打开，或按
+          // "按类型聚合 self_size"离线分析）。加它的理由：`/api/mem` 能说"活对象 386MB"，
+          // 但说不出**是谁**——而"峰值 <300MB"这个目标必须先知道基线里那块是谁的。
+          if (url.searchParams.get('snapshot') === '1') {
+            const snapPath = path.join(REPO_ROOT, 'tmp', `bun-heap-${Date.now()}.heapsnapshot`)
+            await Bun.write(snapPath, Bun.generateHeapSnapshot('v8'))
+            const mm = process.memoryUsage()
+            return json({ snapshot: snapPath, rss: mm.rss, heapUsed: mm.heapUsed })
+          }
           const m = process.memoryUsage()
           return json({
             rss: m.rss,
