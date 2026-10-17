@@ -138,8 +138,13 @@ export function invalidateNodeHistoryMemo(): void {
   aggMemo = null
   scanMemo = null
   streams.clear()
-  legsMemo = null
   appliedLegsFp = null
+  // ★ 2026-10-17：**增量游标必须跟着 memo 一起忘掉**。它是"读到哪了"的记忆，而 memo 是
+  // 「这份记忆对应哪份账本」的凭据 —— 只清 memo 不清游标 = 重读时从**旧末尾**起读（读到 0 字节）
+  // ⇒ 腿集合凭空消失（测试 `腿集合晚到` 当场抓住：第三次聚合 `ok` 从 1 变回 4）。
+  legsMemo = null
+  legsStatFp = ''
+  legsCursors.clear()
 }
 
 // ────────────────────────── 逐调用计数器（plan/dashboard-reload-perf：结构性断言的唯一数据面） ──────────────────────────
@@ -807,6 +812,39 @@ export interface OfflineLegs {
 let legsMemo: OfflineLegs | null = null
 /** 当前**已生效**的腿指纹（变了 ⇒ 历史要按新口径重算，见 aggregateNodeHistory）。 */
 let appliedLegsFp: string | null = null
+/** 上次读 legs 时的**账本 stat 指纹**（= 「要不要再读盘」的判据；与 `legsMemo.fp` 的内容指纹
+ *  分工不同：stat 判「文件动没动」，内容判「腿集合变没变」）。 */
+let legsStatFp = ''
+/** 逐课账本的**增量读游标**（path → 已解析字节位 + 残片）。
+ *
+ *  ★ 2026-10-17：账本是**只追加**的（`append_jsonl`），而旧实现每次都 `readFileSync` 整份重扫
+ *  ⇒ 训练中「账本每秒都在动」⇒ 每个窗口全量重读一遍。真机读数（`/api/poolCounters`，20s 两次）：
+ *  `bytesRead` 累计 **514MB**、`fullRescans` 20s 内 **+3**。改成游标增量后，账本追加只读新增
+ *  那几行（通常 0 条 `offline_artifact`）⇒ 且内容指纹不变 ⇒ `aggregateNodeHistory` 连
+ *  `streams.clear()` 都不触发。 */
+const legsCursors = new Map<string, { offset: number; carry: string; anchor: string }>()
+
+/** **锚点校验**（增量读的正确性前提）：取 `[offset-64, offset)` 的十六进制。
+ *
+ *  只靠 `size < offset` 判「文件被重写」是不够的 —— 重写后的文件完全可能**更大**（测试
+ *  `腿集合晚到` 就是这么被我打破的：游标停在旧末尾，重写后的新行一条都读不到，腿集合恒空）。
+ *  锚点比的是「**已读区域没被改动**」：追加不动历史字节 ⇒ 命中；重写 ⇒ 失配 ⇒ 归零重读。
+ *  代价 = 每次续读一次 64B `readSync`（微秒级）。 */
+export function readAnchor(path: string, offset: number): string {
+  if (offset <= 0) return ''
+  const n = Math.min(64, offset)
+  const buf = Buffer.alloc(n)
+  let fh: number | null = null
+  try {
+    fh = openSync(path, 'r')
+    const got = readSync(fh, buf, 0, n, offset - n)
+    return buf.subarray(0, Math.max(0, got)).toString('hex')
+  } catch {
+    return ''
+  } finally {
+    if (fh !== null) closeSync(fh)
+  }
+}
 
 function legsFingerprint(ledgers: LedgerCandidate[]): string {
   return ledgers.map((l) => `${l.course}|${l.mtimeMs}|${l.size}`).join(String.fromCharCode(10))
@@ -817,36 +855,62 @@ function legsFingerprint(ledgers: LedgerCandidate[]): string {
  *  读整份账本（一次性的，只在指纹变化时发生）；超 `LEGS_MAX_BYTES` 的账本跳过
  *  （宁可少剔，也不把一次聚合变成大文件全读）。 */
 export function readOfflineLegs(ledgers: LedgerCandidate[]): OfflineLegs {
-  const fp = legsFingerprint(ledgers)
-  if (legsMemo && legsMemo.fp === fp) return legsMemo
+  // ① 「要不要读盘」= 账本 stat 指纹（文件没动 ⇒ 零读，与旧 memo 同规）
+  const statFp = legsFingerprint(ledgers)
+  if (legsMemo && legsStatFp === statFp) return legsMemo
+  // ② 读盘时**从上次的游标起读**（账本只追加；被截短/重写才归零重读）
   const byCourse = new Map<string, Set<number>>()
+  if (legsMemo) {
+    for (const [c, s] of legsMemo.byCourse) byCourse.set(c, new Set(s))
+  }
   for (const l of ledgers) {
     if (l.size > LEGS_MAX_BYTES) continue
-    let text: string
+    const cur = legsCursors.get(l.path)
+    // 账本被截短 **或** 锚点对不上（重写/换 run/换文件）⇒ 该课从零重读，集合也重来。
+    if (cur && (l.size < cur.offset || readAnchor(l.path, cur.offset) !== cur.anchor)) {
+      legsCursors.delete(l.path)
+      byCourse.delete(l.course)
+    }
+    // ★ 2026-10-17 两处修：① 分块游标读替代 `readFileSync` 整份 + `split('\n')`（同一个坑的
+    // 第二处复现——`readChunkLines` 的 docstring 记着第一处：27MB 文本裂成 13 万行 ⇒ 峰值
+    // +116MB ⇒ JSC 堆高水位 ⇒ 周期 GC 全停 ⇒ RSS 锯齿）；② 从**上次游标**起读，不再整份重扫。
+    let set: Set<number> | null = byCourse.get(l.course) ?? null
+    const start = legsCursors.get(l.path)
     try {
-      text = readFileSync(l.path, 'utf8')
+      const r = readChunkLines(l.path, start?.offset ?? 0, start?.carry ?? '', (line) => {
+        if (!line.includes('offline_artifact')) return
+        try {
+          const ev = JSON.parse(line) as { event?: string; it?: unknown }
+          if (ev.event !== 'offline_artifact') return
+          const it = Number(ev.it)
+          if (!Number.isInteger(it) || it < 0) return
+          if (!set) {
+            set = new Set()
+            byCourse.set(l.course, set)
+          }
+          set.add(it)
+        } catch {
+          /* 半行/坏行：跳过 */
+        }
+      })
+      legsCursors.set(l.path, {
+        offset: r.offset,
+        carry: r.carry,
+        anchor: readAnchor(l.path, r.offset),
+      })
     } catch {
       continue
     }
-    let set: Set<number> | null = null
-    for (const line of text.split(String.fromCharCode(10))) {
-      if (!line.includes('offline_artifact')) continue
-      try {
-        const r = JSON.parse(line) as { event?: string; it?: unknown }
-        if (r.event !== 'offline_artifact') continue
-        const it = Number(r.it)
-        if (!Number.isInteger(it) || it < 0) continue
-        if (!set) {
-          set = new Set()
-          byCourse.set(l.course, set)
-        }
-        set.add(it)
-      } catch {
-        /* 半行/坏行：跳过 */
-      }
-    }
   }
+  // ③ 指纹 = **腿集合的内容**（不是账本 stat）——决定 `aggregateNodeHistory` 要不要作废流态。
+  //    账本追加但没新增 `offline_artifact` ⇒ 内容没变 ⇒ 不清流态、不重扫（旧口径是 stat 指纹，
+  //    训练中每拍都变 ⇒ 每窗口全量重扫）。
+  const fp = [...byCourse.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([c, s]) => `${c}|${[...s].sort((x, y) => x - y).join(',')}`)
+    .join('\n')
   legsMemo = { fp, byCourse }
+  legsStatFp = statFp
   return legsMemo
 }
 
@@ -1117,6 +1181,7 @@ export function readChunkLines(
   offset: number,
   carry: string,
   onLine: (line: string) => void,
+  tailAsLine = false,
 ): { offset: number; carry: string; bytesRead: number } {
   const CHUNK = 1024 * 1024
   const buf = Buffer.alloc(CHUNK)
@@ -1158,6 +1223,11 @@ export function readChunkLines(
   } catch {
     /* 读失败：保留已消费位置（下一拍重试） */
   }
+  // `tailAsLine`：**全量读**时把「未以换行结尾的最后一段」也当一行交付 —— 旧的
+  // `readFileSync(...).split(String.fromCharCode(10))` 就是这么给的（最后一段即使没有换行，
+  // 也是数组里的一项）。⚠ 增量读**必须**保持默认 false：那时的 tail 是写者还没写完的半行，
+  // 交出去会解析失败、且下一拍拼接后又来一次。carry 仍然照常返回（拼接语义不变）。
+  if (tailAsLine && tail) onLine(tail)
   return { offset: pos, carry: tail, bytesRead }
 }
 

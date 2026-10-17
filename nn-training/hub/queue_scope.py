@@ -50,6 +50,9 @@ class QueueScopeMixin(QueuePeer):
     _ambiguous: dict[str, list[str]]
     _auth_blocked_until: dict[str, float]
     _auth_fail: dict[str, int]
+    #: 轮转游标（`drop_course` 摘到它时置 None ⇒ 必须显式是 `str | None`）；
+    #: 真正的**推进**在 `queue_claims`（`claim_next` / `claim_job`），那里另有同名声明。
+    _cursor: str | None
     _discover_root: Path | None
     _halt_default: bool
     _halts: dict[str, bool]
@@ -58,7 +61,10 @@ class QueueScopeMixin(QueuePeer):
     #: 启动参数里带过模式段的课程（`--course a=offline`；★M4b/P1-3：WARN + 忽略）。
     _mode_ignored: set[str]
     _now: Any
+    #: 「未开课」告警的去重集（`drop_course` 摘课时一并 discard）。
+    _no_marker_warned: set[str]
     _order: list[str]
+    _peeked: dict[str, float]
     _solo: _JobStore | None
     _stores: dict[str, _JobStore]
     _workers: dict[str, float]
@@ -115,6 +121,38 @@ class QueueScopeMixin(QueuePeer):
         # 盘上的 hold 只在**读面**（清单/取包）生效，而派发闸的镜像还是空的 ⇒
         # 重启后一台盘能领走别人正在跑的课（接管闸与读面分叉）。
         self._sync_hold(c)
+        return True
+
+    def drop_course(self, name: str) -> bool:
+        """把一门课从课程表摘掉（连带**释放**它的 store 与那份账本缓存）。
+
+        ★ 2026-10-17（plan/hub-server-memory-slim L3）：课程表此前**只增不减**
+        （`discover` 里 `if ent.name in self._stores: continue`）——目录被删、课被停、tmp 被清
+        之后，那门课的 store 与它的 `_ledger_cache`（整份账本解析出来的 Python 对象）**永久
+        驻留**。hub 那次 6.2GB 里就有这一类：tmp 被清掉了，内存里的账本一份没少。
+
+        为什么不在 `_stores` 上直接 `del`：还有四个旁表按课程键挂着（`_order` / `_halts` /
+        `_no_marker_warned` / `_peeked`），以及 `_locate_cache` 里指向它的 jid——留着它们就是
+        「表里没这门课，但别处还认它」的半死状态。落盘的两个（`_dispatch` 落
+        `offline-dispatch.json`、`_leases` 的意义是重启后接管）**不动**：课程若重新登记，
+        盘上状态本来就该继续生效。
+        """
+        c = str(name or "")
+        with self._lock:
+            if c not in self._stores:
+                return False
+            del self._stores[c]
+            self._order = [x for x in self._order if x != c]
+            self._halts.pop(c, None)
+            self._no_marker_warned.discard(c)
+            self._peeked.pop(c, None)
+            if self._cursor == c:
+                self._cursor = None
+            # 归属缓存里的条目指向已不存在的课 ⇒ `course_of` 会把它交给 `_store_of`
+            # 的缺课分支（那分支按"未知 job"处理，比"指向一个空壳 store"好得多）。
+            for jid in [j for j, owner in self._locate_cache.items() if owner == c]:
+                del self._locate_cache[jid]
+            self._adopt_solo()
         return True
 
     def _adopt_solo(self) -> None:

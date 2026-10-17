@@ -1,0 +1,125 @@
+// 课程 y5-hide —— flank 接续腿：flank.it80 为师＋威胁税加压（用户令三腿各补最缺；原名 yt-hide 系笔误）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 用户 2026-10-15：靠减少暴露换安全——wThreat 调高避火线，wHurt 调高避被击中。
+//   死局 threat lane 3–4 倍＋hurtW 6–10 倍，但都是重税下改不动（刚性），故只温和加压。
+//   剂量（it80 实测：killEV 14.55；threat 账单 −3.38（23%），hurt 账单 −0.90（6%）；wHurt 信号
+//   摊在分母里变稀是刚性主因，加码只加 1/3 量观察）：wThreat 120→**150**（−4.23，29%）；
+//   wHurt 110→**150**（−1.23，8%）。双双远低于 y1 冻结线（60%）；threat 上方还有 headroom，
+//   首剂不顶满，看 +40 threat lane 动不动再议。
+//   起点 flank.it80（`weights/y5-flank/y5-flank.it80.20261015-222118.json`，
+//   sha16 `90a4b216c9051301`；同代直连，kickstart 关，opt fresh §15.5）。
+//   基线（it80 实测 400 局）：headline hitRate 0.841✅/nearSq 111❌（差 1）/kills 4.85✅/encl 98✅
+//   win 0.9375/clears 375/timeout 1.5%/gameover 19（4.75%）；s2000 切片 hit 0.841/kills 4.85。
+//
+// ── 单变量声明（相对 y5-flank：只动威胁两键；公式逐字不动）──────────────────────
+//   wThreat 120→150＋wHurt 110→150（纯 params，无公式项增减）；其余 16 键逐字
+//   （iters 500/max 24 是预算 cap 非变量；种子与 back/dist 共享 20270101）。
+//   双分支：+40 threat lane↓ 且 hurtW↓ 且 gameover ↓ ⇒ 威胁税生效；
+//   threat/hurt 双平 ⇒ 刚性，加码无用，杀；timeout 反升 ⇒ 为避战而苟（hide 最可能苟），杀。
+//
+// ── 门（y5-flank 四线＋命耗线＋威胁 readout＋自杀 watch）────────────────────────
+//   主：hitRate ≥ 0.75；主2：nearSq/千tick ≤ 110；次：kills ≥ 3.5；次2：encl/千tick ≤ 100；
+//   命耗线：+40 gameover 局占比 ≤ 3%（基线 4.75%），fail ⇒ **杀腿**；
+//   自杀 watch：+40 timeout 局占比 ≤ 4%（基线 1.5%），超 ⇒ 为避战而苟，**杀腿**；
+//   D01 ≤ 85 护栏；fear-watch 照旧；fail ⇒ **杀腿**。
+//   门读 headline；s2000 切片附读。上报 policy_new_rms＋it5 analytic 照旧。
+//   终点：四线＋命耗线全过 ⇒ 收官（iters 500 为 cap）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   anchor 0.001（legacy 空片，无害）；熔断全拆（用户令：ent_break 0.0＋max_winrate 0.0，
+//   F4 ENT 永不触发；kickstart_burn/paired_kill/gates 本就缺席；门是人判标准，保留）；batch 24576；优化器/K 冻结（与 flank 同表）。
+//   iters 500，max_hours 24，workers 8，eval 混合（"2000-2003"×50，同口径逐行可比）。
+//   ⚠ 前提：tmp/y5-hide 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c05`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`（课程轮从 1 起，与 bc 轮号无关）；
+//     `bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y5-hide）+ backup 新目录（nn-training/weights/y5-hide）+ opt fresh。
+{
+  "version": 5,
+  "name": "y5-hide",
+  "mode": "per-tick",
+  "level": "ladder-c05",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wWin*where(clearTick>=0, (3900-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 8.6,
+      "wCorner": 110.0,
+      "wThreat": 150.0,
+      "wBlock": 110.0,
+      "wNearSq": 42.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 0.4
+    },
+    "terminal": {
+      "timeout": -5.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y5-flank.it80（sha 见头注；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y5-flank/y5-flank.it80.20261015-222118.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（新种子，与 20261024/20261101/20261201 不同防记忆化；与 y5-back/y5-dist 共享＝三路可比）。
+  "paired_rotate_seed": 20270101,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y5-hide/weights.json",
+  "traj": "tmp/y5-hide",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/y5-hide",
+  "backup_prefix": "y5-hide",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 结课报告（2026-10-16，用户令 halt；规格头冻结，本节只读）──
+//   终点 eval it200（补局后 422 局，settled）：win 0.9597/clears 405/kills 4.88/timeout 0.71%/
+//   gameover 15（3.55%）；headline 0.870/90/4.88/88（四线全过）；threat 23（基线 28.2 −18% 维持）、
+//   hurtW 6.9（基线 8.2 −16% 维持）；A3 3.517 一字不动。终点权重 y5-hide.it200.20261016-103630.json（永存）。
+//   verdict：全场峰 0.9597 收官——threat/hurt 税生效且维持；gameover 3.55%（命耗线 3% 差 0.55pp，
+//   接近未过，诚实注记）；A3 不动（wDist 与 hide 无关，预期内）。
+//   证据 tmp/y5-hide/eval_log.jsonl。

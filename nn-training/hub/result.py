@@ -27,6 +27,7 @@ from typing import Any
 
 from common.protocol import (
     FAIL_BODY_MAX,
+    RESULT_BODY_MAX,
     WIRE_V2_MAGIC,
     ProtocolError,
     unpack_result_v2,
@@ -52,6 +53,7 @@ class ResultRoutes:
     _json: Any
     _lease_token: Any
     _log_reject: Any
+    _read_capped_body: Any
     _read_raw_body: Any
     _worker_id: Any
     log_message: Any
@@ -66,7 +68,10 @@ class ResultRoutes:
         if not (jd / "manifest.json").exists():
             self._json({"error": "unknown job"}, 404)
             return
-        raw = self._read_raw_body()
+        # ★ 2026-10-17（plan/hub-server-memory-slim L2）：**先按声明长度把关再读**。
+        # 旧实现走 `_read_raw_body()`（无界）⇒ 一个请求就能把 hub 顶到任意水位（随后
+        # `json.loads` / `unpack_result_v2` 还要再翻一倍），那是全仓唯一一处无界读。
+        raw = self._read_capped_body(RESULT_BODY_MAX)
         if raw is None:
             return
         # M0 统一计量：收到的 result 请求体字节（云上行实测）——即便后面校验失败

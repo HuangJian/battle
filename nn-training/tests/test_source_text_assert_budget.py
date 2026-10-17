@@ -155,6 +155,33 @@ plan §11 同步记了这条偏差。
 `tests/trainer/test_ppo_watchdog.py` 1，另一处 −1）没跟着抬基线。本次一并显性化（1445 + 4 + 8 = 1457），
 不替它们改判据（那属于那些用例自己的账）。
 
+**2026-10-17 抬 FORM 一格的账**（`plan/offline-backfeed-resilience.plan.md` E/F/G/H 四片：§4 自愈重试
++ 租约重领 + 判据化删除、§5 notebook 一键包、§6.2 报错表、§7 停课导入；形态 1470 → **1480** = **+10**，
+SOURCE 未动）：这四片的交付物大量是**给操作员的一行读数**（「这一包为什么没落位 / 为什么没删抽屉 /
+为什么打不了包」），而它们**没有**可调用的结构化出口；同族先例见上面各笔（aistudio 日志行、探针超界、
+三个降级行、段契约改写行）。逐笔分摊（抬格前先把**能改的全改了**：见下段，−6）：
+
+  · `tests/remote/test_offline_boot.py` **3**：`package_pending` 判据表第 4 行要求「**响亮**说明是哪个
+    目录为空、缺哪一件」（`两边都没有可打包的产物` + 两个锚点名 + 本地根路径）·「抽屉齐 ⇒ 从抽屉打」
+    （`抽屉`）· 清单模式（`CFG.course` 空）必须给一行人话而不是静默空跑。行为面已在同文件另钉（返回的
+    文件名/成员集合、`artifacts.zip` 逐字节相同、不造空包）；「有没有响」只有日志面能判。
+  · `tests/remote/test_offline_notebook.py` **2**：notebook **不在 pytest 里执行**（同 `test_offline_notebook`
+    那族先例）⇒ cell 文本**就是**契约：一键包 cell 调 `package_pending`、老习惯名与
+    `@<run>-it<N>` 附注名两支都要认。
+  · `tests/remote/test_offline_deliver.py` **2**：「删不动只 WARN（下拍再试）」（§4.2-3：删不动绝不能把
+    补传腿拖住/弄抛）与「账本不可读 ⇒ 一个字节都不删」（DoD-3c 反探针，§1-6 不静默失败）——
+    前者的计数器（`prune_failed`）与后者的行为面（抽屉一个都没少）都已另钉，这两条只补「响不响」。
+  · `tests/remote/test_deliver_zip.py` **2**：包自述课名与本次导入冲突时的**拒收人话**（必须带两个课名
+    + `切到 X 再导` 的动作，§6.2-2/DoD-5b）——「不静默切课」的可见面就是这句话（`ProtocolError` 的正文），
+    没有第三个可断的字段。
+  · `tests/remote/test_offline_deliverable_split.py` **2**：notebook→新入口的**接线守卫**（调
+    `package_pending`、且不得再调 `package_partial`）：与 notebook 族同规（改的是 notebook 文本）。
+
+⚠ 同批能改的都改了（**−6**）：三个「名单里没有 `deliver`」的否定式子串判据换成**目标集合全等**
+（`tests/common/test_tmp_clean_keeps_deliver.py` 3 条 → 0）；包内成员从逐条 f-string 子串改成集合包含
+（`{f"it-{it:03d}/weights.json"} <= names`，`<=` 不是 `in`）1 条；体检的 `package_source`/未知 magic
+两条从 `"pending" in detail` 改成**结构化字段相等**（本仓既有口径：控制台与用例按数据判）2 条。
+
 """
 
 from __future__ import annotations
@@ -173,8 +200,10 @@ ROOT = Path(__file__).resolve().parents[1]
 #: 2026-10-14 离线本地盘 C1/B4 腿抬到 1466（备份/交付面的 4 条响亮行；理由见模块头）
 #: 2026-10-14 离线本地盘 B2 腿抬到 1469（容量判据/段中盘满的 3 条响亮行；理由见模块头）
 #: 2026-10-15 离线 J3 腿抬到 1470（hub 递给云机的那行 `trigger_note`；理由见模块头）
+#: 2026-10-17 离线 backfeed-resilience 的 E/F/G/H 四片抬到 1480（+10 操作员读数行 −6 已改成非文本；
+#:   逐笔分摊见模块头）
 #: —— 每笔理由都见模块头）。
-BASELINE_FORM = 1470
+BASELINE_FORM = 1480
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
 #: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092 —— 两笔理由都见模块头）。
 BASELINE_SRC = 1092

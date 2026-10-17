@@ -107,10 +107,23 @@ _DELIVERABLE_NAMES = (
     "package_deliverable",
     "_partial_last_it",
     "package_partial",
+    # ★ 2026-10-17（`plan/offline-backfeed-resilience` §5 / 期望 4）：一键打包待回传产物
+    # （两态判据表）+ 包内元信息 `IMPORT_META.json`。notebook 底部那格从 `package_partial`
+    # （只有一个包）改走它（整段 + 读数）。
+    "package_pending",
+    "deliver_meta",
+    "deliver_pack_name",
+    "write_deliver_zip",
     "ALL_ZIP",
     "LATEST_ZIP",
     "PARTIAL_CANDIDATES",
     "LATEST_ROW_NAME",
+    "IT_PREFIX",
+    "METRICS_NAME",
+    "EVAL_LOG_NAME",
+    "WEIGHTS_ALT_NAME",
+    "IMPORT_META_NAME",
+    "IMPORT_META_MAGIC",
     "_COURSE_NAME_RE",
 )
 
@@ -204,8 +217,12 @@ HEARTBEAT_SEC = 60.0
 PROGRESS_MIN_INTERVAL_SEC = 240.0
 #: 打点 POST 的超时（秒）：它是「顺手报一句」，绝不能把训练卡住（超时即放弃，下一拍再试）。
 PROGRESS_TIMEOUT_SEC = 5.0
-#: 连续几拍发不出去就停打点（hub 此刻显然也收不到进度；再刷只是每 240s 一行噪声）。
+#: 连丢这么多拍 ⇒ **降频**（不是停打点；见 `install_progress_pinger` 的为什么）。
+#: 2026-10-16（评审 F1 / plan §2.2-2）：旧口径是「连丢 3 拍永久哑」，而抖动盖住 ~1 分钟就够了
+#: ⇒ hub 900s 后判 hold stale ⇒ 权重到了也不推活动起点（现场「进度冻在 it125」的一半成因）。
 PROGRESS_FAIL_LIMIT = 3
+#: 降频窗（秒）：按连丢次数取，封顶最后一档；**下一个成功即复位**。
+PROGRESS_COOLDOWN_SEC = (240.0, 480.0, 900.0)
 #: 打点层在 `sys.modules` 里的注册名（与 `common/progress_hook.HOOK_NAME` 逐字相同；测试守——
 #: 本模块不许 import 本仓代码，理由见文件头）。快照侧（`plan_run` / `iter_rollout`）就靠这个
 #: 名字找到这一层：`common/progress_hook.report(kind, it=…, done=…, total=…)`。
@@ -1056,6 +1073,12 @@ def _pack_member(pack: Path | None, name: str) -> bytes | None:
 #   ② 每个候选解出来先过**导入哨兵**（混血树在训练之前就被拦下，不等 train_core）；
 #   ③ 选定即**换码事务**：字节写回产物目录 + 原子改写段级 manifest 的那把 sha。
 
+#: Windows 下 spawn 子进程的旗标（`CREATE_NO_WINDOW`）——本模块不许依赖 `common`，就地一份。
+#: 非 Windows = 空 dict（POSIX 上给非零 `creationflags` 会抛 ValueError）。
+_NT_NO_WINDOW: dict[str, Any] = (
+    {"creationflags": 0x08000000} if os.name == "nt" else {}
+)
+
 #: 导入哨兵的清单 / 超时 / 本仓顶层包（与 `common/code_sentinel.py` 逐字相同，用例对账）。
 #: 为什么这里**内联一份**同形实现（而不是延迟 import 仓库里那份）：本模块是自包含引导模块，
 #: 而哨兵要判的正是**候选树自己** —— 判据不能交给被审对象（老包还没有 `common/code_sentinel.py`；
@@ -1108,6 +1131,11 @@ def _run_import_sentinel(code_dir: Path) -> tuple[bool, str, str]:
             encoding="utf-8",
             errors="replace",
             timeout=_SENTINEL_TIMEOUT_SEC,
+            # ★ 2026-10-17：本模块**不许**依赖 `common`（从 GitHub raw 单独拉取）⇒ 就地写旗标
+            # （与 `common/proc.py::run_capture` 同规）。`dict[str, Any]` 是给 mypy 看的：
+            # 具体字面量 dict 会让 `run` 的重载匹配失败（`creationflags` 只接受 int，
+            # 而 dict 展开证明不了 key）。
+            **_NT_NO_WINDOW,
         )
     except subprocess.TimeoutExpired:
         # 挂住 ⇒ 这份树不能信任（换候选），**不是**环境缺件
@@ -1675,7 +1703,15 @@ def run_one_course(
     # 留着一个指向上一课的 URL 的打点层就会把下一段的进度报到别人账上。
     detach_progress: Callable[[], str] | None = None
     if hub and lease:
-        detach_progress = install_progress_pinger(hub, token, course, lease, log)
+        detach_progress = install_progress_pinger(
+            hub,
+            token,
+            course,
+            lease,
+            log,
+            # 409 expired/taken ⇒ 重新领一次（评审 F1 / plan §4.2-2）：旧口径是整段哑。
+            reclaim=lambda: _reclaim_lease(hub, token, course, work, log),
+        )
     try:
         rc = int(run_loop_main(argv) or 0)
         log(f"run_loop 退出 rc={rc}；产物目录 {dest}")
@@ -1976,6 +2012,28 @@ def _progress_label(kind: str, *, it: int, done: int, total: int) -> str:
     return " ".join(bits)
 
 
+def _reclaim_lease(
+    hub: str, token: str, course: str, work: Path, log: Callable[[str], None]
+) -> str:
+    """打点收到 409（`expired`/`taken`）后**重新领一次租约** → 新 lease（拿不到 ⇒ 空串）。
+
+    为什么需要（2026-10-16，评审 F1 / plan §4.2-2）：旧口径是「整段哑」——进度停在最后一条
+    成功打点（现场「进度停在 it125」的直接成因之一），而 409 往往只是租约 TTL 到期 / 别的盘
+    抢了一次；同一台机重新 claim 自己的课是允许的（hub 侧 `mine` 优先），拿不到就只记一行。
+
+    任何意外都**不得影响训练**（观测腿纪律）：异常 → 空串。`worker_id_of` 读的就是 claim 时
+    写下的 `<work>/.worker-id`（同一次会话内不变）。
+    """
+    try:
+        lease, why = claim_course(hub, token, course, worker_id_of(work, log), log)
+    except Exception as e:
+        log(f"[打点] 重新领租约异常（忽略）：{type(e).__name__}: {e}")
+        return ""
+    if not lease:
+        log(f"[打点] 重新领租约没成功（{why or '未知原因'}）——本段继续跑完并打包")
+    return str(lease or "")
+
+
 def install_progress_pinger(
     hub: str,
     token: str,
@@ -1986,6 +2044,8 @@ def install_progress_pinger(
     interval: float = PROGRESS_MIN_INTERVAL_SEC,
     timeout: float = PROGRESS_TIMEOUT_SEC,
     post: Callable[..., tuple[int, dict]] | None = None,
+    reclaim: Callable[[], str] | None = None,
+    clock: Callable[[], float] | None = None,
 ) -> Callable[[], str]:
     """把**打点层**挂进 `sys.modules[PROGRESS_HOOK_NAME]` → 返回 `detach()`（撤销注册）。
 
@@ -2004,22 +2064,45 @@ def install_progress_pinger(
         （当前段照常跑完并打包）；
       · `"expired"` / `"taken"`（409）：租约过期 / 已被别人接管 ⇒ 跑完当前段并打包，停打点
         （继续 ping 只会每 `interval` 秒刷一行 409）；
-      · `"unreachable"`：连续 `PROGRESS_FAIL_LIMIT` 拍发不出去 ⇒ 停打点（hub 此刻显然也
-        收不到；租约到期由心跳/重建会话处理）。
+      · `"unreachable"`：连丢 `PROGRESS_FAIL_LIMIT` 拍发不出去 ⇒ **降频**（240s → 480s → 900s，
+        下一拍成功即复位）；段末结局仍是 `unreachable` 只表示「最后一次尝试没成」。
+
+    `reclaim`（评审 F1 / plan §4.2-2）：409 的 `expired`/`taken` 时重新领一次租约（返回新 lease，
+    拿不到给空串）⇒ 拿到就换 URL 继续报进度（旧口径是整段哑）。`revoked` 不适用（人的意志）。
 
     打点的任何失败都**不影响训练**（观测腿，与心跳同一条纪律）；`post` 是测试注入点。
     """
     post_fn = post or _post_json
+    now_fn = clock or time.monotonic
     url = progress_url(hub, course, lease)
-    state: dict[str, Any] = {"at": 0.0, "fails": 0, "dead": "", "outcome": ""}
+    state: dict[str, Any] = {
+        "at": 0.0,
+        "fails": 0,
+        "dead": "",
+        "outcome": "",
+        "cool": 0.0,
+        "level": 0,
+    }
 
     def _ping(
         kind: str = "", *, it: int = 0, done: int = 0, total: int = 0, force: bool = False
     ) -> bool:
-        """一个完成事件 → 打点（时间节流；True = 这一拍真发出去了）。**永不抛**。"""
+        """一个完成事件 → 打点（时间节流；True = 这一拍真发出去了）。**永不抛**。
+
+        ★ 2026-10-16（评审 F1 / plan §2.2-2）：连不上**不再永久哑**——连丢 `PROGRESS_FAIL_LIMIT`
+        拍改进**降频窗**（240s → 480s → 900s 封顶），窗过自动再试；**下一个成功就把计数与
+        结局都复位**（本段不再是 `unreachable`）。只有 `revoked`（人强制解除）真停。
+        为什么：现场「抖动盖住 ~1 分钟就打死打点」⇒ hub 900s 后判 hold stale ⇒ 权重到了也不推
+        活动起点；而打点是**观测腿**，停它的代价（几条日志）远小于静默冻结进度的代价。
+        """
+        nonlocal url
         if state["dead"]:
+            # 只有 409 一族会走到这里（`revoked` = 人的意志；`expired`/`taken` 且重新领租约
+            # 拿不到）——**连不上的「降频」不算死**，它走下面的 `cool` 窗。
             return False
-        now = time.monotonic()
+        now = now_fn()
+        if not force and float(state["cool"]) > now:
+            return False  # 降频窗内（不是死；到点自己回来）
         # `at` 从 0 起 ⇒ **首拍恒发**（段开工那一句不会被时间窗吃掉）。
         if not force and (now - float(state["at"])) < float(interval):
             return False
@@ -2027,19 +2110,39 @@ def install_progress_pinger(
         label = _progress_label(kind, it=int(it), done=int(done), total=int(total))
         code, doc = post_fn(url, token, log, timeout=timeout)
         if code == 200:
+            if int(state["fails"]):
+                log(f"[打点] 恢复发报（连丢 {state['fails']} 拍之后）")
             state["fails"] = 0
+            state["cool"] = 0.0
+            state["level"] = 0
+            state["outcome"] = ""  # 复活：本段结局不再是 unreachable
             log(f"[打点] {label} → hub（hold 活性 = 进度；心跳只续 TTL）")
             return True
         if code == 409:
             why = "revoked" if doc.get("revoked") else ("expired" if doc.get("expired") else "taken")
             holder = doc.get("holder") if isinstance(doc.get("holder"), dict) else {}
+            # `expired`/`taken` 可以**重建会话**（plan §4.2-2）：重新 claim 拿到新 lease 再报进度；
+            # `revoked` 是人的意志，保持不动。
+            if why in ("expired", "taken") and reclaim is not None:
+                fresh = ""
+                try:
+                    fresh = str(reclaim() or "")
+                except Exception as e:  # 重新领租约的任何意外都不得影响训练
+                    log(f"[打点] 重新领租约异常（忽略）：{type(e).__name__}: {e}")
+                if fresh:
+                    url = progress_url(hub, course, fresh)
+                    state["fails"] = 0
+                    state["cool"] = 0.0
+                    state["level"] = 0
+                    log(f"[打点] {why} ⇒ 已重新领到租约——恢复报进度")
+                    return False
             state["dead"] = why
             state["outcome"] = why
             log(
                 {
                     "revoked": "⚠ 打点被拒：租约已被撤销（人强制解除了接管）——"
                     "本段跑完即打包，本会话不再领这一课",
-                    "expired": "⚠ 打点被拒：租约已过期——本段继续跑完并打包"
+                    "expired": "⚠ 打点被拒：租约已过期（重新领租约没成功）——本段继续跑完并打包"
                     "（回传可能被判 duplicate 丢弃）",
                 }.get(
                     why,
@@ -2048,14 +2151,19 @@ def install_progress_pinger(
                 )
             )
             return False
-        # 连不上（0）/ 5xx / 404：下一拍再试；连着 PROGRESS_FAIL_LIMIT 拍就停打点。
+        # 连不上（0）/ 5xx / 404：下一拍再试；连丢 PROGRESS_FAIL_LIMIT 拍 ⇒ **降频**（不永久哑）。
         state["fails"] = int(state["fails"]) + 1
         if int(state["fails"]) >= PROGRESS_FAIL_LIMIT:
-            state["dead"] = "unreachable"
+            level = min(int(state["level"]), len(PROGRESS_COOLDOWN_SEC) - 1)
+            cool = float(PROGRESS_COOLDOWN_SEC[level])
+            state["level"] = int(state["level"]) + 1
+            state["cool"] = now + cool
+            # `fails` **不清零**：它是「这一阵子连丢了几拍」的连续读数，下一个成功才复位
+            # （所以恢复那一行能说出「连丢了多少拍」，且再进降频时会升到下一档）。
             state["outcome"] = "unreachable"
             log(
-                f"⚠ 打点连续 {state['fails']} 拍没成功（HTTP {code or '连不上'}）——停打点；训练继续"
-                "（hub 此刻也收不到进度，租约由心跳/重建会话兜）"
+                f"⚠ 打点连丢 {state['fails']} 拍没成功（HTTP {code or '连不上'}）——"
+                f"降频：{cool:.0f}s 后再试（不再永久停）；训练继续"
             )
         elif force:
             log(f"[打点] {label} 没成功（HTTP {code or '连不上'}）——下一拍再试")

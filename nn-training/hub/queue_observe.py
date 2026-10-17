@@ -80,6 +80,12 @@ class QueueObserveMixin(QueuePeer):
     _cursor: str | None
     #: 离线盘报名表与它自己的锁（组合类 `__init__` 建；见 `note_offline_disk` 的理由）
     _disk_lock: Any
+    #: `mem_readout` 要读的三张进程级表（都是组合类 `__init__` 建）。
+    _leases: dict[str, dict]
+    _workers: dict[str, float]
+    _dispatch: dict[str, dict]
+    #: 归属缓存（`mem_readout` 的 `locate_n`）。
+    _locate_cache: dict[str, str]
     _now: Any
     _offline_disks: dict[str, float]
     _order: list[str]
@@ -97,6 +103,28 @@ class QueueObserveMixin(QueuePeer):
     _store_of: Callable[[str], _JobStore | None]
 
     # ---- 观测面 ----
+    def mem_readout(self) -> dict:
+        """`GET /admin/mem`：**常驻表规模**的读数（2026-10-17，plan/hub-server-memory-slim L3）。
+
+        纯观测、不进任何判据。存在的理由是一次事故：hub 连跑 35h 后 RSS 停在 6.2GB，而
+        「内存里到底躺着什么」当时**没有任何读数**，只能靠任务管理器猜。现在 `courses` /
+        `ledger_rows`（逐课账本行数）/ `locate_n`（归属缓存）等一眼可见——**哪张表在涨**
+        不再需要推理。
+        """
+        return {
+            "courses": len(self._stores),
+            # 账本行数 = 每份 `_ledger_cache` 的长度（未读过的课 = 0，读了才涨）。
+            "ledger_rows": {
+                c: len(self._stores[c]._ledger_cache[1]) for c in self._order
+            },
+            "locate_n": len(self._locate_cache),
+            "leases_n": len(self._leases),
+            "workers_n": len(self._workers),
+            "dispatch_n": len(self._dispatch),
+            "prefetch_n": len(self._worker_prefetch),
+            "offline_disks_n": len(self._offline_disks),
+        }
+
     def queue_state(self) -> dict:
         """`/admin/queue`：每课程的深度/在飞/最近心跳/退避记录 + 竞速的两个判据数
         + worker 上报的预取状态（plan/dashboard-ppo-live-rows）。

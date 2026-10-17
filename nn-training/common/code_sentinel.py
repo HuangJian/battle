@@ -154,15 +154,17 @@ def run_import_sentinel(
     env["BCITY_SENTINEL_MODULES"] = ",".join(modules)
     env["BCITY_SENTINEL_REPO_TOPS"] = ",".join(REPO_TOPS)
     try:
-        proc = subprocess.run(
+        # ★ 走 `common.proc.run_capture`（不是裸 `subprocess.run`）——2026-10-17 用户第三次报障
+        # 「启动 hub 时黑窗一闪而过」的真身就在这里：哨兵跑的是 `python -c`（console 应用），
+        # 而它的父进程（控制台起的 hub / 打包快照的那条链）**没有控制台**
+        # （`spawnBg` 的 detached + windowsHide）⇒ Windows 会给这个子进程**新建一块可见控制台**。
+        # 本文件同族的 `_git_head` 早就走 `run_capture` 了（details §20），漏的就是这一处。
+        # `run_capture` 的形参与原来的裸调用**逐项等价**（capture_output + text + utf-8/replace +
+        # timeout），所以这不是「顺手重构」，是收敛到唯一原语：旗标在那一份实现里，漏不掉。
+        proc = run_capture(
             [python or sys.executable, "-c", _CHILD_SCRIPT],
             cwd=str(tree) if tree.is_dir() else None,
             env=env,
-            capture_output=True,
-            # 显式 UTF-8（§19／`common/proc.py` 的口径）：裸 `text=True` 按 locale 解码，
-            # 子进程吐的 traceback 会在 reader 线程里炸掉 UnicodeDecodeError。
-            encoding="utf-8",
-            errors="replace",
             timeout=float(timeout),
         )
     except subprocess.TimeoutExpired:

@@ -15,7 +15,15 @@
  */
 
 import { describe, expect, it } from 'bun:test'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'fs'
 import os from 'os'
 import path from 'path'
 import { REPO_ROOT } from '../src/core/paths'
@@ -28,6 +36,7 @@ import {
   importDeliverZip,
   launchPostImportEval,
   parseDeliverImportJson,
+  pruneDeliverUploads,
   handleDeliverUpload,
   validateDeliverUpload,
   backfillHubRun,
@@ -244,6 +253,90 @@ describe('产物导入', () => {
     expect(validateDeliverUpload('deliver-x1.tar.gz', COURSE)).toContain('.zip')
   })
 
+  it('导出名的 `@<run>-it<N>` 附注不当课程（同名包留历史）；课程段仍要比对', () => {
+    // 规则两处同一条（python：`deliver_zip.course_from_filename`）——单边改就是静默错位。
+    expect(validateDeliverUpload(`deliver-${COURSE}@seg-1-it40.zip`, COURSE)).toBeNull()
+    const bad = validateDeliverUpload('deliver-other@seg-1-it40.zip', COURSE)
+    expect(bad).toContain('other')
+    expect(bad).not.toContain('seg-1-it40') // 报错里指到的那门课就是课程段（否则人照着切也切不对）
+  })
+
+  it('落位计数写进结论（重导同名 run 时「新增 0 轮」与「导入了 5 轮」不能长得一样）', async () => {
+    const runner = (() => ({
+      code: 0,
+      stdout: `${deliverImportJsonMark}${JSON.stringify({
+        run_id: 'r1',
+        dir: deliverImportRoot(COURSE) + '/r1',
+        iters: [1, 2],
+        last_it: 2,
+        ckpt: deliverImportRoot(COURSE) + '/r1/it-002/weights.json',
+        state: 'complete',
+        rows: 2,
+        course: COURSE,
+        source_zip: '/x/z.zip',
+        bytes: 3,
+        kept_rounds: 1,
+        skipped_rounds: 3,
+        healed_files: 2,
+      })}`,
+      stderr: '',
+      timeout: false,
+    })) as unknown as Parameters<typeof importDeliverZip>[1]
+    const r = await importDeliverZip(
+      { course: COURSE, zipPath: '/x/deliver.zip', ...sandboxPaths() },
+      runner,
+    )
+    expect(r.message).toContain('新增 1 轮、跳过 3 轮')
+    expect(r.message).toContain('先到者为准')
+    expect(r.message).toContain('补齐缺件 2 件')
+  })
+
+  it('体检报告在成功路径上也看得见（全绿 / 未过项 / 半段）', async () => {
+    const make = (checks: Array<{ id: string; ok: boolean; detail: string }>, partial = false) =>
+      (() => ({
+        code: 0,
+        stdout: `${deliverImportJsonMark}${JSON.stringify({
+          run_id: 'r1',
+          dir: deliverImportRoot(COURSE) + '/r1',
+          iters: [1, 2],
+          last_it: 2,
+          ckpt: deliverImportRoot(COURSE) + '/r1/it-002/weights.json',
+          state: 'complete',
+          rows: 2,
+          course: COURSE,
+          source_zip: '/x/z.zip',
+          bytes: 3,
+          checks,
+          checks_ok: checks.every((c) => c.ok),
+          partial,
+        })}`,
+        stderr: '',
+        timeout: false,
+      })) as unknown as Parameters<typeof importDeliverZip>[1]
+    const green = [
+      { id: 'shape', ok: true, detail: 'it1 → it2（2 轮）' },
+      { id: 'continuity', ok: true, detail: '连续' },
+    ]
+    const okRun = await importDeliverZip(
+      { course: COURSE, zipPath: '/x/deliver.zip', ...sandboxPaths() },
+      make(green),
+    )
+    expect(okRun.message).toContain('体检 2/2 全绿')
+    // 未过项要逐项点名（「导进去了但读数不可信」是这张表存在的理由）
+    const badRun = await importDeliverZip(
+      { course: COURSE, zipPath: '/x/deliver.zip', ...sandboxPaths() },
+      make([...green, { id: 'state', ok: false, detail: '半段快照' }], true),
+    )
+    expect(badRun.message).toContain('体检未过：state')
+    expect(badRun.message).toContain('半段')
+    // 整屏展开（面板读 detail）
+    const r = await importDeliverZip(
+      { course: COURSE, zipPath: '/x/deliver.zip', ...sandboxPaths() },
+      make(green),
+    )
+    expect(r.payload?.checks?.length).toBe(2)
+  })
+
   it('解析机器可读结果行（人读日志在前，标记行在末）', () => {
     const payload = {
       run_id: 'r1',
@@ -302,6 +395,103 @@ describe('产物导入', () => {
     expect(deliverImportRoot(COURSE)).toBe(path.join(REPO_ROOT, 'tmp', COURSE, 'deliver'))
   })
 
+  it('★ DoD-5a：8+ 类坏包各跑一次 —— 结论必须是可执行的人话，不丢裸异常给人', async () => {
+    // 现场形状（2026-10-16）：`导入失败：PermissionError: [WinError 5] Access is denied: 'D:\gi…`
+    // ——路径被 UI 截断、无任何指引。这张表把「挂在哪道门 + 下一步」写死，且**不许**把裸
+    // `WinError`/`Traceback`/`PermissionError` 当结论上屏（原文只进 detail）。
+    const cases: Array<[string, string, string]> = [
+      [
+        'WinError 5（句柄占住）',
+        "[deliver] PermissionError: [WinError 5] Access is denied: 'D:\\github\\battle2\\tmp'",
+        '占住',
+      ],
+      [
+        'WinError 32（文件被占用）',
+        '[deliver] OSError: [WinError 32] The process cannot access the file',
+        '占住',
+      ],
+      [
+        'WinError 183（目标已存在）',
+        '[deliver] FileExistsError: [WinError 183] Cannot create a file',
+        '已存在',
+      ],
+      [
+        '不是 zip（文件被截断）',
+        '[deliver] 不是合法的 zip: deliver-x.zip: File is not a zip file',
+        '不是 zip',
+      ],
+      [
+        '拿错成任务包',
+        '[deliver] 这是**任务包**（含 BUNDLE_INDEX），不是训练产物——任务包给云机跑',
+        '任务包',
+      ],
+      [
+        '不是训练产物（没有逐轮权重）',
+        "[deliver] 这个包里没有 it-NNN/weights.json（或压缩版 weights.delta）——不是训练产物 zip（包内顶层: ['README.txt', 'nope']）",
+        '逐轮权重',
+      ],
+      [
+        '课程对不上',
+        '[deliver] 文件名里的课程（c6-gae）与控制台当前课程（x1-rebirth-a2）不一致——切到 c6-gae 再导',
+        '切到 c6-gae 再导',
+      ],
+      ['磁盘满', '[deliver] OSError: [Errno 28] No space left on device', '盘满'],
+    ]
+    for (const [name, stderr, want] of cases) {
+      const runner = (() => ({
+        code: 2,
+        stdout: '',
+        stderr: `${stderr}\n`,
+        timeout: false,
+      })) as unknown as Parameters<typeof importDeliverZip>[1]
+      const r = await importDeliverZip(
+        { course: COURSE, zipPath: '/x/bad.zip', ...sandboxPaths() },
+        runner,
+      )
+      expect(r.ok, name).toBe(false)
+      expect(r.message, name).toContain(want)
+      expect(r.message, `${name}：结论里不许出现裸异常`).not.toMatch(
+        /WinError|Traceback|PermissionError|BadZipFile/,
+      )
+      const detail = (r.detail ?? []).join('\n')
+      expect(detail, name).toContain('挂在的门：')
+      expect(detail, name).toContain('完整日志（绝对路径）：')
+    }
+  })
+
+  it('超时不是「导入失败」：同一张表，另一种结论句（并说清已导入到哪）', async () => {
+    const runner = (() => ({
+      code: null,
+      stdout: '[deliver] 导入完成：…（盘上 3 轮）\n',
+      stderr: '',
+      timeout: true,
+    })) as unknown as Parameters<typeof importDeliverZip>[1]
+    const r = await importDeliverZip(
+      { course: COURSE, zipPath: '/x/big.zip', ...sandboxPaths() },
+      runner,
+    )
+    expect(r.ok).toBe(false)
+    expect(r.message).toContain('超时')
+    expect((r.detail ?? []).join('\n')).toContain('落位是逐轮的')
+  })
+
+  it('未分类的异常也有出路：日志绝对路径 + 末尾八行（人不怕未知，怕看不见）', async () => {
+    const runner = (() => ({
+      code: 3,
+      stdout: '',
+      stderr: 'something totally unknown happened\n',
+      timeout: false,
+    })) as unknown as Parameters<typeof importDeliverZip>[1]
+    const r = await importDeliverZip(
+      { course: COURSE, zipPath: '/x/x.zip', ...sandboxPaths() },
+      runner,
+    )
+    const detail = (r.detail ?? []).join('\n')
+    expect(r.message).toContain('导入失败')
+    expect(detail).toContain('something totally unknown happened')
+    expect(detail).toContain('完整日志（绝对路径）：')
+  })
+
   it('python 报错 → 控制台把它的最后一行转成人话（不吞掉真因）', async () => {
     const runner = (() => ({
       code: 2,
@@ -325,6 +515,9 @@ describe('产物导入', () => {
 
   const deps = (over: Partial<DeliverUploadDeps> = {}): DeliverUploadDeps => ({
     save: async () => '/tmp/kept.zip',
+    // 留证目录清理替身（§6.2-5）：**必须**注入 —— 不注入就会真去动 `tmp/<课>/deliver-uploads/`
+    // （那是留证目录，测试里删掉别人的原件是最坏的一种副作用）。
+    pruneUploads: () => ({ removed: [], bytes: 0 }),
     // 异步替身（与生产同形：导入器是异步子进程，调用方 await 它的结果）
     importZip: async () => ({
       ok: true,
@@ -346,8 +539,8 @@ describe('产物导入', () => {
       launched.push({ course, ckpt, iter })
       return { ok: true, message: `evalA 已启动 it${iter}` }
     },
-    // T6 默认：hub 不可达（不转交）——需要转交的用例自己注入摘要与替身。
-    offlineResults: async () => null,
+    // T6 默认：hub 不可达（不转交 + 说明一句）——需要转交的用例自己注入摘要与替身。
+    offlineResults: async () => ({ results: null, hubUp: false }),
     writeRunComplete: async () => ({ ok: true, message: '已完成（run_complete 已落账）' }),
     ...over,
   })
@@ -388,6 +581,32 @@ describe('产物导入', () => {
     expect(String(body.message)).toContain('evalA 已在运行')
   })
 
+  // ──────────── §7 / DoD-6a：课停了也能导入（不看开课标记、不看 hub 活没活）────────────
+
+  it('★ 课已停（无开课标记 + hub 已关）⇒ 照导：ok:true，两句原因都上屏', async () => {
+    // 口径（§7-1）：导入链上**没有一处**读「课程在不在训/有没有开课标记」——解包、并账本、
+    // 留证都是文件层的事。课停之后人恰恰最需要把最后一段产物收进来（而 hub 通常正是关着的）。
+    // 这里把两个会「假设课在跑」的读数都设成最坏：hub 连不上 + 评估起不来。
+    const r = await upload(
+      `deliver-${COURSE}.zip`,
+      'x',
+      deps({
+        offlineResults: async () => {
+          throw new Error('ECONNREFUSED 127.0.0.1:8899（hub 已关）')
+        },
+        launchEval: () => ({ ok: false, message: 'evalA 启动失败：课已停（没有可跑的语料）' }),
+      }),
+    )
+    const body = (await r.json()) as Record<string, unknown>
+    expect(r.status).toBe(200)
+    expect(body.ok).toBe(true)
+    expect(body.evalStarted).toBe(false)
+    const msg = String(body.message)
+    expect(msg).toContain('已导入 r1') // 导入本身不受影响（权重落地 = 这一半的全部价值）
+    expect(msg).toContain('evalA 启动失败：课已停') // 评估没起来：原因照原话说
+    expect(msg).toContain('段末横幅未落账：hub 不可达（不影响导入）')
+  })
+
   it('拿错课的文件名 / 非 zip / 超大 → 拒收且不调 python', async () => {
     let called = 0
     const d = deps({
@@ -415,6 +634,80 @@ describe('产物导入', () => {
   it('上传原件落在课程下的 deliver-uploads/（留证，不覆盖历史）', () => {
     expect(deliverUploadDir(COURSE)).toBe(path.join(REPO_ROOT, 'tmp', COURSE, 'deliver-uploads'))
     expect(deliverImportRoot(COURSE)).toBe(path.join(REPO_ROOT, 'tmp', COURSE, 'deliver'))
+  })
+
+  it('★ §6.2-5：留证目录只留最近 3 份（删时响亮一行，不默默删）', () => {
+    // 现场 43MB/次、只涨不落 ⇒ 加一条保留策略。判据 = 按名字（ISO 时间戳前缀）倒序取前 N。
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'bcity-uploads-'))
+    for (const stamp of [
+      '2026-10-01T00-00-00',
+      '2026-10-02T00-00-00',
+      '2026-10-03T00-00-00',
+      '2026-10-04T00-00-00',
+      '2026-10-05T00-00-00',
+    ]) {
+      writeFileSync(path.join(dir, `${stamp}-deliver-x1.zip`), 'z'.repeat(3))
+    }
+    writeFileSync(path.join(dir, 'notes.txt'), '不是留证原件')
+    const got = pruneDeliverUploads(COURSE, 3, dir)
+    expect(got.removed).toEqual([
+      '2026-10-02T00-00-00-deliver-x1.zip',
+      '2026-10-01T00-00-00-deliver-x1.zip',
+    ])
+    expect(got.bytes).toBe(6)
+    const left = readdirSync(dir).sort()
+    expect(left).toContain('2026-10-05T00-00-00-deliver-x1.zip')
+    expect(left).toContain('notes.txt')
+    expect(left.filter((n) => n.endsWith('.zip'))).toHaveLength(3)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  it('清理发生在响应里看得见（成功与失败两条路都在）', async () => {
+    const d = deps({
+      pruneUploads: () => ({ removed: ['2026-10-01T00-00-00-deliver-x1.zip'], bytes: 9 }),
+    })
+    const body = (await (await upload(`deliver-${COURSE}.zip`, 'x', d)).json()) as Record<
+      string,
+      unknown
+    >
+    expect((body.detail as string[]).join('\n')).toContain('留证目录已清理：删掉 1 份旧原件')
+  })
+
+  it('包内自述上屏（§6.2-2）：课程/run/来源 —— 不静默切课，但看得见', async () => {
+    const d = deps({
+      importZip: async () => ({
+        ok: true,
+        message: '已导入 r1（2 轮，it3 → it4）',
+        payload: {
+          run_id: 'r1',
+          dir: '/tmp/r1',
+          iters: [3, 4],
+          last_it: 4,
+          ckpt: ckptPath,
+          state: 'complete',
+          rows: 2,
+          course: COURSE,
+          source_zip: '/tmp/kept.zip',
+          bytes: 3,
+          package_course: COURSE,
+          package_run_id: 'run-seg2',
+          package_source: 'drawer',
+        } satisfies DeliverImportPayload,
+      }),
+    })
+    const body = (await (
+      await upload(`deliver-${COURSE}@run-seg2-it4.zip`, 'x', d)
+    ).json()) as Record<string, unknown>
+    expect(body.ok).toBe(true)
+    const detail = (body.detail as string[]).join('\n')
+    expect(detail).toContain('包内自述：课程 x1-rebirth-a2·run run-seg2·来源 drawer')
+  })
+
+  it('一键包的附注名（`@<run>-it<N>`）不破课程对账（§6.2-3）', () => {
+    expect(validateDeliverUpload(`deliver-${COURSE}@run-seg2-it40.zip`, COURSE)).toBeNull()
+    const bad = validateDeliverUpload('deliver-other@r-it1.zip', COURSE)
+    expect(bad).toContain('other') // 两个课名 + 动作都要在（DoD-5b 不退化）
+    expect(bad).toContain(`deliver-${COURSE}.zip`)
   })
 
   it('末轮权重不在盘上 → 不静默：明确说「导入目录被动过」', () => {
@@ -447,7 +740,10 @@ describe('产物导入', () => {
       'x',
       deps({
         offlineResults: async () => ({
-          r1: { itEnd: 4, state: 'complete', endItReached: true, segEndKind: '', receivedAt: 1 },
+          hubUp: true,
+          results: {
+            r1: { itEnd: 4, state: 'complete', endItReached: true, segEndKind: '', receivedAt: 1 },
+          },
         }),
         writeRunComplete: async (course: string, runId: string) => {
           calls.push({ course, runId })
@@ -486,7 +782,7 @@ describe('产物导入', () => {
         `deliver-${COURSE}.zip`,
         'x',
         deps({
-          offlineResults: async () => hub,
+          offlineResults: async () => ({ results: hub, hubUp: true }),
           writeRunComplete: async () => {
             calls += 1
             return { ok: true, message: '不该被调用' }
@@ -498,21 +794,37 @@ describe('产物导入', () => {
     expect(calls).toBe(0)
   })
 
-  it('hub 不可达 ⇒ 无从判决，不转交（不可知 ≠ 没跑满）', async () => {
+  it('hub 不可达 ⇒ 无从判决，不转交（不可知 ≠ 没跑满），且**说出来**横幅为何没落账', async () => {
     let calls = 0
     const r = await upload(
       `deliver-${COURSE}.zip`,
       'x',
       deps({
-        offlineResults: async () => null,
+        offlineResults: async () => ({ results: null, hubUp: false }),
         writeRunComplete: async () => {
           calls += 1
           return { ok: true, message: '不该被调用' }
         },
       }),
     )
-    expect(((await r.json()) as Record<string, unknown>).endItReached).toBe(false)
+    const body = (await r.json()) as Record<string, unknown>
+    expect(body.endItReached).toBe(false)
+    expect(body.ok).toBe(true)
+    // ★ §7-2：旧的静默 catch 只会让 endItReached=false，人看不出为什么没有任何横幅
+    expect(String(body.message)).toContain('段末横幅未落账：hub 不可达（不影响导入）')
     expect(calls).toBe(0)
+  })
+
+  it('hub 应答了、只是没有这一段的摘要 ⇒ **不说**「hub 不可达」（原因不许编）', async () => {
+    // §7-2 的反探针：把 hubUp 与 results 混成一个 null 的写法会把这条判成「hub 不可达」。
+    const r = await upload(
+      `deliver-${COURSE}.zip`,
+      'x',
+      deps({ offlineResults: async () => ({ results: null, hubUp: true }) }),
+    )
+    const body = (await r.json()) as Record<string, unknown>
+    expect(body.endItReached).toBe(false)
+    expect(String(body.message)).not.toContain('hub 不可达')
   })
 
   it('转交失败不改导入 ok（权重已落地可评估；少的只是横幅）', async () => {
@@ -521,7 +833,10 @@ describe('产物导入', () => {
       'x',
       deps({
         offlineResults: async () => ({
-          r1: { itEnd: 4, state: 'complete', endItReached: true, segEndKind: '', receivedAt: 1 },
+          hubUp: true,
+          results: {
+            r1: { itEnd: 4, state: 'complete', endItReached: true, segEndKind: '', receivedAt: 1 },
+          },
         }),
         writeRunComplete: async () => ({ ok: false, message: '完成横幅未落账（boom）' }),
       }),
@@ -557,7 +872,7 @@ describe('产物导入', () => {
       `deliver-${COURSE}.zip`,
       'x',
       deps({
-        offlineResults: async () => segResult('open'),
+        offlineResults: async () => ({ results: segResult('open'), hubUp: true }),
         writeRunComplete: async () => {
           calls += 1
           return { ok: true, message: '不该被调用' }
@@ -578,7 +893,7 @@ describe('产物导入', () => {
       `deliver-${COURSE}.zip`,
       'x',
       deps({
-        offlineResults: async () => segResult('segment'),
+        offlineResults: async () => ({ results: segResult('segment'), hubUp: true }),
         writeRunComplete: async () => ({ ok: true, message: '不该被调用' }),
       }),
     )
@@ -596,7 +911,10 @@ describe('产物导入', () => {
       'x',
       deps({
         offlineResults: async () => ({
-          r1: { itEnd: 4, state: 'complete', endItReached: true, segEndKind: '', receivedAt: 1 },
+          hubUp: true,
+          results: {
+            r1: { itEnd: 4, state: 'complete', endItReached: true, segEndKind: '', receivedAt: 1 },
+          },
         }),
         writeRunComplete: async () => {
           calls += 1

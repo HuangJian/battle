@@ -95,6 +95,37 @@ class _Handler:
             }
         )
 
+    def _bytes_file(
+        self,
+        path: Path,
+        status: int = 200,
+        ctype: str = "application/octet-stream",
+        filename: str = "",
+        *,
+        extra_headers: dict[str, str] | None = None,
+        start: int = 0,
+        end: int | None = None,
+    ) -> None:
+        """`_get_payload` 2026-10-17 起走流式（plan/hub-server-memory-slim L1）。
+
+        替身只做「按区间读出字节」，不复制传输语义——流式本身由
+        `tests/hub/test_hub_stream_send.py` 打真实实现钉住。
+        """
+        size = path.stat().st_size
+        lo = max(0, int(start))
+        hi = size - 1 if end is None else min(int(end), size - 1)
+        with open(path, "rb") as f:
+            f.seek(lo)
+            data = f.read(max(0, hi - lo + 1))
+        self.calls.append(
+            {
+                "n": len(data),
+                "status": status,
+                "extra": dict(extra_headers or {}),
+                "data": data,
+            }
+        )
+
     def get(self) -> dict[str, Any]:
         blob_mod.BlobRoutes._get_payload(self)  # type: ignore[arg-type]
         return self.calls[-1]

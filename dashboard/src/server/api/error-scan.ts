@@ -16,7 +16,7 @@
  *    D 走 `buildPoolView(false)`——`false` = 吃既有缓存，不触发重算。
  */
 
-import { readFileSync, readdirSync, statSync } from 'fs'
+import { existsSync, readFileSync, readdirSync, statSync } from 'fs'
 import path from 'path'
 import { tmpLogsDir } from '../../core/paths'
 import type { RlConfig } from '../../core/types'
@@ -27,6 +27,7 @@ import {
   type ErrorEvent,
   type ErrorSeverity,
 } from '../../web/view'
+import { courseEnableMarkerPath } from '../../stack/courses'
 import { parseLogLine } from '../../web/view'
 import { errorFingerprint } from './error-fingerprint'
 import { ALL_COMPONENTS } from './component-meta'
@@ -108,7 +109,15 @@ export function collectLocalLogEvents(lines: string[], ctx: LogScope, now: numbe
  *  ——cloudflared 每次 spawn 换名、trainer 日志按课落在 `tmp/<课>/`）。 */
 export function scanLocalLogEvents(cfg: RlConfig, now: number): ErrorEvent[] {
   const out: ErrorEvent[] = []
+  // ★ 2026-10-17（控制台内存那刀）：只扫**已开课**的课程。
+  // 旧口径 `discoverCourses()` 把 tmp/ 下**全部历史课**都拉进来 —— 本机实测量：**185 门课**，
+  // 于是每拍扫描 `185 × 组件数 × 400 行`，产出 **215,340 条错误事件**（快照里那 394MB 就是
+  // 它们的字符串），`logScanCache` 常驻 400MB、`applySweep` 每 10s 再整份复制一遍 ⇒
+  // 控制台 RSS 在 500MB↔958MB 之间锯齿。
+  // 判据与训练侧 `enabled_courses` / hub `_course_dir_live` / `snapshot-refresher` **同一个闸**
+  // （`training-enabled.txt`），不是新发明的口径；否则 185 门历史课的错误会一直占着面板。
   for (const course of discoverCourses()) {
+    if (!existsSync(courseEnableMarkerPath(course))) continue
     for (const key of ALL_COMPONENTS) {
       try {
         const abs = resolveComponentLog(key, cfg, course)
@@ -190,7 +199,15 @@ export function failRecordEvent(
 /** 腿 B：扫 `<traj>/<课>/remote-jobs/<jid>/fail.json`（与 `ppo-queue.ts:82-90` 同一棵树）。 */
 export function scanHubJobEvents(now: number): ErrorEvent[] {
   const out: ErrorEvent[] = []
+  // ★ 2026-10-17（控制台内存那刀）：只扫**已开课**的课程。
+  // 旧口径 `discoverCourses()` 把 tmp/ 下**全部历史课**都拉进来 —— 本机实测量：**185 门课**，
+  // 于是每拍扫描 `185 × 组件数 × 400 行`，产出 **215,340 条错误事件**（快照里那 394MB 就是
+  // 它们的字符串），`logScanCache` 常驻 400MB、`applySweep` 每 10s 再整份复制一遍 ⇒
+  // 控制台 RSS 在 500MB↔958MB 之间锯齿。
+  // 判据与训练侧 `enabled_courses` / hub `_course_dir_live` / `snapshot-refresher` **同一个闸**
+  // （`training-enabled.txt`），不是新发明的口径；否则 185 门历史课的错误会一直占着面板。
   for (const course of discoverCourses()) {
+    if (!existsSync(courseEnableMarkerPath(course))) continue
     const root = path.join(tmpLogsDir(), course, 'remote-jobs')
     let names: string[]
     try {

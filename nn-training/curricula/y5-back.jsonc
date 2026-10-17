@@ -1,0 +1,125 @@
+// 课程 y5-back —— flank 接续腿：flank.it80 为师＋flank 杀法（背大奖/侧小奖/hit 保底）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 用户 2026-10-15：病根之二侧多背少（侧 0.68 vs 背 0.21，死局背占比再低 3 成），
+//   跨场同病。以 flank.it80 为师换杀法。
+//   剂量（it80 实测 400 局：kills 4.85 ⇒ killEV 14.55；wHit 账单 +7.37 高达 51% 必砍）：
+//   wBackHits 0.4→**1.0**（+2.35 ≈ 16% killEV，大奖）；wSideHits **0.2**（新增，+1.66 ≈ 11%，
+//   per-hit 5:1（1.0 vs 0.2）才是大小之分，侧击占比 1.1x 无分离故只敢小奖）；
+//   wHit 0.6→**0.2**（7.37→2.46，51%→17% 保底价；wAcc 11.84 占 81% 是最大头但用户没点，不动）。
+//   起点 flank.it80（`weights/y5-flank/y5-flank.it80.20261015-222118.json`，
+//   sha16 `90a4b216c9051301`；同代直连，kickstart 关，opt fresh §15.5）。
+//   基线（it80 实测 400 局）：headline hitRate 0.841✅/nearSq 111❌（差 1）/kills 4.85✅/encl 98✅
+//   win 0.9375/clears 375/timeout 1.5%/gameover 19（4.75%）/zero_kill 0；
+//   B3 背击占比 0.1937；s2000 切片 hit 0.841/kills 4.85。
+//
+// ── 单变量声明（相对 y5-flank：只动 flank 杀法三键；其余逐字）────────────────────
+//   wBackHits 0.4→1.0＋新增 wSideHits 0.2（公式尾部追加）＋wHit 0.6→0.2；
+//   梯度 wWin/timeout −5/站位 14 键/wAcc/wMiss/wDmg/wPickup/退火表/K/流/eval 全 HOLD。
+//   三键同属"flank 杀法"一个概念（precedent：终局两项打包）。
+//   双分支：+40 B3 占比↑ 且 gameover ↓ ⇒ 绕后学到了；占比平＋win 平 ⇒ 奖无效，杀。
+//
+// ── 门（y5-flank 四线＋命耗线＋B3 readout）──────────────────────────────────────
+//   主：hitRate ≥ 0.75；主2：nearSq/千tick ≤ 110；次：kills ≥ 3.5；次2：encl/千tick ≤ 100；
+//   命耗线：+40 gameover 局占比 ≤ 3%（基线 4.75%），fail ⇒ **杀腿**；
+//   D01 ≤ 85 护栏；fear-watch 照旧；fail ⇒ **杀腿**。
+//   门读 headline；s2000 切片附读。上报 policy_new_rms＋it5 analytic 照旧。
+//   终点：四线＋命耗线全过 ⇒ 收官（iters 500 为 cap）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   anchor 0.001（legacy 空片，无害）；熔断全拆（用户令：ent_break 0.0＋max_winrate 0.0，
+//   F4 ENT 永不触发；kickstart_burn/paired_kill/gates 本就缺席；门是人判标准，保留）；batch 24576；优化器/K 冻结（与 flank 同表）。
+//   iters 500，max_hours 24，workers 8，eval 混合（"2000-2003"×50，同口径逐行可比）。
+//   ⚠ 前提：tmp/y5-back 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c05`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`（课程轮从 1 起，与 bc 轮号无关）；
+//     `bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y5-back）+ backup 新目录（nn-training/weights/y5-back）+ opt fresh。
+{
+  "version": 5,
+  "name": "y5-back",
+  "mode": "per-tick",
+  "level": "ladder-c05",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wWin*where(clearTick>=0, (3900-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wWin": 5.0,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 42.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -5.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y5-flank.it80（sha 见头注；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y5-flank/y5-flank.it80.20261015-222118.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 24,
+  "workers": 8,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（新种子，与 20261024/20261101/20261201 不同防记忆化；与 y5-dist/y5-hide 共享＝三路可比）。
+  "paired_rotate_seed": 20270101,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y5-back/weights.json",
+  "traj": "tmp/y5-back",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+  "backup_dir": "nn-training/weights/y5-back",
+  "backup_prefix": "y5-back",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
+
+// ── 结课报告（2026-10-16，用户令 halt；规格头冻结，本节只读）──
+//   终点 eval it210（400 局）：win 0.93/clears 372/kills 4.83/timeout 2%/gameover 20（5%）；
+//   headline 0.869/98/4.83/87（四线全过，near 过门）。终点权重 y5-back.it210.20261016-102656.json（永存）。
+//   verdict：变量无效但腿收官——B3 0.1937→0.1874 反降（背击奖没学会，确认，前判"倾向杀"升级）；
+//   终点 win/四线全靠站位＋命中守住（wHit 保底 0.2 未崩命中 0.869），非背击之功。
+//   证据 tmp/y5-back/eval_log.jsonl。

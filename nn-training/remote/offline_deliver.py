@@ -49,25 +49,22 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import threading
 import time
 import urllib.error
 import urllib.request
 from collections.abc import Callable
-from functools import partial
 from pathlib import Path
 
-# 备份抽屉的名字/字节面（三件锚点 + 全量包）与恢复腿**同一份实现**：
-# `remote/offline_deliverable.py` 是 standalone（顶层只 import stdlib）⇒ 不会反向依赖本模块。
+# 备份抽屉的**拷贝策略**（拷哪些件 / 何时跳 / 失败算什么）住在 `remote/backup_drawer`：
+# 那里是它的所有者（不抛 · 有界 · 幂等 · 常态零写入），本模块只负责「算哪些轮次待投」
+# 与「把读数记到 `status()` 看得见的地方」。
 # ⚠ 抽屉目录名（`backup`）不在本模块拼 —— 它由调用方（`open_run_context`）解析后递进来，
 # 免得这里再抄一份；命名硬约束见 `remote/artifacts.BACKUP_DIR_NAME`。
 import remote.delta_files as delta_files
 from common import net_http
-from common.game_watch import DRAIN_CEILING_SEC
-from common.hashing import sha256_file
+from common.cli import house_parser, run_main
 from common.logutil import tag_logger
-from common.platform_utils import call_bounded
 from common.protocol import (
     AUTH_HEADER,
     OFFLINE_ARTIFACT_BODY_MAX,
@@ -80,18 +77,19 @@ from common.protocol import (
     sanitize_run_id,
 )
 from remote.artifacts import ArtifactStore, atomic_write_json, sha256_bytes
-from remote.offline_deliverable import (
-    ALL_ZIP,
-    MANIFEST_NAME,
-    OPT_TAR_NAME,
-    PLAN_NAME,
-    STATE_NAME,
-    WEIGHTS_NAME,
-)
+from remote.backup_drawer import BackupDrawer
 
 #: 探活结果的缓存秒数（训练一轮动辄几分钟，没必要每轮都探两次：`sync()` 前探一次即可，
 #: 只读的 `/ping` 也便宜——但 hub 不可达时每次 `urlopen` 都要等超时，才是真成本）。
 PROBE_TTL_SEC = 60.0
+#: 探活**失败**时的负缓存秒数（比成功短）：抖动恢复的窗口按秒算，而 60s 的负缓存会让
+#: 「隧道刚回来」这段最该补投的时间白白跳过（plan §4.2-1；评审 F2：别把 60s 的平坦重试换成年级退避）。
+PROBE_FAIL_TTL_SEC = 15.0
+#: `_disable`（401/403）后的**冷却**（秒）：到点自动清空停用状态并重探一次。
+#: 为什么不是「一停到底」（2026-10-16，评审 F1/C1）：token 轮换 / hub 换实例都会让 401 变成
+#: 暂时现象，而 `_sync` 首行 return 会让本会话**零尝试**——现场「27 轮 0 送达」的高相容解释之一。
+#: 冷却只影响「自己重试」的节奏，不改「401 立刻停用、当拍不重试」那条口径（D9 闭锁）。
+DISABLE_COOLDOWN_SEC = 600.0
 #: 单次 `sync()` 最多投递几轮。一个刚连上的积压段可能攒了十几轮，全推会让「落到训练循环里
 #: 的那一次调用」耗时不可控（每轮 ~1.9MB + 往返）。少量多次：下轮继续补。
 SYNC_CAP = 4
@@ -105,54 +103,52 @@ DRAIN_FLUSH_SEC = 90.0
 #: 后台线程的空转唤醒间隔（秒）——没有新活时它就这么久醒一次看看有没有 stop。
 DRAIN_TICK_SEC = 0.5
 #: 一次 drain 里 `sync()` 的最多轮数（纯防御：`pending()` 单调收敛，正常远到不了）。
-DRAIN_MAX_PASSES = 256
-#: 备份抽屉的**开闸门槛**：只有「磁盘上有、账本里没有」的轮次才写网络盘（拍板-3）。
+DRAIN_MAX_PASSES = 256#: 备份抽屉的**开闸门槛**：只有「磁盘上有、账本里没有」的轮次才写网络盘（拍板-3）。
 #: 0 轮待投 ⇒ **一个字节都不写**（拍板-1 的全部意义：常态路径上网络盘出现 0 次）。
+#: 拷哪些件、何时跳过、失败算什么 → `remote/backup_drawer`（那里的 `BACKUP_ANCHOR_NAMES`）。
 #: ⚠ 抽屉不得以 `it-` 开头（见 `remote/artifacts.BACKUP_DIR_NAME`）。
-BACKUP_ANCHOR_NAMES: tuple[str, ...] = (ALL_ZIP, MANIFEST_NAME, PLAN_NAME, STATE_NAME)
+
+
+
 
 #: 同一轮**连续**投递异常多少次之后把它当内容问题（记进 `_rejected` 并销账）。
 #: 为什么需要：`_repost` 是持久集 ⇒ 一个永远投不出去的轮次（文件被删/盘抖动/解析炸）会在每次
 #: 唤醒时重抛一次、并让整趟 `_push_backlog` 中止 —— 既不响亮也不收敛（2026-10-07 补，见 plan §10.6-1）。
 POST_FAILURE_LIMIT = 3
+#: 内容拒收记录的**寿命**（秒）与**最多记几次**（D6 / plan §15）：`rejected` 跨会话活着（按权重
+#: 指纹认领），而一次**误判**（例如 hub 侧 409 被读成内容问题）会让那一轮**永久不再回传** ——
+#: 权重还在本地盘上，代价却是永久静默丢一轮。到点就自动复活（宁多试一次，不静默丢）。
+REJECTED_TTL_SEC = 24 * 3600.0
+REJECTED_MAX_TRIES = 3
+#: `delivered.json` 里「人显式重置过拒收」的水位（unix 秒）：`reset_rejected()` 写它，而写方
+#: （`_save_ledger`）比它更早的拒收记录一律不再落盘 —— 否则运维刚清掉的行会被**活着的**补传
+#: 子进程在下一次落盘时原样写回来（它的 `_rejected` 还在内存里）。
+REJECTED_RESET_KEY = "rejected_reset_at"
 _log_default = tag_logger("deliver", lambda: time)
 
 
-def _tree_bytes(path: Path) -> int:
-    """一棵小目录的字节数（备份统计用；拿不到就 0——读数不该把备份拖红）。"""
-    total = 0
-    for p in Path(path).rglob("*"):
-        try:
-            if p.is_file():
-                total += p.stat().st_size
-        except OSError:
-            continue
-    return total
+def _prune_reset_markers(markers: dict[str, float], *, now: float) -> dict[str, float]:
+    """只留 TTL 窗内的重置水位。
 
-
-def _same_file(a: Path, b: Path) -> bool:
-    """两个文件**字节相同**吗（sha256 对账）；任一读不到 ⇒ `False`（当不一致处理）。"""
-    try:
-        return a.is_file() and b.is_file() and sha256_file(a) == sha256_file(b)
-    except OSError:
-        return False
-
-
-def _round_matches(src: Path, dst: Path) -> bool:
-    """抽屉里那一轮与本机产物是**同一份字节**吗（幂等判据的实质）。
-
-    ⚠ 只判「存在」是不够的（plan §3.4 的原话是「已存在**且对账一致** ⇒ 跳过」）：本机的同一轮
-    可能被**重跑**过（中途崩了之后从更早的锚点接上，同一个 `it` 又落一次、字节不同），那时
-    抽屉里那份是旧的 —— 恢复腿会把它当成「这一轮」铺回去，而看起来完全正常。
-
-    对账两件：`weights.json`（这一轮的产物身份）与 `opt.tar`（Adam 动量，恢复后接着跑就靠它）；
-    `opt.tar` 本机没有时按「一致」算（不拿一个不存在的文件当差异 —— 起点快照那一轮就可能没它）。
+    为什么不能「行没了就把水位也删掉」：水位的作用恰恰是拦**别人内存里那一份**还在的记录
+    ——行刚被放掉时它还在飞；删了水位就等于把刚做的重置撤回。代价是水位会慢慢积累，所以
+    按 TTL 清：过期的水位已经没有用了（能靠它救回来的那份内存记录自己也过了 TTL）。
     """
-    if not _same_file(src / WEIGHTS_NAME, dst / WEIGHTS_NAME):
-        return False
-    if not (src / OPT_TAR_NAME).is_file():
-        return True
-    return _same_file(src / OPT_TAR_NAME, dst / OPT_TAR_NAME)
+    return {k: v for k, v in markers.items() if now - v <= REJECTED_TTL_SEC}
+
+
+def _num_or(v: object, default: float) -> float:
+    """宽容地读一个数（JSON 里可能是字符串/None/压根没有）。
+
+    为什么不用 `float(v)`：`delivered.json` 是**盘上的**、也可能被手改过 ⇒ 一个坏字段不该让
+    整个加载返回（那会把「已投递」全忘掉 = 全量重投）。
+    """
+    if isinstance(v, bool) or not isinstance(v, (int, float, str)):
+        return default
+    try:
+        return float(v)
+    except ValueError:
+        return default
 
 
 def _cpu_seconds() -> float:
@@ -205,6 +201,10 @@ class OfflineDeliverer:
         backup_root: str | Path | None = None,
         timeout: float = HTTP_TIMEOUT_SEC,
         probe_ttl: float = PROBE_TTL_SEC,
+        #: 探活**失败**的负缓存（只对**失败**生效，且被 `probe_ttl` 封顶 ⇒ 只会更短、绝不更长）。
+        #: 参数化只为一件事：用例要能把这条常量扳回旧的平坦口径（60s）来反探针——否则
+        #: 「抖动 60s 后恢复」这个主场景就没有任何一条用例真在量它（plan §4.2-1 / DoD-3a）。
+        probe_fail_ttl: float = PROBE_FAIL_TTL_SEC,
         sync_cap: int = SYNC_CAP,
         #: 后台并行模式（见模块 docstring）：True = 训练线程只入队，另一个线程推。
         #: 缺省 False（同步老行为）——调用方明确要并行时开（`make_deliverer` 缺省已开）。
@@ -238,25 +238,52 @@ class OfflineDeliverer:
         self.hub_lease = str(hub_lease or "").strip()
         self.worker_name = str(worker_name or "").strip()
         self.backup_root = Path(backup_root) if backup_root else None
-        #: 本会话的备份统计（只读面/日志用）：`(轮次, 字节, 失败)`。
-        self._backup_stat: tuple[int, int, int] = (0, 0, 0)
+        #: 本会话的备份统计（只读面/日志用）：`(轮次, 字节, 失败, 账本未变跳过)`。
+        self._backup_stat: tuple[int, int, int, int] = (0, 0, 0, 0)
+        #: 抽屉字节读数 `(总字节, 两账本字节, 单轮均字节)`：由**写方**在 `backup_pending()` 里顺手量
+        #: —— `status()` 每拍被调（`deliver_worker._write_status`），而抽屉在网络盘上，读方必须零 IO。
+        self._drawer_stat: tuple[int, int, int] = (0, 0, 0)
+        #: 抽屉**清理**读数 `(删了几轮, 删失败, 孤儿保留, 不删的原因)`（D3）。
+        self._prune_stat: tuple[int, int, int, str] = (0, 0, 0, "")
+        #: 上次清理时「确认送达」有几轮：一样就不必再扫抽屉（只读内存，零 IO）。
+        self._pruned_mark: int = -1
+        #: 段末强制扫一次（`close()` → `backup_pending()`）。
+        self._prune_forced: bool = True
+        #: 抽屉写方（惰性建；`None` = 还没建/这条腿不做备份）。它的 `_last` 就是上面那份读数。
+        self._drawer: BackupDrawer | None = None
         self.timeout = float(timeout)
         self.probe_ttl = float(probe_ttl)
+        self.probe_fail_ttl = float(probe_fail_ttl)
         self.sync_cap = int(sync_cap)
         self._opener = opener or _urllib_opener
         self._now = now_fn or time.time
         self.log = log
         self.enabled = bool(self.base_url and self.token and self.run_id)
         #: 本会话停用（bad token / 体被拒）——一次性配置问题，重试无意义（见模块 docstring）。
+        #: ⚠ 不是死刑：`_maybe_revive()` 在 `DISABLE_COOLDOWN_SEC` 后自动解封并重探。
         self.disabled_reason = ""
+        self._disabled_at = 0.0
+        #: 重试节奏的只读面（plan §4.2-1）：连续失败次数 / 最后一次失败原因 / 下一次可重试的时刻。
+        #: 只给人看，**不参与判决** —— 退避与否由 hub 的租约与 `_disable` 冷决定。
+        self._retry_n = 0
+        self._last_error = ""
+        self._next_try = 0.0
         self._reachable: bool | None = None
         self._probed_at = 0.0
         self._last_log: dict[str, float] = {}
         self._delivered: set[int] = set()
+        #: `delivered.json` 读出来了吗（存在 ∧ 解析得开 ∧ `run_id` 是本次的）。
+        #: 它是**抽屉删除**的硬门槛（D3/DoD-3c）：账本不可读 ⇒ 本会话一份送达证据都没有，
+        #: 而抽屉是跨会话的唯一第二副本 ⇒ 一个字节都不许删。
+        self._ledger_readable = False
         #: 本会话被 hub **内容拒收**（400/413/422）的轮次 → 产物仍在本地产物目录里，但本会话
-        #: 不再重试它们（重试同一个体不会变对），**其余轮次照推**。刻意只住内存：新会话
-        #: 再试一次（那天可能已经换了代码/修好了行），而持久化就等于「一轮被拒＝永久不回传」。
+        #: 不再重试它们（重试同一个体不会变对），**其余轮次照推**。记录会随 `delivered.json`
+        #: 带上权重指纹与**年龄**（`at`/`tries`）：到 `REJECTED_TTL_SEC`（或记满
+        #: `REJECTED_MAX_TRIES` 次）就自动复活，免得一次误判变成「一轮永久不回传」（D6）。
         self._rejected: dict[int, str] = {}
+        #: 每条拒收的年龄面：`it → (记录时刻, 已记次数)`（不落盘也没关系，落盘是为了跨会话 TTL）。
+        self._rejected_at: dict[int, float] = {}
+        self._rejected_tries: dict[int, int] = {}
         self._result_done = False
         self._manifest_cache: dict | None = None
         #: 账本轮次集（`_ledger_its()`）的惰性缓存：`((size, mtime_ns), its)`。
@@ -388,6 +415,8 @@ class OfflineDeliverer:
         # join 给内部预算之外的一点余量（线程要在自己那一侧判 deadline 并收尾）
         self._thread.join(timeout=budget + 5.0)
         # 段末**强制 sweep**（拍板-3 ②）：线程可能已在收线路上返回，而它是最后一次备份机会。
+        #: 备份与**清理**同拍做（`backup_pending` 里）；段末强制扫一次抽屉（D3）。
+        self._prune_forced = True
         self.backup_pending()
         self._report_close()
 
@@ -509,7 +538,11 @@ class OfflineDeliverer:
         return self.root / OFFLINE_DELIVERED_NAME
 
     def _load_ledger(self) -> None:
-        """读已投递项（缺失/损坏 → 空：那只会导致重复投递，hub 侧幂等兜住）。"""
+        """读已投递项（缺失/损坏 → 空：那只会导致重复投递，hub 侧幂等兜住）。
+
+        读成功（存在 ∧ 解析开 ∧ `run_id` 是本次的）时**顺带**把 `_ledger_readable` 置真 ——
+        抽屉删除拿它当硬门槛（DoD-3c），所以「读不出来」与「没送达」必须在这里就分开。
+        """
         p = self.ledger_path
         if not p.exists():
             return
@@ -519,6 +552,7 @@ class OfflineDeliverer:
             return
         if not isinstance(data, dict) or data.get("run_id") != self.run_id:
             return  # 别的 run 的记账（同一个目录被复用）——不认
+        self._ledger_readable = True
         for it in data.get("artifacts") or []:
             if isinstance(it, int) and not isinstance(it, bool):
                 self._delivered.add(it)
@@ -543,8 +577,22 @@ class OfflineDeliverer:
                 continue
             if not fp or not self._weights_fp_matches(it, fp):
                 continue  # 没证据 / 内容换了 ⇒ 当它没被拒过（宁多试一次，不静默丢一轮）
+            # D6：拒收**不是**永久判决 —— 到 TTL（或记满次数）就当我没拒过。
+            # 旧账本没有 `at`（当时不记年龄）⇒ 按「早于 TTL」算，也就是**一律复活**：一条没有
+            # 年龄的证据不足以支撑「永不再试」，而重试一轮的代价只是再推 ~1.9MB。
+            at = _num_or(row.get("at"), 0.0)
+            tries = int(_num_or(row.get("tries"), 0.0))
+            age = self._now() - at
+            if tries >= REJECTED_MAX_TRIES or age > REJECTED_TTL_SEC:
+                self.log(
+                    f"补传 it{it} 不再沿用上次的内容拒收（记了 {tries} 次｜{age / 3600:.1f}h 前）"
+                    "——本会话再试一次（D6）"
+                )
+                continue
             self._rejected[it] = str(row.get("why", "") or "")
             self._rejected_fp[it] = fp
+            self._rejected_at[it] = at
+            self._rejected_tries[it] = tries
 
     def refresh_from_ledger(self) -> None:
         """重读 `delivered.json`（**只读镜像用**：进程模式下账本的写者是子进程，父侧那份缓存
@@ -555,6 +603,8 @@ class OfflineDeliverer:
         self._delivered.clear()
         self._rejected.clear()
         self._rejected_fp.clear()
+        self._rejected_at.clear()
+        self._rejected_tries.clear()
         self._result_done = False
         self._load_ledger()
 
@@ -569,6 +619,27 @@ class OfflineDeliverer:
     def _save_ledger(self) -> None:
         with self._cv:
             owed = sorted(self._repost)
+        # 人的重置水位（D6 的「现在就要它再试一次」）：比它更早的拒收**不落盘**。不读这一眼的话，
+        # 运维刚清空的行会被活着的子进程下一次落盘原样写回来（它的 `_rejected` 还在内存里）。
+        markers = self._ledger_reset_markers()
+        for it, at in list(self._rejected_at.items()):
+            if at <= markers.get(str(it), 0.0):
+                self._rejected.pop(it, None)
+                self._rejected_fp.pop(it, None)
+                self._rejected_at.pop(it, None)
+                self._rejected_tries.pop(it, None)
+        rows = [
+            {
+                "it": it,
+                "weights_fp": self._rejected_fp.get(it, ""),
+                "why": why,
+                # 年龄面（D6）：`at` 与 `tries` 决定这条记录何时过期（`REJECTED_TTL_SEC`/
+                # `REJECTED_MAX_TRIES`）——没有它们就只剩「永久生效」这一种语义。
+                "at": self._rejected_at.get(it, self._now()),
+                "tries": self._rejected_tries.get(it, 1),
+            }
+            for it, why in sorted(self._rejected.items())
+        ]
         atomic_write_json(
             self.ledger_path,
             {
@@ -580,22 +651,47 @@ class OfflineDeliverer:
                 # 拒收过的轮次 + 当时的权重指纹。两者都是**磁盘状态**：_repost 只住内存时，
                 # 段末或子进程重启丢掉的那一次就永远补不回来了。
                 "owed_reposts": owed,
-                "rejected": [
-                    {"it": it, "weights_fp": self._rejected_fp.get(it, ""), "why": why}
-                    for it, why in sorted(self._rejected.items())
-                ],
+                "rejected": rows,
                 "updated_at": self._now(),
+                # 水位原样带过去（连「已被放掉」那些也要带）：抹掉它 = 活着的会话下一次落盘
+                # 又把那一轮写回来了。只按 TTL 窗清（见 `_prune_reset_markers`）。
+                REJECTED_RESET_KEY: _prune_reset_markers(markers, now=self._now()),
             },
         )
+        # 写成功 ⇒ 账本这份证据是**可信**的（`_ledger_readable` 从此不再只是「进门时读得到」）：
+        # 抽屉删除把它当硬门槛（DoD-3c），而本会话第一次送达时磁盘上还没有账本（首开目录），
+        # 不在这里置真就永远删不掉 —— 刚写完的账本就是「hub 收过」的书面证据，且它是我们写的。
+        self._ledger_readable = True
+
+    def _ledger_reset_markers(self) -> dict[str, float]:
+        """`delivered.json` 里「人重置过这一轮拒收」的水位：`it（字符串）→ 重置时刻`。
+
+        为什么按 it 而不是一个全局水位：只重置一环时，全局水位会把**其余**环次的拒收
+        一并复活（活着的子进程下一次落盘就会把它们也放了）。见 `reset_rejected()`。
+        """
+        try:
+            data = json.loads(self.ledger_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        if not isinstance(data, dict):
+            return {}
+        raw = data.get(REJECTED_RESET_KEY)
+        if not isinstance(raw, dict):
+            return {}
+        return {str(k): _num_or(v, 0.0) for k, v in raw.items()}
 
     # ------------------------------------------------------------ 探活
 
     def probe(self, *, force: bool = False) -> bool:
-        """hub 可达且**可用**（token 有效）？结果按 TTL 缓存。永不抛。"""
-        if not self.enabled:
+        """hub 可达且**可用**（token 有效）？结果按 TTL 缓存（**失败**用更短的 `PROBE_FAIL_TTL_SEC`）。永不抛。"""
+        self._maybe_revive()
+        if not self.enabled or self.disabled_reason:
             return False
         now = self._now()
-        if not force and self._reachable is not None and now - self._probed_at < self.probe_ttl:
+        ttl = float(self.probe_ttl)
+        if self._reachable is False:
+            ttl = min(ttl, self.probe_fail_ttl)  # 失败只可能更短（旧口径的 60s 平坦缓存不许回来）
+        if not force and self._reachable is not None and now - self._probed_at < ttl:
             return self._reachable
         self._probed_at = now
         try:
@@ -625,7 +721,28 @@ class OfflineDeliverer:
     def _disable(self, why: str) -> None:
         if not self.disabled_reason:
             self.disabled_reason = why
-            self.log(f"停用补传：{why}（产物照常落本地，训练不受影响）")
+            self._disabled_at = self._now()
+            self.log(
+                f"停用补传：{why}（产物照常落本地，训练不受影响；"
+                f"{DISABLE_COOLDOWN_SEC:.0f}s 后自动重探一次）"
+            )
+
+    def _maybe_revive(self) -> None:
+        """停用冷却到点 ⇒ 解封并逼一次真探活。**只在冷却窗之后**（当拍仍不重试）。
+
+        为什么要有它（2026-10-16，评审 F1/C1）：`_sync` 首行 return 让停用变成「本会话零尝试」，
+        而 401/403 很可能是暂时的（token 轮换 / hub 换实例 / 本机时钟）；现场「27 轮 0 送达」
+        与「打点同期拿到 200」并存，正是这种「一条腿静默死掉」的形状。
+        """
+        if not self.disabled_reason:
+            return
+        if self._now() - float(self._disabled_at) < DISABLE_COOLDOWN_SEC:
+            return
+        why = self.disabled_reason
+        self.disabled_reason = ""
+        self._disabled_at = 0.0
+        self._reachable = None  # 逼下一次探活真的出门（不吃旧负缓存）
+        self.log(f"补传腿冷却结束（{DISABLE_COOLDOWN_SEC:.0f}s）——重新探活；原停用原因：{why}")
 
     def _throttled_log(self, key: str, msg: str) -> None:
         now = self._now()
@@ -721,111 +838,74 @@ class OfflineDeliverer:
 
     # ------------------------------------------------------------ 备份抽屉（拍板-3）
 
+    def _drawer_for_write(self) -> BackupDrawer | None:
+        """抽屉写方（`backup_root` 空 = 这条腿不做备份）。**惰性建**，因为父侧镜像
+        （`deliver_proc.backup_pending`）是在构造**之后**才把 `backup_root` 补上去的 ——
+        在 `__init__` 里建好就是在那个调用点上静默不备份（比不实现更糟：它看起来在工作）。
+        日志取**调用时**的 `self.log`（同一个理由：父侧会现换）。
+        """
+        if self._drawer is None and self.backup_root:
+            self._drawer = BackupDrawer(
+                source_root=self.root,
+                backup_root=self.backup_root,
+                log=self.log,
+                throttled=self._throttled_log,
+            )
+        return self._drawer
+
     def backup_pending(self) -> int:
         """把「磁盘上有、账本里没有」的轮次各备份一份到网络侧抽屉；返回本轮**新写**的轮数。
 
         为什么是这条判据（`pending()`）：它就是「回传失败」的**持久化**定义（重启会话照样成立），
-        不需要新状态源。
-
-        三条纪律（逐字沿用 `remote/job_fs` 的备份腿先例，`plan/offline-local-disk-first` §3.4）：
-          * **绝不抛**（写不成只 WARN；抽屉坏了不能反过来把补传腿或训练拖住）；
-          * **不改 job 状态**（hub 不知道抽屉存在）；
-          * **有界**（逐件 `call_bounded(DRAIN_CEILING_SEC)`：抽屉也可能挂在同一个坏挂载点上，
-            而它跑在补传线程里 —— 绝不能反过来把段末挂住）；
-          * **幂等**（已存在的轮次目录直接跳过：重跑不重复写；锚点每次重写一份小的）。
-
-        常态零写入：`pending()` 空 ⇒ 这个函数**连目录都不建**。
+        不需要新状态源。拷贝策略（拷哪些件 / 何时跳 / 失败算什么）在 `remote/backup_drawer`
+        ——那边是它的所有者（不抛 · 有界 · 幂等 · 常态零写入）；这里只管两件事：
+        「算哪些轮次待投」（本类的定义）与「把读数记到 `status()` 看得见的地方」。
         """
-        if self.backup_root is None:
+        drawer = self._drawer_for_write()
+        if drawer is None:
             return 0
         try:
             rounds = self.pending()
         except Exception as e:  # 判据面坏了也只记一笔
             self._throttled_log("backup-pending", f"备份跳过：算不出待投轮次（{e}）")
             return 0
-        if not rounds:
-            return 0
-        root = Path(self.backup_root)
-        made = bytes_ = failed = 0
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-        except OSError as e:
-            self._throttled_log("backup-root", f"备份跳过：抽屉建不出来（{root}：{e}）")
-            return 0
-        for it in rounds:
-            # 目录名的**唯一口径**是 `ArtifactStore.dir_for`（`it-<03d>`）：自己拼 `it-1` 会
-            # 找一个不存在的源目录（实测：三轮全报 0 字节失败，而抽屉里空空如也）。
-            dst = root / f"{ArtifactStore.IT_PREFIX}{int(it):03d}"
-            if dst.is_dir() and _round_matches(self.root / f"{ArtifactStore.IT_PREFIX}{int(it):03d}", dst):
-                continue  # 幂等：这一轮已经备份过且**字节一致**（重跑不重复写）
-            if dst.is_dir():
-                # 对账不一致 ⇒ 本机的这一轮被重跑过：撤掉重装，否则恢复腿会把旧字节当成「这一轮」
-                self.log(f"备份 it{it}：抽屉里那份与本机字节不符（本机这一轮被重跑过）⇒ 重写")
-                shutil.rmtree(dst, ignore_errors=True)
-            ok, n = call_bounded(
-                partial(
-                    self._copy_backup_round,
-                    src=self.root / f"{ArtifactStore.IT_PREFIX}{int(it):03d}",
-                    dst=dst,
-                ),
-                float(DRAIN_CEILING_SEC),
-                name="deliver-backup",
+        if rounds:
+            r = drawer.backup_rounds(rounds)
+            self._backup_stat = (r.made, r.bytes, r.failed, r.skipped)
+            self._drawer_stat = (r.total, r.ledger, r.round_avg)
+            self.log(
+                f"备份={len(rounds)} 轮待投（本轮新写 {r.made}｜字节 {r.bytes}｜失败 {r.failed}"
+                f"｜账本未变跳过 {r.skipped}）｜抽屉 {drawer.root}（合计 {r.total} 字节）"
             )
-            if not ok or not n:
-                failed += 1
-                self.log(
-                    f"WARN 备份 it{it} 失败或超界（>{float(DRAIN_CEILING_SEC):g}s）——"
-                    "这一轮仍只在本地产物目录里（下一拍再试）"
-                )
-                continue
-            made += 1
-            bytes_ += int(n)
-        if made:
-            # 锚点/交付包：让抽屉自己就是一份**能反向恢复**的产物（恢复腿的判据 = 三件 + 权重）
-            for name in BACKUP_ANCHOR_NAMES:
-                src = self.root / name
-                if not src.is_file():
-                    continue
-                ok, n = call_bounded(
-                    partial(self._copy_backup_file, src=src, dst=root / name),
-                    float(DRAIN_CEILING_SEC),
-                    name="deliver-backup-anchor",
-                )
-                if not ok or not n:
-                    failed += 1
-                else:
-                    bytes_ += int(n)
-        self._backup_stat = (made, bytes_, failed)
-        self.log(
-            f"备份={len(rounds)} 轮待投（本轮新写 {made}｜字节 {bytes_}｜失败 {failed}）"
-            f"｜抽屉 {root}"
+        self._prune_drawer(drawer)
+        return self._backup_stat[0]
+
+    def _prune_drawer(self, drawer: BackupDrawer) -> None:
+        """判据化删除抽屉里**已确认送达**的轮次（D3：回传成功即删）。
+
+        顺序铁律（plan §4.2-3）：`POST 200 → _save_ledger()` **之后**才允许删 —— 本函数只读内存里的
+        `_delivered`，而它是在账本落盘之后才追加的；别另开一条「重读磁盘」的路（那会把顺序反过来）。
+
+        每拍都扫抽屉是**网络盘的目录列表**，太贵 ⇒ 只在「确认集变过」（有新送达）或段末（`close()`
+        经 `backup_pending`）扫一次。读数进 `status()`：`backup_pruned`/`prune_failed`/`backup_orphans`。
+        """
+        if len(self._delivered) == self._pruned_mark and not self._prune_forced:
+            return
+        try:
+            rounds = set(self._ledger_its())  # 本地**真轮次**（内容对账用；不读网络盘）
+        except Exception:
+            rounds = set()
+        p = drawer.prune_delivered(
+            confirmed=set(self._delivered),
+            local_rounds=rounds,
+            ledger_ok=self._ledger_readable,
+            now=self._now(),
         )
-        return made
-
-    def _copy_backup_round(self, *, src: Path, dst: Path) -> int:
-        """拷一轮到抽屉（先 `dst.tmp-<pid>` 再 `os.replace`：半截绝不进抽屉）；返回字节数。"""
-        tmp = dst.with_name(f".{dst.name}.tmp-{os.getpid()}")
-        try:
-            if tmp.exists():
-                shutil.rmtree(tmp, ignore_errors=True)
-            shutil.copytree(src, tmp)
-            os.replace(tmp, dst)
-        except OSError:
-            shutil.rmtree(tmp, ignore_errors=True)
-            return 0
-        return _tree_bytes(dst)
-
-    def _copy_backup_file(self, *, src: Path, dst: Path) -> int:
-        tmp = dst.with_name(f".{dst.name}.tmp-{os.getpid()}")
-        try:
-            shutil.copy2(src, tmp)
-            os.replace(tmp, dst)
-        except OSError:
-            return 0
-        try:
-            return int(dst.stat().st_size)
-        except OSError:
-            return 0
+        self._prune_stat = (p.pruned, p.failed, p.orphans, p.skipped)
+        self._pruned_mark = len(self._delivered)
+        self._prune_forced = False
+        if p.skipped:
+            self._throttled_log("prune-skip", f"抽屉不删：{p.skipped}")
 
     def _manifest(self) -> dict:
         """产物目录里的 manifest 快照（血缘字段随每次投递带上；读失败 → 空）。"""
@@ -951,7 +1031,13 @@ class OfflineDeliverer:
         「只唤醒、不消费」的入口，正是 2026-10-06 忙等事故的成因。只有**真正被 `_post_artifact`
         处理过**且返回 `ok`/`skip` 的轮次才销账；被 `sync_cap` 截断在外的、返回 `stop` 的一律留着。
         """
-        if not self.enabled or self.disabled_reason:
+        if not self.enabled:
+            return 0
+        self._maybe_revive()
+        if self.disabled_reason:
+            self._retry_n += 1
+            self._last_error = self.disabled_reason
+            self._next_try = self._now() + DISABLE_COOLDOWN_SEC
             return 0
         with self._cv:
             repost = sorted(self._repost)
@@ -960,9 +1046,20 @@ class OfflineDeliverer:
         rounds = self._ledger_its()
         todo += [it for it in repost if it not in todo and it in rounds]
         if not todo:
+            self._retry_n = 0
+            self._last_error = ""
+            self._next_try = 0.0
             return 0
         if not self.probe(force=force_probe):
-            return 0  # 还没送到：重投留在 `_repost` 里（下一拍 / 下一次会话再试）
+            # 还没送到：重投留在 `_repost` 里（下一拍 / 下一次会话再试）。
+            # 读数只**给人看**（plan §4.2-1：不做退避判决）—— 下一拍的可试时刻就是探活负缓存的长度
+            # （连不上时 `PROBE_FAIL_TTL_SEC` 那个短窗，抖动恢复不用等一整轮）。
+            self._retry_n += 1
+            self._last_error = self.disabled_reason or "hub 不可达"
+            self._next_try = self._now() + (
+                LOG_THROTTLE_SEC if self.disabled_reason else float(self.probe_fail_ttl)
+            )
+            return 0
         done = 0
         sent: list[int] = []
         changed = False
@@ -979,15 +1076,27 @@ class OfflineDeliverer:
             if outcome == "ok":
                 done += 1
                 sent.append(it)
-            # "skip" = 这一轮被内容拒收（已记进 `_rejected`）：跳过它，后面的照推
+            # "skip" = 这一轮被内容拒收（已记进 `_rejected`）：跳过它，后面的照推。
+            # 拒收**本身也要落盘**（D6）：TTL/上限的年龄面就住在那条记录里，而「本拍只有拒收、
+            # 没有成功投递」的组合只会让 `done=0` ⇒ 不置脏就会连旧记录一起停在上一次的水位。
+            elif outcome == "skip":
+                changed = True
         if done or changed:
             self._save_ledger()
         if done:
+            self._retry_n = 0
+            self._last_error = ""
+            self._next_try = 0.0
             left = len(self.pending())
             self.log(
                 f"补传 {done} 轮（it{sent[0]}…it{sent[-1]}）→ {self.base_url}"
                 + (f"；仍积压 {left} 轮，下轮继续" if left else "")
             )
+        elif not changed:
+            # 这一拍一轮都没送出去（且没有别的脏东西要落盘）⇒ 记进可观测面：连续失败 + 原因。
+            self._retry_n += 1
+            self._last_error = "这一拍没有轮次送达（传输失败/被拦；下拍再试）"
+            self._next_try = self._now() + LOG_THROTTLE_SEC
         return done
 
     def _post_artifact_guarded(self, it: int) -> str:
@@ -1017,13 +1126,19 @@ class OfflineDeliverer:
         跨会话（2026-10-07）：这条记录随 `delivered.json` 带上**权重指纹**——子进程重启/idle-timeout
         会把「会话」缩到分钟级，只住内存的话同一轮会反复重投 ~1.9MB；而新会话读回时先核对指纹，
         同一 `it` 换了内容就不认（照常再试一次）。
+
+        D6（2026-10-16）：跨会话意味着一**次误判会永久生效**（hub 409 被读成内容问题时，那一轮
+        就再也不会回传）⇒ 每条记录带上 `at`/`tries`，到 `REJECTED_TTL_SEC` 或记满
+        `REJECTED_MAX_TRIES` 次自动复活；`reset_rejected()` 是「现在就要它再试一次」的人工出口。
         """
         self._rejected[int(it)] = reason
+        self._rejected_at[int(it)] = self._now()
+        self._rejected_tries[int(it)] = self._rejected_tries.get(int(it), 0) + 1
         if weights_fp:
             self._rejected_fp[int(it)] = str(weights_fp)
         self.log(
             f"补传 it{it} **本轮跳过**（{reason}）——产物照常落本地；"
-            f"其余轮次照推（本会话不再重试这一轮，新会话会再试一次）"
+            f"其余轮次照推（本会话不再重试这一轮，{REJECTED_TTL_SEC / 3600:.0f}h 内或新会话会再试一次）"
         )
         return "skip"
 
@@ -1186,7 +1301,10 @@ class OfflineDeliverer:
         据此决定封课还是触发下一段（判据在 `plan_run._seg_end_kind`）。
         """
         try:
-            if not self.enabled or self.disabled_reason:
+            if not self.enabled:
+                return False
+            self._maybe_revive()
+            if self.disabled_reason:
                 return False
             if not self.probe():
                 return False
@@ -1253,6 +1371,7 @@ class OfflineDeliverer:
 
     def status(self) -> dict:
         """一行式状态（给启动日志与 operator 看：补传在不在、投了几轮、卡在哪）。"""
+        pending = self.pending()  # 两处读数都用它（每拍被调，别算两遍）
         return {
             "enabled": self.enabled,
             "hub_url": self.base_url,
@@ -1260,8 +1379,15 @@ class OfflineDeliverer:
             "course": self.course,
             "lease": bool(self.hub_lease),
             "delivered": len(self._delivered),
-            "pending": len(self.pending()),
+            "pending": len(pending),
             "rejected": dict(self._rejected),
+            #: 拒收记录的年龄面（D6）：`it → (记了几次, 几秒前记的)`。到 TTL/上限会自动复活，
+            #: 人也可以 `reset_rejected()`（或控制台的同名单个动作）现在就把某一环摆回台面。
+            "rejected_age": {
+                it: (int(self._rejected_tries.get(it, 1)), self._now() - self._rejected_at.get(it, 0.0))
+                for it in self._rejected
+            },
+            "rejected_ttl_sec": float(REJECTED_TTL_SEC),
             #: 还没送达的重投（§10.3）：段末核对与子进程状态面（`delivered.json` 的 `owed_reposts`）
             "reposts_unsent": len(self._repost),
             #: 埋点/探针读数（§2.4）：`idle_spins` **恒应为 0**（非 0 = 有人在空转）
@@ -1269,6 +1395,32 @@ class OfflineDeliverer:
             "idle_spins": self._idle_spins,
             "result_done": self._result_done,
             "disabled_reason": self.disabled_reason,
+            #: 停用了多久（秒；0 = 没停用）。冷却到 `DISABLE_COOLDOWN_SEC` 会自动解封（审查 F1/C1）。
+            "disabled_sec": (self._now() - self._disabled_at) if self.disabled_reason else 0.0,
+            "backed_up": int(self._backup_stat[0]),
+            "backup_bytes": int(self._backup_stat[1]),
+            "backup_failed": int(self._backup_stat[2]),
+            #: 「变化才拷」跳过的账本件数（D8）：连做 3 拍时后两拍应为 2（`metrics`/`eval_log` 都没变）。
+            "backup_skipped": int(self._backup_stat[3]),
+            #: 抽屉**清理**（D3 判据化删除）：删了几轮 / 删失败 / **孤儿保留**（账本里没证据且本地
+            #: 也没同一份 —— 绝不默默不删）/ 这一趟不删的原因。
+            "backup_pruned": int(self._prune_stat[0]),
+            "prune_failed": int(self._prune_stat[1]),
+            "backup_orphans": int(self._prune_stat[2]),
+            "prune_skipped": str(self._prune_stat[3]),
+            #: 重试节奏的**只读面**（plan §4.2-1：给人看，**不做退避判决**）：
+            #: 连续失败次数 / 最后一次失败原因 / 距离下一次可重试还有几秒。
+            "retry_n": int(self._retry_n),
+            "last_error": str(self._last_error),
+            "next_try_sec": max(0.0, float(self._next_try) - self._now()) if self._next_try else 0.0,
+            #: 抽屉字节读数（§3.3 DoD-2c + §14 容量行）：总 / 两账本 / 单轮均字节。
+            #: `drawer_budget_bytes` = 下一步大概还要往网络盘写多少 = `pending × 均字节 + 两账本`。
+            "drawer_bytes": int(self._drawer_stat[0]),
+            "drawer_ledger_bytes": int(self._drawer_stat[1]),
+            "drawer_round_avg_bytes": int(self._drawer_stat[2]),
+            "drawer_budget_bytes": (
+                len(pending) * int(self._drawer_stat[2]) + int(self._drawer_stat[1])
+            ),
             "background": self.background,
             "drain_alive": bool(self._thread is not None and self._thread.is_alive()),
         }
@@ -1311,4 +1463,82 @@ def _err_text(resp: bytes, max_chars: int = 300) -> str:
 
 
 #: 本模块的出口（进程模式那一面在 `remote.deliver_proc.py`）。
-__all__ = ["DELIVERED_NAME", "OfflineDeliverer"]
+__all__ = ["DELIVERED_NAME", "OfflineDeliverer", "main", "reset_rejected"]
+
+
+def reset_rejected(
+    artifacts_dir: str | Path,
+    *,
+    run_id: str = "",
+    it: int | None = None,
+    now: float | None = None,
+    log=lambda _m: None,
+) -> int:
+    """把 `delivered.json` 里的**内容拒收**记录清掉（下一次 `sync()` 会再试这些轮次）。返回清掉的条数。
+
+    为什么需要（D6 / plan §15）：拒收记录跨会话活着（按权重指纹认领）⇒ 一次**误判**（hub 侧的
+    409 被读成内容问题、账本行取错）会让那一轮**永久不再回传**，而它的权重一直好好地躺在本地
+    盘上。TTL（`REJECTED_TTL_SEC`）是最坏情况的自动出口，本函数是「现在就要它再试一次」的人工
+    入口（控制台那个「重置该轮拒收」按钮应该走这里，不要各写一份）。
+
+    两件事做全了才算真的生效：
+      * 抹掉该 `it` 的记录行；
+      * 在文件里记下**重置水位**（`it → 时刻`）——否则活着的补传子进程在下一次落盘时会把
+        内存里那份原样写回来，运维看到的「清掉了」会在几分钟后自己复原。
+
+    只改这份记账文件：不出网、不碰轮次目录、不抛（拒接/坏文件都只记一行）。``it=None`` = 全清。
+    """
+    p = Path(artifacts_dir) / OFFLINE_DELIVERED_NAME
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    if not isinstance(data, dict):
+        return 0
+    if run_id and str(data.get("run_id", "")) != str(run_id):
+        log(f"拒收重置跳过：{p} 是 run {data.get('run_id')!r} 的账本，不是 {run_id!r}")
+        return 0
+    rows = [r for r in (data.get("rejected") or []) if isinstance(r, dict)]
+    keep = [r for r in rows if it is not None and r.get("it") != it]
+    dropped = [r for r in rows if it is None or r.get("it") == it]
+    if not dropped:
+        return 0
+    raw = data.get(REJECTED_RESET_KEY)
+    markers = (
+        {str(k): _num_or(v, 0.0) for k, v in raw.items()} if isinstance(raw, dict) else {}
+    )
+    at = float(time.time() if now is None else now)
+    for r in dropped:
+        markers[str(r.get("it"))] = at
+    data["rejected"] = keep
+    data[REJECTED_RESET_KEY] = _prune_reset_markers(markers, now=at)
+    try:
+        atomic_write_json(p, data)
+    except OSError as e:
+        log(f"拒收重置失败：{p} 写不进去（{e}）")
+        return 0
+    which = "全部" if it is None else f"it{it}"
+    log(f"已重置 {len(dropped)} 轮的内容拒收（{which}）——下一次补传会重新试它们｜账本 {p}")
+    return len(dropped)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """`python -m remote.offline_deliver --artifacts <产物根> [--it N]`：重置内容拒收（D6）。
+
+    为什么不给「重置」单开一个脚本：它改的就是本模块的记账文件（`delivered.json`），路径、
+    权重指纹、水位口径都在这里 —— 另开一份就是把同一语义再实现一遍（plan §19 的收口纪律）。
+    """
+    ap = house_parser(description="产物补传腿：重置内容拒收记录（让这些轮次再试一次）")
+    ap.add_argument("--artifacts", required=True, help="产物根目录（`delivered.json` 住在这里）")
+    ap.add_argument("--run-id", default="", help="核对账本归属（给错目录时不改任何东西）")
+    ap.add_argument("--it", type=int, default=None, help="只重置这一轮（不给 = 全清）")
+    ap.add_argument("--json-only", action="store_true", help="只打机器可读那一行")
+    args = ap.parse_args(argv)
+    log = (lambda _m: None) if args.json_only else (lambda m: print(m, flush=True))
+    n = reset_rejected(args.artifacts, run_id=args.run_id, it=args.it, log=log)
+    print(json.dumps({"reset": n, "it": args.it}, ensure_ascii=False), flush=True)
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    run_main(lambda: main())

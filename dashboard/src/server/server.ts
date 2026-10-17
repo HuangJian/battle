@@ -385,6 +385,33 @@ async function main(): Promise<void> {
         if (req.method === 'GET' && url.pathname === '/api/poolCounters') {
           return json(poolCountersView())
         }
+        // 内存读数（2026-10-17）：控制台 RSS 在 645↔1104MB 之间锯齿（60s 采样，每 ~10s 一次
+        // +460MB 尖峰后立刻回落）时的**取证口** —— 「1.5GB 的提交里有多少是活对象」这个问题，
+        // 没有它只能靠任务管理器猜（同 hub 那次 `/admin/mem` 的由来）。
+        // 只读；`?gc=1` 额外跑一次**强制 GC**（回答「堆能不能缩」：若 GC 后 heapUsed 大幅下降
+        // 而 RSS 不降 ⇒ 是 JSC 不还页，不是泄漏）。
+        if (req.method === 'GET' && url.pathname === '/api/mem') {
+          const forced = url.searchParams.get('gc') === '1'
+          if (forced) Bun.gc(true)
+          // `?snapshot=1`：写一份 V8 格式的堆快照到 tmp/（用 Chrome DevTools 打开，或按
+          // "按类型聚合 self_size"离线分析）。加它的理由：`/api/mem` 能说"活对象 386MB"，
+          // 但说不出**是谁**——而"峰值 <300MB"这个目标必须先知道基线里那块是谁的。
+          if (url.searchParams.get('snapshot') === '1') {
+            const snapPath = path.join(REPO_ROOT, 'tmp', `bun-heap-${Date.now()}.heapsnapshot`)
+            await Bun.write(snapPath, Bun.generateHeapSnapshot('v8'))
+            const mm = process.memoryUsage()
+            return json({ snapshot: snapPath, rss: mm.rss, heapUsed: mm.heapUsed })
+          }
+          const m = process.memoryUsage()
+          return json({
+            rss: m.rss,
+            heapUsed: m.heapUsed,
+            heapTotal: m.heapTotal,
+            external: m.external,
+            gcForced: forced,
+            pool: poolCountersView(),
+          })
+        }
         if (req.method === 'GET' && url.pathname === '/api/evalboard') {
           const fresh = url.searchParams.get('fresh') === '1'
           // R4（接线 b）：开关关 ⇒ routes 直接给 disabled 形状，不调 buildEvalBoardView。

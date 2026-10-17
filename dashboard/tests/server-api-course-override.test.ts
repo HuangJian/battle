@@ -31,8 +31,13 @@ describe('console 局域网只读边界（§…：LAN 查看 / localhost 控制�
     const target = courses.find((c) => c !== before.course) ?? before.course
     const s = await api.buildStateView(target)
     expect(s.course).toBe(target)
-    // 只读：查看课程绝不落盘 console-state（LAN 切换不影响操作员课程/训练）
-    expect(actions.loadConsoleState()).toEqual(before)
+    // 只读：查看课程绝不落盘 console-state（LAN 切换不影响操作员课程/训练）。
+    // ⚠ 判据只比 `course` 字段，**不是**整份 `toEqual(before)`（2026-10-17 flake 修）：
+    // console-state 是**多份测试共享的同一个文件**（`cloud-halt.test.ts` 的
+    // `saveConsoleState({cloudHalts})`、`course-lifecycle` / `local-worker` 等都会写它），
+    // 全量并行时整份比对必然与它们竞态 ⇒ 两次连红、单跑恒绿。
+    // 本用例要钉的语义是「buildStateView **不改变操作员课程**」—— 那一条不受并发影响。
+    expect(actions.loadConsoleState().course).toBe(before.course)
     // 无参 = 操作员课程（原语义不变）
     const s2 = await api.buildStateView()
     expect(s2.course).toBe(api.effectiveCourse(before, courses))

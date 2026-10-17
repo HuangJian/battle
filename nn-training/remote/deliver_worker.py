@@ -155,6 +155,24 @@ def _write_status(path: Path, d: OfflineDeliverer, *, ctl: CtlReader, last_ctl_a
                 "result_done": bool(st.get("result_done")),
                 "ticks": int(st.get("ticks", 0)),
                 "idle_spins": int(st.get("idle_spins", 0)),
+                # 抽屉读数（§3.3 DoD-2c + §14 容量行）：父侧/控制台看得到「备份在不在、还要写多少」。
+                "backed_up": int(st.get("backed_up", 0)),
+                "backup_bytes": int(st.get("backup_bytes", 0)),
+                "backup_failed": int(st.get("backup_failed", 0)),
+                "backup_skipped": int(st.get("backup_skipped", 0)),
+                "drawer_bytes": int(st.get("drawer_bytes", 0)),
+                "drawer_ledger_bytes": int(st.get("drawer_ledger_bytes", 0)),
+                "drawer_round_avg_bytes": int(st.get("drawer_round_avg_bytes", 0)),
+                "drawer_budget_bytes": int(st.get("drawer_budget_bytes", 0)),
+                # 判据化删除（D3）与重试可观测面（plan §4.2-1）：父侧/控制台看得到「删了几轮、
+                # 还剩几个孤儿、上一拍错在哪、下一拍什么时候再试」。
+                "backup_pruned": int(st.get("backup_pruned", 0)),
+                "prune_failed": int(st.get("prune_failed", 0)),
+                "backup_orphans": int(st.get("backup_orphans", 0)),
+                "prune_skipped": str(st.get("prune_skipped", "")),
+                "retry_n": int(st.get("retry_n", 0)),
+                "last_error": str(st.get("last_error", "")),
+                "next_try_sec": float(st.get("next_try_sec", 0.0)),
             },
         )
     except Exception as e:  # 状态面坏掉不该拖垮补传本身

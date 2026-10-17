@@ -784,6 +784,144 @@ def test_package_partial_walks_the_course_queue(tmp_path: Path) -> None:
     assert any("c6-gae" in m and "没有可打包的产物" in m for m in logs), logs
 
 
+# ───────────── 一键打包待回传产物（plan/offline-backfeed-resilience §5）─────────────
+
+
+def _three_round_local(art: Path, *, run_id: str = "run-off1", iters: tuple[int, ...] = (1, 2, 3)) -> Path:
+    """真 `ArtifactStore` 造一份多轮产物根（含 `metrics.jsonl`/`state.json`/两态权重）。"""
+    from remote.artifacts import ArtifactStore
+
+    store = ArtifactStore(art, run_id=run_id, log=quiet)
+    for it in iters:
+        store.checkpoint(it, weights_json=b'{"w":%d}' % it, opt_tar=b"opt-%d" % it, row={"stage": 0})
+    (art / offline_boot.EVAL_LOG_NAME).write_text(
+        json.dumps({"it": iters[0], "score": 1.0}) + "\n", encoding="utf-8"
+    )
+    return art
+
+
+def _pack_cfg(tmp_path: Path, local: Path, *, course: str = "c5-gae") -> dict:
+    return {
+        "course": course,
+        "work_dir": str(tmp_path / "w"),
+        "local_root": str(local),
+        "download_dir": str(tmp_path / "out"),
+    }
+
+
+def _names(dest: Path) -> set[str]:
+    with zipfile.ZipFile(dest) as z:
+        return set(z.namelist())
+
+
+def test_package_pending_packs_the_whole_local_root_with_meta(tmp_path: Path) -> None:
+    """判据表第 1 行（DoD-4c）：本地根齐 ⇒ 打**整段**（全部轮 + 三件 + 两账本）+ 包内自述。
+
+    ``package_partial`` 只挑一个包（现场 27 轮只拿到一轮）；这里要的是整段 —— 轮次数对账就是
+    「包内轮次数 = 本地根里带权重的全部轮次 = 已投轮数 + pending()」。
+    """
+    local = _three_round_local(tmp_path / "local")
+    logs: list[str] = []
+    made = offline_boot.package_pending(_pack_cfg(tmp_path, local), logs.append)
+    assert [p.name for p in made] == ["deliver-c5-gae@run-off1-it3.zip"], logs
+    names = _names(made[0])
+    # 判据 = 集合包含（不是逐条子串断言）：包内轮次与三件 + 自述一员不漏，多的不管。
+    assert {f"it-{it:03d}/weights.json" for it in (1, 2, 3)} <= names, names
+    assert {"state.json", "metrics.jsonl", "eval_log.jsonl", "IMPORT_META.json"} <= names, names
+    with zipfile.ZipFile(made[0]) as z:
+        meta = json.loads(z.read("IMPORT_META.json").decode("utf-8"))
+    assert meta["magic"] == offline_boot.IMPORT_META_MAGIC
+    assert (meta["course"], meta["run_id"], meta["source"]) == ("c5-gae", "run-off1", "pending")
+    assert (meta["it_from"], meta["it_to"]) == (1, 3)
+
+
+def test_package_pending_packs_the_drawer_when_the_local_root_is_gone(tmp_path: Path) -> None:
+    """判据表第 2 行 ★ DoD-4a：杀掉训练进程、清掉本地根（只有抽屉）⇒ 仍产出**可导入**的包。
+
+    抽屉的判据是 `backup_ready`（三件 + 末轮权重）——只有 `it-*/` 而没三件时不算「齐」。
+    """
+    drawer = tmp_path / "w" / offline_boot.BACKUP_DIR_NAME
+    drawer.mkdir(parents=True)
+    for it in (1, 2):
+        d = drawer / f"it-{it:03d}"
+        d.mkdir()
+        (d / offline_boot.WEIGHTS_NAME).write_bytes(b'{"w":%d}' % it)
+    (drawer / offline_boot.STATE_NAME).write_text(
+        json.dumps({"run_id": "run-seg2", "last_it": 2}), encoding="utf-8"
+    )
+    (drawer / offline_boot.PLAN_NAME).write_text("{}", encoding="utf-8")
+    (drawer / offline_boot.MANIFEST_NAME).write_text("{}", encoding="utf-8")
+    logs: list[str] = []
+    made = offline_boot.package_pending(_pack_cfg(tmp_path, tmp_path / "gone"), logs.append)
+    assert [p.name for p in made] == ["deliver-c5-gae@run-seg2-it2.zip"], logs
+    assert {f"it-{it:03d}/weights.json" for it in (1, 2)} <= _names(made[0])
+    assert any("抽屉" in m for m in logs), logs
+
+
+def test_package_pending_copies_the_full_pack_byte_for_byte(tmp_path: Path) -> None:
+    """判据表第 3 行（DoD-4b）：已收官 ⇒ 产出的是 `artifacts.zip` 的**副本**（逐字节相同、不重打）。"""
+    local = _three_round_local(tmp_path / "local")
+    (local / offline_boot.ALL_ZIP).write_bytes(b"full-pack-bytes")
+    made = offline_boot.package_pending(_pack_cfg(tmp_path, local), quiet)
+    assert [p.name for p in made] == ["deliver-c5-gae.zip"], "收官那支沿用老习惯名"
+    assert made[0].read_bytes() == b"full-pack-bytes"
+
+
+def test_package_pending_is_loud_when_both_sides_are_empty(tmp_path: Path) -> None:
+    """判据表第 4 行：两边都不齐 ⇒ 说清**哪个目录缺哪一件**，返回空表、不造空包、不抛。"""
+    logs: list[str] = []
+    local = tmp_path / "local"
+    made = offline_boot.package_pending(_pack_cfg(tmp_path, local), logs.append)
+    assert made == [] and not (tmp_path / "out").exists()
+    joined = "\n".join(logs)
+    assert str(local) in joined and "两边都没有可打包的产物" in joined, logs
+    assert offline_boot.STATE_NAME in joined and offline_boot.PLAN_NAME in joined, logs
+
+
+def test_package_pending_says_why_when_no_course_is_named(tmp_path: Path) -> None:
+    """清单模式（`CFG.course` 空）：产物根按课程分 ⇒ 打不了包 —— 但要是**一行人话**，不是静默空跑。"""
+    logs: list[str] = []
+    made = offline_boot.package_pending({"course": "", "download_dir": str(tmp_path / "out")}, logs.append)
+    assert made == []
+    assert any("CFG.course 是空的" in m for m in logs), logs
+
+
+def test_backup_ready_accepts_the_real_zero_padded_round_name(tmp_path: Path) -> None:
+    """★ 回归（2026-10-17）：真抽屉写的是 `it-<03d>`（`ArtifactStore.dir_for` 同一个口径）——
+
+    这里以前只认不补零的 `it-<N>`，于是对**真**抽屉永远返回 `None`：恢复腿与一键打包第 2 行都以
+    它为门槛 ⇒ 本地盘被回收后明明抽屉里有一整段，却仍去取包重跑（“产物丢了”的假象）。
+    两种名字都认（补零 = 规范，不补零 = 旧 fixture/手写抽屉）；两态各一条断言钉住。
+    """
+    for name in ("it-003", "it-3"):
+        root = tmp_path / name.replace("-", "_")
+        root.mkdir()
+        st = root / offline_boot.STATE_NAME
+        st.write_text(json.dumps({"run_id": "r", "last_it": 3}), encoding="utf-8")
+        (root / offline_boot.PLAN_NAME).write_text("{}", encoding="utf-8")
+        (root / offline_boot.MANIFEST_NAME).write_text("{}", encoding="utf-8")
+        assert offline_boot.backup_ready(root) is None, "只有三件、没有末轮权重 ⇒ 不认"
+        d = root / name
+        d.mkdir()
+        (d / offline_boot.WEIGHTS_NAME).write_bytes(b'{"w":3}')
+        assert (offline_boot.backup_ready(root) or {})["last_it"] == 3, name
+
+
+def test_deliver_pack_name_falls_back_without_a_run_id() -> None:
+    """取不到 run/it 时回落到固定名（宁可覆盖，也不要一个猜出来的名字）。"""
+    assert offline_boot.deliver_pack_name("c5-gae", {"run_id": "r1", "it_to": 7}) == (
+        "deliver-c5-gae@r1-it7.zip"
+    )
+    assert offline_boot.deliver_pack_name("c5-gae", {"run_id": "", "it_to": 7}) == "deliver-c5-gae.zip"
+    assert offline_boot.deliver_pack_name("c5-gae", {"run_id": "r1", "it_to": None}) == (
+        "deliver-c5-gae.zip"
+    )
+    # run_id 可能带 `/`/空格（hub 侧的名字不保证像文件名）⇒ 只允许文件名安全字符
+    assert offline_boot.deliver_pack_name("c5-gae", {"run_id": "a/b c", "it_to": 1}) == (
+        "deliver-c5-gae@a-b-c-it1.zip"
+    )
+
+
 def test_boot_self_fingerprint_is_present() -> None:
     """引导模块自带「内存指纹」常量 —— notebook 加载后打它，用来识破旧模块。
 

@@ -63,6 +63,10 @@ class QueueDiscoverMixin(QueuePeer):
     _lock: Lock
     _no_marker_warned: set[str]
     _now: Any
+    #: 课程表的反面（`queue_scope.add_course` 提供；本簇的 `_drop_dead_courses` 调它）。
+    drop_course: Any
+    #: hold 读面（`queue_offline` 提供）：正被离线段接管的课不摘。
+    hold_of: Any
     _stores: dict[str, _JobStore]
 
     def discover(self, force: bool = False) -> list[str]:
@@ -114,9 +118,43 @@ class QueueDiscoverMixin(QueuePeer):
                 continue
             if self.add_course(ent.name):
                 added.append(ent.name)
+        # ---- ★ 淘汰（2026-10-17，plan/hub-server-memory-slim L3）：课程表**只增不减**的
+        # 那一半。目录被删 / 停课删了开课标记 = **确定性**的死信号（不靠"超时"猜——
+        # 卡住的课不该被当成死课摘掉）。且**在飞或有人接管时不摘**：淘汰是为了释放内存，
+        # 不是给正在跑的活断电。
+        dropped = self._drop_dead_courses(root)
+        if dropped:
+            print(f"[hub-server] dropped courses: {', '.join(dropped)}", flush=True)
         if added:
             print(f"[hub-server] discovered courses: {', '.join(added)}", flush=True)
         return added
+
+    def _drop_dead_courses(self, root: Path) -> list[str]:
+        """摘掉「**课程目录整个没了**」且没有在飞、没人接管的课程（目录序，稳定）。
+
+        ⚠ 判据只取「目录不存在」这**一条**，不取「开课标记被删」：停课（删
+        `training-enabled.txt`）之后那门课的权重/任务包还在盘上，控制台要能看见它、
+        云机要能取它的包、人要能导它的段——把它从课程表摘掉 = 那些入口 404
+        （派发那一层已经由 `_serves_course` 挡住了，摘表只带来损失）。
+        只有目录本身没了（tmp 被清 / 课程目录被删）时，留着 store 与它的账本缓存
+        才是纯亏：那正是 2026-10-17 那次 tmp 清空之后内存一份没少的形状。
+        """
+        out: list[str] = []
+        now = self._now()
+        for c in sorted(self._stores):
+            ent = root / c
+            if ent.is_dir():
+                continue  # 目录还在 ⇒ 不摘（停课 ≠ 死课）
+            st = self._stores[c]
+            # ★ 在飞判据走**内存租约**，不走 `inflight_job_ids()`：后者要求 job 目录与
+            # payload 还在盘上，而「目录整个没了」正是本函数的前提 ⇒ 它恒为空，等于没有这道闸。
+            if any(st._lease_held(jid, now) for jid in list(st._leases)):
+                continue  # 有活租约在跑
+            if str(self.hold_of(c).get("state") or "") == "live":
+                continue  # 离线盘正接管着
+            if self.drop_course(c):
+                out.append(c)
+        return out
 
     def _serves_course(self, course: str) -> bool:
         """派发闸：**发现模式**下课程目录必须仍带开课标记（`training-enabled.txt`）。

@@ -573,6 +573,19 @@ FAIL_NAME = "fail.json"
 #: 失败原因回传体上限（人读的诊断字符串，1 个文本块足够；防大体打爆 hub 磁盘）。
 FAIL_BODY_MAX = 64 * 1024
 
+#: `POST /jobs/{id}/result` 的**请求体上限**（2026-10-17，plan/hub-server-memory-slim L2）。
+#:
+#: 这是全仓唯一一处**无界读**：`_read_raw_body()` 按 `Content-Length` 一读到尾，随后
+#: `json.loads` / `unpack_result_v2` 再翻一倍 ⇒ 一个请求就能把 hub 顶到任意水位，而
+#: CPython/Windows 堆释放后不归还（hub 连跑 35h 停在 6.2GB 的机制）。
+#:
+#: 怎么定的 64MB（不是拍脑袋）：result 体 = result.json（权重/opt 以 base64 内嵌，
+#: `hub/store_results.py`）的 wire 形式；实测盘上 `tmp/*/remote-jobs/*/result/result.json`
+#: 最大 **260KB**（6 份样本）⇒ 64MB ≈ **250× 余量**。
+#: ⚠ 复核方法：各课账本里 `record_result_recv` 那批 `job_result_recv` 计量行就是历史分布，
+#: 下次调这个值**先从那里量 p99**，别只看盘上还剩下的那几份。
+RESULT_BODY_MAX = 64 * 1024 * 1024
+
 #: `POST /jobs/{id}/start|ready|abandon` 与 `/jobs/priority` / `/jobs/{id}/claim` 的请求体上限：
 #: 都是小 JSON（job_id / worker_id / held 列表），比 fail 体小得多。有界是硬要求（远端体绝不
 #: 信 Content-Length 之外的暗示）。住协议层：hub 的路由组与调度面都要它。

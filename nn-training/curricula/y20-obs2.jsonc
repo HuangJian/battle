@@ -1,0 +1,150 @@
+// 课程 y20-obs2 —— obs 接续腿：保持击杀速度，治脱离慢＋顶住不撒手（用户令）。
+// 状态：已结课（2026-10-17 第 47 轮训练器单步炸毁、熵冻死，判死；见尾部结课报告）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 用户 2026-10-16：y20-obs 健康（超时全程 0、胜 ticks 7928→~6150 越打越快），
+//   但胜率横盘 0.5~0.6（it120 0.632/it210 0.623，±1.5σ 噪声带），承伤 2x 人类。
+//   目标：杀速不掉（A10/A11/A03 readout 保），胜率↑（→0.70），被击伤↓（D01/D02）。
+//
+// ── gap 实证（`bun tools/gap-text-table.ts --means`，口径见该文件头注）────────
+//   人类 `tmp/panel-c20-human-160.jsonl`（160 局全通，ticks 4973/kills 17.49/承伤 112）
+//   vs 机 `tmp/panel-y20obs-paired.jsonl`（160 局同 seed 配对，
+//   `tmp/y20-obs/weights.json` ~it226 现场权重生成；clear 99/160=0.619，
+//   ticks 5569/kills 14.08/承伤 218）：
+//   · D01 52.2 vs 22.4（2.3x，账单本人）＋D02 0.548 vs 0.243（2.25x）＝ 死因；
+//   · D04 97.5 vs 59.5（1.64x，挨打后脱离慢＝堵死的墙）＋D05 58.4 vs 26.3（2.2x，贴脸绝症）
+//     ＝ 脱离机制坏，不是暴露总量问题（D03 机 60.9 < 人 87.0，人进危险区更多还全通，
+//     威胁总量税误伤人类"进"——y20-stack 头注既定，不加威胁税）；
+//   · W07 131 vs 45（2.9x）＋W08 12.5 vs 3.0（4.2x，顶住不撒手）＋W09 0.176 vs 0.063
+//     （1/6 白推），而 W11 11.4 < 15.7（碰得少、每次顶 4x 久）＝ 罚顶住不罚碰；
+//     obs 比 dist235（W07 105）还差，同 wBlock 110 下无物可拴＝税率不够；
+//   · A06 0.643 vs 0.377（近射 1.7x，近射税方向对）＋A05 4.24 vs 5.64（人打远 1.4 格）
+//     ＋A07 0.162 vs 0.346（wDist 1.8 下远射仍半量＝远射奖没反应，不加码，y5-hit 彩票前科）；
+//   · A01 0.812 vs 0.79（机更准，别加准头）＋A03 6.03 vs 8.69／A04 2.65 vs 3.72
+//     （机太老实；火力 A10/A11 无辜，别加攻击——赢靠活得久）；
+//   · W03 包围/ W15 重复逛 / A02 对准率 / D08 逃脱率：无 gap 或不定价，一律不碰。
+//   结论：杀速（开火量/准头/远奖）全 HOLD，只动" stuckness 脱离轴"两键。
+//
+// ── 单变量声明（相对 y20-obs：脱离轴两键同调；其余逐字＝一个概念）────────────
+//   wBlock 110→**160**（+45%，顶住税：W08 4.2x 纯浪费，推墙时无击杀产出，加税不伤杀速；
+//     W11 定性罚顶住时长不罚碰，现有公式 -wBlock*(idle-stop)/ticks 正是持有总量，方向对、量不够）；
+//   wNearSq 28→**36**（+29%，贴脸税：D05 2.2x＋A06 1.7x，近射税方向对；y5-encl ×2 致死前科，
+//     故只取 +29% 中剂量，wobble 线收紧一格）；
+//   HOLD：wKill/wHit/wMiss/wAcc/wDist（火力全套，杀速保险）＋wDmg/wHurt/wEncl/wCorner/wThreat
+//     （ blanket 危险税：D03 人更高，加税打人类行为；wHurt 150 在 stack 已证加压无益）；
+//   无 wWin/terminal（obs 无锚健康，不进口 dist2 的时间轴修复）。
+//   双分支：W08 均长↓＋D04↓ 且 kills/A11 不掉 ⇒ 脱离税有效；W08 不动 ⇒ 税率仍不够，下轮再加；
+//   kills/A11 掉＋shots 掉 ⇒ 近税过热（wobble），杀（回退 wNearSq）。
+//
+// ── 门（y20 三线＋脱离 readout＋杀速保险）─────────────────────────────────────
+//   主：+60 win ≥ 0.70；次：kills ≥ 16.5/20；命耗线：+60 gameover 占比 ≤ 30%；
+//   反 watch：timeout 占比 ≤ 5%，超 ⇒ 为避战而苟，**杀腿**（obs 基线 0，零容忍漂移）；
+//   readout：W08 episode 均长↓（it0 配对面板校准）＋D04↓（同上），双平 ⇒ 脱离税无效，杀；
+//   杀速保险：A11 击杀/千tick＋kills 双不掉（掉 ⇒ 税过热，杀）；
+//   D01 ≤ 85 护栏（+it0 校准）；fear-watch：shots/局 < 16 且 kills < 10 即恐惧塌，杀；
+//   fail ⇒ **杀腿**。门读 headline；s2000 切片附读。上报 policy_new_rms＋it5 analytic 照旧。
+//   终点：三线全过 ⇒ 收官（iters 500 为 cap，以落盘值为准）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   anchor 0.001；ent_break 0.0＋max_winrate 0.0（熔断全拆）；batch 24576；K=10 冻结；退火表同 obs。
+//   iters 500，max_hours 48，workers 8，eval 混合（"2000-2003"×50，同口径逐行可比）。
+//   ⚠ 前提：tmp/y20-obs2 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · bc = y20-obs.it300（`weights/y20-obs/y20-obs.it300.20261016-192617.json`，
+//     sha16 `118532c4d19d2902`；用户指定，同代直连，kickstart 关，opt fresh §15.5）。
+//   · 环境键全在 level（`ladder-c20-lives1`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y20-obs2）+ backup 新目录（nn-training/weights/y20-obs2）+ opt fresh。
+//   · 新种子 20270203（20270201 三腿／20270202 dist2·stack2 已用过，§15.1 防记忆化）。
+//
+// ── 结课报告（2026-10-17 停课；第 47 轮单步 KL 爆炸致死，用户拍板）──────────
+//   跑量：第 1 到 146 轮；评估到第 145 轮（第 0 轮 200 局其余 400 局）。
+//   轨迹：第 0 轮 0.650/16.11 → 第 30 轮 0.625/15.96（队史峰）→ 第 45 轮 0.583/15.59
+//     → 第 50 轮 0.013/杀敌 3.65（断崖）→ 第 145 轮 0.070/6.32（100 轮没爬起来）。
+//   死因（训练账本）：第 46 轮一切正常（KL 0.0167、熵 0.706）；第 47 轮那次更新策略损失涨 300 倍、
+//     价值损失涨到 43688（平时 0.5）、KL 冲到 12、熵腰斩到 0.318；
+//     而第 47 轮回放数据本身胜率 0.651——更新把好数据吃坏了。
+//     之后熵磨到 0.13 冻死，策略变瞎开火（开火 47→78 次、命中率 0.78→0.20、
+//     杀敌 15.6→3~6 个、命耗 93%~99%）。
+//   配方洗脱嫌疑：新配方跑了 46 轮，价值损失一直钉在 0.5，属偶发数值事故；
+//     另从已有评估读出税曾咬过一口（顶墙 6.1‰→5.1‰、近身 126→113）但到第 45 轮退回原点，胜率只跌不涨。
+//   门（终盘）：三线全不通过（尸体）；门（峰值第 30 轮 0.625/15.96）：同样三线不过。
+//   结论：判死，不再续跑（熵冻死 100 轮，续烧白烧）。obs 线让位给新王（stack2-it200）后代腿；
+//     wall/far/escape 同训练栈，单步炸弹风险在，开跑前 60 轮人工盯单轮 KL，冲起就掐。
+//   证据：tmp/y20-obs2/{training_log,eval_log}.jsonl（第 47 轮行即现场）。
+{
+  "version": 5,
+  "name": "y20-obs2",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.6,
+      "wDmg": 0.03,
+      "wMiss": 0.158,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 1.8,
+      "wHurt": 110.0,
+      "wEncl": 8.6,
+      "wCorner": 55.0,
+      "wThreat": 80.0,
+      "wBlock": 160.0,
+      "wNearSq": 36.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0
+    },
+    "terminal": {},
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：y20-obs.it300（sha16 `118532c4d19d2902`；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y20-obs/y20-obs.it300.20261016-192617.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（0.001：x27 有绳语义＋y 系出生安全件，双账合一）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 48,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（新种子 20270203；obs 接续单腿，不与 dist2/stack2 共享即可比性由 eval 口径保证）。
+  "paired_rotate_seed": 20270203,
+
+  "decision_events": false,
+  // K=10（K=1 探针已证 cadence 无罪）。
+  "decision_k": 10,
+
+  "out": "tmp/y20-obs2/weights.json",
+  "traj": "tmp/y20-obs2",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y20-obs2",
+  "backup_prefix": "y20-obs2",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

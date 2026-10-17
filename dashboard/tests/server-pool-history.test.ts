@@ -1136,6 +1136,45 @@ describe('pool-history · 离线腿剔除（offline worker 的轮不进采样贡
       ).toBe(1)
     })
   })
+
+  // ────────── 增量腿读（2026-10-17）：账本只追加，读也必须只读新增 ──────────
+  //
+  // 真机读数（`/api/poolCounters`，改前）：20s 内 `fullRescans` +3、`bytesRead` 累计 514MB ——
+  // 账本 stat 一变就清流态全量重扫。下面两条钉住改后的两个面：**收益**（没新腿 ⇒ 零全扫）
+  // 与**正确性锚点**（重写 ⇒ 归零重读，腿不丢）。
+  it('★ 账本追加但**没有新腿** ⇒ 零全量重扫（旧口径：每窗口把全部账本重读一遍）', () => {
+    withRoot({ name: 'c1', meta: rows('p'), ledger: [iterEvent(3), iterEvent(5)] }, (root) => {
+      aggregateNodeHistory() // 建立 memo 与增量游标
+      // 训练中每轮都会发生的追加：一行**非** `offline_artifact` 的账本事件
+      appendFileSync(
+        join(root, 'c1', 'training_log.jsonl'),
+        `${JSON.stringify({ event: 'job_pending', job_id: 'j1' })}\n`,
+        'utf8',
+      )
+      resetPoolHistoryCounters()
+      // +31s 跨过 AGG_MEMO_MIN_MS（让它真的再算一次，而不是被时间下限挡住）
+      aggregateNodeHistory(Date.now() + 31_000)
+      expect(poolHistoryCounters().fullRescans).toBe(0)
+    })
+  })
+
+  it('★ 增量读的正确性锚点：账本被**重写**（不是追加）⇒ 归零重读，腿不丢', () => {
+    withRoot({ name: 'c1', meta: rows('p'), ledger: [iterEvent(3), iterEvent(5)] }, (root) => {
+      aggregateNodeHistory()
+      // 重写（长度与旧文件相同或更长 ⇒ 只靠 `size < offset` 判不出来）⇒ 锚点校验必须抓住它
+      const p = join(root, 'c1', 'training_log.jsonl')
+      writeFileSync(
+        p,
+        `${[...readFileSync(p, 'utf8').trim().split('\n'), artifact(3)].join('\n')}\n`,
+        'utf8',
+      )
+      resetPoolHistoryCounters()
+      const after = aggregateNodeHistory(Date.now() + 31_000)
+      // it3 的行被腿剔除 ⇒ 只剩 it5 那一行（对照组：重写前是 4）
+      const w = projectWindow(after, resolveWindow('all', now, after.epochMs))
+      expect(w.hist.get('p1')!.ok).toBe(1)
+    })
+  })
 })
 
 // ────────────────────────── 大流只在自身变化时重建（plan/dashboard-pool-history-idle-cost P0-1） ──────────────────────────

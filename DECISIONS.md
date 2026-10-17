@@ -6814,6 +6814,42 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   两件待知会：① 改的是云机侧 python，在跑的段走 code cache ⇒ 换段/换机才生效；
   ② `wver` 变了 ⇒ 云机此前按容器 sha 落账的行会重评一次（那些读数本就废）。
 
+## §2026-10-15-goalnn-y20open-design（2026-10-15，转场 y20 三腿：dist/stack/obs）
+
+- **背景**（用户令）：立即转场 y20（c05 磨到头：dist it270 0.9525；中期目标 c20 90%）。
+  关卡 `ladder-c20-lives1`（用户写 ladder-c20，按全场惯例取 lives1）；起点 y5-dist.it270
+  （sha16 `65ec5b9224028b35`）；三腿共享新种子 20270201；iters 300/max 48（c20 局慢，
+  用户未指定，先定后议）。
+- **决定**：D1=三新课（全键 diff 绿）：
+  `y20-dist`（y5-dist 配方逐字复刻：wDist 0.6/near 48/encl 12.9/梯度 wWin/timeout −5）；
+  `y20-stack`（dist 底＋back 三键［wBackHits 1.0/wSideHits 0.2/wHit 0.2］＋hurt 150；
+  wThreat 120 HOLD 回退 hide 的 150——D03 人 87 vs 机 51，threat 总量税误伤人类"进"；
+  wEncl 12.9/wDist 0.6/wNearSq 48 HOLD——A06/A05-A07 人类证据＋W03 既定注）；
+  `y20-obs`（x27-obs 配方零差复刻；优化器换 y 系退火；kickstart 关［同架构直连，
+  x27 的 kickstart 是跨架构专需］）。
+- **备选与否决**：① stack 照抄 hide 150 threat —— 否（D03 人类证据，回退 120；罚"待"足量）；
+  ② stack encl 回退 8.6（W03 人 122.9>机 95.1）—— 否（W03 既定注＋dist 支撑有效，维持）；
+  ③ wDist 加码（A05/A07 人类偏远）—— 否（A3 不动之谜未解，维持 0.6＋readout）；
+  ④ y20-obs 沿 x27 单段优化器 —— 否（起点已收敛，退火对；奖励复刻不动优化器）。
+- **前科披露**：x27-obs 已结课冻结（C 类四次阴性＋G0 miss，§85）——本次 c20 新场＋dist 起点
+  重测（非同语境复跑），门配杀线；同样总账零 ⇒ 判死确认不再重测。y20 门全暂定线
+  （锚 dist-190 c20 0.616/15.87；it0 基线偏离超 10% 按比例换算）。
+- **后果**：三文件已落盘；§15.5 新 out/traj/backup＋opt fresh；开课三连点人来。
+
+## §2026-10-16-goalnn-y5bdh-close（2026-10-16，y5-back/dist/hide 三腿结课）
+
+- **背景**（用户令）：y5 三腿（back/dist/hide）全停。
+- **决定**：三文件各追加尾部结课报告节（规格头不动；load 复验绿）：
+  back（变量无效确认：B3 0.1937→0.1874 反降，前判"倾向杀"升级；终点 0.93/四线全靠站位＋命中）/
+  dist（迟到但到：A3 3.517→3.674＋win 峰 0.9525 ⇒ anti-lottery"有效"命中，收回 wDist 无效前判；
+  near/encl 双大胜；纯本机 400 局 settled）/
+  hide（全场峰 0.9597/422 局补局 settled：threat −18%/hurtW −16% 维持；gameover 3.55%，
+  命耗线 3% 差 0.55pp 诚实注记；A3 一字不动预期内）。
+- **备选与否决**：① back 按"倾向"再续 —— 否（B3 反降＋全程未超基线，确认无效）；
+  ② dist kills 行缺失重跑 —— 否（win/clears/终点权重齐，kills 缺一行不影响 verdict）；
+  ③ hide 命耗线 3.55% 判 fail —— 否（差 0.55pp＋峰值＋税维持，收官不认 fail，注记）。
+- **后果**：y5 全系列结课（近/远/冠/速/包/早/翼＋back/dist/hide 共 10 腿，均有尾部报告）；
+  在跑只剩 y20 三腿。
 ## §2026-10-16-goalnn-offline-segment-roll（离线「无限轮」的下一半：J2 段末自动滚（含回灌腿）+ J4 静态拒因前置）
 
 - **来源**：`plan/offline-open-ended-iters-and-loud-export.plan.md` v2 §3.2/§3.4（B/D 腿）·
@@ -6899,3 +6935,233 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   云机 `nn-training/tests/{hub/test_admin_worker_error,remote/test_error_report,remote/test_worker_server_error_detail}.py`
   （25 格：含 F15 守门与「1s 慢 hub 仍立即返回」）+ `remote/error_report.py`（新，L0，已入 `tests/helpers/remote_dag.py` 层账）。
   **未验**：真机端到端（要一段真云机跑满才成立，闭合判据在 `docs/nn.progress.md`）。
+  与 `tmpLogsDir()` / `consoleLogPath()` / `loopControlPath()` 同规（P0-3）—— 否则用例会把指纹写进**操作员真账本**。
+  账本只在「新 `fp` 首次出现」时 append 一行；重启重放它当种子，**不继承** `firstAt`（代价：未消失的错误重弹一次，显式接受）。
+- **定案五（入口与详情页）**：首页 = 告警坞**第 9 类汇总条目**（0 或 1 条，逐条清单是详情页的事），为此把 `AlertAction.kind`
+  闭集放宽出唯一一个**无副作用**的 `'link'`（渲染成真 `<a href>`、**不挂 `onClick`**）；详情页 = **第 3 个独立页 /
+  第 4 份 bundle**（`/errors`，照 `/log` 范式，只读面照渲）；`detail` **不进** 3s/4s 轮询投影，按 `fp` 懒取。
+- **备选与否决**：① 复用 `/jobs/{id}/fail` 收瞬时错误 —— 否（那条腿有「首写胜出 + 只收确定性失败」语义，
+  塞进去会污染训练侧读到的那条失败原因）；② 在 `/jobs/*` 加 `detail` 字段 —— 否（要给取活协议动租约/游标语义面，
+  410 通道是纯加法）；③ 让 `/errors` 进主 bundle —— 否（独立页与 `/log` 同规）；④ 固定 / 纯账本 ack 键 —— 否
+  （只增不减的 `TC_ALERT_ACKS` 会把第二次同因事件永久吃掉）；⑤ 指纹住 `web/view/**` —— 否（`node:crypto` 撞分层禁词闸
+  与三份 bundle 禁词闸，评审 P0-1）；⑥ 把取消 / 热替换也报成错误 —— 否（设计内生命周期，报成错误就是灌噪音，F15）。
+- **后果**：`dashboard/tests/server-api-error-registry.test.ts`（新：P0-1/P0-2/P0-3 三条守门 + G8 跨 episode 试金石）·
+  `web-alert-dock.test.ts` 补第 9 类（含 `link` 渲染分支、汇总条 ack 分工、复现重弹）· `web-ssr-errors-page.test.ts`（新）·
+  既有闸同批改：`web-view-routes.test.ts` 的 link href 白名单改为**数据驱动**（原先硬编码 `/eval|/log/` ⇒ 加第 3 个独立页必红）、
+  `web-ssr-readonly.test.ts` 夹具补 `errors: null`（沿用 selfDisk F11 那条「夹具必须把无告警造成事实」的口径）。
+  技术正文 `docs/nn/console.md` §39；**未落地**：P1/P2 两条云机腿 + 真机端到端（见 plan §5/§6 的批次划分）。
+
+## §2026-10-16-goalnn-deliver-import-placement（产物导入落位：去掉目录改名，改逐轮 merge —— 解 Windows `WinError 5` 必败）
+
+- **来源**：`plan/offline-backfeed-resilience.plan.md` §8.2/§9-12（§10 的 **A+B** 两片）· 现场
+  `reports/y20-dist2-offline-backfeed-20261016.md` §3.8 · 评审 `plan/offline-backfeed-resilience.review-bf.md`
+  F6/F11（根因措辞与顺序证据）。
+- **定案一（去目录改名）**：`import_deliver_zip` 不再「解到 `<dest>/<run>.tmp-<pid>` 再整体 `rename`」——
+  Windows 的 `MoveFile` 要求源目录**整树无句柄**，而仓库常驻进程/监视器会给 `tmp/**` 下新建的目录**按序**挂句柄
+  （探针实测：前 31 个子目录改名成功、从 it-151 起必败；等 90s / 0.5s×60 退避 / `os.replace` 全无效）
+  ⇒ 改为逐件写盘，**全程不出现目录改名/替换**。中转目录仍只用于**解压**，`finally` 里必删。
+- **定案二（「不留半截」的接手方式）**：单轮内**权重最后拷**——半截轮对 `_scan_iters`（只认 `weights.*`）
+  不可见，下一次导入会把它补齐。旧代码靠「原子改名」拿到的性质由这个顺序接手，**不引入新的完整性标记字段**。
+- **定案三（读数源 = 包）**：`metrics.jsonl`/`eval_log.jsonl` 的并账从**包**里读（`_merge_carried_*` 的
+  `src_root` + 显式 `run_id`），不是从导入后的目录读——逐轮 merge 后 `final/metrics.jsonl` 可能停在上一次
+  导入的水位（只读它会让后到的包的曲线静默进不了课程账本）。
+- **备选与否决**：① `os.replace` 代替 `os.rename` —— 否（对目录语义同样 `WinError 5`，实测）；
+  ② 落位仍用改名、只在失败时 `copytree` 兜底 —— 否（两条路径两种语义，而失败在本机是 100%，不是边角）；
+  ③ 「先把持句柄的常驻进程停掉再导入」 —— 否（未定位到是谁；代价大于收益）。
+- **后果**：`remote/deliver_zip.py` 新增 `_same_bytes`/`_round_files`/`_land_rounds`/`_land_anchors`；
+  `tests/remote/test_deliver_zip.py` 用**反探针**钉住（把对目录的 `rename`/`replace` 打成 `PermissionError`
+  ——拦掉也必须照常导成功）。**未落地**：控制台用户可见的报错表（plan §6.2-4，G 片）。
+
+## §2026-10-16-goalnn-deliver-first-write-wins-import（本地导入/回灌同规：同名轮先到者为准 + 缺件愈合 + `--replace` 逃生门）
+
+- **来源**：同上（plan §8.2/§8.3 的 **D5**；评审 F6：`import_from_run` 当时是「存在即整轮跳过」的
+  **第二条路径**，与导入腿的「先 rmtree 再落」语义相反）。
+- **定案一（一份判据）**：导入腿与回灌腿共用一个 `_land_rounds`：缺件 ⇒ 拷（**愈合**）、同字节 ⇒ duplicate、
+  异字节 ⇒ **保留盘上先到的那一份** + 响亮一行 + `skipped_rounds`。口径对齐 hub 的
+  `store_offline_artifact`（duplicate / `_heal_round`）——hub 侧早就是内容判据，本地侧今天是相反的。
+- **定案二（锚点先到者为准，`state.json` 例外）**：`state/plan/manifest/artifacts.zip/两账本` 缺件才拷；
+  `state.json` 当「新包自述 `last_it` 更靠后 ∧ 本次零冲突」时采纳——否则它的 `last_it`/`last_weights_fp`
+  会指向被跳过的轮（自述与盘上事实不符比陈旧更贵）。
+- **定案三（返回体）**：`iters/last_it/ckpt` = **盘上真实**（合并后；`ckpt` 必须真实存在，控制台拿它跑 evalA），
+  新增 `package_iters`/`package_last_it`/`kept_rounds`/`skipped_rounds`/`healed_files`（additive，老读方忽略）。
+- **备选与否决**：① 默认覆盖（= 今天的语义）—— 否（同名轮是不可变快照，2026-10-11 的同一条口径：响比静默好）；
+  ② 「异字节跳过」做成静默 —— 否（人裁决要有入口 ⇒ `--replace`）；③ 把 `delivered.json` 的 `artifacts` 元素
+  类型改成 dict 以记 `confirmed_at` —— 本次未动，但**明令禁止**（老读方 `isinstance(it,int)` 会静默丢掉全部
+  已投递记账 ⇒ 全量重投 + 抽屉永不删；要加就加**并列键**，见 plan §4.2-3）。
+- **后果**：`--zip` 新增 `--replace`；`tests/remote/test_deliver_zip.py` 新增 9 条（DoD-7a/b/c + 缺件愈合 +
+  读数 additive + CLI 逃生门），既有「重导同名 run」用例改写为新语义（逐轮 merge，不再整目录替换）；
+  nn python 门禁全绿（ruff+mypy+pytest tests/ e2e/：4535 passed / 10 skipped）。
+  **未落地**：控制台 message 里的「新增 X 轮、跳过 Y 轮」（plan §8.2-4，G 片）与 §4 的删除/自愈面。
+
+## §2026-10-16-goalnn-offline-legs-revive（两条观测/补传腿都不许「一停到底」）
+
+- **来源**：`plan/offline-backfeed-resilience.plan.md` §2.2-2 / §4.2-1/2（评审 F1/F2）· 现场报告
+  `reports/y20-dist2-offline-backfeed-20261016.md`（「补传 27 轮 0 送达」「进度冻在 it125」）。
+- **定案一（补传腿：401 停用要能复活）**：`_disable` 加 `DISABLE_COOLDOWN_SEC = 600` 冷却 + 到点
+  `_maybe_revive()` 解封并**逼一次真探活**；探活**失败**的负缓存从 60s 收到 `PROBE_FAIL_TTL_SEC = 15`
+  ——「隧道刚回来」这段最该补投的时间不该被一个平坦的 60s 负缓存盖掉。当拍仍不重试（D9 闭锁口径不变）。
+- **定案二（打点腿：连不上 = 降频，不是停）**：连丢 `PROGRESS_FAIL_LIMIT` 拍改进降频窗
+  `PROGRESS_COOLDOWN_SEC = (240, 480, 900)`（封顶），窗过自动再试，**下一个成功复位计数与结局**；
+  段末结局仍是 `unreachable`（= 最后一次没成），只有 `revoked` 真停。
+- **定案三（409 `expired`/`taken` ⇒ 重新领租约）**：`install_progress_pinger(..., reclaim=…)` 交给
+  `offline_boot._reclaim_lease`（同机重领自己的课，hub 侧 `mine` 优先）；领不到才带着原因停。
+- **备选与否决**：① 指数退避到年级 —— 否（F2：抖动窗口按秒算）；② 409 一律停（旧口径）—— 否（现场就是
+  租约 TTL 到期/被抢了一次，而整段动线跟着哑）；③ 401 每轮重试 —— 否（bad token 重试无意义，还会被
+  D9 封 IP）。
+- **后果**：`tests/common/test_offline_task_queue.py` 的 pinger 用例改写（连丢 ⇒ 降频 + 窗过恢复 + reclaim），
+  `tests/remote/test_offline_deliver.py` 加冷却复活用例。**未做（评审 F1 的第 0 步）**：拿云机
+  `[deliver]` 行与 hub `/admin/offline` 读数把「27 轮 0 送达」定性成 C1/C3 还是 C4/C5 —— 在此之前
+  本片是**按覆盖面**设计的修法，不是按定性结果。
+
+## §2026-10-16-goalnn-drawer-carries-ledgers（抽屉带读数账本；账本「变了才拷」；容量读数进 status）
+
+- **来源**：plan §3.2/§3.3（DoD-2a/2b/2c，评审 D8）· §14（抽屉在网络盘上的写放大与配额）。
+- **定案一（抽屉 = 能被直接吃的产物根）**：锚点名单追加 `metrics.jsonl` / `eval_log.jsonl` ——现场
+  「权重能救、读数救不回」（抽屉里只有 `it-NNN/weights.json` + `opt.tar`，导入后曲线与 eval 全空）。
+- **定案二（变化才拷）**：只有这两个账本按 `(size, mtime_ns)` 变化才重拷（判据与 `_ledger_its()` 的缓存
+  失效**逐字同源**）；其余四件仍每拍重写——`state.json` **必须**与轮次同步（`run_id`/`last_it` 是导入/
+  恢复腿的判据）。
+- **定案三（读数由写方量、读方零 IO）**：`drawer_bytes/ledger/round_avg/budget` 进 `status()`，
+  `budget = 待投轮数 × 单轮均字节 + 两账本`（§14 的容量行）；`status()` 每拍被调而抽屉在网络盘上 ⇒
+  绝不在读面 `rglob`。子进程状态面（白名单）同步扩。
+- **备选与否决**：① 每拍全量重写两个账本 —— 否（MB/轮 的网络盘写放大）；② 只拷「首个待投轮之后的尾段」
+  —— 否（要维护一个水位 = 新状态源，而追加型账本的 `(size, mtime_ns)` 已经够准）；③ 在
+  `status()` 里现量抽屉 —— 否（IO 花在展示上）。
+- **后果**：`tests/remote/test_offline_deliver.py` 三条 + e2e 一条（把抽屉当产物根跑 `import_from_run` ⇒
+  曲线读数与 eval 行并入课程账本），`deliver_worker._write_status` 白名单扩 6 个键。
+
+## §2026-10-16-goalnn-rejected-ttl-and-reset（内容拒收不再是永久判决：TTL + 上限 + 人工重置）
+
+- **来源**：plan §15（**D6**）：`rejected` 跨会话按权重指纹认领 ⇒ 一次**误判**（hub 侧 409 被读成内容
+  问题、账本行取错）会让那一轮**永久不再回传**，而权重一直好好地躺在本地盘上。
+- **定案一（年龄面）**：每笔拒收落盘 `at`/`tries`；加载时 `tries ≥ REJECTED_MAX_TRIES(3)` 或
+  `now - at > REJECTED_TTL_SEC(24h)` ⇒ 不认（那一轮回到待投集）。旧账本没有 `at` ⇒ **一律复活**：
+  一条没有年龄的证据不足以支撑「永不再试」，而重试一轮的代价只是再推 ~1.9MB。
+- **定案二（只有拒收的一拍也要落盘）**：`_push_backlog` 的 `skip` 现在也置脏 ⇒ 记录即时落盘。
+  否则「本拍没有成功投递」会让记录只住内存，下一次落盘静默抹掉（连 TTL 都轮不到）。
+- **定案三（人工出口）**：`reset_rejected(根, run_id=…, it=…)`（+ `python -m remote.offline_deliver
+  --artifacts <根> [--it N]`）清掉记录行，并在文件里写**按 it** 的重置水位 `rejected_reset_at`；写方
+  落盘时丢掉水位之下的记录 ⇒ 活着的补传子进程不会把刚清掉的行写回来（水位按 TTL 清，防无限积累）。
+  目录复用时按 `run_id` 拒接（不许拿别的 run 的记录开刀）。
+- **备选与否决**：① 全局水位 —— 否（只重置一环会把**其余**环次的拒收一并放掉）；② 重置只在进程退出后
+  生效 —— 否（段末/长轮期间恰恰最需要）；③ 把 `--reset-rejected` 加在 `deliver_zip` —— 否
+  （`delivered.json` 的路径/指纹/水位口径都住在 `offline_deliver`，另开一处 = 同一语义两份实现）。
+- **后果**：9 条用例（TTL 过期复活 / TTL 内仍跳过 / 记满次数复活 / 旧账本无年龄 / 年龄面计数 / 只有拒收
+  的一拍落盘 / 重置在活会话里不被写回 / 只重置指定轮 / CLI）。
+
+## §2026-10-16-goalnn-import-checklist-and-name（导入：文件名 `@` 附注、落位计数上屏、包体检）
+
+- **来源**：plan §6.2-1/3 + DoD-5a/5c（G 片）· §19（同一语义只留一份实现）。
+- **定案一（文件名放宽）**：`deliver-<课>@<run_id>-it<N>.zip`（§5.2 的导出/一键包留历史名）的**课程段 = 
+  `@` 之前**；python `course_from_filename` 与 ts `validateDeliverUpload` 两处同改（两边各有用例钉住
+  「报错里指到的那门课就是课程段」）。
+- **定案二（包体检是报告不是门）**：`deliver_zip` 返回 `checks: [{id, ok, detail, +结构化字段}]`
+  （entries/shape/continuity/rows-fp/weights/state/state-fp/anchors/body-limit）+ `checks_ok` + `partial`。
+  任何一项不过**都不阻断导入**（先落权重才是这半个功能的主价值）；成功路径上也上屏（DoD-5c）。
+- **定案三（结构化读数与 `detail` 并存）**：`continuity.missing` / `rows-fp.{no_rows,bad_fp}` /
+  `state.{state_last_it,package_last_it}` / `anchors.missing` —— 控制台与用例按**数据**判，不挂措辞
+  （本仓点名过的反模式，见 `tests/helpers/text_asserts.py`）。
+- **定案四（§6.2-2「自动识别课程」取「只报错 + 指引」）**：包内**没有**课程信号（`IMPORT_META.json` 属 F 片
+  未落地；`state.json` 只有 run_id；`manifest.json` 只有 `course_fp`）⇒ 自动识课今天不可达，新增
+  `courseFromPackage=1` 请求字段等于**猜**；现有报错已给两个课名 + 明确动作（切课或改名），`@` 放宽后
+  不再误伤。待 F 片落地 `IMPORT_META.course` 后再按 §6.2-2 的优先级实现（并在 DECISIONS 另记一条）。
+- **后果**：`import.ts` 的结论串带「新增 X 轮、跳过 Y 轮（已有不同字节，先到者为准）」「补齐缺件 N 件」
+  「体检 N/N 全绿 / 未过 …」「**半段**」，`detail` 整屏展开体检 9 行；python 4 条 + ts 3 条用例。
+
+## §2026-10-16-goalnn-backup-drawer-module（抽屉写方单独成家 + 层级账本重排）
+
+- **来源**：`tests/test_python_loc_budget.py`（单文件代码行 < 1000，**只许收紧**）· 
+  `tests/helpers/remote_dag.py`（层号 = 拓扑秩 = `1 + max(依赖)`）。
+- **定案（按「独立所有者 + 独立触发条件」拆）**：抽屉的**拷贝策略**（拷哪些件 / 何时跳 / 失败算什么 /
+  读数）搬进 `remote/backup_drawer.py`（`BackupDrawer` + `BACKUP_ANCHOR_NAMES` + `DrawerReadings`）；
+  `offline_deliver` 只留「算哪些轮次待投」（它的判据）与「读数记进 status」。
+- **层级重排（诚实的代价）**：`remote.backup_drawer` **L1**（靠 L0 的 `artifacts` + `offline_deliverable`）
+  ⇒ `remote.offline_deliver` **L1 → L2**、`remote.deliver_proc`/`deliver_worker` **L2 → L3**（其余不变，
+  层号集合仍稠密）。
+- **备选与否决**：① 抬 LOC 上限 —— 否（用户口径：>1000 行 = 设计问题）；② 让抽屉只 import `common.*`
+  （把产物名搬进 `common/` 当 L0）—— 否（同名常量两处 = 又一份会漂的真相）；③ 把抽屉整块挪进
+  `offline_deliverable`（L0 + 豁免）—— 否（那是 standalone 运输单元，顶层只许 stdlib，混进来会砸引导契约）。
+- **后果**：抽屉写方**惰性建**（`deliver_proc` 的父侧镜像是在构造**之后**才补上 `backup_root`，在
+  `__init__` 里建好就是那个调用点上静默不备份）；`_drawer_for_write()` 取调用时的 `self.log` 同理。
+  方法名 `write` → `backup_rounds`（避免与 `common.log`/`worker.train.loop_util` 的同名面凑成 ≥3 模块，
+  `tests/test_reuse_ledger.py` 当场会红）。
+
+## §2026-10-17-goalnn-backfeed-e-f-g-h-close（E/F/G/H 四片收口：判据化重试与删除 · 一键包 · 报错表 · 停课导入）
+
+- **来源**：`plan/offline-backfeed-resilience.plan.md` §4（E）· §5（F）· §6.2（G）· §7（H）
+  + `plan/offline-backfeed-resilience.review-bf.md`（F1/F2/F4/F9/F10/F11）。
+- **E（§4 自愈重试 + 租约重领 + 判据化删除）**：不新增机制，把 tick 内已有的「试」收紧并记住 ——
+  ① 探活负缓存从 60s 收到 **15s**（`PROBE_FAIL_TTL_SEC`，封顶仍 ≤60s，别把平坦重试换成退避）；
+  ② `next_try_sec`/`last_error`/`retry_n` 进 `status()`（**给人看，不做退避判决**）；
+  ③ `_disable`（401/403）加**冷却复活**（`DISABLE_COOLDOWN_SEC`，到点清 reason + 重探活）；
+  ④ 409 `expired`/`taken` ⇒ 补传腿照落（hub 侧本无租约门）+ 打点腿**重新 claim**（`_reclaim_lease`）
+  —— `revoked` 不动（那是人的意志）；⑤ 抽屉删除 = **回传成功（`POST 200 → _save_ledger()`）才删**，
+  `delivered.json` 不可信 ⇒ 一拍不删；`BACKUP_KEEP_ROUNDS`/`BACKUP_KEEP_HOURS` 接口留而默认 0。
+- **E 的孤儿口径（F4 落地选择）**：账本是 run 级、抽屉是课级 ⇒ 换 run_id 后老段轮次在新账本里**无证据**
+  ⇒ 走**内容对账**（本地有同一份字节 = 可重建的冗余 ⇒ 可删），剩下真孤儿**保留并计数**
+  （`backup_orphans`）——「不许默默不删」两条口径各一条用例（DoD-3e）。备选「孤儿一律不删」被否：
+  抽屉只涨不落，而它能被内容对账证明可重建。
+- **F（§5 一键包）**：新增 `package_pending(cfg, log, *, courses=None)`，判据表四行（本地根齐 → 全量+三件+
+  两账本 / 只有抽屉齐 → 抽屉全量 / 已收官 → `artifacts.zip` 直接复制 / 两边都不齐 → 响亮报缺哪一件、返回空表、
+  绝不抛）；包内加 `IMPORT_META.json`（`magic/课程/run/it_from/it_to/generated_at/source`），
+  历史名 `deliver-<课>@<run>-it<N>.zip` —— 与既有 `package_deliverable` 共用判据函数（不留第二份带账本的口径）。
+- **G（§6.2 报错表 / 自动识课 / 留证保留）**：`import.ts` 的失败收口加一张**现象 → 人话 + 出路**表
+  （句柄占住 / 目标已存在 / 非 zip / 拿错包 / 形状 / 课名冲突 / 盘满 / 超时 / 兜底），`detail` 一律带
+  「挂在的门 + 出路 + 末尾八行 + **日志绝对路径**」，铁律 = 结论句里不出现裸 `WinError`/`Traceback`；
+  留证目录保最近 3 份（删时响亮一行）。**§6.2-2 自动识课的定案改判**：`IMPORT_META.json` 已落地 ⇒
+  优先级 `IMPORT_META.course` > `state.run_id` > `manifest.course_fp` > 文件名，冲突**不猜**（python 侧
+  拒收并给两个课名 + 动作），控制台**不静默切课**、只把「包内自述：课程/run/来源」上屏
+  （上一轮取「只报错 + 指引」的那个前置条件已消失，扩展上一条 `§2026-10-16-goalnn-import-checklist-and-name`）。
+- **H（§7 停课导入）**：导入**全程不看**开课标记/在不在训（写进 docstring + 用例）；唯一与课状态有关的一步
+  只是 T6 段末横幅转交，拿不到 hub 摘要就**不转交且说出来**（`bannerNote = 段末横幅未落账：hub 不可达`）。
+  为此 `fetchHubOfflineResults` 的返回体从「摘要或 null」改成 **`{results, hubUp}`**（「hub 不可达」与
+  「hub 活着但没这一段」是两件事，挤进一个 null 就只能编一个原因）。
+- **H 配套（F9 落地选择①）：`tmp/<课>/deliver/` 是课程的长期资产**。`tools/tmp-clean.py` 只收它的**兄弟**
+  （`LONG_TERM_KEEP`，递归到资产所在那一层）；备选②（把长期资产移出 `tmp/`）被否 —— 那要改导入/回灌/
+  控制台三处路径口径，而豁免在收敛侧一处即可，且危险窗（课已停、`training_running()` 闸放开、人正在导入）
+  正是 `tmp/<课程>/` 被判成 run root 时。导入/回灌的 docstring 同步写明这条语义。
+- **同批加的闸（事故驱动的，非 plan 项）**：`refuses_zero_retention()` —— `--keep-runs 0 --keep-days 0 --apply`
+  拒绝执行（要 `--force`）。**事故**：2026-10-17 一次探针用 `mod.TMP = <临Dir>` 注入，而 `plan` 的
+  `tmp_dir` 默认参数在**定义时**绑定 ⇒ 探针实际在**真 tmp/** 上跑了一趟 `--apply`，1907 项 / 38GB
+  （各课本地 `it<N>/`、账本、日志）一次抹掉且**不可恢复**（`rmtree` 不进回收站；唯一幸存的是三个
+  `PROTECTED` 顶层，以及**本次豁免的 `deliver/`**—— §7-3 的豁免在真实数据上当场自证）。两处据此修死：
+  ① `plan(tmp_dir=None)` 改调用时解析（默认参数陷阱）；② 零保留 + `--apply` 需 `--force`；
+  ③ 用例改按**目标集合全等**判（不再是否定式子串），并新增「资产在更深一层也要保住」的用例。
+- **备选与否决**：指数退避（15s→300s）—— 否（对「抖动 60s 后恢复」这个主场景是降级；若将来要，只能
+  限定为**日志节流**）· 抽屉删除加保留窗口 8 轮/24h —— 用户 2026-10-16 已否（回传成功即删）·
+  新增 `courseFromPackage=1` 请求字段让控制台按包内课程导 —— 否（`IMPORT_META` 落地后 python 侧已有
+  权威对账口，多一个会被误用的开关不如把冲突说清楚）· 把长期资产移出 `tmp/` —— 见上。
+- **后果**：`tmp-clean` 的删除目标从「整个 run root」变成「刨掉资产后的各块」（无资产时仍是**一次
+  `rmtree`**，与旧行为逐字节一致）；文本断言基线 FORM 1470 → **1480**（+10 操作员读数行 −6 已改成
+  非文本判据，逐笔分摊写在 `tests/test_source_text_assert_budget.py` 模块头）。
+
+## §2026-10-17-goalnn-hub-memory-slim（hub 递送流式化 + result 有界 + 账本真增量 + 课程表可淘汰 + /admin/mem）
+
+- **来源**：`plan/hub-server-memory-slim.plan.md`（L1/L2/L3）+ 事故现场：hub（`python -m hub.server`
+  --port 8787 --traj-root tmp --discover）连跑 35h 后 **WS 6.24GB / priv 10.04GB / peak 7.71GB**，
+  而活状态实测全空（7 门课 · `pending_n=0` · 三份账本合计 81KB · 线程 64/句柄 656 正常）。
+  确证实验：打 20 次 16MB net-probe（320MB）⇒ RSS **零增长** ⇒ 堆已被撑到高位且不再向 OS 要/还
+  ⇒ 真因是**历史峰值被堆锁住（棘轮）**，峰值来自「整个文件 `read_bytes()` 成 bytes 再递出去」。
+- **L1 递送流式化**：`hub/http_face.py` 抽出 `_send_headers` + `_send_body`（传输语义只此一份），
+  三种喂法 `_bytes`（内存 bytes）/ `_bytes_file`（盘上区间，`readinto` 复用一块 ⇒ 峰值恒 = SEND_CHUNK）
+  / `_bytes_files`（多件分帧）。改造点：`_serve_path` · `/payload`（Range 分支不再切第二份）·
+  blob 批量（不再 `join`）· `/offline/task-pack` · 锚点件。字节流与旧实现**逐字节等价**。
+- **L2 大块读收口**：`common.fs.same_bytes`（分块比较，替掉 `read_bytes() == blob`）·
+  `sha256` 一律走 `common.hashing.sha256_file`（**不新造**，它本来就是分块的唯一实现）·
+  `POST /jobs/{id}/result` 从**无界** `_read_raw_body()` 改成 `_read_capped_body(RESULT_BODY_MAX=64MB)`
+  ——取值依据：实测 `result.json` 最大 260KB（6 份样本）⇒ ~250× 余量；复核方法写在常量注释里
+  （量账本里 `record_result_recv` 的 p99，别只看盘上剩下的）。
+- **L3 常驻侧 + CPU**：`_read_ledger` 补上 H6 缺的那一半 `_ledger_off`（记住已解析字节位 ⇒ 只**读新增**；
+  半截行留在 offset 外；文件被截短自动退回全量）——旧实现只在「size 未变」时省 IO，一变就全文重解析，
+  长跑每拍 O(账本)，hub 35h 累计 74713s CPU 有一半是这个。`discover` 补 `drop_course`
+  （课程表原先**只增不减**）：判据只认「**课程目录没了**」，且**在飞（内存租约）/ 有人接管不摘**；
+  新增 `GET /admin/mem`（RSS + 逐课账本行数 + 六张常驻表规模）。
+- **备选与否决**：① 用 psutil 读内存 —— 否（hub 的 import 闭包只许标准库，
+  `tests/remote/test_hub_import_graph.py` 钉着）；② 「停课（删开课标记）也摘表」—— **否**（停课后
+  控制台要看得见、云机要能取包、人要能导段，摘表只带来 404；派发已由 `_serves_course` 挡住）；
+  ③ 淘汰判据加「超 fresh 窗口」—— 否（卡住的课会被误当死课）；④ 水位自重启（plan L4）—— **暂不做**
+  （先有 L1–L3，否则是拿重启掩盖；真机判据 = 改完 1 小时后 `/admin/mem` 的 rss 仍 ≤150MB）。
+- **后果**：递送路径的峰值从「文件等长（Range ×2）」降到「≤256KB」；账本读从 O(账本) 降到 O(新增)；
+  课程表可淘汰 ⇒ tmp 被清之后内存里的账本不再永久驻留。守卫随之更新（成员数 121→124、
+  `_init_ledger` 字段 +`_ledger_off`、`_read_raw_body` 调用点 3→2、`SEND_TIMEOUT` 读点 `_bytes`→`_send_body`、
+  `store_offline` 白名单 +`common.hashing`）。

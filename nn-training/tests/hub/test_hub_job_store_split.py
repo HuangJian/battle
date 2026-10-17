@@ -102,7 +102,9 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "_cancel_job_locked",
             "cancel_job",
         ),
-        ("_ledger_cache", "_cancelled"),
+        # 2026-10-17（plan/hub-server-memory-slim L3）：`_ledger_off` = H6 真增量的另一半
+        # （已解析到的字节位）。没有它，size 一变就只能全文重解析。
+        ("_ledger_cache", "_ledger_off", "_cancelled"),
     ),
     "store_wire": (
         wire_mod.WireMeterMixin,
@@ -235,6 +237,10 @@ ALLOWED_IMPORTS = {
     #   涨一层（层号 = 拓扑秩，`tests/test_remote_dag.py`）。
     "hub.store_offline": {
         "common.fs",
+        # 2026-10-17（plan/hub-server-memory-slim L2）：补传冲突那条路要算「hub 已有字节」的
+        # 指纹，改用 `common.hashing.sha256_file`（**分块**、全仓唯一实现，替代
+        # `hashlib.sha256(p.read_bytes())`——旧写法把几十 MB 权重整份读进内存只为算个哈希）。
+        "common.hashing",
         "common.protocol",
         "remote.artifacts",
         "remote.delta_files",

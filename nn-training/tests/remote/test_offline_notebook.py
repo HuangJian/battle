@@ -246,18 +246,23 @@ def test_notebook_has_a_mid_run_package_cell() -> None:
     """底部那格「中途取回」（用户口径 2026-09-23）：跑到一半也能把产物交回控制台。
 
     守三件事：① 它**恰有一格**且不含引导调用（引导 cell 的唯一性靠 `_run(CFG` 判定，
-    多一个含它的 cell 会让那份 fixture 直接报错）；② 它走 runtime 的 `package_partial`
-    （工作目录的推导、包的选择、命名都在那里一份，cell 不许自己拼一份）；③ 名字与下一步
-    写明 —— 控制台靠 `deliver-<课>.zip` 对账课程，而人需要知道去哪里下载。
+    多一个含它的 cell 会让那份 fixture 直接报错）；② 它走 runtime 的 `package_pending`
+    （产物根的推导、两态判据表、命名都在那里一份，cell 不许自己拼一份）；③ 名字与下一步
+    写明 —— 控制台靠文件名/包内 `IMPORT_META` 对账课程，而人需要知道去哪里下载。
+
+    2026-10-17（`plan/offline-backfeed-resilience` §5）：从 `package_partial`（只挑一个包：
+    全量包优先，否则最新一轮）改成 `package_pending`（**整段**：全部轮次 + 两账本 + 三件）
+    —— 现场要 27 轮/200 轮时前者拿不到整体，只能手工 zip 抽屉。
     """
-    hits = [t for t in notebook_cells(NB, "code") if "package_partial" in t]
+    hits = [t for t in notebook_cells(NB, "code") if "package_pending" in t]
     assert len(hits) == 1, f"期望恰好 1 个中途取回 cell，实际 {len(hits)}"
     pack = hits[0]
     assert "_run(CFG" not in pack, "中途取回 cell 不得含引导调用（会破坏引导 cell 的唯一性）"
-    assert "_ob.package_partial(CFG, _log)" in pack, "必须调 runtime 的 package_partial（单一实现）"
+    assert "_ob.package_pending(CFG, _log)" in pack, "必须调 runtime 的 package_pending（单一实现）"
     assert "导入产物" in pack, "要说清下一步是把包上传到控制台「导入产物」"
-    assert "deliver-<课>.zip" in pack, "要写明产出的名字（与跑完时同一个）"
-    assert "LATEST.zip" in pack or "artifacts.zip" in pack, "要说清包里装的是什么"
+    assert "deliver-<课>.zip" in pack, "要写明产出的名字（收官那支与老习惯一致）"
+    assert "deliver-<课>@<run>-it<N>.zip" in pack, "中途包是附注名（多 run 不互盖）——要写明"
+    assert "artifacts.zip" in pack, "要说清两种状态里装的是什么（收官 = 全量包副本）"
     assert "_IS_COLAB" in pack, "Colab 上要直接触发下载（否则人得自己去文件树里找）"
 
 
@@ -273,7 +278,10 @@ def test_markdown_documents_the_hub_retry_cap_and_kaggle_tailscale_skip() -> Non
     assert "Kaggle" in md and "Tailscale" in md and "会被忽略" in md, (
         "Kaggle 上跳过 tailscale 这条要写明（否则人会先去填 HUB_IP/TS_AUTHKEY 白忙）"
     )
-    assert "中途取回" in md and "LATEST.zip" in md, "中途取回那格要在说明书里指出"
+    # 2026-10-17：那格从「挑一个包（LATEST.zip）」改成「打整段」（全部轮次 + 两账本 + 三件），
+    # 说明书要跟着说成两态（收官 = artifacts.zip 副本 / 中途 = 附注名）。
+    assert "中途取回" in md and "整段" in md, "中途取回那格要在说明书里指出（且说清它打的是整段）"
+    assert "artifacts.zip" in md and "@<run>-it<N>" in md, "两种状态的名字/内容都要写明"
 
 
 def test_cell_has_no_key_material_or_hardcoded_course() -> None:

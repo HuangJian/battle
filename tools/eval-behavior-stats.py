@@ -7,11 +7,22 @@
     python3 tools/eval-behavior-stats.py --course y5-crown --iter 125
     python3 tools/eval-behavior-stats.py --course y5-pace --iter 115 --stage
 
-口径（与训练门逐字同）：
+口径（与训练门逐字同，三条纪律来自 2026-10-16 y5 横盘诊断的自我审查；
+明细见 `reports/y5-winrate-plateau-20261016.md` §2/§8）：
 - "/千"率分母 = Σ(ticks+1)（headline 口径）；" /局" = 局均值；占比 = 占 enemyHits。
+- **总量 vs 归一**：死局比活局短（y5 收敛带实测 1592 vs 2254 拍，−29%），总量对比全是局长假象
+  （S2 停总量"死局更少"即误判；W4 贴脸 nearSq raw 总量"死局更低"同理）。看行为一律看率/占比，
+  S4（停占比）才是 S2 的诚实版。
+- **均值 vs 中位**：零膨胀列（D2–D4/E1/G1/超时中伤）中位塌到 0，均值被少数重伤局拉走。
+  本表主列仍是均值（与门/headline 可比），中位为 0 而均值非 0 的行打 ※零膨胀标——
+  读数以方向为准，不读倍数。
+- **定义量 ≠ 行为量**：D1（`playerHits`）在 28046 个死亡局上与 `playerDeaths` **100% 相等**
+  ⇒ 那一行的倍数（~140x）是"1 命死了就是死了"的同义反复，**不要当信号读**。
 - 数据源 = tmp/<课>/eval_log.jsonl 的 `event=eval` 行；只读不写。
 - 死 = outcome gameover（命耗尽：lives 0、基地完好）；活 = stage_clear。
 - gameover 样本 <10 局打 ⚠（比值不稳，只看方向）。
+- 进不了本表的（eval 行没有逐步列）：选中动作置信 −logπ、V(t)、hurt 窗口增量——
+  那是 rollout shard 的地盘（`tmp/y5-autopsy*.py` 管）：本表只到局 FIN 行的聚合列。
 
 行为解释（每条见 METRICS 注，口径已和用户对齐十次， summarized）：
 - 背击/侧击是**奖**：我从背后/侧面打中敌人 = 无伤杀敌（敌人还不了手），多多益善。
@@ -79,10 +90,10 @@ METRICS = [
      "站在危险格里的时间。crown 死局 4.5x=开局逛进危险区。"),
     ("W2", "威胁lane/千", "rate", lambda r: r.get("threatTicks", 0),
      "站在敌人火线覆盖上的时间。已有税 wThreat=120（重税）。死局 3x=税听不见或改不动。"),
-    ("W3", "贴脸4格/千", "rate", lambda r: r.get("nearEnemy4Ticks", 0),
-     "4格内时长=被包围的上游。本身不罚（near×2前科）；死活同量=时长无辜，看贴脸之后。"),
-    ("W4", "贴脸平方和/千", "rate", lambda r: r.get("nearSqSum", 0),
-     "越近权重越大，同 W3（主2门线 110 的本体）。"),
+    ("W3", "贴脸时长/千", "rate", lambda r: r.get("nearEnemy4Ticks", 0),
+     "4格内时长=贴多久（不加权：一格和四格等权计数）。本身不罚（near×2前科）；死活同量=时长无辜。"),
+    ("W4", "贴脸率·加权/千", "rate", lambda r: r.get("nearSqSum", 0),
+     "nearSq 加权=贴多近（一格权重远大于四格）。主2门线 110 的本体；比较贴脸一律用它，不用 W3。"),
     ("W5", "被包围加权/千", "rate", lambda r: r.get("enclWeightTicks", 0),
      "≥2条敌火线夹击的时间。已有税 wEncl=8.6（全场最轻）+死局2x=加压候选（剂量安全）。"),
     ("W6", "最大包围数", "game", lambda r: r.get("enclMax", 0),
@@ -101,13 +112,16 @@ METRICS = [
      "第一个击杀在第几拍=开局慢热度。crown死局慢24%，别处无差。"),
     ("G3", "逛格/局", "game", lambda r: r.get("cellsVisited", 0),
      "活动量。死局少=局短+龟缩。"),
-    # ── 苟系：死局反而少=死因是莽不是苟 ──
+    # ── 苟系：总量看死局更少是局短假象，归一化后死局更爱停（Q3 在 eval 独立复现）──
     ("S1", "卡死/局", "game", lambda r: r.get("stuckTicks", 0),
-     "撞墙顶住不动。死局更少=wBlock对这批局无用（死因是莽）。"),
+     "撞墙顶住不动（总量！死局短所以显得少，诚实版看 S4）。"),
     ("S2", "停/局", "game", lambda r: r.get("stopTicks", 0),
-     "无输入停，同 S1。"),
+     "无输入停（总量！同 S1 被局短掩盖；S4 归一化后死局 0.38 vs 活局 0.30，站桩实锤）。"),
     ("S3", "火压/局", "game", lambda r: r.get("fireHeldTicks", 0),
      "想开火被压住的拍。死局少=死前开火本来就少。"),
+    ("S4", "停占比", "game",
+     lambda r: r.get("stopTicks", 0) / (r.get("ticks", 0) + 1) if r.get("ticks") else None,
+     "停拍占存活比（S2 的归一化诚实版）。死局更高=末端站桩，Q3（末 20 步 STOP 率）在 eval 复现。"),
     # ── 开局与包围拆解：crown 开局逛 + encl 罚时长还是罚烈度 ──
     ("E1", "开局600承伤", "game", lambda r: r.get("dmgFirst600", 0),
      "开局 600 拍挨的血（h5a 税列）。crown 死局开局逛的直接证据。"),
@@ -194,6 +208,20 @@ def mean(vals: list) -> float | None:
     return sum(vs) / len(vs)
 
 
+def median(vals: list) -> float | None:
+    vs = sorted(v for v in vals if v is not None and isinstance(v, (int, float)))
+    if not vs:
+        return None
+    m = len(vs) // 2
+    return vs[m] if len(vs) % 2 else (vs[m - 1] + vs[m]) / 2
+
+
+def zero_inflated(vals: list) -> bool:
+    """零膨胀：中位塌到 0 而均值非 0（D2–D4/E1/G1 类）——倍数不读，只读方向。"""
+    md, mn = median(vals), mean(vals)
+    return md == 0 and (mn or 0) > 0
+
+
 def fmt(v) -> str:
     if v is None:
         return "—"
@@ -222,17 +250,23 @@ def main() -> None:
     print(f"\n{'编号':<6}{'指标':<16}{'死局':>10}{'活局':>10}{'死/活':>8}  行为解释（一句话）")
     for code, name, kind, f, plain in METRICS:
         if kind == "game":
-            a, b = mean([f(r) for r in go]), mean([f(r) for r in cl])
+            gv, cv = [f(r) for r in go], [f(r) for r in cl]
+            a, b = mean(gv), mean(cv)
+            tag = " ※零膨胀" if (zero_inflated(gv) or zero_inflated(cv)) else ""
         else:
             a = sum(v for v in (f(r) for r in go) if v is not None) / denom_go * 1000
             b = sum(v for v in (f(r) for r in cl) if v is not None) / denom_cl * 1000
+            tag = ""
         ratio = f"{a / b:.2f}x" if (a is not None and b not in (None, 0)) else "—"
-        print(f"{code:<6}{name:<16}{fmt(a):>10}{fmt(b):>10}{ratio:>8}  {plain}")
+        print(f"{code:<6}{name:<16}{fmt(a):>10}{fmt(b):>10}{ratio:>8}  {plain}{tag}")
 
     if to:
         k = mean([r.get("kills", 0) for r in to])
         s = mean([r.get("stuckTicks", 0) for r in to])
-        print(f"\n超时 {len(to)} 局画像：击杀 {fmt(k)}（差一口气）、卡死 {fmt(s)}（活局约一半）——苟，不是莽。")
+        td = [r.get("playerDamageTaken", 0) for r in to]
+        print(f"\n超时 {len(to)} 局画像：击杀 {fmt(k)}（差一口气）、卡死 {fmt(s)}、"
+              f"中伤中位 {fmt(median(td))}/均值 {fmt(mean(td))}"
+              f"（中位 0＝一半超时局毫发无损找不着北，POMDP 不是菜）。")
 
     if args.stage:
         print("\n分关：胜率（死/超）")
