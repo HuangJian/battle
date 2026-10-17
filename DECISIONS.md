@@ -6860,35 +6860,42 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 
 ## §2026-10-16-goalnn-component-error-registry（组件错误注册中心：五处散落的错误 → 一张登记表 → 首页入口 + `/errors` 详情页）
 
-- **来源**：`plan/component-error-registry.plan.md` **v3**（用户 2026-10-15 诉求：「让远端 ppo 云机、自主 rollout/eval/ppo
+- **来源**：`plan/component-error-registry.plan.md` v3（用户 2026-10-15 诉求：「让远端 ppo 云机、自主 rollout/eval/ppo
   云机，本地进程 trainer/hub/cloudflared 的错误日志能够在 dashboard 注册并查看…避免训练各个组件静默失败无人处理」）·
-  评审 `plan/component-error-registry.review-bf.md`（3 P0 + 4 P1 + 5 P2，处置见 plan §12）。本条记的是 **D 批次**
-  （只动 `dashboard/**` ⇒ 不翻训练 code zip、不影响集群 codeHash，可随时回滚）；云机侧的两条腿（E3 走既有 410 通道补
-  `detail` / E4-E5 上报腿 `POST /admin/worker-error`）是 **P 批次，未落地**（要单独窗口，见 plan §7 Rk1）。
-- **定案一（五处 → 一处）**：`ErrorEvent` 是唯一形状（类型住 `web/view/error-types.ts` —— 零 import；计算住
-  `server/api/error-{fingerprint,scan,registry}.ts`）。四条腿各带闸：腿 A 本机组件日志尾 `size:mtime` 签名、
-  腿 B 已见 jid 记忆化（`fail.json` 首写胜出 ⇒ 每个 jid 只读一次）、腿 C 云机上报只在自己的 **10s 独立节拍**上探 hub、
-  腿 D 读既有池视图 SWR 缓存 ⇒ **`/api/state` 请求路径零新增探测零网络**（N9 / R1 结构闸）。
-- **定案二（`fp` 不含 `scope`）**：指纹 = `shortHash(source | component | normalize(message))`（归一去掉 hex / 数字序列 /
-  时刻 / `tmp/` 之前的绝对路径前缀）。`scope`（课名 / job id）进指纹会把同一条错误在 10 门课上折成 10 条 ⇒
-  首页计数虚高、详情页十行同一条 —— 正是要治的刷屏在详情页上的复刻。
+  评审 `plan/component-error-registry.review-bf.md`（3 P0 + 4 P1 + 5 P2，处置见 plan §12）。**D 批次**（`dashboard/**`）
+  与 **P 批次**（`nn-training/**`：E3 改走既有 410 通道补 `detail` + E4/E5 上报腿）**均已落地** —— P 批次按 §7-Rk1
+  单开窗口：改 `nn-training/**` 会翻训练 code zip，云机 worker 下次校验 `CodeChangedError` ⇒ 退出码 86 自愈重拉一次。
+- **定案一（五处 → 一张表）**：`ErrorEvent` 是唯一形状（类型住 `web/view/error-types.ts` —— 零 import；计算住
+  `server/api/error-{fingerprint,scan,registry}.ts`）。四条腿**各带闸**：腿 A 本机组件日志尾 `size:mtime` 签名、
+  腿 B 已见 jid 记忆化（`fail.json` 首写胜出）、腿 C 云机上报只在自己的 **10s 独立节拍**上探 hub、腿 D 读既有池视图
+  SWR ⇒ **`/api/state` 请求路径零新增探测零网络**（N9 / R1 结构闸）。技术正文：`docs/nn/console.md` §39。
+- **定案二（`fp` 不含 `scope`）**：指纹 = `shortHash(source | component | normalize(message))`（归一去掉 hex / 数字
+  序列 / 时刻 / `tmp/` 之前的绝对路径前缀）。把课名算进指纹会让同一条错误在 10 门课上折成 10 条 ⇒ 首页计数虚高、
+  详情页十行同一条，正是要治的刷屏在详情页上的复刻。
 - **定案三（两个时刻分开 · 两个 ack kind）**：账本 `firstSeenAt`（**不可变**，只做「这个 fp 我见过」的种子）vs
-  内存 episode `firstAt`（**可重置**，ack 身份）。ack = `component-error`（逐条：`fp` × 内存 `firstAt`）与
-  `component-errors`（首页汇总条本身：subject `'all'`，eventId = 最新未 ack 错误的时刻）⇒ 持续态不重复打断、
-  **消失后复发必重弹**、新错误进来必重弹。二者混用会让一次「知道了」永久静音（F2/F3 要治的病）。
+  内存 episode `firstAt`（**可重置**，ack 身份）；ack = `component-error`（逐条：`fp` × 内存 `firstAt`）与
+  `component-errors`（首页汇总条：subject `'all'`，eventId = 最新未 ack 错误的时刻）。二者混用 ⇒ 一次「知道了」
+  永久静音；分开 ⇒ 持续态不重复打断、**消失后复发必重弹**、新错误进来必重弹。
 - **定案四（账本可重定向）**：`tmp/component-errors.jsonl` 住 `core/paths.ts::errorLedgerPath()`（`BCITY_ERROR_LEDGER`），
-  与 `tmpLogsDir()` / `consoleLogPath()` / `loopControlPath()` 同规（P0-3）—— 否则用例会把指纹写进**操作员真账本**。
-  账本只在「新 `fp` 首次出现」时 append 一行；重启重放它当种子，**不继承** `firstAt`（代价：未消失的错误重弹一次，显式接受）。
-- **定案五（入口与详情页）**：首页 = 告警坞**第 9 类汇总条目**（0 或 1 条，逐条清单是详情页的事），为此把 `AlertAction.kind`
-  闭集放宽出唯一一个**无副作用**的 `'link'`（渲染成真 `<a href>`、**不挂 `onClick`**）；详情页 = **第 3 个独立页 /
-  第 4 份 bundle**（`/errors`，照 `/log` 范式，只读面照渲）；`detail` **不进** 3s/4s 轮询投影，按 `fp` 懒取。
-- **备选与否决**：① 复用 `/jobs/{id}/fail` 收瞬时错误 —— 否（那条腿有「首写胜出 + 只收确定性失败」语义，
-  塞进去会污染训练侧读到的那条失败原因）；② 在 `/jobs/*` 加 `detail` 字段 —— 否（要给取活协议动租约/游标语义面，
-  410 通道是纯加法）；③ 让 `/errors` 进主 bundle —— 否（独立页与 `/log` 同规）；④ 固定 / 纯账本 ack 键 —— 否
-  （只增不减的 `TC_ALERT_ACKS` 会把第二次同因事件永久吃掉）；⑤ 指纹住 `web/view/**` —— 否（`node:crypto` 撞分层禁词闸
-  与三份 bundle 禁词闸，评审 P0-1）；⑥ 把取消 / 热替换也报成错误 —— 否（设计内生命周期，报成错误就是灌噪音，F15）。
-- **后果**：`dashboard/tests/server-api-error-registry.test.ts`（新：P0-1/P0-2/P0-3 三条守门 + G8 跨 episode 试金石）·
-  `web-alert-dock.test.ts` 补第 9 类（含 `link` 渲染分支、汇总条 ack 分工、复现重弹）· `web-ssr-errors-page.test.ts`（新）·
-  既有闸同批改：`web-view-routes.test.ts` 的 link href 白名单改为**数据驱动**（原先硬编码 `/eval|/log/` ⇒ 加第 3 个独立页必红）、
-  `web-ssr-readonly.test.ts` 夹具补 `errors: null`（沿用 selfDisk F11 那条「夹具必须把无告警造成事实」的口径）。
-  技术正文 `docs/nn/console.md` §39；**未落地**：P1/P2 两条云机腿 + 真机端到端（见 plan §5/§6 的批次划分）。
+  与 `tmpLogsDir()` / `consoleLogPath()` / `loopControlPath()` 同规 —— 否则用例会把指纹写进**操作员真账本**。
+  只在「新 `fp` 首次出现」时 append 一行；重启重放只当种子、**不继承** `firstAt`（代价：未消失的错误重弹一次，显式接受）。
+- **定案五（入口与详情页）**：首页 = 告警坞**第 9 类汇总条目**（0 或 1 条，逐条清单是详情页的事），为此把
+  `AlertAction.kind` 闭集放宽出唯一一个**无副作用**的 `'link'`（渲染成真 `<a href>`、**不挂 `onClick`**）；详情页 =
+  **第 3 个独立页 / 第 4 份 bundle**（`/errors`，照 `/log` 范式，只读面照渲）；`detail` **不进** 3s/4s 轮询投影，按 `fp` 懒取。
+- **定案六（P 批次：云机的两条腿怎么回本机）**：① **E3 复用既有 410 通道**（`set_error(detail=…)` → 410 体
+  `fail_detail` → `remote/push_dispatch.push_failure_record()` 改读，缺字段回退原常量）⇒ **无新端点 / 无新凭据 /
+  无阻塞**；② **E4/E5 走 `POST /admin/worker-error`**（形状照抄 `worker-prefetch`：同一枚 token、缺 `worker`/`reason`
+  ⇒ 400、64KB ⇒ 413；hub 侧只是 TTL 120s + 200 条的**内存环** —— 权威账本只在控制台）；③ 上报走 `remote/error_report.py`
+  的 **daemon 线程 + 2s 超时**：`report_error` **立即返回**、失败即丢、不重试（G9）；④ 读面游标 = **hub 的到达时钟
+  `at`**，不是上报方的事件钟 `ts`（跨机时钟不可比）。上报点只有三个 pull 失败分支 + 离线段失败；**取消 / 热替换 /
+  确定性拒绝一律不报**（设计内生命周期，F15）。技术正文：`docs/nn/remote-transport.md` §103。
+- **备选与否决**：① 复用 `/jobs/{id}/fail` 收瞬时错误 —— 否（那条腿「首写胜出 + 只收确定性失败」，会污染训练侧读到
+  的那条失败原因）；② 在 `/jobs/*` 加 `detail` 字段 —— 否（要给取活协议动租约/游标面，410 通道是纯加法）；
+  ③ 让 `/errors` 进主 bundle —— 否（独立页与 `/log` 同规）；④ 固定 / 纯账本 ack 键 —— 否（只增不减的 `TC_ALERT_ACKS`
+  会把第二次同因事件永久吃掉）；⑤ 指纹住 `web/view/**` —— 否（`node:crypto` 撞分层禁词闸与 bundle 禁词闸，评审 P0-1）；
+  ⑥ 把取消 / 热替换也报成错误 —— 否（设计内生命周期，报成错误就是灌噪音，F15）。
+- **后果**：控制台 `tests/server-api-error-registry.test.ts`（新）· `web-alert-dock.test.ts` 第 9 类 · `web-ssr-errors-page.test.ts`
+  （新）· `web-view-routes.test.ts` 的 link href 白名单改**数据驱动** · `web-ssr-readonly.test.ts` 夹具补 `errors: null`；
+  云机 `nn-training/tests/{hub/test_admin_worker_error,remote/test_error_report,remote/test_worker_server_error_detail}.py`
+  （25 格：含 F15 守门与「1s 慢 hub 仍立即返回」）+ `remote/error_report.py`（新，L0，已入 `tests/helpers/remote_dag.py` 层账）。
+  **未验**：真机端到端（要一段真云机跑满才成立，闭合判据在 `docs/nn.progress.md`）。

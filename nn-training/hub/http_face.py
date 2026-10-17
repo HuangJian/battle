@@ -72,6 +72,8 @@ from pathlib import Path
 from common.http_respond import respond_json
 from common.protocol import (
     ADMIN_CANCEL_JOB_PATH,
+    ADMIN_WORKER_ERROR_PATH,
+    ADMIN_WORKER_ERRORS_PATH,
     ADMIN_WORKER_PREFETCH_PATH,
     AUTH_HEADER,
     OFFLINE_ARTIFACT_PATH,
@@ -414,6 +416,10 @@ class HubHandler(
                 self._admin_courses()
             elif path == "/admin/net-probe":
                 self._admin_net_probe()
+            elif path == ADMIN_WORKER_ERRORS_PATH:
+                # 云机错误上报的读面（plan/component-error-registry §4.3-S3b）：**纯观测**的
+                # 增量拉取，与 `/admin/queue`/`/admin/offline` 同规（只读，不碰调度状态）。
+                self._admin_errors()
             elif path == "/admin/offline":
                 self._admin_offline()
             elif path == OFFLINE_TASK_PACK_PATH:
@@ -508,6 +514,11 @@ class HubHandler(
                 # 与 `/jobs/*` 那一族分开（那一族有租约/游标语义），也不走 `/offline/*`
                 # （它报的是 job 队列的软持有，不是离线盘）。
                 self._post_worker_prefetch()
+            elif path == ADMIN_WORKER_ERROR_PATH:
+                # 云机的错误上报（plan/component-error-registry §4.3-S3b，同上形状来源）：
+                # 报的是「只在云机发生的失败」（机器级停滞/瞬时失败/离线段失败），与取活协议
+                # 完全无关 ⇒ 同样刻意开在 `/admin/*` 下，失败即丢、绝不参与派发判据。
+                self._post_worker_error()
             else:
                 self._json({"error": "not found"}, 404)
         except (ProtocolError, ValueError) as e:

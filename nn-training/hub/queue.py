@@ -55,6 +55,7 @@ class _HubQueue(QueueScopeMixin, QueueDiscoverMixin, QueueAuthMixin, QueueClaims
 from __future__ import annotations
 
 import time
+from collections import deque
 from pathlib import Path
 from threading import Lock
 
@@ -189,6 +190,14 @@ class _HubQueue(
         #: 独立锁：`worker_prefetch_readout` 会被 `/admin/queue` 调到（同 `_disk_lock` 的理由——
         #: 观测面不许和调度临界区互等）。
         self._pf_lock = Lock()
+        #: **云机错误上报的 ring**（plan/component-error-registry §4.3-S3b，2026-10-16）：
+        #: 云机上「只在云机」的失败（pull 的机器级停滞/瞬时失败、离线段的失败）在这儿**中继**
+        #: 一拍，等控制台的 10s 节拍来拉。与 `_worker_prefetch` 同口径：进程内、TTL 剔除、
+        #: 重启即清、**绝不进任何派发判据**。为什么不做权威落盘：持久化只该有一个地方管
+        #: （控制台的错误账本），而 hub 的 import 面受纪律约束（顶层禁三方 import）。
+        self._worker_errors: deque[dict] = deque()
+        #: 独立锁（同 `_pf_lock` 的理由）。
+        self._we_lock = Lock()
         _AuthGuard.__init__(self, now_fn)
         # 时钟与单课程 store 同源（测试注入的假时钟必须一致，否则 claimed 标记的时间戳
         # 会混入真实墙钟）。

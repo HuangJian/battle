@@ -140,6 +140,10 @@ LAYERS: dict[str, int] = {
     "hub.task_pack": 0,
 
     "remote.result_upload": 0,
+    # 云机错误上报腿（2026-10-16，plan/component-error-registry §4.3-S3b）：只 import
+    # `common.*`（`net_http` / `protocol`）+ stdlib ⇒ **L0**；读者是 `job_round`(L4) 与
+    # `run_loop`(L6) 两个宿主（顶层边，严格向上够不着它 ⇒ 无需改层）。
+    "remote.error_report": 0,
     # 2026-09-30（刀 3）：`serve_pool` / `iter_rollout` 出包到 `worker/` ⇒ 键前缀随之改。
     # ⚠ 它们**不是**「搬走就不必入账」：与 `remote.*` 之间**有边**（`remote.worker` →
     # `worker.iter_rollout`、`remote.offline_eval` → `worker.serve_pool`），所以仍在**同一套**

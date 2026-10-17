@@ -6,6 +6,83 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §103 云机错误的**回家路**：E3 复用既有 410 通道 + E4/E5 上报腿（2026-10-16，`plan/component-error-registry.plan.md` v3 §4.3-S3a/S3b · 决策 `DECISIONS.md` §2026-10-16-goalnn-component-error-registry · 控制台侧见 `docs/nn/console.md` §39）
+
+云机的两类失败**只在云机**（本条目就是消灭这条形状）：
+
+  * **E3**（push 云机的终局失败）：`worker_server` 只把 `error` 一行字回传（410 体），于是
+    `remote/push_dispatch.py` 只好把 `fail.json.detail` 写成常量「hub push dispatch（hub 代发后取回）」
+    —— traceback 永远留在云机，控制台只显示那一句话；
+  * **E4/E5**（pull 的机器级停滞/瞬时失败、离线段失败）：**零出口**——只有云机本地日志，而日志随机器
+    一起消失（2026-09-25 那次事故最难查的地方）。
+
+### E3 —— 把现场塞回**已有**的 410 通道（**无新端点 / 无新凭据 / 无阻塞**）
+
+纯加法三步 + hub 侧一处改读，**双向兼容**（新 410 体多一个字段：旧 hub 忽略、取不到就回退常量；
+旧 worker 不带该字段：新 hub 同样回退）：
+
+| # | 位置 | 改动 |
+|---|---|---|
+| ① | `worker_server.WorkerServerState.set_error` | 加形参 `detail: str = ""`，存进记录 |
+| ② | `_execute_job` 的两个 except | 传 `common.text.exc_tail(e)`（截尾段：栈顶是 transport 样板） |
+| ③ | `/job/{id}/result` 的 410 体 | 加 `fail_detail`（键在场、可空串；终局可重复读） |
+| ④ | `remote/push_dispatch.push_failure_record` | `detail` 改读 `fb["fail_detail"]`（缺 ⇒ `PUSH_FAILURE_DETAIL_FALLBACK`） |
+
+**为什么不新开一条上报腿**（评审 F7/F8 的正面回答）：`worker_server` 那条路径末尾紧接着
+`state.kick()`，插一个同步 HTTP 就是往关键路径上加网络等待；而 push worker 手里**没有** hub 出站凭据
+（它的出站方向是「等 hub 来取」）。走 410 通道 ⇒ 两个顾虑**根除**（不是缓释）。
+
+### E4/E5 —— 新上报腿（形状**照抄** `worker-prefetch`）
+
+```
+POST /admin/worker-error          # ADMIN_WORKER_ERROR_PATH（common/protocol.py，紧挨 prefetch 常量）
+Authorization: Bearer <与 job 面同一枚 token>
+body: {worker, component, course?, job_id?, it?, severity?, reason, detail?, ts?}
+  · 缺 `worker` 或缺 `reason` ⇒ 400（无归属/无原因的行没法渲染；HTTP 层与 mixin 都拦）
+  · 体越界 WORKER_ERROR_BODY_MAX(64KB) ⇒ 413（复用 `_read_capped_body` 口径，不读进内存）
+  · severity 只认 err/warn（其余归 warn）；reason ≤2000 / detail ≤4000（与 `_clip`、控制台同量）
+读面：GET /admin/errors?since=<游标>   →   {errors: [...], cursor: <本拍最大 at>}
+```
+
+  * **hub 侧只是中继**：内存环（`_worker_errors`）+ 两条闸（`WORKER_ERROR_TTL_SEC = 120s` ·
+    `WORKER_ERROR_RING_MAX = 200`）——权威账本只在控制台（`tmp/component-errors.jsonl`）。hub 的 import 面
+    受纪律约束（顶层禁三方 import）而环是纯 stdlib；且「持久化」只该有一个地方管。hub 重启丢环内未拉走的
+    条目是**显式接受**的代价（TTL 120s = 12 × 控制台 10s 拉取节拍，宽到一次拉取失败不会丢）。
+  * **游标口径 = hub 的到达时钟 `at`**，不是上报方的事件钟 `ts`（跨机时钟不可比：拿 `ts` 当游标会让
+    「钟快的机器」永远被过滤掉、「钟慢的」重复上屏）。`cursor` 由 hub 给、控制台原样回传（不从列表里自己取 max
+    —— 那是第二条游标口径）。
+  * **纯观测、不进任何判据**：`note_worker_error` / `worker_errors` 不碰租约、游标、可领取池（有契约回归用例）；
+    刻意开在 `/admin/*` 下而不是 `/jobs/*`（那一族有租约/游标/首写语义）。**也不复用** `/jobs/{id}/fail`：
+    那条腿是「首写胜出 + 只收确定性失败」，把瞬时错误塞进去会污染训练侧读到的那条失败原因。
+  * **发送不阻塞**（`remote/error_report.py::report_error`）：daemon 线程 + 2s 超时 + **失败即丢**（不重试、
+    不 join、不抛），调用点立即返回 ⇒ pull 轮询间隔与 `state.kick()` 时序零影响。失败时只在**云机日志**留一行
+    （那是它的最后一站）。凭据来自两个上报者**本来就在轮询**的 hub 连接（`--hub-url` + token），push worker
+    不在上报者之列（走 E3）⇒ 不需要任何新凭据。
+
+| 上报点 | 位置 | severity | 为什么报 |
+|---|---|---|---|
+| pull 机器级停滞 | `remote/job_round.py` `UnreapableChildError` | warn | 子进程收不了尸；此前**只见于云机日志**（2026-09-25 事故） |
+| pull 瞬时失败 | 同上 `RetryableError` | warn | 连发时是「这台机器有问题」的唯一信号（本机只看得到「活一直在回池」） |
+| pull 兜底瞬态 | 同上 `except Exception` | warn | 兜底分支此前零出口 |
+| 离线段失败 | `remote/run_loop.py` 的 `[run] 失败` | err | 段末摘要只报 `state`，失败原因彻底丢失 |
+
+**明确不报**（F15；报成「错误」= 往列表里灌噪音，正是「错误常年有噪音 ⇒ 没人看」的成因）：
+`JobCancelledError`（合法取消，注释明写零回传/零 fail）· `CodeChangedError`（热替换，设计内退出码 86）·
+`ProtocolError`（**已走 E2**，push 侧见上表 E3，pull 侧进 `fail.json`）—— 三档都有守门用例（接上就红）。
+
+### 落地与踩过的两个门禁
+
+  * `remote/error_report.py` 是 **L0**（只 import `common.net_http` / `common.protocol` + stdlib），已登进
+    `tests/helpers/remote_dag.py` 的层账；`exc_tail` 必须在 `except` 块内调用（它读 `sys.exc_info()`）。
+  * 用例：`tests/hub/test_admin_worker_error.py`（400/413 · TTL/环上限 · `?since=` 增量 · **上报不动派发状态**）·
+    `tests/remote/test_error_report.py`（键集/两档 severity/截断 · 真打到路径常量 · 真 hub 端到端落环 ·
+    **慢 hub 1s 仍立即返回** · 失败即丢留一行 · 四处接线 + F15 守门）·
+    `tests/remote/test_worker_server_error_detail.py`（410 体带现场 · 旧调用方键在场空串 · except 路径真的填 · hub 侧回退常量）。
+  * **两个静态门禁当场咬了一口**（都值得记住）：① `test_no_sleep_as_sync.py` 要求每处 `time.sleep`
+    带 `# sleep-ok: 轮询步长/夹具模拟`（写用例时漏标一处 ⇒ 红）；② `test_source_text_assert_budget.py`
+    只许降不许升 —— 新增的 6 条「错误正文子串」判据当场超基线，改写成 `startswith(...)` / `==` 全等
+    后回基线（**没有抬基线**：判据本来就该钉「以那儿开头/整串相等」，不是「里面恰好有这三个字母」）。
+
 ## §102 离线「无限轮」的**下一半**：段末自动滚（三态判据 + 回灌腿）+ J4 静态拒因前置（2026-10-16，`plan/offline-open-ended-iters-and-loud-export.plan.md` v2 §3.2/§3.4 · 评审 `plan/offline-open-ended-iters-and-loud-export.review-bf.md` 的 P0-1/P0-2/P0-3 + P1-2/P1-3/P1-4/P1-8 · 决策 `DECISIONS.md` §2026-10-16-goalnn-offline-segment-roll）
 
 §97 让「课程无限」第一次**可表达**（`iters<=0` ⇒ 导一份 `open_ended=true` 的 500 轮开区间段），

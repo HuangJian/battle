@@ -34,7 +34,9 @@ from typing import Any
 import remote.delta_files as delta_files
 from common.cli import house_parser, run_main
 from common.protocol import ProtocolError, RetryableError, normalize_manifest
+from common.text import exc_tail
 from remote.artifacts import ArtifactStore, sha256_bytes, sha256_file
+from remote.error_report import report_error
 from remote.plan_run import (
     TS_TREE_DIR as TS_TREE_DIR,
 )
@@ -569,6 +571,19 @@ def main(argv: list[str] | None = None) -> int:
         )
     except (ProtocolError, RetryableError) as e:
         print(f"[run] 失败：{type(e).__name__}: {e}", file=sys.stderr, flush=True)
+        # 观测腿（plan/component-error-registry §4.3-S3b）：段末摘要只报 `state`，失败原因
+        # 彻底丢失（控制台的离线停摆告警只看「有没有新产物」，不看为什么）⇒ 纯观测上报一条。
+        # 失败即丢（daemon 线程 + 2s 超时），不影响退出码与任何训练时序。
+        report_error(
+            args.hub_url,
+            hub_token,
+            reason=f"{type(e).__name__}: {e}",
+            detail=exc_tail(e),
+            component="offline-worker",
+            course=str(args.hub_course or ""),
+            severity="err",
+            log=lambda m: print(f"[run] {m}", file=sys.stderr, flush=True),
+        )
         return 1
     print(
         f"[run] 完成：it{plan['start_it']} → it{result['it_end']}（{result['run_state']}），"

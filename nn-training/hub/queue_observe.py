@@ -33,11 +33,21 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from common.protocol import PRIORITY_NONE, ROLE_OFFLINE, WORKER_PREFETCH_TTL_SEC
+from common.protocol import (
+    PRIORITY_NONE,
+    ROLE_OFFLINE,
+    WORKER_ERROR_TTL_SEC,
+    WORKER_PREFETCH_TTL_SEC,
+)
 from hub.queue_peer import QueuePeer
 from hub.store import _JobStore
 from hub.task_pack import OFFLINE_DISK_WINDOW_SEC, OFFLINE_LEG_HINT
 from remote.code_snapshot import read_cluster_snapshot
+
+#: 云机错误上报 ring 的**条数上限**（plan/component-error-registry §4.3-S3b）：TTL 之外的第二道
+#: 闸。为什么两道都要有：TTL 管「多久之前的不再服务」，条数管「一台疯掉的机器不会把内存吃光」
+#: （失败风暴时 10s 能报几十条）。200 条 × 每条约 6KB 上限 ≈ 1.2MB，与 hub 的其它 ring 同量级。
+WORKER_ERROR_RING_MAX = 200
 
 #: 未知 job_id 的哨兵根（随 `_job_dir` 一起搬进来）。
 #: 选 tempdir 而不是仓库内目录：任何漏网的 mkdir 都落在系统临时目录（不污染真 store），
@@ -78,6 +88,9 @@ class QueueObserveMixin(QueuePeer):
     #: worker 预取状态上报的表 + 它自己的锁（都是组合类 `__init__` 建；见 `note_worker_prefetch`）。
     _worker_prefetch: dict[str, dict]
     _pf_lock: Any
+    #: 云机错误上报的 **ring** + 它自己的锁（组合类 `__init__` 建；见 `note_worker_error`）。
+    _worker_errors: Any
+    _we_lock: Any
     _stores: dict[str, _JobStore]
 
     # 本簇要调、而不在共同声明面 `QueuePeer` 里的那一个（理由见 `queue_peer.py` 头部）
@@ -401,3 +414,72 @@ class QueueObserveMixin(QueuePeer):
                 continue
             readout[worker_id] = {"age": round(age, 1), "held": held, "dl": dl}
         return readout
+
+    # ---- 云机错误上报（plan/component-error-registry §4.3-S3b，2026-10-16）----
+    def note_worker_error(self, body: dict) -> dict:
+        """登记一条云机错误上报（`POST /admin/worker-error`）。**纯观测**：只进 ring。
+
+        不碰租约 / 游标 / 派发判据（与 `note_worker_prefetch` / `note_offline_disk` 同规）；
+        字段归一（面向控制台的错误登记表）由这里做一次，读面与上报方都不再做第二遍：
+
+          · `worker` / `reason` 缺一不可（无归属/无原因的行没法渲染）——HTTP 层就 400 了，
+            这里再兜一层（它可被直接调用）；
+          · `severity` 只认 `err`/`warn` 两档（云机可能塞别的词）⇒ 其余归 `warn`；
+          · `ts` 用上报方给的**事件时钟**（秒）——它只用于展示；`at` 是 hub 的到达时钟，
+            读面的 `?since=` 游标只认 `at`（跨机器时钟不可比，见 `worker_errors`）；
+          · `it` 非整数的丢掉（不编 0）。
+        """
+        now = self._now()
+        worker = str(body.get("worker") or "").strip()
+        reason = str(body.get("reason") or "").strip()
+        if not worker or not reason:
+            return {}
+        ts = body.get("ts")
+        rec = {
+            "at": now,
+            "ts": float(ts) if isinstance(ts, (int, float)) and ts else now,
+            "worker": worker,
+            "component": str(body.get("component") or "")[:100],
+            "course": str(body.get("course") or "")[:200],
+            "job_id": str(body.get("job_id") or "")[:200],
+            "severity": "err" if body.get("severity") == "err" else "warn",
+            "reason": reason[:2000],
+            "detail": str(body.get("detail") or "")[:4000],
+        }
+        it = body.get("it")
+        if isinstance(it, int):
+            rec["it"] = it
+        with self._we_lock:
+            self._worker_errors.append(rec)
+            # 有界（两条闸）：TTL 之外的老条目、以及超过 ring 上限的老条目。
+            # hub 侧只是**中继**（权威账本在控制台的错误登记表，plan §4.4）⇒ 丢旧的不丢语义。
+            while self._worker_errors and (
+                len(self._worker_errors) > WORKER_ERROR_RING_MAX
+                or now - float(self._worker_errors[0].get("at") or 0.0) > WORKER_ERROR_TTL_SEC
+            ):
+                self._worker_errors.popleft()
+        return rec
+
+    def worker_errors(self, since: float = 0.0) -> dict:
+        """`GET /admin/errors?since=<游标>`：**增量**读面（`at > since`）+ TTL 过滤。
+
+        ★ 游标口径 = hub 的**到达时钟**（`at`，秒）而不是上报方的事件时钟（`ts`）：云机与
+        hub 可能不同机/不同钟，拿 `ts` 当游标会让「钟快的机器」永远被过滤掉、让「钟慢的机器」
+        重复上报。`at` 与 `since` 都在 hub 这一侧，**同一把钟**，而且重启后仍然是墙钟（单调
+        可延续，ring 内容丢了而已）。同一次调用内两条上报拿到同一个 `at` 的概率可忽略。
+
+        返回 `{errors: [...], cursor: <本拍最大 at（无新条目则 = since）>}`：控制台把 `cursor`
+        原样回传当下一拍的 `since`，不靠自己从列表里取 max（那是第二条游标口径）。
+        """
+        now = self._now()
+        cut = float(since or 0.0)
+        with self._we_lock:
+            rows = [dict(r) for r in self._worker_errors]
+        out = [
+            r
+            for r in rows
+            if now - float(r.get("at") or 0.0) <= WORKER_ERROR_TTL_SEC
+            and float(r.get("at") or 0.0) > cut
+        ]
+        cursor = max([float(r.get("at") or 0.0) for r in out], default=cut)
+        return {"errors": out, "cursor": max(cursor, cut)}

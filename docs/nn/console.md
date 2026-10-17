@@ -68,8 +68,11 @@ ack 分工写死：首页汇总条的「知道了」**只关它自己**，逐条
 - 夹具纪律（沿用 `/api/state` 那条 F11 口径）：`web-ssr-readonly.test.ts` 的只读夹具必须把 `errors: null` 也造成事实
   —— `errors` 读的是**活状态**，本机任一组件一出错，坞里就多一条 err，那条只读用例会跟着红/绿。
 
-**未落地**：云机侧两条腿（E3 用既有 410 通道把 `traceback` 带回家 / E4-E5 走 `POST /admin/worker-error`）在 plan §5 里
-属 **P 批次**（`nn-training/**` ⇒ 翻训练 code zip，要单独窗口），本条只记 D 批次。决策：
+**P 批次已落地**（2026-10-16，与本条同窗口）：云机侧两条腿 —— E3 用既有 410 通道把 `traceback` 带回家
+（`worker_server.set_error(detail=)` → 410 体 `fail_detail` → `push_dispatch.push_failure_record`）；E4/E5 走
+`POST /admin/worker-error`（hub 侧 TTL ring，控制台腿 C 读 `GET /admin/errors?since=`）。⚠ 改 `nn-training/**`
+⇒ 翻训练 code zip、云机 worker 下次校验 `CodeChangedError` 自愈重启一次（plan §7-Rk1）；**真机端到端未验**
+（要一段真云机跑满）。技术正文 `docs/nn/remote-transport.md` §103。决策：
 `DECISIONS.md` §2026-10-16-goalnn-component-error-registry。
 
 ## §38 收官原因进横幅：`run_complete.cause/detail` +「说人话 + 指引按原因分叉」（plan/run-complete-cause-banner，2026-10-15）

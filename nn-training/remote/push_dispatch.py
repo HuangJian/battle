@@ -112,6 +112,31 @@ def _http(
         return None
 
 
+# ---------------------------------------------------------------- 节点终局失败（410）
+
+#: 410 体里缺 `fail_detail`（旧 worker）时的**回落现场**。为什么保留一句常量而不是留空：
+#: `fail.json` 的 `detail` 是控制台错误登记表要上屏的字段，「hub 代发后取回」至少说清
+#: 「这条失败是 push 腿代理看到的、没有本机 traceback」——与留空（读成「没有现场」）不同。
+PUSH_FAILURE_DETAIL_FALLBACK = "hub push dispatch（hub 代发后取回）"
+
+
+def push_failure_record(fb: dict, worker_id: str, ts: int) -> dict:
+    """节点 410 体 → `store_job_failure` 的记录（**唯一实现**，与 `hub/result.py`:173-178 同键集）。
+
+    `fail_detail` 取自 `remote/worker_server.py` 的 410 体（`exc_tail` 的 traceback 尾段，
+    2026-10-16，plan/component-error-registry §4.3-S3a）：此前这里写死常量，于是云机的
+    traceback 永远回不来，控制台 /errors 页只能显示「hub 代发后取回」。缺字段（旧 worker）
+    ⇒ 回退常量（不可知 ≠ 没有，但也不编）。
+    """
+    return {
+        "reason": str(fb.get("error") or "worker 判定跑不成")[:2000],
+        "kind": str(fb.get("fail_kind") or "")[:200],
+        "detail": str(fb.get("fail_detail") or PUSH_FAILURE_DETAIL_FALLBACK)[:4000],
+        "worker": worker_id,
+        "ts": ts,
+    }
+
+
 # ---------------------------------------------------------------- 结果入账（两条腿共用）
 
 
@@ -844,16 +869,7 @@ class PushDispatcher:
                     fb = loaded if isinstance(loaded, dict) else {}
                 except ValueError:
                     fb = {}
-                self.hub.store_job_failure(
-                    jid,
-                    {
-                        "reason": str(fb.get("error") or "worker 判定跑不成")[:2000],
-                        "kind": str(fb.get("fail_kind") or "")[:200],
-                        "detail": "hub push dispatch（hub 代发后取回）",
-                        "worker": wid,
-                        "ts": self.hub._now(),
-                    },
-                )
+                self.hub.store_job_failure(jid, push_failure_record(fb, wid, self.hub._now()))
                 self._log(f"{jid} 被 {wid} 判定终局失败：{fb.get('error')}")
                 return
             if status in (409, 428):

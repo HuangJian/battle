@@ -52,6 +52,7 @@ from common.protocol import (
     normalize_manifest,
     unpack_job_v2,
 )
+from common.text import exc_tail
 from remote.worker import _wire_flush as worker_wire_flush
 from remote.worker import _wire_start as worker_wire_start
 from remote.worker import run_job
@@ -143,15 +144,22 @@ class WorkerServerState:
             self.jobs[jid] = {"state": "done", "result": result}
             self.done_total += 1
 
-    def set_error(self, jid: str, error: str, kind: str = "") -> None:
+    def set_error(self, jid: str, error: str, kind: str = "", detail: str = "") -> None:
         """标为 failed（终局）。kind = 异常类名，供 `/job/{id}/result` 的 410 体带上
-        （2026-09-17：训练侧据此区分「确定性能力缺失」与「网络/排队」）。"""
+        （2026-09-17：训练侧据此区分「确定性能力缺失」与「网络/排队」）。
+
+        `detail` = 异常现场（`common.text.exc_tail` 的 traceback 尾段），**同样走 410 体回传**
+        （2026-10-16，plan/component-error-registry §4.3-S3a）：此前 push 这条路只回 `error`
+        一行字，`remote/push_dispatch.py` 只好把 detail 写成常量——于是 traceback 只留在云机，
+        控制台的错误登记表永远拿不到真因（E3 的全部病根）。纯加法：旧调用方不传 ⇒ 空串。
+        """
         with self._lock:
             prev = self.jobs.get(jid, {})
             self.jobs[jid] = {
                 "state": "failed",
                 "error": error,
                 "kind": kind,
+                "detail": detail,
                 **{k: v for k, v in prev.items() if k == "result"},
             }
 
@@ -275,12 +283,12 @@ def _execute_job(
         log(f"job {jid} done — result ready for pickup")
     except CodeChangedError as e:
         # push 模式是长驻服务进程：execv 自重启会打断在跑的 job —— 只能拒收 + 喊人。
-        state.set_error(jid, f"{type(e).__name__}: {e}", kind=type(e).__name__)
+        state.set_error(jid, f"{type(e).__name__}: {e}", kind=type(e).__name__, detail=exc_tail(e))
         log(f"job {jid} REJECTED: {e}")
         log("  → 代码已变更：本服务进程无法热替换。请**重启 worker_server 进程**"
             "（notebook 重跑 push 单元格 / 本机重跑 remote_worker_serve），再重发本 job。")
     except Exception as e:
-        state.set_error(jid, f"{type(e).__name__}: {e}", kind=type(e).__name__)
+        state.set_error(jid, f"{type(e).__name__}: {e}", kind=type(e).__name__, detail=exc_tail(e))
         log(f"job {jid} FAILED: {e}")
     finally:
         # 每 job 一行传输账（push 模式不跑 pull 循环 ⇒ 没有别的 flush 点）：
@@ -364,6 +372,9 @@ def make_worker_server(
                                 "failed": True,
                                 "error": rec.get("error", "?"),
                                 "fail_kind": rec.get("kind", ""),
+                                # 现场（traceback 尾段）。**纯加法**：旧 hub 忽略未知键，
+                                # 旧 worker 不带该键 ⇒ `push_dispatch` 回退原常量。
+                                "fail_detail": rec.get("detail", ""),
                             },
                             410,
                         )

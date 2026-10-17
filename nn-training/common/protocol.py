@@ -666,6 +666,22 @@ ADMIN_CANCEL_JOB_PATH = "/admin/cancel-job"
 #: 取值 = 12 × 预取节拍（`remote/job_round.PREFETCH_ROUND_SEC = 5s`）——形状未变时 worker 不发，
 #: 窗口必须宽到「一轮空转」不至于把还活着的持有显示成过期。
 WORKER_PREFETCH_TTL_SEC = 60.0
+
+#: **云机错误上报**（worker → hub；plan/component-error-registry §4.3-S3b，2026-10-16）。
+#: 诊断动机：云机的两类失败**只在云机**——pull 的机器级停滞 / 瞬时失败（`remote/job_round.py`
+#: 的三个 except 分支）与离线段的失败（`remote/run_loop.py` 的 `[run] 失败`，段末摘要只报 `state`）。
+#: 控制台的错误登记表因此看不到它们（「只有翻日志才知道原因」）。
+#:
+#: 形状照抄 `ADMIN_WORKER_PREFETCH_PATH`（同上理由）：刻意**不**开在 `/jobs/*` 下——那一族是
+#: 取活协议（租约 / 游标 / 首写语义都在里面），而这条是**纯观测**：无副作用、失败即丢、
+#: 绝不参与任何派发判据。读面 `GET /admin/errors?since=<游标>`，hub 侧只是 TTL ring
+#: （权威账本在控制台，见 plan §4.4）。
+ADMIN_WORKER_ERROR_PATH = "/admin/worker-error"
+ADMIN_WORKER_ERRORS_PATH = "/admin/errors"
+#: 上报的存活窗口（秒）：超窗即剔除。取值 = 12 × 控制台拉取节拍（`ERROR_SCAN_INTERVAL_MS = 10s`）
+#: —— 宽到「一次拉取失败」不会丢，窄到 hub 不会长期服务陈旧错误。hub 重启丢 ring 内的
+#: 未拉走条目是**显式接受**的代价（plan §7 Rk3：账本是权威，ring 只是中继）。
+WORKER_ERROR_TTL_SEC = 120.0
 #: **派发协议版本**（★M1b / §1.5.2-P0-4）：`claim` 必须带 `?proto=2`（本轮 hold 语义）。
 #: 缺失 ⇒ 409 `{busy:true, error:<全文>, proto_required:2}`——**为什么借用 `busy` 这个键**：
 #: 旧云机（`remote/offline_boot.py` 的 409 分流）在 `busy` 分支会把 `error` **原样打进会话日志**
