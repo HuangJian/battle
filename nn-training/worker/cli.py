@@ -416,6 +416,14 @@ def build_argparser(mode: str, rl_args: dict) -> argparse.ArgumentParser:
         default=0,
         help="内部：仅采集一轮落盘后退出（T4 双缓冲子进程模式；不 PPO/不 eval/不写权重）。",
     )
+    # ★ 2026-10-17（plan/single-resident-trainer §7-P0-3）：预采子进程的动作覆盖通道。
+    #   不能走普通 CLI：`bc`/`iters` 这些键由**课程**定义（apply_course 会覆盖 CLI 值，
+    #   显式 CLI 还会被 course_cli_conflicts 拒启）⇒ 内部动作只能走「课程之后」的通道。
+    ap.add_argument(
+        "--collect-only-config",
+        default="",
+        help="内部：预采子进程的动作覆盖 JSON（在 apply_course 之后施加；见 worker/course_args）。",
+    )
     # ===== 课程配置化（plan/rl-training-config.md §3）：唯一启动入口，无 CLI 逐参覆盖 =====
     ap.add_argument(
         "--course",

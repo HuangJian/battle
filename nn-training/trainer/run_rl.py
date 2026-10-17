@@ -235,6 +235,14 @@ def main() -> None:
                 + "\n  ".join(conflicts)
                 + "\n删掉冲突 flag 或改课程配置后重试"
             )
+    # 内部预采子进程（T4 双缓冲）的动作覆盖：**必须在 apply_course 之后**（见
+    # `worker/course_args.apply_collect_only_config` 的 docstring：bc/iters 这些键由课程定义，
+    # CLI 传会被拒启、课程值又会覆盖 CLI）。放在 echo 短路之前 —— `--echo-config` 对拍
+    # 要能看见覆盖后的生效值（用例用它验收）。
+    if getattr(args, "collect_only_config", ""):
+        from worker.course_args import apply_collect_only_config
+
+        apply_collect_only_config(args, args.collect_only_config, log_fn=log)
     if getattr(args, "echo_config", False):
         echo_config(args, course)
         log("[run_rl] --echo-config done — exit")

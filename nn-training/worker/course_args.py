@@ -171,6 +171,54 @@ def course_args(course: str, argv: list[str] | None = None) -> Any:
 
 
 
+#: `--collect-only-config` 允许覆盖的键（**内部预采子进程**的动作；plan §7-P0-3）。
+#: 白名单是**闭集**：这张表决定「子进程能盖掉课程的哪些键」，多一个都不行。
+COLLECT_ONLY_OVERRIDE_KEYS: tuple[str, ...] = (
+    "collect_only",
+    "bc",
+    "start_it",
+    "precollect_games",
+    "precollect_samples",
+)
+
+
+def apply_collect_only_config(args: Any, path: str, *, log_fn: Callable[[str], None] | None = None) -> list[str]:
+    """把预采子进程的动作覆盖施加到 args；返回已施加的键。
+
+    为什么需要这条**课程之后**的通道（而不是普通 CLI）：子进程用 `--course <课>` 重新解析
+    命名空间（两种父形态 —— per-course `run_rl` 与 serve —— 都只能靠课程重建），而课程是那些
+    键的单一事实来源：`apply_course` 会拿课程值**覆盖** CLI 值，显式 CLI 还会被
+    `course_cli_conflicts` **响亮拒启**（实跑：`--bc`/`--iters` 两条冲突 → exit 1）。
+    于是「只采一轮 / 读哪份快照 / 从哪个 it 开始」只能走这条通道。
+
+    读不到 / 坏 JSON / 不是对象 ⇒ **响亮 SystemExit**：静默退化正是这条腿今天的样子（零输出
+    exit 0，评审 P0-3）——宁可让父进程看到子进程立刻死，也不要“看起来在预采”。
+    """
+    import json
+
+    say = log_fn or log
+    try:
+        with open(path, encoding="utf-8") as f:
+            payload = json.load(f)
+    except (OSError, ValueError) as e:
+        raise SystemExit(
+            f"[collect-only] 动作覆盖读不到/坏 JSON（{path}）：{e}——本进程是内部预采子进程，"
+            "缺了它就只能跑成常驻训练（正是准入闸要拦的事）。父进程会再生一个。"
+        ) from e
+    if not isinstance(payload, dict):
+        raise SystemExit(f"[collect-only] 动作覆盖不是对象（{path}）：{type(payload).__name__}")
+    applied: list[str] = []
+    for key in COLLECT_ONLY_OVERRIDE_KEYS:
+        if key not in payload:
+            continue
+        if not hasattr(args, key):
+            raise SystemExit(f"[collect-only] 动作覆盖的键本入口没有：{key}")
+        setattr(args, key, payload[key])
+        applied.append(key)
+    say(f"[collect-only] 动作覆盖生效（{path}）：" + ", ".join(f"{k}={getattr(args, k)!r}" for k in applied))
+    return applied
+
+
 def course_openable(course: str) -> tuple[bool, str]:
     """只读判据：这门课能不能被 `open_course` 打开（**复用同一条校验链**，零副作用）。
 
