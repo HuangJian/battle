@@ -590,7 +590,8 @@ export interface CourseOverviewRow {
   lease?: OfflineLeaseView | null
 }
 
-/** 恒等在训课程 ∩ hub 课程表 ∩ 查看课程的课程清单（保持入参顺序 = 服务端的新→旧）。 */
+/** 恒等在训课程 ∩ hub 课程表 ∩ 查看课程的课程清单（保持入参顺序：`training` 是服务端的
+ *  **开课顺序**（先开的在前，见 `enabledCoursesByOpenOrder`），其余按调用方给的课程清单序）。 */
 export function overviewCourseNames(input: {
   courses: string[]
   training: string[]

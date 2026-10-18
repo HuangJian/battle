@@ -20,7 +20,7 @@
  */
 
 import { afterEach, describe, expect, it } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import type {
@@ -625,6 +625,50 @@ describe('buildStateView：trainingCourses = 已开课（开课标记），不�
   })
 })
 
+// ────────────────────────── 顺序：pill 行按**开课顺序**固定 ──────────────────────────
+
+/** 钉死某课目录里某个文件的 mtime（秒）。
+ *
+ *  排序用例不依赖「连写三个文件自然就有先后」：同一拍内 mtime 可能相同，而本用例要的是
+ *  「谁先开课」——显式给时刻才能把「顺序由开课时刻决定」这个断言钉住。 */
+function stamp(course: string, file: string, sec: number): void {
+  utimesSync(path.join(process.env.BCITY_TMP_LOGS_DIR!, course, file), sec, sec)
+}
+
+describe('buildStateView：pill 名单顺序 = 开课顺序（2026-10-18 用户报障）', () => {
+  it('★ 按开课标记的时刻排：账本 mtime 全反着也不动', async () => {
+    // 报障原话：「在训课程 pill 变来变去」。旧实现直接拿 `discoverCourses` 的顺序
+    // （账本 mtime 新→旧）当 pill 顺序，而账本**每跑一轮就写一次** ⇒ 多门课并行时
+    // 每一拍都在重排。开课标记只在开课那一刻写一次 ⇒ 它才是「开课顺序」的事实源。
+    course('x-a', true)
+    course('x-b', true)
+    course('x-c', true)
+    // 开课顺序：c（最早）→ a → b
+    stamp('x-c', 'training-enabled.txt', 1000)
+    stamp('x-a', 'training-enabled.txt', 2000)
+    stamp('x-b', 'training-enabled.txt', 3000)
+    // 账本活跃度与开课顺序**相反**（a 最新、b 最旧）——旧实现给出的正是这个顺序。
+    stamp('x-a', 'training_log.jsonl', 9000)
+    stamp('x-c', 'training_log.jsonl', 5000)
+    stamp('x-b', 'training_log.jsonl', 1000)
+    const first = await api.buildStateView('x-a')
+    expect(first.trainingCourses).toEqual(['x-c', 'x-a', 'x-b'])
+    // 再跑一轮：a 的账本变成最新（这就是刷新即重排的诱因）——名单顺序**一个都不动**。
+    stamp('x-a', 'training_log.jsonl', 99999)
+    const second = await api.buildStateView('x-a')
+    expect(second.trainingCourses).toEqual(['x-c', 'x-a', 'x-b'])
+  })
+
+  it('同一时刻开的两门课按课名补序（排序必须是全序，否则同 mtime 会跟着 readdir 抖动）', async () => {
+    course('x-y2', true)
+    course('x-y1', true)
+    stamp('x-y2', 'training-enabled.txt', 7000)
+    stamp('x-y1', 'training-enabled.txt', 7000)
+    const s = await api.buildStateView('x-y1')
+    expect(s.trainingCourses).toEqual(['x-y1', 'x-y2'])
+  })
+})
+
 // ────────────────────────── SSR：pill 行上屏 ──────────────────────────
 
 /** 把真实 state view 换成「在训两门课 + 队列事实」的最小形状。 */
@@ -663,6 +707,15 @@ describe('顶部在训课程 pill 行（SSR）', () => {
     expect(html).toContain('tc-tpill__kind')
     expect(html).toContain('aria-label="停课 a"')
     expect(html).toContain('aria-label="停课 b"')
+  })
+
+  it('pill 顺序 = 服务端 stamp 的顺序（视图层不重排）', async () => {
+    const html = render.renderConsolePage(await viewWithPills())
+    // `viewWithPills` 的 stamp 是 ['b','a']（与账本行序相反）：上屏顺序必须就是它。
+    const group = html.match(/class="tc-tpills"[\s\S]*?<\/div>/)?.[0] ?? ''
+    expect(group).toContain('<b>b</b>')
+    expect(group).toContain('<b>a</b>')
+    expect(group.indexOf('<b>b</b>')).toBeLessThan(group.indexOf('<b>a</b>'))
   })
 
   it('当前查看的那门高亮（--active），且只有它一门', async () => {

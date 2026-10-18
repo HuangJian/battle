@@ -7,7 +7,7 @@
  *  这里 import，不断环。`actions.ts` 重导出同名函数，老调用方零改动。
  */
 
-import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync } from 'fs'
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, statSync } from 'fs'
 import path from 'path'
 import { readJsoncFile } from '../core/jsonc'
 import {
@@ -119,6 +119,35 @@ export function courseEnableMarkerPath(course: string): string {
 /** 这门课是否已开课（标记存在）——与控制台总览/按钮同判据。 */
 export function courseEnabled(course: string): boolean {
   return !!course && existsSync(courseEnableMarkerPath(course))
+}
+
+/** 已开课课程，**按开课顺序**排（先开的在左）。
+ *
+ *  为什么不能拿「课程清单顺序」当读序（2026-10-18 用户报障：「在训课程 pill 变来变去」）：
+ *  `discoverCourses()` 按 `training_log.jsonl` 的 mtime 排，而那份日志**每跑一轮就写一次**——
+ *  多门课并行时谁的账本最新每一拍都在换，顶部 pill 于是每次刷新都重排。
+ *
+ *  开课标记只在**开课那一刻**写一次（`course-lifecycle` 用 `!existsSync` 守门，停课才删），
+ *  所以它的 mtime = 开课时刻，天然稳定：开新课只会追加在右端，已有 pill 不动。
+ *
+ *  同一时刻开的两门课（mtime 相同）按课名补序：排序必须是**全序**，否则同 mtime 的两门课
+ *  会跟着 `readdir` 的顺序互换——那正是本函数要消灭的那类抖动。
+ *
+ *  读不到标记（没开课 / 目录被清 / 权限）⇒ 不上名单，与 `courseEnabled` 同一判据。
+ */
+export function enabledCoursesByOpenOrder(courses: readonly string[]): string[] {
+  const opened: Array<{ course: string; at: number }> = []
+  for (const course of courses) {
+    if (!course) continue
+    try {
+      opened.push({ course, at: statSync(courseEnableMarkerPath(course)).mtimeMs })
+    } catch {
+      /* 没有开课标记 = 未开课 */
+    }
+  }
+  return opened
+    .sort((a, b) => a.at - b.at || (a.course < b.course ? -1 : a.course > b.course ? 1 : 0))
+    .map((o) => o.course)
 }
 
 /** 按课程播种初始权重（console 与 hub 双路的实际 seeding 路径，DoD F-B6）。

@@ -1,11 +1,10 @@
 /** state-view.ts — /api/state 主视图组装。 */
-import { existsSync } from 'fs'
 import path from 'path'
 import { pidAlive } from '../../core/net'
 import { REPO_ROOT } from '../../core/paths'
 import { entryForCourse, loadRegistry } from '../../core/registry'
 import { type ConsoleStateView, type MetricsView } from '../../web/view'
-import { courseEnableMarkerPath, courseEnabled, isBcCourse } from '../../stack/courses'
+import { courseEnabled, enabledCoursesByOpenOrder, isBcCourse } from '../../stack/courses'
 import { evalboardEnabled } from '../../core/feature-flags'
 import { loadConsoleState } from '../actions'
 import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/specs'
@@ -104,7 +103,11 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   //      把 21 门历史课一起拉起来跑**（用户报障原话：「界面显示一堆课程正在训练」）。
   // 开课标记是训练侧（`loop_plan.enabled_courses`）与 hub（`_course_dir_live`）用的**同一个**
   // 闸：控制台只是把同一份事实读出来上屏（不再自己推算一份，两份必然漂开）。
-  const training = courses.filter((c) => existsSync(courseEnableMarkerPath(c)))
+  //
+  // ★ 顺序 = **开课顺序**（2026-10-18 用户报障：「在训课程 pill 变来变去」）。不取 `courses`
+  //   的现序：那是 `discoverCourses` 按账本 mtime 新→旧排的，而账本每跑一轮就写——多门课并行
+  //   时 pill 行每拍重排。开课标记只在开课那一刻写一次 ⇒ mtime = 开课时刻，固定不动。
+  const training = enabledCoursesByOpenOrder(courses)
   // 课程生命周期事实（2026-09-20：进程与课程解耦后，顶部「训练」入口与在训 pill 行的判据）。
   // 两个判据各自只有**一个**事实源，不在这里发明第三份：
   //  · enabled = **开课标记**（`training-enabled.txt`）——训练侧 `enabled_courses` 与 hub
