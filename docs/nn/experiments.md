@@ -9,6 +9,35 @@
 
 ---
 
+## §118 y22 demo 语料 v5 + 可学性探针：fire 不可学、常量策略哨兵判负（2026-10-18）
+
+- **S1/S2/S3（纯数据，已过）**：160 局 v3 人类 replay 用当前 encoder 重导为 v5——
+  **160 shards / 101153 样本**；`check_demo_corpus.py` 逐元素对账 **failures=0**：160 局 `nSamples`、
+  `obs`、`scalars[:, :30]`、`actions`、`masks`、`conditions` 与 v3 全等；kills=3201（
+  `shard_h_s2001_seed414050` 21 杀）。bank `N=101153`，`obs(…,16,26,26) / scalars(…,40) / extra(…,37)`，
+  9.37MB，sha `c7d41c60f20c9307396e8438a7ddbafd6848ca17d1a970004d229bd59d255200`。
+- **S4a（可学性）**：32 局分层子样本（8/关，20%）、NNPolicy 10 epoch、按局 80/20（
+  train 15440 / val 4238）。move top-1 **0.7975**（多数类 0.3216）、STOP recall 0.7197；
+  但 fire **all-sample hold recall 0.0**（fire_all top-1 0.6753 = 多数类 0.6753；masked keep 0.9784 = 多数类）。
+- **fire 口径坑（新发现）**：`computeMasks` 在冷却期把 fire hold 标成非法，`_masked_ce` 跳过单合法类样本。
+  全语料 **43744/101153** 才有 2 个 fire 合法类，其中 hold 仅 **1.84%**；**57409（56.8%）** 只剩 release 被整样本跳过；
+  整体 hold 28.92% 绝大多数落在被跳过的冷却期。S5 的 `_demo_masked_ce` 同数学 ⇒ 当前 demo CE 的 fire 项
+  几乎只教“放开”，这解释 §33 开火量没被拉上去。**再开 demo 腿前必须先修 fire 的可训练子集/标签口径。**
+- **S4 哨兵（真实 ladder，24 局）**：`eval-course-ckpt` 加载 S4a 权重，pass **0/24**、kills/shots **0/0**、
+  decisions 14378、`moveHist [14378,0,0,0,0]`（STOP **100%**）、idle 143631/143653（99.98%），
+  gameover 22 + max_ticks 2。**held-out move 0.7975 的模型在自己分布上退化成全程 STOP 零开火**——
+  §32 的常量策略坍缩复现；行为哨兵比准确率更接近真实死法。
+- **判决**：**S4 判负，不开 `y22-demo`（150 轮或 20–30 轮短腿都不开）**。move 特征可学，但
+  demo 目标的 fire 头不可学 + 行为坍缩；继续投 demo 混 batch 的期望收益为负。方向：先修 fire 口径，
+  或按原计划转 C 阶段（奖励侧换靶，wShots/开火纪律）。
+- **产物**：`reports/y22-demo-corpus-v5-20261018.md`、`reports/y22-demo-probe-20261018.md`、
+  `nn-training/tools/check_demo_corpus.py`、`nn-training/tools/bc_learnability_probe.py`；
+  现场 `tmp/y22-bc-probe/{report32.json,weights32.json,eval32-24.jsonl}`。
+- **限制**：S4a 是 32/160 子样本 + NNPolicy（不是 StudentNet 全量）；S4b 未跑（CPU ~10min/epoch）。
+  但 fire 的 1.84% 是从全语料直接算出的结构事实，不受子样本影响。
+
+---
+
 ## §117 y21 老四腿结课：opt delta-f16 污染、方向未判、v2 重开（2026-10-17）
 
 - **停腿**（用户 2026-10-17 晚，控制台）：y21-nohurt 止于 it210、y21-chain it213、y21-tempo it212、
