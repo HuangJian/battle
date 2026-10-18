@@ -86,8 +86,9 @@ METRICS = [
     ("D4", "残血又挨", "game", lambda r: r.get("damageWhileLow", 0),
      "残血时又挨的打，同 D2（E0 死刑区）。看着馋，不开价。"),
     # ── 站位：贴脸是上游，被围/火线/角落是已有税 ──
-    ("W1", "危险格/千", "rate", lambda r: r.get("dangerTicks", 0),
-     "站在危险格里的时间。crown 死局 4.5x=开局逛进危险区。"),
+    ("W1", "低血时长/千", "rate", lambda r: r.get("dangerTicks", 0),
+     "hp<40% 的拍数占比（**2026-10-18 订正**：曾误标「危险格」；累加条件是 playerHpRatio<0.4，"
+     "见 export-eval-game.ts:960。真正的火线覆盖看 W2 threatTicks）。死局更高 = 低血期更长。"),
     ("W2", "威胁lane/千", "rate", lambda r: r.get("threatTicks", 0),
      "站在敌人火线覆盖上的时间。已有税 wThreat=120（重税）。死局 3x=税听不见或改不动。"),
     ("W3", "贴脸时长/千", "rate", lambda r: r.get("nearEnemy4Ticks", 0),

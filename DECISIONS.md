@@ -7359,6 +7359,31 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   status 取值 `cancelled`（旧读方落默认分支）与一次 per-30s 的账本全量读（`job_net_event`）。
   plan/export-must-not-cancel-live-job.plan.md 的 A/B/C 全部落地；全文 docs/nn/remote-transport.md §104。
 
+## §2026-10-18-goalnn-y22-phaseA（y22 阶段 A 四条腿：先修优化器，判据换成"余量"）
+
+- **背景**（2026-10-18）：y21 四腿（chain2/nohurt2/temper2/tempo2）配对读数为
+  **Δwin −8.9 ～ −13.5pp**、斜率 −6.5 ～ −8.1pp/100 轮（t≈−3），**且四条腿的奖励账本 Φ 也同向降
+  5–16 分** ⇒ 不是 reward hacking。用 stack2 的公式给人类语料记 Φ = **+102.7** vs NN **+80.0**
+  ⇒ **奖励排序是对的**，问题在优化器不爬坡。另：胜负本质是一笔**生死账**——
+  打完 20 杀要 `20/杀速` 拍，血条能撑 `219/(承伤/千拍)` 拍；NN = 7576 vs 7300（**余量 0.96×**），
+  人类同座位 = 4975 vs 9820（**1.97×**）。⇒ 在优化器学会爬坡前，任何奖励改动都被漂移吃掉。
+- **决定**：开 y22 阶段 A 四条腿（`nn-training/curricula/y22-{null,lr,batch,gamma}.jsonc`），
+  起点 `y20-stack2.it200.pool800`（sha16 `1a7821240d3c47b9`）、seed **20270206**（四腿共享）、
+  各 500 轮 cap、单变量：① `null` 零改动（把"共同漂移"钉死）；② `lr` 表两格减半
+  （0.00015→0.000075 / 0.0001→0.00005）；③ `target_transitions` 24576→49152（+ max_hours 48→72，
+  预算非变量）；④ `gamma` 0.998→0.9995（有效视野 500→2000 拍）。
+  **判据换口径**：主读数 = **余量**（`20/杀速` ÷ `219/(承伤/千拍)`，目标 ≥1.3），
+  win 仅作副门（≥0.685 = 起点值）；Φ 斜率 ≤ −0.05/轮即红。规格全文 `plan/y22-winrate-ladder.plan.md`，
+  落盘自检 `tmp/y22-check.py`（ALL GREEN：奖励逐字 = stack2、差异集逐腿 == 声明变量、四关 stage_json 可用）。
+- **备选与否决**：① 直接继续调奖励——否（y21 四腿已证在 −7pp/100 漂移下测不出 <7pp 的效应）；
+  ② 直接上人类 BC（`demo_bc_coef` 0→0.2）——否，但保留为阶段 B（`demo_bank.npz` 仍是 v4 旧代
+  ⊥ 当前 schema v5，要先重导 160 局才能喂；且未证实优化器能爬之前，BC 锚只会被 PPO 冲掉）；
+  ③ 再加一条"存在税"——否（y20 wall/far/escape、y21 nohurt/chain 全负）；
+  ④ 用 414xxx 人类座位当评估面板——否（阶段 B 要拿它当 BC 语料，同语料重磨 = 记忆化，§15.1）；
+  ⑤ 把 lr+batch 合成一条腿——否（省一半算力，但读不出归因，这正是 y21 四腿的教训）。
+- **后果**：阶段 A 跑完按"哪条腿 Φ 斜率 ≥ 0"选底座；四条全负 ⇒ 问题不在这些旋钮，
+  下一步打 critic/起点（回到 stack2.it120 一类更早的同代权重）。阶段 B/C 的奖励腿在 A 出结果前不开。
+
 ## §2026-10-18-goalnn-demo-move-only（y22 B′：demo BC 只训 move，fire CE 全局删除）
 
 - **背景**：fire 的 mask 语义是「当前打得出去吗」，label 是「有没有按住」，冷却期两者互斥；
