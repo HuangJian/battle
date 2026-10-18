@@ -30,6 +30,7 @@ from worker.eval_local import (
     EVAL_ITER_SUFFIX,
     EVAL_RECORD_RETRY_MAX,
     EVAL_TASK_ATTEMPTS,
+    EVAL_TASK_ATTEMPTS_TRANSIENT,
     a_eval_seed_list,
     eval_done_keys,
     eval_row,
@@ -38,6 +39,7 @@ from worker.eval_local import (
     settle_eval_summary,
     should_dual_track,
 )
+from worker.eval_track import lost_by_node
 
 # 让位/份额（尾巴）策略在 `biz/eval_yield.py`（S5 第十二刀）：本派发器只消费判据——尾段预留量 /
 # 宽限强制释放点 / 在飞落账宽限的**公式**也住那边（不再是内联表达式）。
@@ -74,6 +76,63 @@ def select_delayed_eval_it(dispatch_it: int, is_eval_round) -> int | None:
     if m < 1:
         return None
     return m if is_eval_round(m) else None
+
+
+def _course_logger(course: str):
+    """把模块级 `log` 包成**本轮专属**的显式课程标签（plan/eval-gap-honesty §6-1）。
+
+    为什么不能用 `_PREFIX`：eval 跑在 `dispatch_eval_bg` 的 daemon 线程里，活过
+    `prefix_scope` 的作用域 ⇒ 它每行读到的是别的课程线程最后置的前缀（实测 4 条
+    `it5 DONE` 里 3 条是错的，镜像还会写进别的课的日志文件）。
+
+    为什么要做成模块级工厂（而不是 `run()` 里的 `def log`）：同名的局部函数会让整个
+    `run` 作用域把 `log` 当局部变量，`_raw = log` 直接 UnboundLocalError；工厂里的 `log`
+    是模块全局，`monkeypatch.setattr(ed, "log", …)` 仍然生效（测试夹具换成 `list.append`
+    这类只收一个位置的 callable 时退回旧形，日志不得反过来杀死训练）。
+    """
+
+    def _log(msg: str) -> None:
+        if course:
+            try:
+                log(msg, course=course)
+                return
+            except TypeError:
+                pass
+        log(msg)
+
+    return _log
+
+
+def _record_failed_meta(
+    meta_path: Path,
+    it: int,
+    task: tuple[int, int],
+    node: str,
+    err: str,
+    errno_code: str = "",
+    msg_head: str = "",
+) -> None:
+    """写一条 `ok=false` 的 meta（丢局/缺口原因）。
+
+    plan/eval-gap-honesty D1：`reason` 取**头部**（errno + 首行）——旧的 `[-160:]` 只留栈尾，
+    bun 的 `error: ENOENT … open '<path>'` 正好被切掉。`errno` / `msg_head` 是**纯新增键**，
+    不参与任何公式（历史行读侧按 unknown 处理）。
+    """
+    _record_agent_meta(
+        meta_path,
+        {
+            "node": node,
+            "mode": "eval",
+            "it": it,
+            "stage": task[0],
+            "seed": task[1],
+            "ok": False,
+            "reason": f"{errno_code}: {msg_head}" if msg_head else err,
+            "errno": errno_code,
+            "msg_head": msg_head,
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+        },
+    )
 
 
 def find_archive_weights(backup_dir: str, backup_prefix: str, it: int) -> str | None:
@@ -158,6 +217,12 @@ class EvalDispatcher:
         rollout_winrate = self.rollout_winrate
         local_gate = self.local_gate
         baseline = self.baseline
+        # D5（plan/eval-gap-honesty §6-1）：本轮所有 eval 行自带课程标签、不经 `_PREFIX`。
+        # 嵌套函数（worker / local_worker / record）自然闭包到这个局部名。
+        log = _course_logger(str(getattr(args, "course", "") or ""))
+
+        # D1b（§2b）：eval 的私有 scratch **不是** it<N>/——轮转删 it<N>/ 时不会带走在飞的评估。
+        eval_dir = traj_dir.parent / f"_eval-{traj_dir.name}"
         try:
             policy = cfg.get("policy", {})
             status_timeout = float(policy.get("statusTimeoutSec", 3))
@@ -226,8 +291,8 @@ class EvalDispatcher:
             local_slots = max(0, int(policy.get("evalLocalSlots", EVAL_LOCAL_SLOTS_DEFAULT)))
             if local_gate is not None and local_slots > 0:
                 try:
-                    traj_dir.mkdir(parents=True, exist_ok=True)
-                    snap = traj_dir / (
+                    eval_dir.mkdir(parents=True, exist_ok=True)
+                    snap = eval_dir / (
                         "_eval_frozen_weights-baseline.json"
                         if baseline
                         else "_eval_frozen_weights.json"
@@ -284,6 +349,26 @@ class EvalDispatcher:
             #: 消费线程数（孵化即 +1，线程退出 -1）。全退 = 再等也不会结算 ⇒ 收工
             #: （否则「任务全被 drop + 无在飞」时只能空等整个窗口，2026-09-19）。
             live_workers = [0]
+            #: **per-leg** 尝试数（plan/eval-gap-honesty D2，评审 F2）：`attempts[task]` 是两条腿
+            #: 共享的总数，且 `attempts[task] == 0` 是 never_dispatched 的判据（见收工段）⇒
+            #: 拿总数当重试判据会让「换机器重跑」的第一次失败就被 drop。
+            leg_tries: dict[tuple[tuple[int, int], str], int] = {}
+            #: 瞬断回队的到期时刻（退避）。两条腿共用 pending ⇒ 也必须共用这张表，
+            #: 否则退避中的局会被另一条腿立刻抢走，退避形同虚设。
+            retry_at: dict[tuple[int, int], float] = {}
+            #: 本机腿改派过的一次性标记（防改派-失败-改派成环；与 `seen` 同一把锁保护）。
+            redispatched: set[tuple[int, int]] = set()
+            #: 本机腿本轮停派（**共享**事件：`local_slots` 是 N 条线程，线程局部停不掉全部）。
+            local_stopped = threading.Event()
+
+            def _node_worker_alive() -> bool:
+                """节点消费线程是否还有一条活着（改派只认这个，不认 `nodes_ok`）。
+
+                `nodes_ok` 非空 ≠ 线程还在跑：`worker()` 在 pending 空且无在飞时会 `return`。
+                给一个已退光的池 `appendleft` 只会把 dropped 变成 lost（评审 F2）。
+                调用方持 `lock`（与 `threads` 的追赶无关：列表已建、线程已 start）。
+                """
+                return any(t.is_alive() and t.name != "eval-local" for t in threads)
 
             def _settle_complete() -> None:
                 """**落盘**满：置收工位 + 断连（调用方持 lock；实现非阻塞）。
@@ -306,6 +391,32 @@ class EvalDispatcher:
             def _clear_inflight(task: tuple[int, int]) -> None:
                 inflight.pop(task, None)
                 inflight_nodes.pop(task, None)
+
+            def _take_ready_locked(*, for_local: bool = False) -> tuple[int, int] | None:
+                """取一局**已到期**的任务（调用方必须持 `lock`）。
+
+                退避中的局被轮到队尾再转一圈：至多 `len(pending)` 次循环、无分配
+                （§14.1）。全部未到期 ⇒ None（调用方去睡，与「队列空」同样处理）。
+
+                `for_local=True`（本机腿）额外跳过长 `redispatched` 的局：它们已经被改派给
+                节点，本机不能再把它们抢回来（否则快本机每次都先失败 → 一手改派形同虚设，
+                线上就是「改派了又立刻 drop」）。节点线程全退时不再跳过（否则没人接）。
+                """
+                if not pending:
+                    return None
+                now = time.time()
+                node_live = _node_worker_alive()
+                for _ in range(len(pending)):
+                    t = pending.popleft()
+                    if for_local and t in redispatched and node_live:
+                        pending.append(t)
+                        continue
+                    due = retry_at.get(t)
+                    if due is None or due <= now:
+                        retry_at.pop(t, None)
+                        return t
+                    pending.append(t)
+                return None
 
             def record(
                 manifest: dict,
@@ -419,29 +530,33 @@ class EvalDispatcher:
                     task = None
                     fanout_copy = False
                     t_task_start: float | None = None
+                    leg = 0
                     with lock:
                         if (
                             streaks.get(nd["id"], 0) >= fail_streak_max
                             or soft_streaks.get(nd["id"], 0) >= soft_streak_max
                         ):
                             return
-                        if pending:
-                            # 尾段预留：gate 未放行且余量 ≤ reserved 时不取（留给本机直跑）；
-                            # 宽限期（local_release_due）强制释放防挂死。hold 中仍可对 in-flight race。
-                            if not hold_for_local(
-                                len(pending),
-                                reserved,
-                                local_gate is not None and local_gate.is_set(),
-                                local_release_due(time.time(), deadline),
-                            ):
-                                task = pending.popleft()
+                        # 尾段预留：gate 未放行且余量 ≤ reserved 时不取（留给本机直跑）；
+                        # 宽限期（local_release_due）强制释放防挂死。hold 中仍可对 in-flight race。
+                        hold = hold_for_local(
+                            len(pending),
+                            reserved,
+                            local_gate is not None and local_gate.is_set(),
+                            local_release_due(time.time(), deadline),
+                        )
+                        if not hold:
+                            got = _take_ready_locked()
+                            if got is not None:
+                                task = got
                                 attempts[task] = attempts.get(task, 0) + 1
-                                attempt = attempts[task]
+                                leg = leg_tries.get((task, nd["id"]), 0) + 1
+                                leg_tries[(task, nd["id"])] = leg
                                 register_inflight(inflight, task)
                                 t_task_start = time.time()
                                 inflight_nodes.setdefault(task, set()).add(nd["id"])
-                        elif not inflight:
-                            return
+                            elif not pending and not inflight:
+                                return
                         if task is None and inflight:
                             cand = pick_race_target(
                                 inflight, nd["id"], inflight_nodes, {}
@@ -452,7 +567,8 @@ class EvalDispatcher:
                                 t_task_start = time.time()
                                 inflight_nodes.setdefault(task, set()).add(nd["id"])
                                 fanout_copy = True
-                                attempt = attempts.get(task, 0) + 1
+                                leg = leg_tries.get((task, nd["id"]), 0) + 1
+                                leg_tries[(task, nd["id"])] = leg
                                 log(
                                     f"[eval] tail-race s{task[0]}/seed{task[1]} "
                                     f"node={nd['id']} — race lane"
@@ -562,7 +678,15 @@ class EvalDispatcher:
                             else:
                                 streaks[nd["id"]] = streaks.get(nd["id"], 0) + 1
                             _pop_inflight(task, nd["id"])
-                            if (attempt < EVAL_TASK_ATTEMPTS or transient) and task not in seen:
+                            if (
+                                (
+                                    leg < EVAL_TASK_ATTEMPTS
+                                    or (transient and leg < EVAL_TASK_ATTEMPTS_TRANSIENT)
+                                )
+                                and task not in seen
+                            ):
+                                if transient:
+                                    retry_at[task] = time.time() + min(2 ** max(0, leg - 1), 8)
                                 pending.append(task)
                                 log(
                                     f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued"
@@ -575,21 +699,11 @@ class EvalDispatcher:
                                     )
                                 )
                             elif task not in seen:
-                                _record_agent_meta(
-                                    meta_path,
-                                    {
-                                        "node": nd["id"],
-                                        "mode": "eval",
-                                        "it": it,
-                                        "stage": task[0],
-                                        "seed": task[1],
-                                        "ok": False,
-                                        "reason": err,
-                                        "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-                                    },
+                                _record_failed_meta(
+                                    meta_path, it, task, nd["id"], err
                                 )
                                 log(
-                                    f"[eval] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) "
+                                    f"[eval] s{task[0]}/seed{task[1]} failed {leg}x ({err}) "
                                     f"— dropped"
                                 )
                     if ok:
@@ -619,6 +733,8 @@ class EvalDispatcher:
                 if snapshot_path is None:
                     return
                 while time.time() < deadline and not all_done.is_set():
+                    if local_stopped.is_set():
+                        return  # 连续瞬断熔断：N 条本机线程共享同一个事件
                     t_task_start = None
                     if local_gate is not None and not local_gate.is_set():
                         remaining = deadline - time.time()
@@ -628,15 +744,18 @@ class EvalDispatcher:
                             continue
                     task = None
                     fanout_copy = False
+                    leg = 0
                     with lock:
-                        if pending:
-                            task = pending.popleft()
+                        got = _take_ready_locked(for_local=True)
+                        if got is not None:
+                            task = got
                             attempts[task] = attempts.get(task, 0) + 1
-                            attempt = attempts[task]
+                            leg = leg_tries.get((task, "local"), 0) + 1
+                            leg_tries[(task, "local")] = leg
                             register_inflight(inflight, task)
                             t_task_start = time.time()
                             inflight_nodes.setdefault(task, set()).add("local")
-                        elif not inflight:
+                        elif not pending and not inflight:
                             return
                         if task is None and inflight:
                             cand = pick_race_target(inflight, "local", inflight_nodes, {})
@@ -646,7 +765,8 @@ class EvalDispatcher:
                                 t_task_start = time.time()
                                 inflight_nodes.setdefault(task, set()).add("local")
                                 fanout_copy = True
-                                attempt = attempts.get(task, 0) + 1
+                                leg = leg_tries.get((task, "local"), 0) + 1
+                                leg_tries[(task, "local")] = leg
                                 log(
                                     f"[eval] tail-race s{task[0]}/seed{task[1]} "
                                     f"node=local — race lane"
@@ -656,6 +776,11 @@ class EvalDispatcher:
                         continue
                     ok = False
                     err = ""
+                    # D1（§2.1）：失败保真——`LocalEvalProcessError` 带 errno/首行/头尾；
+                    # 其余异常退回 `str(e)`（本机腿也会抛 DistError/JSON 错）。
+                    err_errno = ""
+                    err_msg_head = ""
+                    transient = False
                     manifest: dict = {}
                     try:
                         from worker.config import args_rollout_overrides, stage_json_for_args
@@ -666,7 +791,7 @@ class EvalDispatcher:
                             snapshot_path,
                             task[0],
                             task[1],
-                            traj_dir / "local-eval" / f"rl_s{task[0]}_seed{task[1]}",
+                            eval_dir / "local-eval" / f"rl_s{task[0]}_seed{task[1]}",
                             max_ticks=args.max_ticks,
                             difficulty=args.difficulty,
                             timeout_sec=task_timeout,
@@ -689,6 +814,10 @@ class EvalDispatcher:
                         ok = True
                     except Exception as e:
                         err = str(e)[:200]
+                        err_errno = str(getattr(e, "errno_code", "") or "")
+                        err_msg_head = str(getattr(e, "msg_head", "") or "")[:160]
+                        # 判据单一实现：A/B/C 三层共用 `common.distribution.is_transient_error`。
+                        transient = common.distribution.is_transient_error(e)
                     with lock:
                         if ok:
                             if task in seen:
@@ -701,31 +830,77 @@ class EvalDispatcher:
                             seen.add(task)
                             writers[0] += 1  # 收工前必须等它落盘
                             _clear_inflight(task)
+                            # 任一局结算即清零（与节点腿同款）："连续"才是熔断判据，
+                            # 否则成败交替的抖动会把计数攒到 soft_streak_max 而误停派。
+                            soft_streaks["local"] = 0
                             # 收工触发**不在这里**：认领≠落盘；见 `_record_with_retry`。
                         elif fanout_copy:
                             _pop_inflight(task, "local")
-                        elif attempt < EVAL_TASK_ATTEMPTS and task not in seen:
+                        else:
                             _pop_inflight(task, "local")
-                            pending.append(task)
-                            log(f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued")
-                        elif task not in seen:
-                            _pop_inflight(task, "local")
-                            _record_agent_meta(
-                                meta_path,
-                                {
-                                    "node": "local",
-                                    "mode": "eval",
-                                    "it": it,
-                                    "stage": task[0],
-                                    "seed": task[1],
-                                    "ok": False,
-                                    "reason": err,
-                                    "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
-                                },
-                            )
-                            log(
-                                f"[eval] s{task[0]}/seed{task[1]} failed {attempt}x ({err}) — dropped"
-                            )
+                            if transient:
+                                # 瞬断不计节点故障，但连续软失败有上界（与节点腿同款）——
+                                # 否则持续机器故障会一直空转到窗口到期。
+                                soft_streaks["local"] = soft_streaks.get("local", 0) + 1
+                                if soft_streaks["local"] == soft_streak_max:
+                                    local_stopped.set()
+                                    log(
+                                        f"[eval] local: 连续 {soft_streak_max} 次瞬时失败"
+                                        "（背压/瞬断，非节点故障）— 本轮停派"
+                                    )
+                                if (
+                                    leg < EVAL_TASK_ATTEMPTS_TRANSIENT
+                                    and task not in seen
+                                ):
+                                    retry_at[task] = time.time() + min(2 ** max(0, leg - 1), 8)
+                                    pending.append(task)
+                                    log(
+                                        f"[eval] s{task[0]}/seed{task[1]} failed ({err})"
+                                        " — requeued（瞬断/背压，不计节点故障）"
+                                    )
+                                elif task not in seen:
+                                    _record_failed_meta(
+                                        meta_path,
+                                        it,
+                                        task,
+                                        "local",
+                                        err,
+                                        err_errno,
+                                        err_msg_head,
+                                    )
+                                    log(
+                                        f"[eval] s{task[0]}/seed{task[1]} failed {leg}x ({err})"
+                                        " — dropped（瞬断预算用尽）"
+                                    )
+                            elif task not in seen and _node_worker_alive():
+                                # 非瞬断（真失败）：先换机器重跑，不在坏机器上重试（D2-5）。
+                                # 一手性由**_取任务侧**保证（`_take_ready_locked(for_local=True)`
+                                # 跳过长 `redispatched` 的局）——节点线程不会复活，所以本机不会
+                                # 把已改派的局抢回来失败再改派（再判一次 `task not in redispatched`
+                                # 是死代码，评审时特意去掉；改派一手性用例钉的是取任务侧那条 skip）。
+                                redispatched.add(task)
+                                pending.appendleft(task)
+                                log(
+                                    f"[eval] s{task[0]}/seed{task[1]} failed ({err})"
+                                    f" — 改派给在线节点（本机第 {leg} 次）"
+                                )
+                            elif leg < EVAL_TASK_ATTEMPTS and task not in seen:
+                                pending.append(task)
+                                log(f"[eval] s{task[0]}/seed{task[1]} failed ({err}) — requeued")
+                            elif task not in seen:
+                                _record_failed_meta(
+                                    meta_path,
+                                    it,
+                                    task,
+                                    "local",
+                                    err,
+                                    err_errno,
+                                    err_msg_head,
+                                )
+                                log(
+                                    f"[eval] s{task[0]}/seed{task[1]} failed {leg}x ({err})"
+                                    " — dropped"
+                                )
                     if ok:
                         wall_sec = (
                             round(time.time() - t_task_start, 3)
@@ -942,9 +1117,22 @@ class EvalDispatcher:
                 inflight_n = len(inflight)
                 spawned_n = len(threads)
                 never_pairs = {p for p in pending if attempts.get(p, 0) == 0}
+                landed_close_n = len(landed)
             remain = deadline - time.time()
+            # D3（§4.2）：单节点集中亏损 = 机器级故障。`lost` 与 `eval_track` 同源式子；
+            # 归因只读 meta 的 `ok=false` 行（没有 meta 的丢局不计入 ⇒ 偏保守）。
+            lost_n = max(0, total - landed_close_n - len(never_pairs))
+            lost_per_node, lost_errnos = lost_by_node(meta_path, it) if lost_n else ({}, {})
+            stopped_nodes = {k for k, v in soft_streaks.items() if v >= soft_streak_max}
+            if local_stopped.is_set():
+                stopped_nodes.add("local")
             close_reason = eval_close_reason(
-                all_done.is_set(), no_consumers, time.time() >= deadline
+                all_done.is_set(),
+                no_consumers,
+                time.time() >= deadline,
+                lost=lost_n,
+                lost_per_node=lost_per_node,
+                stopped_nodes=stopped_nodes,
             )
             never_n = len(never_pairs)
             tail = (
@@ -957,6 +1145,16 @@ class EvalDispatcher:
                 log(
                     f"[eval] it{it}: settled 满（{len(landed)}/{total}）— 断连 {closing} 条"
                     f"在飞连接 + 拒发新请求，立即收工（慢节点/竞速副本不再等）{tail}"
+                )
+            elif close_reason == "machine-fault":
+                top_node, top_n = max(lost_per_node.items(), key=lambda kv: kv[1])
+                top_errno = (
+                    max(lost_errnos.items(), key=lambda kv: kv[1])[0] if lost_errnos else "-"
+                )
+                log(
+                    f"[eval] it{it}: 机器级故障收工 —— {top_node} 独占 {top_n}/{lost_n} 局"
+                    f"（errno={top_errno}）；缺口不进本轮判决，收官 drain 会补"
+                    f"— 断连 {closing} 条在飞连接{tail}"
                 )
             elif close_reason == "workers-gone":
                 log(

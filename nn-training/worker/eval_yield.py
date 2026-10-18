@@ -152,8 +152,44 @@ def release_local_gate_if_starved(local_gate, nodes_ok: list) -> bool:
     return True
 
 
-def eval_close_reason(settled: bool, no_consumers: bool, window_expired: bool) -> str:
-    """收工原因（三值互斥）：`settled` / `workers-gone` / `window`。
+#: 机器级故障的集中度阈值（plan/eval-gap-honesty §4.1）：单个节点占全部 `lost` 的比例。
+#: 取 0.8 而不是 1.0——本机腿的静默路径（tail-race / fanout_copy）会让集中度略低于 1，
+#: 而 0.8 仍足以把「四个节点各丢 1/4」与「一台机器全丢」分开。
+MACHINE_FAULT_SHARE = 0.8
+#: 量级地板：亏损少到判决准入本来就会放过（<= 2% = 400 局里的 8 局）时不值得单独立案。
+#: 没有这条，一局瞬时失败也会被判成「机器级故障」（lost=1 的集中度恒为 100%）。
+MACHINE_FAULT_MIN_LOST = 8
+
+
+def _machine_fault(
+    lost: int,
+    lost_per_node: dict[str, int] | None,
+    stopped_nodes: set[str] | tuple[str, ...],
+) -> bool:
+    """单节点集中亏损失败 = 机器级故障（`eval_close_reason` 的第四态判据，**唯一实现**）。
+
+    全部满足：`lost > 0` · 最大节点占比 `>= MACHINE_FAULT_SHARE` · 该节点是 `local`
+    或在「本轮已停派」集合里（`soft_streaks >= soft_streak_max`）。
+    没有归因数据（`lost_per_node` 为 None/空）⇒ False（旧调用方行为逐字不变）。
+    """
+    if lost < MACHINE_FAULT_MIN_LOST or not lost_per_node:
+        return False
+    node, n = max(lost_per_node.items(), key=lambda kv: kv[1])
+    if n / float(lost) < MACHINE_FAULT_SHARE:
+        return False
+    return node == "local" or node in stopped_nodes
+
+
+def eval_close_reason(
+    settled: bool,
+    no_consumers: bool,
+    window_expired: bool,
+    *,
+    lost: int = 0,
+    lost_per_node: dict[str, int] | None = None,
+    stopped_nodes: set[str] | tuple[str, ...] = (),
+) -> str:
+    """收工原因（四值互斥）：`settled` / `machine-fault` / `workers-gone` / `window`。
 
     为什么需要它（plan/eval-baseline-undispatched §2 P0-1，2026-10-08）：收工行原先
     只说「未全落盘 N/M」——it0 那 95 局就是在 21s/1500s 时因消费线程归零而收工，
@@ -168,10 +204,20 @@ def eval_close_reason(settled: bool, no_consumers: bool, window_expired: bool) -
     ⚠ `workers-gone` 必须带 `not window_expired`：窗口到期那条路上，消费线程本来就因
     `time.time() >= deadline` 而退出 ⇒ 不加这个条件的话 `window` 永远报不出来
     （三条互斥就成了空话）。`no_consumers` 由调用方**已经算好的那个变量**传进来。
+
+    `machine-fault`（2026-10-18，plan/eval-gap-honesty §4）：只在 `workers-gone` 的同一个
+    前提下细分——缺口**集中在一台机器**（`local` 或本轮已停派的节点）就不是普通缺口
+    （y22-lr it5：83 局全落 `local`）。三个关键字参数全部带缺省 ⇒ 旧调用方/旧用例逐字不变。
     """
     if settled:
         return "settled"
-    return "workers-gone" if no_consumers and not window_expired else "window"
+    if no_consumers and not window_expired:
+        return (
+            "machine-fault"
+            if _machine_fault(lost, lost_per_node, stopped_nodes)
+            else "workers-gone"
+        )
+    return "window"
 
 
 # ---- 从 `EvalDispatcher.run()` 的内联判决点提出的三个公式（S5 第十二刀，2026-09-27）---------

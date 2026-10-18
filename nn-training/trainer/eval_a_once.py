@@ -310,8 +310,10 @@ def main() -> int:
     # 不置位本机槽位会一路空等到 deadline。
     gate = threading.Event()
     gate.set()
-    # 与 in-loop 同布局：冻结权重快照 + local-eval/ 都落 traj/it<N>/（eval_replays_once
-    # 的权重解析也按 traj/it*/_eval_frozen_weights*.json 找）。
+    # 与 in-loop 同布局：派发器把冻结权重快照 + local-eval/ 落 eval scratch
+    # `traj/_eval-it<N>/`（2026-10-18 plan/eval-gap-honesty §2b D1b：scratch 移出
+    # it<N>/，轮转删 it<N>/ 时不会带走在飞的评估；eval_replays_once 的权重解析同时认
+    # `_eval-it*/` 与旧课程遗留的 `it*/`）。
     it_dir = traj / f"it{args.iter}"
     it_dir.mkdir(parents=True, exist_ok=True)
 
@@ -337,7 +339,8 @@ def main() -> int:
         summary = _read_summary(eval_jsonl, key16, args.iter)
     # 逐局产物（local-eval/_eval_report.json 等）随收工清掉：账本行已带全部字段，
     # 这是手动触发的一次性评估，不留每次几百 MB 的中间目录（同旧 evalA-tmp 清理）。
-    shutil.rmtree(it_dir / "local-eval", ignore_errors=True)
+    # 清的是 scratch 里的 local-eval/；冻结快照保留（eval_replays_once 按 wver 解析它）。
+    shutil.rmtree(traj / f"_eval-it{args.iter}" / "local-eval", ignore_errors=True)
     if not summary or not summary.get("games"):
         log(f"[evalA] FAIL it{args.iter}：一局都没落账（无可用节点且本机份额为 0？）")
         return 1

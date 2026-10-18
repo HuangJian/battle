@@ -776,6 +776,7 @@ export function readEvalSummaries(trajDir: string): Map<number, EvalSummary> {
             clears: Number(r.clears ?? 0),
             clearRate: typeof r.clearRate === 'number' ? r.clearRate : null,
             dropped: Number(r.dropped ?? 0),
+            closeReason: typeof r.close_reason === 'string' ? r.close_reason : null,
             sec: Number(r.sec ?? 0),
             wver: String(r.wver ?? ''),
             outcomes: (r.outcomes ?? {}) as Record<string, number>,

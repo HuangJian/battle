@@ -18,6 +18,32 @@ from worker.bc_ledger import scan_jobs
 from worker.workdir_sweep import sweep_failed_wave_dirs
 
 
+def _settled_eval_iters(eval_log: Path) -> set[int]:
+    """已有**完整**（`dropped == 0`）summary 的 eval 轮号。
+
+    只给 `_eval-it<k>/` 的回收用：评估可能比训练慢几轮，按 `keep_iters` 一刀切会删掉在飞的
+    评估（plan/eval-gap-honesty §2b，2026-10-18）。读不到/无文件 ⇒ 空集（**保守：不删**）。
+    """
+    out: set[int] = set()
+    try:
+        with open(eval_log, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(r, dict) or r.get("event") != "eval_summary":
+                    continue
+                n = r.get("iter")
+                if isinstance(n, int) and r.get("dropped") == 0:
+                    out.add(n)
+    except OSError:
+        return set()
+    return out
+
+
 class TrainingGuardsSweep:
     """轮级磁盘回收 mixin（keepIters 轮转 / job 目录 / 孤儿波次清扫）。"""
 
@@ -83,6 +109,23 @@ class TrainingGuardsSweep:
                     elif (jd / FAIL_NAME).exists() or jd.name in cancelled:
                         # 无 result 的终局残留：同一配额清理（不造 .archive 第二份配额）
                         rmtree_best_effort(jd, ignore_errors=True)
+            # eval 私有 scratch（`_eval-it<k>/`，plan/eval-gap-honesty §2b）：与 `it<N>/`
+            # **分开**轮转——只删「已有完整 summary」的轮。评估可能比训练慢几轮，按
+            # `keep_iters` 一刀切就会删掉在飞的评估（2026-10-18 y22-lr it5 的第一嫌疑：
+            # 79 局读失败 / 4 局写失败 = 删目录撞上 4 条本机线程）。
+            eval_cands: list[tuple[int, Path]] = []
+            for old in self._traj_root.glob("_eval-it*"):
+                try:
+                    n_ev = int(old.name[len("_eval-it") :])
+                except ValueError:
+                    continue
+                if n_ev <= it - args.keep_iters:
+                    eval_cands.append((n_ev, old))
+            if eval_cands:
+                settled = _settled_eval_iters(self._traj_root / "eval_log.jsonl")
+                for n_ev, old in eval_cands:
+                    if n_ev in settled:
+                        rmtree_best_effort(old, ignore_errors=True)
             # §374 同步（2026-09-08）：本地采样波次目录收敛——本轮已全部结算（无在飞
             # 子进程），清失败/废弃局的孤儿 w* 目录（无 _rl_report.json：部分 shard +
             # rollout.log 是死重，PPO/resume 都不消费）。完整波次目录是语料，永不删

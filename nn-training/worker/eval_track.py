@@ -280,6 +280,38 @@ def _missing_reasons(meta_path: Path, it: int) -> dict[tuple[int, int], str]:
     return out
 
 
+def lost_by_node(meta_path: Path, it: int) -> tuple[dict[str, int], dict[str, int]]:
+    """丢局按节点与 errno 计数（`machine-fault` 判据的输入，plan/eval-gap-honesty D3）。
+
+    只读 `dist-agent-meta.jsonl` 的 `ok is False` 行（有界：一轮几百行，收工时只跑一次）。
+    没有 meta 行的丢局（线程直接死）不计入 ⇒ 集中度可能被低估（**偏保守**，不误报）。
+    住这里而不是派发器：它和 `settle_eval_summary` 的缺口分额是同一张账。
+    """
+    per_node: dict[str, int] = {}
+    per_errno: dict[str, int] = {}
+    try:
+        with open(meta_path, encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if not isinstance(r, dict) or r.get("ok") is not False:
+                    continue
+                if r.get("it") != it:
+                    continue
+                nd = str(r.get("node") or "?")
+                per_node[nd] = per_node.get(nd, 0) + 1
+                code = str(r.get("errno") or "")
+                if code:
+                    per_errno[code] = per_errno.get(code, 0) + 1
+    except OSError:
+        return ({}, {})
+    return (per_node, per_errno)
+
+
 def settle_eval_summary(
     eval_jsonl: Path,
     key16: str,

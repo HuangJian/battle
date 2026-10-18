@@ -339,6 +339,11 @@ def is_transient_error(e: BaseException) -> bool:
         if e.status in TRANSIENT_HTTP_STATUS:
             return True
         return _BUSY_HINT in str(e.reason)[:64].lower()
+    # 鸭子协议（plan/eval-gap-honesty D1）：本机直跑的子进程失败自报 `transient`——
+    # 等价于下面「OSError ⇒ True」那一档，只是 errno 已被归过类（`worker/local_eval_error.py`）。
+    # 为什么用协议而不是 import：`common/` 是下层，不得反向依赖 `worker/`。
+    if getattr(e, "transient", None) is True:
+        return True
     if isinstance(e, OSError):  # ConnectionResetError / TimeoutError / URLError …
         return True
     return _BUSY_HINT in str(e)[:64].lower()

@@ -32,22 +32,38 @@ def format_line(msg: str) -> str:
     return f"[{time.strftime('%H:%M:%S')}] {tag}{msg}"
 
 
-def log(msg: str) -> None:
+def _mirror(sink: Any, line: str) -> None:
+    """镜像一行到课程日志；失败只吞（日志不得反向杀死训练）。"""
+    try:
+        sink.write(line + "\n")
+        sink.flush()
+    except Exception:
+        pass
+
+
+def log(msg: str, *, course: str | None = None) -> None:
     """Timestamped stdout line — the training log must be analyzable over time.
 
     在课程前缀作用域内（`prefix_scope`）额外镜像到该课的日志文件——单进程多课程下这
     替代了「每课自己的 stdout 重定向」（见模块 docstring）。镜像失败只吞（日志不得
     反向杀死训练）。
+    `course`（2026-10-18，plan/eval-gap-honesty §6-1）：**显式**课程归属，不经 `_PREFIX`。
+    为什么需要：eval 跑在 `dispatch_eval_bg` 的 daemon 线程里，活过 `prefix_scope` 的作用域
+    ⇒ 它每行读到的是**别的课程线程**最后置的前缀，行标签与镜像目标都会张冠李戴
+    （实测 4 条 `it5 DONE` 里 3 条前缀是错的）。缺省 = 旧行为逐字节不变。
     """
+    if course:
+        line = f"[{time.strftime('%H:%M:%S')}] [{course}] {msg}"
+        print(line, flush=True)
+        sink = _COURSE_SINKS.get(course)
+        if sink is not None:
+            _mirror(sink, line)
+        return
     line = format_line(msg)
     print(line, flush=True)
     sink = _COURSE_SINKS.get(_PREFIX) if _PREFIX else None
     if sink is not None:
-        try:
-            sink.write(line + "\n")
-            sink.flush()
-        except Exception:
-            pass
+        _mirror(sink, line)
 
 
 def get_prefix() -> str:
