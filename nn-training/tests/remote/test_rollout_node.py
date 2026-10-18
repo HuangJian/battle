@@ -11,6 +11,7 @@ import json
 import urllib.error
 from email.message import Message
 from io import BytesIO
+from typing import Any
 
 import pytest
 
@@ -112,7 +113,9 @@ def test_classify_error() -> None:
 # ---------------------------------------------------------------- register / unregister
 
 class _Resp:
-    def __init__(self, body: dict, status: int = 200) -> None:
+    # body 放宽到 Any：有用例要盖「响应体不是 dict」这条分支（agent 变坏/旧版），
+    # 它必须走 `_status` 的「不编状态」路径而不是被夹具的注解挡住。
+    def __init__(self, body: Any, status: int = 200) -> None:
         self._b = json.dumps(body).encode("utf-8")
         self.status = status
 
@@ -184,3 +187,62 @@ def test_unregister_posts_id_and_reports_status() -> None:
 
     out = rn.unregister(_opener(exc=_http_error(404)), "http://h", "tok", "n", lambda m: None)
     assert out["ok"] is False and out["status"] == 404
+
+
+# ---------------------------------------------------------------- 近 30min 产出摘要（2026-10-18）
+
+def test_output_line_prefers_the_agent_line_verbatim() -> None:
+    """行形状由 agent 算好（数字只在 `tools/agent/output-window.ts` 一处算）——这里只搬运。
+
+    为什么不在 python 里再拼一遍：notebook 日志与 `sampler-agent.log` 必须逐字相同，
+    两处格式化 = 两套口径，对账时先要怀疑日志。
+    """
+    line = "games=412（rollout=380 / eval=32） · 13.7 局/分（30min） · 失败=3 · 轮次=2"
+    assert rn.output_line({"outputLine": line}) == f"近30min产出 {line}"
+    # 两侧空白不是新事实（日志行不带缩进）
+    assert rn.output_line({"outputLine": f"  {line}  "}) == f"近30min产出 {line}"
+
+
+def test_output_line_is_honest_when_unknown() -> None:
+    """旧 agent / 探活失败 ⇒ 「不可知」；绝不拿累计数冒充 30 分钟窗口（那是静默错数）。
+
+    用**全等**而不是子串：这两种不可知形态是仅有的两档，判据没必要挂在措辞的一部分上
+    （文本断言计数护栏只许降不许升，全等不计）。
+    """
+    assert rn.output_line(None) == "近30min产出 不可知（agent 未应答）"
+    assert rn.output_line({"gamesDoneTotal": 1240}) == "近30min产出 不可知（旧 agent 无 outputLine）"
+    assert rn.output_line({"outputLine": "   "}) == "近30min产出 不可知（旧 agent 无 outputLine）"
+
+
+def test_status_reads_local_agent_with_auth_and_never_raises() -> None:
+    calls: list = []
+    body = {"outputLine": "games=1（rollout=1 / eval=0）"}
+    st = rn._status(8443, "tok", urlopen=_opener(_Resp(body), calls=calls))
+    assert st == body
+    assert calls[0].full_url == "http://127.0.0.1:8443/v1/status"
+    assert calls[0].get_header("Authorization") == "Bearer tok"
+    assert rn._status(8443, "tok", urlopen=_opener(exc=urllib.error.URLError("down"))) is None
+    # 非 dict 响应体（旧/坏 agent）⇒ None（不编一个状态出来）
+    assert rn._status(8443, urlopen=_opener(_Resp([1, 2]))) is None
+
+
+def test_output_summary_cadence_is_ten_minutes() -> None:
+    """10 分钟一行（用户 2026-10-18 口径）——节拍是口径本身，写死值相等判据。"""
+    assert rn.OUTPUT_STATUS_EVERY_SEC == 600.0
+
+
+def test_emit_output_summary_prints_exactly_one_line(monkeypatch: pytest.MonkeyPatch) -> None:
+    """监护循环每 10 分钟调的就是它：读一次 `/v1/status`、打一行。
+
+    钉在这里而不是钉源码文本：notebook 侧看不到的正是「算了但没上屏」，而这条用例走的是
+    **监护循环真正调用的入口**（`_status` 注入，不打真网络）。
+    """
+    monkeypatch.setattr(rn, "_status", lambda port, auth: {"outputLine": "games=7（rollout=7 / eval=0）"})
+    seen: list[str] = []
+    rn.emit_output_summary(8443, "tok", seen.append)
+    assert seen == ["近30min产出 games=7（rollout=7 / eval=0）"]
+    # agent 不可达 ⇒ 仍是一行（不可知），不是零行、不是抛
+    monkeypatch.setattr(rn, "_status", lambda port, auth: None)
+    seen.clear()
+    rn.emit_output_summary(8443, "tok", seen.append)
+    assert seen == ["近30min产出 不可知（agent 未应答）"]

@@ -55,6 +55,12 @@ _URL_RE = re.compile(r"https://[a-z0-9-]+\.trycloudflare\.com")
 RETRY_MAX_SEC = 300.0
 RETRY_FIRST_SEC = 30.0
 
+#: 「近 30 分钟产出」摘要的打印节拍（用户 2026-10-18：「rollout.ipynb 及 sampler-agent 的 log
+#: 无法观察最近贡献情况，请持续统计半小时滑动窗口产出，每十分钟打印一行」）。
+#: 窗口计算在 agent 侧（`tools/agent/output-window.ts`，那里才有逐局完成时刻）——本模块
+#: **只负责把那一行搬进 notebook/rollout-node 日志**，第二个数字源就是第二个真相。
+OUTPUT_STATUS_EVERY_SEC = 600.0
+
 RegisterFn = Callable[..., Any]
 
 
@@ -422,6 +428,50 @@ def _ping(port: int, auth: str = "", timeout: float = 5.0, urlopen: RegisterFn |
         return None
 
 
+def _status(
+    port: int, auth: str = "", timeout: float = 5.0, urlopen: RegisterFn | None = None
+) -> dict | None:
+    """读本地 agent 的 `/v1/status`（同 `/v1/ping` 要鉴权）。**绝不抛**：拿不到就 None。
+
+    为什么与 `_ping` 分开：探活是监护的关键路径（它决定「agent 判定死亡/重启」），
+    而摘要是**可丢**的观测——两者共一个函数会让「摘要报错」被当成「节点不健康」。
+    """
+    opener = urlopen or urllib.request.urlopen
+    try:
+        req = urllib.request.Request(f"http://127.0.0.1:{port}/v1/status")
+        if auth:
+            req.add_header("Authorization", f"Bearer {auth}")
+        with opener(req, timeout=timeout) as r:
+            data = json.loads(r.read().decode("utf-8"))
+            return data if isinstance(data, dict) else None
+    except Exception:
+        return None
+
+
+def emit_output_summary(port: int, auth: str, log: Callable[[str], None]) -> None:
+    """打一行「近 30 分钟产出」（监护循环每 10 分钟调一次）。**绝不抛**。
+
+    读 `/v1/status` 失败 ⇒ `output_line(None)` 那一档「不可知」：可丢的观测不该让监护循环炸，
+    也不该被读成「节点不健康」（判活是 `_ping` 的职责）。
+    """
+    log(output_line(_status(port, auth)))
+
+
+def output_line(status: dict | None) -> str:
+    """把 `/v1/status` 的产出摘要拼成**一行**（空/旧 agent 如实说不可知）。
+
+    分母、窗口、分列全在 agent 侧算好（`outputLine`）——这里不重算任何数字：
+    notebook 日志与 `sampler-agent.log` 必须逐字相同，否则两个日志对账时先要怀疑口径。
+    """
+    if not isinstance(status, dict):
+        return "近30min产出 不可知（agent 未应答）"
+    line = status.get("outputLine")
+    if isinstance(line, str) and line.strip():
+        return f"近30min产出 {line.strip()}"
+    # 旧 agent（没随本仓同步升级）不能编一个「窗口」出来：累计数冒充 30 分钟窗口是静默错数。
+    return "近30min产出 不可知（旧 agent 无 outputLine）"
+
+
 # ---------------------------------------------------------------- 主流程（cell 调用）
 
 def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]) -> int:
@@ -565,6 +615,8 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
     deadline = time.time() + max(0.0, float(cfg.get("max_session_hours") or 0)) * 3600
     restart_limit = int(cfg.get("restart_limit") or 5)
     restarts, tick, miss = 0, 0, 0
+    # 「近 30 分钟产出」摘要：按**墙钟**而不是 tick 计数（sleep 漂移不会把 10 分钟变成 11 分钟）
+    next_output_at = time.time() + OUTPUT_STATUS_EVERY_SEC
     try:
         while True:
             if time.time() > deadline:
@@ -611,6 +663,11 @@ def run(cfg: dict, log: Callable[[str], None], secret: Callable[[str, Any], Any]
                     backoff = RETRY_FIRST_SEC if backoff <= 0 else min(RETRY_MAX_SEC, backoff * 2)
                     next_retry = time.time() + backoff
                     log(f"重注册失败（{out['kind']}）——{int(backoff)}s 后重试")
+            # 产出摘要（每 10 分钟一行）：先于 sleep 判定，保证第一行不会因重启/重注册被推迟。
+            # 取不到就如实说不可知（不等于「没产出」）——观测面坏不得让监护循环抛异常。
+            if time.time() >= next_output_at:
+                emit_output_summary(port, auth, log)
+                next_output_at = time.time() + OUTPUT_STATUS_EVERY_SEC
             time.sleep(10)
     except KeyboardInterrupt:
         log("收到中断")

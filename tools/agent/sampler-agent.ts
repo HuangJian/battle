@@ -63,6 +63,15 @@ import {
 } from './persist-pool'
 // 工作目录磁盘收敛纯函数（boot 孤儿清理 + 权重文件保留；修正则 2026-09-08，§374）
 import { staleOrphanPlan, sweepWeightFilePlan } from './workdir-cleanup'
+// 「最近半小时产出」滑动窗口（2026-10-18 用户指令）：本文件**故意不逐局打日志**，累计计数
+// 又读不出「最近还在不在产出」——一个 10 分钟的摘要行补上这层观测（纯逻辑在 output-window.ts）。
+import {
+  OUTPUT_LINE_EVERY_MS,
+  formatOutputLine,
+  newOutputState,
+  noteOutput,
+  outputWindow,
+} from './output-window'
 // 单实例互斥纯判定（plan/sampler-single-instance.plan.md，2026-09-29）：Linux 上为重启链开的
 // SO_REUSEPORT 让第二个实例绑同一端口**静默成功** ⇒ EADDRINUSE 护栏失效（一台节点两个代码
 // 版本同时服务）。判定表在 single-instance.ts（纯函数，单测共享）——本文件只做 IO 与接线。
@@ -423,6 +432,22 @@ let rejectedCount = 0
 let lastError = ''
 let gamesDoneTotal = 0
 const gamesDoneByIter = new Map<string, number>()
+/** 最近 30 分钟的完成/失败事件环（顶部摘要行与 `/v1/status.output` 的唯一数据源）。 */
+const outputState = newOutputState()
+
+/** 记一笔产出（完成或失败）——窗口的唯一入口。
+ *
+ *  `mode` 而不是 `kind` 分 rollout/eval：与看板 `pool-history` 同判据（`mode === 'eval'` 才
+ *  是 eval；kind 是权重桶的维度，历史上有 goal/intent 等写法，拿它分列会与看板对不上）。
+ */
+export function noteTaskOutput(mode: string, iterId: string, ok: boolean): void {
+  noteOutput(outputState, { ms: Date.now(), mode, iterId, ok })
+}
+
+/** 当前窗口视图（`/v1/status` 与摘要行共用一次计算，避免两处数字漂开）。 */
+function currentOutputWindow(): ReturnType<typeof outputWindow> {
+  return outputWindow(outputState, Date.now(), startedAt)
+}
 const inflight = new Map<string, { stage: number; seed: number; startedAt: number }>()
 // v3.6 异步模式：已完成但失败的任务登记表（/v1/result 消费一次即删）。
 // 权重切换清场时与 resultCache 一并清空——跨轮生命周期一致。
@@ -1199,6 +1224,32 @@ function reapIdleWorkers(nowMs = Date.now()): number {
   return targets.length
 }
 
+/** 起「近 30 分钟产出」摘要节拍（每 10 分钟一行；用户 2026-10-18 指令）。
+ *
+ *  为什么是 10 分钟：日志是给人扫的。比 10 分钟更密会把 `tmp/sampler-agent.log` 变成时序
+ *  数据流（本文件**故意不逐局打日志**正是为此）；更疏则「停摆」发现太慢——一次停 20 分钟，
+ *  摘要行会连续两拍显示窗口在下滑。
+ *
+ *  窗口 30 分钟、行形状与 `/v1/status.outputLine` **同一份实现**（`output-window.ts`）：云机侧
+ *  （`rollout_node.py`）直接原样上屏，两份日志逐字相同才好对账。
+ */
+export function startOutputTicker(): void {
+  const t = setInterval(() => {
+    try {
+      console.log(
+        `[sampler-agent] 近30min产出 ${formatOutputLine(currentOutputWindow(), {
+          inflight: inflight.size,
+          total: gamesDoneTotal,
+          failedRecent: failedTasks.size,
+        })}`,
+      )
+    } catch {
+      /* best effort：摘要行坏了不影响服务 */
+    }
+  }, OUTPUT_LINE_EVERY_MS) as ReturnType<typeof setInterval> & { unref?: () => void }
+  t.unref?.()
+}
+
 /** 起回收节拍（`--pool-idle-ms 0` / `--no-persist` 时不起）。 */
 function startReapTicker(): void {
   if (!persistEnabled || poolIdleMs <= 0) return
@@ -1745,9 +1796,11 @@ function beginTask(
       serveResult(key, buf)
       gamesDoneTotal++
       gamesDoneByIter.set(iterId, (gamesDoneByIter.get(iterId) ?? 0) + 1)
+      noteTaskOutput(mode, iterId, true)
     })
     .catch((e: unknown) => {
       const msg = e instanceof Error ? e.message : String(e)
+      noteTaskOutput(mode, iterId, false)
       // 600：摘要已把错误类型行排在最前（summarizeChildFailure），留足余量让
       // 栈顶帧也进得来（原 300 会在长源码帧上切掉诊断本体）。
       failedTasks.set(key, msg.slice(0, 600))
@@ -2163,6 +2216,7 @@ async function handle(req: Request): Promise<Response> {
             const served = serveResult(key, buf)
             gamesDoneTotal++
             gamesDoneByIter.set(iterId, (gamesDoneByIter.get(iterId) ?? 0) + 1)
+            noteTaskOutput(mode, iterId, true)
             try {
               controller.enqueue(new Uint8Array(served))
               controller.close()
@@ -2172,6 +2226,7 @@ async function handle(req: Request): Promise<Response> {
           })
           .catch((e: unknown) => {
             if (hb) clearInterval(hb)
+            noteTaskOutput(mode, iterId, false)
             lastError = `${new Date().toISOString()} s${stage}/seed${seed}: ${e instanceof Error ? e.message : String(e)}`
             console.error(`[sampler-agent] task failed: ${lastError}`)
             controller.error(e instanceof Error ? e : new Error(String(e)))
@@ -2287,6 +2342,15 @@ async function handle(req: Request): Promise<Response> {
       workers,
       gamesDoneTotal,
       gamesDoneByIter: Object.fromEntries(gamesDoneByIter),
+      // 最近 30 分钟产出（2026-10-18 用户指令）：结构给程序读（dashboard / 断言），
+      // `outputLine` 是**同一份数字**的人读行——云机侧（rollout_node）直接原样上屏，
+      // 两侧逐字相同才好对账（格式只在这个文件里实现一次，别在 python 里再拼一遍）。
+      output: currentOutputWindow(),
+      outputLine: formatOutputLine(currentOutputWindow(), {
+        inflight: inflight.size,
+        total: gamesDoneTotal,
+        failedRecent: failedTasks.size,
+      }),
       inflight: [...inflight.entries()].map(([k, v]) => ({
         key: k,
         ...v,
@@ -2415,4 +2479,6 @@ if (import.meta.main) {
   writeInstanceLock()
   // 空闲回收节拍（默认开：floor=min(4, workers)、阈值 30min；`--pool-idle-ms 0` 关）。
   startReapTicker()
+  // 近 30 分钟产出摘要（每 10 分钟一行；2026-10-18 用户指令——两个 log 都看不出最近贡献）。
+  startOutputTicker()
 }

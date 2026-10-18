@@ -6,6 +6,44 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §105 采样节点的「近 30 分钟产出」摘要行：窗口计算住 agent，日志只搬那一行（2026-10-18）
+
+**报障**（用户原话）：「rollout.ipynb 及 sampler-agent 的 log 无法观察最近贡献情况，请持续统计
+半小时滑动窗口产出，每十分钟打印一行」。
+
+**为什么两个 log 都看不见**（各自的盲区正好互补成「没有近期产出信号」）：
+
+- `tmp/sampler-agent.log` **故意不逐局打日志**（多 worker RL 采样下会刷爆），而 `/v1/status`
+  的 `gamesDoneTotal` 是**开机以来累计**：早班攒的大数字掩盖当前停滞，agent 重启又把累计清零
+  （数字掉下去 ≠ 变慢）。两件事都让「最近半小时」不可观测。
+- `rollout.ipynb` / `rollout-node.log` 只有 keepalive（`alive (N min)`）与注册/重启事件，
+  没有任何产出面。
+
+**做法**（一行数字只有一个来源）：
+
+- `tools/agent/output-window.ts`（纯逻辑，`tests/agent/output-window.test.ts` 15 例）：30 分钟事件环
+  + 10 分钟节拍常量。口径与看板 `pool-history` 同判据：**`mode === 'eval'` 才是 eval，其余计
+  rollout**（`kind` 是权重桶维度，历史上有 goal/intent，拿它分列会与看板对不上）；失败单列；
+  轮次 = 窗口内 iterId 去重；速率分母 = `min(30min, 自本次启动)`、下限 1 分钟（开机 3 分钟就报
+  「30 分钟 412 局」不公平，刚跑完一局报「120 局/分」也不公平）；环封顶 20k，触顶丢最旧一半并
+  **诚实标注截断**，且截断锚点随窗口自然过期（不做永久脏标记）。
+- `tools/agent/sampler-agent.ts`：两个完成出口（同步流式 / 异步 `/v1/result`）与两个失败出口各记
+  一笔事件；每 10 分钟打一行
+  `[sampler-agent] 近30min产出 games=…（rollout=… / eval=…） · x 局/分（…min） · 失败=… · 轮次=… ·
+  在飞=… · 待取失败=… · 累计=…`。**同一串**挂到 `/v1/status.outputLine`（结构版 `output`）。
+- `nn-training/remote/rollout_node.py`：监护循环按**墙钟**每 `OUTPUT_STATUS_EVERY_SEC = 600`s 读
+  `/v1/status`，把 `outputLine` **原样**打印（`output_line()`），于是 notebook cell /
+  `rollout-node.log` 与 `sampler-agent.log` 逐字相同、可直接对账。取不到 / 旧 agent ⇒
+  `近30min产出 不可知（…）`——绝不拿累计数冒充 30 分钟窗口（静默错数比缺一行贵）。
+  `_status` 与 `_ping` 分开且**绝不抛**：摘要是可丢的观测，不得让「摘要失败」被监护读成「节点不健康」；
+  打印点放在 `time.sleep(10)` 之前，重启/重注册都不会把第一行推迟。
+
+**证据**：`output-window.test.ts` 用假时钟拨 `OUTPUT_LINE_EVERY_MS`，断言 agent 日志**真的**出现那一
+行（含刚记的产出）——只测纯函数正是「算对了但没人上屏」的原形态；`tests/remote/test_rollout_node.py`
+钉 `output_line` 的搬运/不可知两态（全等）、`_status` 的鉴权与绝不抛、600s 节拍，以及
+`emit_output_summary()`（监护循环每拍真正调用的入口）读一次 `/v1/status` 打一行。**没有**加源码文本
+断言：文本断言计数护栏只许降不许升（`test_source_text_assert_budget.py`），接线改由入口级用例钉。
+
 ## §104 导出进程不许撤在线腿的活：撤销权闸（A）+ 等待侧认账本（B）+ status 与池同源（C）（2026-10-18，`plan/export-must-not-cancel-live-job.plan.md` · 决策 `DECISIONS.md` §2026-10-18-goalnn-export-must-not-cancel-live-job）
 
 **事故**（2026-10-16 04:44–07:51，y5-hide）：一门课的在线腿发布了 PPO job，云机认领后失联；
