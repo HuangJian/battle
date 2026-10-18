@@ -108,6 +108,38 @@ def test_live_lease_still_wins_over_a_ledger_cancel(tmp_path: Path) -> None:
         th.join()
 
 
+def test_frozen_wins_over_a_ledger_cancel(tmp_path: Path) -> None:
+    """既被熔断又被撤 ⇒ 给更具体的 `frozen`（冻结带着诊断与人工动作 `POST /admin/unfreeze`）。
+
+    顺序即契约（`_get_status`）：`leased`（有人在算）→ `frozen`（更具体）→ `cancelled` →
+    `pending`。本用例钉的是后两条的先后——它们都能独立发生，重叠时不许把操作员手里的那根
+    绳子（解冻端点）藏到「已撤单」后面。
+    """
+    from hub.server import FREEZE_AFTER_RECLAIMS
+    from tests.hub.test_poison_freeze import _Clock, _expire
+
+    ledger = tmp_path / "training_log.jsonl"
+    clock = _Clock()
+    store = _JobStore(tmp_path / "jobs", ledger, now_fn=clock)
+    srv = make_server(store, 0, TOKEN, host="127.0.0.1")
+    th = threading.Thread(target=srv.serve_forever, daemon=True)
+    th.start()
+    try:
+        jid = _publish(store)
+        # 「认领后零回传」跑满阈值 ⇒ 熔断（策略层的行为在 `test_poison_freeze.py` 里钉）。
+        for n in range(1, FREEZE_AFTER_RECLAIMS + 1):
+            assert store.claim(jid, worker_id=f"w{n}") is not None
+            _expire(clock)
+        assert store.claim(jid, worker_id="w-last") is None, "已冻结：不再下发"
+        assert cancel_job(ledger, jid, reason="上一 runId 77a9a90a… 遗留（腿启动清理）")
+        st, body = _status(f"http://127.0.0.1:{srv.server_address[1]}", jid)
+        assert st == 200 and body["state"] == "frozen", body
+        assert body["reclaims"] == FREEZE_AFTER_RECLAIMS, body  # 诊断字段照旧带上
+    finally:
+        srv.shutdown()
+        th.join()
+
+
 def test_uncancelled_and_unknown_jobs_keep_reporting_pending(tmp_path: Path) -> None:
     """缺省值不许变：账本里没有它（未撤）⇒ `pending`；未发布的 jid ⇒ 404。"""
     base, store, srv, th, _ledger = _boot(tmp_path)
