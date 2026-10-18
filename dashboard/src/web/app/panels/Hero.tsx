@@ -4,6 +4,7 @@
 
 import {
   colsOf,
+  evalBannerDone,
   EVAL_ROW_KEYS,
   filterGroups,
   fmtLootPickDrop,
@@ -34,6 +35,7 @@ import {
   TREND_SOURCE_OPTIONS,
   winTone,
   type ConsoleStateView,
+  type EvalABanner,
   type EvalCkptFile,
   type IterRow,
   type MetricCol,
@@ -43,9 +45,9 @@ import {
   type TrendSource,
 } from '../../view'
 import { Badge } from '../../components/Pill'
+import { EvalBanner } from '../../components/EvalBanner'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { COLOR_EVAL, TrendChart } from '../../components/TrendChart'
-import { InlineNotice } from '../../components/InlineNotice'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
 import { ReplayExportModal } from './ReplayExportModal'
 import { CompareTrendsModal } from './CompareTrendsModal'
@@ -690,7 +692,8 @@ export function Hero({
   // ckpt 发现（eval A 入队用）；课程切换重拉。
   const [ckpts, setCkpts] = useState<EvalCkptFile[]>([])
   const [busyIters, setBusyIters] = useState<Set<number>>(() => new Set())
-  const [evalFlash, setEvalFlash] = useState<string | null>(null)
+  // evalA 横幅（用户 2026-10-18：原来是一行 `tc-notice` 灰字，改成横幅；读数回填后自动隐藏）。
+  const [evalBanner, setEvalBanner] = useState<EvalABanner | null>(null)
   const aliveRef = useRef(true)
   useEffect(() => {
     aliveRef.current = true
@@ -715,12 +718,12 @@ export function Hero({
   const onEvalQueued = (iter: number, ckpt: string): void => {
     if (readOnly || !course) return
     setBusyIters((s) => new Set(s).add(iter))
-    setEvalFlash(`it${iter} evalA 启动中…`)
+    setEvalBanner({ course, iter, message: `it${iter} evalA 启动中…`, ok: true })
     void (async () => {
       try {
         const { ok, message } = await startEvalA(course, iter, ckpt)
         if (!aliveRef.current) return
-        setEvalFlash(message)
+        setEvalBanner({ course, iter, message, ok })
         if (!ok) {
           setBusyIters((s) => {
             const n = new Set(s)
@@ -744,7 +747,7 @@ export function Hero({
         }
       } catch (e) {
         if (!aliveRef.current) return
-        setEvalFlash(String(e))
+        setEvalBanner({ course, iter, message: String(e), ok: false })
         setBusyIters((s) => {
           const n = new Set(s)
           n.delete(iter)
@@ -753,6 +756,13 @@ export function Hero({
       }
     })()
   }
+
+  // 读数回填 ⇒ 横幅自动隐藏（用户 2026-10-18）。判据在 `view/eval-a-banner.ts`（纯函数，可单测）：
+  // 只有**点的那一轮**出现 evalData 才算完成；切课也作废（横幅回答的是「这门课刚做了什么」）。
+  // 失败横幅本来就没有读数会来 ⇒ 它不自己消失，留给用户看完手动关（万一读数随后真到了，判据照样会收它）。
+  useEffect(() => {
+    setEvalBanner((b) => (b && evalBannerDone(b, iters, course) ? null : b))
+  }, [iters, course])
 
   // eval 回填：iters 里出现 evalData 的轮，清除 busy。
   useEffect(() => {
@@ -881,7 +891,9 @@ export function Hero({
             </button>
           </span>
         </div>
-        {evalFlash ? <InlineNotice>{evalFlash}</InlineNotice> : null}
+        {evalBanner ? (
+          <EvalBanner banner={evalBanner} onDismiss={() => setEvalBanner(null)} />
+        ) : null}
         <div className="tc-trends">
           {/* 行1：胜率 / 承伤·杀 / 胜局耗时（与击杀对调，2026-09-18） */}
           <TrendCell

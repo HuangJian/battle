@@ -8,6 +8,7 @@
 import { useEffect, useRef, useState } from 'preact/hooks'
 import type { ComponentChildren } from 'preact'
 import {
+  evalBannerDone,
   filterGroups,
   fmtLootPickDrop,
   fmtOverfitGap,
@@ -27,6 +28,7 @@ import {
   retTone,
   TC_METRICS_FILTER,
   winTone,
+  type EvalABanner,
   type EvalCkptFile,
   type EvalSummary,
   type IterFilter,
@@ -37,7 +39,7 @@ import {
 import type { ConsoleStateView } from '../../view'
 import { Badge } from '../../components/Pill'
 import { DataTable, type Col } from '../../components/DataTable'
-import { InlineNotice } from '../../components/InlineNotice'
+import { EvalBanner } from '../../components/EvalBanner'
 import { SegmentedControl } from '../../components/SegmentedControl'
 import { ckptForIter, loadCourseCkpts, startEvalA } from '../lib/eval-a'
 
@@ -479,7 +481,9 @@ export function MetricsTable({
   })
   const [ckpts, setCkpts] = useState<EvalCkptFile[]>([])
   const [busyIters, setBusyIters] = useState<Set<number>>(() => new Set())
-  const [flash, setFlash] = useState<string | null>(null)
+  // evalA 横幅（用户 2026-10-18：与首页同一形状 + 读数回填后自动隐藏；原来是 InlineNotice 一行
+  // 灰字且永不消失）。形状在 `components/EvalBanner.tsx`，该不该消失的判据在 `view/eval-a-banner.ts`。
+  const [evalBanner, setEvalBanner] = useState<EvalABanner | null>(null)
   const alive = useRef(true)
   useEffect(() => {
     alive.current = true
@@ -502,6 +506,10 @@ export function MetricsTable({
   }, [course, readOnly])
 
   const iters = stateView?.metrics.iters ?? []
+  // 读数回填 ⇒ 横幅自动隐藏（与首页同一条判据）：只认**点的那一轮**出现 evalData；切课作废。
+  useEffect(() => {
+    setEvalBanner((b) => (b && evalBannerDone(b, iters, course) ? null : b))
+  }, [iters, course])
   useEffect(() => {
     setBusyIters((s) => {
       if (s.size === 0) return s
@@ -517,16 +525,17 @@ export function MetricsTable({
     if (readOnly || !course) return
     const ckpt = ckptForIter(ckpts, iter)
     if (!ckpt) {
-      setFlash(`未发现 it${iter} 权重归档`)
+      // 点不动的档：没有读数会来 ⇒ 红横幅留给用户看完手动关（fail loud，不静默）。
+      setEvalBanner({ course, iter, message: `未发现 it${iter} 权重归档`, ok: false })
       return
     }
     setBusyIters((s) => new Set(s).add(iter))
-    setFlash(`it${iter} evalA 启动中…`)
+    setEvalBanner({ course, iter, message: `it${iter} evalA 启动中…`, ok: true })
     void (async () => {
       try {
         const { ok, message } = await startEvalA(course, iter, ckpt)
         if (!alive.current) return
-        setFlash(message)
+        setEvalBanner({ course, iter, message, ok })
         if (!ok) {
           setBusyIters((s) => {
             const n = new Set(s)
@@ -549,7 +558,7 @@ export function MetricsTable({
         }
       } catch (e) {
         if (!alive.current) return
-        setFlash(String(e))
+        setEvalBanner({ course, iter, message: String(e), ok: false })
         setBusyIters((s) => {
           const n = new Set(s)
           n.delete(iter)
@@ -592,7 +601,7 @@ export function MetricsTable({
   }
   return (
     <div className="tc-panelbody">
-      {flash ? <InlineNotice>{flash}</InlineNotice> : null}
+      {evalBanner ? <EvalBanner banner={evalBanner} onDismiss={() => setEvalBanner(null)} /> : null}
       <DataTable<MetricRow>
         rows={display}
         rowKey={(r) => (r.kind === 'main' ? `m${r.iter}` : `e${r.iter}`)}
