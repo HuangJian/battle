@@ -144,6 +144,14 @@ export function weightsArchiveDir(): string {
 export const BUNDLE_DIR = path.join(DASHBOARD_ROOT, '.build')
 /** EvalBoard 账本数据根（EVALBOARD_DATA 环境变量可覆盖；见 store.ts）。 */
 export const EVALBOARD_DATA_DIR = path.join(DASHBOARD_ROOT, 'data', 'evalboard')
+
+/** 课程指标备份库根（`dashboard/data/course-metrics/`——plan/course-metrics-persistence §3.1）。
+ *
+ *  只存四个课程读数文件（每课一个目录）+ 冷存包；**不是**训练数据源，训练侧永不读它。
+ *  单测以 `BCITY_COURSE_METRICS` 重定向到临时目录（否则用例会写操作员真库），故**惰性**取值。 */
+export function courseMetricsDir(): string {
+  return process.env.BCITY_COURSE_METRICS || path.join(DASHBOARD_ROOT, 'data', 'course-metrics')
+}
 /** EvalBoard 阶梯定义正本（入库副本，随代码走；工作副本在 EVALBOARD_DATA_DIR）。 */
 export const LADDER_CANON_PATH = path.join(DASHBOARD_ROOT, 'src', 'evalboard', 'ladder.json')
 

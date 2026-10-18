@@ -8,12 +8,9 @@
  *    · 课程级缓存（TTL 10s + 账本 `mtimeMs:size` 指纹）——整表缓存 `metricSeries` 的 19 条序列，
  *      换指标/口径/起止都**不打盘**；
  *    · 请求级过滤永远现算（缓存只吃「读账本」这一层）；
- *    · 读账本走 `tmpLogsDir()`（惰性 env 重定向）——单测能造夹具，且这是 `paths.ts` 的路径纪律。
+ *    · 读账本走 `course-source`（tmp ⇒ 备份 ⇒ 冷存）；单测用 env 重定向造夹具（`paths.ts` 路径纪律）。
  */
 
-import { existsSync, statSync } from 'fs'
-import path from 'path'
-import { tmpLogsDir } from '../../core/paths'
 import {
   COMPARE_METRIC_SPECS,
   COMPARE_MAX_COURSES,
@@ -32,7 +29,8 @@ import {
   type Series,
   type TrendSource,
 } from '../../web/view'
-import { readIterMetrics } from '../iters'
+import { courseFileStat, resolveCourseFile } from './course-source'
+import { readCourseMetrics } from './course-metrics-read'
 import { sanitizeViewCourse } from './courses'
 
 export interface CompareQuery {
@@ -116,29 +114,30 @@ export function __compareCacheCounters(): { hits: number; misses: number } {
   return { hits: cacheHits, misses: cacheMisses }
 }
 
-/** 账本指纹 = `training_log.jsonl` + `eval_log.jsonl` 的 `mtimeMs:size`（缺失记 `-`）。
- *  两个都取：eval 点只由 eval_log 追加而 training_log 不动 ⇒ 只看一个会漏更新。 */
-function ledgerFingerprint(trajDir: string): string {
+/** 账本指纹 = 每件的 `来源:mtimeMs:size`（缺失记 `-`）。
+ *  两个都取：eval 点只由 eval_log 追加而 training_log 不动 ⇒ 只看一个会漏更新。
+ *  带 `来源`：tmp ⇒ 备份（或热 ⇒ 冷）切换时旧缓存自动失效（plan §3.3 R3）。 */
+function ledgerFingerprint(course: string): string {
   const parts: string[] = []
   for (const name of ['training_log.jsonl', 'eval_log.jsonl']) {
-    try {
-      const st = statSync(path.join(trajDir, name))
-      parts.push(`${name}=${st.mtimeMs}:${st.size}`)
-    } catch {
+    const ref = resolveCourseFile(course, name)
+    if (ref.source === 'none') {
       parts.push(`${name}=-`)
+      continue
     }
+    const st = courseFileStat(course, name)
+    parts.push(`${name}=${ref.source}:${st?.mtimeMs ?? 0}:${st?.size ?? 0}`)
   }
   return parts.join('&')
 }
 
 /** 读一门课的 19 条序列（缓存命中 = 不读正文；未命中 = `readIterMetrics` → `metricSeries`）。
  *  返回 null = 账本为空/不可读（调用方记 unavailable，不假装零数据）。 */
-function seriesOf(
+async function seriesOf(
   course: string,
-  trajDir: string,
   fp: string,
   now: number,
-): Map<string, Series> | null {
+): Promise<Map<string, Series> | null> {
   const hit = courseCache.get(course)
   if (hit && hit.fp === fp && now - hit.at < COURSE_CACHE_TTL_MS) {
     cacheHits++
@@ -147,7 +146,7 @@ function seriesOf(
   cacheMisses++
   let rows: IterRow[]
   try {
-    rows = readIterMetrics(trajDir).rows
+    rows = (await readCourseMetrics(course)).rows
   } catch {
     return null
   }
@@ -164,7 +163,10 @@ function seriesOf(
 }
 
 /** 组装响应（纯读；`now` 可注入，便于单测谈 TTL 与指纹而不 sleeping）。 */
-export function buildCompareTrendsView(q: CompareQuery, now = Date.now()): CompareTrendsView {
+export async function buildCompareTrendsView(
+  q: CompareQuery,
+  now = Date.now(),
+): Promise<CompareTrendsView> {
   const spec = COMPARE_METRIC_SPECS[q.metric]
   const wantedKeys =
     q.source === 'eval'
@@ -176,14 +178,13 @@ export function buildCompareTrendsView(q: CompareQuery, now = Date.now()): Compa
   const unavailable: CompareUnavailable[] = []
   const fps: string[] = []
   for (const course of q.courses) {
-    const trajDir = path.join(tmpLogsDir(), course)
-    const fp = ledgerFingerprint(trajDir)
+    const fp = ledgerFingerprint(course)
     fps.push(`${course}:${fp}`)
-    if (!existsSync(path.join(trajDir, 'training_log.jsonl'))) {
-      unavailable.push({ course, reason: '无账本' })
+    if (resolveCourseFile(course, 'training_log.jsonl').source === 'none') {
+      unavailable.push({ course, reason: 'tmp 与备份均无账本' })
       continue
     }
-    const byKey = seriesOf(course, trajDir, fp, now)
+    const byKey = await seriesOf(course, fp, now)
     if (!byKey) {
       unavailable.push({ course, reason: '账本不可读' })
       continue

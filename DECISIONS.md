@@ -7446,3 +7446,44 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   + 1667 用例 + 三份 bundle、`bun run check` 2537、`bun run build` 全绿。
   ⚠ 课程头注「×50/关 ⇒ 锚点 50 + 轮转 50 = 400 局/轮（it0 才是 200）」的补记 pending
   —— y22 四门 `.jsonc` 不在本 checkout。
+
+## §2026-10-18-goalnn-course-metrics-backup — 课程读数在 dashboard 侧自动转存 + 冷存（内存解压读）
+
+- **背景**：2026-10-17 `tmp-clean.py --apply` 把 1907 项 / 38GB 一次抹掉，含全部课程账本
+  （`training_log` / `eval_log` / `dist-agent-meta` / `.pool-actuals-cache`），读数不可恢复
+  （§377 的零保留闸只挡「整片抹掉」，挡不住常规 keep-runs/keep-days 收敛）。
+- **决策（用户四条口径）**：① 清理闸**不拒绝删**——先自动镜像转存，成功即照删；② 每课一个备份目录；
+  ③ 备份目录源活动 >14 天自动打包 `<课>.tar.gz`；④ 冷存读**内存解压、不落盘**（只有显式
+  `restore` 落盘）。库 = `dashboard/data/course-metrics/`（env `BCITY_COURSE_METRICS` 可换盘）。
+- **实现要点**：
+  - **写侧**：`course-metrics/mirror.ts` 字节级增量（stat 快路 + 64B 锚点 + 只抄完整行），
+    重写型按 sha256；复位先 `rename` 进 `history/<ts>/`（永不静默覆盖）；
+    单写者 `.lock` 用 `open('wx')` 原子创建 + rename 抢占。
+  - **清理侧**：`tmp-clean --apply` 先调 `dashboard/scripts/course-metrics.ts sync --budget 0`，
+    再逐目标核对覆盖（append: bytes==size；rewrite: size+sha）；未覆盖只跳该目标，退出码仍 0；
+    `--no-mirror` 是唯一直删出口。
+  - **冷存**：`compact.ts` 仅在 `tmp/<课>` 不存在 ∧ `lastSourceActivity` >14d ∧ 无等价包时打包；
+    索引 `<课>.tar.gz.index.json` **先落盘再删热目录**；世代只留 2；`history/` 只留 8。
+  - **读侧**：`api/course-source.ts` 三态 live⇒mirror⇒archive；冷存用 **`Bun.spawn` 异步**
+    `tar -xzO` + 256MiB LRU（存 promise 去重），**禁 `spawnSync`**（单进程事件循环 + Node
+    `maxBuffer` 1MiB 会直接失败）。派生缓存只对 live 写回 tmp。
+  - **动作闸**：mirror/archive-only 课的课程级改状态动作（preset/start/stop/evalA/export…）
+    在分发层统一回 **409 无活体**；`setCourse`（只读视图）放行。
+  - **池历史**：接入**热备份**（同课 tmp 优先、不双计）；冷存件不参与（聚合是同步路径，与异步
+    解压冲突）——残留见 plan §10。
+  - **签入前自审补丁（同日，把 §5 判据当反探针重跑）**：① stat 快路必须三条件齐（源 size/mtime
+    ∧ **备份侧尺寸**），否则稳态每拍仍读 1MiB 尾窗，且镜像被删/改短发现不了（旧副本进 history +
+    `mirror-missing` 复位）；② `tar --version` 自检一次，失败即关 archive 源（`verify` 转红）；
+    ③ `restore --force` 不覆盖 `.run_rl.lock` 活体课；④ `evalLadderStop` 补进动作闸；
+    ⑤ 重打包后旧 memo 条目的字节账连同条目一起作废。
+- **备选与否决**：① 读侧不落盘却用 `spawnSync` —— 否（37MB 成员会停整页 2–4s，Node 语义还在
+  1MiB 处杀子进程）；② 成员存在性靠 `tar -tzf` —— 否（gzip 不可寻址，等价每请求整包解压）；
+  ③ 转存扫描「tmp 全树」—— 否（会多抄 `deliver/` 的 95MB 副本、把 `pytest-tmp/**` 当课程）；
+  ④ 冷存阈值看「备份目录 mtime」—— 否（sync 用源 mtime 回写 ⇒ 重建目录当场判冷 ⇒ 每拍重打包）；
+  ⑤ 读侧恢复自动写回 tmp —— 否（隐藏状态；`restore` 保持显式人工动作）；⑥ 训练侧双写 —— 否
+  （零接触训练语义，§15.5 不触发）。
+- **后果**：tmp 被清后曲线/轮次/对比/池历史（热）仍在 + 「备份数据」徽标；两周无源活动自动降温，
+  刷新仍可读。**不承诺**：防盘坏（同盘；仓库外导出是人工纪律）、可续训（不含权重）、reopen 合并、
+  actuals 缓存未覆盖的轮（`it<N>/per-game.json` 不备份）。
+- **门禁**：`bun run check` 绿、dashboard typecheck + 1684 用例 + 四份 bundle、nn python gate 绿
+  （新增 `test_tmp_clean_needs_mirror.py` 7 例）。评审 F1–F15 全并入 plan v3 + `review-bf`。

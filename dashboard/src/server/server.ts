@@ -90,6 +90,7 @@ import {
   shouldStartLadderTicker,
   startSnapshotRefresher,
 } from './api'
+import { courseMetricsStatusPayload, startCourseMetricsMirror } from './course-metrics-mirror'
 import { restartSpecFor } from './actions'
 import { runningStaleCode } from '../core/reload'
 import {
@@ -301,6 +302,9 @@ async function main(): Promise<void> {
   // 慢部件快照后台刷新（§366：节点 ping/组件探测/池历史移出请求路径，页面加载 <1s）。
   // reconcileWatch 已冷算一次暖缓存；此后每 5s 后台重算，请求只读缓存。
   startSnapshotRefresher()
+  // 课程指标备份库（plan/course-metrics-persistence §3.4）：启动首拍 + 60s 独立节拍。
+  // 只读 tmp、写 dashboard/data/course-metrics；读侧回退不依赖它（备份存在就能读）。
+  startCourseMetricsMirror()
   // 调度器视图（R2c-3）暖一次缓存：它要起一个只读 python（~sub-second），懒算的话
   // 首次 /api/state（含 SSR 首屏）要为它等一个子进程。之后由 TTL（10s）驱动重算。
   void getLoopQueueView().catch(() => {
@@ -419,7 +423,11 @@ async function main(): Promise<void> {
         }
         // BC epoch 指标 / 多地图 eval（2026-09-13；bcRowsFromLedgerTail 解析，只读）。
         if (req.method === 'GET' && url.pathname === '/api/bcEpochs') {
-          return json(buildBcEpochsView(viewCourse || undefined))
+          return json(await buildBcEpochsView(viewCourse || undefined))
+        }
+        // 备份库状态（plan/course-metrics-persistence §3.6）：热/冷逐课 + 冷存 memo 占用。
+        if (req.method === 'GET' && url.pathname === '/api/courseMetrics') {
+          return json(courseMetricsStatusPayload())
         }
         // R7：ckpt/iter 发现（只 stat 不读内容；?leg= 懒加载单腿明细）。
         if (req.method === 'GET' && url.pathname === '/api/evalCkpts') {
@@ -452,7 +460,7 @@ async function main(): Promise<void> {
             to: url.searchParams.get('to'),
           })
           if (!parsed.ok) return json({ ok: false, message: parsed.message }, 400)
-          return json(buildCompareTrendsView(parsed.params))
+          return json(await buildCompareTrendsView(parsed.params))
         }
         if (req.method === 'GET' && url.pathname === '/api/evalReplayJob') {
           // F4 闭合（串话归因，服务端路由）：此接口返回的 manifest = POST /api/replayExport 受理成功后落盘的 manifest，

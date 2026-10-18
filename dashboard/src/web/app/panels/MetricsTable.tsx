@@ -616,6 +616,21 @@ export function MetricsTable({
               onChange={setFilterPersist}
             />
             <span className="tc-muted tc-small">{rows.length} 轮</span>
+            {stateView.metrics.source === 'mirror' ? (
+              <span
+                className="tc-badge tc-badge--y"
+                title="tmp 已无本课账本；以下读数来自备份库的热备份"
+              >
+                备份数据
+              </span>
+            ) : stateView.metrics.source === 'archive' ? (
+              <span
+                className="tc-badge tc-badge--y"
+                title="tmp 已无本课账本；以下读数来自冷存包（内存解压，未落盘）"
+              >
+                备份数据（冷存包）
+              </span>
+            ) : null}
           </>
         }
       />

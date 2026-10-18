@@ -67,6 +67,12 @@ tools/agent/agent.auth
 dashboard/data/evalboard/*
 !dashboard/data/evalboard/README.md
 
+# 课程指标备份库（plan/course-metrics-persistence §3.1；与 evalboard 同写法：
+# 不整树排除父目录，只排内容，README 回捞入库）。库里有课程账本副本与冷存包，
+# 它们是可再生的镜像 + 冷存，不是训练源；备份纪律见该目录 README。
+dashboard/data/course-metrics/*
+!dashboard/data/course-metrics/README.md
+
 *.lock
 *.lock.*
 *.log

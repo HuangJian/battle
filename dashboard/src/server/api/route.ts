@@ -3,6 +3,7 @@ import { closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, write
 import path from 'path'
 import { loadConfig } from '../../core/config'
 import { log, warn } from '../../core/log'
+import { courseSourceOf } from './course-source'
 import { NN_TRAINING, REPO_ROOT, loopControlPath } from '../../core/paths'
 import type { CfEdgeIp, CfProtocol, Component, RolloutSrcMode, SlimMode } from '../../core/types'
 import {
@@ -145,10 +146,54 @@ export async function routeAction(action: string, body: PostBody): Promise<Respo
   return resp
 }
 
+/** 课程级**改状态**的动作（备份课一律 409「无活体」）。
+ *
+ *  为什么在分发层做（plan/course-metrics-persistence §3.3 / 评审 F6）：备份课在 UI 里可见
+ *  （读数要能看），但起课/停课/导出/导入/评估都必须有 tmp 活体；散在每个 case 里迟早漏一个。
+ *  `setCourse` 不在此列——它只切视图，是读。 */
+const COURSE_MUTATING_ACTIONS = new Set([
+  'start',
+  'stop',
+  'smoke',
+  'smokeTrain',
+  'preset',
+  'openCourse',
+  'stopCourse',
+  'setCoursePaused',
+  'setMode',
+  'evalA',
+  'evalReplays',
+  'evalProbeRun',
+  'evalLadderStart',
+  'evalLadderStop',
+  'evalBatchAbort',
+  'redoPpo',
+  'archiveCourse',
+  'exportTaskBundle',
+  'cloud-halt',
+  'cloud-resume',
+  'releaseCourseHold',
+  'unfreeze-job',
+  'autoOfflineHandoff',
+])
+
+export function actionRequiresLive(action: string): boolean {
+  return COURSE_MUTATING_ACTIONS.has(action)
+}
+
 /** 动作分发的内部实现（只被 `routeAction` 调用；落盘在那边统一做）。 */
 async function dispatchAction(action: string, body: PostBody): Promise<Response | null> {
   const ctx = actionCtx(body)
   try {
+    if (actionRequiresLive(action) && ctx.course) {
+      const src = courseSourceOf(ctx.course)
+      if (src === 'mirror' || src === 'archive') {
+        return errResp(
+          `无活体：${ctx.course} 只有备份数据（tmp 已无该课），不能执行 ${action}`,
+          409,
+        )
+      }
+    }
     switch (action) {
       case 'start': {
         const key = bodyStr(body, 'component') as Component

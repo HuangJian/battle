@@ -9,7 +9,7 @@ import { courseEnableMarkerPath, courseEnabled, isBcCourse } from '../../stack/c
 import { evalboardEnabled } from '../../core/feature-flags'
 import { loadConsoleState } from '../actions'
 import { resolveCfTunnel, resolveRolloutSrc, resolveSlim } from '../../stack/specs'
-import { readIterMetrics, readPairedReferee } from '../iters'
+import { readCourseMetrics } from './course-metrics-read'
 import { readArchived } from './archive'
 import { loadConfigSafe } from './config'
 import { courseFacts, discoverCourses, effectiveCourse } from './courses'
@@ -57,14 +57,18 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   void hubProbe.catch(() => undefined) // 真 await 在下面；这里只防「无人接手」的 rejection
   const { components, nodes, localNode, phase, pushFleet } = await getSlowSnapshot(cfg, course)
   let metrics: MetricsView = { available: false, iters: [] }
-  if (course && existsSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'))) {
+  if (course) {
     try {
-      const trajDir = path.join(REPO_ROOT, 'tmp', course)
-      metrics = {
-        available: true,
-        iters: readIterMetrics(trajDir).rows,
-        // 配对裁判：同趟 eval_log 扫描的副产品，纯读，失败即 null 不阻断 state。
-        pairedReferee: readPairedReferee(trajDir),
+      // 读历史可回退备份（live ⇒ mirror ⇒ archive）；动作面仍只认 tmp（plan §3.3）。
+      const m = await readCourseMetrics(course)
+      if (m.source !== 'none') {
+        metrics = {
+          available: true,
+          iters: m.rows,
+          // 配对裁判：同趟 eval_log 扫描的副产品，纯读，失败即 null 不阻断 state。
+          pairedReferee: m.pairedReferee,
+          source: m.source,
+        }
       }
     } catch (e) {
       metrics = { available: false, iters: [], error: e instanceof Error ? e.message : String(e) }

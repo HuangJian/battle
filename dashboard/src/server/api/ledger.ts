@@ -1,9 +1,9 @@
 /** ledger.ts — 训练账本尾派生：课程编辑态、BC 轮次与多地图 eval 行。 */
 import { readFileSync } from 'fs'
 import path from 'path'
-import { REPO_ROOT, curriculaDir } from '../../core/paths'
+import { curriculaDir } from '../../core/paths'
 import type { CourseEdit } from '../../web/view'
-import { readLogTail } from './logs'
+import { readCourseTail } from './course-source'
 
 export function courseEditFromLedgerTail(lines: string[]): CourseEdit | null {
   for (let i = lines.length - 1; i >= 0; i--) {
@@ -149,16 +149,17 @@ export function bcRowsFromLedgerTail(lines: string[]): {
 }
 
 /** BC epoch 面板视图：账本尾窗解析 + 课程 eval.every_epochs（面板头提示用）。 */
-export function buildBcEpochsView(course: string | undefined): {
+export async function buildBcEpochsView(course: string | undefined): Promise<{
   epochs: BcEpochRow[]
   evals: BcEvalRow[]
   evalEveryEpochs: number | null
-} {
+}> {
   if (!course) return { epochs: [], evals: [], evalEveryEpochs: null }
   let epochs: BcEpochRow[] = []
   let evals: BcEvalRow[] = []
   try {
-    const tail = readLogTail(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'), 4000).lines
+    // 读历史可回退备份（plan/course-metrics-persistence §3.3 R5）。
+    const tail = await readCourseTail(course, 'training_log.jsonl', 4000)
     const parsed = bcRowsFromLedgerTail(tail)
     epochs = parsed.epochs.slice(-100)
     evals = parsed.evals.slice(-20)

@@ -37,11 +37,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Callable
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TMP = REPO_ROOT / "tmp"
@@ -171,6 +175,130 @@ def _deletion_targets(d: Path) -> list[Path]:
     return out
 
 
+# ────────────────── 指标转存（plan/course-metrics-persistence §3.5） ──────────────────
+# 删除前先把四个课程读数文件镜像到 dashboard/data/course-metrics（转存成功 ⇒ 照常删；
+# 不覆盖 ⇒ 只跳含账本的目标）。引擎/游标/锚点只有一份实现（dashboard CLI），这里只调用它。
+
+MIRROR_FILES = (
+    "training_log.jsonl",
+    "eval_log.jsonl",
+    "dist-agent-meta.jsonl",
+    ".pool-actuals-cache.json",
+)
+MIRROR_EXCLUDE_DIRS = {"pytest-tmp", "backups", "deliver"}
+
+
+def mirror_root() -> Path:
+    """备份库根（与 `dashboard/src/core/paths.ts::courseMetricsDir` 同口径）。"""
+    env = os.environ.get("BCITY_COURSE_METRICS")
+    return Path(env) if env else REPO_ROOT / "dashboard" / "data" / "course-metrics"
+
+
+def is_course_name(name: str) -> bool:
+    """与 `course-metrics/meta.ts::isCourseName` 同一白名单（ASCII、不以 `_` 开头）。"""
+    if not name or len(name) > 128 or name.startswith("_"):
+        return False
+    if name in MIRROR_EXCLUDE_DIRS:
+        return False
+    if not (name[0].isascii() and name[0].isalnum()):
+        return False
+    return all(c.isascii() and (c.isalnum() or c in "._-") for c in name)
+
+
+def _course_ledger_files(target: Path) -> list[tuple[str, str, Path]]:
+    """目标里直接包含的备份集文件：`(课程, 相对路径, 路径)`。
+
+    只看**目标这一层**（+ `traj/`）：删 `it<N>/` 不涉及账本，不需要覆盖检查。
+    非课程目录（`pytest-tmp/**` 等）⇒ 空（它们的临时账本不进备份库，也不该把清理卡死）。
+    """
+    if not target.is_dir():
+        return []
+    try:
+        rel = target.relative_to(TMP)
+    except ValueError:
+        return []
+    parts = rel.parts
+    if not parts or not is_course_name(parts[0]):
+        return []
+    course = parts[0]
+    course_dir = TMP / course
+    out: list[tuple[str, str, Path]] = []
+    for name in MIRROR_FILES:
+        for cand in (target / name, target / "traj" / name):
+            if cand.is_file():
+                out.append((course, cand.relative_to(course_dir).as_posix(), cand))
+    return out
+
+
+def uncovered_reason(target: Path, root: Path | None = None) -> str | None:
+    """目标里的账本是否**已完整转存**。None = 无账本或已覆盖；字符串 = 原因。"""
+    files = _course_ledger_files(target)
+    if not files:
+        return None
+    root = mirror_root() if root is None else root
+    metas: dict[str, dict | None] = {}
+    for course, relp, p in files:
+        if course not in metas:
+            try:
+                metas[course] = json.loads(
+                    (root / course / "mirror-meta.json").read_text(encoding="utf-8")
+                )
+            except (OSError, ValueError):
+                metas[course] = None
+        meta = metas[course]
+        if not isinstance(meta, dict):
+            return f"{course}: 无 mirror-meta"
+        fm = (meta.get("files") or {}).get(relp)
+        if not isinstance(fm, dict):
+            return f"{course}/{relp}: 未转存"
+        try:
+            size = p.stat().st_size
+        except OSError as e:
+            return f"{course}/{relp}: 源不可读（{e}）"
+        if fm.get("mode") == "rewrite":
+            if int(fm.get("bytes", -1)) != size:
+                return f"{course}/{relp}: 尺寸不等"
+            digest = hashlib.sha256(p.read_bytes()).hexdigest()
+            if digest != fm.get("sha256"):
+                return f"{course}/{relp}: sha256 不符"
+        elif int(fm.get("bytes", -1)) != size:
+            return f"{course}/{relp}: 落后 {size - int(fm.get('bytes', 0))}B"
+    return None
+
+
+def transload(
+    runner: Callable[[list[str]], tuple[bool, str]] | None = None,
+) -> tuple[bool, str]:
+    """调 dashboard CLI 做一次全量转存。`runner` 是单测接缝（不真起子进程）。"""
+    bun = shutil.which("bun")
+    cli = REPO_ROOT / "dashboard" / "scripts" / "course-metrics.ts"
+    if not bun:
+        return False, "bun 不在 PATH（用 --no-mirror 显式放弃转存）"
+    if not cli.is_file():
+        return False, f"CLI 缺失：{cli}"
+    cmd = [bun, str(cli), "sync", "--course", "*", "--budget", "0"]
+    if runner is not None:
+        return runner(cmd)
+    try:
+        proc = subprocess.run(
+            cmd,
+            cwd=str(REPO_ROOT),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, f"转存子进程失败：{e}"
+    out = (proc.stdout or "").strip().splitlines()
+    detail = out[-1] if out else ""
+    if proc.returncode != 0:
+        err = (proc.stderr or "").strip() or detail
+        return False, err[:400]
+    return True, detail
+
+
 def refuses_zero_retention(keep_runs: int, keep_days: float, apply: bool, force: bool) -> bool:
     """「零保留 + --apply」= 把 tmp/ 整片抹掉（`rmtree` **不进回收站**，不可逆）⇒ 拒绝执行。
 
@@ -257,7 +385,7 @@ def plan(
     return to_delete, stats
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="仓库根 tmp/ 统一收敛（dry-run 默认）")
     ap.add_argument("--apply", action="store_true", help="真正删除（缺省只 dry-run）")
     ap.add_argument("--keep-runs", type=int, default=3, help="保留最近 N 个运行目录（默认 3）")
@@ -267,7 +395,12 @@ def main() -> int:
         action="store_true",
         help="确认「零保留 + --apply」的整片抹除（不可逆；dry-run 不需要它）",
     )
-    args = ap.parse_args()
+    ap.add_argument(
+        "--no-mirror",
+        action="store_true",
+        help="跳过指标转存与覆盖核对，按旧行为直接删（无 bun 机器/极端回收的逃生门）",
+    )
+    args = ap.parse_args(argv)
 
     # 零保留 + --apply ⇒ 拒绝（dry-run 仍可用它做断言）：见 refuses_zero_retention 的事故注释。
     if refuses_zero_retention(args.keep_runs, args.keep_days, args.apply, args.force):
@@ -295,9 +428,34 @@ def main() -> int:
     if not items:
         print("[tmp-clean] nothing reclaimable")
 
+    mirror_state = "off(--no-mirror)"
+    if not args.apply and not args.no_mirror:
+        # dry-run 只预报（不转存、不删）：哪些目标在 --apply 时会先转存等待核对。
+        pending = [(p, uncovered_reason(p)) for p, _w, _s in items]
+        pending = [(p, why) for p, why in pending if why]
+        if pending:
+            print(f"[tmp-clean] 镜像预览: {len(pending)} 个目标未覆盖（--apply 会先转存）")
+            for p, why in pending[:10]:
+                print(f"  未覆盖 {p.relative_to(REPO_ROOT)}: {why}")
+
     if args.apply:
+        if not args.no_mirror:
+            ok, detail = transload()
+            if detail:
+                print(f"[tmp-clean] {detail}")
+            mirror_state = "ok" if ok else "failed"
+            if not ok:
+                # 转存失败不是策略性拒绝（退出码仍 0）：只跳「含账本且未覆盖」的目标。
+                print(f"[tmp-clean] 指标转存失败: {detail}")
         removed = 0
+        skipped_uncovered: list[tuple[Path, str]] = []
         for p, why, _size in items:
+            if not args.no_mirror:
+                gap = uncovered_reason(p)
+                if gap:
+                    skipped_uncovered.append((p, gap))
+                    print(f"[tmp-clean] skipped (未转存): {p.relative_to(REPO_ROOT)} — {gap}")
+                    continue
             try:
                 if p.is_dir():
                     shutil.rmtree(p)
@@ -306,7 +464,10 @@ def main() -> int:
                 removed += 1
             except OSError as e:
                 print(f"[tmp-clean] skipped ({e}): {p.relative_to(REPO_ROOT)}")
-        print(f"[tmp-clean] removed {removed}/{len(items)} item(s), freed {total / 1024 / 1024:.1f} MB")
+        print(
+            f"[tmp-clean] removed {removed}/{len(items)} item(s), freed {total / 1024 / 1024:.1f} MB"
+            + f" ｜ 指标转存 {mirror_state} ｜ 跳过 {len(skipped_uncovered)}（未覆盖）"
+        )
     return 0
 
 

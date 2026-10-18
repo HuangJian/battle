@@ -186,6 +186,8 @@ export interface MetricsView {
   error?: string
   /** 配对裁判（只读；缺数据/单轮时为 null，UI 显示空态）。 */
   pairedReferee?: PairedReferee | null
+  /** 数据来源（plan/course-metrics-persistence §3.3）：live 无徽标；mirror/archive 显示备份徽标。 */
+  source?: 'live' | 'mirror' | 'archive'
 }
 
 /** 训练正常完成停车态（账本 run_complete 事件派生，api.ts 填充）。 */

@@ -21,6 +21,7 @@
 import { closeSync, existsSync, openSync, readFileSync, readSync, readdirSync, statSync } from 'fs'
 import { dirname, join } from 'path'
 import { tmpPoolDir } from '../core/paths'
+import { libraryRoot, listMirrorCourses } from './course-metrics'
 import {
   type ContributionSplit,
   fmtFullTs,
@@ -927,6 +928,32 @@ export interface PoolStreamsScan {
   scanned: boolean
 }
 
+/** 把热备份课程补进候选（只补 tmp 里没有的课；同课绝不双计）。 */
+function addHotMirrorCandidates(metas: MetaCandidate[], ledgers: LedgerCandidate[]): void {
+  const seen = new Set(ledgers.map((l) => l.course))
+  for (const course of listMirrorCourses()) {
+    if (seen.has(course)) continue
+    const base = join(libraryRoot(), course)
+    const lp = join(base, 'training_log.jsonl')
+    try {
+      const st = statSync(lp)
+      ledgers.push({ course, path: lp, mtimeMs: st.mtimeMs, size: st.size })
+    } catch {
+      /* 该备份课没有账本 */
+    }
+    for (const rel of ['dist-agent-meta.jsonl', 'traj/dist-agent-meta.jsonl']) {
+      const mp = join(base, rel)
+      try {
+        const st = statSync(mp)
+        metas.push({ path: mp, dir: course, mtimeMs: st.mtimeMs, size: st.size })
+        break
+      } catch {
+        /* 下一个布局 */
+      }
+    }
+  }
+}
+
 let scanMemo: PoolStreamsScan | null = null
 
 /** 扫描 memo 的复用判定（与 `aggMemoReusable` 同规的增量版）。 */
@@ -996,6 +1023,14 @@ export function scanPoolStreams(nowMs: number = Date.now()): PoolStreamsScan {
     walk('', 0)
   } catch {
     /* tmp missing */
+  }
+  // 热备份（tmp 已清的历史课）：读面回退的一部分（plan/course-metrics-persistence §3.3 R6）。
+  // 同课 tmp 优先（不双计）；冷存包**不在这里**参与池历史——聚合是同步路径，冷存读是异步内存
+  // 解压，混进来会把请求线程变成解压线程（见 plan §10 的残留项）。
+  try {
+    addHotMirrorCandidates(metas, ledgers)
+  } catch {
+    /* 备份库不可读 ⇒ 只用 tmp（与旧行为一致） */
   }
   // 指纹要稳定：readdir 顺序不作保证，先按路径名排（与旧实现同规）。
   metas.sort((a, b) => (a.dir < b.dir ? -1 : 1))

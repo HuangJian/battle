@@ -4,9 +4,38 @@ import path from 'path'
 import { REPO_ROOT, curriculaDir, tmpLogsDir } from '../../core/paths'
 import type { CourseFactView } from '../../web/view'
 import { courseEnableMarkerPath } from '../../stack/courses'
+import {
+  coldCourses,
+  hasHotMirror,
+  libraryRoot,
+  readArchiveIndex,
+  readMirrorMeta,
+} from '../course-metrics'
 import { archivedCourseSet } from './archive'
 import { type StartCtx, loadConsoleState } from '../actions'
 import { PostBody, bodyStr } from './route'
+
+/** 备份库课程（热 + 冷；惰性 import 会成环，所以用 course-metrics 的窄接口）。 */
+function backupCourses(): string[] {
+  const names = new Set<string>()
+  try {
+    for (const ent of readdirSync(libraryRoot(), { withFileTypes: true })) {
+      if (!ent.isDirectory()) continue
+      if (hasHotMirror(ent.name)) names.add(ent.name)
+    }
+    for (const course of coldCourses()) names.add(course)
+  } catch {
+    /* 库不存在 */
+  }
+  return [...names]
+}
+
+/** 备份课的「最后活动」用于课程排序（热 = meta.lastSourceActivity；冷 = 包 mtime）。 */
+function backupCourseMtime(course: string): number {
+  const hot = hasHotMirror(course) ? readMirrorMeta(course).lastSourceActivity : 0
+  const cold = readArchiveIndex(course)?.mtimeMs ?? 0
+  return Math.max(hot, cold)
+}
 
 // ────────────────── 视图课程参数校验（局域网只读防线 2：GET ?course= 只读覆盖） ──────────────────
 
@@ -20,6 +49,8 @@ export function sanitizeViewCourse(raw: string | null): string {
   if (!/^[A-Za-z0-9._-]+$/.test(raw)) return ''
   try {
     if (existsSync(path.join(REPO_ROOT, 'tmp', raw))) return raw
+    // 备份课（热/冷）也放行：tmp 被清后仍能在 select 与 ?course= 里打开（plan §3.3 R1）。
+    if (hasHotMirror(raw) || readArchiveIndex(raw) !== null) return raw
     if (existsSync(path.join(curriculaDir(), `${raw}.jsonc`))) return raw
     if (existsSync(path.join(curriculaDir(), `${raw}.bc.jsonc`))) return raw
   } catch {
@@ -56,7 +87,7 @@ export function discoverCourses(max = 500, archivedNames?: Set<string>): string[
       }
     }
   } catch {
-    return []
+    // tmp 整个不在（新检出/被清理）**不是**「没有课程」：备份库还要照常发现，故不 return。
   }
   // 补充 curricula/ 中尚未跑过的课程（按 jsonc mtime 新→旧），使新 course 首次选择有 UI 路径
   try {
@@ -78,6 +109,13 @@ export function discoverCourses(max = 500, archivedNames?: Set<string>): string[
   // 已封存集合可由调用方传入（`/api/state` 已经为 `archived` 读面解析过一遍 manifest——
   // 不传就再解析一遍：13 门 ×~20 KB 可忽略，门数上百才是每 3 秒两次 `JSON.parse`）。
   const archived = archivedNames ?? archivedCourseSet()
+  // 第三/四源：备份库热目录 + 冷存包（tmp 命中优先，按名去重——plan §3.3 R1）。
+  // 课程名去掉 `.tar.gz` / `.<ts>.tar.gz`；旧世代不单列（读面只认当前包）。
+  for (const name of backupCourses()) {
+    if (seen.has(name) || archived.has(name)) continue
+    seen.add(name)
+    out.push({ name, mtime: backupCourseMtime(name) })
+  }
   return out
     .filter((c) => !archived.has(c.name))
     .sort((a, b) => b.mtime - a.mtime)

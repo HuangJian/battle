@@ -195,6 +195,14 @@ SOURCE 未动）：这四片的交付物大量是**给操作员的一行读数**
 （`{f"it-{it:03d}/weights.json"} <= names`，`<=` 不是 `in`）1 条；体检的 `package_source`/未知 magic
 两条从 `"pending" in detail` 改成**结构化字段相等**（本仓既有口径：控制台与用例按数据判）2 条。
 
+**2026-10-18 抬 SOURCE 一格的账**（`plan/course-metrics-persistence.plan.md`；SOURCE 1092 → **1096** = +4，
+FORM 未动）：新用例 `tests/common/test_tmp_clean_needs_mirror.py` 按**文件路径加载** `tools/tmp-clean.py`
+（与 `test_tmp_clean_keeps_deliver.py` 同一接缝），于是断言表达式里引用的 `mod` 被口径 B 的
+「读 `.py` 的派生名字」判成源码面（helper 模块头「B 不区分」的已知边界）。这些断言实际读的是
+**运行时返回值** —— `uncovered_reason()` 返回的覆盖原因串（全等比较）· `main()` 的退出码 · 捕获的
+stdout 行集合 —— 不是源码文本；同一批里能改成行为判据的已改（转存失败只看「目标是否还在」、
+命令形状用 argv 切片相等）。**不**靠再抬一格来掩盖措辞判据：新文件里没有 `assert "…" in <文本>` 形态。
+
 """
 
 from __future__ import annotations
@@ -219,8 +227,9 @@ ROOT = Path(__file__).resolve().parents[1]
 #: —— 每笔理由都见模块头）。
 BASELINE_FORM = 1483
 #: 生产源码文本口径基线（同上；清理前 = 1084；2026-10-10 因新 notebook 接线守卫抬到 1091；
-#: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092 —— 两笔理由都见模块头）。
-BASELINE_SRC = 1092
+#: 2026-10-14 wire-diet M4 切片 2 的产物段结构守卫抬到 1092；
+#: 2026-10-18 course-metrics 备份库用例抬到 **1096**（+4，实测值；理由见模块头末段）。）
+BASELINE_SRC = 1096
 #: 计数异常下界：护栏最怕的是「口径坏了 ⇒ 恒 0 ⇒ 恒绿」。
 SANITY_FLOOR = (400, 200)
 

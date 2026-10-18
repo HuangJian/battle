@@ -7,6 +7,7 @@
   "scripts": {
     "start": "bun src/server/server.ts",
     "launch": "bun src/launch/cli.ts",
+    "course-metrics": "bun scripts/course-metrics.ts",
     "build:ui": "bun src/server/build.ts",
     "typecheck": "tsc --noEmit",
     "test": "bun scripts/run-tests.ts",

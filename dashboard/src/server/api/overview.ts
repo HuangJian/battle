@@ -16,8 +16,6 @@
  *  动作后 `invalidateHubAdmin()` 硬作废（登记/移除 worker 必须即时上屏）。
  */
 
-import path from 'path'
-import { REPO_ROOT } from '../../core/paths'
 import { pidAlive } from '../../core/net'
 import { createSwrCache } from '../../core/swr-cache'
 import { entryForCourse, loadRegistry, scopeOf } from '../../core/registry'
@@ -41,7 +39,7 @@ import {
   overviewCourseNames,
 } from '../../web/view'
 import { writeHeldCache } from '../actions/loop-control'
-import { readLedgerTail } from './logs'
+import { courseFileStat, readCourseTail } from './course-source'
 
 // ────────────────────────── 共享 trainer 存活（「在训」的进程事实） ──────────────────────────
 
@@ -346,14 +344,23 @@ export function peekHubAdmin(): {
  *  必须用 `readLedgerTail`（不截断长行）：`iteration` 事件单行 >500 字符，经
  *  `readLogTail` 的展示截断后 JSON 不可解析 ⇒ 总览「轮次」列对每门课都恒显 `—`
  *  （2026-09-20 实测 x20-steady / c6-chip 均为 null）。 */
-export function courseIter(course: string): number | null {
+const iterMemo = new Map<string, { fp: string; iter: number | null }>()
+
+/** 测试出口：清掉总览轮次 memo（夹具换内容但 mtime 相同的情况）。 */
+export function __clearCourseIterMemo(): void {
+  iterMemo.clear()
+}
+
+export async function courseIter(course: string): Promise<number | null> {
   if (!course) return null
-  try {
-    const lines = readLedgerTail(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'), 600)
-    return latestIterFromLedgerTail(lines)
-  } catch {
-    return null
-  }
+  // 冷存包是解压成本（几十 MB）：按包/文件的 size+mtime 记忆化，5s 一拍不会反复解压。
+  const st = courseFileStat(course, 'training_log.jsonl')
+  const fp = st ? `${st.mtimeMs}:${st.size}` : '-'
+  const hit = iterMemo.get(course)
+  if (hit && hit.fp === fp) return hit.iter
+  const iter = latestIterFromLedgerTail(await readCourseTail(course, 'training_log.jsonl', 600))
+  iterMemo.set(course, { fp, iter })
+  return iter
 }
 
 /** 并行总览视图（在训 ∪ hub 课程表 ∪ 课程清单 ∪ 查看课程）。 */
@@ -373,7 +380,11 @@ export async function buildOverview(
     viewing,
   })
   const iters: Record<string, number | null> = {}
-  for (const c of names) iters[c] = courseIter(c)
+  await Promise.all(
+    names.map(async (c) => {
+      iters[c] = await courseIter(c)
+    }),
+  )
   return {
     hubUrl: admin.url,
     hubOnline: admin.url !== null,
