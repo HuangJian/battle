@@ -105,6 +105,9 @@ from remote.hub_http import (
     HubClientError as HubClientError,
 )
 from remote.hub_http import (
+    JobCancelledError as JobCancelledError,
+)
+from remote.hub_http import (
     ProbeResult as ProbeResult,
 )
 from remote.hub_http import (
@@ -1244,6 +1247,13 @@ def reap_job_dir(
     return True
 
 
+#: M2 撤单行的 reason 前缀——**写者与读者共用的唯一常量**。
+#: 读者 = `trainer/loop_remote_drive.py::_self_healable_cancel`（M1 看门狗：只对「上一代残留
+#: 被清理」这一类自愈重发；人工 `/admin/cancel-job`、`cancel_unsettled_jobs` 撤的不许替操作员反悔）。
+#: 2026-10-17（plan/export-must-not-cancel-live-job §4）：文案就住这里，改它不会静默漂。
+M2_CANCEL_REASON_PREFIX = "上一 runId"
+
+
 def cancel_jobs_of_previous_runs(
     jsonl_path: str | Path,
     job_root: str | Path,
@@ -1285,7 +1295,7 @@ def cancel_jobs_of_previous_runs(
         cancel_job(
             jsonl_path,
             jid,
-            reason=f"上一 runId {row_run[:8]}… 遗留（腿启动清理）",
+            reason=f"{M2_CANCEL_REASON_PREFIX} {row_run[:8]}… 遗留（腿启动清理）",
             it=row_it,
         )
         # ②/③ hub 侧最好努力（不可达/在飞都容忍）
@@ -1320,21 +1330,12 @@ def cancel_job(
     p = Path(jsonl_path)
     if not p.exists():
         return False
-    net = ""
-    for line in p.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            e = json.loads(line)
-        except ValueError:
-            continue
-        if e.get("job_id") == job_id and e.get("event") in (
-            "job_pending",
-            "job_completed",
-            "job_cancelled",
-        ):
-            net = str(e["event"])
-    if net != "job_pending":
+    # 净态折叠**只写一份**：`worker.bc_ledger.job_net_event`（训练侧与 hub 侧、看门狗与本函数
+    # 读的是同一条规则；2026-10-17 之前这里是第 2…4 份拷贝，正是 2026-10-16 事故的成因模式）。
+    from worker.bc_ledger import JOB_PENDING_EVENT, job_net_event
+
+    ev = job_net_event(p, job_id)
+    if ev is None or ev.get("event") != JOB_PENDING_EVENT:
         return False
     event: dict = {"event": "job_cancelled", "job_id": job_id, "reason": reason, "ts": time.time()}
     if it is not None:

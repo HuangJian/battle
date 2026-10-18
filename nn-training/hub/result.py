@@ -4,7 +4,7 @@
 
     POST /jobs/{id}/result   回传结果（weights_json + opt_tar + agg；v2 体按魔数自动识别）
     POST /jobs/{id}/fail     节点**确定性**失败回报（bun 装不上 / TS 取不到 / argv 非法）
-    GET  /jobs/{id}/status   训练主循环轮询状态（pending/leased/done/failed/frozen）
+    GET  /jobs/{id}/status   训练主循环轮询状态（pending/leased/done/failed/frozen/cancelled）
     GET  /jobs/{id}/result   取已落盘结果做三重校验（已失败 → 410 + 原因）
     POST /jobs/{id}/epoch    BC 每 epoch 回传（权重 resume + 指标行）
     GET  /jobs/{id}/resume   最新 epoch 权重（worker 重领时接续训练）
@@ -227,7 +227,18 @@ class ResultRoutes:
         elif frozen is not None:
             # ★ 毒包熔断（§4.1）：终局状态之一（与 pending/leased 并列）。训练侧只要
             # “还会不会有人来跑”这一个答案，而冻结的答案就是「不会，除非人工解冻」。
+            # ★ 2026-10-17：它排在 `cancelled` **之前**——冻结带着诊断与人工动作
+            # （`POST /admin/unfreeze`），既冻又被撤的 job 给更具体的那一档。
             state = "frozen"
+        elif self.hub.ledger_net_state(jid) == "job_cancelled":
+            # ★ 2026-10-17（plan/export-must-not-cancel-live-job §5，2026-10-16 事故）：
+            # 账本已撤（`job_cancelled`）⇒ **池里没有它**（`_unfinished_pending` 读的同一份
+            # 账本）⇒ 「还会不会有人来跑」的答案是「不会」。此前这里落到 `pending`，等待侧
+            # 只能一直等（y5-hide 空等 3h+）：trainer 侧 M2 写的撤单行就在**同一份**
+            # `training_log.jsonl` 里（hub 的 `jsonl_path` 与训练的 `self._jsonl_path` 同源），
+            # 差的就是这一档读数。顺序理由：有活租约 = 真有人在算 ⇒ 仍是 `leased`
+            # （2026-10-03 用户裁决「不管在算的，只管没领的」）。
+            state = "cancelled"
         else:
             state = "pending"
         resp: dict = {"job_id": jid, "state": state}

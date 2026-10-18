@@ -88,8 +88,14 @@ def takes_course_lock(args) -> bool:
     设计目标）；**冒烟保留取锁** —— 它是真跑一轮（collect → publish → echo → 作废），
     作废点全在收官/权重层，**没有**「零写 traj」的判据 ⇒ 与 serve 抢同一批 traj 的面还在
     （2026-09-06 双 trainer 写同一 traj 的护栏同口径）。预采子进程在更早的分支返回，不问本判据。
+
+    ★ 2026-10-17（plan/export-must-not-cancel-live-job §3）：「导出腿」这条判据现在有**两个**
+    读者（取锁 / M2 腿启动清理的资格）⇒ 抽成 `trainer.dispatch_queue.dispatches_jobs` 一份实现，
+    本函数是它的薄读法（两处各写一遍 `getattr` 就是下一次漂移的种子）。
     """
-    return not bool(str(getattr(args, "export_bundle", "") or ""))
+    from trainer.dispatch_queue import dispatches_jobs
+
+    return dispatches_jobs(args)
 
 
 def _require_bun() -> str:

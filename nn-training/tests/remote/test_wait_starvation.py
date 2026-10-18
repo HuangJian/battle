@@ -4,9 +4,12 @@
 失败形态：**没有 worker 时，训练什么都不做也不报错**。C 腿事故里这条静默等了 3.5 小时
 （约 40 次认领过期循环），日志只有超时——操作员只能靠 cadence 反推。
 
-本文件钉两档（都与「执行中」明确区分）：
-  * `state=pending` ⇒ **等待认领中**，并把 hub 的在线 worker 数写进那一行（0 就是病灶本身）；
-  * `state=leased`  ⇒ 执行中（带租约剩余/上次心跳），不是饥饿，不该喊「起 worker」。
+本文件钉三档（三档必须可区分）：
+  * `state=pending`   ⇒ **等待认领中**，并把 hub 的在线 worker 数写进那一行（0 就是病灶本身）；
+  * `state=leased`    ⇒ 执行中（带租约剩余/上次心跳），不是饥饿，不该喊「起 worker」；
+  * `state=cancelled` ⇒ **已被撤单**（账本净态，2026-10-17 加）：这条活已经没了，
+    等待无意义——不许再把人往「起 worker」上引（2026-10-16 事故：这条假 `pending`
+    让腿空等了 3h+，见 `plan/export-must-not-cancel-live-job`）。
 """
 
 from __future__ import annotations
@@ -21,8 +24,11 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from common.protocol import normalize_manifest
-from remote.hub_client import wait_job
+import pytest
+
+import remote.hub_http as hub_http
+from common.protocol import JobFailedError, normalize_manifest
+from remote.hub_client import HubClientError, JobCancelledError, cancel_job, wait_job
 from tests.remote.test_remote_ppo import _boot_server, _mini_manifest  # type: ignore
 
 
@@ -118,6 +124,57 @@ def test_wait_reports_leased_not_starvation_when_claimed(tmp_path: Path) -> None
     assert not err, err
     assert any("执行中" in ln for ln in lines), lines
     assert not [ln for ln in lines if "等待认领中" in ln], lines
+
+
+def test_wait_stops_when_the_ledger_says_cancelled(tmp_path: Path) -> None:
+    """账本已撤 ⇒ 打点说人话，且到点立刻收兵——**可重试**错，不是停腿（2026-10-16 事故）。
+
+    三件事分别钉：
+      * `_wait_state_note` 多第三档：`pending` = 饥饿、`leased` = 执行中、`cancelled` = 这条活
+        已经没了（等待无意义）；
+      * **收兵路径必须是可判别的那一类**：`JobCancelledError`（`HubClientError` 子类）而
+        **不是** `JobFailedError`——后者在 `_handle_remote_failure` 里是「节点确定性失败 ⇒
+        写 ABORT 停腿」（`trainer/loop_remote_fail.py`），而这次是**我们自己撤的单**：正确处置是
+        撤单 + 下一拍重发同 jid（与 M1 lost 同一条路）；
+      * 「不把人往起 worker 上引」有**行为面**判据：`cancelled` 档在 `_wait_state_note` 里
+        早返回 ⇒ 从头到尾**不问** `/admin/queue`（旧版这里是子串判据，只证明「那行里没那几个字」）。
+    """
+    base, _store, srv, th, jid = _publish_unclaimed(tmp_path)
+    lines: list[str] = []
+    asked: list[str] = []
+    real_request = hub_http._request
+
+    def _spy(base_url, token, path, *a, **k):
+        asked.append(path)
+        return real_request(base_url, token, path, *a, **k)
+
+    hub_http._request = _spy  # type: ignore[assignment]
+    try:
+        # trainer 侧 M2 的撤单行（hub 与 trainer 共读同一份 training_log.jsonl）。
+        assert cancel_job(
+            tmp_path / "training_log.jsonl",
+            jid,
+            reason="上一 runId 77a9a90a… 遗留（腿启动清理）",
+        )
+        with pytest.raises(JobCancelledError) as ei:
+            wait_job(
+                base,
+                "sekret",
+                jid,
+                timeout_sec=0.3,
+                poll_sec=0.05,
+                report_every_sec=0.1,
+                log=lines.append,
+            )
+        assert not isinstance(ei.value, JobFailedError)  # 停腿那条路不许被走到
+        assert isinstance(ei.value, HubClientError)  # 可重试：与 M1 lost 同一条处置路
+        assert asked.count("/admin/queue") == 0  # 早返回：不问在线 worker（那条路只服务 pending）
+    finally:
+        hub_http._request = real_request  # type: ignore[assignment]
+        srv.shutdown()
+        th.join()
+    cancelled = [ln for ln in lines if "已被撤单" in ln]
+    assert cancelled, lines
 
 
 def test_wait_report_can_be_disabled(tmp_path: Path) -> None:

@@ -15,13 +15,16 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from worker.bc_ledger import (
+    JOB_CANCELLED_EVENT,
     JOB_DONE_EVENT,
+    JOB_PENDING_EVENT,
     ROUND_DONE_EVENT,
     append_ledger,
     bc_progress,
     completed_jobs,
     completed_rounds,
     inflight_jobs,
+    job_net_event,
     read_events,
 )
 
@@ -156,3 +159,58 @@ def test_progress_finished_only_when_all_rounds_done(tmp_path: Path) -> None:
 def test_progress_of_empty_ledger_starts_at_one(tmp_path: Path) -> None:
     prog = bc_progress(tmp_path / "missing.jsonl", 4)
     assert (prog.next_it, prog.done, prog.finished) == (1, 0, False)
+
+
+# ---------------------------------------------------------------- 净态（唯一折叠口径）
+#
+# 2026-10-17（plan/export-must-not-cancel-live-job §4）：这份折叠此前有三处各自实现
+# （hub 侧 `_ledger_net_state`、`remote/hub_client.cancel_job` 的内联循环、调用方习惯用
+# `scan_jobs` 的「曾经终局」集合当净态）——最后那条会把「撤单后重发」读成「仍然已撤」。
+
+
+def test_job_net_event_reads_the_last_foldable_row(tmp_path: Path) -> None:
+    """净态 = 文件序里**最后**一条 pending/completed/cancelled；无关事件不参与。"""
+    jid = "j" * 16
+    p = _write(
+        tmp_path / "l.jsonl",
+        [
+            {"event": JOB_PENDING_EVENT, "job_id": jid, "it": 1, "ts": 1.0},
+            {"event": "iteration", "it": 1, "kl": 0.01},  # 无关事件不许干扰
+            {"event": JOB_CANCELLED_EVENT, "job_id": jid, "reason": "x", "ts": 2.0},
+        ],
+    )
+    ev = job_net_event(p, jid)
+    assert ev is not None and ev["event"] == JOB_CANCELLED_EVENT
+
+
+def test_job_net_event_returns_pending_after_a_republish(tmp_path: Path) -> None:
+    """★ 撤单 → **重发**（同 jid 追加 job_pending）⇒ 净态回 pending。
+
+    这正是 M1 看门狗自愈成立的前提：重发后不许再判 lost。
+    """
+    jid = "j" * 16
+    p = _write(
+        tmp_path / "l.jsonl",
+        [
+            {"event": JOB_PENDING_EVENT, "job_id": jid, "it": 1, "ts": 1.0},
+            {"event": JOB_CANCELLED_EVENT, "job_id": jid, "reason": "上一 runId x… 遗留", "ts": 2.0},
+            {"event": JOB_PENDING_EVENT, "job_id": jid, "it": 1, "ts": 3.0},
+        ],
+    )
+    ev = job_net_event(p, jid)
+    assert ev is not None and ev["event"] == JOB_PENDING_EVENT
+    assert ev["ts"] == 3.0  # 拿的是那条**行**（读者要读 reason/ts，不是只看名字）
+
+
+def test_job_net_event_is_none_for_unknown_or_next_round_jobs(tmp_path: Path) -> None:
+    """账本里没有它 ⇒ None（不是「已撤」也不是「在飞」——缺省值必须是「不知道」）。"""
+    jid = "j" * 16
+    p = _write(
+        tmp_path / "l.jsonl",
+        [
+            {"event": JOB_PENDING_EVENT, "job_id": "k" * 16, "ts": 1.0},
+            {"event": JOB_PENDING_EVENT, "job_id": 7, "ts": 2.0},  # 假 jid（旧世代）
+        ],
+    )
+    assert job_net_event(p, jid) is None
+    assert job_net_event(tmp_path / "missing.jsonl", jid) is None

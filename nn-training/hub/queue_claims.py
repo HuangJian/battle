@@ -157,6 +157,18 @@ class QueueClaimsMixin(QueuePeer):
         st = self._store_of(job_id)
         return st.job_kind(job_id) if st is not None else "ppo"
 
+    def ledger_net_state(self, job_id: str) -> str:
+        """job 的**账本净态**（经 store 的缓存读，与 `job_role`/`job_kind` 同形状）。
+
+        返回 `job_pending` / `job_completed` / `job_cancelled`；`""` = 账本里没有它。
+        ★ 2026-10-17（plan/export-must-not-cancel-live-job §5）：`/jobs/{id}/status` 靠它与
+        派发池同源——hub 的 `_JobStore.jsonl_path` 与 trainer 的 `self._jsonl_path` 是**同一份**
+        文件（trainer 侧 M2 写的 `job_cancelled` 就是这一行），所以不需要任何新通道。
+        不归本 hub 管的 jid ⇒ `""`（不知道，不是「已撤」）。
+        """
+        st = self._store_of(job_id)
+        return st.ledger_net_state(job_id) if st is not None else ""
+
     def role_blocked(self, job_id: str, role: str) -> str:
         """归属/停摆闸的**只读**探针（派发面用）；不归本 hub 管 ⇒ `""`（不锁死别人）。
 

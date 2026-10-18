@@ -34,6 +34,12 @@ def _stub(obj: object, name: str, fn: object) -> None:
     setattr(obj, name, fn)
 
 
+#: 本腿的**声明依赖** `_jsonl_path`（`TrainingRemoteFail` 里就有它）：`_remote_ppo_lost` 的
+#: 「本地账本净态」那一支读它（2026-10-17，plan/export-must-not-cancel-live-job §4）。
+#: 这些用例只关心三相串法 ⇒ 给一个**必须不存在**的路径（语义 = 「账本里没有这份活」）。
+_NO_LEDGER = Path(__file__).with_name("_phases-no-ledger.jsonl")
+
+
 def _sess(it: int = 1) -> RemotePpoJob:
     return RemotePpoJob(
         it=it,
@@ -50,9 +56,11 @@ class _Rig:
     """搭一台「只记调用」的三相假件，把相位方法替换进真 mixin 实例。"""
 
     def __init__(self, *, probe_result: dict | None, policy_raises: bool = True) -> None:
+        assert not _NO_LEDGER.exists(), f"哨兵文件必须不存在：{_NO_LEDGER}"
         self.step = TrainingSteps()
         self.step.args = types.SimpleNamespace()
         self.step._remote_fail = 0
+        self.step._jsonl_path = _NO_LEDGER
         self.calls: list[str] = []
         self.published: list[RemotePpoJob] = []
         self.landed: list[dict] = []

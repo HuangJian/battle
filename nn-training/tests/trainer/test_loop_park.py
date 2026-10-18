@@ -267,6 +267,65 @@ def test_park_claim_failure_never_breaks_parking(
     assert rows and rows[-1]["event"] == "run_complete"
 
 
+# ---------------------------------------------------------------- M2 的资格闸（A，2026-10-17）
+#
+# 2026-10-16 事故（plan/export-must-not-cancel-live-job）：导出全离线任务包的进程（只读快照）
+# 也构造了主循环 ⇒ 它在 `__init__` 里跑了 M2「腿启动清理上一代」，把**在线腿正在等的那份**
+# job 判成残留作废（hub 侧 409 在飞、目录保留，账本却已撤）⇒ 池里没它、腿还在等它 ⇒
+# 那门课再没被接单（3h+）。撤销权只归**会派活的进程**。
+
+
+def _previous_run_ledger(tmp_path: Path, jid: str = "j" * 16) -> Path:
+    """上一代 runId 留在本课账本里的 pending job（+ 它的 job 目录）。"""
+    (tmp_path / "remote-jobs" / jid).mkdir(parents=True, exist_ok=True)
+    p = tmp_path / "training_log.jsonl"
+    p.write_text(
+        json.dumps({"event": "job_pending", "job_id": jid, "runId": "r-prev", "it": 3, "ts": 1.0})
+        + "\n",
+        encoding="utf-8",
+    )
+    return p
+
+
+def _ledger_events(p: Path) -> list[str]:
+    return [
+        str(json.loads(x)["event"])
+        for x in p.read_text(encoding="utf-8").strip().splitlines()
+        if x.strip()
+    ]
+
+
+def test_export_leg_does_not_run_the_previous_run_cleanup(tmp_path: Path) -> None:
+    """★ A：`--export-bundle`（只读快照）构造主循环后，上一代的活**一个字不动**。"""
+    ledger = _previous_run_ledger(tmp_path)
+    TrainingLoop(  # 现场构造 Way：导出腿也走 TrainingLoop
+        _args(traj=str(tmp_path), export_bundle=str(tmp_path / "bundle.zip")), None, "bun", {}
+    )
+    assert _ledger_events(ledger) == ["job_pending"]
+
+
+def test_normal_leg_still_cancels_the_previous_run(tmp_path: Path) -> None:
+    """反向：会派活的腿清理照旧（闸只放行导出腿，别把 M2 一起关掉）。"""
+    ledger = _previous_run_ledger(tmp_path)
+    TrainingLoop(_args(traj=str(tmp_path)), None, "bun", {})
+    assert _ledger_events(ledger) == ["job_pending", "job_cancelled"]
+
+
+def test_the_m2_gate_and_the_course_lock_share_one_predicate() -> None:
+    """★ A 的判据只有一份：`dispatches_jobs`（M2 资格）与 `takes_course_lock` 同值。
+
+    两处各自写一遍 `getattr(args, "export_bundle", …)` 就是下一次漂移的种子。
+    """
+    from trainer.dispatch_queue import dispatches_jobs
+    from trainer.once_shot import takes_course_lock
+
+    for export in ("", "tmp/out.zip"):
+        args = _args(export_bundle=export)
+        assert dispatches_jobs(args) is takes_course_lock(args) is (not export)
+    # 不带这个键的调用方（serve 的 course_args / smoke）默认「会派活」——默认方向必须是安全的那边。
+    assert dispatches_jobs(types.SimpleNamespace()) is True
+
+
 def test_node_rollout_is_initialized_at_construction(tmp_path: Path) -> None:
     """P0（2026-10-02 事故）：`_node_rollout` 必须在 `__init__` 就有初值。
 

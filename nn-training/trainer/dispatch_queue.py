@@ -24,6 +24,22 @@ from trainer.queue_local import (
 )
 
 
+def dispatches_jobs(args) -> bool:
+    """本进程会不会发布/等待远端 job（= 有资格执行 M2「腿启动清理上一代」）。
+
+    2026-10-16 事故（plan/export-must-not-cancel-live-job §3）：`--export-bundle` 的导出腿是
+    **只读快照**——它建 job 目录只为了打包，不派活、不等回传，但一样构造主循环 ⇒ 它在
+    `TrainingLoop.__init__` 里跑到 M2 清理，用自己的新 runId 把**在线腿正在等的那份**活
+    判成上一代残留作废（hub 侧 409 在飞、目录保留，账本却已撤）⇒ 池里没它、腿还在等它，
+    那门课再没被接单（3h+）。
+
+    判据只写一份：与 `trainer/once_shot.py::takes_course_lock`（「导出腿不取 per-course 锁」）
+    **同一个谓词**；新增只读/不派活的一次性腿时改这里，不许各写一份 `getattr`。
+    默认方向安全：缺 `export_bundle` 键（serve 的 `course_args` / smoke / collect-only）⇒ True。
+    """
+    return not bool(str(getattr(args, "export_bundle", "") or ""))
+
+
 def local_slots_max_of(args) -> int | None:
     """本机直跑槽位上限（传给 run_rollout_queue 的 local_slots_max）。
 

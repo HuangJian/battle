@@ -6,6 +6,73 @@
 > 为本文件局部编号（倒序：新条目置顶、号大，`§1` 最旧），旧编号对照见
 > `docs/nn.progress.md` 附录。每节内容拆分时**未改写**（只更新了内部交叉引用）。
 
+## §104 导出进程不许撤在线腿的活：撤销权闸（A）+ 等待侧认账本（B）+ status 与池同源（C）（2026-10-18，`plan/export-must-not-cancel-live-job.plan.md` · 决策 `DECISIONS.md` §2026-10-18-goalnn-export-must-not-cancel-live-job）
+
+**事故**（2026-10-16 04:44–07:51，y5-hide）：一门课的在线腿发布了 PPO job，云机认领后失联；
+06:17 一个「导出全离线任务包」进程（新 runId）构造 `TrainingLoop` ⇒ 跑 **M2 腿启动清理**
+（`cancel_jobs_of_previous_runs`）⇒ 把上一 runId 的那份 pending 活判成残留、写 `job_cancelled`。
+后果是三重的：**池**按账本净态算 ⇒ 那份活不可派；**`/jobs/{id}/status`** 按目录 + hub 内存算
+⇒ 仍答 `pending`；**等待侧**只信 `/status`（M1 看门狗只认 404）⇒ 永远等下去（3h+）。
+
+一句话根因：**job 只有一份账本，却有两套互不相同的推导；而「撤销权」没跟「派活权」绑定。**
+修法不是加超时（那是第二条命），是三件各自独立的事：
+
+### A 撤销权收口：不派活的进程不跑 M2 启动清理
+
+- `trainer/dispatch_queue.dispatches_jobs(args)` = 「本进程会不会发布/等待远端 job」
+  = **导出腿判据的唯一实现**。`TrainingLoop.__init__` 的 M2 块改成
+  `if _job_root.exists() and dispatches_jobs(args)`；`trainer/once_shot.takes_course_lock`
+  （「导出腿不取 per-course 锁」的既有读者）改为 `return dispatches_jobs(args)` ⇒ 两条闸从此
+  是**同一个谓词**，新增只读/不派活的一次性腿时只改一处。
+- 默认方向安全：serve 的 `course_args`、smoke、collect-only（更早返回）都不带 `export_bundle`
+  ⇒ 清理照旧；`cancel_jobs_of_previous_runs` 本身**一字未改**（它被 M2 语义正确使用，
+  错的是**调用资格**）。
+- 语义（写进注释）：M2 的含义是「重启了就该从头再来」，只有会派活、会等回传的进程才配下这个
+  判断；打包进程用自己的新 runId 把别人在等的活判成残留 = 撤销权越界。
+
+### B 等待侧认账本：本地已撤就别等（且只对**该自愈的那一类**自愈）
+
+- `_remote_ppo_lost`（`trainer/loop_remote_drive.py`）在 30s 节拍上**先**读本地账本净态：
+  命中 ⇒ 与既有 lost **同一条收尾**（`_cancel_remote_job` + `_bump_remote_fail` + 丢会话 ⇒
+  下一拍重发同 jid，连败预算仍是那一份 3 次 ABORT）。不设 `LOST_GRACE_SEC`：净态撤单是确定性
+  事实，不是「hub 还没扫到」的秒级窗口。
+- **判据必须是净态**（文件序最后一条 `job_pending|job_completed|job_cancelled`），不是
+  `scan_jobs` 的「曾经终局」集合——后者只增不减，重发后会把同一份活一拍一撤，30s 一拍 ⇒
+  ~90s 内 3 连败自伤停腿。
+- **唯一的净态实现**：`worker/bc_ledger.job_net_event(jsonl_path, job_id) -> dict | None`
+  （返回净态**行**，读者要的是同一口径下的全部事实：谁撤的、何时）。`remote/hub_client.cancel_job`
+  的内联全文扫改用它（幂等门不变）；hub 侧热路径保留 `store_ledger.ledger_net_state`（增量缓存）。
+  两份实现的对账用例 = `tests/hub/test_status_ledger_net.py::test_the_two_net_state_folders_agree`。
+- **撤单来源白名单**：同一份账本有三类写者（M2 腿启动清理 / 控制台 M3 重发 / 人工
+  `POST /admin/cancel-job` 与 `cancel_unsettled_jobs`）。只对第一类自愈——判据是 reason 前缀
+  `remote.hub_client.M2_CANCEL_REASON_PREFIX`（常量与写它的地方同住一处，读者共用）。
+  无差别自愈会**替操作员反悔**，且 `_cancel_remote_job` 顺带 `unfreeze_job` ⇒ 连人工/熔断冻结
+  一起解。非自愈的那几类继续等，但 `/status` 现在会说 `cancelled`，`_wait_state_note` 每拍把
+  「已撤单，等待无意义」喊出来，处置交控制台。
+
+### C `/status` 与池同源：账本已撤 ⇒ `cancelled`
+
+- `hub/store_ledger._ledger_net_state` **公共化**为 `ledger_net_state`（只改可见性，不改口径；
+  `store_leases._claim_locked` 的即时闸对账与 `publish` 去重仍用它）；`hub/queue_claims`
+  加同名转发（与 `job_role` / `job_kind` 同形状，不归本 hub 管 ⇒ `""`）。
+- `hub/result._get_status` 新档位的顺序：`leased`（真有人在算，2026-10-03 裁决）→ `frozen`
+  （带诊断与人工动作，更具体）→ **`cancelled`（账本净态）** → `pending`。只把今天答 `pending`
+  的那一档换成真答案，既有 state 取值一个不变。
+- 消费侧：`remote/hub_http._wait_state_note` 加 `cancelled` 一行；`wait_job` 收尾见 `cancelled`
+  ⇒ 抛**可重试** `HubClientError`（与 M1 lost 同一条处置路：撤单 + 重发同 jid），**不**用
+  `JobFailedError`（那会写 ABORT 停腿，与「这是我们自己撤的单」自相矛盾）。
+- 契约同步：`hub/http_face.py` / `hub/result.py` / `remote/hub_http.py`（`JOB_ALIVE` 语义不变：
+  200 即「hub 认识它」，判死归 B）/ `trainer/loop_remote_drive.py` 的 state 枚举都加 `cancelled`。
+
+**否决**：① 等待加总超时——第二条命，且超时只能「放弃」不能「重发」；② 导出进程复用在线腿的
+runId——`RUN_ID` 是进程级常量，为打包动它是全局行为变更；③ 清理前问 hub「这份活是不是别人在等」
+——无此 API，等于为一个误伤造第二事实源；④ 导出腿走独立入口不构造 `TrainingLoop`——打包要复用
+轮内计划/权重/预算，是重构级改动；⑤ 把 M2 搬去「首次 publish 那一刻」——清理时机是安全属性
+（新腿开课前就该 reap 掉上一代目录），且 `__init__` 是「腿启动」的唯一确定点 ⇒ 取「加资格闸」；
+⑥ B 对所有 `job_cancelled` 一视同仁——见上「白名单」。
+
+**回归**：`tests/{trainer/test_ppo_watchdog,trainer/test_loop_park,trainer/test_course_enable_gate,worker/test_bc_ledger,hub/test_status_ledger_net,hub/test_poison_freeze,hub/test_hub_queue_split,remote/test_wait_starvation,remote/test_cancel_previous_runs}.py`。
+
 ## §103 云机错误的**回家路**：E3 复用既有 410 通道 + E4/E5 上报腿（2026-10-16，`plan/component-error-registry.plan.md` v3 §4.3-S3a/S3b · 决策 `DECISIONS.md` §2026-10-16-goalnn-component-error-registry · 控制台侧见 `docs/nn/console.md` §39）
 
 云机的两类失败**只在云机**（本条目就是消灭这条形状）：

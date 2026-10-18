@@ -9,6 +9,25 @@
 
 ---
 
+## §117 y21 老四腿结课：opt delta-f16 污染、方向未判、v2 重开（2026-10-17）
+
+- **停腿**（用户 2026-10-17 晚，控制台）：y21-nohurt 止于 it210、y21-chain it213、y21-tempo it212、
+  y21-temper it13（F4 熔断）。状态行＋结课报告节已回写四课程文件
+  （`curricula/y21-{nohurt,chain,tempo,temper}.jsonc`）。
+- **污染面**（同 §115 指纹）：三长腿 stem 单点跳 nohurt 19.30@it171→172 / chain 18.10@it29→30 /
+  tempo 39.76@it41→42；KL 尖峰 chain 0.2255@it10、0.0597@it144、0.3570@it145，tempo 0.5320@it74
+  （nohurt KL 最大 0.0249 但仍有 19.3 死通道）；it210 eval 0.60/0.55/0.6475 vs it0 0.685；
+  末 10 点 win 0.5975/0.6458/0.5905、kills 15.77/16.32/15.79、gameover 40.4%/35.5%/41.1%（门三线全未达）。
+- **判决**：四腿全部**方向未判**——temper 是外因致死（不判退火方向），三长腿被同 bug 污染
+  （死通道不可复活），旧结果不得用作 nohurt/chain/tempo 的有效负判；不重放旧权重。
+- **遗产**：权重冻结 `nn-training/weights/y21-{nohurt,chain,tempo,temper}/`（止于 it210/213/212/13）；
+  现场 `tmp/y21-*/`；修复 = `adb33432`（§116）；快照 21:50 重打（`0493af29` 含修复）；重开
+  `y21-{nohurt2,chain2,tempo2,temper2}`（同 seed 20270205/同起点，2026-10-17 21:55 控制台开课）。
+- **决策** → DECISIONS §2026-10-17-goalnn-y21legs-close（取代
+  §2026-10-17-goalnn-opt-delta-f16-underflow 的「在跑三腿继续」④）。
+
+---
+
 ## §116 opt delta-f16 下溢消毒 + y21-temper2 重开（2026-10-17）
 
 - **修复**：`remote/opt_delta.sanitize_adam_sq`（K=10）+ P0 `train_core._load_opt_state` + P1

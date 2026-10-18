@@ -104,6 +104,30 @@ def scan_jobs(jsonl_path: str | Path) -> tuple[dict[str, dict], set[str], set[st
     return pending, done, terminal
 
 
+#: 参与**净态**折叠的三个事件名（`job_net_event` 的唯一口径）。
+NET_STATE_EVENTS = (JOB_PENDING_EVENT, JOB_DONE_EVENT, JOB_CANCELLED_EVENT)
+
+
+def job_net_event(jsonl_path: str | Path, job_id: str) -> dict | None:
+    """该 jid 的**净态行**：文件序里**最后**一条 `pending|completed|cancelled` 事件；没有 ⇒ None。
+
+    返回整条行（不只是名字）——读者要的是同一个折叠口径下的全部事实（谁撤的、什么时候）。
+
+    ★ 2026-10-17（plan/export-must-not-cancel-live-job §4）：本函数是这份折叠的**唯一实现**。
+    此前三处各自折叠（hub 侧 `store_ledger.ledger_net_state` 走增量缓存、`remote.hub_client.
+    cancel_job` 内联全文扫、调用方拿 `scan_jobs` 的「曾经终局」集合当净态）——最后那条会把
+    「撤单后重发」读成「仍然已撤」：M1 看门狗每 30s 判一次 lost ⇒ 重发后一拍一撤，
+    ~90s 内 3 连败 ABORT 停腿。写者共用同一份判据：`cancel_job` 的净态门与 hub 的认领闸都是它。
+    """
+    net: dict | None = None
+    for e in read_events(jsonl_path):
+        if e.get("job_id") != job_id:
+            continue
+        if e.get("event") in NET_STATE_EVENTS:
+            net = e
+    return net
+
+
 def completed_jobs(jsonl_path: str | Path) -> set[str]:
     """账本里已收口（落位验收完成）的 job id —— 用来分辨「这轮已发布未回」与「历史残留」。"""
     return scan_jobs(jsonl_path)[1]

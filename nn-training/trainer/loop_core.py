@@ -168,14 +168,20 @@ class TrainingLoop(RoundSteps, TrainingSteps, TrainingGuards, TrainingLifecycle)
         # M2（plan/ppo-job-lifecycle-ownership §3）：腿启动 = 上一代 runId 的活整体作废
         # （写账本 + 兑现到磁盘）。**只在这里**发生（不是发布时）——publish 前的
         # `cancel_stale_jobs` 仍是兜底。任何失败都只降级，绝不阻断开课。
+        #
+        # ★ 2026-10-17（plan/export-must-not-cancel-live-job §3，事故 A）：**撤销权只归会派活的
+        #   进程**。M2 的语义是「重启了就该从头再来」，只有会派活、会等回传的腿才配下这个判断；
+        #   `--export-bundle` 的只读导出腿也构造主循环，却既不派活也不等回传（打完包即退），
+        #   它一启动就把在线腿正在等的活判成「上一代残留」——一次跨进程误伤
+        #   （2026-10-16 y5-hide：那门课再没被接单 3h+）。
         try:
             from remote.hub_client import cancel_jobs_of_previous_runs
-            from trainer.dispatch_queue import RUN_ID
+            from trainer.dispatch_queue import RUN_ID, dispatches_jobs
 
             _job_root = Path(
                 getattr(args, "remote_job_root", "") or (self._traj_root / "remote-jobs")
             )
-            if _job_root.exists():
+            if _job_root.exists() and dispatches_jobs(args):
                 cancel_jobs_of_previous_runs(
                     self._jsonl_path,
                     _job_root,

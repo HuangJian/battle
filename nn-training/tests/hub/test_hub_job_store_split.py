@@ -87,7 +87,9 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...], tuple[str, ...]]] = {
             "_read_ledger",
             "_append_ledger",
             #: 六轮 F1（2026-10-05）：净态折叠——`_claim_locked` 的即时闸对账 + `publish` 去重。
-            "_ledger_net_state",
+            #: 2026-10-17（plan/export-must-not-cancel-live-job §5）公共化：第二个读者是
+            #: `/jobs/{id}/status`（status 与派发池同源）；训练侧同口径 = `worker.bc_ledger.job_net_event`。
+            "ledger_net_state",
             # 2026-10-06：未完成集拆成两个视图（池 = ∧无活租约 / 在飞 = ∧有活租约）——
             # 空闲 worker 的备份副本候选源（`inflight_job_ids`），筛子只写一遍。
             "_unfinished_pending",
@@ -346,7 +348,7 @@ def test_every_method_lives_in_exactly_one_mixin() -> None:
     # 49 = 拆分前 `_JobStore` 的 49 个方法；2026-09-25 并入 origin 的课程侧落位后又多了 2 条
     # （`_course_backup_target` / `_land_offline_round_extras`）；2026-10-01 §52 加 2 条
     # （`_lease_state` 判据 + `_lease_held` 布尔视图）；2026-10-03 T0 加 1 条
-    # （`cancel_unsettled_jobs` 撤单）；2026-10-05 六轮 F1 加 1 条（`_ledger_net_state` 净态折叠）；
+    # （`cancel_unsettled_jobs` 撤单）；2026-10-05 六轮 F1 加 1 条（`ledger_net_state` 净态折叠）；
     # 2026-10-06 加 2 条（`_unfinished_pending` 唯一筛子 + `inflight_job_ids` 在飞集）；
     # 2026-10-07 M1b 加 3 条（`job_kind` / `hold_blocked` / `_hold_stale_sec`）；
     # 2026-10-08 M5 加 4 条（`note_job_progress` / `job_progress_at` / `_bc_progress_stale_sec` /

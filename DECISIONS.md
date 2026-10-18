@@ -7312,3 +7312,49 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **后果**：`run_rl.py` 只剩解析与共享原语（锁助手 / `update_kwargs` 原地不动 —— serve、run_bc
   与一串护栏用例都 import 它们，评审 P1-F4）；console 侧的 `trainingLoop` 组件与
   train-smoke / export 两条腿**一字未动**（它们本来就走一次性口）。
+
+## §2026-10-17-goalnn-y21legs-close（y21 nohurt/chain/tempo/temper 停腿结课：opt 下溢污染、方向未判、v2 重开）
+
+- **背景**：opt delta-f16 下溢（§115/§116）扩散到全部旧 y21 腿——三长腿 stem 单点跳最高 39.8、
+  KL 尖峰 0.532，nohurt 无 KL 尖峰但 stem 19.3；it210 eval 三腿 0.60/0.55/0.6475 均低于起点 0.685；
+  temper 早于 it13 熔断。修复已落地（`adb33432`），但已死通道不可复活。
+- **决定**：① 旧四腿全部停腿（nohurt it210、chain it213、tempo it212、temper it13），权重冻结、不回放；
+  ② 不把旧结果当作 nohurt/chain/tempo 方向负判，不改 temper 的「外因致死」判；
+  ③ 四腿以新实验重开（`y21-{nohurt2,chain2,tempo2,temper2}`，新 name/out/traj/backup，
+  同 seed 20270205/同 stack2-it200 起点）；④ 取代 underflow 条目的「在跑三腿继续」。
+- **备选与否决**：① 让三腿跑完 500 —— 否（死通道污染无法归因；继续只买污染样本）；
+  ② 原地续跑/改名复用 —— 否（覆盖 tmp/y21-* 取证现场、违反 §15.5）；③ 只重开 chain/tempo ——
+  否（nohurt 也有 19.3 死通道，三方向干净对照必须同批）；④ 回放旧权重做 warm-start ——
+  否（未过起点且带死通道）。
+- **后果**：旧四腿实验线结课（全为污染/外因，非方向判决）；v2 四腿 2026-10-17 21:55 控制台开课；
+  权重冻结供复核。v2 是修复后的第一批干净语料；快照已于 21:50 重打（commit 0493af29，含修复），v2 21:55 开课。
+
+## §2026-10-18-goalnn-export-must-not-cancel-live-job（撤销权只归派活方 + 等待侧同看一份账本：导出进程不许撤在线腿的活）
+
+- **背景**（2026-10-16 04:44–07:51，y5-hide）：在线腿发布了 PPO job，云机认领后失联；06:17 一个
+  「导出全离线任务包」进程（新 runId）构造 `TrainingLoop` ⇒ 跑 M2 腿启动清理 ⇒ 把上一 runId 的
+  **pending** 活写成 `job_cancelled`。后果三重：派发池（按账本净态）不可派；`/jobs/{id}/status`
+  （按目录 + hub 内存）仍答 `pending`；等待侧只信 `/status`（M1 看门狗只认 404）⇒ 空等 3h+。
+  根因：**job 只有一份账本，却有两套互不相同的推导；而「撤销权」没跟「派活权」绑定。**
+- **决定**：① **A 撤销权收口**——`trainer/dispatch_queue.dispatches_jobs(args)` 是「本进程会不会
+  派活/等回传」的**唯一实现**，`TrainingLoop.__init__` 的 M2 清理加它当闸，`takes_course_lock`
+  改成读同一个谓词（「导出腿不取锁」与「导出腿不撤单」从此一个判据）；`cancel_jobs_of_previous_runs`
+  本身不改。② **B 等待侧认账本**——`_remote_ppo_lost` 在 30s 节拍上先读本地账本**净态**，命中即走
+  既有 lost 收尾（撤单 + 连败预算 + 丢会话 ⇒ 下一拍重发同 jid）；净态折叠的唯一实现抽成
+  `worker.bc_ledger.job_net_event`（`cancel_job` 的内联循环改用它）。③ **撤单来源白名单**——只对
+  `M2_CANCEL_REASON_PREFIX`（写者与读者共用的常量）那一类自愈。④ **C status 与池同源**——
+  `store_ledger._ledger_net_state` 公共化 + `queue_claims` 同名转发，`_get_status` 在 `leased`/
+  `frozen` 之后插 `cancelled` 档（既有取值不变），`_wait_state_note` / `wait_job` 消费侧把
+  `cancelled` 当**可重试**路（撤单重发，**不** ABORT 停腿）。
+- **备选与否决**：① 等待加总超时——否（第二条命，且超时只能放弃不能重发）；② 导出进程复用在线腿
+  runId——否（`RUN_ID` 是进程级常量，为打包动它是全局行为变更）；③ 清理前问 hub「是不是别人在等」
+  ——否（无此 API，等于造第二事实源）；④ 导出腿走独立入口不构造 `TrainingLoop`——否（打包要复用
+  轮内计划/权重/预算，重构级）；⑤ M2 搬去「首次 publish 那一刻」——否（清理时机是安全属性：新腿
+  开课前就该 reap 上一代目录，且 `__init__` 是腿启动的唯一确定点）；⑥ B 对所有 `job_cancelled`
+  一视同仁地自愈——否（人工 `/admin/cancel-job` 与 `cancel_unsettled_jobs` 写同一份账本，无差别
+  自愈=替操作员反悔，且顺手 `unfreeze_job` 把人工/熔断冻结一起解）；⑦ 用 `scan_jobs` 的「曾经
+  终局」集合判撤单——否（只增不减 ⇒ 重发后一拍一撤，~90s 三连败自伤停腿）。
+- **后果**：导出/打包进程再也无法影响在线腿的活；同类误伤现在**自愈**（腿自己撤单并重发同 jid，
+  无需人工停课开课）；`/status` 不再对已撤的活撒谎（排障与等待打点同时受益）。代价是多一个
+  status 取值 `cancelled`（旧读方落默认分支）与一次 per-30s 的账本全量读（`job_net_event`）。
+  plan/export-must-not-cancel-live-job.plan.md 的 A/B/C 全部落地；全文 docs/nn/remote-transport.md §104。

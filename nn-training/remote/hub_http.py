@@ -5,11 +5,12 @@
 
 * **传输薄壳**：`_request` —— 全模块**唯一**碰 `urlopen` 的地方（回环走 `common.net_http` 绕代理）；
 * **回传消费**：`probe_job_result`（状态码分类的唯一实现，hub 与节点两条链路共用）· `poll_job`
-  （非阻塞探针）· `wait_job`（阻塞等待 + 退避 + 饥饿响亮）· `_wait_state_note`；
+  （非阻塞探针）· `wait_job`（阻塞等待 + 退避 + 饥饿响亮 + 收尾分类）· `_wait_state_note`；
 * **行政面**：`report_job_failure`（确定性失败回报）· `set_cloud_halt` / `hub_halted` /
   `clear_halt_on_startup`（云端停机达令）；
 * **失败类型**：`HubClientError`（发布/等待/校验三环共用；旧家的 raise 通过 `hub_client` 的
-  转发名指向**同一个对象**）。
+  转发名指向**同一个对象**）· `TripleCheckError`（拒收）· `JobCancelledError`（账本已撤，
+  2026-10-17 加：收兵重发同 jid —— 同属可重试面，不是 `JobFailedError` 那条停腿路）。
 
 **为什么单独成家**：它是传输面 —— 「把请求发出去、把回答读回来」，与「打包 / 磁盘 IPC 发布 /
 校验落位」是两件事。分开之后：
@@ -48,6 +49,17 @@ class TripleCheckError(HubClientError):
     静默失效。行为面全兼容：它是 `HubClientError` 子类，`remote_retryable_exceptions()`
     照旧捕获，消息逐字不变。
     """
+
+class JobCancelledError(HubClientError):
+    """这条活**已被账本判终局**（`state=cancelled`）——等待无意义，收兵重发同 jid。
+
+    为什么要单独一个类型（2026-10-17，plan/export-must-not-cancel-live-job §5）：处置必须
+    **可判别**（撤单 + 下一拍重发，而不是写 ABORT 停腿），而按消息文本匹配会在下一次改文案时
+    静默失效——与 `TripleCheckError` 同一条理由。行为面全兼容：它是 `HubClientError` 子类
+    ⇒ `remote_retryable_exceptions()` 照旧捕获；**不是** `JobFailedError`（那条路是
+    「节点确定性失败 ⇒ `_abort_node_failure` 写 ABORT」，而这次是我们自己撤的单）。
+    """
+
 
 # ------------------------------------------------------------------ 等待（HTTP）
 
@@ -344,7 +356,9 @@ def poll_job(
 
 
 #: `job_liveness` 的三态（M1 看门狗专用；**不是**三态里那个 404≡pending 的探针语义）。
-JOB_ALIVE = "alive"  # hub 认识这个 jid（任意 state：pending/leased/done/failed/frozen）
+#: ★ 2026-10-17：`cancelled`（账本净态已撤）**也**算 alive —— 200 就是「hub 认识它」；
+#: 「它已经死了」的判据归 M1 看门狗的本地账本那一支（`_remote_ppo_lost`），不在这里。
+JOB_ALIVE = "alive"  # hub 认识这个 jid（任意 state：pending/leased/done/failed/frozen/cancelled）
 JOB_UNKNOWN = "unknown"  # hub 侧不存在这个 jid（404——目录被删 / 课程不认识它）
 JOB_UNREACHABLE = "unreachable"  # 没答上来（网络/5xx/其它）：**不许**据此判丢失
 
@@ -462,8 +476,10 @@ def _wait_state_note(base_url: str, token: str, jid: str, waited: float) -> str:
     """等待期的一行状态（best-effort，**绝不**把观测失败变成训练失败）。
 
     区分两种「还没回」——它们对操作员是完全不同的两件事：
-      * `pending` = **没有任何 worker 认领**（饥饿）⇒ 要算就去控制台起 worker；
-      * `leased` = 已被认领、云机在跑（带租约剩余与上次心跳）⇒ 只能等。
+  * `pending` = **没有任何 worker 认领**（饥饿）⇒ 要算就去控制台起 worker；
+  * `leased` = 已被认领、云机在跑（带租约剩余与上次心跳）⇒ 只能等；
+  * `cancelled` = **账本已撤**（2026-10-17；`hub/result.py::_get_status` 与派发池同源后新有的档）
+    ⇒ 这条活已经没了，等待无意义——不把人往「起 worker」上引。
 
     在线 worker 数来自 `/admin/queue`（hub 已有面，不新造端点）；取不到就只说状态。
     """
@@ -489,6 +505,14 @@ def _wait_state_note(base_url: str, token: str, jid: str, waited: float) -> str:
         return (
             f"job {jid} **已被 hub 熔断冻结**（state=frozen，已等 {waited:.0f}s）"
             "——需人工确认后解冻重发（POST /admin/unfreeze）"
+        )
+    if state == "cancelled":
+        # ★ 2026-10-17（plan/export-must-not-cancel-live-job §5，2026-10-16 事故）：账本净态已撤
+        # ⇒ 池里没有它，没人会来领。这一行的价值是把「在等一份永远不会来的活」变成**可 grep 的
+        # 事实**（事故现场只有一句 `等待认领中 … 在线 worker = 0`，把人引向「起 worker」）。
+        return (
+            f"job {jid} **已被撤单**（state=cancelled，账本净态，已等 {waited:.0f}s）"
+            "——这份活不会再有人领；等它的腿会在收尾时收到可重试错并重发同 job"
         )
     workers = "?"
     try:
@@ -588,6 +612,14 @@ def wait_job(
                 kind="PoisonFrozen",
                 detail=str(info.get("last_worker", "")),
             )
+        elif state == "cancelled":
+            # ★ 2026-10-17（plan/export-must-not-cancel-live-job §5）：账本已撤 ⇒ **立刻收兵**，
+            # 不再白等一个窗口。刻意用**可重试**的 `JobCancelledError`（`HubClientError` 子类，
+            # 与 M1 lost 同一条处置路）：撤单 + 下一拍重发同 jid。不许用 JobFailedError —— 那在
+            # `_handle_remote_failure` 里是「节点确定性失败 ⇒ 写 ABORT 停腿」，而这次是**我们自己
+            # 撤的单**（组合路径不该因此停腿）。类型可判别而不是靠消息文本（同 TripleCheckError）。
+            log(f"wait_job: job {jid} 已被撤单（账本净态）——不再等待，重发同 job")
+            raise JobCancelledError(f"wait_job: job {jid} 已被撤单（账本净态）——不再等待，重发同 job")
         elif state == "leased":
             # 云仍在跑 ⇒ 再给一个完整预算（H3 原语义）。report/now 原样下传：
             # 延长等待期仍要按同一节流继续「在等什么」的报告。

@@ -18,7 +18,7 @@
   GET  /jobs/{id}/payload       下载 payload zip
   POST /jobs/{id}/heartbeat     心跳续租（60s）
   POST /jobs/{id}/result        worker 回传结果（weights_json + opt_tar + agg）
-  GET  /jobs/{id}/status        训练主循环轮询 job 状态（pending/leased/done/failed/frozen）
+  GET  /jobs/{id}/status        训练主循环轮询 job 状态（pending/leased/done/failed/frozen/cancelled）
                                 frozen = 毒包熔断（§4.1，认领后零回传达 3 次）；`/result`
                                 一并回 410 + 原因，训练侧不停在 25min 超时上
   POST /admin/unfreeze?job_id=  人工解冻熔断的 job（回池可重领；重发**不**解冻）

@@ -167,6 +167,9 @@ DOMAINS: dict[str, tuple[type, tuple[str, ...]]] = {
             "abandon",
             "job_role",
             "job_kind",
+            # 2026-10-17（plan/export-must-not-cancel-live-job §5）：账本净态的 hub 侧同名转发——
+            # `/jobs/{id}/status` 靠它与派发池同源（事故：池说「不可派」、status 说 pending）。
+            "ledger_net_state",
             "role_blocked",
             # ★M5（Q5）：drain 互斥——「谁在带课 hold / 谁在跑 BC」的全视图只有 hub 层有
             # （store 只看得到自己那门课），而三个拉活面都要它 ⇒ 判据住本簇。
@@ -322,6 +325,9 @@ FACADE_SAME_SIG = (
     "job_failure",
     "job_kind",
     "job_role",
+    # 2026-10-17（plan/export-must-not-cancel-live-job §5）：与 `_JobStore.ledger_net_state`
+    # 逐参数一致的门面转发（status 与池同源的读面）。
+    "ledger_net_state",
     "mark_completed",
     "note_worker",
     "reclaims",
@@ -538,7 +544,9 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
     # `worker_errors` —— 云机错误上报的中继 ring 的写面与读面）⇒ 123。
     # 2026-10-17（plan/hub-server-memory-slim L3）：+3（`mem_readout` / `drop_course` /
     # `_drop_dead_courses`）⇒ 124。
-    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 126, len(DOMAIN_METHODS)
+    # 2026-10-17（plan/export-must-not-cancel-live-job §5）：+1（`ledger_net_state` 的 hub 转发
+    # ——`/jobs/{id}/status` 认账本净态，status 与派发池从此同源）⇒ 127。
+    assert len(DOMAIN_METHODS) == len(set(DOMAIN_METHODS)) == 127, len(DOMAIN_METHODS)
     seen: dict[str, str] = {}
     for domain, (cls, methods) in DOMAINS.items():
         defined = _own_defs(HUB_DIR / f"{domain}.py", cls.__name__)
@@ -548,7 +556,7 @@ def test_every_domain_method_lives_in_exactly_one_mixin() -> None:
         for m in set(methods):
             assert m not in seen, f"{m} 同时住 {seen[m]} 与 {domain}（实现不唯一）"
             seen[m] = domain
-    assert len(seen) == 126, len(seen)
+    assert len(seen) == 127, len(seen)
 
     own = _own_defs(QUEUE_MOD, "_HubQueue")
     assert sorted(own) == list(OWN_METHODS), (
@@ -666,7 +674,9 @@ def test_the_same_name_surface_is_exactly_the_declared_closed_set() -> None:
     )
     # ★M5：33 → 34（`job_kind` 的 hub 转发：push 腿的备份过滤要读它）
     # 2026-10-11 W7：34 → 35（`cancel_job` 的门面转发：单 job 定向作废）
-    assert len(declared) == 35, len(declared)
+    # 2026-10-17（plan/export-must-not-cancel-live-job §5）：35 → 36（`ledger_net_state`
+    # ——账本净态的读面；`/jobs/{id}/status` 与派发池同源）。
+    assert len(declared) == 36, len(declared)
     # 改名那一条**不是**同名（store 侧没有 `abandon`）⇒ 它不属于这个闭集，另处单独钉。
     assert "abandon" in FACADE_RENAMED and "abandon" not in common
     assert "abandon_job" in _callable_names(_JobStore)
@@ -678,8 +688,9 @@ def test_the_identical_signature_facade_is_byte_for_byte_same_signature() -> Non
     这条在本刀里是真能抓住东西的：门面有 6 个形参全用关键字传的转发（如 `claim`）、
     有 3 个纯 `if st: st.X(...)`（无返回）、有 1 个带参注解返回值；漏一个或改一个名字就红。
     """
-    # ★M5：30 → 31（`job_kind` 的逐字转发）；2026-10-11 W7：31 → 32（`cancel_job`）
-    assert len(FACADE_SAME_SIG) == 32
+    # ★M5：30 → 31（`job_kind` 的逐字转发）；2026-10-11 W7：31 → 32（`cancel_job`）；
+    # 2026-10-17：32 → 33（`ledger_net_state`）。
+    assert len(FACADE_SAME_SIG) == 33
     for name in FACADE_SAME_SIG:
         want = _params(getattr(_JobStore, name))
         got = _params(getattr(_HubQueue, name))

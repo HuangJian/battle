@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 
 import common.distribution
 from common.log import log
@@ -36,6 +37,28 @@ LOST_PROBE_SEC = 30.0
 #: 宽限期**必须**给：`publish` 到 hub 扫到目录之间有秒级窗口（`hub/queue_discover.py`），
 #: 不给宽限会把正常排队误判成丢失。检测上界 = 宽限 + 2×探针节拍（≈120s）。
 LOST_GRACE_SEC = 60.0
+
+
+def _self_healable_cancel(jsonl_path: Path, jid: str) -> bool:
+    """这份活是不是被「上一代残留清理」撤的（⇒ 本进程该自愈：撤单 + 重发同 jid）？
+
+    ★ 2026-10-17（plan/export-must-not-cancel-live-job §4，2026-10-16 事故）：三类写者往
+    **同一份**账本落 `job_cancelled`——M2 腿启动清理（上一代 runId 的残留）/ 人工
+    `POST /admin/cancel-job` / `cancel_unsettled_jobs`（模式切换等）。只有第一类应该自愈：
+    无差别重发会**替操作员反悔**（而且 `_cancel_remote_job` 顺带 `unfreeze_job`，连人工/熔断的
+    冻结一起解掉）。判据取**白名单**（reason 前缀，写者与读者共用
+    `remote.hub_client.M2_CANCEL_REASON_PREFIX`），默认不自愈。
+
+    净态判据走 `worker.bc_ledger.job_net_event`（唯一实现）：撤单后重发的活净态回 `job_pending`
+    ⇒ 本函数为 False（**不许**拿 `scan_jobs` 的「曾经终局」集合当净态——那会一拍一撤）。
+    """
+    from remote.hub_client import M2_CANCEL_REASON_PREFIX
+    from worker.bc_ledger import JOB_CANCELLED_EVENT, job_net_event
+
+    ev = job_net_event(jsonl_path, jid)
+    if ev is None or ev.get("event") != JOB_CANCELLED_EVENT:
+        return False
+    return str(ev.get("reason") or "").startswith(M2_CANCEL_REASON_PREFIX)
 
 
 class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
@@ -148,11 +171,14 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
         """M1 看门狗：让位期间把「这份 job 还能不能回来」问出一个答案。
 
         返回 True = **已判 lost 并撤单**（调用方不再等旧 jid；下一拍正常发布路径重发同 jid）。
-        返回 False = 还在等（含：hub 还不认识它但没超宽限 / hub 不可达 / hub 说在跑或排队）。
+        返回 False = 还在等（含：hub 还不认识它但没超宽限 / hub 不可达 / hub 说在跑或排队 /
+        本地撤单不属本进程该自愈的那一类）。
 
         判据（唯一实现；分类表见 plan §2(a)）：
+          * **本地账本净态 = `job_cancelled` 且撤单来源是本进程该自愈的那一类** ⇒ 判 lost
+            （2026-10-17 加；见 `_self_healable_cancel`——2026-10-16 事故里 hub 一路答 200）；
           * `/jobs/{id}/status` **404** = hub 侧不存在这个 jid ⇒ 起表/续表 `lost_since`；
-          * `200`（pending/leased/done/failed/frozen 任意）= hub 认识 ⇒ 清表；
+          * `200`（pending/leased/done/failed/frozen/cancelled 任意）= hub 认识 ⇒ 清表；
           * 异常 / 其它状态码 = 网络问题 ⇒ **不动表、更不判 lost**（判错的代价是一次完整重发）。
         """
         now = time.time()
@@ -164,6 +190,19 @@ class TrainingRemoteDrive(TrainingRemoteFail, TrainingRemoteJob):
         if now - sess.last_lost_probe < LOST_PROBE_SEC:
             return False
         sess.last_lost_probe = now
+        if _self_healable_cancel(self._jsonl_path, sess.jid):
+            # ★ 2026-10-17（plan/export-must-not-cancel-live-job §4）：账本里这份活**已经被撤**
+            # （上一代 runId 的残留被另一个进程的 M2 清理作废——2026-10-16 事故：导出腿把在线腿
+            # 正在等的活撤了，而 hub 的 `/status` 仍答 pending，M1 的 404 判据照不到）。
+            # 本地终局是**确定性事实** ⇒ 不设宽限；收尾与既有 lost 完全同一条路（撤单 + 连败预算
+            # + 丢会话 ⇒ 下一拍重发同 jid），净态回 pending 后不会再判（重发即复活）。
+            self._cancel_remote_job(sess, it=it, reason="本地账本已判终局（上一代残留被清理），不再等待")
+            self._bump_remote_fail(it, f"job {sess.jid} 本地账本已撤（等待无意义）")
+            log(
+                f"[run_rl] it{it}: job {sess.jid} 本地账本已判终局（上一代残留被清理）— 已撤单；"
+                "下一拍重发同 jid"
+            )
+            return True
         from remote.hub_http import JOB_ALIVE, JOB_UNKNOWN, job_liveness
 
         st = job_liveness(sess.probe_base_url, sess.probe_token, sess.jid)
