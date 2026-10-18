@@ -36,6 +36,8 @@ export interface EvalSummary {
   clears: number
   clearRate: number | null
   dropped: number
+  /** 收工原因（settled / machine-fault / workers-gone / window）；旧行/云端缺字段 = null。 */
+  closeReason?: string | null
   sec: number
   wver: string
   outcomes: Record<string, number>

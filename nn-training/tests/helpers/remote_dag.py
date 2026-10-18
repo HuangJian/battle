@@ -346,6 +346,8 @@ LAYERS: dict[str, int] = {
     "worker.gate_halt": 0,
     "worker.gate_inputs": 0,
     "worker.kickstart_burn": 1,
+    #: 本机评估失败的保真类型（plan/eval-gap-honesty D1）：只用 stdlib（re）⇒ L0。
+    "worker.local_eval_error": 0,
     "worker.loop_tasks": 0,
     "worker.metrics_stats": 0,
     "worker.models.rl_model": 0,

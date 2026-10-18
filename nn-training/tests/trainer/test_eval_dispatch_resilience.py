@@ -15,6 +15,7 @@ test_dist_common_poll.py 有单测。
 from __future__ import annotations
 
 import json
+import re
 import threading
 import types
 from pathlib import Path
@@ -927,3 +928,261 @@ def test_settled_full_requires_landed_not_claimed(tmp_path, monkeypatch) -> None
     )
     played = [r for r in rows if r.get("event") == "eval"]
     assert len(played) == 1
+
+
+# ───────────────────── 本机腿（D1/D2/D3/D1b，plan/eval-gap-honesty）─────────────────────
+# 为什么单开一族：上面全是**节点腿**（local_gate 未接线 ⇒ 本机不参与）。本机腿多了
+# per-leg 重试、退避、共享熔断、改派，以及「scratch 不在 it<N>/」这条落点。
+
+
+class _LocalHarness(_Harness):
+    """本机直跑腿的脚手架：无节点（默认）或 1 个快节点，`run_local_eval_game` 可编排。"""
+
+    def __init__(
+        self,
+        tmp_path: Path,
+        monkeypatch,
+        games: int,
+        *,
+        local_slots: int = 1,
+        nodes: bool = False,
+        window: float = 30.0,
+        soft_streak: int | None = None,
+    ) -> None:
+        super().__init__(tmp_path, monkeypatch, games)
+        self.args.eval_window_sec = window
+        self.args.course = "t-local"
+        policy: dict[str, Any] = {"nodeFailStreak": 3, "evalLocalSlots": local_slots}
+        if soft_streak is not None:
+            policy["nodeSoftFailStreak"] = soft_streak
+        self.cfg = {
+            "nodes": (
+                [{"id": "a97", "url": "http://a97.local", "concurrency": 1}] if nodes else []
+            ),
+            "policy": policy,
+        }
+
+    def run_local(
+        self,
+        fake,
+        fetch=None,
+        *,
+        gate_delay: float | None = None,
+        gate: threading.Event | None = None,
+    ) -> list[dict]:
+        """"gate_delay`/`gate`：控制本机份额何时放行（默认立即）。
+
+        改派的确定性靠这里的窗口：gate 未放行时节点只消耗到队列剩 `reserved` 局就停手，
+        本机拿到的那一局必然是本机先失败 — 否则调度快慢会决定「本机有没有撞过一局」。
+        """
+        common.distribution.weights_push_cache_reset()
+        self.mp.setattr(ed, "run_local_eval_game", fake)
+        self.mp.setattr(common.distribution, "fetch_task", fetch or _never_fetch)
+        own_gate = gate is None
+        gate = gate or threading.Event()
+        timer = None
+        if own_gate:
+            if gate_delay is None:
+                gate.set()
+            else:
+                timer = threading.Timer(gate_delay, gate.set)
+                timer.start()
+        try:
+            ed.dispatch_eval_round(
+                "bun",
+                str(self.weights),
+                self.traj,
+                self.args,
+                self.cfg,
+                "rid.c",
+                5,
+                local_gate=gate,
+            )
+        finally:
+            if timer is not None:
+                timer.cancel()
+        return [
+            json.loads(line)
+            for line in (self.work / "eval_log.jsonl")
+            .read_text(encoding="utf-8")
+            .splitlines()
+            if line.strip()
+        ]
+
+
+def _never_fetch(*_a, **_kw):
+    raise AssertionError("无节点时不该派到节点")
+
+
+def _summary(rows: list[dict]) -> dict:
+    return [r for r in rows if r.get("event") == "eval_summary"][-1]
+
+
+def test_local_transient_retries_are_bounded(tmp_path, monkeypatch) -> None:
+    """T3：瞬断回队到 `EVAL_TASK_ATTEMPTS_TRANSIENT` 就停 —— 队列必须收敛。"""
+    from worker.local_eval_error import LocalEvalProcessError
+
+    monkeypatch.setattr(ed, "EVAL_TASK_ATTEMPTS_TRANSIENT", 2)
+    h = _LocalHarness(tmp_path, monkeypatch, games=1)
+    calls: list[tuple[int, int]] = []
+
+    def fake(_bun, _snap, stage, seed, *_a, **_kw):
+        calls.append((stage, seed))
+        raise LocalEvalProcessError(1, "error: EBUSY: resource busy or locked, open 'w.json'")
+
+    rows = h.run_local(fake)
+    s = _summary(rows)
+    assert len(calls) == 2, f"瞬断预算 = 2 ⇒ 两次尝试后 drop（实际 {len(calls)}）"
+    assert s["dropped"] == 1 and s["games"] == 0
+    meta = [
+        json.loads(line)
+        for line in (h.work / "dist-agent-meta.jsonl").read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    assert len(meta) == 1 and meta[0]["ok"] is False
+    # T14：meta 带 errno / msg_head（旧的 reason 只剩栈尾，errno 被切掉）
+    assert meta[0]["errno"] == "EBUSY"
+    assert meta[0]["msg_head"].startswith("error: EBUSY")
+    assert meta[0]["reason"].startswith("EBUSY:")
+
+
+def test_local_soft_breaker_stops_all_local_threads(tmp_path, monkeypatch) -> None:
+    """T4：连续瞬断到 `nodeSoftFailStreak` ⇒ 本轮停派（共享事件，不是线程局部）。"""
+    from worker.local_eval_error import LocalEvalProcessError
+
+    h = _LocalHarness(tmp_path, monkeypatch, games=3, local_slots=2, soft_streak=2)
+    calls: list[tuple[int, int]] = []
+
+    def fake(_bun, _snap, stage, seed, *_a, **_kw):
+        calls.append((stage, seed))
+        raise LocalEvalProcessError(1, "error: EMFILE: too many open files")
+
+    rows = h.run_local(fake)
+    joined = "\n".join(h.logs)
+    assert "本轮停派" in joined, joined
+    assert len(calls) == 2, f"熔断后两条本机线程都不得再取任务（实际 {len(calls)} 次）"
+    assert _summary(rows)["dropped"] == 3
+
+
+def test_local_failure_is_redispatched_to_a_live_node(tmp_path, monkeypatch) -> None:
+    """T5/T6：非瞬断失败 ⇒ 换机器重跑（节点线程还活着）；改派只发生一次/局。"""
+    import time
+
+    from worker.local_eval_error import LocalEvalProcessError
+
+    h = _LocalHarness(tmp_path, monkeypatch, games=4, nodes=True, window=20.0)
+    local_calls: list[tuple[int, int]] = []
+
+    def fake(_bun, _snap, stage, seed, *_a, **_kw):
+        # sleep-ok: 夹具模拟的工作量：真机一局 ~1s；不等一下本机会在节点线程起来前烧完整队
+        time.sleep(0.2)
+        local_calls.append((stage, seed))
+        raise LocalEvalProcessError(
+            1, "error: ENOENT: no such file or directory, open 'w.json'"
+        )
+
+    def fetch(*_a, **kw):
+        # sleep-ok: 夹具模拟的工作量：慢节点（比本机慢 ⇒ 改派先发生）
+        time.sleep(0.3)
+        return h.manifest(kw["stage"], kw["seed"]), {}
+
+    rows = h.run_local(fake, fetch)
+    s = _summary(rows)
+    joined = "\n".join(h.logs)
+    assert s["dropped"] == 0, f"改派后不得丢局：{joined}"
+    assert s["games"] == 4
+    assert "改派给在线节点" in joined, joined
+    rd = [ln for ln in h.logs if "改派给在线节点" in ln]
+    pairs = [re.search(r"s(\d+)/seed(\d+)", ln).groups() for ln in rd]  # type: ignore[union-attr]
+    assert len(pairs) == len(set(pairs)), f"同一局不得被改派两次：{rd}"
+    meta_path = h.work / "dist-agent-meta.jsonl"
+    assert not meta_path.exists() or meta_path.read_text(encoding="utf-8").count('"ok": false') == 0
+
+
+def test_redispatched_game_is_never_dispatched_twice(tmp_path, monkeypatch) -> None:
+    """T6：改派过一次的局不得再被改派（防「改派-失败-改派」成环）。
+
+    场景：节点先接走改派局、失败后自己退光（`nodeFailStreak=1`）；本机在节点死后重新拿到它
+    —— 没有 `redispatched` 守卫时，本机每次失败都会再 appendleft 一次，直到窗口到期；
+    有守卫时每局只改派一次，随后走本机重试/丢弃。
+    """
+    import time
+
+    from worker.local_eval_error import LocalEvalProcessError
+
+    h = _LocalHarness(tmp_path, monkeypatch, games=4, nodes=True, window=10.0)
+
+    def fake(_bun, _snap, stage, seed, *_a, **_kw):
+        # sleep-ok: 夹具模拟的工作量：真机一局 ~1s（本机比节点快，才会先撞上失败）
+        time.sleep(0.2)
+        raise LocalEvalProcessError(1, "error: ENOENT: no such file or directory")
+
+    gate = threading.Event()
+    seen = {"n": 0}
+
+    def fetch(*_a, **_kw):
+        # sleep-ok: 夹具模拟的工作量：慢节点处理一局（它得活到本机失败那一刻）
+        time.sleep(0.5)
+        seen["n"] += 1
+        if seen["n"] >= 2:
+            # 队列已消耗到只剩尾段 ⇒ 放行本机；此刻节点正在睡，抢不走本机那一局
+            gate.set()
+        raise common.distribution.DistError(400, "boom")
+
+    rows = h.run_local(fake, fetch, gate=gate)
+    rd = [ln for ln in h.logs if "改派给在线节点" in ln]
+    pairs = [re.search(r"s(\d+)/seed(\d+)", ln).groups() for ln in rd]  # type: ignore[union-attr]
+    # 每局**至多**改派一次（哪几局先被本机撞上取决于调度；没有任何一局能出现两次）
+    assert len(pairs) == len(set(pairs)), f"同一局不得被改派两次：{rd}"
+    assert 0 < len(pairs) <= 4
+    assert _summary(rows)["dropped"] == 4
+
+
+def test_machine_fault_close_reason_end_to_end(tmp_path, monkeypatch) -> None:
+    """T7/T8：亏损集中在本机 ⇒ `machine-fault`；三键恒等式不变。"""
+    from worker.local_eval_error import LocalEvalProcessError
+
+    h = _LocalHarness(tmp_path, monkeypatch, games=8, window=20.0)
+
+    def fake(_bun, _snap, stage, seed, *_a, **_kw):
+        raise LocalEvalProcessError(
+            1,
+            "error: ENOENT: no such file or directory, open 'it5/_eval_frozen_weights.json'",
+        )
+
+    rows = h.run_local(fake)
+    s = _summary(rows)
+    assert s["close_reason"] == "machine-fault", s
+    assert s["lost"] == 8 and s["games"] == 0
+    assert s["dropped"] == s["never_dispatched"] + s["lost"] + s["carried"]
+    joined = "\n".join(h.logs)
+    assert "机器级故障收工" in joined and "errno=ENOENT" in joined, joined
+
+
+def test_small_loss_does_not_claim_machine_fault(tmp_path, monkeypatch) -> None:
+    """T7 反探针：亏损量不足（4 < 8）⇒ 仍是 `workers-gone`（不能见集中就报机器故障）。"""
+    from worker.local_eval_error import LocalEvalProcessError
+
+    h = _LocalHarness(tmp_path, monkeypatch, games=4, window=20.0)
+
+    def fake(_bun, _snap, stage, seed, *_a, **_kw):
+        raise LocalEvalProcessError(1, "error: ENOENT: no such file or directory")
+
+    rows = h.run_local(fake)
+    assert _summary(rows)["close_reason"] == "workers-gone"
+
+
+def test_eval_scratch_lives_outside_the_iter_dir(tmp_path, monkeypatch) -> None:
+    """T9：冻结快照与本机落点都在 `_eval-it<N>/`，`it<N>/` 里一份都不留。"""
+    h = _LocalHarness(tmp_path, monkeypatch, games=1)
+    seen: list[Path] = []
+
+    def fake(_bun, snap, stage, seed, out_dir, *_a, **_kw):
+        seen.append(Path(snap))
+        raise RuntimeError("scratch probe")  # 普通异常（BaseException 会穿出 worker 线程）
+
+    h.run_local(fake)
+    assert (h.work / "it1").exists()
+    assert not (h.work / "it1" / "local-eval").exists(), "本机落点不得再住 it<N>/"
+    assert (h.work / "_eval-it1").is_dir()
+    assert seen and seen[0] == h.work / "_eval-it1" / "_eval_frozen_weights.json", seen

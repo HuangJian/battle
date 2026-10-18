@@ -27,6 +27,7 @@ from worker.gate_check import (
     first_run_start_ts,
     load_override,
     read_trend_rows,
+    rejected_summaries,
 )
 
 
@@ -169,6 +170,14 @@ class TrainingGuardsGate:
         except Exception as e:
             log(f"[run_rl] gate it{it}: 求值异常（{type(e).__name__}: {e}）— 本轮跳过门")
             return False
+
+        # D4（plan/eval-gap-honesty §5.2）：拒收的读数不得默默消失（与 CLI 同一判据）。
+        rejects = rejected_summaries(rows, course_fp)
+        if rejects:
+            log(
+                f"[run_rl] gate it{it}: 拒收 {len(rejects)} 条缺口读数（不进判决）"
+                f"：iter={', '.join(str(x['iter']) for x in rejects[:5])}"
+            )
 
         if not res.terminal:
             log(f"[run_rl] gate it{it}: HOLD — {res.reason}")

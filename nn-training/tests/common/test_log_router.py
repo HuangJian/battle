@@ -52,6 +52,38 @@ def test_prefix_is_scoped_and_restored(capsys: pytest.CaptureFixture[str]) -> No
     assert get_prefix() == ""
 
 
+def test_explicit_course_overrides_global_prefix_and_sink(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """T12（plan/eval-gap-honesty §6）：`log(course=)` 不经 `_PREFIX`——标签与**镜像目标**
+    都归显式课程。这是 eval 后台线程的现场：它活过 `prefix_scope`，读到的是别的课的前缀
+    （实测 4 条 `it5 DONE` 里 3 条是错的）。
+    """
+    close_course_sinks()
+    f_a = tmp_path / "a.log"
+    f_b = tmp_path / "b.log"
+    assert open_course_sink("a", f_a) is not None
+    assert open_course_sink("b", f_b) is not None
+    try:
+        with prefix_scope("b"):
+            log("scoped line")  # 走 _PREFIX ⇒ b
+            log("explicit line", course="a")  # 显式 ⇒ a
+            log("other line", course="b")  # 显式 ⇒ b
+    finally:
+        close_course_sinks()
+    out = capsys.readouterr().out
+    printed = out.splitlines()
+    assert any(ln.endswith("[a] explicit line") for ln in printed)
+    assert any(ln.endswith("[b] scoped line") for ln in printed)
+    a_lines = f_a.read_text(encoding="utf-8")
+    b_lines = f_b.read_text(encoding="utf-8")
+    # 镜像目标按 **显式 course** 走：a 的文件里不许出现另外两行
+    assert a_lines.count("explicit line") == 1
+    assert a_lines.count("scoped line") == 0 and a_lines.count("other line") == 0
+    assert b_lines.count("scoped line") == 1 and b_lines.count("other line") == 1
+    assert b_lines.count("explicit line") == 0
+
+
 def test_scope_restores_prefix_even_on_exception() -> None:
     close_course_sinks()
     with pytest.raises(RuntimeError), prefix_scope("c4"):

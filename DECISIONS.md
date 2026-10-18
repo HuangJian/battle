@@ -7400,3 +7400,49 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **后果**：任何 demo 腿不再有 fire BC；fire 头只由 PPO 训练。开腿前的 `entropy_move`/`entropy_fire`
   分头遥测、`stopFireTicks`/空停联合口径、holdout bank、`gate-halt=halt` 等前置见
   `plan/y22-demo-move-only.plan.md`（R2）；§118 的哨兵结论已更正为仪表无效。
+## §2026-10-18-goalnn-eval-gap-honesty（评估缺口不许伪装成读数：保真 / scratch 隔离 / 处置 / 第四态 / 判决准入）
+
+- **背景**：y22-lr it5 的 `eval_log.jsonl` 是四条兄弟腿里**唯一** `dropped>0`、也**唯一**高于起点
+  的读数（0.7098 vs 副门 0.685，兄弟腿 0.605–0.6425）——83 局缺口把胜率配比抽歪，差点被当成
+  「lr 减半立刻见效」。逐层锚点：① 失败被压成字符串（`rc=… ({(stderr or stdout)[-160:]})`，
+  bun 把 `error: ENOENT … open '<path>'` 打在栈**前面** ⇒ 83 条 meta 只剩栈尾，errno 被切掉、
+  `is_transient_error` 恒 False）；② 本机腿 2 次预算、无退避、无改派、无熔断（8 秒烧完 83 局）；
+  ③ eval scratch 住 `it<N>/`，轮转（`keep_iters=3`）连在飞的评估一起删；④ 判决层
+  （`gate_inputs._row_from_summary`）从不读 `dropped`；⑤ `trainer-cluster.log` 的课程前缀不可信
+  （`_PREFIX` 是模块全局，eval 的 daemon 线程活过 `prefix_scope`，镜像还会写进别的课）。
+  全文 plan/eval-gap-honesty.plan.md（含评审 F1–F11 处置与诚实边界）。
+- **决定**：① **D1 保真**——新 `worker/local_eval_error.LocalEvalProcessError`（errno 归一化的
+  单一实现）保留 stderr 头尾两段 + `errno_code`/`msg_head`；`common.distribution.is_transient_error`
+  按**鸭子协议**认 `transient`（`common/` 是下层，不得反向 import `worker/`）；meta 的 `reason`
+  改取头部并**纯新增** `errno`/`msg_head` 两键。
+  ② **D1b scratch 隔离**——eval scratch 迁到 `<traj>/_eval-<it<N>>/`（冻结快照 + `local-eval/`）；
+  `_rotate_cleanup` 对它**只删**「已有 `dropped==0` summary 且超 `keep_iters`」的轮（没有 summary
+  的轮永不删）；`eval_replays_once` 同时认新旧两种 glob（旧课程目录仍要能解析）。
+  ③ **D2 处置**——per-leg 尝试计数（`attempts[task]==0` 的 never_dispatched 判据一字不动）；
+  瞬断预算 `EVAL_TASK_ATTEMPTS_TRANSIENT=4`；瞬断回队退避 `min(2**(lt-1), 8)`；共享熔断
+  `local_stopped`（N 条本机线程；**结算即清零**，与节点腿同款）；非瞬断失败**一手改派**给确实
+  还活着的节点线程（判线程存活，不是 `nodes_ok` 非空）。
+  ④ **D3 第四态**——新增 `close_reason="machine-fault"`，只在 `workers-gone` 同一前提下细分；
+  判据 `lost >= MACHINE_FAULT_MIN_LOST(8)` ∧ 最大节点占比 ≥ `MACHINE_FAULT_SHARE(0.8)` ∧
+  该节点是 `local` 或已停派；`dropped/lost/never_dispatched` 三键与分解公式一字不动。
+  ⑤ **D4 判决准入**——`EvalRow` 纯新增 `dropped`/`close_reason`；`_row_from_summary` 单漏斗拒收
+  （machine-fault 硬拒 + 缺口占 `games+dropped` 超 `GATE_DROP_FRAC_MAX=2%` 拒，与
+  `BASELINE_DROP_FRAC_MAX` 同值同分母）；CLI 与训练循环各打一行「拒收 N 条缺口读数」，拒收不静默。
+  ⑥ **D5 账**——`log(course=)` 显式课程归属（行标签与**镜像文件**都归对课；缺省 = 旧行为逐字节
+  不变）；dashboard 只透传 `closeReason` 一个字段（无新交互）。
+- **备选与否决**：① 把 `local` 降级成纯远端 —— 否（本机是四条腿里最快的腿，问题在处置不在参与）；
+  ② 按 `close_reason != settled` 一刀切拒收 —— 否（云腿 summary 从不传 `close_reason` ⇒ 缺 1 局
+  就整行拒、趋势窗口凭空断档；**量的诚实**才是判据）；③ `_PREFIX` 改 `threading.local()` —— 否
+  （牵动 `open_course_sink` 的课程归属契约；eval 是唯一跑在 prefix 作用域外的日志源）；
+  ④ 写 `eval-topup.json` —— 否（`_drain_pending_eval` 已在补同一批局，多一个文件只多一条读侧契约）；
+  ⑤ summary 补写/覆盖 —— 否（账本 append-only；补评 = 既有 drain + `(iter,wver)` 聚合）；
+  ⑥ 改 `eval_games_per_stage` 把 400 局「修」成 200 —— 否（双轨是设计，改它就是改语料 §15.5）；
+  ⑦ 动 `tools/sim/export-eval-game.ts` —— 否（在 codehash 集里，改它要动远端 bundle）；
+  ⑧ 按 `keep_iters` 一刀切删 `_eval-it<N>/` —— 否（会删在飞的评估，正是本次事故嫌疑）。
+- **后果**：下一次同类故障**带 errno 可钉死**，且 scratch 在结构上不再与轮转同生共死；瞬断不再
+  烧穿预算、真失败自动换机器、持续故障熔断一行说明；`dropped>0` 的读数要么带量要么不进判决。
+  y22-lr it5 的 83 局按 plan §7 人工补评（`eval_a_once --iter 5 --ckpt <归档>`，wver 逐位相同 ⇒
+  确定性重放），补完前该读数不得进任何判决。门禁：nn 全量 python gate ×2 绿、dashboard typecheck
+  + 1667 用例 + 三份 bundle、`bun run check` 2537、`bun run build` 全绿。
+  ⚠ 课程头注「×50/关 ⇒ 锚点 50 + 轮转 50 = 400 局/轮（it0 才是 200）」的补记 pending
+  —— y22 四门 `.jsonc` 不在本 checkout。

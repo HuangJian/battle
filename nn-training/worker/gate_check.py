@@ -89,6 +89,9 @@ from worker.gate_inputs import (
     read_trend_rows as read_trend_rows,
 )
 from worker.gate_inputs import (
+    rejected_summaries as rejected_summaries,
+)
+from worker.gate_inputs import (
     sum_train_samples as sum_train_samples,
 )
 from worker.gate_inputs import (
@@ -520,6 +523,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     except OSError:
         fp = ""
     rows = read_trend_rows(traj / "eval_log.jsonl", course_fp=fp)
+    # D4（plan/eval-gap-honesty §5.2）：「响亮一行」——拒收的读数不能默默消失。
+    rejects = rejected_summaries(rows, fp)
+    if rejects:
+        head = "、".join(
+            f"iter={x['iter']}（dropped={x['dropped']}/{int(x['games']) + int(x['dropped'])}"
+            + (f", {x['close_reason']}" if x["close_reason"] else "")
+            + "）"
+            for x in rejects[:5]
+        )
+        print(f"[gate] 拒收 {len(rejects)} 条缺口读数（不进判决）：{head}", flush=True)
     started = first_run_start_ts(traj / args.log)
     budget = BudgetInfo(
         started_at=started,

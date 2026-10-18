@@ -138,6 +138,7 @@ from worker.eval_yield import (
 from worker.eval_yield import (
     release_local_gate_if_starved as release_local_gate_if_starved,
 )
+from worker.local_eval_error import LocalEvalProcessError as LocalEvalProcessError
 
 EVAL_ITER_SUFFIX = "ev"  # eval iterId = {runId}.{it}ev → 与采集任务在 agent 结果缓存中键空间隔离
 
@@ -154,7 +155,11 @@ BASELINE_DROP_FRAC_MAX = 0.02
 #: 基线重派预算（轮）：**计数从账本导出**（同 wver 的 it0 summary 行数）而不是内存计数
 #: ⇒ 跨进程重启依然成立（内存计数一重启就回满，"上限 3" 就是句空话）。
 BASELINE_RETRY_MAX = 3
-EVAL_TASK_ATTEMPTS = 2  # 单局重试上限；超限放弃并计数（权重切换后未完成局自然作废）
+EVAL_TASK_ATTEMPTS = 2  # 单局重试上限（**非瞬断**）；超限放弃并计数（权重切换后未完成局自然作废）
+#: 瞬断（背压/抖动/句柄忙）的**唯一**额外预算（plan/eval-gap-honesty D2，2026-10-18）：
+#: 与真失败同一把梯子，只是够高到扛过一次目录/挂载抖动，又短到不会在持续故障上空转到窗口到期。
+#: 一个预算只留一个名字——不再另设 `LOCAL_TRANSIENT_MAX`（评审 F6）。
+EVAL_TASK_ATTEMPTS_TRANSIENT = 4
 #: eval 行**落盘**失败的原地重试次数（plan/eval-final-round-and-dropped S2，2026-10-02）：
 #: 失败边界是「eval 行 append 成功」——行没落盘就不算结算；本机落盘问题不重跑整局，
 #: 原地重试后仍失败则记 `record-failed` meta + 计入 summary.missing（不再静默消失）。
@@ -451,7 +456,11 @@ def run_local_eval_game(
             attempt=attempt,
         )
     if proc.returncode != 0:
-        raise RuntimeError(f"rc={proc.returncode} ({(proc.stderr or proc.stdout or '')[-160:]})")
+        # 保真（plan/eval-gap-honesty D1）：头尾两段 + errno。旧的 `[-160:]` 只留栈尾，
+        # 而 bun 把 `error: ENOENT … open '<path>'` 打在栈**前面** ⇒ errno 全丢。
+        raise LocalEvalProcessError(
+            proc.returncode, proc.stderr or "", proc.stdout or ""
+        )
     # json.loads 返回 Any；_eval_report.json 契约固定为 dict。
     manifest: dict[str, Any] = json.loads(
         (Path(out_dir) / "_eval_report.json").read_text(encoding="utf-8")

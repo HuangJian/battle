@@ -61,8 +61,9 @@ def resolve_weights(
 ) -> Path | None:
     """按 wver（sha256[:16]）定位权重文件。候选顺序（快→慢）：
 
-    1. ``tmp/<course>/it*/_eval_frozen_weights*.json``（评估派发时刻的冻结快照，
-       含 it0 基线的 ``-baseline`` 变体——基线快照落在首个窗口目录里）；
+    1. ``tmp/<course>/_eval-it*/_eval_frozen_weights*.json``（评估派发时刻的冻结快照，
+       含 it0 基线的 ``-baseline`` 变体）· 旧课程的 ``tmp/<course>/it*/`` 同形文件
+       （plan/eval-gap-honesty §2b 把 scratch 移出 ``it<N>/``，旧目录仍要能解析）；
     2. ``tmp/<course>/weights.json``（活动权重——仅最新 iter 可能命中）；
     3. ``nn-training/weights/<course>/*it<N>*.json``（该 iter 归档）；
     4. 整腿扫描（归档命名不含 iter 的兜底）。
@@ -70,6 +71,7 @@ def resolve_weights(
     全部不中返回 None（调用方 fail loud——错版本 replay 比没有更糟）。
     """
     cands: list[Path] = []
+    cands += sorted(traj.glob("_eval-it*/_eval_frozen_weights*.json"))
     cands += sorted(traj.glob("it*/_eval_frozen_weights*.json"))
     cands.append(traj / "weights.json")
     leg = (weights_root or (REPO / "nn-training" / "weights")) / course

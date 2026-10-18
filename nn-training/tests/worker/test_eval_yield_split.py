@@ -277,6 +277,66 @@ def test_eval_close_reason_semantics() -> None:
     assert y.eval_close_reason(False, False, False) == "window"
 
 
+def test_eval_close_reason_machine_fault_semantics() -> None:
+    """T7（plan/eval-gap-honesty §4）：单节点集中亏损 = `machine-fault` 第四态。
+
+    判据只看 `workers-gone` 那个前提下的**集中度**：
+    · 83/83 落 local（y22-lr it5 的形状）⇒ machine-fault；
+    · 四个节点均摊 ⇒ 仍是 workers-gone（反探针：阈值改 0 就会误报）；
+    · 集中在一台**已停派**的节点 ⇒ machine-fault；同一集中度但节点未停派 ⇒ workers-gone；
+    · 旧三参调用逐字不变（缺省参数）。
+    """
+    y = eval_yield_mod
+    assert (
+        y.eval_close_reason(False, True, False, lost=83, lost_per_node={"local": 83})
+        == "machine-fault"
+    )
+    # 量级地板（`MACHINE_FAULT_MIN_LOST`）：lost 太少不单独立案
+    assert (
+        y.eval_close_reason(
+            False, True, False, lost=4, lost_per_node={"local": 4}
+        )
+        == "workers-gone"
+    )
+    # 集中度不足（50%）：即使有本机参与也不算机器级故障
+    assert (
+        y.eval_close_reason(
+            False, True, False, lost=60, lost_per_node={"local": 30, "a97": 30}
+        )
+        == "workers-gone"
+    )
+    assert (
+        y.eval_close_reason(
+            False,
+            True,
+            False,
+            lost=10,
+            lost_per_node={"a97": 9, "mac": 1},
+            stopped_nodes={"a97"},
+        )
+        == "machine-fault"
+    )
+    assert (
+        y.eval_close_reason(
+            False, True, False, lost=10, lost_per_node={"a97": 9, "mac": 1}
+        )
+        == "workers-gone"
+    )
+    # 窗口到期 / 已结算：集中度不参与（互斥序不变）
+    assert (
+        y.eval_close_reason(
+            False, False, True, lost=10, lost_per_node={"local": 10}
+        )
+        == "window"
+    )
+    assert (
+        y.eval_close_reason(True, True, False, lost=10, lost_per_node={"local": 10})
+        == "settled"
+    )
+    # 无归因数据 ⇒ 旧行为（不猜）
+    assert y.eval_close_reason(False, True, False, lost=10) == "workers-gone"
+
+
 def test_release_plan_and_early_epoch_semantics() -> None:
     """放行档：本机不跑 PPO（远端 PPO / 整轮上云 / stream）⇒ immediate；否则末 early 个 epoch。"""
     y = eval_yield_mod

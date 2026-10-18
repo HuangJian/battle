@@ -1397,9 +1397,11 @@ def test_eval_local_gate(tmp: Path) -> None:
             and summ[-1]["dropped"] == 0,
             "summary aggregates local-only round",
         )
+        # 2026-10-18 plan/eval-gap-honesty §2b（D1b）：scratch 迁出 it<N>/ ⇒
+        # 快照落 traj 的兄弟目录 `_eval-<traj>/`（轮转删 it<N>/ 时评估不受影响）。
         check(
-            (traj_a / "_eval_frozen_weights.json").exists(),
-            "frozen weights snapshot written into traj_dir",
+            (work / "_eval-trajA" / "_eval_frozen_weights.json").exists(),
+            "frozen weights snapshot written into eval scratch (_eval-<it>/)",
         )
         # 采样机健康账本：eval 局同册入账（mode:"eval"），喂「采样机健康」表指标
         meta_rows = [

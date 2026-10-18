@@ -47,6 +47,10 @@ class EvalRow:
     pickup_mean: float | None = None
     timeout_frac: float | None = None
     seed_fp: str | None = None
+    #: 评估缺口（plan/eval-gap-honesty D4，2026-10-18）：分母 = `games + dropped`
+    #: （与控制台「缺N / 共N」同口径）。旧行缺键 ⇒ 0 / None ⇒ 判决逐位不变。
+    dropped: int = 0
+    close_reason: str | None = None
 
     #: metric 名 → 取值（plateau/hack 的窗口统计走它，避免重复 getattr）。
     def metric(self, name: str) -> float | None:
@@ -100,8 +104,35 @@ class BudgetInfo:
 # --------------------------------------------------------------------------- 行归一化
 
 
-def _row_from_summary(r: Mapping[str, Any]) -> EvalRow | None:
-    """summary 行 → EvalRow；非 eval_summary / 无 games 的行丢弃。
+#: 「缺口大到不算读数」的阈值（与 `worker/eval_local.py::BASELINE_DROP_FRAC_MAX` 同值同分母：
+#: 分母 = `games + dropped`）。为什么是 2%：单局节点失败（1/400 = 0.25%）不应让整轮读数作废；
+#: 而 400 局缺 8 局以上（20.7% 的 y22-lr it5 就是极端例）胜率的 SE 已翻过门边。
+#: `gate_inputs` 是 **stdlib-only 叶子**（头注的零仓内 import 契约）⇒ 不得 import worker/，
+#: 只许与那个常量保持同值（改了这里就要同步改那里，两处都有注释指着对方）。
+GATE_DROP_FRAC_MAX = 0.02
+
+
+def _reject_reason(row: EvalRow) -> str | None:
+    """这条读数能不能进数值判决（D4）：None = 能。
+
+    两个拒收面：
+    · `close_reason == "machine-fault"` —— 缺口**配比不可信**（集中在一台机器），单列硬拒；
+    · 缺口占 `games + dropped` 超 `GATE_DROP_FRAC_MAX` —— 样本量不足到能判 3pp 级差异。
+    为什么不再按「`close_reason != settled` 一刀切」（评审 F3）：云腿 summary 从不传
+    `close_reason`（`remote/offline_eval.py`），本地 `window` 收工也是「结构完整、只缺尾巴」
+    —— 按状态拒会把缺 1 局的健康读数整行拒掉，趋势窗口凭空断档。**量的诚实**才是判据。
+    """
+    if row.close_reason == "machine-fault":
+        return "机器级故障收工（缺口配比不可信）"
+    if row.dropped > 0 and row.dropped / (row.games + row.dropped) > GATE_DROP_FRAC_MAX:
+        return f"缺口 {row.dropped}/{row.games + row.dropped} 超阈值"
+    return None
+
+
+def _build_row(r: Mapping[str, Any]) -> EvalRow | None:
+    """summary 行 → EvalRow（**纯映射**，不做准入；准入在 `_row_from_summary`）。
+
+    非 eval_summary / 无 games 的行丢弃。
 
     胜率口径（2026-09-15，P1-a）：日常 A-eval 起 summary 带 `anchor_wr`
     （锚点段 50 局，固定种子、跨轮配对可比），此时**门按锚点轨判**；
@@ -149,7 +180,47 @@ def _row_from_summary(r: Mapping[str, Any]) -> EvalRow | None:
         pickup_mean=_num(r.get("pickup_mean")),
         timeout_frac=_num(timeout_frac),
         seed_fp=str(seed_fp) if seed_fp is not None else None,
+        dropped=int(r.get("dropped") or 0),
+        close_reason=str(r["close_reason"]) if r.get("close_reason") else None,
     )
+
+
+def _row_from_summary(r: Mapping[str, Any]) -> EvalRow | None:
+    """summary 行 → **准入后**的 EvalRow（单一漏斗：G1/G10/plateau/pool/跨课全走这里）。"""
+    row = _build_row(r)
+    if row is None or _reject_reason(row) is not None:
+        return None
+    return row
+
+
+def rejected_summaries(
+    trend_rows: Sequence[Mapping[str, Any]], course_fp: str = ""
+) -> tuple[dict[str, Any], ...]:
+    """被准入拒收的 summary 行（给「响亮一行」用：`gate_inputs` 保持零 logging）。
+
+    判据与 `_row_from_summary` 同一个（`_reject_reason`）——不会两边漂。
+    """
+    out: list[dict[str, Any]] = []
+    for raw in trend_rows:
+        row = _build_row(raw)
+        if row is None:
+            continue
+        fp = str(raw.get("course_fp") or "")
+        if course_fp and fp and fp != course_fp:
+            continue
+        why = _reject_reason(row)
+        if why is not None:
+            out.append(
+                {
+                    "iter": row.iter,
+                    "wver": row.wver,
+                    "dropped": row.dropped,
+                    "games": row.games,
+                    "close_reason": row.close_reason,
+                    "reason": why,
+                }
+            )
+    return tuple(out)
 
 
 def _num(v: Any) -> float | None:

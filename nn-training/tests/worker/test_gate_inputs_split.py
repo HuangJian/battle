@@ -262,7 +262,11 @@ def test_new_missing_field_rows_read_same_as_old_rows() -> None:
 
     `missing` 是新增观测字段（缺口 seed + 原因），读方 `_row_from_summary` 不消费它——
     旧行缺字段 = unknown，不得让门行为分叉（plan/eval-final-round-and-dropped §4.3）。
+
+    ⚠ 2026-10-18（plan/eval-gap-honesty D4）起 `dropped` **要**消费（它是缺口分母，判决准入
+    靠它）——本用例只把 `dropped` 的差异单独拎出来断，其余字段仍须逐位相同。
     """
+    import dataclasses
     base = {
         "event": "eval_summary",
         "iter": 20,
@@ -287,7 +291,9 @@ def test_new_missing_field_rows_read_same_as_old_rows() -> None:
         }
     )
     assert old is not None and new is not None
-    assert old == new == gate_inputs_mod.EvalRow(
+    assert new.dropped == 2 and new.close_reason is None
+    assert dataclasses.replace(new, dropped=0) == old
+    assert old == gate_inputs_mod.EvalRow(
         iter=20,
         wver="w2",
         games=200,
@@ -300,6 +306,51 @@ def test_new_missing_field_rows_read_same_as_old_rows() -> None:
         timeout_frac=0.1,
         seed_fp=None,
     )
+
+
+def test_gap_rows_are_rejected_from_numeric_judgement() -> None:
+    """T10（plan/eval-gap-honesty D4）：缺口大的读数不进判决，缺口小的照常进。
+
+    y22-lr it5 的形状：`dropped=83` / `games=317` ⇒ 20.7% —— 拒；400 局缺 3 局 = 0.75% —— 留。
+    """
+    base = {
+        "event": "eval_summary",
+        "iter": 5,
+        "wver": "wY",
+        "games": 317,
+        "wins": 225,
+        "winRate": 0.7098,
+        "dropped": 83,
+        "close_reason": "workers-gone",
+    }
+    assert gate_inputs_mod._row_from_summary(base) is None
+    assert gate_inputs_mod.normalize_rows([base]) == ()
+    rejects = gate_inputs_mod.rejected_summaries([base])
+    assert len(rejects) == 1
+    assert str(rejects[0]["reason"]).startswith("缺口")
+
+    small = {**base, "games": 397, "dropped": 3, "close_reason": "window"}
+    row = gate_inputs_mod._row_from_summary(small)
+    assert row is not None, "缺 3 局（0.75%）是健康读数，不得被拒"
+    assert gate_inputs_mod.rejected_summaries([small]) == ()
+
+    machine = {**base, "games": 399, "dropped": 1, "close_reason": "machine-fault"}
+    assert gate_inputs_mod._row_from_summary(machine) is None, "机器级故障单列硬拒"
+
+
+def test_old_rows_without_gap_keys_are_unchanged() -> None:
+    """T11：旧 summary（无 dropped / close_reason）⇒ 0 / None，判决路径逐位不变。"""
+    old = {
+        "event": "eval_summary",
+        "iter": 9,
+        "wver": "w9",
+        "games": 200,
+        "wins": 120,
+        "winRate": 0.6,
+    }
+    row = gate_inputs_mod._row_from_summary(old)
+    assert row is not None and row.dropped == 0 and row.close_reason is None
+    assert gate_inputs_mod.rejected_summaries([old]) == ()
 
 
 def test_event_scanners_basics(tmp_path: Path) -> None:
