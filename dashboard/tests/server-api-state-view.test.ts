@@ -13,6 +13,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
 import { DASHBOARD_ROOT } from '../src/core/paths'
+import type { TrainerHeartbeatView } from '../src/web/view'
 import { invalidatePpoAttributionMemo } from '../src/server/contribution'
 import * as pool from '../src/server/pool-history'
 import * as poolView from '../src/web/view'
@@ -375,6 +376,18 @@ describe('console/api.buildStateView · 请求路径零聚合（reload-perf W1�
   })
 })
 
+/** 心跳快照对账用：把**墙钟派生**的 `ageSec` 归零（键仍在 ⇒「全字段」纪律不破，将来加字段自动进判据）。
+ *
+ *  为什么要有它（2026-10-18 修 flake）：`ageSec = Math.round(now / 1000 - ts)` 是读面算出来的
+ *  **当下龄**，不是盘上事实——两次快照跨过半秒边界就会 4 → 5，把它算进 `toEqual` 就是一个
+ *  **按时间自爆**的用例（实测红过一次：4 vs 5）。盘上事实（pid / ts / steps / waiting /
+ *  courses / verdict）必须逐字相同；龄另有自己的钉子（下面那条确定性跨边界用例）。
+ */
+function hbFrozen(hb: TrainerHeartbeatView | null | undefined): TrainerHeartbeatView | null {
+  // `undefined`（旧视图没这个字段）归一到 null：不可知就是不可知，两边都走同一条。
+  return hb ? { ...hb, ageSec: 0 } : null
+}
+
 describe('console/api.buildStateView — 共享 trainer 心跳（plan/single-resident-trainer §2.4）', () => {
   it('心跳文件在盘上 ⇒ 每次快照现读（控制台重启不丢：状态不属于控制台内存）', async () => {
     const dir = mkdtempSync(path.join(os.tmpdir(), 'hb-state-'))
@@ -409,8 +422,60 @@ describe('console/api.buildStateView — 共享 trainer 心跳（plan/single-res
       expect(first.trainerHeartbeat?.courses.c1?.state).toBe('COLLECT')
       // 「重启控制台后仍在」= 新一次快照不依赖上一次的内存（只读盘）
       const second = await api.buildStateView()
-      expect(second.trainerHeartbeat).toEqual(first.trainerHeartbeat)
+      expect(hbFrozen(second.trainerHeartbeat)).toEqual(hbFrozen(first.trainerHeartbeat))
+      // 龄照常投影（上面的归一化不能把「ageSec 恒 0」这种退化一起放过去）
+      expect(first.trainerHeartbeat!.ageSec).toBeGreaterThanOrEqual(4)
     } finally {
+      if (prevReg === undefined) delete process.env.BCITY_REGISTRY_FILE
+      else process.env.BCITY_REGISTRY_FILE = prevReg
+      if (prevHb === undefined) delete process.env.BCITY_TRAINER_HEARTBEAT
+      else process.env.BCITY_TRAINER_HEARTBEAT = prevHb
+    }
+  })
+
+  it('★ 两次快照跨过 ageSec 的半秒边界也不许红（2026-10-18 那次 flake 的确定性复现）', async () => {
+    // 根因：`ageSec = round(now/1000 - ts)` 是**墙钟派生**量（读面算出来的当下龄），不是盘上事实。
+    // 两次快照若落在半秒边界两侧，它就从 4 变 5，而用例拿 `toEqual` 比整份心跳 ⇒ **按时间自爆**
+    // （2026-10-18 实测红过一次：4 vs 5，用例耗时 74ms；重跑三次全绿 = 典型 flake）。
+    // 这里把「跨边界」变成**确定性**触发：算出已知的翻转时刻，等过去之后再取第二拍——
+    // 于是它每次运行都在复现当初那次红，而不是等运气。
+    const dir = mkdtempSync(path.join(os.tmpdir(), 'hb-age-'))
+    const reg = path.join(dir, 'registry.json')
+    const hb = path.join(dir, 'trainer-heartbeat.json')
+    writeFileSync(
+      reg,
+      JSON.stringify({
+        trainingLoops: { '': { pid: process.pid, startedAt: Date.now() - 3600_000 } },
+      }),
+    )
+    writeFileSync(
+      hb,
+      JSON.stringify({
+        pid: process.pid,
+        ts: Math.floor(Date.now() / 1000) - 4,
+        steps: 4413,
+        waiting: 2,
+        courses: { c1: { state: 'COLLECT', rounds_done: 137 } },
+      }),
+    )
+    const prevReg = process.env.BCITY_REGISTRY_FILE
+    const prevHb = process.env.BCITY_TRAINER_HEARTBEAT
+    process.env.BCITY_REGISTRY_FILE = reg
+    process.env.BCITY_TRAINER_HEARTBEAT = hb
+    try {
+      const a = await api.buildStateView()
+      const hbA = a.trainerHeartbeat
+      expect(hbA).not.toBeNull()
+      // `ageSec` 从 hbA.ageSec 翻到下一位的墙钟时刻 = ts + (ageSec + 0.5)s。
+      const flipMs = (hbA!.ts + hbA!.ageSec + 0.5) * 1000
+      while (Date.now() < flipMs + 20) await new Promise((r) => setTimeout(r, 5))
+      const b = await api.buildStateView()
+      // ① 真的跨过了边界（复现当初的触发条件；不是「碰巧没跨」）
+      expect(b.trainerHeartbeat!.ageSec).toBe(hbA!.ageSec + 1)
+      // ② 除墙钟龄之外的全部事实仍逐字相同——这句就是本条要钉的语义
+      expect(hbFrozen(b.trainerHeartbeat)).toEqual(hbFrozen(a.trainerHeartbeat))
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
       if (prevReg === undefined) delete process.env.BCITY_REGISTRY_FILE
       else process.env.BCITY_REGISTRY_FILE = prevReg
       if (prevHb === undefined) delete process.env.BCITY_TRAINER_HEARTBEAT
