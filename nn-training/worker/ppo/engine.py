@@ -165,7 +165,13 @@ def build_ppo(weights_path: str | None) -> PPOStudent:
 def _demo_masked_ce(logits: torch.Tensor, target: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """合法类掩码 CE，与 train.bc._masked_ce 同数学（非法类 -1e9 进分母剔除；
     合法类 <2 的样本跳过；全跳过时返回零梯度标量）。PPO 内联一份，避免 engine
-    反向依赖 train.bc 的 CLI 模块（数值口径以本函数 + 单测为准）。"""
+    反向依赖 train.bc 的 CLI 模块（数值口径以本函数 + 单测为准）。
+
+    2026-10-18：本函数当前只用于 demo 的 **move 头**。fire 的 mask 语义是「当前
+    打得出去吗」，label 是「有没有按住」，冷却期两者互斥；可训练 fire 子集 43744
+    里 hold 只有 806（1.84%），28448/29254（97.2%）的 hold 落在单合法类样本里被
+    整样本跳过 ⇒ fire CE 实际只教 release。恢复方式见 `ppo_update` 的 demo 段。
+    """
     m = mask > 0
     keep = m.sum(dim=-1) >= 2
     if not keep.any():
@@ -270,12 +276,14 @@ def ppo_update(
     口径同构）。任一缺席即零开销恒等（默认路径数学逐字节不变）。
 
     demo_bank + demo_bc_coef + demo_per_mb（demo 混 batch，x20 后续）：
-    demo_bank = {obs (N,16,26,26) u1 / scalars (N,30) f4 / actions (N,2) i64
-    [move,fire] / masks (N,7)}（与 rollout 同 ObsEncoder v3 口径）；每 PPO minibatch
-    步从 bank 均匀抽 demo_per_mb 个样本（np RNG ⇒ ckpt 断点续跑精确复现），
-    loss += demo_bc_coef · (CE_move + CE_fire)（合法类掩码 CE，与 train.bc._masked_ce
-    同数学：非法类 -1e9、单合法类样本跳过）。三者任一缺席/非正即关闭，默认路径
-    数学逐字节不变（含额外 stat 键 demo_bc，关闭时恒 0.0）。
+    demo_bank = {obs (N,16,26,26) u1 / scalars (N,40) f4 / actions (N,2) i64
+    [move,fire] / masks (N,7)}（v5 口径；scalars 维度以 common.schema.SCALAR_DIM 为准）；
+    每 PPO minibatch 步从 bank 均匀抽 demo_per_mb 个样本（np RNG ⇒ ckpt 断点续跑精确
+    复现），loss += demo_bc_coef · CE_move（**fire 头不做 demo BC**：fire 的 mask 语义是
+    「当前打得出去吗」，label 是「有没有按住」，冷却期两者互斥；43744 个可训练 fire
+    样本里 hold 只有 806（1.84%），fire CE 实际只教 release。2026-10-18 评审后的
+    move-only 消融；恢复方式见调用点）。三者任一缺席/非正即关闭，默认路径数学逐字节
+    不变（含额外 stat 键 demo_bc，关闭时恒 0.0）。
     """
     model.train()
     clip = CLIP_EPS
@@ -489,16 +497,19 @@ def ppo_update(
                 # 索引必须先落到**复用的设备张量**上再索引（否则每步一张新图 ⇒ 每步重编译，
                 # 见 ppo/common.demo_index）；抽样本的数与序完全不变。
                 _didx_t = demo_index(demo_idx_dev, _didx)
-                _dm, _df, _ = model(
+                _dm, _, _ = model(
                     demo_t["obs"][_didx_t],
                     demo_t["scalars"][_didx_t],
                     demo_t["extra"][_didx_t] if "extra" in demo_t else None,
                 )
                 _dmm = demo_t["masks"][_didx_t]
                 _dact = demo_t["actions"][_didx_t]
-                demo_bc_mean = _demo_masked_ce(
-                    _dm, _dact[:, 0], _dmm[:, :MOVE_DIM]
-                ) + _demo_masked_ce(_df, _dact[:, 1], _dmm[:, MOVE_DIM : MOVE_DIM + FIRE_DIM])
+                # 只训 move（2026-10-18）：fire 的 mask 语义是「当前打得出去吗」，label 是
+                # 「有没有按住」；冷却期 hold 被 mask 判非法 ⇒ 可训练子集 43744 里 hold 只有
+                # 806（1.84%），fire CE 实际只教 release。恢复方式：加回
+                # `_demo_masked_ce(_df, _dact[:, 1], _dmm[:, MOVE_DIM:MOVE_DIM+FIRE_DIM])`
+                # （test_demo_fire_labels_do_not_reach_fire_head 会挡住静默复活）。
+                demo_bc_mean = _demo_masked_ce(_dm, _dact[:, 0], _dmm[:, :MOVE_DIM])
                 loss = loss + float(demo_bc_coef) * demo_bc_mean
 
             opt.zero_grad()

@@ -7358,3 +7358,20 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   无需人工停课开课）；`/status` 不再对已撤的活撒谎（排障与等待打点同时受益）。代价是多一个
   status 取值 `cancelled`（旧读方落默认分支）与一次 per-30s 的账本全量读（`job_net_event`）。
   plan/export-must-not-cancel-live-job.plan.md 的 A/B/C 全部落地；全文 docs/nn/remote-transport.md §104。
+
+## §2026-10-18-goalnn-demo-move-only（y22 B′：demo BC 只训 move，fire CE 全局删除）
+
+- **背景**：fire 的 mask 语义是「当前打得出去吗」，label 是「有没有按住」，冷却期两者互斥；
+  43744 个可训练 fire 样本里 hold 只有 **806（1.84%）**，28448/29254（**97.2%**）的 hold
+  被 `_masked_ce` 整样本跳过 ⇒ fire CE 实际只教 release。move 的 5 类掩码全合法
+  （101153/101153）。
+- **决定**：`worker/ppo/engine.py` 的 demo BC **全局删掉 fire CE**，只留 move CE；
+  **不加** `demo_heads` 课程键（不为已知坏项新建机制）。恢复成本 = 调用点加回一行。
+- **测试**：`test_demo_fire_labels_do_not_reach_fire_head` 翻转 fire 标签，断言**全部参数逐位相同**，
+  且 `move_head.weight` 相对初始权重变化。原「move_head 必须不同」的写法是错的——删 fire 后
+  `_dact[:,1]` 不再被读，两次运行逐位相同。
+- **对照**：不拿 §33 冒充单变量（语料 61/38564 vs 160/101153、起点、轮数、种子、schema 全不同）；
+  正式消融用父提交 worktree 跑 fire CE on 的 C 臂，与 move-only M 臂同数据/起点/种子/轮数。
+- **后果**：任何 demo 腿不再有 fire BC；fire 头只由 PPO 训练。开腿前的 `entropy_move`/`entropy_fire`
+  分头遥测、`stopFireTicks`/空停联合口径、holdout bank、`gate-halt=halt` 等前置见
+  `plan/y22-demo-move-only.plan.md`（R2）；§118 的哨兵结论已更正为仪表无效。

@@ -284,8 +284,8 @@ D14 `course_fp/corpus_fp`；人类 shard 是 `shard_h_*`、manifest 无 `course_
 | S2 | bank **N=101153**，`obs(101153,16,26,26) / scalars(…,40) / extra(…,37)`，9,365,977 bytes，sha **`c7d41c60f20c9307396e8438a7ddbafd6848ca17d1a970004d229bd59d255200`** |
 | S3 | `check_demo_corpus.py` **failures=0**：160 局 `nSamples`、`obs`、`scalars[:30]`、`actions`、`masks`、`conditions` 全等；kills=3201 |
 | S4a | 32 局分层子样本（8/关），NNPolicy 10 epoch：move top-1 **0.7975**（多数类 0.3216）、STOP recall 0.7197；fire_all top-1 0.6753（多数类 0.6753）、**hold recall 0.0** |
-| S4 哨兵 | 24 局：pass **0/24**、kills/shots **0/0**、moveHist **[14378,0,0,0,0]**（STOP 100%）、idle 99.98% ⇒ §32 常量策略坍缩 |
-| 判决 | **S4 判负，不开 `y22-demo`（连短腿也不开）**。fire 的可训练子集 hold 仅 **1.84%**（冷却期 hold 被 `_masked_ce` 跳过），当前 demo CE 学不到开火；先修 fire 口径，或转 C 阶段（奖励换靶） |
+| S4 哨兵 | 24 局：pass **0/24**、kills/shots **0/0**、moveHist **[14378,0,0,0,0]**（STOP 100%）、idle 99.98%。**2026-10-18 评审判为仪表无效**：S4a 权重无 `kind:'student'`，TS 落到 legacy `NNModel`（inCh=14 读 16ch 权重）⇒ 100% STOP 是错读，**撤销“常量策略坍缩”结论** |
+| 判决 | **S4 判负，不开 `y22-demo`（连短腿也不开）**。判负理由 = fire 可训练子集 hold 仅 **806/43744 = 1.84%**（97.2% 的 hold 被 mask 判非法，当前 demo CE 实际只教 release）；哨兵不作为证据。move-only 由 `plan/y22-demo-move-only.plan.md`（R2）接手 |
 
 产物：`reports/y22-demo-corpus-v5-20261018.md`（S3）、`reports/y22-demo-probe-20261018.md`（S4）、
 `docs/nn/experiments.md` §118（结论归档）。

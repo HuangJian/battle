@@ -1,11 +1,12 @@
 """demo 混 batch 回归（ppo/engine.py::ppo_update demo BC 项）。
 
-守护四件事：
+守护五件事：
   1. 缺省路径不变：demo_bank 到位但 coef=0（或三者任一缺席）⇒ 权重与纯 PPO
      逐位相同、demo_bc 恒 0（数学逐字节不变）；
   2. 开启时 demo_bc 非零有限（BC 项确实进了 loss）；
   3. 同种子两次运行聚合 + 权重逐位相同（np RNG 抽样确定性，ckpt 可复现）；
-  4. 全单合法类 mask 的 bank ⇒ demo_bc 恒 0（_masked_ce 跳过语义，不炸）。
+  4. 全单合法类 mask 的 bank ⇒ demo_bc 恒 0（_masked_ce 跳过语义，不炸）；
+  5. fire 标签不参与 demo BC：翻转它不得改变任何参数（fire CE 被静默加回会红）。
 """
 
 from __future__ import annotations
@@ -76,6 +77,12 @@ def _run(epochs: int = 1, seed: int = 7, **kw: Any):
     return agg, state
 
 
+def _initial_state() -> dict[str, torch.Tensor]:
+    """与 `_fresh` 同种子的初始权重（证明“更新确实跑了”的参照）。"""
+    torch.manual_seed(1234)
+    return {k: v.clone() for k, v in PPOStudent(h=8, d=1).state_dict().items()}
+
+
 def test_demo_off_is_bitwise_pure_ppo() -> None:
     """bank 到位但 coef=0 ⇒ 与纯 PPO 逐位相同、demo_bc 恒 0。"""
     bank = _bank()
@@ -117,3 +124,24 @@ def test_demo_per_mb_larger_than_bank() -> None:
     """per_mb > N 不炸（有放回抽样，语义正常）。"""
     agg, _ = _run(demo_bank=_bank(n=16), demo_bc_coef=0.02, demo_per_mb=64)
     assert np.isfinite(agg["demo_bc"])
+
+
+def test_demo_fire_labels_do_not_reach_fire_head() -> None:
+    """fire 标签不进 demo loss：翻转它不得改变任何参数（含 fire_head）。
+
+    反面写法（2026-10-18 评审 P0）：断言「fire 标签翻转后 move_head 必须不同」是错的——
+    删掉 fire CE 后 `_dact[:,1]` 根本不再被读，两次运行逐位相同，move_head 也不会变。
+    「更新确实跑了」要用**初始权重**比，不是用翻转标签比；若拿初始权重当基线，
+    fire_head 又会被 PPO 更新，同样不可能逐位相同。
+    """
+    bank = _bank()
+    flipped = {**bank, "actions": bank["actions"].copy()}
+    flipped["actions"][:, 1] = 1
+    _, base = _run(demo_bank=bank, demo_bc_coef=0.02, demo_per_mb=8)
+    _, flip = _run(demo_bank=flipped, demo_bc_coef=0.02, demo_per_mb=8)
+    for k in base:
+        assert torch.equal(base[k], flip[k]), f"{k} 被 fire 标签影响（fire CE 疑似复活）"
+    init = _initial_state()
+    assert not torch.equal(base["move_head.weight"], init["move_head.weight"]), (
+        "move 头没更新——先确认 ppo_update 真的跑了"
+    )
