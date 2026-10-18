@@ -1,0 +1,132 @@
+// 课程 y22-null —— 阶段 A 的零改动基线：把"什么都不改也会退步"钉死。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；与 y22-lr/batch/gamma 并行）。
+//
+// 立项 → 2026-10-18（`plan/y22-winrate-ladder.plan.md` §3）：
+//   y21 四腿（chain2/nohurt2/temper2/tempo2）跑 112–119 轮后 **配对 Δwin −8.9 ～ −13.5pp**、
+//   斜率 −6.5 ～ −8.1pp/100 轮（t≈−3），且**四条腿的奖励账本 Φ 也同向降 5–16 分**（不是 reward hacking）。
+//   四条不同改动跑出同一条斜率 ⇒ 假设是"共同漂移"，但这四条腿**都带了改动**，没有一条是零改动。
+//   本腿就是那条零改动对照：**配方逐字 = y20-stack2**，只换实验身份与起点（stack2.it200 直接续）。
+//   没有它，阶段 B/C 的任何 Δ 都无法归因。
+//
+// ── 单变量声明（相对 y20-stack2：**无变量**）─────────────────────────────────
+//   reward 公式 / params / terminal / lr / epochs / mb / gamma / lam / ppo_schedule /
+//   target_transitions / decision_k / decision_events / eval 面板 / 熔断 全部逐字 = y20-stack2。
+//   唯一差别 = 起点从 y5-dist.it270 换成 **y20-stack2.it200.pool800**（本实验的"最佳权重"），
+//   以及 name/out/traj/backup（§15.5 新实验身份）。
+//   双分支：Φ 斜率 ≤ −0.05/轮（即 110 轮掉 ≥5.5 分）⇒ **共同漂移实锤**，阶段 B/C 必须先等修好；
+//     Φ 斜率 ≈ 0（|斜率| < 0.02/轮）⇒ y21 四腿的负结果是各自效应，直接进阶段 C 调奖励。
+//
+// ── 门（本次换口径：余量为主，胜率仅副门）──────────────────────────────────
+//   主读数 **余量 = (20/杀速) ÷ (219/(承伤/千拍))**，起点实测 **0.96**（杀速 2.64、承伤 30.0/千拍）；
+//     目标 ≥ 1.3（人类同座位实测 1.97）。
+//   副门：+60 win ≥ 0.685（起点值，不比起点差）；kills ≥ 16.5/20；timeout ≤ 5%（反苟）。
+//   Φ 斜率：每 25 轮回归一次，< −0.05/轮 即红。
+//   D01 ≤ 85 护栏（+it0 校准）；fear-watch（shots/局 < 16 且 kills < 10 即恐惧塌，杀）。
+//   fail ⇒ **杀腿**。门读 headline（混合 eval 860xxx 面板）；s2000 切片附读。
+//
+// ── 训练设置（逐字 = y20-stack2 家族）──────────────────────────────────────
+//   anchor 0.001（legacy 空片，无害）；ent_break 0.0＋max_winrate 0.0（熔断全拆，y 系现行惯例）；
+//   batch 24576；K=10；iters 500（cap，以落盘值为准），max_hours 48，workers 8；
+//   eval 混合（"2000-2003"×50，同口径逐行可比）。
+//   ⚠ 前提：tmp/y22-null 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c20-lives1`），课程**不重复** stages 等键。
+//   · 起点 = `y20-stack2.it200.pool800.json`（sha16 `1a7821240d3c47b9`；同代直连，kickstart 关）。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`（课程轮从 1 起）；`bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y22-null）+ backup 新目录（nn-training/weights/y22-null）+ opt fresh。
+//   · 种子 20270206（20270205 及之前全用过，§15.1 防记忆化；y22 四腿共享＝四路可比）。
+// ── 结课报告（2026-10-18 用户手动停腿：阶段 A 判负，三个旋钮都不动）──────────
+//   跑量：第 1–201 轮（最后满局 eval it200），已采 5.55M 样本。19:58 有过一次重启
+//     （`start_it=None`），重启前后读数无缝（kl/entropy/value 无跳变）。
+//   轨迹（anchor 200 座 win）：it0 **0.685** → it100 **0.685** → it150 **0.645** → it200 **0.680**。
+//     ⚠ **形状是「中期低谷再爬回来」，不是单调退步**：it55 时的 −0.19/轮 到 it200 已摊平成
+//     **−0.020 Φ/轮**；四条腿的末点都在起点的 CI（±0.066）之内。
+//   Φ/局：78.7 → **77.8**（−0.9）；余量 0.89（起点 0.90、人类 1.97）——**生死账没动**。
+//   配对（McNemar，同 200 座 vs it0）：Δwin **−0.005**；全段判读见 `tmp/y22-progress.py`。
+//   行为（it0 → 末点，全部 200 局口径）：实弹/千 7.92→8.44 · 威胁 lane/千 43.1→48.2 ·
+//     贴脸/千 115.5→121.4 · 低血时长/千 199.2→187.6 · 中了不跑/千 2.28→2.57 · 开局 600 伤 6.5→6.4。
+//   健康：kl 0.0167→0.0154 · value 0.610→0.576 · entropy 0.760→0.777 · policy loss 0.0031→0.0026。
+//   结论：**判负（本条腿不单独成立）** —— 但**它是本阶段唯一的正产出**：它证明「从 stack2.it200 纯净续训 200 轮」不会持续退步，200 轮后 win 0.680 / Φ 77.8 与起点（0.685 / 78.7）不可分（CI ±0.066），在 400 个新鲜座位上是 0.690 vs 起点 0.677（p 0.76，含 0）。⇒ **「底座在退步」这个前提被推翻；被证伪的是「这些旋钮能带来增益」。**
+//   证据：tmp/y22-null/{training_log,eval_log}.jsonl · reports/y22-phaseA-stop-it200-20261018.md ·
+//     reports/y22-pk-fresh-seats-20261018.md。
+{
+  "version": 5,
+  "name": "y22-null",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (8000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack2-it200（本实验的"最佳权重"；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y20-stack2/y20-stack2.it200.pool800.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 48,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y22 系流（新种子 20270206；y22 四腿共享＝四路可比）。
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  // K=10（K5 配对 1600 局终判，K5 训练侧永久关闭，DECISIONS §2026-10-08-k5-verdict）。
+  "decision_k": 10,
+
+  "out": "tmp/y22-null/weights.json",
+  "traj": "tmp/y22-null",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y22-null",
+  "backup_prefix": "y22-null",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

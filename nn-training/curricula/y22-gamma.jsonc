@@ -1,0 +1,125 @@
+// 课程 y22-gamma —— 阶段 A 腿四：只把折扣视野从 500 拍抬到 2000 拍（其余逐字 = y22-null）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；与 y22-null/lr/batch 并行）。
+//
+// 立项 → 2026-10-18（`plan/y22-winrate-ladder.plan.md` §3）：
+//   γ=0.998 的有效视野是 1/(1−γ) = **500 拍**，而本任务的剧集是 **4900–7350 拍**（20 杀 / 1 命）。
+//   后果：`wWin` 那一项（快 3000 拍只值 ~10.8 分）在 t=0 处被折到 `0.998^6000 ≈ 6e-6`，
+//   终局信号只能靠 TD 链末端一点点往前传；而**胜负恰恰是"多久打完"决定的**（余量 0.96 vs 人类 1.97）。
+//   抬到 γ=0.9995 ⇒ 视野 2000 拍，把"快"这件事放进价值里。
+//
+// ── 单变量声明（相对 y22-null：只动 gamma 一格）─────────────────────────────
+//   `gamma` 0.998 → **0.9995**（`lam` 0.95 / `normalize_ret` true / reward / lr 表 / batch / K 全部逐字）。
+//   已知副作用（提前声明，不算新变量）：value 目标的有效跨度变长 ⇒ **value loss 会明显上升**，
+//   这是预期内的；护栏是"policy 侧读数不许坏"，不是 value loss 的绝对值。
+//   双分支：Φ 斜率转正（或 ≥ −0.02/轮）且局长下降 ⇒ 视野是主因，阶段 B/C 以本腿为底座；
+//     Φ 斜率不动 ⇒ 不是视野问题；value loss 爆到 >1.5 且 win 掉 ⇒ **杀腿**（长视野把 critic 拖垮）。
+//
+// ── 门（同 y22-null，换口径：余量为主）──────────────────────────────────────
+//   主读数 **余量 = (20/杀速) ÷ (219/(承伤/千拍))**，起点 0.96，目标 ≥ 1.3（人类同座位 1.97）。
+//   副门：+60 win ≥ 0.685（起点值）；kills ≥ 16.5/20；timeout ≤ 5%。
+//   Φ 斜率每 25 轮回归：< −0.05/轮 即红。value 读数附读（不设绝对门，只看是否爆到 >1.5）。
+//   D01 ≤ 85 护栏；fear-watch（shots/局 < 16 且 kills < 10，杀）。fail ⇒ **杀腿**。
+//
+// ── 训练设置（除 gamma 外逐字 = y22-null）───────────────────────────────────
+//   anchor 0.001；ent_break 0.0＋max_winrate 0.0；batch 24576；K=10；
+//   iters 500（cap），max_hours 48，workers 8；eval 混合（"2000-2003"×50）。
+//   ⚠ 前提：tmp/y22-gamma 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 起点 = `y20-stack2.it200.pool800.json`（sha16 `1a7821240d3c47b9`；kickstart 关）。
+//   · §15.5 新实验：新 out/traj（tmp/y22-gamma）+ backup 新目录（nn-training/weights/y22-gamma）+ opt fresh。
+//   · 种子 20270206（y22 四腿共享）；`bc=` 非 resume；开课后核 rotateSeed。
+// ── 结课报告（2026-10-18 用户手动停腿：阶段 A 判负，三个旋钮都不动）──────────
+//   跑量：第 1–204 轮（最后满局 eval it200），已采 5.66M 样本。19:58 有过一次重启
+//     （`start_it=None`），重启前后读数无缝（kl/entropy/value 无跳变）。
+//   轨迹（anchor 200 座 win）：it0 **0.685** → it100 **0.615** → it150 **0.630** → it200 **0.620**。
+//     ⚠ **形状是「中期低谷再爬回来」，不是单调退步**：it55 时的 −0.19/轮 到 it200 已摊平成
+//     **+0.026（t +3.1，四腿最陡） Φ/轮**；四条腿的末点都在起点的 CI（±0.066）之内。
+//   Φ/局：78.7 → **77.4**（−1.3）；余量 0.82（起点 0.90、人类 1.97）——**生死账没动**。
+//   配对（McNemar，同 200 座 vs it0）：Δwin **−0.065**；全段判读见 `tmp/y22-progress.py`。
+//   行为（it0 → 末点，全部 200 局口径）：实弹/千 7.92→6.93 · 威胁 lane/千 43.1→39.8 ·
+//     贴脸/千 115.5→112.1 · 低血时长/千 199.2→**211.3** · 中了不跑/千 2.28→1.75 · 开局 600 伤 6.5→8.8。
+//   健康：kl 0.0171→0.0153 · value 0.619→0.601（**没爆**） · entropy 0.752→0.712 · policy loss 0.0028→0.0039。
+//   结论：**判负（本条腿不单独成立）** —— **斜率最正但从坑底爬**：it100 只有 0.615（四腿最低），靠后 100 轮追回一点，末点 0.620 仍是四腿最低。「长视野把 critic 拖垮」这个担心**没发生**（value 0.619→0.601 反而略降）。行为上唯一变差的一项：**低血时长涨到 211**（起点 199）——比谁都久地待在残血区。
+//   证据：tmp/y22-gamma/{training_log,eval_log}.jsonl · reports/y22-phaseA-stop-it200-20261018.md ·
+//     reports/y22-pk-fresh-seats-20261018.md。
+{
+  "version": 5,
+  "name": "y22-gamma",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (8000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack2-it200（本实验的"最佳权重"；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y20-stack2/y20-stack2.it200.pool800.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 48,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.9995,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y22 系流（新种子 20270206；y22 四腿共享＝四路可比）。
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  // K=10（K5 配对 1600 局终判，K5 训练侧永久关闭，DECISIONS §2026-10-08-k5-verdict）。
+  "decision_k": 10,
+
+  "out": "tmp/y22-gamma/weights.json",
+  "traj": "tmp/y22-gamma",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y22-gamma",
+  "backup_prefix": "y22-gamma",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

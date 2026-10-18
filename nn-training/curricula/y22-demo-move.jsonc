@@ -1,0 +1,196 @@
+// 课程 y22-demo-move —— 阶段 B′：demo 混 batch 只训 move 头（fire 头不做 BC）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。
+//
+// 立项 → 2026-10-18（`plan/y22-demo-move-only.plan.md`；前情 `docs/nn/experiments.md` §118）：
+//   S4 探针查明 demo 的 fire 监督口径是坏的——fire 的 mask 语义是「这一发此刻打得出去吗」
+//   （`computeMasks` = `[1, isFireReady()?1:0]`），label 是「手指有没有按住」；
+//   按住 ⇒ 枪一冷却完立刻打出去 ⇒ 冷却重排 ⇒ 「按住」几乎必然落在冷却窗口里。
+//   实测 v5 语料 101153 样本：ready 43744 里 hold 只 **806（1.84%）**；
+//   hold 标签 29254 个里 **28448（97.2%）** 在自身 mask 里非法、被 `_masked_ce` 整样本跳过。
+//   ⇒ fire CE 实际只教 release。**2026-10-18 的 `810e5a34` 已把 fire CE 从 `ppo_update` 删掉**，
+//   本腿是那次改动的第一个课程级验证。
+//
+// ── 为什么只训 move（三条数，都有出处）─────────────────────────────────────
+//   · move 掩码全合法：101153/101153 样本都是 5 类可动（无 mask/label 冲突）。
+//   · move 学得会：S4a held-out top1 **0.7975**（多数类 0.3216）、STOP recall 0.72
+//     ——⚠ 那是 32 局子样本 + NNPolicy + 同一份 val 选点后的**乐观值**，只当上界估计。
+//   · fire 学不了且被教反：806/43744（见上）。
+//   前科：§32（61 局纯 BC → held-out mean 0.00，常量策略）、§33（`x20-demo-mix`，coef 0.02、
+//   两头 CE、300 轮 → 判负，entropy 0.64→0.9、首杀晚 20–40t）。**本腿与它们的差别只有一处：
+//   fire CE 没了、语料从 61 局升到 160 局（38564→101153 样本）、起点换到 stack2-it200。**
+//   不宣称「与 §33 同剂量」——删掉 fire 项后总 BC 梯度本来就小一截。
+//
+// ── 单变量声明（相对 y22-null：只加 demo 三键）──────────────────────────────
+//   `demo_bank` = `nn-training/data/human-x20-corpus-v5/demo_bank.npz`
+//     （N=101153，obs/scalars40/extra37/actions/masks，9.37MB，sha `c7d41c60…`）。
+//   `demo_bc_coef` = **0.02**（§33 用过同一档；源码量级锚「CE~1.0 vs value~0.25 ⇒ 0.02≈8%」）。
+//   `demo_per_mb` = **128**（§33 同值，不引入第二个未知）。
+//   ⚠ 三键必须同时给：`trainer/loop_remote_job.py:287` 半开即拒发；`train_core.py:561` 要求
+//     coef>0 且 per_mb>0 才装配。
+//   其余逐字 HOLD：reward 全表 = y20-stack2、lr 表、epochs 4、mb 1024、gamma 0.998、lam 0.95、
+//     target_transitions 24576、K=10、eval 面板 / 种子流。
+//   **预算 cap 不同且是刻意声明**：iters 500→**150**、max_hours 48→**24**（§33 前 100 轮就判了生死）。
+//     这是预算不是学习变量；比较时按同迭代窗口对齐，不看总轮数。
+//   ⚠ 起点也是共享的：`stack2.it200.pool800` 与 y22-null 完全相同 ⇒ **对照 = 同窗口的
+//     `y22-null`**（同 base、同 seed 20270206、纯 PPO），不需要另起 fire-CE-on 的跨树 C 臂。
+//     若阶段 A 出了胜者再用它的 itN，则对照同步换成那条腿，**跨代不可混**。
+//
+// ── 门（全部**相对 it0**，不硬编码外部数字）────────────────────────────────
+//   it0 = stack2-it200 在 860xxx anchor 200 座的实测（137 胜局口径）：
+//     停占比 **0.133**、持火占比 **0.076**、威胁 lane **34.9**/千拍、贴脸 **110.4**/千拍、
+//     低血时长 **196.9**/千拍、承伤 **24.4**/千拍、局长 **7351**、win **0.685**、kills **16.98**。
+//   人类参照（同座位 160 局）：0.288 / 0.322 / 84.5 / 68.3 / 102.4 / 22.3 / 4971 / 1.000。
+//   主读数（本腿补的是**站位形态**，不是开火量）：
+//     · 威胁 lane/千拍 **≥ it0 × 1.15**（人类 2.42×，一步到位不现实）
+//     · 贴脸加权/千拍 **≤ it0 × 0.90**
+//     · 低血时长/千拍 **≤ it0 × 0.85**
+//     · 停占比 ↑（但必须过下面的空停哨兵）
+//   副门：win ≥ it0（0.685）、kills ≥ 16.5、timeout ≤ 5%、kill/shot ≥ 0.25。
+//   分关（s2000–s2003）各报一行；s2003 单独标红/绿（§33 里它最弱）。
+//
+// ── ★ 空停哨兵（本腿最容易踩的坑；用现成边际量的上界，**不加 metrics 列**）──────
+//   `P(stop∧fire) ≤ min(P(stop), P(fireHeld))` 恒成立 ⇒ 取
+//     **上界比 = min(stop, fireHeld) / stop**（"停拍里最多有多少比例在开火"）
+//   现状：NN 胜局 **0.076/0.133 = 0.571**；人类 0.288/0.322 ⇒ 上界 1.0、真值 **0.576**（0.166/0.288）。
+//   判据（预注册，连续 2 个 25 轮点）：
+//     `停占比` 比 it0 涨 **≥ 0.03** 且 `上界比` 比 it0 **降 > 0.05** ⇒ 新增的停不可能主要是
+//     "停下来打"（学到的是发呆，不是站线）⇒ **停腿**。
+//   ⚠ 精确联合量 `stopFireTicks` 不存在（eval 行只有边际量）。要精确值须走 metrics 版本升级
+//     （双端 schema + metrics_version 守卫 + 两份 telemetry 同步），**不属于本腿的前置**。
+//
+// ── 熔断（第一条最重要）──────────────────────────────────────────────────────
+//   · `demo_bc` 遥测 it1 **非零**且 5 轮趋势向下（恒 0 = demo 没上桌 ⇒ 停腿查链路）。
+//     不比 §33 的绝对值（5.06→1.16）：那边是 move+fire 相加，口径不同。
+//   · **entropy 比 it0 涨 > 0.15 ⇒ 停**（§33 的指纹 0.64→0.9；本腿正是它的对照）。
+//   · 首杀拍退 > 60 拍 ⇒ 红（§33：晚 20–40t；it0 校准 605）。
+//   · 承伤/局 > it0 × 1.15 ⇒ 红（换血式莽化）。
+//   · timeout > 5% ⇒ 停（反苟）。kill/shot < 0.25 ⇒ 红（防乱扫）。
+//   · 走位四件套连续 2 个 25 轮点全不动 ⇒ **机制无效，停腿**（别叠剂量：
+//     move 标签是 5 类单步，"守线"是多步有状态行为，这是本腿最大的理论风险）。
+//
+// ── 训练设置（除 demo 三键外逐字 = y22-null）────────────────────────────────
+//   anchor 0.001；ent_break 0.0＋max_winrate 0.0；batch 24576；K=10；
+//   iters **150**（cap；§33 前 100 轮就判了生死）、max_hours 24、workers 8；
+//   eval 混合（"2000-2003"×50，同口径逐行可比，每 5 轮）。
+//   ⚠ 前提：tmp/y22-demo-move 不存在（§15.5 新 out/traj＋DECISIONS，不得续跑）。
+//
+// ── 防污染（红线）──────────────────────────────────────────────────────────
+//   · demo 语料种子全在 **414xxx**，评估面板仍是 **860xxx** ⇒ 零重叠；**不得**把 414xxx 加进 eval（§15.1）。
+//   · 报告附一行「demo 座位 vs 非 demo 座位的 pass 差」，> 15pp 判背题（§33 做法）。
+//
+// ── 开课前的人肉前置（不进代码）──────────────────────────────────────────────
+//   · `tmp/gate-halt.json` 切 `mode=halt`（当前 `notify`，notify 下这些线不会停）；这是**本机文件**，
+//     不随课程走，换机器要重设。
+//   · `demo_bank` 路径相对 **trainer 的 cwd**（不是仓根）⇒ 开课前确认存在，否则发布那刻直接
+//     `SystemExit: demo_bank 不存在`。
+//   · 起点播种后核 rotateSeed = 20270206；`manifest.it == plan.start_it + 1`；`bc=` 非 resume。
+
+// ── 结课报告（2026-10-18 判负「空停」：机制上桌、方向对、形式错）──────────────
+//   跑量：第 1–22 轮。`demo_bc` 2.894 → **1.886**（BC 在按设计学，22 轮降 35%）。
+//   结果（同 200 anchor 座配对 vs it0）：win 0.685 → **0.515**，**Δ −17.0pp，McNemar p=5e-4**
+//     （it5 就到位并保持 15 轮）；kills 16.98 → 15.11；Φ 78.7 → 63.2；承伤/局 207 → **249（+20%）**；
+//     持火/千 78.7 → **64.8（−18%）**；停占比 0.159 → **0.241**。
+//   机制（拆 `onLane*` 三列才看清）：威胁 lane 43.1 → **57.1（+33%，方向是对的）**，但
+//     · lane∩持火 5.7 → **5.1**（lane 内持火占比 **0.13 → 0.09**）
+//     · lane∩移动 2.8 → 3.3；lane∩**豁免** 12.0 → **18.5**
+//     ⇒ 新增的 lane 时间**既不是在打、也不是在动**：是豁免拍 + 纯站桩。
+//   三条预注册哨兵：**空停哨兵触发**（停 +0.082，`min(停,持火)/停` 0.503→0.274）·
+//     **承伤破 +15% 红线**（+20%）· entropy 0.7455 → **0.8861（+0.141，6 连升，距 0.15 差 0.009）**。
+//   kill/shot 0.373（反而比 it0 的 0.348 高）、timeout 1% ⇒ 不是乱扫也不是苟。
+//   结论：**判负，不建议降 coef 重开** —— 被推上去的 lane 和把胜率推下去的「空站」是同一个行为，
+//     剂量减半只会两边同时减半。根因是 **fire 头不训 + 语料 fire 标签坏（97.2% 的 hold 被判非法）**，
+//     两个头必须一起教，当前语料教不了。
+//   两条口径订正（已写进 plan §12）：① **`threatTicks` 不能单独当走位读数**（站着发呆也满足），
+//     主读数改 `onLaneHoldFireTicks / onLaneTicks`；② **剂量锚失效**：it1 的 CE 2.89 是注释里 CE~1.0
+//     的 2.9 倍，「0.02 ≈ 8%」在新语料上不成立，下次首档应 0.002–0.005。
+//   证据：tmp/y22-demo-move/{training_log,eval_log}.jsonl · reports/y22-demo-move-it20-20261018.md ·
+//     plan/y22-demo-move-only.plan.md §12（R3）。
+{
+  "version": 5,
+  "name": "y22-demo-move",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (8000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── ★ 唯一变量：demo 混 batch 三键（move-only；fire CE 已于 810e5a34 全局删除）──
+  // bank：v5 人类语料（160 局 / 101153 样本 / scalars40 / extra37 / 9.37MB / sha c7d41c60…）。
+  // coef 量级锚：CE~1.0 vs PPO value 项 ~0.25 ⇒ 0.02 ≈ 8%（§33 同档；删掉 fire 项后总量更小）。
+  // per_mb 128 与 §33 同值——不引入第二个未知。
+  // ⚠ 三键必须同时给（半开即拒发）；且 fire 头不再有任何 demo 监督。
+  "demo_bank": "nn-training/data/human-x20-corpus-v5/demo_bank.npz",
+  "demo_bc_coef": 0.02,
+  "demo_per_mb": 128,
+
+  // ── 起点：stack2-it200（本实验的"最佳权重"；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y20-stack2/y20-stack2.it200.pool800.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 150,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y22 系流（新种子 20270206；y22 四腿共享＝四路可比）。
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  // K=10（K5 配对 1600 局终判，K5 训练侧永久关闭，DECISIONS §2026-10-08-k5-verdict）。
+  "decision_k": 10,
+
+  "out": "tmp/y22-demo-move/weights.json",
+  "traj": "tmp/y22-demo-move",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y22-demo-move",
+  "backup_prefix": "y22-demo-move",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

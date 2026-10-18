@@ -1,0 +1,128 @@
+// 课程 y22-lr —— 阶段 A 腿二：只把 PPO 步长减半（其余逐字 = y22-null）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；与 y22-null/batch/gamma 并行）。
+//
+// 立项 → 2026-10-18（`plan/y22-winrate-ladder.plan.md` §3）：
+//   y21 四腿的 KL 全程压在 **0.0147–0.0179**（cap 是 0.1，`kl_coef` 0.05）⇒ **KL 项根本没在限速**；
+//   而 Φ 每轮掉 0.1–0.19 分。也就是说：每一轮都在走"小幅但定向为负"的步。
+//   最省事的解释是步长过大 ⇒ 本腿把 `ppo_schedule` 的两段 lr 各减半，其余一个键不动。
+//
+// ── 单变量声明（相对 y22-null：只动 lr 表两格的数值）────────────────────────
+//   `ppo_schedule[0].lr` 0.00015 → **0.000075**（until_iter 240 不动）
+//   `ppo_schedule[1].lr` 0.0001  → **0.00005**
+//   两格同属"lr 表"这一个变量（同一个旋钮的两段，不是两个变量）；`kl_coef`/`kl_cap`/`until_iter` 不动。
+//   顶层 `lr` 0.0003 是 CLI 缺省值，实跑被 ppo_schedule 覆盖（y21 四腿实测 manifest 里 lr=0.0003、
+//   iteration 行 lr=0.00015）⇒ **不动它**，否则就变成两个变量。
+//   其余逐字 HOLD：reward 全表 / gamma / lam / epochs / mb / target_transitions / K / 流 / eval。
+//   双分支：Φ 斜率回到 ≥ −0.02/轮（或转正）⇒ 步长是主因，阶段 B/C 以本腿为底座；
+//     Φ 斜率与 y22-null 无差别（差 < 0.03/轮）⇒ 步长不是主因，下一刀打 gamma/batch（已在并行跑）。
+//
+// ── 门（同 y22-null，换口径：余量为主）──────────────────────────────────────
+//   主读数 **余量 = (20/杀速) ÷ (219/(承伤/千拍))**，起点 0.96，目标 ≥ 1.3（人类同座位 1.97）。
+//   副门：+60 win ≥ 0.685（起点值）；kills ≥ 16.5/20；timeout ≤ 5%。
+//   Φ 斜率每 25 轮回归一次（**本腿的主判据**）：< −0.05/轮 即红。
+//   KL watch（§15.4）：lr 减半后 KL 应降到 ~0.008；若 KL 不降而 Φ 也不动 ⇒ lr 没生效，查 manifest。
+//   D01 ≤ 85 护栏；fear-watch（shots/局 < 16 且 kills < 10，杀）。fail ⇒ **杀腿**。
+//
+// ── 训练设置（除 lr 表两格外逐字 = y22-null）────────────────────────────────
+//   anchor 0.001；ent_break 0.0＋max_winrate 0.0；batch 24576；K=10；
+//   iters 500（cap），max_hours 48，workers 8；eval 混合（"2000-2003"×50）。
+//   ⚠ 前提：tmp/y22-lr 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 起点 = `y20-stack2.it200.pool800.json`（sha16 `1a7821240d3c47b9`；kickstart 关）。
+//   · §15.5 新实验：新 out/traj（tmp/y22-lr）+ backup 新目录（nn-training/weights/y22-lr）+ opt fresh。
+//   · 种子 20270206（y22 四腿共享）；`bc=` 非 resume；开课后核 rotateSeed。
+// ── 结课报告（2026-10-18 用户手动停腿：阶段 A 判负，三个旋钮都不动）──────────
+//   跑量：第 1–206 轮（最后满局 eval it205），已采 5.70M 样本。19:58 有过一次重启
+//     （`start_it=None`），重启前后读数无缝（kl/entropy/value 无跳变）。
+//   轨迹（anchor 200 座 win）：it0 **0.685** → it100 **0.620** → it150 **0.650** → it200 **0.670**。
+//     ⚠ **形状是「中期低谷再爬回来」，不是单调退步**：it55 时的 −0.19/轮 到 it200 已摊平成
+//     **+0.013（t +1.3） Φ/轮**；四条腿的末点都在起点的 CI（±0.066）之内。
+//   Φ/局：78.7 → **79.3**（+0.6）；余量 0.83（起点 0.90、人类 1.97）——**生死账没动**。
+//   配对（McNemar，同 200 座 vs it0）：Δwin **−0.035**；全段判读见 `tmp/y22-progress.py`。
+//   行为（it0 → 末点，全部 200 局口径）：实弹/千 7.92→7.13 · 威胁 lane/千 43.1→40.1 ·
+//     贴脸/千 115.5→96.5 · 低血时长/千 199.2→189.7 · 中了不跑/千 2.28→1.53 · 开局 600 伤 6.5→9.6。
+//   健康：kl 0.0089→0.0084（**真的减半**） · value 0.630→0.602 · entropy 0.745→0.693 · policy loss 0.0007→0.0006（**接近冻结**）。
+//   结论：**判负（本条腿不单独成立）** —— **操作生效但没换来止损**：KL 从 0.0167 减到 0.0084（设计目标达成），可 win 0.650 < null 的 0.680。行为上它走的是「更保守」那条：贴脸 96.5↓、中了不跑 1.53↓，但**实弹掉 10%、威胁 lane 也降** ——这是 §112 的松手化指纹，不是走位变好。policy loss 掉到 6e-4、entropy −0.05 ⇒ 策略在低步长下几乎不动，「Φ 最高」其实是「改得最少、离起点最近」。**峰值 0.750（it160/it170）在 400 个新鲜座位上不复现**：lr160 是 0.635（−4.2pp，p 0.24）。
+//   证据：tmp/y22-lr/{training_log,eval_log}.jsonl · reports/y22-phaseA-stop-it200-20261018.md ·
+//     reports/y22-pk-fresh-seats-20261018.md。
+{
+  "version": 5,
+  "name": "y22-lr",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (8000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack2-it200（本实验的"最佳权重"；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y20-stack2/y20-stack2.it200.pool800.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 48,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.000075, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.00005, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y22 系流（新种子 20270206；y22 四腿共享＝四路可比）。
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  // K=10（K5 配对 1600 局终判，K5 训练侧永久关闭，DECISIONS §2026-10-08-k5-verdict）。
+  "decision_k": 10,
+
+  "out": "tmp/y22-lr/weights.json",
+  "traj": "tmp/y22-lr",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y22-lr",
+  "backup_prefix": "y22-lr",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
