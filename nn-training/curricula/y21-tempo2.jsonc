@@ -1,0 +1,168 @@
+// 课程 y21-tempo2 —— 中盘里程碑腿（重开）：国王配方（y20-stack2 逐字）＋8/12/16 杀进阶级差（用户令）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；本文件是 y21-tempo 的修复后重开，独立于兄弟腿）。
+//
+// 重开原因（2026-10-17）：opt delta-f16 下溢 bug（v=0/m≠0 动量炸弹）已修复；前次 y21-tempo 现场
+//   保留在 tmp/y21-tempo/（it74 KL 0.5320；stem 单点跳 39.8/26.9；
+//   it210 eval 0.6475 vs 起点 0.685；根因 §115）。本课程规格/seed/起点与 y21-tempo 逐字相同；
+//   仅实验身份（name/out/traj/backup）改为 *2，避免复用取证现场（§15.5）。
+//
+// 立项 → 用户 2026-10-17：三腿全负＋失败形状（§113：中途崩溃，败局死点 kills ~8.93）。
+//   平 wKill 斜率下中盘 [5,12] 杀是回报洼地（x20-snowball 诊断，线索）；本腿用 edge-trigger 里程碑
+//   把「跨过洼地」的边际收益抬起来——败局距胜局只差 ~5.7 个人头（17.1 分），考的是「多活一段」。
+//
+// ── 前科批判吸收（y 系网络结构已换代；x 期/更早裁决只作线索，不作授权）────────
+//   · x20-snowball 同值里程碑被判「空气」——x 期旧网当时够不到 8 杀（峰值 6.91）。该裁决绑定
+//     旧网技能水位，**不越代继承**；y20 现役重测可达性完全翻转：it0 P(k≥8)=0.910、P(k≥12)=0.800、
+//     P(k≥16)=0.745；败局 P(k≥8|败)=0.714、P(k≥12|败)=0.365、P(k≥16|败)=0.190。
+//   · 「edge-trigger 数值已验（7→8 跨越精确 +6.0 一次）」是引擎级事实（Φ 差分），可继承；
+//     四腿落盘前照旧跑数值对账（tmp/y21-check.py）。
+//   · 收益差分（y20 现役标定）：胜局终值全拿 ~27 分、败局期望 ≈9.9 分 ⇒ 差 17.1 分 ≈ 5.7 人头（wKill 3.0）。
+//
+// ── 单变量声明（相对 y20-stack2：只新增里程碑三项；其余逐字）──────────────────
+//   新增 `+ wMS8*where(kills>=8,1,0) + wMS12*where(kills>=12,1,0) + wMS16*where(kills>=16,1,0)`，
+//     wMS8/12/16 = **6/9/12**（「中盘进阶级差」一组概念；数值形状 x20 已验证，力度用 y20
+//     现役可达性重标——见上）。
+//   其余逐字 HOLD（wKill 3.0 线性不动——只加阶差、不改斜率；wBlock 110/wNearSq 48/wDist 0.6/
+//     wHurt 150/wThreat 120/wCorner 110/wWin 8000 锚等全部不动）。底 = y20-stack2 逐字，
+//     **不含** y20 三腿新增项。
+//   双分支：败局 kills 右尾增厚（p50↑）＋8–12 杀窗死亡占比↓ 且 win 不掉 ⇒ 洼地重定价有效；
+//     双平 ⇒ 里程碑在国王底上无边际，杀；kills↑ 但 gameover 破线/dmgFirst600↑ ⇒ 莽化过热，杀。
+//
+// ── 门（y20 三线＋洼地 readout＋莽化 watch）──────────────────────────────────
+//   主：+60 win ≥ 0.70；次：kills ≥ 16.5/20；命耗线：+60 gameover 占比 ≤ 30%（基线 31.5%）；
+//   反 watch：timeout 占比 ≤ 5%，超 ⇒ 为避战而苟，**杀腿**（基线 0，零容忍漂移）；
+//   readout（it0 同种子配对；面板 160 局 414xxx＋混合 eval 860xxx 双读）：败局 kills 分布
+//     （p50/p90、P(k≥12|败)）＋8–12 杀窗死亡占比（§113 形状）＋win（顺手不掉）；
+//   莽化 watch（专属）：dmgFirst600（it0 校准 6.5）> it0×1.5 ⇒ 红标（开局抢杀过头）；
+//   杀速保险：杀敌＋开火量双不掉；D01 ≤ 85 护栏（+it0 校准）；
+//   fear-watch：shots/局 < 16 且 kills < 10 即恐惧塌，杀；
+//   fail ⇒ **杀腿**。门读 headline（混合 eval）；s2000 切片附读。上报 policy_new_rms＋it5 analytic 照旧。
+//   终点：三线全过 ⇒ 收官（iters 500 为 cap，以落盘值为准）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   anchor 0.001（legacy 空片，无害）；ent_break 0.0＋max_winrate 0.0（熔断全拆，y 系现行惯例）；
+//   batch 24576；优化器/K 冻结（退火表与 y20-stack2 同）。
+//   iters 500，max_hours 48，workers 8，eval 混合（"2000-2003"×50，同口径逐行可比）。
+//   ⚠ 前提：tmp/y21-tempo2 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c20-lives1`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`（课程轮从 1 起，与 bc 轮号无关）；
+//     `bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y21-tempo2）+ backup 新目录（nn-training/weights/y21-tempo2）+ opt fresh。
+//   · 种子 20270205（20270204 及之前全用过，§15.1 防记忆化；y21 四腿共享＝四路可比；
+//     本重开沿用同一 seed = 修 bug 后的配对复现，§15.1 的例外理由见 DECISIONS；
+//     与 y20 三腿同起点 stack2-it200 ⇒ 跨代可比）。
+// ── 结课报告（2026-10-18 判负「里程碑零位移」，用户拍板停腿）──────────────────
+//   跑量：第 1–118 轮（最后评估 it115）。05:05 起 hub 在线 worker=0，四个 job 全卡 pending
+//     （已等 11.9k 秒），**非熔断、非正常收尾**；预算 500 轮只用了 24%。
+//   轨迹：anchor 面板（同 200 座位）win 0.685 → 末点 **0.550**（四腿最低）；
+//     线性斜率 **−8.1pp/100 轮**（t −2.89，四腿最陡）。
+//     混合 eval 末点（400 局）：0.573 / gameover 42.7% / kills 15.69 / timeout 0。
+//   配对（McNemar，同 200 座位）：Δwin **−0.135**，95%CI [−0.225, −0.045]，
+//     **p 0.0073**（四腿里最显著的一条）。
+//   奖励账本 Φ/局：**104.67 → 88.96（−15.7，四腿最大跌幅）**；通关局 −3.04、死局 −8.65。
+//     （本腿 Φ 起点 104.7 最高，因为三项里程碑在 it0 就已付 21.6 分/局。）
+//   目标读数（本腿的立项轴）：
+//     · 败局 P(k≥12|败) it0 0.365 → 末 3 点 0.414，但**全程在 0.29–0.44 振荡、无趋势**
+//       （it40 0.343 / it60 0.335 / it80 0.294 / it100 0.305 / it110 0.442）；
+//     · 8–12 杀窗死亡占比 0.349 → 0.208（同属振荡，不可信）；P(k≥16|败) 0.190 → 0.147（反降）；
+//     · 败局 kills p50 **10 → 10**、p90 17 → 16。
+//     ⇒ 按头注双分支判「**双平 ⇒ 里程碑在国王底上无边际，杀**」。
+//   剂量不是不够：里程碑对「胜−负价差」的贡献 **+16.88 分**（wKill 线性部分才 +28.31），
+//     把「从 8 杀推到 12 杀」的边际价从 +12 抬到 +21（**+75%**）——加了 75% 的钱，分布没动。
+//     ⇒ 「中盘 8–12 杀是回报洼地」这个前提被数据否掉：洼地不是价格造成的。
+//   莽化 watch：dmgFirst600 6.54 → 7.21（×1.10，未破 1.5 阈值）；stop/千 143.7 → 193.7（×1.35）；
+//     shots/局 48.8 → 42.9（×0.88）；火线承伤/千 ×1.31。没有莽化，是「更慢更怂」。
+//   体检：KL 全程 0.0141–0.0204；entropy 0.742 → **0.800**（四腿里唯一明显上升，策略更散）；
+//     stem 单点跳 >2 的轮数 **0/118**、max|Δ| 0.0555 ⇒ §115 修复实证通过。
+//   结论：**判负（杀腿）**——目标轴零位移 + win 四腿最低 + 斜率四腿最陡。但注意：
+//     它与兄弟腿的**差异在噪声内**（it110 六对两两比较全跨 0），这个「最差」是同一条漂移的尾巴，
+//     不是里程碑特有的伤害。四腿同斜率 + Φ 同降 ⇒ 主效应是**底座漂移**（见 y22-null）。
+//   证据：tmp/y21-tempo2/{training_log,eval_log}.jsonl · reports/y21-four-legs-20261018.md ·
+//     docs/nn/experiments.md §117。
+{
+  "version": 5,
+  "name": "y21-tempo2",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (8000-clearTick)/1400, 0) + wMS8*where(kills>=8, 1, 0) + wMS12*where(kills>=12, 1, 0) + wMS16*where(kills>=16, 1, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wMS8": 6.0,
+      "wMS12": 9.0,
+      "wMS16": 12.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack2-it200（sha16 1a7821240d3c47b9；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y20-stack2/y20-stack2.it200.pool800.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 48,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（新种子 20270205；y21 四腿共享＝四路可比）。
+  "paired_rotate_seed": 20270205,
+
+  "decision_events": false,
+  // K=10（K5 配对 1600 局终判：细节奏杀敌 -1.99、胜率 -10.1pp，K5 训练侧永久关闭，
+  // DECISIONS §2026-10-08-k5-verdict；顶墙中位数约一窗是 hold 的形状，
+  // 长尾 126 窗连推是策略问题，论证见 dist3 头注；故不动 K 只加里程碑）。
+  "decision_k": 10,
+
+  "out": "tmp/y21-tempo2/weights.json",
+  "traj": "tmp/y21-tempo2",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y21-tempo2",
+  "backup_prefix": "y21-tempo2",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

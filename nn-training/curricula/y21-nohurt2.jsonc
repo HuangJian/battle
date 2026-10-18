@@ -1,0 +1,157 @@
+// 课程 y21-nohurt2 —— 减法对照腿（重开）：国王配方（y20-stack2 逐字）只删受伤税（用户令）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**；本文件是 y21-nohurt 的修复后重开，独立于兄弟腿）。
+//
+// 重开原因（2026-10-17）：opt delta-f16 下溢 bug（v=0/m≠0 动量炸弹）已修复；前次 y21-nohurt 现场
+//   保留在 tmp/y21-nohurt/（KL 最大 0.0249，但 stem 单点跳 19.3/11.8/11.7；
+//   it210 eval 0.60 vs 起点 0.685；根因 §115）。本课程规格/seed/起点与 y21-nohurt 逐字相同；
+//   仅实验身份（name/out/traj/backup）改为 *2，避免复用取证现场（§15.5）。
+//
+// 立项 → 用户 2026-10-17：y20 三腿（wall/far/escape）中段读out 全负——目标轴不动或反向，
+//   共同副作用「松手化」（stop +50~100‰、shots/kills 掉、win −11~22pp，§112），
+//   失败形状 = 中途死亡链（首杀正常、半程崩，§113）。三条腿全是「国王配方＋再添一项税」；
+//   加法方向饱和后反着做减法：测经典恐惧税（wHurt）在国王底上的边际约束。
+//   前科：y1h（单变量删 wHurt）设计过、it3 随 y1 系删除，从未判决 ⇒ 本腿是 y 系首次 hurt 归零实验。
+//
+// ── 前科批判吸收（y 系网络结构已换代；x 期/更早裁决只作线索，不作授权）────────
+//   · x26-obs 复核「wHurt/wThreat 留（人类承伤 ~30/千tick vs NN 150–230，方向对、判的是
+//     手段缺）」——x 期旧网上的裁决；方向当线索，剂量天花板以 y20 现役重测为准。
+//     本次混合 eval iter0 重测：NN 承伤 207/局、42.6/千拍（D01）——绝对水位与旧账同向；
+//     但 §112 三腿受击/千拍 +9~13 反向 ⇒「留税」在 y 系尚无人验证。
+//   · stack2 结课报告自述「受伤 150/命中 0.2 组合走在恐惧边缘」——本腿直接量它。
+//
+// ── 单变量声明（相对 y20-stack2：只删受伤税一项；其余逐字）──────────────────
+//   wHurt 150 → **删项删参**：公式去掉 `- wHurt*hurtWeight/(ticks+1)`、params 去 wHurt；
+//     hurtWeight 仍照常观测（eval 列在，只不价）。「删项不留死文本」先例 = x26 删 wBurst
+//     （格式性先例，可继承）。
+//   其余逐字 HOLD：wBlock 110/wNearSq 48/wDist 0.6/wThreat 120/wEncl 12.9/wCorner 110/
+//     wKill 3.0/wWin 8000 锚（分子 8000/wWin 5.0/1400）等全部不动。底 = y20-stack2 逐字，
+//     **不含** y20 三腿新增项（wBlock150/nearSq60/dist1.2/escape2500）。
+//   双分支：readout 任一显著回补 ⇒ hurt 是松手化主犯、减法路线成立（下一刀 threat，另立课程）；
+//     全平 ⇒ hurt 在国王底上无边际（x26 留存理由继续有效），减法线止、转 chain/tempo 侧。
+//
+// ── 门（y20 三线＋回补 readout＋莽化 watch）──────────────────────────────────
+//   主：+60 win ≥ 0.70；次：kills ≥ 16.5/20；命耗线：+60 gameover 占比 ≤ 30%（基线 63/200=31.5%）；
+//   反 watch：timeout 占比 ≤ 5%，超 ⇒ 为避战而苟，**杀腿**（基线 0，零容忍漂移）；
+//   readout（it0 同种子配对；仪器 = §112 配对面板 160 局 414xxx＋混合 eval 860xxx 双读；
+//     it0 校准：shots 48.8/局、stop 159/千拍、kills 16.98、win 0.685）：
+//     shots/局、stop/千拍、kills、win 四读数——任一显著回补（|z|≥2 同向）⇒ 分支 A；
+//     四读数全平（|z|<2）⇒ 分支 B；
+//   莽化 watch（专属）：hurtW/千拍（观察列，不进价；it0 校准 15.0）> it0×1.5 **且** gameover 破 40% 硬红 ⇒ 杀；
+//   杀速保险：杀敌＋开火量双不掉（掉 ⇒ 无锚恐惧反噬）；D01 ≤ 85 护栏（+it0 校准）；
+//   fear-watch：shots/局 < 16 且 kills < 10 即恐惧塌，杀；
+//   fail ⇒ **杀腿**。门读 headline（混合 eval）；s2000 切片附读。上报 policy_new_rms＋it5 analytic 照旧。
+//   终点：三线全过 ⇒ 收官（iters 500 为 cap，以落盘值为准）。
+//
+// ── 训练设置 ────────────────────────────────────────────────────────────────
+//   anchor 0.001（legacy 空片，无害）；ent_break 0.0＋max_winrate 0.0（熔断全拆，y 系现行惯例）；
+//   batch 24576；优化器/K 冻结（退火表与 y20-stack2 同）。
+//   iters 500，max_hours 48，workers 8，eval 混合（"2000-2003"×50，同口径逐行可比）。
+//   ⚠ 前提：tmp/y21-nohurt2 不存在（§15.5 新 out/traj＋本条 DECISIONS，不得续跑）。
+//
+// ── 起点纪律 ────────────────────────────────────────────────────────────────
+//   · 环境键全在 level（`ladder-c20-lives1`），课程**不重复** stages 等键。
+//   · 起点播种后核对 rotateSeed；`manifest.it == plan.start_it + 1`（课程轮从 1 起，与 bc 轮号无关）；
+//     `bc=` 非 resume。
+//   · §15.5 新实验：新 out/traj（tmp/y21-nohurt2）+ backup 新目录（nn-training/weights/y21-nohurt2）+ opt fresh。
+//   · 种子 20270205（20270204 及之前全用过，§15.1 防记忆化；y21 四腿共享＝四路可比；
+//     本重开沿用同一 seed = 修 bug 后的配对复现，§15.1 的例外理由见 DECISIONS；
+//     与 y20 三腿同起点 stack2-it200 ⇒ 跨代可比）。
+// ── 结课报告（2026-10-18 判负「hurt 无边际，减法线止」，用户拍板停腿）────────
+//   跑量：第 1–112 轮（最后评估 it110）。05:05 起 hub 在线 worker=0，job 卡 pending 11.9k 秒，
+//     **非熔断、非正常收尾**；预算 500 轮只用了 22%。
+//   轨迹：anchor 面板（同 200 座位）win 0.685 → 末点 **0.595**；斜率 **−6.5pp/100 轮**（t −3.10）。
+//     混合 eval 末点（400 局）：0.603 / gameover 39.8% / kills 15.78 / timeout 0。
+//   配对（McNemar）：Δwin **−0.090**，95%CI [−0.175, 0.000]，p 0.063。
+//   奖励账本 Φ/局：**85.32 → 76.13（−9.2）**；通关局 −2.10、死局 −8.86。
+//   四读数（it0 → 末 3 点）：shots/局 ×0.951、stop/千 ×1.007、kills ×0.926、win ×0.881
+//     ⇒ **无一回补（全负）**，按头注双分支落 **B：hurt 在国王底上无边际，减法线止**。
+//   唯一成立的机制发现（本腿唯一的正产出）：**它是四腿里 stop/千 唯一没涨的**
+//     （143.7 → 156，全程 125–205 振荡；另三腿涨到 183–278），而**零税的腿并不更疼**
+//     （hurt/千 14.20 vs 带税腿 13.40–15.12）⇒ **wHurt 控的是「站桩」，不是「挨打」**；
+//     且 stop 膨胀不是掉胜率的原因（三腿 stop 涨、本腿不涨，win 掉得一样多）。
+//   体检：KL 全程 0.0148–0.0213；stem 单点跳 >2 的轮数 **0/112**（§115 修复实证通过）。
+//   结论：**判负（杀腿）**。删掉受伤税既没换回行为也没换回胜率；恐惧税的「约束力」在国王底上
+//     只体现在站桩上。下一步不再是减法，见 plan/y22-winrate-ladder.plan.md。
+//   证据：tmp/y21-nohurt2/{training_log,eval_log}.jsonl · reports/y21-four-legs-20261018.md ·
+//     reports/stack2-vs-human-threeway-20261018.md · docs/nn/experiments.md §117。
+{
+  "version": 5,
+  "name": "y21-nohurt2",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (8000-clearTick)/1400, 0) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack2-it200（sha16 1a7821240d3c47b9；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y20-stack2/y20-stack2.it200.pool800.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 500,
+  "max_hours": 48,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y 系流（新种子 20270205；y21 四腿共享＝四路可比）。
+  "paired_rotate_seed": 20270205,
+
+  "decision_events": false,
+  // K=10（K5 配对 1600 局终判：细节奏杀敌 -1.99、胜率 -10.1pp，K5 训练侧永久关闭，
+  // DECISIONS §2026-10-08-k5-verdict；顶墙中位数约一窗是 hold 的形状，
+  // 长尾 126 窗连推是策略问题，论证见 dist3 头注；故不动 K 只删受伤税）。
+  "decision_k": 10,
+
+  "out": "tmp/y21-nohurt2/weights.json",
+  "traj": "tmp/y21-nohurt2",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y21-nohurt2",
+  "backup_prefix": "y21-nohurt2",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
