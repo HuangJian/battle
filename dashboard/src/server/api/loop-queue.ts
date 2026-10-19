@@ -23,8 +23,7 @@
  *  观测面带崩（与 hub 总览 / 隧道 A/B 同口径），视图带 `error` 上屏，UI 显空态 + 原因。
  */
 
-import path from 'path'
-import { REPO_ROOT } from '../../core/paths'
+import { tmpLogsDir } from '../../core/paths'
 import { createSwrCache } from '../../core/swr-cache'
 import {
   type LoopQueueView,
@@ -48,7 +47,7 @@ export type LoopQueueRunner = () => RunPythonResult | Promise<RunPythonResult>
 function defaultLoopQueueRunner(): Promise<RunPythonResult> {
   return runRunPythonAsyncScript(
     'nn-training/trainer/run_rl_cluster.py',
-    ['--traj-root', path.join(REPO_ROOT, 'tmp'), '--json'],
+    ['--traj-root', tmpLogsDir(), '--json'],
     { timeoutMs: LOOP_QUEUE_TIMEOUT_MS },
   )
 }

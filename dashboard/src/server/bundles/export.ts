@@ -20,7 +20,7 @@ import {
   statSync,
 } from 'fs'
 import path from 'path'
-import { REPO_ROOT } from '../../core/paths'
+import { REPO_ROOT, tmpCourseDir } from '../../core/paths'
 import { declaredCourseIters } from '../../stack/courses'
 import {
   bundleMetaMagic,
@@ -47,7 +47,7 @@ export function taskBundleFileName(course: string): string {
 
 /** 产出 zip 的落点：`tmp/<课程>/task-<课程>.zip`（课程目录下，人一眼能找到）。 */
 export function taskBundlePath(course: string): string {
-  return path.join(REPO_ROOT, 'tmp', course, taskBundleFileName(course))
+  return path.join(tmpCourseDir(course), taskBundleFileName(course))
 }
 
 export function taskBundleLogPath(course: string): string {
@@ -174,7 +174,7 @@ export function taskBundleMeta(course: string): TaskBundleMeta | null {
 
 /** 作废任务包的归档目录（**挪走而非删除**：导出失败时它还是唯一能跑的东西）。 */
 export function stalePackDir(course: string): string {
-  return path.join(REPO_ROOT, 'tmp', course, 'stale-packs')
+  return path.join(tmpCourseDir(course), 'stale-packs')
 }
 
 /** 把现有任务包挪去归档（作废），返回 `{invalidated, archived, message}`。**永不抛**。
@@ -410,7 +410,7 @@ export function exportGuardReason(arg: ExportGuardFacts): string | null {
 export function lastCompletedIt(course: string): number {
   let text: string
   try {
-    text = readFileSync(path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'), 'utf-8')
+    text = readFileSync(path.join(tmpCourseDir(course), 'training_log.jsonl'), 'utf-8')
   } catch {
     return 0
   }
@@ -435,7 +435,7 @@ export function lastCompletedIt(course: string): number {
 /** 导出前的门（IO 壳：看权重在不在 + 课程声明的 iters 与账本已跑到哪）。 */
 export function exportGuard(course: string): string | null {
   return exportGuardReason({
-    weightsExists: existsSync(path.join(REPO_ROOT, 'tmp', course, 'weights.json')),
+    weightsExists: existsSync(path.join(tmpCourseDir(course), 'weights.json')),
     declaredIters: declaredCourseIters(course),
     lastCompletedIt: lastCompletedIt(course),
   })
@@ -450,7 +450,7 @@ export function exportGuard(course: string): string | null {
  */
 export function weightsMtimeMs(course: string): number {
   try {
-    return statSync(path.join(REPO_ROOT, 'tmp', course, 'weights.json')).mtimeMs
+    return statSync(path.join(tmpCourseDir(course), 'weights.json')).mtimeMs
   } catch {
     return 0
   }

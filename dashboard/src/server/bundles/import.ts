@@ -26,7 +26,7 @@ import { existsSync, mkdirSync, readdirSync, statSync, unlinkSync, writeFileSync
 import { writeFile } from 'fs/promises'
 import path from 'path'
 import { loadConfig } from '../../core/config'
-import { REPO_ROOT } from '../../core/paths'
+import { REPO_ROOT, tmpCourseDir } from '../../core/paths'
 import { hubOfflineAdmin, liveHub } from '../../stack/hub-admin'
 import type { OfflineResultView } from '../../web/view'
 import { launchEvalA } from '../eval-a-run'
@@ -35,12 +35,12 @@ import { deliverImportJsonMark, deliverFileNamePrefix } from './marks'
 
 /** 上传原件留证目录（每次导入一份，不覆盖）。 */
 export function deliverUploadDir(course: string): string {
-  return path.join(REPO_ROOT, 'tmp', course, 'deliver-uploads')
+  return path.join(tmpCourseDir(course), 'deliver-uploads')
 }
 
 /** 解压后的产物根目录（每个 run 一个子目录，由 python 一侧决定名字）。 */
 export function deliverImportRoot(course: string): string {
-  return path.join(REPO_ROOT, 'tmp', course, 'deliver')
+  return path.join(tmpCourseDir(course), 'deliver')
 }
 
 /** 单次上传上限：产物 zip 含逐轮权重（几十轮 ≈ 几十 MB）；512MB 已是「拿错文件」的门。 */
@@ -133,7 +133,7 @@ export function parseDeliverImportJson(stdout: string): DeliverImportPayload | n
 
 /** python 导入器日志（stdout/stderr 都进这里，失败时人能看到三道门里是哪一道）。 */
 export function deliverImportLogPath(course: string): string {
-  return path.join(REPO_ROOT, 'tmp', course, 'deliver-import.log')
+  return path.join(tmpCourseDir(course), 'deliver-import.log')
 }
 
 /** 留证目录保留几份（plan §6.2-5）：每次导入一份原件（现场 43MB/次）——只留最近几份。 */
@@ -397,7 +397,7 @@ export interface LandedRun {
 
 /** 本课**已落地的 run 目录**（交付镜像 + 补传原件；按末轮号升序，同 run 只留末轮号大的那份）。 */
 export function landedHubRuns(course: string): LandedRun[] {
-  const traj = path.join(REPO_ROOT, 'tmp', course)
+  const traj = tmpCourseDir(course)
   const roots = [path.join(traj, 'deliver'), path.join(traj, 'remote-jobs', 'offline')]
   const best = new Map<string, LandedRun>()
   for (const root of roots) {

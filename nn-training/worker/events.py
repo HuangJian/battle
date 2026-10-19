@@ -280,6 +280,59 @@ def write_iteration(jsonl_path: Path, args, it: int, report: dict, m: dict) -> d
     )
 
 
+def write_rollout_end(
+    jsonl_path: Path, args, it: int, report: dict, rollout_sec: float
+) -> dict:
+    """`rollout_end` 事件：本轮**采集收官即刻**落账（不等 PPO / 权重回传）。
+
+    为什么另起一个事件名，而不是把 `iteration` 提前写：`iteration` 是**断点续跑的推进判据**
+    （`worker/resume.py` 只认它算 `last_completed_iter`）。若在本轮 PPO 之前写它，进程一旦
+    死在「采集完 → 梯度步提交前」，续跑就会**跳过这一轮**——采集白烧，账本还自证跑过了。
+    ⇒ 另起事件名：续跑 / 门禁照旧忽略未知事件（`LedgerView.apply_event` 的 else 分支），
+    只有**控制台指标读面**消费它。
+
+    ★ **只带采集侧事实**（report + 采集墙钟）。PPO 侧字段（kl / entropy / policy / value /
+    mean_ret / ppo_sec / dist_phase_sec / wire …）此刻还不存在 ⇒ 一律**不写键**
+    （缺键 = 空，读面按 NaN 缺口处理，**不冒充 0**）。本轮的 `iteration` 行落账后，
+    它自然被覆盖（同 iter 取文件里最后一条）。
+    """
+    dm = report.get("dimMeans") or {}
+    return write_event(
+        jsonl_path,
+        {
+            "event": "rollout_end",
+            "iter": it,
+            "time": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "winRate": report.get("winRate", 0.0),
+            "outcomes": report.get("outcomes") or {},
+            "score_mean": (report.get("scoreStats") or {}).get("mean"),
+            "score_std": (report.get("scoreStats") or {}).get("std"),
+            "dim_means": dm,
+            # 意图 RL 字段（per-tick 报告无此行 → None，不破兼容）。
+            "intentCounts": report.get(
+                "intentCounts" if str(getattr(args, "mode", "")) != "goal" else "actionCounts"
+            ),
+            "baseIntegrity": dm.get("baseIntegrity"),
+            "samples": report.get("totalSamples", 0),
+            "ticks": report.get("totalTicks", 0),
+            "rollout_sec": rollout_sec,
+            "pure_collect_sec": report.get("pure_collect_sec"),
+            # 权重下发墙钟属**采集侧**（report 里本来就有）⇒ 这一行也带。
+            "dist_phase_sec": report.get("dist_phase_sec"),
+            # 队列模式附加字段（nodes=[] 纯本地模式不含，保字节一致基线）
+            **(
+                {
+                    "missing": report["missing"],
+                    "expectedGames": report["expectedGames"],
+                    "dist": report["dist"],
+                }
+                if "missing" in report
+                else {}
+            ),
+        },
+    )
+
+
 def write_gate_verdict(
     jsonl_path: Path,
     it: int,

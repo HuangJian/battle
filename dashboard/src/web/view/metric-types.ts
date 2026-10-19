@@ -140,6 +140,11 @@ export interface IterRow {
   kills: number
   actuals: IterActuals | null
   evalData: EvalSummary | null
+  /** ★ true = 这一行来自 `rollout_end`（**采集已收官、PPO/权重还没回传**）。
+   *  只有 rollout 派生列有读数；PPO 侧列（kl / entropy / policy / value / mean_ret /
+   *  lr / ppo_sec / dist_phase_sec / wire）是 NaN 缺口 —— **不是 0**，别拿来判「没动」。
+   *  旧账本行不写该键 ⇒ `undefined` 与 `false` 同义（消费方一律 `?? false`）。 */
+  pendingPpo?: boolean
   /** M0 传输账；**additive**：旧账本行无 `wire` 键，测试直构的 fixture 通常也不带
    *  （与控制台视图的 `activeCourse?` / `isBc?` 同口径）→ 消费方一律用 `?? null` 归一。 */
   wire?: IterWire | null

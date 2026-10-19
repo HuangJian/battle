@@ -26,7 +26,7 @@ import {
 } from 'fs'
 import os from 'os'
 import path from 'path'
-import { REPO_ROOT } from '../src/core/paths'
+import { REPO_ROOT, tmpCourseDir } from '../src/core/paths'
 import {
   DELIVER_MAX_BYTES,
   deliverFileNamePrefix,
@@ -108,7 +108,7 @@ describe('任务包导出', () => {
 
   it('产出路径/文件名/日志都在课程目录下（人一眼能找到）', () => {
     expect(taskBundleFileName(COURSE)).toBe(`task-${COURSE}.zip`)
-    expect(taskBundlePath(COURSE)).toBe(path.join(REPO_ROOT, 'tmp', COURSE, `task-${COURSE}.zip`))
+    expect(taskBundlePath(COURSE)).toBe(path.join(tmpCourseDir(COURSE), `task-${COURSE}.zip`))
     expect(taskBundleLogPath(COURSE).endsWith(path.join(COURSE, 'export-bundle.log'))).toBe(true)
   })
 
@@ -178,7 +178,7 @@ describe('任务包导出', () => {
     // 发生了变化」。作废这一步是必需的——hub 递的是**盘上那一刻的文件**，不作废的话云机在
     // 导出窗口（几分钟）里探到的还是旧代码的包，而它会拿旧代码跑完整段、看起来完全正常。
     const course = '__stale-pack-course__'
-    const live = path.join(REPO_ROOT, 'tmp', course, taskBundleFileName(course))
+    const live = path.join(tmpCourseDir(course), taskBundleFileName(course))
     const stale = stalePackDir(course)
     try {
       mkdirSync(path.dirname(live), { recursive: true })
@@ -193,7 +193,7 @@ describe('任务包导出', () => {
       // 幂等：再作废一次 = 没有包可作废（不抛）
       expect(invalidateTaskBundle(course).invalidated).toBe(false)
     } finally {
-      rmSync(path.join(REPO_ROOT, 'tmp', course), { recursive: true, force: true })
+      rmSync(tmpCourseDir(course), { recursive: true, force: true })
     }
   })
 
@@ -201,7 +201,7 @@ describe('任务包导出', () => {
     // 「先作废、再导出」有个必须堵死的前提：导出**失败**时不能留下「这门课没有包」——
     // 旧包是此刻唯一还能跑的东西（用户点「训练」就是要立刻有东西能跑）。
     const course = '__stale-restore-course__'
-    const live = path.join(REPO_ROOT, 'tmp', course, taskBundleFileName(course))
+    const live = path.join(tmpCourseDir(course), taskBundleFileName(course))
     try {
       mkdirSync(path.dirname(live), { recursive: true })
       writeFileSync(live, 'OLD-CODE', { encoding: 'utf-8', flag: 'w' })
@@ -220,7 +220,7 @@ describe('任务包导出', () => {
       // 显式恢复：线上已有包时不覆盖
       expect(restoreTaskBundle(course, latestStalePack(course) ?? '').restored).toBe(false)
     } finally {
-      rmSync(path.join(REPO_ROOT, 'tmp', course), { recursive: true, force: true })
+      rmSync(tmpCourseDir(course), { recursive: true, force: true })
     }
   })
 
@@ -392,7 +392,7 @@ describe('产物导入', () => {
     expect(calls[0].args[2]).toBe('--dest')
     expect(calls[0].args[4]).toBe('--course')
     expect(calls[0].args[5]).toBe(COURSE)
-    expect(deliverImportRoot(COURSE)).toBe(path.join(REPO_ROOT, 'tmp', COURSE, 'deliver'))
+    expect(deliverImportRoot(COURSE)).toBe(path.join(tmpCourseDir(COURSE), 'deliver'))
   })
 
   it('★ DoD-5a：8+ 类坏包各跑一次 —— 结论必须是可执行的人话，不丢裸异常给人', async () => {
@@ -632,8 +632,8 @@ describe('产物导入', () => {
   })
 
   it('上传原件落在课程下的 deliver-uploads/（留证，不覆盖历史）', () => {
-    expect(deliverUploadDir(COURSE)).toBe(path.join(REPO_ROOT, 'tmp', COURSE, 'deliver-uploads'))
-    expect(deliverImportRoot(COURSE)).toBe(path.join(REPO_ROOT, 'tmp', COURSE, 'deliver'))
+    expect(deliverUploadDir(COURSE)).toBe(path.join(tmpCourseDir(COURSE), 'deliver-uploads'))
+    expect(deliverImportRoot(COURSE)).toBe(path.join(tmpCourseDir(COURSE), 'deliver'))
   })
 
   it('★ §6.2-5：留证目录只留最近 3 份（删时响亮一行，不默默删）', () => {
@@ -944,7 +944,7 @@ describe('产物导入', () => {
   it('B0：从 <traj>/deliver 或 remote-jobs/offline 取段末产物，argv 交给 python 导入器', async () => {
     delete process.env.BCITY_NO_AUTO_TASK_BUNDLE
     const course = '__backfill-course__'
-    const runDir = path.join(REPO_ROOT, 'tmp', course, 'remote-jobs', 'offline', 'seg-1')
+    const runDir = path.join(tmpCourseDir(course), 'remote-jobs', 'offline', 'seg-1')
     try {
       mkdirSync(path.join(runDir, 'it-003'), { recursive: true })
       writeFileSync(path.join(runDir, 'it-003', 'weights.json'), '{}')
@@ -975,7 +975,7 @@ describe('产物导入', () => {
         course,
       ])
     } finally {
-      rmSync(path.join(REPO_ROOT, 'tmp', course), { recursive: true, force: true })
+      rmSync(tmpCourseDir(course), { recursive: true, force: true })
     }
   })
 
@@ -986,7 +986,7 @@ describe('产物导入', () => {
     }) as unknown as DeliverZipRunner)
     expect(quiet).toEqual({ ok: true, ran: false, note: '' })
     const course = '__backfill-idempotent__'
-    const runDir = path.join(REPO_ROOT, 'tmp', course, 'deliver', 'seg-9')
+    const runDir = path.join(tmpCourseDir(course), 'deliver', 'seg-9')
     try {
       mkdirSync(path.join(runDir, 'it-050'), { recursive: true })
       writeFileSync(path.join(runDir, 'it-050', 'weights.json'), '{}')
@@ -1000,7 +1000,7 @@ describe('产物导入', () => {
       expect(r.ok).toBe(true)
       expect(r.note).toContain('无需回灌')
     } finally {
-      rmSync(path.join(REPO_ROOT, 'tmp', course), { recursive: true, force: true })
+      rmSync(tmpCourseDir(course), { recursive: true, force: true })
     }
   })
 

@@ -17,7 +17,7 @@ import { describe, expect, it } from 'bun:test'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, writeFileSync } from 'fs'
 import { tmpdir } from 'os'
 import path from 'path'
-import { loopAppliedPath, loopControlPath } from '../src/core/paths'
+import { LOG_DIR, loopAppliedPath, loopControlPath } from '../src/core/paths'
 import {
   LOOP_CONTROL_VERSION,
   parseLoopControl,
@@ -125,12 +125,18 @@ describe('readLoopControl（永不抛）', () => {
   })
 
   it('路径常量默认落在 tmp/ 且可被 BCITY_* 覆盖（单测重定向，生产零变化）', () => {
-    expect(loopControlPath()).toContain(path.join('tmp', 'loop-control.json'))
-    expect(loopAppliedPath()).toContain(path.join('tmp', 'loop-control.applied.json'))
+    // ★ 2026-10-19：要验「默认」就得**先把 env 删掉**再断言。原实现直接断言
+    //   `loopControlPath()` 含 `tmp/loop-control.json` —— 在 `tests/helpers/isolate-paths.ts`
+    //   预载（全进程 env 重定向）之下恒红，因为那时它指的是隔离根而不是仓根 tmp。
+    //   删掉 env 的那几下就是「生产形态」；finally 里原样还回去（预载设的值也一并还原）。
     const old = { a: process.env.BCITY_LOOP_CONTROL, b: process.env.BCITY_LOOP_APPLIED }
-    process.env.BCITY_LOOP_CONTROL = '/x/ctl.json'
-    process.env.BCITY_LOOP_APPLIED = '/x/app.json'
+    delete process.env.BCITY_LOOP_CONTROL
+    delete process.env.BCITY_LOOP_APPLIED
     try {
+      expect(loopControlPath()).toBe(path.join(LOG_DIR, 'loop-control.json'))
+      expect(loopAppliedPath()).toBe(path.join(LOG_DIR, 'loop-control.applied.json'))
+      process.env.BCITY_LOOP_CONTROL = '/x/ctl.json'
+      process.env.BCITY_LOOP_APPLIED = '/x/app.json'
       expect(loopControlPath()).toBe('/x/ctl.json')
       expect(loopAppliedPath()).toBe('/x/app.json')
     } finally {

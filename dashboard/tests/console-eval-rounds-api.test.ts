@@ -9,7 +9,7 @@
 import { afterAll, describe, expect, it } from 'bun:test'
 import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import path from 'path'
-import { REPO_ROOT } from '../src/core/paths'
+import { tmpCourseDir } from '../src/core/paths'
 import {
   buildEvalGamesView,
   buildEvalRoundsView,
@@ -17,7 +17,7 @@ import {
 } from '../src/server/api/eval-games'
 
 const COURSE = `__test-eval-rounds-${process.pid}-${Date.now()}`
-const TRAJ = path.join(REPO_ROOT, 'tmp', COURSE)
+const TRAJ = tmpCourseDir(COURSE)
 
 afterAll(() => {
   rmSync(TRAJ, { recursive: true, force: true })

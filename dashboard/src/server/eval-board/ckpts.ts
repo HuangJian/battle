@@ -1,7 +1,7 @@
 /** ckpts.ts — ckpt / iter 发现与评估权重清单视图（只读元数据，不读内容）。 */
 import { readdirSync, statSync } from 'fs'
 import path from 'path'
-import { REPO_ROOT } from '../../core/paths'
+import { REPO_ROOT, tmpCourseDir } from '../../core/paths'
 import type { EvalCkptFile, EvalCkptsView } from '../../web/view'
 
 /** `*.it<N>.*.json` 文件名 → N（R3/D-b：iter 不靠前端手传）。无匹配 ⇒ null。 */
@@ -78,7 +78,7 @@ export function buildEvalCkptsView(course = '', leg = ''): EvalCkptsView {
   }
   // 活动权重兜底（tmp/<course>/weights.json，若存在）。
   if (course) {
-    const act = path.join(REPO_ROOT, 'tmp', course, 'weights.json')
+    const act = path.join(tmpCourseDir(course), 'weights.json')
     try {
       const st = statSync(act)
       files.unshift({

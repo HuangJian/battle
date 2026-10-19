@@ -10,7 +10,7 @@
  */
 import { readFileSync, readdirSync, statSync } from 'fs'
 import path from 'path'
-import { REPO_ROOT } from '../../core/paths'
+import { tmpLogsDir } from '../../core/paths'
 
 /** 单腿单方向的统计（探针 `_stats()` 的口径）。 */
 export interface TunnelAbStat {
@@ -109,7 +109,7 @@ export function parseTunnelAb(raw: string, file: string, mtime: number): TunnelA
 }
 
 /** 读最近的探针结果（新→旧）。目录不存在/为空 = available:false 空态。 */
-export function readTunnelAbRuns(limit = 5, dir = path.join(REPO_ROOT, 'tmp')): TunnelAbView {
+export function readTunnelAbRuns(limit = 5, dir = tmpLogsDir()): TunnelAbView {
   try {
     const files = readdirSync(dir)
       .filter((f) => f.startsWith('tunnel-ab-') && f.endsWith('.json'))

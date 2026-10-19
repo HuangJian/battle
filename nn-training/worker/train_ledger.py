@@ -167,6 +167,12 @@ class LedgerView:
     iterations_n: int = 0
     rows: list[IterRow] = field(default_factory=list)
     verdicts: list[VerdictRow] = field(default_factory=list)
+    #: ★ 已落 `rollout_end` 的轮号集（`rollout end` 事件的**幂等判据**）。
+    #:  为什么放视图里：账本只在开课/续跑扫一遍，之后全靠 `apply_event` 增量维护 ⇒
+    #:  这里天然持有「本轮写没写过」，不必为一次判据再读一遍盘。
+    #:  ⚠️ 对续跑/门禁**无语义**：`rollout_end` 只说明采集收官，不说明梯度步已提交
+    #:  （`last_completed_iter` 仍只认 `iteration`）。
+    rollout_ends: set[int] = field(default_factory=set)
     ignored_events: int = 0
     bad_lines: int = 0
 
@@ -210,6 +216,12 @@ class LedgerView:
             self._on_verdict(event)
         elif name == "stop_loss":
             self.stop_loss_streak = int(event.get("streak") or 0)
+        elif name == "rollout_end":
+            # 采集收官即刻落账（控制台走势图/指标表消费）。对续跑与门禁**无推进语义**
+            # ⇒ 只登记轮号，供 `_record_rollout` 做幂等判据。
+            _it = event.get("iter")
+            if isinstance(_it, int) and not isinstance(_it, bool):
+                self.rollout_ends.add(_it)
         else:
             # 未知/无关键（job_completed、job_failed、circuit_break、run_complete…）
             self.ignored_events += 1

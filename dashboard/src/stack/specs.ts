@@ -8,7 +8,14 @@
 
 import { existsSync, readdirSync } from 'fs'
 import path from 'path'
-import { CONFIG_PATH, LOG_DIR, NN_TRAINING, REPO_ROOT } from '../core/paths'
+import {
+  CONFIG_PATH,
+  LOG_DIR,
+  NN_TRAINING,
+  REPO_ROOT,
+  loopControlPath,
+  tmpLogsDir,
+} from '../core/paths'
 import { httpOk, pidAlive, portListen } from '../core/net'
 import { entryForCourse, loadRegistry } from '../core/registry'
 import { agentSentinels, pySentinels } from '../core/sentinels'
@@ -137,7 +144,7 @@ export function hubServerSpec(cfg: RlConfig): ProcSpec {
       '--token',
       cfg.rl.remote_token,
       '--traj-root',
-      path.join(REPO_ROOT, 'tmp'),
+      tmpLogsDir(),
       '--discover',
       // hub 中介 push 派发（2026-09-18）：`rl.hub_push` 打开时，hub 按队列顺序把 job 推给
       // **登记在册**的 GPU worker（登记表 = rl-config 的 `gpu_push` 节点，控制台的 worker
@@ -455,12 +462,12 @@ export function trainerServeSpec(
       '--serve',
       // traj 根必须绝对（hub 同一个坑：相对路径会指到控制台 cwd）
       '--traj-root',
-      path.join(REPO_ROOT, 'tmp'),
+      tmpLogsDir(),
       // ★ §3（2026-09-21）：`--ppo` 已删除 —— PPO 恒为「发布到 hub 队列 + 等 worker 认领」，
       //   训练侧没有「跑在哪」这个参数；想要本机算，起本机 worker 组件（同一认领协议）。
       // 控制文件（暂停意图）：控制台写、训练侧每拍读——显式给绝对路径，不靠 cwd
       '--control-file',
-      path.join(REPO_ROOT, 'tmp', 'loop-control.json'),
+      loopControlPath(),
       // 进程级单实例锁（一个进程服务所有课程 ⇒ 双开 = 两套调度器抢同一批 traj）
       '--cluster-lock',
       path.join(NN_TRAINING, '.run_cluster.lock'),

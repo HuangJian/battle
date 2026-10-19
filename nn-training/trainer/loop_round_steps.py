@@ -123,6 +123,7 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
     _held_note: str
     _export_weights: Any
     _join_eval: Any
+    _record_rollout: Any
     _record_iteration: Any
     _write_iter_stats: Any
     _rotate_cleanup: Any
@@ -382,6 +383,11 @@ class RoundSteps(TrainingVolume, TrainingBaseline, TrainingIterDir, TrainingDisp
         self._dispatch_delayed_eval(it, ctx.dist_cfg)
         self._maybe_dispatch_baseline_eval(ctx.dist_cfg)
         self._log_report(it, ctx.t_rollout)
+        # ★ 采集已收官（本步的入口语义）⇒ 立刻落一行 `rollout_end`：
+        #   控制台走势图/指标表**当下**就多出 it 这一点的 rollout 读数，不等远端
+        #   PPO 回传（第 ⑦ 步，几十分钟量级）。必须在 `_log_report` 之后：
+        #   它负责 pop 掉 report 里不可序列化的 `_eval_thread` / `_stream` 句柄。
+        self._record_rollout(it)
         self._evalboard_idle(it, ctx.dist_cfg)
         return None
 

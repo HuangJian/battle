@@ -3,7 +3,7 @@ import { existsSync } from 'fs'
 import path from 'path'
 import { loadConfig } from '../../core/config'
 import { httpOk, pidAlive } from '../../core/net'
-import { LOG_DIR, REPO_ROOT } from '../../core/paths'
+import { LOG_DIR, tmpCourseDir } from '../../core/paths'
 import { sharedHubPort } from '../../core/slots'
 import type { Component } from '../../core/types'
 import { hubServerHealthy } from '../../stack/hub'
@@ -29,9 +29,7 @@ export async function smokeComponent(key: Component, ctx: StartCtx): Promise<Act
       case 'selfNode': {
         items.push(await selfNodeSmoke(cfg))
         if (ctx.course) {
-          items.push(
-            await rolloutSmoke(cfg, path.join(REPO_ROOT, 'tmp', ctx.course, 'weights.json')),
-          )
+          items.push(await rolloutSmoke(cfg, path.join(tmpCourseDir(ctx.course), 'weights.json')))
         } else {
           items.push({ name: 'rollout 冒烟', passed: true, fatal: false, detail: '未设课程，跳过' })
         }

@@ -1306,7 +1306,20 @@ export function buildIterRows(input: IterMetricsInput): { rows: IterRow[]; cache
       if (!line.trim()) return
       try {
         const r = JSON.parse(line) as Record<string, unknown>
-        if (r.event !== 'iteration') return
+        // 两种行都能出指标行：
+        //   · `iteration`    = 本轮**结算完**（含 PPO 与传输账）；
+        //   · `rollout_end`  = 本轮**采集收官即刻**（PPO 还没跑 / 权重还没回传）。
+        // 后者是用户 2026-10-19 的口径修复：走势图要「采集一结束就多一点」，不是
+        // 「等 W(it+1) 回来才多一点」。同 iter 取文件里最后一条（见下方去重）
+        // ⇒ PPO 落账后 `rollout_end` 行自动被覆盖，不留残影。
+        if (r.event !== 'iteration' && r.event !== 'rollout_end') return
+        const early = r.event === 'rollout_end'
+        /** PPO 侧字段（`rollout_end` 时还没跑 ⇒ NaN 缺口，绝不写 0 冒充）；
+         *  旧行口径 = `Number(v ?? 0)`。 */
+        const ppo = (v: unknown): number => (early ? Number.NaN : Number(v ?? 0))
+        /** 同上，但旧行口径是「缺键 = null」的那两列。 */
+        const ppoOrNull = (v: unknown): number | null =>
+          early ? Number.NaN : v != null ? Number(v) : null
         const dm = (r.dim_means ?? {}) as Record<string, number>
         const topDims = Object.entries(dm)
           .sort((a, b) => b[1] - a[1])
@@ -1344,23 +1357,26 @@ export function buildIterRows(input: IterMetricsInput): { rows: IterRow[]; cache
         rows.push({
           iter,
           time: rowTime,
-          wire: parseIterWire(r.wire),
+          wire: early ? null : parseIterWire(r.wire),
           winRate: Number(r.winRate ?? 0),
           scoreMean: Number(r.score_mean ?? 0),
           scoreStd: Number(r.score_std ?? 0),
           samples: Number(r.samples ?? 0),
           rolloutSec: Number(r.rollout_sec ?? 0),
-          ppoSec: Number(r.ppo_sec ?? 0),
+          ppoSec: ppo(r.ppo_sec),
           pureCollectSec: r.pure_collect_sec != null ? Number(r.pure_collect_sec) : null,
-          ppoCloudSec: r.ppo_cloud_sec != null ? Number(r.ppo_cloud_sec) : null,
+          ppoCloudSec: ppoOrNull(r.ppo_cloud_sec),
+          // 权重下发是**采集侧**的墙钟（report 里本来就有）⇒ rollout_end 也带它。
           distPhaseSec: r.dist_phase_sec != null ? Number(r.dist_phase_sec) : null,
-          kl: Number(r.kl ?? 0),
-          entropy: Number(r.entropy ?? 0),
-          policyLoss: Number(r.policy ?? 0),
-          valueLoss: Number(r.value ?? 0),
-          meanRet: Number(r.mean_ret ?? 0),
-          lr: Number(r.lr ?? 0),
+          kl: ppo(r.kl),
+          entropy: ppo(r.entropy),
+          policyLoss: ppo(r.policy),
+          valueLoss: ppo(r.value),
+          meanRet: ppo(r.mean_ret),
+          lr: ppo(r.lr),
           expectedGames: Number(r.expectedGames ?? 0),
+          // 「采集已收官、PPO 未回传」的行：UI 在 iter 列标一盏灯，读数不冒充。
+          pendingPpo: early,
           halted: Boolean(r.halted),
           topDims,
           avgTicks:
@@ -1377,9 +1393,15 @@ export function buildIterRows(input: IterMetricsInput): { rows: IterRow[]; cache
         /* skip bad line */
       }
     })
-    // 同 iter 去重：取最后一条 = 最新对账结果（双 trainer 并行事故的口径）。
+    // 同 iter 去重：正常时序下 rollout_end 在前、iteration 在后 ⇒ 取最后一条（= 最新对账
+    // 结果，双 trainer 并行事故的口径）；但**信息量优先于时序** —— `iteration` 行带着
+    // rollout_end 的全部字段再加 PPO/传输账，乱序/重放时它必须胜出（否则结算完的轮会
+    // 退化成「PPO 中」的空缺口行）。
     const byIter = new Map<number, IterRow>()
-    for (const r of rows) byIter.set(r.iter, r)
+    for (const r of rows) {
+      const prev = byIter.get(r.iter)
+      if (!prev || (prev.pendingPpo && !r.pendingPpo)) byIter.set(r.iter, r)
+    }
     const merged = [...byIter.values()]
     merged.sort((a, b) => b.iter - a.iter)
     // it0 基线行（bc 权重评估）：它没有 rollout 采样、只有干净评估 ⇒ 合成一行；

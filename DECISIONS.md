@@ -7487,3 +7487,81 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   actuals 缓存未覆盖的轮（`it<N>/per-game.json` 不备份）。
 - **门禁**：`bun run check` 绿、dashboard typecheck + 1684 用例 + 四份 bundle、nn python gate 绿
   （新增 `test_tmp_clean_needs_mirror.py` 7 例）。评审 F1–F15 全并入 plan v3 + `review-bf`。
+
+## §2026-10-19-goalnn-rollout-end-event — 指标行在「采集收官」即刻上屏（新增 `rollout_end` 账本事件，不提前写 `iteration`）
+
+- **背景**：控制台首页走势图与指标表的唯一数据源 = `training_log.jsonl` 里 `event=="iteration"` 的行。
+  而 `record_iteration` 在一轮 13 步里排第 ⑪，前面压着 `ppo` —— 远端模式要等云机跑完梯度步
+  + 权重回传（实测本机 134s/轮，差网络数十分钟）。于是**采集早已结束**，操作员却要等
+  W(it+1) 回来才看到 it 那一点，画面表现为"卡住"。
+- **决策**：训练侧在**采集收官窗口**（第 ⑥ 步 `eval_dispatch`，`_log_report` 之后）立刻落一行
+  **新事件 `rollout_end`**；控制台 `iters.buildIterRows` 同时消费 `iteration` 与 `rollout_end`。
+  同 iter **按信息量取胜**（不是纯时序）：`iteration` 行带着 `rollout_end` 的全部字段再加
+  PPO / 传输账 ⇒ 无论先后，它都覆盖 `rollout_end`。
+- **为什么另起事件名（★ 本条的全部理由）**：`iteration` 是**断点续跑的推进判据**
+  （`worker/resume.py` 的 `last_completed_iter` 只认它）。若在 PPO 之前写它，进程一旦死在
+  「采集完 → 梯度步提交前」，续跑会**跳过这一轮**——采集白烧，账本还自证跑过了。
+  另起事件名 ⇒ 续跑 / 门禁照旧走 `LedgerView.apply_event` 的 else 分支忽略它，
+  **只有控制台指标读面**消费它。
+- **字段口径（写侧）**：`rollout_end` **只带采集侧事实** —— `iter` / `time` / `winRate` /
+  `outcomes` / `score_mean|std` / `dim_means` / `intentCounts` / `baseIntegrity` / `samples` /
+  `ticks` / `rollout_sec`（窗口墙钟）/ `pure_collect_sec` / `dist_phase_sec`（权重下发也属采集侧）
+  + 队列模式附加的 `missing` / `expectedGames` / `dist`。
+  **PPO 侧键一个都不写**（`kl` / `entropy` / `policy` / `value` / `mean_ret` / `lr` /
+  `ppo_sec` / `ppo_cloud_sec` / `wire`）——缺键 = 空 ⇒ 读面按 NaN 缺口处理，
+  **绝不写 0 冒充**（0 会在走势图上多画一个假零点）。
+- **幂等**：`LedgerView.rollout_ends` 记轮号；同 it 重复进入第 ⑥ 步（让步后重入 / 重放）不再写。
+- **备选与否决**：① **把 `iteration` 提前写到 rollout 结束** —— 否（见上，会让续跑跳轮，这是最贵的一类错）；
+  ② 控制台自己扫 `it<N>/**/manifest.json` 合成行 —— 否（绕开账本 SSOT，且拿不到 `samples` / 采集墙钟）；
+  ③ 另开一份 `rollout_log.jsonl` —— 否（同一条流水被劈成两个文件 ⇒ 双事实源，冷存/轮转各漏一半）。
+- **后果**：远端腿上「采集收官 → PPO 回传」这段空窗期，走势图/指标表**当下**就多出 it 的那一点
+  （rollout 读数齐全，PPO 列是空缺口并在 iter 列标「PPO 中」）；本轮 `iteration` 行落账后自动无缝替换。
+- **门禁**：`nn-python-gate.sh` 绿（新增 `tests/worker/test_rollout_end_event.py` 3 例）·
+  dashboard `bun run test`（新增 `server-iters-rollout-end` 3 例 + `web-rollout-end-pending` 2 例）·
+  `bun run typecheck` 绿。
+
+
+## §2026-10-19-goalnn-test-path-isolation — 测试零读写真实工作目录：路径 env 全量预载隔离 + `REPO_ROOT/tmp` 硬编码清零
+
+- **背景（用户定调）**：「测试应该用自己的 fixtures，禁止读写真实工作目录」。实测违规面：
+  `dashboard/data/course-metrics/`（热备份库，20 门课）被 `pool-history.addHotMirrorCandidates()`
+  当成**课程候选**读进聚合 ⇒ 池历史/贡献数用例在真实库存在时随机红（断言里直接冒出
+  `y23-acc-off` 这种真课名）；`auto-offline-handoff.test.ts` 更把 `__ahand-*__` 假课**写**进
+  仓根 `tmp/`；`local-worker.test.ts::loadRealConfig()` 读常量 `CONFIG_PATH`（= 线上真
+  `rl-config.json`），把断言挂在本机配置上。同命令同树对照确认：**与任何功能改动无关**，
+  纯粹是隔离缺口。
+- **根因**：`core/paths.ts` 的惰性 env 重定向是**自愿参加**的——测试记得设才隔离；而
+  `src/` 里有 **31 处** `path.join(REPO_ROOT, 'tmp', …)` 硬编码（bundles / eval-games /
+  state-view / specs…），**绕开**重定向 ⇒ 即使设了 env 也照旧读写真实目录。
+- **决策**：
+  1. **新增 `core/paths.ts::tmpCourseDir(course)`**（`= join(tmpLogsDir(), course)`），
+     把 31 处硬编码全部收敛到它（外加 `--traj-root` / heapsnapshot / `--control-file`
+     三处非课程路径改用 `tmpLogsDir()` / `loopControlPath()`）。默认行为零变化。
+  2. **新增 `tests/helpers/isolate-paths.ts` 预载**：进程级（早于任何测试模块 import）把
+     全部 `BCITY_*` **运行时**路径 env 指进一个 `mkdtempSync` 隔离根，并在根里播种一份
+     **最小种子 rl-config**（无节点、无课程）——忘了设 env 的用例拿到的是空夹具，
+     而不是线上真配置或 ENOENT。挂在 `scripts/run-tests.ts` 的 `--preload`（与 no-proxy 并列）。
+  3. **守卫**：`tests/test-path-isolation.test.ts` —— ① 全部运行时路径必在隔离根内且不在
+     仓根 tmp / `dashboard/data` / `nn-training` 之下；② 备份库为空；③ **源码级围栏**：
+     `src/**/*.ts` 里除 `core/paths.ts` 的定义外零处 `REPO_ROOT, 'tmp'`。
+     `tests/gate-composition.test.ts` 加钉「启动器带 isolate-paths 预载」。
+- **备选与否决**：① **继续自愿参加、逐个测试补 env** —— 否（本次 7 条红就是这么来的，
+  漏一个红一个，且新增测试天然继续漏）；② 预载只重定向、**不播种 rl-config** —— 否
+  （`loadConfig` 不兜底，一批「读配置」用例当场 ENOENT，红从 7 条变 20 条，与要修的污染无关）；
+  ③ 把 `BCITY_CURRICULA_DIR` 也隔离 —— **否（本轮明确不做）**：`nn-training/curricula/` 是
+  **入库源数据**（与 `src/` 同级的只读事实源），重定向它会让「读课程配置」的用例整体失去对象；
+  它与 `tmp/` 这类**运行时**工作目录不是一类。要动得单独一刀，连同所有依赖它的用例一起搬进夹具
+  （守卫里有反面断言钉住这个边界）；④ 用 fs 层 hook 拦截真实目录访问 —— 否（Bun 下
+  ESM 命名导入绑定早于 hook，且会把「读源数据」一起打死）。
+- **迁移的测试**：`auto-offline-handoff` / `server-api-task-bundle` / `console-eval-rounds-api` /
+  `course-lifecycle` / `training-multi-course` / `training-shared-trainer` 的路径断言改用
+  `tmpCourseDir()` / `tmpLogsDir()`；`server-api-error-registry` 的 P0-3 不再读仓根真账本
+  （那本身就是一次真实目录读），改为断言隔离生效；`loop-control` 的「默认落在 tmp/」改为
+  **先删 env 再断言**（预载之下原断言恒红）；`local-worker` 的 `loadRealConfig` 改名
+  `loadTestConfig` 并改读 `configPath()`。
+- **后果**：dashboard 全量 **1712 pass / 0 fail**（此前同树同命令 7 条红，其中 4 条直接
+  由真实库/真实 tmp 数据决定）；fs 层追踪确认整个套件对 `repo/tmp`、`dashboard/data`、
+  `repo/archive` **零读零写**。**不承诺**：`curricula/`、`nn-training/ladder/`、
+  `nn-training/.venv/`（工具链）仍未隔离——它们是只读源数据/工具链，不是运行时工作目录。
+- **门禁**：`bun run typecheck` 绿 · `bunx oxlint` 0 警告 · `oxfmt --check` 净 ·
+  `bun run test` 1712 绿 · `bun src/server/build.ts` 四份 bundle 过。

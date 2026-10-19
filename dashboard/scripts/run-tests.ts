@@ -7,9 +7,11 @@
  * `--parallel=<n>`（口径唯一实现 = 仓根 `tools/lib/cores.ts::physicalCores`；dashboard 早已
  * 只读引用该模块，见 `src/core/venv.ts` 与 `.github/workflows/dashboard.yml` 的 paths）。
  *
- * 组成的两条硬要求（由 `tests/gate-composition.test.ts` 钉住 —— 删掉就是**静默退化**）：
+ * 组成的三条硬要求（由 `tests/gate-composition.test.ts` 钉住 —— 删掉就是**静默退化**）：
  *   · `--parallel`：文件级隔离（去掉 ⇒ 58 个用例因跨文件 global 污染转红，不是慢是错）；
- *   · `--preload ./tests/helpers/no-proxy.ts`：代理机器上不预载 ⇒ 回环流量走 PROXY 白等（11.4s vs 1.8s）。
+ *   · `--preload ./tests/helpers/no-proxy.ts`：代理机器上不预载 ⇒ 回环流量走 PROXY 白等（11.4s vs 1.8s）；
+ *   · `--preload ./tests/helpers/isolate-paths.ts`：不预载 ⇒ 忘了设 env 的用例落到**真实工作目录**
+ *     （实测 `dashboard/data/course-metrics/` 的 20 门课被读进池聚合，池历史/贡献用例随机红）。
  */
 import { spawnSync } from 'node:child_process'
 import { dirname } from 'node:path'
@@ -27,6 +29,8 @@ const args = [
   '--timeout=50000',
   '--preload',
   './tests/helpers/no-proxy.ts',
+  '--preload',
+  './tests/helpers/isolate-paths.ts',
   'tests',
   ...process.argv.slice(2),
 ]

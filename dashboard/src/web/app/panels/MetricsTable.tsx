@@ -158,6 +158,15 @@ function iterCol(ea: EvalACols): Col<MetricRow> {
             {r.main.iter}
             {r.main.halted ? <span className="tc-pill tc-pill--note">halted</span> : null}
           </b>
+          {/* 采集已收官、PPO/权重未回传：这一行有 rollout 读数，PPO 侧列是空缺口。 */}
+          {r.main.pendingPpo ? (
+            <span
+              className="tc-pill tc-pill--note"
+              title="本轮采集已收官，PPO 梯度步尚未回传（下列 PPO 读数为空是预期，不是 0）"
+            >
+              PPO 中
+            </span>
+          ) : null}
           {!ea.readOnly && ea.course && !r.main.evalData ? (
             <button
               type="button"

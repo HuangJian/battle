@@ -19,7 +19,7 @@
 import { closeSync, mkdirSync, openSync } from 'fs'
 import { spawn } from 'child_process'
 import path from 'path'
-import { REPO_ROOT } from '../core/paths'
+import { REPO_ROOT, tmpCourseDir } from '../core/paths'
 import { warn } from '../core/log'
 import { busy } from './actions'
 import { resolveRunPython } from './run-python'
@@ -29,7 +29,7 @@ export const EVAL_A_BUSY_KEY = 'eval:A'
 
 /** evalA 的日志文件（`tmp/<课程>/evalA.log`；与既有约定同址）。 */
 export function evalALogPath(course: string): string {
-  return path.join(REPO_ROOT, 'tmp', course, 'evalA.log')
+  return path.join(tmpCourseDir(course), 'evalA.log')
 }
 
 /** 排队上限：单次评估几十秒–几分钟，8 单已是十几分钟到半小时的积压——再多是误点/脚本刷，

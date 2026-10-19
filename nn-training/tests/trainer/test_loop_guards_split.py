@@ -154,7 +154,10 @@ INBOUND_CALLS: dict[str, dict[str, int]] = {
         "loop_guards_leg.py": 4,
         "loop_guards_trip.py": 3,
         "loop_round_steps.py": 1,
-        "loop_steps.py": 1,
+        # ★ 2026-10-19：`loop_steps` 多了一处写侧（`_record_rollout` 落 `rollout_end`）。
+        #   `rollout_end` 对续跑/门禁**无语义**（它不推进 `next_it`），但既然落进账本，
+        #   就必须喂给增量视图 —— 否则「视图 == 盘上账本」这条就破了。
+        "loop_steps.py": 2,
     },
     "_is_soft_verdict": {"loop_guards.py": 1, "loop_guards_gate.py": 1},
     "_gate_halt_mode": {"loop_guards.py": 1},

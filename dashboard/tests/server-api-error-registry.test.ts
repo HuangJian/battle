@@ -17,10 +17,10 @@
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs'
+import { mkdtempSync, readFileSync, rmSync } from 'fs'
 import os from 'os'
 import path from 'path'
-import { REPO_ROOT } from '../src/core/paths'
+import { REPO_ROOT, errorLedgerPath } from '../src/core/paths'
 import { errorFingerprint, normalizeErrorText } from '../src/server/api/error-fingerprint'
 import {
   collectLocalLogEvents,
@@ -248,9 +248,11 @@ describe('账本（G5 / P0-3）', () => {
 
   it('★ P0-3：重定向生效 —— 本套件的行只在被重定向的账本里', () => {
     expect(readFileSync(ledger, 'utf8').includes('led-3')).toBe(true)
-    // 仓根那份（若操作员机器上真存在）**不得**含本套件写的指纹 —— 去掉 env 重定向这条会红。
-    const prod = path.join(REPO_ROOT, 'tmp', 'component-errors.jsonl')
-    if (existsSync(prod)) expect(readFileSync(prod, 'utf8').includes('led-3')).toBe(false)
+    // ★ 2026-10-19：原断言是「读一遍仓根真账本，确认里面没有本套件的指纹」——那本身就是一次
+    //   真实目录读。现在由 `tests/helpers/isolate-paths.ts` 预载**结构性**保证隔离
+    //   （`errorLedgerPath()` 必不在仓根 tmp 下）⇒ 这里只断言隔离生效，不再碰真文件。
+    expect(errorLedgerPath()).toBe(ledger)
+    expect(errorLedgerPath().startsWith(REPO_ROOT)).toBe(false)
   })
 })
 

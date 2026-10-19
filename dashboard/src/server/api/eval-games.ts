@@ -4,7 +4,7 @@ import path from 'path'
 import { STAGES } from '../../../../src/config/stages'
 import { isArenaId, resolveArenaStage } from '../../../../src/nn/arena-ladder'
 import { CUSTOM_STAGE_BASE } from '../../../../src/nn/config-stage'
-import { REPO_ROOT } from '../../core/paths'
+import { tmpCourseDir } from '../../core/paths'
 import type {
   EvalGamesData,
   EvalGamesView,
@@ -67,7 +67,7 @@ export function parseEvalIterParam(raw: string | null): number | undefined | nul
  *      选轮走 `GET /api/evalRounds`（summary-only，成本低），不用本接口。 */
 export function buildEvalGamesView(course = '', iter?: number): EvalGamesView {
   if (!course) return emptyEvalGamesView(course)
-  const trajDir = path.join(REPO_ROOT, 'tmp', course)
+  const trajDir = tmpCourseDir(course)
   if (!existsSync(path.join(trajDir, 'eval_log.jsonl'))) return emptyEvalGamesView(course)
   let data: EvalGamesData | null = null
   try {
@@ -89,7 +89,7 @@ export function buildEvalGamesView(course = '', iter?: number): EvalGamesView {
  *  iters.ts::readEvalRoundOptions 的注释）。无 eval_log ⇒ 空列表（弹窗显示「暂无评估记录」）。 */
 export function buildEvalRoundsView(course = ''): EvalRoundsView {
   if (!course) return { course, rounds: [] }
-  const trajDir = path.join(REPO_ROOT, 'tmp', course)
+  const trajDir = tmpCourseDir(course)
   try {
     return { course, rounds: readEvalRoundOptions(trajDir) }
   } catch {
@@ -104,10 +104,10 @@ export function replayExportPaths(course: string): {
   gamesFile: string
 } {
   return {
-    manifest: path.join(REPO_ROOT, 'tmp', course, 'replay-export.json'),
-    outDir: path.join(REPO_ROOT, 'tmp', course, 'replay-export'),
-    log: path.join(REPO_ROOT, 'tmp', course, 'replay-export.log'),
-    gamesFile: path.join(REPO_ROOT, 'tmp', course, 'replay-export-games.json'),
+    manifest: path.join(tmpCourseDir(course), 'replay-export.json'),
+    outDir: path.join(tmpCourseDir(course), 'replay-export'),
+    log: path.join(tmpCourseDir(course), 'replay-export.log'),
+    gamesFile: path.join(tmpCourseDir(course), 'replay-export-games.json'),
   }
 }
 

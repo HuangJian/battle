@@ -24,7 +24,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'bun:test'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import os from 'os'
 import path from 'path'
-import { CONFIG_PATH, DASHBOARD_ROOT } from '../src/core/paths'
+import { DASHBOARD_ROOT, configPath } from '../src/core/paths'
 import { sharedHubUrl } from '../src/core/slots'
 import {
   LOCAL_WORKER_ENTRY,
@@ -64,13 +64,16 @@ afterAll(() => {
   rmSync(scratch, { recursive: true, force: true })
 })
 
-function loadRealConfig(): RlConfig {
-  return JSON.parse(readFileSync(CONFIG_PATH, 'utf-8')) as RlConfig
+/** 读**当前生效**的配置（`configPath()` 走 env 重定向 ⇒ 夹具沙箱里那份，不是线上真配置）。
+ *  ★ 2026-10-19：原名 `loadRealConfig` + 读常量 `CONFIG_PATH` —— 那正是「测试读真实工作
+ *    目录」的活例（它会读到 `nn-training/rl-config.json`，把断言挂在本机配置上）。 */
+function loadTestConfig(): RlConfig {
+  return JSON.parse(readFileSync(configPath(), 'utf-8')) as RlConfig
 }
 
 /** 双课程配置（两课各占一槽；端口断言从它推导，不写死）。 */
 function dualCourseCfg(): RlConfig {
-  const cfg = loadRealConfig()
+  const cfg = loadTestConfig()
   return {
     ...cfg,
     courses: {
@@ -215,7 +218,7 @@ describe('localWorker 共享语义', () => {
     saveShared()
     // 重建走真实 venv 解析（restartSpecFor 内部用它）——两边同一份解析结果，比的是
     // 「重建是否复现原 spec」而不是两条 venv 路径。
-    const want = localWorkerSpec(loadRealConfig(), resolveVenvPython())
+    const want = localWorkerSpec(loadTestConfig(), resolveVenvPython())
     const fresh = restartSpecFor('localWorker')
     expect(fresh).not.toBeNull()
     for (const k of [

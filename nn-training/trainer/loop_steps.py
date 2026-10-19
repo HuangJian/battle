@@ -32,7 +32,7 @@ from common.log import log
 from trainer.loop_eval import TrainingEval
 from trainer.loop_export import TrainingExport
 from trainer.loop_remote import TrainingRemote
-from worker.events import write_iteration
+from worker.events import write_iteration, write_rollout_end
 
 if TYPE_CHECKING:
     from worker.commit_journal import CommitJournal
@@ -515,6 +515,29 @@ class TrainingSteps(TrainingRemote, TrainingEval, TrainingExport):
     # `_eval_on_round` 的占位）已搬到 `TrainingEval`（`trainer/loop_eval.py`，S4 第十七刀）——
     # 那是本类里第一条被搬走的方法间调用链；留下的成员全是叶子（产物出包那一簇里还有一条
     # `_export_offline_bundle` → `_volume_plan_block`，S4 第二十一刀一并搬去 `loop_export`）。
+
+    def _record_rollout(self, it: int) -> None:
+        """`rollout_end` 事件：**采集收官即刻**落账（不等 PPO / 权重回传）。
+
+        为什么单独一行：一轮 13 步里 `record_iteration` 排第 ⑪，前面压着 `ppo`
+        （远端模式 = 等云机跑完 + 权重回传，几十分钟量级）。于是控制台的走势图 /
+        指标表要等 W(it+1) 回来才多一个点 —— 采集早就结束了，操作员看到的是
+        「卡住」。采集一结束就落这一行 ⇒ 走势图立刻多出 it 那一点的 rollout 读数
+        （胜率 / 击杀 / 承伤 / 残血 / 道具 / 耗时），PPO 那几列是空缺口。
+
+        只带**采集侧**事实（report + 采集墙钟 `self._rollout_sec`）；PPO 侧字段此刻
+        不存在 ⇒ 不写键（缺键 = 空，读面按 NaN 处理，**不冒充 0**）。本轮 `iteration`
+        行落账后它即被覆盖（同 iter 取文件里最后一条）。
+
+        幂等：账本里已有本 it 的 `rollout_end` 行 ⇒ 直接返回（让步后重入 / 重放不重复记账）。
+        """
+        view = getattr(self, "_ledger", None)
+        seen = getattr(view, "rollout_ends", None)
+        if seen is not None and it in seen:
+            return
+        self._ledger_apply(
+            write_rollout_end(self._jsonl_path, self.args, it, self._report, self._rollout_sec)
+        )
 
     def _record_iteration(self, it: int) -> None:
         """iteration 事件落账（字段契约在 biz/events.py::write_iteration）。

@@ -34,7 +34,7 @@ import {
 } from 'fs'
 import os from 'os'
 import path from 'path'
-import { REPO_ROOT } from '../src/core/paths'
+import { REPO_ROOT, tmpCourseDir as coreTmpCourseDir } from '../src/core/paths'
 
 const DIR = mkdtempSync(path.join(os.tmpdir(), 'bcity-auto-handoff-'))
 process.env.BCITY_CONSOLE_STATE = path.join(DIR, 'console-state.json')
@@ -86,7 +86,7 @@ const future = (Date.now() + 60_000) / 1000
 const past = (Date.now() - 3_600_000) / 1000
 
 const livePack = (course: string): string => taskBundlePath(course)
-const tmpCourseDir = (course: string): string => path.join(REPO_ROOT, 'tmp', course)
+const tmpCourseDir = (course: string): string => coreTmpCourseDir(course)
 /** 开课标记（`courseEnabled` 的判据）：自动交接只接**在训**的课。 */
 const enableMarker = (course: string): string =>
   path.join(tmpCourseDir(course), 'training-enabled.txt')
@@ -308,7 +308,7 @@ describe('autoOfflineHandoff 的接线（假盘；不起子进程）', () => {
   it('B0：逃生阀置位 ⇒ 真回灌路径也不起 python（本机预演/用例共用同一个阀）', async () => {
     process.env.BCITY_NO_AUTO_TASK_BUNDLE = '1'
     const course = '__ahand-valve-backfill__'
-    const runDir = path.join(REPO_ROOT, 'tmp', course, 'deliver', 'seg-1')
+    const runDir = path.join(coreTmpCourseDir(course), 'deliver', 'seg-1')
     try {
       mkdirSync(path.join(runDir, 'it-003'), { recursive: true })
       writeFileSync(path.join(runDir, 'it-003', 'weights.json'), '{}', 'utf-8')

@@ -1,7 +1,7 @@
 /** state-view.ts — /api/state 主视图组装。 */
 import path from 'path'
 import { pidAlive } from '../../core/net'
-import { REPO_ROOT } from '../../core/paths'
+import { tmpCourseDir } from '../../core/paths'
 import { entryForCourse, loadRegistry } from '../../core/registry'
 import { type ConsoleStateView, type MetricsView } from '../../web/view'
 import { courseEnabled, enabledCoursesByOpenOrder, isBcCourse } from '../../stack/courses'
@@ -42,7 +42,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   const loopCompletes = collectLoopCompletes(
     [...courses.filter((c) => courseEnabled(c)), course],
     loopAlive,
-    (c) => readLogTail(path.join(REPO_ROOT, 'tmp', c, 'training_log.jsonl'), 1000).lines,
+    (c) => readLogTail(path.join(tmpCourseDir(c), 'training_log.jsonl'), 1000).lines,
   )
   // 机群级两笔冷探测互不依赖，**并行起跑**：慢快照里的节点 ping（~1.5s）与 hub 观测面
   // （`buildOverview`/`buildWorkerRegistry` 里的 ~1.2s）。串行时它们是相加的——冷启动/
@@ -80,9 +80,7 @@ export async function buildStateView(courseOverride?: string): Promise<ConsoleSt
   const hubForStall = await hubProbe.catch(() => null)
   const holdLive = course ? hubForStall?.holds[course]?.state === 'live' : false
   const ppoQueueStall =
-    course && !holdLive
-      ? detectPpoQueueStall(path.join(REPO_ROOT, 'tmp', course, 'remote-jobs'))
-      : null
+    course && !holdLive ? detectPpoQueueStall(path.join(tmpCourseDir(course), 'remote-jobs')) : null
   // 多课程并行总览 + push worker 登记 + 调度器队列（2026-09-18/R2c-3）：三个面各有一处
   // catch——观测面坏掉（无 hub / 账本不可读 / 只读 CLI 起不来）只该让那一块显空态
   // （视图自带 error 交 UI 显因），不该把整页 /api/state 带崩。

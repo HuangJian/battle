@@ -61,7 +61,10 @@ ROUND_STEPS_PY = NN_ROOT / "trainer/loop_round_steps.py"
 CLASS = "TrainingExport"
 MEMBERS = ("_ensure_ts_code", "_volume_plan_block", "_export_offline_bundle", "_export_weights")
 
-#: 留在 `loop_steps` 的 8 个成员（本刀一个不动）。
+#: 留在 `loop_steps` 的 9 个成员（本刀一个不动）。
+#: ★ 2026-10-19 追加一格 `_record_rollout`：采集收官即刻落账（控制台走势图不等 PPO 回传）。
+#:   它必须与 `_record_iteration` 同住 `loop_steps`（判据同源 = 写 `training_log.jsonl` 的结算簇），
+#:   理由同 `_write_iter_stats`——两处各写一遍落账口径必然漂。
 STAYS = (
     "_commit_journal",
     "_course_iter",
@@ -70,6 +73,7 @@ STAYS = (
     "_log_report",
     "_per_stage_quota",
     "_record_iteration",
+    "_record_rollout",
     "_write_iter_stats",
 )
 

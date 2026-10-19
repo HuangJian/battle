@@ -37,6 +37,16 @@ export const LOG_DIR = path.join(REPO_ROOT, 'tmp')
 export function tmpLogsDir(): string {
   return process.env.BCITY_TMP_LOGS_DIR || LOG_DIR
 }
+/** 课程运行目录（`<tmpLogsDir>/<课>`）——权重 / 账本 / 任务包 / deliver / 开课标记都在它下面。
+ *
+ *  ★ 2026-10-19：本仓库有 **31 处** `path.join(REPO_ROOT, 'tmp', course)` 硬编码（bundles /
+ *   eval-games / state-view / specs…）。它们**绕开** `tmpLogsDir()` 的 env 重定向 ⇒ 单测即使把
+ *   `BCITY_TMP_LOGS_DIR` 指进临时目录，这些路径仍然读写真工作目录（实测：自动交接的用例把
+ *   `__ahand-*__` 假课写进仓根 `tmp/`）。全部收敛到这一个函数，重定向才真正全覆盖。
+ *   默认行为零变化（同 `tmpLogsDir()` 的惰性口径）。 */
+export function tmpCourseDir(course: string): string {
+  return path.join(tmpLogsDir(), course)
+}
 /** 池历史（各训练流的 `dist-agent-meta.jsonl`）扫描根。
  *
  *  单测以 `BCITY_POOL_DIR` 重定向到临时目录——聚合要用**真目录树 + 真账本**才能验

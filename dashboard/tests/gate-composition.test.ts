@@ -48,4 +48,9 @@ describe('dashboard 门禁命令组成', () => {
     expect(process.env.NO_PROXY ?? '').toContain('*')
     expect(process.env.no_proxy ?? '').toContain('*')
   })
+
+  it('启动器带 isolate-paths 预载，且该文件真实存在', () => {
+    expect(launcher).toContain('./tests/helpers/isolate-paths.ts')
+    expect(existsSync(resolve(DASH, 'tests/helpers/isolate-paths.ts'))).toBe(true)
+  })
 })

@@ -27,7 +27,7 @@ import {
 } from 'fs'
 import os from 'os'
 import path from 'path'
-import { DASHBOARD_ROOT, REPO_ROOT } from '../src/core/paths'
+import { DASHBOARD_ROOT, REPO_ROOT, tmpLogsDir } from '../src/core/paths'
 import {
   HUB_SERVER_ENTRY,
   cfTunnelArgs,
@@ -156,7 +156,7 @@ describe('W1 双课程 spec 隔离', () => {
     const argv = spec.cmd.map(String)
     // 课程表来源 = 盘（hub 自己扫）：不给 --course，也不给某一门课的 job-root
     expect(argv).toContain('--discover')
-    expect(argv[argv.indexOf('--traj-root') + 1]).toBe(path.join(REPO_ROOT, 'tmp'))
+    expect(argv[argv.indexOf('--traj-root') + 1]).toBe(tmpLogsDir())
     expect(argv).not.toContain('--job-root')
     expect(argv).not.toContain('--jsonl')
     // 同一个 cfg ⇒ 逐字段同一份 spec（没有第二个参数能把它变成「另一门课的 hub」）。

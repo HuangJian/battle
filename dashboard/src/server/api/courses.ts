@@ -1,7 +1,7 @@
 /** courses.ts — 课程发现与单一事实源（?course= 只读覆盖、effectiveCourse、动作上下文）。 */
 import { existsSync, readdirSync, statSync } from 'fs'
 import path from 'path'
-import { REPO_ROOT, curriculaDir, tmpLogsDir } from '../../core/paths'
+import { curriculaDir, tmpCourseDir, tmpLogsDir } from '../../core/paths'
 import type { CourseFactView } from '../../web/view'
 import { courseEnableMarkerPath } from '../../stack/courses'
 import {
@@ -48,7 +48,7 @@ export function sanitizeViewCourse(raw: string | null): string {
   if (!raw) return ''
   if (!/^[A-Za-z0-9._-]+$/.test(raw)) return ''
   try {
-    if (existsSync(path.join(REPO_ROOT, 'tmp', raw))) return raw
+    if (existsSync(tmpCourseDir(raw))) return raw
     // 备份课（热/冷）也放行：tmp 被清后仍能在 select 与 ?course= 里打开（plan §3.3 R1）。
     if (hasHotMirror(raw) || readArchiveIndex(raw) !== null) return raw
     if (existsSync(path.join(curriculaDir(), `${raw}.jsonc`))) return raw

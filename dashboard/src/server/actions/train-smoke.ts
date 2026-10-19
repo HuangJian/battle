@@ -3,7 +3,7 @@ import { existsSync } from 'fs'
 import path from 'path'
 import { loadConfig, validateCourseArg } from '../../core/config'
 import { killPid, pidAlive } from '../../core/net'
-import { LOG_DIR, REPO_ROOT } from '../../core/paths'
+import { LOG_DIR, tmpCourseDir } from '../../core/paths'
 import { launchSpec } from '../../core/proc'
 import { clearAnyComponent, saveAnyComponent, scopeOf } from '../../core/registry'
 import { monitorTouch } from '../../core/reload-touch'
@@ -119,7 +119,7 @@ export async function smokeTrain(course: string): Promise<ActionResult> {
         '共享 trainer 在跑（一个进程服务所有课程）——预演要独占训练栈，先停止它再冒烟',
       )
     const venv = resolveVenvPython()
-    const trajDir = path.join(REPO_ROOT, 'tmp', course)
+    const trajDir = tmpCourseDir(course)
     const weightsPath = path.join(trajDir, 'weights.json')
     if (!existsSync(weightsPath)) {
       try {

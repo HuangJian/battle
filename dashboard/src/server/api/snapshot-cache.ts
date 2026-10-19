@@ -1,6 +1,6 @@
 /** snapshot-cache.ts — 慢部件快照：类型定义与冷算实现（节点 ping / 组件探测 / 池历史）。 */
 import path from 'path'
-import { REPO_ROOT } from '../../core/paths'
+import { tmpCourseDir } from '../../core/paths'
 import type { Component, RlConfig } from '../../core/types'
 import { assemblePushFleet, probePushFleetHealth } from '../../stack/push-config'
 import {
@@ -212,7 +212,7 @@ export async function computeSlowSnapshot(
   if (course && loopAlive) {
     try {
       const ledgerTail = readLogTail(
-        path.join(REPO_ROOT, 'tmp', course, 'training_log.jsonl'),
+        path.join(tmpCourseDir(course), 'training_log.jsonl'),
         1000,
       ).lines
       courseEdit = courseEditFromLedgerTail(ledgerTail)

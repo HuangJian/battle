@@ -27,7 +27,7 @@ import os from 'os'
 import path from 'path'
 import { saveAnyComponent } from '../src/core/registry'
 import { pruneLegacyCourseKnobs } from '../src/stack/course-knobs'
-import { DASHBOARD_ROOT, REPO_ROOT } from '../src/core/paths'
+import { DASHBOARD_ROOT, tmpLogsDir } from '../src/core/paths'
 import type { RlConfig } from '../src/core/types'
 import * as actions from '../src/server/actions'
 
@@ -110,7 +110,7 @@ describe('① 形状：共享 trainer = 一个进程 + 发现模式', () => {
     expect(cmd).not.toContain('--courses')
     expect(cmd).not.toContain('--course ')
     // traj 根必须绝对（相对路径会指到控制台 cwd）
-    expect(cmd).toContain(`--traj-root ${path.join(REPO_ROOT, 'tmp')}`)
+    expect(cmd).toContain(`--traj-root ${tmpLogsDir()}`)
     // 进程级单实例锁：一个进程服务所有课程，双开 = 两套调度器抢同一批 traj
     expect(cmd).toContain('--cluster-lock')
     // 控制文件（暂停意图）：绝对路径，不靠 cwd

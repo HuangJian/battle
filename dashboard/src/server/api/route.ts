@@ -4,7 +4,7 @@ import path from 'path'
 import { loadConfig } from '../../core/config'
 import { log, warn } from '../../core/log'
 import { courseSourceOf } from './course-source'
-import { NN_TRAINING, REPO_ROOT, loopControlPath } from '../../core/paths'
+import { NN_TRAINING, REPO_ROOT, loopControlPath, tmpCourseDir } from '../../core/paths'
 import type { CfEdgeIp, CfProtocol, Component, RolloutSrcMode, SlimMode } from '../../core/types'
 import {
   ActionError,
@@ -455,7 +455,7 @@ async function dispatchAction(action: string, body: PostBody): Promise<Response 
         if (!node) return errResp(`节点不存在: ${id}`, 400)
         if (!node.enabled) return okResp({ ok: false, message: '节点已停用——先启用再冒烟' })
         const cCourse = ctx.course
-        const cPath = path.join(REPO_ROOT, 'tmp', cCourse, 'weights.json')
+        const cPath = path.join(tmpCourseDir(cCourse), 'weights.json')
         const weightsPath = existsSync(cPath)
           ? cPath
           : path.join(REPO_ROOT, 'tmp/ep60/battle2-p1bc/run/weights.json')
