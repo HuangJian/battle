@@ -1,0 +1,168 @@
+// 课程 y23-winpace —— 阶段 C 腿三：**给「快」定价**（唯一变量：wWin 的时间窗）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。与 y23-lanefire / y23-acc-off 并行同 seed。
+//
+// 立项 → 2026-10-18 夜（剂量实测见 tmp/y23-dose.py → tmp/y23-dose.txt）：
+//   奖励里**没有任何一项在罚「拖」**。`wKill*kills` 是绝对量——打 8000 拍杀 20 和打 5000 拍杀 20
+//   拿到的是同一笔 60 分。而 §0 的生死账说胜负就是 **rate × time 的赛跑**：
+//     余量 = (20/杀速) ÷ (219/(承伤/千拍))，NN **0.96** vs 人类 **1.97**。
+//   ⇒ 提速能同时改善余量的两侧（分子变小、分母的暴露时间也变小），但当前奖励对此**完全不敏感**。
+//   `wWin` 的时间窗 `(8000-clearTick)/1400` 是唯一带 rate 语义的项，可它太软：
+//   胜局均值 clearTick 6854 ⇒ 只给 **4.09 分/局**，每快 1000 拍的边际 **3.57 分**。
+//
+// ── 单变量声明（相对 y20-stack2 / y22-null：只改一个分母 + 加一个截断）────────
+//   公式：`wWin*where(clearTick>=0, (8000-clearTick)/1400, 0)`
+//     → `wWin*where(clearTick>=0, max(8000-clearTick, 0)/278, 0)`
+//   ⚠ `wWin` 本身**不动**（5.0）；params 一个键都不动（**不新增参数**）。
+//   其余逐字 HOLD：wThreat 120 / wAcc 15.3 / wLaneFire 不加 / lr 表 / gamma / K / eval。
+//
+// ── 剂量为什么是 /278（不是原 plan 的 /467）──────────────────────────────────
+//   按 y22-null it200 的 400 局实测（win 259/400、胜局 clearTick 均值 6854）加权：
+//     /1400 基线 2.65 分/局 · /700 Δ+2.65 · **/467 Δ+5.29（原 plan，不够）** ·
+//     /350 Δ+7.95 · **/278 Δ+10.69（Φ 的 13.6%，过 10 分线）** · /200 Δ+15.90。
+//   每快 1000 拍的边际 3.57 → **17.99 分**。§7 第 2 条（别做 <10 分/局的微剂量）⇒ 取 /278。
+//
+// ── ★ 为什么必须加 `max(..., 0)` 截断（不加这条腿有结构性缺陷）────────────────
+//   `(8000-clearTick)` 在 clearTick > 8000 时**变负**，而胜局 clearTick 的
+//   p75 = 7745、p90 = **8672**、max = **10668**。`/278` 下这两档分别是 **−12.09** 和 **−47.99**，
+//   而 `terminal.timeout = -15` ⇒ **「10668 拍才赢」比「超时输」还惨 33 分**，
+//   会教出「注定打很久不如早点死」。截断后慢赢局最低 **0 分**，与 timeout 的关系恢复单调。
+//   代价/收益：加权剂量从 +10.69 **升到 12.73 分**（砍掉的 −2.03 分本身就是负贡献），
+//   仍在 10 分线上、且更干净。
+//
+// ── 门（主读数 = 时间侧的 rate，不看单点胜率）────────────────────────────────
+//   起点（stack2-it200，860xxx anchor 200 座）：胜局局长均值 **6854** 拍（p50 6781）·
+//     全体局长均值 5824 · 杀速 2.64/千拍 · win 0.685 · kills 16.98 · 承伤/局 207 · 余量 0.89。
+//   目标（第 100 轮看方向、第 200 轮判）：
+//     · **胜局局长均值 ≤ 6400 拍**（−450 拍以上；人类同座位 4975）
+//     · **杀速 ≥ 2.90/千拍**（起点 2.64；人类 4.02）
+//     · **余量 ≥ 1.00**（起点 0.89）
+//   副门：win ≥ 0.685、kills ≥ 16.5、timeout ≤ 5%。
+//   ⚠ 判读看**趋势**不看单点（win 单点 SE 3.4pp / Φ SE 2.7）。
+//
+// ── 刷分风险与杀腿（本腿专属）──────────────────────────────────────────────
+//   本项的梯度方向 = 「**在能赢的前提下更快**」（输了这项恒为 0，死了也没有），
+//   所以主风险不是乱打，而是**莽化提速**与**放弃残局**：
+//     · 承伤/局 > 起点 × 1.15 ⇒ 换血式莽化，红
+//     · kills < 16.5 而局长变短 ⇒ **「打不完就别打了」的摆烂**（本项对残局无激励），杀腿
+//     · timeout > 5% 或 avgTicks 不降反升 ⇒ 反苟 / 无效，停
+//     · entropy > it0 + 0.15 ⇒ 停
+//     · 第 100 轮胜局局长降幅 < 150 拍 ⇒ **奖励买不到提速，停腿**（别叠剂量）
+//   ⚠ 与 y23-lanefire / acc-off 的主读数**不重叠**（它们读 lane∩持火 / 实弹量，本腿读局长），
+//     故三条可并行归因；但三者都作用于杀速 ⇒ 若三条同涨，需再跑一条组合腿确认。
+//
+// ── 训练设置（逐字 = y22-null，除变量与预算）────────────────────────────────
+//   anchor 0.001；ent_break 0＋max_winrate 0；batch 24576；K=10；workers 8；
+//   iters **200**、max_hours 24（y22 已证：200 轮走完一个来回，够判）；
+//   eval 混合（2000-2003 ×50，每 5 轮）。
+//   起点 y20-stack2.it200.pool800（sha16 1a7821240d3c47b9）、
+//   **seed 20270206（与 y22 四腿、y23 另两条同值）**——配对优先：本腿 it_k 与 y22-null it_k 吃
+//   同一批训练座位，跨腿比较才干净。
+//   ⚠ 前提：tmp/y23-winpace 不存在（§15.5 新 out/traj，不得续跑）。
+//
+// ── 防污染 ─────────────────────────────────────────────────────────────────
+//   评估面板仍是 860xxx；人类语料 414xxx 不参与本腿。
+
+//
+// ── 结课报告（2026-10-19 07:10 用户停腿：**判负**，时间窗奖励没有梯度）──────────
+//   跑量：第 1–100 轮（末次满局 eval it100），**2.76M 样本**；10-18 21:38 → 10-19 01:58 = **4.3 h**。
+//   轨迹（anchor 200 座）：
+//     win  it0 **0.685** → it50 0.555 → it100 **0.620**
+//     Φ    97.51 → 84.17（−13.3）· **Φ 斜率 −0.0967/轮**（三条腿里唯一陡负）
+//   剂量对账（同一批 it0 局、按本腿公式重算）：**+12.24 分/局**（设计值 +12.3）⇒ 改动确实落地。
+//   末点读数（it100 vs it0）：
+//     **胜局局长 7099 → 7142（+43 拍，方向反了）** · kill/千 2.76 → 2.64 · dmg/千 33.7 → 37.7
+//     余量 **0.897 → 0.766** · kills 16.98 → 15.57 · 承伤/局 207 → 223
+//   行为（it0 → it100，/千拍）：
+//     lane 43.1 → **52.8**（几乎全落在**豁免**：12.0 → 19.0）· lane∩持火 5.70 → 6.30
+//     shots 7.92 → 7.65 · hit 6.45 → 6.21 · 持火 78.7 → 76.1 · **停 143.7 → 118.8（−17%）**
+//   同轮逐座位配对 vs `y22-null` it100：**Δwin −0.065 · p 0.208**（null 0.685）
+//   判决：**判负**。预注册杀腿条件触发 —— **第 100 轮胜局局长降幅 < 150 拍**（实测反而 +43）。
+//     ★ 机制：**放大"快赢"奖金 12.3 分，局长反而变长、Φ 斜率 −0.097/轮** ⇒ 那 12.3 分被训练**吐了出来**。
+//     ⇒ **时间窗类奖励对"提速"没有可学习梯度**——"更快清场"同样是需要**持续行动**才能达成的结果，
+//       不是单点决策能换来的（与 lanefire / acc-off 同一个母题）。
+//   证据：`tmp/y23-winpace/{training_log,eval_log}.jsonl` ·
+//     `reports/y23-phaseC-it110-20261019.md` §3.3 · `tmp/y23-progress.txt` · `tmp/y23-paired.txt`。
+//
+//   ⚠ **Φ 口径**：本报告用**完整 20 项公式**（含 `wBackHits/wSideHits`）。
+//     `reports/y23-phaseC-it110-20261019.md` 那套漏了这两项，绝对值低约 **6.5 分**，
+//     **差值（剂量/斜率）完全一致**；引用时别把两套绝对值混着比。
+{
+  "version": 5,
+  "name": "y23-winpace",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, max(8000-clearTick, 0)/278, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack2-it200（本实验的"最佳权重"；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y20-stack2/y20-stack2.it200.pool800.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 200,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y22 系流（新种子 20270206；y22 四腿共享＝四路可比）。
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  // K=10（K5 配对 1600 局终判，K5 训练侧永久关闭，DECISIONS §2026-10-08-k5-verdict）。
+  "decision_k": 10,
+
+  "out": "tmp/y23-winpace/weights.json",
+  "traj": "tmp/y23-winpace",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y23-winpace",
+  "backup_prefix": "y23-winpace",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

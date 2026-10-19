@@ -1,0 +1,147 @@
+// 课程 y23-acc-off —— 阶段 C 腿二：**删掉 wAcc 开火量税**（唯一变量：删一项）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。与 y23-lanefire 并行同 seed。
+//
+// 立项 → 2026-10-18 夜：wAcc = 15.3*aimHits/(playerShots+1) 是**唯一「多打就扣分」的结构项**——
+//   分母带 playerShots，每多开一枪这一项就掉。按 400 局实测的边际算：
+//     一发（命中率 0.83）给 wHit +0.166、wMiss −0.058、杀价折 +1.26 ⇒ 毛收益 ≈ +1.22；
+//     wAcc 的边际是 −15.3·hits/(shots+1)^2 ≈ **−0.248/发** ⇒ 净 **+0.91**。
+//   删掉后边际变 **+1.16（+27%）**，同时整项 −12.3 分/局（Φ 的 16%）从账上消失。
+//   动机：NN 实弹 7.9–8.4/千拍 vs 人类 **12.38**（少 38%），命中率反而更高（0.833 vs 0.789）
+//   ⇒ 它「省着打」，不是「打不准」。这条税是唯一在鼓励它省着打的东西。
+//
+// ── 单变量声明（相对 y20-stack2 / y22-null：只删一项）──────────────────────
+//   公式删 `+ wAcc*aimHits/(playerShots+1)`、params 删 wAcc（删项删参，不留死文本；
+//   先例 = x26 删 wBurst）。
+//   其余逐字 HOLD：wThreat 120 / **本腿不加** lane 项 / lr 表 / gamma / K / eval。
+//
+// ── 剂量 ───────────────────────────────────────────────────────────────────
+//   被删项在 NN 上的整局贡献 **12.3 分 ≈ Φ 的 16%**（对得分高的策略更大，故更像「折扣」而非「税」）。
+//
+// ── 门（看开火量，胜率只作副门）────────────────────────────────────────────
+//   起点（stack2-it200，860xxx anchor 200 座）：实弹 **7.92**/千 · kills/shot **0.348** ·
+//     kills 16.98 · 持火 78.7/千 · win 0.685 · 承伤/局 207。
+//   目标（第 100 轮看方向、第 200 轮判）：
+//     · **实弹/千拍 ≥ 10**（人类 12.38）
+//     · **kills/shot ≥ 0.33**（防乱扫；起点 0.348）
+//     · kills ≥ 16.5、win ≥ 0.685、timeout ≤ 5%
+//   杀腿：
+//     · **实弹涨了但 kills 不涨 + kill/shot 破 0.33** ⇒ 乱扫，杀
+//     · 承伤/局 > 起点 × 1.15 ⇒ 莽化，红
+//     · entropy > it0 + 0.15 ⇒ 停
+//     · 第 100 轮实弹仍 < 9/千 ⇒ **奖励买不到开火量，停腿**
+//
+// ── 训练设置（逐字 = y22-null，除变量与预算）────────────────────────────────
+//   anchor 0.001；ent_break 0＋max_winrate 0；batch 24576；K=10；workers 8；
+//   iters **200**、max_hours 24；eval 混合（2000-2003 ×50，每 5 轮）。
+//   起点 y20-stack2.it200.pool800（sha16 1a7821240d3c47b9）、
+//   **seed 20270206（与 y22 四腿同值）**——与 y22-null 逐轮同语料，跨腿比较才干净。
+//   ⚠ 前提：tmp/y23-acc-off 不存在（§15.5 新 out/traj，不得续跑）。
+//
+// ── 防污染 ─────────────────────────────────────────────────────────────────
+//   评估面板仍是 860xxx；人类语料 414xxx 不参与本腿。
+
+//
+// ── 结课报告（2026-10-19 07:10 用户停腿：**判负**，且否掉了"删 wAcc 提火力"这条路）──
+//   跑量：第 1–113 轮（末次满局 eval it110），**3.14M 样本**；10-18 21:04 → 10-19 02:00 = **4.9 h**。
+//   轨迹（anchor 200 座）：
+//     win  it0 **0.685** → it50 0.600 → it100 **0.575** → it110 **0.595**
+//     Φ    73.02 → 62.88（−10.1；与另两腿一样有中途低点）
+//   剂量对账（同一批 it0 局、按本腿公式重算）：**−12.25 分/局**（设计值 −12.2）⇒ 改动确实落地。
+//   末点读数（it110 vs it0）：
+//     kill/千 2.76 → **2.41（−13%）** · dmg/千 33.7 → 36.0 · 承伤/局 207 → 233
+//     余量 **0.897 → 0.733** · kills 16.98 → 15.63 · **胜局局长 7099 → 7929（+12%）**
+//   行为（it0 → it110，/千拍）：
+//     **shots 7.92 → 6.79（−14%）** · hit 6.45 → 5.73 · 持火 78.7 → 67.4
+//     **停 143.7 → 299.5（+108%）** · lane 43.1 → 45.4 · lane∩持火 5.70 → 5.64
+//   同轮逐座位配对 vs `y22-null` it110：**Δwin −0.065 · p 0.203**（null 0.660）
+//   判决：**判负**。预注册杀腿条件触发 —— **实弹/千 < 9（实测 6.79）**，且方向**反了**（−14%）。
+//     ★ **机制勘误（本腿最有价值的产出，推翻了 plan 的自述）**：
+//       plan 把 `wAcc = 15.3·aimHits/(playerShots+1)` 说成"唯一多打就扣分的结构项（边际 −0.248/发）"——
+//       **只算了分母效应，漏了它同时是命中率奖金**：NN 命中率 ~0.83 ⇒ 该项在账上是 **+12.3 分/局的正激励**。
+//       删掉它 = 连"打中"的奖一起删 ⇒ 策略的理性回应就是**不打、站着**（停 +108%、开火 −14%、entropy +0.065）。
+//     ⇒ **"靠删 wAcc 提火力"这条路被否**；要提火力应走"给持火发钱"（wHold），而不是删命中率奖。
+//   证据：`tmp/y23-acc-off/{training_log,eval_log}.jsonl` ·
+//     `reports/y23-phaseC-it110-20261019.md` §3.2（机制勘误全文）· `tmp/y23-progress.txt` · `tmp/y23-paired.txt`。
+//
+//   ⚠ **Φ 口径**：本报告用**完整 20 项公式**（含 `wBackHits/wSideHits`）。
+//     `reports/y23-phaseC-it110-20261019.md` 那套漏了这两项，绝对值低约 **6.5 分**，
+//     **差值（剂量/斜率）完全一致**；引用时别把两套绝对值混着比。
+{
+  "version": 5,
+  "name": "y23-acc-off",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (8000-clearTick)/1400, 0) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack2-it200（本实验的"最佳权重"；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y20-stack2/y20-stack2.it200.pool800.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 200,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y22 系流（新种子 20270206；y22 四腿共享＝四路可比）。
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  // K=10（K5 配对 1600 局终判，K5 训练侧永久关闭，DECISIONS §2026-10-08-k5-verdict）。
+  "decision_k": 10,
+
+  "out": "tmp/y23-acc-off/weights.json",
+  "traj": "tmp/y23-acc-off",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y23-acc-off",
+  "backup_prefix": "y23-acc-off",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}

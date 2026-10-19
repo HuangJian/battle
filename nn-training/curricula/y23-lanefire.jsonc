@@ -1,0 +1,168 @@
+// 课程 y23-lanefire —— 阶段 C 腿一：**给「线上∩开火」定价**（唯一变量：新增一项奖励）。
+// 规格来源 = 本头注（agent 只给文件，**开课 = 人在控制台点**）。与 y23-acc-off 并行同 seed。
+//
+// 立项 → 2026-10-18 夜（reports/y22-demo-move-it20-20261018.md 之后的口径修正）：
+//   demo 只训 move 的腿把 lane 时间推上去了 +33%（43.1→57.1/千拍），胜率却掉 17pp。
+//   拆开 onLane* 三列才看清原因——
+//     · 人类：lane **84.5**/千、lane∩持火 **52.4**/千、lane 内持火占比 **0.620**、持火 317.7/千
+//     · NN（stack2）：lane **43.1**/千、lane∩持火 **5.7**/千、占比 **0.13**、持火 78.7/千
+//     ⇒ lane 只差 **2.0 倍**，lane∩持火差 **9.2 倍**。缺口是「站在线上的时候有没有在打」，
+//       不是「上不上线」。
+//   而现有奖励**把这两半都罚了**：wThreat=120 罚 lane 时间（人类水平要付 10.4 分/局）、
+//   wAcc=15.3 罚开火量（边际 −0.248/发）。⇒ 策略没有任何理由走到「守着线打」那个点上。
+//   本腿只做一件事：**给这个联合行为付钱**，罚项一个不动（纯加法，不是换靶）。
+//
+// ── 单变量声明（相对 y20-stack2 / y22-null：只加一项）──────────────────────
+//   公式插入 `+ wLaneFire*onLaneHoldFireTicks/(ticks+1)`（放在 wWin 项之后、罚项之前）
+//   `wLaneFire` = **300**。
+//   ⚠ onLaneHoldFireTicks 是**现成的 metric 列（METRIC_INDEX 53）** ⇒ 无 schema 变更、
+//     无新 telemetry、不需重导语料。
+//   其余逐字 HOLD：wThreat 120 / wAcc 15.3 / 其它全部项 / lr 表 / gamma / K / eval。
+//
+// ── 剂量（为什么是 300）─────────────────────────────────────────────────────
+//   NN 现值 5.7/千拍 ⇒ **1.7 分/局**；人类 52.4/千拍 ⇒ **15.7 分/局**。
+//   ⇒ 这条奖励给「人类式守线」的溢价是 **14 分/局 ≈ Φ 的 18%**（Φ≈78），过本项目的 15% 剂量线。
+//
+// ── 门（主读数换成联合量；裸 threatTicks 已被证明会奖励「站着发呆」）────────────
+//   起点（stack2-it200，860xxx anchor 200 座）：lane∩持火 **5.7**/千 · lane 内持火占比 **0.13** ·
+//     持火 78.7/千 · lane 43.1/千 · win 0.685 · kills 16.98 · 承伤/局 207。
+//   目标（第 100 轮看方向、第 200 轮判）：
+//     · **lane∩持火 ≥ 20/千拍**（人类 52.4）
+//     · **lane 内持火占比 ≥ 0.30**（人类 0.62）
+//     · 持火/千拍 ≥ 120（人类 317.7）
+//   副门：win ≥ 0.685、kills ≥ 16.5、timeout ≤ 5%。
+//   ⚠ 主读数用 anchor 200 座、每 5 轮；判读看**趋势**不看单点（win 单点 SE 3.4pp / Φ SE 2.7）。
+//
+// ── 刷分风险与杀腿（本腿专属）──────────────────────────────────────────────
+//   inThreatLane **无半径上限**（lane 是 lane，不论远近）⇒ 可能「随便找一条线按住火力」刷这项。
+//     · kill/shot < 0.30 或 kills < 16.5 而 lane∩持火 大涨 ⇒ **刷分，杀腿**
+//     · 承伤/局 > 起点 × 1.15 ⇒ 换血式莽化，红
+//     · timeout > 5% ⇒ 反苟，停
+//     · entropy 比 it0 涨 > 0.15 ⇒ 停
+//     · 第 100 轮 lane∩持火 仍 < 10/千拍 ⇒ **奖励买不到该行为，停腿**（别叠剂量）
+//
+// ── 训练设置（逐字 = y22-null，除变量与预算）────────────────────────────────
+//   anchor 0.001；ent_break 0＋max_winrate 0；batch 24576；K=10；workers 8；
+//   iters **200**、max_hours 24（y22 已证：200 轮走完一个来回，够判）；
+//   eval 混合（2000-2003 ×50，每 5 轮）。
+//   起点 y20-stack2.it200.pool800（sha16 1a7821240d3c47b9）、
+//   **seed 20270206（与 y22 四腿同值）**——配对优先：本腿 it_k 与 y22-null it_k 吃同一批
+//   训练座位，跨腿比较才干净（y21↔y22 的 null 差 ~5pp 说明语料流影响 > 我们要测的效应）。
+//   §15.1 例外理由：同语料是为了**配对对照**，不是重磨同一评估集。
+//   ⚠ 前提：tmp/y23-lanefire 不存在（§15.5 新 out/traj，不得续跑）。
+//
+// ── 防污染 ─────────────────────────────────────────────────────────────────
+//   评估面板仍是 860xxx；人类语料 414xxx 不参与本腿。报告引用人类数字时标「同座位参照」。
+
+//
+// ── 结课报告（2026-10-19 07:10 用户停腿：**判负**，靶行为买不到）────────────────
+//   跑量：第 1–114 轮（末次满局 eval it110），**3.14M 样本**；10-18 21:03 → 10-19 01:58 = **4.9 h**。
+//   轨迹（anchor 200 座 = seed 860001-860050）：
+//     win  it0 **0.685** → it50 0.665 → it100 **0.565** → it110 **0.595**
+//     Φ    87.22 → 76.11（−11.1；首末差大、中间有低点，非线性）
+//   剂量对账（同一批 it0 局、按本腿公式重算）：**+1.95 分/局**（设计值 +2.0）⇒ 改动确实落地。
+//   末点读数（it110 vs it0）：
+//     kill/千 2.76 → **2.96** · dmg/千 33.7 → **44.5（+32%）** · 承伤/局 207 → 232
+//     余量 **0.897 → 0.727** · kills 16.98 → 15.44 · 胜局局长 7099 → **6521**
+//   ⚠ **"胜局局长 7099 → 6521（快了 578 拍）"是幸存者偏差，别当成绩**：
+//     同期 win 从 0.685 掉到 0.595 ⇒ 输掉的正是那些**慢局**，胜局子集自然变快。
+//     ⇒ 快慢类读数只能在**胜率不变**的前提下横向比（本腿与 winpace 都不满足）。
+//   行为（it0 → it110，/千拍）：
+//     **lane 43.1 → 55.8（+29%）** · **lane∩持火 5.70 → 7.80** · lane 内持火占比 0.132 → 0.140
+//     持火 78.7 → 84.0 · shots 7.92 → 8.47 · hit 6.45 → 7.08 · 停 143.7 → 168.8
+//   同轮逐座位配对 vs `y22-null` it110（同 seed 20270206）：**Δwin −0.065 · p 0.208**（null 0.660）
+//   判决：**判负**。触发的预注册杀腿条件 —— **第 100 轮 lane∩持火 仍 < 10/千拍（实测 7.80）**。
+//     ★ 机制（本腿最有价值的产出）：**lane 增量 +12.7 里只有 2.1 落在"持火"**，
+//     其余落在空站 +5.5 与豁免 +4.3 ⇒ **奖励能买到"走到线上并停在那"，买不到"停在那的时候扣扳机"**。
+//     与 `y22-demo-move` it20 的形状逐项同构（那次 lane +14 / 豁免 +6.5 / 持火 −0.6）。
+//   ⚠ 事后复核追加（`reports/y234-audit-20261019.md` §1）：本腿靶列
+//     `onLaneHoldFireTicks` 与 `fireHeldTicks` 一样**按决策保持 K 拍** ⇒ 跨 K 不可比；
+//     K=10 内部比较仍成立，但别拿它和未来 K≠10 的腿直接比。
+//   证据：`tmp/y23-lanefire/{training_log,eval_log}.jsonl` ·
+//     `reports/y23-phaseC-it110-20261019.md`（§1 表 / §3.1 机制 / §2 面板噪声校准）·
+//     `tmp/y23-progress.txt` · `tmp/y23-lane.txt`（lane 四分解）· `tmp/y23-paired.txt`。
+//
+//   ⚠ **Φ 口径**：本报告用**完整 20 项公式**（含 `wBackHits/wSideHits`）。
+//     `reports/y23-phaseC-it110-20261019.md` 那套漏了这两项，绝对值低约 **6.5 分**，
+//     **差值（剂量/斜率）完全一致**；引用时别把两套绝对值混着比。
+{
+  "version": 5,
+  "name": "y23-lanefire",
+  "mode": "per-tick",
+  "level": "ladder-c20-lives1",
+
+  "reward": {
+    "formula": "wKill*kills + wHit*aimHits - wDmg*playerDamageTaken - wMiss*aimMisses + wPickup*powerUpsCollected - wApproach*where(pickupDist<0, 0, pickupDist) + wAcc*aimHits/(playerShots+1) + wDist*aimHitDistSum/(aimHits+1) + wWin*where(clearTick>=0, (8000-clearTick)/1400, 0) + wLaneFire*onLaneHoldFireTicks/(ticks+1) - wHurt*hurtWeight/(ticks+1) - wEncl*enclWeightTicks/(ticks+1) - wCorner*cornerWeightTicks/(ticks+1) - wThreat*threatTicks/(ticks+1) - wNearSq*nearSqSum/(ticks+1) - wBlock*(idleTicks-stopTicks)/(ticks+1) + wFrFreeze*puGotFreeze + wFrBomb*puGotBomb + wFrStar*starsCollected + wBackHits*backHits + wSideHits*sideHits",
+    "params": {
+      "wKill": 3.0,
+      "wHit": 0.2,
+      "wDmg": 0.03,
+      "wMiss": 0.35,
+      "wPickup": 3.0,
+      "wApproach": 0.008,
+      "wAcc": 15.3,
+      "wDist": 0.6,
+      "wWin": 5.0,
+      "wLaneFire": 300.0,
+      "wHurt": 150.0,
+      "wEncl": 12.9,
+      "wCorner": 110.0,
+      "wThreat": 120.0,
+      "wBlock": 110.0,
+      "wNearSq": 48.0,
+      "wFrFreeze": 2.0,
+      "wFrBomb": 2.0,
+      "wFrStar": 3.0,
+      "wBackHits": 1.0,
+      "wSideHits": 0.2
+    },
+    "terminal": {
+      "timeout": -15.0
+    },
+    "scheme": "toy"
+  },
+  "dodge": "",
+
+  // ── 起点：stack2-it200（本实验的"最佳权重"；同代直连，kickstart 关）──
+  "bc": "nn-training/weights/y20-stack2/y20-stack2.it200.pool800.json",
+  "kickstart_ref": false,
+  "warmup_iters": 0,
+
+  // value 门控牵引率 ρ（出生安全件，非变量；legacy 空片下无物可拴，无害）。
+  "value_anchor": 0.001,
+
+  "iters": 200,
+  "max_hours": 24,
+
+  "lr": 0.0003,
+  "epochs": 4,
+  "mb": 1024,
+  "normalize_ret": true,
+  "gamma": 0.998,
+  "lam": 0.95,
+
+  "ppo_schedule": [
+    { "until_iter": 240, "kl_coef": 0.05, "lr": 0.00015, "kl_cap": 0.1 },
+    { "kl_coef": 0.05, "lr": 0.0001, "kl_cap": 0.1 }
+  ],
+
+  "target_transitions": 24576,
+  // y22 系流（新种子 20270206；y22 四腿共享＝四路可比）。
+  "paired_rotate_seed": 20270206,
+
+  "decision_events": false,
+  // K=10（K5 配对 1600 局终判，K5 训练侧永久关闭，DECISIONS §2026-10-08-k5-verdict）。
+  "decision_k": 10,
+
+  "out": "tmp/y23-lanefire/weights.json",
+  "traj": "tmp/y23-lanefire",
+  "ent_break": 0.0,
+  "ent_break_max_winrate": 0.0,
+
+  "backup_dir": "nn-training/weights/y23-lanefire",
+  "backup_prefix": "y23-lanefire",
+
+  "eval_stages": "2000-2003",
+  "eval_games_per_stage": 50,
+  "eval_every": 5
+}
