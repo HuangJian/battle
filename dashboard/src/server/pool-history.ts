@@ -8,8 +8,11 @@
  *     内部过滤器（`it <= baseIt_flow`），**不出现在任何展示字段**。
  *   · **一次算全量、切天纯投影**：`aggregateNodeHistory()`（与窗口无关）⊕ `projectWindow(agg, w)`
  *     （纯函数）。探测层缓存全量 agg；切天零重算。
- *   · **贡献数取「最新完成的整轮」**：跨课按**完成时刻**选（不是比 `it` 大小——`it` 是课程内序号，
- *     不可比）；停摆课因完成时刻旧而自然落选。
+ *   · **贡献数取「最新完成的整轮」（采样轮）**：跨课按**完成时刻**选（不是比 `it` 大小——`it` 是
+ *     课程内序号，不可比）；停摆课因完成时刻旧而自然落选。采样轮的边界 = 账本的
+ *     `rollout_end`（采集收官即刻写）或同轮 `iteration` —— 2026-10-19 用户口径：
+ *     pill 显示「上一次完整 rollout/eval 轮的全部贡献」，不能在该轮中途截断，也不能
+ *     非要等 PPO 回来才更新。
  *
  *  GLM-U3 修正：lastError 在聚合层剥离 sampler-agent 的 `new Date().toISOString()`（UTC）前缀
  *  ——注意那是 `lastError` **字符串**的前缀；meta 行的 `ts` 字段是 Python `strftime` 写的
@@ -25,7 +28,7 @@ import { libraryRoot, listMirrorCourses } from './course-metrics'
 import {
   type ContributionSplit,
   fmtFullTs,
-  latestIterationFromLedgerTail,
+  latestSamplingRoundFromLedgerTail,
   stripIsoPrefix,
 } from '../web/view'
 // 直连 api/logs 的文件而非 `../api` 桶：桶经 snapshot-cache 反向 import 本模块（成环）。
@@ -335,7 +338,8 @@ function emptyDayBucket(): DayBucket {
   }
 }
 
-/** 跨课选出的「最新完成轮」（诊断/展示脚注）。 */
+/** 跨课选出的「最新完成采样轮」（诊断/展示脚注）。
+ *  `completedAtMs` = 该轮 `rollout_end`（采集收官）或同轮 `iteration` 的时刻。 */
 export interface LatestRound {
   dir: string
   it: number
@@ -356,9 +360,10 @@ export interface HistoryAggregate {
   sources: ActiveFlow[]
   /** 历史锚点毫秒（渲染层展示用）。 */
   epochMs: number
-  /** 最新完成轮贡献（跨课按完成时刻选）；空 = 无完成信号（消费方 → -1）。 */
+  /** 最新完成采样轮贡献（该轮 rollout + eval 全部成功局；跨课按完成时刻选）；
+   *  空 = 无完成信号（消费方 → -1）。 */
   lastContrib: Map<string, number>
-  /** 最新完成轮的来源（诊断；null = 无池数据）。 */
+  /** 最新完成采样轮的来源（诊断；null = 无池数据）。 */
   latestRound: LatestRound | null
 }
 
@@ -662,12 +667,14 @@ export function projectCourseBreakdown(
 }
 
 /**
- * 最近**已完成**轮的水位：同一训练流目录里 `training_log.jsonl` 的最后一个 `iteration`
- * 事件（只认 iteration —— hub 追加的 `job_completed` 带 it，照它取会读出「还没跑完的那一轮」）。
+ * 最近**已完成采样轮**的水位：同一训练流目录里 `training_log.jsonl` 最近的
+ * `rollout_end`（采集收官即刻写）或同轮 `iteration` —— 两者是同一轮的两个落账时刻，
+ * 文件里后写者仍是同一轮（见 `latestSamplingRoundFromLedgerTail`）。
  *
  * 为什么需要水位：meta 账本是**逐局**追加的，进行中那一轮的行会一直变多——按「最大 it」取
  * 对齐基准，先交活的节点贡献显示得高、还没跑到的显示 0（看着像掉线），而这台机器其实健康。
- * 完成水位由训练循环写在轮末（rollout + PPO 之后），正好是「这一轮的账已经结清」的判据。
+ * 采样轮的水位在该轮采集收官时落定：此时该轮 rollout/eval 行齐全、下一轮还没开始
+ * ⇒ 贡献数是**完整的一轮**（不会截一半）；且不必等 PPO 回来（`iteration` 晚一整轮）。
  *
  * 目录取 meta 所在目录；再退一层父母录，兼容 meta 落在 `<traj root>/traj/` 的布局。
  * 读不出（无账本 / 一次性 run 目录 / 坏文件）→ null，调用方按旧口径退化。
@@ -676,10 +683,11 @@ export function lastCompletedIter(metaAbsPath: string): number | null {
   return lastCompletedIterInfo(metaAbsPath)?.it ?? null
 }
 
-/** 同 `lastCompletedIter`，另带该轮的**完成时刻**（本地 ms；`iteration.time` 解析不出 → null）。
+/** 同 `lastCompletedIter`，另带该轮**采样收官时刻**（本地 ms；time 解析不出 → null）。
  *
  *  §3.4：跨课按**完成时刻**选「最新完成轮」——比「该轮 meta 最后一行的 ts」准（后者是
- *  「最后结算」，与「轮完成」差一个 PPO 的时间）。 */
+ *  「最后结算」）。★ 2026-10-19：时刻优先取 `rollout_end.time`（采集收官、Pill 的贡献
+ *  不必等 PPO），旧账本回落到同轮 `iteration.time`。 */
 export function lastCompletedIterInfo(
   metaAbsPath: string,
 ): { it: number; atMs: number | null } | null {
@@ -687,7 +695,7 @@ export function lastCompletedIterInfo(
   for (const p of [join(dir, 'training_log.jsonl'), join(dirname(dir), 'training_log.jsonl')]) {
     try {
       if (!existsSync(p)) continue
-      const ev = latestIterationFromLedgerTail(readLedgerTail(p, 600))
+      const ev = latestSamplingRoundFromLedgerTail(readLedgerTail(p, 600))
       if (ev) return { it: ev.iter, atMs: parseTsMs(ev.time) }
     } catch {
       /* 账本不可读 → 试下一个候选 */
@@ -1792,8 +1800,11 @@ export function aggregateNodeHistory(nowMs: number = Date.now()): HistoryAggrega
     })
   }
 
-  // ⑥ 最新完成轮：**跨课按完成时刻取最新**（不是比 it 大小——it 是课程内序号，§1.1）。
+  // ⑥ 最新完成**采样轮**：**跨课按完成时刻取最新**（不是比 it 大小——it 是课程内序号，§1.1）。
   //    停摆课因完成时刻旧而自然落选，不必额外过滤。
+  //    ★ 2026-10-19（用户口径）：轮边界 = `rollout_end`（采集收官即刻写）或同轮 `iteration`
+  //    —— 见 `latestSamplingRoundFromLedgerTail`。pill 不必等 PPO 回来就能显示
+  //    「上一完整 rollout/eval 轮的**全部**贡献」；`baseIt` 只停在已完成轮上，进行中那一轮不截半。
   //
   // ★ 2026-10-02：**只有真跑完过至少一轮的流才有资格**。没跑完的流本无完成时刻，
   //   `completedAtMs` 退化成 meta 文件的 mtime，而它常常是最新写入的那个 ⇒ 它抢走 winner，

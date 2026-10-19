@@ -697,9 +697,45 @@ export interface ParallelOverviewView {
  *
  *  **只认 `iteration` 事件**：同一本账本里还有 hub 追加的 `job_completed` / `job_failed`
  *  与训练侧写的 `run_start` / `run_complete`（多写者文件）——把 `job_completed` 的 it
- *  当轮次会读出「还没跑完的那一轮」，那是错的。 */
+ *  当轮次会读出「还没跑完的那一轮」，那是错的。
+ *  节点 pill 的贡献水位另走 `latestSamplingRoundFromLedgerTail`（`rollout_end` 也算一轮的下界）。 */
 export function latestIterFromLedgerTail(lines: string[]): number | null {
   return latestIterationFromLedgerTail(lines)?.iter ?? null
+}
+
+/** 账本尾行里**最近完成采样轮**的轮次 + `time`（纯函数，可单测）。
+ *
+ *  判据 = `rollout_end` **或** `iteration`（两者同 `iter`，是同一轮的两个落账时刻）：
+ *  `rollout_end` 在采集收官即刻写（不等 PPO/权重回传），`iteration` 在同轮训练侧也完成时写。
+ *  文件里后写的那条仍是同一轮 ⇒ **逆序取第一个命中** 就是最近完成的**采样**轮。
+ *
+ *  ★ 2026-10-19（用户口径）：pill 的贡献数要取「上一次完整 rollout/eval 轮的全部贡献」。
+ *  只看 `iteration` 会整整滞后一轮（PPO 几十秒到几分钟），期间显示的是更早那轮；
+ *  改看 `rollout_end` 后，水位在该轮采集收官时就落定——此时该轮 meta 行齐全、下一轮还没开始，
+ *  计数既完整又不会把进行中那一轮截一半。旧账本没有 `rollout_end` 时自然回落到 `iteration`。
+ *  ⚠ 仍**不能**认 `job_completed` / `job_failed` 的 `it`：那是还没跑完的那一轮。 */
+export function latestSamplingRoundFromLedgerTail(
+  lines: string[],
+): { iter: number; time: string } | null {
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const line = lines[i]!.trim()
+    if (!line) continue
+    if (!line.includes('"rollout_end"') && !line.includes('"iteration"')) continue
+    try {
+      const e = JSON.parse(line) as {
+        event?: unknown
+        iter?: unknown
+        it?: unknown
+        time?: unknown
+      }
+      if (e.event !== 'rollout_end' && e.event !== 'iteration') continue
+      const it = typeof e.iter === 'number' ? e.iter : typeof e.it === 'number' ? e.it : null
+      if (it !== null) return { iter: it, time: typeof e.time === 'string' ? e.time : '' }
+    } catch {
+      /* 写半行竞态：跳过该行看更早的 */
+    }
+  }
+  return null
 }
 
 /** 账本尾行里最后一个 `iteration` 事件的**轮次 + `time`**（纯函数，可单测）。

@@ -42,7 +42,7 @@ import {
   resolveWindow,
   windowMeanSec,
 } from '../src/server/pool-history'
-import { nodeHealth } from '../src/web/view'
+import { latestSamplingRoundFromLedgerTail, nodeHealth } from '../src/web/view'
 
 // ────────────────────────── 节点 pill 行（慢节点/停用/启停 toggle，2026-09-11 用户指令） ──────────────────────────
 describe('pool-history.isSlowNode（慢节点判定：1.5s ping 误报「离线」的根治）', () => {
@@ -150,6 +150,9 @@ describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计
   /** 账本 `iteration` 事件（`time` = 完成时刻，§3.4）。 */
   const iterEvent = (it: number, time = tsAt(0)) =>
     JSON.stringify({ event: 'iteration', iter: it, time })
+  /** 账本 `rollout_end` 事件（采集收官即刻写，`iteration` 之前；time 同形）。 */
+  const rolloutEndEvent = (it: number, time = tsAt(0)) =>
+    JSON.stringify({ event: 'rollout_end', iter: it, time })
 
   /** 一个临时池根 + 一条或多条训练流（`BCITY_POOL_DIR` 重定向）。 */
   const withPoolRoot = (
@@ -199,7 +202,7 @@ describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计
     ledger: [iterEvent(5), iterEvent(6), iterEvent(7)],
   }
 
-  it('水位 = 逐流账本最后一个 iteration（不是 meta 最大 it）；进行中那一轮的行不进桶', () => {
+  it('水位 = 逐流账本最后一条完成边界（iteration 或 rollout_end；不是 meta 最大 it）；进行中那一轮的行不进桶', () => {
     withPoolRoot(FLOW, () => {
       const agg = aggregateNodeHistory()
       // it8（进行中）的 6 条行被水位滤掉：只剩 it7 的 4 条（a1 3 条 / a2 1 条）。
@@ -252,6 +255,44 @@ describe('pool-history · 贡献数取最近完成轮（进行中那一轮不计
         expect(h.lastFailTs).toBe(tsAt(0, '14:55:00'))
         // isSlowNode 的输入随之看到「14:50 还在交活」⇒ 宁可判「慢」也不误判「离线」
         expect(h.lastOkElapsedSec).toBe(41.9)
+      },
+    )
+  })
+
+  // ★ 2026-10-19（用户口径）：pill 的贡献数 = 「上一次完整 rollout/eval 轮的全部贡献」。
+  // 边界取 `rollout_end`（采集收官即刻写）而不是非要等 `iteration`（PPO 回传后才写）——
+  // 否则整整滞后一轮；同时仍只认已完成轮，不把进行中那一轮截一半。
+  it('★2026-10-19：水位取最近完成**采样轮**（rollout_end）→ 该轮贡献完整、不截进行中那一轮', () => {
+    withPoolRoot(
+      {
+        meta: [
+          // it7：上一轮（a1 2 局 / a2 1 局）
+          metaRow('a1', 7),
+          metaRow('a1', 7),
+          metaRow('a2', 7),
+          // it8：采集已收官（rollout_end 已写）但 PPO 未回 ⇒ 旧口径会继续显示 it7
+          metaRow('a1', 8),
+          metaRow('a1', 8),
+          metaRow('a2', 8),
+          // it9：进行中，a2 已交 4 局——不得当成贡献（否则看着比真实更健康）
+          metaRow('a2', 9),
+          metaRow('a2', 9),
+          metaRow('a2', 9),
+          metaRow('a2', 9),
+        ],
+        ledger: [iterEvent(7), rolloutEndEvent(8)],
+      },
+      () => {
+        const agg = aggregateNodeHistory()
+        // 最近完成采样轮 = it8（不是 it7，也不是进行中的 it9）
+        expect(agg.latestRound?.it).toBe(8)
+        // 贡献 = it8 的**全部**成功局（rollout + eval），不是 it7、也不是 it9 的半截
+        expect(agg.lastContrib.get('a1')).toBe(2)
+        expect(agg.lastContrib.get('a2')).toBe(1)
+        // 计数只认已完成轮（it7 + it8）；it9 的行待定
+        const win = projectWindow(agg, resolveWindow('all', now, agg.epochMs))
+        expect(win.hist.get('a1')!.ok).toBe(4)
+        expect(win.hist.get('a2')!.ok).toBe(2)
       },
     )
   })
@@ -1352,6 +1393,48 @@ describe('pool-history · readChunkLines 线性游标（P0-2）', () => {
       const ms = Date.now() - t0
       expect(n).toBe(300_000)
       expect(ms).toBeLessThan(20_000)
+    })
+  })
+})
+
+// ────────────────────────── 采样轮边界（2026-10-19 用户口径） ──────────────────────────
+// pill 的贡献数 = 「上一次完整 rollout/eval 轮的全部贡献」：边界取 `rollout_end`
+// （采集收官即刻写）或同轮 `iteration`，逆序取最近一条；不能认还没跑完那一轮的 it。
+
+describe('latestSamplingRoundFromLedgerTail（采样轮边界：rollout_end ∪ iteration）', () => {
+  const ev = (o: Record<string, unknown>): string => JSON.stringify(o)
+
+  it('同轮 iteration 先写、rollout_end 后写 ⇒ 仍返回该轮（两事件是一个轮的两个时刻）', () => {
+    const lines = [
+      ev({ event: 'iteration', iter: 6, time: 'T6' }),
+      ev({ event: 'rollout_end', iter: 7, time: 'T7' }),
+    ]
+    expect(latestSamplingRoundFromLedgerTail(lines)).toEqual({ iter: 7, time: 'T7' })
+    const sameRound = [
+      ev({ event: 'rollout_end', iter: 7, time: 'T7a' }),
+      ev({ event: 'iteration', iter: 7, time: 'T7b' }),
+    ]
+    // 逆序取第一个命中：同轮取后写的 iteration（时刻更晚，仍是同一轮）
+    expect(latestSamplingRoundFromLedgerTail(sameRound)).toEqual({ iter: 7, time: 'T7b' })
+  })
+
+  it('job_completed / job_failed / run_start 的 it 不当轮次；坏行跳过', () => {
+    const lines = [
+      ev({ event: 'iteration', iter: 3, time: 'T3' }),
+      ev({ event: 'job_completed', it: 9 }),
+      ev({ event: 'rollout_end', iter: 4, time: 'T4' }),
+      '{"event":"iteration", bad json',
+      ev({ event: 'job_failed', it: 10 }),
+    ]
+    expect(latestSamplingRoundFromLedgerTail(lines)).toEqual({ iter: 4, time: 'T4' })
+    expect(latestSamplingRoundFromLedgerTail([])).toBeNull()
+    expect(latestSamplingRoundFromLedgerTail([ev({ event: 'run_start' })])).toBeNull()
+  })
+
+  it('缺 time ⇒ 回空串（不可知就说不可知，不编时刻）', () => {
+    expect(latestSamplingRoundFromLedgerTail([ev({ event: 'rollout_end', iter: 2 })])).toEqual({
+      iter: 2,
+      time: '',
     })
   })
 })

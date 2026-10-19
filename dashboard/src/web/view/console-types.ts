@@ -113,9 +113,10 @@ export interface NodeView {
   /** 磁盘水位（plan/self-node-disk-alert）：`null` = 旧 agent 没报或探测失败 ⇒ 不画（不推算）。 */
   disk: DiskFactsView | null
   busy: boolean
-  /** 最近**完成**轮贡献数（该轮内该节点成功局数，rollout + eval；-1 = 无池数据）。
-   *  「完成」= 训练账本已写该轮 `iteration` 事件——进行中那一轮的半截计数不算数
-   *  （否则先交活的节点看着健康、还没轮到的看着掉线）。
+  /** 最近**完成采样轮**贡献数（该轮内该节点成功局数，rollout + eval；-1 = 无池数据）。
+   *  「完成」= 训练账本已写该轮 `rollout_end`（采集收官即刻）或同轮 `iteration`
+   *  ——进行中那一轮的半截计数不算数（否则先交活的节点看着健康、还没轮到的看着掉线）。
+   *  ★ 2026-10-19 用户口径：取「上一次完整 rollout/eval 轮的全部贡献」，不必等 PPO 回传。
    *  ★ 2026-09-26（plan/nodes-decouple-from-course.plan.md）：跨**所有训练流**合并后，
    *  「最近完成轮」按**完成时刻**选（不是比 `it` 大小——`it` 是课程内序号、不可比）。
    *  与 `/api/pool` 的窗口内局数（`winRollout/winEval`）**同源同一份 `aggregateNodeHistory`**。
