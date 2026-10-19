@@ -19,6 +19,7 @@ import { StatusDot } from '../../components/StatusDot'
 import {
   type ContributionBrief,
   type ContributionView,
+  filterBriefSampling,
   fmtCount,
   fmtShare,
   limitLiveToCourses,
@@ -235,7 +236,20 @@ function MatrixTable({ view }: { view: ContributionView }) {
   )
 }
 
-/** 采样块的**收尾行**（首页）：采样份额合计 + top-N 节点份额。
+/** 缩略行的份额签（采样与 PPO 共用同一形状）：等宽身份 + 加粗份额，描边胶囊。
+ *
+ *  两行是**两种人群、两种单位**（局 / job），但版式一致——2026-10-19 用户要求
+ *  「同样样式也应用到 PPO 合计」，故形状只在这里实现一次，不两边各拼一遍。 */
+function BriefChip({ id, share, title }: { id: string; share: number | null; title: string }) {
+  return (
+    <span className="tc-contrib-briefchip" title={title}>
+      <span className="tc-contrib-briefchip-id">{id}</span>
+      <b>{fmtShare(share)}</b>
+    </span>
+  )
+}
+
+/** 采样块的**收尾行**（首页）：采样份额合计 + 每个份额 >10% 的节点。
  *
  *  为什么独立成行、且**只带采样一侧**（2026-10-03 用户报障：「rollout 节点 和 ppo 节点混在一起，
  *  数据混乱，难以区分」）：此前 PPO 与采样两组挤在**同一个按钮**里，两种单位、两种分母并排 ⇒
@@ -243,19 +257,35 @@ function MatrixTable({ view }: { view: ContributionView }) {
  *  PPO 在自己那一行（`PpoBrief`）。两组仍**永不合并**（WC-plan §4.1b）——这里只是把「不合并」
  *  落到版式上：采样份额绝不与 PPO job 数出现在同一行。
  *
- *  这是**纯读数**（不可点）：唯一的深链入口在 PPO 子块的行尾，避免同一区出现两个「节点统计 ›」。 */
+ *  这是**纯读数**（不可点）：唯一的深链入口在 PPO 子块的行尾，避免同一区出现两个「节点统计 ›」。
+ *
+ *  ★ 2026-10-19（用户口径）：份额不再是固定 top-3，而是**所有份额 >10% 的节点**逐个成签
+ *  ——尾部长尾节点在节点行里本来就有身份，这一行只留撑起采样供给的主力。 */
 export function SamplingBrief({ brief }: { brief: ContributionBrief | null }) {
   if (!brief) return null
   const total = brief.sampling.total
-  const parts = brief.sampling.top.map((s) => `${s.id} ${fmtShare(s.share)}`)
+  const rows = filterBriefSampling(brief.sampling.top)
   return (
     <p
       className="tc-contrib-samplingbrief"
-      title="采样份额 = 窗口内成功局（rollout + eval）占采样组内的比例；与 PPO job 数不同单位、分母各自独立（两组永不合并）"
+      title="采样份额 = 窗口内成功局（rollout + eval）占采样组内的比例；只列份额 >10% 的节点（更小的节点见上方节点行）；与 PPO job 数不同单位、分母各自独立（两组永不合并）"
     >
       <span className="tc-contrib-brieflabel">采样合计</span>
       <b>{total > 0 ? `${fmtCount(total)} 局` : '—'}</b>
-      {parts.length > 0 ? <span className="tc-muted">{parts.join(' · ')}</span> : null}
+      {rows.length > 0 ? (
+        <span className="tc-contrib-briefchips">
+          {rows.map((s) => (
+            <BriefChip
+              key={s.id}
+              id={s.id}
+              share={s.share}
+              title={`窗口内 ${fmtCount(s.total)} 局（成功 + 失败；份额只按成功局算）`}
+            />
+          ))}
+        </span>
+      ) : total > 0 ? (
+        <span className="tc-muted">无节点 &gt;10%</span>
+      ) : null}
     </p>
   )
 }
@@ -270,19 +300,33 @@ export function SamplingBrief({ brief }: { brief: ContributionBrief | null }) {
  *  不是把它并进采样那一行。
  *
  *  份额仍**全列**（用户 2026-10-03「全部活跃 worker 都列」）；身份已按机器归并（`machineOf`）
- *  ⇒ 行数 = 机器数（单位数级），太长时由 `flex-wrap` 折行，不会撑破也不会挤掉数值。 */
+ *  ⇒ 行数 = 机器数（单位数级），太长时由 `flex-wrap` 折行，不会撑破也不会挤掉数值。
+ *
+ *  ★ 2026-10-19（用户口径）：与采样行换成**同一种份额签**（`BriefChip`）。PPO 侧不过
+ *  「>10%」阈值——2026-10-03 的口径是「全部活跃 worker 都列」（云机就那几台，看哪台在干活
+ *  比看头部有用）；阈值只在采样行的节点长尾上成立，别把两组的展示规则混掉。 */
 export function PpoBrief({ brief }: { brief: ContributionBrief | null }) {
   if (!brief) return null
   const { ppo } = brief
-  const parts = ppo.top.map((w) => `${w.worker || '(未登记)'} ${fmtShare(w.share)}`)
   return (
     <p
       className="tc-contrib-ppobrief"
-      title="云端 worker 完成的 PPO job（单位：job；与采样局数不同单位、永不合并）；份额分母 = 本组内全体；身份按机器归并（剥 `:pid`）"
+      title="云端 worker 完成的 PPO job（单位：job；与采样局数不同单位、永不合并）；份额分母 = 本组内全体；身份按机器归并（剥 `:pid`）；全部活跃 worker 都列"
     >
       <span className="tc-contrib-brieflabel">PPO 合计</span>
       <b>{ppo.totalDone > 0 ? `${fmtCount(ppo.totalDone)} job` : '—'}</b>
-      {parts.length > 0 ? <span className="tc-muted">{parts.join(' · ')}</span> : null}
+      {ppo.top.length > 0 ? (
+        <span className="tc-contrib-briefchips">
+          {ppo.top.map((w) => (
+            <BriefChip
+              key={w.worker}
+              id={w.worker || '(未登记)'}
+              share={w.share}
+              title={`窗口内完成 ${fmtCount(w.done)} job（份额分母 = 本组内全体；身份按机器归并）`}
+            />
+          ))}
+        </span>
+      ) : null}
     </p>
   )
 }

@@ -409,14 +409,39 @@ export function buildContributionMatrix(
 /** 「不截断」的 top-N 取值（`Array.prototype.slice(0, Infinity)` === 取全部）。
  *
  *  为什么需要它（2026-10-03 用户口径）：首页要**列出全部活跃 PPO worker**（云机数就那几台，
- *  看「哪台在干活」比看「前三名」有用），而采样侧仍只要 top-3（节点行已逐个列出身份，
- *  份额那行只是收尾合计）⇒ 两侧的 N 必须**分开给**。 */
+ *  看「哪台在干活」比看「前三名」有用）；采样侧自 2026-10-19 起也吃全量——首页按
+ *  「份额 >10%」过筛（`filterBriefSampling`），只有全量过筛才等价于「所有 >10%」
+ *  ⇒ 两侧的 N 必须**分开给**。 */
 export const BRIEF_ALL = Number.POSITIVE_INFINITY
+
+/** 首页采样缩略行的打印下限：只列份额**严格 >10%** 的节点（用户 2026-10-19 口径）。
+ *
+ *  尾部长尾节点在上方的节点行里已经逐个有身份，收尾行只回答「谁在撑采样供给」——
+ *  因此这里卡阈值而不是固定条数。⚠ 阈值要在**全量**采样行上过筛：调用方必须用
+ *  `BRIEF_ALL` 取齐，否则「>10%」会退化成「前 N 名里挑 >10%」。 */
+export const SAMPLING_BRIEF_MIN_SHARE = 0.1
+
+/** 按 `SAMPLING_BRIEF_MIN_SHARE` 过筛缩略行：缺数据（`share === null`）不算命中。
+ *
+ *  判据取**打印出来的**一位小数（与 `fmtShare` 同规）：10.04% 会显示成 10.0%，
+ *  若按原值放行，列表里就会出现一枚写着「10.0%」的「>10%」签——口径自相矛盾。
+ *  恰好 10.0% 同样不打印（用户口径是「>10%」，不是 ≥）。 */
+export function filterBriefSampling(
+  rows: ContributionBrief['sampling']['top'],
+  minShare = SAMPLING_BRIEF_MIN_SHARE,
+): ContributionBrief['sampling']['top'] {
+  const minPct = minShare * 100
+  return rows.filter((r) => {
+    if (r.share == null) return false
+    return Number((r.share * 100).toFixed(1)) > minPct
+  })
+}
 
 /** 首页缩略投影：**同一份聚合的裁剪**（不是第二份计算）——top-N + 组总量。
  *
  *  两侧 N 分开（`samplingTop` / `ppoTop`）：两组是**两个不相交的人群、两种单位**（WC-plan §4.1b），
- *  首页对它们的展现需求也不同（采样 3 条够用；PPO 要全列）⇒ 不该被同一个 N 绑在一起。
+ *  首页对它们的展现需求也不同（PPO 要全列）⇒ 不该被同一个 N 绑在一起。
+ *  采样侧首页按份额阈值展示，故用 `BRIEF_ALL` 取齐、由 `filterBriefSampling` 过筛。
  *  `ppoTop` 缺省跟随 `samplingTop`（保持旧调用点的行为逐字不变）。 */
 export function compactSummary(
   view: ContributionView,

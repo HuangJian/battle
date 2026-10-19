@@ -157,13 +157,13 @@ export async function computeFleetProbes(cfg: RlConfig): Promise<FleetProbes> {
       // 窗口 = **近 24 小时滚动档**（用户 2026-10-03：首页要「最近 24 小时的贡献度」）。
       // ⚠ 该档吃子日事件环，环的保留时长（`ROLLING_KEEP_MS`）必须 ≥ 24h，否则数字静默偏低。
       const w = resolveWindow('24h', Date.now(), agg.epochMs)
-      // 两侧 N 分开给：采样 top-3（节点行已逐个列身份）；PPO **全列**（用户口径：云机就那几台，
-      // 「哪几台在干活、各占多少」比只看前三名有用）——两种人群、两种单位（WC-plan §4.1b）。
+      // 两侧都要全量：采样首页按「份额 >10%」过筛（用户 2026-10-19），阈值必须在全量行上过，
+      // 不能先截 top-N；PPO **全列**（用户口径：云机就那几台，「哪几台在干活、各占多少」）。
       // 一次窥视、两处消费（同一拍；`peek` 不触发探测，见 plan/dashboard-reload-perf A6）。
       const admin = peekHubAdmin()
       const queue = admin?.queue ?? null
       const view = buildContributionView(agg, w, inflightByWorkerFromQueue(queue))
-      contributionBrief = compactSummary(view, 3, BRIEF_ALL)
+      contributionBrief = compactSummary(view, BRIEF_ALL, BRIEF_ALL)
       // 每台一行（plan/dashboard-ppo-live-rows）：hub 的租约分档 ⊕ worker 上报的预取状态
       // ⊕ 自主盘的接管（`offline` = 已补传产物的轮次，见 `buildWorkerLive`）。
       ppoWorkerLive = buildWorkerLive(queue, view.ppo.rows, admin?.offline ?? null)

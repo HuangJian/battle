@@ -30,6 +30,7 @@ import {
   buildPpoContribution,
   buildSamplingContribution,
   compactSummary,
+  filterBriefSampling,
   fmtCount,
   fmtShare,
   machineOf,
@@ -499,6 +500,7 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
     const smpHtml = renderToString(h(SamplingBrief, { brief }))
     expect(smpHtml).toContain('tc-contrib-samplingbrief')
     expect(smpHtml).toContain('采样合计')
+    expect(smpHtml).toContain('tc-contrib-briefchip')
     expect(smpHtml).toContain('self')
     // 采样份额行里**不得**出现 PPO 的身份与口径（这就是「混在一起」的反面）
     expect(smpHtml).not.toContain('cloudA')
@@ -508,6 +510,9 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
     expect(ppoHtml).toContain('tc-contrib-ppobrief')
     expect(ppoHtml).toContain('PPO 合计')
     expect(ppoHtml).toContain('6 job')
+    // 与采样行同一签样式（2026-10-19「同样样式应用到 PPO 合计」）
+    expect(ppoHtml).toContain('tc-contrib-briefchips')
+    expect(ppoHtml).toContain('tc-contrib-briefchip-id')
     expect(ppoHtml).toContain('cloudA')
     expect(ppoHtml).toContain('cloudB')
     // ★ 用户 2026-10-04：「不需要百分比 progress bar，像采样合计一样缩略显示即可」——
@@ -520,12 +525,93 @@ describe('WorkerContribution SSR（plan W3a/W3b）', () => {
     expect(ppoHtml).not.toContain('采样合计')
   })
 
+  // ★ 2026-10-19（用户口径）：采样收尾行从「固定 top-3」改成「所有份额 >10% 的节点」——
+  // 阈值必须在**全量**行上过筛，所以服务端改成 BRIEF_ALL；这里同时钉住严格大于与全量前提。
+  it('采样收尾行：份额严格 >10% 的节点全打印；=10% / 缺数据 / 长尾都不打印', () => {
+    const sampling = buildSamplingContribution([
+      { id: 'alpha', split: { rollout: 5, eval: 0, fail: 0 } }, // 50%
+      { id: 'beta', split: { rollout: 3, eval: 0, fail: 0 } }, // 30%
+      { id: 'gamma', split: { rollout: 1, eval: 0, fail: 0 } }, // 恰好 10% ⇒ 不打印
+      { id: 'delta', split: { rollout: 1, eval: 0, fail: 0 } }, // 恰好 10% ⇒ 不打印
+      { id: 'epsilon', split: { rollout: 0, eval: 0, fail: 2 } }, // 只有失败 ⇒ share null
+    ])
+    const view: ContributionView = { ...sampleView(), sampling }
+    const brief = compactSummary(view, BRIEF_ALL, BRIEF_ALL)
+    expect(filterBriefSampling(brief.sampling.top).map((r) => r.id)).toEqual(['alpha', 'beta'])
+
+    const html = renderToString(h(SamplingBrief, { brief }))
+    expect(html).toContain('tc-contrib-briefchips')
+    expect(html).toContain('alpha')
+    expect(html).toContain('50.0%')
+    expect(html).toContain('beta')
+    expect(html).toContain('30.0%')
+    // 恰好 10%、null、以及长尾都不出现在这一行
+    expect(html).not.toContain('gamma')
+    expect(html).not.toContain('delta')
+    expect(html).not.toContain('epsilon')
+    expect(html).not.toContain('10.0%')
+  })
+
+  it('10.04% 显示为 10.0% ⇒ 不进「>10%」列表（判据与 fmtShare 同规）', () => {
+    const sampling = buildSamplingContribution([
+      { id: 'edge', split: { rollout: 251, eval: 0, fail: 0 } }, // 251/2500 = 10.04%
+      { id: 'bulk', split: { rollout: 2249, eval: 0, fail: 0 } },
+    ])
+    const brief = compactSummary({ ...sampleView(), sampling }, BRIEF_ALL)
+    expect(fmtShare(sampling.rows.find((r) => r.id === 'edge')!.share)).toBe('10.0%')
+    expect(filterBriefSampling(brief.sampling.top).map((r) => r.id)).toEqual(['bulk'])
+  })
+
+  it('阈值需要全量行：top-3 裁切会漏掉「同样 >10%」的第 4/5 名（服务端必须 BRIEF_ALL）', () => {
+    const sampling = buildSamplingContribution(
+      ['n1', 'n2', 'n3', 'n4', 'n5'].map((id) => ({
+        id,
+        split: { rollout: 2, eval: 0, fail: 0 }, // 每组 20% ⇒ 全部 >10%
+      })),
+    )
+    const view: ContributionView = { ...sampleView(), sampling }
+    const narrow = compactSummary(view, 3, BRIEF_ALL)
+    expect(filterBriefSampling(narrow.sampling.top)).toHaveLength(3)
+    const full = compactSummary(view, BRIEF_ALL, BRIEF_ALL)
+    expect(filterBriefSampling(full.sampling.top)).toHaveLength(5)
+    const html = renderToString(h(SamplingBrief, { brief: full }))
+    for (const id of ['n1', 'n2', 'n3', 'n4', 'n5']) expect(html).toContain(id)
+  })
+
+  it('全部节点 ≤10% ⇒ 不给空行：明说「无节点 >10%」', () => {
+    // 10 个节点各 1 局 ⇒ 每个恰好 10%（严格大于的阈值下全部不打印）
+    const sampling = buildSamplingContribution(
+      Array.from({ length: 10 }, (_, i) => ({
+        id: `tiny-${i}`,
+        split: { rollout: 1, eval: 0, fail: 0 },
+      })),
+    )
+    const html = renderToString(
+      h(SamplingBrief, { brief: compactSummary({ ...sampleView(), sampling }, BRIEF_ALL) }),
+    )
+    expect(html).toContain('无节点 >10%')
+    expect(html).not.toContain('tc-contrib-briefchip')
+  })
+
   it('缺数据 ⇒ 两条缩略行都不渲染（空行会被读成「有东西没加载出来」）', () => {
     expect(renderToString(h(SamplingBrief, { brief: null }))).toBe('')
     expect(renderToString(h(PpoBrief, { brief: null }))).toBe('')
   })
 
-  it('PPO **全列**（BRIEF_ALL）；采样侧仍按 top-N 收口——两侧 N 分开给', () => {
+  it('PPO 缩略行：同一签样式，但不过 >10% 阈值（1% 的 worker 也列）', () => {
+    const view = sampleView()
+    view.ppo = buildPpoContribution(
+      [50, 30, 12, 7, 1].map((done, i) => ({ worker: `w${i}`, done, rejected: 0 })),
+    )
+    const brief = compactSummary(view, BRIEF_ALL, BRIEF_ALL)
+    const html = renderToString(h(PpoBrief, { brief }))
+    for (const id of ['w0', 'w1', 'w2', 'w3', 'w4']) expect(html).toContain(id)
+    expect(html).toContain('50.0%')
+    expect(html).toContain('1.0%') // 阈值只属于采样行；PPO 仍是「全部活跃 worker 都列」
+    expect(html).not.toContain('无节点') // 没有空态文案（不是阈值过筛）
+  })
+
+  it('两侧 N 独立：PPO 全列不连带采样；采样 N 由调用方给（首页 = 全列 + 阈值过筛）', () => {
     const view = sampleView()
     const five = ['cloudA', 'cloudB', 'cloudC', 'cloudD', 'cloudE']
     view.ppo = buildPpoContribution(five.map((worker, i) => ({ worker, done: 5 - i, rejected: 0 })))

@@ -287,8 +287,9 @@ describe('console/api.buildStateView · 请求路径零聚合（reload-perf W1�
 
   it('缩略与面板同源：brief 是 `/api/pool` 同一份聚合的裁剪（逐字相等）', async () => {
     await withPoolFixture(async () => {
-      // 同一个窗口（首页 = 24h 滚动档，2026-10-03 用户口径取代 today）+ 同一套 N（采样 3 / PPO 全列）
-      // 下，两个端点必须给出同一份数字——防「两份真相」。
+      // 同一个窗口（首页 = 24h 滚动档，2026-10-03 用户口径取代 today）+ 同一套 N（采样/PPO
+      // 都全列；采样由 UI 按份额 >10% 过筛，2026-10-19）下，两个端点必须给出同一份数字
+      //——防「两份真相」。
       api.invalidateSlowSnapshot()
       // 先 pool 后 state：`fresh` 会把探测层与聚合 memo 一起硬清 ⇒ 这一份 fixture 聚合
       // 就是两边共用的那一份（state 侧走 memo 命中，不再重扫）。
@@ -299,7 +300,7 @@ describe('console/api.buildStateView · 请求路径零聚合（reload-perf W1�
       expect(s.contributionBrief?.sampling.total).toBe(4)
       expect(s.contributionBrief?.ppo.totalDone).toBe(1)
       expect(s.contributionBrief).toEqual(
-        poolView.compactSummary(view.contribution!, 3, poolView.BRIEF_ALL),
+        poolView.compactSummary(view.contribution!, poolView.BRIEF_ALL, poolView.BRIEF_ALL),
       )
     })
   })

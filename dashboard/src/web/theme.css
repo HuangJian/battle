@@ -3720,6 +3720,34 @@ a.tc-btn {
 .tc-contrib-brieflabel {
   color: var(--muted);
 }
+/* 采样收尾行的节点签：每个份额 >10% 的节点一枚（2026-10-19 用户口径）。
+   为什么成签而不是 `a 41.1% · b 20.4%` 一串文本：等宽 id + 加粗份额 + 描边胶囊，
+   换行后仍逐枚可读（`flex-wrap` 折行，不会把数值和名字拆到两行）。 */
+.tc-contrib-briefchips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--sp-1) var(--sp-2);
+}
+.tc-contrib-briefchip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 6px;
+  padding: 1px 9px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--surface-2);
+  white-space: nowrap;
+  font-size: var(--fs-sm);
+}
+.tc-contrib-briefchip-id {
+  font-family: ui-monospace, 'Cascadia Mono', Consolas, monospace;
+  color: var(--mono);
+}
+.tc-contrib-briefchip b {
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
 /* ── 每台工作盘**此刻**在干什么（2026-10-09，plan/dashboard-ppo-live-rows）──
    汇总行（`.tc-contrib-ppobrief`）下面逐台一行：● 名字 份额 计算中§… 已下载§… 下载中§…
    同样 `flex-basis:100%`：`.tc-nodes` 是 pill 行，不加这条每行会被当成胶囊挤到行尾。 */
