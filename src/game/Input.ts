@@ -14,6 +14,17 @@ import type { KeyBindings } from '../types'
 export interface InputLike {
   getMoveDirection(): Direction | null
   isFiring(): boolean
+  /**
+   * NN-only action bit (v3 replay frames): turn toward `getMoveDirection()`
+   * without advancing. Optional — human/God-AI inputs leave it undefined,
+   * which means false (byte-identical legacy behavior).
+   */
+  isHolding?(): boolean
+  /**
+   * NN-only action bit (v3 replay frames): fire along the pre-turn facing and
+   * then apply the turn. Optional for the same legacy-compatibility reason.
+   */
+  isFireBeforeTurn?(): boolean
   /** Whether a super-item release key (guard/frenzy/rewind) was pressed this frame. */
   wasItemPressed(kind: 'guard' | 'frenzy' | 'rewind'): boolean
   endFrame(): void

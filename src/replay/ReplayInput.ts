@@ -16,6 +16,8 @@ const IDLE_FRAME: InputFrame = {
   firing: false,
   guard: false,
   frenzy: false,
+  hold: false,
+  fireBeforeTurn: false,
 }
 
 /**
@@ -61,6 +63,16 @@ export class ReplayInput implements InputLike {
   isFiring(): boolean {
     const frame = this.frames1[this.cursor]
     return frame?.firing ?? IDLE_FRAME.firing
+  }
+
+  isHolding(): boolean {
+    const frame = this.frames1[this.cursor]
+    return frame?.hold ?? IDLE_FRAME.hold!
+  }
+
+  isFireBeforeTurn(): boolean {
+    const frame = this.frames1[this.cursor]
+    return frame?.fireBeforeTurn ?? IDLE_FRAME.fireBeforeTurn!
   }
 
   wasItemPressed(kind: 'guard' | 'frenzy'): boolean {
@@ -129,6 +141,16 @@ class ReplayInputSlice implements InputLike {
   isFiring(): boolean {
     const frame = this.frames[this.getTick()]
     return frame?.firing ?? IDLE_FRAME.firing
+  }
+
+  isHolding(): boolean {
+    const frame = this.frames[this.getTick()]
+    return frame?.hold ?? IDLE_FRAME.hold!
+  }
+
+  isFireBeforeTurn(): boolean {
+    const frame = this.frames[this.getTick()]
+    return frame?.fireBeforeTurn ?? IDLE_FRAME.fireBeforeTurn!
   }
 
   wasItemPressed(kind: 'guard' | 'frenzy'): boolean {

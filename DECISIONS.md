@@ -7630,3 +7630,27 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `web-view-format` 4 例、`web-view-rows` 1 例、`web-app-hero-overview` 1 例端到端渲染）
   · typecheck 绿 · oxlint 0 警告 · oxfmt 净 · `bun src/server/build.ts` 四份 bundle 过
   · 用线上真实 `/api/state` 载荷复验 Hero / MetricsTable 均不再抛。
+
+## §2026-10-19-goalnn-a1-blocked-replay-v3 — A1 被 God-AI score gate 拒绝（回退）；回放帧先升 v3 保住 hold/fireBeforeTurn
+
+- **现场**：`plan/nn-capability-upgrade.plan.md` 的 A1 要修“子弹方向 ≠ 开火时刻已提交朝向”。
+  按 L1 实现两版：① `tryFire` 内先 `applyTurnCooldown`，被拒仍按旧朝向发射；
+  ② 玩家路径先提交转身，被拒则本拍不发射。两版都让 God-AI 的转身同拍开火失效。
+- **证据**：`tests/godai-score-gate.test.ts`（v7，classic/hard/chaos，20 seed/关）：
+  ① classic 10 关低于地板（S7/S13/S19/S22/S23/S27/S28/S31/S32/S34，均值 0.65–0.82，
+  truth 0.85–0.97）；② 仍 7 关低于地板（S10/S13/S21/S22/S28/S32/S34，均值 0.66–0.90）。
+  这不是随机噪声，是“侧射/转身同拍开火”本身在 God-AI 战术里的贡献。
+- **决策**：
+  1. **A1 回退，不签入**；God-AI golden 保持原样。不得用延长冷却、改掩码、给 AI 加补偿来“修绿”。
+  2. A1 若要重启，必须单独立项回答“God-AI 的转身同拍开火是否可放弃”；
+     若只服务 NN，则用显式能力开关（默认关）而不是改全局引擎语义，且开关要进快照/回放契约。
+  3. **P0-1 独立先做**：回放帧升 v3（单字节重排，`bits 0–2` 方向、`bit3` 开火、`bit6` hold、
+     `bit7` fireBeforeTurn）；单流只要含任一 v3 位就写 v3，v1/v2 继续兼容读。
+     这样 B′ 不会在“录制侧写不进两位 / 读回恒 false”上静默失败。
+- **备选与否决**：① 直接接受 A1 的分数下降并下调地板 —— 否（地板是 God-AI v7 的 truth 派生，
+  下调等于把回归写成通过）；② 只对敌人开 A1 —— 否（玩家侧才是 NN 要修的那一侧）；
+  ③ v3 双字节/tick —— 否（方向只需 3 bit，白扔的 bit 正好装两位，体积不变）。
+- **后果**：当前 HEAD 无 A1，`bun run check` 的 score gate 三难度全绿；B′ 仍被 A1 阻塞，
+  但回放 v3 已就绪。旧 v1/v2 `.replay` 可继续导入/播放；新录单流若带 NN 两位则必须是 v3。
+- **门禁**：`bun run check`（2554 tests；含 replay v1/v2/v3 round-trip、单流 v3、旧 v2 解码）；
+  `bun run build` 待跑。

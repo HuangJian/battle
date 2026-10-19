@@ -34,6 +34,17 @@ export interface InputFrame {
   guard: boolean
   /** Frenzy (狂暴宣泄) pressed this tick. */
   frenzy: boolean
+  /**
+   * NN-only (v3): turn toward `direction` without advancing. Optional so
+   * legacy/human frames default to false. Only recorded when the input
+   * source exposes `isHolding()`.
+   */
+  hold?: boolean
+  /**
+   * NN-only (v3): fire along the pre-turn facing, then apply the turn.
+   * Optional for the same backward-compatibility reason as `hold`.
+   */
+  fireBeforeTurn?: boolean
 }
 
 /**
