@@ -81,6 +81,8 @@ const errorSummary = (over: Partial<ErrorListItem> = {}, truncated = false): Err
       component: 'trainingLoop',
       scope: 'c5-gae',
       severity: 'err',
+      classification: 'unknown',
+      activity: 'active',
       firstAt: 1_700_000_000_000,
       lastAt: 1_700_000_060_000,
       count: 3,
@@ -926,6 +928,26 @@ describe('组件错误登记表汇总条（2026-10-16，plan/component-error-reg
     expect(items[0]!.title).toContain('2 条未处理')
     expect(items[0]!.severity).toBe('err')
     expect(items[0]!.detail).toContain('worker-report:1')
+  })
+
+  it('只有瞬时噪声 / 历史事件 ⇒ 不打断（0 条）', () => {
+    expect(
+      buildAlerts({ ...clean, errors: errorSummary({ classification: 'transient-network' }) }),
+    ).toEqual([])
+    expect(buildAlerts({ ...clean, errors: errorSummary({ activity: 'historical' }) })).toEqual([])
+  })
+
+  it('真问题 + 噪声 ⇒ 计数只含真问题，噪声折叠进 detail', () => {
+    const mixed = errorSummary()
+    mixed.items.push({
+      ...mixed.items[0]!,
+      fp: 'noise1',
+      classification: 'transient-network',
+      message: 'dial tcp 127.0.0.1:8899: connectex refused',
+    })
+    const a = buildAlerts({ ...clean, errors: mixed })[0]!
+    expect(a.title).toContain('1 条未处理')
+    expect(a.detail).toContain('另有 1 条瞬时噪声已折叠')
   })
 
   it('★ 投影被截断 ⇒ 依据行提示去详情页（不假装「就这么多」）', () => {

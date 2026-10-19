@@ -9,7 +9,7 @@
 
 import os from 'os'
 import path from 'path'
-import { LOG_DIR, NN_TRAINING } from '../src/core/paths'
+import { NN_TRAINING, tmpLogsDir } from '../src/core/paths'
 import { api } from './helpers/console-fixture'
 import { configPath } from '../src/core/paths'
 import { latestIterFromLedgerTail } from '../src/web/view'
@@ -205,8 +205,9 @@ describe('console/log viewer (§348 补 2)', () => {
     const p = await api.componentLogPayload('selfNode', 50)
     expect(p).not.toBeNull()
     expect(p!.component).toBe('selfNode')
-    // 2026-09-08 双 tmp 统一：组件日志统一落到 LOG_DIR = 仓库根 tmp/（绝对路径）
-    expect(p!.log).toBe(path.join(LOG_DIR, 'sampler-agent.log'))
+    // 2026-09-08 双 tmp 统一：组件日志统一落到 tmp/（绝对路径）。
+    // 2026-10-19：走 `tmpLogsDir()`（默认还是仓库根 tmp/）——单测重定向才覆盖得到。
+    expect(p!.log).toBe(path.join(tmpLogsDir(), 'sampler-agent.log'))
     expect(Array.isArray(p!.lines)).toBe(true)
     expect(await api.componentLogPayload('nope' as never, 50)).toBeNull()
   })

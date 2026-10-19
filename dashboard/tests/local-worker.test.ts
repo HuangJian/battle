@@ -356,7 +356,7 @@ describe('接线门禁', () => {
 
   it('读面日志与写面同源：唯一一份 local-worker.log（不再按课程分目录）', () => {
     const meta = src(path.join('server', 'api', 'component-meta.ts'))
-    expect(meta).toContain("localWorker: () => path.join(LOG_DIR, 'local-worker.log')")
+    expect(meta).toContain("localWorker: () => path.join(tmpLogsDir(), 'local-worker.log')")
     // 冒烟的日志兜底也必须是那一条路径
     const smoke = src(path.join('server', 'actions', 'smoke.ts'))
     expect(smoke).toContain("path.join(LOG_DIR, 'local-worker.log')")

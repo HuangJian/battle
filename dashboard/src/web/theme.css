@@ -3857,3 +3857,24 @@ a.tc-btn {
   color: var(--muted);
   font-size: var(--fs-sm);
 }
+/* 分类分组标题（plan v2 D6）：与数据行同一张表，但不可点、不参与斑马纹。 */
+.tc-errors__group td {
+  background: var(--gray-bg);
+  color: var(--muted);
+  font-weight: 600;
+  padding-top: var(--sp-2);
+}
+.tc-errors__group-count {
+  margin-left: var(--sp-1);
+  font-weight: 400;
+}
+/* 「最近已恢复」区块：与活跃表同宽、视觉降权（灰字 + 上间距）。 */
+.tc-errors__resolved {
+  margin-top: var(--sp-4);
+}
+.tc-errors__resolved .tc-errors__title {
+  font-size: var(--fs-md);
+}
+.tc-errors__resolved .tc-errors__sub {
+  margin-bottom: var(--sp-2);
+}

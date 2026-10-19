@@ -1,25 +1,27 @@
 /** component-meta.ts — 受管组件元数据表：日志路径与健康探测 URL（唯一声明处）。 */
 import path from 'path'
-import { LOG_DIR } from '../../core/paths'
+import { tmpLogsDir } from '../../core/paths'
 import { sharedHubUrl } from '../../core/slots'
 import type { Component, RlConfig } from '../../core/types'
 import { courseLogDir } from '../../stack/specs'
 
 // ────────────────────────── 快照组装 ──────────────────────────
 
-// 组件日志统一读 LOG_DIR（仓库根 tmp/，2026-09-08 双 tmp 统一）——绝对路径，
+// 组件日志统一读 `tmpLogsDir()`（默认 = 仓库根 tmp/，2026-09-08 双 tmp 统一）——绝对路径，
 // 与组件启动写入路径（specs.ts log:）同源，不依赖控制台自身 cwd。
+// ★ 2026-10-19：走惰性函数而非常量，单测 `BCITY_TMP_LOGS_DIR` 重定向才覆盖得到全局日志
+//   （否则错误采集用例会去读操作员真 tmp/ 里的 hub-server.out）。
 // 共享组件（hub / 隧道 / 本机 worker）日志唯一；trainer 有**每课镜像**（serve 的行路由写到
 // tmp/<课>/training-loop.log），故它按课程解析。spec 侧 `log:` 与本 resolver 两半必须同步，
 // 否则组件表日志尾会扫到别课的文件。无课程时沿用旧单课路径。
 export const COMPONENT_LOGS: Partial<Record<Component, (cfg: RlConfig, course: string) => string>> =
   {
-    selfNode: () => path.join(LOG_DIR, 'sampler-agent.log'),
+    selfNode: () => path.join(tmpLogsDir(), 'sampler-agent.log'),
     // 共享 hub/隧道 ⇒ 日志也唯一（不再 per-course；与 specs.ts 的 log: 同源）
-    hubServer: () => path.join(LOG_DIR, 'hub-server.out'),
-    cloudflared: (_c) => path.join(LOG_DIR, 'cloudflared.log'),
+    hubServer: () => path.join(tmpLogsDir(), 'hub-server.out'),
+    cloudflared: (_c) => path.join(tmpLogsDir(), 'cloudflared.log'),
     // 共享本机 worker（2026-09-19）：日志也唯一（不再按课程分目录；与 specs.ts 的 log: 同源）
-    localWorker: () => path.join(LOG_DIR, 'local-worker.log'),
+    localWorker: () => path.join(tmpLogsDir(), 'local-worker.log'),
     trainingLoop: (_cfg, course) => path.join(courseLogDir(course), 'training-loop.log'),
     // 本机伪节点（remote_worker_serve）**不在受管组件里**（2026-09-19）：它只服务冒烟预演，
     // 由预演自起自停（`stack/push.ts`）——没有卡片、没有账本、没有日志页入口。

@@ -7630,3 +7630,71 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
   `web-view-format` 4 例、`web-view-rows` 1 例、`web-app-hero-overview` 1 例端到端渲染）
   · typecheck 绿 · oxlint 0 警告 · oxfmt 净 · `bun src/server/build.ts` 四份 bundle 过
   · 用线上真实 `/api/state` 载荷复验 Hero / MetricsTable 均不再抛。
+## §2026-10-19-goalnn-error-denoise-classify — 错误采集去噪 / 分类 / 活动度：访问日志看状态码、续行并入 detail、全局组件只扫一次
+
+- **现场**：`/errors` 的活跃错误里多数是云隧道运维噪声 + 访问日志误报——`parseLogLine` 的
+  `LOG_ERR_RE` 命中路径里的 `errors`/`error` 子串（`/admin/errors`、`/admin/worker-error` 的 200 行），
+  以及 traceback 续行（`During handling…` / `Exception occurred…`）各成一条。真问题（依赖缺失、
+  多进程、500、503、隧道中断）被淹没。评审与设计见 `plan/error-page-denoise-and-triage.plan.md` v2
+  （findings `plan/error-page-denoise-and-triage.review-bf.md`）。
+- **决策**：
+  1. **访问日志按状态码判级别**：`parseLogLine` 识别行首 `"METHOD path HTTP/x.y"`，`<500` ⇒ info、
+     `>=500` ⇒ error。识别**不依赖行尾状态码**（尾窗会截断长 query）——缺失状态码按 info。
+     采集层不再加第二套「跳过访问日志」判据，避免把 hub 500 一起跳掉。
+  2. **traceback 续行不单独成事件**：只跳过无 `[HH:MM:SS]` 前缀且命中 traceback 续行集
+     （`Traceback (` / `File "` / `During handling…` / `The above exception…` /
+     `Exception occurred during processing of request`）的行；`errorDetailBlock` 仍把整块并入命中行。
+     **不按「缩进行」一刀切**（多行 JSON 里的真实错误也可能缩进）。
+  3. **`classification` 是服务端规则表**（`server/api/error-classify.ts`，顺序即优先级）：
+     `dependency` / `multi-process` / `capacity` / `remote-failure` / `process-lifecycle` /
+     `transient-network` / `unknown`。枚举**不含 `misreport`**：误报在采集层就没了，没有写者。
+     标签/处置提示住 `web/view/error-hints.ts`（客户端安全），规则与措辞分离。
+  4. **`activity`**：源文件 mtime 静默 > 24h ⇒ `historical`，事件时间取文件 mtime 而不是 `now`。
+     历史事件仍进登记表与 `/api/errors`（「显示历史」开关），但**不进首页告警坞、不计未 ack**——
+     去开课闸后 185 门旧课的尾窗错误不会全变「此刻活跃」。
+  5. **采集与课程解耦**：全局组件（selfNode/hubServer/localWorker/cloudflared）按解析后的**绝对路径
+     每拍只扫一次**（缓存键 `组件|路径`）；`trainingLoop` 逐课扫；**无 `training-enabled.txt` 闸**。
+     每文件最多 20 个不同 `fp`；缓存键不在本拍扫描集即淘汰。组件日志路径改走 `tmpLogsDir()`
+     （默认值不变，测试可重定向）。
+- **备选与否决**：① **跳过全部访问日志**——否（hub 500 会从「误报」变「永久不可见」，而它是 §1.2 的
+  真问题类别）；② **只加 mtime 有界就重开全量扫描**——否（2026-10-17 事故的大头是全局日志被 185 门课
+  重复缓存，mtime 不解决重复）；③ **分类放客户端**——否（同一事件在日志腿/上报腿会得到两套判定）；
+  ④ **保留 `misreport` 枚举**——否（无写者，且账本重放不读 classification）；⑤ **按课程继续扫全局日志**——
+  否（同一文件 ×185 份缓存 = 400MB / RSS 958MB 的直接原因）。
+- **后果**：`/errors` 默认视图不再出现访问日志/traceback 续行；5xx 访问行成为 `remote-failure` 事件；
+  全局日志事件数不再随课数倍增。**不承诺**：单文件超过 20 类错误时只保留前 20 类（同 fp 仍计次）；
+  历史事件仍占 `/api/errors` 投影配额（`ERROR_SUMMARY_MAX`）。
+- **门禁**：dashboard `bun run typecheck` 绿 · `bun run test` **1743 pass / 0 fail**（新增
+  `server-api-error-classify` 9 例、`server-api-error-scan` 6 例、`web-log-view` 访问日志 1 例）·
+  `oxlint` 0 警告 · `oxfmt --check` 净 · `bun src/server/build.ts` 四份 bundle 过 · 根 `bun run check`
+  **2560 pass / 3 skip / 0 fail** · `bun run build` 过。
+
+## §2026-10-19-goalnn-error-page-shell-and-resolve — `/errors` 包主页外壳（仍独立 bundle）+ 瞬时错误两拍撤销 / resolved 审计行
+
+- **现场**：`/errors` 是独立 SSR 页 + 第 4 份 bundle，没有侧栏/顶栏，与其它页割裂；同时瞬时网络错误
+  在日志尾窗里停留期间会一直占着活跃表与告警坞，源恢复后也不消失。用户口径：错误页包进主页框架、
+  波动错误自行恢复后自动撤销、错误不与课程绑定。
+- **决策**：
+  1. **S1 = 包壳，不进主 bundle**：`ErrorsApp` 内包 `Shell` + `NavSidebar` + `Topbar`；仍由
+     `server.ts` 整页 SSR + `errors.js`。**重申**父 plan `component-error-registry` §2 N5 / Q2
+     「让 `/errors` 进主 bundle 路由 = 不做」；本轮不反转它（进主 bundle 会把 `/errors` 的 SSR 从
+     `getErrorSummary()` 变成全量 `buildStateView`，并让 `/api/errors` 与 `/api/state` 两套轮询并存）。
+  2. **S2 = 两拍撤销 + resolved 环**：瞬时两类（`transient-network`/`process-lifecycle`）连续 2 拍
+     缺席才移出活跃表：第 1 拍保留（`misses=1`），第 2 拍进内存 `resolved` 环（≤50 条 / 24h，
+     `resolvedAt=now`）。非瞬时类保持「消失即结束」。重现清掉同 fp 的 resolved 副本并按新 episode 重弹。
+  3. **账本行类型**：`kind:'seen'`（新 fp 首次出现，含 classification/activity）+ `kind:'resolved'`
+     （自动撤销时追加，含 resolvedAt）。`replayErrorLedger` 跳过 resolved 行；账本仍 append-only，
+     同 fp 的 seen 行仍只有一行。`/api/errors` 增加 `resolvedItems`，页面底部「最近已恢复」单列。
+  4. **告警坞去噪**：`componentErrorAlerts` 只数「真问题 · active」；噪声/历史不参与计数与 ack 键，
+     噪声数量只在 detail 里折叠报一句。排序/折叠口径不动（父 plan N5 的边界）。
+- **备选与否决**：① **进主 bundle 路由**——否（反转父 plan 的显式非目标；SSR 更重；数据面归属未定）；
+  ② **瞬时错误不再复用日志签名缓存**——否（文件没变就不再读盘 ⇒ 仍存在的错误一拍后消失，
+     下一次无关写入又捞回来 ⇒ episode 抖动、告警坞反复重弹）；③ **把 `resolvedAt` 写进 seen 行**——
+     否（append-only 不可回写，且破坏「同 fp 只一行 seen」的契约）；④ **直接把噪声从登记表删掉**——
+     否（审计需要历史；用户口径是分类保留）。
+- **后果**：`/errors` 首帧含侧栏/顶栏，导航激活在「错误」；瞬时错误在源安静两拍后从活跃表消失并出现在
+  「最近已恢复」，账本有审计行；告警坞不再被隧道抖动反复打断。**不承诺**：`resolved` 环是内存投影，
+  控制台重启后清空（账本行仍在，但当前没有历史恢复读面）；「源恢复」不由成功哨兵判定，只看错误是否
+  不再出现在尾窗。
+- **门禁**：同上（`web-ssr-errors-page` 新增外壳/分组/已恢复 3 例、`web-alert-dock` 新增噪声/历史 2 例、
+  `server-api-error-registry` 新增撤销/账本 4 例）；四份 bundle 过（`errors.js` 仍独立）。

@@ -112,7 +112,13 @@ import {
   renderLogPage,
 } from '../web/render'
 import { pageForPath } from '../web/view'
-import { errorRegistryScannedAt, findErrorEvent, getErrorSummary } from './api'
+import {
+  buildErrorSummary,
+  errorRegistryScannedAt,
+  findErrorEvent,
+  getErrorSummary,
+  getResolvedErrors,
+} from './api'
 import type { Component, ProcSpec, RegistryEntry } from '../core/types'
 
 interface ServeOpts {
@@ -547,17 +553,27 @@ async function main(): Promise<void> {
               message: ev.message,
               detail: ev.detail,
               ref: ev.ref,
+              classification: ev.classification,
+              activity: ev.activity,
             })
           }
           const summary = getErrorSummary()
-          return json({ items: summary.items, cursor: errorRegistryScannedAt() })
+          return json({
+            items: summary.items,
+            resolvedItems: buildErrorSummary(getResolvedErrors()).items,
+            cursor: errorRegistryScannedAt(),
+          })
         }
         if (req.method === 'GET' && url.pathname === '/errors') {
           const summary = getErrorSummary()
           const scannedAt = errorRegistryScannedAt()
           return new Response(
             renderErrorsPage(
-              { items: summary.items, scannedAt },
+              {
+                items: summary.items,
+                resolvedItems: buildErrorSummary(getResolvedErrors()).items,
+                scannedAt,
+              },
               { readOnly: !loopback, scannedAt },
               { css: livePageCss() },
             ),

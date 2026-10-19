@@ -27,6 +27,20 @@ describe('日志页展示层（§367：结构化解析 + 事件卡）', () => {
     expect(parseLogLine('plain line without prefix').level).toBe('info')
   })
 
+  it('访问日志：级别只看状态码（2xx/3xx/4xx info，5xx error），路径关键词不再误报', () => {
+    const ok = parseLogLine(
+      '127.0.0.1 - - [19/Oct/2026 12:00:00] "GET /admin/errors?since=0 HTTP/1.1" 200 -',
+    )
+    expect(ok.level).toBe('info')
+    const busy = parseLogLine(
+      '127.0.0.1 - - [19/Oct/2026 12:00:00] "POST /admin/worker-error HTTP/1.1" 503 -',
+    )
+    expect(busy.level).toBe('error')
+    // 长 query 被尾窗截断、状态码丢失 ⇒ info（识别不依赖行尾状态码）
+    const truncated = `127.0.0.1 - - [19/Oct/2026 12:00:00] "GET /x?q=${'a'.repeat(600)} HTTP/1.1"`
+    expect(parseLogLine(truncated).level).toBe('info')
+  })
+
   it('parseTrainingEvent：trainingLoop JSON 行 → event 徽章 + 精选字段；iter_error 带 error', () => {
     const it = JSON.stringify({
       event: 'iteration',

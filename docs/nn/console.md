@@ -81,12 +81,34 @@ registry}.ts`：
 **首页入口与详情页**：首页 = 告警坞**第 9 类汇总条目**（0 或 1 条：逐条清单是详情页的事）；为此 `AlertAction.kind`
 闭集放宽出唯一一个**无副作用**的 `'link'`（渲染成真 `<a href>`、**不挂 `onClick`**，可中键/右键新开标签）。
 详情页 `/errors` 是**第 3 个独立页 / 第 4 份 bundle**（照 `/log` 范式：服务端整页服务 + 不参与主 bundle 路由 +
-只读面照渲 —— 只读的边界是**动作**，不是读面）。`detail` **不进** `/api/state`（3s）与 `/api/errors`（4s）的投影，
+只读面照渲 —— 只读的边界是**动作**，不是读面）。2026-10-19 起它**包进主页外壳**（`Shell` + `NavSidebar` +
+`Topbar`，导航/主题与其它页一致），但**仍是独立 bundle**（父 plan N5/Q2 不反转；见 DECISIONS
+§2026-10-19-goalnn-error-page-shell-and-resolve）。`detail` **不进** `/api/state`（3s）与 `/api/errors`（4s）的投影，
 展开某一行时才 `GET /api/errors?fp=` 懒取（一页几十条 × 4000 字符不该每 4s 全量搬一遍）。
+
+**去噪、分类与活动度**（2026-10-19）：
+
+- **访问日志按状态码判级别**（`parseLogLine`）：行首 `"METHOD path HTTP/x.y"` + 状态码，`<500` ⇒ info、`>=500` ⇒ error；
+  不再因为路径含 `errors`/`worker-error` 就把 200 当错误。识别不依赖行尾状态码（尾窗会截断长 query）。
+- **traceback 续行不单独成事件**：`During handling…` / `The above exception…` / `File "…"` / `Traceback (…)` 只在
+  命中行的 `detail` 块里出现；不按「缩进行」一刀切。
+- **`classification`**（`transient-network` / `process-lifecycle` / `dependency` / `capacity` / `remote-failure` /
+  `multi-process` / `unknown`）由服务端规则表判定；`/errors` 默认隐藏前两类，按分类分组，「显示噪声」可放行。
+  分类**不替代** severity：`err/warn` 仍表示「多严重」，classification 表示「该不该现在打断你」。
+- **`activity`**：源文件 mtime 静默 > 24h ⇒ `historical`（历史课/停机前的旧日志）。历史事件仍在 `/errors`
+  （「显示历史」开关），但不进首页告警坞、不计未 ack —— 否则去开课闸后 185 门旧课的错误会全变「此刻活跃」。
+- **采集与课程解耦**：全局组件（selfNode/hubServer/localWorker/cloudflared）**每拍只扫一次**（缓存键 = 组件|绝对路径）；
+  `trainingLoop` 逐课扫；**无开课闸**。每文件最多 20 个不同 `fp`，缓存键不在本拍扫描集就淘汰 —— 这是 2026-10-17
+  内存事故（185 课 × 全局日志重复缓存 = 400MB）的直接防线。
+- **自动撤销**：瞬时两类连续 2 拍未再出现 ⇒ 移出活跃表、进内存 `resolved` 环（≤50 条/24h，`/api/errors.resolvedItems`），
+  页面底部「最近已恢复」单列；非瞬时类保持「消失即结束」。
 ack 分工写死：首页汇总条的「知道了」**只关它自己**，逐条 ack + 「全部标记已读」在详情页（两者键不同，所以前者不会替
 后者静默结案）。
 
-**账本**：`tmp/component-errors.jsonl`（append-only，只在**新 `fp` 首次出现**时落一行 ⇒ 有界、可 grep，不是出现次数）。
+**账本**：`tmp/component-errors.jsonl`（append-only）。行有两种 `kind`：
+`seen`（**新 `fp` 首次出现**时一行，带 `classification`/`activity`）与 `resolved`（瞬时错误自动撤销时一行，
+带 `resolvedAt`；同一 `fp` 最多一条）。`replayErrorLedger` 只把 `seen` 行当「见过」的种子，跳过 `resolved` 行
+⇒ 重启后重现的错误仍按新 episode 处理。账本仍不是出现次数表，可 grep、有界。
 路径走 `core/paths.ts::errorLedgerPath()`（`BCITY_ERROR_LEDGER` 可重定向）——与 `tmpLogsDir()` / `consoleLogPath()` /
 `loopControlPath()` 同规：**否则跑测试会把指纹写进操作员真账本**（2026-10-16 实测：不设这一条，用例第一次跑就落到真盘上）。
 

@@ -35,6 +35,8 @@ const row = (over: Partial<ErrorListItem> = {}): ErrorListItem => ({
   component: 'trainingLoop',
   scope: 'c5-gae',
   severity: 'err',
+  classification: 'unknown',
+  activity: 'active',
   firstAt: 1_700_000_000_000,
   lastAt: 1_700_000_060_000,
   count: 3,
@@ -62,7 +64,7 @@ describe('/errors SSR（renderErrorsPage，plan/component-error-registry §4.6�
     )
     expect(empty).toContain('没有组件报错')
     expect(empty).toContain('巡检还没跑过') // scannedAt=0 ⇒ 不谎报「已检查」
-    expect(empty).toContain('没有匹配的行')
+    expect(empty).toContain('tc-errors__empty') // 空态区块仍在（文案改为不重复报错）
   })
 
   it('★ `detail` 不进首帧（P1-4：长文本按 fp 懒取，不跟 4s 轮询一起搬）', () => {
@@ -94,6 +96,47 @@ describe('/errors SSR（renderErrorsPage，plan/component-error-registry §4.6�
     const at = (s: string): number => dom.indexOf(s)
     expect(at('err-new')).toBeLessThan(at('err-old'))
     expect(at('err-old')).toBeLessThan(at('warn-msg'))
+  })
+
+  it('主页外壳：`/errors` 首帧含侧栏/顶栏，导航激活在错误页（plan v2 D1）', () => {
+    const dom = body(
+      render.renderErrorsPage({ items: [row()], scannedAt: 1 }, { readOnly: false, scannedAt: 1 }),
+    )
+    expect(dom).toContain('tc-shell')
+    expect(dom).toContain('tc-side')
+    expect(dom).toContain('tc-top')
+    expect(dom).toContain('href="/errors"')
+    expect(dom).toContain('aria-current="page"')
+  })
+
+  it('默认只看真问题：噪声/历史不渲染，分类分组，已恢复单列（plan v2 D3/D6）', () => {
+    const payload = {
+      items: [
+        row({ fp: 'dep', classification: 'dependency', message: 'ModuleNotFoundError: numpy' }),
+        row({ fp: 'noise', classification: 'transient-network', message: 'dial tcp 超时' }),
+        row({ fp: 'hist', activity: 'historical', message: '旧错误' }),
+      ],
+      resolvedItems: [
+        row({
+          fp: 'res',
+          classification: 'transient-network',
+          message: '已恢复的网络抖动',
+          resolvedAt: 1_700_000_100_000,
+        }),
+      ],
+      scannedAt: 1,
+    }
+    const dom = body(render.renderErrorsPage(payload, { readOnly: false, scannedAt: 1 }))
+    expect(dom).toContain('依赖缺失')
+    expect(dom).toContain('ModuleNotFoundError')
+    expect(dom).not.toContain('dial tcp 超时')
+    expect(dom).not.toContain('旧错误')
+    expect(dom).toContain('显示噪声')
+    expect(dom).toContain('显示历史')
+    expect(dom).toContain('1 条噪声已折叠')
+    expect(dom).toContain('1 条历史')
+    expect(dom).toContain('最近已恢复')
+    expect(dom).toContain('已恢复的网络抖动')
   })
 
   it('bundle 与载荷：`/errors.js` + `window.__INITIAL__`（hydrate 首帧与 SSR 同源）', () => {

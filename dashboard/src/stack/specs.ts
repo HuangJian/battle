@@ -34,9 +34,13 @@ import type {
   SlimMode,
 } from '../core/types'
 
-/** 课程日志目录（per-course；无课程走 `nocourse`——与旧单课路径同构）。 */
+/** 课程日志目录（per-course；无课程走 `nocourse`——与旧单课路径同构）。
+ *
+ *  ★ 2026-10-19：走 `tmpLogsDir()`（默认值 = `LOG_DIR`，行为零变化）——单测用
+ *  `BCITY_TMP_LOGS_DIR` 重定向时，错误采集的 trainer 日志路径也跟着进临时目录，
+ *  不再读操作员真 `tmp/<课>/training-loop.log`。 */
 export function courseLogDir(course: string): string {
-  return path.join(LOG_DIR, course || 'nocourse')
+  return path.join(tmpLogsDir(), course || 'nocourse')
 }
 
 /** cloudflared 真身路径（Chocolatey 的 bin\cloudflared.exe 是 shim——另起真身子进程、

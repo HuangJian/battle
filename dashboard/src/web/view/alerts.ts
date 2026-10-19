@@ -43,6 +43,7 @@ import { alertAckKey, cloudHaltAckKey, visibleCloudHalts } from './interaction'
 // 与 pill 的「排队·无人取」说的是同一件事（有活、没人认领）；「卡住」是另一类（有持有者但
 // 无进度）。两处各起一个名字 = 迟早漂开，所以词只在 `course-status.ts` 定义一次。
 import type { ErrorSummaryView } from './error-types'
+import { isNoiseClassification } from './error-hints'
 import type { LoopQueueRow } from './loop-queue'
 import { NO_TAKER_LABEL, STUCK_LABEL, describeRunComplete } from './course-status'
 
@@ -287,10 +288,22 @@ function relAgo(now: number, at: number): string {
 function componentErrorAlerts(input: AlertInput): AlertItem[] {
   const view = input.errors
   if (!view || view.items.length === 0) return []
+  // 2026-10-19（plan v2 D6）：坞只被**真问题 · active** 打断。瞬时网络/进程生命周期噪声与
+  // 历史课旧错误不进计数、也不参与 ack 键（否则它们每次复发都会重弹一条红条）；
+  // 噪声数量只在 detail 里报一句，仍可去详情页看。
   const pending = view.items.filter(
-    (it) => !input.acks.includes(alertAckKey('component-error', it.fp, String(it.firstAt))),
+    (it) =>
+      it.activity !== 'historical' &&
+      !isNoiseClassification(it.classification) &&
+      !input.acks.includes(alertAckKey('component-error', it.fp, String(it.firstAt))),
   )
   if (pending.length === 0) return []
+  const noise = view.items.filter(
+    (it) =>
+      it.activity !== 'historical' &&
+      isNoiseClassification(it.classification) &&
+      !input.acks.includes(alertAckKey('component-error', it.fp, String(it.firstAt))),
+  ).length
   // 汇总条自己的身份：eventId = **最新未 ack 错误的出现时刻** ⇒ 新错误进来必重弹（§4.7）。
   const latest = pending.reduce((a, b) => (a.firstAt >= b.firstAt ? a : b))
   const ackKey = alertAckKey('component-errors', 'all', String(latest.firstAt))
@@ -308,6 +321,7 @@ function componentErrorAlerts(input: AlertInput): AlertItem[] {
         title: `组件报错：${pending.length} 条未处理（最近 ${relAgo(input.now, latest.lastAt)}）`,
         detail:
           `来源分布：${dist}；最近一条：${latest.component} — ${latest.message}${truncated}。` +
+          (noise > 0 ? `另有 ${noise} 条瞬时噪声已折叠（不打断）。` : '') +
           '逐条的 traceback/上下文与 ack 在详情页。',
         role: 'alert',
         actions: [

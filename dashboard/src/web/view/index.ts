@@ -32,6 +32,7 @@
 // ── 内部模块（唯一对外出口；调用方一律 import 本目录，不直连内部文件）──
 export * from './console-types'
 export * from './error-types'
+export * from './error-hints'
 export * from './gate-halt'
 export * from './component-groups'
 export * from './component-roles'

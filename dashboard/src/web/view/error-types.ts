@@ -18,6 +18,27 @@ export type ErrorSource = 'local-log' | 'hub-job' | 'worker-report' | 'node'
 /** 严重度：只两档。`err` = 真错误；`warn` = 值得看一眼（机器级停滞、瞬时失败、上报腿）。 */
 export type ErrorSeverity = 'err' | 'warn'
 
+/** 错误分类（与 severity 正交）：决定默认视图是否折叠、处置提示、告警坞是否打断。
+ *
+ *  ★ 为什么没有 `misreport`（评审 F6）：误报在**采集层**就被过滤了（Phase 0），
+ *  分类器永远看不到它们；留一个没有写者的枚举只会让人以为「历史行会被重新分类」，
+ *  而账本重放根本不读 classification。 */
+export type ErrorClassification =
+  | 'transient-network'
+  | 'process-lifecycle'
+  | 'dependency'
+  | 'capacity'
+  | 'remote-failure'
+  | 'multi-process'
+  | 'unknown'
+
+/** 事件活动度：`historical` = 源文件已静默 > 24h（历史课/停机前的旧日志）。
+ *
+ *  为什么必须有（评审 F2）：去掉开课闸后，185 门历史课的尾窗旧错误会被逐行采集，
+ *  而 `collectLocalLogEvents` 原本给每一行盖 `now` ⇒ 旧错误全变「此刻活跃」，
+ *  首页告警坞按 `firstAt` 反复重弹。`historical` 让「可见」与「活跃」分开。 */
+export type ErrorActivity = 'active' | 'historical'
+
 /** 详情页行上的跳转锚点：`log` → `/log/<component>`；`job` → 课程矩阵该课的行；`node` → `/nodes`。 */
 export interface ErrorRef {
   kind: 'log' | 'job' | 'node'
@@ -40,6 +61,12 @@ export interface ErrorEvent {
   lastAt: number
   /** episode 内累计次数（窗口内读数取 max，拍间不累加 —— 见 error-registry 的注释）。 */
   count: number
+  /** 分类（采集时由服务端 api 层的规则表判定；规则不变量见 plan §3.2）。 */
+  classification: ErrorClassification
+  /** 活动度（按源文件 mtime；见 `ErrorActivity`）。默认视图只显示 `active`。 */
+  activity: ErrorActivity
+  /** 自动撤销时刻（只出现在 `resolvedItems` 投影里；活跃事件恒为 undefined）。 */
+  resolvedAt?: number
   /** 一行摘要（≤ `ERROR_MESSAGE_MAX` 字符）。 */
   message: string
   /** traceback / 上下文（≤ `ERROR_DETAIL_MAX` 字符；本机组件腿 = 命中行所在的**整块**）。 */
@@ -55,6 +82,9 @@ export type ErrorListItem = Pick<
   | 'component'
   | 'scope'
   | 'severity'
+  | 'classification'
+  | 'activity'
+  | 'resolvedAt'
   | 'firstAt'
   | 'lastAt'
   | 'count'
@@ -69,10 +99,13 @@ export interface ErrorSummaryView {
   truncated: boolean
 }
 
-/** 详情页数据面（`/api/errors`）：`events` 含 detail；`cursor` = 本次列表的时刻（增量读法）。 */
+/** 详情页数据面（`/api/errors`）：`events` 含 detail；`cursor` = 本次列表的时刻（增量读法）。
+ *
+ *  `resolvedItems` = 最近自动撤销的瞬时错误（内存环，重启清空；账本另有审计行）。 */
 export interface ErrorPayload {
   events: ErrorEvent[]
   summary: ErrorSummaryView
+  resolvedItems: ErrorListItem[]
   cursor: number
 }
 
@@ -98,6 +131,8 @@ export interface WorkerErrorReport {
  *  P1-4 裁决）—— 一页几十条 × 4000 字符的长文本不该每 4s 全量搬一遍。 */
 export interface ErrorsPagePayload {
   items: ErrorListItem[]
+  /** 最近自动撤销的瞬时错误（缺省 = 旧载荷/没有恢复记录）。 */
+  resolvedItems?: ErrorListItem[]
   /** 登记表上一次巡拍的落定时刻（0 = 还没跑过 ⇒ 页上不谎报「已检查」）。 */
   scannedAt: number
 }
@@ -116,6 +151,8 @@ export interface ErrorDetailPayload {
   message: string
   detail: string
   ref: ErrorRef
+  classification: ErrorClassification
+  activity: ErrorActivity
 }
 
 /** 投影条数上限：首页汇总条只报数，逐条在 `/errors`（上限不是渲染约束，是「别把 3s 载荷撑大」）。 */

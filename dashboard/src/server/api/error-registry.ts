@@ -20,14 +20,14 @@ import {
   ERROR_DETAIL_MAX,
   ERROR_MESSAGE_MAX,
   ERROR_SUMMARY_MAX,
+  isTransientClassification,
   type ErrorEvent,
   type ErrorListItem,
   type ErrorSummaryView,
   type WorkerErrorReport,
 } from '../../web/view'
-import { loadConsoleState } from '../actions'
 import { loadConfigSafe } from './config'
-import { discoverCourses, effectiveCourse } from './courses'
+import { classifyError } from './error-classify'
 import { errorFingerprint } from './error-fingerprint'
 import {
   foldErrorEvents,
@@ -46,6 +46,13 @@ export const ERROR_SCAN_INTERVAL_MS = 10_000
  *  与 `getHubAdmin` 的 5s 节拍同一个 hub，不需要更短。 */
 const HUB_BASE_TTL_MS = 60_000
 
+/** 瞬时类错误连续缺席这么多拍 ⇒ 自动撤销（plan v2 D3）。 */
+export const TRANSIENT_RESOLVE_MISSES = 2
+
+/** 「最近已恢复」环的上限与保留时长（内存投影；账本另有 resolved 行做审计）。 */
+export const RESOLVED_MAX = 50
+export const RESOLVED_TTL_MS = 24 * 60 * 60 * 1000
+
 interface Episode {
   /** **本 episode** 首次出现（可重置；ack 身份的一部分）。 */
   firstAt: number
@@ -58,9 +65,19 @@ export interface RegistryState {
   episodes: Map<string, Episode>
   /** 见过的 `fp`（账本重放 + 本进程新见）——**只用于「账本要不要 append」**。 */
   known: Set<string>
+  /** 瞬时类事件的连续缺席拍数（以「原 fp 已不在本拍 sweep」为一次缺席）。 */
+  misses: Map<string, number>
+  /** 最近自动撤销的事件（有界环；只含瞬时类，非瞬时保持「消失即结束」）。 */
+  resolved: ErrorEvent[]
 }
 
-const EMPTY_STATE: RegistryState = { events: [], episodes: new Map(), known: new Set() }
+const EMPTY_STATE: RegistryState = {
+  events: [],
+  episodes: new Map(),
+  known: new Set(),
+  misses: new Map(),
+  resolved: [],
+}
 
 // ────────────────────────── 账本（G5） ──────────────────────────
 
@@ -71,11 +88,14 @@ export function appendErrorLedger(ev: ErrorEvent, firstSeenAt: number): void {
     const p = errorLedgerPath()
     mkdirSync(path.dirname(p), { recursive: true })
     const row = {
+      kind: 'seen',
       fp: ev.fp,
       source: ev.source,
       component: ev.component,
       scope: ev.scope,
       severity: ev.severity,
+      classification: ev.classification,
+      activity: ev.activity,
       message: ev.message,
       detail: ev.detail,
       ref: ev.ref,
@@ -87,7 +107,10 @@ export function appendErrorLedger(ev: ErrorEvent, firstSeenAt: number): void {
   }
 }
 
-/** 重放账本 → 已知 `fp` 集合（**只是种子**：`firstAt`/`count` 一概不继承）。 */
+/** 重放账本 → 已知 `fp` 集合（**只是种子**：`firstAt`/`count` 一概不继承）。
+ *
+ *  `kind:'resolved'` 行跳过：它不证明「这个错误仍在」，只证明它曾被撤销；
+ *  重启后若重现，按新 episode 处理（与旧账本行「只读 fp」的兼容口径一致）。 */
 export function replayErrorLedger(): Set<string> {
   const out = new Set<string>()
   try {
@@ -96,7 +119,8 @@ export function replayErrorLedger(): Set<string> {
     for (const line of lines.slice(-2000)) {
       if (!line.trim()) continue
       try {
-        const rec = JSON.parse(line) as { fp?: unknown }
+        const rec = JSON.parse(line) as { fp?: unknown; kind?: unknown }
+        if (rec.kind === 'resolved') continue
         if (typeof rec.fp === 'string' && rec.fp) out.add(rec.fp)
       } catch {
         /* 半截行跳过 */
@@ -108,22 +132,54 @@ export function replayErrorLedger(): Set<string> {
   return out
 }
 
+/** 追加一条「已自动恢复」审计行（**与 seen 行同 fp 但不同 kind**：账本仍 append-only）。
+ *  失败即丢（观测面不该拖垮巡检）。 */
+export function appendResolvedLedger(ev: ErrorEvent, resolvedAt: number): void {
+  try {
+    const p = errorLedgerPath()
+    mkdirSync(path.dirname(p), { recursive: true })
+    const row = {
+      kind: 'resolved',
+      fp: ev.fp,
+      source: ev.source,
+      component: ev.component,
+      scope: ev.scope,
+      severity: ev.severity,
+      classification: ev.classification,
+      activity: ev.activity,
+      message: ev.message,
+      resolvedAt,
+    }
+    appendFileSync(p, `${JSON.stringify(row)}\n`, 'utf8')
+  } catch {
+    /* 观测面写失败不抛 */
+  }
+}
+
 // ────────────────────────── episode（G8） ──────────────────────────
 
 /** 一拍 → 下一份状态（**纯函数**：账本副作用在 `commitSweep` 里，用例可以只测这一层）。
  *
- *  消失即结束：`sweep` 里没有的 `fp` **不进**新状态（episode 清掉）；下次再来 ⇒ `firstAt` = 当时的
- *  `now` ⇒ ack 键变 ⇒ 重弹。这正是「持续错误不重复打断、复发必重弹」的判据。 */
+ *  两条不同的消失语义（plan v2 D3）：
+ *    · **瞬时类**（`transient-network`/`process-lifecycle`）：缺席第 1 拍仍保留（miss=1），
+ *      第 2 拍移出活跃表并进 `resolved` 环（`resolvedAt=now`）；
+ *    · **非瞬时类**：缺席 1 拍即结束（今天语义不变）。
+ *  一次 ack 不会把复发吃掉：重现 ⇒ 新 `firstAt`（ack 键变）⇒ 必重弹。 */
 export function applySweep(
   prev: RegistryState,
   sweep: ErrorEvent[],
   now: number,
-): { state: RegistryState; fresh: ErrorEvent[] } {
+): { state: RegistryState; fresh: ErrorEvent[]; resolvedFresh: ErrorEvent[] } {
   const episodes = new Map<string, Episode>()
   const known = new Set(prev.known)
+  const misses = new Map<string, number>()
   const fresh: ErrorEvent[] = []
+  const resolvedFresh: ErrorEvent[] = []
   const events: ErrorEvent[] = []
+  const inSweep = new Set<string>()
+
   for (const e of sweep) {
+    inSweep.add(e.fp)
     const prevEp = prev.episodes.get(e.fp)
     const firstAt = prevEp?.firstAt ?? now
     const count = Math.max(prevEp?.count ?? 0, e.count)
@@ -135,7 +191,31 @@ export function applySweep(
       fresh.push(item)
     }
   }
-  return { state: { events, episodes, known }, fresh }
+
+  // 缺席的旧事件：瞬时类给一拍回差，非瞬时类直接结束。
+  for (const prevEv of prev.events) {
+    if (inSweep.has(prevEv.fp)) continue
+    if (!isTransientClassification(prevEv.classification)) continue
+    const miss = (prev.misses.get(prevEv.fp) ?? 0) + 1
+    if (miss < TRANSIENT_RESOLVE_MISSES) {
+      misses.set(prevEv.fp, miss)
+      const prevEp = prev.episodes.get(prevEv.fp)
+      episodes.set(prevEv.fp, prevEp ?? { firstAt: prevEv.firstAt, count: prevEv.count })
+      events.push(prevEv)
+      continue
+    }
+    resolvedFresh.push({ ...prevEv, resolvedAt: now })
+  }
+
+  // resolved 环：重现的清掉、过期的剪掉、新的放最前。
+  const resolved = [
+    ...resolvedFresh,
+    ...prev.resolved.filter(
+      (r) => !inSweep.has(r.fp) && now - (r.resolvedAt ?? 0) < RESOLVED_TTL_MS,
+    ),
+  ].slice(0, RESOLVED_MAX)
+
+  return { state: { events, episodes, known, misses, resolved }, fresh, resolvedFresh }
 }
 
 let state: RegistryState = EMPTY_STATE
@@ -152,10 +232,16 @@ function ensureSeeded(): void {
 /** 应用一拍并把**新 `fp`** 落进账本（登记表的唯一写点）。 */
 export function commitSweep(sweep: ErrorEvent[], now: number): ErrorEvent[] {
   ensureSeeded()
-  const { state: next, fresh } = applySweep(state, sweep, now)
+  const { state: next, fresh, resolvedFresh } = applySweep(state, sweep, now)
   for (const ev of fresh) appendErrorLedger(ev, now)
+  for (const ev of resolvedFresh) appendResolvedLedger(ev, now)
   state = next
   return state.events
+}
+
+/** 最近的自动恢复投影（`/api/errors` 的 `resolvedItems`；只读缓存）。 */
+export function getResolvedErrors(now: number = Date.now()): ErrorEvent[] {
+  return state.resolved.filter((e) => now - (e.resolvedAt ?? 0) < RESOLVED_TTL_MS)
 }
 
 // ────────────────────────── 腿 C：云机上报（E4/E5） ──────────────────────────
@@ -179,17 +265,21 @@ export function workerReportEvent(rec: WorkerErrorReport, now: number): ErrorEve
   const at = typeof rec.ts === 'number' && Number.isFinite(rec.ts) ? rec.ts * 1000 : now
   const message =
     reason.length > ERROR_MESSAGE_MAX ? `${reason.slice(0, ERROR_MESSAGE_MAX)}…` : reason
+  const detail = String(rec.detail ?? '').slice(0, ERROR_DETAIL_MAX)
   return {
     fp: errorFingerprint('worker-report', component, message),
     source: 'worker-report',
     component,
     scope,
     severity: normalizeSeverity(rec.severity),
+    classification: classifyError({ source: 'worker-report', component, message, detail }),
+    // 上报体自带 ts（秒）；太旧的＝历史，不是「此刻活跃」（S3 的活动度模型）。
+    activity: now - at > 24 * 60 * 60 * 1000 ? 'historical' : 'active',
     firstAt: at,
     lastAt: at,
     count: 1,
     message,
-    detail: String(rec.detail ?? '').slice(0, ERROR_DETAIL_MAX),
+    detail,
     ref: { kind: 'job', target: jobId || worker },
   }
 }
@@ -224,8 +314,9 @@ async function fetchWorkerReports(now: number): Promise<ErrorEvent[]> {
  *  服务端启动路径上，早 import 会让「没有 hub 的机器」也付这份解析）。 */
 async function liveHubUrl(cfg: ReturnType<typeof loadConfigSafe>): Promise<string | null> {
   const { liveHub } = await import('../../stack/hub-admin')
-  const course = effectiveCourse(loadConsoleState(), discoverCourses())
-  const live = await liveHub(cfg, course)
+  // ★ 2026-10-19（S3）：hub 候选早已与课程无关（`hubCandidates` 的 `void course`），
+  //   这里再传「当前课程」只是把两个概念绑在一起的假依赖——传空串，错误采集与课程彻底解耦。
+  const live = await liveHub(cfg, '')
   return live?.url ?? null
 }
 
@@ -294,6 +385,9 @@ export function buildErrorSummary(
     component: e.component,
     scope: e.scope,
     severity: e.severity,
+    classification: e.classification,
+    activity: e.activity,
+    resolvedAt: e.resolvedAt,
     firstAt: e.firstAt,
     lastAt: e.lastAt,
     count: e.count,
@@ -314,7 +408,7 @@ export function errorRegistryScannedAt(): number {
 
 /** 用例隔离：清空登记表 + 采集缓存 + hub 记忆（**不**动账本文件）。 */
 export function resetErrorRegistry(): void {
-  state = EMPTY_STATE
+  state = { events: [], episodes: new Map(), known: new Set(), misses: new Map(), resolved: [] }
   ledgerSeeded = false
   lastRefreshAt = 0
   hubBase = null

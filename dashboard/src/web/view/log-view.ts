@@ -42,12 +42,32 @@ const LOG_TIME_RE = /^\[(\d{2}:\d{2}:\d{2}(?:\.\d+)?)\]\s*(?:\[([^\]]+)\]\s*)?/
 const LOG_ERR_RE = /(error|fail|panic|fatal|exception|✗|❌|超时未完成|失败)/i
 const LOG_WARN_RE = /(warn|warning|⚠|timeout|retry|重试|降级)/i
 
-/** 切分日志行：[HH:MM:SS] 时间戳 + [组件] 标签 + 正文；按关键词判级别。训练 JSON 行不走此解析。 */
+/** HTTP 访问日志的**行首结构**：`"GET /path HTTP/1.1" 200`（python http.server / uvicorn 同形）。
+ *
+ *  ★ 判级别必须看**状态码**而不是路径关键词（plan §1.1 M1/M2）：`/admin/errors` 里的
+ *  `errors` 子串会把一条 200 当成错误。**不依赖行尾状态码**：尾窗读会截断长 query，
+ *  状态码可能已经不在（评审 F5）——识别只看 `METHOD path HTTP/x.y`，缺失状态码按 info。 */
+const HTTP_ACCESS_RE =
+  /"(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\s+\S+\s+HTTP\/\d\.\d"(?:\s+(\d{3}))?/
+
+/** 访问日志行 → 状态码；非访问行 → `undefined`；访问行但状态码被截断 → `null`。 */
+export function httpAccessStatus(text: string): number | null | undefined {
+  const m = HTTP_ACCESS_RE.exec(text)
+  if (!m) return undefined
+  return m[1] ? Number(m[1]) : null
+}
+
+/** 切分日志行：[HH:MM:SS] 时间戳 + [组件] 标签 + 正文；按关键词判级别。训练 JSON 行不走此解析。
+ *
+ *  访问日志例外：级别只看状态码（`>=500` ⇒ error，其余 info）。4xx 不算错误——
+ *  否则 `/admin/errors?since=0` 这类带 `error` 的路径又会被误报（plan D4）。 */
 export function parseLogLine(line: string): ParsedLogLine {
   const m = LOG_TIME_RE.exec(line)
   const rest = m ? line.slice(m[0].length) : line
+  const access = httpAccessStatus(rest)
   let level: LogLevel = 'info'
-  if (LOG_ERR_RE.test(rest)) level = 'error'
+  if (access !== undefined) level = access !== null && access >= 500 ? 'error' : 'info'
+  else if (LOG_ERR_RE.test(rest)) level = 'error'
   else if (LOG_WARN_RE.test(rest)) level = 'warn'
   return { ts: m?.[1] ?? null, tag: m?.[2] ?? null, level, text: rest }
 }

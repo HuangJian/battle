@@ -32,6 +32,8 @@ import {
 import {
   applySweep,
   appendErrorLedger,
+  appendResolvedLedger,
+  getResolvedErrors,
   buildErrorSummary,
   commitSweep,
   findErrorEvent,
@@ -45,7 +47,13 @@ import {
 } from '../src/server/api/error-registry'
 import { ERROR_SUMMARY_MAX, type ErrorEvent } from '../src/web/view'
 
-const EMPTY: RegistryState = { events: [], episodes: new Map(), known: new Set() }
+const EMPTY: RegistryState = {
+  events: [],
+  episodes: new Map(),
+  known: new Set(),
+  misses: new Map(),
+  resolved: [],
+}
 
 let dir = ''
 let ledger = ''
@@ -74,6 +82,8 @@ function ev(over: Partial<ErrorEvent> = {}): ErrorEvent {
     component: 'trainingLoop',
     scope: 'c1',
     severity: 'err',
+    classification: 'unknown',
+    activity: 'active',
     firstAt: 1_000,
     lastAt: 1_000,
     count: 1,
@@ -212,12 +222,72 @@ describe('episode 与 ack 身份（G8 试金石）', () => {
     expect(summary.items.length).toBe(ERROR_SUMMARY_MAX)
     expect(summary.truncated).toBe(true)
     expect('detail' in summary.items[0]!).toBe(false)
+    expect(summary.items[0]!.classification).toBe('unknown')
+    expect(summary.items[0]!.activity).toBe('active')
     expect(buildErrorSummary(many.slice(0, 2)).truncated).toBe(false)
+  })
+})
+
+describe('瞬时错误自动撤销（plan v2 D3）', () => {
+  it('瞬时类：缺席 1 拍保留，缺席 2 拍进 resolved 环；非瞬时 1 拍即消失', () => {
+    const t = ev({ fp: 'trans', classification: 'transient-network' })
+    const s1 = applySweep(EMPTY, [t], 1_000).state
+    const s2 = applySweep(s1, [], 2_000).state
+    expect(s2.events.map((e) => e.fp)).toEqual(['trans'])
+    expect(s2.misses.get('trans')).toBe(1)
+    expect(s2.resolved.length).toBe(0)
+    const s3 = applySweep(s2, [], 3_000).state
+    expect(s3.events.length).toBe(0)
+    expect(s3.resolved.length).toBe(1)
+    expect(s3.resolved[0]!.resolvedAt).toBe(3_000)
+
+    const n = ev({ fp: 'hard', classification: 'remote-failure' })
+    const n1 = applySweep(EMPTY, [n], 1_000).state
+    const n2 = applySweep(n1, [], 2_000).state
+    expect(n2.events.length).toBe(0)
+    expect(n2.resolved.length).toBe(0)
+  })
+
+  it('重现清掉同 fp 的 resolved 副本，并按新 episode 重弹', () => {
+    const t = ev({ fp: 'trans', classification: 'transient-network' })
+    const s1 = applySweep(EMPTY, [t], 1_000).state
+    const s2 = applySweep(s1, [], 2_000).state
+    const s3 = applySweep(s2, [], 3_000).state
+    const s4 = applySweep(s3, [ev({ fp: 'trans', classification: 'transient-network' })], 4_000)
+    expect(s4.state.resolved.length).toBe(0)
+    expect(s4.state.episodes.get('trans')!.firstAt).toBe(4_000)
+  })
+
+  it('commitSweep 追加 resolved 审计行；replay 仍把 seen 行当种子', () => {
+    resetErrorRegistry()
+    const t = ev({ fp: 'trans-led', classification: 'transient-network' })
+    commitSweep([t], 1_000)
+    commitSweep([], 2_000)
+    commitSweep([], 3_000)
+    const rows = readFileSync(ledger, 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as { kind: string; fp: string })
+    expect(rows.filter((r) => r.kind === 'seen' && r.fp === 'trans-led').length).toBe(1)
+    expect(rows.some((r) => r.kind === 'resolved' && r.fp === 'trans-led')).toBe(true)
+    expect(replayErrorLedger().has('trans-led')).toBe(true)
+    expect(getResolvedErrors(3_000).length).toBe(1)
+    expect(getResolvedErrors(3_000 + 25 * 60 * 60 * 1000).length).toBe(0)
+  })
+
+  it('appendResolvedLedger 的行形态（kind/fp/resolvedAt）', () => {
+    appendResolvedLedger(ev({ fp: 'res-shape' }), 9_000)
+    const raw = readFileSync(ledger, 'utf8').trim().split('\n').pop()!
+    const rec = JSON.parse(raw) as { kind: string; fp: string; resolvedAt: number }
+    expect(rec.kind).toBe('resolved')
+    expect(rec.fp).toBe('res-shape')
+    expect(rec.resolvedAt).toBe(9_000)
   })
 })
 
 describe('账本（G5 / P0-3）', () => {
   it('新 fp 落一行；同 fp 再现不写第二行；重启重放后已知', () => {
+    rmSync(ledger, { force: true }) // 前一条 describe 也往同一份账本写过 resolved 行：本用例要干净起点
     resetErrorRegistry()
     const first = ev({ fp: 'led-1', message: 'ledger one' })
     commitSweep([first], 1_000)
