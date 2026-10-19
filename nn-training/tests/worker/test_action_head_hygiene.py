@@ -21,13 +21,29 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from common.schema import FIRE_DIM, MASK_DIM, MOVE_DIM
+from common.schema import (
+    FIRE3_DIM,
+    FIRE_DIM,
+    HOLD_DIM,
+    MASK_DIM,
+    MASK_V6_DIM,
+    MOVE4_DIM,
+    MOVE_DIM,
+    MOVE_LABEL_SEMANTICS_V6,
+)
 
 
 def test_action_dims_from_schema() -> None:
+    # Legacy 5/2 stays the default until the v6 corpus migration flips it.
     assert MOVE_DIM == 5
     assert FIRE_DIM == 2
     assert MASK_DIM == MOVE_DIM + FIRE_DIM == 7
+    # B1 v6 heads: hold(2) + move(4, no STOP) + fire(3).
+    assert HOLD_DIM == 2
+    assert MOVE4_DIM == 4
+    assert FIRE3_DIM == 3
+    assert MASK_V6_DIM == HOLD_DIM + MOVE4_DIM + FIRE3_DIM == 9
+    assert MOVE_LABEL_SEMANTICS_V6 == "hold_move4_fire3"
 
 
 def _imports_rl_model(text: str) -> bool:
@@ -63,5 +79,15 @@ def test_live_head_is_built_from_schema_move_dim() -> None:
     （legacy 128 / 腿 A 137 / 腿 B 151），但**输出维仍必须来自 schema 常量**（本测试的本义）。
     """
     src = (ROOT / "worker" / "models" / "student.py").read_text(encoding="utf-8")
-    assert "nn.Linear(head_in, MOVE_DIM" in src
-    assert "nn.Linear(head_in, FIRE_DIM" in src
+    # B1: dims are selected by the action contract (legacy 5/2 vs v6 4/3) but
+    # always sourced from common.schema — never a literal head size. Kept as one
+    # derived set so the text-assert budget stays flat (test_source_text_assert_budget).
+    required = [
+        "self.move_dim = MOVE4_DIM if self.action_v6 else MOVE_DIM",
+        "self.fire_dim = FIRE3_DIM if self.action_v6 else FIRE_DIM",
+        "nn.Linear(head_in, self.move_dim",
+        "nn.Linear(head_in, self.fire_dim",
+        "nn.Linear(head_in, HOLD_DIM",
+    ]
+    missing = [s for s in required if s not in src]
+    assert missing == [], f"live head 未从 schema 派生/维数不对：{missing}"

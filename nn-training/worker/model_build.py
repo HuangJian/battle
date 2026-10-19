@@ -154,8 +154,11 @@ def build_model(
 
             def _logit_max() -> float:
                 with torch.no_grad():
-                    mv, fr, _v = model(sample, sc)
-                return max(float(mv.abs().max()), float(fr.abs().max())) + 1e-6
+                    out = model(sample, sc)
+                # (move, fire[, hold], value): every policy head must share the
+                # same logit-range normalization (B1 v6 adds hold).
+                policy = out[:-1] if len(out) >= 3 else out[:2]
+                return max(float(h.abs().max()) for h in policy) + 1e-6
 
             alpha = 15.0 / _feat_max()
             with torch.no_grad():
@@ -165,7 +168,10 @@ def build_model(
             beta = 3.0 / _logit_max()  # 保 argmax 的软先验：logit 范围 ~3（熵≈1.2）
             with torch.no_grad():
                 for n, p_ in model.named_parameters():
-                    if n.startswith(("move_head.", "fire_head.")):
+                    # B1 v6: hold head must get the same logit-range scaling as
+                    # move/fire. Missing it leaves a fresh head at kaiming scale
+                    # (plan §4-B1 “Python 权重初始化” row).
+                    if n.startswith(("move_head.", "fire_head.", "hold_head.")):
                         p_.mul_(beta)
                     elif n.startswith("value_head.") and not keep_value:
                         p_.zero_()

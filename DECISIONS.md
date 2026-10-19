@@ -7675,3 +7675,28 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **门禁**：`tests/hold-fire3.test.ts` 4 例 · `bun run check` 2547 pass / 0 fail ·
   `bun run build` 过 · God-AI score gate 三难度全绿 · `freeze:check` 仍
   `FROZEN-SIGNATURE OK`（God-AI 无行为变化，golden 不动）。
+
+## §2026-10-19-goalnn-b1-v6-head-switch — B1 动作空间三头以 `hold_head` 权重键切换，默认仍 5/2（拒绝半迁移）
+
+- **背景**：B′ 的 B1 要把 `move(5)+fire(2)` 换成 `hold(2)+move(4)+fire(3)`。整条训练链
+  （PPO rollout/update、BC dataset、shard `actions/masks`、`export-*` 工具、语料身份）都按
+  7 位 mask 与 (move,fire) 布局写读；一次全量迁移必须与语料重导同批完成。
+- **决策**：采用**运行时按权重自述切换**，而不是把全局常量直接翻成 4/3：
+  1. TS `ModelLike` 以 `hold_head.*` 存在 ⇒ `usesHoldFire3=true`（`StudentModel` 载入时判）；
+     `NNInput` 走 v6 分支，`computeMasks(world, v6=true)` 返回 move4/fire3（fire 两槽共用
+     cooldown 闸，与 plan §4-B1 的「只有 1 位信息」一致）。
+  2. Python `common.schema` 追加 `HOLD_DIM/MOVE4_DIM/FIRE3_DIM/MASK_V6_DIM` 与
+     `MOVE_LABEL_SEMANTICS_V6`；`StudentNet(action_v6=True)` 才建 `hold_head`，arch 写
+     `actionV6`；`model_build` 的 logit 归一与 `mirror_x` 的 4 路左右翻转同步覆盖。
+  3. 仍是 5/2 的默认路径**逐字节不变**（旧权重、旧 shard、God-AI 回放全部照常）。
+- **为何不做「一次翻完」**：PPO update 按 `mask[:, :MOVE_DIM]` 切 7 位、dataset 按同一布局切
+  两段、四个 export 工具各自 argmax 2 头——只翻 schema 会让这些点**静默读错位**（比红更糟）。
+  故本刀只交付契约+运行时；下一步要么整链迁移+重导语料，要么保持 v6 不训练。
+- **备选与否决**：① 直接全局 4/3 —— 否（半迁移静默错配）；② 每个 shard 自带布局字节 ——
+  否（同一份 mask 会有两套读者，正是 C5 要防的双事实源）；③ v6 模型静默回落 5/2 ——
+  否（PPO 解 3 元组会当场 ValueError，这是有意的响亮失败）。
+- **后果**：旧模型继续可服务；v6 权重可被 TS 部署与 Python BC/推理加载，但**尚未有 v6 语料**。
+  `export-*` 工具遇到 v6 权重仍按旧布局读——在生成 v6 语料前不得把它们指向 v6 权重。
+- **门禁**：`bun run check` 2557 pass / 0 fail · `bun run build` 过 · `freeze:check` FROZEN-SIGNATURE OK ·
+  torch↔TS `student-golden-v6.json` 四头对账 ≤1e-4 · Python `test_action_head_hygiene` /
+  `test_student_model` / `test_dataset_mirror` 全绿。

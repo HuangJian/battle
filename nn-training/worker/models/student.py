@@ -52,7 +52,17 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from common.cli import house_parser
-from common.schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
+from common.schema import (
+    BOARD,
+    FIRE3_DIM,
+    FIRE_DIM,
+    HOLD_DIM,
+    MOVE4_DIM,
+    MOVE_DIM,
+    OBS_CHANNELS,
+    POLICY_EXTRA_DIM,
+    SCALAR_DIM,
+)
 from worker.models._common import param_count as param_count
 
 DEFAULT_H = 64
@@ -116,6 +126,7 @@ class StudentNet(nn.Module):
         head_hidden: int = DEFAULT_HEAD_HIDDEN,
         policy_extra: bool = False,
         spatial_tower: bool = False,
+        action_v6: bool = False,
     ):
         super().__init__()
         self.in_ch = in_ch
@@ -126,6 +137,12 @@ class StudentNet(nn.Module):
         self.head_hidden = head_hidden
         self.policy_extra = bool(policy_extra)
         self.spatial_tower = bool(spatial_tower)
+        # B1 v6: three heads hold(2)/move(4)/fire(3). Opt-in so the still-current
+        # 5/2 BC/PPO corpora keep their exact head shapes; the switch travels with
+        # the exported weights (`hold_head.*` presence), same as TS.
+        self.action_v6 = bool(action_v6)
+        self.move_dim = MOVE4_DIM if self.action_v6 else MOVE_DIM
+        self.fire_dim = FIRE3_DIM if self.action_v6 else FIRE_DIM
         if self.spatial_tower and not self.policy_extra:
             # 腿 B 的 189 = tower(112)+scalars(40)+extra(37)；extra 是规格的一部分。
             raise ValueError(
@@ -139,8 +156,9 @@ class StudentNet(nn.Module):
             self.spatial_proj = nn.Conv2d(h, SPATIAL_TOWER_C, 1, bias=True)
             self.spatial_fc = nn.Linear(SPATIAL_TOWER_FEAT, SPATIAL_TOWER_FC_OUT, bias=True)
         head_in = self.policy_input_dim
-        self.move_head = nn.Linear(head_in, MOVE_DIM, bias=True)
-        self.fire_head = nn.Linear(head_in, FIRE_DIM, bias=True)
+        self.move_head = nn.Linear(head_in, self.move_dim, bias=True)
+        self.fire_head = nn.Linear(head_in, self.fire_dim, bias=True)
+        self.hold_head = nn.Linear(head_in, HOLD_DIM, bias=True) if self.action_v6 else None
 
         self._init_weights()
         # P1-10（2026-09-02）：输入归一化**折进首层权重**。obs 与 coord 通道同为
@@ -209,6 +227,8 @@ class StudentNet(nn.Module):
             d["policyExtra"] = True
         if self.spatial_tower:
             d["spatialTower"] = True
+        if self.action_v6:
+            d["actionV6"] = True
         return d
 
     def _spatial(self, obs: torch.Tensor) -> torch.Tensor:
@@ -276,6 +296,12 @@ class StudentNet(nn.Module):
         else:
             h = self.features(obs, scalars)
             pf = self.policy_features(obs, scalars, extra, hidden=h)
+        if self.action_v6:
+            # B1 v6: `(move, fire, hold)`. Legacy callers never construct this
+            # shape, so their 2-tuple contract is untouched.
+            hold_head = self.hold_head
+            assert hold_head is not None  # action_v6=True always builds it
+            return self.move_head(pf), self.fire_head(pf), hold_head(pf)
         return self.move_head(pf), self.fire_head(pf)
 
 
@@ -311,7 +337,7 @@ class PPOStudent(StudentNet):
 
     def forward(
         self, obs: torch.Tensor, scalars: torch.Tensor, extra: torch.Tensor | None = None
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, ...]:
         if self.spatial_tower:
             buf = self._spatial(obs)
             h = self.features(obs, scalars, buf)
@@ -319,6 +345,13 @@ class PPOStudent(StudentNet):
         else:
             h = self.features(obs, scalars)
             pf = self.policy_features(obs, scalars, extra, hidden=h)
+        if self.action_v6:
+            # 4-tuple: old PPO update code unpacks 3 and fails loudly on a v6
+            # model — intentional until the rollout/shard migration lands
+            # (plan §4-B1: no silent 5/2 fallback).
+            hold_head = self.hold_head
+            assert hold_head is not None
+            return self.move_head(pf), self.fire_head(pf), hold_head(pf), self.value_head(pf)
         return self.move_head(pf), self.fire_head(pf), self.value_head(pf)
 
     @torch.no_grad()
@@ -332,7 +365,8 @@ class PPOStudent(StudentNet):
         self.eval()
         if scalars is None:
             scalars = torch.zeros(obs.shape[0], self.scalar_dim)
-        m, f, _v = self.forward(obs, scalars, extra)
+        out = self.forward(obs, scalars, extra)
+        m, f = out[0], out[1]
         return (
             torch.softmax(m, dim=-1),
             torch.softmax(f, dim=-1),
@@ -346,6 +380,7 @@ def export_student_golden(
     seed: int = 20260903,
     policy_extra: bool = False,
     spatial_tower: bool = False,
+    action_v6: bool = False,
 ) -> None:
     """轴 2 parity golden（PPOStudent 生产路径，kind='student'）。
 
@@ -370,9 +405,13 @@ def export_student_golden(
     ex = (torch.rand(1, POLICY_EXTRA_DIM, generator=rng) - 0.25) * 1.5  # 覆盖哨兵 1.5 附近
 
     torch.manual_seed(seed + 1)
-    m = PPOStudent(h=h, d=d, policy_extra=policy_extra, spatial_tower=spatial_tower).eval()
+    m = PPOStudent(
+        h=h, d=d, policy_extra=policy_extra, spatial_tower=spatial_tower, action_v6=action_v6
+    ).eval()
     with torch.no_grad():
-        mv, fr, v = m(obs, sc, ex if policy_extra else None)  # PPOStudent: (move, fire, value)
+        out = m(obs, sc, ex if policy_extra else None)
+    # PPOStudent: legacy (move, fire, value) / v6 (move, fire, hold, value).
+    mv, fr, v = out[0], out[1], out[-1]
 
     from worker.data.weights_io import tensor_to_b64
 
@@ -393,6 +432,9 @@ def export_student_golden(
         "valueLogits": [float(v) for v in v.flatten().tolist()],
         "params": params,
     }
+    if action_v6:
+        golden["actionV6"] = True
+        golden["holdLogits"] = [float(v) for v in out[2].flatten().tolist()]
     if policy_extra:
         golden["policyExtra"] = True
         golden["extra"] = [float(v) for v in ex.flatten().tolist()]
@@ -420,6 +462,9 @@ if __name__ == "__main__":
     ap.add_argument(
         "--spatial-tower", action="store_true", help="腿 B 档（塔 + scalars + extra = 189）golden"
     )
+    ap.add_argument(
+        "--action-v6", action="store_true", help="B1 v6 三头（hold2/move4/fire3）golden"
+    )
     args = ap.parse_args()
 
     if args.golden:
@@ -430,6 +475,7 @@ if __name__ == "__main__":
             args.golden_seed,
             policy_extra=args.policy_extra,
             spatial_tower=args.spatial_tower,
+            action_v6=args.action_v6,
         )
         raise SystemExit(0)
 

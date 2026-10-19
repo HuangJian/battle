@@ -22,7 +22,16 @@ import torch
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from common.cli import run_main
-from common.schema import BOARD, FIRE_DIM, MOVE_DIM, OBS_CHANNELS, SCALAR_DIM
+from common.schema import (
+    BOARD,
+    FIRE3_DIM,
+    FIRE_DIM,
+    HOLD_DIM,
+    MOVE4_DIM,
+    MOVE_DIM,
+    OBS_CHANNELS,
+    SCALAR_DIM,
+)
 from worker.models.student import (
     DEFAULT_D,
     DEFAULT_H,
@@ -82,6 +91,28 @@ def test_ppo_student_value_head() -> None:
     )
 
 
+def test_action_v6_heads() -> None:
+    """B1 v6: hold_head presence switches the heads to hold2/move4/fire3."""
+    torch.manual_seed(2)
+    m = StudentNet(h=16, d=2, action_v6=True)
+    obs, sc = _dummy()
+    mv, fr, hd = m(obs, sc)
+    check(tuple(mv.shape) == (2, MOVE4_DIM), f"v6 move logits (2,{MOVE4_DIM})（got {tuple(mv.shape)}）")
+    check(tuple(fr.shape) == (2, FIRE3_DIM), f"v6 fire logits (2,{FIRE3_DIM})（got {tuple(fr.shape)}）")
+    check(tuple(hd.shape) == (2, HOLD_DIM), f"v6 hold logits (2,{HOLD_DIM})（got {tuple(hd.shape)}）")
+    check(m.arch().get("actionV6") is True, "arch 记录 actionV6（与权重同行的自述）")
+
+    pm = PPOStudent(h=16, d=2, action_v6=True)
+    out = pm(obs, sc)
+    check(len(out) == 4, f"PPOStudent v6 = (move, fire, hold, value)（got {len(out)}）")
+    check(tuple(out[3].shape) == (2, 1), "v6 value head (2,1)")
+
+    # Legacy default must stay exactly 5/2 and expose no hold head.
+    legacy = StudentNet(h=16, d=2)
+    check(legacy.hold_head is None, "legacy StudentNet 不带 hold_head")
+    check(legacy.arch().get("actionV6") is None, "legacy arch 不写 actionV6")
+
+
 def test_coord_channels_formula() -> None:
     coords = coord_channels(BOARD, "cpu")
     check(tuple(coords.shape) == (2, BOARD, BOARD), "coord 形状 (2,26,26)")
@@ -122,6 +153,7 @@ def test_deterministic_init() -> None:
 def main() -> None:
     test_student_forward_shape_and_budget()
     test_ppo_student_value_head()
+    test_action_v6_heads()
     test_coord_channels_formula()
     test_arch_metadata()
     test_deterministic_init()

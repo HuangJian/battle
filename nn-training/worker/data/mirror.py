@@ -32,6 +32,8 @@ from common.schema import (
 )
 
 _MOVE_FLIP = np.array([0, 1, 2, 4, 3], dtype=np.int64)  # none,up,down,left<->right
+# B1 v6: no STOP class ⇒ 4 labels in up/down/left/right order; only left/right swap.
+_MOVE_FLIP_V6 = np.array([0, 1, 3, 2], dtype=np.int64)
 
 # ---- v3 mirror LUT（dsf A2 / hy E6：显式查表，不依赖位运算巧合）----
 # 翻转表按 **d+1 值空间**（1..4）索引：left(d=2)↔right(d=3) ⇒ 值 3↔4 互换，
@@ -104,6 +106,7 @@ def mirror_x(
     scalars: np.ndarray,
     move_label: int,
     extra: np.ndarray | None = None,
+    action_v6: bool = False,
 ):
     """Return (obs', scalars', move_label', extra') for a left-right reflection.
 
@@ -130,4 +133,5 @@ def mirror_x(
         # 顺序无关（NEG 维不在 swap 表里）：取负写在换对之后只是保持与 TS mirrorSwap 同序。
         for i in EXTRA_MIRROR_NEG:
             extra_out[i] = -extra_out[i]
-    return obs, scalars, int(_MOVE_FLIP[move_label]), extra_out
+    table = _MOVE_FLIP_V6 if action_v6 else _MOVE_FLIP
+    return obs, scalars, int(table[move_label]), extra_out

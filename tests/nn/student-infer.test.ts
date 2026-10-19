@@ -34,6 +34,10 @@ interface StudentGolden {
   moveLogits: number[]
   fireLogits: number[]
   valueLogits: number[]
+  /** B1 v6 only. */
+  actionV6?: boolean
+  holdLogits?: number[]
+  extra?: number[]
   params: Record<string, unknown>
 }
 
@@ -42,6 +46,9 @@ const SLIM = JSON.parse(
 ) as StudentGolden
 const PROD = JSON.parse(
   readFileSync(join(import.meta.dir, '..', 'fixtures', 'student-golden-wasm.json'), 'utf8'),
+) as StudentGolden
+const V6 = JSON.parse(
+  readFileSync(join(import.meta.dir, '..', 'fixtures', 'student-golden-v6.json'), 'utf8'),
 ) as StudentGolden
 
 function maxAbsDiff(a: number[], b: Float32Array): number {
@@ -67,6 +74,29 @@ function runCase(g: StudentGolden): { move: number; fire: number; value: number 
   }
 }
 
+function runCaseV6(g: StudentGolden): {
+  move: number
+  fire: number
+  hold: number
+  value: number
+} {
+  const model = buildModelFromText(
+    JSON.stringify({
+      arch: { kind: 'student', h: g.h, d: g.d },
+      params: g.params,
+    }),
+  ) as ModelLike & { valueOut: Float32Array; holdLogits: Float32Array }
+  const obs = new Uint8Array(g.obs)
+  const scalars = new Float32Array(g.scalars)
+  model.forward(obs, scalars)
+  return {
+    move: maxAbsDiff(g.moveLogits, model.moveLogits),
+    fire: maxAbsDiff(g.fireLogits, model.fireLogits),
+    hold: maxAbsDiff(g.holdLogits ?? [], model.holdLogits),
+    value: maxAbsDiff(g.valueLogits, model.valueOut),
+  }
+}
+
 describe('StudentNet TS/Py forward consistency — per-tick RL policy heads (axis 2)', () => {
   it('golden 元信息：format/seed/arch 溯源（两个规格）', () => {
     for (const g of [SLIM, PROD]) {
@@ -84,6 +114,18 @@ describe('StudentNet TS/Py forward consistency — per-tick RL policy heads (axi
     expect(PROD.d).toBe(8)
     // 生产规格与 s5-open20 活权重同参数数（42 = stem+8 blocks+fc+3 heads）
     expect(Object.keys(PROD.params).length).toBe(42)
+  })
+
+  it('B1 v6 golden：hold2/move4/fire3/value 四头 ≤1e-4（hold_head 存在即切换）', () => {
+    expect(V6.actionV6).toBe(true)
+    expect(V6.moveLogits.length).toBe(4)
+    expect(V6.fireLogits.length).toBe(3)
+    expect(V6.holdLogits?.length).toBe(2)
+    const d = runCaseV6(V6)
+    expect(d.move, `move maxΔ=${d.move}`).toBeLessThanOrEqual(1e-4)
+    expect(d.fire, `fire maxΔ=${d.fire}`).toBeLessThanOrEqual(1e-4)
+    expect(d.hold, `hold maxΔ=${d.hold}`).toBeLessThanOrEqual(1e-4)
+    expect(d.value, `value maxΔ=${d.value}`).toBeLessThanOrEqual(1e-4)
   })
 
   it('瘦身 h=16/d=2（TS 手写循环路径）：move/fire/value 三头 ≤1e-4', () => {

@@ -25,9 +25,24 @@ OBS_SHAPE = (OBS_CHANNELS, BOARD, BOARD)
 SCALAR_DIM = 40
 
 # ---- Action heads (v2: item head REMOVED — AI 不使用主动道具) ----
+# legacy 5/2 pair — still the default contract for BC/PPO corpora until the
+# v6 corpus migration lands (plan/nn-capability-upgrade.plan.md §4-B1).
 MOVE_DIM = 5  # stop/up/down/left/right (B案: index 0 = STOP)
 FIRE_DIM = 2  # hold-state: 0=release, 1=hold
 MASK_DIM = MOVE_DIM + FIRE_DIM  # 7
+
+# ---- v6 action heads (B1, opt-in: presence of `hold_head.*` in weights) ----
+# Three independent heads replace the 5/2 pair. The switch is the model's hold
+# head, not a global constant, so archived 5/2 checkpoints keep loading in both
+# runtimes (TS `ModelLike.usesHoldFire3`, Python `StudentNet.action_v6`).
+#   hold : 0 = advance, 1 = turn-only (no forward motion)
+#   move : up / down / left / right (no STOP class)
+#   fire : 0 = none, 1 = fire before the turn, 2 = fire after the turn
+HOLD_DIM = 2
+MOVE4_DIM = 4
+FIRE3_DIM = 3
+MASK_V6_DIM = HOLD_DIM + MOVE4_DIM + FIRE3_DIM  # 9
+MOVE_LABEL_SEMANTICS_V6 = "hold_move4_fire3"  # twin of src/nn/action-space-v6.ts
 
 # Move-label semantics version (plan/new-era-stop.plan.md #7).
 # Index 0 used to mean "keep current heading"; B案 redefines it as **STOP** — the

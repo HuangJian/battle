@@ -775,8 +775,10 @@ export function actionFromFrame(f: { direction: Direction | null; firing: boolea
 }
 
 export interface Masks {
-  move: number[] // length 5
-  fire: number[] // length 2  ([release valid, hold valid])
+  move: number[] // legacy length 5 (0=STOP); v6 length 4 (up/down/left/right)
+  fire: number[] // legacy length 2 ([no-shot, shot-ready]); v6 length 3 (\u0031 before-turn / after-turn)
+  /** B1 v6: hold head mask (always [1,1]); legacy consumers ignore it. */
+  hold: number[] // length 2
 }
 
 /**
@@ -802,12 +804,16 @@ export interface Masks {
  *  改动纪律：本函数返回的**内容**不是指纹输入（指纹只钉上方常量表），但改了
  *  mask 语义 = 改了「一个样本是什么」⇒ 必须走 schema bump 与新语料轮次。
  */
-export function computeMasks(world: World): Masks {
+export function computeMasks(world: World, v6 = false): Masks {
   const p = world.player
   const ready = p ? isFireReady(world) : false
-  const fire: number[] = [1, ready ? 1 : 0]
-  const move: number[] = [1, 1, 1, 1, 1]
-  return { move, fire }
+  // v6: fire head = {0 no shot, 1 before turn, 2 after turn}. Both shot slots
+  // share the same physical gate (cooldown), so only readiness carries information
+  // — same as the legacy 2-slot layout. hold/move stay constant by design.
+  const fire: number[] = v6 ? [1, ready ? 1 : 0, ready ? 1 : 0] : [1, ready ? 1 : 0]
+  const move: number[] = v6 ? [1, 1, 1, 1] : [1, 1, 1, 1, 1]
+  const hold: number[] = [1, 1]
+  return { move, fire, hold }
 }
 
 function isFireReady(world: World): boolean {
