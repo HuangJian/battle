@@ -1289,6 +1289,40 @@ export interface GodAIParams {
   turnCommitFireGate: number
 
   /**
+   * A3 (turn economy): don't request a turn the cooldown will refuse.
+   *
+   * `applyTurnCooldown` reverts a refused turn AND sets `moving = false` — the
+   * tank freezes for the rest of the 200 ms window. Measured (2026-10-19,
+   * 8 stages × 3 seeds, hard): God-AI spends **17.7% of all ticks** requesting
+   * a turn it cannot get, i.e. standing still for no gain. It also turns ~240
+   * times per game and **95% of those turns produce no shot within 12 ticks** —
+   * the turns are bought for movement, but the price (aiming lockout) is paid
+   * in the coin of firing windows.
+   *
+   * When ON, `GodAIInput.getMoveDirection()` substitutes the refused request
+   * with the tank's COMMITTED facing: the tank keeps moving instead of
+   * halting, and the turn is re-requested as soon as the cooldown allows
+   * (the branch intent in `_moveDir` is untouched). The shot set is unchanged:
+   * `isFiring()` suppresses the shot when the effective direction differs from
+   * the branch's aim, so this knob isolates "less standing still" from "more
+   * shooting".
+   *
+   * 0 = OFF (A2 behaviour, byte-identical **for the instance that received the
+   *     override** — verified tick-by-tick against the A2 commit).
+   *     NOTE: 天降神兵 guards (`SimulationEnemies.guardAIFor`) build their own
+   *     God-AI brain from `DEFAULT_GOD_AI_PARAMS`, so they follow the SHIPPED
+   *     default, not a per-run `--params` override. A paired A/B that sets 0
+   *     therefore isolates the player-side effect only (guards keep mode 2), so
+   *     the shipped effect is ≥ the measured one.
+   * 1 = substitute unconditionally (A/B arm — loses on Steel Web: momentum into
+   *     a bullet defeats the dodge).
+   * 2 = substitute ONLY when the committed facing is not crossed by an enemy
+   *     bullet (`isSafeDir`); a refused DODGE turn stays a stop, because the
+   *     §95 halt is the dodge. **Shipped (2026-10-19).**
+   */
+  turnEconomyMode: number
+
+  /**
    * §84: Aggressive branch stall detection. When > 0, the aggressive
    * (freeze/shield) stop-and-aim code tracks how long the player has been
    * stopped at the same cell with no kills. If the player camps for more

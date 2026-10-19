@@ -65,15 +65,12 @@ function runRiverbed(
 }
 
 describe('§164 S8 Riverbed drill sticky (midLaneStickyTicks)', () => {
-  // ⚠ A2 重标（2026-10-19，plan/godai-post-a1-retune.plan.md §3.1）：
-  // `turnCommitFireGate=1` 改变了 God-AI 的每一局 ⇒ **原 seed 10 在 sticky=0 下
-  // 也能过关**（开局不再白耗偏弹，抢在钻击前压死了车道敌人），本用例的
-  // 「sticky=0 ⇒ 输」前提消失。按 A1 的换局纪律**换 seed 而不改判据**：seed 7 上
-  // sticky=0 仍于 tick 1696 失守、sticky=90 过关（tick 6953）——机制语义不变，
-  // 只是同一关的另一局。换局后顺手**复活**原本被 A1 跳过的 sticky=90 用例。
-  const SEED = 7
+  // ⚠ A2/A3 换局（2026-10-19）：A2 一次换到 seed 7；A3 转身经济（沿已提交朝向继续走）
+  // 又把局面改了 ⇒ **seed 10 重新成为可复现的样本**（sticky=0 于 tick 2855 失守、
+  // sticky=90 过关 tick 7440），故回到文件原本的 seed 10。机制语义与判据均不变。
+  const SEED = 10
 
-  it('baseline (sticky=0): seed 7 loses — reproduces the drill base death', () => {
+  it('baseline (sticky=0): seed 10 loses — reproduces the drill base death', () => {
     // Pin sticky OFF explicitly: the shipped default is now 90 (hard/chaos),
     // which is exactly the fix under test. At 0 the drill chews the ring, the
     // fatal bullet wins the race — this documents the bug the sticky fixes.
@@ -82,7 +79,7 @@ describe('§164 S8 Riverbed drill sticky (midLaneStickyTicks)', () => {
     expect(r.terminalTick).toBeLessThan(10000)
   })
 
-  it('sticky=90 (shipped default): seed 7 clears — the player commits to the lane point', () => {
+  it('sticky=90 (shipped default): seed 10 clears — the player commits to the lane point', () => {
     const r = runRiverbed(SEED, { midLaneStickyTicks: 90 })
     expect(r.outcome).toBe('stageclear')
   })

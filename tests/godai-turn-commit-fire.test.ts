@@ -54,7 +54,14 @@ function countOffAxisShots(stageIdx: number, seed: number, gate: number, ticks: 
   world.rng = new RNG(seed)
   world.difficulty = DIFFICULTIES['hard']
   world.rules = RULES['hard'] ?? DEFAULT_RULES
-  const input = new GodAIInput(world, { ...DEFAULT_GOD_AI_PARAMS, turnCommitFireGate: gate })
+  const input = new GodAIInput(world, {
+    ...DEFAULT_GOD_AI_PARAMS,
+    turnCommitFireGate: gate,
+    // A3 pinned OFF: turn economy substitutes the *requested* direction, which
+    // removes the A1-era off-axis bullet at the source and would make the
+    // gate-OFF arm look clean for the wrong reason. This test isolates A2.
+    turnEconomyMode: 0,
+  })
   const sim = new Simulation(world, input)
   world.loadStageData(STAGES[stageIdx], stageIdx)
   world.state = 'playing'

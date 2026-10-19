@@ -456,6 +456,12 @@ export const DEFAULT_GOD_AI_PARAMS: GodAIParams = {
   // (t=5.94, 441 好/256 坏/3 平), 算术 score 0.6104 → 0.7069, 胜率 58.7% → 71.0%
   // ⇒ 回收 A1 缺口的 66.6%；中位偏弹率 27.4% → 0%. 见 DECISIONS §A2.
   turnCommitFireGate: 1,
+  // A3 转身经济：拿不到的转身不请求（沿已提交朝向继续走，别让引擎站桩）。
+  // 0 = OFF（A2 行为，字节等同）· 1 = 无条件替换 · **2 = 仅当已提交朝向不被子弹穿过时替换**
+  // （被拒的躲弹转身必须保持「停」，§95 的 halt 就是 dodge）。SHIPPED 2（2026-10-19）。
+  // hard 35×60 CRN 配对 vs A2：Δscore +0.0384 ±0.0084（t=4.56），SUITE 0.5246→0.5725，
+  // 胜率 74%→79%（1150 好/947 坏/3 平，4 关涨 0 关跌）。mode 1 只有 +0.0183 且 Steel Web 倒退。
+  turnEconomyMode: 2,
   // §84: Aggressive stall detection — 120 ticks (2s). 0 = OFF (byte-identical).
   aggCampTimeoutTicks: 120,
   // §85: Close-range enemy exposure check — 1 = ON (default). 0 = OFF.
