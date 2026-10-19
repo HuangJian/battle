@@ -21,8 +21,9 @@ OBS_SHAPE = (OBS_CHANNELS, BOARD, BOARD)
 # Warmstart M2 ②). SCALAR_X_INDICES renumbered [20,23] → [15,18].
 # v3 (OBS_SCHEMA_MAJOR=3): 19 → 30 (s19..s29，obs-schema-v3.plan.md v4.0 §3.3 定稿)。
 # v5 (OBS_SCHEMA_MAJOR=5): 30 → 40 (s30..s39，plan/obs-v5-vector-gap.plan.md §2.3 冻结)。
-#   **0–29 序号/语义一字不动（只追加）**。
-SCALAR_DIM = 40
+# v6 (OBS_SCHEMA_MAJOR=6): 40 → 46 (s40..s45，plan/nn-capability-upgrade.plan.md §4-B2)。
+#   **0–39 序号/语义一字不动（只追加）**。
+SCALAR_DIM = 46
 
 # ---- Action heads (v2: item head REMOVED — AI 不使用主动道具) ----
 # legacy 5/2 pair — still the default contract for BC/PPO corpora until the
@@ -63,7 +64,7 @@ MOVE_LABEL_SEMANTICS = "stop0"
 # v5 (plan/obs-v5-vector-gap.plan.md, 2026-10-12)：POLICY_EXTRA 9→37、SCALAR_DIM 30→40，
 # 且 critic（value 头）改吃与策略头同一份 `pf` ⇒ 旧权重（value 宽 128）与新 schema 同废。
 # DECISIONS.md §2026-10-12-goalnn-obs-v5-critic-superset（推翻「critic 输入集不动」）。
-OBS_SCHEMA_MAJOR = 5
+OBS_SCHEMA_MAJOR = 6
 
 # ---- Channel index map (plan §1.1 + v3: 14/15) ----
 # 全局规则（hy E1 / dsf A2，实施者必读）：
@@ -143,7 +144,7 @@ SCALAR_X_INDICES = [15, 18, 29, 33]
 #   32..33 该威胁敌相对玩家的单位向量（X 在 mirrorX 下取负）；
 #   34..36 各侧最近敌车曼哈顿格距 /12，无敌 ⇒ 1.5。
 # 方位 = 玩家相对（前 = 炮口朝向）；25–36 是世界坐标族。dtype = float32（与 scalars 同族）。
-POLICY_EXTRA_DIM = 37
+POLICY_EXTRA_DIM = 57
 POLICY_EXTRA_LAYOUT = [
     (0, "threatFront"),
     (1, "threatBack"),
@@ -182,6 +183,27 @@ POLICY_EXTRA_LAYOUT = [
     (34, "baseEnemyDistU"),
     (35, "baseEnemyDistL"),
     (36, "baseEnemyDistR"),
+    # ---- v6 追加（plan §4-B2/B3/B4）----
+    (37, "threatTankFront"),
+    (38, "threatTankBack"),
+    (39, "threatTankLeft"),
+    (40, "threatTankRight"),
+    (41, "prevActionUp"),
+    (42, "prevActionDown"),
+    (43, "prevActionLeft"),
+    (44, "prevActionRight"),
+    (45, "lastHitUp"),
+    (46, "lastHitDown"),
+    (47, "lastHitLeft"),
+    (48, "lastHitRight"),
+    (49, "enemyFacingUp"),
+    (50, "enemyFacingDown"),
+    (51, "enemyFacingLeft"),
+    (52, "enemyFacingRight"),
+    (53, "leadHitFront"),
+    (54, "leadHitBack"),
+    (55, "leadHitLeft"),
+    (56, "leadHitRight"),
 ]
 assert len(POLICY_EXTRA_LAYOUT) == POLICY_EXTRA_DIM
 assert sorted(i for i, _ in POLICY_EXTRA_LAYOUT) == list(range(POLICY_EXTRA_DIM))
@@ -199,6 +221,11 @@ EXTRA_MIRROR_SWAPS = [
     (26, 27),  # baseThreat
     (29, 30),  # baseRing
     (35, 36),  # baseEnemyDist
+    (39, 40),  # v6 threatTank 左/右
+    (43, 44),  # v6 prevAction 左/右
+    (47, 48),  # v6 lastHitDir 左/右
+    (51, 52),  # v6 enemyFacing 左/右
+    (55, 56),  # v6 leadHit 左/右
 ]
 # v5：mirrorX 的**取负**维（相对向量的 x 分量）——swap 表达不了符号，故与上表分家；
 # 指纹末段由此从三字段扩为四字段（`dim|names|swaps|neg`）。
@@ -248,6 +275,13 @@ SCALAR_LAYOUT = [
     (37, "baseRelY"),  # 到基地 dy/d（补 s18 缺的 y；无基地 = 0）
     (38, "basePressure"),  # sampleBasePressure(enemiesOnly) 同公式；无基地 = 0
     (39, "nearestEnemyApproach"),  # 最近敌径向接近速度 −(V·u)/3，clamp[-1,1]
+    # ---- v6 新增（plan §4-B2；只追加）----
+    (40, "prevActionHold"),  # 上一拍请求 = turn-only
+    (41, "prevActionFireNone"),
+    (42, "prevActionFireBeforeTurn"),
+    (43, "prevActionFireAfterTurn"),
+    (44, "ticksSinceHit"),  # 最近挨打距今 /300（从未 ⇒ 1.0）
+    (45, "nearestEnemyBeyond"),  # (E−P)·facing / |E−P|；>0 = 我在它后方
 ]
 assert len(SCALAR_LAYOUT) == SCALAR_DIM
 assert sorted(i for i, _ in SCALAR_LAYOUT) == list(range(SCALAR_DIM))

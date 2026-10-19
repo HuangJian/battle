@@ -96,6 +96,7 @@ import {
   sampleBasePressure,
   nearestPickupDist,
   threatLaneExempt,
+  windowKind,
 } from '../../src/nn/danger-metrics'
 import { createShieldWindow } from '../../src/nn/shield-window'
 import {
@@ -249,7 +250,7 @@ export const RL_SHARD_FILES = [
 // **本常量必须与 `buildMetricsRow` 的行宽一致** —— 2026-09-12 的 P0：只改了行、没改
 // 这里，`metrics.set(row, i * METRICS_DIM)` 每局越界抛 RangeError，整条采集腿零产出。
 // 导出仅供测试断言行宽（tests/export-rl-rollout-metrics.test.ts）。
-export const METRICS_DIM = 76
+export const METRICS_DIM = 79
 /**
  * metrics v11：热线族 2 列（idx74–75，plan/metrics-v11-hotlane.plan.md §2；第三列被 §4bis 杀线
  * 拦下）。与 Python METRICS_VERSION 同步；变更元组 = shard 格式变更（老规矩，见文件头注释）。
@@ -344,6 +345,10 @@ export const METRICS_COLUMN_NAMES: readonly string[] = [
   'cornerWeightTicks',
   'nearSqSum',
   'postHitLaneTicks',
+  // v6 B5（plan §4-B5）：窗口分母 + 窗内命中 + 死亡派生盾诊断。
+  'freezeShieldWindowTicks',
+  'hitsInFreezeShieldWindow',
+  'deathDerivedShieldTicks',
 ]
 /**
  * pickupDist 哨兵：无存活拾取（或玩家不在场）时填此值 —— 与 firstKillTick/clearTick
@@ -566,6 +571,13 @@ export interface Telemetry {
   nearSqSum: number
   /** 被击中后仍留在该源火线轴上的 tick 累计（整数轴；窗关 = 源转向/死亡/局终；**拌入**豁免 A）。 */
   postHitLaneTicks: number
+  // ---- B5（plan §4-B5）：窗口三列 ----
+  /** `freeze ∪ 道具盾` 的 tick 累计（**已剔**复活盾与星盾 grace）。奖励分母。 */
+  freezeShieldWindowTicks: number
+  /** 上述窗口内玩家命中敌车的次数（按命中拍归属）。 */
+  hitsInFreezeShieldWindow: number
+  /** 死亡派生盾（复活盾 + star-shield grace）的 tick 累计；只判读，不进奖励。 */
+  deathDerivedShieldTicks: number
 }
 
 function countBaseWall(world: World): number {
@@ -728,6 +740,9 @@ export function buildMetricsRow(t: number, world: World, tel: Telemetry): number
     tel.cornerWeightTicks, // 73 cornerWeightTicks（aim-dodge：Σ max(0,4−d)；拌入 A）
     tel.nearSqSum, // 74 nearSqSum（v11：全敌 Σ(3−d)²；拌入 A）
     tel.postHitLaneTicks, // 75 postHitLaneTicks（v11：热线窗停留 tick；拌入 A）
+    tel.freezeShieldWindowTicks, // 76 B5：freeze ∪ 道具盾拍（剔死亡派生盾）
+    tel.hitsInFreezeShieldWindow, // 77 B5：窗内命中敌车（分母 = idx76）
+    tel.deathDerivedShieldTicks, // 78 B5：复活盾 + 星盾 grace 拍（诊断）
   ]
 }
 
@@ -1172,6 +1187,10 @@ function runOne(
     // metrics v11（idx74–75；plan/metrics-v11-hotlane.plan.md §2）。
     nearSqSum: 0,
     postHitLaneTicks: 0,
+    // v6 B5（idx76–78）。
+    freezeShieldWindowTicks: 0,
+    hitsInFreezeShieldWindow: 0,
+    deathDerivedShieldTicks: 0,
   }
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
@@ -1352,6 +1371,11 @@ function runOne(
 
     // 本批豁免 A（§1.2）：盾窗 tracker 每 tick 喂一拍（在任何 exposureExempt 消费之前）。
     shieldWin.update(world)
+    // B5：统一的窗口分类（冻结优先；道具盾 vs 复活/星盾 grace 由粘性 tracker 判）。
+    const winKind = windowKind(world, shieldWin)
+    if (winKind === 'freeze' || winKind === 'propShield') tel.freezeShieldWindowTicks++
+    else if (winKind === 'respawnShield' || winKind === 'starShieldGrace')
+      tel.deathDerivedShieldTicks++
 
     // ---- telemetry（语义对齐 simulation-runner）----
     let collectedThisTick = 0
@@ -1438,6 +1462,8 @@ function runOne(
       } else if (e.type === 'enemy_hit') {
         tel.enemyHits++
         hitThisTick = true
+        // B5：命中归属「本 tick 终态」的窗口（事件属 t-1，与 idx76 同一拍读数）。
+        if (winKind === 'freeze' || winKind === 'propShield') tel.hitsInFreezeShieldWindow++
         const ki = enemyKindIndex((e as any).targetKind)
         if (ki >= 0) tel.hitsByKind[ki]++
         // ---- metrics v9：方位计数（plan/geo-threat-instrumentation.plan.md §1.1）----

@@ -1,8 +1,8 @@
-"""`tools/build_demo_bank.py`：v5 维度从 schema 读，旧目录响亮拒绝。
+"""`tools/build_demo_bank.py`：当前 schema 维度从 schema 读，旧目录响亮拒绝。
 
 为什么单独一条：这个脚本已经漂过一次（POLICY_EXTRA 9→37 仍硬编码 9）。
 本用例同时钉住三件事：
-  · v5 shard（40 scalars / 37 extra / obsSchemaMajor=5）能建出正确的 bank；
+  · 当前 shard（46 scalars / 57 extra / obsSchemaMajor=6）能建出正确的 bank；
   · v4 旧 extra（9 维）/ v3 旧 scalars（30 维）不许静默入库；
   · manifest 的 obsSchemaMajor < 当前 schema 不许入库（防拿旧目录建库）。
 """
@@ -43,9 +43,9 @@ def _write_shard(
     name: str,
     *,
     n: int = 3,
-    scalars: int = 40,
-    extra: int = 37,
-    obs_schema_major: int = 5,
+    scalars: int = 46,
+    extra: int = 57,
+    obs_schema_major: int = 6,
 ) -> Path:
     d = root / name
     d.mkdir(parents=True)
@@ -76,7 +76,7 @@ def _run(monkeypatch: pytest.MonkeyPatch, corpus: Path, out: Path) -> None:
     TOOL.main()
 
 
-def test_builds_v5_bank(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_builds_current_bank(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     corpus = tmp_path / "corpus"
     _write_shard(corpus, "shard_h_s2000_seed1")
     _write_shard(corpus, "shard_h_s2001_seed2")
@@ -86,8 +86,8 @@ def test_builds_v5_bank(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None
     with np.load(out) as z:
         assert sorted(z.files) == ["actions", "extra", "masks", "obs", "scalars"]
         assert z["obs"].shape == (6, 16, 26, 26)
-        assert z["scalars"].shape == (6, 40)
-        assert z["extra"].shape == (6, 37)
+        assert z["scalars"].shape == (6, 46)
+        assert z["extra"].shape == (6, 57)
         assert z["actions"].shape == (6, 2)
         assert z["masks"].shape == (6, 7)
 

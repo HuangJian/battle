@@ -26,7 +26,7 @@ import {
 } from '../../src/nn/policy-extra'
 
 // 必须与 nn-training/common/schema.py::SCHEMA_FINGERPRINT 逐字相同（两边单测共锚）。
-const FINGERPRINT = 'db55afb2'
+const FINGERPRINT = 'dabef716'
 
 // 必须与 nn-training/common/schema.py::SCALAR_LAYOUT 的第二元逐字同序（双端共锚）。
 // 只钉维度挡不住「交换两个标量含义」——语义序列进指纹后这种漏同步才现形。
@@ -71,6 +71,12 @@ const SCALAR_LAYOUT_NAMES: (typeof SCALAR_NAMES)[number][] = [
   'baseRelY',
   'basePressure',
   'nearestEnemyApproach',
+  'prevActionHold',
+  'prevActionFireNone',
+  'prevActionFireBeforeTurn',
+  'prevActionFireAfterTurn',
+  'ticksSinceHit',
+  'nearestEnemyBeyond',
 ]
 
 // 必须与 nn-training/common/schema.py::POLICY_EXTRA_LAYOUT 的第二元逐字同序。
@@ -112,6 +118,26 @@ const POLICY_EXTRA_LAYOUT_NAMES: (typeof POLICY_EXTRA_NAMES)[number][] = [
   'baseEnemyDistU',
   'baseEnemyDistL',
   'baseEnemyDistR',
+  'threatTankFront',
+  'threatTankBack',
+  'threatTankLeft',
+  'threatTankRight',
+  'prevActionUp',
+  'prevActionDown',
+  'prevActionLeft',
+  'prevActionRight',
+  'lastHitUp',
+  'lastHitDown',
+  'lastHitLeft',
+  'lastHitRight',
+  'enemyFacingUp',
+  'enemyFacingDown',
+  'enemyFacingLeft',
+  'enemyFacingRight',
+  'leadHitFront',
+  'leadHitBack',
+  'leadHitLeft',
+  'leadHitRight',
 ]
 
 describe('SCHEMA_FINGERPRINT (obs v5 双端锚)', () => {
@@ -119,12 +145,12 @@ describe('SCHEMA_FINGERPRINT (obs v5 双端锚)', () => {
     expect(SCHEMA_FINGERPRINT).toBe(FINGERPRINT)
   })
 
-  it('配套常量与指纹同版（v5：16ch / 40sc / X=[15,18,29,33] / extra 37）', () => {
-    expect(OBS_SCHEMA_MAJOR).toBe(5)
+  it('配套常量与指纹同版（v6：16ch / 46sc / X=[15,18,29,33] / extra 57）', () => {
+    expect(OBS_SCHEMA_MAJOR).toBe(6)
     expect(OBS_CHANNELS).toBe(16)
-    expect(SCALAR_DIM).toBe(40)
+    expect(SCALAR_DIM).toBe(46)
     expect(SCALAR_X_INDICES).toEqual([15, 18, 29, 33])
-    expect(POLICY_EXTRA_DIM).toBe(37)
+    expect(POLICY_EXTRA_DIM).toBe(57)
   })
 
   it('标量语义序列与 schema.py SCALAR_LAYOUT 逐字同序（指纹已含）', () => {
@@ -148,6 +174,11 @@ describe('SCHEMA_FINGERPRINT (obs v5 双端锚)', () => {
       [26, 27],
       [29, 30],
       [35, 36],
+      [39, 40],
+      [43, 44],
+      [47, 48],
+      [51, 52],
+      [55, 56],
     ])
     expect([...POLICY_EXTRA_MIRROR_NEG]).toEqual([32])
   })

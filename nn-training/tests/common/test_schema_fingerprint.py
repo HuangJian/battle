@@ -35,7 +35,7 @@ BOARD_ANCHOR = 26
 
 # 必须与 src/nn/obs-encoder.ts::SCHEMA_FINGERPRINT 逐字相同（两边单测共锚）。
 # v5（plan/obs-v5-vector-gap.plan.md）：MAJOR 4→5、40 scalars、37 extra、指纹末段四字段。
-FINGERPRINT = "db55afb2"
+FINGERPRINT = "dabef716"
 
 # 必须与 src/nn/obs-encoder.ts::SCALAR_NAMES 逐字同序（双端共锚）。只钉维度挡不住
 # 「交换两个标量含义」——语义序列进指纹后这类漏同步才现形。
@@ -80,6 +80,12 @@ SCALAR_LAYOUT_NAMES = [
     "baseRelY",
     "basePressure",
     "nearestEnemyApproach",
+    "prevActionHold",
+    "prevActionFireNone",
+    "prevActionFireBeforeTurn",
+    "prevActionFireAfterTurn",
+    "ticksSinceHit",
+    "nearestEnemyBeyond",
 ]
 
 
@@ -89,11 +95,11 @@ def test_fingerprint_matches_ts_anchor() -> None:
 
 def test_fingerprint_companion_constants() -> None:
     """配套常量与指纹同版（v5：16ch / 40sc / X=[15,18,29,33] / extra 37）。"""
-    assert OBS_SCHEMA_MAJOR == 5
+    assert OBS_SCHEMA_MAJOR == 6
     assert OBS_CHANNELS == 16
-    assert SCALAR_DIM == 40
+    assert SCALAR_DIM == 46
     assert list(SCALAR_X_INDICES) == [15, 18, 29, 33]
-    assert POLICY_EXTRA_DIM == 37
+    assert POLICY_EXTRA_DIM == 57
 
 
 def test_policy_extra_layout_names_match_ts_anchor() -> None:
@@ -139,6 +145,26 @@ def test_policy_extra_layout_names_match_ts_anchor() -> None:
         "baseEnemyDistU",
         "baseEnemyDistL",
         "baseEnemyDistR",
+        "threatTankFront",
+        "threatTankBack",
+        "threatTankLeft",
+        "threatTankRight",
+        "prevActionUp",
+        "prevActionDown",
+        "prevActionLeft",
+        "prevActionRight",
+        "lastHitUp",
+        "lastHitDown",
+        "lastHitLeft",
+        "lastHitRight",
+        "enemyFacingUp",
+        "enemyFacingDown",
+        "enemyFacingLeft",
+        "enemyFacingRight",
+        "leadHitFront",
+        "leadHitBack",
+        "leadHitLeft",
+        "leadHitRight",
     ]
     # v5：swap 九对（计数/距离族 + 世界坐标的基地 L/R 族）。
     assert [tuple(p) for p in EXTRA_MIRROR_SWAPS] == [
@@ -151,6 +177,11 @@ def test_policy_extra_layout_names_match_ts_anchor() -> None:
         (26, 27),
         (29, 30),
         (35, 36),
+        (39, 40),
+        (43, 44),
+        (47, 48),
+        (51, 52),
+        (55, 56),
     ]
     # v5：取负域与互换域分家（x 分量取负不是 exchange）。
     assert list(EXTRA_MIRROR_NEG) == [32]

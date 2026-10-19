@@ -57,7 +57,7 @@ import {
 } from './danger-metrics'
 
 /** `POLICY_EXTRA` 维度（布局契约，见文件头）。 */
-export const POLICY_EXTRA_DIM = 37
+export const POLICY_EXTRA_DIM = 57
 /** 计数维上限（归一化分母；威胁含敌弹，单向可能 > 4，不 clamp 会越界）。 */
 export const POLICY_EXTRA_COUNT_CAP = 4
 /** 「该相对方向打不到敌人 / 没有目标」的哨兵值（> 1，与 clamp01 后的合法域可区分）。 */
@@ -115,6 +115,27 @@ export const POLICY_EXTRA_NAMES = [
   'baseEnemyDistU',
   'baseEnemyDistL',
   'baseEnemyDistR',
+  // ---- v6 追加（plan §4-B2/B3/B4；0–36 序号与语义不动）----
+  'threatTankFront', // 37
+  'threatTankBack',
+  'threatTankLeft',
+  'threatTankRight', // 40
+  'prevActionUp', // 41
+  'prevActionDown',
+  'prevActionLeft',
+  'prevActionRight', // 44
+  'lastHitUp', // 45
+  'lastHitDown',
+  'lastHitLeft',
+  'lastHitRight', // 48
+  'enemyFacingUp', // 49
+  'enemyFacingDown',
+  'enemyFacingLeft',
+  'enemyFacingRight', // 52
+  'leadHitFront', // 53
+  'leadHitBack',
+  'leadHitLeft',
+  'leadHitRight', // 56
 ] as const
 if (POLICY_EXTRA_NAMES.length !== POLICY_EXTRA_DIM) {
   throw new Error(`POLICY_EXTRA_NAMES must have ${POLICY_EXTRA_DIM} entries`)
@@ -139,6 +160,11 @@ export const POLICY_EXTRA_MIRROR_SWAPS: ReadonlyArray<readonly [number, number]>
   [26, 27], // baseThreat 左/右
   [29, 30], // baseRing 左/右
   [35, 36], // baseEnemyDist 左/右
+  [39, 40], // v6 threatTank 左/右
+  [43, 44], // v6 prevAction 左/右
+  [47, 48], // v6 lastHitDir 左/右
+  [51, 52], // v6 enemyFacing 左/右
+  [55, 56], // v6 leadHit 左/右
 ]
 
 /**
@@ -180,8 +206,9 @@ const WORLD_SIDE_CODE: Record<Direction, number> = {
 }
 
 // ---- 模块级复用缓冲（§14.1：encode 热路径零分配）----
-/** 威胁计数（前/后/左/右）。 */
-const _counts = [0, 0, 0, 0]
+/** B4：威胁源拆族——v6 起 0–3 只含**敌弹**，37–40 只含**敌车炮口**。 */
+const _bulletCounts = [0, 0, 0, 0]
+const _tankCounts = [0, 0, 0, 0]
 /** 4 向命中距离（px；Infinity = 尚未找到）。 */
 const _dists = [Infinity, Infinity, Infinity, Infinity]
 /** 4 向最近逼近弹 TTI（tick；Infinity = 无弹）。 */
@@ -194,6 +221,57 @@ const _dirs: Direction[] = ['up', 'up', 'up', 'up']
 const _near = [Infinity, Infinity, Infinity, Infinity]
 /** `alignedScan` 输出缓冲（[total, weight, up, down, left, right]）。 */
 const _scan = new Float64Array(6)
+
+/** 世界方位 → one-hot 下标（up/down/left/right ≡ 0..3）。 */
+const DIR_ORDER: readonly Direction[] = ['up', 'down', 'left', 'right']
+
+/**
+ * B3 `leadHitD[d]`：沿世界方位 `dir` 开火，**到达时**能否命中（计划§4-B3）。
+ *
+ * 条件：轴向距 ≤ 13 格、线性外推 t*=轴向距/弹速 后的横向偏差 < 19px、
+ * 路径无阻弹地形、排除生成中的敌。敌人转向不可预知 ⇒ 用 live 速度外推
+ * （停着的车横向不动 = 恒速假设的退化情形）。
+ *
+ * 零分配、只读 World。
+ */
+function leadHitForDir(world: World, dir: Direction, pcx: number, pcy: number): number {
+  const p = world.player
+  if (!p) return 0
+  const vertical = dir === 'up' || dir === 'down'
+  const sign = dir === 'down' || dir === 'right' ? 1 : -1
+  const bulletSpeed = p.bulletSpeed > 0 ? p.bulletSpeed : 4
+  const maxAxial = 13 * CELL
+  const shooterCol = Math.floor(pcx / CELL)
+  const shooterRow = Math.floor(pcy / CELL)
+  const tileMap = world.tileMap
+  const tanks = world.allTanks
+  for (let i = 0; i < tanks.length; i++) {
+    const t = tanks[i]
+    if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
+    const tx = t.x + t.w / 2
+    const ty = t.y + t.h / 2
+    const axial = (vertical ? ty - pcy : tx - pcx) * sign
+    if (axial <= 0 || axial > maxAxial) continue
+    const lateral = vertical ? tx - pcx : ty - pcy
+    const vLat = vertical ? t.vx : t.vy
+    const tStar = axial / bulletSpeed
+    if (Math.abs(lateral + vLat * tStar) >= THREAT_ALIGN_BAND_PX) continue
+    const colLow = Math.floor(t.x / CELL)
+    const colHigh = Math.floor((t.x + t.w - 1) / CELL)
+    const rowLow = Math.floor(t.y / CELL)
+    const rowHigh = Math.floor((t.y + t.h - 1) / CELL)
+    const occluded = laneOccluded(
+      tileMap,
+      shooterCol,
+      shooterRow,
+      vertical,
+      vertical ? rowLow : colLow,
+      vertical ? rowHigh : colHigh,
+    )
+    if (!occluded) return 1
+  }
+  return 0
+}
 
 /** 距离 → [0,1]；无目标 ⇒ 1.5 哨兵。 */
 function hitNorm(dist: number): number {
@@ -228,7 +306,8 @@ export function computePolicyExtra(world: World, out: Float32Array): void {
   const pRowHigh = Math.floor((p.y + p.h - 1) / CELL)
 
   for (let i = 0; i < 4; i++) {
-    _counts[i] = 0
+    _bulletCounts[i] = 0
+    _tankCounts[i] = 0
     _dists[i] = Infinity
     _tti[i] = Infinity
     _lane[i] = 0
@@ -262,7 +341,7 @@ export function computePolicyExtra(world: World, out: Float32Array): void {
     // 源的世界方位：竖直弹在上/下方，水平弹在左/右侧。
     const side: Direction = vertical ? (by < pcy ? 'up' : 'down') : bx < pcx ? 'left' : 'right'
     const r = relIndex(side, facing)
-    _counts[r]++
+    _bulletCounts[r]++
     // TTI（tick）= 轴向距离 / 弹速（px/tick）。速度非正（域外）按 1 计 ⇒ 读数饱和为 1.0。
     const tti = along / (b.speed > 0 ? b.speed : 1)
     if (tti < _tti[r]) _tti[r] = tti
@@ -288,7 +367,7 @@ export function computePolicyExtra(world: World, out: Float32Array): void {
       )
       if (!occluded) {
         const side: Direction = vertical ? (ty < pcy ? 'up' : 'down') : tx < pcx ? 'left' : 'right'
-        _counts[relIndex(side, facing)]++
+        _tankCounts[relIndex(side, facing)]++
       }
     }
 
@@ -414,22 +493,59 @@ export function computePolicyExtra(world: World, out: Float32Array): void {
     out[36] = distNorm(_near[WORLD_SIDE_CODE.right])
   }
 
+  // ---- v6：最近敌炮口朝向（B2）与提前量可命中（B3）----
+  let nearD = Infinity
+  let nearDir: Direction = 'up'
+  for (let i = 0; i < tanks.length; i++) {
+    const t = tanks[i]
+    if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
+    const dx = t.x + t.w / 2 - pcx
+    const dy = t.y + t.h / 2 - pcy
+    const d = dx * dx + dy * dy
+    if (d < nearD) {
+      nearD = d
+      nearDir = t.dir
+    }
+  }
+  if (nearD < Infinity) out[49 + DIR_ORDER.indexOf(nearDir)] = 1
+
+  // prevAction / lastHitDir 的 world-方向 one-hot（镜像由 swap 表处理）。
+  if (p.lastActionDir) out[41 + DIR_ORDER.indexOf(p.lastActionDir)] = 1
+  if (p.lastHitDir) out[45 + DIR_ORDER.indexOf(p.lastHitDir)] = 1
+
+  for (let r = 0; r < 4; r++) out[53 + r] = leadHitForDir(world, _dirs[r], pcx, pcy)
+
   // ---- 写缓冲（0–8 与 v1 逐位同式；只追加不改写） ----
   const cap = POLICY_EXTRA_COUNT_CAP
-  out[0] = Math.min(_counts[0], cap) / cap
-  out[1] = Math.min(_counts[1], cap) / cap
-  out[2] = Math.min(_counts[2], cap) / cap
-  out[3] = Math.min(_counts[3], cap) / cap
+  out[0] = Math.min(_bulletCounts[0], cap) / cap
+  out[1] = Math.min(_bulletCounts[1], cap) / cap
+  out[2] = Math.min(_bulletCounts[2], cap) / cap
+  out[3] = Math.min(_bulletCounts[3], cap) / cap
   out[4] = hitNorm(_dists[0])
   out[5] = hitNorm(_dists[1])
   out[6] = hitNorm(_dists[2])
   out[7] = hitNorm(_dists[3])
-  out[8] = Math.min(_counts[2], _counts[3], cap) / cap // 包夹度 = min(左,右)
   for (let r = 0; r < 4; r++) {
+    out[37 + r] = Math.min(_tankCounts[r], cap) / cap
     out[13 + r] = isFinite(_tti[r])
       ? Math.min(_tti[r] / POLICY_EXTRA_TTI_NORM, 1)
       : POLICY_EXTRA_HIT_NONE
     out[17 + r] = Math.min(_lane[r], cap) / cap
+  }
+  // 包夹度 = 左右**两族合计**（拆族不改变这个粗读数的语义）。
+  const leftAll = _bulletCounts[2] + _tankCounts[2]
+  const rightAll = _bulletCounts[3] + _tankCounts[3]
+  out[8] = Math.min(leftAll, rightAll, cap) / cap
+
+  // ---- B4 窗口：护盾期威胁族/包夹度全部置零（真无敌，物理上无后果）。
+  // 冰冻期**不**置零：在飞的敌弹照飞，并且解冻瞬间的危险是真实信号（plan §4-B4）。
+  if ((p.shieldTimer ?? 0) > 0) {
+    for (let r = 0; r < 4; r++) {
+      out[r] = 0
+      out[13 + r] = 0
+      out[37 + r] = 0
+    }
+    out[8] = 0
   }
 }
 

@@ -622,6 +622,7 @@ export class CombatSystem {
       // damage *decoration* (hitCount) rises so the renderer can layer on
       // type-preserving scorch/crack decals. This is the canonical
       // firepower/HP model: hits-to-kill = ceil(target.maxHp / bullet.damage).
+      this.recordPlayerHit(tank, bullet)
       tank.hp -= bullet.damage
       tank.hitCount = Math.min((tank.hitCount ?? 0) + 1, 4)
       this.d.effects.createExplosion(bullet.x, bullet.y, 'small')
@@ -805,6 +806,9 @@ export class CombatSystem {
    */
   private spendStarShield(tank: Tank, bullet: Bullet): void {
     const w = this.d.world
+    // B2：星盾消耗是「挨打」（HP 回满 ⇒ 净伤害 0），但观测必须看得见这次命中；
+    // 护盾 bounce（本函数之外）不记录（plan §4-B2 Bf2-3）。
+    this.recordPlayerHit(tank, bullet)
     const newLevel = PLAYER_PROGRESSION.maximumLevel - 1 // 3★ → 2★
     tank.level = newLevel
     w.playerLevel = newLevel
@@ -830,6 +834,28 @@ export class CombatSystem {
     // immediately re-kill the demoted 2★ player.
     tank.shieldTimer = STAR_SHIELD_GRACE_MS
     w.pushEvent({ type: 'player_hit', bulletId: bullet.id, bulletOwnerId: bullet.ownerId })
+  }
+
+  /**
+   * B2 `lastHit*` 写入（只读观测，不改玩法）。
+   *
+   * 方向口径 = **弹的飞行方向**（弹朝左飞 ⇒ 攻击者在玩家右侧）；不在此处取反，
+   * 取反会让「翻符号」类改动无处可查（plan §4-B2 Bf2-2）。
+   * 同拍多来源：`lastHitFrame` 变化时重置 max=0，只有更大的 `bullet.damage` 才覆盖方向
+   * ⇒ 「最大伤害发」赢，而不是最后一发赢（Bf6）。
+   */
+  private recordPlayerHit(tank: Tank, bullet: Bullet): void {
+    if (!tank.isPlayer) return
+    const w = this.d.world
+    if (w.frame !== tank.lastHitFrame) {
+      tank.lastHitFrame = w.frame
+      tank.lastHitDamage = 0
+      tank.lastHitDir = bullet.dir
+    }
+    if (bullet.damage > (tank.lastHitDamage ?? 0)) {
+      tank.lastHitDir = bullet.dir
+      tank.lastHitDamage = bullet.damage
+    }
   }
 
   private bulletHitsBullet(bullet: Bullet): boolean {

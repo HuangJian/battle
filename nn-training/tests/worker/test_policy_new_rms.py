@@ -21,7 +21,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from worker.models.student import PPOStudent
+from common.schema import POLICY_EXTRA_DIM, SCALAR_DIM
+from worker.models.student import SPATIAL_TOWER_FC_OUT, PPOStudent
 from worker.ppo.engine import policy_new_rms_of
 
 
@@ -42,7 +43,7 @@ def test_leg_a_covers_both_heads() -> None:
         .sqrt()
     )
     assert got == want
-    # move 5×37 个 2.0、fire 2×37 个 4.0： pin 住量级（旧列不参与）。
+    # move 5×POLICY_EXTRA_DIM 个 2.0、fire 2×POLICY_EXTRA_DIM 个 4.0：pin 住量级（旧列不参与）。
     assert abs(got - 2.7256) < 1e-4
 
 
@@ -73,7 +74,7 @@ def test_tower_covers_whole_head() -> None:
     torch.manual_seed(2)
     m = PPOStudent(policy_extra=True, spatial_tower=True)
     dim = m.policy_input_dim
-    assert dim == 112 + 40 + 37
+    assert dim == SPATIAL_TOWER_FC_OUT + SCALAR_DIM + POLICY_EXTRA_DIM
     with torch.no_grad():
         m.move_head.weight.fill_(1.0)
         m.fire_head.weight.fill_(1.0)

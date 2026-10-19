@@ -201,6 +201,32 @@ function indepBaseSide(col: number, row: number): 'U' | 'D' | 'L' | 'R' | null {
   return null
 }
 
+/** B3 leadHit 独立实现：轴向 ≤13 格、外推 t* 后横向 <19px、无遮挡、跳过生成中敌。 */
+function indepLead(w: World, pcx: number, pcy: number, dir: Direction): number {
+  const p = w.player!
+  const v = VEC[dir]
+  const vertical = v.dx === 0
+  const speed = p.bulletSpeed > 0 ? p.bulletSpeed : 4
+  const sc = Math.floor(pcx / CELL)
+  const sr = Math.floor(pcy / CELL)
+  for (const t of w.allTanks) {
+    if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
+    const tx = t.x + t.w / 2
+    const ty = t.y + t.h / 2
+    const axial = vertical ? (ty - pcy) * v.dy : (tx - pcx) * v.dx
+    if (axial <= 0 || axial > 13 * CELL) continue
+    const lateral = vertical ? tx - pcx : ty - pcy
+    const vLat = vertical ? t.vx : t.vy
+    if (Math.abs(lateral + vLat * (axial / speed)) >= BAND) continue
+    const cLow = Math.floor(t.x / CELL)
+    const cHigh = Math.floor((t.x + t.w - 1) / CELL)
+    const rLow = Math.floor(t.y / CELL)
+    const rHigh = Math.floor((t.y + t.h - 1) / CELL)
+    if (!occludedSpan(w, sc, sr, vertical, cLow, cHigh, rLow, rHigh)) return 1
+  }
+  return 0
+}
+
 function indepExtra(w: World): Float32Array {
   const out = new Float32Array(POLICY_EXTRA_DIM)
   const p = w.player
@@ -211,7 +237,9 @@ function indepExtra(w: World): Float32Array {
   const colHigh = Math.floor((p.x + p.w - 1) / CELL)
   const rowLow = Math.floor(p.y / CELL)
   const rowHigh = Math.floor((p.y + p.h - 1) / CELL)
-  const counts = [0, 0, 0, 0]
+  // v6(B4)：0–3 = 敌弹源，37–40 = 敌车炮口源。
+  const bulletCounts = [0, 0, 0, 0]
+  const tankCounts = [0, 0, 0, 0]
   const dists = [Infinity, Infinity, Infinity, Infinity]
   const tti = [Infinity, Infinity, Infinity, Infinity]
   const lane = [0, 0, 0, 0]
@@ -235,7 +263,7 @@ function indepExtra(w: World): Float32Array {
     if (occluded(Math.floor(bx / CELL), Math.floor(by / CELL), vertical)) continue
     const side: Direction = vertical ? (by < pcy ? 'up' : 'down') : bx < pcx ? 'left' : 'right'
     const r = relIdx(side, p.dir)
-    counts[r]++
+    bulletCounts[r]++
     const along = vertical ? Math.abs(by - pcy) : Math.abs(bx - pcx)
     const t = along / (b.speed > 0 ? b.speed : 1)
     if (t < tti[r]) tti[r] = t
@@ -254,7 +282,7 @@ function indepExtra(w: World): Float32Array {
       (t.dir === 'left' && tx > pcx)
     if (tAligned && tToward && !occluded(Math.floor(tx / CELL), Math.floor(ty / CELL), tVertical)) {
       const side: Direction = tVertical ? (ty < pcy ? 'up' : 'down') : tx < pcx ? 'left' : 'right'
-      counts[relIdx(side, p.dir)]++
+      tankCounts[relIdx(side, p.dir)]++
     }
     for (let r = 0; r < 4; r++) {
       const d = relDir(p.dir, r)
@@ -281,16 +309,44 @@ function indepExtra(w: World): Float32Array {
   }
 
   const cap = POLICY_EXTRA_COUNT_CAP
-  for (let i = 0; i < 4; i++) out[i] = Math.min(counts[i], cap) / cap
+  for (let i = 0; i < 4; i++) out[i] = Math.min(bulletCounts[i], cap) / cap
   for (let i = 0; i < 4; i++)
     out[4 + i] = isFinite(dists[i]) ? Math.min(dists[i] / POLICY_EXTRA_HIT_DIST_NORM, 1) : 1.5
-  out[8] = Math.min(counts[2], counts[3], cap) / cap
+  out[8] = Math.min(bulletCounts[2] + tankCounts[2], bulletCounts[3] + tankCounts[3], cap) / cap
   for (let r = 0; r < 4; r++) {
+    out[37 + r] = Math.min(tankCounts[r], cap) / cap
     out[9 + r] = indepCorr(w, p, relDir(p.dir, r)) / POLICY_EXTRA_CORR_CAP
     out[13 + r] = isFinite(tti[r]) ? Math.min(tti[r] / POLICY_EXTRA_TTI_NORM, 1) : 1.5
     out[17 + r] = Math.min(lane[r], cap) / cap
     const bpx = indepBlk(w, pcx, pcy, relDir(p.dir, r))
     out[21 + r] = bpx < 0 ? 1.5 : Math.min(bpx / POLICY_EXTRA_HIT_DIST_NORM, 1)
+  }
+
+  // ── v6：prevAction / lastHit / 最近敌朝向 / leadHit ──
+  const di = (d: Direction): number => (d === 'up' ? 0 : d === 'down' ? 1 : d === 'left' ? 2 : 3)
+  if (p.lastActionDir) out[41 + di(p.lastActionDir)] = 1
+  if (p.lastHitDir) out[45 + di(p.lastHitDir)] = 1
+  let nD = Infinity
+  let nDir: Direction = 'up'
+  for (const t of w.allTanks) {
+    if (!t.alive || t.allegiance !== 'enemy' || t.spawnTimer > 0) continue
+    const d = (t.x + t.w / 2 - pcx) ** 2 + (t.y + t.h / 2 - pcy) ** 2
+    if (d < nD) {
+      nD = d
+      nDir = t.dir
+    }
+  }
+  if (nD < Infinity) out[49 + di(nDir)] = 1
+  for (let r = 0; r < 4; r++) out[53 + r] = indepLead(w, pcx, pcy, relDir(p.dir, r))
+
+  // B4：护盾期威胁族与包夹度置零（冰冻期不置零）。
+  if ((p.shieldTimer ?? 0) > 0) {
+    for (let r = 0; r < 4; r++) {
+      out[r] = 0
+      out[13 + r] = 0
+      out[37 + r] = 0
+    }
+    out[8] = 0
   }
 
   // ── ⑤ 基地族（25–36）：无基地 ⇒ 全 0（本函数对无基地世界早退）──
@@ -419,8 +475,8 @@ function assertClose(a: Float32Array, b: Float32Array, label: string): void {
 
 describe('POLICY_EXTRA：常量与布局契约', () => {
   it('维度/名字/哨兵/互换对/取负表 = 冻结值（plan §2.2/§2.4）', () => {
-    expect(POLICY_EXTRA_DIM as number).toBe(37)
-    expect(POLICY_EXTRA_NAMES.length).toBe(37)
+    expect(POLICY_EXTRA_DIM as number).toBe(57)
+    expect(POLICY_EXTRA_NAMES.length).toBe(57)
     expect([...POLICY_EXTRA_NAMES]).toEqual([
       'threatFront',
       'threatBack',
@@ -459,6 +515,26 @@ describe('POLICY_EXTRA：常量与布局契约', () => {
       'baseEnemyDistU',
       'baseEnemyDistL',
       'baseEnemyDistR',
+      'threatTankFront',
+      'threatTankBack',
+      'threatTankLeft',
+      'threatTankRight',
+      'prevActionUp',
+      'prevActionDown',
+      'prevActionLeft',
+      'prevActionRight',
+      'lastHitUp',
+      'lastHitDown',
+      'lastHitLeft',
+      'lastHitRight',
+      'enemyFacingUp',
+      'enemyFacingDown',
+      'enemyFacingLeft',
+      'enemyFacingRight',
+      'leadHitFront',
+      'leadHitBack',
+      'leadHitLeft',
+      'leadHitRight',
     ])
     expect(POLICY_EXTRA_HIT_NONE).toBe(1.5)
     expect(POLICY_EXTRA_HIT_DIST_NORM).toBe(GRID * CELL)
@@ -478,11 +554,16 @@ describe('POLICY_EXTRA：常量与布局契约', () => {
       [26, 27],
       [29, 30],
       [35, 36],
+      [39, 40],
+      [43, 44],
+      [47, 48],
+      [51, 52],
+      [55, 56],
     ])
     expect([...POLICY_EXTRA_MIRROR_NEG]).toEqual([32])
   })
 
-  it('mirrorSwap：按冻结表九对互换 + [32] 取负（与 python mirror_x 同表）', () => {
+  it('mirrorSwap：按冻结表互换 + [32] 取负（与 python mirror_x 同表）', () => {
     const extra = Float32Array.from({ length: POLICY_EXTRA_DIM }, (_, i) => i + 1)
     const exp = Float32Array.from(extra)
     for (const [a, b] of [
@@ -495,6 +576,11 @@ describe('POLICY_EXTRA：常量与布局契约', () => {
       [26, 27],
       [29, 30],
       [35, 36],
+      [39, 40],
+      [43, 44],
+      [47, 48],
+      [51, 52],
+      [55, 56],
     ]) {
       const t = exp[a]
       exp[a] = exp[b]

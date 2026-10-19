@@ -7700,3 +7700,49 @@ test_prefetch_adaptive,test_wire_report}.py`（新增/改写 15 例，先红后�
 - **门禁**：`bun run check` 2557 pass / 0 fail · `bun run build` 过 · `freeze:check` FROZEN-SIGNATURE OK ·
   torch↔TS `student-golden-v6.json` 四头对账 ≤1e-4 · Python `test_action_head_hygiene` /
   `test_student_model` / `test_dataset_mirror` 全绿。
+
+## §2026-10-19-goalnn-obs-v6-b2b5 — B′ 观测/遥测一次 bump 到 v6（SCALAR 46 / EXTRA 57 / MAJOR 6 / metrics v12）：能力位进观测，口径只留一个
+
+- **背景**：plan/nn-capability-upgrade §4-B2–B5 要在同一次 schema bump 里交付 prevAction /
+  lastHit / 敌朝向 / leadHit / 威胁拆族 / 窗口三列——任何一项单独做都要付一遍全语料重导。
+- **决策**：
+  1. **prevAction 由 `SimulationPlayer` 写入 `World.player`**（请求值 = 冷却前、地形前的输入），
+     不是写进 `NNInput`：回放/BC 重导时没有 `NNInput`，只写在那里会让 BC 与 rollout 分布分家。
+  2. **lastHit* 由 `CombatSystem` 写入**（真实扣血 + 星盾消耗两处），护盾 bounce 不写；
+     方向 = 弹的**飞行方向**（不取反）；同拍多源取**最大伤害发**（不是最后一发）。
+  3. **威胁拆族用「加列」不「改列」**：`0–3` 保持「只含敌弹」的旧语义，敌车炮口进 `37–40`；
+     包夹度 `8` 改读两族合计（粗读数语义不变）。护盾期两族置零，冰冻期**不置零**。
+  4. **窗口只留一个谓词**：`windowKind()` 基于粘性 `ShieldWindow` 分类（freeze / propShield /
+     respawnShield / starShieldGrace），B5 三列与 idx47/idx51 豁免列都从它派生（交集，非第三套口径）。
+     `deathDerivedShieldTicks` 只判读、不进奖励/分母——复活盾是「死了才拿到的无敌」。
+  5. **lastHit* 不进 `tickHash`**（纯观测，不参与回放对账），改由快照往返全字段断言覆盖。
+- **备选与否决**：① prevAction 写 `NNInput` —— 否（BC 缺该对象，分布分家）；② 直接把 `0–3`
+  改成「敌弹+敌车」合计 —— 否（旧读数语义被改写，历史课程不可比且无法用差列还原）；
+  ③ 另写一套 B5 窗口判定 —— 否（C5 要防的双事实源）；④ lastHitDir 存「攻击者相对方位」——
+  否（与弹方向互为取反，取反那一层不可查）。
+- **后果**：旧权重/旧 shard/旧 eval 报告在 MAJOR 6 下响亮拒绝（须重灌语料）；`metrics.npy`
+  行宽 76→79、eval 行新增三键（旧报告缺键 = 省略）；腿 B 起点迁移的 extra 槽位随 SCALAR_DIM 移动。
+  B6（窗口命中奖励）仍是数据级改动，本批未接公式。
+- **全文**：`docs/nn/engineering.md` §78。
+- **门禁**：`bun run check` 2577 pass / 0 fail · `bun run build` 过 · `freeze:check` OK ·
+  `nn-training` pytest 全量绿（含 1926 条 worker/trainer）。
+
+## §2026-10-19-goalnn-post-thaw-sentinel — B4 哨兵 `postThawDamageRate` 的口径：解冻帧起 60 拍、重新冻结即关窗、分母用 `player_damage`
+
+- **背景**：B4 让冰冻期不再置零威胁（信息不删），需要一条「解冻即挨打」的读数防止把 D2 修成 D2'
+  （plan/nn-capability-upgrade §4-B4 / 评审 Bf9）。计划只给了名字与「解冻后 60 拍内 player_damage 份额」，
+  没定三件事：窗口起点、再冻结怎么算、分母用什么。
+- **决策**：
+  1. **解冻帧** = `freezeTimer` 由 >0 变 ≤0 的那一拍（`Simulation` 在拍首递减）；
+     窗口 `[thawFrame, thawFrame + 60)`（1 s，左闭右开）——同帧伤害算「解冻后」。
+  2. **重新冻结 ⇒ 窗关**：冻结期的伤害不是「解冻即挨打」，留在窗口里会污染这个哨兵。
+  3. **分母 = 整局 `player_damage` 之和**（与 `playerDamageTaken` 同源），零承伤 ⇒ 0（不产生 NaN）。
+  4. 只产出读数（`_eval_report.json` 的 `postThawDamage` / `postThawDamageRate`），**不做门判定**；
+     门基线 = 新 schema null 腿同期值（本机无该基线）。
+- **备选与否决**：① 窗口从「下一拍」起算 —— 否（解冻当拍开火已是真实威胁，丢掉最危险的一帧）；
+  ② 再冻结不清窗 —— 否（等于把冻结期挨打算成解冻代价）；③ 分母用 `player_hit` 次数 ——
+  否（星盾/致死路径不发 `player_damage`，份额会在「被秒杀」的对局里失真）；④ 用 `player_hits`
+  为分子 —— 否（计划写死 player_damage，且次数丢伤害权重）。
+- **后果**：eval 报告多两个键（旧报告缺键 = 无读数）；metrics 列不变（79 列），无需重灌语料。
+- **全文**：`docs/nn/engineering.md` §78。
+- **门禁**：`bun run check` 2577 pass / 0 fail · build 过 · `freeze:check` OK。

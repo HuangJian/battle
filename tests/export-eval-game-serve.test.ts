@@ -86,6 +86,19 @@ describe('export-eval-game --serve', () => {
     main(oneShot.slice(1))
     const expected = readManifest(join(work, 'oneshot.pack'))
     expect(expected.mode).toBe('eval')
+    // B4 哨兵落盘（plan §4-B4 Bf9）：`_eval_report.json` 必须有这两个键，且份额自洽。
+    const report = JSON.parse(readFileSync(join(work, 'oneshot', '_eval_report.json'), 'utf8')) as {
+      postThawDamage: number
+      postThawDamageRate: number
+      playerDamageTaken: number
+    }
+    expect(typeof report.postThawDamage).toBe('number')
+    expect(typeof report.postThawDamageRate).toBe('number')
+    expect(report.postThawDamageRate).toBeGreaterThanOrEqual(0)
+    expect(report.postThawDamageRate).toBeLessThanOrEqual(1)
+    expect(report.postThawDamageRate).toBe(
+      report.playerDamageTaken > 0 ? report.postThawDamage / report.playerDamageTaken : 0,
+    )
 
     // ---- 唯一子进程：serve 模式连跑两局 ----
     const proc = Bun.spawn([process.execPath, 'tools/sim/export-eval-game.ts', '--serve'], {

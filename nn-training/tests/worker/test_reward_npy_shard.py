@@ -21,7 +21,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from biz.reward_context import Scoped, reset
-from biz.reward_library import METRICS_VERSION
+from biz.reward_library import METRICS_DIM, METRICS_VERSION
 from common.errors import ProtocolError
 from common.payload import DROP_MEMBER, pack_payload, unpack_payload
 from common.schema import BOARD, OBS_CHANNELS, POLICY_EXTRA_DIM, SCALAR_DIM
@@ -64,7 +64,7 @@ def _write_reward_shard(
     np.save(d / "done.npy", np.zeros(n, dtype=np.int64))
     np.save(d / "mask.npy", np.ones((n, 7), dtype=np.int64))
     if keep_metrics:
-        np.save(d / "metrics.npy", rng.random((n + 1, 76), dtype=np.float64))
+        np.save(d / "metrics.npy", rng.random((n + 1, METRICS_DIM), dtype=np.float64))
     np.save(d / REWARD_NAME, reward if reward is not None else rng.random(n).astype(np.float32))
     if keep_meta:
         # `meta` 是**覆盖项**（合并到缺省之上）：每条用例只改它要探的那一栏，其余保持合法

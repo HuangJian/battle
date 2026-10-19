@@ -200,6 +200,14 @@ METRICS: tuple[str, ...] = (
     #                     （d=3 处核值 0），与 raw-only 的 nearEnemy4Ticks（4 格像素带）不是等比量。
     "postHitLaneTicks",  # 75  ← 被击中后仍留在该源**火线轴**（整数格轴，非 19px 带）上的 tick 累计；
     #                     **拌入**豁免 A；窗关 = 源转向/换道/死亡/局终；重开只由新伤害事件；无封顶。
+    # ---- metrics v12（plan/nn-capability-upgrade.plan.md §4-B5；idx76–78）----
+    "freezeShieldWindowTicks",  # 76  ← `freeze ∪ **道具**盾` 的 tick 累计；
+    #                     **已剔**复活盾（RESPAWN_SHIELD_MS）与 star-shield grace（1500ms）。
+    #                     奖励分母（B6）与判读共用；来源分类 = `shield-window.ts` 粘性 tracker。
+    "hitsInFreezeShieldWindow",  # 77  ← 上述窗口内玩家命中敌车次数（按命中拍归属）。
+    #                     B6 的奖励输入；与 idx76 配对算密度（勿与均匀命中率直接比）。
+    "deathDerivedShieldTicks",  # 78  ← 复活盾 + star-shield grace 的 tick 累计（两种都是
+    #                     「挨打/死亡换来」）；**只判读**，不进奖励、不作分母。
     #                     （第三列 pickupProxMax 被 §4bis.4 两条杀线拦下 ⇒ 本批不签入。）
     #                     54–56/58/62–64/72/74–75 都是累计 tick 计数器（同 dangerTicks 警告）；
     #                     59/60/65 单调增（差分 ≥ 0）；57 带 -1 哨兵；
@@ -208,7 +216,7 @@ METRICS: tuple[str, ...] = (
 
 METRIC_INDEX: dict[str, int] = {name: i for i, name in enumerate(METRICS)}
 METRICS_DIM = len(METRICS)
-#: shard manifest 版本：`[N+1,76] f8（idx0–75）` 布局。任何用 `shape[0]` 推 episode 长度的
+#: shard manifest 版本：`[N+1,79] f8（idx0–78）` 布局。任何用 `shape[0]` 推 episode 长度的
 #: 下游在版本不匹配时必须响亮报错，而非静默错读（评审 LC §1.1）。
 #: v8（plan/x20-dodge-avoidance §2）：危险暴露四列。
 #: v9（plan/geo-threat-instrumentation §1.1/§1.3）：命中方位 5 列 + 穿越税 4 列；
@@ -222,7 +230,9 @@ METRICS_DIM = len(METRICS)
 #: v11（plan/metrics-v11-hotlane.plan.md §2）：热线族 2 列（idx74–75）—— nearSqSum /
 #: postHitLaneTicks（第三列 pickupProxMax 被 §4bis.4 两条杀线拦下 ⇒ 不签入）；
 #: **两条都拌入豁免 A**；公式一个字不动（列先行、价后议）。
-METRICS_VERSION = 11
+#: v12（plan/nn-capability-upgrade §4-B5）：窗口三列（idx76–78）—— freezeShieldWindowTicks /
+#: hitsInFreezeShieldWindow / deathDerivedShieldTicks；B6 的奖励输入，本批不接公式。
+METRICS_VERSION = 12
 
 #: 终局 outcome 名（与 TS `manifest.outcome` 同源）；未列出的 terminal 键 = 0。
 OUTCOMES: tuple[str, ...] = ("stage_clear", "lives_exhausted", "timeout", "base_destroyed")
@@ -953,7 +963,8 @@ def _self_check() -> None:
     # v10：追加 idx54–68 差距四族 15 列；aim-dodge 批次内整理：移除 enclExempt1/2/3pTicks，
     #      追加 aim/dodge 8 列（idx66–73），enclMax 顺位 68 → 65 ⇒ 总列数 74。
     # v11：追加 idx74–75 热线族 2 列（plan/metrics-v11-hotlane；第三列被 §4bis 杀线拦下）
-    assert len(METRICS) == METRICS_DIM == 76, METRICS_DIM
+    # v12：追加 idx76–78 窗口三列（plan/nn-capability-upgrade §4-B5）
+    assert len(METRICS) == METRICS_DIM == 79, METRICS_DIM
     assert len(set(METRICS)) == METRICS_DIM
 
 

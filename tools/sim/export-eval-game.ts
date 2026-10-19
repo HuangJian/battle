@@ -71,6 +71,7 @@ import {
   enemyBulletLaneWeightTick,
   exposureExempt,
   inThreatLane,
+  windowKind,
   nearestEnemyDistPx,
   playerHpRatio,
   sampleBasePressure,
@@ -304,6 +305,10 @@ interface Telemetry {
   nearSqSum: number
   /** 被击中后仍留在该源火线轴上的 tick 累计（整数轴；A 拌入）。 */
   postHitLaneTicks: number
+  // ---- B5（plan §4-B5）：窗口三列（与 rollout metrics 同名同义）----
+  freezeShieldWindowTicks: number
+  hitsInFreezeShieldWindow: number
+  deathDerivedShieldTicks: number
   /**
    * Phase 0 逐敌种画像（T3；索引 = ENEMY_KIND_ORDER）：
    * `hitsByKind` = `enemy_hit` 事件按**目标 kind** 累计；`killsByKind` = `by='player'`
@@ -368,6 +373,10 @@ interface EvalResult {
   playerHits: number
   /** 非致命扣血累计（player_damage 事件）。 */
   playerDamageTaken: number
+  /** B4 哨兵（plan §4-B4 Bf9）：解冻后 60 拍内承伤（绝对值）。 */
+  postThawDamage: number
+  /** B4 哨兵：`postThawDamage / playerDamageTaken`（零承伤 ⇒ 0）。 */
+  postThawDamageRate: number
   /** metrics v8 危险暴露（plan/x20-dodge-avoidance §2）：终局 hp/maxHp + 整局累计
    *  danger/threat tick + 开局窗（tick<600）承伤。与 rollout metrics 列同名同义。 */
   playerHpRatio: number
@@ -409,6 +418,9 @@ interface EvalResult {
   /** metrics v11（idx74–75）。 */
   nearSqSum: number
   postHitLaneTicks: number
+  freezeShieldWindowTicks: number
+  hitsInFreezeShieldWindow: number
+  deathDerivedShieldTicks: number
   playerShots: number
   powerUpsCollected: number
   /** T0.4 提顶层（scorable 有、需提顶层 §3.3 🟠）。 */
@@ -452,6 +464,59 @@ interface EvalResult {
    * max-Δt。均匀模式下 `minDt == maxDt == K`；事件模式下 `minDt >= 3` 是门的不变式。
    */
   decisionReadout?: DecisionReadout
+}
+
+// ================================================================
+// B4 哨兵（plan/nn-capability-upgrade.plan.md §4-B4 / 评审 Bf9）：
+// `postThawDamageRate` = **解冻后 60 拍内**的 player_damage 份额。
+//
+// 为什么需要它：B4 让冰冻期不再把威胁置零（信息不删），代价是「解冻即挨打」
+// 可能变多。判据只能在修复前后同期比较，所以先把这个读数固定成可复现的份额；
+// 基线 = 新 schema null 腿同期值（本批无基线，故只产出读数、不做门判定）。
+//
+// 口径（写死，避免第二套「解冻」定义）：
+//   · 解冻帧 = `freezeTimer` 由 >0 变 ≤0 的那一拍（`Simulation` 在拍首递减）；
+//   · 窗口 = `[thawFrame, thawFrame + 60)`，与事件所属帧号比较；
+//   · 重新冻结 ⇒ 窗关（冻结期的伤害不是「解冻即挨打」）；
+//   · 份额分母 = 整局 `player_damage` 之和；零承伤 ⇒ 0。
+// ================================================================
+export const POST_THAW_WINDOW_TICKS = 60
+
+/** 逐局解冻窗口状态（纯数据，住在单局 run 里；不进 World、不进快照）。 */
+export interface PostThawState {
+  /** 最近一次解冻的帧号；-1 = 无活动窗口。 */
+  thawFrame: number
+  /** 窗口内承伤（`player_damage` 之和）。 */
+  inWindow: number
+  /** 整局承伤（份额分母）。 */
+  total: number
+}
+
+export function createPostThawState(): PostThawState {
+  return { thawFrame: -1, inWindow: 0, total: 0 }
+}
+
+/** 每拍喂一次（`sim.tick()` 之后，`frame` = 该拍帧号）。 */
+export function postThawTick(
+  s: PostThawState,
+  freezeBefore: number,
+  freezeAfter: number,
+  frame: number,
+): void {
+  if (freezeBefore > 0 && freezeAfter <= 0) s.thawFrame = frame
+  else if (freezeAfter > 0) s.thawFrame = -1
+}
+
+/** 记一笔承伤（`frame` = 事件所属帧号）。 */
+export function recordPostThawDamage(s: PostThawState, frame: number, amount: number): void {
+  s.total += amount
+  if (s.thawFrame >= 0 && frame >= s.thawFrame && frame < s.thawFrame + POST_THAW_WINDOW_TICKS)
+    s.inWindow += amount
+}
+
+/** 份额：窗口内承伤 / 整局承伤；零承伤 ⇒ 0。 */
+export function postThawDamageRate(s: PostThawState): number {
+  return s.total > 0 ? s.inWindow / s.total : 0
 }
 
 /** 结果 → .replay 状态位（与 replay-writer.statusFromResult 同映射）。 */
@@ -647,6 +712,9 @@ export function runEvalOne(
     // metrics v11（idx74–75）。
     nearSqSum: 0,
     postHitLaneTicks: 0,
+    freezeShieldWindowTicks: 0,
+    hitsInFreezeShieldWindow: 0,
+    deathDerivedShieldTicks: 0,
     hitsByKind: [0, 0, 0, 0],
     killsByKind: [0, 0, 0, 0],
     exposureByKind: [0, 0, 0, 0],
@@ -656,6 +724,7 @@ export function runEvalOne(
     killerKinds: [],
     kindById: new Map<number, TankKind>(),
   }
+  const postThaw = createPostThawState()
   const seenPuIds = new Set<number>()
   let prevLivePuIds = new Set<number>()
   /** metrics v9：bulletId → **开火时刻** shooter 中心格键（与 export-rl-rollout 同式；
@@ -745,6 +814,8 @@ export function runEvalOne(
         }
       }
     }
+    // B4 哨兵：解冻判定要用 tick 前后的 freezeTimer。
+    const freezeBefore = world.freezeTimer
     sim.tick()
     if (world.player?.alive && !world.player.moving) idleTicks++
     // metrics v9：「本 tick 开火输出」（fire head，非冷却态、非实弹）—— 读当前驱动 tick 的
@@ -754,13 +825,21 @@ export function runEvalOne(
     const fireOutThisTick = ai.isFiring()
     // metrics v10：移动输出（None/方向）——与 `fireOutThisTick` 同采样点、同 held head。
     const moveOutThisTick = ai.getMoveDirection()
+    // v6（plan §4-B1 S2-3）："没在前进" = hold=1 或 legacy 的无输入（v6 的 move 头没有 null）。
+    const stopOutThisTick = ai.isHolding?.() === true || moveOutThisTick === null
     // 录制须在 endFrame 前（endFrame 会清掉本 tick 的决策态）——与 runner 同采样点。
     if (recorder) recorder.recordFrame(ai, null)
     ai.endFrame()
     t++
+    postThawTick(postThaw, freezeBefore, world.freezeTimer, t - 1)
 
     // 本批豁免 A：盾窗 tracker 每 tick 喂一拍（在任何 exposureExempt 消费之前）。
     shieldWin.update(world)
+    // B5：窗口分类（与 export-rl-rollout 同一谓词/同一列语义）。
+    const winKind = windowKind(world, shieldWin)
+    if (winKind === 'freeze' || winKind === 'propShield') tel.freezeShieldWindowTicks++
+    else if (winKind === 'respawnShield' || winKind === 'starShieldGrace')
+      tel.deathDerivedShieldTicks++
 
     // ---- Phase 0 逐敌种 census（T3）----
     // 位于 consumeEvents **之前**、sim.tick() 之后：`removeDeadEntities` 已在 tick 末
@@ -804,6 +883,7 @@ export function runEvalOne(
         if (e.bulletId !== undefined) settleHurtShot(e.bulletId)
       } else if (e.type === 'player_damage') {
         tel.playerDamageTaken += (e as { damage: number }).damage
+        recordPostThawDamage(postThaw, t - 1, (e as { damage: number }).damage)
         // metrics v11（idx75）：开窗——源 id 直抄 `bulletOwnerId`（不走 registry，§3.0）。
         const ownerId = (e as { bulletOwnerId?: number }).bulletOwnerId
         if (ownerId !== undefined) hotLaneOpenFromTank(hotLane, world, ownerId)
@@ -842,6 +922,7 @@ export function runEvalOne(
       } else if (e.type === 'enemy_hit') {
         tel.enemyHits++
         hitThisTick = true
+        if (winKind === 'freeze' || winKind === 'propShield') tel.hitsInFreezeShieldWindow++
         // Phase 0（T3②④）：分敌种命中 + 首命中目标。
         const hk = e.targetKind
         if (tel.firstHitKind === null) tel.firstHitKind = hk
@@ -939,7 +1020,7 @@ export function runEvalOne(
     // 危险暴露累加（metrics v8/v9）：与 stuck 检出同刻（本 tick 终态）；玩家阵亡期间不计。
     if (world.player?.alive) {
       // ---- metrics v10：输入级 2 列（静止列复用上面的 idleTicks）+ 距离 2 列 + 被包围族 7 列 ----
-      if (moveOutThisTick === null) tel.stopTicks++
+      if (stopOutThisTick) tel.stopTicks++
       if (fireOutThisTick) tel.fireHeldTicks++
       const enemyDist = nearestEnemyDistPx(world)
       if (enemyDist >= 0 && enemyDist <= NEAR_ENEMY_BAND_PX) tel.nearEnemy4Ticks++
@@ -1125,6 +1206,8 @@ export function runEvalOne(
     enemyHits: tel.enemyHits,
     playerHits: tel.playerHits,
     playerDamageTaken: tel.playerDamageTaken,
+    postThawDamage: postThaw.inWindow,
+    postThawDamageRate: postThawDamageRate(postThaw),
     playerShots: tel.playerShots,
     powerUpsCollected: tel.powerUpsCollected,
     enemyTotal: tel.enemyTotal,
@@ -1167,6 +1250,9 @@ export function runEvalOne(
     cornerWeightTicks: tel.cornerWeightTicks,
     nearSqSum: tel.nearSqSum,
     postHitLaneTicks: tel.postHitLaneTicks,
+    freezeShieldWindowTicks: tel.freezeShieldWindowTicks,
+    hitsInFreezeShieldWindow: tel.hitsInFreezeShieldWindow,
+    deathDerivedShieldTicks: tel.deathDerivedShieldTicks,
     cellsVisited: tel.cellsVisited.size,
     firstKillTick: tel.firstKillTick ?? null,
     stuckTicks: tel.stuckTicks,
@@ -1315,6 +1401,9 @@ export function main(argv: string[]): void {
     enemyHits: res.enemyHits,
     playerHits: res.playerHits,
     playerDamageTaken: res.playerDamageTaken,
+    // B4 哨兵（Bf9）：解冻后 60 拍内承伤份额；基线 = 新 schema null 腿同期值。
+    postThawDamage: res.postThawDamage,
+    postThawDamageRate: +res.postThawDamageRate.toFixed(4),
     playerHpRatio: +res.playerHpRatio.toFixed(4),
     dangerTicks: res.dangerTicks,
     threatTicks: res.threatTicks,
@@ -1353,6 +1442,9 @@ export function main(argv: string[]): void {
     // metrics v11（idx74–75）：顶层直出（与 rollout metrics 行同源；eval_rows 侧经 EVAL_V11_KEYS）。
     nearSqSum: res.nearSqSum,
     postHitLaneTicks: res.postHitLaneTicks,
+    freezeShieldWindowTicks: res.freezeShieldWindowTicks,
+    hitsInFreezeShieldWindow: res.hitsInFreezeShieldWindow,
+    deathDerivedShieldTicks: res.deathDerivedShieldTicks,
     hitRate: res.playerShots > 0 ? +(res.enemyHits / res.playerShots).toFixed(4) : 0,
     powerUpsCollected: res.powerUpsCollected,
     // T0.4 顶层贯通（§3.3 🟠🔴）：EvalStore / eval_dispatch.record() 直读这些键。

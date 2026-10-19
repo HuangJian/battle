@@ -127,6 +127,11 @@ DEFAULT_RANGES: dict[str, tuple[float, float]] = {
     "nearSqSum": (0.0, 4.0 * 20.0 * 36000.0),
     # postHitLaneTicks ≤ ticks（一拍最多一条轴上一格）。
     "postHitLaneTicks": (0.0, 36000.0),
+    # metrics v12（idx76–78，plan/nn-capability-upgrade §4-B5）：窗口三列。
+    # 前两列是 B6 奖励的输入；deathDerivedShieldTicks 只判读、不进奖励。
+    "freezeShieldWindowTicks": (0.0, 36000.0),  # 累计 tick 的上界 = maxTicks
+    "hitsInFreezeShieldWindow": (0.0, 3000.0),  # 上界同 playerShots（命中数 ≤ 开火数）
+    "deathDerivedShieldTicks": (0.0, 36000.0),
 }
 
 #: 单加性项在角点上的绝对上界（超过即判为数值爆炸风险）。

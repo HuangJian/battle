@@ -96,7 +96,9 @@ export interface FrameStats {
 
 /** Intent-only stats straight from the packed input stream. */
 export function frameStats(frames: InputFrame[]): FrameStats {
-  const nullFlags = frames.map((f) => f.direction === null)
+  // v6 口径（plan/nn-capability-upgrade §4-B1 S2-3）："没在前进" = hold=1 或
+  // legacy 的 direction===null（v6 的 move 头没有 null 类）。两代回放共用这一条。
+  const nullFlags = frames.map((f) => f.direction === null || f.hold === true)
   return {
     totalTicks: frames.length,
     nullTicks: nullFlags.reduce((a, b) => a + (b ? 1 : 0), 0),
@@ -219,7 +221,8 @@ export function analyzeReplayText(text: string, file: string): ReplayIdleResult 
     const onIce = p0 ? world.isTankOnIce(p0) : false
     const threat = !onIce && inThreatLane(world)
     const layer: Layer = onIce ? 'ice' : threat ? 'threat' : 'clean'
-    const stopIntent = p1[tick]?.direction === null
+    const f1 = p1[tick]
+    const stopIntent = f1 !== undefined && (f1.direction === null || f1.hold === true)
 
     sim.tick()
     input.advance()

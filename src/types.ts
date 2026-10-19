@@ -208,6 +208,25 @@ export interface Tank extends Entity {
    *  accepted direction change. NOT a frame number — it is wall-clock ms.
    *  Initialized to -9999 so the first turn is always allowed. */
   lastTurnMs?: number
+
+  // --- B2 (plan/nn-capability-upgrade.plan.md §4-B2)：上一拍请求的动作 ---
+  /** 上一拍输入**请求**的方向（不是被冷却/地形接受的朝向）。`null` = 无输入。
+   *  由 `SimulationPlayer` 在应用输入的那一拍写入（在线/回放/BC 同源，§2.2）。 */
+  lastActionDir?: Direction | null
+  /** 上一拍请求是否为 turn-only（v6 hold 头）。旧输入恒 false。 */
+  lastActionHold?: boolean
+  /** 上一拍请求的开火语义：0 不射 / 1 先打再转 / 2 先转再打（旧输入 firing=true ⇒ 2）。 */
+  lastActionFire?: 0 | 1 | 2
+
+  // --- B2：最近一次「玩家承伤」的方向与时间（只读观测，进快照） ---
+  /** 攻击源方向 = **弹的飞行方向**（弹朝左飞 ⇒ 攻击者在玩家右侧）。
+   *  撞车类来源取 `(player − otherTank)` 的主轴方向（与弹同向口径）。
+   *  护盾 bounce（不扣 HP、不耗星）不写。 */
+  lastHitDir?: Direction
+  /** 写入 `lastHitDir` 的 `world.frame`（同拍多来源取伤害最大者）。 */
+  lastHitFrame?: number
+  /** 同拍已记录的最大单发伤害（`lastHitFrame` 变化时重置 0）。 */
+  lastHitDamage?: number
 }
 
 /**

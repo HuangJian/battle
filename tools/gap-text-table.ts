@@ -163,7 +163,8 @@ const MEANFN = new Map<string, (r: Row) => number | null>([
   ['击杀/千tick', (r) => rate(r, r.kills)],
   ['击杀间隔(tick, 均值)', (r) => r.killSpacing],
   ['首杀 tick', (r) => (r.firstKillTick < 0 ? null : r.firstKillTick)],
-  ['停(无输入)/千tick', (r) => rate(r, r.stopTicks)],
+  // v6：stopTicks = hold=1 或 legacy 无输入（两代回放/策略同一口径，见 idle-rate.ts）。
+  ['停(无输入/hold)/千tick', (r) => rate(r, r.stopTicks)],
   ['停∧≤4格/千tick', (r) => rate(r, r.stopNear4Ticks)],
   ['停中≤4格占比', (r) => (r.stopTicks > 0 ? r.stopNear4Ticks / r.stopTicks : null)],
   ['被包围(n≥2敌火线)/千tick', (r) => rate(r, r.surroundTicks)],

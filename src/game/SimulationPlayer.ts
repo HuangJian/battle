@@ -80,6 +80,11 @@ export class PlayerSystem {
       // byte-identical.
       const hold = input.isHolding?.() ?? false
       const fireBefore = input.isFireBeforeTurn?.() ?? false
+      // B2 prevAction = the REQUEST this tick (not the accepted turn): it mirrors
+      // the policy's output and is what a replay/BC label also carries.
+      p.lastActionDir = dir
+      p.lastActionHold = hold
+      p.lastActionFire = firing ? (fireBefore ? 1 : 2) : 0
       if (firing && fireBefore) this.d.combat.tryFire(p)
       let turnAccepted = true
       if (dir !== null) {
@@ -96,6 +101,11 @@ export class PlayerSystem {
       if (firing && !fireBefore && turnAccepted) this.d.combat.tryFire(p)
       return
     }
+
+    // Legacy 5/2 input has no hold/turn-order bits: firing maps to "after turn".
+    p.lastActionDir = dir
+    p.lastActionHold = false
+    p.lastActionFire = firing ? 2 : 0
 
     if (dir !== null) {
       p.dir = dir
@@ -126,6 +136,11 @@ export class PlayerSystem {
     let lastFire = p.frenzyLastFire ?? 0
     p.dir = dir
     p.moving = false
+    // Frenzy locks the input; the observable "last request" is still the locked
+    // direction + an auto shot (fire=2: after the (no-op) turn).
+    p.lastActionDir = dir
+    p.lastActionHold = false
+    p.lastActionFire = 2
     while (shotsLeft > 0 && now - lastFire >= interval) {
       this.spawnFrenzyShot(p, dir)
       shotsLeft -= 1

@@ -14,16 +14,18 @@ spatialTower 标志；A0 档 = 旧架构标志）+ `warmstart_missing` 入 meta�
 自动构建对应架构（架构身份的单一来源 = 权重文件，既有契约不变）。
 
 obs-v5（plan/obs-v5-vector-gap.plan.md §2.7）：起点宽了 —— pf 137→165（腿 A）/ 151→189
-（腿 B）、fc 94→104、value 128→165/189。loader 对**换形**张量只会整块跳过（随机 init），
+（腿 B）、fc 94→104、value 128→165/189。obs-v6（plan/nn-capability-upgrade §4-B2）再宽一次：
+leg A 137→103（多余列丢）、leg B 151→215、fc 94→110、value 128→103/215。
+loader 对**换形**张量只会整块跳过（随机 init），
 而这里要的是**列迁移**：旧列逐列拷进新张量的对应位置，新列用 `normal_(0,0.01)` 重初始化
 （尺度见 `student.py::_init_value_head` 的说明）。
   · 腿 A：fc 拷 94 列；move/fire 拷 137 列（hidden 128 + 旧 extra 9）；value 拷**前 128 列**
     （旧 value 只吃 hidden，语义仍是 hidden）；
   · 腿 B：**分段映射**（不是平铺拷！）——旧 `[tower 0–111 | scalars 112–141 | extra 142–150]`
-    → 新 `[tower 0–111 | scalars 112–151 | extra 152–188]`：拷 [0..111] + [112..141]
-    + [142..150]→[152..160]，其余重 init（新 scalars s30–39 占 [142..151]、新 extra 占
-    [161..188]）；value 头**全重 init**（旧吃 h、新吃 tower 起头的 pf，无对应前缀）。
-    平铺拷 151 会把旧 extra 灌进 s30–s38 = 静默错位（评审 F2）。
+    → 新 `[tower 0–111 | scalars 112–157 | extra 158–214]`：拷 [0..111] + [112..141]
+    + [142..150]→[158..166]，其余重 init（新 scalars s30–45 占 [142..157]、新 extra 占
+    [167..214]）；value 头**全重 init**（旧吃 h、新吃 tower 起头的 pf，无对应前缀）。
+    平铺拷 151 会把旧 extra 灌进 s30–s45 = 静默错位（评审 F2）。
 
 ⚠ warm-start 是**显式开关**（`--allow-partial-init`）：不写就拒绝旧 schema 权重
 （strict/部署态），防静默随机初始化（plan §4-S0c 三态表）。
@@ -37,10 +39,10 @@ obs-v5（plan/obs-v5-vector-gap.plan.md §2.7）：起点宽了 —— pf 137→
   · 源必须是同族旧档：腿 A 要求 v4 **policy_extra** 系（头 137 = hidden 128 + 旧 extra 9，
     value 128）——legacy 系（头 128、无 extra 列）会被响亮拒绝；腿 B 要求 v4 腿 B 系
     （头 151 = tower 112 + scalars 30 + 旧 extra 9，value 128）**或 v4 腿 A 系**
-    （头 137：只拷 extra9 → 新 [152..160]，hidden 在新 pf 无槽，其余全重 init；
+    （头 137：只拷 extra9 → 新 [158..166]，hidden 在新 pf 无槽，其余全重 init；
     源族按旧头宽自动识别，137/151 之外一律拒绝）。偏移表只认这些宽度，
     不是任意旧 schema 都能吃；
-  · 腿 B 加 --spatial-tower（头 189）；A0 对照组用 --legacy-arch 代替两者（A0 源才用 v3 hu150 系）.
+  · 腿 B 加 --spatial-tower（头 215）；A0 对照组用 --legacy-arch 代替两者（A0 源才用 v3 hu150 系）.
 """
 
 from __future__ import annotations
@@ -70,14 +72,17 @@ if _ilu.find_spec("common") is None:
 #   · ("segments", 表) —— 旧布局与新布局**不是**同一段头的（腿 B 的 scalars/extra 夹层）：
 #     逐段 `(src_start, dst_start, count)` 搬；
 #   · 表里不列的名字 = 不迁移（腿 B 的 value 头：旧吃 h、新吃 tower 起头的 pf ⇒ 全重 init）。
-_SCALAR_DELTA = SCALAR_DIM - 30  # v4 → v5：+10（s30–s39）
-_EXTRA_DELTA = POLICY_EXTRA_DIM - 9  # v4 → v5：+28（extra 9–36）
+_SCALAR_DELTA = SCALAR_DIM - 30  # v4 → 当前：s30 之后新增的 scalars
+_EXTRA_DELTA = POLICY_EXTRA_DIM - 9  # v4 → 当前：extra 9 之后新增的列
 # 旧 pf = 腿 B `[tower 0–111 | scalars 112–141 | extra 142–150]`（151 列）；
-# 新 pf = `[tower 0–111 | scalars 112–151 | extra 152–188]`（189 列）⇒ 三段映射。
+# 新 pf = `[tower 0–111 | scalars 112–… | extra …–]`（tower 112 + SCALAR_DIM + EXTRA_DIM）
+# ⇒ 三段映射。**新 extra 起点必须随 SCALAR_DIM 走**（v6 bump 时写死 152 的旧表把
+# 旧 extra 灌进了 s30–s45 —— 正是本文件文档里警告的静默错位）。
+_NEW_EXTRA_START = 112 + SCALAR_DIM
 _LEG_B_SEGMENTS: tuple[tuple[int, int, int], ...] = (
     (0, 0, 112),  # tower：原位
-    (112, 112, 30),  # scalars s0–s29：原位（新 s30–s39 落在 [142..151]，重 init）
-    (142, 152, 9),  # 旧 extra 0–8 → 新 extra 0–8（新 extra 9–36 落在 [161..188]，重 init）
+    (112, 112, 30),  # scalars s0–s29：原位（新 scalars 落在 [142..]，重 init）
+    (142, _NEW_EXTRA_START, 9),  # 旧 extra 0–8 → 新 extra 0–8（新 extra 9+ 重 init）
 )
 _MIGRATION_LEGACY: dict[str, tuple[str, Any]] = {
     "fc.weight": ("drop", _SCALAR_DELTA),  # pooled+scalars 宽了 10 列
@@ -95,10 +100,10 @@ _MIGRATION_LEG_B: dict[str, tuple[str, Any]] = {
     "move_head.weight": ("segments", _LEG_B_SEGMENTS),
     "fire_head.weight": ("segments", _LEG_B_SEGMENTS),
 }
-# 腿 A 源（头 137 = `[hidden 0–127 | extra 128–136]`）→ 腿 B（189）：
-# 只有 extra9 有对应槽（新 extra 0–8 = [152..160]）；hidden 在新 pf 无槽（新 pf 以
-# tower 开头），tower/scalars/新 extra 180 列全重 init。value 同腿 B：无前缀，全重 init。
-_LEG_A2B_SEGMENTS: tuple[tuple[int, int, int], ...] = ((128, 152, 9),)
+# 腿 A 源（头 137 = `[hidden 0–127 | extra 128–136]`）→ 腿 B（215）：
+# 只有 extra9 有对应槽（新 extra 0–8 = [158..166]）；hidden 在新 pf 无槽（新 pf 以
+# tower 开头），其余列全重 init。value 同腿 B：无前缀，全重 init。
+_LEG_A2B_SEGMENTS: tuple[tuple[int, int, int], ...] = ((128, _NEW_EXTRA_START, 9),)
 _MIGRATION_LEG_A2B: dict[str, tuple[str, Any]] = {
     "fc.weight": ("drop", _SCALAR_DELTA),
     "move_head.weight": ("segments", _LEG_A2B_SEGMENTS),

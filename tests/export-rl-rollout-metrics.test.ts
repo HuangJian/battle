@@ -92,6 +92,9 @@ function makeTelemetry(over: Partial<Telemetry> = {}): Telemetry {
     // metrics v11（idx74–75；plan/metrics-v11-hotlane.plan.md）。
     nearSqSum: 0,
     postHitLaneTicks: 0,
+    freezeShieldWindowTicks: 0,
+    hitsInFreezeShieldWindow: 0,
+    deathDerivedShieldTicks: 0,
     ...over,
   }
 }
@@ -174,8 +177,12 @@ describe('export-rl-rollout metrics 行宽', () => {
     // metrics v11（plan/metrics-v11-hotlane.plan.md §2）：尾部追加 2 列（第三列被 §4bis 杀线拦下）。
     expect(names[74]).toBe('nearSqSum')
     expect(names[75]).toBe('postHitLaneTicks')
+    // metrics v12（plan/nn-capability-upgrade §4-B5）：窗口三列（奖励输入 + 诊断）。
+    expect(names[76]).toBe('freezeShieldWindowTicks')
+    expect(names[77]).toBe('hitsInFreezeShieldWindow')
+    expect(names[78]).toBe('deathDerivedShieldTicks')
     // 列数变更必须 bump 版本（旧 shard 靠它响亮报错，不静默错读）
-    expect(py).toContain('METRICS_VERSION = 11')
+    expect(py).toContain('METRICS_VERSION = 12')
   })
 
   it('差距四族 15 列写入 idx54–68（metrics v10）', () => {
